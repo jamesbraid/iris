@@ -80,12 +80,25 @@ pub struct ScsiDeviceConfig {
     /// already exists or `scratch=false`.
     #[serde(default)]
     pub size_mb: Option<u32>,
-    /// Which HPC3 SCSI chip this target lives on: 0 (default) or 1. Indigo2
-    /// (IP22 fullhouse) has two independent WD33C93A controllers; Indy
-    /// (IP24 guinness) only has controller 0, so `controller = 1` is
-    /// rejected outside the Indigo2 profile — see `MachineConfig::validate`.
+    /// Which SCSI controller this target lives on: 0 (default) or 1. Indigo2
+    /// (IP22 fullhouse) has two independent WD33C93A controllers and the O2
+    /// two Adaptec 7880s (0 the internal bus, 1 the external connector);
+    /// Indy (IP24 guinness) only has controller 0, so `controller = 1` is
+    /// rejected there — see `MachineConfig::validate`.
     #[serde(default)]
     pub controller: u8,
+}
+
+/// The `[scsi.N]` key, and the snapshot manifest's disk number, that names
+/// `id` on `controller`: the id itself on controller 0, 16 + id on
+/// controller 1. Sixteen slots per controller, as SCSI ids go.
+pub fn scsi_slot(controller: u8, id: u8) -> u8 {
+    controller * 16 + id
+}
+
+/// `SCSI ID 1` on controller 0, `SCSI 1:1` on another, for messages.
+pub fn scsi_label(controller: u8, id: u8) -> String {
+    if controller == 0 { format!("SCSI ID {id}") } else { format!("SCSI {controller}:{id}") }
 }
 
 impl Default for ScsiDeviceConfig {
@@ -117,6 +130,67 @@ impl ScsiDeviceConfig {
 
     pub fn is_cdrom(&self) -> bool { self.kind() == ScsiKind::Cdrom }
     pub fn is_daynaport(&self) -> bool { self.kind() == ScsiKind::Daynaport }
+
+    /// Where the `[scsi.KEY]` table puts this target, as (controller, id).
+    /// Keys 1–7 are ids on `controller` (0 unless the key says otherwise);
+    /// a key of 16 + id names controller 1 directly, so the same id can be
+    /// used on both controllers. See [`scsi_slot`].
+    pub fn placement(&self, key: u8) -> (u8, u8) {
+        if key >= 16 { (key / 16, key % 16) } else { (self.controller, key) }
+    }
+
+    /// The media this target starts with: the active image and, for a
+    /// CD-ROM, the changer list built from `path` and `discs` with empty
+    /// entries skipped (an empty `path` is a drive with its tray empty, to be
+    /// loaded at run time). A disk is just its path.
+    pub fn media(&self) -> (String, Vec<String>) {
+        if !self.is_cdrom() {
+            return (self.path.clone(), vec![]);
+        }
+        let mut list: Vec<String> = Vec::new();
+        if !self.path.is_empty() {
+            list.push(self.path.clone());
+        }
+        for d in &self.discs {
+            if !d.is_empty() && !list.contains(d) {
+                list.push(d.clone());
+            }
+        }
+        let active = list.first().cloned().unwrap_or_default();
+        (active, list)
+    }
+
+    /// Where a `--ci` run keeps the copy-on-write overlay of the disk at
+    /// `id`: under /tmp and named for the process, so an interactive iris
+    /// holding `PATH.overlay` can coexist with any number of CI runs. The
+    /// files are kept for post-mortem inspection.
+    pub fn ci_overlay_path(id: u8) -> String {
+        format!("/tmp/iris-ci-{}-scsi{}.overlay", std::process::id(), id)
+    }
+
+    /// For `scratch = true`: make sure the volume exists, creating it with a
+    /// minimal SGI volume header and `size_mb` MB when it does not, and
+    /// return its path for the CI socket's scratch commands. None when the
+    /// target is not a scratch volume, or cannot be one (a CD-ROM or an
+    /// overlay is not host-writable in place), which is reported.
+    pub fn prepare_scratch(&self, id: u8) -> Option<std::path::PathBuf> {
+        if !self.scratch {
+            return None;
+        }
+        if self.is_cdrom() || self.overlay {
+            println!("Note: SCSI ID {}: scratch=true is incompatible with cdrom/overlay; ignoring scratch flag", id);
+            return None;
+        }
+        let path = std::path::Path::new(&self.path);
+        if !path.exists() {
+            let size_mb = self.size_mb.unwrap_or(64) as u64;
+            match crate::sgi_vh::create_scratch_image(path, size_mb * 1024 * 1024) {
+                Ok(()) => println!("iris: created scratch volume {} ({} MB, with SGI VH)", self.path, size_mb),
+                Err(e) => println!("Note: could not create scratch volume {}: {}", self.path, e),
+            }
+        }
+        Some(path.to_path_buf())
+    }
 
     /// A DaynaPort target for this SCSI id, with defaults filled in.
     /// Errors describe a bad `mac` / `subnet`; `validate()` catches those first.
@@ -427,6 +501,16 @@ impl MachineProfile {
     }
 
     /// MC/IOC/HPC3 Guinness vs Fullhouse layout. Indy IP24 is Guinness (`true`).
+    /// How many SCSI controllers the machine has: two on the Indigo2 (two
+    /// WD33C93As) and the O2 (two Adaptec 7880s, the second on the external
+    /// connector), one on the Indy.
+    pub fn scsi_controllers(self) -> u8 {
+        match self {
+            Self::Indigo2Ip22 | Self::O2Ip32 => 2,
+            _ => 1,
+        }
+    }
+
     pub fn guinness(self) -> bool {
         matches!(self, Self::IndyIp24)
     }
@@ -717,8 +801,12 @@ pub struct O2Section {
     /// Or the kit in each DIMM pair from A, in MB (32, 64, 128 or 256).
     #[serde(default)]
     pub dimms: Option<Vec<u32>>,
-    /// Disks and CD-ROMs on the two SCSI controllers.
-    #[serde(default)]
+    /// Deprecated: the O2's SCSI devices are the `[scsi.N]` tables, with
+    /// `controller` naming the bus (0 internal, 1 external), as on the
+    /// Indigo2. A `disks` list in an older config is folded into `scsi` when
+    /// the file is loaded ([`MachineConfig::fold_deprecated`]) and is never
+    /// written back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disks: Vec<O2Disk>,
     /// A TCP port for the serial console (telnet 127.0.0.1 PORT).
     #[serde(default)]
@@ -753,6 +841,7 @@ pub struct O2Section {
     pub forwards: Vec<PortForwardConfig>,
 }
 
+/// An entry of the deprecated `o2.disks` list; see [`O2Section::disks`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct O2Disk {
@@ -1531,7 +1620,10 @@ impl MachineConfig {
             return Self::default();
         };
         match toml::from_str::<Self>(&text) {
-            Ok(cfg) => cfg,
+            Ok(mut cfg) => {
+                cfg.fold_deprecated();
+                cfg
+            }
             Err(e) => {
                 eprintln!("Configuration error: failed to parse {}:\n{}", path, e);
                 // Common footgun: backslashes in a double-quoted string (Windows
@@ -1547,6 +1639,27 @@ impl MachineConfig {
                 }
                 std::process::exit(1);
             }
+        }
+    }
+
+    /// Translate keys an older iris wrote into their current form, saying so
+    /// once. `o2.disks` becomes `[scsi.N]` entries with `controller` = bus;
+    /// the list replaces the `scsi` map, since a config that has it never
+    /// meant the Indy's default disks.
+    pub fn fold_deprecated(&mut self) {
+        if self.o2.disks.is_empty() {
+            return;
+        }
+        eprintln!("iris: `o2.disks` is deprecated; list the O2's disks as [scsi.N] with controller = bus (0 internal, 1 external)");
+        self.scsi.clear();
+        for d in std::mem::take(&mut self.o2.disks) {
+            self.scsi.insert(d.id, ScsiDeviceConfig {
+                path: d.path,
+                cdrom: d.cdrom,
+                overlay: d.overlay,
+                controller: d.bus,
+                ..Default::default()
+            });
         }
     }
 
@@ -1572,15 +1685,39 @@ impl MachineConfig {
                 return Err("graphics.resolution presets require Newport (graphics.board = newport)".into());
             }
         }
-        for (&id, dev) in &self.scsi {
-            if dev.controller != 0 && self.machine.profile != MachineProfile::Indigo2Ip22 {
+        let mut placed: std::collections::HashMap<(u8, u8), u8> = std::collections::HashMap::new();
+        let mut keys: Vec<u8> = self.scsi.keys().copied().collect();
+        keys.sort();
+        for key in keys {
+            let dev = &self.scsi[&key];
+            let (controller, id) = dev.placement(key);
+            if id == 0 || id > 7 {
+                return Err(format!("scsi.{}: SCSI ID {} is out of range (1–7; the controller itself is 0)", key, id));
+            }
+            if key >= 16 && dev.controller != 0 && dev.controller != controller {
                 return Err(format!(
-                    "scsi.{}: controller {} is only valid on Indigo2 (machine.profile = indigo2_ip22) — Indy has a single SCSI controller (0)",
-                    id, dev.controller
+                    "scsi.{}: the key already puts the target on controller {}; controller = {} contradicts it",
+                    key, controller, dev.controller
                 ));
             }
-            if dev.controller > 1 {
-                return Err(format!("scsi.{}: controller {} is invalid (valid: 0, 1)", id, dev.controller));
+            if controller > 1 {
+                return Err(format!("scsi.{}: controller {} is invalid (valid: 0, 1)", key, controller));
+            }
+            if controller != 0 && self.machine.profile.scsi_controllers() < 2 {
+                return Err(format!(
+                    "scsi.{}: controller {} is only valid on Indigo2 (machine.profile = indigo2_ip22) and O2 (o2_ip32), which have two SCSI controllers — this machine has one (0)",
+                    key, controller
+                ));
+            }
+            if let Some(other) = placed.insert((controller, id), key) {
+                return Err(format!(
+                    "scsi.{} and scsi.{} both name {}", other, key, scsi_label(controller, id)
+                ));
+            }
+            if dev.is_daynaport() && self.machine.profile == MachineProfile::O2Ip32 {
+                return Err(format!(
+                    "scsi.{}: kind = \"daynaport\" is not available on the O2 (its Ethernet is built in)", key
+                ));
             }
         }
         if self.scale < 1 || self.scale > 4 {
@@ -1611,9 +1748,6 @@ impl MachineConfig {
             parse_mac(mac).map_err(|e| format!("network.mac: {}", e))?;
         }
         for (id, dev) in &self.scsi {
-            if *id == 0 || *id > 7 {
-                return Err(format!("SCSI ID {} is out of range (1–7)", id));
-            }
             // A CD-ROM may legitimately start with an empty tray (no path, no
             // discs) and have media loaded at runtime; any discs list is valid
             // as a changer queue. So there is nothing CD-ROM-specific to check.
@@ -2253,6 +2387,96 @@ mod export_tests {
             cfg.machine.cpu = CpuModel::R10000;
             cfg.validate().expect("the IP28 MC can");
         }
+    }
+
+    /// The O2 reads the same `[scsi.N]` tables as the other machines, with
+    /// `controller` as the bus; like the Indigo2 it has two. Its Ethernet is
+    /// built in, so a DaynaPort target is refused.
+    #[test]
+    fn o2_takes_scsi_tables_with_controller_as_bus() {
+        let mut cfg = MachineConfig::default();
+        cfg.machine.profile = MachineProfile::O2Ip32;
+        cfg.machine.cpu = CpuModel::R10000;
+        cfg.scsi.insert(2, ScsiDeviceConfig { path: "external.raw".into(), controller: 1, ..Default::default() });
+        cfg.validate().expect("the O2 has two SCSI controllers");
+        cfg.machine.profile = MachineProfile::IndyIp24;
+        cfg.machine.cpu = CpuModel::default();
+        assert!(cfg.validate().unwrap_err().contains("controller 1"), "the Indy has one");
+        cfg.machine.profile = MachineProfile::O2Ip32;
+        cfg.machine.cpu = CpuModel::R10000;
+        cfg.scsi.insert(3, ScsiDeviceConfig { kind_field: ScsiKind::Daynaport, ..Default::default() });
+        assert!(cfg.validate().unwrap_err().contains("daynaport"));
+    }
+
+    /// `[scsi.17]` is id 1 on controller 1, so one id can be on both
+    /// controllers; `controller = 1` on a low key still works; a key that
+    /// names a controller cannot be contradicted, two tables cannot name the
+    /// same target, and id 0 and controller 2 do not exist.
+    #[test]
+    fn slot_keys_place_targets_on_either_controller() {
+        let mut cfg: MachineConfig = toml::from_str(r#"
+            [machine]
+            profile = "indigo2_ip22"
+            [scsi.1]
+            path = "internal.raw"
+            [scsi.17]
+            path = "external.raw"
+            [scsi.4]
+            path = "cd.iso"
+            cdrom = true
+            controller = 1
+        "#).expect("parse");
+        cfg.validate().expect("two controllers, no collision");
+        assert_eq!(cfg.scsi[&1].placement(1), (0, 1));
+        assert_eq!(cfg.scsi[&17].placement(17), (1, 1));
+        assert_eq!(cfg.scsi[&4].placement(4), (1, 4));
+        assert_eq!(scsi_slot(1, 1), 17);
+        assert_eq!(scsi_label(0, 1), "SCSI ID 1");
+        assert_eq!(scsi_label(1, 1), "SCSI 1:1");
+
+        cfg.scsi.insert(20, ScsiDeviceConfig { path: "twice.iso".into(), cdrom: true, ..Default::default() });
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("scsi.4 and scsi.20 both name SCSI 1:4"), "{err}");
+        cfg.scsi.remove(&20);
+
+        cfg.scsi.insert(18, ScsiDeviceConfig { path: "x.raw".into(), controller: 0, ..Default::default() });
+        cfg.validate().expect("controller 0 on a slot key is just the default");
+        cfg.scsi.get_mut(&18).unwrap().controller = 2;
+        assert!(cfg.validate().unwrap_err().contains("contradicts"));
+        cfg.scsi.remove(&18);
+
+        cfg.scsi.insert(16, ScsiDeviceConfig { path: "x.raw".into(), ..Default::default() });
+        assert!(cfg.validate().unwrap_err().contains("out of range"));
+        cfg.scsi.remove(&16);
+        cfg.scsi.insert(33, ScsiDeviceConfig { path: "x.raw".into(), ..Default::default() });
+        assert!(cfg.validate().unwrap_err().contains("controller 2 is invalid"));
+        cfg.scsi.remove(&33);
+
+        cfg.machine.profile = MachineProfile::IndyIp24;
+        assert!(cfg.validate().unwrap_err().contains("this machine has one"));
+    }
+
+    /// An older O2 config's `o2.disks` becomes `[scsi.N]` entries, replacing
+    /// the default disks, and is gone from the section afterwards.
+    #[test]
+    fn deprecated_o2_disks_fold_into_scsi() {
+        let mut cfg: MachineConfig = toml::from_str(r#"
+            [machine]
+            profile = "o2_ip32"
+            [o2]
+            disks = [ { id = 1, path = "sys.raw", overlay = true },
+                      { id = 4, path = "cd.iso", cdrom = true, bus = 1 } ]
+        "#).expect("parse");
+        cfg.fold_deprecated();
+        assert!(cfg.o2.disks.is_empty());
+        assert_eq!(cfg.scsi.len(), 2, "the list replaces the default map");
+        assert_eq!(cfg.scsi[&1].path, "sys.raw");
+        assert!(cfg.scsi[&1].overlay);
+        assert_eq!(cfg.scsi[&1].controller, 0);
+        assert!(cfg.scsi[&4].is_cdrom());
+        assert_eq!(cfg.scsi[&4].controller, 1);
+        let s = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(!s.contains("disks"), "the deprecated key is never written back:\n{s}");
     }
 }
 

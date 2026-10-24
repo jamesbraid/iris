@@ -190,11 +190,14 @@ the first `[section]`, because TOML tables continue until the next header.
 | `scsi.<ID>.overlay` | `false` | Raw-image COW sidecar; CHD uses its own diff sidecar. |
 | `scsi.<ID>.scratch` | `false` | Host-managed raw scratch volume; cannot be CD-ROM/overlay. |
 | `scsi.<ID>.size_mb` | `64 when unset` | Size of a newly created scratch image; existing files are unchanged. |
-| `scsi.<ID>.controller` | `0` | 0 or 1; controller 1 is accepted only on indigo2_ip22. |
+| `scsi.<ID>.controller` | `0` | 0 or 1; controller 1 is accepted on indigo2_ip22 and o2_ip32 (on the O2 it is the external bus). A key of 16 + ID names controller 1 directly and does not need it. |
 
-IDs are 1–7. If `scsi` is entirely omitted, core defaults attach SCSI #1
-as `scsi1.raw` and SCSI #4 as `cdrom4.iso`. An explicit map replaces that
-default map; missing IDs are unattached. `kind = "daynaport"` needs no image.
+IDs are 1–7. The key is a slot: `[scsi.N]` with N 1–7 is id N on controller 0
+(or on `controller`, when set), and N = 16 + id is that id on controller 1,
+so both controllers can carry the same id; two tables naming one target are
+rejected. If `scsi` is entirely omitted, core defaults attach SCSI #1 as
+`scsi1.raw` and SCSI #4 as `cdrom4.iso`. An explicit map replaces that
+default map; missing slots are unattached. `kind = "daynaport"` needs no image.
 An explicit non-disk kind takes precedence over the legacy cdrom flag.
 
 ### [network]
@@ -292,9 +295,12 @@ Omit `[nfs]` to disable the share; the default forward list is empty.
 
 ### [o2]
 
-Used with `machine.profile = "o2_ip32"`; the Indy/Indigo2 top-level `prom`,
-`nvram`, `banks` and `[scsi.N]` keys do not apply. Paths are relative to where
-iris runs. See [the O2 guide](docs/o2-ip32.md).
+Used with `machine.profile = "o2_ip32"`. The O2's disks are the `[scsi.N]`
+tables above, with `controller` as the bus (0 internal, 1 external); the
+Indy/Indigo2 top-level `prom`, `nvram` and `banks` keys do not apply. Paths are
+relative to where iris runs. See [the O2 guide](docs/o2-ip32.md). An older
+config's `o2.disks` list is folded into `[scsi.N]` when the file is loaded and
+reported as deprecated.
 
 | Key | Default | Values and behavior |
 |---|---|---|
@@ -302,7 +308,6 @@ iris runs. See [the O2 guide](docs/o2-ip32.md).
 | `o2.flash` | unset | File the PROM's flash (its environment) is loaded from and saved to. |
 | `o2.ram_mb` | `256` | Memory in MB, fitted largest DIMM kits first (up to 1024). |
 | `o2.dimms` | unset | Instead of `ram_mb`: the kit in each DIMM pair, in MB (32, 64, 128 or 256). |
-| `o2.disks` | `[]` | SCSI devices: `{ id, path, cdrom = false, bus = 0, overlay = false }`; bus 0 internal, 1 external; `overlay` writes to `PATH.overlay` and keeps the image as it was (as `[scsi.N] overlay`). |
 | `o2.serial_port` | unset | TCP port on 127.0.0.1 for the first serial port. |
 | `o2.serial_log` | unset | File that copies the first serial port's output. |
 | `o2.graphics` | `true` | PS/2 keyboard and the graphics console; `false` for a serial console. |
@@ -320,7 +325,8 @@ IP22/IP24 four-bank IRIX 6.5 behavior remains separate from IP28's verified
 two-bank 1 GB layout. Extreme requires IP22. All non-Newport boards require
 `heads=1` and `resolution="guest"`. IP28 IRIX needs IMPACT; its PROM has an
 embedded fallback.
-The config validator currently permits SCSI controller 1 only on IP22.
+The config validator permits SCSI controller 1 only on IP22 and the O2, the
+machines with two controllers.
 
 Standalone CLI options update the loaded config where supplied; boolean enable
 switches do not provide a general way to clear every saved true setting.

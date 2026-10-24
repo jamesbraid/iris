@@ -338,6 +338,9 @@ pub struct Aic7880 {
     dma: std::sync::OnceLock<std::sync::Arc<dyn crate::pci::PciDma>>,
     /// The SCSI id a disk attached without one answers at.
     target: u8,
+    /// Which of the O2's two controllers this is (0 internal, 1 external):
+    /// the monitor's `scsi`/`cow` address the first, `scsi1`/`cow1` the second.
+    index: u8,
     /// The controller's own sense, as (key, ASC, ASCQ): a command for a
     /// logical unit the target does not have, handed out by the REQUEST
     /// SENSE that follows. A check condition followed by "no sense" tells a
@@ -358,7 +361,14 @@ pub const PCI_CLASS_SCSI: u32 = 0x0100_00;
 
 impl Aic7880 {
     pub fn new() -> Self {
+        Self::new_at(0)
+    }
+
+    /// The controller at `index`: 0 on the internal bus, 1 on the external
+    /// connector.
+    pub fn new_at(index: u8) -> Self {
         Self {
+            index,
             st: Mutex::new(State::default()),
             targets: Mutex::new(std::array::from_fn(|_| None)),
             dma: std::sync::OnceLock::new(),
@@ -571,7 +581,23 @@ impl Aic7880 {
         -> std::io::Result<u64>
     {
         let path = path.to_str().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path is not UTF-8"))?;
-        let d = ScsiDevice::open(path, cdrom, Vec::new(), overlay, None, if cdrom { O2_CDROM } else { O2_DISK })?;
+        self.attach_device(target, path, cdrom, Vec::new(), overlay, None)
+    }
+
+    /// Attach what a `[scsi.N]` table describes: the image at `path` (empty
+    /// for a CD-ROM with its tray empty), a CD-ROM's changer list `discs`,
+    /// and copy-on-write when `overlay` is set, to `overlay_path` or
+    /// `{path}.overlay`. Returns the size in blocks.
+    pub fn attach_device(
+        &self,
+        target: u8,
+        path: &str,
+        cdrom: bool,
+        discs: Vec<String>,
+        overlay: bool,
+        overlay_path: Option<&str>,
+    ) -> std::io::Result<u64> {
+        let d = ScsiDevice::open(path, cdrom, discs, overlay, overlay_path, if cdrom { O2_CDROM } else { O2_DISK })?;
         let blocks = d.size() / BLOCK_SIZE as u64;
         let mut targets = self.targets.lock().unwrap();
         let slot = targets.get_mut(target as usize).ok_or_else(|| {
@@ -602,6 +628,71 @@ impl Aic7880 {
         let t = self.targets.lock().unwrap();
         (0..t.len() as u8).filter(|&i| t[i as usize].is_some()).collect()
     }
+
+}
+
+/// The monitor's `scsi`/`cow` subcommands and the run-time disc changes
+/// come from `scsi_monitor` through this.
+impl crate::scsi_monitor::ScsiTargets for Aic7880 {
+    fn with_targets<R>(&self, f: impl FnOnce(&mut [Option<ScsiDevice>]) -> R) -> R {
+        let mut targets = self.targets.lock().unwrap();
+        f(&mut targets[..])
+    }
+}
+
+/// Controller 0 answers to `scsi`/`scsi0` and `cow`, controller 1 to `scsi1`
+/// and `cow1`. Only `scsi regs` is this chip's own; the rest is
+/// `scsi_monitor`'s, so the WD33C93A's `wdt`, `defer` and `debug` are not here.
+impl crate::traits::Device for Aic7880 {
+    fn step(&self, _cycles: u64) {}
+    fn stop(&self) {}
+    fn start(&self) {}
+    fn is_running(&self) -> bool { true }
+    fn get_clock(&self) -> u64 { 0 }
+
+    fn register_commands(&self) -> Vec<(String, String)> {
+        let usage = crate::scsi_monitor::SCSI_USAGE;
+        if self.index == 0 {
+            vec![
+                ("scsi".to_string(), format!("SCSI (Adaptec 7880, controller 0): {usage} | scsi regs")),
+                ("scsi0".to_string(), "Alias for `scsi` (controller 0)".to_string()),
+                ("cow".to_string(), "COW overlays on controller 0: cow status | cow commit [id] | cow reset [id]".to_string()),
+            ]
+        } else {
+            vec![
+                (format!("scsi{}", self.index), format!("SCSI controller {} (external): same subcommands as `scsi`", self.index)),
+                (format!("cow{}", self.index), format!("COW overlays on controller {}: same subcommands as `cow`", self.index)),
+            ]
+        }
+    }
+
+    fn execute_command(&self, cmd: &str, args: &[&str], mut w: Box<dyn std::io::Write + Send>) -> Result<(), String> {
+        use std::io::Write as _;
+        if cmd.starts_with("scsi") {
+            if let Some(done) = crate::scsi_monitor::scsi_subcommand(self, args, &mut *w) {
+                return done;
+            }
+            if args.first().copied() == Some("regs") {
+                let st = self.st.lock().unwrap();
+                let _ = writeln!(w, "Adaptec AIC-7880, controller {}", self.index);
+                let _ = writeln!(w, "  INTSTAT={:02x} SSTAT0={:02x} SSTAT1={:02x} SEQADDR={:#x}", st.intstat, st.sstat0, st.sstat1, st.seqaddr);
+                let _ = writeln!(w, "  queue in: {} waiting (pos {})  queue out: {} waiting (pos {})", st.qin.len(), st.qinpos, st.qout.len(), st.qoutpos);
+                let _ = writeln!(w, "  sequencer pauses: {}  commands: {} ({} bytes in, {} out)", st.pauses, st.total_cmds, st.total_in, st.total_out);
+                for n in &st.notes {
+                    let _ = writeln!(w, "  note: {n}");
+                }
+                return Ok(());
+            }
+            return Err(format!("Usage: {} | scsi regs", crate::scsi_monitor::SCSI_USAGE));
+        }
+        if cmd.starts_with("cow") {
+            return crate::scsi_monitor::cow_command(self, args, &mut *w);
+        }
+        Err("Command not found".to_string())
+    }
+}
+
+impl Aic7880 {
 
     /// Whether this address is the one disk we have.
     ///

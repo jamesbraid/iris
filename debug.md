@@ -304,8 +304,13 @@ interpreter), `--features jitv2_smc_check` (writes onto executing pages), and
 | `scsi dayna` | DaynaPort MAC, addresses and counters |
 | `scsi wdt [N]` / `scsi wdt file <path>` | WD33C93A transaction ring: last `N` / all to a file **[DEV]** |
 | `scsi debug <on\|off>` | Per-command trace **[DEV]** |
-| `scsi0 ...` / `scsi1 ...` | The same, for controller 0 / controller 1 (Indigo2) |
-| `cow status` / `cow commit [id]` / `cow reset [id]` | Copy-on-write overlays |
+| `scsi0 ...` / `scsi1 ...` | The same, for controller 0 / controller 1 (Indigo2 and O2) |
+| `cow status` / `cow commit [id]` / `cow reset [id]` | Copy-on-write overlays (`cow1 ...` on the O2's second controller) |
+
+On the O2 the controllers are Adaptec 7880s: `scsi regs` shows that chip's
+interrupt status, queues and command totals, and `wdt`, `defer`, `debug` and
+`dayna` are not there. Ids are per controller, as in the `[scsi.N]` tables
+(`[scsi.17]` is id 1 on controller 1, so `scsi1 eject 1`).
 
 Queue position `[0]` is the mounted disc, `[1]` the next on eject. A disc
 change reaches IRIX as a Unit Attention ("medium changed") on its next
@@ -477,7 +482,9 @@ With `[ultra64] enabled = true`: `ultra status | send <hex> | reset | r
 
 ### SGI O2 (IP32)
 
-The O2's devices register their own commands (see [the O2 guide](docs/o2-ip32.md)):
+The O2's devices register their own commands (see [the O2 guide](docs/o2-ip32.md));
+its SCSI controllers answer to `scsi`/`cow` and `scsi1`/`cow1` as described under
+[SCSI, CD-ROM and disks](#scsi-cd-rom-and-disks):
 
 | Command | Description |
 |---|---|

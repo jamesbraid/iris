@@ -47,6 +47,8 @@ banks = [128, 128, 0, 0]
 path   = "scsi1.raw"
 cdrom  = false
 #overlay = true
+#controller = 0   # Indigo2 and O2 have a second controller (1); on the O2 it is the external bus.
+                  # [scsi.17] is id 1 on controller 1 without this key, so an id can be on both.
 
 # Internal hard disk
 #[scsi.2]

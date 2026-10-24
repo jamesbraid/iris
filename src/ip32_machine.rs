@@ -33,7 +33,7 @@ use crate::dev::crime_mem::O2Memory;
 use crate::dev::ng1::rex3::Renderer;
 use crate::disp::Rex3Screen;
 use crate::hptimer::TimerManager;
-use crate::ip32::{Ip32Bus, Ip32Disk, Ip32Options, FIRMWARE_LOAD_VA, FIRMWARE_SPAN, NO_ECC_BASE, RAM_BASE, RAM_WINDOW_SIZE};
+use crate::ip32::{Ip32Bus, Ip32Options, FIRMWARE_LOAD_VA, FIRMWARE_SPAN, NO_ECC_BASE, RAM_BASE, RAM_WINDOW_SIZE};
 use crate::traits::{BusDevice, Device, MachineEvent, Signal};
 use crate::workstation::{MachineRef, MachineSlot, Workstation};
 
@@ -141,6 +141,8 @@ pub struct O2Machine {
     disks: Vec<crate::snapshot::DiskRef>,
     /// The flash file, recorded in a snapshot's manifest.
     flash_path: Option<String>,
+    /// The `scratch = true` volume, for the CI socket's scratch commands.
+    scratch_path: Option<std::path::PathBuf>,
     /// Where the machine is in its start/stop lifecycle (see
     /// `Workstation::lifecycle`); never `Running`, which `status` reads from
     /// the CPU.
@@ -159,18 +161,7 @@ impl O2Machine {
             None => crate::dev::crime_mem::kits_for(o2.ram_mb)?,
         };
         let mem = O2Memory::from_kits(&kits)?;
-        if let Some(d) = o2.disks.iter().find(|d| d.bus > 1) {
-            return Err(format!("O2 disk {}: bus {} (an O2 has controllers 0 and 1)", d.path, d.bus));
-        }
-        let opts = Ip32Options {
-            scsi: true,
-            disks: o2
-                .disks
-                .iter()
-                .map(|d| Ip32Disk { id: Some(d.id), bus: d.bus, path: d.path.clone().into(), cdrom: d.cdrom, overlay: d.overlay })
-                .collect(),
-            flash_file: o2.flash.clone().map(Into::into),
-        };
+        let opts = Ip32Options { scsi: true, flash_file: o2.flash.clone().map(Into::into) };
         let mut bus = Ip32Bus::with_options(mem, prom, opts);
         // MACE audio plays through the host unless audio is off.
         if !cfg.no_audio {
@@ -180,6 +171,55 @@ impl O2Machine {
             bus.enable_graphics_with_mouse(o2.mouse);
         }
         let bus = Arc::new(bus);
+        // The SCSI devices, from the same `[scsi.N]` tables as the other
+        // machines; `controller` is the bus (0 internal, 1 external).
+        let mut scratch_path: Option<std::path::PathBuf> = None;
+        {
+            let ctls = bus.scsi.lock().unwrap();
+            let mut ids: Vec<u8> = cfg.scsi.keys().copied().collect();
+            ids.sort();
+            for key in ids {
+                let dev = &cfg.scsi[&key];
+                let (controller, id) = dev.placement(key);
+                let at = crate::config::scsi_label(controller, id);
+                if dev.is_daynaport() {
+                    return Err(format!("{at}: kind = \"daynaport\" is not available on the O2"));
+                }
+                if let Some(path) = dev.prepare_scratch(key) {
+                    if scratch_path.is_some() {
+                        println!("Note: multiple scratch SCSI devices configured; CI socket will use the lowest-id one");
+                    } else {
+                        scratch_path = Some(path);
+                    }
+                }
+                let ctl = ctls.get(controller as usize).ok_or_else(|| {
+                    format!("{at}: controller {controller} (an O2 has controllers 0 and 1)")
+                })?;
+                let (path, discs) = dev.media();
+                let cdrom = dev.is_cdrom();
+                // CI mode keeps each copy-on-write overlay under /tmp, as the
+                // Indy does, so an interactive iris holding PATH.overlay and
+                // any number of CI runs can share the image.
+                let ci_overlay = (cfg.ci && dev.overlay && !cdrom).then(|| crate::config::ScsiDeviceConfig::ci_overlay_path(key));
+                match ctl.attach_device(id, &path, cdrom, discs, dev.overlay, ci_overlay.as_deref()) {
+                    Ok(_) if path.is_empty() => eprintln!("ip32: {at}: CD-ROM, tray empty"),
+                    Ok(blocks) => eprintln!("ip32: {at}: {path} ({blocks} blocks)"),
+                    Err(e) => {
+                        // As on the Indy: a configured disk that will not attach
+                        // ends a command-line run, since booting on without it
+                        // only yields a confusing PROM "no such device" later;
+                        // an embedder (the GUI sets IRIS_NO_EXIT_ON_POWEROFF)
+                        // boots without the device instead.
+                        let msg = format!("could not attach {path} to {at}: {e}");
+                        if std::env::var_os("IRIS_NO_EXIT_ON_POWEROFF").is_some() {
+                            eprintln!("iris: warning: {msg}; continuing without {at}");
+                        } else {
+                            return Err(msg);
+                        }
+                    }
+                }
+            }
+        }
         eprintln!(
             "iris: O2 with {} MB ({}), {}",
             kits.iter().sum::<u32>(),
@@ -314,21 +354,26 @@ impl O2Machine {
         monitor.register_device(crate::devlog::init_devlog());
         monitor.register_device(cpu.clone().as_device());
         monitor.register_device(bus.clone());
+        // The SCSI controllers' `scsi`/`scsi1` and `cow`/`cow1`.
+        for ctl in bus.scsi.lock().unwrap().iter() {
+            monitor.register_device(ctl.clone());
+        }
         monitor.register_device(Arc::new(O2Control::new(bus.clone())));
         let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
 
         let (events, event_rx) = std::sync::mpsc::sync_channel(4);
-        // A snapshot's disks by controller and id (bus * 16 + id) and size.
-        let disks = o2
-            .disks
+        // A snapshot's disks by slot (controller * 16 + id) and size.
+        let mut disks: Vec<crate::snapshot::DiskRef> = cfg
+            .scsi
             .iter()
-            .filter(|d| !d.cdrom)
-            .map(|d| crate::snapshot::DiskRef {
-                id: d.bus * 16 + d.id,
+            .filter(|(_, d)| !d.is_cdrom())
+            .map(|(&key, d)| crate::snapshot::DiskRef {
+                id: { let (c, id) = d.placement(key); crate::config::scsi_slot(c, id) },
                 path: d.path.clone(),
                 size_bytes: std::fs::metadata(&d.path).map(|m| m.len()).unwrap_or(0),
             })
             .collect();
+        disks.sort_by_key(|d| d.id);
         Ok(Self {
             bus,
             cpu,
@@ -349,6 +394,7 @@ impl O2Machine {
             lifecycle: crate::machine_state::GuestState::Idle,
             disks,
             flash_path: o2.flash.clone(),
+            scratch_path,
         })
     }
 
@@ -758,8 +804,8 @@ impl Drop for O2Machine {
     }
 }
 
-/// The O2 as the front ends see it. Disc changes, the scratch volume, the CI
-/// rollback and `--load-elf` are not there yet; the trait's defaults say so.
+/// The O2 as the front ends see it. The CI rollback and `--load-elf` are not
+/// there yet; the trait's defaults say so.
 impl Workstation for O2Machine {
     fn start(&mut self) { O2Machine::start(self) }
     fn stop(&mut self) { O2Machine::stop(self) }
@@ -796,6 +842,13 @@ impl Workstation for O2Machine {
 
     fn save_snapshot(&mut self, name: &str) -> Result<(), String> { O2Machine::save_snapshot(self, name) }
     fn load_snapshot(&mut self, name: &str) -> Result<(), String> { O2Machine::load_snapshot(self, name) }
+
+    fn scratch_path(&self) -> Option<&std::path::Path> { self.scratch_path.as_deref() }
+    /// Disc changes on the internal bus (controller 0), as the Indigo2 offers
+    /// its first controller.
+    fn disc_changer(&self) -> Option<Arc<dyn crate::workstation::DiscChanger>> {
+        self.bus.scsi.lock().unwrap().first().map(|c| c.clone() as Arc<dyn crate::workstation::DiscChanger>)
+    }
 
     fn nat_control(&self) -> Option<Arc<crate::net::NatControl>> {
         self.nat.as_ref().map(|(n, _)| n.clone())

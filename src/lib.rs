@@ -189,6 +189,7 @@ pub mod bench_runner;
 pub mod cow_disk;
 pub mod chd_disk;
 pub mod scsi;
+pub mod scsi_monitor;
 pub mod irq;
 pub mod host_audio;
 pub mod pci;

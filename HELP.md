@@ -553,12 +553,15 @@ resolution = "guest"        # or "1024x768", "1280x960", "1280x1024"
 
 # ── SCSI ─────────────────────────────────────────────────────────────────────
 
-# Valid IDs: 1–7. For a hard disk, set cdrom = false.
+# Valid IDs: 1–7. For a hard disk, set cdrom = false. On a machine with two
+# controllers (Indigo2, O2) [scsi.N] is id N on controller 0 and [scsi.16+N]
+# is id N on controller 1, so one id can be used on both; `controller = 1`
+# in a [scsi.N] table does the same for that one device.
 [scsi.1]
 path    = "scsi1.raw"       # raw or .chd image
 cdrom   = false
 overlay = false             # true = copy-on-write overlay in scsi1.raw.overlay
-# controller = 0            # Indigo2 only: 0 or 1
+# controller = 0            # Indigo2 and O2 have two: 0 or 1 (the O2's 1 is its external bus); or write [scsi.17]
 
 # A CD-ROM. path may be empty to start with an empty tray.
 [scsi.4]
@@ -650,7 +653,11 @@ kernel step on each other's block size setting.
 | 6  | Additional disk or tape |
 | 7  | Additional disk |
 
-The controller itself is ID 0.
+The controller itself is ID 0. On the Indigo2 and the O2, which have two
+controllers, `[scsi.N]` keys 1–7 are ids on controller 0 and keys 17–23 are
+ids 1–7 on controller 1 (16 slots per controller); `controller = 1` in a low
+key's table is the older spelling and still works. The monitor's `scsi1`
+addresses the second controller.
 
 ---
 

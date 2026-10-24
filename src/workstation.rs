@@ -24,7 +24,6 @@ use parking_lot::Mutex;
 use crate::config::MachineConfig;
 use crate::gdb_stub::CpuDebug;
 use crate::dev::ps2::Ps2Controller;
-use crate::dev::wd33c93a::Wd33c93a;
 use crate::dev::z85c30::CiSerialBackend;
 use crate::gfx_display::GfxDisplay;
 use crate::hptimer::TimerManager;
@@ -310,18 +309,20 @@ pub trait DiscChanger: Send + Sync {
     fn eject_to_empty(&self, id: usize) -> Result<(), String>;
 }
 
-impl DiscChanger for Wd33c93a {
+/// Every controller that lends its targets (the WD33C93A, the Adaptec 7880)
+/// takes disc changes the same way; the operations are `scsi_monitor`'s.
+impl<T: crate::scsi_monitor::ScsiTargets + Send + Sync> DiscChanger for T {
     fn disc_status(&self) -> Vec<(usize, String, Vec<String>, u64, u64)> {
-        Wd33c93a::disc_status(self)
+        crate::scsi_monitor::disc_status(self)
     }
     fn load_disc(&self, id: usize, path: String) -> Result<String, String> {
-        Wd33c93a::load_disc(self, id, path)
+        crate::scsi_monitor::load_disc(self, id, path)
     }
     fn eject_disc(&self, id: usize) -> Result<String, String> {
-        Wd33c93a::eject_disc(self, id)
+        crate::scsi_monitor::eject_disc(self, id)
     }
     fn eject_to_empty(&self, id: usize) -> Result<(), String> {
-        Wd33c93a::eject_to_empty(self, id)
+        crate::scsi_monitor::eject_to_empty(self, id)
     }
 }
 

@@ -22,6 +22,15 @@ hashes are given where a change is easiest to understand by reading the commit.
   display. Runs IRIX 6.5.22 to the desktop with OpenGL through the rendering
   engine, and NetBSD 11 to multi-user and X. Needs the O2 PROM image; not in
   iris-gui yet.
+- **Disks come from `[scsi.N]`.** The O2 reads the same SCSI tables as the
+  Indy and Indigo2, with `controller` naming the bus (0 internal, 1
+  external): changer lists, scratch volumes, CHD images, copy-on-write
+  overlays and the `--scsi1`/`--cdrom4` options now work on it, disc changes
+  reach its CD-ROMs, and an image that will not open stops the run as it
+  does elsewhere. `o2.disks` is deprecated and folded into `[scsi.N]` on
+  load. The monitor's `scsi` and `cow` commands (`scsi1`/`cow1` for the
+  external bus) work on the O2's Adaptec controllers: status, disc changes,
+  overlay commit and reset, and the chip's registers.
 - **Scripting and inspection.** The O2's devices have monitor commands, and
   `o2 <command>` (also on `[o2] control_port`) takes screen shots, types,
   moves the mouse and reads memory ([debug.md](debug.md#sgi-o2-ip32)).
@@ -37,6 +46,20 @@ hashes are given where a change is easiest to understand by reading the commit.
   opened, and `/dev/mem` and `/dev/kmem` returned 0xffffffff for about one
   page in six. IRIX on an R5000 O2 panicked with "init died" for the same
   reason; it now boots to the desktop.
+
+### SCSI configuration
+
+- **One id on both controllers.** A `[scsi.N]` key is a slot: 1–7 on
+  controller 0, 16 + id on controller 1, so `[scsi.1]` and `[scsi.17]` put a
+  disk at id 1 on each of an Indigo2's or O2's controllers. `controller = 1`
+  in a low key still works, and two tables naming one target are refused.
+  Snapshot manifests record disks by slot, so an Indigo2 snapshot with a disk
+  on controller 1 taken before this change does not match its configuration.
+- **One `scsi` command for every controller.** The monitor's `scsi` and `cow`
+  subcommands and the run-time disc changes are implemented once, in
+  `src/scsi_monitor.rs`, over a controller's target table; the WD33C93A and
+  the Adaptec 7880 lend theirs and keep only their own subcommands (`regs`,
+  and the WD's `wdt`, `defer`, `debug`). `scsi status` now lists disks too.
 
 ### Newport (REX3)
 

@@ -6,7 +6,7 @@ use std::net::TcpStream;
 use std::sync::mpsc;
 use std::thread;
 
-use crate::config::{GraphicsBoard, MachineConfig, MachineProfile, NetworkConfig};
+use crate::config::{GraphicsBoard, MachineConfig, MachineProfile, NetworkConfig, ScsiDeviceConfig};
 use crate::machine_state::GuestState;
 use crate::traits::{BusDevice, Device, Resettable, Saveable, MachineEvent};
 use crate::locks::LockMonitor;
@@ -418,39 +418,37 @@ impl Machine {
             if initialized { eeprom.update_ip28_checksum(); }
         }
 
-        // Attach SCSI devices from config (IDs 1–7).
-        let mut scsi_ids: Vec<u8> = cfg.scsi.keys().copied().collect();
-        scsi_ids.sort();
-        // CI mode: isolate each COW overlay under /tmp so an interactive
-        // iris holding {base}.overlay can coexist with any number of `--ci`
-        // processes. Files are kept for post-mortem inspection; cleanup
-        // happens on machine drop below.
-        let ci_pid = std::process::id();
+        // Attach SCSI devices from config: each `[scsi.KEY]` table puts a
+        // target on a controller (`ScsiDeviceConfig::placement`).
+        let mut scsi_keys: Vec<u8> = cfg.scsi.keys().copied().collect();
+        scsi_keys.sort();
         // Track the on-disk path of any scratch device so the CI socket can
         // read/write its bytes directly (Phase 2.4).
         let mut scratch_path: Option<std::path::PathBuf> = None;
-        for id in scsi_ids {
-            let dev = &cfg.scsi[&id];
+        for key in scsi_keys {
+            let dev = &cfg.scsi[&key];
+            let (controller, id) = dev.placement(key);
+            let label = crate::config::scsi_label(controller, id);
             // DaynaPort SCSI/Link: a network adapter, not storage. None of the
             // scratch / changer / overlay handling below applies — it has no
             // image at all.
             if dev.is_daynaport() {
-                let params = match dev.daynaport_params(id) {
+                let params = match dev.daynaport_params(key) {
                     Ok(p) => p,
                     Err(e) => {
-                        eprintln!("iris: fatal: SCSI ID {}: {}", id, e);
+                        eprintln!("iris: fatal: {}: {}", label, e);
                         std::process::exit(1);
                     }
                 };
-                match hpc3.add_scsi_daynaport(dev.controller, id as usize, params) {
+                match hpc3.add_scsi_daynaport(controller, id as usize, params) {
                     Ok(()) => println!(
-                        "iris: DaynaPort SCSI/Link at SCSI ID {} — MAC {}, gateway {} (guest {}/{})",
-                        id, crate::net::mac_str(&params.mac),
+                        "iris: DaynaPort SCSI/Link at {} — MAC {}, gateway {} (guest {}/{})",
+                        label, crate::net::mac_str(&params.mac),
                         params.subnet.gateway_ip, params.subnet.client_ip, params.subnet.netmask),
                     Err(e) => {
-                        let msg = format!("could not attach DaynaPort to SCSI ID {id}: {e}");
+                        let msg = format!("could not attach DaynaPort to {label}: {e}");
                         if std::env::var_os("IRIS_NO_EXIT_ON_POWEROFF").is_some() {
-                            eprintln!("iris: warning: {msg}; continuing without SCSI ID {id}");
+                            eprintln!("iris: warning: {msg}; continuing without {label}");
                         } else {
                             eprintln!("iris: fatal: {msg}");
                             std::process::exit(1);
@@ -459,64 +457,29 @@ impl Machine {
                 }
                 continue;
             }
-            // Scratch volume: pre-create a raw file with a minimal SGI Volume
-            // Header if it doesn't exist. Refuse cdrom/overlay combinations —
-            // scratch must be a host-writable raw file. Default size 64 MB.
-            //
-            // The VH lays out partition 7 ("vol") spanning sectors 8..end and
-            // partition 8 ("vh") spanning sectors 0..7 (the VH itself).
-            // Without a VH, IRIX recognises the device but returns I/O error
-            // on every read because /dev/rdsk/dks0dNvh and /dev/rdsk/dks0dNvol
-            // both consult the partition table at sector 0.
-            //
-            // Convention: host writes payload via scratch-write at offset >=
-            // SCRATCH_PAYLOAD_OFFSET (4096). Guest reads from offset 0 of
-            // /dev/rdsk/dks0dNvol (which maps to sector 8 of the disk by
-            // partition 7's first_block=8).
-            if dev.scratch {
-                if dev.cdrom || dev.overlay {
-                    println!("Note: SCSI ID {}: scratch=true is incompatible with cdrom/overlay; ignoring scratch flag", id);
+            // Scratch volume (see `ScsiDeviceConfig::prepare_scratch`): the
+            // file gets an SGI volume header, without which IRIX returns I/O
+            // errors on every read of /dev/rdsk/dks0dNvh and dks0dNvol.
+            // Convention: the host writes its payload at offset >=
+            // SCRATCH_PAYLOAD_OFFSET (4096); the guest reads from offset 0 of
+            // the vol partition, which starts at sector 8.
+            if let Some(path) = dev.prepare_scratch(key) {
+                if scratch_path.is_some() {
+                    println!("Note: multiple scratch SCSI devices configured; CI socket will use the lowest-id one");
                 } else {
-                    let path = std::path::Path::new(&dev.path);
-                    if !path.exists() {
-                        let size_mb = dev.size_mb.unwrap_or(64) as u64;
-                        let bytes = size_mb * 1024 * 1024;
-                        match crate::sgi_vh::create_scratch_image(path, bytes) {
-                            Ok(()) => println!("iris: created scratch volume {} ({} MB, with SGI VH)", dev.path, size_mb),
-                            Err(e) => println!("Note: could not create scratch volume {}: {}", dev.path, e),
-                        }
-                    }
-                    if scratch_path.is_some() {
-                        println!("Note: multiple scratch SCSI devices configured; CI socket will use the lowest-id one");
-                    } else {
-                        scratch_path = Some(path.to_path_buf());
-                    }
+                    scratch_path = Some(path);
                 }
             }
-            let (path, discs) = if dev.cdrom {
-                // Build the changer list, skipping empty paths (an empty path
-                // means "drive present, tray empty" — a valid CD-ROM state
-                // where media is loaded later at runtime).
-                let mut list: Vec<String> = Vec::new();
-                if !dev.path.is_empty() {
-                    list.push(dev.path.clone());
-                }
-                for d in &dev.discs {
-                    if !d.is_empty() && !list.contains(d) {
-                        list.push(d.clone());
-                    }
-                }
-                // Active disc is the first entry, or empty (no media) if none.
-                let active = list.first().cloned().unwrap_or_default();
-                (active, list)
+            let (path, discs) = dev.media();
+            let cdrom = dev.is_cdrom();
+            // CI mode: isolate each COW overlay under /tmp so an interactive
+            // iris holding {base}.overlay can coexist with any number of `--ci`
+            // processes; cleanup happens on machine drop below.
+            let result = if ci_enabled && dev.overlay && !cdrom {
+                let ci_overlay = ScsiDeviceConfig::ci_overlay_path(key);
+                hpc3.add_scsi_device_with_overlay(controller, id as usize, &path, cdrom, discs, dev.overlay, &ci_overlay)
             } else {
-                (dev.path.clone(), vec![])
-            };
-            let result = if ci_enabled && dev.overlay && !dev.cdrom {
-                let ci_overlay = format!("/tmp/iris-ci-{}-scsi{}.overlay", ci_pid, id);
-                hpc3.add_scsi_device_with_overlay(dev.controller, id as usize, &path, dev.cdrom, discs, dev.overlay, &ci_overlay)
-            } else {
-                hpc3.add_scsi_device(dev.controller, id as usize, &path, dev.cdrom, discs, dev.overlay)
+                hpc3.add_scsi_device(controller, id as usize, &path, cdrom, discs, dev.overlay)
             };
             if let Err(e) = result {
                 // A configured disk that won't attach (missing/corrupt image,
@@ -532,9 +495,9 @@ impl Machine {
                 // skip just this device and boot without it; the GUI's Start
                 // preflight already warns the user about an unreadable disk, and
                 // they can stop, re-pick or detach it, and start again.
-                let msg = format!("could not attach {path} to SCSI ID {id}: {e}");
+                let msg = format!("could not attach {path} to {label}: {e}");
                 if std::env::var_os("IRIS_NO_EXIT_ON_POWEROFF").is_some() {
-                    eprintln!("iris: warning: {msg}; continuing without SCSI ID {id}");
+                    eprintln!("iris: warning: {msg}; continuing without {label}");
                     continue;
                 }
                 eprintln!("iris: fatal: {msg}");
@@ -544,12 +507,14 @@ impl Machine {
 
         // Disk + nvram provenance for snapshot manifests. Captured here while
         // the MachineConfig `cfg` is still in scope (it is shadowed by the CPU
-        // config below). Identity is the configured path + host file size.
+        // config below). Identity is the slot (controller * 16 + id, see
+        // `config::scsi_slot`), the configured path and the host file size.
         let mut disk_provenance: Vec<DiskRef> = cfg.scsi.iter()
             .filter(|(_, dev)| !dev.is_daynaport()) // no image behind a DaynaPort
-            .map(|(&id, dev)| {
+            .map(|(&key, dev)| {
+                let (controller, id) = dev.placement(key);
                 let size_bytes = std::fs::metadata(&dev.path).map(|m| m.len()).unwrap_or(0);
-                DiskRef { id, path: dev.path.clone(), size_bytes }
+                DiskRef { id: crate::config::scsi_slot(controller, id), path: dev.path.clone(), size_bytes }
             }).collect();
         disk_provenance.sort_by_key(|d| d.id);
         let nvram_provenance = cfg.nvram.clone();

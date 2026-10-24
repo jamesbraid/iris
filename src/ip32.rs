@@ -156,31 +156,16 @@ pub const MACE_RTC: u32 = MACE_BASE + 0x003a_0000;
 pub const MACE_RTC_SIZE: u32 = 0x0001_0000;
 
 
-/// What is plugged into an O2 beyond its memory: the SCSI controllers and
-/// their disks, and where the PROM's flash (its environment) is kept.
+/// What is plugged into an O2 beyond its memory: the SCSI controllers (the
+/// machine attaches their disks from `[scsi.N]`, see `O2Machine::new`), and
+/// where the PROM's flash (its environment) is kept.
 #[derive(Clone, Debug, Default)]
 pub struct Ip32Options {
     /// The two on-board AIC-7880s. Without them the PROM finds nothing to
     /// boot from.
     pub scsi: bool,
-    pub disks: Vec<Ip32Disk>,
     /// A file holding the flash, so `setenv` survives from run to run.
     pub flash_file: Option<std::path::PathBuf>,
-}
-
-#[derive(Clone, Debug)]
-pub struct Ip32Disk {
-    /// SCSI id; None is the controller's default.
-    pub id: Option<u8>,
-    /// Which controller: 0 is the internal bus, 1 the external connector.
-    /// IRIX looks only at ids 1 to 4 on the internal one, as the case has
-    /// room for no more, so further drives go outside.
-    pub bus: u8,
-    pub path: std::path::PathBuf,
-    /// A CD-ROM, which the PROM's install menu insists on seeing.
-    pub cdrom: bool,
-    /// Copy-on-write: writes go to `{path}.overlay` (see `O2Disk::overlay`).
-    pub overlay: bool,
 }
 
 /// Whether the per-register access counters (MACE's, GBE's, the rendering
@@ -381,18 +366,9 @@ impl Ip32Bus {
             // The second controller. Real hardware has it whether or not
             // anything is plugged into it, and a kernel that expects two
             // waits on the one that is missing.
-            let scsi_b = std::sync::Arc::new(crate::dev::aic7880::Aic7880::new());
+            let scsi_b = std::sync::Arc::new(crate::dev::aic7880::Aic7880::new_at(1));
             bus.mace.pci.attach(IP32_SCSI_SLOT_B, "aic7880-b", scsi_b.clone());
             bus.mace.pci.attach(IP32_SCSI_SLOT, "aic7880", scsi.clone());
-            for d in &opts.disks {
-                let ctl = if d.bus == 0 { &scsi } else { &scsi_b };
-                let id = d.id.unwrap_or(ctl.default_target());
-                let at = if d.bus == 0 { format!("id {id}") } else { format!("{}:{id}", d.bus) };
-                match ctl.attach_with(id, &d.path, d.cdrom, d.overlay) {
-                    Ok(b) => eprintln!("ip32: SCSI {at}: {} ({b} blocks)", d.path.display()),
-                    Err(e) => eprintln!("ip32: SCSI {at}: {}: {e}", d.path.display()),
-                }
-            }
             let mut list = bus.scsi.lock().unwrap();
             list.push(scsi);
             list.push(scsi_b);
