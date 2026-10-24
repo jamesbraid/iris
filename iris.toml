@@ -10,7 +10,8 @@ headless = false
 # Can also be set with --noaudio.
 no_audio = false
 
-# PROM ROM image (required).
+# PROM ROM image. Indy and Indigo2 have an embedded fallback; the O2 needs its
+# own (ip32prom.rev4.18.bin is tried when this is left as is).
 prom = "prom.bin"
 
 # Window scale factor. Uses logical points (macOS) / DPI-scaled pixels, so
@@ -28,6 +29,8 @@ scale = 1
 # Each bank must be 0 (absent), 8, 16, 32, 64, or 128.
 # The SGI Indy supports up to two populated banks; banks 2 and 3 are
 # typically absent.  Total RAM = sum of non-zero banks.
+# Up to eight entries (four used today). On the O2 each entry is the kit in a
+# DIMM pair: 32, 64, 128 or 256 MB, largest first.
 banks = [128, 128, 0, 0]
 
 # NAT subnet for the internal network (CIDR notation).

@@ -211,7 +211,7 @@ struct App {
     /// Timestamp of the most recent edit; used to debounce auto-save.
     cfg_dirty_since: Option<std::time::Instant>,
     /// Banks passed to the last `Cmd::Start` (guest-visible RAM is fixed until Stop).
-    started_banks: Option<[u32; 4]>,
+    started_banks: Option<[u32; iris::config::MAX_BANKS]>,
     /// The CPU the running guest booted on — see `MemoryUiContext::started_cpu`.
     started_cpu: Option<iris::config::CpuModel>,
     tab: Tab,
@@ -3796,7 +3796,7 @@ mod machine_storage_integration {
         std::env::set_var("IRIS_NO_EXIT_ON_POWEROFF", "1");
         let mut prefs = GuiSettings::load_in(root.clone(), launch_dir());
         let mut cfg = MachineConfig::default();
-        cfg.banks = [8, 8, 0, 0];
+        cfg.banks = iris::config::banks_from4([8, 8, 0, 0]);
         cfg.scsi.clear();
         cfg.headless = true;
         cfg.monitor_port = Some(0);
@@ -3842,10 +3842,10 @@ mod machine_storage_integration {
         assert_ne!(settings::nvram_mac(alpha.join("nvram.bin").to_str().unwrap()), settings::nvram_mac(beta.join("nvram.bin").to_str().unwrap()));
         // Switch rereads external TOML edits rather than the startup map.
         let mut edited = machines::read(&app.prefs.machine_path("alpha").unwrap()).unwrap();
-        edited.banks = [16, 16, 0, 0];
+        edited.banks = iris::config::banks_from4([16, 16, 0, 0]);
         machines::save(&root, "alpha", &mut edited).unwrap();
         app.switch_to("alpha");
-        assert_eq!(app.cfg.banks, [16, 16, 0, 0]);
+        assert_eq!(app.cfg.banks, iris::config::banks_from4([16, 16, 0, 0]));
         app.apply_rename("renamed");
         assert_eq!(app.prefs.active_machine.as_deref(), Some("renamed"));
         assert_eq!(std::env::current_dir().unwrap(), root.join("machines/renamed"));

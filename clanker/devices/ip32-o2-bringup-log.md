@@ -2,16 +2,18 @@
 
 Status: history, 2026-09 to 2026-10. How the O2 was brought up, gate by gate,
 with the dead ends. For the machine as it is, read [docs/o2-ip32.md](../../docs/o2-ip32.md);
-the "Today" section below summarises it as of 2026-10-23, and the rest is the
+the "Today" section below summarises it as of 2026-10-24, and the rest is the
 journal, in order.
 
 ## Today (read this first)
 
-The O2 runs as a machine like the others: `profile = "o2_ip32"` with an
-`[o2]` section (PROM, flash, `ram_mb` or `dimms`, `disks` on controllers 0
-and 1, `serial_port`, `graphics`, `mouse`, `net` and `forwards`,
-`control_port`, `cpu_mhz`), started with `iris --config`. Its
-devices are on the shared monitor (`monitor_port`, default 8888).
+The O2 runs as a machine like the others: `profile = "o2_ip32"`, configured
+by the shared keys (`prom`, `nvram` for the PROM's flash, `banks` as DIMM
+kits, `[scsi.N]` on controllers 0 and 1, `serial_port_a`/`b`, `headless`,
+`[network]`, `[clock] fixed_mhz`) with `[o2]` holding only `mouse`,
+`control_port` and `arcs_fpu`; the old `[o2]` spellings of the rest are
+folded in on load (2026-10-24). Started with `iris --config`. Its devices
+are on the shared monitor (`monitor_port`, default 8888).
 
 How it is put together now:
 

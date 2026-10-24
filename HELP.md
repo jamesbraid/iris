@@ -62,6 +62,10 @@ On IP22/IP24, each bank is at most 128 MB. IP28 also supports 256 MB and
 [IP28 512 MB banks](clanker/devices/ip28-512mb-banks.md). The table below describes
 the IP22/IP24 extended layouts.
 
+`banks` has room for eight entries; every machine today uses four, and the
+rest must be 0. On the O2 each entry is the kit in a DIMM pair (32, 64, 128 or
+256 MB), largest first: `[256, 256, 256, 256]` is 1 GB.
+
 `banks` in `iris.toml` / iris-gui is applied only when you **Start** the VM.
 Changing RAM while IRIX is running updates the config but not the live guest —
 **Stop → change banks → Start**.
@@ -500,15 +504,16 @@ ignored. The checked-in `iris.toml` is a commented example of everything in this
 ```toml
 # ── Top-level scalars (must come before any [section]) ───────────────────────
 
-prom     = "prom.bin"       # PROM image; the embedded one is used if missing
-nvram    = "nvram.bin"      # DS1386 NVRAM/RTC file (Indy). Use one per install.
+prom     = "prom.bin"       # PROM image; the embedded one is used if missing (the O2 has none: its 4.18 image)
+nvram    = "nvram.bin"      # DS1386 NVRAM/RTC file (Indy); the PROM's flash (O2). Use one per install.
 nveeprom = "nveeprom.bin"   # 93CS56 NVRAM EEPROM file (Indigo2 only)
 
 # RAM bank sizes in MB: 0 (absent), 8, 16, 32, 64, 128; IP28 also 256/512.
+# O2: the kit in each DIMM pair (32/64/128/256), largest first. Up to eight entries.
 banks = [128, 128, 0, 0]
 
 scale = 1                   # window scale, kept across guest mode changes; --2x overrides
-headless = false            # no window, no REX3 (audio unaffected)
+headless = false            # no window, no graphics; the O2 boots on its serial console (audio unaffected)
 no_audio = false            # no HAL2 / cpal (graphics unaffected)
 lock_aspect_ratio = true    # false = free resize with letterboxing
 mouse_scroll_pixels_per_line = 40

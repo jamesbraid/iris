@@ -9,11 +9,11 @@ pub fn ram_presets(ip28: bool) -> &'static [u32] {
     if ip28 { IP28_RAM_PRESETS } else { RAM_PRESETS }
 }
 
-pub fn active_banks(banks: &[u32; 4]) -> usize {
+pub fn active_banks(banks: &[u32]) -> usize {
     banks.iter().filter(|&&s| s > 0).count()
 }
 
-pub fn ram_summary(banks: &[u32; 4]) -> String {
+pub fn ram_summary(banks: &[u32]) -> String {
     let total: u32 = banks.iter().sum();
     let n = active_banks(banks);
     t!("ram-summary", total = total, banks = n)

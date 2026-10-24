@@ -472,11 +472,11 @@ mod storage_tests {
         // Preference saves do not overwrite externally edited machine TOMLs.
         let path = prefs.machine_path("indy").unwrap();
         let mut cfg = machines::read(&path).unwrap();
-        cfg.banks = [8, 8, 0, 0];
+        cfg.banks = iris::config::banks_from4([8, 8, 0, 0]);
         machines::save(&root.0, "indy", &mut cfg).unwrap();
         prefs.save().unwrap();
         let reloaded = GuiSettings::load_in(root.0.clone(), &root.0);
-        assert_eq!(reloaded.machines["indy"].banks, [8, 8, 0, 0]);
+        assert_eq!(reloaded.machines["indy"].banks, iris::config::banks_from4([8, 8, 0, 0]));
         assert_eq!(std::fs::read_to_string(root.0.join("gui.json.pre-toml.bak")).unwrap(), original_text);
     }
 
@@ -513,7 +513,7 @@ mod storage_tests {
         let prefs = GuiSettings::load_in(root.0.clone(), &root.0);
         assert!(prefs.errors.is_empty(), "{:?}", prefs.errors);
         assert_eq!(prefs.active_machine.as_deref(), Some("old"));
-        assert_eq!(prefs.machines["old"].banks, [8, 8, 0, 0]);
+        assert_eq!(prefs.machines["old"].banks, iris::config::banks_from4([8, 8, 0, 0]));
         assert!(prefs.last_config.is_none());
         assert_eq!(std::fs::read_to_string(source).unwrap(), "banks = [8, 8, 0, 0]");
         assert_eq!(GuiSettings::load_in(root.0.clone(), &root.0).machines.len(), 1);

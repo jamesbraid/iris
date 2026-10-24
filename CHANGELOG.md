@@ -31,6 +31,14 @@ hashes are given where a change is easiest to understand by reading the commit.
   load. The monitor's `scsi` and `cow` commands (`scsi1`/`cow1` for the
   external bus) work on the O2's Adaptec controllers: status, disc changes,
   overlay commit and reset, and the chip's registers.
+- **One configuration.** The O2 is set up with the shared keys: `prom`,
+  `nvram` (the PROM's flash), `banks` (the kit in each DIMM pair),
+  `serial_port_a`/`serial_port_b`/`serial_log`, `headless`, `[clock]
+  fixed_mhz` (CP0 Count, half the CPU clock), `[network]` with `mac` and the
+  new `mode = "off"`, `[[port_forward]]`, `nat_subnet` and `[nfs]`. `[o2]`
+  keeps `mouse`, `control_port` and `arcs_fpu`; its old keys are folded into
+  the shared ones on load, with a note. The second serial port is served too,
+  and the flash is kept between runs by default.
 - **Scripting and inspection.** The O2's devices have monitor commands, and
   `o2 <command>` (also on `[o2] control_port`) takes screen shots, types,
   moves the mouse and reads memory ([debug.md](debug.md#sgi-o2-ip32)).
@@ -46,6 +54,12 @@ hashes are given where a change is easiest to understand by reading the commit.
   opened, and `/dev/mem` and `/dev/kmem` returned 0xffffffff for about one
   page in six. IRIX on an R5000 O2 panicked with "init died" for the same
   reason; it now boots to the desktop.
+
+### Memory configuration
+
+- **`banks` has eight entries.** Every machine today uses the first four and
+  the rest must be 0; a config may list fewer, and files are written back with
+  four. Room for machines with more banks.
 
 ### SCSI configuration
 

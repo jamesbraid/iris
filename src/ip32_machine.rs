@@ -152,22 +152,43 @@ pub struct O2Machine {
 /// What an O2 snapshot's manifest names as its machine.
 const SNAPSHOT_MACHINE: &str = "o2_ip32";
 
+/// The PROM image tried when `prom` is left at the shared default: the last
+/// release's, named as SGI shipped it. The O2 has no embedded PROM.
+pub const O2_PROM_FILE: &str = "ip32prom.rev4.18.bin";
+
+/// CP0 Count when `[clock] fixed_mhz` is unset: half of a 180 MHz CPU.
+pub const O2_COUNT_MHZ: f64 = 90.0;
+
 impl O2Machine {
     pub fn new(cfg: &MachineConfig) -> Result<Self, String> {
         let o2 = &cfg.o2;
-        let prom = std::fs::read(&o2.prom).map_err(|e| format!("O2 PROM {}: {e}", o2.prom))?;
-        let kits = match &o2.dimms {
-            Some(k) => k.clone(),
-            None => crate::dev::crime_mem::kits_for(o2.ram_mb)?,
+        // `prom`, or the last release's file when `prom` is the shared default
+        // and that file is not there: there is no embedded O2 PROM.
+        let prom_path = if cfg.prom != crate::config::DEFAULT_PROM || std::path::Path::new(&cfg.prom).exists() {
+            cfg.prom.clone()
+        } else {
+            O2_PROM_FILE.to_string()
         };
+        let prom = std::fs::read(&prom_path)
+            .map_err(|e| format!("O2 PROM {prom_path}: {e} (set `prom` to the O2 PROM image; 4.18 is the last release)"))?;
+        // `banks`: the kit in each DIMM pair from A (validate checked them).
+        let kits = cfg.o2_kits();
         let mem = O2Memory::from_kits(&kits)?;
-        let opts = Ip32Options { scsi: true, flash_file: o2.flash.clone().map(Into::into) };
+        // The PROM's flash, and so its environment, lives in `nvram`.
+        let opts = Ip32Options { scsi: true, flash_file: Some(cfg.nvram.clone().into()) };
         let mut bus = Ip32Bus::with_options(mem, prom, opts);
+        // `[network] mac` is the address in the 1-Wire ID chip.
+        if let Some(mac) = cfg.network.mac.as_deref() {
+            let mac = crate::config::parse_mac(mac).map_err(|e| format!("network.mac: {e}"))?;
+            bus.mace.onewire = crate::dev::onewire::OneWireId::from_mac(mac);
+        }
         // MACE audio plays through the host unless audio is off.
         if !cfg.no_audio {
             bus.mace.audio.enable_output(cfg.audio.clone());
         }
-        if o2.graphics {
+        // `headless`: no keyboard, so the PROM and the OS take the serial
+        // console, as on an O2 booted without one.
+        if !cfg.headless {
             bus.enable_graphics_with_mouse(o2.mouse);
         }
         let bus = Arc::new(bus);
@@ -224,13 +245,16 @@ impl O2Machine {
             "iris: O2 with {} MB ({}), {}",
             kits.iter().sum::<u32>(),
             kits.iter().map(|k| format!("{k}")).collect::<Vec<_>>().join("+"),
-            if o2.graphics { "graphics console" } else { "serial console" }
+            if cfg.headless { "serial console" } else { "graphics console" }
         );
-        // The console UART's host end: the shared TCP serial backend (any
-        // number of clients), teed to the serial log when one is set.
+        // The console UART's host end: in CI mode the in-process backend
+        // the CI socket types into, otherwise TCP on `serial_port_a` (as the
+        // Indy's channel A), either teed to `serial_log` when one is set. The
+        // second port serves TCP on `serial_port_b`.
+        let [port_a, port_b] = cfg.serial_ports();
         let ci_serial = cfg.ci.then(|| Arc::new(crate::dev::z85c30::CiSerialBackend::new()));
         if let Some(ci) = &ci_serial {
-            if let Some(path) = cfg.serial_log.as_deref().or(o2.serial_log.as_deref()) {
+            if let Some(path) = cfg.serial_log.as_deref() {
                 match ci.set_log_file(path) {
                     Ok(()) => eprintln!("iris: O2 serial console mirroring to {path}"),
                     Err(e) => eprintln!("iris: O2 serial log {path}: {e}"),
@@ -239,16 +263,14 @@ impl O2Machine {
             bus.mace.com0.set_backend(ci.clone());
         } else {
             let mut backend = crate::dev::z85c30::null_serial_backend();
-            if let Some(port) = o2.serial_port {
-                match crate::dev::z85c30::tcp_serial_backend(port) {
-                    Some((b, p)) => {
-                        eprintln!("iris: O2 serial console on 127.0.0.1:{p}");
-                        backend = b;
-                    }
-                    None => eprintln!("iris: O2 serial console port {port} unavailable; is another iris using it?"),
+            match crate::dev::z85c30::tcp_serial_backend(port_a) {
+                Some((b, p)) => {
+                    eprintln!("iris: O2 serial port 1 on 127.0.0.1:{p}");
+                    backend = b;
                 }
+                None => eprintln!("iris: O2 serial port 1: port {port_a} unavailable; is another iris using it? (serial_port_a)"),
             }
-            if let Some(path) = &o2.serial_log {
+            if let Some(path) = &cfg.serial_log {
                 // A fresh log each boot, as the O2 has always kept it (the
                 // tee appends): scripts look at its tail for this boot's
                 // prompts.
@@ -260,12 +282,18 @@ impl O2Machine {
             }
             bus.mace.com0.set_backend(backend);
         }
+        match crate::dev::z85c30::tcp_serial_backend(port_b) {
+            Some((b, p)) => {
+                eprintln!("iris: O2 serial port 2 on 127.0.0.1:{p}");
+                bus.mace.com1.set_backend(b);
+            }
+            None => eprintln!("iris: O2 serial port 2: port {port_b} unavailable; is another iris using it? (serial_port_b)"),
+        }
+        // The Ethernet on the NAT gateway `[network]` describes (`mode =
+        // "off"` leaves it unplugged; validate refuses pcap here for now).
         let mut nat = None;
-        if o2.net {
-            let mut net = crate::net::GatewayConfig::default();
-            net.port_forwards = o2.forwards.clone();
-            // `[network] tftp_dir`, so the PROM can `boot -f bootp()FILE`.
-            net.tftp_dir = cfg.network.tftp_dir.as_ref().map(std::path::PathBuf::from);
+        if cfg.network.mode != crate::config::NetMode::Off {
+            let net = crate::net::GatewayConfig::from_network(&cfg.network());
             eprintln!("iris: O2 Ethernet on NAT: gateway {}, guest {} (DHCP)", net.gateway_ip, net.client_ip);
             let addrs = (net.client_ip, net.gateway_ip, net.netmask);
             nat = Some((bus.mace.mec.start_nat(net), addrs));
@@ -274,6 +302,10 @@ impl O2Machine {
         let timer_manager = Arc::new(TimerManager::new());
         let sysad: Arc<dyn BusDevice> = bus.clone();
         let arcs_fpu = o2.arcs_fpu;
+        // `[clock] fixed_mhz` is CP0 Count; the CPU clock the PROM measures
+        // and reports is twice it.
+        let count_mhz = cfg.clock.fixed_mhz.unwrap_or(O2_COUNT_MHZ);
+        let cpu_mhz = (count_mhz * 2.0).round().max(1.0) as u32;
         let boot = Arc::new(BootState::new());
         let cpu: Arc<dyn CpuDevice> = match cfg.machine.cpu {
             // The full cache model through the PROM and the tagless shadow
@@ -281,8 +313,8 @@ impl O2Machine {
             // through the ppmem window with no tag probe, LRU or dirty bit on
             // every load and store (memory-bound code ran 2.5-4x slower than on
             // IP28 with the full model).
-            CpuModel::R10000 => Self::build_cpu::<R10000Handover>(sysad, &timer_manager, arcs_fpu, o2.cpu_mhz, boot.clone(), switch_model, HandoverCache::take_reset_seen),
-            CpuModel::R5000 => Self::build_cpu::<R5000Handover>(sysad, &timer_manager, arcs_fpu, o2.cpu_mhz, boot.clone(), switch_model, HandoverCache::take_reset_seen),
+            CpuModel::R10000 => Self::build_cpu::<R10000Handover>(sysad, &timer_manager, arcs_fpu, cpu_mhz, boot.clone(), switch_model, HandoverCache::take_reset_seen),
+            CpuModel::R5000 => Self::build_cpu::<R5000Handover>(sysad, &timer_manager, arcs_fpu, cpu_mhz, boot.clone(), switch_model, HandoverCache::take_reset_seen),
             CpuModel::R4400 => return Err("an O2 has an R5000 or an R10000 ([machine] cpu)".into()),
         };
 
@@ -332,7 +364,7 @@ impl O2Machine {
         bus.mace.ust.use_host_clock();
         bus.connect_cpu_irq(crate::irq::IrqLine::new(Arc::new(CpuIrq(cpu.clone().as_device())), 2));
 
-        bus.gbe.use_cpu_clock(cpu.cycles_ptr(), o2.cpu_mhz);
+        bus.gbe.use_cpu_clock(cpu.cycles_ptr(), cpu_mhz);
         // CRIME's rendering engine draws on its own thread, fed through
         // its interface buffer.
         bus.crime.re.start(bus.clone(), |b: &Ip32Bus| &b.crime.re);
@@ -393,7 +425,7 @@ impl O2Machine {
             paused: Arc::new(AtomicBool::new(false)),
             lifecycle: crate::machine_state::GuestState::Idle,
             disks,
-            flash_path: o2.flash.clone(),
+            flash_path: Some(cfg.nvram.clone()),
             scratch_path,
         })
     }

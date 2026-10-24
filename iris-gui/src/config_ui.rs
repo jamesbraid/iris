@@ -16,7 +16,7 @@ use crate::ram::{ram_summary, ram_presets};
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MemoryUiContext {
     pub running: bool,
-    pub started_banks: Option<[u32; 4]>,
+    pub started_banks: Option<[u32; iris::config::MAX_BANKS]>,
     /// The CPU the running guest actually booted on, so a pending change is
     /// shown as pending rather than as fact. `None` when nothing is running.
     pub started_cpu: Option<CpuModel>,
@@ -938,6 +938,8 @@ fn show_network(
                 .selected_text(match cfg.network.mode {
                     NetMode::Nat  => t!("config-net-mode-nat"),
                     NetMode::Pcap => t!("config-net-mode-pcap"),
+                    // Only an O2 config can say this, and the GUI does not run one yet.
+                    NetMode::Off  => "off".to_string(),
                 })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut cfg.network.mode, NetMode::Nat, t!("config-net-mode-nat"));

@@ -117,6 +117,27 @@ impl Default for GatewayConfig {
     }
 }
 
+impl GatewayConfig {
+    /// The gateway `[network]`, `nat_subnet`, `[nfs]` and `[[port_forward]]`
+    /// describe, as the machines hand it to their Ethernet.
+    pub fn from_network(net: &crate::config::NetworkConfig) -> Self {
+        let subnet = net.nat_subnet.clone().unwrap_or_default();
+        Self {
+            gateway_ip: subnet.gateway_ip,
+            client_ip: subnet.client_ip,
+            netmask: subnet.netmask,
+            nfs: net.nfs.clone(),
+            port_forwards: net.port_forward.clone(),
+            mode: net.mode,
+            pcap_interface: net.pcap_interface.clone(),
+            nfs_pcap_ip: net.nfs_pcap_ip,
+            tftp_dir: net.tftp_dir.clone(),
+            rsh_dir: net.rsh_dir.clone(),
+            ..Self::default()
+        }
+    }
+}
+
 // ── Network backend abstraction ───────────────────────────────────────────────
 //
 // The SEEQ 8003 chip is backend-agnostic: it hands outbound Ethernet frames to a

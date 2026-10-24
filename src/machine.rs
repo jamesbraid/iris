@@ -304,8 +304,9 @@ impl Machine {
 
         // 1. Create all devices first
         // Memory Controller
+        let mc_banks: [u32; 4] = cfg.banks[..4].try_into().expect("the MC has four banks");
         let mc = MemoryController::new_for_profile(
-            eeprom_mc.clone(), guinness, cfg.banks, cfg.machine.profile.ip28());
+            eeprom_mc.clone(), guinness, mc_banks, cfg.machine.profile.ip28());
         // IP28: IRIX takes the CPU speed from the PROM's `cpufreq` (194, i.e.
         // a 195 MHz R10000) instead of measuring it, and times with it: UST
         // assumes Count at half that, and the RPSS cycle counter the MC clock

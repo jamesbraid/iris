@@ -63,10 +63,11 @@ impl Default for NewMachineDialog {
 /// `ip28` gates the 256/512 MB sizes, which only the IP28 MC can express
 /// (`validate()` rejects them on other machine profiles) — pass
 /// `cfg.machine.profile.ip28()`.
-pub fn distribute_ram(total: u32, ip28: bool) -> [u32; 4] {
+pub fn distribute_ram(total: u32, ip28: bool) -> [u32; iris::config::MAX_BANKS] {
     let mut remaining = total;
-    let mut banks = [0u32; 4];
-    for slot in &mut banks {
+    let mut banks = [0u32; iris::config::MAX_BANKS];
+    // The MC has four banks; the array has room for machines with more.
+    for slot in banks.iter_mut().take(4) {
         // Pick the largest size in VALID_BANK_SIZES that is <= remaining.
         let pick = VALID_BANK_SIZES.iter()
             .filter(|&&s| s > 0 && s <= remaining && (s <= 128 || ip28))
@@ -322,7 +323,7 @@ impl NewMachineDialog {
                         cfg.nvram = self.nvram_path.clone();
                         cfg.nveeprom = self.nveeprom_path.clone();
                         cfg.banks = if self.ram_advanced {
-                            self.ram_banks
+                            iris::config::banks_from4(self.ram_banks)
                         } else {
                             distribute_ram(self.ram_total_mb, self.profile.ip28())
                         };
@@ -364,8 +365,8 @@ mod ram_tests {
 
     #[test]
     fn ip28_gigabyte_uses_two_banks() {
-        assert_eq!(distribute_ram(1024, true), [512, 512, 0, 0]);
-        assert_eq!(distribute_ram(768, true), [512, 256, 0, 0]);
-        assert_eq!(distribute_ram(512, false), [128, 128, 128, 128]);
+        assert_eq!(distribute_ram(1024, true), iris::config::banks_from4([512, 512, 0, 0]));
+        assert_eq!(distribute_ram(768, true), iris::config::banks_from4([512, 256, 0, 0]));
+        assert_eq!(distribute_ram(512, false), iris::config::banks_from4([128, 128, 128, 128]));
     }
 }
