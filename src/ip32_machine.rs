@@ -141,6 +141,10 @@ pub struct O2Machine {
     disks: Vec<crate::snapshot::DiskRef>,
     /// The flash file, recorded in a snapshot's manifest.
     flash_path: Option<String>,
+    /// Where the machine is in its start/stop lifecycle (see
+    /// `Workstation::lifecycle`); never `Running`, which `status` reads from
+    /// the CPU.
+    lifecycle: crate::machine_state::GuestState,
 }
 
 /// What an O2 snapshot's manifest names as its machine.
@@ -342,6 +346,7 @@ impl O2Machine {
             controller_slot: None,
             boot,
             paused: Arc::new(AtomicBool::new(false)),
+            lifecycle: crate::machine_state::GuestState::Idle,
             disks,
             flash_path: o2.flash.clone(),
         })
@@ -434,6 +439,11 @@ impl O2Machine {
     }
 
     pub fn start(&mut self) {
+        // Publish "starting" before the monitor binds, so a caller polling
+        // readiness can tell "not started" from "startup under way".
+        if let Ok(starting) = self.lifecycle.transition(crate::machine_state::GuestState::Starting) {
+            self.lifecycle = starting;
+        }
         self.running.store(true, Ordering::SeqCst);
         self.monitor.clone().start_server(format!("127.0.0.1:{}", self.monitor_port));
         let d = self.display.clone();
@@ -521,6 +531,10 @@ impl O2Machine {
             eprintln!("iris: O2 stopped with rendering engine writes still queued");
         }
         self.bus.save_flash();
+        // A machine that was never started has nothing to halt.
+        if self.lifecycle != crate::machine_state::GuestState::Idle {
+            self.lifecycle = crate::machine_state::GuestState::Halted;
+        }
     }
 
     /// Let the service thread look after the devices again.
@@ -762,6 +776,8 @@ impl Workstation for O2Machine {
         self.controller_up.store(true, Ordering::SeqCst);
     }
     fn monitor_addr(&self) -> Option<std::net::SocketAddr> { self.monitor.bound_addr() }
+    fn lifecycle(&self) -> crate::machine_state::GuestState { self.lifecycle }
+    fn set_lifecycle(&mut self, state: crate::machine_state::GuestState) { self.lifecycle = state; }
 
     fn get_display(&self) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> { Some(O2Machine::get_display(self)) }
     fn get_ps2(&self) -> Arc<crate::dev::ps2::Ps2Controller> { O2Machine::get_ps2(self) }

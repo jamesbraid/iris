@@ -29,6 +29,7 @@ use crate::dev::z85c30::CiSerialBackend;
 use crate::gfx_display::GfxDisplay;
 use crate::hptimer::TimerManager;
 use crate::machine::Machine;
+use crate::machine_state::{GuestState, MachineStatus, TransitionAck};
 use crate::monitor::Monitor;
 use crate::net::NatControl;
 use crate::traits::{Device, MachineEvent};
@@ -73,6 +74,74 @@ pub trait Workstation: Send {
     /// The address the machine's monitor serves on, or None when it could not
     /// bind its port or has not started.
     fn monitor_addr(&self) -> Option<std::net::SocketAddr>;
+
+    /// Where the machine is in its start/stop lifecycle, as it stores it.
+    /// Never `Running`: [`Workstation::status`] derives that from the CPU's
+    /// own running flag, so an execution-control command cannot leave it
+    /// stale. `start` moves it to `Starting` before the monitor binds and
+    /// `stop` to `Halted` (unless it was never started). See
+    /// [`crate::machine_state`].
+    fn lifecycle(&self) -> GuestState;
+    fn set_lifecycle(&mut self, state: GuestState);
+
+    /// The guest's current state and whether the monitor is accepting
+    /// commands. Every surface that reports state — `machine-status`, the
+    /// `machine-start` acknowledgement, and the CI socket's `status` — goes
+    /// through here, so they cannot disagree.
+    fn status(&self) -> MachineStatus {
+        let cpu_running = self.cpu_is_running();
+        MachineStatus {
+            // Running is read from the CPU, not stored: `start`/`stop` and
+            // breakpoints change the CPU's flag without a machine-level
+            // transition, and a stale lifecycle copy would be a second,
+            // wrong answer.
+            state: if cpu_running { GuestState::Running } else { self.lifecycle() },
+            cpu_running,
+            monitor_addr: self.monitor_addr(),
+        }
+    }
+
+    /// Start the CPU and peripherals on behalf of `machine-start` and the CI
+    /// socket's `start`.
+    ///
+    /// Idempotent: a running machine is left alone and the acknowledgement says
+    /// so. A machine that is `Starting` only needs the CPU released; an `Idle`
+    /// or `Halted` one also restarts its peripherals. The returned
+    /// [`TransitionAck`] is what the monitor prints.
+    fn start_guest(&mut self) -> Result<TransitionAck, String> {
+        let from = self.status().state;
+        if from == GuestState::Running {
+            return Ok(TransitionAck { from, via: None, to: from });
+        }
+
+        let via = if from == GuestState::Starting {
+            None
+        } else {
+            let starting = self
+                .lifecycle()
+                .transition(GuestState::Starting)
+                .map_err(|e| e.to_string())?;
+            self.set_lifecycle(starting);
+            Some(GuestState::Starting)
+        };
+        // Peripherals are idempotently startable; do it even from `Starting`
+        // in case a previous stop left one of them down.
+        self.restart_peripherals();
+        self.cpu_start();
+        let to = self.status().state;
+        Ok(TransitionAck { from, via, to })
+    }
+
+    /// Stop the CPU and peripherals on behalf of `machine-stop`.
+    ///
+    /// Idempotent: stopping a halted machine changes nothing. Returns the
+    /// transition for the monitor's acknowledgement.
+    fn stop_guest(&mut self) -> TransitionAck {
+        let from = self.status().state;
+        self.stop();
+        let to = self.status().state;
+        TransitionAck { from, via: None, to }
+    }
 
     // ---- host interfaces ----
 
@@ -351,7 +420,7 @@ pub struct SystemController {
 }
 
 impl SystemController {
-    fn with_machine<F: FnOnce(&mut dyn Workstation) -> Result<(), String>>(&self, f: F) -> Result<(), String> {
+    fn with_machine<R>(&self, f: impl FnOnce(&mut dyn Workstation) -> Result<R, String>) -> Result<R, String> {
         with_machine_slot(&self.machine, f)?
     }
 }
@@ -365,8 +434,9 @@ impl Device for SystemController {
 
     fn register_commands(&self) -> Vec<(String, String)> {
         vec![
-            ("machine-stop".to_string(),  "Stop CPU and all peripherals".to_string()),
-            ("machine-start".to_string(), "Start CPU and all peripherals".to_string()),
+            ("machine-start".to_string(), "Start CPU and all peripherals (idempotent; prints the state transition)".to_string()),
+            ("machine-stop".to_string(),  "Stop CPU and all peripherals (idempotent; prints the state transition)".to_string()),
+            ("machine-status".to_string(), "machine-status [json] — Guest state (idle/starting/running/halted) and monitor readiness".to_string()),
             ("reset".to_string(),         "Reset all hardware to power-on state".to_string()),
             ("save".to_string(),          "save <name> — Save snapshot to saves/<name>/".to_string()),
             ("load".to_string(),          "load <name> — Load snapshot from saves/<name>/".to_string()),
@@ -378,16 +448,28 @@ impl Device for SystemController {
     fn execute_command(&self, cmd: &str, args: &[&str], mut writer: Box<dyn Write + Send>) -> Result<(), String> {
         match cmd {
             "machine-stop" => {
-                let _ = writeln!(writer, "Stopping machine...");
-                self.with_machine(|m| { m.stop(); Ok(()) })
+                let ack = self.with_machine(|m| Ok(m.stop_guest()))?;
+                let _ = writeln!(writer, "machine-stop: {}", ack.text());
+                Ok(())
             }
             "machine-start" => {
-                let _ = writeln!(writer, "Starting machine...");
-                self.with_machine(|m| {
-                    m.restart_peripherals();
-                    m.cpu_start();
-                    Ok(())
-                })
+                let ack = self.with_machine(|m| m.start_guest())?;
+                let _ = writeln!(writer, "machine-start: {}", ack.text());
+                Ok(())
+            }
+            "machine-status" => {
+                let json = match args {
+                    [] => false,
+                    ["json"] => true,
+                    _ => return Err("Usage: machine-status [json]".to_string()),
+                };
+                let status = self.with_machine(|m| Ok(m.status()))?;
+                if json {
+                    let _ = writeln!(writer, "{}", status.to_json());
+                } else {
+                    let _ = writeln!(writer, "{}", status.text());
+                }
+                Ok(())
             }
             "reset" => {
                 let _ = writeln!(writer, "Resetting machine...");

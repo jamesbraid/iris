@@ -63,7 +63,15 @@ struct Cli {
 enum Cmd {
     /// Liveness check — returns "ok" if the socket is reachable.
     Ping,
-    /// Start the CPU thread (no-op if already running).
+    /// Show the guest lifecycle state and whether the monitor is accepting
+    /// commands. `--wait-ready SECS` polls until it is.
+    Status {
+        /// Poll until the monitor has bound its port, up to SECS seconds
+        /// (0 = one query). Exits non-zero on timeout.
+        #[arg(long, default_value_t = 0, value_name = "SECS")]
+        wait_ready: u64,
+    },
+    /// Start the CPU and peripherals (no-op if already running).
     Start,
     /// Cleanly shut down iris. `--sync-chd [ID|all]` folds pending CHD diffs
     /// back into their bases first (default: all disks).
@@ -268,6 +276,7 @@ fn main() {
 fn dispatch(opts: &Opts, cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Ping        => simple(opts, "ping", json!({}), "ok"),
+        Cmd::Status { wait_ready } => cmd_status(opts, wait_ready),
         Cmd::Start       => simple(opts, "start", json!({}), "started"),
         Cmd::Quit { sync_chd } => match sync_chd {
             // A fold recompresses the whole base, so it can far outrun the 300s default.
@@ -473,6 +482,66 @@ fn print_response(opts: &Opts, ok_msg: &str, data: &Value) {
     } else {
         println!("{}: {}", ok_msg, data);
     }
+}
+
+/// `iris-ci status`: guest lifecycle state and monitor readiness from the same
+/// `Machine::status` the monitor's `machine-status` prints. With
+/// `--wait-ready`, keep polling (including through "socket not up yet") until
+/// the monitor has bound its port, then stop — a readiness poll a harness can
+/// use instead of a fixed sleep.
+fn cmd_status(opts: &Opts, wait_ready: u64) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(wait_ready);
+    loop {
+        match send(opts, "status", json!({})) {
+            Ok(data) => {
+                let ready = data.get("monitor_ready").and_then(Value::as_bool).unwrap_or(false);
+                if ready {
+                    print_status(opts, &data);
+                    return Ok(());
+                }
+                if wait_ready == 0 {
+                    // A one-shot query reports whatever the machine says; the
+                    // caller decides whether "not ready yet" matters.
+                    print_status(opts, &data);
+                    return Ok(());
+                }
+                if Instant::now() >= deadline {
+                    print_status(opts, &data);
+                    let state = data.get("state").and_then(Value::as_str).unwrap_or("unknown");
+                    return Err(Error::Local(format!(
+                        "monitor not ready after {wait_ready}s (state {state}); see iris stderr for a bind failure"
+                    )));
+                }
+            }
+            Err(Error::Connection(_)) if wait_ready > 0 && Instant::now() < deadline => {
+                // The CI socket itself may not exist yet: iris creates it only
+                // after the monitor has bound.
+            }
+            Err(e) => return Err(e),
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn print_status(opts: &Opts, data: &Value) {
+    if opts.json {
+        println!("{}", serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string()));
+        return;
+    }
+    if opts.quiet { return; }
+    let state = data.get("state").and_then(Value::as_str).unwrap_or("unknown");
+    let cpu = if data.get("cpu_running").and_then(Value::as_bool).unwrap_or(false) {
+        "running"
+    } else {
+        "stopped"
+    };
+    let monitor = match data.get("monitor_addr").and_then(Value::as_str) {
+        Some(addr) => format!("ready ({addr})"),
+        None => "not ready".to_string(),
+    };
+    println!("state    {state}");
+    println!("cpu      {cpu}");
+    println!("monitor  {monitor}");
 }
 
 fn cmd_list(opts: &Opts) -> Result<()> {

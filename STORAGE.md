@@ -116,6 +116,7 @@ debugging the wrapper itself.
 ./target/release/iris --ci
 
 # In another terminal: drive it
+./target/release/iris-ci status --wait-ready 60   # guest state + monitor readiness
 ./target/release/iris-ci boot          # PROM menu → IRIS console login (one cmd)
 ./target/release/iris-ci login         # send root + dismiss vt100 prompt + wait #
 ./target/release/iris-ci run 'ls /'    # send shell command, get stdout + exit code
@@ -133,6 +134,24 @@ debugging the wrapper itself.
 Run `iris-ci --help` for the full list, or `iris-ci <subcmd> --help` for any
 subcommand. Every operation has a typed clap arg — no JSON quoting, no
 hand-managed timeouts.
+
+### Waiting for a fresh machine
+
+The control socket is created only after `Machine::start` has bound the monitor,
+so a successful connection (or `iris-ci ping`) also means the monitor is
+listening. A harness that launches iris should poll, not sleep:
+`iris-ci status --wait-ready 60` retries until `monitor_ready` is true and then
+prints the guest state (`idle`, `starting`, `running`, `halted`) and the
+monitor address. `--json` emits the same fields as one object. A `--ci` machine
+sits in `starting` with the CPU parked until `iris-ci start` (or the monitor's
+`machine-start`), whose reply acknowledges the transition; repeating it is a
+no-op. See [debug.md](debug.md#machine) for `machine-status` on the monitor
+side.
+
+`script FILE` (also spelled `batch FILE`) runs one command per line through a
+single control-socket connection, so a multi-step scenario costs one connect
+rather than one per line. It prints per-step status and stops at the first
+failure; `--keep-going` runs the remaining steps and still exits non-zero.
 
 For automation that doesn't want to depend on `iris-ci`, the underlying socket
 protocol is newline-delimited JSON; `cmd` and `args` per request, `{ok, data,

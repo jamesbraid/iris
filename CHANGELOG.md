@@ -48,6 +48,19 @@ hashes are given where a change is easiest to understand by reading the commit.
   (reset values, visible `GFIFOLEVEL` only for the last 32 slots, no FIFO
   threshold interrupt), are now pinned by tests and recorded in
   `docs/Indy/rex3.md`.
+### Monitor and CI
+
+- **`machine-start` is idempotent and acknowledges the transition, and
+  `machine-status` reports guest state and monitor readiness.** The monitor
+  command now prints `idle -> starting -> running` (or `running (no change)`),
+  `machine-stop` acknowledges symmetrically, and `machine-status [json]` gives
+  a caller one place to ask whether the guest is `idle`, `starting`, `running`
+  or `halted` and whether the monitor has bound its port. The CI socket gains
+  the same `status` command, `iris-ci status [--wait-ready SECS]` polls it
+  instead of sleeping, and `--ci` creates the control socket only after
+  `Machine::start` has bound the monitor, so a successful connection is
+  itself a readiness signal. Tests cover a command sent before the monitor is
+  ready, duplicate starts, start after halt/reset, and invalid transitions.
 
 ### NAT gateway
 

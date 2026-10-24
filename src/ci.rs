@@ -285,6 +285,7 @@ fn dispatch(server: &CiServer, req: &Request) -> Response {
         "ping" => Response::ok(),
         "quit" => cmd_quit(server, &req.args),
         "start" => cmd_start(server),
+        "status" => cmd_status(server),
         "save" => cmd_save(server, &req.args),
         "restore" => cmd_restore(server, &req.args),
         "rollback" => cmd_rollback(server),
@@ -422,8 +423,22 @@ fn cmd_quit(server: &CiServer, args: &Value) -> Response {
 }
 
 fn cmd_start(server: &CiServer) -> Response {
-    match server.with_machine(|m| m.cpu_start()) {
-        Ok(()) => Response::ok(),
+    // Same path as the monitor's `machine-start`: idempotent, and it brings
+    // peripherals back before releasing the CPU after a stop. A machine that
+    // has not finished `Machine::start` reports `idle` and the harness should
+    // poll `status` first; the CI socket is created after that startup step,
+    // so a connected client normally cannot see `idle`.
+    match server.with_machine_result(|m| m.start_guest()) {
+        Ok(_) => Response::ok(),
+        Err(e) => Response::err(e),
+    }
+}
+
+/// Guest state and monitor readiness, from the same `Workstation::status` the
+/// monitor's `machine-status` prints.
+fn cmd_status(server: &CiServer) -> Response {
+    match server.with_machine(|m| m.status()) {
+        Ok(status) => Response::data(status.to_json()),
         Err(e) => Response::err(e),
     }
 }

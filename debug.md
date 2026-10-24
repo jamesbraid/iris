@@ -81,10 +81,37 @@ accepted in every build but do nothing without the feature.
 
 | Command | Description |
 |---|---|
-| `machine-start` / `machine-stop` | Start / stop the CPU and all peripherals |
+| `machine-start` | Start the CPU and all peripherals. Idempotent: prints the transition it performed, e.g. `machine-start: halted -> starting -> running`, or `machine-start: running (no change)` |
+| `machine-stop` | Stop the CPU and all peripherals. Idempotent: prints `machine-stop: running -> halted` |
+| `machine-status [json]` | Guest state (`idle`, `starting`, `running`, `halted`) and whether the monitor is accepting commands; `json` emits one object |
 | `reset` | Reset all hardware to power-on state |
 | `save <name>` / `load <name>` | Save / load a snapshot under `saves/<name>/` (see [STORAGE.md](STORAGE.md#snapshots-and-rollback)) |
 | `testdev` | Bare-metal test device status (`cpu-tests/`, `bench/`) |
+
+The machine lifecycle is one value, and every surface reports it the same way:
+`idle` (not started; the monitor is not listening), `starting` (the monitor
+accepts commands but the CPU is parked), `running` (the CPU is executing), and
+`halted` (stopped by `machine-stop`, `reset` or a guest power-off). `running` is
+read from the CPU's own running flag, so the `start`/`stop` execution commands
+and breakpoints are reflected without a separate bookkeeping step.
+
+A fresh `--ci` machine is **ready for commands while still `starting`**: the
+monitor is up and the peripherals are running, but the CPU stays parked until
+`machine-start` (or `iris-ci start`). Do not sleep before sending it — poll
+instead. Either retry the monitor TCP connect until it answers, or use the CI
+socket, which iris creates only after the monitor has bound:
+
+```sh
+iris-ci --socket /tmp/iris.sock status --wait-ready 60
+tools/mon.py "machine-start"
+```
+
+`machine-status` is available as soon as a monitor connection is accepted; the
+`json` form is one object with `state`, `cpu_running`, `monitor_ready` and
+`monitor_addr`. `iris-ci status` prints the same fields from the same source.
+If the monitor could not bind its port (another iris is using it), the CI
+socket still answers but reports `monitor_ready` false, so a harness can tell a
+bind failure from a guest that never started.
 
 ### Execution control
 

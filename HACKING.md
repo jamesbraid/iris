@@ -53,11 +53,15 @@ The front ends do not use `Machine` directly. `main.rs`, the window
 iris-gui hold a `Box<dyn Workstation>` from `workstation::build`
 (`src/workstation.rs`). The trait's required methods are what every machine
 has (start and stop, the screen, the keyboard and mouse, the serial console,
-the monitor); its provided methods are optional facilities (snapshots, CHD
-folding, the scratch volume, disc changes, the NAT controls) that default to
-"not supported on this machine". `Machine` implements all of it. A machine
-built around a different chipset implements the same trait and gets the
-window, iris-ci, iris-gui and the monitor's `reset`/`save`/`load` with it.
+the monitor, the stored lifecycle state); its provided methods are either
+shared logic every machine wants the same way (`status`, and the idempotent
+`start_guest`/`stop_guest` behind `machine-start`/`machine-stop`, see
+`src/machine_state.rs`) or optional facilities (snapshots, CHD folding, the
+scratch volume, disc changes, the NAT controls) that default to "not
+supported on this machine". `Machine` implements all of it. A machine built
+around a different chipset implements the same trait and gets the window,
+iris-ci, iris-gui and the monitor's `reset`/`save`/`load`/`machine-status`
+with it.
 
 The monitor's system controller, the machine-events thread and the CI server
 reach the machine through one shared `MachineSlot` per machine, which the

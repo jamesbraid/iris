@@ -82,20 +82,6 @@ fn main() {
         }
     }
 
-    // CI control socket: started after Machine::new so it can hand out the
-    // machine pointer + CiSerialBackend to command handlers.
-    let _ci_server = if ci_enabled {
-        match iris::ci::start_server(&mut *machine, &ci_socket_path) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                eprintln!("iris: failed to start CI server: {}", e);
-                std::process::exit(1);
-            }
-        }
-    } else {
-        None
-    };
-
     // DIAG: optionally enable verbose logging from startup via IRIS_DEBUG_LOG.
     // IRIS_DEBUG_LOG="mc,mips" enables those modules. "all" enables everything.
     // Output is broadcast to a stderr sink so jit-diag.sh's tee captures it inline.
@@ -131,6 +117,24 @@ fn main() {
     start_perfetto(perfetto);
 
     machine.start();
+
+    // CI control socket: started after the machine so a successful connection
+    // means the monitor has already bound its port. That makes "the CI socket
+    // answers" a reliable readiness signal for a harness — no fixed sleep —
+    // and keeps CI commands from racing the half-started Machine. The CPU
+    // itself stays parked in `--ci` mode (see Machine::start).
+    let _ci_server = if ci_enabled {
+        match iris::ci::start_server(&mut *machine, &ci_socket_path) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("iris: failed to start CI server: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
     // The terminal console talks to this process's own monitor only. Without
     // one (its port taken by another iris), there is no console: attached to
     // the other iris's monitor, it would exit along with that iris.
