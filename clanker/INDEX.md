@@ -35,6 +35,7 @@ CPU architecture: CP0, TLB and its fast paths, caches, FPU, LL/SC, CPU models. B
 | [instr_stats_insmap_generalization.md](cpu/instr_stats_insmap_generalization.md) | design | instr_stats generalized into a decode+exec instruction map (insmap) |
 | [intrfast-self-overwrite-investigation.md](cpu/intrfast-self-overwrite-investigation.md) | open | intrfast (0x08016xxx) gets overwritten with data mid-boot — investigation in progress |
 | [movci-is-cp1-by-behaviour-not-encoding.md](cpu/movci-is-cp1-by-behaviour-not-encoding.md) | rule | MOVF/MOVT are CP1 accesses with an integer encoding |
+| [mp-llsc-is-a-host-compare-exchange.md](cpu/mp-llsc-is-a-host-compare-exchange.md) | design | MP LL/SC: SC is a host compare-exchange on the data, not a line-ownership tracker |
 | [nanotlb-asid-mutation-flush.md](cpu/nanotlb-asid-mutation-flush.md) | rule | nanotlb must be flushed on ASID mutation, not just on privilege transition |
 | [nutlb-erl-guard-defeats-permission-test.md](cpu/nutlb-erl-guard-defeats-permission-test.md) | history | nutlb: the ERL guard bit defeats the permission test entirely |
 | [r5000-taglo-is-the-r4400-pstate.md](cpu/r5000-taglo-is-the-r4400-pstate.md) | rule | R5000 L1 TagLo uses the R4400 PState encoding |
