@@ -47,6 +47,12 @@ hashes are given where a change is easiest to understand by reading the commit.
   display. Runs IRIX 6.5.22 to the desktop with OpenGL through the rendering
   engine, and NetBSD 11 to multi-user and X. Needs the O2 PROM image; not in
   iris-gui yet.
+- **The AIC-7880 is specified.** [docs/o2/aic7880.md](docs/o2/aic7880.md)
+  describes the O2's SCSI controller from the Adaptec data books, the
+  open-source drivers, the MACE spec and what the PROM and IRIX download: principles of operation, PCI
+  configuration space, every register and bit, the sequencer's instruction
+  set, the two downloaded programs (Adaptec's HIM and Gibbs' `aic7xxx.seq`),
+  and how the O2 wires and addresses the chips.
 - **Disks come from `[scsi.N]`.** The O2 reads the same SCSI tables as the
   Indy and Indigo2, with `controller` naming the bus (0 internal, 1
   external): changer lists, scratch volumes, CHD images, copy-on-write

@@ -104,6 +104,9 @@ Non-graphics devices: MC/MEMCFG and RAM banks, HPC3, VDMA, EEPROMs and NVRAM, PS
 | [ip28-512mb-banks.md](devices/ip28-512mb-banks.md) | howto | IP28 512 MB banks |
 | [o2-readback-transfer-registers.md](devices/o2-readback-transfer-registers.md) | rule | O2 glReadPixels: the frame-buffer-to-linear transfer, GL vertices, edge type, src steps and linStride as IRIX uses them |
 | [ip32-o2-bringup-log.md](devices/ip32-o2-bringup-log.md) | history | The O2 (IP32) bring-up log: PROM, POST, CRIME/MACE/GBE, SCSI, PCI, the OSes |
+| [aic7880-emulation-vs-spec.md](devices/aic7880-emulation-vs-spec.md) | open | AIC-7880: where the O2 SCSI model departs from `docs/o2/aic7880.md` (HLE above the sequencer, reset values, wide strap, residuals, interrupt gating, config space) |
+| [aic7880-seqdis.py](devices/aic7880-seqdis.py) | howto | Disassembler for an AIC-7xxx sequencer image in a C byte array (the HIM's image the O2 downloads) |
+| [aic7880-patchsim.py](devices/aic7880-patchsim.py) | howto | Reproduces the Linux aic7xxx firmware patch selection and critical sections for a 7880 |
 | [o2-no-ecc-alias-is-memory.md](devices/o2-no-ecc-alias-is-memory.md) | rule | O2: physical 0x00_8000_0000 is CRIME's no-ECC memory alias, folded onto RAM by the CPU (netstat/Netscape hang, /dev/mem all ones) |
 | [o2-cache-handover-full-to-shadow.md](devices/o2-cache-handover-full-to-shadow.md) | design | O2 cache: the full model through POST, the shadow model after; switched by PC range and a tag-store trigger, and why the log flips during a reboot |
 | [memcfg-limit-is-not-the-bank-size.md](devices/memcfg-limit-is-not-the-bank-size.md) | rule | MEMCFG: `limit` is the slot, `addr_mask+1` is the mirror period — they differ |
