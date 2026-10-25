@@ -8,6 +8,7 @@ use crate::exp::eval_const_expr;
 use crate::cpu::mips_dis;
 use crate::dev::mem::{BlackHoleRegion, UnmappedRam};
 use crate::ppmem::{MappedMemory, PpMemSpace, PpMemory};
+use crate::ppmem::devmap::{entry_eq, Entry, SparseDeviceMap, SLOT_SHIFT};
 
 use crate::dev::prom::PromPort;
 use crate::dev::mc::MemoryController;
@@ -196,7 +197,7 @@ const PROM_END: u32  = 0x1FD00000;
 // per MC spec: "The bottom 512KB of memory is just an alias for the memory located
 // at address 0x08000000 to 0x0807ffff."
 // Implemented as an AliasBus that adds LOMEM_BASE to the incoming address, so
-// accesses go through the normal lomem device_map entries — no direct bank pointer needed.
+// accesses go through the normal lomem decode-table entries — no direct bank pointer needed.
 const ALIAS_BASE: u32   = 0x00000000;
 const ALIAS_END: u32    = 0x00080000;
 
@@ -218,14 +219,14 @@ fn alias_offset_for(ip28: bool) -> u32 {
 }
 
 
-/// What one 64 KB `device_map` slot should point at after a MEMCFG write.
+/// What one 64 KB decode-table slot should point at after a MEMCFG write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BankSlot {
     Unmapped,
     Bank(usize),
 }
 
-/// Decide every `device_map` slot a MEMCFG write can affect: the lomem and
+/// Decide every decode-table slot a MEMCFG write can affect: the lomem and
 /// himem windows, each bank's placement, and wherever a bank sat outside
 /// those windows last time. Returns one entry per slot, in slot order, plus
 /// the slots this placement puts outside the windows, for the next call.
@@ -233,11 +234,13 @@ enum BankSlot {
 /// A plan rather than a sequence of stores, for two reasons:
 ///
 /// - **Only the differences get written.** Wiping both 256 MB windows and
-///   mapping the banks back over them is about 8200 stores per MEMCFG write,
-///   each a non-atomic 16-byte fat pointer, while the MC's DMA worker may be
-///   dispatching through the table from its own thread. Collapsing to one
-///   entry per slot means a slot that ends up where it started is never
-///   touched, not wiped and rewritten.
+///   mapping the banks back over them is about 8200 slots per MEMCFG write,
+///   while the MC's DMA worker may be dispatching through the table from its
+///   own thread. Collapsing to one entry per slot means a slot that ends up
+///   where it started is never touched, not wiped and rewritten, and the
+///   table is never seen half-way through a change. (The table now swaps
+///   whole pages atomically, so a transient would no longer be a torn
+///   pointer; it would still be a slot briefly answering as unmapped.)
 /// - **A bank placed outside the windows is unmapped again when it moves.**
 ///   MEMCFG's base field reaches far beyond lomem and himem, and a wipe of
 ///   only those two left such a slot pointing at a bank the MC had since
@@ -285,17 +288,19 @@ const MYSTERY_HOLE_END: u32  = 0x02090000;
 /// Acts as the central hub for connecting devices.
 /// Routes all bus accesses to the appropriate device based on address.
 /// Devices are stored directly in the struct for zero-overhead access.
-/// Uses a 64KB granularity lookup table for O(1) address decoding.
+/// Decodes with one indexed load from a table of 64 KB slots; the table
+/// itself is sparse and host-MMU-backed (`SparseDeviceMap`), so it spans a
+/// 40-bit space while costing a few pages.
 ///
 /// Memory is split into 4 × 128MB banks (0..3). MEMCFG0/1 in the MC
 /// configure at which physical address each bank appears. On MEMCFG write,
-/// the MC invokes remap_banks() which updates device_map and each bank's
+/// the MC invokes remap_banks() which updates the decode table and each bank's
 /// base_addr. Banks 0/1 occupy lomem slots; banks 2/3 occupy himem slots.
 pub struct Physical {
     // 4 × 128MB RAM banks (0,1 in lomem; 2,3 in himem). base_addr set by remap_banks().
     banks: [RamBank; 4],
     /// ppmem's 4GB window. Banks are mapped into it by `remap_banks` in
-    /// addition to being installed in `device_map`, so the mapping-based fast
+    /// addition to being installed in the decode table, so the mapping-based fast
     /// path and the bus path stay in agreement. `None` if the window could not
     /// be reserved, in which case only the bus path is used.
     ppmem_space: Option<PpMemSpace>,
@@ -338,9 +343,14 @@ pub struct Physical {
     vino_gio_alias: AliasBus, // GIO aperture at 0x1F080000 → VINO at 0x00080000
     black_hole: BlackHoleRegion,
 
-    // Lookup table: 64KB granularity (65536 entries = 512KB on 64-bit)
-    // Maps (address >> 16) to device pointer (non-null, always valid)
-    device_map: [*const dyn BusDevice; 65536],
+    /// The decode table: one device per 64 KB slot of a 40-bit physical
+    /// space, sparse and host-MMU-backed (`src/ppmem/devmap.rs`). Slots the
+    /// Indy and Indigo2 decode are filled in `init`; a slot nobody filled is
+    /// faulted in as the CPU bus-error device the first time it is touched.
+    devmap: SparseDeviceMap,
+    /// `devmap.base()`, cached so the hot path is a load off `self` and one
+    /// indexed load.
+    map_base: *const Entry,
 
     /// 64 KB slots the last `remap_banks` placed a RAM bank in outside the
     /// lomem and himem windows. MEMCFG's base field reaches well beyond those
@@ -357,7 +367,7 @@ pub struct Physical {
     host_freq: u64,
 }
 
-// Safety: Physical owns all devices and the pointers in device_map point to owned data
+// Safety: Physical owns all devices and the pointers in the decode table point to owned data
 // All the devices themselves are Send+Sync, and we never mutate through the pointers
 unsafe impl Send for Physical {}
 unsafe impl Sync for Physical {}
@@ -430,17 +440,14 @@ impl Physical {
         let vino_gio_alias = AliasBus::new(std::ptr::null::<ErrorBus>(), 0xE1000000u32);
         let black_hole = BlackHoleRegion::new();
 
-        // The lookup table is filled in init(). Until then it points at a
-        // bus-error device rather than at null, although every slot is
-        // written before the guest runs: the MC's DMA worker dispatches
-        // through this table from its own thread while `remap_banks` rewrites
-        // its 16-byte fat pointers non-atomically from the CPU's, and a torn
-        // read that pairs a null data pointer with a live vtable is a
-        // segfault, not a bus error. A stateless static costs nothing and
-        // takes null out of the table for good.
-        static BOOT_ERR: ErrorBus = ErrorBus { debug: AtomicBool::new(false) };
-        const BOOT_PTR: *const dyn BusDevice = &BOOT_ERR;
-        let device_map: [*const dyn BusDevice; 65536] = [BOOT_PTR; 65536];
+        // The decode table. Only reserved here: `init` fills it once `self`
+        // is in its final place, since the entries point at fields of `self`.
+        // Nothing dispatches before that; a dispatch that did would fault
+        // with a message naming the address rather than read a null.
+        let devmap = SparseDeviceMap::new().unwrap_or_else(|e| {
+            panic!("iris: cannot reserve the physical address decode table: {e}")
+        });
+        let map_base = devmap.base();
 
         // ppmem: reserve the 4GB window over these banks. A failure here is
         // not fatal — the bus path works regardless — so log and carry on
@@ -488,7 +495,8 @@ impl Physical {
             alias_bus,
             vino_gio_alias,
             black_hole,
-            device_map,
+            devmap,
+            map_base,
             banks_outside_windows: Vec::new(),
             alias_offset: alias_offset_for(ip28),
             is_ip28: ip28,
@@ -519,18 +527,29 @@ impl Physical {
         let prom_ptr: *const dyn BusDevice = &self.prom;
         let black_hole_ptr: *const dyn BusDevice = &self.black_hole;
 
-        // Layer 1: fill entire table with CPU bus error device
-        for i in 0..65536usize {
-            self.device_map[i] = cpu_err_ptr;
-        }
+        let map = &self.devmap;
+        let set = |base: u32, end: u32, dev: Entry| {
+            map.fill_bytes(base as u64, end as u64, dev)
+                .unwrap_or_else(|e| panic!("physical: mapping {base:#010x}..{end:#010x}: {e}"));
+        };
+
+        // Whatever is never mapped below answers as a CPU bus error. Within
+        // the 32-bit space that is filled in now (layer 1); the rest of the
+        // 40-bit table stays untouched until the guest reaches it, and the
+        // first access to a slot up there faults it in as the same device,
+        // with a message naming the address.
+        map.set_default(cpu_err_ptr)
+            .unwrap_or_else(|e| panic!("physical: setting the bus-error default: {e}"));
+
+        // Layer 1: the whole 32-bit space, CPU bus error device
+        map.fill(0, 1 << (32 - SLOT_SHIFT), cpu_err_ptr)
+            .unwrap_or_else(|e| panic!("physical: filling the 32-bit space: {e}"));
 
         // Layer 2: overlay GIO space (0x18000000..0x1FA00000) with GIO timeout device
         // This covers: reserved future GIO (0x18000000..0x1F000000) + Newport slot
         // (0x1F000000..0x1F400000) + GIO expansion slots 0/1 (0x1F400000..0x1FA00000)
         // Real devices will overlay their own ranges on top in layer 3.
-        for i in (0x1800_0000u32 >> 16)..(0x1FA0_0000u32 >> 16) {
-            self.device_map[i as usize] = gio_err_ptr;
-        }
+        set(0x1800_0000, 0x1FA0_0000, gio_err_ptr);
 
         // Memory banks are NOT mapped here — MEMCFG0/1 control their placement.
         // remap_banks() is called by the MC when MEMCFG is written.
@@ -539,17 +558,13 @@ impl Physical {
         // Layer 3: real devices overlaid on top
 
         // Map VINO (physical 0x00080000, one 64KB slot)
-        self.device_map[(crate::dev::vino::VINO_BASE >> 16) as usize] = vino_ptr;
+        set(crate::dev::vino::VINO_BASE, crate::dev::vino::VINO_BASE + (1 << SLOT_SHIFT), vino_ptr);
 
         // Map Mystery Hole
-        for i in (MYSTERY_HOLE_BASE >> 16)..((MYSTERY_HOLE_END - 1) >> 16) + 1 {
-            self.device_map[i as usize] = black_hole_ptr;
-        }
+        set(MYSTERY_HOLE_BASE, MYSTERY_HOLE_END, black_hole_ptr);
 
         // 2nd hpc
-        for i in (0x1F980000 >> 16)..((0x1F990000 - 1) >> 16) + 1 {
-            self.device_map[i as usize] = black_hole_ptr;
-        }
+        set(0x1F980000, 0x1F990000, black_hole_ptr);
 
         // HPC1 region (0x1FB00000–0x1FB80000) — older HPC chip iris doesn't
         // emulate. IRIX still probes here during normal operation (visible as
@@ -560,47 +575,33 @@ impl Physical {
         // black hole (reads as zero, writes silently accepted) prevents the
         // bus error from firing and avoids the panic — without implementing
         // real HPC1 semantics, which would be a much larger emulation gap.
-        for i in (0x1FB00000u32 >> 16)..((HPC3_BASE - 1) >> 16) + 1 {
-            self.device_map[i as usize] = black_hole_ptr;
-        }
+        set(0x1FB00000, HPC3_BASE, black_hole_ptr);
 
         // Map Newport/REX3 (4MB GIO slot at 0x1F000000) — only if graphics enabled
         if let Some(rex3_ptr) = rex3_ptr {
-            for i in (NEWPORT_BASE >> 16)..((NEWPORT_END - 1) >> 16) + 1 {
-                self.device_map[i as usize] = rex3_ptr;
-            }
+            set(NEWPORT_BASE, NEWPORT_END, rex3_ptr);
         } else if let Some(gr2_ptr) = gr2_ptr {
             // GR2 (XZ / Extreme): the whole 4 MB gfx slot; see src/dev/gr2.
-            for i in (NEWPORT_BASE >> 16)..((NEWPORT_END - 1) >> 16) + 1 {
-                self.device_map[i as usize] = gr2_ptr;
-            }
+            set(NEWPORT_BASE, NEWPORT_END, gr2_ptr);
         } else if let Some(mgras_ptr) = mgras_ptr {
             // IMPACT in the graphics slot. The expansion slots stay unmapped so
             // their probes bus-error, as empty slots do.
-            for i in (NEWPORT_BASE >> 16)..((NEWPORT_END - 1) >> 16) + 1 {
-                self.device_map[i as usize] = mgras_ptr;
-            }
+            set(NEWPORT_BASE, NEWPORT_END, mgras_ptr);
         }
         // else: GIO timeout from layer 2 already covers the Newport slot
 
         // Second Newport head at GIO expansion slot 1 (dual-head).
         if let Some(h1_ptr) = rex3_head1_ptr {
-            for i in (GIO_SLOT1_BASE >> 16)..((GIO_SLOT1_END - 1) >> 16) + 1 {
-                self.device_map[i as usize] = h1_ptr;
-            }
+            set(GIO_SLOT1_BASE, GIO_SLOT1_END, h1_ptr);
         }
 
         // GIO expansion slot 0 (0x1F400000–0x1F5FFFFF): N64 dev board if enabled
         if let Some(u64_ptr) = ultra64_ptr {
             use crate::dev::ultra64::{GIO_SLOT0_BASE, RAMROM_BASE, RAMROM_SIZE};
             // Control registers: 0x1F400000–0x1F4FFFFF (16 × 64KB slots)
-            for i in (GIO_SLOT0_BASE >> 16)..((RAMROM_BASE - 1) >> 16) + 1 {
-                self.device_map[i as usize] = u64_ptr;
-            }
+            set(GIO_SLOT0_BASE, RAMROM_BASE, u64_ptr);
             // RAMROM window: 0x1F500000–0x1F5FFFFF (16 × 64KB slots)
-            for i in (RAMROM_BASE >> 16)..((RAMROM_BASE + RAMROM_SIZE - 1) >> 16) + 1 {
-                self.device_map[i as usize] = u64_ptr;
-            }
+            set(RAMROM_BASE, RAMROM_BASE + RAMROM_SIZE, u64_ptr);
         }
         // GIO expansion slot 1 — second Newport when rex3_head1 absent: GIO timeout remains
 
@@ -609,51 +610,40 @@ impl Physical {
         if let Some(td) = self.testdev.as_deref() {
             let td_ptr: *const dyn BusDevice = td;
             use crate::dev::testdev::{TEST_DEV_BASE, TEST_DEV_SIZE};
-            for i in (TEST_DEV_BASE >> 16)..((TEST_DEV_BASE + TEST_DEV_SIZE - 1) >> 16) + 1 {
-                self.device_map[i as usize] = td_ptr;
-            }
+            set(TEST_DEV_BASE, TEST_DEV_BASE + TEST_DEV_SIZE, td_ptr);
         }
 
         // Map MC registers (128KB at 0x1FA00000)
-        for i in (MC_BASE >> 16)..((MC_END - 1) >> 16) + 1 {
-            self.device_map[i as usize] = mc_ptr;
-        }
+        set(MC_BASE, MC_END, mc_ptr);
 
         // Map HPC3 (512KB at 0x1FB80000)
-        for i in (HPC3_BASE >> 16)..((HPC3_END - 1) >> 16) + 1 {
-            self.device_map[i as usize] = hpc3_ptr;
-        }
+        set(HPC3_BASE, HPC3_END, hpc3_ptr);
 
         // Map PROM (1MB at 0x1FC00000)
-        for i in (PROM_BASE >> 16)..((PROM_END - 1) >> 16) + 1 {
-            self.device_map[i as usize] = prom_ptr;
-        }
+        set(PROM_BASE, PROM_END, prom_ptr);
 
         // Alias: points back into Physical itself with `alias_offset()` added.
         // So alias accesses go: AliasBus → Physical::read/write(addr + LOMEM_BASE)
-        // → device_map lookup → whichever bank is mapped at LOMEM_BASE.
+        // → table lookup → whichever bank is mapped at LOMEM_BASE.
         // This way alias automatically tracks whatever MEMCFG maps at LOMEM_BASE.
         self.alias_bus.target = self as *const Physical as *const dyn BusDevice;
         let alias_ptr: *const dyn BusDevice = &self.alias_bus;
-        for i in (ALIAS_BASE >> 16)..(ALIAS_END >> 16) {
-            self.device_map[i as usize] = alias_ptr;
-        }
+        set(ALIAS_BASE, ALIAS_END, alias_ptr);
 
         // VINO GIO alias: 0x1F080000 → 0x00080000
-        // Routes through Physical again with 0xFF000000 added (wrapping subtraction of 0x1F000000)
+        // Routes through Physical again with 0xE1000000 added (wrapping subtraction of 0x1F000000)
         // so the re-dispatched address falls into VINO's primary slot at 0x0008xxxx.
         self.vino_gio_alias.target = self as *const Physical as *const dyn BusDevice;
         let vino_gio_alias_ptr: *const dyn BusDevice = &self.vino_gio_alias;
-        self.device_map[(0x1F080000u32 >> 16) as usize] = vino_gio_alias_ptr;
-
+        set(0x1F080000, 0x1F090000, vino_gio_alias_ptr);
     }
 
-    /// Remap memory banks in device_map.
+    /// Remap memory banks in the decode table.
     ///
     /// `bank_addrs[i]` is `Some((base, addr_mask, limit))` if bank i is valid, or `None`.
     /// - `base`      — physical base address
     /// - `addr_mask` — applied inside Memory for aliasing (SIMM wrapping); equals size_mb*1MB-1
-    /// - `limit`     — number of bytes to map in the device_map; slots beyond limit stay as
+    /// - `limit`     — number of bytes to map in the decode table; slots beyond limit stay as
     ///                 UnmappedRam and return 0, matching the hardware behaviour of reads past
     ///                 the real SIMM boundary
     ///
@@ -740,27 +730,38 @@ impl Physical {
             }
         }
 
-        // Now point the table at the banks, whose masks are set, storing only
-        // the slots whose contents actually change. The DMA worker can be
-        // dispatching through this table right now, and each store is a
-        // non-atomic 16-byte fat pointer; see `plan_bank_slots`.
+        // Now point the table at the banks, whose masks are set. The plan
+        // is one entry per slot; apply it as runs of one target, and leave
+        // a run alone that already answers as planned. The DMA worker can be
+        // dispatching through the table right now: a run that does change
+        // is swapped in whole pages by `SparseDeviceMap`, so it sees the old
+        // page or the new one, never a torn pointer. See `plan_bank_slots`.
         let (plan, outside) = plan_bank_slots(&bank_addrs, &self.banks_outside_windows);
         self.banks_outside_windows = outside;
-        for (idx, target) in plan {
+        let mut i = 0;
+        while i < plan.len() {
+            let (start, target) = plan[i];
+            let mut j = i + 1;
+            while j < plan.len() && plan[j].1 == target && plan[j].0 == plan[j - 1].0 + 1 {
+                j += 1;
+            }
             let ptr = match target {
                 BankSlot::Unmapped => unmapped_ptr,
                 BankSlot::Bank(b) => bank_ptrs[b],
             };
-            let slot = &mut self.device_map[idx as usize];
-            if !std::ptr::addr_eq(*slot, ptr) {
-                *slot = ptr;
+            let count = (j - i) as u64;
+            if !self.devmap.all_are(start as u64, count, ptr) {
+                self.devmap.fill(start as u64, count, ptr).unwrap_or_else(|e| {
+                    panic!("physical: remapping slots {start:#x}+{count:#x}: {e}")
+                });
             }
+            i = j;
         }
 
         // ppmem: the low-512KB alias of bank 0 (MC spec — the bottom 512KB
         // mirrors 0x08000000..0x0807ffff). Mapped as real pages rather than
         // routed through AliasBus, so it is the same physical memory with no
-        // re-dispatch. AliasBus stays installed in device_map as the bus-path
+        // re-dispatch. AliasBus stays installed in the decode table as the bus-path
         // equivalent; both see identical memory.
         if let (true, Some(sp)) = (ppmem_placement_changed, &self.ppmem_space) {
             let bank0_mapped = bank_addrs[0].is_some_and(|(base, _, _)| base == self.alias_offset);
@@ -793,6 +794,46 @@ impl Physical {
         if let Some(sp) = &self.ppmem_space {
             self.ppmem_bitmap = sp.bitmap_ptr();
         }
+    }
+
+    /// The device behind `addr`: one indexed load from the decode table.
+    #[inline(always)]
+    fn dev_at(&self, addr: u32) -> Entry {
+        // SAFETY: `map_base` spans the whole table for the life of `devmap`;
+        // a page nobody filled is faulted in by devmap's handler, so every
+        // load lands on a readable page holding a live device pointer.
+        unsafe { *self.map_base.add((addr >> SLOT_SHIFT) as usize) }
+    }
+
+    /// Name a decode-table entry for the monitor.
+    fn device_name(&self, dev: Entry) -> String {
+        fn e<T: BusDevice + 'static>(t: &T) -> Entry { t }
+        let mut known: Vec<(Entry, String)> = vec![
+            (e(&self.cpu_bus_error), "cpu bus error".into()),
+            (e(&self.gio_bus_error), "gio timeout".into()),
+            (e(&self.unmapped_ram), "unmapped ram (reads 0)".into()),
+            (e(&self.alias_bus), "low-memory alias".into()),
+            (e(&self.vino_gio_alias), "vino gio alias".into()),
+            (e(&self.black_hole), "black hole".into()),
+            (e(&self.vino), "vino".into()),
+            (e(&self.mc), "mc".into()),
+            (e(&self.hpc3), "hpc3".into()),
+            (e(&self.prom), "prom".into()),
+        ];
+        for (i, b) in self.banks.iter().enumerate() {
+            known.push((e(b), format!("bank {i}")));
+        }
+        if let Some(d) = self.rex3.as_deref() { known.push((e(d), "newport (rex3)".into())); }
+        if let Some(d) = self.rex3_head1.as_deref() { known.push((e(d), "newport head 1".into())); }
+        if let Some(d) = self.gr2.as_deref() { known.push((e(d), "gr2".into())); }
+        if let Some(d) = self.mgras.as_deref() { known.push((e(d), "impact (mgras)".into())); }
+        if let Some(d) = self.ultra64.as_deref() { known.push((e(d), "ultra64".into())); }
+        if let Some(d) = self.testdev.as_deref() { known.push((e(d), "test device".into())); }
+        known
+            .into_iter()
+            .find(|(p, _)| entry_eq(*p, dev))
+            .map(|(_, n)| n)
+            .unwrap_or_else(|| format!("{:p}", dev as *const ()))
     }
 
     /// Is `addr` backed by a whole directly-mapped 64MB region?
@@ -874,7 +915,7 @@ impl Device for Physical {
 
     fn register_commands(&self) -> Vec<(String, String)> {
         let cmds = vec![
-            ("phys".to_string(), "Physical Bus commands: mem, dis, trace, error <on|off>, hole <on|off>, bench".to_string()),
+            ("phys".to_string(), "Physical Bus commands: mem, dis, map, trace, error <on|off>, hole <on|off>, bench".to_string()),
             ("mm".to_string(), "Alias for phys mem".to_string()),
             ("md".to_string(), "Alias for phys dis".to_string()),
             ("trace".to_string(), "Enable/disable tracing: trace <on|off>".to_string()),
@@ -922,6 +963,27 @@ impl Device for Physical {
                 let r = BusDevice::read32(self, addr as u32);
                 if r.is_ok() { writeln!(writer, "{}", mips_dis::disassemble(r.data, addr, None)).unwrap(); }
                 else { writeln!(writer, "Could not fetch instruction at {:016x}", addr).unwrap(); }
+            }
+            "map" => {
+                let s = self.devmap.stats();
+                writeln!(writer,
+                    "decode table: {} pages of {} KB ({} MB of guest space each): {} untouched, {} shared, {} private",
+                    s.pages, s.page_bytes >> 10, ((s.page_bytes as u64 / 16) << SLOT_SHIFT) >> 20,
+                    s.unmapped, s.shared, s.private).unwrap();
+                writeln!(writer,
+                    "  {} constant page(s), {} pool page(s) ({} free), {} KB in use, {} fault(s)",
+                    s.const_pages, s.pool_pages, s.pool_free, s.in_use_bytes() >> 10, s.faults).unwrap();
+                for a in &s.first_faults {
+                    writeln!(writer, "  faulted in: {:#012x}", a).unwrap();
+                }
+                for r in self.devmap.runs() {
+                    let name = match r.dev {
+                        Some(d) => self.device_name(d),
+                        None => "(untouched)".to_string(),
+                    };
+                    writeln!(writer, "  {:#012x}-{:#012x} {}",
+                        r.start << SLOT_SHIFT, (r.end << SLOT_SHIFT) - 1, name).unwrap();
+                }
             }
             "error" => {
                 if actual_args.is_empty() {
@@ -998,7 +1060,7 @@ impl Device for Physical {
 impl BusDevice for Physical {
     #[inline(always)]
     fn read8(&self, addr: u32) -> BusRead8 {
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         let r = unsafe { (*device_ptr).read8(addr) };
         #[cfg(not(feature = "lightning"))]
         if self.trace.load(Ordering::Relaxed) {
@@ -1010,7 +1072,7 @@ impl BusDevice for Physical {
 
     #[inline(always)]
     fn write8(&self, addr: u32, val: u8) -> u32 {
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         let ws = unsafe { (*device_ptr).write8(addr, val) };
         #[cfg(not(feature = "lightning"))]
         if self.trace.load(Ordering::Relaxed) { println!("PHYS8 Write {:08x} val={:02x} -> {:08x}", addr, val, ws); }
@@ -1019,7 +1081,7 @@ impl BusDevice for Physical {
 
     #[inline(always)]
     fn read16(&self, addr: u32) -> BusRead16 {
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         let r = unsafe { (*device_ptr).read16(addr) };
         #[cfg(not(feature = "lightning"))]
         if self.trace.load(Ordering::Relaxed) {
@@ -1031,7 +1093,7 @@ impl BusDevice for Physical {
 
     #[inline(always)]
     fn write16(&self, addr: u32, val: u16) -> u32 {
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         let ws = unsafe { (*device_ptr).write16(addr, val) };
         #[cfg(not(feature = "lightning"))]
         if self.trace.load(Ordering::Relaxed) { println!("PHYS16 Write {:08x} val={:04x} -> {:08x}", addr, val, ws); }
@@ -1040,7 +1102,7 @@ impl BusDevice for Physical {
 
     #[inline(always)]
     fn read32(&self, addr: u32) -> BusRead32 {
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         let r = unsafe { (*device_ptr).read32(addr) };
         #[cfg(not(feature = "lightning"))]
         if self.trace.load(Ordering::Relaxed) {
@@ -1052,7 +1114,7 @@ impl BusDevice for Physical {
 
     #[inline(always)]
     fn write32(&self, addr: u32, val: u32) -> u32 {
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         let ws = unsafe { (*device_ptr).write32(addr, val) };
         #[cfg(not(feature = "lightning"))]
         if self.trace.load(Ordering::Relaxed) { println!("PHYS32 Write {:08x} val={:08x} -> {:08x}", addr, val, ws); }
@@ -1061,7 +1123,7 @@ impl BusDevice for Physical {
 
     #[inline(always)]
     fn read64(&self, addr: u32) -> BusRead64 {
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         let r = unsafe { (*device_ptr).read64(addr) };
         #[cfg(not(feature = "lightning"))]
         if self.trace.load(Ordering::Relaxed) {
@@ -1073,7 +1135,7 @@ impl BusDevice for Physical {
 
     #[inline(always)]
     fn write64(&self, addr: u32, val: u64) -> u32 {
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         let ws = unsafe { (*device_ptr).write64(addr, val) };
         #[cfg(not(feature = "lightning"))]
         if self.trace.load(Ordering::Relaxed) { println!("PHYS64 Write {:08x} val={:016x} -> {:08x}", addr, val, ws); }
@@ -1082,7 +1144,7 @@ impl BusDevice for Physical {
 
     #[inline(always)]
     fn write64_masked(&self, addr: u32, val: u64, mask: u64) -> u32 {
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         unsafe { (*device_ptr).write64_masked(addr, val, mask) }
     }
 
@@ -1093,13 +1155,13 @@ impl BusDevice for Physical {
     // any DMA-specific override (e.g. Rex3::dma_read64) entirely.
     #[inline(always)]
     fn dma_read64(&self, addr: u32) -> BusRead64 {
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         unsafe { (*device_ptr).dma_read64(addr) }
     }
 
     #[inline(always)]
     fn dma_write64(&self, addr: u32, val: u64) -> u32 {
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         unsafe { (*device_ptr).dma_write64(addr, val) }
     }
 
@@ -1110,13 +1172,13 @@ impl BusDevice for Physical {
     // (Rex3's single-token push) actually gets a chance to run.
     #[inline(always)]
     fn dma_write64_bulk(&self, addr: u32, vals: &[u64]) -> u32 {
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         unsafe { (*device_ptr).dma_write64_bulk(addr, vals) }
     }
 
     #[inline(always)]
     fn dma_read64_bulk(&self, addr: u32, out: &mut [u64]) -> u32 {
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         unsafe { (*device_ptr).dma_read64_bulk(addr, out) }
     }
 
@@ -1130,7 +1192,7 @@ impl BusDevice for Physical {
         if let Some(p) = self.ppmem_gen_ptr(addr) {
             return p;
         }
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         unsafe { (*device_ptr).gen_ptr(addr) }
     }
 
@@ -1145,7 +1207,7 @@ impl BusDevice for Physical {
         if let Some(p) = self.ppmem_ptr(addr) {
             return Some(p as *const u64);
         }
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         unsafe { (*device_ptr).mem_ptr(addr) }
     }
 
@@ -1161,7 +1223,7 @@ impl BusDevice for Physical {
             }
             return BUS_OK;
         }
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         unsafe { (*device_ptr).read_block(addr, buf) }
     }
 
@@ -1179,7 +1241,7 @@ impl BusDevice for Physical {
             self.ppmem_bump_gen_range(addr, buf.len());
             return BUS_OK;
         }
-        let device_ptr = self.device_map[(addr >> 16) as usize];
+        let device_ptr = self.dev_at(addr);
         unsafe { (*device_ptr).write_block(addr, buf) }
     }
 }
@@ -1405,7 +1467,7 @@ mod bank_plan_tests {
         Some((base, size - 1, size))
     }
 
-    /// `device_map` in miniature: apply a plan the way `remap_banks` does and
+    /// The decode table in miniature: apply a plan the way `remap_banks` does and
     /// count the stores that actually happen.
     fn apply(map: &mut [BankSlot], plan: &[(u32, BankSlot)]) -> usize {
         let mut stores = 0;

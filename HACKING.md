@@ -143,9 +143,16 @@ screenshots), `CpuDevice` (what `Machine` holds for the CPU).
 ### The physical address map
 
 `Physical` (`src/physical.rs`) decodes physical addresses through a table of
-64 KB pages (`device_map`, one entry per `addr >> 16`), so finding the device
-for an access is one indexed load. There is a lot of `unsafe` in there; it is
-deliberate. The hierarchy it models:
+64 KB slots (one `*const dyn BusDevice` per `addr >> 16`), so finding the
+device for an access is one indexed load. The table itself is sparse and
+host-mapped (`SparseDeviceMap`, `src/ppmem/devmap.rs`): it spans a 40-bit
+physical space as a 256 MB reservation, pages full of one pointer are views
+of one shared page, a change swaps a whole page in rather than storing into
+it (so threads dispatching through it never see a torn pointer), and a page
+nobody filled is faulted in as the bus-error device the first time the guest
+touches it. [docs/devmap-design.md](docs/devmap-design.md) has the details.
+There is a lot of `unsafe` in there; it is deliberate. The hierarchy it
+models:
 
 - **SysAD**: the CPU's 64-bit bus, with byte enables.
 - **MC** (Memory Controller, `src/dev/mc.rs`): the crossbar. DRAM, the GIO

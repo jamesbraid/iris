@@ -50,14 +50,17 @@ fn main() {
     cfg.debug.apply_env();
     cfg.jitv2.apply_env();
 
-    // Machine::new() allocates >1MB on the stack (Physical device_map), which overflows
-    // the default stack on Windows (1MB). We spawn a thread with a larger stack to create it.
+    // Machine::new() has several large temporaries on the stack, which
+    // overflows the default stack on Windows (1MB). We spawn a thread with a
+    // larger stack to create it.
     let mut machine = std::thread::Builder::new()
         // Rex3Context embeds the HOSTRW data-port array (HOSTRW_BUF_QWORDS u64s,
-            // 1 MiB), and construction has several context-sized temporaries in
-            // flight before the machine is boxed. This is virtual address space,
-            // lazily committed, so the large reservation has no real cost.
-            .stack_size(64 * 1024 * 1024)
+        // 1 MiB), and construction has several context-sized temporaries in
+        // flight before the machine is boxed. (The physical decode table used
+        // to be another 1 MB here; it is host-mapped now.) This is virtual
+        // address space, lazily committed, so the large reservation has no
+        // real cost.
+        .stack_size(64 * 1024 * 1024)
         .spawn(move || iris::workstation::build(cfg))
         .unwrap()
         .join()

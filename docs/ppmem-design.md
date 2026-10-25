@@ -570,6 +570,15 @@ demonstrated. Windows is **designed but unverified** — no Windows host here.
 Explicitly **not** part of this work, and not phase 2 either. Recorded here so
 the idea and its blockers aren't relearned.
 
+*Update, October 2026:* a fault handler now exists, but for the **decode
+table**, not for devices. `src/ppmem/devmap.rs` keeps `Physical`'s
+address-to-device table as a sparse reservation over a 40-bit space and
+faults untouched table pages in as the bus-error device; see
+[devmap-design.md](devmap-design.md). It settles the portability question
+for this narrow use (one handler per OS, no instruction decoding, since the
+retried access is the table load itself) and leaves everything below as
+open as before.
+
 ### 11.1 The interesting use: map devices, delete the bus abstraction
 
 The obvious uses (dirty-page snapshot tracking, lazy/COW bank materialisation

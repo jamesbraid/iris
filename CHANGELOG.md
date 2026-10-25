@@ -64,6 +64,19 @@ hashes are given where a change is easiest to understand by reading the commit.
   page in six. IRIX on an R5000 O2 panicked with "init died" for the same
   reason; it now boots to the desktop.
 
+### Physical address decoding
+
+- **The decode table is sparse and spans 40 bits.** `Physical` used to embed
+  a 1 MB array of device pointers covering a 32-bit physical space. It is now
+  a host-mapped table over a 40-bit space (`SparseDeviceMap`,
+  `src/ppmem/devmap.rs`, [design](docs/devmap-design.md)): pages of one
+  device share one 64 KB page, mixed pages come from a pool, and a page the
+  guest touches that nobody mapped is faulted in as the bus-error device with
+  a message naming the address. An Indy's table is about ten pages. Changes
+  swap whole pages in, so the DMA worker dispatching through the table during
+  a MEMCFG remap can no longer read a torn pointer. `phys map` in the monitor
+  shows the table. Groundwork for machines with a 40-bit address space.
+
 ### Memory configuration
 
 - **`banks` has eight entries.** Every machine today uses the first four and
