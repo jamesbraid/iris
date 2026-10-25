@@ -125,6 +125,13 @@ hashes are given where a change is easiest to understand by reading the commit.
   `docs/Indy/rex3.md`.
 ### Monitor and CI
 
+- **The emulator's name matches the machine.** The IRIS expansion shown by
+  the console banner, the monitor prompt and the window title picked its
+  third word from a fixed list that included "Indy" whatever the profile.
+  The word now comes from the configured machine: Indy or IP24, Indigo2 with
+  IP22 or IP28, and only IP32 for the O2, alongside the model-neutral IRIX
+  and Iris. (`src/machine.rs`)
+
 - **`machine-start` is idempotent and acknowledges the transition, and
   `machine-status` reports guest state and monitor readiness.** The monitor
   command now prints `idle -> starting -> running` (or `running (no change)`),
