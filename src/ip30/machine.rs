@@ -665,6 +665,7 @@ impl OctaneMachine {
         monitor.register_device(bus.clone());
         for c in &scsi {
             monitor.register_device(c.clone());
+            c.register_locks();
         }
         // `ps2 type` and friends: the keyboard and mouse from the monitor.
         monitor.register_device(ioc3.ps2());

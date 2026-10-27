@@ -18,10 +18,11 @@
 //!   the doorbell write returns at once and the completion and its
 //!   interrupt follow when the target has answered, as the part's would.
 //!   No abort/recovery mailbox commands exist (the ISP1040 does not carry
-//!   them; they answer "invalid"). A soft reset drops the completion of
-//!   the command in flight. A queue initialisation does not: the command
-//!   ran once, and its completion goes to the response ring in place when
-//!   it finishes.
+//!   them; they answer "invalid"). A soft reset cancels the command in
+//!   flight without waiting for its target: no completion is posted, and
+//!   what it had not yet stored in host memory is not stored. A queue
+//!   initialisation does not cancel it: the command ran once, and its
+//!   completion goes to the response ring in place when it finishes.
 //! * A completion with no room in the response ring is held and posted when
 //!   the driver acknowledges a slot; the request ring is not consumed while
 //!   any completion is held.
@@ -37,7 +38,10 @@
 //! are not decoded and are noted once.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+
+use parking_lot::{Condvar, Mutex, MutexGuard};
 
 use crate::irq::IrqLine;
 use crate::pci::{Bar, PciBusDevice, PciConfig, PciDma, PCI_INTA};
@@ -226,6 +230,9 @@ struct Ctl {
     /// Bumped when the request ring is replaced (and by a reset): a command
     /// read from the old ring does not advance the new one's consumer.
     rqst_epoch: u64,
+    /// Bumped when the response ring is replaced (and by a reset): an entry
+    /// written into the old ring is written again into the new one.
+    resp_epoch: u64,
     /// The ring may have entries the thread has not looked at.
     work: bool,
     /// The thread is walking the ring.
@@ -235,10 +242,18 @@ struct Ctl {
     /// Holders that need the thread not to start another command
     /// (saving and loading state).
     hold: u32,
-    /// Resets and queue initialisations waiting for the command in flight;
-    /// that command's completion waits for them, and is dropped.
-    settling: u32,
     shutdown: bool,
+}
+
+/// The request ring as a step of the walk found it, for the part of the
+/// step done with the state unlocked.
+#[derive(Clone, Copy)]
+struct Ring {
+    base: u64,
+    len: u32,
+    cons: u32,
+    epoch: u64,
+    gen: u64,
 }
 
 /// One request entry, read and ready to run against its target.
@@ -256,8 +271,10 @@ struct Job {
 enum Prepared {
     /// The fabric refused the entry; the walk stops on it.
     Refused,
+    /// Consumed with no answer (a marker).
+    Skipped,
     /// Answered without reaching a target.
-    Answered,
+    Answered(Pending),
     Run(Job),
 }
 
@@ -324,6 +341,7 @@ impl State {
     fn reset(&mut self) {
         self.ctl.gen += 1;
         self.ctl.rqst_epoch += 1;
+        self.ctl.resp_epoch += 1;
         self.bus_cfg1 = 0;
         self.bus_ctrl = 0;
         self.bus_status = 0;
@@ -377,8 +395,21 @@ impl std::ops::Deref for Isp1040 {
     fn deref(&self) -> &Core { &self.core }
 }
 
+/// Lock order: `line_order`, then `st`. Nothing else is taken with `st`
+/// held except the leaf locks (`notes`, `dma_misses`, `odd_accesses`): DMA,
+/// the targets and `fence` are reached with it released. `fence` is held
+/// across one guest-memory store at a time, and `targets` across one
+/// target command; neither is held with the other.
 pub struct Core {
     st: Mutex<State>,
+    /// `st.ctl.gen`, readable without `st`: what a store into guest memory
+    /// checks under `fence`.
+    gen: AtomicU64,
+    /// Held across each store the ring thread makes into guest memory. A
+    /// reset moves the generation on and then passes through it, so once
+    /// the reset returns no store of a cancelled command is under way or
+    /// can start; the reset waits for one store, never for a disk.
+    fence: Mutex<()>,
     /// Signals [`Ctl`] changes both ways.
     wake: Condvar,
     /// Serialises driving the interrupt line; see [`Core::sync_irq`].
@@ -422,11 +453,28 @@ impl Isp1040 {
     }
 }
 
+impl Isp1040 {
+    /// Name the adapter's long-lived locks in the lock registry, which
+    /// holds only a weak reference to them.
+    pub fn register_locks(&self) {
+        for (what, probe) in [
+            ("st", (|c: &Core| c.st.is_locked()) as fn(&Core) -> bool),
+            ("fence", |c| c.fence.is_locked()),
+            ("targets", |c| c.targets.is_locked()),
+        ] {
+            let core = Arc::downgrade(&self.core);
+            crate::locks::register_lock(format!("isp1040-{}::{what}", self.index), move || {
+                core.upgrade().is_some_and(|c| probe(&c))
+            });
+        }
+    }
+}
+
 impl Drop for Isp1040 {
     fn drop(&mut self) {
-        self.st.lock().unwrap().ctl.shutdown = true;
+        self.st.lock().ctl.shutdown = true;
         self.wake.notify_all();
-        if let Some(h) = self.worker.lock().unwrap().take() {
+        if let Some(h) = self.worker.lock().take() {
             let _ = h.join();
         }
     }
@@ -434,8 +482,12 @@ impl Drop for Isp1040 {
 
 impl Core {
     fn new_at(index: u8) -> Self {
+        let st = State::new();
+        let gen = st.ctl.gen;
         Self {
-            st: Mutex::new(State::new()),
+            st: Mutex::new(st),
+            gen: AtomicU64::new(gen),
+            fence: Mutex::new(()),
             wake: Condvar::new(),
             line_order: Mutex::new(()),
             targets: Mutex::new(std::array::from_fn(|_| None)),
@@ -459,15 +511,34 @@ impl Core {
     pub fn index(&self) -> u8 { self.index }
 
     /// A machine reset: the chip as at power-on (no firmware, no queues),
-    /// its interrupt dropped. The disks stay attached.
+    /// its interrupt dropped. The disks stay attached. As the guest's soft
+    /// reset, it cancels the command in flight without waiting for its
+    /// target.
     pub fn reset(&self) {
-        // As the guest's soft reset: wait out the command in flight, whose
-        // completion then finds a new generation and is dropped.
-        let st = self.st.lock().unwrap();
-        let mut st = self.settle(st);
-        st.reset();
-        drop(st);
+        {
+            let mut st = self.st.lock();
+            st.reset();
+            self.publish_gen(&st);
+        }
+        self.retire_stores();
         self.sync_irq();
+    }
+
+    fn publish_gen(&self, st: &State) {
+        self.gen.store(st.ctl.gen, Ordering::Release);
+    }
+
+    /// Wait out a store into guest memory that a cancelled command began
+    /// before the generation moved on; see `fence`.
+    fn retire_stores(&self) {
+        drop(self.fence.lock());
+    }
+
+    /// Run `store` for work of generation `gen`, unless a reset has
+    /// cancelled that work.
+    fn fenced<R>(&self, gen: u64, store: impl FnOnce() -> R) -> Option<R> {
+        let _fence = self.fence.lock();
+        (self.gen.load(Ordering::Acquire) == gen).then(store)
     }
 
     /// Wire the adapter's interrupt pin to `line` (a level).
@@ -478,7 +549,7 @@ impl Core {
 
     /// True while the adapter asserts its interrupt line.
     pub fn interrupting(&self) -> bool {
-        self.st.lock().unwrap().irq_level()
+        self.st.lock().irq_level()
     }
 
     /// Drive the line to the level the state gives. The level is read
@@ -486,8 +557,8 @@ impl Core {
     /// thread drives last has seen the latest state. `st` is never held
     /// when this is called.
     fn sync_irq(&self) {
-        let _order = self.line_order.lock().unwrap();
-        let level = self.st.lock().unwrap().irq_level();
+        let _order = self.line_order.lock();
+        let level = self.st.lock().irq_level();
         if let Some(l) = self.irq.get() {
             l.set(level);
         }
@@ -496,40 +567,32 @@ impl Core {
     /// Block until the ring thread has run everything it was given and is
     /// waiting for more (or is held on a full response ring).
     pub fn wait_idle(&self) {
-        let mut st = self.st.lock().unwrap();
+        let mut st = self.st.lock();
         while (st.ctl.work && st.ctl.hold == 0) || st.ctl.walking {
-            st = self.wake.wait(st).unwrap();
+            self.wake.wait(&mut st);
         }
     }
 
-    /// Wait out the command in flight before a reset or a new queue, keeping
-    /// the lock. The command's completion then waits for the caller's change
-    /// and sees what the caller changed.
-    fn settle<'a>(&self, mut st: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
-        st.ctl.settling += 1;
-        while st.ctl.busy {
-            st = self.wake.wait(st).unwrap();
-        }
-        st.ctl.settling -= 1;
-        self.wake.notify_all();
-        st
-    }
-
-    /// A reset or a save is waiting for the command in flight (tests).
+    /// A save or a load is waiting for the ring thread (tests).
     #[cfg(test)]
     fn waiting_on_command(&self) -> bool {
-        let st = self.st.lock().unwrap();
-        st.ctl.settling != 0 || st.ctl.hold != 0
+        self.st.lock().ctl.hold != 0
     }
 
-    /// Run `f` on the state with no command in flight and none allowed to
-    /// start: the quiesce point for saving and loading.
+    /// A command is running against its target (tests).
+    #[cfg(test)]
+    fn command_running(&self) -> bool {
+        self.st.lock().ctl.busy
+    }
+
+    /// Run `f` on the state with the ring thread stopped between entries
+    /// and none allowed to start: the quiesce point for saving and loading.
+    /// A command in flight posts its completion first.
     fn quiesced<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
-        let mut st = self.st.lock().unwrap();
+        let mut st = self.st.lock();
         st.ctl.hold += 1;
-        // Not `settle`: a command in flight posts its completion first.
-        while st.ctl.busy {
-            st = self.wake.wait(st).unwrap();
+        while st.ctl.walking {
+            self.wake.wait(&mut st);
         }
         let r = f(&mut st);
         st.ctl.hold -= 1;
@@ -546,18 +609,18 @@ impl Core {
 
     /// Commands run, for the whole session.
     pub fn total_commands(&self) -> u64 {
-        self.st.lock().unwrap().total_cmds
+        self.st.lock().total_cmds
     }
 
     /// A running commentary on the odd things a driver did (accesses of a
     /// width the part does not decode, DMA that is not memory, commands not
     /// modelled).
     pub fn notes(&self) -> Vec<String> {
-        self.notes.lock().unwrap().clone()
+        self.notes.lock().clone()
     }
 
     fn note(&self, what: String) {
-        let mut n = self.notes.lock().unwrap();
+        let mut n = self.notes.lock();
         if n.len() < 256 {
             n.push(what);
         }
@@ -598,7 +661,7 @@ impl Core {
     ) -> std::io::Result<u64> {
         let d = ScsiDevice::open(path, cdrom, discs, overlay, overlay_path, if cdrom { ISP_CDROM } else { ISP_DISK })?;
         let blocks = d.size() / BLOCK_SIZE as u64;
-        let mut targets = self.targets.lock().unwrap();
+        let mut targets = self.targets.lock();
         let slot = targets.get_mut(target as usize).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("SCSI id {target} out of range"))
         })?;
@@ -615,12 +678,12 @@ impl Core {
 
     /// The ids that have something on them.
     pub fn attached(&self) -> Vec<u8> {
-        let t = self.targets.lock().unwrap();
+        let t = self.targets.lock();
         (0..t.len() as u8).filter(|&i| t[i as usize].is_some()).collect()
     }
 
     fn has_target(&self, id: u8) -> bool {
-        self.targets.lock().unwrap().get(id as usize).is_some_and(|t| t.is_some())
+        self.targets.lock().get(id as usize).is_some_and(|t| t.is_some())
     }
 
     // ---- DMA ---------------------------------------------------------
@@ -631,7 +694,7 @@ impl Core {
 
     fn dma_miss(&self, addr: u64, write: bool) {
         let first = {
-            let mut seen = self.dma_misses.lock().unwrap();
+            let mut seen = self.dma_misses.lock();
             seen.len() < 64 && seen.insert(addr & !0xfff)
         };
         if first {
@@ -701,49 +764,46 @@ impl Core {
         ((mb[2] as u64) << 16) | mb[3] as u64
     }
 
-    /// The whole transfer is read before a word of it is kept, so a refused
-    /// DMA leaves the array as it was. Words arrive little-endian. This part
-    /// has no edge to its array: a transfer past the end folds to the start.
-    fn ram_load(&self, st: &mut State) -> u16 {
+    /// A RISC RAM load or dump of up to 128 KiB, with the state unlocked
+    /// for the DMA. The whole transfer is read before a word of it is kept,
+    /// so a refused DMA leaves the array as it was. Words travel
+    /// little-endian. This part has no edge to its array: a transfer past
+    /// the end folds to the start.
+    fn ram_transfer(&self, st: &mut MutexGuard<'_, State>, load: bool) -> u16 {
         let base = st.mailbox[1];
         let count = st.mailbox[4] as usize;
         let host = Self::mbox_host_addr(&st.mailbox);
         if count == 0 {
             return mbox::COMPLETE;
         }
-        let mut bytes = vec![0u8; count * 2];
-        if !self.dma_read(host, &mut bytes) {
-            return mbox::HOST_INTERFACE_ERROR;
-        }
-        for i in 0..count {
-            st.risc_ram[base.wrapping_add(i as u16) as usize] = le16(&bytes, i * 2);
+        if load {
+            let mut bytes = vec![0u8; count * 2];
+            if !MutexGuard::unlocked(st, || self.dma_read(host, &mut bytes)) {
+                return mbox::HOST_INTERFACE_ERROR;
+            }
+            for i in 0..count {
+                st.risc_ram[base.wrapping_add(i as u16) as usize] = le16(&bytes, i * 2);
+            }
+        } else {
+            let bytes: Vec<u8> =
+                (0..count).flat_map(|i| st.risc_ram[base.wrapping_add(i as u16) as usize].to_le_bytes()).collect();
+            if !MutexGuard::unlocked(st, || self.dma_write(host, &bytes)) {
+                return mbox::HOST_INTERFACE_ERROR;
+            }
         }
         mbox::COMPLETE
-    }
-
-    fn ram_dump(&self, st: &State) -> u16 {
-        let base = st.mailbox[1];
-        let count = st.mailbox[4] as usize;
-        let host = Self::mbox_host_addr(&st.mailbox);
-        if count == 0 {
-            return mbox::COMPLETE;
-        }
-        let mut bytes = Vec::with_capacity(count * 2);
-        for i in 0..count {
-            bytes.extend_from_slice(&st.risc_ram[base.wrapping_add(i as u16) as usize].to_le_bytes());
-        }
-        if self.dma_write(host, &bytes) { mbox::COMPLETE } else { mbox::HOST_INTERFACE_ERROR }
     }
 
     // ---- mailbox -----------------------------------------------------
 
     /// Synchronous: the protocol has no way to leave a command pending.
-    fn mailbox_command(&self, st: &mut State) {
+    fn mailbox_command(&self, st: &mut MutexGuard<'_, State>) {
         let cmd = st.mailbox[0];
         match cmd {
             mbox::NOP => st.mailbox[0] = mbox::COMPLETE,
             mbox::WRITE_RAM_WORD => {
-                st.risc_ram[st.mailbox[1] as usize] = st.mailbox[2];
+                let (at, word) = (st.mailbox[1], st.mailbox[2]);
+                st.risc_ram[at as usize] = word;
                 st.mailbox[0] = mbox::COMPLETE;
             }
             // Mailbox 3 is an output too; left alone it hands back stale data.
@@ -752,8 +812,8 @@ impl Core {
                 st.mailbox[3] = 0;
                 st.mailbox[0] = mbox::COMPLETE;
             }
-            mbox::LOAD_RAM => st.mailbox[0] = self.ram_load(st),
-            mbox::DUMP_RAM => st.mailbox[0] = self.ram_dump(st),
+            mbox::LOAD_RAM => st.mailbox[0] = self.ram_transfer(st, true),
+            mbox::DUMP_RAM => st.mailbox[0] = self.ram_transfer(st, false),
             // Mailboxes 1-7 are expected back unchanged; they already are.
             mbox::REGISTER_TEST => st.mailbox[0] = mbox::COMPLETE,
             // The word at base+3 is the image's length; a real image sums to
@@ -829,6 +889,7 @@ impl Core {
                 } else {
                     // A command in flight posts its completion here, as
                     // the QEMU model's does.
+                    st.ctl.resp_epoch += 1;
                     st.resp_base = addr;
                     st.resp_len = st.mailbox[1];
                     st.resp_prod = 0;
@@ -851,7 +912,7 @@ impl Core {
         st.bus_status |= STATUS_INT_REQ | STATUS_RISC_INT_REQ;
     }
 
-    fn host_command(&self, st: &mut State, val: u16) {
+    fn host_command(&self, st: &mut MutexGuard<'_, State>, val: u16) {
         match val >> HOST_CMD_SHIFT {
             0x0 => {}
             // A RISC reset replaces the whole flag set.
@@ -881,11 +942,7 @@ impl Core {
 
     // ---- completions -------------------------------------------------
 
-    /// An I/O completion never takes the semaphore lock: the driver reads
-    /// the semaphore first and falls through to bus status only when it is
-    /// clear.
-    fn post_one(&self, st: &mut State, p: &Pending) {
-        let addr = Self::entry_addr(st.resp_base, u32::from(st.resp_prod));
+    fn status_entry(p: &Pending) -> [u8; ENTRY_SIZE] {
         let mut entry = [0u8; ENTRY_SIZE];
         let sense_len = p.sense.len().min(SENSE_MAX);
         entry[0] = ENTRY_TYPE_STATUS;
@@ -898,38 +955,50 @@ impl Core {
         entry[18..20].copy_from_slice(&(sense_len as u16).to_le_bytes());
         entry[20..24].copy_from_slice(&p.resid.to_le_bytes());
         entry[32..32 + sense_len].copy_from_slice(&p.sense[..sense_len]);
-        // A completion the fabric refuses to store is dropped: advancing the
-        // producer or raising the interrupt would point the driver at a slot
-        // still holding a previous entry's bytes.
-        if !addr.is_some_and(|a| self.dma_write(a, &entry)) {
-            self.note(format!("status entry write to {addr:#x?} refused; completion dropped"));
-            return;
-        }
-        st.resp_prod = ((u32::from(st.resp_prod) + 1) % u32::from(st.resp_len)) as u16;
-        st.bus_status |= STATUS_INT_REQ | STATUS_RISC_INT_REQ;
+        entry
     }
 
-    /// A model with no bus latency can outrun the driver; the surplus is
-    /// held.
-    fn post_status(&self, st: &mut State, p: Pending) {
-        if st.resp_len == 0 {
-            self.note("status posted before the response queue was initialised".into());
-            return;
-        }
-        if !st.resp_has_room() {
-            self.note(format!("response queue full, holding handle {:#010x} until acknowledged", p.handle));
-            st.pending.push_back(p);
-            return;
-        }
-        self.post_one(st, &p);
-    }
-
-    /// Only the driver's acknowledgement can free room, so only it calls
-    /// this.
-    fn drain_pending(&self, st: &mut State) {
-        while st.resp_has_room() {
-            let Some(p) = st.pending.pop_front() else { break };
-            self.post_one(st, &p);
+    /// Post a completion to the response ring, or hold it for room: a
+    /// model with no bus latency can outrun the driver. Only the ring
+    /// thread posts. The entry is stored with the state unlocked; if the
+    /// driver replaced the response ring meanwhile the entry goes into the
+    /// new one, and a reset drops it.
+    ///
+    /// An I/O completion never takes the semaphore lock: the driver reads
+    /// the semaphore first and falls through to bus status only when it is
+    /// clear.
+    fn post<'a>(&'a self, mut st: MutexGuard<'a, State>, p: Pending) -> MutexGuard<'a, State> {
+        let entry = Self::status_entry(&p);
+        loop {
+            if st.resp_len == 0 {
+                self.note("status posted before the response queue was initialised".into());
+                return st;
+            }
+            if !st.resp_has_room() {
+                self.note(format!("response queue full, holding handle {:#010x} until acknowledged", p.handle));
+                st.pending.push_back(p);
+                return st;
+            }
+            let (gen, epoch) = (st.ctl.gen, st.ctl.resp_epoch);
+            let addr = Self::entry_addr(st.resp_base, u32::from(st.resp_prod));
+            let stored =
+                MutexGuard::unlocked(&mut st, || self.fenced(gen, || addr.is_some_and(|a| self.dma_write(a, &entry))));
+            if st.ctl.gen != gen {
+                return st;
+            }
+            if st.ctl.resp_epoch != epoch {
+                continue;
+            }
+            // A completion the fabric refuses to store is dropped: advancing
+            // the producer or raising the interrupt would point the driver
+            // at a slot still holding a previous entry's bytes.
+            if stored != Some(true) {
+                self.note(format!("status entry write to {addr:#x?} refused; completion dropped"));
+                return st;
+            }
+            st.resp_prod = ((u32::from(st.resp_prod) + 1) % u32::from(st.resp_len)) as u16;
+            st.bus_status |= STATUS_INT_REQ | STATUS_RISC_INT_REQ;
+            return st;
         }
     }
 
@@ -984,7 +1053,7 @@ impl Core {
         }
     }
 
-    fn read_segments(&self, st: &State, entry_addr: u64, entry_count: u8, seg_count: u16, max: u64, a64: bool) -> (Vec<(u64, u32)>, u64) {
+    fn read_segments(&self, ring: &Ring, entry_addr: u64, entry_count: u8, seg_count: u16, max: u64, a64: bool) -> (Vec<(u64, u32)>, u64) {
         let (inline_off, inline_n, seg_size, cont_off, cont_n) = if a64 {
             (A64_OFF_SEGS, A64_SEGS_INLINE, A64_SEG_SIZE, A64_CONT_OFF_SEGS, A64_CONT_SEGS)
         } else {
@@ -1007,11 +1076,11 @@ impl Core {
             Self::add_segment(&mut segs, &mut described, max, a, l);
             collected += 1;
         }
-        let mut cont_index = u32::from(st.rqst_cons);
+        let mut cont_index = ring.cons;
         let mut conts_left = entry_count as i32 - 1;
         while collected < seg_count && conts_left > 0 {
-            cont_index = (cont_index + 1) % u32::from(st.rqst_len);
-            let cont_addr = Self::entry_addr(st.rqst_base, cont_index);
+            cont_index = (cont_index + 1) % ring.len;
+            let cont_addr = Self::entry_addr(ring.base, cont_index);
             for i in 0..cont_n {
                 if collected >= seg_count { break; }
                 let (a, l) = seg_at(cont_addr.and_then(|c| Self::at(c, cont_off + i as u64 * seg_size)));
@@ -1023,25 +1092,29 @@ impl Core {
         (segs, described)
     }
 
-    /// Run a CDB against the target; `data` is what a write sends it.
-    fn scsi(&self, target: u8, cdb: &[u8], data: Option<Vec<u8>>) -> (Vec<u8>, u8) {
-        let mut targets = self.targets.lock().unwrap();
+    /// Run a CDB against the target; `data` is what a write sends it. None
+    /// when a reset cancelled the command while it waited for the target.
+    fn scsi(&self, gen: u64, target: u8, cdb: &[u8], data: Option<Vec<u8>>) -> Option<(Vec<u8>, u8)> {
+        let mut targets = self.targets.lock();
+        if self.gen.load(Ordering::Acquire) != gen {
+            return None;
+        }
         let Some(dev) = targets.get_mut(target as usize).and_then(|t| t.as_mut()) else {
-            return (Vec::new(), CHECK_CONDITION);
+            return Some((Vec::new(), CHECK_CONDITION));
         };
         let req = ScsiRequest { cdb: cdb.to_vec(), data_len: ScsiDataLength::Unlimited, data_in: data };
-        match dev.request(&req) {
+        Some(match dev.request(&req) {
             Ok(r) => (r.data, r.status),
             Err(e) => {
                 eprintln!("isp1040: target {target}: {e}");
                 (Vec::new(), CHECK_CONDITION)
             }
-        }
+        })
     }
 
     /// Read a request entry. Refused when the fabric refused the CDB read:
     /// the walk stops on the entry and nothing is posted.
-    fn prepare_request(&self, st: &mut State, addr: u64, entry_count: u8, a64: bool) -> Prepared {
+    fn prepare_request(&self, ring: &Ring, addr: u64, entry_count: u8, a64: bool) -> Prepared {
         let handle = self.ld32(Self::at(addr, REQ_OFF_HANDLE));
         let device = self.ld16(Self::at(addr, REQ_OFF_DEVICE));
         let cdb_len = self.ld16(Self::at(addr, REQ_OFF_CDBLEN));
@@ -1057,14 +1130,12 @@ impl Core {
 
         // A bus this part does not have.
         if channel >= 1 {
-            self.post_status(st, Self::incomplete(handle, 0, 0));
-            return Prepared::Answered;
+            return Prepared::Answered(Self::incomplete(handle, 0, 0));
         }
         // GOT_BUS alone is Linux's bad-target; the timeout bit beside it is
         // what lets the empty slot be treated as benign.
         if target > MAX_TARGET || lun > MAX_LUN || !self.has_target(target) {
-            self.post_status(st, Self::incomplete(handle, STATE_GOT_BUS, STATUS_FLAG_TIMEOUT));
-            return Prepared::Answered;
+            return Prepared::Answered(Self::incomplete(handle, STATE_GOT_BUS, STATUS_FLAG_TIMEOUT));
         }
 
         // The target model reads the unit number from the CDB's second byte.
@@ -1073,15 +1144,13 @@ impl Core {
         let block = self
             .targets
             .lock()
-            .unwrap()
             .get(target as usize)
             .and_then(|t| t.as_ref())
             .map(|d| d.block_sizes().1 as usize)
             .filter(|&b| b != 0)
             .unwrap_or(BLOCK_SIZE);
         let (xfer, to_dev) = Self::cdb_transfer(cdb, block);
-        let (segs, described) = self.read_segments(st, addr, entry_count, seg_count, xfer as u64, a64);
-        st.total_cmds += 1;
+        let (segs, described) = self.read_segments(ring, addr, entry_count, seg_count, xfer as u64, a64);
         Prepared::Run(Job { handle, target, cdb: cdb.to_vec(), xfer, to_dev, segs, described })
     }
 
@@ -1092,7 +1161,11 @@ impl Core {
     /// the target and no completion is built. The QEMU model leaves such a
     /// request outstanding, never completed, until the driver gives up on
     /// it; with no completion posted the driver sees the same here.
-    fn run_job(&self, job: Job) -> Option<Pending> {
+    ///
+    /// None too when a reset cancelled the command (`gen` is the generation
+    /// it was read under): what it had not yet stored in host memory is not
+    /// stored, and no completion is built.
+    fn run_job(&self, job: Job, gen: u64) -> Option<Pending> {
         let Job { handle, target, cdb, xfer, to_dev, segs, described } = job;
         let (status, moved);
         if to_dev {
@@ -1106,9 +1179,9 @@ impl Core {
                 buf.extend_from_slice(&chunk);
             }
             moved = buf.len() as u64;
-            status = self.scsi(target, &cdb, Some(buf)).1;
+            status = self.scsi(gen, target, &cdb, Some(buf))?.1;
         } else {
-            let (data, s) = self.scsi(target, &cdb, None);
+            let (data, s) = self.scsi(gen, target, &cdb, None)?;
             status = s;
             // Offer the target's bytes to the descriptors in order.
             let take = (data.len() as u64).min(described).min(xfer as u64) as usize;
@@ -1116,7 +1189,7 @@ impl Core {
             for &(a, l) in &segs {
                 if off >= take { break; }
                 let n = (l as usize).min(take - off);
-                if !self.dma_write(a, &data[off..off + n]) {
+                if !self.fenced(gen, || self.dma_write(a, &data[off..off + n]))? {
                     self.note(format!("payload DMA for handle {handle:#x} refused by the fabric"));
                     break;
                 }
@@ -1128,7 +1201,7 @@ impl Core {
         // Auto-sense runs only after a CHECK CONDITION.
         let mut sense = Vec::new();
         if status == CHECK_CONDITION {
-            sense = self.scsi(target, &[scsi_cmd::REQUEST_SENSE, 0, 0, 0, SENSE_MAX as u8, 0], None).0;
+            sense = self.scsi(gen, target, &[scsi_cmd::REQUEST_SENSE, 0, 0, 0, SENSE_MAX as u8, 0], None)?.0;
             sense.truncate(SENSE_MAX);
         }
         let mut scsi_status = status as u16;
@@ -1147,10 +1220,10 @@ impl Core {
 
     /// The ring thread: wait to be kicked, then walk the request ring.
     fn run_ring(&self) {
-        let mut st = self.st.lock().unwrap();
+        let mut st = self.st.lock();
         loop {
             while !st.ctl.shutdown && !(st.ctl.work && st.ctl.hold == 0) {
-                st = self.wake.wait(st).unwrap();
+                self.wake.wait(&mut st);
             }
             if st.ctl.shutdown {
                 return;
@@ -1163,15 +1236,54 @@ impl Core {
         }
     }
 
+    /// Read the entry at the ring's consumer and what it asks for, with the
+    /// state unlocked. Returns how many entries it spans with it.
+    fn read_entry(&self, ring: &Ring, budget: u32) -> (u8, Prepared) {
+        let Some(addr) = Self::entry_addr(ring.base, ring.cons) else {
+            // Past the top of the bus: refused, and the walk stops.
+            self.dma_miss(u64::MAX, false);
+            return (1, Prepared::Refused);
+        };
+        let entry_type = self.ld8(Some(addr));
+        let entry_count = self.ld8(Self::at(addr, 1)).max(1).min(budget.min(255) as u8);
+        let prepared = match entry_type {
+            ENTRY_TYPE_REQUEST | ENTRY_TYPE_COMMAND_A64 => {
+                self.prepare_request(ring, addr, entry_count, entry_type == ENTRY_TYPE_COMMAND_A64)
+            }
+            // Continuations are stepped past here; reading segments visits
+            // them.
+            ENTRY_TYPE_MARKER => Prepared::Skipped,
+            // Answered incomplete rather than consumed silently.
+            t => {
+                self.note(format!("unexpected request entry type {t:#04x} at index {}", ring.cons));
+                Prepared::Answered(Self::incomplete(self.ld32(Self::at(addr, REQ_OFF_HANDLE)), 0, 0))
+            }
+        };
+        (entry_count, prepared)
+    }
+
     /// Walk the request ring from the adapter's consumer position to the
-    /// driver's producer, one entry at a time. Each command runs with the
-    /// state unlocked, so the CPU's register accesses never wait on a disk.
+    /// driver's producer, one entry at a time. Reading entries, running
+    /// commands and storing completions all happen with the state
+    /// unlocked, so the CPU's register accesses never wait on a disk or a
+    /// DMA.
     fn consume_requests<'a>(&'a self, mut st: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
         loop {
             if st.ctl.shutdown || st.ctl.hold > 0 {
                 // Resume once the holder lets go.
                 st.ctl.work = true;
                 return st;
+            }
+            // Completions held for room go first, in order, as the driver
+            // frees it; while any is held the request ring waits.
+            if !st.pending.is_empty() {
+                if !st.resp_has_room() {
+                    return st;
+                }
+                let p = st.pending.pop_front().unwrap();
+                st = self.post(st, p);
+                MutexGuard::unlocked(&mut st, || self.sync_irq());
+                continue;
             }
             if st.rqst_len == 0 {
                 return st;
@@ -1188,77 +1300,50 @@ impl Core {
             if budget == 0 {
                 return st;
             }
-            // A held completion stops the ring until the driver frees room.
-            if !st.pending.is_empty() {
-                return st;
+            let ring = Ring { base: st.rqst_base, len, cons, epoch: st.ctl.rqst_epoch, gen: st.ctl.gen };
+            let (count, prepared) = MutexGuard::unlocked(&mut st, || self.read_entry(&ring, budget));
+            // A reset took the ring away while the entry was read.
+            if st.ctl.gen != ring.gen {
+                continue;
             }
-            let Some(addr) = Self::entry_addr(st.rqst_base, cons) else {
-                // Past the top of the bus: refused, and the walk stops.
-                self.dma_miss(u64::MAX, false);
-                return st;
-            };
-            let entry_type = self.ld8(Some(addr));
-            let mut entry_count = self.ld8(Self::at(addr, 1));
-            if entry_count == 0 {
-                entry_count = 1;
-            }
-            entry_count = entry_count.min(budget.min(255) as u8);
-            match entry_type {
-                ENTRY_TYPE_REQUEST | ENTRY_TYPE_COMMAND_A64 => {
-                    let a64 = entry_type == ENTRY_TYPE_COMMAND_A64;
-                    match self.prepare_request(&mut st, addr, entry_count, a64) {
-                        Prepared::Refused => return st,
-                        Prepared::Answered => {}
-                        Prepared::Run(job) => {
-                            let (gen, rqst_epoch) = (st.ctl.gen, st.ctl.rqst_epoch);
-                            st.ctl.busy = true;
-                            drop(st);
-                            let done = self.run_job(job);
-                            st = self.st.lock().unwrap();
-                            st.ctl.busy = false;
-                            self.wake.notify_all();
-                            while st.ctl.settling != 0 {
-                                st = self.wake.wait(st).unwrap();
-                            }
-                            // A reset cancelled the command.
-                            if st.ctl.gen != gen {
-                                continue;
-                            }
-                            if let Some(done) = done {
-                                self.post_status(&mut st, done);
-                            }
-                            // A new request ring starts at its own index 0;
-                            // the command it replaced still ran once.
-                            if st.ctl.rqst_epoch != rqst_epoch {
-                                drop(st);
-                                self.sync_irq();
-                                st = self.st.lock().unwrap();
-                                continue;
-                            }
-                        }
+            let done = match prepared {
+                Prepared::Refused => {
+                    if st.ctl.rqst_epoch != ring.epoch {
+                        continue;
                     }
+                    return st;
                 }
-                // Continuations are stepped past here; reading segments
-                // visits them.
-                ENTRY_TYPE_MARKER => {}
-                // Answered incomplete rather than consumed silently.
-                t => {
-                    self.note(format!("unexpected request entry type {t:#04x} at index {}", st.rqst_cons));
-                    let handle = self.ld32(Self::at(addr, REQ_OFF_HANDLE));
-                    self.post_status(&mut st, Self::incomplete(handle, 0, 0));
+                Prepared::Skipped => None,
+                Prepared::Answered(p) => Some(p),
+                Prepared::Run(job) => {
+                    st.total_cmds += 1;
+                    st.ctl.busy = true;
+                    let done = MutexGuard::unlocked(&mut st, || self.run_job(job, ring.gen));
+                    st.ctl.busy = false;
+                    self.wake.notify_all();
+                    // A reset cancelled the command.
+                    if st.ctl.gen != ring.gen {
+                        continue;
+                    }
+                    done
                 }
+            };
+            // A new request ring starts at its own index 0; the command read
+            // from the ring it replaced still ran once.
+            if st.ctl.rqst_epoch == ring.epoch {
+                st.rqst_cons = ((cons + u32::from(count)) % len) as u16;
             }
-            st.rqst_cons = ((cons + u32::from(entry_count)) % len) as u16;
-            drop(st);
-            self.sync_irq();
-            st = self.st.lock().unwrap();
+            if let Some(p) = done {
+                st = self.post(st, p);
+            }
+            MutexGuard::unlocked(&mut st, || self.sync_irq());
         }
     }
 
     // ---- registers ---------------------------------------------------
 
     fn reg_read(&self, off: u32) -> u16 {
-        let mut st = self.st.lock().unwrap();
+        let mut st = self.st.lock();
         // The adapter's own producer count, never the driver's last write.
         if off == reg::RESPONSE_QUEUE {
             return if st.resp_len == 0 { st.mailbox[MBOX_RSP] } else { st.resp_prod };
@@ -1296,7 +1381,7 @@ impl Core {
     }
 
     fn reg_write(&self, off: u32, val: u16) {
-        let mut st = self.st.lock().unwrap();
+        let mut st = self.st.lock();
         if off == reg::RESPONSE_QUEUE {
             // The consumer acknowledgement: recorded, never over the
             // adapter's own producer count.
@@ -1304,7 +1389,7 @@ impl Core {
                 st.mailbox[MBOX_RSP] = val;
             } else {
                 st.resp_cons = val % st.resp_len;
-                self.drain_pending(&mut st);
+                // The ring thread posts what was held for this room.
                 self.kick(&mut st);
             }
             return;
@@ -1330,12 +1415,13 @@ impl Core {
             }
             // Applied after the enables are stored, so the reset wins.
             reg::BUS_CTRL => {
-                if val & CTRL_SOFT_RESET != 0 {
-                    st = self.settle(st);
-                }
                 st.bus_ctrl = val & CTRL_WRITE_MASK;
+                // The command in flight is cancelled, not waited for.
                 if val & CTRL_SOFT_RESET != 0 {
                     st.reset();
+                    self.publish_gen(&st);
+                    drop(st);
+                    self.retire_stores();
                 }
             }
             reg::SEMAPHORE => st.semaphore = val & SEMAPHORE_MASK,
@@ -1344,18 +1430,7 @@ impl Core {
             reg::DMA_DATA_CFG => st.dma_data_cfg = val & DMA_CFG_WRITE_MASK,
             // Nothing to quiesce: a command's transfers are its own.
             reg::DMA_CMD_CTRL | reg::DMA_DATA_CTRL => {}
-            reg::HOST_CMD => {
-                // A new queue must not receive the completion of a command
-                // read from the old one.
-                let init = matches!(
-                    st.mailbox[0],
-                    mbox::INIT_REQ_QUEUE | mbox::INIT_REQ_QUEUE_A64 | mbox::INIT_RSP_QUEUE | mbox::INIT_RSP_QUEUE_A64
-                );
-                if val >> HOST_CMD_SHIFT == 0x5 && init {
-                    st = self.settle(st);
-                }
-                self.host_command(&mut st, val)
-            }
+            reg::HOST_CMD => self.host_command(&mut st, val),
             reg::ID_LOW | reg::ID_HIGH | reg::BUS_CFG0 | reg::BUS_STATUS => {
                 drop(st);
                 self.note(format!("write {val:#06x} to read-only register {off:#04x}"));
@@ -1387,7 +1462,7 @@ impl Core {
 
     fn odd_access(&self, what: &str, off: u32, width: usize) {
         let first = {
-            let mut n = self.odd_accesses.lock().unwrap();
+            let mut n = self.odd_accesses.lock();
             *n += 1;
             *n <= 16
         };
@@ -1448,7 +1523,7 @@ impl crate::traits::Device for Isp1040 {
 
 impl crate::scsi_monitor::ScsiTargets for Isp1040 {
     fn with_targets<R>(&self, f: impl FnOnce(&mut [Option<ScsiDevice>]) -> R) -> R {
-        let mut targets = self.targets.lock().unwrap();
+        let mut targets = self.targets.lock();
         f(&mut targets[..])
     }
 }
@@ -1482,7 +1557,10 @@ impl crate::traits::Saveable for Isp1040 {
     }
 
     fn load_state(&self, v: &toml::Value) -> Result<(), String> {
-        self.quiesced(|st| Self::load_locked(st, v));
+        self.quiesced(|st| {
+            Self::load_locked(st, v);
+            self.publish_gen(st);
+        });
         self.sync_irq();
         Ok(())
     }
@@ -1536,6 +1614,7 @@ impl Isp1040 {
             st.ctl = ctl;
             st.ctl.gen += 1;
             st.ctl.rqst_epoch += 1;
+            st.ctl.resp_epoch += 1;
             st.ctl.work = true;
             let u16f = |k: &str| get_field(v, k).and_then(toml_u16).unwrap_or(0);
             let u32f = |k: &str| get_field(v, k).and_then(toml_u32).unwrap_or(0);
