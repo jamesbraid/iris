@@ -326,6 +326,10 @@ pub enum NetMode {
     /// No Ethernet: the adapter is not plugged into anything. O2 only for now
     /// (`MachineConfig::validate`); the Indy and Indigo2 always have a network.
     Off,
+    /// A private segment carried over a stream socket in QEMU's `-netdev
+    /// stream` framing, to a peer that serves it (`[network] stream`). iris
+    /// provides no gateway services on it. Octane only for now.
+    Stream,
 }
 
 impl Default for NetMode {
@@ -357,6 +361,8 @@ pub struct NetworkConfig {
     /// Directory served read-only by the gateway's built-in rsh server (TCP
     /// 514). None (the default) disables it.
     pub rsh_dir: Option<std::path::PathBuf>,
+    /// The peer for `NetMode::Stream`, as `tcp:IP:PORT` or `unix:PATH`.
+    pub stream: Option<String>,
 }
 
 impl Default for NetworkConfig {
@@ -370,6 +376,7 @@ impl Default for NetworkConfig {
             nfs_pcap_ip: None,
             tftp_dir: None,
             rsh_dir: None,
+            stream: None,
             mac: DEFAULT_MAC,
         }
     }
@@ -413,6 +420,10 @@ pub struct NetworkSection {
     /// executed on the host. Unset disables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rsh_dir: Option<String>,
+    /// With `mode = "stream"`: the server of the private segment, as
+    /// `tcp:IP:PORT` or `unix:PATH` (QEMU `-netdev stream` framing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<String>,
 }
 
 /// Where VINO's video-in capture should come from.
@@ -1935,6 +1946,14 @@ impl MachineConfig {
             (NetMode::Pcap, MachineProfile::O2Ip32) => {
                 return Err("network.mode = \"pcap\" is not available on the O2 yet (its Ethernet runs on the NAT gateway)".into());
             }
+            (NetMode::Stream, p) if p != MachineProfile::OctaneIp30 => {
+                return Err("network.mode = \"stream\" is only available on the Octane for now".into());
+            }
+            (NetMode::Stream, _) => {
+                let ep = self.network.stream.as_deref()
+                    .ok_or_else(|| "network.mode = \"stream\" needs [network] stream = \"tcp:IP:PORT\" or \"unix:PATH\"".to_string())?;
+                crate::net::stream::StreamEndpoint::parse(ep).map_err(|e| format!("network.stream: {e}"))?;
+            }
             _ => {}
         }
         if let Some(ref s) = self.nat_subnet {
@@ -2014,6 +2033,7 @@ impl MachineConfig {
             mac,
             tftp_dir:     self.network.tftp_dir.as_ref().map(std::path::PathBuf::from),
             rsh_dir:      self.network.rsh_dir.as_ref().map(std::path::PathBuf::from),
+            stream:       self.network.stream.clone(),
         }
     }
 

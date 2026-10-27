@@ -22,6 +22,7 @@
 //!   xdmcp.rs     XDMCP gateway into the guest's xdm
 //!   host_dns.rs  host DNS server discovery for DNS relaying
 //!   net_pcap.rs  PCAP bridged backend (`pcap` feature)
+//!   stream.rs    a private segment over a QEMU `-netdev stream` socket
 //!   telnet.rs    telnet option negotiation for the monitor/serial consoles
 
 mod engine;
@@ -37,6 +38,7 @@ mod nfs_pcap;
 pub mod net_pcap;
 pub mod nfsudp;
 pub mod packet;
+pub mod stream;
 mod portmap;
 mod rsh;
 mod services;

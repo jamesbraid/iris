@@ -517,7 +517,13 @@ impl OctaneMachine {
 
         // The Ethernet on the NAT gateway `[network]` describes.
         let mut nat = None;
-        if cfg.network.mode != crate::config::NetMode::Off {
+        if cfg.network.mode == crate::config::NetMode::Stream {
+            let ep = cfg.network.stream.as_deref()
+                .map(crate::net::stream::StreamEndpoint::parse)
+                .ok_or("network.mode = \"stream\" needs [network] stream")??;
+            eprintln!("iris: Octane Ethernet on the stream segment {ep}");
+            Self::start_stream(&eth, ep);
+        } else if cfg.network.mode != crate::config::NetMode::Off {
             let net = crate::net::GatewayConfig::from_network(&cfg.network());
             eprintln!("iris: Octane Ethernet on NAT: gateway {}, guest {} (DHCP)", net.gateway_ip, net.client_ip);
             let addrs = (net.client_ip, net.gateway_ip, net.netmask);
@@ -587,6 +593,25 @@ impl OctaneMachine {
     /// IOC3's first port is the console: the CI socket's backend in CI
     /// mode, otherwise TCP on `serial_port_a`, either teed to `serial_log`.
     /// The second port serves TCP on `serial_port_b`.
+    /// Put the Ethernet on a stream segment ([`crate::net::stream`]) with a
+    /// receive thread like the NAT's.
+    fn start_stream(eth: &Arc<Ioc3Eth>, ep: crate::net::stream::StreamEndpoint) {
+        let (to_net, tx_cons) = rtrb::RingBuffer::new(256);
+        let (rx_prod, from_net) = rtrb::RingBuffer::new(256);
+        let (tx_wake, rx_wake) = (crate::net::Wake::new(), crate::net::Wake::new());
+        crate::net::stream::spawn(ep, tx_cons, rx_prod, tx_wake.clone(), rx_wake.clone());
+        eth.attach(to_net, from_net, Some(tx_wake), Some(rx_wake.clone()));
+        let weak = Arc::downgrade(eth);
+        std::thread::Builder::new()
+            .name("ip30-eth-rx".into())
+            .spawn(move || loop {
+                rx_wake.wait(std::time::Duration::from_millis(1));
+                let Some(eth) = weak.upgrade() else { break };
+                eth.poll();
+            })
+            .expect("ioc3 eth rx thread");
+    }
+
     fn connect_serial(cfg: &MachineConfig, ioc3: &Ioc3, ci: Option<&Arc<crate::dev::z85c30::CiSerialBackend>>) {
         use crate::dev::z85c30::{null_serial_backend, tcp_serial_backend, TeeBackend};
         let [port_a, port_b] = cfg.serial_ports();
