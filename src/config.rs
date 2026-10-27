@@ -894,6 +894,26 @@ pub struct OctaneSection {
     /// when missing; an existing file is used as it stands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flash: Option<String>,
+    /// The board in the first graphics port: `"solidimpact"` (the default)
+    /// or `"none"`. As on the O2, `headless` changes only the window; the
+    /// board stays, and the PROM's `console` variable picks the console.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphics: Option<String>,
+}
+
+impl OctaneSection {
+    /// The graphics board `graphics` names, or None for `"none"`.
+    pub fn graphics_board(&self) -> Result<Option<GraphicsBoard>, String> {
+        match self.graphics.as_deref().map(str::trim) {
+            None => Ok(Some(GraphicsBoard::SolidImpact)),
+            Some(s) if s.eq_ignore_ascii_case("none") => Ok(None),
+            Some(s) => match s.parse::<GraphicsBoard>() {
+                Ok(GraphicsBoard::SolidImpact) => Ok(Some(GraphicsBoard::SolidImpact)),
+                Ok(b) => Err(format!("octane.graphics \"{s}\": {} is not modelled on the Octane (valid: solidimpact, none)", b.label())),
+                Err(e) => Err(format!("octane.graphics: {e}")),
+            },
+        }
+    }
 }
 
 fn o2_on() -> bool {
@@ -1910,6 +1930,7 @@ impl MachineConfig {
                     return Err(format!("bank{i} size {sz} MB is invalid for an Octane (valid: 64, 128, 256, 512)"));
                 }
             }
+            self.octane.graphics_board()?;
         } else {
             for (i, &sz) in self.banks.iter().enumerate().take(bank_count) {
                 if !VALID_BANK_SIZES.contains(&sz) {
@@ -2455,6 +2476,18 @@ mod export_tests {
         assert_eq!(back.scsi[&1].path, cfg.scsi[&1].path);
         assert_eq!(back.scsi[&4].cdrom, true);
         println!("--- exported toml ---\n{s}");
+    }
+
+    #[test]
+    fn octane_graphics_defaults_to_solid_impact() {
+        let cfg: MachineConfig = toml::from_str("").expect("parse");
+        assert_eq!(cfg.octane.graphics_board(), Ok(Some(GraphicsBoard::SolidImpact)));
+        let cfg: MachineConfig = toml::from_str("[octane]\ngraphics = \"none\"").expect("parse");
+        assert_eq!(cfg.octane.graphics_board(), Ok(None));
+        let cfg: MachineConfig = toml::from_str("[octane]\ngraphics = \"impact:solid\"").expect("parse");
+        assert_eq!(cfg.octane.graphics_board(), Ok(Some(GraphicsBoard::SolidImpact)));
+        let cfg: MachineConfig = toml::from_str("[octane]\ngraphics = \"maximpact\"").expect("parse");
+        assert!(cfg.octane.graphics_board().is_err(), "only Solid IMPACT is modelled");
     }
 
     #[test]
