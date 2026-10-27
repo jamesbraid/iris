@@ -38,6 +38,20 @@
 //! layout are what IRIX 6.5.30 drives on the Octane. Where the board's own
 //! behaviour behind them is unknown, the comments below say which choice
 //! is an approximation.
+//!
+//! Approximation: no widget errors. The widget-error interrupt destination
+//! is stored but never used. Our QEMU model raises a widget error, and moves
+//! the handshake to an error state, for a context-switch selection out of
+//! sequence, a context word written outside an image phase, a normal-FIFO
+//! write that is not 8 bytes wide, an upload past the end of a slot and an
+//! unsupported width. This port does none of that: it logs a note, drops the
+//! access and returns a normal bus response. It also accepts 32-bit words at
+//! the command FIFO port. A guest that provokes those paths sees no error
+//! interrupt where the model would send one.
+//!
+//! Approximation: interrupt packets go to HEART whatever the programmed
+//! destination address is; only the destination widget is checked. The
+//! Bridge, by contrast, requires its own address.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicU64;
@@ -329,7 +343,7 @@ impl BusDevice for XioBus {
 struct Hq4 {
     control: u32,
     /// The widget-error interrupt destination. Stored only: this port
-    /// raises no widget errors.
+    /// raises no widget errors (see the header).
     int_dest: [u32; 2],
     context_word: u32,
     context_word_written: bool,
