@@ -337,7 +337,7 @@ impl State {
             len = DMA_MAX_BYTES;
         }
         // What hardware does with a partial frame is unknown; start nothing.
-        if len % info.frame_bytes != 0 {
+        if !len.is_multiple_of(info.frame_bytes) {
             eprintln!("rad1: {} ring length {len:#x} is not a whole number of frames", info.name);
             return;
         }
