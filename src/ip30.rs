@@ -4,6 +4,7 @@
 //! Ported from the Octane models in jamesbraid/qemu-sgi-origami.
 
 pub mod xio;
+pub mod heart;
 pub mod xbow;
 pub mod bridge;
 pub mod flash;
