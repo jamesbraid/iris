@@ -50,7 +50,7 @@ struct Rig {
 }
 
 fn image(name: &str, blocks: usize) -> std::path::PathBuf {
-    let p = std::env::temp_dir().join(format!("iris-isp1040-{name}.img"));
+    let p = std::env::temp_dir().join(format!("iris-isp1040-{}-{name}.img", std::process::id()));
     std::fs::write(&p, vec![0u8; blocks * BLOCK_SIZE]).expect("test image");
     p
 }
