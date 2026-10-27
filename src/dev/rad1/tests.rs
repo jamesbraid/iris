@@ -609,3 +609,199 @@ fn a_long_catch_up_skips_whole_revolutions() {
     assert!(dma.1.load(Ordering::Relaxed) < 16, "{} transfers", dma.1.load(Ordering::Relaxed));
     assert_eq!(word(&ram, 0x11_0000 + 0x800), 0, "the whole ring is silence");
 }
+
+// PCM conversion and host output.
+
+#[test]
+fn sample_word_conversions() {
+    // A 16-bit sample is bits [23:8], sign-extended through [31:24].
+    assert_eq!(sample_to_word(0), 0);
+    assert_eq!(sample_to_word(1), 0x0000_0100);
+    assert_eq!(sample_to_word(0x7fff), 0x007f_ff00);
+    assert_eq!(sample_to_word(-1), 0xffff_ff00);
+    assert_eq!(sample_to_word(i16::MIN), 0xff80_0000);
+    assert_eq!(word_to_sample(0x007f_ff00), 0x7fff);
+    assert_eq!(word_to_sample(0xff80_0000), i16::MIN);
+    // The low byte is dropped, the sign-extension bits ignored.
+    assert_eq!(word_to_sample(0x0012_34ff), 0x1234);
+    assert_eq!(word_to_sample(0x0112_3400), 0x1234);
+    for s in [i16::MIN, -12345, -1, 0, 1, 321, i16::MAX] {
+        assert_eq!(word_to_sample(sample_to_word(s)), s);
+    }
+}
+
+#[test]
+fn ring_frames_decode_left_first_and_drop_extra_words() {
+    let words = [0x0000_1100u32, 0xffff_ff00, 0x0000_2200, 0x0000_3300];
+    let ring: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let mut pcm = [0i16; 2];
+    frames_to_pcm(&ring[..8], &mut pcm, 2);
+    assert_eq!(pcm, [0x11, -1], "left word first");
+    // Eight-word-style frames: words past the second are dropped.
+    let mut pcm = [0i16; 2];
+    frames_to_pcm(&ring, &mut pcm, 4);
+    assert_eq!(pcm, [0x11, -1]);
+    // Two frames of two words.
+    let mut pcm = [0i16; 4];
+    frames_to_pcm(&ring, &mut pcm, 2);
+    assert_eq!(pcm, [0x11, -1, 0x22, 0x33]);
+}
+
+#[test]
+fn host_frames_encode_into_ring_frames() {
+    let pcm = [0x1234i16, -2, 7, i16::MIN];
+    let mut ring = [0xaau8; 16];
+    pcm_to_frames(&pcm, &mut ring, 2);
+    let w: Vec<u32> = ring.chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    assert_eq!(w, [0x0012_3400, 0xffff_fe00, 0x0000_0700, 0xff80_0000]);
+    // Words past the second record silence.
+    let mut ring = [0xaau8; 16];
+    pcm_to_frames(&pcm[..2], &mut ring, 4);
+    let w: Vec<u32> = ring.chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    assert_eq!(w, [0x0012_3400, 0xffff_fe00, 0, 0]);
+}
+
+#[test]
+fn output_ring_reaches_the_sink() {
+    let (r, ram) = dma_card();
+    let tap = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    *r.sink.lock() = Some(Sink { host: None, wav: None, tap: Some(tap.clone()) });
+    // A 512-frame ring (4 KiB), each frame left = n, right = -n.
+    {
+        let mut m = ram.0.lock().unwrap();
+        for n in 0..512usize {
+            let at = 0x10_0000 + n * 8;
+            m[at..at + 4].copy_from_slice(&sample_to_word(n as i16).to_le_bytes());
+            m[at + 4..at + 8].copy_from_slice(&sample_to_word(-(n as i16)).to_le_bytes());
+        }
+    }
+    start_ust(&r);
+    program(&r, &RING_OUTPUT, 0x10_0000, 0xffff_f008);
+    wr(&r, 0x58, 0x2000_0001);
+    // 1 ms of 44.1 kHz is 44 frames.
+    at(&r, 1_000_000);
+    rd(&r, 0x18);
+    {
+        let t = tap.lock();
+        assert_eq!(t.len(), 44 * 2);
+        for n in 0..44usize {
+            assert_eq!(t[n * 2], n as i16);
+            assert_eq!(t[n * 2 + 1], -(n as i16));
+        }
+    }
+    // Past the ring's end the stream wraps to its first frame.
+    at(&r, 12_000_000);
+    rd(&r, 0x18);
+    let t = tap.lock();
+    assert_eq!(t.len(), 529 * 2);
+    assert_eq!(t[511 * 2], 511);
+    assert_eq!(t[512 * 2], 0, "frame 512 is ring frame 0");
+    assert_eq!(t[513 * 2], 1);
+}
+
+#[test]
+fn input_ring_is_not_played() {
+    let (r, _ram) = dma_card();
+    let tap = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    *r.sink.lock() = Some(Sink { host: None, wav: None, tap: Some(tap.clone()) });
+    program(&r, &RING_INPUT, 0x11_0000, 0xffff_f000);
+    wr(&r, 0x4c, 1);
+    at(&r, 1_000_000);
+    rd(&r, 0x14);
+    assert!(tap.lock().is_empty());
+}
+
+#[test]
+fn wav_file_has_a_valid_header_and_data() {
+    let dir = std::env::temp_dir().join(format!("rad1-wav-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("o.wav");
+    let mut w = Wav::create(path.as_os_str()).unwrap();
+    w.append(&[1, -1, 2, -2]);
+    let b = std::fs::read(&path).unwrap();
+    assert_eq!(&b[..4], b"RIFF");
+    assert_eq!(u32::from_le_bytes(b[4..8].try_into().unwrap()), 36 + 8);
+    assert_eq!(u32::from_le_bytes(b[24..28].try_into().unwrap()), 44100);
+    assert_eq!(u32::from_le_bytes(b[40..44].try_into().unwrap()), 8);
+    assert_eq!(i16::from_le_bytes(b[46..48].try_into().unwrap()), -1);
+    assert_eq!(b.len(), 52);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// Cases from the QEMU PCM conversion unit test: two frames with opposite-sign
+// channels expose bit position, sign, channel and stride errors.
+
+const ADAT_WORDS: usize = 8;
+const AES_SUB_WORDS: usize = 64;
+const ADAT_SUB_WORDS: usize = 32;
+
+#[test]
+fn word_and_sample_conversions_match_the_reference_values() {
+    assert_eq!(word_to_sample(0x0012_3456), 0x1234);
+    assert_eq!(word_to_sample(0xffab_cd12), 0xabcdu16 as i16);
+    assert_eq!(word_to_sample(0xff80_0000), 0x8000u16 as i16);
+    assert_eq!(word_to_sample(0x007f_ffff), 0x7fff);
+    assert_eq!(sample_to_word(0x1234), 0x0012_3400);
+    assert_eq!(sample_to_word(0xabcdu16 as i16), 0xffab_cd00);
+    assert_eq!(sample_to_word(0x8000u16 as i16), 0xff80_0000);
+    assert_eq!(sample_to_word(0x7fff), 0x007f_ff00);
+    assert_eq!(sample_to_word(-1), 0xffff_ff00);
+    assert_eq!(sample_to_word(0), 0);
+}
+
+/// Two ring frames of `words` words; word 0 is left, word 1 right, the rest distinct.
+fn reference_ring(words: usize) -> Vec<u8> {
+    let left = [0x0012_3456u32, 0xff87_6543];
+    let right = [0xffab_cd12u32, 0x0034_5678];
+    let mut ring = Vec::new();
+    for f in 0..2 {
+        for w in 0..words {
+            let v = match w {
+                0 => left[f],
+                1 => right[f],
+                _ => 0x0011_1100u32 * (w as u32 + 1),
+            };
+            ring.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    ring
+}
+
+#[test]
+fn reference_frames_decode_for_analog_and_adat() {
+    let want = [0x1234, 0xabcdu16 as i16, 0x8765u16 as i16, 0x3456];
+    for words in [2, ADAT_WORDS] {
+        let mut pcm = [0i16; 4];
+        frames_to_pcm(&reference_ring(words), &mut pcm, words);
+        // Channels 1 and 2 reach the host, ADAT channels 3 to 8 are dropped.
+        assert_eq!(pcm, want, "{words} words");
+    }
+}
+
+#[test]
+fn reference_host_frames_encode_for_every_frame_size() {
+    let pcm = [0x1234i16, 0xabcdu16 as i16, 0x8000u16 as i16, 0x7fff];
+    let words = [[0x0012_3400u32, 0xffab_cd00], [0xff80_0000, 0x007f_ff00]];
+    for n in [2, ADAT_WORDS, ADAT_SUB_WORDS, AES_SUB_WORDS] {
+        let mut ring = vec![0xa5u8; 3 * AES_SUB_WORDS * 4];
+        pcm_to_frames(&pcm, &mut ring, n);
+        let w = |i: usize| u32::from_le_bytes(ring[i * 4..i * 4 + 4].try_into().unwrap());
+        for f in 0..2 {
+            for k in 0..n {
+                let want = if k < 2 { words[f][k] } else { 0 };
+                assert_eq!(w(f * n + k), want, "{n} words, frame {f} word {k}");
+            }
+        }
+        assert_eq!(w(2 * n), 0xa5a5_a5a5, "nothing past the two frames is written");
+    }
+}
+
+#[test]
+fn a_recorded_adat_frame_plays_back_unchanged() {
+    let pcm = [0x1234i16, 0xabcdu16 as i16, 0x8000u16 as i16, 0x7fff];
+    let mut ring = vec![0u8; 2 * ADAT_WORDS * 4];
+    pcm_to_frames(&pcm, &mut ring, ADAT_WORDS);
+    let mut back = [0i16; 4];
+    frames_to_pcm(&ring, &mut back, ADAT_WORDS);
+    assert_eq!(back, pcm);
+}
