@@ -544,6 +544,34 @@ fn a_write_reaches_the_disk_across_continuation_entries_and_reads_back() {
     assert_eq!(r.r(reg::REQUEST_QUEUE), 3, "the continuation entry was consumed with its command");
 }
 
+/// A WRITE whose payload the fabric refuses writes nothing and completes
+/// nothing, as the QEMU model leaves it: the block keeps what it held and
+/// the next command runs.
+#[test]
+fn a_refused_write_payload_reaches_neither_the_disk_nor_the_response_ring() {
+    let r = Rig::with_disk("refused-write", 1, 64);
+    r.init_rings(8, 8);
+    let pattern: Vec<u8> = (0..BLOCK_SIZE).map(|j| (j % 253) as u8 + 1).collect();
+    r.mem.put(BUF, &pattern);
+    r.put_entry(0, &request(0x80, 1, &cdb10(scsi_cmd::WRITE_10, 5, 1), &[(BUF, BLOCK_SIZE as u32)]));
+    r.doorbell(1);
+    assert_eq!(g16(&r.status(0), 10), IOCB_COMPLETE);
+
+    // The payload sits past the end of memory.
+    r.put_entry(1, &request(0x81, 1, &cdb10(scsi_cmd::WRITE_10, 5, 1), &[(MEM as u32, BLOCK_SIZE as u32)]));
+    r.doorbell(2);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 2, "the entry is consumed");
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1, "but nothing is posted for it");
+
+    let rd = BUF + 0x1000;
+    r.put_entry(2, &request(0x82, 1, &cdb10(scsi_cmd::READ_10, 5, 1), &[(rd, BLOCK_SIZE as u32)]));
+    r.doorbell(3);
+    let s = r.status(1);
+    assert_eq!(g32(&s, 4), 0x82);
+    assert_eq!(g16(&s, 10), IOCB_COMPLETE);
+    assert_eq!(r.mem.get(rd, BLOCK_SIZE), pattern, "the block was not overwritten with zeros");
+}
+
 #[test]
 fn a_check_condition_carries_its_sense() {
     let r = Rig::with_disk("sense", 1, 64);
