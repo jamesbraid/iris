@@ -15,6 +15,8 @@ pub mod ds1687;
 pub mod heart;
 pub mod heart_mem;
 pub mod ioc3;
+pub mod ioc3_eth;
+pub mod ioc3_port;
 pub mod mace_pci;
 pub mod mace_ps2;
 pub mod mace_sdma;
