@@ -7,3 +7,5 @@ pub mod xbow;
 pub mod bridge;
 pub mod impact;
 pub mod machine;
+#[cfg(test)]
+mod xtests;
