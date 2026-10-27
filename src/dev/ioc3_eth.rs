@@ -1015,6 +1015,12 @@ pub struct Ioc3Eth {
     link: Mutex<Option<Link>>,
     rx_wake: Mutex<Option<Arc<crate::net::Wake>>>,
     running: Arc<AtomicBool>,
+    /// The machine is stopped: no frame is taken into guest memory.
+    paused: AtomicBool,
+    /// Held across each receive pass, so a pause can wait one out.
+    rx_pass: Mutex<()>,
+    /// The NAT and receive threads, joined on drop.
+    threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 impl Ioc3Eth {
@@ -1036,6 +1042,9 @@ impl Ioc3Eth {
             link: Mutex::new(None),
             rx_wake: Mutex::new(None),
             running: Arc::new(AtomicBool::new(true)),
+            paused: AtomicBool::new(false),
+            rx_pass: Mutex::new(()),
+            threads: Mutex::new(Vec::new()),
         })
     }
 
@@ -1117,8 +1126,11 @@ impl Ioc3Eth {
 
     /// Run iris's NAT gateway behind this Ethernet (DHCP, ARP, ICMP, TCP, DNS
     /// and the port forwards in `config`), with a receive thread of its own.
-    /// Returns the NAT's controls. The threads end when the last reference to
-    /// the device is dropped or [`Ioc3Eth::stop`] is called.
+    /// Returns the NAT's controls. The threads end, and are joined, when the
+    /// last reference to the device is dropped. While the device is paused
+    /// the receive thread takes nothing; the NAT engine, which only trades
+    /// frames with the host and never reaches the guest, runs on and queues
+    /// what arrives for the guest (up to the ring's 256 frames).
     pub fn start_nat(self: &Arc<Self>, config: crate::net::GatewayConfig) -> Arc<crate::net::NatControl> {
         let (to_net, tx_cons) = rtrb::RingBuffer::new(256);
         let (rx_prod, from_net) = rtrb::RingBuffer::new(256);
@@ -1127,7 +1139,7 @@ impl Ioc3Eth {
         let ctl = crate::net::NatControl::new();
         let controls = ctl.clone();
         let (rw, tw, running) = (rx_wake.clone(), tx_wake.clone(), self.running.clone());
-        std::thread::Builder::new()
+        let nat = std::thread::Builder::new()
             .name("ip30-eth-nat".into())
             .spawn(move || {
                 crate::net::NatEngine::new(config, tx_cons, rx_prod, rw, tw, running, ctl).run();
@@ -1136,7 +1148,7 @@ impl Ioc3Eth {
         self.attach(to_net, from_net, Some(tx_wake), Some(rx_wake.clone()));
         let weak: Weak<Self> = Arc::downgrade(self);
         let running = self.running.clone();
-        std::thread::Builder::new()
+        let rx = std::thread::Builder::new()
             .name("ip30-eth-rx".into())
             .spawn(move || {
                 while running.load(Ordering::Relaxed) {
@@ -1148,12 +1160,22 @@ impl Ioc3Eth {
                 }
             })
             .expect("ioc3 eth rx thread");
+        self.threads.lock().unwrap().extend([nat, rx]);
         controls
     }
 
-    /// Stop the threads `start_nat` created.
-    pub fn stop(&self) {
-        self.running.store(false, Ordering::SeqCst);
+    /// Stop taking frames into guest memory while the machine is stopped.
+    /// Once this returns no receive pass is under way; transmit needs the
+    /// CPU, which is stopped too.
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+        drop(self.rx_pass.lock().unwrap());
+    }
+
+    /// Take frames again, starting with any that queued while paused.
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::SeqCst);
+        self.wake_rx();
     }
 
     /// The packet backend's cable state; the PHY reports it as link status.
@@ -1178,6 +1200,10 @@ impl Ioc3Eth {
     /// taken just as the guest turns receive off is dropped, as one
     /// arriving a moment later would be.
     pub fn poll(&self) -> bool {
+        let _pass = self.rx_pass.lock().unwrap();
+        if self.paused.load(Ordering::SeqCst) {
+            return false;
+        }
         let dma = self.dma();
         let mut moved = false;
         loop {
@@ -1210,6 +1236,18 @@ impl Ioc3Eth {
 impl Drop for Ioc3Eth {
     fn drop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+        self.wake_rx();
+        if let Some(w) = self.link.get_mut().unwrap().as_ref().and_then(|l| l.tx_wake.as_ref()) {
+            w.notify();
+        }
+        // The receive thread can hold the last reference for a moment, and
+        // then this runs on it; it cannot join itself.
+        let me = std::thread::current().id();
+        for t in self.threads.get_mut().unwrap().drain(..) {
+            if t.thread().id() != me {
+                let _ = t.join();
+            }
+        }
     }
 }
 

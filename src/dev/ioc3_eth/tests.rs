@@ -716,3 +716,30 @@ fn a_reset_during_an_interrupt_delivery_leaves_the_line_low() {
     let levels = t.irq.lock().unwrap().clone();
     assert_eq!(levels.last(), Some(&false), "levels: {levels:?}");
 }
+
+/// While paused no frame reaches guest memory; on resume the queued one
+/// is taken.
+#[test]
+fn a_paused_mac_takes_no_frames_until_it_resumes() {
+    let mut t = rig();
+    t.rx_setup(2);
+    t.eth.pause();
+    t.deliver(&frame(STATION, 60));
+    assert_eq!(t.r(RX_CONSUME), 0, "nothing taken while paused");
+    t.eth.resume();
+    assert!(t.eth.poll());
+    assert_eq!(t.r(RX_CONSUME), 8);
+}
+
+/// Dropping the device joins its NAT and receive threads.
+#[test]
+fn dropping_the_mac_joins_its_threads() {
+    let eth = Ioc3Eth::with_negotiation_delay(STATION, Duration::ZERO);
+    let mut cfg = crate::net::GatewayConfig::default();
+    cfg.port_forwards.clear();
+    let _ctl = eth.start_nat(cfg);
+    assert_eq!(eth.threads.lock().unwrap().len(), 2);
+    let probe = Arc::downgrade(&eth);
+    drop(eth);
+    assert!(probe.upgrade().is_none());
+}
