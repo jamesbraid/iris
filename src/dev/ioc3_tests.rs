@@ -1346,3 +1346,123 @@ fn narrow_accesses_to_32_bit_registers_are_refused() {
     r.w8(reg::SERIAL_A + 7, 0x77);
     assert_eq!(r.r8(reg::SERIAL_A + 7), 0x77);
 }
+
+// ---------------------------------------------------------------------------
+// DS1685 extended RAM
+// ---------------------------------------------------------------------------
+
+fn rtc_w(r: &Rig, reg: u8, v: u8) {
+    r.w8(reg::BYTEBUS_DEV1, reg);
+    r.w8(reg::BYTEBUS_DEV2, v);
+}
+
+fn rtc_r(r: &Rig, reg: u8) -> u8 {
+    r.w8(reg::BYTEBUS_DEV1, reg);
+    r.r8(reg::BYTEBUS_DEV2)
+}
+
+/// The bank bit switches only 0x40..0x7f; the low registers and RAM are the
+/// same in both banks.
+#[test]
+fn the_bank_bit_switches_only_the_upper_half() {
+    let r = Rig::new();
+    rtc_w(&r, 0x20, 0x11);
+    rtc_w(&r, 0x60, 0x22); // bank 0 RAM
+    rtc_w(&r, 0x0a, 0x10); // bank 1
+    assert_eq!(rtc_r(&r, 0x20), 0x11, "low RAM is in both banks");
+    assert_ne!(rtc_r(&r, 0x60), 0x22, "bank 1 has its own cell");
+    rtc_w(&r, 0x60, 0x33);
+    rtc_w(&r, 0x0a, 0x00);
+    assert_eq!(rtc_r(&r, 0x60), 0x22, "bank 0 kept its value");
+    rtc_w(&r, 0x0a, 0x10);
+    assert_eq!(rtc_r(&r, 0x60), 0x33);
+}
+
+#[test]
+fn the_extended_ram_is_reached_through_its_address_and_data_ports() {
+    let r = Rig::new();
+    rtc_w(&r, 0x0a, 0x10);
+    for n in 0..128u8 {
+        rtc_w(&r, 0x50, n);
+        rtc_w(&r, 0x53, n ^ 0xa5);
+    }
+    for n in 0..128u8 {
+        rtc_w(&r, 0x50, n);
+        assert_eq!(rtc_r(&r, 0x53), n ^ 0xa5);
+        assert_eq!(rtc_r(&r, 0x53), n ^ 0xa5, "the address does not advance");
+    }
+    // Seven-bit address: 0x80 wraps to cell 0.
+    rtc_w(&r, 0x50, 0x80);
+    assert_eq!(rtc_r(&r, 0x53), 0xa5);
+    // In bank 0, register 0x53 is plain RAM, not the port.
+    rtc_w(&r, 0x0a, 0x00);
+    assert_eq!(rtc_r(&r, 0x53), 0);
+}
+
+#[test]
+fn nvram_and_extended_ram_survive_in_a_512_byte_file() {
+    let path = std::env::temp_dir().join(format!("ioc3-xram-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let r = Rig::new();
+        r.c.set_nvram_file(&path).unwrap();
+        rtc_w(&r, 0x0f, 0x5c);
+        rtc_w(&r, 0x45, 0x66); // bank 0 RAM
+        rtc_w(&r, 0x0a, 0x10);
+        rtc_w(&r, 0x45, 0x77); // bank 1 register
+        rtc_w(&r, 0x50, 0x09);
+        rtc_w(&r, 0x53, b'1');
+        rtc_w(&r, 0x50, 0x01);
+        rtc_w(&r, 0x53, 0x02);
+    }
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0x200);
+    {
+        let r = Rig::new();
+        r.c.set_nvram_file(&path).unwrap();
+        assert_eq!(rtc_r(&r, 0x0f), 0x5c);
+        assert_eq!(rtc_r(&r, 0x45), 0x66);
+        rtc_w(&r, 0x0a, 0x10);
+        assert_eq!(rtc_r(&r, 0x45), 0x77);
+        rtc_w(&r, 0x50, 0x09);
+        assert_eq!(rtc_r(&r, 0x53), b'1');
+        rtc_w(&r, 0x50, 0x01);
+        assert_eq!(rtc_r(&r, 0x53), 0x02);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// An old 114-byte dump still loads; the file becomes a 512-byte image.
+#[test]
+fn an_old_114_byte_file_still_loads() {
+    let path = std::env::temp_dir().join(format!("ioc3-old-{}", std::process::id()));
+    let mut old = vec![0u8; 114];
+    old[0] = 0xab; // register 0x0e
+    old[(0x45 - 0x0e) as usize] = 0xcd; // bank 0 RAM 0x45
+    std::fs::write(&path, &old).unwrap();
+    let r = Rig::new();
+    r.c.set_nvram_file(&path).unwrap();
+    assert_eq!(rtc_r(&r, 0x0e), 0xab);
+    assert_eq!(rtc_r(&r, 0x45), 0xcd);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0x200);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A full image in the QEMU layout loads, extended RAM included.
+#[test]
+fn a_qemu_layout_image_loads() {
+    let path = std::env::temp_dir().join(format!("ioc3-qimg-{}", std::process::id()));
+    let mut img = vec![0u8; 0x200];
+    img[0x0f] = 0x42;
+    img[0xc0 + 9] = b'1';
+    img[0xc0 + 1] = 0x02;
+    std::fs::write(&path, &img).unwrap();
+    let r = Rig::new();
+    r.c.set_nvram_file(&path).unwrap();
+    assert_eq!(rtc_r(&r, 0x0f), 0x42);
+    rtc_w(&r, 0x0a, 0x10);
+    rtc_w(&r, 0x50, 9);
+    assert_eq!(rtc_r(&r, 0x53), b'1');
+    rtc_w(&r, 0x50, 1);
+    assert_eq!(rtc_r(&r, 0x53), 0x02);
+    let _ = std::fs::remove_file(&path);
+}

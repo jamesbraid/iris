@@ -36,8 +36,8 @@
 //! * Serial ring DMA, the receive timer, transmit delays and the interrupt
 //!   output run from register accesses and [`Ioc3::service`], on host time.
 //! * The DS1685 is the O2's DS1687 model behind an index and a data port; it
-//!   has no alarm or periodic interrupts, no extended RAM, and its NVRAM
-//!   file is a plain 114-byte image, a plain register dump.
+//!   has no alarm or periodic interrupts. Its RAM, including the 128-byte
+//!   extended RAM, persists in a 512-byte file (an old 114-byte dump loads).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1010,34 +1010,135 @@ impl Parallel {
 // The DS1685 on the byte bus
 // ---------------------------------------------------------------------------
 
-/// First and last register that is storage, not clock, in the NVRAM file.
+/// Registers 0x0e.. are storage rather than clock in the file.
 const NVRAM_FIRST: usize = 0x0e;
-const NVRAM_END: usize = 0x80;
+/// The old file format: registers 0x0e..0x80 as the bank-flat cell array.
+const NVRAM_OLD_LEN: usize = 0x80 - NVRAM_FIRST;
+/// The current file format is a 512-byte image: common registers 0x00..0x40,
+/// bank-0 RAM 0x40..0x80, bank-1 registers 0x80..0xc0, extended RAM
+/// 0xc0..0x140, zero padding after.
+const NVRAM_IMAGE_LEN: usize = 0x200;
+const NVRAM_OFF_NV: usize = 0x40;
+const NVRAM_OFF_EXT: usize = 0x80;
+const NVRAM_OFF_XRAM: usize = 0xc0;
+/// Register A bit 4 selects bank 1 for registers 0x40..0x7f.
+const RTC_A_DV0: u8 = 0x10;
+/// Bank-1 extended RAM address and data ports.
+const RTC_XRAM_ADDR: usize = 0x50;
+const RTC_XRAM_DATA: usize = 0x53;
+const RTC_XRAM_SIZE: usize = 128;
 
-/// The clock, reached through an address port and a data port. See the
-/// module notes for what the model leaves out.
+/// The clock, reached through an address port and a data port. The bank bit
+/// switches only registers 0x40..0x7f: the four control registers and the
+/// low RAM are the same cells in either bank. Bank 1 carries the extended
+/// registers and, through the address and data ports at 0x50 and 0x53, 128
+/// bytes of extended RAM, where the PROM keeps part of its environment.
+///
+/// The clock and the power-control and century registers are `MaceRtc`'s;
+/// see the module notes for what the model leaves out (alarm and periodic
+/// interrupts, the model number's side effects).
 struct Rtc {
     dev: MaceRtc,
     index: u8,
     file: Option<std::path::PathBuf>,
+    /// Bank-0 RAM at 0x40..0x7f.
+    nv: [u8; 64],
+    /// Bank-1 registers at 0x40..0x7f (0x48 and 0x4a live in `dev`).
+    ext: [u8; 64],
+    xram: [u8; RTC_XRAM_SIZE],
 }
 
 impl Rtc {
+    fn new() -> Rtc {
+        Rtc { dev: MaceRtc::new(), index: 0, file: None, nv: [0; 64], ext: [0; 64], xram: [0; RTC_XRAM_SIZE] }
+    }
+
+    fn bank1(&self) -> bool {
+        self.dev.peek(0x0a) & RTC_A_DV0 != 0
+    }
+
+    /// Whether the selected register is one `MaceRtc` models itself.
+    fn delegated(&self) -> bool {
+        let i = self.index as usize;
+        i < 0x40 || (self.bank1() && (i == 0x48 || i == 0x4a))
+    }
+
     fn read(&self) -> u8 {
-        self.dev.read8(((self.index as u64) << 8) | 7).data
+        let i = self.index as usize;
+        if self.delegated() {
+            self.dev.read8(((i as u64) << 8) | 7).data
+        } else if !self.bank1() {
+            self.nv[i - 0x40]
+        } else if i == RTC_XRAM_DATA {
+            self.xram[self.ext[RTC_XRAM_ADDR - 0x40] as usize & (RTC_XRAM_SIZE - 1)]
+        } else {
+            self.ext[i - 0x40]
+        }
     }
 
     fn write(&mut self, v: u8) {
-        self.dev.write8(((self.index as u64) << 8) | 7, v);
-        if self.index as usize >= NVRAM_FIRST {
+        let i = self.index as usize;
+        if self.delegated() {
+            self.dev.write8(((i as u64) << 8) | 7, v);
+        } else if !self.bank1() {
+            self.nv[i - 0x40] = v;
+        } else if i == RTC_XRAM_DATA {
+            let at = self.ext[RTC_XRAM_ADDR - 0x40] as usize & (RTC_XRAM_SIZE - 1);
+            self.xram[at] = v;
+        } else {
+            self.ext[i - 0x40] = v;
+        }
+        if i >= NVRAM_FIRST {
             self.save();
+        }
+    }
+
+    fn image(&self) -> Vec<u8> {
+        let mut img = vec![0u8; NVRAM_IMAGE_LEN];
+        for r in 0..0x40 {
+            img[r] = self.dev.peek(r);
+        }
+        img[NVRAM_OFF_NV..NVRAM_OFF_NV + 64].copy_from_slice(&self.nv);
+        let mut ext = self.ext;
+        ext[0x08] = self.dev.peek(0x48);
+        ext[0x0a] = self.dev.peek(0x4a);
+        img[NVRAM_OFF_EXT..NVRAM_OFF_EXT + 64].copy_from_slice(&ext);
+        img[NVRAM_OFF_XRAM..NVRAM_OFF_XRAM + RTC_XRAM_SIZE].copy_from_slice(&self.xram);
+        img
+    }
+
+    /// Load a file: the old 114-byte register dump, or the 512-byte image.
+    /// The clock registers (0x00..0x0d) are never loaded; time starts from
+    /// the host. Returns false for any other length.
+    fn load(&mut self, img: &[u8]) -> bool {
+        if img.len() == NVRAM_OLD_LEN {
+            for (i, b) in img.iter().enumerate() {
+                let r = NVRAM_FIRST + i;
+                if r < 0x40 {
+                    self.dev.poke(r, *b);
+                } else {
+                    self.nv[r - 0x40] = *b;
+                }
+            }
+            true
+        } else if img.len() == NVRAM_IMAGE_LEN {
+            for r in NVRAM_FIRST..0x40 {
+                self.dev.poke(r, img[r]);
+            }
+            self.nv.copy_from_slice(&img[NVRAM_OFF_NV..NVRAM_OFF_NV + 64]);
+            self.ext.copy_from_slice(&img[NVRAM_OFF_EXT..NVRAM_OFF_EXT + 64]);
+            self.xram.copy_from_slice(&img[NVRAM_OFF_XRAM..NVRAM_OFF_XRAM + RTC_XRAM_SIZE]);
+            // Loading never powers the machine off.
+            self.dev.poke(0x4a, self.ext[0x0a] & !0x08);
+            true
+        } else {
+            false
         }
     }
 
     fn save(&self) {
         if let Some(p) = &self.file {
-            let image: Vec<u8> = (NVRAM_FIRST..NVRAM_END).map(|r| self.dev.peek(r)).collect();
-            let _ = std::fs::write(p, image);
+            let _ = std::fs::write(p, self.image());
         }
     }
 }
@@ -1219,7 +1320,7 @@ impl St {
             sdma: Sdma::default(),
             kbc: Kbc::default(),
             par: Parallel::default(),
-            rtc: Rtc { dev: MaceRtc::new(), index: 0, file: None },
+            rtc: Rtc::new(),
             ssram: vec![0; (reg::SSRAM_SIZE / 4) as usize],
             ow,
             dma: None,
@@ -2563,22 +2664,21 @@ impl Ioc3 {
         self.sh.st.lock().unwrap().par.backend = Some(backend);
     }
 
-    /// Back the DS1685's NVRAM (registers 0x0e..0x80) with a file: loaded if
-    /// it exists with the right size, rewritten on every NVRAM write. The
-    /// clock itself starts from host time.
+    /// Back the DS1685's RAM (user RAM, bank-1 registers and the 128-byte
+    /// extended RAM) with a file. A 512-byte file (the layout the QEMU model
+    /// uses) is loaded, as is an old 114-byte register dump; the file is
+    /// rewritten as 512 bytes on every RAM write. The clock starts from host
+    /// time.
     pub fn set_nvram_file(&self, path: impl Into<std::path::PathBuf>) -> std::io::Result<()> {
         let path = path.into();
         let mut st = self.sh.st.lock().unwrap();
         if let Ok(img) = std::fs::read(&path) {
-            if img.len() == NVRAM_END - NVRAM_FIRST {
-                for (i, b) in img.iter().enumerate() {
-                    st.rtc.dev.poke(NVRAM_FIRST + i, *b);
-                }
+            if !st.rtc.load(&img) {
+                log::warn!("ioc3: NVRAM file {} has {} bytes, not 114 or 512; ignored", path.display(), img.len());
             }
         }
         st.rtc.file = Some(path);
-        let image: Vec<u8> = (NVRAM_FIRST..NVRAM_END).map(|r| st.rtc.dev.peek(r)).collect();
-        std::fs::write(st.rtc.file.as_ref().unwrap(), image)
+        std::fs::write(st.rtc.file.as_ref().unwrap(), st.rtc.image())
     }
 
     /// Attach the Ethernet MAC. It is told about DMA and the PCI interrupt
