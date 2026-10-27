@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::{Arc, Mutex};
 
 const BAR: u64 = 0x1300_0000;
 
@@ -289,4 +290,218 @@ fn unrecognised_accesses_read_zero_and_store_nothing() {
     // Byte access to a start-up word is not recognised.
     r.bar_write(0, 0x80, 0xff, 1);
     assert_eq!(rd(&r, 0x80), 0);
+}
+
+// Engines and status DMA.
+
+use crate::pci::PciDmaStatus;
+
+/// Bus memory that is `data` from bus address 0, little-endian as the card
+/// sees it.
+struct Ram(Mutex<Vec<u8>>);
+
+impl PciDma for Ram {
+    fn dma_read(&self, addr: u64, buf: &mut [u8]) -> PciDmaStatus {
+        let m = self.0.lock().unwrap();
+        let a = addr as usize;
+        match m.get(a..a + buf.len()) {
+            Some(src) => {
+                buf.copy_from_slice(src);
+                PciDmaStatus::Ok
+            }
+            None => PciDmaStatus::MasterAbort,
+        }
+    }
+    fn dma_write(&self, addr: u64, data: &[u8]) -> PciDmaStatus {
+        let mut m = self.0.lock().unwrap();
+        let a = addr as usize;
+        match m.get_mut(a..a + data.len()) {
+            Some(dst) => {
+                dst.copy_from_slice(data);
+                PciDmaStatus::Ok
+            }
+            None => PciDmaStatus::MasterAbort,
+        }
+    }
+}
+
+fn dma_card() -> (Rad1, Arc<Ram>) {
+    let r = card();
+    let ram = Arc::new(Ram(Mutex::new(vec![0xaa; 0x40_0000])));
+    r.connect_dma(ram.clone());
+    (r, ram)
+}
+
+fn word(ram: &Ram, addr: u64) -> u32 {
+    let m = ram.0.lock().unwrap();
+    u32::from_le_bytes(m[addr as usize..addr as usize + 4].try_into().unwrap())
+}
+
+fn at(r: &Rad1, ns: i64) {
+    r.fake_ns.store(ns, Ordering::Relaxed);
+}
+
+fn start_ust(r: &Rad1) {
+    wr(r, 0x40, 0x0e);
+    wr(r, 0x40, 0x0a);
+}
+
+#[test]
+fn one_shot_status_fills_a_slot() {
+    let (r, ram) = dma_card();
+    start_ust(&r);
+    at(&r, 960 * 100);
+    wr(&r, 0x500, 0x30_0000);
+    wr(&r, 0x504, 0xffff_fffc);
+    wr(&r, 0x5c, 0x40001);
+    let slot = 0x30_0000;
+    // UST mirror at +0x44 + (0x30 - 0x04).
+    assert_eq!(word(&ram, slot + 0x40 + 0x30), 100);
+    // Sync status and the unused position registers read zero.
+    assert_eq!(word(&ram, slot + 0x40 + 0x34), 0);
+    assert_eq!(word(&ram, slot + 0x40 + 0x04), 0);
+    // No channel is running, so every pointer word is zero.
+    for o in [0x00, 0x08, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38] {
+        assert_eq!(word(&ram, slot + o), 0, "pointer {o:#x}");
+    }
+    assert_eq!(word(&ram, slot + 0x78), 0);
+    assert_eq!(word(&ram, slot + 0x7c), 0x8008_0000);
+}
+
+#[test]
+fn unmapped_status_ring_does_not_complete() {
+    let (r, _ram) = dma_card();
+    wr(&r, 0x500, 0xf000_0000);
+    wr(&r, 0x504, 0xffff_fffc);
+    wr(&r, 0x5c, 0x40001);
+    assert_eq!(rd(&r, 0x5c), 0x40001);
+}
+
+#[test]
+fn output_ring_is_consumed_at_the_sample_rate() {
+    let (r, ram) = dma_card();
+    start_ust(&r);
+    program(&r, &RING_OUTPUT, 0x10_0000, 0xffff_f008);
+    wr(&r, 0x58, 0x2000_0001);
+    // 10 ms of 44.1 kHz is 441 frames.
+    at(&r, 10_000_000);
+    let b = rd(&r, 0x18);
+    assert_eq!((b >> 4) & 0x3fff, 441, "output count in B");
+    let a = rd(&r, 0x2c);
+    assert_eq!(a >> 18, 441, "output count in A");
+    // A's low bits are the UST at the 441st frame boundary.
+    let boundary = (441u64 * 1_000_000_000).div_ceil(44100) as i64;
+    assert_eq!(a & 0x3ffff, (boundary / 960) as u32);
+    assert_eq!(rd(&r, 0x14), 0, "input untouched");
+    // The status slot reports the pointer: 441 frames of 8 bytes in.
+    wr(&r, 0x500, 0x30_0000);
+    wr(&r, 0x504, 0xffff_fffc);
+    wr(&r, 0x5c, 0x40001);
+    assert_eq!(word(&ram, 0x30_0000 + 0x38), 0x10_0000 + 441 * 8);
+    // Past the 512-frame ring the pointer wraps.
+    at(&r, 20_000_000);
+    assert_eq!(rd(&r, 0x2c) >> 18, 882);
+    assert_eq!(r.state.lock().unwrap().chan[CH_OUT].offset, (882 - 512) * 8);
+    // Stopping holds the pointer where the sample clock had got to.
+    at(&r, 30_000_000);
+    wr(&r, 0x58, 0x2000_0000);
+    at(&r, 40_000_000);
+    assert_eq!(rd(&r, 0x2c) >> 18, 1323);
+}
+
+#[test]
+fn output_ring_unmapped_stops_the_channel() {
+    let (r, _ram) = dma_card();
+    program(&r, &RING_OUTPUT, 0xf000_0000, 0xffff_f008);
+    wr(&r, 0x58, 0x2000_0001);
+    at(&r, 10_000_000);
+    assert_eq!(rd(&r, 0x18), 0);
+    assert!(!r.state.lock().unwrap().chan[CH_OUT].running);
+}
+
+#[test]
+fn input_ring_records_silence() {
+    let (r, ram) = dma_card();
+    program(&r, &RING_INPUT, 0x11_0000, 0xffff_f000);
+    wr(&r, 0x4c, 1);
+    at(&r, 1_000_000);
+    // 44 frames: 352 bytes of silence, then the untouched fill.
+    assert_eq!(rd(&r, 0x14) >> 18, 44);
+    assert_eq!(rd(&r, 0x18) >> 18, 44);
+    assert_eq!(word(&ram, 0x11_0000), 0);
+    assert_eq!(word(&ram, 0x11_0000 + 351 - 3), 0);
+    assert_eq!(word(&ram, 0x11_0000 + 352), 0xaaaa_aaaa);
+}
+
+#[test]
+fn aes_subcode_runs_at_250_hz_without_a_position_latch() {
+    let (r, ram) = dma_card();
+    program(&r, &RING_AES_SUB, 0x12_0000, 0xffff_f030);
+    wr(&r, 0x48, 4);
+    at(&r, 3_999_999);
+    assert_eq!(rd(&r, 0x10), 0);
+    at(&r, 8_000_000);
+    // Two 256-byte records; the count sits at bit 4 of 0x10.
+    assert_eq!((rd(&r, 0x10) >> 4) & 0x3fff, 2);
+    assert_eq!(word(&ram, 0x12_0000 + 511 - 3), 0);
+    assert_eq!(word(&ram, 0x12_0000 + 512), 0xaaaa_aaaa);
+    // The status slot reports the pointer at +0x20.
+    wr(&r, 0x500, 0x30_0000);
+    wr(&r, 0x504, 0xffff_fffc);
+    wr(&r, 0x5c, 0x40001);
+    assert_eq!(word(&ram, 0x30_0000 + 0x20), 0x12_0000 + 512);
+}
+
+#[test]
+fn continuous_status_fills_slots_in_ring_order() {
+    let (r, ram) = dma_card();
+    wr(&r, 0x500, 0x30_0000);
+    wr(&r, 0x504, 0xffff_c078);
+    wr(&r, 0x4b4, 0x30_0000);
+    wr(&r, 0x4bc, 0xffff_c078);
+    wr(&r, 0x5c, 0x40003 | (3300 << 2));
+    let gen = r.state.lock().unwrap().status_gen;
+    assert_eq!(r.state.lock().unwrap().status_slots, 128);
+    // Interval 3300 at 33 MHz is 100 us.
+    at(&r, 100_000);
+    assert_eq!(r.status_tick(gen), Some(200_000));
+    // The cursor starts one past the consumer index.
+    assert_eq!(word(&ram, 0x30_0000 + 0x80 + 0x7c), 0x8008_0000);
+    assert_eq!(word(&ram, 0x30_0000 + 0x7c), 0xaaaa_aaaa);
+    at(&r, 200_000);
+    assert_eq!(r.status_tick(gen), Some(300_000));
+    assert_eq!(word(&ram, 0x30_0000 + 0x100 + 0x7c), 0x8008_0000);
+    // Stopping ends the schedule.
+    wr(&r, 0x5c, 0x1fffc);
+    assert_eq!(r.status_tick(gen), None);
+}
+
+#[test]
+fn status_schedule_restarts_when_far_behind() {
+    let (r, _ram) = dma_card();
+    wr(&r, 0x500, 0x30_0000);
+    wr(&r, 0x504, 0xffff_c078);
+    wr(&r, 0x4b4, 0x30_0000);
+    wr(&r, 0x4bc, 0xffff_c078);
+    wr(&r, 0x5c, 0x40003 | (3300 << 2));
+    let gen = r.state.lock().unwrap().status_gen;
+    at(&r, 1_000_000_000);
+    assert_eq!(r.status_tick(gen), Some(1_000_100_000));
+}
+
+#[test]
+fn reset_ends_engines_and_status() {
+    let (r, _ram) = dma_card();
+    program(&r, &RING_OUTPUT, 0x10_0000, 0xffff_f008);
+    wr(&r, 0x58, 0x2000_0001);
+    wr(&r, 0x500, 0x30_0000);
+    wr(&r, 0x504, 0xffff_c078);
+    wr(&r, 0x4b4, 0x30_0000);
+    wr(&r, 0x4bc, 0xffff_c078);
+    wr(&r, 0x5c, 0x40003 | (3300 << 2));
+    let gen = r.state.lock().unwrap().status_gen;
+    r.reset();
+    assert_eq!(r.status_tick(gen), None);
+    assert!(!r.state.lock().unwrap().chan[CH_OUT].running);
+    assert_eq!(rd(&r, 0x2c), 0);
 }

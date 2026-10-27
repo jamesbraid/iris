@@ -17,17 +17,26 @@
 //!   store what was written and return it. No reset values or masks are
 //!   established beyond zero; the few writes the model refuses (see
 //!   [`Rad1::write`]) are refused because no supported guest makes them.
+//! * The engines move frames at the sample rate with no host audio backend:
+//!   an output ring is read and discarded, an input ring is filled with
+//!   silence. Frames are moved when something looks (a position or status
+//!   read, a status completion), not on a timer, so a ring's contents reach
+//!   guest memory no later than the next such look. Host audio output is not
+//!   connected.
+//! * The AES3 subcode channel runs at 48000/192 Hz with empty records: no
+//!   capture times them, the rate is inferred from the record layout.
 //! * UST ticks every 960 ns, a selected board policy; the physical rate is
 //!   unmeasured.
 //! * A BAR0 access the model does not recognise is logged and reads zero.
 //!   The model fails the bus access instead, which the PCI bus layer here
 //!   cannot express.
 
+use std::ops::Deref;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
-use crate::pci::{Bar, PciBusDevice, PciConfig};
+use crate::pci::{Bar, PciBusDevice, PciConfig, PciDma};
 
 pub const PCI_VENDOR_SGI: u16 = 0x10a9;
 pub const PCI_DEVICE_RAD1: u16 = 0x0005;
@@ -87,6 +96,27 @@ const STATUS_STOP: u32 = 0x1fffc;
 
 const UST_NS_PER_TICK: i64 = 960;
 
+const NS_PER_SEC: u64 = 1_000_000_000;
+const FREQ_ANALOG: u64 = 44100;
+const FREQ_AES_SUB: u64 = 48000 / 192;
+/// Ring bytes moved per DMA access; a whole number of frames of any type.
+const CHUNK_BYTES: u64 = 1024;
+const POS_FIELD_MASK: u32 = 0x3fff;
+const UST_LATCH_MASK: u32 = 0x3_ffff;
+
+/// Status-DMA descriptor slots: 0x80 bytes apart, at most 0x80 of them.
+const SLOT_STRIDE: u64 = 0x80;
+const SLOT_MAX: u64 = 0x80;
+const SLOT_LIMIT_BASE: i64 = 0x78;
+const SLOT_MIRROR_OFFSET: u64 = 0x40;
+const SLOT_FLAGS_OFFSET: u64 = 0x78;
+const SLOT_DONE_OFFSET: u64 = 0x7c;
+/// Done, with the AES3 "no input connected" bit set.
+const SLOT_DONE_WORD: u32 = 0x8000_0000 | 0x0008_0000;
+const STATUS_CLOCK_HZ: u64 = 33_000_000;
+const STATUS_INTERVAL_SHIFT: u32 = 2;
+const STATUS_INTERVAL_MASK: u32 = 0x7fff;
+
 /// Channel types, as indices into [`State::chan`]. Only the three the
 /// Octane supports are modelled.
 const CH_IN: usize = 0;
@@ -101,12 +131,40 @@ struct ChanInfo {
     /// Bytes in one frame of the ring.
     frame_bytes: u64,
     enable_bit: u32,
+    output: bool,
+    freq: u64,
+    /// Position register A and the shift of its frame count.
+    pos_a: u32,
+    pos_a_shift: u32,
+    /// Position register B, its shift, and whether it is the parent
+    /// channel's (so this channel leaves it alone).
+    pos_b: u32,
+    pos_b_shift: u32,
+    pos_b_parent: bool,
+    /// Offset in a status slot of this channel's DMA pointer.
+    slot_ptr: u64,
 }
 
+/// Pointer words in a status slot for the channel types the Octane does not
+/// run: written as zero.
+const SLOT_PTR_UNUSED: [u64; 5] = [0x00, 0x08, 0x18, 0x28, 0x30];
+
 const CHAN_INFO: [ChanInfo; NUM_CH] = [
-    ChanInfo { name: "analog input", ring: RING_INPUT, tag: 0, frame_bytes: 8, enable_bit: ENABLE_BIT },
-    ChanInfo { name: "analog output", ring: RING_OUTPUT, tag: 1, frame_bytes: 8, enable_bit: ENABLE_BIT },
-    ChanInfo { name: "AES3-input subcode", ring: RING_AES_SUB, tag: 6, frame_bytes: 256, enable_bit: SUBCODE_ENABLE_BIT },
+    ChanInfo {
+        name: "analog input", ring: RING_INPUT, tag: 0, frame_bytes: 8, enable_bit: ENABLE_BIT,
+        output: false, freq: FREQ_ANALOG, pos_a: 0x14, pos_a_shift: 18, pos_b: 0x18,
+        pos_b_shift: 18, pos_b_parent: false, slot_ptr: 0x10,
+    },
+    ChanInfo {
+        name: "analog output", ring: RING_OUTPUT, tag: 1, frame_bytes: 8, enable_bit: ENABLE_BIT,
+        output: true, freq: FREQ_ANALOG, pos_a: 0x2c, pos_a_shift: 18, pos_b: 0x18,
+        pos_b_shift: 4, pos_b_parent: false, slot_ptr: 0x38,
+    },
+    ChanInfo {
+        name: "AES3-input subcode", ring: RING_AES_SUB, tag: 6, frame_bytes: 256,
+        enable_bit: SUBCODE_ENABLE_BIT, output: false, freq: FREQ_AES_SUB, pos_a: 0x10,
+        pos_a_shift: 4, pos_b: 0x10, pos_b_shift: 18, pos_b_parent: true, slot_ptr: 0x20,
+    },
 ];
 
 #[derive(Default, Clone, Copy)]
@@ -134,6 +192,14 @@ struct State {
     ust_enabled: bool,
     ust_armed: bool,
     ust_last_ns: i64,
+    /// Bumped whenever the status schedule is replaced, so a stale timer
+    /// thread notices and exits.
+    status_gen: u64,
+    status_interval: u32,
+    status_start_ns: i64,
+    status_done: u64,
+    status_cursor: u32,
+    status_slots: u32,
 }
 
 impl State {
@@ -152,6 +218,50 @@ impl State {
             ust_enabled: false,
             ust_armed: false,
             ust_last_ns: now,
+            status_gen: 0,
+            status_interval: 0,
+            status_start_ns: 0,
+            status_done: 0,
+            status_cursor: 0,
+            status_slots: 0,
+        }
+    }
+
+    /// The UST counter as it will read at `ns`, for stamping a position.
+    fn ust_at(&self, ns: i64) -> u32 {
+        let mut ticks = self.ust_phase;
+        if self.ust_enabled {
+            ticks += ns - self.ust_last_ns;
+        }
+        self.ust_count.wrapping_add(ticks.div_euclid(UST_NS_PER_TICK) as u32)
+    }
+
+    fn pos(&mut self, reg: u32) -> &mut u32 {
+        &mut self.sample_pos[((reg - POS_FIRST) / 4) as usize]
+    }
+
+    fn add_field(reg: &mut u32, shift: u32, frames: u32) {
+        let mask = POS_FIELD_MASK << shift;
+        let field = ((*reg >> shift).wrapping_add(frames)) & POS_FIELD_MASK;
+        *reg = (*reg & !mask) | (field << shift);
+    }
+
+    /// Credit frames to a channel's position registers. Both count frames.
+    /// A holds the count at its shift and, at shift 18, the low 18 bits of
+    /// the UST at the frame boundary; B is a 14-bit count the driver's start
+    /// polls for change.
+    fn advance_pos(&mut self, idx: usize, frames: u32) {
+        let info = &CHAN_INFO[idx];
+        let c = self.chan[idx];
+        Self::add_field(self.pos(info.pos_a), info.pos_a_shift, frames);
+        if info.pos_a_shift == 18 {
+            let boundary = c.start_ns + (u128::from(c.frames) * u128::from(NS_PER_SEC)).div_ceil(u128::from(info.freq)) as i64;
+            let ust = self.ust_at(boundary);
+            let a = self.pos(info.pos_a);
+            *a = (*a & !UST_LATCH_MASK) | (ust & UST_LATCH_MASK);
+        }
+        if !info.pos_b_parent {
+            Self::add_field(self.pos(info.pos_b), info.pos_b_shift, frames);
         }
     }
 
@@ -227,30 +337,19 @@ impl State {
         }
         self.chan[idx] = Chan { running: true, base, len, offset: 0, start_ns: now, frames: 0 };
     }
-
-    fn chan_stop(&mut self, idx: usize) {
-        self.chan[idx].running = false;
-    }
-
-    /// A write to a channel's enable register: its own bit starts and stops
-    /// it; rewriting a set bit while it runs does not restart it.
-    fn enable_write(&mut self, idx: usize, val: u32, now: i64) {
-        if val & CHAN_INFO[idx].enable_bit != 0 {
-            if !self.chan[idx].running {
-                self.chan_start(idx, now);
-            }
-        } else {
-            self.chan_stop(idx);
-        }
-    }
 }
 
+/// The onboard RAD audio function. Cheap to clone the handle of: the
+/// status-DMA timer thread holds a weak reference to the same state.
 pub struct Rad1 {
-    pci: PciConfig,
-    state: Mutex<State>,
-    start: Instant,
-    /// When not `i64::MIN`, the clock in nanoseconds, for tests.
-    fake_ns: AtomicI64,
+    inner: Arc<Inner>,
+}
+
+impl Deref for Rad1 {
+    type Target = Inner;
+    fn deref(&self) -> &Inner {
+        &self.inner
+    }
 }
 
 impl Default for Rad1 {
@@ -261,6 +360,23 @@ impl Default for Rad1 {
 
 impl Rad1 {
     pub fn new() -> Self {
+        Self { inner: Arc::new_cyclic(|me| Inner::new(me.clone())) }
+    }
+}
+
+pub struct Inner {
+    pci: PciConfig,
+    state: Mutex<State>,
+    start: Instant,
+    /// When not `i64::MIN`, the clock in nanoseconds, for tests; no timer
+    /// thread runs then.
+    fake_ns: AtomicI64,
+    dma: OnceLock<Arc<dyn PciDma>>,
+    me: Weak<Inner>,
+}
+
+impl Inner {
+    fn new(me: Weak<Inner>) -> Self {
         Self {
             pci: PciConfig::new(
                 PCI_VENDOR_SGI,
@@ -273,6 +389,8 @@ impl Rad1 {
             state: Mutex::new(State::new(0)),
             start: Instant::now(),
             fake_ns: AtomicI64::new(i64::MIN),
+            dma: OnceLock::new(),
+            me,
         }
     }
 
@@ -286,7 +404,10 @@ impl Rad1 {
     /// Back to the power-on state.
     pub fn reset(&self) {
         let now = self.now();
-        *self.state.lock().unwrap() = State::new(now);
+        let mut s = self.state.lock().unwrap();
+        let gen = s.status_gen + 1;
+        *s = State::new(now);
+        s.status_gen = gen;
     }
 
     fn startup_index(off: u32) -> Option<usize> {
@@ -324,6 +445,7 @@ impl Rad1 {
                 return s.bank(off);
             }
             if (POS_FIRST..=POS_LAST).contains(&off) {
+                self.sync_all(&mut s, now);
                 return s.sample_pos[((off - POS_FIRST) / 4) as usize];
             }
             if off == REG_ANALOG_OUT_EN {
@@ -372,7 +494,7 @@ impl Rad1 {
                     {
                         return None;
                     }
-                    s.enable_write(CH_IN, val, now);
+                    self.enable_write(s, CH_IN, val, now);
                 } else if off == REG_PREDISPATCH_B {
                     // AES3 input control: bit 2 runs the input subcode channel.
                     if val & SUBCODE_ENABLE_BIT != 0
@@ -381,7 +503,7 @@ impl Rad1 {
                     {
                         return None;
                     }
-                    s.enable_write(CH_AES_SUB, val, now);
+                    self.enable_write(s, CH_AES_SUB, val, now);
                 }
                 s.startup[i] = val;
                 return Some(());
@@ -401,17 +523,18 @@ impl Rad1 {
                 }
             } else if off == REG_ANALOG_OUT_EN && (val == 0x2000_0000 || val == 0x2000_0001) {
                 if val == 0x2000_0000 || s.ring_valid(&RING_OUTPUT, false, 0xffff_f008) {
-                    s.enable_write(CH_OUT, val, now);
+                    self.enable_write(s, CH_OUT, val, now);
                     s.analog_out_en = val;
                     return Some(());
                 }
             } else if off == REG_STATUS_DMA_CTRL {
-                self.status_ctrl_write(s, val)?;
+                self.status_ctrl_write(s, val, now)?;
                 s.status_dma_ctrl = val;
                 return Some(());
             }
         }
         if off == REG_UST_CONTROL && width == 4 {
+            self.sync_all(s, now);
             match val {
                 0x0e => {
                     s.ust_update(now);
@@ -438,38 +561,268 @@ impl Rad1 {
     }
 
     /// The status-DMA control word: stop, one-shot start, or ring start.
-    fn status_ctrl_write(&self, s: &mut State, val: u32) -> Option<()> {
+    fn status_ctrl_write(&self, s: &mut State, val: u32, now: i64) -> Option<()> {
         if val == STATUS_STOP {
-            s.status_running = false;
+            self.status_stop(s);
         } else if val == STATUS_ONESHOT_START
             && !s.status_running
             && s.ring_valid(&RING_STATUS, true, 0xffff_fffc)
         {
-            // The status slot is filled in by the DMA engine.
+            // One completion into the ring's base slot, as a continuous
+            // completion would fill it.
+            let base = Self::status_base(s);
+            self.fill_slot(s, base, now);
         } else if val & !0x1fffc == STATUS_START
             && val & 0x1fffc != 0
             && !s.status_running
             && s.ring_valid(&RING_STATUS, true, 0xffff_c078)
         {
-            s.status_running = true;
+            self.status_start(s, val, now);
         } else {
             return None;
         }
         Some(())
     }
+
+    fn status_stop(&self, s: &mut State) {
+        s.status_running = false;
+        s.status_gen += 1;
+    }
+
+    fn status_base(s: &State) -> u64 {
+        (u64::from(s.bank(RING_STATUS[1])) << 32) | u64::from(s.bank(RING_STATUS[0]))
+    }
+
+    /// The ring's slot count, recovered from the limit register: the
+    /// driver encodes it as `limit = 0x78 - count * 0x80`. A limit that does
+    /// not decode to a whole ring falls back to one slot.
+    fn status_slots(s: &State) -> u32 {
+        let span = SLOT_LIMIT_BASE - i64::from(s.bank(RING_STATUS[2]) as i32);
+        if span >= SLOT_STRIDE as i64 {
+            ((span as u64) / SLOT_STRIDE).min(SLOT_MAX) as u32
+        } else {
+            1
+        }
+    }
+
+    /// Start the continuous engine. The consumer index starts at 0 and the
+    /// cursor one past it, the first slot the driver checks; the first
+    /// completion is one interval out. A zero interval names no period and
+    /// stops the engine. The model has no floor on the interval.
+    fn status_start(&self, s: &mut State, ctrl: u32, now: i64) {
+        let interval = (ctrl >> STATUS_INTERVAL_SHIFT) & STATUS_INTERVAL_MASK;
+        s.status_gen += 1;
+        if interval == 0 {
+            eprintln!("rad1: continuous status DMA started with a zero interval (control {ctrl:#x}); stopping");
+            s.status_running = false;
+            return;
+        }
+        s.status_slots = Self::status_slots(s);
+        s.status_cursor = if s.status_slots > 1 { 1 } else { 0 };
+        s.status_interval = interval;
+        s.status_start_ns = now;
+        s.status_done = 0;
+        s.status_running = true;
+        if self.fake_ns.load(Ordering::Relaxed) == i64::MIN {
+            let gen = s.status_gen;
+            let me = self.me.clone();
+            std::thread::Builder::new()
+                .name("rad1-status".into())
+                .spawn(move || Self::status_thread(me, gen))
+                .ok();
+        }
+    }
+
+    /// When completion `k` of the current schedule is due.
+    fn status_deadline(s: &State, k: u64) -> i64 {
+        s.status_start_ns
+            + (u128::from(k) * u128::from(s.status_interval) * u128::from(NS_PER_SEC) / u128::from(STATUS_CLOCK_HZ)) as i64
+    }
+
+    /// Sleeps to each deadline holding only a weak reference, so dropping
+    /// the card ends it; a new schedule bumps the generation and ends it too.
+    fn status_thread(me: Weak<Inner>, gen: u64) {
+        let mut next = match me.upgrade() {
+            Some(i) => {
+                let s = i.state.lock().unwrap();
+                if s.status_gen != gen || !s.status_running {
+                    return;
+                }
+                Self::status_deadline(&s, 1)
+            }
+            None => return,
+        };
+        loop {
+            let wait = match me.upgrade() {
+                Some(i) => next - i.now(),
+                None => return,
+            };
+            if wait > 0 {
+                std::thread::sleep(Duration::from_nanos(wait as u64));
+            }
+            let Some(i) = me.upgrade() else { return };
+            match i.status_tick(gen) {
+                Some(n) => next = n,
+                None => return,
+            }
+        }
+    }
+
+    /// One completion: fill the next slot and return the next deadline, or
+    /// `None` when this schedule is over. The cursor advances in ring order
+    /// with wrap, so the driver's servicer, which consumes consecutive done
+    /// slots, keeps finding fresh ones.
+    fn status_tick(&self, gen: u64) -> Option<i64> {
+        let now = self.now();
+        let mut s = self.state.lock().unwrap();
+        if s.status_gen != gen || !s.status_running {
+            return None;
+        }
+        let slot = Self::status_base(&s) + u64::from(s.status_cursor) * SLOT_STRIDE;
+        if !self.fill_slot(&mut s, slot, now) {
+            // Ring base unmapped: stop rather than spin on a failing DMA.
+            s.status_running = false;
+            return None;
+        }
+        if s.status_slots != 0 {
+            s.status_cursor = (s.status_cursor + 1) % s.status_slots;
+        }
+        s.status_done += 1;
+        // Running behind: restart the schedule rather than fire in a burst.
+        if now > Self::status_deadline(&s, s.status_done + u64::from(s.status_slots)) {
+            s.status_start_ns = now;
+            s.status_done = 0;
+        }
+        Some(Self::status_deadline(&s, s.status_done + 1))
+    }
+
+    /// Fill one status slot, as a completion. Every word is written
+    /// little-endian through the card's own DMA path; the Bridge applies the
+    /// byte reversal into big-endian memory.
+    ///
+    /// * +0x44..: registers 0x04..0x34 (the positions, the UST counter and
+    ///   the sync status) as they read now, the engines brought up to date
+    ///   first.
+    /// * each channel's DMA pointer (zero for one not running or unmodelled).
+    /// * the flags word, then done last, so the driver never sees a done slot
+    ///   with a stale body. No digital input or video reference is connected.
+    fn fill_slot(&self, s: &mut State, slot: u64, now: i64) -> bool {
+        let Some(dma) = self.dma.get() else { return false };
+        self.sync_all(s, now);
+
+        let mut mirror = Vec::with_capacity(13 * 4);
+        for reg in (0x04..=0x34).step_by(4) {
+            let v = match reg {
+                0x04..=0x2c => s.sample_pos[((reg - POS_FIRST) / 4) as usize],
+                REG_UST_COUNTER => {
+                    s.ust_update(now);
+                    s.ust_count
+                }
+                _ => 0, // sync status
+            };
+            mirror.extend_from_slice(&v.to_le_bytes());
+        }
+        let ok = dma.dma_write(slot + SLOT_MIRROR_OFFSET + 0x04, &mirror).is_ok();
+        let mut ptrs: Vec<(u64, u32)> = SLOT_PTR_UNUSED.iter().map(|&o| (o, 0)).collect();
+        for (i, info) in CHAN_INFO.iter().enumerate() {
+            let c = &s.chan[i];
+            ptrs.push((info.slot_ptr, if c.len != 0 { (c.base + c.offset) as u32 } else { 0 }));
+        }
+        let ok = ok
+            && ptrs.iter().all(|&(o, v)| dma.dma_write(slot + o, &v.to_le_bytes()).is_ok())
+            && dma.dma_write(slot + SLOT_FLAGS_OFFSET, &0u32.to_le_bytes()).is_ok()
+            && dma.dma_write(slot + SLOT_DONE_OFFSET, &SLOT_DONE_WORD.to_le_bytes()).is_ok();
+        if !ok {
+            eprintln!("rad1: status DMA at {slot:#x} failed");
+        }
+        ok
+    }
+
+    /// A write to a channel's enable register. Its own bit starts and stops
+    /// it; the register's other bits never do.
+    fn enable_write(&self, s: &mut State, idx: usize, val: u32, now: i64) {
+        if val & CHAN_INFO[idx].enable_bit != 0 {
+            if !s.chan[idx].running {
+                s.chan_start(idx, now);
+            }
+        } else {
+            // Stop where the sample clock has got to.
+            self.sync_chan(s, idx, now);
+            s.chan[idx].running = false;
+        }
+    }
+
+    /// Move frames between the ring and nowhere, wrapping at the ring's end.
+    /// Output frames are read and discarded; input frames are silence.
+    fn chan_move(&self, s: &mut State, idx: usize, mut frames: u64) -> bool {
+        let info = &CHAN_INFO[idx];
+        let Some(dma) = self.dma.get() else { return false };
+        let mut ring = [0u8; CHUNK_BYTES as usize];
+        while frames != 0 {
+            let c = s.chan[idx];
+            let bytes = (frames * info.frame_bytes).min(c.len - c.offset);
+            let chunk = bytes.min(CHUNK_BYTES);
+            let n = chunk / info.frame_bytes;
+            let buf = &mut ring[..(n * info.frame_bytes) as usize];
+            let status = if info.output {
+                dma.dma_read(c.base + c.offset, buf)
+            } else {
+                buf.fill(0);
+                dma.dma_write(c.base + c.offset, buf)
+            };
+            if !status.is_ok() {
+                eprintln!("rad1: {} DMA at {:#x} failed", info.name, c.base + c.offset);
+                return false;
+            }
+            let c = &mut s.chan[idx];
+            c.offset += chunk;
+            c.frames += n;
+            if c.offset >= c.len {
+                c.offset = 0;
+            }
+            s.advance_pos(idx, n as u32);
+            frames -= n;
+        }
+        true
+    }
+
+    /// Bring a channel up to the present: the frames due are those the
+    /// sample clock has produced since the enable edge.
+    fn sync_chan(&self, s: &mut State, idx: usize, now: i64) {
+        let c = s.chan[idx];
+        if !c.running || now <= c.start_ns {
+            return;
+        }
+        let due = ((now - c.start_ns) as u128 * u128::from(CHAN_INFO[idx].freq) / u128::from(NS_PER_SEC)) as u64;
+        if due > c.frames && !self.chan_move(s, idx, due - c.frames) {
+            s.chan[idx].running = false;
+        }
+    }
+
+    fn sync_all(&self, s: &mut State, now: i64) {
+        for idx in 0..NUM_CH {
+            self.sync_chan(s, idx, now);
+        }
+    }
 }
 
 impl PciBusDevice for Rad1 {
     fn config(&self) -> &PciConfig {
-        &self.pci
+        &self.inner.pci
     }
 
     fn bar_read(&self, _bar: usize, off: u32, width: usize) -> u32 {
-        self.read(off, width)
+        self.inner.read(off, width)
     }
 
     fn bar_write(&self, _bar: usize, off: u32, val: u32, width: usize) {
-        self.write(off, val, width)
+        self.inner.write(off, val, width)
+    }
+
+    /// The card masters the bus for its status slots and audio rings. It
+    /// raises no interrupt, so there is no `connect_interrupt`.
+    fn connect_dma(&self, dma: Arc<dyn PciDma>) {
+        let _ = self.inner.dma.set(dma);
     }
 }
 
