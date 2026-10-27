@@ -57,6 +57,9 @@ pub const LOW_RAM_SIZE: u64 = 0x4000;
 const HIGH_GUARD: std::ops::Range<u64> = RAM_BASE as u64..RAM_BASE as u64 + 0x4000;
 const SMALL_WINDOWS: std::ops::Range<u64> = 0x1000_0000..0x2000_0000;
 const LARGE_SHIFT: u32 = 36;
+/// The DS1685 NVRAM file when `nvram` is left at the shared default: the
+/// Octane's image is a different size and layout from the other machines'.
+pub const OCTANE_NVRAM_FILE: &str = "nvram-ip30.bin";
 /// The boot flash: one 1 MiB part on the Bridge's first chip select.
 pub const FLASH_SIZE: u64 = 1 << 20;
 /// The Ethernet address when `[network] mac` does not set one, a
@@ -546,8 +549,9 @@ impl OctaneMachine {
         // SuperIO (serial, keyboard, clock) is Bridge input 4; the Ethernet
         // uses IOC3's PCI pin.
         ioc3.connect_superio_interrupt(crate::irq::IrqLine::new(Arc::new(BridgeWire(Arc::downgrade(&bridge))), 4));
-        if let Err(e) = ioc3.set_nvram_file(&cfg.nvram) {
-            eprintln!("iris: Octane NVRAM {}: {e}", cfg.nvram);
+        let nvram = if cfg.nvram == crate::config::DEFAULT_NVRAM { OCTANE_NVRAM_FILE } else { cfg.nvram.as_str() };
+        if let Err(e) = ioc3.set_nvram_file(nvram) {
+            eprintln!("iris: Octane NVRAM {nvram}: {e}");
         }
         bus.attach_widget(WIDGET_BRIDGE, bridge.clone(), false);
         let bus = Arc::new(bus);

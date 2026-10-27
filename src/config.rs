@@ -1563,7 +1563,7 @@ fn default_lock_aspect_ratio() -> bool { true }
 /// `ip32_machine::O2_PROM_FILE` as well, having no embedded PROM.
 pub const DEFAULT_PROM: &str = "prom.bin";
 /// `nvram` when a config does not set it: the DS1386's file on the Indy, the
-/// PROM's flash on the O2.
+/// PROM's flash on the O2. The Octane uses `nvram-ip30.bin` instead.
 pub const DEFAULT_NVRAM: &str = "nvram.bin";
 
 fn default_prom() -> String {

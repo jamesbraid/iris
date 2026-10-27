@@ -139,7 +139,7 @@ the first `[section]`, because TOML tables continue until the next header.
 | Key | Default | Values and behavior |
 |---|---|---|
 | `prom` | `"prom.bin"` | PROM path; IP24, IP22, and IP28 each have an embedded fallback. Indigo2 also tries `070-1367-012.bin` (IP22) or `070-1477-002.bin` (IP28) in the working directory; the O2, which has no embedded PROM, tries `ip32prom.rev4.18.bin`. The Octane has none either: `prom` must name the IP30 PROM image. |
-| `nvram` | `"nvram.bin"` | DS1386 backing file on the Indy; the PROM's flash (its environment) on the O2. GUI defaults to an absolute user-config path. |
+| `nvram` | `"nvram.bin"` | DS1386 backing file on the Indy; the PROM's flash (its environment) on the O2. Left at `nvram.bin`, the Octane uses `nvram-ip30.bin` for its DS1685 NVRAM instead. GUI defaults to an absolute user-config path. |
 | `nveeprom` | `"nveeprom.bin"` | Motherboard EEPROM file; GUI anchors it in its user-config directory. |
 | `banks` | `[128,128,0,0]` | RAM bank sizes in MB, up to eight entries (every machine today has four; the rest must be 0). On the O2 each entry is a DIMM pair's kit (32, 64, 128 or 256), largest first. On the Octane each entry is a HEART bank (a DIMM pair) of 64, 128, 256 or 512, filled from bank 0, 2048 at most. See profile constraints below. |
 | `scale` | `1` | Standalone window scale: 1–4. GUI uses its separate vm_scale. |
