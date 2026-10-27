@@ -1,16 +1,16 @@
 //! Crossbow, the Octane's XIO crossbar: widget 0's registers, and which of
 //! the eight links (widgets 8 to 15) are present and carrying traffic.
 //!
-//! A port of the Origami QEMU model, cut to what the Octane uses. The switch
+//! Cut to what the Octane uses; registers follow the Crossbow ASIC
+//! specification, revision 12.0 (`docs/Octane/`). The switch
 //! translates no address: the machine routes a processor access by widget
 //! number and asks [`Xbow::carries`] whether the link is up. Packets from
 //! widget 0 itself are its interrupts, which go to the target its interrupt
 //! destination registers name; on the Octane that is HEART.
 //!
-//! Approximations kept from the model, both recorded in its contract:
-//! a link reset on a fitted link brings the link back alive as it was
-//! before the reset (the restore-alive policy the Octane machine selects
-//! for every fitted link; link training is not modelled), and register
+//! Two approximations: a link reset on a fitted link brings the link back
+//! alive as it was before the reset (link training is not modelled, and the
+//! stock PROM resets each link it finds and expects it back), and register
 //! accesses are 32-bit at the data half of each eight-byte slot only.
 
 use std::sync::{Arc, Mutex};

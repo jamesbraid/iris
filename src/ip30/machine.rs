@@ -7,7 +7,7 @@
 //! `docs/octane-ip30.md`.
 //!
 //! The processor's physical map, from OpenBSD's `ip30.h` and Linux's
-//! `ip30-xtalk.c` (the Origami contract `ip30-machine.md` cites them):
+//! `ip30-xtalk.c`:
 //!
 //! | Range | What |
 //! |---|---|
@@ -23,10 +23,12 @@
 //! ISP1040 SCSI controllers in slots 0 and 1, IOC3 (serial, keyboard and
 //! mouse, the clock, Ethernet) in slot 2, RAD1 audio in slot 3.
 //!
-//! Low memory follows the Origami model's functional approximation
-//! (`ip30-machine.md`, "HEART low memory"): 16 KiB of distinct RAM at
-//! physical 0, zero at reset, and the first 16 KiB above 0x2000_0000 a bus
-//! error, with SDRAM starting at 0x2000_4000. The fault is enforced on the
+//! Low memory is an approximation: 16 KiB of distinct RAM at physical 0,
+//! zero at reset, and the first 16 KiB above 0x2000_0000 a bus error, with
+//! SDRAM starting at 0x2000_4000. Public software uses physical 0x400 (the
+//! GDA) and 0x600 (MPCONF) but no published source gives the backing, and
+//! the stock diagnostics expect the upper 8 KiB to be distinct from the
+//! lower. The fault is enforced on the
 //! bus path; a cached access through the CPU's direct RAM window does not
 //! see it.
 
@@ -57,13 +59,15 @@ const SMALL_WINDOWS: std::ops::Range<u64> = 0x1000_0000..0x2000_0000;
 const LARGE_SHIFT: u32 = 36;
 /// The boot flash: one 1 MiB part on the Bridge's first chip select.
 pub const FLASH_SIZE: u64 = 1 << 20;
-/// The Ethernet address when `[network] mac` does not set one: the
-/// placeholder the Origami model uses.
+/// The Ethernet address when `[network] mac` does not set one, a
+/// placeholder in SGI's range.
 pub const DEFAULT_MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
 
-/// The Octane's 195 MHz R10000 (`ip30-machine.md`): Count at half that.
+/// The 195 MHz R10000 of SGI's standard 128 MB Octane configurations (the
+/// OCTANE Technical Report): Count at half that.
 pub const OCTANE_COUNT_HZ: u64 = 97_500_000;
-/// R10000 revision 2.7 (`ip30-r10000.md`, inferred from inventory text).
+/// R10000 revision 2.7, as an Octane's hinv reports it; the raw PRId is
+/// inferred from the R10000 manual's encoding.
 pub const OCTANE_PRID: u32 = 0x0927;
 /// The Crossbow on the Octane reports revision 4.
 const XBOW_REVISION: u32 = 4;
@@ -442,9 +446,9 @@ impl OneWireResponder for RecordBus {
     }
 }
 
-/// One board-record part on a bus of its own. The records and their ROM
-/// serials are the marked-synthetic identities of the Origami model's
-/// Octane catalogue (`ip30-board-identity.md`).
+/// One board-record part on a bus of its own. The barcodes (EMU...) and ROM
+/// serials are made up and marked so; the part numbers and names are an
+/// Octane's.
 fn record_bus(barcode: &str, part: &str, revision: &str, name: &str, serial: u64) -> onewire::Bus {
     let mut bus = onewire::Bus::new();
     bus.add(board_record_part(&BoardRecord { barcode, part, revision, name }, serial));
@@ -516,13 +520,13 @@ impl OctaneMachine {
         };
         bridge.attach_flash(Arc::new(flash), FLASH_SIZE as u32);
         // The second chip select: a blank 2 MiB part that reads all ones and
-        // keeps no writes, the Origami contract's approximation from one
-        // measured Octane2 word. The PROM looks for a part there too.
+        // keeps no writes, an approximation from one word read on a real
+        // Octane2. The PROM looks for a part there too.
         bridge.attach_flash_select1(Arc::new(RawFlash::new(&[], 2 << 20)), 2 << 20);
         let system_record = Mutex::new(record_bus("EMUN00", "030-0887-003", "F", "IP30", 0x5145_4d55_4e00));
         bridge.set_onewire(Box::new(move |pulse, _sample| {
-            // The slot decode the model shares between its one-wire masters:
-            // a long low drive is a reset, a short one a write-one or read.
+            // The same slot decode as HEART's: a long low drive is a reset, a
+            // short one a write-one or read (chosen thresholds, not measured).
             let mut b = system_record.lock().unwrap();
             if pulse >= 400 { !b.reset() } else { b.slot(pulse < 40) }
         }));
@@ -550,7 +554,7 @@ impl OctaneMachine {
         // DMA reaches only widgets the Crossbow has a live link to.
         let links = xbow.clone();
         bridge.set_link_alive(Box::new(move |w| links.carries(w)));
-        // A link reset of widget 15 resets the Bridge, as in the model.
+        // A Crossbow link reset of widget 15 resets the Bridge at its far end.
         let weak = Arc::downgrade(&bridge);
         xbow.on_link_reset(Box::new(move |w| {
             if w == WIDGET_BRIDGE {

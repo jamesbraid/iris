@@ -4,10 +4,11 @@
 //! processor module's ID part, and the XIO widget (widget 8) that the
 //! Crossbow's other widgets reach memory and interrupts through.
 //!
-//! This is a port of the Origami QEMU model, which is a functional profile
-//! rather than a register-exact HEART: what it does not model it leaves
-//! observable (see [`Heart::unsupported`]). The approximations it keeps are
-//! said where they live.
+//! It is a functional model rather than a register-exact HEART: accesses it
+//! does not support are recorded (see [`Heart::unsupported`]) and the guest
+//! sees a fixed answer. Each approximation is said where it lives.
+//! Register offsets follow OpenBSD's `xheartreg.h` and Linux's
+//! `asm/sgi/heart.h`.
 //!
 //! The processor sees HEART's registers at [`PIU_BASE`], its widget registers
 //! at 0x1800_0000 (the machine decodes that) and memory from [`RAM_BASE`].
@@ -62,8 +63,8 @@ const ONEWIRE_LEVEL: u64 = 1;
 ///
 /// The stock PROM sizes a bank by writing through a temporary 2 GiB density-6
 /// descriptor (`0x81bf0040`) and checking which address bits alias. Real
-/// HEART's address wiring for that probe is not established; this
-/// projection, the Origami model's functional approximation, makes each
+/// HEART's address wiring for that probe is not documented; this
+/// projection is an approximation that makes each
 /// fitted size give the PROM the answer it needs to pick the right
 /// descriptor. Every other descriptor wraps at the bank's size. All of them
 /// keep the low 25 bits, so a 32 MiB unit maps to one 32 MiB run of the bank.
@@ -457,9 +458,8 @@ pub struct Heart {
     /// IP2..IP6, once the machine has a CPU.
     pins: Mutex<Option<[IrqLine; 5]>>,
     onewire: Mutex<Vec<Box<dyn OneWireResponder>>>,
-    /// Accesses the model does not support, first 64 distinct, for the
-    /// monitor: `(offset, size, write)`. The guest sees what the model
-    /// answers; this is how a person sees it was answered for want of more.
+    /// Accesses this model does not support, first 64 distinct, for the
+    /// monitor: `(offset, size, write)`.
     unsupported: Mutex<Vec<(u32, u8, bool)>>,
     /// Packets that reached HEART's interrupt register, for the monitor.
     pub packets: AtomicU64,
@@ -544,7 +544,7 @@ impl Heart {
 
     /// One bit slot, started by a write of the command register: the low
     /// drive time selects reset (at least 400), write-one/read (under 40) or
-    /// write-zero. The thresholds are the model's, not measured. The parts
+    /// write-zero. The thresholds are chosen, not measured. The parts
     /// answer at once; the done bit follows after pulse + sample, counted as
     /// microseconds (the silicon's units are not known).
     fn onewire_start(&self, r: &mut Regs, command: u64) {
@@ -585,7 +585,7 @@ impl Heart {
     // ── processor-interface registers ───────────────────
 
     /// A PIU register read of `size` bytes (4 or 8; HEART refuses narrower
-    /// accesses, `None`). Unsupported offsets read as zero, as in the model.
+    /// accesses, `None`). Unsupported offsets read as zero and are recorded.
     pub fn piu_read(&self, off: u32, size: usize) -> Option<u64> {
         if size != 4 && size != 8 {
             return None;
@@ -636,7 +636,7 @@ impl Heart {
     }
 
     /// A PIU register write; false is a refused width. Unsupported offsets
-    /// are recorded and otherwise ignored, as in the model.
+    /// are recorded and otherwise ignored.
     pub fn piu_write(&self, off: u32, size: usize, val: u64) -> bool {
         if size != 4 && size != 8 {
             return false;
@@ -714,7 +714,7 @@ impl Heart {
     // ── widget registers ───────────────────────────────
 
     /// HEART's widget registers as the processor and other widgets see
-    /// them, `None` for what the model refuses.
+    /// them, `None` for an access this model refuses.
     pub fn widget_read(&self, off: u32, size: usize) -> Option<u64> {
         let r = self.regs.lock().unwrap();
         match (off, size) {
@@ -741,13 +741,12 @@ impl Heart {
         match (off, size) {
             (0x24, 4) => r.widget_control = val as u32,
             (0x28, 8) | (0x2c, 4) => r.widget_request_timeout = val as u32,
-            // The error-command word, which the model takes only as a zero
-            // write. IRIX 6.5.30's bus-error probe clears it with a 64-bit
+            // The error-command word, taken only as a zero write. IRIX 6.5.30's bus-error probe clears it with a 64-bit
             // store to the slot (OpenBSD's map puts the 64-bit slot at
             // +0x40, the word in its low half at +0x44); that is the same
             // zero write.
             (0x44, 4) | (0x40, 8) if val == 0 => {}
-            // No widget error producer exists in the model.
+            // Nothing here produces widget errors, so status stays zero.
             (0x60, 8) => {}
             (0x68, 8) => r.widget_error_mask = val as u32,
             _ => {
@@ -761,7 +760,7 @@ impl Heart {
 
     /// An interrupt packet: a doubleword write of `value` to HEART's widget
     /// offset 0x80, bits 7:0 the vector and bit 8 set or clear. Anything
-    /// else there is refused, as in the model.
+    /// else there is refused.
     pub fn packet_write(&self, off: u64, size: usize, value: u64) -> bool {
         if off != 0x80 || size != 8 || value & !0x1ff != 0 || value & 0xff >= 64 {
             self.note(0x2000_0000 | off as u32, size, true);
@@ -812,7 +811,7 @@ impl XioInterruptSink for Heart {
 
 /// Bus masters reach fitted memory through HEART's descriptors. A byte
 /// that is not fitted memory (an absent bank included) fails the whole
-/// transfer, as the model's packet face does.
+/// transfer.
 impl XioMemory for Heart {
     fn read(&self, phys: u64, buf: &mut [u8]) -> bool {
         self.mem.lock().unwrap().dma_read(phys, buf)
@@ -999,7 +998,7 @@ mod tests {
         }
     }
 
-    /// The stock PROM's bank sizing, as the model's qtest replays it: every
+    /// The stock PROM's bank sizing, replayed: every
     /// size reaches the descriptor the PROM's table names for it.
     #[test]
     fn the_prom_probe_reaches_the_right_descriptor() {
