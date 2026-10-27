@@ -874,6 +874,7 @@ impl OctaneMachine {
         self.ioc3.pause();
         self.eth.pause();
         self.rad.pause();
+        self.bus.heart.pause();
         self.ioc3.flush_nvram();
         if self.lifecycle != crate::machine_state::GuestState::Idle {
             self.lifecycle = crate::machine_state::GuestState::Halted;
@@ -911,6 +912,7 @@ impl OctaneMachine {
         self.ioc3.resume();
         self.eth.resume();
         self.rad.resume();
+        self.bus.heart.resume();
         if let Some(g) = &self.gfx {
             g.start_display();
         }

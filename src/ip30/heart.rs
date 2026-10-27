@@ -356,9 +356,13 @@ struct Regs {
     ecc_cause: u64,
     ecc_address: u64,
     ecc_data: u64,
-    /// The counter is `saved_count` plus the ticks since `epoch_ns`.
+    /// The counter is `saved_count` plus the ticks since `epoch_ns`, or
+    /// just `saved_count` while the machine is stopped.
     saved_count: u64,
     epoch_ns: u64,
+    /// When the machine was stopped, if it is: the counter holds still, as
+    /// the CPU's Count does, so a stop costs the guest no time.
+    paused_at: Option<u64>,
     widget_control: u32,
     widget_request_timeout: u32,
     widget_error_mask: u32,
@@ -388,6 +392,7 @@ impl Regs {
             ecc_data: 0,
             saved_count: 0,
             epoch_ns: now,
+            paused_at: None,
             widget_control: 0,
             widget_request_timeout: 0,
             widget_error_mask: 0,
@@ -400,6 +405,7 @@ impl Regs {
     }
 
     fn counter(&self, now: u64) -> u64 {
+        let now = self.paused_at.unwrap_or(now);
         (self.saved_count + now.saturating_sub(self.epoch_ns) / COUNT_NS) & COUNT_MASK
     }
 
@@ -795,6 +801,28 @@ impl Heart {
 
     pub fn ram_write(&self, addr: u64, n: usize, val: u64) -> bool {
         self.mem.lock().unwrap().cpu_write(addr, n, val)
+    }
+
+    /// The machine stopped: hold the counter (and any one-wire slot in
+    /// progress) still until [`Heart::resume`].
+    pub fn pause(&self) {
+        let now = (self.clock)();
+        let mut r = self.regs.lock().unwrap();
+        if r.paused_at.is_none() {
+            r.paused_at = Some(now);
+        }
+    }
+
+    /// The machine runs again: the counter continues from where it held,
+    /// and a one-wire slot's deadline moves out by the time stopped.
+    pub fn resume(&self) {
+        let now = (self.clock)();
+        let mut r = self.regs.lock().unwrap();
+        if let Some(at) = r.paused_at.take() {
+            let stopped = now.saturating_sub(at);
+            r.epoch_ns += stopped;
+            r.onewire_deadline_ns += stopped;
+        }
     }
 
     /// The counter, for the monitor.
@@ -1200,6 +1228,23 @@ mod tests {
         // Memory survives; a descriptor brings it back.
         wl(h, 0x20, PROBE_DESC);
         assert_eq!(rq(h, PROBE_RAM), 0xfeed_face);
+    }
+
+    #[test]
+    fn the_counter_holds_still_while_the_machine_is_stopped() {
+        let f = heart(128);
+        let h = &f.heart;
+        f.now.fetch_add(800, Ordering::SeqCst);
+        assert_eq!(rq(h, PIU_BASE + 0x20000), 10);
+        h.pause();
+        f.now.fetch_add(30_000_000_000, Ordering::SeqCst);
+        assert_eq!(rq(h, PIU_BASE + 0x20000), 10, "30 s stopped are not counted");
+        h.resume();
+        assert_eq!(rq(h, PIU_BASE + 0x20000), 10);
+        f.now.fetch_add(800, Ordering::SeqCst);
+        assert_eq!(rq(h, PIU_BASE + 0x20000), 20, "and it runs on from there");
+        h.resume();
+        assert_eq!(rq(h, PIU_BASE + 0x20000), 20, "a second resume changes nothing");
     }
 
     #[test]
