@@ -55,7 +55,7 @@ pub const PCI_VENDOR_QLOGIC: u16 = 0x1077;
 pub const PCI_DEVICE_ISP1040: u16 = 0x1020;
 pub const PCI_REVISION_ISP1040: u8 = 0x05;
 /// Mass storage controller, SCSI.
-pub const PCI_CLASS_SCSI: u32 = 0x0100_00;
+pub const PCI_CLASS_SCSI: u32 = 0x0001_0000;
 
 /// What a disk or CD-ROM attached here answers INQUIRY with (the same
 /// identity the O2's controller gives its targets).
