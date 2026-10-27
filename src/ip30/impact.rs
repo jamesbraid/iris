@@ -548,6 +548,9 @@ impl ImpactXio {
             board.ge_revision as u32,
         );
         mgras.set_phys(Arc::new(XioBus(mem)));
+        // The Octane X server arms a pixel read with XFRCONTROL 8 and kicks
+        // the DMA last; our QEMU model reads at the kick.
+        mgras.start_reads_at_kick();
         let me = Arc::new(Self { base: widget_small_base(widget) as u64, board, shared, mgras });
         // The swap reaching the HQ is the one HQ3 flag the general line
         // carries.
@@ -1287,14 +1290,27 @@ mod tests {
         r.descriptor(11, 0xB1); // kick: slot 0, host to board
         let got: Vec<u32> = (10..14).map(|x| r.b.mgras().fb_pixel(x, 10)).collect();
         assert_eq!(got, [1, 2, 3, 4]);
-        // And back: board to host. The raster engine's side of the read
-        // starts after the host's, as on the Indigo2.
+        // And back: board to host, as the Octane X server reads: the
+        // raster engine's read armed with XFRCONTROL 8, then the kick,
+        // which starts it.
         r.poke(0x2001_0FFE, &[0xA5; 2]);
         r.poke(0x2001_1000, &[0xA5; 2]);
-        r.rss(0x110, 4 << 22, false);
+        r.rss(0x102, 8, false); // XFRCONTROL: DMA read
+        r.rss(0x110, 4 << 22, false); // FILLMODE: DMA read
         r.block(10, 10, 13, 10);
         r.descriptor(11, 0xB9); // kick: slot 0, board to host
-        r.rss(0x102, 9, false); // XFRCONTROL: read start
+        r.b.mgras().state_hash();
+        assert_eq!(r.peek(0x2001_0FFE, 2), [1, 2]);
+        assert_eq!(r.peek(0x2001_1000, 2), [3, 4]);
+        // A kick that comes before the raster side waits for XFRCONTROL.
+        r.poke(0x2001_0FFE, &[0xA5; 2]);
+        r.poke(0x2001_1000, &[0xA5; 2]);
+        r.rss(0x102, 0, false);
+        r.descriptor(11, 0xB9);
+        r.block(10, 10, 13, 10);
+        r.b.mgras().state_hash();
+        assert_eq!(r.peek(0x2001_0FFE, 2), [0xA5; 2]);
+        r.rss(0x102, 8, false);
         r.b.mgras().state_hash();
         assert_eq!(r.peek(0x2001_0FFE, 2), [1, 2]);
         assert_eq!(r.peek(0x2001_1000, 2), [3, 4]);
