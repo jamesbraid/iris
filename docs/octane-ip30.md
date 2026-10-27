@@ -124,7 +124,9 @@ gateway, with the usual settings: `nat_subnet`, `[nfs]`, `[[port_forward]]`,
 route of 192.0.2.3 works with `nat_subnet = "192.0.2.0/24"` unchanged. When
 `[network] mac` is unset the station address is 08:00:69:12:34:56; set your
 own if more than one Octane shares a network. `[network] mode = "off"`
-unplugs the Ethernet; `pcap` is not available.
+unplugs the Ethernet; `pcap` is not available. `mode = "stream"` with
+`stream = "tcp:IP:PORT"` or `"unix:PATH"` puts it on a private segment served by
+another program instead (see [NETWORKING.md](../NETWORKING.md)).
 
 ## Inspecting the machine
 

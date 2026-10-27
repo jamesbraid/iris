@@ -1180,6 +1180,30 @@ impl Ioc3Eth {
         controls
     }
 
+    /// Put the Ethernet on a private segment served by `endpoint` (QEMU
+    /// `-netdev stream` framing, [`crate::net::stream`]) instead of the NAT,
+    /// with a receive thread like [`Self::start_nat`]'s.
+    pub fn start_stream(self: &Arc<Self>, endpoint: crate::net::stream::StreamEndpoint) {
+        let (to_net, tx_cons) = rtrb::RingBuffer::new(256);
+        let (rx_prod, from_net) = rtrb::RingBuffer::new(256);
+        let (tx_wake, rx_wake) = (crate::net::Wake::new(), crate::net::Wake::new());
+        crate::net::stream::spawn(endpoint, tx_cons, rx_prod, tx_wake.clone(), rx_wake.clone());
+        self.attach(to_net, from_net, Some(tx_wake), Some(rx_wake.clone()));
+        let weak: Weak<Self> = Arc::downgrade(self);
+        let running = self.running.clone();
+        let rx = std::thread::Builder::new()
+            .name("ip30-eth-rx".into())
+            .spawn(move || {
+                while running.load(Ordering::Relaxed) {
+                    rx_wake.wait(Duration::from_millis(1));
+                    let Some(me) = weak.upgrade() else { break };
+                    me.poll();
+                }
+            })
+            .expect("ioc3 eth rx thread");
+        self.threads.lock().push(rx);
+    }
+
     /// Name the long-lived locks in the lock registry, which holds only a
     /// weak reference to the device.
     pub fn register_locks(self: &Arc<Self>) {

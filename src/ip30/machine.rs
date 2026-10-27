@@ -687,7 +687,11 @@ impl OctaneMachine {
 
         // The Ethernet on the NAT gateway `[network]` describes.
         let mut nat = None;
-        if cfg.network.mode != crate::config::NetMode::Off {
+        if cfg.network.mode == crate::config::NetMode::Stream {
+            let ep = crate::net::GatewayConfig::from_network(&cfg.network()).stream_endpoint()?;
+            eprintln!("iris: Octane Ethernet on the stream segment {ep}");
+            eth.start_stream(ep);
+        } else if cfg.network.mode != crate::config::NetMode::Off {
             let net = crate::net::GatewayConfig::from_network(&cfg.network());
             eprintln!("iris: Octane Ethernet on NAT: gateway {}, guest {} (DHCP)", net.gateway_ip, net.client_ip);
             let addrs = (net.client_ip, net.gateway_ip, net.netmask);
