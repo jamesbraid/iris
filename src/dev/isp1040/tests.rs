@@ -975,6 +975,49 @@ fn a_soft_reset_drops_the_completion_of_a_command_in_flight() {
     assert_eq!(r.r(r.mb(4)), SIG4, "the reset state, untouched by the late answer");
 }
 
+/// A response ring replaced while a command runs gets that command's
+/// completion; the command is not read and run a second time.
+#[test]
+fn a_new_response_ring_takes_the_completion_of_the_command_in_flight() {
+    let (r, gate, _probe) = gated_rig("async-rsp-init");
+    const RESP2: u32 = 0x3000;
+    r.isp.write(reg::REQUEST_QUEUE, 1, 2);
+    gate.wait_arrival();
+    std::thread::scope(|s| {
+        let init = s.spawn(|| r.init_queue(mbox::INIT_RSP_QUEUE, 4, RESP2));
+        while !r.isp.waiting_on_command() { std::thread::yield_now(); }
+        gate.open();
+        assert_eq!(init.join().unwrap(), mbox::COMPLETE);
+    });
+    r.isp.wait_idle();
+    assert_eq!(r.isp.total_commands(), 1, "the command ran once");
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 1, "and its entry was consumed");
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+    let s: [u8; ENTRY_SIZE] = r.mem.get(RESP2, ENTRY_SIZE).try_into().unwrap();
+    assert_eq!(g32(&s, 4), 0x77, "the completion is on the new ring");
+    assert_eq!(g32(&r.status(0), 4), 0, "not the old one");
+}
+
+/// A request ring replaced while a command runs starts at its own index
+/// 0; the completion of the command that was running is still posted.
+#[test]
+fn a_new_request_ring_starts_at_zero_and_the_command_in_flight_completes() {
+    let (r, gate, _probe) = gated_rig("async-req-init");
+    r.isp.write(reg::REQUEST_QUEUE, 1, 2);
+    gate.wait_arrival();
+    std::thread::scope(|s| {
+        let init = s.spawn(|| r.init_queue(mbox::INIT_REQ_QUEUE, 4, RQST));
+        while !r.isp.waiting_on_command() { std::thread::yield_now(); }
+        gate.open();
+        assert_eq!(init.join().unwrap(), mbox::COMPLETE);
+    });
+    r.isp.wait_idle();
+    assert_eq!(r.isp.total_commands(), 1);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 0, "the new ring's consumer is untouched");
+    assert_eq!(g32(&r.status(0), 4), 0x77);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+}
+
 /// Saving waits for the command in flight, so the state saved has it
 /// posted rather than half done.
 #[test]
