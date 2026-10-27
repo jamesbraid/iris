@@ -24,6 +24,7 @@ pub mod mace_sdma;
 pub mod mace_ust;
 pub mod ns16550;
 pub mod onewire;
+pub mod rad1;
 pub mod mgras;
 pub mod ng1;
 pub mod serial_log;
