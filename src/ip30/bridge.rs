@@ -32,9 +32,10 @@
 //! * The translation table is the chip's internal 128 entries; no external
 //!   SRAM extends it.
 //! * Processor accesses to the 2 GB long window (the translated PIO window
-//!   at 0x4000_0000) and 64-bit DMA addressing are not modelled.
-//! * A function's DMA address at or above 4 GiB is not decoded and
-//!   master-aborts. PCI-local space (below 0x4000_0000), which would reach
+//!   at 0x4000_0000) are not modelled.
+//! * A function's DMA address at or above 4 GiB goes through the 64-bit
+//!   direct window: bits 63:60 name the widget and the low 48 bits pass
+//!   through. PCI-local space (below 0x4000_0000), which would reach
 //!   another PCI device, is not carried anywhere and fails.
 //! * Only function 0 of a slot exists.
 
