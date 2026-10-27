@@ -1,6 +1,7 @@
-# IRIX panics early on a headless O2
+# IRIX panics early when the O2's rendering engine is slower than its timeout
 
-Status: open (2026-10-26).
+Status: fixed (2026-10-26). Also hit with the graphics console and less
+than 1 GB.
 
 **Symptom.** `headless = true` (no PS/2 keyboard, serial console) with the
 IRIX 6.5.22 disk: the PROM menu comes up on serial, "1) Start System"
@@ -24,14 +25,29 @@ through Context's PTEBase, which IRIX points at its K2 page-table window at
 panic and BadVAddr is the window. `badvaddr == 0xff800000` therefore means
 "NULL (or other low user address) dereference in kernel mode".
 
-**Ruled out.** CRIME's revision (now always 0xa1) and MACE's revision bit
-(now always set) — both were tied to the keyboard, both fixed, neither
-changes the panic.
+**Not it.** CRIME's revision (now always 0xa1) and MACE's revision bit
+(now always set) were tied to the keyboard; both fixed, neither changed the
+panic.
 
-**Leads.** The faulting code loops with a retry count of 100 and touches
-fields at 544/548 of the NULL struct; nearby registers hold CRIME
-(0xb4000000), CRE (0xb5000000) and GBE (0xb6000000) addresses. Candidates:
-the kernel's PS/2 driver meeting an empty port that answers differently from
-real hardware, or the graphics driver expecting state the PROM sets up only
-when it opened the graphics console. A kernel symbol map for the 6.5.22 IP32
-`/unix` (see the `irix-kernel-debug` skill) would name the function.
+**Cause.** With symbols (`nm` of the guest's `/unix`, kept as
+`ignore/ip32/unix-6522.map`) the fault is `crmFifoWait+0xfc`, called from
+`cn_init` → `gfx_earlyinit` → `crime_earlyinit` → `crimeInitHW`. That
+call waits for the rendering engine's interface buffer to be empty
+(`a1 = 0x7f`, so the threshold is 0), reading the status word at
+0x1500_4000 (level in 24:18) with `us_delay(1)` between reads, about 4096
+times. When it runs out it reports through a structure that does not exist
+yet that early, and that is the NULL. Our engine had 8640 primitives queued
+and finished them in host time, after the guest's 4 ms of guest time were
+gone. Console type and memory size only change how much is queued then.
+
+**Fix.** A status read on a busy engine first gives it up to 100 us of host
+time (`RE_STATUS_POLL_WAIT`, `src/dev/o2gfx.rs`). A guest polling status is
+waiting for the engine anyway. Boots to login with 32 MB up to 1 GB and
+headless.
+
+**Rule.** A guest loop that polls a device on its own clock (`us_delay`,
+Count) can outrun a device modelled on a host thread. Make the poll itself
+wait for the device, bounded, rather than lengthening anything guest-side.
+
+**Gotcha found on the way.** With `jitv2` dispatch on, a `pc` breakpoint
+inside compiled code may not fire; `j2 dispatch off` before setting it.

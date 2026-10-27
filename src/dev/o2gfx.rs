@@ -1000,6 +1000,16 @@ const IB_DEPTH: usize = 65536;
 const IB_HW_DEPTH: usize = 64;
 /// The interface buffer level field of the status word (24:18).
 const RE_STATUS_IB_LEVEL_SHIFT: u32 = 18;
+/// How long a status read waits for a busy engine before it answers.
+///
+/// A guest polls the status word in a loop timed in its own microseconds
+/// (`us_delay`), and the engine runs on its own host thread. Without a pause
+/// the guest's clock races ahead of the engine: IRIX's `crmFifoWait` gives up
+/// after about 4096 polls, which a CPU that is not drawing anything gets
+/// through long before the engine drains a startup queue, and the kernel
+/// then panics in early console setup. A poll is the guest waiting for the
+/// engine anyway, so spending that wait on the engine costs no overlap.
+const RE_STATUS_POLL_WAIT: std::time::Duration = std::time::Duration::from_micros(100);
 
 mod draw {
     pub const GL: u32 = 1 << 22;
@@ -1336,7 +1346,7 @@ impl CrimeRe {
             // queued while that fits, one entry past it, so software that
             // waits for room (the kernel's MTE copies wait for 64 - level)
             // always finds some and the CPU runs ahead of the engine.
-            STATUS | 0x4004 => Some(if self.idle() {
+            STATUS | 0x4004 => Some(if self.idle() || self.drain(RE_STATUS_POLL_WAIT) {
                 RE_STATUS_IDLE
             } else {
                 let n = self.ib.len();

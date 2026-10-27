@@ -92,8 +92,14 @@ hashes are given where a change is easiest to understand by reading the commit.
 - **A headless O2 is still an O2.** CRIME reads as revision 0xa1 and MACE
   as revision 2 whether or not a keyboard is plugged in; `headless` now only
   leaves the PS/2 ports empty, so the PROM and IRIX take the serial console.
-  IRIX 6.5.22 still panics early on a headless O2 (a NULL dereference
-  reported as a fault at 0xff800000); the graphics console boots.
+- **IRIX boots on any O2 memory size, and headless.** IRIX 6.5.22 panicked
+  in early console setup (`TLBMISS: KERNEL FAULT`, bad address 0xff800000)
+  on a headless O2 and with less than 1 GB: the kernel waits for the
+  rendering engine's FIFO for about 4096 of its own microseconds and gave up
+  while the engine, on its own host thread, was still drawing. A status read
+  now gives a busy engine up to 100 us of host time before it answers.
+  Tested to login with 32, 64, 128, 256, 224 (128+64+32), 384, 512 MB and
+  1 GB, and headless.
 - **The AIC-7880 is specified.** [docs/o2/aic7880.md](docs/o2/aic7880.md)
   describes the O2's SCSI controller from the Adaptec data books, the
   open-source drivers, the MACE spec and what the PROM and IRIX download: principles of operation, PCI
