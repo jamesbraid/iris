@@ -357,7 +357,7 @@ impl State {
     fn resp_has_room(&self) -> bool {
         // One slot reserved so producer equal to consumer always means
         // empty; an uninitialised queue has no room.
-        self.resp_len != 0 && (self.resp_prod + 1) % self.resp_len != self.resp_cons
+        self.resp_len != 0 && (u32::from(self.resp_prod) + 1) % u32::from(self.resp_len) != u32::from(self.resp_cons)
     }
 
     fn active_bank(&mut self) -> &mut [u16; BANK_WORDS] {
@@ -660,23 +660,39 @@ impl Core {
         ok
     }
 
+    /// `base + off` on the bus, or None when the sum runs past the top of
+    /// the 64-bit space: the guest chooses ring and buffer bases, and such
+    /// an address is a refused transfer, as the QEMU model treats it.
+    fn at(base: u64, off: u64) -> Option<u64> {
+        base.checked_add(off)
+    }
+
+    /// Where entry `index` of a ring at `base` sits.
+    fn entry_addr(base: u64, index: u32) -> Option<u64> {
+        Self::at(base, u64::from(index) * ENTRY_SIZE as u64)
+    }
+
     // A descriptor read the fabric refuses answers zero, deliberately: a
     // zeroed entry type takes the fail-visibly default and a zeroed segment
-    // transfers nothing.
-    fn ld8(&self, addr: u64) -> u8 {
-        let mut b = [0u8; 1];
-        self.dma_read(addr, &mut b);
-        b[0]
+    // transfers nothing. An address past the top of the bus is refused.
+    fn ld<const N: usize>(&self, addr: Option<u64>) -> [u8; N] {
+        let mut b = [0u8; N];
+        match addr {
+            Some(a) => {
+                self.dma_read(a, &mut b);
+            }
+            None => self.dma_miss(u64::MAX, false),
+        }
+        b
     }
-    fn ld16(&self, addr: u64) -> u16 {
-        let mut b = [0u8; 2];
-        self.dma_read(addr, &mut b);
-        u16::from_le_bytes(b)
+    fn ld8(&self, addr: Option<u64>) -> u8 {
+        self.ld::<1>(addr)[0]
     }
-    fn ld32(&self, addr: u64) -> u32 {
-        let mut b = [0u8; 4];
-        self.dma_read(addr, &mut b);
-        u32::from_le_bytes(b)
+    fn ld16(&self, addr: Option<u64>) -> u16 {
+        u16::from_le_bytes(self.ld(addr))
+    }
+    fn ld32(&self, addr: Option<u64>) -> u32 {
+        u32::from_le_bytes(self.ld(addr))
     }
 
     // ---- RISC RAM ----------------------------------------------------
@@ -869,7 +885,7 @@ impl Core {
     /// the semaphore first and falls through to bus status only when it is
     /// clear.
     fn post_one(&self, st: &mut State, p: &Pending) {
-        let addr = st.resp_base + st.resp_prod as u64 * ENTRY_SIZE as u64;
+        let addr = Self::entry_addr(st.resp_base, u32::from(st.resp_prod));
         let mut entry = [0u8; ENTRY_SIZE];
         let sense_len = p.sense.len().min(SENSE_MAX);
         entry[0] = ENTRY_TYPE_STATUS;
@@ -885,11 +901,11 @@ impl Core {
         // A completion the fabric refuses to store is dropped: advancing the
         // producer or raising the interrupt would point the driver at a slot
         // still holding a previous entry's bytes.
-        if !self.dma_write(addr, &entry) {
-            self.note(format!("status entry write to {addr:#x} refused; completion dropped"));
+        if !addr.is_some_and(|a| self.dma_write(a, &entry)) {
+            self.note(format!("status entry write to {addr:#x?} refused; completion dropped"));
             return;
         }
-        st.resp_prod = (st.resp_prod + 1) % st.resp_len;
+        st.resp_prod = ((u32::from(st.resp_prod) + 1) % u32::from(st.resp_len)) as u16;
         st.bus_status |= STATUS_INT_REQ | STATUS_RISC_INT_REQ;
     }
 
@@ -974,13 +990,12 @@ impl Core {
         } else {
             (REQ_OFF_SEGS, REQ_SEGS_INLINE, SEG_SIZE, CONT_OFF_SEGS, CONT_SEGS)
         };
-        let seg_at = |base: u64| -> (u64, u32) {
+        let seg_at = |base: Option<u64>| -> (u64, u32) {
+            let field = |off: u64| self.ld32(base.and_then(|b| Self::at(b, off)));
             if a64 {
-                let lo = self.ld32(base) as u64;
-                let hi = self.ld32(base + 4) as u64;
-                (lo | (hi << 32), self.ld32(base + 8))
+                (u64::from(field(0)) | (u64::from(field(4)) << 32), field(8))
             } else {
-                (self.ld32(base) as u64, self.ld32(base + 4))
+                (u64::from(field(0)), field(4))
             }
         };
         let mut segs = Vec::new();
@@ -988,18 +1003,18 @@ impl Core {
         let mut collected = 0u16;
         for i in 0..inline_n {
             if collected >= seg_count { break; }
-            let (a, l) = seg_at(entry_addr + inline_off + i as u64 * seg_size);
+            let (a, l) = seg_at(Self::at(entry_addr, inline_off + i as u64 * seg_size));
             Self::add_segment(&mut segs, &mut described, max, a, l);
             collected += 1;
         }
-        let mut cont_index = st.rqst_cons;
+        let mut cont_index = u32::from(st.rqst_cons);
         let mut conts_left = entry_count as i32 - 1;
         while collected < seg_count && conts_left > 0 {
-            cont_index = (cont_index + 1) % st.rqst_len;
-            let cont_addr = st.rqst_base + cont_index as u64 * ENTRY_SIZE as u64;
+            cont_index = (cont_index + 1) % u32::from(st.rqst_len);
+            let cont_addr = Self::entry_addr(st.rqst_base, cont_index);
             for i in 0..cont_n {
                 if collected >= seg_count { break; }
-                let (a, l) = seg_at(cont_addr + cont_off + i as u64 * seg_size);
+                let (a, l) = seg_at(cont_addr.and_then(|c| Self::at(c, cont_off + i as u64 * seg_size)));
                 Self::add_segment(&mut segs, &mut described, max, a, l);
                 collected += 1;
             }
@@ -1027,12 +1042,12 @@ impl Core {
     /// Read a request entry. Refused when the fabric refused the CDB read:
     /// the walk stops on the entry and nothing is posted.
     fn prepare_request(&self, st: &mut State, addr: u64, entry_count: u8, a64: bool) -> Prepared {
-        let handle = self.ld32(addr + REQ_OFF_HANDLE);
-        let device = self.ld16(addr + REQ_OFF_DEVICE);
-        let cdb_len = self.ld16(addr + REQ_OFF_CDBLEN);
-        let seg_count = self.ld16(addr + REQ_OFF_SEGCOUNT);
+        let handle = self.ld32(Self::at(addr, REQ_OFF_HANDLE));
+        let device = self.ld16(Self::at(addr, REQ_OFF_DEVICE));
+        let cdb_len = self.ld16(Self::at(addr, REQ_OFF_CDBLEN));
+        let seg_count = self.ld16(Self::at(addr, REQ_OFF_SEGCOUNT));
         let mut cdb = [0u8; CDB_FIELD_LEN];
-        if !self.dma_read(addr + REQ_OFF_CDB, &mut cdb) {
+        if !Self::at(addr, REQ_OFF_CDB).is_some_and(|a| self.dma_read(a, &mut cdb)) {
             self.note(format!("CDB read for the request entry at {addr:#x} refused; request dropped"));
             return Prepared::Refused;
         }
@@ -1161,11 +1176,15 @@ impl Core {
             if st.rqst_len == 0 {
                 return st;
             }
-            let prod = st.mailbox[MBOX_REQ] % st.rqst_len;
+            // Ring arithmetic is done wide: the length is any sixteen-bit
+            // value the driver chose, and indices wrap modulo it.
+            let len = u32::from(st.rqst_len);
+            let cons = u32::from(st.rqst_cons) % len;
+            let prod = u32::from(st.mailbox[MBOX_REQ]) % len;
             // No exact-equality exit terminates for every driver-supplied
             // index and entry count, so each step is budgeted by the
             // published entries; every step consumes at least one.
-            let budget = (prod + st.rqst_len - st.rqst_cons) % st.rqst_len;
+            let budget = (prod + len - cons) % len;
             if budget == 0 {
                 return st;
             }
@@ -1173,9 +1192,13 @@ impl Core {
             if !st.pending.is_empty() {
                 return st;
             }
-            let addr = st.rqst_base + st.rqst_cons as u64 * ENTRY_SIZE as u64;
-            let entry_type = self.ld8(addr);
-            let mut entry_count = self.ld8(addr + 1);
+            let Some(addr) = Self::entry_addr(st.rqst_base, cons) else {
+                // Past the top of the bus: refused, and the walk stops.
+                self.dma_miss(u64::MAX, false);
+                return st;
+            };
+            let entry_type = self.ld8(Some(addr));
+            let mut entry_count = self.ld8(Self::at(addr, 1));
             if entry_count == 0 {
                 entry_count = 1;
             }
@@ -1221,11 +1244,11 @@ impl Core {
                 // Answered incomplete rather than consumed silently.
                 t => {
                     self.note(format!("unexpected request entry type {t:#04x} at index {}", st.rqst_cons));
-                    let handle = self.ld32(addr + REQ_OFF_HANDLE);
+                    let handle = self.ld32(Self::at(addr, REQ_OFF_HANDLE));
                     self.post_status(&mut st, Self::incomplete(handle, 0, 0));
                 }
             }
-            st.rqst_cons = (st.rqst_cons + entry_count as u16) % st.rqst_len;
+            st.rqst_cons = ((cons + u32::from(entry_count)) % len) as u16;
             drop(st);
             self.sync_irq();
             st = self.st.lock().unwrap();
@@ -1530,6 +1553,14 @@ impl Isp1040 {
             st.resp_prod = u16f("resp_prod");
             st.resp_cons = u16f("resp_cons");
             st.reset_delay = u16f("reset_delay");
+            // Indices fold into their rings, whatever the file says.
+            if st.rqst_len != 0 {
+                st.rqst_cons %= st.rqst_len;
+            }
+            if st.resp_len != 0 {
+                st.resp_prod %= st.resp_len;
+                st.resp_cons %= st.resp_len;
+            }
             st.rqst_base = u32f("rqst_base") as u64 | ((u32f("rqst_base_hi") as u64) << 32);
             st.resp_base = u32f("resp_base") as u64 | ((u32f("resp_base_hi") as u64) << 32);
             if let Some(m) = get_field(v, "mailbox") { load_u16_slice(m, &mut st.mailbox); }
