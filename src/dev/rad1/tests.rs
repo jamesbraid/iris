@@ -508,3 +508,35 @@ fn reset_ends_engines_and_status() {
     assert!(!r.state.lock().unwrap().chan[CH_OUT].running);
     assert_eq!(rd(&r, 0x2c), 0);
 }
+
+/// Rings and status slots the guest based at the top of the 64-bit space
+/// fail as unmapped ones do; nothing wraps or overflows.
+#[test]
+fn rings_at_the_top_of_the_bus_fail_rather_than_wrap() {
+    let (r, _ram) = dma_card();
+    for set in [0, 3] {
+        wr(&r, RING_OUTPUT[set], 0xffff_f000);
+        wr(&r, RING_OUTPUT[set + 1], 0xffff_ffff);
+        wr(&r, RING_OUTPUT[set + 2], 0xffff_f008);
+    }
+    wr(&r, 0x58, 0x2000_0001);
+    at(&r, 10_000_000);
+    assert_eq!(rd(&r, 0x2c), 0);
+    assert!(!r.state.lock().unwrap().chan[CH_OUT].running);
+
+    // A one-shot status slot whose words run past the top.
+    wr(&r, 0x500, 0xffff_ffc0);
+    wr(&r, 0x528, 0xffff_ffff);
+    wr(&r, 0x504, 0xffff_fffc);
+    wr(&r, 0x5c, 0x40001);
+
+    // A continuous ring whose later slots would wrap.
+    wr(&r, 0x504, 0xffff_c078);
+    wr(&r, 0x4b4, 0xffff_ffc0);
+    wr(&r, 0x4b8, 0xffff_ffff);
+    wr(&r, 0x4bc, 0xffff_c078);
+    wr(&r, 0x5c, 0x40003 | (3300 << 2));
+    let gen = r.state.lock().unwrap().status_gen;
+    at(&r, 20_000_000);
+    assert_eq!(r.status_tick(gen), None, "the schedule stops on the failed slot");
+}

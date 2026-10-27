@@ -682,8 +682,8 @@ impl Inner {
         if s.status_gen != gen || !s.status_running {
             return None;
         }
-        let slot = Self::status_base(&s) + u64::from(s.status_cursor) * SLOT_STRIDE;
-        if !self.fill_slot(&mut s, slot, now) {
+        let slot = Self::status_base(&s).checked_add(u64::from(s.status_cursor) * SLOT_STRIDE);
+        if !slot.is_some_and(|slot| self.fill_slot(&mut s, slot, now)) {
             // Ring base unmapped: stop rather than spin on a failing DMA.
             s.status_running = false;
             return None;
@@ -726,16 +726,20 @@ impl Inner {
             };
             mirror.extend_from_slice(&v.to_le_bytes());
         }
-        let ok = dma.dma_write(slot + SLOT_MIRROR_OFFSET + 0x04, &mirror).is_ok();
+        // The slot address is the guest's: a word past the top of the bus
+        // is a failed transfer, like an unmapped one.
+        let put = |off: u64, data: &[u8]| slot.checked_add(off).is_some_and(|a| dma.dma_write(a, data).is_ok());
+        let ok = put(SLOT_MIRROR_OFFSET + 0x04, &mirror);
         let mut ptrs: Vec<(u64, u32)> = SLOT_PTR_UNUSED.iter().map(|&o| (o, 0)).collect();
         for (i, info) in CHAN_INFO.iter().enumerate() {
             let c = &s.chan[i];
-            ptrs.push((info.slot_ptr, if c.len != 0 { (c.base + c.offset) as u32 } else { 0 }));
+            // The slot carries the pointer's low 32 bits.
+            ptrs.push((info.slot_ptr, if c.len != 0 { c.base.wrapping_add(c.offset) as u32 } else { 0 }));
         }
         let ok = ok
-            && ptrs.iter().all(|&(o, v)| dma.dma_write(slot + o, &v.to_le_bytes()).is_ok())
-            && dma.dma_write(slot + SLOT_FLAGS_OFFSET, &0u32.to_le_bytes()).is_ok()
-            && dma.dma_write(slot + SLOT_DONE_OFFSET, &SLOT_DONE_WORD.to_le_bytes()).is_ok();
+            && ptrs.iter().all(|&(o, v)| put(o, &v.to_le_bytes()))
+            && put(SLOT_FLAGS_OFFSET, &0u32.to_le_bytes())
+            && put(SLOT_DONE_OFFSET, &SLOT_DONE_WORD.to_le_bytes());
         if !ok {
             eprintln!("rad1: status DMA at {slot:#x} failed");
         }
@@ -768,14 +772,19 @@ impl Inner {
             let chunk = bytes.min(CHUNK_BYTES);
             let n = chunk / info.frame_bytes;
             let buf = &mut ring[..(n * info.frame_bytes) as usize];
-            let status = if info.output {
-                dma.dma_read(c.base + c.offset, buf)
-            } else {
-                buf.fill(0);
-                dma.dma_write(c.base + c.offset, buf)
-            };
-            if !status.is_ok() {
-                eprintln!("rad1: {} DMA at {:#x} failed", info.name, c.base + c.offset);
+            // A ring the guest based at the top of the bus fails as an
+            // unmapped one does.
+            let addr = c.base.checked_add(c.offset);
+            let ok = addr.is_some_and(|a| {
+                if info.output {
+                    dma.dma_read(a, buf).is_ok()
+                } else {
+                    buf.fill(0);
+                    dma.dma_write(a, buf).is_ok()
+                }
+            });
+            if !ok {
+                eprintln!("rad1: {} DMA at {:#x} + {:#x} failed", info.name, c.base, c.offset);
                 return false;
             }
             let c = &mut s.chan[idx];
