@@ -775,6 +775,33 @@ impl Gl {
     /// it); 0x3A-0x49 the current matrix mode's top matrix, 16 floats in
     /// OpenGL's memory order (IRIS GL getmatrix under IGLOO reads them).
     pub fn state_word(&mut self, addr: u32) -> Option<u32> {
+        self.state_word_in(addr, addr)
+    }
+
+    /// `state_word` for the HQ4 microcode the Octane's boards run. Its GE
+    /// state sits 0x8C words above the Indigo2 microcode's from (at the
+    /// latest) the polygon-stipple enables on: every address known in both
+    /// layouts from there up (enables, stencil, depth, raster position,
+    /// clear values, viewport, scissor, fog, blend, lighting, the
+    /// matrix-stack indices and their bases) differs by exactly that, while
+    /// the matrix-mode index, the matrices and the modelview stack index,
+    /// all below 0x84, do not move. Where between 0x84 and 0x1FA the shift
+    /// starts is not known; this shifts every Indigo2 address from 0x84
+    /// up. An approximation, inferred from the two layouts' known
+    /// addresses. Pixel pipeline words answer at the address they were
+    /// loaded at.
+    pub fn state_word_hq4(&mut self, addr: u32) -> Option<u32> {
+        const SHIFT: u32 = 0x8C;
+        let hq3 = if addr >= 0x84 + SHIFT { addr - SHIFT } else { addr };
+        let v = self.state_word_in(hq3, addr)?;
+        // The matrix-stack depths answer with an address in the GE's
+        // stack, which moved with the rest.
+        Some(if matches!(hq3, 0x83 | 0x896 | 0x897) { v + SHIFT } else { v })
+    }
+
+    /// `state_word` at GE state address `addr`; pixel pipeline words at
+    /// `raw`, the address the client asked for.
+    fn state_word_in(&mut self, addr: u32, raw: u32) -> Option<u32> {
         self.ensure_init();
         match addr {
             4 if self.ci != 0 => Some(self.current_index.to_bits()),
@@ -850,7 +877,7 @@ impl Gl {
             0x6A..=0x79 => Some(self.tex.get()[(addr - 0x6A) as usize].to_bits()),
             // Pixel pipeline memory (PIXEL_STATE / INIT_PIXEL_STATE_ERAM
             // words) as loaded; test/gltest/gepeek.c reads it this way.
-            _ => self.query_word(addr).or_else(|| self.pix.loaded(addr).then(|| self.pix.read(addr))),
+            _ => self.query_word(addr).or_else(|| self.pix.loaded(raw).then(|| self.pix.read(raw))),
         }
     }
 
@@ -3157,5 +3184,33 @@ impl<const N: usize> MatrixStack for Stack<N> {
     }
     fn pop(&mut self) -> bool {
         Stack::pop(self)
+    }
+}
+
+#[cfg(test)]
+mod hq4_state_tests {
+    use super::Gl;
+
+    fn gl() -> Box<Gl> {
+        // SAFETY: Gl is plain data, valid zeroed.
+        unsafe { Box::<Gl>::new_zeroed().assume_init() }
+    }
+
+    /// The HQ4 layout answers the Indigo2 layout's words 0x8C higher, the
+    /// matrices and the modelview stack index where they are, and the
+    /// stacks' depths as addresses in the moved stacks.
+    #[test]
+    fn hq4_readbacks_follow_the_shifted_layout() {
+        let mut g = gl();
+        for (hq3, hq4) in [(0xB91, 0xC1D), (0xB94, 0xC20), (0xB98, 0xC24), (0x1FC, 0x288), (0x2D0, 0x35C), (0xBBE, 0xC4A)] {
+            assert_eq!(g.state_word_hq4(hq4), g.state_word(hq3), "{hq4:#x}");
+        }
+        for addr in [0x29, 0x3A, 0x4A, 0x6A] {
+            assert_eq!(g.state_word_hq4(addr), g.state_word(addr), "{addr:#x}");
+        }
+        assert_eq!(g.state_word_hq4(0x83), Some(0x925), "modelview stack, depth 1");
+        assert_eq!(g.state_word_hq4(0x922), Some(0xB25), "projection stack, depth 1");
+        assert_eq!(g.state_word_hq4(0x923), Some(0xB45), "texture stack, depth 1");
+        assert_eq!(g.state_word(0x83), Some(0x899), "the Indigo2 layout is unchanged");
     }
 }
