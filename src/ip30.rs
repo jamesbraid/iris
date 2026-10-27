@@ -7,5 +7,6 @@
 //! the same behaviour and approximations.
 
 pub mod xio;
+pub mod xbow;
 pub mod bridge;
 pub mod flash;
