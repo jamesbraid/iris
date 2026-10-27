@@ -1044,8 +1044,12 @@ impl Ioc3Eth {
     }
 
     /// A machine reset: the MAC's registers and the PHY as at power-on,
-    /// the interrupt dropped. The network link stays.
+    /// the interrupt dropped. The network link stays. The drop is delivered
+    /// under `irq_order`, so a raise the receive thread was delivering
+    /// lands before it rather than after, which would leave the line high
+    /// with the state saying low.
     pub fn reset(&self) {
+        let _order = self.irq_order.lock().unwrap();
         {
             let mut st = self.st.lock().unwrap();
             let delay = st.phy.delay;

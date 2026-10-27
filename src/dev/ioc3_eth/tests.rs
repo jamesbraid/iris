@@ -682,3 +682,37 @@ fn a_transmit_ring_at_the_top_of_the_bus_stops_the_walk() {
     assert_eq!(t.r(TX_CONSUME) & TX_CONSUME_MASK, 0x8000, "index stays on the entry");
     assert!(t.sent.pop().is_err());
 }
+
+/// A reset that lands while the receive thread is delivering a raise
+/// leaves the line low: the reset's drop goes out after the raise. The
+/// test plays the receive thread's part of `irq_flush` by hand, stopping
+/// between taking the queued raise and delivering it.
+#[test]
+fn a_reset_during_an_interrupt_delivery_leaves_the_line_low() {
+    let t = rig();
+    t.w(INT_ENABLE, INT_RX_TIMER);
+    let order = t.eth.irq_order.lock().unwrap();
+    let events = {
+        let mut st = t.eth.st.lock().unwrap();
+        st.raise_int(INT_RX_TIMER);
+        std::mem::take(&mut st.irq_events)
+    };
+    assert_eq!(events, vec![true]);
+    std::thread::scope(|s| {
+        let reset = s.spawn(|| t.eth.reset());
+        // Give a reset that does not wait its chance to drop the line first.
+        let start = std::time::Instant::now();
+        while t.irq.lock().unwrap().is_empty() && start.elapsed() < Duration::from_millis(100) {
+            std::thread::yield_now();
+        }
+        if let Some(cb) = t.eth.irq.lock().unwrap().as_ref() {
+            for level in events {
+                cb(level);
+            }
+        }
+        drop(order);
+        reset.join().unwrap();
+    });
+    let levels = t.irq.lock().unwrap().clone();
+    assert_eq!(levels.last(), Some(&false), "levels: {levels:?}");
+}
