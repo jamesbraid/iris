@@ -11,7 +11,10 @@ With the stock IP30 PROM (the 879,312-byte image, SHA-256 `ee4722ca6f9b821f…`)
 and an installed IRIX 6.5.30 disk, the machine boots to a serial login.
 `hinv` reports the processor, HEART revision D, 128 MB, Crossbow 1.3, both
 QL1040B controllers with the disk at unit 1 on controller 0, both IOC3 serial
-ports, the parallel port, `ef0` and the RAD audio processor. The guest pings
+ports, the parallel port, `ef0` and the RAD audio processor. With the Solid
+IMPACT board fitted (the default) and a blank NVRAM, the PROM comes up on
+the graphics console and IRIX starts X to the login screen and a desktop.
+The guest pings
 the NAT gateway, fetches files from its TFTP server and accepts telnet logins
 through a port forward. `reboot` comes back to the login prompt.
 
@@ -26,7 +29,7 @@ Octane has.
 prom  = "IP30prom.bin"        # the stock IP30 PROM (not built in)
 nvram = "nvram-ip30.bin"      # the DS1685 clock's NVRAM: the PROM's settings
 banks = [128]                 # MB in each HEART bank
-headless = true               # serial console (until a graphics board is fitted)
+headless = true               # no window; console=d in the NVRAM for a serial console
 serial_log = "serial.log"
 nat_subnet = "192.0.2.0/24"
 
@@ -36,6 +39,7 @@ cpu = "r10000"
 
 [octane]
 flash = "flash-ip30.bin"      # keep the PROM's flash records between runs
+# graphics = "none"           # no graphics board (default: "solidimpact")
 
 [[port_forward]]
 proto = "tcp"
@@ -76,8 +80,8 @@ The PROM keeps its environment (`console`, `AutoLoad`, boot paths) in the
 NVRAM of IOC3's DS1685 clock, including its extended RAM. `nvram` names the
 file it is kept in (512 bytes); left at the shared default `nvram.bin` the
 Octane uses `nvram-ip30.bin`. A blank NVRAM makes the PROM pick the graphics
-console; set `console=d` (or start from an image that has it) for a serial
-console with no graphics board.
+console; set `console=d` (or start from an image that has it) for the serial
+console.
 
 ## Disks
 
@@ -94,8 +98,17 @@ external bus).
 
 The console is IOC3's first serial port on TCP 127.0.0.1 (`serial_port_a`,
 8880 unless set), and `serial_log` copies what it sends to a file; the second
-port is `serial_port_b`. A
-machine with no graphics board runs without a window, as `headless` does.
+port is `serial_port_b`. The PROM's `console` variable picks between the
+serial and graphics consoles; `headless` only removes the window.
+
+## Graphics
+
+The graphics board is Solid IMPACT on widget 11: the same raster chips as
+the Indigo2 IP28's Solid IMPACT behind the Octane's XIO host interface (the
+HQ4), with interrupts and DMA through HEART. Its screen is the iris window
+and what iris-ci screenshots show; the keyboard and mouse are IOC3's PS/2
+ports. `[octane] graphics = "none"` leaves the port empty, and the machine
+then runs on its serial console with no window.
 
 ## Networking
 

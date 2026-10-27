@@ -331,6 +331,7 @@ first the console), `headless`, `[clock] fixed_mhz` (CP0 Count, 97.5 for the
 | Key | Default | Values and behavior |
 |---|---|---|
 | `octane.flash` | unset | File holding the boot flash, so the PROM's persistent records survive between runs. Created from `prom` when missing; an existing file is used as it stands, so delete it after changing `prom`. |
+| `octane.graphics` | `"solidimpact"` | The board in the first graphics port (widget 11): `solidimpact` or `none`. With `none` the machine runs on its serial console with no window. |
 
 ### Hardware constraints and precedence
 
