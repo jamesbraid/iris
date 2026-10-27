@@ -753,7 +753,7 @@ impl State {
 
         // A refused entry fetch leaves no destination; drop the frame.
         let mut entry = [0u8; 8];
-        if !dma_read(dma, ring_base + u64::from(consume), &mut entry) {
+        if !ring_base.checked_add(u64::from(consume)).is_some_and(|a| dma_read(dma, a, &mut entry)) {
             return;
         }
         let buf_addr = u64::from_be_bytes(entry);
@@ -782,11 +782,15 @@ impl State {
             word1 |= RXE_MULTICAST;
         }
 
-        let mut ok = dma_write(dma, buf_addr + 4, &(if short_circuit { 0 } else { word1 }).to_be_bytes());
-        ok &= dma_write(dma, buf_addr + offset, buf);
+        // The buffer address is the guest's: one whose parts would run past
+        // the top of the bus is a refused transfer, like any other.
+        let at = |off: u64| buf_addr.checked_add(off);
+        let write = |off: Option<u64>, data: &[u8]| off.is_some_and(|a| dma_write(dma, a, data));
+        let mut ok = write(at(4), &(if short_circuit { 0 } else { word1 }).to_be_bytes());
+        ok &= write(at(offset), buf);
         if !short_circuit {
             // The phantom FCS bytes, written as the zero they were summed as.
-            ok &= dma_write(dma, buf_addr + offset + size as u64, &[0; 4]);
+            ok &= write(at(offset).and_then(|a| a.checked_add(size as u64)), &[0; 4]);
         }
         // An unreachable buffer is not a delivered frame; the index stays.
         // The valid bit hands the buffer over, so it goes last.
@@ -841,11 +845,11 @@ impl State {
         let mut consume = align(self.get(TX_CONSUME) & TX_CONSUME_MASK);
 
         while consume != produce {
-            let desc = tx_base + u64::from(consume);
             // The whole descriptor in one transfer, header and inline area.
             let mut d = [0u8; TX_DESC_SIZE as usize];
-            // A refused fetch stops the walk with the index on the entry.
-            if !dma_read(dma, desc, &mut d) {
+            // A refused fetch stops the walk with the index on the entry; a
+            // descriptor address past the top of the bus is one.
+            if !tx_base.checked_add(u64::from(consume)).is_some_and(|desc| dma_read(dma, desc, &mut d)) {
                 break;
             }
             let be32 = |o: usize| u32::from_be_bytes(d[o..o + 4].try_into().unwrap());
