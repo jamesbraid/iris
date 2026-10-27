@@ -888,7 +888,13 @@ pub struct O2Disk {
 /// `serial_port_a`/`serial_port_b`/`serial_log` and `[clock] fixed_mhz`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OctaneSection {}
+pub struct OctaneSection {
+    /// A file holding the boot flash, so what the PROM writes there (its
+    /// persistent records) survives from run to run. Created from `prom`
+    /// when missing; an existing file is used as it stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flash: Option<String>,
+}
 
 fn o2_on() -> bool {
     true
