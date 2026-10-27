@@ -487,6 +487,10 @@ pub enum MachineProfile {
     /// the `[o2]` section, not the fullhouse/Guinness options above; see
     /// `src/ip32_machine.rs`.
     O2Ip32,
+    /// SGI Octane IP30: HEART, the Crossbow and the onboard Bridge, with an
+    /// R10000. Configured by the shared keys and the `[octane]` section; see
+    /// `src/ip30/machine.rs` and `docs/octane-ip30.md`.
+    OctaneIp30,
 }
 
 impl MachineProfile {
@@ -501,6 +505,7 @@ impl MachineProfile {
             Self::Indigo2Ip22 => "SGI Indigo2 (IP22)",
             Self::Indigo2Ip28 => "SGI Indigo2 IMPACT (IP28)",
             Self::O2Ip32 => "SGI O2 (IP32)",
+            Self::OctaneIp30 => "SGI Octane (IP30)",
         }
     }
 
@@ -510,7 +515,7 @@ impl MachineProfile {
     /// connector), one on the Indy.
     pub fn scsi_controllers(self) -> u8 {
         match self {
-            Self::Indigo2Ip22 | Self::O2Ip32 => 2,
+            Self::Indigo2Ip22 | Self::O2Ip32 | Self::OctaneIp30 => 2,
             _ => 1,
         }
     }
@@ -876,6 +881,14 @@ pub struct O2Disk {
     #[serde(default)]
     pub overlay: bool,
 }
+
+/// What only an Octane has (`[octane]` section). The rest is the shared
+/// keys: `prom` (the IP30 PROM image), `banks` (MB in each HEART bank),
+/// `[scsi.N]` (`controller` 0 internal, 1 external), `[network]`,
+/// `serial_port_a`/`serial_port_b`/`serial_log` and `[clock] fixed_mhz`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OctaneSection {}
 
 fn o2_on() -> bool {
     true
@@ -1481,6 +1494,11 @@ pub struct MachineConfig {
     #[serde(default)]
     pub o2: O2Section,
 
+    /// The Octane (`[octane]` section), used when `[machine] profile =
+    /// "octane_ip30"`.
+    #[serde(default)]
+    pub octane: OctaneSection,
+
     /// Host performance tuning (`[perf]` section).
     #[serde(default)]
     pub perf: PerfConfig,
@@ -1651,6 +1669,7 @@ impl Default for MachineConfig {
             debug: DebugConfig::default(),
             jitv2: Jitv2Config::default(),
             o2: O2Section::default(),
+            octane: OctaneSection::default(),
             perf: PerfConfig::default(),
             clock: ClockConfig::default(),
             rtc_offset: RtcOffset::default(),
@@ -1868,6 +1887,23 @@ impl MachineConfig {
                 }
             }
             crate::dev::crime_mem::check_kits(&self.o2_kits()).map_err(|e| format!("banks: {e}"))?;
+        } else if self.machine.profile == MachineProfile::OctaneIp30 {
+            // A HEART bank is a matched DIMM pair: 64 to 512 MB, filled from
+            // bank 0 without a gap, 2 GB at most (the Octane owner's guide).
+            let banks = &self.banks[..bank_count];
+            if banks[0] == 0 {
+                return Err("banks: an Octane needs memory in bank 0".into());
+            }
+            if let Some(gap) = banks.iter().position(|&b| b == 0) {
+                if banks[gap..].iter().any(|&b| b != 0) {
+                    return Err(format!("banks: bank {gap} is empty but a later bank is populated; fill the banks from 0"));
+                }
+            }
+            for (i, &sz) in banks.iter().enumerate() {
+                if sz != 0 && ![64, 128, 256, 512].contains(&sz) {
+                    return Err(format!("bank{i} size {sz} MB is invalid for an Octane (valid: 64, 128, 256, 512)"));
+                }
+            }
         } else {
             for (i, &sz) in self.banks.iter().enumerate().take(bank_count) {
                 if !VALID_BANK_SIZES.contains(&sz) {
@@ -1887,7 +1923,7 @@ impl MachineConfig {
             }
         }
         match (self.network.mode, self.machine.profile) {
-            (NetMode::Off, p) if p != MachineProfile::O2Ip32 => {
+            (NetMode::Off, p) if p != MachineProfile::O2Ip32 && p != MachineProfile::OctaneIp30 => {
                 return Err("network.mode = \"off\" is only available on the O2 for now; the Indy and Indigo2 always have their Ethernet".into());
             }
             (NetMode::Pcap, MachineProfile::O2Ip32) => {
