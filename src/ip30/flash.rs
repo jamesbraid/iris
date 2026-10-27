@@ -22,14 +22,14 @@
 //! - Status reads repeat the status byte on both data lanes.
 //!
 //! Persistence: [`CfiFlash::with_file`] backs the array with a file. An existing
-//! file of the right size replaces the seed image; otherwise the file is created
-//! from it. Completed program and erase cycles are written through to the file.
+//! file of the right size replaces the seed image, a missing or empty file is
+//! created from it, and a file of any other size is refused rather than
+//! overwritten. Completed program and erase cycles are written through to the file.
 //!
 //! [`Bridge::attach_flash`]: crate::ip30::bridge::Bridge::attach_flash
 
 use std::fs::{File, OpenOptions};
-use std::io;
-use std::os::unix::fs::FileExt;
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -99,18 +99,25 @@ impl CfiFlash {
 
     /// As [`CfiFlash::new`], backed by `path`. A file of exactly `size` bytes is
     /// the array's contents (a previous run's programming survives, and the
-    /// seed image is ignored). Anything else is replaced by the seeded array.
+    /// seed image is ignored). A missing or empty file is created from the seeded
+    /// array. A file of any other size is refused with `InvalidData` and left
+    /// untouched, since it is probably some other file.
     pub fn with_file(image: &[u8], size: usize, path: impl AsRef<Path>) -> io::Result<Self> {
         let flash = Self::new(image, size);
         let path = path.as_ref();
-        let file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?;
+        let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?;
         {
             let mut st = flash.st.lock().unwrap();
-            if file.metadata()?.len() == size as u64 {
-                file.read_exact_at(&mut st.data, 0)?;
+            let len = file.metadata()?.len();
+            if len == size as u64 {
+                file.read_exact(&mut st.data)?;
+            } else if len == 0 {
+                file.write_all(&st.data)?;
             } else {
-                file.set_len(0)?;
-                file.write_all_at(&st.data, 0)?;
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("flash file {} is {len} bytes, expected {size} (or empty); not overwriting it", path.display()),
+                ));
             }
             st.file = Some(file);
         }
@@ -129,8 +136,10 @@ impl CfiFlash {
 
 impl State {
     fn sync(&self, off: usize, len: usize) {
-        if let Some(f) = &self.file {
-            if let Err(e) = f.write_all_at(&self.data[off..off + len], off as u64) {
+        if let Some(mut f) = self.file.as_ref() {
+            // `&File` seeks and writes without needing `&mut self`.
+            let res = f.seek(SeekFrom::Start(off as u64)).and_then(|_| f.write_all(&self.data[off..off + len]));
+            if let Err(e) = res {
                 // The guest sees a completed cycle; the file is only the backing store.
                 log::warn!("flash: backing file write at {off:#x} failed: {e}");
             }
@@ -356,9 +365,19 @@ mod tests {
         assert_eq!(rd(&g, 0), 0xaabb);
         assert_eq!(rd(&g, 0x40), 0x1357);
         assert_eq!(rd(&g, 0xf0002), 0x2468);
-        // A file of the wrong size is replaced by the seed.
         drop(g);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_wrong_sized_file_is_refused_and_left_alone() {
+        let path = std::env::temp_dir().join(format!("iris-flash-size-{}", std::process::id()));
         std::fs::write(&path, [1, 2, 3]).unwrap();
+        let err = CfiFlash::with_file(&[0xcc, 0xdd], SIZE, &path).err().expect("refused");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(&path).unwrap(), [1, 2, 3]);
+        // An empty file is a new one and gets the seed.
+        std::fs::write(&path, []).unwrap();
         let h = CfiFlash::with_file(&[0xcc, 0xdd], SIZE, &path).unwrap();
         assert_eq!(rd(&h, 0), 0xccdd);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), SIZE as u64);

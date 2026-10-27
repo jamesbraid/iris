@@ -63,8 +63,9 @@ the stock IP30 PROM, at most 1 MiB. It is loaded into the boot flash, a 1 MiB
 part with the Intel/Sharp command set on the Bridge's first chip select,
 where the PROM also keeps its persistent records. `[octane] flash` names a
 file holding the whole flash, so those records survive from run to run; it
-is created from `prom` when missing, and an existing file is used as it
-stands (delete it after changing `prom`). Without it the flash starts from
+is created from `prom` when missing or empty, and an existing file of
+exactly 1 MiB is used as it stands (delete it after changing `prom`). A
+file of any other size is refused with an error and left untouched. Without it the flash starts from
 `prom` every run.
 
 ## Memory
