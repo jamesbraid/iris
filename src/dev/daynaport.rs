@@ -206,6 +206,16 @@ impl DaynaPort {
         let id          = self.target_id;
         let name        = format!("dayna{}-nat", id);
         thread::Builder::new().name(name).spawn(move || {
+            if config.mode == crate::config::NetMode::Stream {
+                match config.stream_endpoint() {
+                    Ok(ep) => {
+                        eprintln!("iris: DaynaPort {} backend = stream segment {}", id, ep);
+                        crate::net::stream::spawn(ep, tx_cons, rx_prod, tx_wake_nat, rx_wake_nat);
+                    }
+                    Err(e) => eprintln!("iris: DaynaPort {}: network.stream: {}; left unplugged", id, e),
+                }
+                return;
+            }
             #[cfg(feature = "pcap")]
             {
                 use crate::net::NetBackend;

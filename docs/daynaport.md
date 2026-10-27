@@ -55,7 +55,8 @@ Inherited from the machine-wide config:
 
 - **Backend selection** (`[network] mode`): `nat` or, in a `--features pcap`
   build, `pcap` — a DaynaPort can be bridged onto a real host interface exactly
-  as `ec0` can.
+  as `ec0` can. `stream` (see [NETWORKING.md](../NETWORKING.md)) puts it on a
+  private segment served by another program.
 - **The NFS export** (`[nfs]`), which is served in-process with no host sockets,
   so the guest can mount it over either interface.
 
