@@ -805,3 +805,32 @@ fn a_recorded_adat_frame_plays_back_unchanged() {
     frames_to_pcm(&ring, &mut back, ADAT_WORDS);
     assert_eq!(back, pcm);
 }
+
+/// A running output engine, the UST and the descriptors come back, and the
+/// engine runs on from the saved point by the time since the load, however
+/// far the loading card's own clock has got.
+#[test]
+fn save_load_round_trip() {
+    use crate::traits::Saveable;
+    let (r, _ram) = dma_card();
+    start_ust(&r);
+    program(&r, &RING_OUTPUT, 0x10_0000, 0xffff_f008);
+    wr(&r, 0x58, 0x2000_0001);
+    wr(&r, 0x44, 0xa000_0008);
+    at(&r, 10_000_000);
+    let pos = rd(&r, 0x2c) >> 18;
+    let ust = rd(&r, 0x30);
+    let v1 = r.save_state();
+
+    let (s, _ram2) = dma_card();
+    at(&s, 50_000_000);
+    s.load_state(&v1).unwrap();
+    assert_eq!(v1, s.save_state(), "Rad1 save_state mismatch after load_state round-trip");
+    assert_eq!(rd(&s, 0x44), 0xa000_0008);
+    assert_eq!(rd(&s, 0x30), ust);
+    assert_eq!(rd(&s, 0x2c) >> 18, pos);
+    at(&r, 20_000_000);
+    at(&s, 60_000_000);
+    assert_eq!(rd(&s, 0x2c) >> 18, rd(&r, 0x2c) >> 18, "both ran on 10 ms");
+    assert_eq!(rd(&s, 0x30), rd(&r, 0x30));
+}
