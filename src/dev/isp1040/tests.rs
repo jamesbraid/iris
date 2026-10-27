@@ -10,6 +10,7 @@ use super::*;
 use crate::irq::LevelProbe;
 use crate::pci::PciDmaStatus;
 use crate::traits::Saveable;
+use std::sync::Mutex;
 
 const MEM: usize = 1 << 20;
 
@@ -938,8 +939,8 @@ fn dma_above_4_gib_reaches_the_bus_in_full() {
 
 // ---- commands off the CPU thread ---------------------------------------
 
-/// Fake memory whose writes to one address wait until the test opens the
-/// gate: a disk answer that is slow to arrive.
+/// Fake memory whose accesses to one address wait until the test opens the
+/// gate: a disk answer that is slow to arrive, or a slow payload fetch.
 struct GatedMem {
     mem: Arc<FakeMem>,
     addr: u64,
@@ -952,7 +953,7 @@ impl GatedMem {
     fn new(mem: Arc<FakeMem>, addr: u32) -> Arc<Self> {
         Arc::new(GatedMem { mem, addr: addr as u64, gate: Mutex::new((false, false)), cv: std::sync::Condvar::new() })
     }
-    /// Block until a write reached the gate.
+    /// Block until an access reached the gate.
     fn wait_arrival(&self) {
         let mut g = self.gate.lock().unwrap();
         while !g.0 { g = self.cv.wait(g).unwrap(); }
@@ -961,19 +962,23 @@ impl GatedMem {
         self.gate.lock().unwrap().1 = true;
         self.cv.notify_all();
     }
-}
-
-impl PciDma for GatedMem {
-    fn dma_read(&self, addr: u64, buf: &mut [u8]) -> PciDmaStatus {
-        self.mem.dma_read(addr, buf)
-    }
-    fn dma_write(&self, addr: u64, data: &[u8]) -> PciDmaStatus {
+    fn pass(&self, addr: u64) {
         if addr == self.addr {
             let mut g = self.gate.lock().unwrap();
             g.0 = true;
             self.cv.notify_all();
             while !g.1 { g = self.cv.wait(g).unwrap(); }
         }
+    }
+}
+
+impl PciDma for GatedMem {
+    fn dma_read(&self, addr: u64, buf: &mut [u8]) -> PciDmaStatus {
+        self.pass(addr);
+        self.mem.dma_read(addr, buf)
+    }
+    fn dma_write(&self, addr: u64, data: &[u8]) -> PciDmaStatus {
+        self.pass(addr);
         self.mem.dma_write(addr, data)
     }
 }
@@ -1015,16 +1020,58 @@ fn the_doorbell_returns_before_the_command_completes() {
     assert!(probe.level(), "the completion raises the line from the adapter's thread");
 }
 
-/// A soft reset waits for the command in flight and drops its completion:
-/// the reset ring has nowhere to put it.
+/// A soft reset cancels the command in flight without waiting for its
+/// target: the reset store returns while the target is still busy, and
+/// the command then reaches neither the disk nor the response ring.
 #[test]
-fn a_soft_reset_drops_the_completion_of_a_command_in_flight() {
-    let (r, gate, probe) = gated_rig("async-reset");
+fn a_soft_reset_does_not_wait_for_the_target() {
+    let mem = FakeMem::new();
+    let gate = GatedMem::new(mem.clone(), BUF);
+    let isp = Isp1040::new();
+    isp.connect_dma(gate.clone());
+    isp.attach_disk_at(1, &image("async-reset", 64)).expect("attach");
+    let r = Rig { isp, mem };
+    let (probe, line) = LevelProbe::line();
+    r.isp.connect_interrupt(line);
+    r.init_rings(4, 4);
+    r.w(reg::BUS_CTRL, CTRL_INT_ENABLE | CTRL_RISC_INT_ENABLE);
+    r.mem.put(BUF, &[0x5a; BLOCK_SIZE]);
+    r.put_entry(0, &request(0x77, 1, &cdb10(scsi_cmd::WRITE_10, 3, 1), &[(BUF, BLOCK_SIZE as u32)]));
+    // The payload fetch stops at the gate; the target is then made busy
+    // with something else, so the command waits for it.
     r.isp.write(reg::REQUEST_QUEUE, 1, 2);
     gate.wait_arrival();
+    assert!(r.isp.command_running());
+    let busy = r.isp.targets.lock();
+    gate.open();
+    r.isp.write(reg::BUS_CTRL, CTRL_SOFT_RESET as u32, 2);
+    assert_eq!(r.r(r.mb(4)), SIG4, "the reset happened with the target still busy");
+    drop(busy);
+    r.isp.wait_idle();
+    assert_eq!(g32(&r.status(0), 4), 0, "no status entry was written");
+    assert_eq!(r.r(reg::BUS_STATUS), 0);
+    assert!(!probe.level());
+    // The block was never written.
+    r.init_rings(4, 4);
+    r.put_entry(0, &request(0x78, 1, &cdb10(scsi_cmd::READ_10, 3, 1), &[(BUF + 0x1000, BLOCK_SIZE as u32)]));
+    r.doorbell(1);
+    assert_eq!(g32(&r.status(0), 4), 0x78);
+    assert_eq!(r.mem.get(BUF + 0x1000, BLOCK_SIZE), vec![0; BLOCK_SIZE]);
+}
+
+/// A soft reset during a store into host memory waits for that one store,
+/// then nothing more of the cancelled command reaches memory.
+#[test]
+fn a_soft_reset_during_a_store_drops_the_completion() {
+    let (r, gate, probe) = gated_rig("async-reset-store");
+    r.isp.write(reg::REQUEST_QUEUE, 1, 2);
+    gate.wait_arrival();
+    let before = r.isp.gen.load(Ordering::Acquire);
     std::thread::scope(|s| {
         let reset = s.spawn(|| r.isp.write(reg::BUS_CTRL, CTRL_SOFT_RESET as u32, 2));
-        while !r.isp.waiting_on_command() { std::thread::yield_now(); }
+        // The reset has moved the generation on and waits for the store.
+        while r.isp.gen.load(Ordering::Acquire) == before { std::thread::yield_now(); }
+        assert!(!reset.is_finished());
         gate.open();
         reset.join().unwrap();
     });
@@ -1043,12 +1090,9 @@ fn a_new_response_ring_takes_the_completion_of_the_command_in_flight() {
     const RESP2: u32 = 0x3000;
     r.isp.write(reg::REQUEST_QUEUE, 1, 2);
     gate.wait_arrival();
-    std::thread::scope(|s| {
-        let init = s.spawn(|| r.init_queue(mbox::INIT_RSP_QUEUE, 4, RESP2));
-        while !r.isp.waiting_on_command() { std::thread::yield_now(); }
-        gate.open();
-        assert_eq!(init.join().unwrap(), mbox::COMPLETE);
-    });
+    // The initialisation does not wait for the command.
+    assert_eq!(r.init_queue(mbox::INIT_RSP_QUEUE, 4, RESP2), mbox::COMPLETE);
+    gate.open();
     r.isp.wait_idle();
     assert_eq!(r.isp.total_commands(), 1, "the command ran once");
     assert_eq!(r.r(reg::REQUEST_QUEUE), 1, "and its entry was consumed");
@@ -1065,12 +1109,8 @@ fn a_new_request_ring_starts_at_zero_and_the_command_in_flight_completes() {
     let (r, gate, _probe) = gated_rig("async-req-init");
     r.isp.write(reg::REQUEST_QUEUE, 1, 2);
     gate.wait_arrival();
-    std::thread::scope(|s| {
-        let init = s.spawn(|| r.init_queue(mbox::INIT_REQ_QUEUE, 4, RQST));
-        while !r.isp.waiting_on_command() { std::thread::yield_now(); }
-        gate.open();
-        assert_eq!(init.join().unwrap(), mbox::COMPLETE);
-    });
+    assert_eq!(r.init_queue(mbox::INIT_REQ_QUEUE, 4, RQST), mbox::COMPLETE);
+    gate.open();
     r.isp.wait_idle();
     assert_eq!(r.isp.total_commands(), 1);
     assert_eq!(r.r(reg::REQUEST_QUEUE), 0, "the new ring's consumer is untouched");
