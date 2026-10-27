@@ -37,6 +37,7 @@ mod nfs_pcap;
 pub mod net_pcap;
 pub mod nfsudp;
 pub mod packet;
+pub mod stream;
 mod portmap;
 mod rsh;
 mod services;
@@ -95,6 +96,8 @@ pub struct GatewayConfig {
     /// gateway): `rsh <gateway> cat|ls|echo|pwd`. Nothing is executed on the
     /// host. None disables it, and 514 is then relayed to the host like any port.
     pub rsh_dir: Option<std::path::PathBuf>,
+    /// The peer of `NetMode::Stream`, as `tcp:IP:PORT` or `unix:PATH`.
+    pub stream: Option<String>,
 }
 
 impl Default for GatewayConfig {
@@ -113,6 +116,7 @@ impl Default for GatewayConfig {
             nfs_pcap_ip:  None,
             tftp_dir:     None,
             rsh_dir:      None,
+            stream:       None,
         }
     }
 }
@@ -133,6 +137,7 @@ impl GatewayConfig {
             nfs_pcap_ip: net.nfs_pcap_ip,
             tftp_dir: net.tftp_dir.clone(),
             rsh_dir: net.rsh_dir.clone(),
+            stream: net.stream.clone(),
             ..Self::default()
         }
     }
