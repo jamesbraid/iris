@@ -1132,6 +1132,53 @@ impl Isp1040 {
 
 /// The monitor's `scsi`/`cow` subcommands and the run-time disc changes come
 /// from `scsi_monitor` through this.
+/// The monitor's `scsi`/`cow` commands (`scsi1`/`cow1` for the external
+/// bus), as the other SCSI controllers have them, plus `scsi notes`.
+impl crate::traits::Device for Isp1040 {
+    fn step(&self, _cycles: u64) {}
+    fn stop(&self) {}
+    fn start(&self) {}
+    fn is_running(&self) -> bool { true }
+    fn get_clock(&self) -> u64 { 0 }
+
+    fn register_commands(&self) -> Vec<(String, String)> {
+        let usage = crate::scsi_monitor::SCSI_USAGE;
+        if self.index == 0 {
+            vec![
+                ("scsi".to_string(), format!("SCSI (QLogic ISP1040, controller 0): {usage} | scsi notes")),
+                ("scsi0".to_string(), "Alias for `scsi` (controller 0)".to_string()),
+                ("cow".to_string(), "COW overlays on controller 0: cow status | cow commit [id] | cow reset [id]".to_string()),
+            ]
+        } else {
+            vec![
+                (format!("scsi{}", self.index), format!("SCSI controller {} (external): same subcommands as `scsi`", self.index)),
+                (format!("cow{}", self.index), format!("COW overlays on controller {}: same subcommands as `cow`", self.index)),
+            ]
+        }
+    }
+
+    fn execute_command(&self, cmd: &str, args: &[&str], mut w: Box<dyn std::io::Write + Send>) -> Result<(), String> {
+        use std::io::Write as _;
+        if cmd.starts_with("scsi") {
+            if let Some(done) = crate::scsi_monitor::scsi_subcommand(self, args, &mut *w) {
+                return done;
+            }
+            if args.first().copied() == Some("notes") {
+                let _ = writeln!(w, "QLogic ISP1040, controller {}: {} commands", self.index, self.total_commands());
+                for n in self.notes() {
+                    let _ = writeln!(w, "  note: {n}");
+                }
+                return Ok(());
+            }
+            return Err(format!("Usage: {} | scsi notes", crate::scsi_monitor::SCSI_USAGE));
+        }
+        if cmd.starts_with("cow") {
+            return crate::scsi_monitor::cow_command(self, args, &mut *w);
+        }
+        Err("Command not found".to_string())
+    }
+}
+
 impl crate::scsi_monitor::ScsiTargets for Isp1040 {
     fn with_targets<R>(&self, f: impl FnOnce(&mut [Option<ScsiDevice>]) -> R) -> R {
         let mut targets = self.targets.lock().unwrap();

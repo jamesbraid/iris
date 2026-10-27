@@ -618,6 +618,9 @@ impl OctaneMachine {
         monitor.register_device(crate::devlog::init_devlog());
         monitor.register_device(cpu.clone().as_device());
         monitor.register_device(bus.clone());
+        for c in &scsi {
+            monitor.register_device(c.clone());
+        }
         let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
         let ci_serial = cfg.ci.then(|| Arc::new(crate::dev::z85c30::CiSerialBackend::new()));
         Self::connect_serial(cfg, &ioc3, ci_serial.as_ref());
