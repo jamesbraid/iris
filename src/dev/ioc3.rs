@@ -46,7 +46,9 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
+
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::dev::ds1687::MaceRtc;
@@ -2502,6 +2504,12 @@ impl InterruptController for KbcSink {
     }
 }
 
+/// Lock order: `service_pass`, then `line_order`, then `st`; the line and
+/// Ethernet slots (`pin_line`, `superio_line`, `eth`, `raw_dma`) are leaves.
+/// The serial and parallel engines move their rings with `st` held: the
+/// DMA goes down through the Bridge and HEART, which never call back into
+/// the chip, and an access to the Ethernet block goes to it with `st`
+/// released.
 struct Shared {
     pci: PciConfig,
     st: Mutex<St>,
@@ -2535,10 +2543,10 @@ impl Shared {
     /// order is always `line_order` then `st`, and `st` is never held when
     /// this is called.
     fn sync_superio(&self) {
-        let _order = self.line_order.lock().unwrap();
-        let level = self.st.lock().unwrap().superio_level();
+        let _order = self.line_order.lock();
+        let level = self.st.lock().superio_level();
         if self.superio_level.swap(level, Ordering::SeqCst) != level {
-            if let Some(l) = self.superio_line.lock().unwrap().as_ref() {
+            if let Some(l) = self.superio_line.lock().as_ref() {
                 l.set(level);
             }
         }
@@ -2546,10 +2554,10 @@ impl Shared {
 
     /// The same for the PCI pin, which follows the Ethernet block's level.
     fn sync_pin(&self) {
-        let _order = self.line_order.lock().unwrap();
+        let _order = self.line_order.lock();
         let level = self.eth_level.load(Ordering::SeqCst);
         if self.pin_level.swap(level, Ordering::SeqCst) != level {
-            if let Some(l) = self.pin_line.lock().unwrap().as_ref() {
+            if let Some(l) = self.pin_line.lock().as_ref() {
                 l.set(level);
             }
         }
@@ -2558,7 +2566,7 @@ impl Shared {
     /// Run `f` with the chip locked, then drive the lines from what it left.
     fn with_st<R>(&self, parity: bool, f: impl FnOnce(&mut St, &Ctx) -> R) -> R {
         let r = {
-            let mut st = self.st.lock().unwrap();
+            let mut st = self.st.lock();
             let ctx = Ctx { ps2: &self.ps2, eth_parity: parity };
             f(&mut st, &ctx)
         };
@@ -2571,7 +2579,7 @@ impl Shared {
 
     fn kbc_service(&self) {
         {
-            let mut st = self.st.lock().unwrap();
+            let mut st = self.st.lock();
             st.kbc_fill(0, &self.ps2);
             st.kbc_fill(1, &self.ps2);
         }
@@ -2582,11 +2590,11 @@ impl Shared {
     /// very thread, from inside a transmit), that access picks it up.
     fn kbc_poke(&self) {
         match self.st.try_lock() {
-            Ok(mut st) => {
+            Some(mut st) => {
                 st.kbc_fill(0, &self.ps2);
                 st.kbc_fill(1, &self.ps2);
             }
-            Err(_) => {
+            None => {
                 self.kbc_dirty.store(true, Ordering::SeqCst);
                 return;
             }
@@ -2597,8 +2605,8 @@ impl Shared {
     /// Hand the Ethernet block its way to memory and its interrupt, once
     /// both it and the bridge's DMA are in hand.
     fn connect_eth(self: &Arc<Self>) {
-        let eth = self.eth.lock().unwrap().clone();
-        let dma = self.raw_dma.lock().unwrap().clone();
+        let eth = self.eth.lock().clone();
+        let dma = self.raw_dma.lock().clone();
         if let (Some(e), Some(d)) = (eth, dma) {
             let weak = Arc::downgrade(self);
             e.connect(
@@ -2614,7 +2622,7 @@ impl Shared {
     }
 
     fn eth(&self) -> Option<Arc<dyn Ioc3EthPort>> {
-        self.eth.lock().unwrap().clone()
+        self.eth.lock().clone()
     }
 
     /// Whether buffer-RAM parity checking is on, for an access to the RAM.
@@ -2626,7 +2634,7 @@ impl Shared {
     }
 
     fn flush_nvram(&self, quiet: Duration) {
-        let Some((path, image)) = self.st.lock().unwrap().rtc.take_dirty(quiet) else { return };
+        let Some((path, image)) = self.st.lock().rtc.take_dirty(quiet) else { return };
         if let Err(e) = save_nvram(&path, &image) {
             eprintln!("ioc3: NVRAM {}: {e}", path.display());
         }
@@ -2707,12 +2715,12 @@ impl Ioc3 {
     /// Wire the host end of serial port `port` (0 is the console): a TCP
     /// listener, a log tee, or nothing.
     pub fn set_serial_backend(&self, port: usize, backend: Arc<dyn SerialBackend>) {
-        self.sh.st.lock().unwrap().uart[port].backend = backend;
+        self.sh.st.lock().uart[port].backend = backend;
     }
 
     /// Where parallel-port output goes. Without one it is dropped.
     pub fn set_parallel_backend(&self, backend: Arc<dyn SerialBackend>) {
-        self.sh.st.lock().unwrap().par.backend = Some(backend);
+        self.sh.st.lock().par.backend = Some(backend);
     }
 
     /// Back the DS1685's RAM (user RAM, bank-1 registers and the 128-byte
@@ -2724,7 +2732,7 @@ impl Ioc3 {
     pub fn set_nvram_file(&self, path: impl Into<std::path::PathBuf>) -> std::io::Result<()> {
         let path = path.into();
         let image = {
-            let mut st = self.sh.st.lock().unwrap();
+            let mut st = self.sh.st.lock();
             if let Ok(img) = std::fs::read(&path) {
                 if !st.rtc.load(&img) {
                     log::warn!("ioc3: NVRAM file {} has {} bytes, not 114 or 512; ignored", path.display(), img.len());
@@ -2754,7 +2762,7 @@ impl Ioc3 {
     /// Attach the Ethernet MAC. It is told about DMA and the PCI interrupt
     /// pin as soon as the bridge provides them.
     pub fn attach_eth(&self, eth: Arc<dyn Ioc3EthPort>) {
-        *self.sh.eth.lock().unwrap() = Some(eth);
+        *self.sh.eth.lock() = Some(eth);
         self.sh.connect_eth();
     }
 
@@ -2763,10 +2771,10 @@ impl Ioc3 {
     /// takes the PCI pin, which only the Ethernet block drives.
     pub fn connect_superio_interrupt(&self, line: IrqLine) {
         {
-            let _order = self.sh.line_order.lock().unwrap();
+            let _order = self.sh.line_order.lock();
             let level = self.sh.superio_level.load(Ordering::SeqCst);
             line.set(level);
-            *self.sh.superio_line.lock().unwrap() = Some(line);
+            *self.sh.superio_line.lock() = Some(line);
         }
         self.sh.sync_superio();
     }
@@ -2779,7 +2787,7 @@ impl Ioc3 {
 
     /// Whether the guest has asked the clock to power the machine off.
     pub fn powered_off(&self) -> bool {
-        self.sh.st.lock().unwrap().rtc.dev.powered_off()
+        self.sh.st.lock().rtc.dev.powered_off()
     }
 
     /// A PCI reset of the chip (not of the clock or the buffer RAM).
@@ -2807,7 +2815,7 @@ impl Ioc3 {
                         break;
                     }
                     {
-                        let _pass = sh.service_pass.lock().unwrap();
+                        let _pass = sh.service_pass.lock();
                         if !sh.paused.load(Ordering::SeqCst) {
                             sh.service();
                             sh.flush_nvram(NVRAM_QUIET);
@@ -2818,7 +2826,19 @@ impl Ioc3 {
                 }
             })
             .expect("spawn ioc3 service thread");
-        *self.service_thread.lock().unwrap() = Some(thread);
+        *self.service_thread.lock() = Some(thread);
+    }
+
+    /// Name the chip's long-lived locks in the lock registry, which holds
+    /// only a weak reference to them.
+    pub fn register_locks(&self) {
+        for (what, probe) in [
+            ("st", (|s: &Shared| s.st.is_locked()) as fn(&Shared) -> bool),
+            ("line_order", |s| s.line_order.is_locked()),
+        ] {
+            let sh = Arc::downgrade(&self.sh);
+            crate::locks::register_lock(format!("ioc3::{what}"), move || sh.upgrade().is_some_and(|s| probe(&s)));
+        }
     }
 
     /// Hold the service thread off the chip while the machine is stopped:
@@ -2827,7 +2847,7 @@ impl Ioc3 {
     /// characters wait.
     pub fn pause(&self) {
         self.sh.paused.store(true, Ordering::SeqCst);
-        drop(self.sh.service_pass.lock().unwrap());
+        drop(self.sh.service_pass.lock());
     }
 
     /// Let the service thread look after the chip again.
@@ -2837,14 +2857,14 @@ impl Ioc3 {
 
     /// The SuperIO interrupt status register, for tests and the monitor.
     pub fn int_status(&self) -> u32 {
-        self.sh.st.lock().unwrap().int_status
+        self.sh.st.lock().int_status
     }
 }
 
 impl Drop for Ioc3 {
     fn drop(&mut self) {
         self.sh.quit.store(true, Ordering::SeqCst);
-        if let Some(t) = self.service_thread.get_mut().unwrap().take() {
+        if let Some(t) = self.service_thread.get_mut().take() {
             let _ = t.join();
         }
         self.flush_nvram();
@@ -2895,16 +2915,16 @@ impl PciBusDevice for Ioc3 {
     /// The PCI interrupt pin: the Ethernet block's level.
     fn connect_interrupt(&self, line: IrqLine) {
         {
-            let _order = self.sh.line_order.lock().unwrap();
+            let _order = self.sh.line_order.lock();
             line.set(self.sh.pin_level.load(Ordering::SeqCst));
-            *self.sh.pin_line.lock().unwrap() = Some(line);
+            *self.sh.pin_line.lock() = Some(line);
         }
         self.sh.sync_pin();
     }
 
     fn connect_dma(&self, dma: Arc<dyn PciDma>) {
-        *self.sh.raw_dma.lock().unwrap() = Some(dma.clone());
-        self.sh.st.lock().unwrap().dma = Some(Arc::new(Ioc3Dma::new(dma)));
+        *self.sh.raw_dma.lock() = Some(dma.clone());
+        self.sh.st.lock().dma = Some(Arc::new(Ioc3Dma::new(dma)));
         self.sh.connect_eth();
     }
 }
