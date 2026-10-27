@@ -36,7 +36,7 @@
 //!   cannot express.
 
 use std::ops::Deref;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -368,6 +368,16 @@ impl Rad1 {
     }
 }
 
+impl Drop for Rad1 {
+    fn drop(&mut self) {
+        self.inner.quit.store(true, Ordering::SeqCst);
+        let threads = std::mem::take(&mut *self.inner.threads.lock().unwrap());
+        for t in threads {
+            let _ = t.join();
+        }
+    }
+}
+
 pub struct Inner {
     pci: PciConfig,
     state: Mutex<State>,
@@ -375,6 +385,19 @@ pub struct Inner {
     /// When not `i64::MIN`, the clock in nanoseconds, for tests; no timer
     /// thread runs then.
     fake_ns: AtomicI64,
+    /// Nanoseconds the card's clock stood still while the machine was
+    /// stopped, and when the current stop began: the sample clock, the UST
+    /// and the status schedule do not run on while the guest cannot see
+    /// them.
+    stopped_ns: AtomicI64,
+    stopped_at: Mutex<Option<Instant>>,
+    /// Held across each status completion the timer thread makes, so a
+    /// pause can wait one out.
+    tick_pass: Mutex<()>,
+    /// Status timer threads, joined on drop; a replaced schedule's thread
+    /// ends by itself and is reaped when the next one starts.
+    threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    quit: AtomicBool,
     dma: OnceLock<Arc<dyn PciDma>>,
     me: Weak<Inner>,
 }
@@ -393,6 +416,11 @@ impl Inner {
             state: Mutex::new(State::new(0)),
             start: Instant::now(),
             fake_ns: AtomicI64::new(i64::MIN),
+            stopped_ns: AtomicI64::new(0),
+            stopped_at: Mutex::new(None),
+            tick_pass: Mutex::new(()),
+            threads: Mutex::new(Vec::new()),
+            quit: AtomicBool::new(false),
             dma: OnceLock::new(),
             me,
         }
@@ -400,9 +428,37 @@ impl Inner {
 
     fn now(&self) -> i64 {
         match self.fake_ns.load(Ordering::Relaxed) {
-            i64::MIN => self.start.elapsed().as_nanos() as i64,
+            i64::MIN => {
+                let at = self.stopped_at.lock().unwrap().unwrap_or_else(Instant::now);
+                at.duration_since(self.start).as_nanos() as i64 - self.stopped_ns.load(Ordering::SeqCst)
+            }
             t => t,
         }
+    }
+
+    /// Stop the card's clock and hold the status timer off guest memory
+    /// while the machine is stopped. Once this returns no completion is
+    /// under way, and none is made until [`Inner::resume`].
+    pub fn pause(&self) {
+        {
+            let mut at = self.stopped_at.lock().unwrap();
+            if at.is_none() {
+                *at = Some(Instant::now());
+            }
+        }
+        drop(self.tick_pass.lock().unwrap());
+    }
+
+    /// Run the clock again from where it stopped.
+    pub fn resume(&self) {
+        let mut at = self.stopped_at.lock().unwrap();
+        if let Some(t) = at.take() {
+            self.stopped_ns.fetch_add(t.elapsed().as_nanos() as i64, Ordering::SeqCst);
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.stopped_at.lock().unwrap().is_some()
     }
 
     /// Back to the power-on state.
@@ -630,10 +686,11 @@ impl Inner {
         if self.fake_ns.load(Ordering::Relaxed) == i64::MIN {
             let gen = s.status_gen;
             let me = self.me.clone();
-            std::thread::Builder::new()
-                .name("rad1-status".into())
-                .spawn(move || Self::status_thread(me, gen))
-                .ok();
+            let mut threads = self.threads.lock().unwrap();
+            threads.retain(|t| !t.is_finished());
+            threads.extend(
+                std::thread::Builder::new().name("rad1-status".into()).spawn(move || Self::status_thread(me, gen)).ok(),
+            );
         }
     }
 
@@ -643,9 +700,12 @@ impl Inner {
             + (u128::from(k) * u128::from(s.status_interval) * u128::from(NS_PER_SEC) / u128::from(STATUS_CLOCK_HZ)) as i64
     }
 
-    /// Sleeps to each deadline holding only a weak reference, so dropping
-    /// the card ends it; a new schedule bumps the generation and ends it too.
+    /// Sleeps to each deadline holding only a weak reference, in slices
+    /// short enough to notice the card being dropped; a new schedule bumps
+    /// the generation and ends it too. While the machine is stopped the
+    /// card's clock stands still, so no deadline comes.
     fn status_thread(me: Weak<Inner>, gen: u64) {
+        const SLICE: Duration = Duration::from_millis(2);
         let mut next = match me.upgrade() {
             Some(i) => {
                 let s = i.state.lock().unwrap();
@@ -658,13 +718,20 @@ impl Inner {
         };
         loop {
             let wait = match me.upgrade() {
-                Some(i) => next - i.now(),
-                None => return,
+                Some(i) if !i.quit.load(Ordering::SeqCst) => next - i.now(),
+                _ => return,
             };
             if wait > 0 {
-                std::thread::sleep(Duration::from_nanos(wait as u64));
+                std::thread::sleep(Duration::from_nanos(wait as u64).min(SLICE));
+                continue;
             }
             let Some(i) = me.upgrade() else { return };
+            let _pass = i.tick_pass.lock().unwrap();
+            if i.stopped() {
+                drop(_pass);
+                std::thread::sleep(SLICE);
+                continue;
+            }
             match i.status_tick(gen) {
                 Some(n) => next = n,
                 None => return,
