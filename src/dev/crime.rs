@@ -49,17 +49,14 @@ pub mod crime_reg {
     pub const MEM_ERROR_ECC_REPL: u32 = 0x0270;
 }
 
-/// CRIME revision as reported to the guest.
-///
-/// The low half identifies the ASIC revision; O2s in the field report a small
-/// number here. Which value the PROM demands is one of the things the first
-/// run is meant to discover, so it is a field rather than a constant.
-pub const CRIME_REV_DEFAULT: u64 = 0x0000_0000_0000_0011;
 /// CRIME interrupt bits that latch (CRIME 1.5 spec): 30, 24:22, 19:16.
 pub const CRIME_LATCHED_BITS: u64 = 0x41cf_0000;
 
-/// CRIME 1.1 as the PROM wants to see it before it offers a graphics console.
-pub const CRIME_REV_GBE: u64 = 0x0000_0000_0000_00a1;
+/// CRIME revision as reported to the guest: CRIME 1.1 (ID 0xa1), the value
+/// the PROM requires before it adds the graphics component. Every O2 has its
+/// GBE, with or without a keyboard and monitor, so this is the only revision
+/// modelled; a headless machine differs only in its console.
+pub const CRIME_REV: u64 = 0x0000_0000_0000_00a1;
 
 /// Minimal CRIME: a 64-bit register file that remembers what it is told, with
 /// the handful of reads the PROM cannot be fobbed off with zero for.
@@ -113,7 +110,7 @@ impl Crime {
             writes: Mutex::new(Vec::new()),
             latched: Mutex::new(0),
             irqlog: Mutex::new(std::collections::VecDeque::new()),
-            revision: std::sync::atomic::AtomicU64::new(CRIME_REV_DEFAULT),
+            revision: std::sync::atomic::AtomicU64::new(CRIME_REV),
             ust,
             time_base: Mutex::new(0),
             out: std::sync::OnceLock::new(),
@@ -129,7 +126,7 @@ impl Crime {
         c
     }
 
-    /// The revision CRIME reports (0xa1 with graphics: the PROM wants it).
+    /// Override the revision CRIME reports; snapshots restore it.
     pub fn set_revision(&self, rev: u64) {
         self.revision.store(rev, std::sync::atomic::Ordering::Relaxed);
     }

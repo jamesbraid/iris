@@ -483,17 +483,11 @@ impl Ip32Bus {
         self.refresh_irq()
     }
 
-    /// Plug in what a graphics console needs: a PS/2 keyboard on port 0, a
-    /// CRIME that reads as revision 1.1 (ID 0xa1, the value the PROM requires
-    /// before it adds the graphics component) and MACE revision 2.
-    pub fn enable_graphics(&mut self) {
-        self.enable_graphics_with_mouse(false);
-    }
-
-    /// The same, with a PS/2 mouse on port 1 as well.
-    pub fn enable_graphics_with_mouse(&mut self, mouse: bool) {
+    /// Plug in a PS/2 keyboard on port 0, and a mouse on port 1 if `mouse`.
+    /// With a keyboard the PROM and IRIX take the graphics console; without
+    /// one, the serial console. The graphics hardware is there either way.
+    pub fn attach_keyboard(&mut self, mouse: bool) {
         self.mace.enable_ps2(mouse);
-        self.crime.regs.set_revision(CRIME_REV_GBE);
     }
 
     /// Write the flash out, if a file was named for it.

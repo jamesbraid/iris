@@ -187,9 +187,10 @@ impl O2Machine {
             bus.mace.audio.enable_output(cfg.audio.clone());
         }
         // `headless`: no keyboard, so the PROM and the OS take the serial
-        // console, as on an O2 booted without one.
+        // console, as on an O2 booted without one. The GBE stays: it is part
+        // of every O2.
         if !cfg.headless {
-            bus.enable_graphics_with_mouse(o2.mouse);
+            bus.attach_keyboard(o2.mouse);
         }
         let bus = Arc::new(bus);
         // The SCSI devices, from the same `[scsi.N]` tables as the other

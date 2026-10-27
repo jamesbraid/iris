@@ -89,6 +89,11 @@ hashes are given where a change is easiest to understand by reading the commit.
   display. Runs IRIX 6.5.22 to the desktop with OpenGL through the rendering
   engine, and NetBSD 11 to multi-user and X. Needs the O2 PROM image; not in
   iris-gui yet.
+- **A headless O2 is still an O2.** CRIME reads as revision 0xa1 and MACE
+  as revision 2 whether or not a keyboard is plugged in; `headless` now only
+  leaves the PS/2 ports empty, so the PROM and IRIX take the serial console.
+  IRIX 6.5.22 still panics early on a headless O2 (a NULL dereference
+  reported as a fault at 0xff800000); the graphics console boots.
 - **The AIC-7880 is specified.** [docs/o2/aic7880.md](docs/o2/aic7880.md)
   describes the O2's SCSI controller from the Adaptec data books, the
   open-source drivers, the MACE spec and what the PROM and IRIX download: principles of operation, PCI

@@ -80,6 +80,8 @@ impl Mace {
         mace.audio.connect_irq(mace.isa.clone());
         mace.com0.connect_irq(crate::irq::IrqLine::new(mace.isa.clone(), ISA_SERIAL0_PIO));
         mace.sdma.connect_irq(mace.isa.clone());
+        // Revision 2, as in every O2: see `regs_wrote`.
+        mace.regs.set_cell_pub(MACE_ISA_RING_BASE, MACE_REV2_BIT);
         mace
     }
 
@@ -89,13 +91,10 @@ impl Mace {
     }
 
     /// Plug in PS/2 devices: a keyboard on port 0 and, with `mouse`, a mouse
-    /// on port 1. MACE then reads as revision 2, as on every O2 with a
-    /// graphics console.
+    /// on port 1.
     pub fn enable_ps2(&mut self, mouse: bool) {
         self.ps2 = MacePs2::with_devices(mouse);
         self.ps2.connect_irq(self.isa.clone());
-        let v = self.regs.cell_pub(MACE_ISA_RING_BASE);
-        self.regs.set_cell_pub(MACE_ISA_RING_BASE, v | MACE_REV2_BIT);
     }
 
     /// What time and the outside world have done since the last call: the
@@ -190,8 +189,9 @@ impl Mace {
     fn regs_wrote(&self, addr: u32) {
         // MACE revision 2 or later: SGI software reads bit 4 of the ISA ring
         // base register as that, and with it clear shifts every PS/2 reply
-        // right one bit to work around revision 1.
-        if addr & !7 == MACE_ISA_RING_BASE && self.ps2.devices().is_some() {
+        // right one bit to work around revision 1. The revision is the chip's,
+        // not the keyboard's: a headless O2 reads 2 as well.
+        if addr & !7 == MACE_ISA_RING_BASE {
             let v = self.regs.cell_pub(MACE_ISA_RING_BASE);
             self.regs.set_cell_pub(MACE_ISA_RING_BASE, v | MACE_REV2_BIT);
         }
