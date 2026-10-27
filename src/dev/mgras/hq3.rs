@@ -936,7 +936,20 @@ impl Hq3Engine {
             0x089 => Some(cmd),
             _ => None,
         };
-        if cmd >= cmd::RASTER_BASE {
+        if cmd >= cmd::RASTER_BASE && self.hq4_state && cmd & 0x200 != 0 {
+            // A raster register past 0x1FF. That the register field is nine
+            // bits is an inference, not a published width: every raster
+            // register name known runs to 0x1FF (`rss::REG_NAMES`), and the
+            // direct packets' decode used for the Octane's port takes the
+            // bit above as part of the packet class. Above 0x1FF the model keeps
+            // its own pseudo-registers. The
+            // IP30 PROM sends one such word (0x001A6804) before its first
+            // context switch; what the board does with it is unknown.
+            // Dropped and reported on the Octane's boards; the Indigo2 path
+            // keeps storing them as before.
+            self.stats.raster_writes += 1;
+            sink.note(format!("raster command {cmd:#x} past register 0x1FF dropped"));
+        } else if cmd >= cmd::RASTER_BASE {
             let r = cmd & 0x3FF;
             let exec = cmd & cmd::RASTER_EXECUTE != 0;
             self.stats.raster_writes += 1;
