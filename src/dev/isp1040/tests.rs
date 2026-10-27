@@ -850,8 +850,14 @@ fn a_loaded_index_past_its_ring_folds_into_it() {
     if let toml::Value::Table(t) = &mut v {
         t.insert("rqst_cons".into(), hex_u16(0xffff));
         t.insert("resp_prod".into(), hex_u16(0xffff));
+        // The driver's producer sits on the folded consumer: nothing to run.
+        let mut mb = [0u16; MAILBOX_COUNT];
+        load_u16_slice(t.get("mailbox").unwrap(), &mut mb);
+        mb[MBOX_REQ] = 0xffff % 4;
+        t.insert("mailbox".into(), u16_slice_to_toml(&mb));
     }
     r.isp.load_state(&v).expect("load_state");
+    r.isp.wait_idle();
     assert_eq!(r.r(reg::REQUEST_QUEUE), 0xffff % 4);
     assert_eq!(r.r(reg::RESPONSE_QUEUE), 0xffff % 4);
 }
