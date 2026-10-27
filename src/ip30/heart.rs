@@ -668,6 +668,9 @@ impl Heart {
                     // ECC generation and forced writes plant errors in
                     // memory, which this port does not model.
                     if val & (MODE_ECC_GENERATE | MODE_ECC_DOUBLE | MODE_ECC_FORCE_WRITE) != 0 {
+                        if trace() {
+                            eprintln!("ip30: HEART: mode {val:#x} asks for ECC error injection");
+                        }
                         drop(r);
                         self.note(off, size, true);
                         r = self.regs.lock().unwrap();
