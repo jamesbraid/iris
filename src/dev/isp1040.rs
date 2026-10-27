@@ -27,7 +27,9 @@
 //!   the driver acknowledges a slot; the request ring is not consumed while
 //!   any completion is held.
 //! * The target model has no bus reset, so a bus reset or soft reset does not
-//!   arm a unit attention on the disk as QEMU's SCSI devices do.
+//!   arm a unit attention on the disk as QEMU's SCSI devices do. A bus reset
+//!   does not retire the command in flight either: it completes as it would
+//!   have.
 //! * Only logical unit 0 of a present target exists. A command for another
 //!   unit is passed to the target with that unit number, which answers as
 //!   SCSI says (INQUIRY: no device at this unit; anything else: check
@@ -35,7 +37,8 @@
 //!
 //! Register windows: BAR 0 is I/O space and BAR 1 memory space, both 256
 //! bytes onto the same sixteen-bit registers. Accesses of any other width
-//! are not decoded and are noted once.
+//! are not decoded: they read zero and writes are dropped, noted for the
+//! first sixteen, where the QEMU model fails the access.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
