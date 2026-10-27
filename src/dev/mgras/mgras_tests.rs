@@ -3337,3 +3337,39 @@ fn gl_raster_color_query_is_latched() {
     assert_eq!(v, [0.5, 0.25, 1.0, 0.75]);
     m.stop_engines();
 }
+
+/// `bound_busy_status`: STATUS's idle bits read set once a busy stretch
+/// has outlasted the bound, and the stretch ends when the board goes idle.
+/// Without the option, nothing changes.
+#[test]
+fn bounded_busy_status_reads_idle_after_the_bound() {
+    use std::sync::atomic::Ordering;
+    let m = live_board();
+    assert!(!m.busy_overdue(false), "off by default");
+    m.bound_busy_status();
+    assert!(!m.busy_overdue(false), "a stretch starts");
+    assert!(!m.busy_overdue(false), "still inside the bound");
+    std::thread::sleep(super::BUSY_STATUS_BOUND + std::time::Duration::from_millis(50));
+    assert!(m.busy_overdue(false), "past the bound");
+    assert!(!m.busy_overdue(true), "idle ends the stretch");
+    assert_eq!(m.busy_since.load(Ordering::Relaxed), 0);
+    m.stop_engines();
+}
+
+/// A stretch that ended without a STATUS read seeing it must not leave the
+/// next one already overdue: the store that restarts work restarts the bound.
+#[test]
+fn a_new_busy_stretch_is_timed_from_its_first_store() {
+    let m = live_board();
+    m.bound_busy_status();
+    assert!(!m.busy_overdue(false), "a stretch starts");
+    std::thread::sleep(super::BUSY_STATUS_BOUND + std::time::Duration::from_millis(50));
+    assert!(m.busy_overdue(false), "that stretch is overdue");
+    // The board goes idle with no STATUS read to notice, then work arrives.
+    while !m.idle() {
+        std::thread::yield_now();
+    }
+    fifo_token(&m, 0x02, &[f(0.0), f(0.0), f(0.0), f(0.0)]);
+    assert!(!m.busy_overdue(false), "the new stretch starts at its store");
+    m.stop_engines();
+}
