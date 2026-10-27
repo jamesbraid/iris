@@ -497,7 +497,18 @@ impl MachineProfile {
     /// All selectable profiles, in display order. (Not the O2 yet: iris-gui's
     /// machine editor has no `[o2]` section.) Single source of truth for the
     /// GUI dropdowns (Config tab + New Machine dialog) so they never drift.
-    pub const ALL: [Self; 3] = [Self::IndyIp24, Self::Indigo2Ip22, Self::Indigo2Ip28];
+    pub const ALL: [Self; 4] = [Self::IndyIp24, Self::Indigo2Ip22, Self::Indigo2Ip28, Self::OctaneIp30];
+
+    /// The bank sizes in MB (0 is an empty bank) that `validate()` accepts
+    /// for this profile. The Octane's banks are matched DIMM pairs of 64 to
+    /// 512 MB; the IP22/IP24 MC stops at 128 MB.
+    pub fn bank_sizes(self) -> &'static [u32] {
+        match self {
+            Self::OctaneIp30 => &[0, 64, 128, 256, 512],
+            Self::Indigo2Ip28 | Self::O2Ip32 => VALID_BANK_SIZES,
+            _ => &[0, 8, 16, 32, 64, 128],
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {

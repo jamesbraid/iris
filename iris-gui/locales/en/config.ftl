@@ -396,3 +396,12 @@ config-ci-scroll = Scroll pixels per line
 config-ci-ping = Test connection
 config-ci-test = Test headless boot
 config-ci-test-subtitle =
+
+## Octane
+
+config-octane-subtitle = An R10000 at 195 MHz. Needs the IP30 PROM image; there is no built-in PROM.
+config-octane-flash = Flash file
+config-octane-flash-tip = Keeps the PROM's saved records between runs. Created from the PROM image when missing.
+config-octane-graphics-none = None
+config-octane-graphics-subtitle = The Octane models the Solid IMPACT board, or no graphics board and a serial console.
+config-ram-banks-octane-subtitle = Each bank is a pair of DIMMs of 64, 128, 256 or 512 MB. Fill the banks from bank 0 with no gaps.
