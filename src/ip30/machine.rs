@@ -21,8 +21,7 @@
 //! holds the boot flash at 0x1fc0_0000, the reset vector), 9 to 12 the
 //! graphics ports. On the Bridge's PCI bus, as on the board: the two
 //! ISP1040 SCSI controllers in slots 0 and 1, IOC3 (serial, keyboard and
-//! mouse, the clock, Ethernet) in slot 2. RAD1 audio in slot 3 is not
-//! modelled.
+//! mouse, the clock, Ethernet) in slot 2, RAD1 audio in slot 3.
 //!
 //! Low memory follows the Origami model's functional approximation
 //! (`ip30-machine.md`, "HEART low memory"): 16 KiB of distinct RAM at
@@ -422,6 +421,7 @@ impl OctaneMachine {
         let eth = Ioc3Eth::new(mac);
         ioc3.attach_eth(eth.clone());
         bridge.attach(2, ioc3.clone());
+        bridge.attach(3, Arc::new(crate::dev::rad1::Rad1::new()));
         // SuperIO (serial, keyboard, clock) is Bridge input 4; the Ethernet
         // uses IOC3's PCI pin.
         ioc3.connect_superio_interrupt(crate::irq::IrqLine::new(Arc::new(BridgeWire(Arc::downgrade(&bridge))), 4));
