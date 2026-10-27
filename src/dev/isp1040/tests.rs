@@ -1,0 +1,807 @@
+//! Register-contract and ring tests, ported from our QEMU qtest for the
+//! ISP1040. Host memory is a flat byte array behind a fake `PciDma`; the disk
+//! is a small raw image.
+
+use super::*;
+use crate::irq::LevelProbe;
+use crate::pci::PciDmaStatus;
+use crate::traits::Saveable;
+
+const MEM: usize = 1 << 20;
+
+struct FakeMem(Mutex<Vec<u8>>);
+
+impl FakeMem {
+    fn new() -> Arc<Self> {
+        Arc::new(FakeMem(Mutex::new(vec![0; MEM])))
+    }
+    fn put(&self, addr: u32, data: &[u8]) {
+        self.0.lock().unwrap()[addr as usize..addr as usize + data.len()].copy_from_slice(data);
+    }
+    fn get(&self, addr: u32, n: usize) -> Vec<u8> {
+        self.0.lock().unwrap()[addr as usize..addr as usize + n].to_vec()
+    }
+}
+
+impl PciDma for FakeMem {
+    fn dma_read(&self, addr: u64, buf: &mut [u8]) -> PciDmaStatus {
+        let m = self.0.lock().unwrap();
+        let a = addr as usize;
+        if a.saturating_add(buf.len()) > m.len() { return PciDmaStatus::MasterAbort; }
+        buf.copy_from_slice(&m[a..a + buf.len()]);
+        PciDmaStatus::Ok
+    }
+    fn dma_write(&self, addr: u64, data: &[u8]) -> PciDmaStatus {
+        let mut m = self.0.lock().unwrap();
+        let a = addr as usize;
+        if a.saturating_add(data.len()) > m.len() { return PciDmaStatus::MasterAbort; }
+        m[a..a + data.len()].copy_from_slice(data);
+        PciDmaStatus::Ok
+    }
+}
+
+const RQST: u32 = 0x1000;
+const RESP: u32 = 0x2000;
+const BUF: u32 = 0x10000;
+
+struct Rig {
+    isp: Isp1040,
+    mem: Arc<FakeMem>,
+}
+
+fn image(name: &str, blocks: usize) -> std::path::PathBuf {
+    let p = std::env::temp_dir().join(format!("iris-isp1040-{name}.img"));
+    std::fs::write(&p, vec![0u8; blocks * BLOCK_SIZE]).expect("test image");
+    p
+}
+
+impl Rig {
+    /// A chip on fake memory, no disks.
+    fn bare() -> Rig {
+        let mem = FakeMem::new();
+        let isp = Isp1040::new();
+        isp.connect_dma(mem.clone());
+        Rig { isp, mem }
+    }
+
+    /// A chip with a disk of `blocks` blocks at target `id`.
+    fn with_disk(name: &str, id: u8, blocks: usize) -> Rig {
+        let r = Rig::bare();
+        r.isp.attach_disk_at(id, &image(name, blocks)).expect("attach");
+        r
+    }
+
+    fn r(&self, off: u32) -> u16 { self.isp.read(off, 2) as u16 }
+    fn w(&self, off: u32, v: u16) { self.isp.write(off, v as u32, 2) }
+    fn mb(&self, n: u32) -> u32 { reg::MAILBOX_BASE + n * 2 }
+
+    /// A mailbox command: load the registers, ring the host interrupt, read
+    /// the status back, then acknowledge as a driver does.
+    fn cmd(&self, regs: &[u16]) -> u16 {
+        for (i, &v) in regs.iter().enumerate() {
+            self.w(self.mb(i as u32), v);
+        }
+        self.w(reg::HOST_CMD, 0x5 << HOST_CMD_SHIFT);
+        let status = self.r(self.mb(0));
+        self.ack();
+        status
+    }
+
+    fn ack(&self) {
+        self.w(reg::HOST_CMD, 0x7 << HOST_CMD_SHIFT);
+        self.w(reg::SEMAPHORE, 0);
+    }
+
+    fn init_queue(&self, cmd: u16, len: u16, addr: u32) -> u16 {
+        self.cmd(&[cmd, len, (addr >> 16) as u16, addr as u16])
+    }
+
+    fn init_rings(&self, req_len: u16, resp_len: u16) {
+        assert_eq!(self.init_queue(mbox::INIT_REQ_QUEUE, req_len, RQST), mbox::COMPLETE);
+        assert_eq!(self.init_queue(mbox::INIT_RSP_QUEUE, resp_len, RESP), mbox::COMPLETE);
+    }
+
+    fn put_entry(&self, slot: u32, e: &[u8; ENTRY_SIZE]) {
+        self.mem.put(RQST + slot * ENTRY_SIZE as u32, e);
+    }
+
+    fn status(&self, slot: u32) -> [u8; ENTRY_SIZE] {
+        self.mem.get(RESP + slot * ENTRY_SIZE as u32, ENTRY_SIZE).try_into().unwrap()
+    }
+
+    fn doorbell(&self, n: u16) { self.w(reg::REQUEST_QUEUE, n); }
+}
+
+fn p16(e: &mut [u8], off: usize, v: u16) { e[off..off + 2].copy_from_slice(&v.to_le_bytes()); }
+fn p32(e: &mut [u8], off: usize, v: u32) { e[off..off + 4].copy_from_slice(&v.to_le_bytes()); }
+fn g16(e: &[u8], off: usize) -> u16 { u16::from_le_bytes([e[off], e[off + 1]]) }
+fn g32(e: &[u8], off: usize) -> u32 { u32::from_le_bytes([e[off], e[off + 1], e[off + 2], e[off + 3]]) }
+
+/// A type-1 request entry for `target`, with up to four inline segments.
+fn request(handle: u32, target: u8, cdb: &[u8], segs: &[(u32, u32)]) -> [u8; ENTRY_SIZE] {
+    let mut e = [0u8; ENTRY_SIZE];
+    e[0] = ENTRY_TYPE_REQUEST;
+    e[1] = 1;
+    p32(&mut e, 4, handle);
+    p16(&mut e, 8, (target as u16) << 8);
+    p16(&mut e, 10, cdb.len() as u16);
+    p16(&mut e, 18, segs.len() as u16);
+    e[20..20 + cdb.len()].copy_from_slice(cdb);
+    for (i, &(a, l)) in segs.iter().take(4).enumerate() {
+        p32(&mut e, 32 + i * 8, a);
+        p32(&mut e, 36 + i * 8, l);
+    }
+    e
+}
+
+fn cdb10(op: u8, lba: u32, blocks: u16) -> [u8; 10] {
+    let mut c = [0u8; 10];
+    c[0] = op;
+    c[2..6].copy_from_slice(&lba.to_be_bytes());
+    c[7..9].copy_from_slice(&blocks.to_be_bytes());
+    c
+}
+
+// ---- identity and plain registers --------------------------------------
+
+#[test]
+fn identity_and_window() {
+    let r = Rig::bare();
+    let c = r.isp.config();
+    assert_eq!(c.read(0), 0x1020_1077, "device and vendor id");
+    assert_eq!(c.read(2) & 0xff, 0x05, "revision");
+    assert_eq!(c.read(2) >> 16, 0x0100, "mass storage, SCSI");
+    assert_eq!(c.interrupt_pin(), PCI_INTA);
+    c.write(4, 0xffff_ffff);
+    assert_eq!(c.read(4), 0xffff_ff01, "256 bytes of I/O space");
+    c.write(5, 0xffff_ffff);
+    assert_eq!(c.read(5), 0xffff_ff00, "256 bytes of memory space");
+    // Both BARs reach the same sixteen-bit registers.
+    for bar in 0..2 {
+        assert_eq!(r.isp.bar_read(bar, reg::ID_LOW, 2), 0x1077);
+        assert_eq!(r.isp.bar_read(bar, reg::ID_HIGH, 2), 0x1020);
+    }
+}
+
+#[test]
+fn bus_cfg0_reports_revision_plus_one() {
+    let r = Rig::bare();
+    assert_eq!(r.r(reg::BUS_CFG0), 0x0006);
+    assert_ne!(r.r(reg::BUS_CFG0) & 0xf, 0x4, "must not select the broken-FIFO workaround");
+}
+
+#[test]
+fn reset_signature_and_soft_reset() {
+    let r = Rig::bare();
+    assert_eq!(r.r(r.mb(1)), SIG1);
+    assert_eq!(r.r(r.mb(2)), SIG2);
+    assert_eq!(r.r(r.mb(3)), SIG3);
+    assert_eq!(r.r(r.mb(4)), SIG4);
+    r.w(reg::BUS_CFG1, CFG1_BURST_ENABLE);
+    r.w(reg::SEMAPHORE, SEMAPHORE_LOCK);
+    r.w(r.mb(1), 0xdead);
+    r.w(r.mb(7), 0xbeef);
+    r.w(reg::HOST_CMD, 0x2 << HOST_CMD_SHIFT);
+    assert_eq!(r.r(r.mb(1)), 0xdead);
+    r.w(reg::BUS_CTRL, CTRL_SOFT_RESET);
+    assert_eq!(r.r(reg::BUS_CTRL), 0, "the bit clears itself and takes the rest with it");
+    assert_eq!(r.r(reg::BUS_CFG1), 0);
+    assert_eq!(r.r(reg::SEMAPHORE), 0);
+    assert_eq!(r.r(reg::HOST_CMD), 0);
+    assert_eq!(r.r(r.mb(1)), SIG1);
+    assert_eq!(r.r(r.mb(7)), 0);
+}
+
+#[test]
+fn bus_cfg1_keeps_only_its_own_bits() {
+    let r = Rig::bare();
+    for v in [0x10, 0x20, 0x30, 0x40, 0x30 | CFG1_BURST_ENABLE, CFG1_BANK_SELECT] {
+        r.w(reg::BUS_CFG1, v);
+        assert_eq!(r.r(reg::BUS_CFG1), v);
+    }
+    r.w(reg::BUS_CFG1, 0xffff);
+    assert_eq!(r.r(reg::BUS_CFG1), CFG1_FIFO_MASK | CFG1_BANK_SELECT | CFG1_BURST_ENABLE);
+}
+
+#[test]
+fn dma_block_config_is_storage_and_control_is_inert() {
+    let r = Rig::bare();
+    for (cfg, ctrl) in [(reg::DMA_CMD_CFG, reg::DMA_CMD_CTRL), (reg::DMA_DATA_CFG, reg::DMA_DATA_CTRL)] {
+        assert_eq!(r.r(cfg), 0);
+        r.w(cfg, 0x0002);
+        assert_eq!(r.r(cfg), 0x0002);
+        r.w(cfg, 0xffff);
+        assert_eq!(r.r(cfg), 0x0002, "only the burst enable is kept");
+        r.w(ctrl, 0xffff);
+        assert_eq!(r.r(cfg), 0x0002, "a control write changes nothing");
+    }
+}
+
+#[test]
+fn bus_ctrl_status_and_the_interrupt_line() {
+    let r = Rig::bare();
+    let (probe, line) = LevelProbe::line();
+    r.isp.connect_interrupt(line);
+    r.w(reg::BUS_CTRL, CTRL_INT_ENABLE | CTRL_RISC_INT_ENABLE);
+    assert_eq!(r.r(reg::BUS_CTRL), CTRL_INT_ENABLE | CTRL_RISC_INT_ENABLE);
+    r.w(reg::BUS_CTRL, 0xffff);
+    assert_eq!(r.r(reg::BUS_CTRL), 0, "the reset bit is in that write and clears itself");
+    r.w(reg::BUS_STATUS, 0xffff);
+    assert_eq!(r.r(reg::BUS_STATUS), 0, "status ignores writes");
+
+    assert!(!probe.level());
+    r.w(reg::BUS_CTRL, CTRL_INT_ENABLE | CTRL_RISC_INT_ENABLE);
+    r.w(r.mb(0), mbox::NOP);
+    r.w(reg::HOST_CMD, 0x5 << HOST_CMD_SHIFT);
+    assert!(probe.level(), "a mailbox result raises the line");
+    assert_eq!(r.r(reg::BUS_STATUS), STATUS_INT_REQ | STATUS_RISC_INT_REQ);
+    r.w(reg::HOST_CMD, 0x7 << HOST_CMD_SHIFT);
+    assert!(!probe.level(), "clearing the RISC interrupt drops it");
+    // Masked: the status bit is set but the line is not driven.
+    r.w(reg::BUS_CTRL, 0);
+    r.w(reg::HOST_CMD, 0x5 << HOST_CMD_SHIFT);
+    assert_eq!(r.r(reg::BUS_STATUS), STATUS_INT_REQ | STATUS_RISC_INT_REQ);
+    assert!(!probe.level());
+}
+
+#[test]
+fn semaphore_holds_two_bits() {
+    let r = Rig::bare();
+    r.w(reg::SEMAPHORE, SEMAPHORE_LOCK);
+    assert_eq!(r.r(reg::SEMAPHORE), SEMAPHORE_LOCK);
+    r.w(reg::SEMAPHORE, 0);
+    assert_eq!(r.r(reg::SEMAPHORE), 0);
+    r.w(reg::SEMAPHORE, 0xffff);
+    assert_eq!(r.r(reg::SEMAPHORE), 3);
+}
+
+#[test]
+fn mailboxes_are_independent_storage() {
+    let r = Rig::bare();
+    for i in 0..8 { r.w(r.mb(i), 0x1000 + i as u16); }
+    for i in 0..8 { assert_eq!(r.r(r.mb(i)), 0x1000 + i as u16); }
+}
+
+#[test]
+fn queue_pointers_are_mailboxes_until_a_queue_exists() {
+    let r = Rig::bare();
+    assert_eq!(r.r(reg::REQUEST_QUEUE), SIG4);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0);
+    r.w(reg::REQUEST_QUEUE, 0x21);
+    r.w(reg::RESPONSE_QUEUE, 0x43);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 0x21);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0x43);
+    assert_eq!(r.r(r.mb(4)), 0x21);
+    assert_eq!(r.r(r.mb(5)), 0x43);
+    r.w(reg::BUS_CTRL, CTRL_SOFT_RESET);
+    assert_eq!(r.r(r.mb(4)), SIG4);
+    assert_eq!(r.r(r.mb(5)), 0);
+}
+
+#[test]
+fn host_command_flags() {
+    let r = Rig::bare();
+    let hc = |c: u16| r.w(reg::HOST_CMD, c << HOST_CMD_SHIFT);
+    hc(0x2);
+    assert_eq!(r.r(reg::HOST_CMD), RISC_FLAG_PAUSED);
+    hc(0x1);
+    assert_eq!(r.r(reg::HOST_CMD), RISC_FLAG_RESET, "reset replaces every flag");
+    hc(0x3);
+    assert_eq!(r.r(reg::HOST_CMD), 0);
+    hc(0x5);
+    assert_eq!(r.r(reg::HOST_CMD), RISC_FLAG_HOST_INT);
+    hc(0x6);
+    assert_eq!(r.r(reg::HOST_CMD), RISC_FLAG_HOST_INT, "clear-host-interrupt is a no-op");
+    hc(0x7);
+    assert_eq!(r.r(reg::HOST_CMD), 0);
+    r.w(reg::HOST_CMD, 0x2);
+    assert_eq!(r.r(reg::HOST_CMD), 0, "the command number in the low bits does nothing");
+}
+
+#[test]
+fn bank_select_is_bit_three() {
+    let r = Rig::bare();
+    r.w(reg::BANK_BASE, 0x1111);
+    r.w(reg::BUS_CFG1, CFG1_BANK_SELECT);
+    assert_eq!(r.r(reg::BANK_BASE), 0, "the other bank is separate storage");
+    r.w(reg::BANK_BASE, 0x2222);
+    r.w(reg::BUS_CFG1, 0);
+    assert_eq!(r.r(reg::BANK_BASE), 0x1111);
+    r.w(reg::BUS_CFG1, CFG1_BANK_SELECT);
+    assert_eq!(r.r(reg::BANK_BASE), 0x2222);
+    // Bit 0 is a decoy constant in driver headers and switches nothing.
+    r.w(reg::BUS_CFG1, 0x0001);
+    assert_eq!(r.r(reg::BANK_BASE), 0x1111);
+}
+
+#[test]
+fn nvram_echoes_its_outputs_and_never_answers() {
+    let r = Rig::bare();
+    r.w(reg::NVRAM, 0x7);
+    assert_eq!(r.r(reg::NVRAM), 0x7);
+    r.w(reg::NVRAM, 0xffff);
+    assert_eq!(r.r(reg::NVRAM) & 0x8, 0, "data-in is never asserted");
+}
+
+#[test]
+fn only_sixteen_bit_accesses_are_decoded() {
+    let r = Rig::bare();
+    assert_eq!(r.isp.read(reg::ID_LOW, 1), 0);
+    assert_eq!(r.isp.read(reg::ID_LOW, 4), 0);
+    assert!(r.isp.notes().iter().any(|n| n.contains("not decoded")));
+}
+
+// ---- mailbox commands --------------------------------------------------
+
+#[test]
+fn simple_mailbox_commands() {
+    let r = Rig::bare();
+    assert_eq!(r.cmd(&[mbox::NOP]), mbox::COMPLETE);
+    assert_eq!(r.cmd(&[mbox::REGISTER_TEST, 1, 2, 3, 4, 5, 6, 7]), mbox::COMPLETE);
+    for i in 1..8 { assert_eq!(r.r(r.mb(i)), i as u16, "register test leaves mailboxes alone"); }
+    assert_eq!(r.cmd(&[mbox::EXEC_FIRMWARE, 0x1000]), mbox::COMPLETE);
+    assert_eq!(r.cmd(&[mbox::ABOUT_FIRMWARE]), mbox::COMPLETE);
+    assert_eq!((r.r(r.mb(1)), r.r(r.mb(2)), r.r(r.mb(3))), (1, 0, 0));
+    assert_eq!(r.cmd(&[mbox::GET_FIRMWARE_STATUS]), mbox::COMPLETE);
+    assert_eq!(r.r(r.mb(2)), MAX_REQUESTS);
+    assert_eq!(r.cmd(&[mbox::GET_TARGET_PARAMETERS, 0x0100, 0xffff, 0xffff]), mbox::COMPLETE);
+    assert_eq!((r.r(r.mb(2)), r.r(r.mb(3))), (0, 0), "asynchronous and narrow");
+    assert_eq!(r.cmd(&[mbox::BUS_RESET, 5]), mbox::COMPLETE);
+    // The setters a driver issues at attach all complete.
+    for c in [
+        mbox::SET_INITIATOR_ID, mbox::SET_SELECTION_TIMEOUT, mbox::SET_RETRY_COUNT, mbox::SET_TAG_AGE_LIMIT,
+        mbox::SET_CLOCK_RATE, mbox::SET_ACTIVE_NEGATION, mbox::SET_ASYNC_DATA_SETUP, mbox::SET_PCI_CONTROL,
+        mbox::SET_TARGET_PARAMETERS, mbox::SET_DEVICE_QUEUE, mbox::SET_SYSTEM_PARAMETER,
+        mbox::SET_FIRMWARE_FEATURES, mbox::SET_DATA_OVERRUN_RECOVERY, mbox::SET_RESET_DELAY_PARAMS,
+    ] {
+        assert_eq!(r.cmd(&[c, 1, 2]), mbox::COMPLETE, "command {c:#x}");
+    }
+}
+
+#[test]
+fn a_command_this_part_does_not_carry_is_invalid() {
+    let r = Rig::bare();
+    for c in [0x0100, mbox::ABORT_COMMAND, mbox::LOAD_RAM_A64] {
+        assert_eq!(r.cmd(&[c]), mbox::INVALID, "command {c:#x}");
+    }
+    // And the result is still collected the usual way.
+    assert_eq!(r.r(reg::SEMAPHORE), 0);
+}
+
+#[test]
+fn a_result_takes_the_semaphore_but_an_io_completion_does_not() {
+    let r = Rig::bare();
+    r.w(r.mb(0), mbox::NOP);
+    r.w(reg::HOST_CMD, 0x5 << HOST_CMD_SHIFT);
+    assert_eq!(r.r(reg::SEMAPHORE), SEMAPHORE_LOCK);
+}
+
+#[test]
+fn ram_words_round_trip() {
+    let r = Rig::bare();
+    assert_eq!(r.cmd(&[mbox::WRITE_RAM_WORD, 0x1234, 0xabcd]), mbox::COMPLETE);
+    r.w(r.mb(3), 0x7777);
+    assert_eq!(r.cmd(&[mbox::READ_RAM_WORD, 0x1234]), mbox::COMPLETE);
+    assert_eq!(r.r(r.mb(2)), 0xabcd);
+    assert_eq!(r.r(r.mb(3)), 0, "mailbox 3 is an output and is cleared");
+}
+
+#[test]
+fn firmware_download_verifies_and_a_corrupt_image_does_not() {
+    let r = Rig::bare();
+    // An image whose word 3 is its length and whose sum is zero.
+    let mut words = vec![0x0100u16, 0x1111, 0x2222, 8, 0x0004, 0, 0, 0];
+    let sum = words.iter().fold(0u16, |a, &w| a.wrapping_add(w));
+    words[7] = 0u16.wrapping_sub(sum);
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    r.mem.put(BUF, &bytes);
+    let load = |base: u16| r.cmd(&[mbox::LOAD_RAM, base, (BUF >> 16) as u16, BUF as u16, 8]);
+    assert_eq!(load(0x1000), mbox::COMPLETE);
+    assert_eq!(r.cmd(&[mbox::VERIFY_CHECKSUM, 0x1000]), mbox::COMPLETE);
+    assert_eq!(r.r(r.mb(1)), 0);
+    assert_eq!(r.r(r.mb(2)), 0);
+    r.cmd(&[mbox::WRITE_RAM_WORD, 0x1005, 0x4242]);
+    assert_eq!(r.cmd(&[mbox::VERIFY_CHECKSUM, 0x1000]), mbox::TEST_FAILED);
+    assert_ne!(r.r(r.mb(2)), 0, "the firmware reads the mailbox 2 copy of the sum");
+}
+
+#[test]
+fn ram_block_transfer_is_little_endian_and_reads_back() {
+    let r = Rig::bare();
+    r.mem.put(BUF, &[0x34, 0x12, 0x78, 0x56, 0xbc, 0x9a]);
+    assert_eq!(r.cmd(&[mbox::LOAD_RAM, 0x200, (BUF >> 16) as u16, BUF as u16, 3]), mbox::COMPLETE);
+    r.cmd(&[mbox::READ_RAM_WORD, 0x200]);
+    assert_eq!(r.r(r.mb(2)), 0x1234, "bytes arrive little-endian");
+    r.cmd(&[mbox::READ_RAM_WORD, 0x202]);
+    assert_eq!(r.r(r.mb(2)), 0x9abc);
+    let out = BUF + 0x100;
+    assert_eq!(r.cmd(&[mbox::DUMP_RAM, 0x200, (out >> 16) as u16, out as u16, 3]), mbox::COMPLETE);
+    assert_eq!(r.mem.get(out, 6), vec![0x34, 0x12, 0x78, 0x56, 0xbc, 0x9a]);
+}
+
+#[test]
+fn a_refused_ram_transfer_leaves_the_array_alone() {
+    let r = Rig::bare();
+    r.cmd(&[mbox::WRITE_RAM_WORD, 0x300, 0x5a5a]);
+    let bad = (MEM - 2) as u32;
+    assert_eq!(r.cmd(&[mbox::LOAD_RAM, 0x300, (bad >> 16) as u16, bad as u16, 4]), mbox::HOST_INTERFACE_ERROR);
+    r.cmd(&[mbox::READ_RAM_WORD, 0x300]);
+    assert_eq!(r.r(r.mb(2)), 0x5a5a);
+    assert_eq!(r.cmd(&[mbox::DUMP_RAM, 0x300, (bad >> 16) as u16, bad as u16, 4]), mbox::HOST_INTERFACE_ERROR);
+}
+
+#[test]
+fn queue_init_rejects_a_zero_length_or_address() {
+    let r = Rig::bare();
+    assert_eq!(r.init_queue(mbox::INIT_REQ_QUEUE, 0, RQST), mbox::PARAM_ERROR);
+    assert_eq!(r.init_queue(mbox::INIT_REQ_QUEUE, 4, 0), mbox::PARAM_ERROR);
+    assert_eq!(r.init_queue(mbox::INIT_RSP_QUEUE, 0, RESP), mbox::PARAM_ERROR);
+    assert_eq!(r.init_queue(mbox::INIT_RSP_QUEUE, 4, 0), mbox::PARAM_ERROR);
+}
+
+// ---- commands through the rings ----------------------------------------
+
+#[test]
+fn inquiry_moves_data_and_reports_complete() {
+    let r = Rig::with_disk("inquiry", 1, 64);
+    r.init_rings(4, 4);
+    r.put_entry(0, &request(0x1234, 1, &[0x12, 0, 0, 0, 36, 0], &[(BUF, 36)]));
+    r.doorbell(1);
+    let s = r.status(0);
+    assert_eq!(s[0], ENTRY_TYPE_STATUS);
+    assert_eq!(g32(&s, 4), 0x1234);
+    assert_eq!(g16(&s, 8), 0, "GOOD");
+    assert_eq!(g16(&s, 10), IOCB_COMPLETE);
+    assert_eq!(g16(&s, 12), STATE_ALL_PHASES & !STATE_GOT_SENSE);
+    assert_eq!(g32(&s, 20), 0, "no residual");
+    assert_eq!(&r.mem.get(BUF + 8, 8), b"SGI     ");
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 1, "the adapter reports its consumer position");
+    assert_eq!(r.r(reg::BUS_STATUS), STATUS_INT_REQ | STATUS_RISC_INT_REQ);
+    assert_eq!(r.r(reg::SEMAPHORE), 0, "I/O completions leave the semaphore alone");
+}
+
+#[test]
+fn a_short_answer_is_an_underrun_with_its_residual() {
+    let r = Rig::with_disk("underrun", 1, 64);
+    r.init_rings(4, 4);
+    r.put_entry(0, &request(1, 1, &[0x12, 0, 0, 0, 255, 0], &[(BUF, 255)]));
+    r.doorbell(1);
+    let s = r.status(0);
+    assert_eq!(g16(&s, 10), IOCB_DATA_UNDERRUN);
+    assert_eq!(g32(&s, 20), 255 - 36);
+}
+
+#[test]
+fn a_status_entry_overwrites_stale_bytes() {
+    let r = Rig::with_disk("stale", 1, 64);
+    r.init_rings(4, 4);
+    r.mem.put(RESP, &[0xa5; ENTRY_SIZE]);
+    r.put_entry(0, &request(7, 1, &[0, 0, 0, 0, 0, 0], &[]));
+    r.doorbell(1);
+    let s = r.status(0);
+    assert_eq!(s[0], ENTRY_TYPE_STATUS);
+    assert!(s[33..].iter().all(|&b| b == 0), "no stale bytes survive past the fields");
+    assert_eq!(g16(&s, 18), 0, "no sense");
+}
+
+#[test]
+fn a_write_reaches_the_disk_across_continuation_entries_and_reads_back() {
+    let r = Rig::with_disk("write4", 1, 256);
+    r.init_rings(8, 8);
+    // Four pages in four host buffers: three inline plus one in a
+    // continuation entry, 4 KiB each, 8 blocks.
+    let pages: Vec<u32> = (0..4).map(|i| BUF + i * 0x2000).collect();
+    for (i, &p) in pages.iter().enumerate() {
+        let data: Vec<u8> = (0..4096).map(|j| ((j + i * 7) % 251) as u8).collect();
+        r.mem.put(p, &data);
+    }
+    let mut e = request(0x77, 1, &cdb10(scsi_cmd::WRITE_10, 16, 32), &[(pages[0], 4096), (pages[1], 4096), (pages[2], 4096)]);
+    p16(&mut e, 18, 4);
+    p32(&mut e, 32 + 3 * 8, pages[3]);
+    p32(&mut e, 36 + 3 * 8, 4096);
+    r.put_entry(0, &e);
+    r.doorbell(1);
+    let s = r.status(0);
+    assert_eq!(g16(&s, 8), 0, "GOOD");
+    assert_eq!(g16(&s, 10), IOCB_COMPLETE);
+    assert_eq!(g32(&s, 20), 0);
+
+    // Read it back: four inline segments of 2 KiB, then two of 4 KiB in the
+    // continuation entry.
+    let rd = BUF + 0x20000;
+    let inline: Vec<(u32, u32)> = (0..4).map(|i| (rd + 2048 * i, 2048)).collect();
+    let mut e = request(0x78, 1, &cdb10(scsi_cmd::READ_10, 16, 32), &inline);
+    e[1] = 2;
+    p16(&mut e, 18, 6);
+    r.put_entry(1, &e);
+    let mut cont = [0u8; ENTRY_SIZE];
+    cont[0] = 2;
+    for i in 0..2u32 {
+        p32(&mut cont, 8 + i as usize * 8, rd + 8192 + 4096 * i);
+        p32(&mut cont, 12 + i as usize * 8, 4096);
+    }
+    r.put_entry(2, &cont);
+    r.doorbell(3);
+    let s = r.status(1);
+    assert_eq!(g32(&s, 4), 0x78);
+    assert_eq!(g16(&s, 10), IOCB_COMPLETE);
+    assert_eq!(g32(&s, 20), 0);
+    for (i, &p) in pages.iter().enumerate() {
+        assert_eq!(r.mem.get(rd + 4096 * i as u32, 4096), r.mem.get(p, 4096), "page {i}");
+    }
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 3, "the continuation entry was consumed with its command");
+}
+
+#[test]
+fn a_check_condition_carries_its_sense() {
+    let r = Rig::with_disk("sense", 1, 64);
+    r.init_rings(4, 4);
+    r.put_entry(0, &request(9, 1, &cdb10(scsi_cmd::READ_10, 0x00ff_ffff, 1), &[(BUF, 512)]));
+    r.doorbell(1);
+    let s = r.status(0);
+    assert_eq!(g16(&s, 8), 0x02 | SCSI_STATUS_SENSE_VALID);
+    assert_eq!(g16(&s, 10), IOCB_COMPLETE, "the target's status carries the failure, not an underrun");
+    assert_ne!(g16(&s, 12) & STATE_GOT_SENSE, 0);
+    assert!(g16(&s, 18) > 0, "sense length");
+    assert_eq!(s[32] & 0x7f, 0x70);
+    assert_eq!(s[34] & 0x0f, 0x05, "illegal request");
+}
+
+#[test]
+fn an_absent_target_is_incomplete_with_a_timeout() {
+    let r = Rig::with_disk("absent", 1, 64);
+    r.init_rings(4, 4);
+    r.put_entry(0, &request(0x55, 3, &[0, 0, 0, 0, 0, 0], &[]));
+    r.doorbell(1);
+    let s = r.status(0);
+    assert_eq!(g16(&s, 10), IOCB_INCOMPLETE);
+    assert_eq!(g16(&s, 12), STATE_GOT_BUS);
+    assert_eq!(g16(&s, 14), STATUS_FLAG_TIMEOUT);
+    // A second logical unit behind a present target is absent too.
+    let mut e = request(0x56, 1, &[0, 0, 0, 0, 0, 0], &[]);
+    e[8] = 1;
+    r.put_entry(1, &e);
+    r.doorbell(2);
+    assert_eq!(g16(&r.status(1), 10), IOCB_INCOMPLETE);
+}
+
+#[test]
+fn the_second_bus_does_not_exist() {
+    let r = Rig::with_disk("bus1", 1, 64);
+    r.init_rings(4, 4);
+    let mut e = request(0x66, 1, &[0, 0, 0, 0, 0, 0], &[]);
+    p16(&mut e, 8, 0x8100);
+    r.put_entry(0, &e);
+    r.doorbell(1);
+    let s = r.status(0);
+    assert_eq!(g16(&s, 10), IOCB_INCOMPLETE);
+    assert_eq!(g16(&s, 12), 0);
+    assert_eq!(g16(&s, 14), 0);
+}
+
+#[test]
+fn an_unknown_entry_type_is_answered_incomplete_and_the_ring_moves_on() {
+    let r = Rig::with_disk("unknown", 1, 64);
+    r.init_rings(4, 4);
+    let mut e = request(0x99, 1, &[0, 0, 0, 0, 0, 0], &[]);
+    e[0] = 0x05;
+    r.put_entry(0, &e);
+    r.put_entry(1, &request(0x9a, 1, &[0, 0, 0, 0, 0, 0], &[]));
+    r.doorbell(2);
+    assert_eq!(g32(&r.status(0), 4), 0x99);
+    assert_eq!(g16(&r.status(0), 10), IOCB_INCOMPLETE);
+    assert_eq!(g32(&r.status(1), 4), 0x9a);
+    assert_eq!(g16(&r.status(1), 10), IOCB_COMPLETE);
+}
+
+#[test]
+fn the_walk_stops_at_the_producer_even_with_a_hostile_entry_count() {
+    let r = Rig::with_disk("walk", 1, 64);
+    r.init_rings(4, 8);
+    let mut e = request(0x11, 1, &[0, 0, 0, 0, 0, 0], &[]);
+    e[1] = 200; // claims far more entries than are published
+    r.put_entry(0, &e);
+    r.doorbell(1);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 1, "consumer is clamped to the producer");
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+}
+
+#[test]
+fn a_marker_entry_is_consumed_without_an_answer() {
+    let r = Rig::with_disk("marker", 1, 64);
+    r.init_rings(4, 4);
+    let mut e = [0u8; ENTRY_SIZE];
+    e[0] = ENTRY_TYPE_MARKER;
+    e[1] = 1;
+    r.put_entry(0, &e);
+    r.doorbell(1);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 1);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0);
+}
+
+fn tur_entry(handle: u32) -> [u8; ENTRY_SIZE] {
+    request(handle, 0, &[0, 0, 0, 0, 0, 0], &[])
+}
+
+#[test]
+fn four_completions_on_a_four_entry_ring_do_not_read_as_empty() {
+    let r = Rig::with_disk("four", 0, 64);
+    r.init_rings(8, 4);
+    for i in 0..4 { r.put_entry(i, &tur_entry(0x1000 + i)); }
+    for i in 0..4 { r.doorbell(i as u16 + 1); }
+    assert_ne!(r.r(reg::RESPONSE_QUEUE), 0, "the producer must not rest on the consumer");
+}
+
+#[test]
+fn an_acknowledgement_does_not_erase_a_later_completion() {
+    let r = Rig::with_disk("ack", 0, 64);
+    r.init_rings(8, 8);
+    r.put_entry(0, &tur_entry(0x2001));
+    r.doorbell(1);
+    let first = r.r(reg::RESPONSE_QUEUE);
+    assert_eq!(first, 1);
+    r.put_entry(1, &tur_entry(0x2002));
+    r.doorbell(2);
+    r.w(reg::RESPONSE_QUEUE, first);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 2, "the adapter's own count, not the number just written");
+}
+
+#[test]
+fn a_held_completion_posts_and_resignals_when_the_driver_frees_room() {
+    let r = Rig::with_disk("held", 0, 64);
+    r.init_rings(8, 4);
+    for i in 0..3 {
+        r.put_entry(i, &tur_entry(0x3000 + i));
+        r.doorbell(i as u16 + 1);
+    }
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 3);
+    r.ack();
+    assert_eq!(r.r(reg::BUS_STATUS), 0);
+    r.put_entry(3, &tur_entry(0x3003));
+    r.doorbell(4);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 3, "held, not lost");
+    assert_eq!(r.r(reg::BUS_STATUS), 0, "and not yet announced");
+    r.w(reg::RESPONSE_QUEUE, 1);
+    assert_eq!(r.r(reg::BUS_STATUS), STATUS_INT_REQ | STATUS_RISC_INT_REQ);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0);
+    let s = r.status(3);
+    assert_eq!(s[0], ENTRY_TYPE_STATUS);
+    assert_eq!(g32(&s, 4), 0x3003);
+    assert_eq!(g16(&s, 10), IOCB_COMPLETE);
+}
+
+#[test]
+fn a_held_completion_stalls_the_request_ring_until_room_appears() {
+    let r = Rig::with_disk("stall", 0, 64);
+    r.init_rings(8, 3);
+    for i in 0..4 { r.put_entry(i, &tur_entry(0x4000 + i)); }
+    r.doorbell(4);
+    // Room for two completions; the third is held and stops the walk.
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 2);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 3);
+    r.w(reg::RESPONSE_QUEUE, 2);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 4, "the acknowledgement lets the ring run again");
+}
+
+// ---- A64 entries -------------------------------------------------------
+
+fn a64_request(handle: u32, target: u8, cdb: &[u8], segs: &[(u64, u32)]) -> [u8; ENTRY_SIZE] {
+    let mut e = [0u8; ENTRY_SIZE];
+    e[0] = ENTRY_TYPE_COMMAND_A64;
+    e[1] = 1;
+    p32(&mut e, 4, handle);
+    p16(&mut e, 8, (target as u16) << 8);
+    p16(&mut e, 10, cdb.len() as u16);
+    p16(&mut e, 18, segs.len() as u16);
+    e[20..20 + cdb.len()].copy_from_slice(cdb);
+    for (i, &(a, l)) in segs.iter().take(2).enumerate() {
+        p32(&mut e, 40 + i * 12, a as u32);
+        p32(&mut e, 44 + i * 12, (a >> 32) as u32);
+        p32(&mut e, 48 + i * 12, l);
+    }
+    e
+}
+
+#[test]
+fn a64_inquiry_and_continuation_segments() {
+    let r = Rig::with_disk("a64", 1, 64);
+    assert_eq!(r.cmd(&[mbox::INIT_REQ_QUEUE_A64, 4, 0, RQST as u16, 0, 0, 0, 0]), mbox::COMPLETE);
+    assert_eq!(r.cmd(&[mbox::INIT_RSP_QUEUE_A64, 4, 0, RESP as u16, 0, 0, 0, 0]), mbox::COMPLETE);
+    r.put_entry(0, &a64_request(0xa1, 1, &[0x12, 0, 0, 0, 36, 0], &[(BUF as u64, 36)]));
+    r.doorbell(1);
+    let s = r.status(0);
+    assert_eq!(g32(&s, 4), 0xa1);
+    assert_eq!(g16(&s, 10), IOCB_COMPLETE);
+    assert_eq!(&r.mem.get(BUF + 8, 8), b"SGI     ");
+
+    // A read of 4 blocks over five segments: two inline, three in the
+    // continuation (twelve-byte segments, no handle).
+    let rd = BUF + 0x1000;
+    let mut e = a64_request(0xa2, 1, &cdb10(scsi_cmd::READ_10, 0, 4), &[(rd as u64, 512), (rd as u64 + 512, 512)]);
+    e[1] = 2;
+    p16(&mut e, 18, 4);
+    r.put_entry(1, &e);
+    let mut cont = [0u8; ENTRY_SIZE];
+    cont[0] = 0x0a;
+    for i in 0..2u32 {
+        p32(&mut cont, 4 + i as usize * 12, rd + 1024 + 512 * i);
+        p32(&mut cont, 12 + i as usize * 12, 512);
+    }
+    r.put_entry(2, &cont);
+    r.doorbell(3);
+    let s = r.status(1);
+    assert_eq!(g32(&s, 4), 0xa2);
+    assert_eq!(g16(&s, 10), IOCB_COMPLETE);
+    assert_eq!(g32(&s, 20), 0);
+}
+
+#[test]
+fn a_queue_above_four_gigabytes_cannot_be_reached_on_a_32_bit_bus() {
+    let r = Rig::with_disk("high", 1, 64);
+    assert_eq!(r.cmd(&[mbox::INIT_REQ_QUEUE_A64, 4, 0, RQST as u16, 0, 0, 0, 0]), mbox::COMPLETE);
+    assert_eq!(r.cmd(&[mbox::INIT_RSP_QUEUE_A64, 4, 0, 0x2000, 0, 0, 1, 0]), mbox::COMPLETE);
+    r.put_entry(0, &tur_entry(1));
+    r.doorbell(1);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0, "the completion cannot be stored, so it is dropped");
+    assert!(r.isp.notes().iter().any(|n| n.contains("completion dropped")));
+}
+
+// ---- state -------------------------------------------------------------
+
+#[test]
+fn save_load_round_trip() {
+    let r = Rig::with_disk("save", 0, 64);
+    r.init_rings(8, 3);
+    r.cmd(&[mbox::WRITE_RAM_WORD, 0x40, 0x1234]);
+    for i in 0..4 { r.put_entry(i, &tur_entry(0x5000 + i)); }
+    r.doorbell(4); // one completion ends up held
+    let v1 = r.isp.save_state();
+    let dst = Rig::with_disk("save2", 0, 64);
+    dst.isp.load_state(&v1).expect("load_state");
+    assert_eq!(v1, dst.isp.save_state());
+    dst.cmd(&[mbox::READ_RAM_WORD, 0x40]);
+    assert_eq!(dst.r(dst.mb(2)), 0x1234);
+    dst.w(reg::RESPONSE_QUEUE, 2);
+    assert_eq!(dst.r(reg::REQUEST_QUEUE), 4, "the held completion and the ring carry over");
+}
+
+#[test]
+fn a_disk_attaches_where_asked_and_the_monitor_can_see_it() {
+    use crate::scsi_monitor::ScsiTargets;
+    let r = Rig::bare();
+    assert_eq!(r.isp.default_target(), 1);
+    let blocks = r.isp.attach_disk(&image("attach", 32)).unwrap();
+    assert_eq!(blocks, 32);
+    assert_eq!(r.isp.attached(), vec![1]);
+    assert!(r.isp.with_targets(|t| t[1].is_some() && t[0].is_none()));
+    assert!(r.isp.attach_disk_at(16, &image("attach", 32)).is_err());
+}
+
+/// Records the bus address of each transfer.
+struct AddrProbe(Mutex<Vec<u64>>);
+
+impl PciDma for AddrProbe {
+    fn dma_read(&self, addr: u64, buf: &mut [u8]) -> PciDmaStatus {
+        self.0.lock().unwrap().push(addr);
+        buf.fill(0);
+        PciDmaStatus::Ok
+    }
+    fn dma_write(&self, addr: u64, _data: &[u8]) -> PciDmaStatus {
+        self.0.lock().unwrap().push(addr);
+        PciDmaStatus::Ok
+    }
+}
+
+#[test]
+fn dma_above_4_gib_reaches_the_bus_in_full() {
+    let isp = Isp1040::new();
+    let probe = Arc::new(AddrProbe(Mutex::new(Vec::new())));
+    isp.connect_dma(probe.clone());
+    let mut b = [0u8; 4];
+    assert!(isp.dma_read(0x1_2345_6000, &mut b));
+    assert!(isp.dma_write(0xffff_ffff_ffff_f000, &b));
+    // A transfer that would wrap past the top of the space is refused.
+    assert!(!isp.dma_write(0xffff_ffff_ffff_fffe, &b));
+    assert_eq!(*probe.0.lock().unwrap(), [0x1_2345_6000, 0xffff_ffff_ffff_f000]);
+}
