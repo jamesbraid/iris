@@ -917,32 +917,33 @@ impl Core {
     // ---- requests ----------------------------------------------------
 
     /// How many bytes a command is declared to move, and whether they go to
-    /// the device. `block` is the target's logical block size.
-    fn cdb_transfer(cdb: &[u8], block: usize) -> Option<(usize, bool)> {
+    /// the device. `block` is the target's logical block size. An opcode
+    /// with no rule here moves nothing; the target answers it as SCSI says.
+    fn cdb_transfer(cdb: &[u8], block: usize) -> (usize, bool) {
         let at = |i: usize| cdb.get(i).copied().unwrap_or(0) as usize;
         let be16 = |i: usize| (at(i) << 8) | at(i + 1);
         let be24 = |i: usize| (at(i) << 16) | (at(i + 1) << 8) | at(i + 2);
         let six = || if at(4) == 0 { 256 } else { at(4) };
         match cdb[0] {
-            scsi_cmd::READ_6 => Some((six() * block, false)),
-            scsi_cmd::WRITE_6 => Some((six() * block, true)),
-            scsi_cmd::READ_10 => Some((be16(7) * block, false)),
-            scsi_cmd::WRITE_10 => Some((be16(7) * block, true)),
-            scsi_cmd::INQUIRY => Some((be16(3), false)),
-            scsi_cmd::REQUEST_SENSE | scsi_cmd::MODE_SENSE_6 => Some((at(4), false)),
-            scsi_cmd::MODE_SELECT_6 => Some((at(4), true)),
+            scsi_cmd::READ_6 => (six() * block, false),
+            scsi_cmd::WRITE_6 => (six() * block, true),
+            scsi_cmd::READ_10 => (be16(7) * block, false),
+            scsi_cmd::WRITE_10 => (be16(7) * block, true),
+            scsi_cmd::INQUIRY => (be16(3), false),
+            scsi_cmd::REQUEST_SENSE | scsi_cmd::MODE_SENSE_6 => (at(4), false),
+            scsi_cmd::MODE_SELECT_6 => (at(4), true),
             scsi_cmd::MODE_SENSE_10
             | scsi_cmd::READ_TOC_PMA_ATIP
             | scsi_cmd::GET_CONFIGURATION
             | scsi_cmd::READ_SUB_CHANNEL
-            | scsi_cmd::READ_DISC_INFORMATION => Some((be16(7), false)),
-            scsi_cmd::MODE_SELECT_10 => Some((be16(7), true)),
-            scsi_cmd::READ_CAPACITY_10 => Some((8, false)),
-            scsi_cmd::READ_BUFFER => Some((be24(6), false)),
-            scsi_cmd::WRITE_BUFFER => Some((be24(6), true)),
-            scsi_cmd::SEND_DIAGNOSTIC => Some((be16(3), true)),
-            scsi_cmd::RECEIVE_DIAGNOSTIC_RESULTS => Some((be16(3), false)),
-            _ => Some((0, false)),
+            | scsi_cmd::READ_DISC_INFORMATION => (be16(7), false),
+            scsi_cmd::MODE_SELECT_10 => (be16(7), true),
+            scsi_cmd::READ_CAPACITY_10 => (8, false),
+            scsi_cmd::READ_BUFFER => (be24(6), false),
+            scsi_cmd::WRITE_BUFFER => (be24(6), true),
+            scsi_cmd::SEND_DIAGNOSTIC => (be16(3), true),
+            scsi_cmd::RECEIVE_DIAGNOSTIC_RESULTS => (be16(3), false),
+            _ => (0, false),
         }
     }
 
@@ -1056,15 +1057,8 @@ impl Core {
             .map(|d| d.block_sizes().1 as usize)
             .filter(|&b| b != 0)
             .unwrap_or(BLOCK_SIZE);
-        // An opcode with no length rule is sized by what the descriptors
-        // name, and treated as data coming from the target.
-        let known = Self::cdb_transfer(cdb, block);
-        let (mut xfer, to_dev) = known.unwrap_or((0, false));
-        let max = if known.is_some() { xfer as u64 } else { u64::MAX };
-        let (segs, described) = self.read_segments(st, addr, entry_count, seg_count, max, a64);
-        if known.is_none() {
-            xfer = described.min(u32::MAX as u64) as usize;
-        }
+        let (xfer, to_dev) = Self::cdb_transfer(cdb, block);
+        let (segs, described) = self.read_segments(st, addr, entry_count, seg_count, xfer as u64, a64);
         st.total_cmds += 1;
         Prepared::Run(Job { handle, target, cdb: cdb.to_vec(), xfer, to_dev, segs, described })
     }
