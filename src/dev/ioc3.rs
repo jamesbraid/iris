@@ -1180,6 +1180,14 @@ const SSRAM_PARITY_ERROR: u32 = 0x0002_0000;
 /// MAC control bit 9: buffer RAM parity checking.
 const ENET_MCR_RAM_PARITY: u32 = 1 << 9;
 
+/// Say once that a narrow access to a 32-bit block was refused.
+fn narrow_once(a: u32, w: usize) {
+    static SAID: AtomicBool = AtomicBool::new(false);
+    if !SAID.swap(true, Ordering::Relaxed) {
+        log::warn!("ioc3: {w}-byte access at {a:#x} to a 32-bit register block refused (reads 0, writes dropped)");
+    }
+}
+
 fn is_byte_wide(a: u32) -> bool {
     (reg::SUPERIO..reg::SUPERIO + reg::SUPERIO_SIZE).contains(&a) || a >= reg::BYTEBUS_DEV1 - 0x20000
 }
@@ -2275,9 +2283,12 @@ impl St {
             }
             return v;
         }
-        // The 32-bit blocks accept only 32-bit accesses; a narrower one is
-        // refused by the bus and reads as zero.
+        // The 32-bit blocks declare both their valid and implemented access
+        // size as 4 in the QEMU model, so a narrower access is refused by the
+        // bus there (not widened to a lane). There is no bus error to return
+        // from `bar_read`: it reads zero, and the write below is dropped.
         if w != 4 {
+            narrow_once(a, w);
             return 0;
         }
         let word = if (reg::SSRAM..reg::SSRAM + reg::SSRAM_SIZE).contains(&a) {
@@ -2310,7 +2321,7 @@ impl St {
             return;
         }
         if w != 4 || a & 3 != 0 {
-            log::debug!("ioc3: {w}-byte write at {a:#x} to a 32-bit register block ignored");
+            narrow_once(a, w);
             return;
         }
         if (reg::SSRAM..reg::SSRAM + reg::SSRAM_SIZE).contains(&a) {
