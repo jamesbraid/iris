@@ -1071,7 +1071,12 @@ impl Core {
 
     /// Run a command against its target and build its completion. The
     /// state is not locked: this is the part that waits on the disk.
-    fn run_job(&self, job: Job) -> Pending {
+    ///
+    /// A WRITE whose payload the fabric refuses stops there: nothing reaches
+    /// the target and no completion is built. The QEMU model leaves such a
+    /// request outstanding, never completed, until the driver gives up on
+    /// it; with no completion posted the driver sees the same here.
+    fn run_job(&self, job: Job) -> Option<Pending> {
         let Job { handle, target, cdb, xfer, to_dev, segs, described } = job;
         let (status, moved);
         if to_dev {
@@ -1079,7 +1084,8 @@ impl Core {
             for &(a, l) in &segs {
                 let mut chunk = vec![0u8; l as usize];
                 if !self.dma_read(a, &mut chunk) {
-                    self.note(format!("payload DMA for handle {handle:#x} refused by the fabric"));
+                    self.note(format!("payload DMA for handle {handle:#x} refused by the fabric; command stopped"));
+                    return None;
                 }
                 buf.extend_from_slice(&chunk);
             }
@@ -1120,7 +1126,7 @@ impl Core {
         // Underrun is a short data transfer, not a refused command: a target
         // answering with a status of its own carries the failure there.
         let completion = if unused != 0 && status == 0 { IOCB_DATA_UNDERRUN } else { IOCB_COMPLETE };
-        Pending { handle, scsi_status, completion, state_flags, status_flags: 0, resid: unused, sense }
+        Some(Pending { handle, scsi_status, completion, state_flags, status_flags: 0, resid: unused, sense })
     }
 
     /// The ring thread: wait to be kicked, then walk the request ring.
@@ -1194,7 +1200,9 @@ impl Core {
                             if st.ctl.epoch != epoch {
                                 continue;
                             }
-                            self.post_status(&mut st, done);
+                            if let Some(done) = done {
+                                self.post_status(&mut st, done);
+                            }
                         }
                     }
                 }
