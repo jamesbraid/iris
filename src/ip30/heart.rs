@@ -538,6 +538,7 @@ impl Heart {
 
     /// The level IPn (n = 2..6) is at, for tests and the monitor.
     pub fn pin(&self, n: u32) -> bool {
+        assert!((2..=6).contains(&n), "HEART drives IP2 to IP6, not IP{n}");
         self.regs.lock().unwrap().out & (1 << (n - 2)) != 0
     }
 
@@ -1011,17 +1012,17 @@ mod tests {
             0x0000_0040, 0x0001_0040, 0x0043_0040, 0x0047_0040, 0x008f_0040, 0x009f_0040, 0x0000_0040, 0x0000_0040,
             0x0101_0040, 0x0103_0040, 0x0147_0040, 0x014f_0040, 0x019f_0040, 0x01bf_0040, 0x0000_0040, 0x0000_0040,
         ];
-        fn distinct(h: &Heart, base: u32, step: u64, pattern: u64) -> bool {
-            wq(h, base, pattern);
-            wq(h, base + step as u32, !pattern);
-            rq(h, base) == pattern
+        fn distinct(h: &Heart, base: u64, step: u64, pattern: u64) -> bool {
+            w(h, base, pattern);
+            w(h, base + step, !pattern);
+            r(h, base) == pattern
         }
-        fn capacity(h: &Heart, base: u32) -> u32 {
+        fn capacity(h: &Heart, base: u64) -> u32 {
             let pattern = 0x1111_1111_1111_1111u64;
             let mut bits = 0;
-            wq(h, base + 0x100, pattern);
-            wq(h, base, !pattern);
-            if rq(h, base + 0x100) == pattern {
+            w(h, base + 0x100, pattern);
+            w(h, base, !pattern);
+            if r(h, base + 0x100) == pattern {
                 bits |= 0x20;
             }
             if distinct(h, base, 4 * UNIT, pattern << 1) {
@@ -1034,23 +1035,39 @@ mod tests {
             }
             TABLE[bits / 4]
         }
-        for (mib, want) in [(64u64, 0x8101_0040u32), (128, 0x8103_0040), (256, 0x8147_0040), (512, 0x814f_0040)] {
+        // Memory addresses here run past 4 GiB: the probe descriptor's base
+        // is 0x40 units up.
+        fn w(h: &Heart, addr: u64, v: u64) {
+            assert!(h.ram_write(addr, 8, v), "write {addr:#x}");
+        }
+        fn r(h: &Heart, addr: u64) -> u64 {
+            h.ram_read(addr, 8).unwrap()
+        }
+        let probe = PROBE_RAM as u64;
+        for (mib, want) in [
+            (64u64, 0x8101_0040u32),
+            (128, 0x8103_0040),
+            (256, 0x8147_0040),
+            (512, 0x814f_0040),
+            (1024, 0x819f_0040),
+            (2048, 0x81bf_0040),
+        ] {
             let f = heart(mib);
             let h = &f.heart;
             wl(h, 0x20, PROBE_DESC);
-            let word = capacity(h, PROBE_RAM) | DESC_VALID;
+            let word = capacity(h, probe) | DESC_VALID;
             wl(h, 0x20, word);
             if (word >> 22) & 1 != 0 {
-                wq(h, PROBE_RAM + 0x80, 0);
-                wq(h, PROBE_RAM + UNIT as u32 + 0x80, !0);
-                assert_ne!(rq(h, PROBE_RAM + 0x80), rq(h, PROBE_RAM + UNIT as u32 + 0x80));
+                w(h, probe + 0x80, 0);
+                w(h, probe + UNIT + 0x80, !0);
+                assert_ne!(r(h, probe + 0x80), r(h, probe + UNIT + 0x80));
             }
             assert_eq!(word, want, "{mib} MiB");
             for unit in 0..mib / 32 {
-                wq(h, PROBE_RAM + (unit * UNIT) as u32 + 0x100, 0x1021_3243_5465_7687 + unit);
+                w(h, probe + unit * UNIT + 0x100, 0x1021_3243_5465_7687 + unit);
             }
             for unit in 0..mib / 32 {
-                assert_eq!(rq(h, PROBE_RAM + (unit * UNIT) as u32 + 0x100), 0x1021_3243_5465_7687 + unit);
+                assert_eq!(r(h, probe + unit * UNIT + 0x100), 0x1021_3243_5465_7687 + unit);
             }
         }
     }
