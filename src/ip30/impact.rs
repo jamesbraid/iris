@@ -1050,6 +1050,167 @@ impl BusDevice for ImpactXio {
 /// its own reaches: identity, widths and holes, reset, DMA through HEART
 /// memory and interrupt transport. The rest go through the raster model
 /// with the Indigo2 tests' register setups.
+/// The HQ4's registers and handshake state, the board's one-wire record
+/// and the GE readback slots, then the raster pipeline's own state (which
+/// `Mgras` does not snapshot yet, so a restored board keeps whatever its
+/// pipeline held). Loading changes no interrupt level: HEART's saved state
+/// carries them, and a load restores HEART last.
+impl crate::traits::Saveable for ImpactXio {
+    fn save_state(&self) -> toml::Value {
+        use crate::snapshot::hex_u32;
+        use toml::Value;
+        let h = self.shared.hq4.lock();
+        let mut t = toml::map::Map::new();
+        for (k, v) in [
+            ("control", h.control),
+            ("context_word", h.context_word),
+            ("entry", h.entry),
+            ("pending", h.pending),
+            ("status_extra", h.status_extra),
+            ("enable", h.enable),
+            ("hq_enable", h.hq_enable),
+            ("vectors", h.vectors),
+            ("flag_shadow", h.flag_shadow),
+            ("nic_control", h.nic_control),
+            ("context_words", h.context_words),
+        ] {
+            t.insert(k.into(), hex_u32(v));
+        }
+        t.insert("int_dest".into(), crate::snapshot::u32_slice_to_toml(&h.int_dest));
+        t.insert("vector_dest".into(), crate::snapshot::u32_slice_to_toml(&h.vector_dest));
+        t.insert("mapping".into(), crate::snapshot::hex_u64(h.mapping));
+        for (k, v) in [
+            ("context_word_written", h.context_word_written),
+            ("entry_selected", h.entry_selected),
+            ("first_ack", h.first_ack),
+            ("ready", h.ready),
+            ("lowater_asserted", h.lowater_asserted),
+            ("general_asserted", h.general_asserted),
+            ("no_dest_logged", h.no_dest_logged),
+        ] {
+            t.insert(k.into(), Value::Boolean(v));
+        }
+        t.insert("protocol".into(), crate::snapshot::hex_u8(h.protocol));
+        let mut plain: Vec<_> = h.plain.iter().collect();
+        plain.sort();
+        t.insert("plain".into(), Value::Array(plain.iter().map(|(k, v)| Value::Array(vec![hex_u32(**k), hex_u32(**v)])).collect()));
+        let mut i2c: Vec<_> = h.i2c.iter().collect();
+        i2c.sort();
+        t.insert("i2c".into(), Value::Array(i2c.iter().map(|(k, v)| Value::Array(vec![hex_u32(**k), crate::snapshot::hex_u8(**v)])).collect()));
+        let g = &h.ge;
+        let mut ge = toml::map::Map::new();
+        // The downloaded programs as one string of hex words each: up to
+        // 178k words a slot, too many for an array of values.
+        for slot in 0..2 {
+            let words: String = g.words[slot].iter().map(|w| format!("{w:08x}")).collect();
+            ge.insert(format!("words{slot}"), Value::String(words));
+        }
+        let ints = |v: [usize; 2]| Value::Array(v.iter().map(|&x| Value::Integer(x as i64)).collect());
+        let bools = |v: [bool; 2]| Value::Array(v.iter().map(|&x| Value::Boolean(x)).collect());
+        ge.insert("write_ptr".into(), ints(g.write_ptr));
+        ge.insert("read_ptr".into(), ints(g.read_ptr));
+        ge.insert("read_odd".into(), bools(g.read_odd));
+        ge.insert("load_mode".into(), bools(g.load_mode));
+        ge.insert("active".into(), Value::Integer(g.active as i64));
+        t.insert("ge".into(), Value::Table(ge));
+        drop(h);
+        t.insert("nic".into(), self.shared.nic.lock().save_bus());
+        t.insert("mgras".into(), self.mgras.save_state());
+        Value::Table(t)
+    }
+
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        use crate::snapshot::{get_field, load_u32_slice, toml_u32, toml_u64, toml_u8, toml_bool};
+        let u32f = |k: &str| get_field(v, k).and_then(toml_u32).unwrap_or(0);
+        let boolf = |k: &str| get_field(v, k).and_then(toml_bool).unwrap_or(false);
+        let mut n = Hq4 {
+            control: u32f("control"),
+            context_word: u32f("context_word"),
+            entry: u32f("entry"),
+            pending: u32f("pending"),
+            status_extra: u32f("status_extra"),
+            enable: u32f("enable"),
+            hq_enable: u32f("hq_enable"),
+            vectors: u32f("vectors"),
+            flag_shadow: u32f("flag_shadow"),
+            nic_control: u32f("nic_control"),
+            context_words: u32f("context_words"),
+            mapping: get_field(v, "mapping").and_then(toml_u64).unwrap_or(0),
+            context_word_written: boolf("context_word_written"),
+            entry_selected: boolf("entry_selected"),
+            first_ack: boolf("first_ack"),
+            ready: boolf("ready"),
+            lowater_asserted: boolf("lowater_asserted"),
+            general_asserted: boolf("general_asserted"),
+            no_dest_logged: boolf("no_dest_logged"),
+            protocol: get_field(v, "protocol").and_then(toml_u8).unwrap_or(0),
+            ..Hq4::default()
+        };
+        if let Some(a) = get_field(v, "int_dest") {
+            load_u32_slice(a, &mut n.int_dest);
+        }
+        if let Some(a) = get_field(v, "vector_dest") {
+            load_u32_slice(a, &mut n.vector_dest);
+        }
+        let pairs = |k: &str| -> Vec<(u32, u32)> {
+            get_field(v, k).and_then(|a| a.as_array()).map_or_else(Vec::new, |a| {
+                a.iter()
+                    .filter_map(|p| {
+                        let p = p.as_array()?;
+                        Some((toml_u32(p.first()?)?, toml_u32(p.get(1)?)?))
+                    })
+                    .collect()
+            })
+        };
+        n.plain = pairs("plain").into_iter().collect();
+        n.i2c = pairs("i2c").into_iter().map(|(k, x)| (k, x as u8)).collect();
+        if let Some(g) = get_field(v, "ge") {
+            for slot in 0..2 {
+                let hex = get_field(g, &format!("words{slot}")).and_then(|w| w.as_str()).unwrap_or("");
+                if hex.len() % 8 != 0 || hex.len() / 8 > ge::WORDS {
+                    return Err("impact: the saved GE download is the wrong size".into());
+                }
+                n.ge.words[slot] = hex
+                    .as_bytes()
+                    .chunks(8)
+                    .map(|c| u32::from_str_radix(std::str::from_utf8(c).unwrap_or("x"), 16).map_err(|e| format!("impact: GE download: {e}")))
+                    .collect::<Result<_, _>>()?;
+            }
+            let ints = |k: &str| -> [usize; 2] {
+                let mut o = [0; 2];
+                if let Some(a) = get_field(g, k).and_then(|a| a.as_array()) {
+                    for (d, x) in o.iter_mut().zip(a) {
+                        *d = x.as_integer().unwrap_or(0).max(0) as usize;
+                    }
+                }
+                o
+            };
+            let bools = |k: &str| -> [bool; 2] {
+                let mut o = [false; 2];
+                if let Some(a) = get_field(g, k).and_then(|a| a.as_array()) {
+                    for (d, x) in o.iter_mut().zip(a) {
+                        *d = x.as_bool().unwrap_or(false);
+                    }
+                }
+                o
+            };
+            n.ge.write_ptr = ints("write_ptr");
+            n.ge.read_ptr = ints("read_ptr");
+            n.ge.read_odd = bools("read_odd");
+            n.ge.load_mode = bools("load_mode");
+            n.ge.active = (get_field(g, "active").and_then(|a| a.as_integer()).unwrap_or(0) as usize).min(1);
+        }
+        if let Some(b) = get_field(v, "nic") {
+            self.shared.nic.lock().load_bus(b)?;
+        }
+        if let Some(m) = get_field(v, "mgras") {
+            self.mgras.load_state(m)?;
+        }
+        *self.shared.hq4.lock() = n;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1591,6 +1752,33 @@ mod tests {
         assert_eq!(r.r32(0x011020) & 1, 1);
         r.w32(0x011028, 0x401);
         assert_eq!(r.r32(0x011020) & 1, 0);
+    }
+
+    /// The HQ4's registers, the GE download with its readback position and
+    /// the one-wire record come back in a fresh board, which carries on
+    /// from the saved point.
+    #[test]
+    fn the_hq4_state_round_trips() {
+        use crate::traits::Saveable;
+        let a = rig();
+        let prog: Vec<u32> = (0..8).map(|i| 0x0100_0000 * (i + 1) + i).collect();
+        a.w32(0x058044, 0x20_0000);
+        for &w in &prog {
+            a.w32(0x058040, w);
+        }
+        a.w32(0x058044, 0x8000_0000);
+        assert_eq!(a.r32(0x05822C), prog[0]);
+        a.w32(CONTROL, 0x1234);
+        let saved = a.b.save_state();
+        let b = rig();
+        b.b.load_state(&saved).unwrap();
+        assert_eq!(b.b.save_state(), saved);
+        assert_eq!(b.r32(CONTROL), a.r32(CONTROL));
+        assert_eq!(b.r32(0x058230), prog[3], "the readback goes on from the second pair");
+        assert_eq!(b.r32(0x05822C), prog[2]);
+        let mut bad = saved.clone();
+        bad.as_table_mut().unwrap().get_mut("ge").unwrap().as_table_mut().unwrap().insert("words0".into(), toml::Value::String("123".into()));
+        assert!(b.b.load_state(&bad).is_err());
     }
 
     /// The kernel's GE11 program download and its verification readback:
