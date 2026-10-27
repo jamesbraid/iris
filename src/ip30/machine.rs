@@ -93,7 +93,7 @@ pub struct Ip30Bus {
     widgets: [Option<Arc<dyn BusDevice>>; 16],
     /// Large windows that reach the same device as the small one.
     large: [bool; 16],
-    /// Accesses that hit nothing, first 64 distinct: `(addr, write, pc)`.
+    /// Accesses that failed, first 64 distinct: `(addr, write, pc)`.
     unmapped: Mutex<Vec<(u64, bool, u64)>>,
 }
 
@@ -217,7 +217,11 @@ macro_rules! bus_access {
     ($read:ident, $write:ident, $r:ident, $t:ty, $n:expr) => {
         fn $read(&self, addr: u64) -> $r {
             if let Some(d) = self.widget(addr) {
-                return d.$read(addr);
+                let r = d.$read(addr);
+                if r.status == BUS_ERR {
+                    self.miss(addr, false);
+                }
+                return r;
             }
             match self.read(addr, $n) {
                 Some(v) => $r::ok(v as $t),
@@ -229,7 +233,11 @@ macro_rules! bus_access {
         }
         fn $write(&self, addr: u64, val: $t) -> u32 {
             if let Some(d) = self.widget(addr) {
-                return d.$write(addr, val);
+                let r = d.$write(addr, val);
+                if r == BUS_ERR {
+                    self.miss(addr, true);
+                }
+                return r;
             }
             if self.write(addr, $n, val as u64) {
                 BUS_OK
@@ -366,7 +374,6 @@ pub struct OctaneMachine {
     pub scsi: [Arc<Isp1040>; 2],
     nat: Option<(Arc<crate::net::NatControl>, (std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr))>,
     scratch_path: Option<std::path::PathBuf>,
-    #[allow(dead_code)]
     events: std::sync::mpsc::SyncSender<MachineEvent>,
     event_rx: Option<std::sync::mpsc::Receiver<MachineEvent>>,
     controller_up: Arc<AtomicBool>,
@@ -397,7 +404,14 @@ impl OctaneMachine {
         // flash on its first chip select, the system board's record on its
         // one-wire register.
         let bridge = Bridge::new(heart.clone() as Arc<dyn XioMemory>, heart.clone() as Arc<dyn XioInterruptSink>);
-        bridge.attach_flash(Arc::new(RawFlash::new(&prom, FLASH_SIZE as usize)), FLASH_SIZE as u32);
+        // The flash holds the PROM's own records as well as its code; with
+        // `[octane] flash` they last from run to run.
+        let flash = match &cfg.octane.flash {
+            Some(path) => crate::ip30::flash::CfiFlash::with_file(&prom, FLASH_SIZE as usize, path)
+                .map_err(|e| format!("octane.flash {path}: {e}"))?,
+            None => crate::ip30::flash::CfiFlash::new(&prom, FLASH_SIZE as usize),
+        };
+        bridge.attach_flash(Arc::new(flash), FLASH_SIZE as u32);
         // The second chip select: a blank 2 MiB part that reads all ones and
         // keeps no writes, the Origami contract's approximation from one
         // measured Octane2 word. The PROM looks for a part there too.
@@ -433,6 +447,15 @@ impl OctaneMachine {
         // DMA reaches only widgets the Crossbow has a live link to.
         let links = xbow.clone();
         bridge.set_link_alive(Box::new(move |w| links.carries(w)));
+        // A link reset of widget 15 resets the Bridge, as in the model.
+        let weak = Arc::downgrade(&bridge);
+        xbow.on_link_reset(Box::new(move |w| {
+            if w == WIDGET_BRIDGE {
+                if let Some(b) = weak.upgrade() {
+                    b.link_reset();
+                }
+            }
+        }));
 
         let scratch_path = Self::attach_scsi(cfg, &scsi)?;
         eprintln!(
@@ -627,6 +650,28 @@ impl OctaneMachine {
         }
         self.running.store(true, Ordering::SeqCst);
         self.monitor.clone().start_server(format!("127.0.0.1:{}", self.monitor_port));
+        // The guest switching the machine off through the clock.
+        let (ioc3, cpu, running) = (self.ioc3.clone(), self.cpu.clone(), self.running.clone());
+        let (events, controller_up) = (self.events.clone(), self.controller_up.clone());
+        self.threads.push(
+            std::thread::Builder::new()
+                .name("Octane-Power".into())
+                .spawn(move || {
+                    while running.load(Ordering::Relaxed) {
+                        if ioc3.powered_off() {
+                            eprintln!("iris: the Octane switched itself off");
+                            cpu.clone().as_device().stop();
+                            if controller_up.load(Ordering::SeqCst) && events.try_send(MachineEvent::PowerOff).is_ok() {
+                                return;
+                            }
+                            running.store(false, Ordering::SeqCst);
+                            std::process::exit(0);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                })
+                .unwrap(),
+        );
         if self.ci_serial.is_none() {
             self.cpu.clone().as_device().start();
         }

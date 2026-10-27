@@ -154,6 +154,9 @@ pub struct Xbow {
     present: Mutex<u8>,
     /// Where widget 0's interrupt packets go when they target HEART.
     heart: Mutex<Option<Arc<dyn XioInterruptSink>>>,
+    /// Told of a link reset, with the widget, once the switch's own state
+    /// has settled: the widget at the far end resets too.
+    on_link_reset: Mutex<Option<Box<dyn Fn(u8) + Send + Sync>>>,
     unsupported: Mutex<Vec<(u32, u8, bool)>>,
 }
 
@@ -171,12 +174,18 @@ impl Xbow {
             revision,
             present: Mutex::new(present),
             heart: Mutex::new(None),
+            on_link_reset: Mutex::new(None),
             unsupported: Mutex::new(Vec::new()),
         }
     }
 
     pub fn connect_heart(&self, sink: Arc<dyn XioInterruptSink>) {
         *self.heart.lock().unwrap() = Some(sink);
+    }
+
+    /// What to do when a link reset reaches the widget on the far end.
+    pub fn on_link_reset(&self, f: Box<dyn Fn(u8) + Send + Sync>) {
+        *self.on_link_reset.lock().unwrap() = Some(f);
     }
 
     /// Fit a board on `widget` after construction (graphics), alive.
@@ -406,7 +415,16 @@ impl Xbow {
                     // Stored; nothing arbitrates on them.
                     LINK_ARB_UPPER => r.link_arb_upper[link] = val,
                     LINK_ARB_LOWER => r.link_arb_lower[link] = val,
-                    LINK_RESET => self.link_reset(&mut r, link),
+                    LINK_RESET => {
+                        self.link_reset(&mut r, link);
+                        // Outside the lock: the widget's reset may ask
+                        // the switch about its links.
+                        drop(r);
+                        if let Some(f) = self.on_link_reset.lock().unwrap().as_ref() {
+                            f(FIRST_WIDGET + link as u8);
+                        }
+                        return true;
+                    }
                     _ => unreachable!(),
                 }
             }
