@@ -21,7 +21,11 @@ out of the host's audio device; `no_audio` turns it off. `reboot` comes back to 
 "/ns: Resource busy" line during startup comes from the guest; the disk
 prints it on the other Octane emulator too.
 
-The Octane does not run in iris-gui; start it from the `iris` command line.
+iris-gui runs the Octane too: choose "SGI Octane (IP30)" as the platform. The editor then fixes the
+CPU at the R10000, offers Solid IMPACT or no graphics board, limits banks to
+64 to 512 MB filled from bank 0, and asks for the IP30 PROM image and an
+optional flash file. The Indy and Indigo2 NVRAM seeding and Ethernet-address
+row do not apply and are skipped. The O2 is not in iris-gui.
 
 ## Configure the machine
 
@@ -158,7 +162,7 @@ HEART's bank mapping as they happen.
   without effect and noted.
 - RAD audio input records silence; only the analog output reaches the host.
 - Board identity records carry made-up barcodes and serial numbers.
-- No snapshots, and not in iris-gui.
+- No snapshots.
 
 ## Sources
 
