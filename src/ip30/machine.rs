@@ -19,7 +19,10 @@
 //!
 //! Widget 0 is the Crossbow, 8 HEART, 15 the onboard Bridge (whose window
 //! holds the boot flash at 0x1fc0_0000, the reset vector), 9 to 12 the
-//! graphics ports.
+//! graphics ports. On the Bridge's PCI bus, as on the board: the two
+//! ISP1040 SCSI controllers in slots 0 and 1, IOC3 (serial, keyboard and
+//! mouse, the clock, Ethernet) in slot 2. RAD1 audio in slot 3 is not
+//! modelled.
 //!
 //! Low memory follows the Origami model's functional approximation
 //! (`ip30-machine.md`, "HEART low memory"): 16 KiB of distinct RAM at
@@ -36,7 +39,12 @@ use crate::cpu::mips_cache_shadow::R10000ShadowCache;
 use crate::cpu::mips_exec::{CpuDevice, MipsCpu, MipsCpuConfig, MipsExecutor};
 use crate::cpu::mips_tlb::MipsTlb;
 use crate::hptimer::TimerManager;
-use crate::ip30::heart::{Heart, HeartConfig, PIU_BASE, PIU_SIZE, RAM_BASE};
+use crate::dev::ioc3::{board_record_part, onewire, BoardRecord, Ioc3};
+use crate::dev::ioc3_eth::Ioc3Eth;
+use crate::dev::isp1040::Isp1040;
+use crate::ip30::bridge::{Bridge, RawFlash};
+use crate::ip30::heart::{Heart, HeartConfig, OneWireResponder, PIU_BASE, PIU_SIZE, RAM_BASE};
+use crate::ip30::xio::{XioInterruptSink, XioMemory};
 use crate::ip30::xbow::{Xbow, REG_SPAN};
 use crate::ip30::xio::{widget_small_base, WIDGET_BRIDGE, WIDGET_HEART, WIDGET_SMALL_SIZE, WIDGET_XBOW};
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, Device, MachineEvent, Signal, BUS_ERR, BUS_OK};
@@ -48,9 +56,11 @@ pub const LOW_RAM_SIZE: u64 = 0x4000;
 const HIGH_GUARD: std::ops::Range<u64> = RAM_BASE as u64..RAM_BASE as u64 + 0x4000;
 const SMALL_WINDOWS: std::ops::Range<u64> = 0x1000_0000..0x2000_0000;
 const LARGE_SHIFT: u32 = 36;
-/// The boot flash's offset in the Bridge's window: 0x1fc0_0000.
-pub const FLASH_OFFSET: u64 = 0x00c0_0000;
-pub const FLASH_SIZE: u64 = 0x0020_0000;
+/// The boot flash: one 1 MiB part on the Bridge's first chip select.
+pub const FLASH_SIZE: u64 = 1 << 20;
+/// The Ethernet address when `[network] mac` does not set one: the
+/// placeholder the Origami model uses.
+pub const DEFAULT_MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
 
 /// The Octane's 195 MHz R10000 (`ip30-machine.md`): Count at half that.
 pub const OCTANE_COUNT_HZ: u64 = 97_500_000;
@@ -61,42 +71,6 @@ const XBOW_REVISION: u32 = 4;
 
 /// Where the CPU was at the end of its last batch, for the unmapped log.
 static LAST_PC: AtomicU64 = AtomicU64::new(0);
-
-/// The PROM image read-only in the flash window, 0xff past its end. Stands
-/// in for the Bridge's flash until a machine has a Bridge.
-pub struct RawFlash {
-    bytes: Vec<u8>,
-}
-
-impl RawFlash {
-    pub fn new(prom: &[u8]) -> Self {
-        let mut bytes = vec![0xffu8; FLASH_SIZE as usize];
-        let n = prom.len().min(bytes.len());
-        bytes[..n].copy_from_slice(&prom[..n]);
-        Self { bytes }
-    }
-
-    fn get(&self, off: u64, n: usize) -> Option<u64> {
-        let o = off.checked_sub(FLASH_OFFSET)? as usize;
-        let b = self.bytes.get(o..o + n)?;
-        Some(b.iter().fold(0u64, |v, &x| (v << 8) | x as u64))
-    }
-}
-
-impl BusDevice for RawFlash {
-    fn read8(&self, a: u64) -> BusRead8 {
-        self.get(a & 0xff_ffff, 1).map_or(BusRead8::err(), |v| BusRead8::ok(v as u8))
-    }
-    fn read16(&self, a: u64) -> BusRead16 {
-        self.get(a & 0xff_ffff, 2).map_or(BusRead16::err(), |v| BusRead16::ok(v as u16))
-    }
-    fn read32(&self, a: u64) -> BusRead32 {
-        self.get(a & 0xff_ffff, 4).map_or(BusRead32::err(), |v| BusRead32::ok(v as u32))
-    }
-    fn read64(&self, a: u64) -> BusRead64 {
-        self.get(a & 0xff_ffff, 8).map_or(BusRead64::err(), BusRead64::ok)
-    }
-}
 
 /// What an address is, on the processor's side of HEART.
 enum Target {
@@ -347,6 +321,38 @@ pub fn heart_banks(cfg: &MachineConfig) -> [u64; 4] {
     b
 }
 
+/// A one-wire bus of board records, as HEART's master sees it.
+struct RecordBus(onewire::Bus);
+
+impl OneWireResponder for RecordBus {
+    fn reset(&mut self) -> bool {
+        self.0.reset()
+    }
+    fn touch_bit(&mut self, bit: bool) -> bool {
+        self.0.slot(bit)
+    }
+}
+
+/// One board-record part on a bus of its own. The records and their ROM
+/// serials are the marked-synthetic identities of the Origami model's
+/// Octane catalogue (`ip30-board-identity.md`).
+fn record_bus(barcode: &str, part: &str, revision: &str, name: &str, serial: u64) -> onewire::Bus {
+    let mut bus = onewire::Bus::new();
+    bus.add(board_record_part(&BoardRecord { barcode, part, revision, name }, serial));
+    bus
+}
+
+/// A line into one of the Bridge's directly wired interrupt inputs.
+struct BridgeWire(std::sync::Weak<Bridge>);
+
+impl crate::irq::InterruptController for BridgeWire {
+    fn set_line(&self, line: u32, level: bool) {
+        if let Some(b) = self.0.upgrade() {
+            b.set_wire_irq(line as u8, level);
+        }
+    }
+}
+
 pub struct OctaneMachine {
     pub bus: Arc<Ip30Bus>,
     cpu: Arc<dyn CpuDevice>,
@@ -356,6 +362,11 @@ pub struct OctaneMachine {
     monitor: Arc<crate::monitor::Monitor>,
     monitor_port: u16,
     ci_serial: Option<Arc<crate::dev::z85c30::CiSerialBackend>>,
+    pub bridge: Arc<Bridge>,
+    pub ioc3: Arc<Ioc3>,
+    pub scsi: [Arc<Isp1040>; 2],
+    nat: Option<(Arc<crate::net::NatControl>, (std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr))>,
+    scratch_path: Option<std::path::PathBuf>,
     #[allow(dead_code)]
     events: std::sync::mpsc::SyncSender<MachineEvent>,
     event_rx: Option<std::sync::mpsc::Receiver<MachineEvent>>,
@@ -379,8 +390,48 @@ impl OctaneMachine {
         let xbow = Arc::new(Xbow::new(XBOW_REVISION, (1 << WIDGET_HEART) | (1 << WIDGET_BRIDGE)));
         xbow.connect_heart(heart.clone());
         let mut bus = Ip30Bus::new(heart.clone(), xbow.clone());
-        bus.attach_widget(WIDGET_BRIDGE, Arc::new(RawFlash::new(&prom)), false);
+
+        // HEART's one-wire bus holds the processor module's record.
+        heart.attach_onewire(Box::new(RecordBus(record_bus("EMUU00", "030-0888-004", "B", "PM10", 0x5145_4d55_5500))));
+
+        // The onboard Bridge: memory and interrupts through HEART, the boot
+        // flash on its first chip select, the system board's record on its
+        // one-wire register.
+        let bridge = Bridge::new(heart.clone() as Arc<dyn XioMemory>, heart.clone() as Arc<dyn XioInterruptSink>);
+        bridge.attach_flash(Arc::new(RawFlash::new(&prom, FLASH_SIZE as usize)), FLASH_SIZE as u32);
+        // The second chip select: a blank 2 MiB part that reads all ones and
+        // keeps no writes, the Origami contract's approximation from one
+        // measured Octane2 word. The PROM looks for a part there too.
+        bridge.attach_flash_select1(Arc::new(RawFlash::new(&[], 2 << 20)), 2 << 20);
+        let system_record = Mutex::new(record_bus("EMUN00", "030-0887-003", "F", "IP30", 0x5145_4d55_4e00));
+        bridge.set_onewire(Box::new(move |pulse, _sample| {
+            // The slot decode the model shares between its one-wire masters:
+            // a long low drive is a reset, a short one a write-one or read.
+            let mut b = system_record.lock().unwrap();
+            if pulse >= 400 { !b.reset() } else { b.slot(pulse < 40) }
+        }));
+
+        let mac = match cfg.network.mac.as_deref() {
+            Some(m) => crate::config::parse_mac(m).map_err(|e| format!("network.mac: {e}"))?,
+            None => DEFAULT_MAC,
+        };
+        let scsi = [Arc::new(Isp1040::new_at(0)), Arc::new(Isp1040::new_at(1))];
+        bridge.attach(0, scsi[0].clone());
+        bridge.attach(1, scsi[1].clone());
+        let ioc3 = Arc::new(Ioc3::octane(mac, false));
+        let eth = Ioc3Eth::new(mac);
+        ioc3.attach_eth(eth.clone());
+        bridge.attach(2, ioc3.clone());
+        // SuperIO (serial, keyboard, clock) is Bridge input 4; the Ethernet
+        // uses IOC3's PCI pin.
+        ioc3.connect_superio_interrupt(crate::irq::IrqLine::new(Arc::new(BridgeWire(Arc::downgrade(&bridge))), 4));
+        if let Err(e) = ioc3.set_nvram_file(&cfg.nvram) {
+            eprintln!("iris: Octane NVRAM {}: {e}", cfg.nvram);
+        }
+        bus.attach_widget(WIDGET_BRIDGE, bridge.clone(), false);
         let bus = Arc::new(bus);
+
+        let scratch_path = Self::attach_scsi(cfg, &scsi)?;
         eprintln!(
             "iris: Octane with {} MB ({}), serial console",
             banks.iter().sum::<u64>() >> 20,
@@ -435,6 +486,17 @@ impl OctaneMachine {
         monitor.register_device(bus.clone());
         let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
         let ci_serial = cfg.ci.then(|| Arc::new(crate::dev::z85c30::CiSerialBackend::new()));
+        Self::connect_serial(cfg, &ioc3, ci_serial.as_ref());
+        ioc3.spawn_service();
+
+        // The Ethernet on the NAT gateway `[network]` describes.
+        let mut nat = None;
+        if cfg.network.mode != crate::config::NetMode::Off {
+            let net = crate::net::GatewayConfig::from_network(&cfg.network());
+            eprintln!("iris: Octane Ethernet on NAT: gateway {}, guest {} (DHCP)", net.gateway_ip, net.client_ip);
+            let addrs = (net.client_ip, net.gateway_ip, net.netmask);
+            nat = Some((eth.start_nat(net), addrs));
+        }
         let (events, event_rx) = std::sync::mpsc::sync_channel(4);
         Ok(Self {
             bus,
@@ -445,12 +507,95 @@ impl OctaneMachine {
             monitor: Arc::new(monitor),
             monitor_port,
             ci_serial,
+            bridge,
+            ioc3,
+            scsi,
+            nat,
+            scratch_path,
             events,
             event_rx: Some(event_rx),
             controller_up: Arc::new(AtomicBool::new(false)),
             controller_slot: None,
             lifecycle: crate::machine_state::GuestState::Idle,
         })
+    }
+
+    /// The `[scsi.N]` devices: `controller` 0 is the internal bus, 1 the
+    /// external one. Returns the `scratch = true` volume, if any.
+    fn attach_scsi(cfg: &MachineConfig, ctls: &[Arc<Isp1040>; 2]) -> Result<Option<std::path::PathBuf>, String> {
+        let mut scratch_path = None;
+        let mut ids: Vec<u8> = cfg.scsi.keys().copied().collect();
+        ids.sort();
+        for key in ids {
+            let dev = &cfg.scsi[&key];
+            let (controller, id) = dev.placement(key);
+            let at = crate::config::scsi_label(controller, id);
+            if dev.is_daynaport() {
+                return Err(format!("{at}: kind = \"daynaport\" is not available on the Octane"));
+            }
+            if let Some(path) = dev.prepare_scratch(key) {
+                scratch_path.get_or_insert(path);
+            }
+            let ctl = ctls
+                .get(controller as usize)
+                .ok_or_else(|| format!("{at}: controller {controller} (an Octane has controllers 0 and 1)"))?;
+            let (path, discs) = dev.media();
+            let cdrom = dev.is_cdrom();
+            let ci_overlay = (cfg.ci && dev.overlay && !cdrom).then(|| crate::config::ScsiDeviceConfig::ci_overlay_path(key));
+            match ctl.attach_device(id, &path, cdrom, discs, dev.overlay, ci_overlay.as_deref()) {
+                Ok(_) if path.is_empty() => eprintln!("ip30: {at}: CD-ROM, tray empty"),
+                Ok(blocks) => eprintln!("ip30: {at}: {path} ({blocks} blocks)"),
+                Err(e) => {
+                    let msg = format!("could not attach {path} to {at}: {e}");
+                    if std::env::var_os("IRIS_NO_EXIT_ON_POWEROFF").is_some() {
+                        eprintln!("iris: warning: {msg}; continuing without {at}");
+                    } else {
+                        return Err(msg);
+                    }
+                }
+            }
+        }
+        Ok(scratch_path)
+    }
+
+    /// IOC3's first port is the console: the CI socket's backend in CI
+    /// mode, otherwise TCP on `serial_port_a`, either teed to `serial_log`.
+    /// The second port serves TCP on `serial_port_b`.
+    fn connect_serial(cfg: &MachineConfig, ioc3: &Ioc3, ci: Option<&Arc<crate::dev::z85c30::CiSerialBackend>>) {
+        use crate::dev::z85c30::{null_serial_backend, tcp_serial_backend, TeeBackend};
+        let [port_a, port_b] = cfg.serial_ports();
+        let log = cfg.serial_log.as_deref().and_then(|path| {
+            match crate::dev::serial_log::SerialLog::create(std::path::Path::new(path), cfg.serial_log_timestamps) {
+                Ok(log) => Some(log),
+                Err(e) => {
+                    eprintln!("iris: Octane serial log {path}: {e}");
+                    None
+                }
+            }
+        });
+        if let Some(ci) = ci {
+            if let Some(log) = log {
+                ci.set_log(log);
+            }
+            ioc3.set_serial_backend(0, ci.clone());
+        } else {
+            let mut backend = null_serial_backend();
+            match tcp_serial_backend(port_a) {
+                Some((b, p)) => {
+                    eprintln!("iris: Octane serial port 1 on 127.0.0.1:{p}");
+                    backend = b;
+                }
+                None => eprintln!("iris: Octane serial port 1: port {port_a} unavailable (serial_port_a)"),
+            }
+            if let Some(log) = log {
+                backend = Arc::new(TeeBackend::new(backend, log));
+            }
+            ioc3.set_serial_backend(0, backend);
+        }
+        if let Some((b, p)) = tcp_serial_backend(port_b) {
+            eprintln!("iris: Octane serial port 2 on 127.0.0.1:{p}");
+            ioc3.set_serial_backend(1, b);
+        }
     }
 
     fn build_cpu(sysad: Arc<dyn BusDevice>, tm: &Arc<TimerManager>, count_hz: u64) -> Arc<dyn CpuDevice> {
@@ -495,6 +640,8 @@ impl OctaneMachine {
         self.stop();
         crate::traits::Resettable::power_on(&*self.cpu);
         self.bus.power_on();
+        self.bridge.reset();
+        self.ioc3.reset();
     }
 
     pub fn machine_slot(&mut self) -> MachineSlot {
@@ -558,7 +705,7 @@ impl Workstation for OctaneMachine {
         None
     }
     fn get_ps2(&self) -> Arc<crate::dev::ps2::Ps2Controller> {
-        Arc::new(crate::dev::ps2::Ps2Controller::new(None))
+        self.ioc3.ps2()
     }
     fn get_timer_manager(&self) -> Arc<TimerManager> {
         self.timer_manager.clone()
@@ -580,6 +727,19 @@ impl Workstation for OctaneMachine {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
+    fn scratch_path(&self) -> Option<&std::path::Path> {
+        self.scratch_path.as_deref()
+    }
+    /// Disc changes on the internal bus.
+    fn disc_changer(&self) -> Option<Arc<dyn crate::workstation::DiscChanger>> {
+        Some(self.scsi[0].clone() as Arc<dyn crate::workstation::DiscChanger>)
+    }
+    fn nat_control(&self) -> Option<Arc<crate::net::NatControl>> {
+        self.nat.as_ref().map(|(n, _)| n.clone())
+    }
+    fn nat_expected(&self) -> Option<(std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr)> {
+        self.nat.as_ref().map(|(_, a)| *a)
+    }
 }
 
 #[cfg(test)]
@@ -592,7 +752,9 @@ mod tests {
         let xbow = Arc::new(Xbow::new(XBOW_REVISION, 0x8100));
         xbow.connect_heart(heart.clone());
         let mut b = Ip30Bus::new(heart, xbow);
-        b.attach_widget(WIDGET_BRIDGE, Arc::new(RawFlash::new(prom)), false);
+        let bridge = Bridge::new(b.heart.clone() as Arc<dyn XioMemory>, b.heart.clone() as Arc<dyn XioInterruptSink>);
+        bridge.attach_flash(Arc::new(RawFlash::new(prom, FLASH_SIZE as usize)), FLASH_SIZE as u32);
+        b.attach_widget(WIDGET_BRIDGE, bridge, false);
         b
     }
 
@@ -603,9 +765,7 @@ mod tests {
         assert_eq!(b.read64(0x1fc0_0000).data, 0x0bf0_00f0_0000_0000);
         assert_eq!(b.read8(0x1fc0_0001).data, 0xf0);
         assert_eq!(b.read32(0x1fc0_0008).data, 0xffff_ffff, "erased past the image");
-        assert_eq!(b.read32(0x1fdf_fffc).data, 0xffff_ffff, "the whole first select");
-        assert_eq!(b.write32(0x1fc0_0000, 0), BUS_ERR);
-        assert_eq!(b.read32(0x1f00_0000).status, BUS_ERR, "nothing else of the Bridge yet");
+        assert_eq!(b.read32(0x1f00_0004).data >> 12 & 0xffff, 0xc002, "the Bridge's widget identity");
     }
 
     #[test]
