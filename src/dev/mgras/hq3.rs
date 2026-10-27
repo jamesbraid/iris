@@ -936,7 +936,20 @@ impl Hq3Engine {
             0x089 => Some(cmd),
             _ => None,
         };
-        if cmd >= cmd::RASTER_BASE {
+        if cmd >= cmd::RASTER_BASE && self.hq4_state && cmd & 0x200 != 0 {
+            // A raster register past 0x1FF. That the register field is nine
+            // bits is an inference, not a published width: every raster
+            // register name known runs to 0x1FF (`rss::REG_NAMES`), and the
+            // direct packets' decode used for the Octane's port takes the
+            // bit above as part of the packet class. Above 0x1FF the model keeps
+            // its own pseudo-registers. The
+            // IP30 PROM sends one such word (0x001A6804) before its first
+            // context switch; what the board does with it is unknown.
+            // Dropped and reported on the Octane's boards; the Indigo2 path
+            // keeps storing them as before.
+            self.stats.raster_writes += 1;
+            sink.note(format!("raster command {cmd:#x} past register 0x1FF dropped"));
+        } else if cmd >= cmd::RASTER_BASE {
             let r = cmd & 0x3FF;
             let exec = cmd & cmd::RASTER_EXECUTE != 0;
             self.stats.raster_writes += 1;
@@ -1064,15 +1077,16 @@ impl Hq3Engine {
         }
     }
 
-    /// The host DMA engine's start word. Host to board runs now: the raster
-    /// engine was armed by commands queued ahead. Board to host waits for
-    /// the raster engine.
     /// The GE state word a readback at `addr` answers, in the layout of the
     /// board's microcode.
     fn ge_state(&mut self, addr: u32) -> Option<u32> {
         if self.hq4_state { self.gl.state_word_hq4(addr) } else { self.gl.state_word(addr) }
     }
 
+    /// The host DMA engine's start word. Host to board runs now: the raster
+    /// engine was armed by commands queued ahead. Board to host is held
+    /// until the raster engine arms the transfer, or, with
+    /// `kick_starts_read`, until the start word itself starts it.
     fn dma_start(&mut self, word: u32, sink: &mut dyn Hq3Sink) {
         if word & 1 == 0 {
             return;
