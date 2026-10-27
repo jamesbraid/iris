@@ -116,72 +116,6 @@ pub fn board_nic(record: &BoardRecord, serial: u64) -> Box<dyn Part> {
     Box::new(board_record_part(record, serial))
 }
 
-// ---------------------------------------------------------------------------
-// #341's register-level master, kept compiling for the files that still use
-// it until integration moves them onto `w1`. It is a thin shim over the
-// shared bus now: no state machine of its own. Do not use it in new code.
-// ---------------------------------------------------------------------------
-
-pub const MCR_RD_DATA: u32 = 1 << 0;
-pub const MCR_DONE: u32 = 1 << 1;
-
-pub use crate::dev::w1::crc::crc8;
-
-/// Dallas's CRC-16 from zero.
-pub fn crc16(bytes: &[u8]) -> u16 {
-    crc16_seed(0, bytes)
-}
-
-/// A part on a legacy `OneWire`.
-pub struct Ds2502(Box<dyn Part>);
-
-impl Ds2502 {
-    /// The Ethernet-address part.
-    pub fn mac_nic(mac: [u8; 6]) -> Self {
-        Ds2502(mac_nic(mac))
-    }
-
-    /// A board record (the serial number fills the ROM's low four bytes).
-    pub fn board_nic(serial_no: u32, name: &str, part: &str, rev: &str, barcode: &str) -> Self {
-        let rec = BoardRecord { barcode, part, revision: rev, name };
-        Ds2502(board_nic(&rec, serial_no as u64))
-    }
-}
-
-/// One master and the parts on its wire.
-#[derive(Default)]
-pub struct OneWire {
-    last: u32,
-    line: bool,
-    bus: w1::Bus,
-}
-
-impl OneWire {
-    pub fn with(dev: Ds2502) -> Self {
-        Self::with_all(vec![dev])
-    }
-
-    pub fn with_all(devs: Vec<Ds2502>) -> Self {
-        let mut bus = w1::Bus::new();
-        for d in devs {
-            bus.add(d.0);
-        }
-        OneWire { bus, ..Default::default() }
-    }
-
-    /// Software drives one slot.
-    pub fn write(&mut self, val: u32) {
-        self.last = val;
-        let (pulse, sample) = w1::slot::fields(val as u64);
-        self.line = w1::slot::slot(&mut self.bus, pulse, sample);
-    }
-
-    /// The slot is always done; the line is as the parts left it.
-    pub fn read(&self) -> u32 {
-        (self.last & !(MCR_RD_DATA | MCR_DONE)) | MCR_DONE | self.line as u32
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,17 +323,5 @@ mod tests {
         ] {
             assert!(bad.check().is_err(), "{:?}", (bad.barcode, bad.part, bad.revision, bad.name));
         }
-    }
-
-    #[test]
-    fn the_legacy_master_shim_still_serves_old_call_sites() {
-        let mut w = OneWire::with_all(vec![Ds2502::mac_nic([1, 2, 3, 4, 5, 6])]);
-        w.write(520 << 10 | 65 << 2);
-        assert_eq!(w.read() & MCR_RD_DATA, 0, "presence");
-        assert_ne!(w.read() & MCR_DONE, 0);
-        assert_eq!(OneWire::default().read() & MCR_RD_DATA, 0, "nothing driven yet");
-        let _ = Ds2502::board_nic(0x0030_0887, "IP30", "030-0887-003", "G", "FGT687");
-        assert_eq!(crc8(&[]), 0);
-        assert_eq!(crc16(b"123456789"), 0xbb3d);
     }
 }

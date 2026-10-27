@@ -487,10 +487,9 @@ pub enum MachineProfile {
     /// the `[o2]` section, not the fullhouse/Guinness options above; see
     /// `src/ip32_machine.rs`.
     O2Ip32,
-    /// SGI Octane IP30: HEART, the Xbow and the Bridge with the IOC3 behind
-    /// it, with an R10000. Built from the shared keys and `[octane]`; see
-    /// `src/ip30_machine.rs` and `docs/Octane/ip30-address-map.md`. In
-    /// bring-up: the PROM on the serial console.
+    /// SGI Octane IP30: HEART, the Crossbow and the onboard Bridge, with an
+    /// R10000. Configured by the shared keys and the `[octane]` section; see
+    /// `src/ip30_machine.rs` and `docs/Octane/ip30-address-map.md`.
     OctaneIp30,
 }
 
@@ -498,7 +497,18 @@ impl MachineProfile {
     /// All selectable profiles, in display order. (Not the O2 yet: iris-gui's
     /// machine editor has no `[o2]` section.) Single source of truth for the
     /// GUI dropdowns (Config tab + New Machine dialog) so they never drift.
-    pub const ALL: [Self; 3] = [Self::IndyIp24, Self::Indigo2Ip22, Self::Indigo2Ip28];
+    pub const ALL: [Self; 4] = [Self::IndyIp24, Self::Indigo2Ip22, Self::Indigo2Ip28, Self::OctaneIp30];
+
+    /// The bank sizes in MB (0 is an empty bank) that `validate()` accepts
+    /// for this profile. The Octane's banks are matched DIMM pairs of 64 to
+    /// 512 MB; the IP22/IP24 MC stops at 128 MB.
+    pub fn bank_sizes(self) -> &'static [u32] {
+        match self {
+            Self::OctaneIp30 => &[0, 64, 128, 256, 512],
+            Self::Indigo2Ip28 | Self::O2Ip32 => VALID_BANK_SIZES,
+            _ => &[0, 8, 16, 32, 64, 128],
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -519,11 +529,6 @@ impl MachineProfile {
             Self::Indigo2Ip22 | Self::O2Ip32 | Self::OctaneIp30 => 2,
             _ => 1,
         }
-    }
-
-    /// The Octane: HEART and XIO in place of the MC and GIO.
-    pub fn ip30(self) -> bool {
-        matches!(self, Self::OctaneIp30)
     }
 
     /// How many memory banks the machine has: four on all of them (the MC's
@@ -870,35 +875,45 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// The Octane (`[octane]`), used with `machine.profile = "octane_ip30"`.
-/// The shared keys do the rest: `prom` is the 1 MB flash image (IRIX's
-/// `IP30prom.bin` is tried when it is left unset), `nvram` the DS1687's
-/// RAM, `banks` the DIMM pair in each of HEART's four banks (multiples of
-/// 32 MB), `serial_port_a` the console, `[clock] fixed_mhz` CP0 Count.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// What only an Octane has (`[octane]` section), used with
+/// `machine.profile = "octane_ip30"`. The rest is the shared keys: `prom`
+/// (the 1 MB flash image; IRIX's `IP30prom.bin` is tried when it is left
+/// unset), `nvram` (the DS1685's RAM), `banks` (MB in each HEART bank),
+/// `[scsi.N]` (`controller` 0 internal, 1 external), `[network]`,
+/// `serial_port_a`/`serial_port_b`/`serial_log` and `[clock] fixed_mhz`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OctaneSection {
-    /// Where the flash is kept between runs: a copy of `prom` whose last
-    /// 64 KB segment, the PROM's data store, the guest rewrites. Empty: the
+    /// A file holding the boot flash, so what the PROM writes there (its
+    /// persistent records) survives from run to run. Created from `prom`
+    /// when missing; an existing file is used as it stands. Unset: the
     /// flash lives in memory only and every start is from `prom`.
-    #[serde(default = "octane_flash")]
-    pub flash: String,
-}
-
-fn octane_flash() -> String {
-    "flash.bin".to_string()
-}
-
-impl Default for OctaneSection {
-    fn default() -> Self {
-        Self { flash: octane_flash() }
-    }
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flash: Option<String>,
+    /// The board in the first graphics port: `"solidimpact"` (the default)
+    /// or `"none"`. As on the O2, `headless` changes only the window; the
+    /// board stays, and the PROM's `console` variable picks the console.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphics: Option<String>,
 }
 
 impl OctaneSection {
+    /// The graphics board `graphics` names, or None for `"none"`.
+    pub fn graphics_board(&self) -> Result<Option<GraphicsBoard>, String> {
+        match self.graphics.as_deref().map(str::trim) {
+            None => Ok(Some(GraphicsBoard::SolidImpact)),
+            Some(s) if s.eq_ignore_ascii_case("none") => Ok(None),
+            Some(s) => match s.parse::<GraphicsBoard>() {
+                Ok(GraphicsBoard::SolidImpact) => Ok(Some(GraphicsBoard::SolidImpact)),
+                Ok(b) => Err(format!("octane.graphics \"{s}\": {} is not modelled on the Octane (valid: solidimpact, none)", b.label())),
+                Err(e) => Err(format!("octane.graphics: {e}")),
+            },
+        }
+    }
+
     /// Left out of a written config when nothing in it was set.
     fn is_default(&self) -> bool {
-        self.flash == octane_flash()
+        self.flash.is_none() && self.graphics.is_none()
     }
 }
 
@@ -1586,7 +1601,7 @@ fn default_lock_aspect_ratio() -> bool { true }
 /// `ip32_machine::O2_PROM_FILE` as well, having no embedded PROM.
 pub const DEFAULT_PROM: &str = "prom.bin";
 /// `nvram` when a config does not set it: the DS1386's file on the Indy, the
-/// PROM's flash on the O2.
+/// PROM's flash on the O2, the DS1685's RAM on the Octane.
 pub const DEFAULT_NVRAM: &str = "nvram.bin";
 
 fn default_prom() -> String {
@@ -1917,18 +1932,23 @@ impl MachineConfig {
             }
             crate::dev::crime_mem::check_kits(&self.o2_kits()).map_err(|e| format!("banks: {e}"))?;
         } else if self.machine.profile == MachineProfile::OctaneIp30 {
-            // A bank is the DIMM pair in one of HEART's four banks: 32 MB
-            // units, up to 2 GB.
-            for (i, &sz) in self.banks.iter().enumerate().take(bank_count) {
-                if sz % 32 != 0 || sz > 2048 {
-                    return Err(format!(
-                        "bank{i} size {sz} MB: an Octane bank is a DIMM pair of up to 2048 MB in 32 MB steps"
-                    ));
+            // A HEART bank is a matched DIMM pair: 64 to 512 MB, filled from
+            // bank 0 without a gap, 2 GB at most (the Octane owner's guide).
+            let banks = &self.banks[..bank_count];
+            if banks[0] == 0 {
+                return Err("banks: an Octane needs memory in bank 0".into());
+            }
+            if let Some(gap) = banks.iter().position(|&b| b == 0) {
+                if banks[gap..].iter().any(|&b| b != 0) {
+                    return Err(format!("banks: bank {gap} is empty but a later bank is populated; fill the banks from 0"));
                 }
             }
-            if self.banks[..bank_count].iter().all(|&b| b == 0) {
-                return Err("banks: an Octane needs memory in at least one bank".into());
+            for (i, &sz) in banks.iter().enumerate() {
+                if sz != 0 && ![64, 128, 256, 512].contains(&sz) {
+                    return Err(format!("bank{i} size {sz} MB is invalid for an Octane (valid: 64, 128, 256, 512)"));
+                }
             }
+            self.octane.graphics_board()?;
         } else {
             for (i, &sz) in self.banks.iter().enumerate().take(bank_count) {
                 if !VALID_BANK_SIZES.contains(&sz) {
@@ -1955,7 +1975,7 @@ impl MachineConfig {
                 return Err("network.mode = \"pcap\" is not available on the O2 yet (its Ethernet runs on the NAT gateway)".into());
             }
             (NetMode::Pcap, MachineProfile::OctaneIp30) => {
-                return Err("network.mode = \"pcap\" is not available on the Octane (it has no Ethernet yet)".into());
+                return Err("network.mode = \"pcap\" is not available on the Octane yet (its Ethernet runs on the NAT gateway)".into());
             }
             _ => {}
         }
@@ -2474,6 +2494,18 @@ mod export_tests {
         assert_eq!(back.scsi[&1].path, cfg.scsi[&1].path);
         assert_eq!(back.scsi[&4].cdrom, true);
         println!("--- exported toml ---\n{s}");
+    }
+
+    #[test]
+    fn octane_graphics_defaults_to_solid_impact() {
+        let cfg: MachineConfig = toml::from_str("").expect("parse");
+        assert_eq!(cfg.octane.graphics_board(), Ok(Some(GraphicsBoard::SolidImpact)));
+        let cfg: MachineConfig = toml::from_str("[octane]\ngraphics = \"none\"").expect("parse");
+        assert_eq!(cfg.octane.graphics_board(), Ok(None));
+        let cfg: MachineConfig = toml::from_str("[octane]\ngraphics = \"impact:solid\"").expect("parse");
+        assert_eq!(cfg.octane.graphics_board(), Ok(Some(GraphicsBoard::SolidImpact)));
+        let cfg: MachineConfig = toml::from_str("[octane]\ngraphics = \"maximpact\"").expect("parse");
+        assert!(cfg.octane.graphics_board().is_err(), "only Solid IMPACT is modelled");
     }
 
     #[test]

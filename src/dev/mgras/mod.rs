@@ -42,6 +42,7 @@ mod frame;
 mod ge11;
 mod gl;
 mod hq3;
+pub mod hq4;
 mod pixmem;
 mod pixpipe;
 mod plain;
