@@ -1,4 +1,4 @@
-//! IOC3 register-contract tests, ported from the QEMU model's qtests.
+//! IOC3 register-contract tests.
 //!
 //! Accesses go through `PciBusDevice` the way a host bridge makes them: a
 //! 32-bit access at its offset, a byte access at `offset ^ 3`.
@@ -482,7 +482,7 @@ fn a_search_finds_every_part_with_a_valid_rom() {
     let found = search_all(&ow);
     assert_eq!(found.len(), 3, "the Ethernet part and two board records");
     for rom in &found {
-        assert_eq!(rom[7], crc8(0, &rom[..7]), "ROM CRC-8");
+        assert_eq!(rom[7], crc8_dallas(&rom[..7]), "ROM CRC-8");
     }
     let eth = found.iter().find(|r| r[0] == 0x91).expect("family 0x91");
     // UniqueWare prefix 0x5e7 in the top twelve bits of the serial.
@@ -527,7 +527,7 @@ fn a_completed_search_leaves_the_part_selected() {
     ow.write_byte(0xc3);
     ow.write_byte(0);
     ow.write_byte(0);
-    assert_eq!(ow.read_byte(), crc8(0, &[0xc3, 0, 0]));
+    assert_eq!(ow.read_byte(), crc8_dallas(&[0xc3, 0, 0]));
     assert_eq!(ow.read_byte(), 0x0a, "marker");
 }
 
@@ -550,7 +550,7 @@ fn read_page_via(ow: &OneWire, rom: &[u8; 8], cmd: u8) -> [u8; 32] {
     ow.write_byte(cmd);
     ow.write_byte(0);
     ow.write_byte(0);
-    assert_eq!(ow.read_byte(), crc8(0, &[cmd, 0, 0]), "leading CRC-8 over the command");
+    assert_eq!(ow.read_byte(), crc8_dallas(&[cmd, 0, 0]), "leading CRC-8 over the command");
     let mut page = [0u8; 32];
     for b in &mut page {
         *b = ow.read_byte();
@@ -585,7 +585,7 @@ fn reading_the_page_via_read_memory_crc() {
     let eth = ethernet_rom(&ow);
     let page = read_page_via(&ow, &eth, 0xc3);
     assert_ethernet_page(&page);
-    assert_eq!(ow.read_byte(), crc8(0, &page), "CRC-8 closing the page");
+    assert_eq!(ow.read_byte(), crc8_dallas(&page), "CRC-8 closing the page");
 }
 
 /// Plain Read Memory has no per-page CRC: the byte after the first page is
@@ -610,11 +610,11 @@ fn read_status_returns_no_redirection() {
     ow.write_byte(0xaa);
     ow.write_byte(1);
     ow.write_byte(0);
-    assert_eq!(ow.read_byte(), crc8(0, &[0xaa, 1, 0]));
+    assert_eq!(ow.read_byte(), crc8_dallas(&[0xaa, 1, 0]));
     let st: Vec<u8> = (0..7).map(|_| ow.read_byte()).collect();
     assert_eq!(&st[..4], &[0xff; 4], "no page redirected");
     assert_eq!(st[6], 0x00, "factory-programmed byte at 0007");
-    assert_eq!(ow.read_byte(), crc8(0, &st));
+    assert_eq!(ow.read_byte(), crc8_dallas(&st));
 }
 
 #[test]
@@ -1173,9 +1173,8 @@ fn the_ethernet_registers_are_forwarded_and_the_block_is_wired() {
     assert_eq!(eth.read32(0xec), 0);
     r.w32(0x154, 7);
     assert_eq!(eth.read32(0x154), 0);
-    // A narrow read takes its lane from the register.
-    assert_eq!(r.r8(0xf4), 0x34);
-    assert_eq!(r.r8(0xf5), 0x12);
+    // Only 32-bit accesses reach the block.
+    assert_eq!(r.r8(0xf4), 0);
 }
 
 #[test]
@@ -1240,4 +1239,110 @@ fn reset_clears_chip_state_but_not_the_buffer_ram() {
     assert_eq!(r.r32(reg::INT_ENABLE_SET), 0);
     assert_eq!(r.r32(reg::PIN_CONTROL_SET), 0);
     assert_eq!(r.r32(reg::SSRAM), 0x55);
+}
+
+// ---------------------------------------------------------------------------
+// Review fixes
+// ---------------------------------------------------------------------------
+
+/// Three threads change what drives the SuperIO line; once they stop, the
+/// line must agree with the status and enable registers.
+#[test]
+fn the_superio_line_never_ends_up_stale_across_threads() {
+    for _ in 0..20 {
+        let r = Arc::new(Rig::new());
+        r.w32(reg::INT_ENABLE_SET, int::KEYBOARD);
+        r.w32(K_TX, 0xf4);
+        let _ = r.r32(K_RX);
+        let go = |f: Box<dyn Fn() + Send>| std::thread::spawn(f);
+        let (a, b, c) = (r.clone(), r.clone(), r.clone());
+        let t = [
+            go(Box::new(move || {
+                for _ in 0..200 {
+                    a.c.ps2().push_kb(winit::keyboard::KeyCode::KeyA, true);
+                    a.c.ps2().push_kb(winit::keyboard::KeyCode::KeyA, false);
+                }
+            })),
+            go(Box::new(move || {
+                for _ in 0..200 {
+                    b.w32(reg::INT_STATUS, int::KEYBOARD);
+                    let _ = b.r32(K_RX);
+                }
+            })),
+            go(Box::new(move || {
+                for _ in 0..200 {
+                    c.c.service();
+                }
+            })),
+        ];
+        for t in t {
+            t.join().unwrap();
+        }
+        r.c.service();
+        let want = r.r32(reg::INT_STATUS) & r.r32(reg::INT_ENABLE_SET) != 0;
+        assert_eq!(r.superio.level(), want);
+    }
+}
+
+#[test]
+fn the_ethernet_pin_follows_the_last_level_given() {
+    let c = Ioc3::octane(MAC, false);
+    let eth = Arc::new(MockEth::default());
+    c.attach_eth(eth.clone());
+    c.connect_dma(TestMem::new());
+    let (pin, line) = LevelProbe::line();
+    c.connect_interrupt(line);
+    let wired = eth.wired.lock().unwrap();
+    let irq = &wired.as_ref().unwrap().1;
+    for i in 0..1000 {
+        irq(i % 2 == 0);
+    }
+    irq(true);
+    assert!(pin.level());
+}
+
+#[test]
+fn a_ring_at_the_top_of_the_address_space_is_a_dma_error_not_a_panic() {
+    let r = Rig::new();
+    r.aim_engines();
+    r.w32(reg::SDMA_RING_HI, 0xffff_ffff);
+    r.w32(reg::SDMA_RING_LO, 0xffff_f000 | 1);
+    r.w32(A, sdma_ctl::ENABLE);
+    r.w32(A + sdma_off::TX_PRODUCE, 8);
+    assert_ne!(r.r32(reg::INT_STATUS) & int::serial(0, int::DMA_ERROR), 0);
+    let d = r.mem_view();
+    let mut b = [0u8; 8];
+    assert!(!d.dma_read(u64::MAX - 2, &mut b).is_ok());
+    assert!(!d.dma_write(u64::MAX - 2, &b).is_ok());
+}
+
+#[test]
+fn an_unaligned_dma_write_keeps_its_neighbours_in_one_transfer() {
+    let r = Rig::new();
+    let d = r.mem_view();
+    put(&r, 0x100, &[1, 2, 3, 4, 5, 6, 7, 8]);
+    assert!(d.dma_write(0x101, &[0xaa, 0xbb, 0xcc]).is_ok());
+    assert_eq!(get(&r, 0x100, 8), [1, 0xaa, 0xbb, 0xcc, 5, 6, 7, 8]);
+}
+
+#[test]
+fn the_ethernet_address_part_is_a_64_byte_ds2501() {
+    let p = ethernet_address_part(MAC, 0x5e7_454d55_000);
+    assert_eq!(p.mem.len(), 64);
+    assert_eq!(p.rom[0], 0x91);
+}
+
+/// The 32-bit blocks refuse narrower accesses: they read zero and a write
+/// does nothing.
+#[test]
+fn narrow_accesses_to_32_bit_registers_are_refused() {
+    let r = Rig::new();
+    r.w32(reg::INT_ENABLE_SET, 0x1234_5678);
+    assert_eq!(r.r8(reg::INT_ENABLE_SET), 0);
+    assert_eq!(r.c.bar_read(0, reg::INT_ENABLE_SET, 2), 0);
+    r.w8(reg::INT_ENABLE_SET, 0xff);
+    assert_eq!(r.r32(reg::INT_ENABLE_SET), 0x1234_5678);
+    // The byte-wide windows are unaffected.
+    r.w8(reg::SERIAL_A + 7, 0x77);
+    assert_eq!(r.r8(reg::SERIAL_A + 7), 0x77);
 }

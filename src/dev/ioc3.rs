@@ -7,9 +7,8 @@
 //! at 0xf0, the Ethernet MAC (which lives in `ioc3_eth.rs` behind
 //! [`Ioc3EthPort`]).
 //!
-//! This is a port of our QEMU model; the contract is `docs/datasheets/ioc3.md`
-//! in the origami repository. Where the model documents an approximation the
-//! comment here says so.
+//! Behaviour follows the public Linux and OpenBSD drivers and measured guest
+//! register traces; where the model approximates, the comment says so.
 //!
 //! # Two interrupt outputs
 //!
@@ -27,18 +26,18 @@
 //! [`PciBusDevice::bar_read`] undoes. DMA: an internal byte at address `a`
 //! sits at bus address `a ^ 3`, so a 32-bit value is big-endian on the bus
 //! with the bridge's swap clear ([`Ioc3Dma`]). Neither is a measured property
-//! of the silicon; see the datasheet's "DMA byte order".
+//! of the silicon; the chip's real placement is undocumented.
 //!
 //! # What is approximated here
 //!
 //! * Nothing is timed to a baud rate: serial transmit completes inside the
-//!   write and a loopback character arrives at once (the QEMU model delays it
-//!   by a character time).
+//!   write and a loopback character arrives at once (the part takes a
+//!   character time).
 //! * Serial ring DMA, the receive timer, transmit delays and the interrupt
 //!   output run from register accesses and [`Ioc3::service`], on host time.
 //! * The DS1685 is the O2's DS1687 model behind an index and a data port; it
 //!   has no alarm or periodic interrupts, no extended RAM, and its NVRAM
-//!   file is a plain 114-byte image, not a QEMU drive image.
+//!   file is a plain 114-byte image, a plain register dump.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,6 +46,7 @@ use std::time::{Duration, Instant};
 
 use crate::dev::ds1687::MaceRtc;
 use crate::dev::ioc3_port::Ioc3EthPort;
+use crate::dev::onewire::crc8_dallas;
 use crate::dev::ps2::Ps2Controller;
 use crate::dev::z85c30::{null_serial_backend, SerialBackend};
 use crate::irq::{InterruptController, IrqLine};
@@ -128,17 +128,7 @@ pub mod int {
         | serial(1, TX_RING_EMPTY);
 }
 
-/// Dallas/Maxim CRCs, as the one-wire parts compute them.
-fn crc8(mut crc: u8, data: &[u8]) -> u8 {
-    for &b in data {
-        crc ^= b;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0x8c } else { crc >> 1 };
-        }
-    }
-    crc
-}
-
+/// Dallas/Maxim CRC-16, as the DS2505-class parts compute it.
 fn crc16(mut crc: u16, data: &[u8]) -> u16 {
     for &b in data {
         crc ^= b as u16;
@@ -151,12 +141,15 @@ fn crc16(mut crc: u16, data: &[u8]) -> u16 {
 
 /// The MicroLAN bus and the parts on it.
 pub mod onewire {
-    use super::{crc16, crc8};
+    use super::crc16;
+    use crate::dev::onewire::crc8_dallas;
 
     /// DS2501/DS2502-style parts frame with CRC-8s and have 128 bytes of
     /// address space; DS2505-style ones use CRC-16s over 2 KiB.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum Class {
+        /// 512 bits (64 bytes): two pages.
+        Ds2501,
         Ds2502,
         Ds2505,
     }
@@ -171,6 +164,7 @@ pub mod onewire {
     impl Part {
         pub fn new(class: Class, family: u8, serial: u64, image: &[u8]) -> Part {
             let size = match class {
+                Class::Ds2501 => 64,
                 Class::Ds2502 => 128,
                 Class::Ds2505 => 2048,
             };
@@ -181,7 +175,7 @@ pub mod onewire {
             for i in 0..6 {
                 rom[1 + i] = (serial >> (8 * i)) as u8;
             }
-            rom[7] = crc8(0, &rom[..7]);
+            rom[7] = crc8_dallas(&rom[..7]);
             Part { class, rom, mem }
         }
 
@@ -194,30 +188,30 @@ pub mod onewire {
             let hdr = [cmd, ta as u8, (ta >> 8) as u8];
             let mut out = Vec::new();
             match self.class {
-                Class::Ds2502 => {
-                    let a = (ta & 0x7f) as usize;
+                Class::Ds2501 | Class::Ds2502 => {
+                    let a = (ta as usize) & (self.mem.len() - 1);
                     match cmd {
                         0xf0 => {
-                            out.push(crc8(0, &hdr));
+                            out.push(crc8_dallas(&hdr));
                             out.extend_from_slice(&self.mem[a..]);
-                            out.push(crc8(0, &self.mem[a..]));
+                            out.push(crc8_dallas(&self.mem[a..]));
                         }
                         0xc3 => {
-                            out.push(crc8(0, &hdr));
+                            out.push(crc8_dallas(&hdr));
                             let mut at = a;
                             while at < self.mem.len() {
                                 let end = (at / 32 + 1) * 32;
                                 out.extend_from_slice(&self.mem[at..end]);
-                                out.push(crc8(0, &self.mem[at..end]));
+                                out.push(crc8_dallas(&self.mem[at..end]));
                                 at = end;
                             }
                         }
                         0xaa => {
                             let status = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
                             let a = (ta & 7) as usize;
-                            out.push(crc8(0, &hdr));
+                            out.push(crc8_dallas(&hdr));
                             out.extend_from_slice(&status[a..]);
-                            out.push(crc8(0, &status[a..]));
+                            out.push(crc8_dallas(&status[a..]));
                         }
                         _ => return None,
                     }
@@ -489,7 +483,7 @@ pub fn ethernet_address_part(mac: [u8; 6], serial: u64) -> onewire::Part {
     let c = !crc16(0, &page[..11]);
     page[11] = c as u8;
     page[12] = (c >> 8) as u8;
-    onewire::Part::new(onewire::Class::Ds2502, 0x91, serial, &page)
+    onewire::Part::new(onewire::Class::Ds2501, 0x91, serial, &page)
 }
 
 // ---------------------------------------------------------------------------
@@ -542,7 +536,7 @@ struct Uart {
     msr_delta: u8,
     msr_prev: u8,
     thr_int: bool,
-    // IOC3 specifics, kept beside the 16550 the way the QEMU model does.
+    // IOC3 specifics, kept beside the 16550.
     predivider: u8,
     mcr_afe: u8,
     lsr_test: u8,
@@ -897,7 +891,11 @@ impl PciDma for Ioc3Dma {
             return PciDmaStatus::Ok;
         }
         let start = addr & !3;
-        let end = (addr + buf.len() as u64 + 3) & !3;
+        // A guest-chosen base can sit at the top of the address space.
+        let Some(end) = addr.checked_add(buf.len() as u64 + 3).map(|e| e & !3) else {
+            buf.fill(0);
+            return PciDmaStatus::MasterAbort;
+        };
         let mut tmp = vec![0u8; (end - start) as usize];
         let status = self.raw.dma_read(start, &mut tmp);
         for (i, b) in buf.iter_mut().enumerate() {
@@ -907,21 +905,25 @@ impl PciDma for Ioc3Dma {
     }
 
     fn dma_write(&self, addr: u64, data: &[u8]) -> PciDmaStatus {
-        if addr & 3 == 0 && data.len() & 3 == 0 {
-            let mut tmp = data.to_vec();
-            for w in tmp.chunks_exact_mut(4) {
-                w.reverse();
-            }
-            return self.raw.dma_write(addr, &tmp);
+        if data.is_empty() {
+            return PciDmaStatus::Ok;
         }
-        // Partial words: each byte lands on its own bus lane.
-        let mut status = PciDmaStatus::Ok;
+        let start = addr & !3;
+        let Some(end) = addr.checked_add(data.len() as u64 + 3).map(|e| e & !3) else {
+            return PciDmaStatus::MasterAbort;
+        };
+        let mut tmp = vec![0u8; (end - start) as usize];
+        if addr & 3 != 0 || data.len() & 3 != 0 {
+            // Bytes outside the span keep their value: read the words the
+            // span touches, overlay it, and write them back as one transfer.
+            if !self.raw.dma_read(start, &mut tmp).is_ok() {
+                return PciDmaStatus::MasterAbort;
+            }
+        }
         for (i, b) in data.iter().enumerate() {
-            if !self.raw.dma_write((addr + i as u64) ^ 3, &[*b]).is_ok() {
-                status = PciDmaStatus::MasterAbort;
-            }
+            tmp[((addr - start) as usize + i) ^ 3] = *b;
         }
-        status
+        self.raw.dma_write(start, &tmp)
     }
 }
 
@@ -1125,7 +1127,7 @@ impl BoardRecordText {
 impl Ioc3Config {
     /// The Octane's IOC3 (`octane2` selects the Octane2's board records and
     /// product input). The fictitious barcodes and ROM serials are the
-    /// marked-synthetic ones in the board-identity datasheet.
+    /// marked-synthetic ones (barcode `EMU...`).
     pub fn octane(mac: [u8; 6], octane2: bool) -> Self {
         let (fp_rev, ps_name, ps_part, ps_rev) = if octane2 {
             ("H", "PWR.SPPLY.ER", "060-0035-002", "A")
@@ -1297,7 +1299,7 @@ impl St {
 
     fn sdma_ring(&self, p: usize, dir: u32) -> u64 {
         let base = ((self.sdma.base_hi as u64) << 32) | (self.sdma.base_lo & 0xffff_f000) as u64;
-        base + ((p as u64 % 2) * 2 + dir as u64) * self.sdma_ring_size() as u64
+        base.saturating_add(((p as u64 % 2) * 2 + dir as u64) * self.sdma_ring_size() as u64)
     }
 
     fn sdma_raise(&mut self, p: usize, src: u32) {
@@ -1363,7 +1365,7 @@ impl St {
             self.sdma_raise(p, int::RX_RING_FULL);
             return false;
         }
-        if !self.dma_write(ring + (produce & mask) as u64, &packer) {
+        if !self.dma_write(ring.saturating_add((produce & mask) as u64), &packer) {
             self.sdma_raise(p, int::DMA_ERROR);
             return false;
         }
@@ -1503,7 +1505,7 @@ impl St {
             }
             if !self.sdma.port[p].tx_fetched {
                 let mut entry = [0u8; ENTRY];
-                if !self.dma_read(ring + (consume & mask) as u64, &mut entry) {
+                if !self.dma_read(ring.saturating_add((consume & mask) as u64), &mut entry) {
                     self.sdma_raise(p, int::DMA_ERROR);
                     break;
                 }
@@ -2273,6 +2275,11 @@ impl St {
             }
             return v;
         }
+        // The 32-bit blocks accept only 32-bit accesses; a narrower one is
+        // refused by the bus and reads as zero.
+        if w != 4 {
+            return 0;
+        }
         let word = if (reg::SSRAM..reg::SSRAM + reg::SSRAM_SIZE).contains(&a) {
             let mut word = self.ssram[((a - reg::SSRAM) / 4) as usize];
             if c.eth_parity && word.count_ones() & 1 != 0 {
@@ -2292,7 +2299,7 @@ impl St {
         } else {
             0
         };
-        (word >> (8 * (a & 3))) & if w >= 4 { u32::MAX } else { (1 << (8 * w)) - 1 }
+        word
     }
 
     fn write(&mut self, a: u32, v: u32, w: usize, c: &Ctx) {
@@ -2360,14 +2367,25 @@ struct Shared {
     pin_line: Mutex<Option<IrqLine>>,
     /// The SuperIO line the board wires to a Bridge input.
     superio_line: Mutex<Option<IrqLine>>,
+    /// What each line was last driven to, and the Ethernet block's level.
     pin_level: AtomicBool,
     superio_level: AtomicBool,
+    eth_level: AtomicBool,
+    /// Serialises driving the two lines; see [`Shared::sync_superio`].
+    line_order: Mutex<()>,
     /// A PS/2 character arrived while an access held the chip.
     kbc_dirty: AtomicBool,
 }
 
 impl Shared {
-    fn drive_superio(&self, level: bool) {
+    /// Put the SuperIO line at the level the chip's state gives. The level
+    /// is read after taking `line_order`, so whichever thread drives last has
+    /// seen the latest state; two threads cannot leave the line stale. The
+    /// order is always `line_order` then `st`, and `st` is never held when
+    /// this is called.
+    fn sync_superio(&self) {
+        let _order = self.line_order.lock().unwrap();
+        let level = self.st.lock().unwrap().superio_level();
         if self.superio_level.swap(level, Ordering::SeqCst) != level {
             if let Some(l) = self.superio_line.lock().unwrap().as_ref() {
                 l.set(level);
@@ -2375,7 +2393,10 @@ impl Shared {
         }
     }
 
-    fn drive_pin(&self, level: bool) {
+    /// The same for the PCI pin, which follows the Ethernet block's level.
+    fn sync_pin(&self) {
+        let _order = self.line_order.lock().unwrap();
+        let level = self.eth_level.load(Ordering::SeqCst);
         if self.pin_level.swap(level, Ordering::SeqCst) != level {
             if let Some(l) = self.pin_line.lock().unwrap().as_ref() {
                 l.set(level);
@@ -2385,13 +2406,12 @@ impl Shared {
 
     /// Run `f` with the chip locked, then drive the lines from what it left.
     fn with_st<R>(&self, parity: bool, f: impl FnOnce(&mut St, &Ctx) -> R) -> R {
-        let (r, sup) = {
+        let r = {
             let mut st = self.st.lock().unwrap();
             let ctx = Ctx { ps2: &self.ps2, eth_parity: parity };
-            let r = f(&mut st, &ctx);
-            (r, st.superio_level())
+            f(&mut st, &ctx)
         };
-        self.drive_superio(sup);
+        self.sync_superio();
         if self.kbc_dirty.swap(false, Ordering::SeqCst) {
             self.kbc_service();
         }
@@ -2399,30 +2419,28 @@ impl Shared {
     }
 
     fn kbc_service(&self) {
-        let sup = {
+        {
             let mut st = self.st.lock().unwrap();
             st.kbc_fill(0, &self.ps2);
             st.kbc_fill(1, &self.ps2);
-            st.superio_level()
-        };
-        self.drive_superio(sup);
+        }
+        self.sync_superio();
     }
 
     /// A device raised its line. If an access holds the chip (possibly this
     /// very thread, from inside a transmit), that access picks it up.
     fn kbc_poke(&self) {
-        let sup = match self.st.try_lock() {
+        match self.st.try_lock() {
             Ok(mut st) => {
                 st.kbc_fill(0, &self.ps2);
                 st.kbc_fill(1, &self.ps2);
-                st.superio_level()
             }
             Err(_) => {
                 self.kbc_dirty.store(true, Ordering::SeqCst);
                 return;
             }
-        };
-        self.drive_superio(sup);
+        }
+        self.sync_superio();
     }
 
     /// Hand the Ethernet block its way to memory and its interrupt, once
@@ -2436,7 +2454,8 @@ impl Shared {
                 Arc::new(Ioc3Dma::new(d)),
                 Box::new(move |level| {
                     if let Some(sh) = weak.upgrade() {
-                        sh.drive_pin(level);
+                        sh.eth_level.store(level, Ordering::SeqCst);
+                        sh.sync_pin();
                     }
                 }),
             );
@@ -2508,6 +2527,8 @@ impl Ioc3 {
                 superio_line: Mutex::new(None),
                 pin_level: AtomicBool::new(false),
                 superio_level: AtomicBool::new(false),
+                eth_level: AtomicBool::new(false),
+                line_order: Mutex::new(()),
                 kbc_dirty: AtomicBool::new(false),
             }
         });
@@ -2560,9 +2581,13 @@ impl Ioc3 {
     /// parallel, interrupt output) to. [`PciBusDevice::connect_interrupt`]
     /// takes the PCI pin, which only the Ethernet block drives.
     pub fn connect_superio_interrupt(&self, line: IrqLine) {
-        let level = self.sh.superio_level.load(Ordering::SeqCst);
-        line.set(level);
-        *self.sh.superio_line.lock().unwrap() = Some(line);
+        {
+            let _order = self.sh.line_order.lock().unwrap();
+            let level = self.sh.superio_level.load(Ordering::SeqCst);
+            line.set(level);
+            *self.sh.superio_line.lock().unwrap() = Some(line);
+        }
+        self.sh.sync_superio();
     }
 
     /// The PS/2 keyboard and mouse model, for the host side to push keys and
@@ -2624,8 +2649,11 @@ impl PciBusDevice for Ioc3 {
         }
         let a = off ^ (4 - width.min(4) as u32);
         if (reg::ENET_FIRST..=reg::ENET_LAST).contains(&a) {
-            let v = self.sh.eth().map_or(0, |e| e.read32(a & !3));
-            return (v >> (8 * (a & 3))) & if width >= 4 { u32::MAX } else { (1 << (8 * width)) - 1 };
+            // Only 32-bit accesses reach the Ethernet block.
+            if width != 4 {
+                return 0;
+            }
+            return self.sh.eth().map_or(0, |e| e.read32(a));
         }
         let parity = self.sh.parity_for(a);
         self.sh.with_st(parity, |st, c| st.read(a, width, c))
@@ -2650,8 +2678,12 @@ impl PciBusDevice for Ioc3 {
 
     /// The PCI interrupt pin: the Ethernet block's level.
     fn connect_interrupt(&self, line: IrqLine) {
-        line.set(self.sh.pin_level.load(Ordering::SeqCst));
-        *self.sh.pin_line.lock().unwrap() = Some(line);
+        {
+            let _order = self.sh.line_order.lock().unwrap();
+            line.set(self.sh.pin_level.load(Ordering::SeqCst));
+            *self.sh.pin_line.lock().unwrap() = Some(line);
+        }
+        self.sh.sync_pin();
     }
 
     fn connect_dma(&self, dma: Arc<dyn PciDma>) {
