@@ -139,12 +139,12 @@ the first `[section]`, because TOML tables continue until the next header.
 | Key | Default | Values and behavior |
 |---|---|---|
 | `prom` | `"prom.bin"` | PROM path; IP24, IP22, and IP28 each have an embedded fallback. Indigo2 also tries `070-1367-012.bin` (IP22) or `070-1477-002.bin` (IP28) in the working directory; the O2, which has no embedded PROM, tries `ip32prom.rev4.18.bin`. |
-| `nvram` | `"nvram.bin"` | DS1386 backing file on the Indy; the PROM's flash (its environment) on the O2. GUI defaults to an absolute user-config path. |
+| `nvram` | `"nvram.bin"` | DS1386 backing file on the Indy; the PROM's environment on the O2 (its flash) and the Octane. GUI defaults to an absolute user-config path. |
 | `nveeprom` | `"nveeprom.bin"` | Motherboard EEPROM file; GUI anchors it in its user-config directory. |
-| `banks` | `[128,128,0,0]` | RAM bank sizes in MB, up to eight entries (every machine today has four; the rest must be 0). On the O2 each entry is a DIMM pair's kit (32, 64, 128 or 256), largest first. See profile constraints below. |
+| `banks` | `[128,128,0,0]` | RAM bank sizes in MB, up to eight entries (every machine today has four; the rest must be 0). On the O2 each entry is a DIMM pair's kit (32, 64, 128 or 256), largest first. On the Octane each entry is 64, 128, 256 or 512, filled from bank 0, 2048 in all. See profile constraints below. |
 | `scale` | `1` | Standalone window scale: 1–4. GUI uses its separate vm_scale. |
 | `headless` | `false` | Disable the standalone window and graphics; the O2 then boots on its serial console. Audio is independent. |
-| `no_audio` | `false` | Disable HAL2 audio emulation. |
+| `no_audio` | `false` | Disable audio emulation (HAL2, MACE or RAD). |
 | `gdb_port` | `unset` | Start the GDB TCP stub; debugging is unavailable in lightning builds. |
 | `monitor_port` | `8888 when unset` | Monitor listener on loopback. |
 | `serial_port_a` | `8880 when unset` | SCC channel A listener (tty2); the O2's first serial port, its console when headless. |
@@ -167,7 +167,7 @@ the first `[section]`, because TOML tables continue until the next header.
 
 | Key | Default | Values and behavior |
 |---|---|---|
-| `machine.profile` | `indy_ip24` | indy_ip24, indigo2_ip22, indigo2_ip28, o2_ip32 (configured by `[o2]`, see [the O2 guide](docs/o2-ip32.md)), octane_ip30 (in bring-up: the PROM on the serial console; `[octane]`, see [the address map](docs/Octane/ip30-address-map.md)). |
+| `machine.profile` | `indy_ip24` | indy_ip24, indigo2_ip22, indigo2_ip28, o2_ip32 (configured by `[o2]`, see [the O2 guide](docs/o2-ip32.md)), octane_ip30 (configured by `[octane]`, see [the Octane guide](docs/octane-ip30.md)). |
 | `machine.cpu` | `r4400` | r4400, r5000, r10000; CPU/ISA choice is independent of build features. |
 
 ### [graphics]
@@ -319,32 +319,33 @@ the file is loaded, with a note, and never written back.
 
 ### [octane]
 
-Used with `machine.profile = "octane_ip30"`. The Octane is configured by
-the shared keys: `prom` is the 1 MB flash image (`IP30prom.bin`, as IRIX
-ships it in `/usr/cpu/firmware`, is tried when `prom` is left unset; there
-is no embedded Octane PROM), `nvram` the DS1687's RAM (the PROM's
-environment), `banks` the DIMM pair in each of HEART's four banks in 32 MB
-steps up to 2048, `serial_port_a` the console (UART A of the IOC3) and
-`serial_port_b` the second port, `[clock] fixed_mhz` CP0 Count (97.5, half
-a 195 MHz R10000, unless set), `[network] mode = "off"` (there is no
-Ethernet yet). `[machine] cpu` must be `r10000`. Headless only.
+Used with `machine.profile = "octane_ip30"`, which needs `machine.cpu =
+"r10000"`. An Octane is configured by the shared keys: `prom` (the IP30 PROM,
+not embedded; `IP30prom.bin` is tried when it is left unset), `nvram` (the
+DS1685's NVRAM, behind IOC3), `banks` (the MB in each HEART bank: 64, 128, 256
+or 512, filled from bank 0 with no gap, 2048 in all), `serial_port_a` and
+`serial_port_b`/`serial_log` (IOC3's two ports, the first the console),
+`headless`, `[clock] fixed_mhz` (CP0 Count; 97.5 for the 195 MHz R10000),
+`[network]`, `[[port_forward]]`, `nat_subnet` and `[scsi.N]` (`controller` 0
+is the internal bus, 1 the external). See [the Octane guide](docs/octane-ip30.md).
 
-| Key | Default | Meaning |
+| Key | Default | Values and behavior |
 |---|---|---|
-| `octane.flash` | `flash.bin` | Where the flash is kept between runs: a copy of `prom` whose last segment, the PROM's data store, the guest rewrites (`setenv`). Empty keeps the flash in memory only. |
+| `octane.flash` | unset | Boot flash file, keeping the PROM's records between runs. Created from `prom` when missing and then used as it is, so delete it after changing `prom`; a file of another size is refused. Unset, the flash is in memory and every start is from `prom`. |
+| `octane.graphics` | `"solidimpact"` | `solidimpact` or `none`. With `none` the machine runs on its serial console, with no window. |
 
 ### Hardware constraints and precedence
 
 Bank values are 0, 8, 16, 32, 64, or 128 MB; only IP28 accepts 256/512 MB. On
 the O2 a bank is a DIMM pair's kit, 32, 64, 128 or 256 MB, fitted from pair A
-largest first. `banks` has eight entries; every machine today uses the first
+largest first; on the Octane it is a matched DIMM pair, 64, 128, 256 or 512 MB, filled from bank 0. `banks` has eight entries; every machine today uses the first
 four and the rest must be 0.
 IP22/IP24 four-bank IRIX 6.5 behavior remains separate from IP28's verified
 two-bank 1 GB layout. Extreme requires IP22. All non-Newport boards require
 `heads=1` and `resolution="guest"`. IP28 IRIX needs IMPACT; its PROM has an
 embedded fallback.
-The config validator permits SCSI controller 1 only on IP22 and the O2, the
-machines with two controllers.
+The config validator permits SCSI controller 1 only on IP22, the O2 and the Octane,
+the machines with two controllers.
 
 Standalone CLI options update the loaded config where supplied; boolean enable
 switches do not provide a general way to clear every saved true setting.

@@ -80,6 +80,36 @@ hashes are given where a change is easiest to understand by reading the commit.
   the guest screen from the display caches when no renderer is present. With
   a GUI renderer attached it still returns the readback that renderer
   produced. (`src/ci.rs`, `src/gfx_display.rs`)
+### SGI Octane (IP30)
+
+- **A new machine: the SGI Octane.** `[machine] profile = "octane_ip30"` with
+  an `[octane]` section ([guide](docs/octane-ip30.md)): a 195 MHz R10000 on
+  HEART, the Crossbow, the onboard Bridge with two QLogic ISP1040 SCSI
+  controllers, IOC3 (serial ports, PS/2, the DS1685 clock and NVRAM,
+  Ethernet on the NAT gateway) and RAD audio, the boot flash, and Solid
+  IMPACT graphics on widget 11. The stock IP30 PROM boots IRIX 6.5.30 to a
+  serial login or, on the graphics console, to the X login and desktop.
+  Needs the IP30 PROM image. Runs under jitv2 as well as the interpreter.
+  The devices are time-driven by `hptimer` and per-port receive threads, with
+  no polling thread; every thread is joined when the machine stops.
+  iris-gui can run it.
+- **One 1-wire bus for the board records.** `dev::w1` holds the bus, the
+  slot decode and the Dallas parts (DS2501/2502, DS2505); HEART, the Bridge,
+  IOC3 and the graphics board each own a wire. `sgi_nic` only builds the SGI
+  record formats.
+- **CP0 Count writes can open the late-Compare window** (`count_write_samples`,
+  opt-in; the Octane sets it): IRIX on the Octane arms Compare a few
+  instructions after writing Count, and a host stall in between no longer
+  costs a full Count wrap.
+- **IMPACT gains hooks for boards outside the Indigo2**: a settable board
+  identity, pixel reads started at the DMA kick, a bound on how long STATUS
+  reads busy, and a board callback for GE state readbacks and raster
+  register decode. The Indigo2 path is unchanged.
+- **A machine with no graphics board runs on its serial console** instead of
+  stopping when it is not headless.
+- **A PCI function's configuration header can be reset** (`PciConfig::reset`),
+  as a bus reset drives it: the command register and BARs return to power-up.
+
 ### SGI O2 (IP32)
 
 - **A new machine: the SGI O2.** `[machine] profile = "o2_ip32"` with an `[o2]`
