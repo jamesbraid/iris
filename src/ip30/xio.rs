@@ -9,8 +9,9 @@ pub trait XioInterruptSink: Send + Sync {
 }
 
 /// System memory as an XIO bus master reaches it through HEART, at
-/// physical byte addresses. False if any byte is not memory: those read
-/// as zero and writes to them go nowhere.
+/// physical byte addresses. False if any byte is not memory: the whole
+/// transfer fails, a read leaving zeros in `buf` and a write changing
+/// nothing.
 pub trait XioMemory: Send + Sync {
     fn read(&self, phys: u64, buf: &mut [u8]) -> bool;
     fn write(&self, phys: u64, data: &[u8]) -> bool;
