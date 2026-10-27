@@ -1,5 +1,5 @@
 //! Register-contract tests for the Bridge, against fake functions, memory
-//! and an interrupt sink. They follow our QEMU model's qtests: configuration
+//! and an interrupt sink. They follow the reference model's register-contract tests: configuration
 //! space with narrow accesses, an empty slot, one register reached through
 //! both BARs, the programmed byte lanes of a device window, and a function's
 //! DMA reaching memory through the direct map and the translation table.
@@ -332,8 +332,13 @@ fn ssram_floats_high_and_swallows_writes() {
 #[test]
 fn the_one_wire_master_runs_a_bit_slot_per_write() {
     let r = Rig::new();
-    // An empty bus has no device to pull a reset slot low.
+    // An empty bus: nothing answers a reset, so the line stays high; a
+    // short pulse releases the wire; one between holds it low.
     r.set(reg::NIC, (520 << NIC_PULSE_SHIFT) | (65 << NIC_SAMPLE_SHIFT));
+    assert_eq!(r.get(reg::NIC) & 3, NIC_DONE | NIC_LEVEL);
+    r.set(reg::NIC, 10 << NIC_PULSE_SHIFT);
+    assert_eq!(r.get(reg::NIC) & 3, NIC_DONE | NIC_LEVEL);
+    r.set(reg::NIC, 100 << NIC_PULSE_SHIFT);
     assert_eq!(r.get(reg::NIC) & 3, NIC_DONE);
     r.bridge.set_onewire(Box::new(|pulse, sample| pulse == 5 && sample == 3));
     r.set(reg::NIC, (5 << NIC_PULSE_SHIFT) | (3 << NIC_SAMPLE_SHIFT));
@@ -735,14 +740,78 @@ fn a_directly_wired_input_shares_the_pins() {
     assert_eq!(r.get(reg::INT_STATUS) & 0xff, 0);
 }
 
+/// A Bridge-only reset leaves the functions' lines alone: a card still
+/// holding INTA must show on the pin, and a later enable must send it.
 #[test]
-fn reset_drops_the_pin_levels() {
+fn reset_keeps_the_input_levels() {
     let r = Rig::new();
     let c = r.card(2, PCI_INTA);
     r.route(2, 1);
     c.raise(true);
+    assert_eq!(r.sink.take(), [(1, true)]);
     r.reset();
-    assert_eq!(r.get(reg::INT_STATUS), 0);
+    assert_eq!(r.get(reg::INT_STATUS), 1 << 2, "the card still holds its line");
+    assert_eq!(r.get(reg::INT_ENABLE), 0);
+    r.route(2, 1);
+    assert_eq!(r.sink.take(), [(1, true)], "enabling a held pin sends");
+    c.raise(false);
+    c.raise(true);
+    assert_eq!(r.sink.take(), [(1, true)]);
+}
+
+#[test]
+fn a_link_reset_loses_the_core_but_not_the_lines() {
+    let r = Rig::new();
+    let c = r.card(2, PCI_INTA);
+    r.route(2, 1);
+    c.raise(true);
+    r.set(reg::DIRECT_MAP, 0);
+    r.bridge.write64(u64::from(ATE_BASE), ATE_VALID | 0x5000);
+    r.set(reg::INT_DEST_LOWER, 0x80);
+    r.bridge.link_reset();
+    assert_eq!(r.get(reg::DIRECT_MAP), DIRECT_ADD_512MB);
+    assert_eq!(r.get(reg::INT_DEST_LOWER), 0);
+    assert_eq!(r.bridge.read32(u64::from(ATE_BASE + 4)).data, 0);
+    assert_eq!(r.get(reg::INT_STATUS), 1 << 2);
+    // The card's configuration is not touched.
+    assert_eq!(r.cfg_read(2, 0, 2), CARD_VENDOR);
+}
+
+/// HEART takes an interrupt packet only at its offset 0x80, for one of its
+/// 64 bits; a packet anywhere else is dropped.
+#[test]
+fn interrupt_packets_must_land_on_hearts_interrupt_offset() {
+    let r = Rig::new();
+    let c = r.card(2, PCI_INTA);
+    r.set(reg::INT_DEST_UPPER, (WIDGET_HEART as u32) << 16);
+    r.set(reg::INT_ENABLE, 1 << 2);
+    r.set(reg::int_host(2), 5);
+    for lower in [0x88, 0x0, 0x7c] {
+        r.set(reg::INT_DEST_LOWER, lower);
+        c.raise(true);
+        c.raise(false);
+    }
+    assert!(r.sink.take().is_empty());
+    // Address bits 47:38 come from the pin's host field, not the pair.
+    r.set(reg::INT_DEST_LOWER, 0x80);
+    r.set(reg::INT_DEST_UPPER, ((WIDGET_HEART as u32) << 16) | 0xffc0);
+    c.raise(true);
+    c.raise(false);
+    assert_eq!(r.sink.take(), [(5, true)]);
+    r.set(reg::int_host(2), 1 << 8 | 5);
+    c.raise(true);
+    c.raise(false);
+    assert!(r.sink.take().is_empty(), "the pin's own address bits are off 0x80");
+    // Only 64 vectors exist.
+    r.set(reg::int_host(2), 70);
+    c.raise(true);
+    assert!(r.sink.take().is_empty());
+    // The same offset rule holds for the chip's own error interrupt.
+    r.set(reg::INT_DEST_UPPER, (WIDGET_HEART as u32) << 16);
+    r.set(reg::INT_DEST_LOWER, 0x88);
+    r.set(reg::INT_ENABLE, INT_PCI_MASTER_TIMEOUT);
+    let _ = r.bridge.read32(u64::from(Rig::cfg(6, 0)));
+    assert!(r.sink.take().is_empty());
 }
 
 // ---- flash ----

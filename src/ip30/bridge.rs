@@ -20,9 +20,9 @@
 //! | 0xc00000   | flash, two 2 MB chip selects on a 16-bit port     |
 //!
 //! Registers are 32 bits in the data (upper) half of an eight-byte slot.
-//! The behaviour is a port of our QEMU model; the contract is
-//! `docs/datasheets/bridge.md` in the origami repository. What that model
-//! approximates, this one approximates the same way:
+//! The register, translation, byte-lane and interrupt behaviour follows the
+//! published Bridge ASIC specification (rev 4.0, `docs/Octane/`). Where the
+//! specification is silent the choice is marked as an approximation:
 //!
 //! * Arbitration, read response buffers, the SSRAM parity and request
 //!   timer registers are storage. Nothing arbitrates, nothing times out.
@@ -130,6 +130,8 @@ fn window_slot(off: u32) -> Option<u32> {
 }
 
 const SLOT_DATA: u32 = 4;
+/// Where in HEART's widget space an interrupt packet lands.
+const HEART_INT_PACKET: u64 = 0x80;
 const REGS_DEFINED: u32 = 0x300;
 const REG_SLOTS: usize = (REGS_DEFINED / 8) as usize;
 /// The one reserved data half this chip answers specially.
@@ -504,7 +506,7 @@ impl Bridge {
     /// Install the one-wire bus behind the NIC register. It runs one bit
     /// slot given the pulse and sample timing fields and returns the line
     /// level the master samples. With none installed the bus is empty and
-    /// every slot samples low.
+    /// reads as an undriven, pulled-up line.
     /// Tell the Bridge which widgets the Crossbow has a live link to. A DMA
     /// request to any other widget is dropped by the Crossbow, which the
     /// Bridge's request timer reports. The default is HEART alone.
@@ -531,16 +533,28 @@ impl Bridge {
         self.update_pin(&mut st, pin as usize);
     }
 
-    /// Cold reset: the register file, the translation table and the latched
-    /// errors return to power-up, and every pin's level clears.
+    /// Reset the Bridge's own state: the register file, the translation
+    /// table and the latched errors return to power-up. The interrupt
+    /// inputs keep their levels, since the functions holding them are not
+    /// in this reset and would never raise another edge; the pins are
+    /// re-evaluated against the cleared enables.
     pub fn reset(&self) {
         let strap = *self.flash_strap.lock().unwrap();
         let mut st = self.st.lock().unwrap();
         st.reset_core(strap);
-        st.pin_level = 0;
-        st.pci_pin_level = 0;
-        st.gpio_pin_level = 0;
-        st.pci_lines = [false; DEVICES * 4];
+        st.pin_level = st.pci_pin_level | st.gpio_pin_level;
+    }
+
+    /// The Crossbow's link reset arriving. IRIX saves the control and link
+    /// configuration registers around it and rebuilds the rest, so the whole
+    /// core is taken as lost: registers, translation entries and latched
+    /// errors return to power-up. The interrupt inputs keep their levels and
+    /// nothing reaches the PCI side. Approximation: the core is reset once
+    /// and released, not held until the link is re-established; what a core
+    /// held in reset answers is not established.
+    pub fn link_reset(&self) {
+        log::debug!("bridge: inbound link reset");
+        self.reset();
     }
 
     /// The register at slot base `off` (such as [`reg::CONTROL`]), for
@@ -606,11 +620,21 @@ impl Bridge {
             return;
         }
         let dest = int_dest(st.r(reg::INT_DEST_UPPER), st.r(reg::INT_DEST_LOWER));
-        if dest.widget != WIDGET_HEART {
-            log::debug!("bridge: interrupt destination widget {} is not HEART; dropped", dest.widget);
+        // The pin's own host-address field replaces bits 47:38 of the
+        // destination address.
+        let field = ((host & INT_HOST_ADDRESS) >> 8) as u64;
+        let address = (dest.address & !(0x3ffu64 << 38)) | field << 38;
+        if !Self::heart_accepts(&dest, address, (host & INT_HOST_FIELD) as u8) {
+            log::debug!("bridge: interrupt packet to widget {} address {address:#x} is not HEART's; dropped", dest.widget);
             return;
         }
         self.sink.xio_interrupt((host & INT_HOST_FIELD) as u8, set);
+    }
+
+    /// HEART takes an interrupt packet only at its interrupt-set offset
+    /// (0x80), naming one of its 64 bits.
+    fn heart_accepts(dest: &IntDest, address: u64, vector: u8) -> bool {
+        dest.widget == WIDGET_HEART && address == HEART_INT_PACKET && vector < 64
     }
 
     /// Chip errors go to the host-error bit at the destination pair.
@@ -618,8 +642,8 @@ impl Bridge {
         let number = (st.r(reg::HOST_ERR_FIELD) & INT_HOST_FIELD) as u8;
         let dest = int_dest(st.r(reg::INT_DEST_UPPER), st.r(reg::INT_DEST_LOWER));
         // An unrouted error is one nobody asked for.
-        if dest.address == 0 || dest.widget != WIDGET_HEART {
-            log::debug!("bridge: error interrupt with no destination programmed");
+        if !Self::heart_accepts(&dest, dest.address, number) {
+            log::debug!("bridge: error interrupt with no usable destination; dropped");
             return;
         }
         self.sink.xio_interrupt(number, true);
@@ -644,7 +668,7 @@ impl Bridge {
 
     /// A read this chip sent for a device and the crossbar dropped: the
     /// request timer expires at once. The capture is the response-buffer
-    /// error pair (inferred from the specification, as in our QEMU model);
+    /// error pair (inferred from the specification, not stated by it);
     /// the buffer field is zero because no response buffers are held.
     fn read_timeout(&self, st: &mut State) {
         if st.r(reg::INT_ENABLE) & INT_XREAD_REQ_TIMEOUT == 0 {
@@ -753,7 +777,14 @@ impl Bridge {
     fn onewire_slot(&self, st: &mut State, val: u32) {
         let pulse = (val & NIC_PULSE_MASK) >> NIC_PULSE_SHIFT;
         let sample = (val & NIC_SAMPLE_MASK) >> NIC_SAMPLE_SHIFT;
-        let level = self.onewire.read().unwrap().as_ref().is_some_and(|f| f(pulse, sample));
+        let level = match self.onewire.read().unwrap().as_ref() {
+            Some(f) => f(pulse, sample),
+            // An empty bus: nothing answers a reset, so the line stays high;
+            // a short pulse releases the wire (high) and one in between
+            // holds it low. The 400/40 thresholds are modelling choices,
+            // not hardware values.
+            None => pulse >= 400 || pulse < 40,
+        };
         let held = st.r(reg::NIC) & !NIC_LEVEL;
         st.set_r(reg::NIC, held | NIC_DONE | if level { NIC_LEVEL } else { 0 });
     }
