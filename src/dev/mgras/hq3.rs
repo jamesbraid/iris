@@ -327,6 +327,9 @@ const XFRCONTROL_READ: u32 = 8;
 pub trait Hq3Board: Send + Sync {
     /// The GE state word a readback at `addr` answers.
     fn ge_state(&self, gl: &mut super::gl::Gl, addr: u32) -> Option<u32>;
+    /// Whether the raster command `cmd` is dropped instead of executed; the
+    /// reason is reported.
+    fn drop_raster_write(&self, cmd: u32) -> Option<String>;
 }
 
 /// CPU-side HQ3 registers (the flags are atomic, in `Mgras`). Plain data,
@@ -940,7 +943,11 @@ impl Hq3Engine {
             0x089 => Some(cmd),
             _ => None,
         };
-        if cmd >= cmd::RASTER_BASE {
+        let dropped = if cmd >= cmd::RASTER_BASE { self.board.as_ref().and_then(|b| b.drop_raster_write(cmd)) } else { None };
+        if let Some(why) = dropped {
+            self.stats.raster_writes += 1;
+            sink.note(why);
+        } else if cmd >= cmd::RASTER_BASE {
             let r = cmd & 0x3FF;
             let exec = cmd & cmd::RASTER_EXECUTE != 0;
             self.stats.raster_writes += 1;
@@ -1068,9 +1075,6 @@ impl Hq3Engine {
         }
     }
 
-    /// The host DMA engine's start word. Host to board runs now: the raster
-    /// engine was armed by commands queued ahead. Board to host waits for
-    /// the raster engine.
     /// The GE state word a readback at `addr` answers, in the layout of the
     /// board's microcode.
     fn ge_state(&mut self, addr: u32) -> Option<u32> {
@@ -1080,6 +1084,10 @@ impl Hq3Engine {
         }
     }
 
+    /// The host DMA engine's start word. Host to board runs now: the raster
+    /// engine was armed by commands queued ahead. Board to host is held
+    /// until the raster engine arms the transfer, or, with
+    /// `kick_starts_read`, until the start word itself starts it.
     fn dma_start(&mut self, word: u32, sink: &mut dyn Hq3Sink) {
         if word & 1 == 0 {
             return;
