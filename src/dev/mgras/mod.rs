@@ -138,6 +138,9 @@ struct Front {
     hq: Hq3Regs,
     ge: Ge11,
     dcb: dcb::Dcb,
+    /// The GE revision a started engine reports; 0 for the Indigo2
+    /// boards' 1.
+    ge_revision: u32,
 }
 
 /// `Front` borrowed under its lock.
@@ -228,8 +231,8 @@ impl Front {
             off if Ge11::is_diag_port(off) => {
                 if self.ge.write(off, val as u32) {
                     // Started: the version program's answer is waiting
-                    // (revision 1).
-                    self.hq.ge_readback = [0, 1];
+                    // (revision 1 on the Indigo2 boards).
+                    self.hq.ge_readback = [0, self.ge_revision.max(1)];
                     flags.fetch_or(host::FLAG_GE_DATA, Ordering::AcqRel);
                 }
                 false
@@ -849,6 +852,17 @@ impl Mgras {
         let f = self.snapshot_frame();
         f.compose(&mut out);
         disp::save_png(path, &out, f.width, f.height)
+    }
+
+    /// Identity for a board outside the Indigo2 (the Octane's XIO boards):
+    /// the two board-version bytes, the colormaps' revision registers and
+    /// the GE revision, which the readback registers hold from now until
+    /// the first state query or engine start replaces it.
+    pub fn set_identity(&self, bdvers: [u32; 2], cmap_rev: [u32; 2], ge_revision: u32) {
+        let mut f = self.front();
+        f.dcb.init(bdvers, cmap_rev);
+        f.ge_revision = ge_revision;
+        f.hq.ge_readback = [0, ge_revision];
     }
 
     /// Give the board its path to system memory, for DMA.
