@@ -440,3 +440,7 @@ impl BusDevice for CachedFlashLines {
         self.bus.gen_ptr(addr)
     }
 }
+
+/// Cross-device tests: the chips wired as the machine wires them, no CPU.
+#[cfg(test)]
+mod tests;
