@@ -365,6 +365,15 @@ impl Isp1040 {
 
     pub fn index(&self) -> u8 { self.index }
 
+    /// A machine reset: the chip as at power-on (no firmware, no queues),
+    /// its interrupt dropped. The disks stay attached.
+    pub fn reset(&self) {
+        *self.st.lock().unwrap() = State::new();
+        if let Some(irq) = self.irq.get() {
+            irq.set(false);
+        }
+    }
+
     /// Wire the adapter's interrupt pin to `line` (a level).
     pub fn connect_irq(&self, line: IrqLine) {
         let _ = self.irq.set(line);

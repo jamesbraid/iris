@@ -486,6 +486,9 @@ pub struct OctaneMachine {
     pub bridge: Arc<Bridge>,
     pub ioc3: Arc<Ioc3>,
     pub scsi: [Arc<Isp1040>; 2],
+    eth: Arc<Ioc3Eth>,
+    rad: Arc<crate::dev::rad1::Rad1>,
+    flash: Arc<crate::ip30::flash::CfiFlash>,
     nat: Option<(Arc<crate::net::NatControl>, (std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr))>,
     scratch_path: Option<std::path::PathBuf>,
     events: std::sync::mpsc::SyncSender<MachineEvent>,
@@ -525,7 +528,8 @@ impl OctaneMachine {
                 .map_err(|e| format!("octane.flash {path}: {e}"))?,
             None => crate::ip30::flash::CfiFlash::new(&prom, FLASH_SIZE as usize),
         };
-        bridge.attach_flash(Arc::new(flash), FLASH_SIZE as u32);
+        let flash = Arc::new(flash);
+        bridge.attach_flash(flash.clone(), FLASH_SIZE as u32);
         // The second chip select: a blank 2 MiB part that reads all ones and
         // keeps no writes, an approximation from one word read on a real
         // Octane2. The PROM looks for a part there too.
@@ -549,7 +553,8 @@ impl OctaneMachine {
         let eth = Ioc3Eth::new(mac);
         ioc3.attach_eth(eth.clone());
         bridge.attach(2, ioc3.clone());
-        bridge.attach(3, Arc::new(crate::dev::rad1::Rad1::new()));
+        let rad = Arc::new(crate::dev::rad1::Rad1::new());
+        bridge.attach(3, rad.clone());
         // SuperIO (serial, keyboard, clock) is Bridge input 4; the Ethernet
         // uses IOC3's PCI pin.
         ioc3.connect_superio_interrupt(crate::irq::IrqLine::new(Arc::new(BridgeWire(Arc::downgrade(&bridge))), 4));
@@ -656,6 +661,9 @@ impl OctaneMachine {
             bridge,
             ioc3,
             scsi,
+            eth: eth.clone(),
+            rad,
+            flash,
             nat,
             scratch_path,
             events,
@@ -813,6 +821,12 @@ impl OctaneMachine {
         self.flash_lines.clear();
         self.bridge.reset();
         self.ioc3.reset();
+        self.eth.reset();
+        for c in &self.scsi {
+            c.reset();
+        }
+        self.rad.reset();
+        self.flash.reset();
     }
 
     pub fn machine_slot(&mut self) -> MachineSlot {

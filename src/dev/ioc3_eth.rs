@@ -1039,6 +1039,21 @@ impl Ioc3Eth {
         self.mac
     }
 
+    /// A machine reset: the MAC's registers and the PHY as at power-on,
+    /// the interrupt dropped. The network link stays.
+    pub fn reset(&self) {
+        {
+            let mut st = self.st.lock().unwrap();
+            let delay = st.phy.delay;
+            let backend_up = st.phy.backend_up;
+            *st = State::new(delay);
+            st.phy.set_backend_link(backend_up, Instant::now());
+        }
+        if let Some(cb) = self.irq.lock().unwrap().as_ref() {
+            cb(false);
+        }
+    }
+
     fn dma(&self) -> Arc<dyn PciDma> {
         self.dma.lock().unwrap().clone().unwrap_or_else(|| Arc::new(NullDma))
     }

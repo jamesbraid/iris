@@ -89,6 +89,14 @@ impl CfiFlash {
         Self { st: Mutex::new(State { data, mode: Mode::Array, status: SR_READY, file: None }) }
     }
 
+    /// A reset: back to read-array mode with the status clear. The array
+    /// keeps what was programmed.
+    pub fn reset(&self) {
+        let mut st = self.st.lock().unwrap();
+        st.mode = Mode::Array;
+        st.status = SR_READY;
+    }
+
     /// As [`CfiFlash::new`], backed by `path`. A file of exactly `size` bytes is
     /// the array's contents (a previous run's programming survives, and the
     /// seed image is ignored). Anything else is replaced by the seeded array.
