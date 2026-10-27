@@ -1308,6 +1308,78 @@ impl BusDevice for RawFlash {
     }
 }
 
+/// The register file, the translation table, the latched errors, the
+/// levels on the interrupt inputs and each slot's configuration header, as
+/// `MacePci` keeps its slots'. Loading sends no interrupt packet: HEART's
+/// own state holds what was pending, and the machine loads it after this.
+impl crate::traits::Saveable for Bridge {
+    fn save_state(&self) -> toml::Value {
+        use crate::snapshot::{hex_u32, hex_u64, hex_u8, u32_slice_to_toml, u64_slice_to_toml};
+        let st = self.st.lock().unwrap();
+        let mut t = toml::map::Map::new();
+        t.insert("reg".into(), u32_slice_to_toml(&st.reg));
+        t.insert("ate".into(), u64_slice_to_toml(&st.ate));
+        t.insert("int_error".into(), hex_u32(st.int_error));
+        t.insert("pin_level".into(), hex_u8(st.pin_level));
+        t.insert("pci_pin_level".into(), hex_u8(st.pci_pin_level));
+        t.insert("gpio_pin_level".into(), hex_u8(st.gpio_pin_level));
+        t.insert("pci_lines".into(), toml::Value::Array(st.pci_lines.iter().map(|&b| toml::Value::Boolean(b)).collect()));
+        t.insert("dma_64bit".into(), hex_u8(st.dma_64bit));
+        t.insert("dma_pci_address".into(), hex_u64(st.dma_pci_address));
+        t.insert("dma_device".into(), hex_u32(st.dma_device));
+        drop(st);
+        t.insert("flash_strap".into(), toml::Value::Boolean(*self.flash_strap.lock().unwrap()));
+        let mut slots = toml::map::Map::new();
+        for (n, s) in self.slots.read().unwrap().iter().enumerate() {
+            if let Some(dev) = s {
+                slots.insert(n.to_string(), dev.config().save_state());
+            }
+        }
+        t.insert("slots".into(), toml::Value::Table(slots));
+        toml::Value::Table(t)
+    }
+
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        use crate::snapshot::{get_field, load_u32_slice, load_u64_slice, toml_bool, toml_u32, toml_u64, toml_u8};
+        if let Some(toml::Value::Table(slots)) = get_field(v, "slots") {
+            let ours = self.slots.read().unwrap();
+            for (n, cfg) in slots {
+                let dev = n
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|n| ours.get(n).cloned().flatten())
+                    .ok_or_else(|| format!("bridge: saved state has slot {n}, which is empty here"))?;
+                dev.config().load_state(cfg)?;
+            }
+        }
+        let strap = get_field(v, "flash_strap").and_then(toml_bool).unwrap_or(false);
+        *self.flash_strap.lock().unwrap() = strap;
+        let mut st = self.st.lock().unwrap();
+        st.reset_core(strap);
+        if let Some(a) = get_field(v, "reg") {
+            load_u32_slice(a, &mut st.reg);
+        }
+        if let Some(a) = get_field(v, "ate") {
+            load_u64_slice(a, &mut st.ate);
+        }
+        let b = |k: &str| get_field(v, k).and_then(toml_u8).unwrap_or(0);
+        st.int_error = get_field(v, "int_error").and_then(toml_u32).unwrap_or(0);
+        st.pin_level = b("pin_level");
+        st.pci_pin_level = b("pci_pin_level");
+        st.gpio_pin_level = b("gpio_pin_level");
+        st.dma_64bit = b("dma_64bit");
+        st.pci_lines = [false; DEVICES * 4];
+        if let Some(toml::Value::Array(a)) = get_field(v, "pci_lines") {
+            for (dst, x) in st.pci_lines.iter_mut().zip(a) {
+                *dst = x.as_bool().unwrap_or(false);
+            }
+        }
+        st.dma_pci_address = get_field(v, "dma_pci_address").and_then(toml_u64).unwrap_or(0);
+        st.dma_device = get_field(v, "dma_device").and_then(toml_u32).unwrap_or(0);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[path = "bridge_tests.rs"]
 mod tests;
