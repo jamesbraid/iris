@@ -1172,27 +1172,37 @@ impl Ioc3Eth {
     /// Frames the filter rejects are discarded; a frame that cannot be taken
     /// yet (no buffer, MAC off) waits in the backend queue. Returns whether
     /// any frame was consumed.
+    ///
+    /// The link is held only to take one frame at a time, so a transmit on
+    /// the CPU thread never waits behind a burst of deliveries. A frame
+    /// taken just as the guest turns receive off is dropped, as one
+    /// arriving a moment later would be.
     pub fn poll(&self) -> bool {
         let dma = self.dma();
         let mut moved = false;
-        {
-            let mut link = self.link.lock().unwrap();
-            let Some(link) = link.as_mut() else { return false };
-            loop {
+        loop {
+            let frame = {
+                let mut link = self.link.lock().unwrap();
+                let Some(link) = link.as_mut() else { break };
+                {
+                    let mut st = self.st.lock().unwrap();
+                    st.phy.sync(Instant::now());
+                    if !st.rx_ready() {
+                        break;
+                    }
+                }
+                let Ok(frame) = link.from_net.pop() else { break };
+                frame
+            };
+            moved = true;
+            {
                 let mut st = self.st.lock().unwrap();
-                st.phy.sync(Instant::now());
-                if !st.rx_ready() {
-                    break;
+                if st.rx_ready() && st.rx_filter(&frame) {
+                    st.deliver(&*dma, &frame, false);
                 }
-                let Ok(frame) = link.from_net.peek() else { break };
-                if st.rx_filter(frame) {
-                    st.deliver(&*dma, frame, false);
-                }
-                let _ = link.from_net.pop();
-                moved = true;
             }
+            self.irq_flush();
         }
-        self.irq_flush();
         moved
     }
 }
