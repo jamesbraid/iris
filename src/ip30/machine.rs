@@ -847,9 +847,7 @@ impl OctaneMachine {
                 })
                 .unwrap(),
         );
-        if let Some(g) = &self.gfx {
-            g.start_display();
-        }
+        self.restart_peripherals();
         if self.ci_serial.is_none() {
             self.cpu.clone().as_device().start();
         }
@@ -881,6 +879,16 @@ impl OctaneMachine {
         self.flash.reset();
         if let Some(g) = &self.gfx {
             g.reset();
+        }
+        self.restart_peripherals();
+    }
+
+    /// Start what `stop` stopped, short of the CPU: the graphics engines
+    /// and display. Without them the PROM's first graphics readback after a
+    /// reset waits forever on a pipeline nothing drains.
+    pub fn restart_peripherals(&mut self) {
+        if let Some(g) = &self.gfx {
+            g.start_display();
         }
     }
 
@@ -915,7 +923,9 @@ impl Workstation for OctaneMachine {
     fn reset(&mut self) {
         OctaneMachine::reset(self)
     }
-    fn restart_peripherals(&mut self) {}
+    fn restart_peripherals(&mut self) {
+        OctaneMachine::restart_peripherals(self)
+    }
     fn cpu_start(&self) {
         self.cpu.clone().as_device().start()
     }
