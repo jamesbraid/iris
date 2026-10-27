@@ -242,6 +242,8 @@ struct Ctl {
     /// Holders that need the thread not to start another command
     /// (saving and loading state).
     hold: u32,
+    /// The machine is stopped: the thread takes no further entries.
+    paused: bool,
     shutdown: bool,
 }
 
@@ -568,9 +570,29 @@ impl Core {
     /// waiting for more (or is held on a full response ring).
     pub fn wait_idle(&self) {
         let mut st = self.st.lock();
-        while (st.ctl.work && st.ctl.hold == 0) || st.ctl.walking {
+        while (st.ctl.work && st.ctl.hold == 0 && !st.ctl.paused) || st.ctl.walking {
             self.wake.wait(&mut st);
         }
+    }
+
+    /// Stop the ring thread between entries while the machine is stopped:
+    /// once this returns the adapter touches neither guest memory nor its
+    /// interrupt until [`Core::resume`]. A command in flight finishes and
+    /// posts first.
+    pub fn pause(&self) {
+        let mut st = self.st.lock();
+        st.ctl.paused = true;
+        while st.ctl.walking {
+            self.wake.wait(&mut st);
+        }
+    }
+
+    /// Let the ring thread run again, taking up whatever was published
+    /// while it was paused.
+    pub fn resume(&self) {
+        let mut st = self.st.lock();
+        st.ctl.paused = false;
+        self.kick(&mut st);
     }
 
     /// A save or a load is waiting for the ring thread (tests).
@@ -1222,7 +1244,7 @@ impl Core {
     fn run_ring(&self) {
         let mut st = self.st.lock();
         loop {
-            while !st.ctl.shutdown && !(st.ctl.work && st.ctl.hold == 0) {
+            while !st.ctl.shutdown && !(st.ctl.work && st.ctl.hold == 0 && !st.ctl.paused) {
                 self.wake.wait(&mut st);
             }
             if st.ctl.shutdown {
@@ -1269,7 +1291,7 @@ impl Core {
     /// DMA.
     fn consume_requests<'a>(&'a self, mut st: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
         loop {
-            if st.ctl.shutdown || st.ctl.hold > 0 {
+            if st.ctl.shutdown || st.ctl.hold > 0 || st.ctl.paused {
                 // Resume once the holder lets go.
                 st.ctl.work = true;
                 return st;
@@ -1478,9 +1500,9 @@ impl Core {
 /// bus), as the other SCSI controllers have them, plus `scsi notes`.
 impl crate::traits::Device for Isp1040 {
     fn step(&self, _cycles: u64) {}
-    fn stop(&self) {}
-    fn start(&self) {}
-    fn is_running(&self) -> bool { true }
+    fn stop(&self) { self.pause() }
+    fn start(&self) { self.resume() }
+    fn is_running(&self) -> bool { !self.st.lock().ctl.paused }
     fn get_clock(&self) -> u64 { 0 }
 
     fn register_commands(&self) -> Vec<(String, String)> {

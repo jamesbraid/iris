@@ -1118,6 +1118,46 @@ fn a_new_request_ring_starts_at_zero_and_the_command_in_flight_completes() {
     assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
 }
 
+/// While the machine is stopped the adapter takes no entries; on start
+/// it runs what the driver published meanwhile.
+#[test]
+fn a_paused_adapter_takes_nothing_until_it_resumes() {
+    let r = Rig::with_disk("pause", 0, 64);
+    r.init_rings(8, 8);
+    r.isp.pause();
+    r.put_entry(0, &tur_entry(0x5001));
+    r.doorbell(1);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 0, "nothing taken while paused");
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0);
+    r.isp.resume();
+    r.isp.wait_idle();
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 1);
+    assert_eq!(g32(&r.status(0), 4), 0x5001);
+}
+
+/// Pausing waits for the command in flight, which then posts; nothing
+/// follows it until the adapter resumes.
+#[test]
+fn pausing_lets_the_command_in_flight_finish() {
+    let (r, gate, probe) = gated_rig("pause-inflight");
+    r.put_entry(1, &request(0x78, 1, &[0, 0, 0, 0, 0, 0], &[]));
+    r.isp.write(reg::REQUEST_QUEUE, 2, 2);
+    gate.wait_arrival();
+    std::thread::scope(|s| {
+        let pause = s.spawn(|| r.isp.pause());
+        while !r.isp.st.lock().ctl.paused { std::thread::yield_now(); }
+        gate.open();
+        pause.join().unwrap();
+    });
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1, "the command in flight posted");
+    assert!(probe.level());
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 1, "and the next waits");
+    r.isp.resume();
+    r.isp.wait_idle();
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 2);
+    assert_eq!(g32(&r.status(1), 4), 0x78);
+}
+
 /// Saving waits for the command in flight, so the state saved has it
 /// posted rather than half done.
 #[test]
