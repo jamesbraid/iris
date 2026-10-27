@@ -7,10 +7,8 @@
 //! SCSI work is done here, against the shared target model, and the
 //! completion is posted the way the firmware would.
 //!
-//! This is a port of the register and ring contract our QEMU model
-//! (`hw/scsi/qlogic-isp.c`) implements for the ISP1040, which is itself taken
-//! from the part's datasheet and the public Linux and OpenBSD drivers. Where
-//! the model approximates, so does this:
+//! The register and ring contract follow the part's datasheet and the public
+//! Linux and OpenBSD drivers. Where the model approximates, it says so:
 //!
 //! * Commands complete inside the doorbell write that starts them, so there
 //!   is never more than one outstanding and no abort/recovery mailbox
@@ -20,7 +18,10 @@
 //!   any completion is held.
 //! * The target model has no bus reset, so a bus reset or soft reset does not
 //!   arm a unit attention on the disk as QEMU's SCSI devices do.
-//! * Only one logical unit (0) exists per target, as in our QEMU model.
+//! * Only logical unit 0 of a present target exists. A command for another
+//!   unit is passed to the target with that unit number, which answers as
+//!   SCSI says (INQUIRY: no device at this unit; anything else: check
+//!   condition, logical unit not supported). An absent target times out.
 //!
 //! Register windows: BAR 0 is I/O space and BAR 1 memory space, both 256
 //! bytes onto the same sixteen-bit registers. Accesses of any other width
@@ -193,6 +194,7 @@ pub const STATUS_FLAG_TIMEOUT: u16 = 0x0040;
 
 const CHECK_CONDITION: u8 = 0x02;
 const MAX_TARGET: u8 = 15;
+const MAX_LUN: u8 = 7;
 
 /// A completion held for response-ring room.
 #[derive(Clone, Default, PartialEq, Debug)]
@@ -755,31 +757,31 @@ impl Isp1040 {
 
     /// How many bytes a command is declared to move, and whether they go to
     /// the device. `block` is the target's logical block size.
-    fn cdb_transfer(cdb: &[u8], block: usize) -> (usize, bool) {
+    fn cdb_transfer(cdb: &[u8], block: usize) -> Option<(usize, bool)> {
         let at = |i: usize| cdb.get(i).copied().unwrap_or(0) as usize;
         let be16 = |i: usize| (at(i) << 8) | at(i + 1);
         let be24 = |i: usize| (at(i) << 16) | (at(i + 1) << 8) | at(i + 2);
         let six = || if at(4) == 0 { 256 } else { at(4) };
         match cdb[0] {
-            scsi_cmd::READ_6 => (six() * block, false),
-            scsi_cmd::WRITE_6 => (six() * block, true),
-            scsi_cmd::READ_10 => (be16(7) * block, false),
-            scsi_cmd::WRITE_10 => (be16(7) * block, true),
-            scsi_cmd::INQUIRY => (be16(3), false),
-            scsi_cmd::REQUEST_SENSE | scsi_cmd::MODE_SENSE_6 => (at(4), false),
-            scsi_cmd::MODE_SELECT_6 => (at(4), true),
+            scsi_cmd::READ_6 => Some((six() * block, false)),
+            scsi_cmd::WRITE_6 => Some((six() * block, true)),
+            scsi_cmd::READ_10 => Some((be16(7) * block, false)),
+            scsi_cmd::WRITE_10 => Some((be16(7) * block, true)),
+            scsi_cmd::INQUIRY => Some((be16(3), false)),
+            scsi_cmd::REQUEST_SENSE | scsi_cmd::MODE_SENSE_6 => Some((at(4), false)),
+            scsi_cmd::MODE_SELECT_6 => Some((at(4), true)),
             scsi_cmd::MODE_SENSE_10
             | scsi_cmd::READ_TOC_PMA_ATIP
             | scsi_cmd::GET_CONFIGURATION
             | scsi_cmd::READ_SUB_CHANNEL
-            | scsi_cmd::READ_DISC_INFORMATION => (be16(7), false),
-            scsi_cmd::MODE_SELECT_10 => (be16(7), true),
-            scsi_cmd::READ_CAPACITY_10 => (8, false),
-            scsi_cmd::READ_BUFFER => (be24(6), false),
-            scsi_cmd::WRITE_BUFFER => (be24(6), true),
-            scsi_cmd::SEND_DIAGNOSTIC => (be16(3), true),
-            scsi_cmd::RECEIVE_DIAGNOSTIC_RESULTS => (be16(3), false),
-            _ => (0, false),
+            | scsi_cmd::READ_DISC_INFORMATION => Some((be16(7), false)),
+            scsi_cmd::MODE_SELECT_10 => Some((be16(7), true)),
+            scsi_cmd::READ_CAPACITY_10 => Some((8, false)),
+            scsi_cmd::READ_BUFFER => Some((be24(6), false)),
+            scsi_cmd::WRITE_BUFFER => Some((be24(6), true)),
+            scsi_cmd::SEND_DIAGNOSTIC => Some((be16(3), true)),
+            scsi_cmd::RECEIVE_DIAGNOSTIC_RESULTS => Some((be16(3), false)),
+            _ => Some((0, false)),
         }
     }
 
@@ -876,11 +878,14 @@ impl Isp1040 {
         }
         // GOT_BUS alone is Linux's bad-target; the timeout bit beside it is
         // what lets the empty slot be treated as benign.
-        if target > MAX_TARGET || lun != 0 || !self.has_target(target) {
+        if target > MAX_TARGET || lun > MAX_LUN || !self.has_target(target) {
             self.post_status(st, Self::incomplete(handle, STATE_GOT_BUS, STATUS_FLAG_TIMEOUT));
             return true;
         }
 
+        let mut cdb = cdb;
+        // The target model reads the unit number from the CDB's second byte.
+        cdb[1] = (cdb[1] & 0x1f) | (lun << 5);
         let cdb = &cdb[..(cdb_len as usize).clamp(1, CDB_FIELD_LEN)];
         let block = self
             .targets
@@ -891,8 +896,15 @@ impl Isp1040 {
             .map(|d| d.block_sizes().1 as usize)
             .filter(|&b| b != 0)
             .unwrap_or(BLOCK_SIZE);
-        let (mut xfer, to_dev) = Self::cdb_transfer(cdb, block);
-        let (segs, described) = self.read_segments(st, addr, entry_count, seg_count, xfer as u64, a64);
+        // An opcode with no length rule is sized by what the descriptors
+        // name, and treated as data coming from the target.
+        let known = Self::cdb_transfer(cdb, block);
+        let (mut xfer, to_dev) = known.unwrap_or((0, false));
+        let max = if known.is_some() { xfer as u64 } else { u64::MAX };
+        let (segs, described) = self.read_segments(st, addr, entry_count, seg_count, max, a64);
+        if known.is_none() {
+            xfer = described.min(u32::MAX as u64) as usize;
+        }
 
         st.total_cmds += 1;
         let (status, moved);
@@ -910,11 +922,6 @@ impl Isp1040 {
         } else {
             let (data, s) = self.scsi(target, cdb, None);
             status = s;
-            if xfer == 0 {
-                // A command this port has no length rule for: the buffer is
-                // what the target gave.
-                xfer = data.len();
-            }
             // Offer the target's bytes to the descriptors in order.
             let take = (data.len() as u64).min(described).min(xfer as u64) as usize;
             let mut off = 0usize;

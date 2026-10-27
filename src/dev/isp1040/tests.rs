@@ -1,5 +1,5 @@
-//! Register-contract and ring tests, ported from our QEMU qtest for the
-//! ISP1040. Host memory is a flat byte array behind a fake `PciDma`; the disk
+//! Register-contract and ring tests, for the ISP1040's register
+//! and ring contract. Host memory is a flat byte array behind a fake `PciDma`; the disk
 //! is a small raw image.
 
 use super::*;
@@ -558,12 +558,41 @@ fn an_absent_target_is_incomplete_with_a_timeout() {
     assert_eq!(g16(&s, 10), IOCB_INCOMPLETE);
     assert_eq!(g16(&s, 12), STATE_GOT_BUS);
     assert_eq!(g16(&s, 14), STATUS_FLAG_TIMEOUT);
-    // A second logical unit behind a present target is absent too.
-    let mut e = request(0x56, 1, &[0, 0, 0, 0, 0, 0], &[]);
+}
+
+#[test]
+fn an_absent_lun_on_a_present_target_answers_as_scsi_says() {
+    let r = Rig::with_disk("lun", 1, 64);
+    r.init_rings(8, 8);
+    let mut e = request(0x56, 1, &[0x12, 0, 0, 0, 36, 0], &[(BUF, 36)]);
     e[8] = 1;
+    r.put_entry(0, &e);
+    let mut e = request(0x57, 1, &[0, 0, 0, 0, 0, 0], &[]);
+    e[8] = 3;
     r.put_entry(1, &e);
     r.doorbell(2);
-    assert_eq!(g16(&r.status(1), 10), IOCB_INCOMPLETE);
+    let s = r.status(0);
+    assert_eq!(g16(&s, 10), IOCB_COMPLETE, "INQUIRY is answered, not timed out");
+    assert_eq!(r.mem.get(BUF, 1)[0] >> 5, 3, "peripheral qualifier 3: no device at this unit");
+    let s = r.status(1);
+    assert_eq!(g16(&s, 8), 0x02 | SCSI_STATUS_SENSE_VALID);
+    assert_eq!(s[34] & 0x0f, 0x05, "illegal request");
+    assert_eq!((s[44], s[45]), (0x25, 0x00), "logical unit not supported");
+}
+
+#[test]
+fn an_opcode_without_a_length_rule_is_sized_by_its_descriptors() {
+    let r = Rig::with_disk("unsized", 1, 64);
+    r.init_rings(4, 4);
+    // The target model rejects the opcode, so nothing moves; the residual is
+    // what the descriptors named, which only a walk of them can know.
+    r.put_entry(0, &request(0x60, 1, &[0xee, 0, 0, 0, 0, 0], &[(BUF, 64), (BUF + 64, 32)]));
+    r.doorbell(1);
+    let s = r.status(0);
+    assert_eq!(g16(&s, 8), 0x02 | SCSI_STATUS_SENSE_VALID);
+    assert_eq!(g16(&s, 10), IOCB_COMPLETE);
+    assert_eq!(g32(&s, 20), 96);
+    assert_eq!(s[34] & 0x0f, 0x05);
 }
 
 #[test]
