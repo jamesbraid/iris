@@ -743,3 +743,42 @@ fn dropping_the_mac_joins_its_threads() {
     drop(eth);
     assert!(probe.upgrade().is_none());
 }
+
+/// The MAC's rings and enables, the PHY's negotiation and the interrupt
+/// come back; the loading device's own backend carries the next frame.
+#[test]
+fn save_load_round_trip() {
+    use crate::traits::Saveable;
+    let mut t = rig();
+    t.rx_setup(4);
+    t.mii_w(1, 4, 0x0061);
+    t.deliver(&frame(STATION, 60));
+    assert!(t.irq_level(), "a received frame raised the interrupt");
+    let v1 = t.eth.save_state();
+
+    let mut u = rig();
+    u.eth.load_state(&v1).unwrap();
+    assert_eq!(v1, u.eth.save_state(), "Ioc3Eth save_state mismatch after load_state round-trip");
+    assert!(u.irq_level(), "the load drives the saved level");
+    assert_eq!(u.mii(1, 4), 0x0061);
+    assert_eq!(u.r(RX_CONSUME), 8);
+    // The saved rings point into memory the snapshot also restores; copy
+    // the ring over and the next frame lands in the second buffer.
+    let ring = t.get(RX_RING, 32);
+    u.put(RX_RING, &ring);
+    u.deliver(&frame(STATION, 60));
+    assert_eq!(u.r(RX_CONSUME), 16);
+    assert_eq!(u.eth.counts().1, 2);
+}
+
+#[test]
+fn a_held_device_leaves_frames_in_the_backend() {
+    let mut t = rig();
+    t.rx_setup(4);
+    t.eth.pause();
+    t.deliver(&frame(STATION, 60));
+    assert_eq!(t.r(RX_CONSUME), 0);
+    t.eth.resume();
+    t.eth.poll();
+    assert_eq!(t.r(RX_CONSUME), 8);
+}
