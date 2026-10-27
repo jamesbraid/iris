@@ -41,7 +41,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
-use crate::ip30::xio::{XioInterruptSink, XioMemory, WIDGET_HEART, WIDGET_SMALL_SIZE};
+use crate::ip30::xio::{XioInterruptSink, XioMemory, WIDGET_BRIDGE, WIDGET_HEART, WIDGET_SMALL_SIZE};
 use crate::irq::{InterruptController, IrqLine};
 use crate::pci::{PciBusDevice, PciDma, PciDmaStatus, Space};
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, BUS_ERR, BUS_OK};
@@ -363,6 +363,8 @@ pub struct Bridge {
     flash: RwLock<[Option<FlashPart>; 2]>,
     flash_strap: Mutex<bool>,
     onewire: RwLock<Option<Box<dyn Fn(u32, u32) -> bool + Send + Sync>>>,
+    /// Whether the Crossbow has a live link to a widget; default only HEART.
+    link_alive: RwLock<Box<dyn Fn(u8) -> bool + Send + Sync>>,
 }
 
 /// A function's pin, as a level into the Bridge.
@@ -452,6 +454,7 @@ impl Bridge {
             flash: RwLock::new(Default::default()),
             flash_strap: Mutex::new(false),
             onewire: RwLock::new(None),
+            link_alive: RwLock::new(Box::new(|w| w == WIDGET_HEART)),
         })
     }
 
@@ -502,6 +505,13 @@ impl Bridge {
     /// slot given the pulse and sample timing fields and returns the line
     /// level the master samples. With none installed the bus is empty and
     /// every slot samples low.
+    /// Tell the Bridge which widgets the Crossbow has a live link to. A DMA
+    /// request to any other widget is dropped by the Crossbow, which the
+    /// Bridge's request timer reports. The default is HEART alone.
+    pub fn set_link_alive(&self, alive: Box<dyn Fn(u8) -> bool + Send + Sync>) {
+        *self.link_alive.write().unwrap() = alive;
+    }
+
     pub fn set_onewire(&self, run_slot: Box<dyn Fn(u32, u32) -> bool + Send + Sync>) {
         *self.onewire.write().unwrap() = Some(run_slot);
     }
@@ -972,7 +982,7 @@ impl Bridge {
 
     /// Map a PCI address of slot `slot` to the XIO address it reaches and the
     /// placement of its bytes. `None`: not memory this Bridge reaches.
-    fn translate(&self, st: &State, slot: usize, addr: u64) -> Option<(u64, Placement)> {
+    fn translate(&self, st: &State, slot: usize, addr: u64) -> Option<(u64, Placement, u8)> {
         let dev = st.r(reg::device(slot as u32));
         let wide = st.dma_64bit >> slot & 1 != 0;
         let placement_for = |swap_bit: u32| match (dev & swap_bit != 0, wide) {
@@ -990,7 +1000,7 @@ impl Bridge {
                 log::debug!("bridge: 64-bit DMA names widget 0, which the crossbar cannot answer");
                 return None;
             }
-            return (widget == WIDGET_HEART).then_some((addr & ((1 << 48) - 1), placement_for(DEV_SWAP_DIRECT)));
+            return Some((addr & ((1 << 48) - 1), placement_for(DEV_SWAP_DIRECT), widget));
         }
         let addr = addr as u32;
         // Local space never crosses the swapper.
@@ -1009,7 +1019,10 @@ impl Bridge {
                 offset += DIRECT_512MB;
             }
             let widget = ((direct & DIRECT_WIDGET) >> DIRECT_WIDGET_SHIFT) as u8;
-            return (widget == WIDGET_HEART).then_some((offset, placement));
+            if widget == 0 {
+                return None;
+            }
+            return Some((offset, placement, widget));
         }
         // Through the table; the index is the page number in the window.
         let index = ((addr - PCI_TRANSLATED) >> page_shift) as usize;
@@ -1024,7 +1037,7 @@ impl Bridge {
             return None;
         }
         let widget = ((ate >> ATE_TARGET_WIDGET_SHIFT) & 0xf) as u8;
-        (widget == WIDGET_HEART).then_some((((ate & ATE_ADDRESS) & !page_mask) | (addr as u64 & page_mask), placement))
+        (widget != 0).then_some((((ate & ATE_ADDRESS) & !page_mask) | (addr as u64 & page_mask), placement, widget))
     }
 
     /// A function's transfer, split at 4 KB boundaries (the smallest
@@ -1045,23 +1058,33 @@ impl Bridge {
                 st.dma_device = slot as u32;
                 self.translate(&st, slot, a)
             };
-            let good = match (&mut buf, target) {
-                (DmaBuf::Read(b), Some((xio, p))) => self.placed_read(xio, p, &mut b[done..done + step]),
-                (DmaBuf::Write(b), Some((xio, p))) => self.placed_write(xio, p, &b[done..done + step]),
-                (DmaBuf::Read(b), None) => {
-                    b[done..done + step].fill(0);
+            // Only HEART is memory. The Crossbow drops a request to a widget
+            // it has no live link to (1 to 7 are illegal, 15 is this Bridge's
+            // own port), and the Bridge's request timer reports a dropped
+            // read. A refused translation, or a read that reaches HEART and
+            // finds no memory, is a silent master abort.
+            let mut dropped = false;
+            let good = match target {
+                None => false,
+                Some((_, _, w)) if w != WIDGET_HEART => {
+                    // Approximation: QEMU routes peer DMA to a fitted widget;
+                    // no supported Octane guest is known to need it.
+                    dropped = w == WIDGET_BRIDGE || !(self.link_alive.read().unwrap())(w);
                     false
                 }
-                (DmaBuf::Write(_), None) => false,
+                Some((xio, p, _)) => match &mut buf {
+                    DmaBuf::Read(b) => self.placed_read(xio, p, &mut b[done..done + step]),
+                    DmaBuf::Write(b) => self.placed_write(xio, p, &b[done..done + step]),
+                },
             };
             if !good {
                 ok = false;
-                // A read that translated but that the crossbar dropped: the
-                // chip's request timer expires at once. A translation that
-                // fails is refused before anything is sent and times nothing.
-                if matches!(buf, DmaBuf::Read(_)) && target.is_some() {
-                    let mut st = self.st.lock().unwrap();
-                    self.read_timeout(&mut st);
+                if let DmaBuf::Read(b) = &mut buf {
+                    b[done..done + step].fill(0);
+                    if dropped {
+                        let mut st = self.st.lock().unwrap();
+                        self.read_timeout(&mut st);
+                    }
                 }
             }
             done += step;
