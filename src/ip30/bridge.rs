@@ -550,6 +550,16 @@ impl Bridge {
         st.pin_level = st.pci_pin_level | st.gpio_pin_level;
     }
 
+    /// The machine's reset reaching the PCI side: RST# returns every
+    /// function's configuration header to power-up, so none decodes until
+    /// firmware assigns its BARs again. The functions' own state is theirs
+    /// to reset.
+    pub fn reset_pci(&self) {
+        for d in self.slots.read().unwrap().iter().flatten() {
+            d.config().reset();
+        }
+    }
+
     /// The Crossbow's link reset arriving. IRIX saves the control and link
     /// configuration registers around it and rebuilds the rest, so the whole
     /// core is taken as lost: registers, translation entries and latched

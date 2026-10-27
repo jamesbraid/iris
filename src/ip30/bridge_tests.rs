@@ -781,6 +781,30 @@ fn a_link_reset_loses_the_core_but_not_the_lines() {
     assert_eq!(r.cfg_read(2, 0, 2), CARD_VENDOR);
 }
 
+/// The machine's reset clears every function's header. A BAR left from the
+/// last boot would otherwise claim the address firmware hands another
+/// function first: the stock PROM gives IOC3 the address the previous boot
+/// gave the second SCSI controller, which then answered its diagnostic.
+#[test]
+fn a_pci_reset_forgets_the_bars_firmware_assigned() {
+    let r = Rig::new();
+    let stale = r.card(1, PCI_INTA);
+    let c = r.card(2, PCI_INTA);
+    r.reset();
+    r.bridge.reset_pci();
+    assert_eq!(r.cfg_read(1, 0x14, 4), 0, "BAR forgotten");
+    assert_eq!(r.cfg_read(1, 0x04, 2), 0, "decoding off");
+    assert_eq!(r.cfg_read(1, 0x10, 4), 1, "an I/O BAR keeps its type bit");
+    assert_eq!(r.cfg_read(1, 0, 2), CARD_VENDOR);
+    // Firmware assigns slot 2 alone the address both used to have.
+    r.cfg_write(2, 0x14, 4, 0x1300_0000);
+    r.cfg_write(2, 0x04, 2, PCI_COMMAND_MEMORY);
+    r.set(reg::device(2), DEV_MEMORY_SPACE | 0x130);
+    assert_eq!(r.bridge.write32(u64::from(Rig::win(2) + SCRATCH), 0x0102_0304), BUS_OK);
+    assert_eq!(c.peek32(SCRATCH as usize), 0x0102_0304);
+    assert_eq!(stale.peek32(SCRATCH as usize), 0);
+}
+
 /// HEART takes an interrupt packet only at its offset 0x80, for one of its
 /// 64 bits; a packet anywhere else is dropped.
 #[test]

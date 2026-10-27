@@ -55,6 +55,8 @@ pub enum Space {
 pub struct PciConfig {
     regs: Mutex<[u32; 64]>,
     bars: [Bar; 6],
+    /// The registers as the function powers up, for [`PciConfig::reset`].
+    power_on: [u32; 64],
 }
 
 impl PciConfig {
@@ -71,7 +73,14 @@ impl PciConfig {
                 r[4 + i] = 1;
             }
         }
-        Self { regs: Mutex::new(r), bars }
+        Self { regs: Mutex::new(r), bars, power_on: r }
+    }
+
+    /// RST#: back to the power-up header. The command register clears, so
+    /// the function stops decoding, and the BARs and line forget what
+    /// firmware assigned.
+    pub fn reset(&self) {
+        *self.regs.lock().unwrap() = self.power_on;
     }
 
     /// Register `reg` (a dword index, 0..64).
@@ -276,6 +285,20 @@ mod tests {
         assert_eq!(c.decode(Space::Mem, 0x8000_1084), Some((1, 0x84)));
         assert_eq!(c.decode(Space::Mem, 0x8000_2000), None, "past the end of the BAR");
         assert_eq!(c.decode(Space::Io, 0x8000_1084), None, "and not in I/O space");
+    }
+
+    #[test]
+    fn reset_returns_the_header_to_power_up() {
+        let c = scsi_like();
+        let fresh: Vec<u32> = (0..64).map(|i| c.read(i)).collect();
+        c.write(1, PCI_COMMAND_MEMORY | PCI_COMMAND_IO);
+        c.write(4, 0x0000_1000);
+        c.write(5, 0x8000_1000);
+        c.write(15, 0x0000_0009);
+        c.reset();
+        assert_eq!((0..64).map(|i| c.read(i)).collect::<Vec<_>>(), fresh);
+        assert_eq!(c.decode(Space::Mem, 0x8000_1000), None);
+        assert_eq!(c.interrupt_pin(), PCI_INTA, "the pin is wiring, not state");
     }
 
     #[test]
