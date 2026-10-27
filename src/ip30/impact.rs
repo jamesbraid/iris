@@ -16,22 +16,24 @@
 //! |---------------------|-----------------------------------|------------------------------|
 //! | `0x000000-0x00003F` | widget identity, control, error interrupt destination | here    |
 //! | `0x011000-0x01109F` | context word, interrupt pending, ack, enables, vectors, NIC | here |
-//! | `0x020000-0x020200` | status, FIFO status, HQ flags, bus and DMA status | HQ3 `0x70000-0x70104` |
+//! | `0x020000-0x020200` | status, HQ flags, bus and DMA status | HQ3 `0x70000-0x70104` |
+//! | `0x020008`          | FIFO status                       | here (reads empty)           |
 //! | `0x020400`          | normal command FIFO               | HQ3 user command FIFO        |
 //! | `0x028000/4`        | GE readback                       | HQ3 `0x70010/4`              |
 //! | `0x02C000-0x02FFFF` | raster registers, execute alias   | HQ3 `0x7C000-0x7FFFF`        |
 //! | `0x040000-0x040030` | FIFO thresholds                   | here; the marks to HQ3 `0x50020/4` |
 //! | `0x050000-0x054FFF` | HQ microcode RAM                  | HQ3 `0x40000`                |
-//! | `0x058040-0x058230` | GE11 program download and readback | here                        |
+//! | `0x058040-0x05804F` | GE11 program download             | here                         |
+//! | `0x05822C-0x058233` | GE11 program readback             | here                         |
 //! | `0x070000-0x077FFF` | display control bus               | HQ3 `0x60000` (I2C here)     |
 //! | `0x120400`          | context image, then command words | HQ3 user command FIFO        |
 //! | `0x130400`          | DMA mapping port (class `0x48`)   | HQ3 privileged command FIFO  |
 //! | `0x130500`          | context-switch selection          | HQ3 context switch           |
 //!
 //! The register map, the handshake, the interrupt sources and the page-list
-//! layout follow our HQ4 contract (origami `docs/datasheets/mgras-hq4.md`)
-//! and its QEMU model, approximations included; the comments below repeat
-//! them where they apply.
+//! layout are what IRIX 6.5.30 drives on the Octane. Where the board's own
+//! behaviour behind them is unknown, the comments below say which choice
+//! is an approximation.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicU64;
@@ -74,8 +76,8 @@ pub struct ImpactBoard {
 }
 
 /// Solid IMPACT, the one board the raster model behind this front is built
-/// as. Its values are inferred from a captured SI with texture, with the
-/// TRAM taken away: nobody has captured a textureless board.
+/// as. Its values are inferred from an SI with texture, with the TRAM
+/// taken away: no textureless board's values are on record.
 pub const SOLID_IMPACT: ImpactBoard = ImpactBoard {
     name: "SI",
     version1: 0x45,
@@ -90,9 +92,9 @@ pub const SOLID_IMPACT: ImpactBoard = ImpactBoard {
     record_revision: "U",
 };
 
-/// The serial-number chip's ROM serial and the record's barcode: the marked
-/// synthetic serial our QEMU model gives an IMPACT board's record ("QEMU",
-/// letter G, instance 0), so nothing mistakes it for a real board's.
+/// The serial-number chip's ROM serial and the record's barcode: a marked
+/// synthetic serial (its top bytes spell "QEMU", then letter G and
+/// instance 0), so nothing mistakes it for a real board's.
 const RECORD_SERIAL: u64 = 0x5145_4D55_4700;
 const RECORD_BARCODE: &str = "EMUG00";
 
@@ -161,7 +163,6 @@ mod hq3 {
     pub const CFIFO_LOW_MARK: u32 = 0x50024;
     pub const DCB: u32 = 0x60000;
     pub const STATUS: u32 = 0x70000;
-    pub const FIFOSTATUS: u32 = 0x70004;
     pub const SET_FLAGS: u32 = 0x70008;
     pub const CLEAR_FLAGS: u32 = 0x7000C;
     pub const GE_READBACK_HI: u32 = 0x70010;
@@ -170,8 +171,6 @@ mod hq3 {
     pub const GIOSTATUS: u32 = 0x70100;
     pub const DMABUSY: u32 = 0x70104;
     pub const RASTER: u32 = 0x7C000;
-    /// Interrupt enable of the command FIFO's low-water condition.
-    pub const INTR_CFIFO_LOW: u32 = 1 << 27;
     /// HQ3 flags the model uses for its own bookkeeping: the swap reached
     /// (10) and the two context-switch phases (19 and 6). The HQ4 reports
     /// the swap as a pending source instead and has its own switch
@@ -257,7 +256,6 @@ fn route(off: u32) -> Route {
     }
     match off {
         hq4::STATUS => Board(hq3::STATUS),
-        hq4::FIFOSTATUS => Board(hq3::FIFOSTATUS),
         hq4::FLAGS_SET => Board(hq3::SET_FLAGS),
         hq4::FLAGS_CLEAR => Board(hq3::CLEAR_FLAGS),
         hq4::GIOSTATUS => Board(hq3::GIOSTATUS),
@@ -312,12 +310,13 @@ impl BusDevice for XioBus {
 
 /// The HQ4 state this front keeps. Plain values under one lock, which is
 /// never held while calling into `Mgras` (its interrupt lines come back
-/// here) or into HEART.
+/// here). Interrupt packets go to HEART with it held, so they leave in the
+/// order they were decided; HEART must not call back into the board.
 #[derive(Default)]
 struct Hq4 {
     control: u32,
-    /// The widget-error interrupt destination. Stored only: nothing in the
-    /// model raises a widget error.
+    /// The widget-error interrupt destination. Stored only: this port
+    /// raises no widget errors.
     int_dest: [u32; 2],
     context_word: u32,
     context_word_written: bool,
@@ -338,17 +337,13 @@ struct Hq4 {
     ge: GeUpload,
     nic_control: u32,
     /// The context-switch handshake: the selection taken, the image being
-    /// written (1) or done (3), the two acknowledgements, image words so
+    /// written (1) or done (3), the first acknowledgement, image words so
     /// far, and whether a switch has completed since reset.
     entry_selected: bool,
     protocol: u8,
     first_ack: bool,
-    second_ack: bool,
     context_words: u32,
     ready: bool,
-    /// The command FIFO is below its low-water mark: the HQ3 model's FIFO
-    /// line, whose low-water enable follows ours.
-    fifo_low: bool,
     lowater_asserted: bool,
     general_asserted: bool,
     no_dest_logged: bool,
@@ -377,9 +372,9 @@ impl Hq4 {
         }
     }
 
-    /// Send a packet for each interrupt that changed, one a transition, as
-    /// our QEMU model does. The general interrupt stays raised while any
-    /// enabled source is pending, since its handler serves one at a time.
+    /// Send a packet for each interrupt that changed, one a transition. The
+    /// general interrupt stays raised while any enabled source is pending,
+    /// since its handler serves one at a time.
     fn update(&mut self, out: &mut Vec<(u8, bool)>) {
         let lowater = self.pending & pending::LOWATER != 0;
         let general = self.pending & self.enable & pending::GENERAL != 0;
@@ -392,24 +387,15 @@ impl Hq4 {
             self.send(self.vector(8), general, out);
         }
     }
-
-    /// The low-water source follows the FIFO line while its second-level
-    /// enable is set.
-    fn refresh_lowater(&mut self) {
-        if self.fifo_low && self.hq_enable & HQ_ENABLE_LOWATER != 0 {
-            self.pending |= pending::LOWATER;
-        } else {
-            self.pending &= !pending::LOWATER;
-        }
-    }
 }
 
 /// GE11 program download ports (`0x058040-0x05804C`) and readback ports
-/// (`0x05822C`, `0x058230`), as our QEMU model has them. The kernel loads
+/// (`0x05822C`, `0x058230`). The kernel loads
 /// GE 0 through slot B's ports and GE 1 through slot A's. The words are
-/// kept without interpretation; the HQ3 model's GE11 diagnostic port reads
-/// the same download back in another order, which the IP28 kernel expects
-/// and the Octane's need not, so this path keeps its own copy.
+/// kept without interpretation, and the readback order below is an
+/// approximation fitted to the Octane kernel's verifier. The HQ3 model's
+/// GE11 diagnostic port reads a download back in the order the IP28 kernel
+/// expects, so this path keeps its own copy.
 mod ge {
     pub const DATA_B: u32 = 0x058040;
     pub const CTRL_B: u32 = 0x058044;
@@ -514,10 +500,8 @@ impl InterruptController for Lines {
         {
             let mut s = self.0.hq4.lock();
             match line {
-                0 => {
-                    s.fifo_low = level;
-                    s.refresh_lowater();
-                }
+                // The FIFO line is not used: the low-water source follows
+                // its enable (see `HQ_ENABLE`).
                 // The general line carries only the swap: `ImpactXio::new`
                 // enables nothing else there. The HQ4 latches it until the
                 // handler acknowledges it.
@@ -533,8 +517,8 @@ impl InterruptController for Lines {
                 _ => {}
             }
             s.update(&mut out);
+            self.0.deliver(out);
         }
-        self.0.deliver(out);
     }
 }
 
@@ -592,7 +576,7 @@ impl ImpactXio {
         );
         mgras.set_phys(Arc::new(XioBus(mem)));
         // The Octane X server arms a pixel read with XFRCONTROL 8 and kicks
-        // the DMA last; our QEMU model reads at the kick.
+        // the DMA last, which starts the read.
         mgras.start_reads_at_kick();
         let me = Arc::new(Self { base: widget_small_base(widget) as u64, board, shared, mgras });
         // The swap reaching the HQ is the one HQ3 flag the general line
@@ -624,6 +608,14 @@ impl ImpactXio {
     /// routing and the context-switch handshake. The raster pipeline keeps
     /// its state, as `Mgras` has no reset of its own.
     pub fn reset(&self) {
+        // The HQ3 model's side of the interrupt lines first: its flags and
+        // enables back to what `new` set, and the FIFO marks cleared. The
+        // lines' callbacks here only lower levels, which change nothing.
+        self.board_write(32, hq3::CLEAR_FLAGS, hq3::FLAGS_INTERNAL as u64);
+        self.board_write(32, hq3::INTERRUPT_ENABLE_CLEAR, u32::MAX as u64);
+        self.board_write(32, hq3::INTERRUPT_ENABLE_SET, hq3::FLAG_CP0 as u64);
+        self.board_write(32, hq3::CFIFO_HIGH_MARK, 0);
+        self.board_write(32, hq3::CFIFO_LOW_MARK, 0);
         *self.shared.hq4.lock() = Hq4::default();
         *self.shared.nic.lock() = nic_bus(&self.board);
     }
@@ -703,6 +695,12 @@ impl ImpactXio {
             hq4::VECTORS => s.vectors,
             hq4::NIC => s.nic_control,
             hq4::RETRACE_STATUS_1 | hq4::RETRACE_STATUS_2 => 0,
+            // FIFO occupancy reads zero: the port takes every word as it
+            // arrives, into the HQ3 model's deep queue. An approximation;
+            // the board's real occupancy while it works is unknown. The
+            // drivers' waits for the pipe still wait, on the idle bits of
+            // `0x020000`.
+            hq4::FIFOSTATUS => 0,
             ge::READ_1 | ge::READ_2 => {
                 drop(s);
                 return (BUS_OK, self.shared.hq4.lock().ge.read(off == ge::READ_2) as u64);
@@ -715,7 +713,7 @@ impl ImpactXio {
                 }
                 return (BUS_OK, v & !0xF0 | (b.re4_revision as u64 & 0xF) << 4);
             }
-            // No kernel routine reads this; our QEMU model answers so.
+            // No kernel routine reads this; the value is an approximation.
             hq4::COMMAND => if s.ready { 0xF400 } else { 0 },
             hq4::MAPPING => return (BUS_OK, if bits == 64 { s.mapping } else { s.mapping as u32 as u64 }),
             hq4::SELECT => s.entry,
@@ -822,9 +820,6 @@ impl ImpactXio {
                     if v & pending::FLAGS != 0 {
                         s.first_ack = true;
                     }
-                    if v & pending::CONTEXT != 0 {
-                        s.second_ack = true;
-                    }
                     if v & pending::SWAP != 0 {
                         // The swap the HQ3 model reported is served.
                         board.push((hq3::CLEAR_FLAGS, hq3::FLAG_CP0));
@@ -841,23 +836,25 @@ impl ImpactXio {
                     s.enable &= !v;
                     s.update(&mut out);
                 }
-                hq4::HQ_ENABLE | hq4::HQ_ENABLE_CLEAR => {
-                    let was = s.hq_enable & HQ_ENABLE_LOWATER;
+                // The low-water source rises as the enable does: the FIFO
+                // reads empty (`FIFOSTATUS`), so it is always below any mark.
+                // An approximation, as is taking `0x011058`, inferred as the
+                // second-level clear, to clear both the source and the
+                // enable bits written.
+                hq4::HQ_ENABLE => {
                     s.plain.insert(off, v);
-                    if off == hq4::HQ_ENABLE {
-                        s.hq_enable = v;
-                    } else {
-                        // Inferred as the second-level clear.
-                        s.hq_enable &= !v;
+                    if v & !s.hq_enable & HQ_ENABLE_LOWATER != 0 {
+                        s.pending |= pending::LOWATER;
                     }
-                    let now = s.hq_enable & HQ_ENABLE_LOWATER;
-                    if now != was {
-                        // The HQ3 model's FIFO line watches the low-water
-                        // mark only while its own enable is set.
-                        let o = if now != 0 { hq3::INTERRUPT_ENABLE_SET } else { hq3::INTERRUPT_ENABLE_CLEAR };
-                        board.push((o, hq3::INTR_CFIFO_LOW));
+                    s.hq_enable = v;
+                    s.update(&mut out);
+                }
+                hq4::HQ_ENABLE_CLEAR => {
+                    s.plain.insert(off, v);
+                    if v & s.hq_enable & HQ_ENABLE_LOWATER != 0 {
+                        s.pending &= !pending::LOWATER;
                     }
-                    s.refresh_lowater();
+                    s.hq_enable &= !v;
                     s.update(&mut out);
                 }
                 hq4::VECTOR_DEST_UPPER => s.vector_dest[0] = v,
@@ -890,8 +887,8 @@ impl ImpactXio {
                     return BUS_OK;
                 }
             }
+            self.shared.deliver(out);
         }
-        self.shared.deliver(out);
         for (o, v) in board {
             // None of these registers holds a store back.
             self.board_write(32, o, v as u64);
@@ -920,12 +917,11 @@ impl ImpactXio {
             s.entry_selected = true;
             s.protocol = 1;
             s.first_ack = false;
-            s.second_ack = false;
             s.context_words = 0;
             s.pending |= pending::FLAGS;
             s.update(&mut out);
+            self.shared.deliver(out);
         }
-        self.shared.deliver(out);
         BUS_OK
     }
 
@@ -965,8 +961,8 @@ impl ImpactXio {
                         s.pending |= pending::CONTEXT;
                         s.update(&mut out);
                     }
+                    self.shared.deliver(out);
                 }
-                self.shared.deliver(out);
                 BUS_OK
             }
             Phase::Ignore => BUS_OK,
@@ -1001,8 +997,8 @@ impl BusDevice for ImpactXio {
     fn write64(&self, addr: u64, val: u64) -> u32 { self.write(addr, 64, val) }
 }
 
-/// Ported from our QEMU qtest `octane-mgras-test.c`, as far as one board
-/// on its own reaches: identity, widths and holes, reset, DMA through HEART
+/// Register-contract tests for the Octane board, as far as one board on
+/// its own reaches: identity, widths and holes, reset, DMA through HEART
 /// memory and interrupt transport. The rest go through the raster model
 /// with the Indigo2 tests' register setups.
 #[cfg(test)]
@@ -1396,22 +1392,100 @@ mod tests {
         }
     }
 
-    /// The kernel's FIFO flush arms the low-water interrupt (mark 1, the
-    /// second-level enable) and sleeps; an idle board wakes it at once.
+    /// The kernel's FIFO flush with the pipe still busy: words queued that
+    /// the engines have not taken. The FIFO reads empty, and arming the
+    /// low-water interrupt (mark 1, then the second-level enable) raises it
+    /// at once, so the flush's wait ends.
     #[test]
-    fn low_water_follows_the_fifo() {
+    fn low_water_rises_with_its_enable() {
         let r = rig();
+        r.b.mgras().stop_engines();
+        for i in 0..8u64 {
+            r.w64(0x020400, (0x60001u64 | 0x176 << 6) << 34 | i);
+        }
+        assert_eq!(r.r32(0x020008) & 0xFF, 0);
         r.w32(0x011060, 8 << 24);
         r.w32(0x011068, 0x80);
         r.w32(0x011070, 5);
+        r.w32(0x011058, 0xFFFF_FFEF);
         r.w32(0x040008, 1);
+        assert_eq!(r.packets(), []);
         r.w32(0x011050, 0x10);
         assert_eq!(r.packets(), [(5, true)]);
         assert_eq!(r.r32(0x011020) & 4, 4);
+        // An enable already set raises nothing new.
+        r.w32(0x011050, 0x10);
+        assert_eq!(r.packets(), []);
+        // The handler's acknowledgement lowers it; the clear port takes the
+        // enable away.
+        r.w32(0x011028, 4);
+        assert_eq!(r.packets(), [(5, false)]);
+        r.w32(0x011058, 0x10);
+        assert_eq!(r.r32(0x011050), 0);
+        // Re-armed, it rises again; the clear port with the bit lowers it.
+        r.w32(0x011050, 0x10);
+        assert_eq!(r.packets(), [(5, true)]);
         r.w32(0x011058, 0x10);
         assert_eq!(r.packets(), [(5, false)]);
         assert_eq!(r.r32(0x011020) & 4, 0);
-        assert_eq!(r.r32(0x011050), 0);
+    }
+
+    /// The swap source raised on an engine thread while the CPU acknowledges
+    /// it: HEART must see its packets in the order they were decided, so its
+    /// level ends where the board's is and sets and clears alternate.
+    #[test]
+    fn swap_packets_keep_their_order_across_threads() {
+        let r = rig();
+        r.w32(0x011060, 8 << 24);
+        r.w32(0x011068, 0x80);
+        r.w32(0x011070, 18 << 8);
+        r.w32(0x011040, 0x400);
+        let lines = Lines(r.b.shared.clone());
+        std::thread::scope(|sc| {
+            sc.spawn(|| {
+                for _ in 0..200_000 {
+                    lines.set_line(1, true);
+                }
+            });
+            for _ in 0..200_000 {
+                r.w32(0x011028, 0x400);
+            }
+        });
+        let got = r.packets();
+        assert!(got.iter().all(|&(v, _)| v == 18));
+        for w in got.windows(2) {
+            assert_ne!(w[0].1, w[1].1, "two packets of one kind in a row");
+        }
+        let heart = got.last().is_some_and(|p| p.1);
+        let s = r.b.shared.hq4.lock();
+        assert_eq!(heart, s.general_asserted);
+        assert_eq!(heart, s.pending & 0x400 != 0);
+    }
+
+    /// A reset leaves no swap latched on the HQ3 model's side: an unserved
+    /// swap before it must not keep the next one from being reported.
+    #[test]
+    fn reset_rearms_the_swap_source() {
+        let r = rig();
+        for round in 0..2 {
+            r.enter_context();
+            r.w32(0x011060, 8 << 24);
+            r.w32(0x011068, 0x80);
+            r.w32(0x011070, 18 << 8);
+            r.w32(0x011040, 0x400);
+            r.w32(COMMAND, 0x37 << 8); // SCHEDULE_SWAP
+            let mut got = Vec::new();
+            for _ in 0..1_000_000 {
+                got = r.packets();
+                if !got.is_empty() {
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            assert_eq!(got, [(18, true)], "round {round}");
+            // Not acknowledged: the board is reset instead.
+            r.b.reset();
+        }
     }
 
     #[test]
@@ -1432,7 +1506,7 @@ mod tests {
 
     /// The kernel's GE11 program download and its verification readback:
     /// slot B (GE 0) takes the words in order, and the two readback ports
-    /// return them in pairs, as our QEMU model does.
+    /// return them in pairs.
     #[test]
     fn ge_program_reads_back_in_pairs() {
         let r = rig();
@@ -1507,7 +1581,7 @@ mod tests {
     #[test]
     fn routes() {
         assert_eq!(route(0x020000), Route::Board(0x70000));
-        assert_eq!(route(0x020008), Route::Board(0x70004));
+        assert_eq!(route(0x020008), Route::Local);
         assert_eq!(route(0x020400), Route::Board(0x70080));
         assert_eq!(route(0x02C1C4), Route::Board(0x7C1C4));
         assert_eq!(route(0x02D1C0), Route::Board(0x7D1C0));
