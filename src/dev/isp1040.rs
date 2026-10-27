@@ -1,5 +1,9 @@
 //! QLogic ISP1040 SCSI host adapter, emulated above its RISC.
 //!
+//! Ported from hw/scsi/qlogic-isp.c in
+//! https://github.com/jamesbraid/qemu-sgi-origami (sgi-origami branch),
+//! BSD-3-Clause.
+//!
 //! The driver hands whole SCSI commands to a request ring in host memory and
 //! collects completions from a response ring. Everything else is a mailbox
 //! protocol of sixteen-bit registers. The microcode a driver downloads is

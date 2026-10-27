@@ -3,6 +3,11 @@
 //! the guest program them, to catch byte-order and wiring mistakes that each
 //! device's own tests cannot see.
 //!
+//! Ported from tests/qtest/octane-test.c and
+//! tests/qtest/sgi-bridge-bus-test.c in
+//! https://github.com/jamesbraid/qemu-sgi-origami (sgi-origami branch),
+//! BSD-3-Clause.
+//!
 //! The processor's accesses go straight to the Bridge's small window (offsets
 //! as in physical 0x1f00_0000 + offset); a function's DMA goes through the
 //! Bridge into HEART's RAM at physical 0x2000_0000. Expected bytes come from

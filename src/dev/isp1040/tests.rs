@@ -1,6 +1,10 @@
 //! Register-contract and ring tests, for the ISP1040's register
 //! and ring contract. Host memory is a flat byte array behind a fake `PciDma`; the disk
 //! is a small raw image.
+//!
+//! Ported from tests/qtest/qlogic-isp-test.c in
+//! https://github.com/jamesbraid/qemu-sgi-origami (sgi-origami branch),
+//! BSD-3-Clause.
 
 use super::*;
 use crate::irq::LevelProbe;

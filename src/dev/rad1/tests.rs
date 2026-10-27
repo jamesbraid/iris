@@ -1,3 +1,6 @@
+//! RAD1 register tests, ported from the RAD tests in tests/qtest/octane-test.c in
+//! https://github.com/jamesbraid/qemu-sgi-origami (sgi-origami branch), BSD-3-Clause.
+
 use super::*;
 use std::sync::{Arc, Mutex};
 

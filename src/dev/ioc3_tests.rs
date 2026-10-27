@@ -1,5 +1,10 @@
 //! IOC3 register-contract tests.
 //!
+//! Ported from the IOC3 qtests (tests/qtest/octane-test.c, sn0-ioc3-test.c,
+//! sn0-ioc3-serial-test.c, sn0-ioc3-parallel-test.c) in
+//! https://github.com/jamesbraid/qemu-sgi-origami (sgi-origami branch),
+//! BSD-3-Clause.
+//!
 //! Accesses go through `PciBusDevice` the way a host bridge makes them: a
 //! 32-bit access at its offset, a byte access at `offset ^ 3`.
 

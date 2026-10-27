@@ -252,6 +252,14 @@ IRIS links `libchdman-rs` (>= 0.288.8), which — along with the MAME CHD core
 it vendors — is also BSD 3-Clause, so the whole binary stays BSD 3-Clause. See `LICENSE-libchdman-rs.txt` for that third-party
 notice.
 
+The Octane (IP30) device models (`src/ip30/`, and `ioc3`, `ioc3_eth`,
+`isp1040` and `rad1` in `src/dev/`) are ports of James Braid's
+[Origami](https://github.com/jamesbraid/origami) project's models from its
+QEMU `sgi-origami` branch
+(<https://github.com/jamesbraid/qemu-sgi-origami>), BSD 3-Clause, by the same
+author. The Octane's boot flash (`src/ip30/flash.rs`) derives from MAME's
+`intelfsh.cpp`, BSD 3-Clause, by Aaron Giles.
+
 ## Whodunnit?
 
 Dominik Behr and contributors

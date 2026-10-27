@@ -1,5 +1,10 @@
 //! SGI IOC3 base I/O controller, as the Octane (IP30) fits it.
 //!
+//! Ported from hw/misc/sgi-ioc3.c, hw/char/sgi-ioc-serial-dma.c,
+//! hw/char/sgi-ioc3-parallel.c and hw/input/sgi-ioc3-kbc.c in
+//! https://github.com/jamesbraid/qemu-sgi-origami (sgi-origami branch),
+//! BSD-3-Clause.
+//!
 //! One PCI function with one 1 MiB memory BAR. Behind it: two 16550 serial
 //! ports with a ring-DMA engine each, a PS/2 keyboard and mouse controller,
 //! a parallel port, a MicroLAN (one-wire) master, the GPIO pins, a DS1685

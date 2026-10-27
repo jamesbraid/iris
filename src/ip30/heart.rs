@@ -4,6 +4,11 @@
 //! processor module's ID part, and the XIO widget (widget 8) that the
 //! Crossbow's other widgets reach memory and interrupts through.
 //!
+//! Ported from hw/misc/sgi-heart.c (with tests from
+//! tests/qtest/sgi-heart-test.c) in
+//! https://github.com/jamesbraid/qemu-sgi-origami (sgi-origami branch),
+//! BSD-3-Clause.
+//!
 //! It is a functional model rather than a register-exact HEART: accesses it
 //! does not support are recorded (see [`Heart::unsupported`]) and the guest
 //! sees a fixed answer. Each approximation is said where it lives.

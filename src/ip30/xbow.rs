@@ -1,6 +1,10 @@
 //! Crossbow, the Octane's XIO crossbar: widget 0's registers, and which of
 //! the eight links (widgets 8 to 15) are present and carrying traffic.
 //!
+//! Ported from hw/misc/sgi-xbow.c in
+//! https://github.com/jamesbraid/qemu-sgi-origami (sgi-origami branch),
+//! BSD-3-Clause.
+//!
 //! Cut to what the Octane uses; registers follow the Crossbow ASIC
 //! specification, revision 12.0 (`docs/Octane/`). The switch
 //! translates no address: the machine routes a processor access by widget

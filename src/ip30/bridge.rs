@@ -1,5 +1,9 @@
 //! The Octane's onboard Bridge: the XIO-to-PCI host bridge at widget 0xf.
 //!
+//! Ported from hw/pci-host/sgi-bridge.c in
+//! https://github.com/jamesbraid/qemu-sgi-origami (sgi-origami branch),
+//! BSD-3-Clause.
+//!
 //! One side is an ordinary XIO widget whose 16 MB small window holds the
 //! common widget registers, the translation table, PCI configuration space,
 //! eight device windows onto PCI and the 4 MB boot-flash aperture. The other

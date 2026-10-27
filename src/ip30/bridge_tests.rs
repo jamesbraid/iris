@@ -3,6 +3,10 @@
 //! space with narrow accesses, an empty slot, one register reached through
 //! both BARs, the programmed byte lanes of a device window, and a function's
 //! DMA reaching memory through the direct map and the translation table.
+//!
+//! Ported from tests/qtest/sgi-bridge-bus-test.c in
+//! https://github.com/jamesbraid/qemu-sgi-origami (sgi-origami branch),
+//! BSD-3-Clause.
 
 use super::*;
 use crate::irq::IrqLine;

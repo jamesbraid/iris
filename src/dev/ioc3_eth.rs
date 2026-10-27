@@ -1,6 +1,10 @@
 //! The Ethernet MAC inside IOC3, with the ICS1890 transceiver the Octane
 //! carries on its management bus.
 //!
+//! Ported from hw/net/sgi-ioc3-eth.c and hw/net/ics1890.c in
+//! https://github.com/jamesbraid/qemu-sgi-origami (sgi-origami branch),
+//! BSD-3-Clause.
+//!
 //! IOC3 forwards the register offsets 0xf0..=0x150 of its register BAR here
 //! through [`Ioc3EthPort`]. The MAC is SGI's own design with no vendor
 //! document, so what it does is the contract the public drivers (Linux and

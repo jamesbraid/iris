@@ -1,6 +1,10 @@
 //! The Octane (IP30) as a machine: an R10000 on HEART, the Crossbow, and
 //! the widgets behind it, with iris's CPU thread, monitor and front ends.
 //!
+//! Ported from hw/mips/sgi/octane.c in
+//! https://github.com/jamesbraid/qemu-sgi-origami (sgi-origami branch),
+//! BSD-3-Clause.
+//!
 //! Selected with `[machine] profile = "octane_ip30"`; the shared keys
 //! configure it (`prom`, `banks`, `[scsi.N]`, `[network]`, the serial
 //! ports) and `[octane]` holds what only an Octane has. See

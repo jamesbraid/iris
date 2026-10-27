@@ -1,6 +1,10 @@
 //! SGI Octane onboard RAD audio (PCI 10a9:0005, revision 0xc0) on Bridge
 //! slot 3.
 //!
+//! Ported from hw/audio/sgi-rad1-audio.c in
+//! https://github.com/jamesbraid/qemu-sgi-origami (sgi-origami branch),
+//! BSD-3-Clause.
+//!
 //! This is the Octane variant of our RAD1 model: the register file the
 //! driver's start-up programs, the free-running UST counter and its control
 //! word, the DMA descriptor words, status-DMA control and the analog output

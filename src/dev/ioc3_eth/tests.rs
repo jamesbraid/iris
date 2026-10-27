@@ -1,6 +1,10 @@
 //! Register-contract tests for the IOC3 Ethernet, ported from the QEMU
 //! model's qtests: a fake bus-master memory, a fake backend queue pair and an
 //! interrupt log stand in for the rest of the machine.
+//!
+//! Ported from tests/qtest/sgi-ioc3-eth-test.c and tests/qtest/ics1890-test.c
+//! in https://github.com/jamesbraid/qemu-sgi-origami (sgi-origami branch),
+//! BSD-3-Clause.
 
 use super::*;
 use std::sync::Mutex;
