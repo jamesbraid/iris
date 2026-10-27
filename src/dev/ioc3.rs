@@ -2520,6 +2520,12 @@ struct Shared {
     line_order: Mutex<()>,
     /// A PS/2 character arrived while an access held the chip.
     kbc_dirty: AtomicBool,
+    /// The machine is stopped: the service thread does nothing.
+    paused: AtomicBool,
+    /// The chip is being dropped: the service thread ends.
+    quit: AtomicBool,
+    /// Held across each service pass, so a pause can wait one out.
+    service_pass: Mutex<()>,
 }
 
 impl Shared {
@@ -2649,6 +2655,8 @@ impl Shared {
 /// The IOC3 PCI function.
 pub struct Ioc3 {
     sh: Arc<Shared>,
+    /// The service thread, joined on drop.
+    service_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl Ioc3 {
@@ -2682,9 +2690,12 @@ impl Ioc3 {
                 eth_level: AtomicBool::new(false),
                 line_order: Mutex::new(()),
                 kbc_dirty: AtomicBool::new(false),
+                paused: AtomicBool::new(false),
+                quit: AtomicBool::new(false),
+                service_pass: Mutex::new(()),
             }
         });
-        Ioc3 { sh }
+        Ioc3 { sh, service_thread: Mutex::new(None) }
     }
 
     /// The Octane's (or Octane2's) onboard IOC3: both serial ports, PS/2,
@@ -2784,20 +2795,44 @@ impl Ioc3 {
         self.sh.service();
     }
 
-    /// Run [`Ioc3::service`] on a thread until the chip is dropped.
+    /// Run [`Ioc3::service`] on a thread until the chip is dropped, which
+    /// joins it. While paused the thread leaves the chip alone.
     pub fn spawn_service(&self) {
         let weak = Arc::downgrade(&self.sh);
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("ioc3-service".into())
             .spawn(move || {
                 while let Some(sh) = weak.upgrade() {
-                    sh.service();
-                    sh.flush_nvram(NVRAM_QUIET);
+                    if sh.quit.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    {
+                        let _pass = sh.service_pass.lock().unwrap();
+                        if !sh.paused.load(Ordering::SeqCst) {
+                            sh.service();
+                            sh.flush_nvram(NVRAM_QUIET);
+                        }
+                    }
                     drop(sh);
                     std::thread::sleep(Duration::from_millis(2));
                 }
             })
             .expect("spawn ioc3 service thread");
+        *self.service_thread.lock().unwrap() = Some(thread);
+    }
+
+    /// Hold the service thread off the chip while the machine is stopped:
+    /// once this returns no pass is under way, and none runs until
+    /// [`Ioc3::resume`]. The serial timers, the interrupt output and typed
+    /// characters wait.
+    pub fn pause(&self) {
+        self.sh.paused.store(true, Ordering::SeqCst);
+        drop(self.sh.service_pass.lock().unwrap());
+    }
+
+    /// Let the service thread look after the chip again.
+    pub fn resume(&self) {
+        self.sh.paused.store(false, Ordering::SeqCst);
     }
 
     /// The SuperIO interrupt status register, for tests and the monitor.
@@ -2808,6 +2843,10 @@ impl Ioc3 {
 
 impl Drop for Ioc3 {
     fn drop(&mut self) {
+        self.sh.quit.store(true, Ordering::SeqCst);
+        if let Some(t) = self.service_thread.get_mut().unwrap().take() {
+            let _ = t.join();
+        }
         self.flush_nvram();
     }
 }
