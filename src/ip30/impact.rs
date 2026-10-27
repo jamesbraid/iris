@@ -41,6 +41,7 @@ use parking_lot::Mutex;
 
 use super::xio::{widget_small_base, XioInterruptSink, XioMemory, WIDGET_HEART};
 use crate::config::GraphicsBoard;
+use crate::dev::ioc3;
 use crate::dev::mgras::{Mgras, MGRAS_SLOT_GFX_BASE};
 use crate::irq::{InterruptController, IrqLine};
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, BUS_ERR, BUS_OK};
@@ -65,6 +66,11 @@ pub struct ImpactBoard {
     pub re4_revision: u8,
     pub cmap_revision: u8,
     pub ra_revision: u8,
+    /// The serial-number chip's board record: name, part and revision, as
+    /// published Octane inventories name the board.
+    pub record_name: &'static str,
+    pub record_part: &'static str,
+    pub record_revision: &'static str,
 }
 
 /// Solid IMPACT, the one board the raster model behind this front is built
@@ -79,7 +85,37 @@ pub const SOLID_IMPACT: ImpactBoard = ImpactBoard {
     re4_revision: 2,
     cmap_revision: 3,
     ra_revision: 0,
+    record_name: "GM10",
+    record_part: "030-0938-003",
+    record_revision: "U",
 };
+
+/// The serial-number chip's ROM serial and the record's barcode: the marked
+/// synthetic serial our QEMU model gives an IMPACT board's record ("QEMU",
+/// letter G, instance 0), so nothing mistakes it for a real board's.
+const RECORD_SERIAL: u64 = 0x5145_4D55_4700;
+const RECORD_BARCODE: &str = "EMUG00";
+
+/// The MicroLAN master at `0x011098`: low-drive time in bits 19:10, sample
+/// offset in 9:2, done in bit 1 and the sampled wire level in bit 0.
+const NIC_DONE: u32 = 1 << 1;
+const NIC_WRITABLE: u32 = 0x000F_FFFC;
+
+/// The board's MicroLAN with its serial-number chip, a DS2505 holding the
+/// board record. The stock IP30 PROM names the board from it ("Name:GM"
+/// is first-generation, "Name:MOT" E-series); with no readable record it
+/// prints an SI as ESI.
+fn nic_bus(board: &ImpactBoard) -> ioc3::onewire::Bus {
+    let mut bus = ioc3::onewire::Bus::new();
+    let record = ioc3::BoardRecord {
+        barcode: RECORD_BARCODE,
+        part: board.record_part,
+        revision: board.record_revision,
+        name: board.record_name,
+    };
+    bus.add(ioc3::board_record_part(&record, RECORD_SERIAL));
+    bus
+}
 
 /// The widget identification word at `0x000004`: revision 0, part `0xC003`,
 /// manufacturer `0x2AA`.
@@ -300,6 +336,7 @@ struct Hq4 {
     /// HQ3-internal flag bits as the guest set them (`FLAGS_INTERNAL`).
     flag_shadow: u32,
     ge: GeUpload,
+    nic_control: u32,
     /// The context-switch handshake: the selection taken, the image being
     /// written (1) or done (3), the two acknowledgements, image words so
     /// far, and whether a switch has completed since reset.
@@ -447,6 +484,7 @@ impl GeUpload {
 /// What the front and the board's interrupt lines share.
 struct Shared {
     hq4: Mutex<Hq4>,
+    nic: Mutex<ioc3::onewire::Bus>,
     irq: Arc<dyn XioInterruptSink>,
     noted: Mutex<HashSet<String>>,
 }
@@ -530,7 +568,12 @@ impl ImpactXio {
         fasttick: Arc<AtomicU64>,
     ) -> Arc<Self> {
         let board = SOLID_IMPACT;
-        let shared = Arc::new(Shared { hq4: Mutex::new(Hq4::default()), irq, noted: Mutex::new(HashSet::new()) });
+        let shared = Arc::new(Shared {
+            hq4: Mutex::new(Hq4::default()),
+            nic: Mutex::new(nic_bus(&board)),
+            irq,
+            noted: Mutex::new(HashSet::new()),
+        });
         let lines: Arc<dyn InterruptController> = Arc::new(Lines(shared.clone()));
         let mgras = Mgras::new(
             GraphicsBoard::SolidImpact,
@@ -582,6 +625,7 @@ impl ImpactXio {
     /// its state, as `Mgras` has no reset of its own.
     pub fn reset(&self) {
         *self.shared.hq4.lock() = Hq4::default();
+        *self.shared.nic.lock() = nic_bus(&self.board);
     }
 
     fn board_read(&self, bits: u32, off: u32) -> (u32, u64) {
@@ -657,10 +701,7 @@ impl ImpactXio {
             hq4::VECTOR_DEST_UPPER => s.vector_dest[0],
             hq4::VECTOR_DEST_LOWER => s.vector_dest[1],
             hq4::VECTORS => s.vectors,
-            // No serial-number chip is fitted: the bit slot reads done with
-            // the wire low, as our QEMU model answers without a board
-            // record.
-            hq4::NIC => 2,
+            hq4::NIC => s.nic_control,
             hq4::RETRACE_STATUS_1 | hq4::RETRACE_STATUS_2 => 0,
             ge::READ_1 | ge::READ_2 => {
                 drop(s);
@@ -822,9 +863,17 @@ impl ImpactXio {
                 hq4::VECTOR_DEST_UPPER => s.vector_dest[0] = v,
                 hq4::VECTOR_DEST_LOWER => s.vector_dest[1] = v,
                 hq4::VECTORS => s.vectors = v,
-                // No serial-number chip: the slot completes with nothing on
-                // the wire.
-                hq4::NIC => {}
+                // One bit slot, complete inside the write: real timing is
+                // unknown, and the PROM and IDE poll the done bit first. A
+                // long low is a reset, which presence answers by pulling the
+                // wire low; a short one writes a 1 or reads (the thresholds
+                // are the IOC3 model's, not hardware values).
+                hq4::NIC => {
+                    let pulse = v >> 10 & 0x3FF;
+                    let mut nic = self.shared.nic.lock();
+                    let level = if pulse >= 400 { !nic.reset() } else { nic.slot(pulse < 40) };
+                    s.nic_control = v & NIC_WRITABLE | NIC_DONE | level as u32;
+                }
                 hq4::RETRACE_ACK => {}
                 hq4::RE_STATUS => board.push((hq3::RASTER + (hq4::RE_STATUS - hq4::RASTER), v)),
                 o if is_plain(o) => {
@@ -1415,6 +1464,44 @@ mod tests {
         assert_eq!(r.r32(0x05822C), prog[0]);
         // The GE revision stays until a query replaces it.
         assert_eq!(r.r32(0x028004), 2);
+    }
+
+    /// One MicroLAN bit slot on the serial-number chip.
+    fn nic_slot(r: &Rig, pulse: u32, sample: u32) -> bool {
+        r.w32(0x011098, pulse << 10 | sample << 2);
+        let v = r.r32(0x011098);
+        assert_eq!(v & 2, 2, "slot done");
+        v & 1 != 0
+    }
+
+    fn nic_write_byte(r: &Rig, b: u8) {
+        for bit in 0..8 {
+            let one = b >> bit & 1 != 0;
+            nic_slot(r, if one { 6 } else { 80 }, if one { 13 } else { 30 });
+        }
+    }
+
+    fn nic_read_byte(r: &Rig) -> u8 {
+        (0..8).fold(0, |v, bit| v | (nic_slot(r, 6, 13) as u8) << bit)
+    }
+
+    /// The board record as the PROM reads it for "Name:": skip ROM, read
+    /// memory from 0, the barcode at byte 1 and the name at byte 48.
+    #[test]
+    fn nic_holds_the_board_record() {
+        let r = rig();
+        for pass in 0..2 {
+            assert!(!nic_slot(&r, 500, 65), "presence");
+            for b in [0xCC, 0xF0, 0, 0] {
+                nic_write_byte(&r, b);
+            }
+            let rec: Vec<u8> = (0..64).map(|_| nic_read_byte(&r)).collect();
+            assert_eq!(&rec[1..11], b"EMUG00    ", "pass {pass}");
+            assert_eq!(&rec[48..62], b"GM10          ");
+            assert_eq!(&rec[21..30], b"030-0938-");
+            assert_eq!(&rec[35..39], b"003U");
+            r.b.reset();
+        }
     }
 
     #[test]
