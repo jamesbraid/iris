@@ -72,7 +72,14 @@ impl Rig {
     }
 
     fn r(&self, off: u32) -> u16 { self.isp.read(off, 2) as u16 }
-    fn w(&self, off: u32, v: u16) { self.isp.write(off, v as u32, 2) }
+    /// A register write. Commands run on the adapter's own thread, so a
+    /// write that can start them waits for the ring to settle.
+    fn w(&self, off: u32, v: u16) {
+        self.isp.write(off, v as u32, 2);
+        if off == reg::REQUEST_QUEUE || off == reg::RESPONSE_QUEUE {
+            self.isp.wait_idle();
+        }
+    }
     fn mb(&self, n: u32) -> u32 { reg::MAILBOX_BASE + n * 2 }
 
     /// A mailbox command: load the registers, ring the host interrupt, read
@@ -833,4 +840,144 @@ fn dma_above_4_gib_reaches_the_bus_in_full() {
     // A transfer that would wrap past the top of the space is refused.
     assert!(!isp.dma_write(0xffff_ffff_ffff_fffe, &b));
     assert_eq!(*probe.0.lock().unwrap(), [0x1_2345_6000, 0xffff_ffff_ffff_f000]);
+}
+
+// ---- commands off the CPU thread ---------------------------------------
+
+/// Fake memory whose writes to one address wait until the test opens the
+/// gate: a disk answer that is slow to arrive.
+struct GatedMem {
+    mem: Arc<FakeMem>,
+    addr: u64,
+    /// (a write is waiting at the gate, the gate is open)
+    gate: Mutex<(bool, bool)>,
+    cv: std::sync::Condvar,
+}
+
+impl GatedMem {
+    fn new(mem: Arc<FakeMem>, addr: u32) -> Arc<Self> {
+        Arc::new(GatedMem { mem, addr: addr as u64, gate: Mutex::new((false, false)), cv: std::sync::Condvar::new() })
+    }
+    /// Block until a write reached the gate.
+    fn wait_arrival(&self) {
+        let mut g = self.gate.lock().unwrap();
+        while !g.0 { g = self.cv.wait(g).unwrap(); }
+    }
+    fn open(&self) {
+        self.gate.lock().unwrap().1 = true;
+        self.cv.notify_all();
+    }
+}
+
+impl PciDma for GatedMem {
+    fn dma_read(&self, addr: u64, buf: &mut [u8]) -> PciDmaStatus {
+        self.mem.dma_read(addr, buf)
+    }
+    fn dma_write(&self, addr: u64, data: &[u8]) -> PciDmaStatus {
+        if addr == self.addr {
+            let mut g = self.gate.lock().unwrap();
+            g.0 = true;
+            self.cv.notify_all();
+            while !g.1 { g = self.cv.wait(g).unwrap(); }
+        }
+        self.mem.dma_write(addr, data)
+    }
+}
+
+/// A chip with a disk at target 1 whose INQUIRY answer into `BUF` waits at
+/// the gate, rings initialised and the interrupt enabled into a probe.
+fn gated_rig(name: &str) -> (Rig, Arc<GatedMem>, Arc<LevelProbe>) {
+    let mem = FakeMem::new();
+    let gate = GatedMem::new(mem.clone(), BUF);
+    let isp = Isp1040::new();
+    isp.connect_dma(gate.clone());
+    isp.attach_disk_at(1, &image(name, 64)).expect("attach");
+    let (probe, line) = LevelProbe::line();
+    isp.connect_interrupt(line);
+    let r = Rig { isp, mem };
+    r.init_rings(4, 4);
+    r.w(reg::BUS_CTRL, CTRL_INT_ENABLE | CTRL_RISC_INT_ENABLE);
+    r.put_entry(0, &request(0x77, 1, &[0x12, 0, 0, 0, 36, 0], &[(BUF, 36)]));
+    (r, gate, probe)
+}
+
+/// The doorbell store returns while the command is still waiting on its
+/// target, and the registers answer meanwhile; the completion and the
+/// interrupt follow when the target does. A guest's clock interrupt is
+/// never held behind a disk.
+#[test]
+fn the_doorbell_returns_before_the_command_completes() {
+    let (r, gate, probe) = gated_rig("async");
+    r.isp.write(reg::REQUEST_QUEUE, 1, 2);
+    gate.wait_arrival();
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0, "nothing posted yet");
+    assert_eq!(r.r(reg::BUS_STATUS), 0);
+    assert!(!probe.level());
+    gate.open();
+    r.isp.wait_idle();
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+    assert_eq!(g32(&r.status(0), 4), 0x77);
+    assert_eq!(&r.mem.get(BUF + 8, 8), b"SGI     ");
+    assert!(probe.level(), "the completion raises the line from the adapter's thread");
+}
+
+/// A soft reset waits for the command in flight and drops its completion:
+/// the reset ring has nowhere to put it.
+#[test]
+fn a_soft_reset_drops_the_completion_of_a_command_in_flight() {
+    let (r, gate, probe) = gated_rig("async-reset");
+    r.isp.write(reg::REQUEST_QUEUE, 1, 2);
+    gate.wait_arrival();
+    std::thread::scope(|s| {
+        let reset = s.spawn(|| r.isp.write(reg::BUS_CTRL, CTRL_SOFT_RESET as u32, 2));
+        while !r.isp.waiting_on_command() { std::thread::yield_now(); }
+        gate.open();
+        reset.join().unwrap();
+    });
+    r.isp.wait_idle();
+    assert_eq!(g32(&r.status(0), 4), 0, "no status entry was written");
+    assert_eq!(r.r(reg::BUS_STATUS), 0);
+    assert!(!probe.level());
+    assert_eq!(r.r(r.mb(4)), SIG4, "the reset state, untouched by the late answer");
+}
+
+/// Saving waits for the command in flight, so the state saved has it
+/// posted rather than half done.
+#[test]
+fn saving_waits_for_the_command_in_flight() {
+    let (r, gate, _probe) = gated_rig("async-save");
+    r.isp.write(reg::REQUEST_QUEUE, 1, 2);
+    gate.wait_arrival();
+    let saved = std::thread::scope(|s| {
+        let save = s.spawn(|| r.isp.save_state());
+        while !r.isp.waiting_on_command() { std::thread::yield_now(); }
+        gate.open();
+        save.join().unwrap()
+    });
+    assert_eq!(get_field(&saved, "resp_prod").and_then(toml_u16), Some(1));
+    assert_eq!(get_field(&saved, "rqst_cons").and_then(toml_u16), Some(1));
+}
+
+/// Entries the driver queued but the adapter had not reached when the
+/// state was saved run after it is loaded.
+#[test]
+fn queued_entries_run_after_a_load() {
+    let src = Rig::with_disk("async-load-src", 0, 64);
+    src.init_rings(8, 8);
+    let mut v = src.isp.save_state();
+    // The driver had published two entries the adapter had not consumed.
+    if let toml::Value::Table(t) = &mut v {
+        let mut mb = [0u16; MAILBOX_COUNT];
+        load_u16_slice(t.get("mailbox").unwrap(), &mut mb);
+        mb[MBOX_REQ] = 2;
+        t.insert("mailbox".into(), u16_slice_to_toml(&mb));
+    }
+    let dst = Rig::with_disk("async-load-dst", 0, 64);
+    dst.put_entry(0, &tur_entry(0x6000));
+    dst.put_entry(1, &tur_entry(0x6001));
+    dst.isp.load_state(&v).expect("load_state");
+    dst.isp.wait_idle();
+    assert_eq!(dst.r(reg::REQUEST_QUEUE), 2);
+    assert_eq!(dst.r(reg::RESPONSE_QUEUE), 2);
+    assert_eq!(g32(&dst.status(1), 4), 0x6001);
 }
