@@ -45,4 +45,6 @@ pub mod ultra64;
 pub mod vino;
 pub mod wd33c93a;
 pub mod z85c30;
+pub mod ioc3;
+pub mod ioc3_port;
 pub mod isp1040;
