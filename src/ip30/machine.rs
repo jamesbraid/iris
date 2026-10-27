@@ -871,6 +871,7 @@ impl OctaneMachine {
         self.bus.power_on();
         self.flash_lines.clear();
         self.bridge.reset();
+        self.bridge.reset_pci();
         self.ioc3.reset();
         self.eth.reset();
         for c in &self.scsi {
