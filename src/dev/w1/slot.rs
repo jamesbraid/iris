@@ -17,22 +17,23 @@ pub const ONE_PULSE: u32 = 40;
 /// The low-drive time and sample offset fields of a MicroLAN register
 /// value: `(pulse, sample)`.
 pub fn fields(val: u64) -> (u32, u32) {
-    let _ = val;
-    todo!()
+    (((val >> 10) & 0x3ff) as u32, ((val >> 2) & 0xff) as u32)
 }
 
 /// One slot of `pulse` on `bus`: a reset (the wire reads low if a part
 /// answers presence) or a bit slot. Returns the level the master samples.
 /// `sample` is accepted so every master can pass its raw fields; this
 /// synchronous decode has no use for it.
-pub fn slot(bus: &mut Bus, pulse: u32, sample: u32) -> bool {
-    let _ = (bus, pulse, sample);
-    todo!()
+pub fn slot(bus: &mut Bus, pulse: u32, _sample: u32) -> bool {
+    if pulse >= RESET_PULSE { !bus.reset() } else { bus.slot(pulse < ONE_PULSE) }
 }
 
 /// A slot on a master whose wire also reaches a second net: both buses
 /// see it, and the wire reads low if a part on either pulls it low.
 pub fn slot_wired(bus: &mut Bus, shared: Option<&mut Bus>, pulse: u32, sample: u32) -> bool {
-    let _ = (bus, shared, pulse, sample);
-    todo!()
+    let level = slot(bus, pulse, sample);
+    match shared {
+        Some(other) => slot(other, pulse, sample) && level,
+        None => level,
+    }
 }
