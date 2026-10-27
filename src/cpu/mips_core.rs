@@ -927,6 +927,13 @@ pub struct MipsCore {
     /// we simply overran (Compare differs from it, yet already lies behind
     /// the freshly materialized Count). See `write_cp0` reg 11.
     pub(crate) count_last_guest_read: u32,
+    /// A Count write also sets `count_last_guest_read`, so a Compare written
+    /// a few instructions after it, against the value written, is measured
+    /// from that value. The Octane's IRIX zeroes Count and arms Compare
+    /// 1000 ticks later with register instructions between; a host stall
+    /// there must not cost a full Count wrap. A machine opts in; it is an
+    /// emulator approximation for host scheduling, not processor behaviour.
+    pub count_write_samples: bool,
     /// IP7 delivery sequence, CPU-thread copy. Incremented by
     /// `arm_ip7_sequence` on every Compare write / re-arm; the value it
     /// becomes is the ticket that the *next* IP7 delivery must present.
@@ -1397,6 +1404,7 @@ impl MipsCore {
             #[cfg(feature = "developer_ip7")]
             ip7_past_writes: 0,
             count_last_guest_read: 0,
+            count_write_samples: false,
             ip7_seq: 0,
             ip7_seq_shared: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "developer_ip7")]
@@ -1985,6 +1993,9 @@ impl MipsCore {
                 // Re-anchor the virtual count at the written value and re-arm
                 // the compare timer against the moved count.
                 self.cp0_count = value as u32 as u64;
+                if self.count_write_samples {
+                    self.count_last_guest_read = value as u32;
+                }
                 self.reanchor_count_and_reschedule();
             }
             10 => { // always use 64bit mask because the entries need to be valid in 64 bit mode even when they were set from 32 bit mode
@@ -2825,5 +2836,125 @@ mod ip7_ticket_tests {
             core.hot.interrupts.load(Ordering::SeqCst) as u32 & CAUSE_IP7, 0,
             "a deadline between the last read and Count is owed across a wrap"
         );
+    }
+
+    /// With `count_write_samples`, a Count write is the reference a later
+    /// Compare is measured from: Count zeroed, a read long before it lying
+    /// between the target and the materialized Count, and the target passed
+    /// during a stall is still owed. Without it, the stale read hides it.
+    #[test]
+    fn a_count_write_opens_the_sample_window_when_asked() {
+        for samples in [false, true] {
+            let mut core = core_past_its_compare();
+            core.count_write_samples = samples;
+            core.count_last_guest_read = 1_200;
+            core.write_cp0(9, 0);
+            advance_count(&mut core, 1_000_000);
+            assert!(core.count_peek() > 1_200);
+            core.write_cp0(11, 1_000);
+            let ip7 = core.hot.interrupts.load(Ordering::SeqCst) as u32 & CAUSE_IP7 != 0;
+            assert_eq!(ip7, samples, "count_write_samples = {samples}");
+        }
+    }
+
+    /// The Octane's timer settings: Count at half the 195 MHz R10000 clock,
+    /// and a Count write opening the sample window.
+    #[cfg(not(feature = "ci_clock"))]
+    fn octane_core() -> MipsCore {
+        let mut core = MipsCore::default();
+        // A slow Count, so the host's own time between two statements (a
+        // loaded test machine can take microseconds) never carries Count
+        // past a target; `elapse_ticks` moves it explicitly.
+        core.set_count_hz(1_000);
+        core.count_write_samples = true;
+        core
+    }
+
+    /// Let Count advance `ticks` without sleeping: move the wall-clock
+    /// anchor back by that much time.
+    #[cfg(not(feature = "ci_clock"))]
+    fn elapse_ticks(core: &mut MipsCore, ticks: u64) {
+        let ns = (ticks as u128 * 1_000_000_000 / core.count_hz as u128) as u64 + 1;
+        core.count_anchor_instant -= std::time::Duration::from_nanos(ns);
+        core.hot.cycles += 1;
+    }
+
+    #[cfg(not(feature = "ci_clock"))]
+    fn ip7(core: &MipsCore) -> bool {
+        core.hot.interrupts.load(Ordering::SeqCst) as u32 & CAUSE_IP7 != 0
+    }
+
+    /// A Compare just before and just after the 32-bit wrap, with Count
+    /// carried across 0xffffffff in one materialization: the Count read
+    /// raises IP7, it does not wait for the next wrap.
+    #[cfg(not(feature = "ci_clock"))]
+    #[test]
+    fn octane_count_crossing_a_compare_across_the_wrap_raises_ip7() {
+        for compare in [0xFFFF_FFF0u32, 0x10] {
+            let mut core = octane_core();
+            core.write_cp0(9, 0xFFFF_FF00);
+            core.hot.cycles += 1;
+            core.write_cp0(11, compare as u64);
+            assert!(!ip7(&core), "compare {compare:#x} is still ahead");
+            elapse_ticks(&mut core, 0x200);
+            let count = core.read_cp0(9) as u32;
+            assert!(count >= 0x100 && count < 0x8000_0000, "Count should have wrapped: {count:#x}");
+            assert!(ip7(&core), "compare {compare:#x} was crossed across the wrap");
+        }
+    }
+
+    /// IRIX on the Octane writes Count and then, a few instructions later,
+    /// a Compare a short way ahead. A host stall between them that carries
+    /// Count past the target and across the wrap still delivers the tick.
+    #[cfg(not(feature = "ci_clock"))]
+    #[test]
+    fn octane_late_compare_after_a_count_write_across_the_wrap_raises_ip7() {
+        for compare in [0xFFFF_FFF0u32, 0x80] {
+            let mut core = octane_core();
+            core.write_cp0(9, 0xFFFF_FF00);
+            elapse_ticks(&mut core, 0x400);
+            core.write_cp0(11, compare as u64);
+            assert!(ip7(&core), "compare {compare:#x} written behind Count after a stall");
+        }
+    }
+
+    /// The other side of the rule: a target behind the sample, such as
+    /// IRIX's Count=1 then Compare=0 disarm when Count wrapped from just
+    /// below 2^32, stays a full-wrap wait.
+    #[cfg(not(feature = "ci_clock"))]
+    #[test]
+    fn octane_compare_behind_the_count_written_stays_clear_across_the_wrap() {
+        let mut core = octane_core();
+        core.write_cp0(9, 1);
+        elapse_ticks(&mut core, 0x400);
+        core.write_cp0(11, 0);
+        assert!(!ip7(&core), "Count=1 then Compare=0 is a disarm");
+
+        let mut core = octane_core();
+        core.write_cp0(9, 0x10);
+        elapse_ticks(&mut core, 0x400);
+        core.write_cp0(11, 0xFFFF_FFF0);
+        assert!(!ip7(&core), "a target behind the Count written is a full-wrap wait");
+    }
+
+    /// The one-shot armed across the wrap waits the short distance, not a
+    /// full wrap (about 44 s at 97.5 MHz).
+    #[cfg(not(feature = "ci_clock"))]
+    #[test]
+    fn octane_one_shot_armed_across_the_wrap_fires_promptly() {
+        let mut core = octane_core();
+        // The one-shot runs on the host clock: the real rate, so the short
+        // distance is microseconds and a full wrap would be 44 s.
+        core.set_count_hz(97_500_000);
+        core.set_timer_manager(Arc::new(crate::hptimer::TimerManager::new()));
+        core.write_cp0(9, 0xFFFF_FF00);
+        core.hot.cycles += 1;
+        // 0x1000 ticks past the wrap: about 45 us.
+        core.write_cp0(11, 0x1000);
+        let t0 = std::time::Instant::now();
+        while !ip7(&core) && t0.elapsed() < std::time::Duration::from_secs(2) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(ip7(&core), "the Compare one-shot across the wrap did not fire within 2 s");
     }
 }
