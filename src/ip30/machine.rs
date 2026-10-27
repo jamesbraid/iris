@@ -202,6 +202,12 @@ pub struct Ip30Bus {
     pub heart: Arc<Heart>,
     pub xbow: Arc<Xbow>,
     low: Mutex<Vec<u8>>,
+    /// jitv2 generation counters for low memory, one per 4 KiB page. The
+    /// kernel writes its exception vectors here; without a counter the JIT
+    /// treats the page as ROM and keeps running code compiled from an
+    /// earlier copy of the vectors.
+    #[cfg(feature = "jitv2")]
+    low_gen: [AtomicU64; (LOW_RAM_SIZE >> 12) as usize],
     /// Widgets 8 to 15 by number; HEART's own slot stays empty. Each takes
     /// the full physical address and masks it to its window.
     widgets: [Option<Arc<dyn BusDevice>>; 16],
@@ -217,6 +223,8 @@ impl Ip30Bus {
             heart,
             xbow,
             low: Mutex::new(vec![0; LOW_RAM_SIZE as usize]),
+            #[cfg(feature = "jitv2")]
+            low_gen: Default::default(),
             widgets: Default::default(),
             large: [false; 16],
             unmapped: Mutex::new(Vec::new()),
@@ -300,6 +308,7 @@ impl Ip30Bus {
                 for (k, x) in b.iter_mut().enumerate() {
                     *x = (val >> (8 * (n - 1 - k))) as u8;
                 }
+                self.bump_low_gen(o, n);
                 true
             }
             Target::Piu(o) => self.heart.piu_write(o, n, val),
@@ -308,6 +317,17 @@ impl Ip30Bus {
             Target::Ram => self.heart.ram_write(addr, n, val),
             Target::Widget(_) | Target::None => false,
         }
+    }
+
+    /// Invalidate compiled code on the low-memory pages bytes `o..o + n`
+    /// touch.
+    fn bump_low_gen(&self, o: usize, n: usize) {
+        #[cfg(feature = "jitv2")]
+        for page in o >> 12..=(o + n - 1) >> 12 {
+            self.low_gen[page].fetch_add(1, Ordering::Release);
+        }
+        #[cfg(not(feature = "jitv2"))]
+        let _ = (o, n);
     }
 
     fn widget(&self, addr: u64) -> Option<&Arc<dyn BusDevice>> {
@@ -322,6 +342,7 @@ impl Ip30Bus {
     pub fn power_on(&self) {
         use crate::traits::Resettable;
         self.low.lock().unwrap().fill(0);
+        self.bump_low_gen(0, LOW_RAM_SIZE as usize);
         self.xbow.power_on();
         self.heart.power_on();
     }
@@ -369,10 +390,13 @@ impl BusDevice for Ip30Bus {
     bus_access!(read32, write32, BusRead32, u32, 4);
     bus_access!(read64, write64, BusRead64, u64, 8);
 
-    /// Memory pages have generations jitv2 can compile against; nothing
-    /// else does.
+    /// Memory pages, SDRAM and low memory, have generations jitv2 can
+    /// compile against; nothing else does.
     #[cfg(feature = "jitv2")]
     fn gen_ptr(&self, addr: u64) -> *const AtomicU64 {
+        if addr < LOW_RAM_SIZE {
+            return &self.low_gen[(addr >> 12) as usize];
+        }
         let m = self.heart.mem.lock().unwrap();
         match m.decode(addr) {
             crate::ip30::heart::Decode::Ram(o) if !HIGH_GUARD.contains(&addr) => m.gen_ptr(o),
@@ -1079,6 +1103,26 @@ mod tests {
         assert_eq!(b.read8(0x4000).status, BUS_ERR);
         b.power_on();
         assert_eq!(b.read32(0x614).data, 0);
+    }
+
+    /// Code in low memory is compiled against a per-page generation that
+    /// every store into the page advances, as SDRAM's is.
+    #[cfg(feature = "jitv2")]
+    #[test]
+    fn low_memory_stores_invalidate_compiled_code() {
+        let b = bus(&[]);
+        let (g0, g1) = (b.gen_ptr(0x180), b.gen_ptr(0x1000));
+        assert!(!g0.is_null() && !g1.is_null());
+        assert_ne!(g0, g1, "one counter per 4 KiB page");
+        assert_eq!(b.gen_ptr(0xffc), g0);
+        let gen = |p: *const AtomicU64| unsafe { (*p).load(Ordering::Acquire) };
+        let (a, c) = (gen(g0), gen(g1));
+        assert_eq!(b.write64(0x180, 0xdf5a_c000_0340_0008), BUS_OK);
+        assert_ne!(gen(g0), a, "a store advances its page");
+        assert_eq!(gen(g1), c, "and no other");
+        assert_eq!(b.write32(0xffe, 0), BUS_OK);
+        assert_ne!(gen(g1), c, "a store across the boundary advances both");
+        assert!(b.gen_ptr(0x4000).is_null(), "the guard below SDRAM has none");
     }
 
     #[test]
