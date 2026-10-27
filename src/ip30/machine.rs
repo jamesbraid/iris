@@ -669,6 +669,9 @@ impl OctaneMachine {
         }
         // `ps2 type` and friends: the keyboard and mouse from the monitor.
         monitor.register_device(ioc3.ps2());
+        ioc3.register_locks();
+        eth.register_locks();
+        rad.register_locks();
         if let Some(g) = &gfx {
             monitor.register_device(g.mgras().clone());
         }

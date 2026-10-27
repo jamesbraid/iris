@@ -9,6 +9,7 @@
 //! 32-bit access at its offset, a byte access at `offset ^ 3`.
 
 use super::*;
+use std::sync::Mutex;
 use crate::irq::LevelProbe;
 
 const MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
@@ -192,10 +193,10 @@ fn the_scratch_register_programs_the_predivider_under_dlab() {
     r.w8(reg::SERIAL_A + 3, 0x80);
     r.w8(reg::SERIAL_A + 7, 6);
     assert_eq!(r.r8(reg::SERIAL_A + 7), 6, "reads back what was written");
-    assert_eq!(r.c.sh.st.lock().unwrap().uart[0].predivider, 6);
+    assert_eq!(r.c.sh.st.lock().uart[0].predivider, 6);
     // Written 0 or 1 means nothing.
     r.w8(reg::SERIAL_A + 7, 1);
-    assert_eq!(r.c.sh.st.lock().unwrap().uart[0].predivider, 6);
+    assert_eq!(r.c.sh.st.lock().uart[0].predivider, 6);
 }
 
 /// A serial pass-through bit follows the 16550's level and ignores an
@@ -282,12 +283,12 @@ fn diagnostic_output_commands_keep_the_running_output() {
     let r = Rig::new();
     r.w32(reg::INT_OUTPUT, IO_PERIODIC | 100);
     r.w32(reg::INT_OUTPUT, IO_DIAG | IO_PERIODIC | 5);
-    assert_eq!(r.c.sh.st.lock().unwrap().int_out.active, IO_PERIODIC | 100);
+    assert_eq!(r.c.sh.st.lock().int_out.active, IO_PERIODIC | 100);
     // So do counts outside 2..=0xfffe.
     r.w32(reg::INT_OUTPUT, IO_SQUARE | 1);
-    assert_eq!(r.c.sh.st.lock().unwrap().int_out.active, IO_PERIODIC | 100);
+    assert_eq!(r.c.sh.st.lock().int_out.active, IO_PERIODIC | 100);
     r.w32(reg::INT_OUTPUT, IO_SQUARE | 0xffff);
-    assert_eq!(r.c.sh.st.lock().unwrap().int_out.active, IO_PERIODIC | 100);
+    assert_eq!(r.c.sh.st.lock().int_out.active, IO_PERIODIC | 100);
 }
 
 #[test]
@@ -1498,7 +1499,7 @@ fn the_service_thread_pauses_and_is_joined_on_drop() {
     let r = Rig::new();
     r.c.spawn_service();
     r.c.pause();
-    assert!(r.c.sh.service_pass.try_lock().is_ok(), "no pass under way");
+    assert!(r.c.sh.service_pass.try_lock().is_some(), "no pass under way");
     assert!(r.c.sh.paused.load(Ordering::SeqCst));
     r.c.resume();
     assert!(!r.c.sh.paused.load(Ordering::SeqCst));
