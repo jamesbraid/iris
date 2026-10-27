@@ -40,7 +40,6 @@ pub mod crime_reg {
 
     pub const MEM_CONTROL: u32 = 0x0200;
     pub const MEM_BANK_CTRL0: u32 = 0x0208;
-    pub const MEM_BANK_CTRL1: u32 = 0x0218;
     pub const MEM_REFRESH_CNTR: u32 = 0x0248;
     pub const MEM_ERROR_STAT: u32 = 0x0250;
     pub const MEM_ERROR_ADDR: u32 = 0x0258;
