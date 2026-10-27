@@ -927,6 +927,13 @@ pub struct MipsCore {
     /// we simply overran (Compare differs from it, yet already lies behind
     /// the freshly materialized Count). See `write_cp0` reg 11.
     pub(crate) count_last_guest_read: u32,
+    /// A Count write also sets `count_last_guest_read`, so a Compare written
+    /// a few instructions after it, against the value written, is measured
+    /// from that value. The Octane's IRIX zeroes Count and arms Compare
+    /// 1000 ticks later with register instructions between; a host stall
+    /// there must not cost a full Count wrap. A machine opts in; it is an
+    /// emulator approximation for host scheduling, not processor behaviour.
+    pub count_write_samples: bool,
     /// IP7 delivery sequence, CPU-thread copy. Incremented by
     /// `arm_ip7_sequence` on every Compare write / re-arm; the value it
     /// becomes is the ticket that the *next* IP7 delivery must present.
@@ -1397,6 +1404,7 @@ impl MipsCore {
             #[cfg(feature = "developer_ip7")]
             ip7_past_writes: 0,
             count_last_guest_read: 0,
+            count_write_samples: false,
             ip7_seq: 0,
             ip7_seq_shared: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "developer_ip7")]
@@ -1985,6 +1993,9 @@ impl MipsCore {
                 // Re-anchor the virtual count at the written value and re-arm
                 // the compare timer against the moved count.
                 self.cp0_count = value as u32 as u64;
+                if self.count_write_samples {
+                    self.count_last_guest_read = value as u32;
+                }
                 self.reanchor_count_and_reschedule();
             }
             10 => { // always use 64bit mask because the entries need to be valid in 64 bit mode even when they were set from 32 bit mode
@@ -2825,5 +2836,24 @@ mod ip7_ticket_tests {
             core.hot.interrupts.load(Ordering::SeqCst) as u32 & CAUSE_IP7, 0,
             "a deadline between the last read and Count is owed across a wrap"
         );
+    }
+
+    /// With `count_write_samples`, a Count write is the reference a later
+    /// Compare is measured from: Count zeroed, a read long before it lying
+    /// between the target and the materialized Count, and the target passed
+    /// during a stall is still owed. Without it, the stale read hides it.
+    #[test]
+    fn a_count_write_opens_the_sample_window_when_asked() {
+        for samples in [false, true] {
+            let mut core = core_past_its_compare();
+            core.count_write_samples = samples;
+            core.count_last_guest_read = 1_200;
+            core.write_cp0(9, 0);
+            advance_count(&mut core, 1_000_000);
+            assert!(core.count_peek() > 1_200);
+            core.write_cp0(11, 1_000);
+            let ip7 = core.hot.interrupts.load(Ordering::SeqCst) as u32 & CAUSE_IP7 != 0;
+            assert_eq!(ip7, samples, "count_write_samples = {samples}");
+        }
     }
 }
