@@ -694,6 +694,31 @@ impl Core {
         Ok(blocks)
     }
 
+    /// Copy each target's copy-on-write overlay into `dir` as
+    /// `scsi<id>.overlay`, and return the dirty sectors of each, as the O2's
+    /// controller does for its snapshots.
+    pub fn export_overlays(&self, dir: &std::path::Path) -> std::io::Result<Vec<(usize, Vec<u64>)>> {
+        let mut targets = self.targets.lock();
+        let mut out = Vec::new();
+        for (id, t) in targets.iter_mut().enumerate() {
+            if let Some(dev) = t.as_mut().filter(|d| d.is_cow()) {
+                out.push((id, dev.cow_export(&dir.join(format!("scsi{id}.overlay")))?));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Put back the overlays [`Self::export_overlays`] wrote.
+    pub fn import_overlays(&self, dir: &std::path::Path, dirty_sets: &[(usize, Vec<u64>)]) -> std::io::Result<()> {
+        let mut targets = self.targets.lock();
+        for (id, dirty) in dirty_sets {
+            if let Some(dev) = targets.get_mut(*id).and_then(|t| t.as_mut()).filter(|d| d.is_cow()) {
+                dev.cow_import(&dir.join(format!("scsi{id}.overlay")), dirty.clone())?;
+            }
+        }
+        Ok(())
+    }
+
     /// The id a disk attached without one goes on.
     pub fn default_target(&self) -> u8 { self.target }
 
