@@ -20,6 +20,8 @@
 
 use crate::dev::heart::{MEMCFG_ADDR_MASK, MEMCFG_SIZE_MASK, MEMCFG_SIZE_SHIFT, MEMCFG_UNIT_SHIFT, MEMCFG_VALID};
 use crate::ppmem::{MappedMemory, PpMemSpace, PpMemory, WINDOW_SIZE};
+use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, BUS_OK};
+use std::sync::Arc;
 
 /// Where memory starts.
 pub const RAM_BASE: u64 = 0x2000_0000;
@@ -225,6 +227,262 @@ impl HeartMemory {
     /// a real size of 0 is a valid bank with no DIMMs.
     pub fn layout(&self) -> Vec<(u64, u64, u64)> {
         self.banks.iter().flatten().map(|b| (b.base, b.span, if b.empty { 0 } else { b.mask + 1 })).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Memory as the processor's map and the bus masters reach it, with no lock.
+// These replace `HeartMemory` above and the lock `Ip30Bus` holds it under.
+// ---------------------------------------------------------------------------
+
+/// The fitted DIMMs where HEART's MEMCFG puts them: the device
+/// `Ip30Physical` maps over SDRAM space, and the processor's view of it.
+///
+/// No lock on an access. Every master reaches the same host bytes, as on
+/// the Indy: aligned 32- and 64-bit host accesses are atomic, and the bank
+/// placement an access decodes against is published whole by `set_memcfg`.
+/// Addresses are full physical addresses (up to 40 bits), not offsets.
+/// A bank MEMCFG marks valid but with no DIMMs reads zero and drops writes;
+/// an address no bank claims is a bus error.
+///
+/// Fast paths, as `Physical`'s banks give them: `mem_ptr`, `read_block` and
+/// `write_block` go straight to the host bytes; `gen_ptr` returns the 4 KiB
+/// page's generation counter, bumped by every write path, DMA included.
+/// The ppmem window (`space`) covers the first 4 GB; memory MEMCFG places
+/// above that is reached through this device only.
+pub struct HeartRam {
+    _todo: (),
+}
+
+impl HeartRam {
+    /// `banks_mb` is the DIMM pair in each of the four banks, in MB (0 for
+    /// an empty bank), placed back to back from `RAM_BASE`.
+    pub fn new(banks_mb: [u32; 4]) -> Self {
+        let _ = banks_mb;
+        todo!()
+    }
+
+    /// HEART's MEMCFG words changed: decode against them from now on and
+    /// lay the ppmem window out again. Called on the CPU thread, through
+    /// `Ip30Physical::remap_banks`.
+    pub fn set_memcfg(&self, words: [u32; 4]) {
+        let _ = words;
+        todo!()
+    }
+
+    /// The MEMCFG words in force, for the monitor.
+    pub fn memcfg(&self) -> [u32; 4] {
+        todo!()
+    }
+
+    /// The ppmem window the CPU and the JIT reach memory through.
+    pub fn space(&self) -> &PpMemSpace {
+        todo!()
+    }
+
+    /// Memory as an XIO bus master reaches it through HEART: what the
+    /// Bridge (and its per-slot `PciDma`) and IMPACT's HQ4 are given.
+    /// Fitted memory only, at 64-bit physical addresses: a bank with no
+    /// DIMMs, low memory, HEART's registers and the widget windows are all
+    /// bus errors here. `read_block` and `write_block` move nothing unless
+    /// every doubleword is fitted memory; use `dma_read_bytes` and
+    /// `dma_write_bytes` for byte transfers.
+    pub fn dma_view(self: &Arc<Self>) -> Arc<dyn BusDevice> {
+        todo!()
+    }
+}
+
+impl BusDevice for HeartRam {
+    fn read8(&self, _addr: u64) -> BusRead8 { todo!() }
+    fn read16(&self, _addr: u64) -> BusRead16 { todo!() }
+    fn read32(&self, _addr: u64) -> BusRead32 { todo!() }
+    fn read64(&self, _addr: u64) -> BusRead64 { todo!() }
+    fn write8(&self, _addr: u64, _val: u8) -> u32 { todo!() }
+    fn write16(&self, _addr: u64, _val: u16) -> u32 { todo!() }
+    fn write32(&self, _addr: u64, _val: u32) -> u32 { todo!() }
+    fn write64(&self, _addr: u64, _val: u64) -> u32 { todo!() }
+    fn mem_ptr(&self, _addr: u64) -> Option<*const u64> { todo!() }
+    fn read_block(&self, _addr: u64, _buf: &mut [u64]) -> u32 { todo!() }
+    fn write_block(&self, _addr: u64, _buf: &[u64]) -> u32 { todo!() }
+    #[cfg(feature = "jitv2")]
+    fn gen_ptr(&self, _addr: u64) -> *const std::sync::atomic::AtomicU64 { todo!() }
+}
+
+/// The first 16 KiB of the processor's physical space: storage of its own,
+/// not an alias of SDRAM (the IDE diagnostics tell the two apart), with its
+/// own jitv2 generation counters, since the kernel writes its exception
+/// vectors here. It fills the 64 KiB decode slot at 0, so it answers
+/// 0x4000..0x10000 with a bus error itself. Zero at power-on.
+pub struct LowMemory {
+    _todo: (),
+}
+
+impl LowMemory {
+    pub fn new() -> Self {
+        todo!()
+    }
+}
+
+impl Default for LowMemory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BusDevice for LowMemory {
+    fn read8(&self, _addr: u64) -> BusRead8 { todo!() }
+    fn read16(&self, _addr: u64) -> BusRead16 { todo!() }
+    fn read32(&self, _addr: u64) -> BusRead32 { todo!() }
+    fn read64(&self, _addr: u64) -> BusRead64 { todo!() }
+    fn write8(&self, _addr: u64, _val: u8) -> u32 { todo!() }
+    fn write16(&self, _addr: u64, _val: u16) -> u32 { todo!() }
+    fn write32(&self, _addr: u64, _val: u32) -> u32 { todo!() }
+    fn write64(&self, _addr: u64, _val: u64) -> u32 { todo!() }
+    #[cfg(feature = "jitv2")]
+    fn gen_ptr(&self, _addr: u64) -> *const std::sync::atomic::AtomicU64 { todo!() }
+}
+
+/// `buf.len()` bytes from physical `addr` of `mem` (a `dma_view`), for a
+/// master that moves bytes. All or nothing: false if any byte is not
+/// memory, and then `buf` is zero.
+pub fn dma_read_bytes(mem: &dyn BusDevice, addr: u64, buf: &mut [u8]) -> bool {
+    if buf.is_empty() {
+        return true;
+    }
+    let Some((first, words)) = covering(addr, buf.len()) else {
+        buf.fill(0);
+        return false;
+    };
+    let mut w = vec![0u64; words];
+    if mem.read_block(first, &mut w) != BUS_OK {
+        buf.fill(0);
+        return false;
+    }
+    let skip = (addr - first) as usize;
+    for (i, b) in buf.iter_mut().enumerate() {
+        let k = skip + i;
+        *b = w[k / 8].to_be_bytes()[k % 8];
+    }
+    true
+}
+
+/// `data` to physical `addr` of `mem` (a `dma_view`). All or nothing:
+/// false if any byte is not memory, and then nothing is written. Partial
+/// doublewords at the ends go as masked writes, so the bytes around them
+/// are left alone.
+pub fn dma_write_bytes(mem: &dyn BusDevice, addr: u64, data: &[u8]) -> bool {
+    if data.is_empty() {
+        return true;
+    }
+    let Some((first, words)) = covering(addr, data.len()) else { return false };
+    // The check: a read of the whole span fails exactly when a write would.
+    let mut probe = vec![0u64; words];
+    if mem.read_block(first, &mut probe) != BUS_OK {
+        return false;
+    }
+    let mut vals = vec![0u64; words];
+    let mut masks = vec![0u64; words];
+    let skip = (addr - first) as usize;
+    for (i, &b) in data.iter().enumerate() {
+        let k = skip + i;
+        let sh = 56 - 8 * (k % 8);
+        vals[k / 8] |= (b as u64) << sh;
+        masks[k / 8] |= 0xff << sh;
+    }
+    let mut i = 0;
+    while i < words {
+        let at = first + 8 * i as u64;
+        if masks[i] != u64::MAX {
+            if mem.write64_masked(at, vals[i], masks[i]) != BUS_OK {
+                return false;
+            }
+            i += 1;
+            continue;
+        }
+        let j = (i..words).find(|&j| masks[j] != u64::MAX).unwrap_or(words);
+        if mem.write_block(at, &vals[i..j]) != BUS_OK {
+            return false;
+        }
+        i = j;
+    }
+    true
+}
+
+/// The aligned doubleword span covering `len` bytes at `addr`: its first
+/// address and how many doublewords. `None` if it would wrap.
+fn covering(addr: u64, len: usize) -> Option<(u64, usize)> {
+    let end = addr.checked_add(len as u64)?;
+    let first = addr & !7;
+    let last = end.checked_add(7)? & !7;
+    Some((first, ((last - first) / 8) as usize))
+}
+
+#[cfg(test)]
+mod dma_tests {
+    use super::*;
+    use crate::traits::BUS_ERR;
+
+    /// 64 bytes of memory at 0x1000, big-endian, 8- and 32-bit only.
+    struct Bytes(parking_lot::Mutex<[u8; 64]>);
+
+    impl Bytes {
+        fn at(&self, a: u64) -> Option<usize> {
+            (0x1000..0x1040).contains(&a).then(|| (a - 0x1000) as usize)
+        }
+    }
+
+    impl BusDevice for Bytes {
+        fn read8(&self, a: u64) -> BusRead8 {
+            self.at(a).map_or(BusRead8::err(), |o| BusRead8::ok(self.0.lock()[o]))
+        }
+        fn write8(&self, a: u64, v: u8) -> u32 {
+            self.at(a).map_or(BUS_ERR, |o| { self.0.lock()[o] = v; BUS_OK })
+        }
+        fn read32(&self, a: u64) -> BusRead32 {
+            match self.at(a) {
+                Some(o) if o + 4 <= 64 => {
+                    let m = self.0.lock();
+                    BusRead32::ok(u32::from_be_bytes(m[o..o + 4].try_into().unwrap()))
+                }
+                _ => BusRead32::err(),
+            }
+        }
+        fn write32(&self, a: u64, v: u32) -> u32 {
+            match self.at(a) {
+                Some(o) if o + 4 <= 64 => {
+                    self.0.lock()[o..o + 4].copy_from_slice(&v.to_be_bytes());
+                    BUS_OK
+                }
+                _ => BUS_ERR,
+            }
+        }
+    }
+
+    fn mem() -> Bytes {
+        Bytes(parking_lot::Mutex::new(std::array::from_fn(|i| i as u8)))
+    }
+
+    #[test]
+    fn unaligned_bytes_read_and_write_in_place() {
+        let m = mem();
+        let mut buf = [0u8; 11];
+        assert!(dma_read_bytes(&m, 0x1003, &mut buf));
+        assert_eq!(buf, [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert!(dma_write_bytes(&m, 0x1005, &[0xaa; 20]));
+        let got = *m.0.lock();
+        assert_eq!(&got[..5], &[0, 1, 2, 3, 4]);
+        assert_eq!(&got[5..25], &[0xaa; 20]);
+        assert_eq!(&got[25..27], &[25, 26], "the bytes after are left alone");
+    }
+
+    #[test]
+    fn a_transfer_off_the_end_of_memory_moves_nothing() {
+        let m = mem();
+        let mut buf = [0x55u8; 8];
+        assert!(!dma_read_bytes(&m, 0x103c, &mut buf));
+        assert_eq!(buf, [0; 8]);
+        assert!(!dma_write_bytes(&m, 0x103c, &[0xee; 8]));
+        assert_eq!(m.0.lock()[0x3c..], [0x3c, 0x3d, 0x3e, 0x3f]);
     }
 }
 

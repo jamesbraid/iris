@@ -23,13 +23,15 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::dev::heart::{Heart, HEART_WIDGET};
-use crate::dev::heart_mem::{Decode, HeartMemory, LOW_ALIAS_SIZE, RAM_BASE};
+use crate::dev::heart_mem::{Decode, HeartMemory, HeartRam, LowMemory, LOW_ALIAS_SIZE, RAM_BASE};
 use crate::dev::ioc3::Ioc3;
 use crate::dev::sflash::Flash;
 use crate::dev::xbow::Xbow;
 use crate::dev::bridge::{octane_slots, Bridge};
 use crate::ip32::Stub;
 use crate::pci::PciBusDevice;
+use crate::ppmem::devmap::{Entry, PHYS_MASK, SLOT_SHIFT};
+use crate::ppmem::SparseDeviceMap;
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, BUS_ERR, BUS_OK};
 
 pub const HEART_PIU_BASE: u32 = 0x0ff0_0000;
@@ -54,6 +56,237 @@ pub struct Ip30Options {
     pub nvram_file: Option<std::path::PathBuf>,
     /// The Ethernet address in the MAC NIC.
     pub mac: [u8; 6],
+}
+
+// ---------------------------------------------------------------------------
+// The processor's physical map as one decode table, built the way
+// `Physical` is for the Indy. This replaces `Ip30Bus` below.
+// ---------------------------------------------------------------------------
+
+/// Widget `w`'s small window: 16 MB at `0x1000_0000 + (w << 24)`.
+pub const fn widget_small_base(w: u8) -> u64 {
+    0x1000_0000 | (w as u64) << 24
+}
+pub const WIDGET_SMALL_SIZE: u64 = 0x0100_0000;
+/// Widget `w`'s large window (widgets 8 to 15): 64 GB at `w << 36`.
+pub const fn widget_large_base(w: u8) -> u64 {
+    (w as u64) << 36
+}
+pub const WIDGET_LARGE_SIZE: u64 = 1 << 36;
+/// Where SDRAM space ends: the first large window. Everything from
+/// `RAM_BASE` to here goes to `HeartRam`, which decodes MEMCFG itself.
+pub const SDRAM_SPACE_END: u64 = widget_large_base(8);
+
+/// What answers an address nothing claims: a bus error. The first 64
+/// distinct accesses are kept for the monitor.
+#[derive(Default)]
+struct Unmapped {
+    seen: Mutex<Vec<(u64, bool)>>,
+}
+
+impl Unmapped {
+    fn miss(&self, addr: u64, write: bool) -> u32 {
+        let mut u = self.seen.lock();
+        if u.len() < 64 && !u.iter().any(|&(a, w)| a == addr && w == write) {
+            u.push((addr, write));
+        }
+        BUS_ERR
+    }
+}
+
+impl BusDevice for Unmapped {
+    fn read8(&self, addr: u64) -> BusRead8 { self.miss(addr, false); BusRead8::err() }
+    fn read16(&self, addr: u64) -> BusRead16 { self.miss(addr, false); BusRead16::err() }
+    fn read32(&self, addr: u64) -> BusRead32 { self.miss(addr, false); BusRead32::err() }
+    fn read64(&self, addr: u64) -> BusRead64 { self.miss(addr, false); BusRead64::err() }
+    fn write8(&self, addr: u64, _: u8) -> u32 { self.miss(addr, true) }
+    fn write16(&self, addr: u64, _: u16) -> u32 { self.miss(addr, true) }
+    fn write32(&self, addr: u64, _: u32) -> u32 { self.miss(addr, true) }
+    fn write64(&self, addr: u64, _: u64) -> u32 { self.miss(addr, true) }
+}
+
+/// The Octane's processor-side physical bus: a `SparseDeviceMap` of 64 KB
+/// slots over the 40-bit space, each pointing at the device that answers
+/// it. Every access is one mask, one table load and a call; there is no
+/// lock and no decode chain.
+///
+/// Devices see full physical addresses (masked to 40 bits), not offsets,
+/// and mask to their own window. A device that fills only part of a slot
+/// answers the rest of it itself (low memory bus-errors 0x4000..0x10000).
+///
+/// Built in three steps, as `Physical` is: `new`, then the machine
+/// registers devices (`map`, `attach_widget`), then `init` fills the table
+/// and from then on the CPU may run. Table changes after that
+/// (`remap_banks`, `set_widget_link`) come from register writes on the CPU
+/// thread; readers on device threads see the old slot or the new one,
+/// never a torn one (`docs/devmap-design.md`).
+pub struct Ip30Physical {
+    devmap: SparseDeviceMap,
+    /// `devmap.base()`, cached for the hot path.
+    map_base: *const Entry,
+    ram: Arc<HeartRam>,
+    low: Arc<LowMemory>,
+    unmapped: Arc<Unmapped>,
+    /// The table holds raw pointers; these keep what they point at alive.
+    keep: Mutex<Vec<Arc<dyn BusDevice>>>,
+    /// The widgets on the Xbow's ports 8 to 15, and whether each also
+    /// takes its large window.
+    widgets: Mutex<[Option<(Arc<dyn BusDevice>, bool)>; 16]>,
+}
+
+// SAFETY: the table's pointers are into devices `keep` (or the fields
+// above) hold for the life of the bus; every device is Send + Sync, and the
+// table itself is only changed through `SparseDeviceMap`'s own lock.
+unsafe impl Send for Ip30Physical {}
+unsafe impl Sync for Ip30Physical {}
+
+impl Ip30Physical {
+    /// An empty map over `ram` (SDRAM space) and `low` (physical 0).
+    pub fn new(ram: Arc<HeartRam>, low: Arc<LowMemory>) -> std::io::Result<Self> {
+        let devmap = SparseDeviceMap::new()?;
+        let map_base = devmap.base();
+        Ok(Self {
+            devmap,
+            map_base,
+            ram,
+            low,
+            unmapped: Arc::new(Unmapped::default()),
+            keep: Mutex::new(Vec::new()),
+            widgets: Mutex::new(Default::default()),
+        })
+    }
+
+    fn fill(&self, start: u64, end: u64, dev: Entry) {
+        self.devmap
+            .fill_bytes(start, end, dev)
+            .unwrap_or_else(|e| panic!("ip30: mapping {start:#x}..{end:#x}: {e}"));
+    }
+
+    /// Put `dev` at physical `start..end` (`end` exclusive, rounded up to a
+    /// 64 KB slot): HEART's PIU registers, the Xbow's window (widget 0) and
+    /// HEART's widget registers (widget 8), none of which a link gates.
+    /// Takes effect at once; a later `map` over the same slots wins.
+    pub fn map(&self, start: u64, end: u64, dev: Arc<dyn BusDevice>) {
+        self.fill(start, end, Arc::as_ptr(&dev));
+        self.keep.lock().push(dev);
+    }
+
+    /// Put `dev` on the Xbow's port `w` (9 to 15): its small window and,
+    /// with `large`, its large window. Routed only while the link is
+    /// alive; until `set_widget_link(w, true)` both windows bus-error.
+    pub fn attach_widget(&self, w: u8, dev: Arc<dyn BusDevice>, large: bool) {
+        assert!((9..16).contains(&w), "ip30: widget {w} is not a port the Xbow switches");
+        self.keep.lock().push(dev.clone());
+        self.widgets.lock()[w as usize] = Some((dev, large));
+    }
+
+    /// Fill the table: bus error by default, low memory, SDRAM space, and
+    /// every attached widget's windows as its link stands (dead). Call once,
+    /// after the devices are registered and before the CPU runs.
+    pub fn init(&self) {
+        let unmapped: Entry = Arc::as_ptr(&self.unmapped) as *const dyn BusDevice;
+        self.devmap
+            .set_default(unmapped)
+            .unwrap_or_else(|e| panic!("ip30: setting the bus-error default: {e}"));
+        self.fill(0, 1 << 32, unmapped);
+        self.fill(0, 1 << SLOT_SHIFT, Arc::as_ptr(&self.low) as *const dyn BusDevice);
+        self.fill(RAM_BASE, SDRAM_SPACE_END, Arc::as_ptr(&self.ram) as *const dyn BusDevice);
+        for w in 9..16 {
+            self.set_widget_link(w, false);
+        }
+    }
+
+    /// HEART's MEMCFG words changed: memory decodes against them from now
+    /// on. HEART calls this (through the machine) from the MEMCFG write.
+    pub fn remap_banks(&self, memcfg: [u32; 4]) {
+        self.ram.set_memcfg(memcfg);
+    }
+
+    /// The Xbow brought widget `w`'s link up or took it down: point its
+    /// windows at the widget or at the bus error. The Xbow's link-change
+    /// callback lands here, outside the Xbow's own lock.
+    pub fn set_widget_link(&self, w: u8, alive: bool) {
+        let unmapped: Entry = Arc::as_ptr(&self.unmapped) as *const dyn BusDevice;
+        let (dev, large) = match &self.widgets.lock()[w as usize] {
+            Some((d, large)) if alive => (Arc::as_ptr(d), *large),
+            Some((_, large)) => (unmapped, *large),
+            None => (unmapped, false),
+        };
+        let small = widget_small_base(w);
+        self.fill(small, small + WIDGET_SMALL_SIZE, dev);
+        if large {
+            let base = widget_large_base(w);
+            self.fill(base, base + WIDGET_LARGE_SIZE, dev);
+        }
+    }
+
+    /// Memory as the bus masters (the Bridge and its `PciDma`s, IMPACT's
+    /// HQ4) reach it: `HeartRam::dma_view`.
+    pub fn memory(&self) -> Arc<dyn BusDevice> {
+        self.ram.dma_view()
+    }
+
+    /// Accesses that hit nothing, first 64 distinct, as `(addr, is_write)`.
+    pub fn unmapped(&self) -> Vec<(u64, bool)> {
+        self.unmapped.seen.lock().clone()
+    }
+
+    /// The device behind `addr`: one indexed load.
+    #[inline(always)]
+    fn dev_at(&self, addr: u64) -> &dyn BusDevice {
+        // SAFETY: `map_base` spans the whole table for the life of
+        // `devmap`; a page nobody filled faults in as the default device,
+        // and every entry points at a device this bus keeps alive.
+        unsafe { &**self.map_base.add(((addr & PHYS_MASK) >> SLOT_SHIFT) as usize) }
+    }
+}
+
+/// Every access forwarded to the slot's device, the fast paths included.
+/// (A shortcut through `HeartRam::space`'s ppmem window, as
+/// `Physical::ppmem_ptr` takes, can go in front of `mem_ptr`, `read_block`
+/// and `write_block` without changing what they return.)
+impl BusDevice for Ip30Physical {
+    fn read8(&self, a: u64) -> BusRead8 { self.dev_at(a).read8(a & PHYS_MASK) }
+    fn read16(&self, a: u64) -> BusRead16 { self.dev_at(a).read16(a & PHYS_MASK) }
+    fn read32(&self, a: u64) -> BusRead32 { self.dev_at(a).read32(a & PHYS_MASK) }
+    fn read64(&self, a: u64) -> BusRead64 { self.dev_at(a).read64(a & PHYS_MASK) }
+    fn write8(&self, a: u64, v: u8) -> u32 { self.dev_at(a).write8(a & PHYS_MASK, v) }
+    fn write16(&self, a: u64, v: u16) -> u32 { self.dev_at(a).write16(a & PHYS_MASK, v) }
+    fn write32(&self, a: u64, v: u32) -> u32 { self.dev_at(a).write32(a & PHYS_MASK, v) }
+    fn write64(&self, a: u64, v: u64) -> u32 { self.dev_at(a).write64(a & PHYS_MASK, v) }
+    fn write64_masked(&self, a: u64, v: u64, m: u64) -> u32 { self.dev_at(a).write64_masked(a & PHYS_MASK, v, m) }
+    fn dma_read64(&self, a: u64) -> BusRead64 { self.dev_at(a).dma_read64(a & PHYS_MASK) }
+    fn dma_write64(&self, a: u64, v: u64) -> u32 { self.dev_at(a).dma_write64(a & PHYS_MASK, v) }
+    fn mem_ptr(&self, a: u64) -> Option<*const u64> { self.dev_at(a).mem_ptr(a & PHYS_MASK) }
+    fn read_block(&self, a: u64, buf: &mut [u64]) -> u32 { self.dev_at(a).read_block(a & PHYS_MASK, buf) }
+    fn write_block(&self, a: u64, buf: &[u64]) -> u32 { self.dev_at(a).write_block(a & PHYS_MASK, buf) }
+    #[cfg(feature = "jitv2")]
+    fn gen_ptr(&self, a: u64) -> *const AtomicU64 { self.dev_at(a).gen_ptr(a & PHYS_MASK) }
+}
+
+/// The CPU's cached view of the bus, wrapped around the `Ip30Physical` the
+/// CPU is given; bus masters never see it. The PROM stores to its own
+/// variables at their boot-flash addresses with the caches on, and an
+/// R10000 keeps such a line dirty in its cache; iris's cache model passes
+/// every cached access to memory, so the lines are held here instead.
+/// Approximation: a held line is never written back or evicted; reset
+/// empties it. Cached accesses in 0x1fc0_0000..0x2000_0000 use the held
+/// lines; everything else, `mem_ptr`, `read_block`, `write_block` and
+/// `gen_ptr` included, goes straight to the bus.
+pub struct CachedFlashLines {
+    _todo: (),
+}
+
+impl CachedFlashLines {
+    pub fn new(bus: Arc<dyn BusDevice>) -> Self {
+        let _ = bus;
+        todo!()
+    }
+
+    /// Forget every line, as a reset loses the cache's contents.
+    pub fn clear(&self) {
+        todo!()
+    }
 }
 
 pub struct Ip30Bus {
@@ -443,8 +676,13 @@ impl crate::traits::Device for Ip30Bus {
     }
 }
 
+/// Cross-device tests: the chips wired as the machine wires them, no CPU.
 #[cfg(test)]
-mod tests {
+mod tests;
+
+/// `Ip30Bus`'s own tests, until it goes.
+#[cfg(test)]
+mod bus_tests {
     use super::*;
 
     fn bus() -> Ip30Bus {

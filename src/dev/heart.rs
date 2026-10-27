@@ -281,6 +281,21 @@ impl Heart {
     }
 }
 
+/// HEART as the target of interrupts: line `n` is ISR bit `n`, the vector
+/// (0 to 63) a widget's interrupt packet carries or a device wired to HEART
+/// raises. A true level is a set packet, false the matching clear. ISR is
+/// not an OR of its inputs: two sources on one vector share the bit, as on
+/// the hardware. A line beyond 63 cannot be carried by a packet and is
+/// dropped. Safe from any thread; it may drive the CPU's interrupt word,
+/// a leaf, under HEART's own lock, and must not call anything else.
+impl crate::irq::InterruptController for Heart {
+    fn set_line(&self, line: u32, level: bool) {
+        if line < 64 {
+            self.set_vector(line, level);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

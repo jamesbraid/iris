@@ -341,6 +341,56 @@ impl Ds2502 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The records on the shared `w1` bus. Everything above this line is the
+// register-level master these replace; it goes once HEART, the Bridge and
+// the IOC3 have moved onto `crate::dev::w1`.
+// ---------------------------------------------------------------------------
+
+/// Text fields of an SGI board record, as a part's first two 32-byte pages
+/// hold them, each page closed by an inverted CRC-16.
+pub struct BoardRecord<'a> {
+    pub barcode: &'a str,
+    /// Twelve characters: `030-0891-003`.
+    pub part: &'a str,
+    pub revision: &'a str,
+    pub name: &'a str,
+}
+
+impl BoardRecord<'_> {
+    /// The two pages.
+    pub fn image(&self) -> [u8; 64] {
+        todo!()
+    }
+}
+
+/// A board record on a DS2505 (family 0x0b) with the 48-bit `serial`.
+pub fn board_record_part(record: &BoardRecord, serial: u64) -> crate::dev::w1::Ds2505 {
+    let _ = (record, serial);
+    todo!()
+}
+
+/// The Ethernet-address part: a DS2501 (family 0x91) whose page 0 holds the
+/// marker 0x0a, the station address reversed at bytes 5..=10 and an
+/// inverted CRC-16 over bytes 0..=10 at 11..=12.
+pub fn ethernet_address_part(mac: [u8; 6], serial: u64) -> crate::dev::w1::Ds2502 {
+    let _ = (mac, serial);
+    todo!()
+}
+
+/// `ethernet_address_part` with the synthetic serial the machine uses, as
+/// a part for a `w1::Bus`.
+pub fn mac_nic(mac: [u8; 6]) -> Box<dyn crate::dev::w1::Part> {
+    let _ = mac;
+    todo!()
+}
+
+/// `board_record_part` as a part for a `w1::Bus`.
+pub fn board_nic(record: &BoardRecord, serial: u64) -> Box<dyn crate::dev::w1::Part> {
+    let _ = (record, serial);
+    todo!()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
