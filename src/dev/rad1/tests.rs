@@ -184,7 +184,7 @@ fn ust_counter_and_control() {
 #[test]
 fn ust_wraps_to_32_bits() {
     let r = card();
-    r.state.lock().unwrap().ust_count = u32::MAX - 1;
+    r.state.lock().ust_count = u32::MAX - 1;
     wr(&r, 0x40, 0x0e);
     wr(&r, 0x40, 0x0a);
     r.fake_ns.store(960 * 3, Ordering::Relaxed);
@@ -223,13 +223,13 @@ fn analog_output_enable_needs_a_matching_ring() {
     program(&r, &RING_OUTPUT, 0x10_0000, 0xffff_f008);
     wr(&r, 0x58, 0x2000_0001);
     assert_eq!(rd(&r, 0x58), 0x2000_0001);
-    assert!(r.state.lock().unwrap().chan[CH_OUT].running);
-    assert_eq!(r.state.lock().unwrap().chan[CH_OUT].len, 0x1000);
+    assert!(r.state.lock().chan[CH_OUT].running);
+    assert_eq!(r.state.lock().chan[CH_OUT].len, 0x1000);
     // The ring cannot be rewritten while it runs.
     wr(&r, 0x4f8, 0x20_0000);
     assert_eq!(rd(&r, 0x4f8), 0x10_0000);
     wr(&r, 0x58, 0x2000_0000);
-    assert!(!r.state.lock().unwrap().chan[CH_OUT].running);
+    assert!(!r.state.lock().chan[CH_OUT].running);
     wr(&r, 0x4f8, 0x20_0000);
     assert_eq!(rd(&r, 0x4f8), 0x20_0000);
     // Values other than the two enables are refused.
@@ -243,14 +243,14 @@ fn analog_input_and_subcode_enable() {
     program(&r, &RING_INPUT, 0x11_0000, 0xffff_f000);
     wr(&r, 0x4c, 0x0300_0001);
     assert_eq!(rd(&r, 0x4c), 0x0300_0001);
-    assert!(r.state.lock().unwrap().chan[CH_IN].running);
+    assert!(r.state.lock().chan[CH_IN].running);
     wr(&r, 0x4c, 0x0300_0000);
-    assert!(!r.state.lock().unwrap().chan[CH_IN].running);
+    assert!(!r.state.lock().chan[CH_IN].running);
 
     program(&r, &RING_AES_SUB, 0x12_0000, 0xffff_f030);
     wr(&r, 0x48, 4);
     assert_eq!(rd(&r, 0x48), 4);
-    assert!(r.state.lock().unwrap().chan[CH_AES_SUB].running);
+    assert!(r.state.lock().chan[CH_AES_SUB].running);
 }
 
 #[test]
@@ -272,12 +272,12 @@ fn status_dma_control() {
     wr(&r, 0x4bc, 0xffff_c078);
     wr(&r, 0x5c, 0x40003 | (330 << 2));
     assert_eq!(rd(&r, 0x5c), 0x40003 | (330 << 2));
-    assert!(r.state.lock().unwrap().status_running);
+    assert!(r.state.lock().status_running);
     // Rewriting the limit while the ring runs is refused.
     wr(&r, 0x504, 0);
     assert_eq!(rd(&r, 0x504), 0xffff_c078);
     wr(&r, 0x5c, 0x1fffc);
-    assert!(!r.state.lock().unwrap().status_running);
+    assert!(!r.state.lock().status_running);
     // A zero interval names no period.
     wr(&r, 0x5c, 0x40003);
     assert_ne!(rd(&r, 0x5c), 0x40003);
@@ -404,7 +404,7 @@ fn output_ring_is_consumed_at_the_sample_rate() {
     // Past the 512-frame ring the pointer wraps.
     at(&r, 20_000_000);
     assert_eq!(rd(&r, 0x2c) >> 18, 882);
-    assert_eq!(r.state.lock().unwrap().chan[CH_OUT].offset, (882 - 512) * 8);
+    assert_eq!(r.state.lock().chan[CH_OUT].offset, (882 - 512) * 8);
     // Stopping holds the pointer where the sample clock had got to.
     at(&r, 30_000_000);
     wr(&r, 0x58, 0x2000_0000);
@@ -419,7 +419,7 @@ fn output_ring_unmapped_stops_the_channel() {
     wr(&r, 0x58, 0x2000_0001);
     at(&r, 10_000_000);
     assert_eq!(rd(&r, 0x18), 0);
-    assert!(!r.state.lock().unwrap().chan[CH_OUT].running);
+    assert!(!r.state.lock().chan[CH_OUT].running);
 }
 
 #[test]
@@ -463,8 +463,8 @@ fn continuous_status_fills_slots_in_ring_order() {
     wr(&r, 0x4b4, 0x30_0000);
     wr(&r, 0x4bc, 0xffff_c078);
     wr(&r, 0x5c, 0x40003 | (3300 << 2));
-    let gen = r.state.lock().unwrap().status_gen;
-    assert_eq!(r.state.lock().unwrap().status_slots, 128);
+    let gen = r.state.lock().status_gen;
+    assert_eq!(r.state.lock().status_slots, 128);
     // Interval 3300 at 33 MHz is 100 us.
     at(&r, 100_000);
     assert_eq!(r.status_tick(gen), Some(200_000));
@@ -487,7 +487,7 @@ fn status_schedule_restarts_when_far_behind() {
     wr(&r, 0x4b4, 0x30_0000);
     wr(&r, 0x4bc, 0xffff_c078);
     wr(&r, 0x5c, 0x40003 | (3300 << 2));
-    let gen = r.state.lock().unwrap().status_gen;
+    let gen = r.state.lock().status_gen;
     at(&r, 1_000_000_000);
     assert_eq!(r.status_tick(gen), Some(1_000_100_000));
 }
@@ -502,10 +502,10 @@ fn reset_ends_engines_and_status() {
     wr(&r, 0x4b4, 0x30_0000);
     wr(&r, 0x4bc, 0xffff_c078);
     wr(&r, 0x5c, 0x40003 | (3300 << 2));
-    let gen = r.state.lock().unwrap().status_gen;
+    let gen = r.state.lock().status_gen;
     r.reset();
     assert_eq!(r.status_tick(gen), None);
-    assert!(!r.state.lock().unwrap().chan[CH_OUT].running);
+    assert!(!r.state.lock().chan[CH_OUT].running);
     assert_eq!(rd(&r, 0x2c), 0);
 }
 
@@ -522,7 +522,7 @@ fn rings_at_the_top_of_the_bus_fail_rather_than_wrap() {
     wr(&r, 0x58, 0x2000_0001);
     at(&r, 10_000_000);
     assert_eq!(rd(&r, 0x2c), 0);
-    assert!(!r.state.lock().unwrap().chan[CH_OUT].running);
+    assert!(!r.state.lock().chan[CH_OUT].running);
 
     // A one-shot status slot whose words run past the top.
     wr(&r, 0x500, 0xffff_ffc0);
@@ -536,7 +536,7 @@ fn rings_at_the_top_of_the_bus_fail_rather_than_wrap() {
     wr(&r, 0x4b8, 0xffff_ffff);
     wr(&r, 0x4bc, 0xffff_c078);
     wr(&r, 0x5c, 0x40003 | (3300 << 2));
-    let gen = r.state.lock().unwrap().status_gen;
+    let gen = r.state.lock().status_gen;
     at(&r, 20_000_000);
     assert_eq!(r.status_tick(gen), None, "the schedule stops on the failed slot");
 }
@@ -569,7 +569,7 @@ fn dropping_the_card_joins_its_status_thread() {
     wr(&r, 0x4b4, 0x30_0000);
     wr(&r, 0x4bc, 0xffff_c078);
     wr(&r, 0x5c, 0x40003 | (3300 << 2));
-    assert_eq!(r.threads.lock().unwrap().len(), 1);
+    assert_eq!(r.threads.lock().len(), 1);
     let weak = Arc::downgrade(&r.inner);
     drop(r);
     assert!(weak.upgrade().is_none());
@@ -603,7 +603,7 @@ fn a_long_catch_up_skips_whole_revolutions() {
     at(&r, 1_000_000_000_000);
     let due: u64 = 44_100_000;
     assert_eq!(u64::from(rd(&r, 0x18) >> 18), due & 0x3fff);
-    let c = r.state.lock().unwrap().chan[CH_IN];
+    let c = r.state.lock().chan[CH_IN];
     assert_eq!(c.frames, due);
     assert_eq!(c.offset, (due * 8) % c.len);
     assert!(dma.1.load(Ordering::Relaxed) < 16, "{} transfers", dma.1.load(Ordering::Relaxed));
