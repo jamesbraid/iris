@@ -14,9 +14,12 @@
 //! The register and ring contract follow the part's datasheet and the public
 //! Linux and OpenBSD drivers. Where the model approximates, it says so:
 //!
-//! * Commands complete inside the doorbell write that starts them, so there
-//!   is never more than one outstanding and no abort/recovery mailbox
-//!   commands exist (the ISP1040 does not carry them; they answer "invalid").
+//! * Commands run one at a time, in ring order, on the adapter's own thread:
+//!   the doorbell write returns at once and the completion and its
+//!   interrupt follow when the target has answered, as the part's would.
+//!   No abort/recovery mailbox commands exist (the ISP1040 does not carry
+//!   them; they answer "invalid"). A soft reset or a queue initialisation
+//!   waits for the command in flight and drops its completion.
 //! * A completion with no room in the response ring is held and posted when
 //!   the driver acknowledges a slot; the request ring is not consumed while
 //!   any completion is held.
@@ -32,7 +35,7 @@
 //! are not decoded and are noted once.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
 use crate::irq::IrqLine;
 use crate::pci::{Bar, PciBusDevice, PciConfig, PciDma, PCI_INTA};
@@ -212,7 +215,49 @@ struct Pending {
     sense: Vec<u8>,
 }
 
+/// What the request-ring thread and the register side tell each other.
+#[derive(Default)]
+struct Ctl {
+    /// Bumped by every reset and queue initialisation: a command that
+    /// finishes under another epoch has nowhere to post.
+    epoch: u64,
+    /// The ring may have entries the thread has not looked at.
+    work: bool,
+    /// The thread is walking the ring.
+    walking: bool,
+    /// A command is running with the state unlocked.
+    busy: bool,
+    /// Holders that need the thread not to start another command
+    /// (saving and loading state).
+    hold: u32,
+    /// Resets and queue initialisations waiting for the command in flight;
+    /// that command's completion waits for them, and is dropped.
+    settling: u32,
+    shutdown: bool,
+}
+
+/// One request entry, read and ready to run against its target.
+struct Job {
+    handle: u32,
+    target: u8,
+    cdb: Vec<u8>,
+    xfer: usize,
+    to_dev: bool,
+    segs: Vec<(u64, u32)>,
+    described: u64,
+}
+
+/// What reading a request entry came to.
+enum Prepared {
+    /// The fabric refused the entry; the walk stops on it.
+    Refused,
+    /// Answered without reaching a target.
+    Answered,
+    Run(Job),
+}
+
 struct State {
+    ctl: Ctl,
     bus_cfg1: u16,
     bus_ctrl: u16,
     bus_status: u16,
@@ -240,6 +285,7 @@ struct State {
 impl State {
     fn new() -> Self {
         let mut s = State {
+            ctl: Ctl::default(),
             bus_cfg1: 0,
             bus_ctrl: 0,
             bus_status: 0,
@@ -271,6 +317,7 @@ impl State {
     /// signature lives in the array so the register test's echo works before
     /// any queue exists.
     fn reset(&mut self) {
+        self.ctl.epoch += 1;
         self.bus_cfg1 = 0;
         self.bus_ctrl = 0;
         self.bus_status = 0;
@@ -312,8 +359,24 @@ impl State {
     }
 }
 
+/// The adapter. Its state lives in a [`Core`] shared with the thread that
+/// runs the request ring.
 pub struct Isp1040 {
+    core: Arc<Core>,
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl std::ops::Deref for Isp1040 {
+    type Target = Core;
+    fn deref(&self) -> &Core { &self.core }
+}
+
+pub struct Core {
     st: Mutex<State>,
+    /// Signals [`Ctl`] changes both ways.
+    wake: Condvar,
+    /// Serialises driving the interrupt line; see [`Core::sync_irq`].
+    line_order: Mutex<()>,
     /// The targets on the bus, by SCSI id.
     targets: Mutex<[Option<ScsiDevice>; 16]>,
     dma: OnceLock<Arc<dyn PciDma>>,
@@ -343,8 +406,32 @@ impl Isp1040 {
 
     /// The controller at `index`: 0 internal, 1 external.
     pub fn new_at(index: u8) -> Self {
+        let core = Arc::new(Core::new_at(index));
+        let c = core.clone();
+        let worker = std::thread::Builder::new()
+            .name(format!("ISP1040-{index}"))
+            .spawn(move || c.run_ring())
+            .expect("spawn isp1040 thread");
+        Self { core, worker: Mutex::new(Some(worker)) }
+    }
+}
+
+impl Drop for Isp1040 {
+    fn drop(&mut self) {
+        self.st.lock().unwrap().ctl.shutdown = true;
+        self.wake.notify_all();
+        if let Some(h) = self.worker.lock().unwrap().take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Core {
+    fn new_at(index: u8) -> Self {
         Self {
             st: Mutex::new(State::new()),
+            wake: Condvar::new(),
+            line_order: Mutex::new(()),
             targets: Mutex::new(std::array::from_fn(|_| None)),
             dma: OnceLock::new(),
             irq: OnceLock::new(),
@@ -385,11 +472,67 @@ impl Isp1040 {
         self.st.lock().unwrap().irq_level()
     }
 
+    /// Drive the line to the level the state gives. The level is read
+    /// after taking `line_order`, so whichever of the CPU and the ring
+    /// thread drives last has seen the latest state. `st` is never held
+    /// when this is called.
     fn sync_irq(&self) {
+        let _order = self.line_order.lock().unwrap();
         let level = self.st.lock().unwrap().irq_level();
         if let Some(l) = self.irq.get() {
             l.set(level);
         }
+    }
+
+    /// Block until the ring thread has run everything it was given and is
+    /// waiting for more (or is held on a full response ring).
+    pub fn wait_idle(&self) {
+        let mut st = self.st.lock().unwrap();
+        while (st.ctl.work && st.ctl.hold == 0) || st.ctl.walking {
+            st = self.wake.wait(st).unwrap();
+        }
+    }
+
+    /// Wait out the command in flight before a reset or a new queue, keeping
+    /// the lock. The command's completion then waits for the caller's change
+    /// and sees the new epoch.
+    fn settle<'a>(&self, mut st: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
+        st.ctl.settling += 1;
+        while st.ctl.busy {
+            st = self.wake.wait(st).unwrap();
+        }
+        st.ctl.settling -= 1;
+        self.wake.notify_all();
+        st
+    }
+
+    /// A reset or a save is waiting for the command in flight (tests).
+    #[cfg(test)]
+    fn waiting_on_command(&self) -> bool {
+        let st = self.st.lock().unwrap();
+        st.ctl.settling != 0 || st.ctl.hold != 0
+    }
+
+    /// Run `f` on the state with no command in flight and none allowed to
+    /// start: the quiesce point for saving and loading.
+    fn quiesced<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
+        let mut st = self.st.lock().unwrap();
+        st.ctl.hold += 1;
+        // Not `settle`: a command in flight posts its completion first.
+        while st.ctl.busy {
+            st = self.wake.wait(st).unwrap();
+        }
+        let r = f(&mut st);
+        st.ctl.hold -= 1;
+        drop(st);
+        self.wake.notify_all();
+        r
+    }
+
+    /// Tell the ring thread the ring may have moved.
+    fn kick(&self, st: &mut State) {
+        st.ctl.work = true;
+        self.wake.notify_all();
     }
 
     /// Commands run, for the whole session.
@@ -652,12 +795,14 @@ impl Isp1040 {
                 if addr == 0 || st.mailbox[1] == 0 {
                     st.mailbox[0] = mbox::PARAM_ERROR;
                 } else if cmd == mbox::INIT_REQ_QUEUE || cmd == mbox::INIT_REQ_QUEUE_A64 {
+                    st.ctl.epoch += 1;
                     st.rqst_base = addr;
                     st.rqst_len = st.mailbox[1];
                     st.rqst_cons = 0;
                     st.mailbox[MBOX_REQ] = 0;
                     st.mailbox[0] = mbox::COMPLETE;
                 } else {
+                    st.ctl.epoch += 1;
                     st.resp_base = addr;
                     st.resp_len = st.mailbox[1];
                     st.resp_prod = 0;
@@ -668,8 +813,8 @@ impl Isp1040 {
                 }
             }
             // Resets the bus, not the adapter: chip state survives. Mailbox 1
-            // holds the configured reset delay, not a selector. Nothing is
-            // ever outstanding to retire.
+            // holds the configured reset delay, not a selector. A command in
+            // flight is not retired; it completes as it would have.
             mbox::BUS_RESET => st.mailbox[0] = mbox::COMPLETE,
             _ => {
                 self.note(format!("mailbox command {cmd:#06x} not modelled"));
@@ -868,9 +1013,9 @@ impl Isp1040 {
         }
     }
 
-    /// Returns false when the fabric refused the CDB read: the walk stops on
-    /// the entry and nothing is posted.
-    fn handle_request(&self, st: &mut State, addr: u64, entry_count: u8, a64: bool) -> bool {
+    /// Read a request entry. Refused when the fabric refused the CDB read:
+    /// the walk stops on the entry and nothing is posted.
+    fn prepare_request(&self, st: &mut State, addr: u64, entry_count: u8, a64: bool) -> Prepared {
         let handle = self.ld32(addr + REQ_OFF_HANDLE);
         let device = self.ld16(addr + REQ_OFF_DEVICE);
         let cdb_len = self.ld16(addr + REQ_OFF_CDBLEN);
@@ -878,7 +1023,7 @@ impl Isp1040 {
         let mut cdb = [0u8; CDB_FIELD_LEN];
         if !self.dma_read(addr + REQ_OFF_CDB, &mut cdb) {
             self.note(format!("CDB read for the request entry at {addr:#x} refused; request dropped"));
-            return false;
+            return Prepared::Refused;
         }
         let channel = (device >> 15) & 1;
         let target = ((device >> 8) & 0x7f) as u8;
@@ -887,16 +1032,15 @@ impl Isp1040 {
         // A bus this part does not have.
         if channel >= 1 {
             self.post_status(st, Self::incomplete(handle, 0, 0));
-            return true;
+            return Prepared::Answered;
         }
         // GOT_BUS alone is Linux's bad-target; the timeout bit beside it is
         // what lets the empty slot be treated as benign.
         if target > MAX_TARGET || lun > MAX_LUN || !self.has_target(target) {
             self.post_status(st, Self::incomplete(handle, STATE_GOT_BUS, STATUS_FLAG_TIMEOUT));
-            return true;
+            return Prepared::Answered;
         }
 
-        let mut cdb = cdb;
         // The target model reads the unit number from the CDB's second byte.
         cdb[1] = (cdb[1] & 0x1f) | (lun << 5);
         let cdb = &cdb[..(cdb_len as usize).clamp(1, CDB_FIELD_LEN)];
@@ -918,8 +1062,14 @@ impl Isp1040 {
         if known.is_none() {
             xfer = described.min(u32::MAX as u64) as usize;
         }
-
         st.total_cmds += 1;
+        Prepared::Run(Job { handle, target, cdb: cdb.to_vec(), xfer, to_dev, segs, described })
+    }
+
+    /// Run a command against its target and build its completion. The
+    /// state is not locked: this is the part that waits on the disk.
+    fn run_job(&self, job: Job) -> Pending {
+        let Job { handle, target, cdb, xfer, to_dev, segs, described } = job;
         let (status, moved);
         if to_dev {
             let mut buf = Vec::new();
@@ -931,9 +1081,9 @@ impl Isp1040 {
                 buf.extend_from_slice(&chunk);
             }
             moved = buf.len() as u64;
-            status = self.scsi(target, cdb, Some(buf)).1;
+            status = self.scsi(target, &cdb, Some(buf)).1;
         } else {
-            let (data, s) = self.scsi(target, cdb, None);
+            let (data, s) = self.scsi(target, &cdb, None);
             status = s;
             // Offer the target's bytes to the descriptors in order.
             let take = (data.len() as u64).min(described).min(xfer as u64) as usize;
@@ -967,26 +1117,53 @@ impl Isp1040 {
         // Underrun is a short data transfer, not a refused command: a target
         // answering with a status of its own carries the failure there.
         let completion = if unused != 0 && status == 0 { IOCB_DATA_UNDERRUN } else { IOCB_COMPLETE };
-        self.post_status(st, Pending { handle, scsi_status, completion, state_flags, status_flags: 0, resid: unused, sense });
-        true
+        Pending { handle, scsi_status, completion, state_flags, status_flags: 0, resid: unused, sense }
     }
 
-    fn consume_requests(&self, st: &mut State) {
-        if st.rqst_len == 0 {
-            return;
-        }
-        let prod = st.mailbox[MBOX_REQ] % st.rqst_len;
-        // No exact-equality exit terminates for every driver-supplied index
-        // and entry count, so the walk is budgeted by published entries.
-        let mut budget = (prod + st.rqst_len - st.rqst_cons) % st.rqst_len;
-        while budget > 0 {
-            let addr = st.rqst_base + st.rqst_cons as u64 * ENTRY_SIZE as u64;
-            // Commands finish synchronously, so the announced budget never
-            // fills; a held completion stops the ring until the driver frees
-            // room.
-            if !st.pending.is_empty() {
+    /// The ring thread: wait to be kicked, then walk the request ring.
+    fn run_ring(&self) {
+        let mut st = self.st.lock().unwrap();
+        loop {
+            while !st.ctl.shutdown && !(st.ctl.work && st.ctl.hold == 0) {
+                st = self.wake.wait(st).unwrap();
+            }
+            if st.ctl.shutdown {
                 return;
             }
+            st.ctl.work = false;
+            st.ctl.walking = true;
+            st = self.consume_requests(st);
+            st.ctl.walking = false;
+            self.wake.notify_all();
+        }
+    }
+
+    /// Walk the request ring from the adapter's consumer position to the
+    /// driver's producer, one entry at a time. Each command runs with the
+    /// state unlocked, so the CPU's register accesses never wait on a disk.
+    fn consume_requests<'a>(&'a self, mut st: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
+        loop {
+            if st.ctl.shutdown || st.ctl.hold > 0 {
+                // Resume once the holder lets go.
+                st.ctl.work = true;
+                return st;
+            }
+            if st.rqst_len == 0 {
+                return st;
+            }
+            let prod = st.mailbox[MBOX_REQ] % st.rqst_len;
+            // No exact-equality exit terminates for every driver-supplied
+            // index and entry count, so each step is budgeted by the
+            // published entries; every step consumes at least one.
+            let budget = (prod + st.rqst_len - st.rqst_cons) % st.rqst_len;
+            if budget == 0 {
+                return st;
+            }
+            // A held completion stops the ring until the driver frees room.
+            if !st.pending.is_empty() {
+                return st;
+            }
+            let addr = st.rqst_base + st.rqst_cons as u64 * ENTRY_SIZE as u64;
             let entry_type = self.ld8(addr);
             let mut entry_count = self.ld8(addr + 1);
             if entry_count == 0 {
@@ -994,24 +1171,44 @@ impl Isp1040 {
             }
             entry_count = entry_count.min(budget.min(255) as u8);
             match entry_type {
-                ENTRY_TYPE_REQUEST => {
-                    if !self.handle_request(st, addr, entry_count, false) { return; }
+                ENTRY_TYPE_REQUEST | ENTRY_TYPE_COMMAND_A64 => {
+                    let a64 = entry_type == ENTRY_TYPE_COMMAND_A64;
+                    match self.prepare_request(&mut st, addr, entry_count, a64) {
+                        Prepared::Refused => return st,
+                        Prepared::Answered => {}
+                        Prepared::Run(job) => {
+                            let epoch = st.ctl.epoch;
+                            st.ctl.busy = true;
+                            drop(st);
+                            let done = self.run_job(job);
+                            st = self.st.lock().unwrap();
+                            st.ctl.busy = false;
+                            self.wake.notify_all();
+                            while st.ctl.settling != 0 {
+                                st = self.wake.wait(st).unwrap();
+                            }
+                            // A reset or a new queue took the ring away.
+                            if st.ctl.epoch != epoch {
+                                continue;
+                            }
+                            self.post_status(&mut st, done);
+                        }
+                    }
                 }
                 // Continuations are stepped past here; reading segments
                 // visits them.
-                ENTRY_TYPE_COMMAND_A64 => {
-                    if !self.handle_request(st, addr, entry_count, true) { return; }
-                }
                 ENTRY_TYPE_MARKER => {}
                 // Answered incomplete rather than consumed silently.
                 t => {
                     self.note(format!("unexpected request entry type {t:#04x} at index {}", st.rqst_cons));
                     let handle = self.ld32(addr + REQ_OFF_HANDLE);
-                    self.post_status(st, Self::incomplete(handle, 0, 0));
+                    self.post_status(&mut st, Self::incomplete(handle, 0, 0));
                 }
             }
             st.rqst_cons = (st.rqst_cons + entry_count as u16) % st.rqst_len;
-            budget -= entry_count as u16;
+            drop(st);
+            self.sync_irq();
+            st = self.st.lock().unwrap();
         }
     }
 
@@ -1065,7 +1262,7 @@ impl Isp1040 {
             } else {
                 st.resp_cons = val % st.resp_len;
                 self.drain_pending(&mut st);
-                self.consume_requests(&mut st);
+                self.kick(&mut st);
             }
             return;
         }
@@ -1073,7 +1270,7 @@ impl Isp1040 {
             st.mailbox[((off - reg::MAILBOX_BASE) / 2) as usize] = val;
             // Writing the request-in pointer is itself the trigger.
             if off == reg::REQUEST_QUEUE {
-                self.consume_requests(&mut st);
+                self.kick(&mut st);
             }
             return;
         }
@@ -1090,6 +1287,9 @@ impl Isp1040 {
             }
             // Applied after the enables are stored, so the reset wins.
             reg::BUS_CTRL => {
+                if val & CTRL_SOFT_RESET != 0 {
+                    st = self.settle(st);
+                }
                 st.bus_ctrl = val & CTRL_WRITE_MASK;
                 if val & CTRL_SOFT_RESET != 0 {
                     st.reset();
@@ -1099,9 +1299,20 @@ impl Isp1040 {
             reg::NVRAM => st.nvram = val & NVRAM_WRITE_MASK,
             reg::DMA_CMD_CFG => st.dma_cmd_cfg = val & DMA_CFG_WRITE_MASK,
             reg::DMA_DATA_CFG => st.dma_data_cfg = val & DMA_CFG_WRITE_MASK,
-            // Nothing to quiesce: every transfer completes inside its write.
+            // Nothing to quiesce: a command's transfers are its own.
             reg::DMA_CMD_CTRL | reg::DMA_DATA_CTRL => {}
-            reg::HOST_CMD => self.host_command(&mut st, val),
+            reg::HOST_CMD => {
+                // A new queue must not receive the completion of a command
+                // read from the old one.
+                let init = matches!(
+                    st.mailbox[0],
+                    mbox::INIT_REQ_QUEUE | mbox::INIT_REQ_QUEUE_A64 | mbox::INIT_RSP_QUEUE | mbox::INIT_RSP_QUEUE_A64
+                );
+                if val >> HOST_CMD_SHIFT == 0x5 && init {
+                    st = self.settle(st);
+                }
+                self.host_command(&mut st, val)
+            }
             reg::ID_LOW | reg::ID_HIGH | reg::BUS_CFG0 | reg::BUS_STATUS => {
                 drop(st);
                 self.note(format!("write {val:#06x} to read-only register {off:#04x}"));
@@ -1224,7 +1435,18 @@ impl PciBusDevice for Isp1040 {
 
 impl crate::traits::Saveable for Isp1040 {
     fn save_state(&self) -> toml::Value {
-        let st = self.st.lock().unwrap();
+        self.quiesced(|st| Self::save_locked(st))
+    }
+
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        self.quiesced(|st| Self::load_locked(st, v));
+        self.sync_irq();
+        Ok(())
+    }
+}
+
+impl Isp1040 {
+    fn save_locked(st: &State) -> toml::Value {
         let mut t = toml::map::Map::new();
         for (k, v) in [
             ("bus_cfg1", st.bus_cfg1), ("bus_ctrl", st.bus_ctrl), ("bus_status", st.bus_status),
@@ -1262,10 +1484,15 @@ impl crate::traits::Saveable for Isp1040 {
         toml::Value::Table(t)
     }
 
-    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+    /// Unprocessed request entries survive: the ring thread is kicked and
+    /// runs them after the load.
+    fn load_locked(st: &mut State, v: &toml::Value) {
         {
-            let mut st = self.st.lock().unwrap();
+            let ctl = std::mem::take(&mut st.ctl);
             *st = State::new();
+            st.ctl = ctl;
+            st.ctl.epoch += 1;
+            st.ctl.work = true;
             let u16f = |k: &str| get_field(v, k).and_then(toml_u16).unwrap_or(0);
             let u32f = |k: &str| get_field(v, k).and_then(toml_u32).unwrap_or(0);
             st.bus_cfg1 = u16f("bus_cfg1");
@@ -1306,8 +1533,6 @@ impl crate::traits::Saveable for Isp1040 {
                 }
             }
         }
-        self.sync_irq();
-        Ok(())
     }
 }
 

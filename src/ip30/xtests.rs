@@ -437,6 +437,8 @@ fn run_inquiry(swap_set: bool) {
     assert_eq!(word, if swap_set { 0x0101_0000 } else { 0x0000_0101 });
 
     o.isp_w(SLOT_ISP0, ireg::REQUEST_QUEUE, 1);
+    // The command runs on the adapter's own thread.
+    o.isp[0].wait_idle();
     assert_eq!(o.isp_r(SLOT_ISP0, ireg::RESPONSE_QUEUE), 1, "one completion posted");
 
     let s = o.unplace(RESP, ENTRY_SIZE, reversed);
