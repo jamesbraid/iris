@@ -117,6 +117,55 @@ impl CfiFlash {
     pub fn contents(&self) -> Vec<u8> {
         self.st.lock().unwrap().data.clone()
     }
+
+    /// Replace the array with `data` (what [`CfiFlash::contents`] gave), and
+    /// the backing file with it: a snapshot's restore.
+    pub fn set_contents(&self, data: &[u8]) -> Result<(), String> {
+        let mut st = self.st.lock().unwrap();
+        if data.len() != st.data.len() {
+            return Err(format!("saved flash is {} bytes, this part has {}", data.len(), st.data.len()));
+        }
+        st.data.copy_from_slice(data);
+        let len = st.data.len();
+        st.sync(0, len);
+        Ok(())
+    }
+}
+
+/// The command state: which mode reads answer in, and the status register.
+/// The array is not in it; the machine keeps that beside the snapshot
+/// ([`CfiFlash::contents`]), and a file-backed part also has it in its file.
+impl crate::traits::Saveable for CfiFlash {
+    fn save_state(&self) -> toml::Value {
+        let st = self.st.lock().unwrap();
+        let mode = match st.mode {
+            Mode::Array => "array",
+            Mode::Id => "id",
+            Mode::Status => "status",
+            Mode::ProgramData => "program",
+            Mode::EraseConfirm => "erase",
+        };
+        let mut t = toml::map::Map::new();
+        t.insert("mode".into(), toml::Value::String(mode.into()));
+        t.insert("status".into(), crate::snapshot::hex_u8(st.status));
+        toml::Value::Table(t)
+    }
+
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        use crate::snapshot::{get_field, toml_u8};
+        let mode = match get_field(v, "mode").and_then(|m| m.as_str()).unwrap_or("array") {
+            "array" => Mode::Array,
+            "id" => Mode::Id,
+            "status" => Mode::Status,
+            "program" => Mode::ProgramData,
+            "erase" => Mode::EraseConfirm,
+            other => return Err(format!("flash: unknown saved mode {other}")),
+        };
+        let mut st = self.st.lock().unwrap();
+        st.mode = mode;
+        st.status = get_field(v, "status").and_then(toml_u8).unwrap_or(SR_READY);
+        Ok(())
+    }
 }
 
 impl State {
@@ -229,6 +278,46 @@ mod tests {
         wr(f, a, v);
         wr(f, a, 0x7070);
         rd(f, a)
+    }
+
+    #[test]
+    fn save_load_round_trip() {
+        use crate::traits::Saveable;
+        let f = part();
+        wr(&f, 0, 0x2020);
+        wr(&f, 0, 0x0000);
+        wr(&f, 0, 0x9090);
+        let v1 = f.save_state();
+        let g = part();
+        g.load_state(&v1).unwrap();
+        assert_eq!(v1, g.save_state(), "CfiFlash save_state mismatch after load_state round-trip");
+        assert_eq!(rd(&g, 0), MANUFACTURER_ID, "identifier mode came back");
+        wr(&g, 0, 0x7070);
+        assert_eq!(rd(&g, 0) & 0x30, 0x30, "and the latched errors");
+
+        // Mid-program: the next write is the data word.
+        wr(&f, 0x10, 0x4040);
+        let h = part();
+        h.load_state(&f.save_state()).unwrap();
+        wr(&h, 0x10, 0xbeef);
+        wr(&h, 0x10, 0xffff);
+        assert_eq!(rd(&h, 0x10), 0xbeef);
+    }
+
+    #[test]
+    fn set_contents_replaces_the_array_and_its_file() {
+        let dir = std::env::temp_dir().join(format!("iris-flash-set-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("flash.bin");
+        let _ = std::fs::remove_file(&path);
+        let f = CfiFlash::with_file(&[1, 2], SIZE, &path).unwrap();
+        let mut img = vec![0xffu8; SIZE];
+        img[..2].copy_from_slice(&[0xab, 0xcd]);
+        f.set_contents(&img).unwrap();
+        assert_eq!(rd(&f, 0), 0xabcd);
+        assert_eq!(std::fs::read(&path).unwrap(), img);
+        assert!(f.set_contents(&img[..16]).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn erase(f: &CfiFlash, a: u64) -> u16 {
