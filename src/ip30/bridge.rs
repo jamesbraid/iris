@@ -335,8 +335,8 @@ impl State {
     /// The chip's own core: the register file, the table and the latched
     /// errors. The interrupt pins' levels belong to whatever drives them.
     fn reset_core(&mut self, flash_strap: bool) {
-        for i in 0..REG_SLOTS {
-            self.reg[i] = reg_info(i as u32 * 8).map_or(0, |r| r.reset);
+        for (i, r) in self.reg.iter_mut().enumerate() {
+            *r = reg_info(i as u32 * 8).map_or(0, |info| info.reset);
         }
         self.set_r(
             reg::IDENTIFICATION,
