@@ -856,11 +856,21 @@ impl OctaneMachine {
         }
     }
 
+    /// Stop the CPU, then hold every device thread off guest memory and
+    /// the interrupt lines (the SCSI ring threads let a command in flight
+    /// finish first), as the O2 holds its service thread, and save the
+    /// NVRAM. [`Self::restart_peripherals`] lets them go again.
     pub fn stop(&mut self) {
         self.cpu.clone().as_device().stop();
         if let Some(g) = &self.gfx {
             g.stop_display();
         }
+        for c in &self.scsi {
+            c.pause();
+        }
+        self.ioc3.pause();
+        self.eth.pause();
+        self.rad.pause();
         self.ioc3.flush_nvram();
         if self.lifecycle != crate::machine_state::GuestState::Idle {
             self.lifecycle = crate::machine_state::GuestState::Halted;
@@ -887,10 +897,17 @@ impl OctaneMachine {
         self.restart_peripherals();
     }
 
-    /// Start what `stop` stopped, short of the CPU: the graphics engines
-    /// and display. Without them the PROM's first graphics readback after a
-    /// reset waits forever on a pipeline nothing drains.
+    /// Start what `stop` stopped, short of the CPU: the device threads, and
+    /// the graphics engines and display. Without the latter the PROM's
+    /// first graphics readback after a reset waits forever on a pipeline
+    /// nothing drains.
     pub fn restart_peripherals(&mut self) {
+        for c in &self.scsi {
+            c.resume();
+        }
+        self.ioc3.resume();
+        self.eth.resume();
+        self.rad.resume();
         if let Some(g) = &self.gfx {
             g.start_display();
         }
