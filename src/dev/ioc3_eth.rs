@@ -37,7 +37,9 @@
 //!   per-bit latches the datasheet describes.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
+
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::dev::ioc3_port::Ioc3EthPort;
@@ -1005,6 +1007,11 @@ struct Link {
 }
 
 /// IOC3's Ethernet.
+///
+/// Lock order: `rx_pass`, then `link`, then `st`; `irq_order` before `st`
+/// and before `irq`. The receive thread delivers a frame into guest memory
+/// with `st` held, as a register write does a transmit: the DMA goes down
+/// through the Bridge and HEART, which never call back into this device.
 pub struct Ioc3Eth {
     mac: [u8; 6],
     st: Mutex<State>,
@@ -1058,32 +1065,32 @@ impl Ioc3Eth {
     /// lands before it rather than after, which would leave the line high
     /// with the state saying low.
     pub fn reset(&self) {
-        let _order = self.irq_order.lock().unwrap();
+        let _order = self.irq_order.lock();
         {
-            let mut st = self.st.lock().unwrap();
+            let mut st = self.st.lock();
             let delay = st.phy.delay;
             let backend_up = st.phy.backend_up;
             *st = State::new(delay);
             st.phy.set_backend_link(backend_up, Instant::now());
         }
-        if let Some(cb) = self.irq.lock().unwrap().as_ref() {
+        if let Some(cb) = self.irq.lock().as_ref() {
             cb(false);
         }
     }
 
     fn dma(&self) -> Arc<dyn PciDma> {
-        self.dma.lock().unwrap().clone().unwrap_or_else(|| Arc::new(NullDma))
+        self.dma.lock().clone().unwrap_or_else(|| Arc::new(NullDma))
     }
 
     /// Deliver queued interrupt level changes, in order, with no lock held
     /// that the callback could need.
     fn irq_flush(&self) {
-        let _order = self.irq_order.lock().unwrap();
-        let events = std::mem::take(&mut self.st.lock().unwrap().irq_events);
+        let _order = self.irq_order.lock();
+        let events = std::mem::take(&mut self.st.lock().irq_events);
         if events.is_empty() {
             return;
         }
-        if let Some(cb) = self.irq.lock().unwrap().as_ref() {
+        if let Some(cb) = self.irq.lock().as_ref() {
             for level in events {
                 cb(level);
             }
@@ -1094,7 +1101,7 @@ impl Ioc3Eth {
         if frames.is_empty() {
             return;
         }
-        if let Some(link) = self.link.lock().unwrap().as_mut() {
+        if let Some(link) = self.link.lock().as_mut() {
             for f in frames {
                 let _ = link.to_net.push(f);
             }
@@ -1105,7 +1112,7 @@ impl Ioc3Eth {
     }
 
     fn wake_rx(&self) {
-        if let Some(w) = self.rx_wake.lock().unwrap().as_ref() {
+        if let Some(w) = self.rx_wake.lock().as_ref() {
             w.notify();
         }
     }
@@ -1120,8 +1127,8 @@ impl Ioc3Eth {
         tx_wake: Option<Arc<crate::net::Wake>>,
         rx_wake: Option<Arc<crate::net::Wake>>,
     ) {
-        *self.link.lock().unwrap() = Some(Link { to_net, from_net, tx_wake });
-        *self.rx_wake.lock().unwrap() = rx_wake;
+        *self.link.lock() = Some(Link { to_net, from_net, tx_wake });
+        *self.rx_wake.lock() = rx_wake;
     }
 
     /// Run iris's NAT gateway behind this Ethernet (DHCP, ARP, ICMP, TCP, DNS
@@ -1160,8 +1167,21 @@ impl Ioc3Eth {
                 }
             })
             .expect("ioc3 eth rx thread");
-        self.threads.lock().unwrap().extend([nat, rx]);
+        self.threads.lock().extend([nat, rx]);
         controls
+    }
+
+    /// Name the long-lived locks in the lock registry, which holds only a
+    /// weak reference to the device.
+    pub fn register_locks(self: &Arc<Self>) {
+        for (what, probe) in [
+            ("st", (|e: &Ioc3Eth| e.st.is_locked()) as fn(&Ioc3Eth) -> bool),
+            ("link", |e| e.link.is_locked()),
+            ("irq_order", |e| e.irq_order.is_locked()),
+        ] {
+            let me = Arc::downgrade(self);
+            crate::locks::register_lock(format!("ioc3-eth::{what}"), move || me.upgrade().is_some_and(|e| probe(&e)));
+        }
     }
 
     /// Stop taking frames into guest memory while the machine is stopped.
@@ -1169,7 +1189,7 @@ impl Ioc3Eth {
     /// CPU, which is stopped too.
     pub fn pause(&self) {
         self.paused.store(true, Ordering::SeqCst);
-        drop(self.rx_pass.lock().unwrap());
+        drop(self.rx_pass.lock());
     }
 
     /// Take frames again, starting with any that queued while paused.
@@ -1180,13 +1200,13 @@ impl Ioc3Eth {
 
     /// The packet backend's cable state; the PHY reports it as link status.
     pub fn set_backend_link(&self, up: bool) {
-        self.st.lock().unwrap().phy.set_backend_link(up, Instant::now());
+        self.st.lock().phy.set_backend_link(up, Instant::now());
         self.wake_rx();
     }
 
     /// Frames sent and received so far.
     pub fn counts(&self) -> (u64, u64) {
-        let s = self.st.lock().unwrap();
+        let s = self.st.lock();
         (s.tx_frames, s.rx_frames)
     }
 
@@ -1200,7 +1220,7 @@ impl Ioc3Eth {
     /// taken just as the guest turns receive off is dropped, as one
     /// arriving a moment later would be.
     pub fn poll(&self) -> bool {
-        let _pass = self.rx_pass.lock().unwrap();
+        let _pass = self.rx_pass.lock();
         if self.paused.load(Ordering::SeqCst) {
             return false;
         }
@@ -1208,10 +1228,10 @@ impl Ioc3Eth {
         let mut moved = false;
         loop {
             let frame = {
-                let mut link = self.link.lock().unwrap();
+                let mut link = self.link.lock();
                 let Some(link) = link.as_mut() else { break };
                 {
-                    let mut st = self.st.lock().unwrap();
+                    let mut st = self.st.lock();
                     st.phy.sync(Instant::now());
                     if !st.rx_ready() {
                         break;
@@ -1222,7 +1242,7 @@ impl Ioc3Eth {
             };
             moved = true;
             {
-                let mut st = self.st.lock().unwrap();
+                let mut st = self.st.lock();
                 if st.rx_ready() && st.rx_filter(&frame) {
                     st.deliver(&*dma, &frame, false);
                 }
@@ -1237,13 +1257,13 @@ impl Drop for Ioc3Eth {
     fn drop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
         self.wake_rx();
-        if let Some(w) = self.link.get_mut().unwrap().as_ref().and_then(|l| l.tx_wake.as_ref()) {
+        if let Some(w) = self.link.get_mut().as_ref().and_then(|l| l.tx_wake.as_ref()) {
             w.notify();
         }
         // The receive thread can hold the last reference for a moment, and
         // then this runs on it; it cannot join itself.
         let me = std::thread::current().id();
-        for t in self.threads.get_mut().unwrap().drain(..) {
+        for t in self.threads.get_mut().drain(..) {
             if t.thread().id() != me {
                 let _ = t.join();
             }
@@ -1256,7 +1276,7 @@ impl Ioc3EthPort for Ioc3Eth {
         if !(MAC_CONTROL..=MII_DATA_W).contains(&off) || off & 3 != 0 {
             return 0;
         }
-        let v = self.st.lock().unwrap().read(off, Instant::now());
+        let v = self.st.lock().read(off, Instant::now());
         self.irq_flush();
         v
     }
@@ -1268,7 +1288,7 @@ impl Ioc3EthPort for Ioc3Eth {
         let dma = self.dma();
         let mut wire = Vec::new();
         let mut wake = false;
-        self.st.lock().unwrap().write(off, val, Instant::now(), &*dma, &mut wire, &mut wake);
+        self.st.lock().write(off, val, Instant::now(), &*dma, &mut wire, &mut wake);
         self.send(wire);
         self.irq_flush();
         if wake {
@@ -1277,8 +1297,8 @@ impl Ioc3EthPort for Ioc3Eth {
     }
 
     fn connect(&self, dma: Arc<dyn PciDma>, irq: Box<dyn Fn(bool) + Send + Sync>) {
-        *self.dma.lock().unwrap() = Some(dma);
-        *self.irq.lock().unwrap() = Some(irq);
+        *self.dma.lock() = Some(dma);
+        *self.irq.lock() = Some(irq);
         self.irq_flush();
     }
 }
