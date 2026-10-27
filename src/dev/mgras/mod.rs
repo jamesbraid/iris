@@ -873,6 +873,15 @@ impl Mgras {
         unsafe { &mut *self.eng.get() }.kick_starts_read = true;
     }
 
+    /// Answer GE state readbacks at the HQ4 microcode's addresses (the
+    /// Octane's boards; see `Gl::state_word_hq4`). Call before the engines
+    /// start.
+    pub fn hq4_state_layout(&self) {
+        assert!(!self.engines.load(Ordering::Acquire), "set before the engines start");
+        // SAFETY: the HQ3 thread is not running.
+        unsafe { &mut *self.eng.get() }.hq4_state = true;
+    }
+
     /// Give the board its path to system memory, for DMA.
     pub fn set_phys(&self, mem: Arc<dyn BusDevice>) {
         *self.mem.lock() = Some(mem);

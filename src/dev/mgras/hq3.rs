@@ -522,6 +522,9 @@ pub struct Hq3Engine {
     /// meant for something else (a kernel GE context read-out) would take
     /// those pixels instead; nothing captured shows that order yet.
     pub kick_starts_read: bool,
+    /// GE state readbacks use the HQ4 microcode's addresses (the Octane's
+    /// boards); see `Gl::state_word_hq4`.
+    pub hq4_state: bool,
     /// DMA transfers logged so far (bring-up).
     dma_logged: u32,
     /// The GE11s' OpenGL state (HLE) for the current context, the context
@@ -587,6 +590,7 @@ impl Hq3Engine {
             formatter: 0,
             dma_read_pending: None,
             kick_starts_read: false,
+            hq4_state: false,
             dma_logged: 0,
             ge_return: None,
             last_token: None,
@@ -1016,7 +1020,7 @@ impl Hq3Engine {
             self.stats.cp_tokens[cmd as usize] += 1;
             self.gl.end_raster(sink);
             let addr = data.first().copied().unwrap_or(0);
-            let v = sink.readback_probe(addr).or_else(|| self.gl.state_word(addr)).unwrap_or(addr);
+            let v = sink.readback_probe(addr).or_else(|| self.ge_state(addr)).unwrap_or(addr);
             self.ge_return = Some([0, v]);
             sink.set_flags(host::FLAG_GE_DATA);
         } else if cmd == cmd::CP_RETURN_MODE {
@@ -1024,7 +1028,7 @@ impl Hq3Engine {
             // Addresses the GE HLE knows answer from its state; others read
             // 0 and are reported once each, so the layout can be mapped.
             let addr = data.first().copied().unwrap_or(0);
-            let v = sink.readback_probe(addr).or_else(|| self.gl.state_word(addr)).unwrap_or_else(|| {
+            let v = sink.readback_probe(addr).or_else(|| self.ge_state(addr)).unwrap_or_else(|| {
                 sink.note(format!("GE state readback at {addr:#x} ({:x?}) answered 0", data.get(1..).unwrap_or(&[])));
                 0
             });
@@ -1061,6 +1065,12 @@ impl Hq3Engine {
     /// The host DMA engine's start word. Host to board runs now: the raster
     /// engine was armed by commands queued ahead. Board to host waits for
     /// the raster engine.
+    /// The GE state word a readback at `addr` answers, in the layout of the
+    /// board's microcode.
+    fn ge_state(&mut self, addr: u32) -> Option<u32> {
+        if self.hq4_state { self.gl.state_word_hq4(addr) } else { self.gl.state_word(addr) }
+    }
+
     fn dma_start(&mut self, word: u32, sink: &mut dyn Hq3Sink) {
         if word & 1 == 0 {
             return;
