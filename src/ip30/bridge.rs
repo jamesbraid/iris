@@ -973,25 +973,34 @@ impl Bridge {
     /// Map a PCI address of slot `slot` to the XIO address it reaches and the
     /// placement of its bytes. `None`: not memory this Bridge reaches.
     fn translate(&self, st: &State, slot: usize, addr: u64) -> Option<(u64, Placement)> {
-        // The windows below are all inside the first 4 GiB.
-        let Ok(addr) = u32::try_from(addr) else {
-            log::debug!("bridge: DMA to {addr:#x} is above the 32-bit windows this Bridge decodes");
-            return None;
+        let dev = st.r(reg::device(slot as u32));
+        let wide = st.dma_64bit >> slot & 1 != 0;
+        let placement_for = |swap_bit: u32| match (dev & swap_bit != 0, wide) {
+            (true, _) => Placement::Identity,
+            (false, false) => Placement::Word,
+            (false, true) => Placement::Doubleword,
         };
+        // The 64-bit direct window, decoded ahead of the 31-bit one, which
+        // would drop the widget at bits 63:60. The widget is named by the
+        // address itself, its low 48 bits pass through, and the direct swap
+        // bit steers the bytes.
+        if addr >> 32 != 0 {
+            let widget = ((addr >> 60) & 0xf) as u8;
+            if widget == 0 {
+                log::debug!("bridge: 64-bit DMA names widget 0, which the crossbar cannot answer");
+                return None;
+            }
+            return (widget == WIDGET_HEART).then_some((addr & ((1 << 48) - 1), placement_for(DEV_SWAP_DIRECT)));
+        }
+        let addr = addr as u32;
         // Local space never crosses the swapper.
         if addr < PCI_TRANSLATED {
             log::debug!("bridge: DMA to PCI-local address {addr:#x} is not carried anywhere");
             return None;
         }
-        let dev = st.r(reg::device(slot as u32));
         let page_shift = if st.r(reg::CONTROL) & CONTROL_PAGE_16K != 0 { 14 } else { 12 };
         let page_mask = (1u64 << page_shift) - 1;
-        let swap = dev & if addr < PCI_DIRECT { DEV_SWAP_TRANSLATED } else { DEV_SWAP_DIRECT } != 0;
-        let placement = match (swap, st.dma_64bit >> slot & 1 != 0) {
-            (true, _) => Placement::Identity,
-            (false, false) => Placement::Word,
-            (false, true) => Placement::Doubleword,
-        };
+        let placement = placement_for(if addr < PCI_DIRECT { DEV_SWAP_TRANSLATED } else { DEV_SWAP_DIRECT });
         if addr >= PCI_DIRECT {
             let direct = st.r(reg::DIRECT_MAP);
             let mut offset = (((direct & DIRECT_OFFSET) as u64) << 31) | (addr & 0x7fff_ffff) as u64;
@@ -1047,9 +1056,10 @@ impl Bridge {
             };
             if !good {
                 ok = false;
-                if matches!(buf, DmaBuf::Read(_)) {
-                    // A read the crossbar dropped: the chip's request timer
-                    // expires at once.
+                // A read that translated but that the crossbar dropped: the
+                // chip's request timer expires at once. A translation that
+                // fails is refused before anything is sent and times nothing.
+                if matches!(buf, DmaBuf::Read(_)) && target.is_some() {
                     let mut st = self.st.lock().unwrap();
                     self.read_timeout(&mut st);
                 }
