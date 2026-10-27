@@ -207,6 +207,9 @@ impl HeartMemory {
                     break;
                 }
                 let src = self.start[bank] + bank_offset(d, self.size[bank], unit * UNIT);
+                if trace() {
+                    eprintln!("ip30: HEART bank {bank} descriptor {d:#010x}: {at:#x} <- bank offset {src:#x}");
+                }
                 if let Err(e) = self.space.map_range(0, src, at, UNIT) {
                     eprintln!("ip30: HEART bank {bank} unit {unit}: window map failed: {e}");
                 }
