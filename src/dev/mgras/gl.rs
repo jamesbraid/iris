@@ -775,6 +775,12 @@ impl Gl {
     /// it); 0x3A-0x49 the current matrix mode's top matrix, 16 floats in
     /// OpenGL's memory order (IRIS GL getmatrix under IGLOO reads them).
     pub fn state_word(&mut self, addr: u32) -> Option<u32> {
+        self.state_word_in(addr, addr)
+    }
+
+    /// `state_word` at GE state address `addr`; pixel pipeline words at
+    /// `raw`, the address the client asked for.
+    pub fn state_word_in(&mut self, addr: u32, raw: u32) -> Option<u32> {
         self.ensure_init();
         match addr {
             4 if self.ci != 0 => Some(self.current_index.to_bits()),
@@ -850,7 +856,7 @@ impl Gl {
             0x6A..=0x79 => Some(self.tex.get()[(addr - 0x6A) as usize].to_bits()),
             // Pixel pipeline memory (PIXEL_STATE / INIT_PIXEL_STATE_ERAM
             // words) as loaded; test/gltest/gepeek.c reads it this way.
-            _ => self.query_word(addr).or_else(|| self.pix.loaded(addr).then(|| self.pix.read(addr))),
+            _ => self.query_word(addr).or_else(|| self.pix.loaded(raw).then(|| self.pix.read(raw))),
         }
     }
 

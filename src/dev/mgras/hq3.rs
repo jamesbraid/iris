@@ -322,6 +322,13 @@ const RSS_XFRCONTROL: u32 = 0x102;
 const XFRCONTROL_READ_START: u32 = 9;
 const XFRCONTROL_READ: u32 = 8;
 
+/// What a board other than the Indigo2's changes in the engine's command
+/// handling.
+pub trait Hq3Board: Send + Sync {
+    /// The GE state word a readback at `addr` answers.
+    fn ge_state(&self, gl: &mut super::gl::Gl, addr: u32) -> Option<u32>;
+}
+
 /// CPU-side HQ3 registers (the flags are atomic, in `Mgras`). Plain data,
 /// valid zeroed.
 #[repr(C)]
@@ -522,6 +529,8 @@ pub struct Hq3Engine {
     /// meant for something else (a kernel GE context read-out) would take
     /// those pixels instead; nothing captured shows that order yet.
     pub kick_starts_read: bool,
+    /// Hooks for a board outside the Indigo2.
+    pub board: Option<Box<dyn Hq3Board>>,
     /// DMA transfers logged so far (bring-up).
     dma_logged: u32,
     /// The GE11s' OpenGL state (HLE) for the current context, the context
@@ -587,6 +596,7 @@ impl Hq3Engine {
             formatter: 0,
             dma_read_pending: None,
             kick_starts_read: false,
+            board: None,
             dma_logged: 0,
             ge_return: None,
             last_token: None,
@@ -1016,7 +1026,7 @@ impl Hq3Engine {
             self.stats.cp_tokens[cmd as usize] += 1;
             self.gl.end_raster(sink);
             let addr = data.first().copied().unwrap_or(0);
-            let v = sink.readback_probe(addr).or_else(|| self.gl.state_word(addr)).unwrap_or(addr);
+            let v = sink.readback_probe(addr).or_else(|| self.ge_state(addr)).unwrap_or(addr);
             self.ge_return = Some([0, v]);
             sink.set_flags(host::FLAG_GE_DATA);
         } else if cmd == cmd::CP_RETURN_MODE {
@@ -1024,7 +1034,7 @@ impl Hq3Engine {
             // Addresses the GE HLE knows answer from its state; others read
             // 0 and are reported once each, so the layout can be mapped.
             let addr = data.first().copied().unwrap_or(0);
-            let v = sink.readback_probe(addr).or_else(|| self.gl.state_word(addr)).unwrap_or_else(|| {
+            let v = sink.readback_probe(addr).or_else(|| self.ge_state(addr)).unwrap_or_else(|| {
                 sink.note(format!("GE state readback at {addr:#x} ({:x?}) answered 0", data.get(1..).unwrap_or(&[])));
                 0
             });
@@ -1061,6 +1071,15 @@ impl Hq3Engine {
     /// The host DMA engine's start word. Host to board runs now: the raster
     /// engine was armed by commands queued ahead. Board to host waits for
     /// the raster engine.
+    /// The GE state word a readback at `addr` answers, in the layout of the
+    /// board's microcode.
+    fn ge_state(&mut self, addr: u32) -> Option<u32> {
+        match &self.board {
+            Some(b) => b.ge_state(&mut self.gl, addr),
+            None => self.gl.state_word(addr),
+        }
+    }
+
     fn dma_start(&mut self, word: u32, sink: &mut dyn Hq3Sink) {
         if word & 1 == 0 {
             return;

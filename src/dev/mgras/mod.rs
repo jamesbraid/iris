@@ -78,6 +78,8 @@ use crate::traits::{BusDevice, BusRead8, BusRead16, BusRead32, BusRead64, BUS_BU
 
 use ge11::Ge11;
 use hq3::{host, Hq3Engine, Hq3Regs, Hq3Sink};
+pub use gl::Gl;
+pub use hq3::Hq3Board;
 use rss::Rss;
 
 /// The graphics slot the board decodes.
@@ -872,6 +874,14 @@ impl Mgras {
         assert!(!self.engines.load(Ordering::Acquire), "set before the engines start");
         // SAFETY: the HQ3 thread is not running.
         unsafe { &mut *self.eng.get() }.kick_starts_read = true;
+    }
+
+    /// Give a board outside the Indigo2 its hooks into the command
+    /// handling. Call before the engines start.
+    pub fn set_board(&self, board: Box<dyn Hq3Board>) {
+        assert!(!self.engines.load(Ordering::Acquire), "set before the engines start");
+        // SAFETY: the HQ3 thread is not running.
+        unsafe { &mut *self.eng.get() }.board = Some(board);
     }
 
     /// Give the board its path to system memory, for DMA.
