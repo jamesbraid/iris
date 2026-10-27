@@ -691,9 +691,9 @@ fn a_transmit_ring_at_the_top_of_the_bus_stops_the_walk() {
 fn a_reset_during_an_interrupt_delivery_leaves_the_line_low() {
     let t = rig();
     t.w(INT_ENABLE, INT_RX_TIMER);
-    let order = t.eth.irq_order.lock().unwrap();
+    let order = t.eth.irq_order.lock();
     let events = {
-        let mut st = t.eth.st.lock().unwrap();
+        let mut st = t.eth.st.lock();
         st.raise_int(INT_RX_TIMER);
         std::mem::take(&mut st.irq_events)
     };
@@ -705,7 +705,7 @@ fn a_reset_during_an_interrupt_delivery_leaves_the_line_low() {
         while t.irq.lock().unwrap().is_empty() && start.elapsed() < Duration::from_millis(100) {
             std::thread::yield_now();
         }
-        if let Some(cb) = t.eth.irq.lock().unwrap().as_ref() {
+        if let Some(cb) = t.eth.irq.lock().as_ref() {
             for level in events {
                 cb(level);
             }
@@ -738,7 +738,7 @@ fn dropping_the_mac_joins_its_threads() {
     let mut cfg = crate::net::GatewayConfig::default();
     cfg.port_forwards.clear();
     let _ctl = eth.start_nat(cfg);
-    assert_eq!(eth.threads.lock().unwrap().len(), 2);
+    assert_eq!(eth.threads.lock().len(), 2);
     let probe = Arc::downgrade(&eth);
     drop(eth);
     assert!(probe.upgrade().is_none());
