@@ -1,5 +1,5 @@
 //! Octane main memory: the DIMMs that are fitted, where HEART's bank
-//! descriptors (MEMCFG) put them, and the 16 KiB at physical 0.
+//! descriptors (MEMCFG) put them, and the alias of their start at physical 0.
 //!
 //! HEART has four banks (a DIMM pair each) and a 32-bit descriptor per
 //! bank: bit 31 valid, bits 21:16 the span less one and bits 8:0 the base,
@@ -13,13 +13,14 @@
 //! read is laid out from the descriptors, 32 MiB at a time; memory a
 //! descriptor puts above 4 GiB is reachable through the bus only.
 //!
-//! Low memory is an approximation: 16 KiB of distinct RAM at physical 0,
-//! zero at reset, and the first 16 KiB of SDRAM space a bus error, with
-//! SDRAM starting at 0x2000_4000. Public software uses physical 0x400 (the
-//! GDA) and 0x600 (MPCONF) but no published source gives the backing, and
-//! the stock diagnostics expect the upper 8 KiB to be distinct from the
-//! lower. The fault is on the bus path; a cached access through the CPU's
-//! window does not see it.
+//! The first 16 KiB of SDRAM are the processor's physical 0..0x4000, and it
+//! reaches them only there: its access to 0x2000_0000..+16 KiB is a bus
+//! error, and SDRAM is reachable at its own address from 0x2000_4000. The
+//! stock IDE diagnostics check exactly this. [`LowAlias`] is the low window,
+//! the same bytes and the same jitv2 page generations. Whether a bus master
+//! reaches 0x2000_0000..+16 KiB is not known; the `dma_view` does, as the
+//! same bytes. Public software uses physical 0x400 (the GDA) and 0x600
+//! (MPCONF).
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
@@ -35,7 +36,8 @@ pub const RAM_BASE: u64 = 0x2000_0000;
 /// The descriptors' unit, and the window's mapping granule.
 pub const UNIT: u64 = 32 << 20;
 pub const BANKS: usize = 4;
-/// Low memory at physical 0, and the faulting start of SDRAM space.
+/// Low memory at physical 0: the first `LOW_SIZE` bytes of SDRAM, which the
+/// processor reaches only there.
 pub const LOW_SIZE: u64 = 0x4000;
 const GUARD: std::ops::Range<u64> = RAM_BASE..RAM_BASE + LOW_SIZE;
 /// The page jitv2 tracks code by.
@@ -91,7 +93,7 @@ pub enum Decode {
     None,
 }
 
-// Host-word layout shared by `HeartRam` and `LowMemory`: what `PpMemory`
+// Host-word layout shared by `HeartRam` and its views: what `PpMemory`
 // keeps, so an aligned word is a host u32 and a doubleword is two of them
 // swapped (`rotate_left(32)`). Offsets are aligned to the access.
 mod layout {
@@ -333,6 +335,12 @@ impl HeartRam {
         if GUARD.contains(&addr) {
             return None;
         }
+        self.unguarded_at(addr)
+    }
+
+    /// `cpu_at` without the guard: how low memory reaches those bytes.
+    #[inline]
+    fn unguarded_at(&self, addr: u64) -> Option<Option<usize>> {
         match self.decode(addr) {
             Decode::Ram(o) => Some(Some(o)),
             Decode::Absent => Some(None),
@@ -599,108 +607,54 @@ impl BusDevice for DmaView {
     }
 }
 
-/// The first 16 KiB of the processor's physical space: storage of its own,
-/// with its own jitv2 generation counters, since the kernel writes its
-/// exception vectors here and without a counter the JIT keeps running code
-/// compiled from an earlier copy. It fills the 64 KiB decode slot at 0, so
-/// it answers 0x4000..0x10000 with a bus error itself. Zero at power-on.
-///
-/// The Indy's low memory is an alias of bank 0, decoded back onto the bank
-/// and sharing its generation counters (`AliasBus` in `physical.rs`). The
-/// Octane's cannot be: the IP30 IDE diagnostics write both and expect the
-/// low pages to differ from the first SDRAM pages.
-pub struct LowMemory {
-    words: Box<UnsafeCell<[u64; (LOW_SIZE / 8) as usize]>>,
-    gen: [AtomicU64; LOW_SIZE as usize / PAGE],
-}
+/// The first 16 KiB of the processor's physical space: the same bytes as
+/// SDRAM at `RAM_BASE`, with the same jitv2 page generations, so code the
+/// kernel rewrites at its exception vectors is recompiled. This is the only
+/// way the processor reaches them, so it takes `HeartRam`'s unguarded path.
+/// It fills the 64 KiB decode slot at 0, so it answers 0x4000..0x10000 with
+/// a bus error itself, and where no bank descriptor covers `RAM_BASE` it
+/// answers as SDRAM does there.
+pub struct LowAlias(Arc<HeartRam>);
 
-// Racing masters see host words as the hardware's own masters would.
-unsafe impl Send for LowMemory {}
-unsafe impl Sync for LowMemory {}
-
-impl LowMemory {
-    pub fn new() -> Self {
-        Self { words: Box::new(UnsafeCell::new([0; (LOW_SIZE / 8) as usize])), gen: Default::default() }
+impl LowAlias {
+    pub fn new(ram: Arc<HeartRam>) -> Self {
+        Self(ram)
     }
 
     #[inline(always)]
-    fn host(&self) -> *mut u8 {
-        self.words.get() as *mut u8
+    fn ram(&self) -> &HeartRam {
+        &self.0
     }
 
+    /// Where `addr` lands, as `cpu_at`: SDRAM's first 16 KiB, past the guard.
     #[inline(always)]
-    fn at(&self, addr: u64) -> Option<usize> {
-        let o = (addr & 0xffff) as usize;
-        (o < LOW_SIZE as usize).then_some(o)
-    }
-
-    #[inline(always)]
-    fn touch(&self, o: usize) {
-        self.gen[o / PAGE].fetch_add(1, Ordering::Release);
+    fn at(&self, addr: u64) -> Option<Option<usize>> {
+        let o = addr & 0xffff;
+        if o >= LOW_SIZE {
+            return None;
+        }
+        self.0.unguarded_at(RAM_BASE + o)
     }
 }
 
-impl Default for LowMemory {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-macro_rules! low_rw {
-    ($read:ident, $write:ident, $r:ident, $t:ty, $ld:ident, $st:ident) => {
-        fn $read(&self, addr: u64) -> $r {
-            match self.at(addr) {
-                Some(o) => $r::ok(unsafe { $ld(self.host(), o) }),
-                None => $r::err(),
-            }
-        }
-        fn $write(&self, addr: u64, val: $t) -> u32 {
-            match self.at(addr) {
-                Some(o) => {
-                    unsafe { $st(self.host(), o, val) };
-                    self.touch(o);
-                    BUS_OK
-                }
-                None => BUS_ERR,
-            }
-        }
-    };
-}
-
-impl BusDevice for LowMemory {
-    low_rw!(read8, write8, BusRead8, u8, ld8, st8);
-    low_rw!(read16, write16, BusRead16, u16, ld16, st16);
-    low_rw!(read32, write32, BusRead32, u32, ld32, st32);
-    low_rw!(read64, write64, BusRead64, u64, ld64, st64);
-
-    fn write64_masked(&self, addr: u64, val: u64, mask: u64) -> u32 {
-        match self.at(addr) {
-            Some(o) => {
-                unsafe { st64_masked(self.host(), o, val, mask) };
-                self.touch(o);
-                BUS_OK
-            }
-            None => BUS_ERR,
-        }
-    }
+impl BusDevice for LowAlias {
+    ram_widths!(LowAlias::at);
 
     fn mem_ptr(&self, addr: u64) -> Option<*const u64> {
-        self.at(addr).map(|o| unsafe { self.host().add(o & !7) } as *const u64)
+        match self.at(addr) {
+            Some(Some(o)) => Some(unsafe { self.0.host.add(o & !7) } as *const u64),
+            _ => None,
+        }
     }
 
+    /// The same counter SDRAM's page has: without it a page reached through
+    /// the alias reads a fixed generation, and the JIT keeps running code
+    /// compiled before the kernel rewrote it.
     #[cfg(feature = "jitv2")]
     fn gen_ptr(&self, addr: u64) -> *const AtomicU64 {
-        self.at(addr).map_or(std::ptr::null(), |o| &self.gen[o / PAGE] as *const AtomicU64)
-    }
-}
-
-/// Back to zero (a synthetic choice: what the hardware holds at power-on
-/// is not known), every page's code invalidated.
-impl Resettable for LowMemory {
-    fn power_on(&self) {
-        unsafe { (*self.words.get()).fill(0) };
-        for g in &self.gen {
-            g.fetch_add(1, Ordering::Release);
+        match self.at(addr) {
+            Some(Some(o)) => self.0.store.gen_ptr(o as u64),
+            _ => std::ptr::null(),
         }
     }
 }
@@ -1017,25 +971,6 @@ mod tests {
     }
 
     #[test]
-    fn sdram_starts_past_the_guard() {
-        let m = Arc::new(ram(128));
-        bank0(&m, DESC_VALID | (3 << 16));
-        assert_eq!(m.read64(RAM_BASE).status, BUS_ERR);
-        assert_eq!(m.read8(RAM_BASE + 0x3fff).status, BUS_ERR);
-        assert_eq!(m.write32(RAM_BASE + 0x10, 1), BUS_ERR);
-        assert!(m.mem_ptr(RAM_BASE).is_none());
-        let mut line = [0u64; 16];
-        assert_eq!(m.read_block(RAM_BASE + 0x3f80, &mut line), BUS_ERR);
-        assert_eq!(m.read_block(RAM_BASE + 0x4000, &mut line), BUS_OK);
-        w(&m, RAM_BASE + 0x4000, 0x0102_0304_0506_0708);
-        assert_eq!(m.read32(RAM_BASE + 0x4004).data, 0x0506_0708);
-        assert_eq!(m.read64(RAM_BASE + (128 << 20)).status, BUS_ERR, "past the bank");
-        // A bus master reaches the guard's bytes: they are fitted memory.
-        assert_eq!(m.dma_view().write64(RAM_BASE, 7), BUS_OK);
-        assert_eq!(m.dma_view().read64(RAM_BASE).data, 7);
-    }
-
-    #[test]
     fn the_fast_paths_see_what_the_width_accesses_see() {
         let m = ram(64);
         bank0(&m, DESC_VALID | (1 << 16));
@@ -1103,24 +1038,53 @@ mod tests {
     }
 
     #[test]
-    fn low_memory_is_its_own_16_kib() {
-        let l = LowMemory::new();
+    fn low_memory_aliases_the_start_of_sdram() {
+        let m = Arc::new(ram(128));
+        bank0(&m, DESC_VALID | (3 << 16));
+        let l = LowAlias::new(m.clone());
+        // The processor reaches the bytes only through `l`; a bus master's
+        // view shows what it did.
+        let dma = m.dma_view();
         assert_eq!(l.read64(0).data, 0);
-        assert_eq!(l.write32(0x614, 0x1234_5678), BUS_OK);
-        assert_eq!(l.read16(0x616).data, 0x5678);
-        assert_eq!(l.read8(0x614).data, 0x12);
-        assert_eq!(l.write64(0x2000, 0xa5a5_a5a5_5a5a_5a5a), BUS_OK);
-        assert_eq!(l.write64(0x0, 0x0f0f_0f0f_f0f0_f0f0), BUS_OK);
-        assert_eq!(l.read64(0x2000).data, 0xa5a5_a5a5_5a5a_5a5a, "no mirror");
+        assert_eq!(l.write32(0x100, 0x1234_5678), BUS_OK);
+        assert_eq!(dma.read32(RAM_BASE + 0x100).data, 0x1234_5678, "a low store is in SDRAM");
+        assert_eq!(m.read32(RAM_BASE + 0x100).status, BUS_ERR, "and not visible to the processor there");
+        assert_eq!(l.read16(0x102).data, 0x5678);
+        assert_eq!(l.read8(0x100).data, 0x12);
+        assert_eq!(dma.write64(RAM_BASE + 0x2000, 0xa5a5_a5a5_5a5a_5a5a), BUS_OK);
+        assert_eq!(l.read64(0x2000).data, 0xa5a5_a5a5_5a5a_5a5a, "and the reverse");
         assert_eq!(l.write8(0x3fff, 7), BUS_OK);
-        assert_eq!(l.read8(0x3fff).data, 7);
+        assert_eq!(dma.read8(RAM_BASE + 0x3fff).data, 7);
+        assert_eq!(l.write64_masked(0x2000, 0, 0xffff_ffff_0000_0000), BUS_OK);
+        assert_eq!(dma.read64(RAM_BASE + 0x2000).data, 0x5a5a_5a5a);
         assert_eq!(l.read8(0x4000).status, BUS_ERR);
         assert_eq!(l.write32(0xfffc, 0), BUS_ERR, "the rest of the slot");
         let mut line = [0u64; 2];
         assert_eq!(l.read_block(0x2000, &mut line), BUS_OK);
-        assert_eq!(line[0], 0xa5a5_a5a5_5a5a_5a5a);
-        l.power_on();
-        assert_eq!(l.read32(0x614).data, 0);
+        assert_eq!(line[0], 0x5a5a_5a5a);
+        assert_eq!(l.mem_ptr(0x100), dma.mem_ptr(RAM_BASE + 0x100), "one word");
+        assert!(l.mem_ptr(0x4000).is_none());
+    }
+
+    #[test]
+    fn sdram_starts_past_the_guard() {
+        let m = Arc::new(ram(128));
+        bank0(&m, DESC_VALID | (3 << 16));
+        assert_eq!(m.read64(RAM_BASE).status, BUS_ERR);
+        assert_eq!(m.read8(RAM_BASE + 0x3fff).status, BUS_ERR);
+        assert_eq!(m.write32(RAM_BASE + 0x10, 1), BUS_ERR);
+        assert!(m.mem_ptr(RAM_BASE).is_none());
+        let mut line = [0u64; 16];
+        assert_eq!(m.read_block(RAM_BASE + 0x3f80, &mut line), BUS_ERR);
+        assert_eq!(m.read_block(RAM_BASE + 0x4000, &mut line), BUS_OK);
+        w(&m, RAM_BASE + 0x4000, 0x0102_0304_0506_0708);
+        assert_eq!(m.read32(RAM_BASE + 0x4004).data, 0x0506_0708);
+        assert_eq!(m.read64(RAM_BASE + (128 << 20)).status, BUS_ERR, "past the bank");
+        // A bus master reaches the guard's bytes, and low memory is the
+        // processor's way to them.
+        assert_eq!(m.dma_view().write64(RAM_BASE, 7), BUS_OK);
+        assert_eq!(m.dma_view().read64(RAM_BASE).data, 7);
+        assert_eq!(LowAlias::new(m.clone()).read64(0).data, 7);
     }
 
     /// Every write path advances the page's generation, so code the JIT
@@ -1152,15 +1116,18 @@ mod tests {
         assert_eq!(gen(win), gen(g0));
         w(&m, a + 8, 2);
         assert_eq!(gen(win), gen(g0));
+        // Low memory shares SDRAM's counters.
+        let l = LowAlias::new(m.clone());
         assert!(m.gen_ptr(RAM_BASE).is_null(), "the guard has none");
-
-        let l = LowMemory::new();
-        let (l0, l1) = (l.gen_ptr(0x180), l.gen_ptr(0x1000));
-        assert!(!l0.is_null() && l0 != l1);
-        let (a0, a1) = (gen(l0), gen(l1));
+        let dma = m.dma_view();
+        assert_eq!(l.gen_ptr(0x180), dma.gen_ptr(RAM_BASE + 0x180));
+        assert_ne!(l.gen_ptr(0x180), l.gen_ptr(0x1000));
+        let (l0, a0) = (l.gen_ptr(0x180), gen(l.gen_ptr(0x180)));
         assert_eq!(l.write64(0x180, 0xdf5a_c000_0340_0008), BUS_OK);
-        assert_ne!(gen(l0), a0, "a low-memory store advances its page");
-        assert_eq!(gen(l1), a1, "and no other");
+        assert_ne!(gen(l0), a0, "a low-memory store advances the page");
+        let v = gen(l0);
+        assert_eq!(dma.write64(RAM_BASE + 0x180, 1), BUS_OK);
+        assert_ne!(gen(l0), v, "and so does a bus master's at its SDRAM address");
         assert!(l.gen_ptr(0x4000).is_null());
     }
 }

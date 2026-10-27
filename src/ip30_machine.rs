@@ -21,7 +21,7 @@ use crate::cpu::mips_exec::{CpuDevice, MipsCpu, MipsCpuConfig, MipsExecutor};
 use crate::cpu::mips_tlb::MipsTlb;
 use crate::dev::bridge::{Bridge, RawFlash};
 use crate::dev::heart::{host_clock, Heart, HeartConfig, PIU_BASE, PIU_SIZE};
-use crate::dev::heart_mem::{HeartRam, LowMemory};
+use crate::dev::heart_mem::HeartRam;
 use crate::dev::ioc3::Ioc3;
 use crate::dev::ioc3_eth::Ioc3Eth;
 use crate::dev::isp1040::Isp1040;
@@ -79,7 +79,6 @@ pub struct OctaneMachine {
     pub phys: Arc<Ip30Physical>,
     pub heart: Arc<Heart>,
     pub ram: Arc<HeartRam>,
-    low: Arc<LowMemory>,
     pub xbow: Arc<Xbow>,
     cpu: Arc<dyn CpuDevice>,
     flash_lines: Arc<CachedFlashLines>,
@@ -128,7 +127,6 @@ impl OctaneMachine {
 
         // Memory, and HEART, whose descriptors place it.
         let ram = Arc::new(HeartRam::try_new(std::array::from_fn(|i| cfg.banks[i]))?);
-        let low = Arc::new(LowMemory::new());
         let mem = ram.dma_view();
         let heart = Arc::new(Heart::new(HeartConfig::octane(banks), host_clock()));
         // HEART's MicroLAN holds the processor module's record.
@@ -186,7 +184,7 @@ impl OctaneMachine {
         let gfx = board.map(|_| ImpactXio::new(WIDGET_GFX, heart.clone(), mem.clone(), heartbeat, fasttick.clone()));
 
         // The bus over them, then the table.
-        let phys = Ip30Physical::new(ram.clone(), low.clone()).map_err(|e| format!("ip30: decode table: {e}"))?;
+        let phys = Ip30Physical::new(ram.clone()).map_err(|e| format!("ip30: decode table: {e}"))?;
         phys.map(PIU_BASE, PIU_BASE + PIU_SIZE, heart.clone());
         phys.map(widget_small_base(WIDGET_XBOW), widget_small_base(WIDGET_XBOW) + WIDGET_SMALL_SIZE, xbow.clone());
         // The processor reaches its own HEART without a trip through the
@@ -324,7 +322,6 @@ impl OctaneMachine {
             phys,
             heart,
             ram,
-            low,
             xbow,
             cpu,
             flash_lines,
@@ -515,7 +512,6 @@ impl OctaneMachine {
     pub fn reset(&mut self) {
         self.stop();
         Resettable::power_on(&*self.cpu);
-        self.low.power_on();
         self.xbow.power_on();
         self.heart.power_on();
         self.flash_lines.clear();

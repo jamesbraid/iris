@@ -7,10 +7,10 @@
 //!
 //! | Range | What |
 //! |---|---|
-//! | `0x0000_0000`, 16 KiB | low memory (`heart_mem::LowMemory`) |
+//! | `0x0000_0000`, 16 KiB | low memory, the first 16 KiB of SDRAM (`heart_mem::LowAlias`) |
 //! | `0x0ff0_0000` | HEART's processor-interface registers |
 //! | `0x1000_0000 + (w << 24)` | widget `w`'s 16 MiB small window |
-//! | `0x2000_0000` up | SDRAM through HEART's bank descriptors (`heart_mem::HeartRam`) |
+//! | `0x2000_0000` up | SDRAM through HEART's bank descriptors (`heart_mem::HeartRam`); its first 16 KiB bus-error here |
 //! | `w << 36` | widget `w`'s 64 GiB large window (8 to 15) |
 //!
 //! Widget 0 is the Crossbow, 8 HEART, 15 the onboard Bridge (whose window
@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::dev::heart_mem::{HeartRam, LowMemory, RAM_BASE};
+use crate::dev::heart_mem::{HeartRam, LowAlias, RAM_BASE};
 use crate::ppmem::devmap::{Entry, PHYS_MASK, SLOT_SHIFT};
 use crate::ppmem::SparseDeviceMap;
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, BUS_ERR, BUS_OK};
@@ -94,7 +94,7 @@ pub struct Ip30Physical {
     /// `devmap.base()`, cached for the hot path.
     map_base: *const Entry,
     ram: Arc<HeartRam>,
-    low: Arc<LowMemory>,
+    low: Arc<LowAlias>,
     unmapped: Arc<Unmapped>,
     /// The table holds raw pointers; these keep what they point at alive.
     keep: Mutex<Vec<Arc<dyn BusDevice>>>,
@@ -112,15 +112,16 @@ unsafe impl Send for Ip30Physical {}
 unsafe impl Sync for Ip30Physical {}
 
 impl Ip30Physical {
-    /// An empty map over `ram` (SDRAM space) and `low` (physical 0).
-    pub fn new(ram: Arc<HeartRam>, low: Arc<LowMemory>) -> std::io::Result<Self> {
+    /// An empty map over `ram` (SDRAM space, and physical 0 as the window onto
+    /// its start).
+    pub fn new(ram: Arc<HeartRam>) -> std::io::Result<Self> {
         let devmap = SparseDeviceMap::new()?;
         let map_base = devmap.base();
         let me = Self {
             devmap,
             map_base,
+            low: Arc::new(LowAlias::new(ram.clone())),
             ram,
-            low,
             unmapped: Arc::new(Unmapped),
             keep: Mutex::new(Vec::new()),
             widgets: Mutex::new(Default::default()),
