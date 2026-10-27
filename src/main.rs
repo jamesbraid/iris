@@ -149,10 +149,15 @@ fn main() {
         }
     }
 
-    let show_window = !headless && !(ci_enabled && !ci_display);
+    // A machine with no graphics board (an Octane without one) runs on its
+    // serial console, as headless does.
+    let no_board = machine.get_display().is_none();
+    let show_window = !headless && !no_board && !(ci_enabled && !ci_display);
     if !show_window {
         if headless {
             eprintln!("iris: running headless (no REX3, no window)");
+        } else if no_board {
+            eprintln!("iris: no graphics board fitted: running on the serial console, no window");
         } else if ci_enabled {
             eprintln!("iris: --ci mode (REX3 rendering to offscreen buffer, no window)");
         }
