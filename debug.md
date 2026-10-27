@@ -314,6 +314,13 @@ interrupt status, queues and command totals, and `wdt`, `defer`, `debug` and
 `dayna` are not there. Ids are per controller, as in the `[scsi.N]` tables
 (`[scsi.17]` is id 1 on controller 1, so `scsi1 eject 1`).
 
+On the Octane the controllers are ISP1040s: `scsi notes` (`scsi1 notes`)
+shows the command total and anything odd the driver did; `regs`, `wdt`,
+`defer`, `debug` and `dayna` are not there. It also has `heart status`
+(interrupt bits, mask, counter, bank descriptors), `heart unsupported`
+(HEART registers touched but not modelled), `ip30 unmapped` (failed physical
+accesses, with the PC) and `ip30 xbow` (refused Crossbow accesses).
+
 Queue position `[0]` is the mounted disc, `[1]` the next on eject. A disc
 change reaches IRIX as a Unit Attention ("medium changed") on its next
 TEST UNIT READY; IRIX's `mediad` may still need a manual remount
