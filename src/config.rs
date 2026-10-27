@@ -326,6 +326,10 @@ pub enum NetMode {
     /// No Ethernet: the adapter is not plugged into anything. O2 only for now
     /// (`MachineConfig::validate`); the Indy and Indigo2 always have a network.
     Off,
+    /// A private segment carried over a stream socket in QEMU's `-netdev
+    /// stream` framing, to a peer that serves it (`[network] stream`). iris
+    /// provides no gateway services on it.
+    Stream,
 }
 
 impl Default for NetMode {
@@ -357,6 +361,8 @@ pub struct NetworkConfig {
     /// Directory served read-only by the gateway's built-in rsh server (TCP
     /// 514). None (the default) disables it.
     pub rsh_dir: Option<std::path::PathBuf>,
+    /// The peer for `NetMode::Stream`, as `tcp:IP:PORT` or `unix:PATH`.
+    pub stream: Option<String>,
 }
 
 impl Default for NetworkConfig {
@@ -370,6 +376,7 @@ impl Default for NetworkConfig {
             nfs_pcap_ip: None,
             tftp_dir: None,
             rsh_dir: None,
+            stream: None,
             mac: DEFAULT_MAC,
         }
     }
@@ -413,6 +420,10 @@ pub struct NetworkSection {
     /// executed on the host. Unset disables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rsh_dir: Option<String>,
+    /// With `mode = "stream"`: the server of the private segment, as
+    /// `tcp:IP:PORT` or `unix:PATH` (QEMU `-netdev stream` framing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<String>,
 }
 
 /// Where VINO's video-in capture should come from.
@@ -1957,6 +1968,14 @@ impl MachineConfig {
             (NetMode::Pcap, MachineProfile::OctaneIp30) => {
                 return Err("network.mode = \"pcap\" is not available on the Octane (it has no Ethernet yet)".into());
             }
+            (NetMode::Stream, MachineProfile::OctaneIp30) => {
+                return Err("network.mode = \"stream\" is not available on the Octane (it has no Ethernet yet)".into());
+            }
+            (NetMode::Stream, _) => {
+                let ep = self.network.stream.as_deref()
+                    .ok_or_else(|| "network.mode = \"stream\" needs [network] stream = \"tcp:IP:PORT\" or \"unix:PATH\"".to_string())?;
+                crate::net::stream::StreamEndpoint::parse(ep).map_err(|e| format!("network.stream: {e}"))?;
+            }
             _ => {}
         }
         if let Some(ref s) = self.nat_subnet {
@@ -2036,6 +2055,7 @@ impl MachineConfig {
             mac,
             tftp_dir:     self.network.tftp_dir.as_ref().map(std::path::PathBuf::from),
             rsh_dir:      self.network.rsh_dir.as_ref().map(std::path::PathBuf::from),
+            stream:       self.network.stream.clone(),
         }
     }
 
@@ -2632,6 +2652,30 @@ mod export_tests {
         cfg.machine.cpu = CpuModel::R10000;
         cfg.scsi.insert(3, ScsiDeviceConfig { kind_field: ScsiKind::Daynaport, ..Default::default() });
         assert!(cfg.validate().unwrap_err().contains("daynaport"));
+    }
+
+    /// `mode = "stream"` needs a parseable `stream` peer, on every machine.
+    #[test]
+    fn stream_mode_needs_a_peer() {
+        for profile in [MachineProfile::default(), MachineProfile::O2Ip32] {
+            let mut cfg = MachineConfig::default();
+            cfg.machine.profile = profile;
+            if profile == MachineProfile::O2Ip32 { cfg.machine.cpu = CpuModel::R10000; }
+            cfg.network.mode = NetMode::Stream;
+            assert!(cfg.validate().unwrap_err().contains("needs [network] stream"), "{profile:?}");
+            cfg.network.stream = Some("tcp:nope".into());
+            assert!(cfg.validate().unwrap_err().contains("network.stream"), "{profile:?}");
+            cfg.network.stream = Some("tcp:127.0.0.1:7000".into());
+            cfg.validate().unwrap_or_else(|e| panic!("{profile:?}: {e}"));
+        }
+        let mut cfg = MachineConfig::default();
+        cfg.machine.profile = MachineProfile::OctaneIp30;
+        cfg.machine.cpu = CpuModel::R10000;
+        cfg.network.mode = NetMode::Stream;
+        cfg.network.stream = Some("tcp:127.0.0.1:7000".into());
+        assert!(cfg.validate().unwrap_err().contains("not available on the Octane"));
+        let cfg: MachineConfig = toml::from_str("[network]\nmode = \"stream\"\nstream = \"unix:/run/x\"").unwrap();
+        assert_eq!(cfg.network().stream.as_deref(), Some("unix:/run/x"));
     }
 
     /// `banks` reads one to eight entries and pads; it writes four or more
