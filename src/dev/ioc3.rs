@@ -1015,6 +1015,9 @@ impl Parallel {
 // The DS1685 on the byte bus
 // ---------------------------------------------------------------------------
 
+/// How long the guest's NVRAM writes must pause before the file is
+/// rewritten.
+const NVRAM_QUIET: Duration = Duration::from_millis(500);
 /// Registers 0x0e.. are storage rather than clock in the file.
 const NVRAM_FIRST: usize = 0x0e;
 /// The old file format: registers 0x0e..0x80 as the bank-flat cell array.
@@ -1051,11 +1054,21 @@ struct Rtc {
     /// Bank-1 registers at 0x40..0x7f (0x48 and 0x4a live in `dev`).
     ext: [u8; 64],
     xram: [u8; RTC_XRAM_SIZE],
+    /// When the RAM last changed, if the file has not caught up yet.
+    dirty_since: Option<Instant>,
 }
 
 impl Rtc {
     fn new() -> Rtc {
-        Rtc { dev: MaceRtc::new(), index: 0, file: None, nv: [0; 64], ext: [0; 64], xram: [0; RTC_XRAM_SIZE] }
+        Rtc {
+            dev: MaceRtc::new(),
+            index: 0,
+            file: None,
+            nv: [0; 64],
+            ext: [0; 64],
+            xram: [0; RTC_XRAM_SIZE],
+            dirty_since: None,
+        }
     }
 
     fn bank1(&self) -> bool {
@@ -1093,8 +1106,9 @@ impl Rtc {
         } else {
             self.ext[i - 0x40] = v;
         }
-        if i >= NVRAM_FIRST {
-            self.save();
+        // The file catches up once the writes stop: see `Ioc3::flush_nvram`.
+        if i >= NVRAM_FIRST && self.file.is_some() {
+            self.dirty_since = Some(Instant::now());
         }
     }
 
@@ -1141,11 +1155,25 @@ impl Rtc {
         }
     }
 
-    fn save(&self) {
-        if let Some(p) = &self.file {
-            let _ = std::fs::write(p, self.image());
+    /// The file and the image to put in it, if the RAM changed at least
+    /// `quiet` ago; the RAM then counts as saved.
+    fn take_dirty(&mut self, quiet: Duration) -> Option<(std::path::PathBuf, Vec<u8>)> {
+        let since = self.dirty_since?;
+        if since.elapsed() < quiet {
+            return None;
         }
+        self.dirty_since = None;
+        Some((self.file.clone()?, self.image()))
     }
+}
+
+/// Replace the NVRAM file in one step (a temporary file, synced and
+/// renamed), so a kill mid-write leaves the previous image whole.
+fn save_nvram(path: &std::path::Path, image: &[u8]) -> std::io::Result<()> {
+    let name = path
+        .to_str()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NVRAM path is not UTF-8"))?;
+    crate::nv_storage::save(name, image)
 }
 
 // ---------------------------------------------------------------------------
@@ -2591,6 +2619,13 @@ impl Shared {
         self.eth().map_or(false, |e| e.read32(reg::ENET_MAC_CONTROL) & ENET_MCR_RAM_PARITY != 0)
     }
 
+    fn flush_nvram(&self, quiet: Duration) {
+        let Some((path, image)) = self.st.lock().unwrap().rtc.take_dirty(quiet) else { return };
+        if let Err(e) = save_nvram(&path, &image) {
+            eprintln!("ioc3: NVRAM {}: {e}", path.display());
+        }
+    }
+
     /// Everything the host side can do between guest accesses.
     fn service(&self) {
         self.with_st(false, |st, _| {
@@ -2671,19 +2706,38 @@ impl Ioc3 {
 
     /// Back the DS1685's RAM (user RAM, bank-1 registers and the 128-byte
     /// extended RAM) with a file. A 512-byte file (the layout the QEMU model
-    /// uses) is loaded, as is an old 114-byte register dump; the file is
-    /// rewritten as 512 bytes on every RAM write. The clock starts from host
-    /// time.
+    /// uses) is loaded, as is an old 114-byte register dump. The file is
+    /// written as 512 bytes now and replaced whole once the guest's writes
+    /// to the RAM pause (see [`Ioc3::flush_nvram`]). The clock starts from
+    /// host time.
     pub fn set_nvram_file(&self, path: impl Into<std::path::PathBuf>) -> std::io::Result<()> {
         let path = path.into();
-        let mut st = self.sh.st.lock().unwrap();
-        if let Ok(img) = std::fs::read(&path) {
-            if !st.rtc.load(&img) {
-                log::warn!("ioc3: NVRAM file {} has {} bytes, not 114 or 512; ignored", path.display(), img.len());
+        let image = {
+            let mut st = self.sh.st.lock().unwrap();
+            if let Ok(img) = std::fs::read(&path) {
+                if !st.rtc.load(&img) {
+                    log::warn!("ioc3: NVRAM file {} has {} bytes, not 114 or 512; ignored", path.display(), img.len());
+                }
             }
-        }
-        st.rtc.file = Some(path);
-        std::fs::write(st.rtc.file.as_ref().unwrap(), st.rtc.image())
+            st.rtc.file = Some(path.clone());
+            st.rtc.dirty_since = None;
+            st.rtc.image()
+        };
+        save_nvram(&path, &image)
+    }
+
+    /// Write the NVRAM file if the RAM changed at least `quiet` ago. The
+    /// PROM writes its environment a byte at a time, so the service thread
+    /// waits for a pause rather than rewriting the file per byte; stopping
+    /// the machine and dropping the chip flush with no wait. The file is
+    /// written outside the chip's lock.
+    pub fn flush_nvram_after(&self, quiet: Duration) {
+        self.sh.flush_nvram(quiet);
+    }
+
+    /// [`Ioc3::flush_nvram_after`] with no wait.
+    pub fn flush_nvram(&self) {
+        self.sh.flush_nvram(Duration::ZERO);
     }
 
     /// Attach the Ethernet MAC. It is told about DMA and the PCI interrupt
@@ -2738,6 +2792,7 @@ impl Ioc3 {
             .spawn(move || {
                 while let Some(sh) = weak.upgrade() {
                     sh.service();
+                    sh.flush_nvram(NVRAM_QUIET);
                     drop(sh);
                     std::thread::sleep(Duration::from_millis(2));
                 }
@@ -2748,6 +2803,12 @@ impl Ioc3 {
     /// The SuperIO interrupt status register, for tests and the monitor.
     pub fn int_status(&self) -> u32 {
         self.sh.st.lock().unwrap().int_status
+    }
+}
+
+impl Drop for Ioc3 {
+    fn drop(&mut self) {
+        self.flush_nvram();
     }
 }
 
