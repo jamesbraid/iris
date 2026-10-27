@@ -152,6 +152,15 @@ const SELECT_ENTRY: u32 = 0x4FC;
 /// Words in a context image.
 const CONTEXT_WORDS: u32 = 63;
 
+/// Whether a 64-bit command-port word is a whole packet: its high word a
+/// command header carrying exactly one payload word (byte count 4 in bits
+/// 7:0, not pixel data), its low word that payload. Direct raster register
+/// writes are of this form.
+fn is_whole_packet(word: u64) -> bool {
+    let header = (word >> 32) as u32;
+    header & 0x8000_0000 == 0 && header & 0xFF == 4
+}
+
 /// HQ3 offsets in `Mgras`'s window.
 mod hq3 {
     pub const UCODE: u32 = 0x40000;
@@ -935,8 +944,20 @@ impl ImpactXio {
                 Phase::Command
             } else if bits == 32 && s.entry_selected && s.protocol == 1 && s.first_ack && s.context_words < CONTEXT_WORDS {
                 Phase::Image
+            } else if bits == 64 && !s.entry_selected && is_whole_packet(val) {
+                // The IP30 PROM's graphical console draws through this port
+                // and never selects a context: direct raster writes and a
+                // few other one-word packets. Before the first selection
+                // only whole packets are taken as commands: the IP30
+                // diagnostics write a bare bring-up word here first, whose
+                // high word is zero, and parsed as a header its low word
+                // would swallow the raster writes after it. That the board
+                // takes them without a switch is inferred from the PROM's
+                // command stream and OpenBSD's impact driver, which draws
+                // with the same packets and no switch.
+                Phase::Command
             } else if bits == 64 && !s.entry_selected {
-                // Traffic before any selection has no modelled effect.
+                // Other traffic before any selection has no modelled effect.
                 Phase::Ignore
             } else {
                 Phase::Stray
@@ -1299,6 +1320,30 @@ mod tests {
         r.w64(0x020400, (0x60001u64 | 0x176 << 6) << 34 | 0x21);
         r.block(30, 5, 30, 5);
         assert_eq!(r.b.mgras().fb_pixel(30, 5), 0x21);
+    }
+
+    /// Before any context switch, as the IP30 PROM's console draws: whole
+    /// packets reach the raster engine; another 64-bit word (the
+    /// diagnostics' bring-up word) is dropped and does not swallow the
+    /// writes after it.
+    #[test]
+    fn whole_packets_draw_before_any_switch() {
+        let r = rig();
+        r.w64(COMMAND, 0x65781);
+        // The PROM's pixel-format packet, a whole packet but no raster write.
+        r.w64(COMMAND, 0x000C_0004_0000_0E00);
+        r.x_server();
+        r.rss(0x110, 1 << 20, false); // FILLMODE: fast fill
+        r.rss(0x176, 0x2A, false); // FILL_COLOR_R
+        r.block(40, 7, 41, 7);
+        assert_eq!(r.b.mgras().fb_pixel(40, 7), 0x2A);
+        assert_eq!(r.b.mgras().fb_pixel(41, 7), 0x2A);
+        assert_eq!(r.b.mgras().fb_pixel(42, 7), 0);
+        assert!(!r.b.shared.hq4.lock().ready, "no switch happened");
+        assert!(is_whole_packet(0x001C_1104_0000_0018));
+        assert!(is_whole_packet(0x001A_6804_0000_0000));
+        assert!(!is_whole_packet(0x65781));
+        assert!(!is_whole_packet(0x8000_0004_0000_0000), "pixel data");
     }
 
     /// HQ4 DMA through HEART memory. On the Octane the page list holds
