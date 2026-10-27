@@ -37,7 +37,9 @@
 
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, OnceLock, Weak};
+
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::pci::{Bar, PciBusDevice, PciConfig, PciDma};
@@ -368,16 +370,29 @@ impl Rad1 {
     }
 }
 
+impl Rad1 {
+    /// Name the card's state lock in the lock registry, which holds only a
+    /// weak reference to it.
+    pub fn register_locks(&self) {
+        let me = Arc::downgrade(&self.inner);
+        crate::locks::register_lock("rad1::state", move || me.upgrade().is_some_and(|i| i.state.is_locked()));
+    }
+}
+
 impl Drop for Rad1 {
     fn drop(&mut self) {
         self.inner.quit.store(true, Ordering::SeqCst);
-        let threads = std::mem::take(&mut *self.inner.threads.lock().unwrap());
+        let threads = std::mem::take(&mut *self.inner.threads.lock());
         for t in threads {
             let _ = t.join();
         }
     }
 }
 
+/// Lock order: `tick_pass`, then `stopped_at` (a leaf, taken by `now`),
+/// then `state`. Rings and status slots are moved with `state` held: the
+/// DMA goes down through the Bridge and HEART, which never call back into
+/// the card, and a catch-up moves at most two revolutions of a ring.
 pub struct Inner {
     pci: PciConfig,
     state: Mutex<State>,
@@ -429,7 +444,7 @@ impl Inner {
     fn now(&self) -> i64 {
         match self.fake_ns.load(Ordering::Relaxed) {
             i64::MIN => {
-                let at = self.stopped_at.lock().unwrap().unwrap_or_else(Instant::now);
+                let at = self.stopped_at.lock().unwrap_or_else(Instant::now);
                 at.duration_since(self.start).as_nanos() as i64 - self.stopped_ns.load(Ordering::SeqCst)
             }
             t => t,
@@ -441,30 +456,30 @@ impl Inner {
     /// under way, and none is made until [`Inner::resume`].
     pub fn pause(&self) {
         {
-            let mut at = self.stopped_at.lock().unwrap();
+            let mut at = self.stopped_at.lock();
             if at.is_none() {
                 *at = Some(Instant::now());
             }
         }
-        drop(self.tick_pass.lock().unwrap());
+        drop(self.tick_pass.lock());
     }
 
     /// Run the clock again from where it stopped.
     pub fn resume(&self) {
-        let mut at = self.stopped_at.lock().unwrap();
+        let mut at = self.stopped_at.lock();
         if let Some(t) = at.take() {
             self.stopped_ns.fetch_add(t.elapsed().as_nanos() as i64, Ordering::SeqCst);
         }
     }
 
     fn stopped(&self) -> bool {
-        self.stopped_at.lock().unwrap().is_some()
+        self.stopped_at.lock().is_some()
     }
 
     /// Back to the power-on state.
     pub fn reset(&self) {
         let now = self.now();
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock();
         let gen = s.status_gen + 1;
         *s = State::new(now);
         s.status_gen = gen;
@@ -490,7 +505,7 @@ impl Inner {
 
     fn read(&self, off: u32, width: usize) -> u32 {
         let now = self.now();
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock();
         if width == 4 {
             if let Some(i) = Self::startup_index(off) {
                 return s.startup[i];
@@ -528,7 +543,7 @@ impl Inner {
     /// the register unchanged.
     fn write(&self, off: u32, val: u32, width: usize) {
         let now = self.now();
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock();
         if self.write_locked(&mut s, off, val, width, now).is_none() {
             eprintln!("rad1: unsupported {width}-byte BAR0 write at {off:#x} value {val:#x}");
         }
@@ -686,7 +701,7 @@ impl Inner {
         if self.fake_ns.load(Ordering::Relaxed) == i64::MIN {
             let gen = s.status_gen;
             let me = self.me.clone();
-            let mut threads = self.threads.lock().unwrap();
+            let mut threads = self.threads.lock();
             threads.retain(|t| !t.is_finished());
             threads.extend(
                 std::thread::Builder::new().name("rad1-status".into()).spawn(move || Self::status_thread(me, gen)).ok(),
@@ -708,7 +723,7 @@ impl Inner {
         const SLICE: Duration = Duration::from_millis(2);
         let mut next = match me.upgrade() {
             Some(i) => {
-                let s = i.state.lock().unwrap();
+                let s = i.state.lock();
                 if s.status_gen != gen || !s.status_running {
                     return;
                 }
@@ -726,7 +741,7 @@ impl Inner {
                 continue;
             }
             let Some(i) = me.upgrade() else { return };
-            let _pass = i.tick_pass.lock().unwrap();
+            let _pass = i.tick_pass.lock();
             if i.stopped() {
                 drop(_pass);
                 std::thread::sleep(SLICE);
@@ -745,7 +760,7 @@ impl Inner {
     /// slots, keeps finding fresh ones.
     fn status_tick(&self, gen: u64) -> Option<i64> {
         let now = self.now();
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock();
         if s.status_gen != gen || !s.status_running {
             return None;
         }
