@@ -16,7 +16,9 @@ IMPACT board fitted (the default) and a blank NVRAM, the PROM comes up on
 the graphics console and IRIX starts X to the login screen and a desktop.
 The guest pings
 the NAT gateway, fetches files from its TFTP server and accepts telnet logins
-through a port forward. `reboot` comes back to the login prompt.
+through a port forward. `reboot` comes back to the login prompt. The
+"/ns: Resource busy" line during startup comes from the guest; the disk
+prints it on the other Octane emulator too.
 
 The Octane does not run in iris-gui; start it from the `iris` command line.
 
