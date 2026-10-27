@@ -17,12 +17,15 @@
 //!   store what was written and return it. No reset values or masks are
 //!   established beyond zero; the few writes the model refuses (see
 //!   [`Rad1::write`]) are refused because no supported guest makes them.
-//! * The engines move frames at the sample rate with no host audio backend:
-//!   an output ring is read and discarded, an input ring is filled with
-//!   silence. Frames are moved when something looks (a position or status
-//!   read, a status completion), not on a timer, so a ring's contents reach
-//!   guest memory no later than the next such look. Host audio output is not
-//!   connected.
+//! * The engines move frames at the sample rate. Frames are moved when
+//!   something looks (a position or status read, a status completion) and,
+//!   while the analog output runs with host audio enabled, by a 10 ms pump,
+//!   so the output reaches the host steadily. An input ring is filled with
+//!   silence: host audio input is not connected.
+//! * Output plays as the model's mixer does: each ring frame is two
+//!   little-endian words, left then right, each a 24-bit signed sample in
+//!   bits [23:0]; the host sample is bits [23:8]. The channel order and the
+//!   use of bits [23:8] are the model's inference, not confirmed.
 //! * The AES3 subcode channel runs at 48000/192 Hz with empty records: no
 //!   capture times them, the rate is inferred from the record layout.
 //! * UST ticks every 960 ns, a selected board policy; the physical rate is
@@ -32,10 +35,12 @@
 //!   cannot express.
 
 use std::ops::Deref;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
+use crate::config::AudioConfig;
+use crate::host_audio::{HostOut, Resampler};
 use crate::pci::{Bar, PciBusDevice, PciConfig, PciDma};
 
 pub const PCI_VENDOR_SGI: u16 = 0x10a9;
@@ -101,6 +106,8 @@ const FREQ_ANALOG: u64 = 44100;
 const FREQ_AES_SUB: u64 = 48000 / 192;
 /// Ring bytes moved per DMA access; a whole number of frames of any type.
 const CHUNK_BYTES: u64 = 1024;
+/// How often the pump moves output frames to the host.
+const PUMP_MS: u64 = 10;
 const POS_FIELD_MASK: u32 = 0x3fff;
 const UST_LATCH_MASK: u32 = 0x3_ffff;
 
@@ -116,6 +123,122 @@ const SLOT_DONE_WORD: u32 = 0x8000_0000 | 0x0008_0000;
 const STATUS_CLOCK_HZ: u64 = 33_000_000;
 const STATUS_INTERVAL_SHIFT: u32 = 2;
 const STATUS_INTERVAL_MASK: u32 = 0x7fff;
+
+/// A 16-bit host sample sits in bits [23:8] of its 24-bit ring sample.
+const SAMPLE_SHIFT: u32 = 8;
+/// Words a host frame carries: the mixer takes two channels.
+const PCM_CHANNELS: usize = 2;
+/// The analog rings' words per frame.
+const ANALOG_WORDS: usize = 2;
+
+/// One ring word's 24-bit sample as a 16-bit host sample, bits [23:8].
+fn word_to_sample(word: u32) -> i16 {
+    (word >> SAMPLE_SHIFT) as i16
+}
+
+/// One 16-bit host sample as a ring word: bits [23:8], sign-extended
+/// through [31:24], bits [7:0] zero.
+fn sample_to_word(sample: i16) -> u32 {
+    (i32::from(sample) << SAMPLE_SHIFT) as u32
+}
+
+/// Output: `ring` holds whole frames of `words_per_frame` little-endian
+/// words; `pcm` receives as many stereo host frames. The first word is left,
+/// the second right; further words have no host channel and are dropped.
+fn frames_to_pcm(ring: &[u8], pcm: &mut [i16], words_per_frame: usize) {
+    let frames = pcm.len() / PCM_CHANNELS;
+    for f in 0..frames {
+        for ch in 0..PCM_CHANNELS {
+            let at = (f * words_per_frame + ch) * 4;
+            let word = u32::from_le_bytes(ring[at..at + 4].try_into().unwrap());
+            pcm[f * PCM_CHANNELS + ch] = word_to_sample(word);
+        }
+    }
+}
+
+/// Input: stereo host frames to ring frames of `words_per_frame` words. Left
+/// fills the first word and right the second; any further word is silence.
+fn pcm_to_frames(pcm: &[i16], ring: &mut [u8], words_per_frame: usize) {
+    let frames = pcm.len() / PCM_CHANNELS;
+    for f in 0..frames {
+        for w in 0..words_per_frame {
+            let word = if w < PCM_CHANNELS { sample_to_word(pcm[f * PCM_CHANNELS + w]) } else { 0 };
+            let at = (f * words_per_frame + w) * 4;
+            ring[at..at + 4].copy_from_slice(&word.to_le_bytes());
+        }
+    }
+}
+
+/// Where decoded output goes: the host stream (through the shared resampler),
+/// an optional WAV file of the 44.1 kHz stream the card produced, and for
+/// tests a plain buffer.
+struct Sink {
+    host: Option<(HostOut, Resampler)>,
+    wav: Option<Wav>,
+    tap: Option<Arc<Mutex<Vec<i16>>>>,
+}
+
+impl Sink {
+    fn play(&mut self, pcm: &[i16]) {
+        if let Some((out, rs)) = self.host.as_mut() {
+            for p in pcm.chunks_exact(PCM_CHANNELS) {
+                rs.push(p[0], p[1], &mut out.producer);
+            }
+        }
+        if let Some(w) = self.wav.as_mut() {
+            w.append(pcm);
+        }
+        if let Some(t) = self.tap.as_ref() {
+            t.lock().unwrap().extend_from_slice(pcm);
+        }
+    }
+}
+
+/// A 44.1 kHz stereo 16-bit WAV, its sizes rewritten after every append so a
+/// file from a killed run still plays. A debugging aid: `IRIS_OCTANE_AUDIO_WAV`.
+struct Wav {
+    file: std::fs::File,
+    data_bytes: u32,
+}
+
+impl Wav {
+    fn create(path: &std::ffi::OsStr) -> Option<Self> {
+        let mut w = Self { file: std::fs::File::create(path).ok()?, data_bytes: 0 };
+        w.header().ok()?;
+        Some(w)
+    }
+
+    fn header(&mut self) -> std::io::Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+        let rate = FREQ_ANALOG as u32;
+        let mut h = Vec::with_capacity(44);
+        h.extend_from_slice(b"RIFF");
+        h.extend_from_slice(&(36 + self.data_bytes).to_le_bytes());
+        h.extend_from_slice(b"WAVEfmt ");
+        h.extend_from_slice(&16u32.to_le_bytes());
+        h.extend_from_slice(&1u16.to_le_bytes());
+        h.extend_from_slice(&(PCM_CHANNELS as u16).to_le_bytes());
+        h.extend_from_slice(&rate.to_le_bytes());
+        h.extend_from_slice(&(rate * 4).to_le_bytes());
+        h.extend_from_slice(&4u16.to_le_bytes());
+        h.extend_from_slice(&16u16.to_le_bytes());
+        h.extend_from_slice(b"data");
+        h.extend_from_slice(&self.data_bytes.to_le_bytes());
+        self.file.seek(SeekFrom::Start(0))?;
+        self.file.write_all(&h)?;
+        self.file.seek(SeekFrom::End(0))?;
+        Ok(())
+    }
+
+    fn append(&mut self, pcm: &[i16]) {
+        use std::io::Write;
+        let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+        if self.file.write_all(&bytes).is_ok() {
+            self.data_bytes = self.data_bytes.wrapping_add(bytes.len() as u32);
+            let _ = self.header();
+        }
+    }
+}
 
 /// Channel types, as indices into [`State::chan`]. Only the three the
 /// Octane supports are modelled.
@@ -372,6 +495,11 @@ pub struct Inner {
     /// thread runs then.
     fake_ns: AtomicI64,
     dma: OnceLock<Arc<dyn PciDma>>,
+    /// `[audio]` settings once host output is enabled; `None` (tests,
+    /// `no_audio`) keeps the output channel running silently.
+    audio_cfg: Mutex<Option<AudioConfig>>,
+    sink: Mutex<Option<Sink>>,
+    underruns: Arc<AtomicU64>,
     me: Weak<Inner>,
 }
 
@@ -390,8 +518,56 @@ impl Inner {
             start: Instant::now(),
             fake_ns: AtomicI64::new(i64::MIN),
             dma: OnceLock::new(),
+            audio_cfg: Mutex::new(None),
+            sink: Mutex::new(None),
+            underruns: Arc::new(AtomicU64::new(0)),
             me,
         }
+    }
+
+    /// Play the analog output through the host with `audio`'s settings. The
+    /// stream opens when the output first starts. A pump thread keeps the
+    /// output channel's frames moving between the guest's own looks.
+    pub fn enable_output(&self, audio: AudioConfig) {
+        *self.audio_cfg.lock().unwrap() = Some(audio);
+        if self.fake_ns.load(Ordering::Relaxed) != i64::MIN {
+            return;
+        }
+        let me = self.me.clone();
+        std::thread::Builder::new()
+            .name("rad1-audio".into())
+            .spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(PUMP_MS));
+                let Some(i) = me.upgrade() else { return };
+                let now = i.now();
+                let mut s = i.state.lock().unwrap();
+                i.sync_chan(&mut s, CH_OUT, now);
+            })
+            .ok();
+    }
+
+    /// Open the output sink on the first start of the analog output.
+    fn open_sink(&self) {
+        let mut sink = self.sink.lock().unwrap();
+        if sink.is_some() {
+            return;
+        }
+        let Some(cfg) = self.audio_cfg.lock().unwrap().clone() else { return };
+        let ring = |rate: u32| rate as usize * 2 / 5; // 200 ms of stereo
+        let host = crate::host_audio::open_output(
+            &cfg,
+            self.underruns.clone(),
+            Arc::new(AtomicBool::new(true)),
+            ring,
+            "Octane audio",
+            "IRIS_OCTANE_AUDIO_CAPTURE",
+        )
+        .map(|out| {
+            let rs = Resampler::new(FREQ_ANALOG as u32, out.stream_rate);
+            (out, rs)
+        });
+        let wav = std::env::var_os("IRIS_OCTANE_AUDIO_WAV").and_then(|p| Wav::create(&p));
+        *sink = Some(Sink { host, wav, tap: None });
     }
 
     fn now(&self) -> i64 {
@@ -744,6 +920,9 @@ impl Inner {
         if val & CHAN_INFO[idx].enable_bit != 0 {
             if !s.chan[idx].running {
                 s.chan_start(idx, now);
+                if idx == CH_OUT && s.chan[idx].running {
+                    self.open_sink();
+                }
             }
         } else {
             // Stop where the sample clock has got to.
@@ -752,12 +931,14 @@ impl Inner {
         }
     }
 
-    /// Move frames between the ring and nowhere, wrapping at the ring's end.
-    /// Output frames are read and discarded; input frames are silence.
+    /// Move frames between the ring and the host, wrapping at the ring's end.
+    /// Output frames are decoded and played (or dropped with no sink); input
+    /// frames are silence.
     fn chan_move(&self, s: &mut State, idx: usize, mut frames: u64) -> bool {
         let info = &CHAN_INFO[idx];
         let Some(dma) = self.dma.get() else { return false };
         let mut ring = [0u8; CHUNK_BYTES as usize];
+        let mut pcm = [0i16; CHUNK_BYTES as usize / 4];
         while frames != 0 {
             let c = s.chan[idx];
             let bytes = (frames * info.frame_bytes).min(c.len - c.offset);
@@ -766,6 +947,10 @@ impl Inner {
             let buf = &mut ring[..(n * info.frame_bytes) as usize];
             let status = if info.output {
                 dma.dma_read(c.base + c.offset, buf)
+            } else if idx == CH_IN {
+                pcm.fill(0); // host input is not connected
+                pcm_to_frames(&pcm[..n as usize * PCM_CHANNELS], buf, ANALOG_WORDS);
+                dma.dma_write(c.base + c.offset, buf)
             } else {
                 buf.fill(0);
                 dma.dma_write(c.base + c.offset, buf)
@@ -773,6 +958,13 @@ impl Inner {
             if !status.is_ok() {
                 eprintln!("rad1: {} DMA at {:#x} failed", info.name, c.base + c.offset);
                 return false;
+            }
+            if info.output {
+                let samples = &mut pcm[..n as usize * PCM_CHANNELS];
+                frames_to_pcm(buf, samples, ANALOG_WORDS);
+                if let Some(sink) = self.sink.lock().unwrap().as_mut() {
+                    sink.play(samples);
+                }
             }
             let c = &mut s.chan[idx];
             c.offset += chunk;

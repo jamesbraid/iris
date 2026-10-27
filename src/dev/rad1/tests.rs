@@ -505,3 +505,121 @@ fn reset_ends_engines_and_status() {
     assert!(!r.state.lock().unwrap().chan[CH_OUT].running);
     assert_eq!(rd(&r, 0x2c), 0);
 }
+
+// PCM conversion and host output.
+
+#[test]
+fn sample_word_conversions() {
+    // A 16-bit sample is bits [23:8], sign-extended through [31:24].
+    assert_eq!(sample_to_word(0), 0);
+    assert_eq!(sample_to_word(1), 0x0000_0100);
+    assert_eq!(sample_to_word(0x7fff), 0x007f_ff00);
+    assert_eq!(sample_to_word(-1), 0xffff_ff00);
+    assert_eq!(sample_to_word(i16::MIN), 0xff80_0000);
+    assert_eq!(word_to_sample(0x007f_ff00), 0x7fff);
+    assert_eq!(word_to_sample(0xff80_0000), i16::MIN);
+    // The low byte is dropped, the sign-extension bits ignored.
+    assert_eq!(word_to_sample(0x0012_34ff), 0x1234);
+    assert_eq!(word_to_sample(0x0112_3400), 0x1234);
+    for s in [i16::MIN, -12345, -1, 0, 1, 321, i16::MAX] {
+        assert_eq!(word_to_sample(sample_to_word(s)), s);
+    }
+}
+
+#[test]
+fn ring_frames_decode_left_first_and_drop_extra_words() {
+    let words = [0x0000_1100u32, 0xffff_ff00, 0x0000_2200, 0x0000_3300];
+    let ring: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let mut pcm = [0i16; 2];
+    frames_to_pcm(&ring[..8], &mut pcm, 2);
+    assert_eq!(pcm, [0x11, -1], "left word first");
+    // Eight-word-style frames: words past the second are dropped.
+    let mut pcm = [0i16; 2];
+    frames_to_pcm(&ring, &mut pcm, 4);
+    assert_eq!(pcm, [0x11, -1]);
+    // Two frames of two words.
+    let mut pcm = [0i16; 4];
+    frames_to_pcm(&ring, &mut pcm, 2);
+    assert_eq!(pcm, [0x11, -1, 0x22, 0x33]);
+}
+
+#[test]
+fn host_frames_encode_into_ring_frames() {
+    let pcm = [0x1234i16, -2, 7, i16::MIN];
+    let mut ring = [0xaau8; 16];
+    pcm_to_frames(&pcm, &mut ring, 2);
+    let w: Vec<u32> = ring.chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    assert_eq!(w, [0x0012_3400, 0xffff_fe00, 0x0000_0700, 0xff80_0000]);
+    // Words past the second record silence.
+    let mut ring = [0xaau8; 16];
+    pcm_to_frames(&pcm[..2], &mut ring, 4);
+    let w: Vec<u32> = ring.chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    assert_eq!(w, [0x0012_3400, 0xffff_fe00, 0, 0]);
+}
+
+#[test]
+fn output_ring_reaches_the_sink() {
+    let (r, ram) = dma_card();
+    let tap = Arc::new(Mutex::new(Vec::new()));
+    *r.sink.lock().unwrap() = Some(Sink { host: None, wav: None, tap: Some(tap.clone()) });
+    // A 512-frame ring (4 KiB), each frame left = n, right = -n.
+    {
+        let mut m = ram.0.lock().unwrap();
+        for n in 0..512usize {
+            let at = 0x10_0000 + n * 8;
+            m[at..at + 4].copy_from_slice(&sample_to_word(n as i16).to_le_bytes());
+            m[at + 4..at + 8].copy_from_slice(&sample_to_word(-(n as i16)).to_le_bytes());
+        }
+    }
+    start_ust(&r);
+    program(&r, &RING_OUTPUT, 0x10_0000, 0xffff_f008);
+    wr(&r, 0x58, 0x2000_0001);
+    // 1 ms of 44.1 kHz is 44 frames.
+    at(&r, 1_000_000);
+    rd(&r, 0x18);
+    {
+        let t = tap.lock().unwrap();
+        assert_eq!(t.len(), 44 * 2);
+        for n in 0..44usize {
+            assert_eq!(t[n * 2], n as i16);
+            assert_eq!(t[n * 2 + 1], -(n as i16));
+        }
+    }
+    // Past the ring's end the stream wraps to its first frame.
+    at(&r, 12_000_000);
+    rd(&r, 0x18);
+    let t = tap.lock().unwrap();
+    assert_eq!(t.len(), 529 * 2);
+    assert_eq!(t[511 * 2], 511);
+    assert_eq!(t[512 * 2], 0, "frame 512 is ring frame 0");
+    assert_eq!(t[513 * 2], 1);
+}
+
+#[test]
+fn input_ring_is_not_played() {
+    let (r, _ram) = dma_card();
+    let tap = Arc::new(Mutex::new(Vec::new()));
+    *r.sink.lock().unwrap() = Some(Sink { host: None, wav: None, tap: Some(tap.clone()) });
+    program(&r, &RING_INPUT, 0x11_0000, 0xffff_f000);
+    wr(&r, 0x4c, 1);
+    at(&r, 1_000_000);
+    rd(&r, 0x14);
+    assert!(tap.lock().unwrap().is_empty());
+}
+
+#[test]
+fn wav_file_has_a_valid_header_and_data() {
+    let dir = std::env::temp_dir().join(format!("rad1-wav-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("o.wav");
+    let mut w = Wav::create(path.as_os_str()).unwrap();
+    w.append(&[1, -1, 2, -2]);
+    let b = std::fs::read(&path).unwrap();
+    assert_eq!(&b[..4], b"RIFF");
+    assert_eq!(u32::from_le_bytes(b[4..8].try_into().unwrap()), 36 + 8);
+    assert_eq!(u32::from_le_bytes(b[24..28].try_into().unwrap()), 44100);
+    assert_eq!(u32::from_le_bytes(b[40..44].try_into().unwrap()), 8);
+    assert_eq!(i16::from_le_bytes(b[46..48].try_into().unwrap()), -1);
+    assert_eq!(b.len(), 52);
+    let _ = std::fs::remove_dir_all(&dir);
+}
