@@ -153,7 +153,7 @@ the first `[section]`, because TOML tables continue until the next header.
 | `test_device` | `false` | Map the bare-metal test device in GIO slot 0. |
 | `test_device_dump` | `iris-testdev-dump.json when unset` | Test-device machine-state JSON output. |
 | `cheritest_dump_hook` | `false` | CP0 register 26 dump convention; needs test_device, unsafe for normal PROM boot. |
-| `nat_subnet` | `192.168.0.0/24 when unset` | CIDR; NAT gateway network+1 and guest network+2. |
+| `nat_subnet` | `192.168.0.0/24 when unset` | CIDR; NAT gateway network+1 and guest network+2. Until the first packet routes, a guest that ARPs for another address in its own /24 moves the gateway there (a disk configured with a different default route works unchanged). |
 | `ci` | `false` | CI server/serial backend; hides host window unless ci_display, keeps offscreen graphics. |
 | `ci_socket` | `/tmp/iris.sock on Unix; 127.0.0.1:19851 on Windows` | Unix path, host:port, or tcp:host:port. |
 | `ci_display` | `false` | Keep host graphics window visible in CI mode. |
