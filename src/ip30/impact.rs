@@ -587,6 +587,8 @@ impl ImpactXio {
         // The Octane X server arms a pixel read with XFRCONTROL 8 and kicks
         // the DMA last, which starts the read.
         mgras.start_reads_at_kick();
+        // The HQ4 microcode keeps its GE state at other addresses.
+        mgras.hq4_state_layout();
         let me = Arc::new(Self { base: widget_small_base(widget) as u64, board, shared, mgras });
         // The swap reaching the HQ is the one HQ3 flag the general line
         // carries.
