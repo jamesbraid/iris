@@ -1077,15 +1077,16 @@ impl Hq3Engine {
         }
     }
 
-    /// The host DMA engine's start word. Host to board runs now: the raster
-    /// engine was armed by commands queued ahead. Board to host waits for
-    /// the raster engine.
     /// The GE state word a readback at `addr` answers, in the layout of the
     /// board's microcode.
     fn ge_state(&mut self, addr: u32) -> Option<u32> {
         if self.hq4_state { self.gl.state_word_hq4(addr) } else { self.gl.state_word(addr) }
     }
 
+    /// The host DMA engine's start word. Host to board runs now: the raster
+    /// engine was armed by commands queued ahead. Board to host is held
+    /// until the raster engine arms the transfer, or, with
+    /// `kick_starts_read`, until the start word itself starts it.
     fn dma_start(&mut self, word: u32, sink: &mut dyn Hq3Sink) {
         if word & 1 == 0 {
             return;

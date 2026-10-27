@@ -335,8 +335,8 @@ impl State {
     /// The chip's own core: the register file, the table and the latched
     /// errors. The interrupt pins' levels belong to whatever drives them.
     fn reset_core(&mut self, flash_strap: bool) {
-        for (i, r) in self.reg.iter_mut().enumerate() {
-            *r = reg_info(i as u32 * 8).map_or(0, |info| info.reset);
+        for (i, slot) in self.reg.iter_mut().enumerate() {
+            *slot = reg_info(i as u32 * 8).map_or(0, |r| r.reset);
         }
         self.set_r(
             reg::IDENTIFICATION,
@@ -508,10 +508,6 @@ impl Bridge {
         st.set_r(reg::STATUS, if select1 { s | STATUS_FLASH_SELECT } else { s & !STATUS_FLASH_SELECT });
     }
 
-    /// Install the one-wire bus behind the NIC register. It runs one bit
-    /// slot given the pulse and sample timing fields and returns the line
-    /// level the master samples. With none installed the bus is empty and
-    /// reads as an undriven, pulled-up line.
     /// Tell the Bridge which widgets the Crossbow has a live link to. A DMA
     /// request to any other widget is dropped by the Crossbow, which the
     /// Bridge's request timer reports. The default is HEART alone.
@@ -519,6 +515,10 @@ impl Bridge {
         *self.link_alive.write().unwrap() = alive;
     }
 
+    /// Install the one-wire bus behind the NIC register. It runs one bit
+    /// slot given the pulse and sample timing fields and returns the line
+    /// level the master samples. With none installed the bus is empty and
+    /// reads as an undriven, pulled-up line.
     pub fn set_onewire(&self, run_slot: Box<dyn Fn(u32, u32) -> bool + Send + Sync>) {
         *self.onewire.write().unwrap() = Some(run_slot);
     }
