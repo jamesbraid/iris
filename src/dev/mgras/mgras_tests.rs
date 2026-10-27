@@ -3337,3 +3337,20 @@ fn gl_raster_color_query_is_latched() {
     assert_eq!(v, [0.5, 0.25, 1.0, 0.75]);
     m.stop_engines();
 }
+
+/// `bound_busy_status`: STATUS's idle bits read set once a busy stretch
+/// has outlasted the bound, and the stretch ends when the board goes idle.
+/// Without the option, nothing changes.
+#[test]
+fn bounded_busy_status_reads_idle_after_the_bound() {
+    use std::sync::atomic::Ordering;
+    let m = live_board();
+    assert!(!m.busy_overdue(false), "off by default");
+    m.bound_busy_status();
+    assert!(!m.busy_overdue(false), "a stretch starts");
+    assert!(!m.busy_overdue(false), "still inside the bound");
+    std::thread::sleep(super::BUSY_STATUS_BOUND + std::time::Duration::from_millis(50));
+    assert!(m.busy_overdue(false), "past the bound");
+    assert!(!m.busy_overdue(true), "idle ends the stretch");
+    assert_eq!(m.busy_since.load(Ordering::Relaxed), 0);
+}
