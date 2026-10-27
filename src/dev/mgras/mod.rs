@@ -895,7 +895,7 @@ impl Mgras {
     /// Let STATUS's idle bits read set once the board has been busy for
     /// `BUSY_STATUS_BOUND` without a break. The model draws far slower than
     /// the board, and the IP30 kernel gives up waiting on those bits after
-    /// about 2 to 3 s and kills the X server ("hq idle wait timeout"). A
+    /// about 2 to 3 s and kills the X server over its idle wait. A
     /// read that then goes ahead still waits for the work at its data
     /// register. An approximation: the board would be idle by then.
     pub fn bound_busy_status(&self) {
@@ -969,8 +969,9 @@ impl Mgras {
     }
 
     /// With `bound_busy_status`, whether the board has been busy without a
-    /// break for longer than `BUSY_STATUS_BOUND`, timed from the first
-    /// STATUS read that saw it busy.
+    /// break for longer than `BUSY_STATUS_BOUND`, timed from the store that
+    /// took it from idle to busy (or from the first STATUS read that saw it
+    /// busy, if none did).
     fn busy_overdue(&self, idle: bool) -> bool {
         if !self.busy_bound.load(Ordering::Relaxed) {
             return false;
@@ -984,7 +985,7 @@ impl Mgras {
             Ok(_) => now,
             Err(t) => t,
         };
-        now - since > BUSY_STATUS_BOUND.as_nanos() as u64
+        now.saturating_sub(since) > BUSY_STATUS_BOUND.as_nanos() as u64
     }
 
     /// The HQ3 has run every command it was given.
@@ -1260,6 +1261,11 @@ impl Mgras {
     fn do_write(&self, addr: u64, bits: u32, val: u64) -> u32 {
         let Some(off) = self.offset(addr) else { return BUS_OK };
         let sub = self.submit.lock();
+        // A store into an idle board may start a busy stretch: time the
+        // bound from here, not from some earlier stretch no STATUS read saw end.
+        if self.busy_bound.load(Ordering::Relaxed) && self.idle() {
+            self.busy_since.store(self.epoch.elapsed().as_nanos() as u64 + 1, Ordering::Relaxed);
+        }
         let ok = self.write_locked(off, bits, val);
         crate::pf_level!(self.pf_fifo_full, crate::perfetto::events::MGRAS_FIFO_FULL, !ok);
         if !ok {
