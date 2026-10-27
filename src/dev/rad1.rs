@@ -832,6 +832,20 @@ impl Inner {
     fn chan_move(&self, s: &mut State, idx: usize, mut frames: u64) -> bool {
         let info = &CHAN_INFO[idx];
         let Some(dma) = self.dma.get() else { return false };
+        // A position read after a long look-away would replay every
+        // revolution of the ring it missed, a DMA per chunk on the CPU
+        // thread. Past one revolution the ring is left as it was found (an
+        // output ring is only read, an input ring is already silence), so
+        // whole revolutions beyond that are credited without moving
+        // anything. The position fields are 14 bits, so the count's
+        // truncation to 32 bits loses nothing.
+        let ring_frames = s.chan[idx].len / info.frame_bytes;
+        if ring_frames != 0 && frames >= 2 * ring_frames {
+            let skip = (frames / ring_frames - 1) * ring_frames;
+            s.chan[idx].frames += skip;
+            s.advance_pos(idx, skip as u32);
+            frames -= skip;
+        }
         let mut ring = [0u8; CHUNK_BYTES as usize];
         while frames != 0 {
             let c = s.chan[idx];

@@ -574,3 +574,38 @@ fn dropping_the_card_joins_its_status_thread() {
     drop(r);
     assert!(weak.upgrade().is_none());
 }
+
+/// Counts the transfers it passes on.
+struct Counting(Arc<Ram>, std::sync::atomic::AtomicUsize);
+
+impl PciDma for Counting {
+    fn dma_read(&self, addr: u64, buf: &mut [u8]) -> PciDmaStatus {
+        self.1.fetch_add(1, Ordering::Relaxed);
+        self.0.dma_read(addr, buf)
+    }
+    fn dma_write(&self, addr: u64, data: &[u8]) -> PciDmaStatus {
+        self.1.fetch_add(1, Ordering::Relaxed);
+        self.0.dma_write(addr, data)
+    }
+}
+
+/// A position read after a long look-away does not replay every missed
+/// revolution of the ring, and still lands where the sample clock says.
+#[test]
+fn a_long_catch_up_skips_whole_revolutions() {
+    let r = card();
+    let ram = Arc::new(Ram(Mutex::new(vec![0xaa; 0x40_0000])));
+    let dma = Arc::new(Counting(ram.clone(), std::sync::atomic::AtomicUsize::new(0)));
+    r.connect_dma(dma.clone());
+    program(&r, &RING_INPUT, 0x11_0000, 0xffff_f000);
+    wr(&r, 0x4c, 1);
+    // 1000 s of 44.1 kHz: 44.1 million frames of 8 bytes into a 4 KiB ring.
+    at(&r, 1_000_000_000_000);
+    let due: u64 = 44_100_000;
+    assert_eq!(u64::from(rd(&r, 0x18) >> 18), due & 0x3fff);
+    let c = r.state.lock().unwrap().chan[CH_IN];
+    assert_eq!(c.frames, due);
+    assert_eq!(c.offset, (due * 8) % c.len);
+    assert!(dma.1.load(Ordering::Relaxed) < 16, "{} transfers", dma.1.load(Ordering::Relaxed));
+    assert_eq!(word(&ram, 0x11_0000 + 0x800), 0, "the whole ring is silence");
+}
