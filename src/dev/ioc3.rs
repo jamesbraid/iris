@@ -300,9 +300,15 @@ pub mod onewire {
         cmd: u8,
     }
 
+    impl Default for Bus {
+        fn default() -> Bus {
+            Bus { parts: vec![], sel: vec![], replies: vec![], phase: Phase::Dead, acc: 0, nbits: 0, cmd: 0 }
+        }
+    }
+
     impl Bus {
         pub fn new() -> Bus {
-            Bus { parts: vec![], sel: vec![], replies: vec![], phase: Phase::Dead, acc: 0, nbits: 0, cmd: 0 }
+            Bus::default()
         }
 
         pub fn add(&mut self, p: Part) {
@@ -319,9 +325,7 @@ pub mod onewire {
             self.phase = Phase::Rom;
             self.acc = 0;
             self.nbits = 0;
-            for s in &mut self.sel {
-                *s = true;
-            }
+            self.sel.fill(true);
             !self.parts.is_empty()
         }
 
@@ -435,7 +439,7 @@ pub mod onewire {
                 Phase::Stream(i) => {
                     let byte = i / 8;
                     let sh = i % 8;
-                    let level = self.replies.iter().all(|r| r.get(byte).map_or(true, |b| b >> sh & 1 != 0));
+                    let level = self.replies.iter().all(|r| r.get(byte).is_none_or(|b| b >> sh & 1 != 0));
                     self.phase = Phase::Stream(i + 1);
                     level
                 }
@@ -1118,8 +1122,8 @@ impl Rtc {
 
     fn image(&self) -> Vec<u8> {
         let mut img = vec![0u8; NVRAM_IMAGE_LEN];
-        for r in 0..0x40 {
-            img[r] = self.dev.peek(r);
+        for (r, b) in img.iter_mut().enumerate().take(0x40) {
+            *b = self.dev.peek(r);
         }
         img[NVRAM_OFF_NV..NVRAM_OFF_NV + 64].copy_from_slice(&self.nv);
         let mut ext = self.ext;
@@ -1145,8 +1149,8 @@ impl Rtc {
             }
             true
         } else if img.len() == NVRAM_IMAGE_LEN {
-            for r in NVRAM_FIRST..0x40 {
-                self.dev.poke(r, img[r]);
+            for (r, &b) in img.iter().enumerate().take(0x40).skip(NVRAM_FIRST) {
+                self.dev.poke(r, b);
             }
             self.nv.copy_from_slice(&img[NVRAM_OFF_NV..NVRAM_OFF_NV + 64]);
             self.ext.copy_from_slice(&img[NVRAM_OFF_EXT..NVRAM_OFF_EXT + 64]);
@@ -1276,7 +1280,7 @@ impl Ioc3Config {
             subsystem_id: SUBSYS_IP30_SYSBOARD,
             mac,
             // UniqueWare prefix 0x5e7, then the "EMU" marker and instance 0.
-            ethernet_part_serial: 0x5e7_454d55_000,
+            ethernet_part_serial: 0x5e74_54d5_5000,
             serial: [true, true],
             parallel: true,
             keyboard_mouse: true,
@@ -1424,11 +1428,11 @@ impl St {
     // ----- serial ring DMA -----
 
     fn dma_read(&self, addr: u64, buf: &mut [u8]) -> bool {
-        self.dma.as_ref().map_or(false, |d| d.dma_read(addr, buf).is_ok())
+        self.dma.as_ref().is_some_and(|d| d.dma_read(addr, buf).is_ok())
     }
 
     fn dma_write(&self, addr: u64, data: &[u8]) -> bool {
-        self.dma.as_ref().map_or(false, |d| d.dma_write(addr, data).is_ok())
+        self.dma.as_ref().is_some_and(|d| d.dma_write(addr, data).is_ok())
     }
 
     fn sdma_ctl(&self, p: usize) -> u32 {
@@ -1811,9 +1815,7 @@ impl St {
                 if val & sdma_ctl::RESET != 0 {
                     // Resets the four indices and nothing else.
                     let port = &mut self.sdma.port[p];
-                    for r in 1..=4 {
-                        port.reg[r] = 0;
-                    }
+                    port.reg[1..=4].fill(0);
                     port.armed = false;
                     port.drain_pending = false;
                     port.packed = 0;
@@ -1919,7 +1921,7 @@ impl St {
                 }
             }
             IO_PERIODIC => {
-                if count + 1 <= IO_PULSE_TICKS {
+                if count < IO_PULSE_TICKS {
                     // No low phase: the output holds high.
                     self.io_drive(true);
                     self.io_hold_high();
@@ -2143,9 +2145,9 @@ impl St {
     fn kbc_receive(&mut self, port: usize, ps2: &Ps2Controller) -> u32 {
         let p = self.kbc.port[port];
         let mut val = 0u32;
-        for i in 0..p.count {
+        for (i, &b) in p.data.iter().enumerate().take(p.count) {
             let slot = (KBC_RX_SLOTS - 1) - i;
-            val |= (p.data[i] as u32) << (8 * slot);
+            val |= (b as u32) << (8 * slot);
             val |= 1 << (29 + slot);
         }
         if p.count != 0 && port == 1 {
@@ -2194,12 +2196,12 @@ impl St {
 
     fn par_status(&self) -> u32 {
         let mut s = 0;
-        for i in 0..2 {
+        for (i, &count) in self.par.count.iter().enumerate() {
             let shift = i * 3;
-            if self.par.count[i] & PAR_COUNT_ARM != 0 {
+            if count & PAR_COUNT_ARM != 0 {
                 s |= 1 << shift;
             }
-            if self.par.count[i] & PAR_COUNT_LAST != 0 {
+            if count & PAR_COUNT_LAST != 0 {
                 s |= 2 << shift;
             }
         }
@@ -2429,7 +2431,7 @@ impl St {
             narrow_once(a, w);
             return 0;
         }
-        let word = if (reg::SSRAM..reg::SSRAM + reg::SSRAM_SIZE).contains(&a) {
+        if (reg::SSRAM..reg::SSRAM + reg::SSRAM_SIZE).contains(&a) {
             let mut word = self.ssram[((a - reg::SSRAM) / 4) as usize];
             if c.eth_parity && word.count_ones() & 1 != 0 {
                 word |= SSRAM_PARITY_ERROR;
@@ -2447,8 +2449,7 @@ impl St {
             self.main_read(a & !3, c)
         } else {
             0
-        };
-        word
+        }
     }
 
     fn write(&mut self, a: u32, v: u32, w: usize, c: &Ctx) {
@@ -2632,7 +2633,7 @@ impl Shared {
         if !(reg::SSRAM..reg::SSRAM + reg::SSRAM_SIZE).contains(&a) {
             return false;
         }
-        self.eth().map_or(false, |e| e.read32(reg::ENET_MAC_CONTROL) & ENET_MCR_RAM_PARITY != 0)
+        self.eth().is_some_and(|e| e.read32(reg::ENET_MAC_CONTROL) & ENET_MCR_RAM_PARITY != 0)
     }
 
     fn flush_nvram(&self, quiet: Duration) {

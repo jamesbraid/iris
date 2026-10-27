@@ -1012,6 +1012,9 @@ struct Link {
     tx_wake: Option<Arc<crate::net::Wake>>,
 }
 
+/// How the MAC drives its interrupt line: called with each new level.
+type IrqFn = Box<dyn Fn(bool) + Send + Sync>;
+
 /// IOC3's Ethernet.
 ///
 /// Lock order: `rx_pass`, then `link`, then `st`; `irq_order` before `st`
@@ -1022,7 +1025,7 @@ pub struct Ioc3Eth {
     mac: [u8; 6],
     st: Mutex<State>,
     dma: Mutex<Option<Arc<dyn PciDma>>>,
-    irq: Mutex<Option<Box<dyn Fn(bool) + Send + Sync>>>,
+    irq: Mutex<Option<IrqFn>>,
     /// Serialises delivery of level changes to the interrupt callback.
     irq_order: Mutex<()>,
     link: Mutex<Option<Link>>,
