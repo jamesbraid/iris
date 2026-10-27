@@ -1490,3 +1490,20 @@ fn a_qemu_layout_image_loads() {
     assert_eq!(rtc_r(&r, 0x53), 0x02);
     let _ = std::fs::remove_file(&path);
 }
+
+/// A paused chip's service thread leaves it alone; dropping the chip
+/// joins the thread.
+#[test]
+fn the_service_thread_pauses_and_is_joined_on_drop() {
+    let r = Rig::new();
+    r.c.spawn_service();
+    r.c.pause();
+    assert!(r.c.sh.service_pass.try_lock().is_ok(), "no pass under way");
+    assert!(r.c.sh.paused.load(Ordering::SeqCst));
+    r.c.resume();
+    assert!(!r.c.sh.paused.load(Ordering::SeqCst));
+    let weak = Arc::downgrade(&r.c.sh);
+    drop(r);
+    // The thread held only a weak reference and has ended.
+    assert!(weak.upgrade().is_none());
+}
