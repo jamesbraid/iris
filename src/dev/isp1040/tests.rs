@@ -819,6 +819,60 @@ fn a_queue_above_four_gigabytes_cannot_be_reached_on_a_32_bit_bus() {
 
 // ---- state -------------------------------------------------------------
 
+// ---- guest-chosen sizes and bases at their limits --------------------
+
+/// A request ring longer than 0x8000 entries, with the consumer about to
+/// wrap: the index arithmetic wraps modulo the ring, it does not overflow.
+#[test]
+fn a_ring_of_65535_entries_wraps_its_consumer() {
+    let r = Rig::with_disk("long-ring", 0, 64);
+    r.init_rings(0xffff, 8);
+    let mut v = r.isp.save_state();
+    if let toml::Value::Table(t) = &mut v {
+        t.insert("rqst_cons".into(), hex_u16(0xfffe));
+    }
+    r.isp.load_state(&v).expect("load_state");
+    // Entry 0xfffe lies past memory and reads as zeros; entry 0 is real.
+    r.put_entry(0, &tur_entry(0x7001));
+    r.doorbell(1);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 1, "0xfffe, then 0, then stop at the producer");
+    let posted = r.r(reg::RESPONSE_QUEUE);
+    let handles: Vec<u32> = (0..posted as u32).map(|i| g32(&r.status(i), 4)).collect();
+    assert!(handles.contains(&0x7001), "the real entry ran: {handles:x?}");
+}
+
+/// A loaded consumer index past the end of its ring folds into it.
+#[test]
+fn a_loaded_index_past_its_ring_folds_into_it() {
+    let r = Rig::with_disk("fold", 0, 64);
+    r.init_rings(4, 4);
+    let mut v = r.isp.save_state();
+    if let toml::Value::Table(t) = &mut v {
+        t.insert("rqst_cons".into(), hex_u16(0xffff));
+        t.insert("resp_prod".into(), hex_u16(0xffff));
+    }
+    r.isp.load_state(&v).expect("load_state");
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 0xffff % 4);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0xffff % 4);
+}
+
+/// Ring bases at the top of the 64-bit space: an entry whose address
+/// would wrap past it is a refused transfer, and the walk stops there.
+#[test]
+fn ring_bases_at_the_top_of_the_bus_are_refused_not_wrapped() {
+    let r = Rig::with_disk("top", 1, 64);
+    let top = [0xffff, 0xfff0, 0, 0, 0xffff, 0xffff];
+    assert_eq!(r.cmd(&[mbox::INIT_REQ_QUEUE_A64, 4, top[0], top[1], 0, 0, top[4], top[5]]), mbox::COMPLETE);
+    assert_eq!(r.cmd(&[mbox::INIT_RSP_QUEUE_A64, 4, 0xffff, 0xffc0, 0, 0, 0xffff, 0xffff]), mbox::COMPLETE);
+    r.doorbell(2);
+    // Entry 0 (whose fields straddle the top) reads as zeros; entry 1 would
+    // wrap, so the walk stops on it.
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 1);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0, "the answer could not be stored");
+    // The device still answers.
+    assert_eq!(r.cmd(&[mbox::NOP]), mbox::COMPLETE);
+}
+
 #[test]
 fn save_load_round_trip() {
     let r = Rig::with_disk("save", 0, 64);
