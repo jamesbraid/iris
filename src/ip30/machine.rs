@@ -430,6 +430,9 @@ impl OctaneMachine {
         }
         bus.attach_widget(WIDGET_BRIDGE, bridge.clone(), false);
         let bus = Arc::new(bus);
+        // DMA reaches only widgets the Crossbow has a live link to.
+        let links = xbow.clone();
+        bridge.set_link_alive(Box::new(move |w| links.carries(w)));
 
         let scratch_path = Self::attach_scsi(cfg, &scsi)?;
         eprintln!(
