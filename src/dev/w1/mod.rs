@@ -18,3 +18,8 @@ pub mod slot;
 pub use bus::{Bus, Part};
 pub use ds2502::Ds2502;
 pub use ds2505::Ds2505;
+
+#[cfg(test)]
+mod golden;
+#[cfg(test)]
+mod tests;
