@@ -1350,6 +1350,22 @@ mod tests {
         assert!(!is_whole_packet(0x8000_0004_0000_0000), "pixel data");
     }
 
+    /// The IP30 PROM's pre-switch packet 0x001A6804 names a raster register
+    /// past 0x1FF: it is dropped and reported, and leaves the raster
+    /// registers alone.
+    #[test]
+    fn a_raster_write_past_the_register_file_is_dropped() {
+        let r = rig();
+        r.w64(COMMAND, 0x001A_6804_0000_0000);
+        r.w64(COMMAND, 0x001A_6804_DEAD_BEEF);
+        r.x_server();
+        r.rss(0x110, 1 << 20, false);
+        r.rss(0x176, 0x2A, false);
+        r.block(3, 3, 3, 3);
+        assert_eq!(r.b.mgras().fb_pixel(3, 3), 0x2A, "the pipe still draws");
+        assert!(r.b.mgras().noted("past register 0x1FF"), "reported");
+    }
+
     /// HQ4 DMA through HEART memory. On the Octane the page list holds
     /// 32-bit page-frame numbers from a list address that is only 4-byte
     /// aligned, as IRIX 6.5.30's IP30 X server lists them; the list here
