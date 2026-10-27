@@ -1,1 +1,1291 @@
-//! Octane (IP30) impact.
+//! IMPACT (MGRAS) graphics on the Octane: the board's HQ4 host interface on
+//! an XIO widget, in front of the raster pipeline `dev::mgras` models for
+//! the Indigo2.
+//!
+//! The Octane boards carry the Indigo2 boards' chips behind the host
+//! interface: the same GE11, RE4, PP1s, display control bus devices,
+//! command grammar and DMA register file. What differs is the front: an
+//! HQ4 on an XIO widget instead of an HQ3 on GIO. Its registers sit at
+//! other offsets in a 2 MB window, the kernel switches graphics contexts
+//! through a handshake of its own, DMA page tables are loaded through a
+//! separate mapping port, and interrupts are vectors sent to HEART. This
+//! file is that front; everything behind it is `Mgras`, reached at the
+//! Indigo2 offsets.
+//!
+//! | HQ4 offset          | what                              | goes to                      |
+//! |---------------------|-----------------------------------|------------------------------|
+//! | `0x000000-0x00003F` | widget identity, control, error interrupt destination | here    |
+//! | `0x011000-0x01109F` | context word, interrupt pending, ack, enables, vectors, NIC | here |
+//! | `0x020000-0x020200` | status, FIFO status, HQ flags, bus and DMA status | HQ3 `0x70000-0x70104` |
+//! | `0x020400`          | normal command FIFO               | HQ3 user command FIFO        |
+//! | `0x028000/4`        | GE readback                       | HQ3 `0x70010/4`              |
+//! | `0x02C000-0x02FFFF` | raster registers, execute alias   | HQ3 `0x7C000-0x7FFFF`        |
+//! | `0x040000-0x040030` | FIFO thresholds                   | here; the marks to HQ3 `0x50020/4` |
+//! | `0x050000-0x054FFF` | HQ microcode RAM                  | HQ3 `0x40000`                |
+//! | `0x058040-0x058233` | GE11 diagnostic ports             | HQ3 `0x50040-0x50233`        |
+//! | `0x070000-0x077FFF` | display control bus               | HQ3 `0x60000` (I2C here)     |
+//! | `0x120400`          | context image, then command words | HQ3 user command FIFO        |
+//! | `0x130400`          | DMA mapping port (class `0x48`)   | HQ3 privileged command FIFO  |
+//! | `0x130500`          | context-switch selection          | HQ3 context switch           |
+//!
+//! The register map, the handshake, the interrupt sources and the page-list
+//! layout follow our HQ4 contract (origami `docs/datasheets/mgras-hq4.md`)
+//! and its QEMU model, approximations included; the comments below repeat
+//! them where they apply.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+
+use super::xio::{widget_small_base, XioInterruptSink, XioMemory, WIDGET_HEART};
+use crate::config::GraphicsBoard;
+use crate::dev::mgras::{Mgras, MGRAS_SLOT_GFX_BASE};
+use crate::irq::{InterruptController, IrqLine};
+use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, BUS_ERR, BUS_OK};
+
+/// The board's register window within its widget space; the rest of the
+/// 16 MB small window is a hole.
+pub const IMPACT_WINDOW: u32 = 0x20_0000;
+
+/// What one XIO IMPACT variant answers to the reads IRIX tells the
+/// variants apart by.
+#[derive(Clone, Copy, Debug)]
+pub struct ImpactBoard {
+    pub name: &'static str,
+    /// The top bytes of 32-bit reads of `0x072488` and `0x072408`.
+    pub version1: u8,
+    pub version0: u8,
+    /// Widget identification word bits 31:28 at `0x000000`.
+    pub hq_revision: u8,
+    /// `0x028004` bits 7:0 before any state query.
+    pub ge_revision: u8,
+    /// `0x02C578` bits 7:4.
+    pub re4_revision: u8,
+    pub cmap_revision: u8,
+    pub ra_revision: u8,
+}
+
+/// Solid IMPACT, the one board the raster model behind this front is built
+/// as. Its values are inferred from a captured SI with texture, with the
+/// TRAM taken away: nobody has captured a textureless board.
+pub const SOLID_IMPACT: ImpactBoard = ImpactBoard {
+    name: "SI",
+    version1: 0x45,
+    version0: 0x0F,
+    hq_revision: 2,
+    ge_revision: 2,
+    re4_revision: 2,
+    cmap_revision: 3,
+    ra_revision: 0,
+};
+
+/// The widget identification word at `0x000004`: revision 0, part `0xC003`,
+/// manufacturer `0x2AA`.
+const WIDGET_PART: u32 = 0xC003;
+const WIDGET_MFG: u32 = 0x2AA;
+const WIDGET_REV: u32 = 0;
+
+/// The attached monitor's ID, in `0x071308` bits 7:4. Every captured board
+/// read 0xF with its monitor, which selects IRIX's stock 1280x1024 60 Hz
+/// timing.
+const MONITOR_ID: u8 = 0xF;
+
+/// Interrupt pending bits (`0x011020`) the model raises.
+mod pending {
+    pub const RETRACE: u32 = 1 << 0;
+    pub const LOWATER: u32 = 1 << 2;
+    /// The swap command has been reached.
+    pub const SWAP: u32 = 1 << 10;
+    /// The context-switch selection has been taken.
+    pub const FLAGS: u32 = 1 << 19;
+    /// The 63rd context image word has arrived.
+    pub const CONTEXT: u32 = 1 << 28;
+    /// What the general interrupt carries.
+    pub const GENERAL: u32 = FLAGS | CONTEXT | SWAP;
+}
+
+/// `0x011050` bit 4: the FIFO low-water interrupt's second-level enable.
+const HQ_ENABLE_LOWATER: u32 = 0x10;
+
+/// The kernel's only context-switch selection value.
+const SELECT_ENTRY: u32 = 0x4FC;
+/// Words in a context image.
+const CONTEXT_WORDS: u32 = 63;
+
+/// HQ3 offsets in `Mgras`'s window.
+mod hq3 {
+    pub const UCODE: u32 = 0x40000;
+    pub const CONTEXT_SWITCH: u32 = 0x50050;
+    pub const CFIFO_PRIVILEGED: u32 = 0x50080;
+    pub const INTERRUPT_ENABLE_SET: u32 = 0x50018;
+    pub const INTERRUPT_ENABLE_CLEAR: u32 = 0x5001C;
+    pub const CFIFO_HIGH_MARK: u32 = 0x50020;
+    pub const CFIFO_LOW_MARK: u32 = 0x50024;
+    pub const DCB: u32 = 0x60000;
+    pub const STATUS: u32 = 0x70000;
+    pub const FIFOSTATUS: u32 = 0x70004;
+    pub const SET_FLAGS: u32 = 0x70008;
+    pub const CLEAR_FLAGS: u32 = 0x7000C;
+    pub const GE_READBACK_HI: u32 = 0x70010;
+    pub const GE_READBACK_LO: u32 = 0x70014;
+    pub const CFIFO: u32 = 0x70080;
+    pub const GIOSTATUS: u32 = 0x70100;
+    pub const DMABUSY: u32 = 0x70104;
+    pub const RASTER: u32 = 0x7C000;
+    /// Interrupt enable of the command FIFO's low-water condition.
+    pub const INTR_CFIFO_LOW: u32 = 1 << 27;
+    /// HQ3 flags the model uses for its own bookkeeping: the swap reached
+    /// (10) and the two context-switch phases (19 and 6). The HQ4 reports
+    /// the swap as a pending source instead and has its own switch
+    /// handshake, so the guest sees these bits only as it wrote them.
+    pub const FLAG_CP0: u32 = 1 << 10;
+    pub const FLAGS_INTERNAL: u32 = 1 << 6 | FLAG_CP0 | 1 << 19;
+}
+
+/// HQ4 offsets.
+mod hq4 {
+    pub const WIDGET_ID_HI: u32 = 0x000000;
+    pub const WIDGET_ID: u32 = 0x000004;
+    pub const WIDGET_CONTROL: u32 = 0x000024;
+    pub const BUS_STATE: u32 = 0x008000;
+    pub const CONTEXT_WORD: u32 = 0x011000;
+    pub const PENDING: u32 = 0x011020;
+    pub const ACK: u32 = 0x011028;
+    pub const ENABLE_SET: u32 = 0x011040;
+    pub const ENABLE_CLEAR: u32 = 0x011048;
+    pub const HQ_ENABLE: u32 = 0x011050;
+    pub const HQ_ENABLE_CLEAR: u32 = 0x011058;
+    pub const VECTOR_DEST_UPPER: u32 = 0x011060;
+    pub const VECTOR_DEST_LOWER: u32 = 0x011068;
+    pub const VECTORS: u32 = 0x011070;
+    pub const NIC: u32 = 0x011098;
+    pub const STATUS: u32 = 0x020000;
+    pub const FIFOSTATUS: u32 = 0x020008;
+    pub const FLAGS_SET: u32 = 0x020010;
+    pub const FLAGS_CLEAR: u32 = 0x020018;
+    pub const RETRACE_ACK: u32 = 0x020028;
+    pub const RETRACE_STATUS_1: u32 = 0x020038;
+    pub const RETRACE_STATUS_2: u32 = 0x020044;
+    pub const GIOSTATUS: u32 = 0x020100;
+    pub const DMABUSY: u32 = 0x020200;
+    pub const FIFO: u32 = 0x020400;
+    pub const GE_READBACK_HI: u32 = 0x028000;
+    pub const GE_READBACK_LO: u32 = 0x028004;
+    pub const RASTER: u32 = 0x02C000;
+    pub const RASTER_END: u32 = 0x030000;
+    pub const RE_STATUS: u32 = 0x02C578;
+    pub const CFIFO_HIGH: u32 = 0x040000;
+    pub const CFIFO_LOW: u32 = 0x040008;
+    pub const UCODE: u32 = 0x050000;
+    pub const UCODE_END: u32 = 0x055000;
+    pub const DCB: u32 = 0x070000;
+    pub const DCB_END: u32 = 0x078000;
+    /// The display control bus's I2C device (number 15 here, 11 on the
+    /// Indigo2's bus), whose registers hold what is written.
+    pub const I2C: u32 = 0x073C00;
+    pub const I2C_END: u32 = 0x074000;
+    pub const COMMAND: u32 = 0x120400;
+    pub const MAPPING: u32 = 0x130400;
+    pub const SELECT: u32 = 0x130500;
+}
+
+/// The HQ4's 32-bit registers that hold what is written and nothing the
+/// model knows more of: per-context words, FIFO thresholds, scheduling
+/// words, bring-up words and the board-configuration table.
+fn is_plain(off: u32) -> bool {
+    off & 3 == 0
+        && matches!(off,
+            0x011008 | 0x011030 | 0x011038 | 0x011088
+            | 0x040000..=0x040033 | 0x040068 | 0x040070 | 0x040078 | 0x040088
+            | 0x040918 | 0x040920 | 0x040928
+            | 0x060008 | 0x061000..=0x0610FF)
+}
+
+/// Where an access goes.
+#[derive(Debug, PartialEq, Eq)]
+enum Route {
+    /// `Mgras`, at this HQ3 offset.
+    Board(u32),
+    /// The HQ4 state here.
+    Local,
+    /// Beyond the board's window: a bus error.
+    Hole,
+}
+
+fn route(off: u32) -> Route {
+    use Route::*;
+    if off >= IMPACT_WINDOW {
+        return Hole;
+    }
+    match off {
+        hq4::STATUS => Board(hq3::STATUS),
+        hq4::FIFOSTATUS => Board(hq3::FIFOSTATUS),
+        hq4::FLAGS_SET => Board(hq3::SET_FLAGS),
+        hq4::FLAGS_CLEAR => Board(hq3::CLEAR_FLAGS),
+        hq4::GIOSTATUS => Board(hq3::GIOSTATUS),
+        hq4::DMABUSY => Board(hq3::DMABUSY),
+        hq4::FIFO => Board(hq3::CFIFO),
+        hq4::GE_READBACK_HI => Board(hq3::GE_READBACK_HI),
+        hq4::GE_READBACK_LO => Board(hq3::GE_READBACK_LO),
+        // The raster engine's status is answered here (its revision).
+        hq4::RE_STATUS => Local,
+        hq4::RASTER..hq4::RASTER_END => Board(hq3::RASTER + (off - hq4::RASTER)),
+        hq4::UCODE..hq4::UCODE_END => Board(hq3::UCODE + (off - hq4::UCODE)),
+        // The two GE11s' diagnostic data and address ports, and the
+        // readback port with its partner.
+        0x05_8040..=0x05_804F | 0x05_822C..=0x05_8233 => Board(off - 0x8000),
+        hq4::I2C..hq4::I2C_END => Local,
+        hq4::DCB..hq4::DCB_END => Board(hq3::DCB + (off - hq4::DCB)),
+        _ => Local,
+    }
+}
+
+/// System memory as the board's DMA sees it: physical addresses through
+/// HEART. The page lists the HQ model walks hold 32-bit 4 KB frame numbers,
+/// the Octane layout.
+struct XioBus(Arc<dyn XioMemory>);
+
+impl XioBus {
+    fn get<const N: usize>(&self, addr: u64) -> Option<[u8; N]> {
+        let mut b = [0u8; N];
+        self.0.read(addr, &mut b).then_some(b)
+    }
+
+    fn put(&self, addr: u64, b: &[u8]) -> u32 {
+        if self.0.write(addr, b) { BUS_OK } else { BUS_ERR }
+    }
+}
+
+impl BusDevice for XioBus {
+    fn read8(&self, addr: u64) -> BusRead8 {
+        self.get::<1>(addr).map_or(BusRead8::err(), |b| BusRead8::ok(b[0]))
+    }
+    fn read16(&self, addr: u64) -> BusRead16 {
+        self.get(addr).map_or(BusRead16::err(), |b| BusRead16::ok(u16::from_be_bytes(b)))
+    }
+    fn read32(&self, addr: u64) -> BusRead32 {
+        self.get(addr).map_or(BusRead32::err(), |b| BusRead32::ok(u32::from_be_bytes(b)))
+    }
+    fn read64(&self, addr: u64) -> BusRead64 {
+        self.get(addr).map_or(BusRead64::err(), |b| BusRead64::ok(u64::from_be_bytes(b)))
+    }
+    fn write8(&self, addr: u64, val: u8) -> u32 { self.put(addr, &[val]) }
+    fn write16(&self, addr: u64, val: u16) -> u32 { self.put(addr, &val.to_be_bytes()) }
+    fn write32(&self, addr: u64, val: u32) -> u32 { self.put(addr, &val.to_be_bytes()) }
+    fn write64(&self, addr: u64, val: u64) -> u32 { self.put(addr, &val.to_be_bytes()) }
+}
+
+/// The HQ4 state this front keeps. Plain values under one lock, which is
+/// never held while calling into `Mgras` (its interrupt lines come back
+/// here) or into HEART.
+#[derive(Default)]
+struct Hq4 {
+    control: u32,
+    /// The widget-error interrupt destination. Stored only: nothing in the
+    /// model raises a widget error.
+    int_dest: [u32; 2],
+    context_word: u32,
+    context_word_written: bool,
+    entry: u32,
+    pending: u32,
+    /// Bits written to `0x011020`, read back beside the pending sources.
+    status_extra: u32,
+    enable: u32,
+    hq_enable: u32,
+    vector_dest: [u32; 2],
+    /// Low-water, general and retrace vectors in bytes 0, 1 and 2.
+    vectors: u32,
+    plain: HashMap<u32, u32>,
+    i2c: HashMap<u32, u8>,
+    mapping: u64,
+    /// HQ3-internal flag bits as the guest set them (`FLAGS_INTERNAL`).
+    flag_shadow: u32,
+    /// The context-switch handshake: the selection taken, the image being
+    /// written (1) or done (3), the two acknowledgements, image words so
+    /// far, and whether a switch has completed since reset.
+    entry_selected: bool,
+    protocol: u8,
+    first_ack: bool,
+    second_ack: bool,
+    context_words: u32,
+    ready: bool,
+    /// The command FIFO is below its low-water mark: the HQ3 model's FIFO
+    /// line, whose low-water enable follows ours.
+    fifo_low: bool,
+    lowater_asserted: bool,
+    general_asserted: bool,
+    no_dest_logged: bool,
+}
+
+impl Hq4 {
+    fn vector(&self, shift: u32) -> u8 {
+        (self.vectors >> shift) as u8
+    }
+
+    /// An HQ interrupt to the vector destination, if one is programmed and
+    /// it names HEART, the only interrupt target on the Octane.
+    fn send(&mut self, vector: u8, set: bool, out: &mut Vec<(u8, bool)>) {
+        let widget = (self.vector_dest[0] >> 24 & 0xF) as u8;
+        let why = if self.vector_dest == [0, 0] {
+            "no vector destination is programmed"
+        } else if widget != WIDGET_HEART {
+            "its destination is not HEART"
+        } else {
+            out.push((vector, set));
+            return;
+        };
+        if !self.no_dest_logged {
+            self.no_dest_logged = true;
+            eprintln!("impact: HQ interrupt not sent: {why}");
+        }
+    }
+
+    /// Send a packet for each interrupt that changed, one a transition, as
+    /// our QEMU model does. The general interrupt stays raised while any
+    /// enabled source is pending, since its handler serves one at a time.
+    fn update(&mut self, out: &mut Vec<(u8, bool)>) {
+        let lowater = self.pending & pending::LOWATER != 0;
+        let general = self.pending & self.enable & pending::GENERAL != 0;
+        if lowater != self.lowater_asserted {
+            self.lowater_asserted = lowater;
+            self.send(self.vector(0), lowater, out);
+        }
+        if general != self.general_asserted {
+            self.general_asserted = general;
+            self.send(self.vector(8), general, out);
+        }
+    }
+
+    /// The low-water source follows the FIFO line while its second-level
+    /// enable is set.
+    fn refresh_lowater(&mut self) {
+        if self.fifo_low && self.hq_enable & HQ_ENABLE_LOWATER != 0 {
+            self.pending |= pending::LOWATER;
+        } else {
+            self.pending &= !pending::LOWATER;
+        }
+    }
+}
+
+/// What the front and the board's interrupt lines share.
+struct Shared {
+    hq4: Mutex<Hq4>,
+    irq: Arc<dyn XioInterruptSink>,
+    noted: Mutex<HashSet<String>>,
+}
+
+impl Shared {
+    fn deliver(&self, packets: Vec<(u8, bool)>) {
+        for (vector, set) in packets {
+            self.irq.xio_interrupt(vector, set);
+        }
+    }
+
+    fn note(&self, what: String) {
+        let mut n = self.noted.lock();
+        if n.len() < 256 && n.insert(what.clone()) {
+            eprintln!("impact: not modelled yet: {what}");
+        }
+    }
+}
+
+/// `Mgras`'s three GIO interrupt lines (FIFO, general, retrace), turned
+/// into HQ4 sources.
+struct Lines(Arc<Shared>);
+
+impl InterruptController for Lines {
+    fn set_line(&self, line: u32, level: bool) {
+        let mut out = Vec::new();
+        {
+            let mut s = self.0.hq4.lock();
+            match line {
+                0 => {
+                    s.fifo_low = level;
+                    s.refresh_lowater();
+                }
+                // The general line carries only the swap: `ImpactXio::new`
+                // enables nothing else there. The HQ4 latches it until the
+                // handler acknowledges it.
+                1 if level => s.pending |= pending::SWAP,
+                // A retrace is a message each frame the video timing chip
+                // enables it, not a level: the kernel acknowledges nothing
+                // on the board for it.
+                2 if level => {
+                    s.pending |= pending::RETRACE;
+                    let v = s.vector(16);
+                    s.send(v, true, &mut out);
+                }
+                _ => {}
+            }
+            s.update(&mut out);
+        }
+        self.0.deliver(out);
+    }
+}
+
+/// IMPACT graphics in one of the Octane's graphics ports: a `BusDevice` for
+/// the widget's small window.
+pub struct ImpactXio {
+    base: u64,
+    board: ImpactBoard,
+    shared: Arc<Shared>,
+    mgras: Arc<Mgras>,
+}
+
+/// One phase of the command port (`0x120400`).
+enum Phase {
+    Command,
+    Image,
+    Ignore,
+    Stray,
+}
+
+impl ImpactXio {
+    /// A Solid IMPACT board at `widget` (one of the four graphics ports from
+    /// `WIDGET_GFX_FIRST`): its interrupts go to `irq` (HEART), its DMA
+    /// reaches `mem`. `heartbeat` and `fasttick` feed the status bar, as for
+    /// the Indigo2 board. Start it with `start_display`.
+    pub fn new(
+        widget: u8,
+        irq: Arc<dyn XioInterruptSink>,
+        mem: Arc<dyn XioMemory>,
+        heartbeat: Arc<AtomicU64>,
+        fasttick: Arc<AtomicU64>,
+    ) -> Arc<Self> {
+        let board = SOLID_IMPACT;
+        let shared = Arc::new(Shared { hq4: Mutex::new(Hq4::default()), irq, noted: Mutex::new(HashSet::new()) });
+        let lines: Arc<dyn InterruptController> = Arc::new(Lines(shared.clone()));
+        let mgras = Mgras::new(
+            GraphicsBoard::SolidImpact,
+            [IrqLine::new(lines.clone(), 0), IrqLine::new(lines.clone(), 1), IrqLine::new(lines, 2)],
+            heartbeat,
+            fasttick,
+        );
+        // CMAP 0's revision register carries the monitor ID in bits 7:4;
+        // CMAP 1's RA revision in 6:4 and, in bit 7, that there is no video
+        // option.
+        let cmap = (board.cmap_revision & 7) as u32;
+        mgras.set_identity(
+            [board.version0 as u32, board.version1 as u32],
+            [(MONITOR_ID as u32) << 4 | cmap, 0x80 | ((board.ra_revision & 7) as u32) << 4 | cmap],
+            board.ge_revision as u32,
+        );
+        mgras.set_phys(Arc::new(XioBus(mem)));
+        let me = Arc::new(Self { base: widget_small_base(widget) as u64, board, shared, mgras });
+        // The swap reaching the HQ is the one HQ3 flag the general line
+        // carries.
+        me.board_write(32, hq3::INTERRUPT_ENABLE_SET, hq3::FLAG_CP0 as u64);
+        me
+    }
+
+    /// The raster pipeline and its display: what the machine hands the
+    /// window, the monitor (`Device`), `set_cpu_cycles` and `register_locks`.
+    pub fn mgras(&self) -> &Arc<Mgras> {
+        &self.mgras
+    }
+
+    pub fn display(&self) -> Arc<dyn crate::gfx_display::GfxDisplay> {
+        self.mgras.clone()
+    }
+
+    /// Start the engine threads and the display refresh.
+    pub fn start_display(&self) {
+        self.mgras.start_display();
+    }
+
+    pub fn stop_display(&self) {
+        self.mgras.stop_display();
+    }
+
+    /// Cold reset of the HQ4's own state: control, thresholds, interrupt
+    /// routing and the context-switch handshake. The raster pipeline keeps
+    /// its state, as `Mgras` has no reset of its own.
+    pub fn reset(&self) {
+        *self.shared.hq4.lock() = Hq4::default();
+    }
+
+    fn board_read(&self, bits: u32, off: u32) -> (u32, u64) {
+        let a = (MGRAS_SLOT_GFX_BASE + off) as u64;
+        let m = &*self.mgras;
+        match bits {
+            8 => { let r = m.read8(a); (r.status, r.data as u64) }
+            16 => { let r = m.read16(a); (r.status, r.data as u64) }
+            32 => { let r = m.read32(a); (r.status, r.data as u64) }
+            _ => { let r = m.read64(a); (r.status, r.data) }
+        }
+    }
+
+    fn board_write(&self, bits: u32, off: u32, val: u64) -> u32 {
+        let a = (MGRAS_SLOT_GFX_BASE + off) as u64;
+        let m = &*self.mgras;
+        match bits {
+            8 => m.write8(a, val as u8),
+            16 => m.write16(a, val as u16),
+            32 => m.write32(a, val as u32),
+            _ => m.write64(a, val),
+        }
+    }
+
+    /// The offset in the widget's space of `addr`, clamped past the
+    /// board's window to a hole.
+    fn offset(&self, addr: u64) -> u32 {
+        addr.wrapping_sub(self.base).min(IMPACT_WINDOW as u64) as u32
+    }
+
+    fn read(&self, addr: u64, bits: u32) -> (u32, u64) {
+        let off = self.offset(addr);
+        match route(off) {
+            Route::Hole => (BUS_ERR, 0),
+            Route::Board(o) => {
+                let (st, v) = self.board_read(bits, o);
+                if st != BUS_OK {
+                    return (st, 0);
+                }
+                if matches!(off, hq4::FLAGS_SET | hq4::FLAGS_CLEAR) {
+                    let shadow = self.shared.hq4.lock().flag_shadow;
+                    let internal = hq3::FLAGS_INTERNAL as u64;
+                    return (BUS_OK, v & !internal | shadow as u64 & internal);
+                }
+                (BUS_OK, v)
+            }
+            Route::Local => self.read_local(off, bits),
+        }
+    }
+
+    fn read_local(&self, off: u32, bits: u32) -> (u32, u64) {
+        let b = &self.board;
+        let s = self.shared.hq4.lock();
+        let v: u32 = match off {
+            hq4::WIDGET_ID_HI => {
+                // The kernel takes the HQ revision from bits 31:28; a 64-bit
+                // read has it in the high word. Why it differs from
+                // `0x000004`'s revision is unknown.
+                let v = (b.hq_revision as u32 & 0xF) << 28 | WIDGET_PART << 12 | WIDGET_MFG << 1 | 1;
+                return (BUS_OK, if bits == 64 { (v as u64) << 32 } else { v as u64 });
+            }
+            hq4::WIDGET_ID => WIDGET_REV << 28 | WIDGET_PART << 12 | WIDGET_MFG << 1 | 1,
+            // The reserved halves of the widget register slots.
+            0x000020 => 0,
+            hq4::WIDGET_CONTROL => s.control,
+            0x000030 | 0x000034 => s.int_dest[0],
+            0x000038 | 0x00003C => s.int_dest[1],
+            hq4::BUS_STATE => 0,
+            hq4::CONTEXT_WORD => s.context_word,
+            hq4::PENDING => s.pending | s.status_extra,
+            hq4::ENABLE_SET => s.enable,
+            hq4::HQ_ENABLE => s.hq_enable,
+            hq4::VECTOR_DEST_UPPER => s.vector_dest[0],
+            hq4::VECTOR_DEST_LOWER => s.vector_dest[1],
+            hq4::VECTORS => s.vectors,
+            // No serial-number chip is fitted: the bit slot reads done with
+            // the wire low, as our QEMU model answers without a board
+            // record.
+            hq4::NIC => 2,
+            hq4::RETRACE_STATUS_1 | hq4::RETRACE_STATUS_2 => 0,
+            hq4::RE_STATUS => {
+                drop(s);
+                let (st, v) = self.board_read(32, hq3::RASTER + (hq4::RE_STATUS - hq4::RASTER));
+                if st != BUS_OK {
+                    return (st, 0);
+                }
+                return (BUS_OK, v & !0xF0 | (b.re4_revision as u64 & 0xF) << 4);
+            }
+            // No kernel routine reads this; our QEMU model answers so.
+            hq4::COMMAND => if s.ready { 0xF400 } else { 0 },
+            hq4::MAPPING => return (BUS_OK, if bits == 64 { s.mapping } else { s.mapping as u32 as u64 }),
+            hq4::SELECT => s.entry,
+            hq4::I2C..hq4::I2C_END => {
+                let v = s.i2c.get(&off).copied().unwrap_or(0) as u64;
+                return (BUS_OK, if bits == 8 { v } else { v << 24 });
+            }
+            o if is_plain(o) => s.plain.get(&o).copied().unwrap_or(0),
+            _ => {
+                drop(s);
+                self.shared.note(format!("read of {off:#08x}"));
+                0
+            }
+        };
+        (BUS_OK, v as u64)
+    }
+
+    fn write(&self, addr: u64, bits: u32, val: u64) -> u32 {
+        let off = self.offset(addr);
+        match route(off) {
+            Route::Hole => BUS_ERR,
+            Route::Board(o) => match off {
+                hq4::FLAGS_SET | hq4::FLAGS_CLEAR => {
+                    let v = val as u32;
+                    let st = self.board_write(32, o, (v & !hq3::FLAGS_INTERNAL) as u64);
+                    if st == BUS_OK {
+                        let mut s = self.shared.hq4.lock();
+                        if off == hq4::FLAGS_SET {
+                            s.flag_shadow |= v & hq3::FLAGS_INTERNAL;
+                        } else {
+                            s.flag_shadow &= !(v & hq3::FLAGS_INTERNAL);
+                        }
+                    }
+                    st
+                }
+                // A write to the status register is accepted and ignored.
+                hq4::STATUS => BUS_OK,
+                _ => self.board_write(bits, o, val),
+            },
+            Route::Local => self.write_local(off, bits, val),
+        }
+    }
+
+    fn write_local(&self, off: u32, bits: u32, val: u64) -> u32 {
+        let v = val as u32;
+        match off {
+            hq4::I2C..hq4::I2C_END => {
+                if bits == 8 {
+                    self.shared.hq4.lock().i2c.insert(off, v as u8);
+                } else {
+                    self.shared.note(format!("{bits}-bit write to the I2C port {off:#08x}"));
+                }
+                return BUS_OK;
+            }
+            hq4::COMMAND => return self.command_write(bits, val),
+            // The mapping port shares the command FIFO's framing. The HQ3
+            // model takes its class 0x48 headers as the DMA register writes
+            // they are (bit 22 is outside the command number it decodes),
+            // and anything else as the command it is.
+            hq4::MAPPING => {
+                let st = self.board_write(bits, hq3::CFIFO_PRIVILEGED, val);
+                if st == BUS_OK {
+                    self.shared.hq4.lock().mapping = val;
+                }
+                return st;
+            }
+            hq4::SELECT => return self.select(bits, v),
+            _ => {}
+        }
+        // The rest are 32-bit registers; other widths are ignored.
+        if bits != 32 {
+            self.shared.note(format!("{bits}-bit write to {off:#08x}"));
+            return BUS_OK;
+        }
+        let mut out = Vec::new();
+        // HQ3 writes, made once the lock is dropped.
+        let mut board: Vec<(u32, u32)> = Vec::new();
+        {
+            let mut s = self.shared.hq4.lock();
+            match off {
+                hq4::WIDGET_ID_HI | 0x000020 | hq4::WIDGET_ID => {}
+                hq4::WIDGET_CONTROL => s.control = v,
+                // Both halves of each destination slot hold the same word.
+                0x000030 | 0x000034 => s.int_dest[0] = v,
+                0x000038 | 0x00003C => s.int_dest[1] = v,
+                hq4::CONTEXT_WORD => {
+                    s.context_word = v;
+                    s.context_word_written = true;
+                }
+                hq4::PENDING => s.status_extra = v,
+                hq4::ACK => {
+                    s.pending &= !v;
+                    if v & pending::FLAGS != 0 {
+                        s.first_ack = true;
+                    }
+                    if v & pending::CONTEXT != 0 {
+                        s.second_ack = true;
+                    }
+                    if v & pending::SWAP != 0 {
+                        // The swap the HQ3 model reported is served.
+                        board.push((hq3::CLEAR_FLAGS, hq3::FLAG_CP0));
+                    }
+                    s.update(&mut out);
+                }
+                // A set port and a clear port for one enable word, inferred
+                // from the kernel's use of them.
+                hq4::ENABLE_SET => {
+                    s.enable |= v;
+                    s.update(&mut out);
+                }
+                hq4::ENABLE_CLEAR => {
+                    s.enable &= !v;
+                    s.update(&mut out);
+                }
+                hq4::HQ_ENABLE | hq4::HQ_ENABLE_CLEAR => {
+                    let was = s.hq_enable & HQ_ENABLE_LOWATER;
+                    s.plain.insert(off, v);
+                    if off == hq4::HQ_ENABLE {
+                        s.hq_enable = v;
+                    } else {
+                        // Inferred as the second-level clear.
+                        s.hq_enable &= !v;
+                    }
+                    let now = s.hq_enable & HQ_ENABLE_LOWATER;
+                    if now != was {
+                        // The HQ3 model's FIFO line watches the low-water
+                        // mark only while its own enable is set.
+                        let o = if now != 0 { hq3::INTERRUPT_ENABLE_SET } else { hq3::INTERRUPT_ENABLE_CLEAR };
+                        board.push((o, hq3::INTR_CFIFO_LOW));
+                    }
+                    s.refresh_lowater();
+                    s.update(&mut out);
+                }
+                hq4::VECTOR_DEST_UPPER => s.vector_dest[0] = v,
+                hq4::VECTOR_DEST_LOWER => s.vector_dest[1] = v,
+                hq4::VECTORS => s.vectors = v,
+                // No serial-number chip: the slot completes with nothing on
+                // the wire.
+                hq4::NIC => {}
+                hq4::RETRACE_ACK => {}
+                hq4::RE_STATUS => board.push((hq3::RASTER + (hq4::RE_STATUS - hq4::RASTER), v)),
+                o if is_plain(o) => {
+                    s.plain.insert(o, v);
+                    match o {
+                        hq4::CFIFO_HIGH => board.push((hq3::CFIFO_HIGH_MARK, v)),
+                        hq4::CFIFO_LOW => board.push((hq3::CFIFO_LOW_MARK, v)),
+                        _ => {}
+                    }
+                }
+                _ => {
+                    drop(s);
+                    self.shared.note(format!("write of {v:#x} to {off:#08x}"));
+                    return BUS_OK;
+                }
+            }
+        }
+        self.shared.deliver(out);
+        for (o, v) in board {
+            // None of these registers holds a store back.
+            self.board_write(32, o, v as u64);
+        }
+        BUS_OK
+    }
+
+    /// `0x130500`: the kernel selects the context-switch entry after writing
+    /// the context word. The HQ3 model saves the outgoing context and takes
+    /// the next 63 command words as the incoming image; the HQ4 raises
+    /// source 19, which the kernel acknowledges before it sends them.
+    fn select(&self, bits: u32, v: u32) -> u32 {
+        let in_sequence = bits == 32 && v == SELECT_ENTRY && self.shared.hq4.lock().context_word_written;
+        if !in_sequence {
+            self.shared.note(format!("context-switch selection {v:#x} ({bits}-bit) out of sequence"));
+            return BUS_OK;
+        }
+        let st = self.board_write(32, hq3::CONTEXT_SWITCH, 0);
+        if st != BUS_OK {
+            return st;
+        }
+        let mut out = Vec::new();
+        {
+            let mut s = self.shared.hq4.lock();
+            s.entry = v;
+            s.entry_selected = true;
+            s.protocol = 1;
+            s.first_ack = false;
+            s.second_ack = false;
+            s.context_words = 0;
+            s.pending |= pending::FLAGS;
+            s.update(&mut out);
+        }
+        self.shared.deliver(out);
+        BUS_OK
+    }
+
+    /// `0x120400`: during a switch, after the first acknowledgement, the 63
+    /// context image words; once a switch has completed, command words of
+    /// 32 or 64 bits.
+    fn command_write(&self, bits: u32, val: u64) -> u32 {
+        let phase = {
+            let s = self.shared.hq4.lock();
+            if s.ready && s.protocol != 1 {
+                Phase::Command
+            } else if bits == 32 && s.entry_selected && s.protocol == 1 && s.first_ack && s.context_words < CONTEXT_WORDS {
+                Phase::Image
+            } else if bits == 64 && !s.entry_selected {
+                // Traffic before any selection has no modelled effect.
+                Phase::Ignore
+            } else {
+                Phase::Stray
+            }
+        };
+        match phase {
+            Phase::Command => self.board_write(bits, hq3::CFIFO, val),
+            Phase::Image => {
+                let st = self.board_write(32, hq3::CFIFO, val);
+                if st != BUS_OK {
+                    return st;
+                }
+                let mut out = Vec::new();
+                {
+                    let mut s = self.shared.hq4.lock();
+                    s.context_words += 1;
+                    if s.context_words == CONTEXT_WORDS {
+                        // The switch completes with the 63rd word: no
+                        // closing word follows.
+                        s.ready = true;
+                        s.protocol = 3;
+                        s.pending |= pending::CONTEXT;
+                        s.update(&mut out);
+                    }
+                }
+                self.shared.deliver(out);
+                BUS_OK
+            }
+            Phase::Ignore => BUS_OK,
+            Phase::Stray => {
+                self.shared.note(format!("{bits}-bit command word {val:#x} outside a context"));
+                BUS_OK
+            }
+        }
+    }
+}
+
+impl BusDevice for ImpactXio {
+    fn read8(&self, addr: u64) -> BusRead8 {
+        let (status, v) = self.read(addr, 8);
+        BusRead8 { status, data: v as u8 }
+    }
+    fn read16(&self, addr: u64) -> BusRead16 {
+        let (status, v) = self.read(addr, 16);
+        BusRead16 { status, data: v as u16 }
+    }
+    fn read32(&self, addr: u64) -> BusRead32 {
+        let (status, v) = self.read(addr, 32);
+        BusRead32 { status, data: v as u32 }
+    }
+    fn read64(&self, addr: u64) -> BusRead64 {
+        let (status, data) = self.read(addr, 64);
+        BusRead64 { status, data }
+    }
+    fn write8(&self, addr: u64, val: u8) -> u32 { self.write(addr, 8, val as u64) }
+    fn write16(&self, addr: u64, val: u16) -> u32 { self.write(addr, 16, val as u64) }
+    fn write32(&self, addr: u64, val: u32) -> u32 { self.write(addr, 32, val as u64) }
+    fn write64(&self, addr: u64, val: u64) -> u32 { self.write(addr, 64, val) }
+}
+
+/// Ported from our QEMU qtest `octane-mgras-test.c`, as far as one board
+/// on its own reaches: identity, widths and holes, reset, DMA through HEART
+/// memory and interrupt transport. The rest go through the raster model
+/// with the Indigo2 tests' register setups.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::BUS_BUSY;
+
+    const SH: u64 = widget_small_base(11) as u64;
+    const CONTROL: u32 = 0x24;
+    const COMMAND: u32 = 0x120400;
+    const MAPPING: u32 = 0x130400;
+    const SI_ID: u32 = 0x0C00_3555;
+    const SI_HQ_REVISION: u64 = 0x2C00_3555_0000_0000;
+
+    #[derive(Default)]
+    struct Heart(Mutex<Vec<(u8, bool)>>);
+
+    impl XioInterruptSink for Heart {
+        fn xio_interrupt(&self, vector: u8, set: bool) {
+            self.0.lock().push((vector, set));
+        }
+    }
+
+    /// 1 MB of HEART memory at physical 0x20000000.
+    struct Ram(Mutex<Vec<u8>>);
+    const RAM: u64 = 0x2000_0000;
+
+    impl Ram {
+        fn span(&self, phys: u64, n: usize) -> Option<std::ops::Range<usize>> {
+            let at = phys.checked_sub(RAM)? as usize;
+            (at + n <= self.0.lock().len()).then_some(at..at + n)
+        }
+    }
+
+    impl XioMemory for Ram {
+        fn read(&self, phys: u64, buf: &mut [u8]) -> bool {
+            match self.span(phys, buf.len()) {
+                Some(r) => { buf.copy_from_slice(&self.0.lock()[r]); true }
+                None => { buf.fill(0); false }
+            }
+        }
+        fn write(&self, phys: u64, data: &[u8]) -> bool {
+            match self.span(phys, data.len()) {
+                Some(r) => { self.0.lock()[r].copy_from_slice(data); true }
+                None => false,
+            }
+        }
+    }
+
+    struct Rig {
+        b: Arc<ImpactXio>,
+        heart: Arc<Heart>,
+        ram: Arc<Ram>,
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            self.b.mgras().stop_engines();
+        }
+    }
+
+    /// A board at widget 11 with its engine threads running (no display).
+    fn rig() -> Rig {
+        let heart = Arc::new(Heart::default());
+        let ram = Arc::new(Ram(Mutex::new(vec![0; 1 << 20])));
+        let hb = Arc::new(AtomicU64::new(0));
+        let b = ImpactXio::new(11, heart.clone(), ram.clone(), hb.clone(), hb);
+        b.mgras().start_engines();
+        Rig { b, heart, ram }
+    }
+
+    impl Rig {
+        /// Store, retrying on back-pressure like the CPU does.
+        fn w(&self, bits: u32, off: u32, val: u64) -> u32 {
+            loop {
+                let st = self.b.write(SH + off as u64, bits, val);
+                if st != BUS_BUSY {
+                    return st;
+                }
+                std::thread::yield_now();
+            }
+        }
+        fn w32(&self, off: u32, val: u32) {
+            assert_eq!(self.w(32, off, val as u64), BUS_OK, "write {off:#x}");
+        }
+        fn w64(&self, off: u32, val: u64) {
+            assert_eq!(self.w(64, off, val), BUS_OK, "write {off:#x}");
+        }
+        fn r(&self, bits: u32, off: u32) -> (u32, u64) {
+            loop {
+                let r = self.b.read(SH + off as u64, bits);
+                if r.0 != BUS_BUSY {
+                    return r;
+                }
+                std::thread::yield_now();
+            }
+        }
+        fn r32(&self, off: u32) -> u32 {
+            let (st, v) = self.r(32, off);
+            assert_eq!(st, BUS_OK, "read {off:#x}");
+            v as u32
+        }
+        fn r8(&self, off: u32) -> u8 {
+            let (st, v) = self.r(8, off);
+            assert_eq!(st, BUS_OK, "read {off:#x}");
+            v as u8
+        }
+        fn packets(&self) -> Vec<(u8, bool)> {
+            std::mem::take(&mut *self.heart.0.lock())
+        }
+        fn poke(&self, phys: u64, bytes: &[u8]) {
+            assert!(self.ram.write(phys, bytes));
+        }
+        fn peek(&self, phys: u64, n: usize) -> Vec<u8> {
+            let mut b = vec![0; n];
+            assert!(self.ram.read(phys, &mut b));
+            b
+        }
+
+        /// The kernel's context switch, with no interrupt routing: the
+        /// selection, the first acknowledgement, the image (a first load
+        /// of context slot 0), the second.
+        fn enter_context(&self) {
+            self.w32(0x011000, 0);
+            self.w32(0x130500, 0x4FC);
+            self.w32(0x011028, 0x80000);
+            for i in 0..63u32 {
+                self.w32(COMMAND, if i == 1 { 0x8000_0000 } else { 0 });
+            }
+            self.w32(0x011028, 0x1000_0000);
+        }
+
+        /// A raster register write through the command port, in the
+        /// 64-bit form the Octane drivers use.
+        fn rss(&self, reg: u32, val: u32, exec: bool) {
+            let sel = if exec { 0x70001 } else { 0x60001 } | reg << 6;
+            self.w64(COMMAND, (sel as u64) << 34 | val as u64);
+        }
+
+        /// A raster register write through the direct window.
+        fn direct(&self, reg: u32, val: u32) {
+            self.w32(0x02C000 + 4 * reg, val);
+        }
+
+        /// A host DMA descriptor write through the command port.
+        fn descriptor(&self, reg: u32, val: u32) {
+            self.w64(COMMAND, ((0x0008_0004 | reg << 8) as u64) << 32 | val as u64);
+        }
+
+        /// The X server's raster setup (as the Indigo2 board tests):
+        /// origin at the top row, colour index drawing into the PROM's
+        /// 1280x1024 layout.
+        fn x_server(&self) {
+            self.direct(0x112, 0xCAC); // CONFIG
+            self.direct(0x115, 1023 << 16); // XYWIN
+            self.direct(0x16E, 0x31E); // DRBSIZE
+            self.direct(0x16D, 0x240); // DRBPOINTERS
+            self.direct(0x163, 0xFFF);
+            self.direct(0x161, 0x0C00_4504); // PP1FILLMODE
+        }
+
+        fn block(&self, x0: u32, y0: u32, x1: u32, y1: u32) {
+            self.rss(0x045, 0x18, false); // IR_ALIAS
+            self.rss(0x046, x0 << 16 | y0, false);
+            self.rss(0x047, x1 << 16 | y1, true);
+        }
+    }
+
+    #[test]
+    fn identity() {
+        let r = rig();
+        assert_eq!(r.r32(4), SI_ID);
+        assert_eq!(r.r(64, 0), (BUS_OK, SI_HQ_REVISION));
+        assert_eq!(r.r32(0x072488) >> 24, 0x45);
+        assert_eq!(r.r8(0x072488), 0x45);
+        assert_eq!(r.r32(0x072408) >> 24, 0x0F);
+        // Monitor 0xF and CMAP revision 3; no video option, RA revision 0.
+        assert_eq!(r.r8(0x071308), 0xF3);
+        assert_eq!(r.r8(0x071708), 0x83);
+        // The RE4's revision 2, an idle raster engine (bit 8), one RE.
+        assert_eq!(r.r32(0x02C578) & 0x1F3, 0x120);
+        // The GE revision until a query replaces it.
+        assert_eq!(r.r32(0x028004), 2);
+    }
+
+    #[test]
+    fn widths_and_holes() {
+        let r = rig();
+        r.w32(CONTROL, 0x39A5_62D7);
+        r.w(8, CONTROL, 0xFF);
+        r.w(16, CONTROL, 0xFFFF);
+        assert_eq!(r.r32(CONTROL), 0x39A5_62D7);
+        r.w32(0x040000, 0x1A2B_3C4D);
+        r.w32(0x040004, 0x5E6F_7081);
+        r.w64(0x040000, 0xA1B2_C3D4_E5F6_0718);
+        assert_eq!(r.r32(0x040000), 0x1A2B_3C4D);
+        assert_eq!(r.r32(0x040004), 0x5E6F_7081);
+        r.w(8, 0x073C08, 0xA7);
+        assert_eq!(r.r8(0x073C08), 0xA7);
+        for off in [0x20_0000, 0x80_0000, 0xFF_FFFC] {
+            assert_eq!(r.r(32, off).0, BUS_ERR);
+            assert_eq!(r.w(32, off, 0xFFFF_FFFF), BUS_ERR);
+            assert_eq!(r.r32(CONTROL), 0x39A5_62D7);
+        }
+    }
+
+    #[test]
+    fn reset_clears_the_hq4() {
+        let r = rig();
+        r.w32(CONTROL, 0xC1D2_8354);
+        r.w32(0x040000, 0x75E6_8192);
+        r.enter_context();
+        assert!(r.b.shared.hq4.lock().first_ack);
+        r.b.reset();
+        assert_eq!(r.r32(4), SI_ID);
+        assert_eq!(r.r32(CONTROL), 0);
+        assert_eq!(r.r32(0x040000), 0);
+        let s = r.b.shared.hq4.lock();
+        assert!(!s.first_ack && !s.ready);
+    }
+
+    #[test]
+    fn context_switch_handshake() {
+        let r = rig();
+        r.w32(0x011060, 8 << 24);
+        r.w32(0x011068, 0x80);
+        r.w32(0x011070, 18 << 8);
+        r.w32(0x011040, 0x1008_A200);
+        r.w32(0x011000, 0x41005);
+        r.w32(0x130500, 0x4FC);
+        assert_eq!(r.r32(0x011020) & 0x80000, 0x80000);
+        assert_eq!(r.packets(), [(18, true)]);
+        // The image waits for the first acknowledgement.
+        r.w32(COMMAND, 0x1234);
+        assert_eq!(r.b.shared.hq4.lock().context_words, 0);
+        r.w32(0x011028, 0x80000);
+        assert_eq!(r.packets(), [(18, false)]);
+        for i in 0..63u32 {
+            assert_eq!(r.r32(0x011020) & 0x1000_0000, 0, "before word {i}");
+            r.w32(COMMAND, if i == 1 { 0x8000_0000 } else { 0 });
+        }
+        assert_eq!(r.r32(0x011020) & 0x1000_0000, 0x1000_0000);
+        assert_eq!(r.packets(), [(18, true)]);
+        r.w32(0x011028, 0x1000_0000);
+        assert_eq!(r.packets(), [(18, false)]);
+        assert_eq!(r.r32(COMMAND), 0xF400);
+        // The HQ3 model's own switch flags stay out of the HQ flags.
+        assert_eq!(r.r32(0x020010) & (1 << 19 | 1 << 6), 0);
+    }
+
+    /// Synthetic programmed vectors exercise transport, not the IP30
+    /// allocation.
+    #[test]
+    fn interrupt_transport() {
+        let r = rig();
+        // No destination: nothing is sent.
+        r.w32(0x011040, 0x80000);
+        r.w32(0x011000, 0);
+        r.w32(0x130500, 0x4FC);
+        assert_eq!(r.packets(), []);
+        r.w32(0x011028, 0x80000);
+        r.w32(0x011060, 8 << 24);
+        r.w32(0x011068, 0x80);
+        r.w32(0x011070, 18 << 8);
+        r.w32(0x130500, 0x4FC);
+        assert_eq!(r.packets(), [(18, true)]);
+        r.w32(0x011028, 0x80000);
+        assert_eq!(r.packets(), [(18, false)]);
+        r.w32(0x130500, 0x4FC);
+        assert_eq!(r.packets(), [(18, true)]);
+        r.w32(0x011028, 0x80000);
+        r.w32(0x011070, 7 << 8);
+        r.w32(0x130500, 0x4FC);
+        assert_eq!(r.packets(), [(18, false), (7, true)]);
+        // A disabled source is latched but not sent.
+        r.w32(0x011048, 0x80000);
+        assert_eq!(r.packets(), [(7, false)]);
+        assert_eq!(r.r32(0x011020) & 0x80000, 0x80000);
+        // A destination outside HEART is not sent either.
+        r.w32(0x011060, 9 << 24);
+        r.w32(0x011040, 0x80000);
+        assert_eq!(r.packets(), []);
+    }
+
+    /// After the switch, command words reach the raster engine: through
+    /// the command port, the normal FIFO and the direct window alike.
+    #[test]
+    fn commands_after_a_switch_draw() {
+        let r = rig();
+        r.enter_context();
+        r.x_server();
+        r.rss(0x110, 1 << 20, false); // FILLMODE: fast fill
+        r.rss(0x176, 0x13, false); // FILL_COLOR_R
+        r.block(10, 20, 12, 21);
+        assert_eq!(r.b.mgras().fb_pixel(10, 20), 0x13);
+        assert_eq!(r.b.mgras().fb_pixel(12, 21), 0x13);
+        assert_eq!(r.b.mgras().fb_pixel(13, 21), 0);
+        r.w64(0x020400, (0x60001u64 | 0x176 << 6) << 34 | 0x21);
+        r.block(30, 5, 30, 5);
+        assert_eq!(r.b.mgras().fb_pixel(30, 5), 0x21);
+    }
+
+    /// HQ4 DMA through HEART memory. On the Octane the page list holds
+    /// 32-bit page-frame numbers from a list address that is only 4-byte
+    /// aligned, as IRIX 6.5.30's IP30 X server lists them; the list here
+    /// starts 12 bytes into its page and the transfer crosses a page, so
+    /// 64-bit entries or a list rounded down to 8 bytes lose the second
+    /// page.
+    #[test]
+    fn dma_through_heart_memory() {
+        let r = rig();
+        r.poke(0x2000_8008, &[0; 4]);
+        r.poke(0x2000_800C, &0x20010u32.to_be_bytes());
+        r.poke(0x2000_8010, &0x20011u32.to_be_bytes());
+        r.poke(0x2001_0FFE, &[1, 2]);
+        r.poke(0x2001_1000, &[3, 4]);
+        r.enter_context();
+        // Slot 0's page list, count and control (HEART's widget) through
+        // the mapping port.
+        r.w32(MAPPING, 0x0048_2008);
+        r.w64(MAPPING, 0x2000_800C);
+        r.w64(MAPPING, 0x0048_3004_0000_0002);
+        r.w64(MAPPING, 0x0048_4B04_0008_0000);
+        r.x_server();
+        r.rss(0x110, 5 << 22, false); // FILLMODE: host data
+        r.rss(0x159, 0, false); // XFRMODE
+        r.rss(0x153, 1 << 16 | 4, false); // XFRSIZE: one line of four
+        r.block(10, 10, 13, 10);
+        r.descriptor(4, 4); // pitch
+        r.descriptor(5, 2); // source offset, low bits
+        r.descriptor(6, 0xFFC); // source offset, aligned
+        r.descriptor(7, 1); // rows
+        r.descriptor(8, 4); // bytes a row
+        r.descriptor(11, 0xB1); // kick: slot 0, host to board
+        let got: Vec<u32> = (10..14).map(|x| r.b.mgras().fb_pixel(x, 10)).collect();
+        assert_eq!(got, [1, 2, 3, 4]);
+        // And back: board to host. The raster engine's side of the read
+        // starts after the host's, as on the Indigo2.
+        r.poke(0x2001_0FFE, &[0xA5; 2]);
+        r.poke(0x2001_1000, &[0xA5; 2]);
+        r.rss(0x110, 4 << 22, false);
+        r.block(10, 10, 13, 10);
+        r.descriptor(11, 0xB9); // kick: slot 0, board to host
+        r.rss(0x102, 9, false); // XFRCONTROL: read start
+        r.b.mgras().state_hash();
+        assert_eq!(r.peek(0x2001_0FFE, 2), [1, 2]);
+        assert_eq!(r.peek(0x2001_1000, 2), [3, 4]);
+    }
+
+    /// The swap command raises source 10 once the HQ reaches it; the
+    /// handler's acknowledgement lets the next swap raise it again.
+    #[test]
+    fn swap_raises_source_10() {
+        let r = rig();
+        r.enter_context();
+        r.w32(0x011060, 8 << 24);
+        r.w32(0x011068, 0x80);
+        r.w32(0x011070, 18 << 8);
+        r.w32(0x011040, 0x400);
+        assert_eq!(r.packets(), []);
+        for _ in 0..2 {
+            r.w32(COMMAND, 0x37 << 8); // SCHEDULE_SWAP
+            let mut tries = 0;
+            while r.r32(0x011020) & 0x400 == 0 {
+                tries += 1;
+                assert!(tries < 1_000_000, "swap never reported");
+                std::thread::yield_now();
+            }
+            assert_eq!(r.packets(), [(18, true)]);
+            assert_eq!(r.r32(0x020010) & 0x400, 0);
+            r.w32(0x011028, 0x401);
+            assert_eq!(r.packets(), [(18, false)]);
+            assert_eq!(r.r32(0x011020) & 0x400, 0);
+        }
+    }
+
+    /// The kernel's FIFO flush arms the low-water interrupt (mark 1, the
+    /// second-level enable) and sleeps; an idle board wakes it at once.
+    #[test]
+    fn low_water_follows_the_fifo() {
+        let r = rig();
+        r.w32(0x011060, 8 << 24);
+        r.w32(0x011068, 0x80);
+        r.w32(0x011070, 5);
+        r.w32(0x040008, 1);
+        r.w32(0x011050, 0x10);
+        assert_eq!(r.packets(), [(5, true)]);
+        assert_eq!(r.r32(0x011020) & 4, 4);
+        r.w32(0x011058, 0x10);
+        assert_eq!(r.packets(), [(5, false)]);
+        assert_eq!(r.r32(0x011020) & 4, 0);
+        assert_eq!(r.r32(0x011050), 0);
+    }
+
+    #[test]
+    fn retrace_is_a_message_a_frame() {
+        let r = rig();
+        r.w32(0x011060, 8 << 24);
+        r.w32(0x011068, 0x80);
+        r.w32(0x011070, 0x2A << 16);
+        let lines = Lines(r.b.shared.clone());
+        lines.set_line(2, true);
+        lines.set_line(2, false);
+        lines.set_line(2, true);
+        assert_eq!(r.packets(), [(0x2A, true), (0x2A, true)]);
+        assert_eq!(r.r32(0x011020) & 1, 1);
+        r.w32(0x011028, 0x401);
+        assert_eq!(r.r32(0x011020) & 1, 0);
+    }
+
+    #[test]
+    fn routes() {
+        assert_eq!(route(0x020000), Route::Board(0x70000));
+        assert_eq!(route(0x020008), Route::Board(0x70004));
+        assert_eq!(route(0x020400), Route::Board(0x70080));
+        assert_eq!(route(0x02C1C4), Route::Board(0x7C1C4));
+        assert_eq!(route(0x02D1C0), Route::Board(0x7D1C0));
+        assert_eq!(route(0x050000), Route::Board(0x40000));
+        assert_eq!(route(0x058040), Route::Board(0x50040));
+        assert_eq!(route(0x05822C), Route::Board(0x5022C));
+        assert_eq!(route(0x058050), Route::Local);
+        assert_eq!(route(0x071C88), Route::Board(0x61C88));
+        assert_eq!(route(0x072038), Route::Board(0x62038));
+        assert_eq!(route(0x073C08), Route::Local);
+        assert_eq!(route(0x1F_FFFC), Route::Local);
+        assert_eq!(route(0x20_0000), Route::Hole);
+    }
+}
