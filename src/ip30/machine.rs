@@ -43,6 +43,7 @@ use crate::dev::ioc3_eth::Ioc3Eth;
 use crate::dev::isp1040::Isp1040;
 use crate::ip30::bridge::{Bridge, RawFlash};
 use crate::ip30::heart::{Heart, HeartConfig, OneWireResponder, PIU_BASE, PIU_SIZE, RAM_BASE};
+use crate::ip30::impact::ImpactXio;
 use crate::ip30::xio::{XioInterruptSink, XioMemory};
 use crate::ip30::xbow::{Xbow, REG_SPAN};
 use crate::ip30::xio::{widget_small_base, WIDGET_BRIDGE, WIDGET_HEART, WIDGET_SMALL_SIZE, WIDGET_XBOW};
@@ -67,6 +68,9 @@ pub const OCTANE_COUNT_HZ: u64 = 97_500_000;
 pub const OCTANE_PRID: u32 = 0x0927;
 /// The Crossbow on the Octane reports revision 4.
 const XBOW_REVISION: u32 = 4;
+/// The graphics port the one IMPACT board sits in: the one a single-board
+/// Octane uses, as in the Origami model.
+pub const WIDGET_GFX: u8 = 11;
 
 /// Where the CPU was at the end of its last batch, for the unmapped log.
 static LAST_PC: AtomicU64 = AtomicU64::new(0);
@@ -372,6 +376,8 @@ pub struct OctaneMachine {
     pub bridge: Arc<Bridge>,
     pub ioc3: Arc<Ioc3>,
     pub scsi: [Arc<Isp1040>; 2],
+    /// The IMPACT board, unless `[octane] graphics = "none"`.
+    pub gfx: Option<Arc<ImpactXio>>,
     nat: Option<(Arc<crate::net::NatControl>, (std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr))>,
     scratch_path: Option<std::path::PathBuf>,
     events: std::sync::mpsc::SyncSender<MachineEvent>,
@@ -392,8 +398,10 @@ impl OctaneMachine {
             return Err(format!("Octane PROM {} is {} bytes; the flash holds {}", cfg.prom, prom.len(), FLASH_SIZE));
         }
         let banks = heart_banks(cfg);
+        let board = cfg.octane.graphics_board()?;
         let heart = Arc::new(Heart::new(HeartConfig::octane(banks), crate::ip30::heart::host_clock())?);
-        let xbow = Arc::new(Xbow::new(XBOW_REVISION, (1 << WIDGET_HEART) | (1 << WIDGET_BRIDGE)));
+        let gfx_link = if board.is_some() { 1 << WIDGET_GFX } else { 0 };
+        let xbow = Arc::new(Xbow::new(XBOW_REVISION, (1 << WIDGET_HEART) | (1 << WIDGET_BRIDGE) | gfx_link));
         xbow.connect_heart(heart.clone());
         let mut bus = Ip30Bus::new(heart.clone(), xbow.clone());
 
@@ -443,6 +451,22 @@ impl OctaneMachine {
             eprintln!("iris: Octane NVRAM {}: {e}", cfg.nvram);
         }
         bus.attach_widget(WIDGET_BRIDGE, bridge.clone(), false);
+
+        // The status bar's activity bits and the CPU's Compare matches,
+        // shared with the graphics board before the CPU exists.
+        let heartbeat = Arc::new(AtomicU64::new(0));
+        let fasttick = Arc::new(AtomicU64::new(0));
+        let gfx = board.map(|_| {
+            let g = ImpactXio::new(
+                WIDGET_GFX,
+                heart.clone() as Arc<dyn XioInterruptSink>,
+                heart.clone() as Arc<dyn XioMemory>,
+                heartbeat.clone(),
+                fasttick.clone(),
+            );
+            bus.attach_widget(WIDGET_GFX, g.clone(), false);
+            g
+        });
         let bus = Arc::new(bus);
         // DMA reaches only widgets the Crossbow has a live link to.
         let links = xbow.clone();
@@ -459,14 +483,22 @@ impl OctaneMachine {
 
         let scratch_path = Self::attach_scsi(cfg, &scsi)?;
         eprintln!(
-            "iris: Octane with {} MB ({}), serial console",
+            "iris: Octane with {} MB ({}), {}",
             banks.iter().sum::<u64>() >> 20,
-            banks.iter().filter(|&&b| b != 0).map(|b| format!("{}", b >> 20)).collect::<Vec<_>>().join("+")
+            banks.iter().filter(|&&b| b != 0).map(|b| format!("{}", b >> 20)).collect::<Vec<_>>().join("+"),
+            board.map_or("no graphics", |b| b.label())
         );
 
         let timer_manager = Arc::new(TimerManager::new());
         let count_hz = cfg.clock.fixed_mhz.map_or(OCTANE_COUNT_HZ, |mhz| (mhz * 1_000_000.0) as u64);
-        let cpu = Self::build_cpu(bus.clone(), &timer_manager, count_hz);
+        let cpu = Self::build_cpu(bus.clone(), &timer_manager, count_hz, fasttick);
+        if let Some(g) = &gfx {
+            g.mgras().set_cpu_cycles(cpu.cycles_ptr());
+            g.mgras().register_locks();
+            // Host GL frames composite straight into the IMPACT framebuffer.
+            #[cfg(feature = "hostgl")]
+            iris_hostcall::set_display(Arc::new(crate::dev::mgras::ImpactScreen(g.mgras().clone())));
+        }
 
         #[cfg(feature = "jitv2")]
         {
@@ -510,6 +542,11 @@ impl OctaneMachine {
         monitor.register_device(crate::devlog::init_devlog());
         monitor.register_device(cpu.clone().as_device());
         monitor.register_device(bus.clone());
+        // `ps2 type` and friends: the keyboard and mouse from the monitor.
+        monitor.register_device(ioc3.ps2());
+        if let Some(g) = &gfx {
+            monitor.register_device(g.mgras().clone());
+        }
         let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
         let ci_serial = cfg.ci.then(|| Arc::new(crate::dev::z85c30::CiSerialBackend::new()));
         Self::connect_serial(cfg, &ioc3, ci_serial.as_ref());
@@ -536,6 +573,7 @@ impl OctaneMachine {
             bridge,
             ioc3,
             scsi,
+            gfx,
             nat,
             scratch_path,
             events,
@@ -624,12 +662,13 @@ impl OctaneMachine {
         }
     }
 
-    fn build_cpu(sysad: Arc<dyn BusDevice>, tm: &Arc<TimerManager>, count_hz: u64) -> Arc<dyn CpuDevice> {
+    fn build_cpu(sysad: Arc<dyn BusDevice>, tm: &Arc<TimerManager>, count_hz: u64, fasttick: Arc<AtomicU64>) -> Arc<dyn CpuDevice> {
         let cfg = MipsCpuConfig::for_model::<R10000ShadowCache>();
         let tlb = MipsTlb::new(cfg.tlb_entries);
         let mut exec: MipsExecutor<MipsTlb, R10000ShadowCache> = MipsExecutor::new(sysad, tlb, &cfg);
         exec.core.set_timer_manager(tm.clone());
         exec.core.set_count_hz(count_hz);
+        exec.core.fasttick_count = fasttick;
         exec.core.reset_prid = OCTANE_PRID;
         exec.core.cp0_prid = OCTANE_PRID;
         // IRIX zeroes Count and arms Compare a few instructions later; see
@@ -672,6 +711,9 @@ impl OctaneMachine {
                 })
                 .unwrap(),
         );
+        if let Some(g) = &self.gfx {
+            g.start_display();
+        }
         if self.ci_serial.is_none() {
             self.cpu.clone().as_device().start();
         }
@@ -679,6 +721,9 @@ impl OctaneMachine {
 
     pub fn stop(&mut self) {
         self.cpu.clone().as_device().stop();
+        if let Some(g) = &self.gfx {
+            g.stop_display();
+        }
         if self.lifecycle != crate::machine_state::GuestState::Idle {
             self.lifecycle = crate::machine_state::GuestState::Halted;
         }
@@ -690,6 +735,9 @@ impl OctaneMachine {
         self.bus.power_on();
         self.bridge.reset();
         self.ioc3.reset();
+        if let Some(g) = &self.gfx {
+            g.reset();
+        }
     }
 
     pub fn machine_slot(&mut self) -> MachineSlot {
@@ -750,7 +798,7 @@ impl Workstation for OctaneMachine {
         self.lifecycle = state;
     }
     fn get_display(&self) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> {
-        None
+        self.gfx.as_ref().map(|g| g.display())
     }
     fn get_ps2(&self) -> Arc<crate::dev::ps2::Ps2Controller> {
         self.ioc3.ps2()
@@ -855,5 +903,32 @@ mod tests {
         assert_eq!(b.read32(0x1b00_0004).status, BUS_ERR, "an empty graphics port");
         assert_eq!(b.read64(0x0ff1_0030).data, 0, "HEART's pending bits");
         assert_eq!(b.read32(0x0ff0_0020).data, 0);
+    }
+
+    #[test]
+    fn the_graphics_port_reaches_impact_with_its_link_up() {
+        use crate::ip30::xio::widget_small_base;
+        let heart = Arc::new(Heart::new(HeartConfig::octane([128 << 20, 0, 0, 0]), crate::ip30::heart::host_clock()).unwrap());
+        let gfx = ImpactXio::new(
+            WIDGET_GFX,
+            heart.clone() as Arc<dyn XioInterruptSink>,
+            heart.clone() as Arc<dyn XioMemory>,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let id = widget_small_base(WIDGET_GFX) as u64 + 4;
+        for (links, alive) in [(0x8100, false), (0x8100 | 1 << WIDGET_GFX, true)] {
+            let xbow = Arc::new(Xbow::new(XBOW_REVISION, links));
+            xbow.connect_heart(heart.clone());
+            let mut b = Ip30Bus::new(heart.clone(), xbow);
+            b.attach_widget(WIDGET_GFX, gfx.clone(), false);
+            let r = b.read32(id);
+            if alive {
+                assert_eq!(r.status, BUS_OK);
+                assert_eq!(r.data >> 12 & 0xffff, 0xc003, "HQ4's widget part number");
+            } else {
+                assert_eq!(r.status, BUS_ERR, "no link, no route");
+            }
+        }
     }
 }
