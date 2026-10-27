@@ -35,6 +35,12 @@
 //!   used virtual time) and the synthetic peer never faults.
 //! - Quick Poll status (PHY register 0x11) reports live state without the
 //!   per-bit latches the datasheet describes.
+//! - A PHY register the model does not implement reads 0. The QEMU model
+//!   answers 0xffff, and the ICS1890 datasheet has an unanswered management
+//!   read float to all ones.
+//! - Frames go to the wire only while the PHY reports link. The QEMU model
+//!   sends whenever the PHY's data path is open (not powered down or
+//!   isolated), link or not.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
