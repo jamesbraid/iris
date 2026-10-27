@@ -583,6 +583,9 @@ impl OctaneMachine {
         ioc3.attach_eth(eth.clone());
         bridge.attach(2, ioc3.clone());
         let rad = Arc::new(crate::dev::rad1::Rad1::new());
+        if !cfg.no_audio {
+            rad.enable_output(cfg.audio.clone());
+        }
         bridge.attach(3, rad.clone());
         // SuperIO (serial, keyboard, clock) is Bridge input 4; the Ethernet
         // uses IOC3's PCI pin.
