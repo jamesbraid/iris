@@ -574,6 +574,16 @@ impl Device for Seeq8003 {
         let rx_wake_nat = self.rx_wake.clone();
         let nat_ctl     = self.nat_ctl.clone();
         thread::Builder::new().name("seeq-nat".into()).spawn(move || {
+            if config.mode == crate::config::NetMode::Stream {
+                match config.stream_endpoint() {
+                    Ok(ep) => {
+                        eprintln!("iris: networking backend = stream segment {ep}");
+                        crate::net::stream::spawn(ep, tx_cons, rx_prod, tx_wake_nat, rx_wake_nat);
+                    }
+                    Err(e) => eprintln!("iris: network.stream: {e}; Ethernet left unplugged"),
+                }
+                return;
+            }
             // Select the network backend. PCAP bridging requires --features pcap;
             // if the build lacks it, fall back to the software NAT gateway.
             #[cfg(feature = "pcap")]
