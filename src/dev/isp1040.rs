@@ -18,8 +18,10 @@
 //!   the doorbell write returns at once and the completion and its
 //!   interrupt follow when the target has answered, as the part's would.
 //!   No abort/recovery mailbox commands exist (the ISP1040 does not carry
-//!   them; they answer "invalid"). A soft reset or a queue initialisation
-//!   waits for the command in flight and drops its completion.
+//!   them; they answer "invalid"). A soft reset drops the completion of
+//!   the command in flight. A queue initialisation does not: the command
+//!   ran once, and its completion goes to the response ring in place when
+//!   it finishes.
 //! * A completion with no room in the response ring is held and posted when
 //!   the driver acknowledges a slot; the request ring is not consumed while
 //!   any completion is held.
@@ -218,9 +220,12 @@ struct Pending {
 /// What the request-ring thread and the register side tell each other.
 #[derive(Default)]
 struct Ctl {
-    /// Bumped by every reset and queue initialisation: a command that
-    /// finishes under another epoch has nowhere to post.
-    epoch: u64,
+    /// Bumped by every reset: a command that finishes under another
+    /// generation was cancelled with the chip, and posts nothing.
+    gen: u64,
+    /// Bumped when the request ring is replaced (and by a reset): a command
+    /// read from the old ring does not advance the new one's consumer.
+    rqst_epoch: u64,
     /// The ring may have entries the thread has not looked at.
     work: bool,
     /// The thread is walking the ring.
@@ -317,7 +322,8 @@ impl State {
     /// signature lives in the array so the register test's echo works before
     /// any queue exists.
     fn reset(&mut self) {
-        self.ctl.epoch += 1;
+        self.ctl.gen += 1;
+        self.ctl.rqst_epoch += 1;
         self.bus_cfg1 = 0;
         self.bus_ctrl = 0;
         self.bus_status = 0;
@@ -456,7 +462,7 @@ impl Core {
     /// its interrupt dropped. The disks stay attached.
     pub fn reset(&self) {
         // As the guest's soft reset: wait out the command in flight, whose
-        // completion then finds a new epoch and is dropped.
+        // completion then finds a new generation and is dropped.
         let st = self.st.lock().unwrap();
         let mut st = self.settle(st);
         st.reset();
@@ -498,7 +504,7 @@ impl Core {
 
     /// Wait out the command in flight before a reset or a new queue, keeping
     /// the lock. The command's completion then waits for the caller's change
-    /// and sees the new epoch.
+    /// and sees what the caller changed.
     fn settle<'a>(&self, mut st: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
         st.ctl.settling += 1;
         while st.ctl.busy {
@@ -798,14 +804,15 @@ impl Core {
                 if addr == 0 || st.mailbox[1] == 0 {
                     st.mailbox[0] = mbox::PARAM_ERROR;
                 } else if cmd == mbox::INIT_REQ_QUEUE || cmd == mbox::INIT_REQ_QUEUE_A64 {
-                    st.ctl.epoch += 1;
+                    st.ctl.rqst_epoch += 1;
                     st.rqst_base = addr;
                     st.rqst_len = st.mailbox[1];
                     st.rqst_cons = 0;
                     st.mailbox[MBOX_REQ] = 0;
                     st.mailbox[0] = mbox::COMPLETE;
                 } else {
-                    st.ctl.epoch += 1;
+                    // A command in flight posts its completion here, as
+                    // the QEMU model's does.
                     st.resp_base = addr;
                     st.resp_len = st.mailbox[1];
                     st.resp_prod = 0;
@@ -1180,7 +1187,7 @@ impl Core {
                         Prepared::Refused => return st,
                         Prepared::Answered => {}
                         Prepared::Run(job) => {
-                            let epoch = st.ctl.epoch;
+                            let (gen, rqst_epoch) = (st.ctl.gen, st.ctl.rqst_epoch);
                             st.ctl.busy = true;
                             drop(st);
                             let done = self.run_job(job);
@@ -1190,12 +1197,20 @@ impl Core {
                             while st.ctl.settling != 0 {
                                 st = self.wake.wait(st).unwrap();
                             }
-                            // A reset or a new queue took the ring away.
-                            if st.ctl.epoch != epoch {
+                            // A reset cancelled the command.
+                            if st.ctl.gen != gen {
                                 continue;
                             }
                             if let Some(done) = done {
                                 self.post_status(&mut st, done);
+                            }
+                            // A new request ring starts at its own index 0;
+                            // the command it replaced still ran once.
+                            if st.ctl.rqst_epoch != rqst_epoch {
+                                drop(st);
+                                self.sync_irq();
+                                st = self.st.lock().unwrap();
+                                continue;
                             }
                         }
                     }
@@ -1496,7 +1511,8 @@ impl Isp1040 {
             let ctl = std::mem::take(&mut st.ctl);
             *st = State::new();
             st.ctl = ctl;
-            st.ctl.epoch += 1;
+            st.ctl.gen += 1;
+            st.ctl.rqst_epoch += 1;
             st.ctl.work = true;
             let u16f = |k: &str| get_field(v, k).and_then(toml_u16).unwrap_or(0);
             let u32f = |k: &str| get_field(v, k).and_then(toml_u32).unwrap_or(0);
