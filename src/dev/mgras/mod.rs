@@ -866,6 +866,14 @@ impl Mgras {
         f.hq.ge_readback = [0, ge_revision];
     }
 
+    /// Start board-to-host DMA in the Octane's HQ4 order (see
+    /// `Hq3Engine::kick_starts_read`). Call before the engines start.
+    pub fn start_reads_at_kick(&self) {
+        assert!(!self.engines.load(Ordering::Acquire), "set before the engines start");
+        // SAFETY: the HQ3 thread is not running.
+        unsafe { &mut *self.eng.get() }.kick_starts_read = true;
+    }
+
     /// Give the board its path to system memory, for DMA.
     pub fn set_phys(&self, mem: Arc<dyn BusDevice>) {
         *self.mem.lock() = Some(mem);
