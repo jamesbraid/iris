@@ -10,3 +10,5 @@ pub mod bridge;
 pub mod flash;
 pub mod impact;
 pub mod machine;
+#[cfg(test)]
+mod xtests;
