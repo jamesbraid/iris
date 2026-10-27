@@ -1,6 +1,6 @@
 # iris-gui
 
-An optional egui front-end for the IRIS SGI Indy / Indigo2 emulator. It runs the
+An optional egui front-end for the IRIS SGI Indy / Indigo2 / Octane emulator. It runs the
 emulator in-process, draws the framebuffer in its own window, and adds
 named-machine storage with autosave, a configuration editor, disk and CD-ROM
 management, networking diagnostics, an in-app serial console, and the benchmark.
@@ -12,6 +12,12 @@ build when you ask for `-p iris-gui`.
 
 Pre-built installers (Windows, macOS, Linux AppImage/deb/rpm) come out of the
 Release workflow, and a sandboxed build ships on the Mac App Store.
+
+The platform list has the Indy, Indigo2 (IP22), Indigo2 IMPACT (IP28) and Octane
+(IP30). The Octane needs the IP30 PROM image (no built-in PROM), is fixed to the
+R10000, takes Solid IMPACT or no graphics board and 64 to 512 MB banks from
+bank 0, and keeps its PROM records in an optional flash file; see
+[docs/octane-ip30.md](docs/octane-ip30.md). The O2 is not selectable here yet.
 
 ---
 
