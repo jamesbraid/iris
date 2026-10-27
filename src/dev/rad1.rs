@@ -31,6 +31,9 @@
 //!   capture times them, the rate is inferred from the record layout.
 //! * UST ticks every 960 ns, a selected board policy; the physical rate is
 //!   unmeasured.
+//! * The sample clock, UST and status schedule run on host wall time, less
+//!   the time the machine was stopped; they are not tied to the emulated
+//!   CPU's progress.
 //! * A BAR0 access the model does not recognise is logged and reads zero.
 //!   The model fails the bus access instead, which the PCI bus layer here
 //!   cannot express.
@@ -53,8 +56,8 @@ pub const BAR0_SIZE: u32 = 0x2000;
 
 const REG_UST_COUNTER: u32 = 0x30;
 const REG_UST_CONTROL: u32 = 0x40;
-const REG_PREDISPATCH_B: u32 = 0x48;
-const REG_SHIFT_LOAD_CLOCK: u32 = 0x4c;
+const REG_AES_INPUT_CTRL: u32 = 0x48;
+const REG_ANALOG_INPUT_CTRL: u32 = 0x4c;
 const REG_ANALOG_OUT_EN: u32 = 0x58;
 const REG_STATUS_DMA_CTRL: u32 = 0x5c;
 
@@ -561,7 +564,7 @@ impl Inner {
                 if val & refused != 0 {
                     return None;
                 }
-                if off == REG_SHIFT_LOAD_CLOCK {
+                if off == REG_ANALOG_INPUT_CTRL {
                     // The analog input's interface word: bit 0 runs it.
                     if val & ENABLE_BIT != 0
                         && !s.chan[CH_IN].running
@@ -570,7 +573,7 @@ impl Inner {
                         return None;
                     }
                     self.enable_write(s, CH_IN, val, now);
-                } else if off == REG_PREDISPATCH_B {
+                } else if off == REG_AES_INPUT_CTRL {
                     // AES3 input control: bit 2 runs the input subcode channel.
                     if val & SUBCODE_ENABLE_BIT != 0
                         && !s.chan[CH_AES_SUB].running
