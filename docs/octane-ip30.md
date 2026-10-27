@@ -126,6 +126,17 @@ route of 192.0.2.3 works with `nat_subnet = "192.0.2.0/24"` unchanged. When
 own if more than one Octane shares a network. `[network] mode = "off"`
 unplugs the Ethernet; `pcap` is not available.
 
+## Snapshots
+
+The monitor's `save NAME` and `load NAME`, and iris-ci's `save`, `restore`
+and `rollback`, keep the Octane in `saves/NAME/` as they do the O2: the CPU,
+every device, all of memory (in the shared chunk store), the boot flash and
+the PROM's cached flash lines, low memory, and the changes on `overlay`
+disks. A snapshot loads only into an Octane with the same CPU, memory, disks
+and build. Use `overlay` disks for snapshots you mean to go back to: a disk
+written in place keeps changing after the save, and the saved memory will not
+match it.
+
 ## Inspecting the machine
 
 The monitor (`monitor_port`) has, besides the usual CPU and device commands:
@@ -158,7 +169,10 @@ HEART's bank mapping as they happen.
   without effect and noted.
 - RAD audio input records silence; only the analog output reaches the host.
 - Board identity records carry made-up barcodes and serial numbers.
-- No snapshots, and not in iris-gui.
+- Not in iris-gui.
+- A snapshot does not hold the IMPACT raster pipeline (the framebuffer and
+  drawing state); only the HQ4 front is saved. `rollback` reloads the
+  snapshot from disk.
 
 ## Sources
 

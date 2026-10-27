@@ -123,6 +123,40 @@ impl CachedFlashLines {
         self.lines.lock().unwrap().clear();
     }
 
+    /// The held lines, for a snapshot: each as its base address and bytes.
+    pub fn save_state(&self) -> toml::Value {
+        let lines = self.lines.lock().unwrap();
+        let mut bases: Vec<_> = lines.keys().copied().collect();
+        bases.sort();
+        let rows = bases
+            .into_iter()
+            .map(|b| {
+                let hex: String = lines[&b].iter().map(|x| format!("{x:02x}")).collect();
+                toml::Value::Array(vec![crate::snapshot::hex_u64(b), toml::Value::String(hex)])
+            })
+            .collect();
+        toml::Value::Array(rows)
+    }
+
+    /// Replace the held lines with what [`Self::save_state`] gave.
+    pub fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        let mut fresh = std::collections::HashMap::new();
+        for row in v.as_array().map_or(&[][..], |a| a.as_slice()) {
+            let base = row.get(0).and_then(crate::snapshot::toml_u64).ok_or("flash line: no address")?;
+            let hex = row.get(1).and_then(|h| h.as_str()).ok_or("flash line: no bytes")?;
+            if !BOOT_FLASH.contains(&base) || base & (CACHE_LINE - 1) != 0 || hex.len() != 2 * CACHE_LINE as usize {
+                return Err(format!("flash line at {base:#x} is malformed"));
+            }
+            let mut line = [0u8; CACHE_LINE as usize];
+            for (i, b) in line.iter_mut().enumerate() {
+                *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).map_err(|e| format!("flash line at {base:#x}: {e}"))?;
+            }
+            fresh.insert(base, line);
+        }
+        *self.lines.lock().unwrap() = fresh;
+        Ok(())
+    }
+
     /// Bytes `addr..addr + n` of a held line, big-endian, or `None` if the
     /// line is not held.
     fn load(&self, addr: u64, n: usize) -> Option<u64> {
@@ -322,6 +356,23 @@ impl Ip30Bus {
         }
     }
 
+    /// Low memory's 16 KiB, for a snapshot.
+    pub fn low_memory(&self) -> Vec<u8> {
+        self.low.lock().unwrap().clone()
+    }
+
+    /// Put back what [`Self::low_memory`] gave. Nothing compiles code from
+    /// low memory (it has no page generations), so there is nothing to
+    /// invalidate.
+    pub fn set_low_memory(&self, data: &[u8]) -> Result<(), String> {
+        let mut low = self.low.lock().unwrap();
+        if data.len() != low.len() {
+            return Err(format!("saved low memory is {} bytes, this Octane has {}", data.len(), low.len()));
+        }
+        low.copy_from_slice(data);
+        Ok(())
+    }
+
     /// Back to power-on: low memory zero (a synthetic choice, as in the
     /// model), the Crossbow and HEART reset.
     pub fn power_on(&self) {
@@ -504,6 +555,26 @@ pub struct OctaneMachine {
     controller_up: Arc<AtomicBool>,
     controller_slot: Option<MachineSlot>,
     lifecycle: crate::machine_state::GuestState,
+    /// The disks as a snapshot records them, to refuse one taken on others.
+    disks: Vec<crate::snapshot::DiskRef>,
+    /// The `[octane] flash` file, recorded in a snapshot's manifest.
+    flash_path: Option<String>,
+    /// The snapshot the CI socket last restored, for `rollback`.
+    last_restore: Option<String>,
+}
+
+/// What an Octane snapshot's manifest names as its machine.
+const SNAPSHOT_MACHINE: &str = "octane_ip30";
+
+/// A snapshot read and checked, ready to put into the machine.
+struct OctaneSnapshot {
+    cpu: toml::Value,
+    devices: toml::Value,
+    flash: Vec<u8>,
+    memory: Vec<u32>,
+    /// Each controller's copy-on-write sets, when the snapshot has them.
+    overlays: Vec<Option<Vec<(usize, Vec<u64>)>>>,
+    dir: std::path::PathBuf,
 }
 
 impl OctaneMachine {
@@ -694,6 +765,18 @@ impl OctaneMachine {
             nat = Some((eth.start_nat(net), addrs));
         }
         let (events, event_rx) = std::sync::mpsc::sync_channel(4);
+        // A snapshot's disks by slot (controller * 16 + id) and size.
+        let mut disks: Vec<crate::snapshot::DiskRef> = cfg
+            .scsi
+            .iter()
+            .filter(|(_, d)| !d.is_cdrom())
+            .map(|(&key, d)| crate::snapshot::DiskRef {
+                id: { let (c, id) = d.placement(key); crate::config::scsi_slot(c, id) },
+                path: d.path.clone(),
+                size_bytes: std::fs::metadata(&d.path).map(|m| m.len()).unwrap_or(0),
+            })
+            .collect();
+        disks.sort_by_key(|d| d.id);
         Ok(Self {
             bus,
             cpu,
@@ -718,6 +801,9 @@ impl OctaneMachine {
             controller_up: Arc::new(AtomicBool::new(false)),
             controller_slot: None,
             lifecycle: crate::machine_state::GuestState::Idle,
+            disks,
+            flash_path: cfg.octane.flash.clone(),
+            last_restore: None,
         })
     }
 
@@ -886,6 +972,12 @@ impl OctaneMachine {
 
     pub fn reset(&mut self) {
         self.stop();
+        self.power_on_hardware();
+        self.restart_peripherals();
+    }
+
+    /// Every part back to power-on, with the machine stopped.
+    fn power_on_hardware(&mut self) {
         crate::traits::Resettable::power_on(&*self.cpu);
         self.bus.power_on();
         self.flash_lines.clear();
@@ -901,7 +993,212 @@ impl OctaneMachine {
         if let Some(g) = &self.gfx {
             g.reset();
         }
+    }
+
+    /// Save the machine to `saves/<name>/`, then run on, in the format the
+    /// O2 uses: device state, memory in the shared chunk store, the boot
+    /// flash, the copy-on-write disks' changes. Disks without `overlay` are
+    /// not in it: restoring then pairs saved memory with whatever the disk
+    /// holds by then.
+    pub fn save_snapshot(&mut self, name: &str) -> Result<(), String> {
+        self.stop();
+        let saved = self.write_snapshot(name);
         self.restart_peripherals();
+        self.cpu.clone().as_device().start();
+        saved?;
+        println!("Snapshot saved to saves/{name}");
+        Ok(())
+    }
+
+    /// Every device's state but the CPU's and memory's, in one table.
+    fn device_state(&self) -> toml::Value {
+        use crate::traits::Saveable;
+        let mut t = toml::map::Map::new();
+        t.insert("heart".into(), self.bus.heart.save_state());
+        t.insert("xbow".into(), self.bus.xbow.save_state());
+        t.insert("bridge".into(), self.bridge.save_state());
+        t.insert("flash".into(), self.flash.save_state());
+        t.insert("ioc3".into(), self.ioc3.save_state());
+        t.insert("eth".into(), self.eth.save_state());
+        t.insert("rad".into(), self.rad.save_state());
+        t.insert("scsi".into(), toml::Value::Array(self.scsi.iter().map(|c| c.save_state()).collect()));
+        if let Some(g) = &self.gfx {
+            t.insert("gfx".into(), g.save_state());
+        }
+        t.insert("low".into(), toml::Value::String(self.bus.low_memory().iter().map(|b| format!("{b:02x}")).collect()));
+        t.insert("flash_lines".into(), self.flash_lines.save_state());
+        toml::Value::Table(t)
+    }
+
+    fn write_snapshot(&self, name: &str) -> Result<(), String> {
+        use crate::chunk_store::{put_words_as_chunks, ChunkStore};
+        use crate::snapshot::{ChunksManifest, Manifest, Snapshot};
+        use crate::traits::Saveable;
+        let snap = Snapshot::new(std::path::PathBuf::from("saves").join(name));
+        snap.ensure_dir().map_err(|e| e.to_string())?;
+        let mut manifest = Manifest::for_current_save();
+        manifest.machine = Some(SNAPSHOT_MACHINE.into());
+        manifest.disks = self.disks.clone();
+        manifest.nvram = self.flash_path.clone();
+        manifest.cpu_model = Some(self.cpu.model_name().to_string());
+        manifest.cpu_cache = Some(self.cpu.cache_kind().to_string());
+        snap.write_manifest(&manifest).map_err(|e| e.to_string())?;
+        let sv = manifest.schema_version;
+        snap.write_state("cpu", &self.cpu.save_state(), sv).map_err(|e| e.to_string())?;
+        snap.write_state("ip30", &self.device_state(), sv).map_err(|e| e.to_string())?;
+        snap.write_bin("flash.bin", &self.flash.contents()).map_err(|e| e.to_string())?;
+        let store = ChunkStore::new("saves");
+        let mut chunks = ChunksManifest::default();
+        chunks.bank_chunks[0] = put_words_as_chunks(&store, self.bus.heart.mem.lock().unwrap().words())
+            .map_err(|e| format!("CAS memory put: {e}"))?;
+        snap.write_chunks_manifest(&chunks).map_err(|e| e.to_string())?;
+        for (i, ctl) in self.scsi.iter().enumerate() {
+            let dir = snap.dir.join(format!("ctrl{i}"));
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let overlays = ctl.export_overlays(&dir).map_err(|e| format!("COW overlay export (controller {i}): {e}"))?;
+            snap.write_toml(&format!("cow{i}.toml"), &crate::machine::build_cow_table(overlays))
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Restore the machine from `saves/<name>/` and run it. Everything is
+    /// read and checked before the machine is touched, so a snapshot that
+    /// does not fit (another machine, CPU, build, memory or disk) leaves it
+    /// as it was.
+    pub fn load_snapshot(&mut self, name: &str) -> Result<(), String> {
+        let snap = self.read_snapshot(name)?;
+        self.stop();
+        let applied = self.apply_snapshot(snap);
+        self.restart_peripherals();
+        applied?;
+        self.cpu.clone().as_device().start();
+        println!("Snapshot loaded from saves/{name}");
+        Ok(())
+    }
+
+    fn read_snapshot(&self, name: &str) -> Result<OctaneSnapshot, String> {
+        use crate::chunk_store::{get_chunks_as_words, ChunkStore};
+        use crate::snapshot::{Snapshot, SCHEMA_VERSION};
+        let snap = Snapshot::new(std::path::PathBuf::from("saves").join(name));
+        let m = snap.read_manifest()?.ok_or_else(|| format!("saves/{name}: no snapshot.toml"))?;
+        if m.machine.as_deref() != Some(SNAPSHOT_MACHINE) {
+            return Err(format!("snapshot {name} is not of an Octane"));
+        }
+        if m.host_arch != std::env::consts::ARCH {
+            return Err(format!("snapshot host_arch '{}' does not match current host '{}'", m.host_arch, std::env::consts::ARCH));
+        }
+        if m.schema_version > SCHEMA_VERSION {
+            return Err(format!("snapshot schema_version {} is newer than this iris build supports ({SCHEMA_VERSION})", m.schema_version));
+        }
+        // As the O2: build, CPU and disks must match;
+        // IRIS_SNAPSHOT_SKIP_CHECK=1 makes those warnings.
+        let mut fatal = Vec::new();
+        let features: Vec<String> = m.features.iter()
+            .filter(|f| !crate::snapshot::RETIRED_FEATURES.contains(&f.as_str())).cloned().collect();
+        if features != crate::snapshot::enabled_features() {
+            fatal.push(format!("build features differ: snapshot [{}] vs current [{}]",
+                m.features.join(","), crate::snapshot::enabled_features().join(",")));
+        }
+        if let Some(e) = crate::snapshot::cpu_model_mismatch(m.cpu_model.as_deref(), self.cpu.model_name()) {
+            fatal.push(e);
+        }
+        if let Some(e) = crate::snapshot::cache_model_mismatch(m.cpu_cache.as_deref(), m.cpu_model.as_deref(), self.cpu.cache_kind()) {
+            fatal.push(e);
+        }
+        for d in &m.disks {
+            match self.disks.iter().find(|c| c.id == d.id) {
+                None => fatal.push(format!("snapshot disk {}:{} ('{}') is not configured in this run", d.id / 16, d.id % 16, d.path)),
+                Some(c) if c.size_bytes != d.size_bytes => fatal.push(format!(
+                    "disk {}:{} ('{}') size differs: snapshot {} bytes vs current {}", d.id / 16, d.id % 16, d.path, d.size_bytes, c.size_bytes)),
+                Some(_) => {}
+            }
+        }
+        if !fatal.is_empty() {
+            let msg = format!("snapshot provenance mismatch:\n  - {}", fatal.join("\n  - "));
+            if std::env::var("IRIS_SNAPSHOT_SKIP_CHECK").is_ok_and(|v| !v.is_empty() && v != "0") {
+                eprintln!("load_snapshot: {msg} [IRIS_SNAPSHOT_SKIP_CHECK set; continuing]");
+            } else {
+                return Err(format!("{msg}\n(set IRIS_SNAPSHOT_SKIP_CHECK=1 to override)"));
+            }
+        }
+        let sv = m.schema_version;
+        let state = |base: &str| snap.read_state(base, sv).map_err(|e| format!("{base}: {e}"));
+        let chunks = snap.read_chunks_manifest().map_err(|e| format!("chunks.bin: {e}"))?;
+        let memory = get_chunks_as_words(&ChunkStore::new("saves"), &chunks.bank_chunks[0])
+            .map_err(|e| format!("CAS memory get: {e}"))?;
+        let have = self.bus.heart.mem.lock().unwrap().words().len();
+        if memory.len() != have {
+            return Err(format!("snapshot memory is {} MB, this Octane has {} MB", memory.len() >> 18, have >> 18));
+        }
+        let overlays = (0..self.scsi.len())
+            .map(|i| snap.read_toml(&format!("cow{i}.toml")).ok().map(|t| crate::machine::parse_cow_table(&t)))
+            .collect();
+        let flash = snap.read_bin("flash.bin").map_err(|e| format!("flash.bin: {e}"))?;
+        if flash.len() != self.flash.size() {
+            return Err(format!("snapshot flash is {} bytes, this Octane has {}", flash.len(), self.flash.size()));
+        }
+        Ok(OctaneSnapshot { cpu: state("cpu")?, devices: state("ip30")?, flash, memory, overlays, dir: snap.dir })
+    }
+
+    /// Put a read snapshot into the stopped machine: the hardware as at
+    /// power-on first, so nothing the snapshot does not hold is left over.
+    /// Then the CPU, the devices, the Bridge, and last the Crossbow and
+    /// HEART, whose loads drive the interrupt lines the others raised.
+    fn apply_snapshot(&mut self, s: OctaneSnapshot) -> Result<(), String> {
+        use crate::snapshot::get_field;
+        use crate::traits::Saveable;
+        let d = &s.devices;
+        let part = |k: &str| get_field(d, k).ok_or_else(|| format!("snapshot has no {k} state"));
+        self.power_on_hardware();
+        self.cpu.load_state(&s.cpu)?;
+        self.flash.set_contents(&s.flash)?;
+        self.flash.load_state(part("flash")?)?;
+        self.flash_lines.load_state(part("flash_lines")?)?;
+        let low = part("low")?.as_str().ok_or("snapshot low memory is not a string")?;
+        let low: Vec<u8> = (0..low.len() / 2)
+            .map(|i| u8::from_str_radix(&low[2 * i..2 * i + 2], 16).map_err(|e| format!("low memory: {e}")))
+            .collect::<Result<_, _>>()?;
+        self.bus.set_low_memory(&low)?;
+        self.bus.heart.mem.lock().unwrap().restore_words(&s.memory)?;
+        for (i, ctl) in self.scsi.iter().enumerate() {
+            if let Some(Some(sets)) = s.overlays.get(i) {
+                ctl.import_overlays(&s.dir.join(format!("ctrl{i}")), sets)
+                    .map_err(|e| format!("COW overlay import (controller {i}): {e}"))?;
+            }
+        }
+        let scsi = part("scsi")?.as_array().ok_or("snapshot scsi state is not a list")?;
+        for (c, v) in self.scsi.iter().zip(scsi) {
+            c.load_state(v)?;
+        }
+        self.ioc3.load_state(part("ioc3")?)?;
+        self.eth.load_state(part("eth")?)?;
+        self.rad.load_state(part("rad")?)?;
+        if let Some(g) = &self.gfx {
+            g.load_state(part("gfx")?)?;
+        }
+        self.bridge.load_state(part("bridge")?)?;
+        self.bus.xbow.load_state(part("xbow")?)?;
+        self.bus.heart.load_state(part("heart")?)?;
+        Ok(())
+    }
+
+    /// The CI socket's `restore`: load the snapshot and remember it for
+    /// `rollback`. Console bytes left from the earlier run are dropped.
+    pub fn ci_restore(&mut self, name: &str) -> Result<(), String> {
+        if let Some(ci) = &self.ci_serial {
+            ci.reset();
+        }
+        self.load_snapshot(name)?;
+        self.last_restore = Some(name.to_string());
+        Ok(())
+    }
+
+    /// Back to the last `ci_restore`, by loading it again: the Octane keeps
+    /// no in-memory checkpoint, so a rollback costs a load from disk.
+    pub fn ci_rollback(&mut self) -> Result<(), String> {
+        let name = self.last_restore.clone().ok_or("no previous restore to roll back to")?;
+        self.ci_restore(&name)
     }
 
     /// Start what `stop` stopped, short of the CPU: the device threads, and
@@ -1006,6 +1303,18 @@ impl Workstation for OctaneMachine {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
+    fn save_snapshot(&mut self, name: &str) -> Result<(), String> {
+        OctaneMachine::save_snapshot(self, name)
+    }
+    fn load_snapshot(&mut self, name: &str) -> Result<(), String> {
+        OctaneMachine::load_snapshot(self, name)
+    }
+    fn ci_restore(&mut self, name: &str) -> Result<(), String> {
+        OctaneMachine::ci_restore(self, name)
+    }
+    fn ci_rollback(&mut self) -> Result<(), String> {
+        OctaneMachine::ci_rollback(self)
+    }
     fn scratch_path(&self) -> Option<&std::path::Path> {
         self.scratch_path.as_deref()
     }
@@ -1061,6 +1370,30 @@ mod tests {
 
         lines.clear();
         assert_eq!(cache.read::<4>(va, pa).data, 0, "reset forgets the line");
+    }
+
+    #[test]
+    fn low_memory_and_cached_flash_lines_round_trip() {
+        let mut prom = vec![0u8; 0x2000];
+        prom[0x1140..0x1150].copy_from_slice(&[0xff; 16]);
+        let src = Arc::new(bus(&prom));
+        src.write32(0x614, 0x1234_5678);
+        let lines = CachedFlashLines::new(src.clone());
+        assert_eq!(lines.write32(0x1fc0_1148, 7), BUS_OK);
+        let (low, held) = (src.low_memory(), lines.save_state());
+
+        let dst = Arc::new(bus(&prom));
+        let fresh = CachedFlashLines::new(dst.clone());
+        dst.set_low_memory(&low).unwrap();
+        fresh.load_state(&held).unwrap();
+        assert_eq!(dst.read32(0x614).data, 0x1234_5678);
+        assert_eq!(fresh.read32(0x1fc0_1148).data, 7, "the held line, not the flash's");
+        assert_eq!(fresh.read32(0x1fc0_1140).data, 0xffff_ffff, "the rest of the line came along");
+        assert_eq!(dst.read32(0x1fc0_1148).data, 0xffff_ffff, "the flash itself is untouched");
+        assert!(dst.set_low_memory(&low[1..]).is_err());
+        let mut bad = held.clone();
+        bad.as_array_mut().unwrap()[0].as_array_mut().unwrap()[0] = toml::Value::String("0x0000000000001000".into());
+        assert!(fresh.load_state(&bad).is_err(), "a line outside the flash is refused");
     }
 
     #[test]
