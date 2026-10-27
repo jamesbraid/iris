@@ -907,8 +907,14 @@ impl ImpactXio {
             self.shared.deliver(out);
         }
         for (o, v) in board {
-            // None of these registers holds a store back.
-            self.board_write(32, o, v as u64);
+            // The RE_STATUS forward goes through the command FIFO, so a full
+            // FIFO holds the store back: the CPU retries it. It is the only
+            // forward in this list that does and it is the only entry of its
+            // write, so the retry repeats nothing.
+            let st = self.board_write(32, o, v as u64);
+            if st != BUS_OK {
+                return st;
+            }
         }
         BUS_OK
     }
@@ -1644,6 +1650,35 @@ mod tests {
             assert_eq!(&rec[21..30], b"030-0938-");
             assert_eq!(&rec[35..39], b"003U");
             r.b.reset();
+        }
+    }
+
+    #[test]
+    fn a_status_store_into_a_full_fifo_is_held_back_and_lands_on_retry() {
+        // No engine thread, so nothing drains the command FIFO.
+        let heart = Arc::new(Heart::default());
+        let ram = Arc::new(Ram(Mutex::new(vec![0; 1 << 20])));
+        let hb = Arc::new(AtomicU64::new(0));
+        let r = Rig { b: ImpactXio::new(11, heart.clone(), ram.clone(), hb.clone(), hb), heart, ram };
+        let mut accepted = 0u32;
+        let st = loop {
+            let st = r.b.write(SH + hq4::RE_STATUS as u64, 32, 0);
+            if st != BUS_OK {
+                break st;
+            }
+            accepted += 1;
+            assert!(accepted < 1 << 20, "the FIFO never filled");
+        };
+        assert_eq!(st, BUS_BUSY, "a full FIFO must back-pressure, not drop the store");
+        assert!(accepted > 0);
+        // Still full, still busy: nothing was consumed or lost silently.
+        assert_eq!(r.b.write(SH + hq4::RE_STATUS as u64, 32, 0), BUS_BUSY);
+        r.b.mgras().start_engines();
+        let mut tries = 0u32;
+        while r.b.write(SH + hq4::RE_STATUS as u64, 32, 0) == BUS_BUSY {
+            tries += 1;
+            assert!(tries < 10_000_000, "the store never landed after the engine drained");
+            std::thread::yield_now();
         }
     }
 
