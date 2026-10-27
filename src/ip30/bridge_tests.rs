@@ -944,3 +944,38 @@ fn the_64_bit_direct_window_refuses_widget_zero_and_other_widgets() {
     assert_eq!(r.get(reg::INT_STATUS), 0, "refusals and peer DMA raise no timeout");
     assert_eq!(r.mem.peek(0x1000, 1), [0]);
 }
+
+/// Registers, a translation entry, a held interrupt input and the slot's
+/// configuration header come back; the load sends HEART nothing, and the
+/// next edge is judged against the restored level.
+#[test]
+fn save_load_round_trip() {
+    use crate::traits::Saveable;
+    let r = Rig::new();
+    let c = r.card(2, PCI_INTA);
+    r.direct_to_heart(true);
+    assert_eq!(r.bridge.write64(u64::from(ATE_BASE + 8 * 5), ATE_VALID | 0x5000), BUS_OK);
+    r.route(2, 17);
+    c.raise(true);
+    r.bridge.set_wire_irq(4, true);
+    assert_eq!(r.sink.take(), [(17, true)]);
+    let v1 = r.bridge.save_state();
+
+    let s = Rig::new();
+    let d = Card::new(PCI_INTA);
+    s.bridge.attach(2, d.clone());
+    s.bridge.load_state(&v1).unwrap();
+    assert_eq!(v1, s.bridge.save_state(), "Bridge save_state mismatch after load_state round-trip");
+    assert!(s.sink.take().is_empty(), "a load sends no packet");
+    assert_eq!(s.get(reg::DIRECT_MAP), r.get(reg::DIRECT_MAP));
+    assert_eq!(s.get(reg::INT_STATUS), r.get(reg::INT_STATUS));
+    assert_eq!(s.bridge.read32(u64::from(ATE_BASE + 8 * 5 + 4)).data, r.bridge.read32(u64::from(ATE_BASE + 8 * 5 + 4)).data);
+    assert_eq!(d.cfg.bar_base(1), 0x1300_0000, "the slot's header came back");
+    // The card's line is still held: dropping it is a falling edge.
+    d.raise(false);
+    d.raise(true);
+    assert_eq!(s.sink.take(), [(17, true)]);
+
+    let empty = Rig::new();
+    assert!(empty.bridge.load_state(&v1).is_err(), "a saved slot must be fitted");
+}
