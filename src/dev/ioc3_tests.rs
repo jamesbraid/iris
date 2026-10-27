@@ -1066,6 +1066,25 @@ fn nvram_survives_in_a_file() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// The file is not rewritten per byte: it catches up once the writes
+/// pause, replaced whole, and on a flush with no wait.
+#[test]
+fn nvram_writes_reach_the_file_after_a_pause() {
+    let path = std::env::temp_dir().join(format!("ioc3-nvram-quiet-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let r = Rig::new();
+    r.c.set_nvram_file(&path).unwrap();
+    rtc_w(&r, 0x45, 0x66);
+    let in_file = || std::fs::read(&path).unwrap()[NVRAM_OFF_NV + 5];
+    assert_eq!(in_file(), 0, "not yet written");
+    r.c.flush_nvram_after(Duration::from_secs(3600));
+    assert_eq!(in_file(), 0, "the writes have not paused for long enough");
+    r.c.flush_nvram_after(Duration::ZERO);
+    assert_eq!(in_file(), 0x66);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0x200);
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn software_power_off_is_reported() {
     let r = Rig::new();
