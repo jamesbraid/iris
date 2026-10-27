@@ -447,7 +447,7 @@ The Octane is its own machine, like the O2: `src/ip30.rs` is the bus
 | 0x1000_0000 | `dev/xbow.rs`: widget 0; link status says which widgets are fitted |
 | 0x1800_0000 | `dev/heart.rs`: HEART's widget registers; a write to 0x80 sets an ISR bit |
 | 0x1C00_0000 | graphics widget: a register file that remembers what it is told (`ip32::Stub`), until HQ4 and IMPACT are put behind it |
-| 0x1F00_0000 | `dev/xbridge.rs`: the Bridge's local registers, PCI configuration space (`crate::pci::PciConfig` per slot), the device windows routed by slot, the NIC |
+| 0x1F00_0000 | `dev/bridge.rs`: the Bridge's local registers, PCI configuration space (`crate::pci::PciConfig` per slot), the device windows routed by slot, the NIC |
 | 0x1F20_0000, 0x1F40_0000 | device windows 0 and 1: the two QL1040s, register files until the ISP1040 model exists (`docs/Octane/qla1040.md`) |
 | 0x1F60_0000 | device window 2: `dev/ioc3.rs`, with the two 16550s (`dev/ns16550.rs`), the DS1687 behind byte buses 1 and 2, the MAC NIC on MCR (`dev/sgi_nic.rs`), the GPIO latch |
 | 0x1F70_0000 | device window 3: RAD, a register file |

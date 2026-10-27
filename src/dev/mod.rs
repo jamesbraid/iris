@@ -27,7 +27,7 @@ pub mod serial_log;
 pub mod sflash;
 pub mod sgi_nic;
 pub mod xbow;
-pub mod xbridge;
+pub mod bridge;
 
 pub mod camera;
 pub mod cdmc;

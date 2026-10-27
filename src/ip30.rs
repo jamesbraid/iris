@@ -27,7 +27,7 @@ use crate::dev::heart_mem::{Decode, HeartMemory, LOW_ALIAS_SIZE, RAM_BASE};
 use crate::dev::ioc3::Ioc3;
 use crate::dev::sflash::Flash;
 use crate::dev::xbow::Xbow;
-use crate::dev::xbridge::{octane_slots, Bridge};
+use crate::dev::bridge::{octane_slots, Bridge};
 use crate::ip32::Stub;
 use crate::pci::PciBusDevice;
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, BUS_ERR, BUS_OK};
@@ -238,7 +238,7 @@ impl Ip30Bus {
             match w {
                 XBOW_WIDGET => Some(match size {
                     8 => self.xbow.read32((off & !7) | 4) as u64,
-                    _ => crate::dev::xbridge::narrow32(self.xbow.read32(off & !3), off, size),
+                    _ => crate::dev::bridge::narrow32(self.xbow.read32(off & !3), off, size),
                 }),
                 HEART_WIDGET => Some(narrow(self.heart.widget_read(off), addr, size)),
                 GFX_WIDGET => Some(match size {
@@ -282,7 +282,7 @@ impl Ip30Bus {
                         self.xbow.write32((off & !7) | 4, val as u32);
                     } else {
                         let old = self.xbow.read32(off & !3);
-                        self.xbow.write32(off & !3, crate::dev::xbridge::widen32(old, off, size, val as u32));
+                        self.xbow.write32(off & !3, crate::dev::bridge::widen32(old, off, size, val as u32));
                     }
                     true
                 }
