@@ -2862,7 +2862,10 @@ mod ip7_ticket_tests {
     #[cfg(not(feature = "ci_clock"))]
     fn octane_core() -> MipsCore {
         let mut core = MipsCore::default();
-        core.set_count_hz(97_500_000);
+        // A slow Count, so the host's own time between two statements (a
+        // loaded test machine can take microseconds) never carries Count
+        // past a target; `elapse_ticks` moves it explicitly.
+        core.set_count_hz(1_000);
         core.count_write_samples = true;
         core
     }
@@ -2940,6 +2943,9 @@ mod ip7_ticket_tests {
     #[test]
     fn octane_one_shot_armed_across_the_wrap_fires_promptly() {
         let mut core = octane_core();
+        // The one-shot runs on the host clock: the real rate, so the short
+        // distance is microseconds and a full wrap would be 44 s.
+        core.set_count_hz(97_500_000);
         core.set_timer_manager(Arc::new(crate::hptimer::TimerManager::new()));
         core.write_cp0(9, 0xFFFF_FF00);
         core.hot.cycles += 1;
