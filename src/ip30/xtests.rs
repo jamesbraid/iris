@@ -6,9 +6,9 @@
 //! The processor's accesses go straight to the Bridge's small window (offsets
 //! as in physical 0x1f00_0000 + offset); a function's DMA goes through the
 //! Bridge into HEART's RAM at physical 0x2000_0000. Expected bytes come from
-//! our QEMU model's qtests (`octane-test.c`, `sgi-bridge-bus-test.c`) and the
-//! "IOC3 PCI byte order" section of the Origami capability notes, not from
-//! reading the Rust back. Where a layout is derived rather than copied, the
+//! the Bridge specification's byte-placement rules (`docs/Octane/`) and
+//! another Octane emulator's register tests, not from reading the Rust
+//! back. Where a layout is derived rather than copied, the
 //! rule is written next to it.
 //!
 //! RAM placement rules used below, for the 32-bit slots the Octane has:

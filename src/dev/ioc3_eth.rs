@@ -174,8 +174,7 @@ fn phy_masks(r: usize) -> (u16, u16) {
 }
 
 /// The ICS1890 as the Octane carries it: address 1, node mode, software
-/// priority, revision 3. See `docs/datasheets/ics1890.md` in the origami
-/// repository for the register contract and the stated approximations.
+/// priority, revision 3.
 pub struct Ics1890 {
     addr: u8,
     bmcr: u16,

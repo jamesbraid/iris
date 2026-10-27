@@ -4,8 +4,8 @@
 //! The Octane's boot flash: a 16-bit, big-endian part with the Intel/Sharp
 //! command set, for [`Bridge::attach_flash`].
 //!
-//! The fitted chip is not identified. The model follows the Origami contract's
-//! compatibility part: a 1 MiB array of sixteen 64 KiB erase blocks, manufacturer
+//! The fitted chip is not identified. This is a compatibility part chosen to
+//! satisfy the stock PROM: a 1 MiB array of sixteen 64 KiB erase blocks, manufacturer
 //! `0x00b0` (Sharp) and device `0x66a8` as 16-bit identifier words, and the
 //! command subset the stock PROM drives (identify, read status, clear status,
 //! word program, block erase). The state machine is a port of the Intel/Sharp
