@@ -2856,4 +2856,99 @@ mod ip7_ticket_tests {
             assert_eq!(ip7, samples, "count_write_samples = {samples}");
         }
     }
+
+    /// The Octane's timer settings: Count at half the 195 MHz R10000 clock,
+    /// and a Count write opening the sample window.
+    #[cfg(not(feature = "ci_clock"))]
+    fn octane_core() -> MipsCore {
+        let mut core = MipsCore::default();
+        core.set_count_hz(97_500_000);
+        core.count_write_samples = true;
+        core
+    }
+
+    /// Let Count advance `ticks` without sleeping: move the wall-clock
+    /// anchor back by that much time.
+    #[cfg(not(feature = "ci_clock"))]
+    fn elapse_ticks(core: &mut MipsCore, ticks: u64) {
+        let ns = (ticks as u128 * 1_000_000_000 / core.count_hz as u128) as u64 + 1;
+        core.count_anchor_instant -= std::time::Duration::from_nanos(ns);
+        core.hot.cycles += 1;
+    }
+
+    #[cfg(not(feature = "ci_clock"))]
+    fn ip7(core: &MipsCore) -> bool {
+        core.hot.interrupts.load(Ordering::SeqCst) as u32 & CAUSE_IP7 != 0
+    }
+
+    /// A Compare just before and just after the 32-bit wrap, with Count
+    /// carried across 0xffffffff in one materialization: the Count read
+    /// raises IP7, it does not wait for the next wrap.
+    #[cfg(not(feature = "ci_clock"))]
+    #[test]
+    fn octane_count_crossing_a_compare_across_the_wrap_raises_ip7() {
+        for compare in [0xFFFF_FFF0u32, 0x10] {
+            let mut core = octane_core();
+            core.write_cp0(9, 0xFFFF_FF00);
+            core.hot.cycles += 1;
+            core.write_cp0(11, compare as u64);
+            assert!(!ip7(&core), "compare {compare:#x} is still ahead");
+            elapse_ticks(&mut core, 0x200);
+            let count = core.read_cp0(9) as u32;
+            assert!(count >= 0x100 && count < 0x8000_0000, "Count should have wrapped: {count:#x}");
+            assert!(ip7(&core), "compare {compare:#x} was crossed across the wrap");
+        }
+    }
+
+    /// IRIX on the Octane writes Count and then, a few instructions later,
+    /// a Compare a short way ahead. A host stall between them that carries
+    /// Count past the target and across the wrap still delivers the tick.
+    #[cfg(not(feature = "ci_clock"))]
+    #[test]
+    fn octane_late_compare_after_a_count_write_across_the_wrap_raises_ip7() {
+        for compare in [0xFFFF_FFF0u32, 0x80] {
+            let mut core = octane_core();
+            core.write_cp0(9, 0xFFFF_FF00);
+            elapse_ticks(&mut core, 0x400);
+            core.write_cp0(11, compare as u64);
+            assert!(ip7(&core), "compare {compare:#x} written behind Count after a stall");
+        }
+    }
+
+    /// The other side of the rule: a target behind the sample, such as
+    /// IRIX's Count=1 then Compare=0 disarm when Count wrapped from just
+    /// below 2^32, stays a full-wrap wait.
+    #[cfg(not(feature = "ci_clock"))]
+    #[test]
+    fn octane_compare_behind_the_count_written_stays_clear_across_the_wrap() {
+        let mut core = octane_core();
+        core.write_cp0(9, 1);
+        elapse_ticks(&mut core, 0x400);
+        core.write_cp0(11, 0);
+        assert!(!ip7(&core), "Count=1 then Compare=0 is a disarm");
+
+        let mut core = octane_core();
+        core.write_cp0(9, 0x10);
+        elapse_ticks(&mut core, 0x400);
+        core.write_cp0(11, 0xFFFF_FFF0);
+        assert!(!ip7(&core), "a target behind the Count written is a full-wrap wait");
+    }
+
+    /// The one-shot armed across the wrap waits the short distance, not a
+    /// full wrap (about 44 s at 97.5 MHz).
+    #[cfg(not(feature = "ci_clock"))]
+    #[test]
+    fn octane_one_shot_armed_across_the_wrap_fires_promptly() {
+        let mut core = octane_core();
+        core.set_timer_manager(Arc::new(crate::hptimer::TimerManager::new()));
+        core.write_cp0(9, 0xFFFF_FF00);
+        core.hot.cycles += 1;
+        // 0x1000 ticks past the wrap: about 45 us.
+        core.write_cp0(11, 0x1000);
+        let t0 = std::time::Instant::now();
+        while !ip7(&core) && t0.elapsed() < std::time::Duration::from_secs(2) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(ip7(&core), "the Compare one-shot across the wrap did not fire within 2 s");
+    }
 }
