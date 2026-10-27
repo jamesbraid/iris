@@ -1508,3 +1508,89 @@ fn the_service_thread_pauses_and_is_joined_on_drop() {
     // The thread held only a weak reference and has ended.
     assert!(weak.upgrade().is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Snapshots
+// ---------------------------------------------------------------------------
+
+/// A saved state without the fields that measure time to a deadline or the
+/// clock's seconds, which move on between two saves.
+fn timeless(v: &toml::Value) -> toml::Value {
+    match v {
+        toml::Value::Table(t) => toml::Value::Table(
+            t.iter().filter(|(k, _)| !k.ends_with("_ns") && k.as_str() != "time").map(|(k, x)| (k.clone(), timeless(x))).collect(),
+        ),
+        toml::Value::Array(a) => toml::Value::Array(a.iter().map(timeless).collect()),
+        x => x.clone(),
+    }
+}
+
+/// Every block's state comes back: the UARTs with a byte waiting, a ring
+/// engine with characters packed and its timer running, the PS/2 receive,
+/// the interrupt output, the parallel FIFO, the clock's extended RAM, the
+/// buffer RAM and a MicroLAN transaction half done. The serial backends
+/// stay the loading chip's own.
+#[test]
+fn save_load_round_trip() {
+    use crate::traits::Saveable;
+    // The ring timer reads the host clock; hold it still so it fires only
+    // when the test says.
+    let t0 = Instant::now();
+    super::TEST_CLOCK.with(|c| c.set(Some(t0)));
+    let _unfreeze = Unfreeze;
+    let r = Rig::new();
+    r.aim_engines();
+    r.w32(reg::SDMA_RING_LO, 0x2000 | 1);
+    r.w32(A + sdma_off::RX_TIMER, 0xfff);
+    r.w32(A + sdma_off::RX_CONSUME, ARM_RX_TIMER);
+    r.w32(A, sdma_ctl::ENABLE | 4);
+    r.wire[0].inp.lock().unwrap().extend(b"hi");
+    r.c.service();
+    r.w8(reg::SERIAL_B + 3, 0x03);
+    r.w8(reg::SERIAL_B + 1, 0x01);
+    r.wire[1].inp.lock().unwrap().extend(b"z");
+    assert_eq!(r.r8(reg::SERIAL_B + 5) & 1, 1);
+    r.w32(K_TX, 0xff);
+    r.w32(reg::INT_ENABLE_SET, int::KEYBOARD);
+    r.w32(reg::INT_OUTPUT, IO_PERIODIC | 0x1000);
+    r.w8(ECP + 0xa, 6 << 5);
+    r.w8(ECP + 8, 0x42);
+    rtc_w(&r, 0x0a, 0x10);
+    rtc_w(&r, 0x50, 0x33);
+    rtc_w(&r, 0x53, 0x5a);
+    r.w32(reg::SSRAM + 0x100, 0x1_2345);
+    let ow = OneWire(&r);
+    ow.enable();
+    assert!(ow.reset());
+    ow.write_byte(0xcc);
+    ow.write_byte(0xf0);
+    let v1 = r.c.save_state();
+    let first = ow.read_byte();
+
+    let s = Rig::new();
+    s.c.load_state(&v1).unwrap();
+    assert_eq!(s.r32(A + sdma_off::RX_PRODUCE) >> HELD_SHIFT & 7, 2, "two held in the packer");
+    assert_eq!(timeless(&v1), timeless(&s.c.save_state()), "Ioc3 save_state mismatch after load_state round-trip");
+    assert!(s.superio.level(), "the keyboard source drives the line");
+    assert_eq!(s.r8(reg::SERIAL_B), b'z', "the byte waiting in the receiver");
+    assert_eq!(s.r8(ECP + 8), 0x42);
+    assert_eq!(rtc_r(&s, 0x53), 0x5a);
+    assert_eq!(s.r32(reg::SSRAM + 0x100), 0x1_2345);
+    assert_eq!(s.r32(K_RX) >> 16 & 0xff, 0xfa, "the keyboard's reply");
+    assert_eq!(OneWire(&s).read_byte(), first, "the MicroLAN read carries on where it was");
+    s.w8(reg::SERIAL_A, b'x');
+    assert_eq!(&*s.wire[0].out.lock().unwrap(), b"x", "the loading chip's backend");
+    assert!(r.wire[0].out.lock().unwrap().is_empty());
+    // The loaded timer has its saved time left, no more: run it out.
+    super::TEST_CLOCK.with(|c| c.set(Some(t0 + Duration::from_millis(300))));
+    assert_eq!(s.r32(A + sdma_off::RX_PRODUCE) >> HELD_SHIFT & 7, 0, "the timer flushed the packer");
+}
+
+/// Puts the real clock back when a test ends, however it ends.
+struct Unfreeze;
+
+impl Drop for Unfreeze {
+    fn drop(&mut self) {
+        super::TEST_CLOCK.with(|c| c.set(None));
+    }
+}
