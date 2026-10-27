@@ -302,7 +302,11 @@ impl O2Machine {
         // The Ethernet on the NAT gateway `[network]` describes (`mode =
         // "off"` leaves it unplugged; validate refuses pcap here for now).
         let mut nat = None;
-        if cfg.network.mode != crate::config::NetMode::Off {
+        if cfg.network.mode == crate::config::NetMode::Stream {
+            let ep = crate::net::GatewayConfig::from_network(&cfg.network()).stream_endpoint()?;
+            eprintln!("iris: O2 Ethernet on the stream segment {ep}");
+            bus.mace.mec.start_stream(ep);
+        } else if cfg.network.mode != crate::config::NetMode::Off {
             let net = crate::net::GatewayConfig::from_network(&cfg.network());
             eprintln!("iris: O2 Ethernet on NAT: gateway {}, guest {} (DHCP)", net.gateway_ip, net.client_ip);
             let addrs = (net.client_ip, net.gateway_ip, net.netmask);

@@ -291,6 +291,16 @@ impl Mec {
         controls
     }
 
+    /// Put this interface on a private segment served by `endpoint` (QEMU
+    /// `-netdev stream` framing, [`crate::net::stream`]) instead of the NAT.
+    pub fn start_stream(&self, endpoint: crate::net::stream::StreamEndpoint) {
+        let (to_net, tx_cons) = rtrb::RingBuffer::new(256);
+        let (rx_prod, from_net) = rtrb::RingBuffer::new(256);
+        let (tx_wake, rx_wake) = (crate::net::Wake::new(), crate::net::Wake::new());
+        crate::net::stream::spawn(endpoint, tx_cons, rx_prod, tx_wake.clone(), rx_wake);
+        self.attach(to_net, from_net, Some(tx_wake));
+    }
+
     /// Frames sent and received so far, and received ones dropped for want of
     /// a buffer.
     pub fn counts(&self) -> (u64, u64, u64) {
