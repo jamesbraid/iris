@@ -834,3 +834,31 @@ fn dma_above_4_gib_reaches_the_bus_in_full() {
     assert!(!isp.dma_write(0xffff_ffff_ffff_fffe, &b));
     assert_eq!(*probe.0.lock().unwrap(), [0x1_2345_6000, 0xffff_ffff_ffff_f000]);
 }
+
+/// A copy-on-write disk's changes leave with the overlay export and come
+/// back with the import, undoing what was written in between; the image is
+/// never written.
+#[test]
+fn overlays_export_and_import() {
+    let img = image("cow", 16);
+    let dir = std::env::temp_dir().join(format!("iris-isp1040-cow-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let r = Rig::bare();
+    let overlay = dir.join("live.overlay");
+    r.isp.attach_device(1, img.to_str().unwrap(), false, Vec::new(), true, Some(overlay.to_str().unwrap())).unwrap();
+    let write = |fill: u8| {
+        let cdb = [0x2a, 0, 0, 0, 0, 3, 0, 0, 1, 0];
+        assert_eq!(r.isp.scsi(1, &cdb, Some(vec![fill; BLOCK_SIZE])).1, 0);
+    };
+    let read = || r.isp.scsi(1, &[0x28, 0, 0, 0, 0, 3, 0, 0, 1, 0], None).0[0];
+    write(0x11);
+    let saved = r.isp.export_overlays(&dir).unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].0, 1);
+    write(0x22);
+    assert_eq!(read(), 0x22);
+    r.isp.import_overlays(&dir, &saved).unwrap();
+    assert_eq!(read(), 0x11, "the import undid the later write");
+    assert!(std::fs::read(&img).unwrap().iter().all(|&b| b == 0), "the image is untouched");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
