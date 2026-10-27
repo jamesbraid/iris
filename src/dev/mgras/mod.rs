@@ -584,6 +584,12 @@ impl Mgras {
         unsafe { &*self.front.get() }
     }
 
+    /// Whether a "not modelled yet" report containing `what` was made.
+    #[cfg(test)]
+    pub(crate) fn noted(&self, what: &str) -> bool {
+        self.unhandled.lock().iter().any(|n| n.contains(what))
+    }
+
     fn note(&self, what: String) {
         let mut u = self.unhandled.lock();
         if u.len() < 256 && u.insert(what.clone()) {
