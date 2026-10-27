@@ -806,6 +806,107 @@ impl Inner {
     }
 }
 
+/// The registers, the engines and the UST counter. Times are kept relative
+/// to the moment of the save and resume from the moment of the load, so a
+/// restored engine carries on from where its sample clock was. A running
+/// status schedule gets a new timer thread.
+impl crate::traits::Saveable for Rad1 {
+    fn save_state(&self) -> toml::Value {
+        use crate::snapshot::{hex_u32, hex_u64, u32_slice_to_toml, u64_slice_to_toml};
+        let now = self.now();
+        let s = self.state.lock().unwrap();
+        let rel = |t: i64| toml::Value::Integer(t - now);
+        let mut t = toml::map::Map::new();
+        t.insert("startup".into(), u32_slice_to_toml(&s.startup));
+        t.insert("subcode".into(), u64_slice_to_toml(&s.subcode));
+        t.insert("dma_bank".into(), u32_slice_to_toml(&s.dma_bank));
+        t.insert("sample_pos".into(), u32_slice_to_toml(&s.sample_pos));
+        t.insert("analog_out_en".into(), hex_u32(s.analog_out_en));
+        t.insert("status_dma_ctrl".into(), hex_u32(s.status_dma_ctrl));
+        t.insert("status_running".into(), toml::Value::Boolean(s.status_running));
+        let chans = s.chan.iter().map(|c| {
+            let mut m = toml::map::Map::new();
+            m.insert("running".into(), toml::Value::Boolean(c.running));
+            m.insert("base".into(), hex_u64(c.base));
+            m.insert("len".into(), hex_u64(c.len));
+            m.insert("offset".into(), hex_u64(c.offset));
+            m.insert("start_rel_ns".into(), rel(c.start_ns));
+            m.insert("frames".into(), hex_u64(c.frames));
+            toml::Value::Table(m)
+        });
+        t.insert("chan".into(), toml::Value::Array(chans.collect()));
+        t.insert("ust_count".into(), hex_u32(s.ust_count));
+        t.insert("ust_phase".into(), toml::Value::Integer(s.ust_phase));
+        t.insert("ust_enabled".into(), toml::Value::Boolean(s.ust_enabled));
+        t.insert("ust_armed".into(), toml::Value::Boolean(s.ust_armed));
+        t.insert("ust_last_rel_ns".into(), rel(s.ust_last_ns));
+        t.insert("status_interval".into(), hex_u32(s.status_interval));
+        t.insert("status_start_rel_ns".into(), rel(s.status_start_ns));
+        t.insert("status_done".into(), hex_u64(s.status_done));
+        t.insert("status_cursor".into(), hex_u32(s.status_cursor));
+        t.insert("status_slots".into(), hex_u32(s.status_slots));
+        toml::Value::Table(t)
+    }
+
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        use crate::snapshot::{get_field, load_u32_slice, load_u64_slice, toml_bool, toml_u32, toml_u64};
+        let now = self.now();
+        let mut s = self.state.lock().unwrap();
+        let gen = s.status_gen + 1;
+        *s = State::new(now);
+        s.status_gen = gen;
+        let at = |v: &toml::Value, k: &str| now + get_field(v, k).and_then(|x| x.as_integer()).unwrap_or(0);
+        let b = |v: &toml::Value, k: &str| get_field(v, k).and_then(toml_bool).unwrap_or(false);
+        let d = |v: &toml::Value, k: &str| get_field(v, k).and_then(toml_u32).unwrap_or(0);
+        let q = |v: &toml::Value, k: &str| get_field(v, k).and_then(toml_u64).unwrap_or(0);
+        if let Some(a) = get_field(v, "startup") {
+            load_u32_slice(a, &mut s.startup);
+        }
+        if let Some(a) = get_field(v, "subcode") {
+            load_u64_slice(a, &mut s.subcode);
+        }
+        if let Some(a) = get_field(v, "dma_bank") {
+            load_u32_slice(a, &mut s.dma_bank);
+        }
+        if let Some(a) = get_field(v, "sample_pos") {
+            load_u32_slice(a, &mut s.sample_pos);
+        }
+        s.analog_out_en = d(v, "analog_out_en");
+        s.status_dma_ctrl = d(v, "status_dma_ctrl");
+        s.status_running = b(v, "status_running");
+        if let Some(toml::Value::Array(cs)) = get_field(v, "chan") {
+            for (c, m) in s.chan.iter_mut().zip(cs) {
+                *c = Chan {
+                    running: b(m, "running"),
+                    base: q(m, "base"),
+                    len: q(m, "len"),
+                    offset: q(m, "offset"),
+                    start_ns: at(m, "start_rel_ns"),
+                    frames: q(m, "frames"),
+                };
+            }
+        }
+        s.ust_count = d(v, "ust_count");
+        s.ust_phase = get_field(v, "ust_phase").and_then(|x| x.as_integer()).unwrap_or(0);
+        s.ust_enabled = b(v, "ust_enabled");
+        s.ust_armed = b(v, "ust_armed");
+        s.ust_last_ns = at(v, "ust_last_rel_ns");
+        s.status_interval = d(v, "status_interval");
+        s.status_start_ns = at(v, "status_start_rel_ns");
+        s.status_done = q(v, "status_done");
+        s.status_cursor = d(v, "status_cursor");
+        s.status_slots = d(v, "status_slots");
+        if s.status_running && self.fake_ns.load(Ordering::Relaxed) == i64::MIN {
+            let me = self.me.clone();
+            std::thread::Builder::new()
+                .name("rad1-status".into())
+                .spawn(move || Inner::status_thread(me, gen))
+                .ok();
+        }
+        Ok(())
+    }
+}
+
 impl PciBusDevice for Rad1 {
     fn config(&self) -> &PciConfig {
         &self.inner.pci
