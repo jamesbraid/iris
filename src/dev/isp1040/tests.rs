@@ -620,13 +620,15 @@ fn an_absent_lun_on_a_present_target_answers_as_scsi_says() {
 }
 
 #[test]
-fn an_opcode_without_a_length_rule_is_sized_by_its_descriptors() {
+fn an_opcode_without_a_length_rule_moves_nothing() {
     let r = Rig::with_disk("unsized", 1, 64);
     r.init_rings(4, 4);
-    // The target model rejects the opcode, so nothing moves; the residual is
-    // what the descriptors named, which only a walk of them can know.
+    // No buffer is offered to the target; the residual is what the
+    // descriptors named.
+    r.mem.put(BUF, &[0x5a; 96]);
     r.put_entry(0, &request(0x60, 1, &[0xee, 0, 0, 0, 0, 0], &[(BUF, 64), (BUF + 64, 32)]));
     r.doorbell(1);
+    assert_eq!(r.mem.get(BUF, 96), vec![0x5a; 96], "the buffer is untouched");
     let s = r.status(0);
     assert_eq!(g16(&s, 8), 0x02 | SCSI_STATUS_SENSE_VALID);
     assert_eq!(g16(&s, 10), IOCB_COMPLETE);
