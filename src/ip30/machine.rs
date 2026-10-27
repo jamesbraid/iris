@@ -143,19 +143,21 @@ impl CachedFlashLines {
         }
         let base = addr & !(CACHE_LINE - 1);
         let mut lines = self.lines.lock().unwrap();
-        if !lines.contains_key(&base) {
-            let mut words = [0u64; (CACHE_LINE / 8) as usize];
-            let r = self.bus.read_block(base, &mut words);
-            if r != BUS_OK {
-                return Some(r);
+        let line = match lines.entry(base) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let mut words = [0u64; (CACHE_LINE / 8) as usize];
+                let r = self.bus.read_block(base, &mut words);
+                if r != BUS_OK {
+                    return Some(r);
+                }
+                let mut line = [0u8; CACHE_LINE as usize];
+                for (chunk, w) in line.chunks_mut(8).zip(words) {
+                    chunk.copy_from_slice(&w.to_be_bytes());
+                }
+                e.insert(line)
             }
-            let mut line = [0u8; CACHE_LINE as usize];
-            for (chunk, w) in line.chunks_mut(8).zip(words) {
-                chunk.copy_from_slice(&w.to_be_bytes());
-            }
-            lines.insert(base, line);
-        }
-        let line = lines.get_mut(&base).unwrap();
+        };
         let at = (addr & (CACHE_LINE - 1)) as usize;
         line[at..at + n].copy_from_slice(&val.to_be_bytes()[8 - n..]);
         Some(BUS_OK)

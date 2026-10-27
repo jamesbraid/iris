@@ -139,7 +139,7 @@ impl HeartMemory {
         let mut start = [0u64; BANKS];
         let mut total = 0u64;
         for (i, &s) in sizes.iter().enumerate() {
-            if s != 0 && (s < 64 << 20 || s > 2 << 30 || !s.is_power_of_two()) {
+            if s != 0 && (!(64 << 20..=2 << 30).contains(&s) || !s.is_power_of_two()) {
                 return Err(format!("HEART bank {i} capacity must be 0, 64M, 128M, 256M, 512M, 1G or 2G"));
             }
             start[i] = total;
@@ -266,14 +266,14 @@ impl HeartMemory {
     /// and then nothing is written.
     pub fn cpu_write(&mut self, addr: u64, n: usize, val: u64) -> bool {
         let mut at = [Decode::None; 8];
-        for k in 0..n {
-            at[k] = self.decode(addr + k as u64);
-            if at[k] == Decode::None {
+        for (k, d) in at[..n].iter_mut().enumerate() {
+            *d = self.decode(addr + k as u64);
+            if *d == Decode::None {
                 return false;
             }
         }
-        for k in 0..n {
-            if let Decode::Ram(o) = at[k] {
+        for (k, d) in at[..n].iter().enumerate() {
+            if let Decode::Ram(o) = *d {
                 self.set_byte(o, (val >> (8 * (n - 1 - k))) as u8);
                 self.touch(o);
             }

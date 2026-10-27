@@ -151,6 +151,9 @@ impl Regs {
     }
 }
 
+/// Told of a link reset with the widget at the far end.
+type LinkResetHook = Box<dyn Fn(u8) + Send + Sync>;
+
 pub struct Xbow {
     regs: Mutex<Regs>,
     revision: u32,
@@ -160,7 +163,7 @@ pub struct Xbow {
     heart: Mutex<Option<Arc<dyn XioInterruptSink>>>,
     /// Told of a link reset, with the widget, once the switch's own state
     /// has settled: the widget at the far end resets too.
-    on_link_reset: Mutex<Option<Box<dyn Fn(u8) + Send + Sync>>>,
+    on_link_reset: Mutex<Option<LinkResetHook>>,
     unsupported: Mutex<Vec<(u32, u8, bool)>>,
 }
 
