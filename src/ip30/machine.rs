@@ -71,6 +71,108 @@ const XBOW_REVISION: u32 = 4;
 /// Where the CPU was at the end of its last batch, for the unmapped log.
 static LAST_PC: AtomicU64 = AtomicU64::new(0);
 
+/// The boot flash window, both chip selects, as the processor addresses it.
+const BOOT_FLASH: std::ops::Range<u64> = 0x1fc0_0000..0x2000_0000;
+/// An R10000 secondary cache line.
+const CACHE_LINE: u64 = 128;
+
+/// The CPU's cached view of the bus: what the cache model reaches, while
+/// uncached accesses go to the bus directly.
+///
+/// The PROM runs cached from the boot flash and keeps its initialised data
+/// there, storing to its own variables at their flash addresses. On an
+/// R10000 a cached store allocates the line in the write-back cache, dirty
+/// exclusive, and later cached loads hit it; the PROM never has the line
+/// written back, the same pattern as firmware that keeps its working data
+/// in the cache before memory exists. Nothing reaches the Bridge, whose
+/// flash port refuses anything but a 16-bit write.
+///
+/// Approximation: iris's R10000 cache model passes every cached access to
+/// memory, so the dirty lines live here instead. The first cached store to a
+/// flash line copies the line in; from then on cached loads and stores of it
+/// use the copy, which is never written back or evicted. Uncached accesses
+/// always reach the flash. Reset empties it. What the hardware does if such
+/// a line is ever written back is not modelled.
+pub struct CachedFlashLines {
+    bus: Arc<dyn BusDevice>,
+    lines: Mutex<std::collections::HashMap<u64, [u8; CACHE_LINE as usize]>>,
+}
+
+impl CachedFlashLines {
+    pub fn new(bus: Arc<dyn BusDevice>) -> Self {
+        Self { bus, lines: Mutex::new(std::collections::HashMap::new()) }
+    }
+
+    /// Forget every line, as a reset loses the cache's contents.
+    pub fn clear(&self) {
+        self.lines.lock().unwrap().clear();
+    }
+
+    /// Bytes `addr..addr + n` of a held line, big-endian, or `None` if the
+    /// line is not held.
+    fn load(&self, addr: u64, n: usize) -> Option<u64> {
+        if !BOOT_FLASH.contains(&addr) {
+            return None;
+        }
+        let lines = self.lines.lock().unwrap();
+        let line = lines.get(&(addr & !(CACHE_LINE - 1)))?;
+        let at = (addr & (CACHE_LINE - 1)) as usize;
+        Some(line[at..at + n].iter().fold(0, |v, &b| v << 8 | b as u64))
+    }
+
+    /// Store into the line, filling it from the flash first. `None`: not a
+    /// flash address.
+    fn store(&self, addr: u64, n: usize, val: u64) -> Option<u32> {
+        if !BOOT_FLASH.contains(&addr) {
+            return None;
+        }
+        let base = addr & !(CACHE_LINE - 1);
+        let mut lines = self.lines.lock().unwrap();
+        if !lines.contains_key(&base) {
+            let mut words = [0u64; (CACHE_LINE / 8) as usize];
+            let r = self.bus.read_block(base, &mut words);
+            if r != BUS_OK {
+                return Some(r);
+            }
+            let mut line = [0u8; CACHE_LINE as usize];
+            for (chunk, w) in line.chunks_mut(8).zip(words) {
+                chunk.copy_from_slice(&w.to_be_bytes());
+            }
+            lines.insert(base, line);
+        }
+        let line = lines.get_mut(&base).unwrap();
+        let at = (addr & (CACHE_LINE - 1)) as usize;
+        line[at..at + n].copy_from_slice(&val.to_be_bytes()[8 - n..]);
+        Some(BUS_OK)
+    }
+}
+
+macro_rules! cached_access {
+    ($read:ident, $write:ident, $r:ident, $t:ty, $n:expr) => {
+        fn $read(&self, addr: u64) -> $r {
+            match self.load(addr, $n) {
+                Some(v) => $r::ok(v as $t),
+                None => self.bus.$read(addr),
+            }
+        }
+        fn $write(&self, addr: u64, val: $t) -> u32 {
+            self.store(addr, $n, val as u64).unwrap_or_else(|| self.bus.$write(addr, val))
+        }
+    };
+}
+
+impl BusDevice for CachedFlashLines {
+    cached_access!(read8, write8, BusRead8, u8, 1);
+    cached_access!(read16, write16, BusRead16, u16, 2);
+    cached_access!(read32, write32, BusRead32, u32, 4);
+    cached_access!(read64, write64, BusRead64, u64, 8);
+
+    #[cfg(feature = "jitv2")]
+    fn gen_ptr(&self, addr: u64) -> *const AtomicU64 {
+        self.bus.gen_ptr(addr)
+    }
+}
+
 /// What an address is, on the processor's side of HEART.
 enum Target {
     LowRam(usize),
@@ -355,6 +457,7 @@ impl crate::irq::InterruptController for BridgeWire {
 pub struct OctaneMachine {
     pub bus: Arc<Ip30Bus>,
     cpu: Arc<dyn CpuDevice>,
+    flash_lines: Arc<CachedFlashLines>,
     timer_manager: Arc<TimerManager>,
     running: Arc<AtomicBool>,
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -443,7 +546,8 @@ impl OctaneMachine {
 
         let timer_manager = Arc::new(TimerManager::new());
         let count_hz = cfg.clock.fixed_mhz.map_or(OCTANE_COUNT_HZ, |mhz| (mhz * 1_000_000.0) as u64);
-        let cpu = Self::build_cpu(bus.clone(), &timer_manager, count_hz);
+        let flash_lines = Arc::new(CachedFlashLines::new(bus.clone()));
+        let cpu = Self::build_cpu(bus.clone(), flash_lines.clone(), &timer_manager, count_hz);
 
         #[cfg(feature = "jitv2")]
         {
@@ -504,6 +608,7 @@ impl OctaneMachine {
         Ok(Self {
             bus,
             cpu,
+            flash_lines,
             timer_manager,
             running: Arc::new(AtomicBool::new(false)),
             threads: Vec::new(),
@@ -601,10 +706,12 @@ impl OctaneMachine {
         }
     }
 
-    fn build_cpu(sysad: Arc<dyn BusDevice>, tm: &Arc<TimerManager>, count_hz: u64) -> Arc<dyn CpuDevice> {
+    fn build_cpu(sysad: Arc<dyn BusDevice>, cached: Arc<CachedFlashLines>, tm: &Arc<TimerManager>, count_hz: u64) -> Arc<dyn CpuDevice> {
         let cfg = MipsCpuConfig::for_model::<R10000ShadowCache>();
         let tlb = MipsTlb::new(cfg.tlb_entries);
         let mut exec: MipsExecutor<MipsTlb, R10000ShadowCache> = MipsExecutor::new(sysad, tlb, &cfg);
+        // Cached accesses see the PROM's dirty flash lines; see `CachedFlashLines`.
+        exec.cache = R10000ShadowCache::from(cached as Arc<dyn BusDevice>);
         exec.core.set_timer_manager(tm.clone());
         exec.core.set_count_hz(count_hz);
         exec.core.reset_prid = OCTANE_PRID;
@@ -643,6 +750,7 @@ impl OctaneMachine {
         self.stop();
         crate::traits::Resettable::power_on(&*self.cpu);
         self.bus.power_on();
+        self.flash_lines.clear();
         self.bridge.reset();
         self.ioc3.reset();
     }
@@ -759,6 +867,32 @@ mod tests {
         bridge.attach_flash(Arc::new(RawFlash::new(prom, FLASH_SIZE as usize)), FLASH_SIZE as u32);
         b.attach_widget(WIDGET_BRIDGE, bridge, false);
         b
+    }
+
+    /// The PROM stores to its own variables at their cached flash addresses.
+    /// Through the CPU's cache the store completes and a later cached load
+    /// sees it; the flash, read uncached, still holds the image, and a reset
+    /// forgets the line.
+    #[test]
+    fn cached_stores_to_the_flash_stay_in_the_cache() {
+        use crate::cpu::mips_cache_v2::MipsCache;
+        let mut prom = vec![0u8; 0x2000];
+        prom[0x1140..0x1150].copy_from_slice(&[0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let flash: Arc<dyn BusDevice> = Arc::new(bus(&prom));
+        let lines = Arc::new(CachedFlashLines::new(flash.clone()));
+        let cache = R10000ShadowCache::from(lines.clone() as Arc<dyn BusDevice>);
+        let (va, pa) = (0xffff_ffff_9fc0_1148, 0x1fc0_1148);
+
+        assert_eq!(flash.write32(pa, 1), BUS_ERR, "the Bridge's flash port refuses a 4-byte write");
+        assert_eq!(cache.write::<4>(va, pa, 1), BUS_OK, "a cached store completes");
+        assert_eq!(cache.read::<4>(va, pa).data, 1, "a later cached load sees it");
+        assert_eq!(cache.read::<4>(va - 8, pa - 8).data, 0xffff_ffff, "the rest of the line is the flash's");
+        assert_eq!(cache.read::<8>(va, pa).data, 0x0000_0001_0000_0001, "wider loads see the line too");
+        assert_eq!(flash.read32(pa).data, 0, "the flash, read uncached, is untouched");
+        assert_eq!(cache.read::<4>(va + 0x80, pa + 0x80).data, 0, "the next line is not held");
+
+        lines.clear();
+        assert_eq!(cache.read::<4>(va, pa).data, 0, "reset forgets the line");
     }
 
     #[test]
