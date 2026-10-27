@@ -188,17 +188,38 @@ pub trait PciBusDevice: Send + Sync {
     fn connect_dma(&self, _dma: std::sync::Arc<dyn PciDma>) {}
 }
 
+/// How a bus master's access ended.
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PciDmaStatus {
+    Ok,
+    /// Some of the bytes had no target: reads return zero for them and
+    /// writes drop them. A bridge may also log it and raise its error
+    /// interrupt.
+    MasterAbort,
+}
+
+impl PciDmaStatus {
+    pub fn is_ok(self) -> bool {
+        self == PciDmaStatus::Ok
+    }
+}
+
 /// Memory as a bus master reaches it. The bridge decides what a PCI address
 /// is and in which order its bytes arrive; the function sees bytes at bus
 /// addresses, as it would on the bus.
+///
+/// A function calls only the object `connect_dma` gave it and never learns
+/// whether it is shared. The O2's MACE hands every function one object (its
+/// translation is fixed); a bridge whose translation depends on the
+/// mastering device, as the Octane's does, hands each its own.
 pub trait PciDma: Send + Sync {
-    /// `buf.len()` bytes from bus address `addr`. False if any of them is
-    /// not memory; those read as zero.
-    fn dma_read(&self, addr: u32, buf: &mut [u8]) -> bool;
+    /// `buf.len()` bytes from bus address `addr`, 64 bits wide for masters
+    /// that use dual address cycles.
+    fn dma_read(&self, addr: u64, buf: &mut [u8]) -> PciDmaStatus;
 
-    /// `data` to bus address `addr`. False if any of it is not memory;
-    /// those bytes go nowhere.
-    fn dma_write(&self, addr: u32, data: &[u8]) -> bool;
+    /// `data` to bus address `addr`.
+    fn dma_write(&self, addr: u64, data: &[u8]) -> PciDmaStatus;
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::irq::{InterruptController, IrqLine};
 use crate::dev::crime_mem::O2Memory;
-use crate::pci::{PciBusDevice, PciDma, Space};
+use crate::pci::{PciBusDevice, PciDma, PciDmaStatus, Space};
 use crate::snapshot::{get_field, hex_u32, load_u32_slice, toml_u32, u32_slice_to_toml};
 use crate::traits::{BusDevice, BusRead32, BusRead64, Saveable, BUS_OK};
 use crate::ip32::*;
@@ -145,40 +145,40 @@ impl HostMemory {
     }
 
     /// The memory byte bus address `a` reaches, if any.
-    fn locate(m: &O2Memory, a: u32) -> Option<usize> {
-        if a >= PCI_HOST_END {
+    fn locate(m: &O2Memory, a: u64) -> Option<usize> {
+        if a >= PCI_HOST_END as u64 {
             return None;
         }
-        m.dma_offset(a)
+        m.dma_offset(a as u32)
     }
 }
 
 impl PciDma for HostMemory {
-    fn dma_read(&self, addr: u32, buf: &mut [u8]) -> bool {
+    fn dma_read(&self, addr: u64, buf: &mut [u8]) -> PciDmaStatus {
         let m = self.ram.lock().unwrap();
-        let mut ok = true;
+        let mut st = PciDmaStatus::Ok;
         for (k, b) in buf.iter_mut().enumerate() {
-            match Self::locate(&m, addr.wrapping_add(k as u32)) {
+            match Self::locate(&m, addr.wrapping_add(k as u64)) {
                 Some(i) => *b = m[i],
                 None => {
                     *b = 0;
-                    ok = false;
+                    st = PciDmaStatus::MasterAbort;
                 }
             }
         }
-        ok
+        st
     }
 
-    fn dma_write(&self, addr: u32, data: &[u8]) -> bool {
+    fn dma_write(&self, addr: u64, data: &[u8]) -> PciDmaStatus {
         let mut m = self.ram.lock().unwrap();
-        let mut ok = true;
+        let mut st = PciDmaStatus::Ok;
         for (k, &b) in data.iter().enumerate() {
-            match Self::locate(&m, addr.wrapping_add(k as u32)) {
+            match Self::locate(&m, addr.wrapping_add(k as u64)) {
                 Some(i) => m.write(i, &[b]),
-                None => ok = false,
+                None => st = PciDmaStatus::MasterAbort,
             }
         }
-        ok
+        st
     }
 }
 
@@ -555,13 +555,17 @@ mod tests {
         ram.lock().unwrap().write(0x100, &[0x11, 0x22, 0x33, 0x44]);
         let host = HostMemory::new(ram.clone());
         let mut b = [0u8; 4];
-        assert!(host.dma_read(PCI_SWAPPED_VIEW + 0x100, &mut b));
+        assert!(host.dma_read((PCI_SWAPPED_VIEW + 0x100) as u64, &mut b).is_ok());
         assert_eq!(b, [0x11, 0x22, 0x33, 0x44]);
-        assert!(host.dma_read(PCI_NATIVE_VIEW + 0x100, &mut b));
+        assert!(host.dma_read((PCI_NATIVE_VIEW + 0x100) as u64, &mut b).is_ok());
         assert_eq!(b, [0x11, 0x22, 0x33, 0x44]);
-        assert!(host.dma_write(PCI_NATIVE_VIEW + 0x102, &[0xaa, 0xbb]));
+        assert!(host.dma_write((PCI_NATIVE_VIEW + 0x102) as u64, &[0xaa, 0xbb]).is_ok());
         assert_eq!(ram.lock().unwrap().bytes(0x100, 4), [0x11, 0x22, 0xaa, 0xbb]);
-        assert!(!host.dma_read(PCI_HOST_END + 0x100, &mut b), "not host memory");
+        assert_eq!(host.dma_read((PCI_HOST_END + 0x100) as u64, &mut b), PciDmaStatus::MasterAbort,
+            "not host memory");
+        assert_eq!(b, [0; 4]);
+        // A dual-address-cycle address is not folded into the low 4 GB.
+        assert_eq!(host.dma_read(0x1_0000_0100, &mut b), PciDmaStatus::MasterAbort);
         assert_eq!(b, [0; 4]);
     }
 

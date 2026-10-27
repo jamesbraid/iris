@@ -392,7 +392,7 @@ impl Aic7880 {
     /// CDB pointer inside it is `0x0107532c`.
     fn dma_read_bytes(&self, addr: u32, n: usize) -> Vec<u8> {
         let mut b = vec![0u8; n];
-        if !self.dma.get().is_some_and(|d| d.dma_read(addr, &mut b)) {
+        if !self.dma.get().is_some_and(|d| d.dma_read(addr as u64, &mut b).is_ok()) {
             self.dma_miss(addr, false);
         }
         b
@@ -403,7 +403,7 @@ impl Aic7880 {
     }
 
     fn dma_write_bytes(&self, addr: u32, data: &[u8]) {
-        if !self.dma.get().is_some_and(|d| d.dma_write(addr, data)) {
+        if !self.dma.get().is_some_and(|d| d.dma_write(addr as u64, data).is_ok()) {
             self.dma_miss(addr, true);
         }
     }
@@ -548,7 +548,7 @@ impl Aic7880 {
     /// bytes the HIM also uses, so a doorbell whose rings are not memory is
     /// somebody else's bytes and not a doorbell.
     fn is_memory(&self, addr: u32) -> bool {
-        self.dma.get().is_some_and(|d| d.dma_read(addr, &mut [0u8]))
+        self.dma.get().is_some_and(|d| d.dma_read(addr as u64, &mut [0u8]).is_ok())
     }
 
     /// A CDB's length follows from its opcode group. Taking it from the
