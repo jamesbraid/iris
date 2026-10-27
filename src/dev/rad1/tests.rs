@@ -540,3 +540,37 @@ fn rings_at_the_top_of_the_bus_fail_rather_than_wrap() {
     at(&r, 20_000_000);
     assert_eq!(r.status_tick(gen), None, "the schedule stops on the failed slot");
 }
+
+/// While the machine is stopped the card's clock stands still: a ring
+/// does not jump on by the length of the stop.
+#[test]
+fn the_clock_stands_still_while_paused() {
+    let (r, _ram) = dma_card();
+    r.fake_ns.store(i64::MIN, Ordering::Relaxed);
+    start_ust(&r);
+    r.pause();
+    let ust = rd(&r, 0x30);
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(rd(&r, 0x30), ust, "no UST ticks while paused");
+    r.resume();
+    std::thread::sleep(Duration::from_millis(2));
+    let ticks = rd(&r, 0x30).wrapping_sub(ust);
+    // About 2 ms of 960 ns ticks, short of the 22 ms slept in all.
+    assert!(ticks > 0 && ticks < 20_000, "{ticks} ticks");
+}
+
+/// A continuous status schedule's thread ends with the card.
+#[test]
+fn dropping_the_card_joins_its_status_thread() {
+    let (r, _ram) = dma_card();
+    r.fake_ns.store(i64::MIN, Ordering::Relaxed);
+    wr(&r, 0x500, 0x30_0000);
+    wr(&r, 0x504, 0xffff_c078);
+    wr(&r, 0x4b4, 0x30_0000);
+    wr(&r, 0x4bc, 0xffff_c078);
+    wr(&r, 0x5c, 0x40003 | (3300 << 2));
+    assert_eq!(r.threads.lock().unwrap().len(), 1);
+    let weak = Arc::downgrade(&r.inner);
+    drop(r);
+    assert!(weak.upgrade().is_none());
+}
