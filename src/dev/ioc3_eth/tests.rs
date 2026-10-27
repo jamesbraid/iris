@@ -652,3 +652,33 @@ fn dma_above_4_gib_reaches_the_bus_in_full() {
     assert!(!dma_write(&probe, 0xffff_ffff_ffff_fffe, &b));
     assert_eq!(*probe.0.lock().unwrap(), [0x1_2345_6000, 0xffff_ffff_ffff_f000]);
 }
+
+/// A receive buffer the guest put at the top of the 64-bit space: the
+/// header and frame addresses would wrap, so the frame is dropped like any
+/// refused transfer and the index stays.
+#[test]
+fn a_receive_buffer_at_the_top_of_the_bus_drops_the_frame() {
+    let mut t = rig();
+    t.rx_setup(2);
+    t.put(RX_RING, &0xffff_ffff_ffff_fff0u64.to_be_bytes());
+    t.deliver(&frame(STATION, 60));
+    assert_eq!(t.r(RX_CONSUME), 0);
+    // The next buffer is reachable again.
+    t.put(RX_RING, &u64::from(RX_BUFS).to_be_bytes());
+    t.deliver(&frame(STATION, 60));
+    assert_eq!(t.r(RX_CONSUME), 8);
+}
+
+/// A transmit ring based at the top of the space: a descriptor whose
+/// address would wrap stops the walk on it rather than overflowing.
+#[test]
+fn a_transmit_ring_at_the_top_of_the_bus_stops_the_walk() {
+    let mut t = rig();
+    t.w(TX_RING_HI, 0xffff_ffff);
+    t.w(TX_RING_LO, 0xffff_c000 | TX_RING_SEL);
+    t.w(TX_CONSUME, 0x8000);
+    t.w(MAC_CONTROL, MCR_TX_DMA_EN | MCR_TX_EN);
+    t.w(TX_PRODUCE, 0x8080);
+    assert_eq!(t.r(TX_CONSUME) & TX_CONSUME_MASK, 0x8000, "index stays on the entry");
+    assert!(t.sent.pop().is_err());
+}
