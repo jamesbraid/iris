@@ -455,10 +455,13 @@ impl Core {
     /// A machine reset: the chip as at power-on (no firmware, no queues),
     /// its interrupt dropped. The disks stay attached.
     pub fn reset(&self) {
-        *self.st.lock().unwrap() = State::new();
-        if let Some(irq) = self.irq.get() {
-            irq.set(false);
-        }
+        // As the guest's soft reset: wait out the command in flight, whose
+        // completion then finds a new epoch and is dropped.
+        let st = self.st.lock().unwrap();
+        let mut st = self.settle(st);
+        st.reset();
+        drop(st);
+        self.sync_irq();
     }
 
     /// Wire the adapter's interrupt pin to `line` (a level).
