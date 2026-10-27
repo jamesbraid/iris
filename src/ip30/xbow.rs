@@ -468,6 +468,90 @@ impl crate::traits::Resettable for Xbow {
     }
 }
 
+/// The switch's registers and each link's state. Which ports have a board
+/// is the machine's build, not state, so a load keeps this Crossbow's. The
+/// interrupt line to HEART is not driven: HEART's own state carries the
+/// bit, and a load restores HEART after the Crossbow.
+impl crate::traits::Saveable for Xbow {
+    fn save_state(&self) -> toml::Value {
+        use crate::snapshot::{hex_u32, hex_u8, u32_slice_to_toml};
+        let r = self.regs.lock().unwrap();
+        let mut t = toml::map::Map::new();
+        for (k, v) in [
+            ("status", r.status),
+            ("err_upper", r.err_upper),
+            ("err_lower", r.err_lower),
+            ("control", r.control),
+            ("packet_timeout", r.packet_timeout),
+            ("int_upper", r.int_upper),
+            ("int_lower", r.int_lower),
+            ("err_cmd", r.err_cmd),
+            ("llp_control", r.llp_control),
+            ("arb_reload", r.arb_reload),
+            ("perf_a", r.perf_a),
+            ("perf_b", r.perf_b),
+            ("nic", r.nic),
+        ] {
+            t.insert(k.into(), hex_u32(v));
+        }
+        for (k, v) in [
+            ("link_control", &r.link_control),
+            ("link_status", &r.link_status),
+            ("link_arb_upper", &r.link_arb_upper),
+            ("link_arb_lower", &r.link_arb_lower),
+            ("link_aux_status", &r.link_aux_status),
+            ("link_event", &r.link_event),
+        ] {
+            t.insert(k.into(), u32_slice_to_toml(v));
+        }
+        for (k, v) in [("alive", r.alive), ("came_up", r.came_up), ("initializing", r.initializing), ("eight_bit", r.eight_bit)] {
+            t.insert(k.into(), hex_u8(v));
+        }
+        t.insert("interrupt_asserted".into(), toml::Value::Boolean(r.interrupt_asserted));
+        toml::Value::Table(t)
+    }
+
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        use crate::snapshot::{get_field, load_u32_slice, toml_bool, toml_u32, toml_u8};
+        let mut r = self.regs.lock().unwrap();
+        *r = Regs::reset(*self.present.lock().unwrap());
+        let d = |k: &str, def: u32| get_field(v, k).and_then(toml_u32).unwrap_or(def);
+        r.status = d("status", r.status);
+        r.err_upper = d("err_upper", r.err_upper);
+        r.err_lower = d("err_lower", r.err_lower);
+        r.control = d("control", r.control);
+        r.packet_timeout = d("packet_timeout", r.packet_timeout);
+        r.int_upper = d("int_upper", r.int_upper);
+        r.int_lower = d("int_lower", r.int_lower);
+        r.err_cmd = d("err_cmd", r.err_cmd);
+        r.llp_control = d("llp_control", r.llp_control);
+        r.arb_reload = d("arb_reload", r.arb_reload);
+        r.perf_a = d("perf_a", r.perf_a);
+        r.perf_b = d("perf_b", r.perf_b);
+        r.nic = d("nic", r.nic);
+        let regs = &mut *r;
+        for (k, dst) in [
+            ("link_control", &mut regs.link_control),
+            ("link_status", &mut regs.link_status),
+            ("link_arb_upper", &mut regs.link_arb_upper),
+            ("link_arb_lower", &mut regs.link_arb_lower),
+            ("link_aux_status", &mut regs.link_aux_status),
+            ("link_event", &mut regs.link_event),
+        ] {
+            if let Some(a) = get_field(v, k) {
+                load_u32_slice(a, dst);
+            }
+        }
+        let b = |k: &str, def: u8| get_field(v, k).and_then(toml_u8).unwrap_or(def);
+        r.alive = b("alive", r.alive);
+        r.came_up = b("came_up", r.came_up);
+        r.initializing = b("initializing", 0);
+        r.eight_bit = b("eight_bit", 0);
+        r.interrupt_asserted = get_field(v, "interrupt_asserted").and_then(toml_bool).unwrap_or(false);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,6 +618,24 @@ mod tests {
         // An empty port stays down.
         assert!(x.write(LINK_BASE + LINK_STRIDE * 3 + LINK_RESET + 4, 4, 0));
         assert!(!x.carries(11));
+    }
+
+    #[test]
+    fn save_load_round_trip() {
+        use crate::traits::Saveable;
+        let x = octane();
+        assert!(x.write(INT_UPPER + 4, 4, (0x2a << 24) | (8 << 16)));
+        assert!(x.write(INT_LOWER + 4, 4, 0x1234));
+        assert!(x.write(LINK_BASE + LINK_STRIDE * 7 + LINK_CONTROL + 4, 4, LINK_ALIVE_ENABLE as u64));
+        assert!(x.write(LINK_BASE + LINK_STRIDE * 7 + LINK_RESET + 4, 4, 0));
+        assert_eq!(x.read(0x00, 4), None, "an access error latched in status");
+        let v1 = x.save_state();
+        let y = octane();
+        y.load_state(&v1).unwrap();
+        assert_eq!(v1, y.save_state(), "Xbow save_state mismatch after load_state round-trip");
+        assert_eq!(y.read(INT_LOWER + 4, 4), Some(0x1234));
+        assert!(y.carries(15) && !y.carries(11));
+        assert_eq!(x.read(STATUS + 4, 4), y.read(STATUS + 4, 4));
     }
 
     #[test]
