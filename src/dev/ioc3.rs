@@ -433,6 +433,76 @@ pub mod onewire {
             }
         }
     }
+
+    /// The transaction in progress: which parts are still selected, the
+    /// phase, the bits collected and any reply being streamed. The parts
+    /// themselves are the board's build and stay as constructed.
+    impl Bus {
+        pub fn save_bus(&self) -> toml::Value {
+            use crate::snapshot::{hex_u32, hex_u8, u8_slice_to_toml};
+            let (phase, a, b) = match self.phase {
+                Phase::Rom => ("rom", 0, 0),
+                Phase::ReadRom(i) => ("read_rom", i, 0),
+                Phase::Match(i) => ("match", i, 0),
+                Phase::Search { bit, step } => ("search", bit, step as usize),
+                Phase::Func => ("func", 0, 0),
+                Phase::Addr => ("addr", 0, 0),
+                Phase::Stream(i) => ("stream", i, 0),
+                Phase::Dead => ("dead", 0, 0),
+            };
+            let mut t = toml::map::Map::new();
+            t.insert("phase".into(), toml::Value::String(phase.into()));
+            t.insert("phase_a".into(), toml::Value::Integer(a as i64));
+            t.insert("phase_b".into(), toml::Value::Integer(b as i64));
+            t.insert("sel".into(), toml::Value::Array(self.sel.iter().map(|&s| toml::Value::Boolean(s)).collect()));
+            t.insert("replies".into(), toml::Value::Array(self.replies.iter().map(|r| u8_slice_to_toml(r)).collect()));
+            t.insert("acc".into(), hex_u32(self.acc));
+            t.insert("nbits".into(), hex_u32(self.nbits));
+            t.insert("cmd".into(), hex_u8(self.cmd));
+            toml::Value::Table(t)
+        }
+
+        /// Put back what [`Bus::save_bus`] gave, onto a bus with the same parts.
+        pub fn load_bus(&mut self, v: &toml::Value) -> Result<(), String> {
+            use crate::snapshot::{get_field, toml_u32, toml_u8};
+            let n = |k: &str| get_field(v, k).and_then(|x| x.as_integer()).unwrap_or(0) as usize;
+            let (a, b) = (n("phase_a"), n("phase_b"));
+            self.phase = match get_field(v, "phase").and_then(|x| x.as_str()).unwrap_or("dead") {
+                "rom" => Phase::Rom,
+                "read_rom" => Phase::ReadRom(a),
+                "match" => Phase::Match(a),
+                "search" => Phase::Search { bit: a, step: b as u8 },
+                "func" => Phase::Func,
+                "addr" => Phase::Addr,
+                "stream" => Phase::Stream(a),
+                "dead" => Phase::Dead,
+                other => return Err(format!("onewire: unknown saved phase {other}")),
+            };
+            self.sel = vec![false; self.parts.len()];
+            if let Some(toml::Value::Array(sel)) = get_field(v, "sel") {
+                if sel.len() != self.parts.len() {
+                    return Err(format!("onewire: saved bus has {} parts, this one {}", sel.len(), self.parts.len()));
+                }
+                for (dst, x) in self.sel.iter_mut().zip(sel) {
+                    *dst = x.as_bool().unwrap_or(false);
+                }
+            }
+            self.replies = match get_field(v, "replies") {
+                Some(toml::Value::Array(rs)) => rs
+                    .iter()
+                    .map(|r| match r {
+                        toml::Value::Array(b) => b.iter().map(|x| toml_u8(x).unwrap_or(0)).collect(),
+                        _ => Vec::new(),
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            self.acc = get_field(v, "acc").and_then(toml_u32).unwrap_or(0);
+            self.nbits = get_field(v, "nbits").and_then(toml_u32).unwrap_or(0);
+            self.cmd = get_field(v, "cmd").and_then(toml_u8).unwrap_or(0);
+            Ok(())
+        }
+    }
 }
 
 /// Text fields of a board record, as the parts' two 32-byte pages hold them.
@@ -2457,6 +2527,303 @@ impl St {
 // The device
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Snapshots
+// ---------------------------------------------------------------------------
+
+/// A deadline as the time left to it, in nanoseconds; none is absent.
+fn put_left(t: &mut toml::map::Map<String, toml::Value>, k: &str, d: Option<Instant>, now: Instant) {
+    if let Some(d) = d {
+        t.insert(k.into(), toml::Value::Integer(d.saturating_duration_since(now).as_nanos() as i64));
+    }
+}
+
+fn put_span(t: &mut toml::map::Map<String, toml::Value>, k: &str, d: Option<Duration>) {
+    if let Some(d) = d {
+        t.insert(k.into(), toml::Value::Integer(d.as_nanos() as i64));
+    }
+}
+
+fn get_span(v: &toml::Value, k: &str) -> Option<Duration> {
+    crate::snapshot::get_field(v, k).and_then(|x| x.as_integer()).map(|n| Duration::from_nanos(n.max(0) as u64))
+}
+
+fn bytes_of(v: &toml::Value, k: &str) -> Vec<u8> {
+    match crate::snapshot::get_field(v, k) {
+        Some(toml::Value::Array(a)) => a.iter().map(|x| crate::snapshot::toml_u8(x).unwrap_or(0)).collect(),
+        _ => Vec::new(),
+    }
+}
+
+impl St {
+    /// Everything but the backends, the configuration and the DMA path,
+    /// which belong to the board. Deadlines are kept as the time left.
+    fn save(&self, now: Instant) -> toml::Value {
+        use crate::snapshot::{hex_u32, hex_u8, u32_slice_to_toml, u8_slice_to_toml};
+        use crate::traits::Saveable;
+        let mut t = toml::map::Map::new();
+        for (k, v) in [
+            ("int_status", self.int_status),
+            ("int_enable", self.int_enable),
+            ("chip_control", self.chip_control),
+            ("microlan", self.microlan),
+            ("pin_control", self.pin_control),
+            ("pin_data", self.pin_data),
+        ] {
+            t.insert(k.into(), hex_u32(v));
+        }
+
+        let o = &self.int_out;
+        let mut io = toml::map::Map::new();
+        io.insert("reg".into(), hex_u32(o.reg));
+        io.insert("active".into(), hex_u32(o.active));
+        io.insert("state".into(), toml::Value::Boolean(o.state));
+        io.insert("pulse_end".into(), toml::Value::Boolean(o.pulse_end));
+        io.insert("square_started".into(), toml::Value::Boolean(o.square_started));
+        put_left(&mut io, "next_ns", o.next, now);
+        t.insert("int_out".into(), toml::Value::Table(io));
+
+        let uarts = self.uart.iter().map(|u| {
+            let mut m = toml::map::Map::new();
+            m.insert("rx".into(), u8_slice_to_toml(&u.rx.iter().copied().collect::<Vec<_>>()));
+            for (k, v) in [
+                ("ier", u.ier), ("lcr", u.lcr), ("mcr", u.mcr), ("scr", u.scr), ("dll", u.dll), ("dlm", u.dlm),
+                ("lsr_err", u.lsr_err), ("msr_delta", u.msr_delta), ("msr_prev", u.msr_prev),
+                ("predivider", u.predivider), ("mcr_afe", u.mcr_afe), ("lsr_test", u.lsr_test), ("msr_test", u.msr_test),
+            ] {
+                m.insert(k.into(), hex_u8(v));
+            }
+            m.insert("fifo".into(), toml::Value::Boolean(u.fifo));
+            m.insert("thr_int".into(), toml::Value::Boolean(u.thr_int));
+            toml::Value::Table(m)
+        });
+        t.insert("uart".into(), toml::Value::Array(uarts.collect()));
+
+        let mut sd = toml::map::Map::new();
+        sd.insert("base_hi".into(), hex_u32(self.sdma.base_hi));
+        sd.insert("base_lo".into(), hex_u32(self.sdma.base_lo));
+        let ports = self.sdma.port.iter().map(|p| {
+            let mut m = toml::map::Map::new();
+            m.insert("reg".into(), u32_slice_to_toml(&p.reg));
+            m.insert("packer".into(), u8_slice_to_toml(&p.packer));
+            m.insert("packed".into(), toml::Value::Integer(p.packed as i64));
+            m.insert("tx_entry".into(), u8_slice_to_toml(&p.tx_entry));
+            m.insert("tx_slot".into(), toml::Value::Integer(p.tx_slot as i64));
+            m.insert("rx_idle_count".into(), hex_u32(p.rx_idle_count));
+            for (k, v) in [
+                ("tx_fetched", p.tx_fetched), ("armed", p.armed), ("drain_pending", p.drain_pending),
+                ("busy", p.busy), ("paused", p.paused), ("tx_delay_irq", p.tx_delay_irq),
+            ] {
+                m.insert(k.into(), toml::Value::Boolean(v));
+            }
+            put_left(&mut m, "rx_deadline_ns", p.rx_deadline, now);
+            put_span(&mut m, "rx_frozen_ns", p.rx_frozen);
+            put_left(&mut m, "tx_delay_deadline_ns", p.tx_delay_deadline, now);
+            put_span(&mut m, "tx_delay_frozen_ns", p.tx_delay_frozen);
+            toml::Value::Table(m)
+        });
+        sd.insert("port".into(), toml::Value::Array(ports.collect()));
+        t.insert("sdma".into(), toml::Value::Table(sd));
+
+        let mut kb = toml::map::Map::new();
+        kb.insert("control".into(), hex_u32(self.kbc.control));
+        let kports = self.kbc.port.iter().map(|p| {
+            let mut m = toml::map::Map::new();
+            m.insert("data".into(), u8_slice_to_toml(&p.data));
+            m.insert("count".into(), toml::Value::Integer(p.count as i64));
+            m.insert("overflow".into(), toml::Value::Boolean(p.overflow));
+            toml::Value::Table(m)
+        });
+        kb.insert("port".into(), toml::Value::Array(kports.collect()));
+        t.insert("kbc".into(), toml::Value::Table(kb));
+
+        let par = &self.par;
+        let mut pm = toml::map::Map::new();
+        pm.insert("addr_hi".into(), u32_slice_to_toml(&par.addr_hi));
+        pm.insert("addr_lo".into(), u32_slice_to_toml(&par.addr_lo));
+        pm.insert("count".into(), u32_slice_to_toml(&par.count));
+        pm.insert("dma_control".into(), hex_u32(par.dma_control));
+        for (k, v) in [("data", par.data), ("control", par.control), ("config_b", par.config_b), ("extended", par.extended)] {
+            pm.insert(k.into(), hex_u8(v));
+        }
+        pm.insert("fifo".into(), u8_slice_to_toml(&par.fifo.iter().copied().collect::<Vec<_>>()));
+        t.insert("parallel".into(), toml::Value::Table(pm));
+
+        let mut rtc = toml::map::Map::new();
+        rtc.insert("clock".into(), self.rtc.dev.save_state());
+        rtc.insert("index".into(), hex_u8(self.rtc.index));
+        rtc.insert("nv".into(), u8_slice_to_toml(&self.rtc.nv));
+        rtc.insert("ext".into(), u8_slice_to_toml(&self.rtc.ext));
+        rtc.insert("xram".into(), u8_slice_to_toml(&self.rtc.xram));
+        t.insert("rtc".into(), toml::Value::Table(rtc));
+
+        // The Ethernet's buffer RAM is all zero until a driver uses it.
+        if self.ssram.iter().any(|&w| w != 0) {
+            t.insert("ssram".into(), u32_slice_to_toml(&self.ssram));
+        }
+        t.insert("microlan_bus".into(), self.ow.save_bus());
+        toml::Value::Table(t)
+    }
+
+    /// Put back what [`St::save`] gave, over a chip at its reset state.
+    fn load(&mut self, v: &toml::Value, now: Instant) -> Result<(), String> {
+        use crate::snapshot::{get_field, load_u32_slice, load_u8_slice, toml_bool, toml_u32, toml_u8};
+        use crate::traits::Saveable;
+        let u32f = |v: &toml::Value, k: &str| get_field(v, k).and_then(toml_u32).unwrap_or(0);
+        let u8f = |v: &toml::Value, k: &str| get_field(v, k).and_then(toml_u8).unwrap_or(0);
+        let bf = |v: &toml::Value, k: &str| get_field(v, k).and_then(toml_bool).unwrap_or(false);
+        let deadline = |v: &toml::Value, k: &str| get_span(v, k).map(|d| now + d);
+        let usz = |v: &toml::Value, k: &str| get_field(v, k).and_then(|x| x.as_integer()).unwrap_or(0) as usize;
+
+        self.reset();
+        self.int_status = u32f(v, "int_status");
+        self.int_enable = u32f(v, "int_enable");
+        self.chip_control = u32f(v, "chip_control");
+        self.microlan = u32f(v, "microlan");
+        self.pin_control = u32f(v, "pin_control");
+        self.pin_data = u32f(v, "pin_data");
+
+        if let Some(io) = get_field(v, "int_out") {
+            self.int_out = IntOut {
+                reg: u32f(io, "reg"),
+                active: u32f(io, "active"),
+                state: bf(io, "state"),
+                pulse_end: bf(io, "pulse_end"),
+                square_started: bf(io, "square_started"),
+                next: deadline(io, "next_ns"),
+            };
+        }
+
+        if let Some(toml::Value::Array(us)) = get_field(v, "uart") {
+            for (u, m) in self.uart.iter_mut().zip(us) {
+                u.rx = bytes_of(m, "rx").into();
+                u.ier = u8f(m, "ier");
+                u.lcr = u8f(m, "lcr");
+                u.mcr = u8f(m, "mcr");
+                u.scr = u8f(m, "scr");
+                u.dll = u8f(m, "dll");
+                u.dlm = u8f(m, "dlm");
+                u.lsr_err = u8f(m, "lsr_err");
+                u.msr_delta = u8f(m, "msr_delta");
+                u.msr_prev = u8f(m, "msr_prev");
+                u.predivider = u8f(m, "predivider");
+                u.mcr_afe = u8f(m, "mcr_afe");
+                u.lsr_test = u8f(m, "lsr_test");
+                u.msr_test = u8f(m, "msr_test");
+                u.fifo = bf(m, "fifo");
+                u.thr_int = bf(m, "thr_int");
+            }
+        }
+
+        if let Some(sd) = get_field(v, "sdma") {
+            self.sdma.base_hi = u32f(sd, "base_hi");
+            self.sdma.base_lo = u32f(sd, "base_lo");
+            if let Some(toml::Value::Array(ps)) = get_field(sd, "port") {
+                for (p, m) in self.sdma.port.iter_mut().zip(ps) {
+                    if let Some(r) = get_field(m, "reg") {
+                        load_u32_slice(r, &mut p.reg);
+                    }
+                    if let Some(r) = get_field(m, "packer") {
+                        load_u8_slice(r, &mut p.packer);
+                    }
+                    if let Some(r) = get_field(m, "tx_entry") {
+                        load_u8_slice(r, &mut p.tx_entry);
+                    }
+                    p.packed = usz(m, "packed").min(ENTRY);
+                    p.tx_slot = usz(m, "tx_slot");
+                    p.rx_idle_count = u32f(m, "rx_idle_count");
+                    p.tx_fetched = bf(m, "tx_fetched");
+                    p.armed = bf(m, "armed");
+                    p.drain_pending = bf(m, "drain_pending");
+                    p.busy = bf(m, "busy");
+                    p.paused = bf(m, "paused");
+                    p.tx_delay_irq = bf(m, "tx_delay_irq");
+                    p.rx_deadline = deadline(m, "rx_deadline_ns");
+                    p.rx_frozen = get_span(m, "rx_frozen_ns");
+                    p.tx_delay_deadline = deadline(m, "tx_delay_deadline_ns");
+                    p.tx_delay_frozen = get_span(m, "tx_delay_frozen_ns");
+                }
+            }
+        }
+
+        if let Some(kb) = get_field(v, "kbc") {
+            self.kbc.control = u32f(kb, "control");
+            if let Some(toml::Value::Array(ps)) = get_field(kb, "port") {
+                for (p, m) in self.kbc.port.iter_mut().zip(ps) {
+                    if let Some(d) = get_field(m, "data") {
+                        load_u8_slice(d, &mut p.data);
+                    }
+                    p.count = usz(m, "count").min(KBC_RX_SLOTS);
+                    p.overflow = bf(m, "overflow");
+                }
+            }
+        }
+
+        if let Some(pm) = get_field(v, "parallel") {
+            let par = &mut self.par;
+            for (k, dst) in [("addr_hi", &mut par.addr_hi), ("addr_lo", &mut par.addr_lo), ("count", &mut par.count)] {
+                if let Some(a) = get_field(pm, k) {
+                    load_u32_slice(a, dst);
+                }
+            }
+            par.dma_control = u32f(pm, "dma_control");
+            par.data = u8f(pm, "data");
+            par.control = u8f(pm, "control");
+            par.config_b = u8f(pm, "config_b");
+            par.extended = u8f(pm, "extended");
+            par.fifo = bytes_of(pm, "fifo").into();
+        }
+
+        if let Some(rtc) = get_field(v, "rtc") {
+            if let Some(c) = get_field(rtc, "clock") {
+                self.rtc.dev.load_state(c)?;
+            }
+            self.rtc.index = u8f(rtc, "index");
+            for (k, dst) in [("nv", &mut self.rtc.nv[..]), ("ext", &mut self.rtc.ext[..]), ("xram", &mut self.rtc.xram[..])] {
+                if let Some(a) = get_field(rtc, k) {
+                    load_u8_slice(a, dst);
+                }
+            }
+            // The file follows the restored RAM, as it follows every write.
+            self.rtc.save();
+        }
+
+        self.ssram.fill(0);
+        if let Some(a) = get_field(v, "ssram") {
+            load_u32_slice(a, &mut self.ssram);
+        }
+        if let Some(b) = get_field(v, "microlan_bus") {
+            self.ow.load_bus(b)?;
+        }
+        Ok(())
+    }
+}
+
+/// The chip's state and its PS/2 controller's. The serial and parallel
+/// backends stay connected: a load changes what the chip holds, not where
+/// its ports go. The SuperIO line is driven to what the state gives; the
+/// Ethernet keeps its own state ([`crate::dev::ioc3_eth::Ioc3Eth`]).
+impl crate::traits::Saveable for Ioc3 {
+    fn save_state(&self) -> toml::Value {
+        let mut t = toml::map::Map::new();
+        t.insert("chip".into(), self.sh.st.lock().unwrap().save(Instant::now()));
+        t.insert("ps2".into(), self.sh.ps2.save_state());
+        toml::Value::Table(t)
+    }
+
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        use crate::snapshot::get_field;
+        if let Some(p) = get_field(v, "ps2") {
+            self.sh.ps2.load_state(p)?;
+        }
+        if let Some(c) = get_field(v, "chip") {
+            self.sh.st.lock().unwrap().load(c, Instant::now())?;
+        }
+        self.sh.sync_superio();
+        Ok(())
+    }
+}
+
 /// A PS/2 device model's "data waiting" line, which tells the chip a
 /// character has arrived.
 struct KbcSink(Weak<Shared>);
@@ -2487,6 +2854,9 @@ struct Shared {
     line_order: Mutex<()>,
     /// A PS/2 character arrived while an access held the chip.
     kbc_dirty: AtomicBool,
+    /// The host side is held off the chip while a snapshot is taken or put
+    /// back; see [`Ioc3::hold`].
+    held: AtomicBool,
 }
 
 impl Shared {
@@ -2588,6 +2958,9 @@ impl Shared {
 
     /// Everything the host side can do between guest accesses.
     fn service(&self) {
+        if self.held.load(Ordering::SeqCst) {
+            return;
+        }
         self.with_st(false, |st, _| {
             let now = Instant::now();
             for p in 0..2 {
@@ -2642,6 +3015,7 @@ impl Ioc3 {
                 eth_level: AtomicBool::new(false),
                 line_order: Mutex::new(()),
                 kbc_dirty: AtomicBool::new(false),
+                held: AtomicBool::new(false),
             }
         });
         Ioc3 { sh }
@@ -2723,6 +3097,14 @@ impl Ioc3 {
     /// milliseconds.
     pub fn service(&self) {
         self.sh.service();
+    }
+
+    /// Hold the host side (typed bytes, the ring engines' timers, the
+    /// interrupt output) off the chip, or let it go again. A machine holds
+    /// it while the CPU is stopped for a snapshot, so nothing changes the
+    /// chip or memory under the save or the load.
+    pub fn hold(&self, held: bool) {
+        self.sh.held.store(held, Ordering::SeqCst);
     }
 
     /// Run [`Ioc3::service`] on a thread until the chip is dropped.
