@@ -513,6 +513,8 @@ pub struct Hq3Engine {
     /// A board-to-host DMA started on the host side, waiting for the raster
     /// engine to be started (xfrcontrol = 9).
     dma_read_pending: Option<u32>,
+    /// After hw/misc/sgi-mgras-raster.c of the qemu-sgi-origami branch
+    /// (BSD-3-Clause).
     /// A board-to-host start runs at once when the raster engine already
     /// has a read armed, and an XFRCONTROL with the read bit starts a
     /// waiting one: the Octane's HQ4 order, where the X server arms the

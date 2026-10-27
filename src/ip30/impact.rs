@@ -2,6 +2,10 @@
 //! an XIO widget, in front of the raster pipeline `dev::mgras` models for
 //! the Indigo2.
 //!
+//! Ported from hw/misc/sgi-mgras.c (the HQ4 XIO front) in
+//! https://github.com/jamesbraid/qemu-sgi-origami (sgi-origami branch),
+//! BSD-3-Clause.
+//!
 //! The Octane boards carry the Indigo2 boards' chips behind the host
 //! interface: the same GE11, RE4, PP1s, display control bus devices,
 //! command grammar and DMA register file. What differs is the front: an

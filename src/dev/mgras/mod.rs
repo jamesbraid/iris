@@ -854,6 +854,7 @@ impl Mgras {
         disp::save_png(path, &out, f.width, f.height)
     }
 
+    /// As in hw/misc/sgi-mgras.c of the qemu-sgi-origami branch (BSD-3-Clause).
     /// Identity for a board outside the Indigo2 (the Octane's XIO boards):
     /// the two board-version bytes, the colormaps' revision registers and
     /// the GE revision, which the readback registers hold from now until
@@ -865,6 +866,8 @@ impl Mgras {
         f.hq.ge_readback = [0, ge_revision];
     }
 
+    /// As in hw/misc/sgi-mgras-raster.c of the qemu-sgi-origami branch
+    /// (BSD-3-Clause).
     /// Start board-to-host DMA in the Octane's HQ4 order (see
     /// `Hq3Engine::kick_starts_read`). Call before the engines start.
     pub fn start_reads_at_kick(&self) {
