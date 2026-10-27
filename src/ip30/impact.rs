@@ -22,7 +22,7 @@
 //! | `0x02C000-0x02FFFF` | raster registers, execute alias   | HQ3 `0x7C000-0x7FFFF`        |
 //! | `0x040000-0x040030` | FIFO thresholds                   | here; the marks to HQ3 `0x50020/4` |
 //! | `0x050000-0x054FFF` | HQ microcode RAM                  | HQ3 `0x40000`                |
-//! | `0x058040-0x058233` | GE11 diagnostic ports             | HQ3 `0x50040-0x50233`        |
+//! | `0x058040-0x058230` | GE11 program download and readback | here                        |
 //! | `0x070000-0x077FFF` | display control bus               | HQ3 `0x60000` (I2C here)     |
 //! | `0x120400`          | context image, then command words | HQ3 user command FIFO        |
 //! | `0x130400`          | DMA mapping port (class `0x48`)   | HQ3 privileged command FIFO  |
@@ -233,9 +233,6 @@ fn route(off: u32) -> Route {
         hq4::RE_STATUS => Local,
         hq4::RASTER..hq4::RASTER_END => Board(hq3::RASTER + (off - hq4::RASTER)),
         hq4::UCODE..hq4::UCODE_END => Board(hq3::UCODE + (off - hq4::UCODE)),
-        // The two GE11s' diagnostic data and address ports, and the
-        // readback port with its partner.
-        0x05_8040..=0x05_804F | 0x05_822C..=0x05_8233 => Board(off - 0x8000),
         hq4::I2C..hq4::I2C_END => Local,
         hq4::DCB..hq4::DCB_END => Board(hq3::DCB + (off - hq4::DCB)),
         _ => Local,
@@ -302,6 +299,7 @@ struct Hq4 {
     mapping: u64,
     /// HQ3-internal flag bits as the guest set them (`FLAGS_INTERNAL`).
     flag_shadow: u32,
+    ge: GeUpload,
     /// The context-switch handshake: the selection taken, the image being
     /// written (1) or done (3), the two acknowledgements, image words so
     /// far, and whether a switch has completed since reset.
@@ -366,6 +364,83 @@ impl Hq4 {
         } else {
             self.pending &= !pending::LOWATER;
         }
+    }
+}
+
+/// GE11 program download ports (`0x058040-0x05804C`) and readback ports
+/// (`0x05822C`, `0x058230`), as our QEMU model has them. The kernel loads
+/// GE 0 through slot B's ports and GE 1 through slot A's. The words are
+/// kept without interpretation; the HQ3 model's GE11 diagnostic port reads
+/// the same download back in another order, which the IP28 kernel expects
+/// and the Octane's need not, so this path keeps its own copy.
+mod ge {
+    pub const DATA_B: u32 = 0x058040;
+    pub const CTRL_B: u32 = 0x058044;
+    pub const DATA_A: u32 = 0x058048;
+    pub const CTRL_A: u32 = 0x05804C;
+    pub const READ_1: u32 = 0x05822C;
+    pub const READ_2: u32 = 0x058230;
+    /// Words a slot holds: the largest program, 59392 lines of three.
+    pub const WORDS: usize = 59392 * 3;
+    /// A control value with this, less bit 0, starts a download; bit 0 set
+    /// makes the readback start one word early.
+    pub const LOAD: u32 = 0x20_0000;
+    /// A control value with this rewinds the readback.
+    pub const REWIND: u32 = 0x8000_0000;
+}
+
+#[derive(Default)]
+struct GeUpload {
+    words: [Vec<u32>; 2],
+    write_ptr: [usize; 2],
+    /// In pairs of words.
+    read_ptr: [usize; 2],
+    read_odd: [bool; 2],
+    load_mode: [bool; 2],
+    active: usize,
+}
+
+impl GeUpload {
+    fn control(&mut self, slot: usize, v: u32) {
+        self.active = slot;
+        if v & !1 == ge::LOAD {
+            self.write_ptr[slot] = 0;
+            self.read_ptr[slot] = 0;
+            self.read_odd[slot] = v & 1 != 0;
+            self.load_mode[slot] = true;
+        } else {
+            if v & ge::REWIND != 0 {
+                self.read_ptr[slot] = 0;
+            }
+            self.load_mode[slot] = false;
+        }
+    }
+
+    /// False when the slot is full.
+    fn data(&mut self, slot: usize, v: u32) -> bool {
+        if !self.load_mode[slot] {
+            return true;
+        }
+        let p = self.write_ptr[slot];
+        if p >= ge::WORDS {
+            return false;
+        }
+        let w = &mut self.words[slot];
+        if p < w.len() { w[p] = v } else { w.push(v) }
+        self.write_ptr[slot] = p + 1;
+        true
+    }
+
+    /// `READ_1` gives word 2p - odd of the active slot and moves p on;
+    /// `READ_2` the word after it at the current p. Words outside the
+    /// download read 0.
+    fn read(&mut self, second: bool) -> u32 {
+        let slot = self.active;
+        let idx = 2 * self.read_ptr[slot] as i64 - self.read_odd[slot] as i64 + second as i64;
+        if !second {
+            self.read_ptr[slot] += 1;
+        }
+        usize::try_from(idx).ok().and_then(|i| self.words[slot].get(i).copied()).unwrap_or(0)
     }
 }
 
@@ -584,6 +659,10 @@ impl ImpactXio {
             // record.
             hq4::NIC => 2,
             hq4::RETRACE_STATUS_1 | hq4::RETRACE_STATUS_2 => 0,
+            ge::READ_1 | ge::READ_2 => {
+                drop(s);
+                return (BUS_OK, self.shared.hq4.lock().ge.read(off == ge::READ_2) as u64);
+            }
             hq4::RE_STATUS => {
                 drop(s);
                 let (st, v) = self.board_read(32, hq3::RASTER + (hq4::RE_STATUS - hq4::RASTER));
@@ -660,6 +739,17 @@ impl ImpactXio {
                 return st;
             }
             hq4::SELECT => return self.select(bits, v),
+            ge::DATA_A | ge::DATA_B | ge::CTRL_A | ge::CTRL_B if bits >= 32 => {
+                let slot = (off == ge::DATA_B || off == ge::CTRL_B) as usize;
+                let mut s = self.shared.hq4.lock();
+                if off == ge::CTRL_A || off == ge::CTRL_B {
+                    s.ge.control(slot, v);
+                } else if !s.ge.data(slot, v) {
+                    drop(s);
+                    self.shared.note("GE program download past the end of its slot".into());
+                }
+                return BUS_OK;
+            }
             _ => {}
         }
         // The rest are 32-bit registers; other widths are ignored.
@@ -1223,13 +1313,17 @@ mod tests {
         assert_eq!(r.packets(), []);
         for _ in 0..2 {
             r.w32(COMMAND, 0x37 << 8); // SCHEDULE_SWAP
-            let mut tries = 0;
-            while r.r32(0x011020) & 0x400 == 0 {
-                tries += 1;
-                assert!(tries < 1_000_000, "swap never reported");
+            // The HQ thread raises the source, then sends the packet.
+            let mut got = Vec::new();
+            for _ in 0..1_000_000 {
+                got = r.packets();
+                if !got.is_empty() {
+                    break;
+                }
                 std::thread::yield_now();
             }
-            assert_eq!(r.packets(), [(18, true)]);
+            assert_eq!(got, [(18, true)]);
+            assert_eq!(r.r32(0x011020) & 0x400, 0x400);
             assert_eq!(r.r32(0x020010) & 0x400, 0);
             r.w32(0x011028, 0x401);
             assert_eq!(r.packets(), [(18, false)]);
@@ -1271,6 +1365,42 @@ mod tests {
         assert_eq!(r.r32(0x011020) & 1, 0);
     }
 
+    /// The kernel's GE11 program download and its verification readback:
+    /// slot B (GE 0) takes the words in order, and the two readback ports
+    /// return them in pairs, as our QEMU model does.
+    #[test]
+    fn ge_program_reads_back_in_pairs() {
+        let r = rig();
+        let prog: Vec<u32> = (0..8).map(|i| 0x0100_0000 * (i + 1) + i).collect();
+        r.w32(0x058044, 0x20_0000);
+        for &w in &prog {
+            r.w32(0x058040, w);
+        }
+        // The download ends with any other control value.
+        r.w32(0x058044, 0x8000_0000);
+        r.w32(0x058040, 0xDEAD);
+        for p in 0..4 {
+            assert_eq!(r.r32(0x058230), prog[2 * p + 1], "pair {p}");
+            assert_eq!(r.r32(0x05822C), prog[2 * p], "pair {p}");
+        }
+        assert_eq!(r.r32(0x05822C), 0, "past the download");
+        // Bit 0 of the load value starts the readback a word early.
+        r.w32(0x05804C, 0x20_0001);
+        for &w in &prog[..4] {
+            r.w32(0x058048, w);
+        }
+        r.w32(0x05804C, 0x8000_0000);
+        assert_eq!(r.r32(0x058230), prog[0]);
+        assert_eq!(r.r32(0x05822C), 0);
+        assert_eq!(r.r32(0x058230), prog[2]);
+        assert_eq!(r.r32(0x05822C), prog[1]);
+        // Slot B's download is untouched.
+        r.w32(0x058044, 0x8000_0000);
+        assert_eq!(r.r32(0x05822C), prog[0]);
+        // The GE revision stays until a query replaces it.
+        assert_eq!(r.r32(0x028004), 2);
+    }
+
     #[test]
     fn routes() {
         assert_eq!(route(0x020000), Route::Board(0x70000));
@@ -1279,8 +1409,8 @@ mod tests {
         assert_eq!(route(0x02C1C4), Route::Board(0x7C1C4));
         assert_eq!(route(0x02D1C0), Route::Board(0x7D1C0));
         assert_eq!(route(0x050000), Route::Board(0x40000));
-        assert_eq!(route(0x058040), Route::Board(0x50040));
-        assert_eq!(route(0x05822C), Route::Board(0x5022C));
+        assert_eq!(route(0x058040), Route::Local);
+        assert_eq!(route(0x05822C), Route::Local);
         assert_eq!(route(0x058050), Route::Local);
         assert_eq!(route(0x071C88), Route::Board(0x61C88));
         assert_eq!(route(0x072038), Route::Board(0x62038));
