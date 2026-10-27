@@ -323,6 +323,19 @@ impl HeartMemory {
     pub fn words(&self) -> &[u32] {
         unsafe { std::slice::from_raw_parts(self.host as *const u32, self.total / 4) }
     }
+
+    /// Put back what [`Self::words`] gave, with every page's generation
+    /// bumped so no compiled code outlives it.
+    pub fn restore_words(&mut self, words: &[u32]) -> Result<(), String> {
+        if words.len() * 4 != self.total {
+            return Err(format!("saved memory is {} bytes, this Octane has {}", words.len() * 4, self.total));
+        }
+        unsafe { std::ptr::copy_nonoverlapping(words.as_ptr() as *const u8, self.host, self.total) };
+        for page in 0..self.total.div_ceil(PAGE) {
+            self.touch(page * PAGE);
+        }
+        Ok(())
+    }
 }
 
 /// A part on HEART's one-wire bus, at the bit-slot level.
@@ -840,6 +853,95 @@ impl crate::traits::Resettable for Heart {
     }
 }
 
+/// The registers, the counter's value and the one-wire master's slot in
+/// progress (its time left). Memory goes with the snapshot separately
+/// ([`HeartMemory::words`]); the parts on the one-wire bus are the
+/// machine's. Loading drives the CPU's pins to what the registers give.
+impl crate::traits::Saveable for Heart {
+    fn save_state(&self) -> toml::Value {
+        use crate::snapshot::{hex_u32, hex_u64, u32_slice_to_toml, u64_slice_to_toml};
+        let now = (self.clock)();
+        let r = self.regs.lock().unwrap();
+        let mut t = toml::map::Map::new();
+        for (k, v) in [
+            ("mode", r.mode),
+            ("sdram_mode", r.sdram_mode),
+            ("mem_refresh", r.mem_refresh),
+            ("mem_req_arb", r.mem_req_arb),
+            ("clock_divider", r.clock_divider),
+            ("pending", r.pending),
+            ("ecc_cause", r.ecc_cause),
+            ("ecc_address", r.ecc_address),
+            ("ecc_data", r.ecc_data),
+            ("counter", r.counter(now)),
+            ("onewire_control", r.onewire_control),
+            ("onewire_left_ns", r.onewire_deadline_ns.saturating_sub(now)),
+        ] {
+            t.insert(k.into(), hex_u64(v));
+        }
+        for (k, v) in [
+            ("compare", r.compare),
+            ("widget_control", r.widget_control),
+            ("widget_request_timeout", r.widget_request_timeout),
+            ("widget_error_mask", r.widget_error_mask),
+        ] {
+            t.insert(k.into(), hex_u32(v));
+        }
+        t.insert("flow_cell".into(), u64_slice_to_toml(&r.flow_cell));
+        t.insert("descriptor".into(), u32_slice_to_toml(&r.descriptor));
+        t.insert("mask".into(), u64_slice_to_toml(&r.mask));
+        t.insert("onewire_level".into(), toml::Value::Boolean(r.onewire_level));
+        t.insert("onewire_busy".into(), toml::Value::Boolean(r.onewire_busy));
+        toml::Value::Table(t)
+    }
+
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        use crate::snapshot::{get_field, load_u32_slice, load_u64_slice, toml_bool, toml_u32, toml_u64};
+        let now = (self.clock)();
+        let mut r = self.regs.lock().unwrap();
+        *r = Regs::new(now);
+        let q = |k: &str| get_field(v, k).and_then(toml_u64).unwrap_or(0);
+        let d = |k: &str| get_field(v, k).and_then(toml_u32).unwrap_or(0);
+        let b = |k: &str| get_field(v, k).and_then(toml_bool).unwrap_or(false);
+        r.mode = q("mode");
+        r.sdram_mode = q("sdram_mode");
+        r.mem_refresh = q("mem_refresh");
+        r.mem_req_arb = q("mem_req_arb");
+        r.clock_divider = q("clock_divider");
+        r.pending = q("pending");
+        r.ecc_cause = q("ecc_cause");
+        r.ecc_address = q("ecc_address");
+        r.ecc_data = q("ecc_data");
+        r.saved_count = q("counter") & COUNT_MASK;
+        r.epoch_ns = now;
+        r.onewire_control = q("onewire_control");
+        r.onewire_deadline_ns = now + q("onewire_left_ns");
+        r.onewire_level = b("onewire_level");
+        r.onewire_busy = b("onewire_busy");
+        r.compare = d("compare");
+        r.widget_control = d("widget_control");
+        r.widget_request_timeout = d("widget_request_timeout");
+        r.widget_error_mask = d("widget_error_mask");
+        if let Some(a) = get_field(v, "flow_cell") {
+            load_u64_slice(a, &mut r.flow_cell);
+        }
+        if let Some(a) = get_field(v, "descriptor") {
+            load_u32_slice(a, &mut r.descriptor);
+        }
+        if let Some(a) = get_field(v, "mask") {
+            load_u64_slice(a, &mut r.mask);
+        }
+        // Drive every pin, not only those that differ from before: the CPU
+        // was loaded with its own idea of them.
+        r.out = !r.levels() & 0x1f;
+        self.update_irq(&mut r);
+        let banks = r.banks();
+        drop(r);
+        self.mem.lock().unwrap().set_descriptors(banks);
+        Ok(())
+    }
+}
+
 fn trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("IRIS_IP30_TRACE").is_some())
@@ -1210,6 +1312,55 @@ mod tests {
     fn invalid_bank_sizes_are_refused() {
         assert!(HeartMemory::new([96 * MIB, 0, 0, 0]).is_err());
         assert!(HeartMemory::new([32 * MIB, 0, 0, 0]).is_err());
+    }
+
+    /// Registers, the counter, a slot in progress and the CPU's pins come
+    /// back; the counter runs on from the saved value.
+    #[test]
+    fn save_load_round_trip() {
+        use crate::traits::Saveable;
+        let f = heart(128);
+        let h = &f.heart;
+        wl(h, 0x20, DESC_VALID | (3 << 16));
+        wq(h, PIU_BASE, MODE_INTERRUPT_ENABLE);
+        wq(h, PIU_BASE + 0x50, 0x1234);
+        wq(h, PIU_BASE + 0x10000, 0xffff_0000);
+        wq(h, PIU_BASE + 0x10020, 1 << 17);
+        wq(h, PIU_BASE + 0x30000, 0xab_cdef);
+        assert!(h.widget_write(0x68, 8, 0x55));
+        assert!(h.piu_write(0xb8, 8, (500 << 10) | (65 << 2)));
+        f.step_us(100);
+        assert!(h.pin(3));
+        let v1 = h.save_state();
+
+        let g = heart(128);
+        g.step_us(5000);
+        g.heart.load_state(&v1).unwrap();
+        assert_eq!(v1, g.heart.save_state(), "HEART save_state mismatch after load_state round-trip");
+        let h2 = &g.heart;
+        assert!(h2.pin(3), "the restored level reaches the pin");
+        assert_eq!(rq(h2, PIU_BASE + 0x20000), 1250, "the counter carries on from the saved value");
+        g.step_us(8);
+        assert_eq!(rq(h2, PIU_BASE + 0x20000), 1350);
+        assert_eq!(h2.piu_read(0x20, 4), Some((DESC_VALID | (3 << 16)) as u64));
+        assert!(h2.ram_write(RAM_BASE as u64 + 0x4000, 8, 7), "the descriptors map memory again");
+        assert_eq!(h2.piu_read(0xb8, 8).unwrap() & 2, 0, "the slot is still running");
+        g.step_us(465);
+        assert_eq!(h2.piu_read(0xb8, 8).unwrap() & 2, 2, "and ends when its time is up");
+    }
+
+    #[test]
+    fn memory_round_trips_through_its_words() {
+        let f = heart(64);
+        let h = &f.heart;
+        wl(h, 0x20, DESC_VALID | (1 << 16));
+        assert!(h.ram_write(RAM_BASE as u64 + 0x100, 8, 0x0102_0304_0506_0708));
+        let words = h.mem.lock().unwrap().words().to_vec();
+        let g = heart(64);
+        wl(&g.heart, 0x20, DESC_VALID | (1 << 16));
+        g.heart.mem.lock().unwrap().restore_words(&words).unwrap();
+        assert_eq!(g.heart.ram_read(RAM_BASE as u64 + 0x100, 8), Some(0x0102_0304_0506_0708));
+        assert!(heart(128).heart.mem.lock().unwrap().restore_words(&words).is_err(), "sizes must match");
     }
 
     struct Present;
