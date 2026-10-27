@@ -3,7 +3,9 @@
 //! Ported from hw/misc/sgi-ioc3.c, hw/char/sgi-ioc-serial-dma.c,
 //! hw/char/sgi-ioc3-parallel.c and hw/input/sgi-ioc3-kbc.c in
 //! https://github.com/jamesbraid/qemu-sgi-origami (sgi-origami branch),
-//! BSD-3-Clause.
+//! BSD-3-Clause. The one-wire parts and board records come from
+//! hw/misc/sgi-board-record.c and include/hw/misc/sgi-onewire-slot.h in
+//! the same repository.
 //!
 //! One PCI function with one 1 MiB memory BAR. Behind it: two 16550 serial
 //! ports with a ring-DMA engine each, a PS/2 keyboard and mouse controller,
@@ -2790,7 +2792,9 @@ impl Ioc3 {
         self.sh.st.lock().rtc.dev.powered_off()
     }
 
-    /// A PCI reset of the chip (not of the clock or the buffer RAM).
+    /// A PCI reset of the chip (not of the clock or the buffer RAM). The
+    /// Ethernet block is a separate device here and keeps its state: the
+    /// machine resets it on its own.
     pub fn reset(&self) {
         self.sh.with_st(false, |st, _| st.reset());
     }
