@@ -1187,8 +1187,15 @@ struct ParityState {
     /// entries so everything else can skip it.
     l2_xor: Vec<u8>,
     l2_xor_live: usize,
-    /// CP0 ECC after the last Index_Load_Tag.
+    /// CP0 ECC after the last Index_Load_Tag or R10000 Index_Load_Data.
     ecc_out: u32,
+    /// CP0 ECC as written, all its bits: an R10000 secondary's check bits
+    /// are wider than the byte `ecc` keeps.
+    ecc_reg: u32,
+    /// R10000 secondary data check bits, one per data slot, stored by
+    /// Index_Store_Data and returned by Index_Load_Data. Empty until first
+    /// stored.
+    l2_slot_ecc: Vec<u32>,
     /// I-cache lines a CE Fill gave forced parity: (extended index, the bits,
     /// the same for every doubleword of the line).
     ic_forced: Vec<(usize, u8)>,
@@ -4059,13 +4066,23 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
                     // 0 selects the way: the same folding as the tag ops
                     // below, so data and tags name the same line.
                     if is_l2 && HAS_L2 {
-                        return self.l2.data()[Self::r10k_way_slot(virt_addr, L2_DATA)];
+                        let slot = Self::r10k_way_slot(virt_addr, L2_DATA);
+                        let e = self.perr();
+                        e.ecc_out = e.l2_slot_ecc.get(slot).copied().unwrap_or(0);
+                        return self.l2.data()[slot];
                     }
                     return self.dc.data()[Self::r10k_way_slot(virt_addr, DC_DATA)];
                 }
                 C_R10K_ISD if matches!(sel, CACH_SI | CACH_SD) => {
                     if HAS_L2 {
-                        self.l2.data_mut()[Self::r10k_way_slot(virt_addr, L2_DATA)] = phys_addr;
+                        let slot = Self::r10k_way_slot(virt_addr, L2_DATA);
+                        self.l2.data_mut()[slot] = phys_addr;
+                        // The check bits ride with the data, from CP0 ECC.
+                        let e = self.perr();
+                        if e.l2_slot_ecc.is_empty() {
+                            e.l2_slot_ecc = vec![0; L2_DATA];
+                        }
+                        e.l2_slot_ecc[slot] = e.ecc_reg;
                     }
                     return 0;
                 }
@@ -4433,6 +4450,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
 
     fn set_cache_ecc(&self, v: u32) {
         self.perr().ecc = v as u8;
+        self.perr().ecc_reg = v;
     }
 
     /// CE toggles the [`L1DTag::SLOW`] mark on every line, so this is cheap
@@ -4812,6 +4830,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
         self.dc.data_mut().fill(0);
         self.l2.tags_mut().fill(L2Tag::default());
         self.l2.data_mut().fill(0);
+        self.perr().l2_slot_ecc.clear();
         if Self::IS_R5K {
         for s in self.ic_instrs.get_mut().iter_mut() { s.flags = FLAG_NOT_DECODED; s.raw = 0; }
         } else {
@@ -4864,6 +4883,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
         self.dc.data_mut().fill(0);
         self.l2.tags_mut().fill(L2Tag::default());
         self.l2.data_mut().fill(0);
+        self.perr().l2_slot_ecc.clear();
         if Self::IS_R5K {
         for s in self.ic_instrs.get_mut().iter_mut() { s.flags = FLAG_NOT_DECODED; s.raw = 0; }
         } else {
@@ -5405,6 +5425,25 @@ mod tests {
         assert_eq!((r.status, r.data), (BUS_OK, 0x1111_2222), "the R10000 carries on");
         assert_eq!(r10k.write::<4>(va2, pa, 0x3333_4444), BUS_OK);
         assert_eq!(r10k.read::<4>(va1, pa).data, 0x3333_4444, "the old colour's copy was dropped");
+    }
+
+    /// R10000 Index_Store_Data(SD) stores CP0 ECC as the slot's check bits
+    /// and Index_Load_Data(SD) returns them in CP0 ECC, per way, as the
+    /// shadow model does: a PROM's secondary SRAM test writes check bits
+    /// through each way and reads them back.
+    #[test]
+    fn the_r10000_secondary_check_bits_travel_with_the_data() {
+        let c: R10000Cache = make_cache_of(Arc::new(Memory::new(MEM_MB)));
+        c.set_cache_ecc(0x001);
+        c.cache_op(C_R10K_ISD | CACH_SD, 0, 0x1111_2222_3333_4444);
+        c.set_cache_ecc(0x30f);
+        c.cache_op(C_R10K_ISD | CACH_SD, 1, 0xaaaa_bbbb_cccc_dddd);
+
+        c.set_cache_ecc(0);
+        assert_eq!(c.cache_op(C_R10K_ILD | CACH_SD, 0, 0), 0x1111_2222_3333_4444);
+        assert_eq!(c.cache_op_ecc(), 0x001, "way 0's check bits");
+        assert_eq!(c.cache_op(C_R10K_ILD | CACH_SD, 1, 0), 0xaaaa_bbbb_cccc_dddd);
+        assert_eq!(c.cache_op_ecc(), 0x30f, "way 1's check bits, wider than a byte");
     }
 
     /// The R10000 implements 44 virtual address bits; XContext's fields are
