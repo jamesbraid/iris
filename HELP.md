@@ -267,8 +267,11 @@ If `192.168.0.x` conflicts with your local network, set `nat_subnet` in
 nat_subnet = "192.168.5.0/24"
 ```
 
-The gateway always gets host `.1` and IRIX gets host `.2` within the chosen
-subnet.  The change is purely internal — no host interface is created.  Prefixes
+The gateway gets host `.1` and IRIX gets host `.2` within the chosen
+subnet. Until the first packet routes through the gateway, a guest that ARPs
+for another address in its own /24 moves the gateway to that address, so a
+disk installed with a different default route (an Octane disk using
+`192.0.2.3`, say) works without editing the guest.  The change is purely internal — no host interface is created.  Prefixes
 from `/8` to `/30` are accepted; `/24` is the typical choice.
 
 You can also pass it on the command line:
