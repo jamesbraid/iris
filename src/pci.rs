@@ -80,7 +80,12 @@ impl PciConfig {
     /// the function stops decoding, and the BARs and line forget what
     /// firmware assigned.
     pub fn reset(&self) {
-        *self.regs.lock().unwrap() = self.power_on;
+        let mut r = self.regs.lock().unwrap();
+        // The subsystem identity is the board's, set once after
+        // construction (IOC3's selects what a guest instantiates).
+        let subsystem = r[11];
+        *r = self.power_on;
+        r[11] = subsystem;
     }
 
     /// Register `reg` (a dword index, 0..64).
@@ -299,6 +304,18 @@ mod tests {
         assert_eq!((0..64).map(|i| c.read(i)).collect::<Vec<_>>(), fresh);
         assert_eq!(c.decode(Space::Mem, 0x8000_1000), None);
         assert_eq!(c.interrupt_pin(), PCI_INTA, "the pin is wiring, not state");
+    }
+
+    /// A subsystem identity set after construction, as IOC3 sets its own,
+    /// is the board's and survives a reset.
+    #[test]
+    fn reset_keeps_the_subsystem_identity() {
+        let c = scsi_like();
+        c.write(11, 0xc304_10a9);
+        c.write(4, 0x0000_1000);
+        c.reset();
+        assert_eq!(c.read(11), 0xc304_10a9);
+        assert_eq!(c.read(4), 1);
     }
 
     #[test]
