@@ -28,6 +28,7 @@ pub mod sflash;
 pub mod sgi_nic;
 pub mod xbow;
 pub mod bridge;
+pub mod w1;
 
 pub mod camera;
 pub mod cdmc;
