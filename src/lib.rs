@@ -177,6 +177,8 @@ pub mod ip32;
 pub mod ip32_handover;
 pub mod ip32_screen;
 pub mod ip32_machine;
+/// The SGI Octane (IP30) -- see `docs/octane-ip30.md`.
+pub mod ip30;
 pub mod machine_state;
 pub mod platform;
 pub mod physical;
