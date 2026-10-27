@@ -5,7 +5,7 @@ Status: open (started 2026-10-19 on branch ip30 of slaapliedje/iris, rebuilt
 command monitor work on the serial console).
 
 **Where it stands.** `[machine] profile = "octane_ip30"` builds an
-`OctaneMachine` (`src/ip30_machine.rs`) over `Ip30Bus` (`src/ip30.rs`):
+`OctaneMachine` (`src/ip30_machine.rs`) over `Ip30Physical` (`src/ip30.rs`):
 HEART, the Xbow, the Bridge with its PCI configuration space and device
 windows, the IOC3's two 16550s, DS1687 and 1-wire parts, the flash, and
 memory placed by MEMCFG. The QL1040s, the RAD and the graphics widget are
@@ -98,3 +98,43 @@ failed" is the register file answering its mailbox); Ethernet the IOC3's
 ring DMA; graphics HQ4 in front of the IMPACT emulation (the widget is
 left off the Xbow's links so the PROM takes the serial console);
 snapshots the usual `Saveable` work.
+
+## Full machine
+
+The sections above stop at the PROM menu. The machine now boots the stock
+PROM to IRIX 6.5.30 (serial login, graphics console and desktop, networking,
+sound); the device models are ports of the author's QEMU models, one file
+each (`docs/octane-ip30.md` says what is covered). What the bring-up above
+lists as not done is done, except the CPU board NIC check. What the full
+boot added:
+
+- *The PROM's stores into the flash are cached lines.* The PROM keeps its
+  initialised data at flash addresses and stores to it with cached accesses
+  that are never written back, so the Bridge's 16-bit-only flash port never
+  sees them. iris's cache model passes every cached access to memory, so the
+  CPU's view of the bus (`CachedFlashLines`) holds those dirty lines in a
+  per-line copy: the first cached store to a flash line copies it in, and
+  cached loads and stores of that line use the copy from then on. Uncached
+  accesses reach the flash itself. Approximation: write-back and
+  eviction are not modelled.
+- *Low memory needs its own generation counters.* The kernel writes its
+  exception vectors at physical 0. With no jitv2 page-generation counter
+  there, the JIT treated the page as ROM, compiled it once and ran a stale
+  general exception vector (IRIX livelocked right after "Starting up the
+  system..."). The 16 KB is distinct storage with a counter per 4 KB page,
+  advanced by every store and at power-on, as SDRAM's are. It cannot alias
+  SDRAM: the IDE diagnostics write both and expect them to differ.
+- *An ISP1040 reset must not wait for the disk.* A soft reset and a queue
+  initialisation waited on the CPU thread for the command in flight, so a
+  slow disk stalled the guest and the scheduler's timer ticks were missed
+ . The reset now moves a generation counter
+  on and the ring thread does the DMA with no lock held.
+- *The PROM console draws on HQ4 before any context switch.* Its graphical
+  console sends direct raster writes and a few other one-word packets to the
+  HQ4's command port before the board has ever selected a context, and a
+  bare bring-up word whose high half is zero comes first. Only whole packets
+  are taken as commands in that state (parsed as a header, the bring-up word
+  would swallow the raster writes after it). One word the PROM sends,
+  `0x001A6804`, addresses a register past 0x1FF; its effect is unknown, so
+  it is dropped and reported. That the board takes the packets without a
+  switch is inferred from the PROM's command stream and OpenBSD's driver.

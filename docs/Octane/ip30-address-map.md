@@ -435,33 +435,49 @@ graphics widget interrupt the same way.
 
 ## 11. In IRIS
 
-The Octane is its own machine, like the O2: `src/ip30.rs` is the bus
-(`Ip30Bus`), `src/ip30_machine.rs` the machine (`OctaneMachine`,
+The Octane is its own machine, like the O2: `src/ip30.rs` is the processor's
+bus (`Ip30Physical`), `src/ip30_machine.rs` the machine (`OctaneMachine`,
 `[machine] profile = "octane_ip30"`), and the chips are one file each under
-`src/dev/`. The decode is a chain of range checks over the map above:
+`src/dev/`. The decode is one table, a `SparseDeviceMap` of 64 KB slots over
+the 40-bit space, as on the Indy: each slot points at the device that
+answers it, a device sees the full physical address and masks it to its own
+window, and what it does not fill it answers with a bus error itself.
 
 | Physical | IRIS |
 |---|---|
-| 0x0000_0000 – 0x0000_3FFF | the first 16 KB of RAM (`dev/heart_mem.rs`) |
-| 0x0FF0_0000 – 0x0FFF_FFFF | `dev/heart.rs`: the PIU registers, MEMCFG (which places the banks), the 64 vectors and their levels on the CPU's pins, the 12.5 MHz counter and compare, the MicroLAN master |
-| 0x1000_0000 | `dev/xbow.rs`: widget 0; link status says which widgets are fitted |
-| 0x1800_0000 | `dev/heart.rs`: HEART's widget registers; a write to 0x80 sets an ISR bit |
-| 0x1C00_0000 | graphics widget: a register file that remembers what it is told (`ip32::Stub`), until HQ4 and IMPACT are put behind it |
-| 0x1F00_0000 | `dev/bridge.rs`: the Bridge's local registers, PCI configuration space (`crate::pci::PciConfig` per slot), the device windows routed by slot, the NIC |
-| 0x1F20_0000, 0x1F40_0000 | device windows 0 and 1: the two QL1040s, register files until the ISP1040 model exists (`docs/Octane/qla1040.md`) |
-| 0x1F60_0000 | device window 2: `dev/ioc3.rs`, with the two 16550s (`dev/ns16550.rs`), the DS1687 behind byte buses 1 and 2, the MAC NIC on MCR (`dev/sgi_nic.rs`), the GPIO latch |
-| 0x1F70_0000 | device window 3: RAD, a register file |
-| 0x1FC0_0000 – 0x1FDF_FFFF | `dev/sflash.rs`: the flash with its command set; `flash` keeps it between runs so the PDS survives |
-| 0x2000_0000 up | `dev/heart_mem.rs`: the banks as MEMCFG places them, mapped into the CPU's ppmem window |
-| widgets 9, 10, 11, 13, 14; the large and huge windows | bus error |
+| 0x0000_0000 – 0x0000_3FFF | low memory: 16 KB of RAM of its own (`dev/heart_mem.rs`, `LowMemory`) |
+| 0x0FF0_0000 – 0x0FFF_FFFF | `dev/heart.rs`: the PIU registers, MEMCFG (which places the banks), the 64 vectors as an interrupt controller driving the CPU's pins, the 12.5 MHz counter and compare, the MicroLAN with the processor module's record |
+| 0x1000_0000 | `dev/xbow.rs`: widget 0; link status says which widgets are fitted, and a link change swaps the widget's windows in the table |
+| 0x1800_0000 | `dev/heart.rs`: HEART's widget registers |
+| 0x1B00_0000 | the graphics widget, 11: `dev/mgras/hq4.rs`, the HQ4 in front of the Solid IMPACT raster chips (`dev/mgras/`); absent with `graphics = "none"` |
+| 0x1F00_0000 | `dev/bridge.rs`: the Bridge's local registers, PCI configuration space, the device windows routed by slot, the NIC on its MicroLAN |
+| 0x1F20_0000, 0x1F40_0000 | device windows 0 and 1: the two QL1040s (`dev/isp1040.rs`, `docs/Octane/qla1040.md`) |
+| 0x1F60_0000 | device window 2: `dev/ioc3.rs` with its own UARTs, the DS1685 on its byte bus, the keyboard and mouse controller, the parallel port and the MAC part on its MicroLAN; the Ethernet MAC and PHY are `dev/ioc3_eth.rs` |
+| 0x1F70_0000 | device window 3: RAD, `dev/rad1.rs` |
+| 0x1FC0_0000 – 0x1FFF_FFFF | `dev/sflash.rs`: the boot flash with its command set; the CPU's cached view (`CachedFlashLines`) keeps the PROM's cached stores into it. `[octane] flash` keeps the part between runs |
+| 0x2000_0000 up | `dev/heart_mem.rs`: SDRAM as MEMCFG places it; `remap_banks` redraws the table when a descriptor is written |
+| widgets 9, 10, 12, 13, 14 | bus error |
 
-The bus still takes 32-bit addresses, as on the other machines: the
-decode table is 40 bits wide (`docs/devmap-design.md`) but the CPU hands
-the bus `phys as u32`. Everything the PROM and an early kernel touch is
-below 4 GB (the windows, the PROM, RAM up to 3.5 GB), and memory the PROM
-places above 4 GB during its sizing probe is left unmapped. Widening the
-bus is the step that opens the large and huge windows (OpenBSD's console
-goes through the large window) and memory beyond 4 GB.
+The bus is 40 bits wide end to end, so memory beyond 4 GB and the 64 GB
+windows at `w << 36` (§2's huge windows, which `src/ip30.rs` calls large)
+are in the table; a widget is attached with or without that window (the
+Bridge's is not). Bus masters
+(the Bridge's PCI functions, HQ4) do not see the processor's map: they get
+SDRAM only, by 64-bit physical address, through HEART's DMA view; an absent
+bank is a bus error where the CPU reads 0.
+
+Where IRIS differs from the notes above, or settles what they leave open:
+
+- Low memory is distinct storage, not an alias of the first 16 KB of SDRAM
+  space: the IP30 IDE diagnostics write both and expect them to differ. It
+  has its own JIT generation counters, so code rewritten at the exception
+  vectors is recompiled. The first 16 KB of SDRAM space is a bus error.
+- The graphics board is Solid IMPACT on widget 11, not snorlax's GM10 on
+  widget 12. The Crossbow link to it is up when the board is fitted.
+- The Crossbow reports revision 1.3 where snorlax's is 1.2.
+- The board records on the MicroLANs (HEART's processor module, the Bridge's
+  system board, IOC3's MAC part) carry synthetic barcodes and serial
+  numbers.
 
 What has been seen to work against this map: PROM 4.17 starts in the
 flash, finds HEART, the Xbow and the Bridge, sizes memory, reads the

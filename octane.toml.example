@@ -1,26 +1,24 @@
-# An SGI Octane (IP30). In bring-up: the PROM runs on the serial console;
-# there is no graphics, Ethernet or SCSI yet. See
-# docs/Octane/ip30-address-map.md and FEATURES.md ([octane]).
+# An SGI Octane (IP30): the stock PROM to IRIX 6.5.30 on a SCSI disk, with
+# Solid IMPACT graphics and the Ethernet on the NAT gateway. See
+# docs/octane-ip30.md and FEATURES.md ([octane]).
 #
 # Run:  iris --config octane.toml
-# Then: telnet 127.0.0.1 2291 for the PROM's console.
+# Console: telnet 127.0.0.1 8880 (IOC3 UART A). With a blank NVRAM the PROM
+# picks the graphics console; set console=d for the serial one.
 
-headless = true
-no_audio = true
 prom     = "IP30prom.bin"      # the 1 MB flash image (IRIX: /usr/cpu/firmware/IP30prom.bin)
-nvram    = "octane-nvram.bin"  # the DS1687's RAM: the PROM's environment
-banks    = [1024, 0, 0, 0]     # the DIMM pair in each of HEART's four banks, MB
-
-serial_port_a = 2291           # the console: IOC3 UART A
-serial_port_b = 2292
-serial_log    = "octane-console.log"
+nvram    = "octane-nvram.bin"  # the DS1685's NVRAM: the PROM's environment
+banks    = [128]               # MB in each HEART bank: 64, 128, 256 or 512, filled from bank 0
+serial_log = "octane-console.log"
 
 [machine]
 profile = "octane_ip30"
 cpu     = "r10000"
 
 [octane]
-flash = "octane-flash.bin"     # the flash between runs (the PROM's data store lives in it)
+flash    = "octane-flash.bin"  # keep the PROM's flash records between runs (optional)
+# graphics = "none"            # no graphics board: serial console, no window
 
-[network]
-mode = "off"
+[scsi.1]                       # id 1 on the internal bus, where IRIX expects its disk
+path    = "irix6530.raw"
+overlay = true
