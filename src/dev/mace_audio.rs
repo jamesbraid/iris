@@ -709,17 +709,17 @@ impl crate::traits::Saveable for MaceAudio {
 }
 
 impl crate::traits::BusDevice for MaceAudio {
-    fn read8(&self, addr: u32) -> crate::traits::BusRead8 { crate::traits::BusRead8::ok(self.read(addr) as u8) }
-    fn read16(&self, addr: u32) -> crate::traits::BusRead16 { crate::traits::BusRead16::ok(self.read(addr) as u16) }
-    fn read32(&self, addr: u32) -> crate::traits::BusRead32 {
-        let v = self.read(addr);
+    fn read8(&self, addr: u64) -> crate::traits::BusRead8 { crate::traits::BusRead8::ok(self.read(addr as u32) as u8) }
+    fn read16(&self, addr: u64) -> crate::traits::BusRead16 { crate::traits::BusRead16::ok(self.read(addr as u32) as u16) }
+    fn read32(&self, addr: u64) -> crate::traits::BusRead32 {
+        let v = self.read(addr as u32);
         crate::traits::BusRead32::ok(if addr & 4 == 0 { (v >> 32) as u32 } else { v as u32 })
     }
-    fn read64(&self, addr: u32) -> crate::traits::BusRead64 { crate::traits::BusRead64::ok(self.read(addr)) }
-    fn write8(&self, addr: u32, val: u8) -> u32 { self.write(addr, val as u64); crate::traits::BUS_OK }
-    fn write16(&self, addr: u32, val: u16) -> u32 { self.write(addr, val as u64); crate::traits::BUS_OK }
-    fn write32(&self, addr: u32, val: u32) -> u32 { self.write(addr, val as u64); crate::traits::BUS_OK }
-    fn write64(&self, addr: u32, val: u64) -> u32 { self.write(addr, val); crate::traits::BUS_OK }
+    fn read64(&self, addr: u64) -> crate::traits::BusRead64 { crate::traits::BusRead64::ok(self.read(addr as u32)) }
+    fn write8(&self, addr: u64, val: u8) -> u32 { self.write(addr as u32, val as u64); crate::traits::BUS_OK }
+    fn write16(&self, addr: u64, val: u16) -> u32 { self.write(addr as u32, val as u64); crate::traits::BUS_OK }
+    fn write32(&self, addr: u64, val: u32) -> u32 { self.write(addr as u32, val as u64); crate::traits::BUS_OK }
+    fn write64(&self, addr: u64, val: u64) -> u32 { self.write(addr as u32, val); crate::traits::BUS_OK }
 }
 
 impl crate::traits::Device for MaceAudio {

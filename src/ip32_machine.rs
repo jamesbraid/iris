@@ -458,6 +458,8 @@ impl O2Machine {
         // The no-ECC alias of memory reaches memory, not the PCI window the
         // bus decodes at the same low 32 bits.
         exec.phys_alias = Some((NO_ECC_BASE, RAM_WINDOW_SIZE as u64, RAM_BASE as u64));
+        // CRIME's decode, like the MC's, is modelled on the low 32 bits.
+        exec.phys_mask = u32::MAX as u64;
         exec.batch_hook = Some(Box::new(move |exec: &mut MipsExecutor<MipsTlb, C>| {
             let pc = exec.core.pc as u32;
             LAST_PC.store(pc, Ordering::Relaxed);
@@ -1148,7 +1150,7 @@ fn control_command(bus: &Ip32Bus, cmd: &str, arg: &str, rgba: &mut [u8]) -> Stri
                 (Some(a), Some(n), Some(path)) => {
                     let mut out = Vec::with_capacity(n as usize);
                     for i in (0..n.min(1 << 20)).step_by(4) {
-                        out.extend_from_slice(&bus.read32(a.wrapping_add(i)).data.to_be_bytes());
+                        out.extend_from_slice(&bus.read32(a.wrapping_add(i) as u64).data.to_be_bytes());
                     }
                     match std::fs::write(path, out) {
                         Ok(()) => "ok".into(),

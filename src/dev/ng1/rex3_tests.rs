@@ -109,9 +109,9 @@ impl Drop for FifoResetGuard<'_> {
 }
 
 // Compute the SET address (no GO bit) for a register offset.
-fn set_addr(offset: u32) -> u32 { REX3_BASE | offset }
+fn set_addr(offset: u32) -> u64 { (REX3_BASE | offset) as u64 }
 // Compute the GO address (bit 11 set) for a register offset.
-fn go_addr(offset: u32) -> u32  { REX3_BASE | 0x0800 | offset }
+fn go_addr(offset: u32) -> u64  { (REX3_BASE | 0x0800 | offset) as u64 }
 
 /// Bus write that retries on `BUS_BUSY`, the way the CPU re-executes a store
 /// on `EXEC_RETRY`. `Rex3::write32` returns `BUS_BUSY` when the GFIFO is
@@ -119,14 +119,14 @@ fn go_addr(offset: u32) -> u32  { REX3_BASE | 0x0800 | offset }
 /// throughput benchmarks below into a measurement of how fast a host thread
 /// can *attempt* pushes (a flat ~18M spans/s at every span length, i.e.
 /// "22 Gpx/s" for 1280-pixel Gouraud spans).
-fn w32(rex: &Rex3, addr: u32, value: u32) {
+fn w32(rex: &Rex3, addr: u64, value: u32) {
     while rex.write32(addr, value) == crate::traits::BUS_BUSY {
         std::hint::spin_loop();
     }
 }
 
 /// 64-bit counterpart of `w32`.
-fn w64(rex: &Rex3, addr: u32, value: u64) {
+fn w64(rex: &Rex3, addr: u64, value: u64) {
     while rex.write64(addr, value) == crate::traits::BUS_BUSY {
         std::hint::spin_loop();
     }
@@ -5747,7 +5747,7 @@ fn gfifo_push_cost() {
     // write32 default arm runs and the entry lands in the fifo.
     let push_one = |r: &Rex3| {
         // Retry on BUS_BUSY exactly as the CPU does.
-        while r.write32(REX3_COLORRED, 0x40 << 11) == crate::traits::BUS_BUSY {
+        while r.write32(REX3_COLORRED as u64, 0x40 << 11) == crate::traits::BUS_BUSY {
             std::hint::spin_loop();
         }
     };
@@ -5792,15 +5792,15 @@ fn gfifo_push64_cost() {
     // COLORRED/COLORGRN are adjacent and neither has a CPU-thread side effect,
     // so a 64-bit store to the pair takes the queue path.
     let push64 = |r: &Rex3| {
-        while r.write64(REX3_COLORRED, 0x0000_0040_0000_0050) == crate::traits::BUS_BUSY {
+        while r.write64(REX3_COLORRED as u64, 0x0000_0040_0000_0050) == crate::traits::BUS_BUSY {
             std::hint::spin_loop();
         }
     };
     let push32x2 = |r: &Rex3| {
-        while r.write32(REX3_COLORRED, 0x40) == crate::traits::BUS_BUSY {
+        while r.write32(REX3_COLORRED as u64, 0x40) == crate::traits::BUS_BUSY {
             std::hint::spin_loop();
         }
-        while r.write32(REX3_COLORRED + 4, 0x50) == crate::traits::BUS_BUSY {
+        while r.write32(REX3_COLORRED as u64 + 4, 0x50) == crate::traits::BUS_BUSY {
             std::hint::spin_loop();
         }
     };
@@ -5958,7 +5958,7 @@ fn gfifo_push_breakdown() {
     let rex = &make_rex3();
     rex3init(rex);
     let c = bench("write32 (full bus path + consumer)", &|| {
-        while rex.write32(REX3_COLORRED, 0x40 << 11) == crate::traits::BUS_BUSY {
+        while rex.write32(REX3_COLORRED as u64, 0x40 << 11) == crate::traits::BUS_BUSY {
             std::hint::spin_loop();
         }
     });

@@ -202,14 +202,14 @@ impl Resettable for MaceUst {
 }
 
 impl BusDevice for MaceUst {
-    fn read32(&self, addr: u32) -> BusRead32 {
+    fn read32(&self, addr: u64) -> BusRead32 {
         let t = self.counter();
         // 64-bit counter presented as two 32-bit halves.
         BusRead32::ok(if addr & 4 == 0 { (t >> 32) as u32 } else { t as u32 })
     }
-    fn read64(&self, _addr: u32) -> BusRead64 { BusRead64::ok(self.counter()) }
-    fn write32(&self, _a: u32, _v: u32) -> u32 { BUS_OK }
-    fn write64(&self, _a: u32, _v: u64) -> u32 { BUS_OK }
+    fn read64(&self, _addr: u64) -> BusRead64 { BusRead64::ok(self.counter()) }
+    fn write32(&self, _a: u64, _v: u32) -> u32 { BUS_OK }
+    fn write64(&self, _a: u64, _v: u64) -> u32 { BUS_OK }
 }
 
 #[cfg(test)]

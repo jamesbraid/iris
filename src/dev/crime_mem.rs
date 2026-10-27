@@ -308,7 +308,7 @@ impl O2Memory {
     /// The generation counter for the page holding byte offset `off`.
     #[cfg(feature = "jitv2")]
     pub fn gen_ptr(&self, off: usize) -> *const std::sync::atomic::AtomicU64 {
-        self.store.gen_ptr(off as u32)
+        self.store.gen_ptr(off as u64)
     }
 
     /// `n` bytes from offset `off`, in guest order.

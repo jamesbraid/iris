@@ -687,7 +687,7 @@ impl Device for Seeq8003 {
                         if let Some((addr, val)) = writeback {
                             if let Some(ref mem) = sys_mem_enet {
                                 dlog_dev!(LogModule::Seeq, "[ts={}] SEEQ TX writeback {:08x}+6 ← {:04x}", st.ts, addr - 6, val);
-                                mem.write16(addr, val);
+                                mem.write16(addr as u64, val);
                             }
                         }
                         dma_irq |= irq;
@@ -705,7 +705,7 @@ impl Device for Seeq8003 {
                         if let Some((addr, val)) = writeback {
                             if let Some(ref mem) = sys_mem_enet {
                                 dlog_dev!(LogModule::Seeq, "[ts={}] SEEQ RX writeback {:08x}+6 ← {:04x}", st.ts, addr - 6, val);
-                                mem.write16(addr, val);
+                                mem.write16(addr as u64, val);
                             }
                         }
                         dma_irq |= irq;

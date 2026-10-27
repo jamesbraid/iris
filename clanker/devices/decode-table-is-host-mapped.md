@@ -41,9 +41,23 @@ record: `docs/devmap-design.md`.
 
 ## Not done
 
-- The `BusDevice` trait still takes `u32`. The table is 40-bit so the bus
-  can be widened without redoing the decode; nothing above 4 GB is reachable
-  from the CPU yet.
+- The `BusDevice` trait takes `u64` (2026-10-26) and `Physical` masks to
+  `PHYS_MASK` (40 bits). `TranslateResult.phys` is `u64` too (2026-10-26),
+  so the CPU reaches the bus with full physical addresses. Above 4 GB:
+  - jitv2's `PfnMap` covers only the 32-bit space; `jitv2::pfn_of` returns
+    `None` above it, `jitv2_track_pcp` leaves `pcp` null, and `step_jit`
+    interprets. Code there is never compiled.
+  - ppmem's window and bitmap cover 4 GB. Test the bitmap with
+    `ppmem::bitmap_maps`, never `1 << (phys >> BITMAP_SHIFT)`: the shift
+    overflows above 4 GB (wraps to region 0 in release).
+  - `nutlb_fill` declines pages at or above 4 GB, because the JIT's inline
+    `emit_tc_mapped` uses that wrapping shift. Those accesses take the
+    callout.
+  - LLAddr is `u64`, PA[PA_BITS-1:4] masked by `CpuModel::LLADDR_MASK`
+    (PA_BITS 36 on R4x00/R5000, 40 on the R10000), on LL and on (D)MTC0.
+  IP32 `Ip32Bus` still truncates to u32 and models the PCI high window and
+  the no-ECC RAM alias folded into the low 4 GB; those can now be decoded
+  at their real addresses.
 - Windows backend written against the API, not run: same status as
   `map_windows.rs`. The devmap unit tests are the acceptance test.
 - Shared pages are never freed (bounded by the number of distinct devices);

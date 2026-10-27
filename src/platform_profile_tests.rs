@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn ioc_sys_id_matches_profile() {
-        let sys = IOC_BASE + IOC_SYS_ID;
+        let sys = (IOC_BASE + IOC_SYS_ID) as u64;
         let indy = Ioc::new_ci(true);
         assert_eq!(indy.read32(sys).data, 0x26, "Indy guinness sys_id");
 
@@ -145,17 +145,17 @@ mod tests {
     fn fullhouse_vblank_routes_sg_retrace_to_l1() {
         let ioc = Ioc::new_ci(false);
         ioc.set_interrupt(crate::dev::ioc::IocInterrupt::VerticalRetrace, true);
-        let l1 = ioc.read32(IOC_BASE + IOC_INT3_L1_STAT).data as u8;
+        let l1 = ioc.read32((IOC_BASE + IOC_INT3_L1_STAT) as u64).data as u8;
         assert_ne!(l1 & l1_regs::VERTICAL_RETRACE, 0, "SG retrace should assert L1 vblank");
         ioc.set_interrupt(crate::dev::ioc::IocInterrupt::VerticalRetrace, false);
-        let l1 = ioc.read32(IOC_BASE + IOC_INT3_L1_STAT).data as u8;
+        let l1 = ioc.read32((IOC_BASE + IOC_INT3_L1_STAT) as u64).data as u8;
         assert_eq!(l1 & l1_regs::VERTICAL_RETRACE, 0);
     }
 
     #[test]
     fn ioc_fullhouse_gc_select_read_write() {
         let ioc = Ioc::new_ci(false);
-        let gc = IOC_BASE + crate::dev::ioc::IOC_GC_SELECT;
+        let gc = (IOC_BASE + crate::dev::ioc::IOC_GC_SELECT) as u64;
         assert_eq!(ioc.write32(gc, 0x0F), crate::traits::BUS_OK);
         assert_eq!(ioc.read32(gc).data, 0x0F, "fullhouse gc_select round-trip");
     }
@@ -193,7 +193,7 @@ mod tests {
             let g = gr2(variant);
             let mut found = 1;
             for i in 1..8u32 {
-                let a = GR2_BASE + 0x68000 + i * 0x400;
+                let a = GR2_BASE + 0x68000 + (i * 0x400) as u64;
                 g.write32(a, 0x1f1f_1f1f);
                 g.write32(a + 127 * 4, 0x5b5b_5b5b);
                 if g.read32(a).data == 0x1f1f_1f1f && g.read32(a + 127 * 4).data == 0x5b5b_5b5b {
@@ -218,7 +218,7 @@ mod tests {
     fn mgras_answers_the_gio_id_probe() {
         let hb = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let m = Mgras::new(GraphicsBoard::SolidImpact, std::array::from_fn(|_| crate::irq::IrqLine::unconnected()), hb.clone(), hb);
-        assert_eq!(m.read32(MGRAS_SLOT_GFX_BASE).data, GIO_ID);
+        assert_eq!(m.read32(MGRAS_SLOT_GFX_BASE as u64).data, GIO_ID);
     }
 
     #[test]

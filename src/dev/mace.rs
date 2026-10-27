@@ -311,345 +311,355 @@ impl Mace {
     }
 }
 
+// MACE decodes 32 bits: `a` is the address its decode helpers take, and the
+// full bus address goes on to the block that answers.
 impl BusDevice for Mace {
-    fn read8(&self, addr: u32) -> BusRead8 {
-        if Self::in_mec(addr) {
+    fn read8(&self, addr: u64) -> BusRead8 {
+        let a = addr as u32;
+        if Self::in_mec(a) {
             return BusDevice::read8(&*self.mec, addr);
         }
-        if Self::in_pci_regs(addr) {
+        if Self::in_pci_regs(a) {
             return BusRead8::ok(self.pci.read32(addr & !3).data as u8);
         }
-        if Self::is_nic_reg(addr) {
+        if Self::is_nic_reg(a) {
             return BusRead8::ok(self.nic_read());
         }
-        if let Some(c) = self.com_for(addr) {
+        if let Some(c) = self.com_for(a) {
             return c.read8(addr);
         }
-        if MacePci::in_window(addr) {
-            return BusRead8::ok(self.pci.window_read(addr, 1) as u8);
+        if MacePci::in_window(a) {
+            return BusRead8::ok(self.pci.window_read(a, 1) as u8);
         }
-        if Self::in_ps2(addr) {
+        if Self::in_ps2(a) {
             return BusDevice::read8(&self.ps2, addr);
         }
-        if Self::in_rtc(addr) {
+        if Self::in_rtc(a) {
             return self.rtc.read8(addr);
         }
-        if MaceAudio::contains(addr) {
+        if MaceAudio::contains(a) {
             return BusDevice::read8(&self.audio, addr);
         }
-        if Self::in_sdma(addr) {
-            return BusRead8::ok(self.sdma_read(addr) as u8);
+        if Self::in_sdma(a) {
+            return BusRead8::ok(self.sdma_read(a) as u8);
         }
-        if MaceIsa::contains(addr) {
-            self.isa_reading(addr);
+        if MaceIsa::contains(a) {
+            self.isa_reading(a);
             return BusDevice::read8(&*self.isa, addr);
         }
         self.regs.read8(addr)
     }
 
-    fn read16(&self, addr: u32) -> BusRead16 {
-        if Self::in_mec(addr) {
+    fn read16(&self, addr: u64) -> BusRead16 {
+        let a = addr as u32;
+        if Self::in_mec(a) {
             return BusDevice::read16(&*self.mec, addr);
         }
-        if Self::in_pci_regs(addr) {
+        if Self::in_pci_regs(a) {
             return BusRead16::ok(self.pci.read32(addr & !3).data as u16);
         }
-        if let Some(c) = self.com_for(addr) {
+        if let Some(c) = self.com_for(a) {
             return c.read16(addr);
         }
-        if MacePci::in_window(addr) {
-            return BusRead16::ok(self.pci.window_read(addr, 2) as u16);
+        if MacePci::in_window(a) {
+            return BusRead16::ok(self.pci.window_read(a, 2) as u16);
         }
-        if Self::in_ps2(addr) {
+        if Self::in_ps2(a) {
             return BusDevice::read16(&self.ps2, addr);
         }
-        if Self::in_rtc(addr) {
+        if Self::in_rtc(a) {
             return self.rtc.read16(addr);
         }
-        if MaceAudio::contains(addr) {
+        if MaceAudio::contains(a) {
             return BusDevice::read16(&self.audio, addr);
         }
-        if Self::in_sdma(addr) {
-            return BusRead16::ok(self.sdma_read(addr) as u16);
+        if Self::in_sdma(a) {
+            return BusRead16::ok(self.sdma_read(a) as u16);
         }
-        if MaceIsa::contains(addr) {
-            self.isa_reading(addr);
+        if MaceIsa::contains(a) {
+            self.isa_reading(a);
             return BusDevice::read16(&*self.isa, addr);
         }
         self.regs.read16(addr)
     }
 
-    fn read32(&self, addr: u32) -> BusRead32 {
-        if Self::in_mec(addr) {
+    fn read32(&self, addr: u64) -> BusRead32 {
+        let a = addr as u32;
+        if Self::in_mec(a) {
             return BusDevice::read32(&*self.mec, addr);
         }
-        if let Some(n) = Self::audio_msc_slot(addr) {
+        if let Some(n) = Self::audio_msc_slot(a) {
             let v = self.audio.msc_ust(n);
             return BusRead32::ok(if addr & 4 == 0 { (v >> 32) as u32 } else { v as u32 });
         }
-        if Self::in_ust(addr) {
+        if Self::in_ust(a) {
             return self.ust.read32(addr);
         }
-        if Self::in_pci_regs(addr) {
+        if Self::in_pci_regs(a) {
             return self.pci.read32(addr);
         }
-        if Self::is_nic_reg(addr) {
+        if Self::is_nic_reg(a) {
             return BusRead32::ok(self.nic_read() as u32);
         }
-        if let Some(c) = self.com_for(addr) {
+        if let Some(c) = self.com_for(a) {
             return c.read32(addr);
         }
-        if MacePci::in_window(addr) {
-            return BusRead32::ok(self.pci.window_read(addr, 4) as u32);
+        if MacePci::in_window(a) {
+            return BusRead32::ok(self.pci.window_read(a, 4) as u32);
         }
-        if Self::in_ps2(addr) {
+        if Self::in_ps2(a) {
             return BusDevice::read32(&self.ps2, addr);
         }
-        if Self::in_rtc(addr) {
+        if Self::in_rtc(a) {
             return self.rtc.read32(addr);
         }
-        if MaceAudio::contains(addr) {
+        if MaceAudio::contains(a) {
             return BusDevice::read32(&self.audio, addr);
         }
-        if Self::in_sdma(addr) {
+        if Self::in_sdma(a) {
             // The registers are 64-bit; a 32-bit access is the half it names.
-            let v = self.sdma_read(addr);
+            let v = self.sdma_read(a);
             return BusRead32::ok(if addr & 4 == 0 { (v >> 32) as u32 } else { v as u32 });
         }
-        if MaceIsa::contains(addr) {
-            self.isa_reading(addr);
+        if MaceIsa::contains(a) {
+            self.isa_reading(a);
             return BusDevice::read32(&*self.isa, addr);
         }
         self.regs.read32(addr)
     }
 
-    fn read64(&self, addr: u32) -> BusRead64 {
-        if Self::in_mec(addr) {
+    fn read64(&self, addr: u64) -> BusRead64 {
+        let a = addr as u32;
+        if Self::in_mec(a) {
             return BusDevice::read64(&*self.mec, addr);
         }
-        if let Some(n) = Self::audio_msc_slot(addr) {
+        if let Some(n) = Self::audio_msc_slot(a) {
             return BusRead64::ok(self.audio.msc_ust(n));
         }
-        if Self::in_ust(addr) {
+        if Self::in_ust(a) {
             return self.ust.read64(addr);
         }
-        if Self::in_pci_regs(addr) {
+        if Self::in_pci_regs(a) {
             return self.pci.read64(addr);
         }
-        if Self::is_nic_reg(addr) {
+        if Self::is_nic_reg(a) {
             return BusRead64::ok(self.nic_read() as u64);
         }
-        if let Some(c) = self.com_for(addr) {
+        if let Some(c) = self.com_for(a) {
             return c.read64(addr);
         }
-        if MacePci::in_window(addr) {
-            return BusRead64::ok(self.pci.window_read(addr, 8));
+        if MacePci::in_window(a) {
+            return BusRead64::ok(self.pci.window_read(a, 8));
         }
-        if Self::in_ps2(addr) {
+        if Self::in_ps2(a) {
             return BusDevice::read64(&self.ps2, addr);
         }
-        if Self::in_rtc(addr) {
+        if Self::in_rtc(a) {
             return self.rtc.read64(addr);
         }
-        if MaceAudio::contains(addr) {
+        if MaceAudio::contains(a) {
             return BusDevice::read64(&self.audio, addr);
         }
-        if Self::in_sdma(addr) {
-            return BusRead64::ok(self.sdma_read(addr));
+        if Self::in_sdma(a) {
+            return BusRead64::ok(self.sdma_read(a));
         }
-        if MaceIsa::contains(addr) {
-            self.isa_reading(addr);
+        if MaceIsa::contains(a) {
+            self.isa_reading(a);
             return BusDevice::read64(&*self.isa, addr);
         }
         self.regs.read64(addr)
     }
 
-    fn write8(&self, addr: u32, val: u8) -> u32 {
-        if Self::in_mec(addr) {
+    fn write8(&self, addr: u64, val: u8) -> u32 {
+        let a = addr as u32;
+        if Self::in_mec(a) {
             return BusDevice::write8(&*self.mec, addr, val);
         }
-        if Self::in_pci_regs(addr) {
+        if Self::in_pci_regs(a) {
             return self.pci.write32(addr & !3, val as u32);
         }
-        if Self::is_nic_reg(addr) {
+        if Self::is_nic_reg(a) {
             self.nic_write(val);
             let r = self.regs.write8(addr, val);
-            self.regs_wrote(addr);
+            self.regs_wrote(a);
             return r;
         }
-        if let Some(c) = self.com_for(addr) {
+        if let Some(c) = self.com_for(a) {
             return c.write8(addr, val);
         }
-        if MacePci::in_window(addr) {
-            self.pci.window_write(addr, val as u64, 1);
+        if MacePci::in_window(a) {
+            self.pci.window_write(a, val as u64, 1);
             return BUS_OK;
         }
-        if Self::in_ps2(addr) {
+        if Self::in_ps2(a) {
             return BusDevice::write8(&self.ps2, addr, val);
         }
-        if Self::in_rtc(addr) {
+        if Self::in_rtc(a) {
             return self.rtc.write8(addr, val);
         }
-        if MaceAudio::contains(addr) {
+        if MaceAudio::contains(a) {
             return BusDevice::write8(&self.audio, addr, val);
         }
-        if Self::in_sdma(addr) {
+        if Self::in_sdma(a) {
             // A narrow store is the low end of the register.
-            return self.sdma_write(addr, val as u64);
+            return self.sdma_write(a, val as u64);
         }
-        if MaceIsa::contains(addr) {
+        if MaceIsa::contains(a) {
             self.regs.w();
-            self.regs.hit(addr, true);
+            self.regs.hit(a, true);
             let r = BusDevice::write8(&*self.isa, addr, val);
-            self.isa_wrote(addr);
+            self.isa_wrote(a);
             return r;
         }
         let r = self.regs.write8(addr, val);
-        self.regs_wrote(addr);
+        self.regs_wrote(a);
         r
     }
 
-    fn write16(&self, addr: u32, val: u16) -> u32 {
-        if Self::in_mec(addr) {
+    fn write16(&self, addr: u64, val: u16) -> u32 {
+        let a = addr as u32;
+        if Self::in_mec(a) {
             return BusDevice::write16(&*self.mec, addr, val);
         }
-        if Self::in_pci_regs(addr) {
+        if Self::in_pci_regs(a) {
             return self.pci.write32(addr & !3, val as u32);
         }
-        if let Some(c) = self.com_for(addr) {
+        if let Some(c) = self.com_for(a) {
             return c.write16(addr, val);
         }
-        if MacePci::in_window(addr) {
-            self.pci.window_write(addr, val as u64, 2);
+        if MacePci::in_window(a) {
+            self.pci.window_write(a, val as u64, 2);
             return BUS_OK;
         }
-        if Self::in_ps2(addr) {
+        if Self::in_ps2(a) {
             return BusDevice::write16(&self.ps2, addr, val);
         }
-        if Self::in_rtc(addr) {
+        if Self::in_rtc(a) {
             return self.rtc.write16(addr, val);
         }
-        if MaceAudio::contains(addr) {
+        if MaceAudio::contains(a) {
             return BusDevice::write16(&self.audio, addr, val);
         }
-        if Self::in_sdma(addr) {
+        if Self::in_sdma(a) {
             // A narrow store is the low end of the register.
-            return self.sdma_write(addr, val as u64);
+            return self.sdma_write(a, val as u64);
         }
-        if MaceIsa::contains(addr) {
+        if MaceIsa::contains(a) {
             self.regs.w();
-            self.regs.hit(addr, true);
+            self.regs.hit(a, true);
             let r = BusDevice::write16(&*self.isa, addr, val);
-            self.isa_wrote(addr);
+            self.isa_wrote(a);
             return r;
         }
         let r = self.regs.write16(addr, val);
-        self.regs_wrote(addr);
+        self.regs_wrote(a);
         r
     }
 
-    fn write32(&self, addr: u32, val: u32) -> u32 {
-        if Self::in_mec(addr) {
+    fn write32(&self, addr: u64, val: u32) -> u32 {
+        let a = addr as u32;
+        if Self::in_mec(a) {
             return BusDevice::write32(&*self.mec, addr, val);
         }
-        if let Some(n) = Self::audio_msc_slot(addr) {
+        if let Some(n) = Self::audio_msc_slot(a) {
             let v = self.audio.msc_ust(n);
             let v = if addr & 4 == 0 { (v & 0xffff_ffff) | (val as u64) << 32 } else { (v & !0xffff_ffff) | val as u64 };
             self.audio.set_msc_ust(n, v);
             return BUS_OK;
         }
-        if Self::in_ust(addr) {
+        if Self::in_ust(a) {
             return self.ust.write32(addr, val);
         }
-        if Self::in_pci_regs(addr) {
+        if Self::in_pci_regs(a) {
             return self.pci.write32(addr, val);
         }
-        if Self::is_nic_reg(addr) {
+        if Self::is_nic_reg(a) {
             self.nic_write(val as u8);
             let r = self.regs.write32(addr, val);
-            self.regs_wrote(addr);
+            self.regs_wrote(a);
             return r;
         }
-        if let Some(c) = self.com_for(addr) {
+        if let Some(c) = self.com_for(a) {
             return c.write32(addr, val);
         }
-        if MacePci::in_window(addr) {
-            self.pci.window_write(addr, val as u64, 4);
+        if MacePci::in_window(a) {
+            self.pci.window_write(a, val as u64, 4);
             return BUS_OK;
         }
-        if Self::in_ps2(addr) {
+        if Self::in_ps2(a) {
             return BusDevice::write32(&self.ps2, addr, val);
         }
-        if Self::in_rtc(addr) {
+        if Self::in_rtc(a) {
             return self.rtc.write32(addr, val);
         }
-        if MaceAudio::contains(addr) {
+        if MaceAudio::contains(a) {
             return BusDevice::write32(&self.audio, addr, val);
         }
-        if Self::in_sdma(addr) {
+        if Self::in_sdma(a) {
             // A narrow store is the low end of the register.
-            return self.sdma_write(addr, val as u64);
+            return self.sdma_write(a, val as u64);
         }
-        if MaceIsa::contains(addr) {
+        if MaceIsa::contains(a) {
             self.regs.w();
-            self.regs.hit(addr, true);
+            self.regs.hit(a, true);
             let r = BusDevice::write32(&*self.isa, addr, val);
-            self.isa_wrote(addr);
+            self.isa_wrote(a);
             return r;
         }
         let r = self.regs.write32(addr, val);
-        self.regs_wrote(addr);
+        self.regs_wrote(a);
         r
     }
 
-    fn write64(&self, addr: u32, val: u64) -> u32 {
-        if Self::in_mec(addr) {
+    fn write64(&self, addr: u64, val: u64) -> u32 {
+        let a = addr as u32;
+        if Self::in_mec(a) {
             return BusDevice::write64(&*self.mec, addr, val);
         }
-        if let Some(n) = Self::audio_msc_slot(addr) {
+        if let Some(n) = Self::audio_msc_slot(a) {
             self.audio.set_msc_ust(n, val);
             return BUS_OK;
         }
-        if Self::in_ust(addr) {
+        if Self::in_ust(a) {
             return self.ust.write64(addr, val);
         }
-        if Self::in_pci_regs(addr) {
+        if Self::in_pci_regs(a) {
             return self.pci.write64(addr, val);
         }
-        if Self::is_nic_reg(addr) {
+        if Self::is_nic_reg(a) {
             self.nic_write(val as u8);
             let r = self.regs.write64(addr, val);
-            self.regs_wrote(addr);
+            self.regs_wrote(a);
             return r;
         }
-        if let Some(c) = self.com_for(addr) {
+        if let Some(c) = self.com_for(a) {
             return c.write64(addr, val);
         }
-        if MacePci::in_window(addr) {
-            self.pci.window_write(addr, val, 8);
+        if MacePci::in_window(a) {
+            self.pci.window_write(a, val, 8);
             return BUS_OK;
         }
-        if Self::in_ps2(addr) {
+        if Self::in_ps2(a) {
             return BusDevice::write64(&self.ps2, addr, val);
         }
-        if Self::in_rtc(addr) {
+        if Self::in_rtc(a) {
             return self.rtc.write64(addr, val);
         }
-        if MaceAudio::contains(addr) {
+        if MaceAudio::contains(a) {
             return BusDevice::write64(&self.audio, addr, val);
         }
-        if Self::in_sdma(addr) {
-            return self.sdma_write(addr, val);
+        if Self::in_sdma(a) {
+            return self.sdma_write(a, val);
         }
-        if MaceIsa::contains(addr) {
+        if MaceIsa::contains(a) {
             self.regs.w();
-            self.regs.hit(addr, true);
+            self.regs.hit(a, true);
             let r = BusDevice::write64(&*self.isa, addr, val);
-            self.isa_wrote(addr);
+            self.isa_wrote(a);
             return r;
         }
         let r = self.regs.write64(addr, val);
-        self.regs_wrote(addr);
+        self.regs_wrote(a);
         r
     }
 }

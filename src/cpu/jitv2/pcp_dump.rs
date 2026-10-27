@@ -138,7 +138,7 @@ impl PcpDump {
         let mut words = [0u32; ENTRIES_PER_PAGE];
         for (i, w) in words.iter_mut().enumerate() {
             let addr = phys_base + (i as u32) * 4;
-            let r = bus.read32(addr);
+            let r = bus.read32(addr as u64);
             if !r.is_ok() {
                 return Err(addr);
             }

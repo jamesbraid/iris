@@ -765,6 +765,8 @@ impl Machine {
         let cfg = MipsCpuConfig::for_model::<$cache>();
         let tlb = MipsTlb::new(cfg.tlb_entries);
         let mut executor: MipsExecutor<MipsTlb, $cache> = MipsExecutor::new(sysad.clone(), tlb, &cfg);
+        // The MC decodes 32 physical address bits; see `MipsExecutor::phys_mask`.
+        executor.phys_mask = u32::MAX as u64;
 
         // Load default symbol maps if they exist
         {

@@ -7,7 +7,7 @@
 // - L2 can signal back to L1 for evictions
 
 use crate::traits::{BusRead64, BusDevice, Resettable, BUS_OK, BUS_BUSY, BUS_ERR, BUS_VCE};
-use crate::snapshot::{u32_slice_to_toml, u64_slice_to_toml, load_u32_slice, load_u64_slice, get_field, toml_bool, toml_u32, hex_u32};
+use crate::snapshot::{u32_slice_to_toml, u64_slice_to_toml, load_u32_slice, load_u64_slice, get_field, toml_bool, toml_u32, toml_u64, hex_u32, hex_u64};
 use crate::cpu::mips_exec::{DecodedInstr, ExecStatus, EXEC_COMPLETE, EXEC_RETRY, exec_exception_const, EXC_VCEI, EXC_VCED, EXC_IBE, FLAG_NOT_DECODED, FLAG_IMM_IS_NEXT, EXEC_CACHE_ERR};
 use crate::devlog::{LogModule, CACHE_LOG_HIT, CACHE_LOG_MISS, CACHE_LOG_OP, devlog_is_active, devlog_mask};
 use std::sync::Arc;
@@ -541,6 +541,11 @@ pub trait CpuModel: MipsCache {
     /// Region and PTEBase fields sit, which is how a 64-bit kernel finds the
     /// page-table entry for a faulting address.
     const VA_BITS: u32 = 40;
+    /// Implemented physical address bits: 36 on the R4x00/R5000, 40 on the
+    /// R10000. LLAddr holds `PA[PA_BITS-1:4]`.
+    const PA_BITS: u32 = 36;
+    /// The bits of LLAddr that exist.
+    const LLADDR_MASK: u64 = (1 << (Self::PA_BITS - 4)) - 1;
     /// Name as the guest and the benchmark report see it.
     const NAME: &'static str;
     /// "full" for the model whose arrays loads, stores and fetches consult;
@@ -768,10 +773,10 @@ pub trait MipsCache: Send + Sync {
     fn set_llbit(&self, val: bool);
 
     /// Get Load-Linked address
-    fn get_lladdr(&self) -> u32;
+    fn get_lladdr(&self) -> u64;
 
     /// Set Load-Linked address
-    fn set_lladdr(&self, addr: u32);
+    fn set_lladdr(&self, addr: u64);
 
     /// Debug probe a virtual+physical address (optional, for debugging)
     fn debug_probe(&self, _cache_name: &str, _virt_addr: u64, _phys_addr: u64) -> String {
@@ -811,7 +816,7 @@ pub trait MipsCache: Send + Sync {
 pub struct PassthroughCacheOf<const MIPS4: bool> {
     downstream: Arc<dyn BusDevice>,
     llbit: UnsafeCell<bool>,
-    lladdr: UnsafeCell<u32>,
+    lladdr: UnsafeCell<u64>,
     /// Scratch slot for fetch() — no actual caching, just a place to decode into.
     fetch_scratch: UnsafeCell<DecodedInstr>,
 }
@@ -864,7 +869,7 @@ impl<const MIPS4: bool> MipsCache for PassthroughCacheOf<MIPS4> {
     fn fetch_is_pure(&self) -> bool { true }
 
     fn fetch(&self, _virt_addr: u64, phys_addr: u64) -> FetchInstrResult {
-        let r = self.downstream.read32(phys_addr as u32);
+        let r = self.downstream.read32(phys_addr);
         if r.is_ok() {
             let slot = unsafe { &mut *self.fetch_scratch.get() };
             slot.flags = FLAG_NOT_DECODED;
@@ -878,15 +883,15 @@ impl<const MIPS4: bool> MipsCache for PassthroughCacheOf<MIPS4> {
 
     fn read<const SIZE: usize>(&self, _virt_addr: u64, phys_addr: u64) -> BusRead64 {
         const { assert!(SIZE == 1 || SIZE == 2 || SIZE == 4 || SIZE == 8, "invalid memory access SIZE") };
-        if SIZE == 1 { let r = self.downstream.read8(phys_addr as u32);  BusRead64 { status: r.status, data: r.data as u64 } }
-        else if SIZE == 2 { let r = self.downstream.read16(phys_addr as u32); BusRead64 { status: r.status, data: r.data as u64 } }
-        else if SIZE == 4 { let r = self.downstream.read32(phys_addr as u32); BusRead64 { status: r.status, data: r.data as u64 } }
-        else               { self.downstream.read64(phys_addr as u32) }
+        if SIZE == 1 { let r = self.downstream.read8(phys_addr);  BusRead64 { status: r.status, data: r.data as u64 } }
+        else if SIZE == 2 { let r = self.downstream.read16(phys_addr); BusRead64 { status: r.status, data: r.data as u64 } }
+        else if SIZE == 4 { let r = self.downstream.read32(phys_addr); BusRead64 { status: r.status, data: r.data as u64 } }
+        else               { self.downstream.read64(phys_addr) }
     }
 
     fn write<const SIZE: usize>(&self, _virt_addr: u64, phys_addr: u64, val: u64) -> u32 {
         const { assert!(SIZE == 1 || SIZE == 2 || SIZE == 4 || SIZE == 8, "invalid memory access SIZE") };
-        let addr = phys_addr as u32;
+        let addr = phys_addr;
         if SIZE == 1      { self.downstream.write8(addr, val as u8) }
         else if SIZE == 2 { self.downstream.write16(addr, val as u16) }
         else if SIZE == 4 { self.downstream.write32(addr, val as u32) }
@@ -895,7 +900,7 @@ impl<const MIPS4: bool> MipsCache for PassthroughCacheOf<MIPS4> {
 
     fn write64_masked(&self, _virt_addr: u64, phys_addr: u64, val: u64, mask: u64) -> u32 {
         // SDL/SDR only — read-modify-write on the downstream device
-        let aligned_addr = (phys_addr & !7) as u32;
+        let aligned_addr = phys_addr & !7;
         let r = self.downstream.read64(aligned_addr);
         if !r.is_ok() { return r.status; }
         let new_val = (r.data & !mask) | (val & mask);
@@ -928,11 +933,11 @@ impl<const MIPS4: bool> MipsCache for PassthroughCacheOf<MIPS4> {
         unsafe { *self.llbit.get() = val; }
     }
 
-    fn get_lladdr(&self) -> u32 {
+    fn get_lladdr(&self) -> u64 {
         unsafe { *self.lladdr.get() }
     }
 
-    fn set_lladdr(&self, addr: u32) {
+    fn set_lladdr(&self, addr: u64) {
         unsafe { *self.lladdr.get() = addr; }
     }
 
@@ -1257,7 +1262,7 @@ pub struct CpuCache<
 
     // Load-Linked / Store-Conditional support
     llbit: UnsafeCell<bool>,
-    lladdr: UnsafeCell<u32>,
+    lladdr: UnsafeCell<u64>,
 
     /// L1-I hit counter — incremented on every fetch that finds a valid line (no fill needed).
     pub l1i_hit_count: Arc<AtomicU64>,
@@ -1745,11 +1750,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
         {
             TC_PROBES.fetch_add(1, Ordering::Relaxed);
         }
-        // `phys_addr` is a 32-bit physical address by construction — anything
-        // larger is a bug upstream, and the shift below will panic in debug
-        // rather than silently pretending the address is un-mapped.
-        let bits = unsafe { *self.tc_bitmap.get() };
-        let hit = bits & (1u64 << (phys_addr >> crate::ppmem::BITMAP_SHIFT)) != 0;
+        let hit = crate::ppmem::bitmap_maps(unsafe { *self.tc_bitmap.get() }, phys_addr);
         #[cfg(feature = "developer")]
         if hit {
             TC_HITS.fetch_add(1, Ordering::Relaxed);
@@ -1796,15 +1797,14 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
                 }
             }
         } else {
-            let a = phys_addr as u32;
             if ACC == 8 {
-                self.downstream.read64(a).data
+                self.downstream.read64(phys_addr).data
             } else if ACC == 4 {
-                self.downstream.read32(a).data as u64
+                self.downstream.read32(phys_addr).data as u64
             } else if ACC == 2 {
-                self.downstream.read16(a).data as u64
+                self.downstream.read16(phys_addr).data as u64
             } else {
-                self.downstream.read8(a).data as u64
+                self.downstream.read8(phys_addr).data as u64
             }
         }
     }
@@ -1833,15 +1833,14 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
             // the gen bump it would have performed has to happen here.
             self.tc_bump_gen(phys_addr);
         } else {
-            let a = phys_addr as u32;
             if ACC == 8 {
-                self.downstream.write64(a, val);
+                self.downstream.write64(phys_addr, val);
             } else if ACC == 4 {
-                self.downstream.write32(a, val as u32);
+                self.downstream.write32(phys_addr, val as u32);
             } else if ACC == 2 {
-                self.downstream.write16(a, val as u16);
+                self.downstream.write16(phys_addr, val as u16);
             } else {
-                self.downstream.write8(a, val as u8);
+                self.downstream.write8(phys_addr, val as u8);
             }
         }
     }
@@ -1930,14 +1929,14 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
 
     /// Check if the given physical address overlaps with the Load Linked address.
     /// If so, clear llbit (the link is broken).
-    /// The lladdr stores bits [35:4] of the physical address.
+    /// The lladdr stores PA[PA_BITS-1:4].
     #[inline]
     fn check_and_clear_llbit(&self, phys_addr: u64, line_mask: usize) {
         unsafe {
             if !*self.llbit.get() {
                 return;
             }
-            let ll_addr = (*self.lladdr.get() as u64) << 4;
+            let ll_addr = *self.lladdr.get() << 4;
             let line_mask = line_mask as u64;
             let addr_line = phys_addr & !line_mask;
             let ll_line = ll_addr & !line_mask;
@@ -2209,7 +2208,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
                 let l1_start_chunk = l1_idx << Self::DC_CHUNKS_PER_LINE_SHIFT;
                 let line_base = phys_addr & !(Self::DC_LINE_MASK as u64);
                 let src = &dc_data[l1_start_chunk..l1_start_chunk + Self::DC_CHUNKS_PER_LINE];
-                self.downstream.write_block(line_base as u32, src);
+                self.downstream.write_block(line_base, src);
             }
             let mut dc_tag: L1DTag = self.dc.get_tag(l1_idx);
             dc_tag.dirty = false;
@@ -2408,7 +2407,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
             let l2_data = self.l2.data();
             let start_chunk = idx << Self::L2_CHUNKS_PER_LINE_SHIFT;
             let src = &l2_data[start_chunk..start_chunk + Self::L2_CHUNKS_PER_LINE];
-            if self.downstream.write_block(phys_addr as u32, src) != BUS_OK {
+            if self.downstream.write_block(phys_addr, src) != BUS_OK {
                 return false;
             }
         }
@@ -2515,7 +2514,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
         }
         if skip_data {
             // Tags only; see `skip_data` above.
-        } else if let Some(src) = self.downstream.mem_ptr(line_base as u32) {
+        } else if let Some(src) = self.downstream.mem_ptr(line_base) {
             // Fast path: single pass over source — rotate into l2.data and fill l2.instrs.
             let l2_instrs = self.l2.instrs.get_mut();
             // Only fuse_pair! mutates prev_s1, and it is a no-op without opcodefusion.
@@ -2542,7 +2541,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
             }
         } else {
             let dest = &mut l2_data[start_chunk..start_chunk + Self::L2_CHUNKS_PER_LINE];
-            let s = self.downstream.read_block(line_base as u32, dest);
+            let s = self.downstream.read_block(line_base, dest);
             if s != crate::traits::BUS_OK { return false; }
             if !Self::IS_R5K {
             {
@@ -2693,7 +2692,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
             } else {
                 // L2 disabled: read directly from memory.
                 let line_base = phys_addr & !(Self::IC_LINE_MASK as u64);
-                if let Some(src) = self.downstream.mem_ptr(line_base as u32) {
+                if let Some(src) = self.downstream.mem_ptr(line_base) {
                     // Fast path: read word pairs directly from backing store.
                     // mem_ptr's raw u64s are host-native pairs of little-endian-loaded
                     // words; rotate_left(32) puts them in MIPS big-endian word order
@@ -2711,7 +2710,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
                     }
                 } else {
                     for i in 0..Self::IC_INSTRS_PER_LINE {
-                        let word_addr = (line_base + (i as u64) * 4) as u32;
+                        let word_addr = line_base + (i as u64) * 4;
                         let r = self.downstream.read32(word_addr);
                         let w = if r.is_ok() { r.data } else { 0 };
                         let d = &mut ic_instrs[ic_slot_base + i];
@@ -3043,7 +3042,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
             let tag: L2Tag = self.l2.get_tag(idx);
             let off = virt_addr as usize & Self::L2_LINE_MASK & !7;
             let phys = l2_tag_to_phys(tag, ((idx << Self::L2_LINE_SHIFT) | off) as u64);
-            let data = tc_or!(self, self.downstream.read64(phys as u32).data,
+            let data = tc_or!(self, self.downstream.read64(phys).data,
                 self.l2.data()[(idx << Self::L2_CHUNKS_PER_LINE_SHIFT) + (off >> 3)]);
             return (l2_data_ecc(data) ^ self.l2_xor(phys)) as u32;
         }
@@ -3215,7 +3214,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
                 // L2 disabled: copy directly from memory
                 let line_base = phys_addr & !(Self::DC_LINE_MASK as u64);
                 let dest = &mut dc_data[dc_start_chunk..dc_start_chunk + Self::DC_CHUNKS_PER_LINE];
-                self.downstream.read_block(line_base as u32, dest);
+                self.downstream.read_block(line_base, dest);
             }
         }
 
@@ -3373,13 +3372,13 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
 
         let Some(l2_idx) = self.hit_l2(line_base) else {
             // write_block bumps the jitv2 page generations it spans.
-            self.downstream.write_block(line_base as u32, chunks);
+            self.downstream.write_block(line_base, chunks);
             return;
         };
         // tcache: RAM is the store, so the words go there; dropping
         // `has_code` makes the next L1-I fill re-read them.
         tc_or!(self, {
-            self.downstream.write_block(line_base as u32, chunks);
+            self.downstream.write_block(line_base, chunks);
             self.tc_invalidate_l2_code(line_base);
         }, {
             let off = ((line_base as usize) & Self::L2_LINE_MASK) >> 3;
@@ -3434,7 +3433,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
                 continue;
             }
             for i in 0..n {
-                let r = self.downstream.read32((line_base + 4 * i as u64) as u32);
+                let r = self.downstream.read32(line_base + 4 * i as u64);
                 let w = if r.is_ok() { r.data } else { 0 };
                 if Self::IS_R5K {
                     let slot = &mut self.ic_instrs.get_mut()[(eidx << Self::IC_INSTR_SHIFT) + i];
@@ -3576,6 +3575,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
     // 44 implemented virtual address bits on the R10000, as the shadow
     // model already says; XContext's layout follows them.
     const VA_BITS: u32 = if MODEL == model::R10000 { 44 } else { 40 };
+    const PA_BITS: u32 = if MODEL == model::R10000 { 40 } else { 36 };
     const NAME: &'static str = match MODEL {
         model::R5000 => "R5000",
         model::R10000 => "R10000",
@@ -4477,7 +4477,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
         if !self.get_llbit() {
             return;
         }
-        let ll_addr = (self.get_lladdr() as u64) << 4;
+        let ll_addr = self.get_lladdr() << 4;
         let addr_line = phys_addr & !(Self::DC_LINE_MASK as u64);
         let ll_line = ll_addr & !(Self::DC_LINE_MASK as u64);
         if addr_line == ll_line {
@@ -4493,11 +4493,11 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
         unsafe { *self.llbit.get() = val; }
     }
 
-    fn get_lladdr(&self) -> u32 {
+    fn get_lladdr(&self) -> u64 {
         unsafe { *self.lladdr.get() }
     }
 
-    fn set_lladdr(&self, addr: u32) {
+    fn set_lladdr(&self, addr: u64) {
         unsafe { *self.lladdr.get() = addr; }
     }
 
@@ -4916,7 +4916,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
         t.insert("l2_tags".into(),  u32_slice_to_toml(&l2_tags));
         t.insert("l2_data".into(),  u64_slice_to_toml(&l2_data));
         t.insert("llbit".into(),    toml::Value::Boolean(llbit));
-        t.insert("lladdr".into(),   hex_u32(lladdr));
+        t.insert("lladdr".into(),   hex_u64(lladdr));
         // 2-way only: LRU as packed u32 words, 1 bit per set (unchanged on-disk format).
         // ic_instrs / ic_raw not saved — load_cache_state rebuilds them (rebuild_l1i_words).
         if Self::IS_R5K {
@@ -5009,7 +5009,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
             if let Some(b) = toml_bool(f) { unsafe { *self.llbit.get() = b; } }
         }
         if let Some(f) = get_field(v, "lladdr") {
-            if let Some(a) = toml_u32(f) { unsafe { *self.lladdr.get() = a; } }
+            if let Some(a) = toml_u64(f) { unsafe { *self.lladdr.get() = a; } }
         }
         self.rebuild_l1i_words();
         Ok(())
@@ -5220,7 +5220,7 @@ mod tests {
         }
         for (i, &want) in shadow.iter().enumerate() {
             if want == 0 { continue; }
-            let phys = (i * 4) as u32;
+            let phys = (i * 4) as u64;
             let got = mem.read32(phys).data;
             assert_eq!(got, want, "post-flush mismatch phys={:#010x}: got={:#010x} want={:#010x}", phys, got, want);
         }
@@ -5239,7 +5239,7 @@ mod tests {
         let mut words = vec![0u32; MEM_BYTES / 4];
         for (i, w) in words.iter_mut().enumerate() {
             *w = rng.next_u32();
-            mem.write32((i * 4) as u32, *w);
+            mem.write32((i * 4) as u64, *w);
         }
 
         let cache: C = make_cache_of(mem.clone());
@@ -5293,8 +5293,8 @@ mod tests {
     }
 
     // Write a word into backing memory, bypassing the cache entirely.
-    fn mem_write(mem: &Memory, phys: u32, val: u32) { mem.write32(phys, val); }
-    fn mem_read(mem: &Memory, phys: u32) -> u32 { mem.read32(phys).data }
+    fn mem_write(mem: &Memory, phys: u32, val: u32) { mem.write32(phys as u64, val); }
+    fn mem_read(mem: &Memory, phys: u32) -> u32 { mem.read32(phys as u64).data }
 
     /// The geometry handed to codegen must describe the *sets*, not the total
     /// line count, or the 2-way inline path's `set | way << num_lines_shift`
@@ -6225,7 +6225,7 @@ mod tests {
                     cache.cache_op(C_IINV | CACH_PI, ic_v0, ic_v0 & 0x1FFF_FFFF);
                     cache.cache_op(C_IINV | CACH_PI, ic_v1, ic_v1 & 0x1FFF_FFFF);
                     // Verify flush landed in memory.
-                    let mem_now = mem.read32(phys).data;
+                    let mem_now = mem.read32(phys as u64).data;
                     assert_eq!(mem_now, val,
                         "post-flush mem wrong at phys={:#010x} op={}: mem={:#010x} want={:#010x}",
                         phys, op, mem_now, val);
@@ -6479,8 +6479,8 @@ mod tcache_tests {
         let mut seed = Rng(0x1234_5678_9ABC_DEF0);
         for i in 0..4096u32 {
             let v = seed.next() as u32;
-            bank_a.write32(i * 4, v);
-            bank_b.write32(i * 4, v);
+            bank_a.write32(i as u64 * 4, v);
+            bank_b.write32(i as u64 * 4, v);
         }
 
         let mut rng = Rng(0xDEAD_BEEF_CAFE_0001);
@@ -6532,8 +6532,8 @@ mod tcache_tests {
         real.writeback(None, BASE, 1024 * 1024);
         tc.writeback(None, BASE, 1024 * 1024);
         for i in 0..(256 * 1024u32) {
-            let a = bank_a.read32(i * 4).data;
-            let b = bank_b.read32(i * 4).data;
+            let a = bank_a.read32(i as u64 * 4).data;
+            let b = bank_b.read32(i as u64 * 4).data;
             assert_eq!(a, b, "RAM diverged at bank offset {:#x}", i * 4);
         }
     }
@@ -6562,8 +6562,8 @@ mod tcache_tests {
         let mut seed = Rng(0x0F1E_2D3C_4B5A_6978);
         for i in 0..4096u32 {
             let v = seed.next() as u32;
-            bank_a.write32(i * 4, v);
-            bank_b.write32(i * 4, v);
+            bank_a.write32(i as u64 * 4, v);
+            bank_b.write32(i as u64 * 4, v);
         }
 
         let mut rng = Rng(0xFEED_FACE_1234_5678);
@@ -6602,8 +6602,8 @@ mod tcache_tests {
         tc.writeback(None, BASE, 1024 * 1024);
         for i in 0..(256 * 1024u32) {
             assert_eq!(
-                bank_a.read32(i * 4).data,
-                bank_b.read32(i * 4).data,
+                bank_a.read32(i as u64 * 4).data,
+                bank_b.read32(i as u64 * 4).data,
                 "r5k RAM diverged at bank offset {:#x}",
                 i * 4
             );

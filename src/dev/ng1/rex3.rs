@@ -4735,7 +4735,8 @@ impl Rex3 {
 }
 
 impl BusDevice for Rex3 {
-    fn read8(&self, addr: u32) -> BusRead8 {
+    fn read8(&self, addr: u64) -> BusRead8 {
+        let addr = addr as u32; // REX3 decodes only its 8 KB window below 4 GB
         #[cfg(feature = "gputrace")]
         {
             let tap = self.tap.load(Ordering::Relaxed);
@@ -4746,7 +4747,8 @@ impl BusDevice for Rex3 {
         self.bus_read8(addr)
     }
 
-    fn read16(&self, addr: u32) -> BusRead16 {
+    fn read16(&self, addr: u64) -> BusRead16 {
+        let addr = addr as u32; // REX3 decodes only its 8 KB window below 4 GB
         #[cfg(feature = "gputrace")]
         {
             let tap = self.tap.load(Ordering::Relaxed);
@@ -4757,7 +4759,8 @@ impl BusDevice for Rex3 {
         self.bus_read16(addr)
     }
 
-    fn read32(&self, addr: u32) -> BusRead32 {
+    fn read32(&self, addr: u64) -> BusRead32 {
+        let addr = addr as u32; // REX3 decodes only its 8 KB window below 4 GB
         #[cfg(feature = "gputrace")]
         {
             let tap = self.tap.load(Ordering::Relaxed);
@@ -4768,7 +4771,8 @@ impl BusDevice for Rex3 {
         self.bus_read32(addr)
     }
 
-    fn read64(&self, addr: u32) -> BusRead64 {
+    fn read64(&self, addr: u64) -> BusRead64 {
+        let addr = addr as u32; // REX3 decodes only its 8 KB window below 4 GB
         #[cfg(feature = "gputrace")]
         {
             let tap = self.tap.load(Ordering::Relaxed);
@@ -4779,7 +4783,8 @@ impl BusDevice for Rex3 {
         self.bus_read64(addr)
     }
 
-    fn write8(&self, addr: u32, val: u8) -> u32 {
+    fn write8(&self, addr: u64, val: u8) -> u32 {
+        let addr = addr as u32; // REX3 decodes only its 8 KB window below 4 GB
         #[cfg(feature = "gputrace")]
         {
             let tap = self.tap.load(Ordering::Relaxed);
@@ -4790,7 +4795,8 @@ impl BusDevice for Rex3 {
         self.bus_write8(addr, val)
     }
 
-    fn write16(&self, addr: u32, val: u16) -> u32 {
+    fn write16(&self, addr: u64, val: u16) -> u32 {
+        let addr = addr as u32; // REX3 decodes only its 8 KB window below 4 GB
         #[cfg(feature = "gputrace")]
         {
             let tap = self.tap.load(Ordering::Relaxed);
@@ -4801,7 +4807,8 @@ impl BusDevice for Rex3 {
         self.bus_write16(addr, val)
     }
 
-    fn write32(&self, addr: u32, val: u32) -> u32 {
+    fn write32(&self, addr: u64, val: u32) -> u32 {
+        let addr = addr as u32; // REX3 decodes only its 8 KB window below 4 GB
         #[cfg(feature = "gputrace")]
         {
             let tap = self.tap.load(Ordering::Relaxed);
@@ -4812,7 +4819,8 @@ impl BusDevice for Rex3 {
         self.bus_write32(addr, val)
     }
 
-    fn write64(&self, addr: u32, val: u64) -> u32 {
+    fn write64(&self, addr: u64, val: u64) -> u32 {
+        let addr = addr as u32; // REX3 decodes only its 8 KB window below 4 GB
         #[cfg(feature = "gputrace")]
         {
             let tap = self.tap.load(Ordering::Relaxed);
@@ -4823,7 +4831,8 @@ impl BusDevice for Rex3 {
         self.bus_write64(addr, val)
     }
 
-    fn dma_read64(&self, addr: u32) -> BusRead64 {
+    fn dma_read64(&self, addr: u64) -> BusRead64 {
+        let addr = addr as u32; // REX3 decodes only its 8 KB window below 4 GB
         #[cfg(feature = "gputrace")]
         {
             let tap = self.tap.load(Ordering::Relaxed);
@@ -4834,7 +4843,8 @@ impl BusDevice for Rex3 {
         self.bus_dma_read64(addr)
     }
 
-    fn dma_write64_bulk(&self, addr: u32, vals: &[u64]) -> u32 {
+    fn dma_write64_bulk(&self, addr: u64, vals: &[u64]) -> u32 {
+        let addr = addr as u32; // REX3 decodes only its 8 KB window below 4 GB
         #[cfg(feature = "gputrace")]
         {
             let tap = self.tap.load(Ordering::Relaxed);
@@ -4845,7 +4855,8 @@ impl BusDevice for Rex3 {
         self.bus_dma_write64_bulk(addr, vals)
     }
 
-    fn dma_read64_bulk(&self, addr: u32, out: &mut [u64]) -> u32 {
+    fn dma_read64_bulk(&self, addr: u64, out: &mut [u64]) -> u32 {
+        let addr = addr as u32; // REX3 decodes only its 8 KB window below 4 GB
         #[cfg(feature = "gputrace")]
         {
             let tap = self.tap.load(Ordering::Relaxed);

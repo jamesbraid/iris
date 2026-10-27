@@ -171,22 +171,22 @@ mod tests {
     }
 
     impl BusDevice for MockMemory {
-        fn read8(&self, addr: u32) -> BusRead8 {
+        fn read8(&self, addr: u64) -> BusRead8 {
             BusRead8::ok(self.get_byte(addr as u64))
         }
-        fn write8(&self, addr: u32, val: u8) -> u32 { self.set_byte(addr as u64, val); BUS_OK }
-        fn read16(&self, addr: u32) -> BusRead16 {
+        fn write8(&self, addr: u64, val: u8) -> u32 { self.set_byte(addr as u64, val); BUS_OK }
+        fn read16(&self, addr: u64) -> BusRead16 {
             let a = (addr & !1) as u64;
             let mut b = [0u8; 2];
             for i in 0..2 { b[i] = self.get_byte(a + i as u64); }
             BusRead16::ok(u16::from_be_bytes(b))
         }
-        fn write16(&self, addr: u32, val: u16) -> u32 {
+        fn write16(&self, addr: u64, val: u16) -> u32 {
             let a = (addr & !1) as u64;
             for (i, b) in val.to_be_bytes().iter().enumerate() { self.set_byte(a + i as u64, *b); }
             BUS_OK
         }
-        fn read32(&self, addr: u32) -> BusRead32 {
+        fn read32(&self, addr: u64) -> BusRead32 {
             let a = (addr & !3) as u64;
             if a == self.magic_addr {
                 let mut responses = self.magic_responses.lock().unwrap();
@@ -199,21 +199,21 @@ mod tests {
             }
             BusRead32::ok(self.get_word(a))
         }
-        fn write32(&self, addr: u32, val: u32) -> u32 { self.set_word((addr & !3) as u64, val); BUS_OK }
-        fn read64(&self, addr: u32) -> BusRead64 {
+        fn write32(&self, addr: u64, val: u32) -> u32 { self.set_word((addr & !3) as u64, val); BUS_OK }
+        fn read64(&self, addr: u64) -> BusRead64 {
             let a = (addr & !7) as u64;
             let hi = self.get_word(a) as u64;
             let lo = self.get_word(a + 4) as u64;
             BusRead64::ok((hi << 32) | lo)
         }
-        fn write64(&self, addr: u32, val: u64) -> u32 {
+        fn write64(&self, addr: u64, val: u64) -> u32 {
             let a = (addr & !7) as u64;
             self.set_word(a, (val >> 32) as u32);
             self.set_word(a + 4, val as u32);
             BUS_OK
         }
         #[cfg(feature = "jitv2")]
-        fn gen_ptr(&self, addr: u32) -> *const AtomicU64 {
+        fn gen_ptr(&self, addr: u64) -> *const AtomicU64 {
             // Real enforcement of no_jitv2 is seeded_executor_over's
             // denylist_all() call, not this null return (a null gen_ptr no
             // longer means "not dispatchable" — see the no_jitv2 field's own
@@ -222,7 +222,7 @@ mod tests {
             if self.no_jitv2 {
                 return std::ptr::null();
             }
-            let page = addr / PAGE_SIZE;
+            let page = (addr / PAGE_SIZE as u64) as u32;
             let mut gens = self.gens.lock().unwrap();
             let counter = gens.entry(page).or_insert_with(|| Box::new(AtomicU64::new(0)));
             counter.as_ref() as *const AtomicU64

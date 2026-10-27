@@ -272,14 +272,14 @@ impl crate::traits::Saveable for Stub {
 }
 
 impl BusDevice for Stub {
-    fn read8(&self, a: u32) -> BusRead8 { self.r(); self.hit(a, false); BusRead8::ok(self.cell(a) as u8) }
-    fn read16(&self, a: u32) -> BusRead16 { self.r(); self.hit(a, false); BusRead16::ok(self.cell(a) as u16) }
-    fn read32(&self, a: u32) -> BusRead32 { self.r(); self.hit(a, false); BusRead32::ok(self.cell(a) as u32) }
-    fn read64(&self, a: u32) -> BusRead64 { self.r(); self.hit(a, false); BusRead64::ok(self.cell(a)) }
-    fn write8(&self, a: u32, v: u8) -> u32 { self.w(); self.hit(a, true); self.set_cell(a, v as u64); BUS_OK }
-    fn write16(&self, a: u32, v: u16) -> u32 { self.w(); self.hit(a, true); self.set_cell(a, v as u64); BUS_OK }
-    fn write32(&self, a: u32, v: u32) -> u32 { self.w(); self.hit(a, true); self.set_cell(a, v as u64); BUS_OK }
-    fn write64(&self, a: u32, v: u64) -> u32 { self.w(); self.hit(a, true); self.set_cell(a, v); BUS_OK }
+    fn read8(&self, a: u64) -> BusRead8 { self.r(); self.hit(a as u32, false); BusRead8::ok(self.cell(a as u32) as u8) }
+    fn read16(&self, a: u64) -> BusRead16 { self.r(); self.hit(a as u32, false); BusRead16::ok(self.cell(a as u32) as u16) }
+    fn read32(&self, a: u64) -> BusRead32 { self.r(); self.hit(a as u32, false); BusRead32::ok(self.cell(a as u32) as u32) }
+    fn read64(&self, a: u64) -> BusRead64 { self.r(); self.hit(a as u32, false); BusRead64::ok(self.cell(a as u32)) }
+    fn write8(&self, a: u64, v: u8) -> u32 { self.w(); self.hit(a as u32, true); self.set_cell(a as u32, v as u64); BUS_OK }
+    fn write16(&self, a: u64, v: u16) -> u32 { self.w(); self.hit(a as u32, true); self.set_cell(a as u32, v as u64); BUS_OK }
+    fn write32(&self, a: u64, v: u32) -> u32 { self.w(); self.hit(a as u32, true); self.set_cell(a as u32, v as u64); BUS_OK }
+    fn write64(&self, a: u64, v: u64) -> u32 { self.w(); self.hit(a as u32, true); self.set_cell(a as u32, v); BUS_OK }
 }
 
 /// The IP32 physical bus: RAM and the PROM, and the chips that claim the
@@ -667,133 +667,144 @@ macro_rules! bus_read {
 // The address map: CRIME (its registers and the rendering engine), GBE,
 // VICE and MACE (with the PCI bridge's windows) each decode their own
 // space; what is left is memory and the PROM.
+// The decode is 32 bits wide (see [`NO_ECC_BASE`] and `PCI_HI_MEM_BASE` for
+// the two places above 4 GB this folds): `a` is the address the decode
+// helpers, memory and the PROM take; devices get the bus address.
 impl Ip32Bus {
-    fn read8_raw(&self, addr: u32) -> BusRead8 {
-        if CrimeSpace::contains(addr) {
+    fn read8_raw(&self, addr: u64) -> BusRead8 {
+        let a = addr as u32;
+        if CrimeSpace::contains(a) {
             return self.crime.read8(addr);
         }
-        if self.in_gbe(addr) {
+        if self.in_gbe(a) {
             return BusRead8::ok(self.gbe.read32(addr & !3).data as u8);
         }
-        if self.in_vice(addr) {
+        if self.in_vice(a) {
             return self.vice.read8(addr);
         }
-        if Mace::contains(addr) {
+        if Mace::contains(a) {
             return self.mace.read8(addr);
         }
-        bus_read!(self, addr, 1, BusRead8::ok, |v: u64| v as u8)
+        bus_read!(self, a, 1, BusRead8::ok, |v: u64| v as u8)
     }
 
-    fn read16_raw(&self, addr: u32) -> BusRead16 {
-        if CrimeSpace::contains(addr) {
+    fn read16_raw(&self, addr: u64) -> BusRead16 {
+        let a = addr as u32;
+        if CrimeSpace::contains(a) {
             return self.crime.read16(addr);
         }
-        if self.in_gbe(addr) {
+        if self.in_gbe(a) {
             return BusRead16::ok(self.gbe.read32(addr & !3).data as u16);
         }
-        if self.in_vice(addr) {
+        if self.in_vice(a) {
             return self.vice.read16(addr);
         }
-        if Mace::contains(addr) {
+        if Mace::contains(a) {
             return self.mace.read16(addr);
         }
-        bus_read!(self, addr, 2, BusRead16::ok, |v: u64| v as u16)
+        bus_read!(self, a, 2, BusRead16::ok, |v: u64| v as u16)
     }
 
-    fn read32_raw(&self, addr: u32) -> BusRead32 {
-        if CrimeSpace::contains(addr) {
+    fn read32_raw(&self, addr: u64) -> BusRead32 {
+        let a = addr as u32;
+        if CrimeSpace::contains(a) {
             return self.crime.read32(addr);
         }
-        if self.in_gbe(addr) {
+        if self.in_gbe(a) {
             return self.gbe.read32(addr);
         }
-        if self.in_vice(addr) {
+        if self.in_vice(a) {
             return self.vice.read32(addr);
         }
-        if Mace::contains(addr) {
+        if Mace::contains(a) {
             return self.mace.read32(addr);
         }
-        bus_read!(self, addr, 4, BusRead32::ok, |v: u64| v as u32)
+        bus_read!(self, a, 4, BusRead32::ok, |v: u64| v as u32)
     }
 
-    fn read64_raw(&self, addr: u32) -> BusRead64 {
-        if CrimeSpace::contains(addr) {
+    fn read64_raw(&self, addr: u64) -> BusRead64 {
+        let a = addr as u32;
+        if CrimeSpace::contains(a) {
             return self.crime.read64(addr);
         }
-        if self.in_gbe(addr) {
+        if self.in_gbe(a) {
             return self.gbe.read64(addr);
         }
-        if self.in_vice(addr) {
+        if self.in_vice(a) {
             return self.vice.read64(addr);
         }
-        if Mace::contains(addr) {
+        if Mace::contains(a) {
             return self.mace.read64(addr);
         }
-        bus_read!(self, addr, 8, BusRead64::ok, |v: u64| v)
+        bus_read!(self, a, 8, BusRead64::ok, |v: u64| v)
     }
 
-    fn write8_raw(&self, addr: u32, val: u8) -> u32 {
-        if CrimeSpace::contains(addr) {
+    fn write8_raw(&self, addr: u64, val: u8) -> u32 {
+        let a = addr as u32;
+        if CrimeSpace::contains(a) {
             return self.crime.write8(addr, val);
         }
-        if self.in_gbe(addr) {
+        if self.in_gbe(a) {
             return self.gbe.write32(addr & !3, val as u32);
         }
-        if self.in_vice(addr) {
+        if self.in_vice(a) {
             return self.vice.write8(addr, val);
         }
-        if Mace::contains(addr) {
+        if Mace::contains(a) {
             return self.mace.write8(addr, val);
         }
-        if self.write_bytes(addr, 1, val as u64) { BUS_OK } else { self.miss(addr, true); BUS_ERR }
+        if self.write_bytes(a, 1, val as u64) { BUS_OK } else { self.miss(a, true); BUS_ERR }
     }
 
-    fn write16_raw(&self, addr: u32, val: u16) -> u32 {
-        if CrimeSpace::contains(addr) {
+    fn write16_raw(&self, addr: u64, val: u16) -> u32 {
+        let a = addr as u32;
+        if CrimeSpace::contains(a) {
             return self.crime.write16(addr, val);
         }
-        if self.in_gbe(addr) {
+        if self.in_gbe(a) {
             return self.gbe.write32(addr & !3, val as u32);
         }
-        if self.in_vice(addr) {
+        if self.in_vice(a) {
             return self.vice.write16(addr, val);
         }
-        if Mace::contains(addr) {
+        if Mace::contains(a) {
             return self.mace.write16(addr, val);
         }
-        if self.write_bytes(addr, 2, val as u64) { BUS_OK } else { self.miss(addr, true); BUS_ERR }
+        if self.write_bytes(a, 2, val as u64) { BUS_OK } else { self.miss(a, true); BUS_ERR }
     }
 
-    fn write32_raw(&self, addr: u32, val: u32) -> u32 {
-        if CrimeSpace::contains(addr) {
+    fn write32_raw(&self, addr: u64, val: u32) -> u32 {
+        let a = addr as u32;
+        if CrimeSpace::contains(a) {
             return self.crime.write32(addr, val);
         }
-        if self.in_gbe(addr) {
+        if self.in_gbe(a) {
             return self.gbe.write32(addr, val);
         }
-        if self.in_vice(addr) {
+        if self.in_vice(a) {
             return self.vice.write32(addr, val);
         }
-        if Mace::contains(addr) {
+        if Mace::contains(a) {
             return self.mace.write32(addr, val);
         }
-        if self.write_bytes(addr, 4, val as u64) { BUS_OK } else { self.miss(addr, true); BUS_ERR }
+        if self.write_bytes(a, 4, val as u64) { BUS_OK } else { self.miss(a, true); BUS_ERR }
     }
 
-    fn write64_raw(&self, addr: u32, val: u64) -> u32 {
-        if CrimeSpace::contains(addr) {
+    fn write64_raw(&self, addr: u64, val: u64) -> u32 {
+        let a = addr as u32;
+        if CrimeSpace::contains(a) {
             return self.crime.write64(addr, val);
         }
-        if self.in_gbe(addr) {
+        if self.in_gbe(a) {
             return self.gbe.write64(addr, val);
         }
-        if self.in_vice(addr) {
+        if self.in_vice(a) {
             return self.vice.write64(addr, val);
         }
-        if Mace::contains(addr) {
+        if Mace::contains(a) {
             return self.mace.write64(addr, val);
         }
-        if self.write_bytes(addr, 8, val) { BUS_OK } else { self.miss(addr, true); BUS_ERR }
+        if self.write_bytes(a, 8, val) { BUS_OK } else { self.miss(a, true); BUS_ERR }
     }
 }
 
@@ -915,8 +926,8 @@ impl BusDevice for Ip32Bus {
     /// Memory pages have generations jitv2 can compile against; the PROM and
     /// devices have none, so nothing there is compiled.
     #[cfg(feature = "jitv2")]
-    fn gen_ptr(&self, addr: u32) -> *const std::sync::atomic::AtomicU64 {
-        let addr = self.resolve(addr);
+    fn gen_ptr(&self, addr: u64) -> *const std::sync::atomic::AtomicU64 {
+        let addr = self.resolve(addr as u32);
         let r = self.ram.lock().unwrap();
         match r.decode(addr) {
             Decode::Ram(i) => r.gen_ptr(i),
@@ -924,40 +935,40 @@ impl BusDevice for Ip32Bus {
         }
     }
 
-    fn read8(&self, addr: u32) -> BusRead8 {
-        self.before_read(addr);
+    fn read8(&self, addr: u64) -> BusRead8 {
+        self.before_read(addr as u32);
         self.read8_raw(addr)
     }
-    fn read16(&self, addr: u32) -> BusRead16 {
-        self.before_read(addr);
+    fn read16(&self, addr: u64) -> BusRead16 {
+        self.before_read(addr as u32);
         self.read16_raw(addr)
     }
-    fn read32(&self, addr: u32) -> BusRead32 {
-        self.before_read(addr);
+    fn read32(&self, addr: u64) -> BusRead32 {
+        self.before_read(addr as u32);
         self.read32_raw(addr)
     }
-    fn read64(&self, addr: u32) -> BusRead64 {
-        self.before_read(addr);
+    fn read64(&self, addr: u64) -> BusRead64 {
+        self.before_read(addr as u32);
         self.read64_raw(addr)
     }
-    fn write8(&self, addr: u32, val: u8) -> u32 {
+    fn write8(&self, addr: u64, val: u8) -> u32 {
         let r = self.write8_raw(addr, val);
-        self.after_write(addr);
+        self.after_write(addr as u32);
         r
     }
-    fn write16(&self, addr: u32, val: u16) -> u32 {
+    fn write16(&self, addr: u64, val: u16) -> u32 {
         let r = self.write16_raw(addr, val);
-        self.after_write(addr);
+        self.after_write(addr as u32);
         r
     }
-    fn write32(&self, addr: u32, val: u32) -> u32 {
+    fn write32(&self, addr: u64, val: u32) -> u32 {
         let r = self.write32_raw(addr, val);
-        self.after_write(addr);
+        self.after_write(addr as u32);
         r
     }
-    fn write64(&self, addr: u32, val: u64) -> u32 {
+    fn write64(&self, addr: u64, val: u64) -> u32 {
         let r = self.write64_raw(addr, val);
-        self.after_write(addr);
+        self.after_write(addr as u32);
         r
     }
 }

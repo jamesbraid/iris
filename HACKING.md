@@ -100,13 +100,13 @@ Every piece of hardware implements some of these traits (`src/traits.rs`):
 
 ```rust
 pub trait BusDevice: Send + Sync {
-    fn read8 (&self, addr: u32) -> BusRead8;           // .status: BUS_OK / BUS_BUSY / BUS_ERR
-    fn write8(&self, addr: u32, val: u8) -> u32;
+    fn read8 (&self, addr: u64) -> BusRead8;           // .status: BUS_OK / BUS_BUSY / BUS_ERR
+    fn write8(&self, addr: u64, val: u8) -> u32;
     // read16/write16, read32/write32, read64/write64 ...
     fn dma_read64 / dma_write64 (+ _bulk)              // accesses initiated by a DMA engine
     fn read_block / write_block / write64_masked       // bulk and byte-enable fast paths
-    fn mem_ptr(&self, addr: u32) -> Option<*const u64>; // direct backing store, for RAM
-    fn gen_ptr(&self, addr: u32) -> *const AtomicU64;  // jitv2 page generation counter
+    fn mem_ptr(&self, addr: u64) -> Option<*const u64>; // direct backing store, for RAM
+    fn gen_ptr(&self, addr: u64) -> *const AtomicU64;  // jitv2 page generation counter
 }
 
 pub trait Device: Send + Sync {
@@ -125,7 +125,10 @@ pub trait Resettable { fn power_on(&self); }
   error, so a device implements only the widths the chip answers. The status
   word is layout-compatible with the CPU's `ExecStatus`, so a bus error turns
   into a data bus exception and `BUS_BUSY` into "retry this instruction"
-  without translation.
+  without translation. Addresses are full physical addresses, 64 bits wide
+  so the Octane's 40-bit space fits. Devices that sit below 4 GB convert to
+  a 32-bit offset from their base at the top of each method and keep their
+  internals 32-bit; the GFIFO still carries a 32-bit register address.
 - **Device** is the lifecycle: devices with threads start and join them here.
   `register_commands`/`execute_command` give a device its own debug commands;
   [debug.md](debug.md) documents them.

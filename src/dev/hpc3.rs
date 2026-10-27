@@ -459,9 +459,9 @@ fn start_transaction(&mut self) {
                 // Word 0: Buffer Address (PADDR)
                 // Word 1: Byte Count & Flags (CNTINFO)
                 // Word 2: Next Descriptor (PNEXT)
-                let w_addr = { let _r = mem.read32(nbdp + PDMA_DESC_CBP_OFFSET); if _r.is_ok() { let d = _r.data; d } else { 0 } };
-                let w_cnt = { let _r = mem.read32(nbdp + PDMA_DESC_BC_OFFSET); if _r.is_ok() { let d = _r.data; d } else { 0 } };
-                let w_next = { let _r = mem.read32(nbdp + PDMA_DESC_NBP_OFFSET); if _r.is_ok() { let d = _r.data; d } else { 0 } };
+                let w_addr = { let _r = mem.read32((nbdp + PDMA_DESC_CBP_OFFSET) as u64); if _r.is_ok() { let d = _r.data; d } else { 0 } };
+                let w_cnt = { let _r = mem.read32((nbdp + PDMA_DESC_BC_OFFSET) as u64); if _r.is_ok() { let d = _r.data; d } else { 0 } };
+                let w_next = { let _r = mem.read32((nbdp + PDMA_DESC_NBP_OFFSET) as u64); if _r.is_ok() { let d = _r.data; d } else { 0 } };
 
                 // Track current descriptor pointer for HPC3 writeback at interrupt time.
                 // RX (ch10): crbdp = address of descriptor currently being filled.
@@ -563,7 +563,7 @@ fn start_transaction(&mut self) {
         if self.id < 8 {
             let addr = self.cbp;
             let mem_val = if let Some(mem) = &self.sys_mem {
-                { let _r = mem.read32(addr); if _r.is_ok() { _r.data } else { return None } }
+                { let _r = mem.read32(addr as u64); if _r.is_ok() { _r.data } else { return None } }
             } else {
                 return None;
             };
@@ -590,14 +590,14 @@ fn start_transaction(&mut self) {
 
         let val = if let Some(mem) = &self.sys_mem {
             if self.width_16 {
-                let _r = mem.read16(addr);
+                let _r = mem.read16(addr as u64);
                 if _r.is_ok() {
                     let v = if swap { _r.data.swap_bytes() } else { _r.data };
                     self.handle_dump(addr, &v.to_be_bytes(), true);
                     Some(v as u32)
                 } else { None }
             } else {
-                let _r = mem.read8(addr);
+                let _r = mem.read8(addr as u64);
                 if _r.is_ok() {
                     self.handle_dump(addr, &[_r.data], true);
                     Some(_r.data as u32)
@@ -655,7 +655,7 @@ fn start_transaction(&mut self) {
             };
 
             if let Some(mem) = &self.sys_mem {
-                mem.write32(addr, mem_val);
+                mem.write32(addr as u64, mem_val);
                 self.handle_dump(addr, &mem_val.to_be_bytes(), false);
             }
             return self.advance(4, eop);
@@ -668,10 +668,10 @@ fn start_transaction(&mut self) {
         if let Some(mem) = &self.sys_mem {
             if self.width_16 {
                 let v = if swap { (val as u16).swap_bytes() } else { val as u16 };
-                mem.write16(addr, v);
+                mem.write16(addr as u64, v);
                 self.handle_dump(addr, &v.to_be_bytes(), false);
             } else {
-                mem.write8(addr, val as u8);
+                mem.write8(addr as u64, val as u8);
                 self.handle_dump(addr, &[val as u8], false);
             }
         }
@@ -1477,9 +1477,9 @@ impl Device for Hpc3 {
                     writeln!(writer, "PDMA descriptor chain from {:08x}:", addr).unwrap();
                     let mut idx = 0usize;
                     loop {
-                        let cbp  = { let _r = mem.read32(addr + PDMA_DESC_CBP_OFFSET); if _r.is_ok() { let d = _r.data; d } else { break } };
-                        let bc   = { let _r = mem.read32(addr + PDMA_DESC_BC_OFFSET); if _r.is_ok() { let d = _r.data; d } else { break } };
-                        let nbdp = { let _r = mem.read32(addr + PDMA_DESC_NBP_OFFSET); if _r.is_ok() { let d = _r.data; d } else { break } };
+                        let cbp  = { let _r = mem.read32((addr + PDMA_DESC_CBP_OFFSET) as u64); if _r.is_ok() { let d = _r.data; d } else { break } };
+                        let bc   = { let _r = mem.read32((addr + PDMA_DESC_BC_OFFSET) as u64); if _r.is_ok() { let d = _r.data; d } else { break } };
+                        let nbdp = { let _r = mem.read32((addr + PDMA_DESC_NBP_OFFSET) as u64); if _r.is_ok() { let d = _r.data; d } else { break } };
                         let eox  = (bc & PDMA_DESC_EOX) != 0;
                         let eop  = (bc & PDMA_DESC_EOP) != 0;
                         let xie  = (bc & PDMA_DESC_XIE) != 0;
@@ -1599,8 +1599,8 @@ impl Device for Hpc3 {
 }
 
 impl BusDevice for Hpc3 {
-    fn read8(&self, addr: u32) -> BusRead8 {
-        let offset = addr - HPC3_BASE;
+    fn read8(&self, addr: u64) -> BusRead8 {
+        let offset = (addr - HPC3_BASE as u64) as u32;
 
         // IP28's PROM copies the PBUS control bitfield with byte loads.
         if offset < 8 * PBUS_DMA_STRIDE {
@@ -1676,7 +1676,7 @@ impl BusDevice for Hpc3 {
             }
             // Sparse decode: addr/4 gives actual byte index in RTC
             let byte_index = rtc_offset >> 2;
-            return self.rtc.read8(byte_index);
+            return self.rtc.read8(byte_index as u64);
         }
 
         // MISC_EEPROM_DATA, byte lane (PROM bit-bangs this register 8 bits
@@ -1711,8 +1711,8 @@ impl BusDevice for Hpc3 {
         BusRead8::ok(0)
     }
 
-    fn write8(&self, addr: u32, val: u8) -> u32 {
-        let offset = addr - HPC3_BASE;
+    fn write8(&self, addr: u64, val: u8) -> u32 {
+        let offset = (addr - HPC3_BASE as u64) as u32;
 
         // IP28's PROM emits four sb instructions for its DMA control struct.
         // Use the addressed big-endian byte lane, without reading CTRL back:
@@ -1790,7 +1790,7 @@ impl BusDevice for Hpc3 {
             }
             // Sparse decode: addr/4 gives actual byte index in RTC
             let byte_index = rtc_offset >> 2;
-            return self.rtc.write8(byte_index, val);
+            return self.rtc.write8(byte_index as u64, val);
         }
 
         // MISC_EEPROM_DATA, byte lane — see matching comment in read8.
@@ -1822,8 +1822,8 @@ impl BusDevice for Hpc3 {
         BUS_OK
     }
 
-    fn read32(&self, addr: u32) -> BusRead32 {
-        let offset = addr - HPC3_BASE;
+    fn read32(&self, addr: u64) -> BusRead32 {
+        let offset = (addr - HPC3_BASE as u64) as u32;
 
         // INT2 (fullhouse only, PBUS PIO channel 4) - should not use 32-bit access, but allow for legacy
         if !self.guinness && (HPC3_INT2_BASE..HPC3_INT2_BASE + HPC3_INT2_SIZE).contains(&offset) {
@@ -1945,7 +1945,7 @@ impl BusDevice for Hpc3 {
             let rtc_offset = (offset - PBUS_BBRAM) as u32;
             // For 32-bit reads, only the bottom byte is valid
             let byte_index = rtc_offset >> 2;
-            let r = self.rtc.read8(byte_index);
+            let r = self.rtc.read8(byte_index as u64);
             return if r.is_ok() { BusRead32::ok(r.data as u32) } else { BusRead32 { status: r.status, data: 0 } };
         }
 
@@ -1953,8 +1953,8 @@ impl BusDevice for Hpc3 {
         BusRead32::ok(0)
     }
 
-    fn write32(&self, addr: u32, val: u32) -> u32 {
-        let offset = addr - HPC3_BASE;
+    fn write32(&self, addr: u64, val: u32) -> u32 {
+        let offset = (addr - HPC3_BASE as u64) as u32;
 
         // INT2 (fullhouse only, PBUS PIO channel 4) - should not use 32-bit access, but allow for legacy
         if !self.guinness && (HPC3_INT2_BASE..HPC3_INT2_BASE + HPC3_INT2_SIZE).contains(&offset) {
@@ -2126,7 +2126,7 @@ impl BusDevice for Hpc3 {
             // For 32-bit writes, extract the bottom byte
             let byte_index = rtc_offset >> 2;
             let byte_val = (val & 0xFF) as u8;
-            return self.rtc.write8(byte_index, byte_val);
+            return self.rtc.write8(byte_index as u64, byte_val);
         }
 
         // Log other writes
@@ -2135,8 +2135,8 @@ impl BusDevice for Hpc3 {
         BUS_OK
     }
 
-    fn read16(&self, addr: u32) -> BusRead16 {
-        let offset = addr - HPC3_BASE;
+    fn read16(&self, addr: u64) -> BusRead16 {
+        let offset = (addr - HPC3_BASE as u64) as u32;
 
         // HAL2 registers are 16-bit; forward directly
         if (HAL2_BASE..HAL2_BASE + 0x400).contains(&offset) {
@@ -2154,8 +2154,8 @@ impl BusDevice for Hpc3 {
         BusRead16::ok(0)
     }
 
-    fn write16(&self, addr: u32, val: u16) -> u32 {
-        let offset = addr - HPC3_BASE;
+    fn write16(&self, addr: u64, val: u16) -> u32 {
+        let offset = (addr - HPC3_BASE as u64) as u32;
 
         // HAL2 registers are 16-bit; forward directly
         if (HAL2_BASE..HAL2_BASE + 0x400).contains(&offset) {
@@ -2403,11 +2403,16 @@ mod tests {
         )
     }
 
+    /// Bus address of a register in PBUS DMA channel 1 (Codec A).
+    fn ch1(off: u32) -> u64 {
+        (HPC3_BASE + PBUS_DMA_STRIDE + off) as u64
+    }
+
     #[test]
     fn ip28_byte_control_writes_start_and_drain_audio_dma() {
         struct TuneMemory;
         impl BusDevice for TuneMemory {
-            fn read32(&self, addr: u32) -> BusRead32 {
+            fn read32(&self, addr: u64) -> BusRead32 {
                 match addr {
                     0x1000 => BusRead32::ok(0x2000),
                     0x1004 => BusRead32::ok(0x8000_0004), // one sample, EOX
@@ -2418,45 +2423,43 @@ mod tests {
             }
         }
         let hpc = hpc3_for_test();
-        let base = HPC3_BASE + PBUS_DMA_STRIDE; // Codec A channel 1
         hpc.pdma_channels[1].lock().sys_mem = Some(Arc::new(TuneMemory));
-        hpc.write32(HPC3_BASE + PBUS_CFGDMA_BASE + PBUS_CFGDMA_STRIDE, PBUS_DMACFG_DS16);
-        hpc.write32(base + PBUS_DMA_DP, 0x1000);
+        hpc.write32((HPC3_BASE + PBUS_CFGDMA_BASE + PBUS_CFGDMA_STRIDE) as u64, PBUS_DMACFG_DS16);
+        hpc.write32(ch1(PBUS_DMA_DP), 0x1000);
         // InitiateDMA's four byte stores, with ACT/ACT_LD in the final lane.
         for (lane, byte) in [0x07, 0x04, 0x0b, 0x70].into_iter().enumerate() {
-            assert_eq!(hpc.write8(base + PBUS_DMA_CTRL + lane as u32, byte), BUS_OK);
+            assert_eq!(hpc.write8(ch1(PBUS_DMA_CTRL + lane as u32), byte), BUS_OK);
             assert_eq!(hpc.pdma_channels[1].lock().is_active(), lane == 3);
         }
-        assert_eq!(hpc.read8(base + PBUS_DMA_CTRL + 3).data & 2, 2);
+        assert_eq!(hpc.read8(ch1(PBUS_DMA_CTRL + 3)).data & 2, 2);
         let (sample, status, _) = hpc.pdma_channels[1].lock().dma_read().expect("audio DMA sample");
         assert_eq!(sample, 0x1234);
         assert!(!status.refused());
-        assert_eq!(hpc.read8(base + PBUS_DMA_CTRL + 3).data & 2, 0);
-        assert_eq!(hpc.read32(base + PBUS_DMA_BP).data, 0x2004);
+        assert_eq!(hpc.read8(ch1(PBUS_DMA_CTRL + 3)).data & 2, 0);
+        assert_eq!(hpc.read32(ch1(PBUS_DMA_BP)).data, 0x2004);
     }
 
     #[test]
     fn pbus_byte_lanes_preserve_addresses_and_control_side_effects() {
         let hpc = hpc3_for_test();
-        let base = HPC3_BASE + PBUS_DMA_STRIDE;
         for reg in [PBUS_DMA_BP, PBUS_DMA_DP] {
-            hpc.write32(base + reg, 0x1234_5678);
-            hpc.write8(base + reg + 1, 0xab);
-            assert_eq!(hpc.read32(base + reg).data, 0x12ab_5678);
+            hpc.write32(ch1(reg), 0x1234_5678);
+            hpc.write8(ch1(reg + 1), 0xab);
+            assert_eq!(hpc.read32(ch1(reg)).data, 0x12ab_5678);
             for (lane, byte) in [0x12, 0xab, 0x56, 0x78].into_iter().enumerate() {
-                assert_eq!(hpc.read8(base + reg + lane as u32).data, byte);
+                assert_eq!(hpc.read8(ch1(reg + lane as u32)).data, byte);
             }
         }
-        hpc.write8(base + PBUS_DMA_CTRL + 3, PDMA_CTRL_LITTLE as u8);
+        hpc.write8(ch1(PBUS_DMA_CTRL + 3), PDMA_CTRL_LITTLE as u8);
         hpc.pdma_channels[1].lock().ctrl |= PDMA_CTRL_INT;
         for lane in 0..3 {
-            hpc.write8(base + PBUS_DMA_CTRL + lane, 0xff);
-            assert_eq!(hpc.read8(base + PBUS_DMA_CTRL + lane).data, 0);
+            hpc.write8(ch1(PBUS_DMA_CTRL + lane), 0xff);
+            assert_eq!(hpc.read8(ch1(PBUS_DMA_CTRL + lane)).data, 0);
             let c = hpc.pdma_channels[1].lock();
             assert!(c.endian);
             assert_ne!(c.ctrl & PDMA_CTRL_INT, 0);
         }
-        assert_eq!(hpc.read8(base + PBUS_DMA_CTRL + 3).data & 1, 1);
+        assert_eq!(hpc.read8(ch1(PBUS_DMA_CTRL + 3)).data & 1, 1);
         assert_eq!(hpc.pdma_channels[1].lock().ctrl & PDMA_CTRL_INT, 0);
     }
 

@@ -841,7 +841,7 @@ pub struct MipsCore {
     pub cp0_epc: u64,         // 14: Exception Program Counter
     pub cp0_prid: u32,        // 15: Processor Revision ID
     pub cp0_config: u32,      // 16: Configuration Register
-    pub cp0_lladdr: u32,      // 17: LLAddr (also mirrored on d_cache for invalidation)
+    pub cp0_lladdr: u64,      // 17: LLAddr, PA[PA_BITS-1:4] (also mirrored on d_cache for invalidation)
     pub cp0_watchlo: u32,     // 18: Watchpoint Low
     pub cp0_watchhi: u32,     // 19: Watchpoint High
     pub cp0_xcontext: u64,    // 20: Extended Context (64-bit)
@@ -1585,7 +1585,7 @@ impl MipsCore {
             14 => self.cp0_epc,
             15 => self.cp0_prid as u64,
             16 => self.cp0_config as u64,
-            17 => self.cp0_lladdr as u64,
+            17 => self.cp0_lladdr,
             18 => self.cp0_watchlo as u64,
             19 => self.cp0_watchhi as u64,
             20 => self.cp0_xcontext,
@@ -1637,7 +1637,7 @@ impl MipsCore {
             14 => self.cp0_epc,
             15 => self.cp0_prid as u64,
             16 => self.cp0_config as u64,
-            17 => self.cp0_lladdr as u64,
+            17 => self.cp0_lladdr,
             18 => self.cp0_watchlo as u64,
             19 => self.cp0_watchhi as u64,
             20 => self.cp0_xcontext,
@@ -2192,7 +2192,7 @@ impl MipsCore {
                 }
                 self.cp0_config = new;
             }
-            17 => self.cp0_lladdr = value as u32,
+            17 => self.cp0_lladdr = value,
             18 => self.cp0_watchlo = value as u32,
             19 => self.cp0_watchhi = value as u32,
             20 => {

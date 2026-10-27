@@ -850,16 +850,16 @@ impl Device for Ioc {
 }
 
 impl BusDevice for Ioc {
-    fn read8(&self, addr: u32) -> BusRead8 {
+    fn read8(&self, addr: u64) -> BusRead8 {
         // Fullhouse-only INT2 window (PBUS PIO channel 4) — lower address
         // than IOC_BASE (PIO channel 6), checked first so it isn't caught by
         // the addr-IOC_BASE subtraction below. See IOC_INT2_BASE's doc
         // comment.
-        if (IOC_INT2_BASE..IOC_INT2_BASE + IOC_INT2_SIZE).contains(&addr) {
-            return self.int2_read8(addr - IOC_INT2_BASE);
+        if (IOC_INT2_BASE as u64..(IOC_INT2_BASE + IOC_INT2_SIZE) as u64).contains(&addr) {
+            return self.int2_read8((addr - IOC_INT2_BASE as u64) as u32);
         }
 
-        let offset = (addr - IOC_BASE) & !3;
+        let offset = (addr - IOC_BASE as u64) as u32 & !3;
 
         // Lock state only for IOC registers, not for SCC/PIT passthrough
         // This prevents deadlock when SCC callback tries to lock state
@@ -921,12 +921,12 @@ impl BusDevice for Ioc {
         BusRead8::ok(val)
     }
 
-    fn write8(&self, addr: u32, val: u8) -> u32 {
-        if (IOC_INT2_BASE..IOC_INT2_BASE + IOC_INT2_SIZE).contains(&addr) {
-            return self.int2_write8(addr - IOC_INT2_BASE, val);
+    fn write8(&self, addr: u64, val: u8) -> u32 {
+        if (IOC_INT2_BASE as u64..(IOC_INT2_BASE + IOC_INT2_SIZE) as u64).contains(&addr) {
+            return self.int2_write8((addr - IOC_INT2_BASE as u64) as u32, val);
         }
 
-        let offset = (addr - IOC_BASE) & !3;
+        let offset = (addr - IOC_BASE as u64) as u32 & !3;
 
         // Serial ports (SCC) - direct 8-bit access
         if offset >= IOC_SERIAL1_CMD && offset <= IOC_SERIAL2_DATA {
@@ -1025,8 +1025,8 @@ impl BusDevice for Ioc {
         BUS_OK
     }
 
-    fn read16(&self, addr: u32) -> BusRead16 {
-        let offset = (addr - IOC_BASE) & !1;
+    fn read16(&self, addr: u64) -> BusRead16 {
+        let offset = (addr - IOC_BASE as u64) as u32 & !1;
         if offset == IOC_EXT_IO {
             let state = self.state.lock();
             dlog_dev!(LogModule::Ioc, "IOC: rd EXT_IO → {:#06x}", state.ext_io);
@@ -1035,8 +1035,8 @@ impl BusDevice for Ioc {
         BusRead16::err()
     }
 
-    fn write16(&self, addr: u32, val: u16) -> u32 {
-        let offset = (addr - IOC_BASE) & !1;
+    fn write16(&self, addr: u64, val: u16) -> u32 {
+        let offset = (addr - IOC_BASE as u64) as u32 & !1;
         if offset == IOC_EXT_IO {
             let mut state = self.state.lock();
             dlog_dev!(LogModule::Ioc, "IOC: EXT_IO = {:#06x}", val);
@@ -1046,10 +1046,10 @@ impl BusDevice for Ioc {
         BUS_ERR
     }
 
-    fn read32(&self, addr: u32) -> BusRead32 {
+    fn read32(&self, addr: u64) -> BusRead32 {
         //println!("IOC: Read32 addr {:08x}", addr);
         let aligned_addr = addr & !3;
-        let offset = aligned_addr - IOC_BASE;
+        let offset = (aligned_addr - IOC_BASE as u64) as u32;
         // HPC3_EXT_IO_ADDR: IRIX reads this specific register as a 32-bit
         // `uint` despite the hardware register being 16 bits wide (comment
         // in kern/ml/IP22.c: "HPC3_EXT_IO_ADDR is 16 bits wide") — zero-
@@ -1064,10 +1064,10 @@ impl BusDevice for Ioc {
         if r.is_ok() { BusRead32::ok(r.data as u32) } else { BusRead32 { status: r.status, data: 0 } }
     }
 
-    fn write32(&self, addr: u32, val: u32) -> u32 {
+    fn write32(&self, addr: u64, val: u32) -> u32 {
         //println!("IOC: Write32 addr {:08x} val {:08x}", addr, val);
         let aligned_addr = addr & !3;
-        let offset = aligned_addr - IOC_BASE;
+        let offset = (aligned_addr - IOC_BASE as u64) as u32;
         if offset == IOC_EXT_IO {
             let mut state = self.state.lock();
             state.ext_io = (val & 0xFFFF) as u16;

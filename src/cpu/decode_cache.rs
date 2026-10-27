@@ -108,7 +108,7 @@ impl DecodeCache {
         window: *const u8,
         bitmap: u64,
         ic_line: usize,
-        word: impl Fn(u32) -> Result<u32, u32>,
+        word: impl Fn(u64) -> Result<u32, u32>,
     ) -> Result<*const DecodedInstr, u32> {
         // The common case, kept small enough to inline into the interpreter
         // loop: a RAM page already here, the slot filled, its word (and a
@@ -139,7 +139,7 @@ impl DecodeCache {
         window: *const u8,
         bitmap: u64,
         ic_line: usize,
-        word: impl Fn(u32) -> Result<u32, u32>,
+        word: impl Fn(u64) -> Result<u32, u32>,
     ) -> Result<*const DecodedInstr, u32> {
         if bitmap != self.bitmap {
             self.flush();
@@ -151,7 +151,7 @@ impl DecodeCache {
         let page = &mut self.pages[pfn as usize % PAGES];
         let _ = ic_line;
         let host_for = || -> *const u32 {
-            if !window.is_null() && bitmap & (1u64 << (phys >> crate::ppmem::BITMAP_SHIFT)) != 0 {
+            if !window.is_null() && crate::ppmem::bitmap_maps(bitmap, phys) {
                 unsafe { window.add((pfn << 12) as usize) as *const u32 }
             } else {
                 std::ptr::null()
@@ -197,8 +197,8 @@ impl DecodeCache {
 /// Word `k` of a page: one load from its window pointer, or a bus read at
 /// `phys` when it has none.
 #[inline(always)]
-fn read(host: *const u32, k: usize, phys: u64, word: &impl Fn(u32) -> Result<u32, u32>) -> Result<u32, u32> {
-    if host.is_null() { word(phys as u32) } else { Ok(unsafe { *host.add(k) }) }
+fn read(host: *const u32, k: usize, phys: u64, word: &impl Fn(u64) -> Result<u32, u32>) -> Result<u32, u32> {
+    if host.is_null() { word(phys) } else { Ok(unsafe { *host.add(k) }) }
 }
 
 #[cfg(test)]
@@ -207,7 +207,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    fn mem(words: &[(u32, u32)]) -> RefCell<HashMap<u32, u32>> {
+    fn mem(words: &[(u64, u32)]) -> RefCell<HashMap<u64, u32>> {
         RefCell::new(words.iter().copied().collect())
     }
 
@@ -217,7 +217,7 @@ mod tests {
     fn a_changed_word_is_refilled() {
         {
             let m = mem(&[(0x1000, 0x2400_0001), (0x1004, 0)]);
-            let read = |a: u32| Ok(*m.borrow().get(&a).unwrap_or(&0));
+            let read = |a: u64| Ok(*m.borrow().get(&a).unwrap_or(&0));
             let mut dc = DecodeCache::new();
 
             let p = dc.fetch(0x1000, std::ptr::null(), 0, 16, read).unwrap();
@@ -245,8 +245,8 @@ mod tests {
     fn colliding_pages_do_not_alias() {
         let a = 0x1000u64;
         let b = a + (PAGES as u64) * 4096;
-        let m = mem(&[(a as u32, 0x1111_1111), (b as u32, 0x2222_2222)]);
-        let read = |x: u32| Ok(*m.borrow().get(&x).unwrap_or(&0));
+        let m = mem(&[(a, 0x1111_1111), (b, 0x2222_2222)]);
+        let read = |x: u64| Ok(*m.borrow().get(&x).unwrap_or(&0));
         let mut dc = DecodeCache::new();
         assert_eq!(unsafe { (*dc.fetch(a, std::ptr::null(), 0, 16, read).unwrap()).raw }, 0x1111_1111);
         assert_eq!(unsafe { (*dc.fetch(b, std::ptr::null(), 0, 16, read).unwrap()).raw }, 0x2222_2222);
@@ -280,7 +280,7 @@ mod tests {
     #[cfg(feature = "opcodefusion")]
     fn raw_mode_rechecks_the_fused_next_word() {
         let m = mem(&[(0x1000, 0x03e0_0008), (0x1004, 0)]); // jr ra; nop
-        let read = |a: u32| Ok(*m.borrow().get(&a).unwrap_or(&0));
+        let read = |a: u64| Ok(*m.borrow().get(&a).unwrap_or(&0));
         let mut dc = DecodeCache::new();
         let p = dc.fetch(0x1000, std::ptr::null(), 0, 16, read).unwrap();
         unsafe { (*(p as *mut DecodedInstr)).flags = 0 };

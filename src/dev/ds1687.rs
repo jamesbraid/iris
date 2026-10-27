@@ -266,8 +266,8 @@ impl Default for MaceRtc {
 }
 
 impl BusDevice for MaceRtc {
-    fn read8(&self, addr: u32) -> BusRead8 {
-        let Some(r) = Self::reg_of(addr) else { return BusRead8::ok(0) };
+    fn read8(&self, addr: u64) -> BusRead8 {
+        let Some(r) = Self::reg_of(addr as u32) else { return BusRead8::ok(0) };
         let b = self.peek(rtc_reg::B);
         if r == rtc_reg::CENTURY && self.peek(rtc_reg::A) & rtc_reg::A_DV0 != 0 {
             let days = self.now().div_euclid(86400);
@@ -280,8 +280,8 @@ impl BusDevice for MaceRtc {
         }
         BusRead8::ok(self.peek(r))
     }
-    fn write8(&self, addr: u32, val: u8) -> u32 {
-        let Some(r) = Self::reg_of(addr) else { return BUS_OK };
+    fn write8(&self, addr: u64, val: u8) -> u32 {
+        let Some(r) = Self::reg_of(addr as u32) else { return BUS_OK };
         let b = self.peek(rtc_reg::B);
         if r == rtc_reg::XCTRL4A && self.peek(rtc_reg::A) & rtc_reg::A_DV0 != 0 {
             if val & rtc_reg::XCTRL4A_PAB != 0 {
@@ -327,12 +327,12 @@ impl BusDevice for MaceRtc {
         }
         BUS_OK
     }
-    fn read16(&self, a: u32) -> BusRead16 { BusRead16::ok(self.read8(a | 7).data as u16) }
-    fn read32(&self, a: u32) -> BusRead32 { BusRead32::ok(self.read8(a | 7).data as u32) }
-    fn read64(&self, a: u32) -> BusRead64 { BusRead64::ok(self.read8(a | 7).data as u64) }
-    fn write16(&self, a: u32, v: u16) -> u32 { self.write8(a | 7, v as u8) }
-    fn write32(&self, a: u32, v: u32) -> u32 { self.write8(a | 7, v as u8) }
-    fn write64(&self, a: u32, v: u64) -> u32 { self.write8(a | 7, v as u8) }
+    fn read16(&self, a: u64) -> BusRead16 { BusRead16::ok(self.read8(a | 7).data as u16) }
+    fn read32(&self, a: u64) -> BusRead32 { BusRead32::ok(self.read8(a | 7).data as u32) }
+    fn read64(&self, a: u64) -> BusRead64 { BusRead64::ok(self.read8(a | 7).data as u64) }
+    fn write16(&self, a: u64, v: u16) -> u32 { self.write8(a | 7, v as u8) }
+    fn write32(&self, a: u64, v: u32) -> u32 { self.write8(a | 7, v as u8) }
+    fn write64(&self, a: u64, v: u64) -> u32 { self.write8(a | 7, v as u8) }
 }
 
 #[cfg(test)]
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn the_rtc_runs_and_can_be_set() {
         let r = MaceRtc::new();
-        let reg = |n: u32| (n << 8) | 7;
+        let reg = |n: u32| ((n << 8) | 7) as u64;
         // Host time on power-up: some year from 2026 on, in BCD.
         let yy = r.read8(reg(9)).data;
         assert!(yy >= 0x26 && yy & 0x0f < 10, "year {yy:#x}");

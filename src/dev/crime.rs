@@ -408,14 +408,14 @@ impl Saveable for Crime {
 }
 
 impl BusDevice for Crime {
-    fn read64(&self, addr: u32) -> BusRead64 {
-        let off = addr & (CRIME_SIZE - 1) & !7;
+    fn read64(&self, addr: u64) -> BusRead64 {
+        let off = (addr as u32) & (CRIME_SIZE - 1) & !7;
         self.note(off, false);
         BusRead64::ok(self.load(off))
     }
 
-    fn write64(&self, addr: u32, val: u64) -> u32 {
-        let off = addr & (CRIME_SIZE - 1) & !7;
+    fn write64(&self, addr: u64, val: u64) -> u32 {
+        let off = (addr as u32) & (CRIME_SIZE - 1) & !7;
         self.note(off, true);
         self.store(off, val);
         BUS_OK
@@ -425,14 +425,14 @@ impl BusDevice for Crime {
     // 32-bit access should read the correct half rather than fail, so a stray
     // one shows up in the trace instead of as a bus error we would then have to
     // chase.
-    fn read32(&self, addr: u32) -> BusRead32 {
+    fn read32(&self, addr: u64) -> BusRead32 {
         let q = self.read64(addr & !7).data;
         let hi = (addr & 4) == 0;
         BusRead32::ok(if hi { (q >> 32) as u32 } else { q as u32 })
     }
 
-    fn write32(&self, addr: u32, val: u32) -> u32 {
-        let off = addr & (CRIME_SIZE - 1) & !7;
+    fn write32(&self, addr: u64, val: u32) -> u32 {
+        let off = (addr as u32) & (CRIME_SIZE - 1) & !7;
         let cur = self.load(off);
         let merged = if (addr & 4) == 0 {
             (cur & 0x0000_0000_ffff_ffff) | ((val as u64) << 32)
@@ -510,40 +510,40 @@ impl Saveable for CrimeSpace {
 // Narrow accesses reach both as the 32-bit word they fall in: neither has a
 // byte-wide register, and the engine's busy status passes through.
 impl BusDevice for CrimeSpace {
-    fn read8(&self, addr: u32) -> crate::traits::BusRead8 {
-        let r = if Self::in_re(addr) { self.re.read32(addr & !3) } else { self.regs.read32(addr & !3) };
+    fn read8(&self, addr: u64) -> crate::traits::BusRead8 {
+        let r = if Self::in_re(addr as u32) { self.re.read32(addr & !3) } else { self.regs.read32(addr & !3) };
         crate::traits::BusRead8 { status: r.status, data: r.data as u8 }
     }
-    fn read16(&self, addr: u32) -> crate::traits::BusRead16 {
-        let r = if Self::in_re(addr) { self.re.read32(addr & !3) } else { self.regs.read32(addr & !3) };
+    fn read16(&self, addr: u64) -> crate::traits::BusRead16 {
+        let r = if Self::in_re(addr as u32) { self.re.read32(addr & !3) } else { self.regs.read32(addr & !3) };
         crate::traits::BusRead16 { status: r.status, data: r.data as u16 }
     }
-    fn read32(&self, addr: u32) -> BusRead32 {
-        if Self::in_re(addr) { self.re.read32(addr) } else { self.regs.read32(addr) }
+    fn read32(&self, addr: u64) -> BusRead32 {
+        if Self::in_re(addr as u32) { self.re.read32(addr) } else { self.regs.read32(addr) }
     }
-    fn read64(&self, addr: u32) -> BusRead64 {
-        if Self::in_re(addr) { self.re.read64(addr) } else { self.regs.read64(addr) }
+    fn read64(&self, addr: u64) -> BusRead64 {
+        if Self::in_re(addr as u32) { self.re.read64(addr) } else { self.regs.read64(addr) }
     }
-    fn write8(&self, addr: u32, val: u8) -> u32 {
+    fn write8(&self, addr: u64, val: u8) -> u32 {
         self.write32(addr & !3, val as u32)
     }
-    fn write16(&self, addr: u32, val: u16) -> u32 {
+    fn write16(&self, addr: u64, val: u16) -> u32 {
         self.write32(addr & !3, val as u32)
     }
-    fn write32(&self, addr: u32, val: u32) -> u32 {
-        if Self::in_re(addr) {
+    fn write32(&self, addr: u64, val: u32) -> u32 {
+        if Self::in_re(addr as u32) {
             return self.re.write32(addr, val);
         }
         let r = self.regs.write32(addr, val);
-        self.regs_wrote(addr);
+        self.regs_wrote(addr as u32);
         r
     }
-    fn write64(&self, addr: u32, val: u64) -> u32 {
-        if Self::in_re(addr) {
+    fn write64(&self, addr: u64, val: u64) -> u32 {
+        if Self::in_re(addr as u32) {
             return self.re.write64(addr, val);
         }
         let r = self.regs.write64(addr, val);
-        self.regs_wrote(addr);
+        self.regs_wrote(addr as u32);
         r
     }
 }

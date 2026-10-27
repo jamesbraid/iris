@@ -143,6 +143,7 @@ impl<F: MipsCache + CpuModel, S: MipsCache> CpuModel for HandoverCache<F, S> {
     const FIR: u32 = F::FIR;
     const TLB_ENTRIES: usize = F::TLB_ENTRIES;
     const VA_BITS: u32 = F::VA_BITS;
+    const PA_BITS: u32 = F::PA_BITS;
     const NAME: &'static str = F::NAME;
     const R10K_CACHE_OPS: bool = F::R10K_CACHE_OPS;
 }
@@ -215,10 +216,10 @@ impl<F: MipsCache + CpuModel, S: MipsCache> MipsCache for HandoverCache<F, S> {
     fn set_llbit(&self, val: bool) {
         live!(self, c => c.set_llbit(val))
     }
-    fn get_lladdr(&self) -> u32 {
+    fn get_lladdr(&self) -> u64 {
         live!(self, c => c.get_lladdr())
     }
-    fn set_lladdr(&self, addr: u32) {
+    fn set_lladdr(&self, addr: u64) {
         live!(self, c => c.set_lladdr(addr))
     }
     fn debug_probe(&self, cache_name: &str, virt_addr: u64, phys_addr: u64) -> String {

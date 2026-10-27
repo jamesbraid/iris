@@ -8,7 +8,7 @@ use crate::exp::eval_const_expr;
 use crate::cpu::mips_dis;
 use crate::dev::mem::{BlackHoleRegion, UnmappedRam};
 use crate::ppmem::{MappedMemory, PpMemSpace, PpMemory};
-use crate::ppmem::devmap::{entry_eq, Entry, SparseDeviceMap, SLOT_SHIFT};
+use crate::ppmem::devmap::{entry_eq, Entry, SparseDeviceMap, PHYS_MASK, SLOT_SHIFT};
 
 use crate::dev::prom::PromPort;
 use crate::dev::mc::MemoryController;
@@ -42,35 +42,35 @@ impl ErrorBus {
 }
 
 impl BusDevice for ErrorBus {
-    fn read8(&self, addr: u32) -> BusRead8 {
+    fn read8(&self, addr: u64) -> BusRead8 {
         if self.debug.load(Ordering::Relaxed) { println!("BusError: Read8 {:08x}", addr); }
         BusRead8::err()
     }
-    fn write8(&self, addr: u32, val: u8) -> u32 {
+    fn write8(&self, addr: u64, val: u8) -> u32 {
         if self.debug.load(Ordering::Relaxed) { println!("BusError: Write8 {:08x} val {:02x}", addr, val); }
         crate::traits::BUS_ERR
     }
-    fn read16(&self, addr: u32) -> BusRead16 {
+    fn read16(&self, addr: u64) -> BusRead16 {
         if self.debug.load(Ordering::Relaxed) { println!("BusError: Read16 {:08x}", addr); }
         BusRead16::err()
     }
-    fn write16(&self, addr: u32, val: u16) -> u32 {
+    fn write16(&self, addr: u64, val: u16) -> u32 {
         if self.debug.load(Ordering::Relaxed) { println!("BusError: Write16 {:08x} val {:04x}", addr, val); }
         crate::traits::BUS_ERR
     }
-    fn read32(&self, addr: u32) -> BusRead32 {
+    fn read32(&self, addr: u64) -> BusRead32 {
         if self.debug.load(Ordering::Relaxed) { println!("BusError: Read32 {:08x}", addr); }
         BusRead32::err()
     }
-    fn write32(&self, addr: u32, val: u32) -> u32 {
+    fn write32(&self, addr: u64, val: u32) -> u32 {
         if self.debug.load(Ordering::Relaxed) { println!("BusError: Write32 {:08x} val {:08x}", addr, val); }
         crate::traits::BUS_ERR
     }
-    fn read64(&self, addr: u32) -> BusRead64 {
+    fn read64(&self, addr: u64) -> BusRead64 {
         if self.debug.load(Ordering::Relaxed) { println!("BusError: Read64 {:08x}", addr); }
         BusRead64::err()
     }
-    fn write64(&self, addr: u32, val: u64) -> u32 {
+    fn write64(&self, addr: u64, val: u64) -> u32 {
         if self.debug.load(Ordering::Relaxed) { println!("BusError: Write64 {:08x} val {:016x}", addr, val); }
         crate::traits::BUS_ERR
     }
@@ -91,15 +91,24 @@ impl AliasBus {
     }
 }
 
+impl AliasBus {
+    /// Aliases live in the 32-bit space and rely on its wrap-around (the VINO
+    /// GIO alias adds 0xE1000000 to reach 0x00080000).
+    #[inline(always)]
+    fn target_addr(&self, addr: u64) -> u64 {
+        (addr as u32).wrapping_add(self.offset) as u64
+    }
+}
+
 impl BusDevice for AliasBus {
-    fn read8(&self, addr: u32) -> BusRead8   { unsafe { (*self.target).read8(addr.wrapping_add(self.offset)) } }
-    fn write8(&self, addr: u32, val: u8) -> u32  { unsafe { (*self.target).write8(addr.wrapping_add(self.offset), val) } }
-    fn read16(&self, addr: u32) -> BusRead16  { unsafe { (*self.target).read16(addr.wrapping_add(self.offset)) } }
-    fn write16(&self, addr: u32, val: u16) -> u32 { unsafe { (*self.target).write16(addr.wrapping_add(self.offset), val) } }
-    fn read32(&self, addr: u32) -> BusRead32  { unsafe { (*self.target).read32(addr.wrapping_add(self.offset)) } }
-    fn write32(&self, addr: u32, val: u32) -> u32 { unsafe { (*self.target).write32(addr.wrapping_add(self.offset), val) } }
-    fn read64(&self, addr: u32) -> BusRead64  { unsafe { (*self.target).read64(addr.wrapping_add(self.offset)) } }
-    fn write64(&self, addr: u32, val: u64) -> u32 { unsafe { (*self.target).write64(addr.wrapping_add(self.offset), val) } }
+    fn read8(&self, addr: u64) -> BusRead8   { unsafe { (*self.target).read8(self.target_addr(addr)) } }
+    fn write8(&self, addr: u64, val: u8) -> u32  { unsafe { (*self.target).write8(self.target_addr(addr), val) } }
+    fn read16(&self, addr: u64) -> BusRead16  { unsafe { (*self.target).read16(self.target_addr(addr)) } }
+    fn write16(&self, addr: u64, val: u16) -> u32 { unsafe { (*self.target).write16(self.target_addr(addr), val) } }
+    fn read32(&self, addr: u64) -> BusRead32  { unsafe { (*self.target).read32(self.target_addr(addr)) } }
+    fn write32(&self, addr: u64, val: u32) -> u32 { unsafe { (*self.target).write32(self.target_addr(addr), val) } }
+    fn read64(&self, addr: u64) -> BusRead64  { unsafe { (*self.target).read64(self.target_addr(addr)) } }
+    fn write64(&self, addr: u64, val: u64) -> u32 { unsafe { (*self.target).write64(self.target_addr(addr), val) } }
 
     /// Forward the generation counter lookup too — an alias is the same
     /// physical memory, so it must resolve to the same counter.
@@ -116,8 +125,8 @@ impl BusDevice for AliasBus {
     /// `PpMemSpace::map_alias` — both had to be wrong for the symptom to appear
     /// in every build, and fixing only one leaves the other configuration broken.
     #[cfg(feature = "jitv2")]
-    fn gen_ptr(&self, addr: u32) -> *const std::sync::atomic::AtomicU64 {
-        unsafe { (*self.target).gen_ptr(addr.wrapping_add(self.offset)) }
+    fn gen_ptr(&self, addr: u64) -> *const std::sync::atomic::AtomicU64 {
+        unsafe { (*self.target).gen_ptr(self.target_addr(addr)) }
     }
 }
 
@@ -129,14 +138,14 @@ struct CpuBusErrorDevice {
 }
 
 impl BusDevice for CpuBusErrorDevice {
-    fn read8(&self, addr: u32) -> BusRead8   { self.mc.report_cpu_error(addr); BusRead8::ok(0xFF) }
-    fn write8(&self, addr: u32, _v: u8) -> u32  { self.mc.report_cpu_error(addr); BUS_OK }
-    fn read16(&self, addr: u32) -> BusRead16  { self.mc.report_cpu_error(addr); BusRead16::ok(0xFFFF) }
-    fn write16(&self, addr: u32, _v: u16) -> u32 { self.mc.report_cpu_error(addr); BUS_OK }
-    fn read32(&self, addr: u32) -> BusRead32  { self.mc.report_cpu_error(addr); BusRead32::ok(0xFFFFFFFF) }
-    fn write32(&self, addr: u32, _v: u32) -> u32 { self.mc.report_cpu_error(addr); BUS_OK }
-    fn read64(&self, addr: u32) -> BusRead64  { self.mc.report_cpu_error(addr); BusRead64::ok(0xFFFFFFFFFFFFFFFF) }
-    fn write64(&self, addr: u32, _v: u64) -> u32 { self.mc.report_cpu_error(addr); BUS_OK }
+    fn read8(&self, addr: u64) -> BusRead8   { self.mc.report_cpu_error(addr); BusRead8::ok(0xFF) }
+    fn write8(&self, addr: u64, _v: u8) -> u32  { self.mc.report_cpu_error(addr); BUS_OK }
+    fn read16(&self, addr: u64) -> BusRead16  { self.mc.report_cpu_error(addr); BusRead16::ok(0xFFFF) }
+    fn write16(&self, addr: u64, _v: u16) -> u32 { self.mc.report_cpu_error(addr); BUS_OK }
+    fn read32(&self, addr: u64) -> BusRead32  { self.mc.report_cpu_error(addr); BusRead32::ok(0xFFFFFFFF) }
+    fn write32(&self, addr: u64, _v: u32) -> u32 { self.mc.report_cpu_error(addr); BUS_OK }
+    fn read64(&self, addr: u64) -> BusRead64  { self.mc.report_cpu_error(addr); BusRead64::ok(0xFFFFFFFFFFFFFFFF) }
+    fn write64(&self, addr: u64, _v: u64) -> u32 { self.mc.report_cpu_error(addr); BUS_OK }
 }
 
 /// GIO bus timeout sink: reports to MC (GIO_ERROR_STAT bit 10 TIME) then returns 0/Ready.
@@ -146,14 +155,14 @@ struct GioBusErrorDevice {
 }
 
 impl BusDevice for GioBusErrorDevice {
-    fn read8(&self, addr: u32) -> BusRead8   { self.mc.report_gio_timeout(addr); BusRead8::ok(0xFF) }
-    fn write8(&self, addr: u32, _v: u8) -> u32  { self.mc.report_gio_timeout(addr); BUS_OK }
-    fn read16(&self, addr: u32) -> BusRead16  { self.mc.report_gio_timeout(addr); BusRead16::ok(0xFFFF) }
-    fn write16(&self, addr: u32, _v: u16) -> u32 { self.mc.report_gio_timeout(addr); BUS_OK }
-    fn read32(&self, addr: u32) -> BusRead32  { self.mc.report_gio_timeout(addr); BusRead32::ok(0xFFFFFFFF) }
-    fn write32(&self, addr: u32, _v: u32) -> u32 { self.mc.report_gio_timeout(addr); BUS_OK }
-    fn read64(&self, addr: u32) -> BusRead64  { self.mc.report_gio_timeout(addr); BusRead64::ok(0xFFFFFFFFFFFFFFFF) }
-    fn write64(&self, addr: u32, _v: u64) -> u32 { self.mc.report_gio_timeout(addr); BUS_OK }
+    fn read8(&self, addr: u64) -> BusRead8   { self.mc.report_gio_timeout(addr); BusRead8::ok(0xFF) }
+    fn write8(&self, addr: u64, _v: u8) -> u32  { self.mc.report_gio_timeout(addr); BUS_OK }
+    fn read16(&self, addr: u64) -> BusRead16  { self.mc.report_gio_timeout(addr); BusRead16::ok(0xFFFF) }
+    fn write16(&self, addr: u64, _v: u16) -> u32 { self.mc.report_gio_timeout(addr); BUS_OK }
+    fn read32(&self, addr: u64) -> BusRead32  { self.mc.report_gio_timeout(addr); BusRead32::ok(0xFFFFFFFF) }
+    fn write32(&self, addr: u64, _v: u32) -> u32 { self.mc.report_gio_timeout(addr); BUS_OK }
+    fn read64(&self, addr: u64) -> BusRead64  { self.mc.report_gio_timeout(addr); BusRead64::ok(0xFFFFFFFFFFFFFFFF) }
+    fn write64(&self, addr: u64, _v: u64) -> u32 { self.mc.report_gio_timeout(addr); BUS_OK }
 }
 
 // Address range constants per MC/Indy hardware specification
@@ -798,7 +807,7 @@ impl Physical {
 
     /// The device behind `addr`: one indexed load from the decode table.
     #[inline(always)]
-    fn dev_at(&self, addr: u32) -> Entry {
+    fn dev_at(&self, addr: u64) -> Entry {
         // SAFETY: `map_base` spans the whole table for the life of `devmap`;
         // a page nobody filled is faulted in by devmap's handler, so every
         // load lands on a readable page holding a live device pointer.
@@ -843,19 +852,18 @@ impl Physical {
     /// means the entire 64MB region is mapped RAM, so a direct host access is
     /// equivalent to going through the bus.
     #[inline(always)]
-    fn ppmem_mapped(&self, addr: u32) -> bool {
+    fn ppmem_mapped(&self, addr: u64) -> bool {
         if self.ppmem_bitmap.is_null() {
             return false;
         }
-        let bm = unsafe { *self.ppmem_bitmap };
-        bm & (1u64 << (addr >> crate::ppmem::BITMAP_SHIFT)) != 0
+        crate::ppmem::bitmap_maps(unsafe { *self.ppmem_bitmap }, addr)
     }
 
     /// Host pointer for a directly-mapped physical address, or `None` if the
     /// address is not in a fully-mapped region (MMIO, unmapped RAM, or ppmem
     /// unavailable).
     #[inline(always)]
-    fn ppmem_ptr(&self, addr: u32) -> Option<*mut u64> {
+    fn ppmem_ptr(&self, addr: u64) -> Option<*mut u64> {
         if !self.ppmem_mapped(addr) {
             return None;
         }
@@ -865,7 +873,7 @@ impl Physical {
     /// Generation counter for a directly-mapped physical address.
     #[cfg(feature = "jitv2")]
     #[inline(always)]
-    fn ppmem_gen_ptr(&self, addr: u32) -> Option<*const std::sync::atomic::AtomicU64> {
+    fn ppmem_gen_ptr(&self, addr: u64) -> Option<*const std::sync::atomic::AtomicU64> {
         if !self.ppmem_mapped(addr) || self.ppmem_gen_base.is_null() {
             return None;
         }
@@ -877,13 +885,13 @@ impl Physical {
     /// direct-path equivalent of `PpMemory::write_block`'s per-page cursor.
     #[cfg(feature = "jitv2")]
     #[inline]
-    fn ppmem_bump_gen_range(&self, addr: u32, qwords: usize) {
+    fn ppmem_bump_gen_range(&self, addr: u64, qwords: usize) {
         use std::sync::atomic::Ordering;
         if self.ppmem_gen_base.is_null() {
             return;
         }
         let first = (addr >> 12) as usize;
-        let last = (addr.wrapping_add(((qwords.max(1) - 1) as u32) * 8) >> 12) as usize;
+        let last = ((addr + (qwords.max(1) - 1) as u64 * 8) >> 12) as usize;
         for page in first..=last.max(first) {
             unsafe {
                 (*(self.ppmem_gen_base.add(page))).fetch_add(1, Ordering::Relaxed);
@@ -949,7 +957,7 @@ impl Device for Physical {
                 let addr = eval_const_expr(actual_args[0])
                     .map_err(|e| format!("mem: {}", e))?;
                 
-                let r = BusDevice::read32(self, addr as u32);
+                let r = BusDevice::read32(self, addr);
                 if r.is_ok() { writeln!(writer, "{:08x}: {:08x}", addr, r.data).unwrap(); }
                 else { writeln!(writer, "{:08x}: Error/Busy", addr).unwrap(); }
             }
@@ -960,7 +968,7 @@ impl Device for Physical {
                 let addr = eval_const_expr(actual_args[0])
                     .map_err(|e| format!("dis: {}", e))?;
 
-                let r = BusDevice::read32(self, addr as u32);
+                let r = BusDevice::read32(self, addr);
                 if r.is_ok() { writeln!(writer, "{}", mips_dis::disassemble(r.data, addr, None)).unwrap(); }
                 else { writeln!(writer, "Could not fetch instruction at {:016x}", addr).unwrap(); }
             }
@@ -1029,8 +1037,8 @@ impl Device for Physical {
             }
             "bench" => {
                 writeln!(writer, "Benchmarking Physical Bus write32 performance...").unwrap();
-                let himem_base = HIMEM_BASE;
-                let himem_size = HIMEM_END - HIMEM_BASE;
+                let himem_base = HIMEM_BASE as u64;
+                let himem_size = (HIMEM_END - HIMEM_BASE) as u64;
                 let bench_start = crate::platform::get_host_ticks();
                 let mut error_count = 0;
                 for addr in (himem_base..himem_base + himem_size).step_by(4) {
@@ -1059,7 +1067,8 @@ impl Device for Physical {
 
 impl BusDevice for Physical {
     #[inline(always)]
-    fn read8(&self, addr: u32) -> BusRead8 {
+    fn read8(&self, addr: u64) -> BusRead8 {
+        let addr = addr & PHYS_MASK;
         let device_ptr = self.dev_at(addr);
         let r = unsafe { (*device_ptr).read8(addr) };
         #[cfg(not(feature = "lightning"))]
@@ -1071,7 +1080,8 @@ impl BusDevice for Physical {
     }
 
     #[inline(always)]
-    fn write8(&self, addr: u32, val: u8) -> u32 {
+    fn write8(&self, addr: u64, val: u8) -> u32 {
+        let addr = addr & PHYS_MASK;
         let device_ptr = self.dev_at(addr);
         let ws = unsafe { (*device_ptr).write8(addr, val) };
         #[cfg(not(feature = "lightning"))]
@@ -1080,7 +1090,8 @@ impl BusDevice for Physical {
     }
 
     #[inline(always)]
-    fn read16(&self, addr: u32) -> BusRead16 {
+    fn read16(&self, addr: u64) -> BusRead16 {
+        let addr = addr & PHYS_MASK;
         let device_ptr = self.dev_at(addr);
         let r = unsafe { (*device_ptr).read16(addr) };
         #[cfg(not(feature = "lightning"))]
@@ -1092,7 +1103,8 @@ impl BusDevice for Physical {
     }
 
     #[inline(always)]
-    fn write16(&self, addr: u32, val: u16) -> u32 {
+    fn write16(&self, addr: u64, val: u16) -> u32 {
+        let addr = addr & PHYS_MASK;
         let device_ptr = self.dev_at(addr);
         let ws = unsafe { (*device_ptr).write16(addr, val) };
         #[cfg(not(feature = "lightning"))]
@@ -1101,7 +1113,8 @@ impl BusDevice for Physical {
     }
 
     #[inline(always)]
-    fn read32(&self, addr: u32) -> BusRead32 {
+    fn read32(&self, addr: u64) -> BusRead32 {
+        let addr = addr & PHYS_MASK;
         let device_ptr = self.dev_at(addr);
         let r = unsafe { (*device_ptr).read32(addr) };
         #[cfg(not(feature = "lightning"))]
@@ -1113,7 +1126,8 @@ impl BusDevice for Physical {
     }
 
     #[inline(always)]
-    fn write32(&self, addr: u32, val: u32) -> u32 {
+    fn write32(&self, addr: u64, val: u32) -> u32 {
+        let addr = addr & PHYS_MASK;
         let device_ptr = self.dev_at(addr);
         let ws = unsafe { (*device_ptr).write32(addr, val) };
         #[cfg(not(feature = "lightning"))]
@@ -1122,7 +1136,8 @@ impl BusDevice for Physical {
     }
 
     #[inline(always)]
-    fn read64(&self, addr: u32) -> BusRead64 {
+    fn read64(&self, addr: u64) -> BusRead64 {
+        let addr = addr & PHYS_MASK;
         let device_ptr = self.dev_at(addr);
         let r = unsafe { (*device_ptr).read64(addr) };
         #[cfg(not(feature = "lightning"))]
@@ -1134,7 +1149,8 @@ impl BusDevice for Physical {
     }
 
     #[inline(always)]
-    fn write64(&self, addr: u32, val: u64) -> u32 {
+    fn write64(&self, addr: u64, val: u64) -> u32 {
+        let addr = addr & PHYS_MASK;
         let device_ptr = self.dev_at(addr);
         let ws = unsafe { (*device_ptr).write64(addr, val) };
         #[cfg(not(feature = "lightning"))]
@@ -1143,7 +1159,8 @@ impl BusDevice for Physical {
     }
 
     #[inline(always)]
-    fn write64_masked(&self, addr: u32, val: u64, mask: u64) -> u32 {
+    fn write64_masked(&self, addr: u64, val: u64, mask: u64) -> u32 {
+        let addr = addr & PHYS_MASK;
         let device_ptr = self.dev_at(addr);
         unsafe { (*device_ptr).write64_masked(addr, val, mask) }
     }
@@ -1154,13 +1171,15 @@ impl BusDevice for Physical {
     // the target device's plain read64/write64 one layer too early and skipping
     // any DMA-specific override (e.g. Rex3::dma_read64) entirely.
     #[inline(always)]
-    fn dma_read64(&self, addr: u32) -> BusRead64 {
+    fn dma_read64(&self, addr: u64) -> BusRead64 {
+        let addr = addr & PHYS_MASK;
         let device_ptr = self.dev_at(addr);
         unsafe { (*device_ptr).dma_read64(addr) }
     }
 
     #[inline(always)]
-    fn dma_write64(&self, addr: u32, val: u64) -> u32 {
+    fn dma_write64(&self, addr: u64, val: u64) -> u32 {
+        let addr = addr & PHYS_MASK;
         let device_ptr = self.dev_at(addr);
         unsafe { (*device_ptr).dma_write64(addr, val) }
     }
@@ -1171,20 +1190,23 @@ impl BusDevice for Physical {
     // of batching. Forward the whole slice so the device's own bulk override
     // (Rex3's single-token push) actually gets a chance to run.
     #[inline(always)]
-    fn dma_write64_bulk(&self, addr: u32, vals: &[u64]) -> u32 {
+    fn dma_write64_bulk(&self, addr: u64, vals: &[u64]) -> u32 {
+        let addr = addr & PHYS_MASK;
         let device_ptr = self.dev_at(addr);
         unsafe { (*device_ptr).dma_write64_bulk(addr, vals) }
     }
 
     #[inline(always)]
-    fn dma_read64_bulk(&self, addr: u32, out: &mut [u64]) -> u32 {
+    fn dma_read64_bulk(&self, addr: u64, out: &mut [u64]) -> u32 {
+        let addr = addr & PHYS_MASK;
         let device_ptr = self.dev_at(addr);
         unsafe { (*device_ptr).dma_read64_bulk(addr, out) }
     }
 
     #[cfg(feature = "jitv2")]
     #[inline(always)]
-    fn gen_ptr(&self, addr: u32) -> *const std::sync::atomic::AtomicU64 {
+    fn gen_ptr(&self, addr: u64) -> *const std::sync::atomic::AtomicU64 {
+        let addr = addr & PHYS_MASK;
         // ppmem: the counter for a directly-mapped page is at a constant
         // offset in the gen window — a pure shift off the physical address,
         // no bank lookup. See docs/ppmem-design.md §6.2.
@@ -1203,7 +1225,8 @@ impl BusDevice for Physical {
     /// Falls through to the device's own `mem_ptr` — and thus to `None` for
     /// MMIO — whenever the address is not backed by a whole mapped region.
     #[inline]
-    fn mem_ptr(&self, addr: u32) -> Option<*const u64> {
+    fn mem_ptr(&self, addr: u64) -> Option<*const u64> {
+        let addr = addr & PHYS_MASK;
         if let Some(p) = self.ppmem_ptr(addr) {
             return Some(p as *const u64);
         }
@@ -1212,7 +1235,8 @@ impl BusDevice for Physical {
     }
 
     #[inline]
-    fn read_block(&self, addr: u32, buf: &mut [u64]) -> u32 {
+    fn read_block(&self, addr: u64, buf: &mut [u64]) -> u32 {
+        let addr = addr & PHYS_MASK;
         if let Some(p) = self.ppmem_ptr(addr) {
             // Same layout as PpMemory::read_block — storage keeps qwords
             // rotate_left(32).
@@ -1228,7 +1252,8 @@ impl BusDevice for Physical {
     }
 
     #[inline]
-    fn write_block(&self, addr: u32, buf: &[u64]) -> u32 {
+    fn write_block(&self, addr: u64, buf: &[u64]) -> u32 {
+        let addr = addr & PHYS_MASK;
         if let Some(p) = self.ppmem_ptr(addr) {
             unsafe {
                 for (i, &val) in buf.iter().enumerate() {
@@ -1306,7 +1331,7 @@ mod ppmem_tests {
                     continue; // not a fully-mapped region; bus path only
                 }
                 let val = 0xC0DE_0000_0000_0000u64 | ((i as u64) << 32) | off as u64;
-                banks[i].write64(off, val);
+                banks[i].write64(off as u64, val);
                 let w = unsafe {
                     *(space.window_base().add(phys as usize) as *const u64)
                 };
@@ -1341,12 +1366,12 @@ mod ppmem_tests {
                 let phys = base + off;
                 assert!(plan.contains(&(phys >> 16, BankSlot::Bank(i))));
                 let val = 0xC0DE_0000_0000_0000u64 | ((i as u64) << 32) | off as u64;
-                banks[i].write64(phys, val);
+                banks[i].write64(phys as u64, val);
             }
             for off in offsets {
                 let phys = base + off;
                 let val = 0xC0DE_0000_0000_0000u64 | ((i as u64) << 32) | off as u64;
-                assert_eq!(banks[i].read64(phys).data, val);
+                assert_eq!(banks[i].read64(phys as u64).data, val);
                 assert_ne!(space.mapped_bitmap() & (1u64 << (phys >> crate::ppmem::BITMAP_SHIFT)), 0);
                 let w = unsafe { *(space.window_base().add(phys as usize) as *const u64) };
                 assert_eq!(w.rotate_left(32), val, "physical {phys:#x}");
@@ -1382,31 +1407,31 @@ mod ppmem_tests {
     fn low_alias_gen_counter_agrees_with_lomem_on_both_paths() {
         // Exercise `AliasBus` directly — constructing a whole `Physical` needs
         // ten collaborators, and the unit under test is the forwarding itself.
-        struct GenBank { ctr: std::sync::atomic::AtomicU64, base: u32 }
+        struct GenBank { ctr: std::sync::atomic::AtomicU64, base: u64 }
         impl BusDevice for GenBank {
-            fn read8(&self, _a: u32) -> BusRead8 { BusRead8::ok(0) }
-            fn write8(&self, _a: u32, _v: u8) -> u32 { BUS_OK }
-            fn read16(&self, _a: u32) -> BusRead16 { BusRead16::ok(0) }
-            fn write16(&self, _a: u32, _v: u16) -> u32 { BUS_OK }
-            fn read32(&self, _a: u32) -> BusRead32 { BusRead32::ok(0) }
-            fn write32(&self, _a: u32, _v: u32) -> u32 { BUS_OK }
-            fn read64(&self, _a: u32) -> BusRead64 { BusRead64::ok(0) }
-            fn write64(&self, _a: u32, _v: u64) -> u32 { BUS_OK }
+            fn read8(&self, _a: u64) -> BusRead8 { BusRead8::ok(0) }
+            fn write8(&self, _a: u64, _v: u8) -> u32 { BUS_OK }
+            fn read16(&self, _a: u64) -> BusRead16 { BusRead16::ok(0) }
+            fn write16(&self, _a: u64, _v: u16) -> u32 { BUS_OK }
+            fn read32(&self, _a: u64) -> BusRead32 { BusRead32::ok(0) }
+            fn write32(&self, _a: u64, _v: u32) -> u32 { BUS_OK }
+            fn read64(&self, _a: u64) -> BusRead64 { BusRead64::ok(0) }
+            fn write64(&self, _a: u64, _v: u64) -> u32 { BUS_OK }
             #[cfg(feature = "jitv2")]
-            fn gen_ptr(&self, addr: u32) -> *const std::sync::atomic::AtomicU64 {
+            fn gen_ptr(&self, addr: u64) -> *const std::sync::atomic::AtomicU64 {
                 // Only the page at `base` has a counter — anything else is a
                 // different page and must NOT resolve here.
                 if addr & !0xFFF == self.base { &self.ctr as *const _ } else { std::ptr::null() }
             }
         }
 
-        let target = GenBank { ctr: std::sync::atomic::AtomicU64::new(0), base: LOMEM_BASE };
+        let target = GenBank { ctr: std::sync::atomic::AtomicU64::new(0), base: LOMEM_BASE as u64 };
         let target_ptr: *const dyn BusDevice = &target;
         // The real wiring: alias at physical 0 forwards by +LOMEM_BASE.
         let alias = AliasBus::new(target_ptr, LOMEM_BASE);
 
-        let via_alias = alias.gen_ptr(ALIAS_BASE);
-        let via_direct = target.gen_ptr(LOMEM_BASE);
+        let via_alias = alias.gen_ptr(ALIAS_BASE as u64);
+        let via_direct = target.gen_ptr(LOMEM_BASE as u64);
 
         assert!(!via_alias.is_null(),
             "AliasBus must forward gen_ptr — the trait default returns null, and a null \
@@ -1418,7 +1443,7 @@ mod ppmem_tests {
         // And it must still translate, not just return something non-null: a
         // page one past the alias base maps to LOMEM_BASE + 0x1000, which this
         // target deliberately has no counter for.
-        assert!(alias.gen_ptr(ALIAS_BASE + 0x1000).is_null(),
+        assert!(alias.gen_ptr(ALIAS_BASE as u64 + 0x1000).is_null(),
             "forwarding must apply the offset, not blanket-return the first counter");
     }
 

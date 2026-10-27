@@ -375,19 +375,24 @@ impl BusDevice for Com16550 {
     // The UART sits on MACE's 8-bit ISA bus, so its byte answers on any lane
     // of the doubleword: IRIX and the BSDs use +7, Linux's 8250 driver +0
     // (mapbase 0x1f390000, regshift 8).
-    fn read8(&self, addr: u32) -> BusRead8 { BusRead8::ok(self.read_reg(addr | 7)) }
-    fn read16(&self, addr: u32) -> BusRead16 { BusRead16::ok(self.read_reg(addr | 7) as u16) }
-    fn write16(&self, addr: u32, val: u16) -> u32 { self.write_reg(addr | 7, val as u8); BUS_OK }
-    fn write8(&self, addr: u32, val: u8) -> u32 { self.write_reg(addr | 7, val); BUS_OK }
-    fn read32(&self, addr: u32) -> BusRead32 { BusRead32::ok(self.read_reg(addr | 7) as u32) }
-    fn write32(&self, addr: u32, val: u32) -> u32 { self.write_reg(addr | 7, val as u8); BUS_OK }
-    fn read64(&self, addr: u32) -> BusRead64 { BusRead64::ok(self.read_reg(addr | 7) as u64) }
-    fn write64(&self, addr: u32, val: u64) -> u32 { self.write_reg(addr | 7, val as u8); BUS_OK }
+    fn read8(&self, addr: u64) -> BusRead8 { BusRead8::ok(self.read_reg((addr | 7) as u32)) }
+    fn read16(&self, addr: u64) -> BusRead16 { BusRead16::ok(self.read_reg((addr | 7) as u32) as u16) }
+    fn write16(&self, addr: u64, val: u16) -> u32 { self.write_reg((addr | 7) as u32, val as u8); BUS_OK }
+    fn write8(&self, addr: u64, val: u8) -> u32 { self.write_reg((addr | 7) as u32, val); BUS_OK }
+    fn read32(&self, addr: u64) -> BusRead32 { BusRead32::ok(self.read_reg((addr | 7) as u32) as u32) }
+    fn write32(&self, addr: u64, val: u32) -> u32 { self.write_reg((addr | 7) as u32, val as u8); BUS_OK }
+    fn read64(&self, addr: u64) -> BusRead64 { BusRead64::ok(self.read_reg((addr | 7) as u32) as u64) }
+    fn write64(&self, addr: u64, val: u64) -> u32 { self.write_reg((addr | 7) as u32, val as u8); BUS_OK }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bus address of a byte in the first MACE serial port.
+    fn com0(off: u32) -> u64 {
+        MACE_COM0 as u64 + off as u64
+    }
 
     /// The TCP console, through the shared serial backend: a client gets
     /// the telnet handshake, then every byte the guest transmits, and what
@@ -423,13 +428,13 @@ mod tests {
             c.pump();
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert_eq!(c.read8(MACE_COM0 + 7).data, b'l');
-        assert_eq!(c.read8(MACE_COM0 + 7).data, b's');
-        assert_eq!(c.read8(MACE_COM0 + 7).data, b'\r');
+        assert_eq!(c.read8(com0(7)).data, b'l');
+        assert_eq!(c.read8(com0(7)).data, b's');
+        assert_eq!(c.read8(com0(7)).data, b'\r');
         assert_eq!(c.pending_input(), 0, "the telnet command is not input");
         // Transmitted: reaches the client.
         for &b in b"ok" {
-            c.write8(MACE_COM0 + 7, b);
+            c.write8(com0(7), b);
         }
         let mut got = [0u8; 2];
         client.read_exact(&mut got).expect("output");
@@ -440,15 +445,15 @@ mod tests {
     #[test]
     fn save_load_round_trip() {
         let src = Com16550::new();
-        src.write8(MACE_COM0 + (com_reg::IER << 8) + 7, com_reg::IER_RX);
-        src.write8(MACE_COM0 + (com_reg::LCR << 8) + 7, 0x03);
-        src.write8(MACE_COM0 + (com_reg::SCR << 8) + 7, 0x5a);
+        src.write8(com0((com_reg::IER << 8) + 7), com_reg::IER_RX);
+        src.write8(com0((com_reg::LCR << 8) + 7), 0x03);
+        src.write8(com0((com_reg::SCR << 8) + 7), 0x5a);
         src.feed(b"typed");
         let v1 = src.save_state();
 
         let dst = Com16550::new();
         dst.load_state(&v1).expect("load_state");
         assert_eq!(v1, dst.save_state(), "Com16550 save_state mismatch after load_state round-trip");
-        assert_eq!(dst.read8(MACE_COM0 + 7).data, b't', "unread input survives");
+        assert_eq!(dst.read8(com0(7)).data, b't', "unread input survives");
     }
 }

@@ -120,6 +120,8 @@ fault handler here maps a *table page*, not a guest device, and it runs once
 per untouched 256 MB region, not per access. The hot path is still the
 indexed load and the virtual call.
 
-The bus trait is still addressed with `u32`. The table reaches 40 bits so
-that the Octane work can widen the bus without also redesigning the decode;
-the Indy and Indigo2 use the low 4 GB of it unchanged.
+The bus trait is addressed with `u64`. `Physical` masks every address to
+the table's 40 bits before dispatch, so a device never sees bits above them.
+The Indy, Indigo2 and O2 use the low 4 GB of the table: their CPUs fold
+every physical address to the 32 bits the board decodes before it reaches
+the bus (`MipsExecutor::phys_mask`), so nothing above 4 GB is touched.

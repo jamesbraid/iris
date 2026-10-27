@@ -49,6 +49,9 @@ pub type Entry = *const dyn BusDevice;
 
 /// Width of the physical address space the table covers.
 pub const PHYS_BITS: u32 = 40;
+/// The bits of a physical address the table decodes. `Physical` masks every
+/// address with this before dispatch, so a device never sees bits above it.
+pub const PHYS_MASK: u64 = (1 << PHYS_BITS) - 1;
 /// Bytes of guest address space per entry: 64 KB.
 pub const SLOT_SHIFT: u32 = 16;
 /// Entries in the table.

@@ -49,6 +49,7 @@ available on the terminal iris was started from.
 ```sh
 nc localhost 8888            # or: telnet 127.0.0.1 8888
 tools/mon.py "regs" "cop0"   # one-shot: run commands and print their output
+IRIS_MON_PORT=8898 tools/mon.py "regs"   # an iris with a non-default monitor_port
 ```
 
 `help` lists every command the running build registered, with a one-line

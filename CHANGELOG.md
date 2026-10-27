@@ -140,6 +140,19 @@ hashes are given where a change is easiest to understand by reading the commit.
   swap whole pages in, so the DMA worker dispatching through the table during
   a MEMCFG remap can no longer read a torn pointer. `phys map` in the monitor
   shows the table. Groundwork for machines with a 40-bit address space.
+- **The bus takes 64-bit addresses.** Every `BusDevice` method now takes
+  `addr: u64`. `Physical` masks to the table's 40 bits before dispatch, and
+  devices below 4 GB turn the address into a 32-bit offset from their base,
+  so their internals and the GFIFO stay 32-bit.
+- **Translation keeps the whole physical address.** `TranslateResult.phys`
+  is 64-bit, so the CPU can hand the bus up to 40 bits. Each machine folds
+  it to the bits its board decodes (`MipsExecutor::phys_mask`): the Indy,
+  Indigo2 and O2 decode 32 and alias the rest away, as they always did.
+  IRIX depends on that: on the IP28 its page-table entries carry software
+  bits into EntryLo's top PFN bits, and its kernel stack sits at physical
+  0x6_2040_4000 as far as the CPU is concerned. Where a machine does decode
+  above 4 GB, RAM there goes through the bus rather than the direct window,
+  and code there runs in the interpreter: the JIT's page map covers 4 GB.
 
 ### Memory configuration
 

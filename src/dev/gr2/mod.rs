@@ -65,8 +65,15 @@ use vc1::Vc1;
 use xmap5::Xmap5;
 
 /// GIO gfx slot base and size (the board decodes a 4 MB slot).
-pub const GR2_BASE: u32 = 0x1F00_0000;
+pub const GR2_BASE: u64 = 0x1F00_0000;
 pub const GR2_SLOT_SIZE: u32 = 0x0040_0000;
+
+/// Bus address to a 32-bit offset from the slot base. The decode table only
+/// routes the GR2 slot here, so the truncation never loses bits.
+#[inline]
+fn slot_off(addr: u64) -> u32 {
+    (addr - GR2_BASE) as u32
+}
 
 // Region offsets from the board base (GR2.h).
 const SHRAM: u32 = 0x00000;
@@ -994,33 +1001,33 @@ impl Resettable for Gr2 {
 }
 
 impl BusDevice for Gr2 {
-    fn read32(&self, addr: u32) -> BusRead32 {
-        let r = self.reg_read((addr - GR2_BASE) & (GR2_SLOT_SIZE - 4));
+    fn read32(&self, addr: u64) -> BusRead32 {
+        let r = self.reg_read(slot_off(addr) & (GR2_SLOT_SIZE - 4));
         crate::pf_level!(self.pf_wait, crate::perfetto::events::GR2_WAIT, r.status == BUS_BUSY);
         r
     }
-    fn write32(&self, addr: u32, val: u32) -> u32 {
-        let st = self.reg_write((addr - GR2_BASE) & (GR2_SLOT_SIZE - 4), val);
+    fn write32(&self, addr: u64, val: u32) -> u32 {
+        let st = self.reg_write(slot_off(addr) & (GR2_SLOT_SIZE - 4), val);
         self.pf_write(st);
         st
     }
     // Narrow accesses hit 8/16-bit peripheral chips on word addresses: the
     // access carries the register value whatever its width or lane (GR2.h).
-    fn read8(&self, addr: u32) -> BusRead8 {
+    fn read8(&self, addr: u64) -> BusRead8 {
         let r = self.read32(addr & !3);
         BusRead8 { status: r.status, data: r.data as u8 }
     }
-    fn write8(&self, addr: u32, val: u8) -> u32 {
-        self.reg_write_narrow((addr - GR2_BASE) & (GR2_SLOT_SIZE - 4), val as u32)
+    fn write8(&self, addr: u64, val: u8) -> u32 {
+        self.reg_write_narrow(slot_off(addr) & (GR2_SLOT_SIZE - 4), val as u32)
     }
-    fn read16(&self, addr: u32) -> BusRead16 {
+    fn read16(&self, addr: u64) -> BusRead16 {
         let r = self.read32(addr & !3);
         BusRead16 { status: r.status, data: r.data as u16 }
     }
-    fn write16(&self, addr: u32, val: u16) -> u32 {
-        self.reg_write_narrow((addr - GR2_BASE) & (GR2_SLOT_SIZE - 4), val as u32)
+    fn write16(&self, addr: u64, val: u16) -> u32 {
+        self.reg_write_narrow(slot_off(addr) & (GR2_SLOT_SIZE - 4), val as u32)
     }
-    fn read64(&self, addr: u32) -> BusRead64 {
+    fn read64(&self, addr: u64) -> BusRead64 {
         let hi = self.read32(addr);
         if hi.status != BUS_OK {
             return BusRead64 { status: hi.status, data: 0 };
@@ -1031,7 +1038,7 @@ impl BusDevice for Gr2 {
         }
         BusRead64::ok(((hi.data as u64) << 32) | lo.data as u64)
     }
-    fn write64(&self, addr: u32, val: u64) -> u32 {
+    fn write64(&self, addr: u64, val: u64) -> u32 {
         let st = self.write64_inner(addr, val);
         self.pf_write(st);
         st
@@ -1046,8 +1053,8 @@ impl Gr2 {
         crate::pf_level!(self.pf_fifo_full, crate::perfetto::events::GR2_FIFO_FULL, st == BUS_BUSY);
     }
 
-    fn write64_inner(&self, addr: u32, val: u64) -> u32 {
-        let off = (addr - GR2_BASE) & (GR2_SLOT_SIZE - 8);
+    fn write64_inner(&self, addr: u64, val: u64) -> u32 {
+        let off = slot_off(addr) & (GR2_SLOT_SIZE - 8);
         let (hi, lo) = ((val >> 32) as u32, val as u32);
         if (FIFO..FIFO_END).contains(&off) {
             // Both words or neither: a retried store must not push the first twice.

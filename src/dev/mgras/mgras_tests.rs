@@ -153,9 +153,9 @@ struct TestMem {
 }
 
 impl BusDevice for TestMem {
-    fn read8(&self, addr: u32) -> BusRead8 { BusRead8::ok(self.bytes.lock().get(&addr).copied().unwrap_or(0)) }
-    fn write8(&self, addr: u32, val: u8) -> u32 { self.bytes.lock().insert(addr, val); BUS_OK }
-    fn read32(&self, addr: u32) -> BusRead32 { BusRead32::ok(self.words.lock().get(&addr).copied().unwrap_or(0)) }
+    fn read8(&self, addr: u64) -> BusRead8 { BusRead8::ok(self.bytes.lock().get(&(addr as u32)).copied().unwrap_or(0)) }
+    fn write8(&self, addr: u64, val: u8) -> u32 { self.bytes.lock().insert(addr as u32, val); BUS_OK }
+    fn read32(&self, addr: u64) -> BusRead32 { BusRead32::ok(self.words.lock().get(&(addr as u32)).copied().unwrap_or(0)) }
 }
 
 /// Memory with pool 0's page table at 0x1000 mapping logical page 0 to

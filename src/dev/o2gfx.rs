@@ -623,19 +623,19 @@ impl Gbe {
 }
 
 impl BusDevice for Gbe {
-    fn read32(&self, addr: u32) -> BusRead32 {
-        BusRead32::ok(self.read_reg(addr & 0xffffc))
+    fn read32(&self, addr: u64) -> BusRead32 {
+        BusRead32::ok(self.read_reg((addr as u32) & 0xffffc))
     }
-    fn read64(&self, addr: u32) -> BusRead64 {
-        let a = addr & 0xffff8;
+    fn read64(&self, addr: u64) -> BusRead64 {
+        let a = (addr as u32) & 0xffff8;
         BusRead64::ok((self.read_reg(a) as u64) << 32 | self.read_reg(a + 4) as u64)
     }
-    fn write32(&self, addr: u32, val: u32) -> u32 {
-        self.write_reg(addr & 0xffffc, val);
+    fn write32(&self, addr: u64, val: u32) -> u32 {
+        self.write_reg((addr as u32) & 0xffffc, val);
         BUS_OK
     }
-    fn write64(&self, addr: u32, val: u64) -> u32 {
-        let a = addr & 0xffff8;
+    fn write64(&self, addr: u64, val: u64) -> u32 {
+        let a = (addr as u32) & 0xffff8;
         self.write_reg(a, (val >> 32) as u32);
         self.write_reg(a + 4, val as u32);
         BUS_OK
@@ -2643,11 +2643,11 @@ impl CrimeRe {
 }
 
 impl BusDevice for CrimeRe {
-    fn read32(&self, addr: u32) -> BusRead32 {
-        self.read_reg(addr & 0x7ffc).map_or(BusRead32::busy(), BusRead32::ok)
+    fn read32(&self, addr: u64) -> BusRead32 {
+        self.read_reg((addr as u32) & 0x7ffc).map_or(BusRead32::busy(), BusRead32::ok)
     }
-    fn read64(&self, addr: u32) -> BusRead64 {
-        let a = addr & 0x7ff8;
+    fn read64(&self, addr: u64) -> BusRead64 {
+        let a = (addr as u32) & 0x7ff8;
         if a == STATUS {
             return self.read_reg(STATUS).map_or(BusRead64::busy(), |v| BusRead64::ok(v as u64));
         }
@@ -2656,11 +2656,11 @@ impl BusDevice for CrimeRe {
             _ => BusRead64::busy(),
         }
     }
-    fn write32(&self, addr: u32, val: u32) -> u32 {
-        self.cpu_write(addr & 0x7ffc, val as u64, 32)
+    fn write32(&self, addr: u64, val: u32) -> u32 {
+        self.cpu_write((addr as u32) & 0x7ffc, val as u64, 32)
     }
-    fn write64(&self, addr: u32, val: u64) -> u32 {
-        self.cpu_write(addr & 0x7ff8, val, 64)
+    fn write64(&self, addr: u64, val: u64) -> u32 {
+        self.cpu_write((addr as u32) & 0x7ff8, val, 64)
     }
 }
 
@@ -2838,12 +2838,12 @@ mod tests {
             TestRe(re)
         }
         fn put32(&self, addr: u32, val: u32) {
-            while self.0.write32(addr, val) == BUS_BUSY {
+            while self.0.write32(addr as u64, val) == BUS_BUSY {
                 std::hint::spin_loop();
             }
         }
         fn put64(&self, addr: u32, val: u64) {
-            while self.0.write64(addr, val) == BUS_BUSY {
+            while self.0.write64(addr as u64, val) == BUS_BUSY {
                 std::hint::spin_loop();
             }
         }
@@ -2872,8 +2872,8 @@ mod tests {
     #[test]
     fn gbe_save_load_round_trip() {
         let src = gbe();
-        src.write32(DOTCLOCK, DOTCLOCK_RUN | 0x0123);
-        src.write32(CMAP + 4 * 7, 0x00ff_8000);
+        src.write32(DOTCLOCK as u64, DOTCLOCK_RUN | 0x0123);
+        src.write32((CMAP + 4 * 7) as u64, 0x00ff_8000);
         {
             let mut s = src.s.lock().unwrap();
             s.t0 = 1_000_000;
@@ -2905,20 +2905,20 @@ mod tests {
     #[test]
     fn the_polls_the_prom_and_the_bsds_run_terminate() {
         let g = gbe();
-        assert_eq!(g.read32(GBE_CTRLSTAT_ADDR).data & 0xf, 1, "chip id 1");
-        assert_ne!(g.read32(GBE_CTRLSTAT_ADDR).data & (1 << 12), 0, "board revision strap");
-        assert_eq!(g.read32(0x1600_0000 + CM_FIFO).data, 0);
-        g.write32(0x1600_0000 + FRM_CONTROL_SHADOW, 0x00d6_0001);
-        assert_eq!(g.read32(0x1600_0000 + FRM_CONTROL).data, 0x00d6_0001, "live follows shadow exactly");
-        g.write32(0x1600_0000 + DOTCLOCK, 0x0010_020f);
-        assert_ne!(g.read32(0x1600_0000 + DOTCLOCK).data & DOTCLOCK_RUN, 0);
-        assert_eq!(g.read32(0x1600_0000 + VT_XY).data, VT_FREEZE, "frozen at reset");
-        g.write32(0x1600_0000 + VT_XYMAX, 0x0042_9690);
-        g.write32(0x1600_0000 + VT_XY, 0);
+        assert_eq!(g.read32(GBE_CTRLSTAT_ADDR as u64).data & 0xf, 1, "chip id 1");
+        assert_ne!(g.read32(GBE_CTRLSTAT_ADDR as u64).data & (1 << 12), 0, "board revision strap");
+        assert_eq!(g.read32((0x1600_0000 + CM_FIFO) as u64).data, 0);
+        g.write32((0x1600_0000 + FRM_CONTROL_SHADOW) as u64, 0x00d6_0001);
+        assert_eq!(g.read32((0x1600_0000 + FRM_CONTROL) as u64).data, 0x00d6_0001, "live follows shadow exactly");
+        g.write32((0x1600_0000 + DOTCLOCK) as u64, 0x0010_020f);
+        assert_ne!(g.read32((0x1600_0000 + DOTCLOCK) as u64).data & DOTCLOCK_RUN, 0);
+        assert_eq!(g.read32((0x1600_0000 + VT_XY) as u64).data, VT_FREEZE, "frozen at reset");
+        g.write32((0x1600_0000 + VT_XYMAX) as u64, 0x0042_9690);
+        g.write32((0x1600_0000 + VT_XY) as u64, 0);
         // The PROM's wait for blanking: x in 1280..=1480 or y in 1024..=1044.
         let mut seen = false;
         for _ in 0..100_000 {
-            let xy = g.read32(0x1600_0000 + VT_XY).data;
+            let xy = g.read32((0x1600_0000 + VT_XY) as u64).data;
             let (x, y) = (xy & 0xfff, (xy >> 12) & 0xfff);
             if (1280..=1480).contains(&x) || (1024..=1044).contains(&y) {
                 seen = true;
@@ -3600,11 +3600,11 @@ mod tests {
         let re = TestRe::new(ram.clone());
         draw(&re, false);
         let mut spins = 0;
-        while re.read32(0x1500_0000 + STATUS).data != RE_STATUS_IDLE {
+        while re.read32((0x1500_0000 + STATUS) as u64).data != RE_STATUS_IDLE {
             spins += 1;
             assert!(spins < 50_000_000, "never idle");
         }
-        assert_eq!(re.read32(0x1500_0000 + FG).data, 0x1020_3000 | 199, "a read when idle sees the last write");
+        assert_eq!(re.read32((0x1500_0000 + FG) as u64).data, 0x1020_3000 | 199, "a read when idle sees the last write");
         assert_eq!(ram.lock().unwrap().bytes(0x0100_0000, 0x1000), one_ram.lock().unwrap().bytes(0x0100_0000, 0x1000));
     }
 
@@ -3614,23 +3614,23 @@ mod tests {
     #[test]
     fn a_full_interface_buffer_asks_the_cpu_to_retry() {
         let re = CrimeRe::new(Arc::new(Mutex::new(O2Memory::single(32 << 20))));
-        let level = |re: &CrimeRe| re.read32(0x1500_0000 + STATUS).data;
+        let level = |re: &CrimeRe| re.read32((0x1500_0000 + STATUS) as u64).data;
         for i in 0..(IB_DEPTH as u32 - 1) {
-            assert_eq!(re.write32(0x1500_0000 + FG, i), BUS_OK, "write {i}");
+            assert_eq!(re.write32((0x1500_0000 + FG) as u64, i), BUS_OK, "write {i}");
             if i == 9 {
                 assert_eq!(level(&re), 10 << RE_STATUS_IB_LEVEL_SHIFT, "ten queued, busy");
             }
         }
-        assert_eq!(re.write32(0x1500_0000 + FG, 999), BUS_BUSY);
+        assert_eq!(re.write32((0x1500_0000 + FG) as u64, 999), BUS_BUSY);
         assert_eq!(level(&re), 1 << RE_STATUS_IB_LEVEL_SHIFT, "full: busy, one entry shown");
-        assert_eq!(re.read32(0x1500_0000 + FG).status, BUS_BUSY);
+        assert_eq!(re.read32((0x1500_0000 + FG) as u64).status, BUS_BUSY);
         let re = Arc::new(re);
         re.start(re.clone(), |r| r);
-        while re.write32(0x1500_0000 + FG, 999) == BUS_BUSY {
+        while re.write32((0x1500_0000 + FG) as u64, 999) == BUS_BUSY {
             std::hint::spin_loop();
         }
         re.wait_idle();
-        assert_eq!(re.read32(0x1500_0000 + FG).data, 999);
+        assert_eq!(re.read32((0x1500_0000 + FG) as u64).data, 999);
     }
 
     /// The X server's Motif bevel: a rectangle into the 32-bit ABGR screen
@@ -3742,14 +3742,14 @@ mod tests {
         let tc = t.clone();
         let g = Gbe::new(Arc::new(move || tc.load(std::sync::atomic::Ordering::Relaxed)));
         let base = 0x1600_0000;
-        g.write32(base + DOTCLOCK, 0x0010_020f);
-        g.write32(base + VT_XYMAX, 0x0042_9690);
-        g.write32(base + VT_XY, 0);
-        g.write32(base + OVR_CONTROL_SHADOW, 0x0035_b9c1);
-        assert_eq!(g.read32(base + OVR_CONTROL).data & 1, 0, "the old state until blanking");
+        g.write32((base + DOTCLOCK) as u64, 0x0010_020f);
+        g.write32((base + VT_XYMAX) as u64, 0x0042_9690);
+        g.write32((base + VT_XY) as u64, 0);
+        g.write32((base + OVR_CONTROL_SHADOW) as u64, 0x0035_b9c1);
+        assert_eq!(g.read32((base + OVR_CONTROL) as u64).data & 1, 0, "the old state until blanking");
         // A frame at 108 MHz is about 15 ms of guest time.
         t.store(40_000, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(g.read32(base + OVR_CONTROL).data, 0x0035_b9c1, "the new value after it");
+        assert_eq!(g.read32((base + OVR_CONTROL) as u64).data, 0x0035_b9c1, "the new value after it");
     }
 
     /// Fill a rectangle through TLB A, then scan it out through a tile list.
@@ -3792,7 +3792,7 @@ mod tests {
             (MODE, 0x403),
             (CMAP + 4 * 5, 0x11223300),
         ] {
-            g.write32(0x1600_0000 + off, v);
+            g.write32((0x1600_0000 + off) as u64, v);
         }
         let mut out = vec![0u8; 2048 * 2048 * 4];
         let (w, h) = g.render(&*ram.lock().unwrap(), &mut out).expect("display on");
@@ -3858,7 +3858,7 @@ mod tests {
             (GMAP + 4 * 0xbb, 0xbbbbbb00),
             (GMAP + 4 * 0xcc, 0xcccccc00),
         ] {
-            g.write32(0x1600_0000 + off, v);
+            g.write32((0x1600_0000 + off) as u64, v);
         }
         let mut out = vec![0u8; 2048 * 2048 * 4];
         g.render(&*ram.lock().unwrap(), &mut out).expect("display on");

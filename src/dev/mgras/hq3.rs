@@ -302,7 +302,7 @@ fn fetch_dl_segment(mem: &dyn BusDevice, table: u32, offset: u32, words: u32) ->
         let frame = match cached {
             Some((p, f)) if p == page => f,
             _ => {
-                let r = mem.read32(table.wrapping_add(4 * page));
+                let r = mem.read32(table.wrapping_add(4 * page) as u64);
                 if !r.is_ok() {
                     return None;
                 }
@@ -310,7 +310,7 @@ fn fetch_dl_segment(mem: &dyn BusDevice, table: u32, offset: u32, words: u32) ->
                 r.data << 12
             }
         };
-        let w = mem.read32(frame | (l & 0xFFF));
+        let w = mem.read32((frame | (l & 0xFFF)) as u64);
         out.push(if w.is_ok() { w.data } else { 0 });
     }
     Some(out)
@@ -1278,7 +1278,7 @@ impl Hq3Engine {
         }
         let frame_of = |page: u32| -> Option<u32> {
             let page = if list.is_empty() { page } else { *list.get(page as usize)? };
-            let r = mem.read32(table.wrapping_add(4 * page));
+            let r = mem.read32(table.wrapping_add(4 * page) as u64);
             r.is_ok().then_some(r.data << 12)
         };
         let mut cached: Option<(u32, u32)> = None;
@@ -1326,7 +1326,7 @@ impl Hq3Engine {
                 format_pixels(self.formatter, &mut bytes);
                 for (k, b) in bytes.iter().take(len as usize).enumerate() {
                     let Some(pa) = phys(a + k as u32) else { return };
-                    mem.write8(pa, *b);
+                    mem.write8(pa as u64, *b);
                 }
             } else {
                 let mut bytes = vec![0u8; len as usize];
@@ -1359,10 +1359,10 @@ impl Hq3Engine {
 /// time, 0 where a read fails.
 fn read_host(mem: &dyn BusDevice, pa: u32, out: &mut [u8]) {
     let base = pa & !7;
-    if mem.mem_ptr(base).is_some() {
+    if mem.mem_ptr(base as u64).is_some() {
         let skip = (pa - base) as usize;
         let mut buf = vec![0u64; (skip + out.len()).div_ceil(8)];
-        if mem.read_block(base, &mut buf) == crate::traits::BUS_OK {
+        if mem.read_block(base as u64, &mut buf) == crate::traits::BUS_OK {
             for (i, b) in out.iter_mut().enumerate() {
                 let at = skip + i;
                 *b = (buf[at / 8] >> (56 - 8 * (at % 8))) as u8;
@@ -1371,7 +1371,7 @@ fn read_host(mem: &dyn BusDevice, pa: u32, out: &mut [u8]) {
         }
     }
     for (i, b) in out.iter_mut().enumerate() {
-        let r = mem.read8(pa + i as u32);
+        let r = mem.read8((pa + i as u32) as u64);
         *b = if r.is_ok() { r.data } else { 0 };
     }
 }
@@ -1697,13 +1697,13 @@ mod tests {
     struct Ram(Vec<u8>);
 
     impl BusDevice for Ram {
-        fn read8(&self, addr: u32) -> BusRead8 {
+        fn read8(&self, addr: u64) -> BusRead8 {
             BusRead8::ok(self.0[addr as usize])
         }
-        fn mem_ptr(&self, addr: u32) -> Option<*const u64> {
+        fn mem_ptr(&self, addr: u64) -> Option<*const u64> {
             Some(self.0[addr as usize..].as_ptr() as *const u64)
         }
-        fn read_block(&self, addr: u32, buf: &mut [u64]) -> u32 {
+        fn read_block(&self, addr: u64, buf: &mut [u64]) -> u32 {
             for (i, w) in buf.iter_mut().enumerate() {
                 let at = addr as usize + 8 * i;
                 *w = u64::from_be_bytes(self.0[at..at + 8].try_into().unwrap());
@@ -1721,7 +1721,7 @@ mod tests {
             for len in [0usize, 1, 5, 7, 8, 9, 16, 23, 64, 0x100] {
                 let mut fast = vec![0u8; len];
                 read_host(&ram, pa, &mut fast);
-                let slow: Vec<u8> = (0..len as u32).map(|i| ram.read8(pa + i).data).collect();
+                let slow: Vec<u8> = (0..len as u32).map(|i| ram.read8((pa + i) as u64).data).collect();
                 assert_eq!(fast, slow, "pa {pa:#x} len {len}");
             }
         }

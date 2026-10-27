@@ -364,8 +364,8 @@ impl Slot {
 
 /// The bridge's own registers, configuration mechanism #1 among them.
 impl BusDevice for MacePci {
-    fn read32(&self, addr: u32) -> BusRead32 {
-        let off = addr & (MACEPCI_SIZE - 1) & !3;
+    fn read32(&self, addr: u64) -> BusRead32 {
+        let off = (addr as u32) & (MACEPCI_SIZE - 1) & !3;
         match off {
             macepci_reg::CONFIG_DATA => BusRead32::ok(match self.selected() {
                 Some((s, reg)) => {
@@ -383,8 +383,8 @@ impl BusDevice for MacePci {
         }
     }
 
-    fn write32(&self, addr: u32, val: u32) -> u32 {
-        let off = addr & (MACEPCI_SIZE - 1) & !3;
+    fn write32(&self, addr: u64, val: u32) -> u32 {
+        let off = (addr as u32) & (MACEPCI_SIZE - 1) & !3;
         match off {
             macepci_reg::CONFIG_ADDR => {
                 *self.config_addr.lock().unwrap() = val;
@@ -404,13 +404,13 @@ impl BusDevice for MacePci {
         BUS_OK
     }
 
-    fn read64(&self, addr: u32) -> BusRead64 {
+    fn read64(&self, addr: u64) -> BusRead64 {
         let hi = self.read32(addr).data as u64;
         let lo = self.read32(addr.wrapping_add(4)).data as u64;
         BusRead64::ok((hi << 32) | lo)
     }
 
-    fn write64(&self, addr: u32, val: u64) -> u32 {
+    fn write64(&self, addr: u64, val: u64) -> u32 {
         self.write32(addr, (val >> 32) as u32);
         self.write32(addr.wrapping_add(4), val as u32)
     }
@@ -540,6 +540,8 @@ mod tests {
     }
 
     fn cfg(addr: u32, reg: u32) -> u32 { addr | (1 << 31) | (reg << 2) }
+    /// A bridge register, as the bus address it sits at.
+    fn bridge(reg: u32) -> u64 { (MACEPCI_BASE + reg) as u64 }
 
     fn test_ram() -> Arc<Mutex<O2Memory>> {
         Arc::new(Mutex::new(O2Memory::single(1 << 20)))
@@ -577,18 +579,18 @@ mod tests {
 
         // Config mechanism #1: slot 1 answers, slot 3 floats high.
         let slot1 = (IP32_SCSI_SLOT as u32) << 11;
-        pci.write32(MACEPCI_BASE + macepci_reg::CONFIG_ADDR, cfg(slot1, 0));
-        assert_eq!(pci.read32(MACEPCI_BASE + macepci_reg::CONFIG_DATA).data, 0x8078_9004);
-        pci.write32(MACEPCI_BASE + macepci_reg::CONFIG_ADDR, cfg(3 << 11, 0));
-        assert_eq!(pci.read32(MACEPCI_BASE + macepci_reg::CONFIG_DATA).data, 0xffff_ffff);
+        pci.write32(bridge(macepci_reg::CONFIG_ADDR), cfg(slot1, 0));
+        assert_eq!(pci.read32(bridge(macepci_reg::CONFIG_DATA)).data, 0x8078_9004);
+        pci.write32(bridge(macepci_reg::CONFIG_ADDR), cfg(3 << 11, 0));
+        assert_eq!(pci.read32(bridge(macepci_reg::CONFIG_DATA)).data, 0xffff_ffff);
 
         // Assign BAR1 and enable memory: the low window reaches it, with
         // byte lanes swapped.
-        pci.write32(MACEPCI_BASE + macepci_reg::CONFIG_ADDR, cfg(slot1, 5));
-        pci.write32(MACEPCI_BASE + macepci_reg::CONFIG_DATA, 0x8000_1000);
+        pci.write32(bridge(macepci_reg::CONFIG_ADDR), cfg(slot1, 5));
+        pci.write32(bridge(macepci_reg::CONFIG_DATA), 0x8000_1000);
         assert_eq!(pci.window_read(PCI_MEM_BASE + 0x1084, 4), 0xffff_ffff, "not before memory is enabled");
-        pci.write32(MACEPCI_BASE + macepci_reg::CONFIG_ADDR, cfg(slot1, 1));
-        pci.write32(MACEPCI_BASE + macepci_reg::CONFIG_DATA, PCI_COMMAND_MEMORY);
+        pci.write32(bridge(macepci_reg::CONFIG_ADDR), cfg(slot1, 1));
+        pci.write32(bridge(macepci_reg::CONFIG_DATA), PCI_COMMAND_MEMORY);
         assert_eq!(pci.window_read(PCI_MEM_BASE + 0x1084, 4), 0x1234_5678);
         assert_eq!(*f.last.lock().unwrap(), Some((1, 0x84, 4)));
         pci.window_write(PCI_MEM_BASE + 0x1084, 0, 1);
@@ -617,10 +619,10 @@ mod tests {
         };
         let (src, f) = make(Arc::new(Crime(Mutex::new(Vec::new()))));
         let slot1 = (IP32_SCSI_SLOT as u32) << 11;
-        src.write32(MACEPCI_BASE + macepci_reg::CONFIG_ADDR, cfg(slot1, 5));
-        src.write32(MACEPCI_BASE + macepci_reg::CONFIG_DATA, 0x8000_1000);
-        src.write32(MACEPCI_BASE + macepci_reg::CONFIG_ADDR, cfg(slot1, 1));
-        src.write32(MACEPCI_BASE + macepci_reg::CONFIG_DATA, PCI_COMMAND_MEMORY);
+        src.write32(bridge(macepci_reg::CONFIG_ADDR), cfg(slot1, 5));
+        src.write32(bridge(macepci_reg::CONFIG_DATA), 0x8000_1000);
+        src.write32(bridge(macepci_reg::CONFIG_ADDR), cfg(slot1, 1));
+        src.write32(bridge(macepci_reg::CONFIG_DATA), PCI_COMMAND_MEMORY);
         f.irq.get().unwrap().set(true);
         let v1 = src.save_state();
 

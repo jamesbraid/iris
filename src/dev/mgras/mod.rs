@@ -871,9 +871,9 @@ impl Mgras {
         *self.cycles.lock() = ptr;
     }
 
-    fn offset(&self, addr: u32) -> Option<u32> {
-        let off = addr.wrapping_sub(MGRAS_SLOT_GFX_BASE);
-        (off < MAP_SIZE).then_some(off)
+    fn offset(&self, addr: u64) -> Option<u32> {
+        let off = addr.wrapping_sub(MGRAS_SLOT_GFX_BASE as u64);
+        (off < MAP_SIZE as u64).then_some(off as u32)
     }
 
     /// Flags as the host reads them.
@@ -1157,7 +1157,7 @@ impl Mgras {
         matches!(off, host::CFIFO | 0x70084 | host::CFIFO_GL | host::CFIFO_PRIVILEGED | 0x50084 | host::RASTER..=0x7FFFF)
     }
 
-    fn do_read(&self, addr: u32, bits: u32) -> Option<u64> {
+    fn do_read(&self, addr: u64, bits: u32) -> Option<u64> {
         let Some(off) = self.offset(addr) else { return Some(0) };
         let sub = self.submit.lock();
         let v = self.read_locked(off, bits);
@@ -1174,7 +1174,7 @@ impl Mgras {
         Some(v)
     }
 
-    fn do_write(&self, addr: u32, bits: u32, val: u64) -> u32 {
+    fn do_write(&self, addr: u64, bits: u32, val: u64) -> u32 {
         let Some(off) = self.offset(addr) else { return BUS_OK };
         let sub = self.submit.lock();
         let ok = self.write_locked(off, bits, val);
@@ -1474,26 +1474,26 @@ fn read_status(v: Option<u64>) -> (u32, u64) {
 }
 
 impl BusDevice for Mgras {
-    fn read32(&self, addr: u32) -> BusRead32 {
+    fn read32(&self, addr: u64) -> BusRead32 {
         let (status, data) = read_status(self.do_read(addr, 32));
         BusRead32 { status, data: data as u32 }
     }
-    fn write32(&self, addr: u32, val: u32) -> u32 { self.do_write(addr, 32, val as u64) }
-    fn read8(&self, addr: u32) -> BusRead8 {
+    fn write32(&self, addr: u64, val: u32) -> u32 { self.do_write(addr, 32, val as u64) }
+    fn read8(&self, addr: u64) -> BusRead8 {
         let (status, data) = read_status(self.do_read(addr, 8));
         BusRead8 { status, data: data as u8 }
     }
-    fn write8(&self, addr: u32, val: u8) -> u32 { self.do_write(addr, 8, val as u64) }
-    fn read16(&self, addr: u32) -> BusRead16 {
+    fn write8(&self, addr: u64, val: u8) -> u32 { self.do_write(addr, 8, val as u64) }
+    fn read16(&self, addr: u64) -> BusRead16 {
         let (status, data) = read_status(self.do_read(addr, 16));
         BusRead16 { status, data: data as u16 }
     }
-    fn write16(&self, addr: u32, val: u16) -> u32 { self.do_write(addr, 16, val as u64) }
-    fn read64(&self, addr: u32) -> BusRead64 {
+    fn write16(&self, addr: u64, val: u16) -> u32 { self.do_write(addr, 16, val as u64) }
+    fn read64(&self, addr: u64) -> BusRead64 {
         let (status, data) = read_status(self.do_read(addr, 64));
         BusRead64 { status, data }
     }
-    fn write64(&self, addr: u32, val: u64) -> u32 { self.do_write(addr, 64, val) }
+    fn write64(&self, addr: u64, val: u64) -> u32 { self.do_write(addr, 64, val) }
 }
 
 /// The board as the display host GL presents into: frames land in the

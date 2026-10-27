@@ -62,16 +62,16 @@ mod tests {
     }
 
     impl BusDevice for MockMemory {
-        fn read8(&self, addr: u32) -> BusRead8 {
+        fn read8(&self, addr: u64) -> BusRead8 {
             BusRead8::ok(self.get_byte(addr as u64))
         }
 
-        fn write8(&self, addr: u32, val: u8) -> u32 {
+        fn write8(&self, addr: u64, val: u8) -> u32 {
             self.set_byte(addr as u64, val);
             BUS_OK
         }
 
-        fn read16(&self, addr: u32) -> BusRead16 {
+        fn read16(&self, addr: u64) -> BusRead16 {
             let aligned_addr = (addr & !1) as u64;
             let mut bytes = [0u8; 2];
             for i in 0..2 {
@@ -80,7 +80,7 @@ mod tests {
             BusRead16::ok(u16::from_be_bytes(bytes))
         }
 
-        fn write16(&self, addr: u32, val: u16) -> u32 {
+        fn write16(&self, addr: u64, val: u16) -> u32 {
             let aligned_addr = (addr & !1) as u64;
             let bytes = val.to_be_bytes();
             for i in 0..2 {
@@ -89,23 +89,23 @@ mod tests {
             BUS_OK
         }
 
-        fn read32(&self, addr: u32) -> BusRead32 {
+        fn read32(&self, addr: u64) -> BusRead32 {
             let aligned_addr = (addr & !3) as u64;
             BusRead32::ok(self.get_word(aligned_addr))
         }
 
-        fn write32(&self, addr: u32, val: u32) -> u32 {
+        fn write32(&self, addr: u64, val: u32) -> u32 {
             let aligned_addr = (addr & !3) as u64;
             self.set_word(aligned_addr, val);
             BUS_OK
         }
 
-        fn read64(&self, addr: u32) -> BusRead64 {
+        fn read64(&self, addr: u64) -> BusRead64 {
             let aligned_addr = (addr & !7) as u64;
             BusRead64::ok(self.get_double(aligned_addr))
         }
 
-        fn write64(&self, addr: u32, val: u64) -> u32 {
+        fn write64(&self, addr: u64, val: u64) -> u32 {
             let aligned_addr = (addr & !7) as u64;
             self.set_double(aligned_addr, val);
             BUS_OK
@@ -138,7 +138,7 @@ mod tests {
         // staying null here is still fine (and simplest — no per-page
         // counter storage needed in this basic MockMemory at all).
         #[cfg(feature = "jitv2")]
-        fn gen_ptr(&self, _addr: u32) -> *const std::sync::atomic::AtomicU64 {
+        fn gen_ptr(&self, _addr: u64) -> *const std::sync::atomic::AtomicU64 {
             std::ptr::null()
         }
     }
@@ -3674,6 +3674,54 @@ mod tests {
         assert!(!exec.cache.get_llbit(), "a successful SC clears the reservation");
     }
 
+    /// LLAddr holds PA[PA_BITS-1:4]: 32 bits on the R4400, 36 on the R10000,
+    /// whose physical addresses are 40 bits wide. LL records the whole field,
+    /// and a DMTC0 keeps only the bits that exist.
+    #[test]
+    fn lladdr_holds_the_models_physical_address_width() {
+        fn check<C: crate::cpu::mips_cache_v2::CpuModel + From<Arc<dyn BusDevice>>>(want: u64) {
+            let mem = Arc::new(MockMemory::new());
+            let bus: Arc<dyn BusDevice> = mem.clone();
+            let mut exec = MipsExecutor::<PassthroughTlb, C>::new(
+                bus, PassthroughTlb::default(), &MipsCpuConfig::indy());
+            disable_jitv2(&mut exec);
+            assert_eq!(C::LLADDR_MASK, want);
+
+            // DMTC0 $1, LLAddr with every bit set.
+            exec.core.write_gpr(1, u64::MAX);
+            assert_eq!(exec.exec((0x10 << 26) | (5 << 21) | (1 << 16) | (17 << 11)), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_cp0(17), want);
+
+            // LL through uncached xkphys, from just below the top of the
+            // model's physical space.
+            let pa = (want << 4) & !0xFFF;
+            mem.set_word(pa, 0x1234_5678);
+            exec.core.cp0_status |= crate::cpu::mips_core::STATUS_KX;
+            exec.resync_privilege_state();
+            exec.core.write_gpr(1, 0x9000_0000_0000_0000 | pa);
+            assert_eq!(exec.exec(make_i(OP_LL, 1, 2, 0)), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_gpr(2), 0x1234_5678);
+            assert_eq!(exec.core.read_cp0(17), pa >> 4);
+        }
+        check::<PassthroughCache>(0xFFFF_FFFF);
+        check::<crate::cpu::mips_cache_v2::R10000Cache>(0xF_FFFF_FFFF);
+        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(0xF_FFFF_FFFF);
+    }
+
+    /// The Indy, Indigo2 and O2 decode 32 physical bits, and IRIX relies on
+    /// it: on the IP28 the kernel stack's wired entry carries PTE software
+    /// bits as PA[34:33]. `phys_mask` must fold them away before the bus.
+    #[test]
+    fn phys_mask_folds_physical_bits_the_board_ignores() {
+        let (mut exec, _mem) = create_executor();
+        exec.core.cp0_status |= crate::cpu::mips_core::STATUS_KX;
+        exec.resync_privilege_state();
+        let va = 0x9000_0006_2040_44d4;
+        assert_eq!(exec.debug_translate(va).phys, 0x6_2040_44d4, "no fold by default");
+        exec.phys_mask = u32::MAX as u64;
+        assert_eq!(exec.debug_translate(va).phys, 0x2040_44d4);
+    }
+
     /// The other half: SC must still FAIL when the LLbit is clear (an
     /// intervening exception/ERET, or no LL at all). Guards against "fixing"
     /// the LLAddr check by making SC unconditionally succeed.
@@ -4651,31 +4699,31 @@ mod tests {
 
     #[cfg(feature = "jitv2")]
     impl BusDevice for JitCapableMockMemory {
-        fn read8(&self, addr: u32) -> BusRead8 {
+        fn read8(&self, addr: u64) -> BusRead8 {
             BusRead8::ok(*self.data.lock().unwrap().get(&(addr as u64)).unwrap_or(&0))
         }
-        fn write8(&self, addr: u32, val: u8) -> u32 { self.data.lock().unwrap().insert(addr as u64, val); BUS_OK }
-        fn read16(&self, addr: u32) -> BusRead16 {
+        fn write8(&self, addr: u64, val: u8) -> u32 { self.data.lock().unwrap().insert(addr as u64, val); BUS_OK }
+        fn read16(&self, addr: u64) -> BusRead16 {
             let a = (addr & !1) as u64;
             let mut b = [0u8; 2];
             for i in 0..2 { b[i] = *self.data.lock().unwrap().get(&(a + i as u64)).unwrap_or(&0); }
             BusRead16::ok(u16::from_be_bytes(b))
         }
-        fn write16(&self, addr: u32, val: u16) -> u32 {
+        fn write16(&self, addr: u64, val: u16) -> u32 {
             let a = (addr & !1) as u64;
             for (i, b) in val.to_be_bytes().iter().enumerate() { self.data.lock().unwrap().insert(a + i as u64, *b); }
             BUS_OK
         }
-        fn read32(&self, addr: u32) -> BusRead32 { BusRead32::ok(self.get_word((addr & !3) as u64)) }
-        fn write32(&self, addr: u32, val: u32) -> u32 {
+        fn read32(&self, addr: u64) -> BusRead32 { BusRead32::ok(self.get_word((addr & !3) as u64)) }
+        fn write32(&self, addr: u64, val: u32) -> u32 {
             let a = (addr & !3) as u64;
             for (i, b) in val.to_be_bytes().iter().enumerate() { self.data.lock().unwrap().insert(a + i as u64, *b); }
             BUS_OK
         }
-        fn read64(&self, addr: u32) -> BusRead64 { BusRead64::ok(self.get_double((addr & !7) as u64)) }
-        fn write64(&self, addr: u32, val: u64) -> u32 { self.set_double((addr & !7) as u64, val); BUS_OK }
-        fn gen_ptr(&self, addr: u32) -> *const std::sync::atomic::AtomicU64 {
-            let page = addr / crate::cpu::jitv2::PAGE_SIZE;
+        fn read64(&self, addr: u64) -> BusRead64 { BusRead64::ok(self.get_double((addr & !7) as u64)) }
+        fn write64(&self, addr: u64, val: u64) -> u32 { self.set_double((addr & !7) as u64, val); BUS_OK }
+        fn gen_ptr(&self, addr: u64) -> *const std::sync::atomic::AtomicU64 {
+            let page = (addr / crate::cpu::jitv2::PAGE_SIZE as u64) as u32;
             let mut gens = self.gens.lock().unwrap();
             let counter = gens.entry(page).or_insert_with(|| Box::new(std::sync::atomic::AtomicU64::new(0)));
             counter.as_ref() as *const std::sync::atomic::AtomicU64

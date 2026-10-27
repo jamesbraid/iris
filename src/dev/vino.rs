@@ -518,7 +518,7 @@ impl Vino {
     fn descriptor_fetch(chan: &mut ChannelState, addr: u32, mem: &Arc<dyn BusDevice>) {
         for i in 0..4usize {
             let word_addr = addr.wrapping_add((i as u32) * 4);
-            let word = { let _r = mem.read32(word_addr); if _r.is_ok() { _r.data } else {
+            let word = { let _r = mem.read32(word_addr as u64); if _r.is_ok() { _r.data } else {
                     eprintln!("VINO: descriptor_fetch read error at {:#010x}", word_addr);
                     0
                 }
@@ -648,7 +648,7 @@ impl Vino {
         let write_addr = desc_base | (chan.page_index & 0x0FF8);
         drop(st);
 
-        mem.write64(write_addr, dword);
+        mem.write64(write_addr as u64, dword);
 
         let mut st = self.state.lock();
         let interleave = st.control & [ctrl::CHA_INTERLEAVE_EN, ctrl::CHB_INTERLEAVE_EN][ch] != 0;
@@ -1249,50 +1249,50 @@ impl BusDevice for Vino {
     // (`PANIC: KERNEL FAULT … Bad addr: 0xa0080016`). Routing
     // smaller-width accesses through read_reg keeps the bus quiet without
     // imposing semantics the real chip doesn't have.
-    fn read8(&self, addr: u32) -> BusRead8 {
+    fn read8(&self, addr: u64) -> BusRead8 {
         let aligned = addr & !3;
         let shift = (3 - (addr & 3)) * 8;
-        let w = self.read_reg(aligned.wrapping_sub(VINO_BASE));
+        let w = self.read_reg(aligned.wrapping_sub(VINO_BASE as u64) as u32);
         BusRead8::ok(((w >> shift) & 0xFF) as u8)
     }
 
-    fn read16(&self, addr: u32) -> BusRead16 {
+    fn read16(&self, addr: u64) -> BusRead16 {
         let aligned = addr & !3;
         let shift = (2 - (addr & 2)) * 8;
-        let w = self.read_reg(aligned.wrapping_sub(VINO_BASE));
+        let w = self.read_reg(aligned.wrapping_sub(VINO_BASE as u64) as u32);
         BusRead16::ok(((w >> shift) & 0xFFFF) as u16)
     }
 
-    fn write8(&self, _addr: u32, _val: u8) -> u32 {
+    fn write8(&self, _addr: u64, _val: u8) -> u32 {
         // Sub-word writes to MMIO registers are atypical; quietly accept
         // them so the kernel doesn't panic. No partial-register update is
         // performed — full-register semantics is what the driver expects.
         BUS_OK
     }
 
-    fn write16(&self, _addr: u32, _val: u16) -> u32 {
+    fn write16(&self, _addr: u64, _val: u16) -> u32 {
         BUS_OK
     }
 
-    fn read32(&self, addr: u32) -> BusRead32 {
-        let offset = addr.wrapping_sub(VINO_BASE);
+    fn read32(&self, addr: u64) -> BusRead32 {
+        let offset = addr.wrapping_sub(VINO_BASE as u64) as u32;
         BusRead32::ok(self.read_reg(offset))
     }
 
-    fn write32(&self, addr: u32, val: u32) -> u32 {
-        let offset = addr.wrapping_sub(VINO_BASE);
+    fn write32(&self, addr: u64, val: u32) -> u32 {
+        let offset = addr.wrapping_sub(VINO_BASE as u64) as u32;
         self.write_reg(offset, val);
         BUS_OK
     }
 
-    fn read64(&self, addr: u32) -> BusRead64 {
+    fn read64(&self, addr: u64) -> BusRead64 {
         // GIO64 double-word: high word at addr, low word at addr+4.
         let hi = { let _r = self.read32(addr); if _r.is_ok() { let v = _r.data; v } else { 0 } };
         let lo = { let _r = self.read32(addr + 4); if _r.is_ok() { let v = _r.data; v } else { 0 } };
         BusRead64::ok(((hi as u64) << 32) | lo as u64)
     }
 
-    fn write64(&self, addr: u32, val: u64) -> u32 {
+    fn write64(&self, addr: u64, val: u64) -> u32 {
         self.write32(addr,     (val >> 32) as u32);
         self.write32(addr + 4, val as u32);
         BUS_OK
@@ -1512,8 +1512,8 @@ mod tests {
         fn dword_count(&self) -> usize { self.writes.lock().len() }
     }
     impl BusDevice for MockMem {
-        fn write64(&self, addr: u32, val: u64) -> u32 {
-            self.writes.lock().push((addr, val));
+        fn write64(&self, addr: u64, val: u64) -> u32 {
+            self.writes.lock().push((addr as u32, val));
             BUS_OK
         }
     }

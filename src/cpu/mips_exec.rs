@@ -322,7 +322,7 @@ struct CpuSnapshot {
 
     // LL/SC state
     llbit: bool,
-    lladdr: u32,
+    lladdr: u64,
 
     // CP0 registers
     cp0_index: u32,
@@ -1164,7 +1164,7 @@ impl JitMemStatsPair {
 /// Result of address translation: 8 bytes, no heap.
 ///
 /// Layout when success (EXEC_IS_EXCEPTION clear in `status`):
-///   `phys`   — 32-bit physical address
+///   `phys`   — physical address (up to 40 bits on the R10000)
 ///   `status` — bits [2:0]: C-field cache attr (TR_UNCACHED/TR_CACHEABLE/TR_CACHEABLE_COH)
 ///              bit  [3]:   TR_MAPPED — translation came from the TLB
 ///              bit  [4]:   TR_GLOBAL — that TLB entry was global (G=1)
@@ -1175,21 +1175,21 @@ impl JitMemStatsPair {
 ///   `status` — fully-formed ExecStatus for handle_exception
 #[derive(Debug, Clone, Copy)]
 pub struct TranslateResult {
-    pub phys:   u32,
+    pub phys:   u64,
     pub status: u32,
 }
 
 impl TranslateResult {
     #[inline(always)]
     pub fn ok(phys: u64, c_field: u32) -> Self {
-        Self { phys: phys as u32, status: c_field }
+        Self { phys, status: c_field }
     }
     /// Success from a TLB-mapped segment, carrying the entry's G bit so the
     /// nutlb can decide whether to tag the fill with an ASID.
     #[inline(always)]
     pub fn ok_mapped(phys: u64, c_field: u32, global: bool) -> Self {
         Self {
-            phys: phys as u32,
+            phys,
             status: c_field | TR_MAPPED | if global { TR_GLOBAL } else { 0 },
         }
     }
@@ -1251,7 +1251,7 @@ pub const LL_STATS_SLOTS: usize = 1024;
 /// a diagnostic whose whole job is "is THIS address stuck".
 #[cfg(feature = "llstats")]
 #[inline]
-fn ll_stats_slot(tbl: &mut [LlSiteStats; LL_STATS_SLOTS], key: u32) -> &mut LlSiteStats {
+fn ll_stats_slot(tbl: &mut [LlSiteStats; LL_STATS_SLOTS], key: u64) -> &mut LlSiteStats {
     let slot = (key as usize) & (LL_STATS_SLOTS - 1);
     let e = &mut tbl[slot];
     if e.key != key {
@@ -1263,7 +1263,7 @@ fn ll_stats_slot(tbl: &mut [LlSiteStats; LL_STATS_SLOTS], key: u32) -> &mut LlSi
 /// Read-only slot lookup for tests/inspection: `None` when this address has no
 /// row (never seen, or evicted by a collision).
 #[cfg(feature = "llstats")]
-pub fn ll_stats_lookup(tbl: &[LlSiteStats; LL_STATS_SLOTS], key: u32) -> Option<&LlSiteStats> {
+pub fn ll_stats_lookup(tbl: &[LlSiteStats; LL_STATS_SLOTS], key: u64) -> Option<&LlSiteStats> {
     let e = &tbl[(key as usize) & (LL_STATS_SLOTS - 1)];
     if e.key == key { Some(e) } else { None }
 }
@@ -1272,11 +1272,11 @@ pub fn ll_stats_lookup(tbl: &[LlSiteStats; LL_STATS_SLOTS], key: u32) -> Option<
 #[cfg(feature = "llstats")]
 #[derive(Default, Clone, Copy)]
 pub struct LlSiteStats {
-    /// `LLAddr` (phys >> 4) this row describes; `u32::MAX` when the slot has
+    /// `LLAddr` (phys >> 4) this row describes; `u64::MAX` when the slot has
     /// never been used. Stored because the table is direct-mapped and two
     /// addresses can collide onto one slot — on a collision the slot is reset
     /// and re-keyed, so a row always describes exactly one address.
-    pub key: u32,
+    pub key: u64,
     /// `LL` executed here, taking a reservation.
     pub ll: u64,
     /// `SC` here found the LLbit set and stored.
@@ -1534,10 +1534,18 @@ pub struct MipsExecutor<T: Tlb, C: CpuModel> {
     pub batch_hook: Option<Box<dyn FnMut(&mut MipsExecutor<T, C>) + Send>>,
     /// A window of physical addresses that reaches memory at another address,
     /// `(base, size, target)`, applied to mapped and XKPHYS translations
-    /// before the bus sees the low 32 bits. The O2 has a no-ECC alias of its
-    /// memory at 0x8000_0000 that would otherwise reach the PCI window the
-    /// bus decodes there. None on the other machines.
+    /// before [`Self::phys_mask`]. The O2 has a no-ECC alias of its memory at
+    /// 0x8000_0000 that would otherwise reach the PCI window the bus decodes
+    /// there. None on the other machines.
     pub phys_alias: Option<(u64, u64, u64)>,
+    /// The physical address bits the board decodes, applied to mapped,
+    /// XKPHYS and ERL-identity translations after [`Self::phys_alias`]. The
+    /// CPU drives 36 or 40 bits, but the Indy, Indigo2 and O2 decode 32 and
+    /// alias the rest away, and IRIX relies on it: its page-table entries keep
+    /// software bits (the PFN lock among them) just above the PFN, so they
+    /// reach EntryLo and come out as physical address bits 32 and up. All
+    /// ones (no fold) by default; each machine sets its own.
+    pub phys_mask: u64,
     /// `jitcheck`'s hardware-read fixup: `validate_jit_determinism`'s two
     /// passes run at genuinely different real wall-clock speed, so any
     /// device register whose value is driven by host time (e.g. the MC's
@@ -2843,7 +2851,7 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             #[cfg(feature = "developer")]
             trace_writer: None,
             #[cfg(feature = "llstats")]
-            ll_stats: Box::new([LlSiteStats { key: u32::MAX, ..Default::default() }; LL_STATS_SLOTS]),
+            ll_stats: Box::new([LlSiteStats { key: u64::MAX, ..Default::default() }; LL_STATS_SLOTS]),
             #[cfg(feature = "idle-pause")]
             idle_profiler: IdleProfiler::default(),
             #[cfg(feature = "idle-pause")]
@@ -2943,6 +2951,7 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             jitv2_dispatch_enabled: !matches!(std::env::var("IRIS_JIT_DISPATCH").as_deref(), Ok("off") | Ok("0")),
             batch_hook: None,
             phys_alias: None,
+            phys_mask: u64::MAX,
             #[cfg(feature = "developer")]
             hw_read_fixup_replay: None,
             #[cfg(feature = "developer")]
@@ -3217,7 +3226,7 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
         self.tlb.stats_nanotlb_miss(at);
         let result = (self.translate_fn)(self, va, at);
         if !result.is_exception() {
-            self.core.nanotlb[AT as usize].fill_raw(va_page, result.phys as u64, result.status & 0x7);
+            self.core.nanotlb[AT as usize].fill_raw(va_page, result.phys, result.status & 0x7);
             #[cfg(feature = "jitv2")]
             if AT == AccessType::Fetch as u8 {
                 self.jitv2_track_pcp(result.phys);
@@ -3350,11 +3359,18 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             return;
         }
 
+        // Compiled code's inline path tests `phys` against ppmem's bitmap
+        // with a shift that wraps above 4GB, so pages up there stay out of
+        // the nutlb and always take the callout.
+        if result.phys >= crate::ppmem::WINDOW_SIZE {
+            return;
+        }
+
         let idx = nutlb_index(va);
         let arr = if W { NUTLB_WRITE } else { NUTLB_READ };
         let e = &mut self.core.nutlb[arr][idx];
         e.virttag = va & !0xFFF;
-        e.phys    = (result.phys as u64 & !0xFFF) | (result.status & 0x7) as u64;
+        e.phys    = (result.phys & !0xFFF) | (result.status & 0x7) as u64;
         // Tag first, then validity. The order matters only for a reader that
         // could observe the entry between the two stores; nothing does today
         // (single-threaded per core), but publishing validity last is the
@@ -3521,8 +3537,13 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     /// nanotlb hit path above and a single PFN comparison here.
     #[cfg(feature = "jitv2")]
     #[inline(always)]
-    fn jitv2_track_pcp(&mut self, phys_addr: u32) {
-        let pfn = phys_addr / crate::cpu::jitv2::PAGE_SIZE;
+    fn jitv2_track_pcp(&mut self, phys_addr: u64) {
+        // Code above the JIT's pfn map gets no page and runs in the
+        // interpreter (`step_jit` checks for the null page).
+        let Some(pfn) = crate::cpu::jitv2::jitv2::pfn_of(phys_addr) else {
+            self.clear_pcp();
+            return;
+        };
         let same_page = !self.pcp.is_null() && unsafe { (*self.pcp).pfn == pfn };
         if same_page {
             return;
@@ -3558,7 +3579,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         // wants; `page.is_published`/`is_runnable` still handle every
         // other arrival at an already-compiled offset without needing this
         // flag at all.
-        if phys_addr & (crate::cpu::jitv2::PAGE_SIZE - 1) == 0 {
+        if phys_addr & (crate::cpu::jitv2::PAGE_SIZE as u64 - 1) == 0 {
             self.core.jit_trigger = true;
         }
 
@@ -3743,7 +3764,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     /// cost to the interpreter's per-instruction hot loop.
     pub fn exec(&mut self, instr: u32) -> ExecStatus {
         #[cfg(feature = "jitv2")]
-        self.jitv2_track_pcp(self.core.pc as u32);
+        self.jitv2_track_pcp(self.core.pc & 0xFFFF_FFFF);
         self.ins.raw = instr;
         self.ins.flags = FLAG_NOT_DECODED;
         decode_into::<T, C>(&mut self.ins);
@@ -4053,8 +4074,10 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         // step_jit() call never triggered a compile at all).
         let trigger = self.core.jit_trigger;
         self.core.jit_trigger = false;
-        let result = if fetch.status == EXEC_COMPLETE {
-            assert!(!self.pcp.is_null(), "step_jit reached with no tracked PhysicalCodePage");
+        let result = if fetch.status == EXEC_COMPLETE && self.pcp.is_null() {
+            // Fetched from above the JIT's pfn map (`jitv2_track_pcp`).
+            self.step_int()
+        } else if fetch.status == EXEC_COMPLETE {
             let page = unsafe { &mut *self.pcp };
             let entry_offset = ((pc & 0xFFF) >> 2) as usize;
             'gate: {
@@ -4938,7 +4961,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
 
                 // When ERL=1, xuseg becomes unmapped, uncached identity mapping
                 if (self.core.cp0_status & crate::cpu::mips_core::STATUS_ERL) != 0 {
-                    return TranslateResult::ok(virt_addr, TR_UNCACHED);
+                    return TranslateResult::ok(self.fold_phys(virt_addr), TR_UNCACHED);
                 }
 
                 // xuseg: true 64-bit address → xtlb=true
@@ -4963,7 +4986,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                         let phys_addr = virt_addr & 0x07FF_FFFF_FFFF_FFFF;
                         // bits_61_59 is the C field directly: 2=Uncached, 3=Cacheable, 5=CacheableCoherent
                         let c = match bits_61_59 { 3 | 5 => bits_61_59 as u32, _ => TR_UNCACHED };
-                        TranslateResult::ok(self.fold_phys_alias(phys_addr), c)
+                        TranslateResult::ok(self.fold_phys(phys_addr), c)
                     } else {
                         if !DEBUG { self.core.cp0_badvaddr = virt_addr; }
                         TranslateResult::exc(exec_exception(if access_type == AccessType::Write { EXC_ADES } else { EXC_ADEL }))
@@ -5016,13 +5039,15 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         }
     }
 
-    /// A physical address through [`Self::phys_alias`], if it falls in it.
+    /// A CPU physical address as the board decodes it: through
+    /// [`Self::phys_alias`] if it falls in it, then cut to [`Self::phys_mask`].
     #[inline(always)]
-    fn fold_phys_alias(&self, pa: u64) -> u64 {
-        match self.phys_alias {
+    fn fold_phys(&self, pa: u64) -> u64 {
+        let pa = match self.phys_alias {
             Some((base, size, target)) if pa.wrapping_sub(base) < size => pa - base + target,
             _ => pa,
-        }
+        };
+        pa & self.phys_mask
     }
 
     /// TLB translation.  When `DEBUG` is true, CP0 side-effect registers are
@@ -5049,7 +5074,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                     // ok_mapped, not ok: this came from the TLB, so the nutlb
                     // fill needs TR_MAPPED plus the entry's G bit to decide
                     // whether to ASID-qualify the tag it stores.
-                    TranslateResult::ok_mapped(self.fold_phys_alias(phys_addr), cache_attr as u32, global)
+                    TranslateResult::ok_mapped(self.fold_phys(phys_addr), cache_attr as u32, global)
                 }
             }
             TlbResult::Miss { .. } => {
@@ -5177,18 +5202,18 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         let phys_addr = translate_result.phys;
         if translate_result.is_cached() {
             #[cfg(not(feature = "lightning"))]
-            if !DEBUG && self.bp_enabled() && self.check_breakpoint::<{ BpType::PhysFetch as u8 }>(phys_addr as u64) {
+            if !DEBUG && self.bp_enabled() && self.check_breakpoint::<{ BpType::PhysFetch as u8 }>(phys_addr) {
                 return FetchInstrResult::exception(EXEC_BREAKPOINT);
             }
 
-            let r = self.cache.fetch(virt_addr, phys_addr as u64);
+            let r = self.cache.fetch(virt_addr, phys_addr);
             if !DEBUG && r.status == exec_exception(EXC_VCEI) {
                 self.core.cp0_badvaddr = virt_addr;
             }
             r
         } else {
             #[cfg(not(feature = "lightning"))]
-            if !DEBUG && self.bp_enabled() && self.check_breakpoint::<{ BpType::PhysFetch as u8 }>(phys_addr as u64) {
+            if !DEBUG && self.bp_enabled() && self.check_breakpoint::<{ BpType::PhysFetch as u8 }>(phys_addr) {
                 return FetchInstrResult::exception(EXEC_BREAKPOINT);
             }
 
@@ -5251,7 +5276,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         };
         if translate_result.is_exception() { return Err(translate_result.status); }
         let result = {
-            let phys_addr = translate_result.phys as u64;
+            let phys_addr = translate_result.phys;
             let is_cached = translate_result.is_cached();
 
             if is_cached {
@@ -5298,16 +5323,16 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
 
                     let res = {
                         let r = if SIZE == 1 {
-                            let r = self.sysad.read8(phys_addr as u32);
+                            let r = self.sysad.read8(phys_addr);
                             BusRead64 { status: r.status, data: r.data as u64 }
                         } else if SIZE == 2 {
-                            let r = self.sysad.read16(phys_addr as u32);
+                            let r = self.sysad.read16(phys_addr);
                             BusRead64 { status: r.status, data: r.data as u64 }
                         } else if SIZE == 4 {
-                            let r = self.sysad.read32(phys_addr as u32);
+                            let r = self.sysad.read32(phys_addr);
                             BusRead64 { status: r.status, data: r.data as u64 }
                         } else {
-                            self.sysad.read64(phys_addr as u32)
+                            self.sysad.read64(phys_addr)
                         };
                         if r.is_ok() {
                             Ok(r.data)
@@ -5375,7 +5400,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         {
             self.core.lockstep_mem = result.ok().map(|val| crate::cpu::mips_core::LockstepMemCapture {
                 addr: virt_addr,
-                phys: translate_result.phys as u64,
+                phys: translate_result.phys,
                 value: val,
             });
         }
@@ -5430,7 +5455,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             self.nanotlb_translate::<{AccessType::Write as u8}>(virt_addr)
         };
         if translate_result.is_exception() { return translate_result.status; }
-        let phys_addr = translate_result.phys as u64;
+        let phys_addr = translate_result.phys;
         let is_cached = translate_result.is_cached();
 
         // Diagnostic (`jitv2_smc_check`): is this write landing on the code
@@ -5478,13 +5503,13 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 dlog_dev!(LogModule::Mips, "Uncached Write{}: PC={:016x} VA={:016x} PA={:016x} Val={:016x}", SIZE*8, self.core.pc, virt_addr, phys_addr, val);
             }
             let ws = if SIZE == 1 {
-                self.sysad.write8(phys_addr as u32, val as u8)
+                self.sysad.write8(phys_addr, val as u8)
             } else if SIZE == 2 {
-                self.sysad.write16(phys_addr as u32, val as u16)
+                self.sysad.write16(phys_addr, val as u16)
             } else if SIZE == 4 {
-                self.sysad.write32(phys_addr as u32, val as u32)
+                self.sysad.write32(phys_addr, val as u32)
             } else {
-                self.sysad.write64(phys_addr as u32, val)
+                self.sysad.write64(phys_addr, val)
             };
             if ws != BUS_OK && ws != BUS_BUSY && !DEBUG {
                 eprintln!("Bus error on uncached write{}: PC={:016x} VA={:016x} PA={:016x} val={:016x} status={:08x}", SIZE*8, self.core.pc, virt_addr, phys_addr, val, ws);
@@ -5523,7 +5548,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             self.nanotlb_translate::<{AccessType::Write as u8}>(virt_addr)
         };
         if translate_result.is_exception() { return translate_result.status; }
-        let phys_addr = translate_result.phys as u64;
+        let phys_addr = translate_result.phys;
         let is_cached = translate_result.is_cached();
 
         #[cfg(not(feature = "lightning"))]
@@ -5541,7 +5566,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             if !DEBUG && mips_log(MIPS_LOG_MEM) {
                 dlog_dev!(LogModule::Mips, "Uncached Write64Masked: PC={:016x} VA={:016x} PA={:016x} Val={:016x} Mask={:016x}", self.core.pc, virt_addr, phys_addr, val, mask);
             }
-            let ws = self.sysad.write64_masked(phys_addr as u32, val, mask);
+            let ws = self.sysad.write64_masked(phys_addr, val, mask);
             if ws != BUS_OK && ws != BUS_BUSY && !DEBUG {
                 eprintln!("Bus error on uncached write64_masked: PC={:016x} VA={:016x} PA={:016x} val={:016x} mask={:016x} status={:08x}", self.core.pc, virt_addr, phys_addr, val, mask, ws);
             }
@@ -6959,7 +6984,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             // Hit operations need address translation
             let tr = self.nanotlb_translate::<{AccessType::Read as u8}>(virt_addr);
             if tr.is_exception() { return self.handle_exception(tr.status); }
-            tr.phys as u64
+            tr.phys
         } else {
             // Index operations use virt_addr as index, no translation needed
             virt_addr
@@ -7056,7 +7081,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     // LL - Load Linked (32-bit)
     /// `ll stats` bookkeeping: a reservation was just taken at `lladdr`.
     #[inline]
-    fn ll_stat_ll(&mut self, #[allow(unused_variables)] lladdr: u32) {
+    fn ll_stat_ll(&mut self, #[allow(unused_variables)] lladdr: u64) {
         #[cfg(feature = "llstats")]
         { ll_stats_slot(&mut self.ll_stats, lladdr).ll += 1; }
     }
@@ -7095,10 +7120,10 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 // Sign-extend word to 64 bits
                 self.core.write_gpr(rt_reg, value as i32 as i64 as u64);
                 // Store physical address in LLAddr register
-                // The LLAddr register stores bits 35..4 of the physical address
+                // LLAddr holds PA[PA_BITS-1:4]: 35:4 on the R4x00/R5000, 39:4 on the R10000
                 let tr = self.nanotlb_translate::<{AccessType::Read as u8}>(virt_addr);
                 if !tr.is_exception() {
-                    let lladdr = (tr.phys >> 4) as u32;
+                    let lladdr = (tr.phys >> 4) & C::LLADDR_MASK;
                     self.cache.set_lladdr(lladdr);
                     self.core.cp0_lladdr = lladdr;
                     self.cache.set_llbit(true);
@@ -7166,7 +7191,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 // Store physical address in LLAddr register
                 let tr = self.nanotlb_translate::<{AccessType::Read as u8}>(virt_addr);
                 if !tr.is_exception() {
-                    let lladdr = (tr.phys >> 4) as u32;
+                    let lladdr = (tr.phys >> 4) & C::LLADDR_MASK;
                     self.cache.set_lladdr(lladdr);
                     self.core.cp0_lladdr = lladdr;
                     self.cache.set_llbit(true);
@@ -7376,6 +7401,10 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         // Cold path (a handful per context switch), so the unconditional
         // flush costs nothing measurable. See `exec_tlbr` for the other
         // ASID-mutating site, and docs/nutlb-design.md §1a.
+        // LLAddr implements PA[PA_BITS-1:4]; the bits above read as zero.
+        if reg == 17 {
+            self.core.cp0_lladdr &= C::LLADDR_MASK;
+        }
         if reg == 10 {
             // Flushes the nutlb too — its tags carry no ASID, so entries
             // filled under the old one would otherwise stay live and resolve
@@ -7421,7 +7450,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             self.cache.set_cache_ecc(self.core.cp0_ecc);
         }
         if reg == 26 && self.cheritest_dump_hook {
-            self.sysad.write32(crate::dev::testdev::TEST_DEV_BASE + crate::dev::testdev::REG_DUMP,
+            self.sysad.write32((crate::dev::testdev::TEST_DEV_BASE + crate::dev::testdev::REG_DUMP) as u64,
                                self.core.cp0_ecc);
         }
         #[cfg(feature = "r5ksc_triton")]
@@ -9261,7 +9290,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             let phys_page_base = page.pfn * crate::cpu::jitv2::PAGE_SIZE;
             unsafe { self.jitv2.lock().flush_from_cpu_thread(self.sysad.clone()); }
             self.clear_pcp();
-            self.jitv2_track_pcp(phys_page_base);
+            self.jitv2_track_pcp(phys_page_base as u64);
             return EXEC_RETRY;
         }
         let mut codegen = self.jitv2.lock().codegen.lock().take();
@@ -9297,7 +9326,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             let phys_page_base = page.pfn * crate::cpu::jitv2::PAGE_SIZE;
             unsafe { self.jitv2.lock().flush_from_cpu_thread(self.sysad.clone()); }
             self.clear_pcp();
-            self.jitv2_track_pcp(phys_page_base);
+            self.jitv2_track_pcp(phys_page_base as u64);
             return EXEC_RETRY;
         }
         // Re-check is_runnable: handle_request can decline this exact
@@ -9707,7 +9736,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         if translate_result.is_exception() {
             return JitReadResult { val: 0, status: translate_result.status };
         }
-        let phys = translate_result.phys as u64;
+        let phys = translate_result.phys;
         if va != captured.addr || phys != captured.phys {
             eprintln!("\n=== jitv2_lockstep DIVERGENCE at pc={:#018x}: read address mismatch ===", self.core.pc);
             eprintln!("  va   jit={:#018x}  interp={:#018x}", va, captured.addr);
@@ -9743,7 +9772,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         if translate_result.is_exception() {
             return translate_result.status;
         }
-        let phys = translate_result.phys as u64;
+        let phys = translate_result.phys;
         let mask: u64 = if SIZE == 8 { u64::MAX } else { (1u64 << (SIZE * 8)) - 1 };
         let jit_masked = val & mask;
         let interp_masked = captured.value & mask;
@@ -10477,7 +10506,7 @@ fn invalidate_loaded_range<T: Tlb, C: CpuModel>(exec: &mut MipsExecutor<T, C>, v
     while addr < end {
         let tr = exec.debug_translate(addr);
         if !tr.is_exception() {
-            let phys = tr.phys as u64;
+            let phys = tr.phys;
             exec.cache.cache_op(C_HWBINV | CACH_PD, addr, phys);
             exec.cache.cache_op(C_HWBINV | CACH_SD, addr, phys);
             exec.cache.cache_op(C_HINV | CACH_PI, addr, phys);
@@ -12147,7 +12176,7 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Device for MipsCpu<T
                 if tr.is_exception() {
                     return Err(format!("Virtual {:016x} -> Translation Failed", addr));
                 }
-                (Some(addr), tr.phys as u64)
+                (Some(addr), tr.phys)
             };
 
             let n = exec.cache.writeback(virt_addr, phys_addr, size);
@@ -12173,7 +12202,7 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Device for MipsCpu<T
             let (virt_addr, phys_addr) = if (op == "check" || op == "probe") && val >= 0x8000_0000 {
                 let tr = exec.debug_translate(val);
                 if !tr.is_exception() {
-                    let pa = tr.phys as u64;
+                    let pa = tr.phys;
                     writeln!(writer, "Virtual {:016x} -> Physical {:016x}", val, pa).unwrap();
                     (val, pa)
                 } else {
@@ -12967,21 +12996,21 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Device for MipsCpu<T
                     match actual_args.first().copied() {
                         Some("clear") => {
                             for e in exec.ll_stats.iter_mut() {
-                                *e = LlSiteStats { key: u32::MAX, ..Default::default() };
+                                *e = LlSiteStats { key: u64::MAX, ..Default::default() };
                             }
                             writeln!(writer, "ll stats cleared").unwrap();
                             return Ok(());
                         }
                         Some("stats") => {
-                            if exec.ll_stats.iter().all(|e| e.key == u32::MAX) {
+                            if exec.ll_stats.iter().all(|e| e.key == u64::MAX) {
                                 writeln!(writer, "ll stats: no LL/SC activity recorded").unwrap();
                                 return Ok(());
                             }
                             // Worst max_run first: a kernel LL/SC loop that
                             // cannot make progress is the thing being hunted,
                             // and it sorts straight to the top.
-                            let mut rows: Vec<(u32, LlSiteStats)> = exec.ll_stats.iter()
-                                .filter(|e| e.key != u32::MAX)
+                            let mut rows: Vec<(u64, LlSiteStats)> = exec.ll_stats.iter()
+                                .filter(|e| e.key != u64::MAX)
                                 .map(|e| (e.key, *e))
                                 .collect();
                             // Lead with reservations that were never resolved:
@@ -13625,7 +13654,7 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Device for MipsCpu<T
                         let mut words = [0u32; crate::cpu::jitv2::ENTRIES_PER_PAGE];
                         for (i, w) in words.iter_mut().enumerate() {
                             let a = page_base_phys + (i as u32) * 4;
-                            let r = exec.sysad.read32(a);
+                            let r = exec.sysad.read32(a as u64);
                             if !r.is_ok() {
                                 return Err(format!("failed to read word at phys {:#010x} (offset {:#x} into page)", a, i * 4));
                             }
@@ -13693,7 +13722,9 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Device for MipsCpu<T
                             if result.is_exception() {
                                 return Err(format!("{:#018x} doesn't translate", pc));
                             }
-                            let pfn = result.phys / crate::cpu::jitv2::PAGE_SIZE;
+                            let Some(pfn) = crate::cpu::jitv2::jitv2::pfn_of(result.phys) else {
+                                return Err(format!("phys {:#x} is above the JIT's physical range", result.phys));
+                            };
                             let page_base = pfn * crate::cpu::jitv2::PAGE_SIZE;
                             let sysad = exec.sysad.clone();
                             let mut jit = exec.jitv2.lock();
@@ -13833,8 +13864,10 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Device for MipsCpu<T
                                 writeln!(writer, "No PhysicalCodePage tracked (self.pcp is null) and PC {:#018x} doesn't translate.", pc).unwrap();
                                 return Ok(());
                             }
-                            let phys_addr = result.phys;
-                            let pfn = phys_addr / crate::cpu::jitv2::PAGE_SIZE;
+                            let Some(pfn) = crate::cpu::jitv2::jitv2::pfn_of(result.phys) else {
+                                writeln!(writer, "No PhysicalCodePage tracked (self.pcp is null) and PC {:#018x} is at phys {:#x}, above the JIT's physical range.", pc, result.phys).unwrap();
+                                return Ok(());
+                            };
                             let page_base = pfn * crate::cpu::jitv2::PAGE_SIZE;
                             let sysad = exec.sysad.clone();
                             let fr1 = (exec.core.cp0_status & crate::cpu::mips_core::STATUS_FR) != 0;
@@ -14967,7 +15000,7 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Saveable for MipsCpu
         // state, and must be reset on load.
         cp0u64!(count_hz);
         cp0u32!(cp0_status); cp0u32!(cp0_cause);
-        cp0u32!(cp0_prid); cp0u32!(cp0_config); cp0u32!(cp0_lladdr);
+        cp0u32!(cp0_prid); cp0u32!(cp0_config); cp0u64!(cp0_lladdr);
         cp0u32!(cp0_watchlo); cp0u32!(cp0_watchhi); cp0u32!(cp0_ecc); cp0u32!(cp0_cacheerr);
         cp0u64!(cp0_taglo); cp0u32!(cp0_taghi);
         cp0u64!(cp0_badvaddr); cp0u64!(cp0_epc); cp0u64!(cp0_errorepc);
@@ -15033,7 +15066,7 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Saveable for MipsCpu
             // thread) so the live UI matches the restored core state.
             c.count_hz_atomic.store(c.count_hz, std::sync::atomic::Ordering::Relaxed);
             ld32!(cp0_status); ld32!(cp0_cause); ld32!(cp0_prid);
-            ld32!(cp0_config); ld32!(cp0_lladdr); ld32!(cp0_watchlo); ld32!(cp0_watchhi);
+            ld32!(cp0_config); ld64!(cp0_lladdr); ld32!(cp0_watchlo); ld32!(cp0_watchhi);
             ld32!(cp0_ecc); ld32!(cp0_cacheerr); ld64!(cp0_taglo); ld32!(cp0_taghi);
             ld64!(cp0_entrylo0); ld64!(cp0_entrylo1); ld64!(cp0_context);
             ld64!(cp0_pagemask); ld64!(cp0_badvaddr); ld64!(cp0_entryhi);

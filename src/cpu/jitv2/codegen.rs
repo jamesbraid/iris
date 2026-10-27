@@ -4113,7 +4113,8 @@ fn emit_tc_mapped(ctx: &mut EmitCtx, phys: Value) -> Value {
     // form and 4.0 s with this one.
     //
     // Cranelift's `ishl` masks the shift count to 6 bits, as x86 and aarch64
-    // do, so an out-of-range `region` wraps rather than being undefined.
+    // do, so an out-of-range `region` would wrap rather than miss. None
+    // arrives: `nutlb_fill` keeps pages at or above 4GB out of the nutlb.
     let region = ctx.builder.ins().ushr_imm_s(phys, crate::ppmem::BITMAP_SHIFT as i64);
     let one = ctx.builder.ins().iconst(i64t, 1);
     let bit = ctx.builder.ins().ishl(one, region);
@@ -4128,9 +4129,8 @@ fn emit_tc_mapped(ctx: &mut EmitCtx, phys: Value) -> Value {
 /// byte lanes and (for stores, in `emit_mem_write_split`) generation bump as
 /// the tagged path, less the tag match, LRU and dirty bit.
 ///
-/// `phys` is cut to 32 bits first, as the callout does: the shadow cache
-/// hands `phys as u32` to the bus, so an address above 4GB aliases here
-/// exactly as it does there.
+/// `phys` is below 4GB: `nutlb_fill` keeps pages above it out of the nutlb,
+/// so they never reach an inline path.
 fn emit_tagless_tail(
     ctx: &mut EmitCtx, phys: Value, size: MemSize,
     fast_block: ir::Block, slow_block: ir::Block, join_block: ir::Block,
@@ -4138,7 +4138,6 @@ fn emit_tagless_tail(
     let mem = MemFlagsData::trusted();
     let ptr_ty = ctx.module.target_config().pointer_type();
 
-    let phys = ctx.builder.ins().band_imm_s(phys, 0xFFFF_FFFF);
     let mapped = emit_tc_mapped(ctx, phys);
     ctx.builder.ins().brif(mapped, fast_block, &[], slow_block, &[]);
 

@@ -590,7 +590,7 @@ pub(crate) mod tests {
     /// the board already (`board`).
     pub fn replay_recs(rex: &Rex3, recs: &[Rec], check_hashes: bool) -> Report {
         let mut rep = Report { records: recs.len(), ..Default::default() };
-        let addr = |off: u32| REX3_BASE | (off & (REX3_SIZE - 1));
+        let addr = |off: u32| (REX3_BASE | (off & (REX3_SIZE - 1))) as u64;
         let differ = |rep: &mut Report, off: u32| {
             rep.reads_differ += 1;
             *rep.differ_at.entry(off).or_default() += 1;

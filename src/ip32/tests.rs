@@ -76,9 +76,9 @@ fn a_waiting_byte_raises_the_keyboard_interrupt_only_when_enabled() {
 #[test]
 fn crime_is_a_64_bit_register_file() {
     let c = Crime::new(std::sync::Arc::new(MaceUst::new()));
-    c.write64(CRIME_BASE + crime_reg::MEM_BANK_CTRL0, 0x0123_4567_89ab_cdef);
+    c.write64((CRIME_BASE + crime_reg::MEM_BANK_CTRL0) as u64, 0x0123_4567_89ab_cdef);
     assert_eq!(
-        c.read64(CRIME_BASE + crime_reg::MEM_BANK_CTRL0).data,
+        c.read64((CRIME_BASE + crime_reg::MEM_BANK_CTRL0) as u64).data,
         0x0123_4567_89ab_cdef,
         "a qword written to CRIME must read back whole",
     );
@@ -88,11 +88,11 @@ fn crime_is_a_64_bit_register_file() {
 fn crime_save_load_round_trip() {
     use crate::traits::Saveable;
     let src = Crime::new(std::sync::Arc::new(MaceUst::new()));
-    src.write64(CRIME_BASE + crime_reg::INTMASK, 0x0000_ff00);
-    src.write64(CRIME_BASE + crime_reg::SOFTINT, 0x0000_0100);
+    src.write64((CRIME_BASE + crime_reg::INTMASK) as u64, 0x0000_ff00);
+    src.write64((CRIME_BASE + crime_reg::SOFTINT) as u64, 0x0000_0100);
     src.set_int(9, true);
     src.latch_int(16);
-    src.write64(CRIME_BASE + crime_reg::TIME, 12345);
+    src.write64((CRIME_BASE + crime_reg::TIME) as u64, 12345);
     src.set_revision(0xa1);
     let v1 = src.save_state();
 
@@ -113,7 +113,7 @@ fn crime_space_load_restores_the_memory_banks() {
     };
     let (src, src_ram) = make();
     for (i, v) in [0x0100u64, 0x0101, 0x0102, 0x0103].into_iter().enumerate() {
-        src.write64(CRIME_BASE + crime_reg::MEM_BANK_CTRL0 + 8 * i as u32, v);
+        src.write64((CRIME_BASE + crime_reg::MEM_BANK_CTRL0 + 8 * i as u32) as u64, v);
     }
     let v1 = src.save_state();
 
@@ -170,8 +170,8 @@ fn a_bus_saves_and_loads_whole() {
     let mut flash = vec![0u8; PROM_SIZE as usize];
     flash[0x100] = 0x42;
     let src = Ip32Bus::new(16 << 20, flash);
-    src.write64(CRIME_BASE + crime_reg::INTMASK, 0x00ff);
-    src.write32(GBE_BASE + 0x50000 + 4 * 3, 0x0011_2233);
+    src.write64((CRIME_BASE + crime_reg::INTMASK) as u64, 0x00ff);
+    src.write32((GBE_BASE + 0x50000 + 4 * 3) as u64, 0x0011_2233);
     src.mace.com0.feed(b"x");
     src.mace.rtc.poke(0x40, 0x99);
     src.ram.lock().unwrap().write(0x1234, b"saved bytes");
@@ -194,10 +194,10 @@ fn a_bus_saves_and_loads_whole() {
 fn crime_cold_reset_is_requested_once() {
     let c = Crime::new(std::sync::Arc::new(MaceUst::new()));
     assert!(!c.take_reset_request());
-    c.write64(CRIME_BASE + crime_reg::CONTROL, 0x0200 | crime_reg::CONTROL_COLD_RESET);
+    c.write64((CRIME_BASE + crime_reg::CONTROL) as u64, 0x0200 | crime_reg::CONTROL_COLD_RESET);
     assert!(c.take_reset_request(), "the write asks for a reset");
     assert!(!c.take_reset_request(), "once");
-    assert_eq!(c.read64(CRIME_BASE + crime_reg::CONTROL).data, 0x0200, "the bit clears; the rest stays");
+    assert_eq!(c.read64((CRIME_BASE + crime_reg::CONTROL) as u64).data, 0x0200, "the bit clears; the rest stays");
 }
 
 /// The PROM identifies the machine from this register before it will do
@@ -205,7 +205,7 @@ fn crime_cold_reset_is_requested_once() {
 #[test]
 fn revision_does_not_read_as_zero() {
     let c = Crime::new(std::sync::Arc::new(MaceUst::new()));
-    assert_ne!(c.read64(CRIME_BASE + crime_reg::REVISION).data, 0);
+    assert_ne!(c.read64((CRIME_BASE + crime_reg::REVISION) as u64).data, 0);
 }
 
 /// POST times its waits against this counter. A constant would spin forever.
@@ -219,16 +219,16 @@ fn the_time_counter_tracks_the_clock_and_can_be_reset() {
     let c = Crime::new(ust.clone());
 
     ust.advance_to(1_000 * UST_TICKS_DEN as u64);
-    let a = c.read64(CRIME_BASE + crime_reg::TIME).data;
+    let a = c.read64((CRIME_BASE + crime_reg::TIME) as u64).data;
     assert!(a >= 1_000 * CRIME_TICKS_PER_US, "counter must follow the clock, got {a}");
-    assert_eq!(c.read64(CRIME_BASE + crime_reg::TIME).data, a,
+    assert_eq!(c.read64((CRIME_BASE + crime_reg::TIME) as u64).data, a,
                "and must not advance merely because it was read");
 
     // Zero it, wait 100us, and it must read about 100us worth of ticks.
-    c.write64(CRIME_BASE + crime_reg::TIME, 0);
-    assert_eq!(c.read64(CRIME_BASE + crime_reg::TIME).data, 0, "a write sets the counter");
+    c.write64((CRIME_BASE + crime_reg::TIME) as u64, 0);
+    assert_eq!(c.read64((CRIME_BASE + crime_reg::TIME) as u64).data, 0, "a write sets the counter");
     ust.advance_to(1_100 * UST_TICKS_DEN as u64);
-    let d = c.read64(CRIME_BASE + crime_reg::TIME).data;
+    let d = c.read64((CRIME_BASE + crime_reg::TIME) as u64).data;
     assert_eq!(d, 100 * CRIME_TICKS_PER_US,
                "100us must be 100 * {CRIME_TICKS_PER_US} ticks, got {d}");
 }
@@ -236,9 +236,9 @@ fn the_time_counter_tracks_the_clock_and_can_be_reset() {
 #[test]
 fn every_touched_register_is_recorded_once_per_direction() {
     let c = Crime::new(std::sync::Arc::new(MaceUst::new()));
-    c.write64(CRIME_BASE + crime_reg::MEM_CONTROL, 1);
-    c.write64(CRIME_BASE + crime_reg::MEM_CONTROL, 2);
-    let _ = c.read64(CRIME_BASE + crime_reg::MEM_CONTROL);
+    c.write64((CRIME_BASE + crime_reg::MEM_CONTROL) as u64, 1);
+    c.write64((CRIME_BASE + crime_reg::MEM_CONTROL) as u64, 2);
+    let _ = c.read64((CRIME_BASE + crime_reg::MEM_CONTROL) as u64);
     assert_eq!(
         c.touched(),
         vec![(crime_reg::MEM_CONTROL, true), (crime_reg::MEM_CONTROL, false)],
@@ -248,8 +248,8 @@ fn every_touched_register_is_recorded_once_per_direction() {
 #[test]
 fn ram_is_reachable_at_its_non_zero_base() {
     let bus = Ip32Bus::new(1 << 20, vec![0u8; PROM_SIZE as usize]);
-    assert_eq!(bus.write32(RAM_BASE, 0xdead_beef), BUS_OK);
-    assert_eq!(bus.read32(RAM_BASE).data, 0xdead_beef);
+    assert_eq!(bus.write32(RAM_BASE as u64, 0xdead_beef), BUS_OK);
+    assert_eq!(bus.read32(RAM_BASE as u64).data, 0xdead_beef);
 }
 
 #[test]
@@ -264,10 +264,10 @@ fn the_flash_is_readable_and_writable() {
     let mut image = vec![0u8; PROM_SIZE as usize];
     image[..4].copy_from_slice(&0x1000_0011u32.to_be_bytes());
     let bus = Ip32Bus::new(1 << 20, image);
-    assert_eq!(bus.read32(PROM_BASE).data, 0x1000_0011, "reset vector must read back");
+    assert_eq!(bus.read32(PROM_BASE as u64).data, 0x1000_0011, "reset vector must read back");
 
     // The environment section, which is what firmware actually writes.
-    let env = PROM_BASE + 0x4000;
+    let env = (PROM_BASE + 0x4000) as u64;
     assert_eq!(bus.write32(env, 0xcafe_f00d), BUS_OK, "the flash must accept writes");
     assert_eq!(bus.read32(env).data, 0xcafe_f00d, "and read back what was written");
     assert!(bus.unmapped().is_empty(), "a flash write is not an unmapped access");
@@ -281,14 +281,14 @@ fn the_flash_is_readable_and_writable() {
 fn the_uart_decodes_maces_register_spacing() {
     let c = Com16550::new();
     // Transmit register is offset 0, so byte lane +7 of the first slot.
-    c.write8(MACE_COM0 + 7, b'A');
+    c.write8((MACE_COM0 + 7) as u64, b'A');
     assert_eq!(c.output(), "A");
     // The UART is on an 8-bit bus, so the byte answers on any lane: Linux's
     // 8250 driver uses +0 (mapbase 0x1f390000, regshift 8).
-    c.write8(MACE_COM0, b'L');
+    c.write8(MACE_COM0 as u64, b'L');
     assert_eq!(c.output(), "AL", "Linux's +0 lane reaches the same register");
     // Line status lives at register 5, i.e. +0x507.
-    let lsr = c.read8(MACE_COM0 + 0x507).data;
+    let lsr = c.read8((MACE_COM0 + 0x507) as u64).data;
     assert_eq!(lsr, com_reg::LSR_THRE | com_reg::LSR_TEMT,
                "the holding register must always read empty or the PROM waits forever");
 }
@@ -297,11 +297,11 @@ fn the_uart_decodes_maces_register_spacing() {
 #[test]
 fn the_baud_divisor_is_not_mistaken_for_output() {
     let c = Com16550::new();
-    c.write8(MACE_COM0 + 0x307, com_reg::LCR_DLAB);
-    c.write8(MACE_COM0 + 7, 0x0c);
+    c.write8((MACE_COM0 + 0x307) as u64, com_reg::LCR_DLAB);
+    c.write8((MACE_COM0 + 7) as u64, 0x0c);
     assert_eq!(c.output(), "", "divisor writes are not characters");
-    c.write8(MACE_COM0 + 0x307, 0x03);
-    c.write8(MACE_COM0 + 7, b'B');
+    c.write8((MACE_COM0 + 0x307) as u64, 0x03);
+    c.write8((MACE_COM0 + 7) as u64, b'B');
     assert_eq!(c.output(), "B");
 }
 
@@ -311,13 +311,13 @@ fn the_baud_divisor_is_not_mistaken_for_output() {
 #[test]
 fn a_typed_character_becomes_readable() {
     let c = Com16550::new();
-    let lsr = MACE_COM0 + 0x507;
+    let lsr = (MACE_COM0 + 0x507) as u64;
     assert_eq!(c.read8(lsr).data & com_reg::LSR_DR, 0, "nothing typed yet");
 
     c.feed(b"hi");
     assert_ne!(c.read8(lsr).data & com_reg::LSR_DR, 0, "data-ready must be set");
-    assert_eq!(c.read8(MACE_COM0 + 7).data, b'h');
-    assert_eq!(c.read8(MACE_COM0 + 7).data, b'i');
+    assert_eq!(c.read8((MACE_COM0 + 7) as u64).data, b'h');
+    assert_eq!(c.read8((MACE_COM0 + 7) as u64).data, b'i');
     assert_eq!(c.read8(lsr).data & com_reg::LSR_DR, 0, "queue drained");
 }
 
@@ -336,12 +336,12 @@ const RX_DEPTH: u32 = 7;
 
 fn sdma_bus() -> Ip32Bus {
     let bus = Ip32Bus::new(16 << 20, vec![0u8; PROM_SIZE as usize]);
-    bus.write64(MACE_ISA_RING_BASE, SDMA_RING as u64);
+    bus.write64(MACE_ISA_RING_BASE as u64, SDMA_RING as u64);
     bus
 }
 
-fn sdma_reg(p: u32, reg: u32) -> u32 {
-    MACE_SDMA + p * 0x4000 + reg * 8
+fn sdma_reg(p: u32, reg: u32) -> u64 {
+    (MACE_SDMA + p * 0x4000 + reg * 8) as u64
 }
 
 fn sdma_get(bus: &Ip32Bus, p: u32, reg: u32) -> u64 {
@@ -352,12 +352,12 @@ fn sdma_set(bus: &Ip32Bus, p: u32, reg: u32, v: u64) {
     assert_eq!(bus.write64(sdma_reg(p, reg), v), BUS_OK);
 }
 
-fn tx_ring(p: u32) -> u32 {
-    SDMA_RING + 0x4000 + p * 0x2000
+fn tx_ring(p: u32) -> u64 {
+    (SDMA_RING + 0x4000 + p * 0x2000) as u64
 }
 
-fn rx_ring(p: u32) -> u32 {
-    SDMA_RING + 0x5000 + p * 0x2000
+fn rx_ring(p: u32) -> u64 {
+    (SDMA_RING + 0x5000 + p * 0x2000) as u64
 }
 
 /// Fill one transmit block as IRIX does: characters from pair 0 on with
@@ -375,12 +375,12 @@ fn tx_block(bus: &Ip32Bus, p: u32, ptr: u32, text: &[u8]) {
 fn tx_raw(bus: &Ip32Bus, p: u32, ptr: u32, b: &[u8; 32]) {
     for k in 0..4 {
         let w = u64::from_be_bytes(b[8 * k..8 * k + 8].try_into().unwrap());
-        bus.write64(tx_ring(p) + ptr + 8 * k as u32, w);
+        bus.write64(tx_ring(p) + ptr as u64 + 8 * k as u64, w);
     }
 }
 
 fn isa_status(bus: &Ip32Bus) -> u64 {
-    bus.read64(MACE_ISA_INT_STATUS).data
+    bus.read64(MACE_ISA_INT_STATUS as u64).data
 }
 
 fn line4(bus: &Ip32Bus) -> bool {
@@ -402,8 +402,8 @@ fn serial_dma_registers_decode_and_start_in_reset() {
     assert_eq!(sdma_get(&bus, 1, TX_CTRL), 0x6e0);
     assert_eq!(sdma_get(&bus, 0, TX_CTRL), 0x400, "port 0 untouched");
     // Gaps in a page alias to its eight registers.
-    assert_eq!(bus.read64(MACE_SDMA + 0x40).data, 0x400);
-    assert_eq!(bus.read64(MACE_SDMA + 0x4000 + 0x40).data, 0x6e0);
+    assert_eq!(bus.read64((MACE_SDMA + 0x40) as u64).data, 0x400);
+    assert_eq!(bus.read64((MACE_SDMA + 0x4000 + 0x40) as u64).data, 0x6e0);
     // Every width answers.
     assert_eq!(bus.read32(sdma_reg(1, TX_CTRL) + 4).data, 0x6e0, "+4 is the low word");
     assert_eq!(bus.read32(sdma_reg(1, TX_CTRL)).data, 0, "+0 the high word");
@@ -469,17 +469,17 @@ fn the_transmit_ring_wraps() {
 #[test]
 fn a_transmit_pair_can_set_mcr_and_ask_for_a_pair_request() {
     let bus = sdma_bus();
-    bus.write64(MACE_ISA_INT_MASK, sdma::tx_preq(0));
+    bus.write64(MACE_ISA_INT_MASK as u64, sdma::tx_preq(0));
     let mut b = [0u8; 32];
     b[..8].copy_from_slice(&[0x80, 0x60, 0, 0, 0x0b, b'Q', 0, 0]);
     tx_raw(&bus, 0, 0, &b);
     sdma_set(&bus, 0, TX_CTRL, 0x200);
     sdma_set(&bus, 0, TX_WPTR, 32);
-    assert_eq!(bus.read8(MACE_COM0 + 0x407).data, 0x0b, "the MCR pair landed in MCR");
+    assert_eq!(bus.read8((MACE_COM0 + 0x407) as u64).data, 0x0b, "the MCR pair landed in MCR");
     assert_eq!(bus.mace.com0.output(), "Q");
     assert_ne!(isa_status(&bus) & sdma::tx_preq(0), 0, "bit 22 latched");
     assert!(line4(&bus));
-    bus.write64(MACE_ISA_INT_STATUS, 0);
+    bus.write64(MACE_ISA_INT_STATUS as u64, 0);
     assert_eq!(isa_status(&bus) & sdma::tx_preq(0), 0, "writing it 0 clears it");
     assert!(!line4(&bus));
 }
@@ -489,17 +489,17 @@ fn a_transmit_pair_can_set_mcr_and_ask_for_a_pair_request() {
 #[test]
 fn the_transmit_threshold_is_a_level_and_the_line_obeys_the_mask() {
     let bus = sdma_bus();
-    bus.write64(MACE_ISA_INT_MASK, sdma::tx_thir(0));
+    bus.write64(MACE_ISA_INT_MASK as u64, sdma::tx_thir(0));
     sdma_set(&bus, 0, TX_CTRL, 0x280);
     bus.service();
     assert_eq!(isa_status(&bus) & sdma::group(0), sdma::tx_thir(0));
     assert!(line4(&bus), "empty ring, EMPTY condition, unmasked");
-    bus.write64(MACE_ISA_INT_MASK, 0);
+    bus.write64(MACE_ISA_INT_MASK as u64, 0);
     assert_eq!(isa_status(&bus) & sdma::tx_thir(0), 0, "status reads through the mask");
     assert!(!line4(&bus), "masked: CRIME input 4 drops at once");
     bus.service();
     assert!(!line4(&bus), "and stays down");
-    bus.write64(MACE_ISA_INT_MASK, sdma::tx_thir(0));
+    bus.write64(MACE_ISA_INT_MASK as u64, sdma::tx_thir(0));
     assert!(line4(&bus), "unmasked again: up again");
     sdma_set(&bus, 0, TX_CTRL, 0x200);
     assert_eq!(isa_status(&bus) & sdma::tx_thir(0), 0, "no condition, no bit");
@@ -510,7 +510,7 @@ fn the_transmit_threshold_is_a_level_and_the_line_obeys_the_mask() {
 #[test]
 fn received_characters_are_packed_into_whole_blocks() {
     let bus = sdma_bus();
-    bus.write64(MACE_ISA_INT_MASK, sdma::rx_thir(0));
+    bus.write64(MACE_ISA_INT_MASK as u64, sdma::rx_thir(0));
     sdma_set(&bus, 0, RX_CTRL, 0x2a0);
     assert!(!line4(&bus), "an empty ring is not 'not empty'");
     bus.mace.com0.feed(b"abcde");
@@ -547,7 +547,7 @@ fn irix_rx_block(bus: &Ip32Bus, sw: &mut u32) -> Option<Vec<u8>> {
     if rp == sdma_get(bus, 0, RX_WPTR) {
         return None;
     }
-    let blk = rx_ring(0) + *sw;
+    let blk = rx_ring(0) + *sw as u64;
     let mut chars = Vec::new();
     let (mut last_ctrl, mut last_at) = (0u32, 0usize);
     for k in 0..4 {
@@ -611,10 +611,10 @@ fn without_receive_dma_input_stays_on_the_pio_path() {
         }
         bus.mace.com0.feed(b"hi");
         bus.service();
-        let lsr = MACE_COM0 + 0x507;
+        let lsr = (MACE_COM0 + 0x507) as u64;
         assert_ne!(bus.read8(lsr).data & com_reg::LSR_DR, 0, "{ctrl:?}: data ready");
-        assert_eq!(bus.read8(MACE_COM0 + 7).data, b'h');
-        assert_eq!(bus.read8(MACE_COM0 + 7).data, b'i');
+        assert_eq!(bus.read8((MACE_COM0 + 7) as u64).data, b'h');
+        assert_eq!(bus.read8((MACE_COM0 + 7) as u64).data, b'i');
         assert_eq!(sdma_get(&bus, 0, RX_WPTR), 0, "{ctrl:?}: nothing went into the ring");
     }
 }
@@ -624,8 +624,8 @@ fn without_receive_dma_input_stays_on_the_pio_path() {
 #[test]
 fn the_uarts_own_request_is_held_low_in_dma_mode() {
     let bus = sdma_bus();
-    bus.write64(MACE_ISA_INT_MASK, 0xffff_ffff);
-    bus.write8(MACE_COM0 + 0x107, com_reg::IER_TX);
+    bus.write64(MACE_ISA_INT_MASK as u64, 0xffff_ffff);
+    bus.write8((MACE_COM0 + 0x107) as u64, com_reg::IER_TX);
     bus.service();
     assert_eq!(isa_status(&bus) & sdma::group(0), sdma::group(0), "before: all six, as today");
     assert!(line4(&bus));
@@ -646,14 +646,14 @@ fn a_pio_port_keeps_the_unmasked_six_bit_behaviour() {
     assert_eq!(sdma::group(0), MACE_ISA_SERIAL0_MASK);
     for mask in [0xffff_0aff, 0] {
         let bus = sdma_bus();
-        bus.write64(MACE_ISA_INT_MASK, mask);
-        bus.write64(MACE_ISA_INT_STATUS, 0);
-        bus.write8(MACE_COM0 + 0x107, com_reg::IER_RX);
+        bus.write64(MACE_ISA_INT_MASK as u64, mask);
+        bus.write64(MACE_ISA_INT_STATUS as u64, 0);
+        bus.write8((MACE_COM0 + 0x107) as u64, com_reg::IER_RX);
         bus.mace.com0.feed(b"x");
         bus.service();
         assert_eq!(isa_status(&bus) & 0xffff_0000, 0x03f0_0000, "mask {mask:x}");
         assert!(line4(&bus), "mask {mask:x}");
-        assert_eq!(bus.read8(MACE_COM0 + 7).data, b'x');
+        assert_eq!(bus.read8((MACE_COM0 + 7) as u64).data, b'x');
         bus.service();
         assert_eq!(isa_status(&bus) & 0xffff_0000, 0, "mask {mask:x}: read, so quiet");
         assert!(!line4(&bus));
@@ -671,8 +671,8 @@ fn a_polled_write_between_batches_keeps_its_place() {
     let saved = sdma_get(&bus, 0, TX_CTRL);
     sdma_set(&bus, 0, TX_CTRL, saved & !0x280);
     for &c in b"cd" {
-        assert_ne!(bus.read8(MACE_COM0 + 0x507).data & com_reg::LSR_THRE, 0);
-        bus.write8(MACE_COM0 + 7, c);
+        assert_ne!(bus.read8((MACE_COM0 + 0x507) as u64).data & com_reg::LSR_THRE, 0);
+        bus.write8((MACE_COM0 + 7) as u64, c);
     }
     sdma_set(&bus, 0, TX_CTRL, saved);
     tx_block(&bus, 0, 32, b"EF");
@@ -683,7 +683,7 @@ fn a_polled_write_between_batches_keeps_its_place() {
 #[test]
 fn resetting_a_channel_clears_its_pointers_latches_and_level() {
     let bus = sdma_bus();
-    bus.write64(MACE_ISA_INT_MASK, 0xffff_ffff);
+    bus.write64(MACE_ISA_INT_MASK as u64, 0xffff_ffff);
     let mut b = [0u8; 32];
     b[..8].copy_from_slice(&[0x60, 0, 0, 0, b'!', 0, 0, 0]);
     tx_raw(&bus, 0, 0, &b);
@@ -893,8 +893,8 @@ fn read_rom_streams_the_identity_back() {
 fn nvram_survives_and_decodes_maces_spacing() {
     let r = MaceRtc::new();
     // Register 0x3f, byte lane +7.
-    r.write8(MACE_RTC + (0x3f << 8) + 7, 0xa5);
-    assert_eq!(r.read8(MACE_RTC + (0x3f << 8) + 7).data, 0xa5);
+    r.write8((MACE_RTC + (0x3f << 8) + 7) as u64, 0xa5);
+    assert_eq!(r.read8((MACE_RTC + (0x3f << 8) + 7) as u64).data, 0xa5);
     assert_eq!(r.peek(0x3f), 0xa5);
     // The valid-RAM-and-time flag must not read as a dead battery.
     assert_ne!(r.peek(0x0d) & 0x80, 0);

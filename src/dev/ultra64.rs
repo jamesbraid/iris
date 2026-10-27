@@ -412,7 +412,8 @@ impl Drop for Ultra64 {
 // ---------------------------------------------------------------------------
 
 impl BusDevice for Ultra64 {
-    fn read32(&self, addr: u32) -> BusRead32 {
+    fn read32(&self, addr: u64) -> BusRead32 {
+        let addr = addr as u32; // GIO slot 0, below 4 GB
         // RDB port (0x1F480000–0x1F48000F)
         if addr >= RDB_BASE && addr < RDB_BASE + 0x10 {
             let offset = addr - RDB_BASE;
@@ -500,7 +501,8 @@ impl BusDevice for Ultra64 {
         }
     }
 
-    fn write32(&self, addr: u32, val: u32) -> u32 {
+    fn write32(&self, addr: u64, val: u32) -> u32 {
+        let addr = addr as u32; // GIO slot 0, below 4 GB
         // RDB port (0x1F480000–0x1F48000F)
         if addr >= RDB_BASE && addr < RDB_BASE + 0x10 {
             let offset = addr - RDB_BASE;
@@ -605,30 +607,30 @@ impl BusDevice for Ultra64 {
         BUS_OK
     }
 
-    fn read8(&self, addr: u32) -> BusRead8 {
+    fn read8(&self, addr: u64) -> BusRead8 {
         let r = self.read32(addr & !3);
         BusRead8::ok((r.data >> (8 * (3 - (addr & 3)))) as u8)
     }
-    fn write8(&self, addr: u32, val: u8) -> u32 {
+    fn write8(&self, addr: u64, val: u8) -> u32 {
         let shift = 8 * (3 - (addr & 3));
         let cur = self.read32(addr & !3).data;
         self.write32(addr & !3, (cur & !(0xFF << shift)) | ((val as u32) << shift))
     }
-    fn read16(&self, addr: u32) -> BusRead16 {
+    fn read16(&self, addr: u64) -> BusRead16 {
         let r = self.read32(addr & !3);
         BusRead16::ok((r.data >> (8 * (2 - (addr & 2)))) as u16)
     }
-    fn write16(&self, addr: u32, val: u16) -> u32 {
+    fn write16(&self, addr: u64, val: u16) -> u32 {
         let shift = 8 * (2 - (addr & 2));
         let cur = self.read32(addr & !3).data;
         self.write32(addr & !3, (cur & !(0xFFFF << shift)) | ((val as u32) << shift))
     }
-    fn read64(&self, addr: u32) -> BusRead64 {
+    fn read64(&self, addr: u64) -> BusRead64 {
         let hi = self.read32(addr).data as u64;
         let lo = self.read32(addr + 4).data as u64;
         BusRead64::ok((hi << 32) | lo)
     }
-    fn write64(&self, addr: u32, val: u64) -> u32 {
+    fn write64(&self, addr: u64, val: u64) -> u32 {
         self.write32(addr, (val >> 32) as u32);
         self.write32(addr + 4, val as u32)
     }

@@ -175,14 +175,14 @@ impl InterruptController for MaceIsa {
 
 /// Every width reads the register's low bits, as MACE's other cells do.
 impl BusDevice for MaceIsa {
-    fn read8(&self, addr: u32) -> BusRead8 { BusRead8::ok(self.reg(addr) as u8) }
-    fn read16(&self, addr: u32) -> BusRead16 { BusRead16::ok(self.reg(addr) as u16) }
-    fn read32(&self, addr: u32) -> BusRead32 { BusRead32::ok(self.reg(addr) as u32) }
-    fn read64(&self, addr: u32) -> BusRead64 { BusRead64::ok(self.reg(addr)) }
-    fn write8(&self, addr: u32, val: u8) -> u32 { self.put(addr, val as u64); BUS_OK }
-    fn write16(&self, addr: u32, val: u16) -> u32 { self.put(addr, val as u64); BUS_OK }
-    fn write32(&self, addr: u32, val: u32) -> u32 { self.put(addr, val as u64); BUS_OK }
-    fn write64(&self, addr: u32, val: u64) -> u32 { self.put(addr, val); BUS_OK }
+    fn read8(&self, addr: u64) -> BusRead8 { BusRead8::ok(self.reg(addr as u32) as u8) }
+    fn read16(&self, addr: u64) -> BusRead16 { BusRead16::ok(self.reg(addr as u32) as u16) }
+    fn read32(&self, addr: u64) -> BusRead32 { BusRead32::ok(self.reg(addr as u32) as u32) }
+    fn read64(&self, addr: u64) -> BusRead64 { BusRead64::ok(self.reg(addr as u32)) }
+    fn write8(&self, addr: u64, val: u8) -> u32 { self.put(addr as u32, val as u64); BUS_OK }
+    fn write16(&self, addr: u64, val: u16) -> u32 { self.put(addr as u32, val as u64); BUS_OK }
+    fn write32(&self, addr: u64, val: u32) -> u32 { self.put(addr as u32, val as u64); BUS_OK }
+    fn write64(&self, addr: u64, val: u64) -> u32 { self.put(addr as u32, val); BUS_OK }
 }
 
 impl Device for MaceIsa {
@@ -284,17 +284,17 @@ mod tests {
         // Audio and PS/2 only through the mask.
         isa.set_line(2, true);
         assert!(!lv(6));
-        isa.write64(MACE_ISA_INT_MASK, 0xff | MACE_ISA_PS2_MASK);
+        isa.write64(MACE_ISA_INT_MASK as u64, 0xff | MACE_ISA_PS2_MASK);
         assert!(lv(6));
         isa.set_line(9, true);
         assert!(lv(5));
         // A port in DMA mode: its bits through the mask.
         isa.set_serial_dma([true, false], sdma::group(0));
         assert!(!lv(4), "masked");
-        isa.write64(MACE_ISA_INT_MASK, sdma::group(0));
+        isa.write64(MACE_ISA_INT_MASK as u64, sdma::group(0));
         assert!(lv(4));
         // Software's writes do not stick on bits a device drives.
-        isa.write64(MACE_ISA_INT_STATUS, 0);
+        isa.write64(MACE_ISA_INT_STATUS as u64, 0);
         assert_eq!(isa.status() & 1 << 2, 1 << 2);
     }
 
@@ -304,8 +304,8 @@ mod tests {
         src.set_line(2, true);
         src.set_line(9, true);
         src.set_line(ISA_SERIAL0_PIO, true);
-        src.write64(MACE_ISA_INT_MASK, 0xff | MACE_ISA_PS2_MASK);
-        src.write64(MACE_ISA_INT_STATUS, 0x4000_0000);
+        src.write64(MACE_ISA_INT_MASK as u64, 0xff | MACE_ISA_PS2_MASK);
+        src.write64(MACE_ISA_INT_STATUS as u64, 0x4000_0000);
         src.set_serial_dma([false, true], sdma::group(1));
         let v1 = src.save_state();
 

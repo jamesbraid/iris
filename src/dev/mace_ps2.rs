@@ -249,19 +249,19 @@ impl MacePs2 {
 /// The bus side: every width reads the register's low bits and writes its
 /// value, as MACE's 64-bit register slots do.
 impl BusDevice for MacePs2 {
-    fn read8(&self, addr: u32) -> BusRead8 { BusRead8::ok(self.read64(addr).data as u8) }
-    fn read16(&self, addr: u32) -> BusRead16 { BusRead16::ok(self.read64(addr).data as u16) }
-    fn read32(&self, addr: u32) -> BusRead32 { BusRead32::ok(self.read64(addr).data as u32) }
-    fn read64(&self, addr: u32) -> BusRead64 {
-        let v = self.read(addr);
+    fn read8(&self, addr: u64) -> BusRead8 { BusRead8::ok(self.read64(addr).data as u8) }
+    fn read16(&self, addr: u64) -> BusRead16 { BusRead16::ok(self.read64(addr).data as u16) }
+    fn read32(&self, addr: u64) -> BusRead32 { BusRead32::ok(self.read64(addr).data as u32) }
+    fn read64(&self, addr: u64) -> BusRead64 {
+        let v = self.read(addr as u32);
         self.update_irq();
         BusRead64::ok(v)
     }
-    fn write8(&self, addr: u32, val: u8) -> u32 { self.write64(addr, val as u64) }
-    fn write16(&self, addr: u32, val: u16) -> u32 { self.write64(addr, val as u64) }
-    fn write32(&self, addr: u32, val: u32) -> u32 { self.write64(addr, val as u64) }
-    fn write64(&self, addr: u32, val: u64) -> u32 {
-        self.write(addr, val);
+    fn write8(&self, addr: u64, val: u8) -> u32 { self.write64(addr, val as u64) }
+    fn write16(&self, addr: u64, val: u16) -> u32 { self.write64(addr, val as u64) }
+    fn write32(&self, addr: u64, val: u32) -> u32 { self.write64(addr, val as u64) }
+    fn write64(&self, addr: u64, val: u64) -> u32 {
+        self.write(addr as u32, val);
         self.update_irq();
         BUS_OK
     }
