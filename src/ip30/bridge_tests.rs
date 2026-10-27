@@ -621,10 +621,15 @@ fn a_dropped_read_is_recorded_when_enabled() {
     r.set(reg::INT_DEST_LOWER, 0x80);
     r.set(reg::INT_ENABLE, INT_XREAD_REQ_TIMEOUT);
     let mut b = [0u8; 4];
+    // A translation that fails is refused up front and times nothing.
     assert_eq!(c.dma().dma_read(0x4000_3000, &mut b), PciDmaStatus::MasterAbort);
+    assert_eq!(r.get(reg::INT_STATUS), 0);
+    // A request that translates but the crossbar drops (no memory there).
+    r.direct_to_heart(false);
+    assert_eq!(c.dma().dma_read(0x8000_0000 | 0x7000_0000, &mut b), PciDmaStatus::MasterAbort);
     assert_ne!(r.get(reg::INT_STATUS) & INT_XREAD_REQ_TIMEOUT, 0);
     assert_eq!(r.get(reg::RESP_ERR_UPPER), 2 << 20);
-    assert_eq!(r.get(reg::RESP_ERR_LOWER), 0x4000_3000);
+    assert_eq!(r.get(reg::RESP_ERR_LOWER), 0xf000_0000);
     r.set(reg::INT_RESET, INT_RESET_RESP_BUF_GRP);
     assert_eq!(r.get(reg::INT_STATUS), 0);
 }
@@ -797,4 +802,60 @@ fn dma_above_4_gib_master_aborts_instead_of_wrapping() {
     assert_eq!(c.dma().dma_read(0x1_8000_0010, &mut b), PciDmaStatus::MasterAbort);
     assert_eq!(b, [0]);
     assert_eq!(r.mem.peek(HIGH + 0x10, 1), [0]);
+}
+
+/// The IRIX ISP driver maps all its DMA through the 64-bit direct window:
+/// the widget in bits 63:60, the XIO address in the low 48 bits.
+#[test]
+fn dma_through_the_64_bit_direct_window() {
+    let r = Rig::new();
+    let c = r.card(0, PCI_INTA);
+    let data = [1u8, 2, 3, 4, 5, 6, 7, 8];
+    let at = |x: u64| ((WIDGET_HEART as u64) << 60) | x;
+
+    // Swap clear on a 32-bit slot reverses words; the translated-window
+    // swap bit does not steer this window.
+    assert!(c.dma().dma_write(at(0x1000), &data).is_ok());
+    assert_eq!(r.mem.peek(0x1000, 8), [4, 3, 2, 1, 8, 7, 6, 5]);
+    let mut back = [0u8; 8];
+    assert!(c.dma().dma_read(at(0x1000), &mut back).is_ok());
+    assert_eq!(back, data);
+
+    r.set(reg::device(0), r.get(reg::device(0)) | DEV_SWAP_TRANSLATED);
+    assert!(c.dma().dma_write(at(0x2000), &data).is_ok());
+    assert_eq!(r.mem.peek(0x2000, 8), [4, 3, 2, 1, 8, 7, 6, 5]);
+
+    // The direct swap bit makes it a byte stream.
+    r.set(reg::device(0), r.get(reg::device(0)) | DEV_SWAP_DIRECT);
+    assert!(c.dma().dma_write(at(0x3000), &data).is_ok());
+    assert_eq!(r.mem.peek(0x3000, 8), data);
+    assert!(c.dma().dma_read(at(0x3000), &mut back).is_ok());
+    assert_eq!(back, data);
+
+    // Bits 47:0 pass through whole, unlike the 31-bit window's map.
+    assert!(c.dma().dma_write(at(HIGH + 0x10), &[9]).is_ok());
+    assert_eq!(r.mem.peek(HIGH + 0x10, 1), [9]);
+
+    // A 64-bit slot reverses doublewords.
+    r.set(reg::device(0), r.get(reg::device(0)) & !DEV_SWAP_DIRECT);
+    r.bridge.set_dma_64bit(0, true);
+    assert!(c.dma().dma_write(at(0x4000), &data).is_ok());
+    assert_eq!(r.mem.peek(0x4000, 8), [8, 7, 6, 5, 4, 3, 2, 1]);
+}
+
+#[test]
+fn the_64_bit_direct_window_refuses_widget_zero_and_other_widgets() {
+    let r = Rig::new();
+    let c = r.card(0, PCI_INTA);
+    r.set(reg::INT_ENABLE, INT_XREAD_REQ_TIMEOUT);
+    r.set(reg::INT_DEST_UPPER, (WIDGET_HEART as u32) << 16);
+    r.set(reg::INT_DEST_LOWER, 0x80);
+    assert_eq!(c.dma().dma_write(0x1000, &[1]), PciDmaStatus::MasterAbort);
+    assert_eq!(c.dma().dma_write(0x1_0000_1000, &[1]), PciDmaStatus::MasterAbort, "widget 0");
+    assert_eq!(c.dma().dma_write((9u64 << 60) | 0x1000, &[1]), PciDmaStatus::MasterAbort, "not HEART");
+    let mut b = [0xffu8; 2];
+    assert_eq!(c.dma().dma_read((9u64 << 60) | 0x1000, &mut b), PciDmaStatus::MasterAbort);
+    assert_eq!(b, [0, 0]);
+    assert_eq!(r.get(reg::INT_STATUS), 0, "refused translations raise no timeout");
+    assert_eq!(r.mem.peek(0x1000, 1), [0]);
 }
