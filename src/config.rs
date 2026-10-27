@@ -1932,6 +1932,9 @@ impl MachineConfig {
             (NetMode::Off, p) if p != MachineProfile::O2Ip32 && p != MachineProfile::OctaneIp30 => {
                 return Err("network.mode = \"off\" is only available on the O2 for now; the Indy and Indigo2 always have their Ethernet".into());
             }
+            (NetMode::Pcap, MachineProfile::OctaneIp30) => {
+                return Err("network.mode = \"pcap\" is not available on the Octane yet (its Ethernet runs on the NAT gateway)".into());
+            }
             (NetMode::Pcap, MachineProfile::O2Ip32) => {
                 return Err("network.mode = \"pcap\" is not available on the O2 yet (its Ethernet runs on the NAT gateway)".into());
             }
