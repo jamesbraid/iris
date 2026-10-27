@@ -8,3 +8,4 @@
 
 pub mod xio;
 pub mod bridge;
+pub mod flash;
