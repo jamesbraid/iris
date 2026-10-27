@@ -1182,10 +1182,11 @@ impl Core {
     /// Run a command against its target and build its completion. The
     /// state is not locked: this is the part that waits on the disk.
     ///
-    /// A WRITE whose payload the fabric refuses stops there: nothing reaches
-    /// the target and no completion is built. The QEMU model leaves such a
-    /// request outstanding, never completed, until the driver gives up on
-    /// it; with no completion posted the driver sees the same here.
+    /// A command whose payload transfer the fabric refuses stops there and
+    /// builds no completion: a WRITE sends nothing to the target, a READ
+    /// stores no more of what the target returned. The QEMU model leaves
+    /// such a request outstanding, never completed, until the driver gives
+    /// up on it; with no completion posted the driver sees the same here.
     ///
     /// None too when a reset cancelled the command (`gen` is the generation
     /// it was read under): what it had not yet stored in host memory is not
@@ -1215,8 +1216,8 @@ impl Core {
                 if off >= take { break; }
                 let n = (l as usize).min(take - off);
                 if !self.fenced(gen, || self.dma_write(a, &data[off..off + n]))? {
-                    self.note(format!("payload DMA for handle {handle:#x} refused by the fabric"));
-                    break;
+                    self.note(format!("payload DMA for handle {handle:#x} refused by the fabric; command stopped"));
+                    return None;
                 }
                 off += n;
             }

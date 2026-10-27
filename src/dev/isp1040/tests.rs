@@ -573,6 +573,23 @@ fn a_refused_write_payload_reaches_neither_the_disk_nor_the_response_ring() {
     assert_eq!(r.mem.get(rd, BLOCK_SIZE), pattern, "the block was not overwritten with zeros");
 }
 
+/// A READ whose payload store the fabric refuses completes nothing, as
+/// the QEMU model leaves it; the next command runs.
+#[test]
+fn a_refused_read_payload_posts_no_completion() {
+    let r = Rig::with_disk("refused-read", 1, 64);
+    r.init_rings(8, 8);
+    // Two blocks: the first segment is memory, the second lies past it.
+    r.put_entry(0, &request(0x90, 1, &cdb10(scsi_cmd::READ_10, 0, 2), &[(BUF, BLOCK_SIZE as u32), (MEM as u32, BLOCK_SIZE as u32)]));
+    r.doorbell(1);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 1, "the entry is consumed");
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0, "but nothing is posted for it");
+    r.put_entry(1, &request(0x91, 1, &[0, 0, 0, 0, 0, 0], &[]));
+    r.doorbell(2);
+    assert_eq!(g32(&r.status(0), 4), 0x91);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+}
+
 #[test]
 fn a_check_condition_carries_its_sense() {
     let r = Rig::with_disk("sense", 1, 64);
