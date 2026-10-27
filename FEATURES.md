@@ -138,13 +138,13 @@ the first `[section]`, because TOML tables continue until the next header.
 
 | Key | Default | Values and behavior |
 |---|---|---|
-| `prom` | `"prom.bin"` | PROM path; IP24, IP22, and IP28 each have an embedded fallback. Indigo2 also tries `070-1367-012.bin` (IP22) or `070-1477-002.bin` (IP28) in the working directory; the O2, which has no embedded PROM, tries `ip32prom.rev4.18.bin`. |
-| `nvram` | `"nvram.bin"` | DS1386 backing file on the Indy; the PROM's flash (its environment) on the O2. GUI defaults to an absolute user-config path. |
+| `prom` | `"prom.bin"` | PROM path; IP24, IP22, and IP28 each have an embedded fallback. Indigo2 also tries `070-1367-012.bin` (IP22) or `070-1477-002.bin` (IP28) in the working directory; the O2, which has no embedded PROM, tries `ip32prom.rev4.18.bin`. The Octane has none either: `prom` must name the IP30 PROM image. |
+| `nvram` | `"nvram.bin"` | DS1386 backing file on the Indy; the PROM's flash (its environment) on the O2. Left at `nvram.bin`, the Octane uses `nvram-ip30.bin` for its DS1685 NVRAM instead. GUI defaults to an absolute user-config path. |
 | `nveeprom` | `"nveeprom.bin"` | Motherboard EEPROM file; GUI anchors it in its user-config directory. |
-| `banks` | `[128,128,0,0]` | RAM bank sizes in MB, up to eight entries (every machine today has four; the rest must be 0). On the O2 each entry is a DIMM pair's kit (32, 64, 128 or 256), largest first. See profile constraints below. |
+| `banks` | `[128,128,0,0]` | RAM bank sizes in MB, up to eight entries (every machine today has four; the rest must be 0). On the O2 each entry is a DIMM pair's kit (32, 64, 128 or 256), largest first. On the Octane each entry is a HEART bank (a DIMM pair) of 64, 128, 256 or 512, filled from bank 0, 2048 at most. See profile constraints below. |
 | `scale` | `1` | Standalone window scale: 1–4. GUI uses its separate vm_scale. |
 | `headless` | `false` | Disable the standalone window and graphics; the O2 then boots on its serial console. Audio is independent. |
-| `no_audio` | `false` | Disable HAL2 audio emulation. |
+| `no_audio` | `false` | Disable audio emulation (HAL2, the O2's MACE audio, the Octane's RAD). |
 | `gdb_port` | `unset` | Start the GDB TCP stub; debugging is unavailable in lightning builds. |
 | `monitor_port` | `8888 when unset` | Monitor listener on loopback. |
 | `serial_port_a` | `8880 when unset` | SCC channel A listener (tty2); the O2's first serial port, its console when headless. |
@@ -167,7 +167,7 @@ the first `[section]`, because TOML tables continue until the next header.
 
 | Key | Default | Values and behavior |
 |---|---|---|
-| `machine.profile` | `indy_ip24` | indy_ip24, indigo2_ip22, indigo2_ip28, o2_ip32 (configured by `[o2]`, see [the O2 guide](docs/o2-ip32.md)). |
+| `machine.profile` | `indy_ip24` | indy_ip24, indigo2_ip22, indigo2_ip28, o2_ip32 (configured by `[o2]`, see [the O2 guide](docs/o2-ip32.md)), octane_ip30 (configured by `[octane]`, see [the Octane guide](docs/octane-ip30.md)). |
 | `machine.cpu` | `r4400` | r4400, r5000, r10000; CPU/ISA choice is independent of build features. |
 
 ### [graphics]
@@ -316,6 +316,22 @@ the file is loaded, with a note, and never written back.
 | `o2.mouse` | `true` | PS/2 mouse on the second port (with the graphics console). |
 | `o2.control_port` | unset | TCP port on 127.0.0.1 serving the `o2` monitor commands for scripts. |
 | `o2.arcs_fpu` | `false` | Test aid: lend a kernel the FPU while it runs inside the PROM. |
+
+### [octane]
+
+Used when `machine.profile = "octane_ip30"`. The rest of an Octane is the
+shared keys: `prom` (the IP30 PROM image; there is no embedded one), `nvram`
+(the DS1685's battery-backed RAM, behind IOC3), `banks` (MB in each HEART
+bank), `serial_port_a`/`serial_port_b`/`serial_log` (IOC3's two ports, the
+first the console), `headless`, `[clock] fixed_mhz` (CP0 Count, 97.5 for the
+195 MHz R10000), `[network]`, `[[port_forward]]`, `nat_subnet` and `[scsi.N]`
+(`controller` 0 is the internal bus, 1 the external). The machine needs
+`machine.cpu = "r10000"`.
+
+| Key | Default | Values and behavior |
+|---|---|---|
+| `octane.flash` | unset | File holding the boot flash, so the PROM's persistent records survive between runs. Created from `prom` when missing; an existing file is used as it stands (a file of any other size is refused, not overwritten), so delete it after changing `prom`. |
+| `octane.graphics` | `"solidimpact"` | The board in the first graphics port (widget 11): `solidimpact` or `none`. With `none` the machine runs on its serial console with no window. |
 
 ### Hardware constraints and precedence
 

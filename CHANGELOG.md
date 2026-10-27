@@ -80,6 +80,28 @@ hashes are given where a change is easiest to understand by reading the commit.
   the guest screen from the display caches when no renderer is present. With
   a GUI renderer attached it still returns the readback that renderer
   produced. (`src/ci.rs`, `src/gfx_display.rs`)
+### SGI Octane (IP30)
+
+- **A new machine: the SGI Octane.** `[machine] profile = "octane_ip30"` with
+  an `[octane]` section ([guide](docs/octane-ip30.md)): a 195 MHz R10000 on
+  HEART, the Crossbow, the onboard Bridge with two QLogic ISP1040 SCSI
+  controllers, IOC3 (serial ports, PS/2, the DS1685 clock and NVRAM,
+  Ethernet on the NAT gateway) and RAD audio, the boot flash, and Solid
+  IMPACT graphics on widget 11. The stock IP30 PROM boots IRIX 6.5.30 to a
+  serial login or, on the graphics console, to the X login and desktop.
+  Needs the IP30 PROM image; not in iris-gui. The device models are ports of
+  the Origami project's QEMU models.
+- **CP0 Count writes can open the late-Compare window** (`count_write_samples`,
+  opt-in; the Octane sets it): IRIX on the Octane arms Compare a few
+  instructions after writing Count, and a host stall in between no longer
+  costs a full Count wrap.
+- **IMPACT gains options for boards outside the Indigo2**: a settable board
+  identity, pixel reads started at the DMA kick, GE state readbacks in the HQ4
+  layout, a bound on how long STATUS reads busy, and HQ4 raster register
+  decode. The Indigo2 path is unchanged.
+- **A machine with no graphics board runs on its serial console** instead of
+  stopping when it is not headless.
+
 ### SGI O2 (IP32)
 
 - **A new machine: the SGI O2.** `[machine] profile = "o2_ip32"` with an `[o2]`

@@ -214,6 +214,11 @@ Every device that has real work to do runs on its own thread:
 | `hptimer` | host timer callbacks (Compare, PIT ticks, HAL2 audio pacing) |
 | listeners | debug console, serial ports, CI socket, GDB stub |
 | `machine-events` | power-off and reset requests from devices |
+| Octane: `ISP1040-0`, `ISP1040-1` | each SCSI controller's request ring and disk transfers |
+| Octane: `ioc3-service` | IOC3's serial input and timers, its interrupt output, PS/2 input |
+| Octane: `ip30-eth-rx`, `ip30-eth-nat` | the IOC3 Ethernet's receive pump; its NAT engine |
+| Octane: `rad1-status` | RAD audio's status DMA and ring timing while it runs |
+| Octane: `Octane-Power` | watches the clock's power-off request |
 
 Threads that have nothing to do park instead of spinning: the graphics
 consumers when their FIFO is empty, and the CPU thread in `idle-pause` builds
