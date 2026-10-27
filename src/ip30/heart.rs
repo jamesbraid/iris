@@ -741,7 +741,12 @@ impl Heart {
         match (off, size) {
             (0x24, 4) => r.widget_control = val as u32,
             (0x28, 8) | (0x2c, 4) => r.widget_request_timeout = val as u32,
-            (0x44, 4) if val == 0 => {}
+            // The error-command word, which the model takes only as a zero
+            // write. IRIX 6.5.30's bus-error probe clears it with a 64-bit
+            // store to the slot (OpenBSD's map puts the 64-bit slot at
+            // +0x40, the word in its low half at +0x44); that is the same
+            // zero write.
+            (0x44, 4) | (0x40, 8) if val == 0 => {}
             // No widget error producer exists in the model.
             (0x60, 8) => {}
             (0x68, 8) => r.widget_error_mask = val as u32,
@@ -1068,6 +1073,17 @@ mod tests {
         assert_eq!(h.widget_read(0, 1), None);
         assert_eq!(h.widget_read(0, 4), None);
         assert_eq!(h.widget_read(8, 8), None);
+    }
+
+    #[test]
+    fn the_error_command_word_takes_a_zero_write_at_either_width() {
+        let f = heart(128);
+        let h = &f.heart;
+        assert!(h.widget_write(0x44, 4, 0));
+        assert!(h.widget_write(0x40, 8, 0));
+        assert!(!h.widget_write(0x44, 4, 1));
+        assert!(!h.widget_write(0x40, 8, 1));
+        assert!(!h.widget_write(0x40, 4, 0));
     }
 
     #[test]
