@@ -1008,6 +1008,8 @@ pub struct Ioc3Eth {
     link: Mutex<Option<Link>>,
     rx_wake: Mutex<Option<Arc<crate::net::Wake>>>,
     running: Arc<AtomicBool>,
+    /// Frames from the backend wait while held; see [`Ioc3Eth::hold`].
+    held: AtomicBool,
 }
 
 impl Ioc3Eth {
@@ -1029,6 +1031,7 @@ impl Ioc3Eth {
             link: Mutex::new(None),
             rx_wake: Mutex::new(None),
             running: Arc::new(AtomicBool::new(true)),
+            held: AtomicBool::new(false),
         })
     }
 
@@ -1125,6 +1128,16 @@ impl Ioc3Eth {
         controls
     }
 
+    /// Keep frames from the backend in its queue, or let them in again. A
+    /// machine holds them while the CPU is stopped for a snapshot, so no
+    /// frame reaches memory under the save or the load.
+    pub fn hold(&self, held: bool) {
+        self.held.store(held, Ordering::SeqCst);
+        if !held {
+            self.wake_rx();
+        }
+    }
+
     /// Stop the threads `start_nat` created.
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
@@ -1147,6 +1160,9 @@ impl Ioc3Eth {
     /// yet (no buffer, MAC off) waits in the backend queue. Returns whether
     /// any frame was consumed.
     pub fn poll(&self) -> bool {
+        if self.held.load(Ordering::SeqCst) {
+            return false;
+        }
         let dma = self.dma();
         let mut moved = false;
         {
@@ -1168,6 +1184,105 @@ impl Ioc3Eth {
         }
         self.irq_flush();
         moved
+    }
+}
+
+impl Ics1890 {
+    fn save(&self, now: Instant) -> toml::Value {
+        use crate::snapshot::hex_u16;
+        let mut t = toml::map::Map::new();
+        for (k, v) in [
+            ("bmcr", self.bmcr), ("bmsr_caps", self.bmsr_caps), ("id1", self.id1), ("id2", self.id2),
+            ("anar", self.anar), ("partner", self.partner), ("exp", self.exp), ("ext_ctl", self.ext_ctl),
+            ("tenbt", self.tenbt), ("ext2", self.ext2),
+        ] {
+            t.insert(k.into(), hex_u16(v));
+        }
+        for (k, v) in [
+            ("override_armed", self.override_armed), ("page_received", self.page_received),
+            ("link_low_latch", self.link_low_latch), ("last_link", self.last_link), ("nego_done", self.nego_done),
+        ] {
+            t.insert(k.into(), toml::Value::Boolean(v));
+        }
+        if let Some(d) = self.deadline {
+            t.insert("deadline_ns".into(), toml::Value::Integer(d.saturating_duration_since(now).as_nanos() as i64));
+        }
+        t.insert("unimplemented_accesses".into(), toml::Value::Integer(self.unimplemented_accesses as i64));
+        toml::Value::Table(t)
+    }
+
+    /// The cable (`backend_up`) is the host's, so it stays as it is now.
+    fn load(&mut self, v: &toml::Value, now: Instant) {
+        use crate::snapshot::{get_field, toml_bool, toml_u16};
+        let h = |k: &str| get_field(v, k).and_then(toml_u16).unwrap_or(0);
+        let b = |k: &str| get_field(v, k).and_then(toml_bool).unwrap_or(false);
+        self.bmcr = h("bmcr");
+        self.bmsr_caps = h("bmsr_caps");
+        self.id1 = h("id1");
+        self.id2 = h("id2");
+        self.anar = h("anar");
+        self.partner = h("partner");
+        self.exp = h("exp");
+        self.ext_ctl = h("ext_ctl");
+        self.tenbt = h("tenbt");
+        self.ext2 = h("ext2");
+        self.override_armed = b("override_armed");
+        self.page_received = b("page_received");
+        self.link_low_latch = b("link_low_latch");
+        self.last_link = b("last_link");
+        self.nego_done = b("nego_done");
+        self.deadline = get_field(v, "deadline_ns")
+            .and_then(|x| x.as_integer())
+            .map(|n| now + Duration::from_nanos(n.max(0) as u64));
+        self.unimplemented_accesses = get_field(v, "unimplemented_accesses").and_then(|x| x.as_integer()).unwrap_or(0) as u32;
+    }
+}
+
+/// The MAC's registers, its pending interrupt edges, the PHY and the frame
+/// counts. The backend link and its queues are the host's and stay as they
+/// are: frames in flight when the snapshot was taken are not in it. Loading
+/// drives the interrupt to the saved level.
+impl crate::traits::Saveable for Ioc3Eth {
+    fn save_state(&self) -> toml::Value {
+        use crate::snapshot::{hex_u16, hex_u32, hex_u64, u32_slice_to_toml};
+        let st = self.st.lock().unwrap();
+        let mut t = toml::map::Map::new();
+        t.insert("regs".into(), u32_slice_to_toml(&st.regs));
+        t.insert("int_deferred".into(), hex_u32(st.int_deferred));
+        t.insert("mii_data".into(), hex_u16(st.mii_data));
+        t.insert("mii_data_w".into(), hex_u16(st.mii_data_w));
+        t.insert("rx_timer_armed".into(), toml::Value::Boolean(st.rx_timer_armed));
+        t.insert("irq_asserted".into(), toml::Value::Boolean(st.irq_asserted));
+        t.insert("tx_frames".into(), hex_u64(st.tx_frames));
+        t.insert("rx_frames".into(), hex_u64(st.rx_frames));
+        t.insert("phy".into(), st.phy.save(Instant::now()));
+        toml::Value::Table(t)
+    }
+
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        use crate::snapshot::{get_field, load_u32_slice, toml_bool, toml_u16, toml_u32, toml_u64};
+        {
+            let mut st = self.st.lock().unwrap();
+            st.regs = [0; NREGS];
+            if let Some(r) = get_field(v, "regs") {
+                load_u32_slice(r, &mut st.regs);
+            }
+            st.int_deferred = get_field(v, "int_deferred").and_then(toml_u32).unwrap_or(0);
+            st.mii_data = get_field(v, "mii_data").and_then(toml_u16).unwrap_or(MII_ABSENT);
+            st.mii_data_w = get_field(v, "mii_data_w").and_then(toml_u16).unwrap_or(0);
+            st.rx_timer_armed = get_field(v, "rx_timer_armed").and_then(toml_bool).unwrap_or(false);
+            st.tx_frames = get_field(v, "tx_frames").and_then(toml_u64).unwrap_or(0);
+            st.rx_frames = get_field(v, "rx_frames").and_then(toml_u64).unwrap_or(0);
+            if let Some(p) = get_field(v, "phy") {
+                st.phy.load(p, Instant::now());
+            }
+            let level = get_field(v, "irq_asserted").and_then(toml_bool).unwrap_or(false);
+            st.irq_asserted = level;
+            st.irq_events = vec![level];
+        }
+        self.irq_flush();
+        self.wake_rx();
+        Ok(())
     }
 }
 
