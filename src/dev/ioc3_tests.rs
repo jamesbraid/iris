@@ -1403,3 +1403,42 @@ fn the_uarts_are_in_the_superio_block() {
     assert_eq!(r.r8(reg::SERIAL_B + 7), 0);
     assert_eq!(r.r32(reg::PIN_DATA) >> 2 & 1, 1, "an original Octane");
 }
+
+#[test]
+fn fuel_timekeeper_selection_mapping_and_host_input() {
+    let r = Rig::with(Ioc3::new(Ioc3Config::fuel(MAC)));
+    assert_eq!(r.c.config().read(11), 0xc30a_10a9);
+    let clock = Arc::new(crate::dev::timekeeper::Timekeeper::fuel_at(2026, 1, 1, 0, 0, 0).unwrap());
+    r.c.attach_timekeeper(clock.clone());
+    let base = reg::BYTEBUS_DEV0;
+    assert_eq!(r.r8(base + 0x7fff), 0x58);
+    r.w8(base + 0x100, 0x12);
+    r.w8(base + 0x900, 0x34);
+    r.w8(base + 0x7f8, 0xa5);
+    assert_eq!(r.r8(base + 0x100), 0x12);
+    assert_eq!(r.r8(base + 0x900), 0x34);
+    assert_eq!(r.r8(base + 0x7f8), 0xa5);
+    r.w32(base + 0x100, 0xffff_ffff);
+    assert_eq!(r.r8(base + 0x100), 0x12, "wide writes refused");
+    r.c.reset(); clock.power_on();
+    assert_eq!(r.r8(base + 0x7f8), 0xa5);
+    // The indexed Dallas ports remain unfitted on Fuel.
+    r.w8(reg::BYTEBUS_DEV1, 0x40); r.w8(reg::BYTEBUS_DEV2, 0x55);
+    assert_eq!(r.r8(reg::BYTEBUS_DEV2), 0);
+    let eth = crate::dev::ioc3_eth::Ioc3Eth::new_fuel(MAC);
+    r.c.attach_eth(eth);
+    use crate::dev::ioc3_eth::{bits::MII_READ, reg::{MII_CONTROL, MII_DATA_R, MII_DATA_W}};
+    r.w32(MII_DATA_W, 7);
+    r.w32(MII_CONTROL, (1 << 5) | 0x19);
+    r.w32(reg::PIN_CONTROL_SET, 1 << 5);
+    r.w32(reg::PIN_REG_FIRST + 5 * 4, 0);
+    r.w32(reg::PIN_DATA, 1 << 5);
+    r.w32(MII_CONTROL, MII_READ | (7 << 5) | 3);
+    assert_eq!(r.r32(MII_DATA_R), 0x5c10, "Fuel GPIO5 has no PHY reset connection");
+    r.w32(reg::INT_ENABLE_SET, int::KEYBOARD);
+    r.w32(K_TX, 0xf4);
+    let _ = r.r32(K_RX);
+    r.w32(reg::INT_STATUS, int::KEYBOARD);
+    r.c.ps2().push_kb(winit::keyboard::KeyCode::KeyA, true);
+    assert!(r.superio.level(), "Fuel host keyboard uses the independent SuperIO line");
+}

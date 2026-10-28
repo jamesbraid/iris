@@ -64,3 +64,5 @@ pub mod bedrock_lb;
 pub mod bedrock_io;
 pub mod bedrock_ni;
 pub mod bedrock_xb;
+pub mod dp83843;
+pub mod timekeeper;

@@ -1,5 +1,5 @@
-//! The Ethernet MAC inside IOC3, with the ICS1890 transceiver the Octane
-//! carries on its management bus.
+//! The Ethernet MAC inside IOC3, with the Octane ICS1890 or Fuel DP83843
+//! transceiver on its management bus.
 //!
 //! IOC3 forwards the register offsets 0xf0..=0x150 of its register BAR here
 //! through [`Ioc3EthPort`]. The MAC is SGI's own design with no vendor
@@ -164,6 +164,28 @@ pub const NEGOTIATION_DELAY: Duration = Duration::from_millis(100);
 
 fn ridx(off: u32) -> usize {
     ((off - MAC_CONTROL) / 4) as usize
+}
+
+/// Board-selected transceiver behind the shared IOC3 MAC.
+enum Phy {
+    Ics1890(Ics1890),
+    Dp83843(crate::dev::dp83843::Dp83843),
+}
+impl Phy {
+    fn address(&self) -> u8 { match self { Self::Ics1890(p) => p.address(), Self::Dp83843(p) => p.address() } }
+    fn deadline(&self) -> Option<Instant> { match self { Self::Ics1890(p) => p.deadline(), Self::Dp83843(p) => p.deadline() } }
+    fn wire_enabled(&self) -> bool { match self { Self::Ics1890(p) => p.wire_enabled(), Self::Dp83843(p) => p.wire_enabled() } }
+    fn in_loopback(&self) -> bool { match self { Self::Ics1890(p) => p.in_loopback(), Self::Dp83843(p) => p.in_loopback() } }
+    fn sync(&mut self, now: Instant) { match self { Self::Ics1890(p) => p.sync(now), Self::Dp83843(p) => p.sync(now) } }
+    fn read(&mut self, r: u8, now: Instant) -> u16 { match self { Self::Ics1890(p) => p.read(r, now), Self::Dp83843(p) => p.read(r, now) } }
+    fn write(&mut self, r: u8, v: u16, now: Instant) { match self { Self::Ics1890(p) => p.write(r, v, now), Self::Dp83843(p) => p.write(r, v, now) } }
+    fn set_backend_link(&mut self, up: bool, now: Instant) { match self { Self::Ics1890(p) => p.set_backend_link(up, now), Self::Dp83843(p) => p.set_backend_link(up, now) } }
+    fn reset_copy(&self) -> Self {
+        match self {
+            Self::Ics1890(p) => { let mut n = Ics1890::new(p.addr, p.delay); n.set_backend_link(p.backend_up, Instant::now()); Self::Ics1890(n) },
+            Self::Dp83843(p) => { let mut n = crate::dev::dp83843::Dp83843::new(PHY_ADDR); n.set_backend_link(p.backend_up(), Instant::now()); Self::Dp83843(n) },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -615,7 +637,7 @@ struct State {
     mii_data_w: u16,
     /// Apart from its index: an index-only write must not disarm.
     rx_timer_armed: bool,
-    phy: Ics1890,
+    phy: Phy,
     irq_asserted: bool,
     /// Level changes not yet delivered to the callback, in order.
     irq_events: Vec<bool>,
@@ -632,7 +654,7 @@ impl State {
             mii_data: MII_ABSENT,
             mii_data_w: 0,
             rx_timer_armed: false,
-            phy: Ics1890::new(PHY_ADDR, delay),
+            phy: Phy::Ics1890(Ics1890::new(PHY_ADDR, delay)),
             irq_asserted: false,
             irq_events: Vec::new(),
             frame: vec![0; FRAME_MAX],
@@ -1063,9 +1085,20 @@ impl Ioc3Eth {
 
     /// As [`Ioc3Eth::new`], with the PHY's synthetic negotiation delay set.
     pub fn with_negotiation_delay(mac: [u8; 6], delay: Duration) -> Arc<Self> {
+        Self::with_phy(mac, Phy::Ics1890(Ics1890::new(PHY_ADDR, delay)))
+    }
+
+    /// Fuel uses the reviewed DP83843 copper profile at management address 1.
+    pub fn new_fuel(mac: [u8; 6]) -> Arc<Self> {
+        Self::with_phy(mac, Phy::Dp83843(crate::dev::dp83843::Dp83843::new(PHY_ADDR)))
+    }
+
+    fn with_phy(mac: [u8; 6], phy: Phy) -> Arc<Self> {
+        let mut state = State::new(NEGOTIATION_DELAY);
+        state.phy = phy;
         Arc::new_cyclic(|me| Self {
             mac,
-            st: Mutex::new(State::new(delay)),
+            st: Mutex::new(state),
             dma: Mutex::new(None),
             irq: Mutex::new(None),
             irq_order: Mutex::new(()),
@@ -1103,10 +1136,9 @@ impl Ioc3Eth {
         let _order = self.irq_order.lock();
         {
             let mut st = self.st.lock();
-            let delay = st.phy.delay;
-            let backend_up = st.phy.backend_up;
-            *st = State::new(delay);
-            st.phy.set_backend_link(backend_up, Instant::now());
+            let phy = st.phy.reset_copy();
+            *st = State::new(NEGOTIATION_DELAY);
+            st.phy = phy;
         }
         if let Some(cb) = self.irq.lock().as_ref() {
             cb(false);

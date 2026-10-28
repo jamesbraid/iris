@@ -792,5 +792,38 @@ fn stopping_the_mac_joins_its_threads() {
     assert_eq!(eth.threads.lock().len(), 2);
     let probe = Arc::downgrade(&eth);
     drop(eth);
-    assert!(probe.upgrade().is_none());
+    // The receive thread may still hold its temporary Arc while polling.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while probe.strong_count() != 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(probe.upgrade().is_none(), "receive-thread reference was released");
+}
+
+#[test]
+fn fuel_phy_mdio_decoder_and_machine_reset() {
+    let eth = Ioc3Eth::new_fuel(STATION);
+    let read = |phy: u32, r: u32| {
+        eth.write32(MII_CONTROL, MII_READ | (phy << 5) | r);
+        eth.read32(MII_DATA_R)
+    };
+    assert_eq!(read(1, 2), 0x2000);
+    assert_eq!(read(1, 3), 0x5c10);
+    assert_eq!(read(0, 2), 0xffff);
+    eth.write32(MII_DATA_W, 7);
+    eth.write32(MII_CONTROL, (1 << 5) | 0x19);
+    assert_eq!(read(1, 2), 0xffff);
+    assert_eq!(read(7, 2), 0x2000);
+    // A wrong-address reset has no effect.
+    eth.write32(MII_DATA_W, 0x8000);
+    eth.write32(MII_CONTROL, 1 << 5);
+    assert_eq!(read(7, 2), 0x2000);
+    eth.reset();
+    assert_eq!(read(1, 3), 0x5c10);
+    assert_eq!(read(7, 2), 0xffff);
+    // The MAC soft reset leaves PHY programming intact.
+    eth.write32(MII_DATA_W, 0x21);
+    eth.write32(MII_CONTROL, (1 << 5) | 4);
+    eth.write32(MAC_CONTROL, MCR_RESET);
+    assert_eq!(read(1, 4), 0x21);
 }
