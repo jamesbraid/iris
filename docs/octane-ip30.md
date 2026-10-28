@@ -181,8 +181,7 @@ through its event channel. `HACKING.md` lists the thread names.
 
 The device models are ported from the author's QEMU models in
 [Origami](https://github.com/jamesbraid/origami) (the
-[sgi-origami branch](https://github.com/jamesbraid/qemu-sgi-origami)), with
-the same behaviour and approximations. The boot flash (`src/dev/sflash.rs`)
+[sgi-origami branch](https://github.com/jamesbraid/qemu-sgi-origami)). The boot flash (`src/dev/sflash.rs`)
 derives from MAME's
 [intelfsh](https://github.com/mamedev/mame/blob/master/src/devices/machine/intelfsh.cpp).
 The physical map is in [Octane/ip30-address-map.md](Octane/ip30-address-map.md);
