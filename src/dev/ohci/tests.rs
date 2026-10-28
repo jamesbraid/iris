@@ -1,0 +1,887 @@
+use super::*;
+use crate::pci::{PciBusDevice, PciDmaStatus};
+use crate::traits::{Device, Resettable};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+struct Memory {
+    bytes: Mutex<Vec<u8>>,
+    refuse_read: Mutex<Option<u32>>,
+    refuse_write: Mutex<Option<u32>>,
+    writes: Mutex<Vec<u64>>,
+}
+impl Memory {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            bytes: Mutex::new(vec![0xa5; 0x10000]),
+            refuse_read: Mutex::new(None),
+            refuse_write: Mutex::new(None),
+            writes: Mutex::new(vec![]),
+        })
+    }
+    fn words(&self, at: u32, words: &[u32]) {
+        for (i, w) in words.iter().enumerate() {
+            self.bytes.lock()[at as usize + i * 4..at as usize + i * 4 + 4]
+                .copy_from_slice(&w.to_le_bytes());
+        }
+    }
+    fn word(&self, at: u32) -> u32 {
+        u32::from_le_bytes(
+            self.bytes.lock()[at as usize..at as usize + 4]
+                .try_into()
+                .unwrap(),
+        )
+    }
+}
+impl PciDma for Memory {
+    fn dma_read(&self, addr: u64, dst: &mut [u8]) -> PciDmaStatus {
+        if self
+            .refuse_read
+            .lock()
+            .is_some_and(|x| (addr..addr + dst.len() as u64).contains(&(x as u64)))
+        {
+            return PciDmaStatus::MasterAbort;
+        }
+        let b = self.bytes.lock();
+        let Some(s) = b.get(addr as usize..addr as usize + dst.len()) else {
+            return PciDmaStatus::MasterAbort;
+        };
+        dst.copy_from_slice(s);
+        PciDmaStatus::Ok
+    }
+    fn dma_write(&self, addr: u64, src: &[u8]) -> PciDmaStatus {
+        if self
+            .refuse_write
+            .lock()
+            .is_some_and(|x| (addr..addr + src.len() as u64).contains(&(x as u64)))
+        {
+            return PciDmaStatus::MasterAbort;
+        }
+        let mut b = self.bytes.lock();
+        let Some(s) = b.get_mut(addr as usize..addr as usize + src.len()) else {
+            return PciDmaStatus::MasterAbort;
+        };
+        s.copy_from_slice(src);
+        self.writes.lock().push(addr);
+        PciDmaStatus::Ok
+    }
+}
+struct Function {
+    address: AtomicUsize,
+    calls: AtomicUsize,
+    reply: Mutex<UsbOutcome>,
+    packets: Mutex<Vec<UsbPacket>>,
+}
+impl Function {
+    fn new(reply: UsbOutcome) -> Arc<Self> {
+        Arc::new(Self {
+            address: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+            reply: Mutex::new(reply),
+            packets: Mutex::new(vec![]),
+        })
+    }
+}
+impl UsbFunction for Function {
+    fn reset(&self) {}
+    fn address(&self) -> u8 {
+        self.address.load(Ordering::SeqCst) as u8
+    }
+    fn transact(&self, packet: UsbPacket) -> UsbOutcome {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.packets.lock().push(packet);
+        self.reply.lock().clone()
+    }
+}
+fn setup(
+    pid: Pid,
+    reply: UsbOutcome,
+    cbp: u32,
+    be: u32,
+    flags: u32,
+) -> (Arc<Ohci>, Arc<Memory>, Arc<Function>) {
+    let h = Ohci::new();
+    let m = Memory::new();
+    let f = Function::new(reply);
+    h.connect_dma(m.clone());
+    h.attach(0, f.clone()).unwrap();
+    h.start();
+    h.bar_write(0, 0x54, 0x100, 4);
+    h.bar_write(0, 0x54, 0x10, 4);
+    h.advance_frames(10);
+    m.words(0x1000, &[0; 64]);
+    m.words(0x2000, &[(8 << 16), 0x3020, 0x3000, 0]);
+    m.words(
+        0x3000,
+        &[0xf000_0000 | flags | ((pid as u32) << 19), cbp, 0x3020, be],
+    );
+    h.config().write(1, 6);
+    h.bar_write(0, 0x18, 0x1000, 4);
+    h.bar_write(0, 0x20, 0x2000, 4);
+    h.bar_write(0, 0x08, 2, 4);
+    h.bar_write(0, 0x04, 0x90, 4);
+    (h, m, f)
+}
+#[test]
+fn out_prefetch_fault_precedes_usb_and_stops_frames() {
+    let (h, m, f) = setup(Pid::Out, UsbOutcome::Ack(vec![]), 0x4000, 0x4007, 0);
+    *m.refuse_read.lock() = Some(0x4000);
+    let before = m.word(0x3000);
+    h.advance_frames(1);
+    let frame = h.bar_read(0, 0x3c, 4);
+    h.advance_frames(4);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(m.word(0x3000), before);
+    assert_eq!(m.word(0x2008), 0x3000);
+    assert_eq!(m.word(0x1084), 0);
+    assert_ne!(h.bar_read(0, 0x0c, 4) & 16, 0);
+    assert_eq!(h.bar_read(0, 0x3c, 4), frame);
+}
+#[test]
+fn in_write_fault_preserves_td_after_device_side_effect() {
+    let (h, m, f) = setup(Pid::In, UsbOutcome::Ack(vec![1; 8]), 0x4000, 0x4007, 0);
+    *m.refuse_write.lock() = Some(0x4000);
+    h.advance_frames(1);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(m.word(0x3004), 0x4000);
+    assert_eq!(m.word(0x2008), 0x3000);
+    assert_eq!(m.word(0x1084), 0);
+    assert_ne!(h.bar_read(0, 0x0c, 4) & 16, 0);
+}
+#[test]
+fn short_in_rounding_preserves_trailing_bytes_and_advances_toggle() {
+    let (h, m, _) = setup(
+        Pid::In,
+        UsbOutcome::Ack(vec![1, 2, 3]),
+        0x4000,
+        0x401f,
+        (1 << 18) | (3 << 24),
+    );
+    h.advance_frames(1);
+    assert_eq!(&m.bytes.lock()[0x4000..0x4005], &[1, 2, 3, 0xa5, 0xa5]);
+    assert_eq!(m.word(0x3004), 0x4003);
+    assert_eq!((m.word(0x3000) >> 24) & 3, 2);
+    assert_eq!(m.word(0x3000) >> 28, 0);
+    assert_eq!(m.word(0x2008) & !15, 0x3020);
+    assert_eq!(m.word(0x1084) & !15, 0x3000);
+}
+#[test]
+fn packet_crosses_nonadjacent_pages() {
+    let (h, m, _) = setup(
+        Pid::In,
+        UsbOutcome::Ack(vec![1, 2, 3, 4, 5, 6, 7, 8]),
+        0x4ffc,
+        0x9003,
+        0,
+    );
+    h.advance_frames(1);
+    assert_eq!(&m.bytes.lock()[0x4ffc..0x5000], &[1, 2, 3, 4]);
+    assert_eq!(&m.bytes.lock()[0x9000..0x9004], &[5, 6, 7, 8]);
+    assert_eq!(m.bytes.lock()[0x5000], 0xa5);
+    assert_eq!(m.word(0x3004), 0);
+}
+#[test]
+fn nak_leaves_descriptor_unchanged() {
+    let (h, m, _) = setup(Pid::In, UsbOutcome::Nak, 0x4000, 0x4007, 0);
+    let before = m.bytes.lock()[0x3000..0x3010].to_vec();
+    h.advance_frames(1);
+    assert_eq!(&m.bytes.lock()[0x3000..0x3010], &before);
+    assert_eq!(m.word(0x2008), 0x3000);
+}
+#[test]
+fn stall_retires_without_buffer_or_toggle_progress() {
+    let (h, m, _) = setup(Pid::In, UsbOutcome::Stall, 0x4000, 0x4007, 3 << 24);
+    h.advance_frames(1);
+    assert_eq!(m.word(0x3000) >> 28, 4);
+    assert_eq!(m.word(0x3004), 0x4000);
+    assert_eq!((m.word(0x3000) >> 24) & 3, 3);
+    assert_ne!(m.word(0x2008) & 1, 0);
+}
+#[test]
+fn port_reset_requires_ten_milliseconds_and_hcr_keeps_connection() {
+    let h = Ohci::new();
+    h.start();
+    h.attach(1, Function::new(UsbOutcome::Nak)).unwrap();
+    h.bar_write(0, 0x58, 0x100, 4);
+    h.bar_write(0, 0x58, 0x10, 4);
+    h.advance_frames(9);
+    assert_ne!(h.bar_read(0, 0x58, 4) & 16, 0);
+    h.advance_frames(1);
+    assert_eq!(h.bar_read(0, 0x58, 4) & 16, 0);
+    assert_ne!(h.bar_read(0, 0x58, 4) & (1 << 20), 0);
+    h.bar_write(0, 8, 1, 4);
+    assert_ne!(h.bar_read(0, 0x58, 4) & 1, 0);
+    h.stop();
+    let frame = h.bar_read(0, 0x3c, 4);
+    h.advance_frames(100);
+    assert_eq!(h.bar_read(0, 0x3c, 4), frame);
+}
+#[test]
+fn hid_boot_protocol_leds_and_changed_report() {
+    let k = HidFunction::keyboard();
+    assert_eq!(k.control([0xa1, 3, 0, 0, 0, 0, 1, 0], &[]), Ok(vec![1]));
+    assert_eq!(k.control([0x21, 11, 0, 0, 0, 0, 0, 0], &[]), Ok(vec![]));
+    assert_eq!(k.control([0xa1, 3, 0, 0, 0, 0, 1, 0], &[]), Ok(vec![0]));
+    k.inject_keyboard(2, &[4, 5, 6, 7, 8, 9, 10]).unwrap();
+    assert_eq!(
+        k.control([0xa1, 1, 0, 1, 0, 0, 8, 0], &[]),
+        Ok(vec![2, 0, 1, 1, 1, 1, 1, 1])
+    );
+    assert_eq!(k.control([0x21, 9, 0, 2, 0, 0, 1, 0], &[7]), Ok(vec![]));
+    assert_eq!(k.leds(), 7);
+    k.reset();
+    assert_eq!(k.control([0xa1, 3, 0, 0, 0, 0, 1, 0], &[]), Ok(vec![1]));
+}
+#[test]
+fn hid_idle_nak_and_mouse_ack_consumption() {
+    fn poll(h: &HidFunction, t: bool, ms: u64) -> UsbOutcome {
+        h.transact(UsbPacket {
+            endpoint: 1,
+            pid: Pid::In,
+            toggle: t,
+            capacity: 8,
+            data: vec![],
+            time_ms: ms,
+        })
+    }
+    let k = HidFunction::keyboard();
+    k.control([0, 9, 1, 0, 0, 0, 0, 0], &[]).unwrap();
+    k.control([0x21, 10, 0, 0, 0, 0, 0, 0], &[]).unwrap();
+    assert_eq!(poll(&k, false, 0), UsbOutcome::Ack(vec![0; 8]));
+    assert_eq!(poll(&k, true, 1), UsbOutcome::Nak);
+    k.inject_keyboard(0, &[4]).unwrap();
+    assert_eq!(
+        poll(&k, true, 2),
+        UsbOutcome::Ack(vec![0, 0, 4, 0, 0, 0, 0, 0])
+    );
+    assert_eq!(
+        poll(&k, true, 3),
+        UsbOutcome::Ack(vec![0, 0, 4, 0, 0, 0, 0, 0])
+    );
+    assert_eq!(poll(&k, false, 4), UsbOutcome::Nak);
+    let m = HidFunction::mouse();
+    m.control([0, 9, 1, 0, 0, 0, 0, 0], &[]).unwrap();
+    m.inject_mouse(1, 200, -3).unwrap();
+    assert_eq!(poll(&m, false, 0), UsbOutcome::Ack(vec![1, 127, 253]));
+    assert_eq!(poll(&m, false, 1), UsbOutcome::Ack(vec![1, 127, 253]));
+    assert_eq!(poll(&m, true, 2), UsbOutcome::Ack(vec![1, 73, 0]));
+    assert_eq!(poll(&m, false, 3), UsbOutcome::Nak);
+}
+#[test]
+fn independent_bulk_and_periodic_lists_complete() {
+    for periodic in [false, true] {
+        let (h, m, f) = setup(Pid::In, UsbOutcome::Ack(vec![9; 8]), 0x4000, 0x4007, 0);
+        if periodic {
+            for i in 0..32 {
+                m.words(0x1000 + i * 4, &[0x2000]);
+            }
+            h.bar_write(0, 0x04, 0x84, 4);
+        } else {
+            h.bar_write(0, 0x28, 0x2000, 4);
+            h.bar_write(0, 8, 4, 4);
+            h.bar_write(0, 4, 0xa0, 4);
+        }
+        h.advance_frames(1);
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(m.word(0x3004), 0);
+    }
+}
+#[test]
+fn done_publication_waits_for_wdh_acknowledgement() {
+    let (h, m, _) = setup(Pid::In, UsbOutcome::Ack(vec![8; 8]), 0x4000, 0x4007, 0);
+    h.advance_frames(1);
+    assert_eq!(m.word(0x1084) & !15, 0x3000);
+    m.words(0x3020, &[0xf0000000 | (2 << 19), 0x4100, 0x3040, 0x4107]);
+    m.words(0x2004, &[0x3040]);
+    h.bar_write(0, 8, 2, 4);
+    h.advance_frames(1);
+    assert_eq!(m.word(0x1084) & !15, 0x3000);
+    assert_eq!(h.bar_read(0, 0x30, 4), 0x3020);
+    h.bar_write(0, 0xc, 2, 4);
+    h.advance_frames(1);
+    assert_eq!(m.word(0x1084) & !15, 0x3020);
+}
+#[test]
+fn endpoint_tail_is_never_fetched_and_cycles_are_bounded() {
+    let (h, m, f) = setup(Pid::In, UsbOutcome::Nak, 0x4000, 0x4007, 0);
+    *m.refuse_read.lock() = Some(0x3020);
+    m.words(0x200c, &[0x2000]);
+    h.advance_frames(1);
+    assert!(f.calls.load(Ordering::SeqCst) > 0);
+    assert!(f.calls.load(Ordering::SeqCst) < 100);
+    assert_eq!(h.bar_read(0, 0xc, 4) & UE, 0);
+}
+#[test]
+fn short_without_rounding_halts_and_retry_errors_retire_on_third() {
+    let (h, m, _) = setup(Pid::In, UsbOutcome::Ack(vec![2]), 0x4000, 0x4007, 0);
+    h.advance_frames(1);
+    assert_eq!(m.word(0x3000) >> 28, 9);
+    assert_ne!(m.word(0x2008) & 1, 0);
+    let (h, m, f) = setup(Pid::In, UsbOutcome::NoResponse, 0x4000, 0x4007, 0);
+    h.advance_frames(1);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(m.word(0x3000) >> 28, 5);
+    assert_ne!(m.word(0x2008) & 1, 0);
+}
+#[test]
+fn in_overrun_writes_prefix_advances_toggle_and_preserves_start() {
+    let (h, m, _) = setup(
+        Pid::In,
+        UsbOutcome::Ack(vec![1; 8]),
+        0x4000,
+        0x4003,
+        3 << 24,
+    );
+    h.advance_frames(1);
+    assert_eq!(&m.bytes.lock()[0x4000..0x4005], &[1, 1, 1, 1, 0xa5]);
+    assert_eq!(m.word(0x3004), 0x4000);
+    assert_eq!(m.word(0x3000) >> 28, 8);
+    assert_eq!((m.word(0x3000) >> 24) & 3, 2);
+}
+#[test]
+fn scheduler_exact_fit_and_periodic_exhaustion_are_observable() {
+    let (h, m, f) = setup(Pid::In, UsbOutcome::Ack(vec![2; 8]), 0x4000, 0x4007, 0);
+    h.bar_write(0, 0x34, 255, 4);
+    h.advance_frames(2);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(m.word(0x3004), 0);
+    let (h, m, f) = setup(Pid::In, UsbOutcome::Nak, 0x4000, 0x4007, 0);
+    for i in 0..32 {
+        m.words(0x1000 + i * 4, &[0x2000]);
+    }
+    m.words(0x200c, &[0x2000]);
+    h.bar_write(0, 4, 0x84, 4);
+    h.bar_write(0, 0x34, 0, 4);
+    h.advance_frames(1);
+    assert!(f.calls.load(Ordering::SeqCst) < 100);
+    assert_ne!(h.bar_read(0, 0xc, 4) & 1, 0);
+    assert_eq!(h.bar_read(0, 0xc, 4) & UE, 0);
+}
+#[test]
+fn keyboard_descriptor_runs_through_setup_data_and_status_tds() {
+    let h = Ohci::new();
+    let m = Memory::new();
+    let k = HidFunction::keyboard();
+    h.connect_dma(m.clone());
+    h.attach(0, k).unwrap();
+    h.start();
+    h.bar_write(0, 0x54, 0x100, 4);
+    h.bar_write(0, 0x54, 0x10, 4);
+    h.advance_frames(10);
+    m.words(0x1000, &[0; 64]);
+    m.words(0x2000, &[8 << 16, 0x3060, 0x3000, 0]);
+    m.words(0x3000, &[0xf2000000, 0x4000, 0x3020, 0x4007]);
+    m.words(0x3020, &[0xf3140000, 0x4100, 0x3040, 0x411f]);
+    m.words(0x3040, &[0xf3080000, 0, 0x3060, 0]);
+    m.bytes.lock()[0x4000..0x4008].copy_from_slice(&[0x80, 6, 0, 1, 0, 0, 32, 0]);
+    h.config().write(1, 6);
+    h.bar_write(0, 0x18, 0x1000, 4);
+    h.bar_write(0, 0x20, 0x2000, 4);
+    h.bar_write(0, 8, 2, 4);
+    h.bar_write(0, 4, 0x90, 4);
+    h.advance_frames(1);
+    assert_eq!(m.word(0x2008) & !15, 0x3060);
+    assert_eq!(m.word(0x3020) >> 28, 0);
+    assert_eq!(m.word(0x3024), 0x4112);
+    assert_eq!(&m.bytes.lock()[0x4100..0x4102], &[18, 1]);
+    assert_eq!(m.bytes.lock()[0x4112], 0xa5);
+    assert_eq!(m.word(0x3040) >> 28, 0);
+}
+#[test]
+fn all_periodic_indices_and_both_payload_directions_stop_on_refusal() {
+    for index in 0..32 {
+        let (h, m, f) = setup(Pid::In, UsbOutcome::Ack(vec![5; 8]), 0x4000, 0x4007, 0);
+        h.state.lock().r[15] = (index + 31) & 31;
+        m.words(0x1000 + index * 4, &[0x2000]);
+        h.bar_write(0, 4, 0x84, 4);
+        h.advance_frames(1);
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1, "periodic index {index}");
+    }
+    for periodic in [false, true] {
+        for pid in [Pid::Setup, Pid::Out, Pid::In] {
+            let (h, m, f) = setup(pid, UsbOutcome::Ack(vec![5; 8]), 0x4000, 0x4007, 0);
+            if periodic {
+                for i in 0..32 {
+                    m.words(0x1000 + i * 4, &[0x2000]);
+                }
+                h.bar_write(0, 4, 0x84, 4);
+            }
+            if pid == Pid::In {
+                *m.refuse_write.lock() = Some(0x4000);
+            } else {
+                *m.refuse_read.lock() = Some(0x4000);
+            }
+            let td = m.bytes.lock()[0x3000..0x3010].to_vec();
+            h.advance_frames(3);
+            assert_eq!(f.calls.load(Ordering::SeqCst), usize::from(pid == Pid::In));
+            assert_eq!(&m.bytes.lock()[0x3000..0x3010], &td);
+            assert_eq!(m.word(0x1084), 0);
+            assert_ne!(h.bar_read(0, 0xc, 4) & UE, 0);
+        }
+    }
+}
+#[test]
+fn service_ratio_counts_attempts_for_all_cbsr_values() {
+    for cbsr in 0..4 {
+        let (h, m, f) = setup(Pid::In, UsbOutcome::Nak, 0x4000, 0x4007, 0);
+        m.words(0x2000, &[(8 << 16) | (1 << 7), 0x3020, 0x3000, 0]);
+        m.words(0x2100, &[(8 << 16) | (2 << 7), 0x3120, 0x3100, 0]);
+        m.words(0x3100, &[0xf0100000, 0x4100, 0x3120, 0x4107]);
+        h.bar_write(0, 0x28, 0x2100, 4);
+        h.bar_write(0, 8, 6, 4);
+        h.bar_write(0, 4, 0xb0 | cbsr, 4);
+        h.advance_frames(1);
+        let packets = f.packets.lock();
+        let control = packets.iter().filter(|p| p.endpoint == 1).count();
+        let bulk = packets.iter().filter(|p| p.endpoint == 2).count();
+        assert!(bulk > 0);
+        assert!(control >= bulk * (cbsr as usize + 1));
+        assert!(control <= bulk * (cbsr as usize + 1) + cbsr as usize + 1);
+    }
+}
+#[test]
+fn frame_overflow_both_edges_and_failed_done_write_never_sets_wdh() {
+    for initial in [0x7fff, 0xffff] {
+        let (h, _, _) = setup(Pid::In, UsbOutcome::Nak, 0x4000, 0x4007, 0);
+        h.state.lock().r[15] = initial;
+        h.advance_frames(1);
+        assert_ne!(h.bar_read(0, 0xc, 4) & 32, 0);
+    }
+    let (h, m, _) = setup(Pid::In, UsbOutcome::Ack(vec![1; 8]), 0x4000, 0x4007, 0);
+    *m.refuse_write.lock() = Some(0x1084);
+    h.advance_frames(1);
+    assert_ne!(h.bar_read(0, 0xc, 4) & UE, 0);
+    assert_eq!(h.bar_read(0, 0xc, 4) & WDH, 0);
+    assert_eq!(m.word(0x1084), 0);
+}
+#[test]
+fn zero_length_packets_consume_budget_and_fi_fit_latch_at_boundary() {
+    let (h, m, f) = setup(Pid::In, UsbOutcome::Ack(vec![]), 0, 0, 0);
+    h.bar_write(0, 0x34, 0x800000ff, 4);
+    assert_eq!(h.bar_read(0, 0x38, 4), 0);
+    h.advance_frames(1);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(m.word(0x3000) >> 28, 0);
+    assert_eq!(h.bar_read(0, 0x38, 4), 0x80000000);
+}
+
+#[test]
+fn skipped_control_cycle_yields_to_active_bulk() {
+    let (h, m, f) = setup(Pid::In, UsbOutcome::Nak, 0x4000, 0x4007, 0);
+    m.words(0x2000, &[(8 << 16) | (1 << 14), 0x3020, 0x3000, 0x2000]);
+    m.words(0x2100, &[(8 << 16) | (2 << 7), 0x3120, 0x3100, 0]);
+    m.words(0x3100, &[0xf0100000, 0x4100, 0x3120, 0x4107]);
+    h.bar_write(0, 0x28, 0x2100, 4);
+    h.bar_write(0, 8, 6, 4);
+    h.bar_write(0, 4, 0xb3, 4);
+    h.advance_frames(1);
+    assert!(f.packets.lock().iter().any(|p| p.endpoint == 2));
+}
+#[test]
+fn clock_read_catches_up_after_timer_starvation() {
+    let h = Ohci::new();
+    h.start();
+    h.bar_write(0, 4, 0x80, 4);
+    *h.clock.lock() = Some(Instant::now() - Duration::from_millis(5));
+    assert!(h.bar_read(0, 0x3c, 4) >= 5);
+    h.stop();
+    let frame = h.bar_read(0, 0x3c, 4);
+    h.advance_frames(10);
+    assert_eq!(h.bar_read(0, 0x3c, 4), frame);
+}
+#[test]
+fn root_power_switching_and_disconnected_enable() {
+    let h = Ohci::new();
+    h.bar_write(0, 0x54, 2, 4);
+    assert_eq!(h.bar_read(0, 0x54, 4) & 2, 0);
+    assert_ne!(h.bar_read(0, 0x54, 4) & 0x10000, 0);
+    h.bar_write(0, 0x50, 1 << 16, 4);
+    assert_eq!(h.bar_read(0, 0x54, 4) & PPS, 0);
+    h.bar_write(0, 0x54, PPS, 4);
+    assert_ne!(h.bar_read(0, 0x54, 4) & PPS, 0);
+    assert_eq!(h.bar_read(0, 0x58, 4) & PPS, 0);
+    h.bar_write(0, 0x48, 0, 4);
+    h.bar_write(0, 0x50, 1 << 16, 4);
+    assert_ne!(h.bar_read(0, 0x58, 4) & PPS, 0);
+    h.bar_write(0, 0x54, 0x200, 4);
+    assert_ne!(h.bar_read(0, 0x54, 4) & PPS, 0);
+    h.bar_write(0, 0x50, 1, 4);
+    assert_eq!(h.bar_read(0, 0x54, 4) & PPS, 0);
+    assert_eq!(h.bar_read(0, 0x58, 4) & PPS, 0);
+    h.bar_write(0, 0x48, 0x200, 4);
+    assert_ne!(h.bar_read(0, 0x54, 4) & PPS, 0);
+    h.bar_write(0, 0x54, 0x200, 4);
+    assert_ne!(h.bar_read(0, 0x54, 4) & PPS, 0);
+}
+
+#[test]
+fn reentrant_irq_acknowledgement_leaves_final_line_clear() {
+    struct Ack {
+        hc: Weak<Ohci>,
+        level: AtomicBool,
+        once: AtomicBool,
+    }
+    impl crate::irq::InterruptController for Ack {
+        fn set_line(&self, _: u32, level: bool) {
+            if level && !self.once.swap(true, Ordering::SeqCst) {
+                self.hc.upgrade().unwrap().bar_write(0, 0xc, RHSC, 4);
+            }
+            self.level.store(level, Ordering::SeqCst);
+        }
+    }
+    let h = Ohci::new();
+    let ack = Arc::new(Ack {
+        hc: Arc::downgrade(&h),
+        level: AtomicBool::new(false),
+        once: AtomicBool::new(false),
+    });
+    h.connect_interrupt(IrqLine::new(ack.clone(), 0));
+    h.bar_write(0, 0x10, 0x80000040, 4);
+    h.attach(0, Function::new(UsbOutcome::Nak)).unwrap();
+    assert!(!ack.level.load(Ordering::SeqCst));
+}
+
+#[test]
+fn powered_off_port_clears_connection_but_power_on_redetects_function() {
+    let h = Ohci::new();
+    h.start();
+    h.attach(0, Function::new(UsbOutcome::Nak)).unwrap();
+    assert_eq!(h.bar_read(0, 0x54, 4) & 1, 0);
+    h.bar_write(0, 0x54, PPS, 4);
+    assert_ne!(h.bar_read(0, 0x54, 4) & 1, 0);
+    h.bar_write(0, 0x54, 2, 4);
+    assert_ne!(h.bar_read(0, 0x54, 4) & 2, 0);
+    h.bar_write(0, 0x54, 0x200, 4);
+    assert_eq!(h.bar_read(0, 0x54, 4) & 0x117, 0);
+    assert_eq!(h.bar_read(0, 0x54, 4) & 0x30000, 0x30000);
+    h.bar_write(0, 0x54, PPS, 4);
+    assert_ne!(h.bar_read(0, 0x54, 4) & 1, 0);
+}
+
+#[test]
+fn control_short_packet_retry_repeats_bytes_and_address_waits_for_status() {
+    let k = HidFunction::keyboard();
+    let tx = |pid, toggle, data: Vec<u8>| {
+        k.transact(UsbPacket {
+            endpoint: 0,
+            pid,
+            toggle,
+            capacity: 8,
+            data,
+            time_ms: 0,
+        })
+    };
+    assert_eq!(
+        tx(Pid::Setup, false, vec![0x80, 6, 0, 1, 0, 0, 32, 0]),
+        UsbOutcome::Ack(vec![])
+    );
+    assert!(matches!(tx(Pid::In,true,vec![]),UsbOutcome::Ack(b) if b.len()==8));
+    assert!(matches!(tx(Pid::In,false,vec![]),UsbOutcome::Ack(b) if b.len()==8));
+    let last = tx(Pid::In, true, vec![]);
+    assert!(matches!(&last,UsbOutcome::Ack(b) if b.len()==2));
+    assert_eq!(tx(Pid::In, true, vec![]), last);
+    assert_eq!(tx(Pid::Out, true, vec![]), UsbOutcome::Ack(vec![]));
+    tx(Pid::Setup, false, vec![0, 5, 5, 0, 0, 0, 0, 0]);
+    assert_eq!(k.address(), 0);
+    assert_eq!(tx(Pid::In, true, vec![]), UsbOutcome::Ack(vec![]));
+    assert_eq!(k.address(), 5);
+}
+
+#[test]
+fn hardware_reset_keeps_attachment_with_all_port_status_cleared() {
+    let h = Ohci::new();
+    h.start();
+    h.attach(0, Function::new(UsbOutcome::Nak)).unwrap();
+    h.bar_write(0, 0x54, PPS, 4);
+    h.power_on();
+    assert_eq!(h.bar_read(0, 0x54, 4), 0);
+    h.bar_write(0, 0x54, PPS, 4);
+    assert_ne!(h.bar_read(0, 0x54, 4) & 1, 0);
+}
+#[test]
+fn completion_interrupt_delay_zero_to_seven() {
+    for di in 0..8 {
+        let (h, m, _) = setup(
+            Pid::In,
+            UsbOutcome::Ack(vec![5; 8]),
+            0x4000,
+            0x4007,
+            di << 21,
+        );
+        h.advance_frames(1);
+        if di != 0 {
+            assert_eq!(m.word(0x1084), 0);
+        }
+        h.advance_frames(u64::from(di));
+        assert_eq!(m.word(0x1084) & !15, if di == 7 { 0 } else { 0x3000 });
+    }
+}
+#[test]
+fn periodic_start_extremes_select_order_and_cost_ignores_packet_length() {
+    for start in [0, 12000] {
+        let (h, m, f) = setup(Pid::In, UsbOutcome::Nak, 0x4000, 0x4007, 0);
+        m.words(0x2200, &[(8 << 16) | (3 << 7), 0x3220, 0x3200, 0]);
+        m.words(0x3200, &[0xf0100000, 0x4200, 0x3220, 0x4207]);
+        for i in 0..32 {
+            m.words(0x1000 + i * 4, &[0x2200]);
+        }
+        h.bar_write(0, 0x40, start, 4);
+        h.bar_write(0, 4, 0x94, 4);
+        h.advance_frames(1);
+        assert_eq!(f.packets.lock()[0].endpoint, if start == 0 { 0 } else { 3 });
+        assert_eq!(
+            f.packets.lock().iter().filter(|p| p.endpoint == 3).count(),
+            usize::from(start != 0)
+        );
+    }
+    let mut counts = vec![];
+    for mps in [1, 8, 64] {
+        let (h, m, f) = setup(Pid::In, UsbOutcome::Nak, 0x4000, 0x41ff, 0);
+        m.words(0x2000, &[mps << 16, 0x3020, 0x3000, 0]);
+        h.advance_frames(1);
+        counts.push(f.calls.load(Ordering::SeqCst));
+    }
+    assert_eq!(counts[0], counts[1]);
+    assert_eq!(counts[1], counts[2]);
+}
+#[test]
+fn register_masks_hcr_exempt_fields_and_ownership_status() {
+    let h = Ohci::new();
+    h.bar_write(0, 0x18, 0x123456ff, 4);
+    assert_eq!(h.bar_read(0, 0x18, 4), 0x12345600);
+    h.bar_write(0, 0x20, 0x123456ff, 4);
+    assert_eq!(h.bar_read(0, 0x20, 4), 0x123456f0);
+    h.bar_write(0, 0x10, u32::MAX, 4);
+    assert_eq!(h.bar_read(0, 0x10, 4), 0xc000007f);
+    h.bar_write(0, 8, 8, 4);
+    assert_eq!(h.bar_read(0, 0xc, 4), 1 << 30);
+    h.bar_write(0, 0xc, 1 << 31, 4);
+    assert_eq!(h.bar_read(0, 0xc, 4), 1 << 30);
+    h.bar_write(0, 0xc, 1 << 30, 4);
+    assert_eq!(h.bar_read(0, 0xc, 4), 0);
+    h.bar_write(0, 0x48, u32::MAX, 4);
+    assert_eq!(h.bar_read(0, 0x48, 4), 0xff001b02);
+    h.bar_write(0, 4, 0x700, 4);
+    h.bar_write(0, 8, 1, 4);
+    assert_eq!(h.bar_read(0, 4, 4), 0x3c0);
+    assert_eq!(h.bar_read(0, 0x48, 4), 0xff001b02);
+    assert_eq!(h.bar_read(0, 0x10, 4), 0);
+    h.bar_write(0, 0x3c, 0xffff, 4);
+    assert_eq!(h.bar_read(0, 0x3c, 4), 0);
+    h.bar_write(0, 0x18, 1, 1);
+    assert_eq!(h.bar_read(0, 0x18, 4), 0);
+}
+
+#[test]
+fn retry_writeback_records_error_before_third_attempt() {
+    let (h, m, f) = setup(Pid::In, UsbOutcome::NoResponse, 0x4000, 0x4007, 0);
+    h.bar_write(0, 0x34, 255, 4);
+    h.advance_frames(1);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(m.word(0x3000) >> 28, 5);
+    assert_eq!((m.word(0x3000) >> 26) & 3, 1);
+    assert_eq!(m.word(0x2008), 0x3000);
+}
+
+#[test]
+fn hid_idle_expiry_and_interval_change_near_expiry() {
+    let k = HidFunction::keyboard();
+    k.control([0, 9, 1, 0, 0, 0, 0, 0], &[]).unwrap();
+    k.control([0x21, 10, 0, 1, 0, 0, 0, 0], &[]).unwrap();
+    let poll = |toggle, time_ms| {
+        k.transact(UsbPacket {
+            endpoint: 1,
+            pid: Pid::In,
+            toggle,
+            capacity: 8,
+            data: vec![],
+            time_ms,
+        })
+    };
+    assert!(matches!(poll(false, 0), UsbOutcome::Ack(_)));
+    assert_eq!(poll(true, 3), UsbOutcome::Nak);
+    assert!(matches!(poll(true, 4), UsbOutcome::Ack(_)));
+    assert_eq!(poll(false, 7), UsbOutcome::Nak);
+    k.control([0x21, 10, 0, 2, 0, 0, 0, 0], &[]).unwrap();
+    assert!(matches!(poll(false, 8), UsbOutcome::Ack(_)));
+    assert_eq!(poll(true, 15), UsbOutcome::Nak);
+    assert!(matches!(poll(true, 16), UsbOutcome::Ack(_)));
+}
+#[test]
+fn hid_descriptor_lengths_and_interface_selection() {
+    for h in [HidFunction::keyboard(), HidFunction::mouse()] {
+        let config = h.control([0x80, 6, 0, 2, 0, 0, 255, 0], &[]).unwrap();
+        assert_eq!(config.len(), 34);
+        assert_eq!(
+            u16::from_le_bytes([config[2], config[3]]) as usize,
+            config.len()
+        );
+        let report = h.control([0x81, 6, 0, 0x22, 0, 0, 255, 0], &[]).unwrap();
+        assert_eq!(
+            u16::from_le_bytes([config[25], config[26]]) as usize,
+            report.len()
+        );
+        assert!(h.control([0x81, 6, 0, 0x22, 1, 0, 255, 0], &[]).is_err());
+        assert!(h.control([0xa1, 1, 0, 3, 0, 0, 8, 0], &[]).is_err());
+    }
+}
+#[test]
+fn keyboard_input_completes_periodic_td_with_bytes_and_irq() {
+    let h = Ohci::new();
+    let m = Memory::new();
+    let k = HidFunction::keyboard();
+    let (probe, line) = crate::irq::LevelProbe::line();
+    h.connect_dma(m.clone());
+    h.connect_interrupt(line);
+    h.attach(0, k.clone()).unwrap();
+    h.start();
+    h.bar_write(0, 0x54, PPS, 4);
+    h.bar_write(0, 0x54, 16, 4);
+    h.advance_frames(10);
+    k.control([0, 9, 1, 0, 0, 0, 0, 0], &[]).unwrap();
+    k.inject_keyboard(2, &[4]).unwrap();
+    m.words(0x1000, &[0x2000; 64]);
+    m.words(
+        0x2000,
+        &[(8 << 16) | (1 << 7) | (2 << 11), 0x3020, 0x3000, 0],
+    );
+    m.words(0x3000, &[0xf0000000, 0x4000, 0x3020, 0x4007]);
+    h.config().write(1, 6);
+    h.bar_write(0, 0x18, 0x1000, 4);
+    h.bar_write(0, 0x10, 0x80000002, 4);
+    h.bar_write(0, 4, 0x84, 4);
+    h.advance_frames(1);
+    assert_eq!(&m.bytes.lock()[0x4000..0x4008], &[2, 0, 4, 0, 0, 0, 0, 0]);
+    assert!(probe.level());
+    h.bar_write(0, 0xc, 2, 4);
+    assert!(!probe.level());
+}
+
+#[test]
+fn retirement_dequeues_ed_before_linking_td_into_done_queue() {
+    let (h, m, _) = setup(Pid::In, UsbOutcome::Ack(vec![3; 8]), 0x4000, 0x4007, 0);
+    h.advance_frames(1);
+    let writes = m.writes.lock();
+    let ed = writes.iter().position(|a| *a == 0x2008).unwrap();
+    let td = writes.iter().position(|a| *a == 0x3000).unwrap();
+    assert!(ed < td);
+}
+#[test]
+fn stalled_explicit_toggle_is_carried_into_endpoint() {
+    let (h, m, _) = setup(Pid::In, UsbOutcome::Stall, 0x4000, 0x4007, 3 << 24);
+    h.advance_frames(1);
+    assert_eq!(m.word(0x2008) & 3, 3);
+}
+
+#[test]
+fn skipped_bulk_cycle_yields_after_control_credit_is_exhausted() {
+    let (h, m, f) = setup(Pid::In, UsbOutcome::Nak, 0x4000, 0x4007, 0);
+    m.words(0x2100, &[(8 << 16) | (1 << 14), 0x3120, 0x3100, 0x2100]);
+    h.bar_write(0, 0x28, 0x2100, 4);
+    h.bar_write(0, 8, 6, 4);
+    h.bar_write(0, 4, 0xb0, 4);
+    h.advance_frames(1);
+    assert!(f.calls.load(Ordering::SeqCst) > 1);
+    assert_eq!(h.bar_read(0, 0xc, 4) & UE, 0);
+}
+
+#[test]
+fn synthetic_budget_edges_defer_or_admit_exactly_one_visit() {
+    for fi in [254, 255, 256] {
+        let (h, m, f) = setup(Pid::In, UsbOutcome::Nak, 0x4000, 0x4007, 0);
+        let before = m.word(0x3000);
+        let mut s = h.state.lock().clone();
+        s.active_fi = fi;
+        s.r[9] = 0x2000;
+        h.schedule(&mut s).unwrap();
+        assert_eq!(f.calls.load(Ordering::SeqCst), usize::from(fi >= 255));
+        assert_eq!(m.word(0x3000), before);
+        assert_eq!(s.r[9], if fi == 254 { 0x2000 } else { 0 });
+        assert_eq!(s.r[14], if fi == 254 { 255 } else { fi - 255 });
+    }
+}
+
+#[test]
+fn interior_periodic_phase_preserves_control_bulk_credit() {
+    let (h, m, f) = setup(Pid::In, UsbOutcome::Nak, 0x4000, 0x4007, 0);
+    m.words(0x2000, &[(8 << 16) | (1 << 7), 0x3020, 0x3000, 0]);
+    m.words(0x2100, &[(8 << 16) | (2 << 7), 0x3120, 0x3100, 0]);
+    m.words(0x3100, &[0xf0100000, 0x4100, 0x3120, 0x4107]);
+    m.words(0x2200, &[(8 << 16) | (3 << 7), 0x3220, 0x3200, 0]);
+    m.words(0x3200, &[0xf0100000, 0x4200, 0x3220, 0x4207]);
+    for i in 0..32 {
+        m.words(0x1000 + i * 4, &[0x2200]);
+    }
+    let mut s = h.state.lock().clone();
+    s.active_fi = 5 * 256 - 1;
+    s.r[16] = 3 * 256;
+    s.r[1] = 0xb5;
+    s.r[10] = 0x2100;
+    s.r[2] |= 4;
+    h.schedule(&mut s).unwrap();
+    let order: Vec<_> = f.packets.lock().iter().map(|p| p.endpoint).collect();
+    assert_eq!(order, [1, 1, 3, 2, 1]);
+    assert_eq!(s.r[14], 0);
+}
+
+#[test]
+fn ambiguous_address_zero_invokes_neither_function() {
+    let (h, m, f) = setup(Pid::In, UsbOutcome::Nak, 0x4000, 0x4007, 0);
+    let peer = Function::new(UsbOutcome::Nak);
+    h.attach(1, peer.clone()).unwrap();
+    h.bar_write(0, 0x58, PPS, 4);
+    h.bar_write(0, 4, 0, 4);
+    h.bar_write(0, 0x58, 16, 4);
+    h.advance_frames(10);
+    h.bar_write(0, 4, 0x90, 4);
+    h.advance_frames(1);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(peer.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(m.word(0x3000) >> 28, 5);
+    assert_eq!((m.word(0x3000) >> 26) & 3, 3);
+}
+
+#[test]
+fn ineligible_address_zero_peer_does_not_capture_traffic() {
+    for peer_status in [0, PPS | 1, PPS | 1 | 2 | 4, PPS | 1 | 2 | 16] {
+        let (h, _, f) = setup(Pid::In, UsbOutcome::Nak, 0x4000, 0x4007, 0);
+        let peer = Function::new(UsbOutcome::Nak);
+        h.attach(1, peer.clone()).unwrap();
+        h.state.lock().r[22] = peer_status;
+        h.advance_frames(1);
+        assert!(f.calls.load(Ordering::SeqCst) > 0);
+        assert_eq!(peer.calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn assigned_address_leaves_a_unique_default_function() {
+    let (h, m, f) = setup(Pid::In, UsbOutcome::Nak, 0x4000, 0x4007, 0);
+    let peer = Function::new(UsbOutcome::Nak);
+    h.attach(1, peer.clone()).unwrap();
+    h.state.lock().r[22] = PPS | 1 | 2;
+    f.address.store(5, Ordering::SeqCst);
+    h.advance_frames(1);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 0);
+    assert!(peer.calls.load(Ordering::SeqCst) > 0);
+    let peer_calls = peer.calls.load(Ordering::SeqCst);
+    m.words(0x2000, &[(8 << 16) | 5]);
+    h.advance_frames(1);
+    assert!(f.calls.load(Ordering::SeqCst) > 0);
+    assert_eq!(peer.calls.load(Ordering::SeqCst), peer_calls);
+}
+
+#[test]
+fn fatal_dma_stops_then_sets_w1c_pci_detected_parity_error() {
+    let (h, m, f) = setup(Pid::Out, UsbOutcome::Ack(vec![]), 0x4000, 0x4007, 0);
+    *m.refuse_read.lock() = Some(0x4000);
+    h.advance_frames(1);
+    assert_ne!(h.bar_read(0, 0xc, 4) & UE, 0);
+    assert_eq!(h.config().read(1) >> 16, 0x8200);
+    let frame = h.bar_read(0, 0x3c, 4);
+    h.advance_frames(1);
+    assert_eq!(h.bar_read(0, 0x3c, 4), frame);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 0);
+    h.config().write(1, 0x8000_0006);
+    assert_eq!(h.config().read(1) >> 16, 0x0200);
+    assert_ne!(h.bar_read(0, 0xc, 4) & UE, 0);
+}
