@@ -24,7 +24,7 @@
 //!
 //! Set IRIS_IP30_TRACE=1 to log unmapped accesses as they happen.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -68,18 +68,27 @@ pub static LAST_PC: AtomicU64 = AtomicU64::new(0);
 struct Unmapped {
     /// First 64 distinct: `(addr, write, pc)`.
     misses: Mutex<Vec<(u64, bool, u64)>>,
+    /// `misses` holds 64: a further miss costs one relaxed load, so a guest
+    /// polling an absent device does not lock and scan the list each time.
+    full: AtomicBool,
 }
 
 impl Unmapped {
     #[cold]
     fn miss(&self, addr: u64, write: bool) {
+        if self.full.load(Ordering::Relaxed) {
+            return;
+        }
         let pc = LAST_PC.load(Ordering::Relaxed);
         let mut u = self.misses.lock();
-        if u.len() < 64 && !u.iter().any(|&(a, w, _)| a == addr && w == write) {
+        if !u.iter().any(|&(a, w, _)| a == addr && w == write) {
             if std::env::var_os("IRIS_IP30_TRACE").is_some() {
                 eprintln!("ip30: unmapped {} at {addr:#x} (pc {pc:#x})", if write { "write" } else { "read" });
             }
             u.push((addr, write, pc));
+            if u.len() == 64 {
+                self.full.store(true, Ordering::Relaxed);
+            }
         }
     }
 }
