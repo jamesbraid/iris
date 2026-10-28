@@ -1,6 +1,8 @@
 //! The bus: which parts are selected, the ROM command phases (Read, Match,
 //! Search and Skip ROM), then a memory function command, its two address
 //! bytes and the selected parts' reply streams, wired-AND.
+//!
+//! Ported from hw/1wire/core.c in jamesbraid/qemu-sgi-origami.
 
 /// A part on the bus.
 pub trait Part: Send {
