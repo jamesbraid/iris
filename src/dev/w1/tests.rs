@@ -5,9 +5,9 @@
 use super::crc::{crc16, crc8};
 use super::slot::{self, fields, ONE_PULSE, RESET_PULSE};
 use super::*;
-use crate::dev::sgi_nic::{board_nic, mac_nic, BoardRecord};
+use crate::dev::sgi_nic::{board_record_part, ethernet_address_part, BoardRecord, ETHERNET_PART_SERIAL};
 
-const MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x0b, 0x7e, 0xba];
+const MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
 
 /// A master on one bus: slots at pulse widths, as a MicroLAN register does.
 struct M(Bus);
@@ -99,12 +99,15 @@ fn image(n: usize) -> Vec<u8> {
 /// The IOC3's wire: the Ethernet part and two board records.
 fn octane_wire() -> M {
     let mut b = Bus::new();
-    b.add(mac_nic(MAC));
-    b.add(board_nic(&BoardRecord { barcode: "EMUF00", part: "030-0891-003", revision: "A", name: "FP1" }, 0x5145_4d55_4600));
-    b.add(board_nic(
+    b.add(Box::new(ethernet_address_part(MAC, ETHERNET_PART_SERIAL)));
+    b.add(Box::new(board_record_part(
+        &BoardRecord { barcode: "EMUF00", part: "030-0891-003", revision: "A", name: "FP1" },
+        0x5145_4d55_4600,
+    )));
+    b.add(Box::new(board_record_part(
         &BoardRecord { barcode: "EMUS00", part: "060-0028-003", revision: "A", name: "PWR.SPPLY.SR" },
         0x5145_4d55_5300,
-    ));
+    )));
     M(b)
 }
 
