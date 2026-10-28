@@ -820,6 +820,21 @@ impl Rtc {
     }
 }
 
+/// Say that an NVRAM save failed, once until a save succeeds again: the
+/// guest's writes keep scheduling saves, and a full disk would otherwise
+/// print on every one.
+fn report_nvram_save(path: &std::path::Path, result: std::io::Result<()>) {
+    static FAILING: AtomicBool = AtomicBool::new(false);
+    match result {
+        Ok(()) => FAILING.store(false, Ordering::Relaxed),
+        Err(e) => {
+            if !FAILING.swap(true, Ordering::Relaxed) {
+                eprintln!("ioc3: NVRAM {}: {e}", path.display());
+            }
+        }
+    }
+}
+
 /// Replace the NVRAM file in one step (a temporary file, synced and
 /// renamed), so a kill mid-write leaves the previous image whole.
 fn save_nvram(path: &std::path::Path, image: &[u8]) -> std::io::Result<()> {
@@ -2396,9 +2411,7 @@ impl Shared {
                     None => return,
                 }
             };
-            if let Err(e) = save_nvram(&job.0, &job.1) {
-                eprintln!("ioc3: NVRAM {}: {e}", job.0.display());
-            }
+            report_nvram_save(&job.0, save_nvram(&job.0, &job.1));
         }
     }
 
@@ -2451,9 +2464,7 @@ impl Shared {
 
     fn flush_nvram(&self, quiet: Duration) {
         let Some((path, image)) = self.st.lock().rtc.take_dirty(quiet) else { return };
-        if let Err(e) = save_nvram(&path, &image) {
-            eprintln!("ioc3: NVRAM {}: {e}", path.display());
-        }
+        report_nvram_save(&path, save_nvram(&path, &image));
     }
 
     /// One synchronous pass of what the receive threads and timers do:
