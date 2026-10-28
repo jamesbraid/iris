@@ -39,7 +39,7 @@
 //!   Host serial input is fed into the FIFOs by one thread per port.
 //! * The DS1685 is the O2's DS1687 model behind an index and a data port; it
 //!   has no alarm or periodic interrupts. Its RAM, including the 128-byte
-//!   extended RAM, persists in a 512-byte file (an old 114-byte dump loads).
+//!   extended RAM, persists in a 512-byte file (a 114-byte register dump loads).
 //!
 //! Ported from hw/misc/sgi-ioc3.c and its serial, parallel and keyboard siblings
 //! in jamesbraid/qemu-sgi-origami.
@@ -673,7 +673,7 @@ impl Parallel {
 const NVRAM_QUIET: Duration = Duration::from_millis(500);
 /// Registers 0x0e.. are storage rather than clock in the file.
 const NVRAM_FIRST: usize = 0x0e;
-/// The old file format: registers 0x0e..0x80 as the bank-flat cell array.
+/// The 114-byte file format: registers 0x0e..0x80 as the bank-flat cell array.
 const NVRAM_OLD_LEN: usize = 0x80 - NVRAM_FIRST;
 /// The current file format is a 512-byte image: common registers 0x00..0x40,
 /// bank-0 RAM 0x40..0x80, bank-1 registers 0x80..0xc0, extended RAM
@@ -779,7 +779,7 @@ impl Rtc {
         img
     }
 
-    /// Load a file: the old 114-byte register dump, or the 512-byte image.
+    /// Load a file: the 114-byte register dump, or the 512-byte image.
     /// The clock registers (0x00..0x0d) are never loaded; time starts from
     /// the host. Returns false for any other length.
     fn load(&mut self, img: &[u8]) -> bool {
@@ -2094,10 +2094,10 @@ impl St {
             }
             return v;
         }
-        // The 32-bit blocks declare both their valid and implemented access
-        // size as 4 in the QEMU model, so a narrower access is refused by the
-        // bus there (not widened to a lane). There is no bus error to return
-        // from `bar_read`: it reads zero, and the write below is dropped.
+        // The 32-bit blocks are valid and implemented at access size 4 only,
+        // so a narrower access is refused (not widened to a lane). There is
+        // no bus error to return from `bar_read`: it reads zero, and the
+        // write below is dropped.
         if w != 4 {
             narrow_once(a, w);
             return 0;
@@ -2567,8 +2567,8 @@ impl Ioc3 {
     }
 
     /// Back the DS1685's RAM (user RAM, bank-1 registers and the 128-byte
-    /// extended RAM) with a file. A 512-byte file (the layout the QEMU model
-    /// uses) is loaded, as is an old 114-byte register dump. The file is
+    /// extended RAM) with a file. A 512-byte image is loaded, as is a
+    /// 114-byte register dump. The file is
     /// written as 512 bytes now and replaced whole once the guest's writes
     /// to the RAM pause (see [`Ioc3::flush_nvram`]). The clock starts from
     /// host time.

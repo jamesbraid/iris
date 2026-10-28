@@ -1201,9 +1201,9 @@ fn nvram_and_extended_ram_survive_in_a_512_byte_file() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// An old 114-byte dump still loads; the file becomes a 512-byte image.
+/// A 114-byte register dump loads; the file becomes a 512-byte image.
 #[test]
-fn an_old_114_byte_file_still_loads() {
+fn a_114_byte_register_dump_loads() {
     let path = std::env::temp_dir().join(format!("ioc3-old-{}", std::process::id()));
     let mut old = vec![0u8; 114];
     old[0] = 0xab; // register 0x0e
@@ -1217,9 +1217,9 @@ fn an_old_114_byte_file_still_loads() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// A full image in the QEMU layout loads, extended RAM included.
+/// A full 512-byte image loads, extended RAM included.
 #[test]
-fn a_qemu_layout_image_loads() {
+fn a_512_byte_image_loads() {
     let path = std::env::temp_dir().join(format!("ioc3-qimg-{}", std::process::id()));
     let mut img = vec![0u8; 0x200];
     img[0x0f] = 0x42;
@@ -1388,8 +1388,7 @@ fn the_clocks_power_off_is_sent_to_the_machine_once() {
 }
 
 // ---------------------------------------------------------------------------
-// Register-level cases from the first Octane work, through the bridge's byte
-// lanes
+// Register-level cases through the bridge's byte lanes
 // ---------------------------------------------------------------------------
 
 #[test]

@@ -1197,8 +1197,8 @@ impl Bridge {
             let good = match target {
                 None => false,
                 Some((_, _, w)) if w != WIDGET_HEART => {
-                    // Approximation: QEMU routes peer DMA to a fitted widget;
-                    // no supported Octane guest is known to need it.
+                    // Approximation: DMA to a widget other than HEART is not
+                    // modelled; no supported Octane guest is known to need it.
                     dropped = w == WIDGET_BRIDGE || !(self.link_alive.read())(w);
                     false
                 }

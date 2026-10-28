@@ -62,7 +62,8 @@ impl BoardRecord<'_> {
 
     /// The two pages, each closed by an inverted CRC-16 so a check over the
     /// whole page leaves the residue 0xb001. Panics if `check` fails: the
-    /// records are machine constants and configuration is checked earlier.
+    /// records are machine constants and configuration is checked before it
+    /// gets here.
     pub fn image(&self) -> [u8; 64] {
         self.check().expect("invalid board record");
         let mut rom = [b' '; 64];
@@ -252,9 +253,8 @@ mod tests {
         }
         assert!(redir.iter().all(|&b| b == 0xff), "no page redirected");
         // Then pages 0 and 1, with no CRC8 in front. (Read Memory on this
-        // part now ends in one CRC16 after the last byte of its 2 KB; the
-        // old model stopped at the end of the data. Only that trailing
-        // CRC16 is new, and it comes after everything read here.)
+        // part ends in one CRC16 after the last byte of its 2 KB, which
+        // comes after everything read here.)
         assert!(m.reset());
         m.byte(0xcc);
         m.byte(0xf0);
