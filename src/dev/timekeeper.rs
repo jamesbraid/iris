@@ -68,6 +68,35 @@ impl Calendar {
         }
     }
 }
+fn saved_calendar(image: &[u8]) -> Option<Calendar> {
+    if image.len() != SIZE {
+        return None;
+    }
+    let values = [
+        image[0x7ff9] & 0x7f,
+        image[0x7ffa],
+        image[0x7ffb],
+        image[0x7ffd],
+        image[0x7ffe],
+        image[0x7fff],
+    ];
+    let limits = [(0, 59), (0, 59), (0, 23), (1, 31), (1, 12), (0, 99)];
+    let valid = values
+        .iter()
+        .zip(limits)
+        .all(|(&v, (lo, hi))| v & 15 <= 9 && v >> 4 <= 9 && (lo..=hi).contains(&unbcd(v)));
+    if !valid {
+        return None;
+    }
+    Some(Calendar {
+        second: unbcd(values[0]),
+        minute: unbcd(values[1]),
+        hour: unbcd(values[2]),
+        day: unbcd(values[3]),
+        month: unbcd(values[4]),
+        year: unbcd(values[5]),
+    })
+}
 struct State {
     cells: Vec<u8>,
     offset: i64,
@@ -126,6 +155,25 @@ impl Timekeeper {
             host % 60,
         )?;
         Ok(t)
+    }
+    /// Open authoritative saved clock state before applying new-store year limits.
+    pub fn fuel_with_nvram_file(path: &Path) -> Result<Self, String> {
+        Self::backed(path, Self::fuel())
+    }
+    fn backed(path: &Path, initial: Result<Self, String>) -> Result<Self, String> {
+        let saved = match std::fs::read(path) {
+            Ok(v) => v,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e.to_string()),
+        };
+        let clock = if saved_calendar(&saved).is_some() {
+            // This seed is replaced by the authoritative image before exposure.
+            Self::fuel_at(1968, 1, 1, 0, 0, 0)?
+        } else {
+            initial?
+        };
+        clock.set_nvram_file(path)?;
+        Ok(clock)
     }
     /// A deterministic initial date; subsequent seconds follow monotonic host time.
     pub fn fuel_at(
@@ -232,28 +280,7 @@ impl Timekeeper {
         st.frozen = None;
         st.staged = None;
         st.stopped = None;
-        let values = [
-            image[0x7ff9] & 0x7f,
-            image[0x7ffa],
-            image[0x7ffb],
-            image[0x7ffd],
-            image[0x7ffe],
-            image[0x7fff],
-        ];
-        let limits = [(0, 59), (0, 59), (0, 23), (1, 31), (1, 12), (0, 99)];
-        let valid = values
-            .iter()
-            .zip(limits)
-            .all(|(&v, (lo, hi))| v & 15 <= 9 && v >> 4 <= 9 && (lo..=hi).contains(&unbcd(v)));
-        if valid {
-            let c = Calendar {
-                second: unbcd(values[0]),
-                minute: unbcd(values[1]),
-                hour: unbcd(values[2]),
-                day: unbcd(values[3]),
-                month: unbcd(values[4]),
-                year: unbcd(values[5]),
-            };
+        if let Some(c) = saved_calendar(image) {
             let stopped = image[0x7ff9] & 0x80 != 0;
             let elapsed = reference.filter(|r| &r[..8] == MAGIC).map_or(0, |r| {
                 now.saturating_sub(i64::from_le_bytes(r[8..16].try_into().unwrap()))

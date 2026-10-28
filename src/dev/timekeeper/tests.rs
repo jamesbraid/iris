@@ -119,3 +119,28 @@ fn backed_storage_is_blank_once_and_wrong_size_is_untouched() {
     std::fs::remove_file(wrong).unwrap();
     std::fs::remove_dir(dir).unwrap();
 }
+
+#[test]
+fn authoritative_saved_clock_does_not_require_an_initial_year() {
+    let dir = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(format!("timekeeper-backed-test-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("nvram");
+    let t = Timekeeper::fuel_at(2067, 12, 31, 23, 59, 59).unwrap();
+    t.write8(0x100, 0x42);
+    let (image, _) = t.persistence_image_at(0);
+    std::fs::write(&path, &image).unwrap();
+    // An out-of-range host initial date must not reject valid saved state.
+    let restored = Timekeeper::backed(&path, Timekeeper::fuel_at(2068, 1, 1, 0, 0, 0)).unwrap();
+    assert_eq!(restored.read8(0x7fff).data, 0x99);
+    assert_eq!(restored.read8(0x100).data, 0x42);
+    drop(restored);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::remove_file(dir.join("nvram.clock")).unwrap();
+    assert!(Timekeeper::backed(&path, Timekeeper::fuel_at(2068, 1, 1, 0, 0, 0)).is_err());
+    assert!(!path.exists());
+    std::fs::remove_dir(dir).unwrap();
+}
