@@ -55,8 +55,8 @@ use std::time::{Duration, Instant};
 use crate::dev::ds1687::MaceRtc;
 use crate::dev::ioc3_port::Ioc3EthPort;
 use crate::dev::ps2::Ps2Controller;
-use crate::dev::sgi_nic::{self, BoardRecord};
 use crate::dev::w1;
+use crate::dev::w1::sgi::{self, BoardRecord};
 use crate::dev::z85c30::{null_serial_backend, SerialBackend};
 use crate::irq::{InterruptController, IrqLine};
 use crate::pci::{Bar, PciBusDevice, PciConfig, PciDma, PciDmaStatus, PCI_INTA};
@@ -946,10 +946,10 @@ impl Ioc3Config {
 /// records, the front plane and the power supply on the Octane.
 fn default_wire(cfg: &Ioc3Config) -> w1::Bus {
     let mut bus = w1::Bus::new();
-    bus.add(Box::new(sgi_nic::ethernet_address_part(cfg.mac, cfg.ethernet_part_serial)));
+    bus.add(Box::new(sgi::ethernet_address_part(cfg.mac, cfg.ethernet_part_serial)));
     for (r, serial) in &cfg.records {
         let rec = BoardRecord { barcode: &r.barcode, part: &r.part, revision: &r.revision, name: &r.name };
-        bus.add(Box::new(sgi_nic::board_record_part(&rec, *serial)));
+        bus.add(Box::new(sgi::board_record_part(&rec, *serial)));
     }
     bus
 }

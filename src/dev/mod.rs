@@ -29,7 +29,6 @@ pub mod mgras;
 pub mod ng1;
 pub mod serial_log;
 pub mod sflash;
-pub mod sgi_nic;
 pub mod xbow;
 pub mod bridge;
 pub mod w1;
