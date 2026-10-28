@@ -11,7 +11,7 @@ console, or loops. `docs/octane-ip30.md` says what the machine covers and
 monitor's `ip30` command (memory, the Bridge, the graphics link, refused
 Crossbow accesses, unmapped accesses) and `heart unsupported` show what the
 PROM touched that the model does not answer. `IRIS_IP30_TRACE=1` prints the
-failed accesses as they happen.
+accesses nothing answers as they happen.
 
 **What the PROM insists on.**
 

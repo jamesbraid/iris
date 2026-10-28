@@ -6,8 +6,9 @@
 //! serial ports, `[clock] fixed_mhz`) and `[octane]` holds what only an
 //! Octane has (see [`crate::config::OctaneSection`]).
 //!
-//! Built as the Indy is: the devices first, then the bus over them
-//! (`ip30::Ip30Physical`), then `init`, then the CPU. On the Bridge's PCI
+//! Built as the O2 is: memory first, which makes the machine-independent
+//! `Physical` bus, then the devices, mapped on it through
+//! `ip30::Ip30Physical`, then `init`, then the CPU. On the Bridge's PCI
 //! bus, as on the board: the two ISP1040 SCSI controllers in slots 0 and 1,
 //! IOC3 (serial, keyboard and mouse, the clock, Ethernet) in slot 2, RAD1
 //! audio in slot 3. IMPACT sits on a graphics port.
@@ -271,6 +272,8 @@ impl OctaneMachine {
                 #[cfg(feature = "jitv2")]
                 cpu.set_tcache_gen_window(sp.gen_window_base());
             }
+            // The bus's direct paths read the same bitmap.
+            ram.phys().resync_ppmem_bitmap();
             // Publish the descriptors as they stand into the sinks just set.
             ram.set_memcfg(heart.memcfg());
         }
@@ -282,6 +285,8 @@ impl OctaneMachine {
         monitor.register_device(crate::devlog::init_devlog());
         monitor.register_device(cpu.clone().as_device());
         monitor.register_device(heart.clone());
+        // `phys`: the physical bus's decode table, memory and traces.
+        monitor.register_device(phys.phys().clone());
         monitor.register_device(Arc::new(Ip30Monitor {
             phys: phys.clone(),
             ram: ram.clone(),

@@ -10,27 +10,29 @@
 //! | `0x0000_0000`, 16 KiB | low memory, the first 16 KiB of SDRAM (`heart_mem::LowAlias`) |
 //! | `0x0ff0_0000` | HEART's processor-interface registers |
 //! | `0x1000_0000 + (w << 24)` | widget `w`'s 16 MiB small window |
-//! | `0x2000_0000` up | SDRAM through HEART's bank descriptors (`heart_mem::HeartRam`); its first 16 KiB bus-error here |
+//! | `0x2000_0000` up | SDRAM through HEART's bank descriptors (`heart_mem::HeartRam`); its first 16 KiB bus-error here (`heart_mem::SdramGuard`) |
 //! | `w << 36` | widget `w`'s 64 GiB large window (8 to 15) |
 //!
 //! Widget 0 is the Crossbow, 8 HEART, 15 the onboard Bridge (whose window
 //! holds the boot flash at 0x1fc0_0000, the reset vector), 9 to 12 the
 //! graphics ports.
 //!
-//! The decode is one table, built the way `Physical` is for the Indy: a
-//! `SparseDeviceMap` of 64 KiB slots over the R10000's 40-bit physical
-//! space, each pointing at the device that answers it.
+//! The decode is the machine-independent [`Physical`], as on the Indy and
+//! the O2: a `SparseDeviceMap` of 64 KiB slots over the R10000's 40-bit
+//! physical space, each pointing at the device that answers it, and the
+//! ppmem window over SDRAM. `HeartRam` makes it and lays SDRAM out in it;
+//! this module maps the chips.
 //!
-//! Set IRIS_IP30_TRACE=1 to log unmapped accesses as they happen.
+//! Set IRIS_IP30_TRACE=1 to log accesses nothing answers as they happen.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::dev::heart_mem::{HeartRam, LowAlias, RAM_BASE};
-use crate::ppmem::devmap::{Entry, PHYS_MASK, SLOT_SHIFT};
-use crate::ppmem::SparseDeviceMap;
+use crate::dev::heart_mem::{HeartRam, GUARD};
+use crate::physical::Physical;
+use crate::ppmem::devmap::{PHYS_MASK, SLOT_SHIFT};
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, BUS_ERR, BUS_OK};
 
 /// Widget numbers on the Octane's Crossbow.
@@ -50,8 +52,8 @@ pub const fn widget_large_base(w: u8) -> u64 {
     (w as u64) << 36
 }
 pub const WIDGET_LARGE_SIZE: u64 = 1 << 36;
-/// Where SDRAM space ends: the first large window. Everything from
-/// `RAM_BASE` to here goes to `HeartRam`, which decodes the descriptors.
+/// Where SDRAM space ends: the first large window. Descriptors reach no
+/// further than 18.5 GiB of it.
 pub const SDRAM_SPACE_END: u64 = widget_large_base(8);
 /// The boot flash window, both chip selects, as the processor addresses it.
 pub const BOOT_FLASH: std::ops::Range<u64> = 0x1fc0_0000..0x2000_0000;
@@ -60,100 +62,118 @@ pub const BOOT_FLASH: std::ops::Range<u64> = 0x1fc0_0000..0x2000_0000;
 /// The machine's batch hook stores it.
 pub static LAST_PC: AtomicU64 = AtomicU64::new(0);
 
-/// What answers an address nothing claims: a bus error.
+/// What answers where nothing on the Octane's bus does: a bus error for
+/// every access, the default device of its `Physical`. The first 64
+/// distinct addresses are kept, as `(addr, is_write, pc)`, for `ip30
+/// unmapped`; once full, a miss costs one relaxed load, so a guest polling
+/// an absent device does not lock and scan the list each time. Low memory's
+/// tail, the guard over SDRAM's first 16 KiB and a widget's windows while
+/// its link is down note here too. A device's own refusal (a register it
+/// does not have, the flash refusing a write) is not a miss.
 #[derive(Default)]
-struct Unmapped;
-
-impl BusDevice for Unmapped {
-    fn read8(&self, _: u64) -> BusRead8 { BusRead8::err() }
-    fn read16(&self, _: u64) -> BusRead16 { BusRead16::err() }
-    fn read32(&self, _: u64) -> BusRead32 { BusRead32::err() }
-    fn read64(&self, _: u64) -> BusRead64 { BusRead64::err() }
-    fn write8(&self, _: u64, _: u8) -> u32 { BUS_ERR }
-    fn write16(&self, _: u64, _: u16) -> u32 { BUS_ERR }
-    fn write32(&self, _: u64, _: u32) -> u32 { BUS_ERR }
-    fn write64(&self, _: u64, _: u64) -> u32 { BUS_ERR }
+pub struct Misses {
+    list: Mutex<Vec<(u64, bool, u64)>>,
+    full: AtomicBool,
 }
 
-/// The Octane's processor-side physical bus: a `SparseDeviceMap` of 64 KiB
-/// slots over the 40-bit space, each pointing at the device that answers
-/// it. Every access is one mask, one table load and a call; there is no
-/// lock and no decode chain.
+impl Misses {
+    #[inline]
+    pub fn note(&self, addr: u64, write: bool) {
+        if !self.full.load(Ordering::Relaxed) {
+            self.record(addr, write);
+        }
+    }
+
+    #[cold]
+    fn record(&self, addr: u64, write: bool) {
+        let pc = LAST_PC.load(Ordering::Relaxed);
+        let mut u = self.list.lock();
+        if !u.iter().any(|&(a, w, _)| a == addr && w == write) {
+            if std::env::var_os("IRIS_IP30_TRACE").is_some() {
+                eprintln!("ip30: unmapped {} at {addr:#x} (pc {pc:#x})", if write { "write" } else { "read" });
+            }
+            u.push((addr, write, pc));
+            if u.len() == 64 {
+                self.full.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The misses kept, in the order they came.
+    pub fn list(&self) -> Vec<(u64, bool, u64)> {
+        self.list.lock().clone()
+    }
+}
+
+impl BusDevice for Misses {
+    fn read8(&self, a: u64) -> BusRead8 { self.note(a, false); BusRead8::err() }
+    fn read16(&self, a: u64) -> BusRead16 { self.note(a, false); BusRead16::err() }
+    fn read32(&self, a: u64) -> BusRead32 { self.note(a, false); BusRead32::err() }
+    fn read64(&self, a: u64) -> BusRead64 { self.note(a, false); BusRead64::err() }
+    fn write8(&self, a: u64, _: u8) -> u32 { self.note(a, true); BUS_ERR }
+    fn write16(&self, a: u64, _: u16) -> u32 { self.note(a, true); BUS_ERR }
+    fn write32(&self, a: u64, _: u32) -> u32 { self.note(a, true); BUS_ERR }
+    fn write64(&self, a: u64, _: u64) -> u32 { self.note(a, true); BUS_ERR }
+}
+
+/// The Octane's processor-side physical bus: HEART's [`Physical`] with the
+/// chips mapped on it, and the widgets the Crossbow switches.
 ///
 /// Devices see full physical addresses (masked to 40 bits), not offsets,
 /// and mask to their own window. A device that fills only part of a slot
-/// answers the rest of it itself (low memory bus-errors 0x4000..0x10000).
+/// answers the rest of it itself.
 ///
-/// Built in three steps, as `Physical` is: `new`, then the machine
-/// registers devices (`map`, `attach_widget`), then `init` fills the table
-/// and from then on the CPU may run. Table changes after that
-/// (`set_widget_link`) replace whole slots; readers on device threads see
-/// the old slot or the new one, never a torn one (`docs/devmap-design.md`).
+/// Built in three steps: `new` over the memory (which has already put low
+/// memory and the guard on the bus), then the machine registers devices
+/// (`map`, `attach_widget`), then `init` points every switched window at
+/// its link as it stands, and from then on the CPU may run. Table changes
+/// after that (`set_widget_link`, a descriptor write) replace whole slots;
+/// readers on device threads see the old slot or the new one, never a torn
+/// one (`docs/devmap-design.md`).
+///
+/// This is what the CPU is given, uncached and as its cache's memory, and
+/// what the JIT reads generations through. Width accesses go straight to
+/// `Physical`. The direct paths (`mem_ptr`, `read_block`, `write_block`,
+/// `gen_ptr`) do too, except over the guard, where `Physical` would take the
+/// window: there they go to `SdramGuard`, so the bus path faults the guard
+/// whatever the window maps.
 pub struct Ip30Physical {
-    devmap: SparseDeviceMap,
-    /// `devmap.base()`, cached for the hot path.
-    map_base: *const Entry,
+    phys: Arc<Physical>,
     ram: Arc<HeartRam>,
-    low: Arc<LowAlias>,
-    unmapped: Arc<Unmapped>,
-    /// The table holds raw pointers; these keep what they point at alive.
-    keep: Mutex<Vec<Arc<dyn BusDevice>>>,
     /// The widgets on the Crossbow's ports 9 to 15, and whether each also
     /// takes its large window.
     widgets: Mutex<[Option<(Arc<dyn BusDevice>, bool)>; 16]>,
-    /// Accesses that failed, first 64 distinct: `(addr, write, pc)`.
-    misses: Mutex<Vec<(u64, bool, u64)>>,
-    /// `misses` holds 64: a further miss costs one relaxed load, so a guest
-    /// polling an absent device does not lock and scan the list each time.
-    misses_full: AtomicBool,
 }
 
-// SAFETY: the table's pointers are into devices `keep` (or the fields
-// above) hold for the life of the bus; every device is Send + Sync, and the
-// table itself is only changed through `SparseDeviceMap`'s own lock.
-unsafe impl Send for Ip30Physical {}
-unsafe impl Sync for Ip30Physical {}
-
 impl Ip30Physical {
-    /// An empty map over `ram` (SDRAM space, and physical 0 as the window onto
-    /// its start).
+    /// The bus `ram` is on, with nothing but memory mapped yet.
     pub fn new(ram: Arc<HeartRam>) -> std::io::Result<Self> {
-        let devmap = SparseDeviceMap::new()?;
-        let map_base = devmap.base();
-        let me = Self {
-            devmap,
-            map_base,
-            low: Arc::new(LowAlias::new(ram.clone())),
-            ram,
-            unmapped: Arc::new(Unmapped),
-            keep: Mutex::new(Vec::new()),
-            widgets: Mutex::new(Default::default()),
-            misses: Mutex::new(Vec::new()),
-            misses_full: AtomicBool::new(false),
-        };
-        // Bus error by default, so `map` may fill part of a page before
-        // `init`.
-        me.devmap.set_default(me.unmapped_entry())?;
-        Ok(me)
+        Ok(Self { phys: ram.phys().clone(), ram, widgets: Mutex::new(Default::default()) })
     }
 
-    fn fill(&self, start: u64, end: u64, dev: Entry) {
-        self.devmap
-            .fill_bytes(start, end, dev)
-            .unwrap_or_else(|e| panic!("ip30: mapping {start:#x}..{end:#x}: {e}"));
-    }
-
-    fn unmapped_entry(&self) -> Entry {
-        Arc::as_ptr(&self.unmapped) as *const dyn BusDevice
+    /// The machine-independent bus, for the monitor's `phys`.
+    pub fn phys(&self) -> &Arc<Physical> {
+        &self.phys
     }
 
     /// Put `dev` at physical `start..end` (`end` exclusive, rounded up to a
     /// 64 KiB slot): HEART's PIU registers, the Crossbow's window (widget 0)
     /// and HEART's widget registers (widget 8), none of which a link gates.
-    /// Takes effect at once; a later `map` over the same slots wins.
+    /// Takes effect at once; a later `map` over the same slots wins. The bus
+    /// keeps `dev`.
     pub fn map(&self, start: u64, end: u64, dev: Arc<dyn BusDevice>) {
-        self.fill(start, end, Arc::as_ptr(&dev));
-        self.keep.lock().push(dev);
+        self.phys.map(start, end, dev, &Self::name(start));
+    }
+
+    /// What `phys map` calls the device at `start`. The bus keeps the first
+    /// name a device is mapped under, so HEART's widget registers show as
+    /// HEART.
+    fn name(start: u64) -> String {
+        match start {
+            crate::dev::heart::PIU_BASE => "heart".into(),
+            s if (0x1000_0000..0x2000_0000).contains(&s) => format!("widget {}", (s >> 24) & 0xf),
+            s => format!("device at {s:#x}"),
+        }
     }
 
     /// Put `dev` on the Crossbow's port `w` (9 to 15): its small window and,
@@ -161,16 +181,17 @@ impl Ip30Physical {
     /// until `set_widget_link(w, true)` both windows bus-error.
     pub fn attach_widget(&self, w: u8, dev: Arc<dyn BusDevice>, large: bool) {
         assert!((9..16).contains(&w), "ip30: widget {w} is not a port the Crossbow switches");
-        self.keep.lock().push(dev.clone());
+        // Mapping it is how the bus comes to keep it; the link puts the
+        // windows where they belong.
+        let small = widget_small_base(w);
+        self.phys.map(small, small + WIDGET_SMALL_SIZE, dev.clone(), &format!("widget {w}"));
         self.widgets.lock()[w as usize] = Some((dev, large));
+        self.set_widget_link(w, false);
     }
 
-    /// Fill the table: low memory, SDRAM space, and
-    /// every attached widget's windows as its link stands (dead). Call once,
-    /// after the devices are registered and before the CPU runs.
+    /// Point every attached widget's windows as its link stands (dead).
+    /// Call once, after the devices are registered and before the CPU runs.
     pub fn init(&self) {
-        self.fill(0, 1 << SLOT_SHIFT, Arc::as_ptr(&self.low) as *const dyn BusDevice);
-        self.fill(RAM_BASE, SDRAM_SPACE_END, Arc::as_ptr(&self.ram) as *const dyn BusDevice);
         for w in 9..16 {
             self.set_widget_link(w, false);
         }
@@ -184,24 +205,23 @@ impl Ip30Physical {
     }
 
     /// The Crossbow brought widget `w`'s link up or took it down: point its
-    /// windows at the widget or at the bus error. The Crossbow's link-change
-    /// callback lands here, outside the Crossbow's own lock. Ports other
-    /// than 9 to 15 have no windows to switch.
+    /// windows at the widget or at the default device, a bus error. The
+    /// Crossbow's link-change callback lands here, outside the Crossbow's
+    /// own lock, on whichever thread touched it. Ports other than 9 to 15
+    /// have no windows to switch.
     pub fn set_widget_link(&self, w: u8, alive: bool) {
         if !(9..16).contains(&w) {
             return;
         }
-        let unmapped = self.unmapped_entry();
+        let none = self.phys.default_entry();
         let (dev, large) = match &self.widgets.lock()[w as usize] {
             Some((d, large)) if alive => (Arc::as_ptr(d), *large),
-            Some((_, large)) => (unmapped, *large),
-            None => (unmapped, false),
+            Some((_, large)) => (none, *large),
+            None => (none, false),
         };
-        let small = widget_small_base(w);
-        self.fill(small, small + WIDGET_SMALL_SIZE, dev);
+        self.phys.fill_slots(widget_small_base(w) >> SLOT_SHIFT, WIDGET_SMALL_SIZE >> SLOT_SHIFT, dev);
         if large {
-            let base = widget_large_base(w);
-            self.fill(base, base + WIDGET_LARGE_SIZE, dev);
+            self.phys.fill_slots(widget_large_base(w) >> SLOT_SHIFT, WIDGET_LARGE_SIZE >> SLOT_SHIFT, dev);
         }
     }
 
@@ -211,101 +231,64 @@ impl Ip30Physical {
         self.ram.dma_view()
     }
 
-    /// Accesses that failed, first 64 distinct, as `(addr, is_write, pc)`.
+    /// Accesses nothing answered, first 64 distinct, as `(addr, is_write,
+    /// pc)`.
     pub fn unmapped(&self) -> Vec<(u64, bool, u64)> {
-        self.misses.lock().clone()
+        self.ram.misses().list()
     }
 
-    #[cold]
-    fn miss(&self, addr: u64, write: bool) {
-        if self.misses_full.load(Ordering::Relaxed) {
-            return;
-        }
-        let pc = LAST_PC.load(Ordering::Relaxed);
-        let mut u = self.misses.lock();
-        if !u.iter().any(|&(a, w, _)| a == addr && w == write) {
-            if std::env::var_os("IRIS_IP30_TRACE").is_some() {
-                eprintln!("ip30: unmapped {} at {addr:#x} (pc {pc:#x})", if write { "write" } else { "read" });
-            }
-            u.push((addr, write, pc));
-            if u.len() == 64 {
-                self.misses_full.store(true, Ordering::Relaxed);
-            }
-        }
-    }
-
-    /// The device behind `addr`: one indexed load.
+    /// Whether `a` falls in the guard, whose direct paths `Physical` would
+    /// take through the window.
     #[inline(always)]
-    fn dev_at(&self, addr: u64) -> &dyn BusDevice {
-        // SAFETY: `map_base` spans the whole table for the life of
-        // `devmap`; a page nobody filled faults in as the default device,
-        // and every entry points at a device this bus keeps alive.
-        unsafe { &**self.map_base.add(((addr & PHYS_MASK) >> SLOT_SHIFT) as usize) }
+    fn guarded(a: u64) -> bool {
+        GUARD.contains(&(a & PHYS_MASK))
     }
 }
 
-macro_rules! forward_rw {
-    ($read:ident, $write:ident, $r:ident, $t:ty) => {
-        #[inline]
-        fn $read(&self, a: u64) -> $r {
-            let a = a & PHYS_MASK;
-            let r = self.dev_at(a).$read(a);
-            if r.status == BUS_ERR {
-                self.miss(a, false);
-            }
-            r
-        }
-        #[inline]
-        fn $write(&self, a: u64, v: $t) -> u32 {
-            let a = a & PHYS_MASK;
-            let r = self.dev_at(a).$write(a, v);
-            if r == BUS_ERR {
-                self.miss(a, true);
-            }
-            r
-        }
-    };
-}
-
-/// Every access forwarded to the slot's device, the fast paths included.
-/// A failed width access is noted for the monitor's `ip30 unmapped`.
+/// Every access forwarded to `Physical`, the direct paths over the guard
+/// excepted (see [`Ip30Physical`]).
 impl BusDevice for Ip30Physical {
-    forward_rw!(read8, write8, BusRead8, u8);
-    forward_rw!(read16, write16, BusRead16, u16);
-    forward_rw!(read32, write32, BusRead32, u32);
-    forward_rw!(read64, write64, BusRead64, u64);
-    fn write64_masked(&self, a: u64, v: u64, m: u64) -> u32 {
-        let a = a & PHYS_MASK;
-        self.dev_at(a).write64_masked(a, v, m)
-    }
-    fn dma_read64(&self, a: u64) -> BusRead64 {
-        let a = a & PHYS_MASK;
-        self.dev_at(a).dma_read64(a)
-    }
-    fn dma_write64(&self, a: u64, v: u64) -> u32 {
-        let a = a & PHYS_MASK;
-        self.dev_at(a).dma_write64(a, v)
-    }
+    #[inline] fn read8(&self, a: u64) -> BusRead8 { self.phys.read8(a) }
+    #[inline] fn read16(&self, a: u64) -> BusRead16 { self.phys.read16(a) }
+    #[inline] fn read32(&self, a: u64) -> BusRead32 { self.phys.read32(a) }
+    #[inline] fn read64(&self, a: u64) -> BusRead64 { self.phys.read64(a) }
+    #[inline] fn write8(&self, a: u64, v: u8) -> u32 { self.phys.write8(a, v) }
+    #[inline] fn write16(&self, a: u64, v: u16) -> u32 { self.phys.write16(a, v) }
+    #[inline] fn write32(&self, a: u64, v: u32) -> u32 { self.phys.write32(a, v) }
+    #[inline] fn write64(&self, a: u64, v: u64) -> u32 { self.phys.write64(a, v) }
+    #[inline] fn write64_masked(&self, a: u64, v: u64, m: u64) -> u32 { self.phys.write64_masked(a, v, m) }
+    #[inline] fn dma_read64(&self, a: u64) -> BusRead64 { self.phys.dma_read64(a) }
+    #[inline] fn dma_write64(&self, a: u64, v: u64) -> u32 { self.phys.dma_write64(a, v) }
+    #[inline] fn dma_read64_bulk(&self, a: u64, out: &mut [u64]) -> u32 { self.phys.dma_read64_bulk(a, out) }
+    #[inline] fn dma_write64_bulk(&self, a: u64, vals: &[u64]) -> u32 { self.phys.dma_write64_bulk(a, vals) }
     #[inline]
     fn mem_ptr(&self, a: u64) -> Option<*const u64> {
-        let a = a & PHYS_MASK;
-        self.dev_at(a).mem_ptr(a)
+        if Self::guarded(a) {
+            return self.ram.guard().mem_ptr(a & PHYS_MASK);
+        }
+        self.phys.mem_ptr(a)
     }
     #[inline]
     fn read_block(&self, a: u64, buf: &mut [u64]) -> u32 {
-        let a = a & PHYS_MASK;
-        self.dev_at(a).read_block(a, buf)
+        if Self::guarded(a) {
+            return self.ram.guard().read_block(a & PHYS_MASK, buf);
+        }
+        self.phys.read_block(a, buf)
     }
     #[inline]
     fn write_block(&self, a: u64, buf: &[u64]) -> u32 {
-        let a = a & PHYS_MASK;
-        self.dev_at(a).write_block(a, buf)
+        if Self::guarded(a) {
+            return self.ram.guard().write_block(a & PHYS_MASK, buf);
+        }
+        self.phys.write_block(a, buf)
     }
     #[cfg(feature = "jitv2")]
     #[inline]
     fn gen_ptr(&self, a: u64) -> *const AtomicU64 {
-        let a = a & PHYS_MASK;
-        self.dev_at(a).gen_ptr(a)
+        if Self::guarded(a) {
+            return self.ram.guard().gen_ptr(a & PHYS_MASK);
+        }
+        self.phys.gen_ptr(a)
     }
 }
 

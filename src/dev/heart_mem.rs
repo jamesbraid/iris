@@ -6,32 +6,39 @@
 //! both in 32 MiB units from 0x2000_0000. When two descriptors claim an
 //! address the higher-numbered bank answers.
 //!
-//! Each fitted bank is its own ppmem object (byte `o` at `host + (o ^ 3)`,
-//! the layout every iris RAM keeps), reached through that object's own
-//! mapping by every master with no lock, as the Indy's banks are. The 4 GiB
-//! ppmem window the CPU's cache and the JIT read is laid out from the
-//! descriptors, 32 MiB at a time; memory a descriptor puts above 4 GiB is
-//! reachable through the bus only.
+//! [`HeartRam`] owns the Octane's [`Physical`], whose RAM banks are the
+//! fitted HEART banks, one store each (byte `o` at `host + (o ^ 3)`, the
+//! layout every iris RAM keeps). A descriptor write lays the bus out again
+//! as the O2's memory does: each 64 KiB slot of a 32 MiB unit points at the
+//! bank that answers there (`Physical::bank_view`), at memory that reads
+//! zero for a bank with nothing fitted, or at the bus's default, and the
+//! 4 GiB ppmem window the CPU's cache and the JIT read maps the same units.
+//! Memory a descriptor puts above 4 GiB is in the table only, so it is
+//! reached through the bus.
 //!
 //! The first 16 KiB of SDRAM are the processor's physical 0..0x4000, and it
 //! reaches them only there: its access to 0x2000_0000..+16 KiB is a bus
 //! error, and SDRAM is reachable at its own address from 0x2000_4000. The
-//! stock IDE diagnostics check exactly this. [`LowAlias`] is the low window,
-//! the same bytes and the same jitv2 page generations. Whether a bus master
+//! stock IDE diagnostics check exactly this. Two slots hold less than 64 KiB
+//! of anything, so each has a device of its own that decodes the
+//! descriptors itself: [`LowAlias`] at 0, the same bytes and the same jitv2
+//! page generations, and [`SdramGuard`] at 0x2000_0000. Whether a bus master
 //! reaches 0x2000_0000..+16 KiB is not known; the `dma_view` does, as the
 //! same bytes. Public software uses physical 0x400 (the GDA) and 0x600
 //! (MPCONF).
 //!
 //! Ported from hw/misc/sgi-heart.c in jamesbraid/qemu-sgi-origami.
 
-use std::cell::UnsafeCell;
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::ppmem::{MappedMemory, PpMemSpace, PpMemory, WINDOW_SIZE};
-use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, Resettable, BUS_ERR, BUS_OK};
+use crate::ip30::Misses;
+use crate::physical::{Physical, RamBank};
+use crate::ppmem::devmap::SLOT_SHIFT;
+use crate::ppmem::{MappedMemory, PpMemSpace, WINDOW_SIZE};
+use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, BUS_ERR, BUS_OK};
 
 /// Where SDRAM space starts. Descriptors count from here in [`UNIT`]s.
 pub const RAM_BASE: u64 = 0x2000_0000;
@@ -41,9 +48,14 @@ pub const BANKS: usize = 4;
 /// Low memory at physical 0: the first `LOW_SIZE` bytes of SDRAM, which the
 /// processor reaches only there.
 pub const LOW_SIZE: u64 = 0x4000;
-const GUARD: std::ops::Range<u64> = RAM_BASE..RAM_BASE + LOW_SIZE;
+/// The processor's bus error over the first 16 KiB of SDRAM space.
+pub const GUARD: std::ops::Range<u64> = RAM_BASE..RAM_BASE + LOW_SIZE;
 /// The page jitv2 tracks code by.
 const PAGE: usize = 4096;
+/// Units a descriptor can reach: a base of up to 511 and a span of up to 64.
+const UNITS: usize = 0x200 + 0x40;
+/// Decode-table slots per unit.
+const SLOTS_PER_UNIT: u64 = UNIT >> SLOT_SHIFT;
 
 const DESC_VALID: u32 = 0x8000_0000;
 
@@ -95,12 +107,21 @@ pub enum Decode {
     None,
 }
 
+/// What answers in one 32 MiB unit of SDRAM space, as the table holds it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Unit {
+    None,
+    Absent,
+    /// HEART bank `bank`, from byte `src` of its store.
+    Ram { bank: usize, src: u64 },
+}
+
 /// A byte of fitted memory: the HEART bank and the offset into it.
 type Loc = (usize, usize);
 
-// Host-word layout shared by `HeartRam` and its views: what `PpMemory`
-// keeps, so an aligned word is a host u32 and a doubleword is two of them
-// swapped (`rotate_left(32)`). Offsets are aligned to the access.
+// Host-word layout shared by the views: what `PpMemory` keeps, so an
+// aligned word is a host u32 and a doubleword is two of them swapped
+// (`rotate_left(32)`). Offsets are aligned to the access.
 mod layout {
     #[inline(always)]
     pub unsafe fn ld8(h: *mut u8, o: usize) -> u8 {
@@ -145,7 +166,7 @@ use layout::*;
 
 /// The four descriptors, published whole: a seqlock, so an access on any
 /// thread decodes against one MEMCFG or the next, never half of each.
-/// Writers are serialised by `HeartRam::remap`.
+/// Writers are serialised by `HeartRam::placed`.
 #[derive(Default)]
 struct Placement {
     seq: AtomicU64,
@@ -179,161 +200,37 @@ impl Placement {
     }
 }
 
-/// The fitted DIMMs where HEART's descriptors put them: the device
-/// `Ip30Physical` maps over SDRAM space, and the processor's view of it.
+/// The descriptors and the fitted banks, for the devices that decode an
+/// address themselves rather than through the table: low memory, the
+/// guarded slot and the bus masters' view.
 ///
 /// No lock on an access. Every master reaches the same host bytes, as on
 /// the Indy: aligned 32- and 64-bit host accesses are atomic, and the
-/// descriptors an access decodes against are published whole by
-/// `set_memcfg`. Addresses are full physical addresses (up to 40 bits).
-/// A bank a descriptor marks valid with no DIMMs reads zero and drops
-/// writes; an address no descriptor claims, or the first 16 KiB of SDRAM
-/// space, is a bus error.
-///
-/// Fast paths, as `Physical`'s banks give them: `mem_ptr`, `read_block` and
-/// `write_block` go straight to the host bytes; `gen_ptr` returns the 4 KiB
-/// page's generation counter, bumped by every write path, DMA included.
-pub struct HeartRam {
-    /// One object per fitted bank, in bank order.
-    banks: Vec<PpMemory>,
-    /// Where each HEART bank is in `banks`, and its host mapping.
-    index: [Option<usize>; BANKS],
-    host: [*mut u8; BANKS],
-    space: PpMemSpace,
-    /// Each bank's capacity in bytes, 0 if nothing is fitted.
-    size: [u64; BANKS],
+/// descriptors an access decodes against are published whole.
+struct Sdram {
     desc: Placement,
-    /// Held across a descriptor change: the window may be laid out by one
-    /// caller at a time.
-    remap: Mutex<()>,
+    /// Each HEART bank's capacity in bytes, 0 if nothing is fitted.
+    size: [u64; BANKS],
+    /// Each fitted bank's host mapping, and its store among the bus's
+    /// banks (null where nothing is fitted). Both point into the
+    /// `Physical`, which outlives every device the table holds.
+    host: [*mut u8; BANKS],
+    store: [*const RamBank; BANKS],
+    /// Where a bus error from low memory or the guard is noted.
+    misses: Arc<Misses>,
 }
 
-// `host` points into `banks`, which live as long as this does. Every master
-// reads and writes the bytes through it with no lock, as the hardware's own
-// masters race; the window (`space`) is changed only under `remap`.
-unsafe impl Send for HeartRam {}
-unsafe impl Sync for HeartRam {}
+// `host` and `store` point into the bus's banks, which live as long as the
+// bus, and every holder of an `Sdram` is a device on that bus or holds the
+// bus itself. Every master reads and writes the bytes with no lock, as the
+// hardware's own masters race.
+unsafe impl Send for Sdram {}
+unsafe impl Sync for Sdram {}
 
-impl HeartRam {
-    /// `banks_mb` is the DIMM pair in each of the four banks, in MB (0 for
-    /// an empty bank). No descriptor is valid until HEART writes one. Panics on a size `try_new` refuses.
-    pub fn new(banks_mb: [u32; 4]) -> Self {
-        Self::try_new(banks_mb).unwrap_or_else(|e| panic!("{e}"))
-    }
-
-    /// Each bank 0 or a power of two from 64 MiB to 2 GiB, 2 GiB in all.
-    pub fn try_new(banks_mb: [u32; 4]) -> Result<Self, String> {
-        let mut size = [0u64; BANKS];
-        let mut total = 0u64;
-        for (i, &mb) in banks_mb.iter().enumerate() {
-            let s = (mb as u64) << 20;
-            if s != 0 && (!(64 << 20..=2 << 30).contains(&s) || !s.is_power_of_two()) {
-                return Err(format!("HEART bank {i} capacity must be 0, 64M, 128M, 256M, 512M, 1G or 2G"));
-            }
-            size[i] = s;
-            total += s;
-        }
-        if total > 2 << 30 {
-            return Err(format!("HEART banks hold {} MiB; an Octane takes at most 2048", total >> 20));
-        }
-        let mut banks = Vec::new();
-        let mut index = [None; BANKS];
-        let mut host = [std::ptr::null_mut(); BANKS];
-        for (i, &s) in size.iter().enumerate().filter(|(_, &s)| s != 0) {
-            let bank = PpMemory::try_new((s >> 20) as usize).map_err(|e| format!("ppmem: {e}"))?;
-            index[i] = Some(banks.len());
-            host[i] = bank.host_ptr();
-            banks.push(bank);
-        }
-        let space = PpMemSpace::over(&banks).map_err(|e| format!("ppmem: {e}"))?;
-        Ok(Self { banks, index, host, space, size, desc: Placement::default(), remap: Mutex::new(()) })
-    }
-
-    /// HEART's descriptors changed: decode against them from now on and lay
-    /// the ppmem window out again. Called on the CPU thread (a MEMCFG write)
-    /// or with the CPU stopped (reset, the machine publishing the window).
-    ///
-    /// A write that leaves the decode as it was does nothing to the window
-    /// or the page generations: the PROM rewrites the same descriptors, and
-    /// a remap empties the window under a running CPU.
-    pub fn set_memcfg(&self, words: [u32; 4]) {
-        let _g = self.remap.lock();
-        let same = Self::decoded(&self.desc.load()) == Self::decoded(&words);
-        self.desc.store(words);
-        if same {
-            return;
-        }
-        self.space.clear_mappings();
-        // A bank now answering where another did must look changed to the
-        // JIT even if the two pages' counters happen to be equal.
-        #[cfg(feature = "jitv2")]
-        self.banks.iter().for_each(PpMemory::bump_gen_all);
-        // Lower banks first, so higher ones overlay them as in the decode.
-        for (bank, &d) in words.iter().enumerate() {
-            let (true, Some(i)) = (d & DESC_VALID != 0, self.index[bank]) else { continue };
-            let base = desc_base(d);
-            for unit in 0..desc_span(d) / UNIT {
-                let at = base + unit * UNIT;
-                if at + UNIT > WINDOW_SIZE {
-                    break;
-                }
-                let src = bank_offset(d, self.size[bank], unit * UNIT);
-                if let Err(e) = self.space.map_range(i, src, at, UNIT) {
-                    eprintln!("ip30: HEART bank {bank} unit {unit}: window map failed: {e}");
-                }
-            }
-        }
-    }
-
-    /// The bits of each descriptor the decode reads: all of a valid one
-    /// (valid, density, span, base), nothing of an invalid one.
-    fn decoded(words: &[u32; BANKS]) -> [u32; BANKS] {
-        words.map(|d| if d & DESC_VALID == 0 { 0 } else { d & (DESC_VALID | 0x7 << 22 | 0x3f << 16 | 0x1ff) })
-    }
-
-    /// The descriptors in force, for the monitor.
-    pub fn memcfg(&self) -> [u32; 4] {
-        self.desc.load()
-    }
-
-    /// Each bank's capacity in bytes.
-    pub fn bank_sizes(&self) -> [u64; BANKS] {
-        self.size
-    }
-
-    /// Bytes fitted.
-    pub fn total(&self) -> usize {
-        self.size.iter().sum::<u64>() as usize
-    }
-
-    /// The valid descriptors as placed: (physical base, span, capacity), a
-    /// capacity of 0 for a bank with nothing fitted.
-    pub fn layout(&self) -> Vec<(u64, u64, u64)> {
-        let d = self.desc.load();
-        (0..BANKS)
-            .filter(|&b| d[b] & DESC_VALID != 0)
-            .map(|b| (desc_base(d[b]), desc_span(d[b]), self.size[b]))
-            .collect()
-    }
-
-    /// The ppmem window the CPU and the JIT reach memory through.
-    pub fn space(&self) -> &PpMemSpace {
-        &self.space
-    }
-
-    /// Memory as an XIO bus master reaches it through HEART: what the
-    /// Bridge (and its per-slot `PciDma`) and IMPACT's HQ4 are given.
-    /// Fitted memory only, at 64-bit physical addresses: a bank with no
-    /// DIMMs, low memory, HEART's registers and the widget windows are all
-    /// bus errors here. `read_block` and `write_block` move nothing unless
-    /// every doubleword is fitted memory; use `dma_read_bytes` and
-    /// `dma_write_bytes` for byte transfers.
-    pub fn dma_view(self: &Arc<Self>) -> Arc<dyn BusDevice> {
-        Arc::new(DmaView(self.clone()))
-    }
-
+impl Sdram {
     /// The highest-numbered bank whose descriptor claims `addr` answers.
-    pub fn decode(&self, addr: u64) -> Decode {
+    #[inline]
+    fn decode(&self, addr: u64) -> Decode {
         Self::decode_in(&self.desc.load(), &self.size, addr)
     }
 
@@ -383,11 +280,17 @@ impl HeartRam {
         }
     }
 
+    #[inline(always)]
+    fn bank(&self, bank: usize) -> &RamBank {
+        debug_assert!(!self.store[bank].is_null(), "a fitted bank");
+        unsafe { &*self.store[bank] }
+    }
+
     /// Byte `off` of bank `bank` was written: bump its page's generation.
     #[inline(always)]
     fn touch(&self, (bank, off): Loc) {
         #[cfg(feature = "jitv2")]
-        self.banks[self.index[bank].expect("a fitted bank")].bump_gen_off(off);
+        self.bank(bank).bump_gen_off(off);
         #[cfg(not(feature = "jitv2"))]
         let _ = (bank, off);
     }
@@ -396,7 +299,7 @@ impl HeartRam {
     #[cfg(feature = "jitv2")]
     #[inline(always)]
     fn gen_at(&self, (bank, off): Loc) -> *const AtomicU64 {
-        self.banks[self.index[bank].expect("a fitted bank")].gen_ptr(off as u64)
+        self.bank(bank).gen_ptr(off as u64)
     }
 
     /// The host word holding that byte's doubleword.
@@ -434,108 +337,6 @@ impl HeartRam {
         };
         // All or nothing: check every run before moving anything.
         walk(&mut |_, _, _| {}) && walk(&mut f)
-    }
-}
-
-/// Width accesses for one view: `$at` decodes an address to
-/// `Option<Option<Loc>>` (bus error, empty bank, memory).
-macro_rules! ram_widths {
-    ($at:expr) => {
-        fn read8(&self, addr: u64) -> BusRead8 {
-            match $at(self, addr) {
-                Some(Some((b, o))) => BusRead8::ok(unsafe { ld8(self.ram().host[b], o) }),
-                Some(None) => BusRead8::ok(0),
-                None => BusRead8::err(),
-            }
-        }
-        fn read16(&self, addr: u64) -> BusRead16 {
-            match $at(self, addr) {
-                Some(Some((b, o))) => BusRead16::ok(unsafe { ld16(self.ram().host[b], o) }),
-                Some(None) => BusRead16::ok(0),
-                None => BusRead16::err(),
-            }
-        }
-        fn read32(&self, addr: u64) -> BusRead32 {
-            match $at(self, addr) {
-                Some(Some((b, o))) => BusRead32::ok(unsafe { ld32(self.ram().host[b], o) }),
-                Some(None) => BusRead32::ok(0),
-                None => BusRead32::err(),
-            }
-        }
-        fn read64(&self, addr: u64) -> BusRead64 {
-            match $at(self, addr) {
-                Some(Some((b, o))) => BusRead64::ok(unsafe { ld64(self.ram().host[b], o) }),
-                Some(None) => BusRead64::ok(0),
-                None => BusRead64::err(),
-            }
-        }
-        fn write8(&self, addr: u64, val: u8) -> u32 {
-            match $at(self, addr) {
-                Some(Some(loc)) => {
-                    let (b, o) = loc;
-                    unsafe { st8(self.ram().host[b], o, val) };
-                    self.ram().touch(loc);
-                    BUS_OK
-                }
-                Some(None) => BUS_OK,
-                None => BUS_ERR,
-            }
-        }
-        fn write16(&self, addr: u64, val: u16) -> u32 {
-            match $at(self, addr) {
-                Some(Some(loc)) => {
-                    let (b, o) = loc;
-                    unsafe { st16(self.ram().host[b], o, val) };
-                    self.ram().touch(loc);
-                    BUS_OK
-                }
-                Some(None) => BUS_OK,
-                None => BUS_ERR,
-            }
-        }
-        fn write32(&self, addr: u64, val: u32) -> u32 {
-            match $at(self, addr) {
-                Some(Some(loc)) => {
-                    let (b, o) = loc;
-                    unsafe { st32(self.ram().host[b], o, val) };
-                    self.ram().touch(loc);
-                    BUS_OK
-                }
-                Some(None) => BUS_OK,
-                None => BUS_ERR,
-            }
-        }
-        fn write64(&self, addr: u64, val: u64) -> u32 {
-            match $at(self, addr) {
-                Some(Some(loc)) => {
-                    let (b, o) = loc;
-                    unsafe { st64(self.ram().host[b], o, val) };
-                    self.ram().touch(loc);
-                    BUS_OK
-                }
-                Some(None) => BUS_OK,
-                None => BUS_ERR,
-            }
-        }
-        fn write64_masked(&self, addr: u64, val: u64, mask: u64) -> u32 {
-            match $at(self, addr) {
-                Some(Some(loc)) => {
-                    let (b, o) = loc;
-                    unsafe { st64_masked(self.ram().host[b], o, val, mask) };
-                    self.ram().touch(loc);
-                    BUS_OK
-                }
-                Some(None) => BUS_OK,
-                None => BUS_ERR,
-            }
-        }
-    };
-}
-
-impl HeartRam {
-    #[inline(always)]
-    fn ram(&self) -> &HeartRam {
-        self
     }
 
     fn block_read(&self, addr: u64, buf: &mut [u64], dma: bool) -> u32 {
@@ -586,86 +387,388 @@ impl HeartRam {
     }
 }
 
-/// The processor's view.
-impl BusDevice for HeartRam {
-    ram_widths!(HeartRam::cpu_at);
-
-    fn mem_ptr(&self, addr: u64) -> Option<*const u64> {
-        match self.cpu_at(addr) {
-            Some(Some(at)) => Some(self.word_at(at)),
-            _ => None,
-        }
-    }
-
-    fn read_block(&self, addr: u64, buf: &mut [u64]) -> u32 {
-        self.block_read(addr, buf, false)
-    }
-
-    fn write_block(&self, addr: u64, buf: &[u64]) -> u32 {
-        self.block_write(addr, buf, false)
-    }
-
-    #[cfg(feature = "jitv2")]
-    fn gen_ptr(&self, addr: u64) -> *const AtomicU64 {
-        match self.cpu_at(addr) {
-            Some(Some(at)) => self.gen_at(at),
-            _ => std::ptr::null(),
-        }
-    }
+/// The fitted DIMMs and the bus they are on: HEART's banks, the
+/// [`Physical`] the processor and the bus masters reach them through, and
+/// the layout of that bus's SDRAM space as the descriptors stand.
+///
+/// Built before anything else is mapped, because the bus's default device
+/// (a bus error that `ip30 unmapped` lists), low memory and the guarded slot
+/// go in first; `Ip30Physical` maps the chips over the rest.
+pub struct HeartRam {
+    phys: Arc<Physical>,
+    sdram: Arc<Sdram>,
+    /// Where each HEART bank is among the bus's banks.
+    index: [Option<usize>; BANKS],
+    /// The slot at `RAM_BASE`, for the bus's direct paths.
+    guard: Arc<SdramGuard>,
+    /// Each unit of SDRAM space as the table holds it. Held across a
+    /// descriptor change: the bus is laid out by one caller at a time.
+    placed: Mutex<Vec<Unit>>,
 }
 
-/// `HeartRam::dma_view`: fitted memory only.
+impl HeartRam {
+    /// `banks_mb` is the DIMM pair in each of the four banks, in MB (0 for
+    /// an empty bank). No descriptor is valid until HEART writes one. Panics on a size `try_new` refuses.
+    pub fn new(banks_mb: [u32; 4]) -> Self {
+        Self::try_new(banks_mb).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Each bank 0 or a power of two from 64 MiB to 2 GiB, 2 GiB in all.
+    pub fn try_new(banks_mb: [u32; 4]) -> Result<Self, String> {
+        let mut size = [0u64; BANKS];
+        let mut total = 0u64;
+        for (i, &mb) in banks_mb.iter().enumerate() {
+            let s = (mb as u64) << 20;
+            if s != 0 && (!(64 << 20..=2 << 30).contains(&s) || !s.is_power_of_two()) {
+                return Err(format!("HEART bank {i} capacity must be 0, 64M, 128M, 256M, 512M, 1G or 2G"));
+            }
+            size[i] = s;
+            total += s;
+        }
+        if total > 2 << 30 {
+            return Err(format!("HEART banks hold {} MiB; an Octane takes at most 2048", total >> 20));
+        }
+        let mut banks = Vec::new();
+        let mut index = [None; BANKS];
+        for (i, &s) in size.iter().enumerate().filter(|(_, &s)| s != 0) {
+            let bank = RamBank::try_new((s >> 20) as usize).map_err(|e| format!("ppmem: {e}"))?;
+            index[i] = Some(banks.len());
+            banks.push(bank);
+        }
+        let phys = Physical::new(banks);
+        if phys.ppmem_space().is_none() {
+            return Err("ppmem: could not reserve the Octane's memory window".into());
+        }
+        let misses = Arc::new(Misses::default());
+        phys.set_default(misses.clone(), "nothing (ip30 unmapped)");
+        let mut host = [std::ptr::null_mut(); BANKS];
+        let mut store = [std::ptr::null(); BANKS];
+        for (bank, i) in index.iter().enumerate() {
+            if let Some(i) = *i {
+                host[bank] = phys.banks()[i].host_ptr();
+                store[bank] = &phys.banks()[i];
+            }
+        }
+        let sdram = Arc::new(Sdram { desc: Placement::default(), size, host, store, misses });
+        let guard = Arc::new(SdramGuard(sdram.clone()));
+        phys.map(0, 1 << SLOT_SHIFT, Arc::new(LowAlias(sdram.clone())), "low memory (sdram's first 16k)");
+        phys.map(RAM_BASE, RAM_BASE + (1 << SLOT_SHIFT), guard.clone(), "sdram (its first 16k a bus error)");
+        Ok(Self { phys, sdram, index, guard, placed: Mutex::new(vec![Unit::None; UNITS]) })
+    }
+
+    /// The bus the banks are on.
+    pub fn phys(&self) -> &Arc<Physical> {
+        &self.phys
+    }
+
+    /// The device in the slot at `RAM_BASE`, which faults the first 16 KiB.
+    pub fn guard(&self) -> &Arc<SdramGuard> {
+        &self.guard
+    }
+
+    /// Accesses nothing on the bus answered, first 64 distinct.
+    pub fn misses(&self) -> &Misses {
+        &self.sdram.misses
+    }
+
+    /// HEART's descriptors changed: decode against them from now on and lay
+    /// the bus and its ppmem window out again. Called on the CPU thread (a
+    /// MEMCFG write) or with the CPU stopped (reset), as the window requires.
+    ///
+    /// A write that leaves the decode as it was does nothing to the bus or
+    /// the page generations: the PROM rewrites the same descriptors, and a
+    /// remap empties the window under a running CPU.
+    ///
+    /// The table moves straight to each unit's new entry, never through the
+    /// default, so a bus master on another thread sees the old memory or the
+    /// new. The slot at `RAM_BASE` keeps [`SdramGuard`], which decodes the
+    /// descriptors itself; the window maps that unit whole, guard included
+    /// (see `SdramGuard`).
+    pub fn set_memcfg(&self, words: [u32; 4]) {
+        let mut placed = self.placed.lock();
+        let same = Self::decoded(&self.sdram.desc.load()) == Self::decoded(&words);
+        self.sdram.desc.store(words);
+        if same {
+            return;
+        }
+        let phys = &*self.phys;
+        let sp = self.space();
+        sp.clear_mappings();
+        // A bank now answering where another did must look changed to the
+        // JIT even if the two pages' counters happen to be equal.
+        #[cfg(feature = "jitv2")]
+        phys.banks().iter().for_each(RamBank::bump_gen_all);
+        // Lower banks first, so higher ones overlay them as in the decode.
+        let mut units = vec![Unit::None; UNITS];
+        for (bank, &d) in words.iter().enumerate() {
+            if d & DESC_VALID == 0 {
+                continue;
+            }
+            let first = (d & 0x1ff) as usize;
+            for u in 0..(desc_span(d) / UNIT) as usize {
+                units[first + u] = match self.sdram.size[bank] {
+                    0 => Unit::Absent,
+                    size => Unit::Ram { bank, src: bank_offset(d, size, u as u64 * UNIT) },
+                };
+            }
+        }
+        for (u, (&now, was)) in units.iter().zip(placed.iter_mut()).enumerate() {
+            let at = RAM_BASE + u as u64 * UNIT;
+            if now != *was {
+                let entry = match now {
+                    Unit::None => phys.default_entry(),
+                    Unit::Absent => phys.unmapped_entry(),
+                    Unit::Ram { bank, src } => phys.bank_view(self.index[bank].expect("a fitted bank"), at.wrapping_sub(src)),
+                };
+                let (first, count) = match u {
+                    0 => ((at >> SLOT_SHIFT) + 1, SLOTS_PER_UNIT - 1),
+                    _ => (at >> SLOT_SHIFT, SLOTS_PER_UNIT),
+                };
+                phys.fill_slots(first, count, entry);
+                *was = now;
+            }
+            let Unit::Ram { bank, src } = now else { continue };
+            if at + UNIT > WINDOW_SIZE {
+                continue;
+            }
+            if let Err(e) = sp.map_range(self.index[bank].unwrap(), src, at, UNIT) {
+                eprintln!("ip30: HEART bank {bank} at {at:#x}: window map failed: {e}");
+            }
+        }
+    }
+
+    /// The bits of each descriptor the decode reads: all of a valid one
+    /// (valid, density, span, base), nothing of an invalid one.
+    fn decoded(words: &[u32; BANKS]) -> [u32; BANKS] {
+        words.map(|d| if d & DESC_VALID == 0 { 0 } else { d & (DESC_VALID | 0x7 << 22 | 0x3f << 16 | 0x1ff) })
+    }
+
+    /// The descriptors in force, for the monitor.
+    pub fn memcfg(&self) -> [u32; 4] {
+        self.sdram.desc.load()
+    }
+
+    /// Each bank's capacity in bytes.
+    pub fn bank_sizes(&self) -> [u64; BANKS] {
+        self.sdram.size
+    }
+
+    /// Bytes fitted.
+    pub fn total(&self) -> usize {
+        self.sdram.size.iter().sum::<u64>() as usize
+    }
+
+    /// The valid descriptors as placed: (physical base, span, capacity), a
+    /// capacity of 0 for a bank with nothing fitted.
+    pub fn layout(&self) -> Vec<(u64, u64, u64)> {
+        let d = self.sdram.desc.load();
+        (0..BANKS)
+            .filter(|&b| d[b] & DESC_VALID != 0)
+            .map(|b| (desc_base(d[b]), desc_span(d[b]), self.sdram.size[b]))
+            .collect()
+    }
+
+    /// The ppmem window the CPU and the JIT reach memory through.
+    pub fn space(&self) -> &PpMemSpace {
+        self.phys.ppmem_space().expect("ppmem: the Octane's window, reserved by try_new")
+    }
+
+    /// Memory as an XIO bus master reaches it through HEART: what the
+    /// Bridge (and its per-slot `PciDma`) and IMPACT's HQ4 are given.
+    /// Fitted memory only, at 64-bit physical addresses: a bank with no
+    /// DIMMs, low memory, HEART's registers and the widget windows are all
+    /// bus errors here, and the guard is not (it is the processor's). Its
+    /// `read_block` and `write_block` move nothing unless every doubleword
+    /// is fitted memory; use `dma_read_bytes` and `dma_write_bytes` for byte
+    /// transfers.
+    pub fn dma_view(self: &Arc<Self>) -> Arc<dyn BusDevice> {
+        Arc::new(DmaView(self.clone()))
+    }
+
+    /// The highest-numbered bank whose descriptor claims `addr` answers.
+    pub fn decode(&self, addr: u64) -> Decode {
+        self.sdram.decode(addr)
+    }}
+
+/// Width accesses for one view: `$at` decodes an address to
+/// `Option<Option<Loc>>` (bus error, empty bank, memory), and a bus error
+/// goes to the view's `fault`.
+macro_rules! ram_widths {
+    ($at:expr) => {
+        fn read8(&self, addr: u64) -> BusRead8 {
+            match $at(self, addr) {
+                Some(Some((b, o))) => BusRead8::ok(unsafe { ld8(self.sd().host[b], o) }),
+                Some(None) => BusRead8::ok(0),
+                None => {
+                    self.fault(addr, false);
+                    BusRead8::err()
+                },
+            }
+        }
+        fn read16(&self, addr: u64) -> BusRead16 {
+            match $at(self, addr) {
+                Some(Some((b, o))) => BusRead16::ok(unsafe { ld16(self.sd().host[b], o) }),
+                Some(None) => BusRead16::ok(0),
+                None => {
+                    self.fault(addr, false);
+                    BusRead16::err()
+                },
+            }
+        }
+        fn read32(&self, addr: u64) -> BusRead32 {
+            match $at(self, addr) {
+                Some(Some((b, o))) => BusRead32::ok(unsafe { ld32(self.sd().host[b], o) }),
+                Some(None) => BusRead32::ok(0),
+                None => {
+                    self.fault(addr, false);
+                    BusRead32::err()
+                },
+            }
+        }
+        fn read64(&self, addr: u64) -> BusRead64 {
+            match $at(self, addr) {
+                Some(Some((b, o))) => BusRead64::ok(unsafe { ld64(self.sd().host[b], o) }),
+                Some(None) => BusRead64::ok(0),
+                None => {
+                    self.fault(addr, false);
+                    BusRead64::err()
+                },
+            }
+        }
+        fn write8(&self, addr: u64, val: u8) -> u32 {
+            match $at(self, addr) {
+                Some(Some(loc)) => {
+                    let (b, o) = loc;
+                    unsafe { st8(self.sd().host[b], o, val) };
+                    self.sd().touch(loc);
+                    BUS_OK
+                }
+                Some(None) => BUS_OK,
+                None => {
+                    self.fault(addr, true);
+                    BUS_ERR
+                },
+            }
+        }
+        fn write16(&self, addr: u64, val: u16) -> u32 {
+            match $at(self, addr) {
+                Some(Some(loc)) => {
+                    let (b, o) = loc;
+                    unsafe { st16(self.sd().host[b], o, val) };
+                    self.sd().touch(loc);
+                    BUS_OK
+                }
+                Some(None) => BUS_OK,
+                None => {
+                    self.fault(addr, true);
+                    BUS_ERR
+                },
+            }
+        }
+        fn write32(&self, addr: u64, val: u32) -> u32 {
+            match $at(self, addr) {
+                Some(Some(loc)) => {
+                    let (b, o) = loc;
+                    unsafe { st32(self.sd().host[b], o, val) };
+                    self.sd().touch(loc);
+                    BUS_OK
+                }
+                Some(None) => BUS_OK,
+                None => {
+                    self.fault(addr, true);
+                    BUS_ERR
+                },
+            }
+        }
+        fn write64(&self, addr: u64, val: u64) -> u32 {
+            match $at(self, addr) {
+                Some(Some(loc)) => {
+                    let (b, o) = loc;
+                    unsafe { st64(self.sd().host[b], o, val) };
+                    self.sd().touch(loc);
+                    BUS_OK
+                }
+                Some(None) => BUS_OK,
+                None => {
+                    self.fault(addr, true);
+                    BUS_ERR
+                },
+            }
+        }
+        fn write64_masked(&self, addr: u64, val: u64, mask: u64) -> u32 {
+            match $at(self, addr) {
+                Some(Some(loc)) => {
+                    let (b, o) = loc;
+                    unsafe { st64_masked(self.sd().host[b], o, val, mask) };
+                    self.sd().touch(loc);
+                    BUS_OK
+                }
+                Some(None) => BUS_OK,
+                None => {
+                    self.fault(addr, true);
+                    BUS_ERR
+                },
+            }
+        }
+    };
+}
+
+/// `HeartRam::dma_view`: fitted memory only. Holds the memory, so the bus's
+/// banks outlive a bus master that keeps it.
 struct DmaView(Arc<HeartRam>);
 
 impl DmaView {
     #[inline(always)]
-    fn ram(&self) -> &HeartRam {
-        &self.0
+    fn sd(&self) -> &Sdram {
+        &self.0.sdram
     }
 
     #[inline(always)]
     fn at(&self, addr: u64) -> Option<Option<Loc>> {
-        self.0.dma_at(addr).map(Some)
+        self.sd().dma_at(addr).map(Some)
     }
+
+    /// A bus master's error is its own to report, not the processor's.
+    #[inline(always)]
+    fn fault(&self, _addr: u64, _write: bool) {}
 }
 
 impl BusDevice for DmaView {
     ram_widths!(DmaView::at);
 
     fn mem_ptr(&self, addr: u64) -> Option<*const u64> {
-        self.0.dma_at(addr).map(|at| self.0.word_at(at))
+        self.sd().dma_at(addr).map(|at| self.sd().word_at(at))
     }
 
     fn read_block(&self, addr: u64, buf: &mut [u64]) -> u32 {
-        self.0.block_read(addr, buf, true)
+        self.sd().block_read(addr, buf, true)
     }
 
     fn write_block(&self, addr: u64, buf: &[u64]) -> u32 {
-        self.0.block_write(addr, buf, true)
+        self.sd().block_write(addr, buf, true)
     }
 
     #[cfg(feature = "jitv2")]
     fn gen_ptr(&self, addr: u64) -> *const AtomicU64 {
-        self.0.dma_at(addr).map_or(std::ptr::null(), |at| self.0.gen_at(at))
+        self.sd().dma_at(addr).map_or(std::ptr::null(), |at| self.sd().gen_at(at))
     }
 }
 
 /// The first 16 KiB of the processor's physical space: the same bytes as
 /// SDRAM at `RAM_BASE`, with the same jitv2 page generations, so code the
 /// kernel rewrites at its exception vectors is recompiled. This is the only
-/// way the processor reaches them, so it takes `HeartRam`'s unguarded path.
-/// It fills the 64 KiB decode slot at 0, so it answers 0x4000..0x10000 with
-/// a bus error itself, and where no bank descriptor covers `RAM_BASE` it
-/// answers as SDRAM does there.
-pub struct LowAlias(Arc<HeartRam>);
+/// way the processor reaches them, so it takes the unguarded decode. It
+/// fills the 64 KiB decode slot at 0, so it answers 0x4000..0x10000 with a
+/// bus error itself, noted as a miss, and where no bank descriptor covers
+/// `RAM_BASE` it answers as SDRAM does there.
+///
+/// The ppmem window does not map it; the CPU's cache and the JIT reach it
+/// through the bus.
+pub struct LowAlias(Arc<Sdram>);
 
 impl LowAlias {
-    pub fn new(ram: Arc<HeartRam>) -> Self {
-        Self(ram)
-    }
-
     #[inline(always)]
-    fn ram(&self) -> &HeartRam {
+    fn sd(&self) -> &Sdram {
         &self.0
     }
 
@@ -677,6 +780,11 @@ impl LowAlias {
             return None;
         }
         self.0.unguarded_at(RAM_BASE + o)
+    }
+
+    #[cold]
+    fn fault(&self, addr: u64, write: bool) {
+        self.0.misses.note(addr, write);
     }
 }
 
@@ -693,6 +801,63 @@ impl BusDevice for LowAlias {
     /// The same counter SDRAM's page has: without it a page reached through
     /// the alias reads a fixed generation, and the JIT keeps running code
     /// compiled before the kernel rewrote it.
+    #[cfg(feature = "jitv2")]
+    fn gen_ptr(&self, addr: u64) -> *const AtomicU64 {
+        match self.at(addr) {
+            Some(Some(at)) => self.0.gen_at(at),
+            _ => std::ptr::null(),
+        }
+    }
+}
+
+/// The slot at `RAM_BASE`: a bus error, noted as a miss, below
+/// `RAM_BASE + LOW_SIZE`, and SDRAM as the descriptors place it above. A
+/// remap leaves this slot alone, since the device decodes the descriptors
+/// itself.
+///
+/// Approximation: this is the bus path. The ppmem window maps the whole
+/// unit at `RAM_BASE`, guard included, so the CPU's cached accesses there
+/// reach the bytes where real HEART faults them. Leaving 16 KiB out would
+/// clear the window's fast-path bit for the first 64 MiB of SDRAM and send
+/// every cached access to the kernel through the bus. No supported guest
+/// makes such an access; `ip30::tests` pins the behaviour.
+pub struct SdramGuard(Arc<Sdram>);
+
+impl SdramGuard {
+    #[inline(always)]
+    fn sd(&self) -> &Sdram {
+        &self.0
+    }
+
+    #[inline(always)]
+    fn at(&self, addr: u64) -> Option<Option<Loc>> {
+        self.0.cpu_at(addr)
+    }
+
+    #[cold]
+    fn fault(&self, addr: u64, write: bool) {
+        self.0.misses.note(addr, write);
+    }
+}
+
+impl BusDevice for SdramGuard {
+    ram_widths!(SdramGuard::at);
+
+    fn mem_ptr(&self, addr: u64) -> Option<*const u64> {
+        match self.at(addr) {
+            Some(Some(at)) => Some(self.0.word_at(at)),
+            _ => None,
+        }
+    }
+
+    fn read_block(&self, addr: u64, buf: &mut [u64]) -> u32 {
+        self.0.block_read(addr, buf, false)
+    }
+
+    fn write_block(&self, addr: u64, buf: &[u64]) -> u32 {
+        self.0.block_write(addr, buf, false)
+    }
+
     #[cfg(feature = "jitv2")]
     fn gen_ptr(&self, addr: u64) -> *const AtomicU64 {
         match self.at(addr) {
@@ -865,11 +1030,11 @@ mod tests {
     }
 
     fn w(m: &HeartRam, addr: u64, v: u64) {
-        assert_eq!(m.write64(addr, v), BUS_OK, "write {addr:#x}");
+        assert_eq!(m.phys().write64(addr, v), BUS_OK, "write {addr:#x}");
     }
 
     fn r(m: &HeartRam, addr: u64) -> u64 {
-        let v = m.read64(addr);
+        let v = m.phys().read64(addr);
         assert_eq!(v.status, BUS_OK, "read {addr:#x}");
         v.data
     }
@@ -886,10 +1051,10 @@ mod tests {
             // An absent bank's descriptor still claims probe space but keeps
             // nothing.
             m.set_memcfg([0, PROBE_DESC, 0, 0]);
-            assert_eq!(m.write64(PROBE_RAM + 0x100, u64::MAX), BUS_OK);
+            assert_eq!(m.phys().write64(PROBE_RAM + 0x100, u64::MAX), BUS_OK);
             assert_eq!(r(&m, PROBE_RAM + 0x100), 0);
             m.set_memcfg([0; 4]);
-            assert_eq!(m.read64(PROBE_RAM).status, BUS_ERR);
+            assert_eq!(m.phys().read64(PROBE_RAM).status, BUS_ERR);
         }
     }
 
@@ -1026,10 +1191,11 @@ mod tests {
     #[test]
     fn a_changed_descriptor_bumps_the_page_generations() {
         let gen = |p: *const AtomicU64| unsafe { (*p).load(Ordering::Acquire) };
-        let m = ram(128);
+        let m = Arc::new(ram(128));
         let d = DESC_VALID | (3 << 16);
         bank0(&m, d);
-        let g = m.gen_ptr(RAM_BASE + 0x8000);
+        // The bank's own counter: the window's moves with each remap.
+        let g = m.dma_view().gen_ptr(RAM_BASE + 0x8000);
         let v = gen(g);
         bank0(&m, d);
         assert_eq!(gen(g), v, "the same descriptors leave it");
@@ -1051,13 +1217,13 @@ mod tests {
         m.set_memcfg([DESC_VALID | (1 << 16), DESC_VALID | (3 << 16) | 2, 0, 0]);
         let in_bank0 = RAM_BASE + 0x5000;
         let in_bank1 = RAM_BASE + 64 * MIB + 0x5000;
-        assert_ne!(m.gen_ptr(in_bank0), m.gen_ptr(in_bank1), "two pages, two counters");
+        assert_ne!(m.phys().gen_ptr(in_bank0), m.phys().gen_ptr(in_bank1), "two pages, two counters");
         let win = |a: u64| unsafe { m.space().gen_window_base().add((a >> 12) as usize) } as *const AtomicU64;
-        let (v0, v1) = (gen(m.gen_ptr(in_bank0)), gen(m.gen_ptr(in_bank1)));
+        let (v0, v1) = (gen(m.phys().gen_ptr(in_bank0)), gen(m.phys().gen_ptr(in_bank1)));
         w(&m, in_bank1, 1);
-        assert_eq!(gen(m.gen_ptr(in_bank0)), v0, "a store in bank 1 leaves bank 0's page alone");
-        assert_ne!(gen(m.gen_ptr(in_bank1)), v1);
-        assert_eq!(gen(win(in_bank1)), gen(m.gen_ptr(in_bank1)), "and the window shows that counter");
+        assert_eq!(gen(m.phys().gen_ptr(in_bank0)), v0, "a store in bank 1 leaves bank 0's page alone");
+        assert_ne!(gen(m.phys().gen_ptr(in_bank1)), v1);
+        assert_eq!(gen(win(in_bank1)), gen(m.phys().gen_ptr(in_bank1)), "and the window shows that counter");
         assert_eq!(gen(win(in_bank0)), v0);
     }
 
@@ -1081,23 +1247,23 @@ mod tests {
         let a = RAM_BASE + UNIT - 16;
         w(&m, a, 0x0011_2233_4455_6677);
         w(&m, a + 8, 0x8899_aabb_ccdd_eeff);
-        let p = m.mem_ptr(a).expect("memory has a pointer");
+        let p = m.phys().mem_ptr(a).expect("memory has a pointer");
         assert_eq!(unsafe { *p }.rotate_left(32), 0x0011_2233_4455_6677, "read64's layout");
-        assert_eq!(m.read32(a + 4).data, 0x4455_6677);
-        assert_eq!(m.read16(a + 2).data, 0x2233);
-        assert_eq!(m.read8(a + 1).data, 0x11);
+        assert_eq!(m.phys().read32(a + 4).data, 0x4455_6677);
+        assert_eq!(m.phys().read16(a + 2).data, 0x2233);
+        assert_eq!(m.phys().read8(a + 1).data, 0x11);
         // A block across a unit boundary: the second unit is the bank's
         // second 32 MiB.
-        assert_eq!(m.write_block(a + 16, &[1, 2]), BUS_OK);
+        assert_eq!(m.phys().write_block(a + 16, &[1, 2]), BUS_OK);
         let mut buf = [0u64; 4];
-        assert_eq!(m.read_block(a, &mut buf), BUS_OK);
+        assert_eq!(m.phys().read_block(a, &mut buf), BUS_OK);
         assert_eq!(buf, [0x0011_2233_4455_6677, 0x8899_aabb_ccdd_eeff, 1, 2]);
-        assert_eq!(m.write64_masked(a, 0xffff_0000_0000_ffff, 0xff00_0000_0000_00ff), BUS_OK);
+        assert_eq!(m.phys().write64_masked(a, 0xffff_0000_0000_ffff, 0xff00_0000_0000_00ff), BUS_OK);
         assert_eq!(r(&m, a), 0xff11_2233_4455_66ff);
-        // Past the end: nothing moves.
+        // Past the end: the slot after the bank is a bus error.
         let end = RAM_BASE + (64 << 20);
-        assert_eq!(m.write_block(end - 8, &[9, 9]), BUS_ERR);
-        assert_eq!(r(&m, end - 8), 0, "an all-or-nothing block wrote nothing");
+        assert_eq!(m.phys().write_block(end, &[9]), BUS_ERR);
+        assert_eq!(m.phys().read64(end).status, BUS_ERR);
     }
 
     #[test]
@@ -1105,9 +1271,9 @@ mod tests {
         let m = Arc::new(HeartRam::new([64, 0, 0, 0]));
         m.set_memcfg([0, PROBE_DESC, 0, 0]);
         let mut buf = [5u64; 2];
-        assert_eq!(m.read_block(PROBE_RAM, &mut buf), BUS_OK);
+        assert_eq!(m.phys().read_block(PROBE_RAM, &mut buf), BUS_OK);
         assert_eq!(buf, [0, 0]);
-        assert_eq!(m.write_block(PROBE_RAM, &[1]), BUS_OK);
+        assert_eq!(m.phys().write_block(PROBE_RAM, &[1]), BUS_OK);
         let dma = m.dma_view();
         assert_eq!(dma.read64(PROBE_RAM).status, BUS_ERR);
         assert_eq!(dma.read_block(PROBE_RAM, &mut buf), BUS_ERR);
@@ -1145,14 +1311,14 @@ mod tests {
     fn low_memory_aliases_the_start_of_sdram() {
         let m = Arc::new(ram(128));
         bank0(&m, DESC_VALID | (3 << 16));
-        let l = LowAlias::new(m.clone());
-        // The processor reaches the bytes only through `l`; a bus master's
-        // view shows what it did.
+        // Low memory is the bus at 0. The processor reaches the bytes only
+        // there; a bus master's view shows what it did.
+        let l = m.phys();
         let dma = m.dma_view();
         assert_eq!(l.read64(0).data, 0);
         assert_eq!(l.write32(0x100, 0x1234_5678), BUS_OK);
         assert_eq!(dma.read32(RAM_BASE + 0x100).data, 0x1234_5678, "a low store is in SDRAM");
-        assert_eq!(m.read32(RAM_BASE + 0x100).status, BUS_ERR, "and not visible to the processor there");
+        assert_eq!(m.phys().read32(RAM_BASE + 0x100).status, BUS_ERR, "and not visible to the processor there");
         assert_eq!(l.read16(0x102).data, 0x5678);
         assert_eq!(l.read8(0x100).data, 0x12);
         assert_eq!(dma.write64(RAM_BASE + 0x2000, 0xa5a5_a5a5_5a5a_5a5a), BUS_OK);
@@ -1174,21 +1340,26 @@ mod tests {
     fn sdram_starts_past_the_guard() {
         let m = Arc::new(ram(128));
         bank0(&m, DESC_VALID | (3 << 16));
-        assert_eq!(m.read64(RAM_BASE).status, BUS_ERR);
-        assert_eq!(m.read8(RAM_BASE + 0x3fff).status, BUS_ERR);
-        assert_eq!(m.write32(RAM_BASE + 0x10, 1), BUS_ERR);
-        assert!(m.mem_ptr(RAM_BASE).is_none());
+        assert_eq!(m.phys().read64(RAM_BASE).status, BUS_ERR);
+        assert_eq!(m.phys().read8(RAM_BASE + 0x3fff).status, BUS_ERR);
+        assert_eq!(m.phys().write32(RAM_BASE + 0x10, 1), BUS_ERR);
+        // The direct paths, which `Ip30Physical` sends to the guard rather
+        // than to the window.
+        let g = m.guard();
+        assert!(g.mem_ptr(RAM_BASE).is_none());
         let mut line = [0u64; 16];
-        assert_eq!(m.read_block(RAM_BASE + 0x3f80, &mut line), BUS_ERR);
-        assert_eq!(m.read_block(RAM_BASE + 0x4000, &mut line), BUS_OK);
+        assert_eq!(g.read_block(RAM_BASE + 0x3f80, &mut line), BUS_ERR);
+        assert_eq!(g.write_block(RAM_BASE + 0x3f80, &line), BUS_ERR);
+        assert_eq!(g.read_block(RAM_BASE + 0x4000, &mut line), BUS_OK);
+        assert!(g.mem_ptr(RAM_BASE + 0x4000).is_some());
         w(&m, RAM_BASE + 0x4000, 0x0102_0304_0506_0708);
-        assert_eq!(m.read32(RAM_BASE + 0x4004).data, 0x0506_0708);
-        assert_eq!(m.read64(RAM_BASE + (128 << 20)).status, BUS_ERR, "past the bank");
+        assert_eq!(m.phys().read32(RAM_BASE + 0x4004).data, 0x0506_0708);
+        assert_eq!(m.phys().read64(RAM_BASE + (128 << 20)).status, BUS_ERR, "past the bank");
         // A bus master reaches the guard's bytes, and low memory is the
         // processor's way to them.
         assert_eq!(m.dma_view().write64(RAM_BASE, 7), BUS_OK);
         assert_eq!(m.dma_view().read64(RAM_BASE).data, 7);
-        assert_eq!(LowAlias::new(m.clone()).read64(0).data, 7);
+        assert_eq!(m.phys().read64(0).data, 7);
     }
 
     /// Every write path advances the page's generation, so code the JIT
@@ -1200,16 +1371,16 @@ mod tests {
         let m = Arc::new(ram(64));
         bank0(&m, DESC_VALID | (1 << 16));
         let a = RAM_BASE + 0x10_0000;
-        let (g0, g1) = (m.gen_ptr(a), m.gen_ptr(a + 0x1000));
+        let (g0, g1) = (m.phys().gen_ptr(a), m.phys().gen_ptr(a + 0x1000));
         assert!(!g0.is_null() && g0 != g1);
-        assert_eq!(m.gen_ptr(a + 0xff8), g0);
+        assert_eq!(m.phys().gen_ptr(a + 0xff8), g0);
         let v = gen(g0);
-        let _ = m.read64(a);
+        let _ = m.phys().read64(a);
         assert_eq!(gen(g0), v, "a read leaves it");
         w(&m, a, 1);
         assert_ne!(gen(g0), v, "a store advances it");
         let (v0, v1) = (gen(g0), gen(g1));
-        assert_eq!(m.write_block(a + 0xff8, &[1, 2]), BUS_OK);
+        assert_eq!(m.phys().write_block(a + 0xff8, &[1, 2]), BUS_OK);
         assert!(gen(g0) != v0 && gen(g1) != v1, "a block across pages advances both");
         let v = gen(g1);
         assert!(dma_write_bytes(&*m.dma_view(), a + 0x1003, &[1]));
@@ -1221,8 +1392,8 @@ mod tests {
         w(&m, a + 8, 2);
         assert_eq!(gen(win), gen(g0));
         // Low memory shares SDRAM's counters.
-        let l = LowAlias::new(m.clone());
-        assert!(m.gen_ptr(RAM_BASE).is_null(), "the guard has none");
+        let l = m.phys();
+        assert!(m.guard().gen_ptr(RAM_BASE).is_null(), "the guard has none");
         let dma = m.dma_view();
         assert_eq!(l.gen_ptr(0x180), dma.gen_ptr(RAM_BASE + 0x180));
         assert_ne!(l.gen_ptr(0x180), l.gen_ptr(0x1000));

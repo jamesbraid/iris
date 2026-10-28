@@ -129,17 +129,20 @@ unplugs the Ethernet; `pcap` is not available.
 
 ## Inspecting the machine
 
-The monitor (`monitor_port`) has, besides the usual CPU and device commands:
+The monitor (`monitor_port`) has, besides the usual CPU and device commands
+(`phys map` among them, the decode table slot by slot):
 
 - `ip30 memcfg | bridge | gfx | xbow | unmapped`: the memory banks as HEART
   places them, the Bridge's interrupt routing and device registers, the
   graphics widget's link and identification, the Crossbow accesses it
-  refused, and physical accesses that failed (the first 64, with the PC).
+  refused, and physical accesses nothing answers (the first 64, with the
+  PC). A device's own refusal, such as the flash refusing a write, is not
+  listed there.
 - `heart status`: HEART's interrupt bits, mask, counter and bank descriptors;
   `heart unsupported`: HEART registers a guest touched that are not modelled.
 - `scsi notes`: what the ISP1040 driver did that the model noted.
 
-`IRIS_IP30_TRACE=1` prints failed accesses, unsupported HEART registers and
+`IRIS_IP30_TRACE=1` prints accesses nothing answers, unsupported HEART registers and
 HEART's bank mapping as they happen.
 
 ## Threads
