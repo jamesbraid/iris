@@ -203,7 +203,7 @@ impl BedrockMd {
         if ![1, 2, 4, 8].contains(&bytes) || addr % bytes != 0 {
             return self.refuse();
         }
-        let mut event = None;
+        let mut event = Vec::new();
         let result = {
             let mut s = self.state.lock();
             match view {
@@ -213,7 +213,7 @@ impl BedrockMd {
                 View::Scrub => self.scrub(&mut s, addr, bytes, write, &mut event),
                 View::Uncached => {
                     let result = self.ram(&mut s, addr, bytes, write, &mut event);
-                    if write.is_none() && event == Some(MemoryError::Uncorrectable) {
+                    if write.is_none() && event.contains(&MemoryError::Uncorrectable) {
                         None
                     } else {
                         result
@@ -223,10 +223,12 @@ impl BedrockMd {
                 View::Memory | View::Dma => self.ram(&mut s, addr, bytes, write, &mut event),
             }
         };
-        if let Some(event) = event {
+        if !event.is_empty() {
             let callback = self.callback.lock().clone();
             if let Some(callback) = callback {
-                callback(event);
+                for kind in event {
+                    callback(kind);
+                }
             }
         }
         result
@@ -349,7 +351,7 @@ impl BedrockMd {
         bank: usize,
         at: u64,
         address: u64,
-        event: &mut Option<MemoryError>,
+        event: &mut Vec<MemoryError>,
     ) -> u64 {
         let mut data = self.memory.raw_read(bank, at);
         let key = (bank as u64 * FITTED_BANK + at) / 8;
@@ -380,9 +382,9 @@ impl BedrockMd {
                             self.memory.raw_write(bank, at, data);
                         }
                         s.ecc.remove(&key);
-                        *event = Some(MemoryError::Correctable);
+                        event.push(MemoryError::Correctable);
                     } else {
-                        *event = Some(MemoryError::Uncorrectable);
+                        event.push(MemoryError::Uncorrectable);
                     }
                 }
             }
@@ -395,7 +397,7 @@ impl BedrockMd {
         address: u64,
         bytes: u64,
         write: Option<u64>,
-        event: &mut Option<MemoryError>,
+        event: &mut Vec<MemoryError>,
     ) -> Option<u64> {
         let Some((bank, offset)) = BedrockMemory::decode(s.config, address, bytes) else {
             return self.refuse();
@@ -429,9 +431,9 @@ impl BedrockMd {
                     if let Some(bit) = bit {
                         s.directory.insert(line, word ^ (1 << bit));
                         s.marked_directory.remove(&line);
-                        *event = Some(MemoryError::Correctable);
+                        event.push(MemoryError::Correctable);
                     } else {
-                        *event = Some(MemoryError::Uncorrectable);
+                        event.push(MemoryError::Uncorrectable);
                         return None;
                     }
                 }
@@ -459,7 +461,7 @@ impl BedrockMd {
         at: u64,
         bytes: u64,
         write: Option<u64>,
-        event: &mut Option<MemoryError>,
+        event: &mut Vec<MemoryError>,
     ) -> Option<u64> {
         if bytes != 4 && bytes != 8 {
             return self.refuse();
@@ -541,7 +543,7 @@ impl BedrockMd {
         at: u64,
         bytes: u64,
         write: Option<u64>,
-        event: &mut Option<MemoryError>,
+        event: &mut Vec<MemoryError>,
     ) -> Option<u64> {
         if write.is_none() {
             return self.ecc(s, at, bytes, None);
@@ -762,9 +764,8 @@ mod tests {
         let r = md.md_bus();
         // These are named idle carriers in the donor's md_idle(), not storage.
         for at in [
-            0x20, 0x28, 0x40, 0x48, 0x58, 0x20010, 0x20018, 0x20020, 0x20028,
-            0x40020, 0x40028, 0x40030, 0x40038, 0x40058, 0x60020, 0x60028, 0x60030,
-            0x60038,
+            0x20, 0x28, 0x40, 0x48, 0x58, 0x20010, 0x20018, 0x20020, 0x20028, 0x40020, 0x40028,
+            0x40030, 0x40038, 0x40058, 0x60020, 0x60028, 0x60030, 0x60038,
         ] {
             let before = md.unsupported();
             assert_eq!(r.write64(at, u64::MAX), BUS_OK, "{at:#x}");
@@ -860,6 +861,60 @@ mod tests {
         assert_eq!(e.read32(4).status, BUS_ERR);
         assert_eq!(e.write16(0x04000006, 0xface), BUS_OK);
         assert_eq!(e.read16(0x04000006).data, 0xface);
+    }
+    #[test]
+    fn bedrock_scrub_delivers_each_error_after_releasing_state() {
+        let md = configured();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = events.clone();
+        let weak = Arc::downgrade(&md);
+        md.on_error(Arc::new(move |kind| {
+            assert_eq!(weak.upgrade().unwrap().current_cell(), u64::MAX);
+            seen.lock().push(kind);
+        }));
+        assert_eq!(md.ecc_bus().write8(7, 3), BUS_OK);
+        assert_eq!(md.ecc_bus().write8(6, 0x13), BUS_OK);
+        assert_eq!(md.ecc_bus().write8(5, 0x23), BUS_OK);
+        assert_eq!(md.ecc_scrub_bus().write64(0, 0), BUS_OK);
+        assert_eq!(
+            *events.lock(),
+            vec![
+                MemoryError::Uncorrectable,
+                MemoryError::Correctable,
+                MemoryError::Correctable,
+            ]
+        );
+        let record = md.md_bus().read64(0x60010).data;
+        assert_ne!(record & (1 << 60), 0);
+        assert_ne!(record & (1 << 52), 0);
+        assert_ne!(record & (1 << 53), 0);
+        assert_eq!((record >> 40) & 0xff, 3);
+        assert_eq!(record & (((1u64 << 30) - 1) << 3), 0);
+        assert_eq!(md.ecc_bus().read8(6).data, 0x13);
+        assert_eq!(md.ecc_bus().read8(5).data, 0x23);
+    }
+    #[test]
+    fn bedrock_read_delivers_directory_and_memory_errors() {
+        let md = configured();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = events.clone();
+        let weak = Arc::downgrade(&md);
+        md.on_error(Arc::new(move |kind| {
+            assert_eq!(weak.upgrade().unwrap().current_cell(), u64::MAX);
+            seen.lock().push(kind);
+        }));
+        let r = md.md_bus();
+        r.write64(0x40000, 2);
+        md.directory_bus().write64(0, 1 << 16);
+        r.write64(0x40000, 0);
+        md.ecc_bus().write8(7, 3);
+        assert_eq!(md.uncached_view().read64(0).status, BUS_ERR);
+        assert_eq!(
+            *events.lock(),
+            vec![MemoryError::Correctable, MemoryError::Uncorrectable]
+        );
+        assert_ne!(r.read64(0x40010).data & (1 << 61), 0);
+        assert_ne!(r.read64(0x60010).data & (1 << 60), 0);
     }
     #[test]
     fn bedrock_directory_protection_is_independent_and_wraps_at_fitted_density() {
