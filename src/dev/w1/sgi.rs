@@ -1,13 +1,13 @@
 //! SGI's "Number In a Can" records: what a board's Dallas add-only memory
 //! holds, a part number, name and barcode, or the Ethernet address. The bus,
-//! the parts and the master's slot decode live in `crate::dev::w1`; this
+//! the parts and the master's slot decode live in the parent module `w1`; this
 //! module only knows the SGI record formats and builds parts that carry
 //! them. The barcodes and ROM serials we ship are synthetic.
 //!
 //! Ported from hw/misc/sgi-board-record.c in jamesbraid/qemu-sgi-origami.
 
-use crate::dev::w1::crc::crc16 as crc16_seed;
 use crate::dev::w1;
+use crate::dev::w1::crc::crc16 as crc16_seed;
 
 /// Text fields of an SGI board record, as a part's first two 32-byte pages
 /// hold them, each page closed by an inverted CRC-16.
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn the_mac_nic_answers_read_rom_and_read_memory() {
-        let mac = [0x08, 0x00, 0x69, 0x0b, 0x7e, 0xba];
+        let mac = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
         let mut m = bus_of(vec![Box::new(ethernet_address_part(mac, ETHERNET_PART_SERIAL))]);
         assert!(m.reset(), "presence pulse");
         m.byte(0x33);
@@ -213,8 +213,8 @@ mod tests {
     fn search_rom_finds_every_part_on_the_wire() {
         let mut m = bus_of(vec![
             Box::new(ethernet_address_part([1, 2, 3, 4, 5, 6], ETHERNET_PART_SERIAL)),
-            Box::new(board_record_part(&rec("EDJ162", "030-0891-003", "A", "FP1"), 0x1234)),
-            Box::new(board_record_part(&rec("AAE3230158", "060-0035-003", "A", "PWR.SPPLY.ER"), 0x5678)),
+            Box::new(board_record_part(&rec("EMUF00", "030-0891-003", "A", "FP1"), 0x1234)),
+            Box::new(board_record_part(&rec("EMUS00", "060-0028-003", "A", "PWR.SPPLY.SR"), 0x5678)),
         ]);
         let roms = m.search();
         let mut fams: Vec<u8> = roms.iter().map(|r| r[0]).collect();
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn a_board_nic_reads_as_openbsd_and_linux_expect() {
-        let mut m = bus_of(vec![Box::new(board_record_part(&rec("FGT687", "030-0887-003", "G", "IP30"), 0x1234))]);
+        let mut m = bus_of(vec![Box::new(board_record_part(&rec("EMUN00", "030-0887-003", "F", "IP30"), 0x1234))]);
         // owserial: the redirection table from the status memory at 0x100,
         // eight bytes and a CRC16 at a time.
         assert!(m.reset());
@@ -262,7 +262,7 @@ mod tests {
         m.byte(0);
         let buf: Vec<u8> = (0..64).map(|_| m.byte(0xff)).collect();
         assert_eq!(buf[0], 0x01);
-        assert_eq!(&buf[1..7], b"FGT687");
+        assert_eq!(&buf[1..7], b"EMUN00");
         assert_eq!(&buf[21..30], b"030-0887-");
         assert_eq!(&buf[32 + 3..32 + 6], b"003");
         assert!(buf[32 + 10..32 + 16].iter().all(|&b| b == 0xff));

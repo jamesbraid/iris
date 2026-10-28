@@ -13,6 +13,7 @@ pub mod bus;
 pub mod crc;
 pub mod ds2502;
 pub mod ds2505;
+pub mod sgi;
 pub mod slot;
 
 pub use bus::{Bus, Part};
