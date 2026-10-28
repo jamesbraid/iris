@@ -2559,7 +2559,9 @@ impl Ioc3 {
         self.sh.st.lock().uart[port].backend = backend;
     }
 
-    /// Where parallel-port output goes. Without one it is dropped.
+    /// Where parallel-port output goes. Without one it is dropped. No machine
+    /// wires one, so only the tests set it.
+    #[cfg(test)]
     pub fn set_parallel_backend(&self, backend: Arc<dyn SerialBackend>) {
         self.sh.st.lock().par.backend = Some(backend);
     }
