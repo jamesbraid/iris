@@ -39,7 +39,7 @@
 //!   Host serial input is fed into the FIFOs by one thread per port.
 //! * The DS1685 is the O2's DS1687 model behind an index and a data port; it
 //!   has no alarm or periodic interrupts. Its RAM, including the 128-byte
-//!   extended RAM, persists in a 512-byte file (a 114-byte register dump loads).
+//!   extended RAM, persists in a 512-byte file.
 //!
 //! Ported from hw/misc/sgi-ioc3.c and its serial, parallel and keyboard siblings
 //! in jamesbraid/qemu-sgi-origami.
@@ -673,9 +673,7 @@ impl Parallel {
 const NVRAM_QUIET: Duration = Duration::from_millis(500);
 /// Registers 0x0e.. are storage rather than clock in the file.
 const NVRAM_FIRST: usize = 0x0e;
-/// The 114-byte file format: registers 0x0e..0x80 as the bank-flat cell array.
-const NVRAM_OLD_LEN: usize = 0x80 - NVRAM_FIRST;
-/// The current file format is a 512-byte image: common registers 0x00..0x40,
+/// The file is a 512-byte image: common registers 0x00..0x40,
 /// bank-0 RAM 0x40..0x80, bank-1 registers 0x80..0xc0, extended RAM
 /// 0xc0..0x140, zero padding after.
 const NVRAM_IMAGE_LEN: usize = 0x200;
@@ -779,33 +777,21 @@ impl Rtc {
         img
     }
 
-    /// Load a file: the 114-byte register dump, or the 512-byte image.
-    /// The clock registers (0x00..0x0d) are never loaded; time starts from
-    /// the host. Returns false for any other length.
+    /// Load a 512-byte image. The clock registers (0x00..0x0d) are never
+    /// loaded; time starts from the host. Returns false for any other length.
     fn load(&mut self, img: &[u8]) -> bool {
-        if img.len() == NVRAM_OLD_LEN {
-            for (i, b) in img.iter().enumerate() {
-                let r = NVRAM_FIRST + i;
-                if r < 0x40 {
-                    self.dev.poke(r, *b);
-                } else {
-                    self.nv[r - 0x40] = *b;
-                }
-            }
-            true
-        } else if img.len() == NVRAM_IMAGE_LEN {
-            for (r, &b) in img.iter().enumerate().take(0x40).skip(NVRAM_FIRST) {
-                self.dev.poke(r, b);
-            }
-            self.nv.copy_from_slice(&img[NVRAM_OFF_NV..NVRAM_OFF_NV + 64]);
-            self.ext.copy_from_slice(&img[NVRAM_OFF_EXT..NVRAM_OFF_EXT + 64]);
-            self.xram.copy_from_slice(&img[NVRAM_OFF_XRAM..NVRAM_OFF_XRAM + RTC_XRAM_SIZE]);
-            // Loading never powers the machine off.
-            self.dev.poke(0x4a, self.ext[0x0a] & !0x08);
-            true
-        } else {
-            false
+        if img.len() != NVRAM_IMAGE_LEN {
+            return false;
         }
+        for (r, &b) in img.iter().enumerate().take(0x40).skip(NVRAM_FIRST) {
+            self.dev.poke(r, b);
+        }
+        self.nv.copy_from_slice(&img[NVRAM_OFF_NV..NVRAM_OFF_NV + 64]);
+        self.ext.copy_from_slice(&img[NVRAM_OFF_EXT..NVRAM_OFF_EXT + 64]);
+        self.xram.copy_from_slice(&img[NVRAM_OFF_XRAM..NVRAM_OFF_XRAM + RTC_XRAM_SIZE]);
+        // Loading never powers the machine off.
+        self.dev.poke(0x4a, self.ext[0x0a] & !0x08);
+        true
     }
 
     /// The file and the image to put in it, if the RAM changed at least
@@ -2578,8 +2564,7 @@ impl Ioc3 {
     }
 
     /// Back the DS1685's RAM (user RAM, bank-1 registers and the 128-byte
-    /// extended RAM) with a file. A 512-byte image is loaded, as is a
-    /// 114-byte register dump. The file is
+    /// extended RAM) with a file. A 512-byte image is loaded. The file is
     /// written as 512 bytes now and replaced whole once the guest's writes
     /// to the RAM pause (see [`Ioc3::flush_nvram`]). The clock starts from
     /// host time.
@@ -2589,7 +2574,7 @@ impl Ioc3 {
             let mut st = self.sh.st.lock();
             if let Ok(img) = std::fs::read(&path) {
                 if !st.rtc.load(&img) {
-                    log::warn!("ioc3: NVRAM file {} has {} bytes, not 114 or 512; ignored", path.display(), img.len());
+                    log::warn!("ioc3: NVRAM file {} has {} bytes, not 512; ignored", path.display(), img.len());
                 }
             }
             st.rtc.file = Some(path.clone());
