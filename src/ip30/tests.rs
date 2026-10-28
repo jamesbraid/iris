@@ -53,8 +53,13 @@ struct Board {
 }
 
 fn board(prom: &[u8]) -> Board {
-    let ram = Arc::new(HeartRam::new([128, 0, 0, 0]));
-    let heart = Arc::new(Heart::new(HeartConfig::octane([128 << 20, 0, 0, 0]), crate::dev::heart::host_clock()));
+    board_with(prom, [128, 0, 0, 0])
+}
+
+/// `board` with the DIMMs fitted in each bank, in MB.
+fn board_with(prom: &[u8], banks_mb: [u32; 4]) -> Board {
+    let ram = Arc::new(HeartRam::new(banks_mb));
+    let heart = Arc::new(Heart::new(HeartConfig::octane(banks_mb.map(|mb| (mb as u64) << 20)), crate::dev::heart::host_clock()));
     let xbow = Arc::new(Xbow::new(XBOW_REVISION, 1 << WIDGET_HEART | 1 << WIDGET_BRIDGE));
     xbow.connect_heart(heart.clone());
     let bridge = Bridge::new(ram.dma_view(), heart.clone());
@@ -203,6 +208,180 @@ fn sdram_follows_the_descriptors() {
     // HEART's reset takes the descriptors, and memory, away.
     crate::traits::Resettable::power_on(&*b.heart);
     assert_eq!(p.read64(0x1_1000_0000).status, BUS_ERR);
+}
+
+// The memory map as it stands, pinned before the decode moves. Each of
+// these holds on the bus path; the one that does not hold for a cached
+// access is named as a limitation.
+
+/// Write HEART's descriptor for `bank`, as the PROM does through the PIU.
+fn set_bank(p: &Ip30Physical, bank: u32, desc: u32) {
+    assert_eq!(p.write32(PIU_BASE + 0x20 + 4 * bank as u64, desc), BUS_OK);
+}
+
+#[test]
+fn map_a_valid_descriptor_over_an_empty_bank_reads_zero_and_drops_writes() {
+    let b = board(&[]);
+    let p = &b.phys;
+    let dma = p.memory();
+    // Bank 1 is not fitted. Its descriptor claims 64 MiB at the third unit.
+    set_bank(p, 1, 0x8001_0002);
+    let at = 0x2000_0000 + 2 * 0x200_0000 + 0x100;
+    assert_eq!(p.write64(at, u64::MAX), BUS_OK, "the write is accepted");
+    assert_eq!(p.read64(at).data, 0, "and goes nowhere");
+    assert_eq!(p.read8(at).status, BUS_OK);
+    assert_eq!(dma.read64(at).status, BUS_ERR, "a bus master gets an error");
+    assert_eq!(p.read64(at + 0x400_0000).status, BUS_ERR, "past the descriptor's span");
+    // With no other descriptor over it, the start of SDRAM is empty memory
+    // too: low memory answers as that bank does, past the guard.
+    set_bank(p, 1, 0x8001_0000);
+    assert_eq!(p.write32(0x100, 5), BUS_OK);
+    assert_eq!(p.read32(0x100).data, 0);
+    assert_eq!(p.read8(0x2000_0000).status, BUS_ERR, "the guard still faults");
+    assert_eq!(p.read32(0x2000_4000).data, 0);
+    assert_eq!(dma.read32(0x2000_0100).status, BUS_ERR);
+}
+
+#[test]
+fn map_the_proms_bank_size_probe_gets_each_size_s_answer() {
+    // The stock PROM sizes a bank through a temporary 2 GiB descriptor
+    // (0x81bf0040), writing patterns and watching which address bits alias,
+    // then looks the result up. These are the descriptors it settles on.
+    const PROBE: u64 = 0x2000_0000 + 0x40 * 0x200_0000;
+    const UNIT: u64 = 0x200_0000;
+    for (mib, want) in [(64u32, 0x8101_0040u32), (128, 0x8103_0040), (256, 0x8147_0040)] {
+        let b = board_with(&[], [mib, 0, 0, 0]);
+        let p = &b.phys;
+        set_bank(p, 0, 0x81bf_0040);
+        let distinct = |step: u64, pat: u64| {
+            assert_eq!(p.write64(PROBE, pat), BUS_OK);
+            assert_eq!(p.write64(PROBE + step, !pat), BUS_OK);
+            p.read64(PROBE).data == pat
+        };
+        let mut bits = 0;
+        assert_eq!(p.write64(PROBE + 0x100, 0x1111_1111_1111_1111), BUS_OK);
+        assert_eq!(p.write64(PROBE, !0x1111_1111_1111_1111), BUS_OK);
+        if p.read64(PROBE + 0x100).data == 0x1111_1111_1111_1111 {
+            bits |= 0x20;
+        }
+        if distinct(4 * UNIT, 0x2222_2222_2222_2222) {
+            bits |= 0x10;
+        } else if distinct(UNIT, 0x4444_4444_4444_4444) {
+            bits |= 0x08;
+        }
+        if distinct(32 * UNIT, 0x8888_8888_8888_8888) {
+            bits |= 0x04;
+        }
+        // The PROM's table, indexed by the three bits it found.
+        const TABLE: [u32; 16] = [
+            0x0000_0040, 0x0001_0040, 0x0043_0040, 0x0047_0040, 0x008f_0040, 0x009f_0040, 0x0000_0040, 0x0000_0040,
+            0x0101_0040, 0x0103_0040, 0x0147_0040, 0x014f_0040, 0x019f_0040, 0x01bf_0040, 0x0000_0040, 0x0000_0040,
+        ];
+        let word = TABLE[bits / 4] | 0x8000_0000;
+        assert_eq!(word, want, "{mib} MiB");
+        set_bank(p, 0, word);
+        assert_eq!(b.heart.memcfg()[0], want);
+        // The descriptor it settles on holds the fitted memory where the probe was, nothing past it.
+        let end = PROBE + ((mib as u64) << 20);
+        assert_eq!(p.write64(end - 8, 3), BUS_OK, "{mib} MiB: last doubleword");
+        assert_eq!(p.read64(end - 8).data, 3);
+        assert_eq!(p.read64(end).status, BUS_ERR, "{mib} MiB: past the end");
+    }
+}
+
+#[test]
+fn map_a_bank_above_4_gib_is_reached_through_the_bus_only() {
+    let b = board_with(&[], [64, 64, 0, 0]);
+    let p = &b.phys;
+    let dma = p.memory();
+    // Bank 0 at the start of SDRAM space; bank 1 at unit 0x80, 4 GiB up.
+    set_bank(p, 0, 0x8001_0000);
+    set_bank(p, 1, 0x8001_0080);
+    let high = 0x2000_0000 + 0x80 * 0x200_0000;
+    assert_eq!(high, 0x1_2000_0000);
+    assert_eq!(p.write64(high + 0x8000, 0x0123_4567_89ab_cdef), BUS_OK);
+    assert_eq!(p.read64(high + 0x8000).data, 0x0123_4567_89ab_cdef);
+    assert_eq!(dma.read64(high + 0x8000).data, 0x0123_4567_89ab_cdef);
+    assert_eq!(p.read64(0x2000_8000).data, 0, "bank 0 is a different bank");
+    assert!(p.mem_ptr(high + 0x8000).is_some(), "it has a direct pointer");
+    assert_eq!(p.read64(high + 0x400_0000).status, BUS_ERR, "past the bank");
+}
+
+#[test]
+fn map_a_bus_master_reaches_the_guarded_bytes() {
+    let b = board(&[]);
+    let p = &b.phys;
+    set_bank(p, 0, 0x8003_0000);
+    let dma = p.memory();
+    assert_eq!(p.read64(0x2000_0000).status, BUS_ERR);
+    assert_eq!(p.write64(0x2000_3000, 1), BUS_ERR);
+    assert_eq!(dma.write64(0x2000_3000, 0x0a0b_0c0d_0e0f_1011), BUS_OK);
+    assert_eq!(dma.read64(0x2000_3000).data, 0x0a0b_0c0d_0e0f_1011);
+    assert_eq!(p.read64(0x3000).data, 0x0a0b_0c0d_0e0f_1011, "the same bytes, at low memory");
+    let mut bytes = [0u8; 8];
+    assert!(dma_read_bytes(&*dma, 0x2000_3000, &mut bytes));
+    assert_eq!(bytes, [0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11]);
+}
+
+/// Low memory and SDRAM are one page-generation counter, whichever way a
+/// store comes in: through the alias, at the SDRAM address by a bus master,
+/// or through a block write.
+#[cfg(feature = "jitv2")]
+#[test]
+fn map_the_alias_and_sdram_share_page_generations() {
+    let b = board(&[]);
+    let p = &b.phys;
+    set_bank(p, 0, 0x8003_0000);
+    let dma = p.memory();
+    let gen = |g: *const AtomicU64| unsafe { (*g).load(Ordering::Acquire) };
+    let low = p.gen_ptr(0x2000);
+    assert!(!low.is_null());
+    assert_eq!(low, dma.gen_ptr(0x2000_2000));
+    let v = gen(low);
+    assert_eq!(p.write_block(0x2000, &[1, 2]), BUS_OK);
+    assert_ne!(gen(low), v, "a block store through the alias");
+    let v = gen(low);
+    assert_eq!(dma.write_block(0x2000_2000, &[3]), BUS_OK);
+    assert_ne!(gen(low), v, "a bus master's block store at the SDRAM address");
+}
+
+/// STATED LIMITATION, not hardware behaviour. On an Octane2 (HEART rev F)
+/// both cached and uncached reads of 0x2000_3000 take a data bus error.
+/// Here only the uncached (bus) path faults: the CPU's cache reads and
+/// writes RAM straight out of the ppmem window, which maps the whole first
+/// 32 MiB unit, guard included. No supported guest does this; leaving the
+/// guard out of the window would send every cached access in the first
+/// 64 MiB of SDRAM through the bus. This test pins the approximation so a
+/// change to it is deliberate.
+#[test]
+fn limitation_a_cached_access_to_the_guard_reaches_the_bytes() {
+    use crate::cpu::mips_cache_shadow::R10000ShadowCache;
+    use crate::cpu::mips_cache_v2::MipsCache;
+    use crate::ppmem::MappedMemory;
+    let b = board(&[]);
+    let lines = Arc::new(CachedFlashLines::new(b.phys.clone()));
+    let cache = R10000ShadowCache::from(lines as Arc<dyn BusDevice>);
+    // Wire the window as the machine does, then let HEART's descriptor
+    // write lay it out.
+    let sp = b.phys.ram.space();
+    unsafe {
+        sp.set_bitmap_sink2(cache.tcache_bitmap_ptr());
+        cache.set_tcache_window(sp.window_base());
+    }
+    set_bank(&b.phys, 0, 0x8003_0000);
+    let (va, pa) = (0xffff_ffff_a000_3000u64, 0x2000_3000u64);
+
+    assert_eq!(b.phys.read32(pa).status, BUS_ERR, "uncached reads fault");
+    assert_eq!(b.phys.write32(pa, 1), BUS_ERR, "and so do uncached writes");
+    assert_eq!(b.phys.memory().write32(pa, 0x1234_5678), BUS_OK);
+    let r = cache.read::<4>(va, pa);
+    assert_eq!((r.status, r.data), (BUS_OK, 0x1234_5678), "limitation: the cached read reaches the byte");
+    assert_eq!(cache.write::<4>(va, pa + 4, 0x9abc_def0), BUS_OK, "limitation: so does a cached write");
+    assert_eq!(b.phys.memory().read32(pa + 4).data, 0x9abc_def0);
+    // The guard ends at 0x2000_4000; the same access just past it is
+    // ordinary memory on both paths.
+    assert_eq!(cache.write::<4>(va + 0x1000, pa + 0x1000, 7), BUS_OK);
+    assert_eq!(b.phys.read32(pa + 0x1000).data, 7);
 }
 
 #[test]
