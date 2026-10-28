@@ -232,8 +232,8 @@ impl OctaneMachine {
         );
 
         let count_hz = cfg.clock.fixed_mhz.map_or(OCTANE_COUNT_HZ, |mhz| (mhz * 1_000_000.0) as u64);
-        let flash_lines = Arc::new(CachedFlashLines::new(phys.clone()));
-        let cpu = Self::build_cpu(phys.clone(), flash_lines.clone(), &timer_manager, count_hz.max(1), fasttick);
+        let flash_lines = Arc::new(CachedFlashLines::new(phys.phys.clone()));
+        let cpu = Self::build_cpu(phys.phys.clone(), flash_lines.clone(), &timer_manager, count_hz.max(1), fasttick);
         if let Some(g) = &gfx {
             g.mgras().set_cpu_cycles(cpu.cycles_ptr());
             // Host GL frames composite straight into the IMPACT framebuffer.
@@ -252,7 +252,7 @@ impl OctaneMachine {
             #[cfg(not(feature = "jitv2_lockstep"))]
             {
                 let stats = g.stats.clone();
-                g.compile_queue.start(phys.clone() as Arc<dyn BusDevice>, stats);
+                g.compile_queue.start(phys.phys.clone() as Arc<dyn BusDevice>, stats);
             }
             std::mem::forget(cpu_device);
         }
@@ -286,7 +286,7 @@ impl OctaneMachine {
         monitor.register_device(cpu.clone().as_device());
         monitor.register_device(heart.clone());
         // `phys`: the physical bus's decode table, memory and traces.
-        monitor.register_device(phys.phys().clone());
+        monitor.register_device(phys.phys.clone());
         monitor.register_device(Arc::new(Ip30Monitor {
             phys: phys.clone(),
             ram: ram.clone(),

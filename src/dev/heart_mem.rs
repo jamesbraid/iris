@@ -1343,8 +1343,8 @@ mod tests {
         assert_eq!(m.phys().read64(RAM_BASE).status, BUS_ERR);
         assert_eq!(m.phys().read8(RAM_BASE + 0x3fff).status, BUS_ERR);
         assert_eq!(m.phys().write32(RAM_BASE + 0x10, 1), BUS_ERR);
-        // The direct paths, which `Ip30Bus` sends to the guard rather
-        // than to the window.
+        // The guard's own direct paths. The bus does not reach them: its
+        // direct paths take the window, which maps this unit whole.
         let g = m.guard();
         assert!(g.mem_ptr(RAM_BASE).is_none());
         let mut line = [0u64; 16];

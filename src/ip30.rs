@@ -30,9 +30,9 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::dev::heart_mem::{OctaneMemory, GUARD};
+use crate::dev::heart_mem::OctaneMemory;
 use crate::physical::Physical;
-use crate::ppmem::devmap::{PHYS_MASK, SLOT_SHIFT};
+use crate::ppmem::devmap::SLOT_SHIFT;
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, BUS_ERR, BUS_OK};
 
 /// Widget numbers on the Octane's Crossbow.
@@ -131,14 +131,15 @@ impl BusDevice for Misses {
 /// readers on device threads see the old slot or the new one, never a torn
 /// one (`docs/devmap-design.md`).
 ///
-/// This is what the CPU is given, uncached and as its cache's memory, and
-/// what the JIT reads generations through. Width accesses go straight to
-/// `Physical`. The direct paths (`mem_ptr`, `read_block`, `write_block`,
-/// `gen_ptr`) do too, except over the guard, where `Physical` would take the
-/// window: there they go to `SdramGuard`, so the bus path faults the guard
-/// whatever the window maps.
+/// Not a [`BusDevice`]: the machine gives the CPU, the JIT and the shadow
+/// cache's downstream `phys` itself, as the O2 does. An uncached scalar
+/// access over the guard reaches `SdramGuard` through the slot table and
+/// faults; the direct paths (`mem_ptr`, `read_block`, `write_block`,
+/// `gen_ptr`) and cached accesses take the window, which maps the guarded
+/// unit whole, and reach the bytes (see `heart_mem`).
 pub struct Ip30Bus {
-    phys: Arc<Physical>,
+    /// The machine-independent bus: what the CPU, the JIT and the monitor use.
+    pub phys: Arc<Physical>,
     ram: Arc<OctaneMemory>,
     /// The widgets on the Crossbow's ports 9 to 15, and whether each also
     /// takes its large window.
@@ -149,11 +150,6 @@ impl Ip30Bus {
     /// The bus `ram` is on, with nothing but memory mapped yet.
     pub fn new(ram: Arc<OctaneMemory>) -> std::io::Result<Self> {
         Ok(Self { phys: ram.phys().clone(), ram, widgets: Mutex::new(Default::default()) })
-    }
-
-    /// The machine-independent bus, for the monitor's `phys`.
-    pub fn phys(&self) -> &Arc<Physical> {
-        &self.phys
     }
 
     /// Put `dev` at physical `start..end` (`end` exclusive, rounded up to a
@@ -235,60 +231,6 @@ impl Ip30Bus {
     /// pc)`.
     pub fn unmapped(&self) -> Vec<(u64, bool, u64)> {
         self.ram.misses().list()
-    }
-
-    /// Whether `a` falls in the guard, whose direct paths `Physical` would
-    /// take through the window.
-    #[inline(always)]
-    fn guarded(a: u64) -> bool {
-        GUARD.contains(&(a & PHYS_MASK))
-    }
-}
-
-/// Every access forwarded to `Physical`, the direct paths over the guard
-/// excepted (see [`Ip30Bus`]).
-impl BusDevice for Ip30Bus {
-    #[inline] fn read8(&self, a: u64) -> BusRead8 { self.phys.read8(a) }
-    #[inline] fn read16(&self, a: u64) -> BusRead16 { self.phys.read16(a) }
-    #[inline] fn read32(&self, a: u64) -> BusRead32 { self.phys.read32(a) }
-    #[inline] fn read64(&self, a: u64) -> BusRead64 { self.phys.read64(a) }
-    #[inline] fn write8(&self, a: u64, v: u8) -> u32 { self.phys.write8(a, v) }
-    #[inline] fn write16(&self, a: u64, v: u16) -> u32 { self.phys.write16(a, v) }
-    #[inline] fn write32(&self, a: u64, v: u32) -> u32 { self.phys.write32(a, v) }
-    #[inline] fn write64(&self, a: u64, v: u64) -> u32 { self.phys.write64(a, v) }
-    #[inline] fn write64_masked(&self, a: u64, v: u64, m: u64) -> u32 { self.phys.write64_masked(a, v, m) }
-    #[inline] fn dma_read64(&self, a: u64) -> BusRead64 { self.phys.dma_read64(a) }
-    #[inline] fn dma_write64(&self, a: u64, v: u64) -> u32 { self.phys.dma_write64(a, v) }
-    #[inline] fn dma_read64_bulk(&self, a: u64, out: &mut [u64]) -> u32 { self.phys.dma_read64_bulk(a, out) }
-    #[inline] fn dma_write64_bulk(&self, a: u64, vals: &[u64]) -> u32 { self.phys.dma_write64_bulk(a, vals) }
-    #[inline]
-    fn mem_ptr(&self, a: u64) -> Option<*const u64> {
-        if Self::guarded(a) {
-            return self.ram.guard().mem_ptr(a & PHYS_MASK);
-        }
-        self.phys.mem_ptr(a)
-    }
-    #[inline]
-    fn read_block(&self, a: u64, buf: &mut [u64]) -> u32 {
-        if Self::guarded(a) {
-            return self.ram.guard().read_block(a & PHYS_MASK, buf);
-        }
-        self.phys.read_block(a, buf)
-    }
-    #[inline]
-    fn write_block(&self, a: u64, buf: &[u64]) -> u32 {
-        if Self::guarded(a) {
-            return self.ram.guard().write_block(a & PHYS_MASK, buf);
-        }
-        self.phys.write_block(a, buf)
-    }
-    #[cfg(feature = "jitv2")]
-    #[inline]
-    fn gen_ptr(&self, a: u64) -> *const AtomicU64 {
-        if Self::guarded(a) {
-            return self.ram.guard().gen_ptr(a & PHYS_MASK);
-        }
-        self.phys.gen_ptr(a)
     }
 }
 
