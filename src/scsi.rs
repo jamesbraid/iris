@@ -126,6 +126,7 @@ pub struct ScsiDevice {
     pending_sense: [u8; 18],  // Stored sense data, served on REQUEST_SENSE
     /// Unit Attention pending — set after disc change, cleared on next command.
     unit_attention: bool,
+    reset_attention: bool,
     /// Physical sector size: always 2048 for CD-ROM (Yellow Book), 512 for HDD.
     /// Used for TOC lead-out LBA (CD spec requires TOC in physical sectors).
     phys_block_size: u64,
@@ -156,6 +157,7 @@ impl ScsiDevice {
             buffer: vec![0u8; SCSI_BUFFER_SIZE],
             pending_sense: [0u8; 18],
             unit_attention: false,
+            reset_attention: false,
             phys_block_size: if is_cdrom { 2048 } else { 512 },
             // CD-ROM drives default to 2048-byte logical blocks (Sony CDU-76S behaviour).
             // HDD defaults to 512. dksc switches CD-ROM to 512 for EFS, back to 2048 for ISO.
@@ -240,6 +242,7 @@ impl ScsiDevice {
             buffer: vec![0u8; SCSI_BUFFER_SIZE],
             pending_sense: [0u8; 18],
             unit_attention: false,
+            reset_attention: false,
             phys_block_size: 2048,
             logical_block_size: 2048,
             identity,
@@ -258,6 +261,7 @@ impl ScsiDevice {
             buffer: Vec::new(),
             pending_sense: [0u8; 18],
             unit_attention: false,
+            reset_attention: false,
             phys_block_size: 512,
             logical_block_size: 512,
             // Never reported: a DaynaPort answers INQUIRY itself.
@@ -576,6 +580,14 @@ impl ScsiDevice {
         ScsiResponse { status: 0x02, data: vec![] }
     }
 
+    /// Reset the target's command state and report a bus-reset unit attention.
+    /// Media, overlays and the selected logical block size remain attached.
+    pub fn reset_bus(&mut self) {
+        self.pending_sense = [0; 18];
+        self.pending_sense[0] = 0x70;
+        self.reset_attention = true;
+    }
+
     pub fn request(&mut self, req: &ScsiRequest) -> Result<ScsiResponse, std::io::Error> {
         if req.cdb.is_empty() {
             return Ok(self.check_condition(0x05, 0x20, 0x00)); // Illegal Request: Invalid command
@@ -586,6 +598,14 @@ impl ScsiDevice {
         // For most commands, only LUN 0 is valid
         if lun != 0 && req.cdb[0] != scsi_cmd::INQUIRY && req.cdb[0] != scsi_cmd::REQUEST_SENSE {
             return Ok(self.check_condition(0x05, 0x25, 0x00)); // Illegal Request: LUN Not Supported
+        }
+
+        if self.reset_attention
+            && req.cdb[0] != scsi_cmd::REQUEST_SENSE
+            && req.cdb[0] != scsi_cmd::INQUIRY
+        {
+            self.reset_attention = false;
+            return Ok(self.check_condition(0x06, 0x29, 0x00));
         }
 
         // Unit attention fires before any other command (except REQUEST_SENSE/INQUIRY).
@@ -1365,6 +1385,21 @@ mod tests {
             data_len: ScsiDataLength::Unlimited,
             data_in,
         }
+    }
+
+    #[test]
+    fn bus_reset_reports_unit_attention_once_without_detaching_media() {
+        let path = tmp("reset");
+        std::fs::write(&path, vec![0; 512]).unwrap();
+        let mut dev = ScsiDevice::open(path.to_str().unwrap(), false, vec![], false, None,
+            ScsiIdentity::new(b"TEST    ", b"DISK            ", b"1.0 ")).unwrap();
+        dev.reset_bus();
+        assert_eq!(dev.request(&request(&[0x12, 0, 0, 0, 36, 0], None)).unwrap().status, 0);
+        assert_eq!(dev.request(&request(&[0, 0, 0, 0, 0, 0], None)).unwrap().status, 2);
+        let sense = dev.request(&request(&[3, 0, 0, 0, 18, 0], None)).unwrap();
+        assert_eq!((sense.data[2], sense.data[12]), (6, 0x29));
+        assert_eq!(dev.request(&request(&[0, 0, 0, 0, 0, 0], None)).unwrap().status, 0);
+        std::fs::remove_file(path).unwrap();
     }
 
     /// The direct backend's read/write call sites now go through `BlockNode`.
