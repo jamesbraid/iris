@@ -60,6 +60,7 @@ pub struct PciConfig {
     power_on: [u32; 64],
     // Construction policy stays with the function when snapshot registers load.
     status: u16,
+    status_w1c_mask: u16,
     command_mask: u16,
     latency_mask: u8,
     cache_line_mask: u8,
@@ -83,7 +84,7 @@ impl PciConfig {
         Self {
             regs: Mutex::new(r), bars, power_on: r,
             status: 0x0200, command_mask: 0xffff, latency_mask: 0, cache_line_mask: 0,
-            writable_masks: [u32::MAX; 64],
+            status_w1c_mask: 0, writable_masks: [u32::MAX; 64],
         }
     }
 
@@ -94,6 +95,18 @@ impl PciConfig {
         self.command_mask = command_mask;
         self.latency_mask = latency_mask;
         self
+    }
+
+    /// Select device-latched Status bits that configuration writes clear with ones.
+    /// Fixed Status bits remain asserted independently of these events.
+    pub fn with_status_w1c_policy(mut self, mask: u16) -> Self {
+        self.status_w1c_mask = mask;
+        self
+    }
+
+    /// Latch selected Status events without replacing earlier events or fixed bits.
+    pub fn set_status_bits(&self, bits: u16) {
+        self.regs.lock().unwrap()[1] |= ((bits & self.status_w1c_mask) as u32) << 16;
     }
 
     /// Set writable cache-line-size bits in the low byte of header dword 3.
@@ -133,7 +146,8 @@ impl PciConfig {
     pub fn read(&self, reg: usize) -> u32 {
         let r = self.regs.lock().unwrap();
         match reg {
-            1 => (r[1] & 0xffff) | ((self.status as u32) << 16),
+            1 => (r[1] & (0xffff | ((self.status_w1c_mask as u32) << 16)))
+                | ((self.status as u32) << 16),
             _ => r[reg],
         }
     }
@@ -147,8 +161,11 @@ impl PciConfig {
                 let mask = ((self.latency_mask as u32) << 8) | self.cache_line_mask as u32;
                 r[3] = (r[3] & !mask) | (val & mask);
             }
-            // Status is fixed; only the selected Command bits are writable.
-            1 => r[1] = val & self.command_mask as u32,
+            // Command writes replace selected bits; Status events clear on ones.
+            1 => {
+                let clear = val & ((self.status_w1c_mask as u32) << 16);
+                r[1] = (r[1] & 0xffff_0000 & !clear) | (val & self.command_mask as u32);
+            }
             4..=9 => {
                 let bar = self.bars[reg - 4];
                 r[reg] = match bar {
@@ -497,6 +514,54 @@ mod tests {
         let default = scsi_like();
         default.write(3, 0xf8ff);
         assert_eq!(default.read(3), 0, "existing functions keep both bytes read-only");
+    }
+
+    #[test]
+    fn status_events_preserve_fixed_fields_until_explicitly_cleared() {
+        let c = scsi_like().with_status_w1c_policy(0xc000);
+        c.set_status_bits(0x8000);
+        assert_eq!(c.read(1), 0x8200_0000);
+        c.write(1, 6);
+        assert_eq!(c.read(1), 0x8200_0006, "Command writes retain the event");
+        c.set_status_bits(0x4000);
+        assert_eq!(c.read(1), 0xc200_0006, "new events retain prior events");
+        c.write(1, 0x4000_0006);
+        assert_eq!(c.read(1), 0x8200_0006, "only the selected written event clears");
+        c.write(1, 0x0200_0006);
+        assert_eq!(c.read(1), 0x8200_0006, "fixed status cannot be cleared");
+        c.write(1, 0x8000_0006);
+        assert_eq!(c.read(1), 0x0200_0006);
+        c.write(1, 0x8000_0006);
+        assert_eq!(c.read(1), 0x0200_0006, "configuration writes cannot set an event");
+    }
+
+    #[test]
+    fn status_events_are_opt_in_and_reset_with_the_header() {
+        let default = scsi_like();
+        default.set_status_bits(u16::MAX);
+        assert_eq!(default.read(1), 0x0200_0000);
+        let c = scsi_like().with_status_w1c_policy(0x8000);
+        c.set_status_bits(u16::MAX);
+        assert_eq!(c.read(1), 0x8200_0000, "only configured event bits latch");
+        c.reset();
+        assert_eq!(c.read(1), 0x0200_0000);
+    }
+
+    #[test]
+    fn snapshots_preserve_status_events_but_not_their_write_policy() {
+        use crate::traits::Saveable;
+        let src = scsi_like().with_status_w1c_policy(0x8000);
+        src.set_status_bits(0x8000);
+        let saved = src.save_state();
+        let dst = scsi_like().with_status_w1c_policy(0x8000);
+        dst.load_state(&saved).expect("load_state");
+        assert_eq!(dst.save_state(), saved);
+        assert_eq!(dst.read(1), 0x8200_0000);
+        dst.write(1, 0x8000_0006);
+        assert_eq!(dst.read(1), 0x0200_0006);
+        let default = scsi_like();
+        default.load_state(&saved).expect("load_state");
+        assert_eq!(default.read(1), 0x0200_0000, "policy is selected at construction");
     }
 
     fn capability_config() -> PciConfig {
