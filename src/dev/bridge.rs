@@ -1313,6 +1313,14 @@ impl Bridge {
         if mask == 0 {
             return self.mem_read(xio, out);
         }
+        let unit = mask as usize + 1;
+        if xio & mask == 0 && out.len() % unit == 0 {
+            // Whole units: the bytes come straight into place and each unit
+            // is reversed where it lies.
+            let ok = self.mem_read(xio, out);
+            out.chunks_exact_mut(unit).for_each(<[u8]>::reverse);
+            return ok;
+        }
         let lo = xio & !mask;
         let hi = (xio + out.len() as u64 + mask) & !mask;
         let mut span = vec![0u8; (hi - lo) as usize];
@@ -1327,6 +1335,21 @@ impl Bridge {
         let mask = placement.mask();
         if mask == 0 {
             return self.mem_write(xio, data);
+        }
+        let unit = mask as usize + 1;
+        if xio & mask == 0 && data.len() % unit == 0 {
+            // Whole units: reverse each into a copy and store it in one go.
+            let mut stack = [0u8; 4096];
+            let mut heap = Vec::new();
+            let swapped: &mut [u8] = if data.len() <= stack.len() {
+                &mut stack[..data.len()]
+            } else {
+                heap.resize(data.len(), 0);
+                &mut heap
+            };
+            swapped.copy_from_slice(data);
+            swapped.chunks_exact_mut(unit).for_each(<[u8]>::reverse);
+            return self.mem_write(xio, swapped);
         }
         let lo = xio & !mask;
         let hi = (xio + data.len() as u64 + mask) & !mask;

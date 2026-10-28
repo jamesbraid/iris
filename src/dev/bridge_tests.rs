@@ -1115,3 +1115,34 @@ fn the_window_decodes_the_low_24_bits_of_a_physical_address() {
     let r = Rig::new();
     assert_eq!(r.bridge.read32(0x1f00_0000 + u64::from(reg::IDENTIFICATION + 4)).data, r.get(reg::IDENTIFICATION));
 }
+
+#[test]
+fn long_and_short_transfers_place_every_byte_by_the_swap_rule() {
+    let r = Rig::new();
+    let c = r.card(2, PCI_INTA);
+    r.direct_to_heart(false);
+    // (swap bit, 64-bit slot, mask): the PCI byte at p is memory byte p ^ mask.
+    for (swap, wide, mask) in [(true, false, 0usize), (false, false, 3), (false, true, 7)] {
+        let d = r.get(reg::device(2)) & !DEV_SWAP_DIRECT;
+        r.set(reg::device(2), if swap { d | DEV_SWAP_DIRECT } else { d });
+        r.bridge.set_dma_64bit(2, wide);
+        // Aligned and unaligned starts and lengths, around the 4 KB split
+        // and the size a stack copy holds.
+        for (off, len) in [(0usize, 8usize), (0, 4096), (0, 4104), (0, 8192), (8, 12288), (1, 4096), (0, 4095), (3, 9), (5, 8192)] {
+            let data: Vec<u8> = (0..len).map(|i| (i * 31 + 7) as u8).collect();
+            r.mem.poke(0x2000, &vec![0xee; 16384]);
+            assert!(c.dma().dma_write(0x8000_2000 + off as u64, &data).is_ok());
+            let lo = 0x2000 + off & !7;
+            let hi = (0x2000 + off + len + 7) & !7;
+            let mut want = vec![0xee; hi - lo];
+            for (i, &b) in data.iter().enumerate() {
+                let p = 0x2000 + off + i;
+                want[(p ^ mask) - lo] = b;
+            }
+            assert_eq!(r.mem.peek(lo as u64, hi - lo), want, "write mask {mask} at {off} for {len}");
+            let mut back = vec![0u8; len];
+            assert!(c.dma().dma_read(0x8000_2000 + off as u64, &mut back).is_ok());
+            assert_eq!(back, data, "read mask {mask} at {off} for {len}");
+        }
+    }
+}
