@@ -926,6 +926,16 @@ impl Core {
 
     /// Synchronous: the protocol has no way to leave a command pending.
     fn mailbox_command(&self, st: &mut MutexGuard<'_, State>) {
+        if self.isp12160 && matches!(st.mailbox[0], mbox::ABORT_COMMAND | mbox::ABORT_DEVICE | mbox::ABORT_TARGET | mbox::BUS_RESET) {
+            // Cancellation drops state to retire payload stores. Keep new
+            // requests out until retirement and target reset both finish.
+            self.with_dispatch_held(st, |st| self.execute_mailbox_command(st));
+        } else {
+            self.execute_mailbox_command(st);
+        }
+    }
+
+    fn execute_mailbox_command(&self, st: &mut MutexGuard<'_, State>) {
         let cmd = st.mailbox[0];
         match cmd {
             mbox::NOP => st.mailbox[0] = mbox::COMPLETE,
@@ -1080,18 +1090,31 @@ impl Core {
         st.bus_status |= STATUS_INT_REQ | STATUS_RISC_INT_REQ;
     }
 
-    fn reset_targets(&self, st: &mut MutexGuard<'_, State>, channel: u8, target: Option<u8>) {
+    fn with_dispatch_held<R>(&self, st: &mut MutexGuard<'_, State>, f: impl FnOnce(&mut MutexGuard<'_, State>) -> R) -> R {
+        struct Hold<'a, 'b> {
+            core: &'a Core,
+            st: &'a mut MutexGuard<'b, State>,
+        }
+        impl Drop for Hold<'_, '_> {
+            fn drop(&mut self) {
+                self.st.ctl.hold -= 1;
+                self.core.kick(self.st);
+            }
+        }
         st.ctl.hold += 1;
-        MutexGuard::unlocked(st, || {
+        let held = Hold { core: self, st };
+        f(held.st)
+    }
+
+    fn reset_targets(&self, st: &mut MutexGuard<'_, State>, channel: u8, target: Option<u8>) {
+        self.with_dispatch_held(st, |st| MutexGuard::unlocked(st, || {
             let mut targets = self.channel_targets(channel).lock();
             for (id, dev) in targets.iter_mut().enumerate() {
                 if target.is_none_or(|t| t as usize == id) {
                     if let Some(dev) = dev { dev.reset_bus(); }
                 }
             }
-        });
-        st.ctl.hold -= 1;
-        self.kick(st);
+        }));
     }
 
     fn retire_outstanding(&self, st: &mut State, matches: impl Fn((u8, u8, u32)) -> bool, completion: u16) -> usize {
@@ -1533,6 +1556,12 @@ impl Core {
             // A reset took the ring away while the entry was read.
             if st.ctl.gen != ring.gen {
                 continue;
+            }
+            // A holder may have arrived while descriptor DMA had state
+            // unlocked. Leave the entry unread until dispatch resumes.
+            if st.ctl.shutdown || st.ctl.hold > 0 || st.ctl.paused {
+                st.ctl.work = true;
+                return st;
             }
             let done = match prepared {
                 Prepared::Refused => {

@@ -1481,3 +1481,94 @@ fn isp12160_response_entry_precedes_interrupt() {
     assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
     assert!(probe.level());
 }
+
+#[test]
+fn isp12160_recovery_holds_dispatch_until_target_reset() {
+    for command in [mbox::ABORT_TARGET, mbox::BUS_RESET] {
+        let (r, gate) = gated_dual_rig(&format!("recovery-hold-{command}"), BUF);
+        r.put_entry(0, &channel_request(0, 0x101, &cdb10(scsi_cmd::WRITE_10, 0, 1), &[(BUF, 512)]));
+        r.put_entry(1, &channel_request(0, 0x102, &[0, 0, 0, 0, 0, 0], &[]));
+        r.isp.write(reg::REQUEST_QUEUE, 2, 2);
+        gate.wait_arrival();
+        // Keep recovery waiting for payload retirement after cancellation.
+        let fence = r.isp.fence.lock();
+        let before = r.isp.cancel.load(Ordering::Acquire);
+        let suspended = std::thread::scope(|scope| {
+            let recovery = scope.spawn(|| r.cmd(&[command, 0x100, 0]));
+            while r.isp.cancel.load(Ordering::Acquire) == before { std::thread::yield_now(); }
+            gate.open();
+            let mut st = r.isp.st.lock();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while st.active.is_some() && std::time::Instant::now() < deadline {
+                r.isp.wake.wait_for(&mut st, std::time::Duration::from_millis(10));
+            }
+            let finished = st.active.is_none();
+            let suspended = st.ctl.hold != 0 && st.rqst_cons == 1;
+            drop(st);
+            drop(fence);
+            assert_eq!(recovery.join().unwrap(), mbox::COMPLETE);
+            assert!(finished, "the cancelled worker must finish during retirement");
+            suspended
+        });
+        r.isp.wait_idle();
+        assert!(suspended, "dispatch must be suspended before payload retirement");
+        assert_eq!(g32(&r.status(1), 4), 0x102);
+        assert_eq!(g16(&r.status(1), 8) & 0xff, 2);
+        assert_eq!(r.status(1)[44], 0x29, "the next command sees reset unit attention");
+        assert_eq!(r.isp.st.lock().ctl.hold, 0);
+    }
+}
+
+#[test]
+fn isp12160_recovery_during_descriptor_dma_holds_dispatch() {
+    let (r, gate) = gated_dual_rig("descriptor-recovery", RQST + REQ_OFF_CDB as u32);
+    r.put_entry(0, &channel_request(0, 0x103, &[0, 0, 0, 0, 0, 0], &[]));
+    r.isp.write(reg::REQUEST_QUEUE, 1, 2);
+    gate.wait_arrival();
+    // A holder arrives while the worker is outside state reading the descriptor.
+    r.isp.st.lock().ctl.hold += 1;
+    gate.open();
+    r.isp.wait_idle();
+    let consumed = r.r(reg::REQUEST_QUEUE);
+    assert_eq!(r.cmd(&[mbox::ABORT_TARGET, 0x100]), mbox::COMPLETE);
+    {
+        let mut st = r.isp.st.lock();
+        st.ctl.hold -= 1;
+        r.isp.kick(&mut st);
+    }
+    r.isp.wait_idle();
+    assert_eq!(consumed, 0, "a descriptor read before the hold cannot dispatch during reset");
+    assert_eq!(g16(&r.status(0), 8) & 0xff, 2);
+    assert_eq!(r.status(0)[44], 0x29);
+    assert_eq!(r.isp.st.lock().ctl.hold, 0);
+}
+
+fn gated_dual_rig(name: &str, addr: u32) -> (Rig, Arc<GatedMem>) {
+    let mem = FakeMem::new();
+    let gate = GatedMem::new(mem.clone(), addr);
+    let isp = Isp1040::new_12160();
+    Device::start(&isp);
+    isp.connect_dma(gate.clone());
+    isp.attach_disk_at(1, &image(name, 8)).unwrap();
+    let r = Rig { isp, mem };
+    r.init_rings(8, 8);
+    (r, gate)
+}
+
+
+#[test]
+fn isp12160_dispatch_hold_balances_errors_and_unwinding() {
+    let r = dual_rig("hold-unwind");
+    let mut st = r.isp.st.lock();
+    st.ctl.hold += 1;
+    let result: Result<(), ()> = r.isp.with_dispatch_held(&mut st, |_| Err(()));
+    assert_eq!(result, Err(()));
+    assert_eq!(st.ctl.hold, 1);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        r.isp.with_dispatch_held(&mut st, |_| panic!("test recovery unwind"));
+    }));
+    assert!(result.is_err());
+    assert_eq!(st.ctl.hold, 1, "an outer holder survives recovery unwinding");
+    st.ctl.hold -= 1;
+    r.isp.kick(&mut st);
+}
