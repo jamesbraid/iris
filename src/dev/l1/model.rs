@@ -452,7 +452,7 @@ impl State {
                 } else {
                     self.display = a[0][1..a[0].len() - 1]
                         .iter()
-                        .take(12)
+                        .take(72)
                         .map(|b| {
                             if (0x20..=0x7e).contains(b) {
                                 *b as char

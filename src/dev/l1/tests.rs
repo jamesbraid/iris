@@ -384,3 +384,22 @@ fn l1_concurrent_output_batches_and_actions_stay_ordered() {
     assert_eq!(*backend.output.lock(), b"ABCD");
     assert_eq!(*actions.lock(), [L1Event::Reset, L1Event::Nmi]);
 }
+
+#[test]
+fn l1_display_keeps_the_full_software_line() {
+    let l1 = L1::new(Default::default()).unwrap();
+    for command in [0x1004, 0x1005] {
+        let mut text = vec![1];
+        text.extend_from_slice(b"abcdefghijkl\x01\x7f");
+        text.extend(std::iter::repeat_n(b'z', 70));
+        text.push(0);
+        assert_eq!(
+            request(&l1, command, &text, 1),
+            encode(&[0x30, 0, 0, 0, 0, 0])
+        );
+        assert_eq!(
+            l1.display_line(),
+            format!("abcdefghijkl??{}", "z".repeat(58))
+        );
+    }
+}
