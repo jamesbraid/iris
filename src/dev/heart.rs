@@ -11,7 +11,7 @@
 //! `asm/sgi/heart.h`.
 //!
 //! The processor sees HEART's registers at [`PIU_BASE`] and its widget
-//! registers at the start of widget 8's small window; `Ip30Physical` maps
+//! registers at the start of widget 8's small window; `Ip30Bus` maps
 //! both to this device, which takes the full physical address. Memory is
 //! `heart_mem::HeartRam`, which a descriptor write reaches through
 //! [`Heart::on_memcfg`].
@@ -188,7 +188,7 @@ pub struct Heart {
     /// The CPU's interrupt word (`MipsCore`'s), once the machine has a CPU.
     cpu_irq: AtomicPtr<AtomicU64>,
     /// Where descriptor writes go: the machine points it at
-    /// `Ip30Physical::remap_banks`.
+    /// `Ip30Bus::remap_banks`.
     memcfg_hook: Mutex<Option<Box<dyn Fn([u32; BANKS]) + Send + Sync>>>,
     /// The processor module's MicroLAN: the PM10 board record.
     mlan: Mutex<w1::Bus>,
@@ -629,7 +629,7 @@ impl crate::irq::InterruptController for Heart {
 
 /// The two register blocks, at full physical addresses: the processor
 /// interface at [`PIU_BASE`] and the widget registers at [`WIDGET_BASE`].
-/// Anything else in the slots `Ip30Physical` gives HEART is a bus error.
+/// Anything else in the slots `Ip30Bus` gives HEART is a bus error.
 impl BusDevice for Heart {
     fn read8(&self, addr: u64) -> BusRead8 {
         self.bus_read(addr, 1).map_or(BusRead8::err(), |v| BusRead8::ok(v as u8))
