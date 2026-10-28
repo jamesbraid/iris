@@ -450,8 +450,6 @@ struct Octane {
     heart: Arc<Heart>,
     mem: Arc<dyn BusDevice>,
     bridge: Arc<Bridge>,
-    #[allow(dead_code)]
-    ioc3: Arc<Ioc3>,
     isp: [Arc<Isp1040>; 2],
     sent: rtrb::Consumer<Vec<u8>>,
     inject: rtrb::Producer<Vec<u8>>,
@@ -479,7 +477,7 @@ impl Octane {
         bridge.attach(SLOT_ISP0 as u8, isp[0].clone());
         bridge.attach(SLOT_ISP1 as u8, isp[1].clone());
         bridge.attach(SLOT_IOC3 as u8, ioc3.clone());
-        Octane { heart, mem, bridge, ioc3, isp, sent, inject, eth }
+        Octane { heart, mem, bridge, isp, sent, inject, eth }
     }
 
     // ---- the processor's side ----
