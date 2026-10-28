@@ -912,30 +912,23 @@ impl BoardRecordText {
 }
 
 impl Ioc3Config {
-    /// The Octane's IOC3 (`octane2` selects the Octane2's board records and
-    /// product input). The fictitious barcodes and ROM serials are the
+    /// The Octane's IOC3. The fictitious barcodes and ROM serials are the
     /// marked-synthetic ones (barcode `EMU...`).
-    pub fn octane(mac: [u8; 6], octane2: bool) -> Self {
-        let (fp_rev, ps_name, ps_part, ps_rev) = if octane2 {
-            ("H", "PWR.SPPLY.ER", "060-0035-002", "A")
-        } else {
-            ("A", "PWR.SPPLY.SR", "060-0028-003", "A")
-        };
+    pub fn octane(mac: [u8; 6]) -> Self {
         Self {
             subsystem_id: SUBSYS_IP30_SYSBOARD,
             mac,
-            // UniqueWare prefix 0x5e7, then the "EMU" marker and instance 0.
-            ethernet_part_serial: 0x5e74_54d5_5000,
+            ethernet_part_serial: sgi_nic::ETHERNET_PART_SERIAL,
             serial: [true, true],
             parallel: true,
             keyboard_mouse: true,
             rtc: true,
-            // GPIO 2 is the read-only product input: 1 on Octane, 0 on Octane2.
+            // GPIO 2 is the read-only product input, 1 on an Octane.
             gpio_input_mask: 1 << 2,
-            gpio_input_values: if octane2 { 0 } else { 1 << 2 },
+            gpio_input_values: 1 << 2,
             records: vec![
-                (BoardRecordText::new("EMUF00", "030-0891-003", fp_rev, "FP1"), 0x5145_4d55_4600),
-                (BoardRecordText::new("EMUS00", ps_part, ps_rev, ps_name), 0x5145_4d55_5300),
+                (BoardRecordText::new("EMUF00", "030-0891-003", "A", "FP1"), 0x5145_4d55_4600),
+                (BoardRecordText::new("EMUS00", "060-0028-003", "A", "PWR.SPPLY.SR"), 0x5145_4d55_5300),
             ],
         }
     }
@@ -2537,10 +2530,10 @@ impl Ioc3 {
         Ioc3 { sh, threads: Mutex::new(Vec::new()) }
     }
 
-    /// The Octane's (or Octane2's) onboard IOC3: both serial ports, PS/2,
+    /// The Octane's onboard IOC3: both serial ports, PS/2,
     /// parallel, the DS1685 and the Ethernet-address and board-record parts.
-    pub fn octane(mac: [u8; 6], octane2: bool) -> Ioc3 {
-        Ioc3::new(Ioc3Config::octane(mac, octane2))
+    pub fn octane(mac: [u8; 6]) -> Ioc3 {
+        Ioc3::new(Ioc3Config::octane(mac))
     }
 
     /// The timer manager the deadlines are armed on. Call before `start`.

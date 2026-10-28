@@ -72,7 +72,7 @@ struct Rig {
 
 impl Rig {
     fn new() -> Rig {
-        Rig::with(Ioc3::octane(MAC, false))
+        Rig::with(Ioc3::octane(MAC))
     }
 
     fn with(c: Ioc3) -> Rig {
@@ -350,27 +350,25 @@ fn a_pin_register_reaches_the_shared_data_word() {
     assert_eq!(r.r32(reg::PIN_DATA) & (1 << 6), 0);
 }
 
-/// Pin 2 is the board's read-only product input: 1 on an Octane, 0 on an
-/// Octane2. Writes and direction changes cannot replace it.
+/// Pin 2 is the board's read-only product input, 1 on an Octane. Writes and
+/// direction changes cannot replace it.
 #[test]
 fn the_product_input_is_read_only() {
-    for (octane2, want) in [(false, 1u32), (true, 0)] {
-        let r = Rig::with(Ioc3::octane(MAC, octane2));
-        let pin2 = reg::PIN_REG_FIRST + 8;
-        assert_eq!(r.r32(pin2), want);
-        assert_eq!(r.r32(reg::PIN_DATA) >> 2 & 1, want);
-        r.w32(pin2, 1 - want);
-        r.w32(reg::PIN_DATA, if want == 1 { 0 } else { 0xffff_ffff });
-        r.w32(reg::PIN_CONTROL_SET, 1 << 2);
-        r.w32(reg::PIN_CONTROL_CLR, 1 << 2);
-        assert_eq!(r.r32(pin2), want);
-        assert_eq!(r.r32(reg::PIN_DATA) >> 2 & 1, want);
-        r.c.reset();
-        assert_eq!(r.r32(pin2), want, "a reset keeps the board's value");
-        // An unrelated pin still writes.
-        r.w32(reg::PIN_REG_FIRST + 4 * 3, 1);
-        assert_eq!(r.r32(reg::PIN_REG_FIRST + 4 * 3), 1);
-    }
+    let r = Rig::with(Ioc3::octane(MAC));
+    let pin2 = reg::PIN_REG_FIRST + 8;
+    assert_eq!(r.r32(pin2), 1);
+    assert_eq!(r.r32(reg::PIN_DATA) >> 2 & 1, 1);
+    r.w32(pin2, 0);
+    r.w32(reg::PIN_DATA, 0);
+    r.w32(reg::PIN_CONTROL_SET, 1 << 2);
+    r.w32(reg::PIN_CONTROL_CLR, 1 << 2);
+    assert_eq!(r.r32(pin2), 1);
+    assert_eq!(r.r32(reg::PIN_DATA) >> 2 & 1, 1);
+    r.c.reset();
+    assert_eq!(r.r32(pin2), 1, "a reset keeps the board's value");
+    // An unrelated pin still writes.
+    r.w32(reg::PIN_REG_FIRST + 4 * 3, 1);
+    assert_eq!(r.r32(reg::PIN_REG_FIRST + 4 * 3), 1);
 }
 
 // The MicroLAN protocol (search, match, page reads, CRCs) is tested with the
@@ -972,7 +970,7 @@ fn the_ethernet_block_gets_the_chips_view_of_memory() {
 /// Ethernet drives the PCI pin; the SuperIO line is a different one.
 #[test]
 fn the_ethernet_level_drives_the_pci_pin_not_the_superio_line() {
-    let c = Ioc3::octane(MAC, false);
+    let c = Ioc3::octane(MAC);
     let eth = Arc::new(MockEth::default());
     c.attach_eth(eth.clone());
     c.connect_dma(TestMem::new());
@@ -1065,7 +1063,7 @@ fn the_superio_line_never_ends_up_stale_across_threads() {
 
 #[test]
 fn the_ethernet_pin_follows_the_last_level_given() {
-    let c = Ioc3::octane(MAC, false);
+    let c = Ioc3::octane(MAC);
     let eth = Arc::new(MockEth::default());
     c.attach_eth(eth.clone());
     c.connect_dma(TestMem::new());
