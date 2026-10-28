@@ -501,27 +501,6 @@ impl OctaneMachine {
         }
     }
 
-    /// Host input into the UARTs, HEART's compare, and the flash written
-    /// back once the guest has stopped changing it.
-    fn service_loop(bus: Arc<Ip30Bus>, running: Arc<AtomicBool>, paused: Arc<AtomicBool>) {
-        let mut save_check = Instant::now();
-        while running.load(Ordering::Relaxed) {
-            if paused.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(1));
-                continue;
-            }
-            bus.service();
-            if save_check.elapsed() >= Duration::from_secs(2) {
-                save_check = Instant::now();
-                bus.save();
-            }
-            // 1 ms, not the 100 µs this loop once paid: nothing it services
-            // (UART typing, the compare timer) is hurt by a millisecond, and
-            // a 10 kHz poll burns real CPU on small hosts for no return.
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    }
-
     /// Stop the CPU, then every device: their threads are joined and their
     /// timers removed, so nothing touches memory or an interrupt line until
     /// [`Self::restart_peripherals`]. HEART's counter holds still meanwhile
