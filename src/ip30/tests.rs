@@ -1,7 +1,7 @@
 //! The Octane's chips wired together as `ip30_machine` wires them, driven
 //! without a CPU.
 //!
-//! The first group is the processor's bus: `Ip30Physical` over HEART, the
+//! The first group is the processor's bus: `Ip30Bus` over HEART, the
 //! Crossbow, the Bridge with the boot flash, SDRAM and its first 16 KiB at physical 0.
 //!
 //! The rest are the real HEART, Bridge, IOC3, IOC3 Ethernet and ISP1040,
@@ -48,7 +48,7 @@ const WIDGET_GFX: u8 = 11;
 /// HEART, the Crossbow (HEART and the Bridge alive), the Bridge with `prom`
 /// in its flash.
 struct Board {
-    phys: Arc<Ip30Physical>,
+    phys: Arc<Ip30Bus>,
     heart: Arc<Heart>,
 }
 
@@ -58,13 +58,13 @@ fn board(prom: &[u8]) -> Board {
 
 /// `board` with the DIMMs fitted in each bank, in MB.
 fn board_with(prom: &[u8], banks_mb: [u32; 4]) -> Board {
-    let ram = Arc::new(HeartRam::new(banks_mb));
+    let ram = Arc::new(OctaneMemory::new(banks_mb));
     let heart = Arc::new(Heart::new(HeartConfig::octane(banks_mb.map(|mb| (mb as u64) << 20)), crate::dev::heart::host_clock()));
     let xbow = Arc::new(Xbow::new(XBOW_REVISION, 1 << WIDGET_HEART | 1 << WIDGET_BRIDGE));
     xbow.connect_heart(heart.clone());
     let bridge = Bridge::new(ram.dma_view(), heart.clone());
     bridge.attach_flash(Arc::new(RawFlash::new(prom, FLASH_SIZE)), FLASH_SIZE as u32);
-    let phys = Ip30Physical::new(ram).unwrap();
+    let phys = Ip30Bus::new(ram).unwrap();
     phys.map(PIU_BASE, PIU_BASE + PIU_SIZE, heart.clone());
     phys.map(widget_small_base(WIDGET_XBOW), widget_small_base(WIDGET_XBOW) + WIDGET_SMALL_SIZE, xbow.clone());
     phys.map(widget_small_base(WIDGET_HEART), widget_small_base(WIDGET_HEART) + WIDGET_SMALL_SIZE, heart.clone());
@@ -94,7 +94,7 @@ fn cached_stores_to_the_flash_stay_in_the_cache() {
     let mut prom = vec![0u8; 0x2000];
     prom[0x1140..0x1150].copy_from_slice(&[0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
     let b = board(&prom);
-    let flash: Arc<dyn BusDevice> = b.phys.clone();
+    let flash: Arc<dyn BusDevice> = b.phys.phys.clone();
     let lines = Arc::new(CachedFlashLines::new(flash.clone()));
     let cache = R10000ShadowCache::from(lines.clone() as Arc<dyn BusDevice>);
     let (va, pa) = (0xffff_ffff_9fc0_1148, 0x1fc0_1148);
@@ -117,7 +117,7 @@ fn cached_stores_to_the_flash_stay_in_the_cache() {
 #[test]
 fn the_reset_vector_reads_the_prom() {
     let b = board(&[0x0b, 0xf0, 0x00, 0xf0, 0, 0, 0, 0]);
-    let p = &b.phys;
+    let p = &b.phys.phys;
     assert_eq!(p.read32(0x1fc0_0000).data, 0x0bf0_00f0);
     assert_eq!(p.read64(0x1fc0_0000).data, 0x0bf0_00f0_0000_0000);
     assert_eq!(p.read8(0x1fc0_0001).data, 0xf0);
@@ -130,12 +130,12 @@ fn the_reset_vector_reads_the_prom() {
 #[test]
 fn low_memory_is_the_first_16_kib_of_sdram_on_the_bus() {
     let b = board(&[]);
-    let p = &b.phys;
+    let p = &b.phys.phys;
     // Bank 0, 128 MiB at the start of SDRAM space.
     assert_eq!(p.write32(PIU_BASE + 0x20, 0x8003_0000), BUS_OK);
     // The processor reaches those bytes only at physical 0; a bus master's
     // view shows where they are.
-    let dma = p.memory();
+    let dma = b.phys.memory();
     assert_eq!(p.read64(0).data, 0);
     assert_eq!(p.write32(0x100, 0x1234_5678), BUS_OK);
     assert_eq!(dma.read32(0x2000_0100).data, 0x1234_5678, "a low store is in SDRAM");
@@ -145,7 +145,10 @@ fn low_memory_is_the_first_16_kib_of_sdram_on_the_bus() {
     assert_eq!(dma.write64(0x2000_0200, 0x0102_0304_0506_0708), BUS_OK);
     assert_eq!(p.read64(0x200).data, 0x0102_0304_0506_0708, "and the reverse");
     assert_eq!(p.mem_ptr(0x100), dma.mem_ptr(0x2000_0100), "one word");
-    assert!(p.mem_ptr(0x2000_0100).is_none(), "no direct pointer at the SDRAM address");
+    // The window maps the guarded unit whole (a stated limitation), so the
+    // direct path reaches the bytes where the width accesses above fault.
+    let ptr = p.mem_ptr(0x2000_0100).expect("the window has a pointer in the guard");
+    assert_eq!(unsafe { *ptr }.rotate_left(32), dma.read64(0x2000_0100).data, "the same word the low alias shows");
     assert_eq!(p.write64(0x2000_0000, 1), BUS_ERR);
     assert_eq!(p.read8(0x2000_3fff).status, BUS_ERR);
     assert_eq!(p.read8(0x3fff).status, BUS_OK);
@@ -153,7 +156,7 @@ fn low_memory_is_the_first_16_kib_of_sdram_on_the_bus() {
     assert_eq!(p.read8(0x10000).status, BUS_ERR);
     assert_eq!(p.write64(0x2000_4000, 1), BUS_OK);
     assert_eq!(p.read64(0x4000).status, BUS_ERR, "SDRAM past 16 KiB is not aliased");
-    assert!(p.unmapped().iter().any(|&(a, w, _)| a == 0x4000 && !w), "misses are logged");
+    assert!(b.phys.unmapped().iter().any(|&(a, w, _)| a == 0x4000 && !w), "misses are logged");
 }
 
 /// Code in low memory and SDRAM is compiled against a per-page
@@ -162,14 +165,18 @@ fn low_memory_is_the_first_16_kib_of_sdram_on_the_bus() {
 #[test]
 fn stores_through_the_bus_invalidate_compiled_code() {
     let b = board(&[]);
-    let p = &b.phys;
+    let p = &b.phys.phys;
     let gen = |g: *const AtomicU64| unsafe { (*g).load(Ordering::Acquire) };
     assert_eq!(p.write32(PIU_BASE + 0x20, 0x8003_0000), BUS_OK);
     let (g0, g1) = (p.gen_ptr(0x180), p.gen_ptr(0x1000));
     assert!(!g0.is_null() && !g1.is_null() && g0 != g1);
-    let dma = p.memory();
+    let dma = b.phys.memory();
     assert_eq!(g0, dma.gen_ptr(0x2000_0180), "low memory shares SDRAM's counter");
-    assert!(p.gen_ptr(0x2000_0180).is_null(), "the processor has none at the SDRAM address");
+    // The window maps the guarded unit whole (a stated limitation): the
+    // direct path has a counter in the guard, the page's own.
+    let gw = p.gen_ptr(0x2000_0180);
+    assert!(!gw.is_null(), "the window has a counter in the guard");
+    assert_eq!(gen(gw), gen(g0), "and it is the page's counter");
     let (a, c) = (gen(g0), gen(g1));
     assert_eq!(p.write64(0x180, 0xdf5a_c000_0340_0008), BUS_OK);
     assert_ne!(gen(g0), a, "a store advances its page");
@@ -188,7 +195,7 @@ fn stores_through_the_bus_invalidate_compiled_code() {
 #[test]
 fn sdram_follows_the_descriptors() {
     let b = board(&[]);
-    let p = &b.phys;
+    let p = &b.phys.phys;
     assert_eq!(p.read64(0x2000_4000).status, BUS_ERR, "no descriptor valid at reset");
     // Bank 0, 128 MiB at the start of SDRAM space.
     assert_eq!(p.write32(PIU_BASE + 0x20, 0x8003_0000), BUS_OK);
@@ -215,15 +222,15 @@ fn sdram_follows_the_descriptors() {
 // access is named as a limitation.
 
 /// Write HEART's descriptor for `bank`, as the PROM does through the PIU.
-fn set_bank(p: &Ip30Physical, bank: u32, desc: u32) {
+fn set_bank(p: &Physical, bank: u32, desc: u32) {
     assert_eq!(p.write32(PIU_BASE + 0x20 + 4 * bank as u64, desc), BUS_OK);
 }
 
 #[test]
 fn map_a_valid_descriptor_over_an_empty_bank_reads_zero_and_drops_writes() {
     let b = board(&[]);
-    let p = &b.phys;
-    let dma = p.memory();
+    let p = &b.phys.phys;
+    let dma = b.phys.memory();
     // Bank 1 is not fitted. Its descriptor claims 64 MiB at the third unit.
     set_bank(p, 1, 0x8001_0002);
     let at = 0x2000_0000 + 2 * 0x200_0000 + 0x100;
@@ -251,7 +258,7 @@ fn map_the_proms_bank_size_probe_gets_each_size_s_answer() {
     const UNIT: u64 = 0x200_0000;
     for (mib, want) in [(64u32, 0x8101_0040u32), (128, 0x8103_0040), (256, 0x8147_0040)] {
         let b = board_with(&[], [mib, 0, 0, 0]);
-        let p = &b.phys;
+        let p = &b.phys.phys;
         set_bank(p, 0, 0x81bf_0040);
         let distinct = |step: u64, pat: u64| {
             assert_eq!(p.write64(PROBE, pat), BUS_OK);
@@ -292,8 +299,8 @@ fn map_the_proms_bank_size_probe_gets_each_size_s_answer() {
 #[test]
 fn map_a_bank_above_4_gib_is_reached_through_the_bus_only() {
     let b = board_with(&[], [64, 64, 0, 0]);
-    let p = &b.phys;
-    let dma = p.memory();
+    let p = &b.phys.phys;
+    let dma = b.phys.memory();
     // Bank 0 at the start of SDRAM space; bank 1 at unit 0x80, 4 GiB up.
     set_bank(p, 0, 0x8001_0000);
     set_bank(p, 1, 0x8001_0080);
@@ -310,9 +317,9 @@ fn map_a_bank_above_4_gib_is_reached_through_the_bus_only() {
 #[test]
 fn map_a_bus_master_reaches_the_guarded_bytes() {
     let b = board(&[]);
-    let p = &b.phys;
+    let p = &b.phys.phys;
     set_bank(p, 0, 0x8003_0000);
-    let dma = p.memory();
+    let dma = b.phys.memory();
     assert_eq!(p.read64(0x2000_0000).status, BUS_ERR);
     assert_eq!(p.write64(0x2000_3000, 1), BUS_ERR);
     assert_eq!(dma.write64(0x2000_3000, 0x0a0b_0c0d_0e0f_1011), BUS_OK);
@@ -330,9 +337,9 @@ fn map_a_bus_master_reaches_the_guarded_bytes() {
 #[test]
 fn map_the_alias_and_sdram_share_page_generations() {
     let b = board(&[]);
-    let p = &b.phys;
+    let p = &b.phys.phys;
     set_bank(p, 0, 0x8003_0000);
-    let dma = p.memory();
+    let dma = b.phys.memory();
     let gen = |g: *const AtomicU64| unsafe { (*g).load(Ordering::Acquire) };
     let low = p.gen_ptr(0x2000);
     assert!(!low.is_null());
@@ -359,7 +366,7 @@ fn limitation_a_cached_access_to_the_guard_reaches_the_bytes() {
     use crate::cpu::mips_cache_v2::MipsCache;
     use crate::ppmem::MappedMemory;
     let b = board(&[]);
-    let lines = Arc::new(CachedFlashLines::new(b.phys.clone()));
+    let lines = Arc::new(CachedFlashLines::new(b.phys.phys.clone()));
     let cache = R10000ShadowCache::from(lines as Arc<dyn BusDevice>);
     // Wire the window as the machine does, then let HEART's descriptor
     // write lay it out.
@@ -368,11 +375,11 @@ fn limitation_a_cached_access_to_the_guard_reaches_the_bytes() {
         sp.set_bitmap_sink2(cache.tcache_bitmap_ptr());
         cache.set_tcache_window(sp.window_base());
     }
-    set_bank(&b.phys, 0, 0x8003_0000);
+    set_bank(&b.phys.phys, 0, 0x8003_0000);
     let (va, pa) = (0xffff_ffff_a000_3000u64, 0x2000_3000u64);
 
-    assert_eq!(b.phys.read32(pa).status, BUS_ERR, "uncached reads fault");
-    assert_eq!(b.phys.write32(pa, 1), BUS_ERR, "and so do uncached writes");
+    assert_eq!(b.phys.phys.read32(pa).status, BUS_ERR, "uncached reads fault");
+    assert_eq!(b.phys.phys.write32(pa, 1), BUS_ERR, "and so do uncached writes");
     assert_eq!(b.phys.memory().write32(pa, 0x1234_5678), BUS_OK);
     let r = cache.read::<4>(va, pa);
     assert_eq!((r.status, r.data), (BUS_OK, 0x1234_5678), "limitation: the cached read reaches the byte");
@@ -381,13 +388,27 @@ fn limitation_a_cached_access_to_the_guard_reaches_the_bytes() {
     // The guard ends at 0x2000_4000; the same access just past it is
     // ordinary memory on both paths.
     assert_eq!(cache.write::<4>(va + 0x1000, pa + 0x1000, 7), BUS_OK);
-    assert_eq!(b.phys.read32(pa + 0x1000).data, 7);
+    assert_eq!(b.phys.phys.read32(pa + 0x1000).data, 7);
+}
+
+#[test]
+fn the_miss_list_keeps_the_first_64_and_then_stops() {
+    let b = board(&[]);
+    let p = &b.phys.phys;
+    for i in 0..100u64 {
+        assert_eq!(p.read32(0xf0_0000_0000 + i * 0x1_0000).status, BUS_ERR);
+    }
+    let u = b.phys.unmapped();
+    assert_eq!(u.len(), 64);
+    assert_eq!(u[63].0, 0xf0_0000_0000 + 63 * 0x1_0000, "the first 64, in order");
+    assert_eq!(p.write32(0xf1_0000_0000, 0), BUS_ERR);
+    assert_eq!(b.phys.unmapped(), u, "a full list is left alone");
 }
 
 #[test]
 fn widgets_route_by_number() {
     let b = board(&[]);
-    let p = &b.phys;
+    let p = &b.phys.phys;
     assert_eq!(p.read32(0x1000_0004).data, 0x4000_0001, "Crossbow");
     assert_eq!(p.read32(0x1800_0004).data, 0x4c00_106d, "HEART");
     assert_eq!(p.read64(0x1800_0000).data, 0x4c00_106d);
@@ -401,7 +422,7 @@ fn widgets_route_by_number() {
 
 #[test]
 fn the_graphics_port_reaches_impact_with_its_link_up() {
-    let ram = Arc::new(HeartRam::new([128, 0, 0, 0]));
+    let ram = Arc::new(OctaneMemory::new([128, 0, 0, 0]));
     let heart = Arc::new(Heart::new(HeartConfig::octane([128 << 20, 0, 0, 0]), crate::dev::heart::host_clock()));
     let gfx = ImpactXio::new(
         WIDGET_GFX,
@@ -414,7 +435,7 @@ fn the_graphics_port_reaches_impact_with_its_link_up() {
     for (links, alive) in [(0x8100u16, false), (0x8100 | 1 << WIDGET_GFX, true)] {
         let xbow = Arc::new(Xbow::new(XBOW_REVISION, links));
         xbow.connect_heart(heart.clone());
-        let p = Arc::new(Ip30Physical::new(ram.clone()).unwrap());
+        let p = Arc::new(Ip30Bus::new(ram.clone()).unwrap());
         p.attach_widget(WIDGET_GFX, gfx.clone(), false);
         p.init();
         let weak = Arc::downgrade(&p);
@@ -426,7 +447,7 @@ fn the_graphics_port_reaches_impact_with_its_link_up() {
         for w in 9..16 {
             p.set_widget_link(w, xbow.carries(w));
         }
-        let r = p.read32(id);
+        let r = p.phys.read32(id);
         if alive {
             assert_eq!(r.status, BUS_OK);
             assert_eq!(r.data >> 12 & 0xffff, 0xc003, "HQ4's widget part number");
@@ -435,7 +456,7 @@ fn the_graphics_port_reaches_impact_with_its_link_up() {
         }
         // The Crossbow attaching a board brings its windows up.
         xbow.attach(WIDGET_GFX);
-        assert_eq!(p.read32(id).status, BUS_OK, "a link that comes up is routed");
+        assert_eq!(p.phys.read32(id).status, BUS_OK, "a link that comes up is routed");
     }
 }
 
@@ -470,7 +491,7 @@ struct Octane {
 
 impl Octane {
     fn new() -> Self {
-        let ram = Arc::new(HeartRam::new([64, 0, 0, 0]));
+        let ram = Arc::new(OctaneMemory::new([64, 0, 0, 0]));
         // One valid descriptor: bank 0, two 32 MB units from 0x2000_0000.
         ram.set_memcfg([0x8001_0000, 0, 0, 0]);
         let mem = ram.dma_view();

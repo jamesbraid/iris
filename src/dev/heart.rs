@@ -11,14 +11,14 @@
 //! `asm/sgi/heart.h`.
 //!
 //! The processor sees HEART's registers at [`PIU_BASE`] and its widget
-//! registers at the start of widget 8's small window; `Ip30Physical` maps
+//! registers at the start of widget 8's small window; `Ip30Bus` maps
 //! both to this device, which takes the full physical address. Memory is
-//! `heart_mem::HeartRam`, which a descriptor write reaches through
+//! `heart_mem::OctaneMemory`, which a descriptor write reaches through
 //! [`Heart::on_memcfg`].
 //!
 //! Ported from hw/misc/sgi-heart.c in jamesbraid/qemu-sgi-origami.
 
-use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -188,13 +188,15 @@ pub struct Heart {
     /// The CPU's interrupt word (`MipsCore`'s), once the machine has a CPU.
     cpu_irq: AtomicPtr<AtomicU64>,
     /// Where descriptor writes go: the machine points it at
-    /// `Ip30Physical::remap_banks`.
+    /// `Ip30Bus::remap_banks`.
     memcfg_hook: Mutex<Option<Box<dyn Fn([u32; BANKS]) + Send + Sync>>>,
     /// The processor module's MicroLAN: the PM10 board record.
     mlan: Mutex<w1::Bus>,
     /// Accesses this model does not support, first 64 distinct, for the
     /// monitor: `(offset, size, write)`.
     unsupported: Mutex<Vec<(u32, u8, bool)>>,
+    /// `unsupported` holds 64: a further access costs one relaxed load.
+    unsupported_full: AtomicBool,
     /// Packets that reached HEART's interrupt register, for the monitor.
     pub packets: AtomicU64,
 }
@@ -210,6 +212,7 @@ impl Heart {
             memcfg_hook: Mutex::new(None),
             mlan: Mutex::new(w1::Bus::new()),
             unsupported: Mutex::new(Vec::new()),
+            unsupported_full: AtomicBool::new(false),
             packets: AtomicU64::new(0),
         }
     }
@@ -256,12 +259,18 @@ impl Heart {
     }
 
     fn note(&self, off: u32, size: usize, write: bool) {
+        if self.unsupported_full.load(Ordering::Relaxed) {
+            return;
+        }
         let mut u = self.unsupported.lock();
-        if u.len() < 64 && !u.iter().any(|&(o, s, w)| o == off && s as usize == size && w == write) {
+        if !u.iter().any(|&(o, s, w)| o == off && s as usize == size && w == write) {
             if trace() {
                 eprintln!("ip30: HEART: unsupported {size}-byte {} at {off:#x}", if write { "write" } else { "read" });
             }
             u.push((off, size as u8, write));
+            if u.len() == 64 {
+                self.unsupported_full.store(true, Ordering::Relaxed);
+            }
         }
     }
 
@@ -620,7 +629,7 @@ impl crate::irq::InterruptController for Heart {
 
 /// The two register blocks, at full physical addresses: the processor
 /// interface at [`PIU_BASE`] and the widget registers at [`WIDGET_BASE`].
-/// Anything else in the slots `Ip30Physical` gives HEART is a bus error.
+/// Anything else in the slots `Ip30Bus` gives HEART is a bus error.
 impl BusDevice for Heart {
     fn read8(&self, addr: u64) -> BusRead8 {
         self.bus_read(addr, 1).map_or(BusRead8::err(), |v| BusRead8::ok(v as u8))
@@ -757,6 +766,20 @@ mod tests {
 
     fn rq(h: &Heart, off: u32) -> u64 {
         h.piu_read(off, 8).unwrap()
+    }
+
+    #[test]
+    fn the_unsupported_list_keeps_the_first_64_and_then_stops() {
+        let f = heart();
+        let h = &f.heart;
+        for i in 0..100u32 {
+            h.note(0x1000 + 8 * i, 8, false);
+        }
+        let u = h.unsupported();
+        assert_eq!(u.len(), 64);
+        assert_eq!(u[63], (0x1000 + 8 * 63, 8, false));
+        h.note(0x9000, 4, true);
+        assert_eq!(h.unsupported(), u, "a full list is left alone");
     }
 
     #[test]
