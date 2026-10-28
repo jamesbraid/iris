@@ -1,7 +1,7 @@
 //! The Octane's chips wired together as `ip30_machine` wires them, driven
 //! without a CPU.
 //!
-//! The first group is the processor's bus: `Ip30Physical` over HEART, the
+//! The first group is the processor's bus: `Ip30Bus` over HEART, the
 //! Crossbow, the Bridge with the boot flash, SDRAM and its first 16 KiB at physical 0.
 //!
 //! The rest are the real HEART, Bridge, IOC3, IOC3 Ethernet and ISP1040,
