@@ -213,6 +213,7 @@ impl BedrockPi {
         })
     }
     pub fn set_node_hooks(&self, hooks: Arc<dyn NodeHooks>) {
+        let _dispatch = self.dispatch.lock();
         *self.hooks.lock() = Some(hooks);
     }
     pub fn set_timer_manager(&self, tm: Arc<TimerManager>) {
@@ -397,6 +398,10 @@ impl BedrockPi {
         value
     }
     fn write(&self, off: u64, value: u64) {
+        // Keep register changes and their node notifications in one order.
+        // The state lock still drops before callbacks; dispatch is reentrant
+        // so a node callback can read registers and recompute IRQ outputs.
+        let _dispatch = self.dispatch.lock();
         if (0x300..0x350).contains(&off) {
             if !self
                 .hooks()
@@ -645,6 +650,7 @@ impl Device for BedrockPi {
 }
 impl Resettable for BedrockPi {
     fn power_on(&self) {
+        let _dispatch = self.dispatch.lock();
         let now = (self.clock)();
         let mut s = self.state.lock();
         // These controls and captures survive the donor's local reset.

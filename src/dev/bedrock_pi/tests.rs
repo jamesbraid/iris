@@ -210,3 +210,76 @@ fn timer_manager_delivers_without_mmio_poll_and_stop_removes_timer() {
     assert!(pi.timer.lock().is_none());
     assert!(!pi.is_running());
 }
+
+#[test]
+fn concurrent_alias_and_enable_writes_publish_in_register_order() {
+    use std::sync::mpsc;
+    use std::thread;
+
+    struct Hooks {
+        pi: Weak<BedrockPi>,
+        offset: u64,
+        first_value: u64,
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+        observed: AtomicU64,
+    }
+    impl Hooks {
+        fn publish(&self, value: u64) {
+            // A node may inspect PI registers while processing a change.
+            let _ = self.pi.upgrade().unwrap().read64(self.offset);
+            if value == self.first_value {
+                self.entered.send(()).unwrap();
+                self.release.lock().recv().unwrap();
+            }
+            self.observed.store(value, Ordering::SeqCst);
+        }
+    }
+    impl NodeHooks for Hooks {
+        fn cached_alias_changed(&self, size: u8) {
+            self.publish(u64::from(size));
+        }
+        fn cpu_enable(&self, _: u8, _: usize, enabled: bool) {
+            self.publish(u64::from(enabled));
+        }
+    }
+
+    for (offset, first_value, second_value) in [(0x28, 1, 2), (0x50, 1, 0), (0x58, 1, 0)] {
+        let (pi, _) = setup();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let hooks = Arc::new(Hooks {
+            pi: Arc::downgrade(&pi),
+            offset,
+            first_value,
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+            observed: AtomicU64::new(99),
+        });
+        pi.set_node_hooks(hooks.clone());
+        let first_pi = pi.clone();
+        let first = thread::spawn(move || first_pi.write64(offset, first_value));
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let second_pi = pi.clone();
+        let second = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            second_pi.write64(offset, second_value);
+            done_tx.send(()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let premature = done_rx.recv_timeout(Duration::from_millis(100));
+        // Always release and join both writers before checking results.
+        release_tx.send(()).unwrap();
+        assert_eq!(first.join().unwrap(), BUS_OK);
+        second.join().unwrap();
+        assert_eq!(
+            hooks.observed.load(Ordering::SeqCst),
+            r(&pi, offset),
+            "offset {offset:#x}"
+        );
+        assert!(matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)));
+        assert_eq!(r(&pi, offset), second_value);
+    }
+}
