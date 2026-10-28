@@ -1,4 +1,6 @@
 //! The Dallas/Maxim CRCs the parts frame their streams with.
+//!
+//! Ported from hw/1wire/crc.c in jamesbraid/qemu-sgi-origami.
 
 /// CRC-8 (x^8 + x^5 + x^4 + 1, reflected), as in a ROM's last byte. A
 /// ROM's CRC over all eight bytes is zero.
