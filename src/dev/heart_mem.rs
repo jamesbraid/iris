@@ -223,9 +223,22 @@ impl HeartRam {
     /// HEART's descriptors changed: place the banks as they now say.
     /// Called on the CPU thread (a MEMCFG write, which the PROM makes before
     /// anything else runs) or with the CPU stopped.
+    ///
+    /// A write that leaves the decode as it was does nothing to the window
+    /// or the page generations: the PROM rewrites the same descriptors, and
+    /// a rebuild empties the window under a running CPU.
     pub fn set_memcfg(&self, words: [u32; 4]) {
+        let same = Self::decoded(&self.desc.load()) == Self::decoded(&words);
         self.desc.store(words);
-        self.rebuild();
+        if !same {
+            self.rebuild();
+        }
+    }
+
+    /// The bits of each descriptor the decode reads: all of a valid one
+    /// (valid, density, span, base), nothing of an invalid one.
+    fn decoded(words: &[u32; BANKS]) -> [u32; BANKS] {
+        words.map(|d| if d & DESC_VALID == 0 { 0 } else { d & (DESC_VALID | 0x7 << 22 | 0x3f << 16 | 0x1ff) })
     }
 
     /// Place the banks as the descriptors in force say: after `set_memcfg`,
@@ -559,6 +572,47 @@ mod tests {
         m.set_memcfg([0; 4]);
         assert_eq!(sp.mapped_bitmap(), 0);
         assert_eq!(m.phys().read64(RAM_BASE + 0x8000).status, BUS_ERR, "and the table forgets the units");
+    }
+
+    #[test]
+    fn a_write_that_leaves_the_decode_alone_does_not_touch_the_window() {
+        let m = ram(128);
+        let d = DESC_VALID | (3 << 16);
+        bank0(&m, d);
+        let space = m.phys().ppmem_space().unwrap();
+        let mapped = space.mapped_bitmap();
+        assert_ne!(mapped, 0);
+        // Drop the mappings behind its back: a rebuild would put them back.
+        space.clear_mappings();
+        bank0(&m, d);
+        assert_eq!(space.mapped_bitmap(), 0, "the same descriptors: no rebuild");
+        // Bits the decode ignores, and the rest of an invalid descriptor.
+        m.set_memcfg([d | 1 << 29, 0x7fff_ffff, 0, 0]);
+        assert_eq!(space.mapped_bitmap(), 0, "ignored bits: no rebuild");
+        assert_eq!(m.memcfg()[1], 0x7fff_ffff, "but the monitor sees what was written");
+        bank0(&m, DESC_VALID | (1 << 16));
+        assert_eq!(space.mapped_bitmap(), 1 << (RAM_BASE >> 26), "a change lays it out");
+        assert_ne!(mapped, space.mapped_bitmap());
+    }
+
+    /// A rebuild bumps every page's generation, so compiled code from a page
+    /// that now holds other bytes is dropped; a repeated write does not.
+    #[cfg(feature = "jitv2")]
+    #[test]
+    fn a_changed_descriptor_bumps_the_page_generations() {
+        let gen = |p: *const AtomicU64| unsafe { (*p).load(Ordering::Acquire) };
+        let m = ram(128);
+        let d = DESC_VALID | (3 << 16);
+        bank0(&m, d);
+        let g = m.phys().gen_ptr(RAM_BASE + 0x8000);
+        let v = gen(g);
+        bank0(&m, d);
+        assert_eq!(gen(g), v, "the same descriptors leave it");
+        bank0(&m, DESC_VALID | (1 << 16));
+        assert_ne!(gen(g), v, "a change advances it");
+        let v = gen(g);
+        m.set_memcfg([0; 4]);
+        assert_ne!(gen(g), v, "so does taking the memory away");
     }
 
     #[test]
