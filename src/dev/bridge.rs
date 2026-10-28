@@ -47,7 +47,7 @@
 //!
 //! Ported from hw/pci-host/sgi-bridge.c in jamesbraid/qemu-sgi-origami.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use parking_lot::{Mutex, RwLock};
@@ -122,6 +122,40 @@ pub const DEVICE_WINDOW_BASE: u32 = 0x20_0000;
 pub const FLASH_BASE: u32 = 0xc0_0000;
 pub const FLASH_SELECT_SIZE: u32 = 0x20_0000;
 pub const DEVICES: usize = 8;
+/// Every BAR of every slot open at once.
+const MAX_WINDOWS: usize = DEVICES * 6;
+
+/// A BAR window as the decode table holds it, packed into one word: base
+/// (bits 0-31), log2 of the size (32-37), I/O space (38), slot (40-42) and
+/// BAR (48-50).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Window {
+    space: Space,
+    slot: u8,
+    bar: usize,
+    base: u32,
+    size: u32,
+}
+
+impl Window {
+    fn pack(self) -> u64 {
+        self.base as u64
+            | (self.size.trailing_zeros() as u64) << 32
+            | ((self.space == Space::Io) as u64) << 38
+            | (self.slot as u64) << 40
+            | (self.bar as u64) << 48
+    }
+
+    fn unpack(w: u64) -> Self {
+        Self {
+            space: if w & (1 << 38) != 0 { Space::Io } else { Space::Mem },
+            slot: ((w >> 40) & 7) as u8,
+            bar: ((w >> 48) & 7) as usize,
+            base: w as u32,
+            size: 1u32 << ((w >> 32) & 0x3f),
+        }
+    }
+}
 pub const PINS: usize = 8;
 pub const ATE_ENTRIES: usize = 128;
 
@@ -391,6 +425,14 @@ pub struct Bridge {
     /// HEART: a line is an interrupt bit, the vector a packet names.
     heart: Arc<dyn InterruptController>,
     slots: RwLock<[Option<Arc<dyn PciBusDevice>>; DEVICES]>,
+    /// The BAR windows the functions decode, rebuilt from their headers
+    /// after every configuration write and reset, so a processor access
+    /// searches this table instead of every header. Slot order, then BAR
+    /// order, is how an overlap resolves. A function's BAR comparators
+    /// are its own registers on the bus; configuration writes and window
+    /// accesses both come from the CPU.
+    windows: [AtomicU64; MAX_WINDOWS],
+    nwindows: AtomicUsize,
     flash: RwLock<[Option<FlashPart>; 2]>,
     flash_strap: AtomicBool,
     /// The one-wire net behind the NIC register; none fitted reads as an
@@ -502,6 +544,8 @@ impl Bridge {
             mem,
             heart,
             slots: RwLock::new(Default::default()),
+            windows: std::array::from_fn(|_| AtomicU64::new(0)),
+            nwindows: AtomicUsize::new(0),
             flash: RwLock::new(Default::default()),
             flash_strap: AtomicBool::new(false),
             microlan: Mutex::new(None),
@@ -552,6 +596,20 @@ impl Bridge {
             dev.connect_interrupt(IrqLine::new(router, (slot * 4 + pin as usize - 1) as u32));
         }
         self.slots.write()[slot] = Some(dev);
+        self.rebuild_windows();
+    }
+
+    /// Read the open windows out of the functions' headers again.
+    fn rebuild_windows(&self) {
+        let mut n = 0;
+        for (slot, d) in self.slots.read().iter().enumerate() {
+            let Some(d) = d else { continue };
+            for (space, bar, base, size) in d.config().windows() {
+                self.windows[n].store(Window { space, slot: slot as u8, bar, base, size }.pack(), Ordering::Relaxed);
+                n += 1;
+            }
+        }
+        self.nwindows.store(n, Ordering::Release);
     }
 
     /// Fit a flash part on chip select 0. `part` is addressed from the
@@ -641,6 +699,7 @@ impl Bridge {
         for d in self.slots.read().iter().flatten() {
             d.config().reset();
         }
+        self.rebuild_windows();
     }
 
     /// The Crossbow's link reset arriving. IRIX saves the control and link
@@ -970,6 +1029,7 @@ impl Bridge {
         let shift = 8 * (reg & 3);
         let mask = (u64::MAX >> (64 - 8 * size)) << shift;
         cfg.write(i, ((cfg.read(i) as u64 & !mask) | ((val << shift) & mask)) as u32);
+        self.rebuild_windows();
         true
     }
 
@@ -986,9 +1046,14 @@ impl Bridge {
     fn pio_cycle(&self, slot: usize, space: Space, base: u32, woff: u32, width: usize, swap: bool, host: &mut [u8], write: bool) -> bool {
         let n = host.len();
         let target = base.wrapping_add(if swap { woff } else { woff ^ (width - n) as u32 });
-        let claimed = self.slots.read().iter().flatten().find_map(|d| {
-            let (bar, boff) = d.config().decode(space, target)?;
-            Some((d.clone(), bar, boff))
+        let open = self.nwindows.load(Ordering::Acquire);
+        let claimed = self.windows[..open].iter().find_map(|w| {
+            let w = Window::unpack(w.load(Ordering::Relaxed));
+            let off = target.wrapping_sub(w.base);
+            if w.space != space || off >= w.size {
+                return None;
+            }
+            Some((self.slots.read()[w.slot as usize].clone()?, w.bar, off))
         });
         let Some((dev, bar, boff)) = claimed else {
             // Nobody drove device select: a master time-out.
