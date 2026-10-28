@@ -161,10 +161,11 @@ HEART's bank mapping as they happen.
 
 ## Threads
 
-Nothing polls. IOC3 runs one receive thread per fitted serial port and an
-NVRAM writer, and arms its deadlines (serial receive and transmit delays,
-the timer interrupt, the NVRAM flush) as `hptimer` one-shots, so they fire
-without the guest touching the chip. RAD audio is paced by `hptimer` too and
+Serial input is the one thing that polls. IOC3 runs one receive thread per
+fitted serial port, which looks for host input every 2 ms, and an NVRAM
+writer. It arms its deadlines (serial receive and transmit delays, the timer
+interrupt, the NVRAM flush) as `hptimer` one-shots, so they fire without the
+guest touching the chip. RAD audio is paced by `hptimer` too and
 has no thread of its own. Each ISP1040 runs a request-ring thread, started
 with the machine and joined when it stops. The Ethernet has a receive pump
 and the NAT engine (`ip30-eth-rx`, `ip30-eth-nat`). A power-off from the
@@ -177,15 +178,18 @@ through its event channel. `HACKING.md` lists the thread names.
 - HEART: the answer to the PROM's bank-size probe is an approximation; ECC
   error injection is not modelled (a mode write that asks for it is
   recorded); the 16 KiB at physical 0 are the first 16 KiB of SDRAM,
-  which the processor reaches only there (0x2000_0000..+16 KiB is a bus
-  error, as the stock IDE memory diagnostics expect). Whether bus masters
-  reach that range is not known; the DMA view does.
+  which the processor reaches only there (an uncached access to
+  0x2000_0000..+16 KiB is a bus error, as the stock IDE memory diagnostics
+  expect; cached accesses are the next item). Whether bus masters reach
+  that range is not known; the DMA view does.
 - A cached access to 0x2000_0000..+16 KiB reaches the bytes. On an Octane2
   (HEART rev F) cached and uncached reads there both take a data bus
   error; here only uncached accesses do, because the processor's cache
-  reads memory straight from the ppmem window, which maps the whole first
-  32 MiB. Faulting the cached access would put that whole 32 MiB unit of
-  SDRAM on the slower bus path. No supported guest touches the range.
+  reads memory straight from the ppmem window, which maps the whole 32 MiB
+  unit at 0x2000_0000. Leaving the 16 KiB out of the window would put every
+  cached access in the first 64 MiB of SDRAM on the slower bus path (the
+  window's fast-path flag covers 64 MiB at a time). No supported guest
+  touches the range.
 - The PROM's cached stores to its own data in the flash are kept in a
   per-line copy, as a write-back cache would hold them; they are never
   written back.
@@ -203,8 +207,7 @@ through its event channel. `HACKING.md` lists the thread names.
 
 The device models are ported from the author's QEMU models in
 [Origami](https://github.com/jamesbraid/origami) (the
-[sgi-origami branch](https://github.com/jamesbraid/qemu-sgi-origami)), with
-the same behaviour and approximations. The boot flash (`src/dev/sflash.rs`)
+[sgi-origami branch](https://github.com/jamesbraid/qemu-sgi-origami)). The boot flash (`src/dev/sflash.rs`)
 derives from MAME's
 [intelfsh](https://github.com/mamedev/mame/blob/master/src/devices/machine/intelfsh.cpp).
 The physical map is in [Octane/ip30-address-map.md](Octane/ip30-address-map.md);
