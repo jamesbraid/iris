@@ -44,6 +44,7 @@ use std::sync::{Arc, OnceLock};
 
 use parking_lot::{Condvar, Mutex, MutexGuard};
 
+use crate::devlog::LogModule;
 use crate::irq::IrqLine;
 use crate::pci::{Bar, PciBusDevice, PciConfig, PciDma, PCI_INTA};
 use crate::scsi::{scsi_cmd, ScsiDataLength, ScsiDevice, ScsiIdentity, ScsiRequest};
@@ -743,7 +744,7 @@ impl Core {
         };
         if first {
             let what = if write { "write to" } else { "read from" };
-            eprintln!("isp1040: DMA {what} {addr:#x} is not memory");
+            crate::dlog!(LogModule::Scsi, "isp1040: DMA {what} {addr:#x} is not memory");
             self.note(format!("DMA {what} {addr:#x} is not memory"));
         }
     }
@@ -1150,7 +1151,8 @@ impl Core {
         Some(match dev.request(&req) {
             Ok(r) => (r.data, r.status),
             Err(e) => {
-                eprintln!("isp1040: target {target}: {e}");
+                crate::dlog!(LogModule::Scsi, "isp1040: target {target}: {e}");
+                self.note(format!("target {target}: {e}"));
                 (Vec::new(), CHECK_CONDITION)
             }
         })
