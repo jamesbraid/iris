@@ -90,9 +90,22 @@ hashes are given where a change is easiest to understand by reading the commit.
   IMPACT graphics on widget 11. The stock IP30 PROM boots IRIX 6.5.30 to a
   serial login or, on the graphics console, to the X login and desktop.
   Needs the IP30 PROM image. Runs under jitv2 as well as the interpreter.
-  The devices are time-driven by `hptimer` and per-port receive threads, with
-  no polling thread; every thread is joined when the machine stops.
+  The devices are time-driven by `hptimer`. Serial input is polled every
+  2 ms by one receive thread per port; every thread is joined when the
+  machine stops.
   iris-gui can run it.
+- **The Octane's bus is the shared `Physical`.** HEART's banks are RAM banks
+  of their own, one store per fitted bank, and a MEMCFG write points the
+  decode table and ppmem's window at them (a write that changes nothing is
+  skipped). Banks of unequal size no longer share jitv2 page generations, so
+  a store into one cannot leave the JIT running stale code from another.
+  The processor reaches the bus directly, and the monitor has the `phys`
+  commands. `ip30 unmapped` lists the accesses nothing answers, the first
+  64, and stops taking the lock once it is full. A cached access to the
+  guarded 16 KiB at 0x2000_0000 reaches the bytes (a stated limitation, in
+  [the guide](docs/octane-ip30.md#what-is-approximated-or-not-modelled)).
+- **The Bridge decodes processor window accesses from a table.** Its BARs
+  and device windows are resolved once per change instead of per access.
 - **One 1-wire bus for the board records.** `dev::w1` holds the bus, the
   slot decode and the Dallas parts (DS2501/2502, DS2505); HEART, the Bridge,
   IOC3 and the graphics board each own a wire. `sgi_nic` only builds the SGI

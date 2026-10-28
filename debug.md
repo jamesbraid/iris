@@ -322,8 +322,9 @@ shows the command total and anything odd the driver did; `regs`, `wdt`,
 (interrupt bits, mask, counter, bank descriptors), `heart unsupported`
 (HEART registers touched but not modelled) and `ip30 memcfg|bridge|gfx|xbow|unmapped`
 (the banks as HEART places them, the Bridge's interrupt routing, the graphics
-widget's link, refused Crossbow accesses, and failed physical accesses with
-the PC).
+widget's link, refused Crossbow accesses, and the physical accesses nothing
+answers, with the PC; a device's own refusal is not listed). The Octane's bus
+is a `Physical`, so `phys map` shows its decode table.
 
 Queue position `[0]` is the mounted disc, `[1]` the next on eject. A disc
 change reaches IRIX as a Unit Attention ("medium changed") on its next
