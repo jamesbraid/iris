@@ -302,7 +302,7 @@ impl Octane {
         let (to_net, sent) = rtrb::RingBuffer::new(64);
         let (inject, from_net) = rtrb::RingBuffer::new(64);
         eth.attach(to_net, from_net, None, None);
-        let ioc3 = Arc::new(Ioc3::octane(MAC, false));
+        let ioc3 = Arc::new(Ioc3::octane(MAC));
         ioc3.attach_eth(eth.clone());
         ioc3.connect_superio_interrupt(bridge.pin_line(SUPERIO_PIN as u8));
 

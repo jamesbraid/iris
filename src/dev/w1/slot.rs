@@ -31,7 +31,9 @@ pub fn slot(bus: &mut Bus, pulse: u32, _sample: u32) -> bool {
 }
 
 /// A slot on a master whose wire also reaches a second net: both buses
-/// see it, and the wire reads low if a part on either pulls it low.
+/// see it, and the wire reads low if a part on either pulls it low. No
+/// machine joins two nets yet, so only the tests build it.
+#[cfg(test)]
 pub fn slot_wired(bus: &mut Bus, shared: Option<&mut Bus>, pulse: u32, sample: u32) -> bool {
     let level = slot(bus, pulse, sample);
     match shared {

@@ -1933,7 +1933,7 @@ impl MachineConfig {
             crate::dev::crime_mem::check_kits(&self.o2_kits()).map_err(|e| format!("banks: {e}"))?;
         } else if self.machine.profile == MachineProfile::OctaneIp30 {
             // A HEART bank is a matched DIMM pair: 64 to 512 MB, filled from
-            // bank 0 without a gap, 2 GB at most (the Octane owner's guide).
+            // bank 0 without a gap, 2 GB at most (see docs/octane-ip30.md).
             let banks = &self.banks[..bank_count];
             if banks[0] == 0 {
                 return Err("banks: an Octane needs memory in bank 0".into());

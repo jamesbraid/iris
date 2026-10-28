@@ -807,8 +807,8 @@ fn wav_file_has_a_valid_header_and_data() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// Cases from the QEMU PCM conversion unit test: two frames with opposite-sign
-// channels expose bit position, sign, channel and stride errors.
+// PCM conversion cases: two frames with opposite-sign channels expose bit
+// position, sign, channel and stride errors.
 
 const ADAT_WORDS: usize = 8;
 const AES_SUB_WORDS: usize = 64;

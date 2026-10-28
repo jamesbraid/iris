@@ -23,7 +23,7 @@
 //!   the driver acknowledges a slot; the request ring is not consumed while
 //!   any completion is held.
 //! * The target model has no bus reset, so a bus reset or soft reset does not
-//!   arm a unit attention on the disk as QEMU's SCSI devices do. A bus reset
+//!   arm a unit attention on the disk. A bus reset
 //!   does not retire the command in flight either: it completes as it would
 //!   have.
 //! * Only logical unit 0 of a present target exists. A command for another
@@ -34,7 +34,7 @@
 //! Register windows: BAR 0 is I/O space and BAR 1 memory space, both 256
 //! bytes onto the same sixteen-bit registers. Accesses of any other width
 //! are not decoded: they read zero and writes are dropped, noted for the
-//! first sixteen, where the QEMU model fails the access.
+//! first sixteen.
 //!
 //! Ported from hw/scsi/qlogic-isp.c in jamesbraid/qemu-sgi-origami.
 
@@ -769,7 +769,7 @@ impl Core {
 
     /// `base + off` on the bus, or None when the sum runs past the top of
     /// the 64-bit space: the guest chooses ring and buffer bases, and such
-    /// an address is a refused transfer, as the QEMU model treats it.
+    /// an address is a refused transfer.
     fn at(base: u64, off: u64) -> Option<u64> {
         base.checked_add(off)
     }
@@ -931,8 +931,7 @@ impl Core {
                     st.mailbox[MBOX_REQ] = 0;
                     st.mailbox[0] = mbox::COMPLETE;
                 } else {
-                    // A command in flight posts its completion here, as
-                    // the QEMU model's does.
+                    // A command in flight posts its completion here.
                     st.ctl.resp_epoch += 1;
                     st.resp_base = addr;
                     st.resp_len = st.mailbox[1];
@@ -1203,9 +1202,8 @@ impl Core {
     ///
     /// A command whose payload transfer the fabric refuses stops there and
     /// builds no completion: a WRITE sends nothing to the target, a READ
-    /// stores no more of what the target returned. The QEMU model leaves
-    /// such a request outstanding, never completed, until the driver gives
-    /// up on it; with no completion posted the driver sees the same here.
+    /// stores no more of what the target returned. Such a request stays
+    /// outstanding, never completed, until the driver gives up on it.
     ///
     /// None too when a reset cancelled the command (`gen` is the generation
     /// it was read under): what it had not yet stored in host memory is not
