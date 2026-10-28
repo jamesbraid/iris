@@ -9,10 +9,10 @@
 //! Callbacks run outside register and attachment locks.
 // SPDX-License-Identifier: BSD-3-Clause
 
-use crate::dev::heart_mem::{dma_read_bytes, dma_write_bytes};
 use crate::dev::w1;
 use crate::irq::{InterruptController, IrqLine};
 use crate::pci::{PciBusDevice, PciDma, PciDmaStatus, Space};
+use crate::physical::{read_bytes, write_bytes};
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, Resettable, BUS_OK};
 use parking_lot::{Mutex, RwLock};
 use std::sync::{Arc, Weak};
@@ -858,6 +858,22 @@ impl XBridgeHead {
         };
         Some((widget, target, mask, half))
     }
+    // Retain the existing memory path's probe before issuing a chunk's writes.
+    // The neutral helper alone can commit bytes before reporting a refusal.
+    fn write_memory(mem: &dyn BusDevice, address: u64, data: &[u8]) -> bool {
+        if data.is_empty() {
+            return true;
+        }
+        let first = address & !7;
+        let Some(end) = address
+            .checked_add(data.len() as u64)
+            .and_then(|a| a.checked_add(7))
+        else {
+            return false;
+        };
+        let mut probe = vec![0; ((end & !7) - first) as usize];
+        read_bytes(mem, first, &mut probe) == BUS_OK && write_bytes(mem, address, data) == BUS_OK
+    }
     fn dma(&self, slot: u8, address: u64, bytes: &mut [u8], write: bool) -> PciDmaStatus {
         let sender = self.routes.dma.read().clone();
         let mut good = true;
@@ -948,12 +964,12 @@ impl XBridgeHead {
                                     bytes[done + i];
                             }
                             if low == target && high == target + n as u64 {
-                                dma_write_bytes(&*mem, low, &data)
+                                Self::write_memory(&*mem, low, &data)
                             } else {
                                 let mut ok = true;
                                 for i in 0..n {
                                     let p = (target + i as u64) ^ mask;
-                                    ok &= dma_write_bytes(
+                                    ok &= Self::write_memory(
                                         &*mem,
                                         p,
                                         &data[(p - low) as usize..(p - low) as usize + 1],
@@ -962,10 +978,15 @@ impl XBridgeHead {
                                 ok
                             }
                         } else {
-                            let ok = dma_read_bytes(&*mem, low, &mut data);
+                            // Preserve the old helper's covering-doubleword probe
+                            // and zero the whole failed physical chunk, even if
+                            // the neutral helper returned part of its contents.
+                            let first = low & !7;
+                            let mut fetched = vec![0; (((high + 7) & !7) - first) as usize];
+                            let ok = read_bytes(&*mem, first, &mut fetched) == BUS_OK;
                             for i in 0..n {
                                 bytes[done + i] = if ok {
-                                    data[(((target + i as u64) ^ mask) - low) as usize]
+                                    fetched[(((target + i as u64) ^ mask) - first) as usize]
                                 } else {
                                     0
                                 };

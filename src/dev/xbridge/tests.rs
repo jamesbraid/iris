@@ -94,6 +94,7 @@ fn two_heads_and_crossbar_are_distinct_shared_chip_views() {
 }
 #[test]
 fn page_dma_keeps_valid_prefix_and_refuses_invalid_suffix() {
+    physical_chunk_refusal_does_not_publish_a_prefix();
     let (c, mem) = chip();
     let f = c.head(15);
     f.write64(0x10000, 0x2000 | (10 << 8) | 0x21);
@@ -111,6 +112,64 @@ fn page_dma_keeps_valid_prefix_and_refuses_invalid_suffix() {
     assert_ne!(f.read32(0x104).data & (1 << 30), 0);
     f.write32(0x114, 2);
     assert_eq!(f.read32(0x104).data & (1 << 30), 0);
+}
+// A mapped memory range whose middle word refuses accesses.
+struct FaultMemory(Arc<Memory>);
+impl BusDevice for FaultMemory {
+    fn read8(&self, a: u64) -> BusRead8 {
+        if (0x2004..0x2008).contains(&a) {
+            BusRead8::err()
+        } else {
+            self.0.read8(a)
+        }
+    }
+    fn write8(&self, a: u64, v: u8) -> u32 {
+        if (0x2004..0x2008).contains(&a) {
+            BUS_ERR
+        } else {
+            self.0.write8(a, v)
+        }
+    }
+    fn read32(&self, a: u64) -> BusRead32 {
+        if (0x2004..0x2008).contains(&a) {
+            BusRead32::err()
+        } else {
+            self.0.read32(a)
+        }
+    }
+    fn write32(&self, a: u64, v: u32) -> u32 {
+        if (0x2004..0x2008).contains(&a) {
+            BUS_ERR
+        } else {
+            self.0.write32(a, v)
+        }
+    }
+}
+fn physical_chunk_refusal_does_not_publish_a_prefix() {
+    let mem = Arc::new(Memory(Mutex::new(vec![0xaa; 0x8000])));
+    let c = XBridge::new(Arc::new(FaultMemory(mem.clone())));
+    let f = c.head(15);
+    f.write32(0x84, 10 << 20);
+    f.write32(0x204, 1 << 19);
+    let dma = c.dma(15, 0);
+    let mut bytes = [0xff; 8];
+    assert_eq!(
+        dma.dma_read(0x80002002, &mut bytes),
+        PciDmaStatus::MasterAbort
+    );
+    assert_eq!(
+        bytes, [0; 8],
+        "a failed physical chunk zeroes its readable prefix and suffix"
+    );
+    assert_eq!(
+        dma.dma_write(0x80002002, &[1; 8]),
+        PciDmaStatus::MasterAbort
+    );
+    assert_eq!(
+        &mem.0.lock()[0x2000..0x2010],
+        &[0xaa; 16],
+        "the probe prevents writes before or after the refused word"
+    );
 }
 #[test]
 fn interrupt_keeps_destination_and_enabling_a_live_pin_asserts() {
