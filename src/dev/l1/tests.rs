@@ -278,3 +278,109 @@ fn l1_ci_backend_and_joined_worker() {
     l1.start();
     l1.stop();
 }
+
+#[test]
+fn l1_worker_irq_delivery_stays_ordered_with_cpu_and_reentrant_reads() {
+    use std::sync::mpsc;
+    struct BlockingIrq {
+        entered: mpsc::SyncSender<()>,
+        resume: std::sync::Mutex<mpsc::Receiver<()>>,
+        blocked: AtomicBool,
+        levels: Mutex<Vec<bool>>,
+        device: std::sync::Weak<L1>,
+    }
+    impl crate::irq::InterruptController for BlockingIrq {
+        fn set_line(&self, _: u32, level: bool) {
+            if level && !self.blocked.swap(true, Ordering::AcqRel) {
+                self.entered.send(()).unwrap();
+                self.resume.lock().unwrap().recv().unwrap();
+                // A machine interrupt handler may inspect the UART immediately.
+                assert_eq!(self.device.upgrade().unwrap().read64(0x28).data, 0x60);
+            }
+            self.levels.lock().push(level);
+        }
+    }
+    let l1 = Arc::new(L1::new(Default::default()).unwrap());
+    let backend = Arc::new(crate::dev::z85c30::CiSerialBackend::new());
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+    let irq = Arc::new(BlockingIrq {
+        entered: entered_tx,
+        resume: std::sync::Mutex::new(resume_rx),
+        blocked: AtomicBool::new(false),
+        levels: Mutex::new(Vec::new()),
+        device: Arc::downgrade(&l1),
+    });
+    l1.set_irq(IrqLine::new(irq.clone(), 0));
+    l1.set_serial_backend(backend.clone());
+    l1.write64(8, 1);
+    l1.start();
+    backend.push_host(b"x");
+    let entered = entered_rx.recv_timeout(std::time::Duration::from_secs(2));
+    if entered.is_ok() {
+        l1.write64(0x10, 2);
+    }
+    resume_tx.send(()).unwrap();
+    l1.stop();
+    entered.unwrap();
+    assert_eq!(*irq.levels.lock(), [false, true, false]);
+}
+
+#[test]
+fn l1_concurrent_output_batches_and_actions_stay_ordered() {
+    use std::sync::mpsc;
+    struct BlockingBackend {
+        entered: mpsc::SyncSender<()>,
+        resume: std::sync::Mutex<mpsc::Receiver<()>>,
+        output: Mutex<Vec<u8>>,
+    }
+    impl SerialBackend for BlockingBackend {
+        fn send_byte(&self, byte: u8) {
+            if byte == b'A' {
+                self.entered.send(()).unwrap();
+                self.resume.lock().unwrap().recv().unwrap();
+            }
+            self.output.lock().push(byte);
+        }
+        fn recv_byte(&self) -> std::io::Result<u8> {
+            Err(std::io::ErrorKind::WouldBlock.into())
+        }
+    }
+    let l1 = Arc::new(L1::new(Default::default()).unwrap());
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+    let backend = Arc::new(BlockingBackend {
+        entered: entered_tx,
+        resume: std::sync::Mutex::new(resume_rx),
+        output: Mutex::new(Vec::new()),
+    });
+    l1.set_serial_backend(backend.clone());
+    let actions = Arc::new(Mutex::new(Vec::new()));
+    let captured = actions.clone();
+    let weak = Arc::downgrade(&l1);
+    l1.set_event_handler(Arc::new(move |action| {
+        // Reentrant register reads must not recursively dispatch notifications.
+        assert_eq!(weak.upgrade().unwrap().read64(0x28).data, 0x60);
+        captured.lock().push(action);
+    }));
+    {
+        let mut s = l1.state.lock();
+        s.output.extend(b"AB");
+        s.actions.push(L1Event::Reset);
+    }
+    let worker_device = l1.clone();
+    let worker = std::thread::spawn(move || worker_device.flush());
+    let entered = entered_rx.recv_timeout(std::time::Duration::from_secs(2));
+    if entered.is_ok() {
+        let mut s = l1.state.lock();
+        s.output.extend(b"CD");
+        s.actions.push(L1Event::Nmi);
+        drop(s);
+        l1.flush();
+    }
+    resume_tx.send(()).unwrap();
+    worker.join().unwrap();
+    entered.unwrap();
+    assert_eq!(*backend.output.lock(), b"ABCD");
+    assert_eq!(*actions.lock(), [L1Event::Reset, L1Event::Nmi]);
+}

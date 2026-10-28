@@ -40,11 +40,20 @@ fn encode(payload: &[u8]) -> Vec<u8> {
 }
 type EventHandler = Arc<dyn Fn(L1Event) + Send + Sync>;
 
+#[derive(Default)]
+struct Dispatch {
+    active: bool,
+    pending: bool,
+    level: Option<bool>,
+}
+
 /// The internal L1 connection is independent of the IOC3's external serial ports.
 /// Register offsets are relative to the 0x40-byte UART window. Only aligned
 /// 64-bit accesses are decoded; register values occupy the low eight bits.
 pub struct L1 {
     state: Arc<Mutex<State>>,
+    // Take dispatch before state when draining. Neither lock crosses a callback.
+    dispatch: Arc<Mutex<Dispatch>>,
     backend: Arc<Mutex<Arc<dyn SerialBackend>>>,
     irq: Arc<Mutex<IrqLine>>,
     handler: Arc<Mutex<Option<EventHandler>>>,
@@ -70,6 +79,7 @@ impl L1 {
         }
         Ok(Self {
             state: Arc::new(Mutex::new(State::new(config))),
+            dispatch: Arc::new(Mutex::new(Dispatch::default())),
             backend: Arc::new(Mutex::new(null_serial_backend())),
             irq: Arc::new(Mutex::new(IrqLine::unconnected())),
             handler: Arc::new(Mutex::new(None)),
@@ -84,6 +94,7 @@ impl L1 {
     }
     pub fn set_irq(&self, line: IrqLine) {
         *self.irq.lock() = line;
+        self.dispatch.lock().level = None;
         self.flush();
     }
     /// Power/reset requests reach the machine only after the reply is queued
@@ -159,26 +170,47 @@ impl L1 {
         }
     }
     fn flush(&self) {
-        let (level, output, actions) = {
-            let mut s = self.state.lock();
-            (
-                s.cause() != 1,
-                std::mem::take(&mut s.output),
-                std::mem::take(&mut s.actions),
-            )
-        };
-        let irq = self.irq.lock().clone();
-        irq.set(level);
-        let backend = self.backend.lock().clone();
-        for b in output {
-            backend.send_byte(b);
+        let mut dispatch = self.dispatch.lock();
+        dispatch.pending = true;
+        if dispatch.active {
+            return;
         }
-        let handler = self.handler.lock().clone();
-        for action in actions {
-            if let Some(handler) = &handler {
-                handler(action);
-            } else {
-                log::warn!("unconnected L1 action {action:?}");
+        dispatch.active = true;
+        loop {
+            dispatch.pending = false;
+            let (level, output, actions) = {
+                let mut s = self.state.lock();
+                (
+                    s.cause() != 1,
+                    std::mem::take(&mut s.output),
+                    std::mem::take(&mut s.actions),
+                )
+            };
+            // Reentrant reads request another drain, but must not repeat an
+            // unchanged IRQ and recursively trigger the same machine callback.
+            let changed = dispatch.level != Some(level);
+            dispatch.level = Some(level);
+            drop(dispatch);
+            if changed {
+                let irq = self.irq.lock().clone();
+                irq.set(level);
+            }
+            let backend = self.backend.lock().clone();
+            for b in output {
+                backend.send_byte(b);
+            }
+            let handler = self.handler.lock().clone();
+            for action in actions {
+                if let Some(handler) = &handler {
+                    handler(action);
+                } else {
+                    log::warn!("unconnected L1 action {action:?}");
+                }
+            }
+            dispatch = self.dispatch.lock();
+            if !dispatch.pending {
+                dispatch.active = false;
+                break;
             }
         }
     }
@@ -292,6 +324,7 @@ impl Device for L1 {
         self.running.store(true, Ordering::Release);
         let device = Self {
             state: self.state.clone(),
+            dispatch: self.dispatch.clone(),
             backend: self.backend.clone(),
             irq: self.irq.clone(),
             handler: self.handler.clone(),
