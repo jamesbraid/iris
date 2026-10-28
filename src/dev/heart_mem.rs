@@ -252,10 +252,22 @@ impl HeartRam {
     /// HEART's descriptors changed: decode against them from now on and lay
     /// the ppmem window out again. Called on the CPU thread (a MEMCFG write)
     /// or with the CPU stopped (reset, the machine publishing the window).
+    ///
+    /// A write that leaves the decode as it was does nothing to the window
+    /// or the page generations: the PROM rewrites the same descriptors, and
+    /// a remap empties the window under a running CPU.
     pub fn set_memcfg(&self, words: [u32; 4]) {
         let _g = self.remap.lock();
+        let same = Self::decoded(&self.desc.load()) == Self::decoded(&words);
         self.desc.store(words);
+        if same {
+            return;
+        }
         self.space.clear_mappings();
+        // A bank now answering where another did must look changed to the
+        // JIT even if the two pages' counters happen to be equal.
+        #[cfg(feature = "jitv2")]
+        self.banks.iter().for_each(PpMemory::bump_gen_all);
         // Lower banks first, so higher ones overlay them as in the decode.
         for (bank, &d) in words.iter().enumerate() {
             let (true, Some(i)) = (d & DESC_VALID != 0, self.index[bank]) else { continue };
@@ -271,6 +283,12 @@ impl HeartRam {
                 }
             }
         }
+    }
+
+    /// The bits of each descriptor the decode reads: all of a valid one
+    /// (valid, density, span, base), nothing of an invalid one.
+    fn decoded(words: &[u32; BANKS]) -> [u32; BANKS] {
+        words.map(|d| if d & DESC_VALID == 0 { 0 } else { d & (DESC_VALID | 0x7 << 22 | 0x3f << 16 | 0x1ff) })
     }
 
     /// The descriptors in force, for the monitor.
@@ -1001,6 +1019,46 @@ mod tests {
         assert_ne!(gen(m.gen_ptr(in_bank1)), v1);
         assert_eq!(gen(win(in_bank1)), gen(m.gen_ptr(in_bank1)), "and the window shows that counter");
         assert_eq!(gen(win(in_bank0)), v0);
+    }
+
+    #[test]
+    fn a_write_that_leaves_the_decode_alone_does_not_touch_the_window() {
+        let m = ram(128);
+        let d = DESC_VALID | (3 << 16);
+        bank0(&m, d);
+        let mapped = m.space().mapped_bitmap();
+        assert_ne!(mapped, 0);
+        // Drop the mappings behind its back: a remap would put them back.
+        m.space().clear_mappings();
+        bank0(&m, d);
+        assert_eq!(m.space().mapped_bitmap(), 0, "the same descriptors: no remap");
+        // Bits the decode ignores, and the rest of an invalid descriptor.
+        m.set_memcfg([d | 1 << 29, 0x7fff_ffff, 0, 0]);
+        assert_eq!(m.space().mapped_bitmap(), 0, "ignored bits: no remap");
+        assert_eq!(m.memcfg()[1], 0x7fff_ffff, "but the monitor sees what was written");
+        bank0(&m, DESC_VALID | (1 << 16));
+        assert_eq!(m.space().mapped_bitmap(), 1 << (RAM_BASE >> 26), "a change lays it out");
+        assert_ne!(mapped, m.space().mapped_bitmap());
+    }
+
+    /// A remap bumps every page's generation, so compiled code from a page
+    /// that now holds other bytes is dropped; a repeated write does not.
+    #[cfg(feature = "jitv2")]
+    #[test]
+    fn a_changed_descriptor_bumps_the_page_generations() {
+        let gen = |p: *const AtomicU64| unsafe { (*p).load(Ordering::Acquire) };
+        let m = ram(128);
+        let d = DESC_VALID | (3 << 16);
+        bank0(&m, d);
+        let g = m.gen_ptr(RAM_BASE + 0x8000);
+        let v = gen(g);
+        bank0(&m, d);
+        assert_eq!(gen(g), v, "the same descriptors leave it");
+        bank0(&m, DESC_VALID | (1 << 16));
+        assert_ne!(gen(g), v, "a change advances it");
+        let v = gen(g);
+        m.set_memcfg([0; 4]);
+        assert_ne!(gen(g), v, "so does taking the memory away");
     }
 
     #[test]
