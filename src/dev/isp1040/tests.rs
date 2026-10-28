@@ -1244,3 +1244,240 @@ fn the_ring_thread_lives_between_start_and_stop() {
     assert_eq!(r.r(reg::REQUEST_QUEUE), 1);
     assert_eq!(g32(&r.status(0), 4), 0x7001);
 }
+
+#[test]
+fn isp12160_banks_identity_and_ram_bounds() {
+    let isp = Isp1040::new_12160();
+    Device::start(&isp);
+    assert_eq!(isp.read(reg::ID_HIGH, 2), 0x1216);
+    assert_eq!(isp.read(reg::BUS_CFG0, 2), 0);
+    for bank in 0..4 {
+        isp.write(reg::BUS_CFG1, bank << 8, 2);
+        isp.write(reg::BANK_BASE, 0xabc0 + bank, 2);
+    }
+    for bank in 0..4 {
+        isp.write(reg::BUS_CFG1, bank << 8, 2);
+        assert_eq!(isp.read(reg::BANK_BASE, 2), 0xabc0 + bank);
+    }
+    isp.write(reg::BUS_CFG1, 0xffff, 2);
+    assert_eq!(isp.read(reg::BUS_CFG1, 2), 0x300);
+    isp.write(reg::DMA_CMD_CFG, 2, 2);
+    assert_eq!(isp.read(reg::DMA_CMD_CFG, 2), 0);
+    let r = Rig { isp, mem: FakeMem::new() };
+    r.isp.connect_dma(r.mem.clone());
+    assert_eq!(r.cmd(&[mbox::LOAD_RAM_A64, 0xffff, 0, 0, 2]), mbox::PARAM_ERROR);
+    assert_eq!(r.cmd(&[mbox::ABOUT_FIRMWARE]), mbox::COMPLETE);
+    assert_eq!((r.r(r.mb(1)), r.r(r.mb(2))), (10, 4));
+}
+
+fn dual_rig(name: &str) -> Rig {
+    let isp = Isp1040::new_12160();
+    Device::start(&isp);
+    let mem = FakeMem::new();
+    isp.connect_dma(mem.clone());
+    for channel in 0..2 {
+        let path = image(&format!("{name}-{channel}"), 8);
+        isp.attach_channel_device(channel, 1, path.to_str().unwrap(), false, vec![], false, None).unwrap();
+    }
+    let r = Rig { isp, mem };
+    r.init_rings(8, 8);
+    r
+}
+
+fn channel_request(channel: u8, handle: u32, cdb: &[u8], segs: &[(u32, u32)]) -> [u8; ENTRY_SIZE] {
+    let mut entry = request(handle, 1, cdb, segs);
+    p16(&mut entry, 8, 0x100 | ((channel as u16) << 15));
+    entry
+}
+
+#[test]
+fn isp12160_targets_with_the_same_id_are_independent() {
+    let r = dual_rig("dual-targets");
+    for channel in 0..2 {
+        r.mem.put(BUF, &[0x51 + channel; BLOCK_SIZE]);
+        r.put_entry(channel as u32, &channel_request(channel, channel as u32,
+            &cdb10(scsi_cmd::WRITE_10, 0, 1), &[(BUF, BLOCK_SIZE as u32)]));
+        r.doorbell(channel as u16 + 1);
+    }
+    for channel in 0..2 {
+        r.put_entry(channel as u32 + 2, &channel_request(channel, channel as u32 + 2,
+            &cdb10(scsi_cmd::READ_10, 0, 1), &[(BUF, BLOCK_SIZE as u32)]));
+        r.doorbell(channel as u16 + 3);
+        assert_eq!(r.mem.get(BUF, BLOCK_SIZE), vec![0x51 + channel; BLOCK_SIZE]);
+    }
+    let no_data = channel_request(1, 5, &[0, 0, 0, 0, 0, 0], &[]);
+    r.put_entry(4, &no_data);
+    r.doorbell(5);
+    assert_eq!(g16(&r.status(4), 12), 0x1700, "no invented data phase");
+    r.put_entry(5, &channel_request(1, 6, &[0x12, 0, 0, 0, 36, 0], &[(BUF, 64)]));
+    r.doorbell(6);
+    assert_eq!(g16(&r.status(5), 12), 0x1f00, "a short transfer did not finish its data phase");
+    assert_eq!(g32(&r.status(5), 20), 28);
+    r.w(r.mb(6), 0xbeef);
+    assert_eq!(r.cmd(&[mbox::GET_TARGET_PARAMETERS, 0x8100]), mbox::COMPLETE);
+    assert_eq!(r.r(r.mb(6)), 0);
+}
+
+#[test]
+fn isp12160_reset_and_abort_leave_the_other_channel_alone() {
+    let r = dual_rig("dual-recovery");
+    // A refused payload leaves an outstanding command for recovery, on each bus.
+    for channel in 0..2 {
+        r.put_entry(channel as u32, &channel_request(channel, 0x11223344 + channel as u32,
+            &cdb10(scsi_cmd::WRITE_10, 0, 1), &[(MEM as u32, BLOCK_SIZE as u32)]));
+        r.doorbell(channel as u16 + 1);
+    }
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0);
+    let snapshot = r.isp.save_state();
+    r.isp.load_state(&snapshot).unwrap();
+    assert_eq!(r.cmd(&[mbox::ABORT_COMMAND, 0x1100, 0x1122, 0x3345]), mbox::COMMAND_ERROR,
+        "an invalid target cannot alias the other channel");
+    assert_eq!(r.cmd(&[mbox::ABORT_COMMAND, 0x8100, 0x1122, 0x3344]), mbox::COMMAND_ERROR,
+        "a handle on the other channel is not a match");
+    assert_eq!(r.cmd(&[mbox::ABORT_COMMAND, 0x0100, 0x1122, 0x3344]), mbox::COMPLETE);
+    r.isp.wait_idle();
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+    assert_eq!(g16(&r.status(0), 10), 5);
+    assert_eq!(g16(&r.status(0), 12), 0);
+    assert_eq!(g16(&r.status(0), 14), 0);
+    assert_eq!(r.cmd(&[mbox::BUS_RESET, 99, 2]), mbox::PARAM_ERROR);
+    assert_eq!(r.cmd(&[mbox::BUS_RESET, 99, 1]), mbox::COMPLETE);
+    r.isp.wait_idle();
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 2);
+    assert_eq!(g32(&r.status(1), 4), 0x11223345);
+    assert_eq!(g16(&r.status(1), 10), 4);
+    for channel in 0..2 {
+        r.put_entry(channel as u32 + 2, &channel_request(channel, 8 + channel as u32,
+            &[0, 0, 0, 0, 0, 0], &[]));
+        r.doorbell(channel as u16 + 3);
+        assert_eq!(g16(&r.status(channel as u32 + 2), 8) & 0xff, if channel == 1 { 2 } else { 0 });
+        if channel == 1 { assert_eq!(r.status(3)[44], 0x29); }
+    }
+}
+
+#[test]
+fn isp12160_busy_mailbox_and_failed_a64_load_preserve_state() {
+    let r = dual_rig("dual-ram");
+    r.w(r.mb(0), mbox::ABOUT_FIRMWARE);
+    r.w(reg::HOST_CMD, 0x5000);
+    r.w(r.mb(0), mbox::WRITE_RAM_WORD);
+    r.w(r.mb(1), 0x20);
+    r.w(r.mb(2), 0xbeef);
+    r.w(reg::HOST_CMD, 0x5000);
+    assert_eq!(r.r(r.mb(0)), mbox::WRITE_RAM_WORD, "busy submission is refused");
+    r.ack();
+    assert_eq!(r.cmd(&[mbox::READ_RAM_WORD, 0x20]), mbox::COMPLETE);
+    assert_eq!(r.r(r.mb(2)), 0);
+    assert_eq!(r.cmd(&[mbox::WRITE_RAM_WORD, 0x20, 0xbeef]), mbox::COMPLETE);
+    assert_eq!(r.cmd(&[mbox::LOAD_RAM_A64, 0x20, 0, 0, 2, 0, 0, 1]), mbox::HOST_INTERFACE_ERROR);
+    assert_eq!(r.cmd(&[mbox::READ_RAM_WORD, 0x20]), mbox::COMPLETE);
+    assert_eq!(r.r(r.mb(2)), 0xbeef);
+    r.mem.put(BUF, &[0x34, 0x12, 0x78, 0x56]);
+    assert_eq!(r.cmd(&[mbox::LOAD_RAM_A64, 0xfffe, (BUF >> 16) as u16, BUF as u16, 2, 0, 0, 0]), mbox::COMPLETE);
+    assert_eq!(r.cmd(&[mbox::READ_RAM_WORD, 0xffff]), mbox::COMPLETE);
+    assert_eq!(r.r(r.mb(2)), 0x5678);
+    assert_eq!(r.cmd(&[mbox::VERIFY_CHECKSUM, 0xffff]), mbox::PARAM_ERROR);
+}
+
+#[test]
+fn isp12160_banks_and_reset_delays_survive_snapshot() {
+    let r = dual_rig("dual-snapshot");
+    assert_eq!(r.cmd(&[mbox::SET_RESET_DELAY_PARAMS, 7, 19]), mbox::COMPLETE);
+    for bank in 0..4 {
+        r.w(reg::BUS_CFG1, bank << 8);
+        r.w(reg::BANK_BASE, bank + 0x1230);
+    }
+    let snapshot = r.isp.save_state();
+    r.isp.reset();
+    r.isp.load_state(&snapshot).unwrap();
+    for bank in 0..4 {
+        r.w(reg::BUS_CFG1, bank << 8);
+        assert_eq!(r.r(reg::BANK_BASE), bank + 0x1230);
+    }
+    assert_eq!(r.isp.st.lock().reset_delay, 7);
+    assert_eq!(r.isp.st.lock().reset_delay1, 19);
+    r.w(reg::BUS_CTRL, CTRL_SOFT_RESET);
+    for bank in 0..4 {
+        r.w(reg::BUS_CFG1, bank << 8);
+        assert_eq!(r.r(reg::BANK_BASE), 0);
+    }
+}
+
+#[test]
+fn isp12160_pci_header_and_channel_handles() {
+    use crate::dev::isp12160::Isp12160;
+    use crate::scsi_monitor::ScsiTargets;
+    let isp = Arc::new(Isp12160::new());
+    assert_eq!(isp.config().read(0), 0x12161077);
+    assert_eq!(isp.config().read(1), 0x02b00000);
+    assert_eq!(isp.config().read(2) & 0xff, 6);
+    assert_eq!(isp.config().read(13), 0x44);
+    assert_eq!(isp.config().read(17), 0x00010001);
+    isp.config().write(1, 0xffff);
+    assert_eq!(isp.config().read(1), 0x02b00156);
+    isp.config().write(3, 0xf8ff);
+    assert_eq!(isp.config().read(3) & 0xffff, 0xf8ff);
+    isp.config().write(18, 0xffffffff);
+    assert_eq!(isp.config().read(18), 0x100);
+    for channel in 0..2 {
+        let handle = isp.channel(channel).unwrap();
+        handle.with_targets(|targets| assert_eq!(targets.len(), 16));
+    }
+    assert!(isp.channel(2).is_none());
+    isp.bar_write(0, reg::MAILBOX_BASE + 14, 0x5678, 2);
+    assert_eq!(isp.bar_read(1, reg::MAILBOX_BASE + 14, 2), 0x5678);
+    isp.bar_write(1, reg::MAILBOX_BASE + 14, 0x1234, 2);
+    assert_eq!(isp.bar_read(0, reg::MAILBOX_BASE + 14, 2), 0x1234);
+    crate::traits::Resettable::power_on(&*isp);
+    assert_eq!(isp.config().read(1), 0x02b00000);
+    assert_eq!(isp.config().read(18), 0);
+}
+
+#[test]
+fn isp12160_abort_cancels_payload_without_resetting_the_other_bus() {
+    let mem = FakeMem::new();
+    let gate = GatedMem::new(mem.clone(), BUF);
+    let isp = Isp1040::new_12160();
+    Device::start(&isp);
+    isp.connect_dma(gate.clone());
+    isp.attach_disk_at(1, &image("dual-active-abort", 8)).unwrap();
+    let r = Rig { isp, mem };
+    r.init_rings(4, 4);
+    r.put_entry(0, &channel_request(0, 0x12345678, &cdb10(scsi_cmd::WRITE_10, 0, 1), &[(BUF, 512)]));
+    r.isp.write(reg::REQUEST_QUEUE, 1, 2);
+    gate.wait_arrival();
+    assert_eq!(r.cmd(&[mbox::ABORT_COMMAND, 0x8100, 0x1234, 0x5678]), mbox::COMMAND_ERROR);
+    assert_eq!(r.cmd(&[mbox::ABORT_COMMAND, 0x100, 0x1234, 0x5678]), mbox::COMPLETE);
+    gate.open();
+    r.isp.wait_idle();
+    assert_eq!(g16(&r.status(0), 10), 5);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+    r.put_entry(1, &channel_request(0, 0x99, &cdb10(scsi_cmd::READ_10, 0, 1), &[(BUF + 4096, 512)]));
+    r.doorbell(2);
+    assert_eq!(r.mem.get(BUF + 4096, 512), vec![0; 512]);
+}
+
+#[test]
+fn isp12160_response_entry_precedes_interrupt() {
+    let mem = FakeMem::new();
+    let gate = GatedMem::new(mem.clone(), RESP);
+    let isp = Isp1040::new_12160();
+    Device::start(&isp);
+    isp.connect_dma(gate.clone());
+    isp.attach_disk_at(1, &image("dual-status-order", 8)).unwrap();
+    let (probe, line) = LevelProbe::line();
+    isp.connect_interrupt(line);
+    let r = Rig { isp, mem };
+    r.init_rings(4, 4);
+    r.w(reg::BUS_CTRL, CTRL_INT_ENABLE | CTRL_RISC_INT_ENABLE);
+    r.put_entry(0, &channel_request(0, 0x123, &[0, 0, 0, 0, 0, 0], &[]));
+    r.isp.write(reg::REQUEST_QUEUE, 1, 2);
+    gate.wait_arrival();
+    assert!(!probe.level());
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0);
+    gate.open();
+    r.isp.wait_idle();
+    assert_eq!(g32(&r.status(0), 4), 0x123);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+    assert!(probe.level());
+}

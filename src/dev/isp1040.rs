@@ -1,4 +1,4 @@
-//! QLogic ISP1040 SCSI host adapter, emulated above its RISC.
+//! QLogic ISP1040 and ISP12160 SCSI engine, emulated above the controller RISC.
 //!
 //! The driver hands whole SCSI commands to a request ring in host memory and
 //! collects completions from a response ring. Everything else is a mailbox
@@ -13,8 +13,8 @@
 //! * Commands run one at a time, in ring order, on the adapter's own thread:
 //!   the doorbell write returns at once and the completion and its
 //!   interrupt follow when the target has answered, as the part's would.
-//!   No abort/recovery mailbox commands exist (the ISP1040 does not carry
-//!   them; they answer "invalid"). A soft reset cancels the command in
+//!   ISP1040 abort/recovery mailbox commands answer "invalid".
+//!   A soft reset cancels the command in
 //!   flight without waiting for its target: no completion is posted, and
 //!   what it had not yet stored in host memory is not stored. A queue
 //!   initialisation does not cancel it: the command ran once, and its
@@ -22,10 +22,9 @@
 //! * A completion with no room in the response ring is held and posted when
 //!   the driver acknowledges a slot; the request ring is not consumed while
 //!   any completion is held.
-//! * The target model has no bus reset, so a bus reset or soft reset does not
-//!   arm a unit attention on the disk as QEMU's SCSI devices do. A bus reset
-//!   does not retire the command in flight either: it completes as it would
-//!   have.
+//! * The ISP1040 retains its original bus-reset approximation: it neither
+//!   retires an in-flight command nor arms target unit attention. The
+//!   ISP12160 retires selected requests and resets the targets on that bus.
 //! * Only logical unit 0 of a present target exists. A command for another
 //!   unit is passed to the target with that unit number, which answers as
 //!   SCSI says (INQUIRY: no device at this unit; anything else: check
@@ -133,6 +132,9 @@ pub mod mbox {
     pub const INIT_REQ_QUEUE: u16 = 0x0010;
     pub const INIT_RSP_QUEUE: u16 = 0x0011;
     pub const ABORT_COMMAND: u16 = 0x0015;
+    pub const ABORT_DEVICE: u16 = 0x0016;
+    pub const ABORT_TARGET: u16 = 0x0017;
+    pub const COMMAND_ERROR: u16 = 0x4005;
     pub const BUS_RESET: u16 = 0x0018;
     pub const GET_FIRMWARE_STATUS: u16 = 0x001f;
     pub const GET_TARGET_PARAMETERS: u16 = 0x0028;
@@ -198,6 +200,8 @@ pub const SCSI_STATUS_SENSE_VALID: u16 = 0x0200;
 
 pub const IOCB_COMPLETE: u16 = 0x0000;
 pub const IOCB_INCOMPLETE: u16 = 0x0001;
+pub const IOCB_RESET: u16 = 0x0004;
+pub const IOCB_ABORTED: u16 = 0x0005;
 pub const IOCB_DATA_UNDERRUN: u16 = 0x0015;
 
 pub const STATE_GOT_BUS: u16 = 0x0100;
@@ -283,6 +287,14 @@ enum Prepared {
 }
 
 struct State {
+    isp12160: bool,
+    sxp1_bank: [u16; BANK_WORDS],
+    dma_bank: [u16; BANK_WORDS],
+    reset_delay1: u16,
+    // Encoded channel/target, LUN and handle. Only dispatched commands can be retired.
+    active: Option<(u8, u8, u32)>,
+    cancelled: bool,
+    outstanding: Vec<(u8, u8, u32)>,
     ctl: Ctl,
     bus_cfg1: u16,
     bus_ctrl: u16,
@@ -311,6 +323,13 @@ struct State {
 impl State {
     fn new() -> Self {
         let mut s = State {
+            isp12160: false,
+            sxp1_bank: [0; BANK_WORDS],
+            dma_bank: [0; BANK_WORDS],
+            reset_delay1: 0,
+            active: None,
+            cancelled: false,
+            outstanding: Vec::new(),
             ctl: Ctl::default(),
             bus_cfg1: 0,
             bus_ctrl: 0,
@@ -360,6 +379,12 @@ impl State {
         // The driver re-downloads firmware after every reset.
         self.risc_ram.iter_mut().for_each(|w| *w = 0);
         self.reset_delay = 0;
+        self.reset_delay1 = 0;
+        self.active = None;
+        self.cancelled = false;
+        self.outstanding.clear();
+        self.sxp1_bank = [0; BANK_WORDS];
+        self.dma_bank = [0; BANK_WORDS];
         self.rqst_base = 0;
         self.resp_base = 0;
         self.rqst_len = 0;
@@ -383,6 +408,14 @@ impl State {
     }
 
     fn active_bank(&mut self) -> &mut [u16; BANK_WORDS] {
+        if self.isp12160 {
+            return match (self.bus_cfg1 >> 8) & 3 {
+                1 => &mut self.sxp_bank,
+                2 => &mut self.sxp1_bank,
+                3 => &mut self.dma_bank,
+                _ => &mut self.risc_bank,
+            };
+        }
         if self.bus_cfg1 & CFG1_BANK_SELECT != 0 { &mut self.sxp_bank } else { &mut self.risc_bank }
     }
 }
@@ -405,6 +438,10 @@ impl std::ops::Deref for Isp1040 {
 /// across one guest-memory store at a time, and `targets` across one
 /// target command; neither is held with the other.
 pub struct Core {
+    isp12160: bool,
+    // Recovery invalidates the active payload stores without replacing either ring.
+    cancel: AtomicU64,
+    targets1: Mutex<[Option<ScsiDevice>; 16]>,
     st: Mutex<State>,
     /// `st.ctl.gen`, readable without `st`: what a store into guest memory
     /// checks under `fence`.
@@ -452,6 +489,10 @@ impl Isp1040 {
         Self { core: Arc::new(Core::new_at(index)), worker: Mutex::new(None) }
     }
 
+    pub(crate) fn new_12160() -> Self {
+        Self { core: Arc::new(Core::new_part(0, true)), worker: Mutex::new(None) }
+    }
+
     /// Start the ring thread (idempotent) and let it take whatever was
     /// published while the adapter was stopped.
     fn start_ring(&self) {
@@ -463,7 +504,7 @@ impl Isp1040 {
         let c = self.core.clone();
         *worker = Some(
             std::thread::Builder::new()
-                .name(format!("ISP1040-{}", self.index))
+                .name(format!("{}-{}", self.model_name(), self.index))
                 .spawn(move || c.run_ring())
                 .expect("spawn isp1040 thread"),
         );
@@ -491,9 +532,10 @@ impl Isp1040 {
             ("st", (|c: &Core| c.st.is_locked()) as fn(&Core) -> bool),
             ("fence", |c| c.fence.is_locked()),
             ("targets", |c| c.targets.is_locked()),
+            ("targets1", |c| c.targets1.is_locked()),
         ] {
             let core = Arc::downgrade(&self.core);
-            crate::locks::register_lock(format!("isp1040-{}::{what}", self.index), move || {
+            crate::locks::register_lock(format!("{}-{}::{what}", self.model_name().to_ascii_lowercase(), self.index), move || {
                 core.upgrade().is_some_and(|c| probe(&c))
             });
         }
@@ -508,10 +550,29 @@ impl Drop for Isp1040 {
 }
 
 impl Core {
-    fn new_at(index: u8) -> Self {
-        let st = State::new();
+    fn new_at(index: u8) -> Self { Self::new_part(index, false) }
+
+    fn new_part(index: u8, isp12160: bool) -> Self {
+        let mut st = State::new();
+        st.isp12160 = isp12160;
         let gen = st.ctl.gen;
+        let pci = PciConfig::new(
+            PCI_VENDOR_QLOGIC, if isp12160 { 0x1216 } else { PCI_DEVICE_ISP1040 },
+            PCI_CLASS_SCSI, if isp12160 { 6 } else { PCI_REVISION_ISP1040 },
+            [Bar::Io(reg::WINDOW_SIZE), Bar::Mem(reg::WINDOW_SIZE), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused],
+            PCI_INTA,
+        );
+        let pci = if isp12160 {
+            pci.with_header_policy(0x02b0, 0x0156, 0xff)
+                .with_cache_line_policy(0xff)
+                .with_register_policy(13, 0x44, 0)
+                .with_register_policy(17, 0x0001_0001, 0)
+                .with_register_policy(18, 0, 0x100)
+        } else { pci };
         Self {
+            isp12160,
+            cancel: AtomicU64::new(0),
+            targets1: Mutex::new(std::array::from_fn(|_| None)),
             st: Mutex::new(st),
             gen: AtomicU64::new(gen),
             fence: Mutex::new(()),
@@ -524,17 +585,15 @@ impl Core {
             target: 1,
             // BAR 0 is the I/O window and BAR 1 its memory-space alias, one
             // register file.
-            pci: PciConfig::new(
-                PCI_VENDOR_QLOGIC, PCI_DEVICE_ISP1040, PCI_CLASS_SCSI, PCI_REVISION_ISP1040,
-                [Bar::Io(reg::WINDOW_SIZE), Bar::Mem(reg::WINDOW_SIZE), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused],
-                PCI_INTA,
-            ),
+            pci,
             notes: Mutex::new(Vec::new()),
             dma_misses: Mutex::new(std::collections::BTreeSet::new()),
             odd_accesses: Mutex::new(0),
             heartbeat: OnceLock::new(),
         }
     }
+
+    fn model_name(&self) -> &'static str { if self.isp12160 { "ISP12160" } else { "ISP1040" } }
 
     pub fn index(&self) -> u8 { self.index }
 
@@ -547,6 +606,10 @@ impl Core {
             let mut st = self.st.lock();
             st.reset();
             self.publish_gen(&st);
+            if self.isp12160 {
+                self.reset_targets(&mut st, 0, None);
+                self.reset_targets(&mut st, 1, None);
+            }
         }
         self.retire_stores();
         self.sync_irq();
@@ -712,9 +775,17 @@ impl Core {
         overlay: bool,
         overlay_path: Option<&str>,
     ) -> std::io::Result<u64> {
+        self.attach_channel_device(0, target, path, cdrom, discs, overlay, overlay_path)
+    }
+
+    pub fn attach_channel_device(&self, channel: u8, target: u8, path: &str, cdrom: bool,
+        discs: Vec<String>, overlay: bool, overlay_path: Option<&str>) -> std::io::Result<u64> {
+        if channel > u8::from(self.isp12160) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "SCSI channel out of range"));
+        }
         let d = ScsiDevice::open(path, cdrom, discs, overlay, overlay_path, if cdrom { ISP_CDROM } else { ISP_DISK })?;
         let blocks = d.size() / BLOCK_SIZE as u64;
-        let mut targets = self.targets.lock();
+        let mut targets = self.channel_targets(channel).lock();
         let slot = targets.get_mut(target as usize).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("SCSI id {target} out of range"))
         })?;
@@ -735,8 +806,8 @@ impl Core {
         (0..t.len() as u8).filter(|&i| t[i as usize].is_some()).collect()
     }
 
-    fn has_target(&self, id: u8) -> bool {
-        self.targets.lock().get(id as usize).is_some_and(|t| t.is_some())
+    pub(crate) fn channel_targets(&self, channel: u8) -> &Mutex<[Option<ScsiDevice>; 16]> {
+        if channel == 1 { &self.targets1 } else { &self.targets }
     }
 
     // ---- DMA ---------------------------------------------------------
@@ -825,7 +896,11 @@ impl Core {
     fn ram_transfer(&self, st: &mut MutexGuard<'_, State>, load: bool) -> u16 {
         let base = st.mailbox[1];
         let count = st.mailbox[4] as usize;
-        let host = Self::mbox_host_addr(&st.mailbox);
+        let mut host = Self::mbox_host_addr(&st.mailbox);
+        if self.isp12160 && base as usize + count > RAM_WORDS { return mbox::PARAM_ERROR; }
+        if st.mailbox[0] == mbox::LOAD_RAM_A64 {
+            host |= ((st.mailbox[7] as u64) << 32) | ((st.mailbox[6] as u64) << 48);
+        }
         if count == 0 {
             return mbox::COMPLETE;
         }
@@ -865,6 +940,7 @@ impl Core {
                 st.mailbox[3] = 0;
                 st.mailbox[0] = mbox::COMPLETE;
             }
+            mbox::LOAD_RAM_A64 if self.isp12160 => st.mailbox[0] = self.ram_transfer(st, true),
             mbox::LOAD_RAM => st.mailbox[0] = self.ram_transfer(st, true),
             mbox::DUMP_RAM => st.mailbox[0] = self.ram_transfer(st, false),
             // Mailboxes 1-7 are expected back unchanged; they already are.
@@ -873,7 +949,19 @@ impl Core {
             // zero.
             mbox::VERIFY_CHECKSUM => {
                 let start = st.mailbox[1];
+                if self.isp12160 && start as usize + 4 > RAM_WORDS {
+                    st.mailbox[0] = mbox::PARAM_ERROR;
+                    st.semaphore = SEMAPHORE_LOCK;
+                    st.bus_status |= STATUS_INT_REQ | STATUS_RISC_INT_REQ;
+                    return;
+                }
                 let len = st.risc_ram[start.wrapping_add(3) as usize];
+                if self.isp12160 && start as usize + len as usize > RAM_WORDS {
+                    st.mailbox[0] = mbox::PARAM_ERROR;
+                    st.semaphore = SEMAPHORE_LOCK;
+                    st.bus_status |= STATUS_INT_REQ | STATUS_RISC_INT_REQ;
+                    return;
+                }
                 let mut sum = 0u16;
                 for i in 0..len {
                     sum = sum.wrapping_add(st.risc_ram[start.wrapping_add(i) as usize]);
@@ -886,8 +974,8 @@ impl Core {
             // Accepted, never executed.
             mbox::EXEC_FIRMWARE => st.mailbox[0] = mbox::COMPLETE,
             mbox::ABOUT_FIRMWARE => {
-                st.mailbox[1] = FW_VERSION[0];
-                st.mailbox[2] = FW_VERSION[1];
+                st.mailbox[1] = if self.isp12160 { 10 } else { FW_VERSION[0] };
+                st.mailbox[2] = if self.isp12160 { 4 } else { FW_VERSION[1] };
                 st.mailbox[3] = FW_VERSION[2];
                 st.mailbox[6] = 0;
                 st.mailbox[0] = mbox::COMPLETE;
@@ -903,6 +991,7 @@ impl Core {
             mbox::GET_TARGET_PARAMETERS => {
                 st.mailbox[2] = 0;
                 st.mailbox[3] = 0;
+                if self.isp12160 { st.mailbox[6] = 0; }
                 st.mailbox[0] = mbox::COMPLETE;
             }
             // Setters for state nothing reads back; answering invalid is a
@@ -922,6 +1011,7 @@ impl Core {
             | mbox::SET_DATA_OVERRUN_RECOVERY => st.mailbox[0] = mbox::COMPLETE,
             mbox::SET_RESET_DELAY_PARAMS => {
                 st.reset_delay = st.mailbox[1];
+                if self.isp12160 { st.reset_delay1 = st.mailbox[2]; }
                 st.mailbox[0] = mbox::COMPLETE;
             }
             mbox::INIT_REQ_QUEUE | mbox::INIT_REQ_QUEUE_A64 | mbox::INIT_RSP_QUEUE | mbox::INIT_RSP_QUEUE_A64 => {
@@ -952,10 +1042,35 @@ impl Core {
                     st.mailbox[0] = mbox::COMPLETE;
                 }
             }
-            // Resets the bus, not the adapter: chip state survives. Mailbox 1
-            // holds the configured reset delay, not a selector. A command in
-            // flight is not retired; it completes as it would have.
-            mbox::BUS_RESET => st.mailbox[0] = mbox::COMPLETE,
+            // Only dispatched requests are retired; unread ring entries stay put.
+            mbox::ABORT_COMMAND | mbox::ABORT_DEVICE | mbox::ABORT_TARGET if self.isp12160 => {
+                let device = st.mailbox[1];
+                let valid_target = (device >> 8) & 0x7f <= MAX_TARGET as u16;
+                let target = ((device >> 8) & 0x7f) as u8 | (((device >> 15) as u8) << 4);
+                let lun = device as u8;
+                let handle = ((st.mailbox[2] as u32) << 16) | st.mailbox[3] as u32;
+                let hit = valid_target && st.active.is_some_and(|(t, l, h)| t == target &&
+                    (cmd == mbox::ABORT_TARGET || l == lun) && (cmd != mbox::ABORT_COMMAND || h == handle));
+                let completion = if cmd == mbox::ABORT_TARGET { IOCB_RESET } else { IOCB_ABORTED };
+                if hit { self.cancel_active(st, completion); }
+                let retired = self.retire_outstanding(st, |(t, l, h)| valid_target && t == target &&
+                    (cmd == mbox::ABORT_TARGET || l == lun) && (cmd != mbox::ABORT_COMMAND || h == handle), completion);
+                if cmd == mbox::ABORT_TARGET && valid_target { self.reset_targets(st, target >> 4, Some(target & 15)); }
+                st.mailbox[0] = if cmd == mbox::ABORT_COMMAND && !hit && retired == 0 { mbox::COMMAND_ERROR } else { mbox::COMPLETE };
+            }
+            // Mailbox 1 is a delay, mailbox 2 selects the ISP12160 bus.
+            mbox::BUS_RESET => {
+                if self.isp12160 {
+                    let channel = st.mailbox[2];
+                    if channel > 1 { st.mailbox[0] = mbox::PARAM_ERROR; }
+                    else {
+                        if st.active.is_some_and(|(t, _, _)| t >> 4 == channel as u8) { self.cancel_active(st, IOCB_RESET); }
+                        self.retire_outstanding(st, |(t, _, _)| t >> 4 == channel as u8, IOCB_RESET);
+                        self.reset_targets(st, channel as u8, None);
+                        st.mailbox[0] = mbox::COMPLETE;
+                    }
+                } else { st.mailbox[0] = mbox::COMPLETE; }
+            }
             _ => {
                 self.note(format!("mailbox command {cmd:#06x} not modelled"));
                 st.mailbox[0] = mbox::INVALID;
@@ -963,6 +1078,45 @@ impl Core {
         }
         st.semaphore = SEMAPHORE_LOCK;
         st.bus_status |= STATUS_INT_REQ | STATUS_RISC_INT_REQ;
+    }
+
+    fn reset_targets(&self, st: &mut MutexGuard<'_, State>, channel: u8, target: Option<u8>) {
+        st.ctl.hold += 1;
+        MutexGuard::unlocked(st, || {
+            let mut targets = self.channel_targets(channel).lock();
+            for (id, dev) in targets.iter_mut().enumerate() {
+                if target.is_none_or(|t| t as usize == id) {
+                    if let Some(dev) = dev { dev.reset_bus(); }
+                }
+            }
+        });
+        st.ctl.hold -= 1;
+        self.kick(st);
+    }
+
+    fn retire_outstanding(&self, st: &mut State, matches: impl Fn((u8, u8, u32)) -> bool, completion: u16) -> usize {
+        let mut retired = 0;
+        let mut keep = Vec::new();
+        for item in st.outstanding.drain(..) {
+            if matches(item) {
+                st.pending.push_back(Pending { handle: item.2, completion, ..Pending::default() });
+                retired += 1;
+            } else { keep.push(item); }
+        }
+        st.outstanding = keep;
+        if retired != 0 { self.kick(st); }
+        retired
+    }
+
+    fn cancel_active(&self, st: &mut MutexGuard<'_, State>, completion: u16) {
+        if st.cancelled { return; }
+        if let Some((_, _, handle)) = st.active {
+            self.cancel.fetch_add(1, Ordering::AcqRel);
+            st.cancelled = true;
+            st.pending.push_back(Pending { handle, completion, ..Pending::default() });
+            self.kick(st);
+            MutexGuard::unlocked(st, || self.retire_stores());
+        }
     }
 
     fn host_command(&self, st: &mut MutexGuard<'_, State>, val: u16) {
@@ -975,6 +1129,10 @@ impl Core {
             0x3 => st.risc_flags &= !(RISC_FLAG_PAUSED | RISC_FLAG_RESET),
             // "A mailbox command is ready": the trigger to process one.
             0x5 => {
+                if self.isp12160 && st.semaphore & SEMAPHORE_LOCK != 0 {
+                    self.note("mailbox submitted with an unacknowledged result".into());
+                    return;
+                }
                 st.risc_flags |= RISC_FLAG_HOST_INT;
                 self.mailbox_command(st);
             }
@@ -1147,12 +1305,12 @@ impl Core {
 
     /// Run a CDB against the target; `data` is what a write sends it. None
     /// when a reset cancelled the command while it waited for the target.
-    fn scsi(&self, gen: u64, target: u8, cdb: &[u8], data: Option<Vec<u8>>) -> Option<(Vec<u8>, u8)> {
-        let mut targets = self.targets.lock();
-        if self.gen.load(Ordering::Acquire) != gen {
+    fn scsi(&self, gen: u64, cancel: u64, target: u8, cdb: &[u8], data: Option<Vec<u8>>) -> Option<(Vec<u8>, u8)> {
+        let mut targets = self.channel_targets(target >> 4).lock();
+        if self.gen.load(Ordering::Acquire) != gen || self.cancel.load(Ordering::Acquire) != cancel {
             return None;
         }
-        let Some(dev) = targets.get_mut(target as usize).and_then(|t| t.as_mut()) else {
+        let Some(dev) = targets.get_mut((target & 15) as usize).and_then(|t| t.as_mut()) else {
             return Some((Vec::new(), CHECK_CONDITION));
         };
         let req = ScsiRequest { cdb: cdb.to_vec(), data_len: ScsiDataLength::Unlimited, data_in: data };
@@ -1183,22 +1341,23 @@ impl Core {
         let lun = (device & 0xff) as u8;
 
         // A bus this part does not have.
-        if channel >= 1 {
+        if channel >= if self.isp12160 { 2 } else { 1 } {
             return Prepared::Answered(Self::incomplete(handle, 0, 0));
         }
         // GOT_BUS alone is Linux's bad-target; the timeout bit beside it is
         // what lets the empty slot be treated as benign.
-        if target > MAX_TARGET || lun > MAX_LUN || !self.has_target(target) {
+        if target > MAX_TARGET || lun > MAX_LUN || self.channel_targets(channel as u8).lock()[target as usize].is_none() {
             return Prepared::Answered(Self::incomplete(handle, STATE_GOT_BUS, STATUS_FLAG_TIMEOUT));
         }
 
         // The target model reads the unit number from the CDB's second byte.
         cdb[1] = (cdb[1] & 0x1f) | (lun << 5);
         let cdb = &cdb[..(cdb_len as usize).clamp(1, CDB_FIELD_LEN)];
+        let target = target | ((channel as u8) << 4);
         let block = self
-            .targets
+            .channel_targets(channel as u8)
             .lock()
-            .get(target as usize)
+            .get((target & 15) as usize)
             .and_then(|t| t.as_ref())
             .map(|d| d.block_sizes().1 as usize)
             .filter(|&b| b != 0)
@@ -1220,7 +1379,7 @@ impl Core {
     /// None too when a reset cancelled the command (`gen` is the generation
     /// it was read under): what it had not yet stored in host memory is not
     /// stored, and no completion is built.
-    fn run_job(&self, job: Job, gen: u64) -> Option<Pending> {
+    fn run_job(&self, job: Job, gen: u64, cancel: u64) -> Option<Pending> {
         let Job { handle, target, cdb, xfer, to_dev, segs, described } = job;
         // The bar has lights for SCSI ids 0-5.
         if let (Some(hb), 0..=5) = (self.heartbeat.get(), target) {
@@ -1238,9 +1397,10 @@ impl Core {
                 buf.extend_from_slice(&chunk);
             }
             moved = buf.len() as u64;
-            status = self.scsi(gen, target, &cdb, Some(buf))?.1;
+            if self.cancel.load(Ordering::Acquire) != cancel { return None; }
+            status = self.scsi(gen, cancel, target, &cdb, Some(buf))?.1;
         } else {
-            let (data, s) = self.scsi(gen, target, &cdb, None)?;
+            let (data, s) = self.scsi(gen, cancel, target, &cdb, None)?;
             status = s;
             // Offer the target's bytes to the descriptors in order.
             let take = (data.len() as u64).min(described).min(xfer as u64) as usize;
@@ -1248,7 +1408,7 @@ impl Core {
             for &(a, l) in &segs {
                 if off >= take { break; }
                 let n = (l as usize).min(take - off);
-                if !self.fenced(gen, || self.dma_write(a, &data[off..off + n]))? {
+                if !self.fenced(gen, || self.cancel.load(Ordering::Acquire) == cancel && self.dma_write(a, &data[off..off + n]))? {
                     self.note(format!("payload DMA for handle {handle:#x} refused by the fabric; command stopped"));
                     return None;
                 }
@@ -1259,12 +1419,21 @@ impl Core {
 
         // Auto-sense runs only after a CHECK CONDITION.
         let mut sense = Vec::new();
+        if self.cancel.load(Ordering::Acquire) != cancel { return None; }
         if status == CHECK_CONDITION {
-            sense = self.scsi(gen, target, &[scsi_cmd::REQUEST_SENSE, 0, 0, 0, SENSE_MAX as u8, 0], None)?.0;
+            sense = self.scsi(gen, cancel, target, &[scsi_cmd::REQUEST_SENSE, 0, 0, 0, SENSE_MAX as u8, 0], None)?.0;
             sense.truncate(SENSE_MAX);
         }
         let mut scsi_status = status as u16;
-        let mut state_flags = STATE_ALL_PHASES & !STATE_GOT_SENSE;
+        let mut state_flags = if self.isp12160 {
+            // Bus, target, CDB and status were reached. Data phases are earned.
+            let mut flags = 0x1700;
+            if moved != 0 {
+                flags |= 0x0800;
+                if moved == described.max(xfer as u64) { flags |= 0x4000; }
+            }
+            flags
+        } else { STATE_ALL_PHASES & !STATE_GOT_SENSE };
         if !sense.is_empty() {
             scsi_status |= SCSI_STATUS_SENSE_VALID;
             state_flags |= STATE_GOT_SENSE;
@@ -1344,7 +1513,7 @@ impl Core {
                 MutexGuard::unlocked(&mut st, || self.sync_irq());
                 continue;
             }
-            if st.rqst_len == 0 {
+            if st.rqst_len == 0 || st.outstanding.len() >= MAX_REQUESTS as usize {
                 return st;
             }
             // Ring arithmetic is done wide: the length is any sixteen-bit
@@ -1376,8 +1545,16 @@ impl Core {
                 Prepared::Answered(p) => Some(p),
                 Prepared::Run(job) => {
                     st.total_cmds += 1;
+                    st.active = Some((job.target, job.cdb.get(1).copied().unwrap_or(0) >> 5, job.handle));
+                    st.cancelled = false;
                     st.ctl.busy = true;
-                    let done = MutexGuard::unlocked(&mut st, || self.run_job(job, ring.gen));
+                    let cancel = self.cancel.load(Ordering::Acquire);
+                    let mut done = MutexGuard::unlocked(&mut st, || self.run_job(job, ring.gen, cancel));
+                    if st.cancelled { done = None; }
+                    else if self.isp12160 && done.is_none() && st.ctl.gen == ring.gen {
+                        if let Some(active) = st.active { st.outstanding.push(active); }
+                    }
+                    st.active = None;
                     st.ctl.busy = false;
                     self.wake.notify_all();
                     // A reset cancelled the command.
@@ -1418,11 +1595,15 @@ impl Core {
         if (reg::BANK_BASE..BANK_END).contains(&off) {
             return st.active_bank()[((off - reg::BANK_BASE) / 2) as usize];
         }
+        if self.isp12160 && matches!(off, reg::DMA_CMD_CFG | reg::DMA_CMD_CTRL | reg::DMA_DATA_CFG | reg::DMA_DATA_CTRL) {
+            self.note(format!("flat DMA register {off:#x} is not decoded on ISP12160"));
+            return 0;
+        }
         match off {
             reg::ID_LOW => PCI_VENDOR_QLOGIC,
-            reg::ID_HIGH => PCI_DEVICE_ISP1040,
+            reg::ID_HIGH => if self.isp12160 { 0x1216 } else { PCI_DEVICE_ISP1040 },
             // The revision field runs one ahead of the PCI byte.
-            reg::BUS_CFG0 => PCI_REVISION_ISP1040 as u16 + 1,
+            reg::BUS_CFG0 => if self.isp12160 { 0 } else { PCI_REVISION_ISP1040 as u16 + 1 },
             reg::BUS_CFG1 => st.bus_cfg1,
             reg::BUS_CTRL => st.bus_ctrl,
             reg::BUS_STATUS => st.bus_status,
@@ -1465,12 +1646,17 @@ impl Core {
             st.active_bank()[((off - reg::BANK_BASE) / 2) as usize] = val;
             return;
         }
+        if self.isp12160 && matches!(off, reg::DMA_CMD_CFG | reg::DMA_CMD_CTRL | reg::DMA_DATA_CFG | reg::DMA_DATA_CTRL) {
+            self.note(format!("flat DMA register {off:#x} is not decoded on ISP12160"));
+            return;
+        }
         match off {
             reg::BUS_CFG1 => {
-                if val & !CFG1_WRITE_MASK != 0 {
-                    self.note(format!("bus configuration 1 bits {:#06x} are not modelled", val & !CFG1_WRITE_MASK));
+                let mask = if self.isp12160 { 0x300 } else { CFG1_WRITE_MASK };
+                if val & !mask != 0 {
+                    self.note(format!("bus configuration 1 bits {:#06x} are not modelled", val & !mask));
                 }
-                st.bus_cfg1 = val & CFG1_WRITE_MASK;
+                st.bus_cfg1 = val & mask;
             }
             // Applied after the enables are stored, so the reset wins.
             reg::BUS_CTRL => {
@@ -1479,6 +1665,10 @@ impl Core {
                 if val & CTRL_SOFT_RESET != 0 {
                     st.reset();
                     self.publish_gen(&st);
+                    if self.isp12160 {
+                        self.reset_targets(&mut st, 0, None);
+                        self.reset_targets(&mut st, 1, None);
+                    }
                     drop(st);
                     self.retire_stores();
                 }
@@ -1644,6 +1834,11 @@ impl Isp1040 {
         t.insert("mailbox".into(), u16_slice_to_toml(&st.mailbox));
         t.insert("risc_bank".into(), u16_slice_to_toml(&st.risc_bank));
         t.insert("sxp_bank".into(), u16_slice_to_toml(&st.sxp_bank));
+        if st.isp12160 {
+            t.insert("sxp1_bank".into(), u16_slice_to_toml(&st.sxp1_bank));
+            t.insert("dma_bank".into(), u16_slice_to_toml(&st.dma_bank));
+            t.insert("reset_delay1".into(), hex_u16(st.reset_delay1));
+        }
         // The downloaded microcode is large and usually all zero between a
         // reset and the driver's download.
         if st.risc_ram.iter().any(|&w| w != 0) {
@@ -1661,6 +1856,11 @@ impl Isp1040 {
             toml::Value::Table(m)
         });
         t.insert("pending".into(), toml::Value::Array(pending.collect()));
+        if st.isp12160 {
+            t.insert("outstanding".into(), toml::Value::Array(st.outstanding.iter().map(|&(target, lun, handle)| {
+                toml::Value::Array(vec![hex_u16(target as u16), hex_u16(lun as u16), hex_u32(handle)])
+            }).collect()));
+        }
         toml::Value::Table(t)
     }
 
@@ -1669,7 +1869,9 @@ impl Isp1040 {
     fn load_locked(st: &mut State, v: &toml::Value) {
         {
             let ctl = std::mem::take(&mut st.ctl);
+            let part = st.isp12160;
             *st = State::new();
+            st.isp12160 = part;
             st.ctl = ctl;
             st.ctl.gen += 1;
             st.ctl.rqst_epoch += 1;
@@ -1691,6 +1893,23 @@ impl Isp1040 {
             st.resp_prod = u16f("resp_prod");
             st.resp_cons = u16f("resp_cons");
             st.reset_delay = u16f("reset_delay");
+            st.reset_delay1 = u16f("reset_delay1");
+            if st.isp12160 {
+                if let Some(toml::Value::Array(items)) = get_field(v, "outstanding") {
+                    for item in items.iter().take(MAX_REQUESTS as usize) {
+                        if let toml::Value::Array(fields) = item {
+                            if fields.len() == 3 {
+                                if let (Some(target), Some(lun), Some(handle)) =
+                                    (toml_u8(&fields[0]), toml_u8(&fields[1]), toml_u32(&fields[2])) {
+                                    if target < 32 && lun < 8 { st.outstanding.push((target, lun, handle)); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(m) = get_field(v, "sxp1_bank") { load_u16_slice(m, &mut st.sxp1_bank); }
+            if let Some(m) = get_field(v, "dma_bank") { load_u16_slice(m, &mut st.dma_bank); }
             // Indices fold into their rings, whatever the file says.
             if st.rqst_len != 0 {
                 st.rqst_cons %= st.rqst_len;
