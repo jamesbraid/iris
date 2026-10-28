@@ -1442,3 +1442,45 @@ fn fuel_timekeeper_selection_mapping_and_host_input() {
     r.c.ps2().push_kb(winit::keyboard::KeyCode::KeyA, true);
     assert!(r.superio.level(), "Fuel host keyboard uses the independent SuperIO line");
 }
+
+#[test]
+fn fuel_pci_header_policy_and_reset() {
+    let c = Ioc3::new(Ioc3Config::fuel(MAC));
+    let cfg = c.config();
+    assert_eq!(cfg.read(1), 0x0280_0000);
+    assert_eq!(cfg.read(3), 0);
+    cfg.write(1, 0xffff_0146);
+    assert_eq!(cfg.read(1), 0x0280_0146, "status is read-only, command enables survive");
+    cfg.write(1, 0xffff_ffff);
+    assert_eq!(cfg.read(1), 0x0280_ffff, "existing native command permissiveness is retained");
+    cfg.write(3, 0x0000_ff00);
+    assert_eq!(cfg.read(3), 0x0000_ff00);
+    cfg.write(3, 0xffff_ffff);
+    assert_eq!(cfg.read(3), 0x0000_ff00, "only the latency byte is writable");
+    cfg.write(4, 0x1230_0000);
+    c.reset();
+    assert_eq!(cfg.read(1), 0x0280_0000);
+    assert_eq!(cfg.read(3), 0);
+    assert_eq!(cfg.read(4), 0);
+    assert_eq!(cfg.read(11), 0xc30a_10a9);
+    assert_eq!(cfg.read(0), 0x0003_10a9);
+}
+
+#[test]
+fn octane_pci_header_keeps_its_default_policy() {
+    for octane2 in [false, true] {
+        let c = Ioc3::octane(MAC, octane2);
+        let cfg = c.config();
+        assert_eq!(cfg.read(1), 0x0200_0000);
+        cfg.write(1, 0xffff_ffff);
+        assert_eq!(cfg.read(1), 0x0200_ffff);
+        cfg.write(3, 0xffff_ffff);
+        assert_eq!(cfg.read(3), 0);
+        c.reset();
+        assert_eq!(cfg.read(1), 0x0200_ffff, "existing Octane chip reset leaves the header alone");
+        cfg.reset();
+        assert_eq!(cfg.read(1), 0x0200_0000);
+        assert_eq!(cfg.read(3), 0);
+        assert_eq!(cfg.read(11), 0xc304_10a9);
+    }
+}

@@ -2557,6 +2557,13 @@ impl Ioc3 {
                 [Bar::Mem(BAR_SIZE), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused],
                 PCI_INTA,
             );
+            let pci = if subsystem == SUBSYS_IP34_SYSBOARD {
+                // Fuel's donor fixes Status and makes latency writable. Keep
+                // the existing native Command mask, including parity response.
+                pci.with_header_policy(0x0280, 0xffff, 0xff)
+            } else {
+                pci
+            };
             // The subsystem identity selects what a guest instantiates.
             pci.write(11, ((subsystem as u32) << 16) | VENDOR_ID as u32);
             Shared {
@@ -2699,6 +2706,9 @@ impl Ioc3 {
     /// Ethernet block is a separate device here and keeps its state: the
     /// machine resets it on its own.
     pub fn reset(&self) {
+        if self.sh.st.lock().cfg.subsystem_id == SUBSYS_IP34_SYSBOARD {
+            self.sh.pci.reset();
+        }
         self.sh.with_st(false, |st, _| st.reset());
     }
 
