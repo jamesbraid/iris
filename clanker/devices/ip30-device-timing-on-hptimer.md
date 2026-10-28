@@ -2,7 +2,7 @@
 
 Status: design (read the code before relying on details).
 
-**What to know.** The Octane's devices avoid polling threads. Timed work is a
+**What to know.** The Octane's devices poll only for serial input. Timed work is a
 one-shot or recurring `hptimer` that does the same catch-up a register access
 would, so an idle guest still makes progress. Threads exist only where
 something blocks.

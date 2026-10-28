@@ -90,8 +90,9 @@ hashes are given where a change is easiest to understand by reading the commit.
   IMPACT graphics on widget 11. The stock IP30 PROM boots IRIX 6.5.30 to a
   serial login or, on the graphics console, to the X login and desktop.
   Needs the IP30 PROM image. Runs under jitv2 as well as the interpreter.
-  The devices are time-driven by `hptimer` and per-port receive threads, with
-  no polling thread; every thread is joined when the machine stops.
+  The devices are time-driven by `hptimer`. Serial input is polled every
+  2 ms by one receive thread per port; every thread is joined when the
+  machine stops.
   iris-gui can run it.
 - **One 1-wire bus for the board records.** `dev::w1` holds the bus, the
   slot decode and the Dallas parts (DS2501/2502, DS2505); HEART, the Bridge,

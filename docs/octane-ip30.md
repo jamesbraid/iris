@@ -144,10 +144,11 @@ HEART's bank mapping as they happen.
 
 ## Threads
 
-Nothing polls. IOC3 runs one receive thread per fitted serial port and an
-NVRAM writer, and arms its deadlines (serial receive and transmit delays,
-the timer interrupt, the NVRAM flush) as `hptimer` one-shots, so they fire
-without the guest touching the chip. RAD audio is paced by `hptimer` too and
+Serial input is the one thing that polls. IOC3 runs one receive thread per
+fitted serial port, which looks for host input every 2 ms, and an NVRAM
+writer. It arms its deadlines (serial receive and transmit delays, the timer
+interrupt, the NVRAM flush) as `hptimer` one-shots, so they fire without the
+guest touching the chip. RAD audio is paced by `hptimer` too and
 has no thread of its own. Each ISP1040 runs a request-ring thread, started
 with the machine and joined when it stops. The Ethernet has a receive pump
 and the NAT engine (`ip30-eth-rx`, `ip30-eth-nat`). A power-off from the
