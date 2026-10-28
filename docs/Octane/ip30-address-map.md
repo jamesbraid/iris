@@ -436,15 +436,15 @@ graphics widget interrupt the same way.
 ## 11. In IRIS
 
 The Octane is its own machine, like the O2: `src/ip30.rs` is the processor's
-bus (`Ip30Physical`), `src/ip30_machine.rs` the machine (`OctaneMachine`,
+bus (`Ip30Bus`), `src/ip30_machine.rs` the machine (`OctaneMachine`,
 `[machine] profile = "octane_ip30"`), and the chips are one file each under
 `src/dev/`. The decode is the machine-independent `Physical` bus
 (`src/physical.rs`), as on the Indy and the O2: one table of 64 KB slots
 over the 40-bit space, each slot pointing at the device that answers it,
 and ppmem's window over SDRAM for the CPU's cache and the JIT. A device sees
 the full physical address and masks it to its own window, and what it does
-not fill it answers with a bus error itself. `HeartRam` makes the bus and
-lays SDRAM out in it, a 32 MB unit at a time; `Ip30Physical` maps the chips.
+not fill it answers with a bus error itself. `OctaneMemory` makes the bus and
+lays SDRAM out in it, a 32 MB unit at a time; `Ip30Bus` maps the chips.
 Where nothing answers, a bus error that `ip30 unmapped` lists.
 
 | Physical | IRIS |

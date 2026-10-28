@@ -10,7 +10,7 @@
 //! | `0x0000_0000`, 16 KiB | low memory, the first 16 KiB of SDRAM (`heart_mem::LowAlias`) |
 //! | `0x0ff0_0000` | HEART's processor-interface registers |
 //! | `0x1000_0000 + (w << 24)` | widget `w`'s 16 MiB small window |
-//! | `0x2000_0000` up | SDRAM through HEART's bank descriptors (`heart_mem::HeartRam`); its first 16 KiB bus-error here (`heart_mem::SdramGuard`) |
+//! | `0x2000_0000` up | SDRAM through HEART's bank descriptors (`heart_mem::OctaneMemory`); its first 16 KiB bus-error here (`heart_mem::SdramGuard`) |
 //! | `w << 36` | widget `w`'s 64 GiB large window (8 to 15) |
 //!
 //! Widget 0 is the Crossbow, 8 HEART, 15 the onboard Bridge (whose window
@@ -20,7 +20,7 @@
 //! The decode is the machine-independent [`Physical`], as on the Indy and
 //! the O2: a `SparseDeviceMap` of 64 KiB slots over the R10000's 40-bit
 //! physical space, each pointing at the device that answers it, and the
-//! ppmem window over SDRAM. `HeartRam` makes it and lays SDRAM out in it;
+//! ppmem window over SDRAM. `OctaneMemory` makes it and lays SDRAM out in it;
 //! this module maps the chips.
 //!
 //! Set IRIS_IP30_TRACE=1 to log accesses nothing answers as they happen.
@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::dev::heart_mem::{HeartRam, GUARD};
+use crate::dev::heart_mem::{OctaneMemory, GUARD};
 use crate::physical::Physical;
 use crate::ppmem::devmap::{PHYS_MASK, SLOT_SHIFT};
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, BUS_ERR, BUS_OK};
@@ -137,17 +137,17 @@ impl BusDevice for Misses {
 /// `gen_ptr`) do too, except over the guard, where `Physical` would take the
 /// window: there they go to `SdramGuard`, so the bus path faults the guard
 /// whatever the window maps.
-pub struct Ip30Physical {
+pub struct Ip30Bus {
     phys: Arc<Physical>,
-    ram: Arc<HeartRam>,
+    ram: Arc<OctaneMemory>,
     /// The widgets on the Crossbow's ports 9 to 15, and whether each also
     /// takes its large window.
     widgets: Mutex<[Option<(Arc<dyn BusDevice>, bool)>; 16]>,
 }
 
-impl Ip30Physical {
+impl Ip30Bus {
     /// The bus `ram` is on, with nothing but memory mapped yet.
-    pub fn new(ram: Arc<HeartRam>) -> std::io::Result<Self> {
+    pub fn new(ram: Arc<OctaneMemory>) -> std::io::Result<Self> {
         Ok(Self { phys: ram.phys().clone(), ram, widgets: Mutex::new(Default::default()) })
     }
 
@@ -226,7 +226,7 @@ impl Ip30Physical {
     }
 
     /// Memory as the bus masters (the Bridge and its `PciDma`s, IMPACT's
-    /// HQ4) reach it: `HeartRam::dma_view`.
+    /// HQ4) reach it: `OctaneMemory::dma_view`.
     pub fn memory(&self) -> Arc<dyn BusDevice> {
         self.ram.dma_view()
     }
@@ -246,8 +246,8 @@ impl Ip30Physical {
 }
 
 /// Every access forwarded to `Physical`, the direct paths over the guard
-/// excepted (see [`Ip30Physical`]).
-impl BusDevice for Ip30Physical {
+/// excepted (see [`Ip30Bus`]).
+impl BusDevice for Ip30Bus {
     #[inline] fn read8(&self, a: u64) -> BusRead8 { self.phys.read8(a) }
     #[inline] fn read16(&self, a: u64) -> BusRead16 { self.phys.read16(a) }
     #[inline] fn read32(&self, a: u64) -> BusRead32 { self.phys.read32(a) }

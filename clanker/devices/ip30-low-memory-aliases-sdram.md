@@ -14,7 +14,7 @@ In `src/dev/heart_mem.rs`, the decode slot at 0x2000_0000 is `SdramGuard`,
 which faults 0x2000_0000..+16 KiB on the bus path, and the slot at 0 is
 `LowAlias`, which reaches the same bytes through the unguarded decode. Both
 use the store and jitv2 page generations of whichever bank the descriptors
-put at 0x2000_0000. `Ip30Physical` sends the
+put at 0x2000_0000. `Ip30Bus` sends the
 direct paths (`mem_ptr`, block reads and writes, `gen_ptr`) over the guard
 to `SdramGuard` too, since `Physical` would take the window there. The
 window itself maps the guard (a stated limitation, pinned in

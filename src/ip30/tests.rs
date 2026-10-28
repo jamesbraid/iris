@@ -1,7 +1,7 @@
 //! The Octane's chips wired together as `ip30_machine` wires them, driven
 //! without a CPU.
 //!
-//! The first group is the processor's bus: `Ip30Physical` over HEART, the
+//! The first group is the processor's bus: `Ip30Bus` over HEART, the
 //! Crossbow, the Bridge with the boot flash, SDRAM and its first 16 KiB at physical 0.
 //!
 //! The rest are the real HEART, Bridge, IOC3, IOC3 Ethernet and ISP1040,
@@ -48,7 +48,7 @@ const WIDGET_GFX: u8 = 11;
 /// HEART, the Crossbow (HEART and the Bridge alive), the Bridge with `prom`
 /// in its flash.
 struct Board {
-    phys: Arc<Ip30Physical>,
+    phys: Arc<Ip30Bus>,
     heart: Arc<Heart>,
 }
 
@@ -58,13 +58,13 @@ fn board(prom: &[u8]) -> Board {
 
 /// `board` with the DIMMs fitted in each bank, in MB.
 fn board_with(prom: &[u8], banks_mb: [u32; 4]) -> Board {
-    let ram = Arc::new(HeartRam::new(banks_mb));
+    let ram = Arc::new(OctaneMemory::new(banks_mb));
     let heart = Arc::new(Heart::new(HeartConfig::octane(banks_mb.map(|mb| (mb as u64) << 20)), crate::dev::heart::host_clock()));
     let xbow = Arc::new(Xbow::new(XBOW_REVISION, 1 << WIDGET_HEART | 1 << WIDGET_BRIDGE));
     xbow.connect_heart(heart.clone());
     let bridge = Bridge::new(ram.dma_view(), heart.clone());
     bridge.attach_flash(Arc::new(RawFlash::new(prom, FLASH_SIZE)), FLASH_SIZE as u32);
-    let phys = Ip30Physical::new(ram).unwrap();
+    let phys = Ip30Bus::new(ram).unwrap();
     phys.map(PIU_BASE, PIU_BASE + PIU_SIZE, heart.clone());
     phys.map(widget_small_base(WIDGET_XBOW), widget_small_base(WIDGET_XBOW) + WIDGET_SMALL_SIZE, xbow.clone());
     phys.map(widget_small_base(WIDGET_HEART), widget_small_base(WIDGET_HEART) + WIDGET_SMALL_SIZE, heart.clone());
@@ -215,7 +215,7 @@ fn sdram_follows_the_descriptors() {
 // access is named as a limitation.
 
 /// Write HEART's descriptor for `bank`, as the PROM does through the PIU.
-fn set_bank(p: &Ip30Physical, bank: u32, desc: u32) {
+fn set_bank(p: &Ip30Bus, bank: u32, desc: u32) {
     assert_eq!(p.write32(PIU_BASE + 0x20 + 4 * bank as u64, desc), BUS_OK);
 }
 
@@ -415,7 +415,7 @@ fn widgets_route_by_number() {
 
 #[test]
 fn the_graphics_port_reaches_impact_with_its_link_up() {
-    let ram = Arc::new(HeartRam::new([128, 0, 0, 0]));
+    let ram = Arc::new(OctaneMemory::new([128, 0, 0, 0]));
     let heart = Arc::new(Heart::new(HeartConfig::octane([128 << 20, 0, 0, 0]), crate::dev::heart::host_clock()));
     let gfx = ImpactXio::new(
         WIDGET_GFX,
@@ -428,7 +428,7 @@ fn the_graphics_port_reaches_impact_with_its_link_up() {
     for (links, alive) in [(0x8100u16, false), (0x8100 | 1 << WIDGET_GFX, true)] {
         let xbow = Arc::new(Xbow::new(XBOW_REVISION, links));
         xbow.connect_heart(heart.clone());
-        let p = Arc::new(Ip30Physical::new(ram.clone()).unwrap());
+        let p = Arc::new(Ip30Bus::new(ram.clone()).unwrap());
         p.attach_widget(WIDGET_GFX, gfx.clone(), false);
         p.init();
         let weak = Arc::downgrade(&p);
@@ -484,7 +484,7 @@ struct Octane {
 
 impl Octane {
     fn new() -> Self {
-        let ram = Arc::new(HeartRam::new([64, 0, 0, 0]));
+        let ram = Arc::new(OctaneMemory::new([64, 0, 0, 0]));
         // One valid descriptor: bank 0, two 32 MB units from 0x2000_0000.
         ram.set_memcfg([0x8001_0000, 0, 0, 0]);
         let mem = ram.dma_view();

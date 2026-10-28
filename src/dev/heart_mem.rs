@@ -6,7 +6,7 @@
 //! both in 32 MiB units from 0x2000_0000. When two descriptors claim an
 //! address the higher-numbered bank answers.
 //!
-//! [`HeartRam`] owns the Octane's [`Physical`], whose RAM banks are the
+//! [`OctaneMemory`] owns the Octane's [`Physical`], whose RAM banks are the
 //! fitted HEART banks, one store each (byte `o` at `host + (o ^ 3)`, the
 //! layout every iris RAM keeps). A descriptor write lays the bus out again
 //! as the O2's memory does: each 64 KiB slot of a 32 MiB unit points at the
@@ -166,7 +166,7 @@ use layout::*;
 
 /// The four descriptors, published whole: a seqlock, so an access on any
 /// thread decodes against one MEMCFG or the next, never half of each.
-/// Writers are serialised by `HeartRam::placed`.
+/// Writers are serialised by `OctaneMemory::placed`.
 #[derive(Default)]
 struct Placement {
     seq: AtomicU64,
@@ -393,8 +393,8 @@ impl Sdram {
 ///
 /// Built before anything else is mapped, because the bus's default device
 /// (a bus error that `ip30 unmapped` lists), low memory and the guarded slot
-/// go in first; `Ip30Physical` maps the chips over the rest.
-pub struct HeartRam {
+/// go in first; `Ip30Bus` maps the chips over the rest.
+pub struct OctaneMemory {
     phys: Arc<Physical>,
     sdram: Arc<Sdram>,
     /// Where each HEART bank is among the bus's banks.
@@ -406,7 +406,7 @@ pub struct HeartRam {
     placed: Mutex<Vec<Unit>>,
 }
 
-impl HeartRam {
+impl OctaneMemory {
     /// `banks_mb` is the DIMM pair in each of the four banks, in MB (0 for
     /// an empty bank). No descriptor is valid until HEART writes one. Panics on a size `try_new` refuses.
     pub fn new(banks_mb: [u32; 4]) -> Self {
@@ -713,9 +713,9 @@ macro_rules! ram_widths {
     };
 }
 
-/// `HeartRam::dma_view`: fitted memory only. Holds the memory, so the bus's
+/// `OctaneMemory::dma_view`: fitted memory only. Holds the memory, so the bus's
 /// banks outlive a bus master that keeps it.
-struct DmaView(Arc<HeartRam>);
+struct DmaView(Arc<OctaneMemory>);
 
 impl DmaView {
     #[inline(always)]
@@ -1021,19 +1021,19 @@ mod tests {
     const MODULO_DESC: u32 = 0x817f_0040;
     const PROBE_RAM: u64 = RAM_BASE + 0x40 * UNIT;
 
-    fn ram(mib: u64) -> HeartRam {
-        HeartRam::new([mib as u32, 0, 0, 0])
+    fn ram(mib: u64) -> OctaneMemory {
+        OctaneMemory::new([mib as u32, 0, 0, 0])
     }
 
-    fn bank0(m: &HeartRam, d: u32) {
+    fn bank0(m: &OctaneMemory, d: u32) {
         m.set_memcfg([d, 0, 0, 0]);
     }
 
-    fn w(m: &HeartRam, addr: u64, v: u64) {
+    fn w(m: &OctaneMemory, addr: u64, v: u64) {
         assert_eq!(m.phys().write64(addr, v), BUS_OK, "write {addr:#x}");
     }
 
-    fn r(m: &HeartRam, addr: u64) -> u64 {
+    fn r(m: &OctaneMemory, addr: u64) -> u64 {
         let v = m.phys().read64(addr);
         assert_eq!(v.status, BUS_OK, "read {addr:#x}");
         v.data
@@ -1099,12 +1099,12 @@ mod tests {
             0x0000_0040, 0x0001_0040, 0x0043_0040, 0x0047_0040, 0x008f_0040, 0x009f_0040, 0x0000_0040, 0x0000_0040,
             0x0101_0040, 0x0103_0040, 0x0147_0040, 0x014f_0040, 0x019f_0040, 0x01bf_0040, 0x0000_0040, 0x0000_0040,
         ];
-        fn distinct(m: &HeartRam, base: u64, step: u64, pattern: u64) -> bool {
+        fn distinct(m: &OctaneMemory, base: u64, step: u64, pattern: u64) -> bool {
             w(m, base, pattern);
             w(m, base + step, !pattern);
             r(m, base) == pattern
         }
-        fn capacity(m: &HeartRam, base: u64) -> u32 {
+        fn capacity(m: &OctaneMemory, base: u64) -> u32 {
             let pattern = 0x1111_1111_1111_1111u64;
             let mut bits = 0;
             w(m, base + 0x100, pattern);
@@ -1213,7 +1213,7 @@ mod tests {
     #[test]
     fn page_generations_are_distinct_when_the_banks_total_is_not_a_power_of_two() {
         let gen = |p: *const AtomicU64| unsafe { (*p).load(Ordering::Acquire) };
-        let m = HeartRam::new([64, 128, 0, 0]);
+        let m = OctaneMemory::new([64, 128, 0, 0]);
         m.set_memcfg([DESC_VALID | (1 << 16), DESC_VALID | (3 << 16) | 2, 0, 0]);
         let in_bank0 = RAM_BASE + 0x5000;
         let in_bank1 = RAM_BASE + 64 * MIB + 0x5000;
@@ -1229,7 +1229,7 @@ mod tests {
 
     #[test]
     fn the_higher_bank_answers_where_two_overlap() {
-        let m = HeartRam::new([64, 64, 0, 0]);
+        let m = OctaneMemory::new([64, 64, 0, 0]);
         let both = DESC_VALID | (1 << 16);
         m.set_memcfg([both, 0, 0, 0]);
         w(&m, RAM_BASE + 0x8000, 1);
@@ -1268,7 +1268,7 @@ mod tests {
 
     #[test]
     fn an_empty_bank_reads_zero_from_the_processor_but_faults_dma() {
-        let m = Arc::new(HeartRam::new([64, 0, 0, 0]));
+        let m = Arc::new(OctaneMemory::new([64, 0, 0, 0]));
         m.set_memcfg([0, PROBE_DESC, 0, 0]);
         let mut buf = [5u64; 2];
         assert_eq!(m.phys().read_block(PROBE_RAM, &mut buf), BUS_OK);
@@ -1302,9 +1302,9 @@ mod tests {
 
     #[test]
     fn invalid_bank_sizes_are_refused() {
-        assert!(HeartRam::try_new([96, 0, 0, 0]).is_err());
-        assert!(HeartRam::try_new([32, 0, 0, 0]).is_err());
-        assert!(HeartRam::try_new([2048, 64, 0, 0]).is_err());
+        assert!(OctaneMemory::try_new([96, 0, 0, 0]).is_err());
+        assert!(OctaneMemory::try_new([32, 0, 0, 0]).is_err());
+        assert!(OctaneMemory::try_new([2048, 64, 0, 0]).is_err());
     }
 
     #[test]
@@ -1343,7 +1343,7 @@ mod tests {
         assert_eq!(m.phys().read64(RAM_BASE).status, BUS_ERR);
         assert_eq!(m.phys().read8(RAM_BASE + 0x3fff).status, BUS_ERR);
         assert_eq!(m.phys().write32(RAM_BASE + 0x10, 1), BUS_ERR);
-        // The direct paths, which `Ip30Physical` sends to the guard rather
+        // The direct paths, which `Ip30Bus` sends to the guard rather
         // than to the window.
         let g = m.guard();
         assert!(g.mem_ptr(RAM_BASE).is_none());

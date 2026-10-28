@@ -8,7 +8,7 @@
 //!
 //! Built as the O2 is: memory first, which makes the machine-independent
 //! `Physical` bus, then the devices, mapped on it through
-//! `ip30::Ip30Physical`, then `init`, then the CPU. On the Bridge's PCI
+//! `ip30::Ip30Bus`, then `init`, then the CPU. On the Bridge's PCI
 //! bus, as on the board: the two ISP1040 SCSI controllers in slots 0 and 1,
 //! IOC3 (serial, keyboard and mouse, the clock, Ethernet) in slot 2, RAD1
 //! audio in slot 3. IMPACT sits on a graphics port.
@@ -22,7 +22,7 @@ use crate::cpu::mips_exec::{CpuDevice, MipsCpu, MipsCpuConfig, MipsExecutor};
 use crate::cpu::mips_tlb::MipsTlb;
 use crate::dev::bridge::{Bridge, RawFlash};
 use crate::dev::heart::{host_clock, Heart, HeartConfig, PIU_BASE, PIU_SIZE};
-use crate::dev::heart_mem::HeartRam;
+use crate::dev::heart_mem::OctaneMemory;
 use crate::dev::ioc3::Ioc3;
 use crate::dev::ioc3_eth::Ioc3Eth;
 use crate::dev::isp1040::Isp1040;
@@ -34,7 +34,7 @@ use crate::dev::w1;
 use crate::dev::xbow::Xbow;
 use crate::hptimer::TimerManager;
 use crate::ip30::{
-    widget_small_base, CachedFlashLines, Ip30Physical, LAST_PC, WIDGET_BRIDGE, WIDGET_HEART, WIDGET_SMALL_SIZE,
+    widget_small_base, CachedFlashLines, Ip30Bus, LAST_PC, WIDGET_BRIDGE, WIDGET_HEART, WIDGET_SMALL_SIZE,
     WIDGET_XBOW,
 };
 use crate::traits::{BusDevice, Device, MachineEvent, Resettable};
@@ -77,9 +77,9 @@ fn record_bus(barcode: &str, part: &str, revision: &str, name: &str, serial: u64
 }
 
 pub struct OctaneMachine {
-    pub phys: Arc<Ip30Physical>,
+    pub phys: Arc<Ip30Bus>,
     pub heart: Arc<Heart>,
-    pub ram: Arc<HeartRam>,
+    pub ram: Arc<OctaneMemory>,
     pub xbow: Arc<Xbow>,
     cpu: Arc<dyn CpuDevice>,
     flash_lines: Arc<CachedFlashLines>,
@@ -127,7 +127,7 @@ impl OctaneMachine {
         let timer_manager = Arc::new(TimerManager::new());
 
         // Memory, and HEART, whose descriptors place it.
-        let ram = Arc::new(HeartRam::try_new(std::array::from_fn(|i| cfg.banks[i]))?);
+        let ram = Arc::new(OctaneMemory::try_new(std::array::from_fn(|i| cfg.banks[i]))?);
         let mem = ram.dma_view();
         let heart = Arc::new(Heart::new(HeartConfig::octane(banks), host_clock()));
         // HEART's MicroLAN holds the processor module's record.
@@ -185,7 +185,7 @@ impl OctaneMachine {
         let gfx = board.map(|_| ImpactXio::new(WIDGET_GFX, heart.clone(), mem.clone(), heartbeat, fasttick.clone()));
 
         // The bus over them, then the table.
-        let phys = Ip30Physical::new(ram.clone()).map_err(|e| format!("ip30: decode table: {e}"))?;
+        let phys = Ip30Bus::new(ram.clone()).map_err(|e| format!("ip30: decode table: {e}"))?;
         phys.map(PIU_BASE, PIU_BASE + PIU_SIZE, heart.clone());
         phys.map(widget_small_base(WIDGET_XBOW), widget_small_base(WIDGET_XBOW) + WIDGET_SMALL_SIZE, xbow.clone());
         // The processor reaches its own HEART without a trip through the
@@ -352,7 +352,7 @@ impl OctaneMachine {
 
     /// Point every switched port's windows at its widget or at the bus
     /// error, as the Crossbow's links stand.
-    fn sync_links(phys: &Ip30Physical, xbow: &Xbow) {
+    fn sync_links(phys: &Ip30Bus, xbow: &Xbow) {
         for w in 9..16 {
             phys.set_widget_link(w, xbow.carries(w));
         }
@@ -656,8 +656,8 @@ impl Workstation for OctaneMachine {
 
 /// The monitor's `ip30` command: the board as a whole.
 struct Ip30Monitor {
-    phys: Arc<Ip30Physical>,
-    ram: Arc<HeartRam>,
+    phys: Arc<Ip30Bus>,
+    ram: Arc<OctaneMemory>,
     xbow: Arc<Xbow>,
     bridge: Arc<Bridge>,
     gfx: Option<Arc<ImpactXio>>,
