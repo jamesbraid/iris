@@ -58,6 +58,11 @@ pub struct PciConfig {
     bars: [Bar; 6],
     /// The registers as the function powers up, for [`PciConfig::reset`].
     power_on: [u32; 64],
+    // Construction policy stays with the function when snapshot registers load.
+    status: u16,
+    command_mask: u16,
+    latency_mask: u8,
+    writable_masks: [u32; 64],
 }
 
 impl PciConfig {
@@ -74,7 +79,34 @@ impl PciConfig {
                 r[4 + i] = 1;
             }
         }
-        Self { regs: Mutex::new(r), bars, power_on: r }
+        Self {
+            regs: Mutex::new(r), bars, power_on: r,
+            status: 0x0200, command_mask: 0xffff, latency_mask: 0,
+            writable_masks: [u32::MAX; 64],
+        }
+    }
+
+    /// Set fixed status bits and the writable Command and latency-timer bits.
+    /// The other bytes of header dword 3 remain read-only.
+    pub fn with_header_policy(mut self, status: u16, command_mask: u16, latency_mask: u8) -> Self {
+        self.status = status;
+        self.command_mask = command_mask;
+        self.latency_mask = latency_mask;
+        self
+    }
+
+    /// Set a function-specific dword's initial/reset value and writable bits.
+    ///
+    /// Panics outside 0..64 or for the identity, Command/Status, class,
+    /// header, BAR, subsystem identity or interrupt dwords, whose behavior
+    /// is managed by this header.
+    pub fn with_register_policy(mut self, reg_dword: usize, initial: u32, writable_mask: u32) -> Self {
+        assert!(matches!(reg_dword, 10 | 12..=14 | 16..=63),
+            "pci: register policy requires a function-specific dword in 0..64");
+        self.regs.get_mut().unwrap()[reg_dword] = initial;
+        self.power_on[reg_dword] = initial;
+        self.writable_masks[reg_dword] = writable_mask;
+        self
     }
 
     /// RST#: back to the power-up header. The command register clears, so
@@ -93,8 +125,7 @@ impl PciConfig {
     pub fn read(&self, reg: usize) -> u32 {
         let r = self.regs.lock().unwrap();
         match reg {
-            // Status: a medium-speed device with no errors to report.
-            1 => (r[1] & 0xffff) | 0x0200_0000,
+            1 => (r[1] & 0xffff) | ((self.status as u32) << 16),
             _ => r[reg],
         }
     }
@@ -103,9 +134,13 @@ impl PciConfig {
         let mut r = self.regs.lock().unwrap();
         match reg {
             // Identity, class and header type are read-only.
-            0 | 2 | 3 => {}
-            // Command; status bits are write-one-to-clear and none are set.
-            1 => r[1] = val & 0xffff,
+            0 | 2 => {}
+            3 => {
+                let mask = (self.latency_mask as u32) << 8;
+                r[3] = (r[3] & !mask) | (val & mask);
+            }
+            // Status is fixed; only the selected Command bits are writable.
+            1 => r[1] = val & self.command_mask as u32,
             4..=9 => {
                 let bar = self.bars[reg - 4];
                 r[reg] = match bar {
@@ -119,7 +154,10 @@ impl PciConfig {
             }
             // Interrupt pin is read-only; the line is firmware's scratch.
             15 => r[15] = (r[15] & 0xff00) | (val & !0xff00),
-            _ => r[reg] = val,
+            _ => {
+                let mask = self.writable_masks[reg];
+                r[reg] = (r[reg] & !mask) | (val & mask);
+            }
         }
     }
 
@@ -401,6 +439,90 @@ mod tests {
     fn scsi_like() -> PciConfig {
         PciConfig::new(0x9004, 0x8078, 0x0100_00, 1,
             [Bar::Io(0x100), Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused], PCI_INTA)
+    }
+
+    #[test]
+    fn default_header_keeps_existing_write_behavior() {
+        let c = scsi_like();
+        c.write(1, u32::MAX);
+        c.write(3, u32::MAX);
+        c.write(13, u32::MAX);
+        assert_eq!(c.read(1), 0x0200_ffff);
+        assert_eq!(c.read(3), 0);
+        assert_eq!(c.read(13), u32::MAX);
+    }
+
+    #[test]
+    fn header_policy_masks_command_and_latency_writes() {
+        let c = scsi_like().with_header_policy(0x02b0, 0x0057, 0xf0);
+        assert_eq!(c.read(1), 0x02b0_0000);
+        c.write(1, u32::MAX);
+        c.write(3, u32::MAX);
+        assert_eq!(c.command(), 0x0057);
+        assert_eq!(c.read(1), 0x02b0_0057);
+        assert_eq!(c.read(3), 0x0000_f000);
+        c.write(3, 0x1234_5678);
+        assert_eq!(c.read(3), 0x0000_5000);
+        c.reset();
+        assert_eq!(c.read(1), 0x02b0_0000);
+        assert_eq!(c.read(3), 0);
+    }
+
+    fn capability_config() -> PciConfig {
+        scsi_like().with_header_policy(0x02b0, 0x0057, 0xff)
+            .with_register_policy(13, 0x44, 0)
+            .with_register_policy(17, 0x0001_0001, 0)
+            .with_register_policy(18, 0, 0x0100)
+    }
+
+    #[test]
+    fn register_policy_preserves_read_only_bits_and_reset_values() {
+        let c = capability_config().with_register_policy(19, 0xa5a5_0055, 0x0000_ff00);
+        c.write(13, u32::MAX);
+        c.write(17, u32::MAX);
+        c.write(18, u32::MAX);
+        c.write(19, u32::MAX);
+        assert_eq!(c.read(13), 0x44);
+        assert_eq!(c.read(17), 0x0001_0001);
+        assert_eq!(c.read(18), 0x0100);
+        assert_eq!(c.read(19), 0xa5a5_ff55);
+        c.write(11, 0xc304_10a9);
+        c.write(4, 0x1000);
+        c.reset();
+        assert_eq!(c.read(13), 0x44);
+        assert_eq!(c.read(17), 0x0001_0001);
+        assert_eq!(c.read(18), 0);
+        assert_eq!(c.read(19), 0xa5a5_0055);
+        assert_eq!(c.read(4), 1);
+        assert_eq!(c.read(11), 0xc304_10a9);
+    }
+
+    #[test]
+    fn snapshots_restore_registers_without_replacing_construction_policy() {
+        use crate::traits::Saveable;
+        let src = capability_config();
+        src.write(18, 0x0100);
+        let saved = src.save_state();
+        let dst = scsi_like().with_header_policy(0x1234, 7, 0x0f)
+            .with_register_policy(18, 0x0000_0020, 0x0200);
+        dst.load_state(&saved).expect("load_state");
+        assert_eq!(dst.save_state(), saved);
+        assert_eq!(dst.read(1), 0x1234_0000);
+        dst.write(1, u32::MAX);
+        dst.write(18, u32::MAX);
+        assert_eq!(dst.command(), 7);
+        assert_eq!(dst.read(18), 0x0300);
+        dst.reset();
+        assert_eq!(dst.read(18), 0x20);
+    }
+
+    #[test]
+    fn register_policy_rejects_managed_header_slots_and_out_of_bounds() {
+        for reg in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 15, 64, usize::MAX] {
+            assert!(std::panic::catch_unwind(|| {
+                scsi_like().with_register_policy(reg, 0, 0)
+            }).is_err(), "register {reg} must reject a function-specific policy");
+        }
     }
 
     /// Firmware learns how much space a device wants by writing all ones to
