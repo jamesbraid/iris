@@ -436,12 +436,16 @@ graphics widget interrupt the same way.
 ## 11. In IRIS
 
 The Octane is its own machine, like the O2: `src/ip30.rs` is the processor's
-bus (`Ip30Physical`), `src/ip30_machine.rs` the machine (`OctaneMachine`,
+bus (`Ip30Bus`), `src/ip30_machine.rs` the machine (`OctaneMachine`,
 `[machine] profile = "octane_ip30"`), and the chips are one file each under
-`src/dev/`. The decode is one table, a `SparseDeviceMap` of 64 KB slots over
-the 40-bit space, as on the Indy: each slot points at the device that
-answers it, a device sees the full physical address and masks it to its own
-window, and what it does not fill it answers with a bus error itself.
+`src/dev/`. The decode is the machine-independent `Physical` bus
+(`src/physical.rs`), as on the Indy and the O2: one table of 64 KB slots
+over the 40-bit space, each slot pointing at the device that answers it,
+and ppmem's window over SDRAM for the CPU's cache and the JIT. A device sees
+the full physical address and masks it to its own window, and what it does
+not fill it answers with a bus error itself. `OctaneMemory` makes the bus and
+lays SDRAM out in it, a 32 MB unit at a time; `Ip30Bus` maps the chips.
+Where nothing answers, a bus error that `ip30 unmapped` lists.
 
 | Physical | IRIS |
 |---|---|
@@ -455,7 +459,7 @@ window, and what it does not fill it answers with a bus error itself.
 | 0x1F60_0000 | device window 2: `dev/ioc3.rs` with its own UARTs, the DS1685 on its byte bus, the keyboard and mouse controller, the parallel port and the MAC part on its MicroLAN; the Ethernet MAC and PHY are `dev/ioc3_eth.rs` |
 | 0x1F70_0000 | device window 3: RAD, `dev/rad1.rs` |
 | 0x1FC0_0000 – 0x1FFF_FFFF | `dev/sflash.rs`: the boot flash with its command set; the CPU's cached view (`CachedFlashLines`) keeps the PROM's cached stores into it. `[octane] flash` keeps the part between runs |
-| 0x2000_0000 up | `dev/heart_mem.rs`: SDRAM as MEMCFG places it, its first 16 KB a processor bus error; `remap_banks` redraws the table when a descriptor is written |
+| 0x2000_0000 up | `dev/heart_mem.rs`: SDRAM as MEMCFG places it, its first 16 KB a processor bus error (`SdramGuard`); `remap_banks` redraws the table and the window when a descriptor is written |
 | widgets 9, 10, 12, 13, 14 | bus error |
 
 The bus is 40 bits wide end to end, so memory beyond 4 GB and the 64 GB
