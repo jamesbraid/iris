@@ -16,10 +16,12 @@ Other documents:
 
 ## 1. What IRIS is
 
-IRIS emulates three SGI workstations: the Indy (IP24), the Indigo2 (IP22) and
-the Indigo2 IMPACT (IP28). The CPU is an R4400, R5000 or R10000, chosen at
-runtime. Graphics is Newport (REX3), GR2 (XZ/Extreme) or IMPACT. It boots the
-real PROMs and IRIX 5.3 and 6.5 to a desktop with networking.
+IRIS emulates five SGI workstations: the Indy (IP24), the Indigo2 (IP22), the
+Indigo2 IMPACT (IP28), the O2 (IP32) and the Octane (IP30). The CPU is an
+R4400, R5000 or R10000, chosen at runtime (the Octane takes the R10000 only).
+Graphics is Newport (REX3), GR2 (XZ/Extreme) or IMPACT on the Indy and
+Indigo2, GBE on the O2 and Solid IMPACT on the Octane. It boots the real PROMs
+and IRIX 5.3 and 6.5 to a desktop with networking.
 
 It is **not cycle-accurate**, anywhere. IRIX is interrupt-driven and does not
 care how many cycles an instruction takes, so IRIS models behaviour
@@ -156,7 +158,10 @@ the MEMCFG remap that places the banks in the table and the window. For the
 O2 it is `src/ip32.rs` (`Ip32Bus`) with CRIME's bank logic in
 `src/dev/crime_mem.rs` (`O2Memory`), whose remap points the table at bank
 views (a bank counted from where CRIME placed it) and maps the window to
-match. The CPU and every DMA master reach memory through `Physical` as a
+match. For the Octane it is `src/ip30.rs` (`Ip30Bus`) over `OctaneMemory`
+(`src/dev/heart_mem.rs`), which keeps one RAM bank per fitted HEART bank and
+lays them out in 32 MB units as HEART's descriptors say. The CPU and every
+DMA master reach memory through `Physical` as a
 `BusDevice`; `physical::read_bytes`/`write_bytes` move byte ranges a page
 at a time with `read_block`/`write_block`.
 
@@ -443,9 +448,16 @@ introspection commands are in [debug.md](debug.md#jit-v2).
   cascade, a serial EEPROM for NVRAM and the MAC address.
 - **IP28 (Indigo2 IMPACT)**: IP22 devices plus an R10000, IMPACT graphics,
   a 16 MB MEMCFG granule and RAM at `0x20000000`.
+- **IP32 (O2)**: its own machine (`src/ip32_machine.rs`) rather than an MC and
+  HPC3 one: CRIME, MACE and GBE, with an Adaptec 7880 for SCSI.
+- **IP30 (Octane)**: its own machine (`src/ip30_machine.rs`): HEART, the
+  Crossbow and the Bridge with IOC3 and two ISP1040 SCSI controllers, an
+  R10000 only, and Solid IMPACT graphics or none.
 
-Each has an embedded PROM fallback. `src/platform.rs` and `src/machine.rs`
-wire the differences; `platform_profile_tests.rs` pins them down.
+The Indy and Indigo2 profiles each have an embedded PROM fallback;
+`src/platform.rs` and `src/machine.rs` wire their differences, and
+`platform_profile_tests.rs` pins them down. The O2 and the Octane have no
+embedded PROM and are built by `workstation::build`.
 
 ## 10. Building and testing
 

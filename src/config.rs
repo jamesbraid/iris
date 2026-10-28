@@ -2,7 +2,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 
-/// Memory bank sizes in MB; validation restricts 256/512 MB banks to IP28.
+/// Memory bank sizes in MB; validation restricts 256/512 MB banks to IP28 and the Octane.
 pub const VALID_BANK_SIZES: &[u32] = &[0, 8, 16, 32, 64, 128, 256, 512];
 
 /// What sits at a SCSI id. `cdrom = true` remains the historical spelling for
