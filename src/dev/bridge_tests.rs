@@ -1115,3 +1115,33 @@ fn the_window_decodes_the_low_24_bits_of_a_physical_address() {
     let r = Rig::new();
     assert_eq!(r.bridge.read32(0x1f00_0000 + u64::from(reg::IDENTIFICATION + 4)).data, r.get(reg::IDENTIFICATION));
 }
+
+/// The Bridge decodes from a table rebuilt on a configuration write: a BAR
+/// that moves leaves its old address, disabling memory decode closes it,
+/// and a PCI reset closes every window.
+#[test]
+fn a_bar_that_moves_is_followed_by_the_window_table() {
+    let r = Rig::new();
+    let c = Card::new(PCI_INTA);
+    r.bridge.attach(2, c.clone());
+    r.cfg_write(2, 0x04, 4, PCI_COMMAND_MEMORY);
+    r.cfg_write(2, 0x14, 4, 0x0040_0000);
+    r.set(reg::device(2), DEV_MEMORY_SPACE | 4);
+    let at = |r: &Rig| r.bridge.read8(u64::from(Rig::win(2) + (SCRATCH ^ 3))).is_ok();
+    assert_eq!(r.bridge.write8(u64::from(Rig::win(2) + (SCRATCH ^ 3)), 0x77), BUS_OK);
+    assert!(at(&r), "the BAR is open where it was put");
+
+    // Move it 1 MiB up; the window, still based at 0x400000, no longer hits.
+    r.cfg_write(2, 0x14, 4, 0x0050_0000);
+    assert!(!at(&r), "the old address is closed");
+    r.set(reg::device(2), DEV_MEMORY_SPACE | 5);
+    assert!(at(&r), "the new one is open");
+    assert_eq!(r.bridge.read8(u64::from(Rig::win(2) + (SCRATCH ^ 3))).data, 0x77, "the same function answers");
+
+    r.cfg_write(2, 0x04, 4, 0);
+    assert!(!at(&r), "memory decode off closes it");
+    r.cfg_write(2, 0x04, 4, PCI_COMMAND_MEMORY);
+    assert!(at(&r));
+    r.bridge.reset_pci();
+    assert!(!at(&r), "a PCI reset closes it");
+}
