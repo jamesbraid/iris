@@ -385,6 +385,20 @@ fn limitation_a_cached_access_to_the_guard_reaches_the_bytes() {
 }
 
 #[test]
+fn the_miss_list_keeps_the_first_64_and_then_stops() {
+    let b = board(&[]);
+    let p = &b.phys;
+    for i in 0..100u64 {
+        assert_eq!(p.read32(0xf0_0000_0000 + i * 0x1_0000).status, BUS_ERR);
+    }
+    let u = p.unmapped();
+    assert_eq!(u.len(), 64);
+    assert_eq!(u[63].0, 0xf0_0000_0000 + 63 * 0x1_0000, "the first 64, in order");
+    assert_eq!(p.write32(0xf1_0000_0000, 0), BUS_ERR);
+    assert_eq!(p.unmapped(), u, "a full list is left alone");
+}
+
+#[test]
 fn widgets_route_by_number() {
     let b = board(&[]);
     let p = &b.phys;
