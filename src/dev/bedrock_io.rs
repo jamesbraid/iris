@@ -10,9 +10,9 @@ pub const SIZE: u64 = 0x30010;
 
 use crate::traits::{BusDevice, BusRead64, Resettable, BUS_ERR, BUS_OK};
 use parking_lot::Mutex;
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
+use std::thread::ThreadId;
 const ID: u64 = (2 << 28) | (0xc110 << 12) | (0x36 << 1);
 const ADDR_MASK: u64 = 0xffffffff80;
 const BUSY: u64 = 1 << 20;
@@ -54,15 +54,20 @@ impl Default for Regs {
         }
     }
 }
-struct InboundAccess<'a>(&'a AtomicBool);
+// Only a synchronous callback on the same thread is recursive. DMA workers
+// on other threads may call the thread-safe downstream bus independently.
+struct InboundAccess<'a> {
+    active: &'a Mutex<HashSet<ThreadId>>,
+    thread: ThreadId,
+}
 impl Drop for InboundAccess<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.active.lock().remove(&self.thread);
     }
 }
 
 pub struct BedrockIo {
-    inbound_busy: AtomicBool,
+    inbound_threads: Mutex<HashSet<ThreadId>>,
     regs: Arc<Mutex<Regs>>,
     widgets: Mutex<[Option<Arc<dyn BusDevice>>; 16]>,
     memory: Mutex<Option<Arc<dyn BusDevice>>>,
@@ -79,7 +84,7 @@ impl BedrockIo {
         crate::locks::register_mutex("bedrock-io", &regs);
         Self {
             regs,
-            inbound_busy: AtomicBool::new(false),
+            inbound_threads: Mutex::new(HashSet::new()),
             widgets: Mutex::new(std::array::from_fn(|_| None)),
             memory: Mutex::new(None),
             hub: Mutex::new(None),
@@ -273,15 +278,15 @@ impl BedrockIo {
                 return BusRead64::err();
             }
         }
-        if self
-            .inbound_busy
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
+        let thread = std::thread::current().id();
+        if !self.inbound_threads.lock().insert(thread) {
             log::warn!("Bedrock IO reentrant inbound packet refused");
             return BusRead64::err();
         }
-        let _access = InboundAccess(&self.inbound_busy);
+        let _access = InboundAccess {
+            active: &self.inbound_threads,
+            thread,
+        };
         if address & (1 << 47) != 0 {
             let node = ((address >> 39) & 255) as u8;
             let window = address & ((1 << 39) - 1);
@@ -727,7 +732,59 @@ mod forwarding_tests {
         let d = Arc::new(BedrockIo::new());
         d.connect_memory(Arc::new(Reentrant(Arc::downgrade(&d))));
         assert_eq!(d.inbound_read(15, Some(0), 0, 8).status, BUS_ERR);
-        assert!(!d.inbound_busy.load(Ordering::Relaxed));
+        d.connect_memory(Arc::new(Busy));
+        assert_eq!(
+            d.inbound_read(15, Some(0), 0, 8).status,
+            crate::traits::BUS_BUSY
+        );
+    }
+    struct BlockingMemory {
+        entered: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        words: Mutex<BTreeMap<u64, u64>>,
+    }
+    impl BusDevice for BlockingMemory {
+        fn write64(&self, address: u64, value: u64) -> u32 {
+            if address == 0x1000 {
+                self.entered.send(()).unwrap();
+                self.release
+                    .lock()
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+            }
+            self.words.lock().insert(address, value);
+            BUS_OK
+        }
+    }
+    #[test]
+    fn independent_dma_workers_both_reach_memory() {
+        let d = Arc::new(BedrockIo::new());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let memory = Arc::new(BlockingMemory {
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+            words: Mutex::new(BTreeMap::new()),
+        });
+        d.connect_memory(memory.clone());
+        let first_io = d.clone();
+        let first =
+            std::thread::spawn(move || first_io.inbound_write(14, Some(0), 0x1000, 8, 0x1234));
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let second_io = d.clone();
+        let second =
+            std::thread::spawn(move || second_io.inbound_write(15, Some(1), 0x2000, 8, 0x5678));
+        let second_status = second.join().unwrap();
+        release_tx.send(()).unwrap();
+        let first_status = first.join().unwrap();
+        assert_eq!(second_status, BUS_OK);
+        assert_eq!(first_status, BUS_OK);
+        assert_eq!(
+            *memory.words.lock(),
+            BTreeMap::from([(0x1000, 0x1234), (0x2000, 0x5678)])
+        );
     }
     #[test]
     fn forwarded_failure_keeps_status() {
