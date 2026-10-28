@@ -652,7 +652,9 @@ impl Bridge {
     }
 
     /// Mark `slot`'s data phases 64 bits wide (its card drove REQ64# at
-    /// reset). Affects the byte placement of its DMA.
+    /// reset). Affects the byte placement of its DMA. No machine marks a card
+    /// 64 bits wide yet, so only the tests call it.
+    #[cfg(test)]
     pub fn set_dma_64bit(&self, slot: u8, wide: bool) {
         let mut st = self.st.lock();
         st.dma_64bit = (st.dma_64bit & !(1 << slot)) | ((wide as u8) << slot);
