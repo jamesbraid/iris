@@ -948,7 +948,7 @@ fn default_wire(cfg: &Ioc3Config) -> w1::Bus {
     bus.add(Box::new(sgi_nic::ethernet_address_part(cfg.mac, cfg.ethernet_part_serial)));
     for (r, serial) in &cfg.records {
         let rec = BoardRecord { barcode: &r.barcode, part: &r.part, revision: &r.revision, name: &r.name };
-        bus.add(sgi_nic::board_nic(&rec, *serial));
+        bus.add(Box::new(sgi_nic::board_record_part(&rec, *serial)));
     }
     bus
 }

@@ -1,6 +1,8 @@
 //! DS2501 (512 bits, two 32-byte pages) and DS2502 (1 Kbit, four pages)
 //! add-only memories: Read Memory (0xf0), Read Data/Generate CRC (0xc3)
 //! and Read Status (0xaa). Writes are refused.
+//!
+//! Ported from hw/1wire/ds2502.c in jamesbraid/qemu-sgi-origami.
 
 use super::crc::crc8;
 use super::Part;

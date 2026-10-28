@@ -3,9 +3,11 @@
 //! the parts and the master's slot decode live in `crate::dev::w1`; this
 //! module only knows the SGI record formats and builds parts that carry
 //! them. The barcodes and ROM serials we ship are synthetic.
+//!
+//! Ported from hw/misc/sgi-board-record.c in jamesbraid/qemu-sgi-origami.
 
 use crate::dev::w1::crc::crc16 as crc16_seed;
-use crate::dev::w1::{self, Part};
+use crate::dev::w1;
 
 /// Text fields of an SGI board record, as a part's first two 32-byte pages
 /// hold them, each page closed by an inverted CRC-16.
@@ -105,23 +107,12 @@ pub fn ethernet_address_part(mac: [u8; 6], serial: u64) -> w1::Ds2502 {
 /// "EMU" marker and instance 0.
 pub const ETHERNET_PART_SERIAL: u64 = 0x5e74_54d5_5000;
 
-/// `ethernet_address_part` with the synthetic serial the machine uses, as
-/// a part for a `w1::Bus`.
-pub fn mac_nic(mac: [u8; 6]) -> Box<dyn Part> {
-    Box::new(ethernet_address_part(mac, ETHERNET_PART_SERIAL))
-}
-
-/// `board_record_part` as a part for a `w1::Bus`.
-pub fn board_nic(record: &BoardRecord, serial: u64) -> Box<dyn Part> {
-    Box::new(board_record_part(record, serial))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dev::w1::crc::crc8;
     use crate::dev::w1::slot;
-    use crate::dev::w1::Bus;
+    use crate::dev::w1::{Bus, Part};
 
     /// The 1-wire protocol, the way Linux's sgi_w1.c drives the register:
     /// `pulse << 10 | sample << 2`.
@@ -192,7 +183,7 @@ mod tests {
     #[test]
     fn the_mac_nic_answers_read_rom_and_read_memory() {
         let mac = [0x08, 0x00, 0x69, 0x0b, 0x7e, 0xba];
-        let mut m = bus_of(vec![mac_nic(mac)]);
+        let mut m = bus_of(vec![Box::new(ethernet_address_part(mac, ETHERNET_PART_SERIAL))]);
         assert!(m.reset(), "presence pulse");
         m.byte(0x33);
         let rom: Vec<u8> = (0..8).map(|_| m.byte(0xff)).collect();
@@ -221,9 +212,9 @@ mod tests {
     #[test]
     fn search_rom_finds_every_part_on_the_wire() {
         let mut m = bus_of(vec![
-            mac_nic([1, 2, 3, 4, 5, 6]),
-            board_nic(&rec("EDJ162", "030-0891-003", "A", "FP1"), 0x1234),
-            board_nic(&rec("AAE3230158", "060-0035-003", "A", "PWR.SPPLY.ER"), 0x5678),
+            Box::new(ethernet_address_part([1, 2, 3, 4, 5, 6], ETHERNET_PART_SERIAL)),
+            Box::new(board_record_part(&rec("EDJ162", "030-0891-003", "A", "FP1"), 0x1234)),
+            Box::new(board_record_part(&rec("AAE3230158", "060-0035-003", "A", "PWR.SPPLY.ER"), 0x5678)),
         ]);
         let roms = m.search();
         let mut fams: Vec<u8> = roms.iter().map(|r| r[0]).collect();
@@ -238,7 +229,7 @@ mod tests {
 
     #[test]
     fn a_board_nic_reads_as_openbsd_and_linux_expect() {
-        let mut m = bus_of(vec![board_nic(&rec("FGT687", "030-0887-003", "G", "IP30"), 0x1234)]);
+        let mut m = bus_of(vec![Box::new(board_record_part(&rec("FGT687", "030-0887-003", "G", "IP30"), 0x1234))]);
         // owserial: the redirection table from the status memory at 0x100,
         // eight bytes and a CRC16 at a time.
         assert!(m.reset());
@@ -292,7 +283,7 @@ mod tests {
         assert_eq!(p.programmable(), 64);
         assert_eq!(p.rom()[0], 0x91);
         assert_eq!((p.memory()[0], p.memory()[5], p.memory()[10]), (0x0a, 3, 8), "marker, station address reversed");
-        assert_eq!(mac_nic([8, 0, 0x69, 1, 2, 3]).rom()[6], 0x5e, "UniqueWare prefix");
+        assert_eq!(ethernet_address_part([8, 0, 0x69, 1, 2, 3], ETHERNET_PART_SERIAL).rom()[6], 0x5e, "UniqueWare prefix");
     }
 
     #[test]
