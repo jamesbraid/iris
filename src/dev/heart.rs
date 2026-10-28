@@ -15,6 +15,8 @@
 //! both to this device, which takes the full physical address. Memory is
 //! `heart_mem::HeartRam`, which a descriptor write reaches through
 //! [`Heart::on_memcfg`].
+//!
+//! Ported from hw/misc/sgi-heart.c in jamesbraid/qemu-sgi-origami.
 
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use std::sync::Arc;

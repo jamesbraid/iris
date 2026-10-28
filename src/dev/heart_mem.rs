@@ -26,6 +26,8 @@
 //! The ppmem window maps whole 32 MiB units, the guard included: the CPU's
 //! cached accesses through the window reach those 16 KiB. Only uncached
 //! accesses, which go through the table, see the bus error.
+//!
+//! Ported from hw/misc/sgi-heart.c in jamesbraid/qemu-sgi-origami.
 
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;

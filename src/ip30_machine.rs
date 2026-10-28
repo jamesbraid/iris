@@ -28,7 +28,7 @@ use crate::dev::isp1040::Isp1040;
 use crate::dev::mgras::hq4::ImpactXio;
 use crate::dev::rad1::Rad1;
 use crate::dev::sflash::{CfiFlash, FLASH_SIZE};
-use crate::dev::sgi_nic::{board_nic, BoardRecord};
+use crate::dev::sgi_nic::{board_record_part, BoardRecord};
 use crate::dev::w1;
 use crate::dev::xbow::Xbow;
 use crate::hptimer::TimerManager;
@@ -71,7 +71,7 @@ pub fn heart_banks(cfg: &MachineConfig) -> [u64; 4] {
 /// Octane's.
 fn record_bus(barcode: &str, part: &str, revision: &str, name: &str, serial: u64) -> w1::Bus {
     let mut bus = w1::Bus::new();
-    bus.add(board_nic(&BoardRecord { barcode, part, revision, name }, serial));
+    bus.add(Box::new(board_record_part(&BoardRecord { barcode, part, revision, name }, serial)));
     bus
 }
 

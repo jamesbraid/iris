@@ -5,6 +5,8 @@
 //! The 400 and 40 thresholds are modelling choices, not hardware values:
 //! real pulse widths in register units are unknown, and every responder
 //! the guests have been run against uses these.
+//!
+//! Ported from include/hw/misc/sgi-onewire-slot.h in jamesbraid/qemu-sgi-origami.
 
 use super::Bus;
 
