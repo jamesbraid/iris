@@ -336,16 +336,17 @@ is the internal bus, 1 the external). See [the Octane guide](docs/octane-ip30.md
 
 ### Hardware constraints and precedence
 
-Bank values are 0, 8, 16, 32, 64, or 128 MB; only IP28 accepts 256/512 MB. On
-the O2 a bank is a DIMM pair's kit, 32, 64, 128 or 256 MB, fitted from pair A
-largest first; on the Octane it is a matched DIMM pair, 64, 128, 256 or 512 MB, filled from bank 0. `banks` has eight entries; every machine today uses the first
-four and the rest must be 0.
+On the Indy and Indigo2 bank values are 0, 8, 16, 32, 64, or 128 MB, and only
+IP28 accepts 256/512 MB. On the O2 a bank is a DIMM pair's kit, 32, 64, 128 or
+256 MB, fitted from pair A largest first; on the Octane it is a matched DIMM
+pair, 64, 128, 256 or 512 MB, filled from bank 0. `banks` has eight entries;
+every machine today uses the first four and the rest must be 0.
 IP22/IP24 four-bank IRIX 6.5 behavior remains separate from IP28's verified
 two-bank 1 GB layout. Extreme requires IP22. All non-Newport boards require
 `heads=1` and `resolution="guest"`. IP28 IRIX needs IMPACT; its PROM has an
 embedded fallback.
-The config validator permits SCSI controller 1 only on IP22, the O2 and the Octane,
-the machines with two controllers.
+The config validator permits SCSI controller 1 only on IP22, the O2 and the
+Octane, the machines with two controllers.
 
 Standalone CLI options update the loaded config where supplied; boolean enable
 switches do not provide a general way to clear every saved true setting.

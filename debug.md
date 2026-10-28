@@ -323,8 +323,8 @@ shows the command total and anything odd the driver did; `regs`, `wdt`,
 (HEART registers touched but not modelled) and `ip30 memcfg|bridge|gfx|xbow|unmapped`
 (the banks as HEART places them, the Bridge's interrupt routing, the graphics
 widget's link, refused Crossbow accesses, and accesses to physical addresses
-nothing is mapped at, with the PC). The `phys` commands work on the Octane as
-well.
+nothing is mapped at, with the PC; a device's own refusal is not listed). The
+`phys` commands work on the Octane as well.
 
 Queue position `[0]` is the mounted disc, `[1]` the next on eject. A disc
 change reaches IRIX as a Unit Attention ("medium changed") on its next

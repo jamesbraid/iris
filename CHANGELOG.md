@@ -128,9 +128,17 @@ hashes are given where a change is easiest to understand by reading the commit.
   IMPACT graphics on widget 11. The stock IP30 PROM boots IRIX 6.5.30 to a
   serial login or, on the graphics console, to the X login and desktop.
   Needs the IP30 PROM image. Runs under jitv2 as well as the interpreter.
-  The devices are time-driven by `hptimer` and per-port receive threads, with
-  no polling thread; every thread is joined when the machine stops.
+  The devices are time-driven by `hptimer`. Serial input is polled every
+  2 ms by one receive thread per port; every thread is joined when the
+  machine stops.
   iris-gui can run it.
+- **The Octane's memory and bus bookkeeping are cheaper.** A MEMCFG write
+  that leaves the decode as it was no longer rebuilds the table and empties
+  ppmem's window under the running CPU. The first 64 distinct misses and
+  unsupported accesses are still listed, but once a list is full it costs one
+  atomic load instead of a lock and a scan. A swapped Bridge DMA transfer
+  that is whole 4- or 8-byte units reverses the bytes in place rather than
+  through a spanning copy.
 - **One 1-wire bus for the board records.** `dev::w1` holds the bus, the
   slot decode and the Dallas parts (DS2501/2502, DS2505); HEART, the Bridge,
   IOC3 and the graphics board each own a wire. `sgi_nic` only builds the SGI
