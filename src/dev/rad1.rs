@@ -48,6 +48,7 @@ use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::config::AudioConfig;
+use crate::devlog::LogModule;
 use crate::host_audio::{HostOut, Resampler};
 use crate::hptimer::{TimerId, TimerManager, TimerReturn};
 use crate::traits::Device;
@@ -459,20 +460,20 @@ impl State {
         let tag = (ctrl >> CTRL_TAG_SHIFT) & CTRL_TAG_MASK;
 
         if base == 0 || len == 0 {
-            eprintln!("rad1: {} enabled with no ring programmed (address {base:#x}, control {ctrl:#x})", info.name);
+            crate::dlog!(LogModule::Rad1, "rad1: {} enabled with no ring programmed (address {base:#x}, control {ctrl:#x})", info.name);
             return;
         }
         if len > DMA_MAX_BYTES {
-            eprintln!("rad1: {} ring length {len:#x} exceeds the modelled cap; clamping", info.name);
+            crate::dlog!(LogModule::Rad1, "rad1: {} ring length {len:#x} exceeds the modelled cap; clamping", info.name);
             len = DMA_MAX_BYTES;
         }
         // What hardware does with a partial frame is unknown; start nothing.
         if !len.is_multiple_of(info.frame_bytes) {
-            eprintln!("rad1: {} ring length {len:#x} is not a whole number of frames", info.name);
+            crate::dlog!(LogModule::Rad1, "rad1: {} ring length {len:#x} is not a whole number of frames", info.name);
             return;
         }
         if tag != info.tag {
-            eprintln!("rad1: {} control word {ctrl:#x} carries tag {tag}, not the channel type {}", info.name, info.tag);
+            crate::dlog!(LogModule::Rad1, "rad1: {} control word {ctrl:#x} carries tag {tag}, not the channel type {}", info.name, info.tag);
         }
         self.chan[idx] = Chan { running: true, base, len, offset: 0, start_ns: now, frames: 0 };
     }
@@ -779,18 +780,18 @@ impl Inner {
             s.ust_update(now);
             return s.ust_count;
         }
-        eprintln!("rad1: unsupported {width}-byte BAR0 read at {off:#x}");
+        crate::dlog!(LogModule::Rad1, "rad1: unsupported {width}-byte BAR0 read at {off:#x}");
         0
     }
 
-    /// A write the model does not support is logged and dropped. The model
-    /// fails the bus cycle; this bus layer cannot, so a refused write leaves
-    /// the register unchanged.
+    /// A write the model does not support is logged and dropped. This bus
+    /// layer cannot fail the cycle, so a refused write leaves the register
+    /// unchanged.
     fn write(&self, off: u32, val: u32, width: usize) {
         let now = self.now();
         let mut s = self.state.lock();
         if self.write_locked(&mut s, off, val, width, now).is_none() {
-            eprintln!("rad1: unsupported {width}-byte BAR0 write at {off:#x} value {val:#x}");
+            crate::dlog!(LogModule::Rad1, "rad1: unsupported {width}-byte BAR0 write at {off:#x} value {val:#x}");
         }
         self.arm_audio(&mut s);
     }
@@ -941,7 +942,7 @@ impl Inner {
         let interval = (ctrl >> STATUS_INTERVAL_SHIFT) & STATUS_INTERVAL_MASK;
         s.status_gen += 1;
         if interval == 0 {
-            eprintln!("rad1: continuous status DMA started with a zero interval (control {ctrl:#x}); stopping");
+            crate::dlog!(LogModule::Rad1, "rad1: continuous status DMA started with a zero interval (control {ctrl:#x}); stopping");
             s.status_running = false;
             self.cancel_status(s);
             return;
@@ -1058,7 +1059,7 @@ impl Inner {
             && put(SLOT_FLAGS_OFFSET, &0u32.to_le_bytes())
             && put(SLOT_DONE_OFFSET, &SLOT_DONE_WORD.to_le_bytes());
         if !ok {
-            eprintln!("rad1: status DMA at {slot:#x} failed");
+            crate::dlog!(LogModule::Rad1, "rad1: status DMA at {slot:#x} failed");
         }
         ok
     }
@@ -1124,7 +1125,7 @@ impl Inner {
                 }
             });
             if !ok {
-                eprintln!("rad1: {} DMA at {:#x} + {:#x} failed", info.name, c.base, c.offset);
+                crate::dlog!(LogModule::Rad1, "rad1: {} DMA at {:#x} + {:#x} failed", info.name, c.base, c.offset);
                 return false;
             }
             if info.output {
