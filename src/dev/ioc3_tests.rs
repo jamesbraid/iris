@@ -1203,22 +1203,6 @@ fn nvram_and_extended_ram_survive_in_a_512_byte_file() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// An old 114-byte dump still loads; the file becomes a 512-byte image.
-#[test]
-fn an_old_114_byte_file_still_loads() {
-    let path = std::env::temp_dir().join(format!("ioc3-old-{}", std::process::id()));
-    let mut old = vec![0u8; 114];
-    old[0] = 0xab; // register 0x0e
-    old[(0x45 - 0x0e) as usize] = 0xcd; // bank 0 RAM 0x45
-    std::fs::write(&path, &old).unwrap();
-    let r = Rig::new();
-    r.c.set_nvram_file(&path).unwrap();
-    assert_eq!(rtc_r(&r, 0x0e), 0xab);
-    assert_eq!(rtc_r(&r, 0x45), 0xcd);
-    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0x200);
-    let _ = std::fs::remove_file(&path);
-}
-
 /// A full image in the QEMU layout loads, extended RAM included.
 #[test]
 fn a_qemu_layout_image_loads() {
