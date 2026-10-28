@@ -1830,11 +1830,7 @@ impl MipsCore {
         // The Compare *write* path classifies that case (a deliberate ack vs
         // a deadline we overran) and delivers IP7 itself when warranted; this
         // function only schedules the next architectural match.
-        let delta = match (self.cp0_compare as u32).wrapping_sub(self.cp0_count as u32) as u64 {
-            0 => 1u64 << 32,
-            d => d,
-        };
-        let ns = ((delta as u128 * 1_000_000_000) / self.count_hz as u128) as u64;
+        let ns = compare_delay_ns(self.cp0_compare as u32, self.cp0_count as u32, self.count_hz);
         #[cfg(feature = "ci_clock")]
         {
             self.count_fire_cycle = self.hot.cycles.saturating_add(ns / NS_PER_GUEST_CYCLE);
@@ -2679,6 +2675,17 @@ impl Default for MipsCore {
     }
 }
 
+/// Host nanoseconds until a Count at `count` next equals `compare`, at `hz`
+/// ticks per second. The distance is taken modulo 2^32, so a target just
+/// past the wrap is a short wait; a target equal to Count is a full wrap.
+fn compare_delay_ns(compare: u32, count: u32, hz: u64) -> u64 {
+    let delta = match compare.wrapping_sub(count) as u64 {
+        0 => 1u64 << 32,
+        d => d,
+    };
+    ((delta as u128 * 1_000_000_000) / hz as u128) as u64
+}
+
 #[cfg(test)]
 mod ip7_ticket_tests {
     use super::*;
@@ -2939,22 +2946,17 @@ mod ip7_ticket_tests {
 
     /// The one-shot armed across the wrap waits the short distance, not a
     /// full wrap (about 44 s at 97.5 MHz).
-    #[cfg(not(feature = "ci_clock"))]
     #[test]
-    fn octane_one_shot_armed_across_the_wrap_fires_promptly() {
-        let mut core = octane_core();
-        // The one-shot runs on the host clock: the real rate, so the short
-        // distance is microseconds and a full wrap would be 44 s.
-        core.set_count_hz(97_500_000);
-        core.set_timer_manager(Arc::new(crate::hptimer::TimerManager::new()));
-        core.write_cp0(9, 0xFFFF_FF00);
-        core.hot.cycles += 1;
-        // 0x1000 ticks past the wrap: about 45 us.
-        core.write_cp0(11, 0x1000);
-        let t0 = std::time::Instant::now();
-        while !ip7(&core) && t0.elapsed() < std::time::Duration::from_secs(2) {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        assert!(ip7(&core), "the Compare one-shot across the wrap did not fire within 2 s");
+    fn octane_one_shot_armed_across_the_wrap_waits_the_short_distance() {
+        let hz = 97_500_000;
+        // 0x1000 ticks past the wrap from 0x100 before it: 0x1100 ticks,
+        // about 45 us.
+        let ns = compare_delay_ns(0x1000, 0xFFFF_FF00, hz);
+        assert_eq!(ns, 0x1100u64 * 1_000_000_000 / hz);
+        assert!(ns < 1_000_000, "{ns} ns is not the short distance");
+        // A target equal to Count is a full wrap away, about 44 s.
+        assert_eq!(compare_delay_ns(5, 5, hz), (1u64 << 32) * 1_000_000_000 / hz);
+        // A target behind Count waits out the wrap.
+        assert!(compare_delay_ns(0x10, 0x20, hz) > 40_000_000_000);
     }
 }
