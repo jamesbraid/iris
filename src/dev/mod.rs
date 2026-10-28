@@ -57,3 +57,5 @@ pub mod ultra64;
 pub mod vino;
 pub mod wd33c93a;
 pub mod z85c30;
+
+pub mod bedrock_pi;
