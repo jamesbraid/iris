@@ -3,6 +3,8 @@
 //! the parts and the master's slot decode live in `crate::dev::w1`; this
 //! module only knows the SGI record formats and builds parts that carry
 //! them. The barcodes and ROM serials we ship are synthetic.
+//!
+//! Ported from hw/misc/sgi-board-record.c in jamesbraid/qemu-sgi-origami.
 
 use crate::dev::w1::crc::crc16 as crc16_seed;
 use crate::dev::w1::{self, Part};

@@ -1,4 +1,6 @@
 //! The bus, the parts and the slot decode, driven the way a guest does.
+//!
+//! Ported from tests/unit/test-onewire.c in jamesbraid/qemu-sgi-origami.
 
 use super::crc::{crc16, crc8};
 use super::slot::{self, fields, ONE_PULSE, RESET_PULSE};
