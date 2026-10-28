@@ -18,7 +18,7 @@
 //!
 //! Ported from hw/misc/sgi-heart.c in jamesbraid/qemu-sgi-origami.
 
-use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -195,6 +195,8 @@ pub struct Heart {
     /// Accesses this model does not support, first 64 distinct, for the
     /// monitor: `(offset, size, write)`.
     unsupported: Mutex<Vec<(u32, u8, bool)>>,
+    /// `unsupported` holds 64: a further access costs one relaxed load.
+    unsupported_full: AtomicBool,
     /// Packets that reached HEART's interrupt register, for the monitor.
     pub packets: AtomicU64,
 }
@@ -210,6 +212,7 @@ impl Heart {
             memcfg_hook: Mutex::new(None),
             mlan: Mutex::new(w1::Bus::new()),
             unsupported: Mutex::new(Vec::new()),
+            unsupported_full: AtomicBool::new(false),
             packets: AtomicU64::new(0),
         }
     }
@@ -256,12 +259,18 @@ impl Heart {
     }
 
     fn note(&self, off: u32, size: usize, write: bool) {
+        if self.unsupported_full.load(Ordering::Relaxed) {
+            return;
+        }
         let mut u = self.unsupported.lock();
-        if u.len() < 64 && !u.iter().any(|&(o, s, w)| o == off && s as usize == size && w == write) {
+        if !u.iter().any(|&(o, s, w)| o == off && s as usize == size && w == write) {
             if trace() {
                 eprintln!("ip30: HEART: unsupported {size}-byte {} at {off:#x}", if write { "write" } else { "read" });
             }
             u.push((off, size as u8, write));
+            if u.len() == 64 {
+                self.unsupported_full.store(true, Ordering::Relaxed);
+            }
         }
     }
 
@@ -757,6 +766,20 @@ mod tests {
 
     fn rq(h: &Heart, off: u32) -> u64 {
         h.piu_read(off, 8).unwrap()
+    }
+
+    #[test]
+    fn the_unsupported_list_keeps_the_first_64_and_then_stops() {
+        let f = heart();
+        let h = &f.heart;
+        for i in 0..100u32 {
+            h.note(0x1000 + 8 * i, 8, false);
+        }
+        let u = h.unsupported();
+        assert_eq!(u.len(), 64);
+        assert_eq!(u[63], (0x1000 + 8 * 63, 8, false));
+        h.note(0x9000, 4, true);
+        assert_eq!(h.unsupported(), u, "a full list is left alone");
     }
 
     #[test]

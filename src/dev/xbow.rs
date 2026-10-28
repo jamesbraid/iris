@@ -20,7 +20,7 @@
 //!
 //! Ported from hw/misc/sgi-xbow.c in jamesbraid/qemu-sgi-origami.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
@@ -194,6 +194,8 @@ pub struct Xbow {
     /// has settled: the widget at the far end resets too.
     on_link_reset: OnceLock<Box<dyn Fn(u8) + Send + Sync>>,
     unsupported: Mutex<Vec<(u32, u8, bool)>>,
+    /// `unsupported` holds 64: a further access costs one relaxed load.
+    unsupported_full: AtomicBool,
 }
 
 fn link_bit(widget: u8) -> Option<u8> {
@@ -215,6 +217,7 @@ impl Xbow {
             on_link_change: OnceLock::new(),
             on_link_reset: OnceLock::new(),
             unsupported: Mutex::new(Vec::new()),
+            unsupported_full: AtomicBool::new(false),
         }
     }
 
@@ -369,9 +372,15 @@ impl Xbow {
     }
 
     fn note(&self, off: u32, size: usize, write: bool) {
+        if self.unsupported_full.load(Ordering::Relaxed) {
+            return;
+        }
         let mut u = self.unsupported.lock();
-        if u.len() < 64 && !u.iter().any(|&(o, s, w)| o == off && s as usize == size && w == write) {
+        if !u.iter().any(|&(o, s, w)| o == off && s as usize == size && w == write) {
             u.push((off, size as u8, write));
+            if u.len() == 64 {
+                self.unsupported_full.store(true, Ordering::Relaxed);
+            }
         }
     }
 
@@ -621,6 +630,19 @@ mod tests {
         let aux = x.read(LINK_BASE + LINK_STRIDE * 3 + LINK_AUX_STATUS + 4, 4).unwrap() as u32;
         assert_eq!(aux & (AUX_PRESENT | AUX_FAILURE_MODE), AUX_FAILURE_MODE);
         assert!(x.carries(8) && x.carries(15) && !x.carries(11) && !x.carries(3));
+    }
+
+    #[test]
+    fn the_unsupported_list_keeps_the_first_64_and_then_stops() {
+        let x = octane();
+        for i in 0..100u32 {
+            x.note(0x1000 + 8 * i, 4, false);
+        }
+        let u = x.unsupported();
+        assert_eq!(u.len(), 64);
+        assert_eq!(u[63], (0x1000 + 8 * 63, 4, false));
+        x.note(0x9000, 4, true);
+        assert_eq!(x.unsupported(), u, "a full list is left alone");
     }
 
     #[test]
