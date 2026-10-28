@@ -62,6 +62,7 @@ pub struct PciConfig {
     status: u16,
     command_mask: u16,
     latency_mask: u8,
+    cache_line_mask: u8,
     writable_masks: [u32; 64],
 }
 
@@ -81,17 +82,24 @@ impl PciConfig {
         }
         Self {
             regs: Mutex::new(r), bars, power_on: r,
-            status: 0x0200, command_mask: 0xffff, latency_mask: 0,
+            status: 0x0200, command_mask: 0xffff, latency_mask: 0, cache_line_mask: 0,
             writable_masks: [u32::MAX; 64],
         }
     }
 
     /// Set fixed status bits and the writable Command and latency-timer bits.
-    /// The other bytes of header dword 3 remain read-only.
+    /// Cache line size is controlled separately by [`Self::with_cache_line_policy`].
     pub fn with_header_policy(mut self, status: u16, command_mask: u16, latency_mask: u8) -> Self {
         self.status = status;
         self.command_mask = command_mask;
         self.latency_mask = latency_mask;
+        self
+    }
+
+    /// Set writable cache-line-size bits in the low byte of header dword 3.
+    /// The header type and BIST bytes remain read-only.
+    pub fn with_cache_line_policy(mut self, mask: u8) -> Self {
+        self.cache_line_mask = mask;
         self
     }
 
@@ -136,7 +144,7 @@ impl PciConfig {
             // Identity, class and header type are read-only.
             0 | 2 => {}
             3 => {
-                let mask = (self.latency_mask as u32) << 8;
+                let mask = ((self.latency_mask as u32) << 8) | self.cache_line_mask as u32;
                 r[3] = (r[3] & !mask) | (val & mask);
             }
             // Status is fixed; only the selected Command bits are writable.
@@ -466,6 +474,29 @@ mod tests {
         c.reset();
         assert_eq!(c.read(1), 0x02b0_0000);
         assert_eq!(c.read(3), 0);
+    }
+
+    #[test]
+    fn cache_line_policy_allows_the_low_header_byte_without_changing_wiring() {
+        use crate::traits::Saveable;
+        let c = scsi_like().with_header_policy(0x02b0, 0x0057, 0xff)
+            .with_cache_line_policy(0xff);
+        c.write(3, 0xf8ff);
+        assert_eq!(c.read(3), 0xf8ff);
+        c.write(3, 0xffff_1234);
+        assert_eq!(c.read(3), 0x1234, "upper header bytes stay read-only");
+        let saved = c.save_state();
+        let d = scsi_like().with_cache_line_policy(0x0f);
+        d.load_state(&saved).expect("load_state");
+        d.write(3, 0xffff_ffff);
+        assert_eq!(d.read(3), 0x123f, "loading registers retains destination masks");
+        c.reset();
+        assert_eq!(c.read(3), 0);
+        d.reset();
+        assert_eq!(d.read(3), 0);
+        let default = scsi_like();
+        default.write(3, 0xf8ff);
+        assert_eq!(default.read(3), 0, "existing functions keep both bytes read-only");
     }
 
     fn capability_config() -> PciConfig {
