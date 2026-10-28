@@ -164,6 +164,12 @@ through its event channel. `HACKING.md` lists the thread names.
   which the processor reaches only there (0x2000_0000..+16 KiB is a bus
   error, as the stock IDE memory diagnostics expect). Whether bus masters
   reach that range is not known; the DMA view does.
+- A cached access to 0x2000_0000..+16 KiB reaches the bytes. On an Octane2
+  (HEART rev F) cached and uncached reads there both take a data bus
+  error; here only uncached accesses do, because the processor's cache
+  reads memory straight from the ppmem window, which maps the whole first
+  32 MiB. Faulting the cached access would put the first 64 MiB of SDRAM
+  on the slower bus path. No supported guest touches the range.
 - The PROM's cached stores to its own data in the flash are kept in a
   per-line copy, as a write-back cache would hold them; they are never
   written back.
