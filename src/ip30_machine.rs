@@ -28,8 +28,8 @@ use crate::dev::isp1040::Isp1040;
 use crate::dev::mgras::hq4::ImpactXio;
 use crate::dev::rad1::Rad1;
 use crate::dev::sflash::{CfiFlash, FLASH_SIZE};
-use crate::dev::sgi_nic::{board_record_part, BoardRecord};
 use crate::dev::w1;
+use crate::dev::w1::sgi::{board_record_part, BoardRecord};
 use crate::dev::xbow::Xbow;
 use crate::hptimer::TimerManager;
 use crate::ip30::{

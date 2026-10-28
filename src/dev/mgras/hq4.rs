@@ -59,8 +59,8 @@ use parking_lot::Mutex;
 
 use super::{Gl, Hq3Board, Mgras, MGRAS_SLOT_GFX_BASE};
 use crate::config::GraphicsBoard;
-use crate::dev::sgi_nic::{board_record_part, BoardRecord};
 use crate::dev::w1;
+use crate::dev::w1::sgi::{board_record_part, BoardRecord};
 use crate::ip30::widget_small_base;
 use crate::irq::{InterruptController, IrqLine};
 use crate::traits::{
