@@ -29,6 +29,8 @@ pub mod mgras;
 pub mod ng1;
 pub mod serial_log;
 pub mod sflash;
+pub mod bedrock_flash;
+pub mod prom_image;
 pub mod xbow;
 pub mod bridge;
 pub mod w1;
