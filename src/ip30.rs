@@ -39,8 +39,6 @@ use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, BUS_ER
 pub const WIDGET_XBOW: u8 = 0x0;
 pub const WIDGET_HEART: u8 = 0x8;
 pub const WIDGET_BRIDGE: u8 = 0xf;
-/// The four ports graphics and expansion boards take.
-pub const WIDGET_GFX_FIRST: u8 = 0x9;
 
 /// Widget `w`'s small window: 16 MiB at `0x1000_0000 + (w << 24)`.
 pub const fn widget_small_base(w: u8) -> u64 {

@@ -884,8 +884,6 @@ pub struct Ioc3Config {
     pub subsystem_id: u16,
     /// The board's station address, which the one-wire part holds.
     pub mac: [u8; 6],
-    /// 48-bit ROM serial of the station-address part.
-    pub ethernet_part_serial: u64,
     pub serial: [bool; 2],
     pub parallel: bool,
     pub keyboard_mouse: bool,
@@ -919,7 +917,6 @@ impl Ioc3Config {
         Self {
             subsystem_id: SUBSYS_IP30_SYSBOARD,
             mac,
-            ethernet_part_serial: sgi::ETHERNET_PART_SERIAL,
             serial: [true, true],
             parallel: true,
             keyboard_mouse: true,
@@ -939,7 +936,7 @@ impl Ioc3Config {
 /// records, the front plane and the power supply on the Octane.
 fn default_wire(cfg: &Ioc3Config) -> w1::Bus {
     let mut bus = w1::Bus::new();
-    bus.add(Box::new(sgi::ethernet_address_part(cfg.mac, cfg.ethernet_part_serial)));
+    bus.add(Box::new(sgi::ethernet_address_part(cfg.mac, sgi::ETHERNET_PART_SERIAL)));
     for (r, serial) in &cfg.records {
         let rec = BoardRecord { barcode: &r.barcode, part: &r.part, revision: &r.revision, name: &r.name };
         bus.add(Box::new(sgi::board_record_part(&rec, *serial)));
@@ -1616,7 +1613,7 @@ impl St {
     }
 
     /// Transitions already due happen before a read, not whenever the
-    /// service thread next runs.
+    /// receive thread or a timer next runs.
     fn io_catch_up(&mut self, now: Instant) {
         for _ in 0..100_000 {
             match self.int_out.next {
@@ -2456,6 +2453,7 @@ impl Shared {
     /// One synchronous pass of what the receive threads and timers do:
     /// host input into the FIFOs, expired receive timers and transmit
     /// delays, the interrupt output, and any PS/2 character that arrived.
+    #[cfg(test)]
     fn service(&self) {
         self.with_st(false, |st, _| {
             let now = Instant::now();
@@ -2637,8 +2635,9 @@ impl Ioc3 {
     }
 
     /// One synchronous pass of the work the receive threads and the timers
-    /// do between guest accesses. Nothing calls it periodically; tests use it
-    /// to settle the chip without waiting on a thread.
+    /// do between guest accesses. Tests use it to settle the chip without
+    /// waiting on a thread.
+    #[cfg(test)]
     pub fn service(&self) {
         self.sh.service();
     }

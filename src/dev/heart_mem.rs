@@ -199,7 +199,7 @@ impl HeartRam {
             }
             total += s;
             if total > 2 << 30 {
-                return Err(format!("HEART banks hold more than 2048 MiB, the most an Octane takes"));
+                return Err("HEART banks hold more than 2048 MiB, the most an Octane takes".to_string());
             }
             if s != 0 {
                 let bank = RamBank::try_new(mb as usize).map_err(|e| format!("ppmem: {e}"))?;

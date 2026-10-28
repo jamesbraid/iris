@@ -172,14 +172,14 @@ fn the_bus_is_quiet_until_its_first_reset() {
 
 #[test]
 fn read_rom_returns_the_identity_and_a_valid_crc() {
-    let p = Ds2502::new(0x91, 0x5e74_54d5_5000, &[]);
+    let p = Ds2502::new(0x91, ETHERNET_PART_SERIAL, &[]);
     let rom = p.rom();
     let mut m = one(Box::new(p));
     assert!(m.reset());
     m.write(0x33);
     assert_eq!(m.read_n(8), rom);
     assert_eq!(rom[0], 0x91);
-    assert_eq!(&rom[1..7], &0x5e74_54d5_5000u64.to_le_bytes()[..6]);
+    assert_eq!(&rom[1..7], &ETHERNET_PART_SERIAL.to_le_bytes()[..6]);
     assert_eq!(crc8(&rom), 0);
 }
 
@@ -274,7 +274,7 @@ fn three_parts() -> [Box<dyn Part>; 3] {
     let img = |n: usize, mul: usize, add: usize| (0..n).map(|i| (i * mul + add) as u8).collect::<Vec<_>>();
     [
         Box::new(Ds2502::new(0x09, 0x0123_4567_89ab, &img(128, 3, 1))),
-        Box::new(Ds2502::ds2501(0x91, 0x5e74_54d5_5000, &img(64, 5, 2))),
+        Box::new(Ds2502::ds2501(0x91, ETHERNET_PART_SERIAL, &img(64, 5, 2))),
         Box::new(Ds2505::new(0x0b, 0x5145_4d55_4600, &img(64, 7, 9))),
     ]
 }
