@@ -263,6 +263,95 @@ fn a_wrong_match_rom_leaves_every_part_unselected() {
     assert!(m.reset());
 }
 
+/// A DS2502, a DS2501 and a DS2505 with distinct images: families 0x09,
+/// 0x91 and 0x0b, so their ROMs part ways in the second bit.
+fn three_parts() -> [Box<dyn Part>; 3] {
+    let img = |n: usize, mul: usize, add: usize| (0..n).map(|i| (i * mul + add) as u8).collect::<Vec<_>>();
+    [
+        Box::new(Ds2502::new(0x09, 0x0123_4567_89ab, &img(128, 3, 1))),
+        Box::new(Ds2502::ds2501(0x91, 0x5e74_54d5_5000, &img(64, 5, 2))),
+        Box::new(Ds2505::new(0x0b, 0x5145_4d55_4600, &img(64, 7, 9))),
+    ]
+}
+
+fn three_part_wire() -> M {
+    let mut b = Bus::new();
+    for p in three_parts() {
+        b.add(p);
+    }
+    M(b)
+}
+
+#[test]
+fn search_rom_on_three_parts_answers_the_and_of_the_parts_still_selected() {
+    let roms: Vec<[u8; 8]> = three_parts().iter().map(|p| p.rom()).collect();
+    let mut discrepancies = 0;
+    // The master follows each part's ROM in turn.
+    for target in 0..3 {
+        let mut m = three_part_wire();
+        assert!(m.reset());
+        m.write(0xf0);
+        let mut selected = vec![0, 1, 2];
+        for i in 0..64 {
+            let bit = |k: usize| roms[k][i / 8] >> (i % 8) & 1 != 0;
+            // Every selected part sends its bit, then its complement; the
+            // wire is low if any of them sends a zero.
+            let want_bit = selected.iter().all(|&k| bit(k));
+            let want_complement = selected.iter().all(|&k| !bit(k));
+            assert_eq!(m.bit(true), want_bit, "target {target} bit {i}");
+            assert_eq!(m.bit(true), want_complement, "target {target} complement {i}");
+            if !want_bit && !want_complement {
+                discrepancies += 1;
+            }
+            let choice = bit(target);
+            m.bit(choice);
+            selected.retain(|&k| bit(k) == choice);
+        }
+        assert_eq!(selected, [target], "only the followed part is left");
+        // The part left selected answers the next memory command.
+        m.write(0xf0);
+        m.write(0);
+        m.write(0);
+        let want = one(three_parts().into_iter().nth(target).unwrap()).skip(0xf0, 0, 5);
+        assert_eq!(m.read_n(5), want, "target {target}");
+    }
+    assert!(discrepancies > 0, "the families differ, so the parts disagree somewhere");
+}
+
+#[test]
+fn skip_rom_read_memory_on_three_parts_wires_the_streams_together() {
+    let mut want = vec![0xffu8; 16];
+    for p in three_parts() {
+        for (w, b) in want.iter_mut().zip(one(p).skip(0xf0, 0, 16)) {
+            *w &= b;
+        }
+    }
+    assert_eq!(three_part_wire().skip(0xf0, 0, 16), want);
+}
+
+#[test]
+fn read_rom_on_three_parts_is_the_and_of_their_roms_and_a_bad_match_selects_none() {
+    let roms: Vec<[u8; 8]> = three_parts().iter().map(|p| p.rom()).collect();
+    let mut and = [0xffu8; 8];
+    for rom in &roms {
+        for i in 0..8 {
+            and[i] &= rom[i];
+        }
+    }
+    let mut m = three_part_wire();
+    assert!(m.reset());
+    m.write(0x33);
+    assert_eq!(m.read_n(8), and);
+    // One wrong bit in a real ROM matches no part, so none answers.
+    let mut bad = roms[0];
+    bad[3] ^= 1;
+    m.match_rom(&bad);
+    m.write(0xf0);
+    m.write(0);
+    m.write(0);
+    assert_eq!(m.read_n(2), [0xff; 2]);
+}
+
 #[test]
 fn a_part_leaves_a_match_at_the_first_differing_bit() {
     // Two parts whose ROMs differ in the first byte: after the bit that
