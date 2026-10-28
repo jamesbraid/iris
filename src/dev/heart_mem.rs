@@ -21,6 +21,8 @@
 //! reaches 0x2000_0000..+16 KiB is not known; the `dma_view` does, as the
 //! same bytes. Public software uses physical 0x400 (the GDA) and 0x600
 //! (MPCONF).
+//!
+//! Ported from hw/misc/sgi-heart.c in jamesbraid/qemu-sgi-origami.
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};

@@ -1,6 +1,8 @@
 //! DS2505 (16 Kbit, 64 pages of 32 bytes) add-only memory: Read Memory
 //! (0xf0), Read Status (0xaa) and Extended Read Memory (0xa5). Writes are
 //! refused.
+//!
+//! Ported from hw/1wire/ds2505.c in jamesbraid/qemu-sgi-origami.
 
 use super::crc::{crc16, crc8};
 use super::Part;
