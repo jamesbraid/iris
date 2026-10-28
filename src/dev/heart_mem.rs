@@ -713,21 +713,37 @@ pub fn dma_read_bytes(mem: &dyn BusDevice, addr: u64, buf: &mut [u8]) -> bool {
         buf.fill(0);
         return false;
     };
-    let mut w = vec![0u64; words];
-    if mem.read_block(first, &mut w) != BUS_OK {
+    let mut stack = [0u64; DMA_STACK_WORDS];
+    let mut heap = Vec::new();
+    let w = scratch_words(&mut stack, &mut heap, words);
+    if mem.read_block(first, w) != BUS_OK {
         buf.fill(0);
         return false;
     }
+    // The first doubleword from `skip` on, whole doublewords, then the tail.
     let skip = (addr - first) as usize;
-    for (i, b) in buf.iter_mut().enumerate() {
-        let k = skip + i;
-        *b = w[k / 8].to_be_bytes()[k % 8];
+    let mut out = &mut buf[..];
+    let mut next = 0;
+    if skip != 0 {
+        let (head, rest) = out.split_at_mut((8 - skip).min(out.len()));
+        head.copy_from_slice(&w[0].to_be_bytes()[skip..skip + head.len()]);
+        out = rest;
+        next = 1;
+    }
+    let mut chunks = out.chunks_exact_mut(8);
+    for (c, v) in (&mut chunks).zip(&w[next..]) {
+        c.copy_from_slice(&v.to_be_bytes());
+    }
+    let tail = chunks.into_remainder();
+    if !tail.is_empty() {
+        tail.copy_from_slice(&w[words - 1].to_be_bytes()[..tail.len()]);
     }
     true
 }
 
 /// `data` to physical `addr` of `mem` (a `dma_view`). All or nothing:
-/// false if any byte is not memory, and then nothing is written. Partial
+/// false if any byte is not memory, and then nothing is written (`mem`'s
+/// `write_block` moves nothing when it refuses, as the view's does). Partial
 /// doublewords at the ends go as masked writes, so the bytes around them
 /// are left alone.
 pub fn dma_write_bytes(mem: &dyn BusDevice, addr: u64, data: &[u8]) -> bool {
@@ -735,37 +751,65 @@ pub fn dma_write_bytes(mem: &dyn BusDevice, addr: u64, data: &[u8]) -> bool {
         return true;
     }
     let Some((first, words)) = covering(addr, data.len()) else { return false };
-    // The check: a read of the whole span fails exactly when a write would.
-    let mut probe = vec![0u64; words];
-    if mem.read_block(first, &mut probe) != BUS_OK {
-        return false;
-    }
-    let mut vals = vec![0u64; words];
-    let mut masks = vec![0u64; words];
     let skip = (addr - first) as usize;
-    for (i, &b) in data.iter().enumerate() {
-        let k = skip + i;
-        let sh = 56 - 8 * (k % 8);
-        vals[k / 8] |= (b as u64) << sh;
-        masks[k / 8] |= 0xff << sh;
-    }
-    let mut i = 0;
-    while i < words {
-        let at = first + 8 * i as u64;
-        if masks[i] != u64::MAX {
-            if mem.write64_masked(at, vals[i], masks[i]) != BUS_OK {
-                return false;
-            }
-            i += 1;
-            continue;
+    let end = skip + data.len();
+    // Only the first and last doubleword can be partly covered.
+    let partial = |i: usize| !(skip <= 8 * i && 8 * (i + 1) <= end);
+    let masked = |i: usize| -> (u64, u64) {
+        let (mut val, mut mask) = (0u64, 0u64);
+        for k in (8 * i).max(skip)..(8 * (i + 1)).min(end) {
+            let sh = 56 - 8 * (k % 8);
+            val |= u64::from(data[k - skip]) << sh;
+            mask |= 0xff << sh;
         }
-        let j = (i..words).find(|&j| masks[j] != u64::MAX).unwrap_or(words);
-        if mem.write_block(at, &vals[i..j]) != BUS_OK {
+        (val, mask)
+    };
+    let lo = usize::from(partial(0));
+    let hi = if partial(words - 1) { words - 1 } else { words }.max(lo);
+    // The check: a read of an end fails exactly when a write would, and the
+    // whole doublewords between are checked by their own block write, which
+    // moves nothing when any of them is refused.
+    let mut probe = [0u64; 1];
+    for i in [0, words - 1] {
+        if partial(i) && mem.read_block(first + 8 * i as u64, &mut probe) != BUS_OK {
             return false;
         }
-        i = j;
+    }
+    if hi > lo {
+        let mut stack = [0u64; DMA_STACK_WORDS];
+        let mut heap = Vec::new();
+        let vals = scratch_words(&mut stack, &mut heap, hi - lo);
+        for (v, c) in vals.iter_mut().zip(data[8 * lo - skip..].chunks_exact(8)) {
+            *v = u64::from_be_bytes(c.try_into().unwrap());
+        }
+        if mem.write_block(first + 8 * lo as u64, vals) != BUS_OK {
+            return false;
+        }
+    }
+    let ends = [0, words - 1];
+    for &i in &ends[..if words == 1 { 1 } else { 2 }] {
+        if partial(i) {
+            let (val, mask) = masked(i);
+            if mem.write64_masked(first + 8 * i as u64, val, mask) != BUS_OK {
+                return false;
+            }
+        }
     }
     true
+}
+
+/// Doublewords of a transfer kept on the stack: a Bridge chunk of at most
+/// 4 KiB, plus a doubleword where an unaligned end spills over.
+const DMA_STACK_WORDS: usize = 514;
+
+/// `n` doublewords: the stack array if they fit, else `heap`, grown.
+fn scratch_words<'a>(stack: &'a mut [u64; DMA_STACK_WORDS], heap: &'a mut Vec<u64>, n: usize) -> &'a mut [u64] {
+    if n <= DMA_STACK_WORDS {
+        &mut stack[..n]
+    } else {
+        heap.resize(n, 0);
+        heap
+    }
 }
 
 /// The aligned doubleword span covering `len` bytes at `addr`: its first
@@ -833,6 +877,74 @@ mod dma_tests {
         assert_eq!(&got[..5], &[0, 1, 2, 3, 4]);
         assert_eq!(&got[5..25], &[0xaa; 20]);
         assert_eq!(&got[25..27], &[25, 26], "the bytes after are left alone");
+    }
+
+    /// 16 KiB of memory at 0, for transfers longer than the stack holds.
+    struct Big(parking_lot::Mutex<Vec<u8>>);
+
+    impl BusDevice for Big {
+        fn read8(&self, a: u64) -> BusRead8 {
+            self.0.lock().get(a as usize).map_or(BusRead8::err(), |&b| BusRead8::ok(b))
+        }
+        fn write8(&self, a: u64, v: u8) -> u32 {
+            self.0.lock().get_mut(a as usize).map_or(BUS_ERR, |b| { *b = v; BUS_OK })
+        }
+        fn read32(&self, a: u64) -> BusRead32 {
+            let m = self.0.lock();
+            m.get(a as usize..a as usize + 4).map_or(BusRead32::err(), |b| BusRead32::ok(u32::from_be_bytes(b.try_into().unwrap())))
+        }
+        fn write32(&self, a: u64, v: u32) -> u32 {
+            let mut m = self.0.lock();
+            m.get_mut(a as usize..a as usize + 4).map_or(BUS_ERR, |b| { b.copy_from_slice(&v.to_be_bytes()); BUS_OK })
+        }
+        /// All or nothing, like the memory behind `dma_view`.
+        fn write_block(&self, a: u64, buf: &[u64]) -> u32 {
+            let mut m = self.0.lock();
+            let Some(dst) = m.get_mut(a as usize..a as usize + 8 * buf.len()) else { return BUS_ERR };
+            for (d, v) in dst.chunks_exact_mut(8).zip(buf) {
+                d.copy_from_slice(&v.to_be_bytes());
+            }
+            BUS_OK
+        }
+    }
+
+    /// Every start and length against a byte-at-a-time model: the bytes
+    /// moved are the bytes asked for, the neighbours are untouched, and a
+    /// transfer whose doubleword span leaves memory moves nothing.
+    fn check_against_model(len_mem: usize, starts: std::ops::Range<usize>, lens: &[usize]) {
+        let image: Vec<u8> = (0..len_mem).map(|i| (i * 7 + 3) as u8).collect();
+        for start in starts {
+            for &len in lens {
+                let m = Big(parking_lot::Mutex::new(image.clone()));
+                let span_end = (start + len + 7) & !7;
+                let fits = span_end <= len_mem;
+                let mut got = vec![0x55u8; len];
+                assert_eq!(dma_read_bytes(&m, start as u64, &mut got), fits, "read {start}+{len}");
+                if fits {
+                    assert_eq!(got, image[start..start + len], "read {start}+{len}");
+                } else {
+                    assert!(got.iter().all(|&b| b == 0), "a failed read leaves zeros: {start}+{len}");
+                }
+                let data: Vec<u8> = (0..len).map(|i| (i * 13 + 1) as u8 | 0x80).collect();
+                assert_eq!(dma_write_bytes(&m, start as u64, &data), fits, "write {start}+{len}");
+                let mut want = image.clone();
+                if fits {
+                    want[start..start + len].copy_from_slice(&data);
+                }
+                assert_eq!(*m.0.lock(), want, "write {start}+{len}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_alignment_and_length_matches_a_byte_model() {
+        check_against_model(64, 0..72, &[1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 56, 63, 64, 65]);
+    }
+
+    #[test]
+    fn transfers_longer_than_the_stack_buffer_match_the_byte_model() {
+        check_against_model(16384, 8180..8190, &[4096, 4097, 4103, 4104, 8191, 8200]);
+        check_against_model(16384, 0..3, &[16384, 16381]);
     }
 
     #[test]
