@@ -46,6 +46,16 @@ impl BedrockMemory {
     pub(crate) fn raw_write(&self, bank: usize, at: u64, value: u64) -> u32 {
         self.physical.banks()[bank].write64(at, value)
     }
+    pub(crate) fn zero(&self, bank: usize, size: u64) {
+        assert!(size <= FITTED_BANK);
+        // The bank owns this contiguous mapping; zero has the same representation
+        // in host word order. MD serializes accesses and regenerates check bytes.
+        unsafe {
+            std::ptr::write_bytes(self.physical.banks()[bank].host_ptr(), 0, size as usize);
+        }
+        #[cfg(feature = "jitv2")]
+        self.physical.banks()[bank].bump_gen_all();
+    }
     pub(crate) fn changed_decode(&self) {
         #[cfg(feature = "jitv2")]
         for bank in self.physical.banks() {

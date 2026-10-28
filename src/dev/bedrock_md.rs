@@ -53,6 +53,11 @@ struct State {
     memory_error: u64,
     directory_error: u64,
     marked_directory: HashMap<u64, ()>,
+    clock_ns: u64,
+    selftest_deadline: Option<u64>,
+    selftest_result: bool,
+    selftest_status: u64,
+    selftest_error: u64,
 }
 impl Default for State {
     fn default() -> Self {
@@ -71,6 +76,11 @@ impl Default for State {
             memory_error: 0,
             directory_error: 0,
             marked_directory: HashMap::new(),
+            clock_ns: 0,
+            selftest_deadline: None,
+            selftest_result: false,
+            selftest_status: 0,
+            selftest_error: 0,
         }
     }
 }
@@ -85,6 +95,8 @@ pub struct BedrockMd {
 enum View {
     Registers,
     Memory,
+    Uncached,
+    Scrub,
     Dma,
     Directory,
     Fetchop,
@@ -93,6 +105,9 @@ enum View {
 struct MdBus {
     md: Weak<BedrockMd>,
     view: View,
+    // External endpoints may outlive MD. Keep their generation pointers valid.
+    // The endpoint owned by Physical itself needs no extra reference.
+    _memory: Option<Arc<crate::physical::Physical>>,
 }
 
 impl BedrockMd {
@@ -118,6 +133,11 @@ impl BedrockMd {
         Arc::new(MdBus {
             md: Arc::downgrade(self),
             view,
+            _memory: if matches!(view, View::Uncached | View::Dma) {
+                Some(self.physical().clone())
+            } else {
+                None
+            },
         })
     }
     pub fn md_bus(self: &Arc<Self>) -> Arc<dyn BusDevice> {
@@ -139,6 +159,23 @@ impl BedrockMd {
     pub fn on_error(&self, callback: ErrorCallback) {
         *self.callback.lock() = Some(callback);
     }
+    /// Advance the unit's guest clock. The machine's clock owner supplies elapsed
+    /// nanoseconds; the unit does not create a host timer or worker thread.
+    pub fn advance_ns(&self, elapsed: u64) {
+        let mut s = self.state.lock();
+        s.clock_ns = s.clock_ns.saturating_add(elapsed);
+        if s.selftest_deadline.is_some_and(|end| s.clock_ns >= end) {
+            s.selftest_deadline = None;
+            s.selftest_status = if s.selftest_result { 3 } else { 2 };
+            s.selftest_error = if s.selftest_result { 0 } else { 1 << 48 };
+        }
+    }
+    pub fn uncached_view(self: &Arc<Self>) -> Arc<dyn BusDevice> {
+        self.view(View::Uncached)
+    }
+    pub fn ecc_scrub_bus(self: &Arc<Self>) -> Arc<dyn BusDevice> {
+        self.view(View::Scrub)
+    }
     pub fn current_cell(&self) -> u64 {
         self.state.lock().cell
     }
@@ -157,6 +194,9 @@ impl BedrockMd {
         s.directory_error = 0;
         s.ecc.clear();
         s.marked_directory.clear();
+        s.selftest_deadline = None;
+        s.selftest_status = 0;
+        s.selftest_error = 0;
         s.refresh &= (1 << 63) | 0xfff;
     }
     fn access(&self, view: View, addr: u64, bytes: u64, write: Option<u64>) -> Option<u64> {
@@ -170,6 +210,15 @@ impl BedrockMd {
                 View::Registers => self.register(&mut s, addr, bytes, write),
                 View::Directory => self.directory(&mut s, addr, bytes, write),
                 View::Ecc => self.ecc(&mut s, addr, bytes, write),
+                View::Scrub => self.scrub(&mut s, addr, bytes, write, &mut event),
+                View::Uncached => {
+                    let result = self.ram(&mut s, addr, bytes, write, &mut event);
+                    if write.is_none() && event == Some(MemoryError::Uncorrectable) {
+                        None
+                    } else {
+                        result
+                    }
+                }
                 View::Fetchop => self.fetchop(&mut s, addr, bytes, write, &mut event),
                 View::Memory | View::Dma => self.ram(&mut s, addr, bytes, write, &mut event),
             }
@@ -191,6 +240,8 @@ impl BedrockMd {
             8 => s.config,
             0x60 => 0x001818180c0c0c00,
             0x20000 => s.refresh,
+            0x20040 => s.selftest_error,
+            0x20048 => s.selftest_status,
             0x40000 => s.directory_config,
             0x40050 => 0x04040400,
             0x60010 | 0x60018 => s.memory_error,
@@ -201,6 +252,7 @@ impl BedrockMd {
         };
         if let Some(value) = write {
             match at {
+                0x20030 => return self.selftest(s, value),
                 0 => s.cell = value,
                 8 => {
                     s.config = value & CONFIG_MASK;
@@ -259,6 +311,7 @@ impl BedrockMd {
             if !s.compat.contains_key(&at) && s.compat.len() >= 74 {
                 return self.refuse();
             }
+            s.compat.entry(at).or_insert(0);
             table = &mut s.compat;
             key = at;
         } else {
@@ -303,6 +356,12 @@ impl BedrockMd {
                 if syndrome != 0 {
                     let bit = ECC_COLUMNS.iter().position(|&v| v == syndrome);
                     let valid = if bit.is_some() { 1 << 52 } else { 1 << 60 };
+                    if bit.is_none()
+                        && s.memory_error & (1 << 60) != 0
+                        && (s.memory_error ^ address) & (((1u64 << 30) - 1) << 3) & !127 != 0
+                    {
+                        s.memory_error |= 1 << 63;
+                    }
                     if s.memory_error & (valid | (1 << 60)) != 0 {
                         s.memory_error |= valid << 1;
                     } else {
@@ -421,8 +480,85 @@ impl BedrockMd {
         self.ram(s, address, bytes, Some(next), event)?;
         Some(old)
     }
+    // Donor approximation: report whether the selected fitting covers the
+    // programmed bank, after 1000 guest ns. Only the zero write phase mutates
+    // memory; other patterns have no published transformation here.
+    fn selftest(&self, s: &mut State, command: u64) -> Option<u64> {
+        if command == 2 || command == 4 {
+            s.selftest_deadline = None;
+            s.selftest_status = 0;
+            s.selftest_error = 0;
+            return Some(0);
+        }
+        if command & 7 != 1 || command & !0x71 != 0 {
+            return self.refuse();
+        }
+        let selected = (command >> 4) & 7;
+        let configured = selected ^ ((s.config >> 32) & 3);
+        let field = s.config >> ((configured / 2) * 8);
+        let code = (field >> 4) & 15;
+        let size = if (1..=5).contains(&code) {
+            (32 << 20) << code
+        } else {
+            0
+        };
+        let fits = selected < 2
+            && field & (1 << (configured & 1)) != 0
+            && size != 0
+            && size <= FITTED_BANK;
+        s.selftest_result = fits;
+        s.selftest_status = 0;
+        s.selftest_error = 0;
+        s.selftest_deadline = Some(s.clock_ns.saturating_add(1000));
+        if fits && s.storage.get(&0x20038).copied().unwrap_or(0) == 0x80 {
+            self.memory.zero(selected as usize, size);
+            let start = selected * FITTED_BANK;
+            s.ecc
+                .retain(|key, _| !(*key >= start / 8 && *key < (start + size) / 8));
+            let lines: Vec<u64> = s
+                .marked_directory
+                .keys()
+                .copied()
+                .filter(|&line| line >= start / 128 && line < (start + size) / 128)
+                .collect();
+            for line in lines {
+                let word = *s.directory.get(&line).unwrap_or(&0);
+                s.directory
+                    .insert(line, directory_encode(word, s.directory_config & 1 != 0));
+                s.marked_directory.remove(&line);
+            }
+        }
+        Some(0)
+    }
+    fn scrub(
+        &self,
+        s: &mut State,
+        at: u64,
+        bytes: u64,
+        write: Option<u64>,
+        event: &mut Option<MemoryError>,
+    ) -> Option<u64> {
+        if write.is_none() {
+            return self.ecc(s, at, bytes, None);
+        }
+        if bytes != 8 || at >= 1 << 30 {
+            return self.refuse();
+        }
+        let software = at / (BANK_SPAN / 8);
+        let within = at % (BANK_SPAN / 8);
+        let address = software * BANK_SPAN + within * 8;
+        let Some((bank, offset)) = BedrockMemory::decode(s.config, address, 8) else {
+            return self.refuse();
+        };
+        for i in 0..8 {
+            if BedrockMemory::decode(s.config, address + i * 8, 8).is_some() {
+                self.checked_word(s, bank, offset + i * 8, address + i * 8, event);
+            }
+        }
+        Some(0)
+    }
     fn ecc(&self, s: &mut State, at: u64, bytes: u64, write: Option<u64>) -> Option<u64> {
-        if bytes != 1 && bytes != 2 {
+        if at >= 1 << 30 || (bytes != 1 && bytes != 2) {
             return self.refuse();
         }
         let software = at / (BANK_SPAN / 8);
@@ -464,6 +600,21 @@ impl Resettable for BedrockMd {
     }
 }
 impl BusDevice for MdBus {
+    #[cfg(feature = "jitv2")]
+    fn gen_ptr(&self, address: u64) -> *const std::sync::atomic::AtomicU64 {
+        let Some(md) = self.md.upgrade() else {
+            return std::ptr::null();
+        };
+        if !matches!(self.view, View::Memory | View::Uncached | View::Dma) {
+            return std::ptr::null();
+        }
+        let s = md.state.lock();
+        let Some((bank, offset)) = BedrockMemory::decode(s.config, address, 1) else {
+            return std::ptr::null();
+        };
+        md.physical().banks()[bank].gen_ptr(offset)
+    }
+
     fn read8(&self, a: u64) -> BusRead8 {
         self.md
             .upgrade()
@@ -596,7 +747,7 @@ mod tests {
         assert_eq!(r.write64(0x20000, u64::MAX), BUS_OK);
         assert_eq!(r.read64(0x20000).data, 1 << 63 | 0xfff);
         assert_eq!(r.read64(0x60).data, 0x001818180c0c0c00);
-        assert_eq!(r.write64(0x20030, 1), BUS_ERR);
+        assert_eq!(r.write64(0x20030, 3), BUS_ERR);
         assert_eq!(r.write64(0x70000, 0), BUS_ERR);
         assert!(md.unsupported() >= 3);
     }
@@ -658,6 +809,77 @@ mod tests {
         assert_eq!(d.read64(8).data, u64::MAX);
         assert_eq!(d.read32(0).status, BUS_ERR);
         assert_eq!(d.read64(1 << 30).status, BUS_ERR);
+    }
+    #[cfg(feature = "jitv2")]
+    #[test]
+    fn bedrock_generations_follow_fitted_banks_across_remaps() {
+        let md = configured();
+        let ram = md.physical();
+        let first = ram.gen_ptr(0);
+        let second = ram.gen_ptr(BANK_SPAN);
+        assert!(!first.is_null() && !second.is_null());
+        assert_ne!(first, second);
+        let before = unsafe { (*first).load(Ordering::Relaxed) };
+        ram.write64(0, 0x55);
+        assert!(unsafe { (*first).load(Ordering::Relaxed) } > before);
+        md.md_bus().write64(8, 0x33 | (1 << 32));
+        assert_eq!(ram.gen_ptr(0), second);
+        let view = md.uncached_view();
+        assert_eq!(view.gen_ptr(0), second);
+        drop(md);
+        // The endpoint keeps the backing memory alive after MD disappears.
+        assert!(unsafe { (*second).load(Ordering::Relaxed) } > 0);
+        assert_eq!(view.read64(0).status, BUS_ERR);
+    }
+    #[test]
+    fn bedrock_selftest_waits_and_cancels_and_rejects_absent_fitting() {
+        let md = configured();
+        let r = md.md_bus();
+        assert_eq!(r.write64(0x20030, 1), BUS_OK);
+        assert_eq!(r.read64(0x20048).data, 0);
+        md.advance_ns(999);
+        assert_eq!(r.read64(0x20048).data, 0);
+        md.advance_ns(1);
+        assert_eq!(r.read64(0x20048).data, 3);
+        r.write64(0x20030, 0x21);
+        md.advance_ns(1000);
+        assert_eq!(r.read64(0x20048).data, 2);
+        assert_eq!(r.read64(0x20040).data, 1 << 48);
+        r.write64(0x20030, 1);
+        r.write64(0x20030, 2);
+        md.advance_ns(1000);
+        assert_eq!(r.read64(0x20048).data, 0);
+        assert_eq!(r.write64(0x20030, 3), BUS_ERR);
+    }
+    #[test]
+    fn bedrock_selftest_zero_fill_changes_ram_and_clears_injections() {
+        let md = configured();
+        let r = md.md_bus();
+        r.write64(8, 0x13);
+        md.physical().write64(0, 0x1234);
+        md.ecc_bus().write8(7, 1);
+        r.write64(0x20038, 0x80);
+        r.write64(0x20030, 1);
+        md.advance_ns(1000);
+        assert_eq!(r.read64(0x20048).data, 3);
+        assert_eq!(md.physical().read64(0).data, 0);
+        assert_eq!(md.ecc_bus().read8(7).data, 0);
+        assert_eq!(r.read64(0x60010).data, 0);
+    }
+    #[test]
+    fn bedrock_uncached_uce_fails_but_dma_returns_data_and_scrub_corrects() {
+        let md = configured();
+        let r = md.md_bus();
+        let e = md.ecc_bus();
+        e.write8(7, 3);
+        assert_eq!(md.uncached_view().read64(0).status, BUS_ERR);
+        assert_eq!(md.dma_view().read64(0).status, BUS_OK);
+        assert_ne!(r.read64(0x60018).data & (1 << 60), 0);
+        e.write8(7, 0x13);
+        assert_eq!(md.ecc_scrub_bus().write64(0, 0), BUS_OK);
+        assert_eq!(md.physical().read64(0).data, 1);
+        assert_eq!(e.read8(7).data, 0x13);
+        assert_eq!(md.ecc_scrub_bus().write32(0, 0), BUS_ERR);
     }
     #[test]
     fn bedrock_directory_writes_generate_check_bits_and_correct_on_ram_read() {
