@@ -10,7 +10,7 @@
 pub const SIZE: u64 = 0xc040;
 
 use crate::traits::{BusDevice, BusRead64, Resettable, BUS_ERR, BUS_OK};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, ReentrantMutex};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
@@ -44,6 +44,8 @@ pub struct BedrockLb {
     regs: Arc<Mutex<Regs>>,
     clock: Clock,
     error: Mutex<Option<Level>>,
+    delivery: ReentrantMutex<()>,
+    driven: Mutex<Option<bool>>,
     reset: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     node_changed: Mutex<Option<Arc<dyn Fn(u8) + Send + Sync>>>,
 }
@@ -55,18 +57,23 @@ impl BedrockLb {
             regs,
             clock,
             error: Mutex::new(None),
+            delivery: ReentrantMutex::new(()),
+            driven: Mutex::new(None),
             reset: Mutex::new(None),
             node_changed: Mutex::new(None),
         }
     }
     pub fn connect_error(&self, cb: Level) {
+        let _delivery = self.delivery.lock();
         *self.error.lock() = Some(cb);
+        *self.driven.lock() = None;
         self.update_irq();
     }
     pub fn connect_soft_reset(&self, cb: Arc<dyn Fn() + Send + Sync>) {
         *self.reset.lock() = Some(cb);
     }
     pub fn connect_node_changed(&self, cb: Arc<dyn Fn(u8) + Send + Sync>) {
+        let _delivery = self.delivery.lock();
         *self.node_changed.lock() = Some(cb);
     }
     pub fn node_number(&self) -> u8 {
@@ -76,12 +83,26 @@ impl BedrockLb {
         self.regs.lock().words.get(&0x4040).copied().unwrap_or(0) != 0
     }
     fn update_irq(&self) {
+        // Serialize the sample and callback, while leaving registers available
+        // to the callback. Suppress unchanged levels so callbacks can reenter
+        // register reads that recompute the output.
+        let _delivery = self.delivery.lock();
         let cb = self.error.lock().clone();
         if let Some(cb) = cb {
-            cb(self.error_level());
+            let level = self.error_level();
+            let changed = {
+                let mut driven = self.driven.lock();
+                let changed = *driven != Some(level);
+                *driven = Some(level);
+                changed
+            };
+            if changed {
+                cb(level);
+            }
         }
     }
     fn notify_node(&self) {
+        let _delivery = self.delivery.lock();
         let cb = self.node_changed.lock().clone();
         if let Some(cb) = cb {
             cb(self.node_number());
@@ -323,5 +344,151 @@ mod contract_tests {
         assert_eq!(d.read64(0xc000).data, VECTOR_MASK);
         assert_eq!(d.read32(0x8000).status, BUS_ERR);
         assert_eq!(d.read64(1).status, BUS_ERR);
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    /// Hold an IRQ packet's assertion callback while a CPU clears the register.
+    pub(super) fn check_order(
+        device: Arc<dyn BusDevice>,
+        install: impl FnOnce(Level),
+        raise: u64,
+        value: u64,
+        clear: impl FnOnce() + Send + 'static,
+    ) {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let delivered = Arc::new(AtomicBool::new(false));
+        let sink = delivered.clone();
+        install(Arc::new(move |level| {
+            if level {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+            }
+            sink.store(level, Ordering::SeqCst);
+        }));
+        let io = crate::dev::bedrock_io::BedrockIo::new();
+        io.connect_hub(device);
+        let first = std::thread::spawn(move || {
+            io.inbound_write(14, Some(0), (1 << 47) | 0x1800000 | raise, 8, value)
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let second = std::thread::spawn(move || {
+            clear();
+            done_tx.send(()).unwrap();
+        });
+        // An ordered callback waits for the blocked assertion. A stale publisher
+        // instead completes the clear early, then overwrites it after release.
+        let _ = done_rx.recv_timeout(std::time::Duration::from_millis(100));
+        release_tx.send(()).unwrap();
+        assert_eq!(first.join().unwrap(), BUS_OK);
+        second.join().unwrap();
+        assert!(!delivered.load(Ordering::SeqCst));
+    }
+    #[test]
+    fn irq_notifications_follow_concurrent_ingress() {
+        let ni = Arc::new(crate::dev::bedrock_ni::BedrockNi::new());
+        let a = ni.clone();
+        let b = ni.clone();
+        check_order(
+            ni,
+            move |cb| a.connect_error(cb),
+            0x100,
+            1 << 24,
+            move || {
+                b.read64(0x120);
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+mod further_notification_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    #[test]
+    fn node_notifications_follow_concurrent_ingress() {
+        let d = Arc::new(BedrockLb::new(Arc::new(|| 0)));
+        let delivered = Arc::new(AtomicU8::new(0));
+        let sink = delivered.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        d.connect_node_changed(Arc::new(move |node| {
+            if node == 1 {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+            }
+            sink.store(node, Ordering::SeqCst);
+        }));
+        let io = crate::dev::bedrock_io::BedrockIo::new();
+        io.connect_hub(d.clone());
+        let first = std::thread::spawn(move || {
+            io.inbound_write(14, Some(0), (1 << 47) | 0x1800000, 8, 1 << 32)
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let other = d.clone();
+        let second = std::thread::spawn(move || {
+            other.write64(0, 2 << 32);
+            done_tx.send(()).unwrap();
+        });
+        let _ = done_rx.recv_timeout(std::time::Duration::from_millis(100));
+        release_tx.send(()).unwrap();
+        assert_eq!(first.join().unwrap(), BUS_OK);
+        second.join().unwrap();
+        assert_eq!(d.node_number(), 2);
+        assert_eq!(delivered.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[cfg(test)]
+mod more_irq_tests {
+    use super::*;
+    #[test]
+    fn local_irq_order() {
+        let d = Arc::new(BedrockLb::new(Arc::new(|| 0)));
+        let a = d.clone();
+        let b = d.clone();
+        super::notification_tests::check_order(
+            d,
+            move |cb| a.connect_error(cb),
+            0x4040,
+            1,
+            move || {
+                b.write64(0x4048, 1);
+            },
+        );
+    }
+    #[test]
+    fn crossbar_irq_order() {
+        let d = Arc::new(crate::dev::bedrock_xb::BedrockXb::new());
+        let a = d.clone();
+        let b = d.clone();
+        super::notification_tests::check_order(
+            d,
+            move |cb| a.connect_error(cb),
+            0x20,
+            1,
+            move || {
+                b.write64(0x120, 0);
+                b.write64(0x190, 0);
+            },
+        );
     }
 }

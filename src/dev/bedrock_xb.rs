@@ -9,7 +9,7 @@
 pub const SIZE: u64 = 0x198;
 
 use crate::traits::{BusDevice, BusRead64, Resettable, BUS_ERR, BUS_OK};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, ReentrantMutex};
 use std::sync::Arc;
 type Level = Arc<dyn Fn(bool) + Send + Sync>;
 const MASKS: [u64; 14] = [
@@ -36,6 +36,8 @@ impl Default for Regs {
 pub struct BedrockXb {
     regs: Arc<Mutex<Regs>>,
     error: Mutex<Option<Level>>,
+    delivery: ReentrantMutex<()>,
+    driven: Mutex<Option<bool>>,
 }
 impl Default for BedrockXb {
     fn default() -> Self {
@@ -49,19 +51,36 @@ impl BedrockXb {
         Self {
             regs,
             error: Mutex::new(None),
+            delivery: ReentrantMutex::new(()),
+            driven: Mutex::new(None),
         }
     }
     pub fn connect_error(&self, cb: Level) {
+        let _delivery = self.delivery.lock();
         *self.error.lock() = Some(cb);
+        *self.driven.lock() = None;
         self.update_irq();
     }
     pub fn error_level(&self) -> bool {
         self.regs.lock().first & 0x1000 != 0
     }
     fn update_irq(&self) {
+        // Serialize the sample and callback, while leaving registers available
+        // to the callback. Suppress unchanged levels so callbacks can reenter
+        // register reads that recompute the output.
+        let _delivery = self.delivery.lock();
         let cb = self.error.lock().clone();
         if let Some(cb) = cb {
-            cb(self.error_level());
+            let level = self.error_level();
+            let changed = {
+                let mut driven = self.driven.lock();
+                let changed = *driven != Some(level);
+                *driven = Some(level);
+                changed
+            };
+            if changed {
+                cb(level);
+            }
         }
     }
 }

@@ -9,7 +9,7 @@
 pub const SIZE: u64 = 0x2008;
 
 use crate::traits::{BusDevice, BusRead64, Resettable, BUS_ERR, BUS_OK};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, ReentrantMutex};
 use std::sync::Arc;
 type Level = Arc<dyn Fn(bool) + Send + Sync>;
 #[derive(Clone)]
@@ -34,6 +34,8 @@ impl Default for Regs {
 pub struct BedrockNi {
     regs: Arc<Mutex<Regs>>,
     error: Mutex<Option<Level>>,
+    delivery: ReentrantMutex<()>,
+    driven: Mutex<Option<bool>>,
     reset: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 impl Default for BedrockNi {
@@ -48,11 +50,15 @@ impl BedrockNi {
         Self {
             regs,
             error: Mutex::new(None),
+            delivery: ReentrantMutex::new(()),
+            driven: Mutex::new(None),
             reset: Mutex::new(None),
         }
     }
     pub fn connect_error(&self, cb: Level) {
+        let _delivery = self.delivery.lock();
         *self.error.lock() = Some(cb);
+        *self.driven.lock() = None;
         self.update_irq();
     }
     pub fn connect_local_reset(&self, cb: Arc<dyn Fn() + Send + Sync>) {
@@ -62,9 +68,22 @@ impl BedrockNi {
         self.regs.lock().errors & 0x1fffffff000000 != 0
     }
     fn update_irq(&self) {
+        // Serialize the sample and callback, while leaving registers available
+        // to the callback. Suppress unchanged levels so callbacks can reenter
+        // register reads that recompute the output.
+        let _delivery = self.delivery.lock();
         let cb = self.error.lock().clone();
         if let Some(cb) = cb {
-            cb(self.error_level());
+            let level = self.error_level();
+            let changed = {
+                let mut driven = self.driven.lock();
+                let changed = *driven != Some(level);
+                *driven = Some(level);
+                changed
+            };
+            if changed {
+                cb(level);
+            }
         }
     }
     fn mask(a: u64) -> u64 {
@@ -196,7 +215,7 @@ mod contract_tests {
         let weak = Arc::downgrade(&d);
         d.connect_error(Arc::new(move |_| {
             let d = weak.upgrade().unwrap();
-            let _ = d.error_level();
+            let _ = d.read64(0x118);
         }));
         let resets = Arc::new(AtomicU64::new(0));
         let count = resets.clone();
