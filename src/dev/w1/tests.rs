@@ -5,7 +5,7 @@
 use super::crc::{crc16, crc8};
 use super::slot::{self, fields, ONE_PULSE, RESET_PULSE};
 use super::*;
-use crate::dev::sgi_nic::{board_record_part, ethernet_address_part, BoardRecord, ETHERNET_PART_SERIAL};
+use crate::dev::w1::sgi::{board_record_part, ethernet_address_part, BoardRecord, ETHERNET_PART_SERIAL};
 
 const MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
 
