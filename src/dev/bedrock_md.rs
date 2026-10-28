@@ -4,8 +4,8 @@
 //! SPDX-License-Identifier: BSD-3-Clause
 //!
 //! CPU coherence requests and hardware protection enforcement are not implemented.
-//! Protection carriers retain opaque words, as in the donor. Unsupported operations
-//! return a bus error and are counted, rather than reporting diagnostic success.
+//! Protection carriers retain opaque words, as in the donor. Known unsupported
+//! register writes are counted and ignored. Unmapped accesses return a bus error.
 
 use super::bedrock_mem::{BedrockMemory, BANK_SPAN, FITTED_BANK};
 use crate::traits::*;
@@ -263,7 +263,10 @@ impl BedrockMd {
                 _ if storage_mask(at).is_some() => {
                     s.storage.insert(at, value & storage_mask(at).unwrap());
                 }
-                _ => return self.refuse(),
+                _ => {
+                    self.unsupported.fetch_add(1, Ordering::Relaxed);
+                    log::debug!("bedrock-md: ignored register write at {at:#x}: {value:#x}");
+                }
             }
         } else if at == 0x60018 {
             s.memory_error = 0;
@@ -491,7 +494,9 @@ impl BedrockMd {
             return Some(0);
         }
         if command & 7 != 1 || command & !0x71 != 0 {
-            return self.refuse();
+            self.unsupported.fetch_add(1, Ordering::Relaxed);
+            log::debug!("bedrock-md: ignored self-test command {command:#x}");
+            return Some(0);
         }
         let selected = (command >> 4) & 7;
         let configured = selected ^ ((s.config >> 32) & 3);
@@ -747,9 +752,69 @@ mod tests {
         assert_eq!(r.write64(0x20000, u64::MAX), BUS_OK);
         assert_eq!(r.read64(0x20000).data, 1 << 63 | 0xfff);
         assert_eq!(r.read64(0x60).data, 0x001818180c0c0c00);
-        assert_eq!(r.write64(0x20030, 3), BUS_ERR);
+        assert_eq!(r.write64(0x20030, 3), BUS_OK);
         assert_eq!(r.write64(0x70000, 0), BUS_ERR);
         assert!(md.unsupported() >= 3);
+    }
+    #[test]
+    fn bedrock_known_register_writes_are_diagnosed_and_ignored() {
+        let md = configured();
+        let r = md.md_bus();
+        // These are named idle carriers in the donor's md_idle(), not storage.
+        for at in [
+            0x20, 0x28, 0x40, 0x48, 0x58, 0x20010, 0x20018, 0x20020, 0x20028,
+            0x40020, 0x40028, 0x40030, 0x40038, 0x40058, 0x60020, 0x60028, 0x60030,
+            0x60038,
+        ] {
+            let before = md.unsupported();
+            assert_eq!(r.write64(at, u64::MAX), BUS_OK, "{at:#x}");
+            assert_eq!(r.read64(at).data, 0, "{at:#x}");
+            assert_eq!(md.unsupported(), before + 1);
+        }
+        for (at, value) in [(0x60, 0x001818180c0c0c00), (0x40050, 0x04040400)] {
+            let before = md.unsupported();
+            assert_eq!(r.write64(at, 0), BUS_OK);
+            assert_eq!(r.read64(at).data, value);
+            assert_eq!(md.unsupported(), before + 1);
+        }
+        // Error-clear writes are ignored too: only a read clears the record.
+        md.ecc_bus().write8(7, 3);
+        md.uncached_view().read64(0);
+        r.write64(0x40000, 2);
+        md.directory_bus().write64(0, 3 << 16);
+        r.write64(0x40000, 0);
+        md.physical().read64(0);
+        let memory_error = r.read64(0x60010).data;
+        let directory_error = r.read64(0x40010).data;
+        assert_ne!(memory_error & (1 << 60), 0);
+        assert_ne!(directory_error & (1 << 63), 0);
+        for at in [0x40010, 0x40018, 0x60010, 0x60018] {
+            let before = md.unsupported();
+            assert_eq!(r.write64(at, u64::MAX), BUS_OK);
+            assert_eq!(r.read64(0x60010).data, memory_error);
+            assert_eq!(r.read64(0x40010).data, directory_error);
+            assert_eq!(md.unsupported(), before + 1);
+        }
+        r.write64(0x20030, 0x21);
+        md.advance_ns(1000);
+        assert_eq!(r.read64(0x20040).data, 1 << 48);
+        assert_eq!(r.read64(0x20048).data, 2);
+        for at in [0x20040, 0x20048] {
+            assert_eq!(r.write64(at, u64::MAX), BUS_OK);
+        }
+        assert_eq!(r.read64(0x20040).data, 1 << 48);
+        assert_eq!(r.read64(0x20048).data, 2);
+        // An unsupported self-test command leaves an in-flight command alone.
+        r.write64(0x20030, 1);
+        let before = md.unsupported();
+        assert_eq!(r.write64(0x20030, 3), BUS_OK);
+        assert_eq!(md.unsupported(), before + 1);
+        md.advance_ns(1000);
+        assert_eq!(r.read64(0x20048).data, 3);
+        assert_eq!(r.write64(0x70000, 1), BUS_ERR);
+        assert_eq!(r.read64(0x70000).status, BUS_ERR);
+        assert_eq!(r.write32(0x60, 0), BUS_ERR);
+        assert_eq!(r.write64(0x61, 0), BUS_ERR);
     }
     #[test]
     fn bedrock_fetchop_uses_big_endian_word_lanes_and_preserves_other_word() {
@@ -849,7 +914,7 @@ mod tests {
         r.write64(0x20030, 2);
         md.advance_ns(1000);
         assert_eq!(r.read64(0x20048).data, 0);
-        assert_eq!(r.write64(0x20030, 3), BUS_ERR);
+        assert_eq!(r.write64(0x20030, 3), BUS_OK);
     }
     #[test]
     fn bedrock_selftest_zero_fill_changes_ram_and_clears_injections() {
