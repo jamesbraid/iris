@@ -514,9 +514,9 @@ fn ds2502_pages_bound_the_programmable_area() {
 
 #[test]
 fn ds2501_start_address_is_masked_to_the_128_byte_space() {
-    // The shared model follows the DS2502 datasheet's 7-bit mask for both
-    // parts; the earlier DS2501 model masked to 63. The PROM reads this
-    // part from 0 only (14 bytes), where the two agree.
+    // Both parts follow the DS2502 datasheet's 7-bit address mask, so the
+    // DS2501's 64 programmable bytes sit in a 128-byte address space whose
+    // upper half reads erased.
     let mut m = one(Box::new(Ds2502::ds2501(0x91, 1, &image(64))));
     let got = m.skip(0xf0, 0x40, 1 + 64);
     assert_eq!(&got[1..], &[0xff; 64], "0x40 is an erased page, not an alias of 0");

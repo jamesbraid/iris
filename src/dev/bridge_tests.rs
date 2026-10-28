@@ -1073,7 +1073,7 @@ fn edges_from_two_threads_reach_heart_in_decision_order() {
     assert_eq!(r.get(reg::INT_STATUS) & 0xff, 0);
 }
 
-// ---- from the first Octane bring-up's register tests ----
+// ---- register-level cases ----
 
 /// As the stock PROM does: memory space on, a function's BAR0 at PCI
 /// 0x400000, and window 2's Device register based there; then a byte

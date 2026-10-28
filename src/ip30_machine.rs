@@ -159,7 +159,7 @@ impl OctaneMachine {
         let scsi = [Arc::new(Isp1040::new_at(0)), Arc::new(Isp1040::new_at(1))];
         bridge.attach(0, scsi[0].clone());
         bridge.attach(1, scsi[1].clone());
-        let ioc3 = Arc::new(Ioc3::octane(mac, false));
+        let ioc3 = Arc::new(Ioc3::octane(mac));
         let eth = Ioc3Eth::new(mac);
         ioc3.attach_eth(eth.clone());
         bridge.attach(2, ioc3.clone());

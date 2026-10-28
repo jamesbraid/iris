@@ -545,8 +545,7 @@ fn a_write_reaches_the_disk_across_continuation_entries_and_reads_back() {
 }
 
 /// A WRITE whose payload the fabric refuses writes nothing and completes
-/// nothing, as the QEMU model leaves it: the block keeps what it held and
-/// the next command runs.
+/// nothing: the block keeps what it held and the next command runs.
 #[test]
 fn a_refused_write_payload_reaches_neither_the_disk_nor_the_response_ring() {
     let r = Rig::with_disk("refused-write", 1, 64);
@@ -572,8 +571,8 @@ fn a_refused_write_payload_reaches_neither_the_disk_nor_the_response_ring() {
     assert_eq!(r.mem.get(rd, BLOCK_SIZE), pattern, "the block was not overwritten with zeros");
 }
 
-/// A READ whose payload store the fabric refuses completes nothing, as
-/// the QEMU model leaves it; the next command runs.
+/// A READ whose payload store the fabric refuses completes nothing; the
+/// next command runs.
 #[test]
 fn a_refused_read_payload_posts_no_completion() {
     let r = Rig::with_disk("refused-read", 1, 64);

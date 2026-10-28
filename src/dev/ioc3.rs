@@ -39,7 +39,7 @@
 //!   Host serial input is fed into the FIFOs by one thread per port.
 //! * The DS1685 is the O2's DS1687 model behind an index and a data port; it
 //!   has no alarm or periodic interrupts. Its RAM, including the 128-byte
-//!   extended RAM, persists in a 512-byte file (an old 114-byte dump loads).
+//!   extended RAM, persists in a 512-byte file (a 114-byte register dump loads).
 //!
 //! Ported from hw/misc/sgi-ioc3.c and its serial, parallel and keyboard siblings
 //! in jamesbraid/qemu-sgi-origami.
@@ -673,7 +673,7 @@ impl Parallel {
 const NVRAM_QUIET: Duration = Duration::from_millis(500);
 /// Registers 0x0e.. are storage rather than clock in the file.
 const NVRAM_FIRST: usize = 0x0e;
-/// The old file format: registers 0x0e..0x80 as the bank-flat cell array.
+/// The 114-byte file format: registers 0x0e..0x80 as the bank-flat cell array.
 const NVRAM_OLD_LEN: usize = 0x80 - NVRAM_FIRST;
 /// The current file format is a 512-byte image: common registers 0x00..0x40,
 /// bank-0 RAM 0x40..0x80, bank-1 registers 0x80..0xc0, extended RAM
@@ -779,7 +779,7 @@ impl Rtc {
         img
     }
 
-    /// Load a file: the old 114-byte register dump, or the 512-byte image.
+    /// Load a file: the 114-byte register dump, or the 512-byte image.
     /// The clock registers (0x00..0x0d) are never loaded; time starts from
     /// the host. Returns false for any other length.
     fn load(&mut self, img: &[u8]) -> bool {
@@ -912,30 +912,23 @@ impl BoardRecordText {
 }
 
 impl Ioc3Config {
-    /// The Octane's IOC3 (`octane2` selects the Octane2's board records and
-    /// product input). The fictitious barcodes and ROM serials are the
+    /// The Octane's IOC3. The fictitious barcodes and ROM serials are the
     /// marked-synthetic ones (barcode `EMU...`).
-    pub fn octane(mac: [u8; 6], octane2: bool) -> Self {
-        let (fp_rev, ps_name, ps_part, ps_rev) = if octane2 {
-            ("H", "PWR.SPPLY.ER", "060-0035-002", "A")
-        } else {
-            ("A", "PWR.SPPLY.SR", "060-0028-003", "A")
-        };
+    pub fn octane(mac: [u8; 6]) -> Self {
         Self {
             subsystem_id: SUBSYS_IP30_SYSBOARD,
             mac,
-            // UniqueWare prefix 0x5e7, then the "EMU" marker and instance 0.
-            ethernet_part_serial: 0x5e74_54d5_5000,
+            ethernet_part_serial: sgi_nic::ETHERNET_PART_SERIAL,
             serial: [true, true],
             parallel: true,
             keyboard_mouse: true,
             rtc: true,
-            // GPIO 2 is the read-only product input: 1 on Octane, 0 on Octane2.
+            // GPIO 2 is the read-only product input, 1 on an Octane.
             gpio_input_mask: 1 << 2,
-            gpio_input_values: if octane2 { 0 } else { 1 << 2 },
+            gpio_input_values: 1 << 2,
             records: vec![
-                (BoardRecordText::new("EMUF00", "030-0891-003", fp_rev, "FP1"), 0x5145_4d55_4600),
-                (BoardRecordText::new("EMUS00", ps_part, ps_rev, ps_name), 0x5145_4d55_5300),
+                (BoardRecordText::new("EMUF00", "030-0891-003", "A", "FP1"), 0x5145_4d55_4600),
+                (BoardRecordText::new("EMUS00", "060-0028-003", "A", "PWR.SPPLY.SR"), 0x5145_4d55_5300),
             ],
         }
     }
@@ -2101,10 +2094,10 @@ impl St {
             }
             return v;
         }
-        // The 32-bit blocks declare both their valid and implemented access
-        // size as 4 in the QEMU model, so a narrower access is refused by the
-        // bus there (not widened to a lane). There is no bus error to return
-        // from `bar_read`: it reads zero, and the write below is dropped.
+        // The 32-bit blocks are valid and implemented at access size 4 only,
+        // so a narrower access is refused (not widened to a lane). There is
+        // no bus error to return from `bar_read`: it reads zero, and the
+        // write below is dropped.
         if w != 4 {
             narrow_once(a, w);
             return 0;
@@ -2537,10 +2530,10 @@ impl Ioc3 {
         Ioc3 { sh, threads: Mutex::new(Vec::new()) }
     }
 
-    /// The Octane's (or Octane2's) onboard IOC3: both serial ports, PS/2,
+    /// The Octane's onboard IOC3: both serial ports, PS/2,
     /// parallel, the DS1685 and the Ethernet-address and board-record parts.
-    pub fn octane(mac: [u8; 6], octane2: bool) -> Ioc3 {
-        Ioc3::new(Ioc3Config::octane(mac, octane2))
+    pub fn octane(mac: [u8; 6]) -> Ioc3 {
+        Ioc3::new(Ioc3Config::octane(mac))
     }
 
     /// The timer manager the deadlines are armed on. Call before `start`.
@@ -2566,14 +2559,16 @@ impl Ioc3 {
         self.sh.st.lock().uart[port].backend = backend;
     }
 
-    /// Where parallel-port output goes. Without one it is dropped.
+    /// Where parallel-port output goes. Without one it is dropped. No machine
+    /// wires one, so only the tests set it.
+    #[cfg(test)]
     pub fn set_parallel_backend(&self, backend: Arc<dyn SerialBackend>) {
         self.sh.st.lock().par.backend = Some(backend);
     }
 
     /// Back the DS1685's RAM (user RAM, bank-1 registers and the 128-byte
-    /// extended RAM) with a file. A 512-byte file (the layout the QEMU model
-    /// uses) is loaded, as is an old 114-byte register dump. The file is
+    /// extended RAM) with a file. A 512-byte image is loaded, as is a
+    /// 114-byte register dump. The file is
     /// written as 512 bytes now and replaced whole once the guest's writes
     /// to the RAM pause (see [`Ioc3::flush_nvram`]). The clock starts from
     /// host time.

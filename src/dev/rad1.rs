@@ -783,9 +783,9 @@ impl Inner {
         0
     }
 
-    /// A write the model does not support is logged and dropped. The model
-    /// fails the bus cycle; this bus layer cannot, so a refused write leaves
-    /// the register unchanged.
+    /// A write the model does not support is logged and dropped. This bus
+    /// layer cannot fail the cycle, so a refused write leaves the register
+    /// unchanged.
     fn write(&self, off: u32, val: u32, width: usize) {
         let now = self.now();
         let mut s = self.state.lock();
