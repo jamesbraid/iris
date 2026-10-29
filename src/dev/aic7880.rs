@@ -28,7 +28,7 @@
 use crate::locks::{SpinGuard, SpinLock};
 use crate::scsi::{scsi_cmd, ScsiDataLength, ScsiDevice, ScsiIdentity, ScsiRequest};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::snapshot::{get_field, hex_u16, hex_u32, hex_u64, hex_u8, load_u8_slice, toml_u16, toml_u32, toml_u64, toml_u8, u8_slice_to_toml};
@@ -430,6 +430,8 @@ pub struct Aic7880 {
     dma: std::sync::OnceLock<std::sync::Arc<dyn crate::pci::PciDma>>,
     /// The SCSI id a disk attached without one answers at.
     target: u8,
+    /// The status bar's activity bits, shared with the display thread.
+    heartbeat: std::sync::OnceLock<Arc<AtomicU64>>,
     /// Which of the O2's two controllers this is (0 internal, 1 external):
     /// the monitor's `scsi`/`cow` address the first, `scsi1`/`cow1` the second.
     index: u8,
@@ -480,7 +482,13 @@ impl Aic7880 {
                     [Bar::Io(0x100), Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused], PCI_INTA)
             },
             target: 1,
+            heartbeat: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Light the status bar's SCSI activity bits in `heartbeat`.
+    pub fn set_heartbeat(&self, heartbeat: Arc<AtomicU64>) {
+        let _ = self.heartbeat.set(heartbeat);
     }
 
     /// `n` bytes of host memory from bus address `addr`, through the bridge.
@@ -891,6 +899,10 @@ impl Aic7880 {
     /// the controller's own sense, if it holds one.
     fn request(&self, target: u8, cdb: &[u8], data_in: Option<&[u8]>) -> (Vec<u8>, u8) {
         const CHECK_CONDITION: u8 = 0x02;
+        // The bar has lights for SCSI ids 0-5.
+        if let (Some(hb), 0..=5) = (self.heartbeat.get(), target) {
+            hb.fetch_or(1u64 << (crate::dev::ng1::rex3::Rex3::HB_SCSI_BASE as u64 + target as u64), Ordering::Relaxed);
+        }
         if cdb[0] == scsi_cmd::REQUEST_SENSE {
             if let Some((key, asc, ascq)) = self.sense.lock().unwrap().take() {
                 let mut d = vec![0u8; 18];
