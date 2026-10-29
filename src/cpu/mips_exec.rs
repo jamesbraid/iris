@@ -6971,11 +6971,13 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         let cache_op = d.rt as u32;  // Encoded operation: cache_sel in bits[1:0], op in bits[4:2]
         let op = cache_op & 0x1C;
 
-        // Determine if this is a Hit operation that needs address translation
-        // On an R10000 the encodings for 5/6/7 are index operations, not the
-        // R4000 hit operations — translating them would fault on an index that
-        // is not a valid virtual address. See C_R10K_ISD in mips_cache_v2.
+        // Distinguish R10000 diagnostic data and barrier encodings from the
+        // R4000 hit operations at the same values. Older index operations
+        // retain their translation behavior; primary data checks follow below.
         let sel = cache_op & 3;
+        let primary_data_op = C::R10K_CACHE_OPS
+            && matches!(sel, CACH_PI | CACH_PD)
+            && matches!(op, C_R10K_ILD | C_R10K_ISD);
         let r10k_index_op = C::R10K_CACHE_OPS
             && match op {
                 C_R10K_CBARRIER => sel == CACH_PI,
@@ -6983,8 +6985,12 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 C_R10K_ISD => matches!(sel, CACH_SI | CACH_SD),
                 _ => false,
             };
-        let needs_translation =
-            !r10k_index_op && matches!(op, C_CDX | C_HINV | C_HWBINV | C_HWB | C_HSV);
+        // Primary diagnostic selection uses VA, but mapped accesses still
+        // require TLB Refill/Invalid checks (NEC U12754E, p. 15). Read access
+        // excludes TLB Modified. Older index operations retain their existing
+        // translation behavior, including the secondary diagnostic limitation.
+        let needs_translation = primary_data_op
+            || (!r10k_index_op && matches!(op, C_CDX | C_HINV | C_HWBINV | C_HWB | C_HSV));
 
         let phys_addr = if needs_translation {
             // Hit operations need address translation
@@ -7004,7 +7010,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         // that reads only TagLo sees a different tag from the one written.
         // Harmless for R4400/R5000, whose tags fit in 32 bits and who leave
         // TagHi zero: the shift-in contributes nothing there.
-        let stores_taglo = op == C_IST || (r10k_index_op && op == C_R10K_ISD);
+        let stores_taglo = op == C_IST || ((r10k_index_op || primary_data_op) && op == C_R10K_ISD);
         let phys_addr_or_taglo = if stores_taglo {
             ((self.core.cp0_taghi as u64) << 32) | (self.core.cp0_taglo as u32 as u64)
         } else {
@@ -7077,6 +7083,8 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             // Split back the way it arrived. Zeroing TagHi unconditionally
             // threw away the top of every tag wider than 32 bits.
             self.core.cp0_taglo = result & 0xFFFF_FFFF;
+            // Primary D TagHi is unused; zero is our deterministic choice,
+            // not a specified silicon result. Primary I keeps only four bits.
             self.core.cp0_taghi = (result >> 32) as u32;
         }
 

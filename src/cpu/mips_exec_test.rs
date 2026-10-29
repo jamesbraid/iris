@@ -245,6 +245,92 @@ mod tests {
         check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>();
     }
 
+    #[test]
+    fn primary_cache_data_instructions_transfer_without_memory_writes() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            use crate::cpu::mips_cache_shadow::R10000ShadowCache;
+            use crate::cpu::mips_tlb::MipsTlb;
+            let mem = Arc::new(MockMemory::new());
+            mem.set_word(0x40, 0xfeed_beef);
+            let mut exec = MipsExecutor::<MipsTlb, R10000ShadowCache>::new(
+                mem.clone(), MipsTlb::default(), &MipsCpuConfig::indy());
+            disable_jitv2(&mut exec);
+            exec.core.cp0_config = (exec.core.cp0_config & !7) | 3;
+            for (store, load, high, low, ecc) in [
+                (0x1c, 0x18, 0xffff_fffa, 0x1234_5678, 0x3ff),
+                (0x1d, 0x19, 0xffff_ffff, 0x8765_4321, 0x3fe),
+            ] {
+                for way in 0..2 {
+                    exec.core.write_gpr(1, 0xffff_ffff_8000_0040 + way);
+                    exec.core.cp0_taghi = high;
+                    exec.core.cp0_taglo = low + way;
+                    exec.core.cp0_ecc = ecc;
+                    assert_eq!(exec.exec(make_i(OP_CACHE, 1, store, 0)), EXEC_COMPLETE);
+                }
+                for way in 0..2 {
+                    exec.core.write_gpr(1, 0xffff_ffff_8000_0040 + way);
+                    exec.core.cp0_taghi = 0;
+                    exec.core.cp0_taglo = 0;
+                    exec.core.cp0_ecc = 0;
+                    assert_eq!(exec.exec(make_i(OP_CACHE, 1, load, 0)), EXEC_COMPLETE);
+                    assert_eq!(exec.core.cp0_taglo, low + way);
+                    if load == 0x18 { assert_eq!(exec.core.cp0_taghi, 0xa); }
+                    assert_eq!(exec.core.cp0_ecc, if load == 0x18 { 1 } else { 14 });
+                }
+            }
+            assert_eq!(mem.get_word(0x40), 0xfeed_beef);
+            assert_eq!(mem.data.lock().unwrap().len(), 4, "CACHE wrote ordinary memory");
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn primary_cache_data_checks_mapped_addresses_but_indexes_by_va() {
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            use crate::cpu::mips_cache_shadow::R10000ShadowCache;
+            use crate::cpu::mips_tlb::MipsTlb;
+            use crate::cpu::mips_core::{STATUS_ERL, STATUS_EXL};
+            for op in [0x18, 0x19, 0x1c, 0x1d] {
+                let mem: Arc<dyn BusDevice> = Arc::new(MockMemory::new());
+                let mut exec = MipsExecutor::<MipsTlb, R10000ShadowCache>::new(
+                    mem, MipsTlb::default(), &MipsCpuConfig::indy());
+                disable_jitv2(&mut exec);
+                exec.core.cp0_status &= !(STATUS_ERL | STATUS_EXL);
+                exec.resync_privilege_state();
+                exec.core.write_gpr(1, 0x20_2044);
+                let result = exec.exec(make_i(OP_CACHE, 1, op, 0));
+                assert_ne!(result & EXEC_IS_EXCEPTION, 0, "mapped op {op:#x} skipped TLB miss");
+                assert_ne!(result & EXEC_IS_TLB_REFILL, 0);
+
+                exec.core.cp0_status &= !(STATUS_ERL | STATUS_EXL);
+                exec.resync_privilege_state();
+                exec.core.cp0_index = 3;
+                exec.core.cp0_entryhi = 0x20_2000;
+                exec.core.cp0_entrylo0 = (0x50 << 6) | (3 << 3) | 1; // Invalid.
+                exec.core.cp0_entrylo1 = 0;
+                assert_eq!(exec.exec((OP_COP0 << 26) | (0x10 << 21) | 0x02), EXEC_COMPLETE);
+                let result = exec.exec(make_i(OP_CACHE, 1, op, 0));
+                assert_ne!(result & EXEC_IS_EXCEPTION, 0, "mapped op {op:#x} skipped invalid entry");
+                assert_eq!(result & EXEC_IS_TLB_REFILL, 0);
+
+                // Valid but not dirty: CACHE must not raise TLB Modified.
+                exec.core.cp0_status &= !(STATUS_ERL | STATUS_EXL);
+                exec.resync_privilege_state();
+                exec.core.cp0_entryhi = 0x20_2000;
+                exec.core.cp0_entrylo0 |= 2;
+                assert_eq!(exec.exec((OP_COP0 << 26) | (0x10 << 21) | 0x02), EXEC_COMPLETE);
+                exec.core.cp0_taglo = 0x1234_5678;
+                exec.core.cp0_taghi = 0xa;
+                assert_eq!(exec.exec(make_i(OP_CACHE, 1, op | 4, 0)), EXEC_COMPLETE);
+                // Same VA index through cached KSEG0, unlike translated PA 0x50044.
+                exec.core.cp0_config = (exec.core.cp0_config & !7) | 3;
+                exec.core.write_gpr(1, 0xffff_ffff_8000_2044);
+                exec.core.cp0_taglo = 0;
+                assert_eq!(exec.exec(make_i(OP_CACHE, 1, op & !4, 0)), EXEC_COMPLETE);
+                assert_eq!(exec.core.cp0_taglo, 0x1234_5678);
+            }
+        }).unwrap().join().unwrap();
+    }
+
     // Instruction builders
     fn make_r(op: u32, rs: u32, rt: u32, rd: u32, sa: u32, funct: u32) -> u32 {
         (op << 26) | ((rs & 0x1F) << 21) | ((rt & 0x1F) << 16) | ((rd & 0x1F) << 11) | ((sa & 0x1F) << 6) | (funct & 0x3F)

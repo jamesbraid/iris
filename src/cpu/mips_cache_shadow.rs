@@ -19,11 +19,9 @@
 //! - **Coherency is exact and free.** There is no stale line to miss on a
 //!   self-modifying store, no L1/L2 inclusion policy to get wrong, and no way
 //!   for a missed writeback to lose data.
-//! - **Diagnostics round-trip.** The shadow stores whatever bits are written
-//!   to it and returns them unchanged, so a walking-1s test over tag or data
-//!   SRAM passes without anyone having to know the hardware's field layout.
-//!   Where the emulator *must* know the layout — to decide whether a line is
-//!   valid, say — that is a separate question from storing the bits.
+//! - **Diagnostic storage is separate.** Primary R10000 data operations keep
+//!   the published data/predecode and parity fields. They do not populate
+//!   ordinary execution caches or regenerate their check bits.
 //!
 //! The shadow is deliberately not consulted by `read`/`write`/`fetch`. If it
 //! ever needs to be, this type is the wrong shape and should say so loudly
@@ -200,11 +198,10 @@ impl<
             lladdr: UnsafeCell::new(0),
             ecc_in: UnsafeCell::new(0),
             ecc_out: UnsafeCell::new(0),
-            ic: UnsafeCell::new(Shadow::new(Self::IC_LINES, 0)),
-            dc: UnsafeCell::new(Shadow::new(Self::DC_LINES, 0)),
-            // Only the R10000 secondary keeps a data shadow: it is the one
-            // the IP28 PROM walks with Index_Store_Data, and a 1 MB array is
-            // cheap once. The R4000 family has no index data ops.
+            // R10000 primaries transfer one word per way, including four
+            // predecode bits for I-cache. Other models have no index data ops.
+            ic: UnsafeCell::new(Shadow::new(Self::IC_LINES, if Self::R10K { IC_SIZE / 4 } else { 0 })),
+            dc: UnsafeCell::new(Shadow::new(Self::DC_LINES, if Self::R10K { DC_SIZE / 4 } else { 0 })),
             l2: UnsafeCell::new(Shadow::new(Self::L2_LINES, if Self::R10K { L2_SIZE / 8 } else { 0 })),
             tc_base: UnsafeCell::new(std::ptr::null_mut()),
             tc_bitmap: UnsafeCell::new(0),
@@ -290,15 +287,15 @@ impl<
 
     /// Data slot for an R10000 `Index_Load_Data` / `Index_Store_Data`.
     ///
-    /// Same shape: way in bit 0, the rest addressing the array. The PROM walks
-    /// it at `…00`, `…01`, `…10`, `…11`, `…20` — one doubleword per operation
-    /// with the way bit shifted in beneath it.
-    fn data_slot(&self, len: usize, virt_addr: u64) -> usize {
+    /// NEC U12754E, pp. 29-30: primaries use VA[13:2] and way VA[0].
+    /// Retain the existing secondary diagnostic index independently.
+    fn data_slot(&self, sel: u32, len: usize, virt_addr: u64) -> usize {
         if len == 0 {
             return 0;
         }
         let way = (virt_addr as usize) & (WAYS - 1);
-        let word = (virt_addr as usize) >> 4;
+        let shift = if matches!(sel, CACH_PI | CACH_PD) { 2 } else { 4 };
+        let word = (virt_addr as usize) >> shift;
         (word * WAYS + way) % len
     }
 }
@@ -579,7 +576,7 @@ impl<
             C_R10K_CBARRIER if Self::R10K && sel == CACH_PI => 0,
             C_R10K_ILD if Self::R10K && matches!(sel, CACH_PI | CACH_PD | CACH_SD) => {
                 let s = self.shadow(sel);
-                let slot = self.data_slot(s.data.len(), virt_addr);
+                let slot = self.data_slot(sel, s.data.len(), virt_addr);
                 if s.data.is_empty() {
                     0
                 } else {
@@ -591,12 +588,19 @@ impl<
                     s.data[slot]
                 }
             }
-            C_R10K_ISD if Self::R10K && matches!(sel, CACH_SI | CACH_SD) => {
+            C_R10K_ISD if Self::R10K => {
                 let s = self.shadow(sel);
-                let slot = self.data_slot(s.data.len(), virt_addr);
+                let slot = self.data_slot(sel, s.data.len(), virt_addr);
                 if !s.data.is_empty() {
-                    s.data[slot] = phys_addr;
-                    s.ecc[slot] = unsafe { *self.ecc_in.get() };
+                    // Primary diagnostic fields: NEC U10278E fourth edition,
+                    // pp. 262, 271-272. Preserve supplied predecode/parity.
+                    let (data_mask, ecc_mask) = match sel {
+                        CACH_PI => (0xf_ffff_ffff, 1),
+                        CACH_PD => (0xffff_ffff, 0xf),
+                        _ => (u64::MAX, u32::MAX),
+                    };
+                    s.data[slot] = phys_addr & data_mask;
+                    s.ecc[slot] = unsafe { *self.ecc_in.get() } & ecc_mask;
                     if l2_op_log(CACHE_LOG_HIT) {
                         crate::dlog!(LogModule::L2c, "shadow:   -> ISD slot={slot} data={phys_addr:#018x} ecc={:#x}",
                                      s.ecc[slot]);
@@ -720,6 +724,68 @@ mod tests {
                 v,
                 "bit {bit} did not survive a store/load tag round trip"
             );
+        }
+    }
+
+    // NEC U12754E, pp. 29-30; U10278E fourth edition, pp. 262, 271-272.
+    #[test]
+    fn primary_data_keeps_only_the_published_data_and_parity_bits() {
+        let c = cache();
+        for (sel, data, check) in [(CACH_PI, 0xf_ffff_ffff, 1), (CACH_PD, 0xffff_ffff, 15)] {
+            c.cache_op(C_IST | sel, 0, 0x8000_0000_1234_5678);
+            let tag = c.cache_op(C_ILT | sel, 0, 0);
+            c.set_cache_ecc(0x3ff);
+            c.cache_op(C_R10K_ISD | sel, 0, u64::MAX);
+            c.set_cache_ecc(0);
+            assert_eq!(c.cache_op(C_R10K_ILD | sel, 0, 0), data);
+            assert_eq!(c.cache_op_ecc(), check);
+            assert_eq!(c.cache_op(C_ILT | sel, 0, 0), tag, "data store changed tag/LRU");
+            // Supplied predecode and parity bits are storage, not regenerated.
+            c.set_cache_ecc(0);
+            c.cache_op(C_R10K_ISD | sel, 0, 0xa_0123_4567);
+            let want = if sel == CACH_PI { 0xa_0123_4567 } else { 0x0123_4567 };
+            assert_eq!(c.cache_op(C_R10K_ILD | sel, 0, 0), want);
+            assert_eq!(c.cache_op_ecc(), 0);
+        }
+    }
+
+    #[test]
+    fn primary_data_operations_do_not_transfer_ordinary_memory() {
+        struct NoTransfers;
+        impl BusDevice for NoTransfers {
+            fn read8(&self, _: u64) -> crate::traits::BusRead8 { panic!("CACHE read8") }
+            fn read16(&self, _: u64) -> crate::traits::BusRead16 { panic!("CACHE read16") }
+            fn read32(&self, _: u64) -> crate::traits::BusRead32 { panic!("CACHE read32") }
+            fn read64(&self, _: u64) -> BusRead64 { panic!("CACHE read64") }
+            fn write8(&self, _: u64, _: u8) -> u32 { panic!("CACHE write8") }
+            fn write16(&self, _: u64, _: u16) -> u32 { panic!("CACHE write16") }
+            fn write32(&self, _: u64, _: u32) -> u32 { panic!("CACHE write32") }
+            fn write64(&self, _: u64, _: u64) -> u32 { panic!("CACHE write64") }
+        }
+        let c = R10000ShadowCache::new(Arc::new(NoTransfers));
+        for sel in [CACH_PI, CACH_PD] {
+            c.cache_op(C_R10K_ISD | sel, 0, 0x1234_5678);
+            assert_eq!(c.cache_op(C_R10K_ILD | sel, 0, 0), 0x1234_5678);
+        }
+    }
+
+    #[test]
+    fn primary_data_words_ways_and_arrays_are_independent() {
+        let c = cache();
+        // Adjacent words, both line boundaries, and the final word in a way.
+        let indices = [0, 1, 4, 5, 28, 29, 32, 33, 60, 61, 64, 65, 0x3ffc, 0x3ffd];
+        for (array, sel) in [CACH_PI, CACH_PD].into_iter().enumerate() {
+            for (n, va) in indices.into_iter().enumerate() {
+                c.set_cache_ecc((n as u32 + array as u32) & 1);
+                c.cache_op(C_R10K_ISD | sel, va, 0x1000 + array as u64 * 0x100 + n as u64);
+            }
+        }
+        for (array, sel) in [CACH_PI, CACH_PD].into_iter().enumerate() {
+            for (n, va) in indices.into_iter().enumerate() {
+                assert_eq!(c.cache_op(C_R10K_ILD | sel, va | 0xffff_ffff_8000_4000, 0),
+                           0x1000 + array as u64 * 0x100 + n as u64, "array {array}, VA {va:#x}");
+                assert_eq!(c.cache_op_ecc(), (n as u32 + array as u32) & 1);
+            }
         }
     }
 
