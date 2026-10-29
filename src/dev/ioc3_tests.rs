@@ -713,15 +713,30 @@ fn host_input_arrives_in_the_receive_ring_after_the_timer() {
     let r = Rig::new();
     r.aim_engines();
     r.w32(reg::SDMA_RING_LO, 0x2000 | 1);
-    // 0x200 ticks of 62.5 us: 32 ms, well clear of a slow test host.
+    // 0x200 ticks of 62.5 us: 32 ms.
     r.w32(A + sdma_off::RX_TIMER, 0x200);
     r.w32(A + sdma_off::RX_CONSUME, ARM_RX_TIMER);
     r.w32(A, sdma_ctl::ENABLE | 4);
     r.wire[0].inp.lock().unwrap().extend(b"hi");
+    let before = Instant::now();
     r.c.service();
+    let after = Instant::now();
+    // Every register access first expires a deadline already past, so a
+    // test thread descheduled past it would see the entry posted before it
+    // looked. Hold the timer off while looking, then let it run out.
+    let wait = Duration::from_nanos(0x200 * TIMER_TICK_NS);
+    let due = {
+        let mut st = r.c.sh.st.lock();
+        let port = &mut st.sdma.port[0];
+        let due = port.rx_deadline.expect("the first character started the timer");
+        assert!(due >= before + wait && due <= after + wait, "the reload's 32 ms from the character");
+        port.rx_deadline = Some(Instant::now() + Duration::from_secs(3600));
+        due
+    };
     assert_eq!(r.r32(A + sdma_off::RX_PRODUCE) >> HELD_SHIFT & 7, 2, "two held in the packer");
     assert_eq!(r.r32(A + sdma_off::RX_CONSUME) & ARM_RX_TIMER, ARM_RX_TIMER);
-    std::thread::sleep(Duration::from_millis(60));
+    r.c.sh.st.lock().sdma.port[0].rx_deadline = Some(due);
+    std::thread::sleep(due.saturating_duration_since(Instant::now()));
     r.c.service();
     assert_eq!(r.r32(A + sdma_off::RX_PRODUCE), 8, "posted when the timer ran out");
     assert_eq!(&get(&r, 0x3000, 2), b"hi");
