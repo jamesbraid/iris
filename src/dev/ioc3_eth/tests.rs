@@ -52,9 +52,8 @@ fn rig() -> Rig {
     let irq = Arc::new(Mutex::new(Vec::new()));
     let log = irq.clone();
     eth.connect(mem.clone(), Box::new(move |l| log.lock().unwrap().push(l)));
-    let (to_net, sent) = rtrb::RingBuffer::new(64);
-    let (inject, from_net) = rtrb::RingBuffer::new(64);
-    eth.attach(to_net, from_net, None, None);
+    let (link, sent, inject) = crate::net::Link::loopback();
+    eth.attach(link);
     Rig { eth, mem, irq, sent, inject }
 }
 
@@ -720,10 +719,9 @@ fn a_reset_during_an_interrupt_delivery_leaves_the_line_low() {
 #[test]
 fn a_stopped_mac_takes_no_frames_until_it_starts() {
     let mut t = rig();
-    let wake = crate::net::Wake::new();
-    let (inject, from_net) = rtrb::RingBuffer::new(64);
-    let (to_net, _sent) = rtrb::RingBuffer::new(64);
-    t.eth.attach(to_net, from_net, None, Some(wake.clone()));
+    let (link, _sent, inject) = crate::net::Link::loopback();
+    let wake = link.rx_wake();
+    t.eth.attach(link);
     t.inject = inject;
     t.rx_setup(2);
     t.eth.start();
@@ -750,10 +748,8 @@ fn a_frame_waits_for_the_negotiation_deadline_without_a_wake() {
     let eth = Ioc3Eth::with_negotiation_delay(STATION, Duration::from_millis(60));
     let mem = Arc::new(Mem(Mutex::new(vec![0; MEM_SIZE])));
     eth.connect(mem.clone(), Box::new(|_| {}));
-    let wake = crate::net::Wake::new();
-    let (to_net, _sent) = rtrb::RingBuffer::new(64);
-    let (mut inject, from_net) = rtrb::RingBuffer::new(64);
-    eth.attach(to_net, from_net, None, Some(wake));
+    let (link, _sent, mut inject) = crate::net::Link::loopback();
+    eth.attach(link);
     let t = Rig { eth, mem, irq: Arc::new(Mutex::new(Vec::new())), sent: rtrb::RingBuffer::new(1).1, inject: rtrb::RingBuffer::new(1).0 };
     t.rx_setup(2);
     t.eth.start();
@@ -779,15 +775,15 @@ fn waits_for(cond: impl Fn() -> bool) -> bool {
 #[test]
 fn stopping_the_mac_joins_its_threads() {
     let eth = Ioc3Eth::with_negotiation_delay(STATION, Duration::ZERO);
-    let mut cfg = crate::net::GatewayConfig::default();
-    cfg.port_forwards.clear();
-    let _ctl = eth.start_nat(cfg);
+    let mut net = crate::config::NetworkConfig::default();
+    net.port_forward.clear();
+    eth.attach(crate::net::Link::open(&net).unwrap().expect("NAT is the default"));
     assert!(eth.threads.lock().is_empty(), "no thread before start");
     eth.start();
     assert_eq!(eth.threads.lock().len(), 2);
     eth.stop();
     assert!(eth.threads.lock().is_empty());
-    assert!(eth.nat.lock().is_some(), "the engine is back for the next run");
+    assert!(eth.backend.lock().is_some(), "the engine is back for the next run");
     eth.start();
     assert_eq!(eth.threads.lock().len(), 2);
     let probe = Arc::downgrade(&eth);

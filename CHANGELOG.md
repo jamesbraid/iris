@@ -557,6 +557,9 @@ hashes are given where a change is easiest to understand by reading the commit.
   the root, as `tftpd -s` does, and serves netascii. `test/tftp/` has a
   portable client (`tftpget.c`) and a guest test script. The monitor's
   `ps2 esc` presses Esc, which stops the PROM's autoboot.
+- The SEEQ, DaynaPort, MEC and IOC3 now get their NAT or PCAP backend from one
+  shared link, so a new backend is one implementation. The backend threads are
+  named `seeq-net`, `daynaN-net`, `ip32-mec-net` and `ip30-eth-net`.
 
 ### UI / input
 

@@ -10,7 +10,7 @@ use crate::config::{AudioConfig, NetworkConfig, RtcOffset};
 use crate::dev::eeprom_93c56::Eeprom93c56;
 use crate::dev::ioc::Ioc;
 use crate::dev::ds1x86::Ds1x86;
-use crate::net::GatewayConfig;
+use crate::net::{GatewayConfig, Link};
 use crate::dev::seeq8003::Seeq8003;
 use crate::dev::wd33c93a::Wd33c93a;
 use crate::irq::{InterruptController, IrqLine};
@@ -1116,14 +1116,7 @@ impl Hpc3 {
     /// target for `iris-ci rtc-save`); `rtc_offset` shifts the RTC's
     /// host-time seed (`[rtc_offset]`).
     pub fn with_net(eeprom: Arc<Mutex<Eeprom93c56>>, ioc: Ioc, guinness: bool, heartbeat: Arc<AtomicU64>, net: NetworkConfig, no_audio: bool, audio: AudioConfig, nvram_path: String, rtc_offset: RtcOffset, scsi_deferred_int: bool) -> Self {
-        let nfs = net.nfs;
-        let port_forwards = net.port_forward;
-        let subnet = net.nat_subnet.unwrap_or_default();
-        let net_mode = net.mode;
-        let pcap_interface = net.pcap_interface;
-        let nfs_pcap_ip = net.nfs_pcap_ip;
-        let tftp_dir = net.tftp_dir.clone();
-        let rsh_dir = net.rsh_dir.clone();
+        let gateway_cfg = GatewayConfig::from_network(&net);
         let rtc = Arc::new(Ds1x86::new(8192, nvram_path, rtc_offset));
         let pdma_dump = Arc::new(AtomicU32::new(0));
         
@@ -1190,21 +1183,14 @@ impl Hpc3 {
         pdma_channels[HPC3_PDMA_CHAN_SCSI0 as usize].lock().irq = Some(irqs.line(HPC3_INTSTAT_SCSI0_DMA));
         pdma_channels[HPC3_PDMA_CHAN_SCSI1 as usize].lock().irq = Some(irqs.line(HPC3_INTSTAT_SCSI1_DMA));
         let seeq_irq = irqs.line(HPC3_INTSTAT_ENET_DEV);
-        let gateway_cfg = GatewayConfig {
-            nfs,
-            port_forwards,
-            gateway_ip: subnet.gateway_ip,
-            client_ip:  subnet.client_ip,
-            netmask:    subnet.netmask,
-            mode:       net_mode,
-            pcap_interface,
-            nfs_pcap_ip,
-            tftp_dir,
-            rsh_dir,
-            ..GatewayConfig::default()
-        };
         let net_base = gateway_cfg.clone();
+        let link = Link::with_gateway(gateway_cfg.clone());
         let seeq = Arc::new(Seeq8003::with_config(Some(seeq_irq), Some(enet_rx_dma), Some(enet_tx_dma), gateway_cfg, heartbeat.clone()));
+        match link {
+            Ok(Some(link)) => seeq.attach(link),
+            Ok(None) => {}
+            Err(e) => eprintln!("iris: network: {e}; Ethernet left unplugged"),
+        }
         // Publish seeq to both the DMA ops (CTRL reads) and the irq (status checks in set_interrupt)
         let _ = enet_seeq_lock.set(seeq.clone());
         
