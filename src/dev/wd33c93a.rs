@@ -408,11 +408,16 @@ impl Wd33c93a {
         mac: [u8; 6],
         gateway: crate::net::GatewayConfig,
     ) -> std::io::Result<()> {
+        let link = crate::net::Link::with_gateway(gateway.clone())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
         if id >= 8 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput, "SCSI ID out of range"));
         }
         let mut dp = crate::dev::daynaport::DaynaPort::new(id, mac, gateway, self.heartbeat.clone());
+        if let Some(link) = link {
+            dp.attach(link);
+        }
         dp.start();
         self.bus.attach(id as u8, Box::new(dp))
     }

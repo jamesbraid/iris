@@ -48,7 +48,7 @@ pub struct Mace {
     pub sdma: MaceSerialDma,
     /// The audio interface and its AD1843 (dev/mace_audio.rs).
     pub audio: MaceAudio,
-    /// The Ethernet. Its frames go nowhere until `start_nat` (`[o2] net`).
+    /// The Ethernet. Its frames go nowhere until `attach` (`[o2] net`).
     pub mec: Arc<Mec>,
 }
 

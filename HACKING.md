@@ -259,7 +259,7 @@ Every device that has real work to do runs on its own thread:
 | jitv2 compile pool | Cranelift compiles of requested pages (`[jitv2] threads`) |
 | `WD33C93A` | SCSI command execution and DMA |
 | `AIC-7880-0`, `AIC-7880-1` | O2 SCSI: command execution, host-memory DMA and disk I/O; the CPU's register writes only queue and kick |
-| `seeq-enet`, `seeq-nat` | ethernet DMA pump; the NAT engine and its built-in services |
+| `seeq-enet`, `seeq-net` | ethernet DMA pump; the network backend (the NAT engine and its built-in services, or a PCAP bridge) |
 | `MC-DMA` | VDMA (graphics DMA) |
 | `SCC-TX/RX-*` | serial ports |
 | `VINO-DMA` | video capture (only with a video source) |
@@ -271,7 +271,7 @@ Every device that has real work to do runs on its own thread:
 | `machine-events` | power-off and reset requests from devices |
 | `ISP1040-0`, `ISP1040-1` | Octane SCSI request rings and disk transfers |
 | `IOC3-RX-A`, `IOC3-RX-B`, `IOC3-NVRAM` | Octane serial input per port; the DS1685 NVRAM file writer (IOC3's other deadlines are `hptimer` one-shots) |
-| `ip30-eth-rx`, `ip30-eth-nat` | Octane ethernet receive pump; the NAT engine |
+| `ip30-eth-rx`, `ip30-eth-net` | Octane ethernet receive pump; the network backend |
 
 Threads that have nothing to do park instead of spinning: the graphics
 consumers when their FIFO is empty, and the CPU thread in `idle-pause` builds

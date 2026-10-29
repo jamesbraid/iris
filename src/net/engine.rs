@@ -1,5 +1,5 @@
 //! The NAT engine: the guest's gateway. Owns every flow table and service and
-//! runs on the `seeq-nat` thread (or a DaynaPort's), taking guest frames from
+//! runs on the `seeq-net` thread (or another adapter's), taking guest frames from
 //! one ring and putting replies on another.
 //!
 //! Protocol handling lives in sibling modules, each an `impl NatEngine`:
