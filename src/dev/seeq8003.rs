@@ -19,9 +19,8 @@ use parking_lot::Mutex;
 use std::thread;
 use std::time::Duration;
 
-use rtrb::RingBuffer;
 
-use crate::net::{eth_summary, mac_str, GatewayConfig, NatControl, NatEngine};
+use crate::net::{eth_summary, mac_str, GatewayConfig, Link, NatControl};
 use crate::traits::{BusRead8, BusRead16, BusRead32, BusRead64, BUS_OK, BUS_ERR, BusDevice, Device, DmaClient, DmaStatus, Resettable, Saveable};
 use crate::snapshot::{get_field, toml_u8, u8_slice_to_toml, load_u8_slice, hex_u8};
 
@@ -168,19 +167,25 @@ pub struct Seeq8003 {
     in_reset: Arc<AtomicBool>, // CH_RESET edge — lock-free check in pump thread
     config:   GatewayConfig,
     running:  Arc<AtomicBool>,
-    nat_ctl:  Arc<NatControl>,
-    // TX: enet thread → NAT thread (outbound frames from guest)
-    tx_prod:  Mutex<Option<rtrb::Producer<Vec<u8>>>>,
-    tx_cons:  Mutex<Option<rtrb::Consumer<Vec<u8>>>>,
-    // RX: NAT thread → enet thread (inbound frames to guest)
-    rx_prod:  Mutex<Option<rtrb::Producer<Vec<u8>>>>,
-    rx_cons:  Mutex<Option<rtrb::Consumer<Vec<u8>>>>,
-    // tx_wake: enet signals NAT when it pushes a TX frame
-    tx_wake:  Arc<crate::net::Wake>,
-    // rx_wake: NAT signals enet when it pushes an RX frame
-    rx_wake:  Arc<crate::net::Wake>,
+    nat_ctl:  Mutex<Arc<NatControl>>,
+    /// The network backend: see [`Net`].
+    net:      Mutex<Net>,
     /// Activity heartbeat — shared with Rex3 display thread.
     heartbeat: Arc<AtomicU64>,
+}
+
+/// The network backend behind the Ethernet. Each `start` runs the link
+/// attached for it and attaches a fresh one for the next, so a restarted
+/// machine gets new rings and a new backend.
+#[derive(Default)]
+struct Net {
+    /// The link the next `start` runs.
+    next: Option<Link>,
+    /// The flag the running backend watches.
+    live: Option<Arc<AtomicBool>>,
+    /// enet waits on this for frames from the backend; `kick_*` notifies it.
+    rx_wake: Option<Arc<crate::net::Wake>>,
+    frames: Option<Arc<AtomicU64>>,
 }
 
 /// Lock a SeeqState mutex and bump the timestamp in one step.
@@ -220,8 +225,6 @@ impl Seeq8003 {
                        tx_dma: Option<Arc<dyn DmaClient>>,
                        config: GatewayConfig,
                        heartbeat: Arc<AtomicU64>) -> Self {
-        let (tx_prod, tx_cons) = RingBuffer::new(CHAN_CAPACITY);
-        let (rx_prod, rx_cons) = RingBuffer::new(CHAN_CAPACITY);
         Self {
             state: Arc::new(Mutex::new(SeeqState {
                 rx_cmd:       0,
@@ -244,15 +247,21 @@ impl Seeq8003 {
             in_reset: Arc::new(AtomicBool::new(false)),
             config,
             running:  Arc::new(AtomicBool::new(false)),
-            nat_ctl:  NatControl::new(),
-            tx_prod: Mutex::new(Some(tx_prod)),
-            tx_cons: Mutex::new(Some(tx_cons)),
-            rx_prod: Mutex::new(Some(rx_prod)),
-            rx_cons: Mutex::new(Some(rx_cons)),
-            tx_wake: crate::net::Wake::new(),
-            rx_wake: crate::net::Wake::new(),
+            nat_ctl:  Mutex::new(NatControl::new()),
+            net:      Mutex::new(Net::default()),
             heartbeat,
         }
+    }
+
+    /// Connect to the backend `[network]` selected. It runs from `start` to
+    /// `stop`. Attach before the first `start`: a SEEQ with no link has no
+    /// network.
+    pub fn attach(&self, link: Link) {
+        *self.nat_ctl.lock() = link.nat.clone();
+        let mut net = self.net.lock();
+        net.rx_wake = Some(link.rx_wake.clone());
+        net.frames = Some(link.frames.clone());
+        net.next = Some(link);
     }
 
     fn raise_interrupt(state: &mut SeeqState, dma_irq: bool, irq: &Option<IrqLine>) {
@@ -281,7 +290,12 @@ impl Seeq8003 {
     /// Shared NAT control/stats handle (debug toggles, table reset, and the
     /// guest-frame counter the GUI's network indicator samples).
     pub fn nat_control(&self) -> Arc<NatControl> {
-        self.nat_ctl.clone()
+        self.nat_ctl.lock().clone()
+    }
+
+    /// Guest frames the backend has processed (see `Workstation::net_frames`).
+    pub fn frames(&self) -> Option<Arc<AtomicU64>> {
+        self.net.lock().frames.clone()
     }
 
     /// NAT addresses this gateway hands the guest: (client_ip, gateway_ip,
@@ -425,13 +439,19 @@ impl Seeq8003 {
     /// Wake the enet thread immediately to drain pending TX data.
     /// Call this when the TX DMA channel is activated with a descriptor ready.
     pub fn kick_tx(&self) {
-        self.rx_wake.notify();
+        self.kick_enet();
     }
 
     /// Wake the enet thread to deliver any pending RX frames.
     /// Call this when the RX DMA channel is activated so queued frames aren't lost.
     pub fn kick_rx(&self) {
-        self.rx_wake.notify();
+        self.kick_enet();
+    }
+
+    fn kick_enet(&self) {
+        if let Some(w) = self.net.lock().rx_wake.as_ref() {
+            w.notify();
+        }
     }
 
     /// Assert CH_RESET (rising edge): hold device in reset state.
@@ -542,13 +562,9 @@ impl Seeq8003 {
         use crate::locks::register_lock_fn;
         let me = self.clone(); register_lock_fn("seeq::state",             move || me.state.is_locked());
         let me = self.clone(); register_lock_fn("seeq::sys_mem",           move || me.sys_mem.is_locked());
-        let me = self.clone(); register_lock_fn("seeq::tx_prod",           move || me.tx_prod.is_locked());
-        let me = self.clone(); register_lock_fn("seeq::tx_cons",           move || me.tx_cons.is_locked());
-        let me = self.clone(); register_lock_fn("seeq::rx_prod",           move || me.rx_prod.is_locked());
-        let me = self.clone(); register_lock_fn("seeq::rx_cons",           move || me.rx_cons.is_locked());
-        let me = self.clone(); register_lock_fn("seeq::tx_wake",           move || me.tx_wake.is_locked());
-        let me = self.clone(); register_lock_fn("seeq::rx_wake",           move || me.rx_wake.is_locked());
-        let me = self.clone(); register_lock_fn("seeq::nat_ctl::snapshot", move || me.nat_ctl.snapshot.is_locked());
+        let me = self.clone(); register_lock_fn("seeq::net",               move || me.net.is_locked());
+        let me = self.clone(); register_lock_fn("seeq::nat_ctl",           move || me.nat_ctl.is_locked());
+        let me = self.clone(); register_lock_fn("seeq::nat_ctl::snapshot", move || me.nat_ctl.try_lock().map_or(true, |c| c.snapshot.is_locked()));
     }
 }
 
@@ -561,54 +577,26 @@ impl Device for Seeq8003 {
     fn start(&self) {
         if self.running.swap(true, Ordering::SeqCst) { return; }
 
-        // Take the channel endpoints — each is moved into exactly one thread.
-        let tx_prod = self.tx_prod.lock().take().expect("tx_prod already taken");
-        let tx_cons = self.tx_cons.lock().take().expect("tx_cons already taken");
-        let rx_prod = self.rx_prod.lock().take().expect("rx_prod already taken");
-        let rx_cons = self.rx_cons.lock().take().expect("rx_cons already taken");
-
-        // ── seeq-nat thread: NAT engine ──────────────────────────────────────
-        let config      = self.config.clone();
-        let running_nat = self.running.clone();
-        let tx_wake_nat = self.tx_wake.clone();
-        let rx_wake_nat = self.rx_wake.clone();
-        let nat_ctl     = self.nat_ctl.clone();
-        thread::Builder::new().name("seeq-nat".into()).spawn(move || {
-            // Select the network backend. PCAP bridging requires --features pcap;
-            // if the build lacks it, fall back to the software NAT gateway.
-            #[cfg(feature = "pcap")]
-            {
-                use crate::net::NetBackend;
-                if config.mode == crate::config::NetMode::Pcap {
-                    eprintln!("iris: networking backend = PCAP (bridged)");
-                    let mut engine = crate::net::net_pcap::PcapEngine::new(
-                        config, tx_cons, rx_prod,
-                        rx_wake_nat, tx_wake_nat,
-                        running_nat, nat_ctl);
-                    engine.run();
-                    return;
-                }
-                eprintln!("iris: networking backend = NAT (software gateway)");
-                let mut engine = NatEngine::new(config, tx_cons, rx_prod,
-                                                rx_wake_nat, tx_wake_nat,
-                                                running_nat, nat_ctl);
-                engine.run();
+        // The link for this run, and a fresh one for the next.
+        let mut link = {
+            let mut net = self.net.lock();
+            let Some(link) = net.next.take() else {
+                self.running.store(false, Ordering::SeqCst);
                 return;
+            };
+            match link.renew() {
+                Ok(next) => net.next = Some(next),
+                Err(e) => eprintln!("iris: network: {e}; the Ethernet stays down after this run"),
             }
-            #[cfg(not(feature = "pcap"))]
-            {
-                if config.mode == crate::config::NetMode::Pcap {
-                    eprintln!("iris: [network] mode = \"pcap\" requested but this build \
-                               lacks --features pcap; falling back to NAT gateway. \
-                               Rebuild with `--features pcap`.");
-                } else {
-                    eprintln!("iris: networking backend = NAT (software gateway)");
-                }
-                NatEngine::new(config, tx_cons, rx_prod,
-                               rx_wake_nat, tx_wake_nat,
-                               running_nat, nat_ctl).run();
-            }
-        }).expect("seeq-nat spawn");
+            net.live = Some(link.running.clone());
+            link
+        };
+
+        // ── seeq-net thread: the network backend ─────────────────────────────
+        eprintln!("iris: networking backend = {}", link.describe);
+        drop(link.spawn("seeq-net"));
+        let (tx_prod, rx_cons) = (link.to_net, link.from_net);
+        let (tx_wake_enet, rx_wake_enet) = (link.tx_wake, link.rx_wake);
 
         // ── seeq-enet thread: DMA pump loop ───────────────────────────────────
         // Polls TX DMA, pushes frames to NAT; receives frames from NAT, writes to RX DMA.
@@ -626,8 +614,6 @@ impl Device for Seeq8003 {
         let sys_mem_enet: Option<Arc<dyn BusDevice>> = self.sys_mem.lock().clone();
         let state_enet    = self.state.clone();
         let irq      = self.irq.clone();
-        let rx_wake_enet  = self.rx_wake.clone();
-        let tx_wake_enet  = self.tx_wake.clone();
         let heartbeat_enet = self.heartbeat.clone();
         thread::Builder::new().name("seeq-enet".into()).spawn(move || {
             let mut tx_prod = tx_prod;
@@ -761,14 +747,11 @@ impl Device for Seeq8003 {
         // The seeq-nat and seeq-enet threads own the ring-buffer endpoints.
         // They will exit on the next loop iteration once `running` is false,
         // but we don't join them here (Device::stop is &self, not &mut self).
-        // Allocate fresh ring buffers now so the next start() can take them.
-        // Any in-flight frames are discarded, which is fine — we're stopping.
-        let (tx_prod, tx_cons) = RingBuffer::new(CHAN_CAPACITY);
-        let (rx_prod, rx_cons) = RingBuffer::new(CHAN_CAPACITY);
-        *self.tx_prod.lock() = Some(tx_prod);
-        *self.tx_cons.lock() = Some(tx_cons);
-        *self.rx_prod.lock() = Some(rx_prod);
-        *self.rx_cons.lock() = Some(rx_cons);
+        // The next start() runs a fresh link. Any in-flight frames are
+        // discarded, which is fine — we're stopping.
+        if let Some(live) = self.net.lock().live.take() {
+            live.store(false, Ordering::SeqCst);
+        }
     }
 
     fn is_running(&self) -> bool { self.running.load(Ordering::Relaxed) }
@@ -806,7 +789,8 @@ impl Device for Seeq8003 {
                     Some("status") | None => {
                         // net status [tcp|udp|icmp|all]
                         let proto = args.get(1).copied().unwrap_or("all");
-                        let snap = self.nat_ctl.snapshot.lock();
+                        let ctl = self.nat_control();
+                        let snap = ctl.snapshot.lock();
                         let show_tcp  = matches!(proto, "tcp"  | "all");
                         let show_udp  = matches!(proto, "udp"  | "all");
                         let show_icmp = matches!(proto, "icmp" | "all");
@@ -856,11 +840,11 @@ impl Device for Seeq8003 {
                             _ => return Err("usage: net debug [tcp|udp|icmp] [on|off]".into()),
                         };
                         match proto {
-                            "tcp"  => { self.nat_ctl.debug_tcp.store(enable,  std::sync::atomic::Ordering::Relaxed);
+                            "tcp"  => { self.nat_control().debug_tcp.store(enable,  std::sync::atomic::Ordering::Relaxed);
                                         writeln!(w, "TCP debug {}", if enable { "on" } else { "off" }).ok(); }
-                            "udp"  => { self.nat_ctl.debug_udp.store(enable,  std::sync::atomic::Ordering::Relaxed);
+                            "udp"  => { self.nat_control().debug_udp.store(enable,  std::sync::atomic::Ordering::Relaxed);
                                         writeln!(w, "UDP debug {}", if enable { "on" } else { "off" }).ok(); }
-                            "icmp" => { self.nat_ctl.debug_icmp.store(enable, std::sync::atomic::Ordering::Relaxed);
+                            "icmp" => { self.nat_control().debug_icmp.store(enable, std::sync::atomic::Ordering::Relaxed);
                                         writeln!(w, "ICMP debug {}", if enable { "on" } else { "off" }).ok(); }
                             _ => return Err("usage: net debug [tcp|udp|icmp] [on|off]".into()),
                         }
@@ -896,7 +880,7 @@ impl Resettable for Seeq8003 {
         // Clear/reset the hardware registers via the existing reset() method.
         self.reset();
         // Signal the NAT thread to flush all TCP/UDP/ICMP tables on its next loop.
-        self.nat_ctl.reset_nat.store(true, Ordering::Release);
+        self.nat_control().reset_nat.store(true, Ordering::Release);
     }
 }
 
