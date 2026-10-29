@@ -205,7 +205,7 @@ An explicit non-disk kind takes precedence over the legacy cdrom flag.
 
 | Key | Default | Values and behavior |
 |---|---|---|
-| `network.mode` | `nat` | nat, pcap or off (no Ethernet; O2 only for now). PCAP needs build support and host capture permissions, and is not available on the O2 yet. |
+| `network.mode` | `nat` | nat, pcap or off (no Ethernet; O2 and Octane only). PCAP needs build support and host capture permissions; it works on every machine with an Ethernet. |
 | `network.pcap_interface` | `auto-pick when unset` | Interface name or numeric list index; PCAP only. |
 | `network.nfs_pcap_ip` | `unset` | Virtual LAN IP for the built-in NFS responder in PCAP mode. |
 | `network.mac` | `08:00:69:12:34:56 when unset` | ec0 MAC; injected only into blank PROM battery-backed MAC slots. |
