@@ -159,12 +159,18 @@ impl OctaneMachine {
         let links = xbow.clone();
         bridge.set_link_alive(Box::new(move |w| links.carries(w)));
 
+        // The status bar's activity bits, shared with the graphics board.
+        let heartbeat = Arc::new(AtomicU64::new(0));
         let mac = cfg.network().mac;
         let scsi = [Arc::new(Isp1040::new_at(0)), Arc::new(Isp1040::new_at(1))];
+        for s in &scsi {
+            s.set_heartbeat(heartbeat.clone());
+        }
         bridge.attach(0, scsi[0].clone());
         bridge.attach(1, scsi[1].clone());
         let ioc3 = Arc::new(Ioc3::octane(mac, false));
         let eth = Ioc3Eth::new(mac);
+        eth.set_heartbeat(heartbeat.clone());
         ioc3.attach_eth(eth.clone());
         bridge.attach(2, ioc3.clone());
         ioc3.connect_superio_interrupt(bridge.pin_line(SUPERIO_PIN));
@@ -183,7 +189,6 @@ impl OctaneMachine {
 
         // The status bar's activity bits and the CPU's Compare matches,
         // shared with the graphics board before the CPU exists.
-        let heartbeat = Arc::new(AtomicU64::new(0));
         let fasttick = Arc::new(AtomicU64::new(0));
         let gfx = board.map(|b| ImpactXio::with_board(WIDGET_GFX, b, heart.clone(), mem.clone(), heartbeat, fasttick.clone()));
 
