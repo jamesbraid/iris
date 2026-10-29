@@ -1,5 +1,5 @@
-# Experimental serial Fuel. Run from the repository root:
-# cargo run --release -- --config irix-install/iris-fuel-serial.toml
+# An SGI Fuel (IP34), booting the IP35 PROM and IRIX over the L1 serial console.
+# Copy to fuel.toml and run from the repository root: iris --config fuel.toml
 # Create ignore/fuel/ and supply your decoded raw PROM payload and IRIX disk.
 # PROM also accepts supported version-six single-segment stored/gzip containers.
 # No PROM or disk images are included. Convert QCOW2 disks to raw first.

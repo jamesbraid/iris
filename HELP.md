@@ -29,21 +29,22 @@ release.
 
 Fuel is an experimental CLI profile with a fixed R14000 f23, 500 MHz,
 2 MiB secondary cache and 512 MiB RAM. Use
-[irix-install/iris-fuel-serial.toml](irix-install/iris-fuel-serial.toml)
+[fuel.toml.example](fuel.toml.example)
 with an external IP35 PROM image and an existing IRIX disk. PROM inputs
 may be raw payloads or supported version-six single-segment containers
 with a stored or gzip payload. Recognized malformed containers are refused.
 There is no embedded Fuel PROM. Disk images must be raw or CHD. Convert
 QCOW2 images before attaching them.
 
-From the repository root, create `ignore/fuel/` and put your
+Copy `fuel.toml.example` to `fuel.toml`. From the repository root, create
+`ignore/fuel/` and put your
 `ip35prom.payload.bin` and `irix.raw` there. The sample keeps private flash,
 NVRAM and disk writes in that ignored directory. Each emulated Fuel needs
 its own flash and NVRAM files. `overlay = true` keeps the base disk unchanged.
 Paths in the sample are relative to the working directory.
 
 ```sh
-cargo run --release -- --config irix-install/iris-fuel-serial.toml
+cargo run --release -- --config fuel.toml
 ```
 
 Use the interpreter build above. Fuel rejects `opcodefusion` and
