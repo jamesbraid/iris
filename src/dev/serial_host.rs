@@ -461,3 +461,34 @@ pub fn console_backends(
     };
     (console, second)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The console is the CI backend in CI mode and TCP otherwise, either
+    /// teed to the same fresh log, and the second port comes up on its own.
+    #[test]
+    fn the_console_is_ci_or_tcp_and_both_log_the_same_bytes() {
+        let dir = std::env::temp_dir().join(format!("iris-serial-host-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("serial.log");
+        std::fs::write(&log, "stale").unwrap();
+        let mut cfg = MachineConfig::default();
+        cfg.serial_log = Some(log.to_string_lossy().into_owned());
+        cfg.serial_port_a = Some(0);
+        cfg.serial_port_b = Some(0);
+
+        let ci = Arc::new(CiSerialBackend::new());
+        let (console, second) = console_backends(&cfg, "Test", Some(&ci));
+        console.send_byte(b'c');
+        assert_eq!(ci.drain_guest(), b"c");
+        assert_eq!(std::fs::read(&log).unwrap(), b"c", "a fresh log, not the stale one");
+        assert!(second.is_some());
+
+        let (console, _) = console_backends(&cfg, "Test", None);
+        console.send_byte(b't');
+        assert_eq!(std::fs::read(&log).unwrap(), b"t");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -51,6 +51,13 @@ hashes are given where a change is easiest to understand by reading the commit.
   cursor position fields are 12-bit signed; they were read as unsigned, so a
   cursor partly off the edge was drawn 4000 pixels away. (`src/dev/o2gfx.rs`)
 
+### Serial ports
+
+- The O2 and Octane serial ports share one 16550A core ported from QEMU. On the
+  O2 this adds the receive FIFO with trigger levels and the character timeout;
+  O2 snapshots from before are refused (snapshot schema 5).
+- Serial host backends moved out of the Z85C30 into `src/dev/serial_host.rs`.
+
 ### Host efficiency on small machines
 
 - **Threads that have nothing to do now sleep in milliseconds, not
