@@ -562,6 +562,9 @@ pub trait CpuModel: MipsCache {
     const LWR_PRESERVES_UPPER: bool = false;
     /// R12000-compatible FS mode flushes denormal input operands before arithmetic.
     const FPU_FS_FLUSH_INPUTS: bool = false;
+    /// Selected FR=1 single-computational result policy; raw word transfers
+    /// and fixed-point word results retain their own write semantics.
+    const FPU_FR1_SINGLE_RESULTS_ZERO_UPPER: bool = false;
 }
 
 pub trait MipsCache: Send + Sync {

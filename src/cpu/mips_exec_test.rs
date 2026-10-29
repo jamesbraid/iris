@@ -409,6 +409,131 @@ mod tests {
     }
 
     #[test]
+    fn r14000_inexact_integer_to_single_trap_preserves_full_destination() {
+        let mut exec = fpu_executor::<FpuR14000>();
+        for (fmt, source) in [(RS_W, 0x1234_5678_0100_0001u64), (RS_L, 0x0100_0001)] {
+            exec.core.write_fpr_l(0, source); // 16777217 is not exact in single precision.
+            exec.core.write_fpr_l(4, 0xdead_beef_89ab_cdef);
+            exec.core.fpu_fcsr = 0x80;
+            let status = exec.exec(make_cop1_compute(fmt, 0, 0, 4, FUNCT_FCVT_S));
+            assert_ne!(status & EXEC_IS_EXCEPTION, 0);
+            assert_eq!((status >> 2) & 31, 15);
+            assert_eq!(exec.core.fpu_fcsr, 0x1080);
+            assert_eq!(exec.core.read_fpr_l(4), 0xdead_beef_89ab_cdef);
+            assert_eq!(exec.core.read_fpr_l(0), source);
+        }
+    }
+
+    #[test]
+    fn r14000_single_computational_results_clear_upper_word() {
+        let mut exec = fpu_executor::<FpuR14000>();
+        for (operation, expected) in [
+            (FUNCT_FADD, 0x4040_0000), (FUNCT_FSUB, 0xbf80_0000),
+            (FUNCT_FMUL, 0x4000_0000), (FUNCT_FDIV, 0x3f00_0000),
+            (FUNCT_FSQRT, 0x3f80_0000), (FUNCT_FABS, 0x3f80_0000),
+            (FUNCT_FNEG, 0xbf80_0000), (FUNCT_FRECIP, 0x3f80_0000),
+            (FUNCT_FRSQRT, 0x3f80_0000),
+        ] {
+            exec.core.write_fpr_l(0, 0x1111_1111_3f80_0000);
+            exec.core.write_fpr_l(2, 0x2222_2222_4000_0000);
+            exec.core.write_fpr_l(4, 0xdead_beef_89ab_cdef);
+            exec.core.fpu_fcsr = 0;
+            assert_eq!(exec.exec(make_cop1_compute(RS_S, 2, 0, 4, operation)), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(4), expected, "single operation {:#x}", operation);
+        }
+        for (operation, expected) in [(FUNCT_MADD_S, 0x40a0_0000),
+            (FUNCT_MSUB_S, 0xbf80_0000), (FUNCT_NMADD_S, 0xc0a0_0000),
+            (FUNCT_NMSUB_S, 0x3f80_0000)] {
+            exec.core.write_fpr_l(0, 0x1111_1111_3f80_0000);
+            exec.core.write_fpr_l(2, 0x2222_2222_4000_0000);
+            exec.core.write_fpr_l(6, 0x3333_3333_4040_0000);
+            exec.core.write_fpr_l(4, 0xdead_beef_89ab_cdef);
+            let raw = (OP_COP1X << 26) | (6 << 21) | (2 << 16) | (4 << 6) | operation;
+            assert_eq!(exec.exec(raw), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(4), expected);
+        }
+        for (fmt, value) in [(RS_D, 0x3ff0_0000_0000_0000), (RS_W, 1), (RS_L, 1)] {
+            exec.core.write_fpr_l(0, value);
+            exec.core.write_fpr_l(4, 0xdead_beef_89ab_cdef);
+            exec.core.fpu_fcsr = 0;
+            assert_eq!(exec.exec(make_cop1_compute(fmt, 0, 0, 4, FUNCT_FCVT_S)), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(4), 0x3f80_0000);
+        }
+    }
+
+    #[test]
+    fn r14000_single_result_trap_preserves_full_destination() {
+        let mut exec = fpu_executor::<FpuR14000>();
+        exec.core.write_fpr_l(0, 0x3f80_0000);
+        exec.core.write_fpr_l(2, 0);
+        exec.core.write_fpr_l(4, 0xdead_beef_89ab_cdef);
+        exec.core.fpu_fcsr = 0x400;
+        let status = exec.exec(make_cop1_compute(RS_S, 2, 0, 4, FUNCT_FDIV));
+        assert_ne!(status & EXEC_IS_EXCEPTION, 0);
+        assert_eq!((status >> 2) & 31, 15);
+        assert_eq!(exec.core.fpu_fcsr, 0x8400);
+        assert_eq!(exec.core.read_fpr_l(4), 0xdead_beef_89ab_cdef);
+    }
+
+    #[test]
+    fn r14000_single_result_policy_keeps_raw_word_transfers_and_word_conversion() {
+        let mem = Arc::new(MockMemory::new());
+        mem.set_word(0x2000, 0x89ab_cdef);
+        let cfg = MipsCpuConfig::for_model::<FpuR14000>();
+        let mut exec = Box::new(MipsExecutor::<PassthroughTlb, FpuR14000>::new(
+            mem, PassthroughTlb::default(), &cfg,
+        ));
+        disable_jitv2(&mut exec);
+        exec.core.cp0_status |= STATUS_CU1 | STATUS_FR;
+        exec.update_fpr_mode();
+        exec.core.write_gpr(1, 0x2000);
+        exec.core.write_gpr(2, 0x0123_4567_89ab_cdef);
+        for raw in [make_i(OP_LWC1, 1, 4, 0), (OP_COP1 << 26) | (4 << 21) | (2 << 16) | (4 << 11)] {
+            exec.core.write_fpr_l(4, 0xdead_beef_0000_0000);
+            assert_eq!(exec.exec(raw), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(4), 0xdead_beef_89ab_cdef);
+        }
+        exec.core.write_fpr_l(0, 0x3f80_0000);
+        exec.core.write_fpr_l(4, 0xdead_beef_0000_0000);
+        assert_eq!(exec.exec(make_cop1_compute(RS_S, 0, 0, 4, FUNCT_FCVT_W)), EXEC_COMPLETE);
+        assert_eq!(exec.core.read_fpr_l(4), 0xdead_beef_0000_0001);
+
+        exec.core.cp0_status &= !STATUS_FR;
+        exec.update_fpr_mode();
+        exec.core.write_fpr_l(4, 0x1122_3344_5566_7788);
+        assert_eq!(exec.exec(make_cop1_compute(RS_S, 0, 0, 5, FUNCT_FSQRT)), EXEC_COMPLETE);
+        assert_eq!(exec.core.read_fpr_l(4), 0x3f80_0000_5566_7788);
+    }
+
+    #[test]
+    fn earlier_models_single_result_upper_word_policy_stays_unchanged() {
+        fn check<C: CpuModel + From<Arc<dyn BusDevice>>>() {
+            let mut exec = fpu_executor::<C>();
+            exec.core.write_fpr_l(0, 0x3f80_0000);
+            exec.core.write_fpr_l(4, 0xdead_beef_89ab_cdef);
+            assert_eq!(exec.exec(make_cop1_compute(RS_S, 0, 0, 4, FUNCT_FSQRT)), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(4), 0xdead_beef_3f80_0000);
+        }
+        use crate::cpu::mips_cache_shadow::{R4400ShadowCache, R5000ShadowCache, R10000ShadowCache};
+        check::<R4400ShadowCache>();
+        check::<R5000ShadowCache>();
+        check::<R10000ShadowCache>();
+    }
+
+    #[test]
+    fn r14000_single_sqrt_zeroes_undefined_upper_word() {
+        let mut exec = fpu_executor::<FpuR14000>();
+        exec.core.write_fpr_l(10, 0x0000_0000_443e_26ec);
+        exec.core.write_fpr_l(16, 0xfbb3_a7f3_6bdc_8c4b);
+        exec.core.fpu_fcsr = 0x1000_0000;
+        // Observed olperi seed 222 inputs; NEC UM p. 279 selects zero here.
+        assert_eq!(exec.exec(0x4600_5404), EXEC_COMPLETE); // SQRT.S f16,f10
+        assert_eq!(exec.core.read_fpr_l(16), 0x0000_0000_41dc_a20c);
+        assert_eq!(exec.core.read_fpr_l(10), 0x0000_0000_443e_26ec);
+        assert_eq!(exec.core.fpu_fcsr, 0x1000_0000);
+    }
+
+    #[test]
     fn r14000_fs_clear_float_to_integer_denormal_is_unimplemented() {
         let mut exec = fpu_executor::<FpuR14000>();
         for fmt in [RS_S, RS_D] {
