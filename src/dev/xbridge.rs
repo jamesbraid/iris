@@ -219,8 +219,9 @@ impl XBridge {
         let bit = 1 << (widget - 8);
         st.eight_bit = (st.eight_bit & !bit) | if enabled { bit } else { 0 };
     }
-    /// A pulse for each reset port. Internal head state is already reset;
-    /// the machine resets attached function engines through this callback.
+    /// A pulse for each reset port, outside chip locks. A head's registers,
+    /// routed PCI lines and function headers are already reset. The board
+    /// must reset that port's attached engines through this callback.
     pub fn set_reset_output(&self, output: Arc<dyn Fn(u8) + Send + Sync>) {
         *self.xbow.reset_output.write() = Some(output);
     }

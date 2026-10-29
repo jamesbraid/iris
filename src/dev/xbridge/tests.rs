@@ -332,6 +332,72 @@ fn link_reset_changes_one_head_and_preserves_crossbar_programming() {
     assert_eq!(f.read32(0x84).data, 0xa00000);
     assert_eq!(x.read32(0x24).data, 0xfe);
 }
+
+#[test]
+fn link_reset_callback_resets_a_function_and_can_reenter_the_chip() {
+    use crate::dev::isp1040::{mbox, reg, CTRL_INT_ENABLE, CTRL_RISC_INT_ENABLE, HOST_CMD_SHIFT};
+    use crate::dev::isp12160::Isp12160;
+
+    let (c, _) = chip();
+    let isp = Arc::new(Isp12160::new());
+    c.attach(15, 1, isp.clone());
+    let (probe, line) = crate::irq::LevelProbe::line();
+    c.set_pci_irq(15, 1, 0, line);
+    isp.config().write(1, 6);
+    isp.config().write(5, 0x02000000);
+    isp.bar_write(1, reg::BUS_CTRL, u32::from(CTRL_INT_ENABLE | CTRL_RISC_INT_ENABLE), 2);
+    isp.bar_write(1, reg::MAILBOX_BASE, u32::from(mbox::NOP), 2);
+    isp.bar_write(1, reg::HOST_CMD, 0x5 << HOST_CMD_SHIFT, 2);
+    assert!(probe.level());
+    assert_eq!(isp.bar_read(1, reg::MAILBOX_BASE, 2), u32::from(mbox::COMPLETE));
+
+    let weak = Arc::downgrade(&c);
+    let reset_isp = isp.clone();
+    c.set_reset_output(Arc::new(move |port| {
+        assert_eq!(port, 15);
+        let chip = weak.upgrade().unwrap();
+        // Callbacks own attached engines and may inspect or rewire the chip.
+        assert_eq!(chip.head(port).read32(0x84).data, 0x20000);
+        assert_eq!(chip.crossbar().read32(4).data, 0x2d000001);
+        assert_eq!(reset_isp.config().command(), 0);
+        reset_isp.power_on();
+        chip.set_reset_output(Arc::new(|_| {}));
+    }));
+    c.head(15).write32(0x84, 0xa00000);
+    c.crossbar().write32(0x2f4, 1);
+    assert!(!probe.level());
+    assert_eq!(isp.config().bar_base(1), 0);
+    assert_eq!(isp.bar_read(1, reg::BUS_CTRL, 2), 0);
+    assert_eq!(isp.bar_read(1, reg::BUS_STATUS, 2), 0);
+    assert_eq!(isp.bar_read(1, reg::MAILBOX_BASE, 2), 0);
+    assert_eq!(isp.bar_read(1, reg::MAILBOX_BASE + 2, 2), 0x4953);
+}
+
+#[test]
+fn warm_reset_notifies_only_admitted_ports_after_head_state_is_reset() {
+    let (c, _) = chip();
+    let ports = Arc::new(Mutex::new(Vec::new()));
+    let output = ports.clone();
+    let weak = Arc::downgrade(&c);
+    c.set_reset_output(Arc::new(move |port| {
+        if port >= 14 {
+            assert_eq!(weak.upgrade().unwrap().head(port).read32(0x84).data, 0x20000);
+        }
+        output.lock().push(port);
+    }));
+    let x = c.crossbar();
+    x.write32(0xb4, 0xff & !(1 << 2));
+    c.head(14).write32(0x84, 0xa00000);
+    c.head(15).write32(0x84, 0xa00000);
+    c.warm_reset(10, 0);
+    assert_eq!(*ports.lock(), vec![8, 9, 10, 11, 12, 13, 15]);
+    assert_eq!(c.head(14).read32(0x84).data, 0xa00000);
+    ports.lock().clear();
+    c.warm_reset(10, 10239);
+    assert!(ports.lock().is_empty());
+    c.warm_reset(10, 10240);
+    assert_eq!(*ports.lock(), vec![8, 9, 10, 11, 12, 13, 14, 15]);
+}
 #[test]
 fn crossbar_errors_deliver_once_then_clear_the_original_destination() {
     let (c, _) = chip();
