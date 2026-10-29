@@ -1270,8 +1270,14 @@ impl Hpc3 {
         }
     }
 
-    pub fn add_scsi_device(&self, controller: u8, id: usize, path: &str, is_cdrom: bool, discs: Vec<String>, overlay: bool) -> std::io::Result<()> {
-        self.scsi_controller(controller).bus().attach_device(id as u8, path, is_cdrom, discs, overlay, None).map(|_| ())
+    /// The SCSI bus on `controller`: 0 on both machines, 1 on the Indigo2's
+    /// second WD33C93A only.
+    pub fn scsi_bus(&self, controller: u8) -> Result<&crate::scsi::ScsiBus, String> {
+        match controller {
+            0 => Ok(&**self.scsi_dev.bus()),
+            1 => self.scsi_dev1.as_ref().map(|d| &**d.bus()).ok_or_else(|| "controller 1 (this machine has only controller 0)".to_string()),
+            c => Err(format!("controller {c} (valid: 0, 1)")),
+        }
     }
 
     /// Attach a DaynaPort SCSI/Link (SCSI-attached Ethernet) at `id`.
@@ -1294,14 +1300,6 @@ impl Hpc3 {
             ..self.net_base.clone()
         };
         self.scsi_controller(controller).add_daynaport(id, params.mac, gateway)
-    }
-
-    /// Same as `add_scsi_device` but lets the caller specify where the COW
-    /// overlay file lives. Used by `--ci` mode to keep per-process overlays
-    /// in `/tmp` so parallel `--ci` instances (and an interactive session)
-    /// don't race on the same file.
-    pub fn add_scsi_device_with_overlay(&self, controller: u8, id: usize, path: &str, is_cdrom: bool, discs: Vec<String>, overlay: bool, overlay_path: &str) -> std::io::Result<()> {
-        self.scsi_controller(controller).bus().attach_device(id as u8, path, is_cdrom, discs, overlay, Some(overlay_path)).map(|_| ())
     }
 
     pub fn ioc(&self) -> &Ioc {
