@@ -170,6 +170,10 @@ impl BedrockMd {
             s.selftest_error = if s.selftest_result { 0 } else { 1 << 48 };
         }
     }
+    /// Normal MD memory semantics without re-entering the cached Physical map.
+    pub fn memory_view(self: &Arc<Self>) -> Arc<dyn BusDevice> {
+        self.view(View::Memory)
+    }
     pub fn uncached_view(self: &Arc<Self>) -> Arc<dyn BusDevice> {
         self.view(View::Uncached)
     }

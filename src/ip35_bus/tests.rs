@@ -8,7 +8,7 @@ impl BusDevice for Word {
 }
 #[test]
 fn uc_spaces_keep_equal_offsets_distinct() {
-    let mut bus = Ip34Bus::new(Physical::new(Vec::new()));
+    let mut bus = Ip35Bus::new(Physical::new(Vec::new()));
     for space in 0..4 {
         bus.map(
             space,
@@ -25,14 +25,14 @@ fn uc_spaces_keep_equal_offsets_distinct() {
 }
 #[test]
 fn an_access_cannot_cross_a_region_boundary() {
-    let mut bus = Ip34Bus::new(Physical::new(Vec::new()));
+    let mut bus = Ip35Bus::new(Physical::new(Vec::new()));
     bus.map(2, 0x0100_0000, 4, Arc::new(Word(7)));
     assert_eq!(bus.read64((2 << 57) | 0x0100_0000).status, BUS_ERR);
     assert!(bus.first_fault().unwrap().contains("width=8"));
 }
 #[test]
 fn unsupported_request_bits_are_not_silently_masked() {
-    let bus = Ip34Bus::new(Physical::new(Vec::new()));
+    let bus = Ip35Bus::new(Physical::new(Vec::new()));
     assert_eq!(bus.read64(1 << 50).status, BUS_ERR);
 }
 
@@ -49,7 +49,7 @@ impl BusDevice for ResetRom {
 #[test]
 #[cfg(not(feature = "opcodefusion"))]
 fn native_constructor_executes_reset_rom() {
-    let mut bus = Ip34Bus::new(Physical::new(Vec::new()));
+    let mut bus = Ip35Bus::new(Physical::new(Vec::new()));
     bus.map(0, 0x1fc0_0000, 8, Arc::new(ResetRom));
     let mut cpu = crate::ip34_machine::build_cpu(Arc::new(bus)).unwrap();
     assert_eq!(cpu.step_int(), 0);
@@ -60,7 +60,7 @@ fn native_constructor_executes_reset_rom() {
 #[test]
 #[cfg(not(feature = "opcodefusion"))]
 fn xkphys_uc_bits_survive_the_board_cpu_mask() {
-    let bus = Arc::new(Ip34Bus::new(Physical::new(Vec::new())));
+    let bus = Arc::new(Ip35Bus::new(Physical::new(Vec::new())));
     let mut cpu = crate::ip34_machine::build_cpu(bus).unwrap();
     cpu.core.write_cp0(
         12,
@@ -91,7 +91,7 @@ fn stock_prom_first_fault() {
     let board =
         crate::ip34_machine::FuelBoard::new(&image, crate::dev::heart::host_clock()).unwrap();
     let console = board.serial[0].clone();
-    let mut cpu = crate::ip34_machine::build_cpu(board.bus.clone()).unwrap();
+    let mut cpu = board.build_cpu().unwrap();
     let mut recent = std::collections::VecDeque::new();
     let mut serial = Vec::new();
     let mut report = String::new();
@@ -130,7 +130,7 @@ fn stock_prom_first_fault() {
                 |value| Some((value & !0x7c00) | board.irq.bits()),
             )
             .unwrap();
-        let status = cpu.step_int();
+        let status = board.step_cpu(&mut cpu);
         if step % 1024 == 0 {
             board.poll();
             serial.extend(console.drain_guest());
@@ -159,9 +159,6 @@ fn stock_prom_first_fault() {
     }
     for item in board.bus.recent_accesses() {
         writeln!(report, "BUS {item}").unwrap();
-    }
-    for item in board.registers.recent_accesses() {
-        writeln!(report, "REG {item}").unwrap();
     }
     for (i, pi) in board.pi.iter().enumerate() {
         writeln!(report, "PI{i} unsupported={:?}", pi.unsupported()).unwrap();
@@ -208,7 +205,7 @@ fn fuel_board_leds_share_local_and_remote_views() {
 
 #[test]
 fn a_short_register_region_cannot_fall_through_to_pio() {
-    let mut bus = Ip34Bus::new(Physical::new(Vec::new()));
+    let mut bus = Ip35Bus::new(Physical::new(Vec::new()));
     bus.set_fallback(1, 1 << 32, Arc::new(Word(0xfeed)));
     bus.map(1, 0x1000, 4, Arc::new(Word(1)));
     assert_eq!(bus.read64((1 << 57) | 0x1000).status, BUS_ERR);
@@ -235,7 +232,7 @@ impl BusDevice for Data32 {
 #[cfg(not(feature = "opcodefusion"))]
 fn cached_and_uncached_views_use_existing_executor_connections() {
     let physical = Physical::new(Vec::new());
-    let mut uncached = Ip34Bus::new(physical.clone());
+    let mut uncached = Ip35Bus::new(physical.clone());
     uncached.map(
         0,
         0x1fc0_0000,
@@ -245,7 +242,7 @@ fn cached_and_uncached_views_use_existing_executor_connections() {
         ])),
     );
     uncached.map(0, 0x1000, 4, Arc::new(Data32(0x1234)));
-    let mut cached = Ip34Bus::new(physical);
+    let mut cached = Ip35Bus::new(physical);
     cached.map(0, 0x1000, 4, Arc::new(Data32(0x5678)));
     let mut cpu = crate::ip34_machine::build_cpu(Arc::new(uncached)).unwrap();
     cpu.cache = crate::ip34_machine::FuelShadowCache::new(Arc::new(cached));
@@ -312,11 +309,245 @@ fn inbound_interrupts_respect_each_pi_io_protection() {
 fn fuel_cache_geometry_matches_selected_population() {
     use crate::cpu::mips_cache_v2::{MipsCache, CACH_PD, CACH_PI, CACH_SD};
     let cpu =
-        crate::ip34_machine::build_cpu(Arc::new(Ip34Bus::new(Physical::new(Vec::new())))).unwrap();
+        crate::ip34_machine::build_cpu(Arc::new(Ip35Bus::new(Physical::new(Vec::new())))).unwrap();
     assert_eq!(cpu.cache.get_config(CACH_PI), (32768, 64));
     assert_eq!(cpu.cache.get_config(CACH_PD), (32768, 32));
     assert_eq!(cpu.cache.get_config(CACH_SD), (2 * 1024 * 1024, 128));
     assert_eq!(cpu.core.cp0_prid, 0xf23);
     assert_eq!(cpu.core.reset_prid, 0xf23);
     assert_eq!(cpu.core.fpu_fir, 0x900);
+}
+
+#[test]
+#[cfg(not(feature = "opcodefusion"))]
+fn startup_private_bytes_precede_dram_ready() {
+    let board =
+        crate::ip34_machine::FuelBoard::with_startup_home(&[], Arc::new(|| 0), 0x1686a8).unwrap();
+    let mut cpu = board.build_cpu().unwrap();
+    cpu.core.fpr[0] = 2;
+    board.observe_cpu(&mut cpu);
+    let _scope = board.startup.begin_access();
+    let cached = board.cached_bus();
+    assert_eq!(cached.write64(0x103f78, 0x123456789abcdef0), BUS_OK);
+    assert_eq!(cached.read64(0x103f78).data, 0x123456789abcdef0);
+    assert_eq!(board.bus.read64(0x103f78).status, BUS_ERR);
+    assert_eq!(board.md.dma_view().read64(0x103f78).status, BUS_ERR);
+}
+
+#[test]
+#[cfg(not(feature = "opcodefusion"))]
+fn startup_observer_uses_translated_copy_home_and_debug_reads_do_not_latch() {
+    use crate::cpu::mips_tlb::{Tlb, TlbEntry};
+    let board =
+        crate::ip34_machine::FuelBoard::with_startup_home(&[], Arc::new(|| 0), 0x1686a8).unwrap();
+    let mut cpu = board.build_cpu().unwrap();
+    cpu.core.fpr[0] = 2;
+    board.observe_cpu(&mut cpu);
+    // A cached debug read must not create a private phase while DRAM is absent.
+    assert!(cpu.debug_read(0xffffffff80100000, 8).is_err());
+    let mut entry = TlbEntry::new();
+    entry.entry_hi = 0xffffffffc1000000;
+    entry.entry_lo = [(0x01a00000 >> 6) | 0x1f, (0x01a01000 >> 6) | 0x1f];
+    cpu.tlb.write(0, entry);
+    cpu.core.cp0_status &= !crate::cpu::mips_core::STATUS_ERL;
+    cpu.resync_privilege_state();
+    cpu.core.pc = 0xffffffffc1000000;
+    assert_eq!(cpu.debug_translate(cpu.core.pc).phys, 0x01a00000);
+    board.observe_cpu(&mut cpu);
+    {
+        let _scope = board.startup.begin_access();
+        assert_eq!(board.cached_bus().write64(0x100000, 0x1234), BUS_OK);
+    }
+    cpu.core.fpr[0] = 0;
+    board.observe_cpu(&mut cpu);
+    {
+        let _scope = board.startup.begin_access();
+        assert_eq!(board.cached_bus().read64(0x100000).data, 0x1234);
+    }
+    cpu.core.pc = 0xffffffff82000000;
+    board.observe_cpu(&mut cpu);
+    let _scope = board.startup.begin_access();
+    assert_eq!(board.cached_bus().read64(0x100000).status, BUS_ERR);
+}
+
+#[test]
+#[cfg(not(feature = "opcodefusion"))]
+fn startup_step_wrapper_routes_synthetic_cpu_store_and_load() {
+    // sd t1,0(t0); ld t2,0(t0), ordinary public MIPS instructions.
+    let payload: Vec<u8> = [0xfd090000u32, 0xdd0a0000]
+        .into_iter()
+        .flat_map(u32::to_be_bytes)
+        .collect();
+    let board = crate::ip34_machine::FuelBoard::new(&payload, Arc::new(|| 0)).unwrap();
+    let mut cpu = board.build_cpu().unwrap();
+    cpu.core.fpr[0] = 2;
+    cpu.core.gpr[8] = 0xffffffff80103f78;
+    cpu.core.gpr[9] = 0x123456789abcdef0;
+    assert_eq!(board.step_cpu(&mut cpu), 0);
+    assert_eq!(board.step_cpu(&mut cpu), 0);
+    assert_eq!(cpu.core.gpr[10], 0x123456789abcdef0);
+    assert!(cpu.debug_read(0xffffffff80103f78, 8).is_err());
+    assert_eq!(board.bus.read64(0x103f78).status, BUS_ERR);
+}
+
+#[test]
+fn physical_map_slots_own_dispatch() {
+    let physical = Physical::new(Vec::new());
+    physical.set_default(Arc::new(Word(0)), "fixture default");
+    let mut bus = Ip35Bus::new(physical.clone());
+    bus.map(0, 0x1000, 0x1000, Arc::new(Word(0x55)));
+    assert_eq!(bus.views[0].read64(0x1000).data, 0x55);
+    assert_eq!(physical.read64(0x1000).status, BUS_ERR);
+    assert_eq!(bus.read64(0x1000).data, 0x55);
+}
+
+#[test]
+#[cfg(not(feature = "opcodefusion"))]
+fn physical_startup_slots_share_only_the_cached_bank_owner() {
+    use crate::ppmem::devmap::{entry_eq, SLOT_SHIFT};
+    let board =
+        crate::ip34_machine::FuelBoard::with_startup_home(&[], Arc::new(|| 0), 1476264).unwrap();
+    assert!(Arc::ptr_eq(&board.bus.phys, board.md.physical()));
+    assert_eq!(board.bus.phys.banks().len(), 2);
+    for view in &board.bus.views {
+        assert!(view.banks().is_empty());
+    }
+    let entry = board.bus.phys.entry_at(0x100000);
+    for page in 0..8 {
+        assert!(entry_eq(
+            entry,
+            board.bus.phys.entry_at(0x100000 + (page << SLOT_SHIFT))
+        ));
+    }
+    assert!(!entry_eq(entry, board.bus.phys.entry_at(0x0ff000)));
+    assert!(!entry_eq(entry, board.bus.phys.entry_at(0x108000)));
+    assert_eq!(board.md.md_bus().write64(8, 0x33), BUS_OK);
+    let plain = board.md.memory_view();
+    let dma = board.md.dma_view();
+    let mut cpu = board.build_cpu().unwrap();
+    cpu.core.fpr[0] = 2;
+    board.observe_cpu(&mut cpu);
+    let _scope = board.startup.begin_access();
+    let cached = board.cached_bus();
+    for page in 0..8 {
+        let at = 0x100000 + (page << SLOT_SHIFT);
+        assert_eq!(plain.write64(at, 0x100 + page), BUS_OK);
+        assert_eq!(cached.write64(at, 0x200 + page), BUS_OK);
+        assert_eq!(cached.read64(at).data, 0x200 + page);
+        assert_eq!(board.bus.read64(at).data, 0x100 + page);
+        assert_eq!(board.bus.read64((3 << 57) | at).data, 0x100 + page);
+        assert_eq!(dma.read64(at).data, 0x100 + page);
+        assert_eq!(cached.dma_read64(at).data, 0x100 + page);
+        assert_eq!(board.bus.write64(at, 0x300 + page), BUS_OK);
+        assert_eq!(board.bus.write64((3 << 57) | at, 0x400 + page), BUS_OK);
+        assert_eq!(dma.write64(at, 0x500 + page), BUS_OK);
+        assert_eq!(plain.read64(at).data, 0x500 + page);
+        assert_eq!(cached.read64(at).data, 0x200 + page);
+    }
+    assert!(cached.mem_ptr(0x100000).is_none());
+}
+#[test]
+fn physical_cached_plane_retains_full_md_decode_without_extra_banks() {
+    use crate::ppmem::devmap::entry_eq;
+    let board = crate::ip34_machine::FuelBoard::new(&[], Arc::new(|| 0)).unwrap();
+    assert_eq!(board.md.md_bus().write64(8, 0x33), BUS_OK);
+    let at = (1 << 30) + 0x1000;
+    assert_eq!(board.md.memory_view().write64(at, 0x12345678), BUS_OK);
+    assert_eq!(board.cached_bus().read64(at).data, 0x12345678);
+    assert_eq!(board.bus.read64((3 << 57) | at).data, 0x12345678);
+    assert_eq!(board.bus.read64(at).status, BUS_ERR);
+    assert!(entry_eq(
+        board.bus.phys.entry_at(at),
+        board.bus.phys.entry_at((7 << 30) + 0x1000)
+    ));
+    assert_eq!(board.md.dma_view().read64(at).data, 0x12345678);
+}
+#[test]
+fn physical_mixed_hub_page_does_not_alias_neighboring_registers() {
+    let board = crate::ip34_machine::FuelBoard::new(&[], Arc::new(|| 0)).unwrap();
+    for base in [0x10000000, 0x30000000] {
+        assert_eq!(board.bus.read64(base + 0x78).status, BUS_OK);
+        assert_eq!(board.bus.read64(base + 0x7c).status, BUS_ERR);
+        assert_eq!(board.bus.read64(base + 0xbc).status, BUS_ERR);
+        assert_eq!(board.bus.write64(base + 0xd8, 0x55), BUS_OK);
+        assert_eq!(board.bus.read64(base + 0xd8).data, 0x55);
+        assert_eq!(board.bus.read64(base + 0xdc).status, BUS_ERR);
+        assert_eq!(board.bus.read8(base + 0xe0).status, BUS_ERR);
+        assert_eq!(board.bus.read64(base + 0x1000).status, BUS_ERR);
+        assert_eq!(board.bus.read64(base + 0x4000000 + 8).status, BUS_ERR);
+    }
+    assert_eq!(
+        board.registers.read64(crate::dev::bedrock_pi::SIZE).status,
+        BUS_ERR
+    );
+}
+
+#[test]
+fn physical_cached_plane_excludes_uncached_hub_aliases_and_rejects_metadata() {
+    use crate::ppmem::devmap::entry_eq;
+    let board = crate::ip34_machine::FuelBoard::new(&[0; 8], Arc::new(|| 0)).unwrap();
+    assert_eq!(board.md.md_bus().write64(8, 0x33), BUS_OK);
+    let cached = board.cached_bus();
+    for at in [
+        0x10000000, 0x14000000, 0x18000000, 0x1a000000, 0x30000000, 0x38000000,
+    ] {
+        assert_eq!(board.bus.read64(at).status, BUS_OK);
+        assert_eq!(cached.read64(at).status, BUS_ERR);
+    }
+    let normal = board.bus.phys.entry_at(0x40001000);
+    assert!(entry_eq(normal, board.bus.phys.entry_at(0x1c0001000)));
+    assert!(!entry_eq(normal, board.bus.views[0].entry_at(0x1c0001000)));
+    assert_eq!(cached.read64(0x1c0001000).status, BUS_ERR);
+    assert_eq!(board.bus.read64(0x1c0001000).status, BUS_OK);
+    assert_eq!(cached.read32(0x1fc00000).status, BUS_OK);
+    for raw in 1..4 {
+        assert_eq!(cached.read64((raw << 57) | 0x100000).status, BUS_ERR);
+        assert_eq!(cached.read32((raw << 57) | 0x1fc00000).status, BUS_ERR);
+    }
+}
+#[test]
+fn physical_board_drop_releases_md_and_its_bank_owner() {
+    let board = crate::ip34_machine::FuelBoard::new(&[], Arc::new(|| 0)).unwrap();
+    let md = Arc::downgrade(&board.md);
+    let physical = Arc::downgrade(&board.bus.phys);
+    drop(board);
+    assert!(md.upgrade().is_none());
+    assert!(physical.upgrade().is_none());
+}
+#[test]
+#[cfg(not(feature = "opcodefusion"))]
+fn physical_cached_cpu_connection_rejects_unaligned_window_crossings() {
+    let board =
+        crate::ip34_machine::FuelBoard::with_startup_home(&[], Arc::new(|| 0), 1476264).unwrap();
+    assert_eq!(board.md.md_bus().write64(8, 0x33), BUS_OK);
+    let mut cpu = board.build_cpu().unwrap();
+    cpu.core.fpr[0] = 2;
+    board.observe_cpu(&mut cpu);
+    let _scope = board.startup.begin_access();
+    let cached = board.cached_bus();
+    assert_eq!(cached.write64(0x100000, 0x12345678), BUS_OK);
+    assert_eq!(cached.write32(0x0ffffe, 0xabcdef01), BUS_ERR);
+    assert_eq!(cached.write32(0x107ffe, 0xabcdef01), BUS_ERR);
+    assert_eq!(cached.read32(0x0ffffe).status, BUS_ERR);
+    assert_eq!(cached.read32(0x107ffe).status, BUS_ERR);
+    assert_eq!(cached.read64(0x100000).data, 0x12345678);
+    assert_eq!(board.md.memory_view().read64(0x100000).data, 0);
+}
+
+#[test]
+fn physical_cached_reset_rom_has_exact_payload_bounds_in_its_last_slot() {
+    let payload = vec![0x5a; 1476264];
+    // The fixture PC home is deliberately independent of its ROM extent.
+    let board = crate::ip34_machine::FuelBoard::with_startup_home(&payload, Arc::new(|| 0), 0x1000)
+        .unwrap();
+    let cached = board.cached_bus();
+    let end = 0x1fc00000 + payload.len() as u64;
+    assert_eq!(cached.read8(end - 1).data, 0x5a);
+    assert_eq!(cached.read64(end - 8).data, 0x5a5a5a5a5a5a5a5a);
+    assert_eq!(cached.read8(end).status, BUS_ERR);
+    assert_eq!(cached.read8(end + 16).status, BUS_ERR);
+    assert_eq!(board.bus.read8(end).status, BUS_OK);
+    drop(board);
+    let empty = crate::ip34_machine::FuelBoard::new(&[], Arc::new(|| 0)).unwrap();
+    assert_eq!(empty.cached_bus().read32(0x1fc00000).status, BUS_ERR);
 }

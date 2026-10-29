@@ -6,7 +6,7 @@
 use crate::cpu::mips_cache_shadow::ShadowCache;
 use crate::cpu::mips_exec::{MipsCpuConfig, MipsExecutor};
 use crate::cpu::mips_tlb::MipsTlb;
-use crate::ip34::{Ip34Bus, CPU_PHYS_MASK};
+use crate::ip35_bus::{Ip35Bus, CPU_PHYS_MASK};
 use crate::traits::BusDevice;
 use std::sync::Arc;
 
@@ -27,7 +27,7 @@ pub(crate) type FuelCpu = MipsExecutor<MipsTlb, FuelShadowCache>;
 
 /// Select Fuel's population and identity over the existing R10000 policies.
 /// This does not qualify the remaining R14000 execution or diagnostic behavior.
-pub(crate) fn build_cpu(bus: Arc<Ip34Bus>) -> Result<Box<FuelCpu>, String> {
+pub(crate) fn build_cpu(bus: Arc<Ip35Bus>) -> Result<Box<FuelCpu>, String> {
     if cfg!(feature = "opcodefusion") {
         return Err("Fuel currently requires an interpreter build without opcodefusion".into());
     }
@@ -53,7 +53,8 @@ pub(crate) fn build_cpu(bus: Arc<Ip34Bus>) -> Result<Box<FuelCpu>, String> {
 /// Private bring-up composition for a single-processor Fuel.
 /// Graphics and USB remain absent until their device implementations attach.
 pub(crate) struct FuelBoard {
-    pub bus: Arc<Ip34Bus>,
+    pub bus: Arc<Ip35Bus>,
+    pub startup: Arc<crate::ip35_bus::startup::StartupWindow>,
     pub pi: [Arc<crate::dev::bedrock_pi::BedrockPi>; 2],
     pub md: Arc<crate::dev::bedrock_md::BedrockMd>,
     pub l1: Arc<crate::dev::l1::L1>,
@@ -62,7 +63,7 @@ pub(crate) struct FuelBoard {
     pub io: Arc<crate::dev::bedrock_io::BedrockIo>,
     pub ni: Arc<crate::dev::bedrock_ni::BedrockNi>,
     pub xb: Arc<crate::dev::bedrock_xb::BedrockXb>,
-    pub registers: Arc<Ip34Bus>,
+    pub registers: Arc<crate::physical::Physical>,
     pub xbridge: Arc<crate::dev::xbridge::XBridge>,
     pub ioc3: Arc<crate::dev::ioc3::Ioc3>,
     pub eth: Arc<crate::dev::ioc3_eth::Ioc3Eth>,
@@ -76,6 +77,15 @@ pub(crate) struct FuelBoard {
 
 impl FuelBoard {
     pub fn new(payload: &[u8], clock: crate::dev::heart::Clock) -> Result<Self, String> {
+        Self::with_startup_home(payload, clock, payload.len() as u64)
+    }
+
+    /// Fixtures without executable payload bytes must name their execution home.
+    pub fn with_startup_home(
+        payload: &[u8],
+        clock: crate::dev::heart::Clock,
+        execution_size: u64,
+    ) -> Result<Self, String> {
         use crate::dev::bedrock_pi::{BedrockPi, BedrockPiConfig};
         let md = crate::dev::bedrock_md::BedrockMd::new();
         let phys = md.physical().clone();
@@ -95,15 +105,56 @@ impl FuelBoard {
         let io = Arc::new(crate::dev::bedrock_io::BedrockIo::new());
         let ni = Arc::new(crate::dev::bedrock_ni::BedrockNi::new());
         let xb = Arc::new(crate::dev::bedrock_xb::BedrockXb::new());
-        let mut registers = Ip34Bus::new(phys.clone());
-        registers.map(0, 0, crate::dev::bedrock_pi::SIZE, pi[0].clone());
-        registers.map(0, 0x20_0000, crate::dev::bedrock_pi::SIZE, pi[1].clone());
-        registers.map(0, 0x40_0000, 0x30010, io.clone());
-        registers.map(0, 0x60_0000, 0xc040, lb.clone());
-        registers.map(0, 0x68_0000, 0x2008, ni.clone());
-        registers.map(0, 0x70_0000, 0x198, xb.clone());
-        registers.map(0, 0x78_0000, 0x200000 - 0x180000, md.md_bus());
-        let registers = Arc::new(registers);
+        let registers = crate::ip35_bus::empty_view();
+        crate::ip35_bus::map_device(
+            &registers,
+            0,
+            crate::dev::bedrock_pi::SIZE,
+            pi[0].clone(),
+            "Bedrock registers",
+        );
+        crate::ip35_bus::map_device(
+            &registers,
+            0x20_0000,
+            crate::dev::bedrock_pi::SIZE,
+            pi[1].clone(),
+            "Bedrock registers",
+        );
+        crate::ip35_bus::map_device(
+            &registers,
+            0x40_0000,
+            0x30010,
+            io.clone(),
+            "Bedrock registers",
+        );
+        crate::ip35_bus::map_device(
+            &registers,
+            0x60_0000,
+            0xc040,
+            lb.clone(),
+            "Bedrock registers",
+        );
+        crate::ip35_bus::map_device(
+            &registers,
+            0x68_0000,
+            0x2008,
+            ni.clone(),
+            "Bedrock registers",
+        );
+        crate::ip35_bus::map_device(
+            &registers,
+            0x70_0000,
+            0x198,
+            xb.clone(),
+            "Bedrock registers",
+        );
+        crate::ip35_bus::map_device(
+            &registers,
+            0x78_0000,
+            0x200000 - 0x180000,
+            md.md_bus(),
+            "Bedrock registers",
+        );
         io.connect_hub(Arc::new(IoHub(Arc::downgrade(&registers), pi.clone())));
         io.connect_memory(md.dma_view());
         let p = pi.clone();
@@ -202,7 +253,7 @@ impl FuelBoard {
         xbridge.attach(15, 1, scsi.clone());
         xbridge.attach(15, 4, ioc3.clone());
         ioc3.connect_superio_interrupt(xbridge.pin_line(15, 0));
-        let mut bus = Ip34Bus::new(phys.clone());
+        let mut bus = Ip35Bus::new(phys.clone());
         bus.set_fallback(1, 1 << 32, Arc::new(IoPio(io.clone())));
         // The two XIO register forms select the requester's PI0 interface.
         let protected_regs = Arc::new(Protected {
@@ -212,10 +263,12 @@ impl FuelBoard {
         for base in [0x0100_0000, 0x0180_0000] {
             bus.map(1, base, 0x80_0000, protected_regs.clone());
         }
-        let ram: Arc<dyn BusDevice> = phys;
+        // The cached plane retains the complete MD decoder. SysAd UC0 and
+        // UC3 have independent maps and never re-enter this overlay plane.
+        phys.map(0, 1 << 33, md.memory_view(), "Bedrock cached memory");
         bus.map(3, 0, 1 << 33, md.uncached_view());
         // Hub-special low memory: its first 256 MiB is the node memory view.
-        bus.map(0, 0, 0x1000_0000, ram);
+        bus.map(0, 0, 0x1000_0000, md.memory_view());
         let prom = Arc::new(
             flash
                 .array_view(0, crate::dev::bedrock_flash::PART_SIZE)
@@ -228,24 +281,37 @@ impl FuelBoard {
                 0x80_0000
             };
             bus.map(0, base, len, prom.clone());
+            if base == 0x1fc0_0000 && !payload.is_empty() {
+                crate::ip35_bus::map_device(
+                    &phys,
+                    base,
+                    payload.len() as u64,
+                    prom.clone(),
+                    "Fuel cached reset PROM",
+                );
+            }
         }
-        let uart = Arc::new(Protected {
-            md: md.clone(),
-            device: l1.clone(),
-        });
-        for base in [0x1000_0080, 0x3000_0080] {
-            bus.map(0, base, 0x40, uart.clone());
-        }
-        let board_id = Arc::new(BoardId(md.clone()));
-        let head = Arc::new(HubHead(md.clone()));
         let leds = Arc::new(Leds {
             md: md.clone(),
             values: parking_lot::Mutex::new([0; 4]),
         });
+        let uart = Arc::new(Protected {
+            md: md.clone(),
+            device: l1.clone(),
+        });
+        let head = Arc::new(HubHead(md.clone()));
         for base in [0x1000_0000, 0x3000_0000] {
-            bus.map(0, base, 0x80, head.clone());
-            bus.map(0, base + 0xc0, 0x20, leds.clone());
-            bus.map(0, base + 0x400_0000, 8, board_id.clone());
+            bus.map(
+                0,
+                base,
+                1 << crate::ppmem::devmap::SLOT_SHIFT,
+                Arc::new(HubSpecialPage {
+                    head: head.clone(),
+                    uart: uart.clone(),
+                    leds: leds.clone(),
+                }),
+            );
+            bus.map(0, base + 0x400_0000, 8, Arc::new(BoardId(md.clone())));
         }
         let second = Arc::new(
             flash
@@ -262,8 +328,19 @@ impl FuelBoard {
         bus.map(0, 0x1_4000_0000, 1 << 30, md.ecc_bus());
         bus.map(0, 0x1_0000_0000, 1 << 30, md.ecc_scrub_bus());
         bus.map(2, 0, 1 << 33, md.fetchop_bus());
+        let startup = Arc::new(crate::ip35_bus::startup::StartupWindow::new(execution_size));
+        phys.map(
+            0x100000,
+            0x108000,
+            Arc::new(crate::ip35_bus::startup::CachedView::new(
+                md.memory_view(),
+                startup.clone(),
+            )),
+            "Fuel private startup window",
+        );
         Ok(Self {
             bus: Arc::new(bus),
+            startup,
             pi,
             md,
             l1,
@@ -283,6 +360,35 @@ impl FuelBoard {
             clock,
             running: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    pub fn cached_bus(&self) -> Arc<dyn BusDevice> {
+        self.bus.cached_view(self.md.memory_view())
+    }
+
+    /// Construct the cached view once. Every instruction must subsequently
+    /// execute through step_cpu, which publishes phase state and scopes access.
+    pub fn build_cpu(&self) -> Result<Box<FuelCpu>, String> {
+        let mut cpu = build_cpu(self.bus.clone())?;
+        cpu.cache = FuelShadowCache::new(self.cached_bus());
+        Ok(cpu)
+    }
+
+    /// CPU-thread observer. Debugger reads must never call this method.
+    pub fn observe_cpu(&self, cpu: &mut FuelCpu) {
+        let pc = cpu.debug_translate(cpu.core.pc);
+        self.startup.observe(
+            cpu.core.fpr[0],
+            (!pc.is_exception()).then_some(pc.phys),
+            self.lb.node_number(),
+        );
+    }
+
+    /// One non-fused interpreter instruction with private-window observation.
+    pub fn step_cpu(&self, cpu: &mut FuelCpu) -> u32 {
+        self.observe_cpu(cpu);
+        let _scope = self.startup.begin_access();
+        cpu.step_int()
     }
 
     pub fn start(&self) {
@@ -329,7 +435,7 @@ impl FuelBoard {
 /// Break the I/O-to-registers ownership cycle while keeping the native bus
 /// interface. A detached endpoint refuses accesses.
 struct IoHub(
-    std::sync::Weak<Ip34Bus>,
+    std::sync::Weak<crate::physical::Physical>,
     [Arc<crate::dev::bedrock_pi::BedrockPi>; 2],
 );
 macro_rules! weak_access {
@@ -371,6 +477,43 @@ impl BusDevice for IoHub {
             .map(|b| b.write64(a, v))
             .unwrap_or(crate::traits::BUS_ERR)
     }
+}
+
+struct HubSpecialPage {
+    head: Arc<HubHead>,
+    uart: Arc<Protected>,
+    leds: Arc<Leds>,
+}
+impl HubSpecialPage {
+    fn target(&self, a: u64, n: u64) -> Option<(&dyn BusDevice, u64)> {
+        let end = a.checked_add(n)?;
+        match a {
+            0..=0x7f if end <= 0x80 => Some((self.head.as_ref(), a)),
+            0x80..=0xbf if end <= 0xc0 => Some((self.uart.as_ref(), a - 0x80)),
+            0xc0..=0xdf if end <= 0xe0 => Some((self.leds.as_ref(), a - 0xc0)),
+            _ => None,
+        }
+    }
+}
+macro_rules! hub_page_access {
+    ($r:ident,$w:ident,$t:ty,$out:ident,$n:expr) => {
+        fn $r(&self, a: u64) -> crate::traits::$out {
+            self.target(a, $n)
+                .map(|(d, at)| d.$r(at))
+                .unwrap_or_else(crate::traits::$out::err)
+        }
+        fn $w(&self, a: u64, v: $t) -> u32 {
+            self.target(a, $n)
+                .map(|(d, at)| d.$w(at, v))
+                .unwrap_or(crate::traits::BUS_ERR)
+        }
+    };
+}
+impl BusDevice for HubSpecialPage {
+    hub_page_access!(read8, write8, u8, BusRead8, 1);
+    hub_page_access!(read16, write16, u16, BusRead16, 2);
+    hub_page_access!(read32, write32, u32, BusRead32, 4);
+    hub_page_access!(read64, write64, u64, BusRead64, 8);
 }
 
 struct BoardId(Arc<crate::dev::bedrock_md::BedrockMd>);
