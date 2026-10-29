@@ -45,7 +45,7 @@ use crate::devlog::{LogModule, CACHE_LOG_HIT, CACHE_LOG_OP, devlog_is_active, de
 /// to the two ways of a set and reads one back. Keeping them costs an array
 /// dimension in a structure no load or store ever consults.
 struct Shadow {
-    /// One raw tag per line, stored and returned verbatim. 64 bits: an
+    /// One tag per line, retaining the published fields. 64 bits: an
     /// R10000 secondary tag carries a 40-bit physical address.
     tags: Box<[u64]>,
     /// Data array in u64 slots. Empty where the model has no data shadow.
@@ -525,9 +525,8 @@ impl<
         }
 
         match op {
-            // Index_Store_Tag / Index_Load_Tag. Stored and returned verbatim:
-            // a tag test is a round trip, and round trips do not require
-            // knowing what the bits mean.
+            // Index_Store_Tag / Index_Load_Tag retain the secondary tag
+            // fields and return zero for its reserved bits.
             C_IST => {
                 let idx = self.tag_slot(sel, virt_addr);
                 let mask = if matches!(sel, CACH_SI | CACH_SD) { L2_TAG_MASK } else { u64::MAX };
@@ -538,10 +537,8 @@ impl<
                 let s = self.shadow(sel);
                 if idx < s.tags.len() {
                     // The MRU bit belongs to the set, not to this way, so it
-                    // is lifted out and kept separately. Everything else is
-                    // stored verbatim: bit 32 in particular is *not* spare —
-                    // TagHi[3:0] are tag address bits 35:32, and clearing it
-                    // here destroyed real tag bits.
+                    // is lifted out and kept separately. Bit 32 is tag
+                    // storage: TagHi[3:0] hold physical-address bits 39:36.
                     let set = (idx / WAYS).min(s.mru.len() - 1);
                     s.mru[set] = phys_addr & MRU_BIT != 0;
                     s.tags[idx] = phys_addr & mask & !MRU_BIT;
@@ -707,24 +704,21 @@ mod tests {
         R10000ShadowCache::from(mem)
     }
 
-    /// A tag test is a round trip, so the shadow must return exactly the bits
-    /// it was given — including any the real layout would not use. The cache
-    /// model that preceded this one decoded TagLo into ptag/state/pidx fields
-    /// and re-encoded on the way out, which silently dropped the low seven
-    /// bits and every state code it did not recognise. A walking-1s test then
-    /// failed on its very first bit.
+    /// NEC U10278E fourth edition, p.270, figure 11-31; U12754E, p.22.
+    /// ECC, virtual index, state, address and MRU survive; reserved bits read zero.
     #[test]
-    fn tags_round_trip_every_bit() {
+    fn secondary_tag_fields_round_trip_and_reserved_bits_read_zero() {
         let c = cache();
         for bit in 0..64 {
-            // 32 and 63 are MRU control/state, not tag storage.
-            if bit == 32 || bit == 63 { continue; }
             let v = 1u64 << bit;
+            // TagLo[8:0], [11:10], [31:14]; TagHi[3:0] and [31].
+            // Enumerate the published fields independently of L2_TAG_MASK.
+            let expected = if matches!(bit, 0..=8 | 10..=11 | 14..=35 | 63) { v } else { 0 };
             c.cache_op(C_IST | CACH_SD, 0, v);
             assert_eq!(
                 c.cache_op(C_ILT | CACH_SD, 0, 0),
-                v,
-                "bit {bit} did not survive a store/load tag round trip"
+                expected,
+                "secondary tag bit {bit}"
             );
         }
     }
@@ -869,18 +863,24 @@ mod tests {
     #[test]
     fn an_untouched_set_has_no_mru_bit() {
         let c = cache();
-        c.cache_op(C_IST | CACH_SD, 0, 0xdead_beef);
-        assert_eq!(c.cache_op(C_ILT | CACH_SD, 0, 0), 0xdead_beef);
+        for way in 0..2 {
+            assert_eq!(c.cache_op(C_ILT | CACH_SD, way, 0), 0);
+        }
+        c.cache_op(C_IST | CACH_SD, 128, MRU_BIT);
+        c.cache_op(C_IST | CACH_SD, 0, 0xdead_8cef);
+        assert_eq!(c.cache_op(C_ILT | CACH_SD, 0, 0), 0xdead_8cef);
+        assert_eq!(c.cache_op(C_ILT | CACH_SD, 1, 0), 0);
+        assert_eq!(c.cache_op(C_ILT | CACH_SD, 128, 0), MRU_BIT);
     }
 
     /// Separate lines must not alias onto one another.
     #[test]
     fn distinct_lines_hold_distinct_tags() {
         let c = cache();
-        c.cache_op(C_IST | CACH_SD, 0, 0x1111_1111);
-        c.cache_op(C_IST | CACH_SD, 128, 0x2222_2222);
-        assert_eq!(c.cache_op(C_ILT | CACH_SD, 0, 0), 0x1111_1111);
-        assert_eq!(c.cache_op(C_ILT | CACH_SD, 128, 0), 0x2222_2222);
+        c.cache_op(C_IST | CACH_SD, 0, 0x1111_0111);
+        c.cache_op(C_IST | CACH_SD, 128, 0x2222_0022);
+        assert_eq!(c.cache_op(C_ILT | CACH_SD, 0, 0), 0x1111_0111);
+        assert_eq!(c.cache_op(C_ILT | CACH_SD, 128, 0), 0x2222_0022);
     }
 
     /// Bit 0 of a CACHE index selects the **way**, and the two ways of a set
@@ -908,14 +908,14 @@ mod tests {
         for set in 0..4u64 {
             for way in 0..2u64 {
                 let va = set * 128 + way;
-                c.cache_op(C_IST | CACH_SD, va, 0x1000 + set * 16 + way);
+                c.cache_op(C_IST | CACH_SD, va, 0x4000 + set * 16 + way);
             }
         }
         for set in 0..4u64 {
             for way in 0..2u64 {
                 let va = set * 128 + way;
                 assert_eq!(c.cache_op(C_ILT | CACH_SD, va, 0),
-                           0x1000 + set * 16 + way,
+                           0x4000 + set * 16 + way,
                            "set {set} way {way} aliased");
             }
         }
