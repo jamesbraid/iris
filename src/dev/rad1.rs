@@ -31,9 +31,13 @@
 //!   capture times them, the rate is inferred from the record layout.
 //! * UST ticks every 960 ns, a selected board policy; the physical rate is
 //!   unmeasured.
-//! * The sample clock, UST and status schedule run on host wall time, less
-//!   the time the machine was stopped; they are not tied to the emulated
-//!   CPU's progress.
+//! * The sample clock and status schedule run on host wall time, less the
+//!   time the machine was stopped. The UST runs on the CPU's instruction
+//!   count at its nominal clock once the machine wires it
+//!   ([`Inner::use_cpu_clock`]), and on that host time until then. The
+//!   driver times its UST liveness check with a delay loop, not a clock:
+//!   on host time a fast emulated CPU finished the loop before three ticks
+//!   had passed and the driver reported the UST stalled.
 //! * A BAR0 access the model does not recognise is logged and reads zero.
 //!   The model fails the bus access instead, which the PCI bus layer here
 //!   cannot express.
@@ -48,6 +52,7 @@ use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::config::AudioConfig;
+use crate::cpu::mips_core::CyclesPtr;
 use crate::devlog::LogModule;
 use crate::host_audio::{HostOut, Resampler};
 use crate::hptimer::{TimerId, TimerManager, TimerReturn};
@@ -326,6 +331,9 @@ struct State {
     ust_enabled: bool,
     ust_armed: bool,
     ust_last_ns: i64,
+    /// The UST clock less the host clock, as of the last catch-up: maps a
+    /// frame boundary on the sample clock to the UST's clock.
+    ust_skew: i64,
     /// Bumped whenever the status schedule is replaced, so a stale timer
     /// callback notices and ends.
     status_gen: u64,
@@ -356,6 +364,7 @@ impl State {
             ust_enabled: false,
             ust_armed: false,
             ust_last_ns: now,
+            ust_skew: 0,
             status_gen: 0,
             status_interval: 0,
             status_start_ns: 0,
@@ -367,11 +376,12 @@ impl State {
         }
     }
 
-    /// The UST counter as it will read at `ns`, for stamping a position.
+    /// The UST counter as it will read at host time `ns`, for stamping a
+    /// position.
     fn ust_at(&self, ns: i64) -> u32 {
         let mut ticks = self.ust_phase;
         if self.ust_enabled {
-            ticks += ns - self.ust_last_ns;
+            ticks += ns + self.ust_skew - self.ust_last_ns;
         }
         self.ust_count.wrapping_add(ticks.div_euclid(UST_NS_PER_TICK) as u32)
     }
@@ -409,7 +419,8 @@ impl State {
         self.dma_bank[((reg - DMA_BANK_FIRST) / 4) as usize]
     }
 
-    /// Advance the UST counter to `now`. It counts only while enabled.
+    /// Advance the UST counter to `now` on the UST's clock. It counts only
+    /// while enabled.
     fn ust_update(&mut self, now: i64) {
         if self.ust_enabled && now > self.ust_last_ns {
             let total = now - self.ust_last_ns + self.ust_phase;
@@ -542,6 +553,9 @@ pub struct Inner {
     audio_cfg: Mutex<Option<AudioConfig>>,
     sink: Mutex<Option<Sink>>,
     underruns: Arc<AtomicU64>,
+    /// The CPU's instruction count and nominal clock in Hz, once the UST
+    /// follows the CPU.
+    cpu_clock: OnceLock<(CyclesPtr, u64)>,
     me: Weak<Inner>,
 }
 
@@ -568,6 +582,7 @@ impl Inner {
             audio_cfg: Mutex::new(None),
             sink: Mutex::new(None),
             underruns: Arc::new(AtomicU64::new(0)),
+            cpu_clock: OnceLock::new(),
             me,
         }
     }
@@ -660,6 +675,31 @@ impl Inner {
         });
         let wav = std::env::var_os("IRIS_OCTANE_AUDIO_WAV").and_then(|p| Wav::create(&p));
         *sink = Some(Sink { host, wav, tap: None });
+    }
+
+    /// Run the UST on the CPU's instruction count at `hz`, its nominal
+    /// clock, rather than on host time. The driver checks the UST with two
+    /// reads a delay loop apart, and the loop's length is in instructions:
+    /// on the CPU's own clock the check sees the ticks the guest expects
+    /// however fast the emulator runs the loop. A stopped machine retires
+    /// no instructions, so the UST holds still with it.
+    pub fn use_cpu_clock(&self, cycles: CyclesPtr, hz: u64) {
+        let _ = self.cpu_clock.set((cycles, hz.max(1)));
+    }
+
+    /// The UST's clock in nanoseconds, given the host clock `now`.
+    fn ust_ns(&self, now: i64) -> i64 {
+        match self.cpu_clock.get() {
+            Some(&(c, hz)) => (u128::from(c.get()) * u128::from(NS_PER_SEC) / u128::from(hz)) as i64,
+            None => now,
+        }
+    }
+
+    /// Bring the UST up to the host clock `now`.
+    fn ust_catch_up(&self, s: &mut State, now: i64) {
+        let ust_now = self.ust_ns(now);
+        s.ust_skew = ust_now - now;
+        s.ust_update(ust_now);
     }
 
     fn now(&self) -> i64 {
@@ -777,7 +817,7 @@ impl Inner {
             }
         }
         if off == REG_UST_COUNTER && width == 4 {
-            s.ust_update(now);
+            self.ust_catch_up(&mut s, now);
             return s.ust_count;
         }
         crate::dlog!(LogModule::Rad1, "rad1: unsupported {width}-byte BAR0 read at {off:#x}");
@@ -859,19 +899,19 @@ impl Inner {
             self.sync_all(s, now);
             match val {
                 0x0e => {
-                    s.ust_update(now);
+                    self.ust_catch_up(s, now);
                     s.ust_enabled = false;
                     s.ust_armed = true;
                     return Some(());
                 }
                 0x0a if s.ust_armed => {
-                    s.ust_update(now);
+                    self.ust_catch_up(s, now);
                     s.ust_enabled = true;
                     s.ust_armed = false;
                     return Some(());
                 }
                 0x02 => {
-                    s.ust_update(now);
+                    self.ust_catch_up(s, now);
                     s.ust_enabled = false;
                     s.ust_armed = false;
                     return Some(());
@@ -1037,7 +1077,7 @@ impl Inner {
             let v = match reg {
                 0x04..=0x2c => s.sample_pos[((reg - POS_FIRST) / 4) as usize],
                 REG_UST_COUNTER => {
-                    s.ust_update(now);
+                    self.ust_catch_up(s, now);
                     s.ust_count
                 }
                 _ => 0, // sync status
@@ -1154,6 +1194,7 @@ impl Inner {
         if !c.running || now <= c.start_ns {
             return;
         }
+        s.ust_skew = self.ust_ns(now) - now;
         let due = ((now - c.start_ns) as u128 * u128::from(CHAN_INFO[idx].freq) / u128::from(NS_PER_SEC)) as u64;
         if due > c.frames && !self.chan_move(s, idx, due - c.frames) {
             s.chan[idx].running = false;

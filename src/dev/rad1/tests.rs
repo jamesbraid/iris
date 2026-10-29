@@ -884,3 +884,27 @@ fn a_recorded_adat_frame_plays_back_unchanged() {
     frames_to_pcm(&ring, &mut back, ADAT_WORDS);
     assert_eq!(back, pcm);
 }
+
+/// On the CPU's clock the UST counts retired instructions at the CPU's
+/// nominal rate: the host clock does not move it, and a 10 us delay loop's
+/// worth of instructions moves it by ten ticks however fast it ran.
+#[test]
+fn ust_follows_the_cpu_clock_once_wired() {
+    let r = card();
+    let p = Box::into_raw(Box::new(0u64));
+    let set = |n: u64| unsafe { std::ptr::write_volatile(p, n) };
+    r.use_cpu_clock(CyclesPtr::new(p), 195_000_000);
+    set(1_000);
+    wr(&r, 0x40, 0x0e);
+    wr(&r, 0x40, 0x0a);
+    r.fake_ns.store(5_000_000, Ordering::Relaxed);
+    assert_eq!(rd(&r, 0x30), 0, "host time alone does not count");
+    // 10 us at 195 MHz.
+    set(1_000 + 1_950);
+    assert_eq!(rd(&r, 0x30), 10);
+    wr(&r, 0x40, 0x02);
+    set(1_000_000);
+    assert_eq!(rd(&r, 0x30), 10, "stopped");
+    drop(r);
+    drop(unsafe { Box::from_raw(p) });
+}

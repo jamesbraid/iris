@@ -251,6 +251,8 @@ impl OctaneMachine {
         let count_hz = cfg.clock.fixed_mhz.map_or(OCTANE_COUNT_HZ, |mhz| (mhz * 1_000_000.0) as u64);
         let flash_lines = Arc::new(CachedFlashLines::new(phys.phys.clone()));
         let cpu = Self::build_cpu(phys.phys.clone(), flash_lines.clone(), &timer_manager, count_hz.max(1), fasttick);
+        // The R10000's Count runs at half its pipeline clock.
+        rad.use_cpu_clock(cpu.cycles_ptr(), 2 * count_hz.max(1));
         if let Some(g) = &gfx {
             g.mgras().set_cpu_cycles(cpu.cycles_ptr());
             // Host GL frames composite straight into the IMPACT framebuffer.
