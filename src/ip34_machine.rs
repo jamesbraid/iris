@@ -4,7 +4,7 @@
 //! Selected with `[machine] profile = "fuel_ip34"`. Shared keys select the
 //! PROM, NVRAM, memory and SCSI devices; `[fuel]` selects the serial console
 //! and writable flash. `ip35::Ip35Bus` maps the processor views over the
-//! same Physical memory banks. Graphics and PS/2 devices are not attached.
+//! same Physical memory banks. Graphics is not attached; PS/2 ports are empty unless configured.
 //!
 //! Board composition ported from hw/mips/sgi/sn1-node.c
 //! in jamesbraid/qemu-sgi-origami.
@@ -50,6 +50,7 @@ impl FuelMachine {
             prom.len() as u64,
             cfg.fuel.flash.as_deref().map(std::path::Path::new),
             cfg.network().mac,
+            [cfg.fuel.ps2_keyboard, cfg.fuel.ps2_mouse],
         )?);
         let timekeeper = Arc::new(crate::dev::timekeeper::Timekeeper::fuel_with_nvram_file(
             std::path::Path::new(&cfg.nvram),
@@ -510,7 +511,7 @@ impl FuelBoard {
         clock: crate::dev::heart::Clock,
         execution_size: u64,
     ) -> Result<Self, String> {
-        Self::with_storage(payload, clock, execution_size, None, crate::dev::l1::L1Config::default().mac)
+        Self::with_storage(payload, clock, execution_size, None, crate::dev::l1::L1Config::default().mac, [false; 2])
     }
 
     pub fn with_storage(
@@ -519,6 +520,7 @@ impl FuelBoard {
         execution_size: u64,
         flash_path: Option<&std::path::Path>,
         station_mac: [u8; 6],
+        ps2_devices: [bool; 2],
     ) -> Result<Self, String> {
         use crate::dev::bedrock_pi::{BedrockPi, BedrockPiConfig};
         let md = crate::dev::bedrock_md::BedrockMd::with_clock(clock.clone());
@@ -688,7 +690,7 @@ impl FuelBoard {
         }));
         let mac = l1.station_mac();
         let ioc3 = Arc::new(crate::dev::ioc3::Ioc3::with_ps2_devices(
-            crate::dev::ioc3::Ioc3Config::fuel(mac), false, false,
+            crate::dev::ioc3::Ioc3Config::fuel(mac), ps2_devices[0], ps2_devices[1],
         ));
         let eth = crate::dev::ioc3_eth::Ioc3Eth::new_fuel(mac);
         ioc3.attach_eth(eth.clone());

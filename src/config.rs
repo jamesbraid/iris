@@ -496,10 +496,11 @@ pub enum MachineProfile {
 }
 
 impl MachineProfile {
-    /// All selectable profiles, in display order. (Not the O2 yet: iris-gui's
-    /// machine editor has no `[o2]` section.) Single source of truth for the
+    /// All GUI-selectable profiles, in display order. O2 and Fuel remain
+    /// CLI profiles until the machine editor supports their settings.
+    /// Single source of truth for the
     /// GUI dropdowns (Config tab + New Machine dialog) so they never drift.
-    pub const ALL: [Self; 5] = [Self::IndyIp24, Self::Indigo2Ip22, Self::Indigo2Ip28, Self::OctaneIp30, Self::FuelIp34];
+    pub const ALL: [Self; 4] = [Self::IndyIp24, Self::Indigo2Ip22, Self::Indigo2Ip28, Self::OctaneIp30];
 
     /// The bank sizes in MB (0 is an empty bank) that `validate()` accepts
     /// for this profile. The Octane's banks are matched DIMM pairs of 64 to
@@ -1379,6 +1380,12 @@ pub struct FuelSection {
     /// Separate L1 log when an IOC3 port is selected as console.
     #[serde(default)]
     pub l1_log: Option<String>,
+    /// Attach a PS/2 keyboard; serial-only configurations leave the port empty.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ps2_keyboard: bool,
+    /// Attach a PS/2 mouse; serial-only configurations leave the port empty.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ps2_mouse: bool,
 }
 
 /// Top-level machine configuration.
@@ -3069,5 +3076,22 @@ mod apply_env_tests {
         std::env::remove_var(OURS);
         set_or_remove_env(OURS, "");
         assert!(std::env::var_os(OURS).is_none());
+    }
+}
+
+#[cfg(test)]
+mod fuel_input_tests {
+    use super::*;
+
+    #[test]
+    fn serial_fuel_ports_are_empty_unless_explicitly_attached() {
+        let empty: FuelSection = toml::from_str("").unwrap();
+        assert!(!empty.ps2_keyboard && !empty.ps2_mouse);
+        let attached: FuelSection = toml::from_str("ps2_keyboard = true\nps2_mouse = true\n").unwrap();
+        assert!(attached.ps2_keyboard && attached.ps2_mouse);
+        let saved = toml::to_string(&attached).unwrap();
+        let loaded: FuelSection = toml::from_str(&saved).unwrap();
+        assert!(loaded.ps2_keyboard && loaded.ps2_mouse);
+        assert!(!MachineProfile::ALL.contains(&MachineProfile::FuelIp34));
     }
 }

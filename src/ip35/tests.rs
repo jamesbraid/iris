@@ -725,6 +725,6 @@ fn fuel_link_reset_resets_the_attached_scsi_engine() {
 #[test]
 fn configured_station_address_reaches_the_l1_identity() {
     let mac = [0x08, 0x00, 0x69, 0x21, 0x43, 0x65];
-    let board = crate::ip34_machine::FuelBoard::with_storage(&[], Arc::new(|| 0), 0, None, mac).unwrap();
+    let board = crate::ip34_machine::FuelBoard::with_storage(&[], Arc::new(|| 0), 0, None, mac, [false; 2]).unwrap();
     assert_eq!(board.l1.station_mac(), mac);
 }
