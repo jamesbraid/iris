@@ -8,8 +8,10 @@
 //!
 //! Ported from hw/mips/sgi/mace-id.c in jamesbraid/qemu-sgi-origami.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
+use crate::dev::ng1::rex3::Rex3;
 use crate::dev::w1::{self, sgi};
 use crate::snapshot::{get_field, toml_u64};
 
@@ -57,6 +59,9 @@ struct State {
 
 pub struct MaceId {
     st: Mutex<State>,
+    /// The LEDs as the status bar shows them: `Rex3::HB_LED_RED` and
+    /// `HB_LED_GREEN`.
+    pub heartbeat: Arc<AtomicU64>,
 }
 
 impl State {
@@ -184,7 +189,9 @@ impl MaceId {
             slot_pull: false,
         };
         st.reset();
-        Self { st: Mutex::new(st) }
+        let id = Self { st: Mutex::new(st), heartbeat: Arc::new(AtomicU64::new(0)) };
+        id.show_leds(GREEN_LED);
+        id
     }
 
     /// The register at guest time `now` (microseconds). The password-clear
@@ -194,7 +201,24 @@ impl MaceId {
     }
 
     pub fn write(&self, now: u64, value: u8) {
-        self.st.lock().unwrap().write(now as i64, value & WRITABLE);
+        let led = {
+            let mut st = self.st.lock().unwrap();
+            st.write(now as i64, value & WRITABLE);
+            st.led_control
+        };
+        self.show_leds(led);
+    }
+
+    /// An LED lights when its bit is clear: writing zero enables both
+    /// outputs, and the register resets with only the green one disabled.
+    fn show_leds(&self, bits: u8) {
+        for (bit, led) in [(RED_LED, Rex3::HB_LED_RED), (GREEN_LED, Rex3::HB_LED_GREEN)] {
+            if bits & bit == 0 {
+                self.heartbeat.fetch_or(led, Ordering::Relaxed);
+            } else {
+                self.heartbeat.fetch_and(!led, Ordering::Relaxed);
+            }
+        }
     }
 }
 
@@ -238,13 +262,16 @@ impl crate::traits::Saveable for MaceId {
 
     fn load_state(&self, v: &toml::Value) -> Result<(), String> {
         let reg = get_field(v, "register").and_then(toml_u64).unwrap_or(0) as u8;
-        let mut st = self.st.lock().unwrap();
-        st.reset();
-        st.startup_pending = false;
-        st.high_seen = true;
-        st.released = reg & RELEASE != 0;
-        st.flash_write_enabled = reg & FLASH_ENABLE != 0;
-        st.led_control = reg & (RED_LED | GREEN_LED);
+        {
+            let mut st = self.st.lock().unwrap();
+            st.reset();
+            st.startup_pending = false;
+            st.high_seen = true;
+            st.released = reg & RELEASE != 0;
+            st.flash_write_enabled = reg & FLASH_ENABLE != 0;
+            st.led_control = reg & (RED_LED | GREEN_LED);
+        }
+        self.show_leds(reg & (RED_LED | GREEN_LED));
         Ok(())
     }
 }
@@ -252,5 +279,6 @@ impl crate::traits::Saveable for MaceId {
 impl crate::traits::Resettable for MaceId {
     fn power_on(&self) {
         self.st.lock().unwrap().reset();
+        self.show_leds(GREEN_LED);
     }
 }

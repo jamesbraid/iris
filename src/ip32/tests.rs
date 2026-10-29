@@ -843,6 +843,22 @@ fn a_short_low_is_not_a_reset() {
     assert_ne!(id.read(m.t + 80) & SAMPLE, 0);
 }
 
+/// Writing zero lights both LEDs; the register resets with green dark, and
+/// the status bar's bits follow.
+#[test]
+fn the_front_leds_follow_the_register() {
+    use crate::dev::ng1::rex3::Rex3;
+    use std::sync::atomic::Ordering::Relaxed;
+    let id = MaceId::new(TEST_MAC);
+    let hb = || id.heartbeat.load(Relaxed);
+    assert_eq!(hb(), Rex3::HB_LED_RED);
+    id.write(0, 0);
+    assert_eq!(hb(), Rex3::HB_LED_RED | Rex3::HB_LED_GREEN);
+    id.write(1, 0x30);
+    assert_eq!(hb(), 0);
+    assert_eq!(id.read(2) & 0x30, 0x30);
+}
+
 /// The register survives a save, and a cold reset puts it back.
 #[test]
 fn the_register_survives_save_and_load_and_resets() {
