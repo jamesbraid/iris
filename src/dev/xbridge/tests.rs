@@ -79,6 +79,32 @@ fn chip() -> (Arc<XBridge>, Arc<Memory>) {
     let mem = Arc::new(Memory(Mutex::new(vec![0; 0x8000])));
     (XBridge::new(mem.clone()), mem)
 }
+
+#[test]
+fn lock_registry_does_not_keep_the_chip_or_its_devices_alive() {
+    let memory = crate::physical::Physical::new(Vec::new());
+    let memory_ref = Arc::downgrade(&memory);
+    let chip = XBridge::new(memory);
+    let chip_ref = Arc::downgrade(&chip);
+    let heads = chip.heads.each_ref().map(Arc::downgrade);
+    let crossbar = Arc::downgrade(&chip.xbow);
+    let card = Card::new();
+    let card_ref = Arc::downgrade(&card);
+    chip.attach(15, 1, card.clone());
+    chip.set_reset_output(Arc::new(move |_| card.config.reset()));
+    chip.register_locks();
+
+    assert!(heads.iter().all(|head| head.upgrade().is_some()));
+    assert!(crossbar.upgrade().is_some());
+    assert!(card_ref.upgrade().is_some());
+    assert!(memory_ref.upgrade().is_some());
+    drop(chip);
+    assert!(chip_ref.upgrade().is_none());
+    assert!(heads.iter().all(|head| head.upgrade().is_none()));
+    assert!(crossbar.upgrade().is_none());
+    assert!(card_ref.upgrade().is_none());
+    assert!(memory_ref.upgrade().is_none());
+}
 #[test]
 fn two_heads_and_crossbar_are_distinct_shared_chip_views() {
     let (c, _) = chip();

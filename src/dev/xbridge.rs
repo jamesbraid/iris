@@ -115,20 +115,25 @@ impl XBridge {
     pub fn register_locks(self: &Arc<Self>) {
         use crate::locks::register_lock_fn;
         for head in &self.heads {
-            let h = head.clone();
-            let name = format!("xbridge::head{:x}::state", h.widget);
-            register_lock_fn(name, move || h.st.is_locked());
-            let h = head.clone();
-            let name = format!("xbridge::head{:x}::irq_order", h.widget);
-            register_lock_fn(name, move || h.order.is_locked());
-            let h = head.clone();
-            let name = format!("xbridge::head{:x}::microlan", h.widget);
-            register_lock_fn(name, move || h.microlan.is_locked());
+            for (what, probe) in [
+                ("state", (|h: &XBridgeHead| h.st.is_locked()) as fn(&XBridgeHead) -> bool),
+                ("irq_order", |h| h.order.is_locked()),
+                ("microlan", |h| h.microlan.is_locked()),
+            ] {
+                let h = Arc::downgrade(head);
+                let name = format!("xbridge::head{:x}::{what}", head.widget);
+                register_lock_fn(name, move || h.upgrade().is_some_and(|h| probe(&h)));
+            }
         }
-        let x = self.xbow.clone();
-        register_lock_fn("xbridge::crossbar::state", move || x.st.is_locked());
-        let x = self.xbow.clone();
-        register_lock_fn("xbridge::crossbar::irq_order", move || x.order.is_locked());
+        for (what, probe) in [
+            ("state", (|x: &Crossbar| x.st.is_locked()) as fn(&Crossbar) -> bool),
+            ("irq_order", |x| x.order.is_locked()),
+        ] {
+            let x = Arc::downgrade(&self.xbow);
+            register_lock_fn(format!("xbridge::crossbar::{what}"), move || {
+                x.upgrade().is_some_and(|x| probe(&x))
+            });
+        }
     }
     fn pci_head(&self, widget: u8) -> &Arc<XBridgeHead> {
         assert!((HEAD_E..=HEAD_F).contains(&widget));
