@@ -303,9 +303,8 @@ impl Octane {
         let bridge = Bridge::new(mem.clone(), heart.clone());
 
         let eth = Ioc3Eth::with_negotiation_delay(MAC, std::time::Duration::ZERO);
-        let (to_net, sent) = rtrb::RingBuffer::new(64);
-        let (inject, from_net) = rtrb::RingBuffer::new(64);
-        eth.attach(to_net, from_net, None, None);
+        let (link, sent, inject) = crate::net::Link::loopback();
+        eth.attach(link);
         let ioc3 = Arc::new(Ioc3::octane(MAC, false));
         ioc3.attach_eth(eth.clone());
         ioc3.connect_superio_interrupt(bridge.pin_line(SUPERIO_PIN as u8));
