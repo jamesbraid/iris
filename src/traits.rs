@@ -219,6 +219,16 @@ pub trait BusDevice: Send + Sync {
     fn gen_ptr(&self, _addr: u64) -> *const std::sync::atomic::AtomicU64 {
         std::ptr::null()
     }
+
+    /// Preserve the source register for uncached subword bus protocols.
+    /// Ordinary devices consume only the low byte or halfword.
+    fn write_uncached_subword(&self, addr: u64, width: usize, source: u64) -> u32 {
+        match width {
+            1 => self.write8(addr, source as u8),
+            2 => self.write16(addr, source as u16),
+            _ => BUS_ERR,
+        }
+    }
 }
 
 pub trait FifoDevice: Send + Sync {

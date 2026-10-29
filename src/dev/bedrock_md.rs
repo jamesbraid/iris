@@ -611,6 +611,25 @@ impl Resettable for BedrockMd {
     }
 }
 impl BusDevice for MdBus {
+    fn write_uncached_subword(&self, a: u64, width: usize, source: u64) -> u32 {
+        if width != 1 && width != 2 {
+            return BUS_ERR;
+        }
+        let value = if matches!(self.view, View::Ecc) {
+            // The ECC carrier represents memory doublewords; source lanes
+            // follow that memory address rather than the carrier address.
+            let memory_address = (a ^ if width == 1 { 7 } else { 6 }).wrapping_mul(8);
+            source >> (memory_address.wrapping_neg() & 63)
+        } else {
+            source
+        };
+        match width {
+            1 => self.write8(a, value as u8),
+            2 => self.write16(a, value as u16),
+            _ => unreachable!(),
+        }
+    }
+
     #[cfg(feature = "jitv2")]
     fn gen_ptr(&self, address: u64) -> *const std::sync::atomic::AtomicU64 {
         let Some(md) = self.md.upgrade() else {

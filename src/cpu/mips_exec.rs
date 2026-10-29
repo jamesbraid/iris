@@ -5508,7 +5508,9 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             if !DEBUG && mips_log(MIPS_LOG_MEM) {
                 dlog_dev!(LogModule::Mips, "Uncached Write{}: PC={:016x} VA={:016x} PA={:016x} Val={:016x}", SIZE*8, self.core.pc, virt_addr, phys_addr, val);
             }
-            let ws = if SIZE == 1 {
+            let ws = if !DEBUG && (SIZE == 1 || SIZE == 2) {
+                self.sysad.write_uncached_subword(phys_addr, SIZE, val)
+            } else if SIZE == 1 {
                 self.sysad.write8(phys_addr, val as u8)
             } else if SIZE == 2 {
                 self.sysad.write16(phys_addr, val as u16)

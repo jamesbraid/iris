@@ -47,6 +47,14 @@ macro_rules! endpoint_access {
     };
 }
 impl BusDevice for OffsetEndpoint {
+    fn write_uncached_subword(&self, a: u64, width: usize, source: u64) -> u32 {
+        if width != 1 && width != 2 {
+            return BUS_ERR;
+        }
+        self.local(a, width as u64)
+            .map(|at| self.device.write_uncached_subword(at, width, source))
+            .unwrap_or(BUS_ERR)
+    }
     endpoint_access!(read8, write8, u8, BusRead8, 1);
     endpoint_access!(read16, write16, u16, BusRead16, 2);
     endpoint_access!(read32, write32, u32, BusRead32, 4);
@@ -199,6 +207,16 @@ macro_rules! processor_access {
     };
 }
 impl BusDevice for Ip35Bus {
+    fn write_uncached_subword(&self, a: u64, width: usize, source: u64) -> u32 {
+        if width != 1 && width != 2 {
+            return BUS_ERR;
+        }
+        let status = self.target(a, width as u64)
+            .map(|(view, pa)| view.write_uncached_subword(pa, width, source))
+            .unwrap_or(BUS_ERR);
+        self.trace.record(a, width as u64, true, source, status);
+        status
+    }
     processor_access!(read8, write8, u8, BusRead8, 1);
     processor_access!(read16, write16, u16, BusRead16, 2);
     processor_access!(read32, write32, u32, BusRead32, 4);

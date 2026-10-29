@@ -812,6 +812,13 @@ impl Device for Physical {
 
 impl BusDevice for Physical {
     #[inline(always)]
+    fn write_uncached_subword(&self, addr: u64, width: usize, source: u64) -> u32 {
+        let addr = addr & PHYS_MASK;
+        let device_ptr = self.dev_at(addr);
+        unsafe { (*device_ptr).write_uncached_subword(addr, width, source) }
+    }
+
+    #[inline(always)]
     fn read8(&self, addr: u64) -> BusRead8 {
         let addr = addr & PHYS_MASK;
         let device_ptr = self.dev_at(addr);
