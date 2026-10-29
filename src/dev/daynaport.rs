@@ -770,7 +770,7 @@ mod tests {
         let (_tx, mut rx) = d.take_nat_ends();
         let mut dev: Box<dyn crate::scsi::ScsiTarget> = Box::new(d);
         assert!(dev.moves_packets());
-        assert!(dev.discs().is_none());
+        assert!(dev.changer().is_none());
 
         dev.request(&cdb6([dp_cmd::ENABLE, 0, 0, 0, 0, 0x80])).unwrap();
         dev.request(&cdb6([dp_cmd::SET_IFACE_MODE, 0, 0, 0, 0x04, 0x80])).unwrap();

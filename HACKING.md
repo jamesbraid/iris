@@ -76,7 +76,12 @@ the lifecycle, and optional behaviour with do-nothing defaults (a
 copy-on-write layer, CHD sync, a disc changer), so callers ask for behaviour
 and never for a type. `ScsiBus` (`src/scsi/bus.rs`) is the mechanism: the
 id-to-target table with attach, request and overlay export and import, and
-the controller's INQUIRY identities. The WD33C93A (Indy, Indigo2), the Adaptec
+the controller's INQUIRY identities. A disk or CD-ROM sits on a `BlockNode`
+(`src/block_node.rs`), built by `open_image` for everything that mounts an
+image. A CD-ROM's node is a `ChangerNode`: the queue of discs and the open
+active one, with the `Removable` trait (present, changed, eject, load)
+separate from `BlockNode` so that removable media which is not a block device,
+a tape, can use it too. The WD33C93A (Indy, Indigo2), the Adaptec
 7880 (O2) and the ISP1040 (Octane) each own one and keep only their registers
 and DMA. `src/scsi_monitor.rs` implements the monitor's `scsi` and `cow`
 subcommands and the run-time disc changes once, over the bus a controller hands

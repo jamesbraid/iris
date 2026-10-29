@@ -11,16 +11,8 @@ use std::io;
 use parking_lot::{Mutex, MutexGuard};
 
 use super::{ScsiDevice, ScsiIdentity, ScsiRequest, ScsiResponse};
-use crate::block_node::{open_image, ImageKind};
+use crate::block_node::{open_image, ChangerNode, ImageKind};
 use crate::dev::daynaport::DaynaPort;
-
-/// A changer's discs: the active one, the queue (index 0 is the active
-/// disc) and the physical and logical block sizes.
-pub struct Discs {
-    pub current: String,
-    pub list: Vec<String>,
-    pub block_sizes: (u64, u64),
-}
 
 /// A device on a SCSI bus, as the controller drives it: a CDB goes in, data
 /// and a status come out.
@@ -88,31 +80,10 @@ pub trait ScsiTarget: Send {
     /// be rebuilt.
     fn take_pending_chd_sync(&mut self) -> Option<(std::path::PathBuf, std::path::PathBuf)> { None }
 
-    // ---- disc changer ------------------------------------------------
-
-    /// The discs, `None` unless this is a CD-ROM.
-    fn discs(&self) -> Option<Discs> { None }
-
-    /// Make `path` the active disc.
-    fn load_disc(&mut self, _path: String) -> Result<String, String> { Err(NOT_A_CDROM.into()) }
-
-    /// Eject, and load the next disc in the queue; `None` with none to load.
-    fn eject_next(&mut self) -> Option<String> { None }
-
-    /// Eject and leave the drive empty.
-    fn unload_media(&mut self) {}
-
-    /// Queue `path` as the next disc.
-    fn add_disc(&mut self, _path: String) -> Result<(), String> { Err(NOT_A_CDROM.into()) }
-
-    /// Remove the queued disc at `ordinal`.
-    fn remove_disc(&mut self, _ordinal: usize) -> Result<String, String> { Err(NOT_A_CDROM.into()) }
-
-    /// Make the queued disc at `ordinal` the next.
-    fn move_disc_next(&mut self, _ordinal: usize) -> Result<(), String> { Err(NOT_A_CDROM.into()) }
+    /// The drive's tray and queue of discs, `None` unless this is a CD-ROM.
+    fn changer(&mut self) -> Option<&mut ChangerNode> { None }
 }
 
-const NOT_A_CDROM: &str = "Not a CD-ROM device";
 
 /// A DaynaPort answers its own vendor command set, which reuses the READ(6)
 /// and WRITE(6) opcodes for packet receive and transmit; it answers no
@@ -211,8 +182,7 @@ impl ScsiBus {
         } else {
             let kind = if cdrom { ImageKind::Cdrom } else { ImageKind::Disk };
             let node = open_image(path, kind, overlay, overlay_path)?;
-            let size = node.size();
-            ScsiDevice::new(node, size, cdrom, path.to_string(), if cdrom { discs } else { Vec::new() }, identity)
+            ScsiDevice::new(node, cdrom, path.to_string(), discs, identity)
         };
         let blocks = dev.size() / 512;
         self.attach(id, Box::new(dev))?;

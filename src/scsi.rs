@@ -4,9 +4,9 @@ mod attach;
 mod bus;
 
 pub use attach::{attach_failed, attach_from_config, Attached, DaynaportRef, TableRef};
-pub use bus::{Discs, ScsiBus, ScsiIdentities, ScsiTarget, Targets};
+pub use bus::{ScsiBus, ScsiIdentities, ScsiTarget, Targets};
 
-use crate::block_node::{open_image, BlockNode, ImageKind};
+use crate::block_node::{ChangerNode, Removable, BlockNode};
 
 /// Get the standard CDB length based on the opcode's group code
 pub fn get_cdb_length(opcode: u8) -> usize {
@@ -117,22 +117,49 @@ impl ScsiIdentity {
     }
 }
 
+/// What a device reads and writes: a disk's image, or a CD-ROM drive's tray.
+enum Media {
+    /// A disk, and the path of its image.
+    Fixed(Box<dyn BlockNode>, String),
+    /// A CD-ROM drive.
+    Changer(ChangerNode),
+}
+
+impl Media {
+    fn node(&self) -> &dyn BlockNode {
+        match self {
+            Media::Fixed(n, _) => &**n,
+            Media::Changer(c) => c,
+        }
+    }
+
+    fn node_mut(&mut self) -> &mut dyn BlockNode {
+        match self {
+            Media::Fixed(n, _) => &mut **n,
+            Media::Changer(c) => c,
+        }
+    }
+
+    fn present(&self) -> bool {
+        match self {
+            Media::Fixed(..) => true,
+            Media::Changer(c) => c.present(),
+        }
+    }
+
+    fn take_changed(&mut self) -> bool {
+        match self {
+            Media::Fixed(..) => false,
+            Media::Changer(c) => c.take_changed(),
+        }
+    }
+}
+
 pub struct ScsiDevice {
-    /// None = no media loaded (CD-ROM drive present but tray is empty).
-    /// HDDs are never None in practice.
-    backend: Option<Box<dyn BlockNode>>,
-    /// Capacity in bytes of the loaded media. 0 when `backend` is None.
-    size: u64,
+    media: Media,
     kind: DeviceKind,
-    /// Path of the currently mounted image. Empty string when no media.
-    filename: String,
-    /// Full disc list for CD-ROM changers. Index 0 is always the active disc.
-    /// For HDDs this is empty (unused).
-    discs: Vec<String>,
     buffer: Vec<u8>,  // Internal buffer for WRITE_BUFFER/READ_BUFFER commands
     pending_sense: [u8; 18],  // Stored sense data, served on REQUEST_SENSE
-    /// Unit Attention pending — set after disc change, cleared on next command.
-    unit_attention: bool,
     /// Physical sector size: always 2048 for CD-ROM (Yellow Book), 512 for HDD.
     /// Used for TOC lead-out LBA (CD spec requires TOC in physical sectors).
     phys_block_size: u64,
@@ -143,27 +170,26 @@ pub struct ScsiDevice {
     identity: ScsiIdentity,
 }
 
+/// A CD-ROM's physical sector (Yellow Book).
+pub const CDROM_SECTOR: u64 = 2048;
+
 const SCSI_BUFFER_SIZE: usize = 0x4000; // 16KB (16384 bytes)
 
 impl ScsiDevice {
-    pub fn new(
-        backend: Box<dyn BlockNode>,
-        size: u64,
-        is_cdrom: bool,
-        filename: String,
-        discs: Vec<String>,
-        identity: ScsiIdentity,
-    ) -> Self {
+    /// A disk, or a CD-ROM drive holding the image `node` opened from `path`
+    /// with `discs` queued.
+    pub fn new(node: Box<dyn BlockNode>, is_cdrom: bool, path: String, discs: Vec<String>, identity: ScsiIdentity) -> Self {
+        let media = if is_cdrom {
+            Media::Changer(ChangerNode::loaded(node, &path, discs))
+        } else {
+            Media::Fixed(node, path)
+        };
         Self {
-            backend: Some(backend),
-            size,
+            media,
             kind: if is_cdrom { DeviceKind::Cdrom } else { DeviceKind::Disk },
-            filename,
-            discs,
             buffer: vec![0u8; SCSI_BUFFER_SIZE],
             pending_sense: [0u8; 18],
-            unit_attention: false,
-            phys_block_size: if is_cdrom { 2048 } else { 512 },
+            phys_block_size: if is_cdrom { CDROM_SECTOR } else { 512 },
             // CD-ROM drives default to 2048-byte logical blocks (Sony CDU-76S behaviour).
             // HDD defaults to 512. dksc switches CD-ROM to 512 for EFS, back to 2048 for ISO.
             logical_block_size: if is_cdrom { 2048 } else { 512 },
@@ -176,15 +202,11 @@ impl ScsiDevice {
     /// MEDIUM NOT PRESENT.
     pub fn new_empty_cdrom(identity: ScsiIdentity) -> Self {
         Self {
-            backend: None,
-            size: 0,
+            media: Media::Changer(ChangerNode::empty()),
             kind: DeviceKind::Cdrom,
-            filename: String::new(),
-            discs: vec![],
             buffer: vec![0u8; SCSI_BUFFER_SIZE],
             pending_sense: [0u8; 18],
-            unit_attention: false,
-            phys_block_size: 2048,
+            phys_block_size: CDROM_SECTOR,
             logical_block_size: 2048,
             identity,
         }
@@ -192,49 +214,38 @@ impl ScsiDevice {
 
     /// Whether physical media is loaded. For HDDs always true; for CD-ROMs
     /// false when the tray is empty.
-    pub fn has_media(&self) -> bool { self.backend.is_some() }
+    pub fn has_media(&self) -> bool { self.media.present() }
 
-    /// Mount media on a previously-empty CD-ROM, or swap the disc on a
-    /// loaded one. Sets `unit_attention` so the guest re-reads capacity.
-    pub fn insert_media(&mut self, path: &str) -> io::Result<()> {
-        let node = open_image(path, ImageKind::Cdrom, false, None)?;
-        let size = node.size();
-        self.backend = Some(node);
-        self.size = size;
-        self.filename = path.to_string();
-        self.unit_attention = true;
-        Ok(())
+    /// What the guest's eject does: [`Removable::eject`], whose queue rules
+    /// are the changer's. A disc that will not open is logged and the drive
+    /// left as it was.
+    fn eject(&mut self) {
+        if let Media::Changer(c) = &mut self.media {
+            if let Err(e) = c.eject() {
+                eprintln!("SCSI eject: {e}");
+            }
+        }
     }
 
     /// Size of the device's uncommitted divergence, via [`BlockNode::dirty_count`]:
     /// exact dirty sectors for a raw overlay, a coarse 1/0 for a CHD diff. 0 if
     /// direct / no media.
     pub fn cow_dirty_count(&self) -> usize {
-        self.backend.as_ref().map_or(0, |node| node.dirty_count())
+        self.media.node().dirty_count()
     }
 
     /// Whether this device has a divergence layer (a raw `.overlay` or a CHD
     /// `.diff.chd`) that `cow commit` / `cow reset` can act on.
     pub fn is_cow(&self) -> bool {
-        self.backend.as_ref().is_some_and(|node| node.is_cow())
+        self.media.node().is_cow()
     }
 
     pub fn is_cdrom(&self) -> bool { matches!(self.kind, DeviceKind::Cdrom) }
 
-    /// Current active disc path (for display / status).
-    pub fn current_disc(&self) -> &str {
-        &self.filename
-    }
-
-    /// All discs in the changer list.
-    pub fn disc_list(&self) -> &[String] {
-        &self.discs
-    }
-
     /// (physical_block_size, logical_block_size)
     /// Capacity of the loaded medium, in bytes (0 with none).
     pub fn size(&self) -> u64 {
-        self.size
+        self.media.node().size()
     }
 
     /// Set the logical block size, as a controller does for its own
@@ -269,12 +280,11 @@ impl ScsiDevice {
     }
 
     fn exec_test_unit_ready(&mut self, _cdb: &[u8]) -> Result<ScsiResponse, std::io::Error> {
-        if self.unit_attention {
-            self.unit_attention = false;
+        if self.media.take_changed() {
             // Sense key 0x06 UNIT_ATTENTION, ASC 0x28 "Not Ready to Ready Transition / Medium Changed"
             return Ok(self.check_condition(0x06, 0x28, 0x00));
         }
-        if self.backend.is_none() {
+        if !self.media.present() {
             // Sense key 0x02 NOT_READY, ASC 0x3A "Medium not present"
             return Ok(self.check_condition(0x02, 0x3A, 0x00));
         }
@@ -333,11 +343,11 @@ impl ScsiDevice {
     }
 
     fn exec_read_capacity_10(&mut self, _cdb: &[u8]) -> Result<ScsiResponse, std::io::Error> {
-        if self.backend.is_none() {
+        if !self.media.present() {
             return Ok(self.check_condition(0x02, 0x3A, 0x00)); // NOT READY / MEDIUM NOT PRESENT
         }
         let block_size = self.logical_block_size as u32;
-        let last_lba = (self.size / self.logical_block_size).saturating_sub(1) as u32;
+        let last_lba = (self.size() / self.logical_block_size).saturating_sub(1) as u32;
         //eprintln!("SCSI READ CAPACITY: block_size={} last_lba={} data={:02x?}", block_size, last_lba, &[last_lba.to_be_bytes(), block_size.to_be_bytes()].concat());
 
         let mut data = vec![0u8; 8];
@@ -363,16 +373,16 @@ impl ScsiDevice {
     }
 
     fn perform_read(&mut self, lba: u64, count: usize) -> Result<ScsiResponse, std::io::Error> {
-        let Some(backend) = self.backend.as_mut() else {
+        if !self.media.present() {
             return Ok(self.check_condition(0x02, 0x3A, 0x00)); // NOT READY / MEDIUM NOT PRESENT
-        };
+        }
         // Check LBA bounds before attempting I/O
-        let last_lba = self.size / self.logical_block_size;
+        let last_lba = self.size() / self.logical_block_size;
         if count > 0 && (lba >= last_lba || lba + count as u64 > last_lba) {
             return Ok(self.check_condition(0x05, 0x21, 0x00)); // Illegal Request: LBA Out of Range
         }
         let mut data = vec![0u8; count * self.logical_block_size as usize];
-        backend.read(lba * self.logical_block_size, &mut data)?;
+        self.media.node_mut().read(lba * self.logical_block_size, &mut data)?;
         let expected = count as u64 * self.logical_block_size;
         if data.len() as u64 != expected {
             eprintln!(
@@ -405,7 +415,7 @@ impl ScsiDevice {
             return Ok(self.check_condition(0x07, 0x27, 0x00)); // DATA PROTECT: write protected
         }
         // Past the end is an error, not a bigger disk.
-        if (lba + count as u64) * self.logical_block_size > self.size {
+        if (lba + count as u64) * self.logical_block_size > self.size() {
             return Ok(self.check_condition(0x05, 0x21, 0x00)); // ILLEGAL REQUEST: LBA out of range
         }
 
@@ -425,10 +435,10 @@ impl ScsiDevice {
         }
 
         // Writes always go through as 512-byte sectors (HDD path only, phys=logical=512)
-        let Some(backend) = self.backend.as_mut() else {
+        if !self.media.present() {
             return Ok(self.check_condition(0x02, 0x3A, 0x00));
-        };
-        if backend.write(lba * 512, data).is_err() {
+        }
+        if self.media.node_mut().write(lba * 512, data).is_err() {
             return Ok(self.check_condition(0x03, 0x0c, 0x00)); // MEDIUM ERROR: write error
         }
 
@@ -443,9 +453,7 @@ impl ScsiDevice {
         let loej  = (cdb[4] & 0x02) != 0;
         let start = (cdb[4] & 0x01) != 0;
         if loej && !start && self.is_cdrom() {
-            // Eject requested. eject_next() handles the count-driven cases:
-            // 0/1 disc empties the tray; 2+ discs cycle to the next.
-            self.eject_next();
+            self.eject();
         }
         Ok(ScsiResponse { status: 0x00, data: vec![] })
     }
@@ -469,7 +477,7 @@ impl ScsiDevice {
         let block_desc: Vec<u8> = if dbd {
             vec![]
         } else {
-            let total_blocks = (self.size / self.logical_block_size) as u32;
+            let total_blocks = (self.size() / self.logical_block_size) as u32;
             vec![
                 0x00,                               // density code
                 (total_blocks >> 16) as u8,
@@ -485,7 +493,7 @@ impl ScsiDevice {
         // Synthesize geometry from disk size (HDD pages only)
         let heads: u32 = 16;
         let spt: u32 = 63;
-        let total_blocks_u64 = self.size / self.logical_block_size;
+        let total_blocks_u64 = self.size() / self.logical_block_size;
         let cylinders = ((total_blocks_u64 + (heads * spt - 1) as u64) / (heads * spt) as u64) as u32;
 
         let mut pages: Vec<u8> = Vec::new();
@@ -839,7 +847,7 @@ impl ScsiDevice {
     }
 
     fn exec_read_toc_pma_atip(&mut self, cdb: &[u8]) -> Result<ScsiResponse, std::io::Error> {
-        if self.backend.is_none() {
+        if !self.media.present() {
             return Ok(self.check_condition(0x02, 0x3A, 0x00)); // NOT READY / MEDIUM NOT PRESENT
         }
         let msf    = (cdb[1] & 0x02) != 0;
@@ -847,7 +855,7 @@ impl ScsiDevice {
         let alloc_len = alloc_len_10(cdb);
 
         // TOC LBAs are always in physical CD sectors (2048 bytes each).
-        let total_lba = (self.size / self.phys_block_size) as u32;
+        let total_lba = (self.size() / self.phys_block_size) as u32;
         //eprintln!("SCSI READ TOC: format={} msf={} total_lba={} (current block_size={})",
         //    format, msf, total_lba, self.logical_block_size);
 
@@ -918,7 +926,7 @@ impl ScsiDevice {
         if !self.is_cdrom() {
             return Ok(self.check_condition(0x05, 0x20, 0x00)); // Invalid command for HDD
         }
-        self.eject_next();
+        self.eject();
         Ok(ScsiResponse { status: 0x00, data: vec![] })
     }
 
@@ -969,11 +977,10 @@ impl ScsiTarget for ScsiDevice {
         }
 
         // Unit attention fires before any other command (except REQUEST_SENSE/INQUIRY).
-        if self.unit_attention
-            && req.cdb[0] != scsi_cmd::REQUEST_SENSE
+        if req.cdb[0] != scsi_cmd::REQUEST_SENSE
             && req.cdb[0] != scsi_cmd::INQUIRY
+            && self.media.take_changed()
         {
-            self.unit_attention = false;
             return Ok(self.check_condition(0x06, 0x28, 0x00));
         }
 
@@ -1029,10 +1036,7 @@ impl ScsiTarget for ScsiDevice {
     /// Returns a coarse count of what was committed. The concrete behaviour is
     /// [`BlockNode::commit`] — including the CHD handle close/reopen.
     fn cow_commit(&mut self) -> io::Result<usize> {
-        match self.backend.as_mut() {
-            Some(node) => node.commit(),
-            None => Ok(0),
-        }
+        self.media.node_mut().commit()
     }
 
     /// Reset the divergence layer — discard all uncommitted writes ("roll
@@ -1040,35 +1044,27 @@ impl ScsiTarget for ScsiDevice {
     /// reopens a fresh overlay over the untouched base. No-op if not overlaid.
     /// The concrete behaviour is [`BlockNode::rollback`].
     fn cow_reset(&mut self) -> io::Result<()> {
-        match self.backend.as_mut() {
-            Some(node) => node.rollback(),
-            None => Ok(()),
-        }
+        self.media.node_mut().rollback()
     }
 
     /// Copy the COW overlay into `dest` and return its dirty sector set.
     /// Direct-mode / no-media devices create no file.
     fn cow_export(&mut self, dest: &std::path::Path) -> io::Result<Option<Vec<u64>>> {
-        match self.backend.as_mut() {
-            Some(node) if node.is_cow() => node.export_overlay(dest).map(Some),
-            _ => Ok(None),
-        }
+        let node = self.media.node_mut();
+        if node.is_cow() { node.export_overlay(dest).map(Some) } else { Ok(None) }
     }
 
     /// Replace the COW overlay with the contents of `source` and adopt
     /// `dirty` as the dirty sector set. No-op on non-COW / no-media devices.
     fn cow_import(&mut self, source: &std::path::Path, dirty: Vec<u64>) -> io::Result<()> {
-        match self.backend.as_mut() {
-            Some(node) => node.import_overlay(source, dirty),
-            None => Ok(()),
-        }
+        self.media.node_mut().import_overlay(source, dirty)
     }
 
     /// `(base, diff)` paths if this device is a CHD writing to a `.diff.chd`
     /// sidecar that holds changes worth folding back into the base on a clean
     /// shutdown. `None` for in-place / non-CHD / no-media devices.
     fn pending_chd_sync(&self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
-        self.backend.as_ref().and_then(|node| node.pending_sync())
+        self.media.node().pending_sync()
     }
 
     /// Take the pending-sync paths AND release the disk backend, closing the CHD
@@ -1077,167 +1073,30 @@ impl ScsiTarget for ScsiDevice {
     fn take_pending_chd_sync(&mut self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
         let pending = self.pending_chd_sync();
         if pending.is_some() {
-            self.backend = None;
+            // Nothing talks to the disk once the guest has stopped; it answers
+            // as a drive with its tray empty.
+            self.media = Media::Changer(ChangerNode::empty());
         }
         pending
     }
 
-    /// Eject the current disc. Behaviour depends on how many discs are queued:
-    ///   - 0 or 1 disc: the tray empties (drive present, no media).
-    ///   - 2+ discs: cycle to the next disc in the changer list (wraps around).
-    /// Returns the newly-active disc path, or None when the tray is emptied or
-    /// this is not a CD-ROM.
-    fn eject_next(&mut self) -> Option<String> {
+    /// The drive's tray and queue, `None` for a disk.
+    fn changer(&mut self) -> Option<&mut ChangerNode> {
         if !self.is_cdrom() {
             return None;
         }
-        // 0 or 1 disc: eject empties the tray entirely.
-        if self.discs.len() <= 1 {
-            let prev_disc = self.filename.clone();
-            self.unload_media();
-            self.discs.clear(); // no phantom entries remain
-            if !prev_disc.is_empty() {
-                eprintln!("CD-ROM: ejected '{}', tray empty", prev_disc);
-            }
-            return None;
+        match &mut self.media {
+            Media::Changer(c) => Some(c),
+            Media::Fixed(..) => None,
         }
-        // Rotate: move front to back, new front becomes active.
-        let current = self.discs.remove(0);
-        self.discs.push(current);
-        let next_path = self.discs[0].clone();
-
-        match open_image(&next_path, ImageKind::Cdrom, false, None) {
-            Ok(node) => {
-                let size = node.size();
-                self.backend = Some(node);
-                self.size = size;
-                // phys_block_size never changes — CD-ROM physical sectors are always 2048.
-                // Do NOT reset logical_block_size — MODE SELECT is a controller setting
-                // that persists across disc changes, just like on real hardware.
-                self.filename = next_path.clone();
-                self.unit_attention = true; // signal medium change on next command
-                eprintln!("CD-ROM changer: switched to '{}'", next_path);
-                Some(next_path)
-            }
-            Err(e) => {
-                eprintln!("SCSI eject: could not open {}: {}", next_path, e);
-                None
-            }
-        }
-    }
-
-    /// Unload media from a CD-ROM (tray empty).
-    fn unload_media(&mut self) {
-        self.backend = None;
-        self.size = 0;
-        self.filename = String::new();
-        self.unit_attention = true;
-    }
-
-    /// Load an explicit image path and make it the active disc immediately,
-    /// as if a hand swapped the disc in the drive. The path is inserted at the
-    /// front of the changer list (becomes index 0) and a medium-change is
-    /// signalled (unit attention) so the guest re-reads the TOC on its next
-    /// command. The image is opened as a drive opens any disc (see
-    /// [`open_image`]). Err if this is not a CD-ROM or the file can't
-    /// be opened.
-    ///
-    /// Queue management by disc count:
-    ///   - 0 discs (empty tray): the new disc becomes the sole entry.
-    ///   - 1 disc: the existing disc is kept in the queue (pushed to index 1)
-    ///     and the new disc becomes active at index 0, growing the queue to 2
-    ///     so that eject cycles rather than emptying the tray.
-    ///   - 2+ discs: the new disc is placed at index 0 (active); if it was
-    ///     already queued it is moved to the front rather than duplicated.
-    fn load_disc(&mut self, path: String) -> Result<String, String> {
-        if !self.is_cdrom() {
-            return Err("Not a CD-ROM device".to_string());
-        }
-        let node = open_image(&path, ImageKind::Cdrom, false, None)
-            .map_err(|e| format!("could not open {}: {}", path, e))?;
-        let size = node.size();
-        self.backend = Some(node);
-        self.size = size;
-        self.filename = path.clone();
-        self.unit_attention = true;
-
-        match self.discs.len() {
-            // Empty tray: new disc is the only entry.
-            0 => self.discs.push(path.clone()),
-            // One disc already loaded: keep it queued at index 1 so eject
-            // cycles between the two instead of emptying the tray.
-            1 => {
-                if self.discs[0] != path {
-                    // Push the current disc to the back, new disc goes to front.
-                    self.discs.insert(0, path.clone());
-                }
-                // If same path, nothing to change — already loaded.
-            }
-            // 2+ discs: make new disc active at front, dedup if already queued.
-            _ => {
-                if let Some(pos) = self.discs.iter().position(|d| d == &path) {
-                    self.discs.remove(pos);
-                }
-                self.discs.insert(0, path.clone());
-            }
-        }
-        Ok(path)
-    }
-
-    /// Insert a new disc path at position 1 (next after current).
-    /// Returns Err if this is not a CD-ROM or the path doesn't exist.
-    fn add_disc(&mut self, path: String) -> Result<(), String> {
-        if !self.is_cdrom() {
-            return Err("Not a CD-ROM device".to_string());
-        }
-        if !std::path::Path::new(&path).exists() {
-            return Err(format!("File not found: {}", path));
-        }
-        // Insert at index 1 so it becomes the next disc after eject.
-        let insert_pos = if self.discs.is_empty() { 0 } else { 1 };
-        self.discs.insert(insert_pos, path);
-        Ok(())
-    }
-
-    /// Remove disc at the given ordinal index.
-    /// Removing index 0 (current) does not eject — it only removes the path.
-    /// Returns Err if index is out of range.
-    fn remove_disc(&mut self, ordinal: usize) -> Result<String, String> {
-        if !self.is_cdrom() {
-            return Err("Not a CD-ROM device".to_string());
-        }
-        if ordinal >= self.discs.len() {
-            return Err(format!("Ordinal {} out of range (0..{})", ordinal, self.discs.len()));
-        }
-        Ok(self.discs.remove(ordinal))
-    }
-
-    /// Move disc at `ordinal` to index 1 (next after current).
-    /// If ordinal is 0 (active), returns Err.
-    fn move_disc_next(&mut self, ordinal: usize) -> Result<(), String> {
-        if !self.is_cdrom() {
-            return Err("Not a CD-ROM device".to_string());
-        }
-        if ordinal == 0 {
-            return Err("Ordinal 0 is the active disc; use 'scsi eject' to advance".to_string());
-        }
-        if ordinal >= self.discs.len() {
-            return Err(format!("Ordinal {} out of range (0..{})", ordinal, self.discs.len()));
-        }
-        if self.discs.len() < 2 {
-            return Ok(()); // already only entry
-        }
-        let path = self.discs.remove(ordinal);
-        // Insert at position 1 (right after the active disc at 0).
-        self.discs.insert(1, path);
-        Ok(())
     }
 
     fn status(&self, id: usize) -> Vec<String> {
         let (phys, logical) = self.block_sizes();
         if self.is_cdrom() {
-            let list = self.disc_list();
-            let active = if self.has_media() { self.current_disc() } else { "(tray empty)" };
+            let Media::Changer(changer) = &self.media else { return Vec::new() };
+            let list = changer.discs();
+            let active = changer.current().unwrap_or("(tray empty)");
             let mut lines = vec![format!("SCSI ID {}: CD-ROM {} ({} disc(s))  phys_block={} logical_block={}",
                 id, active, list.len(), phys, logical)];
             for (i, d) in list.iter().enumerate() {
@@ -1247,8 +1106,9 @@ impl ScsiTarget for ScsiDevice {
             lines
         } else {
             let cow = if self.is_cow() { ", copy-on-write" } else { "" };
+            let path = match &self.media { Media::Fixed(_, p) => p.as_str(), Media::Changer(_) => "" };
             vec![format!("SCSI ID {}: disk {} ({} blocks of {}{})",
-                id, self.current_disc(), self.size() / logical.max(1), logical, cow)]
+                id, path, self.size() / logical.max(1), logical, cow)]
         }
     }
 
@@ -1263,14 +1123,6 @@ impl ScsiTarget for ScsiDevice {
     }
 
     fn cow_dirty(&self) -> Option<usize> { self.is_cow().then(|| self.cow_dirty_count()) }
-
-    fn discs(&self) -> Option<Discs> {
-        self.is_cdrom().then(|| Discs {
-            current: self.filename.clone(),
-            list: self.discs.clone(),
-            block_sizes: self.block_sizes(),
-        })
-    }
 }
 
 #[cfg(test)]
@@ -1305,7 +1157,6 @@ mod tests {
         let node = crate::block_node::RawNode::open(&path).unwrap();
         let mut dev = ScsiDevice::new(
             Box::new(node),
-            4 * 512,
             false,
             path.display().to_string(),
             vec![],
@@ -1346,7 +1197,6 @@ mod tests {
             .with_base_path(&base);
         let mut dev = ScsiDevice::new(
             Box::new(node),
-            2 * 512,
             false,
             base.display().to_string(),
             vec![],
@@ -1390,7 +1240,7 @@ mod tests {
         std::fs::write(&path, vec![0u8; 100 * 2048]).expect("test image");
         let node = crate::block_node::RawNode::open(&path).expect("open");
         let identity = ScsiIdentity::new(b"TEST    ", b"CD-ROM          ", b"1.0 ");
-        let mut dev = ScsiDevice::new(Box::new(node), 100 * 2048, true, path.display().to_string(), Vec::new(), identity);
+        let mut dev = ScsiDevice::new(Box::new(node), true, path.display().to_string(), Vec::new(), identity);
         let _ = run(&mut dev, &[0x00, 0, 0, 0, 0, 0]);
         let _ = run(&mut dev, &[0x03, 0, 0, 0, 18, 0]);
         dev
@@ -1445,7 +1295,7 @@ mod tests {
 
         let mut cd = ScsiDevice::new_empty_cdrom(CDROM_IDENTITY);
         assert!(!cd.has_media());
-        ScsiTarget::load_disc(&mut cd, chd.display().to_string()).unwrap();
+        cd.changer().unwrap().load(&chd.display().to_string()).unwrap();
         assert!(cd.has_media());
         assert_eq!(cd.size(), 16 * 2048, "the CHD's size, not the file's");
         // The medium change is reported once, then the disc reads.

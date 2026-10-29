@@ -805,6 +805,225 @@ pub fn open_image(
     })
 }
 
+/// Media that can be taken out and put back: a CD-ROM drive's tray.
+///
+/// This is a trait of its own, not part of [`BlockNode`], because removable
+/// media is not always a block device. A tape drive's cartridge is removable
+/// too, but a tape grows as it is written and is read in order, so it can
+/// implement this without being a node.
+pub trait Removable {
+    /// Whether a medium is in.
+    fn present(&self) -> bool;
+
+    /// Whether the medium changed since this was last asked. Asking clears
+    /// it, so a caller reports a change once.
+    fn take_changed(&mut self) -> bool;
+
+    /// Take the medium out. Returns what the drive loads in its place, `None`
+    /// when it is left empty.
+    fn eject(&mut self) -> io::Result<Option<String>>;
+
+    /// Put the image at `path` in, as a hand swapping the medium would.
+    fn load(&mut self, path: &str) -> io::Result<()>;
+}
+
+/// A CD-ROM drive's tray, with the discs queued for it.
+///
+/// The queue is paths; only the active disc is open. It is a node that
+/// forwards to the active disc, so the storage commands neither know nor care
+/// that the disc can change, and a drive with its tray empty is a node of
+/// size 0 whose reads fail. The queue editing is the changer's own, not
+/// [`Removable`]'s: a tape has no queue.
+pub struct ChangerNode {
+    /// The discs, the active one first.
+    discs: Vec<String>,
+    /// The active disc, `None` with the tray empty.
+    active: Option<Box<dyn BlockNode>>,
+    changed: bool,
+}
+
+impl ChangerNode {
+    /// A drive with its tray empty and nothing queued.
+    pub fn empty() -> Self {
+        Self { discs: Vec::new(), active: None, changed: false }
+    }
+
+    /// A drive holding `node`, the image at `path`, with `discs` queued
+    /// behind it. `path` is first in the queue.
+    pub fn loaded(node: Box<dyn BlockNode>, path: &str, mut discs: Vec<String>) -> Self {
+        if discs.first().map(String::as_str) != Some(path) {
+            discs.retain(|d| d != path);
+            discs.insert(0, path.to_string());
+        }
+        Self { discs, active: Some(node), changed: false }
+    }
+
+    /// The active disc's path, `None` with the tray empty.
+    pub fn current(&self) -> Option<&str> {
+        self.active.as_ref().and_then(|_| self.discs.first()).map(String::as_str)
+    }
+
+    /// The queue, the active disc first.
+    pub fn discs(&self) -> &[String] {
+        &self.discs
+    }
+
+    /// Take the disc out and leave the tray empty, keeping the queue.
+    pub fn unload(&mut self) {
+        self.active = None;
+        self.changed = true;
+    }
+
+    /// Queue `path` to follow the active disc. The file has to exist; it is
+    /// not opened until it is loaded.
+    pub fn add(&mut self, path: String) -> Result<(), String> {
+        if !Path::new(&path).exists() {
+            return Err(format!("File not found: {}", path));
+        }
+        let at = if self.discs.is_empty() { 0 } else { 1 };
+        self.discs.insert(at, path);
+        Ok(())
+    }
+
+    /// Drop the queued disc at `ordinal`. Dropping the active disc (0) takes
+    /// it off the list but leaves it in the drive.
+    pub fn remove(&mut self, ordinal: usize) -> Result<String, String> {
+        if ordinal >= self.discs.len() {
+            return Err(format!("Ordinal {} out of range (0..{})", ordinal, self.discs.len()));
+        }
+        Ok(self.discs.remove(ordinal))
+    }
+
+    /// Make the queued disc at `ordinal` the one after the active disc.
+    pub fn move_next(&mut self, ordinal: usize) -> Result<(), String> {
+        if ordinal == 0 {
+            return Err("Ordinal 0 is the active disc; use 'scsi eject' to advance".to_string());
+        }
+        if ordinal >= self.discs.len() {
+            return Err(format!("Ordinal {} out of range (0..{})", ordinal, self.discs.len()));
+        }
+        if self.discs.len() < 2 {
+            return Ok(());
+        }
+        let path = self.discs.remove(ordinal);
+        self.discs.insert(1, path);
+        Ok(())
+    }
+
+    fn disc(&mut self) -> io::Result<&mut Box<dyn BlockNode>> {
+        self.active
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no disc in the drive"))
+    }
+}
+
+impl Removable for ChangerNode {
+    fn present(&self) -> bool {
+        self.active.is_some()
+    }
+
+    fn take_changed(&mut self) -> bool {
+        std::mem::take(&mut self.changed)
+    }
+
+    /// With none or one disc queued the tray empties and the queue is cleared;
+    /// with more, the queue turns and the next disc loads. If the next disc
+    /// will not open, the drive is left as it was.
+    fn eject(&mut self) -> io::Result<Option<String>> {
+        if self.discs.len() <= 1 {
+            if let Some(prev) = self.current() {
+                eprintln!("CD-ROM: ejected '{}', tray empty", prev);
+            }
+            self.unload();
+            self.discs.clear();
+            return Ok(None);
+        }
+        let node = open_image(&self.discs[1], ImageKind::Cdrom, false, None)?;
+        let gone = self.discs.remove(0);
+        self.discs.push(gone);
+        self.active = Some(node);
+        self.changed = true;
+        let next = self.discs[0].clone();
+        eprintln!("CD-ROM changer: switched to '{}'", next);
+        Ok(Some(next))
+    }
+
+    /// The disc becomes the active one at the front of the queue. With an
+    /// empty tray it is the only entry; with one disc loaded that disc stays
+    /// queued behind it, so an eject turns the queue rather than emptying the
+    /// tray; with more, a disc already queued moves to the front instead of
+    /// appearing twice.
+    fn load(&mut self, path: &str) -> io::Result<()> {
+        let node = open_image(path, ImageKind::Cdrom, false, None)?;
+        self.active = Some(node);
+        self.changed = true;
+        match self.discs.len() {
+            0 => self.discs.push(path.to_string()),
+            1 => {
+                if self.discs[0] != path {
+                    self.discs.insert(0, path.to_string());
+                }
+            }
+            _ => {
+                self.discs.retain(|d| d != path);
+                self.discs.insert(0, path.to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+impl BlockNode for ChangerNode {
+    fn size(&self) -> u64 {
+        self.active.as_ref().map_or(0, |d| d.size())
+    }
+    fn read(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.disc()?.read(offset, buf)
+    }
+    fn write(&mut self, offset: u64, buf: &[u8]) -> io::Result<()> {
+        self.disc()?.write(offset, buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.active.as_mut().map_or(Ok(()), |d| d.flush())
+    }
+    fn discard(&mut self, offset: u64, len: u64) -> io::Result<()> {
+        self.disc()?.discard(offset, len)
+    }
+    fn block_status(&self, offset: u64, len: u64) -> io::Result<BlockStatus> {
+        match &self.active {
+            Some(d) => d.block_status(offset, len),
+            None => Err(io::Error::new(io::ErrorKind::NotConnected, "no disc in the drive")),
+        }
+    }
+    fn backing(&self) -> Option<&dyn BlockNode> {
+        self.active.as_deref()
+    }
+    fn dirty_count(&self) -> usize {
+        self.active.as_ref().map_or(0, |d| d.dirty_count())
+    }
+    fn is_cow(&self) -> bool {
+        self.active.as_ref().is_some_and(|d| d.is_cow())
+    }
+    fn commit(&mut self) -> io::Result<usize> {
+        self.active.as_mut().map_or(Ok(0), |d| d.commit())
+    }
+    fn rollback(&mut self) -> io::Result<()> {
+        self.active.as_mut().map_or(Ok(()), |d| d.rollback())
+    }
+    fn overlay_paths(&self) -> Option<(PathBuf, PathBuf)> {
+        self.active.as_ref().and_then(|d| d.overlay_paths())
+    }
+    fn pending_sync(&self) -> Option<(PathBuf, PathBuf)> {
+        self.active.as_ref().and_then(|d| d.pending_sync())
+    }
+    fn export_overlay(&mut self, dest: &Path) -> io::Result<Vec<u64>> {
+        self.active.as_mut().map_or(Ok(Vec::new()), |d| d.export_overlay(dest))
+    }
+    fn import_overlay(&mut self, source: &Path, dirty: Vec<u64>) -> io::Result<()> {
+        self.active.as_mut().map_or(Ok(()), |d| d.import_overlay(source, dirty))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1269,5 +1488,95 @@ mod tests {
         drop(node);
         let _ = std::fs::remove_file(&base);
         let _ = std::fs::remove_file(crate::chd_disk::diff_path_for(&base));
+    }
+
+    /// An ISO of `sectors` CD sectors, each filled with `fill`.
+    fn iso(tag: &str, fill: u8, sectors: usize) -> String {
+        let p = tmp_path(tag);
+        std::fs::write(&p, vec![fill; sectors * 2048]).unwrap();
+        p.display().to_string()
+    }
+
+    fn first_byte(c: &mut ChangerNode) -> u8 {
+        let mut b = [0u8; 1];
+        c.read(0, &mut b).unwrap();
+        b[0]
+    }
+
+    fn drive_with(paths: &[&str]) -> ChangerNode {
+        let node = open_image(paths[0], ImageKind::Cdrom, false, None).unwrap();
+        ChangerNode::loaded(node, paths[0], paths.iter().map(|p| p.to_string()).collect())
+    }
+
+    #[test]
+    fn ejecting_the_only_disc_empties_the_tray() {
+        let a = iso("only", 1, 4);
+        let mut c = drive_with(&[&a]);
+        assert!(c.present());
+        assert_eq!(c.eject().unwrap(), None);
+        assert!(!c.present());
+        assert_eq!(c.size(), 0);
+        assert!(c.discs().is_empty(), "no phantom entries remain");
+        assert!(c.read(0, &mut [0u8; 1]).is_err(), "an empty tray reads nothing");
+        assert!(c.take_changed());
+    }
+
+    #[test]
+    fn ejecting_with_two_discs_turns_the_queue() {
+        let (a, b) = (iso("turn-a", 1, 4), iso("turn-b", 2, 8));
+        let mut c = drive_with(&[&a, &b]);
+        assert_eq!(first_byte(&mut c), 1);
+        assert_eq!(c.eject().unwrap().as_deref(), Some(b.as_str()));
+        assert_eq!((first_byte(&mut c), c.size()), (2, 8 * 2048));
+        assert_eq!(c.discs(), [b.clone(), a.clone()], "the ejected disc goes to the back");
+        assert_eq!(c.eject().unwrap().as_deref(), Some(a.as_str()), "and the queue wraps");
+        assert_eq!(first_byte(&mut c), 1);
+    }
+
+    #[test]
+    fn loading_a_disc_raises_the_medium_change_once() {
+        let (a, b) = (iso("change-a", 1, 4), iso("change-b", 2, 4));
+        let mut c = ChangerNode::empty();
+        assert!(!c.take_changed(), "a drive starting empty has not changed");
+        c.load(&a).unwrap();
+        assert!(c.take_changed());
+        assert!(!c.take_changed(), "asking clears it");
+        c.load(&b).unwrap();
+        assert!(c.take_changed());
+        assert_eq!(c.discs(), [b, a], "the first disc stays queued behind the new one");
+    }
+
+    #[test]
+    fn a_chd_cd_in_the_queue_loads_on_eject() {
+        use libchdman_rs::cd::{create_from_iso, CdCreateOptions};
+        let a = iso("chd-a", 1, 4);
+        let src = iso("chd-src", 0x42, 16);
+        let chd = tmp_path("chd-cd").with_extension("chd");
+        create_from_iso(Path::new(&src), &chd, CdCreateOptions::default(), &mut |_| {}, &|| false).unwrap();
+        let chd = chd.display().to_string();
+        let mut c = drive_with(&[&a, &chd]);
+        assert_eq!(c.eject().unwrap().as_deref(), Some(chd.as_str()));
+        assert_eq!((first_byte(&mut c), c.size()), (0x42, 16 * 2048), "the CHD's data, not the file's bytes");
+    }
+
+    #[test]
+    fn a_disc_that_will_not_open_leaves_the_drive_as_it_was() {
+        let a = iso("bad-a", 1, 4);
+        let mut c = drive_with(&[&a, "/nonexistent/disc.iso"]);
+        assert!(c.eject().is_err());
+        assert!(c.present());
+        assert_eq!(c.discs()[0], a, "the queue did not turn");
+        assert_eq!(first_byte(&mut c), 1);
+    }
+
+    #[test]
+    fn queueing_a_missing_file_is_refused() {
+        let a = iso("queue-a", 1, 4);
+        let mut c = drive_with(&[&a]);
+        assert!(c.add("/nonexistent/disc.iso".into()).unwrap_err().contains("not found"));
+        assert_eq!(c.discs().len(), 1);
+        let b = iso("queue-b", 2, 4);
+        c.add(b.clone()).unwrap();
+        assert_eq!(c.discs(), [a, b], "a queued disc follows the active one, unopened");
     }
 }

@@ -2135,7 +2135,7 @@ mod data_out_phase_tests {
             let mut s = dev.state.lock();
             s.bus.attach(2, Box::new(scsi::ScsiDevice::new(
                 Box::new(crate::block_node::RawNode::from_file(file, 1 << 20)),
-                1 << 20, false, path.display().to_string(), Vec::new(), scsi::DISK_IDENTITY))).unwrap();
+                false, path.display().to_string(), Vec::new(), scsi::DISK_IDENTITY))).unwrap();
             s.advanced_mode = true;
             s.target_id = 2;
             s.regs[regs::DESTINATION_ID as usize] = 2;

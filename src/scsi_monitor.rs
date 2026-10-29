@@ -13,7 +13,8 @@
 
 use std::io::Write;
 
-use crate::scsi::{ScsiBus, ScsiTarget};
+use crate::block_node::{ChangerNode, Removable};
+use crate::scsi::{ScsiBus, ScsiTarget, CDROM_SECTOR};
 
 /// A SCSI controller, for the targets on its bus.
 pub trait ScsiTargets {
@@ -29,12 +30,14 @@ pub trait ScsiTargets {
 /// The shared subcommands, for a chip's `help` text.
 pub const SCSI_USAGE: &str = "scsi status | scsi dayna | scsi eject <id> | scsi add <id> <path> | scsi list <id> | scsi del <id> <ord> | scsi next <id> <ord>";
 
-/// Run `f` on the CD-ROM at `id`, or say why there is none.
-fn cdrom<R>(ctl: &impl ScsiTargets, id: usize, f: impl FnOnce(&mut dyn ScsiTarget) -> Result<R, String>) -> Result<R, String> {
+/// Run `f` on the changer of the CD-ROM at `id`, or say why there is none.
+fn cdrom<R>(ctl: &impl ScsiTargets, id: usize, f: impl FnOnce(&mut ChangerNode) -> Result<R, String>) -> Result<R, String> {
     ctl.with_targets(|targets| match targets.get_mut(id).and_then(|d| d.as_mut()) {
         None => Err(format!("No device at SCSI ID {}", id)),
-        Some(dev) if dev.discs().is_none() => Err(format!("SCSI ID {} is not a CD-ROM", id)),
-        Some(dev) => f(&mut **dev),
+        Some(dev) => match dev.changer() {
+            None => Err(format!("SCSI ID {} is not a CD-ROM", id)),
+            Some(changer) => f(changer),
+        },
     })
 }
 
@@ -42,11 +45,12 @@ fn cdrom<R>(ctl: &impl ScsiTargets, id: usize, f: impl FnOnce(&mut dyn ScsiTarge
 /// block size).
 pub fn disc_status(ctl: &impl ScsiTargets) -> Vec<(usize, String, Vec<String>, u64, u64)> {
     ctl.with_targets(|targets| {
-        targets.iter().enumerate()
+        targets.iter_mut().enumerate()
             .filter_map(|(id, d)| {
-                let discs = d.as_ref()?.discs()?;
-                let (phys, logical) = discs.block_sizes;
-                Some((id, discs.current, discs.list, phys, logical))
+                let dev = d.as_mut()?;
+                let logical = dev.block_size()?;
+                let changer = dev.changer()?;
+                Some((id, changer.current().unwrap_or("").to_string(), changer.discs().to_vec(), CDROM_SECTOR, logical))
             })
             .collect()
     })
@@ -55,35 +59,40 @@ pub fn disc_status(ctl: &impl ScsiTargets) -> Vec<(usize, String, Vec<String>, u
 /// Put the image at `path` in CD-ROM `id` and make it the active disc, as a
 /// hand swapping the disc would. Returns the path loaded.
 pub fn load_disc(ctl: &impl ScsiTargets, id: usize, path: String) -> Result<String, String> {
-    cdrom(ctl, id, |dev| dev.load_disc(path))
+    cdrom(ctl, id, |changer| {
+        changer.load(&path).map_err(|e| format!("could not open {}: {}", path, e))?;
+        Ok(path)
+    })
 }
 
 /// Eject CD-ROM `id`'s disc and load the next in its changer list; returns
 /// the new active path.
 pub fn eject_disc(ctl: &impl ScsiTargets, id: usize) -> Result<String, String> {
-    cdrom(ctl, id, |dev| {
-        dev.eject_next().ok_or_else(|| format!("SCSI ID {} has only one disc (nothing to eject to)", id))
+    cdrom(ctl, id, |changer| match changer.eject() {
+        Ok(Some(path)) => Ok(path),
+        Ok(None) => Err(format!("SCSI ID {} has only one disc (nothing to eject to)", id)),
+        Err(e) => Err(format!("SCSI ID {}: could not load the next disc: {}", id, e)),
     })
 }
 
 /// Eject CD-ROM `id`'s disc and leave the drive empty.
 pub fn eject_to_empty(ctl: &impl ScsiTargets, id: usize) -> Result<(), String> {
-    cdrom(ctl, id, |dev| { dev.unload_media(); Ok(()) })
+    cdrom(ctl, id, |changer| { changer.unload(); Ok(()) })
 }
 
 /// Queue `path` as the next disc after an eject on CD-ROM `id`.
 pub fn add_disc(ctl: &impl ScsiTargets, id: usize, path: String) -> Result<(), String> {
-    cdrom(ctl, id, |dev| dev.add_disc(path))
+    cdrom(ctl, id, |changer| changer.add(path))
 }
 
 /// Remove the disc at `ordinal` from CD-ROM `id`'s queue (not the active one).
 pub fn remove_disc(ctl: &impl ScsiTargets, id: usize, ordinal: usize) -> Result<String, String> {
-    cdrom(ctl, id, |dev| dev.remove_disc(ordinal))
+    cdrom(ctl, id, |changer| changer.remove(ordinal))
 }
 
 /// Move the disc at `ordinal` to be the next after an eject on CD-ROM `id`.
 pub fn move_disc_next(ctl: &impl ScsiTargets, id: usize, ordinal: usize) -> Result<(), String> {
-    cdrom(ctl, id, |dev| dev.move_disc_next(ordinal))
+    cdrom(ctl, id, |changer| changer.move_next(ordinal))
 }
 
 fn write_queue(w: &mut dyn Write, list: &[String]) {
@@ -147,7 +156,7 @@ pub fn scsi_subcommand(ctl: &impl ScsiTargets, args: &[&str], w: &mut dyn Write)
             Ok(())
         }),
         "list" => id_arg(1, "Usage: scsi list <id>").map(|id| {
-            match cdrom(ctl, id, |dev| Ok(dev.discs().map(|d| d.list).unwrap_or_default())) {
+            match cdrom(ctl, id, |changer| Ok(changer.discs().to_vec())) {
                 Ok(list) => {
                     let _ = writeln!(w, "SCSI ID {} queue ({} disc(s)):", id, list.len());
                     write_queue(w, &list);
