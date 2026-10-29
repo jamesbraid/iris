@@ -6810,8 +6810,13 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 let mask = 0xFFFFFFFFu32 >> shift;
                 let result = (mem_word >> shift) | (rt_val & !mask);
 
-                // Sign-extend to 64 bits
-                self.core.write_gpr(rt_reg, result as i32 as i64 as u64);
+                // The selected R14000 policy retains the old upper word on partial loads.
+                let value = if C::LWR_PRESERVES_UPPER && byte_offset != 3 {
+                    (self.core.read_gpr(rt_reg) & 0xffff_ffff_0000_0000) | result as u64
+                } else {
+                    result as i32 as i64 as u64
+                };
+                self.core.write_gpr(rt_reg, value);
                 self.handle_exec_complete()
             }
             Err(status) => self.finish_status(status)

@@ -557,6 +557,9 @@ pub trait CpuModel: MipsCache {
     /// and `Index_Load_Data` returns into it, neither of which is true of the
     /// R4000 hit operations that share those encodings.
     const R10K_CACHE_OPS: bool = false;
+    /// Selected partial-LWR upper-word policy for this CPU model.
+    /// Full-word loads still sign-extend bit 31.
+    const LWR_PRESERVES_UPPER: bool = false;
 }
 
 pub trait MipsCache: Send + Sync {

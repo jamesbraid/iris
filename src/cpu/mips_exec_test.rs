@@ -280,6 +280,57 @@ mod tests {
         (exec, mem)
     }
 
+    fn check_lwr_upper_word<C: CpuModel + From<Arc<dyn BusDevice>>>(preserve: bool) {
+        let mem = Arc::new(MockMemory::new());
+        mem.set_word(0x2000, 0x89ab_cdef);
+        let cfg = MipsCpuConfig::for_model::<C>();
+        let mut exec = Box::new(MipsExecutor::<PassthroughTlb, C>::new(
+            mem, PassthroughTlb::default(), &cfg,
+        ));
+        disable_jitv2(&mut exec);
+        exec.core.write_gpr(1, 0x2000);
+        for old in [0x8123_4567_a1b2_c3d4u64, 0x7654_3210_21b2_c3d4] {
+            let low = old as u32;
+            let expected = [
+                (low & 0xffff_ff00) | 0x89,
+                (low & 0xffff_0000) | 0x89ab,
+                (low & 0xff00_0000) | 0x89_abcd,
+                0x89ab_cdef,
+            ];
+            for (offset, word) in expected.into_iter().enumerate() {
+                exec.core.write_gpr(2, old);
+                assert_eq!(exec.exec(make_i(OP_LWR, 1, 2, offset as u16)), EXEC_COMPLETE);
+                let result = if preserve && offset != 3 {
+                    (old & 0xffff_ffff_0000_0000) | word as u64
+                } else {
+                    word as i32 as i64 as u64
+                };
+                assert_eq!(exec.core.read_gpr(2), result, "{} LWR offset {} old {:#018x}", C::NAME, offset, old);
+            }
+        }
+    }
+
+    #[test]
+    fn r14000_partial_lwr_preserves_upper_word() {
+        use crate::cpu::mips_cache_shadow::ShadowCache;
+        use crate::cpu::mips_cache_v2::model;
+        type R14000 = ShadowCache<32768, 64, 32768, 32, 2097152, 128,
+            true, 0x0000_0f23, 0x0000_0900, 64, { model::R10000 }>;
+        check_lwr_upper_word::<R14000>(true);
+    }
+
+    #[test]
+    fn other_models_lwr_keeps_sign_extension() {
+        use crate::cpu::mips_cache_shadow::{R4400ShadowCache, R5000ShadowCache, R10000ShadowCache};
+        use crate::cpu::mips_cache_v2::{R5000Cache, R10000Cache};
+        check_lwr_upper_word::<R4400Cache>(false);
+        check_lwr_upper_word::<R5000Cache>(false);
+        check_lwr_upper_word::<R10000Cache>(false);
+        check_lwr_upper_word::<R4400ShadowCache>(false);
+        check_lwr_upper_word::<R5000ShadowCache>(false);
+        check_lwr_upper_word::<R10000ShadowCache>(false);
+    }
+
     /// A model's identity must be live the moment the executor exists — MipsCore::new
     /// runs reset_registers before the model is known, so the constructor has to set
     /// both the reset value and the live register. Caught a real bug: the guest read
