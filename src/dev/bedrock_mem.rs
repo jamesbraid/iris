@@ -2,8 +2,9 @@
 //! the bank decode selected by Bedrock's memory configuration register.
 //!
 //! This population follows the QEMU model; it is not a measured Fuel
-//! topology. Every access passes through MD's checks, including accesses
-//! to the cached view. No direct CPU memory window bypasses those checks.
+//! topology. Processor and DMA accesses to backing memory pass through MD's
+//! checks. The private cached startup window bypasses RAM during initialization;
+//! there is no direct CPU window onto the backing banks.
 //!
 //! Ported from hw/misc/sgi-bedrock-md.c in jamesbraid/qemu-sgi-origami.
 

@@ -1,7 +1,7 @@
 //! Bedrock's internal crossbar registers and software error injection.
 //!
-//! Arbitration timing and debug outputs are absent. Unpublished queue
-//! registers retain their values; reads do not invent queue errors.
+//! Arbitration timing and debug outputs are absent. Unsupported queue
+//! registers read zero; writes are logged and ignored.
 //!
 //! Ported from hw/misc/sgi-bedrock-xb.c in jamesbraid/qemu-sgi-origami.
 

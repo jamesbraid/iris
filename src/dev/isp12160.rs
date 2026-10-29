@@ -5,7 +5,7 @@
 //! joined worker thread. The downloaded controller program is retained but
 //! not executed.
 //!
-//! Ported from hw/scsi/qlogic-isp.c and hw/scsi/qlogic-isp.h
+//! Ported from hw/scsi/qlogic-isp.c and include/hw/scsi/qlogic-isp.h
 //! in jamesbraid/qemu-sgi-origami.
 
 use std::sync::Arc;

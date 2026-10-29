@@ -1,8 +1,8 @@
 //! The Fuel's L1 system controller and its processor-side UART.
 //!
 //! The internal L1 connection is separate from IOC3's external serial ports.
-//! Controller identities and power timing follow the QEMU model's
-//! approximations. Remote routing and controller diagnostics are absent.
+//! Controller identities and power transitions are functional approximations.
+//! Remote routing and controller diagnostics are absent.
 //!
 //! Ported from hw/misc/sgi-l1.c in jamesbraid/qemu-sgi-origami.
 
