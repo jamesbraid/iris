@@ -20,7 +20,7 @@ use std::thread;
 use std::time::Duration;
 
 
-use crate::net::{eth_summary, mac_str, GatewayConfig, Link, NatControl};
+use crate::net::{eth_summary, mac_str, GatewayConfig, Link, NatControl, NetStatus};
 use crate::traits::{BusRead8, BusRead16, BusRead32, BusRead64, BUS_OK, BUS_ERR, BusDevice, Device, DmaClient, DmaStatus, Resettable, Saveable};
 use crate::snapshot::{get_field, toml_u8, u8_slice_to_toml, load_u8_slice, hex_u8};
 
@@ -185,6 +185,7 @@ struct Net {
     live: Option<Arc<AtomicBool>>,
     /// enet waits on this for frames from the backend; `kick_*` notifies it.
     rx_wake: Option<Arc<crate::net::Wake>>,
+    status: Option<Arc<dyn NetStatus>>,
     frames: Option<Arc<AtomicU64>>,
 }
 
@@ -257,10 +258,13 @@ impl Seeq8003 {
     /// `stop`. Attach before the first `start`: a SEEQ with no link has no
     /// network.
     pub fn attach(&self, link: Link) {
-        *self.nat_ctl.lock() = link.nat.clone();
+        if let Some(nat) = link.nat.clone() {
+            *self.nat_ctl.lock() = nat;
+        }
         let mut net = self.net.lock();
         net.rx_wake = Some(link.rx_wake.clone());
         net.frames = Some(link.frames.clone());
+        net.status = link.status.clone();
         net.next = Some(link);
     }
 
@@ -589,6 +593,7 @@ impl Device for Seeq8003 {
                 Err(e) => eprintln!("iris: network: {e}; the Ethernet stays down after this run"),
             }
             net.live = Some(link.running.clone());
+            net.status = link.status.clone();
             link
         };
 
@@ -788,6 +793,12 @@ impl Device for Seeq8003 {
                 match args.first().copied() {
                     Some("status") | None => {
                         // net status [tcp|udp|icmp|all]
+                        // A backend that is not the NAT reports for itself.
+                        let status = self.net.lock().status.clone();
+                        if let Some(status) = status {
+                            status.report(&mut *w).ok();
+                            return Ok(());
+                        }
                         let proto = args.get(1).copied().unwrap_or("all");
                         let ctl = self.nat_control();
                         let snap = ctl.snapshot.lock();

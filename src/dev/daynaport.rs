@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::devlog::LogModule;
-use crate::net::{eth_summary, mac_str, GatewayConfig, Link, NatControl};
+use crate::net::{eth_summary, mac_str, GatewayConfig, Link, NatControl, NetStatus};
 use crate::scsi::{ScsiRequest, ScsiResponse};
 
 // ── Command set ──────────────────────────────────────────────────────────────
@@ -141,6 +141,8 @@ pub struct DaynaPort {
     next: Option<Link>,
     /// The flag the running backend watches.
     live: Option<Arc<AtomicBool>>,
+    /// What the running backend adds to the status report, if anything.
+    status: Option<Arc<dyn NetStatus>>,
 
     stats: DpStats,
     /// Sense data served on REQUEST SENSE, set by the last CHECK CONDITION.
@@ -164,6 +166,7 @@ impl DaynaPort {
             tx_wake: None,
             next: None,
             live: None,
+            status: None,
             stats: DpStats::default(),
             pending_sense: [0u8; 18],
         }
@@ -186,7 +189,10 @@ impl DaynaPort {
     /// subnet and MAC). It runs from `start` to `stop`; attach before the
     /// first `start`, which a target with no link ignores.
     pub fn attach(&mut self, link: Link) {
-        self.nat_ctl = link.nat.clone();
+        if let Some(nat) = link.nat.clone() {
+            self.nat_ctl = nat;
+        }
+        self.status = link.status.clone();
         self.next = Some(link);
     }
 
@@ -202,6 +208,7 @@ impl DaynaPort {
             Err(e) => eprintln!("iris: DaynaPort {}: network: {e}; down after this run", self.target_id),
         }
         self.live = Some(link.running.clone());
+        self.status = link.status.clone();
         eprintln!("iris: DaynaPort {} backend = {}", self.target_id, link.describe);
         drop(link.spawn(&format!("dayna{}-net", self.target_id)));
         self.tx_prod = Some(link.to_net);
@@ -237,7 +244,7 @@ impl DaynaPort {
     /// Human-readable status for `scsi dayna`.
     pub fn status_lines(&self) -> Vec<String> {
         let (client, gw, mask) = self.gateway_addrs();
-        vec![
+        let mut lines = vec![
             format!("SCSI ID {}: DaynaPort SCSI/Link", self.target_id),
             format!("  MAC        : {}", mac_str(&self.mac)),
             format!("  Gateway MAC: {}", mac_str(&self.config.gateway_mac)),
@@ -250,7 +257,13 @@ impl DaynaPort {
                     self.stats.tx_frames, self.stats.tx_dropped),
             format!("  RX         : {} frames, {} filtered, {} queued",
                     self.stats.rx_frames, self.stats.rx_filtered, self.rx_cons.as_ref().map_or(0, |c| c.slots())),
-        ]
+        ];
+        if let Some(status) = &self.status {
+            let mut text = Vec::new();
+            let _ = status.report(&mut text);
+            lines.extend(String::from_utf8_lossy(&text).lines().map(|l| format!("  {l}")));
+        }
+        lines
     }
 
     // ── SCSI command dispatch ────────────────────────────────────────────────

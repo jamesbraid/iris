@@ -23,6 +23,7 @@
 //!   host_dns.rs  host DNS server discovery for DNS relaying
 //!   link.rs      an adapter's connection to the backend `[network]` selects
 //!   net_pcap.rs  PCAP bridged backend (`pcap` feature)
+//!   stream.rs    a private segment over QEMU's `-netdev stream` framing
 //!   telnet.rs    telnet option negotiation for the monitor/serial consoles
 
 mod engine;
@@ -42,6 +43,7 @@ pub mod packet;
 mod portmap;
 mod rsh;
 mod services;
+pub mod stream;
 mod tcp;
 pub mod wake;
 pub mod telnet;
@@ -59,7 +61,7 @@ use parking_lot::Mutex;
 use crate::config::{NatSubnet, NetMode, NfsConfig, PortForwardConfig};
 
 pub use engine::NatEngine;
-pub use link::Link;
+pub use link::{Link, NetStatus};
 pub use wake::Wake;
 #[cfg(feature = "pcap")]
 pub(crate) use nfs_pcap::NfsVirtualHost;
@@ -98,6 +100,8 @@ pub struct GatewayConfig {
     /// gateway): `rsh <gateway> cat|ls|echo|pwd`. Nothing is executed on the
     /// host. None disables it, and 514 is then relayed to the host like any port.
     pub rsh_dir: Option<std::path::PathBuf>,
+    /// The peer of `NetMode::Stream`, as `tcp:IP:PORT` or `unix:PATH`.
+    pub stream: Option<String>,
 }
 
 impl Default for GatewayConfig {
@@ -116,6 +120,7 @@ impl Default for GatewayConfig {
             nfs_pcap_ip:  None,
             tftp_dir:     None,
             rsh_dir:      None,
+            stream:       None,
         }
     }
 }
@@ -136,6 +141,7 @@ impl GatewayConfig {
             nfs_pcap_ip: net.nfs_pcap_ip,
             tftp_dir: net.tftp_dir.clone(),
             rsh_dir: net.rsh_dir.clone(),
+            stream: net.stream.clone(),
             ..Self::default()
         }
     }
@@ -146,10 +152,12 @@ impl GatewayConfig {
 // The SEEQ 8003 chip is backend-agnostic: it hands outbound Ethernet frames to a
 // backend over an rtrb ring and receives inbound frames back over another. Any
 // type that owns those endpoints and a run loop can serve as the backend. Today
-// there are two implementations:
+// there are three implementations:
 //   - `NatEngine` (this file): a software NAT gateway/router.
 //   - `PcapEngine` (net_pcap.rs, `--features pcap`): bridges frames onto a real
 //     host interface via libpcap.
+//   - `StreamBackend` (stream.rs): a private segment served by a peer over
+//     QEMU's `-netdev stream` framing.
 pub trait NetBackend: Send {
     /// Run the backend loop until the shared `running` flag goes false. Blocks
     /// the calling thread (the `seeq-nat` thread).
