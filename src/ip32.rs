@@ -152,11 +152,12 @@ pub const MACE_RTC_SIZE: u32 = 0x0001_0000;
 /// What is plugged into an O2 beyond its memory: the SCSI controllers (the
 /// machine attaches their disks from `[scsi.N]`, see `O2Machine::new`), and
 /// where the PROM's flash (its environment) is kept.
-#[derive(Clone, Debug, Default)]
+#[derive(Default)]
 pub struct Ip32Options {
-    /// The two on-board AIC-7880s. Without them the PROM finds nothing to
-    /// boot from.
-    pub scsi: bool,
+    /// The buses of the two on-board AIC-7880s (internal, external), with
+    /// their targets attached. Without the controllers the PROM finds nothing
+    /// to boot from.
+    pub scsi: Option<[crate::scsi::ScsiBus; 2]>,
     /// A file holding the flash, so `setenv` survives from run to run.
     pub flash_file: Option<std::path::PathBuf>,
     /// A PS/2 keyboard on port 0, and a mouse on port 1 if `Some(true)`.
@@ -467,14 +468,14 @@ impl Ip32Bus {
             bus.mace.enable_ps2(mouse);
         }
         bus.gbe.connect_irq(bus.crime.regs.clone());
-        if opts.scsi {
+        if let Some([bus_a, bus_b]) = opts.scsi {
             // The controller fetches its work from host memory, which it
             // reaches through the PCI bridge it is attached to.
-            let scsi = crate::dev::aic7880::Aic7880::new();
+            let scsi = crate::dev::aic7880::Aic7880::new_at(0, bus_a);
             // The second controller. Real hardware has it whether or not
             // anything is plugged into it, and a kernel that expects two
             // waits on the one that is missing.
-            let scsi_b = crate::dev::aic7880::Aic7880::new_at(1);
+            let scsi_b = crate::dev::aic7880::Aic7880::new_at(1, bus_b);
             scsi.set_heartbeat(bus.mace.id.heartbeat.clone());
             scsi_b.set_heartbeat(bus.mace.id.heartbeat.clone());
             bus.mace.pci.attach(IP32_SCSI_SLOT_B, "aic7880-b", scsi_b.clone());

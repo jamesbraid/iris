@@ -71,7 +71,7 @@ impl Rig {
     /// A chip with a disk of `blocks` blocks at target `id`.
     fn with_disk(name: &str, id: u8, blocks: usize) -> Rig {
         let r = Rig::bare();
-        r.isp.attach_disk_at(id, &image(name, blocks)).expect("attach");
+        r.isp.bus().attach_image(id, &image(name, blocks), false).expect("attach");
         r
     }
 
@@ -917,12 +917,10 @@ fn save_load_round_trip() {
 fn a_disk_attaches_where_asked_and_the_monitor_can_see_it() {
     use crate::scsi_monitor::ScsiTargets;
     let r = Rig::bare();
-    assert_eq!(r.isp.default_target(), 1);
-    let blocks = r.isp.attach_disk(&image("attach", 32)).unwrap();
+    let blocks = r.isp.bus().attach_image(1, &image("attach", 32), false).unwrap();
     assert_eq!(blocks, 32);
-    assert_eq!(r.isp.attached(), vec![1]);
     assert!(r.isp.with_targets(|t| t[1].is_some() && t[0].is_none()));
-    assert!(r.isp.attach_disk_at(16, &image("attach", 32)).is_err());
+    assert!(r.isp.bus().attach_image(16, &image("attach", 32), false).is_err());
 }
 
 /// Records the bus address of each transfer.
@@ -1008,7 +1006,7 @@ fn gated_rig(name: &str) -> (Rig, Arc<GatedMem>, Arc<LevelProbe>) {
     let isp = Isp1040::new();
     Device::start(&isp);
     isp.connect_dma(gate.clone());
-    isp.attach_disk_at(1, &image(name, 64)).expect("attach");
+    isp.bus().attach_image(1, &image(name, 64), false).expect("attach");
     let (probe, line) = LevelProbe::line();
     isp.connect_interrupt(line);
     let r = Rig { isp, mem };
@@ -1048,7 +1046,7 @@ fn a_soft_reset_does_not_wait_for_the_target() {
     let isp = Isp1040::new();
     Device::start(&isp);
     isp.connect_dma(gate.clone());
-    isp.attach_disk_at(1, &image("async-reset", 64)).expect("attach");
+    isp.bus().attach_image(1, &image("async-reset", 64), false).expect("attach");
     let r = Rig { isp, mem };
     let (probe, line) = LevelProbe::line();
     r.isp.connect_interrupt(line);
@@ -1061,7 +1059,7 @@ fn a_soft_reset_does_not_wait_for_the_target() {
     r.isp.write(reg::REQUEST_QUEUE, 1, 2);
     gate.wait_arrival();
     assert!(r.isp.command_running());
-    let busy = r.isp.targets.lock();
+    let busy = r.isp.bus().lock();
     gate.open();
     r.isp.write(reg::BUS_CTRL, CTRL_SOFT_RESET as u32, 2);
     assert_eq!(r.r(r.mb(4)), SIG4, "the reset happened with the target still busy");
@@ -1227,7 +1225,7 @@ fn the_ring_thread_lives_between_start_and_stop() {
     assert!(!isp.is_running(), "the constructor starts no thread");
     let mem = FakeMem::new();
     isp.connect_dma(mem.clone());
-    isp.attach_disk_at(0, &image("lifecycle", 64)).expect("attach");
+    isp.bus().attach_image(0, &image("lifecycle", 64), false).expect("attach");
     let r = Rig { isp, mem };
     r.init_rings(8, 8);
     r.isp.start();
@@ -1243,4 +1241,29 @@ fn the_ring_thread_lives_between_start_and_stop() {
     r.isp.wait_idle();
     assert_eq!(r.r(reg::REQUEST_QUEUE), 1);
     assert_eq!(g32(&r.status(0), 4), 0x7001);
+}
+
+/// The machine fills the bus from `[scsi.N]` and gives it to the controller,
+/// which answers for what is on it and still takes a target attached later
+/// through the same bus.
+#[test]
+fn a_controller_built_on_a_filled_bus_answers_for_its_target() {
+    let img = std::env::temp_dir().join(format!("iris-isp1040-filled-{}.img", std::process::id()));
+    std::fs::write(&img, vec![0u8; 64 * 512]).unwrap();
+    let bus = Isp1040::new_bus();
+    bus.attach_image(3, &img, false).unwrap();
+    let isp = Isp1040::new_at(1, bus);
+    assert!(isp.bus().has_target(3));
+    assert!(!isp.bus().has_target(4));
+    let inquiry = crate::scsi::ScsiRequest {
+        cdb: vec![crate::scsi::scsi_cmd::INQUIRY, 0, 0, 0, 36, 0],
+        data_len: crate::scsi::ScsiDataLength::Unlimited,
+        data_in: None,
+    };
+    let r = isp.bus().request(3, &inquiry).expect("target answers").unwrap();
+    assert_eq!(&r.data[8..16], b"SGI     ");
+    assert_eq!(&r.data[16..32], b"IRIS EMUL DISK  ");
+    isp.bus().attach_image(4, &img, false).unwrap();
+    assert!(isp.bus().has_target(4), "a target attached after boot goes on the same bus");
+    let _ = std::fs::remove_file(img);
 }

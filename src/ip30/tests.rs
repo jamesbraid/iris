@@ -473,7 +473,7 @@ impl Octane {
         ioc3.attach_eth(eth.clone());
         ioc3.connect_superio_interrupt(bridge.pin_line(SUPERIO_PIN as u8));
 
-        let isp = [Arc::new(Isp1040::new_at(0)), Arc::new(Isp1040::new_at(1))];
+        let isp = [Arc::new(Isp1040::new_at(0, Isp1040::new_bus())), Arc::new(Isp1040::new_at(1, Isp1040::new_bus()))];
         bridge.attach(SLOT_ISP0 as u8, isp[0].clone());
         bridge.attach(SLOT_ISP1 as u8, isp[1].clone());
         bridge.attach(SLOT_IOC3 as u8, ioc3.clone());
@@ -689,7 +689,7 @@ impl IspDisk {
         static N: AtomicU32 = AtomicU32::new(0);
         let p = std::env::temp_dir().join(format!("iris-ip30-xtests-{}-{}-{name}.img", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
         std::fs::write(&p, vec![0u8; 64 * 512]).unwrap();
-        isp.attach_disk_at(target, &p).unwrap();
+        isp.bus().attach_image(target, &p, false).unwrap();
         IspDisk(p)
     }
 }

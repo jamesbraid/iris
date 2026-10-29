@@ -26,7 +26,7 @@
 //! because one boot can hand the chip from one driver to the next.
 
 use crate::locks::{SpinGuard, SpinLock};
-use crate::scsi::{scsi_cmd, ScsiDataLength, ScsiDevice, ScsiIdentity, ScsiRequest};
+use crate::scsi::{scsi_cmd, ScsiBus, ScsiDataLength, ScsiIdentities, ScsiRequest, CDROM_IDENTITY, DISK_IDENTITY};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -173,9 +173,6 @@ pub const SG_LAST: u32 = 0x8000_0000;
 /// in any healthy list.
 pub const SG_MAX: usize = 4096;
 
-/// What the O2's targets report in INQUIRY, disks and CD-ROMs alike.
-pub const O2_DISK: ScsiIdentity = ScsiIdentity::new(b"SGI     ", b"IRIS EMULATED   ", b"1.0 ");
-pub const O2_CDROM: ScsiIdentity = O2_DISK;
 
 /// NetBSD's sequencer program uses a different arrangement from the PROM's,
 /// and these names come from its own headers rather than from guessing.
@@ -422,7 +419,7 @@ pub struct Aic7880 {
     /// The targets on the bus, by SCSI id (the shared SCSI devices: disks,
     /// CHDs, overlays, CD-ROMs). An install needs at least two -- the media
     /// to read and the disk to write.
-    targets: Mutex<[Option<ScsiDevice>; 16]>,
+    bus: ScsiBus,
     /// Host memory, through the PCI bridge the chip masters. The controller
     /// fetches its work from there rather than being handed it a register at
     /// a time, so without this it can see the tag of a command and nothing
@@ -454,14 +451,23 @@ pub const PCI_DEVICE_AIC7880: u16 = 0x8078;
 pub const PCI_CLASS_SCSI: u32 = 0x0100_00;
 
 impl Aic7880 {
-    pub fn new() -> Arc<Self> {
-        Self::new_at(0)
+    /// An empty bus of the kind this chip drives: ids 0-15, and the
+    /// emulated disk and CD-ROM. The machine fills it from `[scsi.N]` and
+    /// hands it to [`Self::new_at`].
+    pub fn new_bus() -> ScsiBus {
+        ScsiBus::new(16, ScsiIdentities { disk: DISK_IDENTITY, cdrom: CDROM_IDENTITY })
     }
 
-    /// The controller at `index`: 0 on the internal bus, 1 on the external
-    /// connector. Commands run inline until [`crate::traits::Device::start`]
-    /// gives it its own thread.
-    pub fn new_at(index: u8) -> Arc<Self> {
+    /// The controller on an empty bus, for the tests.
+    #[cfg(test)]
+    pub fn new() -> Arc<Self> {
+        Self::new_at(0, Self::new_bus())
+    }
+
+    /// The controller at `index` on `bus`: 0 on the internal bus, 1 on the
+    /// external connector. Commands run inline until
+    /// [`crate::traits::Device::start`] gives it its own thread.
+    pub fn new_at(index: u8, bus: ScsiBus) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             index,
             st: SpinLock::new(State::default()),
@@ -469,7 +475,7 @@ impl Aic7880 {
             worker: Mutex::new(None),
             running: AtomicBool::new(false),
             me: me.clone(),
-            targets: Mutex::new(std::array::from_fn(|_| None)),
+            bus,
             dma: std::sync::OnceLock::new(),
             sense: Mutex::new(None),
             dma_misses: Mutex::new(std::collections::BTreeSet::new()),
@@ -675,79 +681,21 @@ impl Aic7880 {
         }
     }
 
-    /// Attach a disk image at a SCSI id.
-    pub fn attach_disk_at(&self, target: u8, path: &std::path::Path) -> std::io::Result<u64> {
-        self.attach_at(target, path, false)
+    /// The SCSI bus: attach targets to it and ask what is on it.
+    pub fn bus(&self) -> &ScsiBus {
+        &self.bus
     }
 
-    pub fn attach_at(&self, target: u8, path: &std::path::Path, cdrom: bool)
-        -> std::io::Result<u64>
-    {
-        self.attach_with(target, path, cdrom, false)
-    }
-
-    /// [`Self::attach_at`], copy-on-write when `overlay` is set: the image is
-    /// never written, writes go to `{path}.overlay`.
-    pub fn attach_with(&self, target: u8, path: &std::path::Path, cdrom: bool, overlay: bool)
-        -> std::io::Result<u64>
-    {
-        let path = path.to_str().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path is not UTF-8"))?;
-        self.attach_device(target, path, cdrom, Vec::new(), overlay, None)
-    }
-
-    /// Attach what a `[scsi.N]` table describes: the image at `path` (empty
-    /// for a CD-ROM with its tray empty), a CD-ROM's changer list `discs`,
-    /// and copy-on-write when `overlay` is set, to `overlay_path` or
-    /// `{path}.overlay`. Returns the size in blocks.
-    pub fn attach_device(
-        &self,
-        target: u8,
-        path: &str,
-        cdrom: bool,
-        discs: Vec<String>,
-        overlay: bool,
-        overlay_path: Option<&str>,
-    ) -> std::io::Result<u64> {
-        let d = ScsiDevice::open(path, cdrom, discs, overlay, overlay_path, if cdrom { O2_CDROM } else { O2_DISK })?;
-        let blocks = d.size() / BLOCK_SIZE as u64;
-        let mut targets = self.targets.lock().unwrap();
-        let slot = targets.get_mut(target as usize).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("SCSI id {target} out of range"))
-        })?;
-        *slot = Some(d);
-        Ok(blocks)
-    }
-
-
-    /// Attach at the default id, which is what a single-disk run wants.
-    /// The id a disk attached without one goes on.
-    pub fn default_target(&self) -> u8 {
-        self.target
-    }
-
-    pub fn attach_disk(&self, path: &std::path::Path) -> std::io::Result<u64> {
-        self.attach_disk_at(self.target, path)
-    }
-
-    /// Whether something answers at `target`.
     fn has_target(&self, target: u8) -> bool {
-        self.targets.lock().unwrap().get(target as usize).is_some_and(|t| t.is_some())
+        self.bus.has_target(target)
     }
-
-    /// The ids that have something on them.
-    pub fn attached(&self) -> Vec<u8> {
-        let t = self.targets.lock().unwrap();
-        (0..t.len() as u8).filter(|&i| t[i as usize].is_some()).collect()
-    }
-
 }
 
 /// The monitor's `scsi`/`cow` subcommands and the run-time disc changes
 /// come from `scsi_monitor` through this.
 impl crate::scsi_monitor::ScsiTargets for Aic7880 {
-    fn with_targets<R>(&self, f: impl FnOnce(&mut [Option<ScsiDevice>]) -> R) -> R {
-        let mut targets = self.targets.lock().unwrap();
-        f(&mut targets[..])
+    fn scsi_bus(&self) -> &ScsiBus {
+        &self.bus
     }
 }
 
@@ -915,14 +863,11 @@ impl Aic7880 {
                 return (d, 0x00);
             }
         }
-        let mut targets = self.targets.lock().unwrap();
-        let Some(dev) = targets.get_mut(target as usize).and_then(|t| t.as_mut()) else {
-            return (Vec::new(), CHECK_CONDITION);
-        };
         let req = ScsiRequest { cdb: cdb.to_vec(), data_len: ScsiDataLength::Unlimited, data_in: data_in.map(|d| d.to_vec()) };
-        match dev.request(&req) {
-            Ok(r) => (r.data, r.status),
-            Err(e) => {
+        match self.bus.request(target, &req) {
+            None => (Vec::new(), CHECK_CONDITION),
+            Some(Ok(r)) => (r.data, r.status),
+            Some(Err(e)) => {
                 eprintln!("aic7880: target {target}: {e}");
                 (Vec::new(), CHECK_CONDITION)
             }
@@ -1474,13 +1419,7 @@ impl Aic7880 {
     /// common 2048 after its reset (the PROM had left 512 behind).
     fn reset_targets(&self) {
         let sgi = Self::him(&self.st.lock());
-        for d in self.targets.lock().unwrap().iter_mut().flatten() {
-            if sgi && d.is_cdrom() {
-                d.set_logical_block_size(512);
-            } else {
-                d.power_on_block_size();
-            }
-        }
+        self.bus.for_each(|_, d| d.reset_block_size(sgi));
     }
 
     /// A register write with the state locked. Returns whether the
@@ -1659,25 +1598,12 @@ impl Aic7880 {
     /// `scsi<id>.overlay`, and return the dirty sectors of each, as the
     /// Indigo2's and Indy's controller does for their snapshots.
     pub fn export_overlays(&self, dir: &std::path::Path) -> std::io::Result<Vec<(usize, Vec<u64>)>> {
-        let mut targets = self.targets.lock().unwrap();
-        let mut out = Vec::new();
-        for (id, t) in targets.iter_mut().enumerate() {
-            if let Some(dev) = t.as_mut().filter(|d| d.is_cow()) {
-                out.push((id, dev.cow_export(&dir.join(format!("scsi{id}.overlay")))?));
-            }
-        }
-        Ok(out)
+        self.bus.export_overlays(dir)
     }
 
     /// Put back the overlays [`Self::export_overlays`] wrote.
     pub fn import_overlays(&self, dir: &std::path::Path, dirty_sets: &[(usize, Vec<u64>)]) -> std::io::Result<()> {
-        let mut targets = self.targets.lock().unwrap();
-        for (id, dirty) in dirty_sets {
-            if let Some(dev) = targets.get_mut(*id).and_then(|t| t.as_mut()).filter(|d| d.is_cow()) {
-                dev.cow_import(&dir.join(format!("scsi{id}.overlay")), dirty.clone())?;
-            }
-        }
-        Ok(())
+        self.bus.import_overlays(dir, dirty_sets)
     }
 }
 
@@ -1913,7 +1839,7 @@ mod tests {
         // needs a disk as much as the machine does.
         let img = std::env::temp_dir().join("iris-aic7880-test.img");
         std::fs::write(&img, vec![0u8; 64 * BLOCK_SIZE]).expect("test image");
-        c.attach_disk(&img).expect("attach");
+        c.bus().attach_image(1, &img, false).expect("attach");
 
         let base = crate::ip32::RAM_BASE;
         let (array, scb_addr, cdb_addr, sg_addr, buf, qout) =
@@ -1969,7 +1895,7 @@ mod tests {
         let c = on(ram.clone());
         let img = std::env::temp_dir().join("iris-aic7880-write.img");
         std::fs::write(&img, vec![0u8; 64 * BLOCK_SIZE]).expect("test image");
-        c.attach_disk(&img).expect("attach");
+        c.bus().attach_image(1, &img, false).expect("attach");
 
         let base = crate::ip32::RAM_BASE;
         let (array, scb, cdb, sg, buf, qout) =
@@ -2023,7 +1949,7 @@ mod tests {
         let img = std::env::temp_dir().join("iris-aic7880-sg.img");
         let pattern: Vec<u8> = (0..264 * BLOCK_SIZE).map(|i| (i % 253) as u8).collect();
         std::fs::write(&img, &pattern).expect("test image");
-        c.attach_disk(&img).expect("attach");
+        c.bus().attach_image(1, &img, false).expect("attach");
 
         let base = crate::ip32::RAM_BASE;
         let (array, scb, cdb, sg, buf, qout) =
@@ -2069,7 +1995,7 @@ mod tests {
         let img = std::env::temp_dir().join("iris-aic7880-grow.img");
         std::fs::write(&img, vec![0u8; 8 * BLOCK_SIZE]).expect("test image");
         let c = chip();
-        c.attach_at(1, &img, false).expect("attach");
+        c.bus().attach_image(1, &img, false).expect("attach");
         // WRITE(10): four blocks at block 7 of eight.
         assert_eq!(c.execute_write_on(&[0x2a, 0, 0, 0, 0, 7, 0, 0, 4, 0], &vec![0xab; 4 * BLOCK_SIZE], 1), 0x02, "refused");
         assert_eq!(std::fs::metadata(&img).unwrap().len(), (8 * BLOCK_SIZE) as u64);
@@ -2132,7 +2058,7 @@ mod tests {
         let c = on(ram.clone());
         let img = std::env::temp_dir().join(format!("iris-aic7880-{name}.img"));
         std::fs::write(&img, vec![0u8; 64 * BLOCK_SIZE]).expect("test image");
-        c.attach_disk_at(1, &img).expect("attach");
+        c.bus().attach_image(1, &img, false).expect("attach");
         let base = crate::ip32::RAM_BASE;
         for (off, v) in [(sram::SCB_ARRAY, base + ARRAY), (sram::QOUTFIFO, base + QOUT)] {
             for (i, b) in v.to_le_bytes().iter().enumerate() {
@@ -2225,7 +2151,7 @@ mod tests {
         let c = on(ram.clone());
         let img = std::env::temp_dir().join("iris-aic7880-nb.img");
         std::fs::write(&img, vec![0u8; 64 * BLOCK_SIZE]).expect("test image");
-        c.attach_disk_at(1, &img).expect("attach");
+        c.bus().attach_image(1, &img, false).expect("attach");
         let (hscbs, shared) = (0x2000u32, 0x4000u32);
         let tag = 3u8;
         {
@@ -2258,7 +2184,7 @@ mod tests {
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let img = std::env::temp_dir().join(format!("iris-aic7880-nb-{}-{n}.img", std::process::id()));
         std::fs::write(&img, img_blocks).expect("test image");
-        c.attach_disk_at(1, &img).expect("attach");
+        c.bus().attach_image(1, &img, false).expect("attach");
         let (hscbs, shared, tag) = (0x2000u32, 0x4000u32, 3u8);
         {
             let m = &*ram;
@@ -2471,8 +2397,8 @@ mod tests {
         let c = chip();
         let img = std::env::temp_dir().join("iris-aic7880-wsense.img");
         std::fs::write(&img, vec![0u8; 8 * BLOCK_SIZE]).expect("test image");
-        c.attach_at(1, &img, false).expect("attach");
-        c.attach_at(4, &img, true).expect("attach CD");
+        c.bus().attach_image(1, &img, false).expect("attach");
+        c.bus().attach_image(4, &img, true).expect("attach CD");
         let write10 = |lba: u8| [0x2a, 0, 0, 0, 0, lba, 0, 0, 1, 0];
         let block = vec![0u8; BLOCK_SIZE];
 
@@ -2569,5 +2495,30 @@ mod tests {
         assert_eq!(qout(&ram)[7], 0, "posted where the HIM looks");
         assert_eq!(c.read(reg::INTSTAT, 1) as u8, intstat::CMDCMPLT);
         assert!(c.st.lock().held.is_empty());
+    }
+
+    /// The machine fills the bus from `[scsi.N]` and gives it to the
+    /// controller, which answers for what is on it and still takes a target
+    /// attached later through the same bus.
+    #[test]
+    fn a_controller_built_on_a_filled_bus_answers_for_its_target() {
+        let img = std::env::temp_dir().join(format!("iris-aic7880-filled-{}.img", std::process::id()));
+        std::fs::write(&img, vec![0u8; 64 * 512]).unwrap();
+        let bus = Aic7880::new_bus();
+        bus.attach_image(3, &img, false).unwrap();
+        let c = Aic7880::new_at(1, bus);
+        assert!(c.bus().has_target(3));
+        assert!(!c.bus().has_target(4));
+        let inquiry = crate::scsi::ScsiRequest {
+            cdb: vec![crate::scsi::scsi_cmd::INQUIRY, 0, 0, 0, 36, 0],
+            data_len: crate::scsi::ScsiDataLength::Unlimited,
+            data_in: None,
+        };
+        let r = c.bus().request(3, &inquiry).expect("target answers").unwrap();
+        assert_eq!(&r.data[8..16], b"SGI     ");
+        assert_eq!(&r.data[16..32], b"IRIS EMUL DISK  ");
+        c.bus().attach_image(4, &img, false).unwrap();
+        assert!(c.bus().has_target(4), "a target attached after boot goes on the same bus");
+        let _ = std::fs::remove_file(img);
     }
 }

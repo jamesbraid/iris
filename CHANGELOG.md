@@ -58,6 +58,25 @@ hashes are given where a change is easiest to understand by reading the commit.
   O2 snapshots from before are refused (snapshot schema 5).
 - Serial host backends moved out of the Z85C30 into `src/dev/serial_host.rs`.
 
+### SCSI
+
+- Every SCSI controller attaches its targets through one shared bus, and
+  disks report one emulated identity on every machine. The O2 and Octane now
+  say `IRIS EMUL DISK` and `IRIS EMUL CDROM` in INQUIRY; the Indy and Indigo2
+  keep their Sony CD-ROM.
+- A disc change loads a CHD CD as well as an ISO, and the O2, the Octane and
+  the Indigo2's second controller fold pending CHD diffs on a clean exit as the
+  first controller always did.
+
+### Networking
+
+- The SEEQ, DaynaPort, MEC and IOC3 now get their NAT or PCAP backend from one
+  shared link, so a new backend is one implementation.
+- `[network] mode = "stream"` connects an Ethernet to a program speaking
+  QEMU's `-netdev stream` framing (not a DaynaPort).
+- `mode = "pcap"` is allowed on the O2 and the Octane, untested on a real
+  interface.
+
 ### Host efficiency on small machines
 
 - **Threads that have nothing to do now sleep in milliseconds, not
@@ -157,6 +176,9 @@ hashes are given where a change is easiest to understand by reading the commit.
   produced. (`src/ci.rs`, `src/gfx_display.rs`)
 ### SGI Octane (IP30)
 
+- **Octane audio plays at the rate the guest asks for.** RAD audio ran at
+  44.1 kHz whatever IRIX programmed, so games and other non-44.1 kHz sounds
+  played at the wrong speed. ([#354](https://github.com/techomancer/iris/issues/354))
 - **IMPACT on the Octane passes the GL pixel and state suites.** On IRIX
   6.5.22 pixtest went from 52 to 366 passing cases (the two left fail on the
   Indigo2 too) and glstate from 393 to 394. The Octane's microcode keeps the

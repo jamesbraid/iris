@@ -428,7 +428,24 @@ impl Machine {
         ioc.set_timer_manager(timer_manager.clone());
         ioc.set_heartbeat(heartbeat.clone());
         ioc.set_clock_ticks(fasttick_count.clone());
-        let hpc3 = Hpc3::with_net(eeprom_hpc3.clone(), ioc.clone(), guinness, heartbeat.clone(), cfg.network(), cfg.no_audio, cfg.audio.clone(), cfg.nvram.clone(), cfg.rtc_offset, cfg.scsi_deferred_int);
+        // Attach SCSI devices from config: each `[scsi.KEY]` table puts a
+        // target on a controller (`ScsiDeviceConfig::placement`). The disks
+        // recorded here, and the scratch volume's path for the CI socket,
+        // come back with it. Disk provenance for snapshot manifests is
+        // captured while the MachineConfig `cfg` is still in scope (it is
+        // shadowed by the CPU config below): the slot (controller * 16 + id,
+        // see `config::scsi_slot`), the configured path and the host file
+        // size.
+        // The buses are filled before the controllers exist and handed to them.
+        let scsi_buses = Hpc3::new_scsi_buses(guinness);
+        let attached = match crate::scsi::attach_from_config(&cfg, None, &|c| Hpc3::route_scsi(&scsi_buses, c)) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("iris: fatal: {e}");
+                std::process::exit(1);
+            }
+        };
+        let hpc3 = Hpc3::with_net(eeprom_hpc3.clone(), ioc.clone(), guinness, heartbeat.clone(), cfg.network(), cfg.no_audio, cfg.audio.clone(), cfg.nvram.clone(), cfg.rtc_offset, cfg.scsi_deferred_int, scsi_buses);
         hpc3.set_timer_manager(timer_manager.clone());
 
         // Backdoor-inject the configured (or default) Ethernet station
@@ -448,105 +465,30 @@ impl Machine {
             if initialized { eeprom.update_ip28_checksum(); }
         }
 
-        // Attach SCSI devices from config: each `[scsi.KEY]` table puts a
-        // target on a controller (`ScsiDeviceConfig::placement`).
-        let mut scsi_keys: Vec<u8> = cfg.scsi.keys().copied().collect();
-        scsi_keys.sort();
-        // Track the on-disk path of any scratch device so the CI socket can
-        // read/write its bytes directly (Phase 2.4).
-        let mut scratch_path: Option<std::path::PathBuf> = None;
-        for key in scsi_keys {
-            let dev = &cfg.scsi[&key];
-            let (controller, id) = dev.placement(key);
-            let label = crate::config::scsi_label(controller, id);
-            // DaynaPort SCSI/Link: a network adapter, not storage. None of the
-            // scratch / changer / overlay handling below applies — it has no
-            // image at all.
-            if dev.is_daynaport() {
-                let params = match dev.daynaport_params(key) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("iris: fatal: {}: {}", label, e);
-                        std::process::exit(1);
-                    }
-                };
-                match hpc3.add_scsi_daynaport(controller, id as usize, params) {
+        // A DaynaPort is built where the gateway is, by Hpc3; a target that
+        // will not attach ends the run (see `attach_from_config`).
+        let daynaports = || -> Result<(), String> {
+            for d in &attached.daynaports {
+                let at = crate::config::scsi_label(d.controller, d.id);
+                match hpc3.add_scsi_daynaport(d.controller, d.id as usize, d.params) {
                     Ok(()) => println!(
-                        "iris: DaynaPort SCSI/Link at {} — MAC {}, gateway {} (guest {}/{})",
-                        label, crate::net::mac_str(&params.mac),
-                        params.subnet.gateway_ip, params.subnet.client_ip, params.subnet.netmask),
-                    Err(e) => {
-                        let msg = format!("could not attach DaynaPort to {label}: {e}");
-                        if std::env::var_os("IRIS_NO_EXIT_ON_POWEROFF").is_some() {
-                            eprintln!("iris: warning: {msg}; continuing without {label}");
-                        } else {
-                            eprintln!("iris: fatal: {msg}");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                continue;
-            }
-            // Scratch volume (see `ScsiDeviceConfig::prepare_scratch`): the
-            // file gets an SGI volume header, without which IRIX returns I/O
-            // errors on every read of /dev/rdsk/dks0dNvh and dks0dNvol.
-            // Convention: the host writes its payload at offset >=
-            // SCRATCH_PAYLOAD_OFFSET (4096); the guest reads from offset 0 of
-            // the vol partition, which starts at sector 8.
-            if let Some(path) = dev.prepare_scratch(key) {
-                if scratch_path.is_some() {
-                    println!("Note: multiple scratch SCSI devices configured; CI socket will use the lowest-id one");
-                } else {
-                    scratch_path = Some(path);
+                        "iris: DaynaPort SCSI/Link at {at} — MAC {}, gateway {} (guest {}/{})",
+                        crate::net::mac_str(&d.params.mac),
+                        d.params.subnet.gateway_ip, d.params.subnet.client_ip, d.params.subnet.netmask),
+                    Err(e) => crate::scsi::attach_failed(format!("could not attach DaynaPort to {at}: {e}"), &at)?,
                 }
             }
-            let (path, discs) = dev.media();
-            let cdrom = dev.is_cdrom();
-            // CI mode: isolate each COW overlay under /tmp so an interactive
-            // iris holding {base}.overlay can coexist with any number of `--ci`
-            // processes; cleanup happens on machine drop below.
-            let result = if ci_enabled && dev.overlay && !cdrom {
-                let ci_overlay = ScsiDeviceConfig::ci_overlay_path(key);
-                hpc3.add_scsi_device_with_overlay(controller, id as usize, &path, cdrom, discs, dev.overlay, &ci_overlay)
-            } else {
-                hpc3.add_scsi_device(controller, id as usize, &path, cdrom, discs, dev.overlay)
-            };
-            if let Err(e) = result {
-                // A configured disk that won't attach (missing/corrupt image,
-                // or a file the macOS sandbox denies) can't host this device.
-                //
-                // Standalone CLI fails loudly and exits — booting on with a
-                // silently-missing device only yields a confusing PROM "no such
-                // device" later. But an embedder (the GUI sets
-                // IRIS_NO_EXIT_ON_POWEROFF) must never be torn down by the
-                // library: process::exit kills it outright, and panicking can't
-                // be caught either because release builds use panic="abort"
-                // (unwinding across the libchdman/JIT FFI would be UB). So we
-                // skip just this device and boot without it; the GUI's Start
-                // preflight already warns the user about an unreadable disk, and
-                // they can stop, re-pick or detach it, and start again.
-                let msg = format!("could not attach {path} to {label}: {e}");
-                if std::env::var_os("IRIS_NO_EXIT_ON_POWEROFF").is_some() {
-                    eprintln!("iris: warning: {msg}; continuing without {label}");
-                    continue;
-                }
-                eprintln!("iris: fatal: {msg}");
-                std::process::exit(1);
-            }
+            Ok(())
+        };
+        if let Err(e) = daynaports() {
+            eprintln!("iris: fatal: {e}");
+            std::process::exit(1);
         }
-
-        // Disk + nvram provenance for snapshot manifests. Captured here while
-        // the MachineConfig `cfg` is still in scope (it is shadowed by the CPU
-        // config below). Identity is the slot (controller * 16 + id, see
-        // `config::scsi_slot`), the configured path and the host file size.
-        let mut disk_provenance: Vec<DiskRef> = cfg.scsi.iter()
-            .filter(|(_, dev)| !dev.is_daynaport()) // no image behind a DaynaPort
-            .map(|(&key, dev)| {
-                let (controller, id) = dev.placement(key);
-                let size_bytes = std::fs::metadata(&dev.path).map(|m| m.len()).unwrap_or(0);
-                DiskRef { id: crate::config::scsi_slot(controller, id), path: dev.path.clone(), size_bytes }
-            }).collect();
-        disk_provenance.sort_by_key(|d| d.id);
+        let scratch_path = attached.scratch;
+        // The Indy and Indigo2 have always listed CD-ROMs beside the disks.
+        let disk_provenance: Vec<DiskRef> = attached.tables.iter()
+            .map(|t| DiskRef { id: t.slot, path: t.path.clone(), size_bytes: t.size_bytes })
+            .collect();
         let nvram_provenance = cfg.nvram.clone();
 
         // REX3 Graphics — Newport only; skipped in headless mode or when non-Newport board selected.
@@ -1282,11 +1224,20 @@ impl Machine {
         self.cpu.fasttick_count()
     }
 
+    /// Every SCSI bus on the board: the first controller's, and the second's
+    /// on a Fullhouse Indigo2.
+    fn scsi_buses(&self) -> Vec<&crate::scsi::ScsiBus> {
+        use crate::scsi_monitor::ScsiTargets;
+        let mut v = vec![self.hpc3.scsi().scsi_bus()];
+        v.extend(self.hpc3.scsi1().map(|c| c.scsi_bus()));
+        v
+    }
+
     /// Number of attached CHD disks whose `.diff.chd` holds changes pending a
     /// fold-back into the base on a clean shutdown (the "Synchronizing disks"
     /// step). 0 means a clean exit needs no disk sync.
     pub fn pending_chd_sync_count(&self) -> usize {
-        self.hpc3.scsi().pending_chd_sync_count()
+        self.scsi_buses().iter().map(|b| b.pending_chd_sync_count()).sum()
     }
 
     /// Fold pending CHD diffs back into their bases, preserving compression.
@@ -1300,7 +1251,7 @@ impl Machine {
         progress: &mut dyn FnMut(usize, usize, f32),
         cancel: &dyn Fn() -> bool,
     ) -> std::io::Result<usize> {
-        self.hpc3.scsi().sync_chd_disks(only, progress, cancel)
+        crate::scsi::ScsiBus::sync_chd_disks(&self.scsi_buses(), only, progress, cancel)
     }
 
     /// Step the CPU `n` instructions in-line on the calling thread, with all
