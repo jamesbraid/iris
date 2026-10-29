@@ -687,6 +687,12 @@ impl O2Machine {
         if m.schema_version > SCHEMA_VERSION {
             return Err(format!("snapshot schema_version {} is newer than this iris build supports ({SCHEMA_VERSION})", m.schema_version));
         }
+        if m.schema_version < SCHEMA_VERSION {
+            return Err(format!(
+                "snapshot {name} is schema {}; the O2's UART state changed shape in schema 5, so it cannot be restored",
+                m.schema_version
+            ));
+        }
         // As the Indy: build, CPU and disks must match;
         // IRIS_SNAPSHOT_SKIP_CHECK=1 makes those warnings.
         let mut fatal = Vec::new();

@@ -3,7 +3,7 @@
 //! and hands the access to the block it names, as HPC3 does for its
 //! children on the Indigo2. The blocks themselves are in their own files
 //! (`mace_pci`, `mec`, `mace_isa`, `mace_ps2`, `mace_ust`, `mace_audio`,
-//! `mace_sdma`, `ns16550`, `ds1687`, `mace_id`); what has no model yet is a
+//! `mace_sdma`, `mace_uart`, `ds1687`, `mace_id`); what has no model yet is a
 //! storing register file (`regs`).
 
 use std::sync::{Arc, Mutex};
@@ -18,7 +18,7 @@ use crate::dev::mace_ps2::MacePs2;
 use crate::dev::mace_sdma::*;
 use crate::dev::mace_ust::MaceUst;
 use crate::dev::mec::Mec;
-use crate::dev::ns16550::Com16550;
+use crate::dev::mace_uart::MaceUart;
 use crate::dev::mace_id::{MaceId, DEFAULT_MAC};
 use crate::ip32::{
     Stub, IP32_MEC_CRIME_INT, MACE_BASE, MACE_COM0, MACE_COM1, MACE_COM_SIZE, MACE_ISA_FLASH_NIC_REG,
@@ -41,8 +41,8 @@ pub struct Mace {
     pub rtc: MaceRtc,
     pub ps2: MacePs2,
     pub id: MaceId,
-    pub com0: Com16550,
-    pub com1: Com16550,
+    pub com0: MaceUart,
+    pub com1: MaceUart,
     /// The serial ports' DMA rings, which IRIX's console runs on.
     pub sdma: MaceSerialDma,
     /// The audio interface and its AD1843 (dev/mace_audio.rs).
@@ -66,8 +66,8 @@ impl Mace {
             ps2: MacePs2::new(),
             // A locally-administered address; nothing depends on the value yet.
             id: MaceId::new(DEFAULT_MAC),
-            com0: Com16550::named("com0"),
-            com1: Com16550::named("com1"),
+            com0: MaceUart::named("com0"),
+            com1: MaceUart::named("com1"),
             sdma: MaceSerialDma::new(),
             audio: MaceAudio::new(),
             mec: Arc::new(Mec::new(ram.clone())),
@@ -218,7 +218,7 @@ impl Mace {
         (0x20..0x38).contains(&off).then(|| ((off - 0x20) / 8) as usize)
     }
 
-    fn com_for(&self, addr: u32) -> Option<&Com16550> {
+    fn com_for(&self, addr: u32) -> Option<&MaceUart> {
         if (MACE_COM0..MACE_COM0 + MACE_COM_SIZE).contains(&addr) {
             Some(&self.com0)
         } else if (MACE_COM1..MACE_COM1 + MACE_COM_SIZE).contains(&addr) {

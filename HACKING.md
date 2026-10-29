@@ -158,6 +158,15 @@ channel), `FifoDevice` (serial byte streams), `InterruptController`/`IrqLine`
 (below), `GfxDisplay` (a graphics board's screen, for the window and
 screenshots), `CpuDevice` (what `Machine` holds for the CPU).
 
+Serial lines have two halves. A UART model owns the registers: the Indy's
+`Z85c30`, and `Ns16550` (`src/dev/ns16550.rs`), the 16550A core that the O2's
+`MaceUart` (lane decode, interrupt line, monitor) and the Octane's IOC3 wrap.
+The host end is a `SerialBackend` from `src/dev/serial_host.rs`, which the
+machine constructors pick with `console_backends`: the CI backend, a TCP
+console, or a log tee. A UART's transmit is instant and its receive side
+pulls from the backend with back-pressure (`pump`), so nothing in the model
+needs a thread of its own beyond the service loop's call.
+
 ### The physical address map
 
 `Physical` (`src/physical.rs`) is the physical bus, and it belongs to no
