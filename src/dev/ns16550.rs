@@ -48,6 +48,8 @@
 //! * A receive overrun with the FIFOs off keeps the character already in the
 //!   receive register and drops the new one, which is what the part does.
 //!   QEMU overwrites the register.
+//! * Reading the receive register with nothing received returns zero, where
+//!   QEMU returns the last character again.
 //! * Modem status changes in loopback latch the delta bits, as the part's
 //!   datasheet has them and MAME's `ins8250` does; QEMU's loopback read returns
 //!   the levels alone. The
@@ -246,6 +248,7 @@ impl Ns16550 {
 
     // ----- state, read without side effects -----
 
+    pub fn baudbase(&self) -> u32 { self.baudbase }
     pub fn ier(&self) -> u8 { self.ier }
     pub fn lcr(&self) -> u8 { self.lcr }
     pub fn mcr(&self) -> u8 { self.mcr }
@@ -527,8 +530,12 @@ impl Ns16550 {
             self.timeout_ipending = false;
             ret
         } else {
+            // With nothing received the register reads zero, as both models
+            // that preceded this one answered, where QEMU returns the last
+            // character again.
+            let ret = if self.lsr & LSR_DR != 0 { self.rbr } else { 0 };
             self.lsr &= !(LSR_DR | LSR_BI);
-            self.rbr
+            ret
         };
         self.update_irq();
         ret
