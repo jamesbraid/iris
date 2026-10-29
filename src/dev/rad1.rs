@@ -17,6 +17,9 @@
 //!   store what was written and return it. No reset values or masks are
 //!   established beyond zero; the few writes the model refuses (see
 //!   [`Rad1::write`]) are refused because no supported guest makes them.
+//! * The analog input and output run at the rates their clock generators
+//!   (0 and 1) are programmed for; see [`Rate`]. Until a guest programs
+//!   one, its rate is 44.1 kHz: the power-on rate is unknown.
 //! * The engines move frames at the sample rate. Frames are moved when
 //!   something looks (a position or status read, a status completion) and,
 //!   while the analog output runs with host audio enabled, by a 10 ms timer,
@@ -67,6 +70,10 @@ const REG_AES_INPUT_CTRL: u32 = 0x48;
 const REG_ANALOG_INPUT_CTRL: u32 = 0x4c;
 const REG_ANALOG_OUT_EN: u32 = 0x58;
 const REG_STATUS_DMA_CTRL: u32 = 0x5c;
+const REG_CLOCKGEN_CTRL: u32 = 0xa0;
+const REG_CLOCKGEN_REM: u32 = 0xa4;
+/// Four master-clock selects, one per clock generator, generator 3 first.
+const REG_CLOCKGEN_MUX_FIRST: u32 = 0xa8;
 
 const POS_FIRST: u32 = 0x04;
 const POS_LAST: u32 = 0x2c;
@@ -113,7 +120,10 @@ const STATUS_STOP: u32 = 0x1fffc;
 const UST_NS_PER_TICK: i64 = 960;
 
 const NS_PER_SEC: u64 = 1_000_000_000;
+/// The rate of a clock generator no guest has programmed.
 const FREQ_ANALOG: u64 = 44100;
+/// The WAV capture's rate.
+const WAV_RATE: u32 = 44100;
 const FREQ_AES_SUB: u64 = 48000 / 192;
 /// Ring bytes moved per DMA access; a whole number of frames of any type.
 const CHUNK_BYTES: u64 = 1024;
@@ -180,9 +190,68 @@ fn pcm_to_frames(pcm: &[i16], ring: &mut [u8], words_per_frame: usize) {
     }
 }
 
+/// Clock generators: 0 clocks the analog input, 1 the analog output, 2 the
+/// AES3 output. Generator 3 is not modelled.
+const NUM_CG: usize = 4;
+/// The control word's generator selects, one bit each from bit 28.
+const CG_SELECT_SHIFT: u32 = 28;
+/// The control word's divisor less one; bits 9 and 10 above it are flags.
+const CG_DIV_MASK: u32 = 0x1ff;
+/// The two master clocks a generator divides, each four times its family's
+/// base rate.
+const MASTER_44K: u64 = 176_400;
+const MASTER_48K: u64 = 192_000;
+
+/// A sample rate, `num / den` frames per second.
+///
+/// A generator divides its master clock by `div + rem / den`. The decode is
+/// the public Linux RAD1 driver's (Stanislaw Skowronek's `snd_rad1_set_cg`):
+/// the control word at 0xa0 holds the generator select from bit 28 and
+/// `div - 1` in its low bits, the word at 0xa4 holds `rem << 16 | (0x10000 -
+/// den)`, and the generator's word in 0xa8..0xb4 picks the master: bit 0 set
+/// for 192 kHz, clear for 176.4 kHz. IRIX 6.5.30 programs its rates from 8
+/// to 48 kHz with words of the same form, all from the 192 kHz master (the
+/// tests hold the words it writes). What the flag bits 9 and 10 and the
+/// other select values do is unknown; they are ignored. The new rate takes
+/// effect at the control word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Rate {
+    num: u64,
+    den: u64,
+}
+
+impl Rate {
+    const fn hz(hz: u64) -> Self {
+        Self { num: hz, den: 1 }
+    }
+
+    fn from_clockgen(ctrl: u32, rem_word: u32, mux: u32) -> Self {
+        let master = if mux & 1 != 0 { MASTER_48K } else { MASTER_44K };
+        let div = u64::from(ctrl & CG_DIV_MASK) + 1;
+        let den = 0x1_0000 - u64::from(rem_word & 0xffff);
+        let rem = u64::from(rem_word >> 16);
+        Self { num: master * den, den: div * den + rem }
+    }
+
+    /// Whole frames the clock has produced in `ns`.
+    fn frames_in(self, ns: i64) -> u64 {
+        (ns as u128 * u128::from(self.num) / (u128::from(self.den) * u128::from(NS_PER_SEC))) as u64
+    }
+
+    /// When frame `frames` ends, in ns from the clock's start.
+    fn ns_for(self, frames: u64) -> i64 {
+        (u128::from(frames) * u128::from(self.den) * u128::from(NS_PER_SEC)).div_ceil(u128::from(self.num)) as i64
+    }
+
+    /// The nearest whole rate, for the host stream.
+    fn rounded_hz(self) -> u32 {
+        ((self.num + self.den / 2) / self.den) as u32
+    }
+}
+
 /// Where decoded output goes: the host stream (through the shared resampler),
-/// an optional WAV file of the 44.1 kHz stream the card produced, and for
-/// tests a plain buffer.
+/// an optional 44.1 kHz WAV file of what the card played, and for tests a
+/// plain buffer of the card's own frames.
 struct Sink {
     host: Option<(HostOut, Resampler)>,
     wav: Option<Wav>,
@@ -190,14 +259,18 @@ struct Sink {
 }
 
 impl Sink {
-    fn play(&mut self, pcm: &[i16]) {
+    /// Play stereo frames the card produced at `rate` Hz.
+    fn play(&mut self, pcm: &[i16], rate: u32) {
         if let Some((out, rs)) = self.host.as_mut() {
+            if rs.in_rate != rate {
+                *rs = Resampler::new(rate, out.stream_rate);
+            }
             for p in pcm.chunks_exact(PCM_CHANNELS) {
                 rs.push(p[0], p[1], &mut out.producer);
             }
         }
         if let Some(w) = self.wav.as_mut() {
-            w.append(pcm);
+            w.play(pcm, rate);
         }
         if let Some(t) = self.tap.as_ref() {
             t.lock().extend_from_slice(pcm);
@@ -205,23 +278,46 @@ impl Sink {
     }
 }
 
-/// A 44.1 kHz stereo 16-bit WAV, its sizes rewritten after every append so a
-/// file from a killed run still plays. A debugging aid: `IRIS_OCTANE_AUDIO_WAV`.
+/// A 44.1 kHz stereo 16-bit WAV of the output, converted from the card's
+/// rate, its sizes rewritten after every append so a file from a killed run
+/// still plays. A debugging aid: `IRIS_OCTANE_AUDIO_WAV`.
 struct Wav {
     file: std::fs::File,
     data_bytes: u32,
+    rs: Resampler,
 }
 
 impl Wav {
     fn create(path: &std::ffi::OsStr) -> Option<Self> {
-        let mut w = Self { file: std::fs::File::create(path).ok()?, data_bytes: 0 };
+        let file = std::fs::File::create(path).ok()?;
+        let mut w = Self { file, data_bytes: 0, rs: Resampler::new(WAV_RATE, WAV_RATE) };
         w.header().ok()?;
         Some(w)
     }
 
+    /// Append frames the card produced at `rate` Hz.
+    fn play(&mut self, pcm: &[i16], rate: u32) {
+        if self.rs.in_rate != rate {
+            self.rs = Resampler::new(rate, WAV_RATE);
+        }
+        if self.rs.passthrough() {
+            self.append(pcm);
+            return;
+        }
+        // The resampler writes into a ring; take its output back out.
+        let frames = pcm.len() / PCM_CHANNELS;
+        let room = (frames * WAV_RATE as usize / rate.max(1) as usize + 2) * PCM_CHANNELS;
+        let (mut prod, mut cons) = rtrb::RingBuffer::<i16>::new(room);
+        for p in pcm.chunks_exact(PCM_CHANNELS) {
+            self.rs.push(p[0], p[1], &mut prod);
+        }
+        let out: Vec<i16> = std::iter::from_fn(|| cons.pop().ok()).collect();
+        self.append(&out);
+    }
+
     fn header(&mut self) -> std::io::Result<()> {
         use std::io::{Seek, SeekFrom, Write};
-        let rate = FREQ_ANALOG as u32;
+        let rate = WAV_RATE;
         let mut h = Vec::with_capacity(44);
         h.extend_from_slice(b"RIFF");
         h.extend_from_slice(&(36 + self.data_bytes).to_le_bytes());
@@ -266,6 +362,9 @@ struct ChanInfo {
     frame_bytes: u64,
     enable_bit: u32,
     output: bool,
+    /// The clock generator setting the rate; with none, `freq` is the
+    /// fixed rate in Hz.
+    clockgen: Option<usize>,
     freq: u64,
     /// Position register A and the shift of its frame count.
     pos_a: u32,
@@ -286,17 +385,17 @@ const SLOT_PTR_UNUSED: [u64; 5] = [0x00, 0x08, 0x18, 0x28, 0x30];
 const CHAN_INFO: [ChanInfo; NUM_CH] = [
     ChanInfo {
         name: "analog input", ring: RING_INPUT, tag: 0, frame_bytes: 8, enable_bit: ENABLE_BIT,
-        output: false, freq: FREQ_ANALOG, pos_a: 0x14, pos_a_shift: 18, pos_b: 0x18,
+        output: false, clockgen: Some(0), freq: 0, pos_a: 0x14, pos_a_shift: 18, pos_b: 0x18,
         pos_b_shift: 18, pos_b_parent: false, slot_ptr: 0x10,
     },
     ChanInfo {
         name: "analog output", ring: RING_OUTPUT, tag: 1, frame_bytes: 8, enable_bit: ENABLE_BIT,
-        output: true, freq: FREQ_ANALOG, pos_a: 0x2c, pos_a_shift: 18, pos_b: 0x18,
+        output: true, clockgen: Some(1), freq: 0, pos_a: 0x2c, pos_a_shift: 18, pos_b: 0x18,
         pos_b_shift: 4, pos_b_parent: false, slot_ptr: 0x38,
     },
     ChanInfo {
         name: "AES3-input subcode", ring: RING_AES_SUB, tag: 6, frame_bytes: 256,
-        enable_bit: SUBCODE_ENABLE_BIT, output: false, freq: FREQ_AES_SUB, pos_a: 0x10,
+        enable_bit: SUBCODE_ENABLE_BIT, output: false, clockgen: None, freq: FREQ_AES_SUB, pos_a: 0x10,
         pos_a_shift: 4, pos_b: 0x10, pos_b_shift: 18, pos_b_parent: true, slot_ptr: 0x20,
     },
 ];
@@ -321,6 +420,8 @@ struct State {
     status_dma_ctrl: u32,
     status_running: bool,
     chan: [Chan; NUM_CH],
+    /// Each clock generator's rate.
+    clock: [Rate; NUM_CG],
     ust_count: u32,
     ust_phase: i64,
     ust_enabled: bool,
@@ -351,6 +452,7 @@ impl State {
             status_dma_ctrl: 0,
             status_running: false,
             chan: [Chan::default(); NUM_CH],
+            clock: [Rate::hz(FREQ_ANALOG); NUM_CG],
             ust_count: 0,
             ust_phase: 0,
             ust_enabled: false,
@@ -376,6 +478,14 @@ impl State {
         self.ust_count.wrapping_add(ticks.div_euclid(UST_NS_PER_TICK) as u32)
     }
 
+    /// A channel's sample rate.
+    fn rate(&self, idx: usize) -> Rate {
+        match CHAN_INFO[idx].clockgen {
+            Some(cg) => self.clock[cg],
+            None => Rate::hz(CHAN_INFO[idx].freq),
+        }
+    }
+
     fn pos(&mut self, reg: u32) -> &mut u32 {
         &mut self.sample_pos[((reg - POS_FIRST) / 4) as usize]
     }
@@ -395,7 +505,7 @@ impl State {
         let c = self.chan[idx];
         Self::add_field(self.pos(info.pos_a), info.pos_a_shift, frames);
         if info.pos_a_shift == 18 {
-            let boundary = c.start_ns + (u128::from(c.frames) * u128::from(NS_PER_SEC)).div_ceil(u128::from(info.freq)) as i64;
+            let boundary = c.start_ns + self.rate(idx).ns_for(c.frames);
             let ust = self.ust_at(boundary);
             let a = self.pos(info.pos_a);
             *a = (*a & !UST_LATCH_MASK) | (ust & UST_LATCH_MASK);
@@ -828,6 +938,9 @@ impl Inner {
                     self.enable_write(s, CH_AES_SUB, val, now);
                 }
                 s.startup[i] = val;
+                if off == REG_CLOCKGEN_CTRL {
+                    self.clockgen_write(s, val, now);
+                }
                 return Some(());
             }
         }
@@ -880,6 +993,29 @@ impl Inner {
             }
         }
         None
+    }
+
+    /// A clock generator control word: each generator it selects takes the
+    /// rate the remainder and master-select words describe. A channel that
+    /// runs from one is brought up to `now` at the old rate first, and counts
+    /// on from there at the new one.
+    fn clockgen_write(&self, s: &mut State, ctrl: u32, now: i64) {
+        let rem = s.startup[Self::startup_index(REG_CLOCKGEN_REM).unwrap()];
+        for cg in (0..NUM_CG).filter(|cg| ctrl & (1 << (CG_SELECT_SHIFT + *cg as u32)) != 0) {
+            let mux_reg = REG_CLOCKGEN_MUX_FIRST + 4 * (NUM_CG - 1 - cg) as u32;
+            let mux = s.startup[Self::startup_index(mux_reg).unwrap()];
+            let rate = Rate::from_clockgen(ctrl, rem, mux);
+            for idx in (0..NUM_CH).filter(|&i| CHAN_INFO[i].clockgen == Some(cg)) {
+                self.sync_chan(s, idx, now);
+                let c = &mut s.chan[idx];
+                if c.running {
+                    c.start_ns = now;
+                    c.frames = 0;
+                }
+            }
+            crate::dlog!(LogModule::Rad1, "rad1: clock generator {cg} at {:.3} Hz", rate.num as f64 / rate.den as f64);
+            s.clock[cg] = rate;
+        }
     }
 
     /// The status-DMA control word: stop, one-shot start, or ring start.
@@ -1132,7 +1268,7 @@ impl Inner {
                 let samples = &mut pcm[..n as usize * PCM_CHANNELS];
                 frames_to_pcm(buf, samples, ANALOG_WORDS);
                 if let Some(sink) = self.sink.lock().as_mut() {
-                    sink.play(samples);
+                    sink.play(samples, s.rate(idx).rounded_hz());
                 }
             }
             let c = &mut s.chan[idx];
@@ -1154,7 +1290,7 @@ impl Inner {
         if !c.running || now <= c.start_ns {
             return;
         }
-        let due = ((now - c.start_ns) as u128 * u128::from(CHAN_INFO[idx].freq) / u128::from(NS_PER_SEC)) as u64;
+        let due = s.rate(idx).frames_in(now - c.start_ns);
         if due > c.frames && !self.chan_move(s, idx, due - c.frames) {
             s.chan[idx].running = false;
         }

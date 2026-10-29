@@ -99,6 +99,7 @@ Non-graphics devices: MC/MEMCFG and RAM banks, HPC3, VDMA, EEPROMs and NVRAM, PS
 | Note | Kind | Title |
 |---|---|---|
 | [empty-gio-slot-reads-bus-error.md](devices/empty-gio-slot-reads-bus-error.md) | rule | Reads of an empty GIO slot end in a bus error (ABORT_EN); all ones made the PROM poll a phantom Newport 200 000 times headless |
+| [audio-test-suite.md](devices/audio-test-suite.md) | howto | The audio test suite (`test/audiotest`): rates x channels x widths through the audio library, playaiff and sfplay, checked against the Octane's capture |
 | [cpal-alsa-busy-poll.md](devices/cpal-alsa-busy-poll.md) | rule | cpal's ALSA backend can spin a core: `[audio] host = "pulseaudio"` |
 | [decode-table-is-host-mapped.md](devices/decode-table-is-host-mapped.md) | rule | The physical decode table is a sparse host mapping over 40 bits: change it only through `fill`, set the default first, compare entries with `entry_eq` |
 | [mc-decodes-32-physical-bits.md](devices/mc-decodes-32-physical-bits.md) | rule | Indy/Indigo2/O2 decode 32 physical bits; IRIX PTE software bits reach PA[35:32]; fold with `MipsExecutor::phys_mask`, never decode them |
