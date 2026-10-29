@@ -351,9 +351,14 @@ struct Lanes {
     size: u64,
 }
 
+const PIO_INVALID: u64 = 1 << 63;
+
 impl Lanes {
     fn access(&self, f: &dyn PciBusDevice, bar: usize, off: u32, size: usize, value: Option<u64>) -> u64 {
         let policy = self.policy.load(Ordering::Acquire);
+        if policy & PIO_INVALID != 0 {
+            return if value.is_none() { u64::MAX >> (64 - size * 8) } else { 0 };
+        }
         self.cycle(f, bar, off.wrapping_sub(policy as u32), size, value, policy)
     }
 
@@ -710,7 +715,9 @@ impl XBridgeHead {
         // Host replacement changes an endpoint's function. Guest configuration
         // writes only update policy and never allocate another table endpoint.
         map.entries.retain(|&(_, slot, _), entry| {
-            funcs.iter().any(|(s, f)| *s == slot && Arc::ptr_eq(f, &entry.function))
+            let keep = funcs.iter().any(|(s, f)| *s == slot && Arc::ptr_eq(f, &entry.function));
+            if !keep { entry.lanes.policy.fetch_or(PIO_INVALID, Ordering::AcqRel); }
+            keep
         });
         for kind in 0u8..11 {
             let (cpu, len, space, pci, width, selected) = if kind < 8 {
