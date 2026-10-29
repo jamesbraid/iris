@@ -169,6 +169,7 @@ impl OctaneMachine {
         bridge.attach(0, scsi[0].clone());
         bridge.attach(1, scsi[1].clone());
         let ioc3 = Arc::new(Ioc3::octane(mac, false));
+        ioc3.set_heartbeat(heartbeat.clone());
         let eth = Ioc3Eth::new(mac);
         eth.set_heartbeat(heartbeat.clone());
         ioc3.attach_eth(eth.clone());

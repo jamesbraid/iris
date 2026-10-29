@@ -45,7 +45,7 @@
 //! in jamesbraid/qemu-sgi-origami.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, OnceLock, Weak};
 
@@ -2218,6 +2218,8 @@ struct Shared {
     pin_line: Mutex<Option<IrqLine>>,
     /// The SuperIO line the board wires to a Bridge input.
     superio_line: Mutex<Option<IrqLine>>,
+    /// The status bar's activity word, shared with the graphics board.
+    heartbeat: OnceLock<Arc<AtomicU64>>,
     /// What each line was last driven to, and the Ethernet block's level.
     pin_level: AtomicBool,
     superio_level: AtomicBool,
@@ -2288,7 +2290,9 @@ impl Shared {
         let (r, want, power_off) = {
             let mut st = self.st.lock();
             let ctx = Ctx { ps2: &self.ps2, eth_parity: parity };
+            let pins = st.pin_data;
             let r = f(&mut st, &ctx);
+            self.show_lightbar(&st, pins);
             (r, st.deadlines(), std::mem::take(&mut st.power_off_pending))
         };
         self.arm(want);
@@ -2299,6 +2303,32 @@ impl Shared {
             }
         }
         r
+    }
+
+    /// Mirror the system board's front lightbar into the status bar when
+    /// pins 0 and 1 changed from `before`.
+    fn show_lightbar(&self, st: &St, before: u32) {
+        use crate::dev::ng1::rex3::Rex3;
+        let Some(hb) = self.heartbeat.get() else { return };
+        if st.cfg.subsystem_id != SUBSYS_IP30_SYSBOARD {
+            return;
+        }
+        // Pin 0 is the white power LED, pin 1 the red fault LED (Linux
+        // drivers/leds/leds-ip30.c writes 1 to light one). The status bar
+        // shows white as its green LED. Set to false if the pins turn out
+        // to be active low.
+        const LIT_WHEN_HIGH: bool = true;
+        for (pin, led) in [(0, Rex3::HB_LED_GREEN), (1, Rex3::HB_LED_RED)] {
+            let (old, new) = ((before >> pin) & 1, (st.pin_data >> pin) & 1);
+            if old == new {
+                continue;
+            }
+            if (new == 1) == LIT_WHEN_HIGH {
+                hb.fetch_or(led, Ordering::Relaxed);
+            } else {
+                hb.fetch_and(!led, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Make the pending timers match `want`: one one-shot per deadline. A
@@ -2513,6 +2543,7 @@ impl Ioc3 {
                 raw_dma: Mutex::new(None),
                 pin_line: Mutex::new(None),
                 superio_line: Mutex::new(None),
+                heartbeat: OnceLock::new(),
                 pin_level: AtomicBool::new(false),
                 superio_level: AtomicBool::new(false),
                 eth_level: AtomicBool::new(false),
@@ -2601,6 +2632,12 @@ impl Ioc3 {
     /// [`Ioc3::flush_nvram_after`] with no wait.
     pub fn flush_nvram(&self) {
         self.sh.flush_nvram(Duration::ZERO);
+    }
+
+    /// Show the system board's front lightbar in the status bar through
+    /// `heartbeat`.
+    pub fn set_heartbeat(&self, heartbeat: Arc<AtomicU64>) {
+        let _ = self.sh.heartbeat.set(heartbeat);
     }
 
     /// Attach the Ethernet MAC. It is told about DMA and the PCI interrupt
