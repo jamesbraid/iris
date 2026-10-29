@@ -911,8 +911,8 @@ impl BoardRecordText {
 }
 
 impl Ioc3Config {
-    /// The Octane's IOC3 (`octane2` selects the Octane2's board records and
-    /// product input). The fictitious barcodes and ROM serials are the
+    /// The Octane's IOC3 (`octane2` selects the Octane2's board records).
+    /// The fictitious barcodes and ROM serials are the
     /// marked-synthetic ones (barcode `EMU...`).
     pub fn octane(mac: [u8; 6], octane2: bool) -> Self {
         let (fp_rev, ps_name, ps_part, ps_rev) = if octane2 {
@@ -927,9 +927,11 @@ impl Ioc3Config {
             parallel: true,
             keyboard_mouse: true,
             rtc: true,
-            // GPIO 2 is the read-only product input: 1 on Octane, 0 on Octane2.
-            gpio_input_mask: 1 << 2,
-            gpio_input_values: if octane2 { 0 } else { 1 << 2 },
+            // The board drives GPIO inputs 2 and 3 high: read on an Octane2's
+            // PROM Command Monitor (pin data 0x12d). An Octane is unmeasured
+            // and assumed the same; nothing shows a pin that tells them apart.
+            gpio_input_mask: 1 << 2 | 1 << 3,
+            gpio_input_values: 1 << 2 | 1 << 3,
             records: vec![
                 (BoardRecordText::new("EMUF00", "030-0891-003", fp_rev, "FP1"), 0x5145_4d55_4600),
                 (BoardRecordText::new("EMUS00", ps_part, ps_rev, ps_name), 0x5145_4d55_5300),
