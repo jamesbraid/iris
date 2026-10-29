@@ -1,6 +1,42 @@
 use super::*;
 use crate::traits::*;
 
+#[test]
+fn startup_release_runs_once_outside_state_and_reset_rearms() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for fetch_exit in [false, true] {
+        let releases = Arc::new(AtomicUsize::new(0));
+        let count = releases.clone();
+        let window = Arc::new_cyclic(|weak: &std::sync::Weak<StartupWindow>| {
+            let weak = weak.clone();
+            StartupWindow::with_release(0x200000, Arc::new(move || {
+                let window = weak.upgrade().unwrap();
+                assert!(window.state.try_lock().is_some());
+                assert!(!window.observing());
+                count.fetch_add(1, Ordering::Relaxed);
+            }))
+        });
+        let ram = Arc::new(Ram(Mutex::new(vec![0xa5; 0x20000])));
+        let view = CachedView::new(ram, window.clone());
+        for expected in [1, 2] {
+            assert!(window.observing());
+            arm(&window, &view);
+            if fetch_exit {
+                window.observe(2, Some(WINDOW_BASE), 0);
+                let _scope = window.begin_access();
+                view.read8(WINDOW_BASE);
+            } else {
+                window.observe(0, Some(0x200000), 0);
+            }
+            assert!(!window.observing());
+            assert_eq!(releases.load(Ordering::Relaxed), expected);
+            window.observe(0, Some(0x200000), 0);
+            assert_eq!(releases.load(Ordering::Relaxed), expected);
+            window.reset();
+        }
+    }
+}
+
 struct Ram(Mutex<Vec<u8>>);
 macro_rules! ram_access {
     ($r:ident,$w:ident,$t:ty,$out:ident,$n:expr) => {

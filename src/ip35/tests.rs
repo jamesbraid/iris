@@ -1,5 +1,61 @@
 use super::*;
 use crate::traits::BUS_OK;
+
+#[test]
+fn startup_exit_remaps_eight_slots_and_reset_restores_the_private_view() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let clocks = Arc::new(AtomicU64::new(0));
+    let count = clocks.clone();
+    let board = crate::ip34_machine::FuelBoard::new(&[0; 16], Arc::new(move || {
+        count.fetch_add(1, Ordering::Relaxed);
+        0
+    })).unwrap();
+    let base = startup::WINDOW_BASE;
+    let phys = board.md.physical();
+    board.md.md_bus().write64(8, 0x33);
+    assert_eq!(board.md.memory_view().write64(base, 0x2222222222222222), BUS_OK);
+    let cached = board.cached_bus();
+    let initial: Vec<_> = (0..8).map(|slot| phys.entry_at(base + slot * 4096)).collect();
+    let outside = [phys.entry_at(base - 4096), phys.entry_at(base + 32768)];
+    for _ in 0..2 {
+        assert!(board.startup.observing());
+        board.startup.observe(2, Some(0x1fc00000), 0);
+        {
+            let _scope = board.startup.begin_access();
+            assert_eq!(cached.write8(base, 0x11), BUS_OK);
+            assert_eq!(cached.read8(base).data, 0x11);
+            assert_eq!(cached.dma_read64(base).data, 0x2222222222222222);
+        }
+        assert_eq!(cached.read8(base).data, 0x22, "debugger sees backing bytes");
+        board.startup.observe(0, Some(0x200000), 0);
+        assert!(!board.startup.observing());
+        for slot in 0..8 {
+            let entry = phys.entry_at(base + slot * 4096);
+            assert!(!std::ptr::eq(entry, initial[slot as usize]));
+            assert!(std::ptr::eq(entry, phys.entry_at(base)));
+        }
+        assert!(std::ptr::eq(outside[0], phys.entry_at(base - 4096)));
+        assert!(std::ptr::eq(outside[1], phys.entry_at(base + 32768)));
+        {
+            let _scope = board.startup.begin_access();
+            assert_eq!(cached.read8(base).data, 0x22);
+        }
+        let mut cpu = board.build_cpu().unwrap();
+        cpu.core.pc = 0xffffffff80000000;
+        let before = clocks.load(Ordering::Relaxed);
+        assert_eq!(board.step_cpu(&mut cpu), 0);
+        assert_eq!(clocks.load(Ordering::Relaxed), before, "completed startup never polls the clock");
+        board.reset_startup();
+        for slot in 0..8 {
+            assert!(std::ptr::eq(phys.entry_at(base + slot * 4096), initial[slot as usize]));
+        }
+    }
+    let md = Arc::downgrade(&board.md);
+    drop(cached);
+    drop(board);
+    assert!(md.upgrade().is_none(), "startup remapping must not retain the board");
+}
+
 struct Word(u64);
 impl BusDevice for Word {
     fn read64(&self, _: u64) -> BusRead64 {

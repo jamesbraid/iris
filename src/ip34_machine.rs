@@ -65,6 +65,7 @@ impl FuelMachine {
         );
         exec.core.count_write_samples = true;
         let step_board = board.clone();
+        exec.instruction_hook_enabled = Some(board.startup.enabled());
         exec.instruction_hook = Some(Arc::new(move |exec, step| {
             step_board.observe_cpu(exec);
             let _scope = step_board.startup.begin_access();
@@ -112,6 +113,9 @@ impl FuelMachine {
         let mut monitor = crate::monitor::Monitor::new();
         monitor.register_device(crate::devlog::init_devlog());
         monitor.register_device(cpu.clone().as_device());
+        monitor.register_device(crate::perf_monitor::PerfMonitor::new(
+            cpu.running_flag(), cpu.cycles_ptr(), cpu.fasttick_count(), None, None,
+        ));
         monitor.register_device(board.md.physical().clone());
         monitor.register_device(board.ioc3.ps2());
         monitor.register_device(board.l1.clone());
@@ -121,6 +125,8 @@ impl FuelMachine {
         board.ioc3.register_locks();
         board.xbridge.register_locks();
         board.flash.register_locks();
+        board.md.register_locks();
+        board.startup.register_locks();
         let nat = if cfg.network.mode != crate::config::NetMode::Off {
             let net = crate::net::GatewayConfig::from_network(&cfg.network());
             let addrs = (net.client_ip, net.gateway_ip, net.netmask);
@@ -286,7 +292,7 @@ impl Workstation for FuelMachine {
     fn reset(&mut self) {
         self.stop();
         self.cpu.power_on();
-        self.board.startup.reset();
+        self.board.reset_startup();
         for pi in &self.board.pi {
             pi.power_on();
         }
@@ -467,6 +473,7 @@ pub(crate) fn build_cpu(bus: Arc<Ip35Bus>) -> Result<Box<FuelCpu>, String> {
 pub(crate) struct FuelBoard {
     pub bus: Arc<Ip35Bus>,
     pub startup: Arc<crate::ip35::startup::StartupWindow>,
+    startup_view: Arc<dyn BusDevice>,
     pub pi: [Arc<crate::dev::bedrock_pi::BedrockPi>; 2],
     pub md: Arc<crate::dev::bedrock_md::BedrockMd>,
     pub l1: Arc<crate::dev::l1::L1>,
@@ -486,7 +493,6 @@ pub(crate) struct FuelBoard {
     clock: crate::dev::heart::Clock,
     last_clock: std::sync::atomic::AtomicU64,
     usb_elapsed_ns: std::sync::atomic::AtomicU64,
-    last_md_clock: std::sync::atomic::AtomicU64,
     running: std::sync::atomic::AtomicBool,
 }
 
@@ -511,7 +517,7 @@ impl FuelBoard {
         flash_path: Option<&std::path::Path>,
     ) -> Result<Self, String> {
         use crate::dev::bedrock_pi::{BedrockPi, BedrockPiConfig};
-        let md = crate::dev::bedrock_md::BedrockMd::new();
+        let md = crate::dev::bedrock_md::BedrockMd::with_clock(clock.clone());
         let phys = md.physical().clone();
         let pi: [Arc<BedrockPi>; 2] = std::array::from_fn(|interface| {
             BedrockPi::new(
@@ -765,19 +771,29 @@ impl FuelBoard {
         bus.map(0, 0x1_4000_0000, 1 << 30, md.ecc_bus());
         bus.map(0, 0x1_0000_0000, 1 << 30, md.ecc_scrub_bus());
         bus.map(2, 0, 1 << 33, md.fetchop_bus());
-        let startup = Arc::new(crate::ip35::startup::StartupWindow::new(execution_size));
+        let weak_phys = Arc::downgrade(&phys);
+        let backing = md.memory_view();
+        let startup = Arc::new(crate::ip35::startup::StartupWindow::with_release(
+            execution_size,
+            Arc::new(move || {
+                if let Some(phys) = weak_phys.upgrade() {
+                    phys.map(0x100000, 0x108000, backing.clone(), "Bedrock cached memory");
+                }
+            }),
+        ));
+        let startup_view: Arc<dyn BusDevice> = Arc::new(
+            crate::ip35::startup::CachedView::new(md.memory_view(), startup.clone()),
+        );
         phys.map(
             0x100000,
             0x108000,
-            Arc::new(crate::ip35::startup::CachedView::new(
-                md.memory_view(),
-                startup.clone(),
-            )),
+            startup_view.clone(),
             "Fuel private startup window",
         );
         Ok(Self {
             bus: Arc::new(bus),
             startup,
+            startup_view,
             pi,
             md,
             l1,
@@ -795,7 +811,6 @@ impl FuelBoard {
             serial,
             irq,
             last_clock: std::sync::atomic::AtomicU64::new(clock()),
-            last_md_clock: std::sync::atomic::AtomicU64::new(clock()),
             usb_elapsed_ns: std::sync::atomic::AtomicU64::new(0),
             clock,
             running: std::sync::atomic::AtomicBool::new(false),
@@ -816,9 +831,8 @@ impl FuelBoard {
 
     /// CPU-thread observer. Debugger reads must never call this method.
     pub fn observe_cpu(&self, cpu: &mut FuelCpu) {
-        // MBIST can complete between two consecutive register polls.
-        if self.running.load(std::sync::atomic::Ordering::Acquire) {
-            self.poll_md((self.clock)());
+        if !self.startup.observing() {
+            return;
         }
         let pc = cpu.debug_translate(cpu.core.pc);
         self.startup.observe(
@@ -830,21 +844,30 @@ impl FuelBoard {
 
     /// One non-fused interpreter instruction with private-window observation.
     pub fn step_cpu(&self, cpu: &mut FuelCpu) -> u32 {
+        if !self.startup.observing() {
+            return cpu.step_int();
+        }
         self.observe_cpu(cpu);
         let _scope = self.startup.begin_access();
         cpu.step_int()
     }
 
-    fn poll_md(&self, now: u64) {
-        let previous = self.last_md_clock.swap(now, std::sync::atomic::Ordering::AcqRel);
-        self.md.advance_ns(now.saturating_sub(previous));
+    /// The CPU is stopped while restoring the startup decoder and observer.
+    pub fn reset_startup(&self) {
+        self.startup.reset();
+        self.md.physical().map(
+            0x100000,
+            0x108000,
+            self.startup_view.clone(),
+            "Fuel private startup window",
+        );
     }
 
     pub fn start(&self) {
         use crate::traits::Device;
         self.last_clock
             .store((self.clock)(), std::sync::atomic::Ordering::Release);
-        self.last_md_clock.store((self.clock)(), std::sync::atomic::Ordering::Release);
+        self.md.start_clock();
         self.running
             .store(true, std::sync::atomic::Ordering::Release);
         for pi in &self.pi {
@@ -862,7 +885,6 @@ impl FuelBoard {
             let previous = self
                 .last_clock
                 .swap(now, std::sync::atomic::Ordering::AcqRel);
-            self.poll_md(now);
             self.flash.advance_ns(now.saturating_sub(previous));
             let delta = now.saturating_sub(previous);
             let old = self.usb_elapsed_ns.fetch_add(delta, std::sync::atomic::Ordering::Relaxed);
@@ -878,6 +900,7 @@ impl FuelBoard {
         self.poll();
         self.running
             .store(false, std::sync::atomic::Ordering::Release);
+        self.md.stop_clock();
         self.usb.stop();
         self.scsi.stop();
         self.eth.stop();

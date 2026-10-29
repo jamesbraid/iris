@@ -11,6 +11,7 @@
 use crate::traits::*;
 use parking_lot::Mutex;
 use std::{cell::Cell, marker::PhantomData, rc::Rc, sync::Arc};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(super) const WINDOW_BASE: u64 = 0x100000;
 pub(super) const WINDOW_SIZE: usize = 0x8000;
@@ -19,6 +20,8 @@ thread_local! { static ACTIVE: Cell<usize> = const { Cell::new(0) }; }
 pub(crate) struct StartupWindow {
     state: Mutex<State>,
     flash_size: u64,
+    observing: Arc<AtomicBool>,
+    release: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 struct State {
     bytes: Box<[u8; WINDOW_SIZE]>,
@@ -61,10 +64,34 @@ impl StartupWindow {
         Self {
             state: Mutex::new(State::default()),
             flash_size,
+            observing: Arc::new(AtomicBool::new(true)),
+            release: None,
         }
+    }
+    pub(crate) fn with_release(flash_size: u64, release: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self { release: Some(release), ..Self::new(flash_size) }
+    }
+    pub(crate) fn register_locks(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        crate::locks::register_lock_fn("fuel::startup", move || {
+            weak.upgrade().is_some_and(|window| window.state.is_locked())
+        });
+    }
+    pub(crate) fn enabled(&self) -> Arc<AtomicBool> {
+        self.observing.clone()
+    }
+    pub(crate) fn observing(&self) -> bool {
+        self.observing.load(Ordering::Acquire)
     }
     pub(crate) fn reset(&self) {
         *self.state.lock() = State::default();
+        self.observing.store(true, Ordering::Release);
+    }
+    fn release(&self) {
+        // Remapping may call into the bus. Never retain the private state lock.
+        if let Some(release) = &self.release {
+            release();
+        }
     }
     pub(crate) fn begin_access(&self) -> CpuAccess<'_> {
         let previous = ACTIVE.with(|a| a.replace(self as *const Self as usize));
@@ -86,6 +113,9 @@ impl StartupWindow {
     /// Publish only on the CPU thread before executing an instruction.
     /// The observer can release an existing latch but never arms one.
     pub(crate) fn observe(&self, fpr0: u64, translated_pc: Option<u64>, live_node: u8) {
+        if !self.observing() {
+            return;
+        }
         let node_base = (live_node as u64) << 33;
         let pc = translated_pc.map(|p| {
             let p = p & ((1u64 << 40) - 1);
@@ -104,6 +134,9 @@ impl StartupWindow {
         if s.private && !s.phase_bit && !self.home(s.pc) {
             s.private = false;
             s.left = true;
+            self.observing.store(false, Ordering::Release);
+            drop(s);
+            self.release();
         }
     }
     fn private(&self, s: &mut State, read: bool) -> bool {
@@ -118,6 +151,7 @@ impl StartupWindow {
         {
             s.private = false;
             s.left = true;
+            self.observing.store(false, Ordering::Release);
         }
         if s.left {
             return false;
@@ -155,11 +189,17 @@ impl CachedView {
         a < WINDOW_BASE + WINDOW_SIZE as u64 && a.saturating_add(n) > WINDOW_BASE
     }
     fn read_private(&self, a: u64, n: usize) -> Option<BusRead64> {
-        if !Self::overlaps(a, n as u64) {
+        if !self.window.observing() || !Self::overlaps(a, n as u64) {
             return None;
         }
         let mut s = self.window.state.lock();
+        let was_left = s.left;
         if !self.window.private(&mut s, true) {
+            let released = !was_left && s.left;
+            drop(s);
+            if released {
+                self.window.release();
+            }
             return None;
         }
         let mut value = 0;
@@ -185,7 +225,7 @@ impl CachedView {
         Some(BusRead64::ok(value))
     }
     fn write_private(&self, a: u64, n: usize, v: u64) -> Option<u32> {
-        if !Self::overlaps(a, n as u64) {
+        if !self.window.observing() || !Self::overlaps(a, n as u64) {
             return None;
         }
         let mut s = self.window.state.lock();

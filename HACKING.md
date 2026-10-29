@@ -83,11 +83,14 @@ their devices from the `[scsi.N]` tables, where the key is a slot
 
 Fuel (`src/ip34_machine.rs`) uses the same `MipsCpu` thread and workstation
 interfaces. Its interpreter installs an optional `MipsExecutor::instruction_hook`
-to observe startup state before every instruction and scope private startup
-memory access until that instruction returns. The hook calls its supplied
-interpreter function once. Normal execution and monitor stepping both pass
-through it. Other machines leave it unset. The existing batch callback polls
-Fuel's elapsed-time devices; it does not define startup-memory visibility.
+to observe startup state and scope private startup memory access until that
+instruction returns. The hook calls its supplied interpreter function once.
+Normal execution and monitor stepping both pass through it. Leaving startup
+remaps its eight decoder slots to MD memory and disables the hook before its
+callback is cloned. Board reset restores both. Other machines leave the hook
+unset. MD catches up its self-test clock when its registers are accessed, so
+consecutive status reads can observe completion without instruction polling.
+The existing batch callback polls the other elapsed-time devices.
 
 ## 2. Data path and endianness
 

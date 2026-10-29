@@ -11,6 +11,34 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn instruction_hook_can_be_disabled_and_rearmed_without_replacing_it() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let (mut exec, mem) = create_executor();
+        mem.set_word(0, 0);
+        mem.set_word(4, 0);
+        mem.set_word(8, 0);
+        exec.core.pc = 0xffffffff80000000;
+        let enabled = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        exec.instruction_hook_enabled = Some(enabled.clone());
+        exec.instruction_hook = Some(Arc::new(move |exec, step| {
+            count.fetch_add(1, Ordering::Relaxed);
+            step(exec)
+        }));
+        assert_eq!(exec.step_int(), EXEC_COMPLETE);
+        assert_eq!(exec.core.pc, 0xffffffff80000004);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        enabled.store(true, Ordering::Release);
+        assert_eq!(exec.step_int(), EXEC_COMPLETE);
+        assert_eq!(exec.core.pc, 0xffffffff80000008);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        exec.instruction_hook_enabled = None;
+        assert_eq!(exec.step_int(), EXEC_COMPLETE);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
     fn r10000_va_width_translation_keeps_full_vpn() {
         use crate::cpu::mips_cache_shadow::R10000ShadowCache;
         use crate::cpu::mips_core::STATUS_UX;

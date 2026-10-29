@@ -55,6 +55,7 @@ struct State {
     directory_error: u64,
     marked_directory: HashMap<u64, ()>,
     clock_ns: u64,
+    clock_anchor: Option<u64>,
     selftest_deadline: Option<u64>,
     selftest_result: bool,
     selftest_status: u64,
@@ -78,6 +79,7 @@ impl Default for State {
             directory_error: 0,
             marked_directory: HashMap::new(),
             clock_ns: 0,
+            clock_anchor: None,
             selftest_deadline: None,
             selftest_result: false,
             selftest_status: 0,
@@ -88,6 +90,9 @@ impl Default for State {
 
 pub struct BedrockMd {
     memory: BedrockMemory,
+    clock: Option<crate::dev::heart::Clock>,
+    // The banks contain non-atomic words shared with DMA. Keep their accesses
+    // serialized with ECC repair, directory updates and fetch operations.
     state: Mutex<State>,
     callback: Mutex<Option<ErrorCallback>>,
     unsupported: AtomicU64,
@@ -113,8 +118,15 @@ struct MdBus {
 
 impl BedrockMd {
     pub fn new() -> Arc<Self> {
+        Self::build(None)
+    }
+    pub fn with_clock(clock: crate::dev::heart::Clock) -> Arc<Self> {
+        Self::build(Some(clock))
+    }
+    fn build(clock: Option<crate::dev::heart::Clock>) -> Arc<Self> {
         let md = Arc::new(Self {
             memory: BedrockMemory::new(),
+            clock,
             state: Mutex::new(State::default()),
             callback: Mutex::new(None),
             unsupported: AtomicU64::new(0),
@@ -126,6 +138,16 @@ impl BedrockMd {
             "Bedrock RAM decoder",
         );
         md
+    }
+    pub fn register_locks(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        crate::locks::register_lock_fn("bedrock-md::state", move || {
+            weak.upgrade().is_some_and(|md| md.state.is_locked())
+        });
+        let weak = Arc::downgrade(self);
+        crate::locks::register_lock_fn("bedrock-md::callback", move || {
+            weak.upgrade().is_some_and(|md| md.callback.is_locked())
+        });
     }
     pub fn physical(&self) -> &Arc<crate::physical::Physical> {
         self.memory.physical()
@@ -160,15 +182,37 @@ impl BedrockMd {
     pub fn on_error(&self, callback: ErrorCallback) {
         *self.callback.lock() = Some(callback);
     }
-    /// Advance the unit's guest clock. The machine's clock owner supplies elapsed
-    /// nanoseconds; the unit does not create a host timer or worker thread.
+    /// Explicit elapsed time for a manually clocked controller.
     pub fn advance_ns(&self, elapsed: u64) {
         let mut s = self.state.lock();
+        Self::advance(&mut s, elapsed);
+    }
+    fn advance(s: &mut State, elapsed: u64) {
         s.clock_ns = s.clock_ns.saturating_add(elapsed);
         if s.selftest_deadline.is_some_and(|end| s.clock_ns >= end) {
             s.selftest_deadline = None;
             s.selftest_status = if s.selftest_result { 3 } else { 2 };
             s.selftest_error = if s.selftest_result { 0 } else { 1 << 48 };
+        }
+    }
+    fn catch_up(s: &mut State, now: u64) {
+        if let Some(anchor) = s.clock_anchor {
+            s.clock_anchor = Some(anchor.max(now));
+            Self::advance(s, now.saturating_sub(anchor));
+        }
+    }
+    pub fn start_clock(&self) {
+        if let Some(clock) = &self.clock {
+            let now = clock();
+            self.state.lock().clock_anchor.get_or_insert(now);
+        }
+    }
+    pub fn stop_clock(&self) {
+        if let Some(clock) = &self.clock {
+            let now = clock();
+            let mut s = self.state.lock();
+            Self::catch_up(&mut s, now);
+            s.clock_anchor = None;
         }
     }
     /// Normal MD memory semantics without re-entering the cached Physical map.
@@ -209,8 +253,18 @@ impl BedrockMd {
             return self.refuse();
         }
         let mut event = Vec::new();
+        // Sample outside state: even an injected clock must not call out under
+        // the memory lock. Only register observations need the self-test timer.
+        let now = if matches!(view, View::Registers) {
+            self.clock.as_ref().map(|clock| clock())
+        } else {
+            None
+        };
         let result = {
             let mut s = self.state.lock();
+            if let Some(now) = now {
+                Self::catch_up(&mut s, now);
+            }
             match view {
                 View::Registers => self.register(&mut s, addr, bytes, write),
                 View::Directory => self.directory(&mut s, addr, bytes, write),
@@ -756,6 +810,51 @@ mod tests {
         assert_eq!(ecc.write_uncached_subword(4, 2, 0x123456789abcdef0), BUS_OK);
         assert_eq!(ecc.read16(4).data, 0x1234);
     }
+    #[test]
+    fn selftest_clock_is_lazy_and_excludes_stopped_time() {
+        let now = Arc::new(AtomicU64::new(100));
+        let time = now.clone();
+        let md = BedrockMd::with_clock(Arc::new(move || time.load(Ordering::Relaxed)));
+        let regs = md.md_bus();
+        regs.write64(8, 0x33);
+        md.start_clock();
+        regs.write64(0x20030, 1);
+        now.store(1099, Ordering::Relaxed);
+        assert_eq!(regs.read64(0x20048).data, 0);
+        now.store(1100, Ordering::Relaxed);
+        assert_eq!(regs.read64(0x20048).data, 3);
+        now.store(5000, Ordering::Relaxed);
+        regs.write64(0x20030, 1);
+        now.store(5500, Ordering::Relaxed);
+        md.stop_clock();
+        now.store(15000, Ordering::Relaxed);
+        assert_eq!(regs.read64(0x20048).data, 0);
+        md.start_clock();
+        now.store(15499, Ordering::Relaxed);
+        assert_eq!(regs.read64(0x20048).data, 0);
+        now.store(15500, Ordering::Relaxed);
+        assert_eq!(regs.read64(0x20048).data, 3);
+        regs.write64(0x20030, 1);
+        now.store(15400, Ordering::Relaxed);
+        assert_eq!(regs.read64(0x20048).data, 0);
+        now.store(16499, Ordering::Relaxed);
+        assert_eq!(regs.read64(0x20048).data, 0);
+        now.store(16500, Ordering::Relaxed);
+        assert_eq!(regs.read64(0x20048).data, 3);
+        regs.write64(0x20030, 1);
+        regs.write64(0x20030, 2);
+        now.store(20000, Ordering::Relaxed);
+        assert_eq!(regs.read64(0x20048).data, 0);
+        md.power_on();
+        regs.write64(8, 0x33);
+        md.start_clock();
+        regs.write64(0x20030, 1);
+        now.store(20999, Ordering::Relaxed);
+        assert_eq!(regs.read64(0x20048).data, 0);
+        now.store(21000, Ordering::Relaxed);
+        assert_eq!(regs.read64(0x20048).data, 3);
+    }
+
     fn configured() -> Arc<BedrockMd> {
         let md = BedrockMd::new();
         assert_eq!(md.md_bus().write64(8, 0x33), BUS_OK);
