@@ -18,7 +18,7 @@ impl Ohci {
         cutoff: u32,
         credit: &mut u32,
     ) -> Result<(), ()> {
-        let mut yielded = None;
+        let mut yielded: Option<bool> = None;
         while *budget >= VISIT && *budget > cutoff {
             let control = s.r[1] & 16 != 0 && Self::list_ready(s, 8, 9, 2);
             let bulk = s.r[1] & 32 != 0 && Self::list_ready(s, 10, 11, 4);
