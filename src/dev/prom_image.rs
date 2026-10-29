@@ -40,6 +40,50 @@ mod tests {
         v
     }
     #[test]
+    fn load_raw_stored_and_gzip_files() {
+        let path = std::env::temp_dir().join(format!("iris-prom-load-{}", std::process::id()));
+        for file in [
+            vec![9, 8, 7, 6],
+            container(&[9, 8, 7, 6], false),
+            container(&[9, 8, 7, 6], true),
+        ] {
+            std::fs::write(&path, file).unwrap();
+            assert_eq!(load(&path, 4).unwrap(), [9, 8, 7, 6]);
+        }
+        std::fs::write(&path, []).unwrap();
+        assert!(load(&path, 4).unwrap().is_empty());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn load_rejects_malformed_containers_with_path() {
+        let path = std::env::temp_dir().join(format!("iris-prom-invalid-{}", std::process::id()));
+        for gzip in [false, true] {
+            let mut file = container(&[9, 8, 7, 6], gzip);
+            file[0xc7] ^= 1;
+            std::fs::write(&path, file).unwrap();
+            let error = load(&path, 4).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains(&path.display().to_string()));
+            assert!(error.to_string().contains("checksum"));
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn load_reports_missing_and_oversized_files() {
+        let path = std::env::temp_dir().join(format!("iris-prom-errors-{}", std::process::id()));
+        let error = load(&path, 4).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(error.to_string().contains(&path.display().to_string()));
+        std::fs::write(&path, vec![0; 5000]).unwrap();
+        let error = load(&path, 4).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains(&path.display().to_string()));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn raw_stored_and_gzip() {
         assert_eq!(decode(&[1, 2], 2).unwrap(), [1, 2]);
         assert!(decode(&[1, 2], 1).is_err());
@@ -108,6 +152,37 @@ fn word(data: &[u8], off: usize) -> u64 {
 }
 fn byte_sum(data: &[u8]) -> u64 {
     data.iter().map(|b| *b as u64).sum()
+}
+
+/// Read a PROM file and decode its payload, retaining the path in errors.
+pub fn load(path: &std::path::Path, payload_limit: usize) -> io::Result<Vec<u8>> {
+    let with_path = |error: io::Error| {
+        io::Error::new(error.kind(), format!("PROM image {}: {error}", path.display()))
+    };
+    let file = std::fs::File::open(path).map_err(with_path)?;
+    // Bound the encoded file by zlib's compression bound, the container
+    // header, gzip framing and the accepted zero tail.
+    let size = payload_limit as u64;
+    let file_limit = size
+        .saturating_add(size >> 12)
+        .saturating_add(size >> 14)
+        .saturating_add(size >> 25)
+        .saturating_add(13 + 4096 + 12 + 7);
+    if file.metadata().map_err(with_path)?.len() > file_limit {
+        return Err(with_path(invalid(
+            "encoded PROM image exceeds flash capacity",
+        )));
+    }
+    let mut bytes = Vec::new();
+    file.take(file_limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(with_path)?;
+    if bytes.len() as u64 > file_limit {
+        return Err(with_path(invalid(
+            "encoded PROM image exceeds flash capacity",
+        )));
+    }
+    decode(&bytes, payload_limit).map_err(with_path)
 }
 
 /// Accept raw payload bytes or the supported stored/gzip container subset.

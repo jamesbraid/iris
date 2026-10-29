@@ -1,0 +1,41 @@
+# Experimental serial Fuel. Run from the repository root:
+# cargo run --release -- --config irix-install/iris-fuel-serial.toml
+# Create ignore/fuel/ and supply your decoded raw PROM payload and IRIX disk.
+# PROM also accepts supported version-six single-segment stored/gzip containers.
+# No PROM or disk images are included. Convert QCOW2 disks to raw first.
+
+prom = "ignore/fuel/ip35prom.payload.bin"
+nvram = "ignore/fuel/nvram.bin"
+banks = [256, 256]
+headless = true
+no_audio = true
+monitor_port = 18888
+serial_port_a = 18880
+serial_port_b = 18881
+
+[machine]
+profile = "fuel_ip34"
+# Selects the execution family. Fuel fixes R14000 f23, 500 MHz and 2 MiB L2.
+cpu = "r10000"
+
+[graphics]
+board = "none"
+
+[fuel]
+flash = "ignore/fuel/flash.bin"
+console = "l1"
+l1_port = 18882
+# The controller is fitted, with no attached devices in this serial setup.
+ps2_keyboard = false
+ps2_mouse = false
+
+[network]
+# Disconnected cable. For NAT, use mode = "nat" and configure IRIX ef0:
+# guest 192.168.0.2/24, default gateway 192.168.0.1.
+mode = "off"
+
+[scsi.1]
+path = "ignore/fuel/irix.raw"
+cdrom = false
+# Keep the base disk unchanged. Guest writes go to irix.raw.overlay.
+overlay = true

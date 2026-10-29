@@ -25,6 +25,58 @@ Serial ports are on ports 8880 and 8881 (connect to 8881 for IRIX serial term); 
 `iris-irix53.toml` and `iris-irix65.toml` are templates for installing each
 release.
 
+## Fuel serial console
+
+Fuel is an experimental CLI profile with a fixed R14000 f23, 500 MHz,
+2 MiB secondary cache and 512 MiB RAM. Use
+[irix-install/iris-fuel-serial.toml](irix-install/iris-fuel-serial.toml)
+with an external IP35 PROM image and an existing IRIX disk. PROM inputs
+may be raw payloads or supported version-six single-segment containers
+with a stored or gzip payload. Recognized malformed containers are refused.
+There is no embedded Fuel PROM. Disk images must be raw or CHD. Convert
+QCOW2 images before attaching them.
+
+From the repository root, create `ignore/fuel/` and put your
+`ip35prom.payload.bin` and `irix.raw` there. The sample keeps private flash,
+NVRAM and disk writes in that ignored directory. Each emulated Fuel needs
+its own flash and NVRAM files. `overlay = true` keeps the base disk unchanged.
+Paths in the sample are relative to the working directory.
+
+```sh
+cargo run --release -- --config irix-install/iris-fuel-serial.toml
+```
+
+Use the interpreter build above. Fuel rejects `opcodefusion` and
+`lightning` builds. A build with `jitv2` still uses the interpreter for Fuel.
+Graphics, snapshots and CPU NMI entry are unsupported. Fuel is not listed
+in the GUI's machine selector.
+
+The sample exposes three independent serial connections on localhost:
+
+| Connection | Sample port | Configuration |
+|---|---|---|
+| L1 host console | 18882 | `fuel.l1_port` (default 8882) |
+| IOC3 channel A | 18880 | `serial_port_a` (default 8880) |
+| IOC3 channel B | 18881 | `serial_port_b` (default 8881) |
+
+Connect to the L1 console with `telnet 127.0.0.1 18882`. `fuel.console`
+selects the connection used by CI and `serial_log`. It does
+not change the PROM's saved `console` environment variable. The stock PROM's
+`setenv console d` selects the Hub serial console through L1. Confirm the
+console setting when reusing flash from another configuration.
+
+The PS/2 controller is fitted, but both ports are empty by default. To attach
+a keyboard and mouse, set both `fuel.ps2_keyboard` and `fuel.ps2_mouse` to
+`true`.
+
+The sample starts with `[network] mode = "off"`, which leaves the Ethernet
+PHY link down. Guest warnings about a disconnected cable are expected.
+To use the native NAT backend, change this to `"nat"` and configure IRIX's
+`ef0` address and default route for the same subnet. Defaults are
+`192.168.0.2` for the guest, `192.168.0.1` for the gateway and
+`255.255.255.0` for the netmask. A saved disk's old address and route may
+need changing. Fuel guest NAT operation has not yet been validated.
+
 ---
 
 ## Performance vs inventory (MHz vs MIPS)
@@ -65,9 +117,9 @@ On IP22/IP24, each bank is at most 128 MB. IP28 also supports 256 MB and
 [IP28 512 MB banks](clanker/devices/ip28-512mb-banks.md). The table below describes
 the IP22/IP24 extended layouts.
 
-`banks` has room for eight entries; every machine today uses four, and the
-rest must be 0. On the O2 each entry is the kit in a DIMM pair (32, 64, 128 or
-256 MB), largest first: `[256, 256, 256, 256]` is 1 GB.
+`banks` has room for eight entries. Fuel requires `[256, 256]` and uses
+two banks. Other machines use four, and unused entries must be 0. On the O2
+each entry is the kit in a DIMM pair (32, 64, 128 or 256 MB), largest first: `[256, 256, 256, 256]` is 1 GB.
 
 `banks` in `iris.toml` / iris-gui is applied only when you **Start** the VM.
 Changing RAM while IRIX is running updates the config but not the live guest —

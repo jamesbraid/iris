@@ -43,7 +43,8 @@ pub struct FuelMachine {
 impl FuelMachine {
     pub fn new(cfg: &MachineConfig) -> Result<Self, String> {
         cfg.validate()?;
-        let prom = std::fs::read(&cfg.prom).map_err(|e| format!("Fuel PROM {}: {e}", cfg.prom))?;
+        let prom = crate::dev::prom_image::load(std::path::Path::new(&cfg.prom), 8 * 1024 * 1024)
+            .map_err(|e| format!("Fuel {e}"))?;
         let board = Arc::new(FuelBoard::with_storage(
             &prom,
             crate::dev::heart::host_clock(),

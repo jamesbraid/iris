@@ -81,8 +81,14 @@ lend theirs and keep only chip-specific subcommands (`regs`; the WD's `wdt`,
 their devices from the `[scsi.N]` tables, where the key is a slot
 (controller × 16 + id, see `config::scsi_slot`).
 
-Fuel (`src/ip34_machine.rs`) uses the same `MipsCpu` thread and workstation
-interfaces. Its interpreter installs an optional `MipsExecutor::instruction_hook`
+Fuel (`src/ip34_machine.rs`) owns both its workstation runtime and board
+composition, using the same `MipsCpu` thread and workstation interfaces.
+`src/ip35.rs` holds the high-address bus decoder, with tests in
+`src/ip35/tests.rs`. Fuel selects the existing R10000 execution family with
+a fixed R14000 identity and cache population. It runs in the interpreter,
+with JIT dispatch disabled even in a `jitv2` build.
+
+Its interpreter installs an optional `MipsExecutor::instruction_hook`
 to observe startup state and scope private startup memory access until that
 instruction returns. The hook calls its supplied interpreter function once.
 Normal execution and monitor stepping both pass through it. Leaving startup
