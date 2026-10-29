@@ -22,7 +22,7 @@ use serde_json::Value;
 
 use crate::workstation::{MachineSlot, Workstation};
 use crate::gfx_display::GfxDisplay;
-use crate::dev::z85c30::CiSerialBackend;
+use crate::dev::serial_host::CiSerialBackend;
 
 /// Set at `start_server`; consulted by `quit` so the socket file is cleaned up
 /// before `std::process::exit` (which skips Drop).

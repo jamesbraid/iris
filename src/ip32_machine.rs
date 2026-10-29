@@ -132,7 +132,7 @@ pub struct O2Machine {
     monitor_port: u16,
     /// The console UART's in-process host end in CI mode (`--ci`), which the
     /// CI socket types into and reads.
-    ci_serial: Option<Arc<crate::dev::z85c30::CiSerialBackend>>,
+    ci_serial: Option<Arc<crate::dev::serial_host::CiSerialBackend>>,
     /// The NAT's controls and the addresses it hands the guest (client,
     /// gateway, netmask), when the Ethernet is plugged in.
     nat: Option<(Arc<crate::net::NatControl>, (std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr))>,
@@ -228,52 +228,11 @@ impl O2Machine {
         // the CI socket types into, otherwise TCP on `serial_port_a` (as the
         // Indy's channel A), either teed to `serial_log` when one is set. The
         // second port serves TCP on `serial_port_b`.
-        let [port_a, port_b] = cfg.serial_ports();
-        let ci_serial = cfg.ci.then(|| Arc::new(crate::dev::z85c30::CiSerialBackend::new()));
-        if let Some(ci) = &ci_serial {
-            if let Some(path) = cfg.serial_log.as_deref() {
-                match crate::dev::serial_log::SerialLog::create(
-                    std::path::Path::new(path),
-                    cfg.serial_log_timestamps,
-                ) {
-                    Ok(log) => {
-                        ci.set_log(log);
-                        eprintln!("iris: O2 serial console mirroring to {path}");
-                    }
-                    Err(e) => eprintln!("iris: O2 serial log {path}: {e}"),
-                }
-            }
-            bus.mace.com0.set_backend(ci.clone());
-        } else {
-            let mut backend = crate::dev::z85c30::null_serial_backend();
-            match crate::dev::z85c30::tcp_serial_backend(port_a) {
-                Some((b, p)) => {
-                    eprintln!("iris: O2 serial port 1 on 127.0.0.1:{p}");
-                    backend = b;
-                }
-                None => eprintln!("iris: O2 serial port 1: port {port_a} unavailable; is another iris using it? (serial_port_a)"),
-            }
-            if let Some(path) = &cfg.serial_log {
-                // A fresh log each boot, as the O2 has always kept it: scripts
-                // look at its tail for this boot's prompts.
-                match crate::dev::serial_log::SerialLog::create(
-                    std::path::Path::new(path),
-                    cfg.serial_log_timestamps,
-                ) {
-                    Ok(log) => {
-                        backend = Arc::new(crate::dev::z85c30::TeeBackend::new(backend.clone(), log));
-                    }
-                    Err(e) => eprintln!("iris: O2 serial log {path}: {e}"),
-                }
-            }
-            bus.mace.com0.set_backend(backend);
-        }
-        match crate::dev::z85c30::tcp_serial_backend(port_b) {
-            Some((b, p)) => {
-                eprintln!("iris: O2 serial port 2 on 127.0.0.1:{p}");
-                bus.mace.com1.set_backend(b);
-            }
-            None => eprintln!("iris: O2 serial port 2: port {port_b} unavailable; is another iris using it? (serial_port_b)"),
+        let ci_serial = cfg.ci.then(|| Arc::new(crate::dev::serial_host::CiSerialBackend::new()));
+        let (console, second) = crate::dev::serial_host::console_backends(cfg, "O2", ci_serial.as_ref());
+        bus.mace.com0.set_backend(console);
+        if let Some(b) = second {
+            bus.mace.com1.set_backend(b);
         }
         // The Ethernet on the NAT gateway `[network]` describes (`mode =
         // "off"` leaves it unplugged; validate refuses pcap here for now).
@@ -884,7 +843,7 @@ impl Workstation for O2Machine {
     fn get_timer_manager(&self) -> Arc<TimerManager> { O2Machine::get_timer_manager(self) }
     fn get_cpu_debug(&self) -> Arc<dyn crate::gdb_stub::CpuDebug> { self.cpu.clone().debug_adapter() }
     fn fasttick_count(&self) -> Arc<std::sync::atomic::AtomicU64> { self.cpu.fasttick_count() }
-    fn get_ci_serial(&self) -> Option<Arc<crate::dev::z85c30::CiSerialBackend>> { self.ci_serial.clone() }
+    fn get_ci_serial(&self) -> Option<Arc<crate::dev::serial_host::CiSerialBackend>> { self.ci_serial.clone() }
     /// Typed at serial port 1, the console with `graphics = false`.
     fn inject_serial_console(&self, bytes: &[u8]) {
         match &self.ci_serial {

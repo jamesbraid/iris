@@ -116,7 +116,7 @@ pub struct Machine {
     timer_manager: Arc<TimerManager>,
     /// When `cfg.ci` is set, the channel-A backend is replaced by this
     /// in-process one so the CI control socket can drive the console.
-    ci_serial: Option<Arc<crate::dev::z85c30::CiSerialBackend>>,
+    ci_serial: Option<Arc<crate::dev::serial_host::CiSerialBackend>>,
     /// The shared `--serial-log` sink, kept so `stop` can flush a final
     /// partial line (wall-timestamp mode holds one until its newline).
     serial_log: Option<Arc<crate::dev::serial_log::SerialLog>>,
@@ -402,27 +402,13 @@ impl Machine {
         // One sink for both serial paths, so the CI and TCP logs are the same
         // bytes (timestamps included). Opened once, before any peripheral
         // `start()` clones the current backend Arc into the RX/TX threads.
-        let serial_log = cfg.serial_log.as_deref().and_then(|path| {
-            match crate::dev::serial_log::SerialLog::open(
-                std::path::Path::new(path),
-                cfg.serial_log_timestamps,
-            ) {
-                Ok(log) => {
-                    eprintln!("iris: serial console mirroring to {}", path);
-                    Some(log)
-                }
-                Err(e) => {
-                    eprintln!("iris: serial_log: failed to open {}: {}", path, e);
-                    None
-                }
-            }
-        });
+        let serial_log = crate::dev::serial_host::open_log(&cfg, "Indy", crate::dev::serial_host::LogMode::Append);
 
         // CI mode replaces the default TCP backend on channel B (tty1, the
         // SGI serial console) with an in-process backend the control socket
         // drives directly. Channel A (tty2) keeps its default TCP backend.
         let ci_serial = if ci_enabled {
-            let b = Arc::new(crate::dev::z85c30::CiSerialBackend::new());
+            let b = Arc::new(crate::dev::serial_host::CiSerialBackend::new());
             if let Some(log) = &serial_log {
                 b.set_log(log.clone());
             }
@@ -434,7 +420,7 @@ impl Machine {
             // guest-emitted bytes also reach the file.
             if let Some(log) = &serial_log {
                 let inner = ioc.scc().backend_b();
-                ioc.scc().set_backend_b(Arc::new(crate::dev::z85c30::TeeBackend::new(inner, log.clone())));
+                ioc.scc().set_backend_b(Arc::new(crate::dev::serial_host::TeeBackend::new(inner, log.clone())));
             }
             None
         };
@@ -1176,7 +1162,7 @@ impl Machine {
 
     /// The in-process serial backend used by `--ci` mode. `None` in
     /// interactive mode.
-    pub fn get_ci_serial(&self) -> Option<Arc<crate::dev::z85c30::CiSerialBackend>> {
+    pub fn get_ci_serial(&self) -> Option<Arc<crate::dev::serial_host::CiSerialBackend>> {
         self.ci_serial.clone()
     }
 
@@ -2054,7 +2040,7 @@ impl Workstation for Machine {
     fn get_timer_manager(&self) -> Arc<TimerManager> { Machine::get_timer_manager(self) }
     fn get_cpu_debug(&self) -> Arc<dyn CpuDebug> { Machine::get_cpu_debug(self) }
     fn fasttick_count(&self) -> Arc<AtomicU64> { Machine::fasttick_count(self) }
-    fn get_ci_serial(&self) -> Option<Arc<crate::dev::z85c30::CiSerialBackend>> { Machine::get_ci_serial(self) }
+    fn get_ci_serial(&self) -> Option<Arc<crate::dev::serial_host::CiSerialBackend>> { Machine::get_ci_serial(self) }
     fn inject_serial_console(&self, bytes: &[u8]) { Machine::inject_serial_console(self, bytes) }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 

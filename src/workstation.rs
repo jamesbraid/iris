@@ -24,7 +24,7 @@ use parking_lot::Mutex;
 use crate::config::MachineConfig;
 use crate::gdb_stub::CpuDebug;
 use crate::dev::ps2::Ps2Controller;
-use crate::dev::z85c30::CiSerialBackend;
+use crate::dev::serial_host::CiSerialBackend;
 use crate::gfx_display::GfxDisplay;
 use crate::hptimer::TimerManager;
 use crate::machine::Machine;
