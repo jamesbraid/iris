@@ -239,6 +239,8 @@ struct Ctl {
     /// Bumped when the response ring is replaced (and by a reset): an entry
     /// written into the old ring is written again into the new one.
     resp_epoch: u64,
+    /// The worker must reset both ISP12160 target buses before dispatch.
+    reset_targets: bool,
     /// The ring may have entries the thread has not looked at.
     work: bool,
     /// The thread is walking the ring.
@@ -607,8 +609,8 @@ impl Core {
             st.reset();
             self.publish_gen(&st);
             if self.isp12160 {
-                self.reset_targets(&mut st, 0, None);
-                self.reset_targets(&mut st, 1, None);
+                st.ctl.reset_targets = true;
+                self.kick(&mut st);
             }
         }
         self.retire_stores();
@@ -1525,6 +1527,13 @@ impl Core {
                 st.ctl.work = true;
                 return st;
             }
+            if std::mem::take(&mut st.ctl.reset_targets) {
+                // Target commands can wait on backing I/O. Only the worker
+                // waits for them; no new request may pass this reset.
+                self.reset_targets(&mut st, 0, None);
+                self.reset_targets(&mut st, 1, None);
+                continue;
+            }
             // Completions held for room go first, in order, as the driver
             // frees it; while any is held the request ring waits.
             if !st.pending.is_empty() {
@@ -1695,8 +1704,8 @@ impl Core {
                     st.reset();
                     self.publish_gen(&st);
                     if self.isp12160 {
-                        self.reset_targets(&mut st, 0, None);
-                        self.reset_targets(&mut st, 1, None);
+                        st.ctl.reset_targets = true;
+                        self.kick(&mut st);
                     }
                     drop(st);
                     self.retire_stores();

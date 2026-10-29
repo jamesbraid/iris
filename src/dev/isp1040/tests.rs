@@ -1078,6 +1078,60 @@ fn a_soft_reset_does_not_wait_for_the_target() {
     assert_eq!(r.mem.get(BUF + 0x1000, BLOCK_SIZE), vec![0; BLOCK_SIZE]);
 }
 
+/// Recovery must return while target I/O owns the channel lock, and reset
+/// both buses before any newly published request reaches a target.
+#[test]
+fn isp12160_soft_reset_returns_before_target_io_finishes() {
+    for machine_reset in [false, true] {
+        let (r, gate) = gated_dual_rig(&format!("soft-reset-target-{machine_reset}"), BUF);
+        let path = image(&format!("soft-reset-other-{machine_reset}"), 8);
+        r.isp.attach_channel_device(1, 1, path.to_str().unwrap(), false, vec![], false, None).unwrap();
+        r.mem.put(BUF, &[0x5a; BLOCK_SIZE]);
+        r.put_entry(0, &channel_request(0, 0x101, &cdb10(scsi_cmd::WRITE_10, 0, 1), &[(BUF, 512)]));
+        r.isp.write(reg::REQUEST_QUEUE, 1, 2);
+        gate.wait_arrival();
+        let target_busy = r.isp.targets.lock();
+        gate.open();
+        let returned = std::thread::scope(|scope| {
+            let (done, returned) = std::sync::mpsc::channel();
+            let isp = &r.isp;
+            let reset = scope.spawn(move || {
+                if machine_reset { isp.reset(); }
+                else { isp.write(reg::BUS_CTRL, CTRL_SOFT_RESET as u32, 2); }
+                done.send(()).unwrap();
+            });
+            let returned = returned.recv_timeout(std::time::Duration::from_secs(2)).is_ok();
+            if returned {
+                assert_eq!(g32(&r.status(0), 4), 0, "the cancelled request posts no completion");
+                r.init_rings(8, 8);
+                for channel in 0..2 {
+                    r.put_entry(channel as u32, &channel_request(channel, 0x200 + channel as u32,
+                        &[0, 0, 0, 0, 0, 0], &[]));
+                }
+                // Queue new work while the target reset still cannot finish.
+                r.isp.write(reg::REQUEST_QUEUE, 2, 2);
+                assert_eq!(r.r(reg::RESPONSE_QUEUE), 0);
+            }
+            // Release even on failure so a regression cannot strand the test.
+            drop(target_busy);
+            reset.join().unwrap();
+            returned
+        });
+        r.isp.wait_idle();
+        assert!(returned, "reset must return before target I/O releases the channel lock");
+        assert_eq!(r.r(reg::RESPONSE_QUEUE), 2, "only the new requests complete");
+        for index in 0..2 {
+            assert_eq!(g32(&r.status(index), 4), 0x200 + index);
+            assert_eq!(g16(&r.status(index), 8) & 0xff, 2);
+            assert_eq!(r.status(index)[44], 0x29, "each bus delivers reset unit attention");
+        }
+        r.put_entry(2, &channel_request(0, 0x300, &cdb10(scsi_cmd::READ_10, 0, 1), &[(BUF + 4096, 512)]));
+        r.doorbell(3);
+        assert_eq!(g16(&r.status(2), 8) & 0xff, 0, "unit attention is consumed once");
+        assert_eq!(r.mem.get(BUF + 4096, 512), vec![0; 512], "cancelled write never reached the disk");
+    }
+}
+
 /// A soft reset during a store into host memory waits for that one store,
 /// then nothing more of the cancelled command reaches memory.
 #[test]
@@ -1099,6 +1153,27 @@ fn a_soft_reset_during_a_store_drops_the_completion() {
     assert_eq!(r.r(reg::BUS_STATUS), 0);
     assert!(!probe.level());
     assert_eq!(r.r(r.mb(4)), SIG4, "the reset state, untouched by the late answer");
+}
+
+#[test]
+fn isp12160_soft_reset_stops_later_payload_stores() {
+    let (r, gate) = gated_dual_rig("soft-reset-read", BUF);
+    r.mem.put(BUF + 4096, &[0x5a; 256]);
+    r.put_entry(0, &channel_request(0, 0x101, &cdb10(scsi_cmd::READ_10, 0, 1),
+        &[(BUF, 256), (BUF + 4096, 256)]));
+    r.isp.write(reg::REQUEST_QUEUE, 1, 2);
+    gate.wait_arrival();
+    let before = r.isp.gen.load(Ordering::Acquire);
+    std::thread::scope(|scope| {
+        let reset = scope.spawn(|| r.isp.write(reg::BUS_CTRL, CTRL_SOFT_RESET as u32, 2));
+        while r.isp.gen.load(Ordering::Acquire) == before { std::thread::yield_now(); }
+        gate.open();
+        reset.join().unwrap();
+    });
+    r.isp.wait_idle();
+    assert_eq!(r.mem.get(BUF + 4096, 256), vec![0x5a; 256], "no later payload store survives reset");
+    assert_eq!(g32(&r.status(0), 4), 0, "no cancelled completion survives reset");
+    assert_eq!(r.r(reg::BUS_STATUS), 0);
 }
 
 /// A response ring replaced while a command runs gets that command's
