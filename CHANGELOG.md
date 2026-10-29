@@ -51,6 +51,15 @@ hashes are given where a change is easiest to understand by reading the commit.
   cursor position fields are 12-bit signed; they were read as unsigned, so a
   cursor partly off the edge was drawn 4000 pixels away. (`src/dev/o2gfx.rs`)
 
+### Networking
+
+- The SEEQ, DaynaPort, MEC and IOC3 now get their NAT or PCAP backend from one
+  shared link, so a new backend is one implementation.
+- `[network] mode = "stream"` connects an Ethernet to a program speaking
+  QEMU's `-netdev stream` framing (not a DaynaPort).
+- `mode = "pcap"` is allowed on the O2 and the Octane, untested on a real
+  interface.
+
 ### Host efficiency on small machines
 
 - **Threads that have nothing to do now sleep in milliseconds, not
