@@ -51,6 +51,13 @@ hashes are given where a change is easiest to understand by reading the commit.
   cursor position fields are 12-bit signed; they were read as unsigned, so a
   cursor partly off the edge was drawn 4000 pixels away. (`src/dev/o2gfx.rs`)
 
+### SCSI
+
+- Every SCSI controller attaches its targets through one shared bus, and
+  disks report one emulated identity on every machine. The O2 and Octane now
+  say `IRIS EMUL DISK` and `IRIS EMUL CDROM` in INQUIRY; the Indy and Indigo2
+  keep their Sony CD-ROM.
+
 ### Host efficiency on small machines
 
 - **Threads that have nothing to do now sleep in milliseconds, not

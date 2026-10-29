@@ -70,16 +70,22 @@ reach the machine through one shared `MachineSlot` per machine, which the
 machine's `Drop` nulls, so a holder that outlives the machine (the monitor,
 after iris-gui's Stop) gets "machine is not running" instead of freed memory.
 
-SCSI storage follows the same pattern one level down. `src/scsi.rs` is the
-target (disk, CD-ROM, DaynaPort) any controller can hold, and
-`src/scsi_monitor.rs` implements the monitor's `scsi` and `cow` subcommands and
-the run-time disc changes once, over a controller's target table lent through
-its `ScsiTargets` trait. The WD33C93A (Indy, Indigo2) and the Adaptec 7880 (O2)
-lend theirs and keep only chip-specific subcommands (`regs`; the WD's `wdt`,
-`defer`, `debug`), and `DiscChanger` is implemented once for every
-`ScsiTargets`. Configuration is shared the same way: both machines attach
-their devices from the `[scsi.N]` tables, where the key is a slot
-(controller × 16 + id, see `config::scsi_slot`).
+SCSI storage follows the same pattern one level down. `ScsiTarget` is what
+varies on a bus (a `ScsiDevice` disk or CD-ROM, a `DaynaPort`): `request`,
+the lifecycle, and optional behaviour with do-nothing defaults (a
+copy-on-write layer, CHD sync, a disc changer), so callers ask for behaviour
+and never for a type. `ScsiBus` (`src/scsi/bus.rs`) is the mechanism: the
+id-to-target table with attach, request and overlay export and import, and
+the controller's INQUIRY identities. The WD33C93A (Indy, Indigo2), the Adaptec
+7880 (O2) and the ISP1040 (Octane) each own one and keep only their registers
+and DMA. `src/scsi_monitor.rs` implements the monitor's `scsi` and `cow`
+subcommands and the run-time disc changes once, over the bus a controller hands
+out through `ScsiTargets::scsi_bus`; chip-specific subcommands (`regs`; the
+WD's `wdt`, `defer`, `debug`) stay with the chip, and `DiscChanger` is
+implemented once for every `ScsiTargets`. Configuration is shared the same
+way: `scsi::attach_from_config` walks the `[scsi.N]` tables for every machine,
+where the key is a slot (controller × 16 + id, see `config::scsi_slot`), and
+the machine supplies only a route from controller number to bus.
 
 ## 2. Data path and endianness
 
