@@ -200,10 +200,15 @@ impl FuelBoard {
                 io.set_node_number(node);
             }
         }));
-        let p = pi[0].clone();
+        let p = pi.clone();
         md.on_error(Arc::new(move |kind| {
-            if matches!(kind, crate::dev::bedrock_md::MemoryError::Uncorrectable) {
-                p.set_memory_uncorrectable();
+            for pi in &p {
+                match kind {
+                    crate::dev::bedrock_md::MemoryError::Correctable => pi.set_pending(1, 61),
+                    crate::dev::bedrock_md::MemoryError::Uncorrectable => {
+                        pi.set_memory_uncorrectable();
+                    }
+                }
             }
         }));
         let irq = Arc::new(PendingIrq::default());
@@ -292,7 +297,7 @@ impl FuelBoard {
         phys.map(0, 1 << 33, md.memory_view(), "Bedrock cached memory");
         bus.map(3, 0, 1 << 33, md.uncached_view());
         // Hub-special low memory: its first 256 MiB is the node memory view.
-        bus.map(0, 0, 0x1000_0000, md.memory_view());
+        bus.map(0, 0, 0x1000_0000, md.uncached_view());
         let prom = Arc::new(
             flash
                 .array_view(0, crate::dev::bedrock_flash::PART_SIZE)
@@ -697,3 +702,4 @@ impl crate::irq::InterruptController for UartIrq {
         }
     }
 }
+

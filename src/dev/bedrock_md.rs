@@ -616,10 +616,10 @@ impl BusDevice for MdBus {
         if width != 1 && width != 2 {
             return BUS_ERR;
         }
-        let value = if matches!(self.view, View::Ecc) {
+        let value = if matches!(self.view, View::Ecc) && width == 2 {
             // The ECC carrier represents memory doublewords; source lanes
             // follow that memory address rather than the carrier address.
-            let memory_address = (a ^ if width == 1 { 7 } else { 6 }).wrapping_mul(8);
+            let memory_address = (a ^ 6).wrapping_mul(8);
             source >> (memory_address.wrapping_neg() & 63)
         } else {
             source
@@ -743,6 +743,19 @@ fn idle(at: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fuel_memory_regression_uncached_ecc_byte_stores_keep_low_source_byte() {
+        let md = configured();
+        let ecc = md.ecc_bus();
+        for carrier in 0..8 {
+            let source = 0x11223344556677a5;
+            assert_eq!(ecc.write_uncached_subword(carrier, 1, source), BUS_OK);
+            assert_eq!(ecc.read8(carrier).data, source as u8, "carrier {carrier}");
+        }
+        // The halfword protocol alone selects a different register lane.
+        assert_eq!(ecc.write_uncached_subword(4, 2, 0x123456789abcdef0), BUS_OK);
+        assert_eq!(ecc.read16(4).data, 0x1234);
+    }
     fn configured() -> Arc<BedrockMd> {
         let md = BedrockMd::new();
         assert_eq!(md.md_bus().write64(8, 0x33), BUS_OK);

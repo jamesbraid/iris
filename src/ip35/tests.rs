@@ -597,3 +597,48 @@ fn physical_cached_reset_rom_has_exact_payload_bounds_in_its_last_slot() {
     let empty = crate::ip34_machine::FuelBoard::new(&[], Arc::new(|| 0)).unwrap();
     assert_eq!(empty.cached_bus().read32(0x1fc00000).status, BUS_ERR);
 }
+
+mod memory_error_tests {
+    use crate::ip34_machine::FuelBoard;
+    use crate::traits::{BusDevice, BUS_ERR, BUS_OK};
+    use std::sync::Arc;
+
+    #[test]
+    fn fuel_memory_regression_correctable_errors_notify_both_interfaces() {
+        let board = FuelBoard::new(&[], Arc::new(|| 0)).unwrap();
+        let correctable = 1 << 61;
+        board.pi[0].write64(0xb0, correctable);
+        board.md.md_bus().write64(8, 0x33);
+        for directory in [false, true] {
+            if directory {
+                board.md.md_bus().write64(0x40000, 2);
+                board.md.directory_bus().write64(0, 1 << 16);
+                board.md.md_bus().write64(0x40000, 0);
+            } else {
+                board.md.ecc_bus().write8(7, 1);
+            }
+            assert_eq!(board.bus.read64(0).status, BUS_OK);
+            for pi in &board.pi {
+                assert_eq!(pi.read64(0xa0).data & correctable, correctable);
+            }
+            assert_eq!(board.irq.bits() & (1 << 11), 1 << 11);
+            for pi in &board.pi {
+                pi.write64(0x90, 64 + 61);
+                assert_eq!(pi.read64(0xa0).data & correctable, 0);
+            }
+            assert_eq!(board.irq.bits() & (1 << 11), 0);
+        }
+    }
+
+    #[test]
+    fn fuel_memory_regression_uncached_uce_fails_in_both_memory_spaces() {
+        let board = FuelBoard::new(&[], Arc::new(|| 0)).unwrap();
+        board.md.md_bus().write64(8, 0x33);
+        board.md.ecc_bus().write8(7, 3);
+        for selector in [0, 3] {
+            assert_eq!(board.bus.read64(selector << 57).status, BUS_ERR);
+        }
+        assert_eq!(board.cached_bus().read64(0).status, BUS_OK);
+        assert_eq!(board.md.dma_view().read64(0).status, BUS_OK);
+    }
+}
