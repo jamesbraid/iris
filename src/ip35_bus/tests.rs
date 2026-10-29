@@ -152,6 +152,7 @@ fn stock_prom_first_fault() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(2_000_000u64);
+    let seconds = std::env::var("IRIS_FUEL_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(60u64);
     let start = std::time::Instant::now();
     writeln!(
         report,
@@ -164,15 +165,7 @@ fn stock_prom_first_fault() {
         if recent.len() == 64 {
             recent.pop_front();
         }
-        recent.push_back(format!(
-            "{step} pc={:#018x} sp={:#018x} fpr0={:#018x} taghi={:#x} taglo={:#x} gpr2_15={:x?}",
-            cpu.core.pc,
-            cpu.core.gpr[29],
-            cpu.core.fpr[0],
-            cpu.core.cp0_taghi,
-            cpu.core.cp0_taglo,
-            &cpu.core.gpr[2..16]
-        ));
+        recent.push_back((step, cpu.core.pc, cpu.core.gpr[29], cpu.core.fpr[0], cpu.core.cp0_taghi, cpu.core.cp0_taglo));
         let cause = cpu.core.cp0_cause;
         cpu.core
             .hot
@@ -196,7 +189,7 @@ fn stock_prom_first_fault() {
             || (cpu.core.cp0_cause ^ cause) & 0x7c != 0
             || menu
             || step + 1 == limit
-            || start.elapsed().as_secs() >= 60
+            || start.elapsed().as_secs() >= seconds
         {
             writeln!(report,"stop step={step} status={status:#x} pc={:#018x} cause={:#x} epc={:#018x} badvaddr={:#018x} fpr0={:#018x} fault={:?} menu={menu}",cpu.core.pc,cpu.core.cp0_cause,cpu.core.cp0_epc,cpu.core.cp0_badvaddr,cpu.core.fpr[0],board.bus.first_fault()).unwrap();
             break;
@@ -204,8 +197,8 @@ fn stock_prom_first_fault() {
     }
     board.stop();
     serial.extend(console.drain_guest());
-    for item in recent {
-        writeln!(report, "PC {item}").unwrap();
+    for (step, pc, sp, fpr0, taghi, taglo) in recent {
+        writeln!(report, "PC {step} pc={pc:#018x} sp={sp:#018x} fpr0={fpr0:#018x} taghi={taghi:#x} taglo={taglo:#x}").unwrap();
     }
     for (i, value) in cpu.core.gpr.iter().enumerate() {
         writeln!(report, "GPR {i} {value:#018x}").unwrap();

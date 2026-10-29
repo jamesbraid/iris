@@ -76,10 +76,15 @@ pub(crate) fn map_device(
     );
 }
 
-#[derive(Default)]
 struct Trace {
+    enabled: bool,
     fault: Mutex<Option<String>>,
     recent: Mutex<VecDeque<String>>,
+}
+impl Default for Trace {
+    fn default() -> Self {
+        Self { enabled: std::env::var_os("IRIS_FUEL_TRACE").is_some(), fault: Mutex::new(None), recent: Mutex::new(VecDeque::new()) }
+    }
 }
 impl Trace {
     fn miss(&self, addr: u64, width: u64, write: bool, value: u64) {
@@ -93,6 +98,8 @@ impl Trace {
     }
 
     fn record(&self, addr: u64, width: u64, write: bool, value: u64, status: u32) {
+        if status == BUS_ERR { self.miss(addr, width, write, value); }
+        if !self.enabled { return; }
         let mut recent = self.recent.lock();
         if recent.len() == 128 {
             recent.pop_front();
@@ -102,9 +109,6 @@ impl Trace {
             if write { "w" } else { "r" },
             addr >> 57
         ));
-        if status == BUS_ERR {
-            self.miss(addr, width, write, value);
-        }
     }
 
     pub fn first_fault(&self) -> Option<String> {
