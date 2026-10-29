@@ -87,11 +87,15 @@ fn lock_registry_does_not_keep_the_chip_or_its_devices_alive() {
     let chip = XBridge::new(memory);
     let chip_ref = Arc::downgrade(&chip);
     let heads = chip.heads.each_ref().map(Arc::downgrade);
+    let pio = chip.heads.each_ref().map(|head| Arc::downgrade(&head.pio));
     let crossbar = Arc::downgrade(&chip.xbow);
-    let card = Card::new();
+    let card = Card::with_bar(crate::pci::Bar::Mem(0x1000), 0);
     let card_ref = Arc::downgrade(&card);
     chip.attach(15, 1, card.clone());
     chip.set_reset_output(Arc::new(move |_| card.config.reset()));
+    chip.head(15).write32(0x21010, 0x02000000);
+    chip.head(15).write32(0x21004, 2);
+    assert!(!chip.pci_head(15).pio_map.lock().runs.is_empty());
     chip.register_locks();
 
     assert!(heads.iter().all(|head| head.upgrade().is_some()));
@@ -101,6 +105,7 @@ fn lock_registry_does_not_keep_the_chip_or_its_devices_alive() {
     drop(chip);
     assert!(chip_ref.upgrade().is_none());
     assert!(heads.iter().all(|head| head.upgrade().is_none()));
+    assert!(pio.iter().all(|view| view.upgrade().is_none()));
     assert!(crossbar.upgrade().is_none());
     assert!(card_ref.upgrade().is_none());
     assert!(memory_ref.upgrade().is_none());
@@ -452,7 +457,7 @@ fn crossbar_errors_deliver_once_then_clear_the_original_destination() {
 
 struct Card {
     config: crate::pci::PciConfig,
-    bytes: Mutex<[u8; 32]>,
+    bytes: Mutex<Vec<u8>>,
     irq: Mutex<Option<IrqLine>>,
 }
 impl Card {
@@ -460,7 +465,11 @@ impl Card {
         Self::with_status_events(0)
     }
     fn with_status_events(mask: u16) -> Arc<Self> {
+        Self::with_bar(crate::pci::Bar::Mem(32), mask)
+    }
+    fn with_bar(bar: crate::pci::Bar, mask: u16) -> Arc<Self> {
         use crate::pci::{Bar, PciConfig};
+        let size = match bar { Bar::Mem(size) | Bar::Io(size) => size as usize, Bar::Unused => 0 };
         Arc::new(Self {
             config: PciConfig::new(
                 0x1234,
@@ -468,7 +477,7 @@ impl Card {
                 0,
                 0,
                 [
-                    Bar::Mem(32),
+                    bar,
                     Bar::Unused,
                     Bar::Unused,
                     Bar::Unused,
@@ -477,7 +486,7 @@ impl Card {
                 ],
                 1,
             ).with_status_w1c_policy(mask),
-            bytes: Mutex::new(std::array::from_fn(|i| i as u8)),
+            bytes: Mutex::new((0..size).map(|i| i as u8).collect()),
             irq: Mutex::new(None),
         })
     }
@@ -676,4 +685,150 @@ fn partial_configuration_writes_preserve_unwritten_status_events() {
     card.config.set_status_bits(0xc000);
     assert_eq!(f.write32(0x20004, 0x8000_0002), BUS_OK);
     assert_eq!(f.read32(0x20004).data, 0x4200_0002);
+}
+
+fn assert_pio_matches_slow(head: &XBridgeHead, card: &Card, address: u64) {
+    for size in [1, 2, 4, 8] {
+        for offset in (0..32).step_by(size) {
+            let at = address + offset as u64;
+            assert_eq!(head.access(at, size, None), head.slow_pio(at, size, None),
+                "read {at:#x} width {size}");
+            let before = card.bytes.lock().clone();
+            head.access(at, size, Some(0x0123456789abcdef));
+            let fast = card.bytes.lock().clone();
+            *card.bytes.lock() = before;
+            head.slow_pio(at, size, Some(0x0123456789abcdef));
+            assert_eq!(*card.bytes.lock(), fast, "write {at:#x} width {size}");
+        }
+    }
+}
+
+#[test]
+fn native_bar_pages_match_device_windows_and_both_alias_widths() {
+    let (chip, _) = chip();
+    let head = chip.pci_head(15);
+    let card = Card::with_bar(crate::pci::Bar::Mem(0x2000), 0);
+    // Device window 0 reaches a function owned by slot 3.
+    chip.attach(15, 3, card.clone());
+    head.write32(0x23010, 0x02000000);
+    head.write32(0x23004, 2);
+    for wide in [false, true] {
+        chip.set_dma_64bit(15, 3, wide);
+        for stream in [false, true] {
+            head.write32(0x204, 0x1020 | if wide { 1 << 22 } else { 0 }
+                | if stream { 1 << 13 } else { 0 });
+            assert!(head.pio_map.lock().runs.contains(&(0x200000, 0x202000)));
+            assert_pio_matches_slow(head, &card, 0x200000);
+            for swap in [false, true] {
+                head.write32(0x24, if swap { 1 << 22 } else { 0 });
+                assert_pio_matches_slow(head, &card, 0x42000000);
+                assert_pio_matches_slow(head, &card, 0x82000000);
+            }
+        }
+    }
+}
+
+#[test]
+fn native_io_bar_pages_match_window_and_alias_placement() {
+    let (chip, _) = chip();
+    let head = chip.pci_head(15);
+    let card = Card::with_bar(crate::pci::Bar::Io(0x1000), 0);
+    chip.attach(15, 0, card.clone());
+    head.write32(0x20010, 0x02000001);
+    head.write32(0x20004, 1);
+    for wide in [false, true] {
+        for stream in [false, true] {
+            head.write32(0x204, 0x20 | if wide { 1 << 22 } else { 0 }
+                | if stream { 1 << 13 } else { 0 });
+            assert_pio_matches_slow(head, &card, 0x200000);
+            for swap in [false, true] {
+                head.write32(0x24, if swap { 1 << 23 } else { 0 });
+                assert_pio_matches_slow(head, &card, 0x102000000);
+            }
+        }
+    }
+    assert!(head.pio_map.lock().runs.iter().any(|&(start, _)| start == 0x102000000));
+}
+
+#[test]
+fn bar_moves_disable_and_reset_revoke_native_pages_without_new_endpoints() {
+    let (chip, _) = chip();
+    let head = chip.pci_head(15);
+    let card = Card::with_bar(crate::pci::Bar::Mem(0x1000), 0);
+    chip.attach(15, 0, card);
+    head.write32(0x20010, 0x02000000);
+    head.write32(0x20004, 2);
+    head.write32(0x204, 0x1020);
+    let original: Vec<_> = head.pio_map.lock().entries.iter()
+        .map(|(key, entry)| (*key, entry.device.clone())).collect();
+    let stale = head.pio_map.lock().entries[&(8, 0, 0)].device.clone();
+    head.write32(0x204, 0x1022);
+    assert_eq!(head.read32(0x200000).data, u32::MAX);
+    head.write32(0x204, 0x1020);
+    assert_eq!(head.read32(0x200000).data, 0x03020100);
+    for i in 0..128 {
+        let base = 0x02000000 + i * 0x1000;
+        head.write32(0x20010, base);
+        assert_eq!(head.read32(0x40000000 + base as u64).data, 0x03020100);
+        if i != 0 {
+            assert_eq!(head.read32(0x40000000 + base as u64 - 0x1000).data, u32::MAX);
+        }
+    }
+    assert_eq!(stale.read32(0x42000000).data, u32::MAX);
+    let entries = head.pio_map.lock();
+    assert_eq!(entries.entries.len(), original.len());
+    for (key, device) in &original { assert!(Arc::ptr_eq(device, &entries.entries[key].device)); }
+    drop(entries);
+    head.write8(0x20007, 0);
+    assert!(head.pio_map.lock().runs.is_empty());
+    assert_eq!(head.read32(0x4207f000).data, u32::MAX);
+    head.write8(0x20007, 2);
+    assert!(!head.pio_map.lock().runs.is_empty());
+    chip.crossbar().write32(0x2f4, 1);
+    assert!(head.pio_map.lock().runs.is_empty());
+    assert_eq!(head.read32(0x4207f000).data, u32::MAX);
+}
+
+#[test]
+fn partial_and_overlapping_bar_pages_keep_the_slow_decoder() {
+    let (chip, _) = chip();
+    let head = chip.pci_head(15);
+    let small = Card::new();
+    let large = Card::with_bar(crate::pci::Bar::Mem(0x2000), 0);
+    small.bytes.lock().fill(0xa5);
+    chip.attach(15, 0, small);
+    chip.attach(15, 1, large.clone());
+    for slot in 0..2 {
+        head.write32(0x20010 + slot * 0x1000, 0x02000000);
+        head.write32(0x20004 + slot * 0x1000, 2);
+    }
+    head.write32(0x204, 0x1020);
+    assert!(head.pio_map.lock().runs.is_empty());
+    assert_eq!(head.read32(0x42000000).data, 0xa5a5a5a5);
+    assert_eq!(head.read32(0x42000020).data, 0x23222120);
+    head.write32(0x20004, 0);
+    assert!(!head.pio_map.lock().runs.is_empty());
+    assert_pio_matches_slow(head, &large, 0x42000000);
+    head.write32(0x21004, 0);
+    head.write32(0x20004, 2);
+    assert!(head.pio_map.lock().runs.is_empty());
+    assert_eq!(head.read32(0x42000000).data, 0xa5a5a5a5);
+}
+
+#[test]
+fn replacing_a_host_function_revokes_its_native_pages() {
+    let (chip, _) = chip();
+    let head = chip.pci_head(15);
+    let old = Card::with_bar(crate::pci::Bar::Mem(0x1000), 0);
+    chip.attach(15, 0, old);
+    head.write32(0x20010, 0x02000000);
+    head.write32(0x20004, 2);
+    assert_eq!(head.read32(0x42000000).data, 0x03020100);
+    let replacement = Card::with_bar(crate::pci::Bar::Mem(0x1000), 0);
+    replacement.bytes.lock().fill(0x5a);
+    chip.attach(15, 0, replacement);
+    assert_eq!(head.read32(0x42000000).data, u32::MAX);
+    head.write32(0x20010, 0x02000000);
+    head.write32(0x20004, 2);
+    assert_eq!(head.read32(0x42000000).data, 0x5a5a5a5a);
 }

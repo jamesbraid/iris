@@ -14,11 +14,12 @@
 
 use crate::dev::w1;
 use crate::irq::{InterruptController, IrqLine};
-use crate::pci::{PciBusDevice, PciDma, PciDmaStatus, Space};
-use crate::physical::{read_bytes, write_bytes};
+use crate::pci::{bar_runs, PciBar, PciBusDevice, PciDma, PciDmaStatus, PciLanes, Space};
+use crate::physical::{read_bytes, write_bytes, Physical};
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, Resettable, BUS_OK};
 use parking_lot::{Mutex, RwLock};
-use std::sync::{Arc, Weak};
+use std::collections::HashMap;
+use std::sync::{atomic::{AtomicU64, Ordering}, Arc, Weak};
 
 pub const HOST_WIDGET: u8 = 10;
 pub const HEAD_E: u8 = 14;
@@ -119,6 +120,7 @@ impl XBridge {
                 ("state", (|h: &XBridgeHead| h.st.is_locked()) as fn(&XBridgeHead) -> bool),
                 ("irq_order", |h| h.order.is_locked()),
                 ("microlan", |h| h.microlan.is_locked()),
+                ("pio_map", |h| h.pio_map.is_locked()),
             ] {
                 let h = Arc::downgrade(head);
                 let name = format!("xbridge::head{:x}::{what}", head.widget);
@@ -199,8 +201,12 @@ impl XBridge {
     }
     pub fn set_dma_64bit(&self, widget: u8, slot: u8, wide: bool) {
         assert!(slot < 8);
-        let mut st = self.pci_head(widget).st.lock();
-        st.dma_64bit = (st.dma_64bit & !(1 << slot)) | ((wide as u8) << slot);
+        let head = self.pci_head(widget);
+        {
+            let mut st = head.st.lock();
+            st.dma_64bit = (st.dma_64bit & !(1 << slot)) | ((wide as u8) << slot);
+        }
+        head.publish_bars();
     }
     pub fn set_wide_slot_mask(&self, widget: u8, mask: u8) {
         self.pci_head(widget).st.lock().wide_slots = mask;
@@ -320,6 +326,77 @@ struct XBridgeHead {
     slots: RwLock<[Option<Arc<dyn PciBusDevice>>; 8]>,
     pci_outputs: RwLock<[Option<IrqLine>; 32]>,
     microlan: Mutex<Option<w1::Bus>>,
+    pio: Arc<Physical>,
+    pio_map: Mutex<PioMap>,
+}
+
+#[derive(Default)]
+struct PioMap {
+    entries: HashMap<(u8, usize, usize), MappedBar>,
+    runs: Vec<(u64, u64)>,
+}
+
+struct MappedBar {
+    function: Arc<dyn PciBusDevice>,
+    lanes: Arc<Lanes>,
+    device: Arc<dyn BusDevice>,
+}
+
+struct PioFallback(Weak<XBridgeHead>);
+
+struct Lanes {
+    // BAR-relative CPU base, data-phase width and stream/swap policy.
+    policy: AtomicU64,
+    alias: bool,
+    size: u64,
+}
+
+impl Lanes {
+    fn access(&self, f: &dyn PciBusDevice, bar: usize, off: u32, size: usize, value: Option<u64>) -> u64 {
+        let policy = self.policy.load(Ordering::Acquire);
+        self.cycle(f, bar, off.wrapping_sub(policy as u32), size, value, policy)
+    }
+
+    fn cycle(&self, f: &dyn PciBusDevice, bar: usize, off: u32, size: usize, value: Option<u64>, policy: u64) -> u64 {
+        let width = if policy & (1 << 32) != 0 { 8 } else { 4 };
+        if size > width {
+            let hi = self.cycle(f, bar, off, 4, value.map(|v| v >> 32), policy);
+            let lo = self.cycle(f, bar, off + 4, 4, value.map(|v| v as u32 as u64), policy);
+            return (hi << 32) | lo;
+        }
+        let selected = policy & (1 << 33) != 0;
+        let reverse = if self.alias { !selected } else { selected };
+        let placed = if selected { off } else { off ^ (width - size) as u32 };
+        // A reader may have obtained the old table entry before relocation.
+        // Its new policy must not send the stale address outside the BAR.
+        if placed as u64 + size as u64 > self.size {
+            return if value.is_none() { u64::MAX >> (64 - size * 8) } else { 0 };
+        }
+        let mut bytes = [0; 8];
+        if let Some(v) = value {
+            for (i, b) in bytes[..size].iter_mut().enumerate() {
+                let shift = if self.alias { (size - 1 - i) * 8 } else { i * 8 };
+                *b = (v >> shift) as u8;
+            }
+            if reverse { bytes[..size].reverse(); }
+        }
+        XBridgeHead::bar_cycle(f, bar, placed, &mut bytes[..size], value.is_some());
+        if reverse && value.is_none() { bytes[..size].reverse(); }
+        if self.alias {
+            bytes[..size].iter().fold(0, |v, &b| (v << 8) | b as u64)
+        } else {
+            bytes[..size].iter().enumerate().fold(0, |v, (i, &b)| v | ((b as u64) << (i * 8)))
+        }
+    }
+}
+
+impl PciLanes for Lanes {
+    fn read(&self, f: &dyn PciBusDevice, bar: usize, off: u32, size: usize) -> u64 {
+        self.access(f, bar, off, size, None)
+    }
+    fn write(&self, f: &dyn PciBusDevice, bar: usize, off: u32, size: usize, value: u64) {
+        self.access(f, bar, off, size, Some(value));
+    }
 }
 struct Pin {
     head: Weak<XBridgeHead>,
@@ -377,15 +454,21 @@ impl XBridgeHead {
             wide_slots: 0,
         };
         st.reset(speed);
-        Arc::new(Self {
-            widget,
-            speed,
-            st: Mutex::new(st),
-            order: Mutex::new(()),
-            routes,
-            slots: RwLock::new(std::array::from_fn(|_| None)),
-            pci_outputs: RwLock::new(std::array::from_fn(|_| None)),
-            microlan: Mutex::new(None),
+        Arc::new_cyclic(|weak| {
+            let pio = Physical::new(Vec::new());
+            pio.set_default(Arc::new(PioFallback(weak.clone())), "xbridge PCI decode");
+            Self {
+                widget,
+                speed,
+                st: Mutex::new(st),
+                order: Mutex::new(()),
+                routes,
+                slots: RwLock::new(std::array::from_fn(|_| None)),
+                pci_outputs: RwLock::new(std::array::from_fn(|_| None)),
+                microlan: Mutex::new(None),
+                pio,
+                pio_map: Mutex::new(PioMap::default()),
+            }
         })
     }
     fn attach(self: &Arc<Self>, slot: u8, device: Arc<dyn PciBusDevice>) {
@@ -405,6 +488,7 @@ impl XBridgeHead {
                 slot as u32 * 4 + pin as u32 - 1,
             ));
         }
+        self.publish_bars();
     }
     fn pin(&self, pin: usize, level: bool) {
         if pin >= 8 {
@@ -441,6 +525,7 @@ impl XBridgeHead {
         for d in devices.into_iter().flatten() {
             d.config().reset();
         }
+        self.publish_bars();
     }
     fn invalid(&self, address: u64) {
         let _order = self.order.lock();
@@ -503,6 +588,7 @@ impl XBridgeHead {
                     (value as u32 & mask) << shift,
                     mask << shift,
                 );
+                self.publish_bars();
                 0
             } else {
                 ((dev.config().read(reg / 4) >> shift) & mask) as u64
@@ -596,6 +682,94 @@ impl XBridgeHead {
         for p in packets {
             self.routes.interrupt(p);
         }
+        drop(_order);
+        if off == 0x20 || (0x200..=0x238).contains(&off) {
+            self.publish_bars();
+        }
+    }
+
+    fn publish_bars(&self) {
+        // Serialize remaps, but never hold state/attachment locks while mapping.
+        // Physical retains entry identities; guest BAR moves reuse this finite set.
+        let mut map = self.pio_map.lock();
+        let (regs, control, wide) = {
+            let st = self.st.lock();
+            let regs: [u32; 8] = std::array::from_fn(|i| st.r(0x200 + i * 8));
+            (regs, st.r(0x20), st.dma_64bit)
+        };
+        let funcs: Vec<_> = self.slots.read().iter().enumerate()
+            .filter_map(|(slot, f)| Some((slot, f.clone()?))).collect();
+        let windows: Vec<_> = funcs.iter().flat_map(|(slot, f)| {
+            f.config().windows().into_iter().map(move |(space, bar, base, size)| (*slot, bar, space, base as u64, base as u64 + size as u64))
+        }).collect();
+        let fallback = self.pio.default_entry();
+        for (start, end) in map.runs.drain(..) {
+            self.pio.fill_slots(start >> crate::ppmem::devmap::SLOT_SHIFT,
+                (end - start) >> crate::ppmem::devmap::SLOT_SHIFT, fallback);
+        }
+        // Host replacement changes an endpoint's function. Guest configuration
+        // writes only update policy and never allocate another table endpoint.
+        map.entries.retain(|&(_, slot, _), entry| {
+            funcs.iter().any(|(s, f)| *s == slot && Arc::ptr_eq(f, &entry.function))
+        });
+        for kind in 0u8..11 {
+            let (cpu, len, space, pci, width, selected) = if kind < 8 {
+                let slot = kind as usize;
+                let dev = regs[slot];
+                let memory = dev & (1 << 12) != 0;
+                let mut base = dev & if memory { 0x3ff } else { 0xfff };
+                if slot < 2 { base &= !1; }
+                let (cpu, len) = if slot < 2 {
+                    (0x200000 + slot as u64 * 0x200000, 0x200000)
+                } else {
+                    (0x600000 + (slot as u64 - 2) * 0x100000, 0x100000)
+                };
+                (cpu, len, if memory { Space::Mem } else { Space::Io }, base << 20,
+                    if dev & (1 << 22) != 0 { 8 } else { 4 }, dev & (1 << 13) != 0)
+            } else {
+                let (cpu, len, space, width) = match kind {
+                    8 => (0x40000000, 0x40000000, Space::Mem, 4),
+                    9 => (0x80000000, 0x40000000, Space::Mem, 8),
+                    _ => (0x100000000, 0x100000000, Space::Io, 4),
+                };
+                (cpu, len, space, 0, width, control & (1 << if space == Space::Mem { 22 } else { 23 }) != 0)
+            };
+            let runs = bar_runs(&funcs, space, cpu, pci, len, |b| {
+                let width = if kind == 9 && wide & (1 << b.slot) == 0 { 4 } else { width };
+                let policy = b.cpu_base as u32 as u64 | ((width == 8) as u64) << 32 | (selected as u64) << 33;
+                let entry = map.entries.entry((kind, b.slot, b.bar)).or_insert_with(|| {
+                    let size = windows.iter().find(|&&(slot, bar, _, _, _)| slot == b.slot && bar == b.bar)
+                        .map(|&(_, _, _, lo, hi)| hi - lo).unwrap();
+                    let lanes = Arc::new(Lanes { policy: AtomicU64::new(policy), alias: kind >= 8, size });
+                    let device = Arc::new(PciBar::new(lanes.clone(), b.dev.clone(), b.bar, u32::MAX as u64, 0));
+                    MappedBar { function: b.dev.clone(), lanes, device }
+                });
+                entry.lanes.policy.store(policy, Ordering::Release);
+                entry.device.clone()
+            });
+            for run in runs {
+                let lo = run.start - cpu + pci as u64;
+                let hi = run.end - cpu + pci as u64;
+                // bar_runs rounds to whole pages. A subpage BAR can still
+                // overlap one of those pages, so retain the slow decoder there.
+                let claims = windows.iter().filter(|&&(_, _, s, l, h)| s == space && l < hi && lo < h).count();
+                if claims != 1 { continue; }
+                self.pio.map(run.start, run.end, run.dev, "xbridge PCI BAR");
+                map.runs.push((run.start, run.end));
+            }
+        }
+    }
+
+    fn bar_cycle(dev: &dyn PciBusDevice, bar: usize, off: u32, bytes: &mut [u8], write: bool) {
+        for (i, part) in bytes.chunks_mut(4).enumerate() {
+            if write {
+                let v = part.iter().enumerate().fold(0, |v, (j, &b)| v | ((b as u32) << (j * 8)));
+                dev.bar_write(bar, off + i as u32 * 4, v, part.len());
+            } else {
+                let v = dev.bar_read(bar, off + i as u32 * 4, part.len());
+                for (j, b) in part.iter_mut().enumerate() { *b = (v >> (j * 8)) as u8; }
+            }
+        }
     }
     /// PCI functions see little-endian values; bytes here remain in address order.
     fn pci_cycle(&self, space: Space, address: u32, bytes: &mut [u8], write: bool) -> bool {
@@ -616,20 +790,7 @@ impl XBridgeHead {
             }
             return false;
         };
-        for (i, part) in bytes.chunks_mut(4).enumerate() {
-            if write {
-                let v = part
-                    .iter()
-                    .enumerate()
-                    .fold(0, |v, (j, &b)| v | ((b as u32) << (j * 8)));
-                dev.bar_write(bar, off + i as u32 * 4, v, part.len());
-            } else {
-                let v = dev.bar_read(bar, off + i as u32 * 4, part.len());
-                for (j, b) in part.iter_mut().enumerate() {
-                    *b = (v >> (j * 8)) as u8;
-                }
-            }
-        }
+        Self::bar_cycle(&*dev, bar, off, bytes, write);
         true
     }
     fn window_cycle(&self, slot: usize, off: u32, bytes: &mut [u8], write: bool) {
@@ -715,12 +876,9 @@ impl XBridgeHead {
             bytes.reverse();
         }
     }
-    fn access(&self, address: u64, size: usize, value: Option<u64>) -> u64 {
+    fn slow_pio(&self, address: u64, size: usize, value: Option<u64>) -> u64 {
         let write = value.is_some();
         let mut bytes = [0u8; 8];
-        if (0x20000..0x29000).contains(&address) {
-            return self.config(address, size, value);
-        }
         if (0x200000..0xc00000).contains(&address) {
             let (slot, off) = if address < 0x600000 {
                 (((address - 0x200000) >> 21) as usize, address & 0x1fffff)
@@ -755,6 +913,38 @@ impl XBridgeHead {
             }
             self.alias_cycle(space, off as u32, width, &mut bytes[..size], write);
             return bytes[..size].iter().fold(0, |v, &b| (v << 8) | b as u64);
+        }
+        0
+    }
+    fn access(&self, address: u64, size: usize, value: Option<u64>) -> u64 {
+        let write = value.is_some();
+        if (0x20000..0x29000).contains(&address) {
+            return self.config(address, size, value);
+        }
+        if (0x200000..0xc00000).contains(&address)
+            || (0x40000000..0xc0000000).contains(&address)
+            || (0x100000000..0x200000000).contains(&address)
+        {
+            // An unaligned access can straddle a BAR's final mapped page.
+            if address & 0xfff > 0x1000 - size as u64 {
+                return self.slow_pio(address, size, value);
+            }
+            return if let Some(v) = value {
+                match size {
+                    1 => { self.pio.write8(address, v as u8); }
+                    2 => { self.pio.write16(address, v as u16); }
+                    4 => { self.pio.write32(address, v as u32); }
+                    _ => { self.pio.write64(address, v); }
+                }
+                0
+            } else {
+                match size {
+                    1 => self.pio.read8(address).data as u64,
+                    2 => self.pio.read16(address).data as u64,
+                    4 => self.pio.read32(address).data as u64,
+                    _ => self.pio.read64(address).data,
+                }
+            };
         }
         if size == 8 && address & 7 == 0 && (0x10000..0x12000).contains(&address) && write {
             self.st.lock().ate[((address - 0x10000) / 8) as usize] =
@@ -1278,6 +1468,7 @@ macro_rules! bus_view {
     };
 }
 bus_view!(XBridgeHead, |s: &XBridgeHead, a, n, v| s.access(a, n, v));
+bus_view!(PioFallback, |s: &PioFallback, a, n, v| s.0.upgrade().map_or(0, |h| h.slow_pio(a, n, v)));
 bus_view!(Crossbar, |s: &Crossbar, a, n, v| s.access(
     HOST_WIDGET,
     a,
