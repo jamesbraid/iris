@@ -985,7 +985,7 @@ impl O2Display {
                 let take_shot = self.screenshot_pending.swap(false, Ordering::Relaxed);
                 let stats = crate::disp::BarStats {
                     now: start,
-                    hb: 0,
+                    hb: self.bus.mace.id.heartbeat.fetch_and(crate::dev::ng1::rex3::Rex3::HB_PERSISTENT, Ordering::Relaxed),
                     cycles: self.cycles.get(),
                     fasttick: self.ticks.load(Ordering::Relaxed),
                     decoded_delta: 0,
