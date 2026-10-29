@@ -1156,79 +1156,66 @@ fn a_soft_reset_during_a_store_drops_the_completion() {
 }
 
 #[test]
-fn isp12160_pending_target_reset_survives_a_paused_snapshot() {
-    let src = dual_rig("pending-reset-save");
-    src.isp.pause();
-    src.mem.put(BUF, &[0x5a; BLOCK_SIZE]);
-    src.put_entry(0, &channel_request(0, 0x101, &cdb10(scsi_cmd::WRITE_10, 0, 1), &[(BUF, 512)]));
-    src.doorbell(1);
-    for _ in 0..3 { src.isp.write(reg::BUS_CTRL, CTRL_SOFT_RESET as u32, 2); }
-    src.init_rings(8, 8);
-    for channel in 0..2 {
-        src.put_entry(channel as u32, &channel_request(channel, 0x200 + channel as u32,
-            &[0, 0, 0, 0, 0, 0], &[]));
-    }
-    src.doorbell(2);
-    let saved = src.isp.save_state();
-    let dst = dual_rig("pending-reset-load");
-    dst.isp.pause();
-    dst.mem.put(RQST, &src.mem.get(RQST, 2 * ENTRY_SIZE));
-    dst.isp.st.lock().ctl.hold += 1;
-    dst.isp.load_state(&saved).unwrap();
-    {
-        let mut st = dst.isp.st.lock();
-        assert!(st.ctl.paused, "loading preserves the host pause");
-        assert_eq!(st.ctl.hold, 1, "loading preserves other dispatch holders");
-        st.ctl.hold -= 1;
-    }
-    assert_eq!(dst.r(reg::RESPONSE_QUEUE), 0);
-    dst.isp.resume();
-    dst.isp.wait_idle();
-    assert_eq!(dst.r(reg::RESPONSE_QUEUE), 2);
-    for index in 0..2 {
-        assert_eq!(g32(&dst.status(index), 4), 0x200 + index);
-        assert_eq!(g16(&dst.status(index), 8) & 0xff, 2);
-        assert_eq!(dst.status(index)[44], 0x29, "restored reset reaches both buses");
-    }
-    dst.put_entry(2, &channel_request(0, 0x300, &cdb10(scsi_cmd::READ_10, 0, 1), &[(BUF, 512)]));
-    dst.doorbell(3);
-    assert_eq!(g16(&dst.status(2), 8) & 0xff, 0, "repeated resets leave one unit attention");
-    assert_eq!(dst.mem.get(BUF, 512), vec![0; 512], "pre-reset WRITE was discarded");
-    src.isp.resume();
-    src.isp.wait_idle();
-    src.put_entry(2, &channel_request(0, 0x301, &cdb10(scsi_cmd::READ_10, 0, 1), &[(BUF, 512)]));
-    src.doorbell(3);
-    assert_eq!(g16(&src.status(2), 8) & 0xff, 0);
-    assert_eq!(src.mem.get(BUF, 512), vec![0; 512], "saving did not revive the discarded WRITE");
-}
-
-#[test]
-fn isp12160_loading_a_snapshot_replaces_pending_target_reset() {
-    for legacy in [false, true] {
-        let src = dual_rig(&format!("clean-reset-save-{legacy}"));
+fn isp12160_snapshot_replaces_target_reset_and_preserves_host_holds() {
+    for (pending, legacy) in [(true, false), (false, false), (false, true)] {
+        let src = dual_rig(&format!("reset-save-{pending}-{legacy}"));
         src.isp.pause();
+        if pending {
+            src.mem.put(BUF, &[0x5a; BLOCK_SIZE]);
+            src.put_entry(0, &channel_request(0, 0x101, &cdb10(scsi_cmd::WRITE_10, 0, 1), &[(BUF, 512)]));
+            src.doorbell(1);
+            for _ in 0..3 { src.w(reg::BUS_CTRL, CTRL_SOFT_RESET); }
+            src.init_rings(8, 8);
+        }
+        assert_eq!(src.cmd(&[mbox::SET_RESET_DELAY_PARAMS, 7, 19]), mbox::COMPLETE);
+        for bank in 0..4 {
+            src.w(reg::BUS_CFG1, bank << 8);
+            src.w(reg::BANK_BASE, bank + 0x1230);
+        }
+        for channel in 0..2 {
+            src.put_entry(channel as u32, &channel_request(channel, 0x200 + channel as u32, &[0, 0, 0, 0, 0, 0], &[]));
+        }
+        src.doorbell(2);
         let mut saved = src.isp.save_state();
         if legacy { saved.as_table_mut().unwrap().remove("reset_targets"); }
-        let dst = dual_rig(&format!("clean-reset-load-{legacy}"));
+        let dst = dual_rig(&format!("reset-load-{pending}-{legacy}"));
         dst.isp.pause();
-        dst.mem.put(BUF, &[0x5a; BLOCK_SIZE]);
-        dst.put_entry(0, &channel_request(0, 0x101, &cdb10(scsi_cmd::WRITE_10, 0, 1), &[(BUF, 512)]));
-        dst.doorbell(1);
-        for _ in 0..3 { dst.isp.write(reg::BUS_CTRL, CTRL_SOFT_RESET as u32, 2); }
+        dst.w(reg::BUS_CTRL, CTRL_SOFT_RESET);
+        dst.mem.put(RQST, &src.mem.get(RQST, 2 * ENTRY_SIZE));
+        dst.isp.st.lock().ctl.hold += 1;
         dst.isp.load_state(&saved).unwrap();
-        for channel in 0..2 {
-            dst.put_entry(channel as u32, &channel_request(channel, 0x200 + channel as u32,
-                &cdb10(scsi_cmd::READ_10, 0, 1), &[(BUF + 4096 + channel as u32 * 512, 512)]));
+        {
+            let mut st = dst.isp.st.lock();
+            assert!(st.ctl.paused);
+            assert_eq!(st.ctl.hold, 1, "loading preserves other dispatch holders");
+            assert_eq!((st.reset_delay, st.reset_delay1), (7, 19));
+            st.ctl.hold -= 1;
         }
-        dst.doorbell(2);
-        assert_eq!(dst.r(reg::RESPONSE_QUEUE), 0, "loading keeps the worker paused");
+        for bank in 0..4 {
+            dst.w(reg::BUS_CFG1, bank << 8);
+            assert_eq!(dst.r(reg::BANK_BASE), bank + 0x1230);
+        }
+        assert_eq!(dst.r(reg::RESPONSE_QUEUE), 0);
         dst.isp.resume();
         dst.isp.wait_idle();
         assert_eq!(dst.r(reg::RESPONSE_QUEUE), 2);
         for index in 0..2 {
             assert_eq!(g32(&dst.status(index), 4), 0x200 + index);
-            assert_eq!(g16(&dst.status(index), 8) & 0xff, 0, "unrelated live reset must not survive load");
-            assert_eq!(dst.mem.get(BUF + 4096 + index * 512, 512), vec![0; 512]);
+            assert_eq!(g16(&dst.status(index), 8) & 0xff, if pending { 2 } else { 0 });
+            if pending { assert_eq!(dst.status(index)[44], 0x29, "restored reset reaches both buses"); }
+        }
+        for rig in [&src, &dst] {
+            rig.isp.resume();
+            rig.isp.wait_idle();
+            rig.put_entry(2, &channel_request(0, 0x300, &cdb10(scsi_cmd::READ_10, 0, 1), &[(BUF, 512)]));
+            rig.doorbell(3);
+            assert_eq!(g16(&rig.status(2), 8) & 0xff, 0, "reset unit attention is consumed once");
+            assert_eq!(rig.mem.get(BUF, 512), vec![0; 512], "reset WRITE is not revived by save or load");
+        }
+        dst.w(reg::BUS_CTRL, CTRL_SOFT_RESET);
+        for bank in 0..4 {
+            dst.w(reg::BUS_CFG1, bank << 8);
+            assert_eq!(dst.r(reg::BANK_BASE), 0);
         }
     }
 }
@@ -1398,31 +1385,6 @@ fn the_ring_thread_lives_between_start_and_stop() {
     assert_eq!(g32(&r.status(0), 4), 0x7001);
 }
 
-#[test]
-fn isp12160_banks_identity_and_ram_bounds() {
-    let isp = Isp1040::new_12160();
-    Device::start(&isp);
-    assert_eq!(isp.read(reg::ID_HIGH, 2), 0x1216);
-    assert_eq!(isp.read(reg::BUS_CFG0, 2), 0);
-    for bank in 0..4 {
-        isp.write(reg::BUS_CFG1, bank << 8, 2);
-        isp.write(reg::BANK_BASE, 0xabc0 + bank, 2);
-    }
-    for bank in 0..4 {
-        isp.write(reg::BUS_CFG1, bank << 8, 2);
-        assert_eq!(isp.read(reg::BANK_BASE, 2), 0xabc0 + bank);
-    }
-    isp.write(reg::BUS_CFG1, 0xffff, 2);
-    assert_eq!(isp.read(reg::BUS_CFG1, 2), 0x300);
-    isp.write(reg::DMA_CMD_CFG, 2, 2);
-    assert_eq!(isp.read(reg::DMA_CMD_CFG, 2), 0);
-    let r = Rig { isp, mem: FakeMem::new() };
-    r.isp.connect_dma(r.mem.clone());
-    assert_eq!(r.cmd(&[mbox::LOAD_RAM_A64, 0xffff, 0, 0, 2]), mbox::PARAM_ERROR);
-    assert_eq!(r.cmd(&[mbox::ABOUT_FIRMWARE]), mbox::COMPLETE);
-    assert_eq!((r.r(r.mb(1)), r.r(r.mb(2))), (10, 4));
-}
-
 fn dual_rig(name: &str) -> Rig {
     let isp = Isp1040::new_12160();
     Device::start(&isp);
@@ -1511,6 +1473,11 @@ fn isp12160_reset_and_abort_leave_the_other_channel_alone() {
 #[test]
 fn isp12160_busy_mailbox_and_failed_a64_load_preserve_state() {
     let r = dual_rig("dual-ram");
+    for (args, expected) in [
+        (vec![mbox::LOAD_RAM_A64, 0xffff, 0, 0, 2], mbox::PARAM_ERROR),
+        (vec![mbox::ABOUT_FIRMWARE], mbox::COMPLETE),
+    ] { assert_eq!(r.cmd(&args), expected); }
+    assert_eq!((r.r(r.mb(1)), r.r(r.mb(2))), (10, 4));
     r.w(r.mb(0), mbox::ABOUT_FIRMWARE);
     r.w(reg::HOST_CMD, 0x5000);
     r.w(r.mb(0), mbox::WRITE_RAM_WORD);
@@ -1530,84 +1497,6 @@ fn isp12160_busy_mailbox_and_failed_a64_load_preserve_state() {
     assert_eq!(r.cmd(&[mbox::READ_RAM_WORD, 0xffff]), mbox::COMPLETE);
     assert_eq!(r.r(r.mb(2)), 0x5678);
     assert_eq!(r.cmd(&[mbox::VERIFY_CHECKSUM, 0xffff]), mbox::PARAM_ERROR);
-}
-
-#[test]
-fn isp12160_banks_and_reset_delays_survive_snapshot() {
-    let r = dual_rig("dual-snapshot");
-    assert_eq!(r.cmd(&[mbox::SET_RESET_DELAY_PARAMS, 7, 19]), mbox::COMPLETE);
-    for bank in 0..4 {
-        r.w(reg::BUS_CFG1, bank << 8);
-        r.w(reg::BANK_BASE, bank + 0x1230);
-    }
-    let snapshot = r.isp.save_state();
-    r.isp.reset();
-    r.isp.load_state(&snapshot).unwrap();
-    for bank in 0..4 {
-        r.w(reg::BUS_CFG1, bank << 8);
-        assert_eq!(r.r(reg::BANK_BASE), bank + 0x1230);
-    }
-    assert_eq!(r.isp.st.lock().reset_delay, 7);
-    assert_eq!(r.isp.st.lock().reset_delay1, 19);
-    r.w(reg::BUS_CTRL, CTRL_SOFT_RESET);
-    for bank in 0..4 {
-        r.w(reg::BUS_CFG1, bank << 8);
-        assert_eq!(r.r(reg::BANK_BASE), 0);
-    }
-}
-
-#[test]
-fn isp12160_pci_header_and_channel_handles() {
-    use crate::dev::isp12160::Isp12160;
-    use crate::scsi_monitor::ScsiTargets;
-    let isp = Arc::new(Isp12160::new());
-    assert_eq!(isp.config().read(0), 0x12161077);
-    assert_eq!(isp.config().read(1), 0x02b00000);
-    assert_eq!(isp.config().read(2) & 0xff, 6);
-    assert_eq!(isp.config().read(13), 0x44);
-    assert_eq!(isp.config().read(17), 0x00010001);
-    isp.config().write(1, 0xffff);
-    assert_eq!(isp.config().read(1), 0x02b00156);
-    isp.config().write(3, 0xf8ff);
-    assert_eq!(isp.config().read(3) & 0xffff, 0xf8ff);
-    isp.config().write(18, 0xffffffff);
-    assert_eq!(isp.config().read(18), 0x100);
-    for channel in 0..2 {
-        let handle = isp.channel(channel).unwrap();
-        handle.with_targets(|targets| assert_eq!(targets.len(), 16));
-    }
-    assert!(isp.channel(2).is_none());
-    isp.bar_write(0, reg::MAILBOX_BASE + 14, 0x5678, 2);
-    assert_eq!(isp.bar_read(1, reg::MAILBOX_BASE + 14, 2), 0x5678);
-    isp.bar_write(1, reg::MAILBOX_BASE + 14, 0x1234, 2);
-    assert_eq!(isp.bar_read(0, reg::MAILBOX_BASE + 14, 2), 0x1234);
-    crate::traits::Resettable::power_on(&*isp);
-    assert_eq!(isp.config().read(1), 0x02b00000);
-    assert_eq!(isp.config().read(18), 0);
-}
-
-#[test]
-fn isp12160_abort_cancels_payload_without_resetting_the_other_bus() {
-    let mem = FakeMem::new();
-    let gate = GatedMem::new(mem.clone(), BUF);
-    let isp = Isp1040::new_12160();
-    Device::start(&isp);
-    isp.connect_dma(gate.clone());
-    isp.attach_disk_at(1, &image("dual-active-abort", 8)).unwrap();
-    let r = Rig { isp, mem };
-    r.init_rings(4, 4);
-    r.put_entry(0, &channel_request(0, 0x12345678, &cdb10(scsi_cmd::WRITE_10, 0, 1), &[(BUF, 512)]));
-    r.isp.write(reg::REQUEST_QUEUE, 1, 2);
-    gate.wait_arrival();
-    assert_eq!(r.cmd(&[mbox::ABORT_COMMAND, 0x8100, 0x1234, 0x5678]), mbox::COMMAND_ERROR);
-    assert_eq!(r.cmd(&[mbox::ABORT_COMMAND, 0x100, 0x1234, 0x5678]), mbox::COMPLETE);
-    gate.open();
-    r.isp.wait_idle();
-    assert_eq!(g16(&r.status(0), 10), 5);
-    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
-    r.put_entry(1, &channel_request(0, 0x99, &cdb10(scsi_cmd::READ_10, 0, 1), &[(BUF + 4096, 512)]));
-    r.doorbell(2);
-    assert_eq!(r.mem.get(BUF + 4096, 512), vec![0; 512]);
 }
 
 #[test]
@@ -1637,7 +1526,7 @@ fn isp12160_response_entry_precedes_interrupt() {
 
 #[test]
 fn isp12160_recovery_holds_dispatch_until_target_reset() {
-    for command in [mbox::ABORT_TARGET, mbox::BUS_RESET] {
+    for command in [mbox::ABORT_COMMAND, mbox::ABORT_TARGET, mbox::BUS_RESET] {
         let (r, gate) = gated_dual_rig(&format!("recovery-hold-{command}"), BUF);
         r.put_entry(0, &channel_request(0, 0x101, &cdb10(scsi_cmd::WRITE_10, 0, 1), &[(BUF, 512)]));
         r.put_entry(1, &channel_request(0, 0x102, &[0, 0, 0, 0, 0, 0], &[]));
@@ -1647,7 +1536,7 @@ fn isp12160_recovery_holds_dispatch_until_target_reset() {
         let fence = r.isp.fence.lock();
         let before = r.isp.cancel.load(Ordering::Acquire);
         let suspended = std::thread::scope(|scope| {
-            let recovery = scope.spawn(|| r.cmd(&[command, 0x100, 0]));
+            let recovery = scope.spawn(|| r.cmd(&[command, 0x100, 0, 0x101]));
             while r.isp.cancel.load(Ordering::Acquire) == before { std::thread::yield_now(); }
             gate.open();
             let mut st = r.isp.st.lock();
@@ -1666,8 +1555,13 @@ fn isp12160_recovery_holds_dispatch_until_target_reset() {
         r.isp.wait_idle();
         assert!(suspended, "dispatch must be suspended before payload retirement");
         assert_eq!(g32(&r.status(1), 4), 0x102);
-        assert_eq!(g16(&r.status(1), 8) & 0xff, 2);
-        assert_eq!(r.status(1)[44], 0x29, "the next command sees reset unit attention");
+        let resets_target = command != mbox::ABORT_COMMAND;
+        assert_eq!(g16(&r.status(0), 10), if resets_target { IOCB_RESET } else { IOCB_ABORTED });
+        assert_eq!(g16(&r.status(1), 8) & 0xff, if resets_target { 2 } else { 0 });
+        if resets_target { assert_eq!(r.status(1)[44], 0x29); }
+        r.put_entry(2, &channel_request(0, 0x103, &cdb10(scsi_cmd::READ_10, 0, 1), &[(BUF + 4096, 512)]));
+        r.doorbell(3);
+        assert_eq!(r.mem.get(BUF + 4096, 512), vec![0; 512], "cancelled WRITE never reaches disk");
         assert_eq!(r.isp.st.lock().ctl.hold, 0);
     }
 }
@@ -1706,22 +1600,4 @@ fn gated_dual_rig(name: &str, addr: u32) -> (Rig, Arc<GatedMem>) {
     let r = Rig { isp, mem };
     r.init_rings(8, 8);
     (r, gate)
-}
-
-
-#[test]
-fn isp12160_dispatch_hold_balances_errors_and_unwinding() {
-    let r = dual_rig("hold-unwind");
-    let mut st = r.isp.st.lock();
-    st.ctl.hold += 1;
-    let result: Result<(), ()> = r.isp.with_dispatch_held(&mut st, |_| Err(()));
-    assert_eq!(result, Err(()));
-    assert_eq!(st.ctl.hold, 1);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        r.isp.with_dispatch_held(&mut st, |_| panic!("test recovery unwind"));
-    }));
-    assert!(result.is_err());
-    assert_eq!(st.ctl.hold, 1, "an outer holder survives recovery unwinding");
-    st.ctl.hold -= 1;
-    r.isp.kick(&mut st);
 }

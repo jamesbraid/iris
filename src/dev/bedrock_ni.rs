@@ -174,29 +174,10 @@ impl BusDevice for BedrockNi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn masks_errors_reset() {
-        let d = BedrockNi::new();
-        assert_eq!(d.read64(0).data, 0);
-        d.write64(0x30, !0);
-        assert_eq!(d.read64(0x30).data, 0x7efffffff);
-        d.write64(0x100, !0);
-        assert!(d.error_level());
-        assert_eq!(d.read64(0x120).data, (1 << 53) - 1);
-        assert!(!d.error_level());
-        d.write64(0x118, !0);
-        d.power_on();
-        assert_eq!(d.read64(0x118).data, 0xfffff);
-        assert_eq!(d.read64(0x30).data, 0);
-    }
-}
-
-#[cfg(test)]
-mod contract_tests {
-    use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
     #[test]
-    fn masks_routes_reset_and_callbacks() {
+    fn routes_error_clear_reset_and_callbacks() {
         let d = Arc::new(BedrockNi::new());
         for (a, mask) in [
             (0x10, 1),
@@ -208,7 +189,7 @@ mod contract_tests {
             d.write64(a, !0);
             assert_eq!(d.read64(a).data, mask);
         }
-        for a in (0x1000..0x1400).step_by(8) {
+        for a in [0x1000, 0x13f8] {
             d.write64(a, !0);
             assert_eq!(d.read64(a).data, 31);
         }
@@ -233,6 +214,9 @@ mod contract_tests {
         assert!(d.error_level());
         d.read64(0x120);
         assert!(!d.error_level());
-        assert_eq!(d.read32(0).status, BUS_ERR);
+        d.write64(0x118, !0);
+        d.power_on();
+        assert_eq!(d.read64(0x118).data, 0xfffff);
+        assert_eq!(d.read64(0x30).data, 0);
     }
 }

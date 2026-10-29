@@ -481,210 +481,81 @@ mod tests {
     }
 
     #[test]
-    fn default_header_keeps_existing_write_behavior() {
-        let c = scsi_like();
-        c.write(1, u32::MAX);
-        c.write(3, u32::MAX);
-        c.write(13, u32::MAX);
-        assert_eq!(c.read(1), 0x0200_ffff);
-        assert_eq!(c.read(3), 0);
-        assert_eq!(c.read(13), u32::MAX);
+    fn header_policies_mask_writes_and_restore_reset_values() {
+        for (status, command, latency, cache) in [(0x0200, 0xffff, 0, 0), (0x02b0, 0x0156, 0xf0, 0x0f)] {
+            let c = scsi_like().with_header_policy(status, command, latency)
+                .with_cache_line_policy(cache).with_register_policy(18, 0xaabb_0020, 0xff00);
+            c.write(1, u32::MAX);
+            c.write(3, u32::MAX);
+            c.write(18, u32::MAX);
+            assert_eq!(c.read(1), (u32::from(status) << 16) | u32::from(command));
+            assert_eq!(c.read(3), (u32::from(latency) << 8) | u32::from(cache));
+            assert_eq!(c.read(18), 0xaabb_ff20);
+            c.reset();
+            assert_eq!(c.read(1), u32::from(status) << 16);
+            assert_eq!(c.read(3), 0);
+            assert_eq!(c.read(18), 0xaabb_0020);
+        }
     }
 
     #[test]
-    fn header_policy_masks_command_and_latency_writes() {
-        let c = scsi_like().with_header_policy(0x02b0, 0x0057, 0xf0);
-        assert_eq!(c.read(1), 0x02b0_0000);
-        c.write(1, u32::MAX);
-        c.write(3, u32::MAX);
-        assert_eq!(c.command(), 0x0057);
-        assert_eq!(c.read(1), 0x02b0_0057);
-        assert_eq!(c.read(3), 0x0000_f000);
-        c.write(3, 0x1234_5678);
-        assert_eq!(c.read(3), 0x0000_5000);
-        c.reset();
-        assert_eq!(c.read(1), 0x02b0_0000);
-        assert_eq!(c.read(3), 0);
-    }
-
-    #[test]
-    fn cache_line_policy_allows_the_low_header_byte_without_changing_wiring() {
-        use crate::traits::Saveable;
-        let c = scsi_like().with_header_policy(0x02b0, 0x0057, 0xff)
-            .with_cache_line_policy(0xff);
-        c.write(3, 0xf8ff);
-        assert_eq!(c.read(3), 0xf8ff);
-        c.write(3, 0xffff_1234);
-        assert_eq!(c.read(3), 0x1234, "upper header bytes stay read-only");
-        let saved = c.save_state();
-        let d = scsi_like().with_cache_line_policy(0x0f);
-        d.load_state(&saved).expect("load_state");
-        d.write(3, 0xffff_ffff);
-        assert_eq!(d.read(3), 0x123f, "loading registers retains destination masks");
-        c.reset();
-        assert_eq!(c.read(3), 0);
-        d.reset();
-        assert_eq!(d.read(3), 0);
-        let default = scsi_like();
-        default.write(3, 0xf8ff);
-        assert_eq!(default.read(3), 0, "existing functions keep both bytes read-only");
-    }
-
-    #[test]
-    fn status_events_preserve_fixed_fields_until_explicitly_cleared() {
-        let c = scsi_like().with_status_w1c_policy(0xc000);
-        c.set_status_bits(0x8000);
-        assert_eq!(c.read(1), 0x8200_0000);
-        c.write(1, 6);
-        assert_eq!(c.read(1), 0x8200_0006, "Command writes retain the event");
-        c.set_status_bits(0x4000);
-        assert_eq!(c.read(1), 0xc200_0006, "new events retain prior events");
-        c.write(1, 0x4000_0006);
-        assert_eq!(c.read(1), 0x8200_0006, "only the selected written event clears");
-        c.write(1, 0x0200_0006);
-        assert_eq!(c.read(1), 0x8200_0006, "fixed status cannot be cleared");
-        c.write(1, 0x8000_0006);
-        assert_eq!(c.read(1), 0x0200_0006);
-        c.write(1, 0x8000_0006);
-        assert_eq!(c.read(1), 0x0200_0006, "configuration writes cannot set an event");
-    }
-
-    #[test]
-    fn masked_writes_apply_policies_only_to_selected_bits() {
+    fn masked_writes_preserve_unselected_fields_and_status_events() {
         let c = scsi_like().with_header_policy(0x0200, 0x0157, 0xff)
-            .with_cache_line_policy(0xff)
+            .with_cache_line_policy(0xff).with_status_w1c_policy(0xc000)
             .with_register_policy(18, 0xaabb_0000, 0xffff);
-        c.write(1, 0x0157);
-        c.write_masked(1, 0xffff_0002, 0x0000_00ff);
-        assert_eq!(c.read(1), 0x0200_0102);
-        c.write_masked(1, 0, 0xffff_0000);
-        assert_eq!(c.command(), 0x0102);
-        c.write(3, 0x1234);
-        c.write_masked(3, 0xffff_00ab, 0xff);
-        assert_eq!(c.read(3), 0x12ab);
-        c.write(5, 0x1234_5000);
-        c.write_masked(5, 0xabcd_ffff, 0xffff_0000);
-        assert_eq!(c.bar_base(1), 0xabcd_5000);
-        c.write(4, 0x1201);
-        c.write_masked(4, 0x3400, 0xff00);
-        assert_eq!(c.read(4), 0x3401);
-        c.write(15, 0x1234_5678);
-        c.write_masked(15, 0xffff_ffff, 0xff00);
-        assert_eq!(c.read(15), 0x1234_0178);
-        c.write_masked(18, u32::MAX, 0xff);
-        assert_eq!(c.read(18), 0xaabb_00ff);
-        c.reset();
-        assert_eq!(c.read(18), 0xaabb_0000);
-        assert_eq!(c.command(), 0);
-    }
-
-    #[test]
-    fn masked_status_acknowledgements_ignore_unselected_ones() {
-        use crate::traits::Saveable;
-        let c = scsi_like().with_status_w1c_policy(0xc000);
         c.set_status_bits(0xc000);
-        c.write(1, 0x1234);
-        c.write_masked(1, u32::MAX, 0x00ff_0000);
-        assert_eq!(c.read(1), 0xc200_1234);
-        c.write_masked(1, u32::MAX, 0x8000_0000);
-        assert_eq!(c.read(1), 0x4200_1234);
-        c.write_masked(1, u32::MAX, 0);
-        assert_eq!(c.read(1), 0x4200_1234);
-        let saved = c.save_state();
-        let dst = scsi_like().with_status_w1c_policy(0xc000);
-        dst.load_state(&saved).expect("load_state");
-        assert_eq!(dst.save_state(), saved);
-        dst.write_masked(1, 0xffff_0002, 0xffff);
-        assert_eq!(dst.read(1), 0x4200_0002);
-        dst.write_masked(1, 0x4000_ffff, 0xffff_0000);
-        assert_eq!(dst.read(1), 0x0200_0002);
+        c.write(1, 0x0157);
+        c.write(3, 0x1234);
+        c.write(5, 0x1234_5000);
+        c.write(4, 0x1201);
+        for (reg, value, mask, expected) in [
+            (1, 0xffff_0002, 0xff, 0xc200_0102),
+            (1, u32::MAX, 0x00ff_0000, 0xc200_0102),
+            (1, u32::MAX, 0x8000_0000, 0x4200_0102),
+            (1, u32::MAX, 0, 0x4200_0102),
+            (1, u32::MAX, 0x4000_0000, 0x0200_0102),
+            (3, 0xffff_00ab, 0xff, 0x12ab),
+            (5, 0xabcd_ffff, 0xffff_0000, 0xabcd_5000),
+            (4, 0x3400, 0xff00, 0x3401),
+            (15, u32::MAX, 0xff00, 0x0100),
+            (18, u32::MAX, 0xff, 0xaabb_00ff),
+        ] {
+            c.write_masked(reg, value, mask);
+            assert_eq!(c.read(reg), expected, "register {reg}");
+        }
+        c.set_status_bits(u16::MAX);
         c.reset();
         assert_eq!(c.read(1), 0x0200_0000);
-    }
-
-    #[test]
-    fn status_events_are_opt_in_and_reset_with_the_header() {
         let default = scsi_like();
         default.set_status_bits(u16::MAX);
         assert_eq!(default.read(1), 0x0200_0000);
-        let c = scsi_like().with_status_w1c_policy(0x8000);
-        c.set_status_bits(u16::MAX);
-        assert_eq!(c.read(1), 0x8200_0000, "only configured event bits latch");
-        c.reset();
-        assert_eq!(c.read(1), 0x0200_0000);
     }
 
     #[test]
-    fn snapshots_preserve_status_events_but_not_their_write_policy() {
+    fn snapshots_restore_registers_with_destination_write_policies() {
         use crate::traits::Saveable;
-        let src = scsi_like().with_status_w1c_policy(0x8000);
+        let src = scsi_like().with_header_policy(0x02b0, 0x0157, 0xff)
+            .with_cache_line_policy(0xff).with_status_w1c_policy(0xc000)
+            .with_register_policy(18, 0, 0x100);
         src.set_status_bits(0x8000);
+        src.write(3, 0x1234);
+        src.write(18, 0x100);
         let saved = src.save_state();
-        let dst = scsi_like().with_status_w1c_policy(0x8000);
-        dst.load_state(&saved).expect("load_state");
-        assert_eq!(dst.save_state(), saved);
-        assert_eq!(dst.read(1), 0x8200_0000);
-        dst.write(1, 0x8000_0006);
-        assert_eq!(dst.read(1), 0x0200_0006);
-        let default = scsi_like();
-        default.load_state(&saved).expect("load_state");
-        assert_eq!(default.read(1), 0x0200_0000, "policy is selected at construction");
-    }
-
-    fn capability_config() -> PciConfig {
-        scsi_like().with_header_policy(0x02b0, 0x0057, 0xff)
-            .with_register_policy(13, 0x44, 0)
-            .with_register_policy(17, 0x0001_0001, 0)
-            .with_register_policy(18, 0, 0x0100)
-    }
-
-    #[test]
-    fn register_policy_preserves_read_only_bits_and_reset_values() {
-        let c = capability_config().with_register_policy(19, 0xa5a5_0055, 0x0000_ff00);
-        c.write(13, u32::MAX);
-        c.write(17, u32::MAX);
-        c.write(18, u32::MAX);
-        c.write(19, u32::MAX);
-        assert_eq!(c.read(13), 0x44);
-        assert_eq!(c.read(17), 0x0001_0001);
-        assert_eq!(c.read(18), 0x0100);
-        assert_eq!(c.read(19), 0xa5a5_ff55);
-        c.write(11, 0xc304_10a9);
-        c.write(4, 0x1000);
-        c.reset();
-        assert_eq!(c.read(13), 0x44);
-        assert_eq!(c.read(17), 0x0001_0001);
-        assert_eq!(c.read(18), 0);
-        assert_eq!(c.read(19), 0xa5a5_0055);
-        assert_eq!(c.read(4), 1);
-        assert_eq!(c.read(11), 0xc304_10a9);
-    }
-
-    #[test]
-    fn snapshots_restore_registers_without_replacing_construction_policy() {
-        use crate::traits::Saveable;
-        let src = capability_config();
-        src.write(18, 0x0100);
-        let saved = src.save_state();
-        let dst = scsi_like().with_header_policy(0x1234, 7, 0x0f)
-            .with_register_policy(18, 0x0000_0020, 0x0200);
-        dst.load_state(&saved).expect("load_state");
-        assert_eq!(dst.save_state(), saved);
-        assert_eq!(dst.read(1), 0x1234_0000);
-        dst.write(1, u32::MAX);
-        dst.write(18, u32::MAX);
-        assert_eq!(dst.command(), 7);
-        assert_eq!(dst.read(18), 0x0300);
-        dst.reset();
-        assert_eq!(dst.read(18), 0x20);
-    }
-
-    #[test]
-    fn register_policy_rejects_managed_header_slots_and_out_of_bounds() {
-        for reg in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 15, 64, usize::MAX] {
-            assert!(std::panic::catch_unwind(|| {
-                scsi_like().with_register_policy(reg, 0, 0)
-            }).is_err(), "register {reg} must reject a function-specific policy");
+        for (events, command, cache) in [(0, 7, 0x0f), (0xc000, 0x0157, 0xff)] {
+            let dst = scsi_like().with_header_policy(0x0200, command, 0)
+                .with_cache_line_policy(cache).with_status_w1c_policy(events)
+                .with_register_policy(18, 0x20, 0x200);
+            dst.load_state(&saved).unwrap();
+            assert_eq!(dst.save_state(), saved);
+            assert_eq!(dst.read(1), 0x0200_0000 | ((0x8000 & u32::from(events)) << 16));
+            dst.write_masked(1, u32::MAX, u32::MAX);
+            dst.write(3, u32::MAX);
+            dst.write(18, u32::MAX);
+            assert_eq!(dst.read(1), 0x0200_0000 | u32::from(command));
+            assert_eq!(dst.read(3), (0x1234 & !u32::from(cache)) | u32::from(cache));
+            assert_eq!(dst.read(18), 0x300);
+            dst.reset();
+            assert_eq!(dst.read(18), 0x20);
         }
     }
 

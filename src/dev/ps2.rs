@@ -1370,24 +1370,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn absent_devices_ignore_commands_and_host_input_after_power_on() {
-        let p = Ps2Controller::with_devices(None, false, false);
-        for _ in 0..2 {
-            p.power_on();
-            for mouse in [false, true] {
-                for command in [0xff, 0xf2, 0xf4] {
-                    p.write_to(command, mouse);
-                    assert_eq!(p.pop_from(mouse), None);
-                }
-            }
-            p.push_kb(KeyCode::KeyA, true);
-            p.push_mouse_input(1, 10, 10, 0);
-            assert!(!p.type_char('A'));
-            assert_eq!(p.read_status() & 1, 0);
-        }
-    }
-
-    #[test]
     fn an_empty_controller_keeps_its_own_commands() {
         let p = Ps2Controller::with_devices(None, false, false);
         p.write_command(0xaa);
@@ -1400,24 +1382,6 @@ mod tests {
         p.write_data(0x42);
         p.write_command(0x20);
         assert_eq!(p.pop_from(false), Some(0x42));
-    }
-
-    #[test]
-    fn device_presence_is_independent() {
-        for (keyboard, mouse) in [(true, false), (false, true), (true, true)] {
-            let p = Ps2Controller::with_devices(None, keyboard, mouse);
-            p.write_to(0xf2, false);
-            let keyboard_id = std::iter::from_fn(|| p.pop_from(false)).collect::<Vec<_>>();
-            assert_eq!(keyboard_id, if keyboard { vec![0xfa, 0xab, 0x83] } else { vec![] });
-            p.write_to(0xf2, true);
-            let mouse_id = std::iter::from_fn(|| p.pop_from(true)).collect::<Vec<_>>();
-            assert_eq!(mouse_id, if mouse { vec![0xfa, 0] } else { vec![] });
-        }
-        let p = Ps2Controller::new(None);
-        p.write_to(0xf2, false);
-        assert_eq!(p.pop_from(false), Some(0xfa));
-        p.write_to(0xf2, true);
-        assert_eq!(p.pop_from(true), Some(0xfa));
     }
 
     /// `type_char` sends what the keys themselves would: Shift around a

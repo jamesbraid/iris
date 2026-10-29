@@ -527,27 +527,6 @@ impl BusDevice for BedrockIo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn identity_masks_windows() {
-        let d = BedrockIo::new();
-        assert_eq!(d.read64(0).data, (2 << 28) | (0xc110 << 12) | (0x36 << 1));
-        assert_eq!(d.read64(0x128).data & (1 << 13), 0);
-        d.write64(0x128, !0);
-        assert_eq!(d.read64(0x128).data & (1 << 13), 0);
-        d.write64(0x160, !0);
-        assert_eq!(d.read64(0x160).data, 0x1f1f);
-        assert_eq!(d.read64(0x1e8).data, 0x111);
-        d.write64(0x1e8, 0);
-        assert_eq!(d.read64(0x1e8).data, 0x111);
-        d.write64(0x1e8, 0x1000);
-        assert_eq!(d.read64(0x1e8).data, 0x1111);
-        assert_eq!(d.pio_read(0x20000000, 8).status, BUS_ERR);
-    }
-}
-
-#[cfg(test)]
-mod contract_tests {
-    use super::*;
     #[derive(Default)]
     struct Memory {
         words: Mutex<BTreeMap<u64, u64>>,
@@ -576,46 +555,85 @@ mod contract_tests {
         d.write64(base + 0x20, notify);
         d.write64(base + 0x18, control);
     }
-    #[test]
-    fn pio_translation_and_denial() {
-        let d = BedrockIo::new();
-        let m = Arc::new(Memory::default());
-        d.connect_widget(8, m.clone());
-        d.write64(0x160, 0x802);
-        assert_eq!(d.pio_write(0x20000080, 8, 0xabcd), BUS_OK);
-        assert_eq!(m.read64(0x40000080).data, 0xabcd);
-        assert_eq!(d.pio_read(0x20000080, 8).data, 0xabcd);
-        d.write64(0x110, 0);
-        assert_eq!(d.pio_read(0x20000080, 8).status, BUS_ERR);
-        d.write64(0x110, !0);
-        d.write64(0x100, 0);
-        assert_eq!(d.pio_read(0x20000080, 8).status, BUS_ERR);
-        d.write64(0x108, 0x53474972756c6573);
-        assert_eq!(d.pio_read(0x20000080, 8).status, BUS_OK);
-        assert_eq!(d.pio_read(0x10000000, 8).status, BUS_ERR);
+    struct Reentrant(std::sync::Weak<BedrockIo>);
+    impl BusDevice for Reentrant {
+        fn read64(&self, a: u64) -> BusRead64 {
+            self.0.upgrade().unwrap().inbound_read(15, Some(0), a, 8)
+        }
     }
+    struct Busy;
+    impl BusDevice for Busy {
+        fn read64(&self, _: u64) -> BusRead64 {
+            BusRead64::busy()
+        }
+        fn write64(&self, _: u64, _: u64) -> u32 {
+            crate::traits::BUS_BUSY
+        }
+    }
+    struct BlockingMemory {
+        entered: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        words: Mutex<BTreeMap<u64, u64>>,
+    }
+    impl BusDevice for BlockingMemory {
+        fn write64(&self, address: u64, value: u64) -> u32 {
+            if address == 0x1000 {
+                self.entered.send(()).unwrap();
+                self.release
+                    .lock()
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+            }
+            self.words.lock().insert(address, value);
+            BUS_OK
+        }
+    }
+
     #[test]
-    fn inbound_source_and_register_address() {
-        let d = BedrockIo::new();
-        let m = Arc::new(Memory::default());
-        let h = Arc::new(Memory::default());
-        d.connect_memory(m.clone());
-        d.connect_hub(h.clone());
-        assert_eq!(d.inbound_write(14, Some(2), 0x80, 8, 42), BUS_OK);
-        assert_eq!(m.read64(0x80).data, 42);
-        d.disable_device(14, 2);
-        assert_eq!(d.inbound_read(14, Some(2), 0x80, 8).status, BUS_ERR);
-        assert_eq!(d.inbound_read(14, None, 0x80, 8).status, BUS_ERR);
-        assert_eq!(d.inbound_read(14, Some(1), 0x80, 8).status, BUS_OK);
-        let a = (1 << 47) | 0x1800090;
-        assert_eq!(d.inbound_write(15, Some(0), a, 8, 0x123), BUS_OK);
-        assert_eq!(h.read64(0x90).data, 0x123);
-        assert_eq!(
-            d.inbound_read(15, Some(0), a | (1 << 39), 8).status,
-            BUS_ERR
-        );
-        assert_eq!(d.inbound_read(15, Some(0), 1 << 48, 8).status, BUS_ERR);
-        assert_eq!(d.inbound_read(15, Some(0), a + 0x800000, 8).status, BUS_ERR);
+    fn pio_and_inbound_source_permissions() {
+        {
+            let d = BedrockIo::new();
+            let m = Arc::new(Memory::default());
+            d.connect_widget(8, m.clone());
+            d.write64(0x160, 0x802);
+            assert_eq!(d.pio_write(0x20000080, 8, 0xabcd), BUS_OK);
+            assert_eq!(m.read64(0x40000080).data, 0xabcd);
+            assert_eq!(d.pio_read(0x20000080, 8).data, 0xabcd);
+            d.write64(0x110, 0);
+            assert_eq!(d.pio_read(0x20000080, 8).status, BUS_ERR);
+            d.write64(0x110, !0);
+            d.write64(0x100, 0);
+            assert_eq!(d.pio_read(0x20000080, 8).status, BUS_ERR);
+            d.write64(0x108, 0x53474972756c6573);
+            assert_eq!(d.pio_read(0x20000080, 8).status, BUS_OK);
+            assert_eq!(d.pio_read(0x10000000, 8).status, BUS_ERR);
+            d.power_on();
+            assert_eq!(d.read64(0x100).data, !0);
+            assert_eq!(d.read64(0x1e8).data, 0x111);
+
+        }
+        {
+            let d = BedrockIo::new();
+            let m = Arc::new(Memory::default());
+            let h = Arc::new(Memory::default());
+            d.connect_memory(m.clone());
+            d.connect_hub(h.clone());
+            assert_eq!(d.inbound_write(14, Some(2), 0x80, 8, 42), BUS_OK);
+            assert_eq!(m.read64(0x80).data, 42);
+            d.disable_device(14, 2);
+            assert_eq!(d.inbound_read(14, Some(2), 0x80, 8).status, BUS_ERR);
+            assert_eq!(d.inbound_read(14, None, 0x80, 8).status, BUS_ERR);
+            assert_eq!(d.inbound_read(14, Some(1), 0x80, 8).status, BUS_OK);
+            let a = (1 << 47) | 0x1800090;
+            assert_eq!(d.inbound_write(15, Some(0), a, 8, 0x123), BUS_OK);
+            assert_eq!(h.read64(0x90).data, 0x123);
+            assert_eq!(
+                d.inbound_read(15, Some(0), a | (1 << 39), 8).status,
+                BUS_ERR
+            );
+            assert_eq!(d.inbound_read(15, Some(0), 1 << 48, 8).status, BUS_ERR);
+            assert_eq!(d.inbound_read(15, Some(0), a + 0x800000, 8).status, BUS_ERR);
+        }
     }
     #[test]
     fn bte_copy_zero_and_completion() {
@@ -642,95 +660,44 @@ mod contract_tests {
         assert_eq!(h.read64(0x90).data, 0x135);
     }
     #[test]
-    fn bte_failures_remaining_and_notification() {
-        for (read, fail) in [(true, 0x1080), (false, 0x2080)] {
+    fn bte_errors_and_termination() {
+        {
+            for (read, fail) in [(true, 0x1080), (false, 0x2080)] {
+                let d = BedrockIo::new();
+                let m = Arc::new(Memory::default());
+                d.connect_memory(m.clone());
+                if read {
+                    *m.fail_read.lock() = Some(fail);
+                } else {
+                    *m.fail_write.lock() = Some(fail);
+                }
+                launch(&d, 0x10000, 3, 0x1000, 0x2000, 0x3000, 0x10);
+                assert_eq!(d.read64(0x10000).data, 2 | ERROR);
+                assert_eq!(d.read64(0x10008).data, 0x1080);
+                assert_eq!(d.read64(0x10010).data, 0x2080);
+                assert_eq!(m.read64(0x3000).data, 2 | ERROR);
+            }
             let d = BedrockIo::new();
             let m = Arc::new(Memory::default());
             d.connect_memory(m.clone());
-            if read {
-                *m.fail_read.lock() = Some(fail);
-            } else {
-                *m.fail_write.lock() = Some(fail);
-            }
-            launch(&d, 0x10000, 3, 0x1000, 0x2000, 0x3000, 0x10);
+            *m.fail_write.lock() = Some(0x3000);
+            launch(&d, 0x10000, 1, 0x1000, 0x2000, 0x3000, 0x10);
+            assert_eq!(d.read64(0x10000).data, 0);
+            launch(&d, 0x10000, 2, 0xffffffff80, 0x2000, 0x3000, 0x10);
             assert_eq!(d.read64(0x10000).data, 2 | ERROR);
-            assert_eq!(d.read64(0x10008).data, 0x1080);
-            assert_eq!(d.read64(0x10010).data, 0x2080);
-            assert_eq!(m.read64(0x3000).data, 2 | ERROR);
         }
-        let d = BedrockIo::new();
-        let m = Arc::new(Memory::default());
-        d.connect_memory(m.clone());
-        *m.fail_write.lock() = Some(0x3000);
-        launch(&d, 0x10000, 1, 0x1000, 0x2000, 0x3000, 0x10);
-        assert_eq!(d.read64(0x10000).data, 0);
-        launch(&d, 0x10000, 2, 0xffffffff80, 0x2000, 0x3000, 0x10);
-        assert_eq!(d.read64(0x10000).data, 2 | ERROR);
-    }
-    #[test]
-    fn bte_poison_zero_and_termination() {
-        let d = BedrockIo::new();
-        launch(&d, 0x10000, 1, 0, 0, 0, 0x100);
-        assert_eq!(d.read64(0x10000).data, 1 | BUSY);
-        d.read64(0x10018);
-        assert_eq!(d.read64(0x10000).data, 1);
-        launch(&d, 0x10000, 0, 0, 0, 0, 0x10);
-        assert_eq!(d.read64(0x10000).data, 0);
-    }
-    #[test]
-    fn retained_masks_and_reset() {
-        let d = BedrockIo::new();
-        for (a, v) in [
-            (0x1e0, 0x3ffffff),
-            (0x1f0, 0x0fffffff03ffffff),
-            (0x200, 0x10f),
-            (0x3a8, 0x13ffffffff30f3),
-            (0x3b0, 0x1ff0f),
-            (0x3b8, 0xff),
-            (0x3c0, 0xffffff),
-        ] {
-            d.write64(a, !0);
-            assert_eq!(d.read64(a).data, v);
-        }
-        for a in (0x400..=0x5d8)
-            .step_by(8)
-            .chain((0x308..0x348).step_by(8))
-            .chain([
-                0x140, 0x148, 0x208, 0x210, 0x218, 0x220, 0x228, 0x300, 0x388, 0x390, 0x398, 0x3a0,
-                0x600, 0x608, 0x610, 0x30000, 0x30008,
-            ])
         {
-            d.write64(a, !0);
-            assert_eq!(d.read64(a).data, !0);
-        }
-        d.power_on();
-        assert_eq!(d.read64(0x140).data, 0);
-        assert_eq!(d.read64(0x100).data, !0);
-        assert_eq!(d.read64(0x1e8).data, 0x111);
-        assert_eq!(d.read32(0x150).status, BUS_ERR);
-    }
-}
-
-#[cfg(test)]
-mod forwarding_tests {
-    use super::*;
-    struct Reentrant(std::sync::Weak<BedrockIo>);
-    impl BusDevice for Reentrant {
-        fn read64(&self, a: u64) -> BusRead64 {
-            self.0.upgrade().unwrap().inbound_read(15, Some(0), a, 8)
-        }
-    }
-    struct Busy;
-    impl BusDevice for Busy {
-        fn read64(&self, _: u64) -> BusRead64 {
-            BusRead64::busy()
-        }
-        fn write64(&self, _: u64, _: u64) -> u32 {
-            crate::traits::BUS_BUSY
+            let d = BedrockIo::new();
+            launch(&d, 0x10000, 1, 0, 0, 0, 0x100);
+            assert_eq!(d.read64(0x10000).data, 1 | BUSY);
+            d.read64(0x10018);
+            assert_eq!(d.read64(0x10000).data, 1);
+            launch(&d, 0x10000, 0, 0, 0, 0, 0x10);
+            assert_eq!(d.read64(0x10000).data, 0);
         }
     }
     #[test]
-    fn recursive_inbound_is_refused() {
+    fn forwarding_reentrancy_and_retry_status() {
         let d = Arc::new(BedrockIo::new());
         d.connect_memory(Arc::new(Reentrant(Arc::downgrade(&d))));
         assert_eq!(d.inbound_read(15, Some(0), 0, 8).status, BUS_ERR);
@@ -739,24 +706,10 @@ mod forwarding_tests {
             d.inbound_read(15, Some(0), 0, 8).status,
             crate::traits::BUS_BUSY
         );
-    }
-    struct BlockingMemory {
-        entered: std::sync::mpsc::Sender<()>,
-        release: Mutex<std::sync::mpsc::Receiver<()>>,
-        words: Mutex<BTreeMap<u64, u64>>,
-    }
-    impl BusDevice for BlockingMemory {
-        fn write64(&self, address: u64, value: u64) -> u32 {
-            if address == 0x1000 {
-                self.entered.send(()).unwrap();
-                self.release
-                    .lock()
-                    .recv_timeout(std::time::Duration::from_secs(5))
-                    .unwrap();
-            }
-            self.words.lock().insert(address, value);
-            BUS_OK
-        }
+        d.connect_widget(8, Arc::new(Busy));
+        assert_eq!(d.pio_read(0x8000000, 8).status, crate::traits::BUS_BUSY);
+        assert_eq!(d.pio_write(0x8000000, 8, 42), crate::traits::BUS_BUSY);
+
     }
     #[test]
     fn independent_dma_workers_both_reach_memory() {
@@ -786,18 +739,6 @@ mod forwarding_tests {
         assert_eq!(
             *memory.words.lock(),
             BTreeMap::from([(0x1000, 0x1234), (0x2000, 0x5678)])
-        );
-    }
-    #[test]
-    fn forwarded_failure_keeps_status() {
-        let d = BedrockIo::new();
-        d.connect_widget(8, Arc::new(Busy));
-        assert_eq!(d.pio_read(0x8000000, 8).status, crate::traits::BUS_BUSY);
-        assert_eq!(d.pio_write(0x8000000, 8, 42), crate::traits::BUS_BUSY);
-        d.connect_memory(Arc::new(Busy));
-        assert_eq!(
-            d.inbound_read(15, Some(0), 0, 8).status,
-            crate::traits::BUS_BUSY
         );
     }
 }

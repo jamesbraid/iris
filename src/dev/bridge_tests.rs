@@ -1152,32 +1152,21 @@ fn long_and_short_transfers_place_every_byte_by_the_swap_rule() {
 }
 
 #[test]
-fn partial_configuration_writes_preserve_unwritten_status_events() {
+fn partial_configuration_writes_preserve_status_and_update_bar_runs() {
     let r = Rig::new();
     let card = Card::with_status_events(PCI_INTA, 0xc000);
-    r.bridge.attach(0, card.clone());
+    r.bridge.attach(1, card.clone());
+    r.cfg_write(1, 0x14, 4, 0x1300_0000);
+    r.set(reg::device(1), DEV_MEMORY_SPACE | 0x130);
     card.cfg.set_status_bits(0xc000);
-    r.cfg_write(0, 4, 2, 0x0102);
-    assert_eq!(r.cfg_read(0, 4, 4), 0xc200_0102);
-    r.cfg_write(0, 4, 1, 3);
-    assert_eq!(r.cfg_read(0, 4, 4), 0xc200_0103);
-    r.cfg_write(0, 5, 1, 2);
-    assert_eq!(r.cfg_read(0, 4, 4), 0xc200_0203);
-    r.cfg_write(0, 6, 1, 0xff);
-    assert_eq!(r.cfg_read(0, 4, 4), 0xc200_0203);
-    r.cfg_write(0, 7, 1, 0x80);
-    assert_eq!(r.cfg_read(0, 4, 4), 0x4200_0203);
-    r.cfg_write(0, 6, 2, 0x4000);
-    assert_eq!(r.cfg_read(0, 4, 4), 0x0200_0203);
-    card.cfg.set_status_bits(0xc000);
-    r.cfg_write(0, 4, 4, 0x8000_0002);
-    assert_eq!(r.cfg_read(0, 4, 4), 0x4200_0002);
-}
-
-#[test]
-fn partial_configuration_writes_update_published_bar_runs() {
-    let r = Rig::new();
-    r.card(1, PCI_INTA);
+    for (offset, width, value, expected) in [
+        (4, 2, 0x0102, 0xc200_0102), (4, 1, 3, 0xc200_0103),
+        (5, 1, 2, 0xc200_0203), (6, 1, 0xff, 0xc200_0203),
+        (7, 1, 0x80, 0x4200_0203), (6, 2, 0x4000, 0x0200_0203),
+    ] {
+        r.cfg_write(1, offset, width, value);
+        assert_eq!(r.cfg_read(1, 4, 4), expected);
+    }
     let published = Arc::new(Mutex::new(Vec::new()));
     let capture = published.clone();
     r.bridge.on_bar_runs(Box::new(move |runs| {

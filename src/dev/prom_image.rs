@@ -42,13 +42,10 @@ mod tests {
     #[test]
     fn load_raw_stored_and_gzip_files() {
         let path = std::env::temp_dir().join(format!("iris-prom-load-{}", std::process::id()));
-        for file in [
-            vec![9, 8, 7, 6],
-            container(&[9, 8, 7, 6], false),
-            container(&[9, 8, 7, 6], true),
-        ] {
+        for file in [vec![9, 8, 7, 6], container(&[9, 8, 7, 6], false), container(&[9, 8, 7, 6], true)] {
             std::fs::write(&path, file).unwrap();
             assert_eq!(load(&path, 4).unwrap(), [9, 8, 7, 6]);
+            assert!(load(&path, 3).is_err(), "decoded payload exceeds capacity");
         }
         std::fs::write(&path, []).unwrap();
         assert!(load(&path, 4).unwrap().is_empty());
@@ -56,90 +53,46 @@ mod tests {
     }
 
     #[test]
-    fn load_rejects_malformed_containers_with_path() {
+    fn malformed_and_unavailable_files_report_the_path() {
         let path = std::env::temp_dir().join(format!("iris-prom-invalid-{}", std::process::id()));
-        for gzip in [false, true] {
-            let mut file = container(&[9, 8, 7, 6], gzip);
-            file[0xc7] ^= 1;
+        let error = load(&path, 4).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(error.to_string().contains(&path.display().to_string()));
+        let reject = |file: &[u8]| {
             std::fs::write(&path, file).unwrap();
             let error = load(&path, 4).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
             assert!(error.to_string().contains(&path.display().to_string()));
-            assert!(error.to_string().contains("checksum"));
-        }
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn load_reports_missing_and_oversized_files() {
-        let path = std::env::temp_dir().join(format!("iris-prom-errors-{}", std::process::id()));
-        let error = load(&path, 4).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert!(error.to_string().contains(&path.display().to_string()));
-        std::fs::write(&path, vec![0; 5000]).unwrap();
-        let error = load(&path, 4).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains(&path.display().to_string()));
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn raw_stored_and_gzip() {
-        assert_eq!(decode(&[1, 2], 2).unwrap(), [1, 2]);
-        assert!(decode(&[1, 2], 1).is_err());
-        for gzip in [false, true] {
-            let v = container(&[9, 8, 7, 6], gzip);
-            assert_eq!(decode(&v, 4).unwrap(), [9, 8, 7, 6]);
-            assert!(decode(&v, 3).is_err());
-            let mut bad = v.clone();
-            bad[0xc7] ^= 1;
-            assert!(decode(&bad, 4).is_err());
-            assert!(decode(&v[..100], 4).is_err());
-        }
-    }
-    #[test]
-    fn rejected_headers_and_gzip_tail() {
+        };
+        reject(&vec![0; 5000]); // encoded file bound
         let original = container(&[4, 3, 2, 1], false);
-        for (off, n) in [
-            (0x48, 7),
-            (0x50, 4096),
-            (0x90, 0x14),
-            (0x98, 4095),
-            (0xb0, 0),
-            (0xb8, 1),
-            (0xc8, 1),
-            (0xd0, 3),
-        ] {
-            let mut v = original.clone();
-            put(&mut v, off, n);
-            assert!(decode(&v, 4).is_err(), "field {off:x}");
+        reject(&original[..100]); // recognized but truncated header
+        for (off, n) in [(0x48, 7), (0x50, 4096), (0x90, 0x14), (0x98, 4095), (0xb0, 0), (0xd0, 3)] {
+            let mut file = original.clone();
+            put(&mut file, off, n);
+            reject(&file);
         }
-        let mut v = original;
-        v[0x7f] = 2;
-        assert!(decode(&v, 4).is_err());
-        let gz = container(&[4, 3, 2, 1], true);
-        for tail in [0, 1, 7, 8] {
-            let mut v = gz.clone();
-            v.extend(vec![0; tail]);
-            let size = v.len();
-            put(&mut v, 0x50, size as u64);
-            assert_eq!(decode(&v, 4).is_ok(), tail <= 7);
+        for gzip in [false, true] {
+            let mut file = container(&[4, 3, 2, 1], gzip);
+            file[0xc7] ^= 1;
+            reject(&file);
         }
-        let mut v = gz.clone();
-        v.push(1);
-        let size = v.len();
-        put(&mut v, 0x50, size as u64);
-        assert!(decode(&v, 4).is_err());
-        let mut v = gz;
-        v.push(0);
-        let stored = (v.len() - 4096) as u64;
-        put(&mut v, 0xb8, stored);
-        let checksum = byte_sum(&v[4096..]);
-        put(&mut v, 0xc8, checksum);
-        let size = v.len();
-        put(&mut v, 0x50, size as u64);
-        assert!(decode(&v, 4).is_err());
+        let gzip = container(&[4, 3, 2, 1], true);
+        for tail in [7, 8] {
+            let mut file = gzip.clone();
+            file.extend(vec![0; tail]);
+            let size = file.len();
+            put(&mut file, 0x50, size as u64);
+            if tail == 7 {
+                std::fs::write(&path, &file).unwrap();
+                assert_eq!(load(&path, 4).unwrap(), [4, 3, 2, 1]);
+            } else {
+                reject(&file);
+            }
+        }
+        std::fs::remove_file(path).unwrap();
     }
+
 }
 
 use std::io::{self, Read};

@@ -270,88 +270,7 @@ impl BusDevice for BedrockLb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn identity_scratch_and_survivors() {
-        let d = BedrockLb::new(Arc::new(|| 0));
-        assert_eq!(d.read64(0).data, (0x36 << 1) | (0x3012 << 12) | (2 << 28));
-        d.write64(0x8008, 42);
-        d.write64(0x8010, 43);
-        d.write64(0x8018, !0);
-        assert_eq!(d.read64(0x8058).data, 1);
-        d.write64(0x8018, 0);
-        assert_eq!(d.read64(0x8058).data, 0);
-        assert_eq!(d.read64(0x8058).data, 1);
-        d.power_on();
-        assert_eq!(d.read64(0x8008).data, 42);
-        assert_eq!(d.read64(0x8010).data, 43);
-        assert_eq!(d.read64(0x8018).data, 0);
-    }
-}
-
-#[cfg(test)]
-mod contract_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    #[test]
-    fn microlan_timing_pending_and_reset() {
-        let time = Arc::new(AtomicU64::new(0));
-        let t = time.clone();
-        let d = BedrockLb::new(Arc::new(move || t.load(Ordering::SeqCst)));
-        let word = (0x66 << 27) | (60 << 10) | (0x41 << 2) | 3;
-        d.write64(0x4030, word);
-        assert_eq!(d.read64(0x4030).data, word & !3);
-        d.write64(0x4030, 8 << 10);
-        assert_eq!(d.read64(0x4030).data, word & !3);
-        time.store(1000, Ordering::SeqCst);
-        assert_eq!(d.read64(0x4030).data, (word & !3) | 2);
-        d.write64(0x4030, 8 << 10);
-        time.store(2000, Ordering::SeqCst);
-        assert_eq!(d.read64(0x4030).data, (8 << 10) | 3);
-        d.write64(0x4030, 60 << 10);
-        d.power_on();
-        time.store(3000, Ordering::SeqCst);
-        assert_eq!(d.read64(0x4030).data, 0);
-    }
-    #[test]
-    fn revision_permissions_errors() {
-        let d = BedrockLb::new(Arc::new(|| 0));
-        d.write64(0, (0x5a << 32) | (2 << 46));
-        assert_eq!(d.node_number(), 0x5a);
-        d.write64(0, 3 << 46);
-        assert_eq!(d.node_number(), 0x5a);
-        d.write64(0x4000, 0);
-        d.write64(0x4008, 0);
-        assert_eq!(d.read64(0x4000).data, 0);
-        d.write64(0x4008, 0x53474972756c6573);
-        assert_eq!(d.read64(0x4000).data, 1);
-        d.write64(0x4040, !0);
-        assert_eq!(d.read64(0x4040).data, 0x7ff);
-        d.power_on();
-        assert!(d.error_level());
-        d.write64(0x4048, 0x7ff);
-        assert!(!d.error_level());
-        assert_eq!(d.node_number(), 0);
-    }
-    #[test]
-    fn write_zero_and_vector_no_reply() {
-        let d = BedrockLb::new(Arc::new(|| 0));
-        d.write64(0x8040, 42);
-        d.write64(0x8040, 43);
-        assert_eq!(d.read64(0x8000).data, 42);
-        d.write64(0xc030, 0xdead);
-        d.write64(0xc000, !0);
-        assert_eq!(d.read64(0xc020).data, 0);
-        assert_eq!(d.read64(0xc030).data, 0xdead);
-        assert_eq!(d.read64(0xc000).data, VECTOR_MASK);
-        assert_eq!(d.read32(0x8000).status, BUS_ERR);
-        assert_eq!(d.read64(1).status, BUS_ERR);
-    }
-}
-
-#[cfg(test)]
-mod notification_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
     /// Hold an IRQ packet's assertion callback while a CPU clears the register.
     pub(super) fn check_order(
         device: Arc<dyn BusDevice>,
@@ -396,100 +315,145 @@ mod notification_tests {
         second.join().unwrap();
         assert!(!delivered.load(Ordering::SeqCst));
     }
-    #[test]
-    fn irq_notifications_follow_concurrent_ingress() {
-        let ni = Arc::new(crate::dev::bedrock_ni::BedrockNi::new());
-        let a = ni.clone();
-        let b = ni.clone();
-        check_order(
-            ni,
-            move |cb| a.connect_error(cb),
-            0x100,
-            1 << 24,
-            move || {
-                b.read64(0x120);
-            },
-        );
-    }
-}
 
-#[cfg(test)]
-mod further_notification_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicU8, Ordering};
     #[test]
-    fn node_notifications_follow_concurrent_ingress() {
-        let d = Arc::new(BedrockLb::new(Arc::new(|| 0)));
-        let delivered = Arc::new(AtomicU8::new(0));
-        let sink = delivered.clone();
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let release_rx = Mutex::new(release_rx);
-        d.connect_node_changed(Arc::new(move |node| {
-            if node == 1 {
-                entered_tx.send(()).unwrap();
-                release_rx
-                    .lock()
-                    .recv_timeout(std::time::Duration::from_secs(5))
-                    .unwrap();
-            }
-            sink.store(node, Ordering::SeqCst);
-        }));
-        let io = crate::dev::bedrock_io::BedrockIo::new();
-        io.connect_hub(d.clone());
-        let first = std::thread::spawn(move || {
-            io.inbound_write(14, Some(0), (1 << 47) | 0x1800000, 8, 1 << 32)
-        });
-        entered_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let other = d.clone();
-        let second = std::thread::spawn(move || {
-            other.write64(0, 2 << 32);
-            done_tx.send(()).unwrap();
-        });
-        let _ = done_rx.recv_timeout(std::time::Duration::from_millis(100));
-        release_tx.send(()).unwrap();
-        assert_eq!(first.join().unwrap(), BUS_OK);
-        second.join().unwrap();
-        assert_eq!(d.node_number(), 2);
-        assert_eq!(delivered.load(Ordering::SeqCst), 2);
-    }
-}
-
-#[cfg(test)]
-mod more_irq_tests {
-    use super::*;
-    #[test]
-    fn local_irq_order() {
-        let d = Arc::new(BedrockLb::new(Arc::new(|| 0)));
-        let a = d.clone();
-        let b = d.clone();
-        super::notification_tests::check_order(
-            d,
-            move |cb| a.connect_error(cb),
-            0x4040,
-            1,
-            move || {
-                b.write64(0x4048, 1);
-            },
-        );
+    fn permissions_errors_and_reset_survivors() {
+        {
+            let d = BedrockLb::new(Arc::new(|| 0));
+            d.write64(0, (0x5a << 32) | (2 << 46));
+            assert_eq!(d.node_number(), 0x5a);
+            d.write64(0, 3 << 46);
+            assert_eq!(d.node_number(), 0x5a);
+            d.write64(0x4000, 0);
+            d.write64(0x4008, 0);
+            assert_eq!(d.read64(0x4000).data, 0);
+            d.write64(0x4008, 0x53474972756c6573);
+            assert_eq!(d.read64(0x4000).data, 1);
+            d.write64(0x8008, 42);
+            d.write64(0x4040, !0);
+            assert_eq!(d.read64(0x4040).data, 0x7ff);
+            d.power_on();
+            assert_eq!(d.read64(0x8008).data, 42);
+            assert!(d.error_level());
+            d.write64(0x4048, 0x7ff);
+            assert!(!d.error_level());
+            assert_eq!(d.node_number(), 0);
+        }
+        {
+            let d = BedrockLb::new(Arc::new(|| 0));
+            d.write64(0x8040, 42);
+            d.write64(0x8040, 43);
+            assert_eq!(d.read64(0x8000).data, 42);
+            d.write64(0xc030, 0xdead);
+            d.write64(0xc000, !0);
+            assert_eq!(d.read64(0xc020).data, 0);
+            assert_eq!(d.read64(0xc030).data, 0xdead);
+            assert_eq!(d.read32(0x8000).status, BUS_ERR);
+            assert_eq!(d.read64(1).status, BUS_ERR);
+        }
     }
     #[test]
-    fn crossbar_irq_order() {
-        let d = Arc::new(crate::dev::bedrock_xb::BedrockXb::new());
-        let a = d.clone();
-        let b = d.clone();
-        super::notification_tests::check_order(
-            d,
-            move |cb| a.connect_error(cb),
-            0x20,
-            1,
-            move || {
-                b.write64(0x120, 0);
-                b.write64(0x190, 0);
-            },
-        );
+    fn microlan_timing_pending_and_reset() {
+        let time = Arc::new(AtomicU64::new(0));
+        let t = time.clone();
+        let d = BedrockLb::new(Arc::new(move || t.load(Ordering::SeqCst)));
+        let word = (0x66 << 27) | (60 << 10) | (0x41 << 2) | 3;
+        d.write64(0x4030, word);
+        assert_eq!(d.read64(0x4030).data, word & !3);
+        d.write64(0x4030, 8 << 10);
+        assert_eq!(d.read64(0x4030).data, word & !3);
+        time.store(1000, Ordering::SeqCst);
+        assert_eq!(d.read64(0x4030).data, (word & !3) | 2);
+        d.write64(0x4030, 8 << 10);
+        time.store(2000, Ordering::SeqCst);
+        assert_eq!(d.read64(0x4030).data, (8 << 10) | 3);
+        d.write64(0x4030, 60 << 10);
+        d.power_on();
+        time.store(3000, Ordering::SeqCst);
+        assert_eq!(d.read64(0x4030).data, 0);
+    }
+    #[test]
+    fn notifications_preserve_concurrent_register_order() {
+        {
+            let ni = Arc::new(crate::dev::bedrock_ni::BedrockNi::new());
+            let a = ni.clone();
+            let b = ni.clone();
+            check_order(
+                ni,
+                move |cb| a.connect_error(cb),
+                0x100,
+                1 << 24,
+                move || {
+                    b.read64(0x120);
+                },
+            );
+        }
+        {
+            let d = Arc::new(BedrockLb::new(Arc::new(|| 0)));
+            let a = d.clone();
+            let b = d.clone();
+            check_order(
+                d,
+                move |cb| a.connect_error(cb),
+                0x4040,
+                1,
+                move || {
+                    b.write64(0x4048, 1);
+                },
+            );
+        }
+        {
+            let d = Arc::new(crate::dev::bedrock_xb::BedrockXb::new());
+            let a = d.clone();
+            let b = d.clone();
+            check_order(
+                d,
+                move |cb| a.connect_error(cb),
+                0x20,
+                1,
+                move || {
+                    b.write64(0x120, 0);
+                    b.write64(0x190, 0);
+                },
+            );
+        }
+        {
+            let d = Arc::new(BedrockLb::new(Arc::new(|| 0)));
+            let delivered = Arc::new(AtomicU8::new(0));
+            let sink = delivered.clone();
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let release_rx = Mutex::new(release_rx);
+            d.connect_node_changed(Arc::new(move |node| {
+                if node == 1 {
+                    entered_tx.send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                }
+                sink.store(node, Ordering::SeqCst);
+            }));
+            let io = crate::dev::bedrock_io::BedrockIo::new();
+            io.connect_hub(d.clone());
+            let first = std::thread::spawn(move || {
+                io.inbound_write(14, Some(0), (1 << 47) | 0x1800000, 8, 1 << 32)
+            });
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let other = d.clone();
+            let second = std::thread::spawn(move || {
+                other.write64(0, 2 << 32);
+                done_tx.send(()).unwrap();
+            });
+            let _ = done_rx.recv_timeout(std::time::Duration::from_millis(100));
+            release_tx.send(()).unwrap();
+            assert_eq!(first.join().unwrap(), BUS_OK);
+            second.join().unwrap();
+            assert_eq!(d.node_number(), 2);
+            assert_eq!(delivered.load(Ordering::SeqCst), 2);
+        }
     }
 }

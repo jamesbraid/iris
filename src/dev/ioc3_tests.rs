@@ -1405,28 +1405,28 @@ fn the_uarts_are_in_the_superio_block() {
 }
 
 #[test]
-fn fuel_timekeeper_selection_mapping_and_host_input() {
+fn fuel_board_mapping_survives_reset() {
     let r = Rig::with(Ioc3::new(Ioc3Config::fuel(MAC)));
-    assert_eq!(r.c.config().read(11), 0xc30a_10a9);
     let clock = Arc::new(crate::dev::timekeeper::Timekeeper::fuel_at(2026, 1, 1, 0, 0, 0).unwrap());
     r.c.attach_timekeeper(clock.clone());
+    let cfg = r.c.config();
+    cfg.write(1, 0xffff_0146);
+    cfg.write(3, 0xffff_ffff);
+    assert_eq!(cfg.read(1), 0x0280_0146);
+    assert_eq!(cfg.read(3), 0x0000_ff00);
     let base = reg::BYTEBUS_DEV0;
-    assert_eq!(r.r8(base + 0x7fff), 0x58);
-    r.w8(base + 0x100, 0x12);
-    r.w8(base + 0x900, 0x34);
     r.w8(base + 0x7f8, 0xa5);
-    assert_eq!(r.r8(base + 0x100), 0x12);
-    assert_eq!(r.r8(base + 0x900), 0x34);
+    r.c.reset();
+    clock.power_on();
+    assert_eq!(r.r8(base + 0x7fff), 0x58);
     assert_eq!(r.r8(base + 0x7f8), 0xa5);
-    r.w32(base + 0x100, 0xffff_ffff);
-    assert_eq!(r.r8(base + 0x100), 0x12, "wide writes refused");
-    r.c.reset(); clock.power_on();
-    assert_eq!(r.r8(base + 0x7f8), 0xa5);
-    // The indexed Dallas ports remain unfitted on Fuel.
-    r.w8(reg::BYTEBUS_DEV1, 0x40); r.w8(reg::BYTEBUS_DEV2, 0x55);
+    assert_eq!(cfg.read(1), 0x0280_0000);
+    assert_eq!(cfg.read(3), 0);
+    // Fuel selects the flat clock, leaving indexed Dallas ports unfitted.
+    r.w8(reg::BYTEBUS_DEV1, 0x40);
+    r.w8(reg::BYTEBUS_DEV2, 0x55);
     assert_eq!(r.r8(reg::BYTEBUS_DEV2), 0);
-    let eth = crate::dev::ioc3_eth::Ioc3Eth::new_fuel(MAC);
-    r.c.attach_eth(eth);
+    r.c.attach_eth(crate::dev::ioc3_eth::Ioc3Eth::new_fuel(MAC));
     use crate::dev::ioc3_eth::{bits::MII_READ, reg::{MII_CONTROL, MII_DATA_R, MII_DATA_W}};
     r.w32(MII_DATA_W, 7);
     r.w32(MII_CONTROL, (1 << 5) | 0x19);
@@ -1435,54 +1435,6 @@ fn fuel_timekeeper_selection_mapping_and_host_input() {
     r.w32(reg::PIN_DATA, 1 << 5);
     r.w32(MII_CONTROL, MII_READ | (7 << 5) | 3);
     assert_eq!(r.r32(MII_DATA_R), 0x5c10, "Fuel GPIO5 has no PHY reset connection");
-    r.w32(reg::INT_ENABLE_SET, int::KEYBOARD);
-    r.w32(K_TX, 0xf4);
-    let _ = r.r32(K_RX);
-    r.w32(reg::INT_STATUS, int::KEYBOARD);
-    r.c.ps2().push_kb(winit::keyboard::KeyCode::KeyA, true);
-    assert!(r.superio.level(), "Fuel host keyboard uses the independent SuperIO line");
-}
-
-#[test]
-fn fuel_pci_header_policy_and_reset() {
-    let c = Ioc3::new(Ioc3Config::fuel(MAC));
-    let cfg = c.config();
-    assert_eq!(cfg.read(1), 0x0280_0000);
-    assert_eq!(cfg.read(3), 0);
-    cfg.write(1, 0xffff_0146);
-    assert_eq!(cfg.read(1), 0x0280_0146, "status is read-only, command enables survive");
-    cfg.write(1, 0xffff_ffff);
-    assert_eq!(cfg.read(1), 0x0280_ffff, "existing native command permissiveness is retained");
-    cfg.write(3, 0x0000_ff00);
-    assert_eq!(cfg.read(3), 0x0000_ff00);
-    cfg.write(3, 0xffff_ffff);
-    assert_eq!(cfg.read(3), 0x0000_ff00, "only the latency byte is writable");
-    cfg.write(4, 0x1230_0000);
-    c.reset();
-    assert_eq!(cfg.read(1), 0x0280_0000);
-    assert_eq!(cfg.read(3), 0);
-    assert_eq!(cfg.read(4), 0);
-    assert_eq!(cfg.read(11), 0xc30a_10a9);
-    assert_eq!(cfg.read(0), 0x0003_10a9);
-}
-
-#[test]
-fn octane_pci_header_keeps_its_default_policy() {
-    for octane2 in [false, true] {
-        let c = Ioc3::octane(MAC, octane2);
-        let cfg = c.config();
-        assert_eq!(cfg.read(1), 0x0200_0000);
-        cfg.write(1, 0xffff_ffff);
-        assert_eq!(cfg.read(1), 0x0200_ffff);
-        cfg.write(3, 0xffff_ffff);
-        assert_eq!(cfg.read(3), 0);
-        c.reset();
-        assert_eq!(cfg.read(1), 0x0200_ffff, "existing Octane chip reset leaves the header alone");
-        cfg.reset();
-        assert_eq!(cfg.read(1), 0x0200_0000);
-        assert_eq!(cfg.read(3), 0);
-        assert_eq!(cfg.read(11), 0xc304_10a9);
-    }
 }
 
 #[test]

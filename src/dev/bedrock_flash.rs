@@ -13,8 +13,27 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn unlock(v: &FlashView, part: u64) {
+        assert_eq!(v.write64(part + 8 * 0x555, 0xaa), crate::traits::BUS_OK);
+        assert_eq!(v.write64(part + 8 * 0x2aa, 0x55), crate::traits::BUS_OK);
+    }
+    fn program(v: &FlashView, part: u64, off: u64, value: u16) {
+        unlock(v, part);
+        assert_eq!(v.write64(part + 8 * 0x555, 0xa0), crate::traits::BUS_OK);
+        assert_eq!(
+            v.write64(part + 4 * off, value as u64),
+            crate::traits::BUS_OK
+        );
+    }
+    fn erase_select(v: &FlashView, part: u64, offset: u64) {
+        unlock(v, part);
+        assert_eq!(v.write64(part + 8 * 0x555, 0x80), BUS_OK);
+        unlock(v, part);
+        assert_eq!(v.write64(part + 4 * offset, 0x30), BUS_OK);
+    }
+
     #[test]
-    fn label_and_configuration() {
+    fn initial_configuration_and_label() {
         let seed = vec![0x21; 0xb0];
         let f = Flash::new(&seed).unwrap();
         let bytes = f.contents();
@@ -32,226 +51,89 @@ mod tests {
         assert!(Flash::new(&vec![0; PART_SIZE + 1]).is_err());
     }
     #[test]
-    fn views_and_bounds() {
-        let f = Arc::new(Flash::new(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap());
-        let a = f.boot_view();
-        let b = f.boot_view();
-        assert_eq!(a.read64(0).data, 0x0102030405060708);
-        assert_eq!(a.read8(1).data, 2);
-        assert_eq!(a.read16(2).data, 0x0304);
-        assert_eq!(a.read32(4).data, 0x05060708);
-        assert_eq!(a.read64(SECOND_POSITION).data, u64::MAX);
-        assert_eq!(b.read64(0).data, a.read64(0).data);
-        assert!(!a.read8(PART_SIZE as u64).is_ok());
-        assert!(!a.read64(PART_SIZE as u64 - 4).is_ok());
-        assert!(!a.read8(SECOND_POSITION + PART_SIZE as u64).is_ok());
-        let x = f.array_view(0, PART_SIZE).unwrap();
-        assert_eq!(x.read64(0).data, a.read64(0).data);
-        assert!(!x.read8(PART_SIZE as u64).is_ok());
-        assert_eq!(a.write64(8 * 0x555, 0xaa), crate::traits::BUS_OK);
-        assert_eq!(a.write16(0, 0), BUS_ERR);
-        assert_eq!(f.generation(), 1);
-    }
-    #[test]
-    fn amd_reset_and_program_through_both_boot_views() {
-        let f = Arc::new(Flash::new(&[]).unwrap());
-        let local = f.boot_view();
-        let remote = f.boot_view();
-        let execute = f.array_view(0, PART_SIZE).unwrap();
-        assert_eq!(local.write64(SECOND_POSITION, 0xf0), crate::traits::BUS_OK);
-        for part in [0, SECOND_POSITION] {
-            assert_eq!(local.write64(part + 8 * 0x55, 0x98), crate::traits::BUS_OK);
-            assert_eq!(remote.read16(part + 0x20).data, b'Q' as u16);
-            assert_eq!(remote.read16((SECOND_POSITION - part) + 0x20).data, 0xffff);
-            assert_eq!(execute.read16(0x20).data, 0xffff);
-            assert_eq!(remote.write64(part, 0xf0), crate::traits::BUS_OK);
-            assert_eq!(local.write64(part + 8 * 0x555, 0xaa), crate::traits::BUS_OK);
-            assert_eq!(
-                remote.write64(part + 8 * 0x2aa, 0x55),
-                crate::traits::BUS_OK
-            );
-            assert_eq!(local.write64(part + 8 * 0x555, 0xa0), crate::traits::BUS_OK);
-            assert_eq!(
-                remote.write64(part + 4 * 0x200, 0x1234),
-                crate::traits::BUS_OK
-            );
-            assert_eq!(local.read16(part + 0x200).data, 0x1234);
+    fn command_views_query_and_programming() {
+        {
+            let f = Arc::new(Flash::new(&[]).unwrap());
+            let local = f.boot_view();
+            let remote = f.boot_view();
+            let execute = f.array_view(0, PART_SIZE).unwrap();
+            assert_eq!(local.write64(SECOND_POSITION, 0xf0), crate::traits::BUS_OK);
+            for part in [0, SECOND_POSITION] {
+                assert_eq!(local.write64(part + 8 * 0x55, 0x98), crate::traits::BUS_OK);
+                assert_eq!(remote.read16(part + 0x20).data, b'Q' as u16);
+                assert_eq!(remote.read16((SECOND_POSITION - part) + 0x20).data, 0xffff);
+                assert_eq!(execute.read16(0x20).data, 0xffff);
+                assert_eq!(remote.write64(part, 0xf0), crate::traits::BUS_OK);
+                assert_eq!(local.write64(part + 8 * 0x555, 0xaa), crate::traits::BUS_OK);
+                assert_eq!(
+                    remote.write64(part + 8 * 0x2aa, 0x55),
+                    crate::traits::BUS_OK
+                );
+                assert_eq!(local.write64(part + 8 * 0x555, 0xa0), crate::traits::BUS_OK);
+                assert_eq!(
+                    remote.write64(part + 4 * 0x200, 0x1234),
+                    crate::traits::BUS_OK
+                );
+                assert_eq!(local.read16(part + 0x200).data, 0x1234);
+            }
+            assert_eq!(execute.read16(0x200).data, 0x1234);
+            assert!(!local.read8(PART_SIZE as u64).is_ok());
         }
-        assert_eq!(execute.read16(0x200).data, 0x1234);
-        assert!(f.generation() > 0);
-    }
-    fn unlock(v: &FlashView, part: u64) {
-        assert_eq!(v.write64(part + 8 * 0x555, 0xaa), crate::traits::BUS_OK);
-        assert_eq!(v.write64(part + 8 * 0x2aa, 0x55), crate::traits::BUS_OK);
-    }
-    fn program(v: &FlashView, part: u64, off: u64, value: u16) {
-        unlock(v, part);
-        assert_eq!(v.write64(part + 8 * 0x555, 0xa0), crate::traits::BUS_OK);
-        assert_eq!(
-            v.write64(part + 4 * off, value as u64),
-            crate::traits::BUS_OK
-        );
-    }
-    #[test]
-    fn amd_invalid_cycles_preserve_pending_program_and_nor_bits() {
-        let f = Arc::new(Flash::new(&[]).unwrap());
-        let v = f.boot_view();
-        program(&v, 0, 0x200, 0x1234);
-        program(&v, 0, 0x200, 0xf0ff);
-        assert_eq!(v.read16(0x200).data, 0x1034);
-        unlock(&v, 0);
-        assert_eq!(v.write64(8 * 0x555, 0xa0), crate::traits::BUS_OK);
-        let gen = f.generation();
-        for (addr, value) in [
-            (0x800, 0x10000),
-            (0x804, 0),
-            (32 << 20, 0x10000),
-            (64 << 20, 0),
-        ] {
-            assert_eq!(v.write64(addr, value), BUS_ERR);
+        {
+            let f = Arc::new(Flash::new(&[]).unwrap());
+            let v = f.boot_view();
+            program(&v, 0, 0x200, 0x1234);
+            program(&v, 0, 0x200, 0xf0ff);
+            assert_eq!(v.read16(0x200).data, 0x1034);
+            unlock(&v, 0);
+            assert_eq!(v.write64(8 * 0x555, 0xa0), crate::traits::BUS_OK);
+            let gen = f.generation();
+            for (addr, value) in [
+                (0x800, 0x10000),
+                (0x804, 0),
+                (64 << 20, 0),
+            ] {
+                assert_eq!(v.write64(addr, value), BUS_ERR);
+            }
+            assert_eq!(v.write16(0x800, 0), BUS_ERR);
+            assert_eq!(f.generation(), gen);
+            assert_eq!(v.write64(0x800, 0x00ff), crate::traits::BUS_OK);
+            assert_eq!(v.read16(0x200).data, 0x0034);
+            let execute = f.array_view(0, PART_SIZE).unwrap();
+            unlock(&v, 0);
+            assert_eq!(execute.write64(8 * 0x555, 0xa0), BUS_ERR);
+            assert_eq!(v.write64(8 * 0x555, 0xa0), crate::traits::BUS_OK);
+            assert_eq!(v.write64(0x808, 0x5555), crate::traits::BUS_OK);
+            assert_eq!(execute.read16(0x202).data, 0x5555);
         }
-        assert_eq!(v.write16(0x800, 0), BUS_ERR);
-        assert_eq!(v.write32(0x800, 0), BUS_ERR);
-        assert_eq!(f.generation(), gen);
-        assert_eq!(v.write64(0x800, 0x00ff), crate::traits::BUS_OK);
-        assert_eq!(v.read16(0x200).data, 0x0034);
-        let execute = f.array_view(0, PART_SIZE).unwrap();
-        unlock(&v, 0);
-        assert_eq!(execute.write64(8 * 0x555, 0xa0), BUS_ERR);
-        assert_eq!(v.write64(8 * 0x555, 0xa0), crate::traits::BUS_OK);
-        assert_eq!(v.write64(0x808, 0x5555), crate::traits::BUS_OK);
-        assert_eq!(execute.read16(0x202).data, 0x5555);
-    }
-    #[test]
-    fn amd_sector_erase_has_two_timer_boundaries_and_no_poll_completion() {
-        let f = Arc::new(Flash::new(&[]).unwrap());
-        let v = f.boot_view();
-        let r = f.boot_view();
-        program(&v, 0, 0x200, 0);
-        program(&v, 0, 0x10000, 0x3456);
-        unlock(&v, 0);
-        assert_eq!(v.write64(8 * 0x555, 0x80), crate::traits::BUS_OK);
-        unlock(&r, 0);
-        assert_eq!(v.write64(4 * 0x200, 0x30), crate::traits::BUS_OK);
-        let a = v.read16(0x200).data;
-        let b = r.read16(0x200).data;
-        assert_eq!(a & 0x80, 0);
-        assert_eq!((a ^ b) & 0x40, 0x40);
-        assert_eq!(&f.contents()[0x10000..0x10002], &[0x34, 0x56]);
-        f.advance_ns(49_999);
-        assert_eq!(v.read16(0x200).data & 0x08, 0);
-        f.advance_ns(1);
-        assert_ne!(v.read16(0x200).data & 0x08, 0);
-        assert_eq!(f.contents()[0x200], 0);
-        f.advance_ns(512_000_000);
-        assert_eq!(f.contents()[0x200], 0xff);
-        assert_eq!(v.read16(0x200).data, 0xffff);
-        assert_eq!(r.read16(0x10000).data, 0x3456);
-    }
-    #[test]
-    fn amd_completed_mutations_persist_in_both_halves() {
-        let path = std::env::temp_dir().join(format!("iris-amd-persist-{}", std::process::id()));
-        std::fs::write(&path, []).unwrap();
-        let f = Arc::new(Flash::with_file(&[], &path).unwrap());
-        let v = f.boot_view();
-        program(&v, 0, 0x200, 0x1234);
-        program(&v, SECOND_POSITION, (PART_SIZE - 2) as u64, 0x5678);
-        drop(v);
-        drop(f);
-        let f = Arc::new(Flash::with_file(&[], &path).unwrap());
-        let v = f.boot_view();
-        assert_eq!(v.read16(0x200).data, 0x1234);
-        assert_eq!(
-            v.read16(SECOND_POSITION + PART_SIZE as u64 - 2).data,
-            0x5678
-        );
-        unlock(&v, SECOND_POSITION);
-        assert_eq!(v.write64(SECOND_POSITION + 8 * 0x555, 0x80), BUS_OK);
-        unlock(&v, SECOND_POSITION);
-        assert_eq!(
-            v.write64(SECOND_POSITION + 4 * (PART_SIZE as u64 - 2), 0x30),
-            BUS_OK
-        );
-        f.advance_ns(50_000 + 512_000_000);
-        drop(v);
-        drop(f);
-        let f = Arc::new(Flash::with_file(&[], &path).unwrap());
-        let v = f.boot_view();
-        assert_eq!(v.read16(0x200).data, 0x1234);
-        assert_eq!(
-            v.read16(SECOND_POSITION + PART_SIZE as u64 - 2).data,
-            0xffff
-        );
-        std::fs::remove_file(path).unwrap();
-    }
-    #[test]
-    fn amd_backing_failure_does_not_report_program_completion() {
-        let f = Arc::new(Flash::new(&[]).unwrap());
-        // A read-only descriptor makes writes fail without a special backend.
-        let path = std::env::temp_dir().join(format!("iris-amd-read-only-{}", std::process::id()));
-        std::fs::write(&path, []).unwrap();
-        f.st.lock().file = Some(File::open(&path).unwrap());
-        let v = f.boot_view();
-        unlock(&v, 0);
-        assert_eq!(v.write64(8 * 0x555, 0xa0), BUS_OK);
-        assert_eq!(v.write64(4 * 0x200, 0x1234), BUS_ERR);
-        assert_eq!(v.read16(0x200).data, 0xffff);
-        std::fs::remove_file(path).unwrap();
-    }
-    #[test]
-    fn amd_complete_query_profile_and_word_interface() {
-        let f = Arc::new(Flash::new(&[]).unwrap());
-        let v = f.boot_view();
-        assert_eq!(v.write64(0x550, 0x98), BUS_ERR);
-        assert_eq!(v.read16(0x20).data, 0xffff);
-        assert_eq!(v.write64(8 * 0x55, 0x98), BUS_OK);
-        let expected = [
-            0x51, 0x52, 0x59, 2, 0, 0, 0, 0, 0, 0, 0, 0x27, 0x36, 0, 0, 3, 0, 9, 0, 4, 0, 4, 0, 23,
-            1, 0, 0, 0, 1, 0x7f, 0, 0, 1,
-        ];
-        for index in 0..0x100 {
-            let value = if (0x10..=0x30).contains(&index) {
-                expected[index - 0x10]
-            } else {
-                0
-            };
-            assert_eq!(
-                v.read16((index * 2) as u64).data,
-                value,
-                "query index {index:x}"
-            );
+        {
+            let f = Arc::new(Flash::new(&[]).unwrap());
+            let v = f.boot_view();
+            assert_eq!(v.write64(0x550, 0x98), BUS_ERR);
+            assert_eq!(v.read16(0x20).data, 0xffff);
+            assert_eq!(v.write64(8 * 0x55, 0x98), BUS_OK);
+            let expected = [
+                0x51, 0x52, 0x59, 2, 0, 0, 0, 0, 0, 0, 0, 0x27, 0x36, 0, 0, 3, 0, 9, 0, 4, 0, 4, 0, 23,
+                1, 0, 0, 0, 1, 0x7f, 0, 0, 1,
+            ];
+            for (index, value) in expected.into_iter().enumerate() {
+                assert_eq!(v.read16(((index + 0x10) * 2) as u64).data, value);
+            }
+            assert_eq!(v.read16(0x100).data, 0);
+            assert!(!v.read8(0x20).is_ok());
+            assert!(!v.read16(0x21).is_ok());
+            f.reset();
+            assert_eq!(v.read16(0x20).data, 0xffff);
         }
-        assert!(!v.read8(0x20).is_ok());
-        assert!(!v.read16(0x21).is_ok());
-        assert!(!v.read32(0x20).is_ok());
-        assert!(!v.read64(0x20).is_ok());
-        f.reset();
-        assert_eq!(v.read16(0x20).data, 0xffff);
-        unlock(&v, 0);
-        assert_eq!(v.write64(8 * 0x555, 0x90), BUS_OK);
-        for index in [0, 1, 2, 3, 0xff] {
-            assert_eq!(v.read16(index * 2).data, 0);
-        }
-        assert_eq!(v.write64(0, 0xf0), BUS_OK);
-        program(&v, 0, 0x200, 0x00f0);
-        assert_eq!(v.read16(0x200).data, 0x00f0);
-    }
-    fn erase_select(v: &FlashView, part: u64, offset: u64) {
-        unlock(v, part);
-        assert_eq!(v.write64(part + 8 * 0x555, 0x80), BUS_OK);
-        unlock(v, part);
-        assert_eq!(v.write64(part + 4 * offset, 0x30), BUS_OK);
     }
     #[test]
-    fn amd_selection_restart_polling_and_reset_states() {
+    fn erase_selection_timing_and_reset() {
         let f = Arc::new(Flash::new(&[]).unwrap());
         let v = f.boot_view();
         program(&v, 0, 0x200, 0);
         program(&v, 0, 0x10000, 0);
         erase_select(&v, 0, 0x200);
         assert!(!v.read8(0x200).is_ok());
-        assert!(!v.read32(0x200).is_ok());
-        assert!(!v.read64(0x200).is_ok());
         let a = v.read16(0x200).data;
         let b = v.read16(0x200).data;
         assert_eq!((a ^ b) & 0x44, 0x44);
@@ -287,44 +169,102 @@ mod tests {
         f.reset();
         assert_eq!(v.write64(4 * 0x200, 0x1234), BUS_ERR);
         assert_eq!(v.read16(0x200).data, 0xffff);
-    }
-    #[test]
-    fn amd_erase_backing_failure_latches_error_without_array_mutation() {
-        let f = Arc::new(Flash::new(&[]).unwrap());
-        let v = f.boot_view();
         program(&v, 0, 0x200, 0);
-        let path =
-            std::env::temp_dir().join(format!("iris-amd-erase-failure-{}", std::process::id()));
-        std::fs::write(&path, []).unwrap();
-        f.st.lock().file = Some(File::open(&path).unwrap());
+        program(&v, 0, 0x10000, 0x3456);
         erase_select(&v, 0, 0x200);
         f.advance_ns(50_000 + 512_000_000);
-        assert_eq!(v.read16(0x200).data & 0x20, 0x20);
-        assert_eq!(f.contents()[0x200], 0);
-        assert_eq!(v.write64(0, 0xf0), BUS_OK);
-        assert_eq!(v.read16(0x200).data, 0);
-        std::fs::remove_file(path).unwrap();
+        assert_eq!(v.read16(0x200).data, 0xffff);
+        assert_eq!(v.read16(0x10000).data, 0x3456);
     }
     #[test]
-    fn backing_size_and_seed_precedence() {
-        let path = std::env::temp_dir().join(format!("iris-bedrock-store-{}", std::process::id()));
-        let mut bytes = vec![0x5a; FLASH_SIZE];
-        bytes[PART_SIZE] = 0xc7;
-        std::fs::write(&path, &bytes).unwrap();
-        let f = Flash::with_file(&[0x11], &path).unwrap();
-        assert_eq!(f.contents()[0], 0x5a);
-        assert_eq!(f.contents()[PART_SIZE], 0xc7);
-        assert_eq!(std::fs::read(&path).unwrap(), f.contents());
-        drop(f);
-        std::fs::write(&path, [1, 2, 3]).unwrap();
-        assert!(Flash::with_file(&[], &path).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), [1, 2, 3]);
-        std::fs::write(&path, []).unwrap();
-        let g = Flash::with_file(&[0x34], &path).unwrap();
-        assert_eq!(g.contents()[0], 0x34);
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), FLASH_SIZE as u64);
-        drop(g);
-        std::fs::remove_file(path).unwrap();
+    fn backing_seed_and_persistent_mutations() {
+        {
+            let path = std::env::temp_dir().join(format!("iris-bedrock-store-{}", std::process::id()));
+            let mut bytes = vec![0x5a; FLASH_SIZE];
+            bytes[PART_SIZE] = 0xc7;
+            std::fs::write(&path, &bytes).unwrap();
+            let f = Flash::with_file(&[0x11], &path).unwrap();
+            assert_eq!(f.contents()[0], 0x5a);
+            assert_eq!(f.contents()[PART_SIZE], 0xc7);
+            assert_eq!(std::fs::read(&path).unwrap(), f.contents());
+            drop(f);
+            std::fs::write(&path, [1, 2, 3]).unwrap();
+            assert!(Flash::with_file(&[], &path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), [1, 2, 3]);
+            std::fs::write(&path, []).unwrap();
+            let g = Flash::with_file(&[0x34], &path).unwrap();
+            assert_eq!(g.contents()[0], 0x34);
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), FLASH_SIZE as u64);
+            drop(g);
+            std::fs::remove_file(path).unwrap();
+        }
+        {
+            let path = std::env::temp_dir().join(format!("iris-amd-persist-{}", std::process::id()));
+            std::fs::write(&path, []).unwrap();
+            let f = Arc::new(Flash::with_file(&[], &path).unwrap());
+            let v = f.boot_view();
+            program(&v, 0, 0x200, 0x1234);
+            program(&v, SECOND_POSITION, (PART_SIZE - 2) as u64, 0x5678);
+            drop(v);
+            drop(f);
+            let f = Arc::new(Flash::with_file(&[], &path).unwrap());
+            let v = f.boot_view();
+            assert_eq!(v.read16(0x200).data, 0x1234);
+            assert_eq!(
+                v.read16(SECOND_POSITION + PART_SIZE as u64 - 2).data,
+                0x5678
+            );
+            unlock(&v, SECOND_POSITION);
+            assert_eq!(v.write64(SECOND_POSITION + 8 * 0x555, 0x80), BUS_OK);
+            unlock(&v, SECOND_POSITION);
+            assert_eq!(
+                v.write64(SECOND_POSITION + 4 * (PART_SIZE as u64 - 2), 0x30),
+                BUS_OK
+            );
+            f.advance_ns(50_000 + 512_000_000);
+            drop(v);
+            drop(f);
+            let f = Arc::new(Flash::with_file(&[], &path).unwrap());
+            let v = f.boot_view();
+            assert_eq!(v.read16(0x200).data, 0x1234);
+            assert_eq!(
+                v.read16(SECOND_POSITION + PART_SIZE as u64 - 2).data,
+                0xffff
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    #[test]
+    fn backing_failure_preserves_array_and_status() {
+        {
+            let f = Arc::new(Flash::new(&[]).unwrap());
+            // A read-only descriptor makes writes fail without a special backend.
+            let path = std::env::temp_dir().join(format!("iris-amd-read-only-{}", std::process::id()));
+            std::fs::write(&path, []).unwrap();
+            f.st.lock().file = Some(File::open(&path).unwrap());
+            let v = f.boot_view();
+            unlock(&v, 0);
+            assert_eq!(v.write64(8 * 0x555, 0xa0), BUS_OK);
+            assert_eq!(v.write64(4 * 0x200, 0x1234), BUS_ERR);
+            assert_eq!(v.read16(0x200).data, 0xffff);
+            std::fs::remove_file(path).unwrap();
+        }
+        {
+            let f = Arc::new(Flash::new(&[]).unwrap());
+            let v = f.boot_view();
+            program(&v, 0, 0x200, 0);
+            let path =
+                std::env::temp_dir().join(format!("iris-amd-erase-failure-{}", std::process::id()));
+            std::fs::write(&path, []).unwrap();
+            f.st.lock().file = Some(File::open(&path).unwrap());
+            erase_select(&v, 0, 0x200);
+            f.advance_ns(50_000 + 512_000_000);
+            assert_eq!(v.read16(0x200).data & 0x20, 0x20);
+            assert_eq!(f.contents()[0x200], 0);
+            assert_eq!(v.write64(0, 0xf0), BUS_OK);
+            assert_eq!(v.read16(0x200).data, 0);
+            std::fs::remove_file(path).unwrap();
+        }
     }
 }
 

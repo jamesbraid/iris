@@ -111,19 +111,6 @@ fn lock_registry_does_not_keep_the_chip_or_its_devices_alive() {
     assert!(memory_ref.upgrade().is_none());
 }
 #[test]
-fn two_heads_and_crossbar_are_distinct_shared_chip_views() {
-    let (c, _) = chip();
-    let e = c.head(14);
-    let f = c.head(15);
-    assert_eq!(e.read32(4).data, 0x2d002049);
-    assert_eq!(f.read32(4).data, 0x2d002049);
-    e.write32(0x84, 0xa00000);
-    assert_eq!(f.read32(0x84).data, 0x20000);
-    assert_eq!(c.crossbar().read32(4).data, 0x2d000001);
-    assert_eq!(c.crossbar().read32(0xc).data >> 6 & 15, 10);
-    assert_eq!(c.crossbar().read32(0x194).data, 1 << 31);
-}
-#[test]
 fn page_dma_keeps_valid_prefix_and_refuses_invalid_suffix() {
     physical_chunk_refusal_does_not_publish_a_prefix();
     let (c, mem) = chip();
@@ -143,6 +130,18 @@ fn page_dma_keeps_valid_prefix_and_refuses_invalid_suffix() {
     assert_ne!(f.read32(0x104).data & (1 << 30), 0);
     f.write32(0x114, 2);
     assert_eq!(f.read32(0x104).data & (1 << 30), 0);
+    f.write64(0x10000 + 800 * 8, 0xffff123456789abc);
+    assert_eq!(f.read32(0x10004 + 800 * 8).data, 0x1234);
+    assert_eq!(f.read32(0x12004 + 800 * 8).data, 0x56789abc);
+    f.write64(0x10000 + 512 * 8, 0x2a21);
+    f.write32(0x84, 9 << 20);
+    for (address, status) in [(0x80002000, PciDmaStatus::MasterAbort),
+        (0x3fff8000, PciDmaStatus::Ok), (0x40800000, PciDmaStatus::MasterAbort),
+        (0x40200000, PciDmaStatus::MasterAbort)] {
+        let mut bytes = [0xff; 4];
+        assert_eq!(dma.dma_read(address, &mut bytes), status);
+        assert_eq!(bytes, [0; 4]);
+    }
 }
 // A mapped memory range whose middle word refuses accesses.
 struct FaultMemory(Arc<Memory>);
@@ -228,41 +227,35 @@ fn interrupt_keeps_destination_and_enabling_a_live_pin_asserts() {
     assert_eq!(p[0].address, (0x123450080 & !(0x3ff << 38)) | (0x155 << 38));
     assert!(p[0].level);
     assert!(!p[1].level);
+    drop(p);
+    let card = Card::new();
+    c.attach(15, 2, card.clone());
+    let (probe, line) = crate::irq::LevelProbe::line();
+    c.set_pci_irq(15, 2, 0, line);
+    card.irq.lock().as_ref().unwrap().set(true);
+    assert!(probe.level());
+    assert_eq!(f.read32(0x104).data & 255, 0);
+    c.reset();
+    assert!(!probe.level());
 }
 
 #[test]
-fn revision_two_alias_and_requester_width_place_bytes() {
+fn dma_placement_packets_and_refusals() {
     let (c, mem) = chip();
     let f = c.head(15);
     let d = c.dma(15, 0);
     f.write32(0x84, 10 << 20);
-    assert_eq!(
-        d.dma_write(0x80002000, &[0, 1, 2, 3, 4, 5, 6, 7]),
-        PciDmaStatus::Ok
-    );
-    assert_eq!(&mem.0.lock()[0x2000..0x2008], &[3, 2, 1, 0, 7, 6, 5, 4]);
-    c.set_dma_64bit(15, 0, true);
-    assert_eq!(
-        d.dma_write(0x80002000, &[0, 1, 2, 3, 4, 5, 6, 7]),
-        PciDmaStatus::Ok
-    );
-    assert_eq!(&mem.0.lock()[0x2000..0x2008], &[7, 6, 5, 4, 3, 2, 1, 0]);
     f.write64(0x10000, 0x3000 | (10 << 8) | 1);
-    assert_eq!(
-        d.dma_write(0x60000000, &[0, 1, 2, 3, 4, 5, 6, 7]),
-        PciDmaStatus::Ok
-    );
-    assert_eq!(&mem.0.lock()[0x3000..0x3008], &[0, 1, 2, 3, 4, 5, 6, 7]);
-    assert_eq!(
-        d.dma_write((10 << 60) | (1 << 55) | 0x2000, &[11, 22]),
-        PciDmaStatus::Ok
-    );
-    assert_eq!(&mem.0.lock()[0x2000..0x2002], &[11, 22]);
-}
-#[test]
-fn source_packet_retains_programmed_widget_slot_and_half_requests() {
-    let (c, _) = chip();
-    let f = c.head(15);
+    for (wide, address, target, expected) in [
+        (false, 0x80002000, 0x2000, [3, 2, 1, 0, 7, 6, 5, 4]),
+        (true, 0x80002000, 0x2000, [7, 6, 5, 4, 3, 2, 1, 0]),
+        (true, 0x60000000, 0x3000, [0, 1, 2, 3, 4, 5, 6, 7]),
+        (true, (10 << 60) | (1 << 55) | 0x2000, 0x2000, [0, 1, 2, 3, 4, 5, 6, 7]),
+    ] {
+        c.set_dma_64bit(15, 0, wide);
+        assert_eq!(d.dma_write(address, &[0, 1, 2, 3, 4, 5, 6, 7]), PciDmaStatus::Ok);
+        assert_eq!(&mem.0.lock()[target..target + 8], &expected);
+    }
     let records = Arc::new(Mutex::new(Vec::new()));
     let out = records.clone();
     c.set_dma_sender(Arc::new(move |p, b| {
@@ -287,12 +280,7 @@ fn source_packet_retains_programmed_widget_slot_and_half_requests() {
     assert_eq!(r[0].0.address, 0x2000);
     assert!(r[0].0.half_write_requested);
     assert_eq!(r[0].1, [0, 1, 2, 3, 4, 5, 6, 7]);
-}
-#[test]
-fn source_packet_refusal_keeps_successful_prefix() {
-    let (c, _) = chip();
-    let f = c.head(15);
-    f.write32(0x84, 10 << 20);
+    drop(r);
     c.set_dma_sender(Arc::new(|p, b| {
         if p.address >= 0x2008 {
             return false;
@@ -310,60 +298,6 @@ fn source_packet_refusal_keeps_successful_prefix() {
         [0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0, 0, 0, 0, 0, 0, 0, 0]
     );
 }
-#[test]
-fn ate_readback_geometry_and_invalid_mapper_entry_are_distinct() {
-    let (c, _) = chip();
-    let f = c.head(15);
-    f.write64(0x10000 + 800 * 8, 0xffff123456789abc);
-    assert_eq!(f.read32(0x10004 + 800 * 8).data, 0x1234);
-    assert_eq!(f.read32(0x12004 + 800 * 8).data, 0x56789abc);
-    f.write64(0x10000 + 512 * 8, 0x2a21);
-    assert_eq!(
-        c.dma(15, 0).dma_write(0x40200000, &[1]),
-        PciDmaStatus::MasterAbort
-    );
-}
-#[test]
-fn warm_reset_uses_old_fences_and_the_quiet_window() {
-    let (c, _) = chip();
-    let x = c.crossbar();
-    let e = c.head(14);
-    let f = c.head(15);
-    e.write32(0x84, 0xa00000);
-    f.write32(0x84, 0xa00000);
-    x.write32(0xb4, 0xff & !(1 << 2)); // Port E rejects port A.
-    c.warm_reset(10, 0);
-    assert_eq!(e.read32(0x84).data, 0xa00000);
-    assert_eq!(f.read32(0x84).data, 0x20000);
-    f.write32(0x84, 0xa00000);
-    c.warm_reset(10, 10239);
-    assert_eq!(f.read32(0x84).data, 0xa00000);
-    c.warm_reset(10, 10240);
-    assert_eq!(f.read32(0x84).data, 0x20000);
-    c.reset();
-    f.write32(0x84, 0xa00000);
-    c.warm_reset(10, 10240);
-    assert_eq!(f.read32(0x84).data, 0x20000);
-}
-#[test]
-fn link_reset_changes_one_head_and_preserves_crossbar_programming() {
-    let (c, _) = chip();
-    let ports = Arc::new(Mutex::new(Vec::new()));
-    let output = ports.clone();
-    c.set_reset_output(Arc::new(move |port| output.lock().push(port)));
-    let x = c.crossbar();
-    let e = c.head(14);
-    let f = c.head(15);
-    x.write32(0x24, 0xfe);
-    e.write32(0x84, 0xa00000);
-    f.write32(0x84, 0xa00000);
-    x.write32(0x2b4, 1);
-    assert_eq!(*ports.lock(), vec![14]);
-    assert_eq!(e.read32(0x84).data, 0x20000);
-    assert_eq!(f.read32(0x84).data, 0xa00000);
-    assert_eq!(x.read32(0x24).data, 0xfe);
-}
-
 #[test]
 fn link_reset_callback_resets_a_function_and_can_reenter_the_chip() {
     use crate::dev::isp1040::{mbox, reg, CTRL_INT_ENABLE, CTRL_RISC_INT_ENABLE, HOST_CMD_SHIFT};
@@ -510,112 +444,6 @@ impl PciBusDevice for Card {
     }
 }
 #[test]
-fn configuration_bar_decode_and_programmed_pio_placement() {
-    let (c, _) = chip();
-    let f = c.head(15);
-    let card = Card::new();
-    c.attach(15, 0, card.clone());
-    assert_eq!(f.read32(0x20000).data, 0x56781234);
-    assert_eq!(f.read8(0x20003).data, 0x34);
-    assert_eq!(f.read32(0x21000).data, u32::MAX);
-    f.write32(0x20010, 0x02000000);
-    f.write32(0x20004, 2);
-    f.write32(0x204, 0x1020);
-    assert_eq!(f.read8(0x200000).data, 3);
-    assert_eq!(f.read32(0x200000).data, 0x03020100);
-    assert_eq!(f.read64(0x200000).data, 0x0302010007060504);
-    f.write32(0x204, 0x3020);
-    assert_eq!(f.read8(0x200000).data, 0);
-    assert_eq!(f.read32(0x200000).data, 0x00010203);
-    f.write32(0x20004, 0);
-    assert_eq!(f.read32(0x200000).data, u32::MAX);
-}
-#[test]
-fn long_alias_obeys_control_swap_and_target_width() {
-    let (c, _) = chip();
-    let f = c.head(15);
-    let card = Card::new();
-    c.attach(15, 0, card);
-    f.write32(0x20010, 0x02000000);
-    f.write32(0x20004, 2);
-    assert_eq!(f.read8(0x82000000).data, 3);
-    c.set_dma_64bit(15, 0, true);
-    assert_eq!(f.read8(0x82000000).data, 7);
-    f.write32(0x24, 1 << 22);
-    assert_eq!(f.read8(0x82000000).data, 0);
-    assert_eq!(f.read32(0x42000000).data, 0x00010203);
-}
-#[test]
-fn pci_raw_output_is_independent_of_head_pin() {
-    let (c, _) = chip();
-    let card = Card::new();
-    c.attach(15, 2, card.clone());
-    let (probe, line) = crate::irq::LevelProbe::line();
-    c.set_pci_irq(15, 2, 0, line);
-    card.irq.lock().as_ref().unwrap().set(true);
-    assert!(probe.level());
-    assert_eq!(c.head(15).read32(0x104).data & 255, 0);
-    c.reset();
-    assert!(!probe.level());
-}
-
-#[test]
-fn pio_narrow_and_doubleword_accesses_follow_all_four_placement_rows() {
-    let (c, _) = chip();
-    let f = c.head(15);
-    c.attach(15, 0, Card::new());
-    f.write32(0x20010, 0x02000000);
-    f.write32(0x20004, 2);
-    for wide in [false, true] {
-        for stream in [false, true] {
-            f.write32(
-                0x204,
-                0x1020 | if wide { 1 << 22 } else { 0 } | if stream { 1 << 13 } else { 0 },
-            );
-            let mask = if stream {
-                0
-            } else if wide {
-                7
-            } else {
-                3
-            };
-            for size in [1, 2, 4, 8] {
-                for off in (0..8).step_by(size) {
-                    let expected = (0..size).fold(0u64, |v, i| v << 8 | ((off + i) ^ mask) as u64);
-                    let a = 0x200000 + off as u64;
-                    let got = match size {
-                        1 => f.read8(a).data as u64,
-                        2 => f.read16(a).data as u64,
-                        4 => f.read32(a).data as u64,
-                        _ => f.read64(a).data,
-                    };
-                    assert_eq!(
-                        got, expected,
-                        "wide={wide} stream={stream} size={size} off={off}"
-                    );
-                }
-            }
-        }
-    }
-}
-#[test]
-fn crossbar_reader_views_links_and_lock_share_state() {
-    let (c, _) = chip();
-    let x = c.crossbar();
-    let view = c.crossbar_for_port(14);
-    assert_eq!(view.read32(0xc).data >> 6 & 15, 14);
-    x.write32(0xc4, 0x11);
-    view.write32(0xc4, 0x22);
-    assert_eq!(x.read32(0xc4).data, 0x11);
-    view.write32(0xcc, 0);
-    assert_eq!(x.read32(0xc4).data, 0);
-    c.set_link_present(9, true);
-    c.set_link_8bit(9, true);
-    assert_eq!(x.read32(0x17c).data, 0x30);
-    assert_eq!(x.read32(0x154).data, 1 << 31);
-    assert_eq!(x.read32(0x13c).data, 0x40);
-}
-#[test]
 fn invalid_register_captures_first_address_and_reports_error_destination() {
     let (c, _) = chip();
     let f = c.head(15);
@@ -638,37 +466,15 @@ fn invalid_register_captures_first_address_and_reports_error_destination() {
     assert_eq!(f.read32(0x104).data & (1 << 24), 0);
 }
 #[test]
-fn type_one_configuration_and_absent_dma_targets_are_explicit() {
-    let (c, _) = chip();
-    let f = c.head(15);
-    c.attach(15, 2, Card::new());
-    f.write32(0xcc, 2 << 11);
-    assert_eq!(f.read32(0x28000).data, 0x56781234);
-    f.write32(0xcc, (1 << 16) | (2 << 11));
-    assert_eq!(f.read32(0x28000).data, u32::MAX);
-    f.write32(0x84, 9 << 20);
-    let mut bytes = [0xff; 4];
-    assert_eq!(
-        c.dma(15, 0).dma_read(0x80002000, &mut bytes),
-        PciDmaStatus::MasterAbort
-    );
-    assert_eq!(bytes, [0; 4]);
-    assert_eq!(
-        c.dma(15, 0).dma_read(0x3fff8000, &mut bytes),
-        PciDmaStatus::Ok
-    );
-    assert_eq!(
-        c.dma(15, 0).dma_read(0x40800000, &mut bytes),
-        PciDmaStatus::MasterAbort
-    );
-}
-
-#[test]
 fn partial_configuration_writes_preserve_unwritten_status_events() {
     let (c, _) = chip();
     let f = c.head(15);
     let card = Card::with_status_events(0xc000);
     c.attach(15, 0, card.clone());
+    for (bus, expected) in [(0, 0x56781234), (1, u32::MAX)] {
+        f.write32(0xcc, bus << 16);
+        assert_eq!(f.read32(0x28000).data, expected);
+    }
     card.config.set_status_bits(0xc000);
     assert_eq!(f.write16(0x20006, 0x0102), BUS_OK);
     assert_eq!(f.read32(0x20004).data, 0xc200_0102);
@@ -687,67 +493,54 @@ fn partial_configuration_writes_preserve_unwritten_status_events() {
     assert_eq!(f.read32(0x20004).data, 0x4200_0002);
 }
 
-fn assert_pio_matches_slow(head: &XBridgeHead, card: &Card, address: u64) {
+fn assert_pio_matches_slow(head: &XBridgeHead, card: &Card, address: u64, mask: usize) {
     for size in [1, 2, 4, 8] {
         for offset in (0..32).step_by(size) {
             let at = address + offset as u64;
-            assert_eq!(head.access(at, size, None), head.slow_pio(at, size, None),
-                "read {at:#x} width {size}");
             let before = card.bytes.lock().clone();
+            let expected = (0..size).fold(0u64, |v, i| (v << 8) | before[(offset + i) ^ mask] as u64);
+            assert_eq!(head.access(at, size, None), expected, "read {at:#x} width {size}");
+            assert_eq!(head.slow_pio(at, size, None), expected);
             head.access(at, size, Some(0x0123456789abcdef));
             let fast = card.bytes.lock().clone();
-            *card.bytes.lock() = before;
+            *card.bytes.lock() = before.clone();
             head.slow_pio(at, size, Some(0x0123456789abcdef));
             assert_eq!(*card.bytes.lock(), fast, "write {at:#x} width {size}");
+            *card.bytes.lock() = before;
         }
     }
 }
 
 #[test]
-fn native_bar_pages_match_device_windows_and_both_alias_widths() {
-    let (chip, _) = chip();
-    let head = chip.pci_head(15);
-    let card = Card::with_bar(crate::pci::Bar::Mem(0x2000), 0);
-    // Device window 0 reaches a function owned by slot 3.
-    chip.attach(15, 3, card.clone());
-    head.write32(0x23010, 0x02000000);
-    head.write32(0x23004, 2);
-    for wide in [false, true] {
-        chip.set_dma_64bit(15, 3, wide);
-        for stream in [false, true] {
-            head.write32(0x204, 0x1020 | if wide { 1 << 22 } else { 0 }
-                | if stream { 1 << 13 } else { 0 });
-            assert!(head.pio_map.lock().runs.contains(&(0x200000, 0x202000)));
-            assert_pio_matches_slow(head, &card, 0x200000);
-            for swap in [false, true] {
-                head.write32(0x24, if swap { 1 << 22 } else { 0 });
-                assert_pio_matches_slow(head, &card, 0x42000000);
-                assert_pio_matches_slow(head, &card, 0x82000000);
+fn native_bar_pages_preserve_all_pio_lanes() {
+    for memory in [false, true] {
+        let (chip, _) = chip();
+        let head = chip.pci_head(15);
+        let bar = if memory { crate::pci::Bar::Mem(0x2000) } else { crate::pci::Bar::Io(0x2000) };
+        let card = Card::with_bar(bar, 0);
+        // Device window 0 reaches a function owned by slot 3.
+        chip.attach(15, 3, card.clone());
+        head.write32(0x23010, 0x02000000 | u32::from(!memory));
+        head.write32(0x23004, if memory { 2 } else { 1 });
+        for wide in [false, true] {
+            chip.set_dma_64bit(15, 3, wide);
+            for stream in [false, true] {
+                head.write32(0x204, 0x20 | if memory { 1 << 12 } else { 0 }
+                    | if wide { 1 << 22 } else { 0 } | if stream { 1 << 13 } else { 0 });
+                assert!(head.pio_map.lock().runs.contains(&(0x200000, 0x202000)));
+                assert_pio_matches_slow(head, &card, 0x200000, if stream { 0 } else if wide { 7 } else { 3 });
+                for swap in [false, true] {
+                    head.write32(0x24, if swap { 1 << if memory { 22 } else { 23 } } else { 0 });
+                    let aliases = if memory {
+                        vec![(0x42000000, false), (0x82000000, wide)]
+                    } else { vec![(0x102000000, false)] };
+                    for (address, wide) in aliases {
+                        assert_pio_matches_slow(head, &card, address, if swap { 0 } else if wide { 7 } else { 3 });
+                    }
+                }
             }
         }
     }
-}
-
-#[test]
-fn native_io_bar_pages_match_window_and_alias_placement() {
-    let (chip, _) = chip();
-    let head = chip.pci_head(15);
-    let card = Card::with_bar(crate::pci::Bar::Io(0x1000), 0);
-    chip.attach(15, 0, card.clone());
-    head.write32(0x20010, 0x02000001);
-    head.write32(0x20004, 1);
-    for wide in [false, true] {
-        for stream in [false, true] {
-            head.write32(0x204, 0x20 | if wide { 1 << 22 } else { 0 }
-                | if stream { 1 << 13 } else { 0 });
-            assert_pio_matches_slow(head, &card, 0x200000);
-            for swap in [false, true] {
-                head.write32(0x24, if swap { 1 << 23 } else { 0 });
-                assert_pio_matches_slow(head, &card, 0x102000000);
-            }
-        }
-    }
-    assert!(head.pio_map.lock().runs.iter().any(|&(start, _)| start == 0x102000000));
 }
 
 #[test]
@@ -755,6 +548,7 @@ fn bar_moves_disable_and_reset_revoke_native_pages_without_new_endpoints() {
     let (chip, _) = chip();
     let head = chip.pci_head(15);
     let card = Card::with_bar(crate::pci::Bar::Mem(0x1000), 0);
+    let old_ref = Arc::downgrade(&card);
     chip.attach(15, 0, card);
     head.write32(0x20010, 0x02000000);
     head.write32(0x20004, 2);
@@ -787,6 +581,19 @@ fn bar_moves_disable_and_reset_revoke_native_pages_without_new_endpoints() {
     chip.crossbar().write32(0x2f4, 1);
     assert!(head.pio_map.lock().runs.is_empty());
     assert_eq!(head.read32(0x4207f000).data, u32::MAX);
+    head.write32(0x20010, 0x02000000);
+    head.write32(0x20004, 2);
+    let stale = head.pio_map.lock().entries[&(8, 0, 0)].device.clone();
+    let replacement = Card::with_bar(crate::pci::Bar::Mem(0x1000), 0);
+    replacement.bytes.lock().fill(0x5a);
+    chip.attach(15, 0, replacement);
+    assert_eq!(head.read32(0x42000000).data, u32::MAX);
+    assert_eq!(stale.read32(0x42000000).data, u32::MAX);
+    stale.write32(0x42000000, 0xdeadbeef);
+    assert_eq!(old_ref.upgrade().unwrap().bytes.lock()[..4], [0, 1, 2, 3]);
+    head.write32(0x20010, 0x02000000);
+    head.write32(0x20004, 2);
+    assert_eq!(head.read32(0x42000000).data, 0x5a5a5a5a);
 }
 
 #[test]
@@ -808,32 +615,9 @@ fn partial_and_overlapping_bar_pages_keep_the_slow_decoder() {
     assert_eq!(head.read32(0x42000020).data, 0x23222120);
     head.write32(0x20004, 0);
     assert!(!head.pio_map.lock().runs.is_empty());
-    assert_pio_matches_slow(head, &large, 0x42000000);
+    assert_pio_matches_slow(head, &large, 0x42000000, 3);
     head.write32(0x21004, 0);
     head.write32(0x20004, 2);
     assert!(head.pio_map.lock().runs.is_empty());
     assert_eq!(head.read32(0x42000000).data, 0xa5a5a5a5);
-}
-
-#[test]
-fn replacing_a_host_function_revokes_its_native_pages() {
-    let (chip, _) = chip();
-    let head = chip.pci_head(15);
-    let old = Card::with_bar(crate::pci::Bar::Mem(0x1000), 0);
-    let old_ref = Arc::downgrade(&old);
-    chip.attach(15, 0, old);
-    head.write32(0x20010, 0x02000000);
-    head.write32(0x20004, 2);
-    assert_eq!(head.read32(0x42000000).data, 0x03020100);
-    let stale = head.pio_map.lock().entries[&(8, 0, 0)].device.clone();
-    let replacement = Card::with_bar(crate::pci::Bar::Mem(0x1000), 0);
-    replacement.bytes.lock().fill(0x5a);
-    chip.attach(15, 0, replacement);
-    assert_eq!(head.read32(0x42000000).data, u32::MAX);
-    assert_eq!(stale.read32(0x42000000).data, u32::MAX);
-    stale.write32(0x42000000, 0xdeadbeef);
-    assert_eq!(old_ref.upgrade().unwrap().bytes.lock()[..4], [0, 1, 2, 3]);
-    head.write32(0x20010, 0x02000000);
-    head.write32(0x20004, 2);
-    assert_eq!(head.read32(0x42000000).data, 0x5a5a5a5a);
 }

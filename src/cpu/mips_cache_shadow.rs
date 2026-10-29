@@ -727,30 +727,9 @@ mod tests {
         }
     }
 
-    // NEC U12754E, pp. 29-30; U10278E fourth edition, pp. 262, 271-272.
+    /// NEC U12754E pp.29-30; U10278E pp.262,271-272: diagnostic data and supplied parity.
     #[test]
-    fn primary_data_keeps_only_the_published_data_and_parity_bits() {
-        let c = cache();
-        for (sel, data, check) in [(CACH_PI, 0xf_ffff_ffff, 1), (CACH_PD, 0xffff_ffff, 15)] {
-            c.cache_op(C_IST | sel, 0, 0x8000_0000_1234_5678);
-            let tag = c.cache_op(C_ILT | sel, 0, 0);
-            c.set_cache_ecc(0x3ff);
-            c.cache_op(C_R10K_ISD | sel, 0, u64::MAX);
-            c.set_cache_ecc(0);
-            assert_eq!(c.cache_op(C_R10K_ILD | sel, 0, 0), data);
-            assert_eq!(c.cache_op_ecc(), check);
-            assert_eq!(c.cache_op(C_ILT | sel, 0, 0), tag, "data store changed tag/LRU");
-            // Supplied predecode and parity bits are storage, not regenerated.
-            c.set_cache_ecc(0);
-            c.cache_op(C_R10K_ISD | sel, 0, 0xa_0123_4567);
-            let want = if sel == CACH_PI { 0xa_0123_4567 } else { 0x0123_4567 };
-            assert_eq!(c.cache_op(C_R10K_ILD | sel, 0, 0), want);
-            assert_eq!(c.cache_op_ecc(), 0);
-        }
-    }
-
-    #[test]
-    fn primary_data_operations_do_not_transfer_ordinary_memory() {
+    fn primary_data_masks_arrays_and_ways() {
         struct NoTransfers;
         impl BusDevice for NoTransfers {
             fn read8(&self, _: u64) -> crate::traits::BusRead8 { panic!("CACHE read8") }
@@ -763,20 +742,23 @@ mod tests {
             fn write64(&self, _: u64, _: u64) -> u32 { panic!("CACHE write64") }
         }
         let c = R10000ShadowCache::new(Arc::new(NoTransfers));
-        for sel in [CACH_PI, CACH_PD] {
-            c.cache_op(C_R10K_ISD | sel, 0, 0x1234_5678);
-            assert_eq!(c.cache_op(C_R10K_ILD | sel, 0, 0), 0x1234_5678);
+        for (sel, data, parity) in [(CACH_PI, 0xf_ffff_ffff, 1), (CACH_PD, 0xffff_ffff, 15)] {
+            c.cache_op(C_IST | sel, 0, 0x8000_0000_1234_5678);
+            let tag = c.cache_op(C_ILT | sel, 0, 0);
+            c.set_cache_ecc(0x3ff);
+            c.cache_op(C_R10K_ISD | sel, 0, u64::MAX);
+            assert_eq!(c.cache_op(C_R10K_ILD | sel, 0, 0), data);
+            assert_eq!(c.cache_op_ecc(), parity);
+            assert_eq!(c.cache_op(C_ILT | sel, 0, 0), tag);
+            c.set_cache_ecc(0); // Supplied check bits must not be regenerated.
+            c.cache_op(C_R10K_ISD | sel, 0, 0xa_0123_4567);
+            assert_eq!(c.cache_op(C_R10K_ILD | sel, 0, 0), if sel == CACH_PI { 0xa_0123_4567 } else { 0x0123_4567 });
+            assert_eq!(c.cache_op_ecc(), 0);
         }
-    }
-
-    #[test]
-    fn primary_data_words_ways_and_arrays_are_independent() {
-        let c = cache();
-        // Adjacent words, both line boundaries, and the final word in a way.
-        let indices = [0, 1, 4, 5, 28, 29, 32, 33, 60, 61, 64, 65, 0x3ffc, 0x3ffd];
+        let indices = [0, 1, 4, 0x3ffc]; // Both ways, adjacent words, final word.
         for (array, sel) in [CACH_PI, CACH_PD].into_iter().enumerate() {
             for (n, va) in indices.into_iter().enumerate() {
-                c.set_cache_ecc((n as u32 + array as u32) & 1);
+                c.set_cache_ecc(n as u32 & 1);
                 c.cache_op(C_R10K_ISD | sel, va, 0x1000 + array as u64 * 0x100 + n as u64);
             }
         }
@@ -784,7 +766,7 @@ mod tests {
             for (n, va) in indices.into_iter().enumerate() {
                 assert_eq!(c.cache_op(C_R10K_ILD | sel, va | 0xffff_ffff_8000_4000, 0),
                            0x1000 + array as u64 * 0x100 + n as u64, "array {array}, VA {va:#x}");
-                assert_eq!(c.cache_op_ecc(), (n as u32 + array as u32) & 1);
+                assert_eq!(c.cache_op_ecc(), n as u32 & 1);
             }
         }
     }

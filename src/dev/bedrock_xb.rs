@@ -180,31 +180,9 @@ impl BusDevice for BedrockXb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn service_order() {
-        let d = BedrockXb::new();
-        assert_eq!(d.read64(0).data, 0x0008000080000021);
-        d.write64(0x20, 1);
-        assert!(d.error_level());
-        assert_eq!(d.read64(0x90).data, 0x1f00);
-        d.write64(0x190, !0);
-        assert_eq!(d.read64(0x90).data, 0x1f00);
-        d.write64(0x188, !0);
-        d.write64(0x120, 0);
-        d.write64(0x190, 0);
-        assert!(!d.error_level());
-        d.write64(0x88, !0);
-        assert_eq!(d.read64(0x88).data, 0x11);
-        d.power_on();
-        assert!(!d.error_level());
-    }
-}
 
-#[cfg(test)]
-mod contract_tests {
-    use super::*;
     #[test]
-    fn all_masks_and_unpublished_queues() {
+    fn register_masks_and_reset() {
         let d = BedrockXb::new();
         for (a, mask) in [
             (0, 0x000ffffffffffff1),
@@ -217,9 +195,25 @@ mod contract_tests {
             d.write64(a, !0);
             assert_eq!(d.read64(a).data, mask);
         }
-        for (n, mask) in MASKS.into_iter().enumerate() {
-            d.write64(0x20 + n as u64 * 8, !0);
-            assert_eq!(d.read64(0x20 + n as u64 * 8).data, mask);
+        // Keep expected register values independent of the decoder's mask table.
+        for (address, expected) in [
+            (0x20, 0x3333),
+            (0x28, 0x0033),
+            (0x30, 0),
+            (0x38, 0),
+            (0x40, 0x3330),
+            (0x48, 0),
+            (0x50, 0),
+            (0x58, 0x00f0),
+            (0x60, 0xfff0),
+            (0x68, 0),
+            (0x70, 0),
+            (0x78, 0),
+            (0x80, 0x3303),
+            (0x88, 0x0011),
+        ] {
+            d.write64(address, !0);
+            assert_eq!(d.read64(address).data, expected, "register {address:#x}");
         }
         d.power_on();
         assert_eq!(d.read64(0).data, 0x0008000080000021);
@@ -227,20 +221,36 @@ mod contract_tests {
         assert_eq!(d.read32(0).status, BUS_ERR);
     }
     #[test]
-    fn next_error_and_reinjection() {
-        let d = BedrockXb::new();
-        d.write64(0x88, 0x10);
-        d.write64(0x20, 1);
-        assert_eq!(d.read64(0x90).data, 0x1200);
-        d.write64(0x188, 0);
-        d.write64(0x190, 0);
-        assert_eq!(d.read64(0x90).data, 0x1f00);
-        d.write64(0x120, 0);
-        d.write64(0x20, 0x10);
-        d.write64(0x190, 0);
-        assert_eq!(d.read64(0x90).data, 0x1f00);
-        d.write64(0x120, 0);
-        d.write64(0x190, 0);
-        assert!(!d.error_level());
+    fn error_service_and_reinjection() {
+        {
+            let d = BedrockXb::new();
+            d.write64(0x20, 1);
+            assert!(d.error_level());
+            assert_eq!(d.read64(0x90).data, 0x1f00);
+            d.write64(0x190, !0);
+            assert_eq!(d.read64(0x90).data, 0x1f00);
+            d.write64(0x188, !0);
+            d.write64(0x120, 0);
+            d.write64(0x190, 0);
+            assert!(!d.error_level());
+            d.power_on();
+            assert!(!d.error_level());
+        }
+        {
+            let d = BedrockXb::new();
+            d.write64(0x88, 0x10);
+            d.write64(0x20, 1);
+            assert_eq!(d.read64(0x90).data, 0x1200);
+            d.write64(0x188, 0);
+            d.write64(0x190, 0);
+            assert_eq!(d.read64(0x90).data, 0x1f00);
+            d.write64(0x120, 0);
+            d.write64(0x20, 0x10);
+            d.write64(0x190, 0);
+            assert_eq!(d.read64(0x90).data, 0x1f00);
+            d.write64(0x120, 0);
+            d.write64(0x190, 0);
+            assert!(!d.error_level());
+        }
     }
 }

@@ -806,140 +806,14 @@ fn idle(at: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn fuel_memory_regression_uncached_ecc_byte_stores_keep_low_source_byte() {
-        let md = configured();
-        let ecc = md.ecc_bus();
-        for carrier in 0..8 {
-            let source = 0x11223344556677a5;
-            assert_eq!(ecc.write_uncached_subword(carrier, 1, source), BUS_OK);
-            assert_eq!(ecc.read8(carrier).data, source as u8, "carrier {carrier}");
-        }
-        // The halfword protocol alone selects a different register lane.
-        assert_eq!(ecc.write_uncached_subword(4, 2, 0x123456789abcdef0), BUS_OK);
-        assert_eq!(ecc.read16(4).data, 0x1234);
-    }
-    #[test]
-    fn selftest_clock_is_lazy_and_excludes_stopped_time() {
-        let now = Arc::new(AtomicU64::new(100));
-        let time = now.clone();
-        let md = BedrockMd::with_clock(Arc::new(move || time.load(Ordering::Relaxed)));
-        let regs = md.md_bus();
-        regs.write64(8, 0x33);
-        md.start_clock();
-        regs.write64(0x20030, 1);
-        now.store(1099, Ordering::Relaxed);
-        assert_eq!(regs.read64(0x20048).data, 0);
-        now.store(1100, Ordering::Relaxed);
-        assert_eq!(regs.read64(0x20048).data, 3);
-        now.store(5000, Ordering::Relaxed);
-        regs.write64(0x20030, 1);
-        now.store(5500, Ordering::Relaxed);
-        md.stop_clock();
-        now.store(15000, Ordering::Relaxed);
-        assert_eq!(regs.read64(0x20048).data, 0);
-        md.start_clock();
-        now.store(15499, Ordering::Relaxed);
-        assert_eq!(regs.read64(0x20048).data, 0);
-        now.store(15500, Ordering::Relaxed);
-        assert_eq!(regs.read64(0x20048).data, 3);
-        regs.write64(0x20030, 1);
-        now.store(15400, Ordering::Relaxed);
-        assert_eq!(regs.read64(0x20048).data, 0);
-        now.store(16499, Ordering::Relaxed);
-        assert_eq!(regs.read64(0x20048).data, 0);
-        now.store(16500, Ordering::Relaxed);
-        assert_eq!(regs.read64(0x20048).data, 3);
-        regs.write64(0x20030, 1);
-        regs.write64(0x20030, 2);
-        now.store(20000, Ordering::Relaxed);
-        assert_eq!(regs.read64(0x20048).data, 0);
-        md.power_on();
-        regs.write64(8, 0x33);
-        md.start_clock();
-        regs.write64(0x20030, 1);
-        now.store(20999, Ordering::Relaxed);
-        assert_eq!(regs.read64(0x20048).data, 0);
-        now.store(21000, Ordering::Relaxed);
-        assert_eq!(regs.read64(0x20048).data, 3);
-    }
-
-    #[test]
-    fn ecc_config_masks_widths_and_resets() {
-        let md = configured();
-        let regs = md.md_bus();
-        assert_eq!(regs.read64(0x60000).data, 0);
-        assert_eq!(regs.write64(0x60000, u64::MAX), BUS_OK);
-        assert_eq!(regs.read64(0x60000).data, 1);
-        assert_eq!(regs.write64(0x60000, !1), BUS_OK);
-        assert_eq!(regs.read64(0x60000).data, 0);
-        assert_eq!(regs.read32(0x60000).status, BUS_ERR);
-        assert_eq!(regs.write8(0x60000, 1), BUS_ERR);
-        assert_eq!(regs.write64(0x60001, 1), BUS_ERR);
-        regs.write64(0x60000, 1);
-        md.soft_reset();
-        assert_eq!(regs.read64(0x60000).data, 0);
-        assert_eq!(regs.read64(8).data, 0x33);
-        regs.write64(0x60000, 1);
-        md.power_on();
-        assert_eq!(regs.read64(0x60000).data, 0);
-        assert_eq!(regs.read64(8).data, 0);
-    }
-    #[test]
-    fn ecc_config_retains_injections_until_checks_resume() {
-        for (code, kind, status, valid) in [
-            (1, MemoryError::Correctable, BUS_OK, 1 << 52),
-            (3, MemoryError::Uncorrectable, BUS_ERR, 1 << 60),
-        ] {
-            let md = configured();
-            let regs = md.md_bus();
-            let ecc = md.ecc_bus();
-            let ram = md.uncached_view();
-            let events = Arc::new(Mutex::new(Vec::new()));
-            let seen = events.clone();
-            md.on_error(Arc::new(move |event| seen.lock().push(event)));
-            assert_eq!(ram.read64(0).status, BUS_OK);
-            ecc.write8(7, code);
-            regs.write64(0x60000, u64::MAX);
-            assert_eq!(ram.read64(0).status, BUS_OK);
-            assert_eq!(ecc.read8(7).data, code);
-            assert_eq!(regs.read64(0x60010).data, 0);
-            assert!(events.lock().is_empty());
-            regs.write64(0x60000, !1);
-            assert_eq!(regs.read64(0x60000).data, 0);
-            assert_eq!(ram.read64(0).status, status);
-            assert_ne!(regs.read64(0x60010).data & valid, 0);
-            assert_eq!(*events.lock(), vec![kind]);
-            if kind == MemoryError::Correctable {
-                assert_eq!(ecc.read8(7).data, 0);
-                assert_eq!(ram.read64(0).status, BUS_OK);
-                assert_eq!(*events.lock(), vec![kind]);
-            }
-        }
-    }
-    #[test]
-    fn ecc_config_disabled_data_write_regenerates_check_bits() {
-        let md = configured();
-        let regs = md.md_bus();
-        let ecc = md.ecc_bus();
-        let ram = md.uncached_view();
-        ecc.write8(7, 3);
-        regs.write64(0x60000, 1);
-        assert_eq!(ram.write8(7, 0x5a), BUS_OK);
-        assert_eq!(ecc.read8(7).data, ecc_compute(0x5a));
-        regs.write64(0x60000, 0);
-        assert_eq!(ram.read64(0).status, BUS_OK);
-        assert_eq!(ram.read64(0).data, 0x5a);
-        assert_eq!(regs.read64(0x60010).data, 0);
-    }
-
     fn configured() -> Arc<BedrockMd> {
         let md = BedrockMd::new();
         assert_eq!(md.md_bus().write64(8, 0x33), BUS_OK);
         md
     }
+
     #[test]
-    fn bedrock_banks_remap_without_losing_data_or_exposing_holes() {
+    fn bank_decode_remap_and_reset() {
         let md = configured();
         let bus = md.physical();
         assert_eq!(bus.write64(0, 0x1122334455667788), BUS_OK);
@@ -956,83 +830,216 @@ mod tests {
         assert_eq!(bus.read64(0).data, 0xabcdef);
         md.power_on();
         assert_eq!(bus.read64(0).status, BUS_ERR);
+        #[cfg(feature = "jitv2")]
+        {
+            let md = configured();
+            let ram = md.physical();
+            let first = ram.gen_ptr(0);
+            let second = ram.gen_ptr(BANK_SPAN);
+            assert!(!first.is_null() && !second.is_null());
+            assert_ne!(first, second);
+            let before = unsafe { (*first).load(Ordering::Relaxed) };
+            ram.write64(0, 0x55);
+            assert!(unsafe { (*first).load(Ordering::Relaxed) } > before);
+            md.md_bus().write64(8, 0x33 | (1 << 32));
+            assert_eq!(ram.gen_ptr(0), second);
+            let view = md.uncached_view();
+            assert_eq!(view.gen_ptr(0), second);
+            drop(md);
+            // The endpoint keeps the backing memory alive after MD disappears.
+            assert!(unsafe { (*second).load(Ordering::Relaxed) } > 0);
+            assert_eq!(view.read64(0).status, BUS_ERR);
+        }
+
     }
     #[test]
-    fn bedrock_register_masks_and_widths_do_not_accept_unknown_operations() {
-        let md = BedrockMd::new();
-        let r = md.md_bus();
-        assert_eq!(r.read64(0).data, u64::MAX);
-        assert_eq!(r.read32(0).status, BUS_ERR);
-        assert_eq!(r.write64(8, u64::MAX), BUS_OK);
-        assert_eq!(r.read64(8).data, CONFIG_MASK);
-        assert_eq!(r.write64(0x20000, u64::MAX), BUS_OK);
-        assert_eq!(r.read64(0x20000).data, 1 << 63 | 0xfff);
-        assert_eq!(r.read64(0x60).data, 0x001818180c0c0c00);
-        assert_eq!(r.write64(0x20030, 3), BUS_OK);
-        assert_eq!(r.write64(0x70000, 0), BUS_ERR);
-        assert!(md.unsupported() >= 3);
+    fn register_access_and_ecc_configuration() {
+        {
+            let md = configured();
+            let r = md.md_bus();
+            // These are named idle carriers in the donor's md_idle(), not storage.
+            for at in [0x20, 0x20010, 0x40020, 0x60020] {
+                let before = md.unsupported();
+                assert_eq!(r.write64(at, u64::MAX), BUS_OK, "{at:#x}");
+                assert_eq!(r.read64(at).data, 0, "{at:#x}");
+                assert_eq!(md.unsupported(), before + 1);
+            }
+            for (at, value) in [(0x60, 0x001818180c0c0c00), (0x40050, 0x04040400)] {
+                let before = md.unsupported();
+                assert_eq!(r.write64(at, 0), BUS_OK);
+                assert_eq!(r.read64(at).data, value);
+                assert_eq!(md.unsupported(), before + 1);
+            }
+            // Error-clear writes are ignored too: only a read clears the record.
+            md.ecc_bus().write8(7, 3);
+            md.uncached_view().read64(0);
+            r.write64(0x40000, 2);
+            md.directory_bus().write64(0, 3 << 16);
+            r.write64(0x40000, 0);
+            md.physical().read64(0);
+            let memory_error = r.read64(0x60010).data;
+            let directory_error = r.read64(0x40010).data;
+            assert_ne!(memory_error & (1 << 60), 0);
+            assert_ne!(directory_error & (1 << 63), 0);
+            for at in [0x40010, 0x40018, 0x60010, 0x60018] {
+                let before = md.unsupported();
+                assert_eq!(r.write64(at, u64::MAX), BUS_OK);
+                assert_eq!(r.read64(0x60010).data, memory_error);
+                assert_eq!(r.read64(0x40010).data, directory_error);
+                assert_eq!(md.unsupported(), before + 1);
+            }
+            // An unsupported self-test command leaves an in-flight command alone.
+            r.write64(0x20030, 1);
+            let before = md.unsupported();
+            assert_eq!(r.write64(0x20030, 3), BUS_OK);
+            assert_eq!(md.unsupported(), before + 1);
+            md.advance_ns(1000);
+            assert_eq!(r.read64(0x20048).data, 3);
+            assert_eq!(r.write64(0x70000, 1), BUS_ERR);
+            assert_eq!(r.read64(0x70000).status, BUS_ERR);
+            assert_eq!(r.write32(0x60, 0), BUS_ERR);
+            assert_eq!(r.write64(0x61, 0), BUS_ERR);
+        }
+        {
+            let md = configured();
+            let regs = md.md_bus();
+            assert_eq!(regs.read64(0x60000).data, 0);
+            assert_eq!(regs.write64(0x60000, u64::MAX), BUS_OK);
+            assert_eq!(regs.read64(0x60000).data, 1);
+            assert_eq!(regs.write64(0x60000, !1), BUS_OK);
+            assert_eq!(regs.read64(0x60000).data, 0);
+            assert_eq!(regs.write8(0x60000, 1), BUS_ERR);
+            assert_eq!(regs.write64(0x60001, 1), BUS_ERR);
+            regs.write64(0x60000, 1);
+            md.soft_reset();
+            assert_eq!(regs.read64(0x60000).data, 0);
+            assert_eq!(regs.read64(8).data, 0x33);
+            regs.write64(0x60000, 1);
+            md.power_on();
+            assert_eq!(regs.read64(0x60000).data, 0);
+            assert_eq!(regs.read64(8).data, 0);
+        }
+        {
+            for (code, kind, status, valid) in [
+                (1, MemoryError::Correctable, BUS_OK, 1 << 52),
+                (3, MemoryError::Uncorrectable, BUS_ERR, 1 << 60),
+            ] {
+                let md = configured();
+                let regs = md.md_bus();
+                let ecc = md.ecc_bus();
+                let ram = md.uncached_view();
+                let events = Arc::new(Mutex::new(Vec::new()));
+                let seen = events.clone();
+                md.on_error(Arc::new(move |event| seen.lock().push(event)));
+                assert_eq!(ram.read64(0).status, BUS_OK);
+                ecc.write8(7, code);
+                regs.write64(0x60000, u64::MAX);
+                assert_eq!(ram.read64(0).status, BUS_OK);
+                assert_eq!(ecc.read8(7).data, code);
+                assert_eq!(regs.read64(0x60010).data, 0);
+                assert!(events.lock().is_empty());
+                regs.write64(0x60000, !1);
+                assert_eq!(regs.read64(0x60000).data, 0);
+                assert_eq!(ram.read64(0).status, status);
+                assert_ne!(regs.read64(0x60010).data & valid, 0);
+                assert_eq!(*events.lock(), vec![kind]);
+                if kind == MemoryError::Correctable {
+                    assert_eq!(ecc.read8(7).data, 0);
+                    assert_eq!(ram.read64(0).status, BUS_OK);
+                    assert_eq!(*events.lock(), vec![kind]);
+                }
+            }
+        }
+        {
+            let md = configured();
+            let regs = md.md_bus();
+            let ecc = md.ecc_bus();
+            let ram = md.uncached_view();
+            ecc.write8(7, 3);
+            regs.write64(0x60000, 1);
+            assert_eq!(ram.write8(7, 0x5a), BUS_OK);
+            assert_eq!(ecc.read8(7).data, 0x82);
+            regs.write64(0x60000, 0);
+            assert_eq!(ram.read64(0).status, BUS_OK);
+            assert_eq!(ram.read64(0).data, 0x5a);
+            assert_eq!(regs.read64(0x60010).data, 0);
+        }
     }
     #[test]
-    fn bedrock_known_register_writes_are_diagnosed_and_ignored() {
-        let md = configured();
-        let r = md.md_bus();
-        // These are named idle carriers in the donor's md_idle(), not storage.
-        for at in [
-            0x20, 0x28, 0x40, 0x48, 0x58, 0x20010, 0x20018, 0x20020, 0x20028, 0x40020, 0x40028,
-            0x40030, 0x40038, 0x40058, 0x60020, 0x60028, 0x60030, 0x60038,
-        ] {
-            let before = md.unsupported();
-            assert_eq!(r.write64(at, u64::MAX), BUS_OK, "{at:#x}");
-            assert_eq!(r.read64(at).data, 0, "{at:#x}");
-            assert_eq!(md.unsupported(), before + 1);
+    fn selftest_clock_fitting_and_zero_fill() {
+        {
+            let now = Arc::new(AtomicU64::new(100));
+            let time = now.clone();
+            let md = BedrockMd::with_clock(Arc::new(move || time.load(Ordering::Relaxed)));
+            let regs = md.md_bus();
+            regs.write64(8, 0x33);
+            md.start_clock();
+            regs.write64(0x20030, 1);
+            now.store(1099, Ordering::Relaxed);
+            assert_eq!(regs.read64(0x20048).data, 0);
+            now.store(1100, Ordering::Relaxed);
+            assert_eq!(regs.read64(0x20048).data, 3);
+            now.store(5000, Ordering::Relaxed);
+            regs.write64(0x20030, 1);
+            now.store(5500, Ordering::Relaxed);
+            md.stop_clock();
+            now.store(15000, Ordering::Relaxed);
+            assert_eq!(regs.read64(0x20048).data, 0);
+            md.start_clock();
+            now.store(15499, Ordering::Relaxed);
+            assert_eq!(regs.read64(0x20048).data, 0);
+            now.store(15500, Ordering::Relaxed);
+            assert_eq!(regs.read64(0x20048).data, 3);
+            regs.write64(0x20030, 1);
+            now.store(15400, Ordering::Relaxed);
+            assert_eq!(regs.read64(0x20048).data, 0);
+            now.store(16499, Ordering::Relaxed);
+            assert_eq!(regs.read64(0x20048).data, 0);
+            now.store(16500, Ordering::Relaxed);
+            assert_eq!(regs.read64(0x20048).data, 3);
+            regs.write64(0x20030, 1);
+            regs.write64(0x20030, 2);
+            now.store(20000, Ordering::Relaxed);
+            assert_eq!(regs.read64(0x20048).data, 0);
+            md.power_on();
+            regs.write64(8, 0x33);
+            md.start_clock();
+            regs.write64(0x20030, 1);
+            now.store(20999, Ordering::Relaxed);
+            assert_eq!(regs.read64(0x20048).data, 0);
+            now.store(21000, Ordering::Relaxed);
+            assert_eq!(regs.read64(0x20048).data, 3);
         }
-        for (at, value) in [(0x60, 0x001818180c0c0c00), (0x40050, 0x04040400)] {
-            let before = md.unsupported();
-            assert_eq!(r.write64(at, 0), BUS_OK);
-            assert_eq!(r.read64(at).data, value);
-            assert_eq!(md.unsupported(), before + 1);
+        {
+            let md = configured();
+            let r = md.md_bus();
+            r.write64(0x20030, 0x21);
+            md.advance_ns(1000);
+            assert_eq!(r.read64(0x20048).data, 2);
+            assert_eq!(r.read64(0x20040).data, 1 << 48);
+            r.write64(0x20030, 1);
+            r.write64(0x20030, 2);
+            md.advance_ns(1000);
+            assert_eq!(r.read64(0x20048).data, 0);
+            assert_eq!(r.write64(0x20030, 3), BUS_OK);
         }
-        // Error-clear writes are ignored too: only a read clears the record.
-        md.ecc_bus().write8(7, 3);
-        md.uncached_view().read64(0);
-        r.write64(0x40000, 2);
-        md.directory_bus().write64(0, 3 << 16);
-        r.write64(0x40000, 0);
-        md.physical().read64(0);
-        let memory_error = r.read64(0x60010).data;
-        let directory_error = r.read64(0x40010).data;
-        assert_ne!(memory_error & (1 << 60), 0);
-        assert_ne!(directory_error & (1 << 63), 0);
-        for at in [0x40010, 0x40018, 0x60010, 0x60018] {
-            let before = md.unsupported();
-            assert_eq!(r.write64(at, u64::MAX), BUS_OK);
-            assert_eq!(r.read64(0x60010).data, memory_error);
-            assert_eq!(r.read64(0x40010).data, directory_error);
-            assert_eq!(md.unsupported(), before + 1);
+        {
+            let md = configured();
+            let r = md.md_bus();
+            r.write64(8, 0x13);
+            md.physical().write64(0, 0x1234);
+            md.ecc_bus().write8(7, 1);
+            r.write64(0x20038, 0x80);
+            r.write64(0x20030, 1);
+            md.advance_ns(1000);
+            assert_eq!(r.read64(0x20048).data, 3);
+            assert_eq!(md.physical().read64(0).data, 0);
+            assert_eq!(md.ecc_bus().read8(7).data, 0);
+            assert_eq!(r.read64(0x60010).data, 0);
         }
-        r.write64(0x20030, 0x21);
-        md.advance_ns(1000);
-        assert_eq!(r.read64(0x20040).data, 1 << 48);
-        assert_eq!(r.read64(0x20048).data, 2);
-        for at in [0x20040, 0x20048] {
-            assert_eq!(r.write64(at, u64::MAX), BUS_OK);
-        }
-        assert_eq!(r.read64(0x20040).data, 1 << 48);
-        assert_eq!(r.read64(0x20048).data, 2);
-        // An unsupported self-test command leaves an in-flight command alone.
-        r.write64(0x20030, 1);
-        let before = md.unsupported();
-        assert_eq!(r.write64(0x20030, 3), BUS_OK);
-        assert_eq!(md.unsupported(), before + 1);
-        md.advance_ns(1000);
-        assert_eq!(r.read64(0x20048).data, 3);
-        assert_eq!(r.write64(0x70000, 1), BUS_ERR);
-        assert_eq!(r.read64(0x70000).status, BUS_ERR);
-        assert_eq!(r.write32(0x60, 0), BUS_ERR);
-        assert_eq!(r.write64(0x61, 0), BUS_ERR);
     }
     #[test]
-    fn bedrock_fetchop_uses_big_endian_word_lanes_and_preserves_other_word() {
+    fn fetchop_preserves_big_endian_word_lanes() {
         let md = configured();
         let ram = md.physical();
         let f = md.fetchop_bus();
@@ -1052,156 +1059,57 @@ mod tests {
         assert_eq!(f.read16(0).status, BUS_ERR);
     }
     #[test]
-    fn bedrock_ecc_corrects_and_callback_can_reenter_controller() {
-        let md = configured();
-        let e = md.ecc_bus();
-        md.physical().write64(0, 0);
-        let weak = Arc::downgrade(&md);
-        let count = Arc::new(AtomicU64::new(0));
-        let seen = count.clone();
-        md.on_error(Arc::new(move |kind| {
-            assert_eq!(kind, MemoryError::Correctable);
-            assert_eq!(weak.upgrade().unwrap().current_cell(), u64::MAX);
-            seen.fetch_add(1, Ordering::Relaxed);
-        }));
-        assert_eq!(e.write8(7, 1), BUS_OK);
-        assert_eq!(md.physical().read64(0).data, 0);
-        assert_eq!(count.load(Ordering::Relaxed), 1);
-        assert_eq!(e.read8(7).data, 0);
-        assert_ne!(md.md_bus().read64(0x60018).data & (1 << 52), 0);
-        assert_eq!(md.md_bus().read64(0x60010).data, 0);
-        assert_eq!(e.write16(6, 0x2313), BUS_OK);
-        assert_eq!(e.read16(6).data, 0x2313);
-        assert_eq!(e.read32(4).status, BUS_ERR);
-        assert_eq!(e.write16(0x04000006, 0xface), BUS_OK);
-        assert_eq!(e.read16(0x04000006).data, 0xface);
+    fn ecc_carriers_correction_and_scrub() {
+        {
+            let md = configured();
+            let ecc = md.ecc_bus();
+            for carrier in 0..8 {
+                let source = 0x11223344556677a5;
+                assert_eq!(ecc.write_uncached_subword(carrier, 1, source), BUS_OK);
+                assert_eq!(ecc.read8(carrier).data, source as u8, "carrier {carrier}");
+            }
+            // The halfword protocol alone selects a different register lane.
+            assert_eq!(ecc.write_uncached_subword(4, 2, 0x123456789abcdef0), BUS_OK);
+            assert_eq!(ecc.read16(4).data, 0x1234);
+            assert_eq!(ecc.write16(6, 0x2313), BUS_OK);
+            assert_eq!(ecc.read16(6).data, 0x2313);
+            assert_eq!(ecc.write16(0x04000006, 0xface), BUS_OK);
+            assert_eq!(ecc.read16(0x04000006).data, 0xface);
+
+        }
+        {
+            let md = configured();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let seen = events.clone();
+            let weak = Arc::downgrade(&md);
+            md.on_error(Arc::new(move |kind| {
+                assert_eq!(weak.upgrade().unwrap().current_cell(), u64::MAX);
+                seen.lock().push(kind);
+            }));
+            assert_eq!(md.ecc_bus().write8(7, 3), BUS_OK);
+            assert_eq!(md.ecc_bus().write8(6, 0x13), BUS_OK);
+            assert_eq!(md.ecc_bus().write8(5, 0x23), BUS_OK);
+            assert_eq!(md.ecc_scrub_bus().write64(0, 0), BUS_OK);
+            assert_eq!(
+                *events.lock(),
+                vec![
+                    MemoryError::Uncorrectable,
+                    MemoryError::Correctable,
+                    MemoryError::Correctable,
+                ]
+            );
+            let record = md.md_bus().read64(0x60010).data;
+            assert_ne!(record & (1 << 60), 0);
+            assert_ne!(record & (1 << 52), 0);
+            assert_ne!(record & (1 << 53), 0);
+            assert_eq!((record >> 40) & 0xff, 3);
+            assert_eq!(record & (((1u64 << 30) - 1) << 3), 0);
+            assert_eq!(md.ecc_bus().read8(6).data, 0x13);
+            assert_eq!(md.ecc_bus().read8(5).data, 0x23);
+        }
     }
     #[test]
-    fn bedrock_scrub_delivers_each_error_after_releasing_state() {
-        let md = configured();
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let seen = events.clone();
-        let weak = Arc::downgrade(&md);
-        md.on_error(Arc::new(move |kind| {
-            assert_eq!(weak.upgrade().unwrap().current_cell(), u64::MAX);
-            seen.lock().push(kind);
-        }));
-        assert_eq!(md.ecc_bus().write8(7, 3), BUS_OK);
-        assert_eq!(md.ecc_bus().write8(6, 0x13), BUS_OK);
-        assert_eq!(md.ecc_bus().write8(5, 0x23), BUS_OK);
-        assert_eq!(md.ecc_scrub_bus().write64(0, 0), BUS_OK);
-        assert_eq!(
-            *events.lock(),
-            vec![
-                MemoryError::Uncorrectable,
-                MemoryError::Correctable,
-                MemoryError::Correctable,
-            ]
-        );
-        let record = md.md_bus().read64(0x60010).data;
-        assert_ne!(record & (1 << 60), 0);
-        assert_ne!(record & (1 << 52), 0);
-        assert_ne!(record & (1 << 53), 0);
-        assert_eq!((record >> 40) & 0xff, 3);
-        assert_eq!(record & (((1u64 << 30) - 1) << 3), 0);
-        assert_eq!(md.ecc_bus().read8(6).data, 0x13);
-        assert_eq!(md.ecc_bus().read8(5).data, 0x23);
-    }
-    #[test]
-    fn bedrock_read_delivers_directory_and_memory_errors() {
-        let md = configured();
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let seen = events.clone();
-        let weak = Arc::downgrade(&md);
-        md.on_error(Arc::new(move |kind| {
-            assert_eq!(weak.upgrade().unwrap().current_cell(), u64::MAX);
-            seen.lock().push(kind);
-        }));
-        let r = md.md_bus();
-        r.write64(0x40000, 2);
-        md.directory_bus().write64(0, 1 << 16);
-        r.write64(0x40000, 0);
-        md.ecc_bus().write8(7, 3);
-        assert_eq!(md.uncached_view().read64(0).status, BUS_ERR);
-        assert_eq!(
-            *events.lock(),
-            vec![MemoryError::Correctable, MemoryError::Uncorrectable]
-        );
-        assert_ne!(r.read64(0x40010).data & (1 << 61), 0);
-        assert_ne!(r.read64(0x60010).data & (1 << 60), 0);
-    }
-    #[test]
-    fn bedrock_directory_protection_is_independent_and_wraps_at_fitted_density() {
-        let md = configured();
-        let d = md.directory_bus();
-        assert_eq!(d.write64(0x408, 0x1234), BUS_OK);
-        assert_eq!(d.read64(0x2000408).data, 0x1234);
-        assert_eq!(d.write64(0x418, 0x5678), BUS_OK);
-        assert_eq!(d.read64(0x408).data, 0x1234);
-        assert_eq!(d.read64(0x418).data, 0x5678);
-        assert_eq!(d.write64(8, u64::MAX), BUS_OK);
-        assert_eq!(d.read64(8).data, u64::MAX);
-        assert_eq!(d.read32(0).status, BUS_ERR);
-        assert_eq!(d.read64(1 << 30).status, BUS_ERR);
-    }
-    #[cfg(feature = "jitv2")]
-    #[test]
-    fn bedrock_generations_follow_fitted_banks_across_remaps() {
-        let md = configured();
-        let ram = md.physical();
-        let first = ram.gen_ptr(0);
-        let second = ram.gen_ptr(BANK_SPAN);
-        assert!(!first.is_null() && !second.is_null());
-        assert_ne!(first, second);
-        let before = unsafe { (*first).load(Ordering::Relaxed) };
-        ram.write64(0, 0x55);
-        assert!(unsafe { (*first).load(Ordering::Relaxed) } > before);
-        md.md_bus().write64(8, 0x33 | (1 << 32));
-        assert_eq!(ram.gen_ptr(0), second);
-        let view = md.uncached_view();
-        assert_eq!(view.gen_ptr(0), second);
-        drop(md);
-        // The endpoint keeps the backing memory alive after MD disappears.
-        assert!(unsafe { (*second).load(Ordering::Relaxed) } > 0);
-        assert_eq!(view.read64(0).status, BUS_ERR);
-    }
-    #[test]
-    fn bedrock_selftest_waits_and_cancels_and_rejects_absent_fitting() {
-        let md = configured();
-        let r = md.md_bus();
-        assert_eq!(r.write64(0x20030, 1), BUS_OK);
-        assert_eq!(r.read64(0x20048).data, 0);
-        md.advance_ns(999);
-        assert_eq!(r.read64(0x20048).data, 0);
-        md.advance_ns(1);
-        assert_eq!(r.read64(0x20048).data, 3);
-        r.write64(0x20030, 0x21);
-        md.advance_ns(1000);
-        assert_eq!(r.read64(0x20048).data, 2);
-        assert_eq!(r.read64(0x20040).data, 1 << 48);
-        r.write64(0x20030, 1);
-        r.write64(0x20030, 2);
-        md.advance_ns(1000);
-        assert_eq!(r.read64(0x20048).data, 0);
-        assert_eq!(r.write64(0x20030, 3), BUS_OK);
-    }
-    #[test]
-    fn bedrock_selftest_zero_fill_changes_ram_and_clears_injections() {
-        let md = configured();
-        let r = md.md_bus();
-        r.write64(8, 0x13);
-        md.physical().write64(0, 0x1234);
-        md.ecc_bus().write8(7, 1);
-        r.write64(0x20038, 0x80);
-        r.write64(0x20030, 1);
-        md.advance_ns(1000);
-        assert_eq!(r.read64(0x20048).data, 3);
-        assert_eq!(md.physical().read64(0).data, 0);
-        assert_eq!(md.ecc_bus().read8(7).data, 0);
-        assert_eq!(r.read64(0x60010).data, 0);
-    }
-    #[test]
-    fn bedrock_uncached_uce_fails_but_dma_returns_data_and_scrub_corrects() {
+    fn uncached_errors_and_dma_responses() {
         let md = configured();
         let r = md.md_bus();
         let e = md.ecc_bus();
@@ -1216,19 +1124,45 @@ mod tests {
         assert_eq!(md.ecc_scrub_bus().write32(0, 0), BUS_ERR);
     }
     #[test]
-    fn bedrock_directory_writes_generate_check_bits_and_correct_on_ram_read() {
-        let md = configured();
-        let r = md.md_bus();
-        let d = md.directory_bus();
-        assert_eq!(d.write64(0, 1), BUS_OK);
-        assert_eq!(d.read64(0).data, 0x001f0001);
-        r.write64(0x40000, 2);
-        d.write64(0, 0x001e0001);
-        r.write64(0x40000, 0);
-        assert_eq!(md.physical().read64(0).status, BUS_OK);
-        assert_eq!(d.read64(0).data, 0x001f0001);
-        assert_ne!(r.read64(0x40018).data & (1 << 61), 0);
-        assert_eq!(r.read64(0x40010).data, 0);
+    fn directory_checks_and_protection() {
+        {
+            let md = configured();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let seen = events.clone();
+            let weak = Arc::downgrade(&md);
+            md.on_error(Arc::new(move |kind| {
+                assert_eq!(weak.upgrade().unwrap().current_cell(), u64::MAX);
+                seen.lock().push(kind);
+            }));
+            let r = md.md_bus();
+            md.directory_bus().write64(0, 1);
+            assert_eq!(md.directory_bus().read64(0).data, 0x001f0001);
+            r.write64(0x40000, 2);
+            md.directory_bus().write64(0, 0x001e0001);
+            r.write64(0x40000, 0);
+            md.ecc_bus().write8(7, 3);
+            assert_eq!(md.uncached_view().read64(0).status, BUS_ERR);
+            assert_eq!(md.directory_bus().read64(0).data, 0x001f0001);
+            assert_eq!(
+                *events.lock(),
+                vec![MemoryError::Correctable, MemoryError::Uncorrectable]
+            );
+            assert_ne!(r.read64(0x40010).data & (1 << 61), 0);
+            assert_ne!(r.read64(0x60010).data & (1 << 60), 0);
+        }
+        {
+            let md = configured();
+            let d = md.directory_bus();
+            assert_eq!(d.write64(0x408, 0x1234), BUS_OK);
+            assert_eq!(d.read64(0x2000408).data, 0x1234);
+            assert_eq!(d.write64(0x418, 0x5678), BUS_OK);
+            assert_eq!(d.read64(0x408).data, 0x1234);
+            assert_eq!(d.read64(0x418).data, 0x5678);
+            assert_eq!(d.write64(8, u64::MAX), BUS_OK);
+            assert_eq!(d.read64(8).data, u64::MAX);
+            assert_eq!(d.read32(0).status, BUS_ERR);
+            assert_eq!(d.read64(1 << 30).status, BUS_ERR);
+        }
     }
 }
 
