@@ -77,6 +77,59 @@ fn xkphys_uc_bits_survive_the_board_cpu_mask() {
 }
 
 #[test]
+fn fuel_flash_command_windows_share_states_and_execution_bytes() {
+    let board = crate::ip34_machine::FuelBoard::new(&[], crate::dev::heart::host_clock()).unwrap();
+    let bus = &board.bus;
+    const LOCAL: u64 = 0x1800_0000;
+    const REMOTE: u64 = 0x3800_0000;
+    const SECOND: u64 = 0x0200_0000;
+    // The real PROM first uses this reset cycle at the second selection.
+    assert_eq!(bus.write64(LOCAL + SECOND, 0xf0), BUS_OK);
+    for part in [0, SECOND] {
+        assert_eq!(bus.write64(LOCAL + part + 8 * 0x55, 0x98), BUS_OK);
+        assert_eq!(bus.read16(REMOTE + part + 0x20).data, b'Q' as u16);
+        assert_eq!(bus.read16(0x1fc0_0020).data, 0xffff);
+        assert_eq!(bus.write64(REMOTE + part, 0xf0), BUS_OK);
+        for (offset, value) in [
+            (8 * 0x555, 0xaa),
+            (8 * 0x2aa, 0x55),
+            (8 * 0x555, 0xa0),
+            (4 * 0x200, 0x1234),
+        ] {
+            assert_eq!(bus.write64(LOCAL + part + offset, value), BUS_OK);
+        }
+        assert_eq!(bus.read16(REMOTE + part + 0x200).data, 0x1234);
+    }
+    assert_eq!(bus.read16(0x1fc0_0200).data, 0x1234);
+    assert_eq!(bus.write64(0x1fc0_0000 + 8 * 0x555, 0xaa), BUS_ERR);
+    assert_eq!(board.flash.contents()[0x200..0x202], [0x12, 0x34]);
+}
+
+#[test]
+#[cfg(not(feature = "opcodefusion"))]
+fn fuel_programmed_instructions_are_fetched_without_restarting_machine() {
+    let board = crate::ip34_machine::FuelBoard::new(
+        &[0x24, 0x08, 0, 0x2a],
+        crate::dev::heart::host_clock(),
+    )
+    .unwrap();
+    let mut cpu = board.build_cpu().unwrap();
+    assert_eq!(cpu.step_int(), 0);
+    assert_eq!(cpu.core.gpr[8], 42);
+    for (offset, value) in [
+        (8 * 0x555, 0xaa),
+        (8 * 0x2aa, 0x55),
+        (8 * 0x555, 0xa0),
+        (4 * 2, 0x0028),
+    ] {
+        assert_eq!(board.bus.write64(0x1800_0000 + offset, value), BUS_OK);
+    }
+    cpu.core.pc = 0xffff_ffff_bfc0_0000;
+    assert_eq!(cpu.step_int(), 0);
+    assert_eq!(cpu.core.gpr[8], 40);
+}
+
+#[test]
 #[ignore = "requires a caller-supplied raw IP35 PROM; retains raw execution evidence"]
 #[cfg(not(feature = "opcodefusion"))]
 fn stock_prom_first_fault() {

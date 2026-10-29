@@ -274,22 +274,20 @@ impl FuelBoard {
                 .array_view(0, crate::dev::bedrock_flash::PART_SIZE)
                 .map_err(|e| e.to_string())?,
         );
-        for base in [0x1800_0000, 0x1fc0_0000, 0x3800_0000] {
-            let len = if base == 0x1fc0_0000 {
-                0x40_0000
-            } else {
-                0x80_0000
-            };
-            bus.map(0, base, len, prom.clone());
-            if base == 0x1fc0_0000 && !payload.is_empty() {
-                crate::ip35_bus::map_device(
-                    &phys,
-                    base,
-                    payload.len() as u64,
-                    prom.clone(),
-                    "Fuel cached reset PROM",
-                );
-            }
+        let boot = Arc::new(flash.boot_view());
+        for base in [0x1800_0000, 0x3800_0000] {
+            bus.map(0, base, 0x800_0000, boot.clone());
+        }
+        // Reset execution always sees stored bytes, independently of commands.
+        bus.map(0, 0x1fc0_0000, 0x40_0000, prom.clone());
+        if !payload.is_empty() {
+            crate::ip35_bus::map_device(
+                &phys,
+                0x1fc0_0000,
+                payload.len() as u64,
+                prom.clone(),
+                "Fuel cached reset PROM",
+            );
         }
         let leds = Arc::new(Leds {
             md: md.clone(),
@@ -312,17 +310,6 @@ impl FuelBoard {
                 }),
             );
             bus.map(0, base + 0x400_0000, 8, Arc::new(BoardId(md.clone())));
-        }
-        let second = Arc::new(
-            flash
-                .array_view(
-                    crate::dev::bedrock_flash::PART_SIZE,
-                    crate::dev::bedrock_flash::PART_SIZE,
-                )
-                .map_err(|e| e.to_string())?,
-        );
-        for base in [0x1a00_0000, 0x3a00_0000] {
-            bus.map(0, base, 0x80_0000, second.clone());
         }
         bus.map(0, 0x1_c000_0000, 1 << 29, md.directory_bus());
         bus.map(0, 0x1_4000_0000, 1 << 30, md.ecc_bus());
@@ -412,6 +399,7 @@ impl FuelBoard {
                 .last_clock
                 .swap(now, std::sync::atomic::Ordering::AcqRel);
             self.md.advance_ns(now.saturating_sub(previous));
+            self.flash.advance_ns(now.saturating_sub(previous));
             for pi in &self.pi {
                 pi.poll();
             }

@@ -29,6 +29,8 @@
 //!
 //! [`Bridge::attach_flash`]: crate::dev::bridge::Bridge::attach_flash
 
+pub mod amd;
+
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
