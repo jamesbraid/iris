@@ -86,7 +86,7 @@ pub struct OctaneMachine {
     monitor: Arc<crate::monitor::Monitor>,
     monitor_port: u16,
     /// The console UART's in-process host end in CI mode (`--ci`).
-    ci_serial: Option<Arc<crate::dev::z85c30::CiSerialBackend>>,
+    ci_serial: Option<Arc<crate::dev::serial_host::CiSerialBackend>>,
     pub bridge: Arc<Bridge>,
     pub ioc3: Arc<Ioc3>,
     pub scsi: [Arc<Isp1040>; 2],
@@ -331,7 +331,7 @@ impl OctaneMachine {
             g.register_locks();
         }
         let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
-        let ci_serial = cfg.ci.then(|| Arc::new(crate::dev::z85c30::CiSerialBackend::new()));
+        let ci_serial = cfg.ci.then(|| Arc::new(crate::dev::serial_host::CiSerialBackend::new()));
         Self::connect_serial(cfg, &ioc3, ci_serial.as_ref());
 
         // The Ethernet on the NAT gateway `[network]` describes.
@@ -418,43 +418,11 @@ impl OctaneMachine {
     /// IOC3's first port is the console: the CI socket's backend in CI
     /// mode, otherwise TCP on `serial_port_a`, either teed to `serial_log`.
     /// The second port serves TCP on `serial_port_b`.
-    fn connect_serial(cfg: &MachineConfig, ioc3: &Ioc3, ci: Option<&Arc<crate::dev::z85c30::CiSerialBackend>>) {
-        use crate::dev::z85c30::{null_serial_backend, tcp_serial_backend, TeeBackend};
-        let [port_a, port_b] = cfg.serial_ports();
-        let log = cfg.serial_log.as_deref().and_then(|path| {
-            match crate::dev::serial_log::SerialLog::create(std::path::Path::new(path), cfg.serial_log_timestamps) {
-                Ok(log) => Some(log),
-                Err(e) => {
-                    eprintln!("iris: Octane serial log {path}: {e}");
-                    None
-                }
-            }
-        });
-        if let Some(ci) = ci {
-            if let Some(log) = log {
-                ci.set_log(log);
-            }
-            ioc3.set_serial_backend(0, ci.clone());
-        } else {
-            let mut backend = null_serial_backend();
-            match tcp_serial_backend(port_a) {
-                Some((b, p)) => {
-                    eprintln!("iris: Octane serial port 1 on 127.0.0.1:{p}");
-                    backend = b;
-                }
-                None => eprintln!("iris: Octane serial port 1: port {port_a} unavailable (serial_port_a)"),
-            }
-            if let Some(log) = log {
-                backend = Arc::new(TeeBackend::new(backend, log));
-            }
-            ioc3.set_serial_backend(0, backend);
-        }
-        match tcp_serial_backend(port_b) {
-            Some((b, p)) => {
-                eprintln!("iris: Octane serial port 2 on 127.0.0.1:{p}");
-                ioc3.set_serial_backend(1, b);
-            }
-            None => eprintln!("iris: Octane serial port 2: port {port_b} unavailable (serial_port_b)"),
+    fn connect_serial(cfg: &MachineConfig, ioc3: &Ioc3, ci: Option<&Arc<crate::dev::serial_host::CiSerialBackend>>) {
+        let (console, second) = crate::dev::serial_host::console_backends(cfg, "Octane", ci);
+        ioc3.set_serial_backend(0, console);
+        if let Some(b) = second {
+            ioc3.set_serial_backend(1, b);
         }
     }
 
@@ -641,7 +609,7 @@ impl Workstation for OctaneMachine {
     fn fasttick_count(&self) -> Arc<AtomicU64> {
         self.cpu.fasttick_count()
     }
-    fn get_ci_serial(&self) -> Option<Arc<crate::dev::z85c30::CiSerialBackend>> {
+    fn get_ci_serial(&self) -> Option<Arc<crate::dev::serial_host::CiSerialBackend>> {
         self.ci_serial.clone()
     }
     fn inject_serial_console(&self, bytes: &[u8]) {

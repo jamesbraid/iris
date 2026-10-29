@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use std::io::Write;
 
-use crate::dev::z85c30::SerialBackend;
+use crate::dev::serial_host::SerialBackend;
 use crate::snapshot::{get_field, load_u8_slice, toml_u8, u8_slice_to_toml};
 use crate::traits::{BusDevice, BusRead8, BusRead16, BusRead32, BusRead64, Device, Resettable, Saveable, BUS_OK};
 use crate::ip32::*;
@@ -102,7 +102,7 @@ impl Com16550 {
         Self {
             out: Mutex::new(std::collections::VecDeque::new()),
             sent: std::sync::atomic::AtomicUsize::new(0),
-            backend: Mutex::new(crate::dev::z85c30::null_serial_backend()),
+            backend: Mutex::new(crate::dev::serial_host::null_serial_backend()),
             input: Default::default(),
             regs: Mutex::new([0u8; 8]),
             name,
@@ -111,7 +111,7 @@ impl Com16550 {
     }
 
     /// Wire the host end of the line: a TCP console
-    /// (`z85c30::tcp_serial_backend`), a `TeeBackend` logging to a file, or
+    /// (`serial_host::tcp_serial_backend`), a `TeeBackend` logging to a file, or
     /// nothing.
     pub fn set_backend(&self, backend: std::sync::Arc<dyn SerialBackend>) {
         *self.backend.lock().unwrap() = backend;
@@ -442,7 +442,7 @@ mod tests {
     fn a_tcp_console_carries_both_directions() {
         use std::io::{Read, Write};
         let c = Com16550::new();
-        let (backend, port) = crate::dev::z85c30::tcp_serial_backend(0).expect("bind");
+        let (backend, port) = crate::dev::serial_host::tcp_serial_backend(0).expect("bind");
         c.set_backend(backend);
         let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
         client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
