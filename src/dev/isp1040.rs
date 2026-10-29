@@ -47,7 +47,7 @@ use parking_lot::{Condvar, Mutex, MutexGuard};
 use crate::devlog::LogModule;
 use crate::irq::IrqLine;
 use crate::pci::{Bar, PciBusDevice, PciConfig, PciDma, PCI_INTA};
-use crate::scsi::{scsi_cmd, ScsiBus, ScsiDataLength, ScsiIdentities, ScsiIdentity, ScsiRequest};
+use crate::scsi::{scsi_cmd, ScsiBus, ScsiDataLength, ScsiIdentities, ScsiRequest, CDROM_IDENTITY, DISK_IDENTITY};
 use crate::snapshot::{get_field, hex_u16, hex_u32, load_u16_slice, toml_u16, toml_u32, toml_u8, u16_slice_to_toml, u8_slice_to_toml};
 
 pub const PCI_VENDOR_QLOGIC: u16 = 0x1077;
@@ -55,11 +55,6 @@ pub const PCI_DEVICE_ISP1040: u16 = 0x1020;
 pub const PCI_REVISION_ISP1040: u8 = 0x05;
 /// Mass storage controller, SCSI.
 pub const PCI_CLASS_SCSI: u32 = 0x0001_0000;
-
-/// What a disk or CD-ROM attached here answers INQUIRY with (the same
-/// identity the O2's controller gives its targets).
-pub const ISP_DISK: ScsiIdentity = ScsiIdentity::new(b"SGI     ", b"IRIS EMULATED   ", b"1.0 ");
-pub const ISP_CDROM: ScsiIdentity = ISP_DISK;
 
 pub const BLOCK_SIZE: usize = 512;
 
@@ -515,7 +510,7 @@ impl Core {
             fence: Mutex::new(()),
             wake: Condvar::new(),
             line_order: Mutex::new(()),
-            bus: ScsiBus::new(16, ScsiIdentities { disk: ISP_DISK, cdrom: ISP_CDROM }),
+            bus: ScsiBus::new(16, ScsiIdentities { disk: DISK_IDENTITY, cdrom: CDROM_IDENTITY }),
             dma: OnceLock::new(),
             irq: OnceLock::new(),
             index,

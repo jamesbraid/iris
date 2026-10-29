@@ -104,6 +104,13 @@ pub struct ScsiIdentity {
     pub revision: [u8; 4],
 }
 
+/// What every machine's emulated disk reports in INQUIRY.
+pub const DISK_IDENTITY: ScsiIdentity = ScsiIdentity::new(b"SGI     ", b"IRIS EMUL DISK  ", b"1.0 ");
+
+/// What an emulated CD-ROM reports, where the machine does not name a real
+/// drive (the Indy and Indigo2 do: a Sony CDU-76S).
+pub const CDROM_IDENTITY: ScsiIdentity = ScsiIdentity::new(b"SGI     ", b"IRIS EMUL CDROM ", b"1.0 ");
+
 impl ScsiIdentity {
     pub const fn new(vendor: &[u8; 8], product: &[u8; 16], revision: &[u8; 4]) -> Self {
         Self { vendor: *vendor, product: *product, revision: *revision }

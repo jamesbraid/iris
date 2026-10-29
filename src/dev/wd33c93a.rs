@@ -302,7 +302,6 @@ unsafe impl Sync for Wd33c93a {}
 /// CDU-76S the Indy shipped with: IRIX's mediad uses the vendor and product
 /// strings for feature detection (volume control, eject).
 pub const INDY_CDROM: crate::scsi::ScsiIdentity = crate::scsi::ScsiIdentity::new(b"Sony    ", b"CDU-76S         ", b"1.0 ");
-pub const INDY_DISK: crate::scsi::ScsiIdentity = crate::scsi::ScsiIdentity::new(b"SGI     ", b"IRIS EMUL DISK  ", b"1.0 ");
 
 pub struct Wd33c93a {
     /// The targets, also held by the state the worker thread runs on.
@@ -341,7 +340,7 @@ impl Wd33c93a {
     /// HPC3 SCSI controller number) — see `Wd33c93aState.id`'s doc comment.
     pub fn new_with_id(dma: Option<Arc<dyn DmaClient>>, irq: Option<IrqLine>, heartbeat: Arc<AtomicU64>, deferred_int: bool, id: u8) -> Self {
         let deferred_int_arc = Arc::new(AtomicBool::new(deferred_int));
-        let bus = Arc::new(ScsiBus::new(8, ScsiIdentities { disk: INDY_DISK, cdrom: INDY_CDROM }));
+        let bus = Arc::new(ScsiBus::new(8, ScsiIdentities { disk: scsi::DISK_IDENTITY, cdrom: INDY_CDROM }));
         Self {
             bus: bus.clone(),
             state: Arc::new(Mutex::new(Wd33c93aState {
@@ -2180,7 +2179,7 @@ mod data_out_phase_tests {
             let mut s = dev.state.lock();
             s.bus.attach(2, Box::new(scsi::ScsiDevice::new(
                 Box::new(crate::block_node::RawNode::from_file(file, 1 << 20)),
-                1 << 20, false, path.display().to_string(), Vec::new(), INDY_DISK))).unwrap();
+                1 << 20, false, path.display().to_string(), Vec::new(), scsi::DISK_IDENTITY))).unwrap();
             s.advanced_mode = true;
             s.target_id = 2;
             s.regs[regs::DESTINATION_ID as usize] = 2;

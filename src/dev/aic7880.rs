@@ -26,7 +26,7 @@
 //! because one boot can hand the chip from one driver to the next.
 
 use crate::locks::{SpinGuard, SpinLock};
-use crate::scsi::{scsi_cmd, ScsiBus, ScsiDataLength, ScsiIdentities, ScsiIdentity, ScsiRequest};
+use crate::scsi::{scsi_cmd, ScsiBus, ScsiDataLength, ScsiIdentities, ScsiRequest, CDROM_IDENTITY, DISK_IDENTITY};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -173,9 +173,6 @@ pub const SG_LAST: u32 = 0x8000_0000;
 /// in any healthy list.
 pub const SG_MAX: usize = 4096;
 
-/// What the O2's targets report in INQUIRY, disks and CD-ROMs alike.
-pub const O2_DISK: ScsiIdentity = ScsiIdentity::new(b"SGI     ", b"IRIS EMULATED   ", b"1.0 ");
-pub const O2_CDROM: ScsiIdentity = O2_DISK;
 
 /// NetBSD's sequencer program uses a different arrangement from the PROM's,
 /// and these names come from its own headers rather than from guessing.
@@ -467,7 +464,7 @@ impl Aic7880 {
             worker: Mutex::new(None),
             running: AtomicBool::new(false),
             me: me.clone(),
-            bus: ScsiBus::new(16, ScsiIdentities { disk: O2_DISK, cdrom: O2_CDROM }),
+            bus: ScsiBus::new(16, ScsiIdentities { disk: DISK_IDENTITY, cdrom: CDROM_IDENTITY }),
             dma: std::sync::OnceLock::new(),
             sense: Mutex::new(None),
             dma_misses: Mutex::new(std::collections::BTreeSet::new()),
