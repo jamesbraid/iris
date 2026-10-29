@@ -26,7 +26,7 @@
 //! Indy's SEEQ 8003 meets IRIS's NAT gateway: `start_nat` runs one.
 
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::snapshot::{get_field, hex_u32, hex_u64, load_u16_slice, toml_u32, toml_u64, u16_slice_to_toml};
@@ -241,11 +241,24 @@ pub struct Mec {
     link: Mutex<Option<Link>>,
     /// CRIME's Ethernet input.
     irq: std::sync::OnceLock<crate::irq::IrqLine>,
+    /// The status bar's activity bits, shared with the display thread.
+    heartbeat: std::sync::OnceLock<Arc<AtomicU64>>,
 }
 
 impl Mec {
     pub fn new(ram: Arc<crate::dev::crime_mem::O2Memory>) -> Self {
-        Self { ram, st: Mutex::new(State::new()), link: Mutex::new(None), irq: std::sync::OnceLock::new() }
+        Self { ram, st: Mutex::new(State::new()), link: Mutex::new(None), irq: std::sync::OnceLock::new(), heartbeat: std::sync::OnceLock::new() }
+    }
+
+    /// Light the status bar's Ethernet activity bits in `heartbeat`.
+    pub fn set_heartbeat(&self, heartbeat: Arc<AtomicU64>) {
+        let _ = self.heartbeat.set(heartbeat);
+    }
+
+    fn blink(&self, bit: u64) {
+        if let Some(hb) = self.heartbeat.get() {
+            hb.fetch_or(bit, Ordering::Relaxed);
+        }
     }
 
     /// Wire the chip's interrupt to `line`.
@@ -531,6 +544,7 @@ impl Mec {
         if frames.is_empty() {
             return;
         }
+        self.blink(crate::dev::ng1::rex3::Rex3::HB_ENET_TX);
         if let Some(link) = self.link.lock().unwrap().as_mut() {
             for f in frames {
                 Self::trace("tx", &f);
@@ -641,6 +655,7 @@ impl Mec {
             self.ram_write(u64::from(buf), &stat.to_be_bytes());
             s.int_status |= bits::INT_RX_THRESHOLD;
             s.rx_frames += 1;
+            self.blink(crate::dev::ng1::rex3::Rex3::HB_ENET_RX);
         }
     }
 }

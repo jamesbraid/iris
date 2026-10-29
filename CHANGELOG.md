@@ -244,6 +244,10 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ### SGI O2 (IP32)
 
+- **The O2's Ethernet-address chip is on the shared 1-wire bus** (`dev::mace_id`,
+  ported from the QEMU model); the MAC reads correctly at any emulator speed.
+- The O2's front LEDs show in the status bar.
+- The O2's SCSI and Ethernet lights show in the status bar.
 - **The O2 is on `Physical`.** Its bus is the same decode table and memory
   window as the Indy's: CRIME's banks are RAM banks a bank-control write
   remaps, CRIME, GBE, VICE, MACE and the flash are table entries, and

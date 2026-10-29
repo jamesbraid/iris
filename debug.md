@@ -542,7 +542,7 @@ its SCSI controllers answer to `scsi`/`cow` and `scsi1`/`cow1` as described unde
 | `audio status` / `audio codec` | MACE audio rings and rates / AD1843 codec registers |
 | `ust status` | MACE UST counter |
 | `rtc status` / `rtc dump` / `rtc r <reg>` / `rtc w <reg> <val>` | DS1687 RTC |
-| `onewire status` / `onewire log` | 1-Wire ID chip (the MAC address) |
+| `onewire status` | MACE identity register and the ID chip holding the MAC address |
 
 `o2 <command>` runs the same commands `[o2] control_port` serves, one per line:
 
@@ -559,7 +559,7 @@ its SCSI controllers answer to `scsi`/`cow` and `scsi1`/`cow1` as described unde
 | `o2 retrace PATH` | Recorded rendering-engine primitives (`IRIS_IP32_RE_TRACE`) |
 | `o2 scsi PATH` | The SCSI controllers' recent commands |
 | `o2 unmapped` | Bus accesses that reached no device (the first 64 distinct), with the PC that made each (not kept in a `lightning` build) |
-| `o2 ps2log PATH` / `o2 crimelog PATH` / `o2 nictrace PATH` | PS/2 traffic / CRIME interrupt-register accesses recorded since `crime irqlog on` / the MAC-address chip's register trace and 1-Wire protocol log |
+| `o2 ps2log PATH` / `o2 crimelog PATH` | PS/2 traffic / CRIME interrupt-register accesses recorded since `crime irqlog on` |
 
 ## Recipes
 
