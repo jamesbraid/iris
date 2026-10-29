@@ -74,6 +74,7 @@ pub(crate) struct FuelBoard {
     clock: crate::dev::heart::Clock,
     last_clock: std::sync::atomic::AtomicU64,
     usb_elapsed_ns: std::sync::atomic::AtomicU64,
+    last_md_clock: std::sync::atomic::AtomicU64,
     running: std::sync::atomic::AtomicBool,
 }
 
@@ -109,6 +110,8 @@ impl FuelBoard {
                 clock.clone(),
             )
         });
+        // The selected QEMU Fuel population grants its fitted CPU A the bus.
+        pi[0].write64(0x50, 1);
         let l1 = Arc::new(crate::dev::l1::L1::new(crate::dev::l1::L1Config::default())?);
         let flash = Arc::new(match flash_path {
             Some(path) => crate::dev::bedrock_flash::Flash::with_file(payload, path),
@@ -267,6 +270,9 @@ impl FuelBoard {
         xbridge.attach(15, 4, ioc3.clone());
         let usb = crate::dev::ohci::Ohci::new();
         xbridge.attach(15, 5, usb.clone());
+        for slot in [1, 4, 5] {
+            xbridge.set_pci_irq(15, slot, 0, xbridge.pin_line(15, slot));
+        }
         ioc3.connect_superio_interrupt(xbridge.pin_line(15, 0));
         let mut bus = Ip35Bus::new(phys.clone());
         bus.set_fallback(1, 1 << 32, Arc::new(IoPio(io.clone())));
@@ -360,6 +366,7 @@ impl FuelBoard {
             serial,
             irq,
             last_clock: std::sync::atomic::AtomicU64::new(clock()),
+            last_md_clock: std::sync::atomic::AtomicU64::new(clock()),
             usb_elapsed_ns: std::sync::atomic::AtomicU64::new(0),
             clock,
             running: std::sync::atomic::AtomicBool::new(false),
@@ -380,6 +387,10 @@ impl FuelBoard {
 
     /// CPU-thread observer. Debugger reads must never call this method.
     pub fn observe_cpu(&self, cpu: &mut FuelCpu) {
+        // MBIST can complete between two consecutive register polls.
+        if self.running.load(std::sync::atomic::Ordering::Acquire) {
+            self.poll_md((self.clock)());
+        }
         let pc = cpu.debug_translate(cpu.core.pc);
         self.startup.observe(
             cpu.core.fpr[0],
@@ -395,10 +406,16 @@ impl FuelBoard {
         cpu.step_int()
     }
 
+    fn poll_md(&self, now: u64) {
+        let previous = self.last_md_clock.swap(now, std::sync::atomic::Ordering::AcqRel);
+        self.md.advance_ns(now.saturating_sub(previous));
+    }
+
     pub fn start(&self) {
         use crate::traits::Device;
         self.last_clock
             .store((self.clock)(), std::sync::atomic::Ordering::Release);
+        self.last_md_clock.store((self.clock)(), std::sync::atomic::Ordering::Release);
         self.running
             .store(true, std::sync::atomic::Ordering::Release);
         for pi in &self.pi {
@@ -416,11 +433,12 @@ impl FuelBoard {
             let previous = self
                 .last_clock
                 .swap(now, std::sync::atomic::Ordering::AcqRel);
-            self.md.advance_ns(now.saturating_sub(previous));
+            self.poll_md(now);
             self.flash.advance_ns(now.saturating_sub(previous));
             let delta = now.saturating_sub(previous);
             let old = self.usb_elapsed_ns.fetch_add(delta, std::sync::atomic::Ordering::Relaxed);
-            self.usb.advance_frames((old + delta) / 1_000_000 - old / 1_000_000);
+            let frames = (old + delta) / 1_000_000 - old / 1_000_000;
+            if frames != 0 { self.usb.advance_frames(frames); }
             for pi in &self.pi {
                 pi.poll();
             }
