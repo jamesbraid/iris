@@ -562,9 +562,11 @@ pub trait CpuModel: MipsCache {
     const LWR_PRESERVES_UPPER: bool = false;
     /// R12000-compatible FS mode flushes denormal input operands before arithmetic.
     const FPU_FS_FLUSH_INPUTS: bool = false;
-    /// Selected FR=1 single-computational result policy; raw word transfers
-    /// and fixed-point word results retain their own write semantics.
-    const FPU_FR1_SINGLE_RESULTS_ZERO_UPPER: bool = false;
+    /// Selected FR=1 word-write compatibility policy, including raw transfers,
+    /// S/W results and untaken conditional S moves. The upper word is undefined.
+    const FPU_FR1_WORD_WRITES_ZERO_UPPER: bool = false;
+    /// Selected FR=0 MOV.S compatibility choice: retain the other paired word.
+    const FPU_FR0_MOV_S_PRESERVES_PAIR: bool = false;
 }
 
 pub trait MipsCache: Send + Sync {

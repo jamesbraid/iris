@@ -476,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn r14000_single_result_policy_keeps_raw_word_transfers_and_word_conversion() {
+    fn r14000_word_writes_clear_upper_and_fr0_keeps_pairs() {
         let mem = Arc::new(MockMemory::new());
         mem.set_word(0x2000, 0x89ab_cdef);
         let cfg = MipsCpuConfig::for_model::<FpuR14000>();
@@ -491,18 +491,134 @@ mod tests {
         for raw in [make_i(OP_LWC1, 1, 4, 0), (OP_COP1 << 26) | (4 << 21) | (2 << 16) | (4 << 11)] {
             exec.core.write_fpr_l(4, 0xdead_beef_0000_0000);
             assert_eq!(exec.exec(raw), EXEC_COMPLETE);
-            assert_eq!(exec.core.read_fpr_l(4), 0xdead_beef_89ab_cdef);
+            assert_eq!(exec.core.read_fpr_l(4), 0x0000_0000_89ab_cdef);
         }
         exec.core.write_fpr_l(0, 0x3f80_0000);
         exec.core.write_fpr_l(4, 0xdead_beef_0000_0000);
         assert_eq!(exec.exec(make_cop1_compute(RS_S, 0, 0, 4, FUNCT_FCVT_W)), EXEC_COMPLETE);
-        assert_eq!(exec.core.read_fpr_l(4), 0xdead_beef_0000_0001);
+        assert_eq!(exec.core.read_fpr_l(4), 1);
 
         exec.core.cp0_status &= !STATUS_FR;
         exec.update_fpr_mode();
         exec.core.write_fpr_l(4, 0x1122_3344_5566_7788);
         assert_eq!(exec.exec(make_cop1_compute(RS_S, 0, 0, 5, FUNCT_FSQRT)), EXEC_COMPLETE);
         assert_eq!(exec.core.read_fpr_l(4), 0x3f80_0000_5566_7788);
+        for fd in [4, 5] {
+            for raw in [make_i(OP_LWC1, 1, fd, 0),
+                (OP_COP1 << 26) | (RS_MTC1 << 21) | (2 << 16) | (fd << 11)] {
+                exec.core.write_fpr_l(4, 0x1122_3344_5566_7788);
+                assert_eq!(exec.exec(raw), EXEC_COMPLETE);
+                let expected = if fd == 4 { 0x1122_3344_89ab_cdef } else { 0x89ab_cdef_5566_7788 };
+                assert_eq!(exec.core.read_fpr_l(4), expected);
+            }
+        }
+        exec.core.write_fpr_l(0, 0x1234_5678_3f80_0000);
+        exec.core.write_fpr_l(4, 0xdead_beef_4000_0000);
+        assert_eq!(exec.exec(make_cop1_compute(RS_S, 0, 0, 4, FUNCT_FMOV)), EXEC_COMPLETE);
+        assert_eq!(exec.core.read_fpr_l(4), 0xdead_beef_3f80_0000);
+        exec.core.cp0_status |= STATUS_FR;
+        exec.update_fpr_mode();
+        exec.core.write_fpr_l(4, 0xdead_beef_0000_0000);
+        assert_eq!(exec.exec((OP_COP1 << 26) | (RS_MTC1 << 21) | (2 << 16) | (4 << 11)), EXEC_COMPLETE);
+        assert_eq!(exec.core.read_fpr_l(4), 0x89ab_cdef);
+    }
+
+    #[test]
+    fn r14000_word_conversions_clear_upper_including_negative_results() {
+        let mut exec = fpu_executor::<FpuR14000>();
+        for (fmt, positive, negative) in [(RS_S, 0x4080_0000u64, 0xc060_0000u64),
+            (RS_D, 0x4010_0000_0000_0000, 0xc00c_0000_0000_0000)] {
+            for (operation, negative_result) in [(FUNCT_FCVT_W, 0xffff_fffcu64),
+                (FUNCT_FROUND_W, 0xffff_fffc), (FUNCT_FTRUNC_W, 0xffff_fffd),
+                (FUNCT_FCEIL_W, 0xffff_fffd), (FUNCT_FFLOOR_W, 0xffff_fffc)] {
+                for (source, expected) in [(positive, 4), (negative, negative_result)] {
+                    exec.core.write_fpr_l(0, source);
+                    exec.core.write_fpr_l(4, 0x9f50_2723_308f_8d56);
+                    exec.core.fpu_fcsr = 0;
+                    assert_eq!(exec.exec(make_cop1_compute(fmt, 0, 0, 4, operation)), EXEC_COMPLETE);
+                    assert_eq!(exec.core.read_fpr_l(4), expected);
+                    assert_eq!(exec.core.read_fpr_l(0), source);
+                }
+            }
+        }
+        exec.core.write_fpr_l(5, 0x478d_05de);
+        exec.core.write_fpr_l(11, 0x9f50_2723_308f_8d56);
+        exec.core.fpu_fcsr = 0x9000_0401;
+        assert_eq!(exec.exec(0x4600_2acc), EXEC_COMPLETE); // Observed seed 1 ROUND.W.S.
+        assert_eq!(exec.core.read_fpr_l(11), 0x0001_1a0c);
+        assert_eq!(exec.core.read_fpr_l(5), 0x478d_05de);
+
+        exec.core.write_fpr_l(0, 0x7f80_0000); // Infinity cannot convert to W.
+        exec.core.write_fpr_l(4, 0x9f50_2723_308f_8d56);
+        exec.core.fpu_fcsr = 0x800;
+        let status = exec.exec(make_cop1_compute(RS_S, 0, 0, 4, FUNCT_FROUND_W));
+        assert_ne!(status & EXEC_IS_EXCEPTION, 0);
+        assert_eq!((status >> 2) & 31, 15);
+        assert_eq!(exec.core.fpu_fcsr, 0x10800);
+        assert_eq!(exec.core.read_fpr_l(4), 0x9f50_2723_308f_8d56);
+    }
+
+    #[test]
+    fn r14000_single_moves_clear_upper_in_both_conditional_outcomes() {
+        let mut exec = fpu_executor::<FpuR14000>();
+        let source = 0x1234_5678_7fc0_1234u64; // Raw signalling NaN must not raise Invalid on a move.
+        let destination = 0x9f50_2723_308f_8d56u64;
+        exec.core.write_fpr_l(0, source);
+        exec.core.write_fpr_l(4, destination);
+        exec.core.fpu_fcsr = 0x0100_0040;
+        assert_eq!(exec.exec(make_cop1_compute(RS_S, 0, 0, 4, FUNCT_FMOV)), EXEC_COMPLETE);
+        assert_eq!(exec.core.read_fpr_l(4), source as u32 as u64);
+        assert_eq!(exec.core.fpu_fcsr, 0x0100_0040);
+        for tf in [false, true] {
+            for condition in [false, true] {
+                exec.core.write_fpr_l(4, destination);
+                exec.core.fpu_fcsr = 0x0100_0040;
+                exec.core.set_fpu_cc(3, condition);
+                let fcsr = exec.core.fpu_fcsr;
+                let rt = (3 << 2) | tf as u32;
+                assert_eq!(exec.exec(make_cop1_compute(RS_S, rt, 0, 4, FUNCT_FMOVCF)), EXEC_COMPLETE);
+                let expected = if tf == condition { source } else { destination } as u32 as u64;
+                assert_eq!(exec.core.read_fpr_l(4), expected);
+                assert_eq!(exec.core.read_fpr_l(0), source);
+                assert_eq!(exec.core.fpu_fcsr, fcsr);
+            }
+        }
+        for operation in [FUNCT_FMOVZ, FUNCT_FMOVN] {
+            for value in [0, 1] {
+                exec.core.write_gpr(2, value);
+                exec.core.write_fpr_l(4, destination);
+                exec.core.fpu_fcsr = 0x0100_0040;
+                assert_eq!(exec.exec(make_cop1_compute(RS_S, 2, 0, 4, operation)), EXEC_COMPLETE);
+                let taken = if operation == FUNCT_FMOVZ { value == 0 } else { value != 0 };
+                let expected = if taken { source } else { destination } as u32 as u64;
+                assert_eq!(exec.core.read_fpr_l(4), expected);
+                assert_eq!(exec.core.read_fpr_l(0), source);
+                assert_eq!(exec.core.fpu_fcsr, 0x0100_0040);
+            }
+        }
+    }
+
+    #[test]
+    fn r14000_word_policy_keeps_nop_and_full_width_writes() {
+        let mut exec = fpu_executor::<FpuR14000>();
+        let destination = 0x9f50_2723_308f_8d56u64;
+        exec.core.write_fpr_l(4, destination);
+        assert_eq!(exec.exec(0), EXEC_COMPLETE);
+        assert_eq!(exec.core.read_fpr_l(4), destination);
+        exec.core.write_fpr_l(0, 0x1234_5678_4080_0000);
+        assert_eq!(exec.exec(make_cop1_compute(RS_D, 0, 0, 4, FUNCT_FMOV)), EXEC_COMPLETE);
+        assert_eq!(exec.core.read_fpr_l(4), 0x1234_5678_4080_0000);
+        exec.core.write_gpr(2, 0x1122_3344_7654_3210);
+        assert_eq!(exec.exec((OP_COP1 << 26) | (RS_DMTC1 << 21) | (2 << 16) | (4 << 11)), EXEC_COMPLETE);
+        assert_eq!(exec.core.read_fpr_l(4), 0x1122_3344_7654_3210);
+        exec.core.write_fpr_l(0, 0xbf80_0000);
+        exec.core.fpu_fcsr = 0;
+        assert_eq!(exec.exec(make_cop1_compute(RS_S, 0, 0, 4, FUNCT_FCVT_L)), EXEC_COMPLETE);
+        assert_eq!(exec.core.read_fpr_l(4), u64::MAX);
+        exec.core.write_fpr_l(4, destination);
+        exec.core.write_gpr(2, 1);
+        assert_eq!(exec.exec(make_cop1_compute(RS_D, 2, 0, 4, FUNCT_FMOVZ)), EXEC_COMPLETE);
+        assert_eq!(exec.core.read_fpr_l(4), destination);
     }
 
     #[test]
@@ -513,6 +629,9 @@ mod tests {
             exec.core.write_fpr_l(4, 0xdead_beef_89ab_cdef);
             assert_eq!(exec.exec(make_cop1_compute(RS_S, 0, 0, 4, FUNCT_FSQRT)), EXEC_COMPLETE);
             assert_eq!(exec.core.read_fpr_l(4), 0xdead_beef_3f80_0000);
+            exec.core.write_gpr(2, 0x0123_4567_89ab_cdef);
+            assert_eq!(exec.exec((OP_COP1 << 26) | (RS_MTC1 << 21) | (2 << 16) | (4 << 11)), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(4), 0xdead_beef_89ab_cdef);
         }
         use crate::cpu::mips_cache_shadow::{R4400ShadowCache, R5000ShadowCache, R10000ShadowCache};
         check::<R4400ShadowCache>();
