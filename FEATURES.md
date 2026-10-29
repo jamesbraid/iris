@@ -156,7 +156,7 @@ the first `[section]`, because TOML tables continue until the next header.
 | `test_device` | `false` | Map the bare-metal test device in GIO slot 0. |
 | `test_device_dump` | `iris-testdev-dump.json when unset` | Test-device machine-state JSON output. |
 | `cheritest_dump_hook` | `false` | CP0 register 26 dump convention; needs test_device, unsafe for normal PROM boot. |
-| `nat_subnet` | `192.168.0.0/24 when unset` | CIDR; NAT gateway network+1 and guest network+2. |
+| `nat_subnet` | `192.168.0.0/24 when unset` | CIDR. Initial NAT gateway network+1 and guest network+2. Native NAT can adopt the guest's static gateway before routing begins. |
 | `ci` | `false` | CI server/serial backend; hides host window unless ci_display, keeps offscreen graphics. |
 | `ci_socket` | `/tmp/iris.sock on Unix; 127.0.0.1:19851 on Windows` | Unix path, host:port, or tcp:host:port. |
 | `ci_display` | `false` | Keep host graphics window visible in CI mode. |
@@ -426,7 +426,7 @@ iris-gui does not parse this standalone option set; use its named-machine UI.
 | `--noaudio` | Disable audio emulation (no HAL2); graphics still works |
 | `--audio-host <HOST>` | Host audio system for HAL2: `default`, `alsa` or `pulseaudio` (overrides `[audio] host`) |
 | `--nfs-dir` | Enable NFS share: path to the directory to export (enables NFS) |
-| `--nat-subnet` | NAT subnet in CIDR notation (e.g. 192.168.5.0/24). Gateway gets .1, guest (IRIX) gets .2. Default: 192.168.0.0/24. |
+| `--nat-subnet` | NAT subnet in CIDR notation (e.g. 192.168.5.0/24). Initial gateway gets .1, guest (IRIX) gets .2. Default: 192.168.0.0/24. |
 | `--net-mode` | Networking backend: "nat" (default, software gateway) or "pcap" (bridge onto a real host interface; requires --features pcap). |
 | `--pcap-interface` | Host interface to bridge onto in PCAP mode (e.g. eth0, en0). Implies --net-mode pcap. List candidates with --list-net-interfaces. |
 | `--list-net-interfaces` | Print the host network interfaces libpcap can bridge onto, then exit. Requires a build with --features pcap. |

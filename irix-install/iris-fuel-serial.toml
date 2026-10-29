@@ -30,8 +30,10 @@ ps2_keyboard = false
 ps2_mouse = false
 
 [network]
-# Disconnected cable. For NAT, use mode = "nat" and configure IRIX ef0:
-# guest 192.168.0.2/24, default gateway 192.168.0.1.
+# Disconnected cable. For NAT, use mode = "nat".
+# Keep the installed disk's working ef0 address and default route.
+# NAT can adopt its static gateway before routing begins.
+# Initial defaults: guest 192.168.0.2/24, gateway 192.168.0.1.
 mode = "off"
 
 [scsi.1]

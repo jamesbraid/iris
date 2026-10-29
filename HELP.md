@@ -71,11 +71,12 @@ a keyboard and mouse, set both `fuel.ps2_keyboard` and `fuel.ps2_mouse` to
 
 The sample starts with `[network] mode = "off"`, which leaves the Ethernet
 PHY link down. Guest warnings about a disconnected cable are expected.
-To use the native NAT backend, change this to `"nat"` and configure IRIX's
-`ef0` address and default route for the same subnet. Defaults are
+To use the native NAT backend, change this to `"nat"`. Initial defaults are
 `192.168.0.2` for the guest, `192.168.0.1` for the gateway and
-`255.255.255.0` for the netmask. A saved disk's old address and route may
-need changing. Fuel guest NAT operation has not yet been validated.
+`255.255.255.0` for the netmask. Keep an installed disk's working `ef0`
+address and default route. Before routing begins, NAT can adopt its static
+gateway, provided that /24 subnet does not overlap a host network.
+Automatic gateway adoption stops once routing begins.
 
 ---
 
