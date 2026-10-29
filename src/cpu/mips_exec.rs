@@ -1532,6 +1532,9 @@ pub struct MipsExecutor<T: Tlb, C: CpuModel> {
     /// shadow model once a kernel starts, and back when POST starts over).
     /// None costs one check per batch.
     pub batch_hook: Option<Box<dyn FnMut(&mut MipsExecutor<T, C>) + Send>>,
+    /// Optional machine instruction scope, including monitor stepping. The
+    /// callback calls the provided interpreter body exactly once.
+    pub instruction_hook: Option<Arc<dyn Fn(&mut MipsExecutor<T, C>, fn(&mut MipsExecutor<T, C>) -> ExecStatus) -> ExecStatus + Send + Sync>>,
     /// A window of physical addresses that reaches memory at another address,
     /// `(base, size, target)`, applied to mapped and XKPHYS translations
     /// before [`Self::phys_mask`]. The O2 has a no-ECC alias of its memory at
@@ -2953,6 +2956,7 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             #[cfg(feature = "jitv2")]
             jitv2_dispatch_enabled: !matches!(std::env::var("IRIS_JIT_DISPATCH").as_deref(), Ok("off") | Ok("0")),
             batch_hook: None,
+            instruction_hook: None,
             phys_alias: None,
             phys_mask: u64::MAX,
             #[cfg(feature = "developer")]
@@ -4007,6 +4011,13 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     }
 
     pub fn step_int(&mut self) -> ExecStatus {
+        match self.instruction_hook.clone() {
+            Some(hook) => hook(self, Self::step_int_inner),
+            None => self.step_int_inner(),
+        }
+    }
+
+    fn step_int_inner(&mut self) -> ExecStatus {
         step_preamble!(self);
         let pc = self.core.pc;
 
