@@ -71,3 +71,4 @@ pub mod bedrock_mem;
 pub mod bedrock_md;
 pub mod isp12160;
 pub mod ohci;
+pub mod odyssey;
