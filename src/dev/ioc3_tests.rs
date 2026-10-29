@@ -192,6 +192,7 @@ fn the_scratch_register_programs_the_predivider_under_dlab() {
     r.w8(reg::SERIAL_A + 7, 6);
     assert_eq!(r.r8(reg::SERIAL_A + 7), 6, "reads back what was written");
     assert_eq!(r.c.sh.st.lock().uart[0].predivider, 6);
+    assert_eq!(r.c.sh.st.lock().uart[0].core.baudbase(), 22_118_400 / 3 / 16, "the divisor's clock follows it");
     // Written 0 or 1 means nothing.
     r.w8(reg::SERIAL_A + 7, 1);
     assert_eq!(r.c.sh.st.lock().uart[0].predivider, 6);
@@ -1344,9 +1345,9 @@ fn stop_joins_the_threads_and_removes_the_timers() {
     // Typed input waits in the backend while stopped.
     r.wire[0].inp.lock().unwrap().extend(b"x");
     std::thread::sleep(Duration::from_millis(20));
-    assert!(r.c.sh.st.lock().uart[0].rx.is_empty());
+    assert!(r.c.sh.st.lock().uart[0].core.rx_pending() == 0);
     r.c.start();
-    assert!(within_two_seconds(|| !r.c.sh.st.lock().uart[0].rx.is_empty()));
+    assert!(within_two_seconds(|| r.c.sh.st.lock().uart[0].core.rx_pending() != 0));
     assert!(r.c.sh.armed.lock()[K_INT_OUT].is_some(), "start arms the deadlines the chip holds");
     r.c.stop();
 }

@@ -57,7 +57,8 @@ use crate::dev::ioc3_port::Ioc3EthPort;
 use crate::dev::ps2::Ps2Controller;
 use crate::dev::w1;
 use crate::dev::w1::sgi::{self, BoardRecord};
-use crate::dev::z85c30::{null_serial_backend, SerialBackend};
+use crate::dev::ns16550::Ns16550;
+use crate::dev::serial_host::SerialBackend;
 use crate::irq::{InterruptController, IrqLine};
 use crate::pci::{Bar, PciBusDevice, PciConfig, PciDma, PciDmaStatus, PCI_INTA};
 use crate::hptimer::{TimerId, TimerManager, TimerReturn};
@@ -144,9 +145,7 @@ pub mod int {
 
 mod uart_reg {
     pub const RBR_THR: u32 = 0;
-    pub const IER: u32 = 1;
     pub const IIR_FCR: u32 = 2;
-    pub const LCR: u32 = 3;
     pub const MCR: u32 = 4;
     pub const LSR: u32 = 5;
     pub const MSR: u32 = 6;
@@ -157,7 +156,6 @@ const LSR_OE: u8 = 0x02;
 const LSR_PE: u8 = 0x04;
 const LSR_FE: u8 = 0x08;
 const LSR_BI: u8 = 0x10;
-const LSR_THRE_TEMT: u8 = 0x60;
 const MCR_DTR: u8 = 0x01;
 const MCR_RTS: u8 = 0x02;
 const MCR_OUT1: u8 = 0x04;
@@ -167,27 +165,22 @@ const MCR_AFE: u8 = 0x20;
 const MSR_DCTS: u8 = 0x01;
 const MSR_CTS: u8 = 0x10;
 const MSR_DCD: u8 = 0x80;
-const LCR_DLAB: u8 = 0x80;
-const UART_FIFO: usize = 16;
 const LSR_TEST_MASK: u8 = 0x7f;
 const MSR_TEST_MASK: u8 = 0x0f;
+/// The reference clock of the UART crystal: the pre-divider divides it, and
+/// the divisor latch divides the result by 16 again.
+const UART_CRYSTAL_HZ: u32 = 22_118_400;
 
-/// A 16550 as IOC3 fits it. Transmit is instantaneous (the byte goes to the
+/// A 16550 as IOC3 fits it: the shared core (`ns16550.rs`) with the chip's
+/// own additions around it. Transmit is instantaneous (the byte goes to the
 /// backend inside the write), so the transmitter always reads empty.
+///
+/// The additions: the auto-flow bit in modem control, which the core's modem
+/// control masks away; factory-test writes to line and modem status; and the
+/// scratch register doubling as the clock pre-divider while the divisor latch
+/// is open. Ported from hw/misc/sgi-ioc3.c in jamesbraid/qemu-sgi-origami.
 struct Uart {
-    backend: Arc<dyn SerialBackend>,
-    rx: VecDeque<u8>,
-    ier: u8,
-    fifo: bool,
-    lcr: u8,
-    mcr: u8,
-    scr: u8,
-    dll: u8,
-    dlm: u8,
-    lsr_err: u8,
-    msr_delta: u8,
-    msr_prev: u8,
-    thr_int: bool,
+    core: Ns16550,
     // IOC3 specifics, kept beside the 16550.
     predivider: u8,
     mcr_afe: u8,
@@ -197,42 +190,11 @@ struct Uart {
 
 impl Uart {
     fn new() -> Uart {
-        let mut u = Uart {
-            backend: null_serial_backend(),
-            rx: VecDeque::new(),
-            ier: 0,
-            fifo: false,
-            lcr: 0,
-            mcr: MCR_OUT2,
-            scr: 0,
-            dll: 0x0c,
-            dlm: 0,
-            lsr_err: 0,
-            msr_delta: 0,
-            msr_prev: 0xb0,
-            thr_int: false,
-            predivider: 0,
-            mcr_afe: 0,
-            lsr_test: 0,
-            msr_test: 0,
-        };
-        u.reset();
-        u
+        Uart { core: Ns16550::new(115200), predivider: 0, mcr_afe: 0, lsr_test: 0, msr_test: 0 }
     }
 
     fn reset(&mut self) {
-        self.rx.clear();
-        self.ier = 0;
-        self.fifo = false;
-        self.lcr = 0;
-        self.mcr = MCR_OUT2;
-        self.scr = 0;
-        self.dll = 0x0c;
-        self.dlm = 0;
-        self.lsr_err = 0;
-        self.msr_delta = 0;
-        self.msr_prev = self.msr_levels();
-        self.thr_int = false;
+        self.core.reset();
         self.mcr_afe = 0;
         self.lsr_test = 0;
         self.msr_test = 0;
@@ -240,116 +202,25 @@ impl Uart {
         // specified for it.
     }
 
-    fn dlab(&self) -> bool {
-        self.lcr & LCR_DLAB != 0
-    }
-
     fn loopback(&self) -> bool {
-        self.mcr & MCR_LOOP != 0
-    }
-
-    /// The modem status input levels (bits 4..7). The port comes up with
-    /// carrier and clear-to-send asserted; in loopback the outputs wire back.
-    fn msr_levels(&self) -> u8 {
-        if self.loopback() {
-            ((self.mcr & (MCR_OUT1 | MCR_OUT2)) << 4)
-                | ((self.mcr & MCR_RTS) << 3)
-                | ((self.mcr & MCR_DTR) << 5)
-        } else {
-            0xb0
-        }
-    }
-
-    fn lsr_now(&self) -> u8 {
-        let mut v = LSR_THRE_TEMT | self.lsr_err;
-        if !self.rx.is_empty() {
-            v |= LSR_DR;
-        }
-        v
-    }
-
-    fn iir(&self) -> u8 {
-        let id = if self.ier & 4 != 0 && self.lsr_err & (LSR_OE | LSR_PE | LSR_FE | LSR_BI) != 0 {
-            0x06
-        } else if self.ier & 1 != 0 && !self.rx.is_empty() {
-            0x04
-        } else if self.ier & 2 != 0 && self.thr_int {
-            0x02
-        } else if self.ier & 8 != 0 && self.msr_delta & 0x0f != 0 {
-            0x00
-        } else {
-            0x01
-        };
-        id | if self.fifo { 0xc0 } else { 0 }
+        self.core.loopback()
     }
 
     /// The interrupt line: low IIR bit clear.
     fn irq(&self) -> bool {
-        self.iir() & 1 == 0
+        self.core.irq()
     }
 
-    fn push_rx(&mut self, b: u8) {
-        let cap = if self.fifo { UART_FIFO } else { 1 };
-        if self.rx.len() >= cap {
-            self.lsr_err |= LSR_OE;
-        } else {
-            self.rx.push_back(b);
-        }
-    }
-
-    /// Move whatever the host end has typed into the receive FIFO.
-    /// Returns whether anything arrived.
+    /// Move whatever the host end has typed into the receive FIFO and let
+    /// the receive timeout run out. Returns whether anything changed.
     fn pump(&mut self) -> bool {
-        let cap = if self.fifo { UART_FIFO } else { 1 };
-        let mut moved = false;
-        while self.rx.len() < cap {
-            match self.backend.recv_byte() {
-                Ok(b) => {
-                    self.rx.push_back(b);
-                    moved = true;
-                }
-                Err(_) => break,
-            }
-        }
-        moved
+        let moved = self.core.pump();
+        self.core.check_timeout(Instant::now()) || moved
     }
 
     /// The 16550 proper: what the ring engine sees.
     fn read_core(&mut self, r: u32) -> u8 {
-        match r {
-            uart_reg::RBR_THR => {
-                if self.dlab() {
-                    self.dll
-                } else {
-                    self.pump();
-                    self.rx.pop_front().unwrap_or(0)
-                }
-            }
-            uart_reg::IER => if self.dlab() { self.dlm } else { self.ier },
-            uart_reg::IIR_FCR => {
-                let v = self.iir();
-                if v & 0x0f == 0x02 {
-                    self.thr_int = false;
-                }
-                v
-            }
-            uart_reg::LCR => self.lcr,
-            uart_reg::MCR => self.mcr,
-            uart_reg::LSR => {
-                self.pump();
-                // Reading clears the error latches.
-                let v = self.lsr_now();
-                self.lsr_err = 0;
-                v
-            }
-            uart_reg::MSR => {
-                let v = self.msr_levels() | self.msr_delta;
-                self.msr_delta = 0;
-                self.msr_prev = self.msr_levels();
-                v
-            }
-            _ => self.scr,
-        }
+        self.core.read(r)
     }
 
     /// A guest's byte-wide read, with the chip's additions: the auto-flow
@@ -374,67 +245,20 @@ impl Uart {
 
     fn write(&mut self, r: u32, v: u8) {
         match r {
-            uart_reg::RBR_THR => {
-                if self.dlab() {
-                    self.dll = v;
-                } else {
-                    self.transmit(v);
-                }
-            }
-            uart_reg::IER => {
-                if self.dlab() {
-                    self.dlm = v;
-                } else {
-                    let was = self.ier;
-                    self.ier = v & 0x0f;
-                    // Enabling the transmit interrupt with the holding
-                    // register empty raises it at once.
-                    if was & 2 == 0 && self.ier & 2 != 0 {
-                        self.thr_int = true;
-                    }
-                }
-            }
-            uart_reg::IIR_FCR => {
-                self.fifo = v & 1 != 0;
-                if v & 2 != 0 {
-                    self.rx.clear();
-                }
-            }
-            uart_reg::LCR => self.lcr = v,
-            uart_reg::MCR => {
-                self.mcr_afe = v & MCR_AFE;
-                self.mcr = v & 0x1f;
-                let now = self.msr_levels();
-                let changed = (now ^ self.msr_prev) >> 4;
-                // CTS, DSR change bits straight; RI only on its trailing
-                // edge; carrier changes.
-                let mut delta = changed & 0x0b;
-                if self.msr_prev & 0x40 != 0 && now & 0x40 == 0 {
-                    delta |= 0x04;
-                }
-                self.msr_delta |= delta;
-                self.msr_prev = now;
-            }
+            uart_reg::MCR => self.mcr_afe = v & MCR_AFE,
             uart_reg::LSR => self.lsr_test = v & LSR_TEST_MASK,
             uart_reg::MSR => self.msr_test = v & MSR_TEST_MASK,
-            _ => {
-                self.scr = v;
+            uart_reg::SCR => {
                 // Scratch writes with the divisor latch up program the clock
                 // pre-divider; twice the divide wanted. 0 and 1 mean nothing.
-                if self.dlab() && v / 2 != 0 {
+                if self.core.dlab() && v / 2 != 0 {
                     self.predivider = v;
+                    self.core.set_baudbase(UART_CRYSTAL_HZ / (v / 2) as u32 / 16);
                 }
             }
+            _ => {}
         }
-    }
-
-    fn transmit(&mut self, b: u8) {
-        if self.loopback() {
-            self.push_rx(b);
-        } else {
-            self.backend.send_byte(b);
-        }
-        self.thr_int = true;
+        self.core.write(r, v);
     }
 
     /// Modem status as the ring engine reads it with flow control looped back.
@@ -1414,9 +1238,9 @@ impl St {
     /// A passive mirror of the 16550's lines; no read side effects.
     fn sdma_shadow(&self, p: usize) -> u32 {
         let u = &self.uart[p];
-        let lsr = u.lsr_now();
-        let mcr = u.mcr;
-        let mut msr = if u.loopback() { u.msr_levels() } else { 0xb0 | u.msr_delta };
+        let lsr = u.core.lsr();
+        let mcr = u.core.mcr();
+        let mut msr = u.core.msr();
         if u.flow_cts(self.sdma_ctl(p)) {
             msr |= MSR_CTS;
         }
@@ -2590,7 +2414,7 @@ impl Ioc3 {
     /// Wire the host end of serial port `port` (0 is the console): a TCP
     /// listener, a log tee, or nothing.
     pub fn set_serial_backend(&self, port: usize, backend: Arc<dyn SerialBackend>) {
-        self.sh.st.lock().uart[port].backend = backend;
+        self.sh.st.lock().uart[port].core.set_backend(backend);
     }
 
     /// Where parallel-port output goes. Without one it is dropped. No machine
