@@ -68,10 +68,12 @@ pub(crate) struct FuelBoard {
     pub ioc3: Arc<crate::dev::ioc3::Ioc3>,
     pub eth: Arc<crate::dev::ioc3_eth::Ioc3Eth>,
     pub scsi: Arc<crate::dev::isp12160::Isp12160>,
+    pub usb: Arc<crate::dev::ohci::Ohci>,
     pub serial: [Arc<crate::dev::z85c30::CiSerialBackend>; 3],
     pub irq: Arc<PendingIrq>,
     clock: crate::dev::heart::Clock,
     last_clock: std::sync::atomic::AtomicU64,
+    usb_elapsed_ns: std::sync::atomic::AtomicU64,
     running: std::sync::atomic::AtomicBool,
 }
 
@@ -252,6 +254,8 @@ impl FuelBoard {
         let scsi = Arc::new(crate::dev::isp12160::Isp12160::new());
         xbridge.attach(15, 1, scsi.clone());
         xbridge.attach(15, 4, ioc3.clone());
+        let usb = crate::dev::ohci::Ohci::new();
+        xbridge.attach(15, 5, usb.clone());
         ioc3.connect_superio_interrupt(xbridge.pin_line(15, 0));
         let mut bus = Ip35Bus::new(phys.clone());
         bus.set_fallback(1, 1 << 32, Arc::new(IoPio(io.clone())));
@@ -311,7 +315,7 @@ impl FuelBoard {
             );
             bus.map(0, base + 0x400_0000, 8, Arc::new(BoardId(md.clone())));
         }
-        bus.map(0, 0x1_c000_0000, 1 << 29, md.directory_bus());
+        bus.map(0, 0x1_c000_0000, 1 << 30, md.directory_bus());
         bus.map(0, 0x1_4000_0000, 1 << 30, md.ecc_bus());
         bus.map(0, 0x1_0000_0000, 1 << 30, md.ecc_scrub_bus());
         bus.map(2, 0, 1 << 33, md.fetchop_bus());
@@ -341,9 +345,11 @@ impl FuelBoard {
             ioc3,
             eth,
             scsi,
+            usb,
             serial,
             irq,
             last_clock: std::sync::atomic::AtomicU64::new(clock()),
+            usb_elapsed_ns: std::sync::atomic::AtomicU64::new(0),
             clock,
             running: std::sync::atomic::AtomicBool::new(false),
         })
@@ -391,6 +397,7 @@ impl FuelBoard {
         self.ioc3.start();
         self.eth.start();
         self.scsi.start();
+        self.usb.start();
     }
     pub fn poll(&self) {
         if self.running.load(std::sync::atomic::Ordering::Acquire) {
@@ -400,6 +407,9 @@ impl FuelBoard {
                 .swap(now, std::sync::atomic::Ordering::AcqRel);
             self.md.advance_ns(now.saturating_sub(previous));
             self.flash.advance_ns(now.saturating_sub(previous));
+            let delta = now.saturating_sub(previous);
+            let old = self.usb_elapsed_ns.fetch_add(delta, std::sync::atomic::Ordering::Relaxed);
+            self.usb.advance_frames((old + delta) / 1_000_000 - old / 1_000_000);
             for pi in &self.pi {
                 pi.poll();
             }
@@ -410,6 +420,7 @@ impl FuelBoard {
         self.poll();
         self.running
             .store(false, std::sync::atomic::Ordering::Release);
+        self.usb.stop();
         self.scsi.stop();
         self.eth.stop();
         self.ioc3.stop();
