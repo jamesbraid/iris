@@ -323,9 +323,14 @@ pub enum NetMode {
     /// The guest appears as a real L2 host on the physical LAN; NAT services
     /// (DHCP/DNS/NFS/port-forward) are NOT provided — use the real network's.
     Pcap,
-    /// No Ethernet: the adapter is not plugged into anything. O2 only for now
-    /// (`MachineConfig::validate`); the Indy and Indigo2 always have a network.
+    /// No Ethernet: the adapter is not plugged into anything. O2 and Octane
+    /// only (`MachineConfig::validate`); the Indy and Indigo2 always have a
+    /// network.
     Off,
+    /// A private segment carried over a stream socket in QEMU's `-netdev
+    /// stream` framing, to a peer that serves it (`[network] stream`). iris
+    /// provides no gateway services on it.
+    Stream,
 }
 
 impl Default for NetMode {
@@ -357,6 +362,8 @@ pub struct NetworkConfig {
     /// Directory served read-only by the gateway's built-in rsh server (TCP
     /// 514). None (the default) disables it.
     pub rsh_dir: Option<std::path::PathBuf>,
+    /// The peer for `NetMode::Stream`, as `tcp:IP:PORT` or `unix:PATH`.
+    pub stream: Option<String>,
 }
 
 impl Default for NetworkConfig {
@@ -370,6 +377,7 @@ impl Default for NetworkConfig {
             nfs_pcap_ip: None,
             tftp_dir: None,
             rsh_dir: None,
+            stream: None,
             mac: DEFAULT_MAC,
         }
     }
@@ -413,6 +421,10 @@ pub struct NetworkSection {
     /// executed on the host. Unset disables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rsh_dir: Option<String>,
+    /// With `mode = "stream"`: the server of the private segment, as
+    /// `tcp:IP:PORT` or `unix:PATH` (QEMU `-netdev stream` framing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<String>,
 }
 
 /// Where VINO's video-in capture should come from.
@@ -1952,6 +1964,11 @@ impl MachineConfig {
                     "scsi.{}: kind = \"daynaport\" is not available on the O2 (its Ethernet is built in)", key
                 ));
             }
+            if dev.is_daynaport() && self.network.mode == NetMode::Stream {
+                return Err(format!(
+                    "scsi.{}: kind = \"daynaport\" cannot join a stream segment: [network] stream names the onboard Ethernet's peer", key
+                ));
+            }
         }
         if self.scale < 1 || self.scale > 4 {
             return Err(format!("scale {} is invalid (valid: 1, 2, 3, 4)", self.scale));
@@ -2021,11 +2038,10 @@ impl MachineConfig {
             (NetMode::Off, p) if p != MachineProfile::O2Ip32 && p != MachineProfile::OctaneIp30 => {
                 return Err("network.mode = \"off\" is only available on the O2 and the Octane for now; the Indy and Indigo2 always have their Ethernet".into());
             }
-            (NetMode::Pcap, MachineProfile::O2Ip32) => {
-                return Err("network.mode = \"pcap\" is not available on the O2 yet (its Ethernet runs on the NAT gateway)".into());
-            }
-            (NetMode::Pcap, MachineProfile::OctaneIp30) => {
-                return Err("network.mode = \"pcap\" is not available on the Octane yet (its Ethernet runs on the NAT gateway)".into());
+            (NetMode::Stream, _) => {
+                let ep = self.network.stream.as_deref()
+                    .ok_or_else(|| "network.mode = \"stream\" needs [network] stream = \"tcp:IP:PORT\" or \"unix:PATH\"".to_string())?;
+                crate::net::stream::StreamEndpoint::parse(ep).map_err(|e| format!("network.stream: {e}"))?;
             }
             _ => {}
         }
@@ -2106,6 +2122,7 @@ impl MachineConfig {
             mac,
             tftp_dir:     self.network.tftp_dir.as_ref().map(std::path::PathBuf::from),
             rsh_dir:      self.network.rsh_dir.as_ref().map(std::path::PathBuf::from),
+            stream:       self.network.stream.clone(),
         }
     }
 
@@ -2740,6 +2757,26 @@ mod export_tests {
         assert!(cfg.validate().unwrap_err().contains("daynaport"));
     }
 
+    /// `mode = "stream"` needs a parseable `stream` peer, on every machine.
+    #[test]
+    fn stream_mode_needs_a_peer() {
+        for profile in [MachineProfile::default(), MachineProfile::O2Ip32, MachineProfile::OctaneIp30] {
+            let mut cfg = MachineConfig::default();
+            cfg.machine.profile = profile;
+            if profile != MachineProfile::default() { cfg.machine.cpu = CpuModel::R10000; }
+            cfg.network.mode = NetMode::Stream;
+            assert!(cfg.validate().unwrap_err().contains("needs [network] stream"), "{profile:?}");
+            cfg.network.stream = Some("tcp:nope".into());
+            assert!(cfg.validate().unwrap_err().contains("network.stream"), "{profile:?}");
+            cfg.network.stream = Some("tcp:127.0.0.1:7000".into());
+            cfg.validate().unwrap_or_else(|e| panic!("{profile:?}: {e}"));
+        }
+        let mut cfg: MachineConfig = toml::from_str("[network]\nmode = \"stream\"\nstream = \"unix:/run/x\"\n[scsi.4]\nkind = \"daynaport\"").unwrap();
+        assert!(cfg.validate().unwrap_err().contains("cannot join a stream segment"));
+        cfg.scsi.clear();
+        assert_eq!(cfg.network().stream.as_deref(), Some("unix:/run/x"));
+    }
+
     /// `banks` reads one to eight entries and pads; it writes four or more
     /// with no trailing zeros past the fourth; banks a machine does not have
     /// must be 0; the O2 takes DIMM kits, largest first, and nothing else.
@@ -2770,7 +2807,7 @@ mod export_tests {
         assert!(o2.validate().unwrap_err().contains("largest kit goes in pair A"));
         o2.banks = default_banks();
         o2.network.mode = NetMode::Pcap;
-        assert!(o2.validate().unwrap_err().contains("pcap"));
+        o2.validate().expect("a bridged O2");
         o2.network.mode = NetMode::Off;
         o2.validate().expect("an unplugged O2");
         let mut indy = MachineConfig::default();

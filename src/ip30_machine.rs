@@ -96,6 +96,8 @@ pub struct OctaneMachine {
     /// The IMPACT board, unless `[octane] graphics = "none"`.
     pub gfx: Option<Arc<ImpactXio>>,
     nat: Option<(Arc<crate::net::NatControl>, (std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr))>,
+    /// Guest frames the network backend has processed.
+    frames: Option<Arc<std::sync::atomic::AtomicU64>>,
     scratch_path: Option<std::path::PathBuf>,
     nvram_path: String,
     event_rx: Option<std::sync::mpsc::Receiver<MachineEvent>>,
@@ -337,12 +339,17 @@ impl OctaneMachine {
         Self::connect_serial(cfg, &ioc3, ci_serial.as_ref());
 
         // The Ethernet on the NAT gateway `[network]` describes.
-        let mut nat = None;
-        if cfg.network.mode != crate::config::NetMode::Off {
-            let net = crate::net::GatewayConfig::from_network(&cfg.network());
-            eprintln!("iris: Octane Ethernet on NAT: gateway {}, guest {} (DHCP)", net.gateway_ip, net.client_ip);
-            let addrs = (net.client_ip, net.gateway_ip, net.netmask);
-            nat = Some((eth.start_nat(net), addrs));
+        let (mut nat, mut frames) = (None, None);
+        let net = crate::net::GatewayConfig::from_network(&cfg.network());
+        if let Some(link) = crate::net::Link::with_gateway(net.clone())? {
+            if net.mode == crate::config::NetMode::Nat {
+                eprintln!("iris: Octane Ethernet on NAT: gateway {}, guest {} (DHCP)", net.gateway_ip, net.client_ip);
+            } else {
+                eprintln!("iris: Octane Ethernet on {}", link.describe);
+            }
+            frames = Some(link.frames.clone());
+            nat = link.nat.clone().map(|c| (c, (net.client_ip, net.gateway_ip, net.netmask)));
+            eth.attach(link);
         }
         Ok(Self {
             phys,
@@ -363,6 +370,7 @@ impl OctaneMachine {
             flash,
             gfx,
             nat,
+            frames,
             scratch_path,
             nvram_path: cfg.nvram.clone(),
             event_rx: Some(event_rx),
@@ -626,6 +634,9 @@ impl Workstation for OctaneMachine {
     ) -> std::io::Result<usize> {
         let buses: Vec<_> = self.scsi.iter().map(|c| c.bus()).collect();
         crate::scsi::ScsiBus::sync_chd_disks(&buses, only, progress, cancel)
+    }
+    fn net_frames(&self) -> Option<Arc<std::sync::atomic::AtomicU64>> {
+        self.frames.clone()
     }
     fn nat_control(&self) -> Option<Arc<crate::net::NatControl>> {
         self.nat.as_ref().map(|(n, _)| n.clone())

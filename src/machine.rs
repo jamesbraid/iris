@@ -2069,6 +2069,9 @@ impl Workstation for Machine {
     ) -> std::io::Result<usize> {
         Machine::sync_chd_disks(self, only, progress, cancel)
     }
+    fn net_frames(&self) -> Option<Arc<std::sync::atomic::AtomicU64>> {
+        self.hpc3.seeq().frames()
+    }
     fn nat_control(&self) -> Option<Arc<crate::net::NatControl>> {
         Some(self.hpc3.seeq().nat_control())
     }

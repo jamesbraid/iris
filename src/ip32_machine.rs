@@ -136,6 +136,8 @@ pub struct O2Machine {
     /// The NAT's controls and the addresses it hands the guest (client,
     /// gateway, netmask), when the Ethernet is plugged in.
     nat: Option<(Arc<crate::net::NatControl>, (std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr))>,
+    /// Guest frames the network backend has processed.
+    frames: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// The guest switching the machine off, for the machine-events thread.
     events: std::sync::mpsc::SyncSender<MachineEvent>,
     event_rx: Option<std::sync::mpsc::Receiver<MachineEvent>>,
@@ -234,12 +236,17 @@ impl O2Machine {
         }
         // The Ethernet on the NAT gateway `[network]` describes (`mode =
         // "off"` leaves it unplugged; validate refuses pcap here for now).
-        let mut nat = None;
-        if cfg.network.mode != crate::config::NetMode::Off {
-            let net = crate::net::GatewayConfig::from_network(&cfg.network());
-            eprintln!("iris: O2 Ethernet on NAT: gateway {}, guest {} (DHCP)", net.gateway_ip, net.client_ip);
-            let addrs = (net.client_ip, net.gateway_ip, net.netmask);
-            nat = Some((bus.mace.mec.start_nat(net), addrs));
+        let (mut nat, mut frames) = (None, None);
+        let net = crate::net::GatewayConfig::from_network(&cfg.network());
+        if let Some(link) = crate::net::Link::with_gateway(net.clone())? {
+            if net.mode == crate::config::NetMode::Nat {
+                eprintln!("iris: O2 Ethernet on NAT: gateway {}, guest {} (DHCP)", net.gateway_ip, net.client_ip);
+            } else {
+                eprintln!("iris: O2 Ethernet on {}", link.describe);
+            }
+            frames = Some(link.frames.clone());
+            nat = link.nat.clone().map(|c| (c, (net.client_ip, net.gateway_ip, net.netmask)));
+            bus.mace.mec.attach(link);
         }
 
         let timer_manager = Arc::new(TimerManager::new());
@@ -360,6 +367,7 @@ impl O2Machine {
             monitor_port,
             ci_serial,
             nat,
+            frames,
             events,
             event_rx: Some(event_rx),
             controller_up: Arc::new(AtomicBool::new(false)),
@@ -879,6 +887,9 @@ impl Workstation for O2Machine {
         crate::scsi::ScsiBus::sync_chd_disks(&buses, only, progress, cancel)
     }
 
+    fn net_frames(&self) -> Option<Arc<std::sync::atomic::AtomicU64>> {
+        self.frames.clone()
+    }
     fn nat_control(&self) -> Option<Arc<crate::net::NatControl>> {
         self.nat.as_ref().map(|(n, _)| n.clone())
     }
