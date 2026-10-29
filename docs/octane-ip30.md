@@ -114,6 +114,10 @@ move them. The PROM and IRIX run the keyboard in scan code set 3. How the
 controller works and what each driver does with it is in
 [Octane/ioc3-ps2.md](Octane/ioc3-ps2.md).
 
+The front lightbar is two IOC3 general-purpose pins: pin 0 the white power
+LED, pin 1 the red fault LED. The GUI's front LED shows them, green for white
+and red for red.
+
 ## Graphics
 
 The graphics board sits on widget 11: the same raster chips as the Indigo2
