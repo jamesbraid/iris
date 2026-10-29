@@ -162,7 +162,10 @@ impl OctaneMachine {
         // The status bar's activity bits, shared with the graphics board.
         let heartbeat = Arc::new(AtomicU64::new(0));
         let mac = cfg.network().mac;
-        let scsi = [Arc::new(Isp1040::new_at(0)), Arc::new(Isp1040::new_at(1))];
+        // The buses are filled from `[scsi.N]` before the controllers exist.
+        let [bus_a, bus_b] = [Isp1040::new_bus(), Isp1040::new_bus()];
+        let scratch_path = Self::attach_scsi(cfg, [&bus_a, &bus_b])?;
+        let scsi = [Arc::new(Isp1040::new_at(0, bus_a)), Arc::new(Isp1040::new_at(1, bus_b))];
         for s in &scsi {
             s.set_heartbeat(heartbeat.clone());
         }
@@ -240,7 +243,6 @@ impl OctaneMachine {
             }
         }));
 
-        let scratch_path = Self::attach_scsi(cfg, &scsi)?;
         eprintln!(
             "iris: Octane with {} MB ({}), {}",
             banks.iter().sum::<u64>() >> 20,
@@ -379,10 +381,10 @@ impl OctaneMachine {
 
     /// The `[scsi.N]` devices: `controller` 0 is the internal bus, 1 the
     /// external one. Returns the `scratch = true` volume, if any.
-    fn attach_scsi(cfg: &MachineConfig, ctls: &[Arc<Isp1040>; 2]) -> Result<Option<std::path::PathBuf>, String> {
+    fn attach_scsi(cfg: &MachineConfig, buses: [&crate::scsi::ScsiBus; 2]) -> Result<Option<std::path::PathBuf>, String> {
         let attached = crate::scsi::attach_from_config(cfg, Some("ip30"), &|c| {
-            ctls.get(c as usize)
-                .map(|ctl| ctl.bus())
+            buses.get(c as usize)
+                .copied()
                 .ok_or_else(|| format!("controller {c} (an Octane has controllers 0 and 1)"))
         })?;
         if let Some(d) = attached.daynaports.first() {

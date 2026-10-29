@@ -328,19 +328,24 @@ pub struct Wd33c93a {
 }
 
 impl Wd33c93a {
+    /// An empty bus of the kind this chip drives: ids 0-7, and the Indy's
+    /// Sony CD-ROM. The machine fills it from `[scsi.N]` and hands it to
+    /// [`Self::new_with_id`].
+    pub fn new_bus() -> ScsiBus {
+        ScsiBus::new(8, ScsiIdentities { disk: scsi::DISK_IDENTITY, cdrom: INDY_CDROM })
+    }
+
+    /// A chip on an empty bus, for the tests.
+    #[cfg(test)]
     pub fn new(dma: Option<Arc<dyn DmaClient>>, irq: Option<IrqLine>, heartbeat: Arc<AtomicU64>) -> Self {
-        Self::new_with_config(dma, irq, heartbeat, true)
+        Self::new_with_id(dma, irq, heartbeat, true, 0, Self::new_bus())
     }
 
-    pub fn new_with_config(dma: Option<Arc<dyn DmaClient>>, irq: Option<IrqLine>, heartbeat: Arc<AtomicU64>, deferred_int: bool) -> Self {
-        Self::new_with_id(dma, irq, heartbeat, deferred_int, 0)
-    }
-
-    /// Same as `new_with_config`, but tags every log line with `id` (the
-    /// HPC3 SCSI controller number) — see `Wd33c93aState.id`'s doc comment.
-    pub fn new_with_id(dma: Option<Arc<dyn DmaClient>>, irq: Option<IrqLine>, heartbeat: Arc<AtomicU64>, deferred_int: bool, id: u8) -> Self {
+    /// The chip on `bus`, tagging every log line with `id` (the HPC3 SCSI
+    /// controller number) — see `Wd33c93aState.id`'s doc comment.
+    pub fn new_with_id(dma: Option<Arc<dyn DmaClient>>, irq: Option<IrqLine>, heartbeat: Arc<AtomicU64>, deferred_int: bool, id: u8, bus: ScsiBus) -> Self {
         let deferred_int_arc = Arc::new(AtomicBool::new(deferred_int));
-        let bus = Arc::new(ScsiBus::new(8, ScsiIdentities { disk: scsi::DISK_IDENTITY, cdrom: INDY_CDROM }));
+        let bus = Arc::new(bus);
         Self {
             bus: bus.clone(),
             state: Arc::new(Mutex::new(Wd33c93aState {
@@ -1027,11 +1032,6 @@ impl crate::scsi_monitor::ScsiTargets for Wd33c93a {
     }
 }
 
-impl Default for Wd33c93a {
-    fn default() -> Self {
-        Self::new(None, None, Arc::new(AtomicU64::new(0)))
-    }
-}
 
 // ============================================================================
 // Resettable + Saveable for Wd33c93a
@@ -2192,5 +2192,30 @@ mod data_out_phase_tests {
         f.read_exact(&mut written).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(written, sector, "the sector never reached the disk");
+    }
+
+    /// The machine fills the bus from `[scsi.N]` and gives it to the chip,
+    /// which answers for what is on it, with the Indy's Sony CD-ROM, and still
+    /// takes a target attached later through the same bus.
+    #[test]
+    fn a_chip_built_on_a_filled_bus_answers_for_its_target() {
+        let img = std::env::temp_dir().join(format!("iris-wd33c93a-filled-{}.img", std::process::id()));
+        std::fs::write(&img, vec![0u8; 64 * 512]).unwrap();
+        let bus = Wd33c93a::new_bus();
+        bus.attach_image(3, &img, true).unwrap();
+        let dev = Wd33c93a::new_with_id(None, None, Arc::new(AtomicU64::new(0)), true, 0, bus);
+        assert!(dev.bus().has_target(3));
+        assert!(!dev.bus().has_target(4));
+        let inquiry = ScsiRequest {
+            cdb: vec![scsi_cmd::INQUIRY, 0, 0, 0, 36, 0],
+            data_len: ScsiDataLength::Unlimited,
+            data_in: None,
+        };
+        let r = dev.bus().request(3, &inquiry).expect("target answers").unwrap();
+        assert_eq!(&r.data[8..16], b"Sony    ");
+        assert_eq!(&r.data[16..32], b"CDU-76S         ");
+        dev.bus().attach_image(4, &img, false).unwrap();
+        assert!(dev.bus().has_target(4), "a target attached after boot goes on the same bus");
+        let _ = std::fs::remove_file(img);
     }
 }
