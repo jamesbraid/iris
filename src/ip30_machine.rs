@@ -380,39 +380,15 @@ impl OctaneMachine {
     /// The `[scsi.N]` devices: `controller` 0 is the internal bus, 1 the
     /// external one. Returns the `scratch = true` volume, if any.
     fn attach_scsi(cfg: &MachineConfig, ctls: &[Arc<Isp1040>; 2]) -> Result<Option<std::path::PathBuf>, String> {
-        let mut scratch_path = None;
-        let mut ids: Vec<u8> = cfg.scsi.keys().copied().collect();
-        ids.sort();
-        for key in ids {
-            let dev = &cfg.scsi[&key];
-            let (controller, id) = dev.placement(key);
-            let at = crate::config::scsi_label(controller, id);
-            if dev.is_daynaport() {
-                return Err(format!("{at}: kind = \"daynaport\" is not available on the Octane"));
-            }
-            if let Some(path) = dev.prepare_scratch(key) {
-                scratch_path.get_or_insert(path);
-            }
-            let ctl = ctls
-                .get(controller as usize)
-                .ok_or_else(|| format!("{at}: controller {controller} (an Octane has controllers 0 and 1)"))?;
-            let (path, discs) = dev.media();
-            let cdrom = dev.is_cdrom();
-            let ci_overlay = (cfg.ci && dev.overlay && !cdrom).then(|| crate::config::ScsiDeviceConfig::ci_overlay_path(key));
-            match ctl.bus().attach_device(id, &path, cdrom, discs, dev.overlay, ci_overlay.as_deref()) {
-                Ok(_) if path.is_empty() => eprintln!("ip30: {at}: CD-ROM, tray empty"),
-                Ok(blocks) => eprintln!("ip30: {at}: {path} ({blocks} blocks)"),
-                Err(e) => {
-                    let msg = format!("could not attach {path} to {at}: {e}");
-                    if std::env::var_os("IRIS_NO_EXIT_ON_POWEROFF").is_some() {
-                        eprintln!("iris: warning: {msg}; continuing without {at}");
-                    } else {
-                        return Err(msg);
-                    }
-                }
-            }
+        let attached = crate::scsi::attach_from_config(cfg, Some("ip30"), &|c| {
+            ctls.get(c as usize)
+                .map(|ctl| ctl.bus())
+                .ok_or_else(|| format!("controller {c} (an Octane has controllers 0 and 1)"))
+        })?;
+        if let Some(d) = attached.daynaports.first() {
+            return Err(format!("{}: kind = \"daynaport\" is not available on the Octane", crate::config::scsi_label(d.controller, d.id)));
         }
-        Ok(scratch_path)
+        Ok(attached.scratch)
     }
 
     /// IOC3's first port is the console: the CI socket's backend in CI

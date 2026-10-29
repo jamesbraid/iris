@@ -206,53 +206,18 @@ impl O2Machine {
         }
         // The SCSI devices, from the same `[scsi.N]` tables as the other
         // machines; `controller` is the bus (0 internal, 1 external).
-        let mut scratch_path: Option<std::path::PathBuf> = None;
-        {
+        let attached = {
             let ctls = bus.scsi.lock().unwrap();
-            let mut ids: Vec<u8> = cfg.scsi.keys().copied().collect();
-            ids.sort();
-            for key in ids {
-                let dev = &cfg.scsi[&key];
-                let (controller, id) = dev.placement(key);
-                let at = crate::config::scsi_label(controller, id);
-                if dev.is_daynaport() {
-                    return Err(format!("{at}: kind = \"daynaport\" is not available on the O2"));
-                }
-                if let Some(path) = dev.prepare_scratch(key) {
-                    if scratch_path.is_some() {
-                        println!("Note: multiple scratch SCSI devices configured; CI socket will use the lowest-id one");
-                    } else {
-                        scratch_path = Some(path);
-                    }
-                }
-                let ctl = ctls.get(controller as usize).ok_or_else(|| {
-                    format!("{at}: controller {controller} (an O2 has controllers 0 and 1)")
-                })?;
-                let (path, discs) = dev.media();
-                let cdrom = dev.is_cdrom();
-                // CI mode keeps each copy-on-write overlay under /tmp, as the
-                // Indy does, so an interactive iris holding PATH.overlay and
-                // any number of CI runs can share the image.
-                let ci_overlay = (cfg.ci && dev.overlay && !cdrom).then(|| crate::config::ScsiDeviceConfig::ci_overlay_path(key));
-                match ctl.bus().attach_device(id, &path, cdrom, discs, dev.overlay, ci_overlay.as_deref()) {
-                    Ok(_) if path.is_empty() => eprintln!("ip32: {at}: CD-ROM, tray empty"),
-                    Ok(blocks) => eprintln!("ip32: {at}: {path} ({blocks} blocks)"),
-                    Err(e) => {
-                        // As on the Indy: a configured disk that will not attach
-                        // ends a command-line run, since booting on without it
-                        // only yields a confusing PROM "no such device" later;
-                        // an embedder (the GUI sets IRIS_NO_EXIT_ON_POWEROFF)
-                        // boots without the device instead.
-                        let msg = format!("could not attach {path} to {at}: {e}");
-                        if std::env::var_os("IRIS_NO_EXIT_ON_POWEROFF").is_some() {
-                            eprintln!("iris: warning: {msg}; continuing without {at}");
-                        } else {
-                            return Err(msg);
-                        }
-                    }
-                }
-            }
+            crate::scsi::attach_from_config(cfg, Some("ip32"), &|c| {
+                ctls.get(c as usize)
+                    .map(|ctl| ctl.bus())
+                    .ok_or_else(|| format!("controller {c} (an O2 has controllers 0 and 1)"))
+            })?
+        };
+        if let Some(d) = attached.daynaports.first() {
+            return Err(format!("{}: kind = \"daynaport\" is not available on the O2", crate::config::scsi_label(d.controller, d.id)));
         }
+        let scratch_path = attached.scratch;
         eprintln!(
             "iris: O2 with {} MB ({}), {}",
             kits.iter().sum::<u32>(),
@@ -423,17 +388,10 @@ impl O2Machine {
 
         let (events, event_rx) = std::sync::mpsc::sync_channel(4);
         // A snapshot's disks by slot (controller * 16 + id) and size.
-        let mut disks: Vec<crate::snapshot::DiskRef> = cfg
-            .scsi
-            .iter()
-            .filter(|(_, d)| !d.is_cdrom())
-            .map(|(&key, d)| crate::snapshot::DiskRef {
-                id: { let (c, id) = d.placement(key); crate::config::scsi_slot(c, id) },
-                path: d.path.clone(),
-                size_bytes: std::fs::metadata(&d.path).map(|m| m.len()).unwrap_or(0),
-            })
+        let disks: Vec<crate::snapshot::DiskRef> = attached.tables.iter()
+            .filter(|t| !t.is_cdrom)
+            .map(|t| crate::snapshot::DiskRef { id: t.slot, path: t.path.clone(), size_bytes: t.size_bytes })
             .collect();
-        disks.sort_by_key(|d| d.id);
         Ok(Self {
             bus,
             cpu,
