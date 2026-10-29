@@ -304,13 +304,7 @@ impl BusDevice for L1 {
 impl Resettable for L1 {
     fn power_on(&self) {
         let mut s = self.state.lock();
-        let config = s.config.clone();
-        let records = std::mem::replace(
-            &mut s.records,
-            std::array::from_fn(|_| std::array::from_fn(|_| Vec::new())),
-        );
-        *s = State::new(config);
-        s.records = records;
+        s.reset();
         drop(s);
         self.clock.store(0, Ordering::Relaxed);
         self.flush();

@@ -59,6 +59,7 @@ pub(super) struct State {
     two_bit: u32,
     reasons: [u32; 2],
     events: Option<u8>,
+    power_down_pending: bool,
 }
 fn text_field(out: &mut Vec<u8>, text: &[u8]) {
     out.push(1);
@@ -165,7 +166,22 @@ impl State {
             two_bit: 0,
             reasons: [0; 2],
             events: None,
+            power_down_pending: false,
         }
+    }
+    pub fn reset(&mut self) {
+        // Controller settings survive the donor's local boot. The UART and
+        // packet parser reset independently of those persistent settings.
+        let persistent = (self.debug, self.partition, self.two_bit, self.reasons);
+        let events = self.events.filter(|&channel| channel >= 4);
+        let records = std::mem::replace(
+            &mut self.records,
+            std::array::from_fn(|_| std::array::from_fn(|_| Vec::new())),
+        );
+        *self = Self::new(self.config.clone());
+        (self.debug, self.partition, self.two_bit, self.reasons) = persistent;
+        self.events = events;
+        self.records = records;
     }
     pub fn cause(&self) -> u8 {
         if self.regs[1] & 1 != 0 && !self.queue.is_empty() {
@@ -349,7 +365,7 @@ impl State {
                 return;
             }
             let text = String::from_utf8_lossy(&a[0][1..a[0].len() - 1]);
-            let (code, output) = self.run_line(&text);
+            let (code, output) = self.run_line(&text, false);
             let mut fields = Vec::new();
             let mut n = 0;
             for line in output.split("\r\n").filter(|s| !s.is_empty()) {
@@ -487,9 +503,9 @@ impl State {
                 self.reply(channel, 0, 0, &[]);
                 match cmd {
                     0x2001 => self.reset_node(),
-                    0x2005 => self.power_down(true),
+                    0x2005 => self.power_down(true, false),
                     _ => {
-                        self.power_down(false);
+                        self.power_down(false, false);
                         self.power_up(true);
                     }
                 }
@@ -525,8 +541,18 @@ impl State {
             self.actions.push(L1Event::Reset);
         }
     }
-    fn power_down(&mut self, shutdown: bool) {
+    fn power_down(&mut self, shutdown: bool, confirm: bool) {
         if self.powered {
+            if confirm && !self.power_down_pending {
+                self.power_down_pending = true;
+                self.event(
+                    0x8000,
+                    0,
+                    "Power Down: issue 'pwr d' again to immediately power down.",
+                );
+                return;
+            }
+            self.power_down_pending = false;
             self.reason();
             self.powered = false;
             self.display = "Powered Down".into();
@@ -539,6 +565,7 @@ impl State {
     fn power_up(&mut self, restart: bool) {
         self.reason();
         self.powered = true;
+        self.power_down_pending = false;
         self.port &= 0x60;
         self.console = true;
         self.display = "Powered Up".into();
@@ -548,6 +575,7 @@ impl State {
         }
     }
     fn reboot(&mut self) {
+        self.power_down_pending = false;
         self.console = false;
         self.escaped = false;
         self.command.clear();
@@ -582,7 +610,7 @@ impl State {
             self.emit(&p);
         }
     }
-    fn run_line(&mut self, line: &str) -> (i32, String) {
+    fn run_line(&mut self, line: &str, interactive: bool) -> (i32, String) {
         let words = line.split_whitespace().collect::<Vec<_>>();
         let local = if words.first() == Some(&"*") {
             &words[1..]
@@ -591,7 +619,7 @@ impl State {
         };
         match local {
             ["pwr" | "power", "d" | "down"] => {
-                self.power_down(true);
+                self.power_down(true, interactive);
                 (0, String::new())
             }
             ["pwr" | "power", "u" | "up"] => {
@@ -686,7 +714,7 @@ impl State {
         } else if byte == b'\r' || byte == b'\n' {
             let line = String::from_utf8_lossy(&self.command).into_owned();
             self.command.clear();
-            let (_, output) = self.run_line(&line);
+            let (_, output) = self.run_line(&line, true);
             self.output.extend_from_slice(output.as_bytes());
             if self.escaped {
                 self.console = true;

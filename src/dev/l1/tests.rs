@@ -403,3 +403,132 @@ fn l1_display_keeps_the_full_software_line() {
         );
     }
 }
+
+fn integer_reply(values: &[u32]) -> Vec<u8> {
+    let mut p = vec![0x30, 0, 0, 0, 0, values.len() as u8];
+    p.extend(model::ints(values));
+    encode(&p)
+}
+
+#[test]
+fn l1_machine_reset_preserves_controller_settings() {
+    let l1 = L1::new(Default::default()).unwrap();
+    for (set, value) in [(0x1001, 0x1234), (0x1006, 42), (0x1008, 2)] {
+        request(&l1, set, &model::ints(&[value]), 1);
+    }
+    request(&l1, 0x2001, &[], 0);
+    let reasons = request(&l1, 0xf, &[], 0);
+    assert_eq!(reasons, integer_reply(&[3, 0]));
+    l1.power_on();
+    for (get, value) in [(1, 0x1234), (9, 42), (0xb, 2)] {
+        assert_eq!(request(&l1, get, &[], 0), integer_reply(&[value]));
+    }
+    assert_eq!(request(&l1, 0xf, &[], 0), reasons);
+}
+
+#[test]
+fn l1_machine_reset_preserves_only_nonvolatile_event_channels() {
+    for channel in [3, 4, 23] {
+        let l1 = L1::new(Default::default()).unwrap();
+        let (irq, line) = crate::irq::LevelProbe::line();
+        l1.set_irq(line);
+        request(&l1, 0x1007, &model::ints(&[channel]), 1);
+        l1.write64(8, 1);
+        l1.send_event(0x8000, 7, "before reset");
+        assert!(irq.level());
+        let stale = encode(&[0x10, 0x0f, 0xff, 0xf0, 6, 0, 9, 0]);
+        send(&l1, &stale[..4]);
+        l1.write64(0x18, 0x80);
+        l1.write64(0, 42);
+        l1.write64(8, 7);
+        l1.power_on();
+        assert!(!irq.level());
+        assert_eq!(l1.read64(0x18).data, 0);
+        assert_eq!(l1.read64(8).data, 0);
+        assert!(drain(&l1).is_empty());
+        l1.write64(0x18, 0x80);
+        assert_eq!(l1.read64(0).data, 0);
+        assert_eq!(l1.read64(8).data, 0);
+        l1.write64(0x18, 0);
+        send(&l1, &stale[4..]);
+        assert!(drain(&l1).is_empty());
+        l1.write64(8, 1);
+        l1.send_event(0x8000, 7, "after reset");
+        assert_eq!(irq.level(), channel >= 4);
+        let emitted = drain(&l1);
+        if channel >= 4 {
+            let mut expected = vec![0x40 | channel as u8, 0, 4, 0x10, 4, 0, 0, 0x80, 0, 2];
+            expected.extend(model::ints(&[7]));
+            expected.push(1);
+            expected.extend_from_slice(b"\r\n001c01 ATTN: after reset\r\n\0");
+            assert_eq!(emitted, encode(&expected));
+        } else {
+            assert!(emitted.is_empty());
+        }
+        assert!(!irq.level());
+        assert_eq!(request(&l1, 9, &[], 0), integer_reply(&[0]));
+    }
+}
+
+#[test]
+fn l1_interactive_power_down_requires_confirmation() {
+    let l1 = Arc::new(L1::new(Default::default()).unwrap());
+    let actions = Arc::new(Mutex::new(Vec::new()));
+    let observed = actions.clone();
+    let weak = Arc::downgrade(&l1);
+    l1.set_event_handler(Arc::new(move |event| {
+        assert!(!weak.upgrade().unwrap().node_powered());
+        observed.lock().push(event);
+    }));
+    request(&l1, 0x1007, &model::ints(&[23]), 1);
+    l1.receive_console(&[0x14]);
+    l1.receive_console(b"pwr d\r");
+    assert!(l1.node_powered());
+    assert!(actions.lock().is_empty());
+    let mut warning = vec![0x57, 0, 4, 0x10, 4, 0, 0, 0x80, 0, 2];
+    warning.extend(model::ints(&[0]));
+    warning.push(1);
+    warning.extend_from_slice(b"\r\n001c01 ATTN: Power Down: issue 'pwr d' again to immediately power down.\r\n\0");
+    assert_eq!(drain(&l1), encode(&warning));
+    l1.receive_console(&[0x14]);
+    l1.receive_console(b"power down\r");
+    assert!(!l1.node_powered());
+    assert_eq!(*actions.lock(), [L1Event::Power(false), L1Event::Shutdown]);
+}
+
+#[test]
+fn l1_protocol_power_down_is_immediate() {
+    let l1 = L1::new(Default::default()).unwrap();
+    let actions = Arc::new(Mutex::new(Vec::new()));
+    let observed = actions.clone();
+    l1.set_event_handler(Arc::new(move |event| observed.lock().push(event)));
+    assert_eq!(request(&l1, 0x2005, &[], 0), integer_reply(&[]));
+    assert!(!l1.node_powered());
+    assert_eq!(*actions.lock(), [L1Event::Power(false), L1Event::Shutdown]);
+}
+
+
+#[test]
+fn l1_machine_reset_clears_power_down_confirmation() {
+    let l1 = L1::new(Default::default()).unwrap();
+    for _ in 0..2 {
+        l1.receive_console(&[0x14]);
+        l1.receive_console(b"pwr d\r");
+        assert!(l1.node_powered());
+        l1.power_on();
+    }
+}
+
+#[test]
+fn l1_task_three_power_down_is_immediate() {
+    let l1 = L1::new(Default::default()).unwrap();
+    let actions = Arc::new(Mutex::new(Vec::new()));
+    let observed = actions.clone();
+    l1.set_event_handler(Arc::new(move |event| observed.lock().push(event)));
+    let mut p = vec![0x10, 0x0f, 0xff, 0xf0, 3, 0, 0, 1, 1];
+    p.extend_from_slice(b"pwr d\0");
+    send(&l1, &encode(&p));
+    assert_eq!(drain(&l1), integer_reply(&[]));
+    assert!(!l1.node_powered());
+    assert_eq!(*actions.lock(), [L1Event::Power(false), L1Event::Shutdown]);
+}
