@@ -1118,7 +1118,7 @@ impl Device for O2Control {
     fn register_commands(&self) -> Vec<(String, String)> {
         vec![("o2".to_string(), "O2 control: o2 shot PATH | status | pixel X Y | type TEXT | key|keydown|keyup NAME | \
             mouse DX DY [BUTTONS] | click [BUTTON] | pc | regs | peek ADDR LEN PATH | \
-            retrace PATH | scsi PATH | unmapped | ps2log PATH | crimelog PATH | nictrace PATH".to_string())]
+            retrace PATH | scsi PATH | unmapped | ps2log PATH | crimelog PATH".to_string())]
     }
 
     fn execute_command(&self, cmd: &str, args: &[&str], mut w: Box<dyn std::io::Write + Send>) -> Result<(), String> {
@@ -1171,16 +1171,6 @@ fn control_command(bus: &Ip32Bus, cmd: &str, arg: &str, rgba: &mut [u8]) -> Stri
         ),
         // `crimelog PATH`: the guest's recent CRIME interrupt-register
         // accesses, oldest first.
-        "nictrace" => {
-            let mut t = bus.mace.nic_trace.text();
-            for l in bus.mace.onewire.protocol_log() {
-                t.push_str(&format!("# {l}\n"));
-            }
-            match std::fs::write(arg.trim(), t) {
-                Ok(()) => "ok".into(),
-                Err(e) => format!("err {e}"),
-            }
-        }
         "crimelog" => match std::fs::write(arg.trim(), bus.crime.regs.irqlog_text()) {
             Ok(()) => "ok".into(),
             Err(e) => format!("err {e}"),
