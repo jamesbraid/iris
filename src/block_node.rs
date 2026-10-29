@@ -762,6 +762,49 @@ impl BlockNode for ChdCdNode {
     }
 }
 
+/// What an image is mounted as, which decides how its file is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageKind {
+    Disk,
+    Cdrom,
+}
+
+/// Open the image at `path` as a node: a CHD (hard disk or CD), a
+/// copy-on-write overlay over it when `overlay` (hard disks), or the file
+/// itself. `overlay_path` names the overlay file, `PATH.overlay` when `None`.
+///
+/// Everything that mounts an image goes through here, so a disk attached at
+/// start-up and a disc swapped in later are read the same way.
+pub fn open_image(
+    path: &str,
+    kind: ImageKind,
+    overlay: bool,
+    overlay_path: Option<&str>,
+) -> io::Result<Box<dyn BlockNode>> {
+    let cdrom = kind == ImageKind::Cdrom;
+    Ok(if crate::chd_disk::is_chd(path) {
+        if cdrom {
+            Box::new(ChdCdNode::open(path)?)
+        } else {
+            // The `overlay` flag is the per-disk copy-on-write toggle: COW on
+            // → always overlay (even an uncompressed base gets a diff) and
+            // never auto-fold on exit (commit/roll back manually); COW off →
+            // write in place (uncompressed) or a diff that auto-folds on a
+            // clean exit (compressed).
+            Box::new(ChdNode::open(path, overlay)?)
+        }
+    } else if overlay && !cdrom {
+        let overlay_path = overlay_path.map(str::to_string).unwrap_or_else(|| format!("{path}.overlay"));
+        let backing = RawNode::open_readonly(Path::new(path))?;
+        let size = backing.size();
+        Box::new(CowNode::new(Some(Box::new(backing)), &overlay_path, size)?.with_base_path(path))
+    } else if cdrom {
+        Box::new(RawNode::open_readonly(Path::new(path))?)
+    } else {
+        Box::new(RawNode::open(Path::new(path))?)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

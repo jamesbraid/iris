@@ -6,7 +6,7 @@ mod bus;
 pub use attach::{attach_failed, attach_from_config, Attached, DaynaportRef, TableRef};
 pub use bus::{Discs, ScsiBus, ScsiIdentities, ScsiTarget, Targets};
 
-use crate::block_node::{BlockNode, ChdCdNode, ChdNode, CowNode, RawNode};
+use crate::block_node::{open_image, BlockNode, ImageKind};
 
 /// Get the standard CDB length based on the opcode's group code
 pub fn get_cdb_length(opcode: u8) -> usize {
@@ -171,69 +171,6 @@ impl ScsiDevice {
         }
     }
 
-    /// Open a disk or CD-ROM image as a target: a CHD (hard disk or CD),
-    /// a copy-on-write overlay over `path` when `overlay` (hard disks), or
-    /// the file itself; an empty `path` is a CD-ROM drive with no disc. A
-    /// CD-ROM changer's discs are `discs`. Any controller attaches its
-    /// targets this way, with its own `identity`.
-    ///
-    /// Each image becomes a [`BlockNode`]: the node owns the backend-specific
-    /// arithmetic, so the storage commands above never see a backend kind.
-    pub fn open(
-        path: &str,
-        is_cdrom: bool,
-        discs: Vec<String>,
-        overlay: bool,
-        overlay_path_override: Option<&str>,
-        identity: ScsiIdentity,
-    ) -> std::io::Result<Self> {
-        // Empty CD-ROM (drive present, tray empty). Stored backend=None so
-        // TEST UNIT READY / READ CAPACITY / READ return MEDIUM NOT PRESENT,
-        // while INQUIRY still advertises the drive. Use insert_disc() to
-        // mount media later.
-        if is_cdrom && path.is_empty() {
-            return Ok(Self::new_empty_cdrom(identity));
-        }
-        let is_chd_path = crate::chd_disk::is_chd(path);
-
-        let (backend, size): (Box<dyn BlockNode>, u64) = if is_chd_path {
-            if is_cdrom {
-                let cd = ChdCdNode::open(path)?;
-                let sz = cd.size();
-                (Box::new(cd), sz)
-            } else {
-                // HD CHD. The `overlay` flag is the per-disk copy-on-write
-                // toggle: COW on → always overlay (even an uncompressed base
-                // gets a diff) and never auto-fold on exit (commit/roll back
-                // manually); COW off → write in place (uncompressed) or a diff
-                // that auto-folds on a clean exit (compressed).
-                let hd = ChdNode::open(path, overlay)?;
-                let sz = hd.size();
-                (Box::new(hd), sz)
-            }
-        } else if overlay && !is_cdrom {
-            let overlay_path = overlay_path_override
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("{}.overlay", path));
-            let backing = RawNode::open_readonly(std::path::Path::new(path))?;
-            let sz = backing.size();
-            let cow = CowNode::new(Some(Box::new(backing)), &overlay_path, sz)?
-                .with_base_path(path);
-            (Box::new(cow), sz)
-        } else {
-            let node = if is_cdrom {
-                RawNode::open_readonly(std::path::Path::new(path))?
-            } else {
-                RawNode::open(std::path::Path::new(path))?
-            };
-            let sz = node.size();
-            (Box::new(node), sz)
-        };
-
-        let disc_list = if is_cdrom { discs } else { vec![] };
-        Ok(Self::new(backend, size, is_cdrom, path.to_string(), disc_list, identity))
-    }
-
     /// Construct an empty CD-ROM drive — drive present, no media inserted.
     /// IRIX will see the drive in `hinv` but `TEST UNIT READY` reports
     /// MEDIUM NOT PRESENT.
@@ -260,9 +197,9 @@ impl ScsiDevice {
     /// Mount media on a previously-empty CD-ROM, or swap the disc on a
     /// loaded one. Sets `unit_attention` so the guest re-reads capacity.
     pub fn insert_media(&mut self, path: &str) -> io::Result<()> {
-        let node = RawNode::open_readonly(std::path::Path::new(path))?;
+        let node = open_image(path, ImageKind::Cdrom, false, None)?;
         let size = node.size();
-        self.backend = Some(Box::new(node));
+        self.backend = Some(node);
         self.size = size;
         self.filename = path.to_string();
         self.unit_attention = true;
@@ -1169,10 +1106,10 @@ impl ScsiTarget for ScsiDevice {
         self.discs.push(current);
         let next_path = self.discs[0].clone();
 
-        match RawNode::open_readonly(std::path::Path::new(&next_path)) {
+        match open_image(&next_path, ImageKind::Cdrom, false, None) {
             Ok(node) => {
                 let size = node.size();
-                self.backend = Some(Box::new(node));
+                self.backend = Some(node);
                 self.size = size;
                 // phys_block_size never changes — CD-ROM physical sectors are always 2048.
                 // Do NOT reset logical_block_size — MODE SELECT is a controller setting
@@ -1201,8 +1138,8 @@ impl ScsiTarget for ScsiDevice {
     /// as if a hand swapped the disc in the drive. The path is inserted at the
     /// front of the changer list (becomes index 0) and a medium-change is
     /// signalled (unit attention) so the guest re-reads the TOC on its next
-    /// command. The image is opened as a raw ISO (`Direct` backend), matching
-    /// the changer's eject path. Err if this is not a CD-ROM or the file can't
+    /// command. The image is opened as a drive opens any disc (see
+    /// [`open_image`]). Err if this is not a CD-ROM or the file can't
     /// be opened.
     ///
     /// Queue management by disc count:
@@ -1216,10 +1153,10 @@ impl ScsiTarget for ScsiDevice {
         if !self.is_cdrom() {
             return Err("Not a CD-ROM device".to_string());
         }
-        let node = RawNode::open_readonly(std::path::Path::new(&path))
+        let node = open_image(&path, ImageKind::Cdrom, false, None)
             .map_err(|e| format!("could not open {}: {}", path, e))?;
         let size = node.size();
-        self.backend = Some(Box::new(node));
+        self.backend = Some(node);
         self.size = size;
         self.filename = path.clone();
         self.unit_attention = true;
@@ -1451,7 +1388,7 @@ mod tests {
     fn cdrom() -> ScsiDevice {
         let path = std::env::temp_dir().join(format!("iris-scsi-alloc-{}.iso", std::process::id()));
         std::fs::write(&path, vec![0u8; 100 * 2048]).expect("test image");
-        let node = RawNode::open(&path).expect("open");
+        let node = crate::block_node::RawNode::open(&path).expect("open");
         let identity = ScsiIdentity::new(b"TEST    ", b"CD-ROM          ", b"1.0 ");
         let mut dev = ScsiDevice::new(Box::new(node), 100 * 2048, true, path.display().to_string(), Vec::new(), identity);
         let _ = run(&mut dev, &[0x00, 0, 0, 0, 0, 0]);
@@ -1492,5 +1429,31 @@ mod tests {
         let mut dev = cdrom();
         assert_eq!(run(&mut dev, &[0x03, 0, 0, 0, 8, 0]).data.len(), 8);
         assert_eq!(run(&mut dev, &[0x03, 0, 0, 0, 0, 0]).data.len(), 4, "SCSI-2: 0 means 4 bytes");
+    }
+
+    /// A disc swapped in through the changer is opened as the drive opens any
+    /// disc, so a CHD CD loads, not only a raw ISO.
+    #[test]
+    fn a_disc_change_loads_a_chd_cd() {
+        use libchdman_rs::cd::{create_from_iso, CdCreateOptions};
+        let dir = std::env::temp_dir().join(format!("iris-discswap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let iso = dir.join("disc.iso");
+        std::fs::write(&iso, vec![0x42u8; 16 * 2048]).unwrap();
+        let chd = dir.join("disc.chd");
+        create_from_iso(&iso, &chd, CdCreateOptions::default(), &mut |_| {}, &|| false).unwrap();
+
+        let mut cd = ScsiDevice::new_empty_cdrom(CDROM_IDENTITY);
+        assert!(!cd.has_media());
+        ScsiTarget::load_disc(&mut cd, chd.display().to_string()).unwrap();
+        assert!(cd.has_media());
+        assert_eq!(cd.size(), 16 * 2048, "the CHD's size, not the file's");
+        // The medium change is reported once, then the disc reads.
+        let tur = cd.request(&request(&[0, 0, 0, 0, 0, 0], None)).unwrap();
+        assert_eq!(tur.status, 0x02, "unit attention after the change");
+        let read = cd.request(&request(&[0x28, 0, 0, 0, 0, 3, 0, 0, 1, 0], None)).unwrap();
+        assert_eq!(read.status, 0x00);
+        assert_eq!(read.data, vec![0x42u8; 2048]);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

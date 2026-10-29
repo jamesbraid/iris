@@ -11,6 +11,7 @@ use std::io;
 use parking_lot::{Mutex, MutexGuard};
 
 use super::{ScsiDevice, ScsiIdentity, ScsiRequest, ScsiResponse};
+use crate::block_node::{open_image, ImageKind};
 use crate::dev::daynaport::DaynaPort;
 
 /// A changer's discs: the active one, the queue (index 0 is the active
@@ -191,7 +192,7 @@ impl ScsiBus {
     /// Attach what a `[scsi.N]` table describes: the image at `path` (empty
     /// for a CD-ROM with its tray empty), a CD-ROM's changer list `discs`,
     /// and copy-on-write when `overlay` is set, to `overlay_path` or the
-    /// default place ([`ScsiDevice::open`]). The bus gives it its INQUIRY
+    /// default place ([`open_image`]). The bus gives it its INQUIRY
     /// identity. Returns the size in 512-byte blocks.
     pub fn attach_device(
         &self,
@@ -203,7 +204,16 @@ impl ScsiBus {
         overlay_path: Option<&str>,
     ) -> io::Result<u64> {
         let identity = if cdrom { self.identities.cdrom } else { self.identities.disk };
-        let dev = ScsiDevice::open(path, cdrom, discs, overlay, overlay_path, identity)?;
+        let dev = if cdrom && path.is_empty() {
+            // A drive with its tray empty answers INQUIRY and reports no
+            // medium; a disc is loaded into it later.
+            ScsiDevice::new_empty_cdrom(identity)
+        } else {
+            let kind = if cdrom { ImageKind::Cdrom } else { ImageKind::Disk };
+            let node = open_image(path, kind, overlay, overlay_path)?;
+            let size = node.size();
+            ScsiDevice::new(node, size, cdrom, path.to_string(), if cdrom { discs } else { Vec::new() }, identity)
+        };
         let blocks = dev.size() / 512;
         self.attach(id, Box::new(dev))?;
         Ok(blocks)
