@@ -325,7 +325,11 @@ struct State {
     ust_phase: i64,
     ust_enabled: bool,
     ust_armed: bool,
+    /// In the UST clock's domain (guest time when the machine gives one).
     ust_last_ns: i64,
+    /// UST clock minus card clock, as of the last access: maps a sample
+    /// clock instant (a frame boundary) onto the UST clock.
+    ust_skew: i64,
     /// Bumped whenever the status schedule is replaced, so a stale timer
     /// callback notices and ends.
     status_gen: u64,
@@ -356,6 +360,7 @@ impl State {
             ust_enabled: false,
             ust_armed: false,
             ust_last_ns: now,
+            ust_skew: 0,
             status_gen: 0,
             status_interval: 0,
             status_start_ns: 0,
@@ -371,7 +376,7 @@ impl State {
     fn ust_at(&self, ns: i64) -> u32 {
         let mut ticks = self.ust_phase;
         if self.ust_enabled {
-            ticks += ns - self.ust_last_ns;
+            ticks += ns + self.ust_skew - self.ust_last_ns;
         }
         self.ust_count.wrapping_add(ticks.div_euclid(UST_NS_PER_TICK) as u32)
     }
@@ -411,6 +416,7 @@ impl State {
 
     /// Advance the UST counter to `now`. It counts only while enabled.
     fn ust_update(&mut self, now: i64) {
+        let now = now + self.ust_skew;
         if self.ust_enabled && now > self.ust_last_ns {
             let total = now - self.ust_last_ns + self.ust_phase;
             self.ust_count = self.ust_count.wrapping_add((total / UST_NS_PER_TICK) as u32);
@@ -530,6 +536,9 @@ pub struct Inner {
     /// them.
     stopped_ns: AtomicI64,
     stopped_at: Mutex<Option<Instant>>,
+    /// Spike: the UST's own clock (guest time), when the machine gives one;
+    /// the sample clock and status schedule stay on the card's host clock.
+    ust_clock: OnceLock<crate::dev::heart::Clock>,
     /// Held across each timer callback's work, so a stop can wait one out.
     tick_pass: Mutex<()>,
     timers: OnceLock<Arc<TimerManager>>,
@@ -561,6 +570,7 @@ impl Inner {
             fake_ns: AtomicI64::new(i64::MIN),
             stopped_ns: AtomicI64::new(0),
             stopped_at: Mutex::new(None),
+            ust_clock: OnceLock::new(),
             tick_pass: Mutex::new(()),
             timers: OnceLock::new(),
             armed: AtomicBool::new(false),
@@ -624,6 +634,7 @@ impl Inner {
         }
         let now = self.now();
         let mut s = self.state.lock();
+        self.sync_skew(&mut s, now);
         self.sync_chan(&mut s, CH_OUT, now);
         if s.chan[CH_OUT].running {
             TimerReturn::Continue
@@ -660,6 +671,26 @@ impl Inner {
         });
         let wav = std::env::var_os("IRIS_OCTANE_AUDIO_WAV").and_then(|p| Wav::create(&p));
         *sink = Some(Sink { host, wav, tap: None });
+    }
+
+    /// Run the UST on `clock` (nanoseconds) instead of the card's clock.
+    pub fn set_ust_clock(&self, clock: crate::dev::heart::Clock) {
+        let _ = self.ust_clock.set(clock);
+        let now = self.now();
+        let mut s = self.state.lock();
+        self.sync_skew(&mut s, now);
+        s.ust_last_ns = now + s.ust_skew;
+    }
+
+    /// Record the UST clock's offset from the card clock's `now`. Called
+    /// with the state lock held at every entry that may touch the UST.
+    fn sync_skew(&self, s: &mut State, now: i64) {
+        if self.fake_ns.load(Ordering::Relaxed) != i64::MIN {
+            return;
+        }
+        if let Some(c) = self.ust_clock.get() {
+            s.ust_skew = c() as i64 - now;
+        }
     }
 
     fn now(&self) -> i64 {
@@ -729,6 +760,8 @@ impl Inner {
         }
         *s = State::new(now);
         s.status_gen = gen;
+        self.sync_skew(&mut s, now);
+        s.ust_last_ns = now + s.ust_skew;
     }
 
     fn startup_index(off: u32) -> Option<usize> {
@@ -752,6 +785,7 @@ impl Inner {
     fn read(&self, off: u32, width: usize) -> u32 {
         let now = self.now();
         let mut s = self.state.lock();
+        self.sync_skew(&mut s, now);
         if width == 4 {
             if let Some(i) = Self::startup_index(off) {
                 return s.startup[i];
@@ -790,6 +824,7 @@ impl Inner {
     fn write(&self, off: u32, val: u32, width: usize) {
         let now = self.now();
         let mut s = self.state.lock();
+        self.sync_skew(&mut s, now);
         if self.write_locked(&mut s, off, val, width, now).is_none() {
             crate::dlog!(LogModule::Rad1, "rad1: unsupported {width}-byte BAR0 write at {off:#x} value {val:#x}");
         }
@@ -999,6 +1034,7 @@ impl Inner {
         if s.status_gen != gen || !s.status_running {
             return None;
         }
+        self.sync_skew(&mut s, now);
         let slot = Self::status_base(&s).checked_add(u64::from(s.status_cursor) * SLOT_STRIDE);
         if !slot.is_some_and(|slot| self.fill_slot(&mut s, slot, now)) {
             // Ring base unmapped: stop rather than spin on a failing DMA.

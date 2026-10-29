@@ -12,7 +12,7 @@
 //! IOC3 (serial, keyboard and mouse, the clock, Ethernet) in slot 2, RAD1
 //! audio in slot 3. IMPACT sits on a graphics port.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::config::{CpuModel, MachineConfig};
@@ -20,7 +20,8 @@ use crate::cpu::mips_cache_shadow::R10000ShadowCache;
 use crate::cpu::mips_exec::{CpuDevice, MipsCpu, MipsCpuConfig, MipsExecutor};
 use crate::cpu::mips_tlb::MipsTlb;
 use crate::dev::bridge::{Bridge, RawFlash};
-use crate::dev::heart::{host_clock, Heart, HeartConfig, PIU_BASE, PIU_SIZE};
+use crate::cpu::mips_core::CyclesPtr;
+use crate::dev::heart::{Clock, Heart, HeartConfig, PIU_BASE, PIU_SIZE};
 use crate::dev::heart_mem::HeartRam;
 use crate::dev::ioc3::Ioc3;
 use crate::dev::ioc3_eth::Ioc3Eth;
@@ -60,6 +61,18 @@ const SUPERIO_PIN: u8 = 4;
 /// keeps no writes, an approximation from one word read on a real Octane2.
 /// The PROM looks for a part there too.
 const FLASH_SELECT1_SIZE: usize = 2 << 20;
+
+/// Spike: guest time in nanoseconds from the CPU's executed cycles, one
+/// cycle per pipeline clock at twice the Count rate (195 MHz for the
+/// standard part). Reads 0 until the machine binds the CPU's counter into
+/// `src`. A stopped CPU stops this clock, so it needs no pause logic.
+fn guest_clock(src: Arc<AtomicPtr<u64>>, count_hz: u64) -> Clock {
+    let hz = u128::from(2 * count_hz);
+    Arc::new(move || {
+        let c = CyclesPtr::new(src.load(Ordering::Acquire)).get();
+        (u128::from(c) * 1_000_000_000 / hz) as u64
+    })
+}
 
 /// Bank sizes in bytes from `banks` (MB per HEART bank).
 pub fn heart_banks(cfg: &MachineConfig) -> [u64; 4] {
@@ -132,7 +145,12 @@ impl OctaneMachine {
         // Memory, and HEART, whose descriptors place it.
         let ram = Arc::new(HeartRam::try_new(std::array::from_fn(|i| cfg.banks[i]))?);
         let mem = ram.dma_view();
-        let heart = Arc::new(Heart::new(HeartConfig::octane(banks), host_clock()));
+        let count_hz = cfg.clock.fixed_mhz.map_or(OCTANE_COUNT_HZ, |mhz| (mhz * 1_000_000.0) as u64);
+        // HEART's counter and RAD's UST run on guest cycles, bound once
+        // the CPU exists.
+        let cycles_src = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
+        let gclock = guest_clock(cycles_src.clone(), count_hz.max(1));
+        let heart = Arc::new(Heart::new(HeartConfig::octane(banks), gclock.clone()));
         // HEART's MicroLAN holds the processor module's record.
         heart.set_microlan(record_bus("EMUU00", "030-0888-004", "B", "PM10", 0x5145_4d55_5500));
 
@@ -248,9 +266,10 @@ impl OctaneMachine {
             board.map_or("no graphics", |b| b.label())
         );
 
-        let count_hz = cfg.clock.fixed_mhz.map_or(OCTANE_COUNT_HZ, |mhz| (mhz * 1_000_000.0) as u64);
         let flash_lines = Arc::new(CachedFlashLines::new(phys.phys.clone()));
         let cpu = Self::build_cpu(phys.phys.clone(), flash_lines.clone(), &timer_manager, count_hz.max(1), fasttick);
+        cycles_src.store(cpu.cycles_ptr().raw() as *mut u64, Ordering::Release);
+        rad.set_ust_clock(gclock);
         if let Some(g) = &gfx {
             g.mgras().set_cpu_cycles(cpu.cycles_ptr());
             // Host GL frames composite straight into the IMPACT framebuffer.
