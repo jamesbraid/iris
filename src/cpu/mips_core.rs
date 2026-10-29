@@ -859,6 +859,8 @@ pub struct MipsCore {
     pub cp0_errorepc: u64,    // 30: Error Exception PC
 
     pub tlb_entries: u32,     // Total TLB entries
+    /// Writable EntryHi bits, selected from the CPU virtual address width.
+    pub entryhi_mask: u64,
     /// CP0 PRId / CP1 FIR reset values, supplied by the CPU model at construction.
     pub reset_prid: u32,
     pub reset_fir: u32,
@@ -1382,6 +1384,7 @@ impl MipsCore {
             cp0_taghi: 0,
             cp0_errorepc: 0,
             tlb_entries: 48,
+            entryhi_mask: 0xC000_00FF_FFFF_E0FF,
             reset_prid: 0x0000_0440,
             reset_fir: 0x0000_0500,
             cp0_random_cycle: 0,
@@ -1994,18 +1997,15 @@ impl MipsCore {
                 }
                 self.reanchor_count_and_reschedule();
             }
-            10 => { // always use 64bit mask because the entries need to be valid in 64 bit mode even when they were set from 32 bit mode
-                // `log mips mask cp0` shows what the guest wrote against
-                // what survives the mask. The mask is R4400's 40-bit virtual
-                // address; the R10000 implements 44.
-                if cp0_log() && (value & !0xC000_00FF_FFFF_E0FF) != 0 {
+            10 => {
+                if cp0_log() && (value & !self.entryhi_mask) != 0 {
                     crate::dlog!(crate::devlog::LogModule::Mips,
                         "ip28ehi: wrote {value:#018x} -> kept {:#018x} (lost {:#018x}) pc={:#018x}",
-                        value & 0xC000_00FF_FFFF_E0FF,
-                        value & !0xC000_00FF_FFFF_E0FF,
+                        value & self.entryhi_mask,
+                        value & !self.entryhi_mask,
                         self.pc);
                 }
-                self.cp0_entryhi = value & 0xC000_00FF_FFFF_E0FF;
+                self.cp0_entryhi = value & self.entryhi_mask;
             },
             11 => {
                 // Materialize the count *first* so both new_delta below and

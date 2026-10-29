@@ -10,6 +10,63 @@ mod tests {
     use crate::traits::{BusRead8, BusRead16, BusRead32, BusRead64, BUS_OK, BusDevice};
     use std::sync::Arc;
 
+    #[test]
+    fn r10000_va_width_translation_keeps_full_vpn() {
+        use crate::cpu::mips_cache_shadow::R10000ShadowCache;
+        use crate::cpu::mips_core::STATUS_UX;
+        use crate::cpu::mips_tlb::{MipsTlb, Tlb};
+
+        let memory = Arc::new(MockMemory::new());
+        let cfg = MipsCpuConfig::for_model::<R10000ShadowCache>();
+        let mut exec = Box::new(MipsExecutor::<_, R10000ShadowCache>::new(
+            memory.clone(), MipsTlb::new(cfg.tlb_entries), &cfg,
+        ));
+        let stack = 0x0000_0fff_ffff_aee4;
+        let base = stack & !0x7fff;
+        let pa = 0x10000 + (stack & 0x3fff);
+        memory.set_word(pa, 0x12345678);
+        exec.core.cp0_status = STATUS_KX;
+        exec.update_translate_fn();
+        exec.core.write_cp0(10, base | 7);
+        assert_eq!(exec.core.cp0_entryhi, base | 7);
+        exec.core.cp0_index = 3;
+        exec.core.cp0_pagemask = 0x6000;
+        exec.core.cp0_entrylo0 = (0x10 << 6) | (2 << 3) | 7;
+        exec.core.cp0_entrylo1 = (0x14 << 6) | (2 << 3) | 7;
+        assert_eq!(exec.exec((OP_COP0 << 26) | (0x10 << 21) | 2), EXEC_COMPLETE);
+        assert_eq!(exec.tlb.read(3).entry_hi & !0x1fff, base);
+        assert_eq!(exec.tlb.probe(stack, 7, true), 3);
+        let low_alias = stack & ((1u64 << 40) - 1);
+        assert_eq!(exec.tlb.probe(low_alias, 7, true), 0x80000000);
+
+        exec.core.cp0_status = STATUS_UX | (2 << 3);
+        exec.update_translate_fn();
+        assert_eq!(exec.read_data::<4>(stack).unwrap(), 0x12345678);
+        assert!(exec.read_data::<4>(low_alias).is_err());
+        assert_eq!(exec.read_data::<4>(stack).unwrap(), 0x12345678);
+        assert_eq!(exec.read_data::<4>(1u64 << 44).unwrap_err(), exec_exception(EXC_ADEL));
+
+        let saved = exec.tlb.save_state();
+        exec.tlb.power_on();
+        exec.tlb.load_state(&saved).unwrap();
+        assert_eq!(exec.tlb.probe(stack, 7, true), 3);
+        assert_eq!(exec.tlb.probe(low_alias, 7, true), 0x80000000);
+    }
+
+    #[test]
+    fn r4400_va_width_stays_40_bits() {
+        use crate::cpu::mips_tlb::MipsTlb;
+        let cfg = MipsCpuConfig::for_model::<R4400Cache>();
+        let mut exec = Box::new(MipsExecutor::<_, R4400Cache>::new(
+            Arc::new(MockMemory::new()), MipsTlb::new(cfg.tlb_entries), &cfg,
+        ));
+        exec.core.cp0_status = STATUS_KX;
+        exec.update_translate_fn();
+        exec.core.write_cp0(10, 0x0000_0fff_ffff_8007);
+        assert_eq!(exec.core.cp0_entryhi, 0x0000_00ff_ffff_8007);
+        assert_eq!(exec.read_data::<4>(1u64 << 40).unwrap_err(), exec_exception(EXC_ADEL));
+    }
+
     // Mock Memory Interface
     pub struct MockMemory {
         pub data: Mutex<HashMap<u64, u8>>,
