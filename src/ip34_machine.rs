@@ -598,7 +598,7 @@ impl FuelBoard {
             md.md_bus(),
             "Bedrock registers",
         );
-        io.connect_hub(Arc::new(IoHub(Arc::downgrade(&registers), pi.clone())));
+        io.connect_hub(Arc::new(IoHub(pi.clone())));
         io.connect_memory(md.dma_view());
         let p = pi.clone();
         lb.connect_error(Arc::new(move |level| {
@@ -670,6 +670,27 @@ impl FuelBoard {
             let Some(io) = weak_io.upgrade() else {
                 return false;
             };
+            // Preserve the width of XBridge's naturally aligned packet legs,
+            // including Hub registers whose narrower accesses are refused.
+            let size = bytes.len();
+            if matches!(size, 1 | 2 | 4 | 8)
+                && packet.address & (size as u64 - 1) == 0
+            {
+                if packet.write {
+                    let value = bytes.iter().fold(0u64, |value, byte| (value << 8) | *byte as u64);
+                    return io.inbound_write(
+                        packet.source_widget, Some(packet.slot), packet.address, size as u8, value,
+                    ) == crate::traits::BUS_OK;
+                }
+                let value = io.inbound_read(
+                    packet.source_widget, Some(packet.slot), packet.address, size as u8,
+                );
+                if value.status != crate::traits::BUS_OK {
+                    return false;
+                }
+                bytes.copy_from_slice(&value.data.to_be_bytes()[8 - size..]);
+                return true;
+            }
             for (i, byte) in bytes.iter_mut().enumerate() {
                 let a = packet.address + i as u64;
                 if packet.write {
@@ -921,50 +942,16 @@ impl FuelBoard {
     }
 }
 
-/// Break the I/O-to-registers ownership cycle while keeping the native bus
-/// interface. A detached endpoint refuses accesses.
-struct IoHub(
-    std::sync::Weak<crate::physical::Physical>,
-    [Arc<crate::dev::bedrock_pi::BedrockPi>; 2],
-);
-macro_rules! weak_access {
-    ($r:ident,$w:ident,$ty:ty,$result:ident) => {
-        fn $r(&self, a: u64) -> crate::traits::$result {
-            self.0
-                .upgrade()
-                .map(|b| b.$r(a))
-                .unwrap_or_else(crate::traits::$result::err)
-        }
-        fn $w(&self, a: u64, v: $ty) -> u32 {
-            self.0
-                .upgrade()
-                .map(|b| b.$w(a, v))
-                .unwrap_or(crate::traits::BUS_ERR)
-        }
-    };
-}
+// XIO register packets reach only the two PI interrupt-modify registers.
+// The processor's register projection has a separate, wider interface.
+struct IoHub([Arc<crate::dev::bedrock_pi::BedrockPi>; 2]);
 impl BusDevice for IoHub {
-    weak_access!(read8, write8, u8, BusRead8);
-    weak_access!(read16, write16, u16, BusRead16);
-    weak_access!(read32, write32, u32, BusRead32);
-    fn read64(&self, a: u64) -> crate::traits::BusRead64 {
-        self.0
-            .upgrade()
-            .map(|b| b.read64(a))
-            .unwrap_or_else(crate::traits::BusRead64::err)
-    }
     fn write64(&self, a: u64, v: u64) -> u32 {
-        if matches!(a, 0x90 | 0x20_0090) {
-            return if self.1[(a >> 21) as usize].io_modify(v, 0) {
-                crate::traits::BUS_OK
-            } else {
-                crate::traits::BUS_ERR
-            };
+        if matches!(a, 0x90 | 0x20_0090) && self.0[(a >> 21) as usize].io_modify(v, 0) {
+            crate::traits::BUS_OK
+        } else {
+            crate::traits::BUS_ERR
         }
-        self.0
-            .upgrade()
-            .map(|b| b.write64(a, v))
-            .unwrap_or(crate::traits::BUS_ERR)
     }
 }
 

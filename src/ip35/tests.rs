@@ -728,3 +728,162 @@ fn configured_station_address_reaches_the_l1_identity() {
     let board = crate::ip34_machine::FuelBoard::with_storage(&[], Arc::new(|| 0), 0, None, mac, [false; 2]).unwrap();
     assert_eq!(board.l1.station_mac(), mac);
 }
+
+
+fn fuel_dma_board() -> crate::ip34_machine::FuelBoard {
+    let board = crate::ip34_machine::FuelBoard::new(&[], Arc::new(|| 0)).unwrap();
+    assert_eq!(board.md.md_bus().write64(8, 0x33), BUS_OK);
+    board.xbridge.head(15).write32(0x24, 15);
+    board.xbridge.set_wide_slot_mask(15, 0);
+    board
+}
+
+fn fuel_dma_address(address: u64) -> u64 {
+    (10 << 60) | (1 << 55) | address
+}
+
+#[test]
+fn fuel_dma_preserves_address_order_for_all_widths_and_ragged_pages() {
+    use crate::pci::PciDmaStatus;
+    let board = fuel_dma_board();
+    let dma = board.xbridge.dma(15, 0);
+    let memory = board.md.memory_view();
+    for (address, length) in [(0x1000, 1), (0x1010, 2), (0x1020, 4), (0x1030, 8),
+        (0x1103, 27), (0x1ffb, 19)] {
+        let data: Vec<u8> = (0..length).map(|i| 0x31 + i as u8).collect();
+        assert_eq!(dma.dma_write(fuel_dma_address(address), &data), PciDmaStatus::Ok);
+        for (i, &byte) in data.iter().enumerate() {
+            assert_eq!(memory.read8(address + i as u64).data, byte);
+        }
+        let mut back = vec![0xff; length];
+        assert_eq!(dma.dma_read(fuel_dma_address(address), &mut back), PciDmaStatus::Ok);
+        assert_eq!(back, data);
+    }
+    // Without byte swapping enabled, the bridge reverses each 32-bit word.
+    assert_eq!(dma.dma_write((10 << 60) | 0x3000, &[0, 1, 2, 3, 4, 5, 6, 7]), PciDmaStatus::Ok);
+    assert_eq!(memory.read64(0x3000).data, 0x0302010007060504);
+}
+
+#[test]
+fn fuel_dma_refusal_zeros_failed_legs_and_keeps_successful_legs() {
+    use crate::pci::PciDmaStatus;
+    let board = fuel_dma_board();
+    let dma = board.xbridge.dma(15, 0);
+    let memory = board.md.memory_view();
+    // Bank zero has 256 MiB fitted. The second qword is outside its backing.
+    let last = 0x0fff_fff8;
+    assert_eq!(memory.write64(last, 0x0102030405060708), BUS_OK);
+    let mut bytes = [0xff; 16];
+    assert_eq!(dma.dma_read(fuel_dma_address(last), &mut bytes), PciDmaStatus::MasterAbort);
+    assert_eq!(bytes, [1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(dma.dma_write(fuel_dma_address(last), &[0x42; 16]), PciDmaStatus::MasterAbort);
+    assert_eq!(memory.read64(last).data, 0x4242424242424242);
+    board.io.disable_device(15, 0);
+    bytes.fill(0xff);
+    assert_eq!(dma.dma_read(fuel_dma_address(last), &mut bytes), PciDmaStatus::MasterAbort);
+    assert_eq!(bytes, [0; 16]);
+    assert_eq!(dma.dma_write(fuel_dma_address(last), &[0x99; 8]), PciDmaStatus::MasterAbort);
+    assert_eq!(memory.read64(last).data, 0x4242424242424242);
+}
+
+#[test]
+fn fuel_dma_directory_failure_preserves_the_previous_leg() {
+    use crate::pci::PciDmaStatus;
+    let board = fuel_dma_board();
+    let memory = board.md.memory_view();
+    assert_eq!(memory.write64(0x78, 0x0102030405060708), BUS_OK);
+    assert_eq!(memory.write64(0x80, 0x1112131415161718), BUS_OK);
+    let regs = board.md.md_bus();
+    assert_eq!(regs.write64(0x40000, 2), BUS_OK);
+    assert_eq!(board.md.directory_bus().write64(0x10, 3 << 16), BUS_OK);
+    assert_eq!(regs.write64(0x40000, 0), BUS_OK);
+    let mut bytes = [0xff; 16];
+    assert_eq!(board.xbridge.dma(15, 0).dma_read(fuel_dma_address(0x78), &mut bytes), PciDmaStatus::MasterAbort);
+    assert_eq!(bytes, [1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_ne!(regs.read64(0x40010).data & (1 << 63), 0);
+}
+
+#[test]
+fn fuel_dma_checks_an_aligned_uncorrectable_word_once() {
+    use crate::dev::bedrock_md::MemoryError;
+    use crate::pci::PciDmaStatus;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let board = fuel_dma_board();
+    assert_eq!(board.md.memory_view().write64(0, 0), BUS_OK);
+    assert_eq!(board.md.ecc_bus().write8(7, 3), BUS_OK);
+    let count = Arc::new(AtomicU64::new(0));
+    let seen = count.clone();
+    let md = Arc::downgrade(&board.md);
+    board.md.on_error(Arc::new(move |kind| {
+        assert_eq!(kind, MemoryError::Uncorrectable);
+        assert_eq!(md.upgrade().unwrap().current_cell(), u64::MAX);
+        seen.fetch_add(1, Ordering::Relaxed);
+    }));
+    // The former callback read the same persistent UCE once for each byte.
+    for address in 0..8 {
+        assert_eq!(board.io.inbound_read(15, Some(0), address, 1).status, BUS_OK);
+    }
+    assert_eq!(count.swap(0, Ordering::Relaxed), 8);
+    assert_ne!(board.md.md_bus().read64(0x60018).data & (1 << 61), 0);
+    let mut bytes = [0xff; 8];
+    assert_eq!(board.xbridge.dma(15, 0).dma_read(fuel_dma_address(0), &mut bytes), PciDmaStatus::Ok);
+    assert_eq!(bytes, [0; 8]);
+    assert_eq!(count.load(Ordering::Relaxed), 1);
+    let record = board.md.md_bus().read64(0x60010).data;
+    assert_ne!(record & (1 << 60), 0);
+    assert_eq!(record & (1 << 61), 0);
+    assert_eq!(board.md.uncached_view().read64(0).status, BUS_ERR);
+}
+
+#[test]
+fn fuel_dma_hub_mode_accepts_only_full_width_interrupt_modify_writes() {
+    use crate::pci::PciDmaStatus;
+    let board = fuel_dma_board();
+    let dma = board.xbridge.dma(15, 0);
+    let hub = (1 << 47) | 0x1800000;
+    for (interface, offset) in [(0, 0), (1, 0x200000)] {
+        let address = fuel_dma_address(hub + offset + 0x90);
+        assert_eq!(dma.dma_write(address, &0x10cu64.to_be_bytes()), PciDmaStatus::Ok);
+        assert_ne!(board.pi[interface].read64(0x98).data & (1 << 12), 0);
+        for width in [1, 2, 4] {
+            assert_eq!(dma.dma_write(address, &[0; 8][..width]), PciDmaStatus::MasterAbort);
+            assert_ne!(board.pi[interface].read64(0x98).data & (1 << 12), 0);
+        }
+        assert_eq!(dma.dma_write(address, &12u64.to_be_bytes()), PciDmaStatus::Ok);
+        assert_eq!(board.pi[interface].read64(0x98).data & (1 << 12), 0);
+    }
+    let address = fuel_dma_address(hub + 0x90);
+    // I/O modify must retain PI region protection and requesting-slot identity.
+    assert_eq!(board.pi[0].write64(0x10, 0), BUS_OK);
+    assert_eq!(dma.dma_write(address, &0x10cu64.to_be_bytes()), PciDmaStatus::MasterAbort);
+    assert_eq!(board.pi[0].read64(0x98).data & (1 << 12), 0);
+    assert_eq!(board.pi[0].write64(0x10, 1), BUS_OK);
+    board.io.disable_device(15, 0);
+    assert_eq!(dma.dma_write(address, &0x10cu64.to_be_bytes()), PciDmaStatus::MasterAbort);
+    assert_eq!(board.pi[0].read64(0x98).data & (1 << 12), 0);
+    assert_eq!(board.xbridge.dma(15, 1).dma_write(address, &0x10cu64.to_be_bytes()), PciDmaStatus::Ok);
+    assert_ne!(board.pi[0].read64(0x98).data & (1 << 12), 0);
+}
+
+#[test]
+fn fuel_dma_hub_target_does_not_expose_the_processor_register_view() {
+    use crate::pci::PciDmaStatus;
+    let board = fuel_dma_board();
+    let dma = board.xbridge.dma(15, 0);
+    let hub = (1 << 47) | 0x1800000;
+    for offset in [0x40, 0x90, 0x400118, 0x600000, 0x7ffff8] {
+        for width in [1, 2, 4, 8] {
+            let mut bytes = [0xff; 8];
+            assert_eq!(dma.dma_read(fuel_dma_address(hub + offset), &mut bytes[..width]), PciDmaStatus::MasterAbort);
+            assert_eq!(&bytes[..width], &[0; 8][..width]);
+        }
+        if offset != 0x90 {
+            assert_eq!(dma.dma_write(fuel_dma_address(hub + offset), &[0; 8]), PciDmaStatus::MasterAbort);
+        }
+    }
+    // The CPU retains access to PI0 and I/O registers in the upper window.
+    let cpu_hub = (1 << 57) | 0x1800000;
+    assert_eq!(board.bus.read64(cpu_hub + 0x40).data, 1);
+    assert_eq!(board.bus.read64(cpu_hub + 0x400118).status, BUS_OK);
+    assert_eq!(board.bus.read64(cpu_hub + 0x400118).data, u64::MAX);
+}
