@@ -183,6 +183,8 @@ struct Net {
     live: Option<Arc<AtomicBool>>,
     /// enet waits on this for frames from the backend; `kick_*` notifies it.
     rx_wake: Option<Arc<crate::net::Wake>>,
+    /// The running backend's status report, for a backend that has one.
+    reporter: Option<Arc<dyn crate::net::NetBackend + Send + Sync>>,
     frames: Option<Arc<AtomicU64>>,
     /// The backend's controls, which every link of the run shares. A SEEQ
     /// with no link has a set of its own, so the monitor's `net` commands work.
@@ -248,7 +250,7 @@ impl Seeq8003 {
             in_reset: Arc::new(AtomicBool::new(false)),
             config,
             running:  Arc::new(AtomicBool::new(false)),
-            net:      Mutex::new(Net { next: None, live: None, rx_wake: None, frames: None, nat: NatControl::new() }),
+            net:      Mutex::new(Net { next: None, live: None, rx_wake: None, reporter: None, frames: None, nat: NatControl::new() }),
             heartbeat,
         }
     }
@@ -594,6 +596,7 @@ impl Device for Seeq8003 {
         // ── seeq-net thread: the network backend ─────────────────────────────
         eprintln!("iris: networking backend = {}", link.describe());
         link.spawn("seeq-net");
+        self.net.lock().reporter = link.reporter();
         let Rings { to_net: tx_prod, from_net: rx_cons, tx_wake: tx_wake_enet, rx_wake: rx_wake_enet } = link.into_rings();
 
         // ── seeq-enet thread: DMA pump loop ───────────────────────────────────
@@ -786,6 +789,12 @@ impl Device for Seeq8003 {
                 match args.first().copied() {
                     Some("status") | None => {
                         // net status [tcp|udp|icmp|all]
+                        // A backend with a report of its own shows it in place of the NAT tables.
+                        let reporter = self.net.lock().reporter.clone();
+                        if let Some(reporter) = reporter {
+                            reporter.report(&mut *w).ok();
+                            return Ok(());
+                        }
                         let proto = args.get(1).copied().unwrap_or("all");
                         let ctl = self.nat_control();
                         let snap = ctl.snapshot.lock();
