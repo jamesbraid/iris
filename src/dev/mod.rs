@@ -77,6 +77,7 @@ pub mod ics1890;
 pub mod isp12160;
 pub mod l1;
 pub mod ohci;
+pub mod odyssey;
 pub mod pic;
 pub mod pxbow;
 pub mod prom_image;
