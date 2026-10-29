@@ -334,6 +334,7 @@ impl<
     const CACHE_KIND: &'static str = "shadow";
     const R10K_CACHE_OPS: bool = MODEL == model::R10000;
     const LWR_PRESERVES_UPPER: bool = MODEL == model::R10000 && ((PRID >> 8) & 0xff) == 0x0f;
+    const FPU_FS_FLUSH_INPUTS: bool = MODEL == model::R10000 && ((PRID >> 8) & 0xff) == 0x0f;
 }
 
 impl<

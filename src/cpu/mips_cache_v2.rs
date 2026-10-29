@@ -560,6 +560,8 @@ pub trait CpuModel: MipsCache {
     /// Selected partial-LWR upper-word policy for this CPU model.
     /// Full-word loads still sign-extend bit 31.
     const LWR_PRESERVES_UPPER: bool = false;
+    /// R12000-compatible FS mode flushes denormal input operands before arithmetic.
+    const FPU_FS_FLUSH_INPUTS: bool = false;
 }
 
 pub trait MipsCache: Send + Sync {

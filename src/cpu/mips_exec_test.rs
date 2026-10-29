@@ -331,6 +331,249 @@ mod tests {
         check_lwr_upper_word::<R10000ShadowCache>(false);
     }
 
+    type FpuR14000 = crate::cpu::mips_cache_shadow::ShadowCache<
+        32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0f23,
+        0x0000_0900, 64, { crate::cpu::mips_cache_v2::model::R10000 }>;
+
+    fn fpu_executor<C: CpuModel + From<Arc<dyn BusDevice>>>() -> Box<MipsExecutor<PassthroughTlb, C>> {
+        let cfg = MipsCpuConfig::for_model::<C>();
+        let mut exec = Box::new(MipsExecutor::new(
+            Arc::new(MockMemory::new()), PassthroughTlb::default(), &cfg,
+        ));
+        disable_jitv2(&mut exec);
+        exec.core.cp0_status |= STATUS_CU1 | STATUS_FR;
+        exec.update_fpr_mode();
+        exec
+    }
+
+    fn check_legacy_nan_comparisons<C: CpuModel + From<Arc<dyn BusDevice>>>() {
+        let mut exec = fpu_executor::<C>();
+        for (fmt, snan, qnan) in [
+            (RS_S, 0x7fc0_0001u64, 0x7fbf_ffffu64),
+            (RS_D, 0x7ff8_0000_0000_0001, 0x7ff7_ffff_ffff_ffff),
+        ] {
+            for (nan, signals) in [(snan, true), (qnan, false)] {
+                exec.core.write_fpr_l(0, nan);
+                exec.core.write_fpr_l(2, 0);
+                exec.core.fpu_fcsr = 0x0080_0800; // Invalid enabled, cc0 initially true.
+                let status = exec.exec(make_cop1_compute(fmt, 2, 0, 0, 0x32));
+                if signals {
+                    assert_eq!(status & EXEC_IS_EXCEPTION, EXEC_IS_EXCEPTION);
+                    assert_eq!((status >> 2) & 31, 15);
+                    assert_eq!(exec.core.fpu_fcsr, 0x0081_0800);
+                } else {
+                    assert_eq!(status, EXEC_COMPLETE);
+                    assert_eq!(exec.core.fpu_fcsr, 0x0000_0800);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_nan_comparison_uses_mips_signalling_bit() {
+        use crate::cpu::mips_cache_shadow::{R4400ShadowCache, R5000ShadowCache, R10000ShadowCache};
+        check_legacy_nan_comparisons::<R4400ShadowCache>();
+        check_legacy_nan_comparisons::<R5000ShadowCache>();
+        check_legacy_nan_comparisons::<R10000ShadowCache>();
+        check_legacy_nan_comparisons::<FpuR14000>();
+    }
+
+    #[test]
+    fn r14000_fs_denormal_add_flushes_before_arithmetic() {
+        let mut exec = fpu_executor::<FpuR14000>();
+        for fmt in [RS_S, RS_D] {
+            for (input, other, zero) in [(1u64, 0u64, 0u64),
+                (if fmt == RS_S { 0x8000_0001 } else { 0x8000_0000_0000_0001 },
+                 if fmt == RS_S { 0x8000_0000 } else { 0x8000_0000_0000_0000 },
+                 if fmt == RS_S { 0x8000_0000 } else { 0x8000_0000_0000_0000 })] {
+                for enables in [0, 0x80] {
+                    exec.core.write_fpr_l(0, input);
+                    exec.core.write_fpr_l(2, other);
+                    exec.core.write_fpr_l(4, 0x3f80_0000);
+                    exec.core.fpu_fcsr = 0x0100_0000 | enables;
+                    let status = exec.exec(make_cop1_compute(fmt, 2, 0, 4, FUNCT_FADD));
+                    if enables == 0 {
+                        assert_eq!(status, EXEC_COMPLETE);
+                        assert_eq!(exec.core.read_fpr_l(4), zero);
+                        assert_eq!(exec.core.fpu_fcsr, 0x0100_1004);
+                    } else {
+                        assert_ne!(status & EXEC_IS_EXCEPTION, 0);
+                        assert_eq!((status >> 2) & 31, 15);
+                        assert_eq!(exec.core.read_fpr_l(4), 0x3f80_0000);
+                        assert_eq!(exec.core.fpu_fcsr, 0x0100_1080);
+                    }
+                    assert_eq!(exec.core.read_fpr_l(0), input, "source register must survive input flushing");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn r14000_fs_clear_float_to_integer_denormal_is_unimplemented() {
+        let mut exec = fpu_executor::<FpuR14000>();
+        for fmt in [RS_S, RS_D] {
+            for conversion in [FUNCT_FCVT_W, FUNCT_FCVT_L] {
+                exec.core.write_fpr_l(0, 1);
+                exec.core.write_fpr_l(4, 0x1234_5678_9abc_def0);
+                exec.core.fpu_fcsr = 0;
+                let status = exec.exec(make_cop1_compute(fmt, 0, 0, 4, conversion));
+                assert_ne!(status & EXEC_IS_EXCEPTION, 0);
+                assert_eq!((status >> 2) & 31, 15);
+                assert_eq!(exec.core.fpu_fcsr, 0x0002_0000);
+                assert_eq!(exec.core.read_fpr_l(4), 0x1234_5678_9abc_def0);
+                assert_eq!(exec.core.read_fpr_l(0), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn r14000_fs_float_conversions_flush_inputs_and_preserve_trapping_destinations() {
+        let mut exec = fpu_executor::<FpuR14000>();
+        for (fmt, conversion) in [(RS_S, FUNCT_FCVT_W), (RS_S, FUNCT_FCVT_L),
+            (RS_D, FUNCT_FCVT_W), (RS_D, FUNCT_FCVT_L),
+            (RS_S, FUNCT_FCVT_D), (RS_D, FUNCT_FCVT_S)] {
+            for enables in [0, 0x80] {
+                exec.core.write_fpr_l(0, 1);
+                exec.core.write_fpr_l(4, 0x1234);
+                exec.core.fpu_fcsr = 0x0100_0000 | enables;
+                let status = exec.exec(make_cop1_compute(fmt, 0, 0, 4, conversion));
+                if enables == 0 {
+                    assert_eq!(status, EXEC_COMPLETE);
+                    assert_eq!(exec.core.read_fpr_l(4), 0);
+                    assert_eq!(exec.core.fpu_fcsr, 0x0100_1004);
+                } else {
+                    assert_ne!(status & EXEC_IS_EXCEPTION, 0);
+                    assert_eq!((status >> 2) & 31, 15);
+                    assert_eq!(exec.core.read_fpr_l(4), 0x1234);
+                    assert_eq!(exec.core.fpu_fcsr, 0x0100_1080);
+                }
+                assert_eq!(exec.core.read_fpr_l(0), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn r14000_fs_float_conversions_return_legacy_quiet_nan() {
+        let mut exec = fpu_executor::<FpuR14000>();
+        for (fmt, conversion, input, expected) in [
+            (RS_S, FUNCT_FCVT_D, 0x7fbf_ffffu64, 0x7ff7_ffff_ffff_ffffu64),
+            (RS_D, FUNCT_FCVT_S, 0x7ff7_ffff_ffff_ffff, 0x7fbf_ffff),
+        ] {
+            exec.core.write_fpr_l(0, input);
+            exec.core.write_fpr_l(4, 0);
+            exec.core.fpu_fcsr = 0x0100_0880;
+            assert_eq!(exec.exec(make_cop1_compute(fmt, 0, 0, 4, conversion)), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(4), expected);
+            assert_eq!(exec.core.fpu_fcsr, 0x0100_0880);
+        }
+    }
+
+    #[test]
+    fn r14000_fs_abs_neg_compare_flush_but_moves_keep_raw_inputs() {
+        let mut exec = fpu_executor::<FpuR14000>();
+        for fmt in [RS_S, RS_D] {
+            let sign = if fmt == RS_S { 0x8000_0000u64 } else { 0x8000_0000_0000_0000 };
+            for (instruction, input, output) in [
+                (FUNCT_FABS, sign | 1, 0), (FUNCT_FNEG, 1, sign),
+            ] {
+                exec.core.write_fpr_l(0, input);
+                exec.core.fpu_fcsr = 0x0100_0000;
+                assert_eq!(exec.exec(make_cop1_compute(fmt, 0, 0, 4, instruction)), EXEC_COMPLETE);
+                assert_eq!(exec.core.read_fpr_l(4), output);
+                assert_eq!(exec.core.fpu_fcsr, 0x0100_1004);
+            }
+            for instruction in [FUNCT_FMOV, FUNCT_FMOVCF, FUNCT_FMOVZ] {
+                exec.core.write_fpr_l(0, 1);
+                exec.core.fpu_fcsr = 0x0100_0080;
+                assert_eq!(exec.exec(make_cop1_compute(fmt, 0, 0, 4, instruction)), EXEC_COMPLETE);
+                assert_eq!(exec.core.read_fpr_l(4), 1);
+                assert_eq!(exec.core.fpu_fcsr, 0x0100_0080);
+            }
+            exec.core.write_fpr_l(0, 1);
+            exec.core.write_fpr_l(2, 0);
+            exec.core.fpu_fcsr = 0x0100_0000;
+            assert_eq!(exec.exec(make_cop1_compute(fmt, 2, 0, 0, 0x32)), EXEC_COMPLETE);
+            assert_eq!(exec.core.fpu_fcsr, 0x0180_1004); // Flushed zero equals zero.
+            exec.core.fpu_fcsr = 0x0100_0080;
+            let status = exec.exec(make_cop1_compute(fmt, 2, 0, 0, 0x32));
+            assert_ne!(status & EXEC_IS_EXCEPTION, 0);
+            assert_eq!(exec.core.fpu_fcsr, 0x0100_1080); // Trapping compare leaves cc0 false.
+        }
+    }
+
+    #[test]
+    fn r14000_fs_multiply_accumulate_flushes_denormal_addend() {
+        let mut exec = fpu_executor::<FpuR14000>();
+        for (instruction, one) in [(FUNCT_MADD_S, 0x3f80_0000u64),
+            (FUNCT_MADD_D, 0x3ff0_0000_0000_0000)] {
+            exec.core.write_fpr_l(0, 1); // fr: denormal addend.
+            exec.core.write_fpr_l(2, 0); // fs: zero.
+            exec.core.write_fpr_l(6, one); // ft: one.
+            exec.core.fpu_fcsr = 0x0100_0000;
+            let raw = (OP_COP1X << 26) | (6 << 16) | (2 << 11) | (4 << 6) | instruction;
+            assert_eq!(exec.exec(raw), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(4), 0);
+            assert_eq!(exec.core.fpu_fcsr, 0x0100_1004);
+        }
+    }
+
+    #[test]
+    fn floating_zero_divided_by_zero_raises_invalid() {
+        let mut exec = fpu_executor::<FpuR14000>();
+        for (fmt, qnan) in [(RS_S, 0x7fbf_ffffu64), (RS_D, 0x7ff7_ffff_ffff_ffff)] {
+            exec.core.write_fpr_l(0, 0);
+            exec.core.write_fpr_l(2, 0);
+            exec.core.fpu_fcsr = 0x800;
+            exec.core.write_fpr_l(4, 0x1234);
+            let status = exec.exec(make_cop1_compute(fmt, 2, 0, 4, FUNCT_FDIV));
+            assert_ne!(status & EXEC_IS_EXCEPTION, 0);
+            assert_eq!((status >> 2) & 31, 15);
+            assert_eq!(exec.core.fpu_fcsr, 0x10800);
+            assert_eq!(exec.core.read_fpr_l(4), 0x1234);
+            exec.core.fpu_fcsr = 0;
+            assert_eq!(exec.exec(make_cop1_compute(fmt, 2, 0, 4, FUNCT_FDIV)), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(4), qnan);
+            assert_eq!(exec.core.fpu_fcsr, 0x10040);
+        }
+    }
+
+    #[test]
+    fn r14000_fs_quiet_nan_add_returns_legacy_nan_without_inexact() {
+        let mut exec = fpu_executor::<FpuR14000>();
+        for (fmt, qnan) in [(RS_S, 0x7fbf_ffffu64), (RS_D, 0x7ff7_ffff_ffff_ffff)] {
+            exec.core.write_fpr_l(0, qnan);
+            exec.core.write_fpr_l(2, 1); // Denormal cannot affect a quiet-NaN result.
+            exec.core.fpu_fcsr = 0x0100_0880;
+            assert_eq!(exec.exec(make_cop1_compute(fmt, 2, 0, 4, FUNCT_FADD)), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(4), qnan);
+            assert_eq!(exec.core.fpu_fcsr, 0x0100_0880);
+        }
+    }
+
+    fn check_denormal_add_still_traps<C: CpuModel + From<Arc<dyn BusDevice>>>(fs: u32) {
+        let mut exec = fpu_executor::<C>();
+        for fmt in [RS_S, RS_D] {
+            exec.core.write_fpr_l(0, 1);
+            exec.core.write_fpr_l(2, 0);
+            exec.core.write_fpr_l(4, 0x3f80_0000);
+            exec.core.fpu_fcsr = fs;
+            let status = exec.exec(make_cop1_compute(fmt, 2, 0, 4, FUNCT_FADD));
+            assert_ne!(status & EXEC_IS_EXCEPTION, 0);
+            assert_eq!((status >> 2) & 31, 15);
+            assert_eq!(exec.core.fpu_fcsr, fs | 0x20000);
+            assert_eq!(exec.core.read_fpr_l(4), 0x3f80_0000);
+        }
+    }
+
+    #[test]
+    fn older_models_and_r14000_fs_clear_keep_denormal_input_traps() {
+        use crate::cpu::mips_cache_shadow::{R4400ShadowCache, R5000ShadowCache, R10000ShadowCache};
+        check_denormal_add_still_traps::<R4400ShadowCache>(0x0100_0000);
+        check_denormal_add_still_traps::<R5000ShadowCache>(0x0100_0000);
+        check_denormal_add_still_traps::<R10000ShadowCache>(0x0100_0000);
+        check_denormal_add_still_traps::<FpuR14000>(0);
+    }
+
     /// A model's identity must be live the moment the executor exists — MipsCore::new
     /// runs reset_registers before the model is known, so the constructor has to set
     /// both the reset value and the live register. Caught a real bug: the guest read
@@ -2937,7 +3180,7 @@ mod tests {
         exec.core.cp0_status |= STATUS_CU1 | STATUS_FR;
         exec.update_fpr_mode();
 
-        exec.core.write_fpr_w(1, 0x7FC0_0000); // quiet NaN
+        exec.core.write_fpr_w(1, 0x7FBF_FFFF); // legacy MIPS quiet NaN
         exec.core.write_fpr_s(2, 1.0);
         exec.core.write_fpr_w(0, 0x5a5a5a5a);
 
