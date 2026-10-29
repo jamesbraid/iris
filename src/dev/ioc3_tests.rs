@@ -1484,3 +1484,26 @@ fn octane_pci_header_keeps_its_default_policy() {
         assert_eq!(cfg.read(11), 0xc304_10a9);
     }
 }
+
+#[test]
+fn headless_fuel_keeps_the_controller_with_empty_ports_across_reset() {
+    let r = Rig::with(Ioc3::with_ps2_devices(Ioc3Config::fuel(MAC), false, false));
+    for _ in 0..2 {
+        r.c.reset();
+        r.c.ps2().power_on();
+        r.w32(CTRL, KBC_K_CLAMP_3 | KBC_M_CLAMP_3);
+        assert_eq!(r.r32(CTRL), KBC_K_CLAMP_3 | KBC_M_CLAMP_3);
+        for command in [0xff, 0xf2, 0xf4] {
+            r.w32(K_TX, command);
+            r.w32(M_TX, command);
+            assert_eq!(r.r32(K_RX), 0);
+            assert_eq!(r.r32(M_RX), 0);
+        }
+        r.c.ps2().push_kb(winit::keyboard::KeyCode::KeyA, true);
+        r.c.ps2().push_mouse_input(1, 10, 10, 0);
+        assert_eq!(r.r32(K_RX), 0);
+        assert_eq!(r.r32(M_RX), 0);
+        assert_eq!(r.r32(reg::INT_STATUS) & int::KEYBOARD, 0);
+        assert!(!r.superio.level());
+    }
+}

@@ -2542,10 +2542,15 @@ impl Ioc3 {
     }
 
     pub fn new(cfg: Ioc3Config) -> Ioc3 {
+        Self::with_ps2_devices(cfg, true, true)
+    }
+
+    /// Select attached PS/2 devices independently of the board's controller population.
+    pub fn with_ps2_devices(cfg: Ioc3Config, keyboard: bool, mouse: bool) -> Ioc3 {
         let subsystem = cfg.subsystem_id;
         let sh = Arc::new_cyclic(|weak: &Weak<Shared>| {
             let line = IrqLine::new(Arc::new(KbcSink(weak.clone())), 0);
-            let ps2 = Arc::new(Ps2Controller::new(Some(line)));
+            let ps2 = Arc::new(Ps2Controller::with_devices(Some(line), keyboard, mouse));
             // Host key and mouse events are accepted from the start (this
             // only sets a flag); `stop` and `start` follow the chip's.
             Device::start(&*ps2);

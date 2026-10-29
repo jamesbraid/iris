@@ -56,6 +56,9 @@ struct Ps2State {
 /// Combined PS/2 Keyboard and Mouse Controller
 pub struct Ps2Controller {
     state: Mutex<Ps2State>,
+    /// Cable attachments are host configuration and survive guest resets.
+    keyboard_present: bool,
+    mouse_present: bool,
     /// The controller's interrupt: up while a byte waits to be read.
     irq: Option<IrqLine>,
     running: AtomicBool,
@@ -67,6 +70,11 @@ pub struct Ps2Controller {
 impl Ps2Controller {
     /// Create a new PS/2 Controller
     pub fn new(irq: Option<IrqLine>) -> Self {
+        Self::with_devices(irq, true, true)
+    }
+
+    /// Create the controller with independently attached keyboard and mouse.
+    pub fn with_devices(irq: Option<IrqLine>, keyboard: bool, mouse: bool) -> Self {
         Self {
             state: Mutex::new(Ps2State {
                 rx_queue: VecDeque::new(),
@@ -87,6 +95,8 @@ impl Ps2Controller {
                 key_modes: [3; 256],
                 held_keys: [false; 256],
             }),
+            keyboard_present: keyboard,
+            mouse_present: mouse,
             irq,
             running: AtomicBool::new(false),
             layout: AtomicU8::new(KeyboardLayout::Ansi as u8),
@@ -136,6 +146,16 @@ impl Ps2Controller {
             state.command_state = CommandState::Idle;
             drop(state);
             self.update_interrupt();
+            return;
+        }
+        if state.next_write_is_mouse && !self.mouse_present {
+            state.next_write_is_mouse = false;
+            state.command_state = CommandState::Idle;
+            return;
+        }
+        // Configuration writes belong to the controller, not the keyboard.
+        if !state.next_write_is_mouse && !self.keyboard_present
+            && state.command_state != CommandState::WriteConfig {
             return;
         }
         if state.next_write_is_mouse {
@@ -401,7 +421,9 @@ impl Ps2Controller {
                     dlog!(LogModule::Ps2, "PS2: Command Self-Test (AA)");
                 }
                 state.rx_queue.push_back((0x55, Ps2Source::Keyboard)); // controller self-test pass
-                state.rx_queue.push_back((0xAA, Ps2Source::Keyboard)); // keyboard BAT success
+                if self.keyboard_present {
+                    state.rx_queue.push_back((0xAA, Ps2Source::Keyboard)); // keyboard BAT success
+                }
                 state.next_write_is_mouse = false;
             }
             0x20 => {
@@ -480,6 +502,7 @@ impl Ps2Controller {
     /// `\r` and `\n` are Enter, `\x1b` is Escape and `\x08` Backspace.
     /// False, and nothing sent, if there is no key for it.
     pub fn type_char(&self, ch: char) -> bool {
+        if !self.keyboard_present { return false; }
         let (k, shifted) = match ch {
             '\r' | '\n' => (KeyCode::Enter, false),
             '\x1b' => (KeyCode::Escape, false),
@@ -533,7 +556,7 @@ impl Ps2Controller {
 
     /// Push a scancode byte to the keyboard queue (called from UI)
     pub fn push_kb(&self, key: KeyCode, pressed: bool) {
-        if !self.running.load(Ordering::Relaxed) { return; }
+        if !self.keyboard_present || !self.running.load(Ordering::Relaxed) { return; }
         let mut state = self.state.lock();
         if !state.scanning_enabled || state.config & 0x10 != 0 {
             return;
@@ -964,7 +987,7 @@ impl Ps2Controller {
     /// - `dx`, `dy`: signed X/Y delta (Y is screen-down-positive; flipped here)
     /// - `dz`: scroll wheel delta (positive = scroll up/away from user)
     pub fn push_mouse_input(&self, buttons: u8, dx: i32, dy: i32, dz: i32) {
-        if !self.running.load(Ordering::Relaxed) { return; }
+        if !self.mouse_present || !self.running.load(Ordering::Relaxed) { return; }
         let mut state = self.state.lock();
         if !state.mouse_enabled || state.config & 0x20 != 0 { return; }
 
@@ -1345,6 +1368,57 @@ impl Saveable for Ps2Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absent_devices_ignore_commands_and_host_input_after_power_on() {
+        let p = Ps2Controller::with_devices(None, false, false);
+        for _ in 0..2 {
+            p.power_on();
+            for mouse in [false, true] {
+                for command in [0xff, 0xf2, 0xf4] {
+                    p.write_to(command, mouse);
+                    assert_eq!(p.pop_from(mouse), None);
+                }
+            }
+            p.push_kb(KeyCode::KeyA, true);
+            p.push_mouse_input(1, 10, 10, 0);
+            assert!(!p.type_char('A'));
+            assert_eq!(p.read_status() & 1, 0);
+        }
+    }
+
+    #[test]
+    fn an_empty_controller_keeps_its_own_commands() {
+        let p = Ps2Controller::with_devices(None, false, false);
+        p.write_command(0xaa);
+        assert_eq!(p.pop_from(false), Some(0x55));
+        assert_eq!(p.pop_from(false), None, "no keyboard BAT without a keyboard");
+        p.write_command(0xd3);
+        p.write_data(0x5a);
+        assert_eq!(p.pop_from(true), Some(0x5a));
+        p.write_command(0x60);
+        p.write_data(0x42);
+        p.write_command(0x20);
+        assert_eq!(p.pop_from(false), Some(0x42));
+    }
+
+    #[test]
+    fn device_presence_is_independent() {
+        for (keyboard, mouse) in [(true, false), (false, true), (true, true)] {
+            let p = Ps2Controller::with_devices(None, keyboard, mouse);
+            p.write_to(0xf2, false);
+            let keyboard_id = std::iter::from_fn(|| p.pop_from(false)).collect::<Vec<_>>();
+            assert_eq!(keyboard_id, if keyboard { vec![0xfa, 0xab, 0x83] } else { vec![] });
+            p.write_to(0xf2, true);
+            let mouse_id = std::iter::from_fn(|| p.pop_from(true)).collect::<Vec<_>>();
+            assert_eq!(mouse_id, if mouse { vec![0xfa, 0] } else { vec![] });
+        }
+        let p = Ps2Controller::new(None);
+        p.write_to(0xf2, false);
+        assert_eq!(p.pop_from(false), Some(0xfa));
+        p.write_to(0xf2, true);
+        assert_eq!(p.pop_from(true), Some(0xfa));
+    }
 
     /// `type_char` sends what the keys themselves would: Shift around a
     /// shifted character, Enter for a newline, and nothing for a character
