@@ -429,20 +429,25 @@ pub struct Core {
     heartbeat: OnceLock<Arc<AtomicU64>>,
 }
 
-impl Default for Isp1040 {
-    fn default() -> Self { Self::new() }
-}
-
 fn le16(b: &[u8], off: usize) -> u16 { u16::from_le_bytes([b[off], b[off + 1]]) }
 
 impl Isp1040 {
-    pub fn new() -> Self {
-        Self::new_at(0)
+    /// An empty bus of the kind this chip drives: ids 0-15, and the
+    /// emulated disk and CD-ROM. The machine fills it from `[scsi.N]` and
+    /// hands it to [`Self::new_at`].
+    pub fn new_bus() -> ScsiBus {
+        ScsiBus::new(16, ScsiIdentities { disk: DISK_IDENTITY, cdrom: CDROM_IDENTITY })
     }
 
-    /// The controller at `index`: 0 internal, 1 external.
-    pub fn new_at(index: u8) -> Self {
-        Self { core: Arc::new(Core::new_at(index)), worker: Mutex::new(None) }
+    /// The controller on an empty bus, for the tests.
+    #[cfg(test)]
+    pub fn new() -> Self {
+        Self::new_at(0, Self::new_bus())
+    }
+
+    /// The controller at `index` (0 internal, 1 external) on `bus`.
+    pub fn new_at(index: u8, bus: ScsiBus) -> Self {
+        Self { core: Arc::new(Core::new_at(index, bus)), worker: Mutex::new(None) }
     }
 
     /// Start the ring thread (idempotent) and let it take whatever was
@@ -501,7 +506,7 @@ impl Drop for Isp1040 {
 }
 
 impl Core {
-    fn new_at(index: u8) -> Self {
+    fn new_at(index: u8, bus: ScsiBus) -> Self {
         let st = State::new();
         let gen = st.ctl.gen;
         Self {
@@ -510,7 +515,7 @@ impl Core {
             fence: Mutex::new(()),
             wake: Condvar::new(),
             line_order: Mutex::new(()),
-            bus: ScsiBus::new(16, ScsiIdentities { disk: DISK_IDENTITY, cdrom: CDROM_IDENTITY }),
+            bus,
             dma: OnceLock::new(),
             irq: OnceLock::new(),
             index,

@@ -82,8 +82,10 @@ image. A CD-ROM's node is a `ChangerNode`: the queue of discs and the open
 active one, with the `Removable` trait (present, changed, eject, load)
 separate from `BlockNode` so that removable media which is not a block device,
 a tape, can use it too. The WD33C93A (Indy, Indigo2), the Adaptec
-7880 (O2) and the ISP1040 (Octane) each own one and keep only their registers
-and DMA. `src/scsi_monitor.rs` implements the monitor's `scsi` and `cow`
+7880 (O2) and the ISP1040 (Octane) each make an empty bus of their own kind
+(`new_bus`); the machine fills it from config and gives it to the controller's
+constructor, so a controller exists with its targets and keeps only its
+registers and DMA. `src/scsi_monitor.rs` implements the monitor's `scsi` and `cow`
 subcommands and the run-time disc changes once, over the bus a controller hands
 out through `ScsiTargets::scsi_bus`; chip-specific subcommands (`regs`; the
 WD's `wdt`, `defer`, `debug`) stay with the chip, and `DiscChanger` is

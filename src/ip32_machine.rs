@@ -193,8 +193,16 @@ impl O2Machine {
             Some(mac) => Some(crate::config::parse_mac(mac).map_err(|e| format!("network.mac: {e}"))?),
             None => None,
         };
+        // The SCSI devices, from the same `[scsi.N]` tables as the other
+        // machines; `controller` is the bus (0 internal, 1 external). The
+        // buses are filled before the controllers exist.
+        let scsi = [crate::dev::aic7880::Aic7880::new_bus(), crate::dev::aic7880::Aic7880::new_bus()];
+        let attached = crate::scsi::attach_from_config(cfg, Some("ip32"), &|c| {
+            scsi.get(c as usize)
+                .ok_or_else(|| format!("controller {c} (an O2 has controllers 0 and 1)"))
+        })?;
         let opts = Ip32Options {
-            scsi: true,
+            scsi: Some(scsi),
             flash_file: Some(cfg.nvram.clone().into()),
             keyboard: (!cfg.headless).then_some(o2.mouse),
             mac,
@@ -204,16 +212,6 @@ impl O2Machine {
         if !cfg.no_audio {
             bus.mace.audio.enable_output(cfg.audio.clone());
         }
-        // The SCSI devices, from the same `[scsi.N]` tables as the other
-        // machines; `controller` is the bus (0 internal, 1 external).
-        let attached = {
-            let ctls = bus.scsi.lock().unwrap();
-            crate::scsi::attach_from_config(cfg, Some("ip32"), &|c| {
-                ctls.get(c as usize)
-                    .map(|ctl| ctl.bus())
-                    .ok_or_else(|| format!("controller {c} (an O2 has controllers 0 and 1)"))
-            })?
-        };
         if let Some(d) = attached.daynaports.first() {
             return Err(format!("{}: kind = \"daynaport\" is not available on the O2", crate::config::scsi_label(d.controller, d.id)));
         }

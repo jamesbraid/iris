@@ -442,7 +442,24 @@ impl Machine {
         ioc.set_timer_manager(timer_manager.clone());
         ioc.set_heartbeat(heartbeat.clone());
         ioc.set_clock_ticks(fasttick_count.clone());
-        let hpc3 = Hpc3::with_net(eeprom_hpc3.clone(), ioc.clone(), guinness, heartbeat.clone(), cfg.network(), cfg.no_audio, cfg.audio.clone(), cfg.nvram.clone(), cfg.rtc_offset, cfg.scsi_deferred_int);
+        // Attach SCSI devices from config: each `[scsi.KEY]` table puts a
+        // target on a controller (`ScsiDeviceConfig::placement`). The disks
+        // recorded here, and the scratch volume's path for the CI socket,
+        // come back with it. Disk provenance for snapshot manifests is
+        // captured while the MachineConfig `cfg` is still in scope (it is
+        // shadowed by the CPU config below): the slot (controller * 16 + id,
+        // see `config::scsi_slot`), the configured path and the host file
+        // size.
+        // The buses are filled before the controllers exist and handed to them.
+        let scsi_buses = Hpc3::new_scsi_buses(guinness);
+        let attached = match crate::scsi::attach_from_config(&cfg, None, &|c| Hpc3::route_scsi(&scsi_buses, c)) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("iris: fatal: {e}");
+                std::process::exit(1);
+            }
+        };
+        let hpc3 = Hpc3::with_net(eeprom_hpc3.clone(), ioc.clone(), guinness, heartbeat.clone(), cfg.network(), cfg.no_audio, cfg.audio.clone(), cfg.nvram.clone(), cfg.rtc_offset, cfg.scsi_deferred_int, scsi_buses);
         hpc3.set_timer_manager(timer_manager.clone());
 
         // Backdoor-inject the configured (or default) Ethernet station
@@ -462,39 +479,25 @@ impl Machine {
             if initialized { eeprom.update_ip28_checksum(); }
         }
 
-        // Attach SCSI devices from config: each `[scsi.KEY]` table puts a
-        // target on a controller (`ScsiDeviceConfig::placement`). The disks
-        // recorded here, and the scratch volume's path for the CI socket,
-        // come back with it. Disk provenance for snapshot manifests is
-        // captured while the MachineConfig `cfg` is still in scope (it is
-        // shadowed by the CPU config below): the slot (controller * 16 + id,
-        // see `config::scsi_slot`), the configured path and the host file
-        // size.
-        let attached = {
-            // Standalone CLI fails loudly and exits; see `attach_from_config`.
-            let attach = || -> Result<crate::scsi::Attached, String> {
-                let a = crate::scsi::attach_from_config(&cfg, None, &|c| hpc3.scsi_bus(c))?;
-                // A DaynaPort is built where the gateway is, by Hpc3.
-                for d in &a.daynaports {
-                    let at = crate::config::scsi_label(d.controller, d.id);
-                    match hpc3.add_scsi_daynaport(d.controller, d.id as usize, d.params) {
-                        Ok(()) => println!(
-                            "iris: DaynaPort SCSI/Link at {at} — MAC {}, gateway {} (guest {}/{})",
-                            crate::net::mac_str(&d.params.mac),
-                            d.params.subnet.gateway_ip, d.params.subnet.client_ip, d.params.subnet.netmask),
-                        Err(e) => crate::scsi::attach_failed(format!("could not attach DaynaPort to {at}: {e}"), &at)?,
-                    }
-                }
-                Ok(a)
-            };
-            match attach() {
-                Ok(a) => a,
-                Err(e) => {
-                    eprintln!("iris: fatal: {e}");
-                    std::process::exit(1);
+        // A DaynaPort is built where the gateway is, by Hpc3; a target that
+        // will not attach ends the run (see `attach_from_config`).
+        let daynaports = || -> Result<(), String> {
+            for d in &attached.daynaports {
+                let at = crate::config::scsi_label(d.controller, d.id);
+                match hpc3.add_scsi_daynaport(d.controller, d.id as usize, d.params) {
+                    Ok(()) => println!(
+                        "iris: DaynaPort SCSI/Link at {at} — MAC {}, gateway {} (guest {}/{})",
+                        crate::net::mac_str(&d.params.mac),
+                        d.params.subnet.gateway_ip, d.params.subnet.client_ip, d.params.subnet.netmask),
+                    Err(e) => crate::scsi::attach_failed(format!("could not attach DaynaPort to {at}: {e}"), &at)?,
                 }
             }
+            Ok(())
         };
+        if let Err(e) = daynaports() {
+            eprintln!("iris: fatal: {e}");
+            std::process::exit(1);
+        }
         let scratch_path = attached.scratch;
         // The Indy and Indigo2 have always listed CD-ROMs beside the disks.
         let disk_provenance: Vec<DiskRef> = attached.tables.iter()

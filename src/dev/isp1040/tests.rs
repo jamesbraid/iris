@@ -1242,3 +1242,28 @@ fn the_ring_thread_lives_between_start_and_stop() {
     assert_eq!(r.r(reg::REQUEST_QUEUE), 1);
     assert_eq!(g32(&r.status(0), 4), 0x7001);
 }
+
+/// The machine fills the bus from `[scsi.N]` and gives it to the controller,
+/// which answers for what is on it and still takes a target attached later
+/// through the same bus.
+#[test]
+fn a_controller_built_on_a_filled_bus_answers_for_its_target() {
+    let img = std::env::temp_dir().join(format!("iris-isp1040-filled-{}.img", std::process::id()));
+    std::fs::write(&img, vec![0u8; 64 * 512]).unwrap();
+    let bus = Isp1040::new_bus();
+    bus.attach_image(3, &img, false).unwrap();
+    let isp = Isp1040::new_at(1, bus);
+    assert!(isp.bus().has_target(3));
+    assert!(!isp.bus().has_target(4));
+    let inquiry = crate::scsi::ScsiRequest {
+        cdb: vec![crate::scsi::scsi_cmd::INQUIRY, 0, 0, 0, 36, 0],
+        data_len: crate::scsi::ScsiDataLength::Unlimited,
+        data_in: None,
+    };
+    let r = isp.bus().request(3, &inquiry).expect("target answers").unwrap();
+    assert_eq!(&r.data[8..16], b"SGI     ");
+    assert_eq!(&r.data[16..32], b"IRIS EMUL DISK  ");
+    isp.bus().attach_image(4, &img, false).unwrap();
+    assert!(isp.bus().has_target(4), "a target attached after boot goes on the same bus");
+    let _ = std::fs::remove_file(img);
+}

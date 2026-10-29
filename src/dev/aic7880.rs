@@ -449,14 +449,23 @@ pub const PCI_DEVICE_AIC7880: u16 = 0x8078;
 pub const PCI_CLASS_SCSI: u32 = 0x0100_00;
 
 impl Aic7880 {
-    pub fn new() -> Arc<Self> {
-        Self::new_at(0)
+    /// An empty bus of the kind this chip drives: ids 0-15, and the
+    /// emulated disk and CD-ROM. The machine fills it from `[scsi.N]` and
+    /// hands it to [`Self::new_at`].
+    pub fn new_bus() -> ScsiBus {
+        ScsiBus::new(16, ScsiIdentities { disk: DISK_IDENTITY, cdrom: CDROM_IDENTITY })
     }
 
-    /// The controller at `index`: 0 on the internal bus, 1 on the external
-    /// connector. Commands run inline until [`crate::traits::Device::start`]
-    /// gives it its own thread.
-    pub fn new_at(index: u8) -> Arc<Self> {
+    /// The controller on an empty bus, for the tests.
+    #[cfg(test)]
+    pub fn new() -> Arc<Self> {
+        Self::new_at(0, Self::new_bus())
+    }
+
+    /// The controller at `index` on `bus`: 0 on the internal bus, 1 on the
+    /// external connector. Commands run inline until
+    /// [`crate::traits::Device::start`] gives it its own thread.
+    pub fn new_at(index: u8, bus: ScsiBus) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             index,
             st: SpinLock::new(State::default()),
@@ -464,7 +473,7 @@ impl Aic7880 {
             worker: Mutex::new(None),
             running: AtomicBool::new(false),
             me: me.clone(),
-            bus: ScsiBus::new(16, ScsiIdentities { disk: DISK_IDENTITY, cdrom: CDROM_IDENTITY }),
+            bus,
             dma: std::sync::OnceLock::new(),
             sense: Mutex::new(None),
             dma_misses: Mutex::new(std::collections::BTreeSet::new()),
@@ -2474,5 +2483,30 @@ mod tests {
         assert_eq!(qout(&ram)[7], 0, "posted where the HIM looks");
         assert_eq!(c.read(reg::INTSTAT, 1) as u8, intstat::CMDCMPLT);
         assert!(c.st.lock().held.is_empty());
+    }
+
+    /// The machine fills the bus from `[scsi.N]` and gives it to the
+    /// controller, which answers for what is on it and still takes a target
+    /// attached later through the same bus.
+    #[test]
+    fn a_controller_built_on_a_filled_bus_answers_for_its_target() {
+        let img = std::env::temp_dir().join(format!("iris-aic7880-filled-{}.img", std::process::id()));
+        std::fs::write(&img, vec![0u8; 64 * 512]).unwrap();
+        let bus = Aic7880::new_bus();
+        bus.attach_image(3, &img, false).unwrap();
+        let c = Aic7880::new_at(1, bus);
+        assert!(c.bus().has_target(3));
+        assert!(!c.bus().has_target(4));
+        let inquiry = crate::scsi::ScsiRequest {
+            cdb: vec![crate::scsi::scsi_cmd::INQUIRY, 0, 0, 0, 36, 0],
+            data_len: crate::scsi::ScsiDataLength::Unlimited,
+            data_in: None,
+        };
+        let r = c.bus().request(3, &inquiry).expect("target answers").unwrap();
+        assert_eq!(&r.data[8..16], b"SGI     ");
+        assert_eq!(&r.data[16..32], b"IRIS EMUL DISK  ");
+        c.bus().attach_image(4, &img, false).unwrap();
+        assert!(c.bus().has_target(4), "a target attached after boot goes on the same bus");
+        let _ = std::fs::remove_file(img);
     }
 }
