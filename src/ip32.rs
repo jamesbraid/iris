@@ -46,19 +46,9 @@ pub const VICE_SIZE: u32 = 0x0100_0000;
 /// MACE, the I/O ASIC (`crate::dev::mace`): PCI, Ethernet, the ISA block.
 pub const MACE_BASE: u32 = 0x1f00_0000;
 pub const MACE_SIZE: u32 = 0x0080_0000;
-/// MACE's ISA-block register holding the flash write-enable and the Dallas
-/// 1-Wire ("NIC") data line. The PROM bit-bangs the serial-ID chip here.
+/// MACE's ISA-block register holding the flash write-enable, the Dallas
+/// identity line and the front LEDs (`crate::dev::mace_id`).
 pub const MACE_ISA_FLASH_NIC_REG: u32 = MACE_BASE + 0x0031_0008;
-
-/// Bits in [`MACE_ISA_FLASH_NIC_REG`], as named by NetBSD's `macereg.h`.
-pub mod nic_bit {
-    /// 1 => flash writes enabled.
-    pub const FLASH_WE: u8 = 0x01;
-    /// Release the 1-Wire line (let it float high).
-    pub const DEASSERT: u8 = 0x04;
-    /// The 1-Wire data line itself.
-    pub const DATA: u8 = 0x08;
-}
 
 /// `com0`, the PROM's console UART. NetBSD attaches it at `mace0 offset
 /// 0x390000`; `com1` follows at 0x398000.
@@ -129,7 +119,7 @@ pub use crate::dev::mace_ps2::*;
 pub use crate::dev::mace_sdma::*;
 pub use crate::dev::mace_ust::*;
 pub use crate::dev::ns16550::*;
-pub use crate::dev::onewire::*;
+pub use crate::dev::mace_id::*;
 
 
 pub const RAM_WINDOW_SIZE: u32 = 8 * 128 * 1024 * 1024;
@@ -466,7 +456,7 @@ impl Ip32Bus {
             scsi: Mutex::new(Vec::new()),
         };
         if let Some(mac) = opts.mac {
-            bus.mace.onewire = crate::dev::onewire::OneWireId::from_mac(mac);
+            bus.mace.id = crate::dev::mace_id::MaceId::new(mac);
         }
         if let Some(mouse) = opts.keyboard {
             // With a keyboard the PROM and IRIX take the graphics console;
@@ -691,7 +681,7 @@ impl Ip32Bus {
         self.crime.regs.power_on();
         let m = &self.mace;
         let devices: [&dyn Resettable; 8] =
-            [&*m.ust, &m.rtc, &m.ps2, &m.onewire, &m.com0, &m.com1, &m.sdma, &*m.isa];
+            [&*m.ust, &m.rtc, &m.ps2, &m.id, &m.com0, &m.com1, &m.sdma, &*m.isa];
         for d in devices {
             d.power_on();
         }
