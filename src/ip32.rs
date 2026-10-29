@@ -458,6 +458,8 @@ impl Ip32Bus {
         if let Some(mac) = opts.mac {
             bus.mace.id = crate::dev::mace_id::MaceId::new(mac);
         }
+        // The status bar's lights, from the register's heartbeat.
+        bus.mace.mec.set_heartbeat(bus.mace.id.heartbeat.clone());
         if let Some(mouse) = opts.keyboard {
             // With a keyboard the PROM and IRIX take the graphics console;
             // without one, the serial console. The graphics hardware is
@@ -473,6 +475,8 @@ impl Ip32Bus {
             // anything is plugged into it, and a kernel that expects two
             // waits on the one that is missing.
             let scsi_b = crate::dev::aic7880::Aic7880::new_at(1, bus_b);
+            scsi.set_heartbeat(bus.mace.id.heartbeat.clone());
+            scsi_b.set_heartbeat(bus.mace.id.heartbeat.clone());
             bus.mace.pci.attach(IP32_SCSI_SLOT_B, "aic7880-b", scsi_b.clone());
             bus.mace.pci.attach(IP32_SCSI_SLOT, "aic7880", scsi.clone());
             let mut list = bus.scsi.lock().unwrap();
