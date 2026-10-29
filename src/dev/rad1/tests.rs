@@ -439,6 +439,113 @@ fn input_ring_records_silence() {
     assert_eq!(word(&ram, 0x11_0000 + 352), 0xaaaa_aaaa);
 }
 
+/// Program clock generator `cg` as both drivers do: hold it in reset, pick
+/// its master clock, write the remainder word, then the control word that
+/// names it, and release it.
+fn set_clock(r: &Rad1, cg: u32, mux: u32, rem: u32, ictl_low: u32) {
+    wr(r, 0x80, 0xffe2_0000 | (0x100 << cg));
+    wr(r, 0xa8 + 4 * (3 - cg), mux);
+    wr(r, 0xa4, rem);
+    wr(r, 0xa0, (0x1000_0000 << cg) | ictl_low);
+    wr(r, 0x80, 0xffe2_0000);
+}
+
+/// Output frames counted after `ns` of a fresh output channel.
+fn output_frames_after(r: &Rad1, ns: i64) -> u32 {
+    program(r, &RING_OUTPUT, 0x10_0000, 0xffff_f008);
+    wr(r, 0x58, 0x2000_0001);
+    at(r, ns);
+    rd(r, 0x2c) >> 18
+}
+
+// The words IRIX 6.5.30 writes to the output's generator (1) for each rate,
+// captured from the guest; all of them use the 192 kHz master (select 1).
+const IRIX_DTOA_WORDS: [(u32, u32, u32); 7] = [
+    (48000, 0x0000_ffff, 0x603),
+    (44100, 0x0034_ff6d, 0x603),
+    (32000, 0x0000_ffff, 0x605),
+    (22050, 0x0068_ff6d, 0x207),
+    (16000, 0x0000_ffff, 0x60b),
+    (11025, 0x003d_ff6d, 0x610),
+    (8000, 0x0000_ffff, 0x617),
+];
+
+#[test]
+fn the_output_runs_at_its_clock_generator_rate() {
+    for (hz, rem, ictl) in IRIX_DTOA_WORDS {
+        let (r, _ram) = dma_card();
+        start_ust(&r);
+        set_clock(&r, 1, 1, rem, ictl);
+        // 100 ms is a whole number of frames at every rate in the table.
+        assert_eq!(output_frames_after(&r, 100_000_000), hz / 10, "{hz} Hz");
+    }
+}
+
+#[test]
+fn the_44k_master_divides_from_176400() {
+    // The Linux driver's choice for 44.1 kHz rates: master 0, no remainder.
+    let (r, _ram) = dma_card();
+    set_clock(&r, 1, 0, 0x0000_ffff, 0x607);
+    assert_eq!(output_frames_after(&r, 100_000_000), 2205);
+}
+
+#[test]
+fn generator_0_clocks_the_input_and_not_the_output() {
+    let (r, _ram) = dma_card();
+    set_clock(&r, 0, 1, 0x0000_ffff, 0x617);
+    program(&r, &RING_INPUT, 0x11_0000, 0xffff_f000);
+    wr(&r, 0x4c, 1);
+    assert_eq!(output_frames_after(&r, 100_000_000), 4410, "output keeps 44.1 kHz");
+    assert_eq!(rd(&r, 0x14) >> 18, 800, "input at 8 kHz");
+}
+
+#[test]
+fn a_control_word_naming_no_generator_changes_no_rate() {
+    let (r, _ram) = dma_card();
+    set_clock(&r, 1, 1, 0x0000_ffff, 0x617);
+    // IRIX writes these between rate changes; no generator bit is set.
+    wr(&r, 0xa4, 0x0068_ff6d);
+    wr(&r, 0xa0, 0x0200_0004);
+    assert_eq!(rd(&r, 0xa0), 0x0200_0004, "still stored");
+    assert_eq!(output_frames_after(&r, 100_000_000), 800);
+}
+
+#[test]
+fn a_rate_change_while_running_takes_effect_from_then() {
+    let (r, _ram) = dma_card();
+    start_ust(&r);
+    assert_eq!(output_frames_after(&r, 100_000_000), 4410);
+    set_clock(&r, 1, 1, 0x0068_ff6d, 0x207);
+    at(&r, 200_000_000);
+    assert_eq!(rd(&r, 0x2c) >> 18, 4410 + 2205);
+    // A's UST stamp is the last frame's boundary at the new rate.
+    let boundary = 100_000_000 + (2205u64 * 1_000_000_000).div_ceil(22050) as i64;
+    assert_eq!(rd(&r, 0x2c) & 0x3ffff, (boundary / 960) as u32 & 0x3ffff);
+}
+
+#[test]
+fn reset_returns_the_generators_to_the_default_rate() {
+    let (r, _ram) = dma_card();
+    set_clock(&r, 1, 1, 0x0000_ffff, 0x617);
+    r.reset();
+    assert_eq!(output_frames_after(&r, 100_000_000), 4410);
+}
+
+#[test]
+fn the_wav_capture_stays_at_44100_whatever_the_card_rate() {
+    let dir = std::env::temp_dir().join(format!("rad1-wav-rate-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("o.wav");
+    let mut sink = Sink { host: None, wav: Wav::create(path.as_os_str()), tap: None };
+    sink.play(&[0i16; 2 * 2205], 22050);
+    sink.play(&[0i16; 2 * 4410], 44100);
+    let b = std::fs::read(&path).unwrap();
+    assert_eq!(u32::from_le_bytes(b[24..28].try_into().unwrap()), 44100);
+    let frames = u32::from_le_bytes(b[40..44].try_into().unwrap()) / 4;
+    assert!((8818..=8822).contains(&frames), "{frames} frames for 200 ms");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn aes_subcode_runs_at_250_hz_without_a_position_latch() {
     let (r, ram) = dma_card();
