@@ -720,3 +720,11 @@ fn fuel_link_reset_resets_the_attached_scsi_engine() {
     assert_eq!(isp.bar_read(1, reg::MAILBOX_BASE, 2), 0);
     assert_eq!(isp.bar_read(1, reg::MAILBOX_BASE + 2, 2), 0x4953);
 }
+
+
+#[test]
+fn configured_station_address_reaches_the_l1_identity() {
+    let mac = [0x08, 0x00, 0x69, 0x21, 0x43, 0x65];
+    let board = crate::ip34_machine::FuelBoard::with_storage(&[], Arc::new(|| 0), 0, None, mac).unwrap();
+    assert_eq!(board.l1.station_mac(), mac);
+}

@@ -49,6 +49,7 @@ impl FuelMachine {
             crate::dev::heart::host_clock(),
             prom.len() as u64,
             cfg.fuel.flash.as_deref().map(std::path::Path::new),
+            cfg.network().mac,
         )?);
         let timekeeper = Arc::new(crate::dev::timekeeper::Timekeeper::fuel_with_nvram_file(
             std::path::Path::new(&cfg.nvram),
@@ -127,7 +128,9 @@ impl FuelMachine {
         board.flash.register_locks();
         board.md.register_locks();
         board.startup.register_locks();
-        let nat = if cfg.network.mode != crate::config::NetMode::Off {
+        let network_up = cfg.network.mode != crate::config::NetMode::Off;
+        board.eth.set_backend_link(network_up);
+        let nat = if network_up {
             let net = crate::net::GatewayConfig::from_network(&cfg.network());
             let addrs = (net.client_ip, net.gateway_ip, net.netmask);
             Some((board.eth.start_nat(net), addrs))
@@ -507,7 +510,7 @@ impl FuelBoard {
         clock: crate::dev::heart::Clock,
         execution_size: u64,
     ) -> Result<Self, String> {
-        Self::with_storage(payload, clock, execution_size, None)
+        Self::with_storage(payload, clock, execution_size, None, crate::dev::l1::L1Config::default().mac)
     }
 
     pub fn with_storage(
@@ -515,6 +518,7 @@ impl FuelBoard {
         clock: crate::dev::heart::Clock,
         execution_size: u64,
         flash_path: Option<&std::path::Path>,
+        station_mac: [u8; 6],
     ) -> Result<Self, String> {
         use crate::dev::bedrock_pi::{BedrockPi, BedrockPiConfig};
         let md = crate::dev::bedrock_md::BedrockMd::with_clock(clock.clone());
@@ -530,7 +534,10 @@ impl FuelBoard {
         });
         // The selected QEMU Fuel population grants its fitted CPU A the bus.
         pi[0].write64(0x50, 1);
-        let l1 = Arc::new(crate::dev::l1::L1::new(crate::dev::l1::L1Config::default())?);
+        let l1 = Arc::new(crate::dev::l1::L1::new(crate::dev::l1::L1Config {
+            mac: station_mac,
+            ..Default::default()
+        })?);
         let flash = Arc::new(match flash_path {
             Some(path) => crate::dev::bedrock_flash::Flash::with_file(payload, path),
             None => crate::dev::bedrock_flash::Flash::new(payload),
