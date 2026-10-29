@@ -88,15 +88,9 @@ const MRU_BIT: u64 = 1 << 63;
 /// R4400 and R5000 index differently — see `tag_slot`.
 const WAYS: usize = 2;
 
-/// Bits a secondary-cache tag retains.
-///
-/// All of them, now. A 36-bit mask was inferred here from the PROM's
-/// walking-0s phase, which writes an all-ones TagLo and expects back
-/// 0x0000000f_ffffcdfe — but that truncation comes from the tag being
-/// assembled as `(TagHi << 32) | TagLo[31:0]`, not from the array dropping
-/// bits. Once the executor carried TagHi properly the mask did nothing except
-/// discard the MRU bit, which the PROM writes as TagHi[31] and reads back.
-const L2_TAG_MASK: u64 = u64::MAX;
+/// Secondary tag fields: NEC U10278E fourth edition, p.270, figure11-31.
+/// TagHi retains MRU and STag1; TagLo bits13:12 and9 are reserved zero.
+const L2_TAG_MASK: u64 = 0x8000_000f_ffff_cdff;
 
 /// Is the shadow cache's operation trace on, at this level of detail?
 ///
@@ -294,7 +288,7 @@ impl<
             return 0;
         }
         let way = (virt_addr as usize) & (WAYS - 1);
-        let shift = if matches!(sel, CACH_PI | CACH_PD) { 2 } else { 4 };
+        let shift = if matches!(sel, CACH_PI | CACH_PD) { 2 } else { 3 };
         let word = (virt_addr as usize) >> shift;
         (word * WAYS + way) % len
     }
@@ -597,10 +591,18 @@ impl<
                     let (data_mask, ecc_mask) = match sel {
                         CACH_PI => (0xf_ffff_ffff, 1),
                         CACH_PD => (0xffff_ffff, 0xf),
-                        _ => (u64::MAX, u32::MAX),
+                        _ => (u64::MAX, 0x3ff),
                     };
                     s.data[slot] = phys_addr & data_mask;
                     s.ecc[slot] = unsafe { *self.ecc_in.get() } & ecc_mask;
+                    if matches!(sel, CACH_SI | CACH_SD) {
+                        // Index Store Data(S) writes a quadword: selected VA[3]
+                        // doubleword plus a zero partner; check bits are shared.
+                        // NEC U10278E fourth edition p.91, figure5-7.
+                        let partner = slot ^ WAYS;
+                        s.data[partner] = 0;
+                        s.ecc[partner] = s.ecc[slot];
+                    }
                     if l2_op_log(CACHE_LOG_HIT) {
                         crate::dlog!(LogModule::L2c, "shadow:   -> ISD slot={slot} data={phys_addr:#018x} ecc={:#x}",
                                      s.ecc[slot]);
