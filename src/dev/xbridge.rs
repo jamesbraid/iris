@@ -489,10 +489,10 @@ impl XBridgeHead {
         let shift = (reg & 3) * 8;
         if let Some(dev) = device {
             if let Some(value) = value {
-                let old = dev.config().read(reg / 4);
-                dev.config().write(
+                dev.config().write_masked(
                     reg / 4,
-                    (old & !(mask << shift)) | ((value as u32 & mask) << shift),
+                    (value as u32 & mask) << shift,
+                    mask << shift,
                 );
                 0
             } else {

@@ -365,6 +365,9 @@ struct Card {
 }
 impl Card {
     fn new() -> Arc<Self> {
+        Self::with_status_events(0)
+    }
+    fn with_status_events(mask: u16) -> Arc<Self> {
         use crate::pci::{Bar, PciConfig};
         Arc::new(Self {
             config: PciConfig::new(
@@ -381,7 +384,7 @@ impl Card {
                     Bar::Unused,
                 ],
                 1,
-            ),
+            ).with_status_w1c_policy(mask),
             bytes: Mutex::new(std::array::from_fn(|i| i as u8)),
             irq: Mutex::new(None),
         })
@@ -557,4 +560,28 @@ fn type_one_configuration_and_absent_dma_targets_are_explicit() {
         c.dma(15, 0).dma_read(0x40800000, &mut bytes),
         PciDmaStatus::MasterAbort
     );
+}
+
+#[test]
+fn partial_configuration_writes_preserve_unwritten_status_events() {
+    let (c, _) = chip();
+    let f = c.head(15);
+    let card = Card::with_status_events(0xc000);
+    c.attach(15, 0, card.clone());
+    card.config.set_status_bits(0xc000);
+    assert_eq!(f.write16(0x20006, 0x0102), BUS_OK);
+    assert_eq!(f.read32(0x20004).data, 0xc200_0102);
+    assert_eq!(f.write8(0x20007, 3), BUS_OK);
+    assert_eq!(f.read32(0x20004).data, 0xc200_0103);
+    assert_eq!(f.write8(0x20006, 2), BUS_OK);
+    assert_eq!(f.read32(0x20004).data, 0xc200_0203);
+    assert_eq!(f.write8(0x20005, 0xff), BUS_OK);
+    assert_eq!(f.read32(0x20004).data, 0xc200_0203);
+    assert_eq!(f.write8(0x20004, 0x80), BUS_OK);
+    assert_eq!(f.read32(0x20004).data, 0x4200_0203);
+    assert_eq!(f.write16(0x20004, 0x4000), BUS_OK);
+    assert_eq!(f.read32(0x20004).data, 0x0200_0203);
+    card.config.set_status_bits(0xc000);
+    assert_eq!(f.write32(0x20004, 0x8000_0002), BUS_OK);
+    assert_eq!(f.read32(0x20004).data, 0x4200_0002);
 }

@@ -153,20 +153,31 @@ impl PciConfig {
     }
 
     pub fn write(&self, reg: usize, val: u32) {
+        self.write_masked(reg, val, u32::MAX);
+    }
+
+    /// Write selected bits of dword `reg`. Both `val` and `mask` use the
+    /// register's bit positions. Unselected Status events are not acknowledged.
+    pub fn write_masked(&self, reg: usize, val: u32, mask: u32) {
+        if mask == 0 {
+            return;
+        }
         let mut r = self.regs.lock().unwrap();
         match reg {
             // Identity, class and header type are read-only.
             0 | 2 => {}
             3 => {
-                let mask = ((self.latency_mask as u32) << 8) | self.cache_line_mask as u32;
+                let mask = mask & (((self.latency_mask as u32) << 8) | self.cache_line_mask as u32);
                 r[3] = (r[3] & !mask) | (val & mask);
             }
             // Command writes replace selected bits; Status events clear on ones.
             1 => {
-                let clear = val & ((self.status_w1c_mask as u32) << 16);
-                r[1] = (r[1] & 0xffff_0000 & !clear) | (val & self.command_mask as u32);
+                let clear = val & mask & ((self.status_w1c_mask as u32) << 16);
+                r[1] = (r[1] & !(mask & 0xffff) & !clear)
+                    | (val & mask & self.command_mask as u32);
             }
             4..=9 => {
+                let val = (r[reg] & !mask) | (val & mask);
                 let bar = self.bars[reg - 4];
                 r[reg] = match bar {
                     Bar::Unused => 0,
@@ -178,9 +189,12 @@ impl PciConfig {
                 };
             }
             // Interrupt pin is read-only; the line is firmware's scratch.
-            15 => r[15] = (r[15] & 0xff00) | (val & !0xff00),
+            15 => {
+                let mask = mask & !0xff00;
+                r[15] = (r[15] & !mask) | (val & mask);
+            }
             _ => {
-                let mask = self.writable_masks[reg];
+                let mask = mask & self.writable_masks[reg];
                 r[reg] = (r[reg] & !mask) | (val & mask);
             }
         }
@@ -533,6 +547,59 @@ mod tests {
         assert_eq!(c.read(1), 0x0200_0006);
         c.write(1, 0x8000_0006);
         assert_eq!(c.read(1), 0x0200_0006, "configuration writes cannot set an event");
+    }
+
+    #[test]
+    fn masked_writes_apply_policies_only_to_selected_bits() {
+        let c = scsi_like().with_header_policy(0x0200, 0x0157, 0xff)
+            .with_cache_line_policy(0xff)
+            .with_register_policy(18, 0xaabb_0000, 0xffff);
+        c.write(1, 0x0157);
+        c.write_masked(1, 0xffff_0002, 0x0000_00ff);
+        assert_eq!(c.read(1), 0x0200_0102);
+        c.write_masked(1, 0, 0xffff_0000);
+        assert_eq!(c.command(), 0x0102);
+        c.write(3, 0x1234);
+        c.write_masked(3, 0xffff_00ab, 0xff);
+        assert_eq!(c.read(3), 0x12ab);
+        c.write(5, 0x1234_5000);
+        c.write_masked(5, 0xabcd_ffff, 0xffff_0000);
+        assert_eq!(c.bar_base(1), 0xabcd_5000);
+        c.write(4, 0x1201);
+        c.write_masked(4, 0x3400, 0xff00);
+        assert_eq!(c.read(4), 0x3401);
+        c.write(15, 0x1234_5678);
+        c.write_masked(15, 0xffff_ffff, 0xff00);
+        assert_eq!(c.read(15), 0x1234_0178);
+        c.write_masked(18, u32::MAX, 0xff);
+        assert_eq!(c.read(18), 0xaabb_00ff);
+        c.reset();
+        assert_eq!(c.read(18), 0xaabb_0000);
+        assert_eq!(c.command(), 0);
+    }
+
+    #[test]
+    fn masked_status_acknowledgements_ignore_unselected_ones() {
+        use crate::traits::Saveable;
+        let c = scsi_like().with_status_w1c_policy(0xc000);
+        c.set_status_bits(0xc000);
+        c.write(1, 0x1234);
+        c.write_masked(1, u32::MAX, 0x00ff_0000);
+        assert_eq!(c.read(1), 0xc200_1234);
+        c.write_masked(1, u32::MAX, 0x8000_0000);
+        assert_eq!(c.read(1), 0x4200_1234);
+        c.write_masked(1, u32::MAX, 0);
+        assert_eq!(c.read(1), 0x4200_1234);
+        let saved = c.save_state();
+        let dst = scsi_like().with_status_w1c_policy(0xc000);
+        dst.load_state(&saved).expect("load_state");
+        assert_eq!(dst.save_state(), saved);
+        dst.write_masked(1, 0xffff_0002, 0xffff);
+        assert_eq!(dst.read(1), 0x4200_0002);
+        dst.write_masked(1, 0x4000_ffff, 0xffff_0000);
+        assert_eq!(dst.read(1), 0x0200_0002);
+        c.reset();
+        assert_eq!(c.read(1), 0x0200_0000);
     }
 
     #[test]

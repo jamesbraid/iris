@@ -105,6 +105,10 @@ struct Card {
 
 impl Card {
     fn new(pin: u8) -> Arc<Self> {
+        Self::with_status_events(pin, 0)
+    }
+
+    fn with_status_events(pin: u8, mask: u16) -> Arc<Self> {
         let mut regs = [0u8; 0x1000];
         regs[FIXED as usize..FIXED as usize + 4].copy_from_slice(&0x1234_5678u32.to_le_bytes());
         Arc::new(Self {
@@ -115,7 +119,7 @@ impl Card {
                 1,
                 [Bar::Io(0x100), Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused],
                 pin,
-            ),
+            ).with_status_w1c_policy(mask),
             regs: Mutex::new(regs),
             irq: Mutex::new(None),
             dma: Mutex::new(None),
@@ -1145,4 +1149,45 @@ fn long_and_short_transfers_place_every_byte_by_the_swap_rule() {
             assert_eq!(back, data, "read mask {mask} at {off} for {len}");
         }
     }
+}
+
+#[test]
+fn partial_configuration_writes_preserve_unwritten_status_events() {
+    let r = Rig::new();
+    let card = Card::with_status_events(PCI_INTA, 0xc000);
+    r.bridge.attach(0, card.clone());
+    card.cfg.set_status_bits(0xc000);
+    r.cfg_write(0, 4, 2, 0x0102);
+    assert_eq!(r.cfg_read(0, 4, 4), 0xc200_0102);
+    r.cfg_write(0, 4, 1, 3);
+    assert_eq!(r.cfg_read(0, 4, 4), 0xc200_0103);
+    r.cfg_write(0, 5, 1, 2);
+    assert_eq!(r.cfg_read(0, 4, 4), 0xc200_0203);
+    r.cfg_write(0, 6, 1, 0xff);
+    assert_eq!(r.cfg_read(0, 4, 4), 0xc200_0203);
+    r.cfg_write(0, 7, 1, 0x80);
+    assert_eq!(r.cfg_read(0, 4, 4), 0x4200_0203);
+    r.cfg_write(0, 6, 2, 0x4000);
+    assert_eq!(r.cfg_read(0, 4, 4), 0x0200_0203);
+    card.cfg.set_status_bits(0xc000);
+    r.cfg_write(0, 4, 4, 0x8000_0002);
+    assert_eq!(r.cfg_read(0, 4, 4), 0x4200_0002);
+}
+
+#[test]
+fn partial_configuration_writes_update_published_bar_runs() {
+    let r = Rig::new();
+    r.card(1, PCI_INTA);
+    let published = Arc::new(Mutex::new(Vec::new()));
+    let capture = published.clone();
+    r.bridge.on_bar_runs(Box::new(move |runs| {
+        *capture.lock() = runs.iter().map(|r| (r.start, r.end)).collect();
+    }));
+    assert_eq!(&*published.lock(), &[(0x400000, 0x401000)]);
+    r.cfg_write(1, 4, 1, 0);
+    assert!(published.lock().is_empty());
+    r.cfg_write(1, 4, 1, PCI_COMMAND_MEMORY);
+    assert_eq!(&*published.lock(), &[(0x400000, 0x401000)]);
+    r.cfg_write(1, 0x16, 2, 0x1310);
+    assert_eq!(&*published.lock(), &[(0x500000, 0x501000)]);
 }
