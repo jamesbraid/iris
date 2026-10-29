@@ -152,7 +152,8 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 - **Octane audio plays at the rate the guest asks for.** RAD audio ran at
   44.1 kHz whatever IRIX programmed, so games and other non-44.1 kHz sounds
-  played at the wrong speed. ([#354](https://github.com/techomancer/iris/issues/354))
+  played at the wrong speed. `test/audiotest` sweeps rates and formats.
+  ([#354](https://github.com/techomancer/iris/issues/354))
 - **IMPACT on the Octane passes the GL pixel and state suites.** On IRIX
   6.5.22 pixtest went from 52 to 366 passing cases (the two left fail on the
   Indigo2 too) and glstate from 393 to 394. The Octane's microcode keeps the
