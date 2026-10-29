@@ -81,7 +81,7 @@ lend theirs and keep only chip-specific subcommands (`regs`; the WD's `wdt`,
 their devices from the `[scsi.N]` tables, where the key is a slot
 (controller × 16 + id, see `config::scsi_slot`).
 
-Fuel (`src/fuel_machine.rs`) uses the same `MipsCpu` thread and workstation
+Fuel (`src/ip34_machine.rs`) uses the same `MipsCpu` thread and workstation
 interfaces. Its interpreter installs an optional `MipsExecutor::instruction_hook`
 to observe startup state before every instruction and scope private startup
 memory access until that instruction returns. The hook calls its supplied

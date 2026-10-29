@@ -642,3 +642,25 @@ mod memory_error_tests {
         assert_eq!(board.md.dma_view().read64(0).status, BUS_OK);
     }
 }
+
+
+#[test]
+fn fuel_link_reset_resets_the_attached_scsi_engine() {
+    use crate::dev::isp1040::{mbox, reg, CTRL_INT_ENABLE, CTRL_RISC_INT_ENABLE, HOST_CMD_SHIFT};
+    use crate::pci::PciBusDevice;
+    let board = crate::ip34_machine::FuelBoard::new(&[], Arc::new(|| 0)).unwrap();
+    let isp = &board.scsi;
+    isp.config().write(1, 6);
+    isp.config().write(5, 0x02000000);
+    isp.bar_write(1, reg::BUS_CTRL, u32::from(CTRL_INT_ENABLE | CTRL_RISC_INT_ENABLE), 2);
+    isp.bar_write(1, reg::MAILBOX_BASE, u32::from(mbox::NOP), 2);
+    isp.bar_write(1, reg::HOST_CMD, 0x5 << HOST_CMD_SHIFT, 2);
+    assert_eq!(isp.bar_read(1, reg::MAILBOX_BASE, 2), u32::from(mbox::COMPLETE));
+    assert_ne!(isp.bar_read(1, reg::BUS_CTRL, 2), 0);
+    assert_eq!(board.xbridge.widget(0).unwrap().write32(0x2f4, 1), BUS_OK);
+    assert_eq!(isp.config().command(), 0);
+    assert_eq!(isp.config().bar_base(1), 0);
+    assert_eq!(isp.bar_read(1, reg::BUS_CTRL, 2), 0);
+    assert_eq!(isp.bar_read(1, reg::MAILBOX_BASE, 2), 0);
+    assert_eq!(isp.bar_read(1, reg::MAILBOX_BASE + 2, 2), 0x4953);
+}

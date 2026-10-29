@@ -180,7 +180,7 @@ pub mod ip32_machine;
 /// The SGI Octane (IP30): its bus and machine -- see `docs/Octane/ip30-address-map.md`.
 pub mod ip30;
 pub mod ip35;
-mod ip34_machine;
+pub mod ip34_machine;
 pub mod ip30_machine;
 pub mod machine_state;
 pub mod platform;
@@ -243,5 +243,3 @@ pub mod perfetto;
 mod platform_profile_tests;
 #[cfg(test)]
 pub(crate) mod test_board;
-
-pub mod fuel_machine;
