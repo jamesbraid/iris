@@ -323,8 +323,9 @@ pub enum NetMode {
     /// The guest appears as a real L2 host on the physical LAN; NAT services
     /// (DHCP/DNS/NFS/port-forward) are NOT provided — use the real network's.
     Pcap,
-    /// No Ethernet: the adapter is not plugged into anything. O2 only for now
-    /// (`MachineConfig::validate`); the Indy and Indigo2 always have a network.
+    /// No Ethernet: the adapter is not plugged into anything. O2 and Octane
+    /// only (`MachineConfig::validate`); the Indy and Indigo2 always have a
+    /// network.
     Off,
 }
 
@@ -2021,12 +2022,6 @@ impl MachineConfig {
             (NetMode::Off, p) if p != MachineProfile::O2Ip32 && p != MachineProfile::OctaneIp30 => {
                 return Err("network.mode = \"off\" is only available on the O2 and the Octane for now; the Indy and Indigo2 always have their Ethernet".into());
             }
-            (NetMode::Pcap, MachineProfile::O2Ip32) => {
-                return Err("network.mode = \"pcap\" is not available on the O2 yet (its Ethernet runs on the NAT gateway)".into());
-            }
-            (NetMode::Pcap, MachineProfile::OctaneIp30) => {
-                return Err("network.mode = \"pcap\" is not available on the Octane yet (its Ethernet runs on the NAT gateway)".into());
-            }
             _ => {}
         }
         if let Some(ref s) = self.nat_subnet {
@@ -2770,7 +2765,7 @@ mod export_tests {
         assert!(o2.validate().unwrap_err().contains("largest kit goes in pair A"));
         o2.banks = default_banks();
         o2.network.mode = NetMode::Pcap;
-        assert!(o2.validate().unwrap_err().contains("pcap"));
+        o2.validate().expect("a bridged O2");
         o2.network.mode = NetMode::Off;
         o2.validate().expect("an unplugged O2");
         let mut indy = MachineConfig::default();

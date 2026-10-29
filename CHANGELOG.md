@@ -578,6 +578,8 @@ hashes are given where a change is easiest to understand by reading the commit.
 - The SEEQ, DaynaPort, MEC and IOC3 now get their NAT or PCAP backend from one
   shared link, so a new backend is one implementation. The backend threads are
   named `seeq-net`, `daynaN-net`, `ip32-mec-net` and `ip30-eth-net`.
+- `mode = "pcap"` is allowed on the O2 and the Octane, untested on a real
+  interface.
 
 ### UI / input
 
