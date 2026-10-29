@@ -44,6 +44,7 @@ struct State {
     config: u64,
     refresh: u64,
     directory_config: u64,
+    ecc_config: u64,
     storage: HashMap<u64, u64>,
     directory: HashMap<u64, u64>,
     counters: HashMap<u64, u64>,
@@ -68,6 +69,7 @@ impl Default for State {
             config: 0,
             refresh: 0,
             directory_config: 0,
+            ecc_config: 0,
             storage: HashMap::new(),
             directory: HashMap::new(),
             counters: HashMap::new(),
@@ -239,6 +241,7 @@ impl BedrockMd {
         let mut s = self.state.lock();
         s.cell = u64::MAX;
         s.storage.clear();
+        s.ecc_config = 0;
         s.memory_error = 0;
         s.directory_error = 0;
         s.ecc.clear();
@@ -304,6 +307,7 @@ impl BedrockMd {
             0x20040 => s.selftest_error,
             0x20048 => s.selftest_status,
             0x40000 => s.directory_config,
+            0x60000 => s.ecc_config,
             0x40050 => 0x04040400,
             0x60010 | 0x60018 => s.memory_error,
             0x40010 | 0x40018 => s.directory_error,
@@ -321,6 +325,7 @@ impl BedrockMd {
                 }
                 0x20000 => s.refresh = value & ((1 << 63) | 0xfff),
                 0x40000 => s.directory_config = value & 3,
+                0x60000 => s.ecc_config = value & 1,
                 _ if storage_mask(at).is_some() => {
                     s.storage.insert(at, value & storage_mask(at).unwrap());
                 }
@@ -413,38 +418,39 @@ impl BedrockMd {
         event: &mut Vec<MemoryError>,
     ) -> u64 {
         let mut data = self.memory.raw_read(bank, at);
+        if s.ecc_config & 1 != 0 || s.ecc.is_empty() {
+            return data;
+        }
         let key = (bank as u64 * FITTED_BANK + at) / 8;
-        if s.storage.get(&0x60000).copied().unwrap_or(0) & 1 == 0 {
-            if let Some(&check) = s.ecc.get(&key) {
-                let syndrome = check ^ ecc_compute(data);
-                if syndrome != 0 {
-                    let bit = ECC_COLUMNS.iter().position(|&v| v == syndrome);
-                    let valid = if bit.is_some() { 1 << 52 } else { 1 << 60 };
-                    if bit.is_none()
-                        && s.memory_error & (1 << 60) != 0
-                        && (s.memory_error ^ address) & (((1u64 << 30) - 1) << 3) & !127 != 0
-                    {
-                        s.memory_error |= 1 << 63;
+        if let Some(&check) = s.ecc.get(&key) {
+            let syndrome = check ^ ecc_compute(data);
+            if syndrome != 0 {
+                let bit = ECC_COLUMNS.iter().position(|&v| v == syndrome);
+                let valid = if bit.is_some() { 1 << 52 } else { 1 << 60 };
+                if bit.is_none()
+                    && s.memory_error & (1 << 60) != 0
+                    && (s.memory_error ^ address) & (((1u64 << 30) - 1) << 3) & !127 != 0
+                {
+                    s.memory_error |= 1 << 63;
+                }
+                if s.memory_error & (valid | (1 << 60)) != 0 {
+                    s.memory_error |= valid << 1;
+                } else {
+                    s.memory_error = (s.memory_error
+                        & !((0xff << 40) | (((1u64 << 30) - 1) << 3)))
+                        | ((syndrome as u64) << 40)
+                        | (address & (((1u64 << 30) - 1) << 3));
+                }
+                s.memory_error |= valid;
+                if let Some(bit) = bit {
+                    if bit < 64 {
+                        data ^= 1 << bit;
+                        self.memory.raw_write(bank, at, data);
                     }
-                    if s.memory_error & (valid | (1 << 60)) != 0 {
-                        s.memory_error |= valid << 1;
-                    } else {
-                        s.memory_error = (s.memory_error
-                            & !((0xff << 40) | (((1u64 << 30) - 1) << 3)))
-                            | ((syndrome as u64) << 40)
-                            | (address & (((1u64 << 30) - 1) << 3));
-                    }
-                    s.memory_error |= valid;
-                    if let Some(bit) = bit {
-                        if bit < 64 {
-                            data ^= 1 << bit;
-                            self.memory.raw_write(bank, at, data);
-                        }
-                        s.ecc.remove(&key);
-                        event.push(MemoryError::Correctable);
-                    } else {
-                        event.push(MemoryError::Uncorrectable);
-                    }
+                    s.ecc.remove(&key);
+                    event.push(MemoryError::Correctable);
+                } else {
+                    event.push(MemoryError::Uncorrectable);
                 }
             }
         }
@@ -461,39 +467,41 @@ impl BedrockMd {
         let Some((bank, offset)) = BedrockMemory::decode(s.config, address, bytes) else {
             return self.refuse();
         };
-        let line = (bank as u64 * FITTED_BANK + offset) / 128;
-        if s.marked_directory.contains_key(&line) {
-            let premium = s.directory_config & 1 != 0;
-            let word = *s.directory.get(&line).unwrap_or(&0);
-            if write.is_some() {
-                s.directory.insert(line, directory_encode(word, premium));
-                s.marked_directory.remove(&line);
-            } else if s.directory_config & 2 == 0 {
-                let syndrome = directory_syndrome(word, premium);
-                if syndrome != 0 {
-                    let bit = directory_columns(premium)
-                        .iter()
-                        .position(|&v| v == syndrome);
-                    let valid = if bit.is_some() { 1 << 61 } else { 1 << 63 };
-                    if s.directory_error & ((1 << 63) | valid) != 0 {
-                        s.directory_error |= if bit.is_some() { 1 << 57 } else { 1 << 59 };
-                    } else {
-                        let carrier = 0x1c0000000
-                            + (address / BANK_SPAN) * (BANK_SPAN / 8)
-                            + ((offset & !127) / 8);
-                        s.directory_error = (s.directory_error
-                            & !((0x7f << 40) | (((1u64 << 30) - 1) << 3)))
-                            | ((syndrome as u64) << 40)
-                            | (carrier & (((1u64 << 30) - 1) << 3));
-                    }
-                    s.directory_error |= valid;
-                    if let Some(bit) = bit {
-                        s.directory.insert(line, word ^ (1 << bit));
-                        s.marked_directory.remove(&line);
-                        event.push(MemoryError::Correctable);
-                    } else {
-                        event.push(MemoryError::Uncorrectable);
-                        return None;
+        if !s.marked_directory.is_empty() {
+            let line = (bank as u64 * FITTED_BANK + offset) / 128;
+            if s.marked_directory.contains_key(&line) {
+                let premium = s.directory_config & 1 != 0;
+                let word = *s.directory.get(&line).unwrap_or(&0);
+                if write.is_some() {
+                    s.directory.insert(line, directory_encode(word, premium));
+                    s.marked_directory.remove(&line);
+                } else if s.directory_config & 2 == 0 {
+                    let syndrome = directory_syndrome(word, premium);
+                    if syndrome != 0 {
+                        let bit = directory_columns(premium)
+                            .iter()
+                            .position(|&v| v == syndrome);
+                        let valid = if bit.is_some() { 1 << 61 } else { 1 << 63 };
+                        if s.directory_error & ((1 << 63) | valid) != 0 {
+                            s.directory_error |= if bit.is_some() { 1 << 57 } else { 1 << 59 };
+                        } else {
+                            let carrier = 0x1c0000000
+                                + (address / BANK_SPAN) * (BANK_SPAN / 8)
+                                + ((offset & !127) / 8);
+                            s.directory_error = (s.directory_error
+                                & !((0x7f << 40) | (((1u64 << 30) - 1) << 3)))
+                                | ((syndrome as u64) << 40)
+                                | (carrier & (((1u64 << 30) - 1) << 3));
+                        }
+                        s.directory_error |= valid;
+                        if let Some(bit) = bit {
+                            s.directory.insert(line, word ^ (1 << bit));
+                            s.marked_directory.remove(&line);
+                            event.push(MemoryError::Correctable);
+                        } else {
+                            event.push(MemoryError::Uncorrectable);
+                            return None;
+                        }
                     }
                 }
             }
@@ -508,7 +516,9 @@ impl BedrockMd {
                 at,
                 (old & !(mask << shift)) | ((value & mask) << shift),
             );
-            s.ecc.remove(&((bank as u64 * FITTED_BANK + at) / 8));
+            if !s.ecc.is_empty() {
+                s.ecc.remove(&((bank as u64 * FITTED_BANK + at) / 8));
+            }
             Some(0)
         } else {
             Some((self.checked_word(s, bank, at, address, event) >> shift) & mask)
@@ -762,7 +772,6 @@ fn storage_mask(at: u64) -> Option<u64> {
         0x20060 => 3,
         0x40040 => 0x7fff | (7 << 32) | (7 << 35) | (1 << 63),
         0x40048 => 0x7fff | (7 << 32) | (7 << 35) | (3 << 62),
-        0x60000 => 1,
         0x40060 => 3,
         0x60040 => 1,
         _ => return None,
@@ -853,6 +862,75 @@ mod tests {
         assert_eq!(regs.read64(0x20048).data, 0);
         now.store(21000, Ordering::Relaxed);
         assert_eq!(regs.read64(0x20048).data, 3);
+    }
+
+    #[test]
+    fn ecc_config_masks_widths_and_resets() {
+        let md = configured();
+        let regs = md.md_bus();
+        assert_eq!(regs.read64(0x60000).data, 0);
+        assert_eq!(regs.write64(0x60000, u64::MAX), BUS_OK);
+        assert_eq!(regs.read64(0x60000).data, 1);
+        assert_eq!(regs.write64(0x60000, !1), BUS_OK);
+        assert_eq!(regs.read64(0x60000).data, 0);
+        assert_eq!(regs.read32(0x60000).status, BUS_ERR);
+        assert_eq!(regs.write8(0x60000, 1), BUS_ERR);
+        assert_eq!(regs.write64(0x60001, 1), BUS_ERR);
+        regs.write64(0x60000, 1);
+        md.soft_reset();
+        assert_eq!(regs.read64(0x60000).data, 0);
+        assert_eq!(regs.read64(8).data, 0x33);
+        regs.write64(0x60000, 1);
+        md.power_on();
+        assert_eq!(regs.read64(0x60000).data, 0);
+        assert_eq!(regs.read64(8).data, 0);
+    }
+    #[test]
+    fn ecc_config_retains_injections_until_checks_resume() {
+        for (code, kind, status, valid) in [
+            (1, MemoryError::Correctable, BUS_OK, 1 << 52),
+            (3, MemoryError::Uncorrectable, BUS_ERR, 1 << 60),
+        ] {
+            let md = configured();
+            let regs = md.md_bus();
+            let ecc = md.ecc_bus();
+            let ram = md.uncached_view();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let seen = events.clone();
+            md.on_error(Arc::new(move |event| seen.lock().push(event)));
+            assert_eq!(ram.read64(0).status, BUS_OK);
+            ecc.write8(7, code);
+            regs.write64(0x60000, u64::MAX);
+            assert_eq!(ram.read64(0).status, BUS_OK);
+            assert_eq!(ecc.read8(7).data, code);
+            assert_eq!(regs.read64(0x60010).data, 0);
+            assert!(events.lock().is_empty());
+            regs.write64(0x60000, !1);
+            assert_eq!(regs.read64(0x60000).data, 0);
+            assert_eq!(ram.read64(0).status, status);
+            assert_ne!(regs.read64(0x60010).data & valid, 0);
+            assert_eq!(*events.lock(), vec![kind]);
+            if kind == MemoryError::Correctable {
+                assert_eq!(ecc.read8(7).data, 0);
+                assert_eq!(ram.read64(0).status, BUS_OK);
+                assert_eq!(*events.lock(), vec![kind]);
+            }
+        }
+    }
+    #[test]
+    fn ecc_config_disabled_data_write_regenerates_check_bits() {
+        let md = configured();
+        let regs = md.md_bus();
+        let ecc = md.ecc_bus();
+        let ram = md.uncached_view();
+        ecc.write8(7, 3);
+        regs.write64(0x60000, 1);
+        assert_eq!(ram.write8(7, 0x5a), BUS_OK);
+        assert_eq!(ecc.read8(7).data, ecc_compute(0x5a));
+        regs.write64(0x60000, 0);
+        assert_eq!(ram.read64(0).status, BUS_OK);
+        assert_eq!(ram.read64(0).data, 0x5a);
+        assert_eq!(regs.read64(0x60010).data, 0);
     }
 
     fn configured() -> Arc<BedrockMd> {
