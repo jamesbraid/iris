@@ -22,6 +22,7 @@ pub mod mace_id;
 pub mod mace_pci;
 pub mod mace_ps2;
 pub mod mace_sdma;
+pub mod mace_uart;
 pub mod mace_ust;
 pub mod ns16550;
 pub mod rad1;

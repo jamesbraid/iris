@@ -118,6 +118,7 @@ pub use crate::dev::mace_pci::*;
 pub use crate::dev::mace_ps2::*;
 pub use crate::dev::mace_sdma::*;
 pub use crate::dev::mace_ust::*;
+pub use crate::dev::mace_uart::*;
 pub use crate::dev::ns16550::*;
 pub use crate::dev::mace_id::*;
 
