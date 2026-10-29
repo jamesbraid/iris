@@ -103,11 +103,7 @@ impl Mace {
         self.mec.poll();
         self.com0.pump();
         self.com1.pump();
-        self.audio.poll(&AudioIo {
-            ram: &self.ram,
-            ring_base: (self.regs.cell(MACE_ISA_RING_BASE) & sdma::RING_BASE_MASK) as u32,
-            ust: self.ust.counter() as u32,
-        });
+        self.audio.poll(&self.audio_io());
         if self.sdma.any_owned() {
             self.sdma.poll(&self.sdma_io());
         }
@@ -120,6 +116,15 @@ impl Mace {
             &self.pci, &*self.ust, &self.rtc, &self.ps2, &self.onewire, &self.com0, &self.com1, &self.sdma,
             &self.audio, &*self.mec, &*self.isa,
         ]
+    }
+
+    /// The audio engine's view of the machine.
+    fn audio_io(&self) -> AudioIo<'_> {
+        AudioIo {
+            ram: &self.ram,
+            ring_base: (self.regs.cell(MACE_ISA_RING_BASE) & sdma::RING_BASE_MASK) as u32,
+            ust: self.ust.counter() as u32,
+        }
     }
 
     /// The engines' view of the machine.
@@ -329,6 +334,7 @@ impl BusDevice for Mace {
             return self.rtc.read8(addr);
         }
         if MaceAudio::contains(a) {
+            self.audio.catch_up(&self.audio_io());
             return BusDevice::read8(&self.audio, addr);
         }
         if Self::in_sdma(a) {
@@ -362,6 +368,7 @@ impl BusDevice for Mace {
             return self.rtc.read16(addr);
         }
         if MaceAudio::contains(a) {
+            self.audio.catch_up(&self.audio_io());
             return BusDevice::read16(&self.audio, addr);
         }
         if Self::in_sdma(a) {
@@ -405,6 +412,7 @@ impl BusDevice for Mace {
             return self.rtc.read32(addr);
         }
         if MaceAudio::contains(a) {
+            self.audio.catch_up(&self.audio_io());
             return BusDevice::read32(&self.audio, addr);
         }
         if Self::in_sdma(a) {
@@ -449,6 +457,7 @@ impl BusDevice for Mace {
             return self.rtc.read64(addr);
         }
         if MaceAudio::contains(a) {
+            self.audio.catch_up(&self.audio_io());
             return BusDevice::read64(&self.audio, addr);
         }
         if Self::in_sdma(a) {

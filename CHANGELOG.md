@@ -248,6 +248,10 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ### SGI O2 (IP32)
 
+- **O2 audio at 8 and 11 kHz no longer plays sharp.** A read of MACE's
+  audio registers now brings the rings up to date, so IRIX, which keeps
+  only about 2 ms of sound queued, no longer lets them run dry between
+  service passes.
 - **The O2 is on `Physical`.** Its bus is the same decode table and memory
   window as the Indy's: CRIME's banks are RAM banks a bank-control write
   remaps, CRIME, GBE, VICE, MACE and the flash are table entries, and

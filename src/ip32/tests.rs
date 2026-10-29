@@ -384,6 +384,29 @@ fn sdma_bus() -> std::sync::Arc<Ip32Bus> {
     bus
 }
 
+/// IRIX paces its audio by MACE's read pointer: it reads it about once a
+/// millisecond and writes about 2 ms of sound past it. The pointer it reads
+/// is where the engine is, not where the last service pass (up to 2 ms ago
+/// on a quiet machine) left it; otherwise the next pass ran the ring dry.
+#[test]
+fn an_audio_register_read_sees_the_ring_as_it_stands() {
+    use crate::dev::mace_audio::MACE_AUDIO;
+    let bus = sdma_bus();
+    let a = MACE_AUDIO as u64;
+    let codec = |reg: u64, v: u64| bus.write64(a + 8, reg << 17 | v);
+    bus.write64(a, 0);
+    codec(28, 0x0800); // clock 1 on, converters up
+    codec(17, 8000);
+    codec(15, 1 << 8); // DAC1 from clock 1
+    codec(27, 1 << 8); // DAC1 on
+    bus.write64(a + 0x40, 0x200); // output 1 running
+    bus.write64(a + 0x50, 0xfe0); // a full ring
+    bus.service();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let rptr = bus.read64(a + 0x48).data;
+    assert!(rptr >= 0x280, "10 ms at 8 kHz is 20 blocks with no service pass between, read {rptr:#x}");
+}
+
 fn sdma_reg(p: u32, reg: u32) -> u64 {
     (MACE_SDMA + p * 0x4000 + reg * 8) as u64
 }

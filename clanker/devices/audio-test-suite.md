@@ -99,27 +99,32 @@ sticky cases cannot fail there: with no rate handling, every rate is 44.1 kHz.
 They guard against the fix keeping a stale rate.
 
 O2 (MACE audio), IRIX 6.5.30 (`o2-irix6530-20261028` disk, `uname -R`
-`6.5 6.5.30m`), build 4ec2939 (the rate fix; it does not touch the O2 code). 62 of 86 pass. Every failure is 8000 or 11025 Hz, and
-all three paths agree:
+`6.5 6.5.30m`), 2026-10-29. Ranges cover `gen`, `playaiff` and `sfplay`,
+mono and stereo, 8 and 16 bit.
 
-| Rate | Length s | Pitch Hz | Verdict |
-|---|---|---|---|
-| 8000 | 2.080 to 2.093 | 1045 to 1166 | FAIL |
-| 11025 | 2.071 to 2.076 | 1036 to 1092 | FAIL |
-| 16000 | 2.009 to 2.016 | 1001 to 1008 | ok |
-| 22050 | 2.004 to 2.014 | 1000 to 1004 | ok |
-| 32000 | 2.004 to 2.011 | 1001 to 1005 | ok |
-| 44100 | 2.005 to 2.010 | 1001 to 1006 | ok |
-| 48000 | 2.006 to 2.011 | 1001 to 1006 | ok |
+| Rate | Before the MACE fix (length s, pitch Hz) | With it |
+|---|---|---|
+| 8000 | 2.080 to 2.093, 1045 to 1166 FAIL | 2.000 to 2.003, 999 to 1000 ok |
+| 11025 | 2.071 to 2.076, 1036 to 1092 FAIL | 2.000, 1000 ok |
+| 16000 | 2.009 to 2.016, 1001 to 1008 ok | 2.000, 1000 ok |
+| 22050 | 2.004 to 2.014, 1000 to 1004 ok | 1.998 to 2.001, 1000 ok |
+| 32000 | 2.004 to 2.011, 1001 to 1005 ok | 1.998 to 2.000, 1000 ok |
+| 44100 | 2.005 to 2.010, 1001 to 1006 ok | 2.000 to 2.004, 998 to 1000 ok |
+| 48000 | 2.006 to 2.011, 1001 to 1006 ok | 1.999 to 2.001, 999 to 1000 ok |
 
-The ranges cover `gen`, `playaiff` and `sfplay`, mono and stereo, 8 and 16
-bit; both `sticky_*` cases pass (2.005 and 2.008 s, 1002 and 1004 Hz). The
-rate the guest programs is right everywhere (the records carry 8000 and
-11025, and the lengths are within 5%). The pitch fails because the stream has
-extra samples in it: at 8 kHz about one in 33 is an inserted zero in the
-middle of the sine, which makes extra zero crossings (period lengths of 3 and
-6 where it should be 8). It is not yet known whether MACE's ring read, the
-guest's feeding of the ring or IRIX's own sample conversion inserts them.
+| O2 | Pass | Fail |
+|---|---|---|
+| With the MACE fix | 86 of 86 | 0 |
+| Before (4ec2939) | 62 of 86 | 24 |
+
+Before the fix every 8000 and 11025 Hz case failed through all three paths.
+The rate was right, but the stream had zeros inserted in the middle of the
+sine (about one in 33 at 8 kHz), which added zero crossings. IRIX keeps an
+output ring about 2 ms ahead of the read pointer it reads each millisecond,
+and MACE only moved that pointer on the service thread's passes, about
+2.1 ms apart on a quiet machine. A pass then wanted 16 or 17 frames at
+8 kHz where 16 or fewer were queued, and played a zero for each missing
+one. Register reads now bring the rings up to date first.
 
 Indy and Indigo2 (HAL2): not covered. HAL2 has only the host-side capture
 (`IRIS_HAL2_CAPTURE`, raw stereo 16-bit at the host stream's rate, and only
