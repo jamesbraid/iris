@@ -57,6 +57,9 @@ hashes are given where a change is easiest to understand by reading the commit.
   disks report one emulated identity on every machine. The O2 and Octane now
   say `IRIS EMUL DISK` and `IRIS EMUL CDROM` in INQUIRY; the Indy and Indigo2
   keep their Sony CD-ROM.
+- A disc change loads a CHD CD as well as an ISO, and the O2, the Octane and
+  the Indigo2's second controller fold pending CHD diffs on a clean exit as the
+  first controller always did.
 
 ### Host efficiency on small machines
 
