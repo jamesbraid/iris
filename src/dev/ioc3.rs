@@ -57,7 +57,7 @@ use crate::dev::ioc3_port::Ioc3EthPort;
 use crate::dev::ps2::Ps2Controller;
 use crate::dev::w1;
 use crate::dev::w1::sgi::{self, BoardRecord};
-use crate::dev::z85c30::{null_serial_backend, SerialBackend};
+use crate::dev::serial_host::{null_serial_backend, SerialBackend};
 use crate::irq::{InterruptController, IrqLine};
 use crate::pci::{Bar, PciBusDevice, PciConfig, PciDma, PciDmaStatus, PCI_INTA};
 use crate::hptimer::{TimerId, TimerManager, TimerReturn};
