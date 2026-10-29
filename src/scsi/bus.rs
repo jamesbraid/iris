@@ -25,7 +25,8 @@ pub struct Discs {
 /// and a status come out.
 ///
 /// A disk or CD-ROM is a [`ScsiDevice`], a DaynaPort Ethernet adapter a
-/// [`DaynaPort`]. Everything beyond `request` is optional behaviour that a
+/// [`DaynaPort`]. The contract is `request` and the lifecycle (`power_on`,
+/// `start`, `stop`). Everything else is optional behaviour that a
 /// kind of target has or does not (a copy-on-write layer, a disc changer),
 /// defaulting to "not this target"; the controllers and the monitor ask for
 /// the behaviour, never for the type.
@@ -111,66 +112,6 @@ pub trait ScsiTarget: Send {
 }
 
 const NOT_A_CDROM: &str = "Not a CD-ROM device";
-
-impl ScsiTarget for ScsiDevice {
-    fn request(&mut self, req: &ScsiRequest) -> io::Result<ScsiResponse> {
-        ScsiDevice::request(self, req)
-    }
-    fn status(&self, id: usize) -> Vec<String> {
-        let (phys, logical) = self.block_sizes();
-        if self.is_cdrom() {
-            let list = self.disc_list();
-            let active = if self.has_media() { self.current_disc() } else { "(tray empty)" };
-            let mut lines = vec![format!("SCSI ID {}: CD-ROM {} ({} disc(s))  phys_block={} logical_block={}",
-                id, active, list.len(), phys, logical)];
-            for (i, d) in list.iter().enumerate() {
-                let tag = if i == 0 { " <active>" } else if i == 1 { " <next>" } else { "" };
-                lines.push(format!("  [{}] {}{}", i, d, tag));
-            }
-            lines
-        } else {
-            let cow = if self.is_cow() { ", copy-on-write" } else { "" };
-            vec![format!("SCSI ID {}: disk {} ({} blocks of {}{})",
-                id, self.current_disc(), self.size() / logical.max(1), logical, cow)]
-        }
-    }
-    fn block_size(&self) -> Option<u64> { Some(self.block_sizes().1) }
-    fn reset_block_size(&mut self, cdrom_512: bool) {
-        if cdrom_512 && self.is_cdrom() {
-            self.set_logical_block_size(512);
-        } else {
-            self.power_on_block_size();
-        }
-    }
-    fn cow_dirty(&self) -> Option<usize> { self.is_cow().then(|| self.cow_dirty_count()) }
-    fn cow_commit(&mut self) -> io::Result<usize> { ScsiDevice::cow_commit(self) }
-    fn cow_reset(&mut self) -> io::Result<()> { ScsiDevice::cow_reset(self) }
-    fn cow_export(&mut self, dest: &std::path::Path) -> io::Result<Option<Vec<u64>>> {
-        if self.is_cow() { ScsiDevice::cow_export(self, dest).map(Some) } else { Ok(None) }
-    }
-    fn cow_import(&mut self, source: &std::path::Path, dirty: Vec<u64>) -> io::Result<()> {
-        ScsiDevice::cow_import(self, source, dirty)
-    }
-    fn pending_chd_sync(&self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
-        ScsiDevice::pending_chd_sync(self)
-    }
-    fn take_pending_chd_sync(&mut self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
-        ScsiDevice::take_pending_chd_sync(self)
-    }
-    fn discs(&self) -> Option<Discs> {
-        self.is_cdrom().then(|| Discs {
-            current: self.current_disc().to_string(),
-            list: self.disc_list().to_vec(),
-            block_sizes: self.block_sizes(),
-        })
-    }
-    fn load_disc(&mut self, path: String) -> Result<String, String> { ScsiDevice::load_disc(self, path) }
-    fn eject_next(&mut self) -> Option<String> { ScsiDevice::eject_next(self) }
-    fn unload_media(&mut self) { ScsiDevice::unload_media(self) }
-    fn add_disc(&mut self, path: String) -> Result<(), String> { ScsiDevice::add_disc(self, path) }
-    fn remove_disc(&mut self, ordinal: usize) -> Result<String, String> { ScsiDevice::remove_disc(self, ordinal) }
-    fn move_disc_next(&mut self, ordinal: usize) -> Result<(), String> { ScsiDevice::move_disc_next(self, ordinal) }
-}
 
 /// A DaynaPort answers its own vendor command set, which reuses the READ(6)
 /// and WRITE(6) opcodes for packet receive and transmit; it answers no
