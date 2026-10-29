@@ -350,26 +350,28 @@ fn a_pin_register_reaches_the_shared_data_word() {
     assert_eq!(r.r32(reg::PIN_DATA) & (1 << 6), 0);
 }
 
-/// Pin 2 is the board's read-only product input: 1 on an Octane, 0 on an
-/// Octane2. Writes and direction changes cannot replace it.
+/// Pins 2 and 3 are read-only inputs the board drives high, on the Octane
+/// and the Octane2 alike. Writes and direction changes cannot replace them.
 #[test]
-fn the_product_input_is_read_only() {
-    for (octane2, want) in [(false, 1u32), (true, 0)] {
+fn the_board_inputs_are_read_only() {
+    for octane2 in [false, true] {
         let r = Rig::with(Ioc3::octane(MAC, octane2));
-        let pin2 = reg::PIN_REG_FIRST + 8;
-        assert_eq!(r.r32(pin2), want);
-        assert_eq!(r.r32(reg::PIN_DATA) >> 2 & 1, want);
-        r.w32(pin2, 1 - want);
-        r.w32(reg::PIN_DATA, if want == 1 { 0 } else { 0xffff_ffff });
-        r.w32(reg::PIN_CONTROL_SET, 1 << 2);
-        r.w32(reg::PIN_CONTROL_CLR, 1 << 2);
-        assert_eq!(r.r32(pin2), want);
-        assert_eq!(r.r32(reg::PIN_DATA) >> 2 & 1, want);
-        r.c.reset();
-        assert_eq!(r.r32(pin2), want, "a reset keeps the board's value");
+        for pin in [2u32, 3] {
+            let reg = reg::PIN_REG_FIRST + 4 * pin;
+            assert_eq!(r.r32(reg), 1);
+            assert_eq!(r.r32(reg::PIN_DATA) >> pin & 1, 1);
+            r.w32(reg, 0);
+            r.w32(reg::PIN_DATA, 0);
+            r.w32(reg::PIN_CONTROL_SET, 1 << pin);
+            r.w32(reg::PIN_CONTROL_CLR, 1 << pin);
+            assert_eq!(r.r32(reg), 1);
+            assert_eq!(r.r32(reg::PIN_DATA) >> pin & 1, 1);
+            r.c.reset();
+            assert_eq!(r.r32(reg), 1, "a reset keeps the board's value");
+        }
         // An unrelated pin still writes.
-        r.w32(reg::PIN_REG_FIRST + 4 * 3, 1);
-        assert_eq!(r.r32(reg::PIN_REG_FIRST + 4 * 3), 1);
+        r.w32(reg::PIN_REG_FIRST + 4 * 6, 1);
+        assert_eq!(r.r32(reg::PIN_REG_FIRST + 4 * 6), 1);
     }
 }
 
