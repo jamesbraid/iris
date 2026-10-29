@@ -41,8 +41,8 @@
 //! Ported from hw/net/sgi-ioc3-eth.c and hw/net/ics1890.c in
 //! jamesbraid/qemu-sgi-origami.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
 
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
@@ -1045,6 +1045,8 @@ pub struct Ioc3Eth {
     /// The NAT and receive threads, joined in `stop`.
     threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     me: Weak<Self>,
+    /// The status bar's activity bits, shared with the display thread.
+    heartbeat: OnceLock<Arc<AtomicU64>>,
 }
 
 /// How long the receive thread sleeps with no negotiation to wait for: it is
@@ -1073,11 +1075,23 @@ impl Ioc3Eth {
             nat: Arc::new(Mutex::new(None)),
             threads: Mutex::new(Vec::new()),
             me: me.clone(),
+            heartbeat: OnceLock::new(),
         })
     }
 
     pub fn mac(&self) -> [u8; 6] {
         self.mac
+    }
+
+    /// Light the status bar's Ethernet activity bits in `heartbeat`.
+    pub fn set_heartbeat(&self, heartbeat: Arc<AtomicU64>) {
+        let _ = self.heartbeat.set(heartbeat);
+    }
+
+    fn blink(&self, bit: u64) {
+        if let Some(hb) = self.heartbeat.get() {
+            hb.fetch_or(bit, Ordering::Relaxed);
+        }
     }
 
     /// A machine reset: the MAC's registers and the PHY as at power-on,
@@ -1123,6 +1137,7 @@ impl Ioc3Eth {
         if frames.is_empty() {
             return;
         }
+        self.blink(crate::dev::ng1::rex3::Rex3::HB_ENET_TX);
         if let Some(link) = self.link.lock().as_mut() {
             for f in frames {
                 let _ = link.to_net.push(f);
@@ -1264,6 +1279,7 @@ impl Ioc3Eth {
                 let mut st = self.st.lock();
                 if st.rx_ready() && st.rx_filter(&frame) {
                     st.deliver(&*dma, &frame, false);
+                    self.blink(crate::dev::ng1::rex3::Rex3::HB_ENET_RX);
                 }
             }
             self.irq_flush();

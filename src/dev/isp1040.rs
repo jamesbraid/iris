@@ -432,6 +432,8 @@ pub struct Core {
     notes: Mutex<Vec<String>>,
     dma_misses: Mutex<std::collections::BTreeSet<u64>>,
     odd_accesses: Mutex<u32>,
+    /// The status bar's activity bits, shared with the display thread.
+    heartbeat: OnceLock<Arc<AtomicU64>>,
 }
 
 impl Default for Isp1040 {
@@ -530,6 +532,7 @@ impl Core {
             notes: Mutex::new(Vec::new()),
             dma_misses: Mutex::new(std::collections::BTreeSet::new()),
             odd_accesses: Mutex::new(0),
+            heartbeat: OnceLock::new(),
         }
     }
 
@@ -564,6 +567,11 @@ impl Core {
     fn fenced<R>(&self, gen: u64, store: impl FnOnce() -> R) -> Option<R> {
         let _fence = self.fence.lock();
         (self.gen.load(Ordering::Acquire) == gen).then(store)
+    }
+
+    /// Light the status bar's SCSI activity bits in `heartbeat`.
+    pub fn set_heartbeat(&self, heartbeat: Arc<AtomicU64>) {
+        let _ = self.heartbeat.set(heartbeat);
     }
 
     /// Wire the adapter's interrupt pin to `line` (a level).
@@ -1214,6 +1222,10 @@ impl Core {
     /// stored, and no completion is built.
     fn run_job(&self, job: Job, gen: u64) -> Option<Pending> {
         let Job { handle, target, cdb, xfer, to_dev, segs, described } = job;
+        // The bar has lights for SCSI ids 0-5.
+        if let (Some(hb), 0..=5) = (self.heartbeat.get(), target) {
+            hb.fetch_or(1u64 << (crate::dev::ng1::rex3::Rex3::HB_SCSI_BASE as u64 + target as u64), Ordering::Relaxed);
+        }
         let (status, moved);
         if to_dev {
             let mut buf = Vec::new();
