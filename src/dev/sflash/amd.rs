@@ -1,12 +1,15 @@
-// SPDX-License-Identifier: BSD-3-Clause
+//! The AMD flash command set: unlock, word program, sector erase and CFI
+//! query state, over storage supplied by the caller.
+//!
+//! Array bytes and bus translation belong to the enclosing device. CFI data
+//! and timing describe the selected model profile, not an identified chip.
+//! Buffered writes, protection, bypass and erase suspend are absent.
+//!
+//! Ported from MAME's intelfsh.cpp AMD command path, revision
+//! 2ee9b1e30299b122b131cab0bd7912abc2b095ba (BSD-3-Clause).
+
 // Copyright (c) Aaron Giles
 // Copyright (c) 2026 James Braid
-//! AMD unlock/program/erase state machine derived from MAME intelfsh.cpp,
-//! revision 2ee9b1e30299b122b131cab0bd7912abc2b095ba (BSD-3-Clause).
-//!
-//! This engine owns protocol state, not storage or bus translation. CFI bytes
-//! and model timing describe an explicit profile, not a fitted chip.
-//! Buffered writes, protection, bypass and erase suspend are unsupported.
 
 pub const SECTOR_SIZE: usize = 64 * 1024;
 const SECTORS: usize = 128;

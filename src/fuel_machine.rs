@@ -1,4 +1,9 @@
-//! Serial-only Fuel IP34 using Iris's shared workstation runtime.
+//! The Fuel (IP34) as a machine: an R14000 on Bedrock, XBridge and the
+//! base I/O devices, with Iris's CPU thread, monitor and serial console.
+//!
+//! Selected with `[machine] profile = "fuel_ip34"`. The shared keys select
+//! the PROM, NVRAM, memory and SCSI devices; `[fuel]` selects the L1 or IOC3
+//! console and the writable flash file. Graphics is not attached.
 
 use crate::config::{FuelConsole, MachineConfig};
 use crate::cpu::mips_exec::{CpuDevice, MipsCpu};

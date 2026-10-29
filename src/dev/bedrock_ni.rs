@@ -1,10 +1,12 @@
-// SPDX-License-Identifier: BSD-3-Clause
-//! Bedrock's network registers for a node without a network peer.
+//! Bedrock's network interface on a node with no NUMAlink peer.
 //!
-//! Unknown power-on fields use deterministic zero state, with sideband retained
-//! across reset. Routing entries retain fields without simulating a fabric.
+//! Routing registers retain their fields without simulating a fabric.
+//! Unknown power-on fields start at zero, and sideband state survives
+//! reset, as in the QEMU model.
 //!
-//! Ported from hw/misc/sgi-bedrock-ni.c and hw/misc/sgi-bedrock-ni-regs.c in jamesbraid/qemu-sgi-origami.
+//! Ported from hw/misc/sgi-bedrock-ni.c and hw/misc/sgi-bedrock-ni-regs.c
+//! in jamesbraid/qemu-sgi-origami.
+
 /// Length of the block-relative register aperture.
 pub const SIZE: u64 = 0x2008;
 

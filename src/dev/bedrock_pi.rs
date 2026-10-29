@@ -1,9 +1,12 @@
-// SPDX-License-Identifier: BSD-3-Clause
-//! Bedrock processor interface, at PI-relative offsets.
+//! Bedrock's processor interface: processor control, pending interrupts,
+//! real-time counters and timers, at offsets relative to one PI block.
+//!
+//! The Fuel fits one processor in PI0 slot A. Other processor slots are
+//! absent. Interrupt outputs and node callbacks connect the block to the
+//! machine; their delivery is ordered with register writes.
 //!
 //! Ported from hw/misc/sgi-bedrock-pi.c in jamesbraid/qemu-sgi-origami.
-//! Implements the reviewed Origami bedrock-processor-interface contract.
-//! Fuel has one processor at PI0/A. The other slots remain absent.
+
 use crate::dev::heart::Clock;
 use crate::hptimer::{TimerId, TimerManager, TimerReturn};
 use crate::irq::InterruptController;

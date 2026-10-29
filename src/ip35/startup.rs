@@ -1,9 +1,12 @@
-// SPDX-License-Identifier: BSD-3-Clause
-//! Private early data for Fuel's sole processor.
+//! The Fuel processor's private 32 KiB startup window, over the cached
+//! memory view while the PROM initializes DRAM.
 //!
-//! Ported from hw/mips/sgi/sn-promdata.c and hw/mips/sgi/sn-promdata.h in jamesbraid/qemu-sgi-origami.
-//! The PC/phase-bit lifetime is an existing emulator approximation, not a
-//! physical cache model. Only raw-0 cached window accesses select these bytes.
+//! Its lifetime follows the QEMU model's program-counter and phase-bit
+//! approximation; it does not model a physical cache. CPU accesses select
+//! the private bytes, while debugger and DMA accesses use the backing memory.
+//!
+//! Ported from hw/mips/sgi/sn-promdata.c and hw/mips/sgi/sn-promdata.h
+//! in jamesbraid/qemu-sgi-origami.
 
 use crate::traits::*;
 use parking_lot::Mutex;

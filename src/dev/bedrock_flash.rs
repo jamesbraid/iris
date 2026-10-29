@@ -1,11 +1,14 @@
-// SPDX-License-Identifier: BSD-3-Clause
-// Copyright (c) 2026 James Braid
+//! Bedrock's boot flash: two independent 8 MiB arrays, selected 32 MiB
+//! apart, with the AMD command set and CFI query data.
+//!
+//! Boot aliases and executable views share the same array bytes. Each array
+//! has its own command state; instruction fetches read stored bytes even
+//! while register reads return command status.
+//!
 //! Ported from hw/misc/sgi-bedrock-flash.c and hw/mips/sgi/initial-flash.c
 //! in jamesbraid/qemu-sgi-origami.
-//!
-//! Two independent 8 MiB positions, selected 32 MiB apart. Both boot-space
-//! aliases and executable views share these bytes. Each position has its own
-//! AMD command state. Executable views always read stored bytes and reject stores.
+
+// Copyright (c) 2026 James Braid
 
 #[cfg(test)]
 mod tests {

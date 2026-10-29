@@ -1,12 +1,15 @@
-// SPDX-License-Identifier: BSD-3-Clause
-//! Fuel IP34 device composition and selected interpreter profile.
+//! The Fuel's IP34 board: Bedrock, XBridge, L1 and the base I/O devices,
+//! connected to the IP35 processor bus and the R10000-family interpreter.
+//!
+//! Bedrock owns the memory banks. The board maps processor views through
+//! `ip35::Ip35Bus` and connects DMA, interrupts and the serial backends.
 //!
 //! Ported from hw/mips/sgi/sn1-node.c in jamesbraid/qemu-sgi-origami.
 
 use crate::cpu::mips_cache_shadow::ShadowCache;
 use crate::cpu::mips_exec::{MipsCpuConfig, MipsExecutor};
 use crate::cpu::mips_tlb::MipsTlb;
-use crate::ip35_bus::{Ip35Bus, CPU_PHYS_MASK};
+use crate::ip35::{Ip35Bus, CPU_PHYS_MASK};
 use crate::traits::BusDevice;
 use std::sync::Arc;
 
@@ -54,7 +57,7 @@ pub(crate) fn build_cpu(bus: Arc<Ip35Bus>) -> Result<Box<FuelCpu>, String> {
 /// Graphics and USB remain absent until their device implementations attach.
 pub(crate) struct FuelBoard {
     pub bus: Arc<Ip35Bus>,
-    pub startup: Arc<crate::ip35_bus::startup::StartupWindow>,
+    pub startup: Arc<crate::ip35::startup::StartupWindow>,
     pub pi: [Arc<crate::dev::bedrock_pi::BedrockPi>; 2],
     pub md: Arc<crate::dev::bedrock_md::BedrockMd>,
     pub l1: Arc<crate::dev::l1::L1>,
@@ -121,50 +124,50 @@ impl FuelBoard {
         let io = Arc::new(crate::dev::bedrock_io::BedrockIo::new());
         let ni = Arc::new(crate::dev::bedrock_ni::BedrockNi::new());
         let xb = Arc::new(crate::dev::bedrock_xb::BedrockXb::new());
-        let registers = crate::ip35_bus::empty_view();
-        crate::ip35_bus::map_device(
+        let registers = crate::ip35::empty_view();
+        crate::ip35::map_device(
             &registers,
             0,
             crate::dev::bedrock_pi::SIZE,
             pi[0].clone(),
             "Bedrock registers",
         );
-        crate::ip35_bus::map_device(
+        crate::ip35::map_device(
             &registers,
             0x20_0000,
             crate::dev::bedrock_pi::SIZE,
             pi[1].clone(),
             "Bedrock registers",
         );
-        crate::ip35_bus::map_device(
+        crate::ip35::map_device(
             &registers,
             0x40_0000,
             0x30010,
             io.clone(),
             "Bedrock registers",
         );
-        crate::ip35_bus::map_device(
+        crate::ip35::map_device(
             &registers,
             0x60_0000,
             0xc040,
             lb.clone(),
             "Bedrock registers",
         );
-        crate::ip35_bus::map_device(
+        crate::ip35::map_device(
             &registers,
             0x68_0000,
             0x2008,
             ni.clone(),
             "Bedrock registers",
         );
-        crate::ip35_bus::map_device(
+        crate::ip35::map_device(
             &registers,
             0x70_0000,
             0x198,
             xb.clone(),
             "Bedrock registers",
         );
-        crate::ip35_bus::map_device(
+        crate::ip35::map_device(
             &registers,
             0x78_0000,
             0x200000 - 0x180000,
@@ -302,7 +305,7 @@ impl FuelBoard {
         // Reset execution always sees stored bytes, independently of commands.
         bus.map(0, 0x1fc0_0000, 0x40_0000, prom.clone());
         if !payload.is_empty() {
-            crate::ip35_bus::map_device(
+            crate::ip35::map_device(
                 &phys,
                 0x1fc0_0000,
                 payload.len() as u64,
@@ -336,11 +339,11 @@ impl FuelBoard {
         bus.map(0, 0x1_4000_0000, 1 << 30, md.ecc_bus());
         bus.map(0, 0x1_0000_0000, 1 << 30, md.ecc_scrub_bus());
         bus.map(2, 0, 1 << 33, md.fetchop_bus());
-        let startup = Arc::new(crate::ip35_bus::startup::StartupWindow::new(execution_size));
+        let startup = Arc::new(crate::ip35::startup::StartupWindow::new(execution_size));
         phys.map(
             0x100000,
             0x108000,
-            Arc::new(crate::ip35_bus::startup::CachedView::new(
+            Arc::new(crate::ip35::startup::CachedView::new(
                 md.memory_view(),
                 startup.clone(),
             )),

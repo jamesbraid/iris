@@ -1,11 +1,12 @@
-//! Bedrock memory/directory registers and local memory operations.
+//! Bedrock's memory and directory controller: bank configuration, memory
+//! self-test, ECC, scrubbing and the directory and fetch-operation views.
+//!
+//! Memory is held by `bedrock_mem::BedrockMemory`. CPU coherence requests
+//! and hardware protection enforcement are absent; protection registers
+//! retain their words. Known unsupported writes are counted and ignored,
+//! and unmapped accesses return a bus error.
 //!
 //! Ported from hw/misc/sgi-bedrock-md.c in jamesbraid/qemu-sgi-origami.
-//! SPDX-License-Identifier: BSD-3-Clause
-//!
-//! CPU coherence requests and hardware protection enforcement are not implemented.
-//! Protection carriers retain opaque words, as in the donor. Known unsupported
-//! register writes are counted and ignored. Unmapped accesses return a bus error.
 
 use super::bedrock_mem::{BedrockMemory, BANK_SPAN, FITTED_BANK};
 use crate::traits::*;

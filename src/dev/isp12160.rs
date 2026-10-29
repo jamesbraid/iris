@@ -1,11 +1,12 @@
-// SPDX-License-Identifier: BSD-3-Clause
-//! QLogic ISP12160 dual-channel SCSI adapter.
+//! The QLogic ISP12160: two SCSI channels behind one PCI function.
 //!
-//! Ported from hw/scsi/qlogic-isp.c and hw/scsi/qlogic-isp.h in jamesbraid/qemu-sgi-origami.
+//! Both channels use the ISP1040 command engine, with one request/response
+//! queue pair and one interrupt. Commands execute serially on the device's
+//! joined worker thread. The downloaded controller program is retained but
+//! not executed.
 //!
-//! The ISP1040 engine retains the downloaded controller program without executing it.
-//! One PCI function owns both channels, a shared request/response queue pair, and
-//! one interrupt. Commands execute serially on its joined device thread.
+//! Ported from hw/scsi/qlogic-isp.c and hw/scsi/qlogic-isp.h
+//! in jamesbraid/qemu-sgi-origami.
 
 use std::sync::Arc;
 use crate::dev::isp1040::{Core, Isp1040};

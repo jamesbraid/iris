@@ -1,13 +1,16 @@
-//! XBridge's two PCI heads and shared crossbar, selected as revision 2.
+//! XBridge revision 2: two PCI host bridges and their shared crossbar.
 //!
-//! Ported from hw/pci-host/sgi-xbridge.c and hw/misc/sgi-xbridge-xbow.c in jamesbraid/qemu-sgi-origami.
-//! The donor revision is fe128635b6dfe2511f1bd451684cb30007686df1.
-//! This preserves that model's approximations: fixed slot data-phase widths,
-//! immediate link initialization, synchronous flushes and revision-2 alias
-//! placement. Timing, external SRAM, flash and diagnostic engines are absent.
-//! Undefined accesses latch the donor's access error and remain observable.
-//! Callbacks run outside register and attachment locks.
-// SPDX-License-Identifier: BSD-3-Clause
+//! Each head provides PCI configuration, device windows, interrupt routing
+//! and DMA translation. Callbacks run outside register and attachment locks.
+//!
+//! Slot data-phase widths, immediate link initialization, synchronous flushes
+//! and revision-2 alias placement follow the QEMU model. Timing, external
+//! SRAM, flash and diagnostic engines are absent. Undefined accesses latch
+//! an access error and remain observable.
+//!
+//! Ported from hw/pci-host/sgi-xbridge.c and hw/misc/sgi-xbridge-xbow.c
+//! in jamesbraid/qemu-sgi-origami, revision
+//! fe128635b6dfe2511f1bd451684cb30007686df1.
 
 use crate::dev::w1;
 use crate::irq::{InterruptController, IrqLine};

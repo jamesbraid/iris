@@ -1,9 +1,10 @@
-//! Fuel's L1 system controller and processor-side UART.
+//! The Fuel's L1 system controller and its processor-side UART.
+//!
+//! The internal L1 connection is separate from IOC3's external serial ports.
+//! Controller identities and power timing follow the QEMU model's
+//! approximations. Remote routing and controller diagnostics are absent.
 //!
 //! Ported from hw/misc/sgi-l1.c in jamesbraid/qemu-sgi-origami.
-//! The synthetic identities and unmeasured power timing retain that model's
-//! approximations. Remote routing and controller diagnostics are unsupported.
-// SPDX-License-Identifier: BSD-3-Clause
 
 use crate::dev::z85c30::{null_serial_backend, SerialBackend};
 use crate::irq::IrqLine;

@@ -1,7 +1,7 @@
-//! M48T35-compatible system Timekeeper, with independent byte-wide storage.
+//! The M48T35 system Timekeeper: byte-wide RAM and clock registers,
+//! independent of the processor's byte order.
 //!
 //! Ported from hw/rtc/m48t35.c in jamesbraid/qemu-sgi-origami.
-// SPDX-License-Identifier: BSD-3-Clause
 
 use crate::traits::{BusDevice, BusRead8, Device, Resettable, BUS_ERR, BUS_OK};
 use parking_lot::Mutex;

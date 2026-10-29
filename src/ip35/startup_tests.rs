@@ -220,7 +220,7 @@ fn startup_selected_fuel_execution_home_has_exact_donor_payload_bounds() {
 fn startup_cached_instruction_fetch_observes_changed_forwarded_words() {
     let physical = crate::physical::Physical::new(Vec::new());
     let ram = Arc::new(Ram(Mutex::new(vec![0; 16])));
-    let mut bus = crate::ip35_bus::Ip35Bus::new(physical);
+    let mut bus = crate::ip35::Ip35Bus::new(physical);
     bus.map(0, 0x1fc00000, 16, ram.clone());
     let bus = Arc::new(bus);
     let window = Arc::new(StartupWindow::new(16));

@@ -1,10 +1,10 @@
-// SPDX-License-Identifier: BSD-3-Clause
-//! Bedrock internal crossbar register storage and software error injection.
+//! Bedrock's internal crossbar registers and software error injection.
 //!
-//! Arbitration timing and debug outputs are unsupported. Unpublished queue
-//! layouts remain observable and cannot fabricate error fields.
+//! Arbitration timing and debug outputs are absent. Unpublished queue
+//! registers retain their values; reads do not invent queue errors.
 //!
 //! Ported from hw/misc/sgi-bedrock-xb.c in jamesbraid/qemu-sgi-origami.
+
 /// Length of the block-relative register aperture.
 pub const SIZE: u64 = 0x198;
 

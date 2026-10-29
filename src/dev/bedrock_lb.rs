@@ -1,11 +1,12 @@
-// SPDX-License-Identifier: BSD-3-Clause
-//! Bedrock local registers, atomic scratch aliases and an empty MicroLAN wire.
+//! Bedrock's local block: local registers, atomic scratch aliases and the
+//! MicroLAN master.
 //!
-//! MicroLAN has no identity endpoint. Its positive one-microsecond slot delay
-//! and writable permissions without requester enforcement are donor policies.
-//! An injected machine clock makes completion independent of host sleeps.
+//! The MicroLAN wire has no identity device attached. A slot completes after
+//! one microsecond on the machine clock. Permission registers retain their
+//! values without enforcing requester access, as in the QEMU model.
 //!
 //! Ported from hw/misc/sgi-bedrock-lb.c in jamesbraid/qemu-sgi-origami.
+
 /// Length of the block-relative register aperture.
 pub const SIZE: u64 = 0xc040;
 

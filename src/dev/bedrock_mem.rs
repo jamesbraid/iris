@@ -1,10 +1,11 @@
-//! Fuel's selected 512 MiB fitting: two 256 MiB locational banks.
+//! The Fuel's fitted memory: two 256 MiB banks owned by `Physical`, with
+//! the bank decode selected by Bedrock's memory configuration register.
+//!
+//! This population follows the QEMU model; it is not a measured Fuel
+//! topology. Every access passes through MD's checks, including accesses
+//! to the cached view. No direct CPU memory window bypasses those checks.
 //!
 //! Ported from hw/misc/sgi-bedrock-md.c in jamesbraid/qemu-sgi-origami.
-//! SPDX-License-Identifier: BSD-3-Clause
-//!
-//! This fitting is an emulator hypothesis, not a measured Fuel topology.
-//! Every access passes MD checks; no direct CPU window is mapped.
 
 use crate::physical::{Physical, RamBank};
 use crate::traits::*;

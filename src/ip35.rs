@@ -1,7 +1,10 @@
-//! IP35/Bedrock processor views over the shared Physical address decoder.
+//! The IP35 processor bus: Bedrock's processor views over `Physical`.
+//!
+//! The processor's access-space bits select a view; each view uses the
+//! shared 4 KiB address decoder. `ip34_machine` maps the Fuel's devices and
+//! connects the cached startup window over the same memory banks.
 //!
 //! Ported from hw/mips/sgi/sn1-node.c in jamesbraid/qemu-sgi-origami.
-//! SPDX-License-Identifier: BSD-3-Clause
 
 use crate::physical::Physical;
 use crate::traits::*;

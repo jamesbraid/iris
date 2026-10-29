@@ -1,8 +1,10 @@
-// SPDX-License-Identifier: BSD-3-Clause
-// Copyright (c) 2026 James Braid
+//! SGI PROM image loading: version-six single-segment containers and raw
+//! payloads. A recognized but malformed container is rejected rather than
+//! retried as a raw image.
+//!
 //! Ported from hw/mips/sgi/prom-image.c in jamesbraid/qemu-sgi-origami.
-//! Decode the supported version-six, single-segment SGI PROM container.
-//! A recognized malformed container is never treated as a raw payload.
+
+// Copyright (c) 2026 James Braid
 
 #[cfg(test)]
 mod tests {

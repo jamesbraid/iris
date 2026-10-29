@@ -1,13 +1,14 @@
-//! Lucent USS-312 two-port OHCI controller.
+//! The Lucent USS-312 USB controller: two root ports, OHCI registers and
+//! descriptor processing through the PCI bridge's DMA interface.
+//!
+//! Basic boot-subclass HID devices are provided. Isochronous traffic,
+//! suspend/resume, external hubs, USB storage and legacy keyboard/SMI
+//! routing are unsupported and logged. Register behavior follows OpenHCI
+//! 1.0a and the USS-312 revision 5 data sheet.
 //!
 //! Ported from src/mame/shared/xbox_usb.cpp and xbox_usb.h in MAME,
-//! revision 2ee9b1e30299b122b131cab0bd7912abc2b095ba (BSD-3-Clause,
-//! copyright Samuele Zannoli). Register selection follows the published
-//! OpenHCI 1.0a and Lucent USS-312 revision 5 contracts independently.
-//! No QEMU OHCI controller or Lucent wrapper code is used here.
-//!
-//! Isochronous traffic, suspend/resume, external hubs, USB storage and
-//! legacy keyboard/SMI routing are unsupported and logged.
+//! revision 2ee9b1e30299b122b131cab0bd7912abc2b095ba.
+//! BSD-3-Clause, copyright Samuele Zannoli; see ohci/LICENSE-MAME.
 
 use crate::hptimer::{TimerId, TimerManager, TimerReturn};
 use crate::irq::IrqLine;

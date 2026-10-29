@@ -1,10 +1,12 @@
-// SPDX-License-Identifier: BSD-3-Clause
-//! Bedrock I/O registers, widget PIO, inbound protection and block transfers.
+//! Bedrock's I/O interface: widget PIO windows, inbound access protection
+//! and the block-transfer engines that move data through node memory.
+//!
+//! Block transfers finish synchronously, as in the QEMU model. Unpublished
+//! fields retain that model's stored values and deterministic reset state.
+//! Transfers and completion callbacks run outside the register lock.
 //!
 //! Ported from hw/misc/sgi-bedrock-io.c in jamesbraid/qemu-sgi-origami.
-//! BTE transfers finish synchronously, matching the donor's timing approximation.
-//! Unpublished fields use the donor's retained storage and deterministic resets.
-//! Transfers and completion callbacks run outside the register lock.
+
 /// Length of the block-relative register aperture.
 pub const SIZE: u64 = 0x30010;
 

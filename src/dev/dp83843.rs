@@ -1,9 +1,10 @@
-//! DP83843BVJE copper/nibble-MII management profile.
+//! The DP83843BVJE Ethernet PHY's MII management registers.
+//!
+//! Link settling and the simulated partner follow the QEMU model. BMSR
+//! reports the current link level; the hardware's latched-low link status
+//! is not implemented.
 //!
 //! Ported from hw/net/dp83840.c in jamesbraid/qemu-sgi-origami.
-//! Link settling and the synthetic partner are emulator approximations.
-//! Hardware BMSR latches link low; this profile reports the live level.
-// SPDX-License-Identifier: BSD-3-Clause
 
 use std::time::{Duration, Instant};
 const SETTLE: Duration = Duration::from_secs(2);
