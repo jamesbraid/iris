@@ -113,7 +113,7 @@ impl FuelMachine {
         };
         let ci_serial = cfg.ci.then(|| board.serial[console].clone());
         Self::connect_serial(cfg, &board, console)?;
-        let mut monitor = crate::monitor::Monitor::new();
+        let monitor = crate::monitor::Monitor::new();
         monitor.register_device(crate::devlog::init_devlog());
         monitor.register_device(cpu.clone().as_device());
         monitor.register_device(crate::perf_monitor::PerfMonitor::new(
@@ -349,6 +349,9 @@ impl Workstation for FuelMachine {
     }
     fn get_display(&self) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> {
         None
+    }
+    fn register_monitor_device(&self, device: Arc<dyn crate::traits::Device>) {
+        self.monitor.register_device(device);
     }
     fn get_ps2(&self) -> Arc<crate::dev::ps2::Ps2Controller> {
         self.board.ioc3.ps2()
