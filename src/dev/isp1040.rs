@@ -239,8 +239,6 @@ struct Ctl {
     /// Bumped when the response ring is replaced (and by a reset): an entry
     /// written into the old ring is written again into the new one.
     resp_epoch: u64,
-    /// The worker must reset both ISP12160 target buses before dispatch.
-    reset_targets: bool,
     /// The ring may have entries the thread has not looked at.
     work: bool,
     /// The thread is walking the ring.
@@ -290,6 +288,8 @@ enum Prepared {
 
 struct State {
     isp12160: bool,
+    /// Guest-visible reset work, saved even while the worker is paused.
+    reset_targets: bool,
     sxp1_bank: [u16; BANK_WORDS],
     dma_bank: [u16; BANK_WORDS],
     reset_delay1: u16,
@@ -326,6 +326,7 @@ impl State {
     fn new() -> Self {
         let mut s = State {
             isp12160: false,
+            reset_targets: false,
             sxp1_bank: [0; BANK_WORDS],
             dma_bank: [0; BANK_WORDS],
             reset_delay1: 0,
@@ -609,7 +610,7 @@ impl Core {
             st.reset();
             self.publish_gen(&st);
             if self.isp12160 {
-                st.ctl.reset_targets = true;
+                st.reset_targets = true;
                 self.kick(&mut st);
             }
         }
@@ -1527,7 +1528,7 @@ impl Core {
                 st.ctl.work = true;
                 return st;
             }
-            if std::mem::take(&mut st.ctl.reset_targets) {
+            if std::mem::take(&mut st.reset_targets) {
                 // Target commands can wait on backing I/O. Only the worker
                 // waits for them; no new request may pass this reset.
                 self.reset_targets(&mut st, 0, None);
@@ -1704,7 +1705,7 @@ impl Core {
                     st.reset();
                     self.publish_gen(&st);
                     if self.isp12160 {
-                        st.ctl.reset_targets = true;
+                        st.reset_targets = true;
                         self.kick(&mut st);
                     }
                     drop(st);
@@ -1873,6 +1874,7 @@ impl Isp1040 {
         t.insert("risc_bank".into(), u16_slice_to_toml(&st.risc_bank));
         t.insert("sxp_bank".into(), u16_slice_to_toml(&st.sxp_bank));
         if st.isp12160 {
+            t.insert("reset_targets".into(), toml::Value::Boolean(st.reset_targets));
             t.insert("sxp1_bank".into(), u16_slice_to_toml(&st.sxp1_bank));
             t.insert("dma_bank".into(), u16_slice_to_toml(&st.dma_bank));
             t.insert("reset_delay1".into(), hex_u16(st.reset_delay1));
@@ -1915,6 +1917,9 @@ impl Isp1040 {
             st.ctl.rqst_epoch += 1;
             st.ctl.resp_epoch += 1;
             st.ctl.work = true;
+            // Older snapshots predate deferred target resets. Loading must
+            // replace this guest state, not inherit live worker controls.
+            st.reset_targets = part && get_field(v, "reset_targets").and_then(|x| x.as_bool()).unwrap_or(false);
             let u16f = |k: &str| get_field(v, k).and_then(toml_u16).unwrap_or(0);
             let u32f = |k: &str| get_field(v, k).and_then(toml_u32).unwrap_or(0);
             st.bus_cfg1 = u16f("bus_cfg1");

@@ -1156,6 +1156,84 @@ fn a_soft_reset_during_a_store_drops_the_completion() {
 }
 
 #[test]
+fn isp12160_pending_target_reset_survives_a_paused_snapshot() {
+    let src = dual_rig("pending-reset-save");
+    src.isp.pause();
+    src.mem.put(BUF, &[0x5a; BLOCK_SIZE]);
+    src.put_entry(0, &channel_request(0, 0x101, &cdb10(scsi_cmd::WRITE_10, 0, 1), &[(BUF, 512)]));
+    src.doorbell(1);
+    for _ in 0..3 { src.isp.write(reg::BUS_CTRL, CTRL_SOFT_RESET as u32, 2); }
+    src.init_rings(8, 8);
+    for channel in 0..2 {
+        src.put_entry(channel as u32, &channel_request(channel, 0x200 + channel as u32,
+            &[0, 0, 0, 0, 0, 0], &[]));
+    }
+    src.doorbell(2);
+    let saved = src.isp.save_state();
+    let dst = dual_rig("pending-reset-load");
+    dst.isp.pause();
+    dst.mem.put(RQST, &src.mem.get(RQST, 2 * ENTRY_SIZE));
+    dst.isp.st.lock().ctl.hold += 1;
+    dst.isp.load_state(&saved).unwrap();
+    {
+        let mut st = dst.isp.st.lock();
+        assert!(st.ctl.paused, "loading preserves the host pause");
+        assert_eq!(st.ctl.hold, 1, "loading preserves other dispatch holders");
+        st.ctl.hold -= 1;
+    }
+    assert_eq!(dst.r(reg::RESPONSE_QUEUE), 0);
+    dst.isp.resume();
+    dst.isp.wait_idle();
+    assert_eq!(dst.r(reg::RESPONSE_QUEUE), 2);
+    for index in 0..2 {
+        assert_eq!(g32(&dst.status(index), 4), 0x200 + index);
+        assert_eq!(g16(&dst.status(index), 8) & 0xff, 2);
+        assert_eq!(dst.status(index)[44], 0x29, "restored reset reaches both buses");
+    }
+    dst.put_entry(2, &channel_request(0, 0x300, &cdb10(scsi_cmd::READ_10, 0, 1), &[(BUF, 512)]));
+    dst.doorbell(3);
+    assert_eq!(g16(&dst.status(2), 8) & 0xff, 0, "repeated resets leave one unit attention");
+    assert_eq!(dst.mem.get(BUF, 512), vec![0; 512], "pre-reset WRITE was discarded");
+    src.isp.resume();
+    src.isp.wait_idle();
+    src.put_entry(2, &channel_request(0, 0x301, &cdb10(scsi_cmd::READ_10, 0, 1), &[(BUF, 512)]));
+    src.doorbell(3);
+    assert_eq!(g16(&src.status(2), 8) & 0xff, 0);
+    assert_eq!(src.mem.get(BUF, 512), vec![0; 512], "saving did not revive the discarded WRITE");
+}
+
+#[test]
+fn isp12160_loading_a_snapshot_replaces_pending_target_reset() {
+    for legacy in [false, true] {
+        let src = dual_rig(&format!("clean-reset-save-{legacy}"));
+        src.isp.pause();
+        let mut saved = src.isp.save_state();
+        if legacy { saved.as_table_mut().unwrap().remove("reset_targets"); }
+        let dst = dual_rig(&format!("clean-reset-load-{legacy}"));
+        dst.isp.pause();
+        dst.mem.put(BUF, &[0x5a; BLOCK_SIZE]);
+        dst.put_entry(0, &channel_request(0, 0x101, &cdb10(scsi_cmd::WRITE_10, 0, 1), &[(BUF, 512)]));
+        dst.doorbell(1);
+        for _ in 0..3 { dst.isp.write(reg::BUS_CTRL, CTRL_SOFT_RESET as u32, 2); }
+        dst.isp.load_state(&saved).unwrap();
+        for channel in 0..2 {
+            dst.put_entry(channel as u32, &channel_request(channel, 0x200 + channel as u32,
+                &cdb10(scsi_cmd::READ_10, 0, 1), &[(BUF + 4096 + channel as u32 * 512, 512)]));
+        }
+        dst.doorbell(2);
+        assert_eq!(dst.r(reg::RESPONSE_QUEUE), 0, "loading keeps the worker paused");
+        dst.isp.resume();
+        dst.isp.wait_idle();
+        assert_eq!(dst.r(reg::RESPONSE_QUEUE), 2);
+        for index in 0..2 {
+            assert_eq!(g32(&dst.status(index), 4), 0x200 + index);
+            assert_eq!(g16(&dst.status(index), 8) & 0xff, 0, "unrelated live reset must not survive load");
+            assert_eq!(dst.mem.get(BUF + 4096 + index * 512, 512), vec![0; 512]);
+        }
+    }
+}
+
+#[test]
 fn isp12160_soft_reset_stops_later_payload_stores() {
     let (r, gate) = gated_dual_rig("soft-reset-read", BUF);
     r.mem.put(BUF + 4096, &[0x5a; 256]);
