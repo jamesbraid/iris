@@ -81,6 +81,14 @@ lend theirs and keep only chip-specific subcommands (`regs`; the WD's `wdt`,
 their devices from the `[scsi.N]` tables, where the key is a slot
 (controller × 16 + id, see `config::scsi_slot`).
 
+Fuel (`src/fuel_machine.rs`) uses the same `MipsCpu` thread and workstation
+interfaces. Its interpreter installs an optional `MipsExecutor::instruction_hook`
+to observe startup state before every instruction and scope private startup
+memory access until that instruction returns. The hook calls its supplied
+interpreter function once. Normal execution and monitor stepping both pass
+through it. Other machines leave it unset. The existing batch callback polls
+Fuel's elapsed-time devices; it does not define startup-memory visibility.
+
 ## 2. Data path and endianness
 
 **Word-transparent architecture.** Host `u32`/`u64` values are bit

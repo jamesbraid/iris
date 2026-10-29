@@ -491,13 +491,15 @@ pub enum MachineProfile {
     /// R10000. Configured by the shared keys and the `[octane]` section; see
     /// `src/ip30_machine.rs` and `docs/Octane/ip30-address-map.md`.
     OctaneIp30,
+    /// Experimental serial-only SGI Fuel IP34, with the selected R14000 profile.
+    FuelIp34,
 }
 
 impl MachineProfile {
     /// All selectable profiles, in display order. (Not the O2 yet: iris-gui's
     /// machine editor has no `[o2]` section.) Single source of truth for the
     /// GUI dropdowns (Config tab + New Machine dialog) so they never drift.
-    pub const ALL: [Self; 4] = [Self::IndyIp24, Self::Indigo2Ip22, Self::Indigo2Ip28, Self::OctaneIp30];
+    pub const ALL: [Self; 5] = [Self::IndyIp24, Self::Indigo2Ip22, Self::Indigo2Ip28, Self::OctaneIp30, Self::FuelIp34];
 
     /// The bank sizes in MB (0 is an empty bank) that `validate()` accepts
     /// for this profile. The Octane's banks are matched DIMM pairs of 64 to
@@ -505,6 +507,7 @@ impl MachineProfile {
     pub fn bank_sizes(self) -> &'static [u32] {
         match self {
             Self::OctaneIp30 => &[0, 64, 128, 256, 512],
+            Self::FuelIp34 => &[0, 256],
             Self::Indigo2Ip28 | Self::O2Ip32 => VALID_BANK_SIZES,
             _ => &[0, 8, 16, 32, 64, 128],
         }
@@ -517,6 +520,7 @@ impl MachineProfile {
             Self::Indigo2Ip28 => "SGI Indigo2 IMPACT (IP28)",
             Self::O2Ip32 => "SGI O2 (IP32)",
             Self::OctaneIp30 => "SGI Octane (IP30)",
+            Self::FuelIp34 => "SGI Fuel (IP34)",
         }
     }
 
@@ -526,7 +530,7 @@ impl MachineProfile {
     /// connector), one on the Indy.
     pub fn scsi_controllers(self) -> u8 {
         match self {
-            Self::Indigo2Ip22 | Self::O2Ip32 | Self::OctaneIp30 => 2,
+            Self::Indigo2Ip22 | Self::O2Ip32 | Self::OctaneIp30 | Self::FuelIp34 => 2,
             _ => 1,
         }
     }
@@ -534,7 +538,7 @@ impl MachineProfile {
     /// How many memory banks the machine has: four on all of them (the MC's
     /// four banks; the O2's four DIMM pairs). `banks` has room for more.
     pub fn memory_banks(self) -> usize {
-        4
+        if self == Self::FuelIp34 { 2 } else { 4 }
     }
 
     pub fn guinness(self) -> bool {
@@ -620,6 +624,7 @@ impl GraphicsBoard {
     pub fn supports(self, profile: MachineProfile) -> bool {
         match profile {
             MachineProfile::OctaneIp30 => self.is_impact() || self == Self::None,
+            MachineProfile::FuelIp34 => self == Self::None,
             MachineProfile::Indigo2Ip22 => self != Self::None,
             _ => !matches!(self, Self::Extreme | Self::None),
         }
@@ -629,6 +634,7 @@ impl GraphicsBoard {
     pub fn default_for(profile: MachineProfile) -> Self {
         match profile {
             MachineProfile::OctaneIp30 => Self::SolidImpact,
+            MachineProfile::FuelIp34 => Self::None,
             _ => Self::Newport,
         }
     }
@@ -1349,6 +1355,32 @@ mod scsi_keys {
     }
 }
 
+/// Fuel's independent serial connections. The selected console serves CI and serial_log.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FuelConsole {
+    #[default]
+    L1,
+    Ioc3A,
+    Ioc3B,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FuelSection {
+    /// Persistent 16 MiB boot flash store; absent means volatile flash.
+    #[serde(default)]
+    pub flash: Option<String>,
+    #[serde(default)]
+    pub console: FuelConsole,
+    /// L1 host console TCP port; IOC3 keeps serial_port_a and serial_port_b.
+    #[serde(default)]
+    pub l1_port: Option<u16>,
+    /// Separate L1 log when an IOC3 port is selected as console.
+    #[serde(default)]
+    pub l1_log: Option<String>,
+}
+
 /// Top-level machine configuration.
 ///
 /// Field order matters for TOML export: the `toml` serializer requires every
@@ -1570,6 +1602,9 @@ pub struct MachineConfig {
     #[serde(default, skip_serializing_if = "OctaneSection::is_default")]
     pub octane: OctaneSection,
 
+    #[serde(default)]
+    pub fuel: FuelSection,
+
     /// Host performance tuning (`[perf]` section).
     #[serde(default)]
     pub perf: PerfConfig,
@@ -1742,6 +1777,7 @@ impl Default for MachineConfig {
             jitv2: Jitv2Config::default(),
             o2: O2Section::default(),
             octane: OctaneSection::default(),
+            fuel: FuelSection::default(),
             perf: PerfConfig::default(),
             clock: ClockConfig::default(),
             rtc_offset: RtcOffset::default(),
@@ -1973,6 +2009,13 @@ impl MachineConfig {
                 }
             }
             crate::dev::crime_mem::check_kits(&self.o2_kits()).map_err(|e| format!("banks: {e}"))?;
+        } else if self.machine.profile == MachineProfile::FuelIp34 {
+            if self.banks[..2] != [256, 256] {
+                return Err("Fuel currently requires banks = [256, 256] (512 MiB)".into());
+            }
+            if board != GraphicsBoard::None {
+                return Err("Fuel currently supports graphics.board = \"none\" only".into());
+            }
         } else if self.machine.profile == MachineProfile::OctaneIp30 {
             // A HEART bank is a matched DIMM pair: 64 to 512 MB, filled from
             // bank 0 without a gap, 2 GB at most (the Octane owner's guide).
@@ -2018,11 +2061,14 @@ impl MachineConfig {
             }
         }
         match (self.network.mode, self.machine.profile) {
-            (NetMode::Off, p) if p != MachineProfile::O2Ip32 && p != MachineProfile::OctaneIp30 => {
+            (NetMode::Off, p) if p != MachineProfile::O2Ip32 && p != MachineProfile::OctaneIp30 && p != MachineProfile::FuelIp34 => {
                 return Err("network.mode = \"off\" is only available on the O2 and the Octane for now; the Indy and Indigo2 always have their Ethernet".into());
             }
             (NetMode::Pcap, MachineProfile::O2Ip32) => {
                 return Err("network.mode = \"pcap\" is not available on the O2 yet (its Ethernet runs on the NAT gateway)".into());
+            }
+            (NetMode::Pcap, MachineProfile::FuelIp34) => {
+                return Err("Fuel Ethernet currently supports NAT or off".into());
             }
             (NetMode::Pcap, MachineProfile::OctaneIp30) => {
                 return Err("network.mode = \"pcap\" is not available on the Octane yet (its Ethernet runs on the NAT gateway)".into());

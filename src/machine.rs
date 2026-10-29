@@ -50,7 +50,7 @@ pub fn set_emulator_profile(profile: MachineProfile) {
 
 fn emulator_profile() -> Option<MachineProfile> {
     let raw = EMULATOR_PROFILE.load(std::sync::atomic::Ordering::Relaxed);
-    [MachineProfile::IndyIp24, MachineProfile::Indigo2Ip22, MachineProfile::Indigo2Ip28, MachineProfile::O2Ip32, MachineProfile::OctaneIp30]
+    [MachineProfile::IndyIp24, MachineProfile::Indigo2Ip22, MachineProfile::Indigo2Ip28, MachineProfile::O2Ip32, MachineProfile::OctaneIp30, MachineProfile::FuelIp34]
         .into_iter().find(|p| *p as u8 == raw)
 }
 
@@ -65,6 +65,7 @@ fn emulator_name_thirds(profile: Option<MachineProfile>) -> &'static [&'static s
         Some(MachineProfile::Indigo2Ip28) => &["IRIX", "Iris", "Indigo2", "IP28"],
         Some(MachineProfile::O2Ip32) => &["IRIX", "Iris", "IP32"],
         Some(MachineProfile::OctaneIp30) => &["IRIX", "Iris", "IP30"],
+        Some(MachineProfile::FuelIp34) => &["IRIX", "Iris", "Fuel", "IP34"],
         None => &["IRIX", "Iris"],
     }
 }

@@ -243,3 +243,5 @@ pub mod perfetto;
 mod platform_profile_tests;
 #[cfg(test)]
 pub(crate) mod test_board;
+
+pub mod fuel_machine;

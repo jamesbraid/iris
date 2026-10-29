@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
-//! Fuel interpreter construction. The machine is not yet a public selector.
+//! Fuel IP34 device composition and selected interpreter profile.
 //!
 //! Ported from hw/mips/sgi/sn1-node.c in jamesbraid/qemu-sgi-origami.
 
@@ -50,7 +50,7 @@ pub(crate) fn build_cpu(bus: Arc<Ip35Bus>) -> Result<Box<FuelCpu>, String> {
     Ok(cpu)
 }
 
-/// Private bring-up composition for a single-processor Fuel.
+/// Shared device composition for a single-processor Fuel.
 /// Graphics and USB remain absent until their device implementations attach.
 pub(crate) struct FuelBoard {
     pub bus: Arc<Ip35Bus>,
@@ -88,6 +88,15 @@ impl FuelBoard {
         clock: crate::dev::heart::Clock,
         execution_size: u64,
     ) -> Result<Self, String> {
+        Self::with_storage(payload, clock, execution_size, None)
+    }
+
+    pub fn with_storage(
+        payload: &[u8],
+        clock: crate::dev::heart::Clock,
+        execution_size: u64,
+        flash_path: Option<&std::path::Path>,
+    ) -> Result<Self, String> {
         use crate::dev::bedrock_pi::{BedrockPi, BedrockPiConfig};
         let md = crate::dev::bedrock_md::BedrockMd::new();
         let phys = md.physical().clone();
@@ -101,8 +110,10 @@ impl FuelBoard {
             )
         });
         let l1 = Arc::new(crate::dev::l1::L1::new(crate::dev::l1::L1Config::default())?);
-        let flash =
-            Arc::new(crate::dev::bedrock_flash::Flash::new(payload).map_err(|e| e.to_string())?);
+        let flash = Arc::new(match flash_path {
+            Some(path) => crate::dev::bedrock_flash::Flash::with_file(payload, path),
+            None => crate::dev::bedrock_flash::Flash::new(payload),
+        }.map_err(|e| e.to_string())?);
         let lb = Arc::new(crate::dev::bedrock_lb::BedrockLb::new(clock.clone()));
         let io = Arc::new(crate::dev::bedrock_io::BedrockIo::new());
         let ni = Arc::new(crate::dev::bedrock_ni::BedrockNi::new());
