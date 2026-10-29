@@ -1235,11 +1235,20 @@ impl Machine {
         self.cpu.fasttick_count()
     }
 
+    /// Every SCSI bus on the board: the first controller's, and the second's
+    /// on a Fullhouse Indigo2.
+    fn scsi_buses(&self) -> Vec<&crate::scsi::ScsiBus> {
+        use crate::scsi_monitor::ScsiTargets;
+        let mut v = vec![self.hpc3.scsi().scsi_bus()];
+        v.extend(self.hpc3.scsi1().map(|c| c.scsi_bus()));
+        v
+    }
+
     /// Number of attached CHD disks whose `.diff.chd` holds changes pending a
     /// fold-back into the base on a clean shutdown (the "Synchronizing disks"
     /// step). 0 means a clean exit needs no disk sync.
     pub fn pending_chd_sync_count(&self) -> usize {
-        self.hpc3.scsi().pending_chd_sync_count()
+        self.scsi_buses().iter().map(|b| b.pending_chd_sync_count()).sum()
     }
 
     /// Fold pending CHD diffs back into their bases, preserving compression.
@@ -1253,7 +1262,7 @@ impl Machine {
         progress: &mut dyn FnMut(usize, usize, f32),
         cancel: &dyn Fn() -> bool,
     ) -> std::io::Result<usize> {
-        self.hpc3.scsi().sync_chd_disks(only, progress, cancel)
+        crate::scsi::ScsiBus::sync_chd_disks(&self.scsi_buses(), only, progress, cancel)
     }
 
     /// Step the CPU `n` instructions in-line on the calling thread, with all

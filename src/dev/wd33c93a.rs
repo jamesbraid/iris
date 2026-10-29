@@ -424,50 +424,6 @@ impl Wd33c93a {
         results
     }
 
-    /// Number of attached CHD devices whose `.diff.chd` holds changes pending a
-    /// fold-back into the base on a clean shutdown.
-    pub fn pending_chd_sync_count(&self) -> usize {
-        let mut n = 0;
-        self.bus.for_each(|_, dev| n += dev.pending_chd_sync().is_some() as usize);
-        n
-    }
-
-    /// Fold pending CHD diffs back into their bases ("sync"), preserving the
-    /// base's compression. `only` limits it to one SCSI id; `None` means all.
-    /// Releases each disk backend first (closing the CHD), then rebuilds
-    /// outside the device lock since recompression is slow.
-    /// `progress(done, total, fraction)` reports per-disk progress; `cancel()`
-    /// stops before the next disk (the in-flight rebuild also honours it),
-    /// leaving every un-synced base+diff intact. Returns the count synced.
-    pub fn sync_chd_disks(
-        &self,
-        only: Option<usize>,
-        progress: &mut dyn FnMut(usize, usize, f32),
-        cancel: &dyn Fn() -> bool,
-    ) -> std::io::Result<usize> {
-        // Collect pending (base, diff) pairs, releasing CHD handles under the
-        // lock so the files can be atomically rebuilt. The rebuild itself runs
-        // unlocked.
-        let mut pending = Vec::new();
-        self.bus.for_each(|id, dev| {
-            if only.is_none_or(|o| o == id) {
-                pending.extend(dev.take_pending_chd_sync());
-            }
-        });
-        let total = pending.len();
-        let mut done = 0usize;
-        for (base, diff) in pending {
-            if cancel() {
-                break;
-            }
-            progress(done, total, 0.0);
-            crate::chd_disk::flatten_diff(&base, &diff, &mut |f| progress(done, total, f), cancel)?;
-            done += 1;
-            progress(done, total, 1.0);
-        }
-        Ok(done)
-    }
-
     /// Copy every COW overlay into `dir` as `scsi<id>.overlay`. Returns a
     /// list of `(id, dirty_sector_list)` entries so snapshot save can
     /// persist the dirty set alongside the raw overlay bytes.

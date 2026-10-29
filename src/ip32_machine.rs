@@ -902,6 +902,20 @@ impl Workstation for O2Machine {
         self.bus.scsi.lock().unwrap().first().map(|c| c.clone() as Arc<dyn crate::workstation::DiscChanger>)
     }
 
+    fn pending_chd_sync_count(&self) -> usize {
+        self.bus.scsi.lock().unwrap().iter().map(|c| c.bus().pending_chd_sync_count()).sum()
+    }
+    fn sync_chd_disks(
+        &self,
+        only: Option<usize>,
+        progress: &mut dyn FnMut(usize, usize, f32),
+        cancel: &dyn Fn() -> bool,
+    ) -> std::io::Result<usize> {
+        let controllers = self.bus.scsi.lock().unwrap().clone();
+        let buses: Vec<_> = controllers.iter().map(|c| c.bus()).collect();
+        crate::scsi::ScsiBus::sync_chd_disks(&buses, only, progress, cancel)
+    }
+
     fn nat_control(&self) -> Option<Arc<crate::net::NatControl>> {
         self.nat.as_ref().map(|(n, _)| n.clone())
     }

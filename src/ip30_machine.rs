@@ -645,6 +645,18 @@ impl Workstation for OctaneMachine {
     fn disc_changer(&self) -> Option<Arc<dyn crate::workstation::DiscChanger>> {
         Some(self.scsi[0].clone() as Arc<dyn crate::workstation::DiscChanger>)
     }
+    fn pending_chd_sync_count(&self) -> usize {
+        self.scsi.iter().map(|c| c.bus().pending_chd_sync_count()).sum()
+    }
+    fn sync_chd_disks(
+        &self,
+        only: Option<usize>,
+        progress: &mut dyn FnMut(usize, usize, f32),
+        cancel: &dyn Fn() -> bool,
+    ) -> std::io::Result<usize> {
+        let buses: Vec<_> = self.scsi.iter().map(|c| c.bus()).collect();
+        crate::scsi::ScsiBus::sync_chd_disks(&buses, only, progress, cancel)
+    }
     fn nat_control(&self) -> Option<Arc<crate::net::NatControl>> {
         self.nat.as_ref().map(|(n, _)| n.clone())
     }

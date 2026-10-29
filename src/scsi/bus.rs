@@ -234,6 +234,50 @@ impl ScsiBus {
         }
     }
 
+    /// Targets whose `.diff.chd` holds changes waiting to be folded back into
+    /// the base on a clean shutdown.
+    pub fn pending_chd_sync_count(&self) -> usize {
+        let mut n = 0;
+        self.for_each(|_, t| n += t.pending_chd_sync().is_some() as usize);
+        n
+    }
+
+    /// Fold pending CHD diffs on `buses` back into their bases ("sync"),
+    /// preserving each base's compression. `only` limits it to one SCSI id
+    /// (on every bus); `None` means all. Each target releases its backend
+    /// first, closing the CHD; the rebuild then runs with no bus lock held,
+    /// since recompression is slow. `progress(done, total, fraction)` reports
+    /// per-disk progress; `cancel()` stops before the next disk (the in-flight
+    /// rebuild also honours it), leaving every un-synced base and diff intact.
+    /// Returns the count synced.
+    pub fn sync_chd_disks(
+        buses: &[&ScsiBus],
+        only: Option<usize>,
+        progress: &mut dyn FnMut(usize, usize, f32),
+        cancel: &dyn Fn() -> bool,
+    ) -> io::Result<usize> {
+        let mut pending = Vec::new();
+        for bus in buses {
+            bus.for_each(|id, t| {
+                if only.is_none_or(|o| o == id) {
+                    pending.extend(t.take_pending_chd_sync());
+                }
+            });
+        }
+        let total = pending.len();
+        let mut done = 0usize;
+        for (base, diff) in pending {
+            if cancel() {
+                break;
+            }
+            progress(done, total, 0.0);
+            crate::chd_disk::flatten_diff(&base, &diff, &mut |f| progress(done, total, f), cancel)?;
+            done += 1;
+            progress(done, total, 1.0);
+        }
+        Ok(done)
+    }
+
     /// Copy each target's copy-on-write overlay into `dir` as
     /// `scsi<id>.overlay`, and return the dirty sectors of each.
     pub fn export_overlays(&self, dir: &std::path::Path) -> io::Result<Vec<(usize, Vec<u64>)>> {
@@ -330,5 +374,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_file(format!("{}.overlay", p.display()));
         std::fs::remove_file(p).unwrap();
+    }
+
+    #[test]
+    fn a_chd_diff_is_counted_and_folded_on_every_bus_given() {
+        use libchdman_rs::hd::{create_from_reader, HdCreateOptions};
+        use libchdman_rs::CHD_CODEC_ZLIB;
+        let base = std::env::temp_dir().join(format!("iris-scsibus-fold-{}.chd", std::process::id()));
+        let logical = 128 * 1024u64;
+        create_from_reader(
+            std::io::Cursor::new(vec![0xABu8; logical as usize]),
+            &base,
+            HdCreateOptions {
+                logical_size: logical,
+                hunk_size: 4096,
+                unit_size: 512,
+                codecs: [CHD_CODEC_ZLIB, 0, 0, 0],
+                geometry: None,
+                ident: None,
+            },
+            &mut |_| {},
+            &|| false,
+        )
+        .unwrap();
+        let (b0, b1) = (bus(8), bus(8));
+        attach(&b1, 4, &base, false).unwrap();
+        assert_eq!(b1.pending_chd_sync_count(), 0, "nothing written yet");
+        let write = ScsiRequest {
+            cdb: vec![scsi_cmd::WRITE_10, 0, 0, 0, 0, 2, 0, 0, 1, 0],
+            data_len: crate::scsi::ScsiDataLength::Unlimited,
+            data_in: Some(vec![0x5Au8; 512]),
+        };
+        b1.request(4, &write).unwrap().unwrap();
+        assert_eq!(b1.pending_chd_sync_count(), 1);
+        assert_eq!(b0.pending_chd_sync_count(), 0);
+        let n = ScsiBus::sync_chd_disks(&[&b0, &b1], None, &mut |_, _, _| {}, &|| false).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(b1.pending_chd_sync_count(), 0, "folded");
+        let _ = std::fs::remove_file(&base);
+        let _ = std::fs::remove_file(crate::chd_disk::diff_path_for(&base));
     }
 }
