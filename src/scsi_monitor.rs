@@ -1,8 +1,9 @@
 //! The monitor's `scsi` and `cow` commands, and the run-time disc changes
 //! behind them, over any SCSI controller's target table.
 //!
-//! A controller implements [`ScsiTargets`] by lending its targets under its
-//! own lock; the WD33C93A (Indy, Indigo2) and the Adaptec 7880 (O2) both do.
+//! A controller implements [`ScsiTargets`] by handing over its [`ScsiBus`];
+//! the WD33C93A (Indy, Indigo2), the Adaptec 7880 (O2) and the ISP1040
+//! (Octane) all do.
 //! Everything that only needs the targets lives here once: `scsi status`,
 //! `scsi dayna`, the changer subcommands (`eject`, `add`, `list`, `del`,
 //! `next`), the whole of `cow`, and the [`crate::workstation::DiscChanger`]
@@ -12,23 +13,28 @@
 
 use std::io::Write;
 
-use crate::scsi::ScsiDevice;
+use crate::scsi::{ScsiBus, ScsiTarget};
 
-/// A SCSI controller's targets by id, `None` where nothing is attached.
+/// A SCSI controller, for the targets on its bus.
 pub trait ScsiTargets {
-    /// Run `f` over the target table under the controller's lock.
-    fn with_targets<R>(&self, f: impl FnOnce(&mut [Option<ScsiDevice>]) -> R) -> R;
+    /// The bus whose targets the commands act on.
+    fn scsi_bus(&self) -> &ScsiBus;
+
+    /// Run `f` over the target table, `None` where nothing is attached.
+    fn with_targets<R>(&self, f: impl FnOnce(&mut [Option<Box<dyn ScsiTarget>>]) -> R) -> R {
+        self.scsi_bus().with_targets(f)
+    }
 }
 
 /// The shared subcommands, for a chip's `help` text.
 pub const SCSI_USAGE: &str = "scsi status | scsi dayna | scsi eject <id> | scsi add <id> <path> | scsi list <id> | scsi del <id> <ord> | scsi next <id> <ord>";
 
 /// Run `f` on the CD-ROM at `id`, or say why there is none.
-fn cdrom<R>(ctl: &impl ScsiTargets, id: usize, f: impl FnOnce(&mut ScsiDevice) -> Result<R, String>) -> Result<R, String> {
+fn cdrom<R>(ctl: &impl ScsiTargets, id: usize, f: impl FnOnce(&mut dyn ScsiTarget) -> Result<R, String>) -> Result<R, String> {
     ctl.with_targets(|targets| match targets.get_mut(id).and_then(|d| d.as_mut()) {
         None => Err(format!("No device at SCSI ID {}", id)),
-        Some(dev) if !dev.is_cdrom() => Err(format!("SCSI ID {} is not a CD-ROM", id)),
-        Some(dev) => f(dev),
+        Some(dev) if dev.discs().is_none() => Err(format!("SCSI ID {} is not a CD-ROM", id)),
+        Some(dev) => f(&mut **dev),
     })
 }
 
@@ -38,10 +44,9 @@ pub fn disc_status(ctl: &impl ScsiTargets) -> Vec<(usize, String, Vec<String>, u
     ctl.with_targets(|targets| {
         targets.iter().enumerate()
             .filter_map(|(id, d)| {
-                let dev = d.as_ref()?;
-                if !dev.is_cdrom() { return None; }
-                let (phys, logical) = dev.block_sizes();
-                Some((id, dev.current_disc().to_string(), dev.disc_list().to_vec(), phys, logical))
+                let discs = d.as_ref()?.discs()?;
+                let (phys, logical) = discs.block_sizes;
+                Some((id, discs.current, discs.list, phys, logical))
             })
             .collect()
     })
@@ -99,24 +104,8 @@ pub fn scsi_subcommand(ctl: &impl ScsiTargets, args: &[&str], w: &mut dyn Write)
             let lines = ctl.with_targets(|targets| {
                 let mut lines = Vec::new();
                 for (id, dev) in targets.iter().enumerate() {
-                    let Some(dev) = dev else { continue };
-                    if let Some(dp) = dev.daynaport() {
-                        lines.push(dp.status_lines()[0].clone());
-                    } else if dev.is_cdrom() {
-                        let (phys, logical) = dev.block_sizes();
-                        let list = dev.disc_list();
-                        let active = if dev.has_media() { dev.current_disc() } else { "(tray empty)" };
-                        lines.push(format!("SCSI ID {}: CD-ROM {} ({} disc(s))  phys_block={} logical_block={}",
-                            id, active, list.len(), phys, logical));
-                        for (i, d) in list.iter().enumerate() {
-                            let tag = if i == 0 { " <active>" } else if i == 1 { " <next>" } else { "" };
-                            lines.push(format!("  [{}] {}{}", i, d, tag));
-                        }
-                    } else {
-                        let (_, logical) = dev.block_sizes();
-                        let cow = if dev.is_cow() { ", copy-on-write" } else { "" };
-                        lines.push(format!("SCSI ID {}: disk {} ({} blocks of {}{})",
-                            id, dev.current_disc(), dev.size() / logical.max(1), logical, cow));
+                    if let Some(dev) = dev {
+                        lines.extend(dev.status(id));
                     }
                 }
                 lines
@@ -132,8 +121,7 @@ pub fn scsi_subcommand(ctl: &impl ScsiTargets, args: &[&str], w: &mut dyn Write)
         "dayna" => {
             let lines = ctl.with_targets(|targets| {
                 targets.iter().flatten()
-                    .filter_map(|dev| dev.daynaport().map(|dp| dp.status_lines()))
-                    .flatten()
+                    .flat_map(|dev| dev.adapter_status())
                     .collect::<Vec<_>>()
             });
             if lines.is_empty() {
@@ -159,7 +147,7 @@ pub fn scsi_subcommand(ctl: &impl ScsiTargets, args: &[&str], w: &mut dyn Write)
             Ok(())
         }),
         "list" => id_arg(1, "Usage: scsi list <id>").map(|id| {
-            match cdrom(ctl, id, |dev| Ok(dev.disc_list().to_vec())) {
+            match cdrom(ctl, id, |dev| Ok(dev.discs().map(|d| d.list).unwrap_or_default())) {
                 Ok(list) => {
                     let _ = writeln!(w, "SCSI ID {} queue ({} disc(s)):", id, list.len());
                     write_queue(w, &list);
@@ -199,8 +187,8 @@ pub fn cow_command(ctl: &impl ScsiTargets, args: &[&str], w: &mut dyn Write) -> 
         Some("status") => ctl.with_targets(|targets| {
             targets.iter().enumerate()
                 .filter_map(|(id, d)| d.as_ref().map(|d| (id, d)))
-                .map(|(id, d)| if d.is_cow() {
-                    format!("SCSI {}: COW overlay, {} dirty sectors", id, d.cow_dirty_count())
+                .map(|(id, d)| if let Some(dirty) = d.cow_dirty() {
+                    format!("SCSI {}: COW overlay, {} dirty sectors", id, dirty)
                 } else {
                     format!("SCSI {}: direct (no overlay)", id)
                 })
@@ -209,7 +197,7 @@ pub fn cow_command(ctl: &impl ScsiTargets, args: &[&str], w: &mut dyn Write) -> 
         Some(op @ ("commit" | "reset")) => ctl.with_targets(|targets| {
             let ids: Vec<usize> = match explicit {
                 Some(id) => vec![id],
-                None => (0..targets.len()).filter(|&i| targets[i].as_ref().is_some_and(|d| d.is_cow())).collect(),
+                None => (0..targets.len()).filter(|&i| targets[i].as_ref().is_some_and(|d| d.cow_dirty().is_some())).collect(),
             };
             let mut lines = Vec::new();
             for id in ids {

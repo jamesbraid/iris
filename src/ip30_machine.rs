@@ -399,7 +399,7 @@ impl OctaneMachine {
             let (path, discs) = dev.media();
             let cdrom = dev.is_cdrom();
             let ci_overlay = (cfg.ci && dev.overlay && !cdrom).then(|| crate::config::ScsiDeviceConfig::ci_overlay_path(key));
-            match ctl.attach_device(id, &path, cdrom, discs, dev.overlay, ci_overlay.as_deref()) {
+            match ctl.bus().attach_device(id, &path, cdrom, discs, dev.overlay, ci_overlay.as_deref()) {
                 Ok(_) if path.is_empty() => eprintln!("ip30: {at}: CD-ROM, tray empty"),
                 Ok(blocks) => eprintln!("ip30: {at}: {path} ({blocks} blocks)"),
                 Err(e) => {

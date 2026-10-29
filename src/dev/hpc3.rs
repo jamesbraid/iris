@@ -1271,7 +1271,7 @@ impl Hpc3 {
     }
 
     pub fn add_scsi_device(&self, controller: u8, id: usize, path: &str, is_cdrom: bool, discs: Vec<String>, overlay: bool) -> std::io::Result<()> {
-        self.scsi_controller(controller).add_device(id, path, is_cdrom, discs, overlay, None)
+        self.scsi_controller(controller).bus().attach_device(id as u8, path, is_cdrom, discs, overlay, None).map(|_| ())
     }
 
     /// Attach a DaynaPort SCSI/Link (SCSI-attached Ethernet) at `id`.
@@ -1301,7 +1301,7 @@ impl Hpc3 {
     /// in `/tmp` so parallel `--ci` instances (and an interactive session)
     /// don't race on the same file.
     pub fn add_scsi_device_with_overlay(&self, controller: u8, id: usize, path: &str, is_cdrom: bool, discs: Vec<String>, overlay: bool, overlay_path: &str) -> std::io::Result<()> {
-        self.scsi_controller(controller).add_device(id, path, is_cdrom, discs, overlay, Some(overlay_path))
+        self.scsi_controller(controller).bus().attach_device(id as u8, path, is_cdrom, discs, overlay, Some(overlay_path)).map(|_| ())
     }
 
     pub fn ioc(&self) -> &Ioc {

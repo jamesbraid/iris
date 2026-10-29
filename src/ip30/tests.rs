@@ -689,7 +689,7 @@ impl IspDisk {
         static N: AtomicU32 = AtomicU32::new(0);
         let p = std::env::temp_dir().join(format!("iris-ip30-xtests-{}-{}-{name}.img", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
         std::fs::write(&p, vec![0u8; 64 * 512]).unwrap();
-        isp.attach_disk_at(target, &p).unwrap();
+        isp.bus().attach_image(target, &p, false).unwrap();
         IspDisk(p)
     }
 }

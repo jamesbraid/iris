@@ -768,9 +768,9 @@ mod tests {
         let mut d = DaynaPort::new(3, default_mac(3), GatewayConfig::default(),
                                    Arc::new(AtomicU64::new(0)));
         let (_tx, mut rx) = d.take_nat_ends();
-        let mut dev = crate::scsi::ScsiDevice::new_daynaport(d);
-        assert!(dev.is_daynaport());
-        assert!(!dev.is_cdrom());
+        let mut dev: Box<dyn crate::scsi::ScsiTarget> = Box::new(d);
+        assert!(dev.moves_packets());
+        assert!(dev.discs().is_none());
 
         dev.request(&cdb6([dp_cmd::ENABLE, 0, 0, 0, 0, 0x80])).unwrap();
         dev.request(&cdb6([dp_cmd::SET_IFACE_MODE, 0, 0, 0, 0x04, 0x80])).unwrap();

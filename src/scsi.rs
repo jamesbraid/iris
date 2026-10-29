@@ -1,5 +1,11 @@
 use std::io;
 
+mod attach;
+mod bus;
+
+pub use attach::{attach_failed, attach_from_config, Attached, DaynaportRef, TableRef};
+pub use bus::{ScsiBus, ScsiIdentities, ScsiTarget, Targets};
+
 use crate::block_node::{BlockNode, ChdCdNode, ChdNode, CowNode, RawNode};
 
 /// Get the standard CDB length based on the opcode's group code
@@ -78,17 +84,12 @@ pub fn request_sense_alloc_len(cdb: &[u8]) -> usize {
     if cdb[4] == 0 { 4 } else { cdb[4] as usize }
 }
 
-/// What kind of target sits at this SCSI id.
-///
-/// `Disk` and `Cdrom` share the storage command set below and differ only in
-/// behaviour (block size, TOC, write protection). `DaynaPort` shares nothing
-/// with them: it is a type-3 Processor device whose vendor command set reuses
-/// the READ(6)/WRITE(6) opcodes for packet RX/TX, so it is dispatched *before*
-/// the storage opcodes in `request()` and must never reach them.
+/// What kind of storage target sits at this SCSI id: the two share the
+/// command set below and differ only in behaviour (block size, TOC, write
+/// protection).
 pub enum DeviceKind {
     Disk,
     Cdrom,
-    DaynaPort(Box<crate::dev::daynaport::DaynaPort>),
 }
 
 /// What a target reports of itself in INQUIRY: vendor, product and
@@ -110,8 +111,7 @@ impl ScsiIdentity {
 }
 
 pub struct ScsiDevice {
-    /// None = no media loaded (CD-ROM drive present but tray is empty), or a
-    /// device with no storage behind it at all (DaynaPort).
+    /// None = no media loaded (CD-ROM drive present but tray is empty).
     /// HDDs are never None in practice.
     backend: Option<Box<dyn BlockNode>>,
     /// Capacity in bytes of the loaded media. 0 when `backend` is None.
@@ -244,48 +244,6 @@ impl ScsiDevice {
             logical_block_size: 2048,
             identity,
         }
-    }
-
-    /// Construct a DaynaPort SCSI/Link target — a type-3 Processor device with
-    /// no storage backing at all (no image, no CHD, no overlay).
-    pub fn new_daynaport(dp: crate::dev::daynaport::DaynaPort) -> Self {
-        Self {
-            backend: None,
-            size: 0,
-            kind: DeviceKind::DaynaPort(Box::new(dp)),
-            filename: String::new(),
-            discs: vec![],
-            buffer: Vec::new(),
-            pending_sense: [0u8; 18],
-            unit_attention: false,
-            phys_block_size: 512,
-            logical_block_size: 512,
-            // Never reported: a DaynaPort answers INQUIRY itself.
-            identity: ScsiIdentity::new(b"        ", b"                ", b"    "),
-        }
-    }
-
-    /// The DaynaPort behind this target, if it is one.
-    pub fn daynaport_mut(&mut self) -> Option<&mut crate::dev::daynaport::DaynaPort> {
-        match &mut self.kind {
-            DeviceKind::DaynaPort(dp) => Some(dp),
-            _ => None,
-        }
-    }
-
-    /// The DaynaPort behind this target, if it is one.
-    pub fn daynaport(&self) -> Option<&crate::dev::daynaport::DaynaPort> {
-        match &self.kind {
-            DeviceKind::DaynaPort(dp) => Some(dp),
-            _ => None,
-        }
-    }
-
-    /// True for a DaynaPort SCSI/Link target. Callers on the storage path use
-    /// this to skip block-oriented handling (the controller, for instance, must
-    /// not read a WRITE(6) byte count as `blocks × 512`).
-    pub fn is_daynaport(&self) -> bool {
-        matches!(self.kind, DeviceKind::DaynaPort(_))
     }
 
     /// Whether physical media is loaded. For HDDs always true; for CD-ROMs
@@ -595,19 +553,6 @@ impl ScsiDevice {
         {
             self.unit_attention = false;
             return Ok(self.check_condition(0x06, 0x28, 0x00));
-        }
-
-        // A DaynaPort answers its own vendor command set, which reuses the
-        // READ(6) (0x08) and WRITE(6) (0x0a) opcodes for packet RX/TX. Dispatch
-        // it here, ahead of the storage match below, or those two would be
-        // read as disk block transfers. It answers no storage command at all —
-        // not READ CAPACITY, not MODE SENSE, not READ TOC.
-        if let DeviceKind::DaynaPort(dp) = &mut self.kind {
-            let mut response = dp.request(req)?;
-            if let ScsiDataLength::Fixed(max_len) = req.data_len {
-                response.data.truncate(max_len.min(response.data.len()));
-            }
-            return Ok(response);
         }
 
         let mut response = match req.cdb[0] {

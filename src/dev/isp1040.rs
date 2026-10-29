@@ -47,7 +47,7 @@ use parking_lot::{Condvar, Mutex, MutexGuard};
 use crate::devlog::LogModule;
 use crate::irq::IrqLine;
 use crate::pci::{Bar, PciBusDevice, PciConfig, PciDma, PCI_INTA};
-use crate::scsi::{scsi_cmd, ScsiDataLength, ScsiDevice, ScsiIdentity, ScsiRequest};
+use crate::scsi::{scsi_cmd, ScsiBus, ScsiDataLength, ScsiIdentities, ScsiIdentity, ScsiRequest};
 use crate::snapshot::{get_field, hex_u16, hex_u32, load_u16_slice, toml_u16, toml_u32, toml_u8, u16_slice_to_toml, u8_slice_to_toml};
 
 pub const PCI_VENDOR_QLOGIC: u16 = 0x1077;
@@ -419,15 +419,13 @@ pub struct Core {
     /// Serialises driving the interrupt line; see [`Core::sync_irq`].
     line_order: Mutex<()>,
     /// The targets on the bus, by SCSI id.
-    targets: Mutex<[Option<ScsiDevice>; 16]>,
+    bus: ScsiBus,
     dma: OnceLock<Arc<dyn PciDma>>,
     irq: OnceLock<IrqLine>,
     /// Which of the Octane's two controllers this is (0 internal, 1
     /// external): the monitor's `scsi`/`cow` address the first,
     /// `scsi1`/`cow1` the second.
     index: u8,
-    /// The SCSI id a disk attached without one answers at.
-    target: u8,
     pci: PciConfig,
     notes: Mutex<Vec<String>>,
     dma_misses: Mutex<std::collections::BTreeSet<u64>>,
@@ -490,7 +488,7 @@ impl Isp1040 {
         for (what, probe) in [
             ("st", (|c: &Core| c.st.is_locked()) as fn(&Core) -> bool),
             ("fence", |c| c.fence.is_locked()),
-            ("targets", |c| c.targets.is_locked()),
+            ("targets", |c| c.bus.is_locked()),
         ] {
             let core = Arc::downgrade(&self.core);
             crate::locks::register_lock(format!("isp1040-{}::{what}", self.index), move || {
@@ -517,11 +515,10 @@ impl Core {
             fence: Mutex::new(()),
             wake: Condvar::new(),
             line_order: Mutex::new(()),
-            targets: Mutex::new(std::array::from_fn(|_| None)),
+            bus: ScsiBus::new(16, ScsiIdentities { disk: ISP_DISK, cdrom: ISP_CDROM }),
             dma: OnceLock::new(),
             irq: OnceLock::new(),
             index,
-            target: 1,
             // BAR 0 is the I/O window and BAR 1 its memory-space alias, one
             // register file.
             pci: PciConfig::new(
@@ -679,64 +676,15 @@ impl Core {
         }
     }
 
-    // ---- attaching targets -------------------------------------------
+    // ---- the bus ------------------------------------------------------
 
-    /// Attach a disk image at a SCSI id.
-    pub fn attach_disk_at(&self, target: u8, path: &std::path::Path) -> std::io::Result<u64> {
-        self.attach_at(target, path, false)
-    }
-
-    pub fn attach_at(&self, target: u8, path: &std::path::Path, cdrom: bool) -> std::io::Result<u64> {
-        self.attach_with(target, path, cdrom, false)
-    }
-
-    /// [`Self::attach_at`], copy-on-write when `overlay` is set: the image is
-    /// never written, writes go to `{path}.overlay`.
-    pub fn attach_with(&self, target: u8, path: &std::path::Path, cdrom: bool, overlay: bool) -> std::io::Result<u64> {
-        let path = path
-            .to_str()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path is not UTF-8"))?;
-        self.attach_device(target, path, cdrom, Vec::new(), overlay, None)
-    }
-
-    /// Attach what a `[scsi.N]` table describes: the image at `path` (empty
-    /// for a CD-ROM with its tray empty), a CD-ROM's changer list `discs`,
-    /// and copy-on-write when `overlay` is set, to `overlay_path` or
-    /// `{path}.overlay`. Returns the size in blocks.
-    pub fn attach_device(
-        &self,
-        target: u8,
-        path: &str,
-        cdrom: bool,
-        discs: Vec<String>,
-        overlay: bool,
-        overlay_path: Option<&str>,
-    ) -> std::io::Result<u64> {
-        let d = ScsiDevice::open(path, cdrom, discs, overlay, overlay_path, if cdrom { ISP_CDROM } else { ISP_DISK })?;
-        let blocks = d.size() / BLOCK_SIZE as u64;
-        let mut targets = self.targets.lock();
-        let slot = targets.get_mut(target as usize).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("SCSI id {target} out of range"))
-        })?;
-        *slot = Some(d);
-        Ok(blocks)
-    }
-
-    /// The id a disk attached without one goes on.
-    pub fn default_target(&self) -> u8 { self.target }
-
-    pub fn attach_disk(&self, path: &std::path::Path) -> std::io::Result<u64> {
-        self.attach_disk_at(self.target, path)
-    }
-
-    /// The ids that have something on them.
-    pub fn attached(&self) -> Vec<u8> {
-        let t = self.targets.lock();
-        (0..t.len() as u8).filter(|&i| t[i as usize].is_some()).collect()
+    /// The SCSI bus: attach targets to it and ask what is on it.
+    pub fn bus(&self) -> &ScsiBus {
+        &self.bus
     }
 
     fn has_target(&self, id: u8) -> bool {
-        self.targets.lock().get(id as usize).is_some_and(|t| t.is_some())
+        self.bus.has_target(id)
     }
 
     // ---- DMA ---------------------------------------------------------
@@ -1148,7 +1096,7 @@ impl Core {
     /// Run a CDB against the target; `data` is what a write sends it. None
     /// when a reset cancelled the command while it waited for the target.
     fn scsi(&self, gen: u64, target: u8, cdb: &[u8], data: Option<Vec<u8>>) -> Option<(Vec<u8>, u8)> {
-        let mut targets = self.targets.lock();
+        let mut targets = self.bus.lock();
         if self.gen.load(Ordering::Acquire) != gen {
             return None;
         }
@@ -1196,11 +1144,12 @@ impl Core {
         cdb[1] = (cdb[1] & 0x1f) | (lun << 5);
         let cdb = &cdb[..(cdb_len as usize).clamp(1, CDB_FIELD_LEN)];
         let block = self
-            .targets
+            .bus
             .lock()
             .get(target as usize)
             .and_then(|t| t.as_ref())
-            .map(|d| d.block_sizes().1 as usize)
+            .and_then(|t| t.block_size())
+            .map(|b| b as usize)
             .filter(|&b| b != 0)
             .unwrap_or(BLOCK_SIZE);
         let (xfer, to_dev) = Self::cdb_transfer(cdb, block);
@@ -1581,9 +1530,8 @@ impl crate::traits::Device for Isp1040 {
 }
 
 impl crate::scsi_monitor::ScsiTargets for Isp1040 {
-    fn with_targets<R>(&self, f: impl FnOnce(&mut [Option<ScsiDevice>]) -> R) -> R {
-        let mut targets = self.targets.lock();
-        f(&mut targets[..])
+    fn scsi_bus(&self) -> &ScsiBus {
+        &self.bus
     }
 }
 
