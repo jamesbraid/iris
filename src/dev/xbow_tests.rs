@@ -321,6 +321,132 @@ fn a_link_reset_restores_a_live_link() {
     }
 }
 
+/// A link taken down after coming up reports maximum retry but not failure
+/// mode, which is for a port that never came up, and its traffic stops.
+/// From QEMU's sn0-xbow-test link-population and
+/// unavailable-destination-is-not-illegal, and octane-mgras-test liveness.
+#[test]
+fn a_link_taken_down_reports_maximum_retry_and_stops_carrying() {
+    let x = Xbow::new(4, CORE | 1 << GFX);
+    x.set_alive(CORE).unwrap();
+    assert_eq!(rd(&x, link(GFX, 0x10)), 0x20);
+    assert_eq!(rd(&x, link(GFX, 0x38)), 0x20, "present, and it came up once");
+    assert!(!x.carries(GFX));
+    x.set_alive(CORE | 1 << GFX).unwrap();
+    assert!(x.carries(GFX));
+    assert!(x.set_alive(CORE | 1 << EMPTY).is_err(), "an empty port cannot come up");
+    assert!(x.set_alive(CORE | 1 << 3).is_err(), "widget 3 is not a link");
+}
+
+/// Width is what the link negotiated when it last came up, not what its
+/// control forces now; the force survives a link reset, and a link reset
+/// does not acknowledge a standing request. From QEMU's sn0-xbow-test
+/// link-width-and-control.
+#[test]
+fn a_link_runs_the_width_it_came_up_with() {
+    let x = Xbow::new(4, CORE | 1 << GFX);
+    wr(&x, link(GFX, 0x08), 0xffff_ffff);
+    assert_eq!(rd(&x, link(GFX, 0x38)) & 0x10, 0);
+    x.set_alive(CORE).unwrap();
+    x.set_alive(CORE | 1 << GFX).unwrap();
+    assert_eq!(rd(&x, link(GFX, 0x38)) & 0x10, 0x10, "eight bits, as forced");
+    let request = 1 << (24 + GFX - 8);
+    assert_eq!(rd(&x, 0x08) & request, request, "its arrival was enabled");
+    wr(&x, link(GFX, 0x30), 0);
+    assert_eq!(rd(&x, 0x08) & request, request, "a link reset is no acknowledgment");
+    assert_eq!(rd(&x, link(GFX, 0x08)) & 1 << 24, 1 << 24, "the force survives");
+}
+
+/// One assertion is outstanding at a time: a second enabled condition
+/// sends no packet, acknowledging one leaves the assertion standing, and
+/// acknowledging the last sends the deassertion. From QEMU's sn0-xbow-test
+/// interrupt-coalescing.
+#[test]
+fn one_interrupt_assertion_is_outstanding_at_a_time() {
+    let x = octane();
+    let heart = interrupt_to_heart(&x, 0x5a);
+    wr(&x, 0x20, 0x20);
+    let _ = x.read(0x78 + 4, 4);
+    assert_eq!(rd(&x, 0x08) & 1 << 23, 1 << 23);
+    assert_eq!(heart.take(), [(0x5a, true)]);
+
+    wr(&x, link(BRIDGE, 0x08), 2 << 18 | 0x20);
+    x.set_alive(1 << HEART).unwrap();
+    assert_eq!(rd(&x, 0x08) & 1 << 31, 1 << 31, "the Bridge link's request");
+    assert_eq!(heart.take(), [], "behind the same assertion");
+
+    clear(&x);
+    assert_eq!(rd(&x, 0x08) & 1 << 23, 0);
+    assert_eq!(rd(&x, 0x08) & 1 << 31, 1 << 31, "acknowledged at its own alias only");
+    assert_eq!(heart.take(), []);
+    rd(&x, link(BRIDGE, 0x28));
+    assert_eq!(rd(&x, 0x08) & 0xff80_0000, 0);
+    assert_eq!(heart.take(), [(0x5a, false)]);
+}
+
+/// Disabling a link's notification withdraws its request without
+/// acknowledging the condition, and deasserts if it was the last. A link
+/// coming up asks only when its arrival is enabled, and the arrival is an
+/// event: acknowledged, it stops asking though the link stays up. From
+/// QEMU's sn0-xbow-test interrupt-masking and interrupt-on-link-arrival.
+#[test]
+fn a_link_asks_for_an_interrupt_only_while_its_condition_is_enabled() {
+    let x = Xbow::new(4, CORE | 1 << GFX);
+    let heart = interrupt_to_heart(&x, 0x11);
+    wr(&x, link(BRIDGE, 0x08), 2 << 18 | 0x20);
+    x.set_alive(1 << HEART | 1 << GFX).unwrap();
+    assert_eq!(heart.take(), [(0x11, true)]);
+    wr(&x, link(BRIDGE, 0x08), 2 << 18);
+    assert_eq!(rd(&x, 0x08) & 1 << 31, 0);
+    assert_eq!(heart.take(), [(0x11, false)]);
+    assert_eq!(rd(&x, link(BRIDGE, 0x10)), 0x20, "suppressed, not acknowledged");
+
+    x.set_alive(CORE).unwrap();
+    wr(&x, link(GFX, 0x08), 2 << 18 | 1 << 31);
+    x.set_alive(CORE | 1 << GFX).unwrap();
+    assert_eq!(heart.take(), [(0x11, true)]);
+    rd(&x, link(GFX, 0x28));
+    assert_eq!(rd(&x, link(GFX, 0x10)) & 1 << 31, 1 << 31);
+    assert_eq!(rd(&x, 0x08) & 0xff80_0000, 0);
+    assert_eq!(heart.take(), [(0x11, false)]);
+}
+
+/// Widget 0's interrupt leaves by the target's link: with HEART's link
+/// down the request stands and no packet goes, and it goes once the link
+/// is back. The processor's own accesses enter by that link too, so a dead
+/// one cannot reach the registers, not even to reset itself. From QEMU's
+/// sn0-xbow-test interrupt-needs-its-link and octane-mgras-test
+/// core-link-reset-recovery.
+#[test]
+fn widget_0_interrupts_and_processor_accesses_need_heart_s_link() {
+    let x = octane();
+    let heart = interrupt_to_heart(&x, 3);
+    wr(&x, link(HEART, 0x08), 2 << 18 | 0x20);
+    x.set_alive(1 << BRIDGE).unwrap();
+    assert_eq!(heart.take(), [], "the packet cannot leave");
+    assert_eq!(x.read(0x08 + 4, 4), None);
+    assert!(!x.write(link(HEART, 0x30) + 4, 4, 0));
+    assert!(!x.carries(HEART));
+    x.set_alive(CORE).unwrap();
+    assert_eq!(heart.take(), [(3, true)], "the standing request goes out");
+}
+
+/// A link reset of a fitted link that was down returns it to failure, not
+/// back up, and a machine reset brings it up again. From QEMU's
+/// sn0-origin2000-test xbow-baseio-link-reset and octane-mgras-test
+/// link-reset-recovery.
+#[test]
+fn a_link_reset_of_a_dead_link_leaves_it_down_until_a_machine_reset() {
+    let x = Xbow::new(4, CORE | 1 << GFX);
+    x.set_alive(CORE).unwrap();
+    wr(&x, link(GFX, 0x30), 0);
+    assert_eq!(rd(&x, link(GFX, 0x10)), 0x20);
+    assert!(!x.carries(GFX));
+    Resettable::power_on(&x);
+    assert!(x.carries(GFX));
+    assert_eq!(rd(&x, link(GFX, 0x10)) & 1 << 31, 1 << 31);
+}
+
 /// A machine reset puts back the registers and the links fitted, and sends
 /// no packet for an assertion it drops. From QEMU's sn0-xbow-test
 /// reset-restores-startup-health.

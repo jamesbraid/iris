@@ -144,8 +144,9 @@ struct Regs {
     /// Conditions since the link's status was last acknowledged, in its
     /// status register's bit positions.
     link_event: [u32; LINKS],
+    /// Links that came up since power-on: a failed one that never did
+    /// reports failure mode.
     came_up: u8,
-    initializing: u8,
     eight_bit: u8,
     interrupt_asserted: bool,
     /// Revision code 5 and later: which ports' warm resets may reach the
@@ -182,7 +183,6 @@ impl Regs {
             fences: [FENCE_MASK; FENCES],
             lock: 0,
             came_up: startup,
-            initializing: 0,
             eight_bit: 0,
             interrupt_asserted: false,
         }
@@ -297,15 +297,58 @@ impl Xbow {
         ret
     }
 
-    /// Fit a board on `widget` after construction (graphics), alive.
+    /// Fit a board on `widget` after construction (graphics) and bring its
+    /// link up, as a link comes up from the registers' point of view: alive,
+    /// with an alive event and the width its control forces. A reset brings
+    /// it up again, and a link reset restores it, like the links fitted at
+    /// construction.
     pub fn attach(&self, widget: u8) {
         if let Some(bit) = link_bit(widget) {
-            self.locked(|r, _| {
+            self.locked(|r, out| {
                 self.present.fetch_or(bit, Ordering::AcqRel);
-                self.alive.fetch_or(bit, Ordering::AcqRel);
-                r.came_up |= bit;
+                let alive = self.alive.load(Ordering::Acquire) | bit;
+                self.set_alive_locked(r, out, alive);
             });
         }
+    }
+
+    /// Bring links up or take them down: `widgets` is the widget mask of
+    /// the links that are alive from now on, bit n for widget n, a subset
+    /// of those fitted. A link that comes up reports an alive event and
+    /// the width its control forces; one that goes down after coming up
+    /// reports maximum retry, and its windows bus-error. No machine takes
+    /// a link down yet; the tests do, as QEMU's set its `links-alive`.
+    pub fn set_alive(&self, widgets: u16) -> Result<(), String> {
+        if widgets & !0xff00 != 0 {
+            return Err("a Crossbow link mask names widgets 8 through 15".into());
+        }
+        self.locked(|r, out| {
+            let value = (widgets >> FIRST_WIDGET) as u8;
+            if value & !self.present.load(Ordering::Acquire) != 0 {
+                return Err("an operational Crossbow link must be fitted".into());
+            }
+            self.set_alive_locked(r, out, value);
+            Ok(())
+        })
+    }
+
+    fn set_alive_locked(&self, r: &mut Regs, out: &mut Out, value: u8) {
+        let changed = value ^ self.alive.swap(value, Ordering::AcqRel);
+        for link in (0..LINKS).filter(|l| changed >> l & 1 != 0) {
+            let bit = 1u8 << link;
+            if value & bit != 0 {
+                r.came_up |= bit;
+                r.link_event[link] |= LINK_ALIVE;
+                if r.link_control[link] & LINK_EIGHT_BIT_FORCE != 0 {
+                    r.eight_bit |= bit;
+                } else {
+                    r.eight_bit &= !bit;
+                }
+            } else {
+                r.link_event[link] |= LINK_MAX_RETRY;
+            }
+        }
+        self.update_interrupt(r, out);
     }
 
     /// Whether the switch passes traffic to and from `widget`. Lock-free.
@@ -322,19 +365,19 @@ impl Xbow {
         (self.revision << 28) | 1
     }
 
-    fn link_state(&self, r: &Regs, link: usize) -> u32 {
-        let bit = 1u8 << link;
-        if self.alive.load(Ordering::Acquire) & bit != 0 {
+    /// A port is up (alive) or has failed (maximum retry), before coming
+    /// up or after. The third state, initializing, shows only inside a
+    /// link reset's pulse, which is not kept.
+    fn link_state(&self, link: usize) -> u32 {
+        if self.alive.load(Ordering::Acquire) >> link & 1 != 0 {
             LINK_ALIVE
-        } else if r.initializing & bit != 0 {
-            0
         } else {
             LINK_MAX_RETRY
         }
     }
 
     fn link_status(&self, r: &Regs, link: usize) -> u32 {
-        r.link_status[link] | self.link_state(r, link)
+        r.link_status[link] | self.link_state(link)
     }
 
     fn link_aux(&self, r: &Regs, link: usize) -> u32 {
@@ -347,7 +390,7 @@ impl Xbow {
             if r.eight_bit & bit != 0 {
                 v |= AUX_EIGHT_BIT;
             }
-        } else if r.initializing & bit == 0 && r.came_up & bit == 0 {
+        } else if r.came_up & bit == 0 {
             v |= AUX_FAILURE_MODE;
         }
         v
@@ -453,7 +496,12 @@ impl Xbow {
     }
 
     /// A processor read of widget 0's window at `off`; `None` is a bus error.
+    /// The processor's packets enter at HEART's port, so with that link down
+    /// nothing reaches the registers and nothing is recorded.
     pub fn read(&self, off: u32, size: usize) -> Option<u64> {
+        if !self.carries(WIDGET_HEART) {
+            return None;
+        }
         self.locked(|r, out| {
             let slot = self.decode(r, out, off, size, false)?;
             let v = match slot {
@@ -509,6 +557,9 @@ impl Xbow {
 
     /// A processor write; false is a bus error.
     pub fn write(&self, off: u32, size: usize, val: u64) -> bool {
+        if !self.carries(WIDGET_HEART) {
+            return false;
+        }
         self.locked(|r, out| {
             let Some(slot) = self.decode(r, out, off, size, true) else { return false };
             let val = val as u32;
@@ -572,28 +623,26 @@ impl Xbow {
     }
 
     /// A link reset. The pulse is two core cycles, over before the
-    /// processor can look again, so it is not kept. A fitted link that was
-    /// alive comes back alive with an alive event, as the Octane's
-    /// restore-alive policy has it; one that was down stays down, still
-    /// initializing; an empty port fails initialization.
+    /// processor can look again, so it is not kept. Every fitted link is in
+    /// the Octane's restore set, because the stock PROM resets each link it
+    /// finds and expects it back: one that was alive comes back alive with
+    /// an alive event, one that was down returns to initialization failure.
+    /// An empty port fails initialization. Nothing here acknowledges a
+    /// standing request; the clearing aliases do that.
     fn link_reset(&self, r: &mut Regs, link: usize, out: &mut Out) {
         let bit = 1u8 << link;
         let was_alive = self.alive.load(Ordering::Acquire) & bit != 0;
         r.eight_bit &= !bit;
         if self.present.load(Ordering::Acquire) & bit != 0 {
             if was_alive {
-                r.initializing &= !bit;
                 r.came_up |= bit;
                 r.link_event[link] |= LINK_ALIVE;
                 if r.link_control[link] & LINK_EIGHT_BIT_FORCE != 0 {
                     r.eight_bit |= bit;
                 }
-            } else {
-                r.initializing |= bit;
             }
         } else {
             self.alive.fetch_and(!bit, Ordering::AcqRel);
-            r.initializing &= !bit;
             r.came_up &= !bit;
         }
         self.update_interrupt(r, out);
