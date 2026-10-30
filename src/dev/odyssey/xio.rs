@@ -46,21 +46,23 @@ pub fn sgi_xio_compose(who: &str, widget: u32, address: u64, packet: &mut u64) -
 /// HEART's interrupt-packet register in its widget space.
 const HEART_PACKET: u64 = 0x80;
 
-/// `sgi_xio_send_interrupt(&s->fabric_as, packet, number, set)`: the
-/// interrupt-modify write. HEART takes it at 0x80 of widget 8.
-pub fn sgi_xio_send_interrupt(s: &mut OdysseyFront, packet: u64, number: u8, set: bool) -> MemTxResult {
-    let widget = (packet >> SGI_XIO_PACKET_ADDRESS_BITS) as u32;
-    let address = packet & ((1u64 << SGI_XIO_PACKET_ADDRESS_BITS) - 1);
-    if widget != s.heart_widget || address != HEART_PACKET {
-        crate::qlog!("odyssey: interrupt packet to widget {widget} address {address:#x} has no receiver\n");
-        return MEMTX_DECODE_ERROR;
-    }
-    match &s.irq {
-        Some(irq) => {
-            irq.set_line(number as u32, set);
-            MEMTX_OK
+impl OdysseyFront {
+    /// `sgi_xio_send_interrupt(&s->fabric_as, packet, number, set)`: the
+    /// interrupt-modify write. HEART takes it at 0x80 of widget 8.
+    pub fn send_interrupt(&mut self, packet: u64, number: u8, set: bool) -> MemTxResult {
+        let widget = (packet >> SGI_XIO_PACKET_ADDRESS_BITS) as u32;
+        let address = packet & ((1u64 << SGI_XIO_PACKET_ADDRESS_BITS) - 1);
+        if widget != self.heart_widget || address != HEART_PACKET {
+            crate::qlog!("odyssey: interrupt packet to widget {widget} address {address:#x} has no receiver\n");
+            return MEMTX_DECODE_ERROR;
         }
-        None => MEMTX_DECODE_ERROR,
+        match &self.irq {
+            Some(irq) => {
+                irq.set_line(number as u32, set);
+                MEMTX_OK
+            }
+            None => MEMTX_DECODE_ERROR,
+        }
     }
 }
 
@@ -200,7 +202,7 @@ impl OdysseyXio {
     fn read(&self, addr: u64, size: u32) -> (u32, u64) {
         match self.offset(addr) {
             Some(off) => {
-                (BUS_OK, odyssey_handles_read(&self.state, off, size))
+                (BUS_OK, self.state.read(off, size))
             }
             None => (BUS_ERR, 0),
         }
@@ -209,7 +211,7 @@ impl OdysseyXio {
     fn write(&self, addr: u64, size: u32, val: u64) -> u32 {
         match self.offset(addr) {
             Some(off) => {
-                odyssey_handles_write(&self.state, off, val, size);
+                self.state.write(off, val, size);
                 BUS_OK
             }
             None => BUS_ERR,
@@ -221,8 +223,8 @@ impl OdysseyXio {
     fn frame(state: &OdysseyHandles, display: &OdysseyDisplay) {
         let (frame, w, h) = {
             let mut s = state.board.lock();
-            sgi_scanout_poll(&mut s.scanout, qemu_clock_virtual_ns());
-            sgi_scanout_update(&mut s.scanout);
+            s.scanout.poll(qemu_clock_virtual_ns());
+            s.scanout.update();
             (s.scanout.frame.clone(), s.scanout.frame_width as usize, s.scanout.frame_height as usize)
         };
         if w != 0 && h != 0 && frame.len() >= w * h {
@@ -297,7 +299,7 @@ impl Device for OdysseyXio {
         if t.is_some() {
             return;
         }
-        odyssey_work_start(&self.state);
+        self.state.work_start();
         self.running.store(true, Ordering::Release);
         let (state, display, running) = (self.state.clone(), self.display.clone(), self.running.clone());
         *t = Some(
@@ -326,7 +328,7 @@ impl Device for OdysseyXio {
         if let Some(t) = self.thread.lock().take() {
             let _ = t.join();
         }
-        odyssey_work_stop(&self.state);
+        self.state.work_stop();
     }
 
     fn is_running(&self) -> bool {
@@ -348,7 +350,7 @@ impl Drop for OdysseyXio {
 
 impl Resettable for OdysseyXio {
     fn power_on(&self) {
-        odyssey_reset_hold(&mut self.state.board.lock());
+        self.state.board.lock().reset_hold();
     }
 }
 

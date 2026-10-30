@@ -61,15 +61,10 @@ pub struct SGIHeadOps {
     pub retrace: Option<fn(Opaque)>,
 }
 
-#[inline]
-pub fn sgi_head_publish(
-    ops: &SGIHeadOps,
-    opaque: Opaque,
-    seq: u64,
-    kind: SGICompletionKind,
-    cookie: u64,
-    payload: u64,
-) {
-    let c = SGICompletion { seq, kind, cookie, payload };
-    (ops.publish.expect("publish hook"))(opaque, &c);
+impl SGIHeadOps {
+    #[inline]
+    pub fn publish(&self, opaque: Opaque, seq: u64, kind: SGICompletionKind, cookie: u64, payload: u64) {
+        let c = SGICompletion { seq, kind, cookie, payload };
+        (self.publish.expect("publish hook"))(opaque, &c);
+    }
 }

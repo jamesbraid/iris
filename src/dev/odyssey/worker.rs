@@ -67,66 +67,68 @@ impl OdysseyBudget {
     }
 }
 
-/// Start the board's thread.
-pub fn odyssey_work_start(h: &OdysseyHandles) {
-    let mut f = h.front.lock();
-    if f.worker.is_some() {
-        return;
+impl OdysseyHandles {
+    /// Start the board's thread.
+    pub fn work_start(&self) {
+        let mut f = self.front.lock();
+        if f.worker.is_some() {
+            return;
+        }
+        f.worker_exit = false;
+        let handles = self.clone();
+        f.worker = Some(
+            std::thread::Builder::new()
+                .name(ODYSSEY_WORK_THREAD.into())
+                .spawn(move || handles.work_run())
+                .expect("odyssey work thread"),
+        );
     }
-    f.worker_exit = false;
-    let handles = h.clone();
-    f.worker = Some(
-        std::thread::Builder::new()
-            .name(ODYSSEY_WORK_THREAD.into())
-            .spawn(move || odyssey_work_run(&handles))
-            .expect("odyssey work thread"),
-    );
-}
 
-/// The machine stops: finish the waiting work, then stop the board's
-/// thread, so no work is left behind a stopped machine.
-pub fn odyssey_work_stop(h: &OdysseyHandles) {
-    {
-        let mut s = h.board.lock();
-        let waiting = s.front.lock().work_queue.len() as u32;
-        odyssey_work_step(&mut s, &mut OdysseyBudget::words(waiting));
+    /// The machine stops: finish the waiting work, then stop the board's
+    /// thread, so no work is left behind a stopped machine.
+    pub fn work_stop(&self) {
+        {
+            let mut s = self.board.lock();
+            let waiting = s.front.lock().work_queue.len() as u32;
+            s.work_step(&mut OdysseyBudget::words(waiting));
+        }
+        let thread = {
+            let mut f = self.front.lock();
+            f.worker_exit = true;
+            f.kick.notify_one();
+            f.worker.take()
+        };
+        if let Some(t) = thread {
+            let _ = t.join();
+        }
     }
-    let thread = {
-        let mut f = h.front.lock();
-        f.worker_exit = true;
-        f.kick.notify_one();
-        f.worker.take()
-    };
-    if let Some(t) = thread {
-        let _ = t.join();
-    }
-}
 
-fn odyssey_work_run(h: &OdysseyHandles) {
-    let mut f = h.front.lock();
-    let kick: Arc<parking_lot::Condvar> = f.kick.clone();
-    loop {
-        while f.work_queue.is_empty() && !f.worker_exit {
-            f.worker_waiting = true;
-            kick.wait(&mut f);
-            f.worker_waiting = false;
+    fn work_run(&self) {
+        let mut f = self.front.lock();
+        let kick: Arc<parking_lot::Condvar> = f.kick.clone();
+        loop {
+            while f.work_queue.is_empty() && !f.worker_exit {
+                f.worker_waiting = true;
+                kick.wait(&mut f);
+                f.worker_waiting = false;
+            }
+            if f.worker_exit {
+                break;
+            }
+            MutexGuard::unlocked(&mut f, || std::thread::sleep(GAP));
+            if f.worker_exit {
+                break;
+            }
+            #[cfg(test)]
+            let words = f.test_words;
+            #[cfg(not(test))]
+            let words = 0;
+            f.slice = true;
+            MutexGuard::unlocked(&mut f, || {
+                let mut s = self.board.lock();
+                s.work_step(&mut OdysseyBudget::slice(words));
+            });
+            f.slice = false;
         }
-        if f.worker_exit {
-            break;
-        }
-        MutexGuard::unlocked(&mut f, || std::thread::sleep(GAP));
-        if f.worker_exit {
-            break;
-        }
-        #[cfg(test)]
-        let words = f.test_words;
-        #[cfg(not(test))]
-        let words = 0;
-        f.slice = true;
-        MutexGuard::unlocked(&mut f, || {
-            let mut s = h.board.lock();
-            odyssey_work_step(&mut s, &mut OdysseyBudget::slice(words));
-        });
-        f.slice = false;
     }
 }

@@ -61,18 +61,20 @@ pub fn sgi_x_gc_decode_main_index(words: &[u32; SGI_X_GC_WORDS], decoded: &mut S
         status
     }
 }
-pub fn sgi_x_gc_apply(gc: &SGIXGC, source: u32, destination: u32) -> u32 {
-    ((sgi_x_logic_op(gc.gx as u32, source, destination) & gc.mask) | (destination & !gc.mask))
-        & gc.width_mask
-}
-pub fn sgi_x_gc_noop(gc: &SGIXGC) -> bool {
-    gc.mask == 0 || gc.gx == 5
-}
-pub fn sgi_x_gc_needs_destination(gc: &SGIXGC) -> bool {
-    if sgi_x_gc_noop(gc) {
-        return false;
+impl SGIXGC {
+    pub fn apply(&self, source: u32, destination: u32) -> u32 {
+        ((sgi_x_logic_op(self.gx as u32, source, destination) & self.mask) | (destination & !self.mask))
+            & self.width_mask
     }
-    gc.mask != gc.width_mask || (gc.gx != 0 && gc.gx != 3 && gc.gx != 12 && gc.gx != 15)
+    pub fn noop(&self) -> bool {
+        self.mask == 0 || self.gx == 5
+    }
+    pub fn needs_destination(&self) -> bool {
+        if self.noop() {
+            return false;
+        }
+        self.mask != self.width_mask || (self.gx != 0 && self.gx != 3 && self.gx != 12 && self.gx != 15)
+    }
 }
 
 pub fn index_value(high: u32) -> u32 {

@@ -92,135 +92,137 @@ pub fn sgi_pi_gfx_repay_credits(node: &dyn SGIPIGfxLink, widget: u32, credits: u
     node.repay_credits(widget, credits);
 }
 
-/// The counter above the bias re-arms the slot's graphics interrupt.
-fn sgi_pi_gfx_rearm(g: &mut SGIPIGfx, slot: usize) {
-    if g.credit[slot] > g.bias[slot] {
-        g.starved[slot] = false;
-    }
-}
-
-/// Every register zero, every page disabled (the model's choice).
-pub fn sgi_pi_gfx_reset(g: &mut SGIPIGfx) {
-    *g = SGIPIGfx::default();
-}
-
-/// Register n of the block, 0 to SGI_PI_GFX_REGS - 1, counted in
-/// doublewords from SGI_PI_GFX_BASE.
-pub fn sgi_pi_gfx_read(g: &SGIPIGfx, n: u32) -> u64 {
-    let slot = (n / SGI_PI_GFX_SLOT_REGS) as usize;
-
-    assert!(n < SGI_PI_GFX_REGS);
-    match n % SGI_PI_GFX_SLOT_REGS {
-        SGI_PI_GFX_PAGE => g.page[slot],
-        SGI_PI_GFX_CREDIT => g.credit[slot] as u64,
-        SGI_PI_GFX_BIAS => g.bias[slot] as u64,
-        SGI_PI_GFX_INT_COUNT => g.int_count[slot] as u64,
-        _ => g.int_compare[slot] as u64,
-    }
-}
-
-/// A write keeps the field's bits; a write to the credit counter replaces
-/// the count.
-pub fn sgi_pi_gfx_write(g: &mut SGIPIGfx, n: u32, value: u64) {
-    let slot = (n / SGI_PI_GFX_SLOT_REGS) as usize;
-
-    assert!(n < SGI_PI_GFX_REGS);
-    match n % SGI_PI_GFX_SLOT_REGS {
-        SGI_PI_GFX_PAGE => g.page[slot] = value & SGI_PI_GFX_PAGE_MASK,
-        SGI_PI_GFX_CREDIT => {
-            g.credit[slot] = (value as u32) & SGI_PI_GFX_CREDIT_MASK;
-            sgi_pi_gfx_rearm(g, slot);
-        }
-        SGI_PI_GFX_BIAS => g.bias[slot] = (value as u32) & SGI_PI_GFX_BIAS_MASK,
-        SGI_PI_GFX_INT_COUNT => g.int_count[slot] = (value as u32) & SGI_PI_GFX_INT_MASK,
-        _ => g.int_compare[slot] = (value as u32) & SGI_PI_GFX_INT_MASK,
-    }
-}
-
-/// Whether the slot's page is enabled and covers physical address `addr`.
-pub fn sgi_pi_gfx_covers(g: &SGIPIGfx, slot: usize, addr: u64) -> bool {
-    assert!(slot < SGI_PI_GFX_SLOTS);
-    let page = g.page[slot];
-    (page & SGI_PI_GFX_PAGE_ENABLE) != 0
-        && (addr & SGI_PI_GFX_PAGE_ADDRESS) == (page & SGI_PI_GFX_PAGE_ADDRESS)
-}
-
-/// An uncached I/O store by the processor in `slot` reached physical
-/// address bits 39:0 `addr`. Charges one credit when the slot's page is
-/// enabled and covers it, and returns whether it did. `who` names the
-/// device in log messages.
-pub fn sgi_pi_gfx_count_store(g: &mut SGIPIGfx, slot: usize, addr: u64, who: &str) -> bool {
-    if !sgi_pi_gfx_covers(g, slot, addr) {
-        return false;
-    }
-    // Whether the twelve-bit counter wraps, saturates or goes negative is
-    // unknown. It wraps, and says so.
-    if g.credit[slot] == 0 {
-        crate::qlog!("{}: graphics credit counter {} wrapped below zero\n", who, (b'A' + slot as u8) as char);
-    }
-    g.credit[slot] = g.credit[slot].wrapping_sub(1) & SGI_PI_GFX_CREDIT_MASK;
-    true
-}
-
-/// After a counted store: whether the slot's graphics interrupt must be
-/// raised now. True once when the counter has fallen below the bias; the
-/// counter rising above the bias again re-arms it. The stall that
-/// accompanies it on the chip is modelled as zero length.
-pub fn sgi_pi_gfx_take_starved(g: &mut SGIPIGfx, slot: usize, who: &str) -> bool {
-    assert!(slot < SGI_PI_GFX_SLOTS);
-    if g.starved[slot] || g.credit[slot] >= g.bias[slot] {
-        return false;
-    }
-    g.starved[slot] = true;
-    if !g.stall_logged[slot] {
-        g.stall_logged[slot] = true;
-        crate::qlog!(
-            "{}: graphics credit counter {} fell below its bias; interrupt raised at once, the write stall and the interrupt counter are not modelled\n",
-            who,
-            (b'A' + slot as u8) as char
-        );
-    }
-    true
-}
-
-/// Ticks from the count to the compare: a whole turn when they are equal.
-fn sgi_pi_gfx_int_left(g: &SGIPIGfx, slot: usize) -> u64 {
-    let left = g.int_compare[slot].wrapping_sub(g.int_count[slot]) & SGI_PI_GFX_INT_MASK;
-
-    if left != 0 { left as u64 } else { SGI_PI_GFX_INT_MASK as u64 + 1 }
-}
-
-/// Brings int_count up to `now`, then starts or stops the count for the
-/// credit counter as it now stands. True when the counter reached the
-/// compare: the caller sends the interrupt.
-pub fn sgi_pi_gfx_int_advance(g: &mut SGIPIGfx, slot: usize, now: u64) -> bool {
-    let mut fired = false;
-
-    assert!(slot < SGI_PI_GFX_SLOTS);
-    if g.int_running[slot] && now > g.int_epoch[slot] {
-        let elapsed = now - g.int_epoch[slot];
-
-        if elapsed >= sgi_pi_gfx_int_left(g, slot) {
-            g.int_count[slot] = g.int_compare[slot];
-            fired = true;
-        } else {
-            g.int_count[slot] = (g.int_count[slot] as u64).wrapping_add(elapsed) as u32 & SGI_PI_GFX_INT_MASK;
+impl SGIPIGfx {
+    /// The counter above the bias re-arms the slot's graphics interrupt.
+    fn rearm(&mut self, slot: usize) {
+        if self.credit[slot] > self.bias[slot] {
+            self.starved[slot] = false;
         }
     }
-    g.int_epoch[slot] = now;
-    // At or below zero, and (the model's choice) below a nonzero bias.
-    g.int_running[slot] = g.credit[slot] == 0 && g.bias[slot] > 0;
-    fired
-}
 
-/// The tick at which the interrupt counter reaches the compare, or
-/// u64::MAX while it does not run.
-pub fn sgi_pi_gfx_int_due(g: &SGIPIGfx, slot: usize) -> u64 {
-    assert!(slot < SGI_PI_GFX_SLOTS);
-    if !g.int_running[slot] {
-        return u64::MAX;
+    /// Every register zero, every page disabled (the model's choice).
+    pub fn reset(&mut self) {
+        *self = SGIPIGfx::default();
     }
-    g.int_epoch[slot].wrapping_add(sgi_pi_gfx_int_left(g, slot))
+
+    /// Register n of the block, 0 to SGI_PI_GFX_REGS - 1, counted in
+    /// doublewords from SGI_PI_GFX_BASE.
+    pub fn read(&self, n: u32) -> u64 {
+        let slot = (n / SGI_PI_GFX_SLOT_REGS) as usize;
+
+        assert!(n < SGI_PI_GFX_REGS);
+        match n % SGI_PI_GFX_SLOT_REGS {
+            SGI_PI_GFX_PAGE => self.page[slot],
+            SGI_PI_GFX_CREDIT => self.credit[slot] as u64,
+            SGI_PI_GFX_BIAS => self.bias[slot] as u64,
+            SGI_PI_GFX_INT_COUNT => self.int_count[slot] as u64,
+            _ => self.int_compare[slot] as u64,
+        }
+    }
+
+    /// A write keeps the field's bits; a write to the credit counter replaces
+    /// the count.
+    pub fn write(&mut self, n: u32, value: u64) {
+        let slot = (n / SGI_PI_GFX_SLOT_REGS) as usize;
+
+        assert!(n < SGI_PI_GFX_REGS);
+        match n % SGI_PI_GFX_SLOT_REGS {
+            SGI_PI_GFX_PAGE => self.page[slot] = value & SGI_PI_GFX_PAGE_MASK,
+            SGI_PI_GFX_CREDIT => {
+                self.credit[slot] = (value as u32) & SGI_PI_GFX_CREDIT_MASK;
+                self.rearm(slot);
+            }
+            SGI_PI_GFX_BIAS => self.bias[slot] = (value as u32) & SGI_PI_GFX_BIAS_MASK,
+            SGI_PI_GFX_INT_COUNT => self.int_count[slot] = (value as u32) & SGI_PI_GFX_INT_MASK,
+            _ => self.int_compare[slot] = (value as u32) & SGI_PI_GFX_INT_MASK,
+        }
+    }
+
+    /// Whether the slot's page is enabled and covers physical address `addr`.
+    pub fn covers(&self, slot: usize, addr: u64) -> bool {
+        assert!(slot < SGI_PI_GFX_SLOTS);
+        let page = self.page[slot];
+        (page & SGI_PI_GFX_PAGE_ENABLE) != 0
+            && (addr & SGI_PI_GFX_PAGE_ADDRESS) == (page & SGI_PI_GFX_PAGE_ADDRESS)
+    }
+
+    /// An uncached I/O store by the processor in `slot` reached physical
+    /// address bits 39:0 `addr`. Charges one credit when the slot's page is
+    /// enabled and covers it, and returns whether it did. `who` names the
+    /// device in log messages.
+    pub fn count_store(&mut self, slot: usize, addr: u64, who: &str) -> bool {
+        if !self.covers(slot, addr) {
+            return false;
+        }
+        // Whether the twelve-bit counter wraps, saturates or goes negative is
+        // unknown. It wraps, and says so.
+        if self.credit[slot] == 0 {
+            crate::qlog!("{}: graphics credit counter {} wrapped below zero\n", who, (b'A' + slot as u8) as char);
+        }
+        self.credit[slot] = self.credit[slot].wrapping_sub(1) & SGI_PI_GFX_CREDIT_MASK;
+        true
+    }
+
+    /// After a counted store: whether the slot's graphics interrupt must be
+    /// raised now. True once when the counter has fallen below the bias; the
+    /// counter rising above the bias again re-arms it. The stall that
+    /// accompanies it on the chip is modelled as zero length.
+    pub fn take_starved(&mut self, slot: usize, who: &str) -> bool {
+        assert!(slot < SGI_PI_GFX_SLOTS);
+        if self.starved[slot] || self.credit[slot] >= self.bias[slot] {
+            return false;
+        }
+        self.starved[slot] = true;
+        if !self.stall_logged[slot] {
+            self.stall_logged[slot] = true;
+            crate::qlog!(
+                "{}: graphics credit counter {} fell below its bias; interrupt raised at once, the write stall and the interrupt counter are not modelled\n",
+                who,
+                (b'A' + slot as u8) as char
+            );
+        }
+        true
+    }
+
+    /// Ticks from the count to the compare: a whole turn when they are equal.
+    fn int_left(&self, slot: usize) -> u64 {
+        let left = self.int_compare[slot].wrapping_sub(self.int_count[slot]) & SGI_PI_GFX_INT_MASK;
+
+        if left != 0 { left as u64 } else { SGI_PI_GFX_INT_MASK as u64 + 1 }
+    }
+
+    /// Brings int_count up to `now`, then starts or stops the count for the
+    /// credit counter as it now stands. True when the counter reached the
+    /// compare: the caller sends the interrupt.
+    pub fn int_advance(&mut self, slot: usize, now: u64) -> bool {
+        let mut fired = false;
+
+        assert!(slot < SGI_PI_GFX_SLOTS);
+        if self.int_running[slot] && now > self.int_epoch[slot] {
+            let elapsed = now - self.int_epoch[slot];
+
+            if elapsed >= self.int_left(slot) {
+                self.int_count[slot] = self.int_compare[slot];
+                fired = true;
+            } else {
+                self.int_count[slot] = (self.int_count[slot] as u64).wrapping_add(elapsed) as u32 & SGI_PI_GFX_INT_MASK;
+            }
+        }
+        self.int_epoch[slot] = now;
+        // At or below zero, and (the model's choice) below a nonzero bias.
+        self.int_running[slot] = self.credit[slot] == 0 && self.bias[slot] > 0;
+        fired
+    }
+
+    /// The tick at which the interrupt counter reaches the compare, or
+    /// u64::MAX while it does not run.
+    pub fn int_due(&self, slot: usize) -> u64 {
+        assert!(slot < SGI_PI_GFX_SLOTS);
+        if !self.int_running[slot] {
+            return u64::MAX;
+        }
+        self.int_epoch[slot].wrapping_add(self.int_left(slot))
+    }
 }
 
 thread_local! {
@@ -245,15 +247,17 @@ pub fn sgi_pi_gfx_take_mark() -> bool {
     SGI_PI_GFX_FORWARDING_COUNTED.with(|m| m.replace(false))
 }
 
-/// `credits` credits returned to `slot`.
-pub fn sgi_pi_gfx_add_credits(g: &mut SGIPIGfx, slot: usize, credits: u32, who: &str) {
-    assert!(slot < SGI_PI_GFX_SLOTS);
-    let sum = g.credit[slot] as u64 + credits as u64;
-    if sum > SGI_PI_GFX_CREDIT_MASK as u64 {
-        crate::qlog!("{}: graphics credit counter {} wrapped above {:#x}\n", who, (b'A' + slot as u8) as char, SGI_PI_GFX_CREDIT_MASK);
+impl SGIPIGfx {
+    /// `credits` credits returned to `slot`.
+    pub fn add_credits(&mut self, slot: usize, credits: u32, who: &str) {
+        assert!(slot < SGI_PI_GFX_SLOTS);
+        let sum = self.credit[slot] as u64 + credits as u64;
+        if sum > SGI_PI_GFX_CREDIT_MASK as u64 {
+            crate::qlog!("{}: graphics credit counter {} wrapped above {:#x}\n", who, (b'A' + slot as u8) as char, SGI_PI_GFX_CREDIT_MASK);
+        }
+        self.credit[slot] = (sum & SGI_PI_GFX_CREDIT_MASK as u64) as u32;
+        self.rearm(slot);
     }
-    g.credit[slot] = (sum & SGI_PI_GFX_CREDIT_MASK as u64) as u32;
-    sgi_pi_gfx_rearm(g, slot);
 }
 
 /// Where a graphics node-widget map sends a widget's credits.

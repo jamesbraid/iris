@@ -162,140 +162,142 @@ pub fn sgi_soft_fixed_unit(c: f64) -> u32 {
     (fx_min(fx_max(c, 0.0), 1.0) * 255.0 + 0.5) as u32
 }
 
-/// Whether draw r's filled triangles sample its texture in fixed point,
-/// and if so f made ready for them; the tests sgi_soft_texture_setup()
-/// has already made are not repeated.
-pub fn sgi_soft_fixed_setup(r: &SGISoftDraw, f: &mut SGISoftFixedTex) -> bool {
-    let im_p = r.texture;
-    let base_p = r.texture_base;
-    let mipmap: bool;
-    let edge_only: bool;
-    let mut border = [0.0f64; 4];
+impl SGISoftDraw {
+    /// Whether draw r's filled triangles sample its texture in fixed point,
+    /// and if so f made ready for them; the tests sgi_soft_texture_setup()
+    /// has already made are not repeated.
+    pub fn fixed_setup(&self, f: &mut SGISoftFixedTex) -> bool {
+        let im_p = self.texture;
+        let base_p = self.texture_base;
+        let mipmap: bool;
+        let edge_only: bool;
+        let mut border = [0.0f64; 4];
 
-    if sgi_soft_texture_path.load(std::sync::atomic::Ordering::Relaxed) == SGI_RASTER_TEXTURE_DOUBLE
-        || im_p.is_null()
-        || r.texels.is_null()
-        || r.t.mixed_frame
-        || im_p.volume
-        || im_p.one_dimensional
-        || r.st.index_bits != 0
-        || r.st.alpha_test != 0
-        || r.logic_op
-    {
-        return false;
-    }
-    let im: &SGIGLTexImage = &im_p;
-    let base: Option<&SGIGLTexLevel> = base_p.as_opt().map(|b| &*b);
-    let p: Option<&SGIGLTexPyramid> = im.pyramid.as_opt().map(|b| &*b);
-    *f = SGISoftFixedTex::default();
-    f.format = match base {
-        Some(b) => b.base_format,
-        None => im.base_format,
-    };
-    f.min = im.min_filter;
-    f.mag = im.mag_filter;
-    f.wrap_s = im.wrap_s;
-    f.wrap_t = im.wrap_t;
-    f.upper_s = if im.max_clamp { im.max_clamp_s } else { 1.0 };
-    f.upper_t = if im.max_clamp { im.max_clamp_t } else { 1.0 };
-    mipmap = sgi_soft_texture_mipmap(f.min);
-    if f.format == SGI_GL_DEPTH_COMPONENT
-        || (f.mag != SGI_GL_NEAREST && f.mag != SGI_GL_LINEAR)
-        || (f.min != SGI_GL_NEAREST && f.min != SGI_GL_LINEAR && !mipmap)
-    {
-        return false;
-    }
-    edge_only = (f.wrap_s == SGI_GL_REPEAT || f.wrap_s == SGI_GL_CLAMP_TO_EDGE)
-        && (f.wrap_t == SGI_GL_REPEAT || f.wrap_t == SGI_GL_CLAMP_TO_EDGE);
-    f.range = if base.is_some() { r.texture_last.wrapping_sub(p.unwrap().base_level) } else { 0 };
-    if f.range as usize >= SGI_SOFT_FIXED_LEVELS {
-        return false;
-    }
-    for i in 0..=f.range {
-        let l: Option<&SGIGLTexLevel> = if base.is_some() {
-            let p = p.unwrap();
-            sgi_soft_texture_level(p, p.base_level.wrapping_add(i))
-        } else {
-            None
-        };
-        let fl = &mut f.level[i as usize];
-        let format = match l {
-            Some(l) => l.base_format,
-            None => im.base_format,
-        };
-        let raw = match l {
-            Some(l) => l.read_texel_components.is_some(),
-            None => im.read_texel_components.is_some(),
-        };
-
-        fl.level = match l {
-            Some(l) => P::from_ref(l),
-            None => P::null(),
-        };
-        fl.width = l.map_or(im.width, |l| l.width);
-        fl.height = l.map_or(im.height, |l| l.height);
-        fl.width_shift = ctz32(fl.width);
-        fl.height_shift = ctz32(fl.height);
-        fl.raw = raw;
-        if l.is_none() && i != 0 {
-            return false;
-        }
-        let border_texels = match l {
-            Some(l) => l.border,
-            None => im.border,
-        };
-        let readable = if raw {
-            sgi_soft_fixed_widths(format, &l.map_or(im.component_bits, |l| l.component_bits))
-        } else {
-            match l {
-                Some(l) => l.read_texel.is_some(),
-                None => im.read_texel.is_some(),
-            }
-        };
-        if fl.width > SGI_SOFT_FIXED_MAX_SIDE
-            || fl.height > SGI_SOFT_FIXED_MAX_SIDE
-            || (fl.width as u64) * (fl.height as u64) > SGI_SOFT_FIXED_MAX_TEXELS as u64
-            || !is_power_of_2(fl.width as u64)
-            || !is_power_of_2(fl.height as u64)
-            || format != f.format
-            || (border_texels != 0 && !edge_only)
-            || !readable
+        if sgi_soft_texture_path.load(std::sync::atomic::Ordering::Relaxed) == SGI_RASTER_TEXTURE_DOUBLE
+            || im_p.is_null()
+            || self.texels.is_null()
+            || self.t.mixed_frame
+            || im_p.volume
+            || im_p.one_dimensional
+            || self.st.index_bits != 0
+            || self.st.alpha_test != 0
+            || self.logic_op
         {
             return false;
         }
-    }
-    for k in 0..4 {
-        border[k] = fx_min(fx_max(im.border_color[k], 0.0), 1.0) as f64;
-    }
-    sgi_soft_texture_components(f.format, &mut border);
-    f.border = sgi_soft_fixed_lanes(
-        sgi_soft_fixed_unit(border[0]) << 24
-            | sgi_soft_fixed_unit(border[1]) << 16
-            | sgi_soft_fixed_unit(border[2]) << 8
-            | sgi_soft_fixed_unit(border[3]),
-    );
-    // An image without a pyramid has one filter and no footprint.
-    f.lod = base.is_some() && (mipmap || f.min != f.mag);
-    f.choice = f.lod && !(f.min == SGI_GL_LINEAR_MIPMAP_LINEAR && f.mag == SGI_GL_LINEAR);
-    if let Some(base) = base {
-        let p = p.unwrap();
-        let lmax = SGI_SOFT_FIXED_LAMBDA_MAX as f64;
+        let im: &SGIGLTexImage = &im_p;
+        let base: Option<&SGIGLTexLevel> = base_p.as_opt().map(|b| &*b);
+        let p: Option<&SGIGLTexPyramid> = im.pyramid.as_opt().map(|b| &*b);
+        *f = SGISoftFixedTex::default();
+        f.format = match base {
+            Some(b) => b.base_format,
+            None => im.base_format,
+        };
+        f.min = im.min_filter;
+        f.mag = im.mag_filter;
+        f.wrap_s = im.wrap_s;
+        f.wrap_t = im.wrap_t;
+        f.upper_s = if im.max_clamp { im.max_clamp_s } else { 1.0 };
+        f.upper_t = if im.max_clamp { im.max_clamp_t } else { 1.0 };
+        mipmap = sgi_soft_texture_mipmap(f.min);
+        if f.format == SGI_GL_DEPTH_COMPONENT
+            || (f.mag != SGI_GL_NEAREST && f.mag != SGI_GL_LINEAR)
+            || (f.min != SGI_GL_NEAREST && f.min != SGI_GL_LINEAR && !mipmap)
+        {
+            return false;
+        }
+        edge_only = (f.wrap_s == SGI_GL_REPEAT || f.wrap_s == SGI_GL_CLAMP_TO_EDGE)
+            && (f.wrap_t == SGI_GL_REPEAT || f.wrap_t == SGI_GL_CLAMP_TO_EDGE);
+        f.range = if base.is_some() { self.texture_last.wrapping_sub(p.unwrap().base_level) } else { 0 };
+        if f.range as usize >= SGI_SOFT_FIXED_LEVELS {
+            return false;
+        }
+        for i in 0..=f.range {
+            let l: Option<&SGIGLTexLevel> = if base.is_some() {
+                let p = p.unwrap();
+                p.soft_texture_level(p.base_level.wrapping_add(i))
+            } else {
+                None
+            };
+            let fl = &mut f.level[i as usize];
+            let format = match l {
+                Some(l) => l.base_format,
+                None => im.base_format,
+            };
+            let raw = match l {
+                Some(l) => l.read_texel_components.is_some(),
+                None => im.read_texel_components.is_some(),
+            };
 
-        // Rounded up, as an exact lambda is (sgi_soft_fixed_decide()).
-        f.min_lod = fx_min(fx_max(p.min_lod * 256.0, -lmax), lmax).ceil() as i32;
-        f.max_lod = fx_min(fx_max(p.max_lod * 256.0, -lmax), lmax).ceil() as i32;
-        f.ns = base.width as f64 * sgi_soft_texture_lod_scale(im.lod_scale_s);
-        f.nt = base.height as f64 * sgi_soft_texture_lod_scale(im.lod_scale_t);
+            fl.level = match l {
+                Some(l) => P::from_ref(l),
+                None => P::null(),
+            };
+            fl.width = l.map_or(im.width, |l| l.width);
+            fl.height = l.map_or(im.height, |l| l.height);
+            fl.width_shift = ctz32(fl.width);
+            fl.height_shift = ctz32(fl.height);
+            fl.raw = raw;
+            if l.is_none() && i != 0 {
+                return false;
+            }
+            let border_texels = match l {
+                Some(l) => l.border,
+                None => im.border,
+            };
+            let readable = if raw {
+                sgi_soft_fixed_widths(format, &l.map_or(im.component_bits, |l| l.component_bits))
+            } else {
+                match l {
+                    Some(l) => l.read_texel.is_some(),
+                    None => im.read_texel.is_some(),
+                }
+            };
+            if fl.width > SGI_SOFT_FIXED_MAX_SIDE
+                || fl.height > SGI_SOFT_FIXED_MAX_SIDE
+                || (fl.width as u64) * (fl.height as u64) > SGI_SOFT_FIXED_MAX_TEXELS as u64
+                || !is_power_of_2(fl.width as u64)
+                || !is_power_of_2(fl.height as u64)
+                || format != f.format
+                || (border_texels != 0 && !edge_only)
+                || !readable
+            {
+                return false;
+            }
+        }
+        for k in 0..4 {
+            border[k] = fx_min(fx_max(im.border_color[k], 0.0), 1.0) as f64;
+        }
+        sgi_soft_texture_components(f.format, &mut border);
+        f.border = sgi_soft_fixed_lanes(
+            sgi_soft_fixed_unit(border[0]) << 24
+                | sgi_soft_fixed_unit(border[1]) << 16
+                | sgi_soft_fixed_unit(border[2]) << 8
+                | sgi_soft_fixed_unit(border[3]),
+        );
+        // An image without a pyramid has one filter and no footprint.
+        f.lod = base.is_some() && (mipmap || f.min != f.mag);
+        f.choice = f.lod && !(f.min == SGI_GL_LINEAR_MIPMAP_LINEAR && f.mag == SGI_GL_LINEAR);
+        if let Some(base) = base {
+            let p = p.unwrap();
+            let lmax = SGI_SOFT_FIXED_LAMBDA_MAX as f64;
+
+            // Rounded up, as an exact lambda is (sgi_soft_fixed_decide()).
+            f.min_lod = fx_min(fx_max(p.min_lod * 256.0, -lmax), lmax).ceil() as i32;
+            f.max_lod = fx_min(fx_max(p.max_lod * 256.0, -lmax), lmax).ceil() as i32;
+            f.ns = base.width as f64 * sgi_soft_texture_lod_scale(im.lod_scale_s);
+            f.nt = base.height as f64 * sgi_soft_texture_lod_scale(im.lod_scale_t);
+        }
+        // sgi_soft_texture_select()'s c, for these filters.
+        f.mag_below = if f.mag == SGI_GL_LINEAR
+            && (f.min == SGI_GL_NEAREST_MIPMAP_NEAREST || f.min == SGI_GL_NEAREST_MIPMAP_LINEAR)
+        {
+            128
+        } else {
+            0
+        };
+        true
     }
-    // sgi_soft_texture_select()'s c, for these filters.
-    f.mag_below = if f.mag == SGI_GL_LINEAR
-        && (f.min == SGI_GL_NEAREST_MIPMAP_NEAREST || f.min == SGI_GL_NEAREST_MIPMAP_LINEAR)
-    {
-        128
-    } else {
-        0
-    };
-    true
 }
 
 /// Allocate zeroed cells for size texels, or None where that fails.
@@ -309,175 +311,181 @@ fn sgi_soft_fixed_alloc(size: usize) -> Option<Vec<u64>> {
     Some(v)
 }
 
-/// Make this thread's texel store ready for draw r's levels: false, and
-/// the draw samples in double, where it cannot be allocated.
-pub fn sgi_soft_fixed_begin(r: &SGISoftDraw) -> bool {
-    let f: &SGISoftFixedTex = &r.fixed;
+impl SGISoftDraw {
+    /// Make this thread's texel store ready for draw r's levels: false, and
+    /// the draw samples in double, where it cannot be allocated.
+    pub fn fixed_begin(&self) -> bool {
+        let f: &SGISoftFixedTex = &self.fixed;
 
-    for i in 0..=f.range as usize {
-        let store = &mut r.texels.get().fixed[i];
-        let size = (f.level[i].width as usize) * (f.level[i].height as usize);
+        for i in 0..=f.range as usize {
+            let store = &mut self.texels.get().fixed[i];
+            let size = (f.level[i].width as usize) * (f.level[i].height as usize);
 
-        if store.size < size {
-            store.cell = Vec::new();
-            store.size = 0;
-            match sgi_soft_fixed_alloc(size) {
-                Some(v) => store.cell = v,
-                None => return false,
-            }
-            store.size = size;
-        }
-    }
-    true
-}
-
-/// Interior texel (x, y) of relative level i of draw r's image as a packed
-/// texel, components expanded; false where the read fails or returns a
-/// component beyond its width.
-pub fn sgi_soft_fixed_read(r: &SGISoftDraw, f: &SGISoftFixedTex, i: u32, x: u32, y: u32, texel: &mut u32) -> bool {
-    let fl = &f.level[i as usize];
-    let l: Option<&SGIGLTexLevel> = fl.level.as_opt().map(|l| &*l);
-    let im: &SGIGLTexImage = &r.texture;
-    let mut rgba: u32 = 0;
-    let mut read: bool;
-
-    if fl.raw {
-        let bits = l.map_or(im.component_bits, |l| l.component_bits);
-        let mask = sgi_soft_texture_component_mask(f.format);
-        let mut c = [0u16; 4];
-
-        read = match l {
-            Some(l) => (l.read_texel_components.unwrap())(l.opaque, l.level, x, y, &mut c),
-            None => (im.read_texel_components.unwrap())(im.opaque, x, y, &mut c),
-        };
-        let mut k = 0;
-        while read && k < 4 {
-            if (mask & (1u8 << k)) != 0 {
-                read = (c[k] as u32) < (1u32 << bits[k]);
-                rgba |= sgi_soft_fixed_component(c[k] as u32, bits[k]) << (24 - 8 * k);
-            }
-            k += 1;
-        }
-    } else {
-        read = match l {
-            Some(l) => (l.read_texel.unwrap())(l.opaque, l.level, x, y, &mut rgba),
-            None => (im.read_texel.unwrap())(im.opaque, x, y, &mut rgba),
-        };
-    }
-    *texel = sgi_soft_fixed_expand(f.format, rgba);
-    read
-}
-
-/// Read interior texel (x, y) of relative level i into its cell, and
-/// return the cell, tagged failed where the read failed.
-#[inline(never)]
-pub fn sgi_soft_fixed_fill(r: &SGISoftDraw, i: u32, x: u32, y: u32, cell: &mut u64) -> u64 {
-    let tag = r.texels.tag;
-    let mut texel = 0u32;
-    let read = sgi_soft_fixed_read(r, &r.fixed, i, x, y, &mut texel);
-
-    *cell = ((if read { tag } else { tag | SGI_SOFT_FIXED_FAILED }) as u64) << 32 | texel as u64;
-    *cell
-}
-
-/// The relative levels a draw's fragments can sample, first to last: the
-/// level clamp keeps lambda within [min_lod, max_lod], and a lambda above
-/// a half never magnifies, so no level outside reaches the sampler.
-pub fn sgi_soft_fixed_reach(f: &SGISoftFixedTex, first: &mut u32, last: &mut u32) {
-    *first = 0;
-    *last = f.range;
-    if !f.lod {
-        return;
-    }
-    if f.min_lod > 128 {
-        *first = fx_min((f.min_lod >> 8) as u32, f.range);
-    }
-    *last = if f.max_lod <= 0 { 0 } else { fx_min((f.max_lod.wrapping_add(255)) >> 8, f.range as i32) as u32 };
-    *first = fx_min(*first, *last);
-}
-
-/// Read every texel of the levels draw r can sample into this thread's
-/// plain arrays, which f then shares with the draw's bands: for a large
-/// draw that covers about as many pixels as those levels have texels,
-/// which then reads each once rather than once in each band, and taps
-/// them without a tag. False, and the draw reads texels as it reaches them,
-/// where any read fails or the arrays cannot be allocated.
-pub fn sgi_soft_fixed_prefill(r: &SGISoftDraw, f: &mut SGISoftFixedTex) -> bool {
-    let mut first = 0u32;
-    let mut last = 0u32;
-
-    sgi_soft_fixed_reach(f, &mut first, &mut last);
-    for i in first..=last {
-        let store = &mut r.texels.get().fixed[i as usize];
-        let fl = f.level[i as usize];
-        let size = (fl.width as usize) * (fl.height as usize);
-
-        if store.plain_size < size {
-            store.plain = Vec::new();
-            store.plain_size = 0;
-            match sgi_soft_fixed_alloc(size) {
-                Some(v) => store.plain = v,
-                None => return false,
-            }
-            store.plain_size = size;
-        }
-        for y in 0..fl.height {
-            for x in 0..fl.width {
-                let mut texel = 0u32;
-
-                if !sgi_soft_fixed_read(r, f, i, x, y, &mut texel) {
-                    return false;
+            if store.size < size {
+                store.cell = Vec::new();
+                store.size = 0;
+                match sgi_soft_fixed_alloc(size) {
+                    Some(v) => store.cell = v,
+                    None => return false,
                 }
-                store.plain[((y as usize) << fl.width_shift) + x as usize] = sgi_soft_fixed_lanes(texel);
+                store.size = size;
             }
         }
+        true
     }
-    for i in first..=last {
-        f.plain[i as usize] = P(r.texels.fixed[i as usize].plain.as_ptr() as *mut u64);
+
+    /// Interior texel (x, y) of relative level i of draw r's image as a packed
+    /// texel, components expanded; false where the read fails or returns a
+    /// component beyond its width.
+    pub fn fixed_read(&self, f: &SGISoftFixedTex, i: u32, x: u32, y: u32, texel: &mut u32) -> bool {
+        let fl = &f.level[i as usize];
+        let l: Option<&SGIGLTexLevel> = fl.level.as_opt().map(|l| &*l);
+        let im: &SGIGLTexImage = &self.texture;
+        let mut rgba: u32 = 0;
+        let mut read: bool;
+
+        if fl.raw {
+            let bits = l.map_or(im.component_bits, |l| l.component_bits);
+            let mask = sgi_soft_texture_component_mask(f.format);
+            let mut c = [0u16; 4];
+
+            read = match l {
+                Some(l) => (l.read_texel_components.unwrap())(l.opaque, l.level, x, y, &mut c),
+                None => (im.read_texel_components.unwrap())(im.opaque, x, y, &mut c),
+            };
+            let mut k = 0;
+            while read && k < 4 {
+                if (mask & (1u8 << k)) != 0 {
+                    read = (c[k] as u32) < (1u32 << bits[k]);
+                    rgba |= sgi_soft_fixed_component(c[k] as u32, bits[k]) << (24 - 8 * k);
+                }
+                k += 1;
+            }
+        } else {
+            read = match l {
+                Some(l) => (l.read_texel.unwrap())(l.opaque, l.level, x, y, &mut rgba),
+                None => (im.read_texel.unwrap())(im.opaque, x, y, &mut rgba),
+            };
+        }
+        *texel = sgi_soft_fixed_expand(f.format, rgba);
+        read
     }
-    f.prefilled = true;
-    true
+
+    /// Read interior texel (x, y) of relative level i into its cell, and
+    /// return the cell, tagged failed where the read failed.
+    #[inline(never)]
+    pub fn fixed_fill(&self, i: u32, x: u32, y: u32, cell: &mut u64) -> u64 {
+        let tag = self.texels.tag;
+        let mut texel = 0u32;
+        let read = self.fixed_read(&self.fixed, i, x, y, &mut texel);
+
+        *cell = ((if read { tag } else { tag | SGI_SOFT_FIXED_FAILED }) as u64) << 32 | texel as u64;
+        *cell
+    }
 }
 
-/// Interior texel (x, y) of relative level i in lanes, read once a draw.
-#[inline(always)]
-pub fn sgi_soft_fixed_texel(r: &SGISoftDraw, i: u32, x: u32, y: u32, lanes: &mut u64) -> bool {
-    let f: &SGISoftFixedTex = &r.fixed;
-    let index = ((y as usize) << f.level[i as usize].width_shift) + x as usize;
-    let tag = r.texels.tag;
-
-    if f.prefilled {
-        *lanes = unsafe { *f.plain[i as usize].0.add(index) };
-        return true;
-    }
-    let cell = &mut r.texels.get().fixed[i as usize].cell[index];
-    let mut v = *cell;
-    if (v >> 32) as u32 != tag {
-        if (v >> 32) as u32 == (tag | SGI_SOFT_FIXED_FAILED) {
-            return false;
+impl SGISoftFixedTex {
+    /// The relative levels a draw's fragments can sample, first to last: the
+    /// level clamp keeps lambda within [min_lod, max_lod], and a lambda above
+    /// a half never magnifies, so no level outside reaches the sampler.
+    pub fn fixed_reach(&self, first: &mut u32, last: &mut u32) {
+        *first = 0;
+        *last = self.range;
+        if !self.lod {
+            return;
         }
-        v = sgi_soft_fixed_fill(r, i, x, y, cell);
+        if self.min_lod > 128 {
+            *first = fx_min((self.min_lod >> 8) as u32, self.range);
+        }
+        *last = if self.max_lod <= 0 { 0 } else { fx_min((self.max_lod.wrapping_add(255)) >> 8, self.range as i32) as u32 };
+        *first = fx_min(*first, *last);
+    }
+}
+
+impl SGISoftDraw {
+    /// Read every texel of the levels draw r can sample into this thread's
+    /// plain arrays, which f then shares with the draw's bands: for a large
+    /// draw that covers about as many pixels as those levels have texels,
+    /// which then reads each once rather than once in each band, and taps
+    /// them without a tag. False, and the draw reads texels as it reaches them,
+    /// where any read fails or the arrays cannot be allocated.
+    pub fn fixed_prefill(&self, f: &mut SGISoftFixedTex) -> bool {
+        let mut first = 0u32;
+        let mut last = 0u32;
+
+        f.fixed_reach(&mut first, &mut last);
+        for i in first..=last {
+            let store = &mut self.texels.get().fixed[i as usize];
+            let fl = f.level[i as usize];
+            let size = (fl.width as usize) * (fl.height as usize);
+
+            if store.plain_size < size {
+                store.plain = Vec::new();
+                store.plain_size = 0;
+                match sgi_soft_fixed_alloc(size) {
+                    Some(v) => store.plain = v,
+                    None => return false,
+                }
+                store.plain_size = size;
+            }
+            for y in 0..fl.height {
+                for x in 0..fl.width {
+                    let mut texel = 0u32;
+
+                    if !self.fixed_read(f, i, x, y, &mut texel) {
+                        return false;
+                    }
+                    store.plain[((y as usize) << fl.width_shift) + x as usize] = sgi_soft_fixed_lanes(texel);
+                }
+            }
+        }
+        for i in first..=last {
+            f.plain[i as usize] = P(self.texels.fixed[i as usize].plain.as_ptr() as *mut u64);
+        }
+        f.prefilled = true;
+        true
+    }
+
+    /// Interior texel (x, y) of relative level i in lanes, read once a draw.
+    #[inline(always)]
+    pub fn fixed_texel(&self, i: u32, x: u32, y: u32, lanes: &mut u64) -> bool {
+        let f: &SGISoftFixedTex = &self.fixed;
+        let index = ((y as usize) << f.level[i as usize].width_shift) + x as usize;
+        let tag = self.texels.tag;
+
+        if f.prefilled {
+            *lanes = unsafe { *f.plain[i as usize].0.add(index) };
+            return true;
+        }
+        let cell = &mut self.texels.get().fixed[i as usize].cell[index];
+        let mut v = *cell;
         if (v >> 32) as u32 != tag {
-            return false;
+            if (v >> 32) as u32 == (tag | SGI_SOFT_FIXED_FAILED) {
+                return false;
+            }
+            v = self.fixed_fill(i, x, y, cell);
+            if (v >> 32) as u32 != tag {
+                return false;
+            }
         }
+        *lanes = sgi_soft_fixed_lanes(v as u32);
+        true
     }
-    *lanes = sgi_soft_fixed_lanes(v as u32);
-    true
-}
 
-/// The texel at signed index (x, y) of relative level i after wrapping,
-/// which leaves an index outside the interior only under CLAMP and
-/// CLAMP_TO_BORDER: there the border colour.
-#[inline(always)]
-pub fn sgi_soft_fixed_tap<const REPEAT: bool>(r: &SGISoftDraw, i: u32, x: i64, y: i64, lanes: &mut u64) -> bool {
-    let f: &SGISoftFixedTex = &r.fixed;
-    let fl = &f.level[i as usize];
+    /// The texel at signed index (x, y) of relative level i after wrapping,
+    /// which leaves an index outside the interior only under CLAMP and
+    /// CLAMP_TO_BORDER: there the border colour.
+    #[inline(always)]
+    pub fn fixed_tap<const REPEAT: bool>(&self, i: u32, x: i64, y: i64, lanes: &mut u64) -> bool {
+        let f: &SGISoftFixedTex = &self.fixed;
+        let fl = &f.level[i as usize];
 
-    if !REPEAT && (x < 0 || y < 0 || x >= fl.width as i64 || y >= fl.height as i64) {
-        *lanes = f.border;
-        return true;
+        if !REPEAT && (x < 0 || y < 0 || x >= fl.width as i64 || y >= fl.height as i64) {
+            *lanes = f.border;
+            return true;
+        }
+        self.fixed_texel(i, x as u32, y as u32, lanes)
     }
-    sgi_soft_fixed_texel(r, i, x as u32, y as u32, lanes)
 }
 
 /// floor(x) for |x| below 2^62.
@@ -549,45 +557,47 @@ pub fn sgi_soft_fixed_axis(mut u: i64, n: u32, wrap: u32, upper: f64, linear: bo
 /// Two of a texel's lanes, in the low 16 bits of each 32-bit half.
 pub const SGI_SOFT_FIXED_PAIRS: u64 = 0x0000ffff0000ffff;
 
-/// Relative level i sampled at position (u, v), in 1/256 of its texels,
-/// with filter, each component in 1/(255 * 2^16): out[0] holds red over
-/// blue and out[1] green over alpha, one to each 32-bit half. Across, one
-/// product weights all four of a texel's components in their 16-bit
-/// lanes; down, the sums need 24 bits, so two products take two each.
-#[inline(always)]
-pub fn sgi_soft_fixed_level<const REPEAT: bool>(r: &SGISoftDraw, i: u32, filter: u32, u: i64, v: i64, out: &mut [u64; 2]) -> bool {
-    let f: &SGISoftFixedTex = &r.fixed;
-    let fl = &f.level[i as usize];
-    let ws = if REPEAT { SGI_GL_REPEAT } else { f.wrap_s };
-    let wt = if REPEAT { SGI_GL_REPEAT } else { f.wrap_t };
-    let (mut x0, mut x1, mut y0, mut y1) = (0i64, 0i64, 0i64, 0i64);
-    let (mut c00, mut c10, mut c01, mut c11) = (0u64, 0u64, 0u64, 0u64);
+impl SGISoftDraw {
+    /// Relative level i sampled at position (u, v), in 1/256 of its texels,
+    /// with filter, each component in 1/(255 * 2^16): out[0] holds red over
+    /// blue and out[1] green over alpha, one to each 32-bit half. Across, one
+    /// product weights all four of a texel's components in their 16-bit
+    /// lanes; down, the sums need 24 bits, so two products take two each.
+    #[inline(always)]
+    pub fn fixed_level<const REPEAT: bool>(&self, i: u32, filter: u32, u: i64, v: i64, out: &mut [u64; 2]) -> bool {
+        let f: &SGISoftFixedTex = &self.fixed;
+        let fl = &f.level[i as usize];
+        let ws = if REPEAT { SGI_GL_REPEAT } else { f.wrap_s };
+        let wt = if REPEAT { SGI_GL_REPEAT } else { f.wrap_t };
+        let (mut x0, mut x1, mut y0, mut y1) = (0i64, 0i64, 0i64, 0i64);
+        let (mut c00, mut c10, mut c01, mut c11) = (0u64, 0u64, 0u64, 0u64);
 
-    if filter == SGI_GL_NEAREST {
-        sgi_soft_fixed_axis(u, fl.width, ws, f.upper_s, false, &mut x0, &mut x1);
-        sgi_soft_fixed_axis(v, fl.height, wt, f.upper_t, false, &mut y0, &mut y1);
-        if !sgi_soft_fixed_tap::<REPEAT>(r, i, x0, y0, &mut c00) {
+        if filter == SGI_GL_NEAREST {
+            sgi_soft_fixed_axis(u, fl.width, ws, f.upper_s, false, &mut x0, &mut x1);
+            sgi_soft_fixed_axis(v, fl.height, wt, f.upper_t, false, &mut y0, &mut y1);
+            if !SGISoftDraw::fixed_tap::<REPEAT>(self, i, x0, y0, &mut c00) {
+                return false;
+            }
+            out[0] = ((c00 >> 16) & SGI_SOFT_FIXED_PAIRS) << 16;
+            out[1] = (c00 & SGI_SOFT_FIXED_PAIRS) << 16;
+            return true;
+        }
+        let a = sgi_soft_fixed_axis(u, fl.width, ws, f.upper_s, true, &mut x0, &mut x1);
+        let b = sgi_soft_fixed_axis(v, fl.height, wt, f.upper_t, true, &mut y0, &mut y1);
+        if !SGISoftDraw::fixed_tap::<REPEAT>(self, i, x0, y0, &mut c00)
+            || !SGISoftDraw::fixed_tap::<REPEAT>(self, i, x1, y0, &mut c10)
+            || !SGISoftDraw::fixed_tap::<REPEAT>(self, i, x0, y1, &mut c01)
+            || !SGISoftDraw::fixed_tap::<REPEAT>(self, i, x1, y1, &mut c11)
+        {
             return false;
         }
-        out[0] = ((c00 >> 16) & SGI_SOFT_FIXED_PAIRS) << 16;
-        out[1] = (c00 & SGI_SOFT_FIXED_PAIRS) << 16;
-        return true;
+        let (a, b) = (a as u64, b as u64);
+        let top = c00.wrapping_mul(256 - a).wrapping_add(c10.wrapping_mul(a));
+        let bot = c01.wrapping_mul(256 - a).wrapping_add(c11.wrapping_mul(a));
+        out[0] = ((top >> 16) & SGI_SOFT_FIXED_PAIRS) * (256 - b) + ((bot >> 16) & SGI_SOFT_FIXED_PAIRS) * b;
+        out[1] = (top & SGI_SOFT_FIXED_PAIRS) * (256 - b) + (bot & SGI_SOFT_FIXED_PAIRS) * b;
+        true
     }
-    let a = sgi_soft_fixed_axis(u, fl.width, ws, f.upper_s, true, &mut x0, &mut x1);
-    let b = sgi_soft_fixed_axis(v, fl.height, wt, f.upper_t, true, &mut y0, &mut y1);
-    if !sgi_soft_fixed_tap::<REPEAT>(r, i, x0, y0, &mut c00)
-        || !sgi_soft_fixed_tap::<REPEAT>(r, i, x1, y0, &mut c10)
-        || !sgi_soft_fixed_tap::<REPEAT>(r, i, x0, y1, &mut c01)
-        || !sgi_soft_fixed_tap::<REPEAT>(r, i, x1, y1, &mut c11)
-    {
-        return false;
-    }
-    let (a, b) = (a as u64, b as u64);
-    let top = c00.wrapping_mul(256 - a).wrapping_add(c10.wrapping_mul(a));
-    let bot = c01.wrapping_mul(256 - a).wrapping_add(c11.wrapping_mul(a));
-    out[0] = ((top >> 16) & SGI_SOFT_FIXED_PAIRS) * (256 - b) + ((bot >> 16) & SGI_SOFT_FIXED_PAIRS) * b;
-    out[1] = (top & SGI_SOFT_FIXED_PAIRS) * (256 - b) + (bot & SGI_SOFT_FIXED_PAIRS) * b;
-    true
 }
 
 /// round(128 log2(1 + (i + 0.5) / 1024)): lambda's table, in 1/256.
@@ -621,72 +631,65 @@ pub fn sgi_soft_fixed_lambda(rho2: f64) -> i32 {
     (exponent - 1023) * 128 + sgi_soft_fixed_log2_init()[((bits >> 42) & 1023) as usize] as i32
 }
 
-/// Lambda for footprint squared rho2 from its table value lambda, or,
-/// within a few steps of a lambda where the filter or nearest level
-/// changes, computed exactly and rounded up. A lambda of ceil(256 l) is at
-/// or below 256 c exactly when l is at or below c, and rounds to the same
-/// nearest level, so those choices are sgi_soft_texture_select()'s; only
-/// the blend between levels takes the table's precision.
-#[inline(always)]
-pub fn sgi_soft_fixed_decide(f: &SGISoftFixedTex, rho2: f64, lambda: i32) -> i32 {
-    let clamped = fx_min(fx_max(lambda, f.min_lod), f.max_lod);
-    let at_edge = (clamped - f.mag_below).abs() <= 3
-        || ((f.min == SGI_GL_NEAREST_MIPMAP_NEAREST || f.min == SGI_GL_LINEAR_MIPMAP_NEAREST)
-            && (((clamped - 128) & 255) - 128).abs() >= 125);
-    let lmax = SGI_SOFT_FIXED_LAMBDA_MAX as f64;
+impl SGISoftFixedTex {
+    /// Lambda for footprint squared rho2 from its table value lambda, or,
+    /// within a few steps of a lambda where the filter or nearest level
+    /// changes, computed exactly and rounded up. A lambda of ceil(256 l) is at
+    /// or below 256 c exactly when l is at or below c, and rounds to the same
+    /// nearest level, so those choices are sgi_soft_texture_select()'s; only
+    /// the blend between levels takes the table's precision.
+    #[inline(always)]
+    pub fn fixed_decide(&self, rho2: f64, lambda: i32) -> i32 {
+        let clamped = fx_min(fx_max(lambda, self.min_lod), self.max_lod);
+        let at_edge = (clamped - self.mag_below).abs() <= 3
+            || ((self.min == SGI_GL_NEAREST_MIPMAP_NEAREST || self.min == SGI_GL_LINEAR_MIPMAP_NEAREST)
+                && (((clamped - 128) & 255) - 128).abs() >= 125);
+        let lmax = SGI_SOFT_FIXED_LAMBDA_MAX as f64;
 
-    if !f.choice || !at_edge {
-        return lambda;
+        if !self.choice || !at_edge {
+            return lambda;
+        }
+        if rho2 > 0.0 {
+            fx_min(fx_max((128.0 * rho2.log2()).ceil(), -lmax), lmax) as i32
+        } else {
+            -SGI_SOFT_FIXED_LAMBDA_MAX
+        }
     }
-    if rho2 > 0.0 {
-        fx_min(fx_max((128.0 * rho2.log2()).ceil(), -lmax), lmax) as i32
-    } else {
-        -SGI_SOFT_FIXED_LAMBDA_MAX
-    }
-}
 
-/// A fragment's s, t and lambda from the triangle's planes g at pixel
-/// column px, whose row terms are row; false where the fixed sampler
-/// cannot take it. rho2_flat, where Q/W is the same across the triangle,
-/// is its footprint squared there, the same at every fragment.
-#[inline(always)]
-pub fn sgi_soft_fixed_coords(
-    f: &SGISoftFixedTex,
-    g: &SGISoftTexPlane,
-    row: &[f64; 4],
-    px: i32,
-    flat_lambda: Option<i32>,
-    s: &mut f64,
-    t: &mut f64,
-    lambda: &mut i32,
-) -> bool {
-    let x = px as f64 + 0.5 - g.x;
-    let q = g.value[2] + x * g.dx[2] + row[2];
+    /// A fragment's s, t and lambda from the triangle's planes g at pixel
+    /// column px, whose row terms are row; false where the fixed sampler
+    /// cannot take it. rho2_flat, where Q/W is the same across the triangle,
+    /// is its footprint squared there, the same at every fragment.
+    #[inline(always)]
+    pub fn fixed_coords(&self, g: &SGISoftTexPlane, row: &[f64; 4], px: i32, flat_lambda: Option<i32>, s: &mut f64, t: &mut f64, lambda: &mut i32) -> bool {
+        let x = px as f64 + 0.5 - g.x;
+        let q = g.value[2] + x * g.dx[2] + row[2];
 
-    if !(q > 0.0) {
-        return false;
+        if !(q > 0.0) {
+            return false;
+        }
+        let iq = 1.0 / q;
+        *s = (g.value[0] + x * g.dx[0] + row[0]) * iq;
+        *t = (g.value[1] + x * g.dx[1] + row[1]) * iq;
+        if !(s.abs() < 1073741824.0 && t.abs() < 1073741824.0) {
+            return false;
+        }
+        if !self.lod || flat_lambda.is_some() {
+            *lambda = flat_lambda.unwrap_or(0);
+            return true;
+        }
+        // d(S/Q)/dx is (dS/dx - s dQ/dx) / Q, and so on.
+        let a = self.ns * (g.dx[0] - *s * g.dx[2]) * iq;
+        let b = self.nt * (g.dx[1] - *t * g.dx[2]) * iq;
+        let c = self.ns * (g.dy[0] - *s * g.dy[2]) * iq;
+        let e = self.nt * (g.dy[1] - *t * g.dy[2]) * iq;
+        let rho2 = fx_max(a * a + b * b, c * c + e * e);
+        if !(rho2 <= f64::MAX) {
+            return false;
+        }
+        *lambda = self.fixed_decide(rho2, sgi_soft_fixed_lambda(rho2));
+        true
     }
-    let iq = 1.0 / q;
-    *s = (g.value[0] + x * g.dx[0] + row[0]) * iq;
-    *t = (g.value[1] + x * g.dx[1] + row[1]) * iq;
-    if !(s.abs() < 1073741824.0 && t.abs() < 1073741824.0) {
-        return false;
-    }
-    if !f.lod || flat_lambda.is_some() {
-        *lambda = flat_lambda.unwrap_or(0);
-        return true;
-    }
-    // d(S/Q)/dx is (dS/dx - s dQ/dx) / Q, and so on.
-    let a = f.ns * (g.dx[0] - *s * g.dx[2]) * iq;
-    let b = f.nt * (g.dx[1] - *t * g.dx[2]) * iq;
-    let c = f.ns * (g.dy[0] - *s * g.dy[2]) * iq;
-    let e = f.nt * (g.dy[1] - *t * g.dy[2]) * iq;
-    let rho2 = fx_max(a * a + b * b, c * c + e * e);
-    if !(rho2 <= f64::MAX) {
-        return false;
-    }
-    *lambda = sgi_soft_fixed_decide(f, rho2, sgi_soft_fixed_lambda(rho2));
-    true
 }
 
 /// The fixed-point sampler's choice of kernel, a constant in the
@@ -699,96 +702,92 @@ pub const SGI_SOFT_FIXED_NEAREST: SGISoftFixedKernel = 1;
 pub const SGI_SOFT_FIXED_LINEAR: SGISoftFixedKernel = 2;
 pub const SGI_SOFT_FIXED_TRILINEAR: SGISoftFixedKernel = 3;
 
-/// The filtered texel at (s, t) for lambda, each component in [0, 1], as
-/// sgi_soft_texture_select() chooses filter, levels and their blend, with
-/// lambda and the blend fraction in 1/256. KERNEL, and REPEAT (both axes
-/// GL_REPEAT), are constants where the caller can name them.
-#[inline(always)]
-pub fn sgi_soft_fixed_sample<const KERNEL: u32, const REPEAT: bool>(
-    r: &SGISoftDraw,
-    s: f64,
-    t: f64,
-    mut lambda: i32,
-    texel: &mut [f64; 4],
-) -> bool {
-    let f: &SGISoftFixedTex = &r.fixed;
-    let unit: f64 = 1.0 / (255.0 * (1u32 << 24) as f64);
-    let mut first: u32 = 0;
-    let mut second: u32 = 0;
-    let mut alpha: u32 = 0;
-    let mut filter = if KERNEL == SGI_SOFT_FIXED_NEAREST {
-        SGI_GL_NEAREST
-    } else if KERNEL == SGI_SOFT_FIXED_ANY {
-        f.min
-    } else {
-        SGI_GL_LINEAR
-    };
-    let mut out = [0u64; 2];
-    let mut other = [0u64; 2];
+impl SGISoftDraw {
+    /// The filtered texel at (s, t) for lambda, each component in [0, 1], as
+    /// sgi_soft_texture_select() chooses filter, levels and their blend, with
+    /// lambda and the blend fraction in 1/256. KERNEL, and REPEAT (both axes
+    /// GL_REPEAT), are constants where the caller can name them.
+    #[inline(always)]
+    pub fn fixed_sample<const KERNEL: u32, const REPEAT: bool>(&self, s: f64, t: f64, mut lambda: i32, texel: &mut [f64; 4]) -> bool {
+        let f: &SGISoftFixedTex = &self.fixed;
+        let unit: f64 = 1.0 / (255.0 * (1u32 << 24) as f64);
+        let mut first: u32 = 0;
+        let mut second: u32 = 0;
+        let mut alpha: u32 = 0;
+        let mut filter = if KERNEL == SGI_SOFT_FIXED_NEAREST {
+            SGI_GL_NEAREST
+        } else if KERNEL == SGI_SOFT_FIXED_ANY {
+            f.min
+        } else {
+            SGI_GL_LINEAR
+        };
+        let mut out = [0u64; 2];
+        let mut other = [0u64; 2];
 
-    if KERNEL == SGI_SOFT_FIXED_TRILINEAR || (KERNEL == SGI_SOFT_FIXED_ANY && f.lod) {
-        lambda = fx_min(fx_max(lambda, f.min_lod), f.max_lod);
-    }
-    if KERNEL == SGI_SOFT_FIXED_TRILINEAR {
-        // At or below 0, magnification is the same LINEAR on level 0.
-        let rel = fx_min(fx_max(lambda, 0), (f.range << 8) as i32) as u32;
+        if KERNEL == SGI_SOFT_FIXED_TRILINEAR || (KERNEL == SGI_SOFT_FIXED_ANY && f.lod) {
+            lambda = fx_min(fx_max(lambda, f.min_lod), f.max_lod);
+        }
+        if KERNEL == SGI_SOFT_FIXED_TRILINEAR {
+            // At or below 0, magnification is the same LINEAR on level 0.
+            let rel = fx_min(fx_max(lambda, 0), (f.range << 8) as i32) as u32;
 
-        first = rel >> 8;
-        alpha = rel & 255;
-        second = fx_min(first + 1, f.range);
-    } else if KERNEL == SGI_SOFT_FIXED_ANY && f.lod {
-        if lambda <= f.mag_below {
-            filter = f.mag;
-        } else if sgi_soft_texture_mipmap(f.min) {
-            filter = if f.min == SGI_GL_NEAREST_MIPMAP_NEAREST || f.min == SGI_GL_NEAREST_MIPMAP_LINEAR {
-                SGI_GL_NEAREST
-            } else {
-                SGI_GL_LINEAR
-            };
-            if f.min == SGI_GL_NEAREST_MIPMAP_NEAREST || f.min == SGI_GL_LINEAR_MIPMAP_NEAREST {
-                // The nearest level: lambda rounded, half down.
-                first = if lambda <= 128 {
-                    0
-                } else if lambda > (f.range << 8) as i32 + 128 {
-                    f.range
+            first = rel >> 8;
+            alpha = rel & 255;
+            second = fx_min(first + 1, f.range);
+        } else if KERNEL == SGI_SOFT_FIXED_ANY && f.lod {
+            if lambda <= f.mag_below {
+                filter = f.mag;
+            } else if sgi_soft_texture_mipmap(f.min) {
+                filter = if f.min == SGI_GL_NEAREST_MIPMAP_NEAREST || f.min == SGI_GL_NEAREST_MIPMAP_LINEAR {
+                    SGI_GL_NEAREST
                 } else {
-                    (lambda.wrapping_add(127) as u32) >> 8
+                    SGI_GL_LINEAR
                 };
-            } else {
-                let rel = fx_min(fx_max(lambda, 0), (f.range << 8) as i32) as u32;
+                if f.min == SGI_GL_NEAREST_MIPMAP_NEAREST || f.min == SGI_GL_LINEAR_MIPMAP_NEAREST {
+                    // The nearest level: lambda rounded, half down.
+                    first = if lambda <= 128 {
+                        0
+                    } else if lambda > (f.range << 8) as i32 + 128 {
+                        f.range
+                    } else {
+                        (lambda.wrapping_add(127) as u32) >> 8
+                    };
+                } else {
+                    let rel = fx_min(fx_max(lambda, 0), (f.range << 8) as i32) as u32;
 
-                first = rel >> 8;
-                alpha = rel & 255;
-                second = fx_min(first + 1, f.range);
+                    first = rel >> 8;
+                    alpha = rel & 255;
+                    second = fx_min(first + 1, f.range);
+                }
             }
         }
-    }
-    let fl = &f.level[first as usize];
-    let mut u = sgi_soft_fixed_floor(s * (fl.width as f64 * 256.0));
-    let mut v = sgi_soft_fixed_floor(t * (fl.height as f64 * 256.0));
-    if !sgi_soft_fixed_level::<REPEAT>(r, first, filter, u, v, &mut out) {
-        return false;
-    }
-    if alpha != 0 {
-        // The next level's position: a level half as wide scales s by an
-        // exact half, so its floor is this one's halved, rounded down.
-        u >>= fl.width_shift.wrapping_sub(f.level[second as usize].width_shift) & 63;
-        v >>= fl.height_shift.wrapping_sub(f.level[second as usize].height_shift) & 63;
-        if !sgi_soft_fixed_level::<REPEAT>(r, second, filter, u, v, &mut other) {
+        let fl = &f.level[first as usize];
+        let mut u = sgi_soft_fixed_floor(s * (fl.width as f64 * 256.0));
+        let mut v = sgi_soft_fixed_floor(t * (fl.height as f64 * 256.0));
+        if !SGISoftDraw::fixed_level::<REPEAT>(self, first, filter, u, v, &mut out) {
             return false;
         }
-        let a = alpha as u64;
-        out[0] = out[0] * (256 - a) + other[0] * a;
-        out[1] = out[1] * (256 - a) + other[1] * a;
-    } else {
-        out[0] <<= 8;
-        out[1] <<= 8;
+        if alpha != 0 {
+            // The next level's position: a level half as wide scales s by an
+            // exact half, so its floor is this one's halved, rounded down.
+            u >>= fl.width_shift.wrapping_sub(f.level[second as usize].width_shift) & 63;
+            v >>= fl.height_shift.wrapping_sub(f.level[second as usize].height_shift) & 63;
+            if !SGISoftDraw::fixed_level::<REPEAT>(self, second, filter, u, v, &mut other) {
+                return false;
+            }
+            let a = alpha as u64;
+            out[0] = out[0] * (256 - a) + other[0] * a;
+            out[1] = out[1] * (256 - a) + other[1] * a;
+        } else {
+            out[0] <<= 8;
+            out[1] <<= 8;
+        }
+        texel[0] = (out[0] >> 32) as u32 as f64 * unit;
+        texel[1] = (out[1] >> 32) as u32 as f64 * unit;
+        texel[2] = out[0] as u32 as f64 * unit;
+        texel[3] = out[1] as u32 as f64 * unit;
+        true
     }
-    texel[0] = (out[0] >> 32) as u32 as f64 * unit;
-    texel[1] = (out[1] >> 32) as u32 as f64 * unit;
-    texel[2] = out[0] as u32 as f64 * unit;
-    texel[3] = out[1] as u32 as f64 * unit;
-    true
 }
 
 /// One triangle's fixed inputs to a textured row loop
@@ -815,164 +814,158 @@ pub struct SGISoftTexSpan {
     pub constant: u8,
 }
 
-/// Pixels px0 to px1 of row py of a textured triangle, whose edge values
-/// for v[2]-v[0] and v[0]-v[1] at px0 are e1 and e2, under state
-/// sgi_soft_fixed_span_select() admits: what the general loop and
-/// sgi_soft_fragment_at() leave for each fragment, with the fixed-point
-/// sampler, and the same planes; only the order of target calls differs,
-/// the depth read coming before the texture's. It stops at the first
-/// fragment the fixed sampler cannot take and returns its column, which
-/// the caller draws through the general loop, or px1 + 1 when the row is
-/// done. The constant arguments select a specialisation each: the
-/// sampler's kernel and wrap, the environment and base format where
-/// nonzero, and with KNOWN set, a depth-tested draw without blending or
-/// fog, so the per-pixel loop carries no test of them.
-#[inline(always)]
-pub fn sgi_soft_texture_row<
-    const KERNEL: u32,
-    const REPEAT: bool,
-    const ENV_KNOWN: u32,
-    const FORMAT_KNOWN: u32,
-    const KNOWN: bool,
->(
-    r: &SGISoftDraw,
-    sp: &SGISoftTexSpan,
-    py: i32,
-    mut px0: i32,
-    mut px1: i32,
-    mut e1: i64,
-    mut e2: i64,
-) -> i32 {
-    let rules: &SGIRasterRules = &r.rules;
-    let st: &SGIGLDrawState = &r.st;
-    let t: &SGIRasterTarget = &r.t;
-    let v: &[SGISoftVertex; 3] = &sp.v;
-    let y = r.win.oy.wrapping_add(py);
-    let mut clipped = r.win.clip.n > 1;
-    let depth_test = KNOWN || st.depth_test != 0;
-    let fog = !KNOWN && st.fog != 0;
-    let rgba_read = t.store_rgba.is_some() && r.rgba_read;
-    let env = if ENV_KNOWN != 0 { ENV_KNOWN } else { st.texture_env_mode };
-    let format = if FORMAT_KNOWN != 0 { FORMAT_KNOWN } else { r.fixed.format };
-    // REPLACE leaves none of the colour of these formats' fragments.
-    let keeps = env != SGI_GL_REPLACE
-        || (format != SGI_GL_RGBA && format != SGI_GL_INTENSITY && format != SGI_GL_LUMINANCE_ALPHA);
-    let end = px1 + 1;
-    let mut frag: SGISoftFrag = *sp.flat;
-    let mut dest = [SGIRasterColour::default(); SGI_GL_MAX_TARGETS as usize];
+impl SGISoftDraw {
+    /// Pixels px0 to px1 of row py of a textured triangle, whose edge values
+    /// for v[2]-v[0] and v[0]-v[1] at px0 are e1 and e2, under state
+    /// sgi_soft_fixed_span_select() admits: what the general loop and
+    /// sgi_soft_fragment_at() leave for each fragment, with the fixed-point
+    /// sampler, and the same planes; only the order of target calls differs,
+    /// the depth read coming before the texture's. It stops at the first
+    /// fragment the fixed sampler cannot take and returns its column, which
+    /// the caller draws through the general loop, or px1 + 1 when the row is
+    /// done. The constant arguments select a specialisation each: the
+    /// sampler's kernel and wrap, the environment and base format where
+    /// nonzero, and with KNOWN set, a depth-tested draw without blending or
+    /// fog, so the per-pixel loop carries no test of them.
+    #[inline(always)]
+    pub fn texture_row<
+        const KERNEL: u32,
+        const REPEAT: bool,
+        const ENV_KNOWN: u32,
+        const FORMAT_KNOWN: u32,
+        const KNOWN: bool,
+    >(&self, sp: &SGISoftTexSpan, py: i32, mut px0: i32, mut px1: i32, mut e1: i64, mut e2: i64) -> i32 {
+        let rules: &SGIRasterRules = &self.rules;
+        let st: &SGIGLDrawState = &self.st;
+        let t: &SGIRasterTarget = &self.t;
+        let v: &[SGISoftVertex; 3] = &sp.v;
+        let y = self.win.oy.wrapping_add(py);
+        let mut clipped = self.win.clip.n > 1;
+        let depth_test = KNOWN || st.depth_test != 0;
+        let fog = !KNOWN && st.fog != 0;
+        let rgba_read = t.store_rgba.is_some() && self.rgba_read;
+        let env = if ENV_KNOWN != 0 { ENV_KNOWN } else { st.texture_env_mode };
+        let format = if FORMAT_KNOWN != 0 { FORMAT_KNOWN } else { self.fixed.format };
+        // REPLACE leaves none of the colour of these formats' fragments.
+        let keeps = env != SGI_GL_REPLACE
+            || (format != SGI_GL_RGBA && format != SGI_GL_INTENSITY && format != SGI_GL_LUMINANCE_ALPHA);
+        let end = px1 + 1;
+        let mut frag: SGISoftFrag = *sp.flat;
+        let mut dest = [SGIRasterColour::default(); SGI_GL_MAX_TARGETS as usize];
 
-    let mut i = 0u32;
-    while clipped && i < fx_min(r.win.clip.n, SGI_CLIP_MAX as u32) {
-        // One of the window's rectangles holds the whole row.
-        let c = &r.win.clip.r[i as usize];
+        let mut i = 0u32;
+        while clipped && i < fx_min(self.win.clip.n, SGI_CLIP_MAX as u32) {
+            // One of the window's rectangles holds the whole row.
+            let c = &self.win.clip.r[i as usize];
 
-        clipped = !(y >= c.y0
-            && y <= c.y1
-            && (r.win.ox as i64) + px0 as i64 >= c.x0 as i64
-            && (r.win.ox as i64) + px1 as i64 <= c.x1 as i64);
-        i += 1;
-    }
-    if st.scissor_test != 0 && !clipped {
-        // sgi_soft_owned_at()'s scissor test, decided for the whole row.
-        let sx0 = st.scissor[0] as i64;
-        let sx1 = st.scissor[0] as i64 + st.scissor[2] as i64 - 1;
-
-        if !(py >= st.scissor[1] && (py as i64) < st.scissor[1] as i64 + st.scissor[3] as i64) {
-            return end;
+            clipped = !(y >= c.y0
+                && y <= c.y1
+                && (self.win.ox as i64) + px0 as i64 >= c.x0 as i64
+                && (self.win.ox as i64) + px1 as i64 <= c.x1 as i64);
+            i += 1;
         }
-        if sx0 > px0 as i64 {
-            if sx0 > px1 as i64 {
+        if st.scissor_test != 0 && !clipped {
+            // sgi_soft_owned_at()'s scissor test, decided for the whole row.
+            let sx0 = st.scissor[0] as i64;
+            let sx1 = st.scissor[0] as i64 + st.scissor[2] as i64 - 1;
+
+            if !(py >= st.scissor[1] && (py as i64) < st.scissor[1] as i64 + st.scissor[3] as i64) {
                 return end;
             }
-            e1 = e1.wrapping_add((sx0 - px0 as i64).wrapping_mul(sp.step1));
-            e2 = e2.wrapping_add((sx0 - px0 as i64).wrapping_mul(sp.step2));
-            px0 = sx0 as i32;
-        }
-        px1 = fx_min(px1 as i64, sx1) as i32;
-    }
-    let mut px = px0;
-    let mut first_pixel = true;
-    loop {
-        // The C's for-increment, run before every pixel but the first so
-        // that a continue still steps.
-        if !first_pixel {
-            px += 1;
-            e1 = e1.wrapping_add(sp.step1);
-            e2 = e2.wrapping_add(sp.step2);
-        }
-        first_pixel = false;
-        if px > px1 {
-            break;
-        }
-        let x = r.win.ox.wrapping_add(px);
-        let b1 = e1 as f64 / sp.area as f64;
-        let b2 = e2 as f64 / sp.area as f64;
-        let mut z = v[0].z + b1 * (v[1].z - v[0].z) + b2 * (v[2].z - v[0].z);
-        let w0 = (1.0 - b1 - b2) * v[0].inv_w;
-        let w1 = b1 * v[1].inv_w;
-        let w2 = b2 * v[2].inv_w;
-        let sum = w0 + w1 + w2;
-        let mut off = sp.offset;
-        let mut zw = 0.0f64;
-        let mut s = 0.0f64;
-        let mut tc = 0.0f64;
-        let mut lambda = 0i32;
-        let mut zq = 0u32;
-
-        if rules.depth_row_given {
-            let depth_w = (1.0 - b1 - b2) * v[0].depth_w + b1 * v[1].depth_w + b2 * v[2].depth_w;
-            let slack = rules.depth_slack;
-
-            z = (z + off) / depth_w;
-            off = 0.0;
-            if z < 0.0 && z >= -slack {
-                z = 0.0;
-            } else if z > 1.0 && z <= 1.0 + slack {
-                z = 1.0;
+            if sx0 > px0 as i64 {
+                if sx0 > px1 as i64 {
+                    return end;
+                }
+                e1 = e1.wrapping_add((sx0 - px0 as i64).wrapping_mul(sp.step1));
+                e2 = e2.wrapping_add((sx0 - px0 as i64).wrapping_mul(sp.step2));
+                px0 = sx0 as i32;
             }
+            px1 = fx_min(px1 as i64, sx1) as i32;
         }
-        if !sgi_raster_window_depth(st, z, off, &mut zw) || !(zw >= 0.0 && zw <= 1.0) {
-            continue;
-        }
-        if clipped && !sgi_soft_owned_at(r, px, py) {
-            continue;
-        }
-        if depth_test {
-            zq = sgi_raster_depth_code(rules, zw);
-            if !sgi_soft_compare(st.depth_func, zq, (t.load_depth.unwrap())(t.opaque, x, y)) {
+        let mut px = px0;
+        let mut first_pixel = true;
+        loop {
+            // The C's for-increment, run before every pixel but the first so
+            // that a continue still steps.
+            if !first_pixel {
+                px += 1;
+                e1 = e1.wrapping_add(sp.step1);
+                e2 = e2.wrapping_add(sp.step2);
+            }
+            first_pixel = false;
+            if px > px1 {
+                break;
+            }
+            let x = self.win.ox.wrapping_add(px);
+            let b1 = e1 as f64 / sp.area as f64;
+            let b2 = e2 as f64 / sp.area as f64;
+            let mut z = v[0].z + b1 * (v[1].z - v[0].z) + b2 * (v[2].z - v[0].z);
+            let w0 = (1.0 - b1 - b2) * v[0].inv_w;
+            let w1 = b1 * v[1].inv_w;
+            let w2 = b2 * v[2].inv_w;
+            let sum = w0 + w1 + w2;
+            let mut off = sp.offset;
+            let mut zw = 0.0f64;
+            let mut s = 0.0f64;
+            let mut tc = 0.0f64;
+            let mut lambda = 0i32;
+            let mut zq = 0u32;
+
+            if rules.depth_row_given {
+                let depth_w = (1.0 - b1 - b2) * v[0].depth_w + b1 * v[1].depth_w + b2 * v[2].depth_w;
+                let slack = rules.depth_slack;
+
+                z = (z + off) / depth_w;
+                off = 0.0;
+                if z < 0.0 && z >= -slack {
+                    z = 0.0;
+                } else if z > 1.0 && z <= 1.0 + slack {
+                    z = 1.0;
+                }
+            }
+            if !st.window_depth(z, off, &mut zw) || !(zw >= 0.0 && zw <= 1.0) {
                 continue;
             }
-        }
-        if !sgi_soft_fixed_coords(&r.fixed, &sp.g, &sp.row, px, sp.flat_lambda, &mut s, &mut tc, &mut lambda)
-            || !sgi_soft_fixed_sample::<KERNEL, REPEAT>(r, s, tc, lambda, &mut frag.texel)
-        {
-            return px;
-        }
-        if sp.smooth && keeps {
-            for k in 0..4 {
-                frag.rgba[k] = if sp.constant & (1u8 << k) != 0 {
-                    v[0].rgba[k]
-                } else {
-                    (w0 * v[0].rgba[k] + w1 * v[1].rgba[k] + w2 * v[2].rgba[k]) / sum
-                };
+            if clipped && !self.owned_at(px, py) {
+                continue;
             }
-        } else {
-            frag.rgba = sp.flat.rgba;
+            if depth_test {
+                zq = rules.depth_code(zw);
+                if !sgi_soft_compare(st.depth_func, zq, (t.load_depth.unwrap())(t.opaque, x, y)) {
+                    continue;
+                }
+            }
+            if !self.fixed.fixed_coords(&sp.g, &sp.row, px, sp.flat_lambda, &mut s, &mut tc, &mut lambda)
+                || !SGISoftDraw::fixed_sample::<KERNEL, REPEAT>(self, s, tc, lambda, &mut frag.texel)
+            {
+                return px;
+            }
+            if sp.smooth && keeps {
+                for k in 0..4 {
+                    frag.rgba[k] = if sp.constant & (1u8 << k) != 0 {
+                        v[0].rgba[k]
+                    } else {
+                        (w0 * v[0].rgba[k] + w1 * v[1].rgba[k] + w2 * v[2].rgba[k]) / sum
+                    };
+                }
+            } else {
+                frag.rgba = sp.flat.rgba;
+            }
+            self.texture_apply(format, env, &mut frag.texel, &mut frag.rgba);
+            if fog {
+                frag.fog = (w0 * v[0].fog + w1 * v[1].fog + w2 * v[2].fog) / sum;
+                self.fog(&mut frag, zw);
+            }
+            if rgba_read && !rules.rgba_load(t, &self.targets, self.ntargets, x, y, &mut dest, self.rgba_reported.get()) {
+                continue;
+            }
+            if depth_test && st.depth_mask != 0 {
+                (t.store_depth.unwrap())(t.opaque, x, y, zq);
+            }
+            self.fragment_store(x, y, &frag, &dest);
         }
-        sgi_soft_texture_apply(r, format, env, &mut frag.texel, &mut frag.rgba);
-        if fog {
-            frag.fog = (w0 * v[0].fog + w1 * v[1].fog + w2 * v[2].fog) / sum;
-            sgi_soft_fog(r, &mut frag, zw);
-        }
-        if rgba_read && !sgi_soft_rgba_load(rules, t, &r.targets, r.ntargets, x, y, &mut dest, r.rgba_reported.get()) {
-            continue;
-        }
-        if depth_test && st.depth_mask != 0 {
-            (t.store_depth.unwrap())(t.opaque, x, y, zq);
-        }
-        sgi_soft_fragment_store(r, x, y, &frag, &dest);
+        end
     }
-    end
 }
 
 /// A specialisation of sgi_soft_texture_row() under a name, as the C's
@@ -988,7 +981,7 @@ macro_rules! SGI_SOFT_TEXTURE_SPAN {
             e1: i64,
             e2: i64,
         ) -> i32 {
-            sgi_soft_texture_row::<{ $kernel }, { $repeat }, { $env }, { $format }, { $known }>(
+            SGISoftDraw::texture_row::<{ $kernel }, { $repeat }, { $env }, { $format }, { $known }>(
                 r, sp, py, px0, px1, e1, e2,
             )
         }
@@ -1030,61 +1023,63 @@ pub static sgi_soft_texture_spans: [[[SGISoftTexSpanFn; 2]; 2]; 3] = [
     ],
 ];
 
-/// The row loop for draw r's textured triangles, or None for the general
-/// loop: under SGI_RASTER_TEXTURE_SPANS, for state whose per-fragment
-/// work is ownership, the depth test, the texture, fog, blending and the
-/// store, whatever the colour mask, dither and targets. A loop of its own
-/// for the common states named above; the others take the loop that tests
-/// the state per pixel.
-pub fn sgi_soft_fixed_span_select(r: &SGISoftDraw) -> Option<SGISoftTexSpanFn> {
-    let st: &SGIGLDrawState = &r.st;
-    let t: &SGIRasterTarget = &r.t;
-    let f: &SGISoftFixedTex = &r.fixed;
-    let mut smax = 0u32;
+impl SGISoftDraw {
+    /// The row loop for draw r's textured triangles, or None for the general
+    /// loop: under SGI_RASTER_TEXTURE_SPANS, for state whose per-fragment
+    /// work is ownership, the depth test, the texture, fog, blending and the
+    /// store, whatever the colour mask, dither and targets. A loop of its own
+    /// for the common states named above; the others take the loop that tests
+    /// the state per pixel.
+    pub fn fixed_span_select(&self) -> Option<SGISoftTexSpanFn> {
+        let st: &SGIGLDrawState = &self.st;
+        let t: &SGIRasterTarget = &self.t;
+        let f: &SGISoftFixedTex = &self.fixed;
+        let mut smax = 0u32;
 
-    if sgi_soft_texture_path.load(std::sync::atomic::Ordering::Relaxed) != SGI_RASTER_TEXTURE_SPANS
-        || !r.polygon_stipple.is_null()
-        || st.clip_planes != 0
-        || (st.stencil_test != 0 && sgi_soft_stencil_max(&r.rules, t, &mut smax))
-        || (st.depth_test != 0 && (t.load_depth.is_none() || (st.depth_mask != 0 && t.store_depth.is_none())))
-    {
-        return None;
+        if sgi_soft_texture_path.load(std::sync::atomic::Ordering::Relaxed) != SGI_RASTER_TEXTURE_SPANS
+            || !self.polygon_stipple.is_null()
+            || st.clip_planes != 0
+            || (st.stencil_test != 0 && self.rules.stencil_max(t, &mut smax))
+            || (st.depth_test != 0 && (t.load_depth.is_none() || (st.depth_mask != 0 && t.store_depth.is_none())))
+        {
+            return None;
+        }
+        let kernel: i32 = if !f.lod && f.min == SGI_GL_NEAREST {
+            0
+        } else if !f.lod && f.min == SGI_GL_LINEAR {
+            1
+        } else if f.min == SGI_GL_LINEAR_MIPMAP_LINEAR && f.mag == SGI_GL_LINEAR {
+            2
+        } else {
+            -1
+        };
+        let env: i32 = if st.texture_env_mode == SGI_GL_REPLACE {
+            0
+        } else if st.texture_env_mode == SGI_GL_MODULATE {
+            1
+        } else {
+            -1
+        };
+        let format: i32 = if f.format == SGI_GL_RGBA {
+            0
+        } else if f.format == SGI_GL_RGB {
+            1
+        } else {
+            -1
+        };
+        if kernel < 0
+            || env < 0
+            || format < 0
+            || f.wrap_s != SGI_GL_REPEAT
+            || f.wrap_t != SGI_GL_REPEAT
+            || st.depth_test == 0
+            || self.blend
+            || st.fog != 0
+        {
+            return Some(sgi_soft_texture_span_any);
+        }
+        Some(sgi_soft_texture_spans[kernel as usize][env as usize][format as usize])
     }
-    let kernel: i32 = if !f.lod && f.min == SGI_GL_NEAREST {
-        0
-    } else if !f.lod && f.min == SGI_GL_LINEAR {
-        1
-    } else if f.min == SGI_GL_LINEAR_MIPMAP_LINEAR && f.mag == SGI_GL_LINEAR {
-        2
-    } else {
-        -1
-    };
-    let env: i32 = if st.texture_env_mode == SGI_GL_REPLACE {
-        0
-    } else if st.texture_env_mode == SGI_GL_MODULATE {
-        1
-    } else {
-        -1
-    };
-    let format: i32 = if f.format == SGI_GL_RGBA {
-        0
-    } else if f.format == SGI_GL_RGB {
-        1
-    } else {
-        -1
-    };
-    if kernel < 0
-        || env < 0
-        || format < 0
-        || f.wrap_s != SGI_GL_REPEAT
-        || f.wrap_t != SGI_GL_REPEAT
-        || st.depth_test == 0
-        || r.blend
-        || st.fog != 0
-    {
-        return Some(sgi_soft_texture_span_any);
-    }
-    Some(sgi_soft_texture_spans[kernel as usize][env as usize][format as usize])
 }
 
 #[cfg(test)]
@@ -1204,7 +1199,7 @@ mod tests {
 
         sgi_raster_set_texture_path(path);
         sgi_raster_set_parallel(4, 1);
-        sgi_soft_draw(&rules, &target, &d);
+        rules.draw(&target, &d);
         sgi_raster_set_texture_path(SGI_RASTER_TEXTURE_SPANS);
         sgi_raster_set_parallel(0, SGI_RASTER_PARALLEL_MIN_PIXELS);
         (fb.colour, fb.depth)

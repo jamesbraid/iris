@@ -102,112 +102,116 @@ pub const SGI_LOGIC_OR_INVERTED: u32 = 13;
 pub const SGI_LOGIC_NAND: u32 = 14;
 pub const SGI_LOGIC_SET: u32 = 15;
 
-/// A zeroed device-backed memory of size bytes, at most 4 GiB - 1.
-pub fn sgi_board_memory_init(m: &mut SGIBoardMemory, size: u64) {
-    // A family constant; the limit is the migration buffer's length.
-    assert!(size != 0 && size <= u32::MAX as u64);
-    *m = SGIBoardMemory::default();
-    m.size = size;
-    m.bytes_len = size as u32;
-    m.bytes = vec![0u8; size as usize];
-}
-/// A page-backed memory of npages unresolved pages of page_size bytes.
-pub fn sgi_board_memory_init_pages(m: &mut SGIBoardMemory, npages: u32, page_size: u32) {
-    assert!(npages != 0 && is_power_of_2(page_size as u64));
-    *m = SGIBoardMemory::default();
-    m.size = npages as u64 * page_size as u64;
-    m.npages = npages;
-    m.page_size = page_size;
-    m.pages = vec![SGIBoardPage::default(); npages as usize];
-}
-/// Page i is guest address guest, reached at host (null: unresolved).
-pub fn sgi_board_memory_set_page(m: &mut SGIBoardMemory, i: u32, guest: u64, host: P<u8>) {
-    assert!(!m.pages.is_empty() && i < m.npages);
-    m.pages[i as usize].guest = guest;
-    m.pages[i as usize].host = host;
-}
-pub fn sgi_board_memory_cleanup(m: &mut SGIBoardMemory) {
-    *m = SGIBoardMemory::default();
+impl SGIBoardMemory {
+    /// A zeroed device-backed memory of size bytes, at most 4 GiB - 1.
+    pub fn init(&mut self, size: u64) {
+        // A family constant; the limit is the migration buffer's length.
+        assert!(size != 0 && size <= u32::MAX as u64);
+        *self = SGIBoardMemory::default();
+        self.size = size;
+        self.bytes_len = size as u32;
+        self.bytes = vec![0u8; size as usize];
+    }
+    /// A page-backed memory of npages unresolved pages of page_size bytes.
+    pub fn init_pages(&mut self, npages: u32, page_size: u32) {
+        assert!(npages != 0 && is_power_of_2(page_size as u64));
+        *self = SGIBoardMemory::default();
+        self.size = npages as u64 * page_size as u64;
+        self.npages = npages;
+        self.page_size = page_size;
+        self.pages = vec![SGIBoardPage::default(); npages as usize];
+    }
+    /// Page i is guest address guest, reached at host (null: unresolved).
+    pub fn set_page(&mut self, i: u32, guest: u64, host: P<u8>) {
+        assert!(!self.pages.is_empty() && i < self.npages);
+        self.pages[i as usize].guest = guest;
+        self.pages[i as usize].host = host;
+    }
+    pub fn cleanup(&mut self) {
+        *self = SGIBoardMemory::default();
+    }
 }
 
 pub fn sgi_plane_bytes_per_pixel(format: SGIPlaneFormat) -> u32 {
     sgi_plane_bpp(format)
 }
 
-/// Declare a plane. Its id is assigned here and returned; the rest of
-/// *plane is copied. Fails, returning SGI_PLANE_NONE (and setting errp),
-/// when the plane does not fit the memory, its rows do not fit its stride
-/// and length, or the table already holds SGI_PLANES_MAX planes.
-pub fn sgi_board_memory_add_plane(
-    m: &mut SGIBoardMemory,
-    plane: &SGIPlane,
-    errp: &mut Option<String>,
-) -> u32 {
-    let bpp = sgi_plane_bytes_per_pixel(plane.format);
-    let row = plane.width as u64 * bpp as u64;
+impl SGIBoardMemory {
+    /// Declare a plane. Its id is assigned here and returned; the rest of
+    /// *plane is copied. Fails, returning SGI_PLANE_NONE (and setting errp),
+    /// when the plane does not fit the memory, its rows do not fit its stride
+    /// and length, or the table already holds SGI_PLANES_MAX planes.
+    pub fn add_plane(&mut self, plane: &SGIPlane, errp: &mut Option<String>) -> u32 {
+        let bpp = sgi_plane_bytes_per_pixel(plane.format);
+        let row = plane.width as u64 * bpp as u64;
 
-    if plane.width == 0 || plane.height == 0 {
-        *errp = Some("plane has no pixels".to_string());
-        return SGI_PLANE_NONE;
-    }
-    if (plane.stride as u64) < row {
-        *errp = Some(format!(
-            "plane stride {} is shorter than its {}-byte rows",
-            plane.stride, row
-        ));
-        return SGI_PLANE_NONE;
-    }
-    let need = (plane.height as u64 - 1) * plane.stride as u64 + row;
-    if need > plane.len {
-        *errp = Some(format!("plane needs {} bytes but has {}", need, plane.len));
-        return SGI_PLANE_NONE;
-    }
-    if plane.base > m.size || plane.len > m.size - plane.base {
-        *errp = Some(format!(
-            "plane {:#x}+{:#x} is outside {:#x} bytes of board memory",
-            plane.base, plane.len, m.size
-        ));
-        return SGI_PLANE_NONE;
-    }
+        if plane.width == 0 || plane.height == 0 {
+            *errp = Some("plane has no pixels".to_string());
+            return SGI_PLANE_NONE;
+        }
+        if (plane.stride as u64) < row {
+            *errp = Some(format!(
+                "plane stride {} is shorter than its {}-byte rows",
+                plane.stride, row
+            ));
+            return SGI_PLANE_NONE;
+        }
+        let need = (plane.height as u64 - 1) * plane.stride as u64 + row;
+        if need > plane.len {
+            *errp = Some(format!("plane needs {} bytes but has {}", need, plane.len));
+            return SGI_PLANE_NONE;
+        }
+        if plane.base > self.size || plane.len > self.size - plane.base {
+            *errp = Some(format!(
+                "plane {:#x}+{:#x} is outside {:#x} bytes of board memory",
+                plane.base, plane.len, self.size
+            ));
+            return SGI_PLANE_NONE;
+        }
 
-    if m.nplanes as usize == SGI_PLANES_MAX {
-        *errp = Some(format!("board memory already has {} planes", SGI_PLANES_MAX));
-        return SGI_PLANE_NONE;
+        if self.nplanes as usize == SGI_PLANES_MAX {
+            *errp = Some(format!("board memory already has {} planes", SGI_PLANES_MAX));
+            return SGI_PLANE_NONE;
+        }
+        let id = self.nplanes;
+        self.nplanes += 1;
+        let p = &mut self.planes[id as usize];
+        *p = *plane;
+        p.id = id;
+        crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi_plane_add: plane {} base {:#x} len {:#x} {}x{} stride {} format {}", p.id, p.base, p.len, p.width, p.height, p.stride, p.format as i32);
+        p.id
     }
-    let id = m.nplanes;
-    m.nplanes += 1;
-    let p = &mut m.planes[id as usize];
-    *p = *plane;
-    p.id = id;
-    crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi_plane_add: plane {} base {:#x} len {:#x} {}x{} stride {} format {}", p.id, p.base, p.len, p.width, p.height, p.stride, p.format as i32);
-    p.id
-}
-/// The plane with this id, or null.
-pub fn sgi_board_memory_plane(m: &SGIBoardMemory, id: u32) -> P<SGIPlane> {
-    if id < m.nplanes {
-        P::from_ref(&m.planes[id as usize])
-    } else {
-        P::null()
-    }
-}
-
-#[inline]
-pub fn sgi_plane_contains(p: &SGIPlane, x: i32, y: i32) -> bool {
-    x >= 0 && y >= 0 && (x as u32) < p.width && (y as u32) < p.height
-}
-
-pub fn sgi_clip_contains(clip: &SGIClipList, x: i32, y: i32) -> bool {
-    if clip.n == 0 {
-        return clip.empty == 0;
-    }
-    for i in 0..clip.n.min(SGI_CLIP_MAX as u32) {
-        let r = &clip.r[i as usize];
-
-        if x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1 {
-            return true;
+    /// The plane with this id, or null.
+    pub fn plane(&self, id: u32) -> P<SGIPlane> {
+        if id < self.nplanes {
+            P::from_ref(&self.planes[id as usize])
+        } else {
+            P::null()
         }
     }
-    false
+}
+
+impl SGIPlane {
+    #[inline]
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        x >= 0 && y >= 0 && (x as u32) < self.width && (y as u32) < self.height
+    }
+}
+
+impl SGIClipList {
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        if self.n == 0 {
+            return self.empty == 0;
+        }
+        for i in 0..self.n.min(SGI_CLIP_MAX as u32) {
+            let r = &self.r[i as usize];
+
+            if x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1 {
+                return true;
+            }
+        }
+        false
+    }
 }
 pub fn sgi_logic_op(op: u8, src: u32, dst: u32) -> u32 {
     let s = src;
@@ -232,71 +236,65 @@ pub fn sgi_logic_op(op: u8, src: u32, dst: u32) -> u32 {
     }
 }
 
-pub fn sgi_plane_load(m: &SGIBoardMemory, p: &SGIPlane, x: i32, y: i32) -> u32 {
-    if !sgi_plane_contains(p, x, y) {
-        return 0;
-    }
-    let bpp = sgi_plane_bpp(p.format);
-    let at = sgi_plane_offset(p, x, y, bpp);
-    if !m.bytes.is_empty() {
-        let host = sgi_board_memory_bytes(m, at, bpp);
-        return if !host.is_null() {
-            sgi_plane_get(p, bpp, unsafe { std::slice::from_raw_parts(host.0, bpp as usize) })
-        } else {
-            0
-        };
-    }
-    let host = sgi_board_memory_host(m, at, bpp as u64);
-    if !host.is_null() {
-        return sgi_plane_get(p, bpp, unsafe { std::slice::from_raw_parts(host.0, bpp as usize) });
-    }
-    let mut bytes = [0u8; 4];
-    if !sgi_board_memory_export(m, at, &mut bytes[..bpp as usize]) {
-        return 0;
-    }
-    sgi_plane_get(p, bpp, &bytes)
-}
-pub fn sgi_plane_store(m: &mut SGIBoardMemory, p: &SGIPlane, x: i32, y: i32, word: u32) {
-    if !sgi_plane_contains(p, x, y) {
-        return;
-    }
-    let bpp = sgi_plane_bpp(p.format);
-    let at = sgi_plane_offset(p, x, y, bpp);
-    if !m.bytes.is_empty() {
-        let host = sgi_board_memory_bytes(m, at, bpp);
+impl SGIBoardMemory {
+    pub fn plane_load(&self, p: &SGIPlane, x: i32, y: i32) -> u32 {
+        if !p.contains(x, y) {
+            return 0;
+        }
+        let bpp = sgi_plane_bpp(p.format);
+        let at = p.offset(x, y, bpp);
+        if !self.bytes.is_empty() {
+            let host = self.bytes(at, bpp);
+            return if !host.is_null() {
+                p.get(bpp, unsafe { std::slice::from_raw_parts(host.0, bpp as usize) })
+            } else {
+                0
+            };
+        }
+        let host = self.host(at, bpp as u64);
         if !host.is_null() {
-            sgi_plane_put(p, bpp, word, unsafe {
+            return p.get(bpp, unsafe { std::slice::from_raw_parts(host.0, bpp as usize) });
+        }
+        let mut bytes = [0u8; 4];
+        if !self.export(at, &mut bytes[..bpp as usize]) {
+            return 0;
+        }
+        p.get(bpp, &bytes)
+    }
+    pub fn plane_store(&mut self, p: &SGIPlane, x: i32, y: i32, word: u32) {
+        if !p.contains(x, y) {
+            return;
+        }
+        let bpp = sgi_plane_bpp(p.format);
+        let at = p.offset(x, y, bpp);
+        if !self.bytes.is_empty() {
+            let host = self.bytes(at, bpp);
+            if !host.is_null() {
+                p.put(bpp, word, unsafe {
+                    std::slice::from_raw_parts_mut(host.0, bpp as usize)
+                });
+            }
+            return;
+        }
+        let host = self.host(at, bpp as u64);
+        if !host.is_null() {
+            p.put(bpp, word, unsafe {
                 std::slice::from_raw_parts_mut(host.0, bpp as usize)
             });
+            return;
         }
-        return;
+        let mut bytes = [0u8; 4];
+        p.put(bpp, word, &mut bytes);
+        self.import(at, &bytes[..bpp as usize]);
     }
-    let host = sgi_board_memory_host(m, at, bpp as u64);
-    if !host.is_null() {
-        sgi_plane_put(p, bpp, word, unsafe {
-            std::slice::from_raw_parts_mut(host.0, bpp as usize)
-        });
-        return;
-    }
-    let mut bytes = [0u8; 4];
-    sgi_plane_put(p, bpp, word, &mut bytes);
-    sgi_board_memory_import(m, at, &bytes[..bpp as usize]);
-}
-/// Store op(src, dst) at (x, y) through the write mask: bits set in mask
-/// take the result, the others keep the plane's word.
-pub fn sgi_plane_merge(
-    m: &mut SGIBoardMemory,
-    p: &SGIPlane,
-    x: i32,
-    y: i32,
-    src: u32,
-    op: u8,
-    mask: u32,
-) {
-    let dst = sgi_plane_load(m, p, x, y);
-    let val = sgi_logic_op(op, src, dst);
+    /// Store op(src, dst) at (x, y) through the write mask: bits set in mask
+    /// take the result, the others keep the plane's word.
+    pub fn plane_merge(&mut self, p: &SGIPlane, x: i32, y: i32, src: u32, op: u8, mask: u32) {
+        let dst = self.plane_load(p, x, y);
+        let val = sgi_logic_op(op, src, dst);
 
-    sgi_plane_store(m, p, x, y, (dst & !mask) | (val & mask));
+        self.plane_store(p, x, y, (dst & !mask) | (val & mask));
+    }
 }
 
 /// A run of pixels along one plane row, reached directly. `host` points
@@ -309,26 +307,21 @@ pub struct SGIPlaneRun {
     pub le: bool,
 }
 
-/// n pixels from (x, y) onwards: fills `run` and returns true when every
-/// pixel is inside the plane and one contiguous host range.
-pub fn sgi_plane_run(
-    m: &SGIBoardMemory,
-    p: &SGIPlane,
-    x: i32,
-    y: i32,
-    n: i32,
-    run: &mut SGIPlaneRun,
-) -> bool {
-    if n <= 0 || !sgi_plane_contains(p, x, y) || !sgi_plane_contains(p, x + n - 1, y) {
-        return false;
+impl SGIBoardMemory {
+    /// n pixels from (x, y) onwards: fills `run` and returns true when every
+    /// pixel is inside the plane and one contiguous host range.
+    pub fn plane_run(&self, p: &SGIPlane, x: i32, y: i32, n: i32, run: &mut SGIPlaneRun) -> bool {
+        if n <= 0 || !p.contains(x, y) || !p.contains(x + n - 1, y) {
+            return false;
+        }
+        let bpp = sgi_plane_bpp(p.format);
+        let host = self.host(p.offset(x, y, bpp), n as u64 * bpp as u64);
+        if host.is_null() {
+            return false;
+        }
+        *run = SGIPlaneRun { host, bpp, le: p.is_le() };
+        true
     }
-    let bpp = sgi_plane_bpp(p.format);
-    let host = sgi_board_memory_host(m, sgi_plane_offset(p, x, y, bpp), n as u64 * bpp as u64);
-    if host.is_null() {
-        return false;
-    }
-    *run = SGIPlaneRun { host, bpp, le: sgi_plane_is_le(p) };
-    true
 }
 
 /// One plane word of `bpp` bytes, little-endian when `le` is set.
@@ -374,39 +367,45 @@ pub fn sgi_plane_word_store(bytes: &mut [u8], bpp: u32, le: bool, word: u32) {
     }
 }
 
-#[inline]
-pub fn sgi_plane_run_load(run: &SGIPlaneRun, i: i32) -> u32 {
-    let b = unsafe {
-        std::slice::from_raw_parts(run.host.0.add(i as usize * run.bpp as usize), run.bpp as usize)
-    };
-    sgi_plane_word_load(b, run.bpp, run.le)
+impl SGIPlaneRun {
+    #[inline]
+    pub fn load(&self, i: i32) -> u32 {
+        let b = unsafe {
+            std::slice::from_raw_parts(self.host.0.add(i as usize * self.bpp as usize), self.bpp as usize)
+        };
+        sgi_plane_word_load(b, self.bpp, self.le)
+    }
+
+    #[inline]
+    pub fn store(&self, i: i32, word: u32) {
+        let b = unsafe {
+            std::slice::from_raw_parts_mut(self.host.0.add(i as usize * self.bpp as usize), self.bpp as usize)
+        };
+        sgi_plane_word_store(b, self.bpp, self.le, word)
+    }
 }
 
-#[inline]
-pub fn sgi_plane_run_store(run: &SGIPlaneRun, i: i32, word: u32) {
-    let b = unsafe {
-        std::slice::from_raw_parts_mut(run.host.0.add(i as usize * run.bpp as usize), run.bpp as usize)
-    };
-    sgi_plane_word_store(b, run.bpp, run.le, word)
+impl SGIPlane {
+    /// A plane word to and from its stored bytes, in the plane's packing.
+    pub fn decode(&self, bytes: &[u8]) -> u32 {
+        self.get(sgi_plane_bpp(self.format), bytes)
+    }
+    pub fn encode(&self, word: u32, bytes: &mut [u8]) {
+        self.put(sgi_plane_bpp(self.format), word, bytes)
+    }
 }
 
-/// A plane word to and from its stored bytes, in the plane's packing.
-pub fn sgi_plane_decode(p: &SGIPlane, bytes: &[u8]) -> u32 {
-    sgi_plane_get(p, sgi_plane_bpp(p.format), bytes)
-}
-pub fn sgi_plane_encode(p: &SGIPlane, word: u32, bytes: &mut [u8]) {
-    sgi_plane_put(p, sgi_plane_bpp(p.format), word, bytes)
-}
-
-/// Copy dst.len() bytes at base out of board memory. Returns false,
-/// copying nothing, when the range is outside the memory or crosses a
-/// page the family has not resolved.
-pub fn sgi_board_memory_export(m: &SGIBoardMemory, base: u64, dst: &mut [u8]) -> bool {
-    sgi_board_memory_copy(m, base, dst.len() as u64, dst.as_mut_ptr(), true)
-}
-/// The same, into board memory from src.
-pub fn sgi_board_memory_import(m: &mut SGIBoardMemory, base: u64, src: &[u8]) -> bool {
-    sgi_board_memory_copy(m, base, src.len() as u64, src.as_ptr() as *mut u8, false)
+impl SGIBoardMemory {
+    /// Copy dst.len() bytes at base out of board memory. Returns false,
+    /// copying nothing, when the range is outside the memory or crosses a
+    /// page the family has not resolved.
+    pub fn export(&self, base: u64, dst: &mut [u8]) -> bool {
+        self.copy(base, dst.len() as u64, dst.as_mut_ptr(), true)
+    }
+    /// The same, into board memory from src.
+    pub fn import(&mut self, base: u64, src: &[u8]) -> bool {
+        self.copy(base, src.len() as u64, src.as_ptr() as *mut u8, false)
+    }
 }
 
 // The per-pixel paths take a plane's pixel size once and reuse it.
@@ -420,104 +419,112 @@ pub fn sgi_plane_bpp(format: SGIPlaneFormat) -> u32 {
     }
 }
 
-pub fn sgi_plane_is_le(p: &SGIPlane) -> bool {
-    p.packing == SGI_PACK_LE_RED_LOW || p.packing == SGI_PACK_LE_RED_HIGH
-}
+impl SGIPlane {
+    pub fn is_le(&self) -> bool {
+        self.packing == SGI_PACK_LE_RED_LOW || self.packing == SGI_PACK_LE_RED_HIGH
+    }
 
-#[inline]
-pub fn sgi_plane_get(p: &SGIPlane, bpp: u32, bytes: &[u8]) -> u32 {
-    sgi_plane_word_load(bytes, bpp, sgi_plane_is_le(p))
-}
+    #[inline]
+    pub fn get(&self, bpp: u32, bytes: &[u8]) -> u32 {
+        sgi_plane_word_load(bytes, bpp, self.is_le())
+    }
 
-#[inline]
-pub fn sgi_plane_put(p: &SGIPlane, bpp: u32, word: u32, bytes: &mut [u8]) {
-    sgi_plane_word_store(bytes, bpp, sgi_plane_is_le(p), word)
-}
-
-/// The host bytes behind [base, base + len), when they are contiguous on
-/// the host: always for a device-backed memory, within one resolved page
-/// for a page-backed one. Null otherwise.
-pub fn sgi_board_memory_host(m: &SGIBoardMemory, base: u64, len: u64) -> P<u8> {
-    if base > m.size || len > m.size - base {
-        return P::null();
-    }
-    if !m.bytes.is_empty() {
-        return P(unsafe { m.bytes.as_ptr().add(base as usize) } as *mut u8);
-    }
-    let in_page = base & (m.page_size as u64 - 1);
-    if in_page + len > m.page_size as u64 {
-        return P::null();
-    }
-    let idx = (base / m.page_size as u64) as usize;
-    if idx >= m.pages.len() {
-        return P::null();
-    }
-    let host = m.pages[idx].host;
-    if host.is_null() {
-        P::null()
-    } else {
-        P(unsafe { host.0.add(in_page as usize) })
+    #[inline]
+    pub fn put(&self, bpp: u32, word: u32, bytes: &mut [u8]) {
+        sgi_plane_word_store(bytes, bpp, self.is_le(), word)
     }
 }
 
-/// Copy between board memory and buf (a raw pointer so import can take a
-/// shared slice): out copies memory to buf, else buf into memory.
-pub fn sgi_board_memory_copy(m: &SGIBoardMemory, base: u64, len: u64, buf: *mut u8, out: bool) -> bool {
-    let mut done = 0u64;
-
-    if base > m.size || len > m.size - base {
-        return false;
-    }
-    if !m.bytes.is_empty() {
-        unsafe {
-            let mem = m.bytes.as_ptr().add(base as usize) as *mut u8;
-            if out {
-                std::ptr::copy_nonoverlapping(mem, buf, len as usize);
-            } else {
-                std::ptr::copy_nonoverlapping(buf, mem, len as usize);
-            }
+impl SGIBoardMemory {
+    /// The host bytes behind [base, base + len), when they are contiguous on
+    /// the host: always for a device-backed memory, within one resolved page
+    /// for a page-backed one. Null otherwise.
+    pub fn host(&self, base: u64, len: u64) -> P<u8> {
+        if base > self.size || len > self.size - base {
+            return P::null();
         }
-        return true;
+        if !self.bytes.is_empty() {
+            return P(unsafe { self.bytes.as_ptr().add(base as usize) } as *mut u8);
+        }
+        let in_page = base & (self.page_size as u64 - 1);
+        if in_page + len > self.page_size as u64 {
+            return P::null();
+        }
+        let idx = (base / self.page_size as u64) as usize;
+        if idx >= self.pages.len() {
+            return P::null();
+        }
+        let host = self.pages[idx].host;
+        if host.is_null() {
+            P::null()
+        } else {
+            P(unsafe { host.0.add(in_page as usize) })
+        }
     }
-    // Check every page first so a failed copy copies nothing.
-    let ps = m.page_size as u64;
-    let mut a = base & !(ps - 1);
-    while a < base + len {
-        if m.pages[(a / ps) as usize].host.is_null() {
+
+    /// Copy between board memory and buf (a raw pointer so import can take a
+    /// shared slice): out copies memory to buf, else buf into memory.
+    pub fn copy(&self, base: u64, len: u64, buf: *mut u8, out: bool) -> bool {
+        let mut done = 0u64;
+
+        if base > self.size || len > self.size - base {
             return false;
         }
-        a += ps;
-    }
-    while done < len {
-        let at = base + done;
-        let n = (len - done).min(ps - (at & (ps - 1)));
-        let host = sgi_board_memory_host(m, at, n);
-
-        unsafe {
-            if out {
-                std::ptr::copy_nonoverlapping(host.0, buf.add(done as usize), n as usize);
-            } else {
-                std::ptr::copy_nonoverlapping(buf.add(done as usize), host.0, n as usize);
+        if !self.bytes.is_empty() {
+            unsafe {
+                let mem = self.bytes.as_ptr().add(base as usize) as *mut u8;
+                if out {
+                    std::ptr::copy_nonoverlapping(mem, buf, len as usize);
+                } else {
+                    std::ptr::copy_nonoverlapping(buf, mem, len as usize);
+                }
             }
+            return true;
         }
-        done += n;
+        // Check every page first so a failed copy copies nothing.
+        let ps = self.page_size as u64;
+        let mut a = base & !(ps - 1);
+        while a < base + len {
+            if self.pages[(a / ps) as usize].host.is_null() {
+                return false;
+            }
+            a += ps;
+        }
+        while done < len {
+            let at = base + done;
+            let n = (len - done).min(ps - (at & (ps - 1)));
+            let host = self.host(at, n);
+
+            unsafe {
+                if out {
+                    std::ptr::copy_nonoverlapping(host.0, buf.add(done as usize), n as usize);
+                } else {
+                    std::ptr::copy_nonoverlapping(buf.add(done as usize), host.0, n as usize);
+                }
+            }
+            done += n;
+        }
+        true
     }
-    true
 }
 
-pub fn sgi_plane_offset(p: &SGIPlane, x: i32, y: i32, bpp: u32) -> u64 {
-    p.base
-        .wrapping_add((y as u64).wrapping_mul(p.stride as u64))
-        .wrapping_add((x as u64).wrapping_mul(bpp as u64))
+impl SGIPlane {
+    pub fn offset(&self, x: i32, y: i32, bpp: u32) -> u64 {
+        self.base
+            .wrapping_add((y as u64).wrapping_mul(self.stride as u64))
+            .wrapping_add((x as u64).wrapping_mul(bpp as u64))
+    }
 }
 
-/// A device-backed memory is one host array, so a pixel inside it is
-/// reached directly.
-#[inline]
-pub fn sgi_board_memory_bytes(m: &SGIBoardMemory, at: u64, bpp: u32) -> P<u8> {
-    if at <= m.size && bpp as u64 <= m.size - at {
-        P(unsafe { m.bytes.as_ptr().add(at as usize) } as *mut u8)
-    } else {
-        P::null()
+impl SGIBoardMemory {
+    /// A device-backed memory is one host array, so a pixel inside it is
+    /// reached directly.
+    #[inline]
+    pub fn bytes(&self, at: u64, bpp: u32) -> P<u8> {
+        if at <= self.size && bpp as u64 <= self.size - at {
+            P(unsafe { self.bytes.as_ptr().add(at as usize) } as *mut u8)
+        } else {
+            P::null()
+        }
     }
 }
