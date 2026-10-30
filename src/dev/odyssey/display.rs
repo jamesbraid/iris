@@ -476,6 +476,20 @@ impl Board {
             f.swap_clear = 0;
             repaint = true;
         }
+        // MEASUREMENT ONLY (vpro-raster2, not committed): swaps a second on stderr.
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SWAPS: AtomicU64 = AtomicU64::new(0);
+            static LAST: AtomicU64 = AtomicU64::new(0);
+            static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            if flips != 0 {
+                SWAPS.fetch_add(1, Ordering::Relaxed);
+            }
+            let secs = START.get_or_init(std::time::Instant::now).elapsed().as_secs();
+            if LAST.swap(secs, Ordering::Relaxed) != secs {
+                eprintln!("SWAPS {} {}", secs, SWAPS.load(Ordering::Relaxed));
+            }
+        }
         if flips != 0 {
             f.swap_arm = 0;
             f.displayed_buffer ^= flips;

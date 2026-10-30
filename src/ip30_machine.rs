@@ -389,6 +389,8 @@ impl OctaneMachine {
             crate::perfetto::set_guest_cycles(Some(cpu.cycles_ptr()));
             monitor.register_device(Arc::new(crate::perfetto::PerfettoMonitor));
         }
+        // MEASUREMENT ONLY (vpro-stall, not committed): `perf snapshot` for cycles.
+        monitor.register_device(crate::perf_monitor::PerfMonitor::new(cpu.running_flag(), cpu.cycles_ptr(), cpu.fasttick_count(), None, None));
         heart.register_locks();
         xbow.register_locks();
         bridge.register_locks();
