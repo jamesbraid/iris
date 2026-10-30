@@ -564,6 +564,11 @@ pub trait CpuModel: MipsCache {
     /// Keep every implemented VPN2 bit in EntryHi and the TLB. False keeps the
     /// 40-bit match, which is what the IP28 and Octane guests were brought up on.
     const ENTRYHI_FULL_VA: bool = false;
+    /// Primary-cache Index_Load_Data / Index_Store_Data operate on a shadow
+    /// array (translated like a hit operation: they fault on a bad address).
+    const R10K_PRIMARY_DATA_OPS: bool = false;
+    /// Bits Index_Store_Tag keeps for the secondary cache.
+    const SECONDARY_TAG_MASK: u64 = u64::MAX;
 }
 
 pub trait MipsCache: Send + Sync {
@@ -1412,6 +1417,22 @@ pub mod model {
         /// EntryHi and the TLB keep every implemented VPN2 bit. Off keeps the
         /// 40-bit match the IP28 and Octane guests were brought up with.
         pub entryhi_full_va: bool,
+        /// Primary Index_Load_Data / Index_Store_Data keep a shadow array, so a
+        /// PROM's primary-cache data walk round-trips. Off leaves the primaries
+        /// without data, as the IP28 PROM was brought up.
+        pub primary_diag_data: bool,
+        /// The data-array index shifts, check-bit masks and quadword stores the
+        /// NEC manual describes for the diagnostic operations. Off keeps the
+        /// secondary-only layout the IP28 PROM was brought up on.
+        pub nec_diag_layout: bool,
+        /// Bits Index_Store_Tag keeps for the secondary cache. All of them
+        /// unless a part sets a mask. A 36-bit mask once inferred from the IP28
+        /// PROM's walking-0s phase broke its diagnostics: the truncation it
+        /// reads back comes from the tag being assembled as
+        /// `(TagHi << 32) | TagLo[31:0]`, not from the array, and the mask only
+        /// discarded the MRU bit the PROM writes as TagHi[31]. Extending a mask
+        /// to another part needs IP28/Octane diagnostic comparisons.
+        pub l2_tag_mask: u64,
     }
 
     impl Profile {
@@ -1422,6 +1443,9 @@ pub mod model {
             va_bits: 40,
             pa_bits: 36,
             entryhi_full_va: false,
+            primary_diag_data: false,
+            nec_diag_layout: false,
+            l2_tag_mask: u64::MAX,
         };
         /// The existing R10000 types (IP28, Octane, O2): family behaviour,
         /// none of the later approximations.
@@ -1438,11 +1462,30 @@ pub mod model {
         match model {
             R5000 => Profile { name: "R5000", ..Profile::BASE },
             R10000 => Profile::R10K,
-            // NEC U12754E and origami's r14000.md label the 44-bit VPN2 as
-            // R12000A behaviour. No machine wires an R12000 yet.
-            R12000 => Profile { name: "R12000", entryhi_full_va: true, ..Profile::R10K },
-            // Fuel. The only part whose approximations are switched on.
-            R14000 => Profile { name: "R14000", entryhi_full_va: true, ..Profile::R10K },
+            // origami's r14000.md labels the 44-bit VPN2 and the cache
+            // diagnostics as R12000A policy, so both apply here. The secondary
+            // tag mask is only a Fuel PROM compatibility choice, with no
+            // source for an R12000. No machine wires an R12000 yet.
+            R12000 => Profile {
+                name: "R12000",
+                entryhi_full_va: true,
+                primary_diag_data: true,
+                nec_diag_layout: true,
+                ..Profile::R10K
+            },
+            // Fuel. The only part whose approximations are switched on. The
+            // tag mask follows the R10000 format in NEC U10278EJ4V0UM p.270,
+            // figure 11-31: MRU, physical tag, state, virtual index and ECC.
+            // It is a compatibility choice for Fuel's PROM, not a measurement
+            // of R14000 silicon.
+            R14000 => Profile {
+                name: "R14000",
+                entryhi_full_va: true,
+                primary_diag_data: true,
+                nec_diag_layout: true,
+                l2_tag_mask: 0x8000_000f_ffff_cdff,
+                ..Profile::R10K
+            },
             // Left at the family defaults: no R16000 behaviour is established
             // here, and its PRId, caches and policies belong with its machine.
             R16000 => Profile { name: "R16000", ..Profile::R10K },
@@ -3665,6 +3708,8 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
     const VA_BITS: u32 = model::profile(MODEL).va_bits;
     const PA_BITS: u32 = model::profile(MODEL).pa_bits;
     const ENTRYHI_FULL_VA: bool = model::profile(MODEL).entryhi_full_va;
+    const R10K_PRIMARY_DATA_OPS: bool = model::profile(MODEL).primary_diag_data;
+    const SECONDARY_TAG_MASK: u64 = model::profile(MODEL).l2_tag_mask;
     const NAME: &'static str = model::profile(MODEL).name;
 }
 

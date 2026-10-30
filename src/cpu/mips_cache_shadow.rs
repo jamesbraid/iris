@@ -19,11 +19,10 @@
 //! - **Coherency is exact and free.** There is no stale line to miss on a
 //!   self-modifying store, no L1/L2 inclusion policy to get wrong, and no way
 //!   for a missed writeback to lose data.
-//! - **Diagnostics round-trip.** The shadow stores whatever bits are written
-//!   to it and returns them unchanged, so a walking-1s test over tag or data
-//!   SRAM passes without anyone having to know the hardware's field layout.
-//!   Where the emulator *must* know the layout — to decide whether a line is
-//!   valid, say — that is a separate question from storing the bits.
+//! - **Diagnostics round-trip by default.** The shadow stores whatever bits
+//!   are written to it and returns them unchanged, so walking-1s tests pass
+//!   without knowing the hardware's field layout. A part's profile opts in to
+//!   its secondary-tag mask and primary data arrays separately.
 //!
 //! The shadow is deliberately not consulted by `read`/`write`/`fetch`. If it
 //! ever needs to be, this type is the wrong shape and should say so loudly
@@ -89,16 +88,6 @@ const MRU_BIT: u64 = 1 << 63;
 /// of the index selects the way; the set starts above the line offset. The
 /// R4400 and R5000 index differently — see `tag_slot`.
 const WAYS: usize = 2;
-
-/// Bits a secondary-cache tag retains.
-///
-/// All of them, now. A 36-bit mask was inferred here from the PROM's
-/// walking-0s phase, which writes an all-ones TagLo and expects back
-/// 0x0000000f_ffffcdfe — but that truncation comes from the tag being
-/// assembled as `(TagHi << 32) | TagLo[31:0]`, not from the array dropping
-/// bits. Once the executor carried TagHi properly the mask did nothing except
-/// discard the MRU bit, which the PROM writes as TagHi[31] and reads back.
-const L2_TAG_MASK: u64 = u64::MAX;
 
 /// Is the shadow cache's operation trace on, at this level of detail?
 ///
@@ -190,6 +179,8 @@ impl<
     > ShadowCache<IC_SIZE, IC_LINE, DC_SIZE, DC_LINE, L2_SIZE, L2_LINE, MIPS4, PRID, FIR, TLB_ENTRIES, MODEL>
 {
     const R10K: bool = model::profile(MODEL).r10k_family;
+    const PRIMARY_DIAG: bool = model::profile(MODEL).primary_diag_data;
+    const NEC_DIAG: bool = model::profile(MODEL).nec_diag_layout;
     const R5K: bool = MODEL == model::R5000;
     const IC_LINES: usize = if IC_LINE == 0 { 0 } else { IC_SIZE / IC_LINE };
     const DC_LINES: usize = if DC_LINE == 0 { 0 } else { DC_SIZE / DC_LINE };
@@ -202,11 +193,13 @@ impl<
             lladdr: UnsafeCell::new(0),
             ecc_in: UnsafeCell::new(0),
             ecc_out: UnsafeCell::new(0),
-            ic: UnsafeCell::new(Shadow::new(Self::IC_LINES, 0)),
-            dc: UnsafeCell::new(Shadow::new(Self::DC_LINES, 0)),
-            // Only the R10000 secondary keeps a data shadow: it is the one
-            // the IP28 PROM walks with Index_Store_Data, and a 1 MB array is
-            // cheap once. The R4000 family has no index data ops.
+            // The R10000 secondary keeps a data shadow: it is the one the IP28
+            // PROM walks with Index_Store_Data, and a 1 MB array is cheap
+            // once. The R4000 family has no index data ops. A profile that
+            // sets `primary_diag_data` also keeps the primaries' arrays, for
+            // the Fuel PROM's primary-cache walk.
+            ic: UnsafeCell::new(Shadow::new(Self::IC_LINES, if Self::PRIMARY_DIAG { IC_SIZE / 4 } else { 0 })),
+            dc: UnsafeCell::new(Shadow::new(Self::DC_LINES, if Self::PRIMARY_DIAG { DC_SIZE / 4 } else { 0 })),
             l2: UnsafeCell::new(Shadow::new(Self::L2_LINES, if Self::R10K { L2_SIZE / 8 } else { 0 })),
             tc_base: UnsafeCell::new(std::ptr::null_mut()),
             tc_bitmap: UnsafeCell::new(0),
@@ -293,15 +286,23 @@ impl<
 
     /// Data slot for an R10000 `Index_Load_Data` / `Index_Store_Data`.
     ///
-    /// Same shape: way in bit 0, the rest addressing the array. The PROM walks
-    /// it at `…00`, `…01`, `…10`, `…11`, `…20` — one doubleword per operation
-    /// with the way bit shifted in beneath it.
-    fn data_slot(&self, len: usize, virt_addr: u64) -> usize {
+    /// Same shape: way in bit 0, the rest addressing the array. The IP28 PROM
+    /// walks the secondary array at `…00`, `…01`, `…10`, `…11`, `…20`: one
+    /// doubleword per operation, with the way bit beneath the word index.
+    /// Parts without `nec_diag_layout` keep that index. Those with it use
+    /// four-byte primary and eight-byte secondary slots, a diagnostic
+    /// compatibility approximation.
+    fn data_slot(&self, sel: u32, len: usize, virt_addr: u64) -> usize {
         if len == 0 {
             return 0;
         }
         let way = (virt_addr as usize) & (WAYS - 1);
-        let word = (virt_addr as usize) >> 4;
+        let shift = if Self::NEC_DIAG {
+            if matches!(sel, CACH_PI | CACH_PD) { 2 } else { 3 }
+        } else {
+            4
+        };
+        let word = (virt_addr as usize) >> shift;
         (word * WAYS + way) % len
     }
 }
@@ -342,6 +343,8 @@ impl<
     const CACHE_KIND: &'static str = "shadow";
     const R10K_CACHE_OPS: bool = model::profile(MODEL).r10k_family;
     const ENTRYHI_FULL_VA: bool = model::profile(MODEL).entryhi_full_va;
+    const R10K_PRIMARY_DATA_OPS: bool = model::profile(MODEL).primary_diag_data;
+    const SECONDARY_TAG_MASK: u64 = model::profile(MODEL).l2_tag_mask;
 }
 
 impl<
@@ -548,12 +551,17 @@ impl<
         }
 
         match op {
-            // Index_Store_Tag / Index_Load_Tag. Stored and returned verbatim:
-            // a tag test is a round trip, and round trips do not require
-            // knowing what the bits mean.
+            // Index_Store_Tag / Index_Load_Tag. Stored and returned verbatim
+            // unless the part's profile sets a secondary mask: a tag test is a
+            // round trip, and round trips do not require knowing what the bits
+            // mean.
             C_IST => {
                 let idx = self.tag_slot(sel, virt_addr);
-                let mask = if matches!(sel, CACH_SI | CACH_SD) { L2_TAG_MASK } else { u64::MAX };
+                let mask = if matches!(sel, CACH_SI | CACH_SD) {
+                    <Self as CpuModel>::SECONDARY_TAG_MASK
+                } else {
+                    u64::MAX
+                };
                 if l2_op_log(CACHE_LOG_OP) {
                     crate::dlog!(LogModule::L2c, "shadow:   -> IST va={virt_addr:#012x} idx={idx} stores {:#018x}",
                                  phys_addr & mask & !MRU_BIT);
@@ -593,7 +601,7 @@ impl<
             C_R10K_CBARRIER if Self::R10K && sel == CACH_PI => 0,
             C_R10K_ILD if Self::R10K && matches!(sel, CACH_PI | CACH_PD | CACH_SD) => {
                 let s = self.shadow(sel);
-                let slot = self.data_slot(s.data.len(), virt_addr);
+                let slot = self.data_slot(sel, s.data.len(), virt_addr);
                 if s.data.is_empty() {
                     0
                 } else {
@@ -605,12 +613,28 @@ impl<
                     s.data[slot]
                 }
             }
-            C_R10K_ISD if Self::R10K && matches!(sel, CACH_SI | CACH_SD) => {
+            C_R10K_ISD if Self::R10K && (matches!(sel, CACH_SI | CACH_SD) ||
+                (<Self as CpuModel>::R10K_PRIMARY_DATA_OPS && matches!(sel, CACH_PI | CACH_PD))) => {
                 let s = self.shadow(sel);
-                let slot = self.data_slot(s.data.len(), virt_addr);
+                let slot = self.data_slot(sel, s.data.len(), virt_addr);
                 if !s.data.is_empty() {
-                    s.data[slot] = phys_addr;
-                    s.ecc[slot] = unsafe { *self.ecc_in.get() };
+                    // Primary diagnostic fields: NEC U10278E fourth edition,
+                    // pp. 262, 271-272. Preserve supplied predecode/parity.
+                    let (data_mask, ecc_mask) = match sel {
+                        CACH_PI if Self::NEC_DIAG => (0xf_ffff_ffff, 1),
+                        CACH_PD if Self::NEC_DIAG => (0xffff_ffff, 0xf),
+                        _ => (u64::MAX, if Self::NEC_DIAG { 0x3ff } else { u32::MAX }),
+                    };
+                    s.data[slot] = phys_addr & data_mask;
+                    s.ecc[slot] = unsafe { *self.ecc_in.get() } & ecc_mask;
+                    if Self::NEC_DIAG && matches!(sel, CACH_SI | CACH_SD) {
+                        // Index Store Data(S) writes a quadword: selected VA[3]
+                        // doubleword plus a zero partner; check bits are shared.
+                        // NEC U10278E fourth edition p.91, figure 5-7.
+                        let partner = slot ^ WAYS;
+                        s.data[partner] = 0;
+                        s.ecc[partner] = s.ecc[slot];
+                    }
                     if l2_op_log(CACHE_LOG_HIT) {
                         crate::dlog!(LogModule::L2c, "shadow:   -> ISD slot={slot} data={phys_addr:#018x} ecc={:#x}",
                                      s.ecc[slot]);
@@ -772,14 +796,25 @@ mod tests {
                 "bit {bit} did not survive a store/load tag round trip"
             );
         }
+        let r14 = R14000ShadowCache::new(Arc::new(Memory::new(1)));
+        r14.cache_op(C_IST | CACH_SD, 0, u64::MAX);
+        assert_eq!(r14.cache_op(C_ILT | CACH_SD, 0, 0), <R14000ShadowCache as CpuModel>::SECONDARY_TAG_MASK);
     }
 
-    /// Index_Store_Data / Index_Load_Data likewise.
+    /// Index_Store_Data / Index_Load_Data likewise. Only a part that sets
+    /// `primary_diag_data` keeps primary arrays; the IP28's stay empty.
     #[test]
     fn secondary_data_round_trips() {
         let c = cache();
         c.cache_op(C_R10K_ISD | CACH_SD, 0x40, 0xdeadbeef);
         assert_eq!(c.cache_op(C_R10K_ILD | CACH_SD, 0x40, 0), 0xdeadbeef);
+
+        c.cache_op(C_R10K_ISD | CACH_PI, 0, 0x1234);
+        assert_eq!(c.cache_op(C_R10K_ILD | CACH_PI, 0, 0), 0);
+
+        let r14 = R14000ShadowCache::new(Arc::new(Memory::new(1)));
+        r14.cache_op(C_R10K_ISD | CACH_PI, 4, 0x1234);
+        assert_eq!(r14.cache_op(C_R10K_ILD | CACH_PI, 4, 0), 0x1234);
     }
 
     /// The MRU bit is **shared between the ways of a set**: written through
@@ -845,6 +880,30 @@ mod tests {
         assert_eq!(c.cache_op_ecc(), 0x001, "way 0's check bits");
         assert_eq!(c.cache_op(C_R10K_ILD | CACH_SD, 1, 0), 0xaaaa_bbbb_cccc_dddd);
         assert_eq!(c.cache_op_ecc(), 0x3fe, "way 1's check bits");
+
+        // Without `nec_diag_layout` a part keeps every supplied check bit and
+        // does not clear the neighbouring doubleword on a store.
+        c.set_cache_ecc(0xffff_fc01);
+        c.cache_op(C_R10K_ISD | CACH_SD, 16, 0x1234_5678);
+        c.set_cache_ecc(0);
+        c.cache_op(C_R10K_ISD | CACH_SD, 0, 0x8765_4321);
+        assert_eq!(c.cache_op(C_R10K_ILD | CACH_SD, 16, 0), 0x1234_5678);
+        assert_eq!(c.cache_op_ecc(), 0xffff_fc01);
+    }
+
+    /// The NEC layout: ten check bits, and a secondary store writes a
+    /// quadword whose other doubleword is zero and shares the check bits.
+    #[test]
+    fn nec_layout_stores_a_quadword_with_ten_check_bits() {
+        let r14 = R14000ShadowCache::new(Arc::new(Memory::new(1)));
+        r14.set_cache_ecc(0);
+        r14.cache_op(C_R10K_ISD | CACH_SD, 8, 0xdead_beef);
+        r14.set_cache_ecc(0xffff_fc01);
+        r14.cache_op(C_R10K_ISD | CACH_SD, 0, 0x1111_2222_3333_4444);
+        assert_eq!(r14.cache_op(C_R10K_ILD | CACH_SD, 0, 0), 0x1111_2222_3333_4444);
+        assert_eq!(r14.cache_op_ecc(), 0x001, "ten check bits");
+        assert_eq!(r14.cache_op(C_R10K_ILD | CACH_SD, 8, 0), 0, "zero partner");
+        assert_eq!(r14.cache_op_ecc(), 0x001, "shared check bits");
     }
 
     /// An untouched set reports no MRU, so an ordinary tag read is not
@@ -960,6 +1019,10 @@ mod tests {
         );
         assert!(<R14K as CpuModel>::ENTRYHI_FULL_VA);
         assert!(<R14K as CpuModel>::R10K_CACHE_OPS);
+        assert!(!<R10K as CpuModel>::R10K_PRIMARY_DATA_OPS);
+        assert_eq!(<R10K as CpuModel>::SECONDARY_TAG_MASK, u64::MAX);
+        assert!(<R14K as CpuModel>::R10K_PRIMARY_DATA_OPS);
+        assert_eq!(<R14K as CpuModel>::SECONDARY_TAG_MASK, 0x8000_000f_ffff_cdff);
         assert_eq!((<R14K as CpuModel>::VA_BITS, <R14K as CpuModel>::PA_BITS), (44, 40));
     }
 
