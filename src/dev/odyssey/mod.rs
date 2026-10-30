@@ -43,7 +43,7 @@
 //! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code
 //! (hw/display/sgi/) in jamesbraid/qemu-sgi-origami.
 
-#![allow(clippy::all)]
+//ALLOWREMOVED
 
 use crate::devlog::LogModule;
 

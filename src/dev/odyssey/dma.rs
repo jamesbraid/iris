@@ -1338,7 +1338,7 @@ impl Board {
             .and_then(|v| v.checked_add(self.obj_offset[su] as u64))
             .and_then(|v| v.checked_add(ws as u64));
         let Some(source_end) = source_end else { return false };
-        if source_end > self.obj_used as u64 || source_end > (self.obj_mem.bytes_len / 4) as u64 || !self.object_rows(dest, hd) {
+        if source_end > self.obj_used as u64 || source_end > self.obj_mem.size / 4 || !self.object_rows(dest, hd) {
             return false;
         }
         for y in 0..hd {

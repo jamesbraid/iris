@@ -1262,7 +1262,7 @@ impl Board {
         // Under the floating-point code depth 1.0 is 0xfe0000, and every code of
         // a depth in [0, 1] is at most that, so all ones still compares as
         // farther than any fragment.
-        let depth = *self.depth_mem.plane(self.depth_plane).get();
+        let depth = self.depth_mem.plane(self.depth_plane).expect("the depth plane");
         for y in 0..SGI_ODYSSEY_HEIGHT as i32 {
             for x in 0..SGI_ODYSSEY_WIDTH as i32 {
                 self.depth_mem.plane_store(&depth, x, y, ODSY_DEPTH24_MAX);
