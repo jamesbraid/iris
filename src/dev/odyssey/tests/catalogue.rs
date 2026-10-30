@@ -77,6 +77,27 @@ mod widget {
         assert!(!empty.carries(WIDGET));
     }
 
+    /// Starting the device starts the board's thread and the display
+    /// thread; stopping it joins both and finishes the work still
+    /// queued, so nothing is left behind a stopped machine.
+    ///
+    /// QEMU: command-work-stop-and-reset.
+    #[test]
+    fn stopping_the_device_finishes_the_work_the_board_thread_had_queued() {
+        use crate::traits::Device;
+        let (_heart, v) = board();
+        assert!(!v.is_running());
+
+        v.start();
+        v.start();
+        assert!(v.is_running(), "a second start changes nothing");
+        v.stop();
+
+        assert!(!v.is_running());
+        assert!(v.state.fifo.thread.lock().is_none());
+        assert!(!v.state.fifo.pending());
+    }
+
     #[test]
     fn a_routed_interrupt_sets_and_clears_its_heart_vector() {
         let (heart, v) = board();
