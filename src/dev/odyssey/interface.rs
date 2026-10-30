@@ -25,8 +25,11 @@ use std::sync::Arc;
 pub struct HostInterface {
     /// The crosstalk widget number.
     pub slot: u32,
-    /// Where interrupt packets go (the iris glue's HEART).
+    /// Where interrupt packets go on the Octane (the iris glue's HEART).
     pub irq: Option<Arc<dyn crate::irq::InterruptController>>,
+    /// Where interrupt packets go on a machine whose fabric carries them to
+    /// any widget (the Fuel's XBridge crossbar); `irq` is unused then.
+    pub packets: Option<PacketSender>,
     /// The master node's processor interface, for graphics credits.
     pub pi: Option<Arc<dyn PiGfxLink>>,
     /// The widget number of HEART, the packets' destination.
@@ -78,6 +81,7 @@ impl Default for HostInterface {
         HostInterface {
             slot: 0,
             irq: None,
+            packets: None,
             pi: None,
             heart_widget: 8,
             identity: 0,
@@ -446,6 +450,12 @@ impl HostInterface {
     pub fn send_interrupt(&mut self, packet: u64, number: u8, set: bool) {
         let widget = (packet >> SGI_XIO_PACKET_ADDRESS_BITS) as u32;
         let address = packet & ((1u64 << SGI_XIO_PACKET_ADDRESS_BITS) - 1);
+        if let Some(send) = &self.packets {
+            if !send(widget as u8, address, number, set) {
+                crate::dlog!(LogModule::Odyssey, "odyssey: interrupt packet to widget {widget} address {address:#x} was refused");
+            }
+            return;
+        }
         if widget != self.heart_widget || address != HEART_PACKET {
             crate::dlog!(LogModule::Odyssey, "odyssey: interrupt packet to widget {widget} address {address:#x} has no receiver");
             return;

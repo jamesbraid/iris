@@ -1,4 +1,5 @@
-//! The SGI VPro (Odyssey) graphics board in the Octane's graphics port.
+//! The SGI VPro (Odyssey) graphics board in the Octane's or the Fuel's
+//! graphics port.
 //!
 //! The board is a crosstalk widget. The processor stores commands into a
 //! command FIFO; the board decodes them, draws integer and GL primitives
@@ -12,6 +13,9 @@
 //! interface.rs describes the two locks the first two share.
 //! Interrupt packets go to HEART, the only interrupt target on the Octane:
 //! a packet to widget 8 sets or clears the HEART pending bit of its vector.
+//! On the Fuel they cross the XBridge's crossbar to Bedrock like any other
+//! widget's (`Odyssey::new_widget_relative`), and the processor reaches the
+//! board through Bedrock's widget windows, which hand it widget offsets.
 //!
 //! - `board`: the board's state, construction and reset.
 //! - `interface`: the host interface: the registers that do not wait for
@@ -153,9 +157,15 @@ pub struct Odyssey {
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// Carries a board interrupt packet into a machine's crosstalk fabric: the
+/// destination widget, the address within it, the vector, and whether the
+/// source rose or fell. False when nothing at the destination takes it.
+pub type PacketSender = Arc<dyn Fn(u8, u64, u8, bool) -> bool + Send + Sync>;
+
 impl Odyssey {
-    /// A board of `product` (v12, v10, v8, v6) at `widget`: its interrupt
-    /// packets reach `irq` (HEART), its DMA reaches `mem`.
+    /// A board of `product` (v12, v10, v8, v6) at `widget` on the Octane:
+    /// the processor reaches it through the IP30 widget windows, its
+    /// interrupt packets reach `irq` (HEART), its DMA reaches `mem`.
     pub fn new(
         widget: u8,
         product: &str,
@@ -167,15 +177,43 @@ impl Odyssey {
         let mut s = Board::new(product, widget as u32)?;
         s.guest = Some(mem);
         s.front.lock().irq = Some(irq);
-        Ok(Arc::new(Self {
-            small: widget_small_base(widget),
-            large: widget_large_base(widget),
+        Ok(Self::with_board(s, widget_small_base(widget), widget_large_base(widget), heartbeat, fasttick))
+    }
+
+    /// A board of `product` at `widget` on a machine that hands the board
+    /// widget-relative addresses, as Bedrock's I/O interface does, and
+    /// carries its interrupt packets through `packets`.
+    pub fn new_widget_relative(
+        widget: u8,
+        product: &str,
+        packets: PacketSender,
+        mem: Arc<dyn BusDevice>,
+        heartbeat: Arc<std::sync::atomic::AtomicU64>,
+        fasttick: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Result<Arc<Self>, String> {
+        let mut s = Board::new(product, widget as u32)?;
+        s.guest = Some(mem);
+        s.front.lock().packets = Some(packets);
+        // Every address is already an aperture offset: no large window.
+        Ok(Self::with_board(s, 0, u64::MAX, heartbeat, fasttick))
+    }
+
+    fn with_board(
+        s: Box<Board>,
+        small: u64,
+        large: u64,
+        heartbeat: Arc<std::sync::atomic::AtomicU64>,
+        fasttick: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            small,
+            large,
             state: BoardLocks::new(s),
             display: Arc::new(Display::new(heartbeat, fasttick)),
             running: Arc::new(AtomicBool::new(false)),
             keep_renderer: Arc::new(AtomicBool::new(false)),
             thread: Mutex::new(None),
-        }))
+        })
     }
 
     pub fn display(&self) -> Arc<dyn crate::gfx_display::GfxDisplay> {
