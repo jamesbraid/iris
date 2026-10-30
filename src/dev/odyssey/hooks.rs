@@ -68,3 +68,47 @@ impl HeadOps {
         (self.publish.expect("publish hook"))(opaque, &c);
     }
 }
+
+/// The shared graphics foundation's head hooks (head_ops.rs). resolve_row
+/// turns the colour plane into displayed colour through each pixel's
+/// drawable, display mode and the lookup RAM; publish raises the completion
+/// fence a written transfer signals; retrace is the vertical-retrace callback
+/// the shared scanout drives at the mode's rate. dma_address stays None: the
+/// inbound path is direct-mapped.
+pub fn publish(opaque: Opaque, c: &Completion) {
+    let s = from_opaque::<Board>(opaque);
+
+    // A transfer that reached board or guest memory raises the fence; a
+    // failed one does not, so the driver's DMA wait times out as it would on
+    // a board that never wrote the fence halfword. A cookie without the
+    // validity marker wants no fence.
+    if c.kind == SGI_DONE_WRITTEN && (c.cookie & ODSY_FENCE_VALID) != 0 {
+        s.fence(c.cookie);
+    }
+}
+
+/// A run of guest bytes the DMA engine read: the C only traced it.
+pub fn dma_chunk(opaque: Opaque, seq: u64, addr: u64, bytes: &[u8]) {
+    let _ = seq;
+    // The chunks belong to the MMIO write that caused the RAM read.
+    let s = from_opaque::<Board>(opaque);
+    crate::dlog_dev!(
+        LogModule::Odyssey,
+        "sgi_odyssey_dma_chunk: seq {} addr {:#x} len {} hex {}",
+        s.trace_sequence.wrapping_sub(1),
+        addr,
+        bytes.len(),
+        bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    );
+}
+
+pub static HEAD_OPS: HeadOps = HeadOps {
+    publish: Some(publish),
+    resolve_row: Some(resolve_row),
+    pre_update: Some(pre_update),
+    convert_row: None,
+    answer: None,
+    dma_address: None,
+    dma_chunk: Some(dma_chunk),
+    retrace: Some(retrace),
+};

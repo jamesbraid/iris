@@ -2244,9 +2244,9 @@ pub fn soft_band_draw(opaque: Opaque, band: u32, bands: u32) {
     if !r.fixed.is_null() && !r.fixed.prefilled && !r.fixed_begin() {
         r.fixed = P::null();
     }
-    sgi_soft_band_quiet.with(|q| q.set(band > 0));
+    SOFT_BAND_QUIET.with(|q| q.set(band > 0));
     r.draw_triangles(&job.d);
-    sgi_soft_band_quiet.with(|q| q.set(false));
+    SOFT_BAND_QUIET.with(|q| q.set(false));
 }
 
 impl SoftDraw {

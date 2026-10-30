@@ -507,7 +507,7 @@ pub struct SoftDraw {
     pub rgba_mask: u32,
     pub rgba_read: bool,
     pub rgba_reported: P<bool>,
-    /// Texels already read in this draw, or NULL (sgi_soft_texel_cache).
+    /// Texels already read in this draw, or NULL (SOFT_TEXEL_CACHE).
     pub texels: P<SoftTexelCache>,
     /// Filled triangles sample in fixed point, or NULL (sgi_soft_fixed).
     pub fixed: P<SoftFixedTex>,
@@ -588,7 +588,7 @@ pub static SOFT_HOST_PROCESSORS: std::sync::OnceLock<u32> = std::sync::OnceLock:
 
 thread_local! {
     /// A band other than the first repeats the primitive work: say it once.
-    pub static sgi_soft_band_quiet: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub static SOFT_BAND_QUIET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub type SoftBandFn = fn(Opaque, u32, u32);
@@ -1921,13 +1921,13 @@ pub struct SoftTexelCache {
 }
 
 thread_local! {
-    pub static sgi_soft_texel_cache: std::cell::RefCell<Option<Box<SoftTexelCache>>> =
+    pub static SOFT_TEXEL_CACHE: std::cell::RefCell<Option<Box<SoftTexelCache>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 impl GlTexImage {
     pub fn soft_texel_cache_begin(&self) -> P<SoftTexelCache> {
-        sgi_soft_texel_cache.with(|cell| {
+        SOFT_TEXEL_CACHE.with(|cell| {
             let mut slot = cell.borrow_mut();
             if slot.is_none() {
                 *slot = Some(Box::new(SoftTexelCache {
@@ -2398,7 +2398,7 @@ pub struct SoftTexSelectionMemo {
 }
 
 thread_local! {
-    pub static sgi_soft_texture_selected: std::cell::Cell<SoftTexSelectionMemo> =
+    pub static SOFT_TEXTURE_SELECTED: std::cell::Cell<SoftTexSelectionMemo> =
         std::cell::Cell::new(SoftTexSelectionMemo {
             serial: 0,
             rho: 0,
@@ -2413,7 +2413,7 @@ impl SoftDraw {
         let bits = rho.to_bits();
 
         if memo {
-            let m = sgi_soft_texture_selected.with(|c| c.get());
+            let m = SOFT_TEXTURE_SELECTED.with(|c| c.get());
             if m.serial == self.texels.serial && m.rho == bits {
                 *out = m.selected;
                 return true;
@@ -2423,7 +2423,7 @@ impl SoftDraw {
             return false;
         }
         if memo {
-            sgi_soft_texture_selected.with(|c| {
+            SOFT_TEXTURE_SELECTED.with(|c| {
                 c.set(SoftTexSelectionMemo { serial: self.texels.serial, rho: bits, selected: *out })
             });
         }
@@ -3320,7 +3320,7 @@ impl SoftDraw {
         let clip = &cv.clip;
         let eye = &cv.eye;
         let mut win = [0.0f64; 3];
-        let quiet = sgi_soft_band_quiet.with(|q| q.get());
+        let quiet = SOFT_BAND_QUIET.with(|q| q.get());
 
         if !self.texture_vertex_valid(cv) {
             return false;
@@ -3395,4 +3395,14 @@ pub struct SoftTexPlane {
 pub fn raster_set_parallel(bands: u32, min_pixels: u64) {
     SOFT_BANDS_WANTED.store(bands, std::sync::atomic::Ordering::Relaxed);
     SOFT_BANDS_MIN_PIXELS.store(min_pixels, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The X server's logic ops (GX numbers) are GL's logic-op enums less
+/// GL_CLEAR; an out-of-range one keeps the source.
+fn x_logic_op(gx: u32, source: u32, destination: u32) -> u32 {
+    if gx <= 15 {
+        logic_op(gx as u8, source, destination)
+    } else {
+        source
+    }
 }

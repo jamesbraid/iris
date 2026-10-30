@@ -132,3 +132,73 @@ impl BoardLocks {
         }
     }
 }
+
+impl Board {
+    pub fn work_pending(&mut self) -> bool {
+        self.front.lock().pending()
+    }
+
+    /// Run the oldest waiting stores until the budget is spent. The caller
+    /// holds the board lock and not the front lock: the board's thread for a
+    /// slice, or an access that drains.
+    pub fn work_step(&mut self, b: &mut Budget) {
+        #[cfg(test)]
+        {
+            // A slice that holds the board as a long draw would.
+            let sleep_ms = std::mem::take(&mut self.test_slice_sleep_ms);
+            if sleep_ms != 0 {
+                std::thread::sleep(std::time::Duration::from_millis(sleep_ms as u64));
+            }
+        }
+
+        loop {
+            let Some(q) = self.front.lock().work_take() else {
+                break;
+            };
+            self.write_dispatch(q.addr as u64, q.value, q.size as u32);
+            {
+                let mut f = self.front.lock();
+                let level = f.work_queue.len() as u32 + 1;
+                f.fifo_level_changed(level);
+            }
+            if b.spent() {
+                break;
+            }
+        }
+        let f = self.front.lock();
+        if !f.work_queue.is_empty() {
+            crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_work_behind: {} stores wait, the oldest for {:?}", f.work_queue.len(), f.work_queue[0].queued_at.elapsed());
+        }
+    }
+
+    /// Finish the waiting work now, for an access at addr that must see it. The
+    /// caller holds the board lock, so no slice runs. The stores queued when
+    /// the drain starts run here; any a processor adds meanwhile are left to
+    /// the board's thread.
+    pub fn work_drain(&mut self, addr: u64) {
+        let waiting = self.front.lock().work_queue.len() as u32;
+        if waiting == 0 {
+            return;
+        }
+        let start = std::time::Instant::now();
+        self.work_step(&mut Budget::words(waiting));
+        crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_work: drained offset {:#x} in {:?}", addr, start.elapsed());
+    }
+
+    /// Reset clears the FIFO and abandons the waiting stores. The caller holds
+    /// the board lock, so no slice runs.
+    pub fn work_reset(&mut self) {
+        let mut f = self.front.lock();
+        let f = &mut *f;
+        for q in f.work_queue.iter() {
+            if q.owed {
+                if let Some(pi) = &f.pi {
+                    pi_gfx_owe_credits(pi.as_ref(), f.slot, -1);
+                }
+            }
+        }
+        f.work_queue.clear();
+        f.work_in_fifo = 0;
+    }
+}
+
