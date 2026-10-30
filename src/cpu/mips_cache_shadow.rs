@@ -191,7 +191,6 @@ impl<
         const FIR: u32, const TLB_ENTRIES: usize, const MODEL: u8,
     > ShadowCache<IC_SIZE, IC_LINE, DC_SIZE, DC_LINE, L2_SIZE, L2_LINE, MIPS4, PRID, FIR, TLB_ENTRIES, MODEL>
 {
-    const R10K: bool = MODEL == model::R10000;
     const R5K: bool = MODEL == model::R5000;
     const IC_LINES: usize = if IC_LINE == 0 { 0 } else { IC_SIZE / IC_LINE };
     const DC_LINES: usize = if DC_LINE == 0 { 0 } else { DC_SIZE / DC_LINE };
@@ -209,7 +208,7 @@ impl<
             // Only the R10000 secondary keeps a data shadow: it is the one
             // the IP28 PROM walks with Index_Store_Data, and a 1 MB array is
             // cheap once. The R4000 family has no index data ops.
-            l2: UnsafeCell::new(Shadow::new(Self::L2_LINES, if Self::R10K { L2_SIZE / 8 } else { 0 })),
+            l2: UnsafeCell::new(Shadow::new(Self::L2_LINES, if Self::R10K_FAMILY { L2_SIZE / 8 } else { 0 })),
             tc_base: UnsafeCell::new(std::ptr::null_mut()),
             tc_bitmap: UnsafeCell::new(0),
             tc_shift: UnsafeCell::new(crate::ppmem::BITMAP_SHIFT),
@@ -281,7 +280,7 @@ impl<
         if line == 0 || lines == 0 {
             return 0;
         }
-        if !Self::R10K {
+        if !Self::R10K_FAMILY {
             let va = virt_addr as usize;
             if Self::R5K && matches!(sel, CACH_PI | CACH_PD) {
                 let sets = lines / 2;
@@ -332,11 +331,10 @@ impl<
     const PRID: u32 = PRID;
     const FIR: u32 = FIR;
     const TLB_ENTRIES: usize = TLB_ENTRIES;
-    // The R10000 implements 44 virtual address bits where the R4x00 implements
-    // 40; the shadow cache is only used for it, but key this off the same flag
-    // that selects its cache encodings rather than asserting it unconditionally.
-    const VA_BITS: u32 = if MODEL == model::R10000 { 44 } else { 40 };
-    const PA_BITS: u32 = if MODEL == model::R10000 { 40 } else { 36 };
+    // The R10000 family implements 44 virtual address bits where the R4x00
+    // implements 40.
+    const VA_BITS: u32 = if Self::R10K_FAMILY { 44 } else { 40 };
+    const PA_BITS: u32 = if Self::R10K_FAMILY { 40 } else { 36 };
     // The CPU's name, which snapshots check: the same as the full model's, so
     // a mismatch reads as a cache-kind difference rather than a different CPU.
     // The R10000 keeps its historical "shadow", which existing IP28
@@ -344,10 +342,15 @@ impl<
     const NAME: &'static str = match MODEL {
         model::R4400 => "R4400",
         model::R5000 => "R5000",
-        _ => "shadow",
+        model::R10000 => "shadow",
+        model::R12000 => "R12000",
+        model::R14000 => "R14000",
+        model::R16000 => "R16000",
+        _ => "R4400",
     };
     const CACHE_KIND: &'static str = "shadow";
-    const R10K_CACHE_OPS: bool = MODEL == model::R10000;
+    const R10K_FAMILY: bool = model::r10k_family(MODEL);
+    const R10K_CACHE_OPS: bool = Self::R10K_FAMILY;
 }
 
 impl<
@@ -547,7 +550,7 @@ impl<
 
         // R4400/R5000: a tag keeps only its fields, and reads back with
         // generated check bits — exactly what the full model returns.
-        if !Self::R10K && matches!(op, C_IST | C_ILT) {
+        if !Self::R10K_FAMILY && matches!(op, C_IST | C_ILT) {
             let lines = match sel { CACH_PI => Self::IC_LINES, CACH_PD => Self::DC_LINES, _ => Self::L2_LINES };
             if lines == 0 {
                 return 0; // no secondary on the R5000
@@ -604,8 +607,8 @@ impl<
             }
 
             // R10000 reassigns 5/6/7, scoped to particular cache selects.
-            C_R10K_CBARRIER if Self::R10K && sel == CACH_PI => 0,
-            C_R10K_ILD if Self::R10K && matches!(sel, CACH_PI | CACH_PD | CACH_SD) => {
+            C_R10K_CBARRIER if Self::R10K_FAMILY && sel == CACH_PI => 0,
+            C_R10K_ILD if Self::R10K_FAMILY && matches!(sel, CACH_PI | CACH_PD | CACH_SD) => {
                 let s = self.shadow(sel);
                 let slot = self.data_slot(s.data.len(), virt_addr);
                 if s.data.is_empty() {
@@ -619,7 +622,7 @@ impl<
                     s.data[slot]
                 }
             }
-            C_R10K_ISD if Self::R10K && matches!(sel, CACH_SI | CACH_SD) => {
+            C_R10K_ISD if Self::R10K_FAMILY && matches!(sel, CACH_SI | CACH_SD) => {
                 let s = self.shadow(sel);
                 let slot = self.data_slot(s.data.len(), virt_addr);
                 if !s.data.is_empty() {
@@ -742,6 +745,20 @@ pub type R10000ShadowCache =
 /// modules have SB clear, and so does this model.
 pub type R10000O2ShadowCache =
     ShadowCache<32768, 64, 32768, 32, 1048576, 64, true, 0x0000_0925, 0x0000_0900, 64, { model::R10000 }>;
+
+// Parts of the R10000 family that no machine instantiates yet. They exist for
+// the tests that exercise the family's shared behaviour on each model id. The
+// PRId words are inferred, not captured, and the geometry is the R10000's with
+// a larger secondary cache.
+#[cfg(test)]
+pub type R12000ShadowCache =
+    ShadowCache<32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0e35, 0x0000_0900, 64, { model::R12000 }>;
+#[cfg(test)]
+pub type R14000ShadowCache =
+    ShadowCache<32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0f23, 0x0000_0900, 64, { model::R14000 }>;
+#[cfg(test)]
+pub type R16000ShadowCache =
+    ShadowCache<32768, 64, 32768, 32, 4194304, 128, true, 0x0000_0f50, 0x0000_0900, 64, { model::R16000 }>;
 
 /// SGI Indy / Indigo2 R4400: the full model's geometry and identity — 16 KB
 /// direct-mapped primaries with 16-byte lines, a 1 MB secondary with 128-byte
@@ -958,6 +975,25 @@ mod tests {
         same::<R4400ShadowCache, R4400Cache>();
         same::<R5000ShadowCache, R5000Cache>();
         assert_eq!(<R10000ShadowCache as CpuModel>::NAME, "shadow", "existing IP28 snapshots");
+    }
+
+    /// Each R10000-family part reports its own identity, and all of them are
+    /// the family: 44 virtual and 40 physical address bits, R10000 cache
+    /// operations.
+    #[test]
+    fn the_r10000_family_parts_report_their_own_identity() {
+        fn id<C: CpuModel>() -> (u32, u32, usize, bool, &'static str, u32, u32, bool) {
+            (C::PRID, C::FIR, C::TLB_ENTRIES, C::MIPS4, C::NAME, C::VA_BITS, C::PA_BITS, C::R10K_FAMILY)
+        }
+        assert_eq!(id::<R10000ShadowCache>(), (0x925, 0x900, 64, true, "shadow", 44, 40, true));
+        assert_eq!(id::<R12000ShadowCache>(), (0xe35, 0x900, 64, true, "R12000", 44, 40, true));
+        assert_eq!(id::<R14000ShadowCache>(), (0xf23, 0x900, 64, true, "R14000", 44, 40, true));
+        assert_eq!(id::<R16000ShadowCache>(), (0xf50, 0x900, 64, true, "R16000", 44, 40, true));
+        assert!(<R12000ShadowCache as CpuModel>::R10K_CACHE_OPS);
+        assert!(!<R5000ShadowCache as CpuModel>::R10K_FAMILY);
+        assert!(!<R4400ShadowCache as CpuModel>::R10K_FAMILY);
+        assert!(!<R5000ShadowCache as CpuModel>::R10K_CACHE_OPS);
+        assert!(!<R4400ShadowCache as CpuModel>::R10K_CACHE_OPS);
     }
 
     /// The O2 R10000 differs from the IP28's only in its secondary line size.

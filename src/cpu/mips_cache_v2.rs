@@ -565,6 +565,9 @@ pub trait CpuModel: MipsCache {
     /// and `Index_Load_Data` returns into it, neither of which is true of the
     /// R4000 hit operations that share those encodings.
     const R10K_CACHE_OPS: bool = false;
+    /// The part is in the R10000 family (R10000, R12000, R14000, R16000), which
+    /// shares one programming model: 44 virtual and 40 physical address bits.
+    const R10K_FAMILY: bool = false;
 }
 
 pub trait MipsCache: Send + Sync {
@@ -1385,6 +1388,15 @@ pub mod model {
     pub const R4400: u8 = 0;
     pub const R5000: u8 = 1;
     pub const R10000: u8 = 2;
+    pub const R12000: u8 = 3;
+    pub const R14000: u8 = 4;
+    pub const R16000: u8 = 5;
+
+    /// The R10000 family: R10000 and the parts that follow it, which share one
+    /// programming model.
+    pub const fn r10k_family(model: u8) -> bool {
+        matches!(model, R10000 | R12000 | R14000 | R16000)
+    }
 }
 
 /// SGI Indy R4400: direct-mapped 16K L1s, 1 MB unified L2 owning the decode slots.
@@ -3595,14 +3607,18 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
     const PRID: u32 = PRID;
     const FIR: u32 = FIR;
     const TLB_ENTRIES: usize = TLB_ENTRIES;
-    const R10K_CACHE_OPS: bool = MODEL == model::R10000;
-    // 44 implemented virtual address bits on the R10000, as the shadow
+    const R10K_FAMILY: bool = model::r10k_family(MODEL);
+    const R10K_CACHE_OPS: bool = Self::R10K_FAMILY;
+    // 44 implemented virtual address bits on the R10000 family, as the shadow
     // model already says; XContext's layout follows them.
-    const VA_BITS: u32 = if MODEL == model::R10000 { 44 } else { 40 };
-    const PA_BITS: u32 = if MODEL == model::R10000 { 40 } else { 36 };
+    const VA_BITS: u32 = if Self::R10K_FAMILY { 44 } else { 40 };
+    const PA_BITS: u32 = if Self::R10K_FAMILY { 40 } else { 36 };
     const NAME: &'static str = match MODEL {
         model::R5000 => "R5000",
         model::R10000 => "R10000",
+        model::R12000 => "R12000",
+        model::R14000 => "R14000",
+        model::R16000 => "R16000",
         _ => "R4400",
     };
 }
