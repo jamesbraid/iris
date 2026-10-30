@@ -754,6 +754,11 @@ impl Ioc3Eth {
         Self::with_phy(mac, Box::new(Ics1890::new(PHY_ADDR, delay)), "ip30-eth")
     }
 
+    /// Fuel uses the DP83843 at management address 1.
+    pub fn new_fuel(mac: [u8; 6]) -> Arc<Self> {
+        Self::with_phy(mac, Box::new(crate::dev::dp83843::Dp83843::new(PHY_ADDR)), "ioc3-eth")
+    }
+
     fn with_phy(mac: [u8; 6], phy: Box<dyn MiiPhy>, thread_prefix: &'static str) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             mac,
