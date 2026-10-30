@@ -27,6 +27,7 @@ pub mod mace_ust;
 pub mod ns16550;
 pub mod rad1;
 pub mod mgras;
+pub mod odyssey;
 pub mod sgi_gfx;
 pub mod ng1;
 pub mod serial_host;
