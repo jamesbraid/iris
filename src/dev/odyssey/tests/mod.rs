@@ -25,6 +25,8 @@ mod display;
 mod dma;
 mod fifo;
 mod interrupts;
+mod program;
+mod raster;
 mod registers;
 
 pub(super) const VPRO_WIDGET: u32 = 11;

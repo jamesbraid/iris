@@ -258,7 +258,109 @@ pub struct GlPlanes<'a> {
     overlay: Rows<'a, u8>,
 }
 
+/// One row of GlPlanes as a row loop reaches it (Planes::row()): the depth
+/// plane's and both colour buffers' words for the row's pixels, and of
+/// GlPixelState::pixel_allowed() only the id test, which is per pixel; the
+/// plane bound and clip rectangles were tested for the whole row. Its
+/// methods take plane coordinates on that row and answer as GlPlanes would.
+pub struct GlPlaneRow<'a> {
+    x0: i32,
+    depth: &'a [std::cell::Cell<u8>],
+    depth_le: bool,
+    colour: [&'a [std::cell::Cell<u8>]; ODSY_BUFFERS as usize],
+    colour_le: [bool; ODSY_BUFFERS as usize],
+    /// Stores reach the planes: not a draw to the id-plane destination.
+    store: bool,
+    /// The id bytes of the row's pixels, or empty with the id test off.
+    did: &'a [u8],
+    id_value: u8,
+    id_mask: u8,
+}
+
+impl GlPlaneRow<'_> {
+    #[inline(always)]
+    fn allowed(&self, i: usize) -> bool {
+        self.did.is_empty() || ((self.did[i] ^ self.id_value) & self.id_mask) == 0
+    }
+}
+
+impl Planes for GlPlaneRow<'_> {
+    #[inline(always)]
+    fn store_rgba(&self, target: ColourTarget, x: i32, _y: i32, colour: &RasterColour) {
+        let i = (x - self.x0) as usize;
+        let c = &colour.component;
+
+        if target < ODSY_BUFFERS && self.store && self.allowed(i) {
+            let word = (c[0] << 24) | (c[1] << 16) | (c[2] << 8) | c[3];
+
+            word_store(self.colour[target as usize], i, self.colour_le[target as usize], word);
+        }
+    }
+
+    #[inline(always)]
+    fn load_rgba(&self, target: ColourTarget, x: i32, _y: i32) -> Option<RasterColour> {
+        if target >= ODSY_BUFFERS {
+            return None;
+        }
+        let word = word_load(self.colour[target as usize], (x - self.x0) as usize, self.colour_le[target as usize]);
+        let mut colour = RasterColour::default();
+        for i in 0..4u32 {
+            colour.component[i as usize] = (word >> (24 - 8 * i)) & 0xff;
+        }
+        Some(colour)
+    }
+
+    #[inline(always)]
+    fn load_depth(&self, x: i32, _y: i32) -> u32 {
+        word_load(self.depth, (x - self.x0) as usize, self.depth_le)
+    }
+
+    #[inline(always)]
+    fn store_depth(&self, x: i32, _y: i32, depth: u32) {
+        let i = (x - self.x0) as usize;
+
+        if self.store && self.allowed(i) {
+            word_store(self.depth, i, self.depth_le, depth & ODSY_DEPTH24_MAX);
+        }
+    }
+}
+
 impl Planes for GlPlanes<'_> {
+    /// The whole row on the screen and inside one kept clip rectangle, and
+    /// in the depth plane and both colour planes; otherwise None, and the
+    /// row loop tests each pixel.
+    fn row(&self, y: i32, x0: i32, x1: i32) -> Option<GlPlaneRow<'_>> {
+        let s = &self.state;
+        let n = (x1 as i64 - x0 as i64 + 1) as usize;
+
+        if x0 < 0 || y < 0 || x1 >= SGI_ODYSSEY_WIDTH as i32 || y >= SGI_ODYSSEY_HEIGHT as i32 || x1 < x0 {
+            return None;
+        }
+        if !s.clip_rect[..s.clip_kept as usize].iter().any(|r| y >= r.y0 && y <= r.y1 && x0 >= r.x0 && x1 <= r.x1) {
+            return None;
+        }
+        let did = if s.id_compare & ODSY_ID_COMPARE_ENABLE != 0 {
+            let at = y as usize * SGI_ODYSSEY_WIDTH as usize + x0 as usize;
+            s.did.get(at..at + n)?
+        } else {
+            &[]
+        };
+        Some(GlPlaneRow {
+            x0,
+            depth: self.depth.plane_words(&s.depth, y, x0, n)?,
+            depth_le: s.depth.is_le(),
+            colour: [
+                self.colour[0].plane_words(&s.colour[0], y, x0, n)?,
+                self.colour[1].plane_words(&s.colour[1], y, x0, n)?,
+            ],
+            colour_le: [s.colour[0].is_le(), s.colour[1].is_le()],
+            store: !s.to_aux,
+            did,
+            id_value: s.id_compare as u8,
+            id_mask: (s.id_compare >> ODSY_ID_COMPARE_MASK_SHIFT) as u8,
+        })
+    }
+
     fn store_colour(&self, target: ColourTarget, x: i32, y: i32, colour: u32) {
         let s = &self.state;
         let mask = (s.write_mask >> ODSY_WRITE_COLOUR_SHIFT) & ODSY_WRITE_COLOUR_MASK;
@@ -364,11 +466,212 @@ impl Planes for GlPlanes<'_> {
     }
 }
 
+/// The board's planes and pixel state as a raster job takes them: the
+/// pixel state of the moment it was set up, and spans of the planes the
+/// raster unit owns (raster_unit.rs).
+#[derive(Clone, Copy)]
+pub struct GlPixelJob {
+    pub state: GlPixelState<'static>,
+    pub spans: PlaneSpans,
+}
+
+impl GlPixelJob {
+    /// The planes, as GlPixels borrows them.
+    ///
+    /// # Safety
+    /// As `Span::bytes`: only the raster unit, or a caller the raster unit
+    /// has finished for, uses the planes meanwhile.
+    pub unsafe fn pixels<'a>(&self) -> GlPixels<'a> {
+        let s = &self.spans;
+        let st = &self.state;
+        unsafe {
+            GlPixels {
+                state: GlPixelState { did: s.did.bytes(), ..*st },
+                colour: [
+                    RowsMut::new(s.colour[0].bytes(), st.colour[0].stride as usize),
+                    RowsMut::new(s.colour[1].bytes(), st.colour[1].stride as usize),
+                ],
+                depth: RowsMut::new(s.depth.bytes(), st.depth.stride as usize),
+                stencil: RowsMut::new(s.stencil.bytes(), st.stencil.stride as usize),
+                overlay: RowsMut::new(s.overlay.bytes(), SGI_ODYSSEY_WIDTH as usize),
+            }
+        }
+    }
+}
+
+/// The texture tables a textured draw reads, copied when it is set up: a
+/// later command may rewrite them before the raster unit draws. Only what
+/// the chain uses is copied.
+#[derive(Default)]
+pub struct TexelTables {
+    slice_offset: Vec<u32>,
+    slice_width: Vec<u32>,
+    colour_table: Option<Box<[[u32; SGI_ODYSSEY_TEX_COLOUR_TABLE_ENTRIES as usize]; 2]>>,
+    scale_bias: [u32; 8],
+}
+
+static NO_COLOUR_TABLE: [[u32; SGI_ODYSSEY_TEX_COLOUR_TABLE_ENTRIES as usize]; 2] =
+    [[0; SGI_ODYSSEY_TEX_COLOUR_TABLE_ENTRIES as usize]; 2];
+
+impl TexelTables {
+    fn of(s: &Board, chain: Option<&TextureChain>) -> Self {
+        let Some(chain) = chain else {
+            return TexelTables::default();
+        };
+        // Only a volume reads the slice tables (BoardTexels::read_3d()).
+        let volume = chain.volume.slices != 0 || chain.volumes.iter().any(|v| v.slices != 0);
+        TexelTables {
+            slice_offset: if volume { s.tex_slice_offset.to_vec() } else { Vec::new() },
+            slice_width: if volume { s.tex_slice_width.to_vec() } else { Vec::new() },
+            colour_table: chain.volume.colour_table.then(|| Box::new(s.tex_colour_table)),
+            scale_bias: s.tex_scale_bias,
+        }
+    }
+
+    /// The board's texels, as a raster job reads them.
+    ///
+    /// # Safety
+    /// As `Span::bytes` for the object store.
+    unsafe fn texels<'a>(&'a self, chain: &'a TextureChain, obj: Span) -> BoardTexels<'a> {
+        let obj: &'a [u8] = unsafe { obj.bytes() };
+        BoardTexels {
+            chain,
+            obj,
+            obj_words: obj.len() as u64 / 4,
+            slice_offset: &self.slice_offset,
+            slice_width: &self.slice_width,
+            colour_table: self.colour_table.as_deref().unwrap_or(&NO_COLOUR_TABLE),
+            scale_bias: &self.scale_bias,
+        }
+    }
+}
+
+/// A GL draw's fields other than its borrows, for a raster job to own.
+#[derive(Clone, Copy)]
+struct GlDrawFields {
+    context: u32,
+    mode: u32,
+    count: u32,
+    back_colors: bool,
+    point_size: f32,
+    line_width: f32,
+    point_smooth: bool,
+    line_smooth: bool,
+    polygon_smooth: bool,
+    polygon_stipple_enabled: bool,
+    polygon_modes: Option<[u32; 2]>,
+    fill_by_triangle: bool,
+    line_stipple_enabled: bool,
+    line_stipple_repeat: u32,
+    line_stipple_pattern: u32,
+    line_phase: Option<u32>,
+    line_phase_reset: bool,
+}
+
+impl GlDrawFields {
+    fn of(d: &GlDraw) -> Self {
+        GlDrawFields {
+            context: d.context,
+            mode: d.mode,
+            count: d.count,
+            back_colors: d.back_colors,
+            point_size: d.point_size,
+            line_width: d.line_width,
+            point_smooth: d.point_smooth,
+            line_smooth: d.line_smooth,
+            polygon_smooth: d.polygon_smooth,
+            polygon_stipple_enabled: d.polygon_stipple_enabled,
+            polygon_modes: d.polygon_modes,
+            fill_by_triangle: d.fill_by_triangle,
+            line_stipple_enabled: d.line_stipple_enabled,
+            line_stipple_repeat: d.line_stipple_repeat,
+            line_stipple_pattern: d.line_stipple_pattern,
+            line_phase: d.line_phase,
+            line_phase_reset: d.line_phase_reset,
+        }
+    }
+
+    fn draw<'a>(&self, vertices: &'a [f32], state: &'a GlDrawState, polygon_stipple: &'a [u32; 32]) -> GlDraw<'a> {
+        let f = *self;
+        GlDraw {
+            context: f.context,
+            mode: f.mode,
+            count: f.count,
+            vertices,
+            back_colors: f.back_colors,
+            state,
+            point_size: f.point_size,
+            line_width: f.line_width,
+            point_smooth: f.point_smooth,
+            line_smooth: f.line_smooth,
+            polygon_smooth: f.polygon_smooth,
+            polygon_stipple,
+            polygon_stipple_enabled: f.polygon_stipple_enabled,
+            polygon_modes: f.polygon_modes,
+            fill_by_triangle: f.fill_by_triangle,
+            line_stipple_enabled: f.line_stipple_enabled,
+            line_stipple_repeat: f.line_stipple_repeat,
+            line_stipple_pattern: f.line_stipple_pattern,
+            line_phase: f.line_phase,
+            line_phase_reset: f.line_phase_reset,
+        }
+    }
+}
+
+/// One GL primitive set up for the raster unit: everything Board::gl_draw()
+/// read of the board, owned.
+///
+/// The raster unit hands a finished job back (RasterQueue::give_back) and
+/// the front end fills it again for a later draw, keeping its vertex
+/// buffer and texture chain: allocating them per draw on the front end and
+/// freeing them on the raster thread had the two threads contending for
+/// the allocator.
+pub struct GlDrawJob {
+    rules: RasterRules,
+    target: RasterTarget<'static>,
+    image: GlTexImage<'static>,
+    /// Kept across reuse; the draw reads it only when `textured`.
+    chain: Option<Box<TextureChain>>,
+    textured: bool,
+    tables: TexelTables,
+    state: GlDrawState,
+    vertices: Vec<f32>,
+    polygon_stipple: [u32; 32],
+    fields: GlDrawFields,
+    pixels: GlPixelJob,
+}
+
+impl GlDrawJob {
+    /// Draw it; the result, and the line-stipple phase the context keeps.
+    pub fn run(&self, ctx: &mut RasterCtx) -> (GlDrawResult, Option<u32>) {
+        let mut t = self.target.clone();
+        let chain = self.chain.as_deref().filter(|_| self.textured);
+        t.texture = chain.map(|chain| chain.image(&self.image));
+        let mut d = self.fields.draw(&self.vertices, &self.state, &self.polygon_stipple);
+        if d.line_phase == Some(LINE_PHASE_ON_RASTER) {
+            d.line_phase = Some(ctx.line_phase);
+        }
+        // SAFETY: the raster unit owns the planes while the job runs
+        // (PlaneSpans).
+        let mut pixels = unsafe { self.pixels.pixels() };
+        let texels = chain.map(|chain| unsafe { self.tables.texels(chain, self.pixels.spans.obj) });
+        let texels: &dyn Texels = match &texels {
+            Some(texels) => texels,
+            None => &NoTexels,
+        };
+        let result = self.rules.draw(&t, &mut pixels, texels, &mut d);
+        if let Some(phase) = d.line_phase {
+            ctx.line_phase = phase;
+        }
+        crate::dlog_dev!(LogModule::Odyssey, "sgi-odyssey: GL draw path: backend scalar result {} called=1", result);
+        (result, d.line_phase)
+    }
+}
+
 impl Board {
-    /// The board's planes as a GL draw borrows them, and, for a textured
-    /// draw, its texels in chain.
-    pub fn gl_parts<'a>(&'a mut self, chain: Option<&'a TextureChain>) -> (GlPixels<'a>, Option<BoardTexels<'a>>) {
-        let state = GlPixelState {
+    /// The board state a GL draw's pixels pass under, without the id bytes.
+    pub fn gl_pixel_state(&mut self) -> GlPixelState<'static> {
+        GlPixelState {
             did: &[],
             id_compare: self.id_compare,
             clip_rect: self.clip_rect,
@@ -382,7 +685,15 @@ impl Board {
             ],
             depth: self.depth_mem.plane(self.depth_plane).expect("the depth plane"),
             stencil: self.stencil_mem.plane(self.stencil_plane).expect("the stencil plane"),
-        };
+        }
+    }
+
+    /// The board's planes as a GL draw borrows them, and, for a textured
+    /// draw, its texels in chain, for a draw on the caller's thread. It
+    /// waits for the raster unit's queued jobs first.
+    pub fn gl_parts<'a>(&'a mut self, chain: Option<&'a TextureChain>) -> (GlPixels<'a>, Option<BoardTexels<'a>>) {
+        self.raster_wait();
+        let state = self.gl_pixel_state();
         let texels = chain.map(|chain| BoardTexels {
             chain,
             obj: &self.obj_mem.bytes,
@@ -1577,15 +1888,22 @@ impl Board {
         let rules = self.gl_operation_rules();
         let mut state: GlDrawState = *d.state;
         let mut image = GlTexImage::default();
+        // A job the raster unit has finished with, if one is back.
+        let mut spare = self.raster.take_draw();
         // Some 7 KB that only a textured draw uses, and Board::texture_setup()
         // clears before it fills any of it, so it is not built for every
-        // primitive.
-        let mut texture: Option<Box<TextureChain>> = None;
+        // primitive, and a reused job's is reused.
+        let mut texture: Option<Box<TextureChain>> = spare.as_mut().and_then(|j| j.chain.take());
+        let textured = d.state.texture_2d != 0 || d.state.texture_3d != 0;
 
-        if d.state.texture_2d != 0 || d.state.texture_3d != 0 {
-            let chain = texture.insert(Box::default());
+        if textured {
+            let chain = texture.get_or_insert_with(Box::default);
 
             if !self.texture_setup(&mut image, chain) {
+                if let Some(mut j) = spare {
+                    j.chain = texture;
+                    self.raster.give_back(j);
+                }
                 crate::dlog_dev!(LogModule::Odyssey, "sgi-odyssey: GL draw path: backend scalar-skip result {} called=0", SGI_GL_DRAW_OK);
                 return SGI_GL_DRAW_OK;
             }
@@ -1606,31 +1924,86 @@ impl Board {
         state.fog_color[3] = (self.gl_fog[1] & 0xfff) as f32 / 4096.0f32;
         state.fog_index = ((self.gl_fog[0] >> 12) & 0xfff) as f32;
         self.gl_report_refusals(true);
-        t.texture = texture.as_deref().map(|chain| chain.image(&image));
-        let mut draw = GlDraw { state: &state, ..*d };
-        // The board's thread holds the board lock for the whole draw; a
-        // processor's accesses that need not wait for it use the front lock
-        // (interface.rs).
-        let (mut pixels, texels) = self.gl_parts(texture.as_deref());
-        let texels: &dyn Texels = match &texels {
-            Some(texels) => texels,
-            None => &NoTexels,
+        t.texture = None;
+        let tables = TexelTables::of(self, texture.as_deref().filter(|_| textured));
+        let pixels = self.gl_pixel_job();
+        let job = match spare {
+            Some(mut j) => {
+                j.rules = rules;
+                j.target = t;
+                j.image = image;
+                j.chain = texture;
+                j.textured = textured;
+                j.tables = tables;
+                j.state = state;
+                j.vertices.clear();
+                j.vertices.extend_from_slice(d.vertices);
+                j.polygon_stipple = *d.polygon_stipple;
+                j.fields = GlDrawFields::of(d);
+                j.pixels = pixels;
+                j
+            }
+            None => Box::new(GlDrawJob {
+                rules,
+                target: t,
+                image,
+                chain: texture,
+                textured,
+                tables,
+                state,
+                vertices: d.vertices.to_vec(),
+                polygon_stipple: *d.polygon_stipple,
+                fields: GlDrawFields::of(d),
+                pixels,
+            }),
         };
-        let result = rules.draw(&t, &mut pixels, texels, &mut draw);
-        d.line_phase = draw.line_phase;
-        crate::dlog_dev!(LogModule::Odyssey, "sgi-odyssey: GL draw path: backend scalar result {} called=1", result);
         self.scanout.invalidate_all();
-        result
+        if !self.raster.threaded() {
+            let (result, phase) = self.raster.run_now(|ctx| job.run(ctx));
+            d.line_phase = phase;
+            self.raster.give_back(job);
+            return result;
+        }
+        // The raster unit draws it later, so the context hears no result:
+        // every result but out-of-memory is only reported, and that one
+        // needs a polygon of more vertices than the host can address. The
+        // raster unit keeps the line-stipple phase the draw advances.
+        self.raster.submit_draw(job);
+        if d.line_phase.is_some() {
+            d.line_phase = Some(LINE_PHASE_ON_RASTER);
+        }
+        SGI_GL_DRAW_OK
+    }
+
+    /// The board's planes and pixel state as a raster job takes them.
+    pub fn gl_pixel_job(&mut self) -> GlPixelJob {
+        GlPixelJob { state: self.gl_pixel_state(), spans: self.plane_spans() }
+    }
+
+    /// glClear's raster op, and the pattern rectangle's runs: the raster
+    /// unit runs ops in order with the draw state of now.
+    pub fn gl_raster_ops(&mut self, ops: Vec<RasterOp>) {
+        let t = self.gl_target();
+        let rules = self.gl_operation_rules();
+        let pixels = self.gl_pixel_job();
+
+        if let Some(op) = ops.first() {
+            self.gl_report_refusals(op.kind != SGI_RASTER_CLEAR || (op.clear_buffers & SGI_GL_COLOR_BUFFER_BIT) != 0);
+        }
+        self.scanout.invalidate_all();
+        self.raster.submit(move |_| {
+            // SAFETY: the job runs before the front end next touches the
+            // planes (PlaneSpans).
+            let mut planes = unsafe { pixels.pixels() };
+            for op in &ops {
+                rules.raster(&t, &mut planes, op);
+            }
+        });
     }
 
     /// glClear's raster op: not on the first-triangle path, wired for later.
     pub fn gl_raster(&mut self, op: &RasterOp) {
-        let t = self.gl_target();
-        let rules = self.gl_operation_rules();
-
-        self.gl_report_refusals(op.kind != SGI_RASTER_CLEAR || (op.clear_buffers & SGI_GL_COLOR_BUFFER_BIT) != 0);
-        rules.raster(&t, &mut self.gl_parts(None).0, op);
-        self.scanout.invalidate_all();
+        self.gl_raster_ops(vec![*op]);
     }
 
     /// Run one command in the GL context, with the board as the sink for the

@@ -128,6 +128,12 @@ pub const ODSY_REG_FIFO_SETUP_LAST: u32 = 0x6b3;
 pub const ODSY_REG_FIFO_HIGH_WATER: u32 = 0x6b2;
 pub const ODSY_REG_FIFO_SETUP_7B5: u32 = 0x7b5;
 pub const ODSY_FIFO_SETUP_7B5_INDEX: usize = 4;
+// The hardware-sync timeout in board clocks. The kernels' FIFO set-up writes
+// 10^9 after the program load, and when a hardware sync waits longer the
+// board raises flags bit 1. The model has no hardware-sync wait (which
+// command words are syncs is not established), so the timeout is stored and
+// never expires.
+pub const ODSY_REG_SYNC_TIMEOUT: u32 = 0x7f0;
 
 // ODSY_INTR_FLAGS' low-water bit, the command-FIFO low-water interrupt (the kernel's flags decode names it as the low-water flag bit).
 pub const ODSY_INTR_FIFO_LOW_WATER: u32 = 0x00000200;
@@ -489,6 +495,13 @@ pub const ODSY_PROG_RUN_ONCE: u32 = 0x90808800; // 2 operands
 
 // How far a program list is read before it counts as unrecognised.
 pub const ODSY_PROG_LIST_MAX: u32 = 64;
+// The older GL libraries' program image lacks the 99-record spot routine at
+// records 792 to 890 and every record from 2365 on, so they number each
+// routine from 891 on 99 lower than the current libraries do.
+pub const ODSY_UCODE_SPOT_FIRST: u32 = 792;
+pub const ODSY_UCODE_SPOT_RECORDS: u32 = 99;
+// The older image's length: records 0-791 and 891-2364 of the current one.
+pub const ODSY_UCODE_OLDER_RECORDS: u32 = 2266;
 pub const ODSY_UCODE_END: u32 = 0x4c5;
 pub const ODSY_UCODE_UNLIT: u32 = 0x0d6;
 pub const ODSY_UCODE_UNLIT_2A: u32 = 0x0e0;
