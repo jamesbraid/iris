@@ -49,8 +49,35 @@ pub const OCTANE_COUNT_HZ: u64 = 97_500_000;
 /// R10000 revision 2.7, as an Octane's hinv reports it; the raw PRId is
 /// inferred from the R10000 manual's encoding.
 pub const OCTANE_PRID: u32 = 0x0927;
-/// The Crossbow on the Octane reports revision 4.
+/// The Crossbow on the Octane reports revision code 4.
 const XBOW_REVISION: u32 = 4;
+/// The Octane2's Crossbow: revision code 5, which IRIX's inventory names
+/// Crossbow 1.4 (a PROM-monitor read of 0x50000001 beside an inventory of
+/// 1.4 on an Octane2, recorded in jamesbraid/qemu-sgi-origami's
+/// docs/system/mips/sgi/ip30.rst). SGI's VPro upgrade kit (007-4210-003)
+/// requires Crossbow 1.4 for the V10 and V12, so a machine with one of
+/// those presents it.
+const XBOW_REVISION_OCTANE2: u32 = 5;
+
+/// The PROM revision a VPro board needs (007-4210-003): 4.0 for the V6 and
+/// V8, 4.5 for the V10 and V12.
+fn vpro_prom_needed(board: crate::config::GraphicsBoard) -> (u32, u32) {
+    match board {
+        crate::config::GraphicsBoard::V10 | crate::config::GraphicsBoard::V12 => (4, 5),
+        _ => (4, 0),
+    }
+}
+
+/// The PROM's own revision, from its banner ("SGI Version 6.5 Rev 4.9
+/// IP30 ..."), if the image carries one.
+fn prom_revision(prom: &[u8]) -> Option<(u32, u32)> {
+    let text = String::from_utf8_lossy(prom);
+    let at = text.find(" Rev ")?;
+    let rest = &text[at + 5..];
+    let end = rest.find(" IP30")?;
+    let (major, minor) = rest[..end].split_once('.')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
 /// The graphics port the one IMPACT board sits in. A choice: it is where a
 /// measured Octane2 has its graphics board, not a measured SI placement.
 pub const WIDGET_GFX: u8 = 11;
@@ -96,7 +123,7 @@ pub struct OctaneMachine {
     flash: Arc<CfiFlash>,
     /// The IMPACT board, when `[graphics] board` names one.
     pub gfx: Option<Arc<ImpactXio>>,
-    /// The VPro board, with `[graphics] board = "v12"`.
+    /// The VPro board, with `[graphics] board = "v6"`, `"v8"`, `"v10"` or `"v12"`.
     pub vpro: Option<Arc<Odyssey>>,
     nat: Option<(Arc<crate::net::NatControl>, (std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr))>,
     /// Guest frames the network backend has processed.
@@ -128,11 +155,32 @@ impl OctaneMachine {
         let banks = heart_banks(cfg);
         let kind = cfg.graphics_board();
         let board = match kind {
-            crate::config::GraphicsBoard::None | crate::config::GraphicsBoard::V12 => None,
+            crate::config::GraphicsBoard::None => None,
+            b if b.is_vpro() => None,
             b if b.is_impact() => Some(b),
-            b => return Err(format!("graphics.board \"{}\" is not modelled on the Octane (valid: solidimpact, highimpact, maximpact, v12, none)", b.as_str())),
+            b => return Err(format!("graphics.board \"{}\" is not modelled on the Octane (valid: solidimpact, highimpact, maximpact, v6, v8, v10, v12, none)", b.as_str())),
         };
-        let has_vpro = kind == crate::config::GraphicsBoard::V12;
+        let has_vpro = kind.is_vpro();
+        if has_vpro {
+            let needed = vpro_prom_needed(kind);
+            if let Some(found) = prom_revision(&prom) {
+                if found < needed {
+                    eprintln!(
+                        "iris: the {} needs PROM {}.{} or later; {prom_path} is {}.{}",
+                        kind.label(),
+                        needed.0,
+                        needed.1,
+                        found.0,
+                        found.1
+                    );
+                }
+            }
+        }
+        let xbow_revision = if matches!(kind, crate::config::GraphicsBoard::V10 | crate::config::GraphicsBoard::V12) {
+            XBOW_REVISION_OCTANE2
+        } else {
+            XBOW_REVISION
+        };
         let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4);
         let timer_manager = Arc::new(TimerManager::new());
 
@@ -144,7 +192,7 @@ impl OctaneMachine {
         heart.set_microlan(record_bus("EMUU00", "030-0888-004", "B", "PM10", 0x5145_4d55_5500));
 
         let gfx_link = if board.is_some() || has_vpro { 1 << WIDGET_GFX } else { 0 };
-        let xbow = Arc::new(Xbow::new(XBOW_REVISION, (1 << WIDGET_HEART) | (1 << WIDGET_BRIDGE) | gfx_link));
+        let xbow = Arc::new(Xbow::new(xbow_revision, (1 << WIDGET_HEART) | (1 << WIDGET_BRIDGE) | gfx_link));
         xbow.connect_heart(heart.clone());
 
         // The onboard Bridge: memory and interrupts through HEART, the boot
@@ -202,7 +250,7 @@ impl OctaneMachine {
         // shared with the graphics board before the CPU exists.
         let fasttick = Arc::new(AtomicU64::new(0));
         let gfx = board.map(|b| ImpactXio::with_board(WIDGET_GFX, b, heart.clone(), mem.clone(), heartbeat, fasttick.clone()));
-        let vpro = if has_vpro { Some(Odyssey::new(WIDGET_GFX, "v12", heart.clone(), mem.clone())?) } else { None };
+        let vpro = if has_vpro { Some(Odyssey::new(WIDGET_GFX, kind.as_str(), heart.clone(), mem.clone())?) } else { None };
 
         // The bus over them, then the table.
         let phys = Ip30Bus::new(ram.clone());
@@ -756,5 +804,21 @@ impl Device for Ip30Monitor {
         }
         let text = self.text(args.first().copied().unwrap_or("unmapped"))?;
         w.write_all(text.as_bytes()).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The VPro fitment check reads the PROM's revision from its banner;
+    /// a board that needs a newer PROM than the image warns.
+    #[test]
+    fn the_prom_banner_gives_its_revision() {
+        let banner = b"\0\0SGI Version 6.5 Rev 4.9 IP30 Jan 20, 2004\0";
+        assert_eq!(prom_revision(banner), Some((4, 9)));
+        assert_eq!(prom_revision(b"no banner here"), None);
+        assert!((4, 3) < vpro_prom_needed(crate::config::GraphicsBoard::V12));
+        assert!((4, 3) >= vpro_prom_needed(crate::config::GraphicsBoard::V6));
     }
 }
