@@ -21,6 +21,8 @@ profile = "fuel_ip34"
 cpu = "r10000"
 
 [graphics]
+# "v12" or "v10" fits a VPro in the graphics slot; IRIX needs a kernel with
+# the VPro driver. The console stays on serial either way.
 board = "none"
 
 [fuel]
