@@ -189,7 +189,7 @@ impl<
         const FIR: u32, const TLB_ENTRIES: usize, const MODEL: u8,
     > ShadowCache<IC_SIZE, IC_LINE, DC_SIZE, DC_LINE, L2_SIZE, L2_LINE, MIPS4, PRID, FIR, TLB_ENTRIES, MODEL>
 {
-    const R10K: bool = MODEL == model::R10000;
+    const R10K: bool = model::profile(MODEL).r10k_family;
     const R5K: bool = MODEL == model::R5000;
     const IC_LINES: usize = if IC_LINE == 0 { 0 } else { IC_SIZE / IC_LINE };
     const DC_LINES: usize = if DC_LINE == 0 { 0 } else { DC_SIZE / DC_LINE };
@@ -332,19 +332,16 @@ impl<
     // The R10000 implements 44 virtual address bits where the R4x00 implements
     // 40; the shadow cache is only used for it, but key this off the same flag
     // that selects its cache encodings rather than asserting it unconditionally.
-    const VA_BITS: u32 = if MODEL == model::R10000 { 44 } else { 40 };
-    const PA_BITS: u32 = if MODEL == model::R10000 { 40 } else { 36 };
+    const VA_BITS: u32 = model::profile(MODEL).va_bits;
+    const PA_BITS: u32 = model::profile(MODEL).pa_bits;
     // The CPU's name, which snapshots check: the same as the full model's, so
     // a mismatch reads as a cache-kind difference rather than a different CPU.
     // The R10000 keeps its historical "shadow", which existing IP28
     // snapshots carry.
-    const NAME: &'static str = match MODEL {
-        model::R4400 => "R4400",
-        model::R5000 => "R5000",
-        _ => "shadow",
-    };
+    const NAME: &'static str = if MODEL == model::R10000 { "shadow" } else { model::profile(MODEL).name };
     const CACHE_KIND: &'static str = "shadow";
-    const R10K_CACHE_OPS: bool = MODEL == model::R10000;
+    const R10K_CACHE_OPS: bool = model::profile(MODEL).r10k_family;
+    const ENTRYHI_FULL_VA: bool = model::profile(MODEL).entryhi_full_va;
 }
 
 impl<
@@ -727,6 +724,11 @@ pub type R10000ShadowCache =
 pub type R10000O2ShadowCache =
     ShadowCache<32768, 64, 32768, 32, 1048576, 64, true, 0x0000_0925, 0x0000_0900, 64, { model::R10000 }>;
 
+/// SGI Fuel R14000. It has its own model id, so the approximations the Fuel
+/// needs are selected by its profile row and never by its PRId.
+pub type R14000ShadowCache =
+    ShadowCache<32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0f23, 0x0000_0900, 64, { model::R14000 }>;
+
 /// SGI Indy / Indigo2 R4400: the full model's geometry and identity — 16 KB
 /// direct-mapped primaries with 16-byte lines, a 1 MB secondary with 128-byte
 /// lines, PRId/FIR, 48 TLB entries, MIPS III — so CP0 Config and a PROM's
@@ -942,6 +944,38 @@ mod tests {
         same::<R4400ShadowCache, R4400Cache>();
         same::<R5000ShadowCache, R5000Cache>();
         assert_eq!(<R10000ShadowCache as CpuModel>::NAME, "shadow", "existing IP28 snapshots");
+
+        type R10K = R10000ShadowCache;
+        type R14K = R14000ShadowCache;
+        assert!(!<R10K as CpuModel>::ENTRYHI_FULL_VA);
+        assert_eq!(<R14K as CpuModel>::PRID, 0x0000_0f23);
+        assert_eq!(<R14K as CpuModel>::FIR, 0x0000_0900);
+        assert_eq!(<R14K as CpuModel>::TLB_ENTRIES, 64);
+        assert_eq!(<R14K as CpuModel>::NAME, "R14000");
+        assert_eq!(
+            (<R14K as MipsCache>::IC_SIZE, <R14K as MipsCache>::IC_LINE,
+             <R14K as MipsCache>::DC_SIZE, <R14K as MipsCache>::DC_LINE,
+             <R14K as MipsCache>::L2_SIZE, <R14K as MipsCache>::L2_LINE),
+            (32768, 64, 32768, 32, 2097152, 128),
+        );
+        assert!(<R14K as CpuModel>::ENTRYHI_FULL_VA);
+        assert!(<R14K as CpuModel>::R10K_CACHE_OPS);
+        assert_eq!((<R14K as CpuModel>::VA_BITS, <R14K as CpuModel>::PA_BITS), (44, 40));
+    }
+
+    /// A part is named by its model id. The R14000 and R16000 share PRId
+    /// implementation byte 0x0f, so a PRId test would call one the other.
+    #[test]
+    fn policies_follow_the_model_id_not_the_prid() {
+        type Same = ShadowCache<32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0f50, 0x0000_0900, 64, { model::R16000 }>;
+        type Twelve = ShadowCache<32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0e23, 0x0000_0900, 64, { model::R12000 }>;
+        assert_eq!(<Same as CpuModel>::NAME, "R16000");
+        assert!(!<Same as CpuModel>::ENTRYHI_FULL_VA, "no R16000 policy is established");
+        assert!(<Same as CpuModel>::R10K_CACHE_OPS, "still an R10000-family part");
+        assert_eq!(<Twelve as CpuModel>::NAME, "R12000");
+        assert!(<Twelve as CpuModel>::ENTRYHI_FULL_VA);
+        assert_eq!(model::profile(model::R10000).name, "R10000");
+        assert!(!model::profile(model::R5000).r10k_family);
     }
 
     /// The O2 R10000 differs from the IP28's only in its secondary line size.

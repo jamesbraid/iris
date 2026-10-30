@@ -349,6 +349,12 @@ consumer thread never takes `rec`.
   monomorphised over it, so all three CPUs are in every binary with no
   per-model branch on the hot path. `Machine::new` picks one from `[machine]
   cpu`.
+- CPU parts are told apart by model id (`mips_cache_v2::model`), not by the
+  PRId in the type. One `model::profile` table holds each part's address
+  widths and approximations, and every `CpuModel` constant reads it, so a new
+  part is an id, a table row and a type alias. `R14000ShadowCache` is Fuel's
+  CPU: its EntryHi and TLB keep 44 virtual-address bits, where the IP28 and
+  Octane stay at 40. `CpuModel` defaults preserve the existing machines.
 - With `opcodefusion` (implied by `lightning`), the interpreter executes
   common pairs (branch + NOP, LUI + ORI/ADDIU, address + load/store) as one
   dispatch.

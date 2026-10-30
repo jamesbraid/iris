@@ -561,6 +561,9 @@ pub trait CpuModel: MipsCache {
     /// and `Index_Load_Data` returns into it, neither of which is true of the
     /// R4000 hit operations that share those encodings.
     const R10K_CACHE_OPS: bool = false;
+    /// Keep every implemented VPN2 bit in EntryHi and the TLB. False keeps the
+    /// 40-bit match, which is what the IP28 and Octane guests were brought up on.
+    const ENTRYHI_FULL_VA: bool = false;
 }
 
 pub trait MipsCache: Send + Sync {
@@ -1379,6 +1382,73 @@ pub mod model {
     pub const R4400: u8 = 0;
     pub const R5000: u8 = 1;
     pub const R10000: u8 = 2;
+    pub const R12000: u8 = 3;
+    pub const R14000: u8 = 4;
+    pub const R16000: u8 = 5;
+
+    /// What one part does differently, read at compile time by every
+    /// `CpuModel` constant of the cache types.
+    ///
+    /// The part is named by its model id, not inferred from the PRId in the
+    /// type: the R14000 and R16000 share an implementation byte, and a board
+    /// may overwrite PRId at run time. An R10000-family part is any id with
+    /// `r10k_family` set; a model-specific approximation is a separate field,
+    /// so a part opts in to each one on its own row.
+    ///
+    /// To add a part: give it an id above, add an arm to [`profile`] that
+    /// starts from [`Profile::BASE`] or a sibling and overrides what differs,
+    /// then add a type alias next to the other cache aliases that passes the
+    /// id as `MODEL`. A new policy is a new field, a default in `BASE` and an
+    /// override in the rows that take it.
+    #[derive(Clone, Copy)]
+    pub struct Profile {
+        /// The CPU name snapshots carry (`CpuModel::NAME`).
+        pub name: &'static str,
+        /// R10000-family cache operations.
+        pub r10k_family: bool,
+        /// Implemented virtual and physical address bits (XContext layout, TLB).
+        pub va_bits: u32,
+        pub pa_bits: u32,
+        /// EntryHi and the TLB keep every implemented VPN2 bit. Off keeps the
+        /// 40-bit match the IP28 and Octane guests were brought up with.
+        pub entryhi_full_va: bool,
+    }
+
+    impl Profile {
+        /// The R4400 and the neutral defaults every other row builds on.
+        pub const BASE: Profile = Profile {
+            name: "R4400",
+            r10k_family: false,
+            va_bits: 40,
+            pa_bits: 36,
+            entryhi_full_va: false,
+        };
+        /// The existing R10000 types (IP28, Octane, O2): family behaviour,
+        /// none of the later approximations.
+        pub const R10K: Profile = Profile {
+            name: "R10000",
+            r10k_family: true,
+            va_bits: 44,
+            pa_bits: 40,
+            ..Profile::BASE
+        };
+    }
+
+    pub const fn profile(model: u8) -> Profile {
+        match model {
+            R5000 => Profile { name: "R5000", ..Profile::BASE },
+            R10000 => Profile::R10K,
+            // NEC U12754E and origami's r14000.md label the 44-bit VPN2 as
+            // R12000A behaviour. No machine wires an R12000 yet.
+            R12000 => Profile { name: "R12000", entryhi_full_va: true, ..Profile::R10K },
+            // Fuel. The only part whose approximations are switched on.
+            R14000 => Profile { name: "R14000", entryhi_full_va: true, ..Profile::R10K },
+            // Left at the family defaults: no R16000 behaviour is established
+            // here, and its PRId, caches and policies belong with its machine.
+            R16000 => Profile { name: "R16000", ..Profile::R10K },
+            _ => Profile::BASE,
+        }
+    }
 }
 
 /// SGI Indy R4400: direct-mapped 16K L1s, 1 MB unified L2 owning the decode slots.
@@ -3589,16 +3659,13 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
     const PRID: u32 = PRID;
     const FIR: u32 = FIR;
     const TLB_ENTRIES: usize = TLB_ENTRIES;
-    const R10K_CACHE_OPS: bool = MODEL == model::R10000;
-    // 44 implemented virtual address bits on the R10000, as the shadow
+    const R10K_CACHE_OPS: bool = model::profile(MODEL).r10k_family;
+    // 44 implemented virtual address bits on the R10000 family, as the shadow
     // model already says; XContext's layout follows them.
-    const VA_BITS: u32 = if MODEL == model::R10000 { 44 } else { 40 };
-    const PA_BITS: u32 = if MODEL == model::R10000 { 40 } else { 36 };
-    const NAME: &'static str = match MODEL {
-        model::R5000 => "R5000",
-        model::R10000 => "R10000",
-        _ => "R4400",
-    };
+    const VA_BITS: u32 = model::profile(MODEL).va_bits;
+    const PA_BITS: u32 = model::profile(MODEL).pa_bits;
+    const ENTRYHI_FULL_VA: bool = model::profile(MODEL).entryhi_full_va;
+    const NAME: &'static str = model::profile(MODEL).name;
 }
 
 impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_TAGS: usize,
@@ -4206,7 +4273,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
                     // L2 TagLo format:
                     //   [31:13] physical tag   [12:10] state   [9:7] PIdx
                     let tag: L2Tag = self.l2.get_tag(idx);
-                    if MODEL == model::R10000 {
+                    if model::profile(MODEL).r10k_family {
                         eprintln!("ip28: C_ILT(SD) idx={idx:#x} ptag={:#x} cs={:#x} pidx={:#x}",
                                   tag.ptag(), tag.cs(), tag.pidx());
                     }
