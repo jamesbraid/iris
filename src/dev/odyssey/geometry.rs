@@ -143,7 +143,7 @@ impl Board {
 }
 
 pub fn prog_in_window(a: u32) -> bool {
-    a >= ODSY_PROG_WINDOW_BASE && a < ODSY_PROG_WINDOW_BASE + ODSY_PROG_WINDOW_ENTRIES
+    (ODSY_PROG_WINDOW_BASE..ODSY_PROG_WINDOW_BASE + ODSY_PROG_WINDOW_ENTRIES).contains(&a)
 }
 
 /// The GL library's precompiled lit programs whose three entries are all
@@ -233,8 +233,8 @@ impl Board {
         let h = &self.gl_program_mem[base..];
         let mut crc: u64 = 0;
 
-        for i in 0..(n * ODSY_PROG_ENTRY_HALFWORDS) as usize {
-            crc ^= (h[i] as u64) << 48;
+        for &half in &h[..(n * ODSY_PROG_ENTRY_HALFWORDS) as usize] {
+            crc ^= (half as u64) << 48;
             for _bit in 0..16 {
                 crc = if crc & (1u64 << 63) != 0 { (crc << 1) ^ ODSY_CRC64_ECMA_POLY } else { crc << 1 };
             }
@@ -244,23 +244,18 @@ impl Board {
 
     /// The lit window record the entries and window body identify, or None.
     pub fn gl_window_record(&self, e: &[u32; 3]) -> Option<&'static WindowRecord> {
-        for w in WINDOW_RECORDS.iter() {
-            if e[0] == w.entry[0] as u32 && e[1] == w.entry[1] as u32 && e[2] == w.entry[2] as u32 && self.window_crc(w.entries as u32) == w.crc {
-                return Some(w);
-            }
-        }
-        None
+        WINDOW_RECORDS.iter().find(|w| {
+            e[0] == w.entry[0] as u32
+                && e[1] == w.entry[1] as u32
+                && e[2] == w.entry[2] as u32
+                && self.window_crc(w.entries as u32) == w.crc
+        })
     }
 }
 
 /// Uploaded program bodies have no reviewed decoder.
 pub fn gl_resident(e: &[u32; 3]) -> bool {
-    for i in 0..3 {
-        if prog_in_window(e[i]) {
-            return false;
-        }
-    }
-    true
+    !e.iter().any(|&w| prog_in_window(w))
 }
 
 impl Board {
@@ -295,10 +290,9 @@ impl Board {
             // Any other uploaded program is unsupported and reported below.
         } else if r[0] == 0 && r[1] == 0 && r[2] == 0 {
             p.known = true;
-        } else if r[0] == ODSY_UCODE_UNLIT && r[1] == ODSY_UCODE_UNLIT_2A && r[2] == ODSY_UCODE_UNLIT_2C {
-            self.gl_walk_list(k, false, &mut p);
-            p.known = true;
-        } else if r[0] == ODSY_UCODE_UNLIT_CLIP && r[1] == ODSY_UCODE_UNLIT_CLIP_2A && r[2] == ODSY_UCODE_UNLIT_CLIP_2C {
+        } else if r == [ODSY_UCODE_UNLIT, ODSY_UCODE_UNLIT_2A, ODSY_UCODE_UNLIT_2C]
+            || r == [ODSY_UCODE_UNLIT_CLIP, ODSY_UCODE_UNLIT_CLIP_2A, ODSY_UCODE_UNLIT_CLIP_2C]
+        {
             self.gl_walk_list(k, false, &mut p);
             p.known = true;
         } else if gl_lit_record(&r) {
@@ -400,7 +394,7 @@ impl Board {
         let v = prog_value(word);
         let cls = word >> ODSY_PROG_CLASS_SHIFT;
 
-        if cls >= ODSY_PROG_SEQ_FIRST && cls <= ODSY_PROG_SEQ_LAST {
+        if (ODSY_PROG_SEQ_FIRST..=ODSY_PROG_SEQ_LAST).contains(&cls) {
             self.gl_seq[(cls - ODSY_PROG_SEQ_FIRST) as usize] = v;
         }
         match cls {
@@ -668,18 +662,21 @@ impl Board {
     /// which a float row could not resolve; a fragment outside depth [0, 1] by
     /// more than the rounding slack (ODSY_GL_DEPTH_SLACK) is dropped, which is
     /// the near and far clip. Under an orthographic matrix the z row stays
-    /// row2 / (block16[3] S) - row3, whose window depth is the same. Board depth
-    /// is floating point in a format whose layout is UNKNOWN; a fixed-point store
-    /// would flatten a distant scene to one value, so the rules' floating-point
-    /// code stands in for the board's (APPROXIMATED). Whether the board
-    /// interpolates depth with perspective correction is UNKNOWN.
+    /// row2 / (block16[3] S) - row3, whose window depth is the same. The plane
+    /// holds the board's 24-bit float depth word of 2S times that depth
+    /// (depth_word.rs; datasheet, "Depth word"). The word's layout is
+    /// ESTABLISHED as the library's reading; that the plane stores exactly it is
+    /// INFERRED, and the rounding of a rasterised depth into it (truncation here)
+    /// is UNKNOWN. Whether the board interpolates depth with perspective
+    /// correction is INFERRED from SGI's raster patents; the model does.
     ///
-    /// APPROXIMATION, polygon offset: the shared rasterizer adds a polygon's
-    /// offset to depth over w before multiplying w back, so under perspective
-    /// the offset grows with the fragment's w, where OpenGL adds a constant
-    /// window-depth offset. How the board offsets eye-linear depth is UNKNOWN;
-    /// a board capture of glPolygonOffset decals at two eye distances, or a
-    /// depth readback of one offset polygon, would settle it.
+    /// Polygon offset (block 0x058) is a signed count of steps of the encoded
+    /// word, added to it after encoding (RasterRules::split_offset()). The
+    /// field is ESTABLISHED; adding it to the word, not to eye-linear depth, is
+    /// INFERRED, so the offset shrinks toward the near plane in proportion to
+    /// d - n. The far-plane kill is by depth value in the raster stage
+    /// (INFERRED), and this model cuts at the slack ODSY_GL_DEPTH_SLACK
+    /// (APPROXIMATION: the board's cut point is UNKNOWN).
     ///
     /// APPROXIMATION, raster position: under perspective the shared projection's
     /// z row is 0, so glRasterPos takes window z 0.5 whatever its eye distance,

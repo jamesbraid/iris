@@ -1,9 +1,9 @@
 //! The scalar rasteriser's core: the rules a draw follows where OpenGL
 //! leaves a choice, the draw and fragment types, the fragment path (window
 //! mapping, depth and stencil, blending, logic ops, fog, the colour mask)
-//! and the draw entry point. Triangles, lines, pixel work, texturing and
-//! banding are in the other raster_*.rs files; raster_fixed_texture.rs is
-//! the fixed-point fast path for textured triangles.
+//! and the draw entry point. Triangles, lines, pixel work and texturing
+//! are in the other raster_*.rs files; raster_fixed_texture.rs is the
+//! fixed-point fast path for textured triangles.
 //!
 //! Ported from include/hw/display/sgi/rasterizer.h in jamesbraid/qemu-sgi-origami.
 
@@ -88,9 +88,9 @@ pub struct RasterRules {
     /// With depth_row, how far outside [0, 1] a depth may lie and be
     /// clamped rather than dropped.
     pub depth_slack: f64,
-    /// Stored depth is the IEEE single bits of the window depth shifted
-    /// right by 30 - depth_bits (RasterRules::depth_code()); needs depth_bits
-    /// 10 to 30.
+    /// Stored depth is the board's 24-bit float word of 2S times the window
+    /// depth (depth_word.rs), which orders as an integer; needs depth_bits
+    /// 24. A polygon offset then counts steps of that word.
     pub depth_float: bool,
 }
 
@@ -285,16 +285,21 @@ pub trait Planes {
         let _ = (window_z, eye_z);
         unreachable!("fog_factor without RasterTarget::fog_factor");
     }
+    /// Pixels px0 to px1 of row py of a filled triangle through the row loop
+    /// row (raster_fill.rs), which returns where it stopped. Not for a family
+    /// to override: the default body is each implementation's own copy of
+    /// the loop, calling these planes' methods directly rather than through
+    /// a `dyn Planes`.
+    #[allow(clippy::too_many_arguments, reason = "a row loop takes the row as its parts")]
+    fn fill_row(&self, r: &SoftDraw<'_>, row: FillRow, sp: &SoftTexSpan<'_>, py: i32, px0: i32, px1: i32, e1: i64, e2: i64) -> i32 {
+        fill_row_dispatch(self, r, row, sp, py, px0, px1, e1, e2)
+    }
 }
 
-/// The planes a draw writes, as the family lends them for one draw: whole,
-/// or split so that each band of a banded draw has its own rows.
+/// The planes a draw writes, as the family lends them for one draw.
 pub trait PlaneStore: Send {
     /// The planes, for drawing on this thread.
     fn planes(&mut self) -> Box<dyn Planes + '_>;
-    /// One store per band, band b holding the rows SoftDraw::row_in_band()
-    /// gives it.
-    fn split(&mut self, bands: u32) -> Vec<Box<dyn PlaneStore + '_>>;
 }
 
 /// The setup of a draw, before it touches a plane.
@@ -333,9 +338,6 @@ pub struct RasterTarget<'a> {
     pub stipple_opaque: bool,
     pub stipple_background: [f32; 4],
     pub stipple_background_index: u32,
-    /// Bands run serially.
-    pub concurrent_pixels: bool,
-    pub band_min_pixels: u32,
     pub mixed_frame: bool,
 }
 
@@ -368,14 +370,14 @@ pub struct SoftWindow {
     pub clip: ClipList,
 }
 
-/// Once-a-draw reports, shared by the bands of one draw.
+/// Once-a-draw reports.
 #[derive(Default)]
 pub struct SoftReports {
     pub texture: std::sync::atomic::AtomicU32,
     pub rgba: std::sync::atomic::AtomicBool,
 }
 
-/// One draw's fixed inputs, the part of a draw its bands share.
+/// One draw's fixed inputs, apart from its planes and texel cache.
 #[derive(Clone, Copy)]
 pub struct SoftShared<'a> {
     pub rules: &'a RasterRules,
@@ -411,9 +413,9 @@ pub struct SoftShared<'a> {
     pub rgba_read: bool,
     /// Filled triangles sample in fixed point.
     pub fixed: Option<&'a SoftFixedTex>,
-    /// Of bands > 1, the rows this pass draws (SoftDraw::row_in_band()).
-    pub band: u32,
-    pub bands: u32,
+    /// The row loop untextured filled triangles take, or None for the
+    /// general per-fragment path (SoftDraw::fill_select()).
+    pub fill: Option<FillRow>,
 }
 
 /// A draw as one thread runs it: the shared inputs, and the planes and
@@ -474,8 +476,7 @@ impl<'a> SoftDraw<'a> {
                 rgba_mask: 0,
                 rgba_read: false,
                 fixed: None,
-                band: 0,
-                bands: 0,
+                fill: None,
             },
             px: &NoPlanes,
             texels_cache: None,
@@ -572,22 +573,19 @@ pub struct SoftFrag {
 
  // rows interleave in runs of 8
 
-thread_local! {
-    /// A band other than the first repeats the primitive work: say it once.
-    pub static SOFT_BAND_QUIET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
 
 impl GlDrawState {
-    pub fn window(&self, win: &mut SoftWindow) -> bool {
+    pub fn window(&self) -> Option<SoftWindow> {
         let d = &self.drawable;
+        let mut win = SoftWindow::default();
 
         if d.bound == 0 {
             crate::dlog!(LogModule::Odyssey, "sgi-gl: draw with no window bound dropped");
-            return false;
+            return None;
         }
         if d.clip.n == 0 {
             // Other windows cover all of this one: nothing to draw.
-            return false;
+            return None;
         }
         win.ox = d.origin[0];
         win.oy = d.origin[1];
@@ -595,14 +593,14 @@ impl GlDrawState {
         win.y0 = d.clip.r[0].y0;
         win.x1 = d.clip.r[0].x1;
         win.y1 = d.clip.r[0].y1;
-        for i in 1..std::cmp::min(d.clip.n as usize, SGI_CLIP_MAX) {
-            win.x0 = win.x0.min(d.clip.r[i].x0);
-            win.y0 = win.y0.min(d.clip.r[i].y0);
-            win.x1 = win.x1.max(d.clip.r[i].x1);
-            win.y1 = win.y1.max(d.clip.r[i].y1);
+        for r in &d.clip.r[1..std::cmp::min(d.clip.n as usize, SGI_CLIP_MAX)] {
+            win.x0 = win.x0.min(r.x0);
+            win.y0 = win.y0.min(r.y0);
+            win.x1 = win.x1.max(r.x1);
+            win.y1 = win.y1.max(r.y1);
         }
         win.clip = d.clip;
-        true
+        Some(win)
     }
 }
 
@@ -611,7 +609,7 @@ impl RasterRules {
         self.subpixel_bits >= 1 && self.subpixel_bits <= 12 &&
             self.color_bits >= 1 && self.color_bits <= 10 &&
             self.depth_bits >= 1 && self.depth_bits <= 32 &&
-            (!self.depth_float || (self.depth_bits >= 10 && self.depth_bits <= 30)) &&
+            (!self.depth_float || self.depth_bits == 24) &&
             (!self.depth_row_given ||
              (self.depth_row[0].is_finite() && self.depth_row[1].is_finite() &&
               self.depth_row[2].is_finite() && self.depth_row[3].is_finite())) &&
@@ -654,6 +652,7 @@ impl RasterTarget<'_> {
 
 impl RasterRules {
     /// x rounded to an integer by the rules' rounding.
+    #[inline]
     pub fn round(&self, x: f64) -> i64 {
         let rounding = self.rounding as u32;
         if rounding != SGI_ROUND_FLOOR && rounding != SGI_ROUND_HALF_UP && rounding != SGI_ROUND_HALF_EVEN {
@@ -678,25 +677,51 @@ impl RasterRules {
     }
 
     /// The largest stored depth.
+    #[inline]
     pub fn depth_max(&self) -> u32 {
         u32::MAX.wrapping_shr(32u32.wrapping_sub(self.depth_bits as u32))
     }
 
-    /// A non-negative single's bits order as unsigned integers do, so the
-    /// shifted bits of a depth in [0, 1], at most 0x3f800000 >> (30 -
-    /// depth_bits), keep its order in depth_bits bits.
+    /// The stored code of window depth z in [0, 1]: an integer fraction of
+    /// depth_max, or with depth_float the board's depth word for 2S z
+    /// (depth_word::word_for_fraction()).
+    #[inline]
     pub fn depth_code(&self, z: f64) -> u32 {
         if !self.depth_float {
             return self.round(z * self.depth_max() as f64) as u32;
         }
-        let f = fmin(fmax(z, 0.0), 1.0) as f32;
-        let bits = f.to_bits();
-        bits.wrapping_shr(30u32.wrapping_sub(self.depth_bits as u32))
+        super::depth_word::word_for_fraction(z)
+    }
+
+    /// A polygon offset (RasterRules::offset_amount(), in window depth) split
+    /// into what adds to the window depth before the code and the steps that
+    /// add to the code after it. With depth_float the amount is the 0x058
+    /// field over 2^24 (ODSY_POLYGON_OFFSET_SCALE), a step count the board
+    /// adds to the encoded word (depth_word::word_with_offset(); datasheet,
+    /// "Polygon offset" and "Depth word"; the placement is INFERRED), so none
+    /// of it adds to window depth.
+    pub fn split_offset(&self, offset: f64) -> (f64, i64) {
+        if !self.depth_float {
+            return (offset, 0);
+        }
+        (0.0, (offset * (1u64 << 24) as f64).round() as i64)
+    }
+
+    /// [`depth_code`](Self::depth_code) of z, then `steps` of polygon offset.
+    pub fn depth_code_offset(&self, z: f64, steps: i64) -> u32 {
+        let code = self.depth_code(z);
+
+        if self.depth_float {
+            super::depth_word::word_with_offset(code, steps)
+        } else {
+            code
+        }
     }
 
     /// A component clamped to [0, 1] and scaled to the rules' colour bits, a
     /// fraction of a step rounded half up, whatever the rules' rounding: the
     /// sum is truncated (OpenGL 1.2.1, 2.13.9).
+    #[inline]
     pub fn channel(&self, c: f64) -> u32 {
         let max = (1u32.wrapping_shl(self.color_bits as u32)).wrapping_sub(1);
 
@@ -710,10 +735,12 @@ impl RasterRules {
     }
 
     /// Incoming alpha precision is independent of absent or narrower stored A.
+    #[inline]
     pub fn alpha_max(&self) -> u32 {
         (1u32.wrapping_shl(std::cmp::max(2, std::cmp::max(self.color_bits, self.alpha_bits)) as u32)).wrapping_sub(1)
     }
 
+    #[inline]
     pub fn alpha(&self, value: f64) -> u32 {
         let max = self.alpha_max();
 
@@ -753,6 +780,7 @@ impl RasterRules {
             / m
     }
 
+    #[inline]
     pub fn rgba_mask(&self, mask: u32) -> u32 {
         mask & if self.alpha_bits != 0 { SGI_GL_COLOUR_MASK_ALL } else { SGI_GL_COLOUR_MASK_ALPHA - 1 }
     }
@@ -770,7 +798,9 @@ impl RasterRules {
     }
 
     /// Read every selected destination before any colour/depth/stencil write.
-    pub fn rgba_load(&self, px: &dyn Planes, targets: &[ColourTarget], count: u32, x: i32, y: i32, dest: &mut [RasterColour; SGI_GL_MAX_TARGETS as usize], reported: &std::sync::atomic::AtomicBool) -> bool {
+    #[allow(clippy::too_many_arguments, reason = "the fragment path takes a fragment as its parts")]
+    #[inline]
+    pub fn rgba_load<P: Planes + ?Sized>(&self, px: &P, targets: &[ColourTarget], count: u32, x: i32, y: i32, dest: &mut [RasterColour; SGI_GL_MAX_TARGETS as usize], reported: &std::sync::atomic::AtomicBool) -> bool {
         for i in 0..count as usize {
             let loaded = px.load_rgba(targets[i], x, y);
             let mut valid = loaded.is_some();
@@ -787,7 +817,6 @@ impl RasterRules {
                 k += 1;
             }
             if !valid {
-                // Bands of one draw share the flag (soft_bands_run()).
                 if !reported.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     crate::dlog!(LogModule::Odyssey, "sgi-gl: RGBA destination read failed; pixel writes dropped");
                 }
@@ -801,6 +830,7 @@ impl RasterRules {
     }
 
     /// A colour, each component clamped and rounded to the rules' bits.
+    #[inline]
     pub fn rgb(&self, c: &[f64]) -> u32 {
         (self.channel(c[0]).wrapping_shl(2 * self.color_bits as u32)) |
             (self.channel(c[1]).wrapping_shl(self.color_bits as u32)) |
@@ -821,6 +851,7 @@ impl SoftDraw<'_> {
     /// dithered while the draw dithers, otherwise rounded as RasterRules::rgb()
     /// rounds. A clamped component of 0 or 1 is exact either way, and one
     /// below 1 stays below max + 1 with the largest threshold added.
+    #[inline]
     pub fn store_rgb(&self, x: i32, y: i32, c: &[f64]) -> u32 {
         let bits = self.rules.color_bits as u32;
         let max: u32 = (1u32 << bits) - 1;
@@ -835,16 +866,14 @@ impl SoftDraw<'_> {
             self.t.screen_top as i64 - y as i64
         };
         let b = SOFT_BAYER4[(row & 3) as usize][(x & 3) as usize] as f64 / 16.0;
-        for k in 0..3usize {
-            let v: u32;
-
-            if !(c[k] > 0.0) {
-                v = 0;
-            } else if c[k] >= 1.0 {
-                v = max;
+        for (k, &ck) in c.iter().enumerate().take(3) {
+            let v: u32 = if !(ck > 0.0) {
+                0
+            } else if ck >= 1.0 {
+                max
             } else {
-                v = (c[k] * max as f64 + b).floor() as u32;
-            }
+                (ck * max as f64 + b).floor() as u32
+            };
             out |= v.wrapping_shl((2 - k as u32) * bits);
         }
         out
@@ -874,21 +903,22 @@ impl SoftVertex {
     /// whose value moves by step a pixel. The edge function is linear along the
     /// row, so the owned steps are one run: e + k * step >= need, where need is
     /// 0 for an edge that owns the centres on it and 1 for one that does not.
-    pub fn owned_run(&self, b: &SoftVertex, e: i64, step: i64, lo: &mut i64, hi: &mut i64) {
+    pub fn owned_run(&self, b: &SoftVertex, e: i64, step: i64, (mut lo, mut hi): (i64, i64)) -> (i64, i64) {
         let need: i64 = if self.owns(b, 0) { 0 } else { 1 };
         let d = need.wrapping_sub(e);
 
         if step > 0 {
             // The first k with k * step >= d, rounding the quotient up.
             let v = if d > 0 { (d + step - 1) / step } else { -(-d / step) };
-            *lo = std::cmp::max(*lo, v);
+            lo = std::cmp::max(lo, v);
         } else if step < 0 {
             // The last k with k * -step <= -d, rounding the quotient down.
             let v = if -d >= 0 { -d / -step } else { -((d - step - 1) / -step) };
-            *hi = std::cmp::min(*hi, v);
+            hi = std::cmp::min(hi, v);
         } else if d > 0 {
-            *hi = *lo - 1;
+            hi = lo - 1;
         }
+        (lo, hi)
     }
 }
 
@@ -897,6 +927,7 @@ impl SoftVertex {
 /// stored one (4.1.5), the alpha test's alpha against its reference
 /// (4.1.4), the stencil test's masked reference against the masked stored
 /// value (4.1.5).
+#[inline]
 pub fn soft_compare(func: u32, value: u32, ref_: u32) -> bool {
     match func {
         SGI_GL_NEVER => false,
@@ -915,10 +946,9 @@ impl RasterRules {
         soft_compare(func, self.soft_alpha_test(alpha), self.soft_alpha_test(ref_))
     }
 
-    /// Whether the planes have a stencil buffer, and its largest value.
-    pub fn stencil_max(&self, t: &RasterTarget, max: &mut u32) -> bool {
-        *max = (1u32.wrapping_shl(self.stencil_bits as u32)).wrapping_sub(1);
-        self.stencil_bits != 0 && t.stencil
+    /// The stencil buffer's largest value, if the planes have one.
+    pub fn stencil_max(&self, t: &RasterTarget) -> Option<u32> {
+        (self.stencil_bits != 0 && t.stencil).then(|| (1u32.wrapping_shl(self.stencil_bits as u32)).wrapping_sub(1))
     }
 }
 
@@ -929,23 +959,22 @@ impl GlDrawState {
     pub fn stencil_op(&self, px: &dyn Planes, x: i32, y: i32, op: u32, max: u32, ref_: u32) {
         let old = px.load_stencil(x, y) & max;
         let mask = self.stencil_write_mask & max;
-        let value: u32;
 
-        match op {
+        let value: u32 = match op {
             SGI_GL_KEEP => return,
-            SGI_GL_REPLACE => value = ref_,
-            SGI_GL_INCR => value = if old < max { old + 1 } else { max },
-            SGI_GL_DECR => value = if old != 0 { old - 1 } else { 0 },
-            SGI_GL_INVERT => value = !old & max,
-            _ => value = 0,
-        }
+            SGI_GL_REPLACE => ref_,
+            SGI_GL_INCR => if old < max { old + 1 } else { max },
+            SGI_GL_DECR => if old != 0 { old - 1 } else { 0 },
+            SGI_GL_INVERT => !old & max,
+            _ => 0,
+        };
         px.store_stencil(x, y, (old & !mask) | (value & mask));
     }
 }
 
 impl RasterRules {
-    pub fn depth_stencil(&self, st: &GlDrawState, t: &RasterTarget, px: &dyn Planes, x: i32, y: i32, z: f64) -> bool {
-        let mut smax: u32 = 0;
+    #[allow(clippy::too_many_arguments, reason = "the fragment path takes a fragment as its parts")]
+    pub fn depth_stencil(&self, st: &GlDrawState, t: &RasterTarget, px: &dyn Planes, x: i32, y: i32, z: f64, steps: i64) -> bool {
         let mut sref: u32 = 0;
 
         if !(0.0..=1.0).contains(&z) {
@@ -953,7 +982,9 @@ impl RasterRules {
         }
         // The reference clamps to the buffer's range; with no stencil buffer
         // the test passes and nothing is written.
-        let stencil = st.stencil_test != 0 && self.stencil_max(t, &mut smax);
+        let smax = if st.stencil_test != 0 { self.stencil_max(t) } else { None };
+        let stencil = smax.is_some();
+        let smax = smax.unwrap_or(0);
         if stencil {
             let vmask = st.stencil_value_mask;
 
@@ -967,7 +998,7 @@ impl RasterRules {
                 return false;
             }
         }
-        let zq = self.depth_code(z);
+        let zq = self.depth_code_offset(z, steps);
         if st.depth_test != 0 {
             if !soft_compare(st.depth_func, zq, px.load_depth(x, y)) {
                 if stencil {
@@ -989,6 +1020,7 @@ impl RasterRules {
 
 /// One blend factor (OpenGL 1.2.1, tables 4.1 and 4.2) for component k,
 /// red to alpha, from the source s, destination d and constant colour c.
+#[inline]
 pub fn soft_blend_factor(factor: u32, k: usize, s: &[f64; 4], d: &[f64; 4], c: &[f32; 4]) -> f64 {
     match factor {
         1 => 1.0,
@@ -1044,8 +1076,8 @@ impl RasterRules {
         }
         s[3] = alpha;
         d[3] = 1.0;
-        for k in 0..3usize {
-            out[k] = st.blend_component(k, &s, &d);
+        for (k, o) in out.iter_mut().enumerate() {
+            *o = st.blend_component(k, &s, &d);
         }
     }
 
@@ -1055,7 +1087,7 @@ impl SoftDraw<'_> {
     pub fn blend(&self, x: i32, y: i32, src: u32, alpha: f64, dst: u32) -> u32 {
         let mut out = [0.0f64; 3];
 
-        self.rules.soft_blend_rgb(&self.st, src, alpha, dst, &mut out);
+        self.rules.soft_blend_rgb(self.st, src, alpha, dst, &mut out);
         self.store_rgb(x, y, &out)
     }
 }
@@ -1068,12 +1100,13 @@ pub fn soft_logic_op(op: u32, s: u32, d: u32) -> u32 {
 
 impl RasterRules {
     /// RGB retains its existing arithmetic; spatial alpha dithering is omitted.
+    #[inline]
     pub fn rgba_value(&self, rgb: u32, alpha: f64) -> RasterColour {
         let mut c = RasterColour::default();
         let max = (1u32 << self.color_bits) - 1;
 
-        for k in 0..3usize {
-            c.component[k] = (rgb >> ((2 - k as u32) * self.color_bits as u32)) & max;
+        for (k, comp) in c.component.iter_mut().enumerate().take(3) {
+            *comp = (rgb >> ((2 - k as u32) * self.color_bits as u32)) & max;
         }
         c.component[3] = self.stored_alpha(alpha);
         c
@@ -1083,7 +1116,7 @@ impl RasterRules {
 impl SoftDraw<'_> {
     pub fn rgba_result(&self, x: i32, y: i32, frag: &SoftFrag, dest: &RasterColour) -> RasterColour {
         let mut out = RasterColour::default();
-        let rules = &*self.rules;
+        let rules = self.rules;
         let max = (1u32 << rules.color_bits) - 1;
         let alpha_max = rules.alpha_max();
         let alpha_q = rules.alpha(frag.rgba[3]);
@@ -1097,8 +1130,8 @@ impl SoftDraw<'_> {
             // for every alpha_q up to 1023.
             let stored = (1u32.wrapping_shl(rules.alpha_bits as u32)).wrapping_sub(1);
 
-            for k in 0..3usize {
-                out.component[k] = (rgb >> ((2 - k as u32) * rules.color_bits as u32)) & max;
+            for (k, comp) in out.component.iter_mut().enumerate().take(3) {
+                *comp = (rgb >> ((2 - k as u32) * rules.color_bits as u32)) & max;
             }
             out.component[3] = if stored == alpha_max { alpha_q } else { alpha_q.wrapping_mul(stored) / alpha_max };
             return out;
@@ -1119,8 +1152,8 @@ impl SoftDraw<'_> {
             } else {
                 1.0
             };
-            for k in 0..4usize {
-                blended[k] = self.st.blend_component(k, &src, &dst);
+            for (k, b) in blended.iter_mut().enumerate() {
+                *b = self.st.blend_component(k, &src, &dst);
             }
             out = rules.rgba_value(self.store_rgb(x, y, &blended), blended[3]);
         }
@@ -1189,7 +1222,7 @@ impl SoftDraw<'_> {
             self.rgba_read = self.ntargets != 0 && self.rgba_mask != 0 &&
                 (self.blend || self.logic_op ||
                  self.rgba_mask != self.rules.rgba_mask(SGI_GL_COLOUR_MASK_ALL));
-            if !self.rules.rgba_capable(&self.t, self.rgba_read) {
+            if !self.rules.rgba_capable(self.t, self.rgba_read) {
                 return false;
             }
             if self.t.store_rgba {
@@ -1237,11 +1270,11 @@ pub fn with_texel_cache<R>(f: impl FnOnce(&std::cell::RefCell<SoftTexelCache>) -
 
 thread_local! {
     pub static SOFT_TEXTURE_SELECTED: std::cell::Cell<SoftTexSelectionMemo> =
-        std::cell::Cell::new(SoftTexSelectionMemo {
+        const { std::cell::Cell::new(SoftTexSelectionMemo {
             serial: 0,
             rho: 0,
             selected: SoftTexSelection { first: 0, second: 0, filter: 0, alpha: 0.0, lambda: 0.0 },
-        });
+        }) };
 }
 
 impl SoftDraw<'_> {
@@ -1253,7 +1286,7 @@ impl SoftDraw<'_> {
     /// equal to end divides by zero; the model takes f as 1 before the end and
     /// 0 from it, the limit of the equation from either side.
     pub fn fog(&self, frag: &mut SoftFrag, z: f64) {
-        let st: &GlDrawState = &self.st;
+        let st: &GlDrawState = self.st;
         let c = frag.fog;
         let mut f: f64;
         let dens = st.fog_density as f64;
@@ -1287,8 +1320,8 @@ impl GlDrawState {
     /// Whether a point whose client clip plane values are d lies outside an
     /// enabled plane (2.11).
     pub fn clipped(&self, d: &[f64]) -> bool {
-        for i in 0..SGI_GL_CLIP_PLANES as usize {
-            if (self.clip_planes & (1u32 << i)) != 0 && !(d[i] >= 0.0) {
+        for (i, &di) in d.iter().enumerate().take(SGI_GL_CLIP_PLANES as usize) {
+            if (self.clip_planes & (1u32 << i)) != 0 && !(di >= 0.0) {
                 return true;
             }
         }
@@ -1305,7 +1338,7 @@ impl SoftDraw<'_> {
     pub fn owned_at(&self, px: i32, py: i32) -> bool {
         let x = self.win.ox.wrapping_add(px);
         let y = self.win.oy.wrapping_add(py);
-        let st: &GlDrawState = &self.st;
+        let st: &GlDrawState = self.st;
 
         (self.win.clip.n <= 1 || self.win.clip.contains(x, y)) &&
             (st.scissor_test == 0 ||
@@ -1321,8 +1354,8 @@ impl SoftDraw<'_> {
     /// dest in RGBA mode, which the caller has read where the draw reads it.
     #[inline(always)]
     pub fn fragment_store(&self, x: i32, y: i32, f: &SoftFrag, dest: &[RasterColour; SGI_GL_MAX_TARGETS as usize]) {
-        let t: &RasterTarget = &self.t;
-        let st: &GlDrawState = &self.st;
+        let t: &RasterTarget = self.t;
+        let st: &GlDrawState = self.st;
 
         if st.index_bits == 0 && t.store_rgba {
             let mut i = 0;
@@ -1379,14 +1412,21 @@ impl SoftDraw<'_> {
     }
 
     pub fn fragment_at(&self, px: i32, py: i32, z: f64, frag: &SoftFrag, coverage: f64, antialias: bool) {
-        let t: &RasterTarget = &self.t;
-        let st: &GlDrawState = &self.st;
+        self.fragment_at_offset(px, py, z, 0, frag, coverage, antialias);
+    }
+
+    /// [`fragment_at`](Self::fragment_at) with `steps` of the board's polygon
+    /// offset added to the depth code (RasterRules::split_offset()).
+    #[allow(clippy::too_many_arguments, reason = "the fragment path takes a fragment as its parts")]
+    pub fn fragment_at_offset(&self, px: i32, py: i32, z: f64, steps: i64, frag: &SoftFrag, coverage: f64, antialias: bool) {
+        let t: &RasterTarget = self.t;
+        let st: &GlDrawState = self.st;
         let mut fogged = *frag;
         let x = self.win.ox.wrapping_add(px);
         let y = self.win.oy.wrapping_add(py);
         let mut dest = [RasterColour::default(); SGI_GL_MAX_TARGETS as usize];
 
-        if !(z >= 0.0 && z <= 1.0) {
+        if !(0.0..=1.0).contains(&z) {
             return;
         }
         if let Some(im) = self.texture {
@@ -1428,7 +1468,7 @@ impl SoftDraw<'_> {
         {
             return;
         }
-        if !self.rules.depth_stencil(st, t, self.px, x, y, z) {
+        if !self.rules.depth_stencil(st, t, self.px, x, y, z, steps) {
             return;
         }
         self.fragment_store(x, y, f, &dest);
@@ -1439,16 +1479,18 @@ impl GlDrawState {
     /// The depth range [n, f] normalized depth is mapped through (2.10.1): the
     /// draw state's, or [0, 1] under a window matrix, whose depth is already
     /// window depth.
+    #[inline]
     pub fn depth_range(&self, n: &mut f64, f: &mut f64) {
         *n = if self.window_matrix_given != 0 { 0.0 } else { self.depth_range[0] as f64 };
         *f = if self.window_matrix_given != 0 { 1.0 } else { self.depth_range[1] as f64 };
     }
 
+    #[inline]
     pub fn window_depth(&self, z: f64, offset: f64, window: &mut f64) -> bool {
         let mut n = 0.0;
         let mut f = 0.0;
 
-        if !(z >= 0.0 && z <= 1.0) {
+        if !(0.0..=1.0).contains(&z) {
             return false;
         }
         self.depth_range(&mut n, &mut f);
@@ -1461,30 +1503,40 @@ impl GlDrawState {
 impl SoftDraw<'_> {
     /// The window pixels a primitive's fragments may fall on, inclusive: the
     /// bounds of those the window owns, within the viewport unless a window
-    /// matrix replaces it. False when there are none.
-    pub fn bounds(&self, x0: &mut i32, y0: &mut i32, x1: &mut i32, y1: &mut i32) -> bool {
-        let st: &GlDrawState = &self.st;
-        let win = &self.win;
+    /// matrix replaces it, as (x0, y0, x1, y1). None when there are none.
+    pub fn bounds(&self) -> Option<(i32, i32, i32, i32)> {
+        let st: &GlDrawState = self.st;
+        let (x0, y0, x1, y1) = self.owned_bounds();
         let vx = st.viewport[0];
         let vy = st.viewport[1];
         let vw = st.viewport[2];
         let vh = st.viewport[3];
 
-        *x0 = win.x0.wrapping_sub(win.ox);
-        *y0 = win.y0.wrapping_sub(win.oy);
-        *x1 = win.x1.wrapping_sub(win.ox);
-        *y1 = win.y1.wrapping_sub(win.oy);
         if st.window_matrix_given != 0 {
-            return true;
+            return Some((x0, y0, x1, y1));
         }
         if vw <= 0 || vh <= 0 {
-            return false;
+            return None;
         }
-        *x0 = std::cmp::max(*x0, vx);
-        *y0 = std::cmp::max(*y0, vy);
-        *x1 = std::cmp::min(*x1, vx.wrapping_add(vw).wrapping_sub(1));
-        *y1 = std::cmp::min(*y1, vy.wrapping_add(vh).wrapping_sub(1));
-        true
+        Some((
+            std::cmp::max(x0, vx),
+            std::cmp::max(y0, vy),
+            std::cmp::min(x1, vx.wrapping_add(vw).wrapping_sub(1)),
+            std::cmp::min(y1, vy.wrapping_add(vh).wrapping_sub(1)),
+        ))
+    }
+
+    /// The window's owned rectangle in draw coordinates, before the viewport
+    /// narrows it, as (x0, y0, x1, y1).
+    pub fn owned_bounds(&self) -> (i32, i32, i32, i32) {
+        let win = &self.win;
+
+        (
+            win.x0.wrapping_sub(win.ox),
+            win.y0.wrapping_sub(win.oy),
+            win.x1.wrapping_sub(win.ox),
+            win.y1.wrapping_sub(win.oy),
+        )
     }
 
     /// Whether a polygon fragment at (px, py) is drawn under the polygon
@@ -1512,9 +1564,10 @@ impl SoftDraw<'_> {
     /// otherwise mapped to window depth n + (f - n) z through the depth range
     /// [n, f] (OpenGL 1.2.1, 2.10.1). A polygon's offset is then added to the
     /// window depth, and the sum clamped to [0, 1] (3.5.5).
+    #[allow(clippy::too_many_arguments, reason = "the fragment path takes a fragment as its parts")]
     pub fn fragment_coverage(&self, px: i32, py: i32, z: f64, offset: f64, depth_w: f64, frag: &SoftFrag, coverage: f64, antialias: bool) {
         let mut z = z;
-        let mut offset = offset;
+        let (mut offset, steps) = self.rules.split_offset(offset);
         let mut zw = 0.0;
 
         if self.rules.depth_row_given {
@@ -1533,7 +1586,7 @@ impl SoftDraw<'_> {
         if !(coverage > 0.0) || !self.st.window_depth(z, offset, &mut zw) {
             return;
         }
-        self.fragment_at(px, py, zw, frag, coverage, antialias);
+        self.fragment_at_offset(px, py, zw, steps, frag, coverage, antialias);
     }
 
     pub fn fragment(&self, px: i32, py: i32, z: f64, offset: f64, depth_w: f64, frag: &SoftFrag) {
@@ -1591,9 +1644,22 @@ impl RasterRules {
         if st.polygon_offset & SGI_GL_OFFSET_FILL == 0 {
             return 0.0;
         }
-        st.depth_slope(window) * st.offset_factor as f64
-            + st.offset_units as f64 / self.depth_max() as f64
-            + st.offset_bias as f64
+        self.offset_amount(st, st.depth_slope(window))
+    }
+
+    /// The offset of an enabled polygon mode for a primitive of depth slope m:
+    /// m factor + r units + bias in window depth (OpenGL 1.2.1, 3.5.5). With
+    /// depth_float the guest library has already folded factor (through
+    /// tan L) and 2 units into one per-projection step count and sends it as
+    /// the 0x058 field, which the context carries as the bias; the board has
+    /// no per-polygon slope term (datasheet, "Polygon offset"). So only the
+    /// bias counts there, and the slope and the context's factor and units,
+    /// which the library never sets, add nothing.
+    pub fn offset_amount(&self, st: &GlDrawState, slope: f64) -> f64 {
+        if self.depth_float {
+            return st.offset_bias as f64;
+        }
+        slope * st.offset_factor as f64 + st.offset_units as f64 / self.depth_max() as f64 + st.offset_bias as f64
     }
 }
 
@@ -1602,7 +1668,7 @@ impl SoftDraw<'_> {
         let mut window = [[0.0f64; 3]; 3];
 
         self.window_vertices(v, &mut window);
-        self.rules.polygon_offset(&self.st, &window)
+        self.rules.polygon_offset(self.st, &window)
     }
 }
 
@@ -1616,32 +1682,28 @@ impl SoftDraw<'_> {
     /// clipping does not bound it. The colour is the front colour; a back-facing
     /// triangle takes its back colour later.
     /// A vertex with w <= 0 is in the volume only at the clip-space origin,
-    /// where the divide has no answer, and returns false, as does one mapped
+    /// where the divide has no answer, and returns None, as does one mapped
     /// beyond the rasterizer's range.
-    pub fn project(&self, cv: &VolumeVertex, out: &mut SoftVertex) -> bool {
-        let st: &GlDrawState = &self.st;
+    pub fn project(&self, cv: &VolumeVertex) -> Option<SoftVertex> {
+        let mut out = SoftVertex::default();
+        let st: &GlDrawState = self.st;
         let clip = &cv.clip;
         let eye = &cv.eye;
         let mut win = [0.0f64; 3];
-        let quiet = SOFT_BAND_QUIET.with(|q| q.get());
 
         if !self.texture_vertex_valid(cv) {
-            return false;
+            return None;
         }
         if !(clip[3] > 0.0) {
-            if !quiet {
-                crate::dlog!(LogModule::Odyssey, "sgi-gl: clipped vertex at w {} has no window position, primitive dropped", clip[3]);
-            }
-            return false;
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: clipped vertex at w {} has no window position, primitive dropped", clip[3]);
+            return None;
         }
         st.clip_to_window(clip, &mut win);
         let xw = win[0];
         let yw = win[1];
         if !(xw.abs() < 65536.0 && yw.abs() < 65536.0) {
-            if !quiet {
-                crate::dlog!(LogModule::Odyssey, "sgi-gl: vertex outside the rasterizer's range, primitive dropped");
-            }
-            return false;
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: vertex outside the rasterizer's range, primitive dropped");
+            return None;
         }
         for k in 0..4usize {
             out.texcoord[k] = cv.attr[SGI_GL_V_TEXCOORD + k] as f64;
@@ -1681,7 +1743,7 @@ impl SoftDraw<'_> {
             out.rgba[k] = n as f64;
         }
         out.index = cv.attr[SGI_GL_V_INDEX] as f64;
-        true
+        Some(out)
     }
 }
 
@@ -1728,7 +1790,9 @@ impl RasterRules {
         if !self.check_rules() || !t.soft_check_index(d.state.index_bits) {
             return SGI_GL_DRAW_OK;
         }
-        if !d.state.window(&mut r.win) {
+        if let Some(win) = d.state.window() {
+            r.win = win;
+        } else {
             if !use_stipple
                 || d.mode < SGI_GL_LINES
                 || d.mode > SGI_GL_LINE_STRIP
@@ -1750,6 +1814,9 @@ impl RasterRules {
         if !r.setup_ops() {
             return SGI_GL_DRAW_OK;
         }
+        if d.mode >= SGI_GL_TRIANGLES && d.mode <= SGI_GL_POLYGON {
+            r.fill = r.fill_select();
+        }
         let mut fixed_on = false;
         if d.mode >= SGI_GL_TRIANGLES && d.mode <= SGI_GL_POLYGON && r.fixed_setup(&mut fixed) {
             let mut texels = 0u64;
@@ -1761,8 +1828,7 @@ impl RasterRules {
             for i in first..=last {
                 texels += fixed.level[i as usize].width as u64 * fixed.level[i as usize].height as u64;
             }
-            // A draw as large as the smallest that bands share, at least.
-            texels = r2_max(texels, SGI_RASTER_PARALLEL_MIN_PIXELS);
+            texels = r2_max(texels, SGI_SOFT_FIXED_PREFILL_MIN_PIXELS);
             fixed_on = (r.draw_pixels(d, texels) >= texels
                 && r.fixed_coordinates_valid(d)
                 && r.fixed_prefill(&mut fixed))
@@ -1813,9 +1879,10 @@ impl<'a> SoftDraw<'a> {
         let mut r = *self;
         match d.mode {
             SGI_GL_POINTS => {
-                if !soft_dimension(d.point_size, &mut r.point_size) {
+                let Some(size) = soft_dimension(d.point_size) else {
                     return SGI_GL_DRAW_OK;
-                }
+                };
+                r.point_size = size;
                 let px = planes.planes();
                 let r = r.with_planes(&*px);
                 for i in 0..n {
@@ -1824,9 +1891,10 @@ impl<'a> SoftDraw<'a> {
                 SGI_GL_DRAW_OK
             }
             SGI_GL_LINES => {
-                if !soft_dimension(d.line_width, &mut r.line_width) {
+                let Some(width) = soft_dimension(d.line_width) else {
                     return SGI_GL_DRAW_OK;
-                }
+                };
+                r.line_width = width;
                 let px = planes.planes();
                 let r = r.with_planes(&*px);
                 let mut i = 0usize;
@@ -1840,9 +1908,10 @@ impl<'a> SoftDraw<'a> {
                 SGI_GL_DRAW_OK
             }
             SGI_GL_LINE_STRIP | SGI_GL_LINE_LOOP => {
-                if !soft_dimension(d.line_width, &mut r.line_width) {
+                let Some(width) = soft_dimension(d.line_width) else {
                     return SGI_GL_DRAW_OK;
-                }
+                };
+                r.line_width = width;
                 let px = planes.planes();
                 let r = r.with_planes(&*px);
                 let mut i = 0usize;
@@ -1857,10 +1926,8 @@ impl<'a> SoftDraw<'a> {
             }
             SGI_GL_TRIANGLES | SGI_GL_TRIANGLE_STRIP | SGI_GL_TRIANGLE_FAN | SGI_GL_POLYGON | SGI_GL_QUADS
             | SGI_GL_QUAD_STRIP => {
-                if !r.draw_parallel(d, planes) {
-                    let px = planes.planes();
-                    r.with_planes(&*px).draw_triangles(d);
-                }
+                let px = planes.planes();
+                r.with_planes(&*px).draw_triangles(d);
                 SGI_GL_DRAW_OK
             }
             _ => {

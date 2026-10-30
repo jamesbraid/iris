@@ -493,7 +493,7 @@ pub const ODSY_UCODE_UNLIT_CLIP: u32 = 0x0f3;
 pub const ODSY_UCODE_UNLIT_CLIP_2A: u32 = 0x100;
 pub const ODSY_UCODE_UNLIT_CLIP_2C: u32 = 0x10c;
 pub const ODSY_PROG_WINDOW_BASE: u32 = 0x738;
-pub const ODSY_PROG_WINDOW_ENTRIES: u32 = SGI_ODYSSEY_GL_WINDOW_ENTRIES as u32;
+pub const ODSY_PROG_WINDOW_ENTRIES: u32 = SGI_ODYSSEY_GL_WINDOW_ENTRIES;
 
 // The assembled unlit list
 pub const ODSY_UCODE_HEAD_UNLIT: u32 = 0x4ae;
@@ -748,6 +748,9 @@ pub const ODSY_MODE_OFFSET_LINE: u32 = 1 << 6;
 pub const ODSY_MODE_OFFSET_FILL: u32 = 1 << 7;
 pub const ODSY_REG_POLYGON_OFFSET: u32 = 0x0458; // 1 operand
 pub const ODSY_POLYGON_OFFSET_BITS: u32 = 25;
+// The field is a signed count of steps of the encoded 24-bit depth word
+// (depth_word.rs); the shared context carries it as that count over 2^24, which
+// RasterRules::split_offset() turns back into steps.
 pub const ODSY_POLYGON_OFFSET_SCALE: f32 = 1.0f32 / (1u32 << 24) as f32;
 
 // 0x0415 packs glPolygonMode's two faces in one word

@@ -264,11 +264,6 @@ pub struct Board {
     pub gl_ctx: Option<Box<GlContext>>,
     /// The drawable Board::gl_bind() last built for the shared context.
     pub gl_bind_drawable: GlDrawable,
-    /// Host-only: GL draws may run in bands of rows (x-raster-bands); the
-    /// bands run serially here.
-    pub raster_bands: bool,
-    /// Host-only band threshold, lowered by tests to force banding.
-    pub raster_band_pixels: u32,
     pub gl_in_prim: bool,
     pub gl_begin_open: bool,
     pub gl_integer_prim: bool,
@@ -286,7 +281,7 @@ pub struct Board {
     pub gl_restart_m3: u32,
     pub gl_restart_m4: u32,
     pub gl_restart_armed: bool,
-    pub gl_restart_vertex: [[f32; SGI_GL_VERTEX_FLOATS as usize]; 3],
+    pub gl_restart_vertex: [[f32; SGI_GL_VERTEX_FLOATS]; 3],
     pub gl_matrix_slot: u32,
     pub gl_matrix: [u32; 16],
     pub gl_texture_matrix: [u32; 16],
@@ -572,8 +567,6 @@ impl Default for Board {
             poly_col_lo: 0,
             gl_ctx: Some(Box::default()),
             gl_bind_drawable: Default::default(),
-            raster_bands: false,
-            raster_band_pixels: 0,
             gl_in_prim: false,
             gl_begin_open: false,
             gl_integer_prim: false,
@@ -591,7 +584,7 @@ impl Default for Board {
             gl_restart_m3: 0,
             gl_restart_m4: 0,
             gl_restart_armed: false,
-            gl_restart_vertex: [[0.0; SGI_GL_VERTEX_FLOATS as usize]; 3],
+            gl_restart_vertex: [[0.0; SGI_GL_VERTEX_FLOATS]; 3],
             gl_matrix_slot: 0,
             gl_matrix: [0; 16],
             gl_texture_matrix: [0; 16],
@@ -705,7 +698,7 @@ impl Board {
     /// where the master stops clocking. Without a nic-record, a selected
     /// product supplies its board's name, and otherwise the default is the
     /// public owner record of the board the Odyssey contract describes.
-    pub fn build_nic_rom(&mut self, rom: &mut [u8; ODSY_NIC_ROM_SIZE as usize]) {
+    pub fn build_nic_rom(&mut self, rom: &mut [u8; ODSY_NIC_ROM_SIZE]) {
         let fields: &str = if !self.nic_record.is_empty() {
             &self.nic_record
         } else if !self.product_record.is_empty() {
@@ -715,7 +708,7 @@ impl Board {
         };
         let record = format!("\u{1}    ;{};", fields);
         let record = record.as_bytes();
-        let length = record.len().min(ODSY_NIC_ROM_SIZE as usize);
+        let length = record.len().min(ODSY_NIC_ROM_SIZE);
 
         rom.fill(0xff);
         rom[..length].copy_from_slice(&record[..length]);
@@ -725,7 +718,7 @@ impl Board {
     }
 
     pub fn attach_nic(&mut self) -> Result<(), String> {
-        let mut rom = [0u8; ODSY_NIC_ROM_SIZE as usize];
+        let mut rom = [0u8; ODSY_NIC_ROM_SIZE];
 
         if self.nic_serial & !ODSY_NIC_SERIAL_MASK != 0 {
             return Err(format!("the sgi-odyssey one-wire serial {:#x} does not fit in 48 bits", self.nic_serial));
@@ -1147,20 +1140,18 @@ impl Board {
     }
 
     pub fn allocate(&mut self) -> Result<(), String> {
-        let mut err: Option<String> = None;
-
         self.attach_nic()?;
 
         // The colour framebuffer is two RGBA8 planes, one per colour buffer,
         // each over device-backed board memory of its own: a model-owned byte
         // array. It is not page-backed onto guest RAM. add_plane can only fail
-        // on a programming error in these fixed sizes, so a failure panics.
+        // on a programming error in these fixed sizes.
         let pixels = SGI_ODYSSEY_WIDTH as u64 * SGI_ODYSSEY_HEIGHT as u64;
         self.mem.init(pixels * 4);
         {
             let plane = Plane {
-                format: SGI_PLANE_RGBA8,
-                packing: SGI_PACK_BE_RED_HIGH,
+                format: PlaneFormat::Rgba8,
+                packing: Packing::BeRedHigh,
                 width: SGI_ODYSSEY_WIDTH,
                 height: SGI_ODYSSEY_HEIGHT,
                 stride: SGI_ODYSSEY_WIDTH * 4,
@@ -1170,12 +1161,12 @@ impl Board {
                 ..Default::default()
             };
 
-            self.colour_plane = self.mem.add_plane(&plane, &mut err);
+            self.colour_plane = self.mem.add_plane(&plane).map_err(|e| format!("sgi-odyssey: colour plane: {e}"))?;
             // Colour buffer 1, the same shape in its own memory. Two model
             // planes preserve the visible contract; they do not claim the
             // board's two-buffer layout.
             self.buffer1_mem.init(plane.len);
-            self.buffer1_plane = self.buffer1_mem.add_plane(&plane, &mut err);
+            self.buffer1_plane = self.buffer1_mem.add_plane(&plane).map_err(|e| format!("sgi-odyssey: colour buffer 1 plane: {e}"))?;
         }
 
         // The board-memory object store: device-backed words the objects are
@@ -1189,12 +1180,13 @@ impl Board {
         // The depth plane: 24-bit depth in a 32-bit word per frame pixel, in
         // device-backed memory of its own. Where the board keeps the depth
         // buffer, and its width and layout, are unknown, so no aperture reaches
-        // this plane. 24 bits matches the Z24 names in the GL library.
+        // this plane. 24 bits matches the Z24 names in the GL library and the depth
+        // word (depth_word.rs).
         self.depth_mem.init(pixels * 4);
         {
             let depth = Plane {
-                format: SGI_PLANE_Z24,
-                packing: SGI_PACK_BE_RED_HIGH,
+                format: PlaneFormat::Z24,
+                packing: Packing::BeRedHigh,
                 width: SGI_ODYSSEY_WIDTH,
                 height: SGI_ODYSSEY_HEIGHT,
                 stride: SGI_ODYSSEY_WIDTH * 4,
@@ -1204,7 +1196,7 @@ impl Board {
                 ..Default::default()
             };
 
-            self.depth_plane = self.depth_mem.add_plane(&depth, &mut err);
+            self.depth_plane = self.depth_mem.add_plane(&depth).map_err(|e| format!("sgi-odyssey: depth plane: {e}"))?;
         }
 
         // The stencil plane: 8 bits a pixel, in device-backed memory of its own;
@@ -1212,8 +1204,8 @@ impl Board {
         self.stencil_mem.init(pixels);
         {
             let stencil = Plane {
-                format: SGI_PLANE_S8,
-                packing: SGI_PACK_BE_RED_HIGH,
+                format: PlaneFormat::S8,
+                packing: Packing::BeRedHigh,
                 width: SGI_ODYSSEY_WIDTH,
                 height: SGI_ODYSSEY_HEIGHT,
                 stride: SGI_ODYSSEY_WIDTH,
@@ -1223,10 +1215,7 @@ impl Board {
                 ..Default::default()
             };
 
-            self.stencil_plane = self.stencil_mem.add_plane(&stencil, &mut err);
-        }
-        if let Some(e) = err {
-            panic!("sgi-odyssey: {}", e);
+            self.stencil_plane = self.stencil_mem.add_plane(&stencil).map_err(|e| format!("sgi-odyssey: stencil plane: {e}"))?;
         }
 
         // Setting the mode allocates the scanout's frame, marks it all dirty
@@ -1251,10 +1240,9 @@ impl Board {
         self.did.fill(0);
         self.overlay.fill(0);
         self.poly_marks.fill(0);
-        // The depth plane starts at the far value, all ones (a model choice).
-        // Under the floating-point code depth 1.0 is 0xfe0000, and every code of
-        // a depth in [0, 1] is at most that, so all ones still compares as
-        // farther than any fragment.
+        // The depth plane starts at all ones (a model choice). The far plane,
+        // 2S, is word 0xfffffe, and every drawn depth is at most that, so all
+        // ones, the largest word, compares as farther than any fragment.
         let depth = self.depth_mem.plane(self.depth_plane).expect("the depth plane");
         for y in 0..SGI_ODYSSEY_HEIGHT as i32 {
             for x in 0..SGI_ODYSSEY_WIDTH as i32 {
@@ -1294,8 +1282,6 @@ impl Board {
         s.cas_latency = 3;
         s.backend_version = 1;
         s.nic_serial = synthetic_onewire_serial('G', 0);
-        s.raster_bands = true;
-        s.raster_band_pixels = 0;
         s.product = product.to_string();
         s.slot = slot;
         s.configure()?;

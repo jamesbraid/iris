@@ -30,19 +30,23 @@
 //! - `raster`: the scalar rasteriser's rules, fragment path and draw entry;
 //!   `raster_triangle`, `raster_line`, `raster_pixels`: triangles and
 //!   polygons, lines and points, pixel rectangles, bitmaps, clears and
-//!   raster ops; `raster_texture`: texture sampling; `raster_bands`:
-//!   drawing in bands of rows on host threads; `raster_fixed_texture`: the
-//!   fixed-point fast path for textured triangles.
+//!   raster ops; `raster_texture`: texture sampling; `raster_fixed_texture`:
+//!   the fixed-point fast path for textured triangles; `raster_fill`: the row
+//!   loops filled triangles take, specialised by draw state and planes;
+//!   `raster_bench`: a fill-rate benchmark (tests only).
 //! - `memory`, `scanout`, `display`: board memory and planes; the scanned
 //!   frame and retrace; what reaches the window.
 //! - `pixel_dma`, `pi_gfx`: DMA between guest memory and planes, and graphics
 //!   credits for machines whose processor interface counts them.
+//! - `depth_word`: the board's 24-bit float depth word and its offset.
 //! - `consts`: register, command and field constants.
 //!
 //! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code
 //! (hw/display/sgi/) in jamesbraid/qemu-sgi-origami.
 
-//ALLOWREMOVED
+// The rasteriser writes its range tests as !(x > 0.0) and the like so that
+// a NaN fails them.
+#![allow(clippy::neg_cmp_op_on_partial_ord, reason = "a NaN must fail these tests")]
 
 use crate::devlog::LogModule;
 
@@ -51,7 +55,10 @@ pub mod board;
 pub mod command;
 pub mod consts;
 pub mod context;
+pub mod depth_word;
 pub mod display;
+#[cfg(test)]
+mod display_bench;
 pub mod dma;
 pub mod draw;
 pub mod fifo;
@@ -65,7 +72,9 @@ pub mod objects;
 pub mod pi_gfx;
 pub mod pixel_dma;
 pub mod raster;
-pub mod raster_bands;
+#[cfg(test)]
+pub mod raster_bench;
+pub mod raster_fill;
 pub mod raster_fixed_texture;
 pub mod raster_line;
 pub mod raster_pixels;
@@ -96,7 +105,7 @@ pub use objects::*;
 pub use pi_gfx::*;
 pub use pixel_dma::*;
 pub use raster::*;
-pub use raster_bands::*;
+pub use raster_fill::*;
 pub use raster_fixed_texture::*;
 pub use raster_line::*;
 pub use raster_pixels::*;
@@ -170,7 +179,7 @@ impl Odyssey {
     /// The aperture offset of `addr`, in either window.
     fn offset(&self, addr: u64) -> Option<u64> {
         let off = if addr >= self.large { addr - self.large } else { addr.wrapping_sub(self.small) };
-        (off < ODSY_APERTURE as u64).then_some(off)
+        (off < ODSY_APERTURE).then_some(off)
     }
 
     fn read(&self, addr: u64, size: u32) -> (u32, u64) {
