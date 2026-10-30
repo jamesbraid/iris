@@ -153,9 +153,12 @@ pub enum Scene {
     /// Trilinear RGBA blended over what is there, depth ALWAYS and not
     /// written (perfly's sky and overlays).
     TexBlendOver,
+    /// TexStencil's state under a client clip plane that cuts the screen
+    /// (Smoke & Mirrors' reflected scene).
+    TexStencilClip,
 }
 
-pub const ALL_SCENES: [Scene; 16] = [
+pub const ALL_SCENES: [Scene; 17] = [
     Scene::FlatFill,
     Scene::SmoothDepth,
     Scene::SmoothBlend,
@@ -172,6 +175,7 @@ pub const ALL_SCENES: [Scene; 16] = [
     Scene::StencilMark,
     Scene::TexClampTrilinear,
     Scene::TexBlendOver,
+    Scene::TexStencilClip,
 ];
 
 /// One scene, built: the board, the draw state, the vertex lists of its
@@ -359,7 +363,12 @@ impl Bench {
                     b.pixels += a;
                 }
             }
-            Scene::TexStencil => {
+            Scene::TexStencil | Scene::TexStencilClip => {
+                if scene == Scene::TexStencilClip {
+                    // x + y / 4 >= -0.25: about three fifths of the screen.
+                    st.clip_planes = 1;
+                    st.clip_plane[0] = [1.0, 0.25, 0.0, 0.25];
+                }
                 st.depth_test = 1;
                 st.texture_2d = 1;
                 st.stencil_test = 1;

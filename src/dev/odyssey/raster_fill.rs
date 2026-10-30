@@ -8,7 +8,8 @@
 //! whose implementor FillMode carries in const parameters the draw state
 //! each pixel would otherwise test: texturing and the fixed-point sampler's
 //! kernel, wrap, environment and format; the depth test, its function and
-//! write; flat or smooth shading; blending; fog; the stencil test. A parameter of FILL_DYN
+//! write; flat or smooth shading; blending; fog; the stencil test; client
+//! clip planes. A parameter of FILL_DYN
 //! reads its state at run time instead. So the same source is both a loop
 //! with every test folded away and the fallback that takes any state the
 //! loops admit, and the two cannot disagree: the arithmetic is the same
@@ -84,11 +85,14 @@ pub trait Fill {
     fn fog(st: &GlDrawState) -> bool;
     /// The stencil test and its operations, on planes with a stencil buffer.
     fn stencil(r: &SoftDraw) -> bool;
+    /// The client clip planes, any enabled.
+    fn clip(st: &GlDrawState) -> bool;
 }
 
 /// The const draw state of one row loop (see the Fill trait). DEPTH, WRITE,
 /// SMOOTH and FOG are 0, 1 or FILL_DYN; FUNC a depth function or FILL_DYN;
-/// BLEND one of the FILL_BLEND_ values or FILL_DYN; STENCIL 0 or FILL_DYN.
+/// BLEND one of the FILL_BLEND_ values or FILL_DYN; STENCIL and CLIP 0 or
+/// FILL_DYN.
 pub struct FillMode<
     const TEX: bool,
     const KERNEL: u32,
@@ -102,6 +106,7 @@ pub struct FillMode<
     const BLEND: u32,
     const FOG: u32,
     const STENCIL: u32,
+    const CLIP: u32,
 >;
 
 impl<
@@ -117,9 +122,11 @@ impl<
         const BLEND: u32,
         const FOG: u32,
         const STENCIL: u32,
-    > Fill for FillMode<TEX, KERNEL, REPEAT, ENV, FORMAT, DEPTH, FUNC, WRITE, SMOOTH, BLEND, FOG, STENCIL>
+        const CLIP: u32,
+    > Fill for FillMode<TEX, KERNEL, REPEAT, ENV, FORMAT, DEPTH, FUNC, WRITE, SMOOTH, BLEND, FOG, STENCIL, CLIP>
 {
-    type Dyn = FillMode<TEX, SGI_SOFT_FIXED_ANY, false, 0, 0, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN>;
+    type Dyn =
+        FillMode<TEX, SGI_SOFT_FIXED_ANY, false, 0, 0, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN>;
     const TEX: bool = TEX;
     const ENV: u32 = ENV;
     const FORMAT: u32 = FORMAT;
@@ -167,6 +174,10 @@ impl<
     #[inline(always)]
     fn stencil(r: &SoftDraw) -> bool {
         STENCIL == FILL_DYN && r.st.stencil_test != 0 && r.rules.stencil_max(r.t).is_some()
+    }
+    #[inline(always)]
+    fn clip(st: &GlDrawState) -> bool {
+        CLIP == FILL_DYN && st.clip_planes != 0
     }
 }
 
@@ -320,6 +331,7 @@ impl SoftDraw<'_> {
         let depth_func = M::depth_func(st);
         let depth_write = depth_test && M::depth_write(st);
         let fog = M::fog(st);
+        let clip = M::clip(st);
         let smooth = M::smooth(sp);
         // The stencil test as RasterRules::depth_stencil() makes it: the
         // reference clamped to the buffer's range, compared under the value
@@ -446,6 +458,18 @@ impl SoftDraw<'_> {
                 if runs[r].is_some_and(|run| run.clipped) && !self.owned_at(col, py) {
                     continue;
                 }
+                if clip {
+                    let mut d = [0.0f64; SGI_GL_CLIP_PLANES as usize];
+
+                    for (k, dk) in d.iter_mut().enumerate() {
+                        if st.clip_planes & (1u32 << k) != 0 {
+                            *dk = (w0[i] * v[0].clip[k] + w1[i] * v[1].clip[k] + w2[i] * v[2].clip[k]) / sum[i];
+                        }
+                    }
+                    if st.clipped(&d) {
+                        continue;
+                    }
+                }
                 // Which of the stencil operations the fragment takes: 0 where
                 // the stencil test fails, 1 the depth test, 2 where it passes.
                 let mut outcome = 2usize;
@@ -558,11 +582,11 @@ pub struct QuadRow {
 /// Generates FillRow, one variant per specialisation, and the dispatch
 /// from a variant to its instance of SoftDraw::fill_row(). Each entry is the
 /// texture's kernel, wrap, environment and format, then the depth test,
-/// function and write, shading, blend, fog and stencil.
+/// function and write, shading, blend, fog, stencil and clip planes.
 macro_rules! fill_rows {
     ($($id:ident = ($tex:expr, $kernel:expr, $repeat:expr, $env:expr, $format:expr,
                     $depth:expr, $func:expr, $write:expr, $smooth:expr, $blend:expr, $fog:expr,
-                    $stencil:expr);)*) => {
+                    $stencil:expr, $clip:expr);)*) => {
         /// A row loop for filled triangles (raster_fill.rs).
         #[allow(non_camel_case_types)]
         #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -584,7 +608,7 @@ macro_rules! fill_rows {
             match row {
                 $(FillRow::$id => fill_quads_instance::<FillMode<
                     { $tex }, { $kernel }, { $repeat }, { $env }, { $format },
-                    { $depth }, { $func }, { $write }, { $smooth }, { $blend }, { $fog }, { $stencil },
+                    { $depth }, { $func }, { $write }, { $smooth }, { $blend }, { $fog }, { $stencil }, { $clip },
                 >, P>(px, r, sp, qy, rows, general),)*
             }
         }
@@ -659,51 +683,51 @@ const LEQUAL: u32 = SGI_GL_LEQUAL;
 
 fill_rows! {
     // The fallbacks: any state the loops take, tested per pixel.
-    TextureAny = (true, SGI_SOFT_FIXED_ANY, false, 0, 0, D, D, D, D, D, D, D);
-    FillAny = (false, 0, false, 0, 0, D, D, D, D, D, D, D);
+    TextureAny = (true, SGI_SOFT_FIXED_ANY, false, 0, 0, D, D, D, D, D, D, D, D);
+    FillAny = (false, 0, false, 0, 0, D, D, D, D, D, D, D, D);
 
     // Textured: a repeated RGB or RGBA image, nearest, bilinear or
     // trilinear, replacing or modulating the fragment's colour, depth
     // tested LESS or LEQUAL and written, without blending or fog.
-    NearestReplaceRgbaLess = (true, NEAREST, true, REPLACE, RGBA, 1, LESS, 1, D, OFF, 0, D);
-    NearestReplaceRgbLess = (true, NEAREST, true, REPLACE, RGB, 1, LESS, 1, D, OFF, 0, D);
-    NearestModulateRgbaLess = (true, NEAREST, true, MODULATE, RGBA, 1, LESS, 1, D, OFF, 0, D);
-    NearestModulateRgbLess = (true, NEAREST, true, MODULATE, RGB, 1, LESS, 1, D, OFF, 0, D);
-    LinearReplaceRgbaLess = (true, LINEAR, true, REPLACE, RGBA, 1, LESS, 1, D, OFF, 0, D);
-    LinearReplaceRgbLess = (true, LINEAR, true, REPLACE, RGB, 1, LESS, 1, D, OFF, 0, D);
-    LinearModulateRgbaLess = (true, LINEAR, true, MODULATE, RGBA, 1, LESS, 1, D, OFF, 0, D);
-    LinearModulateRgbLess = (true, LINEAR, true, MODULATE, RGB, 1, LESS, 1, D, OFF, 0, D);
-    TrilinearReplaceRgbaLess = (true, TRILINEAR, true, REPLACE, RGBA, 1, LESS, 1, D, OFF, 0, D);
-    TrilinearReplaceRgbLess = (true, TRILINEAR, true, REPLACE, RGB, 1, LESS, 1, D, OFF, 0, D);
-    TrilinearModulateRgbaLess = (true, TRILINEAR, true, MODULATE, RGBA, 1, LESS, 1, D, OFF, 0, D);
-    TrilinearModulateRgbLess = (true, TRILINEAR, true, MODULATE, RGB, 1, LESS, 1, D, OFF, 0, D);
-    NearestReplaceRgbaLequal = (true, NEAREST, true, REPLACE, RGBA, 1, LEQUAL, 1, D, OFF, 0, D);
-    NearestReplaceRgbLequal = (true, NEAREST, true, REPLACE, RGB, 1, LEQUAL, 1, D, OFF, 0, D);
-    NearestModulateRgbaLequal = (true, NEAREST, true, MODULATE, RGBA, 1, LEQUAL, 1, D, OFF, 0, D);
-    NearestModulateRgbLequal = (true, NEAREST, true, MODULATE, RGB, 1, LEQUAL, 1, D, OFF, 0, D);
-    LinearReplaceRgbaLequal = (true, LINEAR, true, REPLACE, RGBA, 1, LEQUAL, 1, D, OFF, 0, D);
-    LinearReplaceRgbLequal = (true, LINEAR, true, REPLACE, RGB, 1, LEQUAL, 1, D, OFF, 0, D);
-    LinearModulateRgbaLequal = (true, LINEAR, true, MODULATE, RGBA, 1, LEQUAL, 1, D, OFF, 0, D);
-    LinearModulateRgbLequal = (true, LINEAR, true, MODULATE, RGB, 1, LEQUAL, 1, D, OFF, 0, D);
-    TrilinearReplaceRgbaLequal = (true, TRILINEAR, true, REPLACE, RGBA, 1, LEQUAL, 1, D, OFF, 0, D);
-    TrilinearReplaceRgbLequal = (true, TRILINEAR, true, REPLACE, RGB, 1, LEQUAL, 1, D, OFF, 0, D);
-    TrilinearModulateRgbaLequal = (true, TRILINEAR, true, MODULATE, RGBA, 1, LEQUAL, 1, D, OFF, 0, D);
-    TrilinearModulateRgbLequal = (true, TRILINEAR, true, MODULATE, RGB, 1, LEQUAL, 1, D, OFF, 0, D);
+    NearestReplaceRgbaLess = (true, NEAREST, true, REPLACE, RGBA, 1, LESS, 1, D, OFF, 0, D, D);
+    NearestReplaceRgbLess = (true, NEAREST, true, REPLACE, RGB, 1, LESS, 1, D, OFF, 0, D, D);
+    NearestModulateRgbaLess = (true, NEAREST, true, MODULATE, RGBA, 1, LESS, 1, D, OFF, 0, D, D);
+    NearestModulateRgbLess = (true, NEAREST, true, MODULATE, RGB, 1, LESS, 1, D, OFF, 0, D, D);
+    LinearReplaceRgbaLess = (true, LINEAR, true, REPLACE, RGBA, 1, LESS, 1, D, OFF, 0, D, D);
+    LinearReplaceRgbLess = (true, LINEAR, true, REPLACE, RGB, 1, LESS, 1, D, OFF, 0, D, D);
+    LinearModulateRgbaLess = (true, LINEAR, true, MODULATE, RGBA, 1, LESS, 1, D, OFF, 0, D, D);
+    LinearModulateRgbLess = (true, LINEAR, true, MODULATE, RGB, 1, LESS, 1, D, OFF, 0, D, D);
+    TrilinearReplaceRgbaLess = (true, TRILINEAR, true, REPLACE, RGBA, 1, LESS, 1, D, OFF, 0, D, D);
+    TrilinearReplaceRgbLess = (true, TRILINEAR, true, REPLACE, RGB, 1, LESS, 1, D, OFF, 0, D, D);
+    TrilinearModulateRgbaLess = (true, TRILINEAR, true, MODULATE, RGBA, 1, LESS, 1, D, OFF, 0, D, D);
+    TrilinearModulateRgbLess = (true, TRILINEAR, true, MODULATE, RGB, 1, LESS, 1, D, OFF, 0, D, D);
+    NearestReplaceRgbaLequal = (true, NEAREST, true, REPLACE, RGBA, 1, LEQUAL, 1, D, OFF, 0, D, D);
+    NearestReplaceRgbLequal = (true, NEAREST, true, REPLACE, RGB, 1, LEQUAL, 1, D, OFF, 0, D, D);
+    NearestModulateRgbaLequal = (true, NEAREST, true, MODULATE, RGBA, 1, LEQUAL, 1, D, OFF, 0, D, D);
+    NearestModulateRgbLequal = (true, NEAREST, true, MODULATE, RGB, 1, LEQUAL, 1, D, OFF, 0, D, D);
+    LinearReplaceRgbaLequal = (true, LINEAR, true, REPLACE, RGBA, 1, LEQUAL, 1, D, OFF, 0, D, D);
+    LinearReplaceRgbLequal = (true, LINEAR, true, REPLACE, RGB, 1, LEQUAL, 1, D, OFF, 0, D, D);
+    LinearModulateRgbaLequal = (true, LINEAR, true, MODULATE, RGBA, 1, LEQUAL, 1, D, OFF, 0, D, D);
+    LinearModulateRgbLequal = (true, LINEAR, true, MODULATE, RGB, 1, LEQUAL, 1, D, OFF, 0, D, D);
+    TrilinearReplaceRgbaLequal = (true, TRILINEAR, true, REPLACE, RGBA, 1, LEQUAL, 1, D, OFF, 0, D, D);
+    TrilinearReplaceRgbLequal = (true, TRILINEAR, true, REPLACE, RGB, 1, LEQUAL, 1, D, OFF, 0, D, D);
+    TrilinearModulateRgbaLequal = (true, TRILINEAR, true, MODULATE, RGBA, 1, LEQUAL, 1, D, OFF, 0, D, D);
+    TrilinearModulateRgbLequal = (true, TRILINEAR, true, MODULATE, RGB, 1, LEQUAL, 1, D, OFF, 0, D, D);
 
     // Untextured: no depth test, or LESS or LEQUAL written; flat or
     // smooth; unblended or blended alpha-over; no fog.
-    NodepthFlat = (false, 0, false, 0, 0, 0, D, 1, 0, OFF, 0, 0);
-    NodepthSmooth = (false, 0, false, 0, 0, 0, D, 1, 1, OFF, 0, 0);
-    NodepthFlatOver = (false, 0, false, 0, 0, 0, D, 1, 0, OVER, 0, 0);
-    NodepthSmoothOver = (false, 0, false, 0, 0, 0, D, 1, 1, OVER, 0, 0);
-    LessFlat = (false, 0, false, 0, 0, 1, LESS, 1, 0, OFF, 0, 0);
-    LessSmooth = (false, 0, false, 0, 0, 1, LESS, 1, 1, OFF, 0, 0);
-    LessFlatOver = (false, 0, false, 0, 0, 1, LESS, 1, 0, OVER, 0, 0);
-    LessSmoothOver = (false, 0, false, 0, 0, 1, LESS, 1, 1, OVER, 0, 0);
-    LequalFlat = (false, 0, false, 0, 0, 1, LEQUAL, 1, 0, OFF, 0, 0);
-    LequalSmooth = (false, 0, false, 0, 0, 1, LEQUAL, 1, 1, OFF, 0, 0);
-    LequalFlatOver = (false, 0, false, 0, 0, 1, LEQUAL, 1, 0, OVER, 0, 0);
-    LequalSmoothOver = (false, 0, false, 0, 0, 1, LEQUAL, 1, 1, OVER, 0, 0);
+    NodepthFlat = (false, 0, false, 0, 0, 0, D, 1, 0, OFF, 0, 0, 0);
+    NodepthSmooth = (false, 0, false, 0, 0, 0, D, 1, 1, OFF, 0, 0, 0);
+    NodepthFlatOver = (false, 0, false, 0, 0, 0, D, 1, 0, OVER, 0, 0, 0);
+    NodepthSmoothOver = (false, 0, false, 0, 0, 0, D, 1, 1, OVER, 0, 0, 0);
+    LessFlat = (false, 0, false, 0, 0, 1, LESS, 1, 0, OFF, 0, 0, 0);
+    LessSmooth = (false, 0, false, 0, 0, 1, LESS, 1, 1, OFF, 0, 0, 0);
+    LessFlatOver = (false, 0, false, 0, 0, 1, LESS, 1, 0, OVER, 0, 0, 0);
+    LessSmoothOver = (false, 0, false, 0, 0, 1, LESS, 1, 1, OVER, 0, 0, 0);
+    LequalFlat = (false, 0, false, 0, 0, 1, LEQUAL, 1, 0, OFF, 0, 0, 0);
+    LequalSmooth = (false, 0, false, 0, 0, 1, LEQUAL, 1, 1, OFF, 0, 0, 0);
+    LequalFlatOver = (false, 0, false, 0, 0, 1, LEQUAL, 1, 0, OVER, 0, 0, 0);
+    LequalSmoothOver = (false, 0, false, 0, 0, 1, LEQUAL, 1, 1, OVER, 0, 0, 0);
 }
 
 /// Textured specialisations by depth function (LESS, LEQUAL), kernel less
@@ -753,15 +777,11 @@ impl SoftDraw<'_> {
 
     /// The state every row loop leaves to SoftDraw::fragment_at(): what none
     /// of them does per fragment. RGBA colour, with no alpha test, logical
-    /// operation, client clip planes or polygon stipple.
+    /// operation or polygon stipple.
     pub fn fill_admits(&self) -> bool {
         let st: &GlDrawState = self.st;
 
-        st.index_bits == 0
-            && st.alpha_test == 0
-            && !self.logic_op
-            && st.clip_planes == 0
-            && self.polygon_stipple.is_none()
+        st.index_bits == 0 && st.alpha_test == 0 && !self.logic_op && self.polygon_stipple.is_none()
     }
 
     /// The row loop for the draw's untextured filled triangles, or None for
@@ -792,7 +812,7 @@ impl SoftDraw<'_> {
             -1
         };
         let stencil = st.stencil_test != 0 && self.rules.stencil_max(self.t).is_some();
-        if path == SGI_RASTER_FILL_DYNAMIC || depth < 0 || blend < 0 || st.fog != 0 || stencil {
+        if path == SGI_RASTER_FILL_DYNAMIC || depth < 0 || blend < 0 || st.fog != 0 || stencil || st.clip_planes != 0 {
             return Some(FillRow::FillAny);
         }
         let smooth = (st.shade_model != SGI_GL_FLAT) as usize;
@@ -929,6 +949,9 @@ mod tests {
         if rng.next_u32() % 3 == 0 {
             random_stencil(&mut rng, st);
         }
+        if rng.next_u32() % 4 == 0 {
+            random_clip(&mut rng, st);
+        }
         if textured {
             let min = pick(&mut rng, &[SGI_GL_NEAREST, SGI_GL_LINEAR, SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_NEAREST_MIPMAP_NEAREST]);
             let mag = pick(&mut rng, &[SGI_GL_NEAREST, SGI_GL_LINEAR, SGI_GL_LINEAR]);
@@ -995,6 +1018,15 @@ mod tests {
         st.stencil_value_mask = pick(rng, &[u32::MAX, 0xff, 0x3, 0x2]);
         st.stencil_write_mask = pick(rng, &[u32::MAX, 0xff, 0x1, 0]);
         st.stencil_op = [pick(rng, &ops), pick(rng, &ops), pick(rng, &ops)];
+    }
+
+    /// One or two client clip planes, in eye coordinates, which are the
+    /// cases' object coordinates: each cuts some triangles across.
+    fn random_clip(rng: &mut Lcg, st: &mut GlDrawState) {
+        st.clip_planes = pick(rng, &[1, 2, 0x21, 0x9]);
+        for plane in st.clip_plane.iter_mut() {
+            *plane = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-0.5, 0.5), rng.range(-0.5, 0.5)];
+        }
     }
 
     type Planes3 = (Vec<u32>, Vec<u32>, Vec<u32>);
@@ -1104,8 +1136,8 @@ mod tests {
     }
 
     // Under the stencil test, with any function, reference, masks and
-    // operations: the loops test and write the stencil plane as the general
-    // path does, textured or not. The row loops take these draws (a
+    // operations, some under client clip planes too: the loops test and
+    // write the stencil plane as the general path does, textured or not. The row loops take these draws (a
     // textured one its specialisation), and the cases change stencil values.
     #[test]
     fn stencil_fills_match_the_general_path() {
@@ -1115,6 +1147,9 @@ mod tests {
             let make = || {
                 let mut b = case(seed, textured);
                 random_stencil(&mut Lcg(seed), &mut b.st);
+                if seed % 3 == 0 {
+                    random_clip(&mut Lcg(seed + 1), &mut b.st);
+                }
                 b
             };
             let (fill, texture) = if textured {
@@ -1144,6 +1179,22 @@ mod tests {
         b.st.stencil_test = 1;
         b.st.stencil_func = SGI_GL_EQUAL;
         b.st.stencil_op = [SGI_GL_KEEP; 3];
+        let t = b.board.gl_target();
+        let reports = SoftReports::default();
+        let mut r = SoftDraw::new(&b.rules, &t, &b.st, &reports);
+        r.ntargets = 1;
+        assert!(r.setup_ops());
+        assert_eq!(r.fill_select(), Some(FillRow::FillAny));
+        let f = SoftFixedTex { min: SGI_GL_LINEAR, mag: SGI_GL_LINEAR, format: SGI_GL_RGB, wrap_s: SGI_GL_REPEAT, wrap_t: SGI_GL_REPEAT, ..Default::default() };
+        assert_eq!(r.fixed_span_select(&f), Some(FillRow::LinearModulateRgbLess));
+    }
+
+    // So does a draw under client clip planes.
+    #[test]
+    fn clipped_draws_take_the_row_loops() {
+        let mut b = Bench::empty();
+        b.st.depth_test = 1;
+        b.st.clip_planes = 1;
         let t = b.board.gl_target();
         let reports = SoftReports::default();
         let mut r = SoftDraw::new(&b.rules, &t, &b.st, &reports);
