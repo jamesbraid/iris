@@ -193,14 +193,18 @@ impl Odyssey {
     /// One display frame: the retrace if it is due, then the dirty lines
     /// resolved and the frame presented.
     fn frame(state: &BoardLocks, display: &Display) {
+        crate::pf_begin!(crate::perfetto::events::ODSY_CAPTURE);
         let (frame, w, h) = {
             let mut s = state.board.lock();
             s.scanout.poll(monotonic_ns());
             s.scanout.update();
             (s.scanout.frame.clone(), s.scanout.frame_width as usize, s.scanout.frame_height as usize)
         };
+        crate::pf_end!(crate::perfetto::events::ODSY_CAPTURE);
         if w != 0 && h != 0 && frame.len() >= w * h {
+            crate::pf_begin!(crate::perfetto::events::ODSY_PRESENT);
             display.present(&frame, w, h);
+            crate::pf_end!(crate::perfetto::events::ODSY_PRESENT);
         }
     }
 }
