@@ -29,6 +29,7 @@ use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 
+use crate::devlog::LogModule;
 use crate::irq::InterruptController;
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, BUS_ERR, BUS_OK};
 
@@ -386,9 +387,14 @@ impl Xbow {
         r.interrupt_asserted = pending;
     }
 
+    /// A widget 0 access error. A processor access carries no command word
+    /// to capture, so the error command and address registers stay as they
+    /// are; the first such error says so.
     fn record_access_error(&self, r: &mut Regs, out: &mut Out) {
         if r.status & STATUS_ACCESS_ERROR != 0 {
             r.status |= STATUS_MULTIPLE_ERROR;
+        } else {
+            crate::dlog!(LogModule::Xbow, "xbow: the failing access is not captured; the first-error latch holds packets only");
         }
         r.status |= STATUS_ACCESS_ERROR;
         self.update_interrupt(r, out);
@@ -430,12 +436,15 @@ impl Xbow {
     /// established packet form and is refused without a status flag, any
     /// other malformed access is an access error.
     fn decode(&self, r: &mut Regs, out: &mut Out, off: u32, size: usize, write: bool) -> Option<u32> {
+        let rw = if write { "write" } else { "read" };
         if size == 8 {
+            crate::dlog!(LogModule::Xbow, "xbow: eight-byte {rw} at {off:#x} has no established packet form; refused");
             self.note(off, size, write);
             return None;
         }
         let slot = off.wrapping_sub(4);
         if size != 4 || off % 8 != 4 || !self.accessible(slot, write) {
+            crate::dlog!(LogModule::Xbow, "xbow: invalid {size}-byte {rw} at {off:#x}");
             self.note(off, size, write);
             self.record_access_error(r, out);
             return None;
@@ -519,9 +528,11 @@ impl Xbow {
                 }
                 LLP_CONTROL => r.llp_control = val & LLP_CONTROL_MASK,
                 ARB_RELOAD => r.arb_reload = val & ARB_RELOAD_MASK,
-                // The selector is kept; nothing counts.
-                PERF_A => r.perf_a = val & PERF_SELECT_MASK,
-                PERF_B => r.perf_b = val & PERF_SELECT_MASK,
+                // The selector is kept; nothing counts, so the count stays zero.
+                PERF_A | PERF_B => {
+                    crate::dlog!(LogModule::Xbow, "xbow: performance counting is not modelled");
+                    *if slot == PERF_A { &mut r.perf_a } else { &mut r.perf_b } = val & PERF_SELECT_MASK;
+                }
                 NIC => r.nic = val & NIC_MASK,
                 s if (FENCE_BASE..FENCE_END).contains(&s) => r.fences[((s - FENCE_BASE) / 8) as usize] = val & FENCE_MASK,
                 // Test-and-set: stored only while the lock is free.
@@ -535,12 +546,17 @@ impl Xbow {
                     let link = ((s - LINK_BASE) / LINK_STRIDE) as usize;
                     match (s - LINK_BASE) % LINK_STRIDE {
                         LINK_CONTROL => {
+                            if val & LINK_FORCE_BAD != 0 {
+                                crate::dlog!(LogModule::Xbow, "xbow: a forced bad micropacket is not modelled; the one-shot reads back zero");
+                            }
                             r.link_control[link] = val & LINK_CONTROL_MASK & !LINK_FORCE_BAD;
                             self.update_interrupt(r, out);
                         }
                         // Stored; nothing arbitrates on them.
-                        LINK_ARB_UPPER => r.link_arb_upper[link] = val,
-                        LINK_ARB_LOWER => r.link_arb_lower[link] = val,
+                        reg @ (LINK_ARB_UPPER | LINK_ARB_LOWER) => {
+                            crate::dlog!(LogModule::Xbow, "xbow: link arbitration is not modelled");
+                            *if reg == LINK_ARB_UPPER { &mut r.link_arb_upper[link] } else { &mut r.link_arb_lower[link] } = val;
+                        }
                         LINK_RESET => {
                             self.link_reset(r, link, out);
                             // After the lock: the widget's reset may ask
