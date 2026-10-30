@@ -2291,15 +2291,19 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             c |= log2(32768) << 26;          // 32 KB L1D
             c |= 1 << 15;                    // big endian
             if C::L2_LINE == 128 { c |= 1 << 13; }
-            // Secondary cache size. The encoding is not in anything to hand,
-            // so it was swept against the PROM rather than guessed.
+            // SS is log2(secondary cache size / 512 KB): 0 is 512 KB, 1 is 1 MB,
+            // 2 is 2 MB, up to 5 for 16 MB (NEC U10278EJ4V0UM p.230). It follows
+            // the model's own `L2_SIZE`, so IRIX's "Secondary unified
+            // instruction/data cache size" line agrees with the part.
             //
-            // 1 is the value to keep: IRIX reports "Secondary unified
-            // instruction/data cache size: 1 Mbyte", which agrees with this
-            // model's own `L2_SIZE`, and the PROM's power-on diagnostics pass
-            // and IRIX boots with it. 4 also passes POST but has IRIX report
-            // 8 MB, contradicting the model.
-            c |= 1 << 16;
+            // How well each field is known: IC and DC (32 KB) come from raw
+            // Linux prints on Origin-class machines, and so do SB and SS,
+            // where SS follows the population, not the part. EC, SC, DN, PM,
+            // DSD and SK are zero and K0 is 2 at reset (the PROM sets its
+            // own); the clock-ratio fields and those mode bits were not
+            // printed by any capture found, so they are model choices, not
+            // the straps of any module.
+            c |= (C::L2_SIZE / (512 << 10)).trailing_zeros() << 16;
             c |= 2;                          // K0 = uncached at reset
             config = c;
         }
