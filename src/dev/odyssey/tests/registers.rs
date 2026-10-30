@@ -522,3 +522,54 @@ fn display_modes_start_at_zero_keep_their_words_and_clear_on_reset() {
     assert_eq!(backend_readback(&mut s, 0x2900), 0);
     assert_eq!(backend_readback(&mut s, 0x2927), 0);
 }
+
+/// The unmodelled-register reports and the unmodelled-command reports
+/// keep separate budgets of 64 distinct entries. On a real boot the
+/// command FIFO's own run of unmodelled words filled a shared table before
+/// the driver ever touched an unmodelled register, so that access never
+/// produced a report.
+///
+/// QEMU: unimplemented-reports-independent-budgets.
+#[test]
+fn filling_the_command_report_budget_leaves_the_register_budget_alone() {
+    let (mut s, _) = board("v12");
+
+    // Distinct words of no recognised shape that take no operands, so each
+    // fills one slot of its own.
+    for i in 0..SGI_ODYSSEY_UNIMP_REPORTS {
+        cmd(&mut s, 0x0000_0100 | i);
+    }
+    assert_eq!(s.reported_cmd_count, SGI_ODYSSEY_UNIMP_REPORTS);
+    cmd(&mut s, 0x0000_7800);
+    assert_eq!(s.reported_cmd_count, SGI_ODYSSEY_UNIMP_REPORTS, "further words stay silent");
+
+    assert_eq!(s.mmio_read(0x8, 1), 0);
+    assert_eq!(s.reported_addr_count, 1, "an unmodelled register is still reported");
+}
+
+/// An unmodelled word still names its operand count in bits 13:10, and the
+/// parser passes over that many words: a 16-operand word the kernel's
+/// context restore sends has operands that happen to spell a whole
+/// triangle, and read as commands they drew it. Passed over, they are not
+/// reported or run, and the word after them is parsed again.
+///
+/// QEMU: command-fifo-unknown-word-skips-its-operands.
+#[test]
+fn an_unmodelled_word_passes_over_the_operands_its_arity_names() {
+    let (mut s, _) = board("v12");
+
+    cmd(&mut s, 0x0000_3cf8);
+    for w in [ODSY_GL_COLOR_3UB, 1, 2, 3, select(ODSY_REG_GL_BEGIN), ODSY_GL_TRIANGLES, 0x0000_7777, 0x0000_7778] {
+        cmd(&mut s, w);
+    }
+    for w in 0..8 {
+        cmd(&mut s, 0x0000_0200 | w);
+    }
+    assert_eq!(s.reported_cmd_count, 1, "only the word itself is reported");
+    assert_eq!(s.reported_cmd[0], 0x3cf8);
+    assert!(!s.gl_begin_open, "the operands that spell a primitive did not run");
+
+    cmd(&mut s, 0x0000_0123);
+    assert_eq!(s.reported_cmd_count, 2);
+    assert_eq!(s.reported_cmd[1], 0x123);
+}
