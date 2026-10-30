@@ -3848,6 +3848,92 @@ mod tests {
         check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(0xF_FFFF_FFFF);
     }
 
+    /// EntryLo holds the R10000 family's uncached attribute in bits 63:62
+    /// (NEC U10278EJ4V0UM section 11.3, p.214) and keeps nothing above
+    /// the PFN on the other models.
+    #[test]
+    fn entrylo_keeps_the_uncached_attribute_on_the_r10000_family() {
+        fn check<C: crate::cpu::mips_cache_v2::CpuModel + From<Arc<dyn BusDevice>>>(want: u64) {
+            let mem = Arc::new(MockMemory::new());
+            let bus: Arc<dyn BusDevice> = mem.clone();
+            let mut exec = MipsExecutor::<PassthroughTlb, C>::new(
+                bus, PassthroughTlb::default(), &MipsCpuConfig::indy());
+            disable_jitv2(&mut exec);
+            exec.core.write_gpr(1, u64::MAX);
+            for reg in [2u32, 3] {
+                // DMTC0 $1, EntryLo0/1; the readback is the writable field.
+                assert_eq!(exec.exec((0x10 << 26) | (5 << 21) | (1 << 16) | (reg << 11)), EXEC_COMPLETE);
+                assert_eq!(exec.core.read_cp0(reg), want, "EntryLo{}", reg - 2);
+            }
+        }
+        check::<PassthroughCache>(0x3FFF_FFFF);
+        check::<crate::cpu::mips_cache_v2::R4400Cache>(0x3FFF_FFFF);
+        check::<crate::cpu::mips_cache_v2::R10000Cache>(0xC000_0000_3FFF_FFFF);
+        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(0xC000_0000_3FFF_FFFF);
+        check::<crate::cpu::mips_cache_shadow::R14000ShadowCache>(0xC000_0000_3FFF_FFFF);
+    }
+
+    /// A mapped uncached page's attribute (EntryLo 63:62, carried to physical
+    /// bits 58:57) reaches the bus on a board that decodes them, and is folded
+    /// away on the Octane (40 bits), Indigo2 and O2 (32), which is what keeps
+    /// those machines unchanged. The O2's no-ECC alias is matched on the
+    /// decoded address, so the attribute cannot hide a hit.
+    #[test]
+    fn mapped_uncached_attribute_is_folded_by_the_boards_physical_mask() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use crate::cpu::mips_tlb::MipsTlb;
+                const VA: u64 = 0x4000_0000;
+
+                fn translate<C: CpuModel + From<Arc<dyn BusDevice>>>(
+                    phys_mask: u64, alias: Option<(u64, u64, u64)>, pfn: u64,
+                ) -> u64 {
+                    let bus: Arc<dyn BusDevice> = Arc::new(MockMemory::new());
+                    let cfg = MipsCpuConfig::for_model::<C>();
+                    let mut exec = Box::new(MipsExecutor::<MipsTlb, C>::new(
+                        bus, MipsTlb::default(), &cfg));
+                    disable_jitv2(&mut exec);
+                    exec.install_status_cb();
+                    let dmtc0 = |exec: &mut Box<MipsExecutor<MipsTlb, C>>, rd: u32, value: u64| {
+                        exec.core.write_gpr(1, value);
+                        let op = (OP_COP0 << 26) | (RS_DMTC0 << 21) | (1 << 16) | (rd << 11);
+                        assert_eq!(exec.exec(op), EXEC_COMPLETE);
+                    };
+                    let status = (exec.core.cp0_status & !crate::cpu::mips_core::STATUS_ERL) | STATUS_KX;
+                    dmtc0(&mut exec, 12, status as u64);
+                    dmtc0(&mut exec, 10, VA);
+                    dmtc0(&mut exec, 0, 0);
+                    dmtc0(&mut exec, 5, 0);
+                    // C=2 (uncached), valid, dirty, attribute 1 in bits 63:62.
+                    dmtc0(&mut exec, 2, (1 << 62) | (pfn << 6) | (2 << 3) | (1 << 2) | (1 << 1));
+                    dmtc0(&mut exec, 3, 0);
+                    assert_eq!(exec.exec((OP_COP0 << 26) | (RS_TLB << 21) | FUNCT_TLBWI), EXEC_COMPLETE);
+                    exec.phys_mask = phys_mask;
+                    exec.phys_alias = alias;
+                    exec.debug_translate(VA).phys
+                }
+
+                type R10K = crate::cpu::mips_cache_shadow::R10000ShadowCache;
+                type R14K = crate::cpu::mips_cache_shadow::R14000ShadowCache;
+                const PA: u64 = 0x0d10_0000;
+                assert_eq!(translate::<R14K>(u64::MAX, None, PA >> 12), (1 << 57) | PA,
+                    "no mask: the attribute reaches the bus");
+                for (name, mask) in [("Octane", (1u64 << 40) - 1), ("Indigo2/O2", u32::MAX as u64)] {
+                    assert_eq!(translate::<R10K>(mask, None, PA >> 12), PA, "{name} folds it away");
+                }
+                assert_eq!(translate::<crate::cpu::mips_cache_v2::R4400Cache>(u64::MAX, None, PA >> 12), PA,
+                    "a model without the attribute never stores it");
+                // The O2 alias of RAM at 0x8000_0000: an attribute above bit 32
+                // must not make the page miss it.
+                let alias = Some((0x8000_0000, 0x1000_0000, 0));
+                assert_eq!(translate::<R10K>(u32::MAX as u64, alias, 0x80001), 0x1000);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     /// The Indy, Indigo2 and O2 decode 32 physical bits, and IRIX relies on
     /// it: on the IP28 the kernel stack's wired entry carries PTE software
     /// bits as PA[34:33]. `phys_mask` must fold them away before the bus.

@@ -381,7 +381,11 @@ consumer thread never takes `rec`.
   code-cache fingerprint carries it. Every uncached SB/SH goes to the bus through
   `BusDevice::write_narrow_from` with the whole source register: the byte or
   halfword is the low bits, the other lanes are undefined by hardware, and only
-  Bedrock's ECC view reads them.
+  Bedrock's ECC view reads them. EntryLo keeps the R10000 family's uncached
+  attribute in bits 63:62, and a mapped uncached access carries it to the bus
+  as address bits 58:57, as an xkphys access does. A machine whose bus decodes
+  fewer physical bits (`phys_mask`) folds the attribute away; other models drop
+  the bits at EntryLo.
 - With `opcodefusion` (implied by `lightning`), the interpreter executes
   common pairs (branch + NOP, LUI + ORI/ADDIU, address + load/store) as one
   dispatch.
