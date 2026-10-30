@@ -722,7 +722,7 @@ fn the_screen_follows_the_frame_through_frames_that_present_a_few_lines() {
     }
     s.regs().set_cursor(ODSY_CURSOR_CONTROL as usize, ODSY_CURSOR_CTL_ENABLE);
     let h = BoardLocks::new(s);
-    let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let display = Display::new(crate::disp::StatusSource::detached());
     let (w, ht) = (ODSY_WIDTH as usize, ODSY_HEIGHT as usize);
 
     for step in 0..8 {
@@ -1037,7 +1037,7 @@ fn display_rig() -> (BoardLocks, GlDrawState, Arc<Display>) {
     s.set_scanout_size(ODSY_WIDTH, ODSY_HEIGHT);
     let h = BoardLocks::new(s);
     h.raster.start();
-    let display = Arc::new(Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))));
+    let display = Arc::new(Display::new(crate::disp::StatusSource::detached()));
     (h, st, display)
 }
 
@@ -1276,7 +1276,7 @@ fn a_swap_after_a_fence_shows_the_whole_new_frame_with_no_lock() {
 #[test]
 fn a_frame_waits_for_no_slice_and_takes_no_lock() {
     let (h, st) = slow_raster(0);
-    let display = Arc::new(Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))));
+    let display = Arc::new(Display::new(crate::disp::StatusSource::detached()));
     let hold = Arc::new(AtomicBool::new(true));
     let held = hold.clone();
     h.raster.submit(move |_| {
@@ -1322,7 +1322,7 @@ fn a_frame_waits_for_no_slice_and_takes_no_lock() {
 fn a_lookup_store_between_taking_the_marks_and_copying_the_registers_is_not_lost() {
     let (s, _) = gl_board();
     let h = BoardLocks::new(s);
-    let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let display = Display::new(crate::disp::StatusSource::detached());
     Odyssey::frame(&h, &display);
     {
         let shared = h.shared.clone();

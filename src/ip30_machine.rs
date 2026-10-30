@@ -270,9 +270,10 @@ impl OctaneMachine {
         // The status bar's activity bits and the CPU's Compare matches,
         // shared with the graphics board before the CPU exists.
         let fasttick = Arc::new(AtomicU64::new(0));
-        let gfx = board.map(|b| ImpactXio::with_board(WIDGET_GFX, b, heart.clone(), mem.clone(), heartbeat.clone(), fasttick.clone()));
+        let status = crate::disp::StatusSource::new(heartbeat.clone(), fasttick.clone());
+        let gfx = board.map(|b| ImpactXio::with_board(WIDGET_GFX, b, heart.clone(), mem.clone(), status.clone()));
         let vpro = if has_vpro {
-            Some(Odyssey::new(WIDGET_GFX, kind.as_str(), heart.clone(), mem.clone(), heartbeat.clone(), fasttick.clone())?)
+            Some(Odyssey::new(WIDGET_GFX, kind.as_str(), heart.clone(), mem.clone(), status.clone())?)
         } else {
             None
         };
@@ -364,11 +365,12 @@ impl OctaneMachine {
                 c.share_jitv2(jit.clone(), world.clone());
             }
         }
+        status.set_cpu_cycles(cpu.cycles_ptr());
+        status.set_count_hz(cpu.count_hz_atomic());
+        for (c, tick) in cpus.iter().zip(&ticks).skip(1) {
+            status.add_cpu_stats(c.cycles_ptr(), tick.clone());
+        }
         if let Some(g) = &gfx {
-            g.mgras().set_cpu_cycles(cpu.cycles_ptr());
-            for (c, tick) in cpus.iter().zip(&ticks).skip(1) {
-                g.mgras().add_cpu_stats(c.cycles_ptr(), tick.clone());
-            }
             // Host GL frames composite straight into the IMPACT framebuffer.
             #[cfg(feature = "hostgl")]
             iris_hostcall::set_display(Arc::new(crate::dev::mgras::ImpactScreen(g.mgras().clone())));
@@ -468,10 +470,6 @@ impl OctaneMachine {
             g.register_locks();
         }
         if let Some(v) = &vpro {
-            v.set_cpu_cycles(cpu.cycles_ptr());
-            for (c, tick) in cpus.iter().zip(&ticks).skip(1) {
-                v.add_cpu_stats(c.cycles_ptr(), tick.clone());
-            }
             monitor.register_device(v.clone());
         }
         let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
