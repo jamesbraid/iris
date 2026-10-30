@@ -606,6 +606,9 @@ impl Board {
             }
             ODSY_REG_FIFO_SETUP_FIRST..=ODSY_REG_FIFO_SETUP_LAST => {
                 self.fifo_setup[(tag - ODSY_REG_FIFO_SETUP_FIRST) as usize] = self.cmd_operand[0];
+                if tag == ODSY_REG_FIFO_SETUP_6B2 {
+                    self.fifo.set_threshold_6b2(self.cmd_operand[0]);
+                }
             }
             ODSY_REG_FIFO_SETUP_7B5 => {
                 self.fifo_setup[ODSY_FIFO_SETUP_7B5_INDEX] = self.cmd_operand[0];

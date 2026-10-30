@@ -173,7 +173,9 @@ fn a_counted_store_is_credited_as_it_enters_the_fifo() {
     for _ in 0..stores {
         s.mmio_write(ODSY_CMD_FIFO, 0, 8);
     }
-    assert_eq!(s.fifo.level(), stores);
+    // Credits count stores; the level counts words, two a doubleword.
+    assert_eq!(s.fifo.stores(), stores);
+    assert_eq!(s.fifo.level(), 2 * stores);
     assert_eq!(s.fifo.in_fifo(), ODSY_CFIFO_DEPTH);
     assert_eq!(pi.count("return"), ODSY_CFIFO_DEPTH as i64);
     assert_eq!(pi.count("owe"), (stores - ODSY_CFIFO_DEPTH) as i64);
@@ -181,7 +183,7 @@ fn a_counted_store_is_credited_as_it_enters_the_fifo() {
     assert!(pi.0.lock().iter().all(|c| c.1 == VPRO_WIDGET));
 
     // One store runs per slice: the next one moves up and is repaid.
-    s.work_step(&mut Budget::words(1));
+    s.work_step(&mut Budget::stores(1));
     assert_eq!(pi.count("repay"), 1);
     assert_eq!(pi.settled(), ODSY_CFIFO_DEPTH as i64 + 1);
 
@@ -267,7 +269,7 @@ fn the_credit_block_starves_a_widget_that_runs_out_of_credits() {
 }
 
 
-/// The low-water mark, in waiting stores.
+/// The model's low-water threshold, in waiting words (a model choice).
 const LOW_WATER_MARK: u32 = ODSY_CFIFO_LOW_WATER;
 const HOST_WRITE_BASE: u64 = 0xb70000;
 
@@ -292,10 +294,10 @@ fn push_fences(s: &mut Board) {
 
 /// Run one store, as a one-store slice on the board's thread would.
 fn step(s: &mut Board) {
-    let before = s.fifo.level();
+    let before = s.fifo.stores();
     assert!(before > 0, "nothing waits to be stepped");
-    s.work_step(&mut Budget::words(1));
-    assert_eq!(s.fifo.level(), before - 1);
+    s.work_step(&mut Budget::stores(1));
+    assert_eq!(s.fifo.stores(), before - 1);
 }
 
 /// Run everything that waits.
@@ -397,10 +399,81 @@ fn the_status_shows_waiting_stores_until_they_have_run() {
     assert_eq!(reg_read(&mut s, ODSY_STATUS0), 0x1003_0000);
 }
 
-/// The kernel's credit flow control clears low water, finds the FIFO above
-/// its mark, enables the source and sleeps until the interrupt. Low water
-/// is not raised while 16 or more stores wait, and is raised, with its
-/// interrupt, as the level falls below the mark while stores still wait.
+/// MODEL CONTRACT ONLY, no evidence for the hardware: the roles of `0x6b2`
+/// are unknown. The level counts the FIFO's 32-bit words (a model choice): a
+/// doubleword store fills two. The model reads status bit 15 set at or above
+/// the written `0x6b2`, and reaching it raises flags bit 25; with no `0x6b2`
+/// written it never reads set. A store that would overfill the model's
+/// 32,768-word FIFO is not queued: the storing caller runs the queue and then
+/// the store.
+#[test]
+fn the_level_counts_words_against_the_model_fifo_and_the_6b2_threshold() {
+    let (mut s, _, _) = queued_board();
+    let (high, flag) = (ODSY_STATUS0_FIFO_HIGH_WATER, ODSY_INTR_FIFO_HIGH_WATER);
+
+    s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    s.mmio_write(ODSY_CMD_FIFO, 0, 4);
+    assert_eq!((s.fifo.stores(), s.fifo.level()), (2, 3));
+    finish(&mut s);
+
+    // No threshold yet: a FIFO filled to the brim never reads high.
+    for _ in 0..ODSY_CFIFO_WORDS / 2 {
+        s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    }
+    assert_eq!(s.fifo.level(), ODSY_CFIFO_WORDS);
+    assert_eq!(reg_read(&mut s, ODSY_STATUS0) & high, 0);
+    // Full: the next store runs everything waiting, then itself.
+    s.mmio_write(ODSY_CMD_FIFO, 0, 4);
+    assert!(!s.work_pending());
+
+    // The 0x6b2 value the kernel writes, 576 words below the model's size.
+    cmd64(&mut s, 0x6b2, 32192);
+    finish(&mut s);
+    reg_write(&mut s, ODSY_INTR_CLEAR, ODSY_INTR_FIFO_HIGH_WATER);
+    for _ in 0..32190 / 2 {
+        s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    }
+    assert_eq!(reg_read(&mut s, ODSY_STATUS0) & high, 0);
+    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS) & flag, 0);
+    s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    assert_eq!(s.fifo.level(), 32192);
+    assert_eq!(reg_read(&mut s, ODSY_STATUS0) & high, high);
+    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS) & flag, flag);
+    step(&mut s);
+    assert_eq!(reg_read(&mut s, ODSY_STATUS0) & high, 0, "below the threshold again");
+    finish(&mut s);
+}
+
+/// MODEL CONTRACT ONLY, no evidence for the hardware: the roles of `0x6b2` and
+/// `0x6b3` are unknown. The model applies `0x6b2` to status bit 15 and only
+/// stores `0x6b3`. With `0x6b2` = 12 and `0x6b3` = 8, eight waiting words
+/// leave bit 15 clear; swapped, they set it. Flags bit 25 is covered by
+/// `the_level_counts_words_against_the_model_fifo_and_the_6b2_threshold`.
+///
+/// QEMU: command-fifo-high-mark-follows-6b2.
+#[test]
+fn the_threshold_follows_6b2() {
+    let (mut s, _, _) = queued_board();
+    let high = ODSY_STATUS0_FIFO_HIGH_WATER;
+
+    for (mark_6b2, word_6b3, expect) in [(12, 8, 0), (8, 12, high)] {
+        cmd64(&mut s, 0x6b1, 256);
+        cmd64(&mut s, 0x6b3, word_6b3);
+        cmd64(&mut s, 0x6b2, mark_6b2);
+        finish(&mut s);
+        for _ in 0..4 {
+            cmd64(&mut s, 0x6b0, 0);
+        }
+        assert_eq!(s.fifo.level(), 8);
+        assert_eq!(reg_read(&mut s, ODSY_STATUS0) & high, expect, "0x6b2 = {mark_6b2}, 0x6b3 = {word_6b3}");
+        finish(&mut s);
+    }
+}
+
+/// MODEL CONTRACT ONLY, no evidence for the hardware: the threshold and the
+/// edge are the model's choice. Low water is not raised while 16 or more
+/// stores wait, and is raised, with its interrupt, as the level falls below
+/// the threshold while stores still wait.
 ///
 /// QEMU: command-work-low-water-after-drain.
 #[test]
@@ -448,7 +521,7 @@ fn the_fifo_set_up_does_not_widen_the_credit_depth() {
     for _ in 0..72 {
         s.mmio_write(ODSY_CMD_FIFO, 0, 8);
     }
-    assert_eq!(s.fifo.level(), 72);
+    assert_eq!(s.fifo.stores(), 72);
     assert_eq!(pi.count("return"), ODSY_CFIFO_DEPTH as i64);
     finish(&mut s);
     assert_eq!(pi.settled(), 72);

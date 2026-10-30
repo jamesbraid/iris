@@ -112,8 +112,19 @@ pub const ODSY_FLCTL_CONFIG_RESET: u32 = 0x0001c000;
 pub const ODSY_STATUS0_FIFO_ENABLED: u32 = 0x10000000;
 pub const ODSY_STATUS0_FIFO_LOW_WATER: u32 = 0x00020000;
 pub const ODSY_STATUS0_FIFO_EMPTY: u32 = 0x00010000;
+pub const ODSY_STATUS0_FIFO_HIGH_WATER: u32 = 0x00008000;
 
-// The command FIFO's low-water mark, in stores
+// The command FIFO's low-water threshold, in 32-bit words: below it STATUS0
+// bit 17 reads set, and the level falling below it latches the low-water
+// flag. That bit 17 and flag 9 report a low-water level is INFERRED, and
+// their link to any 0x6bX value is UNKNOWN (datasheet, "Grades for withdrawn
+// claims", rows for 0x6b0-0x6b3 and for status bits 15 and 17).
+// MODEL CHOICE, not a hardware fact: the threshold is 16 words, independent
+// of the 0x6bX values the kernel stores (24,144 in 0x6b3). The edge (bit 17
+// set while the level is below it, the flag latched on falling below it) is a
+// model choice too. Tests, a model contract and no evidence for the hardware:
+// the_status_shows_waiting_stores_until_they_have_run and
+// low_water_is_raised_as_the_queue_falls_below_the_mark.
 pub const ODSY_CFIFO_LOW_WATER: u32 = 16;
 
 // 0x1074, flow-control attach.
@@ -142,11 +153,18 @@ pub const ODSY_FLCTL_INTR_TARGET_SHIFT: u32 = 17;
 // the_threshold_follows_6b2.
 pub const ODSY_REG_FIFO_SETUP_FIRST: u32 = 0x6b0;
 pub const ODSY_REG_FIFO_SETUP_LAST: u32 = 0x6b3;
+pub const ODSY_REG_FIFO_SETUP_6B2: u32 = 0x6b2;
 pub const ODSY_REG_FIFO_SETUP_7B5: u32 = 0x7b5;
 pub const ODSY_FIFO_SETUP_7B5_INDEX: usize = 4;
 
 // ODSY_INTR_FLAGS' low-water bit, the command-FIFO low-water interrupt (the kernel's flags decode names it as the low-water flag bit).
 pub const ODSY_INTR_FIFO_LOW_WATER: u32 = 0x00000200;
+// Flags bit 25, raised as the level rises to the threshold the high mark gives.
+// MODEL CHOICE: the flag's meaning rests on its name alone, and its link to
+// 0x6b2 and its threshold and edge are UNKNOWN (datasheet, "Grades for
+// withdrawn claims"); no driver enables it, and the kernel's fatal-flag mask
+// leaves it out.
+pub const ODSY_INTR_FIFO_HIGH_WATER: u32 = 0x02000000;
 
 // SGI's MicroLAN control register, the layout the Bridge, the XBridge and the Hub all carry
 pub const ODSY_NIC_LEVEL: u32 = 1 << 0;
@@ -990,10 +1008,24 @@ pub const ODSY_F32_SCALE_8: u32 = 0x3b808081;
 pub const ODSY_F32_SCALE_16: u32 = 0x37800080;
 pub const ODSY_F32_SCALE_32: u32 = 0x2f800005;
 
-// Stores waiting behind work before the next one finishes the work.
+// The host ring under the command FIFO, in entries (fifo.rs). Deeper than
+// the board's FIFO, so it never fills.
 pub const ODSY_WORK_QUEUE_MAX: u32 = 65536;
 
-// The command FIFO's depth, in stores.
+// The command FIFO's size in 32-bit words that the model clamps the level to
+// and, with IRIS_VPRO_FIFO=shallow, refuses stores past. MODEL CHOICE: the
+// FIFO's depth, in any unit, and the figure 32,768 are UNKNOWN (datasheet,
+// "Grades for withdrawn claims"; no object names a FIFO size). The model
+// keeps this figure whatever the stored 0x6bX values say, so the level the
+// guest reads never exceeds it, which is a limitation: a real FIFO may be
+// deeper or shallower. Test, a model contract:
+// the_fifo_size_ignores_the_set_up_words.
+pub const ODSY_CFIFO_WORDS: u32 = 32768;
+
+// The waiting stores whose credits have been returned, in stores. MODEL
+// CHOICE: the FIFO's depth is UNKNOWN (see ODSY_CFIFO_WORDS) and the model
+// keeps 64 stores whatever the stored 0x6bX values say (fifo.rs). Test, a
+// model contract: the_fifo_set_up_does_not_widen_the_credit_depth.
 pub const ODSY_CFIFO_DEPTH: u32 = 64;
 
 // Board-to-host and sentinel reports, each made once (dma_read_reported).
