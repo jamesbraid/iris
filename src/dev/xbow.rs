@@ -97,6 +97,11 @@ const CONTROL_CONDITIONS: u32 = STATUS_ACCESS_ERROR | STATUS_XTALK_ERROR;
 const PACKET_TIMEOUT_MASK: u32 = 0x000f_ffff;
 const INT_UPPER_MASK: u32 = 0xff07_ffff;
 const INT_UPPER_TARGET_HIGH: u32 = 1 << 19;
+/// Address bits 47:32 of the interrupt destination; the lower register
+/// holds bits 31:0.
+const INT_UPPER_ADDRESS: u32 = 0xffff;
+/// Where in HEART's widget space an interrupt packet sets or clears a bit.
+const HEART_INT_PACKET: u64 = 0x80;
 const LLP_CONTROL_MASK: u32 = 0x03ff_ffff;
 const LLP_CONTROL_RESET: u32 = 0x03ff_1810;
 const ARB_RELOAD_MASK: u32 = 0x3f;
@@ -404,8 +409,7 @@ impl Xbow {
 
     /// Recompute the request bits and, when the summary changes, queue widget
     /// 0's interrupt packet: one assertion outstanding at a time, the
-    /// deassertion once every request is acknowledged. A packet to anything
-    /// but HEART goes nowhere on this machine.
+    /// deassertion once every request is acknowledged.
     fn update_interrupt(&self, r: &mut Regs, out: &mut Out) {
         for link in 0..LINKS {
             if Self::link_requesting(r, link) {
@@ -421,13 +425,34 @@ impl Xbow {
         if pending == r.interrupt_asserted {
             return;
         }
-        let target = ((r.int_upper >> 16) & 0xf) as u8;
-        let vector = (r.int_upper >> 24) as u8;
-        if target != WIDGET_HEART || !self.carries(target) || self.heart.get().is_none() {
-            return;
+        if self.send(r, pending, out) {
+            r.interrupt_asserted = pending;
         }
-        out.packets.push((vector, pending));
-        r.interrupt_asserted = pending;
+    }
+
+    /// Widget 0's interrupt packet: one doubleword write of the vector, bit
+    /// 8 set to raise it, to the 48-bit address the destination pair names
+    /// in the target widget's own space. Not sent when the target's link
+    /// carries nothing. Once sent it counts as sent whatever the target
+    /// makes of it: HEART takes it only at its interrupt address (0x80) and
+    /// for vectors 0 to 63, and iris carries no packet into any other
+    /// widget. The target is never below 8, since its bit 19 is fixed.
+    fn send(&self, r: &Regs, raise: bool, out: &mut Out) -> bool {
+        let vector = (r.int_upper >> 24) as u8;
+        let target = ((r.int_upper >> 16) & 0xf) as u8;
+        let address = ((r.int_upper & INT_UPPER_ADDRESS) as u64) << 32 | r.int_lower as u64;
+        if !self.carries(target) {
+            crate::dlog!(LogModule::Xbow, "xbow: widget {target} is not reachable, so its interrupt packet goes nowhere");
+            return false;
+        }
+        if target != WIDGET_HEART {
+            crate::dlog!(LogModule::Xbow, "xbow: interrupt packet to widget {target} at {address:#x} is not carried; iris delivers packets to HEART only");
+        } else if address != HEART_INT_PACKET || vector >= 64 {
+            crate::dlog!(LogModule::Xbow, "xbow: HEART refuses an interrupt packet at {address:#x} for vector {vector}");
+        } else if self.heart.get().is_some() {
+            out.packets.push((vector, raise));
+        }
+        true
     }
 
     /// A widget 0 access error. A processor access carries no command word
