@@ -345,6 +345,8 @@ pub struct Board {
     pub gl_clip_eye: [u32; (SGI_GL_CLIP_PLANES * 4) as usize],
     pub gl_lit: bool,
     pub gl_local_viewer: bool,
+    /// The geometry program renormalises transformed normals.
+    pub gl_normalize: bool,
     pub gl_colour_overridden: bool,
     pub gl_program_logged: [u32; (SGI_ODYSSEY_GL_PROGRAM_REPORTS * 3) as usize],
     pub gl_program_logged_count: u32,
@@ -635,6 +637,7 @@ impl Default for Board {
             gl_clip_eye: [0; (SGI_GL_CLIP_PLANES * 4) as usize],
             gl_lit: false,
             gl_local_viewer: false,
+            gl_normalize: false,
             gl_colour_overridden: false,
             gl_program_logged: [0; (SGI_ODYSSEY_GL_PROGRAM_REPORTS * 3) as usize],
             gl_program_logged_count: 0,
@@ -1049,6 +1052,7 @@ impl Board {
         }
         self.gl_lit = false;
         self.gl_local_viewer = false;
+        self.gl_normalize = false;
         self.gl_colour_overridden = false;
         self.gl_program_logged_count = 0;
         self.gl_two_sided_logged = false;

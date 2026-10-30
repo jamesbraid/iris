@@ -10,7 +10,7 @@
 
 use super::*;
 
-use crate::dev::gl::math::IDENT;
+use crate::dev::gl::math::{xform, IDENT};
 
 /// A raster operation: pixel work on a head's planes that is not a GL
 /// primitive, queued beside draws in the order the head received it.
@@ -1304,16 +1304,7 @@ impl GlContext {
     /// texture matrix, before clipping (OpenGL 1.2.1, 2.10.2). The board
     /// generates none of its own.
     pub fn texture_coord(&self, obj: &[f32; 4], pos: &[f32; 4], n: &[f32; 3], out: &mut [f32; 4]) {
-        let strq = self.cur_texcoord;
-
-        for row in 0..4 {
-            let mut value = 0.0f64;
-
-            for k in 0..4 {
-                value += (self.texture[k * 4 + row] as f64) * strq[k] as f64;
-            }
-            out[row] = value as f32;
-        }
+        *out = xform(&self.texture, self.cur_texcoord);
     }
 
     /// Hold a vertex in slot n of the three a context keeps.

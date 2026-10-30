@@ -6,12 +6,16 @@
 
 use super::*;
 
+use crate::dev::gl::light::Lighting;
+
 /// What a program asks for, as far as the model recognises it.
 #[derive(Clone, Copy, Default)]
 pub struct Program {
     pub known: bool,
     pub lit: bool,
     pub local_viewer: bool,
+    /// The program renormalises transformed normals (GL_NORMALIZE).
+    pub normalize: bool,
     pub two_sided: bool,
     pub texgen: bool,
     pub clip: bool,
@@ -77,6 +81,9 @@ impl Board {
                     n += 4;
                     continue;
                 }
+            }
+            if a == ODSY_UCODE_NORMALIZE {
+                p.normalize = true;
             }
             if ucode_is_texgen(a) {
                 p.texgen = true;
@@ -157,6 +164,9 @@ pub static UCODE_LIT_RECORDS: [[u32; 3]; 6] = [
     [0x657, 0x66e, 0x684], // record 10: two lights, GL_NORMALIZE
     [0x699, 0x6b4, 0x6ce], // record 11: four lights, texgen
 ];
+
+/// The lit records above that renormalise normals (GL_NORMALIZE).
+pub static UCODE_NORMALIZE_RECORDS: [[u32; 3]; 2] = [[0x5f0, 0x605, 0x619], [0x657, 0x66e, 0x684]];
 
 pub fn gl_lit_record(e: &[u32; 3]) -> bool {
     for r in UCODE_LIT_RECORDS.iter() {
@@ -295,6 +305,7 @@ impl Board {
             self.gl_walk_list(k, false, &mut p);
             p.known = true;
             p.lit = true;
+            p.normalize |= UCODE_NORMALIZE_RECORDS.contains(&r);
         } else if r[1] == ODSY_UCODE_END && r[2] == ODSY_UCODE_END {
             match r[0] {
                 ODSY_UCODE_HEAD_LOCAL_DIR | ODSY_UCODE_HEAD_LOCAL_POS => {
@@ -361,6 +372,7 @@ impl Board {
         self.gl_linear_texgen = if p.known { p.linear_texgen } else { 0 };
         self.gl_lit = p.lit;
         self.gl_local_viewer = p.local_viewer;
+        self.gl_normalize = p.normalize;
     }
 
     /// A colour-mode word (ODSY_PROG_COLOUR_MODE). Only the captured pairs are
@@ -452,16 +464,6 @@ pub fn f32_bits(f: f32) -> u32 {
     f.to_bits()
 }
 
-pub fn normalize3(v: &mut [f64; 3]) {
-    let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-
-    if n > 0.0 {
-        v[0] /= n;
-        v[1] /= n;
-        v[2] /= n;
-    }
-}
-
 // MAX/MIN as the draw maths needs them: the first operand wins ties and NaN comparisons.
 fn cmax(a: f64, b: f64) -> f64 {
     if a > b { a } else { b }
@@ -472,134 +474,113 @@ fn cmin(a: f64, b: f64) -> f64 {
 }
 
 impl Board {
-    /// OpenGL 1.2.1's lighting equation (section 2.13.1, equation 2.5) at one
-    /// vertex, front material, from the kept light, material and matrix words.
-    /// Under colour material (section 2.13.3) the current colour replaces each
-    /// front material colour the class 0x35 word names (ODSY_PROG_COLOUR_MATERIAL);
-    /// the back half of that word is kept but, like the back material, unused.
-    /// APPROXIMATION: the board's geometry engine computes this in microcode the
-    /// model does not run; the equation is the one that reproduces both lighting
-    /// captures offline. The eye position is the model-view (slot 0x24) applied to
-    /// the vertex, the normal the upper 3x3 of slot 0x34 applied to the current
-    /// normal and normalised. A light block is directional when its precomputed
-    /// half vector (floats 3-5) is not zero, positional otherwise (INFERRED from
-    /// the values; a directional light straight down -z would have a zero half
-    /// vector and is then read as positional, which is unknown). A light with zero
-    /// ambient, diffuse and specular colour -- every disabled one, as the library
-    /// sends it -- adds nothing and is skipped.
+    /// OpenGL's lighting equation (section 2.13.1) at one vertex, front
+    /// material, from the kept light, material and matrix words, evaluated by
+    /// dev::gl's lighting core. Under colour material (section 2.13.3) the
+    /// current colour replaces each front material colour the class 0x35 word
+    /// names (ODSY_PROG_COLOUR_MATERIAL); the back half of that word is kept
+    /// but, like the back material, unused.
     ///
-    /// Two deviations from the GL text, neither exercised by a capture. The
-    /// transformed normal is always normalised, so programs with the plain
-    /// normal transform (0x2b6) and with GL_NORMALIZE (0x29c) draw alike, where
-    /// GL without GL_NORMALIZE under a scaling model-view does not renormalise
-    /// (INFERRED to be harmless: the captures' normal matrix is the identity).
-    /// A zero shininess gives a specular factor of 1 at any n.h, by
-    /// pow(0, 0) = 1, a case the GL text leaves open.
+    /// APPROXIMATION: the board's geometry engine computes this in microcode
+    /// the model does not run, with a table function for the specular term
+    /// whose exact falloff is unknown; GL's equation reproduces both lighting
+    /// captures. The eye position is the model-view (slot 0x24) applied to the
+    /// vertex, the normal the upper 3x3 of slot 0x34 applied to the current
+    /// normal, renormalised only when the program is one of the GL_NORMALIZE
+    /// ones. The library precomputes a half vector (floats 3-5) for each
+    /// infinite light and leaves it zero for a positional one, so a light
+    /// block is directional when its half vector is not zero (INFERRED; a
+    /// directional light straight down -z would have a zero half vector and
+    /// is then read as positional). A light with zero ambient, diffuse and
+    /// specular colour, every disabled one as the library sends it, adds
+    /// nothing and is left out. Shininess arrives as its square root.
     pub fn gl_light(&mut self, obj: &[f64; 4], out: &mut [f32; 4]) {
-        let mut eye = [0f64; 3];
-        let mut n = [0f64; 3];
-        let mut c = [0f64; 3];
-        let mut ma = [0f64; 4];
-        let mut md = [0f64; 4];
-        let mut ms = [0f64; 4];
-        let mut me = [0f64; 4];
-        let mut ga = [0f64; 4];
-
+        let f = |w: u32| f32::from_bits(w);
+        let obj = [obj[0] as f32, obj[1] as f32, obj[2] as f32, obj[3] as f32];
+        // The model-view's first three rows; the board ignores w.
+        let mv = &self.gl_modelview;
+        let mut eye = [0f32; 4];
         for r in 0..3usize {
-            eye[r] = 0.0;
-            for k in 0..4usize {
-                eye[r] += odyssey_f32(self.gl_modelview[r * 4 + k]) * obj[k];
-            }
-            n[r] = 0.0;
-            for k in 0..3usize {
-                n[r] += odyssey_f32(self.gl_normal_matrix[r * 4 + k]) * odyssey_f32(self.gl_normal[k]);
-            }
+            eye[r] = (0..4usize).map(|k| f(mv[r * 4 + k]) * obj[k]).sum();
         }
-        normalize3(&mut n);
-        for k in 0..4usize {
-            let colour = odyssey_f32(self.gl_colour[k]);
-            let cm = self.gl_colour_material;
+        eye[3] = 1.0;
 
-            ma[k] = if cm & ODSY_COLOUR_MATERIAL_AMBIENT != 0 { colour } else { odyssey_f32(self.gl_material[k]) };
-            md[k] = if cm & ODSY_COLOUR_MATERIAL_DIFFUSE != 0 { colour } else { odyssey_f32(self.gl_material[4 + k]) };
-            ms[k] = if cm & ODSY_COLOUR_MATERIAL_SPECULAR != 0 { colour } else { odyssey_f32(self.gl_material[8 + k]) };
-            me[k] = if cm & ODSY_COLOUR_MATERIAL_EMISSION != 0 { colour } else { odyssey_f32(self.gl_material[12 + k]) };
-            ga[k] = odyssey_f32(self.gl_light_colour[ODSY_GL_LIGHT_MODEL_AMBIENT as usize * 4 + k]);
+        // SAFETY: Lighting is plain data, valid when zeroed.
+        let mut lt: Lighting = unsafe { std::mem::zeroed() };
+        lt.init();
+        lt.on = 1;
+        lt.local_viewer = self.gl_local_viewer as u32;
+        lt.normalize = self.gl_normalize as u32;
+        for r in 0..3usize {
+            for c in 0..3usize {
+                lt.normal_matrix[c * 3 + r] = f(self.gl_normal_matrix[r * 4 + c]);
+            }
         }
-        let mut shin = odyssey_f32(self.gl_shininess_sqrt);
-        shin *= shin;
-        for k in 0..3usize {
-            c[k] = me[k] + ga[k] * ma[k];
-        }
+        let colour = self.gl_colour.map(f);
+        let cm = self.gl_colour_material;
+        let pick = |bit: u32, base: usize| -> [f32; 4] {
+            if cm & bit != 0 { colour } else { std::array::from_fn(|k| f(self.gl_material[base + k])) }
+        };
+        let (ma, md, ms, me) = (
+            pick(ODSY_COLOUR_MATERIAL_AMBIENT, 0),
+            pick(ODSY_COLOUR_MATERIAL_DIFFUSE, 4),
+            pick(ODSY_COLOUR_MATERIAL_SPECULAR, 8),
+            pick(ODSY_COLOUR_MATERIAL_EMISSION, 12),
+        );
+        let m = &mut lt.mat[0];
+        m.ambient = [ma[0], ma[1], ma[2]];
+        m.diffuse = md;
+        m.specular = [ms[0], ms[1], ms[2]];
+        m.emission = [me[0], me[1], me[2]];
+        let shininess = f(self.gl_shininess_sqrt);
+        m.shininess = shininess * shininess;
+        let ambient = ODSY_GL_LIGHT_MODEL_AMBIENT as usize * 4;
+        lt.amb_sum = std::array::from_fn(|k| f(self.gl_light_colour[ambient + k]));
+
+        let mut last = -1i32;
         for i in 0..SGI_ODYSSEY_GL_LIGHTS as usize {
             let blk = &self.gl_light_vec[i * ODSY_GL_LIGHT_VEC_FLOATS as usize..];
             let col = &self.gl_light_colour[i * 3 * 4..];
-            let mut la = [0f64; 3];
-            let mut ld = [0f64; 3];
-            let mut ls = [0f64; 3];
-            let mut l = [0f64; 3];
-            let mut h = [0f64; 3];
-            let mut atten = 1f64;
-            let mut spot = 1f64;
-            let mut any = false;
-
-            for k in 0..3usize {
-                la[k] = odyssey_f32(col[k]);
-                ld[k] = odyssey_f32(col[4 + k]);
-                ls[k] = odyssey_f32(col[8 + k]);
-                any |= la[k] != 0.0 || ld[k] != 0.0 || ls[k] != 0.0;
-            }
-            if !any {
+            let rgb = |base: usize| -> [f32; 3] { std::array::from_fn(|k| f(col[base + k])) };
+            let (la, ld, ls) = (rgb(0), rgb(4), rgb(8));
+            if la.iter().chain(&ld).chain(&ls).all(|&v| v == 0.0) {
                 continue;
             }
-            if odyssey_f32(blk[ODSY_LIGHT_HALF]) != 0.0 || odyssey_f32(blk[ODSY_LIGHT_HALF + 1]) != 0.0 || odyssey_f32(blk[ODSY_LIGHT_HALF + 2]) != 0.0 {
-                for k in 0..3usize {
-                    l[k] = odyssey_f32(blk[ODSY_LIGHT_POS + k]);
-                }
-                normalize3(&mut l);
+            let l = &mut lt.lights[i];
+            l.ambient = la;
+            l.diffuse = ld;
+            l.specular = ls;
+            let pos: [f32; 3] = std::array::from_fn(|k| f(blk[ODSY_LIGHT_POS + k]));
+            let directional = (0..3).any(|k| f(blk[ODSY_LIGHT_HALF + k]) != 0.0);
+            if directional {
+                l.pos = [pos[0], pos[1], pos[2], 0.0];
             } else {
-                for k in 0..3usize {
-                    l[k] = odyssey_f32(blk[ODSY_LIGHT_POS + k]) - eye[k];
-                }
-                let d = (l[0] * l[0] + l[1] * l[1] + l[2] * l[2]).sqrt();
-                normalize3(&mut l);
-                let denom = odyssey_f32(blk[ODSY_LIGHT_ATTEN]) + odyssey_f32(blk[ODSY_LIGHT_ATTEN + 1]) * d + odyssey_f32(blk[ODSY_LIGHT_ATTEN + 2]) * d * d;
-                atten = if denom > 0.0 { 1.0 / denom } else { 1.0 };
-                let cut = -odyssey_f32(blk[ODSY_LIGHT_SPOT_COS]);
+                l.pos = [pos[0], pos[1], pos[2], 1.0];
+                // The board's order is constant, linear, quadratic.
+                l.atten = [f(blk[ODSY_LIGHT_ATTEN + 1]), f(blk[ODSY_LIGHT_ATTEN + 2]), f(blk[ODSY_LIGHT_ATTEN])];
+                // The board keeps minus the cutoff cosine, minus the spot
+                // direction and minus the exponent.
+                let cut = -f(blk[ODSY_LIGHT_SPOT_COS]);
                 if cut > -1.0 {
-                    // The spot direction is minus floats 10-12.
-                    let mut cs = 0f64;
-                    for k in 0..3usize {
-                        cs += l[k] * odyssey_f32(blk[ODSY_LIGHT_SPOT_DIR + k]);
-                    }
-                    spot = if cs >= cut { cs.powf(-odyssey_f32(blk[ODSY_LIGHT_SPOT_EXP])) } else { 0.0 };
+                    l.spot_on = 1;
+                    l.spot_cos_cutoff = cut;
+                    l.spot_dir = std::array::from_fn(|k| -f(blk[ODSY_LIGHT_SPOT_DIR + k]));
+                    l.spot_exp = -f(blk[ODSY_LIGHT_SPOT_EXP]);
                 }
             }
-            let nl = cmax(n[0] * l[0] + n[1] * l[1] + n[2] * l[2], 0.0);
-            for k in 0..3usize {
-                h[k] = l[k];
-            }
-            if self.gl_local_viewer {
-                let mut v = [-eye[0], -eye[1], -eye[2]];
-
-                normalize3(&mut v);
-                for k in 0..3usize {
-                    h[k] += v[k];
-                }
+            if last < 0 {
+                lt.head = i as i32;
             } else {
-                h[2] += 1.0;
+                lt.lights[last as usize].next = i as i32;
             }
-            normalize3(&mut h);
-            let nh = cmax(n[0] * h[0] + n[1] * h[1] + n[2] * h[2], 0.0);
-            let fs = if nl > 0.0 { nh.powf(shin) } else { 0.0 };
-            for k in 0..3usize {
-                c[k] += atten * spot * (la[k] * ma[k] + nl * ld[k] * md[k] + fs * ls[k] * ms[k]);
-            }
+            last = i as i32;
+            lt.count += 1;
         }
-        for k in 0..3usize {
-            out[k] = cmin(cmax(c[k], 0.0), 1.0) as f32;
-        }
-        out[3] = md[3] as f32;
+        let normal = self.gl_normal.map(f);
+        let (front, _) = lt.light_vertex(eye, normal, colour);
+        *out = front;
+        // The board passes the diffuse alpha through unclamped.
+        out[3] = md[3];
     }
 
     /// The colour a GL vertex takes, handed to the shared context just before
