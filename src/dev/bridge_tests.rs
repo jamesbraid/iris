@@ -675,7 +675,7 @@ fn a_dropped_read_is_recorded_when_enabled() {
     }
     // A widget with a live link is peer DMA, refused without a timeout.
     r.set(reg::INT_RESET, 0x7f);
-    r.bridge.set_link_alive(Box::new(|w| w == WIDGET_HEART || w == 10));
+    r.bridge.set_route(Box::new(|w, _| w == WIDGET_HEART || w == 10));
     assert_eq!(c.dma().dma_read((10u64 << 60) | 0x3000, &mut b), PciDmaStatus::MasterAbort);
     assert_eq!(r.get(reg::INT_STATUS), 0);
     assert_eq!(c.dma().dma_read((11u64 << 60) | 0x3000, &mut b), PciDmaStatus::MasterAbort);
@@ -992,7 +992,7 @@ fn the_64_bit_direct_window_refuses_widget_zero_and_other_widgets() {
     assert_eq!(c.dma().dma_write(0x1000, &[1]), PciDmaStatus::MasterAbort);
     assert_eq!(c.dma().dma_write(0x1_0000_1000, &[1]), PciDmaStatus::MasterAbort, "widget 0");
     assert_eq!(c.dma().dma_write((9u64 << 60) | 0x1000, &[1]), PciDmaStatus::MasterAbort, "not HEART");
-    r.bridge.set_link_alive(Box::new(|w| w == WIDGET_HEART || w == 9));
+    r.bridge.set_route(Box::new(|w, _| w == WIDGET_HEART || w == 9));
     let mut b = [0xffu8; 2];
     assert_eq!(c.dma().dma_read((9u64 << 60) | 0x1000, &mut b), PciDmaStatus::MasterAbort);
     assert_eq!(b, [0, 0]);

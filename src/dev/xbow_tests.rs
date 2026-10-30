@@ -481,6 +481,139 @@ fn heart_takes_widget_0_s_packet_only_at_its_interrupt_address() {
     assert_eq!(heart.take(), [], "an assertion is already outstanding");
 }
 
+/// A request goes to any live link but its own, and enters only by a live
+/// link; a link taken down blocks both directions until it is back. From
+/// QEMU's sn0-xbow-test routes-by-destination-widget, no-route-to-self and
+/// link-failure-blocks-both-directions.
+#[test]
+fn a_port_reaches_every_live_link_but_its_own() {
+    let x = Xbow::new(4, CORE | 1 << GFX);
+    assert!(x.route(BRIDGE, HEART, 0x40) && x.route(BRIDGE, GFX, 0x40) && x.route(HEART, BRIDGE, 0x40));
+    assert!(!x.route(BRIDGE, BRIDGE, 0x40), "no route to itself");
+    assert!(!x.route(BRIDGE, EMPTY, 0x40), "an empty port");
+    x.set_alive(CORE).unwrap();
+    assert!(!x.route(BRIDGE, GFX, 0x40), "a dead destination");
+    assert!(!x.route(GFX, HEART, 0x40), "a dead source");
+    x.set_alive(CORE | 1 << GFX).unwrap();
+    assert!(x.route(BRIDGE, GFX, 0x40) && x.route(GFX, HEART, 0x40));
+    assert_eq!(rd(&x, 0x08), 0, "none of that is an error");
+}
+
+/// Widgets 1 to 7 name no destination: a request for one is an error on
+/// the port it arrived by, bit 17, and a repeat while it stands sets bit
+/// 18; the link's clearing alias returns both and clears them. A legal
+/// widget that is down, empty or the port's own is no error at all. From
+/// QEMU's sn0-xbow-test illegal-destination and
+/// unavailable-destination-is-not-illegal.
+#[test]
+fn an_illegal_destination_is_an_error_on_the_receiving_port() {
+    let x = Xbow::new(4, CORE | 1 << GFX);
+    assert!(!x.route(HEART, 3, 0x40));
+    assert_eq!(rd(&x, link(HEART, 0x10)), 1 << 31 | 1 << 17);
+    assert_eq!(rd(&x, link(BRIDGE, 0x10)), 1 << 31, "not the other ports'");
+    assert!(!x.route(HEART, 3, 0x40));
+    assert_eq!(rd(&x, link(HEART, 0x28)), 1 << 31 | 1 << 18 | 1 << 17);
+    assert_eq!(rd(&x, link(HEART, 0x10)), 1 << 31);
+
+    assert!(!x.route(BRIDGE, 3, 0x40));
+    assert_eq!(rd(&x, link(BRIDGE, 0x10)), 1 << 31 | 1 << 17);
+    assert_eq!(rd(&x, link(HEART, 0x10)), 1 << 31);
+    rd(&x, link(BRIDGE, 0x28));
+    for w in 1..=7 {
+        assert!(!x.route(BRIDGE, w, w as u64));
+        assert_eq!(rd(&x, link(BRIDGE, 0x28)), 1 << 31 | 1 << 17, "widget {w}");
+    }
+    assert!(x.route(BRIDGE, 0, 0x04), "widget 0 is a destination");
+
+    x.set_alive(CORE).unwrap();
+    for w in [BRIDGE, GFX, EMPTY] {
+        assert!(!x.route(BRIDGE, w, 0x40));
+    }
+    assert_eq!(rd(&x, link(BRIDGE, 0x10)), 1 << 31, "dropped, not illegal");
+}
+
+/// The first illegal destination fills the error command word, with the
+/// widget named and the widget on the receiving port, and the address
+/// registers with the offset it carried; a later one leaves them, and
+/// writing the command word clears all three and rearms the capture. From
+/// QEMU's sn0-xbow-test illegal-destination-captures-command-and-address.
+#[test]
+fn the_first_illegal_destination_is_captured_until_software_rearms() {
+    let x = octane();
+    x.route(HEART, 3, 0x40);
+    assert_eq!(rd(&x, 0x40), 3 << 28 | 8 << 24);
+    assert_eq!((rd(&x, 0x10), rd(&x, 0x18)), (0, 0x40));
+    x.route(BRIDGE, 3, 0x48);
+    assert_eq!((rd(&x, 0x40), rd(&x, 0x18)), (3 << 28 | 8 << 24, 0x40), "the first stays");
+    wr(&x, 0x40, 0xffff_ffff);
+    assert_eq!((rd(&x, 0x40), rd(&x, 0x10), rd(&x, 0x18)), (0, 0, 0));
+    x.route(BRIDGE, 7, 0x1_00ff_fff8);
+    assert_eq!(rd(&x, 0x40), 7 << 28 | 15 << 24);
+    assert_eq!((rd(&x, 0x10), rd(&x, 0x18)), (1, 0x00ff_fff8));
+}
+
+/// The error asks for an interrupt only while the port's control enables
+/// it, and the link's clearing alias acknowledges the error and the
+/// request together. A machine reset clears a standing one, request and
+/// all. From QEMU's sn0-xbow-test illegal-destination-interrupt and
+/// reset-clears-a-latched-illegal-destination.
+#[test]
+fn an_illegal_destination_interrupts_when_its_port_enables_it() {
+    let x = octane();
+    let heart = interrupt_to_heart(&x, 0x2d);
+    x.route(BRIDGE, 3, 0);
+    assert_eq!(rd(&x, link(BRIDGE, 0x10)), 1 << 31 | 1 << 17);
+    assert_eq!(rd(&x, 0x08), 0);
+    assert_eq!(heart.take(), []);
+    rd(&x, link(BRIDGE, 0x28));
+
+    wr(&x, link(BRIDGE, 0x08), 2 << 18 | 1 << 17);
+    x.route(BRIDGE, 3, 0);
+    assert_eq!(rd(&x, 0x08), 1 << 31);
+    assert_eq!(heart.take(), [(0x2d, true)]);
+    rd(&x, link(BRIDGE, 0x28));
+    assert_eq!(rd(&x, link(BRIDGE, 0x10)), 1 << 31);
+    assert_eq!(rd(&x, 0x08), 0);
+    assert_eq!(heart.take(), [(0x2d, false)]);
+
+    x.route(BRIDGE, 3, 0);
+    x.route(BRIDGE, 3, 0);
+    assert_eq!(rd(&x, link(BRIDGE, 0x10)), 1 << 31 | 1 << 18 | 1 << 17);
+    Resettable::power_on(&x);
+    assert_eq!(rd(&x, link(BRIDGE, 0x10)), 1 << 31);
+    assert_eq!(rd(&x, 0x08), 0);
+    assert_eq!(rd(&x, link(BRIDGE, 0x08)), 2 << 18);
+}
+
+/// The processor's windows for widgets 1 to 7: every access, at every
+/// width, is one report on HEART's port and a bus error. From QEMU's
+/// sn0-xbow-test illegal-destination-one-report-per-access.
+#[test]
+fn each_processor_access_to_an_illegal_widget_is_one_report() {
+    let x = Arc::new(octane());
+    let window = IllegalDestinations::new(x.clone(), HEART);
+    let at = 0x1000_0000 + (3 << 24) + 0x33;
+    let once = |what: &str| assert_eq!(rd(&x, link(HEART, 0x28)), 1 << 31 | 1 << 17, "{what}");
+    assert_eq!(window.write8(at, 0x11), BUS_ERR);
+    once("byte write");
+    assert!(!window.read8(at).is_ok());
+    once("byte read");
+    assert_eq!(window.write16(at, 0x2233), BUS_ERR);
+    once("halfword write");
+    assert!(!window.read16(at).is_ok());
+    once("halfword read");
+    assert_eq!(window.write32(at, 0x4455_6677), BUS_ERR);
+    once("word write");
+    assert!(!window.read32(at).is_ok());
+    once("word read");
+    assert_eq!(window.write64(at, 0x8899_aabb_ccdd_eeff), BUS_ERR);
+    once("doubleword write");
+    assert!(!window.read64(at).is_ok());
+    once("doubleword read");
+    assert_eq!(rd(&x, 0x40), 3 << 28 | 8 << 24);
+    assert_eq!(rd(&x, 0x18), 0x33);
+}
+
 /// A machine reset puts back the registers and the links fitted, and sends
 /// no packet for an assertion it drops. From QEMU's sn0-xbow-test
 /// reset-restores-startup-health.

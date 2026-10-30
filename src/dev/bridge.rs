@@ -395,8 +395,9 @@ pub struct Bridge {
     /// The one-wire net behind the NIC register; none fitted reads as an
     /// empty bus.
     microlan: Mutex<Option<w1::Bus>>,
-    /// Whether the Crossbow has a live link to a widget; default only HEART.
-    link_alive: RwLock<Box<dyn Fn(u8) -> bool + Send + Sync>>,
+    /// Whether the Crossbow carries a request to a widget at an offset in
+    /// its space; default only HEART.
+    route: RwLock<Box<dyn Fn(u8, u64) -> bool + Send + Sync>>,
     /// Where the runs of the device windows a BAR decodes whole go (the
     /// machine maps them over this widget's window), and the table entries
     /// made for them, so one configuration maps to one entry.
@@ -509,7 +510,7 @@ impl Bridge {
             flash: RwLock::new(Default::default()),
             flash_strap: AtomicBool::new(false),
             microlan: Mutex::new(None),
-            link_alive: RwLock::new(Box::new(|w| w == WIDGET_HEART)),
+            route: RwLock::new(Box::new(|w, _| w == WIDGET_HEART)),
             bar_sink: RwLock::new(None),
             bar_entries: Mutex::new(Default::default()),
         })
@@ -635,11 +636,13 @@ impl Bridge {
         st.set_r(reg::STATUS, if select1 { s | STATUS_FLASH_SELECT } else { s & !STATUS_FLASH_SELECT });
     }
 
-    /// Tell the Bridge which widgets the Crossbow has a live link to. A DMA
-    /// request to any other widget is dropped by the Crossbow, which the
-    /// Bridge's request timer reports. The default is HEART alone.
-    pub fn set_link_alive(&self, alive: Box<dyn Fn(u8) -> bool + Send + Sync>) {
-        *self.link_alive.write() = alive;
+    /// Tell the Bridge which requests the Crossbow carries: `route(widget,
+    /// offset)` for a DMA request to `offset` in `widget`'s space. A request
+    /// it refuses is dropped, which the Bridge's request timer reports; the
+    /// Crossbow records one naming an illegal widget on this port. The
+    /// default carries to HEART alone.
+    pub fn set_route(&self, route: Box<dyn Fn(u8, u64) -> bool + Send + Sync>) {
+        *self.route.write() = route;
     }
 
     /// Install the one-wire net behind the NIC register: the board's
@@ -1260,17 +1263,17 @@ impl Bridge {
                 self.translate(&st, slot, a)
             };
             // Only HEART is memory. The Crossbow drops a request to a widget
-            // it has no live link to (1 to 7 are illegal, 15 is this Bridge's
-            // own port), and the Bridge's request timer reports a dropped
-            // read. A refused translation, or a read that reaches HEART and
+            // it has no live link to (1 to 7 are illegal, an error it records
+            // on this port; 15 is this Bridge's own), and the Bridge's
+            // request timer reports a dropped read. A refused translation, or a read that reaches HEART and
             // finds no memory, is a silent master abort.
             let mut dropped = false;
             let good = match target {
                 None => false,
-                Some((_, _, w)) if w != WIDGET_HEART => {
+                Some((xio, _, w)) if w != WIDGET_HEART => {
                     // Approximation: QEMU routes peer DMA to a fitted widget;
                     // no supported Octane guest is known to need it.
-                    dropped = w == WIDGET_BRIDGE || !(self.link_alive.read())(w);
+                    dropped = w == WIDGET_BRIDGE || !(self.route.read())(w, xio);
                     false
                 }
                 Some((xio, p, _)) => match &mut buf {

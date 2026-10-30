@@ -30,7 +30,7 @@ use crate::dev::rad1::Rad1;
 use crate::dev::sflash::{CfiFlash, FLASH_SIZE};
 use crate::dev::w1;
 use crate::dev::w1::sgi::{board_record_part, BoardRecord};
-use crate::dev::xbow::Xbow;
+use crate::dev::xbow::{IllegalDestinations, Xbow};
 use crate::hptimer::TimerManager;
 use crate::ip30::{
     widget_small_base, CachedFlashLines, Ip30Bus, LAST_PC, WIDGET_BRIDGE, WIDGET_HEART, WIDGET_SMALL_SIZE,
@@ -157,9 +157,10 @@ impl OctaneMachine {
         bridge.attach_flash(flash.clone(), FLASH_SIZE as u32);
         bridge.attach_flash_select1(Arc::new(RawFlash::new(&[], FLASH_SELECT1_SIZE)), FLASH_SELECT1_SIZE as u32);
         bridge.set_microlan(record_bus("EMUN00", "030-0887-003", "F", "IP30", 0x5145_4d55_4e00));
-        // DMA reaches only widgets the Crossbow has a live link to.
+        // DMA enters the Crossbow at the Bridge's port and reaches only
+        // widgets it has a live link to.
         let links = xbow.clone();
-        bridge.set_link_alive(Box::new(move |w| links.carries(w)));
+        bridge.set_route(Box::new(move |w, offset| links.route(WIDGET_BRIDGE, w, offset)));
 
         // The status bar's activity bits, shared with the graphics board.
         let heartbeat = Arc::new(AtomicU64::new(0));
@@ -202,6 +203,10 @@ impl OctaneMachine {
         let phys = Ip30Bus::new(ram.clone());
         phys.map(PIU_BASE, PIU_BASE + PIU_SIZE, heart.clone(), "heart piu");
         phys.map(widget_small_base(WIDGET_XBOW), widget_small_base(WIDGET_XBOW) + WIDGET_SMALL_SIZE, xbow.clone(), "xbow");
+        // Widgets 1 to 7 name no destination; the processor's packets enter
+        // at HEART's port, which records them.
+        let illegal = Arc::new(IllegalDestinations::new(xbow.clone(), WIDGET_HEART));
+        phys.map(widget_small_base(1), widget_small_base(WIDGET_HEART), illegal, "xbow illegal widgets");
         // The processor reaches its own HEART without a trip through the
         // switch.
         phys.map(widget_small_base(WIDGET_HEART), widget_small_base(WIDGET_HEART) + WIDGET_SMALL_SIZE, heart.clone(), "heart widget");
