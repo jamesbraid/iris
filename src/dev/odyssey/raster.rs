@@ -25,6 +25,11 @@ pub const SGI_TIE_TOP_LEFT_BOTTOM_ORIGIN: TieRule = 1;
 
 pub type LineRule = u32;
 pub const SGI_LINE_COVERAGE_DOUBLE: LineRule = 1;
+/// One pixel per major-axis column (or row) whose centre lies between the
+/// ends, the start's side included: the minor-axis pixel holding the segment
+/// at that centre, a crossing exactly on a pixel edge taking the lower
+/// pixel. Width and smoothing as SGI_LINE_COVERAGE_DOUBLE.
+pub const SGI_LINE_CENTRE_SAMPLED: LineRule = 2;
 
 pub type Dither = u32;
 pub const SGI_DITHER_NONE: Dither = 0;
@@ -630,7 +635,7 @@ impl RasterRules {
             (self.rounding as u32) <= SGI_ROUND_HALF_AWAY &&
             (self.tie_rule as u32) == SGI_TIE_TOP_LEFT_BOTTOM_ORIGIN &&
             (self.arith as u32) == SGI_ARITH_DOUBLE &&
-            (self.line_rule as u32) == SGI_LINE_COVERAGE_DOUBLE &&
+            ((self.line_rule as u32) == SGI_LINE_COVERAGE_DOUBLE || (self.line_rule as u32) == SGI_LINE_CENTRE_SAMPLED) &&
             (self.dither as u32) <= SGI_DITHER_BAYER4_TOP_ROWS &&
             (self.smooth_rule as u32) <= SGI_SMOOTH_TWO_PIXEL_FILTER &&
             (self.dither as u32 == SGI_DITHER_NONE ||
@@ -963,7 +968,8 @@ impl GlDrawState {
     /// One of glStencilOp's operations on the stencil value at (x, y), the
     /// result written under the stencil write mask (4.1.5, 4.2.2). GL_INCR
     /// and GL_DECR clamp to the buffer's range.
-    pub fn stencil_op(&self, px: &dyn Planes, x: i32, y: i32, op: u32, max: u32, ref_: u32) {
+    #[inline(always)]
+    pub fn stencil_op<P: Planes + ?Sized>(&self, px: &P, x: i32, y: i32, op: u32, max: u32, ref_: u32) {
         let old = px.load_stencil(x, y) & max;
         let mask = self.stencil_write_mask & max;
 
@@ -1254,11 +1260,13 @@ pub const SGI_SOFT_FIXED_LEVELS: usize = 14;
 pub const SGI_SOFT_FIXED_FAILED: u32 = 0x80000000;
 
 /// The fixed-point sampler's texels of one level for one draw, by interior
-/// index: each the read tag in the high word and the packed RGBA8 texel,
-/// components expanded, in the low (SoftDraw::fixed_texel()).
+/// index: each the packed RGBA8 texel, components expanded, in lanes
+/// (soft_fixed_lanes()), and the tag of the draw that read it
+/// (SoftDraw::fixed_texel()).
 #[derive(Clone, Default)]
 pub struct SoftFixedStore {
     pub cell: Vec<u64>,
+    pub tag: Vec<u32>,
     pub size: usize,
     pub plain: Vec<u64>,
 }
