@@ -349,6 +349,15 @@ consumer thread never takes `rec`.
   monomorphised over it, so all three CPUs are in every binary with no
   per-model branch on the hot path. `Machine::new` picks one from `[machine]
   cpu`.
+- CPU parts are `CpuModel` types, one alias per part, not PRId tests: the
+  alias fixes `PRID`, `FIR`, `TLB_ENTRIES` and the cache geometry, and a
+  model id (`mips_cache_v2::model`) names the part for the few behaviours
+  that differ between parts sharing a PRId implementation byte (the R14000 and
+  R16000 share `0x0f`). The R10000 family (R10000, R12000, R14000, R16000;
+  `model::r10k_family`) has one programming model: 44 virtual and 40 physical
+  address bits, with EntryHi and the TLB keeping every implemented VPN2 bit.
+  To add a part, add a type alias with its constants and, if it must tell
+  itself apart, an id. `CpuModel` defaults preserve the earlier CPUs.
 - With `opcodefusion` (implied by `lightning`), the interpreter executes
   common pairs (branch + NOP, LUI + ORI/ADDIU, address + load/store) as one
   dispatch.

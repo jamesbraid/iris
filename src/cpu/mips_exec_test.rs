@@ -6322,4 +6322,93 @@ mod tests {
                                parked through an interrupt masked only by the spl"),
         }
     }
+
+    /// EntryHi and the TLB keep every implemented VPN2 bit: 44 virtual-address
+    /// bits on the R10000 family, 40 on the R4400 and R5000. Fuel IRIX places
+    /// n64 stacks above the 40-bit limit.
+    #[test]
+    fn cp0_entryhi_and_tlb_match_full_xuseg_va() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(cp0_entryhi_and_tlb_match_full_xuseg_va_inner)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn cp0_entryhi_and_tlb_match_full_xuseg_va_inner() {
+        use crate::cpu::mips_tlb::MipsTlb;
+
+        const VA: u64 = 0x0000_0123_4000_0000;
+        const PHYS: u64 = 0x0005_0000;
+        const VALUE: u32 = 0xdead_beef;
+
+        fn check<C: CpuModel + From<Arc<dyn BusDevice>>>(full_va: bool) {
+            let mem = Arc::new(MockMemory::new());
+            mem.set_word(PHYS, VALUE);
+            let bus: Arc<dyn BusDevice> = mem;
+            let cfg = MipsCpuConfig::for_model::<C>();
+            let mut exec = Box::new(MipsExecutor::<MipsTlb, C>::new(
+                bus,
+                MipsTlb::default(),
+                &cfg,
+            ));
+            disable_jitv2(&mut exec);
+            // MTC0 must refresh the boxed executor's translation/accessor state.
+            exec.install_status_cb();
+
+            // Enter 64-bit kernel mode through MTC0 Status so the high xuseg
+            // address is checked by the CPU model's implemented VA width.
+            let status = (exec.core.cp0_status & !crate::cpu::mips_core::STATUS_ERL)
+                | STATUS_KX;
+            exec.core.write_gpr(1, status as u64);
+            let mtc0_status = (OP_COP0 << 26)
+                | (RS_MTC0 << 21)
+                | (1 << 16)
+                | (12 << 11);
+            assert_eq!(exec.exec(mtc0_status), EXEC_COMPLETE);
+
+            // Populate one TLB entry using architectural CP0 writes and TLBWI.
+            exec.core.write_gpr(1, VA);
+            let dmtc0_entryhi = (OP_COP0 << 26)
+                | (RS_DMTC0 << 21)
+                | (1 << 16)
+                | (10 << 11);
+            assert_eq!(exec.exec(dmtc0_entryhi), EXEC_COMPLETE);
+            let expected_entryhi = if full_va {
+                VA
+            } else {
+                VA & 0xC000_00FF_FFFF_E0FF
+            };
+            assert_eq!(exec.core.cp0_entryhi, expected_entryhi);
+
+            let entrylo0 = (0x50 << 6) | (3 << 3) | (1 << 2) | (1 << 1);
+            for (rt, rd, value) in [(2, 0, 0), (3, 5, 0), (4, 2, entrylo0), (5, 3, 0)] {
+                exec.core.write_gpr(rt, value);
+                let mtc0 = (OP_COP0 << 26)
+                    | (RS_MTC0 << 21)
+                    | (rt << 16)
+                    | (rd << 11);
+                assert_eq!(exec.exec(mtc0), EXEC_COMPLETE);
+            }
+            let tlbwi = (OP_COP0 << 26) | (RS_TLB << 21) | FUNCT_TLBWI;
+            assert_eq!(exec.exec(tlbwi), EXEC_COMPLETE);
+
+            let result = exec.read_data::<4>(VA);
+            if full_va {
+                assert_eq!(result, Ok(VALUE as u64));
+            } else {
+                let exception = result.unwrap_err();
+                assert_ne!(exception & EXEC_IS_EXCEPTION, 0);
+                assert_eq!((exception >> 2) & 0x1f, EXC_ADEL);
+            }
+        }
+
+        check::<crate::cpu::mips_cache_shadow::R4400ShadowCache>(false);
+        check::<crate::cpu::mips_cache_shadow::R5000ShadowCache>(false);
+        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(true);
+        check::<crate::cpu::mips_cache_shadow::R12000ShadowCache>(true);
+        check::<crate::cpu::mips_cache_shadow::R14000ShadowCache>(true);
+        check::<crate::cpu::mips_cache_shadow::R16000ShadowCache>(true);
+    }
 }
