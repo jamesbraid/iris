@@ -42,6 +42,9 @@ pub struct Codegen {
     /// [`JitConsts`]. Default (all `None`) means "load from memory as
     /// before", which is always correct.
     pub jit_consts: JitConsts,
+    /// Behaviour the CPU model selects for every core it runs on — see
+    /// [`ModelPolicy`]. Default is the architectural/IP28 behaviour.
+    pub model_policy: ModelPolicy,
     /// Addresses of the shared memory-access helpers, indexed by
     /// [`MemHelper::index`]. Emitted once into the arena's lowest range by
     /// [`Codegen::emit_mem_helpers`] and force-sealed there, so every region
@@ -226,6 +229,8 @@ struct EmitCtx<'a, 'b> {
     /// trusted from whatever's already live in `core.in_delay_slot`.
     /// L1-D geometry for the inline memory path, copied from `Codegen`.
     dc_geometry: crate::cpu::mips_cache_v2::JitDcGeometry,
+    /// The CPU model's policies, copied from `Codegen`.
+    model_policy: ModelPolicy,
     bd: bool,
     /// The pending transfer of the branch whose inlined delay slot is being
     /// emitted (`Some` exactly when `bd` is). A retry bail out of the slot
@@ -613,6 +618,7 @@ impl Codegen {
             // calls out in the meantime, which is the pre-existing behaviour.
             dc_geometry: crate::cpu::mips_cache_v2::JitDcGeometry::unsupported(),
             jit_consts: JitConsts::default(),
+            model_policy: ModelPolicy::default(),
             // Built by `emit_mem_helpers`, which the CPU triggers once
             // `dc_geometry` is known (a fresh `Codegen` has none yet, so
             // constructing here would always no-op).
@@ -818,7 +824,7 @@ impl Codegen {
         use std::fmt::Write as _;
         let _ = write!(
             s,
-            "max={} min={} speed={} intrun={} inline={} helpers={} fallback={} preamble={} skip_preamble={} mips4={} dc={:?} triple={} flags={}",
+            "max={} min={} speed={} intrun={} inline={} helpers={} fallback={} preamble={} skip_preamble={} mips4={} dc={:?} policy={:?} triple={} flags={}",
             crate::cpu::jitv2::comp::max_instrs_per_compile(),
             crate::cpu::jitv2::comp::min_instrs_to_compile(),
             Self::opt_level_speed(),
@@ -830,6 +836,7 @@ impl Codegen {
             skip_entry_preamble,
             crate::cpu::jitv2::isa::mips4_enabled(),
             self.dc_geometry,
+            self.model_policy,
             isa.triple(),
             isa.flags(),
         );
@@ -1239,6 +1246,7 @@ impl Codegen {
         let jit_consts = self.jit_consts;
         let mem_helpers = self.mem_helpers;
         let dc_geometry = self.dc_geometry;
+        let model_policy = self.model_policy;
         let ptr_ty = self.module.target_config().pointer_type();
         ctx.func.signature = self.module.make_signature();
         ctx.func.signature.params.push(AbiParam::new(ptr_ty));        // core (biased)
@@ -1281,6 +1289,7 @@ impl Codegen {
                 raw: 0,
                 word: 0,
                 dc_geometry,
+                model_policy,
                 bd: false,
                 slot_target: None,
                 trust_live_pc_bd_on_exc: true,
@@ -1376,6 +1385,7 @@ impl Codegen {
         page: *mut crate::cpu::jitv2::PhysicalCodePage,
     ) -> Option<cranelift_module::FuncId> {
         let dc_geometry = self.dc_geometry;
+        let model_policy = self.model_policy;
         let jit_consts = self.jit_consts;
         let mem_helpers = self.mem_helpers;
         let fr_mode = if compiled_for_fr1 { FrMode::Fr1 } else { FrMode::Fr0 };
@@ -1613,7 +1623,7 @@ impl Codegen {
             // instruction's cycles_delta/cycles_flush bookkeeping begins,
             // so a throwaway local is correct here (never read back).
             let mut unused_cycles_pending = 0u32;
-            let mut guard_ctx = EmitCtx { builder: &mut builder, module: &mut self.module, jit_consts, mem_helpers, core_ptr, raw: 0, word: 0, dc_geometry, bd: false, slot_target: None, trust_live_pc_bd_on_exc: true, exit_block, exception_call_block, abs_exit_block, cycles_pending: &mut unused_cycles_pending };
+            let mut guard_ctx = EmitCtx { builder: &mut builder, module: &mut self.module, jit_consts, mem_helpers, core_ptr, raw: 0, word: 0, dc_geometry, model_policy, bd: false, slot_target: None, trust_live_pc_bd_on_exc: true, exit_block, exception_call_block, abs_exit_block, cycles_pending: &mut unused_cycles_pending };
             emit_fr_mode_guard(&mut guard_ctx, live_entry_offset, compiled_for_fr1);
         }
 
@@ -1644,7 +1654,7 @@ impl Codegen {
         // start, because the armed foreign-slot transfer was destroyed.
         if crate::cpu::jitv2::entry_preamble_forced() {
             let mut unused_cycles_pending = 0u32;
-            let mut pre_ctx = EmitCtx { builder: &mut builder, module: &mut self.module, jit_consts, mem_helpers, core_ptr, raw: 0, word: 0, dc_geometry, bd: false, slot_target: None, trust_live_pc_bd_on_exc: true, exit_block, exception_call_block, abs_exit_block, cycles_pending: &mut unused_cycles_pending };
+            let mut pre_ctx = EmitCtx { builder: &mut builder, module: &mut self.module, jit_consts, mem_helpers, core_ptr, raw: 0, word: 0, dc_geometry, model_policy, bd: false, slot_target: None, trust_live_pc_bd_on_exc: true, exit_block, exception_call_block, abs_exit_block, cycles_pending: &mut unused_cycles_pending };
             emit_entry_interrupt_bail(&mut pre_ctx);
         }
 
@@ -1724,7 +1734,7 @@ impl Codegen {
             builder.switch_to_block(stub);
             let raw = instrs[w as usize].raw;
             let mut unused_cycles_pending = 0u32;
-            let mut trace_ctx = EmitCtx { builder: &mut builder, module: &mut self.module, jit_consts, mem_helpers, core_ptr, raw, word: w, dc_geometry, bd: false, slot_target: None, trust_live_pc_bd_on_exc: true, exit_block, exception_call_block, abs_exit_block, cycles_pending: &mut unused_cycles_pending };
+            let mut trace_ctx = EmitCtx { builder: &mut builder, module: &mut self.module, jit_consts, mem_helpers, core_ptr, raw, word: w, dc_geometry, model_policy, bd: false, slot_target: None, trust_live_pc_bd_on_exc: true, exit_block, exception_call_block, abs_exit_block, cycles_pending: &mut unused_cycles_pending };
             emit_dev_trace_bp(&mut trace_ctx, origin);
             builder.ins().jump(real_target, &[]);
             builder.seal_block(stub);
@@ -1858,7 +1868,7 @@ impl Codegen {
             // the right exception outer stage.
             let is_entry_point = instrs[word as usize].is_entry_point;
             let trust_live_pc_bd_on_exc = is_entry_point || instrs[word as usize].is_branch_fallback_successor;
-            let mut ctx = EmitCtx { builder: &mut builder, module: &mut self.module, jit_consts, mem_helpers, core_ptr, raw, word, dc_geometry, bd: false, slot_target: None, trust_live_pc_bd_on_exc, exit_block, exception_call_block, abs_exit_block, cycles_pending: &mut cycles_pending };
+            let mut ctx = EmitCtx { builder: &mut builder, module: &mut self.module, jit_consts, mem_helpers, core_ptr, raw, word, dc_geometry, model_policy, bd: false, slot_target: None, trust_live_pc_bd_on_exc, exit_block, exception_call_block, abs_exit_block, cycles_pending: &mut cycles_pending };
 
             if is_entry_point && entry_body_blocks.contains_key(&word) {
                 // This entry word's ordinary block is reached only by
@@ -2432,6 +2442,7 @@ impl Codegen {
         skip_entry_preamble: bool,
     ) -> Option<crate::cpu::jitv2::JitFn> {
         let dc_geometry = self.dc_geometry;
+        let model_policy = self.model_policy;
         let jit_consts = self.jit_consts;
         let mem_helpers = self.mem_helpers;
         instrs[entry_word as usize].is_entry_point = true;
@@ -4335,6 +4346,26 @@ pub struct JitConsts {
     /// to loading from memory, exactly as before, so an un-stamped `Codegen`
     /// stays correct (just no faster).
     pub core: Option<core::num::NonZeroUsize>,
+}
+
+/// Behaviour that belongs to the CPU model, not to one core: where two MIPS
+/// results are both permitted, the model picks. Every core of a model shares
+/// one value, so it is not baked with the core address in [`JitConsts`]; it is
+/// published the same way (`Jitv2::model_policy`, copied into each worker at
+/// start), so the compile pool must start after the CPU has published it.
+/// It is part of the code-cache fingerprint as one field.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModelPolicy {
+    /// A partial 32-bit LWR keeps bits 63:32 of the destination
+    /// (`CpuModel::LWR_PRESERVES_UPPER`).
+    pub lwr_preserves_upper: bool,
+}
+
+impl ModelPolicy {
+    /// The policy a model's profile selects.
+    pub fn of<C: crate::cpu::mips_cache_v2::CpuModel>() -> Self {
+        Self { lwr_preserves_upper: C::LWR_PRESERVES_UPPER }
+    }
 }
 
 impl JitConsts {
@@ -9998,6 +10029,15 @@ fn emit_lwr_ldr(ctx: &mut EmitCtx, size: MemSize) {
 
     let result = if size == MemSize::B8 {
         result_narrow
+    } else if size == MemSize::B4 && ctx.model_policy.lwr_preserves_upper {
+        // Partial words keep rt[63:32]; a full word (offset 3) still
+        // sign-extends. Mirrors `MipsExecutor::exec_lwr`.
+        let upper = ctx.builder.ins().band_imm_s(rt_val, 0xFFFF_FFFF_0000_0000u64 as i64);
+        let lower = ctx.builder.ins().uextend(ir::types::I64, result_narrow);
+        let merged = ctx.builder.ins().bor(upper, lower);
+        let partial = ctx.builder.ins().icmp_imm_s(ir::condcodes::IntCC::NotEqual, byte_offset, align_mask);
+        let full = ctx.builder.ins().sextend(ir::types::I64, result_narrow);
+        ctx.builder.ins().select(partial, merged, full)
     } else {
         ctx.builder.ins().sextend(ir::types::I64, result_narrow)
     };
@@ -10767,6 +10807,18 @@ mod tests {
         (op << 26) | (rs << 21) | (rt << 16) | (rd << 11) | (sa << 6) | funct
     }
 
+    #[test]
+    fn cache_fingerprint_includes_the_model_policy() {
+        let base = Codegen::new().cache_fingerprint(false).expect("default codegen is cacheable");
+        let mut codegen = Codegen::new();
+        codegen.model_policy = ModelPolicy { lwr_preserves_upper: true };
+        assert_ne!(
+            codegen.cache_fingerprint(false).expect("policy codegen is cacheable"),
+            base,
+            "a model policy must select a different persistent cache namespace",
+        );
+    }
+
     /// `is_inlinable` must reject on *both* of its conditions, not just the
     /// bounds one. The bounds half is what panicked
     /// (`clanker/jitv2/nested-delay-slot-across-page-boundary.md`); the
@@ -11004,12 +11056,13 @@ mod tests {
                 // function's doc comment) — never touches cycles bookkeeping.
                 let mut unused_cycles_pending = 0u32;
                 let dc_geometry = crate::cpu::mips_cache_v2::JitDcGeometry::unsupported();
+                let model_policy = ModelPolicy::default();
                 // This harness compiles against no real core, so hook targets
                 // must keep coming from `core_ptr` loads rather than being
                 // baked — `JitConsts::default()` is exactly that fallback.
                 let jit_consts = JitConsts::default();
             let mem_helpers = [None; MEM_HELPER_COUNT];
-                let mut ctx = EmitCtx { builder: &mut builder, module: &mut codegen.module, jit_consts, mem_helpers, core_ptr, raw: 0, word: word_offset, dc_geometry, bd: false, slot_target: None, trust_live_pc_bd_on_exc: true, exit_block, exception_call_block, abs_exit_block, cycles_pending: &mut unused_cycles_pending };
+                let mut ctx = EmitCtx { builder: &mut builder, module: &mut codegen.module, jit_consts, mem_helpers, core_ptr, raw: 0, word: word_offset, dc_geometry, model_policy, bd: false, slot_target: None, trust_live_pc_bd_on_exc: true, exit_block, exception_call_block, abs_exit_block, cycles_pending: &mut unused_cycles_pending };
                 emit(&mut ctx, exit_block, word_offset);
             }
             // Not-fired/not-pending path continues here (the preamble leaves

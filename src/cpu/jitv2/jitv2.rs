@@ -2337,6 +2337,10 @@ pub struct Jitv2 {
     /// Compile-time constants for the one core these workers compile for —
     /// see `codegen::JitConsts`. Same publication route as `dc_geometry`.
     pub jit_consts: Mutex<crate::cpu::jitv2::codegen::JitConsts>,
+    /// The CPU model's policies (`codegen::ModelPolicy`). Same publication
+    /// route as `dc_geometry`: workers copy it once at start, so the compile
+    /// pool must start after `install_jit_mem_ptrs` has published it.
+    pub model_policy: Mutex<crate::cpu::jitv2::codegen::ModelPolicy>,
     /// Event counters, read only under `j2 status` (dev-only display — see
     /// `JitStats`'s own doc comment for why the *fields themselves* still
     /// exist and get threaded through unconditionally: it's cheaper to carry
@@ -2396,6 +2400,7 @@ impl Jitv2 {
             codegen: Mutex::new(Some(crate::cpu::jitv2::codegen::Codegen::new())),
             dc_geometry: Mutex::new(crate::cpu::mips_cache_v2::JitDcGeometry::unsupported()),
             jit_consts: Mutex::new(crate::cpu::jitv2::codegen::JitConsts::default()),
+            model_policy: Mutex::new(crate::cpu::jitv2::codegen::ModelPolicy::default()),
             stats: Arc::new(JitStats::default()),
         }
     }
@@ -3332,6 +3337,7 @@ impl CompileQueue {
             let g = j.lock();
             codegen.dc_geometry = *g.dc_geometry.lock();
             codegen.jit_consts = *g.jit_consts.lock();
+            codegen.model_policy = *g.model_policy.lock();
         }
         // First worker to get here builds the shared helpers into the arena's
         // lowest range. Startup only — the flush path rebuilds them from the

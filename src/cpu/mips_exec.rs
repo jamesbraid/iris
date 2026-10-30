@@ -2613,6 +2613,8 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
                 core: if self.core.smp || std::env::var_os("IRIS_JIT_PIC").is_some() { None } else { core::num::NonZeroUsize::new(core_addr) },
             };
             *j.jit_consts.lock() = consts;
+            let policy = crate::cpu::jitv2::codegen::ModelPolicy::of::<C>();
+            *j.model_policy.lock() = policy;
             // The inline-compile path (`jitv2_compile_inline`) takes this
             // `Codegen` directly rather than going through `worker_loop`, so
             // it has to be stamped here too — it was built by `Jitv2::new`,
@@ -2621,6 +2623,7 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             if let Some(cg) = cg_slot.as_mut() {
                 cg.dc_geometry = geom;
                 cg.jit_consts = consts;
+                cg.model_policy = policy;
             }
         }
         if geom.supported {
@@ -6340,8 +6343,15 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 let mask = 0xFFFFFFFFu32 >> shift;
                 let result = (mem_word >> shift) | (rt_val & !mask);
 
-                // Sign-extend to 64 bits
-                self.core.write_gpr(rt_reg, result as i32 as i64 as u64);
+                // A model whose profile says so keeps bits 63:32 on a partial
+                // LWR (MIPS IV permits either). A full word still sign-extends.
+                let value = if C::LWR_PRESERVES_UPPER && byte_offset != 3 {
+                    (self.core.read_gpr(rt_reg) & 0xffff_ffff_0000_0000) | result as u64
+                } else {
+                    // Sign-extend to 64 bits
+                    result as i32 as i64 as u64
+                };
+                self.core.write_gpr(rt_reg, value);
                 self.handle_exec_complete()
             }
             Err(status) => self.finish_status(status)
@@ -8894,6 +8904,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             // Stamp the L1-D geometry the inline load/store path needs. No
             // helper build here — see the note in Jitv2::worker_loop.
             codegen.dc_geometry = self.cache.jit_dc_geometry();
+            codegen.model_policy = crate::cpu::jitv2::codegen::ModelPolicy::of::<C>();
             #[cfg(feature = "developer")]
             {
                 let stats = self.jitv2.lock().stats.clone();

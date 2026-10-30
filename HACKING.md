@@ -355,9 +355,12 @@ consumer thread never takes `rec`.
   part is an id, a table row and a type alias. `R14000ShadowCache` is Fuel's
   CPU: its EntryHi and TLB keep 44 virtual-address bits, where the IP28 and
   Octane stay at 40, and its PROM's cache diagnostics get primary data
-  arrays and a secondary tag mask. These are compatibility approximations,
-  not measurements of R14000 silicon. `CpuModel` defaults preserve the
-  existing machines.
+  arrays and a secondary tag mask, and a partial LWR keeps the upper word
+  (MIPS IV permits either). These are compatibility approximations, not
+  measurements of R14000 silicon. The JIT reads such choices from a
+  `ModelPolicy` on `Codegen`, published once with the other compile-pool
+  inputs, so the pool must start after `install_jit_mem_ptrs`. `CpuModel`
+  defaults preserve the existing machines.
 - With `opcodefusion` (implied by `lightning`), the interpreter executes
   common pairs (branch + NOP, LUI + ORI/ADDIU, address + load/store) as one
   dispatch.

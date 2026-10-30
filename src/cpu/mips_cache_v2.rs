@@ -569,6 +569,9 @@ pub trait CpuModel: MipsCache {
     const R10K_PRIMARY_DATA_OPS: bool = false;
     /// Bits Index_Store_Tag keeps for the secondary cache.
     const SECONDARY_TAG_MASK: u64 = u64::MAX;
+    /// Preserve the upper word on partial LWR loads. A full-word load still
+    /// sign-extends bit 31.
+    const LWR_PRESERVES_UPPER: bool = false;
 }
 
 pub trait MipsCache: Send + Sync {
@@ -1433,6 +1436,15 @@ pub mod model {
         /// discarded the MRU bit the PROM writes as TagHi[31]. Extending a mask
         /// to another part needs IP28/Octane diagnostic comparisons.
         pub l2_tag_mask: u64,
+        /// A partial LWR in 64-bit-register mode keeps bits 63:32 of the
+        /// destination. MIPS IV permits that or sign extension from the
+        /// retained bit 31 (NEC U12754E pp.125-126). Origami's reviewed
+        /// R10000 record selects preservation for the R10000 family from a
+        /// first-party diagnostic's reference results, and its R14000 record
+        /// adopts it as a model choice. The IP28, Octane and O2 sign-extend
+        /// today, so turning this on for their rows is a separate change with
+        /// its own tests. A full-word LWR always sign-extends.
+        pub lwr_preserves_upper: bool,
     }
 
     impl Profile {
@@ -1446,6 +1458,7 @@ pub mod model {
             primary_diag_data: false,
             nec_diag_layout: false,
             l2_tag_mask: u64::MAX,
+            lwr_preserves_upper: false,
         };
         /// The existing R10000 types (IP28, Octane, O2): family behaviour,
         /// none of the later approximations.
@@ -1484,6 +1497,7 @@ pub mod model {
                 primary_diag_data: true,
                 nec_diag_layout: true,
                 l2_tag_mask: 0x8000_000f_ffff_cdff,
+                lwr_preserves_upper: true,
                 ..Profile::R10K
             },
             // Left at the family defaults: no R16000 behaviour is established
@@ -3710,6 +3724,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
     const ENTRYHI_FULL_VA: bool = model::profile(MODEL).entryhi_full_va;
     const R10K_PRIMARY_DATA_OPS: bool = model::profile(MODEL).primary_diag_data;
     const SECONDARY_TAG_MASK: u64 = model::profile(MODEL).l2_tag_mask;
+    const LWR_PRESERVES_UPPER: bool = model::profile(MODEL).lwr_preserves_upper;
     const NAME: &'static str = model::profile(MODEL).name;
 }
 

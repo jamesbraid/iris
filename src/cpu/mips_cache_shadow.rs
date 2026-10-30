@@ -345,6 +345,7 @@ impl<
     const ENTRYHI_FULL_VA: bool = model::profile(MODEL).entryhi_full_va;
     const R10K_PRIMARY_DATA_OPS: bool = model::profile(MODEL).primary_diag_data;
     const SECONDARY_TAG_MASK: u64 = model::profile(MODEL).l2_tag_mask;
+    const LWR_PRESERVES_UPPER: bool = model::profile(MODEL).lwr_preserves_upper;
 }
 
 impl<
@@ -1023,6 +1024,8 @@ mod tests {
         assert_eq!(<R10K as CpuModel>::SECONDARY_TAG_MASK, u64::MAX);
         assert!(<R14K as CpuModel>::R10K_PRIMARY_DATA_OPS);
         assert_eq!(<R14K as CpuModel>::SECONDARY_TAG_MASK, 0x8000_000f_ffff_cdff);
+        assert!(!<R10K as CpuModel>::LWR_PRESERVES_UPPER);
+        assert!(<R14K as CpuModel>::LWR_PRESERVES_UPPER);
         assert_eq!((<R14K as CpuModel>::VA_BITS, <R14K as CpuModel>::PA_BITS), (44, 40));
     }
 
