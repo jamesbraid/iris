@@ -6411,4 +6411,52 @@ mod tests {
         check::<crate::cpu::mips_cache_shadow::R14000ShadowCache>(true);
         check::<crate::cpu::mips_cache_shadow::R16000ShadowCache>(true);
     }
+
+    /// The R10000 family retains the upper word on a partial LWR while a
+    /// complete word still sign-extends; the R4400 and R5000 sign-extend.
+    #[test]
+    fn partial_lwr_preserves_upper_only_on_the_r10000_family() {
+        fn check<C: CpuModel + From<Arc<dyn BusDevice>>>(preserve_upper: bool) {
+            let mem = Arc::new(MockMemory::new());
+            mem.set_word(0x2000, 0x89ab_cdef);
+            let bus: Arc<dyn BusDevice> = mem;
+            let cfg = MipsCpuConfig::for_model::<C>();
+            let mut exec = Box::new(MipsExecutor::<PassthroughTlb, C>::new(
+                bus,
+                PassthroughTlb::default(),
+                &cfg,
+            ));
+            disable_jitv2(&mut exec);
+            exec.core.write_gpr(1, 0x2000);
+
+            for old in [0x8123_4567_a1b2_c3d4u64, 0x7654_3210_21b2_c3d4] {
+                let low = old as u32;
+                let expected_words = [
+                    (low & 0xffff_ff00) | 0x89,
+                    (low & 0xffff_0000) | 0x89ab,
+                    (low & 0xff00_0000) | 0x89_abcd,
+                    0x89ab_cdef,
+                ];
+                for (offset, word) in expected_words.into_iter().enumerate() {
+                    exec.core.write_gpr(2, old);
+                    let lwr = make_i(OP_LWR, 1, 2, offset as u16);
+                    assert_eq!(exec.exec(lwr), EXEC_COMPLETE);
+                    let expected = if preserve_upper && offset != 3 {
+                        (old & 0xffff_ffff_0000_0000) | word as u64
+                    } else {
+                        word as i32 as i64 as u64
+                    };
+                    assert_eq!(exec.core.read_gpr(2), expected,
+                        "{} LWR offset {offset} old {old:#018x}", C::NAME);
+                }
+            }
+        }
+
+        check::<crate::cpu::mips_cache_shadow::R4400ShadowCache>(false);
+        check::<crate::cpu::mips_cache_shadow::R5000ShadowCache>(false);
+        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(true);
+        check::<crate::cpu::mips_cache_shadow::R12000ShadowCache>(true);
+        check::<crate::cpu::mips_cache_shadow::R14000ShadowCache>(true);
+        check::<crate::cpu::mips_cache_shadow::R16000ShadowCache>(true);
+    }
 }

@@ -362,7 +362,10 @@ consumer thread never takes `rec`.
   them out, which a PROM's cache walk needs; these are compatibility
   approximations, not measurements of silicon. Only the R14000 masks its
   secondary tags (`SECONDARY_TAG_MASK`): a mask once broke IP28
-  diagnostics, so it stays per part.
+  diagnostics, so it stays per part. A partial LWR keeps the upper word of the
+  destination on the family (MIPS IV permits either); the JIT learns it from
+  `JitConsts::lwr_keeps_upper`, set from the same constant, and the persistent
+  code-cache fingerprint carries it.
 - With `opcodefusion` (implied by `lightning`), the interpreter executes
   common pairs (branch + NOP, LUI + ORI/ADDIU, address + load/store) as one
   dispatch.
