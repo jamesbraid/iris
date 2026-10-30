@@ -116,6 +116,40 @@ pub trait NodeHooks: Send + Sync {
     }
     fn gfx_reset(&self) {}
 }
+/// The five registers of each of the two graphics slots, in address order:
+/// page, credit counter, bias, interrupt counter and interrupt compare.
+const GRAPHICS_SLOT_REGS: usize = 5;
+const GRAPHICS_REGS: usize = 2 * GRAPHICS_SLOT_REGS;
+/// Each register's writable bits: bit 40 enables a page and bits 39:17 name
+/// it; the counters are 12 bits, the interrupt pair 26.
+const GRAPHICS_MASKS: [u64; GRAPHICS_SLOT_REGS] = [(1 << 40) | 0xff_fffe_0000, 0xfff, 0xfff, 0x3ff_ffff, 0x3ff_ffff];
+
+/// A processor interface's graphics flow-control registers, kept as written
+/// with each register's reserved bits dropped. IRIX's graphics driver writes
+/// them at attach and tears the board down when the credit counter reads
+/// zero. Nothing counts stores or returns credits (no board links to the
+/// interface), so the registers hold only what the driver stored.
+///
+/// Ported from hw/mips/sgi/pi-gfx.c in jamesbraid/qemu-sgi-origami.
+#[derive(Default)]
+pub struct GraphicsRegisters(Mutex<[u64; GRAPHICS_REGS]>);
+impl NodeHooks for GraphicsRegisters {
+    fn gfx_read(&self, index: usize) -> Option<u64> {
+        self.0.lock().get(index).copied()
+    }
+    fn gfx_write(&self, index: usize, value: u64) -> bool {
+        match self.0.lock().get_mut(index) {
+            Some(r) => {
+                *r = value & GRAPHICS_MASKS[index % GRAPHICS_SLOT_REGS];
+                true
+            }
+            None => false,
+        }
+    }
+    fn gfx_reset(&self) {
+        *self.0.lock() = [0; GRAPHICS_REGS];
+    }
+}
 struct State {
     w: [u64; 160],
     pending: [u64; 2],
