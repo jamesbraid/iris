@@ -188,14 +188,6 @@ pub fn odyssey_write_dispatch(s: &mut SGIOdysseyState, addr: u64, value: u64, si
 // credits), so `s.pi` stays None there and every credit call the C makes
 // through s->pi is skipped, as it is in QEMU with the link unset.
 
-/// Machine time FIFO stores keep queueing after a long one.
-pub const ODSY_WORK_HOLD_NS: i64 = 1000 * SCALE_MS;
-
-/// Stores waiting behind work before the next one finishes the work.
-pub const ODSY_WORK_QUEUE_MAX: usize = 65536;
-
-/// The command FIFO's depth, in stores; the model's choice.
-pub const ODSY_CFIFO_DEPTH: u32 = 64;
 
 pub fn odyssey_work_pending(s: &mut SGIOdysseyState) -> bool {
     !s.work_queue.is_empty()
@@ -410,7 +402,7 @@ pub fn odyssey_mmio_write(s: &mut SGIOdysseyState, addr: u64, value: u64, size: 
         return;
     }
     if odyssey_store_queues(s, addr, size) {
-        if s.work_queue.len() >= ODSY_WORK_QUEUE_MAX && !s.work.drawing {
+        if s.work_queue.len() >= ODSY_WORK_QUEUE_MAX as usize && !s.work.drawing {
             odyssey_work_drain(s, addr);
         }
         odyssey_work_append(s, addr, value, size, counted);
@@ -463,10 +455,6 @@ pub fn odyssey_work_reset(s: &mut SGIOdysseyState) {
     sgi_head_work_idle(&mut s.work);
 }
 
-/// The two command-FIFO pages are separate regions in the C so their stores
-/// can be posted. Here the glue passes aperture offsets, so a page access is
-/// the aperture access.
-pub const ODSY_FIFO_PAGE: u64 = 0x1000;
 
 pub fn odyssey_fifo_page_read(s: &mut SGIOdysseyState, addr: u64, size: u32) -> u64 {
     odyssey_mmio_read(s, addr, size)

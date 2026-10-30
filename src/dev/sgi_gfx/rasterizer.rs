@@ -1943,7 +1943,7 @@ pub fn sgi_soft_texture_tap_inner(
     let format = level.map_or(im.base_format, |l| l.base_format);
     let mut rgba: u32 = 0;
     let mut component = [0u16; 4];
-    let mut raw_components = false;
+    let raw_components: bool;
     let mut slot: Option<usize> = None;
     let level_addr = level.map_or(0usize, |l| l as *const SGIGLTexLevel as usize);
 

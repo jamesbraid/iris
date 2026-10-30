@@ -209,7 +209,6 @@ pub static odyssey_window_records: [OdysseyWindowRecord; 8] = [
     OdysseyWindowRecord { record: 23, local_viewer: false, two_sided: false, entry: [0x738, 0x760, 0x787], entries: 199, crc: 0x8d6174822a99856f },
 ];
 
-pub const ODSY_CRC64_ECMA_POLY: u64 = 0x42f0e1eba9ea3693;
 
 /// CRC-64/ECMA-182 (no reflection, zero initial value) of n window entries.
 pub fn odyssey_window_crc(s: &SGIOdysseyState, n: u32) -> u64 {

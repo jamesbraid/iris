@@ -2069,7 +2069,7 @@ pub fn sgi_gl_light_face(
         let p = &l.position;
         let mut vp = [0.0f32; 3];
         let mut h = [0.0f32; 3];
-        let mut sd = [0.0f32; 3];
+        let mut sd: [f32; 3];
         let mut att: f32 = 1.0;
         let mut spot: f32 = 1.0;
 
@@ -2144,7 +2144,7 @@ pub fn sgi_gl_light_index_face(
         let p = &l.position;
         let mut vp = [0.0f32; 3];
         let mut h = [0.0f32; 3];
-        let mut sd = [0.0f32; 3];
+        let mut sd: [f32; 3];
         let mut att: f32 = 1.0;
         let mut spot: f32 = 1.0;
 
@@ -2606,7 +2606,7 @@ pub fn sgi_gl_capture_vertex(
     components: u32,
     out: &mut [f32; SGI_GL_VERTEX_FLOATS],
 ) {
-    let mut normal = [0.0f32; 3];
+    let mut normal: [f32; 3];
     let mut obj = [0.0f32; 4];
 
     *out = [0.0; SGI_GL_VERTEX_FLOATS];
@@ -3903,7 +3903,7 @@ pub fn sgi_gl_tex_gen_param(c: &mut SGIGLContext, a: &[u32]) {
     let a1 = sgi_gl_arg(a, 1);
     let i = a0.wrapping_sub(SGI_GL_S);
     let mut v = [0.0f32; 4];
-    let mut mm = [0.0f32; 16];
+    let mut mm: [f32; 16];
     let mut inv = [0.0f64; 16];
 
     for k in 0..4 {
