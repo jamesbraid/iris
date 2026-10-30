@@ -20,8 +20,9 @@ impl Board {
         }
         self.reported_addr[self.reported_addr_count as usize] = token;
         self.reported_addr_count += 1;
-        crate::qlog!(
-            "sgi-odyssey: {}-byte {} at {:#x} is not modeled{}\n",
+        crate::dlog!(
+            LogModule::Odyssey,
+            "sgi-odyssey: {}-byte {} at {:#x} is not modeled{}",
             size,
             if write { "write" } else { "read" },
             addr,
@@ -42,8 +43,9 @@ impl Board {
         }
         self.reported_cmd[self.reported_cmd_count as usize] = word;
         self.reported_cmd_count += 1;
-        crate::qlog!(
-            "sgi-odyssey: command FIFO word {:#010x} is not modeled{}{}\n",
+        crate::dlog!(
+            LogModule::Odyssey,
+            "sgi-odyssey: command FIFO word {:#010x} is not modeled{}{}",
             word,
             note,
             if self.reported_cmd_count == SGI_ODYSSEY_UNIMP_REPORTS { "; further words stay silent" } else { "" }
@@ -154,7 +156,7 @@ impl Board {
             return;
         }
         self.cursor_reported |= bit;
-        crate::qlog!("sgi-odyssey: cursor entry {:#x} word {:#010x}: {}\n", ODSY_CURSOR_BASE + index, data, what);
+        crate::dlog!(LogModule::Odyssey, "sgi-odyssey: cursor entry {:#x} word {:#010x}: {}", ODSY_CURSOR_BASE + index, data, what);
     }
 
     /// The position's components, each a signed 16-bit value (inferred).
@@ -386,7 +388,7 @@ impl Board {
         self.memory_control = value;
         if !self.memory_control_reported {
             self.memory_control_reported = true;
-            crate::qlog!("sgi-odyssey: memory controller configuration {:#x} stored; the controller is not modeled\n", value);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: memory controller configuration {:#x} stored; the controller is not modeled", value);
         }
         // The master id goes in first, with the strap fields still zero.
         if value & !(0xfu32 << 19) == 0 {
@@ -397,7 +399,7 @@ impl Board {
             || ((value & ODSY_MEMORY_CONTROL_FOUR_BANKS) != 0) != ((strap & ODSY_CONFIG_FOUR_BANKS) != 0)
             || ((value & ODSY_MEMORY_CONTROL_LATENCY_2) != 0) != ((strap & ODSY_CONFIG_LATENCY_2) != 0)
         {
-            crate::qlog!("sgi-odyssey: memory controller configuration {:#x} disagrees with the strap word {:#x}\n", value, strap);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: memory controller configuration {:#x} disagrees with the strap word {:#x}", value, strap);
         }
     }
 }
@@ -449,17 +451,17 @@ impl Board {
             | ODSY_CTX_SHADOW_ADDR_LOWER
             | ODSY_RESET_CONTROL
             | ODSY_MEMORY_CONTROL => {
-                crate::qlog!("sgi-odyssey: read of the write-only register at {:#x}\n", addr);
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: read of the write-only register at {:#x}", addr);
             }
             _ => {
                 if self.cursor_read(addr, size, &mut value) || self.backend_ctl_read(addr, size, &mut value) {
-                    crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_mmio: seq {} offset {:#x} size {} value {:#x} write=0", sequence, addr, size, value);
+                    crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_mmio: seq {} offset {:#x} size {} value {:#x} write=0", sequence, addr, size, value);
                     return value;
                 }
                 self.unimplemented(addr, size, false);
             }
         }
-        crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_mmio: seq {} offset {:#x} size {} value {:#x} write=0", sequence, addr, size, value);
+        crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_mmio: seq {} offset {:#x} size {} value {:#x} write=0", sequence, addr, size, value);
         value
     }
 
@@ -486,8 +488,9 @@ impl Board {
             height = data;
         }
         if width > SGI_ODYSSEY_WIDTH || height > SGI_ODYSSEY_HEIGHT {
-            crate::qlog!(
-                "sgi-odyssey: display channel {}x{} is larger than the modeled {}x{} planes\n",
+            crate::dlog!(
+                LogModule::Odyssey,
+                "sgi-odyssey: display channel {}x{} is larger than the modeled {}x{} planes",
                 width,
                 height,
                 SGI_ODYSSEY_WIDTH,
@@ -530,7 +533,7 @@ impl Board {
             self.overlay_mode[(index - ODSY_OVERLAY_MODE_BASE) as usize] = data;
             if (data & !ODSY_OVERLAY_MODE_KNOWN) != 0 && !self.overlay_mode_reported {
                 self.overlay_mode_reported = true;
-                crate::qlog!("sgi-odyssey: overlay mode {:#x} has bits this model does not decode\n", data);
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: overlay mode {:#x} has bits this model does not decode", data);
             }
             self.scanout.invalidate_all();
             return;

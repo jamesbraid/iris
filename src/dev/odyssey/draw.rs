@@ -31,11 +31,9 @@ impl Board {
 
     pub fn shadow_put(&mut self, base: u64, off: u32, word: u32) {
         let at = base.wrapping_add(off as u64);
-        let res = address_space_stl_be(&address_space_memory(), at, word);
-
-        if res != MEMTX_OK && !self.ctx_shadow_fail_reported {
+        if !write_guest(&self.guest, at, &word.to_be_bytes()) && !self.ctx_shadow_fail_reported {
             self.ctx_shadow_fail_reported = true;
-            crate::qlog!("sgi-odyssey: context shadow store to {:#x} failed", at);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: context shadow store to {:#x} failed", at);
         }
     }
 
@@ -233,7 +231,8 @@ impl Board {
 
         if self.gl_begin_open && !open && !self.ctx_open_prim_logged {
             self.ctx_open_prim_logged = true;
-            crate::qlog!(
+            crate::dlog!(
+                LogModule::Odyssey,
                 "sgi-odyssey: context switch inside primitive {:#x}; its buffered vertices are not saved",
                 self.gl_primitive
             );
@@ -346,7 +345,8 @@ impl Board {
             return;
         }
         if self.ctx_shadow_addr_upper == 0 && self.ctx_shadow_addr_lower == 0 {
-            crate::qlog!(
+            crate::dlog!(
+                LogModule::Odyssey,
                 "sgi-odyssey: context switch ({:#x}) with no shadow address programmed; no completion written",
                 value
             );
@@ -420,7 +420,7 @@ impl Board {
         let token = (word >> ODSY_DMA_FENCE_TOKEN_SHIFT) & 0xffff;
         let base = (((self.host_write_addr_upper & 0xffff) as u64) << 32) | self.host_write_addr_lower as u64;
 
-        address_space_stw_be(&address_space_memory(), base.wrapping_add(2 * slot as u64), token);
+        write_guest(&self.guest, base.wrapping_add(2 * slot as u64), &(token as u16).to_be_bytes());
         if word & ODSY_DMA_FENCE_INTERRUPT != 0 {
             self.front.lock().deliver_softsync();
         }
@@ -451,7 +451,7 @@ pub fn dma_chunk(opaque: Opaque, seq: u64, addr: u64, bytes: &[u8]) {
     // The chunks belong to the MMIO write that caused the RAM read.
     let s = from_opaque::<Board>(opaque);
     crate::dlog_dev!(
-        crate::devlog::LogModule::Odyssey,
+        LogModule::Odyssey,
         "sgi_odyssey_dma_chunk: seq {} addr {:#x} len {} hex {}",
         s.trace_sequence.wrapping_sub(1),
         addr,
@@ -558,7 +558,7 @@ pub fn resolve_row(opaque: Opaque, y: u32, dst: &mut [u32]) {
         }
         if group == ODSY_CMAP_UNVERIFIED_GROUP && !s.scanout_group25_reported {
             s.scanout_group25_reported = true;
-            crate::qlog!("sgi-odyssey: colormap group 25 (0x1900) resolved as an index table; unverified");
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: colormap group 25 (0x1900) resolved as an index table; unverified");
         }
         dst[x as usize] = s.lut_rgb(if group != 0 { 256 * group + (word & 0xff) } else { word & ODSY_INDEX_MASK });
     }
@@ -595,7 +595,7 @@ pub fn retrace(opaque: Opaque) {
     if flips != 0 {
         f.swap_arm = 0;
         f.displayed_buffer ^= flips;
-        crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_swap_latch: arm {:#x} displayed {:#x}", flips, f.displayed_buffer);
+        crate::dlog!(LogModule::Odyssey, "sgi_odyssey_swap_latch: arm {:#x} displayed {:#x}", flips, f.displayed_buffer);
         repaint = true;
     }
     if f.routed() {
@@ -803,7 +803,8 @@ impl Board {
         }
         if buffers & ((1u32 << ODSY_AUX_ID_BUFFER) | (1u32 << ODSY_AUX_OVERLAY_BUFFER)) == 0 && !self.aux_mask_reported {
             self.aux_mask_reported = true;
-            crate::qlog!(
+            crate::dlog!(
+                LogModule::Odyssey,
                 "sgi-odyssey: id-plane write with drawing mask {:#x} selects neither the id nor the overlay byte; dropped",
                 self.draw_mask
             );
@@ -1418,7 +1419,8 @@ impl Board {
             i = self.object_oldest(-1);
             if !self.obj_full_reported {
                 self.obj_full_reported = true;
-                crate::qlog!(
+                crate::dlog!(
+                    LogModule::Odyssey,
                     "sgi-odyssey: more than {} board-memory objects; the least recently used, {:#x}, is forgotten",
                     SGI_ODYSSEY_OBJECTS,
                     self.obj_base[i as usize]
@@ -1479,7 +1481,8 @@ impl Board {
                 live -= self.obj_width[v] as u64 * self.obj_rows[v] as u64;
                 if !self.obj_forget_reported {
                     self.obj_forget_reported = true;
-                    crate::qlog!(
+                    crate::dlog!(
+                        LogModule::Odyssey,
                         "sgi-odyssey: the model's {} MiB board-memory store is full; the least recently used object, {:#x}, is forgotten",
                         ODSY_OBJ_POOL_BYTES / (1024 * 1024),
                         self.obj_base[v]
@@ -1506,7 +1509,8 @@ impl Board {
         } else {
             if !self.obj_full_reported {
                 self.obj_full_reported = true;
-                crate::qlog!(
+                crate::dlog!(
+                    LogModule::Odyssey,
                     "sgi-odyssey: board-memory object {:#x} ({} x {}) exceeds the model's {} MiB store",
                     self.obj_base[iu],
                     self.obj_width[iu],
@@ -1526,7 +1530,7 @@ impl Board {
             return;
         }
         let word = self.obj_offset[i as usize] as u64 + y as u64 * self.obj_width[i as usize] as u64 + x as u64;
-        stl_be_p(&mut self.obj_mem.bytes[(word * 4) as usize..], rgba);
+        self.obj_mem.bytes[(word * 4) as usize..][..4].copy_from_slice(&(rgba as u32).to_be_bytes());
         self.object_word_set_valid(word, true);
     }
 
@@ -1536,7 +1540,7 @@ impl Board {
         if x >= self.obj_width[iu] || y >= self.obj_rows[iu] {
             return 0;
         }
-        ldl_be_p(&self.obj_mem.bytes[((self.obj_offset[iu] as u64 + y as u64 * self.obj_width[iu] as u64 + x as u64) * 4) as usize..])
+        u32::from_be_bytes(self.obj_mem.bytes[((self.obj_offset[iu] as u64 + y as u64 * self.obj_width[iu] as u64 + x as u64) * 4) as usize..][..4].try_into().unwrap())
     }
 
     /// Copy a recognised GL read-drawable rectangle into its scratch object.
@@ -1623,7 +1627,7 @@ impl Board {
                 );
             } else if !self.aux_image_reported {
                 self.aux_image_reported = true;
-                crate::qlog!("sgi-odyssey: an RGB image to the id-plane destination is not modeled; dropped");
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: an RGB image to the id-plane destination is not modeled; dropped");
             }
         } else {
             // Screen pixels are window-relative; object pixels are not.
@@ -1681,7 +1685,7 @@ pub fn decode_texel12(code: u32, b: &[u8], wide: bool) -> u32 {
     let n = texel12_components(code) as usize;
 
     for i in 0..n {
-        c[i] = if wide { unorm16_to_8(lduw_be_p(&b[2 * i..])) } else { b[i] as u32 };
+        c[i] = if wide { unorm16_to_8(u16::from_be_bytes(b[2 * i..][..2].try_into().unwrap()) as u32) } else { b[i] as u32 };
     }
     match code {
         ODSY_IMAGE_CODE_LUM12 => pack_pixel(c[0], c[0], c[0]),
@@ -1707,7 +1711,7 @@ impl Board {
                 true
             }
             ODSY_IMAGE_CODE_RGBA | ODSY_IMAGE_CODE_RGBA12 => {
-                *rgba = ldl_be_p(b);
+                *rgba = u32::from_be_bytes(b[..4].try_into().unwrap());
                 true
             }
             ODSY_IMAGE_CODE_RGB => {
@@ -1733,7 +1737,7 @@ impl Board {
                 true
             }
             ODSY_IMAGE_CODE_CI16 => {
-                *rgba = lduw_be_p(b) & ODSY_INDEX_MASK;
+                *rgba = u16::from_be_bytes(b[..2].try_into().unwrap()) as u32 & ODSY_INDEX_MASK;
                 true
             }
             _ => false,
@@ -1811,7 +1815,7 @@ impl Board {
                     continue;
                 }
                 for i in 0..comps {
-                    stw_be_p(&mut px[2 * i..], halves[i] as u32);
+                    px[2 * i..][..2].copy_from_slice(&(halves[i] as u16).to_be_bytes());
                 }
                 self.image_put(decode_texel12(code, &px, true), false, true);
                 held = 0;
@@ -1835,12 +1839,12 @@ impl Board {
         if n == 0 {
             if !self.image_code_reported {
                 self.image_code_reported = true;
-                crate::qlog!("sgi-odyssey: image source format {:#x} is not modeled; laid out by the burst tag", code);
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: image source format {:#x} is not modeled; laid out by the burst tag", code);
             }
             code = if self.image_fmt == ODSY_IMAGE_FMT_RGB { ODSY_IMAGE_CODE_FALLBACK_XRGB } else { ODSY_IMAGE_CODE_CI };
             n = pixel_bytes(code);
         }
-        stl_be_p(&mut b, word);
+        b[..4].copy_from_slice(&(word as u32).to_be_bytes());
         for i in 0..4 {
             let mut px = [0u8; 4];
             let mut rgba = 0u32;
@@ -1852,7 +1856,7 @@ impl Board {
             }
             self.image_nbytes = 0;
             // The pixel's bytes, first byte highest, at the start of px[].
-            stl_be_p(&mut px, self.image_bytes << (8 * (4 - n)));
+            px[..4].copy_from_slice(&(self.image_bytes << (8 * (4 - n))).to_be_bytes());
             self.decode_pixel(code, &px, &mut rgba);
             self.image_texel(rgba, code_is_index(code));
         }

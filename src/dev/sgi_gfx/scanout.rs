@@ -1,16 +1,15 @@
-//! Ported from include/hw/display/sgi/scanout.h in jamesbraid/qemu-sgi-origami.
+//! An SGI graphics head's scanout: its presented frame, dirty lines,
+//! cursor, retrace and the queue of swap records. Display line 0 is the top.
 //!
-//! SGI graphics scanout: one head's presented frame, dirty lines, cursor,
-//! retrace and the queue of swap records. Display line 0 is the top.
+//! `frame` holds the presented frame (0x00RRGGBB, `frame_width` by
+//! `frame_height`), which the board's display thread copies to the window;
+//! `dirty` marks the lines to resolve again. The retrace is counted on the
+//! host's monotonic clock: `retrace_deadline` (-1 when disarmed) is when
+//! the next one is due, and [`Scanout::poll`] fires every retrace that has
+//! come due.
 //!
-//! Adaptations: there is no QemuConsole. `frame` is the scanout's own
-//! presented frame (`Vec<u32>` of 0x00RRGGBB, `frame_width` x `frame_height`),
-//! which the iris glue copies to the screen; `dirty` is one bool per display
-//! line instead of a bitmap. The retrace QEMUTimer is `retrace_deadline`
-//! (virtual ns, -1 = disarmed), fired by Scanout::poll(). `con`,
-//! `Scanout::init(_head)`'s DeviceState/head arguments and VMState are
-//! dropped (init_head is kept with its `head` number, unused). `ops` is a
-//! `P<HeadOps>`.
+//! Ported from include/hw/display/sgi/scanout.h and the shared SGI graphics
+//! code in jamesbraid/qemu-sgi-origami.
 use super::*;
 
 pub const SGI_CURSOR_MAX: usize = 64;
@@ -126,7 +125,7 @@ impl Scanout {
     pub fn set_mode(&mut self, mode: &ScanoutMode) {
         self.mode = *mode;
         self.mode.sanitize();
-        crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi_scanout_mode: {}x{} frame {} clocks at {} Hz", self.mode.width, self.mode.height, self.mode.frame_clocks, self.mode.clock_hz);
+        crate::dlog!(LogModule::Odyssey, "sgi_scanout_mode: {}x{} frame {} clocks at {} Hz", self.mode.width, self.mode.height, self.mode.frame_clocks, self.mode.clock_hz);
         self.alloc();
         self.cursor_drawn_first = 0;
         self.cursor_drawn_last = -1;
@@ -154,8 +153,8 @@ impl Scanout {
         // reaches: whole seconds' worth of frames first, then the rest, whose
         // product fits because both factors are below 2^32.
         (self.epoch as u64)
-            .wrapping_add((n / hz).wrapping_mul(fc).wrapping_mul(NANOSECONDS_PER_SECOND as u64))
-            .wrapping_add(muldiv64((n % hz).wrapping_mul(fc), NANOSECONDS_PER_SECOND as u64, hz)) as i64
+            .wrapping_add((n / hz).wrapping_mul(fc).wrapping_mul(NS_PER_SECOND))
+            .wrapping_add(mul_div((n % hz).wrapping_mul(fc), NS_PER_SECOND, hz)) as i64
     }
 
     /// Put the next retrace at virtual time `when`, with the ones after it a
@@ -170,7 +169,7 @@ impl Scanout {
         // retrace for good; an idle timer's -1 is a request for one now.
         let mut when = when;
         if when < 0 {
-            when = qemu_clock_virtual_ns();
+            when = monotonic_ns();
         }
         // Move the epoch rather than restart the count, so retrace n stays
         // epoch plus n periods and the next one, frames + 1, lands on when.
@@ -251,7 +250,7 @@ impl Scanout {
             if self.composite_cursor {
                 self.draw_cursor(y as i32, end as i32 - 1);
             }
-            crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_scanout_update: lines {}-{}", y, end - 1);
+            crate::dlog_dev!(LogModule::Odyssey, "sgi_scanout_update: lines {}-{}", y, end - 1);
             y = end;
         }
         if self.composite_cursor {
@@ -273,7 +272,7 @@ impl Scanout {
         let ch = h.min(SGI_CURSOR_MAX as u32);
 
         if cw != w || ch != h {
-            crate::qlog!("sgi-scanout: a {}x{} cursor is clipped to {}x{}", w, h, cw, ch);
+            crate::dlog!(LogModule::Odyssey, "sgi-scanout: a {}x{} cursor is clipped to {}x{}", w, h, cw, ch);
         }
         self.cursor_w = cw;
         self.cursor_h = ch;
@@ -311,7 +310,18 @@ impl Scanout {
     }
 }
 
-pub fn muldiv64(a: u64, b: u64, c: u64) -> u64 {
+/// Nanoseconds in a second.
+pub const NS_PER_SECOND: u64 = 1_000_000_000;
+
+/// The host's monotonic clock in nanoseconds since the first call: the
+/// time base of every scanout's retrace.
+pub fn monotonic_ns() -> i64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(std::time::Instant::now).elapsed().as_nanos() as i64
+}
+
+/// a * b / c without overflowing the product.
+pub fn mul_div(a: u64, b: u64, c: u64) -> u64 {
     ((a as u128 * b as u128) / c as u128) as u64
 }
 
@@ -326,7 +336,8 @@ impl ScanoutMode {
         let mut ok = true;
 
         if self.width > SGI_SCANOUT_MAX_DIM || self.height > SGI_SCANOUT_MAX_DIM {
-            crate::qlog!(
+            crate::dlog!(
+                LogModule::Odyssey,
                 "sgi-scanout: {}x{} exceeds the largest mode, {}x{}",
                 self.width,
                 self.height,
@@ -339,10 +350,11 @@ impl ScanoutMode {
         }
         if self.clock_hz != 0
             && (self.frame_clocks > u32::MAX as u64
-                || (muldiv64(self.frame_clocks, NANOSECONDS_PER_SECOND as u64, self.clock_hz as u64) as i64)
+                || (mul_div(self.frame_clocks, NS_PER_SECOND, self.clock_hz as u64) as i64)
                     < SGI_SCANOUT_MIN_PERIOD_NS)
         {
-            crate::qlog!(
+            crate::dlog!(
+                LogModule::Odyssey,
                 "sgi-scanout: a frame of {} clocks at {} Hz is outside the retrace periods modelled",
                 self.frame_clocks,
                 self.clock_hz
@@ -362,7 +374,7 @@ impl Scanout {
     }
 
     pub fn restart(&mut self) {
-        self.epoch = qemu_clock_virtual_ns();
+        self.epoch = monotonic_ns();
         self.frames = 0;
         self.arm();
     }
@@ -372,13 +384,13 @@ impl Scanout {
         let mut swapped = false;
 
         self.frames += 1;
-        crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_scanout_retrace: frame {} swaps waiting {}", self.frames, self.swap_count);
+        crate::dlog_dev!(LogModule::Odyssey, "sgi_scanout_retrace: frame {} swaps waiting {}", self.frames, self.swap_count);
         if self.swap_count != 0 {
             let rec = self.swaps[self.swap_head as usize];
 
             self.swap_head = (self.swap_head + 1) % SGI_SWAP_MAX as u32;
             self.swap_count -= 1;
-            crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi_scanout_swap: seq {} cookie {:#x} frame {}", rec.seq, rec.cookie, self.frames);
+            crate::dlog!(LogModule::Odyssey, "sgi_scanout_swap: seq {} cookie {:#x} frame {}", rec.seq, rec.cookie, self.frames);
             self.ops.get().publish(self.opaque, rec.seq, SGI_DONE_SWAPPED, rec.cookie, 0);
             swapped = true;
         }

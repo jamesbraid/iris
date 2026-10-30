@@ -752,7 +752,7 @@ impl GlDrawState {
         let d = &self.drawable;
 
         if d.bound == 0 {
-            crate::qlog!("sgi-gl: draw with no window bound dropped");
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: draw with no window bound dropped");
             return false;
         }
         if d.clip.n == 0 {
@@ -804,7 +804,7 @@ impl RasterRules {
 
     pub fn check_rules(&self) -> bool {
         if !self.rules_supported() {
-            crate::qlog!("sgi-gl: raster rules are not implemented; nothing drawn");
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: raster rules are not implemented; nothing drawn");
             return false;
         }
         true
@@ -815,7 +815,7 @@ impl RasterTarget {
     /// Whether the target can take the colour-index work a draw state asks.
     pub fn soft_check_index(&self, index_bits: u32) -> bool {
         if index_bits != 0 && self.store_index.is_none() {
-            crate::qlog!("sgi-gl: colour-index drawing is not implemented for these planes; nothing drawn");
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: colour-index drawing is not implemented for these planes; nothing drawn");
             return false;
         }
         true
@@ -933,7 +933,7 @@ impl RasterRules {
             (t.store_rgba.is_some() && read && t.load_rgba.is_none()) ||
             (t.store_rgba.is_none() && t.load_rgba.is_some())
         {
-            crate::qlog!("sgi-gl: inconsistent RGBA callbacks; operation dropped");
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: inconsistent RGBA callbacks; operation dropped");
             return false;
         }
         true
@@ -957,7 +957,7 @@ impl RasterRules {
                 let old = *reported;
                 *reported = true;
                 if !old {
-                    crate::qlog!("sgi-gl: RGBA destination read failed; pixel writes dropped");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: RGBA destination read failed; pixel writes dropped");
                 }
                 return false;
             }
@@ -1377,7 +1377,7 @@ impl SoftDraw {
             (st.index_bits == 0 && self.colour_mask != 0 && self.colour_mask != self.rules.colour_bits())) &&
             self.t.load_colour.is_none()
         {
-            crate::qlog!("sgi-gl: blending, logical operations and partial colour masks need planes that can be read back; drawn without them");
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: blending, logical operations and partial colour masks need planes that can be read back; drawn without them");
             self.blend = false;
             self.logic_op = false;
             self.colour_mask = self.rules.colour_bits();
@@ -1392,7 +1392,7 @@ impl SoftDraw {
         let old = *rep;
         *rep |= reason;
         if old & reason == 0 {
-            crate::qlog!("sgi-gl: texture {}", message);
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: texture {}", message);
         }
     }
 }
@@ -1440,7 +1440,7 @@ pub fn soft_texture_detail(filter: u32) -> bool {
 
 pub fn soft_texture_dimensions(w: u32, h: u32) -> bool {
     w != 0 && h != 0 && w <= i32::MAX as u32 && h <= i32::MAX as u32 &&
-        is_power_of_2(w as u64) && is_power_of_2(h as u64)
+        (w as u64).is_power_of_two() && (h as u64).is_power_of_two()
 }
 
 pub fn soft_texture_component_mask(format: u32) -> u8 {
@@ -1576,7 +1576,7 @@ impl SoftDraw {
                 return Out::Unsupported;
             }
             if !soft_texture_dimensions(base.width, base.height) ||
-                (im.volume && (base.depth == 0 || base.depth > i32::MAX as u32 || !is_power_of_2(base.depth as u64)))
+                (im.volume && (base.depth == 0 || base.depth > i32::MAX as u32 || !(base.depth as u64).is_power_of_two()))
             {
                 return Out::Incomplete;
             }
@@ -1587,7 +1587,7 @@ impl SoftDraw {
                 if im.volume {
                     extent = std::cmp::max(extent, base.depth);
                 }
-                let k = 31 - clz32(extent);
+                let k = 31 - extent.leading_zeros();
                 last = std::cmp::min(p.base_level as u64 + k as u64, p.max_level as u64) as u32;
             }
             // Unsupported relevant forms cannot be concealed by missing images.
@@ -1644,13 +1644,13 @@ impl SoftDraw {
             Out::Done => true,
             Out::Unsupported => {
                 if report {
-                    crate::qlog!("sgi-gl: unsupported texture state in pyramid, draw dropped");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: unsupported texture state in pyramid, draw dropped");
                 }
                 false
             }
             Out::Incomplete => {
                 if report {
-                    crate::qlog!("sgi-gl: incomplete texture image pyramid, texturing disabled for draw");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: incomplete texture image pyramid, texturing disabled for draw");
                 }
                 true
             }
@@ -1676,7 +1676,7 @@ impl SoftDraw {
                 (im.one_dimensional && im.pyramid.is_null() && im.height != 1)
             {
                 if report {
-                    crate::qlog!("sgi-gl: incompatible 1D texture image, draw dropped");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: incompatible 1D texture image, draw dropped");
                 }
                 return false;
             }
@@ -1686,13 +1686,13 @@ impl SoftDraw {
         // and a volume is not a 2D image.
         if target == 2 && im.as_deref().map_or(false, |i| i.volume) && st.texture_1d != 0 {
             if report {
-                crate::qlog!("sgi-gl: volume texture image for a 2D target, draw dropped");
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: volume texture image for a 2D target, draw dropped");
             }
             return false;
         }
         if target == 3 && im.as_deref().map_or(false, |i| !i.volume) {
             if report {
-                crate::qlog!("sgi-gl: 3D texturing requires a volume image, draw dropped");
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: 3D texturing requires a volume image, draw dropped");
             }
             return false;
         }
@@ -1700,7 +1700,7 @@ impl SoftDraw {
             st.texture_env_mode != SGI_GL_DECAL && st.texture_env_mode != SGI_GL_BLEND
         {
             if report {
-                crate::qlog!("sgi-gl: unsupported texture state environment {:#x}, draw dropped", st.texture_env_mode);
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: unsupported texture state environment {:#x}, draw dropped", st.texture_env_mode);
             }
             return false;
         }
@@ -1711,7 +1711,7 @@ impl SoftDraw {
                   im.max_clamp_r >= 0.0 && im.max_clamp_r <= 1.0)
             {
                 if report {
-                    crate::qlog!("sgi-gl: invalid coordinate clamp, draw dropped");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: invalid coordinate clamp, draw dropped");
                 }
                 return false;
             }
@@ -1720,7 +1720,7 @@ impl SoftDraw {
                 (im.volume && (!im.lod_scale_r.is_finite() || im.lod_scale_r < 0.0))
             {
                 if report {
-                    crate::qlog!("sgi-gl: invalid derivative scales, draw dropped");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: invalid derivative scales, draw dropped");
                 }
                 return false;
             }
@@ -1752,7 +1752,8 @@ impl SoftDraw {
                 (st.texture_env_mode == SGI_GL_DECAL && im.base_format != SGI_GL_RGB && im.base_format != SGI_GL_RGBA)
             {
                 if report {
-                    crate::qlog!(
+                    crate::dlog!(
+                        LogModule::Odyssey,
                         "sgi-gl: unsupported texture state format {:#x} border {} filters {:#x}/{:#x} wraps {:#x}/{:#x}/{:#x} environment {:#x}{}, draw dropped",
                         im.base_format, im.border, im.min_filter, im.mag_filter, im.wrap_s, im.wrap_t,
                         im.wrap_r, st.texture_env_mode,
@@ -1772,13 +1773,13 @@ impl SoftDraw {
                 }) ||
                     im.width == 0 || im.height == 0 ||
                     im.width > i32::MAX as u32 || im.height > i32::MAX as u32 ||
-                    !is_power_of_2(im.width as u64) || !is_power_of_2(im.height as u64) ||
-                    (im.volume && (im.depth == 0 || im.depth > i32::MAX as u32 || !is_power_of_2(im.depth as u64)))
+                    !(im.width as u64).is_power_of_two() || !(im.height as u64).is_power_of_two() ||
+                    (im.volume && (im.depth == 0 || im.depth > i32::MAX as u32 || !(im.depth as u64).is_power_of_two()))
             }
         };
         if incomplete {
             if report {
-                crate::qlog!("sgi-gl: incomplete texture image, texturing disabled for draw");
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: incomplete texture image, texturing disabled for draw");
             }
             return true;
         }
@@ -1864,7 +1865,7 @@ impl GlTexImage {
 /// powers of two wherever setup admits them, and there the mask gives the
 /// remainder without two 64-bit divisions a tap.
 pub fn soft_texture_repeat(i: i64, n: u32) -> i64 {
-    if is_power_of_2(n as u64) {
+    if (n as u64).is_power_of_two() {
         i & (n as i64 - 1)
     } else {
         (i % n as i64 + n as i64) % n as i64
@@ -3326,7 +3327,7 @@ impl SoftDraw {
         }
         if !(clip[3] > 0.0) {
             if !quiet {
-                crate::qlog!("sgi-gl: clipped vertex at w {} has no window position, primitive dropped", clip[3]);
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: clipped vertex at w {} has no window position, primitive dropped", clip[3]);
             }
             return false;
         }
@@ -3335,7 +3336,7 @@ impl SoftDraw {
         let yw = win[1];
         if !(xw.abs() < 65536.0 && yw.abs() < 65536.0) {
             if !quiet {
-                crate::qlog!("sgi-gl: vertex outside the rasterizer's range, primitive dropped");
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: vertex outside the rasterizer's range, primitive dropped");
             }
             return false;
         }

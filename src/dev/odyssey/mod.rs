@@ -25,6 +25,8 @@
 
 pub use crate::dev::sgi_gfx::*;
 
+use crate::devlog::LogModule;
+
 pub mod cmd;
 pub mod defs;
 pub mod device;

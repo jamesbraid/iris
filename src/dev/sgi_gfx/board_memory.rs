@@ -114,7 +114,7 @@ impl BoardMemory {
     }
     /// A page-backed memory of npages unresolved pages of page_size bytes.
     pub fn init_pages(&mut self, npages: u32, page_size: u32) {
-        assert!(npages != 0 && is_power_of_2(page_size as u64));
+        assert!(npages != 0 && (page_size as u64).is_power_of_two());
         *self = BoardMemory::default();
         self.size = npages as u64 * page_size as u64;
         self.npages = npages;
@@ -178,7 +178,7 @@ impl BoardMemory {
         let p = &mut self.planes[id as usize];
         *p = *plane;
         p.id = id;
-        crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi_plane_add: plane {} base {:#x} len {:#x} {}x{} stride {} format {}", p.id, p.base, p.len, p.width, p.height, p.stride, p.format as i32);
+        crate::dlog!(LogModule::Odyssey, "sgi_plane_add: plane {} base {:#x} len {:#x} {}x{} stride {} format {}", p.id, p.base, p.len, p.width, p.height, p.stride, p.format as i32);
         p.id
     }
     /// The plane with this id, or null.
@@ -331,16 +331,16 @@ pub fn plane_word_load(bytes: &[u8], bpp: u32, le: bool) -> u32 {
         1 => bytes[0] as u32,
         2 => {
             if le {
-                lduw_le_p(bytes)
+                u16::from_le_bytes(bytes[..2].try_into().unwrap()) as u32
             } else {
-                lduw_be_p(bytes)
+                u16::from_be_bytes(bytes[..2].try_into().unwrap()) as u32
             }
         }
         _ => {
             if le {
-                ldl_le_p(bytes)
+                u32::from_le_bytes(bytes[..4].try_into().unwrap())
             } else {
-                ldl_be_p(bytes)
+                u32::from_be_bytes(bytes[..4].try_into().unwrap())
             }
         }
     }
@@ -352,16 +352,16 @@ pub fn plane_word_store(bytes: &mut [u8], bpp: u32, le: bool, word: u32) {
         1 => bytes[0] = word as u8,
         2 => {
             if le {
-                stw_le_p(bytes, word);
+                bytes[..2].copy_from_slice(&(word as u16).to_le_bytes());
             } else {
-                stw_be_p(bytes, word);
+                bytes[..2].copy_from_slice(&(word as u16).to_be_bytes());
             }
         }
         _ => {
             if le {
-                stl_le_p(bytes, word);
+                bytes[..4].copy_from_slice(&(word as u32).to_le_bytes());
             } else {
-                stl_be_p(bytes, word);
+                bytes[..4].copy_from_slice(&(word as u32).to_be_bytes());
             }
         }
     }

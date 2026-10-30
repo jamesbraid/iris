@@ -1371,7 +1371,7 @@ impl GlContext {
     /// (x, y). Rejects use inside Begin/End.
     pub fn polygon_stipple(&mut self, rows: &[u32; 32]) -> bool {
         if self.in_begin != 0 {
-            crate::qlog!("sgi-gl: polygon stipple inside glBegin: invalid operation");
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: polygon stipple inside glBegin: invalid operation");
             return false;
         }
         self.polygon_stipple = *rows;
@@ -1380,7 +1380,7 @@ impl GlContext {
 
     pub fn get_polygon_stipple(&self, rows: &mut [u32; 32]) -> bool {
         if self.in_begin != 0 {
-            crate::qlog!("sgi-gl: polygon stipple query inside glBegin: invalid operation");
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: polygon stipple query inside glBegin: invalid operation");
             return false;
         }
         *rows = self.polygon_stipple;
@@ -1492,7 +1492,8 @@ impl GlContext {
             SGI_GL_PROJECTION => Some(&mut self.cur.projection),
             SGI_GL_TEXTURE => Some(&mut self.texture),
             _ => {
-                crate::qlog!(
+                crate::dlog!(
+                    LogModule::Odyssey,
                     "sgi-gl: matrix mode {:#x} is not modelled; matrix command ignored",
                     slot
                 );
@@ -1533,7 +1534,7 @@ pub fn gl_projection_matrix(op: u16, p: &[u32], m: &mut [f64; 16]) -> bool {
     let f = gl_float(gl_arg(p, 5)) as f64;
 
     if l == r || b == t || n == f || (op as u32 == SGI_GL_OP_FRUSTUM && (n <= 0.0 || f <= 0.0)) {
-        crate::qlog!("sgi-gl: projection with invalid bounds ignored");
+        crate::dlog!(LogModule::Odyssey, "sgi-gl: projection with invalid bounds ignored");
         return false;
     }
     *m = [0.0; 16];
@@ -1588,7 +1589,7 @@ pub fn gl_transform_matrix(op: u16, p: &[u32], m: &mut [f64; 16]) -> bool {
             let len = (x * x + y * y + z * z).sqrt();
 
             if !(len > 0.0) {
-                crate::qlog!("sgi-gl: glRotatef about a zero axis ignored");
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: glRotatef about a zero axis ignored");
                 return false;
             }
             x /= len;
@@ -1630,7 +1631,7 @@ impl GlContext {
 
         if op as u32 == SGI_GL_OP_PUSH_MATRIX {
             if *depth >= SGI_GL_STACK_DEPTH - 1 {
-                crate::qlog!("sgi-gl: glPushMatrix on a full stack ignored");
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: glPushMatrix on a full stack ignored");
                 return;
             }
             stack[*depth as usize] = *m;
@@ -1638,7 +1639,7 @@ impl GlContext {
             return;
         }
         if *depth == 0 {
-            crate::qlog!("sgi-gl: glPopMatrix of the last matrix ignored");
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: glPopMatrix of the last matrix ignored");
             return;
         }
         *depth -= 1;
@@ -1819,7 +1820,8 @@ impl GlDrawState {
                 continue;
             }
             if bit >= 2 && pick[bit] == 0 {
-                crate::qlog!(
+                crate::dlog!(
+                    LogModule::Odyssey,
                     "sgi-gl: draw buffer bit {} of {:#x} has no buffer; ignored",
                     bit,
                     self.draw_buffers
@@ -1838,7 +1840,7 @@ impl GlDrawState {
             }
         }
         if self.draw_buffers & !0xfu32 != 0 {
-            crate::qlog!("sgi-gl: draw buffers {:#x} beyond bit 3 ignored", self.draw_buffers);
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: draw buffers {:#x} beyond bit 3 ignored", self.draw_buffers);
         }
         n
     }
@@ -1896,14 +1898,15 @@ impl GlContext {
 
         if mask & !(SGI_GL_COLOR_BUFFER_BIT | SGI_GL_DEPTH_BUFFER_BIT | SGI_GL_STENCIL_BUFFER_BIT) != 0
         {
-            crate::qlog!(
+            crate::dlog!(
+                LogModule::Odyssey,
                 "sgi-gl: glClear of buffers {:#x} beyond colour, depth and stencil ignored",
                 mask
             );
         }
         op.ntargets = self.cur.draw_targets(&mut op.targets);
         if self.cur.drawable.bound == 0 {
-            crate::qlog!("sgi-gl: glClear with no window bound dropped");
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: glClear with no window bound dropped");
             return;
         }
         // A window others wholly cover, or a scissor off it: nothing.
@@ -2659,7 +2662,7 @@ impl GlContext {
         let n = self.nheld;
 
         if self.in_begin == 0 {
-            crate::qlog!("sgi-gl: vertex outside glBegin ignored");
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: vertex outside glBegin ignored");
             return;
         }
         let bits = [pos[0].to_bits(), pos[1].to_bits(), pos[2].to_bits(), pos[3].to_bits()];
@@ -2907,7 +2910,7 @@ impl GlContext {
     /// Shininess outside [0, 128] is an error and changes nothing.
     pub fn material(&mut self, faces: u32, pname: u32, v: &[f32; 4]) {
         if pname == SGI_GL_SHININESS && !(v[0] >= 0.0 && v[0] <= 128.0) {
-            crate::qlog!("sgi-gl: material shininess {} ignored", v[0]);
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: material shininess {} ignored", v[0]);
             return;
         }
         for i in 0..2usize {
@@ -2928,7 +2931,7 @@ impl GlContext {
                 SGI_GL_SHININESS => m.shininess = v[0],
                 SGI_GL_COLOR_INDEXES => m.color_indexes.copy_from_slice(&v[..3]),
                 _ => {
-                    crate::qlog!("sgi-gl: material parameter {:#x} ignored", pname);
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: material parameter {:#x} ignored", pname);
                     return;
                 }
             }
@@ -2982,7 +2985,7 @@ impl GlContext {
         let mut eye = [0.0f32; 4];
 
         if n >= SGI_GL_LIGHTS {
-            crate::qlog!("sgi-gl: light {} ignored", n);
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: light {} ignored", n);
             return;
         }
         let mv = self.cur.modelview;
@@ -3030,7 +3033,7 @@ impl GlContext {
             }
             _ => {}
         }
-        crate::qlog!("sgi-gl: light parameter {:#x} value {} ignored", pname, v[0]);
+        crate::dlog!(LogModule::Odyssey, "sgi-gl: light parameter {:#x} value {} ignored", pname, v[0]);
     }
 
     /// Set light number light (0 for GL_LIGHT0) from values a family has
@@ -3038,7 +3041,7 @@ impl GlContext {
     /// and logged, for a light the context does not keep.
     pub fn set_light(&mut self, light: u32, e: &GlEyeLight) -> bool {
         if light >= SGI_GL_LIGHTS {
-            crate::qlog!("sgi-gl: light {} ignored", light);
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: light {} ignored", light);
             return false;
         }
         let l = &mut self.light[light as usize];
@@ -3136,7 +3139,7 @@ impl GlContext {
             SGI_GL_LIGHT_MODEL_LOCAL_VIEWER => self.light_model_local_viewer = (v[0] != 0.0) as u32,
             SGI_GL_LIGHT_MODEL_TWO_SIDE => self.light_model_two_side = (v[0] != 0.0) as u32,
             _ => {
-                crate::qlog!("sgi-gl: light model parameter {:#x} ignored", pname);
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: light model parameter {:#x} ignored", pname);
             }
         }
     }
@@ -3186,7 +3189,7 @@ impl GlContext {
             }
             _ => {}
         }
-        crate::qlog!("sgi-gl: glFog parameter {:#x} value {} ignored", pname, v[0]);
+        crate::dlog!(LogModule::Odyssey, "sgi-gl: glFog parameter {:#x} value {} ignored", pname, v[0]);
     }
 
     pub fn color_material(&mut self, face: u32, mode: u32) {
@@ -3196,7 +3199,7 @@ impl GlContext {
             _ => 0,
         };
         if gl_faces(face) == 0 || mode == 0 {
-            crate::qlog!("sgi-gl: glColorMaterial({:#x}, {:#x}) ignored", face, mode);
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: glColorMaterial({:#x}, {:#x}) ignored", face, mode);
             return;
         }
         self.color_material_face = face;
@@ -3253,7 +3256,7 @@ impl GlContext {
         let mut inv = [0.0f64; 16];
 
         if plane >= SGI_GL_CLIP_PLANES || !gl_invert(&self.cur.modelview, &mut inv) {
-            crate::qlog!("sgi-gl: glClipPlane of plane {} ignored", plane);
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: glClipPlane of plane {} ignored", plane);
             return;
         }
         for j in 0..4 {
@@ -3293,11 +3296,12 @@ impl GlContext {
         match op as u32 {
             SGI_GL_OP_POINT_SIZE | SGI_GL_OP_LINE_WIDTH => {
                 if self.in_begin != 0 {
-                    crate::qlog!("sgi-gl: size setter inside glBegin: invalid operation");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: size setter inside glBegin: invalid operation");
                     return;
                 }
                 if !f.is_finite() || !(f > 0.0) {
-                    crate::qlog!(
+                    crate::dlog!(
+                        LogModule::Odyssey,
                         "sgi-gl: {}({}) ignored",
                         if op as u32 == SGI_GL_OP_POINT_SIZE { "glPointSize" } else { "glLineWidth" },
                         f
@@ -3312,7 +3316,7 @@ impl GlContext {
             }
             SGI_GL_OP_LINE_STIPPLE => {
                 if self.in_begin != 0 {
-                    crate::qlog!("sgi-gl: line stipple inside glBegin: invalid operation");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: line stipple inside glBegin: invalid operation");
                     return;
                 }
                 let repeat = gl_arg(a, 0) as i32;
@@ -3321,7 +3325,7 @@ impl GlContext {
             }
             _ => {
                 if self.in_begin != 0 {
-                    crate::qlog!("sgi-gl: polygon mode inside glBegin: invalid operation");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: polygon mode inside glBegin: invalid operation");
                     return;
                 }
                 let a0 = gl_arg(a, 0);
@@ -3336,7 +3340,7 @@ impl GlContext {
                     0
                 };
                 if faces == 0 || a1.wrapping_sub(SGI_GL_POINT) > SGI_GL_FILL - SGI_GL_POINT {
-                    crate::qlog!("sgi-gl: glPolygonMode({:#x}, {:#x}) ignored", a0, a1);
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: glPolygonMode({:#x}, {:#x}) ignored", a0, a1);
                     return;
                 }
                 for i in 0..2usize {
@@ -3345,7 +3349,7 @@ impl GlContext {
                     }
                 }
                 if a1 != SGI_GL_FILL && self.polygon.enabled == 0 {
-                    crate::qlog!("sgi-gl: polygon mode {:#x} is kept; polygons are drawn filled", a1);
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: polygon mode {:#x} is kept; polygons are drawn filled", a1);
                 }
             }
         }
@@ -3357,12 +3361,12 @@ impl GlContext {
 
         if raster != 0 {
             if (cap == SGI_GL_POLYGON_STIPPLE || cap == SGI_GL_LINE_STIPPLE) && self.in_begin != 0 {
-                crate::qlog!("sgi-gl: stipple enable inside glBegin: invalid operation");
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: stipple enable inside glBegin: invalid operation");
                 return;
             }
             self.raster_enables = if on { self.raster_enables | raster } else { self.raster_enables & !raster };
             if on && cap == SGI_GL_LINE_STIPPLE && !self.standalone_stipple {
-                crate::qlog!("sgi-gl: standalone line stipple is kept; standalone lines are drawn without it");
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: standalone line stipple is kept; standalone lines are drawn without it");
             }
             return;
         }
@@ -3393,7 +3397,7 @@ impl GlContext {
             SGI_GL_LIGHTING => {
                 self.lighting = onv;
                 if on && self.cur.index_bits != 0 {
-                    crate::qlog!("sgi-gl: colour-index lighting is not modelled; indices stay unlit");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: colour-index lighting is not modelled; indices stay unlit");
                 }
             }
             SGI_GL_NORMALIZE => self.normalize = onv,
@@ -3406,7 +3410,8 @@ impl GlContext {
                 self.tex_gen_enabled = deposit32(self.tex_gen_enabled, cap - SGI_GL_TEXTURE_GEN_S, 1, onv);
             }
             _ => {
-                crate::qlog!(
+                crate::dlog!(
+                    LogModule::Odyssey,
                     "sgi-gl: capability {:#x} is not modelled; {} ignored",
                     cap,
                     if on { "glEnable" } else { "glDisable" }
@@ -3440,7 +3445,7 @@ impl GlContext {
             || !xmove.is_finite()
             || !ymove.is_finite()
         {
-            crate::qlog!("sgi-gl: nonfinite bitmap placement dropped");
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: nonfinite bitmap placement dropped");
             return false;
         }
         // Beyond 2^30 a corner lies off any plane; keep it there.
@@ -3475,7 +3480,7 @@ impl GlContext {
         op.bitmap.distance = self.raster_distance;
 
         if self.cur.drawable.bound == 0 {
-            crate::qlog!("sgi-gl: glBitmap with no window bound dropped");
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: glBitmap with no window bound dropped");
             return;
         }
         if self.cur.drawable.clip.n == 0 {
@@ -3522,14 +3527,14 @@ impl GlContext {
         op.pixels.z = self.raster_pos[2];
         op.pixels.distance = self.raster_distance;
         if self.in_begin != 0 {
-            crate::qlog!("sgi-gl: {} inside glBegin dropped", call);
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: {} inside glBegin dropped", call);
             return SGI_GL_PIXELS_REFUSED;
         }
         if self.raster_valid == 0 || width == 0 || height == 0 {
             return SGI_GL_PIXELS_EMPTY;
         }
         if !zoom_x.is_finite() || !zoom_y.is_finite() || !op.pixels.x.is_finite() || !op.pixels.y.is_finite() {
-            crate::qlog!("sgi-gl: nonfinite {} placement dropped", call);
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: nonfinite {} placement dropped", call);
             return SGI_GL_PIXELS_REFUSED;
         }
         if zoom_x == 0.0 || zoom_y == 0.0 {
@@ -3538,24 +3543,24 @@ impl GlContext {
         if let Some(t) = transfer {
             for k in 0..4 {
                 if !t.scale[k].is_finite() || !t.bias[k].is_finite() {
-                    crate::qlog!("sgi-gl: nonfinite pixel transfer dropped");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: nonfinite pixel transfer dropped");
                     return SGI_GL_PIXELS_REFUSED;
                 }
             }
             op.pixels.transfer = *t;
         }
         if colour && self.cur.index_bits != 0 {
-            crate::qlog!("sgi-gl: colour-index {} is unsupported; image dropped", call);
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: colour-index {} is unsupported; image dropped", call);
             return SGI_GL_PIXELS_REFUSED;
         }
         if self.cur.drawable.bound == 0 {
-            crate::qlog!("sgi-gl: {} with no window bound dropped", call);
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: {} with no window bound dropped", call);
             return SGI_GL_PIXELS_REFUSED;
         }
         match sink {
             Some(s) if s.raster.is_some() => {}
             _ => {
-                crate::qlog!("sgi-gl: {} with no raster sink dropped", call);
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: {} with no raster sink dropped", call);
                 return SGI_GL_PIXELS_REFUSED;
             }
         }
@@ -3578,7 +3583,7 @@ impl GlContext {
             return;
         }
         if rgba.is_empty() {
-            crate::qlog!("sgi-gl: glDrawPixels with no image bound dropped");
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: glDrawPixels with no image bound dropped");
             return;
         }
         op.pixels.rgba = P(rgba.as_ptr() as *mut u32);
@@ -3607,7 +3612,7 @@ impl GlContext {
                 };
 
                 if !component.is_finite() {
-                    crate::qlog!("sgi-gl: nonfinite glDrawPixels source dropped");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: nonfinite glDrawPixels source dropped");
                     return false;
                 }
             }
@@ -3682,7 +3687,7 @@ impl GlContext {
         }
         for i in 0..count as usize {
             if !depth[i].is_finite() {
-                crate::qlog!("sgi-gl: nonfinite glDrawPixels depth source dropped");
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: nonfinite glDrawPixels depth source dropped");
                 return false;
             }
         }
@@ -3717,7 +3722,7 @@ impl GlContext {
                 f
             }
             _ => {
-                crate::qlog!("sgi-gl: glCopyPixels source unavailable or outside coordinate range");
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: glCopyPixels source unavailable or outside coordinate range");
                 return false;
             }
         };
@@ -3740,7 +3745,7 @@ impl GlContext {
                     (y as i64 + row as i64) as i32,
                     &mut pixels[(row as u64 * width as u64 + col as u64) as usize],
                 ) {
-                    crate::qlog!("sgi-gl: glCopyPixels source read failed; image dropped");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: glCopyPixels source read failed; image dropped");
                     return false;
                 }
             }
@@ -3817,7 +3822,7 @@ impl GlContext {
                 _ => {}
             }
         }
-        crate::qlog!("sgi-gl: glTexGen of coordinate {:#x} parameter {:#x} ignored", a0, a1);
+        crate::dlog!(LogModule::Odyssey, "sgi-gl: glTexGen of coordinate {:#x} parameter {:#x} ignored", a0, a1);
     }
 }
 
@@ -3842,7 +3847,7 @@ impl GlContext {
         let mut pos = [0.0f32; 4];
 
         if cmd.op as usize >= GL_NARGS.len() || cmd.nargs != GL_NARGS[cmd.op as usize] as u16 {
-            crate::qlog!("sgi-gl: command {} with {} arguments ignored", cmd.op, cmd.nargs);
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: command {} with {} arguments ignored", cmd.op, cmd.nargs);
             return;
         }
         match cmd.op as u32 {
@@ -3852,7 +3857,8 @@ impl GlContext {
                     || a[0] > SGI_GL_FOG_HINT
                     || !gl_hint_mode(a[1])
                 {
-                    crate::qlog!(
+                    crate::dlog!(
+                        LogModule::Odyssey,
                         "sgi-gl: hint target {:#x} mode {:#x} ignored{}",
                         a[0],
                         a[1],
@@ -3896,7 +3902,8 @@ impl GlContext {
                     }
                     return;
                 }
-                crate::qlog!(
+                crate::dlog!(
+                    LogModule::Odyssey,
                     "sgi-gl: texture environment parameter {:#x} value {} ignored",
                     a[0],
                     gl_float(a[1])
@@ -3930,7 +3937,7 @@ impl GlContext {
             }
             SGI_GL_OP_DEPTH_FUNC => {
                 if a[0].wrapping_sub(SGI_GL_NEVER_ENUM) > SGI_GL_ALWAYS {
-                    crate::qlog!("sgi-gl: depth function {:#x} ignored", a[0]);
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: depth function {:#x} ignored", a[0]);
                     return;
                 }
                 self.cur.depth_func = a[0] - SGI_GL_NEVER_ENUM;
@@ -3938,14 +3945,14 @@ impl GlContext {
             SGI_GL_OP_DEPTH_MASK => self.cur.depth_mask = (a[0] != 0) as u32,
             SGI_GL_OP_CULL_FACE => {
                 if gl_faces(a[0]) == 0 {
-                    crate::qlog!("sgi-gl: glCullFace({:#x}) ignored", a[0]);
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: glCullFace({:#x}) ignored", a[0]);
                     return;
                 }
                 self.cur.cull_face_mode = a[0];
             }
             SGI_GL_OP_FRONT_FACE => {
                 if a[0] != SGI_GL_CW && a[0] != SGI_GL_CCW {
-                    crate::qlog!("sgi-gl: glFrontFace({:#x}) ignored", a[0]);
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: glFrontFace({:#x}) ignored", a[0]);
                     return;
                 }
                 self.cur.front_face = a[0];
@@ -3954,7 +3961,7 @@ impl GlContext {
             SGI_GL_OP_SCISSOR => {
                 // A negative width or height is an error and changes nothing.
                 if (a[2] as i32) < 0 || (a[3] as i32) < 0 {
-                    crate::qlog!("sgi-gl: glScissor of {} by {} ignored", a[2] as i32, a[3] as i32);
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: glScissor of {} by {} ignored", a[2] as i32, a[3] as i32);
                     return;
                 }
                 for i in 0..4 {
@@ -3965,7 +3972,7 @@ impl GlContext {
                 let r = gl_float(a[1]);
 
                 if a[0].wrapping_sub(SGI_GL_NEVER_ENUM) > SGI_GL_ALWAYS {
-                    crate::qlog!("sgi-gl: alpha function {:#x} ignored", a[0]);
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: alpha function {:#x} ignored", a[0]);
                     return;
                 }
                 self.cur.alpha_func = a[0] - SGI_GL_NEVER_ENUM;
@@ -3980,7 +3987,7 @@ impl GlContext {
             }
             SGI_GL_OP_STENCIL_FUNC => {
                 if a[0].wrapping_sub(SGI_GL_NEVER_ENUM) > SGI_GL_ALWAYS {
-                    crate::qlog!("sgi-gl: stencil function {:#x} ignored", a[0]);
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: stencil function {:#x} ignored", a[0]);
                     return;
                 }
                 self.cur.stencil_func = a[0] - SGI_GL_NEVER_ENUM;
@@ -3990,7 +3997,7 @@ impl GlContext {
             SGI_GL_OP_STENCIL_OP => {
                 for i in 0..3 {
                     if !gl_stencil_op_valid(a[i]) {
-                        crate::qlog!("sgi-gl: glStencilOp({:#x}, {:#x}, {:#x}) ignored", a[0], a[1], a[2]);
+                        crate::dlog!(LogModule::Odyssey, "sgi-gl: glStencilOp({:#x}, {:#x}, {:#x}) ignored", a[0], a[1], a[2]);
                         return;
                     }
                 }
@@ -4000,7 +4007,7 @@ impl GlContext {
             SGI_GL_OP_CLEAR_STENCIL => self.clear_stencil = a[0],
             SGI_GL_OP_BLEND_FUNC => {
                 if !gl_blend_factor_valid(a[0], false) || !gl_blend_factor_valid(a[1], true) {
-                    crate::qlog!("sgi-gl: glBlendFunc({:#x}, {:#x}) ignored", a[0], a[1]);
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: glBlendFunc({:#x}, {:#x}) ignored", a[0], a[1]);
                     return;
                 }
                 self.cur.blend_src = a[0];
@@ -4008,7 +4015,7 @@ impl GlContext {
             }
             SGI_GL_OP_BLEND_EQUATION => {
                 if !gl_blend_equation_valid(a[0]) {
-                    crate::qlog!("sgi-gl: glBlendEquation({:#x}) ignored", a[0]);
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: glBlendEquation({:#x}) ignored", a[0]);
                     return;
                 }
                 self.cur.blend_equation = a[0];
@@ -4028,7 +4035,7 @@ impl GlContext {
             }
             SGI_GL_OP_LOGIC_OP => {
                 if a[0].wrapping_sub(SGI_GL_CLEAR) > SGI_GL_SET - SGI_GL_CLEAR {
-                    crate::qlog!("sgi-gl: glLogicOp({:#x}) ignored", a[0]);
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: glLogicOp({:#x}) ignored", a[0]);
                     return;
                 }
                 self.cur.logic_op_mode = a[0];
@@ -4086,11 +4093,11 @@ impl GlContext {
             SGI_GL_OP_EDGE_FLAG => self.cur_edge = (a[0] != 0) as u32,
             SGI_GL_OP_BEGIN => {
                 if self.in_begin != 0 {
-                    crate::qlog!("sgi-gl: nested glBegin ignored");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: nested glBegin ignored");
                     return;
                 }
                 if a[0] > SGI_GL_POLYGON {
-                    crate::qlog!("sgi-gl: glBegin of mode {} ignored", a[0]);
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: glBegin of mode {} ignored", a[0]);
                     return;
                 }
                 self.line_phase = 0;
@@ -4103,11 +4110,11 @@ impl GlContext {
             }
             SGI_GL_OP_SWAP_TMESH => {
                 if self.in_begin == 0 || self.begin_mode != SGI_GL_TRIANGLE_STRIP {
-                    crate::qlog!("sgi-gl: a mesh swap outside an open triangle strip ignored");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: a mesh swap outside an open triangle strip ignored");
                     return;
                 }
                 if self.strip_prev == 0 {
-                    crate::qlog!("sgi-gl: a mesh swap before the strip's first triangle ignored");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: a mesh swap before the strip's first triangle ignored");
                     return;
                 }
                 // Two swaps before a vertex undo each other.
@@ -4192,7 +4199,7 @@ impl GlContext {
             SGI_GL_OP_MATERIAL => {
                 pos = gl_words4(a, 2);
                 if gl_faces(a[0]) == 0 {
-                    crate::qlog!("sgi-gl: material face {:#x} ignored", a[0]);
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: material face {:#x} ignored", a[0]);
                     return;
                 }
                 self.material(gl_faces(a[0]), a[1], &pos);
@@ -4317,7 +4324,7 @@ impl GlContext {
                 || pname == SGI_GL_LINE_STIPPLE_REPEAT
                 || pname == SGI_GL_LINE_STIPPLE_PATTERN)
         {
-            crate::qlog!("sgi-gl: line stipple query inside glBegin: invalid operation");
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: line stipple query inside glBegin: invalid operation");
             return false;
         }
         match pname {
@@ -4485,7 +4492,7 @@ impl GlContext {
             | SGI_GL_POLYGON_SMOOTH
             | SGI_GL_POLYGON_STIPPLE => {
                 if pname == SGI_GL_POLYGON_STIPPLE && self.in_begin != 0 {
-                    crate::qlog!("sgi-gl: polygon stipple query inside glBegin: invalid operation");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: polygon stipple query inside glBegin: invalid operation");
                     return false;
                 }
                 gl_get_one(out, n, (self.raster_enables & gl_raster_enable(pname) != 0) as u32)
@@ -4585,7 +4592,7 @@ impl GlContext {
     /// vertices; None when k is 0.
     pub fn resume_primitive(&mut self, mode: u32, v: Option<&[[f32; SGI_GL_VERTEX_FLOATS]]>, k: u32, count: u32) -> bool {
         if self.in_begin != 0 {
-            crate::qlog!("sgi-gl: resume inside glBegin ignored");
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: resume inside glBegin ignored");
             return false;
         }
         if mode > SGI_GL_POLYGON
@@ -4594,7 +4601,7 @@ impl GlContext {
             || !gl_resume_held_ok(mode, k, count)
             || (self.polygon.enabled != 0 && mode == SGI_GL_POLYGON)
         {
-            crate::qlog!("sgi-gl: resume of mode {} with {} held of {} sent refused", mode, k, count);
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: resume of mode {} with {} held of {} sent refused", mode, k, count);
             return false;
         }
         // line_phase is deliberately left alone, unlike glBegin.

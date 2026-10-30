@@ -235,8 +235,8 @@ impl SoftDraw {
             };
             fl.width = l.map_or(im.width, |l| l.width);
             fl.height = l.map_or(im.height, |l| l.height);
-            fl.width_shift = ctz32(fl.width);
-            fl.height_shift = ctz32(fl.height);
+            fl.width_shift = fl.width.trailing_zeros();
+            fl.height_shift = fl.height.trailing_zeros();
             fl.raw = raw;
             if l.is_none() && i != 0 {
                 return false;
@@ -256,8 +256,8 @@ impl SoftDraw {
             if fl.width > SGI_SOFT_FIXED_MAX_SIDE
                 || fl.height > SGI_SOFT_FIXED_MAX_SIDE
                 || (fl.width as u64) * (fl.height as u64) > SGI_SOFT_FIXED_MAX_TEXELS as u64
-                || !is_power_of_2(fl.width as u64)
-                || !is_power_of_2(fl.height as u64)
+                || !(fl.width as u64).is_power_of_two()
+                || !(fl.height as u64).is_power_of_two()
                 || format != f.format
                 || (border_texels != 0 && !edge_only)
                 || !readable

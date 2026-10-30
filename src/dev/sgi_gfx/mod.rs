@@ -9,13 +9,15 @@
 
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals, clippy::all)]
 
+use crate::devlog::LogModule;
+
+pub mod bits;
 pub mod board_memory;
-pub mod cutil;
 pub mod gl_context;
 pub mod head_ops;
-pub mod host;
 pub mod pi_gfx;
 pub mod pixel_dma;
+pub mod ptr;
 pub mod rasterizer;
 pub mod rasterizer2;
 pub mod rasterizer_fixed;
@@ -24,12 +26,12 @@ pub mod scanout;
 pub mod x_gc;
 
 pub use board_memory::*;
-pub use cutil::*;
+pub use bits::*;
 pub use gl_context::*;
 pub use head_ops::*;
-pub use host::*;
 pub use pi_gfx::*;
 pub use pixel_dma::*;
+pub use ptr::*;
 pub use rasterizer::*;
 pub use rasterizer2::*;
 pub use rasterizer_fixed::*;

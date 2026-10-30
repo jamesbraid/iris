@@ -75,6 +75,9 @@ pub struct Board {
     /// processor may touch while the board works, the interrupt routing
     /// and the command-FIFO queue.
     pub front: std::sync::Arc<parking_lot::Mutex<HostInterface>>,
+    /// Guest memory as the board's DMA reaches it (HEART's RAM on the
+    /// Octane).
+    pub guest: GuestMemory,
     pub nic_bus: Option<crate::dev::w1::Bus>,
 
     // Properties.
@@ -448,6 +451,7 @@ impl Default for Board {
         Board {
             slot: 0,
             front: Default::default(),
+            guest: None,
             nic_bus: None,
             revision: 0,
             memory_size: 0,

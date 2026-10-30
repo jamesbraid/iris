@@ -1356,7 +1356,7 @@ pub fn soft_dimension(requested: f32, rounded: &mut u32) -> bool {
     let n = if requested == 0.0 { 1.0 } else { (requested as f64 + 0.5).floor() };
 
     if !requested.is_finite() || requested < 0.0 || n > i32::MAX as f64 {
-        crate::qlog!("sgi-gl: unsupported aliased dimension {}", requested);
+        crate::dlog!(LogModule::Odyssey, "sgi-gl: unsupported aliased dimension {}", requested);
         return false;
     }
     *rounded = r2_max(n, 1.0) as u32;
@@ -1654,7 +1654,7 @@ impl SoftDraw {
                         };
 
                         if !ok {
-                            crate::qlog!("sgi-gl: polygon coverage clip exceeded its bound");
+                            crate::dlog!(LogModule::Odyssey, "sgi-gl: polygon coverage clip exceeded its bound");
                             return;
                         }
                         src_is_a = !src_is_a;
@@ -1899,7 +1899,7 @@ impl SoftDraw {
             self.st.volume_from_draw_vertex(d.soft_polygon_vertex(indices, i), &mut poly[i]);
             for k in 0..4 {
                 if !poly[i].clip[k].is_finite() || !poly[i].eye[k].is_finite() {
-                    crate::qlog!("sgi-gl: invalid polygon position dropped");
+                    crate::dlog!(LogModule::Odyssey, "sgi-gl: invalid polygon position dropped");
                     return SGI_GL_DRAW_OK;
                 }
             }
@@ -1908,7 +1908,7 @@ impl SoftDraw {
             }
         }
         if !self.boundary_clip(&mut poly, &mut other, &mut n, capacity) {
-            crate::qlog!("sgi-gl: polygon exceeds convex clipping bound");
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: polygon exceeds convex clipping bound");
             return SGI_GL_DRAW_OK;
         }
         if n == 0 || !positions.project(&poly[0], &mut first) {
@@ -1951,7 +1951,7 @@ impl SoftDraw {
             return SGI_GL_DRAW_OK;
         }
         if mode != SGI_GL_LINE && mode != SGI_GL_POINT {
-            crate::qlog!("sgi-gl: invalid polygon mode {:#x} ignored", mode);
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: invalid polygon mode {:#x} ignored", mode);
             return SGI_GL_DRAW_OK;
         }
         if (mode == SGI_GL_LINE && !soft_dimension(d.line_width, &mut coverage.line_width))
@@ -2357,7 +2357,7 @@ impl RasterRules {
                 smooth = Some("polygon");
             }
             if let Some(s) = smooth {
-                crate::qlog!("sgi-gl: {} smoothing requested but unsupported by raster rules; drawn aliased", s);
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: {} smoothing requested but unsupported by raster rules; drawn aliased", s);
             }
         }
         if r.polygon_smooth && d.mode >= SGI_GL_TRIANGLES && d.mode <= SGI_GL_POLYGON {
@@ -2422,7 +2422,7 @@ impl RasterRules {
                 SGI_GL_DRAW_OK
             }
             _ => {
-                crate::qlog!("sgi-gl: draw of mode {} ignored", d.mode);
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: draw of mode {} ignored", d.mode);
                 SGI_GL_DRAW_OK
             }
         }
@@ -2777,7 +2777,7 @@ impl RasterRules {
             return;
         }
         if op.kind != SGI_RASTER_CLEAR {
-            crate::qlog!("sgi-gl: raster op of kind {} is not executed", op.kind);
+            crate::dlog!(LogModule::Odyssey, "sgi-gl: raster op of kind {} is not executed", op.kind);
             return;
         }
         if op.clip.n == 0 && op.clip.empty != 0 {
@@ -2797,7 +2797,7 @@ impl RasterRules {
 
             mask = self.colour_mask(op.clear_colour_mask);
             if !rgba && mask != self.colour_bits() && mask != 0 && t.load_colour.is_none() {
-                crate::qlog!("sgi-gl: a partial colour mask needs planes that can be read back; cleared without it");
+                crate::dlog!(LogModule::Odyssey, "sgi-gl: a partial colour mask needs planes that can be read back; cleared without it");
                 mask = self.colour_bits();
             }
             colour = if rgba { rgba_mask != 0 } else { mask != 0 };

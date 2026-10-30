@@ -325,7 +325,8 @@ impl Board {
                     }
                 } else if !self.gl_block_logged {
                     self.gl_block_logged = true;
-                    crate::qlog!(
+                    crate::dlog!(
+                        LogModule::Odyssey,
                         "sgi-odyssey: class 0x31 clip-plane load at index {:#x} is not modeled",
                         self.gl_light_vec_sel
                     );
@@ -337,7 +338,8 @@ impl Board {
                     self.gl_light_colour[at..at + 4].copy_from_slice(&self.cmd_operand[..4]);
                 } else if !self.gl_block_logged {
                     self.gl_block_logged = true;
-                    crate::qlog!(
+                    crate::dlog!(
+                        LogModule::Odyssey,
                         "sgi-odyssey: class 0x32 load at index {:#x} is not modeled",
                         self.gl_light_colour_sel
                     );
@@ -362,7 +364,8 @@ impl Board {
                     self.gl_light_vec[at..at + n].copy_from_slice(&self.cmd_operand[..n]);
                 } else if !self.gl_block_logged {
                     self.gl_block_logged = true;
-                    crate::qlog!(
+                    crate::dlog!(
+                        LogModule::Odyssey,
                         "sgi-odyssey: class 0x31 load at index {:#x} is not modeled",
                         self.gl_light_vec_sel
                     );
@@ -440,7 +443,8 @@ impl Board {
             ODSY_REG_DEPTH_FUNC => {
                 if (self.cmd_operand[0] & !ODSY_DEPTH_FUNC_MASK) != 0 {
                     // Only bits 2:0 are known; every capture leaves the rest 0.
-                    crate::qlog!(
+                    crate::dlog!(
+                        LogModule::Odyssey,
                         "sgi-odyssey: depth function word {:#x} has bits beyond 2:0, not modeled",
                         self.cmd_operand[0]
                     );
@@ -477,7 +481,7 @@ impl Board {
                 let zfail = stencil_op((word >> ODSY_STENCIL_OP_ZFAIL_SHIFT) & ODSY_STENCIL_OP_MASK);
                 let zpass = stencil_op((word >> ODSY_STENCIL_OP_ZPASS_SHIFT) & ODSY_STENCIL_OP_MASK);
                 if fail == u32::MAX || zfail == u32::MAX || zpass == u32::MAX {
-                    crate::qlog!("sgi-odyssey: stencil op word {:#x} is not modeled", word);
+                    crate::dlog!(LogModule::Odyssey, "sgi-odyssey: stencil op word {:#x} is not modeled", word);
                 } else {
                     args[0] = fail;
                     args[1] = zfail;
@@ -499,14 +503,15 @@ impl Board {
                 let src = blend_factor((word >> ODSY_BLEND_SRC_SHIFT) & ODSY_BLEND_SRC_MASK, false);
                 let dst = blend_factor(word & ODSY_BLEND_DST_MASK, true);
                 if src == u32::MAX || dst == u32::MAX {
-                    crate::qlog!("sgi-odyssey: blend factor word {:#x} is not modeled", word);
+                    crate::dlog!(LogModule::Odyssey, "sgi-odyssey: blend factor word {:#x} is not modeled", word);
                 } else {
                     args[0] = src;
                     args[1] = dst;
                     self.gl_feed(SGI_GL_OP_BLEND_FUNC as u16, &args[..2]);
                 }
                 if eq == 3 || eq == 4 {
-                    crate::qlog!(
+                    crate::dlog!(
+                        LogModule::Odyssey,
                         "sgi-odyssey: blend equation {} (the SGIX alpha min/max extension) is not modeled",
                         eq
                     );
@@ -622,7 +627,8 @@ impl Board {
             ODSY_GL_TEX_RECT => {
                 if !self.texture_build_level() && !self.tex_rect_reported {
                     self.tex_rect_reported = true;
-                    crate::qlog!(
+                    crate::dlog!(
+                        LogModule::Odyssey,
                         "sgi-odyssey: textured rectangle into buffer {:#x} has unsupported construction state or missing backing",
                         self.dest_base
                     );
@@ -829,7 +835,8 @@ impl Board {
                     && !self.line_stipple_reported
                 {
                     self.line_stipple_reported = true;
-                    crate::qlog!(
+                    crate::dlog!(
+                        LogModule::Odyssey,
                         "sgi-odyssey: line stipple control {:#x} has unclassified high bits",
                         self.line_stipple[ODSY_LINE_STIPPLE_CONTROL]
                     );
@@ -846,11 +853,11 @@ impl Board {
                 // model draws. The swap completes on the retrace hook
                 // (retrace()).
                 self.draw_word = self.cmd_operand[0];
-                crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_buffer_word: reg {:#x} word {:#x}", tag, self.draw_word);
+                crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_buffer_word: reg {:#x} word {:#x}", tag, self.draw_word);
             }
             ODSY_SWAP_SYNC_B => {
                 self.read_word = self.cmd_operand[0];
-                crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_buffer_word: reg {:#x} word {:#x}", tag, self.read_word);
+                crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_buffer_word: reg {:#x} word {:#x}", tag, self.read_word);
             }
             ODSY_REG_READ_ORIGIN => {
                 self.read_origin[0] = sextract32(self.cmd_operand[0], 0, 16);
@@ -859,7 +866,8 @@ impl Board {
             0x0000060a | 0x0000060c..=ODSY_REG_DRAWABLE_LAST => {
                 if !self.drawable_word_reported {
                     self.drawable_word_reported = true;
-                    crate::qlog!(
+                    crate::dlog!(
+                        LogModule::Odyssey,
                         "sgi-odyssey: drawable word {:#x} with operand {:#x} is consumed but not modeled",
                         tag,
                         self.cmd_operand[0]
@@ -869,17 +877,19 @@ impl Board {
             ODSY_REG_DRAW_MASK => {
                 // The drawing mask: which colour buffers the next writes reach.
                 self.draw_mask = self.cmd_operand[0];
-                crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_draw_mask: mask {:#x}", self.draw_mask);
+                crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_draw_mask: mask {:#x}", self.draw_mask);
                 if (self.draw_mask & !ODSY_DRAW_MASK_BITS) != 0 && !self.draw_mask_high_reported {
                     self.draw_mask_high_reported = true;
-                    crate::qlog!(
+                    crate::dlog!(
+                        LogModule::Odyssey,
                         "sgi-odyssey: drawing mask {:#x} bits above 3 are not modeled; ignored",
                         self.draw_mask
                     );
                 }
                 if (self.draw_mask & ODSY_DRAW_MASK_RIGHT) != 0 && !self.draw_mask_stereo_reported {
                     self.draw_mask_stereo_reported = true;
-                    crate::qlog!(
+                    crate::dlog!(
+                        LogModule::Odyssey,
                         "sgi-odyssey: stereo is not modeled; drawing mask {:#x} draws its right-eye buffers into the left-eye ones",
                         self.draw_mask
                     );
@@ -1189,7 +1199,7 @@ impl Board {
                     return;
                 }
                 self.query_stage = 0;
-                crate::qlog!("sgi-odyssey: unpaired current-query sequence");
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: unpaired current-query sequence");
                 self.cmd_classify(word);
                 return;
             }

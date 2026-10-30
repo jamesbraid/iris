@@ -3,19 +3,41 @@
 //! SGI graphics DMA: guest pages resolved to chunks, and pixel transfers
 //! between those chunks and a plane.
 //!
-//! Chunk buffers: iris has no dma_memory_map(), so every chunk is the C's
-//! "bounce" case. `DmaChunk::host` is an owned `Vec<u8>` of `len` bytes,
-//! filled from guest memory at map time for TO_DEVICE, and written back
-//! (the `written_start..written_end` run) by DmaMap::unmap() for FROM_DEVICE.
-//! `bounce` is therefore always true. Offsets within a chunk are indices
-//! into that Vec. `nchunks`/`capacity` are the Vec's len/capacity and are
-//! dropped.
-//!
-//! Other adaptations: `AddressSpace *as` is an owned `AddressSpace` clone
-//! (field `as_`, `as` being a keyword); the page list's `addr` is an owned
-//! `Vec<u64>` (npages kept); (void*, len) buffers are slices; `bus->ops` is
-//! a `P<HeadOps>`.
+//! A transfer reads or writes guest memory in chunks of at most a page, as
+//! a head's DMA engine bursts. Each chunk is a buffer of its own: a source
+//! is read whole when the transfer is mapped, and of a target only the run
+//! of bytes the head wrote goes back when it is unmapped, so a target the
+//! head did not fully write keeps its other bytes.
 use super::*;
+
+use std::sync::Arc;
+
+use crate::traits::{BusDevice, BUS_OK};
+
+/// Guest memory as a graphics head's DMA reaches it: the machine's
+/// bus-master view, or none before the machine attaches one.
+pub type GuestMemory = Option<Arc<dyn BusDevice>>;
+
+/// Read `buf.len()` guest bytes at `addr`; false when no memory is attached
+/// or the bus reports an error.
+pub fn read_guest(mem: &GuestMemory, addr: u64, buf: &mut [u8]) -> bool {
+    mem.as_deref().is_some_and(|m| crate::physical::read_bytes(m, addr, buf) == BUS_OK)
+}
+
+/// Write `buf` to guest memory at `addr`; false as for [`read_guest`].
+pub fn write_guest(mem: &GuestMemory, addr: u64, buf: &[u8]) -> bool {
+    mem.as_deref().is_some_and(|m| crate::physical::write_bytes(m, addr, buf) == BUS_OK)
+}
+
+/// Which way a mapped transfer moves bytes.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum DmaDirection {
+    /// Guest memory to the head: chunks are read when mapped.
+    #[default]
+    ToDevice,
+    /// The head to guest memory: written runs go back when unmapped.
+    FromDevice,
+}
 
 pub const SGI_DMA_CHUNK_MAX: u32 = 4096;
 /// No SGI head has a plane taller than this; it bounds a transfer's chunks.
@@ -26,7 +48,7 @@ pub const SGI_DMA_MIN_PAGE_SIZE: u32 = SGI_DMA_CHUNK_MAX;
 /// A head's view of guest memory.
 #[derive(Clone, Default)]
 pub struct DmaBus {
-    pub as_: AddressSpace, // the head's bus address space
+    pub mem: GuestMemory,
     pub ops: P<HeadOps>, // dma_address, dma_chunk, publish
     pub opaque: Opaque,
 }
@@ -41,7 +63,7 @@ pub struct DmaPageList {
 
 #[derive(Clone, Default)]
 pub struct DmaChunk {
-    pub host: Vec<u8>, // the chunk's bytes (always a bounce buffer here)
+    pub host: Vec<u8>, // the chunk's bytes
     pub len: u32,
     pub pos: u64,      // offset within the page-listed buffer
     pub addr: u64,     // device address, as traced
@@ -57,16 +79,17 @@ pub struct DmaChunk {
 pub struct DmaMap {
     pub chunks: Vec<DmaChunk>,
     pub cursor: u32, // the chunk the last copy ended in
-    pub as_: AddressSpace,
-    pub dir: DMADirection,
+    pub mem: GuestMemory,
+    pub dir: DmaDirection,
 }
 
 impl DmaPageList {
     /// The bytes a page list maps, or 0 (logged) when its page size is not a
     /// power of two of at least SGI_DMA_MIN_PAGE_SIZE.
     pub fn bytes(&self) -> u64 {
-        if self.page_size < SGI_DMA_MIN_PAGE_SIZE || !is_power_of_2(self.page_size as u64) {
-            crate::qlog!(
+        if self.page_size < SGI_DMA_MIN_PAGE_SIZE || !(self.page_size as u64).is_power_of_two() {
+            crate::dlog!(
+                LogModule::Odyssey,
                 "sgi-dma: page size {} is not a power of two of at least {}",
                 self.page_size,
                 SGI_DMA_MIN_PAGE_SIZE
@@ -97,14 +120,8 @@ impl DmaBus {
                 return false;
             }
             let dst = &mut buf[done as usize..(done + n) as usize];
-            let res = dma_memory_read(&self.as_, bus_addr, dst);
-            if res != MEMTX_OK {
-                crate::qlog!(
-                    "sgi-dma: read of {} bytes at {:#x} failed (result {})",
-                    n,
-                    bus_addr,
-                    res
-                );
+            if !read_guest(&self.mem, bus_addr, dst) {
+                crate::dlog!(LogModule::Odyssey, "sgi-dma: read of {} bytes at {:#x} failed", n, bus_addr);
                 return false;
             }
             self.trace(trace, trace_seq, at, dst);
@@ -115,17 +132,18 @@ impl DmaBus {
 
     /// Resolve [offset, offset + len) of a page-listed buffer and append its
     /// chunks to map. Returns 0, or an Failure after logging a guest error.
-    pub fn map(&self, map: &mut DmaMap, pl: &DmaPageList, offset: u64, len: u64, dir: DMADirection, trace: bool, trace_seq: u64) -> i32 {
+    pub fn map(&self, map: &mut DmaMap, pl: &DmaPageList, offset: u64, len: u64, dir: DmaDirection, trace: bool, trace_seq: u64) -> i32 {
         let total = pl.bytes();
         let mut pos = offset;
 
         assert!(map.chunks.is_empty() || map.dir == dir);
-        map.as_ = self.as_.clone();
+        map.mem = self.mem.clone();
         map.dir = dir;
         let first = map.chunks.len();
 
         if offset > total || len > total - offset {
-            crate::qlog!(
+            crate::dlog!(
+                LogModule::Odyssey,
                 "sgi-dma: bytes {:#x}+{:#x} are outside a {}-page buffer",
                 offset,
                 len,
@@ -146,7 +164,8 @@ impl DmaBus {
             let mut bus_addr: u64 = 0;
 
             if page & (ps - 1) != 0 {
-                crate::qlog!(
+                crate::dlog!(
+                    LogModule::Odyssey,
                     "sgi-dma: page {:#x} is not aligned to its {}-byte size",
                     page,
                     pl.page_size
@@ -156,8 +175,7 @@ impl DmaBus {
             if !self.compose(addr, &mut bus_addr) {
                 return SGI_FAIL_BUS as i32;
             }
-            // No dma_memory_map() here: always a bounce buffer.
-            crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_dma_bounce: addr {:#x} len {}", addr, n);
+            crate::dlog_dev!(LogModule::Odyssey, "sgi_dma_chunk: addr {:#x} len {}", addr, n);
             let mut c = DmaChunk {
                 host: vec![0u8; n as usize],
                 len: n as u32,
@@ -171,19 +189,17 @@ impl DmaBus {
             // Only a source is read. A buffer the head writes starts empty and
             // only the bytes it wrote go back, so a target that is not RAM sees
             // the writes the head made and no read of its own.
-            if dir == DMA_DIRECTION_TO_DEVICE
-                && dma_memory_read(&self.as_, bus_addr, &mut c.host[..]) != MEMTX_OK
-            {
-                crate::qlog!("sgi-dma: read of {} bytes at {:#x} failed", n, bus_addr);
+            if dir == DmaDirection::ToDevice && !read_guest(&self.mem, bus_addr, &mut c.host[..]) {
+                crate::dlog!(LogModule::Odyssey, "sgi-dma: read of {} bytes at {:#x} failed", n, bus_addr);
                 return SGI_FAIL_BUS as i32;
             }
-            if dir == DMA_DIRECTION_TO_DEVICE {
+            if dir == DmaDirection::ToDevice {
                 self.trace(trace, trace_seq, addr, &c.host[..c.len as usize]);
             }
             pos += c.len as u64;
             map.chunks.push(c);
         }
-        crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_dma_map: seq {} dir {} offset {:#x} len {:#x} chunks {}", trace_seq, dir as i32, offset, len, map.chunks.len() - first);
+        crate::dlog_dev!(LogModule::Odyssey, "sgi_dma_map: seq {} dir {:?} offset {:#x} len {:#x} chunks {}", trace_seq, dir, offset, len, map.chunks.len() - first);
         0
     }
 }
@@ -221,19 +237,9 @@ impl DmaMap {
             // failed later on: the guest's memory then shows how far the
             // transfer got.
             if len != 0 {
-                let res = dma_memory_write(
-                    &self.as_,
-                    c.bus_addr + start as u64,
-                    &c.host[start as usize..(start + len) as usize],
-                );
-
-                if res != MEMTX_OK {
-                    crate::qlog!(
-                        "sgi-dma: write of {} bytes at {:#x} failed (result {})",
-                        len,
-                        c.bus_addr + start as u64,
-                        res
-                    );
+                let at = c.bus_addr + start as u64;
+                if !write_guest(&self.mem, at, &c.host[start as usize..(start + len) as usize]) {
+                    crate::dlog!(LogModule::Odyssey, "sgi-dma: write of {} bytes at {:#x} failed", len, at);
                 }
             }
         }
@@ -273,7 +279,7 @@ impl PixelDma {
     /// m is the board memory whose plane the transfer targets, read for the
     /// plane's size only. Returns 0 or an Failure.
     pub fn dma_pixels_map(&mut self, bus: &DmaBus, pl: &DmaPageList, m: &BoardMemory) -> i32 {
-        let dir = if self.dir == SGI_DMA_TO_PLANE { DMA_DIRECTION_TO_DEVICE } else { DMA_DIRECTION_FROM_DEVICE };
+        let dir = if self.dir == SGI_DMA_TO_PLANE { DmaDirection::ToDevice } else { DmaDirection::FromDevice };
         let row = self.dma_pixels_row_bytes();
 
         self.map = DmaMap::default();
@@ -314,21 +320,22 @@ impl PixelDma {
             return 0;
         }
         if pp.is_null() {
-            crate::qlog!("sgi-dma: no plane {}", self.plane);
+            crate::dlog!(LogModule::Odyssey, "sgi-dma: no plane {}", self.plane);
             return SGI_FAIL_BOUNDS as i32;
         }
         let p: Plane = *pp.get();
         if self.tag_plane != SGI_PLANE_NONE {
             let tp = m.plane(self.tag_plane);
             if tp.is_null() {
-                crate::qlog!("sgi-dma: no tag plane {}", self.tag_plane);
+                crate::dlog!(LogModule::Odyssey, "sgi-dma: no tag plane {}", self.tag_plane);
                 return SGI_FAIL_BOUNDS as i32;
             }
             tag = Some(*tp.get());
         }
         // A row wider or a transfer taller than the plane has no destination.
         if self.w as u32 > p.width || self.h as u32 > p.height {
-            crate::qlog!(
+            crate::dlog!(
+                LogModule::Odyssey,
                 "sgi-dma: {}x{} pixels exceed plane {}'s {}x{}",
                 self.w,
                 self.h,
@@ -340,7 +347,8 @@ impl PixelDma {
         }
         let pbpp = plane_bytes_per_pixel(p.format);
         if ops.convert_row.is_none() && self.guest_bpp as u32 != pbpp {
-            crate::qlog!(
+            crate::dlog!(
+                LogModule::Odyssey,
                 "sgi-dma: {}-byte guest pixels to plane {}'s {}-byte pixels need a conversion",
                 self.guest_bpp,
                 self.plane,
@@ -357,7 +365,7 @@ impl PixelDma {
 
             if self.dir == SGI_DMA_TO_PLANE {
                 if !self.map.copy(pos, &mut bytes, false) {
-                    crate::qlog!("sgi-dma: row {} at {:#x} was not mapped", r, pos);
+                    crate::dlog!(LogModule::Odyssey, "sgi-dma: row {} at {:#x} was not mapped", r, pos);
                     return SGI_FAIL_BOUNDS as i32;
                 }
                 if let Some(convert_row) = ops.convert_row {
@@ -396,7 +404,7 @@ impl PixelDma {
                     }
                 }
                 if !self.map.copy(pos, &mut bytes, true) {
-                    crate::qlog!("sgi-dma: row {} at {:#x} was not mapped", r, pos);
+                    crate::dlog!(LogModule::Odyssey, "sgi-dma: row {} at {:#x} was not mapped", r, pos);
                     return SGI_FAIL_BOUNDS as i32;
                 }
             }
@@ -413,7 +421,7 @@ impl PixelDma {
         };
 
         self.map.unmap();
-        crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi_dma_pixels: seq {} dir {} plane {} at {},{} size {}x{} status {}", self.seq, self.dir as i32, self.plane, self.x, self.y, self.w, self.h, status);
+        crate::dlog!(LogModule::Odyssey, "sgi_dma_pixels: seq {} dir {} plane {} at {},{} size {}x{} status {}", self.seq, self.dir as i32, self.plane, self.x, self.y, self.w, self.h, status);
         if status != 0 {
             ops.publish(opaque, self.seq, SGI_DONE_FAILED, self.cookie, status as u64);
         } else {
@@ -506,12 +514,13 @@ impl PixelDma {
         let row = self.dma_pixels_row_bytes();
 
         if pp.is_null() {
-            crate::qlog!("sgi-dma: no plane {}", self.plane);
+            crate::dlog!(LogModule::Odyssey, "sgi-dma: no plane {}", self.plane);
             return SGI_FAIL_BOUNDS as i32;
         }
         let p: Plane = *pp.get();
         if self.w as u32 > p.width || self.h as u32 > p.height {
-            crate::qlog!(
+            crate::dlog!(
+                LogModule::Odyssey,
                 "sgi-dma: {}x{} pixels exceed plane {}'s {}x{}",
                 self.w,
                 self.h,
@@ -535,7 +544,8 @@ impl PixelDma {
             Some(end <= total)
         };
         if fits(self.h) != Some(true) {
-            crate::qlog!(
+            crate::dlog!(
+                LogModule::Odyssey,
                 "sgi-dma: {}x{} pixels of {} bytes, pitch {}, from {:#x} do not fit a {}-page buffer",
                 self.w,
                 self.h,
@@ -549,7 +559,7 @@ impl PixelDma {
         // Overlapping rows are fine to read, but written back through bounce
         // buffers the later chunk's copy of the shared bytes would win.
         if self.dir == SGI_DMA_FROM_PLANE && self.h > 1 && (self.pitch as u64) < row {
-            crate::qlog!("sgi-dma: pitch {} overlaps {}-byte rows written to guest memory", self.pitch, row);
+            crate::dlog!(LogModule::Odyssey, "sgi-dma: pitch {} overlaps {}-byte rows written to guest memory", self.pitch, row);
             return SGI_FAIL_BOUNDS as i32;
         }
         0

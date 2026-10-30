@@ -131,7 +131,7 @@ impl Board {
     pub fn gl_aux_refused(&mut self, what: &str) {
         if !self.gl_aux_reported {
             self.gl_aux_reported = true;
-            crate::qlog!("sgi-odyssey: {} to the id-plane destination is not modeled; dropped", what);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: {} to the id-plane destination is not modeled; dropped", what);
         }
     }
 
@@ -166,7 +166,7 @@ impl Board {
         }
         if index_mask != ODSY_WRITE_INDEX_MASK && !self.gl_index_mask_logged {
             self.gl_index_mask_logged = true;
-            crate::qlog!("sgi-odyssey: index write mask {:#05x} is decoded but not applied", index_mask);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: index write mask {:#05x} is decoded but not applied", index_mask);
         }
         if mask != 0 && (buffers & !(1u32 << ODSY_AUX_OVERLAY_BUFFER)) != 0 && self.gl_to_aux() {
             self.gl_aux_refused("a GL id-byte write");
@@ -422,7 +422,7 @@ pub fn texture_read(opaque: Opaque, x: u32, y: u32, rgba: &mut u32) -> bool {
     if at + 4 > s.obj_mem.bytes.len() {
         return false;
     }
-    *rgba = ldl_be_p(&s.obj_mem.bytes[at..]);
+    *rgba = u32::from_be_bytes(s.obj_mem.bytes[at..][..4].try_into().unwrap());
     if texture.base_format == SGI_GL_ALPHA {
         *rgba = (*rgba >> 24) & 0xff;
     }
@@ -896,9 +896,9 @@ impl Board {
             && width >= 2
             && height >= 2
             && depth >= 2
-            && is_power_of_2(width as u64)
-            && is_power_of_2(height as u64)
-            && is_power_of_2(depth as u64)
+            && (width as u64).is_power_of_two()
+            && (height as u64).is_power_of_two()
+            && (depth as u64).is_power_of_two()
             && self.tex_level0 == 0;
         let ws = (word >> 12) & 3;
         let wt = (word >> 10) & 3;
@@ -1018,16 +1018,16 @@ impl Board {
                 || height == 0
                 || width > i32::MAX as u32
                 || height > i32::MAX as u32
-                || !is_power_of_2(width as u64)
-                || !is_power_of_2(height as u64)
+                || !(width as u64).is_power_of_two()
+                || !(height as u64).is_power_of_two()
                 || (three_d
                     && (depth == 0
                         || depth > SGI_ODYSSEY_OBJECTS
-                        || !is_power_of_2(depth as u64)
+                        || !(depth as u64).is_power_of_two()
                         || (self.tex_mode & (ODSY_TEX_MODE_1D | ODSY_TEX_MODE_2D)) != 0))
                 || (!three_d && depth != 1)
                 || sampler_size
-                    != (0x08000000 | (ctz32(width) << 10) | (ctz32(height) << 5) | (if three_d { ctz32(depth) } else { 0 }))
+                    != (0x08000000 | (width.trailing_zeros() << 10) | (height.trailing_zeros() << 5) | (if three_d { depth.trailing_zeros() } else { 0 }))
                 || ws > 3
                 || wt > 3
                 || (!border
@@ -1175,7 +1175,7 @@ impl Board {
                     }
                     base = first_slice as u32;
                 }
-                terminal = cmax(cmax(ctz32(width), ctz32(height)), ctz32(depth));
+                terminal = cmax(cmax(width.trailing_zeros(), height.trailing_zeros()), depth.trailing_zeros());
                 count = if mipmap && hi > 0 { cmin(terminal, ((hi + 255) / 256) as u32) + 1 } else { 1 };
                 if count > SGI_GL_TEX_LEVELS_MAX {
                     break 'unsupported;
@@ -1460,7 +1460,8 @@ impl Board {
             return true;
         }
         let index_mode = self.gl_index_mode();
-        crate::qlog!(
+        crate::dlog!(
+            LogModule::Odyssey,
             "sgi-odyssey: unsupported texture state sampler {:#x} environment {}{}, draw dropped",
             self.tex_sampler[4],
             self.tex_env[0],
@@ -1556,7 +1557,7 @@ pub fn gl_draw_result(opaque: Opaque, d: &GlDraw) -> GlDrawResult {
         let chain = texture.insert(Box::default());
 
         if !s.texture_setup(&mut image, chain, &mut t.texture) {
-            crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_gl_draw_path: backend scalar-skip result {} called=0", SGI_GL_DRAW_OK);
+            crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_gl_draw_path: backend scalar-skip result {} called=0", SGI_GL_DRAW_OK);
             return SGI_GL_DRAW_OK;
         }
     }
@@ -1581,7 +1582,7 @@ pub fn gl_draw_result(opaque: Opaque, d: &GlDraw) -> GlDrawResult {
     // processor's accesses that need not wait for it use the front lock
     // (front.rs).
     let result = rules.draw(&t, &draw);
-    crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_gl_draw_path: backend scalar result {} called=1", result);
+    crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_gl_draw_path: backend scalar result {} called=1", result);
     s.scanout.invalidate_all();
     drop(texture);
     result
@@ -1913,7 +1914,7 @@ impl Board {
     /// (ODSY_GL_CLIP_PLANE_LOAD) feeds.
     pub fn gl_apply_clip_planes(&mut self) {
         let bits = self.tex_mode & ODSY_TEX_MODE_CLIP_COUNT_MASK;
-        let n = ctpop32(bits);
+        let n = bits.count_ones();
 
         for i in 0..SGI_GL_CLIP_PLANES {
             let plane = SGI_GL_CLIP_PLANE0 + i;

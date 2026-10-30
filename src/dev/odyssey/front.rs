@@ -177,8 +177,9 @@ impl HostInterface {
         let mut where_ = 0u64;
 
         if self.route_dest_upper == 0 && self.route_dest_lower == 0 {
-            crate::qlog!(
-                "sgi-odyssey: {} interrupt {} with no destination programmed; no packet sent\n",
+            crate::dlog!(
+                LogModule::Odyssey,
+                "sgi-odyssey: {} interrupt {} with no destination programmed; no packet sent",
                 what,
                 if set { "raised" } else { "lowered" }
             );
@@ -235,7 +236,7 @@ impl HostInterface {
         if let Some(pi) = &self.pi {
             pi_gfx_return_credits(pi.as_ref(), self.slot, 1);
         } else {
-            crate::qlog!("sgi-odyssey: counted graphics store has no processor interface for its return\n");
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: counted graphics store has no processor interface for its return");
         }
     }
 
@@ -367,16 +368,16 @@ impl HostInterface {
             // The buffer the last latched swap put on screen (retrace()).
             ODSY_DISPLAYED_BUFFER => value = self.displayed_buffer as u64,
             ODSY_ROUTE_DEST_UPPER | ODSY_ROUTE_DEST_LOWER | ODSY_ROUTE_VECTORS => {
-                crate::qlog!("sgi-odyssey: read of the write-only register at {:#x}\n", addr);
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: read of the write-only register at {:#x}", addr);
             }
             _ => unreachable!("odyssey_front_register() admits only these"),
         }
-        crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_mmio: front seq {} offset {:#x} size {} value {:#x} write=0", sequence, addr, size, value);
+        crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_mmio: front seq {} offset {:#x} size {} value {:#x} write=0", sequence, addr, size, value);
         value
     }
 
     pub fn write(&mut self, addr: u64, value: u64, size: u32) {
-        crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_mmio: front seq {} offset {:#x} size {} value {:#x} write=1", self.trace_sequence, addr, size, value);
+        crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_mmio: front seq {} offset {:#x} size {} value {:#x} write=1", self.trace_sequence, addr, size, value);
         self.trace_sequence = self.trace_sequence.wrapping_add(1);
 
         match reg(addr, size) as u64 {
@@ -442,7 +443,7 @@ impl HostInterface {
             ODSY_ROUTE_DEST_LOWER => self.route_dest_lower = value as u32,
             ODSY_ROUTE_VECTORS => self.route_vectors = value as u32,
             ODSY_IDENTITY | ODSY_STATUS | ODSY_ERROR_ADDR_UPPER | ODSY_ERROR_ADDR_LOWER => {
-                crate::qlog!("sgi-odyssey: write of {:#x} to the read-only register at {:#x}\n", value, addr);
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: write of {:#x} to the read-only register at {:#x}", value, addr);
             }
             _ => unreachable!("odyssey_front_register() admits only these"),
         }

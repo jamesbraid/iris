@@ -82,7 +82,7 @@ impl DmaBus {
             if !self.read(table + ODSY_DMA_TABLE_HEADER + (n as u64) * 8, &mut raw, true, seq) {
                 return -1;
             }
-            let pte = ldq_be_p(&raw);
+            let pte = u64::from_be_bytes(raw[..8].try_into().unwrap());
             if pte & (ODSY_DMA_PTE_LEN_MASK as u64) == 0 {
                 return n as i32;
             }
@@ -130,7 +130,7 @@ impl Board {
         }
         if !self.dma_code_reported {
             self.dma_code_reported = true;
-            crate::qlog!("sgi-odyssey: DMA source format {:#x} at {} bytes a pixel is not modeled", code, bpp);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA source format {:#x} at {} bytes a pixel is not modeled", code, bpp);
         }
         if bpp == 4 { ODSY_IMAGE_CODE_FALLBACK_XRGB } else { ODSY_IMAGE_CODE_CI }
     }
@@ -154,7 +154,8 @@ impl Board {
             return false;
         }
         if self.dma_report(ODSY_DMA_REPORT_RAW64) {
-            crate::qlog!(
+            crate::dlog!(
+                LogModule::Odyssey,
                 "sgi-odyssey: an 8-byte backing-store page of object {:#x} is not modeled",
                 hdr[ODSY_DMA_HDR_DEST]
             );
@@ -170,24 +171,22 @@ pub fn raw_nibble(byte: u32) -> u32 {
 /// A stored texel as a backing-store page's bpp raw bytes.
 pub fn raw_pack(rgba: u32, bpp: u32, dst: &mut [u8]) {
     if bpp == 4 {
-        stl_be_p(dst, rgba);
+        dst[..4].copy_from_slice(&(rgba as u32).to_be_bytes());
         return;
     }
-    stw_be_p(
-        dst,
-        raw_nibble(rgba >> 24) << 12
-            | raw_nibble((rgba >> 16) & 0xff) << 8
-            | raw_nibble((rgba >> 8) & 0xff) << 4
-            | raw_nibble(rgba & 0xff),
-    );
+    let word = raw_nibble(rgba >> 24) << 12
+        | raw_nibble((rgba >> 16) & 0xff) << 8
+        | raw_nibble((rgba >> 8) & 0xff) << 4
+        | raw_nibble(rgba & 0xff);
+    dst[..2].copy_from_slice(&(word as u16).to_be_bytes());
 }
 
 /// A backing-store page's bpp raw bytes back as a stored texel.
 pub fn raw_unpack(src: &[u8], bpp: u32) -> u32 {
     if bpp == 4 {
-        return ldl_be_p(src);
+        return u32::from_be_bytes(src[..4].try_into().unwrap());
     }
-    let v = lduw_be_p(src);
+    let v = u16::from_be_bytes(src[..2].try_into().unwrap()) as u32;
     ((v >> 12) & 0xf) * 0x11u32 << 24
         | ((v >> 8) & 0xf) * 0x11u32 << 16
         | ((v >> 4) & 0xf) * 0x11u32 << 8
@@ -225,7 +224,8 @@ impl Board {
         if bpp != 4 && bpp != 3 && bpp != 1 && !texel12 && !lum_alpha && !raw {
             if !self.dma_bpp_reported {
                 self.dma_bpp_reported = true;
-                crate::qlog!(
+                crate::dlog!(
+                    LogModule::Odyssey,
                     "sgi-odyssey: DMA to buffer {:#x} at {} bytes a pixel is not modeled",
                     hdr[ODSY_DMA_HDR_DEST],
                     bpp
@@ -247,7 +247,8 @@ impl Board {
             payload += e[k].len as u64;
         }
         if rowbytes as u64 != (w as u64) * (bpp as u64) || payload != (rowbytes as u64) * (h as u64) {
-            crate::qlog!(
+            crate::dlog!(
+                LogModule::Odyssey,
                 "sgi-odyssey: DMA header at {:#x} disagrees with itself: {}x{} at {} bytes a pixel, {} bytes a row, {} bytes in its entries",
                 table, w, h, bpp, rowbytes, payload
             );
@@ -369,7 +370,8 @@ impl Board {
 
         if psize == 0 {
             if self.dma_report(ODSY_DMA_REPORT_UPLOAD_SENTINEL) {
-                crate::qlog!(
+                crate::dlog!(
+                    LogModule::Odyssey,
                     "sgi-odyssey: DMA upload to sentinel {:#x} with format {:#x} and control {:#x} is not modeled",
                     hdr[ODSY_DMA_HDR_DEST],
                     hdr[ODSY_DMA_HDR_FORMAT],
@@ -392,7 +394,7 @@ impl Board {
             || rowbytes as u64 != (w as u64) * (psize as u64)
             || payload_len != (rowbytes as u64) * (h as u64)
         {
-            crate::qlog!("sgi-odyssey: draw-sentinel DMA header at {:#x} disagrees with its payload", table);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: draw-sentinel DMA header at {:#x} disagrees with its payload", table);
             return;
         }
 
@@ -440,10 +442,10 @@ impl Board {
                 if psize == 4 {
                     rgba = (pack_pixel(src[3] as u32, src[2] as u32, src[1] as u32) & !0xffu32) | src[0] as u32;
                 } else {
-                    let red = lduw_be_p(src);
-                    let green = lduw_be_p(&src[2..]);
-                    let blue = lduw_be_p(&src[4..]);
-                    let alpha = lduw_be_p(&src[6..]);
+                    let red = u16::from_be_bytes(src[..2].try_into().unwrap()) as u32;
+                    let green = u16::from_be_bytes(src[2..][..2].try_into().unwrap()) as u32;
+                    let blue = u16::from_be_bytes(src[4..][..2].try_into().unwrap()) as u32;
+                    let alpha = u16::from_be_bytes(src[6..][..2].try_into().unwrap()) as u32;
 
                     rgba = pack_pixel(
                         (red * 255 + 65535 / 2) / 65535,
@@ -529,7 +531,8 @@ impl Board {
             }
         }
         if self.dma_report(ODSY_DMA_REPORT_LAYOUT) {
-            crate::qlog!(
+            crate::dlog!(
+                LogModule::Odyssey,
                 "sgi-odyssey: DMA read with format byte {:#x}, word 4 {:#x} (class {}, code {}) at {} bytes a pixel is not modeled",
                 xcode, fmt, cls, code, bpp
             );
@@ -554,14 +557,15 @@ impl Board {
         if base & ODSY_DMA_SENTINEL != 0 {
             if base == ODSY_DMA_SENTINEL_DRAW && selector == ODSY_DMA_FMT_SELECTOR_DRAW {
                 if self.dma_report(ODSY_DMA_REPORT_DRAW_SENTINEL) {
-                    crate::qlog!(
+                    crate::dlog!(
+                        LogModule::Odyssey,
                         "sgi-odyssey: DMA read of the draw drawable ({:#x}); never captured, read as the read drawable is",
                         base
                     );
                 }
             } else if base != ODSY_DMA_SENTINEL_READ || selector != ODSY_DMA_FMT_SELECTOR_READ {
                 if self.dma_report(ODSY_DMA_REPORT_SENTINEL) {
-                    crate::qlog!("sgi-odyssey: DMA read of sentinel {:#x} with word 4 {:#x} is not modeled", base, fmt);
+                    crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA read of sentinel {:#x} with word 4 {:#x} is not modeled", base, fmt);
                 }
                 return false;
             }
@@ -578,7 +582,7 @@ impl Board {
         src.obj = if base != 0 { self.object_find(base) } else { -1 };
         if src.obj < 0 {
             if self.dma_report(ODSY_DMA_REPORT_SOURCE) {
-                crate::qlog!("sgi-odyssey: DMA read of board base {:#x}, which holds no buffer", base);
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA read of board base {:#x}, which holds no buffer", base);
             }
             return false;
         }
@@ -611,7 +615,7 @@ impl DmaBus {
         }
         let pl = DmaPageList { addr: pages, npages, page_size: ODSY_DMA_PAGE_SIZE as u32 };
         p.at = addr - first;
-        self.map(&mut p.map, &pl, p.at, p.len as u64, DMA_DIRECTION_FROM_DEVICE, false, 0)
+        self.map(&mut p.map, &pl, p.at, p.len as u64, DmaDirection::FromDevice, false, 0)
     }
 }
 
@@ -629,7 +633,8 @@ impl Board {
 
         if index_read && src.obj >= 0 {
             if self.dma_report(ODSY_DMA_REPORT_INDEX_OBJECT) {
-                crate::qlog!(
+                crate::dlog!(
+                    LogModule::Odyssey,
                     "sgi-odyssey: DMA index read of board object {:#x}, which records no display mode",
                     self.obj_base[src.obj as usize]
                 );
@@ -651,7 +656,8 @@ impl Board {
                 }
                 if index_read && (group >= ODSY_GAMMA_GROUP || word > 0xff) {
                     if self.dma_report(ODSY_DMA_REPORT_INDEX) {
-                        crate::qlog!(
+                        crate::dlog!(
+                            LogModule::Odyssey,
                             "sgi-odyssey: DMA index read at ({}, {}) finds word {:#x} in display-mode group {}, not an eight-bit index",
                             x, y, word, group
                         );
@@ -659,7 +665,8 @@ impl Board {
                     return false;
                 }
                 if !index_read && group < ODSY_GAMMA_GROUP && self.dma_report(ODSY_DMA_REPORT_COLOUR_OVER_INDEX) {
-                    crate::qlog!(
+                    crate::dlog!(
+                        LogModule::Odyssey,
                         "sgi-odyssey: DMA colour read at ({}, {}) finds an index pixel (display-mode group {}); its word {:#x} is returned as colour",
                         x, y, group, word
                     );
@@ -736,7 +743,7 @@ impl Board {
             p.map.unmap();
         }
         if !ok && self.dma_report(ODSY_DMA_REPORT_WRITE) {
-            crate::qlog!("sgi-odyssey: DMA read's host pages could not all be written");
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA read's host pages could not all be written");
         }
         ok
     }
@@ -767,7 +774,8 @@ impl Board {
         }
         if raw && src.obj < 0 {
             if self.dma_report(ODSY_DMA_REPORT_SOURCE) {
-                crate::qlog!(
+                crate::dlog!(
+                    LogModule::Odyssey,
                     "sgi-odyssey: raw DMA read of {:#x}, which is not a board-memory object, is not modeled",
                     hdr[ODSY_DMA_HDR_DEST]
                 );
@@ -784,7 +792,8 @@ impl Board {
         }
         if rowbytes as u64 != (w as u64) * (bpp as u64) || total != (rowbytes as u64) * (h as u64) {
             if self.dma_report(ODSY_DMA_REPORT_SHAPE) {
-                crate::qlog!(
+                crate::dlog!(
+                    LogModule::Odyssey,
                     "sgi-odyssey: DMA read header at {:#x} disagrees with itself: {}x{} at {} bytes a pixel, {} bytes a row, {} bytes in its entries",
                     table, w, h, bpp, rowbytes, total
                 );
@@ -804,7 +813,8 @@ impl Board {
         };
         if !inside {
             if self.dma_report(ODSY_DMA_REPORT_BOUNDS) {
-                crate::qlog!(
+                crate::dlog!(
+                    LogModule::Odyssey,
                     "sgi-odyssey: DMA read of {}x{} at ({}, {}) from {:#x} leaves its source",
                     w, h, src.x, src.y, hdr[ODSY_DMA_HDR_DEST]
                 );
@@ -821,7 +831,7 @@ impl Board {
                 }
             }
             if self.dma_read_write(bus, &e[..n], rowbytes, h, skip, &mut payload) {
-                crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_dma_read: seq {} source {:#x} at {},{} {}x{} wrote {} bytes", seq, hdr[ODSY_DMA_HDR_DEST], src.x, src.y, w, h, total);
+                crate::dlog!(LogModule::Odyssey, "sgi_odyssey_dma_read: seq {} source {:#x} at {},{} {}x{} wrote {} bytes", seq, hdr[ODSY_DMA_HDR_DEST], src.x, src.y, w, h, total);
             }
             return;
         }
@@ -832,7 +842,7 @@ impl Board {
         if !self.dma_read_write(bus, &e[..n], rowbytes, h, skip, &mut payload) {
             return;
         }
-        crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_dma_read: seq {} source {:#x} at {},{} {}x{} wrote {} bytes", seq, hdr[ODSY_DMA_HDR_DEST], src.x, src.y, w, h, total);
+        crate::dlog!(LogModule::Odyssey, "sgi_odyssey_dma_read: seq {} source {:#x} at {},{} {}x{} wrote {} bytes", seq, hdr[ODSY_DMA_HDR_DEST], src.x, src.y, w, h, total);
     }
 
     /// A 0xe01/0xe03 descriptor: read the table's header, move the pixels, and
@@ -848,7 +858,7 @@ impl Board {
         self.dma_seq += 1;
         let seq = self.dma_seq;
         let bus = DmaBus {
-            as_: address_space_memory(),
+            mem: self.guest.clone(),
             ops: P::from_ref(&HEAD_OPS),
             opaque: P::new(self).opaque(),
         };
@@ -859,12 +869,12 @@ impl Board {
             return;
         }
         for i in 0..ODSY_DMA_HDR_WORDS {
-            hdr[i] = ldl_be_p(&raw[i * 4..]);
+            hdr[i] = u32::from_be_bytes(raw[i * 4..][..4].try_into().unwrap());
         }
         if readback {
             if !self.dma_readback_reported {
                 self.dma_readback_reported = true;
-                crate::qlog!("sgi-odyssey: DMA opcode 0xe03 (buffer {:#x}) is not modeled", hdr[ODSY_DMA_HDR_DEST]);
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA opcode 0xe03 (buffer {:#x}) is not modeled", hdr[ODSY_DMA_HDR_DEST]);
             }
         } else if hdr[ODSY_DMA_HDR_CONTROL] & ODSY_DMA_TO_HOST != 0 {
             self.dma_from_board(&bus, table, seq, &hdr);
@@ -872,7 +882,8 @@ impl Board {
             if hdr[ODSY_DMA_HDR_DEST] == ODSY_DMA_SENTINEL_DRAW {
                 self.dma_draw_sentinel_short(&bus, table, seq, &hdr);
             } else if self.dma_report(ODSY_DMA_REPORT_UPLOAD_SENTINEL) {
-                crate::qlog!(
+                crate::dlog!(
+                    LogModule::Odyssey,
                     "sgi-odyssey: DMA upload to sentinel {:#x} with word 4 {:#x} is not modeled",
                     hdr[ODSY_DMA_HDR_DEST],
                     hdr[ODSY_DMA_HDR_FORMAT]
@@ -881,7 +892,7 @@ impl Board {
         } else if self.dma_colour_base != 0 && hdr[ODSY_DMA_HDR_DEST] == self.dma_colour_base {
             self.dma_to_buffer(&bus, table, seq, &hdr, -1);
         } else if hdr[ODSY_DMA_HDR_DEST] == 0 {
-            crate::qlog!("sgi-odyssey: DMA header at {:#x} names no destination buffer", table);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA header at {:#x} names no destination buffer", table);
         } else {
             // The header's row length is the object's, as a select's.
             let obj = self.object_select(
@@ -930,7 +941,7 @@ impl Board {
 
     pub fn query_cancel(&mut self) {
         if self.query_stage != 0 {
-            crate::qlog!("sgi-odyssey: interrupted current-query sequence");
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: interrupted current-query sequence");
         }
         self.query_epoch += 1;
         self.query_stage = 0;
@@ -1031,7 +1042,7 @@ impl Board {
         if supported {
             self.query_current_valid |= 1u32 << record;
         } else {
-            crate::qlog!("sgi-odyssey: unsupported current-query record {} tag {:#010x}", record, tag);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: unsupported current-query record {} tag {:#010x}", record, tag);
         }
     }
 }
@@ -1046,28 +1057,28 @@ impl DmaBus {
         let mut bus_addr: u64 = addr;
 
         if (addr & (size64 - 1)) != 0 || addr > u64::MAX - size64 {
-            crate::qlog!("sgi-odyssey: invalid publication address {:#x}", addr);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: invalid publication address {:#x}", addr);
             return SGI_FAIL_BOUNDS as i32;
         }
         if let Some(ops) = self.ops.as_opt() {
             if let Some(dma_address) = ops.dma_address {
                 if !dma_address(self.opaque, addr, &mut bus_addr) {
-                    crate::qlog!("sgi-odyssey: publication address {:#x} cannot be composed", addr);
+                    crate::dlog!(LogModule::Odyssey, "sgi-odyssey: publication address {:#x} cannot be composed", addr);
                     return SGI_FAIL_BUS as i32;
                 }
             }
         }
         if (bus_addr & (size64 - 1)) != 0 || bus_addr > u64::MAX - size64 {
-            crate::qlog!("sgi-odyssey: invalid bus address {:#x}", bus_addr);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: invalid bus address {:#x}", bus_addr);
             return SGI_FAIL_BOUNDS as i32;
         }
-        let r = if size == 2 {
-            address_space_write(&self.as_, bus_addr, &(value as u16).to_be_bytes())
+        let written = if size == 2 {
+            write_guest(&self.mem, bus_addr, &(value as u16).to_be_bytes())
         } else {
-            address_space_write(&self.as_, bus_addr, &value.to_be_bytes())
+            write_guest(&self.mem, bus_addr, &value.to_be_bytes())
         };
-        if r != MEMTX_OK {
-            crate::qlog!("sgi-odyssey: publication at {:#x} is not aligned writable RAM", bus_addr);
+        if !written {
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: publication at {:#x} is not aligned writable RAM", bus_addr);
             return SGI_FAIL_BUS as i32;
         }
         0
@@ -1094,7 +1105,7 @@ impl Board {
 
     pub fn query_finish(&mut self, sequence: u32) {
         let bus = DmaBus {
-            as_: address_space_memory(),
+            mem: self.guest.clone(),
             ops: P::from_ref(&HEAD_OPS),
             opaque: P::new(self).opaque(),
         };
@@ -1103,7 +1114,7 @@ impl Board {
         self.query_stage = 0;
         for i in 0..QUERY_OFFSET.len() {
             if self.query_captured_valid & (1u32 << i) == 0 {
-                crate::qlog!("sgi-odyssey: unsupported current-query record {} in snapshot", i);
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: unsupported current-query record {} in snapshot", i);
             }
         }
         if self.query_base == 0
@@ -1111,7 +1122,7 @@ impl Board {
             || self.query_captured_epoch != self.query_epoch
             || self.query_captured_valid != 0x1f
         {
-            crate::qlog!("sgi-odyssey: unsupported current-query snapshot");
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: unsupported current-query snapshot");
             return;
         }
         for i in 0..QUERY_OFFSET.len() {
@@ -1121,7 +1132,7 @@ impl Board {
                 let addr = self.query_base + QUERY_OFFSET[i] as u64 + 4 * j as u64;
 
                 if bus.publish_be32(addr, self.query_captured[i][j]) != 0 {
-                    crate::qlog!("sgi-odyssey: current-query payload failed");
+                    crate::dlog!(LogModule::Odyssey, "sgi-odyssey: current-query payload failed");
                     return;
                 }
             }
@@ -1133,20 +1144,20 @@ impl Board {
 
             for j in 0..(1 + cmd_arity(rec[0]) as usize) {
                 if bus.publish_be32(at + 4 * j as u64, rec[j]) != 0 {
-                    crate::qlog!("sgi-odyssey: raster query payload failed");
+                    crate::dlog!(LogModule::Odyssey, "sgi-odyssey: raster query payload failed");
                     return;
                 }
             }
             i += 1;
         }
         if bus.publish_be32(self.query_base + 0x97c, self.query_count) != 0 {
-            crate::qlog!("sgi-odyssey: current-query counter failed");
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: current-query counter failed");
             return;
         }
         if self.query_sync_base > u64::MAX - sync_offset
             || bus.publish_be16(self.query_sync_base + sync_offset, (sequence & 0xffff) as u16) != 0
         {
-            crate::qlog!("sgi-odyssey: current-query sync failed");
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: current-query sync failed");
             return;
         }
         if self.query_sync_index & ODSY_DMA_FENCE_INTERRUPT != 0 {
@@ -1250,9 +1261,9 @@ impl Board {
         }
         if !self.board_oob_reported {
             self.board_oob_reported = true;
-            crate::qlog!("sgi-odyssey: destination base {:#x} is beyond the {} MiB this board reports", base, self.memory_size);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: destination base {:#x} is beyond the {} MiB this board reports", base, self.memory_size);
         }
-        crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_board_oob: destination base {:#x} exceeds the {} MiB this board reports", base, self.memory_size);
+        crate::dlog!(LogModule::Odyssey, "sgi_odyssey_board_oob: destination base {:#x} exceeds the {} MiB this board reports", base, self.memory_size);
         false
     }
 
@@ -1274,7 +1285,7 @@ impl Board {
             0x11e40000 => format = 0x00b00000,
             _ => return false,
         }
-        if ws == 0 || hs == 0 || ws > i32::MAX as u32 || hs > i32::MAX as u32 || !is_power_of_2(ws as u64) || !is_power_of_2(hs as u64) {
+        if ws == 0 || hs == 0 || ws > i32::MAX as u32 || hs > i32::MAX as u32 || !(ws as u64).is_power_of_two() || !(hs as u64).is_power_of_two() {
             return false;
         }
         let wd = (ws / 2).max(1);
@@ -1286,7 +1297,7 @@ impl Board {
             || self.tex_level0 != 60
             || entry[1] != (format | source_units)
             || entry[2] != 0
-            || self.tex_sampler[0] != ((ctz32(ws) << 10) | (ctz32(hs) << 5))
+            || self.tex_sampler[0] != ((ws.trailing_zeros() << 10) | (hs.trailing_zeros() << 5))
             || self.tex_sampler[3] != 0
             || self.tex_sampler[5] != 0
             || self.tex_sampler[6] != 0

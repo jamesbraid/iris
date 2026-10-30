@@ -117,7 +117,7 @@ impl Board {
         if self.gl_program_addr >= SGI_ODYSSEY_GL_PROGRAM_ENTRIES {
             if !self.gl_program_mem_reported {
                 self.gl_program_mem_reported = true;
-                crate::qlog!("sgi-odyssey: program-memory store past entry {:#x} is not modeled", SGI_ODYSSEY_GL_PROGRAM_ENTRIES - 1);
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: program-memory store past entry {:#x} is not modeled", SGI_ODYSSEY_GL_PROGRAM_ENTRIES - 1);
             }
             return;
         }
@@ -330,7 +330,8 @@ impl Board {
                 self.gl_program_logged[b + 1] = e2a;
                 self.gl_program_logged[b + 2] = e2c;
                 self.gl_program_logged_count += 1;
-                crate::qlog!(
+                crate::dlog!(
+                    LogModule::Odyssey,
                     "sgi-odyssey: geometry program {:#x} {:#x} {:#x} from list index {} ({:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}) is not recognised{}; drawn unlit",
                     e29, e2a, e2c, k, c0, c1, c2, c3, c4, c5, c6, c7,
                     if resident { "" } else { " (uploaded program is unsupported)" }
@@ -339,19 +340,19 @@ impl Board {
         }
         if p.two_sided && !self.gl_two_sided_logged {
             self.gl_two_sided_logged = true;
-            crate::qlog!("sgi-odyssey: two-sided lighting is not modeled; back faces are lit with the front material");
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: two-sided lighting is not modeled; back faces are lit with the front material");
         }
         if p.texgen && !self.gl_texgen_logged {
             self.gl_texgen_logged = true;
-            crate::qlog!("sgi-odyssey: texture-coordinate generation in geometry program {:#x} is not modeled", e29);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: texture-coordinate generation in geometry program {:#x} is not modeled", e29);
         }
         if p.clip && !self.gl_clip_logged {
             self.gl_clip_logged = true;
-            crate::qlog!("sgi-odyssey: clip planes in geometry program {:#x} are not modeled; geometry is not clipped to them", e29);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: clip planes in geometry program {:#x} are not modeled; geometry is not clipped to them", e29);
         }
         if p.texture && !self.gl_texture_stage_logged {
             self.gl_texture_stage_logged = true;
-            crate::qlog!("sgi-odyssey: texture-mode lighting finish in geometry program {:#x} is not modeled", e29);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: texture-mode lighting finish in geometry program {:#x} is not modeled", e29);
         }
         self.gl_linear_texgen = if p.known { p.linear_texgen } else { 0 };
         self.gl_lit = p.lit;
@@ -374,7 +375,7 @@ impl Board {
         let disagree = cls == ODSY_PROG_COLOUR_MODE_B && ((self.colour_mode[0] ^ self.colour_mode[1]) & ODSY_COLOUR_MODE_INDEX) != 0;
         if ((v & !known) != 0 || disagree) && !self.colour_mode_reported {
             self.colour_mode_reported = true;
-            crate::qlog!("sgi-odyssey: colour mode word class {:#x} value {:#x} (0x22 value {:#x}) is not modeled", cls, v, self.colour_mode[0]);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: colour mode word class {:#x} value {:#x} (0x22 value {:#x}) is not modeled", cls, v, self.colour_mode[0]);
         }
     }
 
@@ -416,7 +417,7 @@ impl Board {
             ODSY_PROG_COLOUR_MATERIAL => {
                 self.gl_colour_material = v & ODSY_COLOUR_MATERIAL_MASK;
                 if (v & !ODSY_COLOUR_MATERIAL_MASK) != 0 {
-                    crate::qlog!("sgi-odyssey: colour-material word value {:#x} has bits beyond the eight known ones", v);
+                    crate::dlog!(LogModule::Odyssey, "sgi-odyssey: colour-material word value {:#x} has bits beyond the eight known ones", v);
                 }
             }
             ODSY_PROG_LIGHT_VEC_SELECT => {
@@ -606,14 +607,14 @@ impl Board {
     pub fn gl_vertex_colour(&mut self, xyz: &[f64; 3]) {
         if self.gl_dither && !self.gl_dither_reported {
             self.gl_dither_reported = true;
-            crate::qlog!("sgi-odyssey: dither not modelled; drawing undithered");
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: dither not modelled; drawing undithered");
         }
         if self.gl_index_mode() {
             let mut rgba = [0f32; 4];
 
             if self.gl_lit && !self.gl_index_lit_reported {
                 self.gl_index_lit_reported = true;
-                crate::qlog!("sgi-odyssey: colour-index lighting is not modeled; drawn with the current index");
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: colour-index lighting is not modeled; drawn with the current index");
             }
             gl_index_rgba(self.gl_color_index, &mut rgba);
             let words = rgba.map(f32::to_bits);
@@ -866,7 +867,7 @@ impl Board {
             {
                 if !self.gl_rect_pattern_logged {
                     self.gl_rect_pattern_logged = true;
-                    crate::qlog!("sgi-odyssey: patterned rectangle requires shape 4 and finite integral corners");
+                    crate::dlog!(LogModule::Odyssey, "sgi-odyssey: patterned rectangle requires shape 4 and finite integral corners");
                 }
                 return;
             }
@@ -894,12 +895,12 @@ impl Board {
             } else if !self.gl_rect_stencil_logged {
                 let (func, sop) = (st.stencil_func, st.stencil_op[2]);
                 self.gl_rect_stencil_logged = true;
-                crate::qlog!("sgi-odyssey: stencil-tested rectangle under comparison {} and operation {:#x} is not modeled; stencil left unchanged", func, sop);
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: stencil-tested rectangle under comparison {} and operation {:#x} is not modeled; stencil left unchanged", func, sop);
             }
         }
         if (self.pattern_mode & ODSY_MODE_DEPTH_TEST) != 0 && (self.gl_depth_func & ODSY_DEPTH_FUNC_MASK) != SGI_GL_ALWAYS && !self.gl_rect_depth_logged {
             self.gl_rect_depth_logged = true;
-            crate::qlog!("sgi-odyssey: depth-tested rectangle under comparison {} is not modeled; written unconditionally", self.gl_depth_func & ODSY_DEPTH_FUNC_MASK);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: depth-tested rectangle under comparison {} is not modeled; written unconditionally", self.gl_depth_func & ODSY_DEPTH_FUNC_MASK);
         }
         // No kept rectangle means every 0x204b rectangle is empty: the window is
         // fully covered and nothing may be drawn. The shared clear reads a clip
@@ -1088,7 +1089,7 @@ impl Board {
 
         if stippled && self.line_stipple[ODSY_LINE_STIPPLE_CONTROL] != ODSY_LINE_STIPPLE_CONTROL_32 && !self.line_stipple_reported {
             self.line_stipple_reported = true;
-            crate::qlog!("sgi-odyssey: integer line stipple control {:#x} is not modeled; drawn as a 32-pixel stipple", self.line_stipple[ODSY_LINE_STIPPLE_CONTROL]);
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: integer line stipple control {:#x} is not modeled; drawn as a 32-pixel stipple", self.line_stipple[ODSY_LINE_STIPPLE_CONTROL]);
         }
 
         // These captured Xlib modes distinguish inclusion of the final vertex.
@@ -1321,7 +1322,7 @@ impl Board {
                 if count == 0 {
                     return;
                 }
-                crate::qlog!("sgi-odyssey: command FIFO OpenGL primitive {:#x} is not modeled", self.gl_primitive);
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: command FIFO OpenGL primitive {:#x} is not modeled", self.gl_primitive);
                 return;
             }
         }

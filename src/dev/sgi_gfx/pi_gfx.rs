@@ -157,7 +157,7 @@ impl PiGfx {
         // Whether the twelve-bit counter wraps, saturates or goes negative is
         // unknown. It wraps, and says so.
         if self.credit[slot] == 0 {
-            crate::qlog!("{}: graphics credit counter {} wrapped below zero\n", who, (b'A' + slot as u8) as char);
+            crate::dlog!(LogModule::Odyssey, "{}: graphics credit counter {} wrapped below zero", who, (b'A' + slot as u8) as char);
         }
         self.credit[slot] = self.credit[slot].wrapping_sub(1) & SGI_PI_GFX_CREDIT_MASK;
         true
@@ -175,8 +175,9 @@ impl PiGfx {
         self.starved[slot] = true;
         if !self.stall_logged[slot] {
             self.stall_logged[slot] = true;
-            crate::qlog!(
-                "{}: graphics credit counter {} fell below its bias; interrupt raised at once, the write stall and the interrupt counter are not modelled\n",
+            crate::dlog!(
+                LogModule::Odyssey,
+                "{}: graphics credit counter {} fell below its bias; interrupt raised at once, the write stall and the interrupt counter are not modelled",
                 who,
                 (b'A' + slot as u8) as char
             );
@@ -253,7 +254,7 @@ impl PiGfx {
         assert!(slot < SGI_PI_GFX_SLOTS);
         let sum = self.credit[slot] as u64 + credits as u64;
         if sum > SGI_PI_GFX_CREDIT_MASK as u64 {
-            crate::qlog!("{}: graphics credit counter {} wrapped above {:#x}\n", who, (b'A' + slot as u8) as char, SGI_PI_GFX_CREDIT_MASK);
+            crate::dlog!(LogModule::Odyssey, "{}: graphics credit counter {} wrapped above {:#x}", who, (b'A' + slot as u8) as char, SGI_PI_GFX_CREDIT_MASK);
         }
         self.credit[slot] = (sum & SGI_PI_GFX_CREDIT_MASK as u64) as u32;
         self.rearm(slot);

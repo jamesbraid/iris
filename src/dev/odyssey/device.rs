@@ -4,7 +4,7 @@ use super::*;
 
 impl Board {
     pub fn write_dispatch(&mut self, addr: u64, value: u64, size: u32) {
-        crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_mmio: seq {} offset {:#x} size {} value {:#x} write=1", self.trace_sequence, addr, size, value);
+        crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_mmio: seq {} offset {:#x} size {} value {:#x} write=1", self.trace_sequence, addr, size, value);
         self.trace_sequence = self.trace_sequence.wrapping_add(1);
 
         if addr == ODSY_BACKEND_SELECT && (size == 8 || size == 4) {
@@ -39,8 +39,9 @@ impl Board {
         // -1 (no register) becomes u64::MAX, which no constant matches.
         match reg(addr, size) as u64 {
             ODSY_RESET_CONTROL => {
-                crate::qlog!(
-                    "sgi-odyssey: write of {:#x} to the reset control register accepted; its effect is unknown\n",
+                crate::dlog!(
+                    LogModule::Odyssey,
+                    "sgi-odyssey: write of {:#x} to the reset control register accepted; its effect is unknown",
                     value
                 );
             }
@@ -50,8 +51,9 @@ impl Board {
                 self.flctl_target = value as u32;
                 if !self.flctl_target_reported {
                     self.flctl_target_reported = true;
-                    crate::qlog!(
-                        "sgi-odyssey: flow-control interrupt target {} and credit target {} stored; credits still return through the node interface\n",
+                    crate::dlog!(
+                        LogModule::Odyssey,
+                        "sgi-odyssey: flow-control interrupt target {} and credit target {} stored; credits still return through the node interface",
                         (value as u32) >> ODSY_FLCTL_INTR_TARGET_SHIFT,
                         ((value >> ODSY_FLCTL_TARGET_SHIFT) as u32) & ODSY_FLCTL_TARGET_MASK
                     );
@@ -82,8 +84,9 @@ impl Board {
                 }
                 if value != 0 && !self.stats_reported {
                     self.stats_reported = true;
-                    crate::qlog!(
-                        "sgi-odyssey: statistics region word {:#x} at {:#x} stored; the board's writes into the region are not modeled\n",
+                    crate::dlog!(
+                        LogModule::Odyssey,
+                        "sgi-odyssey: statistics region word {:#x} at {:#x} stored; the board's writes into the region are not modeled",
                         value as u32,
                         addr
                     );
@@ -103,7 +106,7 @@ impl Board {
             | ODSY_I2C_OPT_CMD_READ
             | ODSY_I2C_OPT_STATUS_READ
             | ODSY_BACKEND_VERSION => {
-                crate::qlog!("sgi-odyssey: write of {:#x} to the read-only register at {:#x}\n", value, addr);
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: write of {:#x} to the read-only register at {:#x}", value, addr);
             }
             _ => self.unimplemented(addr, size, true),
         }
@@ -177,7 +180,7 @@ impl Board {
         }
         let f = self.front.lock();
         if !f.work_queue.is_empty() {
-            crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_work_behind: {} stores wait, the oldest for {:?}", f.work_queue.len(), f.work_queue[0].queued_at.elapsed());
+            crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_work_behind: {} stores wait, the oldest for {:?}", f.work_queue.len(), f.work_queue[0].queued_at.elapsed());
         }
     }
 
@@ -192,7 +195,7 @@ impl Board {
         }
         let start = std::time::Instant::now();
         self.work_step(&mut Budget::words(waiting));
-        crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_work: drained offset {:#x} in {:?}", addr, start.elapsed());
+        crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_work: drained offset {:#x} in {:?}", addr, start.elapsed());
     }
 }
 

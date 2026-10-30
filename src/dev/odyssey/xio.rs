@@ -36,7 +36,7 @@ pub const SGI_XIO_INTERRUPT_SET: u64 = 1 << 8;
 /// The fabric address of a widget/address pair: the widget in bits 51:48.
 pub fn sgi_xio_compose(who: &str, widget: u32, address: u64, packet: &mut u64) -> bool {
     if widget >= SGI_XIO_WIDGETS || address >> SGI_XIO_PACKET_ADDRESS_BITS != 0 {
-        crate::qlog!("{who}: packet fabric cannot encode widget {widget} address {address:#x}\n");
+        crate::dlog!(LogModule::Odyssey, "{who}: packet fabric cannot encode widget {widget} address {address:#x}");
         return false;
     }
     *packet = (widget as u64) << SGI_XIO_PACKET_ADDRESS_BITS | address;
@@ -49,19 +49,15 @@ const HEART_PACKET: u64 = 0x80;
 impl HostInterface {
     /// `HostInterface::send_interrupt(&s->fabric_as, packet, number, set)`: the
     /// interrupt-modify write. HEART takes it at 0x80 of widget 8.
-    pub fn send_interrupt(&mut self, packet: u64, number: u8, set: bool) -> MemTxResult {
+    pub fn send_interrupt(&mut self, packet: u64, number: u8, set: bool) {
         let widget = (packet >> SGI_XIO_PACKET_ADDRESS_BITS) as u32;
         let address = packet & ((1u64 << SGI_XIO_PACKET_ADDRESS_BITS) - 1);
         if widget != self.heart_widget || address != HEART_PACKET {
-            crate::qlog!("odyssey: interrupt packet to widget {widget} address {address:#x} has no receiver\n");
-            return MEMTX_DECODE_ERROR;
+            crate::dlog!(LogModule::Odyssey, "odyssey: interrupt packet to widget {widget} address {address:#x} has no receiver");
+            return;
         }
-        match &self.irq {
-            Some(irq) => {
-                irq.set_line(number as u32, set);
-                MEMTX_OK
-            }
-            None => MEMTX_DECODE_ERROR,
+        if let Some(irq) = &self.irq {
+            irq.set_line(number as u32, set);
         }
     }
 }
@@ -172,8 +168,8 @@ impl Odyssey {
         irq: Arc<dyn InterruptController>,
         mem: Arc<dyn BusDevice>,
     ) -> Result<Arc<Self>, String> {
-        set_address_space_memory(mem);
-        let s = sgi_odyssey_new(product, widget as u32)?;
+        let mut s = sgi_odyssey_new(product, widget as u32)?;
+        s.guest = Some(mem);
         s.front.lock().irq = Some(irq);
         Ok(Arc::new(Self {
             small: widget_small_base(widget),
@@ -223,7 +219,7 @@ impl Odyssey {
     fn frame(state: &BoardLocks, display: &Display) {
         let (frame, w, h) = {
             let mut s = state.board.lock();
-            s.scanout.poll(qemu_clock_virtual_ns());
+            s.scanout.poll(monotonic_ns());
             s.scanout.update();
             (s.scanout.frame.clone(), s.scanout.frame_width as usize, s.scanout.frame_height as usize)
         };
