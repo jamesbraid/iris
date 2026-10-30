@@ -167,6 +167,10 @@ hashes are given where a change is easiest to understand by reading the commit.
   produced. (`src/ci.rs`, `src/gfx_display.rs`)
 ### SGI Octane (IP30)
 
+- **The Crossbow follows QEMU's model:** widgets 1 to 7 are
+  illegal-destination errors on the receiving port, widget 0's interrupt
+  reaches HEART only at its interrupt address, links report coming up and
+  going down, and refused accesses go to the `xbow` log module.
 - **Octane audio plays at the rate the guest asks for.** RAD audio ran at
   44.1 kHz whatever IRIX programmed, so games and other non-44.1 kHz sounds
   played at the wrong speed. `test/audiotest` sweeps rates and formats.

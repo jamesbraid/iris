@@ -1,12 +1,17 @@
 //! Crossbow, the Octane's XIO crossbar: widget 0's registers, and which of
 //! the eight links (widgets 8 to 15) are present and carrying traffic.
 //!
-//! Cut to what the Octane uses; registers follow the Crossbow ASIC
-//! specification, revision 12.0 (`docs/Octane/`). The switch
-//! translates no address: the machine routes a processor access by widget
-//! number and asks [`Xbow::carries`] whether the link is up. Packets from
-//! widget 0 itself are its interrupts, which go to the target its interrupt
-//! destination registers name; on the Octane that is HEART.
+//! Registers follow the Crossbow ASIC specification, revision 12.0
+//! (`docs/Octane/`). The switch translates no address: the machine routes a
+//! processor access by widget number and asks [`Xbow::carries`] whether the
+//! link is up, and the Bridge asks [`Xbow::route`] about its DMA. A request
+//! naming widgets 1 to 7 is an illegal-destination error on the port it
+//! entered by (the processor's enter at HEART's, through
+//! [`IllegalDestinations`]). Packets from widget 0 itself are its
+//! interrupts, a doubleword write to the address its interrupt destination
+//! registers name; HEART takes one at its offset 0x80, and iris carries
+//! packets to no other widget. Guest accesses the model refuses or ignores
+//! are reported through the `xbow` log module.
 //!
 //! Which links are present and alive are atomics, so the routing decision
 //! (`carries`) never takes a lock; they change only under the register
@@ -17,10 +22,13 @@
 //! resource lock; the fences are kept but gate nothing, since no warm reset
 //! travels through the modelled switch.
 //!
-//! Two approximations: a link reset on a fitted link brings the link back
-//! alive as it was before the reset (link training is not modelled, and the
-//! stock PROM resets each link it finds and expects it back), and register
-//! accesses are 32-bit at the data half of each eight-byte slot only.
+//! Approximations: a link reset on a fitted link brings the link back
+//! alive as it was before the reset, or failed if it was down (link
+//! training is not modelled, and the stock PROM resets each link it finds
+//! and expects it back); the two-cycle pulse itself is not kept, so no port
+//! is seen initializing. Register accesses are 32-bit at the data half of
+//! each eight-byte slot only. Performance counters, arbitration and link
+//! micropacket errors keep their settings and count nothing.
 //!
 //! Ported from hw/misc/sgi-xbow.c in jamesbraid/qemu-sgi-origami.
 

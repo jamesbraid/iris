@@ -181,7 +181,8 @@ O2 it is `src/ip32.rs` (`Ip32Bus`) with CRIME's bank logic in
 `src/dev/crime_mem.rs` (`O2Memory`), whose remap points the table at bank
 views (a bank counted from where CRIME placed it) and maps the window to
 match. The Octane is built the same way: `src/ip30.rs` (`Ip30Bus`) maps
-HEART, the Crossbow and the widget windows (switched as links come and go),
+HEART, the Crossbow and the widget windows (switched as links come and go;
+widgets 1 to 7 answer as the Crossbow's illegal destinations),
 and HEART's bank descriptors place the banks through `src/dev/heart_mem.rs`
 (`HeartRam`), 32 MB at a time, with the 16 KB low-memory window as a view
 of the same bank. The CPU and every DMA master reach memory through
