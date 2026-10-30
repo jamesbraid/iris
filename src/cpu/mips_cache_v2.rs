@@ -566,6 +566,14 @@ pub trait CpuModel: MipsCache {
     /// keeps primary-cache diagnostic data, and leaves bits 63:32 alone on a
     /// partial LWR.
     const R10K_CACHE_OPS: bool = false;
+    /// Bits `Index_Store_Tag` keeps for the secondary cache. All of them unless
+    /// a part sets a mask. A 36-bit mask once inferred from the IP28 PROM's
+    /// walking-0s phase broke its diagnostics: the truncation it reads back
+    /// comes from the tag being assembled as `(TagHi << 32) | TagLo[31:0]`, not
+    /// from the array, and the mask only discarded the MRU bit the PROM writes
+    /// as TagHi[31]. Extending a mask to another part needs IP28 and Octane
+    /// diagnostic comparisons.
+    const SECONDARY_TAG_MASK: u64 = u64::MAX;
 }
 
 pub trait MipsCache: Send + Sync {
