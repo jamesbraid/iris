@@ -189,7 +189,7 @@ impl<
         const FIR: u32, const TLB_ENTRIES: usize, const MODEL: u8,
     > ShadowCache<IC_SIZE, IC_LINE, DC_SIZE, DC_LINE, L2_SIZE, L2_LINE, MIPS4, PRID, FIR, TLB_ENTRIES, MODEL>
 {
-    const R10K: bool = MODEL == model::R10000;
+    const R10K: bool = model::r10k_family(MODEL);
     const R5K: bool = MODEL == model::R5000;
     const IC_LINES: usize = if IC_LINE == 0 { 0 } else { IC_SIZE / IC_LINE };
     const DC_LINES: usize = if DC_LINE == 0 { 0 } else { DC_SIZE / DC_LINE };
@@ -329,11 +329,11 @@ impl<
     const PRID: u32 = PRID;
     const FIR: u32 = FIR;
     const TLB_ENTRIES: usize = TLB_ENTRIES;
-    // The R10000 implements 44 virtual address bits where the R4x00 implements
-    // 40; the shadow cache is only used for it, but key this off the same flag
-    // that selects its cache encodings rather than asserting it unconditionally.
-    const VA_BITS: u32 = if MODEL == model::R10000 { 44 } else { 40 };
-    const PA_BITS: u32 = if MODEL == model::R10000 { 40 } else { 36 };
+    // The R10000 family implements 44 virtual address bits where the R4x00
+    // implements 40; key this off the same flag that selects its cache
+    // encodings.
+    const VA_BITS: u32 = if Self::R10K { 44 } else { 40 };
+    const PA_BITS: u32 = if Self::R10K { 40 } else { 36 };
     // The CPU's name, which snapshots check: the same as the full model's, so
     // a mismatch reads as a cache-kind difference rather than a different CPU.
     // The R10000 keeps its historical "shadow", which existing IP28
@@ -341,10 +341,13 @@ impl<
     const NAME: &'static str = match MODEL {
         model::R4400 => "R4400",
         model::R5000 => "R5000",
-        _ => "shadow",
+        model::R10000 => "shadow",
+        model::R12000 => "R12000",
+        model::R14000 => "R14000",
+        _ => "R16000",
     };
     const CACHE_KIND: &'static str = "shadow";
-    const R10K_CACHE_OPS: bool = MODEL == model::R10000;
+    const R10K_CACHE_OPS: bool = Self::R10K;
 }
 
 impl<
@@ -727,6 +730,56 @@ pub type R10000ShadowCache =
 pub type R10000O2ShadowCache =
     ShadowCache<32768, 64, 32768, 32, 1048576, 64, true, 0x0000_0925, 0x0000_0900, 64, { model::R10000 }>;
 
+/// SGI Octane2 R12000 (IP30): revision 3.5, 2 MiB secondary cache.
+///
+/// PRId 0x0e35 and FPU word 0x0900 are the kernel-inventory words of a running
+/// Octane2 (origami's `ip30-r12000.md`, O2): not raw CP0 reads, and not proof
+/// of every R12000 revision. A 64-entry TLB and MIPS IV are what Linux selects
+/// for the implementation field 0x0e (same record, L1), and the primary caches
+/// are 32 KiB each from Config (NEC U10278EJ4V0UM p.230). The 128-byte
+/// secondary line is the R10000 family's, not established for this module
+/// (Config.SB is unknown there).
+pub type R12000ShadowCache =
+    ShadowCache<32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0e35, 0x0000_0900, 64, { model::R12000 }>;
+
+/// SGI O2 R12000 (IP32): the Octane2 part with a 1 MiB secondary cache and the
+/// 64-byte secondary line the O2 PROM needs (see `R10000O2ShadowCache`).
+///
+/// SGI shipped O2s with a 300 MHz R12000 and 1 MiB of secondary cache
+/// (origami's `o2-hardware-findings.md`). Its PRId revision is not
+/// established; the Octane2 word is borrowed so the implementation field is
+/// right.
+pub type R12000O2ShadowCache =
+    ShadowCache<32768, 64, 32768, 32, 1048576, 64, true, 0x0000_0e35, 0x0000_0900, 64, { model::R12000 }>;
+
+/// SGI Fuel R14000 (IP34): 2 MiB secondary cache.
+///
+/// PRId 0x0f23 is revision 2.3, inferred from a public software inventory of
+/// a Fuel, not a captured CP0 word (origami's `ip34-fuel.md`). The FPU word
+/// is the R14000 compatibility choice from `r14000.md`.
+pub type R14000ShadowCache =
+    ShadowCache<32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0f23, 0x0000_0900, 64, { model::R14000 }>;
+
+/// SGI Octane R14000 (IP30): revision 2.4, 2 MiB secondary cache with
+/// 128-byte lines, as two Linux captures of a dual-R14000 Octane report
+/// (origami's `r14000.md` and its IP30 identity and cache evidence review).
+pub type R14000Ip30ShadowCache =
+    ShadowCache<32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0f24, 0x0000_0900, 64, { model::R14000 }>;
+
+/// SGI Tezro R16000 (IP53), a 4 MiB secondary cache.
+///
+/// PRId 0x0f50 is what a Tezro PROM capture prints for four processors
+/// (origami's `r16000.md`, "PROM CP0 PRId evidence"); it is conditional on
+/// those parts, not established for every R16000 revision. The FPU word
+/// 0x0900 is an R14000 compatibility approximation. The secondary cache is
+/// product-specific, not an R16000 constant: 4 MiB is the 700 MHz Tezro part,
+/// and the Origin 3900 part has 8 MiB. Its 128-byte line is unestablished.
+/// Linux treats the R16000 secondary cache like the family's (c-r4k.c,
+/// 374-390). Nothing else of the R16000 is modelled: its CP0 diagnostic
+/// register, denormal handling and CVT.L limit are the R14000's.
+pub type R16000ShadowCache =
+    ShadowCache<32768, 64, 32768, 32, 4194304, 128, true, 0x0000_0f50, 0x0000_0900, 64, { model::R16000 }>;
+
 /// SGI Indy / Indigo2 R4400: the full model's geometry and identity — 16 KB
 /// direct-mapped primaries with 16-byte lines, a 1 MB secondary with 128-byte
 /// lines, PRId/FIR, 48 TLB entries, MIPS III — so CP0 Config and a PROM's
@@ -942,6 +995,40 @@ mod tests {
         same::<R4400ShadowCache, R4400Cache>();
         same::<R5000ShadowCache, R5000Cache>();
         assert_eq!(<R10000ShadowCache as CpuModel>::NAME, "shadow", "existing IP28 snapshots");
+    }
+
+    /// Each R10000-family part reports its own identity, and all of them are
+    /// the family: 44 virtual and 40 physical address bits, R10000 cache
+    /// operations.
+    #[test]
+    fn the_r10000_family_parts_report_their_own_identity() {
+        fn id<C: CpuModel>() -> (u32, u32, usize, bool, &'static str, u32, u32) {
+            (C::PRID, C::FIR, C::TLB_ENTRIES, C::MIPS4, C::NAME, C::VA_BITS, C::PA_BITS)
+        }
+        fn caches<C: MipsCache>() -> (usize, usize, usize, usize, usize, usize) {
+            (C::IC_SIZE, C::IC_LINE, C::DC_SIZE, C::DC_LINE, C::L2_SIZE, C::L2_LINE)
+        }
+        assert_eq!(id::<R10000ShadowCache>(), (0x925, 0x900, 64, true, "shadow", 44, 40));
+        assert_eq!(id::<R12000ShadowCache>(), (0xe35, 0x900, 64, true, "R12000", 44, 40));
+        assert_eq!(id::<R14000ShadowCache>(), (0xf23, 0x900, 64, true, "R14000", 44, 40));
+        assert_eq!(id::<R14000Ip30ShadowCache>(), (0xf24, 0x900, 64, true, "R14000", 44, 40));
+        assert_eq!(id::<R16000ShadowCache>(), (0xf50, 0x900, 64, true, "R16000", 44, 40));
+        assert_eq!(caches::<R12000ShadowCache>(), (32768, 64, 32768, 32, 2 << 20, 128));
+        assert_eq!(caches::<R12000O2ShadowCache>(), (32768, 64, 32768, 32, 1 << 20, 64));
+        assert_eq!(caches::<R14000ShadowCache>(), (32768, 64, 32768, 32, 2 << 20, 128));
+        assert_eq!(caches::<R16000ShadowCache>(), (32768, 64, 32768, 32, 4 << 20, 128));
+        fn family<C: CpuModel>() {
+            assert!(C::R10K_CACHE_OPS);
+        }
+        family::<R10000ShadowCache>();
+        family::<R10000O2ShadowCache>();
+        family::<R12000ShadowCache>();
+        family::<R12000O2ShadowCache>();
+        family::<R14000ShadowCache>();
+        family::<R14000Ip30ShadowCache>();
+        family::<R16000ShadowCache>();
+        assert!(!<R5000ShadowCache as CpuModel>::R10K_CACHE_OPS);
+        assert!(!<R4400ShadowCache as CpuModel>::R10K_CACHE_OPS);
     }
 
     /// The O2 R10000 differs from the IP28's only in its secondary line size.

@@ -4355,6 +4355,9 @@ mod tests {
         }
     }
 
+    /// The R10000 family keeps bits 63:32 on a partial LWR; the R5000 sign-extends.
+    /// The JIT and the interpreter must agree for each, and the JIT learns the
+    /// choice from the model's `CpuModel` constants.
     #[test]
     fn lwl_lwr_combine_to_a_full_unaligned_word_load_matches_interpreter() {
         // The canonical compiler-generated idiom for an unaligned word
