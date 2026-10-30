@@ -557,6 +557,21 @@ pub trait CpuModel: MipsCache {
     /// and `Index_Load_Data` returns into it, neither of which is true of the
     /// R4000 hit operations that share those encodings.
     const R10K_CACHE_OPS: bool = false;
+    /// Enable the full virtual-address EntryHi/TLB behavior for this model.
+    /// False preserves the upstream 40-bit EntryHi/TLB matching behavior.
+    const ENTRYHI_FULL_VA: bool = false;
+    /// Enable R10000 primary Index_Load_Data/Index_Store_Data shadows.
+    const R10K_PRIMARY_DATA_OPS: bool = false;
+    /// Bits retained by Index_Store_Tag to the secondary cache.
+    const SECONDARY_TAG_MASK: u64 = u64::MAX;
+    /// Preserve the upper word on partial LWR loads.
+    /// Full-word loads still sign-extend bit 31.
+    const LWR_PRESERVES_UPPER: bool = false;
+    /// Zero the upper word on FR=1 word writes, including raw transfers,
+    /// S/W results and untaken conditional S moves. The upper word is undefined.
+    const FPU_FR1_WORD_WRITES_ZERO_UPPER: bool = false;
+    /// Preserve the other paired word on FR=0 MOV.S.
+    const FPU_FR0_MOV_S_PRESERVES_PAIR: bool = false;
 }
 
 pub trait MipsCache: Send + Sync {

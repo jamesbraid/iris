@@ -6322,4 +6322,232 @@ mod tests {
                                parked through an interrupt masked only by the spl"),
         }
     }
+
+    /// Fuel IRIX places n64 stacks above the existing 40-bit compatibility limit.
+    #[test]
+    fn r14000_cp0_entryhi_and_tlb_match_full_xuseg_va() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(r14000_cp0_entryhi_and_tlb_match_full_xuseg_va_inner)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn r14000_cp0_entryhi_and_tlb_match_full_xuseg_va_inner() {
+        use crate::cpu::mips_tlb::MipsTlb;
+
+        const VA: u64 = 0x0000_0123_4000_0000;
+        const PHYS: u64 = 0x0005_0000;
+        const VALUE: u32 = 0xdead_beef;
+
+        fn check<C: CpuModel + From<Arc<dyn BusDevice>>>(full_va: bool) {
+            let mem = Arc::new(MockMemory::new());
+            mem.set_word(PHYS, VALUE);
+            let bus: Arc<dyn BusDevice> = mem;
+            let cfg = MipsCpuConfig::for_model::<C>();
+            let mut exec = Box::new(MipsExecutor::<MipsTlb, C>::new(
+                bus,
+                MipsTlb::default(),
+                &cfg,
+            ));
+            disable_jitv2(&mut exec);
+            // MTC0 must refresh the boxed executor's translation/accessor state.
+            exec.install_status_cb();
+
+            // Enter 64-bit kernel mode through MTC0 Status so the high xuseg
+            // address is checked by the CPU model's implemented VA width.
+            let status = (exec.core.cp0_status & !crate::cpu::mips_core::STATUS_ERL)
+                | STATUS_KX;
+            exec.core.write_gpr(1, status as u64);
+            let mtc0_status = (OP_COP0 << 26)
+                | (RS_MTC0 << 21)
+                | (1 << 16)
+                | (12 << 11);
+            assert_eq!(exec.exec(mtc0_status), EXEC_COMPLETE);
+
+            // Populate one TLB entry using architectural CP0 writes and TLBWI.
+            exec.core.write_gpr(1, VA);
+            let dmtc0_entryhi = (OP_COP0 << 26)
+                | (RS_DMTC0 << 21)
+                | (1 << 16)
+                | (10 << 11);
+            assert_eq!(exec.exec(dmtc0_entryhi), EXEC_COMPLETE);
+            let expected_entryhi = if full_va {
+                VA
+            } else {
+                VA & 0xC000_00FF_FFFF_E0FF
+            };
+            assert_eq!(exec.core.cp0_entryhi, expected_entryhi);
+
+            let entrylo0 = (0x50 << 6) | (3 << 3) | (1 << 2) | (1 << 1);
+            for (rt, rd, value) in [(2, 0, 0), (3, 5, 0), (4, 2, entrylo0), (5, 3, 0)] {
+                exec.core.write_gpr(rt, value);
+                let mtc0 = (OP_COP0 << 26)
+                    | (RS_MTC0 << 21)
+                    | (rt << 16)
+                    | (rd << 11);
+                assert_eq!(exec.exec(mtc0), EXEC_COMPLETE);
+            }
+            let tlbwi = (OP_COP0 << 26) | (RS_TLB << 21) | FUNCT_TLBWI;
+            assert_eq!(exec.exec(tlbwi), EXEC_COMPLETE);
+
+            let result = exec.read_data::<4>(VA);
+            if full_va {
+                assert_eq!(result, Ok(VALUE as u64));
+            } else {
+                let exception = result.unwrap_err();
+                assert_ne!(exception & EXEC_IS_EXCEPTION, 0);
+                assert_eq!((exception >> 2) & 0x1f, EXC_ADEL);
+            }
+        }
+
+        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(false);
+        check::<crate::cpu::mips_cache_shadow::R14000ShadowCache>(true);
+    }
+
+    /// Fuel retains the upper word on partial LWR while a complete word still sign-extends.
+    #[test]
+    fn r14000_partial_lwr_preserves_upper_only_for_partial_loads() {
+        fn check<C: CpuModel + From<Arc<dyn BusDevice>>>(preserve_upper: bool) {
+            let mem = Arc::new(MockMemory::new());
+            mem.set_word(0x2000, 0x89ab_cdef);
+            let bus: Arc<dyn BusDevice> = mem;
+            let cfg = MipsCpuConfig::for_model::<C>();
+            let mut exec = Box::new(MipsExecutor::<PassthroughTlb, C>::new(
+                bus,
+                PassthroughTlb::default(),
+                &cfg,
+            ));
+            disable_jitv2(&mut exec);
+            exec.core.write_gpr(1, 0x2000);
+
+            for old in [0x8123_4567_a1b2_c3d4u64, 0x7654_3210_21b2_c3d4] {
+                let low = old as u32;
+                let expected_words = [
+                    (low & 0xffff_ff00) | 0x89,
+                    (low & 0xffff_0000) | 0x89ab,
+                    (low & 0xff00_0000) | 0x89_abcd,
+                    0x89ab_cdef,
+                ];
+                for (offset, word) in expected_words.into_iter().enumerate() {
+                    exec.core.write_gpr(2, old);
+                    let lwr = make_i(OP_LWR, 1, 2, offset as u16);
+                    assert_eq!(exec.exec(lwr), EXEC_COMPLETE);
+                    let expected = if preserve_upper && offset != 3 {
+                        (old & 0xffff_ffff_0000_0000) | word as u64
+                    } else {
+                        word as i32 as i64 as u64
+                    };
+                    assert_eq!(exec.core.read_gpr(2), expected,
+                        "{} LWR offset {offset} old {old:#018x}", C::NAME);
+                }
+            }
+        }
+
+        check::<crate::cpu::mips_cache_shadow::R14000ShadowCache>(true);
+        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(false);
+    }
+
+    /// Fuel floating-point compatibility choices must leave the existing CPU models unchanged.
+    #[test]
+    fn r14000_fpr_word_and_move_policies_are_model_scoped() {
+        fn check<C: CpuModel + From<Arc<dyn BusDevice>>>(r14000: bool) {
+            let mem = Arc::new(MockMemory::new());
+            let bus: Arc<dyn BusDevice> = mem;
+            let cfg = MipsCpuConfig::for_model::<C>();
+            let mut exec = Box::new(MipsExecutor::<PassthroughTlb, C>::new(
+                bus,
+                PassthroughTlb::default(),
+                &cfg,
+            ));
+            disable_jitv2(&mut exec);
+            exec.core.cp0_status |= STATUS_CU1 | STATUS_FR;
+            exec.update_fpr_mode();
+
+            let initial = 0x9f50_2723_308f_8d56;
+            exec.core.write_gpr(2, 0x1122_3344_7654_3210);
+            exec.core.write_fpr_l(4, initial);
+            let mtc1 = make_cop1_move(RS_MTC1, 2, 4);
+            assert_eq!(exec.exec(mtc1), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(4), if r14000 {
+                0x0000_0000_7654_3210
+            } else {
+                0x9f50_2723_7654_3210
+            }, "FR=1 MTC1");
+
+            // Seed 222 SQRT.S f16,f10: same result word, model-selected upper.
+            exec.core.write_fpr_l(10, 0x0000_0000_443e_26ec);
+            exec.core.write_fpr_l(16, 0xfbb3_a7f3_6bdc_8c4b);
+            exec.core.fpu_fcsr = 0x1000_0000;
+            assert_eq!(exec.exec(0x4600_5404), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(16), if r14000 {
+                0x0000_0000_41dc_a20c
+            } else {
+                0xfbb3_a7f3_41dc_a20c
+            }, "seed 222 SQRT.S");
+
+            // Seed 1 ROUND.W.S f11,f5, including its nonzero old upper word.
+            exec.core.write_fpr_l(5, 0x0000_0000_478d_05de);
+            exec.core.write_fpr_l(11, initial);
+            exec.core.fpu_fcsr = 0;
+            assert_eq!(exec.exec(0x4600_2acc), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(11), if r14000 {
+                0x0000_0000_0001_1a0c
+            } else {
+                0x9f50_2723_0001_1a0c
+            }, "seed 1 ROUND.W.S");
+
+            // An untaken FR=1 MOVZ.S leaves the low word in place. R14000's
+            // selected compatibility policy also clears its upper word.
+            exec.core.write_gpr(2, 1);
+            exec.core.write_fpr_l(0, 0x0000_0000_3f80_0000);
+            exec.core.write_fpr_l(4, initial);
+            let movz_s = make_cop1_compute(RS_S, 2, 0, 4, FUNCT_FMOVZ);
+            assert_eq!(exec.exec(movz_s), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(4), if r14000 {
+                0x0000_0000_308f_8d56
+            } else {
+                initial
+            }, "untaken FR=1 MOVZ.S");
+
+            // In FR=0, MTC1 updates one word of an even/odd pair and keeps its
+            // partner. The R14000 MOV.S choice likewise keeps the old partner.
+            exec.core.cp0_status &= !STATUS_FR;
+            exec.update_fpr_mode();
+            exec.core.write_gpr(2, 0x7654_3210);
+            for (fd, expected) in [(4, 0x9f50_2723_7654_3210), (5, 0x7654_3210_308f_8d56)] {
+                exec.core.write_fpr_l(4, initial);
+                assert_eq!(exec.exec(make_cop1_move(RS_MTC1, 2, fd)), EXEC_COMPLETE);
+                assert_eq!(exec.core.read_fpr_l(4), expected, "FR=0 MTC1 f{fd}");
+            }
+            let source = 0x1234_5678_4080_0000;
+            exec.core.write_fpr_l(0, source);
+            exec.core.write_fpr_l(4, initial);
+            let mov_s = make_cop1_compute(RS_S, 0, 0, 4, FUNCT_FMOV);
+            assert_eq!(exec.exec(mov_s), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(4), if r14000 {
+                0x9f50_2723_4080_0000
+            } else {
+                source
+            }, "FR=0 MOV.S");
+
+            // FR=1 full-width controls remain whole-register transfers.
+            exec.core.cp0_status |= STATUS_FR;
+            exec.update_fpr_mode();
+            let wide = 0x1122_3344_7654_3210;
+            exec.core.write_gpr(2, wide);
+            exec.core.write_fpr_l(4, initial);
+            assert_eq!(exec.exec(make_cop1_move(RS_DMTC1, 2, 4)), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(4), wide, "DMTC1 keeps all 64 bits");
+            exec.core.write_fpr_l(0, source);
+            exec.core.write_fpr_l(4, initial);
+            let mov_d = make_cop1_compute(RS_D, 0, 0, 4, FUNCT_FMOV);
+            assert_eq!(exec.exec(mov_d), EXEC_COMPLETE);
+            assert_eq!(exec.core.read_fpr_l(4), source, "MOV.D keeps all 64 bits");
+        }
+
+        check::<crate::cpu::mips_cache_shadow::R14000ShadowCache>(true);
+        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(false);
+    }
 }

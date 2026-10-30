@@ -19,11 +19,10 @@
 //! - **Coherency is exact and free.** There is no stale line to miss on a
 //!   self-modifying store, no L1/L2 inclusion policy to get wrong, and no way
 //!   for a missed writeback to lose data.
-//! - **Diagnostics round-trip.** The shadow stores whatever bits are written
-//!   to it and returns them unchanged, so a walking-1s test over tag or data
-//!   SRAM passes without anyone having to know the hardware's field layout.
-//!   Where the emulator *must* know the layout — to decide whether a line is
-//!   valid, say — that is a separate question from storing the bits.
+//! - **Diagnostics round-trip by default.** The shadow stores whatever bits
+//!   are written to it and returns them unchanged, so walking-1s tests pass
+//!   without knowing the hardware's field layout. The R14000
+//!   model opts into its secondary-tag mask separately.
 //!
 //! The shadow is deliberately not consulted by `read`/`write`/`fetch`. If it
 //! ever needs to be, this type is the wrong shape and should say so loudly
@@ -99,6 +98,14 @@ const WAYS: usize = 2;
 /// bits. Once the executor carried TagHi properly the mask did nothing except
 /// discard the MRU bit, which the PROM writes as TagHi[31] and reads back.
 const L2_TAG_MASK: u64 = u64::MAX;
+
+/// TagHi/Lo fields documented for the R10000 in NEC U10278EJ4V0UM,
+/// p.270, figure 11-31: MRU, physical tag, state, virtual index and ECC.
+/// Fuel uses this layout as a compatibility mask, not a measurement of R14000
+/// silicon. Existing R10000 models retain L2_TAG_MASK: an earlier narrower
+/// mask broke IP28 PROM diagnostics. Extending this policy needs IP28/Octane
+/// diagnostic comparisons; establishing R14000 behavior needs its own evidence.
+const R14000_L2_TAG_MASK: u64 = 0x8000_000f_ffff_cdff;
 
 /// Is the shadow cache's operation trace on, at this level of detail?
 ///
@@ -190,6 +197,9 @@ impl<
     > ShadowCache<IC_SIZE, IC_LINE, DC_SIZE, DC_LINE, L2_SIZE, L2_LINE, MIPS4, PRID, FIR, TLB_ENTRIES, MODEL>
 {
     const R10K: bool = MODEL == model::R10000;
+    /// PRId-specific compatibility policies approximate R14000 behavior;
+    /// they are not measurements of R14000 silicon.
+    const IS_R14000: bool = MODEL == model::R10000 && ((PRID >> 8) & 0xff) == 0x0f;
     const R5K: bool = MODEL == model::R5000;
     const IC_LINES: usize = if IC_LINE == 0 { 0 } else { IC_SIZE / IC_LINE };
     const DC_LINES: usize = if DC_LINE == 0 { 0 } else { DC_SIZE / DC_LINE };
@@ -202,11 +212,11 @@ impl<
             lladdr: UnsafeCell::new(0),
             ecc_in: UnsafeCell::new(0),
             ecc_out: UnsafeCell::new(0),
-            ic: UnsafeCell::new(Shadow::new(Self::IC_LINES, 0)),
-            dc: UnsafeCell::new(Shadow::new(Self::DC_LINES, 0)),
-            // Only the R10000 secondary keeps a data shadow: it is the one
-            // the IP28 PROM walks with Index_Store_Data, and a 1 MB array is
-            // cheap once. The R4000 family has no index data ops.
+            // Fuel's PROM walks primary data with index load/store operations.
+            // Keep those arrays only for R14000; existing R10000 models retain
+            // their secondary-only data shadow for the IP28 PROM.
+            ic: UnsafeCell::new(Shadow::new(Self::IC_LINES, if Self::IS_R14000 { IC_SIZE / 4 } else { 0 })),
+            dc: UnsafeCell::new(Shadow::new(Self::DC_LINES, if Self::IS_R14000 { DC_SIZE / 4 } else { 0 })),
             l2: UnsafeCell::new(Shadow::new(Self::L2_LINES, if Self::R10K { L2_SIZE / 8 } else { 0 })),
             tc_base: UnsafeCell::new(std::ptr::null_mut()),
             tc_bitmap: UnsafeCell::new(0),
@@ -293,15 +303,22 @@ impl<
 
     /// Data slot for an R10000 `Index_Load_Data` / `Index_Store_Data`.
     ///
-    /// Same shape: way in bit 0, the rest addressing the array. The PROM walks
-    /// it at `…00`, `…01`, `…10`, `…11`, `…20` — one doubleword per operation
-    /// with the way bit shifted in beneath it.
-    fn data_slot(&self, len: usize, virt_addr: u64) -> usize {
+    /// Way is bit 0. The IP28 PROM walks the secondary array at
+    /// `…00`, `…01`, `…10`, `…11`, `…20`: one doubleword per operation,
+    /// with the way bit beneath the word index. Existing R10000 models retain
+    /// that index. Fuel's R14000 uses four-byte primary and eight-byte secondary
+    /// slots as a diagnostic compatibility approximation.
+    fn data_slot(&self, sel: u32, len: usize, virt_addr: u64) -> usize {
         if len == 0 {
             return 0;
         }
         let way = (virt_addr as usize) & (WAYS - 1);
-        let word = (virt_addr as usize) >> 4;
+        let shift = if Self::IS_R14000 {
+            if matches!(sel, CACH_PI | CACH_PD) { 2 } else { 3 }
+        } else {
+            4
+        };
+        let word = (virt_addr as usize) >> shift;
         (word * WAYS + way) % len
     }
 }
@@ -338,13 +355,23 @@ impl<
     // a mismatch reads as a cache-kind difference rather than a different CPU.
     // The R10000 keeps its historical "shadow", which existing IP28
     // snapshots carry.
-    const NAME: &'static str = match MODEL {
-        model::R4400 => "R4400",
-        model::R5000 => "R5000",
-        _ => "shadow",
+    const NAME: &'static str = if Self::IS_R14000 {
+        "R14000"
+    } else {
+        match MODEL {
+            model::R4400 => "R4400",
+            model::R5000 => "R5000",
+            _ => "shadow",
+        }
     };
     const CACHE_KIND: &'static str = "shadow";
     const R10K_CACHE_OPS: bool = MODEL == model::R10000;
+    const ENTRYHI_FULL_VA: bool = Self::IS_R14000;
+    const R10K_PRIMARY_DATA_OPS: bool = Self::IS_R14000;
+    const SECONDARY_TAG_MASK: u64 = if Self::IS_R14000 { R14000_L2_TAG_MASK } else { L2_TAG_MASK };
+    const LWR_PRESERVES_UPPER: bool = Self::IS_R14000;
+    const FPU_FR1_WORD_WRITES_ZERO_UPPER: bool = Self::IS_R14000;
+    const FPU_FR0_MOV_S_PRESERVES_PAIR: bool = Self::IS_R14000;
 }
 
 impl<
@@ -547,12 +574,15 @@ impl<
         }
 
         match op {
-            // Index_Store_Tag / Index_Load_Tag. Stored and returned verbatim:
-            // a tag test is a round trip, and round trips do not require
-            // knowing what the bits mean.
+            // Index_Store_Tag / Index_Load_Tag use the model's selected tag
+            // mask. Existing models retain all bits; R14000 applies its mask.
             C_IST => {
                 let idx = self.tag_slot(sel, virt_addr);
-                let mask = if matches!(sel, CACH_SI | CACH_SD) { L2_TAG_MASK } else { u64::MAX };
+                let mask = if matches!(sel, CACH_SI | CACH_SD) {
+                    <Self as CpuModel>::SECONDARY_TAG_MASK
+                } else {
+                    u64::MAX
+                };
                 if l2_op_log(CACHE_LOG_OP) {
                     crate::dlog!(LogModule::L2c, "shadow:   -> IST va={virt_addr:#012x} idx={idx} stores {:#018x}",
                                  phys_addr & mask & !MRU_BIT);
@@ -560,10 +590,8 @@ impl<
                 let s = self.shadow(sel);
                 if idx < s.tags.len() {
                     // The MRU bit belongs to the set, not to this way, so it
-                    // is lifted out and kept separately. Everything else is
-                    // stored verbatim: bit 32 in particular is *not* spare —
-                    // TagHi[3:0] are tag address bits 35:32, and clearing it
-                    // here destroyed real tag bits.
+                    // is lifted out and kept separately. TagHi[3:0] are tag
+                    // address bits, not spare bits; clearing them loses data.
                     let set = (idx / WAYS).min(s.mru.len() - 1);
                     s.mru[set] = phys_addr & MRU_BIT != 0;
                     s.tags[idx] = phys_addr & mask & !MRU_BIT;
@@ -590,9 +618,10 @@ impl<
 
             // R10000 reassigns 5/6/7, scoped to particular cache selects.
             C_R10K_CBARRIER if Self::R10K && sel == CACH_PI => 0,
-            C_R10K_ILD if Self::R10K && matches!(sel, CACH_PI | CACH_PD | CACH_SD) => {
+            C_R10K_ILD if Self::R10K && (sel == CACH_SD ||
+                (<Self as CpuModel>::R10K_PRIMARY_DATA_OPS && matches!(sel, CACH_PI | CACH_PD))) => {
                 let s = self.shadow(sel);
-                let slot = self.data_slot(s.data.len(), virt_addr);
+                let slot = self.data_slot(sel, s.data.len(), virt_addr);
                 if s.data.is_empty() {
                     0
                 } else {
@@ -604,12 +633,28 @@ impl<
                     s.data[slot]
                 }
             }
-            C_R10K_ISD if Self::R10K && matches!(sel, CACH_SI | CACH_SD) => {
+            C_R10K_ISD if Self::R10K && (matches!(sel, CACH_SI | CACH_SD) ||
+                (<Self as CpuModel>::R10K_PRIMARY_DATA_OPS && matches!(sel, CACH_PI | CACH_PD))) => {
                 let s = self.shadow(sel);
-                let slot = self.data_slot(s.data.len(), virt_addr);
+                let slot = self.data_slot(sel, s.data.len(), virt_addr);
                 if !s.data.is_empty() {
-                    s.data[slot] = phys_addr;
-                    s.ecc[slot] = unsafe { *self.ecc_in.get() };
+                    // Primary diagnostic fields: NEC U10278E fourth edition,
+                    // pp. 262, 271-272. Preserve supplied predecode/parity.
+                    let (data_mask, ecc_mask) = match sel {
+                        CACH_PI => (0xf_ffff_ffff, 1),
+                        CACH_PD => (0xffff_ffff, 0xf),
+                        _ => (u64::MAX, if Self::IS_R14000 { 0x3ff } else { u32::MAX }),
+                    };
+                    s.data[slot] = phys_addr & data_mask;
+                    s.ecc[slot] = unsafe { *self.ecc_in.get() } & ecc_mask;
+                    if Self::IS_R14000 && matches!(sel, CACH_SI | CACH_SD) {
+                        // Index Store Data(S) writes a quadword: selected VA[3]
+                        // doubleword plus a zero partner; check bits are shared.
+                        // NEC U10278E fourth edition p.91, figure5-7.
+                        let partner = slot ^ WAYS;
+                        s.data[partner] = 0;
+                        s.ecc[partner] = s.ecc[slot];
+                    }
                     if l2_op_log(CACHE_LOG_HIT) {
                         crate::dlog!(LogModule::L2c, "shadow:   -> ISD slot={slot} data={phys_addr:#018x} ecc={:#x}",
                                      s.ecc[slot]);
@@ -701,6 +746,11 @@ pub type R10000ShadowCache =
 pub type R10000O2ShadowCache =
     ShadowCache<32768, 64, 32768, 32, 1048576, 64, true, 0x0000_0925, 0x0000_0900, 64, { model::R10000 }>;
 
+/// SGI Fuel R14000 shadow model. R14000 compatibility policies are selected
+/// explicitly here; they are approximations, not measurements of silicon.
+pub type R14000ShadowCache =
+    ShadowCache<32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0f23, 0x0000_0900, 64, { model::R10000 }>;
+
 /// SGI Indy / Indigo2 R4400: the full model's geometry and identity — 16 KB
 /// direct-mapped primaries with 16-byte lines, a 1 MB secondary with 128-byte
 /// lines, PRId/FIR, 48 TLB entries, MIPS III — so CP0 Config and a PROM's
@@ -744,14 +794,25 @@ mod tests {
                 "bit {bit} did not survive a store/load tag round trip"
             );
         }
+        let r14 = R14000ShadowCache::new(Arc::new(Memory::new(1)));
+        r14.cache_op(C_IST | CACH_SD, 0, u64::MAX);
+        assert_eq!(r14.cache_op(C_ILT | CACH_SD, 0, 0), R14000_L2_TAG_MASK);
     }
 
-    /// Index_Store_Data / Index_Load_Data likewise.
+    /// Fuel's primary diagnostic data must round-trip while IP28 keeps its secondary-only shadow.
     #[test]
-    fn secondary_data_round_trips() {
+    fn diagnostic_data_round_trips_without_adding_primary_arrays_to_existing_models() {
         let c = cache();
         c.cache_op(C_R10K_ISD | CACH_SD, 0x40, 0xdeadbeef);
         assert_eq!(c.cache_op(C_R10K_ILD | CACH_SD, 0x40, 0), 0xdeadbeef);
+
+        // Existing R10000 models keep the upstream empty-primary behavior.
+        c.cache_op(C_R10K_ISD | CACH_PI, 0, 0x1234);
+        assert_eq!(c.cache_op(C_R10K_ILD | CACH_PI, 0, 0), 0);
+
+        let r14 = R14000ShadowCache::new(Arc::new(Memory::new(1)));
+        r14.cache_op(C_R10K_ISD | CACH_PI, 4, 0x1234);
+        assert_eq!(r14.cache_op(C_R10K_ILD | CACH_PI, 4, 0), 0x1234);
     }
 
     /// The MRU bit is **shared between the ways of a set**: written through
@@ -817,6 +878,15 @@ mod tests {
         assert_eq!(c.cache_op_ecc(), 0x001, "way 0's check bits");
         assert_eq!(c.cache_op(C_R10K_ILD | CACH_SD, 1, 0), 0xaaaa_bbbb_cccc_dddd);
         assert_eq!(c.cache_op_ecc(), 0x3fe, "way 1's check bits");
+
+        // Existing R10000 diagnostics retain all supplied ECC bits and do
+        // not clear the neighbouring doubleword on a store.
+        c.set_cache_ecc(0xffff_fc01);
+        c.cache_op(C_R10K_ISD | CACH_SD, 16, 0x1234_5678);
+        c.set_cache_ecc(0);
+        c.cache_op(C_R10K_ISD | CACH_SD, 0, 0x8765_4321);
+        assert_eq!(c.cache_op(C_R10K_ILD | CACH_SD, 16, 0), 0x1234_5678);
+        assert_eq!(c.cache_op_ecc(), 0xffff_fc01);
     }
 
     /// An untouched set reports no MRU, so an ordinary tag read is not
@@ -916,6 +986,32 @@ mod tests {
         same::<R4400ShadowCache, R4400Cache>();
         same::<R5000ShadowCache, R5000Cache>();
         assert_eq!(<R10000ShadowCache as CpuModel>::NAME, "shadow", "existing IP28 snapshots");
+
+        type R10K = R10000ShadowCache;
+        type R14K = R14000ShadowCache;
+        assert!(!<R10K as CpuModel>::ENTRYHI_FULL_VA);
+        assert!(!<R10K as CpuModel>::R10K_PRIMARY_DATA_OPS);
+        assert_eq!(<R10K as CpuModel>::SECONDARY_TAG_MASK, u64::MAX);
+        assert!(!<R10K as CpuModel>::LWR_PRESERVES_UPPER);
+        assert!(!<R10K as CpuModel>::FPU_FR1_WORD_WRITES_ZERO_UPPER);
+        assert!(!<R10K as CpuModel>::FPU_FR0_MOV_S_PRESERVES_PAIR);
+
+        assert_eq!(<R14K as CpuModel>::PRID, 0x0000_0f23);
+        assert_eq!(<R14K as CpuModel>::FIR, 0x0000_0900);
+        assert_eq!(<R14K as CpuModel>::TLB_ENTRIES, 64);
+        assert_eq!(<R14K as CpuModel>::NAME, "R14000");
+        assert_eq!(
+            (<R14K as MipsCache>::IC_SIZE, <R14K as MipsCache>::IC_LINE,
+             <R14K as MipsCache>::DC_SIZE, <R14K as MipsCache>::DC_LINE,
+             <R14K as MipsCache>::L2_SIZE, <R14K as MipsCache>::L2_LINE),
+            (32768, 64, 32768, 32, 2097152, 128),
+        );
+        assert!(<R14K as CpuModel>::ENTRYHI_FULL_VA);
+        assert!(<R14K as CpuModel>::R10K_PRIMARY_DATA_OPS);
+        assert_eq!(<R14K as CpuModel>::SECONDARY_TAG_MASK, R14000_L2_TAG_MASK);
+        assert!(<R14K as CpuModel>::LWR_PRESERVES_UPPER);
+        assert!(<R14K as CpuModel>::FPU_FR1_WORD_WRITES_ZERO_UPPER);
+        assert!(<R14K as CpuModel>::FPU_FR0_MOV_S_PRESERVES_PAIR);
     }
 
     /// The O2 R10000 differs from the IP28's only in its secondary line size.

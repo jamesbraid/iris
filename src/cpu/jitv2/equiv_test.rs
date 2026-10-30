@@ -452,6 +452,11 @@ mod tests {
     /// function runs until it exits the region (returns to the interpreter)
     /// on its own.
     fn run_jit_page(page: &[(u16, u32)], gpr: [u64; 32], pc: u64, entry_word: u16, max_instrs: usize, mem_init: &[(u64, u32)]) -> Option<CoreSnapshot> {
+        run_jit_page_with_consts(page, gpr, pc, entry_word, max_instrs, mem_init,
+            crate::cpu::jitv2::codegen::JitConsts::default())
+    }
+
+    fn run_jit_page_with_consts(page: &[(u16, u32)], gpr: [u64; 32], pc: u64, entry_word: u16, max_instrs: usize, mem_init: &[(u64, u32)], jit_consts: crate::cpu::jitv2::codegen::JitConsts) -> Option<CoreSnapshot> {
         let mut page_words = [0u32; ENTRIES_PER_PAGE];
         for &(word, raw) in page {
             page_words[word as usize] = raw;
@@ -476,6 +481,7 @@ mod tests {
         let mut instrs_owned = *walked;
 
         let mut codegen = Codegen::new();
+        codegen.jit_consts = jit_consts;
         let jit_fn: JitFn = codegen.compile_region(&mut instrs_owned, entry_word, true, false)?;
 
         let (exec, mem) = seeded_executor(gpr, pc);
@@ -1284,6 +1290,11 @@ mod tests {
 
     /// `run_interpreter_fpu_fcsr`'s JIT counterpart.
     fn run_jit_fpu_fcsr(instr: u32, gpr: [u64; 32], fpr: [u64; 32], pc: u64, word_offset: u16, fr1: bool, fcsr: Option<u32>) -> Option<CoreSnapshot> {
+        run_jit_fpu_fcsr_with_consts(instr, gpr, fpr, pc, word_offset, fr1, fcsr,
+            crate::cpu::jitv2::codegen::JitConsts::default())
+    }
+
+    fn run_jit_fpu_fcsr_with_consts(instr: u32, gpr: [u64; 32], fpr: [u64; 32], pc: u64, word_offset: u16, fr1: bool, fcsr: Option<u32>, jit_consts: crate::cpu::jitv2::codegen::JitConsts) -> Option<CoreSnapshot> {
         let mut page = [0u32; ENTRIES_PER_PAGE];
         page[word_offset as usize] = instr;
 
@@ -1293,6 +1304,7 @@ mod tests {
         let mut instrs_owned = *walked;
 
         let mut codegen = Codegen::new();
+        codegen.jit_consts = jit_consts;
         let jit_fn: JitFn = codegen.compile_region(&mut instrs_owned, word_offset, fr1, false)?;
 
         let (exec, _mem) = fpu_seeded_executor(gpr, fpr, pc, fr1);
@@ -4356,6 +4368,75 @@ mod tests {
     }
 
     #[test]
+    fn r14000_jit_lwr_preserves_upper_for_partial_words() {
+        type R14000 = crate::cpu::mips_cache_shadow::R14000ShadowCache;
+
+        let aligned = 0x2000u64;
+        let pc = 0x1000u64;
+        let lwr = make_i(crate::cpu::mips_isa::OP_LWR, 1, 2, 0);
+        let policy = crate::cpu::jitv2::codegen::JitConsts {
+            lwr_preserves_upper: true,
+            ..Default::default()
+        };
+        for (offset, expected) in [
+            (0, 0x1122_3344_5566_77DE),
+            (1, 0x1122_3344_5566_DEAD),
+            (2, 0x1122_3344_55DE_ADBE),
+            (3, 0xFFFF_FFFF_DEAD_BEEF),
+        ] {
+            let mut gpr = [0u64; 32];
+            gpr[1] = aligned + offset;
+            gpr[2] = 0x1122_3344_5566_7788;
+
+            let interp_mem = Arc::new(MockMemory::new_not_compilable());
+            interp_mem.set_word(aligned, 0xDEAD_BEEF);
+            let interp_bus: Arc<dyn BusDevice> = interp_mem;
+            let cfg = MipsCpuConfig::for_model::<R14000>();
+            let mut interp = MipsExecutor::<PassthroughTlb, R14000>::new(
+                interp_bus,
+                PassthroughTlb::default(),
+                &cfg,
+            );
+            interp.core.gpr = gpr;
+            interp.core.pc = pc;
+            assert_eq!(interp.exec(lwr), crate::cpu::mips_exec::EXEC_COMPLETE);
+
+            let mut page = [0u32; ENTRIES_PER_PAGE];
+            page[0] = lwr;
+            let mut analyzer = Analyzer::new();
+            let page_base = (pc & !(PAGE_SIZE as u64 - 1)) as u32;
+            let (walked, non_empty) = analyzer.walk_bounded(&page, 0, page_base, 1);
+            assert!(non_empty, "LWR must be admitted to compilation");
+            let mut instrs_owned = *walked;
+            let mut codegen = Codegen::new();
+            codegen.jit_consts = policy;
+            let jit_fn: JitFn = codegen.compile_region(&mut instrs_owned, 0, true, false)
+                .expect("LWR must compile");
+
+            let jit_mem = Arc::new(MockMemory::new_not_compilable());
+            jit_mem.set_word(aligned, 0xDEAD_BEEF);
+            jit_mem.set_word(pc, lwr);
+            jit_mem.set_word(pc & 0x1FFF_FFFF, lwr);
+            let jit_bus: Arc<dyn BusDevice> = jit_mem;
+            let mut jit = Box::new(MipsExecutor::<PassthroughTlb, R14000>::new(
+                jit_bus,
+                PassthroughTlb::default(),
+                &cfg,
+            ));
+            jit.core.gpr = gpr;
+            jit.core.pc = pc;
+            jit.install_jit_hooks();
+            unsafe { jit_fn(&mut jit.core as *mut MipsCore) };
+            std::mem::forget(codegen);
+
+            let interp = CoreSnapshot::capture(&interp.core);
+            let jit = CoreSnapshot::capture(&jit.core);
+            assert_eq!(jit, interp, "R14000 JIT/interpreter LWR offset {offset}");
+            assert_eq!(jit.gpr[2], expected, "R14000 LWR offset {offset}");
+        }
+    }
+
+    #[test]
     fn lwl_lwr_combine_to_a_full_unaligned_word_load_matches_interpreter() {
         // The canonical compiler-generated idiom for an unaligned word
         // load: LWL rt,0(base) then LWR rt,3(base) reconstructs the full
@@ -5894,6 +5975,61 @@ mod tests {
                 assert_fpu_matches_interpreter(fmovn_d, gpr, fpr, fr1);
             }
         }
+    }
+
+    #[test]
+    fn r14000_jit_fpu_word_policies_are_compiled() {
+        use crate::cpu::mips_isa::{FUNCT_FMOV, FUNCT_FMOVZ, OP_COP1, RS_MTC1, RS_S};
+        let policy = crate::cpu::jitv2::codegen::JitConsts {
+            fpu_fr1_word_writes_zero_upper: true,
+            fpu_fr0_mov_s_preserves_pair: true,
+            ..Default::default()
+        };
+        let pc = 0xFFFF_FFFF_8000_1000u64;
+        let word = (pc as u16 / 4) & 0x3ff;
+
+        // MTC1 is a real compiled word write in FR=1.
+        let mut gpr = [0u64; 32];
+        gpr[2] = 0x1122_3344_7654_3210;
+        let mut fpr = [0u64; 32];
+        fpr[4] = 0x9f50_2723_308f_8d56;
+        let mtc1 = make_r(OP_COP1, RS_MTC1, 2, 4, 0, 0);
+        let jit = run_jit_fpu_fcsr_with_consts(mtc1, gpr, fpr, pc, word, true, None, policy)
+            .expect("MTC1 must compile");
+        assert_eq!(jit.fpr[4], 0x0000_0000_7654_3210);
+
+        // Arithmetic and conversion emitters share the same word-write
+        // helper. Keep a compiled SQRT.S and ROUND.W.S case on this policy.
+        fpr[10] = 0x0000_0000_443E_26EC;
+        fpr[16] = 0xFBB3_A7F3_6BDC_8C4B;
+        let sqrt_s = 0x4600_5404;
+        let jit = run_jit_fpu_fcsr_with_consts(sqrt_s, gpr, fpr, pc, word, true, None, policy)
+            .expect("SQRT.S must compile");
+        assert_eq!(jit.fpr[16], 0x0000_0000_41DC_A20C);
+
+        fpr[5] = 0x0000_0000_478D_05DE;
+        fpr[11] = 0x9F50_2723_308F_8D56;
+        let round_w_s = 0x4600_2ACC;
+        let jit = run_jit_fpu_fcsr_with_consts(round_w_s, gpr, fpr, pc, word, true, None, policy)
+            .expect("ROUND.W.S must compile");
+        assert_eq!(jit.fpr[11], 0x0000_0000_0001_1A0C);
+
+        // An untaken MOVZ.S still performs the model's FR=1 word-write
+        // policy: preserve the low word and clear the unused upper half.
+        gpr[4] = 1;
+        fpr[6] = 0xAAAA_BBBB_CCCC_DDDD;
+        let movz_s = make_r(OP_COP1, RS_S, 4, 2, 6, FUNCT_FMOVZ);
+        let jit = run_jit_fpu_fcsr_with_consts(movz_s, gpr, fpr, pc, word, true, None, policy)
+            .expect("MOVZ.S must compile");
+        assert_eq!(jit.fpr[6], 0x0000_0000_CCCC_DDDD);
+
+        // In FR=0, MOV.S changes one logical word and keeps its paired half.
+        fpr[2] = 0x1111_2222_3333_4444;
+        fpr[6] = 0xAAAA_BBBB_CCCC_DDDD;
+        let mov_s = make_r(OP_COP1, RS_S, 0, 2, 6, FUNCT_FMOV);
+        let jit = run_jit_fpu_fcsr_with_consts(mov_s, gpr, fpr, pc, word, false, None, policy)
+            .expect("MOV.S must compile");
+        assert_eq!(jit.fpr[6], 0xAAAA_BBBB_3333_4444);
     }
 
     /// The multiply-add family, S and D, in both FR modes.

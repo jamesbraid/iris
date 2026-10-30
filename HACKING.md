@@ -349,6 +349,13 @@ consumer thread never takes `rec`.
   monomorphised over it, so all three CPUs are in every binary with no
   per-model branch on the hot path. `Machine::new` picks one from `[machine]
   cpu`.
+- `R14000ShadowCache` supplies Fuel's CPU identity and compatibility
+  policies. Its EntryHi and TLB retain 44 virtual-address bits; primary
+  diagnostic data arrays and secondary tag masks model the PROM's cache
+  checks. Partial LWR loads preserve the old upper word, FR=1 word writes
+  clear it, and FR=0 MOV.S preserves the paired word. These choices match
+  Fuel's existing emulation model; they are not measurements of R14000
+  silicon. `CpuModel` defaults preserve the existing machines' behavior.
 - With `opcodefusion` (implied by `lightning`), the interpreter executes
   common pairs (branch + NOP, LUI + ORI/ADDIU, address + load/store) as one
   dispatch.

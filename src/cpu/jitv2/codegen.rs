@@ -818,7 +818,7 @@ impl Codegen {
         use std::fmt::Write as _;
         let _ = write!(
             s,
-            "max={} min={} speed={} intrun={} inline={} helpers={} fallback={} preamble={} skip_preamble={} mips4={} dc={:?} triple={} flags={}",
+            "max={} min={} speed={} intrun={} inline={} helpers={} fallback={} preamble={} skip_preamble={} mips4={} dc={:?} lwr_upper={} fpu_fr1_zero_upper={} fpu_fr0_mov_s_pair={} triple={} flags={}",
             crate::cpu::jitv2::comp::max_instrs_per_compile(),
             crate::cpu::jitv2::comp::min_instrs_to_compile(),
             Self::opt_level_speed(),
@@ -830,6 +830,9 @@ impl Codegen {
             skip_entry_preamble,
             crate::cpu::jitv2::isa::mips4_enabled(),
             self.dc_geometry,
+            self.jit_consts.lwr_preserves_upper,
+            self.jit_consts.fpu_fr1_word_writes_zero_upper,
+            self.jit_consts.fpu_fr0_mov_s_preserves_pair,
             isa.triple(),
             isa.flags(),
         );
@@ -4335,6 +4338,12 @@ pub struct JitConsts {
     /// to loading from memory, exactly as before, so an un-stamped `Codegen`
     /// stays correct (just no faster).
     pub core: Option<core::num::NonZeroUsize>,
+    /// R14000-compatible LWR behavior for partial words.
+    pub lwr_preserves_upper: bool,
+    /// R14000-compatible FR=1 word writes clear the unused upper half.
+    pub fpu_fr1_word_writes_zero_upper: bool,
+    /// R14000-compatible MOV.S writes one logical word in FR=0.
+    pub fpu_fr0_mov_s_preserves_pair: bool,
 }
 
 impl JitConsts {
@@ -6095,10 +6104,14 @@ fn emit_write_fpr_w(ctx: &mut EmitCtx, reg: u32, value: Value, fr_mode: FrMode) 
         }
         FrMode::Fr1 => {
             let off = ir::immediates::Offset32::new(core_offset_of_fpr(reg));
-            let slot = ctx.builder.ins().load(ir::types::I64, mem, ctx.core_ptr, off);
-            let masked = ctx.builder.ins().band_imm_s(slot, 0xFFFF_FFFF_0000_0000u64 as i64);
             let value_64 = ctx.builder.ins().uextend(ir::types::I64, value);
-            let result = ctx.builder.ins().bor(masked, value_64);
+            let result = if ctx.jit_consts.fpu_fr1_word_writes_zero_upper {
+                value_64
+            } else {
+                let slot = ctx.builder.ins().load(ir::types::I64, mem, ctx.core_ptr, off);
+                let masked = ctx.builder.ins().band_imm_s(slot, 0xFFFF_FFFF_0000_0000u64 as i64);
+                ctx.builder.ins().bor(masked, value_64)
+            };
             ctx.builder.ins().store(mem, result, ctx.core_ptr, off);
         }
     }
@@ -7901,11 +7914,30 @@ fn emit_fneg_d(ctx: &mut EmitCtx, fr_mode: FrMode) {
 fn emit_fmov_s(ctx: &mut EmitCtx, fr_mode: FrMode) {
     let fs = field_rd(ctx.raw);
     let fd = field_sa(ctx.raw);
-    let value = emit_read_fpr_l(ctx, fs, fr_mode);
-    emit_write_fpr_l(ctx, fd, value, fr_mode);
+    if (matches!(fr_mode, FrMode::Fr0) && ctx.jit_consts.fpu_fr0_mov_s_preserves_pair)
+        || (matches!(fr_mode, FrMode::Fr1) && ctx.jit_consts.fpu_fr1_word_writes_zero_upper)
+    {
+        let value = emit_read_fpr_w(ctx, fs, fr_mode);
+        emit_write_fpr_w(ctx, fd, value, fr_mode);
+    } else {
+        let value = emit_read_fpr_l(ctx, fs, fr_mode);
+        emit_write_fpr_l(ctx, fd, value, fr_mode);
+    }
+}
+
+/// Apply the R14000 FR=1 scalar-write policy after a conditional S move. The
+/// interpreter clears the upper half even when the move predicate is false.
+fn emit_clear_fpr_word_upper(ctx: &mut EmitCtx, fd: u32, fr_mode: FrMode) {
+    if ctx.jit_consts.fpu_fr1_word_writes_zero_upper && matches!(fr_mode, FrMode::Fr1) {
+        let value = emit_read_fpr_w(ctx, fd, fr_mode);
+        emit_write_fpr_w(ctx, fd, value, fr_mode);
+    }
 }
 fn emit_fmov_d(ctx: &mut EmitCtx, fr_mode: FrMode) {
-    emit_fmov_s(ctx, fr_mode);
+    let fs = field_rd(ctx.raw);
+    let fd = field_sa(ctx.raw);
+    let value = emit_read_fpr_l(ctx, fs, fr_mode);
+    emit_write_fpr_l(ctx, fd, value, fr_mode);
 }
 
 /// MOVCF.fmt fd, fs, cc, tf: fd = fs if FPU condition code `cc` == `tf`
@@ -7969,6 +8001,7 @@ fn emit_fmovcf_s(ctx: &mut EmitCtx, fr_mode: FrMode) {
 
     ctx.builder.switch_to_block(merge_block);
     ctx.builder.seal_block(merge_block);
+    emit_clear_fpr_word_upper(ctx, fd, fr_mode);
 }
 /// MOVCF.D fd, fs, cc, tf — see `emit_fmovcf_s`'s doc comment for why this
 /// isn't just a delegate to it: `exec_fmovcf_d` uses `fpr_read_d`/
@@ -8011,6 +8044,7 @@ fn emit_fmovz_s(ctx: &mut EmitCtx, fr_mode: FrMode) {
 
     ctx.builder.switch_to_block(merge_block);
     ctx.builder.seal_block(merge_block);
+    emit_clear_fpr_word_upper(ctx, fd, fr_mode);
 }
 
 fn emit_fmovn_s(ctx: &mut EmitCtx, fr_mode: FrMode) {
@@ -8031,6 +8065,7 @@ fn emit_fmovn_s(ctx: &mut EmitCtx, fr_mode: FrMode) {
 
     ctx.builder.switch_to_block(merge_block);
     ctx.builder.seal_block(merge_block);
+    emit_clear_fpr_word_upper(ctx, fd, fr_mode);
 }
 
 fn emit_fmovz_d(ctx: &mut EmitCtx, fr_mode: FrMode) {
@@ -9993,6 +10028,13 @@ fn emit_lwr_ldr(ctx: &mut EmitCtx, size: MemSize) {
 
     let result = if size == MemSize::B8 {
         result_narrow
+    } else if size == MemSize::B4 && ctx.jit_consts.lwr_preserves_upper {
+        let upper = ctx.builder.ins().band_imm_s(rt_val, 0xFFFF_FFFF_0000_0000u64 as i64);
+        let lower = ctx.builder.ins().uextend(ir::types::I64, result_narrow);
+        let merged = ctx.builder.ins().bor(upper, lower);
+        let partial = ctx.builder.ins().icmp_imm_s(ir::condcodes::IntCC::NotEqual, byte_offset, align_mask);
+        let full = ctx.builder.ins().sextend(ir::types::I64, result_narrow);
+        ctx.builder.ins().select(partial, merged, full)
     } else {
         ctx.builder.ins().sextend(ir::types::I64, result_narrow)
     };
@@ -10760,6 +10802,25 @@ mod tests {
 
     fn r_type(op: u32, rs: u32, rt: u32, rd: u32, sa: u32, funct: u32) -> u32 {
         (op << 26) | (rs << 21) | (rt << 16) | (rd << 11) | (sa << 6) | funct
+    }
+
+    #[test]
+    fn cache_fingerprint_includes_cpu_codegen_policies() {
+        let default = Codegen::new();
+        let base = default.cache_fingerprint(false).expect("default codegen is cacheable");
+        for policy in [
+            JitConsts { lwr_preserves_upper: true, ..Default::default() },
+            JitConsts { fpu_fr1_word_writes_zero_upper: true, ..Default::default() },
+            JitConsts { fpu_fr0_mov_s_preserves_pair: true, ..Default::default() },
+        ] {
+            let mut codegen = Codegen::new();
+            codegen.jit_consts = policy;
+            assert_ne!(
+                codegen.cache_fingerprint(false).expect("policy codegen is cacheable"),
+                base,
+                "changing a codegen CPU policy must select a different persistent cache namespace",
+            );
+        }
     }
 
     /// `is_inlinable` must reject on *both* of its conditions, not just the

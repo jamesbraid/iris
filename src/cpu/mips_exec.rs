@@ -194,6 +194,24 @@ fn is_qnan_d(bits: u64) -> bool {
     f64::from_bits(bits).is_nan() && !is_snan_d(bits)
 }
 
+// The R14000 profile uses zero for undefined FR=1 word-write upper bits.
+// Other models keep their existing accessor and conversion semantics.
+fn write_fpr_word_fr1_zero_upper(core: &mut MipsCore, reg: u32, bits: u32) {
+    core.write_fpr_l(reg, bits as u64);
+}
+
+fn write_fpr_word<C: CpuModel>(core: &mut MipsCore, reg: u32, bits: u32, fr1: bool) {
+    if fr1 {
+        if C::FPU_FR1_WORD_WRITES_ZERO_UPPER {
+            write_fpr_word_fr1_zero_upper(core, reg, bits);
+        } else {
+            core.write_fpr_w(reg, bits);
+        }
+    } else {
+        write_fpr_w_fr0(core, reg, bits);
+    }
+}
+
 /// Every ADD/SUB/MUL/DIV/SQRT/RECIP/RSQRT/MADD-family handler's exception
 /// checks are computed from operand/result bit patterns alone — never from
 /// the host FPU's own exception flags (see
@@ -1104,6 +1122,21 @@ fn nutlb_cacheable_segment(va: u64, is_64bit: bool) -> bool {
     // windows) is fine — translate_64bit_impl raises before returning ok for
     // the illegal xkphys sub-ranges, so nothing invalid reaches a fill.
     (va >> 62) != 0 || (va >> 40) == 0
+}
+
+// Existing machines keep the historical 40-bit EntryHi/TLB VPN policy.
+#[inline(always)]
+const fn model_vpn_bits<C: CpuModel>() -> u32 {
+    if C::ENTRYHI_FULL_VA { C::VA_BITS } else { 40 }
+}
+
+#[inline]
+fn model_nutlb_cacheable_segment<C: CpuModel>(va: u64, is_64bit: bool) -> bool {
+    if C::ENTRYHI_FULL_VA {
+        !is_64bit || (va >> 62) != 0 || (va >> C::VA_BITS) == 0
+    } else {
+        nutlb_cacheable_segment(va, is_64bit)
+    }
 }
 
 /// Per-access-class tally of how far a guest load/store would get through the
@@ -2113,7 +2146,7 @@ unsafe extern "C" fn jit_cvt_to_int<T: Tlb, C: CpuModel>(
     rm: u32,
 ) -> u32 {
     let exec = unsafe { &mut *exec_from_core::<T, C>(ctx) };
-    cvt_to_int_and_commit(&mut exec.core, fs_reg, fd_reg, fr1 != 0, src_f64 != 0, dst_i64 != 0, rm as u8) as u32
+    cvt_to_int_and_commit::<C>(&mut exec.core, fs_reg, fd_reg, fr1 != 0, src_f64 != 0, dst_i64 != 0, rm as u8) as u32
 }
 
 /// Single-implementation CVT.S.W/D.W/S.L/D.L — see `cvt_int_to_float_and_commit`'s
@@ -2128,7 +2161,7 @@ unsafe extern "C" fn jit_cvt_int_to_float<T: Tlb, C: CpuModel>(
     dst_f64: u32,
 ) -> u32 {
     let exec = unsafe { &mut *exec_from_core::<T, C>(ctx) };
-    cvt_int_to_float_and_commit(&mut exec.core, fs_reg, fd_reg, fr1 != 0, src_i64 != 0, dst_f64 != 0) as u32
+    cvt_int_to_float_and_commit::<C>(&mut exec.core, fs_reg, fd_reg, fr1 != 0, src_i64 != 0, dst_f64 != 0) as u32
 }
 
 /// Single-implementation CVT.S.D — see `cvt_d_to_s_and_commit`'s doc
@@ -2136,7 +2169,7 @@ unsafe extern "C" fn jit_cvt_int_to_float<T: Tlb, C: CpuModel>(
 #[cfg(feature = "jitv2")]
 unsafe extern "C" fn jit_cvt_d_to_s<T: Tlb, C: CpuModel>(ctx: *mut core::ffi::c_void, fs_reg: u32, fd_reg: u32, fr1: u32) -> u32 {
     let exec = unsafe { &mut *exec_from_core::<T, C>(ctx) };
-    cvt_d_to_s_and_commit(&mut exec.core, fs_reg, fd_reg, fr1 != 0) as u32
+    cvt_d_to_s_and_commit::<C>(&mut exec.core, fs_reg, fd_reg, fr1 != 0) as u32
 }
 
 /// Inline lockstep step hook (`core.lockstep_step_fn`), called by compiled code
@@ -2440,7 +2473,7 @@ fn cvt_f64_to_int_by_value(x: f64, dst_bits: u32) -> (u64, bool, bool) {
 /// encoding (0=nearest-even, 1=toward-zero, 2=toward+inf, 3=toward-inf) —
 /// callers pass a fixed mode for ROUND/TRUNC/CEIL/FLOOR or FCSR's live low
 /// 2 bits for plain CVT.W/CVT.L.
-fn cvt_to_int_and_commit(core: &mut MipsCore, fs_reg: u32, fd_reg: u32, fr1: bool, src_f64: bool, dst_i64: bool, rm: u8) -> bool {
+fn cvt_to_int_and_commit<C: CpuModel>(core: &mut MipsCore, fs_reg: u32, fd_reg: u32, fr1: bool, src_f64: bool, dst_i64: bool, rm: u8) -> bool {
     let dst_bits = if dst_i64 { 64 } else { 32 };
     let (result, invalid, inexact) = if src_f64 {
         let bits = if fr1 { core.read_fpr_l(fs_reg) } else { read_fpr_l_fr0(core, fs_reg) };
@@ -2458,10 +2491,8 @@ fn cvt_to_int_and_commit(core: &mut MipsCore, fs_reg: u32, fd_reg: u32, fr1: boo
     let write_result = |core: &mut MipsCore| {
         if dst_i64 {
             if fr1 { core.write_fpr_l(fd_reg, result) } else { write_fpr_l_fr0(core, fd_reg, result) }
-        } else if fr1 {
-            core.write_fpr_w(fd_reg, result as u32)
         } else {
-            write_fpr_w_fr0(core, fd_reg, result as u32)
+            write_fpr_word::<C>(core, fd_reg, result as u32, fr1)
         }
     };
     if !invalid && !inexact {
@@ -2489,7 +2520,7 @@ fn cvt_to_int_and_commit(core: &mut MipsCore, fs_reg: u32, fd_reg: u32, fr1: boo
 /// MXCSR/FPSR race `cvt_to_int_and_commit`'s doc comment describes (found
 /// live in the opposite conversion direction; the same hazard applies here
 /// since `fcvt_from_sint` is just as real a hardware instruction).
-fn cvt_int_to_float_and_commit(core: &mut MipsCore, fs_reg: u32, fd_reg: u32, fr1: bool, src_i64: bool, dst_f64: bool) -> bool {
+fn cvt_int_to_float_and_commit<C: CpuModel>(core: &mut MipsCore, fs_reg: u32, fd_reg: u32, fr1: bool, src_i64: bool, dst_f64: bool) -> bool {
     let src: i64 = if src_i64 {
         (if fr1 { core.read_fpr_l(fs_reg) } else { read_fpr_l_fr0(core, fs_reg) }) as i64
     } else {
@@ -2503,7 +2534,7 @@ fn cvt_int_to_float_and_commit(core: &mut MipsCore, fs_reg: u32, fd_reg: u32, fr
     } else {
         let result = src as f32;
         let bits = result.to_bits();
-        if fr1 { core.write_fpr_w(fd_reg, bits) } else { write_fpr_w_fr0(core, fd_reg, bits) }
+        write_fpr_word::<C>(core, fd_reg, bits, fr1);
         (result as i64) != src
     };
     core.fpu_fcsr &= !FCSR_CM;
@@ -2528,7 +2559,7 @@ fn cvt_int_to_float_and_commit(core: &mut MipsCore, fs_reg: u32, fd_reg: u32, fr
 /// the magnitude exceeds `f32::MAX`, in which case the destination is
 /// infinity with the source's sign — matches Rust's own narrowing behavior
 /// for this case, so no manual saturation is needed, just cause reporting.
-fn cvt_d_to_s_and_commit(core: &mut MipsCore, fs_reg: u32, fd_reg: u32, fr1: bool) -> bool {
+fn cvt_d_to_s_and_commit<C: CpuModel>(core: &mut MipsCore, fs_reg: u32, fd_reg: u32, fr1: bool) -> bool {
     let src = if fr1 { core.read_fpr_d(fs_reg) } else { read_fpr_d_fr0(core, fs_reg) };
     let result = src as f32;
     let overflow = result.is_infinite() && !src.is_infinite();
@@ -2536,7 +2567,7 @@ fn cvt_d_to_s_and_commit(core: &mut MipsCore, fs_reg: u32, fd_reg: u32, fr1: boo
     let bits = result.to_bits();
     core.fpu_fcsr &= !FCSR_CM;
     if !overflow && !inexact {
-        if fr1 { core.write_fpr_w(fd_reg, bits) } else { write_fpr_w_fr0(core, fd_reg, bits) }
+        write_fpr_word::<C>(core, fd_reg, bits, fr1);
         return false;
     }
     let cause = if overflow { FCSR_CO } else { FCSR_CI };
@@ -2545,7 +2576,7 @@ fn cvt_d_to_s_and_commit(core: &mut MipsCore, fs_reg: u32, fd_reg: u32, fr1: boo
     if (core.fpu_fcsr & enable_bit) != 0 {
         return true;
     }
-    if fr1 { core.write_fpr_w(fd_reg, bits) } else { write_fpr_w_fr0(core, fd_reg, bits) }
+    write_fpr_word::<C>(core, fd_reg, bits, fr1);
     core.fpu_fcsr |= if overflow { FCSR_FO } else { FCSR_FI };
     false
 }
@@ -2699,7 +2730,11 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
         let mut core = MipsCore::new();
         // Mapped pages decode their C field with this model's table, as KSEG0
         // and xkphys do.
+        if C::ENTRYHI_FULL_VA { tlb.set_va_bits(C::VA_BITS); }
         tlb.set_cache_attrs(Self::cache_attr_table());
+        if C::ENTRYHI_FULL_VA {
+            core.entryhi_mask = 0xC000_0000_0000_00FF | (((1u64 << C::VA_BITS) - 1) & !0x1fff);
+        }
 
         // Cache geometry comes from the model type C, so Config describes this CPU.
         // `mut` is only used by the Triton L2-enable sync below.
@@ -3103,6 +3138,9 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
                 // the other baked address, are off unless IRIS_MEM_HELPERS is
                 // set) -- the property a persistent code cache needs.
                 core: if std::env::var_os("IRIS_JIT_PIC").is_some() { None } else { core::num::NonZeroUsize::new(core_addr) },
+                lwr_preserves_upper: C::LWR_PRESERVES_UPPER,
+                fpu_fr1_word_writes_zero_upper: C::FPU_FR1_WORD_WRITES_ZERO_UPPER,
+                fpu_fr0_mov_s_preserves_pair: C::FPU_FR0_MOV_S_PRESERVES_PAIR,
             };
             *j.jit_consts.lock() = consts;
             // The inline-compile path (`jitv2_compile_inline`) takes this
@@ -3358,7 +3396,7 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
         // user address. Everything else is cacheable regardless of which
         // mode filled it, because privilege is enforced by flushing on
         // transition rather than by the tag.
-        if !nutlb_cacheable_segment(va, self.core.is_64bit_mode()) {
+        if !model_nutlb_cacheable_segment::<C>(va, self.core.is_64bit_mode()) {
             return;
         }
 
@@ -3686,7 +3724,12 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             self.fpr_read_l  = read_fpr_l_fr1;
             self.fpr_write_l = write_fpr_l_fr1;
             self.fpr_read_w  = read_fpr_w_fr1;
-            self.fpr_write_w = write_fpr_w_fr1;
+            // Undefined upper-word choice is shared by every native word write.
+            self.fpr_write_w = if C::FPU_FR1_WORD_WRITES_ZERO_UPPER {
+                write_fpr_word_fr1_zero_upper
+            } else {
+                write_fpr_w_fr1
+            };
         } else {
             self.fpr_read_d  = read_fpr_d_fr0;
             self.fpr_write_d = write_fpr_d_fr0;
@@ -4955,11 +4998,11 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         let top_bits = virt_addr >> 62;
 
         match top_bits {
-            // xuseg: 0x0000_0000_0000_0000 - 0x0000_00FF_FFFF_FFFF (user mapped)
-            // Accessible from all privilege levels
+            // xuseg is user-mapped below 2^model_vpn_bits::<C>() and
+            // accessible from every privilege level.
             0 => {
-                if (virt_addr >> 40) != 0 {
-                    // Bits 63:40 must be zero for valid user address
+                if (virt_addr >> model_vpn_bits::<C>()) != 0 {
+                    // Reject bits outside the CPU model's implemented user VA.
                     if !DEBUG { self.core.cp0_badvaddr = virt_addr; }
                     return TranslateResult::exc(exec_exception(if access_type == AccessType::Write { EXC_ADES } else { EXC_ADEL }));
                 }
@@ -5110,7 +5153,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     #[inline]
     fn update_tlb_exception_registers<const XTLB: u8>(&mut self, virt_addr: u64) {
         const EH_VPN2_32: u64 = 0x0000_0000_FFFF_E000;
-        const EH_VPN2_64: u64 = 0x0000_00FF_FFFF_E000;
+        let eh_vpn2_64 = ((1u64 << model_vpn_bits::<C>()) - 1) & !0x1fff;
         const EH_REGION:  u64 = 0xC000_0000_0000_0000;
 
         self.core.cp0_badvaddr = virt_addr;
@@ -5134,9 +5177,9 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         //
         // This is MAME r4000's `EH_WM` (0xC000_00FF_FFFF_E0FF) less the ASID
         // bits, which are carried separately below.
-        const EH_VPN_MASK: u64 = EH_REGION | EH_VPN2_64; // 0xC000_00FF_FFFF_E000
+        let eh_vpn_mask = EH_REGION | eh_vpn2_64;
         let asid = self.core.cp0_entryhi & 0xFF;
-        self.core.cp0_entryhi = (virt_addr & EH_VPN_MASK) | asid;
+        self.core.cp0_entryhi = (virt_addr & eh_vpn_mask) | asid;
 
         // Context: PTEBase[63:23] preserved, BadVPN2 = virt_addr[31:13] in bits [22:4].
         // Always 32-bit VPN — Context is used by the 32-bit UTLB handler.
@@ -5158,9 +5201,11 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         // nested miss is unrecoverable, and IRIX panics with "Entered tlbmiss
         // with invalid vaddr".
         //
-        // EntryHi keeps the 40-bit VPN2 field on every model: a 64-bit kernel
-        // zero-fills those upper bits itself when it builds an EntryHi value,
-        // and widening the mask here breaks it.
+        // EntryHi/TLB matching keeps the 40-bit compatibility path unless
+        // ENTRYHI_FULL_VA is set. NEC U10278EJ4V0UM pp.219 and 288 specify
+        // VPN2 bits 43:13 and a 16 TiB xuseg. Fuel's IRIX n64 stack reaches
+        // 0x0fff_ffff_aee4, above the 40-bit limit. Its R14000 opts in;
+        // existing IP28 and Octane models retain their previous behavior.
         self.core.cp0_xcontext =
             xcontext_on_miss(C::VA_BITS, self.core.cp0_xcontext, virt_addr);
     }
@@ -6789,8 +6834,14 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 let mask = 0xFFFFFFFFu32 >> shift;
                 let result = (mem_word >> shift) | (rt_val & !mask);
 
-                // Sign-extend to 64 bits
-                self.core.write_gpr(rt_reg, result as i32 as i64 as u64);
+                // Fuel's R14000 keeps bits 63:32 on a partial LWR. A full
+                // word still sign-extends; other models retain their existing policy.
+                let value = if C::LWR_PRESERVES_UPPER && byte_offset != 3 {
+                    (self.core.read_gpr(rt_reg) & 0xffff_ffff_0000_0000) | result as u64
+                } else {
+                    result as i32 as i64 as u64
+                };
+                self.core.write_gpr(rt_reg, value);
                 self.handle_exec_complete()
             }
             Err(status) => self.finish_status(status)
@@ -6971,11 +7022,13 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         let cache_op = d.rt as u32;  // Encoded operation: cache_sel in bits[1:0], op in bits[4:2]
         let op = cache_op & 0x1C;
 
-        // Determine if this is a Hit operation that needs address translation
-        // On an R10000 the encodings for 5/6/7 are index operations, not the
-        // R4000 hit operations — translating them would fault on an index that
-        // is not a valid virtual address. See C_R10K_ISD in mips_cache_v2.
+        // Distinguish R10000 diagnostic data and barrier encodings from the
+        // R4000 hit operations at the same values. Older index operations
+        // retain their translation behavior; primary data checks follow below.
         let sel = cache_op & 3;
+        let primary_data_op = C::R10K_PRIMARY_DATA_OPS
+            && matches!(sel, CACH_PI | CACH_PD)
+            && matches!(op, C_R10K_ILD | C_R10K_ISD);
         let r10k_index_op = C::R10K_CACHE_OPS
             && match op {
                 C_R10K_CBARRIER => sel == CACH_PI,
@@ -6983,8 +7036,12 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 C_R10K_ISD => matches!(sel, CACH_SI | CACH_SD),
                 _ => false,
             };
-        let needs_translation =
-            !r10k_index_op && matches!(op, C_CDX | C_HINV | C_HWBINV | C_HWB | C_HSV);
+        // Primary diagnostic selection uses VA, but mapped accesses still
+        // require TLB Refill/Invalid checks (NEC U12754E, p. 15). Read access
+        // excludes TLB Modified. Older index operations retain their existing
+        // translation behavior, including the secondary diagnostic limitation.
+        let needs_translation = primary_data_op
+            || (!r10k_index_op && matches!(op, C_CDX | C_HINV | C_HWBINV | C_HWB | C_HSV));
 
         let phys_addr = if needs_translation {
             // Hit operations need address translation
@@ -7004,7 +7061,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         // that reads only TagLo sees a different tag from the one written.
         // Harmless for R4400/R5000, whose tags fit in 32 bits and who leave
         // TagHi zero: the shift-in contributes nothing there.
-        let stores_taglo = op == C_IST || (r10k_index_op && op == C_R10K_ISD);
+        let stores_taglo = op == C_IST || ((r10k_index_op || primary_data_op) && op == C_R10K_ISD);
         let phys_addr_or_taglo = if stores_taglo {
             ((self.core.cp0_taghi as u64) << 32) | (self.core.cp0_taglo as u32 as u64)
         } else {
@@ -7077,6 +7134,8 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             // Split back the way it arrived. Zeroing TagHi unconditionally
             // threw away the top of every tag wider than 32 bits.
             self.core.cp0_taglo = result & 0xFFFF_FFFF;
+            // Primary D TagHi is unused; zero is our deterministic choice,
+            // not a specified silicon result. Primary I keeps only four bits.
             self.core.cp0_taghi = (result >> 32) as u32;
         }
 
@@ -7543,12 +7602,11 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         let g1 = (self.core.cp0_entrylo1 & 1) != 0;
         let g_combined = if g0 && g1 { 1u64 << 12 } else { 0 };
 
-        // EH_WM = 0xC000_00FF_FFFF_E0FF — same mask MAME applies on TLBWI (clears reserved bits).
-        // Then clear bit 12 (G bit from EntryHi) and set combined G from Lo0&Lo1.
-        const EH_WM: u64 = 0xC000_00FF_FFFF_E0FF;
+        // Keep the same implemented VPN bits as CP0 EntryHi writes.
+        // The TLB's combined G bit comes from Lo0 & Lo1.
         TlbEntry {
             page_mask: self.core.cp0_pagemask,
-            entry_hi: (self.core.cp0_entryhi & EH_WM & !0x1000) | g_combined,
+            entry_hi: (self.core.cp0_entryhi & self.core.entryhi_mask & !0x1000) | g_combined,
             entry_lo: [self.core.cp0_entrylo0, self.core.cp0_entrylo1],
             selector_bit_shift: 0, // all derived fields overwritten by MipsTlb::write()
             vcmp32: 0, vpn_hi32: 0, vcmp64: 0, vpn_hi64: 0,
@@ -8305,11 +8363,28 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         let write_w = self.fpr_write_w;
         self.fpu_check_snan_operand(is_snan_s(fs_bits), |exec| write_w(&mut exec.core, fd_reg, (result).to_bits()))
     }
+    fn fpu_move_s(&mut self, fs_reg: u32, fd_reg: u32, taken: bool) {
+        if taken || (C::FPU_FR1_WORD_WRITES_ZERO_UPPER && self.core.cp0_status & STATUS_FR != 0) {
+            let source = if taken { fs_reg } else { fd_reg };
+            let value = (self.fpr_read_w)(&self.core, source);
+            (self.fpr_write_w)(&mut self.core, fd_reg, value);
+        }
+    }
+
     fn exec_fmov_s(&mut self, d: &DecodedInstr) -> ExecStatus {
         if (self.core.cp0_status & STATUS_CU1) == 0 { return self.cpu_unusable(1); }
         let fs_reg = d.rd as u32; let fd_reg = d.sa as u32;
-        let value = (self.fpr_read_l)(&self.core, fs_reg);
-        (self.fpr_write_l)(&mut self.core, fd_reg, value);
+        let word_move = if self.core.cp0_status & STATUS_FR != 0 {
+            C::FPU_FR1_WORD_WRITES_ZERO_UPPER
+        } else {
+            C::FPU_FR0_MOV_S_PRESERVES_PAIR
+        };
+        if word_move {
+            self.fpu_move_s(fs_reg, fd_reg, true);
+        } else {
+            let value = (self.fpr_read_l)(&self.core, fs_reg);
+            (self.fpr_write_l)(&mut self.core, fd_reg, value);
+        }
         self.handle_exec_complete()
     }
     fn exec_fneg_s(&mut self, d: &DecodedInstr) -> ExecStatus {
@@ -8421,10 +8496,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         let tf = ((d.raw >> 16) & 0x1) != 0;
         let cc_value = self.core.get_fpu_cc(cc);
         let taken = cc_value == tf;
-        if taken {
-            let val = f32::from_bits((self.fpr_read_w)(&self.core, fs_reg));
-            (self.fpr_write_w)(&mut self.core, fd_reg, (val).to_bits());
-        }
+        self.fpu_move_s(fs_reg, fd_reg, taken);
         if mips_log(MIPS_LOG_FPU) {
             dlog_dev!(LogModule::Mips, "FPU fmov{}.s PC={:016x} cc{}={} taken={}",
                 if tf { "t" } else { "f" }, self.core.pc, cc, cc_value, taken);
@@ -8434,19 +8506,15 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     fn exec_fmovz_s(&mut self, d: &DecodedInstr) -> ExecStatus {
         if (self.core.cp0_status & STATUS_CU1) == 0 { return self.cpu_unusable(1); }
         let fs_reg = d.rd as u32; let ft_reg = d.rt as u32; let fd_reg = d.sa as u32;
-        if self.core.read_gpr(ft_reg) == 0 {
-            let val = f32::from_bits((self.fpr_read_w)(&self.core, fs_reg));
-            (self.fpr_write_w)(&mut self.core, fd_reg, (val).to_bits());
-        }
+        let taken = self.core.read_gpr(ft_reg) == 0;
+        self.fpu_move_s(fs_reg, fd_reg, taken);
         self.handle_exec_complete()
     }
     fn exec_fmovn_s(&mut self, d: &DecodedInstr) -> ExecStatus {
         if (self.core.cp0_status & STATUS_CU1) == 0 { return self.cpu_unusable(1); }
         let fs_reg = d.rd as u32; let ft_reg = d.rt as u32; let fd_reg = d.sa as u32;
-        if self.core.read_gpr(ft_reg) != 0 {
-            let val = f32::from_bits((self.fpr_read_w)(&self.core, fs_reg));
-            (self.fpr_write_w)(&mut self.core, fd_reg, (val).to_bits());
-        }
+        let taken = self.core.read_gpr(ft_reg) != 0;
+        self.fpu_move_s(fs_reg, fd_reg, taken);
         self.handle_exec_complete()
     }
     fn exec_frecip_s(&mut self, d: &DecodedInstr) -> ExecStatus {
@@ -8493,7 +8561,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     #[inline]
     fn fpu_cvt_to_int(&mut self, fs_reg: u32, fd_reg: u32, src_f64: bool, dst_i64: bool, rm: u8) -> ExecStatus {
         let fr1 = (self.core.cp0_status & STATUS_FR) != 0;
-        if cvt_to_int_and_commit(&mut self.core, fs_reg, fd_reg, fr1, src_f64, dst_i64, rm) {
+        if cvt_to_int_and_commit::<C>(&mut self.core, fs_reg, fd_reg, fr1, src_f64, dst_i64, rm) {
             let s = exec_exception(EXC_FPE);
             self.handle_exception(s)
         } else {
@@ -8504,7 +8572,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     #[inline]
     fn fpu_cvt_int_to_float(&mut self, fs_reg: u32, fd_reg: u32, src_i64: bool, dst_f64: bool) -> ExecStatus {
         let fr1 = (self.core.cp0_status & STATUS_FR) != 0;
-        if cvt_int_to_float_and_commit(&mut self.core, fs_reg, fd_reg, fr1, src_i64, dst_f64) {
+        if cvt_int_to_float_and_commit::<C>(&mut self.core, fs_reg, fd_reg, fr1, src_i64, dst_f64) {
             let s = exec_exception(EXC_FPE);
             self.handle_exception(s)
         } else {
@@ -8515,7 +8583,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     #[inline]
     fn fpu_cvt_d_to_s(&mut self, fs_reg: u32, fd_reg: u32) -> ExecStatus {
         let fr1 = (self.core.cp0_status & STATUS_FR) != 0;
-        if cvt_d_to_s_and_commit(&mut self.core, fs_reg, fd_reg, fr1) {
+        if cvt_d_to_s_and_commit::<C>(&mut self.core, fs_reg, fd_reg, fr1) {
             let s = exec_exception(EXC_FPE);
             self.handle_exception(s)
         } else {
