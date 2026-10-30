@@ -361,7 +361,12 @@ consumer thread never takes `rec`.
   `model::r10k_family`) has one programming model: 44 virtual and 40 physical
   address bits, with EntryHi and the TLB keeping every implemented VPN2 bit.
   To add a part, add a type alias with its constants and, if it must tell
-  itself apart, an id. `CpuModel` defaults preserve the earlier CPUs.
+  itself apart, an id. `CpuModel` defaults preserve the earlier CPUs. The family also keeps primary-cache
+  diagnostic data and decodes the diagnostic data fields as the NEC manual lays
+  them out, which a PROM's cache walk needs; these are compatibility
+  approximations, not measurements of silicon. Only the R14000 masks its
+  secondary tags (`SECONDARY_TAG_MASK`): a mask once broke IP28
+  diagnostics, so it stays per part.
 - With `opcodefusion` (implied by `lightning`), the interpreter executes
   common pairs (branch + NOP, LUI + ORI/ADDIU, address + load/store) as one
   dispatch.
