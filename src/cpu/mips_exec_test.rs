@@ -6411,4 +6411,32 @@ mod tests {
         }
         assert_eq!(outcome[0], outcome[1], "an explanation must not change what the guest sees");
     }
+
+    /// A partial LWR keeps bits 63:32 of the destination on the R10000 and
+    /// sign-extends on the R4400 and R5000; a complete word sign-extends on all.
+    #[test]
+    fn partial_lwr_keeps_the_upper_word_only_on_the_r10000() {
+        fn check<C: CpuModel + From<Arc<dyn BusDevice>>>(keeps_upper: bool) {
+            let mem = Arc::new(MockMemory::new());
+            mem.set_word(0x2000, 0x89ab_cdef);
+            let cfg = MipsCpuConfig::for_model::<C>(Arc::new(crate::ip22_bus::memory_map(false)));
+            let mut exec = Box::new(MipsExecutor::<PassthroughTlb, C>::new(mem, PassthroughTlb::default(), &cfg));
+            disable_jitv2(&mut exec);
+            exec.core.write_gpr(1, 0x2000);
+            let old = 0x8123_4567_a1b2_c3d4u64;
+            for (offset, word) in [0xa1b2_c389u32, 0xa1b2_89ab, 0xa189_abcd, 0x89ab_cdef].into_iter().enumerate() {
+                exec.core.write_gpr(2, old);
+                assert_eq!(exec.exec(make_i(OP_LWR, 1, 2, offset as u16)), EXEC_COMPLETE);
+                let expected = if keeps_upper && offset != 3 {
+                    (old & 0xffff_ffff_0000_0000) | word as u64
+                } else {
+                    word as i32 as i64 as u64
+                };
+                assert_eq!(exec.core.read_gpr(2), expected, "{} LWR offset {offset}", C::NAME);
+            }
+        }
+        check::<crate::cpu::mips_cache_shadow::R4400ShadowCache>(false);
+        check::<crate::cpu::mips_cache_shadow::R5000ShadowCache>(false);
+        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(true);
+    }
 }
