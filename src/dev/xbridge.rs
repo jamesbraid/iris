@@ -157,7 +157,7 @@ struct Routes {
     dma: RwLock<Option<DmaSender>>,
 }
 impl Routes {
-    fn interrupt(&self, p: InterruptPacket) {
+    fn interrupt(&self, p: InterruptPacket) -> bool {
         let sender = self.interrupts.read().clone();
         let accepted = if let Some(send) = sender {
             send(p)
@@ -173,6 +173,7 @@ impl Routes {
         if !accepted {
             crate::dlog!(crate::devlog::LogModule::Bedrock, "xbridge: refused interrupt {p:?}");
         }
+        accepted
     }
 }
 
@@ -312,6 +313,12 @@ impl XBridge {
     }
     pub fn set_microlan(&self, widget: u8, bus: w1::Bus) {
         *self.pci_head(widget).microlan.lock() = Some(bus);
+    }
+    /// An interrupt packet from the widget attached at `p.source_widget`,
+    /// routed as the heads' packets are. False when nothing takes it.
+    pub fn send_interrupt(&self, p: InterruptPacket) -> bool {
+        assert!((8..14).contains(&p.source_widget) && p.source_widget != HOST_WIDGET);
+        self.routes.interrupt(p)
     }
     pub fn attach_widget(&self, widget: u8, target: Arc<dyn BusDevice>) {
         assert!((8..14).contains(&widget) && widget != HOST_WIDGET);
