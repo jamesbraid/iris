@@ -10,7 +10,7 @@ use crate::devlog::LogModule;
 use std::cell::Cell;
 
 pub(super) const PI_GFX_SLOTS: usize = 2;
-pub(super) const PI_GFX_REGS: u32 = 10;
+pub const PI_GFX_REGS: u32 = 10;
 
 /// The five registers of one slot, in address order.
 pub(super) const PI_GFX_PAGE: u32 = 0;
@@ -28,7 +28,7 @@ pub(super) const PI_GFX_BIAS_MASK: u32 = 0xfff;
 pub(super) const PI_GFX_INT_MASK: u32 = 0x3ffffff;
 
 #[derive(Clone, Copy, Default)]
-pub(super) struct PiGfx {
+pub struct PiGfx {
     pub page: [u64; PI_GFX_SLOTS],
     pub credit: [u32; PI_GFX_SLOTS],
     pub bias: [u32; PI_GFX_SLOTS],
