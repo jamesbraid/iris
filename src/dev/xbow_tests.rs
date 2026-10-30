@@ -364,11 +364,11 @@ fn a_link_runs_the_width_it_came_up_with() {
 #[test]
 fn one_interrupt_assertion_is_outstanding_at_a_time() {
     let x = octane();
-    let heart = interrupt_to_heart(&x, 0x5a);
+    let heart = interrupt_to_heart(&x, 0x1a);
     wr(&x, 0x20, 0x20);
     let _ = x.read(0x78 + 4, 4);
     assert_eq!(rd(&x, 0x08) & 1 << 23, 1 << 23);
-    assert_eq!(heart.take(), [(0x5a, true)]);
+    assert_eq!(heart.take(), [(0x1a, true)]);
 
     wr(&x, link(BRIDGE, 0x08), 2 << 18 | 0x20);
     x.set_alive(1 << HEART).unwrap();
@@ -381,7 +381,7 @@ fn one_interrupt_assertion_is_outstanding_at_a_time() {
     assert_eq!(heart.take(), []);
     rd(&x, link(BRIDGE, 0x28));
     assert_eq!(rd(&x, 0x08) & 0xff80_0000, 0);
-    assert_eq!(heart.take(), [(0x5a, false)]);
+    assert_eq!(heart.take(), [(0x1a, false)]);
 }
 
 /// Disabling a link's notification withdraws its request without
@@ -445,6 +445,40 @@ fn a_link_reset_of_a_dead_link_leaves_it_down_until_a_machine_reset() {
     Resettable::power_on(&x);
     assert!(x.carries(GFX));
     assert_eq!(rd(&x, link(GFX, 0x10)) & 1 << 31, 1 << 31);
+}
+
+/// The packet goes to the 48-bit address the destination pair names, in
+/// the target's own space, and HEART takes it only at its interrupt address
+/// with a vector it has. A packet sent anywhere else still counts as the
+/// outstanding assertion. From QEMU's sn0-xbow-test
+/// interrupt-destination-address, with HEART's packet rule from sgi-heart.c.
+#[test]
+fn heart_takes_widget_0_s_packet_only_at_its_interrupt_address() {
+    let x = octane();
+    let heart = interrupt_to_heart(&x, 0x7e);
+    wr(&x, 0x30, 0x7e << 24 | 8 << 16 | 0x0002);
+    wr(&x, 0x20, 0x20);
+    let _ = x.read(0x78 + 4, 4);
+    assert_eq!(heart.take(), [], "address 0x2_0000_0080 is not HEART's interrupt register");
+    clear(&x);
+
+    wr(&x, 0x30, 0x7e << 24 | 8 << 16);
+    let _ = x.read(0x78 + 4, 4);
+    assert_eq!(heart.take(), [], "HEART has 64 vectors");
+    clear(&x);
+
+    wr(&x, 0x30, 0x3e << 24 | 8 << 16);
+    let _ = x.read(0x78 + 4, 4);
+    assert_eq!(heart.take(), [(0x3e, true)]);
+    clear(&x);
+    assert_eq!(heart.take(), [(0x3e, false)], "the deassertion goes to the same place");
+
+    // To the Bridge, which iris carries no packet into: sent all the same.
+    wr(&x, 0x30, 0x3e << 24 | (BRIDGE as u32) << 16);
+    let _ = x.read(0x78 + 4, 4);
+    wr(&x, 0x30, 0x3e << 24 | 8 << 16);
+    let _ = x.read(0x78 + 4, 4);
+    assert_eq!(heart.take(), [], "an assertion is already outstanding");
 }
 
 /// A machine reset puts back the registers and the links fitted, and sends
