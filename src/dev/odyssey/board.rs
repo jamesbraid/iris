@@ -52,20 +52,6 @@ pub struct OpenVertex {
     pub slot: u32,
 }
 
-/// A command-FIFO store waiting for the board's thread.
-#[derive(Clone, Copy)]
-pub struct QueuedStore {
-    pub value: u64,
-    pub addr: u32,
-    pub size: u8,
-    /// The processor interface counted it: its credit is due.
-    pub counted: bool,
-    /// It waited outside the FIFO, so the node holds its credit as owed.
-    pub owed: bool,
-    /// When it was stored, for the trace.
-    pub queued_at: std::time::Instant,
-}
-
 pub struct Board {
     /// The crosstalk widget number.
     pub slot: u32,
@@ -73,6 +59,8 @@ pub struct Board {
     /// processor may touch while the board works, the interrupt routing
     /// and the command-FIFO queue.
     pub front: std::sync::Arc<parking_lot::Mutex<HostInterface>>,
+    /// The command FIFO, shared with the host interface.
+    pub fifo: std::sync::Arc<CommandFifo>,
     /// Guest memory as the board's DMA reaches it (HEART's RAM on the
     /// Octane).
     pub guest: GuestMemory,
@@ -272,7 +260,8 @@ pub struct Board {
     pub poly_col_lo: u32,
 
     // The true-colour OpenGL path.
-    pub gl_ctx: GlContext,
+    /// None only during Board::gl_command().
+    pub gl_ctx: Option<Box<GlContext>>,
     /// The drawable Board::gl_bind() last built for the shared context.
     pub gl_bind_drawable: GlDrawable,
     /// Host-only: GL draws may run in bands of rows (x-raster-bands); the
@@ -419,8 +408,8 @@ pub struct Board {
     pub image_nbytes: u32,
     pub image_code_reported: bool,
 
-    /// The shared scanout; resolves the colour plane through
-    /// HEAD_OPS.resolve_row.
+    /// The presented frame and retrace; Board::scanout_update() resolves
+    /// the colour planes into it.
     pub scanout: Scanout,
 
     // Diagnostic bookkeeping, not guest state.
@@ -438,9 +427,12 @@ pub struct Board {
 
 impl Default for Board {
     fn default() -> Self {
+        let front: std::sync::Arc<parking_lot::Mutex<HostInterface>> = Default::default();
+        let fifo = front.lock().fifo.clone();
         Board {
             slot: 0,
-            front: Default::default(),
+            front,
+            fifo,
             guest: None,
             nic_bus: None,
             revision: 0,
@@ -578,7 +570,7 @@ impl Default for Board {
             poly_row_lo: 0,
             poly_row_hi: 0,
             poly_col_lo: 0,
-            gl_ctx: Default::default(),
+            gl_ctx: Some(Box::default()),
             gl_bind_drawable: Default::default(),
             raster_bands: false,
             raster_band_pixels: 0,
@@ -942,18 +934,15 @@ impl Board {
         // it before reinitializing. It is safe here even before Board::allocate
         // allocates the colour plane. Its viewport starts empty: nothing is
         // drawn until the client's combined matrix arrives.
-        self.gl_ctx.reset(ODSY_GL_CONTEXT_HW_ID);
+        self.gl().reset(ODSY_GL_CONTEXT_HW_ID);
         {
             // Opt into the shared context's per-face polygon modes (0x0415) and
             // line stipple: unset, it silently keeps every face at legacy FILL
-            // no matter what 0x0415 decodes to. The sink built here always
-            // carries the checked draw callback, this call's one precondition;
-            // GlContext::reset() above has already cleared in_begin, satisfying the
-            // other precondition even when reset lands mid-primitive.
-            let sink = self.gl_sink();
-
-            assert!(self.gl_ctx.enable_polygon_modes(Some(&sink)));
-            assert!(self.gl_ctx.enable_line_stipple(Some(&sink)));
+            // no matter what 0x0415 decodes to. GlContext::reset() above has
+            // already cleared in_begin, the one precondition, even when reset
+            // lands mid-primitive.
+            assert!(self.gl().enable_polygon_modes());
+            assert!(self.gl().enable_line_stipple());
         }
         self.gl_in_prim = false;
         self.gl_begin_open = false;
@@ -1240,15 +1229,9 @@ impl Board {
             panic!("sgi-odyssey: {}", e);
         }
 
-        // The shared scanout owns the presented frame, resolving the colour
-        // plane through HEAD_OPS.resolve_row. Setting the mode allocates
-        // the frame, marks it all dirty and arms the retrace at the mode's rate.
-        // The state never moves after sgi_odyssey_new returns, so its address is
-        // a stable opaque.
-        let opaque = P::new(&mut *self).opaque();
-        self.scanout.init(&HEAD_OPS, opaque);
+        // Setting the mode allocates the scanout's frame, marks it all dirty
+        // and arms the retrace at the mode's rate.
         self.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
-        self.front.lock().work_queue = Vec::new();
         Ok(())
     }
 
@@ -1272,14 +1255,14 @@ impl Board {
         // Under the floating-point code depth 1.0 is 0xfe0000, and every code of
         // a depth in [0, 1] is at most that, so all ones still compares as
         // farther than any fragment.
-        let depth = *self.depth_mem.plane(self.depth_plane).get();
+        let depth = self.depth_mem.plane(self.depth_plane).expect("the depth plane");
         for y in 0..SGI_ODYSSEY_HEIGHT as i32 {
             for x in 0..SGI_ODYSSEY_WIDTH as i32 {
                 self.depth_mem.plane_store(&depth, x, y, ODSY_DEPTH24_MAX);
             }
         }
-        // Back to the boot size, then forget swaps and the cursor, repaint the
-        // cleared plane and restart the phase.
+        // Back to the boot size, then repaint the cleared plane and restart
+        // the phase.
         if self.scanout.mode.width != SGI_ODYSSEY_WIDTH || self.scanout.mode.height != SGI_ODYSSEY_HEIGHT {
             self.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
         }
