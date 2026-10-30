@@ -568,6 +568,13 @@ pub trait CpuModel: MipsCache {
     /// The part is in the R10000 family (R10000, R12000, R14000, R16000), which
     /// shares one programming model: 44 virtual and 40 physical address bits.
     const R10K_FAMILY: bool = false;
+    /// Bits `Index_Store_Tag` keeps for the secondary cache: all of them unless
+    /// a part sets a mask. A 36-bit mask inferred from the IP28 PROM's
+    /// walking-0s phase broke its diagnostics: the truncation it reads back
+    /// comes from the tag being assembled as `(TagHi << 32) | TagLo[31:0]`, not
+    /// from the array, and the mask only discarded the MRU bit the PROM writes
+    /// as TagHi[31]. A mask on another part risks the same.
+    const SECONDARY_TAG_MASK: u64 = u64::MAX;
 }
 
 pub trait MipsCache: Send + Sync {

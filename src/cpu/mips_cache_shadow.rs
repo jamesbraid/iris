@@ -23,7 +23,8 @@
 //!   to it and returns them unchanged, so a walking-1s test over tag or data
 //!   SRAM passes without anyone having to know the hardware's field layout.
 //!   Where the emulator *must* know the layout — to decide whether a line is
-//!   valid, say — that is a separate question from storing the bits.
+//!   valid, say — that is a separate question from storing the bits. The one
+//!   exception is the R14000's secondary tag (`R14000_L2_TAG_MASK`).
 //!
 //! The shadow is deliberately not consulted by `read`/`write`/`fetch`. If it
 //! ever needs to be, this type is the wrong shape and should say so loudly
@@ -90,15 +91,11 @@ const MRU_BIT: u64 = 1 << 63;
 /// R4400 and R5000 index differently — see `tag_slot`.
 const WAYS: usize = 2;
 
-/// Bits a secondary-cache tag retains.
-///
-/// All of them, now. A 36-bit mask was inferred here from the PROM's
-/// walking-0s phase, which writes an all-ones TagLo and expects back
-/// 0x0000000f_ffffcdfe — but that truncation comes from the tag being
-/// assembled as `(TagHi << 32) | TagLo[31:0]`, not from the array dropping
-/// bits. Once the executor carried TagHi properly the mask did nothing except
-/// discard the MRU bit, which the PROM writes as TagHi[31] and reads back.
-const L2_TAG_MASK: u64 = u64::MAX;
+/// Bits an R14000 secondary-cache tag retains: MRU, physical tag, state,
+/// virtual index and ECC, taken from the R10000 tag format (NEC U10278EJ4V0UM
+/// p.270, figure 11-31). Inferred, not a measurement of R14000 silicon. The
+/// other parts keep every bit; see `CpuModel::SECONDARY_TAG_MASK`.
+const R14000_L2_TAG_MASK: u64 = 0x8000_000f_ffff_cdff;
 
 /// Is the shadow cache's operation trace on, at this level of detail?
 ///
@@ -353,6 +350,7 @@ impl<
     const CACHE_KIND: &'static str = "shadow";
     const R10K_FAMILY: bool = model::r10k_family(MODEL);
     const R10K_CACHE_OPS: bool = Self::R10K_FAMILY;
+    const SECONDARY_TAG_MASK: u64 = if MODEL == model::R14000 { R14000_L2_TAG_MASK } else { u64::MAX };
 }
 
 impl<
@@ -567,12 +565,16 @@ impl<
         }
 
         match op {
-            // Index_Store_Tag / Index_Load_Tag. Stored and returned verbatim:
-            // a tag test is a round trip, and round trips do not require
-            // knowing what the bits mean.
+            // Index_Store_Tag / Index_Load_Tag. Stored and returned verbatim
+            // unless the part sets a secondary mask: a tag test is a round trip,
+            // and round trips do not require knowing what the bits mean.
             C_IST => {
                 let idx = self.tag_slot(sel, virt_addr);
-                let mask = if matches!(sel, CACH_SI | CACH_SD) { L2_TAG_MASK } else { u64::MAX };
+                let mask = if matches!(sel, CACH_SI | CACH_SD) {
+                    <Self as CpuModel>::SECONDARY_TAG_MASK
+                } else {
+                    u64::MAX
+                };
                 if l2_op_log(CACHE_LOG_OP) {
                     crate::dlog!(LogModule::L2c, "shadow:   -> IST va={virt_addr:#012x} idx={idx} stores {:#018x}",
                                  phys_addr & mask & !MRU_BIT);
@@ -1020,18 +1022,35 @@ mod tests {
     /// operations.
     #[test]
     fn the_r10000_family_parts_report_their_own_identity() {
-        fn id<C: CpuModel>() -> (u32, u32, usize, bool, &'static str, u32, u32, bool) {
-            (C::PRID, C::FIR, C::TLB_ENTRIES, C::MIPS4, C::NAME, C::VA_BITS, C::PA_BITS, C::R10K_FAMILY)
+        fn id<C: CpuModel>() -> (u32, u32, usize, bool, &'static str, u32, u32, bool, u64) {
+            (C::PRID, C::FIR, C::TLB_ENTRIES, C::MIPS4, C::NAME, C::VA_BITS, C::PA_BITS, C::R10K_FAMILY,
+             C::SECONDARY_TAG_MASK)
         }
-        assert_eq!(id::<R10000ShadowCache>(), (0x925, 0x900, 64, true, "shadow", 44, 40, true));
-        assert_eq!(id::<R12000ShadowCache>(), (0xe35, 0x900, 64, true, "R12000", 44, 40, true));
-        assert_eq!(id::<R14000ShadowCache>(), (0xf23, 0x900, 64, true, "R14000", 44, 40, true));
-        assert_eq!(id::<R16000ShadowCache>(), (0xf50, 0x900, 64, true, "R16000", 44, 40, true));
+        assert_eq!(id::<R10000ShadowCache>(), (0x925, 0x900, 64, true, "shadow", 44, 40, true, u64::MAX));
+        assert_eq!(id::<R12000ShadowCache>(), (0xe35, 0x900, 64, true, "R12000", 44, 40, true, u64::MAX));
+        assert_eq!(id::<R14000ShadowCache>(), (0xf23, 0x900, 64, true, "R14000", 44, 40, true, R14000_L2_TAG_MASK));
+        assert_eq!(id::<R16000ShadowCache>(), (0xf50, 0x900, 64, true, "R16000", 44, 40, true, u64::MAX));
         assert!(<R12000ShadowCache as CpuModel>::R10K_CACHE_OPS);
         assert!(!<R5000ShadowCache as CpuModel>::R10K_FAMILY);
         assert!(!<R4400ShadowCache as CpuModel>::R10K_FAMILY);
         assert!(!<R5000ShadowCache as CpuModel>::R10K_CACHE_OPS);
         assert!(!<R4400ShadowCache as CpuModel>::R10K_CACHE_OPS);
+    }
+
+    /// The secondary tag mask is the one difference between the family's parts
+    /// that diagnostics see: the R14000 keeps MRU, tag, state, index and ECC,
+    /// and the rest keep every bit.
+    #[test]
+    fn only_the_r14000_masks_secondary_tags() {
+        fn stored<C: CpuModel + MipsCache + From<Arc<dyn BusDevice>>>() -> u64 {
+            let c = C::from(Arc::new(Memory::new(1)) as Arc<dyn BusDevice>);
+            c.cache_op(C_IST | CACH_SD, 0, u64::MAX);
+            c.cache_op(C_ILT | CACH_SD, 0, 0)
+        }
+        assert_eq!(stored::<R10000ShadowCache>(), u64::MAX);
+        assert_eq!(stored::<R12000ShadowCache>(), u64::MAX);
+        assert_eq!(stored::<R16000ShadowCache>(), u64::MAX);
+        assert_eq!(stored::<R14000ShadowCache>(), 0x8000_000f_ffff_cdff);
     }
 
     /// The O2 R10000 differs from the IP28's only in its secondary line size.
