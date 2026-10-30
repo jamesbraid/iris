@@ -137,6 +137,40 @@ fn scenes_resolve_to_the_stored_frames() {
     assert_eq!(got, EXPECTED, "hashes {got:#018x?}");
 }
 
+/// The rows resolve_row() makes are the per-pixel resolve's, on every scene
+/// and at a few lines of each, with the board left as the scene made it.
+#[test]
+fn the_row_resolve_matches_the_per_pixel_resolve() {
+    for (scene, name) in SCENES {
+        let mut s = scene_board(scene);
+        let w = s.scanout.mode.width as usize;
+        let mut fast = vec![0u32; w];
+        let mut slow = vec![0u32; w];
+
+        for y in 0..s.scanout.mode.height {
+            s.resolve_row(y, &mut fast);
+            s.resolve_row_generic(y, &mut slow);
+            assert_eq!(fast, slow, "scene {name}, line {y}");
+        }
+    }
+}
+
+/// A line the planes do not cover whole is resolved per pixel, not skipped.
+#[test]
+fn a_mode_wider_than_the_planes_still_resolves() {
+    let mut s = scene_board(Scene::Mixed);
+    let mut fast = vec![0u32; 1280];
+    let mut slow = vec![0u32; 1280];
+
+    s.mem.bytes.truncate(1280 * 4 * 10);
+    s.resolve_row(9, &mut fast);
+    s.resolve_row_generic(9, &mut slow);
+    assert_eq!(fast, slow);
+    s.resolve_row(500, &mut fast);
+    s.resolve_row_generic(500, &mut slow);
+    assert_eq!(fast, slow, "a line past the end of the board memory");
+}
+
 fn bench<F: FnMut()>(mut f: F) -> f64 {
     let secs: f64 = std::env::var("BENCH_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
     let budget = Duration::from_secs_f64(secs);
