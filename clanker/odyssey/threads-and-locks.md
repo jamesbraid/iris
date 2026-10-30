@@ -72,7 +72,9 @@ return.
   lock and never waits for a draw.
 - Every other access takes the board lock, which waits out the current
   slice, then runs whatever is still queued before it (`work_drain`), so it
-  sees all earlier stores.
+  sees all earlier stores. A processor's access on the bus answers busy
+  instead while stores it must see are queued (rule 2 below), so the drain
+  normally finds nothing to run.
 - The display thread takes the board lock, then the raster unit's context
   lock, which the raster thread holds for each slice of jobs (at most 1 ms,
   checked between jobs). A frame therefore waits out a raster slice in
@@ -145,7 +147,12 @@ must keep them.
    (`read_waits_for_raster`). The kernel reads it at every flow-control
    attach, which each GL make-current runs; waiting for the raster queue
    there stalled the processor behind the drawing of each frame. The
-   registers that do not wait answer from the front at once.
+   registers that do not wait answer from the front at once. On the bus
+   (`BoardLocks::bus_read`, `bus_write`) such an access answers busy while
+   that work is still queued and the board's threads run: the processor
+   retries it, taking interrupts, and the board's threads run the work,
+   as IMPACT's waiting reads do. Callers other than the bus drain it
+   themselves.
 3. STATUS0's empty, low-water and high-water bits follow the words in the
    command FIFO, not the raster queue: they are the board's FIFO.
 4. The low-water flag latches as a store retires below the mark (16 words),
