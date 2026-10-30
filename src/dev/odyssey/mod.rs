@@ -15,6 +15,7 @@
 //! - `interface`: the host interface: the registers that do not wait for
 //!   drawing, interrupts and the queue of command stores.
 //! - `mmio`: register accesses, and which of them wait for the drawing.
+//! - `fifo`: the command FIFO between the processor and the board's thread.
 //! - `worker`: the board's thread, which runs the queued stores.
 //! - `registers`: identity, the board NIC, the cursor and the back end's
 //!   register file.
@@ -34,15 +35,14 @@
 //!   fixed-point fast path for textured triangles.
 //! - `memory`, `scanout`, `display`: board memory and planes; the scanned
 //!   frame and retrace; what reaches the window.
-//! - `pixel_dma`, `hooks`, `pi_gfx`: DMA between guest memory and planes,
-//!   the hooks the scanout and DMA call back into the board, and graphics
+//! - `pixel_dma`, `pi_gfx`: DMA between guest memory and planes, and graphics
 //!   credits for machines whose processor interface counts them.
 //! - `consts`: register, command and field constants.
 //!
 //! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code
 //! (hw/display/sgi/) in jamesbraid/qemu-sgi-origami.
 
-#![allow(clippy::all)]
+//ALLOWREMOVED
 
 use crate::devlog::LogModule;
 
@@ -54,17 +54,16 @@ pub mod context;
 pub mod display;
 pub mod dma;
 pub mod draw;
+pub mod fifo;
 pub mod geometry;
 pub mod gl;
 pub mod gl_context;
-pub mod hooks;
 pub mod interface;
 pub mod memory;
 pub mod mmio;
 pub mod objects;
 pub mod pi_gfx;
 pub mod pixel_dma;
-pub mod ptr;
 pub mod raster;
 pub mod raster_bands;
 pub mod raster_fixed_texture;
@@ -86,17 +85,16 @@ pub use context::*;
 pub use display::*;
 pub use dma::*;
 pub use draw::*;
+pub use fifo::*;
 pub use geometry::*;
 pub use gl::*;
 pub use gl_context::*;
-pub use hooks::*;
 pub use interface::*;
 pub use memory::*;
 pub use mmio::*;
 pub use objects::*;
 pub use pi_gfx::*;
 pub use pixel_dma::*;
-pub use ptr::*;
 pub use raster::*;
 pub use raster_bands::*;
 pub use raster_fixed_texture::*;
@@ -140,6 +138,8 @@ impl Odyssey {
         product: &str,
         irq: Arc<dyn InterruptController>,
         mem: Arc<dyn BusDevice>,
+        heartbeat: Arc<std::sync::atomic::AtomicU64>,
+        fasttick: Arc<std::sync::atomic::AtomicU64>,
     ) -> Result<Arc<Self>, String> {
         let mut s = Board::new(product, widget as u32)?;
         s.guest = Some(mem);
@@ -148,7 +148,7 @@ impl Odyssey {
             small: widget_small_base(widget),
             large: widget_large_base(widget),
             state: BoardLocks::new(s),
-            display: Arc::new(Display::new()),
+            display: Arc::new(Display::new(heartbeat, fasttick)),
             running: Arc::new(AtomicBool::new(false)),
             thread: Mutex::new(None),
         }))
@@ -160,6 +160,11 @@ impl Odyssey {
 
     pub fn set_cpu_cycles(&self, cycles: CyclesPtr) {
         *self.display.cycles.lock() = cycles;
+    }
+
+    /// One more CPU for the status bar.
+    pub fn add_cpu_stats(&self, cycles: CyclesPtr, fasttick: Arc<std::sync::atomic::AtomicU64>) {
+        self.display.more_cpus.lock().push((cycles, fasttick));
     }
 
     /// The aperture offset of `addr`, in either window.
@@ -188,17 +193,32 @@ impl Odyssey {
     }
 
     /// One display frame: the retrace if it is due, then the dirty lines
-    /// resolved and the frame presented.
+    /// resolved and, if any changed (or a refresh is due), presented. The
+    /// retrace fires either way.
     fn frame(state: &BoardLocks, display: &Display) {
-        let (frame, w, h) = {
-            let mut s = state.board.lock();
-            s.scanout.poll(monotonic_ns());
-            s.scanout.update();
-            (s.scanout.frame.clone(), s.scanout.frame_width as usize, s.scanout.frame_height as usize)
-        };
-        if w != 0 && h != 0 && frame.len() >= w * h {
-            display.present(&frame, w, h);
+        crate::pf_begin!(crate::perfetto::events::ODSY_CAPTURE);
+        let mut s = state.board.lock();
+        s.scanout_poll(monotonic_ns());
+        let (w, h) = (s.scanout.frame_width as usize, s.scanout.frame_height as usize);
+        let span = s.scanout_update();
+        if w == 0 || h == 0 || s.scanout.frame.len() < w * h {
+            crate::pf_end!(crate::perfetto::events::ODSY_CAPTURE);
+            return;
         }
+        // A new size has nothing valid on the screen yet: take every line.
+        let span = if display.shown() != (w, h) { Some((0, h)) } else { span };
+        if !display.due(span.is_some()) {
+            crate::pf_end!(crate::perfetto::events::ODSY_CAPTURE);
+            return;
+        }
+        // Only the changed lines leave the board lock.
+        let (first, end) = span.unwrap_or((0, 0));
+        let rows = s.scanout.frame[first * w..end * w].to_vec();
+        drop(s);
+        crate::pf_end!(crate::perfetto::events::ODSY_CAPTURE);
+        crate::pf_begin!(crate::perfetto::events::ODSY_PRESENT);
+        display.present(&rows, w, h, first);
+        crate::pf_end!(crate::perfetto::events::ODSY_PRESENT);
     }
 }
 
