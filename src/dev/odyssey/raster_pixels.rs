@@ -106,13 +106,34 @@ impl SoftClear<'_> {
     pub fn rows(&self, px: &dyn Planes) {
         let op = self.op;
         let lend = !self.colour || (op.index_bits == 0 && self.rgba);
+        // A lent row that reads nothing back stores the same words at every
+        // pixel: the loop for the planes the clear names.
+        let stores: Option<fn(&SoftClear, &GlPlaneRow, i32)> = match (self.rgba_read, self.depth, self.stencil, self.colour) {
+            (true, ..) => None,
+            (false, true, false, true) => Some(clear_lent_row::<true, false, true>),
+            (false, true, false, false) => Some(clear_lent_row::<true, false, false>),
+            (false, false, false, true) => Some(clear_lent_row::<false, false, true>),
+            (false, d, true, c) => Some(if d && c {
+                clear_lent_row::<true, true, true>
+            } else if d {
+                clear_lent_row::<true, true, false>
+            } else if c {
+                clear_lent_row::<false, true, true>
+            } else {
+                clear_lent_row::<false, true, false>
+            }),
+            (false, false, false, false) => None,
+        };
 
         for y in op.y0..=op.y1 {
             let whole_row = op.clip.n <= 1 || op.clip.soft_clip_covers_row(op.x0, op.x1, y);
 
             if lend && whole_row && op.x0 <= op.x1 {
                 if let Some(row) = px.row(y, op.x0, op.x1) {
-                    self.row(&row, y, true);
+                    match stores {
+                        Some(stores) => stores(self, &row, y),
+                        None => self.row(&row, y, true),
+                    }
                     continue;
                 }
             }
@@ -169,6 +190,29 @@ impl SoftClear<'_> {
                     px.store_colour(target, x, y, (self.rgb & self.mask) | (px.load_colour(target, x, y) & !self.mask));
                 }
                 i += 1;
+            }
+        }
+    }
+}
+
+/// Row y of clear c, which reads nothing back, through the row of planes px
+/// lends: SoftClear::row()'s stores for the planes DEPTH, STENCIL and COLOUR
+/// name. The colour is the clear colour whole: only a partial mask reads
+/// the destination.
+fn clear_lent_row<const DEPTH: bool, const STENCIL: bool, const COLOUR: bool>(c: &SoftClear, px: &GlPlaneRow, y: i32) {
+    let op = c.op;
+    let smask = op.stencil_mask & c.smax;
+
+    for x in op.x0..=op.x1 {
+        if DEPTH {
+            px.store_depth(x, y, c.depth_value);
+        }
+        if STENCIL {
+            px.store_stencil(x, y, (px.load_stencil(x, y) & !smask & c.smax) | (op.clear_stencil & smask));
+        }
+        if COLOUR {
+            for &target in &op.targets[..c.ntargets as usize] {
+                px.store_rgba(target, x, y, &c.clear);
             }
         }
     }
@@ -378,7 +422,9 @@ mod tests {
                 SGI_GL_DEPTH_BUFFER_BIT,
                 SGI_GL_STENCIL_BUFFER_BIT,
                 SGI_GL_COLOR_BUFFER_BIT,
-            ][rng.next_u32() as usize % 5],
+                SGI_GL_DEPTH_BUFFER_BIT | SGI_GL_STENCIL_BUFFER_BIT,
+                SGI_GL_COLOR_BUFFER_BIT | SGI_GL_STENCIL_BUFFER_BIT,
+            ][rng.next_u32() as usize % 7],
             clear_rgba: [0.2, 0.7, 0.4, 0.9],
             clear_colour_mask: if rng.next_u32() % 3 == 0 { rng.next_u32() % 16 } else { SGI_GL_COLOUR_MASK_ALL },
             clear_depth24: 0x123456,
@@ -410,7 +456,7 @@ mod tests {
     // under its mask, with the board's id test and clip rectangles.
     #[test]
     fn lent_clear_rows_match_the_pixel_path() {
-        for seed in 1..=60u64 {
+        for seed in 1..=100u64 {
             let want = clear(seed, false);
             let got = clear(seed, true);
 
