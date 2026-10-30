@@ -967,6 +967,10 @@ pub const ODSY_DMA_MOVIE_CONTROL: u32 = 0x4001004c;
 // A read's host bytes for one pixel
 pub const ODSY_DMA_BYTE_ZERO: u32 = 4;
 pub const ODSY_DMA_BYTE_INDEX: u32 = 5;
+/// The index word's bits 15:8.
+pub const ODSY_DMA_BYTE_INDEX_HIGH: u32 = 6;
+/// The index when the pixel is shown through a colour map, else the red byte.
+pub const ODSY_DMA_BYTE_INDEX_OR_RED: u32 = 7;
 
 // The 16 KiB pages an entry's longest piece can touch.
 pub const ODSY_DMA_PIECE_PAGES: usize = (ODSY_DMA_PTE_LEN_MASK as u64 + ODSY_DMA_PAGE_SIZE).div_ceil(ODSY_DMA_PAGE_SIZE) as usize;
@@ -1006,6 +1010,9 @@ pub const ODSY_DMA_REPORT_UPLOAD_SENTINEL: u32 = 1 << 8;
 pub const ODSY_DMA_REPORT_INDEX_OBJECT: u32 = 1 << 9;
 pub const ODSY_DMA_REPORT_COLOUR_OVER_INDEX: u32 = 1 << 10;
 pub const ODSY_DMA_REPORT_RAW64: u32 = 1 << 11;
+pub const ODSY_DMA_REPORT_SHARED: u32 = 1 << 12;
+pub const ODSY_DMA_REPORT_STENCIL_OR_INDEX: u32 = 1 << 13;
+pub const ODSY_DMA_REPORT_UNLISTED_FIELDS: u32 = 1 << 14;
 
 // gl_entry[] slots.
 pub const ODSY_ENTRY_29: usize = 0;
