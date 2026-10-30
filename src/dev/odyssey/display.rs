@@ -88,16 +88,18 @@ impl Display {
         screen.height = h;
         screen.prebuilt = true;
         screen.status_bar_only = false;
+        let planes = &mut *screen;
         for (i, src) in rows.chunks_exact(width).enumerate() {
             let y = first + i;
             if y >= h {
                 break;
             }
-            for (x, &rgb) in src[..w].iter().enumerate() {
-                let rgba = 0xff00_0000 | (rgb >> 16) & 0xff | rgb & 0xff00 | (rgb & 0xff) << 16;
-                screen.fb_rgb[y * FB_STRIDE + x] = rgba;
-                screen.rgba[y * FB_STRIDE + x] = rgba;
+            // 0x00RRGGBB to opaque 0xAABBGGRR: a byte swap with alpha set.
+            let line = &mut planes.fb_rgb[y * FB_STRIDE..y * FB_STRIDE + w];
+            for (d, &rgb) in line.iter_mut().zip(&src[..w]) {
+                *d = 0xff00_0000 | rgb.swap_bytes() >> 8;
             }
+            planes.rgba[y * FB_STRIDE..y * FB_STRIDE + w].copy_from_slice(line);
         }
         *self.shown.lock() = (width, height);
         screen.frame_seq = screen.frame_seq.wrapping_add(1);

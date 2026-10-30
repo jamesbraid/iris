@@ -171,6 +171,32 @@ fn a_mode_wider_than_the_planes_still_resolves() {
     assert_eq!(fast, slow, "a line past the end of the board memory");
 }
 
+/// The window's buffers hold each pixel as opaque 0xAABBGGRR, in both copies,
+/// for the lines presented and nothing else.
+#[test]
+fn present_swaps_each_pixel_into_both_buffers() {
+    let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let (w, h) = (SGI_ODYSSEY_WIDTH as usize, SGI_ODYSSEY_HEIGHT as usize);
+    let frame = resolved(Scene::Mixed);
+    let rows = &frame[100 * w..300 * w];
+
+    display.present(rows, w, h, 100);
+    let screen = display.screen.lock();
+    assert_eq!((screen.width, screen.height), (w, h));
+    for y in 0..h {
+        for x in 0..w {
+            let want = if (100..300).contains(&y) {
+                let rgb = frame[y * w + x];
+                0xff00_0000 | (rgb >> 16) & 0xff | rgb & 0xff00 | (rgb & 0xff) << 16
+            } else {
+                0
+            };
+            let at = y * crate::disp::FB_STRIDE + x;
+            assert_eq!((screen.fb_rgb[at], screen.rgba[at]), (want, want), "({x}, {y})");
+        }
+    }
+}
+
 fn bench<F: FnMut()>(mut f: F) -> f64 {
     let secs: f64 = std::env::var("BENCH_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
     let budget = Duration::from_secs_f64(secs);
