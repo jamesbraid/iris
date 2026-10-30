@@ -378,7 +378,10 @@ consumer thread never takes `rec`.
   diagnostics, so it stays per part. A partial LWR keeps the upper word of the
   destination on the family (MIPS IV permits either); the JIT learns it from
   `JitConsts::lwr_keeps_upper`, set from the same constant, and the persistent
-  code-cache fingerprint carries it.
+  code-cache fingerprint carries it. Every uncached SB/SH goes to the bus through
+  `BusDevice::write_narrow_from` with the whole source register: the byte or
+  halfword is the low bits, the other lanes are undefined by hardware, and only
+  Bedrock's ECC view reads them.
 - With `opcodefusion` (implied by `lightning`), the interpreter executes
   common pairs (branch + NOP, LUI + ORI/ADDIU, address + load/store) as one
   dispatch.
