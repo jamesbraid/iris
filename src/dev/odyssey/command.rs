@@ -613,6 +613,17 @@ impl Board {
             ODSY_REG_FIFO_SETUP_7B5 => {
                 self.fifo_setup[ODSY_FIFO_SETUP_7B5_INDEX] = self.cmd_operand[0];
             }
+            ODSY_REG_SETUP_7F0 => {
+                self.setup_7f0 = self.cmd_operand[0];
+                if self.setup_7f0 != 0 && !self.setup_7f0_reported {
+                    self.setup_7f0_reported = true;
+                    crate::dlog!(
+                        LogModule::Odyssey,
+                        "sgi-odyssey: register 0x7f0 written with {}; the value is stored and its role is unknown, so no timer runs",
+                        self.setup_7f0
+                    );
+                }
+            }
             ODSY_GL_TEXCOORD_1F => {
                 self.tex_coord[0] = self.cmd_operand[0];
                 self.tex_coord[1] = 0;
@@ -998,6 +1009,7 @@ impl Board {
         }
         if (ODSY_REG_FIFO_SETUP_FIRST..=ODSY_REG_FIFO_SETUP_LAST).contains(&word)
             || word == ODSY_REG_FIFO_SETUP_7B5
+            || word == ODSY_REG_SETUP_7F0
         {
             self.cmd_start(word, 1);
             return;

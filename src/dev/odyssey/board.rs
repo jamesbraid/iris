@@ -61,6 +61,9 @@ pub struct Board {
     pub front: std::sync::Arc<parking_lot::Mutex<HostInterface>>,
     /// The command FIFO, shared with the host interface.
     pub fifo: std::sync::Arc<CommandFifo>,
+    /// The queue to BUZZ's raster unit (raster_unit.rs), which owns the
+    /// planes below while it has jobs.
+    pub raster: std::sync::Arc<RasterQueue>,
     /// Guest memory as the board's DMA reaches it (HEART's RAM on the
     /// Octane).
     pub guest: GuestMemory,
@@ -91,6 +94,11 @@ pub struct Board {
     pub flctl_target: u32,
     /// The FIFO set-up registers 0x6b0-0x6b3 and 0x7b5, as last written.
     pub fifo_setup: [u32; 5],
+    /// Register 0x7f0 as last written. Its unit and meaning are unknown; the
+    /// model records the value and runs no timer. Whether a nonzero value has
+    /// been reported.
+    pub setup_7f0: u32,
+    pub setup_7f0_reported: bool,
     pub flctl_target_reported: bool,
 
     // The DMA-sync command's host-write base (48-bit guest physical address).
@@ -406,6 +414,11 @@ pub struct Board {
     /// The presented frame and retrace; Board::scanout_update() resolves
     /// the colour planes into it.
     pub scanout: Scanout,
+    /// The lines of the update in progress between scanout_stage() and
+    /// scanout_resolve().
+    pub scanout_stage: ScanoutStage,
+    /// The resolved lines' buffer, kept between frames for its allocation.
+    pub scanout_rows: Vec<u32>,
 
     // Diagnostic bookkeeping, not guest state.
     pub reported_addr: [u32; SGI_ODYSSEY_UNIMP_REPORTS as usize],
@@ -428,6 +441,7 @@ impl Default for Board {
             slot: 0,
             front,
             fifo,
+            raster: Default::default(),
             guest: None,
             nic_bus: None,
             revision: 0,
@@ -445,6 +459,8 @@ impl Default for Board {
             memory_control_reported: false,
             flctl_target: 0,
             fifo_setup: [0; 5],
+            setup_7f0: 0,
+            setup_7f0_reported: false,
             flctl_target_reported: false,
             host_write_addr_upper: 0,
             host_write_addr_lower: 0,
@@ -674,6 +690,8 @@ impl Default for Board {
             image_nbytes: 0,
             image_code_reported: false,
             scanout: Default::default(),
+            scanout_stage: Default::default(),
+            scanout_rows: Vec::new(),
             reported_addr: [0; SGI_ODYSSEY_UNIMP_REPORTS as usize],
             reported_addr_count: 0,
             reported_cmd: [0; SGI_ODYSSEY_UNIMP_REPORTS as usize],
@@ -797,6 +815,7 @@ impl Board {
         self.memory_control = 0;
         self.flctl_target = 0;
         self.fifo_setup = [0; 5];
+        self.setup_7f0 = 0;
         self.host_write_addr_upper = 0;
         self.host_write_addr_lower = 0;
         self.stats_addr_upper = 0;
@@ -1226,6 +1245,8 @@ impl Board {
 
     pub fn reset(&mut self) {
         self.work_reset();
+        // The raster unit finishes what it was given before the planes clear.
+        self.raster_wait();
         self.reset_registers();
         self.front.lock().update_irq();
         // Board::configure() also calls Board::reset_registers(), before

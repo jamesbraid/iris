@@ -13,8 +13,9 @@
 //! two; the high-water bit compares it against the mark the kernel sends
 //! in `0x6b2`, and the low-water bit against the model's 16-word mark. The
 //! ring under it holds `ODSY_WORK_QUEUE_MAX` entries, more than the board's
-//! FIFO can, so it never fills: a store that would overfill the board's
-//! FIFO is refused instead, and the storing caller runs the queue.
+//! FIFO can, so it never fills: a processor store that would overfill the
+//! board's FIFO is refused with the bus busy, and the processor retries it
+//! while the board's thread makes room (`BoardLocks::bus_write`).
 //!
 //! The processor's stores are the producer; whoever runs the queue (the
 //! board's thread, or an access that drains it) holds the board lock and is
@@ -111,6 +112,9 @@ pub struct CommandFifo {
     pub running: AtomicBool,
     /// The board's thread sleeps on `kick`.
     waiting: AtomicBool,
+    /// The processor waits for the board's thread: its next slice starts
+    /// without the pause for a burst of stores.
+    hurry: AtomicBool,
     /// The board's thread is running stores under the board lock.
     pub slice: AtomicBool,
     exit: AtomicBool,
@@ -139,6 +143,7 @@ impl Default for CommandFifo {
             threshold_6b2: AtomicU32::new(0),
             running: AtomicBool::new(false),
             waiting: AtomicBool::new(false),
+            hurry: AtomicBool::new(false),
             slice: AtomicBool::new(false),
             exit: AtomicBool::new(false),
             wake: Mutex::new(()),
@@ -176,6 +181,23 @@ impl CommandFifo {
     /// CHOICE (see `ODSY_REG_FIFO_SETUP_FIRST`).
     pub fn set_threshold_6b2(&self, words: u32) {
         self.threshold_6b2.store(words, SeqCst);
+    }
+
+    /// Whether a store of `size` bytes finds the board's FIFO full while
+    /// the board's thread runs, so it must wait for room. The processor is
+    /// the only producer, so room it sees stays until it stores.
+    pub fn full_for(&self, size: u32) -> bool {
+        self.running.load(SeqCst) && self.level() + store_words(size) > ODSY_CFIFO_WORDS
+    }
+
+    /// The processor waits for the board's thread to run what is queued.
+    pub fn hurry(&self) {
+        self.hurry.store(true, SeqCst);
+    }
+
+    /// Whether the board's thread's next slice is awaited, clearing it.
+    pub fn take_hurry(&self) -> bool {
+        self.hurry.swap(false, SeqCst)
     }
 
     /// Tests: every command store queues, to be run by hand.
