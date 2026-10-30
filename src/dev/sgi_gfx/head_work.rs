@@ -30,6 +30,15 @@
 //! there is no thread, and `sgi_head_work_schedule` runs the pending work on
 //! the caller so nothing is stranded.
 //!
+//! Split locking (`sgi_head_work_init_split`) is an iris addition. Letting
+//! go of the owner's lock part-way through a draw is sound in C under its
+//! own rules, but in Rust the draw's frames still hold `&mut` references
+//! into the state while another thread takes the lock and makes its own.
+//! Under split locking the work's own fields sit under one lock (`bql`) and
+//! the state it works on under another, which the head's thread holds for a
+//! whole step without letting go; whatever another thread must reach while
+//! a step runs belongs under `bql`.
+//!
 //! Fields both the head's thread and another thread reach (`slice`,
 //! `drawing`, `go`, `exit`, `timer`) are only touched under the big lock,
 //! as in the C. Loops that wait for another thread to change one read it
@@ -103,6 +112,14 @@ pub struct SGIHeadWork {
     pub timer: i64,
     pub sync: Option<Arc<SGIHeadWorkSync>>,
     pub bql: Option<Arc<dyn SGIHeadWorkBql>>,
+    /// Split locking (`sgi_head_work_init_split`): the work's fields live
+    /// under `bql`, and the state `step` works on under this lock, which
+    /// the head's thread holds for a whole step and nothing else.
+    pub state_lock: Option<Arc<dyn SGIHeadWorkBql>>,
+    pub split: bool,
+    /// What `pending` receives: `opaque`, or under split locking the
+    /// state `bql` covers.
+    pub pending_opaque: Opaque,
     /// The head's thread, while it runs.
     pub thread: Option<ThreadId>,
     pub started: bool,
@@ -181,6 +198,10 @@ pub fn sgi_head_work_schedule(w: &mut SGIHeadWork) {
         w.pending_since = qemu_clock_virtual_ns().max(1);
     }
     if !w.started {
+        if w.split {
+            // The caller holds bql, not the state lock; it drains.
+            return;
+        }
         // No head thread: finish the work on the caller.
         sgi_head_work_enter_work();
         sgi_head_work_drain(w);
@@ -242,6 +263,8 @@ pub fn sgi_head_work_drain(w: &mut SGIHeadWork) {
 /// second `&mut` to the board state while the draw still holds one. Draws
 /// keep the board lock for their whole length instead, so
 /// `sgi_head_work_unlock` and `sgi_head_work_relock` are never reached.
+/// Split locking (`sgi_head_work_init_split`) lets other threads reach
+/// what they need during a draw without it.
 pub fn sgi_head_work_may_unlock(_w: &mut SGIHeadWork) -> bool {
     false
 }
@@ -309,14 +332,29 @@ pub fn sgi_head_work_thread(w: *mut SGIHeadWork) {
         let mut budget = sgi_head_work_budget(wr, true);
         let ops = *wr.ops.get();
         let opaque = wr.opaque;
+        let pending_opaque = wr.pending_opaque;
+        let state_lock = wr.state_lock.clone();
         sgi_head_work_enter_work();
         wr.slice = true;
-        ops.step.expect("step hook")(opaque, &mut budget);
+        if let Some(state_lock) = state_lock {
+            // Split locking: the step runs under the state lock alone, so
+            // what bql covers stays open to other threads meanwhile. No
+            // reference into either lock's data lives across the switch.
+            // SAFETY: held since the wait above; taken back below.
+            unsafe { bql.unlock() };
+            state_lock.lock();
+            ops.step.expect("step hook")(opaque, &mut budget);
+            // SAFETY: taken just above.
+            unsafe { state_lock.unlock() };
+            bql.lock();
+        } else {
+            ops.step.expect("step hook")(opaque, &mut budget);
+        }
         let wr = unsafe { &mut *w };
         wr.slice = false;
         sgi_head_work_leave();
         sgi_head_work_cond_signal(wr, true);
-        if ops.pending.expect("pending hook")(opaque) {
+        if ops.pending.expect("pending hook")(pending_opaque) {
             sgi_head_work_schedule(unsafe { &mut *w });
         } else {
             sgi_head_work_idle(unsafe { &mut *w });
@@ -334,8 +372,28 @@ pub fn sgi_head_work_thread(w: *mut SGIHeadWork) {
 pub fn sgi_head_work_init(w: &mut SGIHeadWork, name: &str, ops: &SGIHeadWorkOps, opaque: Opaque) {
     w.ops = P::from_ref(ops);
     w.opaque = opaque;
+    w.pending_opaque = opaque;
     w.name = name.to_string();
     w.sync = Some(Arc::new(SGIHeadWorkSync::default()));
+}
+
+/// Split locking: `step(opaque)` runs on the head's thread under the state
+/// lock `sgi_head_work_start_split` names, and nothing else does there;
+/// `pending(pending_opaque)` and the work's own fields are under the lock
+/// it names as `bql`. Without a thread, `sgi_head_work_schedule` leaves the
+/// work to the caller.
+pub fn sgi_head_work_init_split(w: &mut SGIHeadWork, name: &str, ops: &SGIHeadWorkOps, opaque: Opaque, pending_opaque: Opaque) {
+    sgi_head_work_init(w, name, ops, opaque);
+    w.pending_opaque = pending_opaque;
+    w.split = true;
+}
+
+/// Start a split-locked head's thread. The caller holds `bql` and not
+/// `state_lock`.
+pub fn sgi_head_work_start_split(w: &mut SGIHeadWork, thread_name: &str, bql: Arc<dyn SGIHeadWorkBql>, state_lock: Arc<dyn SGIHeadWorkBql>) {
+    assert!(w.split);
+    w.state_lock = Some(state_lock);
+    sgi_head_work_start(w, thread_name, bql);
 }
 
 /// Start the head's thread, named `thread_name`. The caller holds `bql`,
@@ -388,6 +446,7 @@ pub fn sgi_head_work_cleanup(w: &mut SGIHeadWork) {
     w.thread = None;
     // The lock may own the state that owns this work: let go of it.
     w.bql = None;
+    w.state_lock = None;
     w.started = false;
 }
 
