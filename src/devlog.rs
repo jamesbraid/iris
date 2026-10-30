@@ -64,6 +64,7 @@ pub enum LogModule {
     /// The Octane's HEART: processor-interface register accesses (not
     /// counter reads) and interrupt vectors raised and lowered.
     Heart = 31,
+    Bedrock = 32,
 }
 
 // Mask bits shared by L1i / L1d / L2c
@@ -72,7 +73,7 @@ pub const CACHE_LOG_MISS: u32 = 0x2;  // log misses and fills
 pub const CACHE_LOG_OP:   u32 = 0x4;  // log CACHE instruction ops
 
 impl LogModule {
-    pub const COUNT: usize = 32;
+    pub const COUNT: usize = 33;
 
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
@@ -108,6 +109,7 @@ impl LogModule {
             "pci"    => Some(Self::Pci),
             "bridge" => Some(Self::Bridge),
             "heart"  => Some(Self::Heart),
+            "bedrock" => Some(Self::Bedrock),
             _        => None,
         }
     }
@@ -146,6 +148,7 @@ impl LogModule {
             Self::Pci    => "pci",
             Self::Bridge => "bridge",
             Self::Heart  => "heart",
+            Self::Bedrock => "bedrock",
         }
     }
 
@@ -157,7 +160,7 @@ impl LogModule {
             Self::Bt445, Self::Scc, Self::Ps2, Self::Rtc, Self::Eeprom,
             Self::L1i, Self::L1d, Self::L2c, Self::Ultra, Self::Scsi1,
             Self::Nveeprom, Self::Gr2, Self::Rad1, Self::Odyssey, Self::Pci,
-            Self::Bridge, Self::Heart,
+            Self::Bridge, Self::Heart, Self::Bedrock,
         ]
     }
 
@@ -302,6 +305,7 @@ impl DevLog {
                 ModuleLog::new(), // Pci
                 ModuleLog::new(), // Bridge
                 ModuleLog::new(), // Heart
+                ModuleLog::new(), // Bedrock
             ],
         }
     }
