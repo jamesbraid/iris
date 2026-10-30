@@ -861,6 +861,7 @@ impl Board {
         for i in 0..ODSY_DMA_HDR_WORDS {
             hdr[i] = u32::from_be_bytes(raw[i * 4..][..4].try_into().unwrap());
         }
+        crate::dlog!(LogModule::Odyssey, "PIX dma {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}", hdr[0], hdr[1], hdr[2], hdr[3], hdr[4], hdr[5], hdr[6], hdr[7]);
         if readback {
             if !self.dma_readback_reported {
                 self.dma_readback_reported = true;

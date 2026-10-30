@@ -767,6 +767,7 @@ impl Board {
                 };
                 self.image_group_painted = 0;
                 self.image_code = self.cmd_operand[0] & ODSY_IMAGE_CODE_MASK;
+                crate::dlog!(LogModule::Odyssey, "PIX imghdr {:08x} box {} {} {} {} dest {:x} mask {:x}", self.cmd_operand[0], self.image_x1, self.image_y1, self.image_x2, self.image_y2, self.dest_base, self.draw_mask);
                 self.image_nbytes = 0;
                 self.image_bytes = 0;
             }
@@ -950,6 +951,9 @@ impl Board {
         // A pixel burst while an image is open: its data words paint into the
         // box rather than streaming through the generic operand path. Outside
         // an image the same register-select is an ordinary state word.
+        if self.image_active && (reg & 0x4000) != 0 {
+            crate::dlog!(LogModule::Odyssey, "PIX burst reg {:x} ops {}", reg, operands);
+        }
         if self.image_active && operands > 0 && image_burst_fmt(reg, &mut fmt) {
             self.image_fmt = fmt;
             if !image_pairing_supported(self.image_code, fmt) {
@@ -1270,6 +1274,7 @@ impl Board {
                 }
             }
             ODSY_CMD_IMAGE_BURST => {
+                crate::dlog!(LogModule::Odyssey, "PIX bw {:08x}", word);
                 // Each data word paints into the open image at the raster cursor.
                 self.image_burst_word(word);
                 self.cmd_operand_index += 1;

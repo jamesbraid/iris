@@ -533,6 +533,7 @@ impl Board {
     }
 
     pub fn copy_rect(&mut self) {
+        crate::dlog!(LogModule::Odyssey, "PIX copy {:08x?} mask {:x}", &self.cmd_operand[..8], self.draw_mask);
         let source = (self.cmd_operand[2] >> ODSY_COPY_RECT_SOURCE_SHIFT) & 0xf;
         let dest = (self.cmd_operand[7] >> ODSY_COPY_RECT_DEST_SHIFT) & 0xf;
         let format_source = (self.cmd_operand[4] >> ODSY_COPY_RECT_FORMAT_SOURCE_SHIFT) & 0xf;
