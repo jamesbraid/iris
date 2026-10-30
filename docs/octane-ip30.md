@@ -138,9 +138,8 @@ ports. `board = "none"` leaves the port empty, and the machine
 then runs on its serial console with no window.
 
 `v12` is a VPro V12 on the same port: a port of the VPro (Odyssey) model
-in jamesbraid/qemu-sgi-origami (`src/dev/odyssey`, on the shared SGI
-graphics code in `src/dev/sgi_gfx`), with the X server and OpenGL drawn by
-the model's scalar rasteriser. The PROM draws its startup screen on it,
+in jamesbraid/qemu-sgi-origami (`src/dev/odyssey`), with the X server and
+OpenGL drawn by the model's scalar rasteriser on the board's own thread. The PROM draws its startup screen on it,
 but IRIX needs an install with the VPro kernel driver and X server
 module: a disk installed with an IMPACT board finds no screen on a V12.
 

@@ -204,7 +204,9 @@ hashes are given where a change is easiest to understand by reading the commit.
   (docs/perfetto.md).
 - **The Octane takes a VPro V12**: `[graphics] board = "v12"` puts a port
   of QEMU's VPro (Odyssey) model on the graphics port; IRIX needs an
-  install with the VPro driver. (`src/dev/odyssey`, `src/dev/sgi_gfx`)
+  install with the VPro driver. The board decodes and draws on a thread
+  of its own, so long GL streams no longer hold up the processor.
+  (`src/dev/odyssey`)
 - **The Octane takes the textured IMPACT boards.** `[graphics] board =
   "highimpact"` is the SI with texture option and `"maximpact"` the MXI
   (two GEs, two REs), with the board version bytes the IP30 kernel decodes;
