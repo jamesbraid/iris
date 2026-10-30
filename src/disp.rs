@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::Mutex;
 use glow::HasContext;
@@ -505,6 +506,106 @@ pub struct BarStats {
     pub hb:             u64,
     pub count_hz:       u64,
     pub gfifo_pending:  usize,
+}
+
+/// The machine-level inputs of the status bar, shared by every graphics board
+/// on the machine.
+///
+/// The machine builds one and hands it to its board(s) at construction. A
+/// board's display thread calls [`snapshot`](Self::snapshot) once per frame
+/// and gets back a [`BarStats`] with the heartbeat, cycle counter and the
+/// rest already filled in, so a board cannot forget the front-panel LEDs or
+/// the activity lights, and the rule for clearing them lives here only.
+///
+/// What stays with the board is what only the board knows: the depth of its
+/// command queue (`gfifo_pending`).
+pub struct StatusSource {
+    /// LEDs and SCSI/network activity bits (`Rex3::HB_*`). Devices set bits;
+    /// `snapshot` clears the activity bits once they have been shown.
+    heartbeat: Arc<AtomicU64>,
+    /// CP0 Compare-match counter, for the bar's Hz figure.
+    fasttick: Arc<AtomicU64>,
+    /// The CPU's cycle counter; wired once the CPU exists, because the boards
+    /// are built first (see `CyclesPtr::dangling`).
+    cycles: Mutex<crate::cpu::mips_core::CyclesPtr>,
+    /// CPU Count rate, for the developer bar. Replaced when the CPU exists.
+    count_hz: Mutex<Arc<AtomicU64>>,
+    /// Fetch counters the CPU bumps, read and cleared per frame by the
+    /// developer bar. Zero on machines whose CPU does not feed them.
+    decoded: Arc<AtomicU64>,
+    l1i_hits: Arc<AtomicU64>,
+    l1i_fetches: Arc<AtomicU64>,
+    uncached: Arc<AtomicU64>,
+}
+
+impl StatusSource {
+    /// Heartbeat bits that stay lit between frames (the front-panel LEDs).
+    /// Everything else in the heartbeat is activity and clears once shown.
+    pub const PERSISTENT: u64 = Rex3::HB_PERSISTENT;
+
+    pub fn new(heartbeat: Arc<AtomicU64>, fasttick: Arc<AtomicU64>) -> Arc<Self> {
+        Arc::new(Self {
+            heartbeat,
+            fasttick,
+            cycles: Mutex::new(crate::cpu::mips_core::CyclesPtr::dangling()),
+            count_hz: Mutex::new(Arc::new(AtomicU64::new(crate::cpu::mips_core::DEFAULT_COUNT_HZ))),
+            decoded: Arc::new(AtomicU64::new(0)),
+            l1i_hits: Arc::new(AtomicU64::new(0)),
+            l1i_fetches: Arc::new(AtomicU64::new(0)),
+            uncached: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    /// A source with its own counters and no CPU, for tests and boards run
+    /// outside a machine.
+    pub fn detached() -> Arc<Self> {
+        Self::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)))
+    }
+
+    /// The CPU's pre-decoded-instruction, L1-I hit, L1-I fetch and uncached
+    /// fetch counters, in that order: the Arcs the CPU is given to bump.
+    pub fn fetch_counters(&self) -> [Arc<AtomicU64>; 4] {
+        [self.decoded.clone(), self.l1i_hits.clone(), self.l1i_fetches.clone(), self.uncached.clone()]
+    }
+
+    pub fn set_cpu_cycles(&self, ptr: crate::cpu::mips_core::CyclesPtr) {
+        *self.cycles.lock() = ptr;
+    }
+
+    pub fn cycles(&self) -> crate::cpu::mips_core::CyclesPtr {
+        *self.cycles.lock()
+    }
+
+    pub fn set_count_hz(&self, hz: Arc<AtomicU64>) {
+        *self.count_hz.lock() = hz;
+    }
+
+    /// One frame's stats. Clears the heartbeat's activity bits and the fetch
+    /// counters, so call it once per presented frame.
+    pub fn snapshot(&self, now: std::time::Instant, gfifo_pending: usize) -> BarStats {
+        #[cfg(feature = "developer")]
+        let (decoded_delta, l1i_hits, l1i_fetches, uncached, count_hz) = (
+            self.decoded.swap(0, Ordering::Relaxed),
+            self.l1i_hits.swap(0, Ordering::Relaxed),
+            self.l1i_fetches.swap(0, Ordering::Relaxed),
+            self.uncached.swap(0, Ordering::Relaxed),
+            self.count_hz.lock().load(Ordering::Relaxed),
+        );
+        #[cfg(not(feature = "developer"))]
+        let (decoded_delta, l1i_hits, l1i_fetches, uncached, count_hz) = (0, 0, 0, 0, 0);
+        BarStats {
+            now,
+            cycles: self.cycles().get(),
+            fasttick: self.fasttick.load(Ordering::Relaxed),
+            decoded_delta,
+            l1i_hits,
+            l1i_fetches,
+            uncached,
+            hb: self.heartbeat.fetch_and(Self::PERSISTENT, Ordering::Relaxed),
+            count_hz,
+            gfifo_pending,
+        }
+    }
 }
 
 const FADE_FRAMES: u8 = 15;
