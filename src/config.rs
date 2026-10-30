@@ -808,16 +808,34 @@ pub enum CpuModel {
     /// the Indigo2 IMPACT (IP28). The machine uses shadow cache arrays;
     /// see `docs/indigo2-ip28.md` and `src/cpu/mips_cache_shadow.rs`.
     R10000,
+    /// MIPS R12000: the R10000's programming model. The Octane has it with a
+    /// 2 MB secondary cache (revision 3.5), the O2 with 1 MB (revision 2.3).
+    R12000,
+    /// MIPS R14000, revision 2.4, with a 2 MB secondary cache. Selectable on
+    /// the Octane.
+    R14000,
+    /// MIPS R16000, revision 2.2, with a 4 MB secondary cache. No machine
+    /// accepts it yet; `iris-bench --cpu r16000` runs it on the bench's bare
+    /// machine.
+    R16000,
 }
 
 impl CpuModel {
-    pub const ALL: [Self; 3] = [Self::R4400, Self::R5000, Self::R10000];
+    pub const ALL: [Self; 6] = [Self::R4400, Self::R5000, Self::R10000, Self::R12000, Self::R14000, Self::R16000];
+
+    /// Whether the part is in the R10000 family.
+    pub fn is_r10000_family(self) -> bool {
+        matches!(self, Self::R10000 | Self::R12000 | Self::R14000 | Self::R16000)
+    }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::R4400 => "MIPS R4400",
             Self::R5000 => "MIPS R5000",
             Self::R10000 => "MIPS R10000",
+            Self::R12000 => "MIPS R12000",
+            Self::R14000 => "MIPS R14000",
+            Self::R16000 => "MIPS R16000",
         }
     }
 }
@@ -833,7 +851,7 @@ impl CpuModel {
 ///   need no tag check against it.
 /// - `auto`: `shadow` in a `jitv2` build, `full` otherwise.
 ///
-/// The R10000 (IP28) only has the shadow model.
+/// The R10000 family only has the shadow model.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 #[clap(rename_all = "lower")]
@@ -848,7 +866,7 @@ impl CacheModel {
     /// Whether `cpu` runs the shadow cache under this setting.
     pub fn is_shadow(self, cpu: CpuModel) -> bool {
         match (cpu, self) {
-            (CpuModel::R10000, _) => true,
+            (cpu, _) if cpu.is_r10000_family() => true,
             (_, Self::Full) => false,
             (_, Self::Shadow) => true,
             (_, Self::Auto) => cfg!(feature = "jitv2"),
@@ -1971,6 +1989,11 @@ impl MachineConfig {
         if self.machine.cpus != 1 && self.machine.profile != MachineProfile::OctaneIp30 {
             return Err(format!("[machine] cpus = {}: only the Octane has more than one processor", self.machine.cpus));
         }
+        if self.machine.profile == MachineProfile::Indigo2Ip28
+            && matches!(self.machine.cpu, CpuModel::R12000 | CpuModel::R14000 | CpuModel::R16000)
+        {
+            return Err("an Indigo2 IMPACT (IP28) has an R10000 ([machine] cpu = \"r10000\")".into());
+        }
         if self.graphics.heads != 1 && self.graphics.heads != 2 {
             return Err(format!(
                 "graphics.heads {} is invalid (valid: 1, 2)",
@@ -2358,17 +2381,19 @@ pub struct Cli {
     #[arg(long = "no-scsi-deferred-int", default_value_t = false)]
     pub no_scsi_deferred_int: bool,
 
-    /// Emulated CPU: `r4400` (default), `r5000`, or `r10000`. Overrides `[machine] cpu`.
+    /// Emulated CPU: `r4400` (default), `r5000`, `r10000`, `r12000`, `r14000` or `r16000`. Overrides `[machine] cpu`.
     ///
-    /// All three models are compiled into every build — each is its own
+    /// Every model is compiled into every build — each is its own
     /// monomorphisation, so the hot path carries no per-model branch — and this
     /// picks between them at construction. The `r5k` Cargo feature is removed.
+    /// The Octane takes `r10000`, `r12000` and `r14000`; the O2 `r5000`,
+    /// `r10000` and `r12000`; the IP28 `r10000`.
     #[arg(long = "cpu", value_name = "MODEL")]
     pub cpu: Option<CpuModel>,
 
     /// Cache model: `auto` (default: `shadow` in a jitv2 build, else `full`),
-    /// `full` or `shadow`. Overrides `[machine] cache`. The R10000 is always
-    /// `shadow`.
+    /// `full` or `shadow`. Overrides `[machine] cache`. The R10000 family is
+    /// always `shadow`.
     #[arg(long = "cache", value_name = "MODEL")]
     pub cache: Option<CacheModel>,
 
@@ -2960,6 +2985,59 @@ mod export_tests {
         assert!(indy.validate().unwrap_err().contains("channel B is the console"));
         let back: MachineConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back.serial_socket_a.as_deref(), Some("/run/x.sock"));
+    }
+
+    /// `cpu` names each part, and the R10000 family runs the shadow caches.
+    #[test]
+    fn every_cpu_part_is_selectable_by_name() {
+        for (name, cpu, family) in [
+            ("r4400", CpuModel::R4400, false),
+            ("r5000", CpuModel::R5000, false),
+            ("r10000", CpuModel::R10000, true),
+            ("r12000", CpuModel::R12000, true),
+            ("r14000", CpuModel::R14000, true),
+            ("r16000", CpuModel::R16000, true),
+        ] {
+            let cfg: MachineConfig = toml::from_str(&format!("[machine]\ncpu = \"{name}\"\n")).unwrap();
+            assert_eq!(cfg.machine.cpu, cpu, "{name}");
+            assert_eq!(cpu.is_r10000_family(), family, "{name}");
+            assert_eq!(CacheModel::Full.is_shadow(cpu), family, "{name}");
+            assert!(CpuModel::ALL.contains(&cpu), "{name}");
+        }
+    }
+
+    /// The IP28 shipped with the R10000 only, so it refuses the later family
+    /// parts; the Octane and the O2 each name the parts they take.
+    #[test]
+    fn machines_name_the_cpus_they_accept() {
+        let mut cfg = MachineConfig::default();
+        cfg.machine.profile = MachineProfile::Indigo2Ip28;
+        for cpu in [CpuModel::R12000, CpuModel::R14000, CpuModel::R16000] {
+            cfg.machine.cpu = cpu;
+            let err = cfg.validate().expect_err("the IP28 has an R10000");
+            assert_eq!(err, "an Indigo2 IMPACT (IP28) has an R10000 ([machine] cpu = \"r10000\")");
+        }
+        cfg.machine.cpu = CpuModel::R10000;
+        cfg.validate().expect("the IP28 takes the R10000");
+
+        // Both machines check the part before they look for a PROM.
+        let refusal = |profile, cpu| {
+            let mut cfg = MachineConfig::default();
+            cfg.machine.profile = profile;
+            cfg.machine.cpu = cpu;
+            match profile {
+                MachineProfile::OctaneIp30 => crate::ip30_machine::OctaneMachine::new(&cfg).err(),
+                _ => crate::ip32_machine::O2Machine::new(&cfg).err(),
+            }
+        };
+        let octane = "an Octane has an R10000, R12000 or R14000 ([machine] cpu = \"r10000\", \"r12000\" or \"r14000\")";
+        let o2 = "an O2 has an R5000, R10000 or R12000 ([machine] cpu = \"r5000\", \"r10000\" or \"r12000\")";
+        for cpu in [CpuModel::R4400, CpuModel::R5000, CpuModel::R16000] {
+            assert_eq!(refusal(MachineProfile::OctaneIp30, cpu).as_deref(), Some(octane), "{cpu:?}");
+        }
+        for cpu in [CpuModel::R4400, CpuModel::R14000, CpuModel::R16000] {
+            assert_eq!(refusal(MachineProfile::O2Ip32, cpu).as_deref(), Some(o2), "{cpu:?}");
+        }
     }
 
     /// Every old `[o2]` key lands on the shared key it stood for, and the

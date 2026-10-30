@@ -6391,6 +6391,37 @@ mod tests {
         exec
     }
 
+    /// Config reports each R10000-family part's own geometry: SS (bits 18:16) is
+    /// log2(secondary size / 512 KB) and SB (bit 13) is set for 128-byte
+    /// lines (NEC U10278EJ4V0UM p.230). The primary caches are 32 KB (IC and DC
+    /// read 3), big endian is set, and EC, SC, DN, PM, DSD and SK are zero.
+    #[test]
+    fn config_reports_each_family_parts_secondary_cache() {
+        use crate::cpu::mips_cache_shadow::*;
+        fn config<C: CpuModel + From<Arc<dyn BusDevice>>>() -> u64 {
+            let cfg = MipsCpuConfig::for_model::<C>(Arc::new(crate::ip22_bus::memory_map(false)));
+            let mut exec = Box::new(MipsExecutor::<PassthroughTlb, C>::new(
+                Arc::new(MockMemory::new()), PassthroughTlb::default(), &cfg));
+            disable_jitv2(&mut exec);
+            exec.core.read_cp0(16)
+        }
+        on_big_stack(|| {
+            for (name, c, want) in [
+                ("R10000", config::<R10000ShadowCache>(), (1, 1)),
+                ("R10000 O2", config::<R10000O2ShadowCache>(), (1, 0)),
+                ("R12000", config::<R12000ShadowCache>(), (2, 1)),
+                ("R12000 O2", config::<R12000O2ShadowCache>(), (2, 0)),
+                ("R14000", config::<R14000ShadowCache>(), (2, 1)),
+                ("R16000", config::<R16000ShadowCache>(), (3, 1)),
+            ] {
+                let (ss, sb) = want;
+                assert_eq!(c >> 26, 0b011_011, "{name}: IC and DC read 32 KB");
+                // Bits 25:0 are SS, SB, big endian and K0 = uncached; the rest are zero.
+                assert_eq!(c & 0x03FF_FFFF, (ss << 16) | (sb << 13) | 0x8000 | 2, "{name}: Config {c:#x}");
+            }
+        });
+    }
+
     /// EntryHi and the TLB keep every implemented VPN2 bit: 44 virtual-address
     /// bits on the R10000, 40 on the R4400 and R5000. An IRIX n64 stack can sit
     /// above the 40-bit limit.
