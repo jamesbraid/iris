@@ -75,6 +75,7 @@ mod memory;
 mod mmio;
 mod objects;
 mod pi_gfx;
+pub use pi_gfx::{PiGfx, PI_GFX_REGS};
 mod pixel_dma;
 mod pixel_write;
 mod raster;

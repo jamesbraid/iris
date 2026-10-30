@@ -53,12 +53,28 @@ The ordinary interpreter configuration is the one with recorded Fuel boot
 evidence. `lightning` and experimental `jitv2` builds are available, but no
 Fuel guest boot with either is claimed here.
 
-The V12/Odyssey graphics path is not attached. The IOC3 carries a PS/2
-keyboard and mouse, fed from host input; they are the default, as in the
-Fuel's manual. `[fuel] usb_input = true` also plugs a USB keyboard and mouse
-into the OHCI controller, and `ps2_input = false` leaves the PS/2 pair out.
-Machine snapshots are
-unsupported.
+## Graphics
+
+`[graphics] board = "v12"` (or `"v10"`) fits a VPro board in the graphics
+slot, crossbar widget 13: a Fuel IRIX inventory lists its board under
+xtalk/13, and Fuels have been reported with both the V12 and the V10. It is
+the Octane's VPro model. Its interrupt packets cross the XBridge to Bedrock
+like the PCI heads', its DMA enters Bedrock's inbound path as widget 13, and
+a link reset of port 13 resets it. The processor interfaces' graphics
+flow-control registers keep what IRIX writes but count no stores, so the
+credit-starvation interrupt never fires.
+
+With PROM 6.210 the graphics diagnostic finds the board and passes. An IRIX
+6.5.30 disk whose kernel includes the VPro driver lists `Graphics board: V12`
+in `hinv` and brings the X login screen up on it. A disk installed for a
+machine without graphics has no VPro driver in its kernel and runs as before.
+
+## Input
+
+The IOC3 carries a PS/2 keyboard and mouse, fed from host input; they are the
+default, as in the Fuel's manual. `[fuel] usb_input = true` also plugs a USB
+keyboard and mouse into the OHCI controller, and `ps2_input = false` leaves the
+PS/2 pair out. Machine snapshots are unsupported.
 
 ## Source basis
 
