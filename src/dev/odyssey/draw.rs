@@ -756,14 +756,41 @@ impl Board {
     }
 
     /// One byte-stream texel of the open image at the raster cursor, bounded by
-    /// the header's group length in pixels.
-    pub fn image_texel(&mut self, rgba: u32, is_index: bool) {
+    /// the header's group length in pixels. A source format that carries
+    /// alpha stores it (code_carries_alpha()); any other stores 255.
+    pub fn image_texel(&mut self, rgba: u32, code: u32) {
         if self.image_group_len != 0 && self.image_group_painted >= self.image_group_len {
             return;
         }
-        self.image_put(rgba, is_index, false);
+        self.image_put(rgba, code_is_index(code), code_carries_alpha(code));
         self.image_group_painted += 1;
     }
+}
+
+/// Whether a GL image write under source format `code` stores the source's
+/// alpha rather than 255.
+///
+/// ESTABLISHED (datasheet "Alpha from image writes"): the library sends
+/// the source's alpha bytes unchanged under 0x4b, 0x48, 0x6b, 0x4c and
+/// 0x6c, and no header bit asks the board to replace them. INFERRED there:
+/// the board stores that alpha. The write mask's alpha enable (block
+/// 0x052) is not applied to image writes in this model.
+///
+/// The X server's on-screen images under 0x4c come by DMA to the colour
+/// buffer (Board::dma_put()), which still stores 255: the datasheet infers
+/// they would write the A byte, 0 in every traced upload, but the X server
+/// passes client pixels through, and whether alpha is stored at all for a
+/// window whose visual has none is unknown. The model keeps one plane for
+/// every visual, so it cannot tell such a window apart.
+pub fn code_carries_alpha(code: u32) -> bool {
+    matches!(
+        code,
+        ODSY_IMAGE_CODE_RGBA
+            | ODSY_IMAGE_CODE_LUM_ALPHA
+            | ODSY_IMAGE_CODE_ABGR
+            | ODSY_IMAGE_CODE_RGBA12
+            | ODSY_IMAGE_CODE_ABGR12
+    )
 }
 
 pub fn unorm16_to_8(v: u32) -> u32 {
@@ -806,7 +833,7 @@ impl Board {
     pub fn decode_pixel(&mut self, code: u32, b: &[u8], rgba: &mut u32) -> bool {
         match code {
             ODSY_IMAGE_CODE_ABGR => {
-                *rgba = pack_pixel(b[3] as u32, b[2] as u32, b[1] as u32);
+                *rgba = (pack_pixel(b[3] as u32, b[2] as u32, b[1] as u32) & !0xffu32) | b[0] as u32;
                 true
             }
             ODSY_IMAGE_CODE_FALLBACK_XRGB => {
@@ -961,7 +988,7 @@ impl Board {
             // The pixel's bytes, first byte highest, at the start of px[].
             px[..4].copy_from_slice(&(self.image_bytes << (8 * (4 - n))).to_be_bytes());
             self.decode_pixel(code, &px, &mut rgba);
-            self.image_texel(rgba, code_is_index(code));
+            self.image_texel(rgba, code);
         }
     }
 }
