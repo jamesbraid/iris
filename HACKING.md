@@ -609,8 +609,10 @@ introspection commands are in [debug.md](debug.md#jit-v2).
   ISP12160. It runs headless on the L1 or IOC3 serial console. The IOC3 uses
   the shared `net::Link` for NAT or PCAP. The writable Bedrock flash and
   serial-flash devices share `FlashBacking` storage, with separate command
-  handling. V12/Odyssey graphics and snapshots are unsupported. See the
-  [Fuel guide](docs/fuel-ip34.md).
+  handling. A VPro board (the Octane's Odyssey model) can sit at crossbar
+  widget 13; its packets and DMA go through the XBridge and Bedrock's inbound
+  path, and the PI graphics registers are stored but count no credits.
+  Snapshots are unsupported. See the [Fuel guide](docs/fuel-ip34.md).
 
 The Indy and Indigo2 profiles each have an embedded PROM fallback;
 `src/platform.rs` and `src/machine.rs` wire their differences, and
