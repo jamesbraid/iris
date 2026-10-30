@@ -494,20 +494,24 @@ impl Bench {
         }
     }
 
-    /// The colour and depth planes in the square from (0, 0) to side - 1.
-    pub fn snapshot(&self, side: i32) -> (Vec<u32>, Vec<u32>) {
+    /// The colour, depth and stencil planes in the square from (0, 0) to
+    /// side - 1.
+    pub fn snapshot(&self, side: i32) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
         let b = &self.board;
         let depth = b.depth_mem.plane(b.depth_plane).expect("the depth plane");
+        let stencil = b.stencil_mem.plane(b.stencil_plane).expect("the stencil plane");
         let mut c = Vec::new();
         let mut z = Vec::new();
+        let mut s = Vec::new();
 
         for y in 0..side {
             for x in 0..side {
                 c.push(b.buffer_load(0, x as i64, y as i64));
                 z.push(b.depth_mem.plane_load(&depth, x, y));
+                s.push(b.stencil_mem.plane_load(&stencil, x, y));
             }
         }
-        (c, z)
+        (c, z, s)
     }
 }
 
