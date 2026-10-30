@@ -55,7 +55,9 @@ because no warm reset travels through the modelled switch. Revision code 4
 and earlier keep the range reserved.
 
 iris warns at start-up when the PROM image's banner is older than the board
-needs. The PROM used in testing is `IP30prom.bin`, whose banner reads Rev 4.9.
+needs. `IP30prom.bin` (from IRIX 6.5.30) holds two PROMs: Rev 4.9 is the
+recovery PROM and Rev 4.17 the main one; the PROM console reports 4.17, as
+`flash -V` does in IRIX.
 
 ## Disk images
 
