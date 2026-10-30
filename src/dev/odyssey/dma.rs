@@ -30,6 +30,21 @@ pub struct DmaLayout {
     /// A packed big-endian word of `bytes` bytes, most significant field
     /// listed by its shift. Empty for a layout of whole bytes.
     pub fields: [DmaField; 4],
+    /// Which plane the read takes its pixels from.
+    pub plane: ReadPlane,
+}
+
+/// The plane a read comes from and the form of its word.
+#[derive(Clone, Copy, Default, PartialEq)]
+pub enum ReadPlane {
+    #[default]
+    Colour,
+    /// The depth word's 16-bit form: exponent and top ten mantissa bits.
+    Depth16,
+    /// The depth word as a 32-bit word, bits 31:24 zero.
+    Depth32,
+    /// The stencil byte.
+    Stencil,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -358,7 +373,63 @@ pub fn dma_draw_sentinel_bytes(hdr: &[u32], top_down: &mut bool) -> u32 {
     0
 }
 
+/// What a depth or stencil image write names (see dma_depth_stencil_write()).
+#[derive(Clone, Copy, PartialEq)]
+pub enum DepthStencil {
+    Depth,
+    Stencil,
+}
+
+/// Whether hdr is the library's depth or stencil image write: format 0 and
+/// type 4 (word 7 low bits 0x080, four bytes a pixel) with word 4's size
+/// field 1 for depth and 0 for stencil.
+///
+/// ESTABLISHED as the library's request (datasheet, "Depth and stencil
+/// headers"). How the board takes the words is unknown, so the model's
+/// choices, each pinned by a test, are:
+/// - stencil lives in a plane of its own, so a stencil write leaves the
+///   colour and the depth word alone;
+/// - a write passes the same clip-rectangle and window-ID tests as a GL
+///   fragment;
+/// - a write ignores the stencil write mask (register 0x0452);
+/// - a depth write is always the 24-bit word, bits 23:0 of each value.
+pub fn dma_depth_stencil_write(hdr: &[u32]) -> Option<DepthStencil> {
+    if hdr[ODSY_DMA_HDR_CONTROL] & ODSY_WRITE_CODE_MASK != ODSY_IMAGE_CODE_DEPTH_STENCIL {
+        return None;
+    }
+    match (hdr[ODSY_DMA_HDR_FORMAT] >> ODSY_DMA_FMT_SIZE_SHIFT) & ODSY_DMA_FMT_SIZE_MASK {
+        ODSY_DMA_FMT_SIZE_DEPTH => Some(DepthStencil::Depth),
+        ODSY_DMA_FMT_SIZE_STENCIL => Some(DepthStencil::Stencil),
+        _ => None,
+    }
+}
+
 impl Board {
+    /// The depth plane's word at plane pixel (x, y), which is in the plane.
+    pub fn depth_load(&mut self, x: i64, y: i64) -> u32 {
+        self.raster_wait();
+        let p = self.depth_mem.plane(self.depth_plane).expect("the depth plane");
+        self.depth_mem.plane_load(&p, x as i32, y as i32)
+    }
+
+    pub fn depth_store(&mut self, x: i64, y: i64, word: u32) {
+        self.raster_wait();
+        let p = self.depth_mem.plane(self.depth_plane).expect("the depth plane");
+        self.depth_mem.plane_store(&p, x as i32, y as i32, word);
+    }
+
+    pub fn stencil_load(&mut self, x: i64, y: i64) -> u32 {
+        self.raster_wait();
+        let p = self.stencil_mem.plane(self.stencil_plane).expect("the stencil plane");
+        self.stencil_mem.plane_load(&p, x as i32, y as i32)
+    }
+
+    pub fn stencil_store(&mut self, x: i64, y: i64, value: u8) {
+        self.raster_wait();
+        let p = self.stencil_mem.plane(self.stencil_plane).expect("the stencil plane");
+        self.stencil_mem.plane_store(&p, x as i32, y as i32, value as u32);
+    }
+
     /// Stage the pixel bytes first so a failed source read cannot leave a
     /// partially painted rectangle. Entry lengths count pixels; row gaps advance
     /// the address cursor only while the current entry has bytes remaining.
@@ -374,7 +445,8 @@ impl Board {
         let mut pos: u64 = 0;
         let mut out: u64 = 0;
         let mut top_down = false;
-        let psize = dma_draw_sentinel_bytes(hdr, &mut top_down);
+        let depth_stencil = dma_depth_stencil_write(hdr);
+        let psize = if depth_stencil.is_some() { 4 } else { dma_draw_sentinel_bytes(hdr, &mut top_down) };
         // APPROXIMATION: the window's height, for a top-down write's bottom-up y,
         // taken from the clip box's last row; the header carries no height. A
         // capture with a scissor box smaller than the window would tell this
@@ -448,6 +520,19 @@ impl Board {
                 }) + self.win_origin[1] as i64;
                 let mut rgba: u32;
 
+                if let Some(plane) = depth_stencil {
+                    let value = u32::from_be_bytes(src[..4].try_into().unwrap());
+
+                    if self.pixel_allowed(px, py) {
+                        if plane == DepthStencil::Depth {
+                            self.depth_store(px, py, value & ODSY_DEPTH24_MAX);
+                        } else {
+                            self.stencil_store(px, py, value as u8);
+                        }
+                    }
+                    continue;
+                }
+
                 if psize == 4 {
                     rgba = (pack_pixel(src[3] as u32, src[2] as u32, src[1] as u32) & !0xffu32) | src[0] as u32;
                 } else {
@@ -480,7 +565,7 @@ impl Board {
 }
 
 const fn lay(code: u32, bytes: u8, from: [u8; 8]) -> DmaLayout {
-    DmaLayout { code: code as u8, bytes, from, fields: [DmaField { chan: 0, width: 0, shift: 0 }; 4] }
+    DmaLayout { code: code as u8, bytes, from, fields: [DmaField { chan: 0, width: 0, shift: 0 }; 4], plane: ReadPlane::Colour }
 }
 
 const fn fld(chan: u8, width: u8, shift: u8) -> DmaField {
@@ -489,7 +574,7 @@ const fn fld(chan: u8, width: u8, shift: u8) -> DmaField {
 
 /// A packed layout: the fields of a `bytes`-byte big-endian word.
 const fn pack(code: u32, bytes: u8, fields: [DmaField; 4]) -> DmaLayout {
-    DmaLayout { code: code as u8, bytes, from: [0; 8], fields }
+    DmaLayout { code: code as u8, bytes, from: [0; 8], fields, plane: ReadPlane::Colour }
 }
 
 const NF: DmaField = fld(0, 0, 0);
@@ -597,6 +682,33 @@ pub static DMA_GL_READS: &[GlRead] = &[
     row(4, 2, lay(2, 4, [0, 1, 2, 3, 0, 0, 0, 0])),  // RGBA, UNSIGNED_BYTE
 ];
 
+/// A depth read from a drawable under header class 1 code 0, two bytes a
+/// pixel (DEPTH_COMPONENT, UNSIGNED_SHORT). The library sends it for windows
+/// whose visual is RGBA 12/12/12/12. The bytes are the 16-bit form of the
+/// plane's depth word: exponent in bits 15:10, the top ten mantissa bits
+/// below.
+///
+/// ESTABLISHED as the library's request (datasheet, "Depth and stencil
+/// headers"); that the board returns the plane's own 16-bit form is INFERRED.
+/// MODEL CHOICE: the plane holds a 24-bit word whatever the visual, so a
+/// depth written by the 16-bit form (always stored as 24 bits, see
+/// dma_depth_stencil_write()) reads back near zero, and that visual's depth
+/// does not round-trip; the model does not identify those windows.
+pub static DMA_DEPTH16: DmaLayout =
+    DmaLayout { code: 0, bytes: 2, from: [0; 8], fields: [NF; 4], plane: ReadPlane::Depth16 };
+
+/// A depth read under class 2 code 2 with field codes (0,0) or (4,0), four
+/// bytes a pixel (DEPTH_COMPONENT, UNSIGNED_INT): the plane's 24-bit word.
+pub static DMA_DEPTH32: DmaLayout =
+    DmaLayout { code: 2, bytes: 4, from: [0; 8], fields: [NF; 4], plane: ReadPlane::Depth32 };
+
+/// A stencil read under class 0 code 0 with field codes (4,0), one byte a
+/// pixel (STENCIL_INDEX, UNSIGNED_BYTE). MODEL CHOICE: the stencil byte
+/// comes from the model's own stencil plane; where the board keeps it inside
+/// a stored pixel is unknown.
+pub static DMA_STENCIL: DmaLayout =
+    DmaLayout { code: 0, bytes: 1, from: [0; 8], fields: [NF; 4], plane: ReadPlane::Stencil };
+
 /// X reads, by word 7's format byte: the upload decode run backwards. The
 /// luminance code is not invertible and no read of it has been seen.
 pub static DMA_X_LAYOUTS: [DmaLayout; 4] = [
@@ -641,17 +753,11 @@ impl Board {
             // (2,0).
             let fields = ((fmt >> 20) & 0xf, (fmt >> 24) & 0xf);
 
-            if fields == (4, 0) || (cls == 2 && fields == (0, 0)) {
-                if self.dma_report(ODSY_DMA_REPORT_SHARED) {
-                    crate::dlog!(
-                        LogModule::Odyssey,
-                        "sgi-odyssey: DMA depth or stencil read with word 4 {:#x} (class {}, code {}) is not modeled",
-                        fmt, cls, code
-                    );
-                }
-                return None;
-            }
-            if cls == 0 && fields == (0, 0) {
+            if cls == 2 && (fields == (4, 0) || fields == (0, 0)) {
+                l = Some(&DMA_DEPTH32);
+            } else if cls == 0 && fields == (4, 0) {
+                l = Some(&DMA_STENCIL);
+            } else if cls == 0 && fields == (0, 0) {
                 // UNKNOWN: this is a stencil read of a storage-2 window or a
                 // colour index read of a storage-0 window, and only the
                 // header's word 2 would separate them. The model keeps no
@@ -675,6 +781,8 @@ impl Board {
                 }
                 l = DMA_GL_READS.iter().find(|t| t.class as u32 == cls && t.code as u32 == code).map(|t| &t.layout);
             }
+        } else if drawable && cls == 1 && code == 0 {
+            l = Some(&DMA_DEPTH16);
         } else {
             for t in DMA_GL_READS.iter() {
                 if t.class as u32 == cls && t.code as u32 == code && (t.from == ReadFrom::Any || !drawable) {
@@ -817,6 +925,18 @@ impl Board {
             for c in 0..w {
                 let x = src.x + c as i64;
                 let y = src.y + board_row as i64;
+                if l.plane != ReadPlane::Colour {
+                    let n = l.bytes as usize;
+                    let word = match l.plane {
+                        ReadPlane::Depth16 => super::depth_word::word16_from_word24(self.depth_load(x, y)),
+                        ReadPlane::Depth32 => self.depth_load(x, y) & ODSY_DEPTH24_MAX,
+                        _ => self.stencil_load(x, y),
+                    };
+
+                    out[o..o + n].copy_from_slice(&word.to_be_bytes()[4 - n..]);
+                    o += n;
+                    continue;
+                }
                 let word = self.dma_read_pixel(src, x, y);
                 let mut group = ODSY_GAMMA_GROUP;
 

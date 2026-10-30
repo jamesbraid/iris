@@ -210,14 +210,14 @@ fn field_codes_separate_a_colour_read_from_a_depth_or_stencil_read() {
         let got = dma_read(&mut s, &ram, (30, 40, 1), with_fields(read_word4(2, 2), a, b), 4);
         assert_eq!(got[..5], [0xff, 0xa5, 0x5a, 0x3c, 0xa5], "fields ({a},{b})");
     }
-    // Depth-looking pairs: not a colour. Nothing is written for them here.
+    // Depth-looking pairs: not a colour.
     for (a, b) in [(0, 0), (4, 0)] {
         let got = dma_read(&mut s, &ram, (30, 40, 1), with_fields(read_word4(2, 2), a, b), 4);
         assert_ne!(got[..4], colour, "fields ({a},{b}) are a depth read");
     }
-    // Stencil (4,0) is not a colour index.
+    // Stencil (4,0) is the stencil plane's byte, not a colour index.
     let got = dma_read(&mut s, &ram, (30, 40, 1), with_fields(read_word4(0, 0), 4, 0), 1);
-    assert_eq!(got[..2], [0xa5, 0xa5]);
+    assert_eq!(got[..2], [0x00, 0xa5]);
 
     // The (0,0) tie is served as an index byte. On a window shown as colour
     // there is no index to return and the read is refused.
@@ -247,4 +247,95 @@ fn a_colour_index_read_returns_the_index() {
     s.dispmode[0] = ODSY_GAMMA_GROUP << ODSY_DISPMODE_GROUP_SHIFT;
     let got = dma_read(&mut s, &ram, (30, 40, 1), read_word4(0, 1), 1);
     assert_eq!(got[..2], [0xa5, 0xa5], "the red byte of 0xa55a3cff");
+}
+
+/// A GL image write by DMA to the draw drawable: the table at `TABLE` names
+/// `payload` for a `w` x 1 box at (x, y) under word 4 `word4` and word 7's
+/// low bits `code`, four bytes a pixel, rows bottom-up.
+fn dma_write(s: &mut Board, ram: &Ram, (x, y, w): (u32, u32, u32), word4: u32, code: u32, payload: &[u8]) {
+    ram.put(PAGE_A, payload);
+    put_table(
+        ram,
+        TABLE,
+        [ODSY_DMA_SENTINEL_DRAW, y << 16 | x, 0x50, 1 << 16 | w, word4, 0, w * 4, 1 << 30 | 1 << 16 | code],
+        &[pte(PAGE_A, w * 4)],
+    );
+    descriptor(s, TABLE);
+}
+
+fn stencil_at(s: &Board, x: i32, y: i32) -> u32 {
+    let p = s.stencil_mem.plane(s.stencil_plane).expect("the stencil plane");
+    s.stencil_mem.plane_load(&p, x, y)
+}
+
+/// A depth read from a 12/12/12/12 window is class 1 code 0, two bytes a
+/// pixel: the plane's 24-bit depth word in its 16-bit form (exponent and
+/// the top ten mantissa bits).
+///
+/// Datasheet: "Depth and stencil headers" (the request is established; that
+/// the board hands back the plane's 16-bit form is inferred).
+#[test]
+fn a_16_bit_depth_read_returns_the_planes_16_bit_form() {
+    let (mut s, ram) = read_window();
+    s.depth_store(30, 40, 0x002b_5a1f);
+
+    let got = dma_read(&mut s, &ram, (30, 40, 1), read_word4(1, 0), 2);
+    assert_eq!(got[..3], [0x2b, 0x5a, 0xa5]);
+}
+
+/// The field codes (0,0) and (4,0) on class 2 code 2 mark a depth read of
+/// four bytes, the plane's 24-bit word; (4,0) on class 0 code 0 a stencil
+/// read of one byte. The same header with a colour pair is colour, as the
+/// test above has it. Nothing here is the colour planes.
+///
+/// Datasheet: "Read table" (established that the field codes separate them;
+/// that the plane holds the board's word is inferred; the stencil plane is a
+/// model choice).
+#[test]
+fn a_depth_or_stencil_read_returns_the_planes_word_or_byte() {
+    let (mut s, ram) = read_window();
+    s.depth_store(30, 40, 0x00d2_a45f);
+    s.stencil_store(30, 40, 0xc7);
+
+    for (a, b) in [(0, 0), (4, 0)] {
+        let got = dma_read(&mut s, &ram, (30, 40, 1), with_fields(read_word4(2, 2), a, b), 4);
+        assert_eq!(got[..5], [0x00, 0xd2, 0xa4, 0x5f, 0xa5], "depth, fields ({a},{b})");
+    }
+    let got = dma_read(&mut s, &ram, (30, 40, 1), with_fields(read_word4(0, 0), 4, 0), 1);
+    assert_eq!(got[..2], [0xc7, 0xa5]);
+}
+
+/// A depth image is format 0, type 4, word 4's size field 1, and a stencil
+/// image the same with size 0. Each goes to its own plane, one four-byte
+/// word a pixel, and the colour planes stay as they were.
+///
+/// Datasheet: "Depth and stencil headers", established as the library's
+/// request.
+#[test]
+fn a_depth_or_stencil_image_by_dma_writes_its_own_plane() {
+    let (mut s, ram) = read_window();
+
+    dma_write(&mut s, &ram, (30, 40, 2), 1 << 13 | 0x1000, 0x080, &[0xff, 0x12, 0x34, 0x56, 0x00, 0xab, 0xcd, 0xef]);
+    assert_eq!(s.depth_load(30, 40), 0x0012_3456, "bits 31:24 are not depth");
+    assert_eq!(s.depth_load(31, 40), 0x00ab_cdef);
+
+    dma_write(&mut s, &ram, (30, 40, 2), 0x1000, 0x080, &[0, 0, 0, 0x11, 0, 0, 0, 0xc7]);
+    assert_eq!(stencil_at(&s, 30, 40), 0x11);
+    assert_eq!(stencil_at(&s, 31, 40), 0xc7);
+    assert_eq!(s.depth_load(30, 40), 0x0012_3456, "a stencil write leaves depth");
+    assert_eq!(pixel(&s, 0, 30, 40), READ_PIXEL, "and colour");
+}
+
+/// The same code by pixel burst names no plane: nothing says depth or
+/// stencil, so it paints neither, and does not land in the colour planes as
+/// RGB.
+#[test]
+fn a_depth_or_stencil_image_by_burst_paints_nothing() {
+    let (mut s, _) = window();
+
+    burst_image(&mut s, (40, 10, 42, 11), 0x0021_1080, ODSY_IMAGE_FMT_RGB, &[0x0012_3456, 0x00ab_cdef]);
+    for buffer in 0..2 {
+        assert_eq!(pixel(&s, buffer, 40, 10), 0);
+        assert_eq!(pixel(&s, buffer, 41, 10), 0);
+    }
 }

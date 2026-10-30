@@ -921,6 +921,17 @@ impl Board {
         if !image_pairing_supported(code, self.image_fmt) {
             return;
         }
+        if code == ODSY_IMAGE_CODE_DEPTH_STENCIL {
+            // The library's depth and stencil images are both format 0, type
+            // 4; the DMA header's size field tells them apart (dma.rs) and a
+            // burst header has none. Which plane a burst names is unknown,
+            // so it paints nothing, not the colour planes.
+            if !self.image_code_reported {
+                self.image_code_reported = true;
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: a depth or stencil image by burst is not modeled; the header does not say which");
+            }
+            return;
+        }
         if self.image_fmt == ODSY_IMAGE_FMT_RGBA16 {
             // A stream of 16-bit components, high half first, a pixel every
             // texel12_components() halves: two words for 0x6b and 0x6c, a

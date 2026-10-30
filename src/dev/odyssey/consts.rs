@@ -332,6 +332,10 @@ pub const ODSY_DMA_FMT_SELECTOR_SHIFT: u32 = 28; // word 4 bits 30:28
 pub const ODSY_DMA_FMT_SELECTOR_MASK: u32 = 0x7;
 pub const ODSY_DMA_FMT_SELECTOR_READ: u32 = 1;
 pub const ODSY_DMA_FMT_SELECTOR_DRAW: u32 = 0;
+pub const ODSY_DMA_FMT_SIZE_SHIFT: u32 = 13; // word 4 bits 15:13
+pub const ODSY_DMA_FMT_SIZE_MASK: u32 = 0x7;
+pub const ODSY_DMA_FMT_SIZE_STENCIL: u32 = 0; // a write's size field: stencil
+pub const ODSY_DMA_FMT_SIZE_DEPTH: u32 = 1; // and depth
 pub const ODSY_DMA_FMT_CLASS_MASK: u32 = 0x7; // word 4 bits 2:0
 pub const ODSY_DMA_FMT_CODE_SHIFT: u32 = 3; // word 4 bits 7:3
 pub const ODSY_DMA_FMT_CODE_MASK: u32 = 0x1f;
@@ -817,6 +821,10 @@ pub const ODSY_IMAGE_FMT_RGBA16: u32 = 0x12;
 
 // The source pixel format
 pub const ODSY_IMAGE_CODE_MASK: u32 = 0xff;
+/// A GL write's format (bits 4:0) and type (8:5) together.
+pub const ODSY_WRITE_CODE_MASK: u32 = 0x1ff;
+/// Format 0 (depth or stencil) with type 4 (four bytes a pixel).
+pub const ODSY_IMAGE_CODE_DEPTH_STENCIL: u32 = 0x80;
 pub const ODSY_IMAGE_CODE_CI: u32 = 0x41;
 pub const ODSY_IMAGE_CODE_CI16: u32 = 0x61;
 pub const ODSY_IMAGE_CODE_LUM: u32 = 0x42;
