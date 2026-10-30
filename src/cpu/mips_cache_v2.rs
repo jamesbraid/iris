@@ -566,7 +566,8 @@ pub trait CpuModel: MipsCache {
     /// R4000 hit operations that share those encodings.
     const R10K_CACHE_OPS: bool = false;
     /// The part is in the R10000 family (R10000, R12000, R14000, R16000), which
-    /// shares one programming model: 44 virtual and 40 physical address bits.
+    /// shares one programming model: 44 virtual and 40 physical address bits,
+    /// and a partial LWR that keeps bits 63:32 of the destination.
     const R10K_FAMILY: bool = false;
     /// Bits `Index_Store_Tag` keeps for the secondary cache: all of them unless
     /// a part sets a mask. A 36-bit mask inferred from the IP28 PROM's
