@@ -140,6 +140,8 @@ impl Odyssey {
         product: &str,
         irq: Arc<dyn InterruptController>,
         mem: Arc<dyn BusDevice>,
+        heartbeat: Arc<std::sync::atomic::AtomicU64>,
+        fasttick: Arc<std::sync::atomic::AtomicU64>,
     ) -> Result<Arc<Self>, String> {
         let mut s = Board::new(product, widget as u32)?;
         s.guest = Some(mem);
@@ -148,7 +150,7 @@ impl Odyssey {
             small: widget_small_base(widget),
             large: widget_large_base(widget),
             state: BoardLocks::new(s),
-            display: Arc::new(Display::new()),
+            display: Arc::new(Display::new(heartbeat, fasttick)),
             running: Arc::new(AtomicBool::new(false)),
             thread: Mutex::new(None),
         }))

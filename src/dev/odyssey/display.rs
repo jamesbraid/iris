@@ -3,7 +3,8 @@
 
 use super::*;
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 
@@ -26,6 +27,11 @@ pub struct Display {
     idle: AtomicU32,
     /// The frame size last copied to the screen; (0, 0) before the first.
     shown: Mutex<(usize, usize)>,
+    /// The machine's status-bar word: front-panel LEDs and the disk and
+    /// network activity bits other devices set.
+    heartbeat: Arc<AtomicU64>,
+    /// The CPU's Compare matches, for the status bar's timer rate.
+    fasttick: Arc<AtomicU64>,
 }
 
 struct Local {
@@ -35,8 +41,11 @@ struct Local {
     size: (usize, usize),
 }
 
+/// The status-bar bits that stay lit until changed: the front-panel LEDs.
+const PERSISTENT: u64 = crate::dev::ng1::rex3::Rex3::HB_LED_RED | crate::dev::ng1::rex3::Rex3::HB_LED_GREEN;
+
 impl Display {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(heartbeat: Arc<AtomicU64>, fasttick: Arc<AtomicU64>) -> Self {
         Self {
             renderer: Mutex::new(None),
             screen: Mutex::new(Rex3Screen::new()),
@@ -46,6 +55,8 @@ impl Display {
             local: Mutex::new(None),
             idle: AtomicU32::new(0),
             shown: Mutex::new((0, 0)),
+            heartbeat,
+            fasttick,
         }
     }
 
@@ -106,12 +117,13 @@ impl Display {
             let stats = crate::disp::BarStats {
                 now: std::time::Instant::now(),
                 cycles: self.cycles.lock().get(),
-                fasttick: 0,
+                fasttick: self.fasttick.load(Ordering::Relaxed),
                 decoded_delta: 0,
                 l1i_hits: 0,
                 l1i_fetches: 0,
                 uncached: 0,
-                hb: 0,
+                // Activity bits clear once shown; the LEDs persist, as on IMPACT.
+                hb: self.heartbeat.fetch_and(PERSISTENT, Ordering::Relaxed),
                 count_hz: 0,
                 gfifo_pending: 0,
             };
