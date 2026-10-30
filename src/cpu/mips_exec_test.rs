@@ -6475,4 +6475,20 @@ mod tests {
         check::<crate::cpu::mips_cache_shadow::R5000ShadowCache>(false);
         check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(true);
     }
+
+    /// The O2's no-ECC alias of RAM at 0x8000_0000 is matched on the address the
+    /// board decodes (32 bits), so a PTE software bit above the PFN cannot make
+    /// a mapped page miss the alias window.
+    #[test]
+    fn phys_alias_is_matched_after_the_physical_mask() {
+        on_big_stack(|| {
+            type C = crate::cpu::mips_cache_shadow::R5000ShadowCache;
+            const VA: u64 = 0x4000_0000;
+            // PA 0x1_8000_0000: bit 32 is above what the board decodes.
+            let mut exec = map_page::<C>(Arc::new(MockMemory::new()), VA, 0x1_8000_0000);
+            exec.phys_mask = u32::MAX as u64;
+            exec.phys_alias = Some((0x8000_0000, 0x1000_0000, 0));
+            assert_eq!(exec.debug_translate(VA).phys, 0);
+        });
+    }
 }
