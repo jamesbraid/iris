@@ -129,9 +129,11 @@ fn the_display_waits_out_a_raster_slice_in_flight() {
     red_triangle(&mut h.board.lock(), &st);
     eventually("the raster slice did not start", || h.raster.in_slice());
     let s = h.board.lock();
-    let planes = h.raster.planes();
+    let mut planes = h.raster.planes();
     assert_ne!(pixel(&s, 0, 10, 10), 0, "the frame saw the whole draw");
-    assert!(h.raster.take_drawn(), "and the display hears the raster unit drew");
+    let mut rows = Vec::new();
+    planes.take_rows(0, |y| rows.push(y));
+    assert!(rows.contains(&10), "and the display hears which rows the raster unit drew: {rows:?}");
     drop(planes);
     drop(s);
     h.raster.stop();
@@ -277,4 +279,164 @@ fn a_waiting_bus_read_is_busy_until_the_raster_unit_has_drawn() {
     eventually("the read stayed busy", || h.bus_read(ODSY_BUZZ_1, 4).is_some());
     assert_ne!(pixel(&h.board.lock(), 0, 10, 10), 0, "drawn before the read answered");
     h.work_stop();
+}
+
+/// The rows the display would resolve after the draws so far, for a board
+/// whose windows show the buffers `displayed` names.
+fn drawn_rows(h: &BoardLocks, displayed: u32) -> Vec<u32> {
+    let mut rows = Vec::new();
+    h.raster.planes().take_rows(displayed, |y| rows.push(y));
+    rows
+}
+
+/// Which rows of colour buffer b differ between two snapshots.
+fn changed_rows(s: &Board, b: u32, before: &[u32]) -> Vec<u32> {
+    let w = 64;
+    (0..SGI_ODYSSEY_HEIGHT).filter(|&y| (0..w).any(|x| pixel(s, b, x, y as i32) != before[(y * w as u32 + x as u32) as usize])).collect()
+}
+
+/// The pixels of the first 64 columns of colour buffer b.
+fn snapshot(s: &Board, b: u32) -> Vec<u32> {
+    (0..SGI_ODYSSEY_HEIGHT as i32).flat_map(|y| (0..64).map(move |x| (y, x))).map(|(y, x)| pixel(s, b, x, y)).collect()
+}
+
+/// A small triangle at window row `y`, in the first 64 columns.
+fn small_triangle(s: &mut Board, st: &GlDrawState, y: f32, colour: [f32; 4]) {
+    let v = vertices(&[(2.0, y), (60.0, y + 3.0), (4.0, y + 40.0)], colour);
+    let stipple = [0u32; 32];
+    let mut d = GlDraw::new(SGI_GL_TRIANGLES, 3, &v, st, &stipple);
+    assert_eq!(s.gl_draw(&mut d), SGI_GL_DRAW_OK);
+}
+
+/// What the display resolves again covers every row of the colour buffer
+/// the windows show that a draw changed, and a draw into a buffer no window
+/// shows asks for none: its window shows it only after a swap, which
+/// repaints the frame.
+#[test]
+fn a_draw_asks_the_display_for_the_rows_it_changed_in_a_buffer_a_window_shows() {
+    for (target, displayed, shown) in [(0, 0, true), (1, 0, false), (1, 0xffff_ffff, true), (0, 0xffff_ffff, false), (1, 1, true)] {
+        let (s, mut st) = gl_board();
+        let h = BoardLocks::new(s);
+        st.drawable.front = target;
+        st.drawable.back = target;
+        let mut s = h.board.lock();
+        let before = snapshot(&s, target);
+
+        small_triangle(&mut s, &st, 100.0, RED);
+        small_triangle(&mut s, &st, 400.0, RED);
+        let changed = changed_rows(&s, target, &before);
+        let rows = drawn_rows(&h, displayed);
+
+        assert!(changed.len() > 40, "the triangles drew");
+        if shown {
+            assert!(changed.iter().all(|y| rows.contains(y)), "target {target} displayed {displayed:#x}: rows {changed:?} changed, {rows:?} asked for");
+            assert!(rows.len() < 200, "and not the whole frame: {}", rows.len());
+        } else {
+            assert!(rows.is_empty(), "target {target} displayed {displayed:#x}: no window shows it, yet {rows:?}");
+        }
+        assert!(drawn_rows(&h, displayed).is_empty(), "the rows are handed over once");
+    }
+}
+
+/// A draw under a window-id test reaches only the windows that test names:
+/// into the buffer the window it names does not show, it asks for nothing,
+/// even while other windows show that buffer.
+#[test]
+fn a_draw_under_an_id_test_asks_only_for_the_window_it_reaches() {
+    let (mut s, mut st) = gl_board();
+    s.did.fill(3 << ODSY_DID_MAIN_SHIFT);
+    s.id_compare = ODSY_ID_COMPARE_ENABLE | 0xf8 << ODSY_ID_COMPARE_MASK_SHIFT | 3 << ODSY_DID_MAIN_SHIFT;
+    st.drawable.front = 1;
+    st.drawable.back = 1;
+    let h = BoardLocks::new(s);
+    let mut s = h.board.lock();
+
+    small_triangle(&mut s, &st, 100.0, RED);
+    assert_ne!(pixel(&s, 1, 10, 110), 0, "the draw passed the id test");
+    assert!(drawn_rows(&h, !(1 << 3)).is_empty(), "window 3 shows buffer 0 and the others show buffer 1");
+    small_triangle(&mut s, &st, 100.0, RED);
+    assert!(drawn_rows(&h, 1 << 3).contains(&110), "window 3 shows buffer 1");
+}
+
+/// A clear's rows reach the display the same way.
+#[test]
+fn a_clear_asks_the_display_for_its_rows() {
+    let (s, _) = gl_board();
+    let h = BoardLocks::new(s);
+    let mut s = h.board.lock();
+    let mut op = RasterOp {
+        kind: SGI_RASTER_CLEAR,
+        ntargets: 1,
+        x0: 0,
+        y0: 200,
+        x1: 63,
+        y1: 299,
+        clear_buffers: SGI_GL_COLOR_BUFFER_BIT,
+        clear_rgba: [0.2, 0.3, 0.4, 1.0],
+        clear_colour_mask: SGI_GL_COLOUR_MASK_ALL,
+        ..Default::default()
+    };
+    op.clip.n = 1;
+    op.clip.r[0] = ClipRect { x0: 0, y0: 0, x1: 1279, y1: 1023 };
+
+    s.gl_raster(&op);
+    h.raster.wait_idle();
+    let rows = drawn_rows(&h, 0);
+    assert_eq!(rows, (200..300).collect::<Vec<_>>());
+}
+
+/// The pixels a one-pixel line lights under line rule `rule`, in the
+/// rectangle of the board's first 80 columns and 64 rows, as (x, y) pairs.
+fn line_pixels(rule: LineRule, a: (f32, f32), b: (f32, f32)) -> Vec<(i32, i32)> {
+    let mut bench = Bench::empty();
+    bench.board.gl_write_mask |= ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT;
+    bench.st.shade_model = SGI_GL_FLAT;
+    bench.st.dither = 0;
+    bench.rules.line_rule = rule as u8;
+    bench.mode = SGI_GL_LINES;
+    bench.prims = vec![vertices(&[a, b], RED)];
+    bench.run();
+    (0..64).flat_map(|y| (0..80).map(move |x| (x, y))).filter(|&(x, y)| pixel(&bench.board, 0, x, y) != 0).collect()
+}
+
+/// A one-pixel line takes the centre-sampled rule: a pixel per major-axis
+/// column whose centre lies between the ends, the end not included. A line
+/// that ends past a column centre but inside that pixel's diamond lights the
+/// column, where the diamond-exit rule leaves it; a crossing exactly on a
+/// pixel edge goes to the lower pixel whichever way the line slopes, where
+/// the diamond rule's perturbation follows the slope. Reversed, the end
+/// inside a diamond is the start, and both rules agree. A vertical line
+/// exactly on a column edge takes the column to its left under both. Cases
+/// and expectations from the QEMU sgi-origami branch's line tests
+/// (ab9b3f98f25f, c5417243927d).
+#[test]
+fn a_line_takes_the_centre_sampled_rule() {
+    let cases: [((f32, f32), (f32, f32), bool, Vec<(i32, i32)>); 4] = [
+        ((1.0, 3.5), (5.75, 3.5), true, vec![(1, 3), (2, 3), (3, 3), (4, 3), (5, 3)]),
+        ((5.75, 3.5), (1.0, 3.5), false, vec![(1, 3), (2, 3), (3, 3), (4, 3), (5, 3)]),
+        ((1.5, 2.0), (5.5, 4.0), true, vec![(1, 1), (2, 2), (3, 2), (4, 3)]),
+        ((4.0, 1.0), (4.0, 5.0), false, vec![(3, 1), (3, 2), (3, 3), (3, 4)]),
+    ];
+
+    for (a, b, diamond_differs, want) in cases {
+        let centre = line_pixels(SGI_LINE_CENTRE_SAMPLED, a, b);
+        let diamond = line_pixels(SGI_LINE_COVERAGE_DOUBLE, a, b);
+
+        assert_eq!(centre, want, "centre-sampled {a:?} to {b:?}");
+        assert_eq!(diamond != want, diamond_differs, "diamond-exit {a:?} to {b:?}: {diamond:?}");
+    }
+}
+
+/// Centre-sampled lines at the board's line-test geometry: a horizontal
+/// line from x 60.0 to 70.75 lights columns 60 to 70, eleven pixels, the one
+/// past the last column centre included; a line rising at slope one half
+/// crosses a row edge exactly at every other column centre, and each of those
+/// columns takes the lower row, sharing it with the column after.
+#[test]
+fn centre_sampled_lines_light_the_pixels_the_rule_names() {
+    let horizontal = line_pixels(SGI_LINE_CENTRE_SAMPLED, (60.0, 10.5), (70.75, 10.5));
+    assert_eq!(horizontal, (60..=70).map(|x| (x, 10)).collect::<Vec<_>>());
+
+    let rising = line_pixels(SGI_LINE_CENTRE_SAMPLED, (60.0, 9.75), (68.0, 13.75));
+    assert_eq!(rising, [(60, 9), (61, 10), (62, 10), (63, 11), (64, 11), (65, 12), (66, 12), (67, 13)]);
 }
