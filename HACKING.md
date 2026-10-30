@@ -16,12 +16,14 @@ Other documents:
 
 ## 1. What IRIS is
 
-IRIS emulates five SGI workstations: the Indy (IP24), the Indigo2 (IP22), the
-Indigo2 IMPACT (IP28), the O2 (IP32) and the Octane (IP30). The CPU is an
-R4400, R5000 or R10000, chosen at runtime (the Octane takes the R10000 only).
-Graphics is Newport (REX3), GR2 (XZ/Extreme) or IMPACT on the Indy and
-Indigo2, GBE on the O2 and Solid IMPACT on the Octane. It boots the real PROMs
-and IRIX 5.3 and 6.5 to a desktop with networking.
+IRIS emulates the Indy (IP24), Indigo2 (IP22), Indigo2 IMPACT (IP28), O2
+(IP32), Octane (IP30) and Fuel (IP34 board, IP35 software platform). The CPU
+models depend on the machine. The Octane uses an R10000. Fuel uses a fixed
+500 MHz R14000. Graphics is Newport (REX3), GR2 (XZ/Extreme) or IMPACT on
+the Indy and Indigo2, GBE on the O2, and Solid IMPACT on the Octane. Fuel has
+no graphics board and runs headless on its serial console. The graphical
+machines boot their real PROMs and IRIX 5.3 or 6.5 to a desktop with
+networking.
 
 It is **not cycle-accurate**, anywhere. IRIX is interrupt-driven and does not
 care how many cycles an instruction takes, so IRIS models behaviour
@@ -82,14 +84,14 @@ image. A CD-ROM's node is a `ChangerNode`: the queue of discs and the open
 active one, with the `Removable` trait (present, changed, eject, load)
 separate from `BlockNode` so that removable media which is not a block device,
 a tape, can use it too. The WD33C93A (Indy, Indigo2), the Adaptec
-7880 (O2) and the ISP1040 (Octane) each make an empty bus of their own kind
-(`new_bus`); the machine fills it from config and gives it to the controller's
-constructor, so a controller exists with its targets and keeps only its
-registers and DMA. `src/scsi_monitor.rs` implements the monitor's `scsi` and `cow`
+7880 (O2) and ISP1040 (Octane) each make an empty bus of their own kind
+(`new_bus`). Fuel uses an ISP12160 with two SCSI buses behind one PCI
+function. The machine fills each bus from config and gives it to the controller
+constructor, so the controller keeps its registers and DMA. `src/scsi_monitor.rs` implements the monitor's `scsi` and `cow`
 subcommands and the run-time disc changes once, over the bus a controller hands
-out through `ScsiTargets::scsi_bus`; chip-specific subcommands (`regs`; the
-WD's `wdt`, `defer`, `debug`) stay with the chip, and `DiscChanger` is
-implemented once for every `ScsiTargets`. Configuration is shared the same
+out through `ScsiTargets::scsi_bus`. Chip-specific subcommands stay with the
+chip, including `regs` and the WD's `wdt`, `defer` and `debug`. `DiscChanger`
+is implemented once for every `ScsiTargets`. Configuration is shared the same
 way: `scsi::attach_from_config` walks the `[scsi.N]` tables for every machine,
 where the key is a slot (controller × 16 + id, see `config::scsi_slot`), and
 the machine supplies only a route from controller number to bus.
@@ -97,8 +99,9 @@ the machine supplies only a route from controller number to bus.
 `ScsiTarget::bus_reset` defaults to no action. Disk targets record reset as
 unit attention. Only the ISP12160 calls it; the other controllers keep
 their earlier behaviour of not reporting resets to targets.
-The ISP12160 releases its controller state lock before walking either bus.
-Target callbacks run under that bus lock and must not reacquire it.
+The ISP12160 defers target resets and releases its controller state lock
+before walking the bus. It calls targets while holding the bus lock, so a
+target callback must not take that lock again.
 
 Flash command engines share `FlashBacking` file storage while retaining
 their own command state.
@@ -288,9 +291,12 @@ Every device that has real work to do runs on its own thread:
 | `VNC-Grab`, `VNC-Pointer`, `VNC-Client`/`VNC-Read` | with `--vnc`: frame diffing, pointer steering, one pair per viewer |
 | `machine-events` | power-off and reset requests from devices |
 | `ISP1040-0`, `ISP1040-1` | Octane SCSI request rings and disk transfers |
-| `IOC3-RX-A`, `IOC3-RX-B`, `IOC3-NVRAM` | Octane serial input per port; the DS1685 NVRAM file writer (IOC3's other deadlines are `hptimer` one-shots) |
+| `ISP12160-0` | Fuel SCSI request ring for both ISP12160 channels |
+| `IOC3-RX-A`, `IOC3-RX-B`, `IOC3-NVRAM` | Octane and Fuel IOC3 serial input and NVRAM writer (IOC3's other deadlines are `hptimer` one-shots) |
+| `l1-serial` | Fuel L1 console UART worker. Its other serial ports are IOC3 A and B |
 | `ip30-eth-rx`, `ip30-eth-net` | Octane ethernet receive pump; the network backend |
 | `odyssey-work`, `odyssey-display` | VPro: command-FIFO decoding and drawing in slices under the board lock (the processor's stores only queue); the retrace and window present at 60 Hz |
+| `ioc3-eth-rx`, `ioc3-eth-net` | Fuel IOC3 Ethernet receive pump and network backend |
 
 Threads that have nothing to do park instead of spinning: the graphics
 consumers when their FIFO is empty, and the CPU thread in `idle-pause` builds
@@ -385,7 +391,8 @@ consumer thread never takes `rec`.
   attribute in bits 63:62, and a mapped uncached access carries it to the bus
   as address bits 58:57, as an xkphys access does. A machine whose bus decodes
   fewer physical bits (`phys_mask`) folds the attribute away; other models drop
-  the bits at EntryLo.
+  the bits at EntryLo. The Octane takes an R10000, R12000 or
+  R14000 and the O2 an R5000, R10000 or R12000 (`[machine] cpu`).
 - With `opcodefusion` (implied by `lightning`), the interpreter executes
   common pairs (branch + NOP, LUI + ORI/ADDIU, address + load/store) as one
   dispatch.
@@ -580,6 +587,13 @@ introspection commands are in [debug.md](debug.md#jit-v2).
   Crossbow and the Bridge with IOC3 and two ISP1040 SCSI controllers, an
   R10000, and IMPACT graphics (see the [Octane guide](docs/octane-ip30.md)
   for the boards).
+- **IP34 board, IP35 software platform (Fuel)**: one 500 MHz R14000, 512 MiB
+  in two 256 MiB banks, Bedrock, two XBridge heads, IOC3 and a two-channel
+  ISP12160. It runs headless on the L1 or IOC3 serial console. The IOC3 uses
+  the shared `net::Link` for NAT or PCAP. The writable Bedrock flash and
+  serial-flash devices share `FlashBacking` storage, with separate command
+  handling. V12/Odyssey graphics and snapshots are unsupported. See the
+  [Fuel guide](docs/fuel-ip34.md).
 
 The Indy and Indigo2 profiles each have an embedded PROM fallback;
 `src/platform.rs` and `src/machine.rs` wire their differences, and
