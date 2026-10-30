@@ -470,6 +470,18 @@ where they differed:
 - Memory past 4 GB is as fast as the rest: such a machine gets a 16 GB direct
   window, and the JIT compiles code anywhere in it.
 - A store-conditional on memory outside the window is now atomic with two CPUs.
+
+### SGI Fuel (IP34 board, IP35 software platform)
+
+- **The Fuel takes a VPro board**: `[graphics] board = "v12"` or `"v10"`
+  fits the Octane's VPro model at crossbar widget 13. IRIX 6.5.30 with the
+  VPro driver brings the X login screen up on it.
+
+- Added a headless Fuel profile with the 500 MHz R14000, 512 MiB RAM,
+  Bedrock, dual-head XBridge, IOC3 networking and two-channel ISP12160 SCSI.
+  The normal interpreter boot reaches the IRIX 6.5.30 root shell with PROM
+  6.210. See the [Fuel guide](docs/fuel-ip34.md).
+
 ### PCI configuration
 
 - A PCI function can describe its own writable header fields and
