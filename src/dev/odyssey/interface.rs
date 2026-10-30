@@ -471,9 +471,6 @@ pub const SGI_XIO_PACKET_ADDRESS_BITS: u32 = 48;
 
 pub const SGI_XIO_WIDGETS: u32 = 16;
 
-/// An interrupt packet's set bit, above the vector byte.
-pub const SGI_XIO_INTERRUPT_SET: u64 = 1 << 8;
-
 /// The fabric address of a widget/address pair: the widget in bits 51:48.
 pub fn sgi_xio_compose(who: &str, widget: u32, address: u64, packet: &mut u64) -> bool {
     if widget >= SGI_XIO_WIDGETS || address >> SGI_XIO_PACKET_ADDRESS_BITS != 0 {

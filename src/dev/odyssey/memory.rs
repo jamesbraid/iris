@@ -30,7 +30,6 @@ pub const SGI_PLANE_RAW: PlaneFormat = 9; // 4 bytes: a word the family interpre
 pub type Packing = u32;
 pub const SGI_PACK_LE_RED_LOW: Packing = 0;
 pub const SGI_PACK_LE_RED_HIGH: Packing = 1;
-pub const SGI_PACK_BE_RED_LOW: Packing = 2;
 pub const SGI_PACK_BE_RED_HIGH: Packing = 3;
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -100,7 +99,6 @@ pub const SGI_LOGIC_OR_REVERSE: u32 = 11;
 pub const SGI_LOGIC_COPY_INVERTED: u32 = 12;
 pub const SGI_LOGIC_OR_INVERTED: u32 = 13;
 pub const SGI_LOGIC_NAND: u32 = 14;
-pub const SGI_LOGIC_SET: u32 = 15;
 
 impl BoardMemory {
     /// A zeroed device-backed memory of size bytes, at most 4 GiB - 1.
@@ -111,24 +109,6 @@ impl BoardMemory {
         self.size = size;
         self.bytes_len = size as u32;
         self.bytes = vec![0u8; size as usize];
-    }
-    /// A page-backed memory of npages unresolved pages of page_size bytes.
-    pub fn init_pages(&mut self, npages: u32, page_size: u32) {
-        assert!(npages != 0 && (page_size as u64).is_power_of_two());
-        *self = BoardMemory::default();
-        self.size = npages as u64 * page_size as u64;
-        self.npages = npages;
-        self.page_size = page_size;
-        self.pages = vec![BoardPage::default(); npages as usize];
-    }
-    /// Page i is guest address guest, reached at host (null: unresolved).
-    pub fn set_page(&mut self, i: u32, guest: u64, host: P<u8>) {
-        assert!(!self.pages.is_empty() && i < self.npages);
-        self.pages[i as usize].guest = guest;
-        self.pages[i as usize].host = host;
-    }
-    pub fn cleanup(&mut self) {
-        *self = BoardMemory::default();
     }
 }
 
@@ -287,41 +267,6 @@ impl BoardMemory {
         p.put(bpp, word, &mut bytes);
         self.import(at, &bytes[..bpp as usize]);
     }
-    /// Store op(src, dst) at (x, y) through the write mask: bits set in mask
-    /// take the result, the others keep the plane's word.
-    pub fn plane_merge(&mut self, p: &Plane, x: i32, y: i32, src: u32, op: u8, mask: u32) {
-        let dst = self.plane_load(p, x, y);
-        let val = logic_op(op, src, dst);
-
-        self.plane_store(p, x, y, (dst & !mask) | (val & mask));
-    }
-}
-
-/// A run of pixels along one plane row, reached directly. `host` points
-/// into the board memory (or a resolved page) and is valid only until the
-/// memory is next changed.
-#[derive(Clone, Copy, Default)]
-pub struct PlaneRun {
-    pub host: P<u8>,
-    pub bpp: u32,
-    pub le: bool,
-}
-
-impl BoardMemory {
-    /// n pixels from (x, y) onwards: fills `run` and returns true when every
-    /// pixel is inside the plane and one contiguous host range.
-    pub fn plane_run(&self, p: &Plane, x: i32, y: i32, n: i32, run: &mut PlaneRun) -> bool {
-        if n <= 0 || !p.contains(x, y) || !p.contains(x + n - 1, y) {
-            return false;
-        }
-        let bpp = plane_bpp(p.format);
-        let host = self.host(p.offset(x, y, bpp), n as u64 * bpp as u64);
-        if host.is_null() {
-            return false;
-        }
-        *run = PlaneRun { host, bpp, le: p.is_le() };
-        true
-    }
 }
 
 /// One plane word of `bpp` bytes, little-endian when `le` is set.
@@ -364,24 +309,6 @@ pub fn plane_word_store(bytes: &mut [u8], bpp: u32, le: bool, word: u32) {
                 bytes[..4].copy_from_slice(&(word as u32).to_be_bytes());
             }
         }
-    }
-}
-
-impl PlaneRun {
-    #[inline]
-    pub fn load(&self, i: i32) -> u32 {
-        let b = unsafe {
-            std::slice::from_raw_parts(self.host.0.add(i as usize * self.bpp as usize), self.bpp as usize)
-        };
-        plane_word_load(b, self.bpp, self.le)
-    }
-
-    #[inline]
-    pub fn store(&self, i: i32, word: u32) {
-        let b = unsafe {
-            std::slice::from_raw_parts_mut(self.host.0.add(i as usize * self.bpp as usize), self.bpp as usize)
-        };
-        plane_word_store(b, self.bpp, self.le, word)
     }
 }
 

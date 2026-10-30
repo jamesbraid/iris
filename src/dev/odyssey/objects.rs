@@ -27,17 +27,6 @@ impl Board {
         }
     }
 
-    /// Rebuild obj_index from obj_base, after a load. Where a loaded table names
-    /// one base twice, the lower index wins, as a search would find it.
-    pub fn object_index_rebuild(&mut self) {
-        self.obj_index.clear();
-        for i in (0..self.obj_count.min(SGI_ODYSSEY_OBJECTS) as usize).rev() {
-            if self.obj_base[i] != 0 {
-                self.obj_index.insert(self.obj_base[i], i as u32 + 1);
-            }
-        }
-    }
-
     pub fn object_word_valid(&self, word: u64) -> bool {
         word < ODSY_OBJ_POOL_WORDS as u64 && (self.obj_valid[(word >> 3) as usize] & (1u8 << (word & 7))) != 0
     }

@@ -21,15 +21,12 @@ pub const SGI_ROUND_HALF_EVEN: Rounding = 2;
 pub const SGI_ROUND_HALF_AWAY: Rounding = 3;
 
 pub type Arith = u32;
-pub const SGI_ARITH_FIXED16: Arith = 0;
 pub const SGI_ARITH_DOUBLE: Arith = 1;
 
 pub type TieRule = u32;
-pub const SGI_TIE_TOP_LEFT: TieRule = 0;
 pub const SGI_TIE_TOP_LEFT_BOTTOM_ORIGIN: TieRule = 1;
 
 pub type LineRule = u32;
-pub const SGI_LINE_BRESENHAM_DIAMOND: LineRule = 0;
 pub const SGI_LINE_COVERAGE_DOUBLE: LineRule = 1;
 
 pub type Dither = u32;
@@ -38,10 +35,8 @@ pub const SGI_DITHER_BAYER4_TOP_ROWS: Dither = 1;
 
 pub type DitherAnchor = u32;
 pub const SGI_DITHER_SCREEN: DitherAnchor = 0;
-pub const SGI_DITHER_WINDOW: DitherAnchor = 1;
 
 pub type SmoothRule = u32;
-pub const SGI_SMOOTH_AREA: SmoothRule = 0;
 pub const SGI_SMOOTH_TWO_PIXEL_FILTER: SmoothRule = 1;
 
 // Rounding: how a window coordinate or depth is rounded to its grid
@@ -226,47 +221,16 @@ pub struct RasterColour {
 }
 
 pub type RenderResult = u32;
-pub const SGI_RENDER_OK: RenderResult = 0;
-pub const SGI_RENDER_OOM: RenderResult = 1;
-pub const SGI_RENDER_UNSUPPORTED: RenderResult = 2;
-pub const SGI_RENDER_RESOURCE_ERROR: RenderResult = 3;
-pub const SGI_RENDER_HOST_ERROR: RenderResult = 4;
 
 pub type RenderRole = u32;
-pub const SGI_RENDER_COLOUR: RenderRole = 0;
-pub const SGI_RENDER_INDEX: RenderRole = 1;
-pub const SGI_RENDER_DEPTH: RenderRole = 2;
-pub const SGI_RENDER_STENCIL: RenderRole = 3;
-pub const SGI_RENDER_OVERLAY: RenderRole = 4;
-pub const SGI_RENDER_WID: RenderRole = 5;
-pub const SGI_RENDER_TAG: RenderRole = 6;
-pub const SGI_RENDER_ACCUM: RenderRole = 7;
-pub const SGI_RENDER_TEXTURE: RenderRole = 8;
 
 pub type RenderBuffer = u32;
-pub const SGI_RENDER_BUFFER_NONE: RenderBuffer = 0;
-pub const SGI_RENDER_FRONT: RenderBuffer = 1;
-pub const SGI_RENDER_BACK: RenderBuffer = 2;
-pub const SGI_RENDER_AUX: RenderBuffer = 3;
 
 pub type RenderEye = u32;
-pub const SGI_RENDER_MONO: RenderEye = 0;
-pub const SGI_RENDER_LEFT: RenderEye = 1;
-pub const SGI_RENDER_RIGHT: RenderEye = 2;
 
 pub type RenderNumeric = u32;
-pub const SGI_RENDER_UINT: RenderNumeric = 0;
-pub const SGI_RENDER_SINT: RenderNumeric = 1;
-pub const SGI_RENDER_UNORM: RenderNumeric = 2;
-pub const SGI_RENDER_SNORM: RenderNumeric = 3;
-pub const SGI_RENDER_FLOAT: RenderNumeric = 4;
 
 pub type RenderChannel = u32;
-pub const SGI_RENDER_R: RenderChannel = 0;
-pub const SGI_RENDER_G: RenderChannel = 1;
-pub const SGI_RENDER_B: RenderChannel = 2;
-pub const SGI_RENDER_A: RenderChannel = 3;
-pub const SGI_RENDER_SCALAR: RenderChannel = 4;
 
 #[derive(Clone, Copy, Default)]
 pub struct RenderComponent {
@@ -384,69 +348,6 @@ pub type RasterTexturePath = u32;
 pub const SGI_RASTER_TEXTURE_SPANS: RasterTexturePath = 0;
 pub const SGI_RASTER_TEXTURE_FIXED: RasterTexturePath = 1;
 pub const SGI_RASTER_TEXTURE_DOUBLE: RasterTexturePath = 2;
-
-/// Why a checked draw or raster operation was refused (host renderer
-/// feature rows; the Odyssey model only names and counts them).
-pub type RenderRefusal = u32;
-pub const SGI_RENDER_REFUSAL_NONE: RenderRefusal = 0;
-pub const SGI_RENDER_REFUSAL_RULES: RenderRefusal = 1;
-pub const SGI_RENDER_REFUSAL_DITHER: RenderRefusal = 2;
-pub const SGI_RENDER_REFUSAL_PRIMITIVE: RenderRefusal = 3;
-pub const SGI_RENDER_REFUSAL_SMOOTHING: RenderRefusal = 4;
-pub const SGI_RENDER_REFUSAL_COLOUR_INDEX: RenderRefusal = 5;
-pub const SGI_RENDER_REFUSAL_INDEX_CLIPPED: RenderRefusal = 6;
-pub const SGI_RENDER_REFUSAL_BUFFERS: RenderRefusal = 7;
-pub const SGI_RENDER_REFUSAL_FRAGMENT_TESTS: RenderRefusal = 8;
-pub const SGI_RENDER_REFUSAL_FOG: RenderRefusal = 9;
-pub const SGI_RENDER_REFUSAL_FACING: RenderRefusal = 10;
-pub const SGI_RENDER_REFUSAL_CLIP_PLANES: RenderRefusal = 11;
-pub const SGI_RENDER_REFUSAL_LOGIC_OP: RenderRefusal = 12;
-pub const SGI_RENDER_REFUSAL_POLYGON_OFFSET: RenderRefusal = 13;
-pub const SGI_RENDER_REFUSAL_WINDOW: RenderRefusal = 14;
-pub const SGI_RENDER_REFUSAL_GEOMETRY: RenderRefusal = 15;
-pub const SGI_RENDER_REFUSAL_LINE_SHAPE: RenderRefusal = 16;
-pub const SGI_RENDER_REFUSAL_RESOURCE: RenderRefusal = 17;
-pub const SGI_RENDER_REFUSAL_STORE_WIDTH: RenderRefusal = 18;
-pub const SGI_RENDER_REFUSAL_BLEND: RenderRefusal = 19;
-pub const SGI_RENDER_REFUSAL_BLEND_OVERLAP: RenderRefusal = 20;
-pub const SGI_RENDER_REFUSAL_TEXTURE: RenderRefusal = 21;
-pub const SGI_RENDER_REFUSAL_PROVIDER: RenderRefusal = 22;
-pub const SGI_RENDER_REFUSAL_RASTER_OP: RenderRefusal = 23;
-pub const SGI_RENDER_REFUSAL_MIXED_FRAME: RenderRefusal = 24;
-pub const SGI_RENDER_REFUSAL_HOST_VIEWPORT: RenderRefusal = 25;
-pub const SGI_RENDER_REFUSAL_HOST_POINT_SIZE: RenderRefusal = 26;
-pub const SGI_RENDER_REFUSAL_HOST_PROGRAM: RenderRefusal = 27;
-pub const SGI_RENDER_REFUSAL_HOST_PROBE: RenderRefusal = 28;
-pub const SGI_RENDER_REFUSAL_HOST_STAGING: RenderRefusal = 29;
-pub const SGI_RENDER_REFUSAL_HOST_DRIVER: RenderRefusal = 30;
-pub const SGI_RENDER_REFUSAL_SNAPSHOT: RenderRefusal = 31;
-pub const SGI_RENDER_REFUSAL_PRECISION: RenderRefusal = 32;
-pub const SGI_RENDER_REFUSAL__MAX: RenderRefusal = 33;
-
-/// A stable lowercase name for counters and traces, such as "fog".
-pub fn render_refusal_name(reason: RenderRefusal) -> &'static str {
-    // hw/display/sgi/renderer.c, sgi_render_refusals[].name.
-    const NAMES: [&str; SGI_RENDER_REFUSAL__MAX as usize] = [
-        "none", "rules", "dither", "primitive", "smoothing", "colour-index", "index-clipped", "buffers", "fragment-tests", "fog", "facing", "clip-planes", "logic-op", "polygon-offset", "window", "geometry", "line-shape", "resource", "store-width", "blend", "blend-overlap", "texture", "provider", "raster-op", "mixed-frame", "host-viewport", "host-point-size", "host-program", "host-probe", "host-staging", "host-driver", "snapshot", "precision"
-    ];
-    NAMES.get(reason as usize).copied().unwrap_or("unknown")
-}
-
-/// A prepared texture sampler (private to rasterizer.c). Borrowed state and image stay immutable until it is
-/// dropped.
-#[derive(Clone, Default)]
-pub struct RasterTexture {
-    pub target: RasterTarget,
-    pub draw: SoftDraw,
-    pub reports: u32,
-}
-
-pub type RasterTextureResult = u32;
-pub const SGI_RASTER_TEXTURE_READY: RasterTextureResult = 0;
-pub const SGI_RASTER_TEXTURE_DISABLED: RasterTextureResult = 1;
-pub const SGI_RASTER_TEXTURE_INCOMPLETE: RasterTextureResult = 2;
-pub const SGI_RASTER_TEXTURE_UNSUPPORTED: RasterTextureResult = 3;
-pub const SGI_RASTER_TEXTURE_OOM: RasterTextureResult = 4;
 
 // ---------------------------------------------------------------------
 // Ported from hw/display/sgi/rasterizer.c lines 1-3145 (the fixed-point
@@ -1219,13 +1120,6 @@ impl RasterRules {
         }
     }
 
-    pub fn blend_rgb(&self, st: &GlDrawState, src: u32, alpha: f64, dst: u32) -> u32 {
-        let mut out = [0.0f64; 3];
-
-        let alpha = self.alpha(alpha) as f64 / self.alpha_max() as f64;
-        self.soft_blend_rgb(st, src, alpha, dst, &mut out);
-        self.rgb(&out)
-    }
 }
 
 impl SoftDraw {
@@ -2681,107 +2575,6 @@ impl SoftDraw {
         true
     }
 
-    pub fn raster_texture_check_draw(&mut self, report: bool) -> RasterTextureResult {
-        let state = self.st.get();
-
-        if self.st.is_null() || !self.texture_setup(report) {
-            return SGI_RASTER_TEXTURE_UNSUPPORTED;
-        }
-        if !self.texture.is_null() {
-            return SGI_RASTER_TEXTURE_READY;
-        }
-        if state.index_bits != 0 || (state.texture_1d == 0 && state.texture_2d == 0 && state.texture_3d == 0) {
-            return SGI_RASTER_TEXTURE_DISABLED;
-        }
-        SGI_RASTER_TEXTURE_INCOMPLETE
-    }
-}
-
-impl GlDrawState {
-    pub fn texture_check(&self, texture: &GlTexImage) -> RasterTextureResult {
-        let mut target = RasterTarget::default();
-        let mut reports: u32 = 0;
-        target.texture = P::from_ref(texture);
-        let mut draw = SoftDraw::default();
-        draw.t = P::new(&mut target);
-        draw.st = P::from_ref(self);
-        draw.texture_reports = P::new(&mut reports);
-
-        draw.raster_texture_check_draw(false)
-    }
-
-    pub fn texture_prepare(&self, texture: &GlTexImage, out: &mut Option<Box<RasterTexture>>) -> RasterTextureResult {
-        let mut target = RasterTarget::default();
-        let mut reports: u32 = 0;
-        target.texture = P::from_ref(texture);
-        let mut draw = SoftDraw::default();
-        draw.t = P::new(&mut target);
-        draw.st = P::from_ref(self);
-        draw.texture_reports = P::new(&mut reports);
-
-        *out = None;
-        let result = draw.raster_texture_check_draw(true);
-        if result != SGI_RASTER_TEXTURE_READY {
-            return result;
-        }
-        let mut sampler = Box::new(RasterTexture {
-            target: RasterTarget::default(),
-            draw,
-            reports: 0,
-        });
-        sampler.target.texture = P::from_ref(texture);
-        sampler.draw.t = P::new(&mut sampler.target);
-        sampler.draw.texture_reports = P::new(&mut sampler.reports);
-        *out = Some(sampler);
-        SGI_RASTER_TEXTURE_READY
-    }
-}
-
-impl RasterTexture {
-    /// Stop the sampler's reports.
-    pub fn quiet(&mut self) {
-        self.reports = u32::MAX;
-    }
-
-    pub fn fragment(&mut self, coord: &[f64; 4], color: &mut [f64; 4]) -> bool {
-        let mut frag = SoftFrag::default();
-
-        frag.texcoord = *coord;
-        frag.rgba = *color;
-        if !self.draw.texture(&mut frag) {
-            return false;
-        }
-        *color = frag.rgba;
-        true
-    }
-}
-
-impl GlDrawState {
-    pub fn texture_apply_pixel(&self, texture: &GlTexImage, coord: &[f32; 4], color: &[f32; 4], out: &mut [f32; 4]) -> bool {
-        let mut reports: u32 = 0;
-        let mut target = RasterTarget::default();
-        target.texture = P::from_ref(texture);
-        let mut r = SoftDraw::default();
-        r.t = P::new(&mut target);
-        r.st = P::from_ref(self);
-        r.texture_reports = P::new(&mut reports);
-        let mut frag = SoftFrag::default();
-
-        if !r.texture_setup(true) || r.texture.is_null() {
-            return false;
-        }
-        for k in 0..4usize {
-            frag.texcoord[k] = coord[k] as f64;
-            frag.rgba[k] = color[k] as f64;
-        }
-        if !r.texture(&mut frag) {
-            return false;
-        }
-        for k in 0..4usize {
-            out[k] = frag.rgba[k] as f32;
-        }
-        true
-    }
 }
 
 impl SoftDraw {

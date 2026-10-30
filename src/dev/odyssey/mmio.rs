@@ -263,18 +263,6 @@ impl Board {
     }
 }
 
-impl Board {
-
-    pub fn fifo_page_read(&mut self, addr: u64, size: u32) -> u64 {
-        self.mmio_read(addr, size)
-    }
-
-    pub fn fifo_page_write(&mut self, addr: u64, value: u64, size: u32) {
-        self.mmio_write(addr, value, size)
-    }
-
-}
-
 /// The two locks a processor's access goes through.
 #[derive(Clone)]
 pub struct BoardLocks {

@@ -14,6 +14,8 @@
 
 use super::*;
 
+use crate::dev::gl::math::IDENT;
+
 /// A raster operation: pixel work on a head's planes that is not a GL
 /// primitive, queued beside draws in the order the head received it.
 pub type RasterKind = u32;
@@ -30,17 +32,13 @@ pub const SGI_GL_MAX_TARGETS: u32 = 4;
 
 // The channels glColorMask lets a draw or clear write (4.2.2).
 pub const SGI_GL_COLOUR_MASK_RED: u32 = 0x1;
-pub const SGI_GL_COLOUR_MASK_GREEN: u32 = 0x2;
-pub const SGI_GL_COLOUR_MASK_BLUE: u32 = 0x4;
 pub const SGI_GL_COLOUR_MASK_ALPHA: u32 = 0x8;
 pub const SGI_GL_COLOUR_MASK_ALL: u32 = 0xf;
 
 // The buffers a clear names, glClear's mask bits.
 pub const SGI_GL_DEPTH_BUFFER_BIT: u32 = 0x0100;
 pub const SGI_GL_STENCIL_BUFFER_BIT: u32 = 0x0400;
-pub const SGI_GL_ACCUM_BUFFER_BIT: u32 = 0x0200;
 pub const SGI_GL_COLOR_BUFFER_BIT: u32 = 0x4000;
-
 
 pub const SGI_GL_VERTEX_FLOATS: usize = 24;
 pub const SGI_GL_V_POSITION: usize = 0;
@@ -48,7 +46,6 @@ pub const SGI_GL_V_COLOR: usize = 4;
 pub const SGI_GL_V_NORMAL: usize = 8;
 pub const SGI_GL_V_MATERIAL: usize = 11;
 pub const SGI_GL_V_TEXCOORD: usize = 12;
-pub const SGI_GL_V_FOG: usize = 16;
 pub const SGI_GL_V_EDGE: usize = 17;
 pub const SGI_GL_V_INDEX: usize = 18;
 pub const SGI_GL_V_BACK_INDEX: usize = 19;
@@ -74,8 +71,6 @@ pub const SGI_GL_TEXTURE_3D: u32 = 0x806f;
 pub const SGI_GL_TEXTURE_ENV_MODE: u32 = 0x2200;
 // Texture coordinate generation (OpenGL 1.2.1, 2.10.4).
 pub const SGI_GL_S: u32 = 0x2000;
-pub const SGI_GL_T: u32 = 0x2001;
-pub const SGI_GL_R: u32 = 0x2002;
 pub const SGI_GL_Q: u32 = 0x2003;
 pub const SGI_GL_EYE_LINEAR: u32 = 0x2400;
 pub const SGI_GL_OBJECT_LINEAR: u32 = 0x2401;
@@ -84,8 +79,6 @@ pub const SGI_GL_TEXTURE_GEN_MODE: u32 = 0x2500;
 pub const SGI_GL_OBJECT_PLANE: u32 = 0x2501;
 pub const SGI_GL_EYE_PLANE: u32 = 0x2502;
 pub const SGI_GL_TEXTURE_GEN_S: u32 = 0x0c60;
-pub const SGI_GL_TEXTURE_GEN_T: u32 = 0x0c61;
-pub const SGI_GL_TEXTURE_GEN_R: u32 = 0x0c62;
 pub const SGI_GL_TEXTURE_GEN_Q: u32 = 0x0c63;
 pub const SGI_GL_TEXTURE_ENV_COLOR: u32 = 0x2201;
 pub const SGI_GL_MODULATE: u32 = 0x2100;
@@ -101,11 +94,6 @@ pub const SGI_GL_LINEAR_SHARPEN_COLOR_SGIS: u32 = 0x80af;
 pub const SGI_GL_LINEAR_DETAIL_SGIS: u32 = 0x8097;
 pub const SGI_GL_LINEAR_DETAIL_ALPHA_SGIS: u32 = 0x8098;
 pub const SGI_GL_LINEAR_DETAIL_COLOR_SGIS: u32 = 0x8099;
-// glAccum's operations (OpenGL 1.2.1, 4.2.4); ADD is also a texture mode.
-pub const SGI_GL_ACCUM: u32 = 0x0100;
-pub const SGI_GL_LOAD: u32 = 0x0101;
-pub const SGI_GL_RETURN: u32 = 0x0102;
-pub const SGI_GL_MULT: u32 = 0x0103;
 pub const SGI_GL_ADD: u32 = 0x0104;
 pub const SGI_GL_REPEAT: u32 = 0x2901;
 pub const SGI_GL_CLAMP: u32 = 0x2900;
@@ -168,8 +156,6 @@ pub const SGI_GL_GEQUAL: u32 = 6;
 pub const SGI_GL_ALWAYS: u32 = 7;
 pub const SGI_GL_DRAW_FRONT: u32 = 0x1;
 pub const SGI_GL_DRAW_BACK: u32 = 0x2;
-pub const SGI_GL_DRAW_EXTRA0: u32 = 0x4;
-pub const SGI_GL_DRAW_EXTRA1: u32 = 0x8;
 //
 // The family's overlay planes, a layer of their own: set, the draw goes
 // to the drawable's overlay target alone and the other bits name nothing.
@@ -229,9 +215,6 @@ pub const SGI_GL_STENCIL_PASS_DEPTH_PASS: u32 = 0x0b96;
 pub const SGI_GL_STENCIL_REF: u32 = 0x0b97;
 pub const SGI_GL_STENCIL_WRITEMASK: u32 = 0x0b98;
 pub const SGI_GL_PERSPECTIVE_CORRECTION_HINT: u32 = 0x0c50;
-pub const SGI_GL_POINT_SMOOTH_HINT: u32 = 0x0c51;
-pub const SGI_GL_LINE_SMOOTH_HINT: u32 = 0x0c52;
-pub const SGI_GL_POLYGON_SMOOTH_HINT: u32 = 0x0c53;
 pub const SGI_GL_FOG_HINT: u32 = 0x0c54;
 pub const SGI_GL_DONT_CARE: u32 = 0x1100;
 pub const SGI_GL_FASTEST: u32 = 0x1101;
@@ -241,11 +224,7 @@ pub const SGI_GL_MATRIX_MODE: u32 = 0x0ba0;
 pub const SGI_GL_NORMALIZE: u32 = 0x0ba1;
 // SGIX_sprite: the enable, its parameters and the modes.
 pub const SGI_GL_SPRITE_SGIX: u32 = 0x8148;
-pub const SGI_GL_SPRITE_MODE_SGIX: u32 = 0x8149;
-pub const SGI_GL_SPRITE_AXIS_SGIX: u32 = 0x814a;
-pub const SGI_GL_SPRITE_TRANSLATION_SGIX: u32 = 0x814b;
 pub const SGI_GL_SPRITE_AXIAL_SGIX: u32 = 0x814c;
-pub const SGI_GL_SPRITE_OBJECT_ALIGNED_SGIX: u32 = 0x814d;
 pub const SGI_GL_SPRITE_EYE_ALIGNED_SGIX: u32 = 0x814e;
 pub const SGI_GL_VIEWPORT: u32 = 0x0ba2;
 pub const SGI_GL_MODELVIEW_STACK_DEPTH: u32 = 0x0ba3;
@@ -377,18 +356,9 @@ pub const SGI_GL_HELD_VERTICES: u32 = 3;
 
 pub const SGI_GL_WINDOW_GUARD: i32 = 16384;
 
-pub const SGI_GL_INVALID_ENUM: u32 = 0x0500;
-pub const SGI_GL_INVALID_OPERATION: u32 = 0x0502;
 pub const SGI_GL_OUT_OF_MEMORY: u32 = 0x0505;
 
-// Enumerations as type alias plus constants
-pub const SGI_RASTER_FILL: RasterKind = 0;
 pub const SGI_RASTER_CLEAR: RasterKind = 1;
-pub const SGI_RASTER_COPY: RasterKind = 2;
-pub const SGI_RASTER_GLYPH: RasterKind = 3;
-pub const SGI_RASTER_LINE: RasterKind = 4;
-pub const SGI_RASTER_POINT: RasterKind = 5;
-pub const SGI_RASTER_BLIT: RasterKind = 6;
 pub const SGI_RASTER_BITMAP: RasterKind = 7;
 pub const SGI_RASTER_PIXELS: RasterKind = 8;
 
@@ -496,7 +466,6 @@ pub const SGI_GL_OP_HINT: GlOp = 72;
 // floats; GL_TEXTURE_GEN_MODE's mode is its enumerant as a float.
 //
 pub const SGI_GL_OP_TEX_GEN: GlOp = 73;
-
 
 /// BITMAP: a run of glBitmap's image (OpenGL 1.2.1, 3.7), drawn as
 /// fragments under a context's draw state. The image is height rows of
@@ -619,21 +588,6 @@ pub struct GlLight {
     pub spot_cutoff: f32,
     pub attenuation: [f32; 3],
     pub spot_cos_cutoff: f32,
-}
-
-/// A light as a family's board delivers it, already decoded to eye
-/// coordinates: for GlContext::set_light(). position has w 0 for a light at
-/// infinity. spot_cos_cutoff of -1 or less is no spot.
-#[derive(Clone, Copy, Default)]
-pub struct GlEyeLight {
-    pub position: [f32; 4],
-    pub spot_direction: [f32; 3],
-    pub spot_cos_cutoff: f32,
-    pub spot_exponent: f32,
-    pub attenuation: [f32; 3],
-    pub ambient: [f32; 4],
-    pub diffuse: [f32; 4],
-    pub specular: [f32; 4],
 }
 
 /// One face's material (2.13.1, table 2.10).
@@ -1007,16 +961,6 @@ pub struct GlSink {
     pub result: P<GlDrawResult>,
 }
 
-/// Where glBitmap's image falls, from GlContext::bitmap_place().
-#[derive(Clone, Copy, Default)]
-pub struct GlBitmap {
-    /// Window pixel of the lower-left corner.
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
 /// The most words one GlContext::get() answer takes: a matrix's.
 pub const SGI_GL_GET_WORDS: usize = 16;
 
@@ -1060,12 +1004,6 @@ pub fn gl_float(bits: u32) -> f32 {
 
 pub fn gl_bits(value: f32) -> u32 {
     value.to_bits()
-}
-
-pub fn gl_identity(m: &mut [f32; 16]) {
-    for i in 0..16 {
-        m[i] = if i % 5 == 0 { 1.0 } else { 0.0 };
-    }
 }
 
 pub fn gl_rgba(v: &mut [f32; 4], r: f32, g: f32, b: f32, a: f32) {
@@ -1121,9 +1059,9 @@ impl GlContext {
         self.sprite_axis[2] = 1.0;
         self.matrix_mode = SGI_GL_MODELVIEW;
         self.cur.dither = 1;
-        gl_identity(&mut self.cur.modelview);
-        gl_identity(&mut self.cur.projection);
-        gl_identity(&mut self.texture);
+        self.cur.modelview = IDENT;
+        self.cur.projection = IDENT;
+        self.texture = IDENT;
         self.cur.depth_func = SGI_GL_LESS;
         self.cur.alpha_func = SGI_GL_ALWAYS;
         self.cur.stencil_func = SGI_GL_ALWAYS;
@@ -1175,10 +1113,6 @@ impl GlContext {
         self.lighting_init();
     }
 
-    pub fn polygon_owned(&self) -> bool {
-        self.polygon.error != 0
-            || (self.polygon.enabled != 0 && self.in_begin != 0 && self.begin_mode == SGI_GL_POLYGON)
-    }
 }
 
 impl GlPolygonAssembly {
@@ -1200,10 +1134,6 @@ impl GlContext {
         }
         self.polygon.enabled = 1;
         true
-    }
-
-    pub fn open_line(&self) -> bool {
-        self.in_begin != 0 && (self.begin_mode == SGI_GL_LINE_STRIP || self.begin_mode == SGI_GL_LINE_LOOP)
     }
 
     pub fn enable_line_stipple(&mut self, sink: Option<&GlSink>) -> bool {
@@ -1268,49 +1198,6 @@ impl GlPolygonAssembly {
 }
 
 impl GlContext {
-    /// Both contexts initialized and distinct; failure leaves both unchanged.
-    pub fn gl_clone(&mut self, src: &GlContext) -> bool {
-        let open = src.in_begin != 0 && src.begin_mode == SGI_GL_POLYGON;
-
-        if std::ptr::eq(self as *const GlContext, src as *const GlContext)
-            || (src.open_line() && self.standalone_stipple != src.standalone_stipple)
-            || (open && self.polygon.enabled != src.polygon.enabled)
-            || (self.polygon.enabled == 0
-                && (src.polygon.count != 0
-                    || src.polygon.failed != 0
-                    || (src.polygon.enabled != 0 && src.polygon_owned())))
-        {
-            return false;
-        }
-        // Ownership is replaced before the copy becomes visible.
-        let mut copy = src.clone();
-        copy.polygon.vertices = Vec::new();
-        copy.polygon.capacity = 0;
-        copy.polygon.enabled = self.polygon.enabled;
-        copy.polygon.loaded = 0;
-        copy.standalone_stipple = self.standalone_stipple;
-        copy.line_phase_loaded = false;
-        copy.draw_error_loaded = false;
-        if !copy.polygon.polygon_reserve(src.polygon.count as usize) {
-            return false;
-        }
-        if src.polygon.count != 0 {
-            let n = src.polygon.count as usize * SGI_GL_VERTEX_FLOATS;
-            copy.polygon.vertices[..n].copy_from_slice(&src.polygon.vertices[..n]);
-        }
-        self.cleanup();
-        *self = copy;
-        true
-    }
-
-    pub fn consume_error(&mut self, error: &mut u32) -> bool {
-        if self.in_begin != 0 {
-            return false;
-        }
-        *error = self.polygon.error;
-        self.polygon.error = 0;
-        true
-    }
 
     pub fn draw_result(&mut self, sink: &GlSink, d: &GlDraw) {
         let result: GlDrawResult;
@@ -1378,15 +1265,6 @@ impl GlContext {
         true
     }
 
-    pub fn get_polygon_stipple(&self, rows: &mut [u32; 32]) -> bool {
-        if self.in_begin != 0 {
-            crate::dlog!(LogModule::Odyssey, "sgi-gl: polygon stipple query inside glBegin: invalid operation");
-            return false;
-        }
-        *rows = self.polygon_stipple;
-        true
-    }
-
     /// Point the context at a drawable. A bound half-known extent is refused
     /// without changing the current drawable. Unbinding clears both dimensions.
     pub fn set_drawable(&mut self, d: &GlDrawable) -> bool {
@@ -1401,11 +1279,6 @@ impl GlContext {
         true
     }
 
-    /// Put the context in colour-index mode with index_bits bits a colour
-    /// index, or in RGBA mode for 0.
-    pub fn set_index_mode(&mut self, index_bits: u32) {
-        self.cur.index_bits = std::cmp::min(index_bits, 32);
-    }
 }
 
 /// A colour index as a colour-index buffer of index_bits bits stores it
@@ -1669,7 +1542,7 @@ pub fn gl_matrix_apply(m: &mut [f32; 16], cmd: &GlCmd) -> bool {
             true
         }
         SGI_GL_OP_LOAD_IDENTITY => {
-            gl_identity(m);
+            *m = IDENT;
             true
         }
         SGI_GL_OP_MULT_MATRIX => {
@@ -2547,36 +2420,6 @@ impl GlContext {
         s4[15] = 1.0;
     }
 
-    /// glSpriteParameter*SGIX: the axis or translation's three values. Refuses,
-    /// changing nothing, a pname SGIX_sprite does not name and a non-finite
-    /// value.
-    pub fn sprite_parameter(&mut self, pname: u32, v: &[f32; 3]) -> bool {
-        let dst = if pname == SGI_GL_SPRITE_AXIS_SGIX {
-            &mut self.sprite_axis
-        } else if pname == SGI_GL_SPRITE_TRANSLATION_SGIX {
-            &mut self.sprite_translation
-        } else {
-            return false;
-        };
-
-        if !v[0].is_finite() || !v[1].is_finite() || !v[2].is_finite() {
-            return false;
-        }
-        *dst = *v;
-        true
-    }
-
-    pub fn sprite_mode(&mut self, mode: u32) -> bool {
-        if mode != SGI_GL_SPRITE_AXIAL_SGIX
-            && mode != SGI_GL_SPRITE_OBJECT_ALIGNED_SGIX
-            && mode != SGI_GL_SPRITE_EYE_ALIGNED_SGIX
-        {
-            return false;
-        }
-        self.sprite_mode = mode;
-        true
-    }
-
     /// Capture one vertex with current attributes and lighting, without
     /// drawing. `bits` holds `components` words.
     pub fn capture_vertex(&mut self, mode: u32, bits: &[u32], components: u32, out: &mut [f32; SGI_GL_VERTEX_FLOATS]) {
@@ -3036,58 +2879,6 @@ impl GlContext {
         crate::dlog!(LogModule::Odyssey, "sgi-gl: light parameter {:#x} value {} ignored", pname, v[0]);
     }
 
-    /// Set light number light (0 for GL_LIGHT0) from values a family has
-    /// decoded from its board's own encoding, already in eye coordinates. False,
-    /// and logged, for a light the context does not keep.
-    pub fn set_light(&mut self, light: u32, e: &GlEyeLight) -> bool {
-        if light >= SGI_GL_LIGHTS {
-            crate::dlog!(LogModule::Odyssey, "sgi-gl: light {} ignored", light);
-            return false;
-        }
-        let l = &mut self.light[light as usize];
-        l.position = e.position;
-        l.spot_direction = e.spot_direction;
-        l.spot_exponent = e.spot_exponent;
-        l.attenuation = e.attenuation;
-        l.ambient = e.ambient;
-        l.diffuse = e.diffuse;
-        l.specular = e.specular;
-        // The cosine is kept as given, so the cone's edge falls where the
-        // family's board puts it; the degrees are only glGet's answer.
-        if e.spot_cos_cutoff <= -1.0 {
-            l.spot_cos_cutoff = -1.0;
-            l.spot_cutoff = 180.0;
-        } else {
-            l.spot_cos_cutoff = gl_c_min(e.spot_cos_cutoff, 1.0);
-            l.spot_cutoff = ((l.spot_cos_cutoff as f64).acos() * 180.0 / std::f64::consts::PI) as f32;
-        }
-        true
-    }
-
-    /// Take normals to eye coordinates by m, column-major 3x3, used as given;
-    /// None returns to the modelview's inverse transpose (2.10.3).
-    pub fn set_normal_matrix(&mut self, m: Option<&[f32; 9]>) {
-        self.normal_matrix_given = m.is_some() as u32;
-        match m {
-            Some(m) => self.normal_matrix = *m,
-            None => self.normal_matrix = [0.0; 9],
-        }
-    }
-
-    /// Draw through the window matrix m, column-major, with depth scale
-    /// depth_scale and rows running down when rows_down; None returns to the
-    /// projection and viewport, and clears all three.
-    pub fn set_window_matrix(&mut self, m: Option<&[f32; 16]>, depth_scale: f32, rows_down: bool) {
-        let st = &mut self.cur;
-
-        st.window_matrix_given = m.is_some() as u32;
-        match m {
-            Some(m) => st.window_matrix = *m,
-            None => st.window_matrix = [0.0; 16],
-        }
-        st.window_depth_scale = if m.is_some() { depth_scale } else { 0.0 };
-        st.window_rows_down = (m.is_some() && rows_down) as u32;
-    }
 }
 
 impl GlDrawState {
@@ -3128,10 +2919,6 @@ impl GlDrawState {
 }
 
 impl GlContext {
-    /// Make every eye normal unit length, whatever GL_NORMALIZE's enable.
-    pub fn set_normalize_always(&mut self, on: bool) {
-        self.normalize_always = on as u32;
-    }
 
     pub fn light_model(&mut self, pname: u32, v: &[f32; 4]) {
         match pname {
@@ -3420,340 +3207,9 @@ impl GlContext {
         }
     }
 
-    /// GL_LIGHTING's enable and GL_LIGHT_MODEL_LOCAL_VIEWER, for a family whose
-    /// board sets them in a state word.
-    pub fn set_lighting(&mut self, on: bool) {
-        self.capability(SGI_GL_LIGHTING, on);
-    }
-
-    pub fn set_local_viewer(&mut self, on: bool) {
-        self.light_model_local_viewer = on as u32;
-    }
-
-    /// glBitmap's placement and move (OpenGL 1.2.1, 3.7). With the raster
-    /// position valid, the image's lower-left corner goes into *b and the
-    /// raster position moves by (xmove, ymove); returns true. With it invalid
-    /// nothing is drawn or moved; returns false.
-    pub fn bitmap_place(&mut self, width: u32, height: u32, xorig: f32, yorig: f32, xmove: f32, ymove: f32, b: &mut GlBitmap) -> bool {
-        if self.raster_valid == 0 {
-            return false;
-        }
-        if !self.raster_pos[0].is_finite()
-            || !self.raster_pos[1].is_finite()
-            || !xorig.is_finite()
-            || !yorig.is_finite()
-            || !xmove.is_finite()
-            || !ymove.is_finite()
-        {
-            crate::dlog!(LogModule::Odyssey, "sgi-gl: nonfinite bitmap placement dropped");
-            return false;
-        }
-        // Beyond 2^30 a corner lies off any plane; keep it there.
-        let fx = (self.raster_pos[0] as f64 - xorig as f64).floor();
-        let fy = (self.raster_pos[1] as f64 - yorig as f64).floor();
-        b.x = (if fx > -1073741824.0 { fx } else { -1073741824.0 }).min(1073741824.0) as i32;
-        b.y = (if fy > -1073741824.0 { fy } else { -1073741824.0 }).min(1073741824.0) as i32;
-        b.width = width;
-        b.height = height;
-        self.raster_pos[0] += xmove;
-        self.raster_pos[1] += ymove;
-        true
-    }
-
-    /// The fragments of glBitmap's set bits take the raster position's depth
-    /// and its colour or colour index (3.7) and pass the per-fragment
-    /// operations like a primitive's: pixel ownership against the drawable,
-    /// the depth test and the draw buffers. The viewport does not bound them.
-    pub fn bitmap_bytes(&mut self, sink: &GlSink, b: &GlBitmap, first: u32, bytes: &[u8], count: u32) {
-        let mut op = RasterOp::default();
-        op.kind = SGI_RASTER_BITMAP;
-        op.bitmap.state = P(&mut self.cur as *mut GlDrawState);
-        op.bitmap.x = b.x;
-        op.bitmap.y = b.y;
-        op.bitmap.width = b.width;
-        op.bitmap.height = b.height;
-        op.bitmap.first = first;
-        op.bitmap.count = count;
-        op.bitmap.bytes = P(bytes.as_ptr() as *mut u8);
-        op.bitmap.z = self.raster_pos[2];
-        op.bitmap.index = self.raster_index;
-        op.bitmap.distance = self.raster_distance;
-
-        if self.cur.drawable.bound == 0 {
-            crate::dlog!(LogModule::Odyssey, "sgi-gl: glBitmap with no window bound dropped");
-            return;
-        }
-        if self.cur.drawable.clip.n == 0 {
-            // A window others wholly cover: the image draws nothing.
-            return;
-        }
-        op.bitmap.rgba = self.raster_color;
-        op.bitmap.texcoord = self.raster_texcoord;
-        op.ntargets = self.cur.draw_targets(&mut op.targets);
-        op.clip = self.cur.drawable.clip;
-        if let Some(f) = sink.raster {
-            f(sink.opaque, &op);
-        }
-    }
-
-    /// Draw tightly packed RGBA8 pixels (0xRRGGBBAA), bottom row first, at the
-    /// current raster position with unit zoom and no pixel transfer.
-    pub fn draw_pixels_rgba(&mut self, sink: &GlSink, width: u32, height: u32, rgba: &[u32]) {
-        self.draw_pixels_rgba_zoom(sink, width, height, rgba, 1.0, 1.0);
-    }
-
-    /// As above with explicit pixel zoom; zero scales produce no fragments.
-    pub fn draw_pixels_rgba_zoom(&mut self, sink: &GlSink, width: u32, height: u32, rgba: &[u32], zoom_x: f32, zoom_y: f32) {
-        self.draw_pixels_rgba_transfer(sink, width, height, rgba, zoom_x, zoom_y, None);
-    }
 }
 
-pub type GlPixelRectangleResult = u32;
-pub const SGI_GL_PIXELS_REFUSED: GlPixelRectangleResult = 0;
-pub const SGI_GL_PIXELS_EMPTY: GlPixelRectangleResult = 1;
-pub const SGI_GL_PIXELS_READY: GlPixelRectangleResult = 2;
-
 impl GlContext {
-    pub fn pixel_rectangle(&mut self, sink: Option<&GlSink>, call: &str, width: u32, height: u32, zoom_x: f32, zoom_y: f32, transfer: Option<&GlPixelTransfer>, colour: bool, op: &mut RasterOp) -> GlPixelRectangleResult {
-        *op = RasterOp::default();
-        op.kind = SGI_RASTER_PIXELS;
-        op.pixels.state = P(&mut self.cur as *mut GlDrawState);
-        op.pixels.x = self.raster_pos[0] as f64;
-        op.pixels.y = self.raster_pos[1] as f64;
-        op.pixels.zoom = [zoom_x, zoom_y];
-        op.pixels.transfer.scale = [1.0, 1.0, 1.0, 1.0];
-        op.pixels.width = width;
-        op.pixels.height = height;
-        op.pixels.z = self.raster_pos[2];
-        op.pixels.distance = self.raster_distance;
-        if self.in_begin != 0 {
-            crate::dlog!(LogModule::Odyssey, "sgi-gl: {} inside glBegin dropped", call);
-            return SGI_GL_PIXELS_REFUSED;
-        }
-        if self.raster_valid == 0 || width == 0 || height == 0 {
-            return SGI_GL_PIXELS_EMPTY;
-        }
-        if !zoom_x.is_finite() || !zoom_y.is_finite() || !op.pixels.x.is_finite() || !op.pixels.y.is_finite() {
-            crate::dlog!(LogModule::Odyssey, "sgi-gl: nonfinite {} placement dropped", call);
-            return SGI_GL_PIXELS_REFUSED;
-        }
-        if zoom_x == 0.0 || zoom_y == 0.0 {
-            return SGI_GL_PIXELS_EMPTY;
-        }
-        if let Some(t) = transfer {
-            for k in 0..4 {
-                if !t.scale[k].is_finite() || !t.bias[k].is_finite() {
-                    crate::dlog!(LogModule::Odyssey, "sgi-gl: nonfinite pixel transfer dropped");
-                    return SGI_GL_PIXELS_REFUSED;
-                }
-            }
-            op.pixels.transfer = *t;
-        }
-        if colour && self.cur.index_bits != 0 {
-            crate::dlog!(LogModule::Odyssey, "sgi-gl: colour-index {} is unsupported; image dropped", call);
-            return SGI_GL_PIXELS_REFUSED;
-        }
-        if self.cur.drawable.bound == 0 {
-            crate::dlog!(LogModule::Odyssey, "sgi-gl: {} with no window bound dropped", call);
-            return SGI_GL_PIXELS_REFUSED;
-        }
-        match sink {
-            Some(s) if s.raster.is_some() => {}
-            _ => {
-                crate::dlog!(LogModule::Odyssey, "sgi-gl: {} with no raster sink dropped", call);
-                return SGI_GL_PIXELS_REFUSED;
-            }
-        }
-        if self.cur.drawable.clip.n == 0 {
-            return SGI_GL_PIXELS_EMPTY;
-        }
-        op.pixels.texcoord = self.raster_texcoord;
-        op.ntargets = self.cur.draw_targets(&mut op.targets);
-        op.clip = self.cur.drawable.clip;
-        SGI_GL_PIXELS_READY
-    }
-
-    /// Apply RGBA scale and bias before fragment operations; None is identity.
-    pub fn draw_pixels_rgba_transfer(&mut self, sink: &GlSink, width: u32, height: u32, rgba: &[u32], zoom_x: f32, zoom_y: f32, transfer: Option<&GlPixelTransfer>) {
-        let mut op = RasterOp::default();
-
-        if self.pixel_rectangle(Some(sink), "glDrawPixels", width, height, zoom_x, zoom_y, transfer, true, &mut op)
-            != SGI_GL_PIXELS_READY
-        {
-            return;
-        }
-        if rgba.is_empty() {
-            crate::dlog!(LogModule::Odyssey, "sgi-gl: glDrawPixels with no image bound dropped");
-            return;
-        }
-        op.pixels.rgba = P(rgba.as_ptr() as *mut u32);
-        (sink.raster.unwrap())(sink.opaque, &op);
-    }
-
-    pub fn draw_pixels_unquantized_transfer(&mut self, sink: &GlSink, width: u32, height: u32, rgba_float: Option<&[[f32; 4]]>, rgba_double: Option<&[[f64; 4]]>, zoom_x: f32, zoom_y: f32, transfer: Option<&GlPixelTransfer>) -> bool {
-        let mut op = RasterOp::default();
-        let count = width as u64 * height as u64;
-
-        let result = self.pixel_rectangle(Some(sink), "glDrawPixels", width, height, zoom_x, zoom_y, transfer, true, &mut op,
-        );
-        if result != SGI_GL_PIXELS_READY {
-            return result == SGI_GL_PIXELS_EMPTY;
-        }
-        let esize: u64 = if rgba_double.is_some() { 32 } else { 16 };
-        if (rgba_float.is_none() && rgba_double.is_none()) || count > u64::MAX / esize {
-            return false;
-        }
-        // Validate the complete image before publishing any fragment.
-        for i in 0..count as usize {
-            for k in 0..4usize {
-                let component: f64 = match rgba_double {
-                    Some(d) => d[i][k],
-                    None => rgba_float.unwrap()[i][k] as f64,
-                };
-
-                if !component.is_finite() {
-                    crate::dlog!(LogModule::Odyssey, "sgi-gl: nonfinite glDrawPixels source dropped");
-                    return false;
-                }
-            }
-        }
-        if let Some(f) = rgba_float {
-            op.pixels.rgba_float = P(f.as_ptr() as *mut [f32; 4]);
-        }
-        if let Some(d) = rgba_double {
-            op.pixels.rgba_double = P(d.as_ptr() as *mut [f64; 4]);
-        }
-        (sink.raster.unwrap())(sink.opaque, &op);
-        true
-    }
-
-    /// Finite float sources remain unquantized until fragment operations.
-    pub fn draw_pixels_float_transfer(&mut self, sink: &GlSink, width: u32, height: u32, rgba: &[[f32; 4]], zoom_x: f32, zoom_y: f32, transfer: Option<&GlPixelTransfer>) -> bool {
-        self.draw_pixels_unquantized_transfer(sink, width, height, Some(rgba), None, zoom_x, zoom_y, transfer)
-    }
-
-    /// Preserve normalized integer source precision through pixel transfer.
-    pub fn draw_pixels_double_transfer(&mut self, sink: &GlSink, width: u32, height: u32, rgba: &[[f64; 4]], zoom_x: f32, zoom_y: f32, transfer: Option<&GlPixelTransfer>) -> bool {
-        self.draw_pixels_unquantized_transfer(sink, width, height, None, Some(rgba), zoom_x, zoom_y, transfer)
-    }
-
-    /// Transferred colour indices use the context's index fragment operations.
-    pub fn draw_pixels_index(&mut self, sink: &GlSink, width: u32, height: u32, index: &[u32], zoom_x: f32, zoom_y: f32) -> bool {
-        let mut op = RasterOp::default();
-
-        let result = self.pixel_rectangle(Some(sink), "glDrawPixels", width, height, zoom_x, zoom_y, None, false, &mut op,
-        );
-        if result != SGI_GL_PIXELS_READY {
-            return result == SGI_GL_PIXELS_EMPTY;
-        }
-        if index.is_empty() || self.cur.index_bits == 0 || (width as u64 * height as u64) > u64::MAX / 4 {
-            return false;
-        }
-        op.pixels.index = P(index.as_ptr() as *mut u32);
-        (sink.raster.unwrap())(sink.opaque, &op);
-        true
-    }
-
-    /// Stencil pixels bypass fragments and obey ownership, scissor and mask.
-    pub fn draw_pixels_stencil(&mut self, sink: &GlSink, width: u32, height: u32, stencil: &[u32], zoom_x: f32, zoom_y: f32) -> bool {
-        let mut op = RasterOp::default();
-
-        let result = self.pixel_rectangle(Some(sink), "glDrawPixels", width, height, zoom_x, zoom_y, None, false, &mut op,
-        );
-        if result != SGI_GL_PIXELS_READY {
-            return result == SGI_GL_PIXELS_EMPTY;
-        }
-        if stencil.is_empty() {
-            return false;
-        }
-        op.pixels.stencil = P(stencil.as_ptr() as *mut u32);
-        op.ntargets = 0;
-        (sink.raster.unwrap())(sink.opaque, &op);
-        true
-    }
-
-    /// Depth sources use raster colour and explicit depth scale/bias.
-    pub fn draw_pixels_depth_transfer(&mut self, sink: &GlSink, width: u32, height: u32, depth: &[f64], zoom_x: f32, zoom_y: f32, scale: f32, bias: f32) -> bool {
-        let mut op = RasterOp::default();
-        let count = width as u64 * height as u64;
-
-        let result = self.pixel_rectangle(Some(sink), "glDrawPixels", width, height, zoom_x, zoom_y, None, false, &mut op,
-        );
-        if result != SGI_GL_PIXELS_READY {
-            return result == SGI_GL_PIXELS_EMPTY;
-        }
-        if depth.is_empty() || count > u64::MAX / 8 || !scale.is_finite() || !bias.is_finite() {
-            return false;
-        }
-        for i in 0..count as usize {
-            if !depth[i].is_finite() {
-                crate::dlog!(LogModule::Odyssey, "sgi-gl: nonfinite glDrawPixels depth source dropped");
-                return false;
-            }
-        }
-        op.pixels.depth = P(depth.as_ptr() as *mut f64);
-        op.pixels.depth_scale = scale;
-        op.pixels.depth_bias = bias;
-        op.pixels.colour = self.raster_color;
-        op.pixels.colour_index = self.raster_index;
-        (sink.raster.unwrap())(sink.opaque, &op);
-        true
-    }
-
-    /// Copy an RGBA8 source snapshot through pixel transfer and fragment
-    /// operations. read_rgba gets window-local coordinates and writes one raw
-    /// RRGGBBAA pixel, returning false on failure. Failed reads or allocation
-    /// write no fragments. Raster position stays unchanged. False means
-    /// refusal.
-    pub fn copy_pixels_rgba_transfer(&mut self, sink: &GlSink, x: i32, y: i32, width: u32, height: u32, read_rgba: Option<fn(Opaque, i32, i32, &mut u32) -> bool>, source: Opaque, zoom_x: f32, zoom_y: f32, transfer: Option<&GlPixelTransfer>) -> bool {
-        let mut op = RasterOp::default();
-        let count = width as u64 * height as u64;
-
-        let result = self.pixel_rectangle(Some(sink), "glCopyPixels", width, height, zoom_x, zoom_y, transfer, true, &mut op,
-        );
-        if result != SGI_GL_PIXELS_READY {
-            return result == SGI_GL_PIXELS_EMPTY;
-        }
-        let read_rgba = match read_rgba {
-            Some(f)
-                if (x as i64 + width as i64 - 1) <= i32::MAX as i64
-                    && (y as i64 + height as i64 - 1) <= i32::MAX as i64 =>
-            {
-                f
-            }
-            _ => {
-                crate::dlog!(LogModule::Odyssey, "sgi-gl: glCopyPixels source unavailable or outside coordinate range");
-                return false;
-            }
-        };
-        let mut pixels: Vec<u32> = Vec::new();
-        if count > (usize::MAX / 4) as u64
-            || pixels.try_reserve_exact(count as usize).is_err()
-        {
-            if self.polygon.error == 0 {
-                self.polygon.error = SGI_GL_OUT_OF_MEMORY;
-            }
-            return false;
-        }
-        pixels.resize(count as usize, 0);
-        // Complete the snapshot before a destination can overwrite its source.
-        for row in 0..height {
-            for col in 0..width {
-                if !read_rgba(
-                    source,
-                    (x as i64 + col as i64) as i32,
-                    (y as i64 + row as i64) as i32,
-                    &mut pixels[(row as u64 * width as u64 + col as u64) as usize],
-                ) {
-                    crate::dlog!(LogModule::Odyssey, "sgi-gl: glCopyPixels source read failed; image dropped");
-                    return false;
-                }
-            }
-        }
-        op.pixels.rgba = P(pixels.as_mut_ptr());
-        (sink.raster.unwrap())(sink.opaque, &op);
-        true
-    }
 
     /// glTexGen (OpenGL 1.2.1, 2.10.4): a coordinate's mode, SPHERE_MAP only
     /// for S and T, or its object or eye plane; the eye plane is kept as p M^-1,
@@ -4226,15 +3682,6 @@ impl GlContext {
         }
     }
 
-    /// Return the first draw failure from one command.
-    pub fn command_checked(&mut self, sink: &GlSink, cmd: &GlCmd) -> GlDrawResult {
-        let mut result: GlDrawResult = SGI_GL_DRAW_OK;
-        let mut checked = *sink;
-
-        checked.result = P(&mut result as *mut GlDrawResult);
-        self.command(&checked, cmd);
-        result
-    }
 }
 
 pub fn gl_get_floats(v: &[f32], count: usize, out: &mut [u32], n: &mut u32) -> bool {
@@ -4243,63 +3690,6 @@ pub fn gl_get_floats(v: &[f32], count: usize, out: &mut [u32], n: &mut u32) -> b
     }
     *n = count as u32;
     true
-}
-
-impl GlContext {
-    /// glGetLightfv of light number light (0 for GL_LIGHT0) and glGetMaterialfv
-    /// of GL_FRONT or GL_BACK: the answer as *n float words into out (which
-    /// holds SGI_GL_GET_WORDS). False, with nothing written, for a light, face
-    /// or parameter the context does not keep.
-    pub fn get_light(&self, light: u32, pname: u32, out: &mut [u32], n: &mut u32) -> bool {
-        if light >= SGI_GL_LIGHTS {
-            return false;
-        }
-        let l = &self.light[light as usize];
-        match pname {
-            SGI_GL_AMBIENT => gl_get_floats(&l.ambient, 4, out, n),
-            SGI_GL_DIFFUSE => gl_get_floats(&l.diffuse, 4, out, n),
-            SGI_GL_SPECULAR => gl_get_floats(&l.specular, 4, out, n),
-            SGI_GL_POSITION => gl_get_floats(&l.position, 4, out, n),
-            SGI_GL_SPOT_DIRECTION => gl_get_floats(&l.spot_direction, 3, out, n),
-            SGI_GL_SPOT_EXPONENT => gl_get_floats(std::slice::from_ref(&l.spot_exponent), 1, out, n),
-            SGI_GL_SPOT_CUTOFF => gl_get_floats(std::slice::from_ref(&l.spot_cutoff), 1, out, n),
-            SGI_GL_CONSTANT_ATTENUATION | SGI_GL_LINEAR_ATTENUATION | SGI_GL_QUADRATIC_ATTENUATION => {
-                gl_get_floats(
-                    std::slice::from_ref(&l.attenuation[(pname - SGI_GL_CONSTANT_ATTENUATION) as usize]),
-                    1,
-                    out,
-                    n,
-                )
-            }
-            _ => false,
-        }
-    }
-
-    /// glGetClipPlane of plane number plane (0 for GL_CLIP_PLANE0): its four
-    /// coefficients in eye coordinates as float words. False for a plane the
-    /// context does not keep.
-    pub fn get_clip_plane(&self, plane: u32, out: &mut [u32; 4]) -> bool {
-        let mut n = 0u32;
-
-        plane < SGI_GL_CLIP_PLANES
-            && gl_get_floats(&self.cur.clip_plane[plane as usize], 4, out, &mut n)
-    }
-
-    pub fn get_material(&self, face: u32, pname: u32, out: &mut [u32], n: &mut u32) -> bool {
-        if face != SGI_GL_FRONT && face != SGI_GL_BACK {
-            return false;
-        }
-        let m = &self.material[(face == SGI_GL_BACK) as usize];
-        match pname {
-            SGI_GL_AMBIENT => gl_get_floats(&m.ambient, 4, out, n),
-            SGI_GL_DIFFUSE => gl_get_floats(&m.diffuse, 4, out, n),
-            SGI_GL_SPECULAR => gl_get_floats(&m.specular, 4, out, n),
-            SGI_GL_EMISSION => gl_get_floats(&m.emission, 4, out, n),
-            SGI_GL_SHININESS => gl_get_floats(std::slice::from_ref(&m.shininess), 1, out, n),
-            SGI_GL_COLOR_INDEXES => gl_get_floats(&m.color_indexes, 3, out, n),
-            _ => false,
-        }
-    }
 }
 
 /// One word answer.
@@ -4547,18 +3937,6 @@ impl GlContext {
     }
 }
 
-/// The most vertices each primitive mode leaves held between pieces, as
-/// GlContext::vertex() keeps them: a line strip keeps its last vertex, a line
-/// loop its first and last, a quad strip three until its first quad.
-pub fn gl_held_max(mode: u32) -> u32 {
-    match mode {
-        SGI_GL_POINTS => 0,
-        SGI_GL_LINES | SGI_GL_LINE_STRIP => 1,
-        SGI_GL_QUADS | SGI_GL_QUAD_STRIP => 3,
-        _ => 2,
-    }
-}
-
 /// How many vertices a primitive of this mode holds after count vertices
 /// since glBegin, or -1 when k cannot be that number. Only count mod 2,
 /// 3 and 4 and k itself decide it, never count's absolute size, so a
@@ -4632,251 +4010,4 @@ impl GlContext {
         self.strip_swap = 0;
     }
 
-    /// Whether c holds state the context's own commands could have left. Err
-    /// carries the reason (the C's errp).
-    pub fn context_valid(&self) -> Result<(), String> {
-        let st = &self.cur;
-        let flags: [(&str, u32); 33] = [
-            ("depth_test", st.depth_test),
-            ("depth_mask", st.depth_mask),
-            ("cull_face", st.cull_face),
-            ("scissor_test", st.scissor_test),
-            ("alpha_test", st.alpha_test),
-            ("stencil_test", st.stencil_test),
-            ("blend", st.blend),
-            ("index_logic_op", st.index_logic_op),
-            ("color_logic_op", st.color_logic_op),
-            ("fog", st.fog),
-            ("texture_1d", st.texture_1d),
-            ("texture_2d", st.texture_2d),
-            ("texture_3d", st.texture_3d),
-            ("drawable.bound", st.drawable.bound),
-            ("drawable.clip.empty", st.drawable.clip.empty),
-            ("window_matrix_given", st.window_matrix_given),
-            ("window_rows_down", st.window_rows_down),
-            ("dither", st.dither),
-            ("light_model_local_viewer", self.light_model_local_viewer),
-            ("light_model_two_side", self.light_model_two_side),
-            ("color_material", self.color_material),
-            ("lighting", self.lighting),
-            ("normalize", self.normalize),
-            ("rescale_normal", self.rescale_normal),
-            ("normal_matrix_given", self.normal_matrix_given),
-            ("normalize_always", self.normalize_always),
-            ("cur_edge", self.cur_edge),
-            ("raster_valid", self.raster_valid),
-            ("strip_odd", self.strip_odd),
-            ("strip_prev", self.strip_prev),
-            ("strip_swap", self.strip_swap),
-            ("in_begin", self.in_begin),
-            ("sprite", self.sprite),
-        ];
-        let stacks: [(&str, u32); 3] =
-            [("mv_depth", self.mv_depth), ("pr_depth", self.pr_depth), ("tx_depth", self.tx_depth)];
-
-        for i in 0..SGI_GL_HINTS as usize {
-            if !gl_hint_mode(self.hints[i]) {
-                return Err(format!("sgi-gl: hint {} mode {:#x}", i, self.hints[i]));
-            }
-        }
-        if self.sprite_mode != SGI_GL_SPRITE_AXIAL_SGIX
-            && self.sprite_mode != SGI_GL_SPRITE_OBJECT_ALIGNED_SGIX
-            && self.sprite_mode != SGI_GL_SPRITE_EYE_ALIGNED_SGIX
-        {
-            return Err(format!("sgi-gl: sprite mode {:#x}", self.sprite_mode));
-        }
-
-        for f in flags.iter() {
-            if f.1 > 1 {
-                return Err(format!("sgi-gl: {} is {}, not 0 or 1", f.0, f.1));
-            }
-        }
-        if (st.drawable.width != 0) != (st.drawable.height != 0) {
-            return Err(format!(
-                "sgi-gl: drawable extent {} by {} is half-known",
-                st.drawable.width, st.drawable.height
-            ));
-        }
-        if st.drawable.bound == 0 && st.drawable.width != 0 {
-            return Err(format!(
-                "sgi-gl: unbound drawable extent {} by {}",
-                st.drawable.width, st.drawable.height
-            ));
-        }
-        for s in stacks.iter() {
-            if s.1 >= SGI_GL_STACK_DEPTH {
-                return Err(format!("sgi-gl: {} {} is past the stack's {}", s.0, s.1, SGI_GL_STACK_DEPTH));
-            }
-        }
-        if st.depth_func > SGI_GL_ALWAYS {
-            return Err(format!("sgi-gl: depth function {}", st.depth_func));
-        }
-        for i in 0..2 {
-            if !(st.depth_range[i] >= 0.0 && st.depth_range[i] <= 1.0) {
-                return Err(format!("sgi-gl: depth range {} is outside [0, 1]", st.depth_range[i]));
-            }
-        }
-        if st.index_bits > 32 {
-            return Err(format!("sgi-gl: {} bits a colour index", st.index_bits));
-        }
-        if gl_faces(st.cull_face_mode) == 0 {
-            return Err(format!("sgi-gl: cull face {:#x}", st.cull_face_mode));
-        }
-        if st.front_face != SGI_GL_CW && st.front_face != SGI_GL_CCW {
-            return Err(format!("sgi-gl: front face {:#x}", st.front_face));
-        }
-        if st.scissor[2] < 0 || st.scissor[3] < 0 {
-            return Err(format!("sgi-gl: scissor box of {} by {}", st.scissor[2], st.scissor[3]));
-        }
-        if st.alpha_func > SGI_GL_ALWAYS {
-            return Err(format!("sgi-gl: alpha function {}", st.alpha_func));
-        }
-        if !(st.alpha_ref >= 0.0 && st.alpha_ref <= 1.0) {
-            return Err(format!("sgi-gl: alpha reference {} is outside [0, 1]", st.alpha_ref));
-        }
-        if st.stencil_func > SGI_GL_ALWAYS {
-            return Err(format!("sgi-gl: stencil function {}", st.stencil_func));
-        }
-        for i in 0..3 {
-            if !gl_stencil_op_valid(st.stencil_op[i]) {
-                return Err(format!("sgi-gl: stencil operation {:#x}", st.stencil_op[i]));
-            }
-        }
-        if !gl_blend_factor_valid(st.blend_src, false) || !gl_blend_factor_valid(st.blend_dst, true) {
-            return Err(format!("sgi-gl: blend factors {:#x} and {:#x}", st.blend_src, st.blend_dst));
-        }
-        if !gl_blend_equation_valid(st.blend_equation) {
-            return Err(format!("sgi-gl: blend equation {:#x}", st.blend_equation));
-        }
-        for i in 0..4 {
-            if !(st.blend_color[i] >= 0.0 && st.blend_color[i] <= 1.0) {
-                return Err(format!("sgi-gl: blend colour {} is outside [0, 1]", st.blend_color[i]));
-            }
-        }
-        if st.logic_op_mode.wrapping_sub(SGI_GL_CLEAR) > SGI_GL_SET - SGI_GL_CLEAR {
-            return Err(format!("sgi-gl: logical operation {:#x}", st.logic_op_mode));
-        }
-        if st.colour_mask > SGI_GL_COLOUR_MASK_ALL {
-            return Err(format!("sgi-gl: colour mask {:#x}", st.colour_mask));
-        }
-        if st.texture_env_mode != SGI_GL_REPLACE
-            && st.texture_env_mode != SGI_GL_MODULATE
-            && st.texture_env_mode != SGI_GL_DECAL
-            && st.texture_env_mode != SGI_GL_BLEND
-        {
-            return Err(format!("sgi-gl: texture environment mode {:#x}", st.texture_env_mode));
-        }
-        for i in 0..4 {
-            if !(st.texture_env_color[i] >= 0.0 && st.texture_env_color[i] <= 1.0) {
-                return Err(format!(
-                    "sgi-gl: texture environment colour {} is outside [0, 1]",
-                    st.texture_env_color[i]
-                ));
-            }
-        }
-        if st.fog_mode != SGI_GL_LINEAR && st.fog_mode != SGI_GL_EXP && st.fog_mode != SGI_GL_EXP2 {
-            return Err(format!("sgi-gl: fog mode {:#x}", st.fog_mode));
-        }
-        if !(st.fog_density >= 0.0) {
-            return Err(format!("sgi-gl: fog density {}", st.fog_density));
-        }
-        for i in 0..4 {
-            if !(st.fog_color[i] >= 0.0 && st.fog_color[i] <= 1.0) {
-                return Err(format!("sgi-gl: fog colour {} is outside [0, 1]", st.fog_color[i]));
-            }
-        }
-        if st.polygon_offset & !(SGI_GL_OFFSET_FILL | SGI_GL_OFFSET_LINE | SGI_GL_OFFSET_POINT) != 0 {
-            return Err(format!("sgi-gl: polygon offset enables {:#x}", st.polygon_offset));
-        }
-        if (st.clip_planes >> SGI_GL_CLIP_PLANES) != 0 {
-            return Err(format!("sgi-gl: clip plane enables {:#x}", st.clip_planes));
-        }
-        if st.drawable.clip.n > SGI_CLIP_MAX as u32 {
-            return Err(format!("sgi-gl: {} clip rectangles", st.drawable.clip.n));
-        }
-        if (self.lights_enabled >> SGI_GL_LIGHTS) != 0 {
-            return Err(format!("sgi-gl: light enables {:#x}", self.lights_enabled));
-        }
-        if (self.tex_gen_enabled >> 4) != 0 {
-            return Err(format!("sgi-gl: texture generation enables {:#x}", self.tex_gen_enabled));
-        }
-        for i in 0..4usize {
-            let mode = self.tex_gen_mode[i];
-
-            if mode != SGI_GL_EYE_LINEAR
-                && mode != SGI_GL_OBJECT_LINEAR
-                && (mode != SGI_GL_SPHERE_MAP || i >= 2)
-            {
-                return Err(format!("sgi-gl: texture generation mode {} {:#x}", i, mode));
-            }
-        }
-        if gl_faces(self.color_material_face) == 0 {
-            return Err(format!("sgi-gl: colour material face {:#x}", self.color_material_face));
-        }
-        match self.color_material_mode {
-            SGI_GL_AMBIENT | SGI_GL_DIFFUSE | SGI_GL_SPECULAR | SGI_GL_EMISSION
-            | SGI_GL_AMBIENT_AND_DIFFUSE => {}
-            _ => {
-                return Err(format!("sgi-gl: colour material parameter {:#x}", self.color_material_mode));
-            }
-        }
-        if !self.point_size.is_finite()
-            || !self.line_width.is_finite()
-            || !(self.point_size > 0.0)
-            || !(self.line_width > 0.0)
-        {
-            return Err(format!(
-                "sgi-gl: point size {} or line width {}",
-                self.point_size, self.line_width
-            ));
-        }
-        if self.line_stipple_repeat.wrapping_sub(1) > 255 || self.line_stipple_pattern > 0xffff {
-            return Err(format!(
-                "sgi-gl: line stipple repeat {}, pattern {:#x}",
-                self.line_stipple_repeat, self.line_stipple_pattern
-            ));
-        }
-        for i in 0..2 {
-            if self.polygon_mode[i].wrapping_sub(SGI_GL_POINT) > SGI_GL_FILL - SGI_GL_POINT {
-                return Err(format!("sgi-gl: polygon mode {:#x}", self.polygon_mode[i]));
-            }
-        }
-        if self.raster_enables
-            & !(SGI_GL_RASTER_POINT_SMOOTH
-                | SGI_GL_RASTER_LINE_SMOOTH
-                | SGI_GL_RASTER_LINE_STIPPLE
-                | SGI_GL_RASTER_POLYGON_SMOOTH
-                | SGI_GL_RASTER_POLYGON_STIPPLE)
-            != 0
-        {
-            return Err(format!("sgi-gl: rasterization enables {:#x}", self.raster_enables));
-        }
-        if self.polygon.enabled > 1
-            || self.polygon.failed > 1
-            || self.polygon.count > self.polygon.capacity
-            || (self.polygon.count != 0 && self.polygon.vertices.is_empty())
-            || (self.polygon.failed != 0 && self.polygon.count != 0)
-            || (self.polygon.error != 0 && self.polygon.error != SGI_GL_OUT_OF_MEMORY)
-            || ((self.polygon.count != 0 || self.polygon.failed != 0)
-                && (self.polygon.enabled == 0 || self.in_begin == 0 || self.begin_mode != SGI_GL_POLYGON))
-            || (self.polygon.enabled != 0
-                && self.in_begin != 0
-                && self.begin_mode == SGI_GL_POLYGON
-                && self.nheld != 0)
-        {
-            return Err("sgi-gl: invalid owned polygon assembly".to_string());
-        }
-        if self.begin_mode > SGI_GL_POLYGON {
-            return Err(format!("sgi-gl: primitive mode {}", self.begin_mode));
-        }
-        if self.nheld > (if self.in_begin != 0 { gl_held_max(self.begin_mode) } else { 0 }) {
-            return Err(format!(
-                "sgi-gl: {} vertices held in mode {}{}",
-                self.nheld,
-                self.begin_mode,
-                if self.in_begin != 0 { "" } else { " outside glBegin" }
-            ));
-        }
-        Ok(())
-    }
 }

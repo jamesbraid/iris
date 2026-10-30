@@ -129,7 +129,7 @@ impl Odyssey {
         irq: Arc<dyn InterruptController>,
         mem: Arc<dyn BusDevice>,
     ) -> Result<Arc<Self>, String> {
-        let mut s = sgi_odyssey_new(product, widget as u32)?;
+        let mut s = Board::new(product, widget as u32)?;
         s.guest = Some(mem);
         s.front.lock().irq = Some(irq);
         Ok(Arc::new(Self {
@@ -283,6 +283,6 @@ impl Drop for Odyssey {
 
 impl Resettable for Odyssey {
     fn power_on(&self) {
-        self.state.board.lock().reset_hold();
+        self.state.board.lock().reset();
     }
 }

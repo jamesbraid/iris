@@ -11,19 +11,19 @@
 use super::*;
 
 pub type CompletionKind = u32;
-pub const SGI_DONE_CONSUMED: CompletionKind = 1; // the item's words were consumed
+ // the item's words were consumed
 pub const SGI_DONE_WRITTEN: CompletionKind = 2; // its pixels are in board or guest memory
-pub const SGI_DONE_QUERY_READY: CompletionKind = 4; // a query's answer is ready
+ // a query's answer is ready
 pub const SGI_DONE_SWAPPED: CompletionKind = 8; // a swap took effect at a retrace
-pub const SGI_DONE_FAILED: CompletionKind = 16; // the item stopped; payload is Failure
+ // the item stopped; payload is Failure
 
 /// The payload of an SGI_DONE_FAILED record.
 pub type Failure = u32;
 pub const SGI_FAIL_BUS: Failure = 1; // a guest-memory transaction failed
 pub const SGI_FAIL_BOUNDS: Failure = 2; // outside the page list, plane or pool
-pub const SGI_FAIL_FORMAT: Failure = 3; // no conversion between the two formats
-pub const SGI_FAIL_FULL: Failure = 4; // a fixed-size record queue was full
-pub const SGI_FAIL_BUSY: Failure = 5; // the fetch was still running a list
+ // no conversion between the two formats
+ // a fixed-size record queue was full
+ // the fetch was still running a list
 
 /// One completion, published to the family in item order. seq is the
 /// item's position in the head's order; cookie is the family's own tag.
@@ -45,12 +45,6 @@ pub struct HeadOps {
     /// Scanout: an update is about to resolve the dirty lines. Must not
     /// call Scanout::update().
     pub pre_update: Option<fn(Opaque)>,
-    /// A row of pixels between guest bytes and native plane words:
-    /// (opaque, conversion, to_plane, src, dst, pixels). NULL: a guest
-    /// pixel is the plane's stored bytes.
-    pub convert_row: Option<fn(Opaque, u8, bool, &[u8], &mut [u8], u32)>,
-    /// A query about family state: (opaque, request words, dst, len out).
-    pub answer: Option<fn(Opaque, &[u32], &mut [u8], &mut u32)>,
     /// The bus address at which the head's address space reaches a device
     /// address; false (having logged why) when unreachable.
     pub dma_address: Option<fn(Opaque, u64, &mut u64) -> bool>,
@@ -106,8 +100,6 @@ pub static HEAD_OPS: HeadOps = HeadOps {
     publish: Some(publish),
     resolve_row: Some(resolve_row),
     pre_update: Some(pre_update),
-    convert_row: None,
-    answer: None,
     dma_address: None,
     dma_chunk: Some(dma_chunk),
     retrace: Some(retrace),

@@ -14,9 +14,6 @@ use super::*;
 use std::cell::Cell;
 
 pub const SGI_PI_GFX_SLOTS: usize = 2;
-/// The block's first register and its extent in the interface's window.
-pub const SGI_PI_GFX_BASE: u32 = 0x300;
-pub const SGI_PI_GFX_SLOT_STRIDE: u32 = 0x28;
 pub const SGI_PI_GFX_REGS: u32 = 10;
 
 /// The five registers of one slot, in address order.
@@ -24,7 +21,6 @@ pub const SGI_PI_GFX_PAGE: u32 = 0;
 pub const SGI_PI_GFX_CREDIT: u32 = 1;
 pub const SGI_PI_GFX_BIAS: u32 = 2;
 pub const SGI_PI_GFX_INT_COUNT: u32 = 3;
-pub const SGI_PI_GFX_INT_COMPARE: u32 = 4;
 pub const SGI_PI_GFX_SLOT_REGS: u32 = 5;
 
 /// Page: bit 40 enables it, bits 39:17 name it; the rest is reserved.
@@ -98,11 +94,6 @@ impl PiGfx {
         if self.credit[slot] > self.bias[slot] {
             self.starved[slot] = false;
         }
-    }
-
-    /// Every register zero, every page disabled (the model's choice).
-    pub fn reset(&mut self) {
-        *self = PiGfx::default();
     }
 
     /// Register n of the block, 0 to SGI_PI_GFX_REGS - 1, counted in
@@ -185,45 +176,6 @@ impl PiGfx {
         true
     }
 
-    /// Ticks from the count to the compare: a whole turn when they are equal.
-    fn int_left(&self, slot: usize) -> u64 {
-        let left = self.int_compare[slot].wrapping_sub(self.int_count[slot]) & SGI_PI_GFX_INT_MASK;
-
-        if left != 0 { left as u64 } else { SGI_PI_GFX_INT_MASK as u64 + 1 }
-    }
-
-    /// Brings int_count up to `now`, then starts or stops the count for the
-    /// credit counter as it now stands. True when the counter reached the
-    /// compare: the caller sends the interrupt.
-    pub fn int_advance(&mut self, slot: usize, now: u64) -> bool {
-        let mut fired = false;
-
-        assert!(slot < SGI_PI_GFX_SLOTS);
-        if self.int_running[slot] && now > self.int_epoch[slot] {
-            let elapsed = now - self.int_epoch[slot];
-
-            if elapsed >= self.int_left(slot) {
-                self.int_count[slot] = self.int_compare[slot];
-                fired = true;
-            } else {
-                self.int_count[slot] = (self.int_count[slot] as u64).wrapping_add(elapsed) as u32 & SGI_PI_GFX_INT_MASK;
-            }
-        }
-        self.int_epoch[slot] = now;
-        // At or below zero, and (the model's choice) below a nonzero bias.
-        self.int_running[slot] = self.credit[slot] == 0 && self.bias[slot] > 0;
-        fired
-    }
-
-    /// The tick at which the interrupt counter reaches the compare, or
-    /// u64::MAX while it does not run.
-    pub fn int_due(&self, slot: usize) -> u64 {
-        assert!(slot < SGI_PI_GFX_SLOTS);
-        if !self.int_running[slot] {
-            return u64::MAX;
-        }
-        self.int_epoch[slot].wrapping_add(self.int_left(slot))
-    }
 }
 
 thread_local! {
@@ -261,40 +213,3 @@ impl PiGfx {
     }
 }
 
-/// Where a graphics node-widget map sends a widget's credits.
-#[derive(Clone, Copy, Default)]
-pub struct PiGfxRoute {
-    pub node: u32,
-    pub pi: u32,
-    pub slot: u32,
-}
-
-/// The Hub's map: widget 3:0, node 12:4, processor 16, valid 20. The first
-/// matching entry wins.
-pub fn pi_gfx_route_hub(map: &[u64; 2], widget: u32, route: &mut PiGfxRoute) -> bool {
-    for entry in map.iter().copied() {
-        if entry & (1 << 20) == 0 || (entry & 0xf) as u32 != widget {
-            continue;
-        }
-        route.node = ((entry >> 4) & 0x1ff) as u32;
-        route.pi = 0;
-        route.slot = ((entry >> 16) & 1) as u32;
-        return true;
-    }
-    false
-}
-
-/// The Bedrock's map: widget 3:0, PI 4, node 12:5, processor 16. There is
-/// no valid bit, so an entry of zero names widget 0 on node 0.
-pub fn pi_gfx_route_bedrock(map: &[u64; 2], widget: u32, route: &mut PiGfxRoute) -> bool {
-    for entry in map.iter().copied() {
-        if (entry & 0xf) as u32 != widget {
-            continue;
-        }
-        route.node = ((entry >> 5) & 0xff) as u32;
-        route.pi = ((entry >> 4) & 1) as u32;
-        route.slot = ((entry >> 16) & 1) as u32;
-        return true;
-    }
-    false
-}

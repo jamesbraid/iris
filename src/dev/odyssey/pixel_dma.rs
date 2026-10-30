@@ -40,8 +40,6 @@ pub enum DmaDirection {
 }
 
 pub const SGI_DMA_CHUNK_MAX: u32 = 4096;
-/// No SGI head has a plane taller than this; it bounds a transfer's chunks.
-pub const SGI_DMA_MAX_ROWS: u32 = 16384;
 /// The smallest page a page list may name.
 pub const SGI_DMA_MIN_PAGE_SIZE: u32 = SGI_DMA_CHUNK_MAX;
 
@@ -68,7 +66,6 @@ pub struct DmaChunk {
     pub pos: u64,      // offset within the page-listed buffer
     pub addr: u64,     // device address, as traced
     pub bus_addr: u64, // composed address the transfer used
-    pub bounce: bool,
     /// The bytes the head wrote, as offsets into the chunk: one run from
     /// the first to the last, empty while written_end is 0.
     pub written_start: u32,
@@ -182,7 +179,6 @@ impl DmaBus {
                 pos,
                 addr,
                 bus_addr,
-                bounce: true,
                 written_start: 0,
                 written_end: 0,
             };
@@ -247,199 +243,6 @@ impl DmaMap {
     }
 }
 
-pub type PixelDmaDir = u32;
-pub const SGI_DMA_TO_PLANE: PixelDmaDir = 0;
-pub const SGI_DMA_FROM_PLANE: PixelDmaDir = 1;
-
-#[derive(Clone, Default)]
-pub struct PixelDma {
-    pub dir: PixelDmaDir,
-    pub plane: u32,
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32, // plane coordinates
-    pub pitch: u32, // guest bytes from one row to the next
-    pub guest_bpp: u8,
-    pub conversion: u8, // family constant for convert_row()
-    pub logic_op: u8,   // SGI_LOGIC_*, SGI_LOGIC_COPY to store
-    pub mask: u32,      // plane bits a store may change
-    pub tag_plane: u32, // SGI_PLANE_NONE: no tag written
-    pub tag: u8,        // stored in tag_plane per pixel written
-    pub clip: ClipList,
-    pub trace_chunks: bool,
-    pub trace_seq: u64,
-    pub seq: u64,    // the completion's sequence number
-    pub cookie: u64, // the family's tag for the completion
-    pub offset: u64, // buffer offset of row 0
-    pub map: DmaMap, // resolved by PixelDma::dma_pixels_map()
-}
-
-impl PixelDma {
-    /// m is the board memory whose plane the transfer targets, read for the
-    /// plane's size only. Returns 0 or an Failure.
-    pub fn dma_pixels_map(&mut self, bus: &DmaBus, pl: &DmaPageList, m: &BoardMemory) -> i32 {
-        let dir = if self.dir == SGI_DMA_TO_PLANE { DmaDirection::ToDevice } else { DmaDirection::FromDevice };
-        let row = self.dma_pixels_row_bytes();
-
-        self.map = DmaMap::default();
-        if self.w <= 0 || self.h <= 0 || self.guest_bpp == 0 {
-            return 0;
-        }
-        let mut ret = self.dma_pixels_check(pl, m);
-        if ret != 0 {
-            return ret;
-        }
-        // Rows that follow one another map as one range, in fewer chunks.
-        if self.pitch as u64 == row {
-            return bus.map(&mut self.map, pl, self.offset, row * self.h as u64, dir, self.trace_chunks, self.trace_seq);
-        }
-        for r in 0..self.h {
-            ret = bus.map(
-                &mut self.map,
-                pl,
-                self.offset + r as u64 * self.pitch as u64,
-                row,
-                dir,
-                self.trace_chunks,
-                self.trace_seq,
-            );
-            if ret != 0 {
-                return ret;
-            }
-        }
-        0
-    }
-    /// Host memory only. Returns 0 or an Failure.
-    pub fn dma_pixels_run(&mut self, m: &mut BoardMemory, ops: &HeadOps, opaque: Opaque) -> i32 {
-        let pp = m.plane(self.plane);
-        let mut tag: Option<Plane> = None;
-        let row = self.dma_pixels_row_bytes();
-
-        if self.w <= 0 || self.h <= 0 || self.guest_bpp == 0 {
-            return 0;
-        }
-        if pp.is_null() {
-            crate::dlog!(LogModule::Odyssey, "sgi-dma: no plane {}", self.plane);
-            return SGI_FAIL_BOUNDS as i32;
-        }
-        let p: Plane = *pp.get();
-        if self.tag_plane != SGI_PLANE_NONE {
-            let tp = m.plane(self.tag_plane);
-            if tp.is_null() {
-                crate::dlog!(LogModule::Odyssey, "sgi-dma: no tag plane {}", self.tag_plane);
-                return SGI_FAIL_BOUNDS as i32;
-            }
-            tag = Some(*tp.get());
-        }
-        // A row wider or a transfer taller than the plane has no destination.
-        if self.w as u32 > p.width || self.h as u32 > p.height {
-            crate::dlog!(
-                LogModule::Odyssey,
-                "sgi-dma: {}x{} pixels exceed plane {}'s {}x{}",
-                self.w,
-                self.h,
-                self.plane,
-                p.width,
-                p.height
-            );
-            return SGI_FAIL_BOUNDS as i32;
-        }
-        let pbpp = plane_bytes_per_pixel(p.format);
-        if ops.convert_row.is_none() && self.guest_bpp as u32 != pbpp {
-            crate::dlog!(
-                LogModule::Odyssey,
-                "sgi-dma: {}-byte guest pixels to plane {}'s {}-byte pixels need a conversion",
-                self.guest_bpp,
-                self.plane,
-                pbpp
-            );
-            return SGI_FAIL_FORMAT as i32;
-        }
-
-        let mut bytes = vec![0u8; row as usize];
-        let mut words = vec![0u32; self.w as usize];
-        for r in 0..self.h {
-            let pos = self.offset + r as u64 * self.pitch as u64;
-            let y = self.y + r;
-
-            if self.dir == SGI_DMA_TO_PLANE {
-                if !self.map.copy(pos, &mut bytes, false) {
-                    crate::dlog!(LogModule::Odyssey, "sgi-dma: row {} at {:#x} was not mapped", r, pos);
-                    return SGI_FAIL_BOUNDS as i32;
-                }
-                if let Some(convert_row) = ops.convert_row {
-                    let wb = unsafe {
-                        std::slice::from_raw_parts_mut(words.as_mut_ptr() as *mut u8, words.len() * 4)
-                    };
-                    convert_row(opaque, self.conversion, true, &bytes, wb, self.w as u32);
-                } else {
-                    for i in 0..self.w as usize {
-                        words[i] = p.decode(&bytes[i * pbpp as usize..]);
-                    }
-                }
-                for i in 0..self.w {
-                    let x = self.x + i;
-
-                    if !p.contains(x, y) || !self.clip.contains(x, y) {
-                        continue;
-                    }
-                    m.plane_merge(&p, x, y, words[i as usize], self.logic_op, self.mask);
-                    if let Some(t) = &tag {
-                        m.plane_store(t, x, y, self.tag as u32);
-                    }
-                }
-            } else {
-                for i in 0..self.w {
-                    words[i as usize] = m.plane_load(&p, self.x + i, y);
-                }
-                if let Some(convert_row) = ops.convert_row {
-                    let wb = unsafe {
-                        std::slice::from_raw_parts(words.as_ptr() as *const u8, words.len() * 4)
-                    };
-                    convert_row(opaque, self.conversion, false, wb, &mut bytes, self.w as u32);
-                } else {
-                    for i in 0..self.w as usize {
-                        p.encode(words[i], &mut bytes[i * pbpp as usize..]);
-                    }
-                }
-                if !self.map.copy(pos, &mut bytes, true) {
-                    crate::dlog!(LogModule::Odyssey, "sgi-dma: row {} at {:#x} was not mapped", r, pos);
-                    return SGI_FAIL_BOUNDS as i32;
-                }
-            }
-        }
-        0
-    }
-    /// Release the map and publish WRITTEN with the bytes moved, or FAILED
-    /// with status when status is non-zero.
-    pub fn dma_pixels_finish(&mut self, status: i32, ops: &HeadOps, opaque: Opaque) {
-        let moved: u64 = if self.w > 0 && self.h > 0 {
-            self.dma_pixels_row_bytes().wrapping_mul(self.h as u64)
-        } else {
-            0
-        };
-
-        self.map.unmap();
-        crate::dlog!(LogModule::Odyssey, "sgi_dma_pixels: seq {} dir {} plane {} at {},{} size {}x{} status {}", self.seq, self.dir as i32, self.plane, self.x, self.y, self.w, self.h, status);
-        if status != 0 {
-            ops.publish(opaque, self.seq, SGI_DONE_FAILED, self.cookie, status as u64);
-        } else {
-            ops.publish(opaque, self.seq, SGI_DONE_WRITTEN, self.cookie, moved);
-        }
-    }
-    /// All three steps, for a synchronous head. Returns 0 or an Failure.
-    pub fn dma_pixels(&mut self, bus: &DmaBus, pl: &DmaPageList, m: &mut BoardMemory) -> i32 {
-        let mut ret = self.dma_pixels_map(bus, pl, m);
-
-        if ret == 0 {
-            ret = self.dma_pixels_run(m, bus.ops.get(), bus.opaque);
-        }
-        self.dma_pixels_finish(ret, bus.ops.get(), bus.opaque);
-        ret
-    }
-}
-
 impl DmaBus {
     pub fn compose(&self, addr: u64, out: &mut u64) -> bool {
         if let Some(ops) = self.ops.as_opt() {
@@ -501,67 +304,3 @@ impl DmaMap {
     }
 }
 
-impl PixelDma {
-    pub fn dma_pixels_row_bytes(&self) -> u64 {
-        (self.w as i64 as u64).wrapping_mul(self.guest_bpp as u64)
-    }
-
-    // Every size here can come from a guest's descriptor, so the transfer must
-    // fit its plane and its page list before anything is mapped or allocated.
-    pub fn dma_pixels_check(&self, pl: &DmaPageList, m: &BoardMemory) -> i32 {
-        let pp = m.plane(self.plane);
-        let total = pl.bytes();
-        let row = self.dma_pixels_row_bytes();
-
-        if pp.is_null() {
-            crate::dlog!(LogModule::Odyssey, "sgi-dma: no plane {}", self.plane);
-            return SGI_FAIL_BOUNDS as i32;
-        }
-        let p: Plane = *pp.get();
-        if self.w as u32 > p.width || self.h as u32 > p.height {
-            crate::dlog!(
-                LogModule::Odyssey,
-                "sgi-dma: {}x{} pixels exceed plane {}'s {}x{}",
-                self.w,
-                self.h,
-                self.plane,
-                p.width,
-                p.height
-            );
-            return SGI_FAIL_BOUNDS as i32;
-        }
-        let fits = |h: i32| -> Option<bool> {
-            if h as i64 > SGI_DMA_MAX_ROWS as i64 {
-                return Some(false);
-            }
-            let moved = row.checked_mul(h as u64)?;
-            if moved > total {
-                return Some(false);
-            }
-            let end = (self.pitch as u64).checked_mul((h - 1) as u64)?;
-            let end = end.checked_add(row)?;
-            let end = end.checked_add(self.offset)?;
-            Some(end <= total)
-        };
-        if fits(self.h) != Some(true) {
-            crate::dlog!(
-                LogModule::Odyssey,
-                "sgi-dma: {}x{} pixels of {} bytes, pitch {}, from {:#x} do not fit a {}-page buffer",
-                self.w,
-                self.h,
-                self.guest_bpp,
-                self.pitch,
-                self.offset,
-                pl.npages
-            );
-            return SGI_FAIL_BOUNDS as i32;
-        }
-        // Overlapping rows are fine to read, but written back through bounce
-        // buffers the later chunk's copy of the shared bytes would win.
-        if self.dir == SGI_DMA_FROM_PLANE && self.h > 1 && (self.pitch as u64) < row {
-            crate::dlog!(LogModule::Odyssey, "sgi-dma: pitch {} overlaps {}-byte rows written to guest memory", self.pitch, row);
-            return SGI_FAIL_BOUNDS as i32;
-        }
-        0
-    }
-}

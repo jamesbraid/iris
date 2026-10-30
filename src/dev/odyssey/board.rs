@@ -31,7 +31,6 @@ pub const SGI_ODYSSEY_OBJ_VALID_BYTES: u32 = SGI_ODYSSEY_OBJ_POOL_WORDS / 8;
 /// The texture level table's entries (0x0e80 .. 0x0ebf).
 pub const SGI_ODYSSEY_TEX_LEVELS: u32 = 64;
 pub const SGI_ODYSSEY_TEX_COLOUR_TABLE_ENTRIES: u32 = 256;
-pub const SGI_ODYSSEY_TEX_DETAIL_FUNCTION_BLOCKS: u32 = 16;
 pub const SGI_ODYSSEY_TEX_DETAIL_FUNCTION_ENTRIES: u32 = 256;
 pub const SGI_ODYSSEY_GL_ENTRIES: u32 = 4;
 pub const SGI_ODYSSEY_GL_LIGHTS: u32 = 8;
@@ -91,8 +90,6 @@ pub struct Board {
     pub product: String,
     pub nic_serial: u64,
     pub nic_record: String,
-    /// Whether the FIFO pages' stores are posted (x-posted-fifo).
-    pub posted_fifo: bool,
 
     // Composed at realize from the properties above.
     /// The product's record, if nic-record unset.
@@ -177,7 +174,6 @@ pub struct Board {
     /// When each object was last selected or grown (obj_clock's count).
     pub obj_stamp: [u64; SGI_ODYSSEY_OBJECTS as usize],
     pub obj_clock: u64,
-    pub obj_mem_saved: u32,
     /// SGI_ODYSSEY_OBJ_VALID_BYTES bytes.
     pub obj_valid: Vec<u8>,
     pub obj_full_reported: bool,
@@ -422,13 +418,6 @@ pub struct Board {
     pub image_nbytes: u32,
     pub image_code_reported: bool,
 
-    // Host-only qtest introspection.
-    pub test_pixel_x: u32,
-    pub test_pixel_y: u32,
-    pub test_pixel_buffer: u32,
-    pub test_pixel_count: u32,
-    pub test_object_base: u32,
-
     /// The shared scanout; resolves the colour plane through
     /// HEAD_OPS.resolve_row.
     pub scanout: Scanout,
@@ -461,7 +450,6 @@ impl Default for Board {
             product: String::new(),
             nic_serial: 0,
             nic_record: String::new(),
-            posted_fifo: false,
             product_record: String::new(),
             memory_config: 0,
             flctl_config: 0,
@@ -514,7 +502,6 @@ impl Default for Board {
             obj_rows: [0; SGI_ODYSSEY_OBJECTS as usize],
             obj_stamp: [0; SGI_ODYSSEY_OBJECTS as usize],
             obj_clock: 0,
-            obj_mem_saved: 0,
             obj_valid: vec![0; SGI_ODYSSEY_OBJ_VALID_BYTES as usize],
             obj_full_reported: false,
             obj_forget_reported: false,
@@ -699,11 +686,6 @@ impl Default for Board {
             image_bytes: 0,
             image_nbytes: 0,
             image_code_reported: false,
-            test_pixel_x: 0,
-            test_pixel_y: 0,
-            test_pixel_buffer: 0,
-            test_pixel_count: 0,
-            test_object_base: 0,
             scanout: Default::default(),
             reported_addr: [0; SGI_ODYSSEY_UNIMP_REPORTS as usize],
             reported_addr_count: 0,
@@ -1159,7 +1141,7 @@ impl Board {
         Err(format!("sgi-odyssey product must be v12, v10, v8 or v6, not {}", self.product))
     }
 
-    pub fn build_widget(&mut self) -> Result<(), String> {
+    pub fn configure(&mut self) -> Result<(), String> {
         self.resolve_product()?;
         if self.revision > 0xf {
             return Err(format!("sgi-odyssey revision must fit in four bits, not {}", self.revision));
@@ -1169,7 +1151,7 @@ impl Board {
         Ok(())
     }
 
-    pub fn realize(&mut self) -> Result<(), String> {
+    pub fn allocate(&mut self) -> Result<(), String> {
         let mut err: Option<String> = None;
 
         self.attach_nic()?;
@@ -1264,35 +1246,15 @@ impl Board {
         Ok(())
     }
 
-    pub fn unrealize(&mut self) {
-        {
-            // The board's thread may wait for the board lock the caller holds;
-            // it is stopped beforehand (BoardLocks::work_stop()).
-            let mut f = self.front.lock();
-            assert!(f.worker.is_none(), "odyssey: the work thread outlived the machine");
-            f.work_queue = Vec::new();
-        }
-        self.gl_ctx.cleanup();
-        self.scanout.cleanup();
-        self.did = Vec::new();
-        self.overlay = Vec::new();
-        self.poly_marks = Vec::new();
-        self.mem.cleanup();
-        self.buffer1_mem.cleanup();
-        self.obj_mem.cleanup();
-        self.depth_mem.cleanup();
-        self.stencil_mem.cleanup();
-    }
-
-    pub fn reset_hold(&mut self) {
+    pub fn reset(&mut self) {
         self.work_reset();
         self.reset_registers();
         self.front.lock().update_irq();
-        // Board::build_widget() also calls Board::reset_registers(), before
-        // the board memory exists (realize initializes it afterwards) -- this
-        // runs strictly after realize, so the board memory exists here. Zero the
-        // device-backed colour plane's bytes directly; its planes are realize-
-        // time configuration and stay. Redraw because reset clears it.
+        // Board::configure() also calls Board::reset_registers(), before
+        // the board memory exists; this runs after Board::allocate(), so the
+        // memory exists here. Zero the colour planes' bytes directly; the
+        // planes themselves are fixed at allocation and stay. Redraw because
+        // reset clears them.
         self.mem.bytes.fill(0);
         self.buffer1_mem.bytes.fill(0);
         self.obj_mem.bytes.fill(0);
@@ -1317,14 +1279,6 @@ impl Board {
         }
         self.scanout.reset();
     }
-
-    pub fn instance_init(&mut self) {
-        self.obj_index = Default::default();
-        // The fixed part of the drawable Board::gl_bind() hands over.
-        self.gl_bind_drawable.bound = 1;
-        self.gl_bind_drawable.front = 0;
-        self.gl_bind_drawable.back = 1;
-    }
 }
 
 /// The synthetic one-wire serial for a component letter and index.
@@ -1332,25 +1286,31 @@ pub fn synthetic_onewire_serial(letter: char, index: u32) -> u64 {
     0x51454d55u64 << 16 | (letter as u64) << 8 | index as u64
 }
 
-/// The board as the QEMU device is built: instance_init, the property
-/// defaults (odyssey_properties), `product` and the slot, then realize.
-pub fn sgi_odyssey_new(product: &str, slot: u32) -> Result<Box<Board>, String> {
-    let mut s = Box::new(Board::default());
+impl Board {
+    /// A board of `product` (v12, v10, v8 or v6) in crosstalk widget
+    /// `slot`: board revision A with a synthetic serial number in its
+    /// one-wire NIC, and the memory the product carries. An error names a
+    /// configuration the board cannot have.
+    pub fn new(product: &str, slot: u32) -> Result<Box<Board>, String> {
+        let mut s = Box::new(Board::default());
 
-    s.instance_init();
-    // Property defaults.
-    s.revision = 0xa;
-    s.memory_size = 128;
-    s.memory_banks = 4;
-    s.cas_latency = 3;
-    s.backend_version = 1;
-    s.nic_serial = synthetic_onewire_serial('G', 0);
-    s.raster_bands = true;
-    s.raster_band_pixels = 0;
-    s.posted_fifo = true;
-    s.product = product.to_string();
-    s.slot = slot;
-    s.build_widget()?;
-    s.realize()?;
-    Ok(s)
+        s.obj_index = Default::default();
+        // The fixed part of the drawable Board::gl_bind() hands over.
+        s.gl_bind_drawable.bound = 1;
+        s.gl_bind_drawable.front = 0;
+        s.gl_bind_drawable.back = 1;
+        s.revision = 0xa;
+        s.memory_size = 128;
+        s.memory_banks = 4;
+        s.cas_latency = 3;
+        s.backend_version = 1;
+        s.nic_serial = synthetic_onewire_serial('G', 0);
+        s.raster_bands = true;
+        s.raster_band_pixels = 0;
+        s.product = product.to_string();
+        s.slot = slot;
+        s.configure()?;
+        s.allocate()?;
+        Ok(s)
+    }
 }

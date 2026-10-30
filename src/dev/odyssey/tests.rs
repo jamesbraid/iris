@@ -44,7 +44,7 @@ impl Recorder {
 
 fn board(product: &str) -> (Box<Board>, Arc<Recorder>) {
     let rec = Arc::new(Recorder::default());
-    let s = sgi_odyssey_new(product, VPRO_WIDGET).expect("board");
+    let s = Board::new(product, VPRO_WIDGET).expect("board");
     s.front.lock().irq = Some(rec.clone());
     (s, rec)
 }

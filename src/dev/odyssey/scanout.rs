@@ -113,13 +113,6 @@ impl Scanout {
         self.cursor_drawn_last = -1;
         self.retrace_deadline = -1;
     }
-    pub fn cleanup(&mut self) {
-        self.retrace_deadline = -1;
-        self.frame = Vec::new();
-        self.dirty = Vec::new();
-        self.frame_width = 0;
-        self.frame_height = 0;
-    }
 
     /// A new mode: new frame, everything dirty, retrace phase restarted now.
     pub fn set_mode(&mut self, mode: &ScanoutMode) {
@@ -157,26 +150,6 @@ impl Scanout {
             .wrapping_add(mul_div((n % hz).wrapping_mul(fc), NS_PER_SECOND, hz)) as i64
     }
 
-    /// Put the next retrace at virtual time `when`, with the ones after it a
-    /// period apart. With no retrace in the current mode this does nothing.
-    pub fn set_next_retrace(&mut self, when: i64) {
-        let next = self.retrace_time(self.frames + 1);
-
-        if next < 0 {
-            return;
-        }
-        // A negative retrace time reads as no retrace, which would stop the
-        // retrace for good; an idle timer's -1 is a request for one now.
-        let mut when = when;
-        if when < 0 {
-            when = monotonic_ns();
-        }
-        // Move the epoch rather than restart the count, so retrace n stays
-        // epoch plus n periods and the next one, frames + 1, lands on when.
-        self.epoch = when - (next - self.epoch);
-        self.arm();
-    }
-
     /// Fire the retrace(s) due at `now_ns` (the timer callback's body); the
     /// iris glue calls this from its tick.
     pub fn poll(&mut self, now_ns: i64) {
@@ -202,19 +175,6 @@ impl Scanout {
     }
     pub fn invalidate_all(&mut self) {
         self.invalidate(0, self.mode.height as i32);
-    }
-    /// Plane rows y0 .. y1 changed. The plane is the displayed one and exactly
-    /// as tall as the mode: a bottom-origin row maps to display line
-    /// p.height - 1 - y.
-    pub fn invalidate_plane(&mut self, p: &Plane, y0: i32, y1: i32) {
-        if p.bottom_origin {
-            let first = p.height as i32 - 1 - y0.max(y1);
-            let last = p.height as i32 - 1 - y0.min(y1);
-
-            self.invalidate(first, last - first + 1);
-        } else {
-            self.invalidate(y0.min(y1), (y1 - y0).abs() + 1);
-        }
     }
 
     /// Resolve the dirty lines, draw the cursor if composited, present.
@@ -265,49 +225,6 @@ impl Scanout {
         }
     }
 
-    /// A new cursor image, w x h pixels of 0xAARRGGBB (alpha 0 transparent),
-    /// with its hot spot at (hot_x, hot_y); argb holds w * h words.
-    pub fn cursor_define(&mut self, w: u32, h: u32, hot_x: i32, hot_y: i32, argb: &[u32]) {
-        let cw = w.min(SGI_CURSOR_MAX as u32);
-        let ch = h.min(SGI_CURSOR_MAX as u32);
-
-        if cw != w || ch != h {
-            crate::dlog!(LogModule::Odyssey, "sgi-scanout: a {}x{} cursor is clipped to {}x{}", w, h, cw, ch);
-        }
-        self.cursor_w = cw;
-        self.cursor_h = ch;
-        self.cursor_hot_x = hot_x;
-        self.cursor_hot_y = hot_y;
-        self.cursor_image = [0; SGI_CURSOR_MAX * SGI_CURSOR_MAX];
-        for y in 0..ch as usize {
-            self.cursor_image[y * cw as usize..(y + 1) * cw as usize]
-                .copy_from_slice(&argb[y * w as usize..y * w as usize + cw as usize]);
-        }
-        // The host cursor (non-composited) is the iris glue's to present.
-        if self.composite_cursor {
-            self.cursor_invalidate();
-        }
-    }
-    /// The hot spot is at display (x, y); `on` is whether the cursor shows.
-    pub fn cursor_move(&mut self, x: i32, y: i32, on: bool) {
-        self.cursor_x = x;
-        self.cursor_y = y;
-        self.cursor_on = on;
-        if self.composite_cursor {
-            self.cursor_invalidate();
-        }
-    }
-
-    /// Queue a swap to take effect at a coming retrace. With SGI_SWAP_MAX
-    /// already waiting, publishes FAILED with SGI_FAIL_FULL at once.
-    pub fn queue_swap(&mut self, seq: u64, cookie: u64) {
-        if self.swap_count as usize == SGI_SWAP_MAX {
-            self.ops.get().publish(self.opaque, seq, SGI_DONE_FAILED, cookie, SGI_FAIL_FULL as u64);
-            return;
-        }
-        self.swaps[((self.swap_head + self.swap_count) as usize) % SGI_SWAP_MAX] = SwapRecord { seq, cookie };
-        self.swap_count += 1;
-    }
 }
 
 /// Nanoseconds in a second.
@@ -417,15 +334,6 @@ impl Scanout {
         *last = top + self.cursor_h as i32 - 1;
     }
 
-    /// A composited cursor changed: repaint where it was and where it is.
-    pub fn cursor_invalidate(&mut self) {
-        let mut first = 0;
-        let mut last = 0;
-
-        self.invalidate(self.cursor_drawn_first, self.cursor_drawn_last - self.cursor_drawn_first + 1);
-        self.cursor_span(&mut first, &mut last);
-        self.invalidate(first, last - first + 1);
-    }
 }
 
 pub fn scanout_blend(src: u32, dst: u32) -> u32 {

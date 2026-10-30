@@ -111,7 +111,6 @@ pub const ODSY_FLCTL_CONFIG_RESET: u32 = 0x0001c000;
 pub const ODSY_STATUS0_FIFO_ENABLED: u32 = 0x10000000;
 pub const ODSY_STATUS0_FIFO_LOW_WATER: u32 = 0x00020000;
 pub const ODSY_STATUS0_FIFO_EMPTY: u32 = 0x00010000;
-pub const ODSY_STATUS0_READY: u32 = ODSY_STATUS0_FIFO_ENABLED | ODSY_STATUS0_FIFO_LOW_WATER |  ODSY_STATUS0_FIFO_EMPTY;
 
 // The command FIFO's low-water mark, in stores
 pub const ODSY_CFIFO_LOW_WATER: u32 = 16;
@@ -227,7 +226,6 @@ pub const ODSY_CTX_SWITCH_PORT: u64 = 0x118000;
 pub const ODSY_CTX_SWITCH_OPCODE_SHIFT: u32 = 40;
 pub const ODSY_CTX_SWITCH_OPCODE: u32 = 0x7;
 pub const ODSY_CTX_SWITCH_VALID: u64 = 1 << 0;
-pub const ODSY_CTX_SWITCH_ID_SHIFT: u32 = 16;
 pub const ODSY_CTX_SWITCH_DONE_OFFSET: u64 = 0x8fc;
 
 // The command-FIFO self-test read-back.
@@ -259,7 +257,6 @@ pub const ODSY_REG_BLIT_PREFIX: u32 = 0x0658;
 
 // The host-write/sync command the kernel driver's DMA completion wait uses
 pub const ODSY_REG_HOST_WRITE: u32 = 0x0a5a;
-pub const ODSY_HOST_WRITE_INTERRUPT: u32 = 1 << 15;
 
 // The page-table pixel/texture DMA descriptor.
 pub const ODSY_DMA_DESC_UPLOAD: u32 = 0x00000e01; // opcode 0xe01: either direction
@@ -820,10 +817,6 @@ pub const ODSY_IMAGE_HEADER_GROUP_SHIFT: u32 = 20;
 pub const ODSY_IMAGE_HEADER_GROUP_MASK: u32 = 0xf;
 pub const ODSY_IMAGE_HEADER_GROUP_FULL: u32 = 16;
 
-// How many operand words cmd_operand[] retains
-pub const ODSY_CMD_MAX_OPERANDS: u32 = SGI_ODYSSEY_CMD_OPERANDS as u32;
-pub const ODSY_CMD_OLD_OPERANDS: u32 = 5;
-
 // The window restore.
 pub const ODSY_CMD_WINDOW_RESTORE: u32 = 0x90008116; // 0 operands
 pub const ODSY_REG_WINDOW_ORIGIN: u32 = 0x0841; // 2 operands: x, y
@@ -973,8 +966,6 @@ pub const ODSY_WORK_QUEUE_MAX: u32 = 65536;
 // The command FIFO's depth, in stores.
 pub const ODSY_CFIFO_DEPTH: u32 = 64;
 
-// The two command-FIFO pages, as their own regions over the aperture so their stores can be posted (memory_region_enable_posted_writes())
-pub const ODSY_FIFO_PAGE: u64 = 0x1000;
 // Board-to-host and sentinel reports, each made once (dma_read_reported).
 pub const ODSY_DMA_REPORT_DRAW_SENTINEL: u32 = 1 << 0;
 pub const ODSY_DMA_REPORT_SENTINEL: u32 = 1 << 1;
