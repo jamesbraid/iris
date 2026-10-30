@@ -6661,4 +6661,40 @@ mod tests {
         check::<crate::cpu::mips_cache_shadow::R5000ShadowCache>(false);
         check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(true);
     }
+
+    /// Config reports each part's secondary cache: SS (bits 18:16) is
+    /// log2(secondary size / 512 KB) and SB (bit 13) is set for 128-byte lines
+    /// (NEC U10278EJ4V0UM p.230). The primary caches read 32 KB.
+    #[test]
+    fn config_reports_the_secondary_cache_of_each_family_part() {
+        use crate::cpu::mips_cache_shadow::*;
+        fn config<C: CpuModel + From<Arc<dyn BusDevice>>>() -> u64 {
+            let cfg = MipsCpuConfig::for_model::<C>(Arc::new(crate::ip22_bus::memory_map(false)));
+            let mut exec = Box::new(MipsExecutor::<PassthroughTlb, C>::new(
+                Arc::new(MockMemory::new()), PassthroughTlb::default(), &cfg));
+            disable_jitv2(&mut exec);
+            exec.core.read_cp0(16)
+        }
+        // The executor is large; build it on a thread with room.
+        std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+            for (name, c, ss, sb) in [
+                ("R10000", config::<R10000ShadowCache>(), 1, 1),
+                ("R12000", config::<R12000ShadowCache>(), 2, 1),
+                ("R12000 O2", config::<R12000O2ShadowCache>(), 2, 0),
+            ] {
+                assert_eq!(c >> 26, 0b011_011, "{name}: IC and DC read 32 KB");
+                assert_eq!(c & 0x03FF_FFFF, (ss << 16) | (sb << 13) | 0x8000 | 2, "{name}: Config {c:#x}");
+            }
+            // The R16000 presents its part's whole reset word over the low 25
+            // bits: SS 3 and SB 1 as for the generic family, plus the clock
+            // fields. The 700 MHz part is the same type with its word set at
+            // build time.
+            let c = config::<R16000ShadowCache>();
+            assert_eq!(c >> 26, 0b011_011, "R16000: IC and DC read 32 KB");
+            assert_eq!(c & CONFIG0_RESET_MASK as u64, 0x009b_af85, "R16000: Config {c:#x}");
+            assert_eq!((c >> 16) & 7, 3, "R16000: 4 MB secondary cache");
+            assert_eq!((c >> 13) & 1, 1, "R16000: 128-byte lines");
+            assert_eq!(R16000_MHZ700_CONFIG0 ^ 0x009b_af85, 1 << 9, "the 700 MHz word differs in EC only");
+        }).unwrap().join().unwrap();
+    }
 }
