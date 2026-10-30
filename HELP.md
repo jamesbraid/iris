@@ -596,7 +596,7 @@ scsi_deferred_int = true        # needed by OpenBSD/NetBSD; see --no-scsi-deferr
 
 [machine]
 profile = "indy_ip24"       # "indigo2_ip22" (--ip22), "indigo2_ip28", or "o2_ip32" (an [o2] section: docs/o2-ip32.md)
-cpu     = "r4400"           # "r5000" or "r10000" (--cpu); use R10000 on IP28
+cpu     = "r4400"           # "r5000", "r10000", "r12000", "r14000" or "r16000" (--cpu). IP28: r10000; Octane: r10000, r12000, r14000; O2: r5000, r10000, r12000; no machine takes r16000 yet (iris-bench only)
 # cpus  = 2                 # Octane only: a second processor (docs/Octane/multiprocessor.md)
 
 [graphics]
@@ -737,7 +737,7 @@ Configuration
   --nveeprom <FILE>           Indigo2 NVRAM EEPROM file (default: nveeprom.bin)
   --ip22                      Emulate an Indigo2 (IP22) instead of an Indy (IP24)
   --graphics <BOARD>          newport, xz, extreme, solidimpact, highimpact, maximpact
-  --cpu <MODEL>               r4400 (default), r5000, or r10000
+  --cpu <MODEL>               r4400 (default), r5000, r10000, r12000, r14000 or r16000
   --bank0..--bank3 <MB>       RAM bank sizes (0/8/16/32/64/128; IP28: also 256/512)
   --clock-fixed-mhz <MHZ>     CP0 Count frequency (IP22/IP24: 33; IP28: 97.5)
 

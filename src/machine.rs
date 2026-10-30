@@ -27,7 +27,9 @@ use crate::cpu::mips_tlb::MipsTlb;
 use crate::cpu::mips_exec::{MipsExecutor, MipsCpu, MipsCpuConfig, MipsCpuDebugAdapter};
 use crate::gdb_stub::CpuDebug;
 use crate::cpu::mips_cache_v2::{MipsCache, R4400Cache, R5000Cache};
-use crate::cpu::mips_cache_shadow::{R10000ShadowCache, R4400ShadowCache, R5000ShadowCache};
+use crate::cpu::mips_cache_shadow::{
+    R10000ShadowCache, R12000ShadowCache, R14000ShadowCache, R16000ShadowCache, R4400ShadowCache, R5000ShadowCache,
+};
 use crate::dev::hpc3::Hpc3;
 use crate::dev::ioc::{Ioc, GioSlot, GIO_SLOT_MAP, profile_idx};
 use crate::monitor::Monitor;
@@ -338,6 +340,9 @@ impl Machine {
             crate::config::CpuModel::R4400 => <R4400Cache as MipsCache>::L2_SIZE > 0,
             crate::config::CpuModel::R5000 => <R5000Cache as MipsCache>::L2_SIZE > 0,
             crate::config::CpuModel::R10000 => <R10000ShadowCache as MipsCache>::L2_SIZE > 0,
+            crate::config::CpuModel::R12000 => <R12000ShadowCache as MipsCache>::L2_SIZE > 0,
+            crate::config::CpuModel::R14000 => <R14000ShadowCache as MipsCache>::L2_SIZE > 0,
+            crate::config::CpuModel::R16000 => <R16000ShadowCache as MipsCache>::L2_SIZE > 0,
         };
         if !model_has_l2 {
             eeprom_mc.lock().set_cachsz(0);
@@ -738,6 +743,9 @@ impl Machine {
             // tag and data arrays that exist only to answer CACHE ops and the
             // PROM's diagnostics. See mips_cache_shadow.rs.
             crate::config::CpuModel::R10000 => build_cpu!(R10000ShadowCache),
+            crate::config::CpuModel::R12000 => build_cpu!(R12000ShadowCache),
+            crate::config::CpuModel::R14000 => build_cpu!(R14000ShadowCache),
+            crate::config::CpuModel::R16000 => build_cpu!(R16000ShadowCache),
         };
 
         // Share count_hz_atomic from MipsCore with Rex3 so the refresh thread can display it.
