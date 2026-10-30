@@ -56,6 +56,10 @@ const PACKET_TIMEOUT: u32 = 0x28;
 const INT_UPPER: u32 = 0x30;
 const INT_LOWER: u32 = 0x38;
 const ERR_CMD: u32 = 0x40;
+/// The error command word: the widget a failed packet named, then the
+/// widget on the port it arrived by.
+const ERR_CMD_DIDN_SHIFT: u32 = 28;
+const ERR_CMD_SIDN_SHIFT: u32 = 24;
 const LLP_CONTROL: u32 = 0x48;
 const STATUS_CLEAR: u32 = 0x50;
 const ARB_RELOAD: u32 = 0x58;
@@ -112,6 +116,8 @@ const NIC_MASK: u32 = 0x000f_ffff;
 const NIC_RESET: u32 = 0x02;
 
 const LINK_ALIVE: u32 = 1 << 31;
+const LINK_MULTIPLE_ERROR: u32 = 1 << 18;
+const LINK_ILLEGAL_DEST: u32 = 1 << 17;
 const LINK_MAX_RETRY: u32 = 1 << 5;
 const LINK_STATUS_ERRORS: u32 = 0x0007_fffb;
 const LINK_ALIVE_ENABLE: u32 = 1 << 31;
@@ -353,6 +359,51 @@ impl Xbow {
                 r.link_event[link] |= LINK_MAX_RETRY;
             }
         }
+        self.update_interrupt(r, out);
+    }
+
+    /// Whether a request entering at `port`'s link and addressed to
+    /// `widget`, at `offset` in its space, reaches it. Widget 0 is the
+    /// register block, which the caller reaches through [`Xbow::read`] and
+    /// [`Xbow::write`]. Widgets 1 to 7 name no destination: the packet is an
+    /// illegal-destination error on the receiving port and goes nowhere. A
+    /// legal widget is reached while its link is alive and it is not the
+    /// port's own; otherwise the request is dropped and nothing is
+    /// recorded. Nothing enters by a dead link.
+    pub fn route(&self, port: u8, widget: u8, offset: u64) -> bool {
+        if !self.carries(port) {
+            return false;
+        }
+        match widget {
+            0 => true,
+            1..=7 => {
+                self.locked(|r, out| self.record_illegal(r, out, port, widget, offset));
+                false
+            }
+            w => w != port && self.carries(w),
+        }
+    }
+
+    /// An illegal-destination packet from `port`: the receiving port's
+    /// status bit 17, bit 18 for a repeat while 17 stands, and its request
+    /// when enabled. The first such packet while the error command word
+    /// is clear fills the capture registers: the command word with the
+    /// widget it named and the port's widget, and the offset it carried,
+    /// split as the interrupt destination pair splits an address
+    /// (inferred).
+    fn record_illegal(&self, r: &mut Regs, out: &mut Out, port: u8, widget: u8, offset: u64) {
+        crate::dlog!(LogModule::Xbow, "xbow: widget {port} addressed widget {widget}, which is not a destination this switch has");
+        let link = (port - FIRST_WIDGET) as usize;
+        if r.link_status[link] & LINK_ILLEGAL_DEST != 0 {
+            r.link_status[link] |= LINK_MULTIPLE_ERROR;
+        }
+        if r.err_cmd == 0 {
+            r.err_cmd = (widget as u32) << ERR_CMD_DIDN_SHIFT | (port as u32) << ERR_CMD_SIDN_SHIFT;
+            r.err_upper = (offset >> 32) as u32;
+            r.err_lower = offset as u32;
+        }
+        r.link_status[link] |= LINK_ILLEGAL_DEST;
+        r.link_event[link] |= LINK_ILLEGAL_DEST;
         self.update_interrupt(r, out);
     }
 
@@ -682,6 +733,40 @@ impl crate::traits::Resettable for Xbow {
             self.alive.store(present, Ordering::Release);
         });
     }
+}
+
+/// The processor's small windows for widgets 1 to 7, which name no
+/// destination: each access, at any width, is one illegal-destination
+/// error on the port the processor's packets enter by, and a bus error.
+/// The bus hands it full physical addresses, each widget 16 MB.
+pub struct IllegalDestinations {
+    xbow: Arc<Xbow>,
+    port: u8,
+}
+
+impl IllegalDestinations {
+    /// The windows as seen by packets entering at `port` (HEART's, on the
+    /// Octane).
+    pub fn new(xbow: Arc<Xbow>, port: u8) -> Self {
+        assert!(link_bit(port).is_some(), "xbow: widget {port} is not a link");
+        Self { xbow, port }
+    }
+
+    fn refuse(&self, addr: u64) {
+        let widget = ((addr / REG_SPAN as u64) & 0xf) as u8;
+        self.xbow.route(self.port, widget, addr & WINDOW_MASK);
+    }
+}
+
+impl BusDevice for IllegalDestinations {
+    fn read8(&self, a: u64) -> BusRead8 { self.refuse(a); BusRead8::err() }
+    fn read16(&self, a: u64) -> BusRead16 { self.refuse(a); BusRead16::err() }
+    fn read32(&self, a: u64) -> BusRead32 { self.refuse(a); BusRead32::err() }
+    fn read64(&self, a: u64) -> BusRead64 { self.refuse(a); BusRead64::err() }
+    fn write8(&self, a: u64, _: u8) -> u32 { self.refuse(a); BUS_ERR }
+    fn write16(&self, a: u64, _: u16) -> u32 { self.refuse(a); BUS_ERR }
+    fn write32(&self, a: u64, _: u32) -> u32 { self.refuse(a); BUS_ERR }
+    fn write64(&self, a: u64, _: u64) -> u32 { self.refuse(a); BUS_ERR }
 }
 
 /// Widget 0's window as the machine's bus sees it: the full physical

@@ -35,7 +35,7 @@ use crate::dev::ioc3::{self, Ioc3};
 use crate::dev::ioc3_eth::{bits as ebit, reg as ereg, Ioc3Eth};
 use crate::dev::isp1040::{mbox, reg as ireg, Isp1040, CTRL_INT_ENABLE, CTRL_RISC_INT_ENABLE, ENTRY_SIZE, ENTRY_TYPE_REQUEST, ENTRY_TYPE_STATUS};
 use crate::dev::mgras::hq4::ImpactXio;
-use crate::dev::xbow::Xbow;
+use crate::dev::xbow::{IllegalDestinations, Xbow};
 use crate::traits::{BusDevice, Device, Resettable, BUS_ERR, BUS_OK};
 
 const FLASH_SIZE: usize = 1 << 20;
@@ -68,6 +68,8 @@ fn board_with(prom: &[u8], banks_mb: [u32; 4]) -> Board {
     let phys = Ip30Bus::new(ram);
     phys.map(PIU_BASE, PIU_BASE + PIU_SIZE, heart.clone(), "heart piu");
     phys.map(widget_small_base(WIDGET_XBOW), widget_small_base(WIDGET_XBOW) + WIDGET_SMALL_SIZE, xbow.clone(), "xbow");
+    let illegal = Arc::new(IllegalDestinations::new(xbow.clone(), WIDGET_HEART));
+    phys.map(widget_small_base(1), widget_small_base(WIDGET_HEART), illegal, "xbow illegal widgets");
     phys.map(widget_small_base(WIDGET_HEART), widget_small_base(WIDGET_HEART) + WIDGET_SMALL_SIZE, heart.clone(), "heart widget");
     phys.attach_widget(WIDGET_BRIDGE, bridge, false);
     let phys = Arc::new(phys);
@@ -384,6 +386,8 @@ fn widgets_route_by_number() {
     assert_eq!(p.read32(0x1800_1004).status, BUS_ERR, "no route back to HEART");
     assert_eq!(p.read32(0x1b00_0004).status, BUS_ERR, "an empty graphics port");
     assert_eq!(p.read32(0x1100_0004).status, BUS_ERR, "nothing on widget 1");
+    assert_eq!(p.read32(0x1000_0114).data, 1 << 31 | 1 << 17, "an illegal destination on HEART's port");
+    assert_eq!(p.read32(0x1000_0044).data, 1 << 28 | 8 << 24, "captured");
     assert_eq!(p.read64(0x0ff1_0030).data, 0, "HEART's pending bits");
     assert_eq!(p.read32(0x0ff0_0020).data, 0);
     assert_eq!(p.read32(widget_large_base(WIDGET_BRIDGE)).status, BUS_ERR, "the Bridge takes no large window");
