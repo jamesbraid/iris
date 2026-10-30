@@ -202,6 +202,9 @@ hashes are given where a change is easiest to understand by reading the commit.
   flags, window-ID modes and VC3 tables, the draw bank, the interrupt lines
   and, on the Octane, the HEART packets and acknowledgements
   (docs/perfetto.md).
+- **The Octane takes a VPro V12**: `[graphics] board = "v12"` puts a port
+  of QEMU's VPro (Odyssey) model on the graphics port; IRIX needs an
+  install with the VPro driver. (`src/dev/odyssey`, `src/dev/sgi_gfx`)
 - **The Octane takes the textured IMPACT boards.** `[graphics] board =
   "highimpact"` is the SI with texture option and `"maximpact"` the MXI
   (two GEs, two REs), with the board version bytes the IP30 kernel decodes;

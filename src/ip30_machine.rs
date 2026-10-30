@@ -26,6 +26,7 @@ use crate::dev::ioc3::Ioc3;
 use crate::dev::ioc3_eth::Ioc3Eth;
 use crate::dev::isp1040::Isp1040;
 use crate::dev::mgras::hq4::ImpactXio;
+use crate::dev::odyssey::OdysseyXio;
 use crate::dev::rad1::Rad1;
 use crate::dev::sflash::{CfiFlash, FLASH_SIZE};
 use crate::dev::w1;
@@ -93,8 +94,10 @@ pub struct OctaneMachine {
     eth: Arc<Ioc3Eth>,
     rad: Arc<Rad1>,
     flash: Arc<CfiFlash>,
-    /// The IMPACT board, unless `[octane] graphics = "none"`.
+    /// The IMPACT board, when `[graphics] board` names one.
     pub gfx: Option<Arc<ImpactXio>>,
+    /// The VPro board, with `[graphics] board = "v12"`.
+    pub vpro: Option<Arc<OdysseyXio>>,
     nat: Option<(Arc<crate::net::NatControl>, (std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr))>,
     /// Guest frames the network backend has processed.
     frames: Option<Arc<std::sync::atomic::AtomicU64>>,
@@ -123,11 +126,13 @@ impl OctaneMachine {
             return Err(format!("Octane PROM {prom_path} is {} bytes; the flash holds {FLASH_SIZE}", prom.len()));
         }
         let banks = heart_banks(cfg);
-        let board = match cfg.graphics_board() {
-            crate::config::GraphicsBoard::None => None,
+        let kind = cfg.graphics_board();
+        let board = match kind {
+            crate::config::GraphicsBoard::None | crate::config::GraphicsBoard::V12 => None,
             b if b.is_impact() => Some(b),
-            b => return Err(format!("graphics.board \"{}\" is not modelled on the Octane (valid: solidimpact, highimpact, maximpact, none)", b.as_str())),
+            b => return Err(format!("graphics.board \"{}\" is not modelled on the Octane (valid: solidimpact, highimpact, maximpact, v12, none)", b.as_str())),
         };
+        let has_vpro = kind == crate::config::GraphicsBoard::V12;
         let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4);
         let timer_manager = Arc::new(TimerManager::new());
 
@@ -138,7 +143,7 @@ impl OctaneMachine {
         // HEART's MicroLAN holds the processor module's record.
         heart.set_microlan(record_bus("EMUU00", "030-0888-004", "B", "PM10", 0x5145_4d55_5500));
 
-        let gfx_link = if board.is_some() { 1 << WIDGET_GFX } else { 0 };
+        let gfx_link = if board.is_some() || has_vpro { 1 << WIDGET_GFX } else { 0 };
         let xbow = Arc::new(Xbow::new(XBOW_REVISION, (1 << WIDGET_HEART) | (1 << WIDGET_BRIDGE) | gfx_link));
         xbow.connect_heart(heart.clone());
 
@@ -197,6 +202,7 @@ impl OctaneMachine {
         // shared with the graphics board before the CPU exists.
         let fasttick = Arc::new(AtomicU64::new(0));
         let gfx = board.map(|b| ImpactXio::with_board(WIDGET_GFX, b, heart.clone(), mem.clone(), heartbeat, fasttick.clone()));
+        let vpro = if has_vpro { Some(OdysseyXio::new(WIDGET_GFX, "v12", heart.clone(), mem.clone())?) } else { None };
 
         // The bus over them, then the table.
         let phys = Ip30Bus::new(ram.clone());
@@ -208,6 +214,9 @@ impl OctaneMachine {
         phys.attach_widget(WIDGET_BRIDGE, bridge.clone(), false);
         if let Some(g) = &gfx {
             phys.attach_widget(WIDGET_GFX, g.clone(), false);
+        }
+        if let Some(v) = &vpro {
+            phys.attach_widget(WIDGET_GFX, v.clone(), true);
         }
         let phys = Arc::new(phys);
         phys.init();
@@ -249,7 +258,7 @@ impl OctaneMachine {
             "iris: Octane with {} MB ({}), {}",
             banks.iter().sum::<u64>() >> 20,
             banks.iter().filter(|&&b| b != 0).map(|b| format!("{}", b >> 20)).collect::<Vec<_>>().join("+"),
-            board.map_or("no graphics", |b| b.label())
+            if has_vpro { kind.label() } else { board.map_or("no graphics", |b| b.label()) }
         );
 
         let count_hz = cfg.clock.fixed_mhz.map_or(OCTANE_COUNT_HZ, |mhz| (mhz * 1_000_000.0) as u64);
@@ -334,6 +343,9 @@ impl OctaneMachine {
             monitor.register_device(g.mgras().clone());
             g.register_locks();
         }
+        if let Some(v) = &vpro {
+            v.set_cpu_cycles(cpu.cycles_ptr());
+        }
         let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
         let ci_serial = cfg.ci.then(|| Arc::new(crate::dev::serial_host::CiSerialBackend::new()));
         Self::connect_serial(cfg, &ioc3, ci_serial.as_ref());
@@ -365,6 +377,7 @@ impl OctaneMachine {
             rad,
             flash,
             gfx,
+            vpro,
             nat,
             frames,
             scratch_path,
@@ -451,6 +464,9 @@ impl OctaneMachine {
         if let Some(g) = &self.gfx {
             d.push(g.clone());
         }
+        if let Some(v) = &self.vpro {
+            d.push(v.clone());
+        }
         d
     }
 
@@ -503,6 +519,9 @@ impl OctaneMachine {
         self.flash.reset();
         if let Some(g) = &self.gfx {
             g.power_on();
+        }
+        if let Some(v) = &self.vpro {
+            v.power_on();
         }
         Self::sync_links(&self.phys, &self.xbow);
         self.restart_peripherals();
@@ -577,7 +596,10 @@ impl Workstation for OctaneMachine {
         self.lifecycle = state;
     }
     fn get_display(&self) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> {
-        self.gfx.as_ref().map(|g| g.display())
+        match &self.vpro {
+            Some(v) => Some(v.display()),
+            None => self.gfx.as_ref().map(|g| g.display()),
+        }
     }
     fn register_monitor_device(&self, device: Arc<dyn crate::traits::Device>) { self.monitor.register_device(device); }
     fn get_ps2(&self) -> Arc<crate::dev::ps2::Ps2Controller> {

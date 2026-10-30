@@ -46,7 +46,7 @@ cpu = "r10000"
 flash = "flash-ip30.bin"      # keep the PROM's flash records between runs
 
 [graphics]
-# board = "maximpact"         # "solidimpact" (default), "highimpact", "maximpact" or "none"
+# board = "maximpact"         # "solidimpact" (default), "highimpact", "maximpact", "v12" or "none"
 
 [[port_forward]]
 proto = "tcp"
@@ -130,11 +130,19 @@ the board, as on the other machines:
 | `solidimpact` (default) | SI | 1 / 1 | none |
 | `highimpact` | SI with texture option | 1 / 1 | 4 TRAMs |
 | `maximpact` | MXI | 2 / 2 | 4 TRAMs per RE |
+| `v12` (also `vpro:v12`) | V12 | (VPro) | in its 128 MB board memory |
 
 The two textured boards are new and less tested than the SI. Its screen is the iris window
 and what iris-ci screenshots show; the keyboard and mouse are IOC3's PS/2
 ports. `board = "none"` leaves the port empty, and the machine
 then runs on its serial console with no window.
+
+`v12` is a VPro V12 on the same port: a port of the VPro (Odyssey) model
+in jamesbraid/qemu-sgi-origami (`src/dev/odyssey`, on the shared SGI
+graphics code in `src/dev/sgi_gfx`), with the X server and OpenGL drawn by
+the model's scalar rasteriser. The PROM draws its startup screen on it,
+but IRIX needs an install with the VPro kernel driver and X server
+module: a disk installed with an IMPACT board finds no screen on a V12.
 
 ## Networking
 
