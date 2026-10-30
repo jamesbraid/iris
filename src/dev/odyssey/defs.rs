@@ -967,9 +967,6 @@ pub const ODSY_F32_SCALE_8: u32 = 0x3b808081;
 pub const ODSY_F32_SCALE_16: u32 = 0x37800080;
 pub const ODSY_F32_SCALE_32: u32 = 0x2f800005;
 
-// Command work after the store.
-pub const ODSY_WORK_HOLD_NS: i64 = 1000 * SCALE_MS;
-
 // Stores waiting behind work before the next one finishes the work.
 pub const ODSY_WORK_QUEUE_MAX: u32 = 65536;
 

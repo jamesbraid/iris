@@ -2,7 +2,7 @@
 //!
 //! The Odyssey (VPro) board's constants and state. The QOM class and the
 //! native-Mesa fields are gone; the interrupt packet path is the `irq` field
-//! (see `SGIOdysseyState`).
+//! of the host interface (`OdysseyFront`, front.rs).
 use super::*;
 
 /// Distinct unimplemented offsets reported before the device falls silent
@@ -54,10 +54,8 @@ pub struct SGIOdysseyOpenVertex {
     pub slot: u32,
 }
 
-/// A command-FIFO store waiting behind a long draw (defined in
-/// hw/misc/sgi-odyssey.c, "Command work after the store"; the C declares it
-/// there, the state holds a GArray of it).
-#[derive(Clone, Copy, Default)]
+/// A command-FIFO store waiting for the board's thread.
+#[derive(Clone, Copy)]
 pub struct OdysseyQueuedStore {
     pub value: u64,
     pub addr: u32,
@@ -66,22 +64,17 @@ pub struct OdysseyQueuedStore {
     pub counted: bool,
     /// It waited outside the FIFO, so the node holds its credit as owed.
     pub owed: bool,
-    /// When it was stored (virtual clock ns), for the trace.
-    pub queued_at: i64,
+    /// When it was stored, for the trace.
+    pub queued_at: std::time::Instant,
 }
 
 pub struct SGIOdysseyState {
     /// The crosstalk widget number (the C's parent_obj.slot).
     pub slot: u32,
-    /// Where interrupt packets go. The C wrote a packet to a fabric address
-    /// space with the destination widget in address bits 51:48; here the
-    /// iris glue delivers it to this controller.
-    pub irq: Option<std::sync::Arc<dyn crate::irq::InterruptController>>,
-    /// The master node's processor interface, for graphics credits (the C's
-    /// "pi" link). The Octane has no PI link: nothing attaches one.
-    pub pi: Option<std::sync::Arc<dyn SGIPIGfxLink>>,
-    /// The widget number of HEART, the packets' destination.
-    pub heart_widget: u32,
+    /// The host interface, under its own lock (front.rs): the registers a
+    /// processor may touch while the board works, the interrupt routing
+    /// and the command-FIFO queue.
+    pub front: std::sync::Arc<parking_lot::Mutex<OdysseyFront>>,
     pub nic_bus: Option<crate::dev::w1::Bus>,
 
     // Properties.
@@ -104,13 +97,6 @@ pub struct SGIOdysseyState {
     pub memory_config: u32,
 
     // Modeled registers.
-    pub widget_control: u32,
-    pub xt_req_timeout: u32,
-    pub int_dest_upper: u32,
-    pub int_dest_lower: u32,
-    pub error_command: u32,
-    pub intr_flags: u32,
-    pub intr_enable: u32,
     pub flctl_config: u32,
     /// The memory controller's configuration word (+0x1004), as written.
     pub memory_control: u32,
@@ -119,12 +105,6 @@ pub struct SGIOdysseyState {
     /// The FIFO set-up registers 0x6b0-0x6b3 and 0x7b5, as last written.
     pub fifo_setup: [u32; 5],
     pub flctl_target_reported: bool,
-    pub sw_token: u32,
-
-    // The routed-interrupt destination and per-source vector table.
-    pub route_dest_upper: u32,
-    pub route_dest_lower: u32,
-    pub route_vectors: u32,
 
     // The DMA-sync command's host-write base (48-bit guest physical address).
     pub host_write_addr_upper: u32,
@@ -144,15 +124,6 @@ pub struct SGIOdysseyState {
     pub i2c_main_cmd: u32,
     pub i2c_opt_cmd: u32,
 
-    // The swap-control register bank, one bit per window in each.
-    pub swap_arm: u32,
-    pub swap_pending: u32,
-    pub swap_control: u32,
-    pub swap_control_companion: u32,
-    pub swap_set: u32,
-    pub swap_clear: u32,
-    pub displayed_buffer: u32,
-
     /// The display back end's colour lookup RAM (0x2000 entries), one 30-bit
     /// colour per entry.
     pub lut: Vec<u32>,
@@ -171,9 +142,6 @@ pub struct SGIOdysseyState {
     // Command-FIFO self-test.
     pub selftest_progress: u32,
     pub cfifo_selftest_ready: bool,
-
-    /// The one modeled source's transition state, for the packet edge.
-    pub interrupt_asserted: bool,
 
     /// Colour buffer 0's RGBA8 plane over the shared board memory.
     pub mem: SGIBoardMemory,
@@ -242,19 +210,9 @@ pub struct SGIOdysseyState {
     /// Monotonic for this device instance.
     pub trace_sequence: u64,
 
-    // Command-FIFO stores waiting behind a long draw.
-    pub work: SGIHeadWork,
-    pub work_queue: Vec<OdysseyQueuedStore>,
-    /// The oldest waiting stores, this many, are in the FIFO and credited.
-    pub work_in_fifo: u32,
-    /// qtest: stores from outside a processor count as counted.
-    pub test_counted_stores: u8,
-    /// qtest: each slice on the board's thread first sleeps this long.
+    /// Tests: the next slice on the board's thread first sleeps this long.
+    #[cfg(test)]
     pub test_slice_sleep_ms: u32,
-    /// Until when (virtual clock) FIFO stores queue after a long one.
-    pub work_queued_until: i64,
-    /// Scalar draws run without the big lock, for the qtest.
-    pub work_unlocked_draws: u32,
 
     /// The per-pixel drawable-id plane, one byte per framebuffer pixel.
     pub did: Vec<u8>,
@@ -467,8 +425,6 @@ pub struct SGIOdysseyState {
     pub test_pixel_buffer: u32,
     pub test_pixel_count: u32,
     pub test_object_base: u32,
-    pub test_last_interrupt_addr: u64,
-    pub test_last_interrupt_value: u64,
 
     /// The shared scanout; resolves the colour plane through
     /// odyssey_head_ops.resolve_row.
@@ -491,9 +447,7 @@ impl Default for SGIOdysseyState {
     fn default() -> Self {
         SGIOdysseyState {
             slot: 0,
-            irq: None,
-            pi: None,
-            heart_widget: 8,
+            front: Default::default(),
             nic_bus: None,
             revision: 0,
             memory_size: 0,
@@ -506,23 +460,12 @@ impl Default for SGIOdysseyState {
             posted_fifo: false,
             product_record: String::new(),
             memory_config: 0,
-            widget_control: 0,
-            xt_req_timeout: 0,
-            int_dest_upper: 0,
-            int_dest_lower: 0,
-            error_command: 0,
-            intr_flags: 0,
-            intr_enable: 0,
             flctl_config: 0,
             memory_control: 0,
             memory_control_reported: false,
             flctl_target: 0,
             fifo_setup: [0; 5],
             flctl_target_reported: false,
-            sw_token: 0,
-            route_dest_upper: 0,
-            route_dest_lower: 0,
-            route_vectors: 0,
             host_write_addr_upper: 0,
             host_write_addr_lower: 0,
             stats_addr_upper: 0,
@@ -535,13 +478,6 @@ impl Default for SGIOdysseyState {
             nic: 0,
             i2c_main_cmd: 0,
             i2c_opt_cmd: 0,
-            swap_arm: 0,
-            swap_pending: 0,
-            swap_control: 0,
-            swap_control_companion: 0,
-            swap_set: 0,
-            swap_clear: 0,
-            displayed_buffer: 0,
             lut: vec![0; 0x2000],
             backend_ctl: vec![0; 0x1000],
             dispmode: [0; 32],
@@ -553,7 +489,6 @@ impl Default for SGIOdysseyState {
             backend_count: 0,
             selftest_progress: 0,
             cfifo_selftest_ready: false,
-            interrupt_asserted: false,
             mem: Default::default(),
             colour_plane: 0,
             buffer1_mem: Default::default(),
@@ -604,13 +539,8 @@ impl Default for SGIOdysseyState {
             tex_rect_reported: false,
             dma_seq: 0,
             trace_sequence: 0,
-            work: Default::default(),
-            work_queue: Vec::new(),
-            work_in_fifo: 0,
-            test_counted_stores: 0,
+            #[cfg(test)]
             test_slice_sleep_ms: 0,
-            work_queued_until: 0,
-            work_unlocked_draws: 0,
             did: Vec::new(),
             overlay: Vec::new(),
             gl_aux_reported: false,
@@ -770,8 +700,6 @@ impl Default for SGIOdysseyState {
             test_pixel_buffer: 0,
             test_pixel_count: 0,
             test_object_base: 0,
-            test_last_interrupt_addr: 0,
-            test_last_interrupt_value: 0,
             scanout: Default::default(),
             reported_addr: [0; SGI_ODYSSEY_UNIMP_REPORTS as usize],
             reported_addr_count: 0,

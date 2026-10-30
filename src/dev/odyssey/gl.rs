@@ -1556,19 +1556,10 @@ pub fn odyssey_gl_draw_result(opaque: Opaque, d: &SGIGLDraw) -> SGIGLDrawResult 
     state.fog_index = ((s.gl_fog[0] >> 12) & 0xfff) as f32;
     draw.state = P::new(&mut state);
     odyssey_gl_report_refusals(s, true);
-    // In a slice of queued command work on the board's thread the draw runs
-    // without the big lock. It reads and writes only the planes and the
-    // state command words set; meanwhile command-FIFO stores queue and any
-    // access that would touch either waits for the slice.
-    let result;
-    if sgi_head_work_may_unlock(&mut s.work) {
-        sgi_head_work_unlock(&mut s.work);
-        s.work_unlocked_draws = s.work_unlocked_draws.wrapping_add(1);
-        result = sgi_soft_draw(&rules, &t, &draw);
-        sgi_head_work_relock(&mut s.work);
-    } else {
-        result = sgi_soft_draw(&rules, &t, &draw);
-    }
+    // The board's thread holds the board lock for the whole draw; a
+    // processor's accesses that need not wait for it use the front lock
+    // (front.rs).
+    let result = sgi_soft_draw(&rules, &t, &draw);
     crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_gl_draw_path: backend scalar result {} called=1", result);
     sgi_scanout_invalidate_all(&mut s.scanout);
     drop(texture);

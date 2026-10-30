@@ -245,21 +245,6 @@ pub fn sgi_pi_gfx_take_mark() -> bool {
     SGI_PI_GFX_FORWARDING_COUNTED.with(|m| m.replace(false))
 }
 
-/// sgi_pi_gfx_take_mark() with the C's current_cpu check: with no processor
-/// storing (`cpu` false) it answers false and logs a guest error once.
-pub fn sgi_pi_gfx_store_counted(cpu: bool) -> bool {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static WARNED: AtomicBool = AtomicBool::new(false);
-
-    if !cpu {
-        if !WARNED.swap(true, Ordering::Relaxed) {
-            crate::qlog!("sgi-pi-gfx: a head asked whether a store was counted with no processor storing; its credit will not be returned\n");
-        }
-        return false;
-    }
-    sgi_pi_gfx_take_mark()
-}
-
 /// `credits` credits returned to `slot`.
 pub fn sgi_pi_gfx_add_credits(g: &mut SGIPIGfx, slot: usize, credits: u32, who: &str) {
     assert!(slot < SGI_PI_GFX_SLOTS);

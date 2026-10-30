@@ -422,7 +422,7 @@ pub fn odyssey_fence(s: &mut SGIOdysseyState, cookie: u64) {
 
     address_space_stw_be(&address_space_memory(), base.wrapping_add(2 * slot as u64), token);
     if word & ODSY_DMA_FENCE_INTERRUPT != 0 {
-        odyssey_deliver_softsync(s);
+        odyssey_deliver_softsync(&mut s.front.lock());
     }
 }
 
@@ -523,11 +523,14 @@ pub fn odyssey_display_channel(mode: u32, c: u32) -> u32 {
 pub fn odyssey_resolve_row(opaque: Opaque, y: u32, dst: &mut [u32]) {
     let s = from_opaque::<SGIOdysseyState>(opaque);
     let width = s.scanout.mode.width.min(SGI_ODYSSEY_WIDTH);
+    // Swaps latch under the board lock (odyssey_retrace()), so the selection
+    // holds for the row.
+    let displayed = s.front.lock().displayed_buffer;
 
     for x in 0..width {
         let at = (y * SGI_ODYSSEY_WIDTH + x) as usize;
         let main_id = odyssey_main_id(s, x, y);
-        let word = odyssey_buffer_load(s, (s.displayed_buffer >> main_id) & 1, x as i64, y as i64);
+        let word = odyssey_buffer_load(s, (displayed >> main_id) & 1, x as i64, y as i64);
         let group = odyssey_display_group(s, main_id);
 
         let omode = s.overlay_mode[((s.did[at] as u32) & ODSY_DID_OVERLAY_MASK) as usize];
@@ -577,33 +580,40 @@ pub fn odyssey_resolve_row(opaque: Opaque, y: u32, dst: &mut [u32]) {
 /// buffer.
 pub fn odyssey_retrace(opaque: Opaque) {
     let s = from_opaque::<SGIOdysseyState>(opaque);
-    let flips = s.swap_arm;
+    let mut f = s.front.lock();
+    let flips = f.swap_arm;
+    let mut repaint = false;
 
-    if s.swap_set != 0 || s.swap_clear != 0 {
-        s.displayed_buffer = (s.displayed_buffer | s.swap_set) & !s.swap_clear;
-        s.swap_set = 0;
-        s.swap_clear = 0;
-        sgi_scanout_invalidate_all(&mut s.scanout);
+    if f.swap_set != 0 || f.swap_clear != 0 {
+        f.displayed_buffer = (f.displayed_buffer | f.swap_set) & !f.swap_clear;
+        f.swap_set = 0;
+        f.swap_clear = 0;
+        repaint = true;
     }
     if flips != 0 {
-        s.swap_arm = 0;
-        s.displayed_buffer ^= flips;
-        crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_swap_latch: arm {:#x} displayed {:#x}", flips, s.displayed_buffer);
-        sgi_scanout_invalidate_all(&mut s.scanout);
+        f.swap_arm = 0;
+        f.displayed_buffer ^= flips;
+        crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_swap_latch: arm {:#x} displayed {:#x}", flips, f.displayed_buffer);
+        repaint = true;
     }
-    if s.route_dest_upper != 0 || s.route_dest_lower != 0 {
-        odyssey_deliver_routed(s, ODSY_ROUTE_VECTOR_RETRACE_SHIFT, "retrace", true);
+    if odyssey_routed(&f) {
+        odyssey_deliver_routed(&mut f, ODSY_ROUTE_VECTOR_RETRACE_SHIFT, "retrace", true);
+    }
+    drop(f);
+    if repaint {
+        sgi_scanout_invalidate_all(&mut s.scanout);
     }
 }
 
-/// Scanout reads the planes, and a slice of queued command work draws into
-/// them. An update waits that draw out first, unless it runs on that slice's
-/// own thread.
+/// Scanout reads the planes under the board lock, which the board's thread
+/// holds for a whole slice, so no draw runs meanwhile. A processor's write
+/// of the displayed-buffer register reached only the front: repaint for it.
 pub fn odyssey_pre_update(opaque: Opaque) {
     let s = from_opaque::<SGIOdysseyState>(opaque);
+    let written = std::mem::take(&mut s.front.lock().displayed_written);
 
-    if !sgi_head_work_may_unlock(&mut s.work) {
-        sgi_head_work_wait_slice(&mut s.work);
+    if written {
+        sgi_scanout_invalidate_all(&mut s.scanout);
     }
 }
 
@@ -1554,9 +1564,10 @@ pub fn odyssey_copy_rect_to_object(s: &mut SGIOdysseyState) -> bool {
     {
         return false;
     }
+    let displayed = s.front.lock().displayed_buffer;
     for y in 0..h {
         for x in 0..w {
-            let shown = (s.displayed_buffer >> odyssey_main_id(s, (sx + x as i64) as u32, (sy + y as i64) as u32)) & 1;
+            let shown = (displayed >> odyssey_main_id(s, (sx + x as i64) as u32, (sy + y as i64) as u32)) & 1;
             let source = if fmt & ODSY_DMA_FMT_FRONT != 0 { shown } else { shown ^ 1 };
             let px = odyssey_buffer_load(s, source, sx + x as i64, sy + y as i64);
 

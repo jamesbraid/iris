@@ -15,7 +15,10 @@
 //! - `glprog`: the geometry program, lighting and the GL primitives.
 //! - `dma`: pixel DMA, queries and fences.
 //! - `cmd`: the command-FIFO interpreter.
+//! - `front`: the host interface under its own lock: the registers that
+//!   do not wait for the board's work, interrupts and the command queue.
 //! - `device`: the work queue, MMIO, reset and construction.
+//! - `worker`: the board's thread, which runs the queued stores.
 //! - `xio`: the board as an iris widget: the bus, HEART and the display.
 
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals, clippy::all)]
@@ -27,10 +30,12 @@ pub mod defs;
 pub mod device;
 pub mod dma;
 pub mod draw;
+pub mod front;
 pub mod gl;
 pub mod glprog;
 pub mod regs;
 pub mod state;
+pub mod worker;
 pub mod xio;
 
 pub use cmd::*;
@@ -38,8 +43,10 @@ pub use defs::*;
 pub use device::*;
 pub use dma::*;
 pub use draw::*;
+pub use front::*;
 pub use gl::*;
 pub use glprog::*;
 pub use regs::*;
 pub use state::*;
+pub use worker::*;
 pub use xio::*;
