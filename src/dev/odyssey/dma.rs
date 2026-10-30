@@ -74,25 +74,25 @@ pub static DMA_BPP: [u8; (ODSY_DMA_BPP_MASK + 1) as usize] = [2, 4, 8, 16, 12, 1
 
 impl DmaBus {
     /// The entry's page pairs, up to a zero pair or the twelfth, into e[].
-    /// Returns how many, or -1 when a read fails.
-    pub fn entries(&self, table: u64, seq: u64, e: &mut [DmaEntry]) -> i32 {
+    /// Returns how many, or a bus error when a read fails.
+    pub fn entries(&self, table: u64, seq: u64, e: &mut [DmaEntry]) -> Result<usize, DmaError> {
         let mut n: usize = 0;
 
         while n < ODSY_DMA_MAX_PAGES {
             let mut raw = [0u8; 8];
 
             if !self.read(table + ODSY_DMA_TABLE_HEADER + (n as u64) * 8, &mut raw, true, seq) {
-                return -1;
+                return Err(DmaError::Bus);
             }
             let pte = u64::from_be_bytes(raw[..8].try_into().unwrap());
             if pte & (ODSY_DMA_PTE_LEN_MASK as u64) == 0 {
-                return n as i32;
+                return Ok(n);
             }
             e[n].addr = pte >> ODSY_DMA_PTE_ADDR_SHIFT;
             e[n].len = (pte & (ODSY_DMA_PTE_LEN_MASK as u64)) as u32;
             n += 1;
         }
-        n as i32
+        Ok(n)
     }
 }
 
@@ -173,7 +173,7 @@ pub fn raw_nibble(byte: u32) -> u32 {
 /// A stored texel as a backing-store page's bpp raw bytes.
 pub fn raw_pack(rgba: u32, bpp: u32, dst: &mut [u8]) {
     if bpp == 4 {
-        dst[..4].copy_from_slice(&(rgba as u32).to_be_bytes());
+        dst[..4].copy_from_slice(&rgba.to_be_bytes());
         return;
     }
     let word = raw_nibble(rgba >> 24) << 12
@@ -189,10 +189,10 @@ pub fn raw_unpack(src: &[u8], bpp: u32) -> u32 {
         return u32::from_be_bytes(src[..4].try_into().unwrap());
     }
     let v = u16::from_be_bytes(src[..2].try_into().unwrap()) as u32;
-    ((v >> 12) & 0xf) * 0x11u32 << 24
-        | ((v >> 8) & 0xf) * 0x11u32 << 16
-        | ((v >> 4) & 0xf) * 0x11u32 << 8
-        | (v & 0xf) * 0x11u32
+    (((v >> 12) & 0xf) * 0x11u32) << 24
+        | (((v >> 8) & 0xf) * 0x11u32) << 16
+        | (((v >> 4) & 0xf) * 0x11u32) << 8
+        | ((v & 0xf) * 0x11u32)
 }
 
 impl Board {
@@ -240,14 +240,10 @@ impl Board {
         } else {
             self.dma_code(hdr, bpp)
         };
-        let n = bus.entries(table, seq, &mut e);
-        if n < 0 {
+        let Ok(n) = bus.entries(table, seq, &mut e) else {
             return;
-        }
-        let n = n as usize;
-        for k in 0..n {
-            payload += e[k].len as u64;
-        }
+        };
+        payload += e[..n].iter().map(|e| e.len as u64).sum::<u64>();
         if rowbytes as u64 != (w as u64) * (bpp as u64) || payload != (rowbytes as u64) * (h as u64) {
             crate::dlog!(
                 LogModule::Odyssey,
@@ -383,14 +379,10 @@ impl Board {
             return;
         }
 
-        let n = bus.entries(table, seq, &mut e);
-        if n < 0 {
+        let Ok(n) = bus.entries(table, seq, &mut e) else {
             return;
-        }
-        let n = n as usize;
-        for j in 0..n {
-            payload_len += e[j].len as u64;
-        }
+        };
+        payload_len += e[..n].iter().map(|e| e.len as u64).sum::<u64>();
         if w == 0
             || h == 0
             || rowbytes as u64 != (w as u64) * (psize as u64)
@@ -607,7 +599,7 @@ impl Board {
 impl DmaBus {
     /// Map piece p at guest address addr: an entry is one physical extent, so
     /// the pages it runs over are consecutive.
-    pub fn map_piece(&self, p: &mut DmaPiece, addr: u64) -> i32 {
+    pub fn map_piece(&self, p: &mut DmaPiece, addr: u64) -> Result<(), DmaError> {
         let first = addr & !(ODSY_DMA_PAGE_SIZE - 1);
         let npages = (addr - first + p.len as u64).div_ceil(ODSY_DMA_PAGE_SIZE) as u32;
         let mut pages = vec![0u64; npages as usize];
@@ -673,8 +665,8 @@ impl Board {
                         x, y, group, word
                     );
                 }
-                for b in 0..l.bytes as usize {
-                    let from = l.from[b] as u32;
+                for &from in &l.from[..l.bytes as usize] {
+                    let from = from as u32;
 
                     out[o] = if from == ODSY_DMA_BYTE_INDEX {
                         word as u8
@@ -721,7 +713,7 @@ impl Board {
                 p.src = done;
                 let plen = p.len;
                 pieces.push(p);
-                if bus.map_piece(pieces.last_mut().unwrap(), e[i].addr + pos) != 0 {
+                if bus.map_piece(pieces.last_mut().unwrap(), e[i].addr + pos).is_err() {
                     ok = false;
                     break;
                 }
@@ -784,14 +776,10 @@ impl Board {
             }
             return;
         }
-        let n = bus.entries(table, seq, &mut e);
-        if n < 0 {
+        let Ok(n) = bus.entries(table, seq, &mut e) else {
             return;
-        }
-        let n = n as usize;
-        for k in 0..n {
-            total += e[k].len as u64;
-        }
+        };
+        total += e[..n].iter().map(|e| e.len as u64).sum::<u64>();
         if rowbytes as u64 != (w as u64) * (bpp as u64) || total != (rowbytes as u64) * (h as u64) {
             if self.dma_report(ODSY_DMA_REPORT_SHAPE) {
                 crate::dlog!(
@@ -833,7 +821,7 @@ impl Board {
                 }
             }
             if self.dma_read_write(bus, &e[..n], rowbytes, h, skip, &mut payload) {
-                crate::dlog!(LogModule::Odyssey, "sgi_odyssey_dma_read: seq {} source {:#x} at {},{} {}x{} wrote {} bytes", seq, hdr[ODSY_DMA_HDR_DEST], src.x, src.y, w, h, total);
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA read: seq {} source {:#x} at {},{} {}x{} wrote {} bytes", seq, hdr[ODSY_DMA_HDR_DEST], src.x, src.y, w, h, total);
             }
             return;
         }
@@ -844,7 +832,7 @@ impl Board {
         if !self.dma_read_write(bus, &e[..n], rowbytes, h, skip, &mut payload) {
             return;
         }
-        crate::dlog!(LogModule::Odyssey, "sgi_odyssey_dma_read: seq {} source {:#x} at {},{} {}x{} wrote {} bytes", seq, hdr[ODSY_DMA_HDR_DEST], src.x, src.y, w, h, total);
+        crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA read: seq {} source {:#x} at {},{} {}x{} wrote {} bytes", seq, hdr[ODSY_DMA_HDR_DEST], src.x, src.y, w, h, total);
     }
 
     /// A 0xe01/0xe03 descriptor: read the table's header, move the pixels, and
@@ -980,15 +968,11 @@ impl Board {
             }
             ODSY_GL_COLOR_3UB | ODSY_MODE_INDEX_ZEROS => {
                 record = ODSY_QUERY_COLOUR;
-                for i in 0..3 {
-                    supported &= self.cmd_operand[i] <= 0xff;
-                }
+                supported &= self.cmd_operand[..3].iter().all(|&c| c <= 0xff);
             }
             ODSY_GL_COLOR_4UB => {
                 record = ODSY_QUERY_COLOUR;
-                for i in 0..4 {
-                    supported &= self.cmd_operand[i] <= 0xff;
-                }
+                supported &= self.cmd_operand[..4].iter().all(|&c| c <= 0xff);
             }
             ODSY_GL_COLOR_3I
             | ODSY_GL_INDEX_MODE_COLOR_3I
@@ -1051,14 +1035,14 @@ impl Board {
 
 impl DmaBus {
     /// A query's completion words must not report failure after changing guest
-    /// memory. Admit only a whole aligned scalar, big-endian. Returns 0 or an
-    /// Failure. Guest memory is written through the bus.
-    pub fn publish_word(&self, addr: u64, value: u32, size: u32) -> i32 {
+    /// memory. Admit only a whole aligned scalar, big-endian. Guest memory is
+    /// written through the bus.
+    pub fn publish_word(&self, addr: u64, value: u32, size: u32) -> Result<(), DmaError> {
         let size64 = size as u64;
 
         if (addr & (size64 - 1)) != 0 || addr > u64::MAX - size64 {
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: invalid publication address {:#x}", addr);
-            return SGI_FAIL_BOUNDS as i32;
+            return Err(DmaError::Bounds);
         }
         let written = if size == 2 {
             write_guest(&self.mem, addr, &(value as u16).to_be_bytes())
@@ -1067,16 +1051,16 @@ impl DmaBus {
         };
         if !written {
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: publication at {:#x} is not aligned writable RAM", addr);
-            return SGI_FAIL_BUS as i32;
+            return Err(DmaError::Bus);
         }
-        0
+        Ok(())
     }
 
-    pub fn publish_be16(&self, addr: u64, value: u16) -> i32 {
+    pub fn publish_be16(&self, addr: u64, value: u16) -> Result<(), DmaError> {
         self.publish_word(addr, value as u32, 2)
     }
 
-    pub fn publish_be32(&self, addr: u64, value: u32) -> i32 {
+    pub fn publish_be32(&self, addr: u64, value: u32) -> Result<(), DmaError> {
         self.publish_word(addr, value, 4)
     }
 }
@@ -1118,7 +1102,7 @@ impl Board {
             for j in 0..words {
                 let addr = self.query_base + QUERY_OFFSET[i] as u64 + 4 * j as u64;
 
-                if bus.publish_be32(addr, self.query_captured[i][j]) != 0 {
+                if bus.publish_be32(addr, self.query_captured[i][j]).is_err() {
                     crate::dlog!(LogModule::Odyssey, "sgi-odyssey: current-query payload failed");
                     return;
                 }
@@ -1129,20 +1113,20 @@ impl Board {
             let rec = self.query_captured[if i != 0 { ODSY_QUERY_COLOUR } else { ODSY_QUERY_INDEX } as usize];
             let at = self.query_base + (if i != 0 { ODSY_QUERY_RASTER_COLOUR } else { ODSY_QUERY_RASTER_INDEX }) as u64;
 
-            for j in 0..(1 + cmd_arity(rec[0]) as usize) {
-                if bus.publish_be32(at + 4 * j as u64, rec[j]) != 0 {
+            for (j, &word) in rec.iter().enumerate().take(1 + cmd_arity(rec[0]) as usize) {
+                if bus.publish_be32(at + 4 * j as u64, word).is_err() {
                     crate::dlog!(LogModule::Odyssey, "sgi-odyssey: raster query payload failed");
                     return;
                 }
             }
             i += 1;
         }
-        if bus.publish_be32(self.query_base + 0x97c, self.query_count) != 0 {
+        if bus.publish_be32(self.query_base + 0x97c, self.query_count).is_err() {
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: current-query counter failed");
             return;
         }
         if self.query_sync_base > u64::MAX - sync_offset
-            || bus.publish_be16(self.query_sync_base + sync_offset, (sequence & 0xffff) as u16) != 0
+            || bus.publish_be16(self.query_sync_base + sync_offset, (sequence & 0xffff) as u16).is_err()
         {
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: current-query sync failed");
             return;
@@ -1203,17 +1187,16 @@ pub fn signed_to_float(word: u32, format: u32) -> u32 {
 /// converts by OpenGL's rule; the library sends the raw components.
 pub fn integer_colour(tag: u32, word: u32) -> u32 {
     let mut code = tag & ODSY_GL_COLOR_TYPE_MASK;
-    let c: f64;
 
     code = code.wrapping_sub(if code >= ODSY_GL_COLOR_TYPE_4 { ODSY_GL_COLOR_TYPE_4 } else { ODSY_GL_COLOR_TYPE_3 });
-    match code {
-        0 => c = (word as u8) as f64 / 255.0,
-        1 => c = (word as u16) as f64 / 65535.0,
-        2 => c = word as f64 / 4294967295.0,
-        3 => c = (2.0 * ((word as u8 as i8) as f64) + 1.0) / 255.0,
-        4 => c = (2.0 * ((word as u16 as i16) as f64) + 1.0) / 65535.0,
+    let c: f64 = match code {
+        0 => (word as u8) as f64 / 255.0,
+        1 => (word as u16) as f64 / 65535.0,
+        2 => word as f64 / 4294967295.0,
+        3 => (2.0 * ((word as u8 as i8) as f64) + 1.0) / 255.0,
+        4 => (2.0 * ((word as u16 as i16) as f64) + 1.0) / 65535.0,
         _ => return signed_to_float(word, ODSY_GL_COLOR_3I & ODSY_GL_COLOR_TYPE_MASK),
-    }
+    };
     f32_bits(c as f32)
 }
 
@@ -1250,7 +1233,7 @@ impl Board {
             self.board_oob_reported = true;
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: destination base {:#x} is beyond the {} MiB this board reports", base, self.memory_size);
         }
-        crate::dlog!(LogModule::Odyssey, "sgi_odyssey_board_oob: destination base {:#x} exceeds the {} MiB this board reports", base, self.memory_size);
+        crate::dlog!(LogModule::Odyssey, "sgi-odyssey: board memory out of bounds: destination base {:#x} exceeds the {} MiB this board reports", base, self.memory_size);
         false
     }
 
@@ -1264,21 +1247,20 @@ impl Board {
         let entry = [self.tex_levels[60 * 3], self.tex_levels[60 * 3 + 1], self.tex_levels[60 * 3 + 2]];
         let ws = self.tex_sampler[1];
         let hs = self.tex_sampler[2];
-        let format: u32;
 
-        match self.tex_sampler[4] {
-            0x13640000 => format = 0x41100000,
-            0x12e40000 => format = 0x00c00000,
-            0x11e40000 => format = 0x00b00000,
+        let format: u32 = match self.tex_sampler[4] {
+            0x13640000 => 0x41100000,
+            0x12e40000 => 0x00c00000,
+            0x11e40000 => 0x00b00000,
             _ => return false,
-        }
+        };
         if ws == 0 || hs == 0 || ws > i32::MAX as u32 || hs > i32::MAX as u32 || !(ws as u64).is_power_of_two() || !(hs as u64).is_power_of_two() {
             return false;
         }
         let wd = (ws / 2).max(1);
         let hd = (hs / 2).max(1);
-        let source_units = ((ws + 15) / 16 + 1) & !1u32;
-        let dest_units = ((wd + 15) / 16 + 1) & !1u32;
+        let source_units = (ws.div_ceil(16) + 1) & !1u32;
+        let dest_units = (wd.div_ceil(16) + 1) & !1u32;
         if self.gl_primitive != ODSY_GL_QUADS
             || (self.tex_mode & ODSY_TEX_MODE_2D) == 0
             || self.tex_level0 != 60

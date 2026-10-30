@@ -10,7 +10,6 @@ use super::*;
 impl SoftDraw<'_> {
     /// Runtime errors are observable without logging once for every pixel.
     pub fn texture_report(&self, reason: u32, message: &str) {
-        // Bands of one draw share the reports (soft_bands_run()).
         let old = self.reports.texture.fetch_or(reason, std::sync::atomic::Ordering::Relaxed);
         if old & reason == 0 {
             crate::dlog!(LogModule::Odyssey, "sgi-gl: texture {}", message);
@@ -46,7 +45,7 @@ pub fn soft_texture_internal_format(format: u32) -> u32 {
 }
 
 pub fn soft_texture_mipmap(filter: u32) -> bool {
-    filter >= SGI_GL_NEAREST_MIPMAP_NEAREST && filter <= SGI_GL_LINEAR_MIPMAP_LINEAR
+    (SGI_GL_NEAREST_MIPMAP_NEAREST..=SGI_GL_LINEAR_MIPMAP_LINEAR).contains(&filter)
 }
 
 pub fn soft_texture_sharpen(filter: u32) -> bool {
@@ -62,31 +61,6 @@ pub fn soft_texture_detail(filter: u32) -> bool {
 pub fn soft_texture_dimensions(w: u32, h: u32) -> bool {
     w != 0 && h != 0 && w <= i32::MAX as u32 && h <= i32::MAX as u32 &&
         (w as u64).is_power_of_two() && (h as u64).is_power_of_two()
-}
-
-pub fn soft_texture_component_mask(format: u32) -> u8 {
-    match format {
-        SGI_GL_ALPHA => 1u8 << 3,
-        SGI_GL_LUMINANCE | SGI_GL_INTENSITY => 1,
-        SGI_GL_LUMINANCE_ALPHA => (1 << 0) | (1 << 3),
-        SGI_GL_RGB => 7,
-        SGI_GL_RGBA => 15,
-        _ => 0,
-    }
-}
-
-pub fn soft_texture_component_bits_valid(format: u32, bits: &[u8; 4]) -> bool {
-    let mask = soft_texture_component_mask(format);
-
-    if mask == 0 {
-        return false;
-    }
-    for k in 0..4usize {
-        if (mask & (1u8 << k)) != 0 && (bits[k] == 0 || bits[k] > 16) {
-            return false;
-        }
-    }
-    true
 }
 
 impl<'a> GlTexPyramid<'a> {
@@ -138,9 +112,7 @@ impl<'a> SoftDraw<'a> {
         #[derive(PartialEq)]
         enum Out { Unsupported, Incomplete, Done }
         let res = (|| -> Out {
-            for k in 0..4usize {
-                border_finite &= im.border_color[k].is_finite();
-            }
+            border_finite &= im.border_color.iter().all(|c| c.is_finite());
             if p.levels.len() > SGI_GL_TEX_LEVELS_MAX as usize ||
                 !p.min_lod.is_finite() || !p.max_lod.is_finite() ||
                 p.min_lod > p.max_lod || !border_finite ||
@@ -319,9 +291,7 @@ impl<'a> SoftDraw<'a> {
             }
             let mut border_finite = true;
 
-            for k in 0..4usize {
-                border_finite &= im.border_color[k].is_finite();
-            }
+            border_finite &= im.border_color.iter().all(|c| c.is_finite());
             if !im.soft_texture_shadow_supported(im.base_format) ||
                 !im.soft_texture_border_supported(None) ||
                 !border_finite ||
@@ -873,20 +843,19 @@ pub fn soft_texture_mix(value: &mut [f64; 4], other: &[f64; 4], alpha: f64) {
 }
 
 impl SoftDraw<'_> {
-    pub fn texture_weight(&self, lambda: f64, weight: &mut f64) -> bool {
+    pub fn texture_weight(&self, lambda: f64) -> Option<f64> {
         let im = self.image();
 
-        *weight = fmin(fmax(-lambda / 4.0, 0.0), 1.0);
         if im.read_filter_weight {
             match self.texels.filter_weight(lambda) {
-                Some(w) if w.is_finite() => *weight = w,
+                Some(w) if w.is_finite() => return Some(w),
                 _ => {
                     self.texture_report(16, "invalid filter weight, fragment dropped");
-                    return false;
+                    return None;
                 }
             }
         }
-        true
+        Some(fmin(fmax(-lambda / 4.0, 0.0), 1.0))
     }
 
     pub fn texture_sharpen_sample(&self, filter: u32, lambda: f64, s: f64, t: f64, rr: f64, texel: &mut [f64; 4]) -> bool {
@@ -895,7 +864,6 @@ impl SoftDraw<'_> {
         let base = self.texture_base.expect("a base level");
         let mut extent = std::cmp::max(base.width, base.height);
         let mut other = [0.0f64; 4];
-        let mut weight = 0.0f64;
 
         if !self.texture_sample(Some(base), SGI_GL_LINEAR, s, t, rr, texel) {
             return false;
@@ -916,9 +884,10 @@ impl SoftDraw<'_> {
                 (if im.volume { !c.read_texel_3d } else { !c.read_texel })) => c,
             _ => return true,
         };
-        if !self.texture_weight(lambda, &mut weight) ||
-            !self.texture_sample(Some(coarse), SGI_GL_LINEAR, s, t, rr, &mut other)
-        {
+        let Some(weight) = self.texture_weight(lambda) else {
+            return false;
+        };
+        if !self.texture_sample(Some(coarse), SGI_GL_LINEAR, s, t, rr, &mut other) {
             return false;
         }
         for k in 0..4usize {
@@ -957,7 +926,6 @@ impl SoftDraw<'_> {
         let base = self.texture_base.expect("a base level");
         let mut repeat = *im;
         let mut other = [0.0f64; 4];
-        let mut weight = 0.0f64;
         let scale: i32 = std::cmp::min(-(im.detail_level as i64), i32::MAX as i64) as i32;
 
         if !self.texture_sample(Some(base), SGI_GL_LINEAR, s, t, rr, texel) {
@@ -989,9 +957,10 @@ impl SoftDraw<'_> {
         let mut draw = *self;
         draw.texture = Some(&repeat);
         draw.texels_cache = None;
-        if !self.texture_weight(lambda, &mut weight) ||
-            !draw.texture_sample(Some(&detail), SGI_GL_LINEAR, ds, dt, 0.0, &mut other)
-        {
+        let Some(weight) = self.texture_weight(lambda) else {
+            return false;
+        };
+        if !draw.texture_sample(Some(&detail), SGI_GL_LINEAR, ds, dt, 0.0, &mut other) {
             return false;
         }
         for k in 0..4usize {
@@ -1061,7 +1030,7 @@ impl SoftDraw<'_> {
 
     pub fn texture(&self, frag: &mut SoftFrag) -> bool {
         let im = self.image();
-        let st: &GlDrawState = &self.st;
+        let st: &GlDrawState = self.st;
         let base = self.texture_base;
         let format = base.map_or(im.base_format, |b| b.base_format);
         let mut texel = [0.0f64; 4];

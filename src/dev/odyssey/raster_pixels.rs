@@ -13,11 +13,10 @@ impl SoftDraw<'_> {
     pub fn draw_pixels(&self, d: &GlDraw, limit: u64) -> u64 {
         let n = d.count as usize;
         let mut sum = 0u64;
-        let (mut x0, mut y0, mut x1, mut y1) = (0i32, 0i32, 0i32, 0i32);
 
-        if !self.bounds(&mut x0, &mut y0, &mut x1, &mut y1) || n < 3 {
+        let Some((x0, y0, x1, y1)) = self.bounds().filter(|_| n >= 3) else {
             return 0;
-        }
+        };
         let mut xy = vec![0.0f64; 2 * n];
         for i in 0..n {
             let mut cv = VolumeVertex::default();
@@ -64,10 +63,6 @@ impl SoftDraw<'_> {
     }
 }
 
-pub fn r2_clamp(val: f64, low: f64, high: f64) -> f64 {
-    if val > high { high } else if val < low { low } else { val }
-}
-
 impl ClipList {
     /// Whether one rectangle of a non-empty clip list holds all of row y from
     /// x0 to x1, so that each pixel's own test would pass.
@@ -104,18 +99,14 @@ pub struct SoftClear<'a> {
 }
 
 impl SoftClear<'_> {
-    /// The rows of a clear that are band's of bands (SoftDraw::row_in_band()),
-    /// stored to px.
-    pub fn rows(&self, px: &dyn Planes, band: u32, bands: u32) {
+    /// The clear's rows, stored to px.
+    pub fn rows(&self, px: &dyn Planes) {
         let rules = self.rules;
         let op = self.op;
         // Only a read fills it, and only a read's targets are read back.
         let mut dest = [RasterColour::default(); SGI_GL_MAX_TARGETS as usize];
 
         for y in op.y0..=op.y1 {
-            if !(bands <= 1 || ((y as u32) >> SGI_SOFT_BAND_ROWS_SHIFT) % bands == band) {
-                continue;
-            }
             let whole_row = op.clip.n <= 1 || op.clip.soft_clip_covers_row(op.x0, op.x1, y);
             for x in op.x0..=op.x1 {
                 if !whole_row && !op.clip.contains(x, y) {
@@ -198,8 +189,11 @@ impl RasterRules {
         if op.clip.n == 0 && op.clip.empty != 0 {
             return;
         }
-        if stencil && !self.stencil_max(t, &mut smax) {
-            stencil = false;
+        if stencil {
+            match self.stencil_max(t) {
+                Some(max) => smax = max,
+                None => stencil = false,
+            }
         }
         if colour && op.index_bits != 0 && !t.soft_check_index(op.index_bits) {
             colour = false;
@@ -238,16 +232,7 @@ impl RasterRules {
             clear,
             rgba_reported: Default::default(),
         };
-        let bands = soft_bands();
-        if !t.concurrent_pixels
-            || bands < 2
-            || op.y1 < op.y0
-            || op.x1 < op.x0
-            || ((op.x1 - op.x0 + 1) as u64) * ((op.y1 - op.y0 + 1) as u64) < t.soft_band_min_pixels()
-            || !soft_bands_run_split(planes, bands, &|band, store| rows.rows(&*store.planes(), band, bands))
-        {
-            rows.rows(&*planes.planes(), 0, 1);
-        }
+        rows.rows(&*planes.planes());
     }
 }
 
