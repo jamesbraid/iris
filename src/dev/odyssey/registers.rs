@@ -13,10 +13,8 @@ impl Board {
     pub fn unimplemented(&mut self, addr: u64, size: u32, write: bool) {
         let token = (addr as u32) | if write { ODSY_UNIMP_WRITE } else { 0 };
 
-        for i in 0..self.reported_addr_count as usize {
-            if self.reported_addr[i] == token {
-                return;
-            }
+        if self.reported_addr[..self.reported_addr_count as usize].contains(&token) {
+            return;
         }
         if self.reported_addr_count == SGI_ODYSSEY_UNIMP_REPORTS {
             return;
@@ -36,10 +34,8 @@ impl Board {
     /// Report an unmodeled command word once. note follows the message: the
     /// parser's framing decision for a word it does not know, or "".
     pub fn cmd_report(&mut self, word: u32, note: &str) {
-        for i in 0..self.reported_cmd_count as usize {
-            if self.reported_cmd[i] == word {
-                return;
-            }
+        if self.reported_cmd[..self.reported_cmd_count as usize].contains(&word) {
+            return;
         }
         if self.reported_cmd_count == SGI_ODYSSEY_UNIMP_REPORTS {
             return;
@@ -179,24 +175,24 @@ impl Board {
         (ctl & ODSY_CURSOR_CTL_ENABLE) != 0 && (ctl & ODSY_CURSOR_CTL_CHANNEL1) == 0
     }
 
-    /// The display lines the cursor covers as it stands: first > last if none.
-    pub fn cursor_span(&mut self, first: &mut i32, last: &mut i32) {
-        *first = 0;
-        *last = -1;
+    /// The first and last display line the cursor covers as it stands, or
+    /// None when it covers none.
+    pub fn cursor_span(&mut self) -> Option<(i32, i32)> {
         if !self.cursor_shown() {
-            return;
+            return None;
         }
+        let bottom = self.scanout.mode.height as i32 - 1;
         if self.cursor[ODSY_CURSOR_CONTROL as usize] & ODSY_CURSOR_CTL_CROSSHAIR != 0 {
             // The vertical line crosses every line.
-            *last = self.scanout.mode.height as i32 - 1;
-            return;
+            return Some((0, bottom));
         }
-        *first = self.cursor_y().max(0);
-        *last = (self.cursor_y() + ODSY_CURSOR_SIZE as i32 - 1).min(self.scanout.mode.height as i32 - 1);
+        Some((self.cursor_y().max(0), (self.cursor_y() + ODSY_CURSOR_SIZE as i32 - 1).min(bottom)))
     }
 
-    pub fn cursor_invalidate(&mut self, first: i32, last: i32) {
-        if first <= last {
+    /// Repaint the lines of a span from cursor_span(); a span past the
+    /// bottom of the raster is empty.
+    pub fn cursor_invalidate(&mut self, span: Option<(i32, i32)>) {
+        if let Some((first, last)) = span.filter(|&(first, last)| first <= last) {
             self.scanout.invalidate(first, last - first + 1);
         }
     }
@@ -265,7 +261,7 @@ impl Board {
                     data,
                 );
             }
-        } else if index != ODSY_CURSOR_POSITION && (index < ODSY_CURSOR_COLOURS || index >= ODSY_CURSOR_COLOURS + ODSY_CURSOR_COLOUR_COUNT) {
+        } else if index != ODSY_CURSOR_POSITION && !(ODSY_CURSOR_COLOURS..ODSY_CURSOR_COLOURS + ODSY_CURSOR_COLOUR_COUNT).contains(&index) {
             self.cursor_report(ODSY_CURSOR_REPORT_ENTRY, "no known function; stored", index, data);
         }
     }
@@ -274,14 +270,13 @@ impl Board {
     /// carries that has no known meaning, and repaint the lines the cursor
     /// covered before and covers now.
     pub fn cursor_write(&mut self, index: u32, data: u32) {
-        let (mut old_first, mut old_last, mut first, mut last) = (0, 0, 0, 0);
+        let old = self.cursor_span();
 
-        self.cursor_span(&mut old_first, &mut old_last);
         self.cursor[index as usize] = data;
         self.cursor_check(index, data);
-        self.cursor_span(&mut first, &mut last);
-        self.cursor_invalidate(old_first, old_last);
-        self.cursor_invalidate(first, last);
+        let new = self.cursor_span();
+        self.cursor_invalidate(old);
+        self.cursor_invalidate(new);
     }
 
     /// Draw the cursor over display line y, already resolved into dst. With bit
@@ -300,9 +295,7 @@ impl Board {
             let colour = cursor_rgb(self.cursor[ODSY_CURSOR_COLOURS as usize + 1]);
 
             if row == 0 {
-                for x in 0..width as usize {
-                    dst[x] = colour;
-                }
+                dst[..width as usize].fill(colour);
             } else if cx >= 0 && cx < width as i32 {
                 dst[cx as usize] = colour;
             }
@@ -458,13 +451,13 @@ impl Board {
             }
             _ => {
                 if self.cursor_read(addr, size, &mut value) || self.backend_ctl_read(addr, size, &mut value) {
-                    crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_mmio: seq {} offset {:#x} size {} value {:#x} write=0", sequence, addr, size, value);
+                    crate::dlog_dev!(LogModule::Odyssey, "sgi-odyssey: MMIO read seq {} offset {:#x} size {} value {:#x}", sequence, addr, size, value);
                     return value;
                 }
                 self.unimplemented(addr, size, false);
             }
         }
-        crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_mmio: seq {} offset {:#x} size {} value {:#x} write=0", sequence, addr, size, value);
+        crate::dlog_dev!(LogModule::Odyssey, "sgi-odyssey: MMIO read seq {} offset {:#x} size {} value {:#x}", sequence, addr, size, value);
         value
     }
 
@@ -514,7 +507,7 @@ impl Board {
     /// window (Board::backend_ctl_read()); one the kernel is not known to write
     /// is still reported.
     pub fn backend_data(&mut self, index: u32, data: u32) {
-        if index >= ODSY_BACKEND_CTL_BASE && index < ODSY_BACKEND_CTL_BASE + ODSY_BACKEND_CTL_ENTRIES {
+        if (ODSY_BACKEND_CTL_BASE..ODSY_BACKEND_CTL_BASE + ODSY_BACKEND_CTL_ENTRIES).contains(&index) {
             self.backend_ctl[(index - ODSY_BACKEND_CTL_BASE) as usize] = data;
         }
         // Scanout resolves through both, so either change repaints.
@@ -523,16 +516,16 @@ impl Board {
             self.scanout.invalidate_all();
             return;
         }
-        if index >= ODSY_DISPMODE_BASE && index < ODSY_DISPMODE_BASE + ODSY_DISPMODE_COUNT {
+        if (ODSY_DISPMODE_BASE..ODSY_DISPMODE_BASE + ODSY_DISPMODE_COUNT).contains(&index) {
             self.dispmode[(index - ODSY_DISPMODE_BASE) as usize] = data;
             self.scanout.invalidate_all();
             return;
         }
-        if index >= ODSY_CURSOR_BASE && index < ODSY_CURSOR_BASE + ODSY_CURSOR_ENTRIES {
+        if (ODSY_CURSOR_BASE..ODSY_CURSOR_BASE + ODSY_CURSOR_ENTRIES).contains(&index) {
             self.cursor_write(index - ODSY_CURSOR_BASE, data);
             return;
         }
-        if index >= ODSY_OVERLAY_MODE_BASE && index < ODSY_OVERLAY_MODE_BASE + ODSY_OVERLAY_IDS {
+        if (ODSY_OVERLAY_MODE_BASE..ODSY_OVERLAY_MODE_BASE + ODSY_OVERLAY_IDS).contains(&index) {
             self.overlay_mode[(index - ODSY_OVERLAY_MODE_BASE) as usize] = data;
             if (data & !ODSY_OVERLAY_MODE_KNOWN) != 0 && !self.overlay_mode_reported {
                 self.overlay_mode_reported = true;

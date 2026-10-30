@@ -1,8 +1,7 @@
 //! The fixed-point fast path for textured triangles: the sampler's state, its
-//! texel reads and filters, the lambda table, and the row loops that draw a
-//! textured triangle's pixels through it. The row loops are a generic
-//! function with const parameters, stamped out as a set of named spans by
-//! a macro_rules!. Its colours stay within 3/255 of the double-precision
+//! texel reads and filters, and the lambda table. The row loops that draw a
+//! textured triangle's pixels through it are SoftDraw::fill_row() in
+//! raster_fill.rs. Its colours stay within 3/255 of the double-precision
 //! path's; it is faster, not more accurate.
 //!
 //! Ported from hw/display/sgi/rasterizer.c in jamesbraid/qemu-sgi-origami.
@@ -57,15 +56,22 @@ pub fn fx_min<T: PartialOrd>(a: T, b: T) -> T {
 // is dropped and reported as before.
 pub const SGI_SOFT_FIXED_MAX_SIDE: u32 = 8192;
 pub const SGI_SOFT_FIXED_MAX_TEXELS: u32 = 1 << 22;
+/// The fewest pixels a draw covers for its texels to be read ahead
+/// (SoftDraw::fixed_prefill()).
+pub const SGI_SOFT_FIXED_PREFILL_MIN_PIXELS: u64 = 2048;
 /// Lambda's bounds, beyond any level count, in 1/256.
 pub const SGI_SOFT_FIXED_LAMBDA_MAX: i32 = 1 << 24;
 
-pub static SOFT_TEXTURE_PATH: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(SGI_RASTER_TEXTURE_SPANS);
+thread_local! {
+    pub static SOFT_TEXTURE_PATH: std::cell::Cell<RasterTexturePath> =
+        const { std::cell::Cell::new(SGI_RASTER_TEXTURE_SPANS) };
+}
 
-/// How filled triangles sample a texture. Process-wide, for tests.
+/// How filled triangles drawn on this thread sample a texture, for tests.
+/// Per thread, so that tests running at once cannot change each other's
+/// path.
 pub fn raster_set_texture_path(path: RasterTexturePath) {
-    SOFT_TEXTURE_PATH.store(path, std::sync::atomic::Ordering::Relaxed);
+    SOFT_TEXTURE_PATH.with(|p| p.set(path));
 }
 
 #[derive(Clone, Copy, Default)]
@@ -78,13 +84,11 @@ pub struct SoftFixedLevel {
     pub height_shift: u32,
 }
 
-pub type SoftTexSpanFn = fn(&SoftDraw, &SoftTexSpan, i32, i32, i32, i64, i64) -> i32;
-
 #[derive(Clone, Default)]
 pub struct SoftFixedTex {
     pub level: [SoftFixedLevel; SGI_SOFT_FIXED_LEVELS],
     /// The row loop for textured triangles, or None for the general one.
-    pub span: Option<SoftTexSpanFn>,
+    pub span: Option<FillRow>,
     /// Every texel read before drawing, by level (SoftDraw::fixed_prefill()).
     pub prefilled: bool,
     /// Lent by the drawing thread's texel store for the draw
@@ -126,11 +130,6 @@ pub fn soft_fixed_lanes(rgba: u32) -> u64 {
     (t & 0x0000ff000000ff00) << 8 | (t & 0x000000ff000000ff)
 }
 
-/// An 8-bit image component from one of a component reader's width.
-pub fn soft_fixed_component(value: u32, bits: u8) -> u32 {
-    value.wrapping_mul(255 / ((1u32 << bits) - 1))
-}
-
 /// A packed RRGGBBAA texel with the components the base format lacks
 /// filled in, as soft_texture_components() fills them.
 pub fn soft_fixed_expand(format: u32, rgba: u32) -> u32 {
@@ -146,17 +145,6 @@ pub fn soft_fixed_expand(format: u32, rgba: u32) -> u32 {
     }
 }
 
-pub fn soft_fixed_widths(format: u32, bits: &[u8; 4]) -> bool {
-    let mask = soft_texture_component_mask(format);
-
-    for k in 0..4 {
-        if (mask & (1u8 << k)) != 0 && bits[k] != 1 && bits[k] != 2 && bits[k] != 4 && bits[k] != 8 {
-            return false;
-        }
-    }
-    true
-}
-
 pub fn soft_fixed_unit(c: f64) -> u32 {
     (fx_min(fx_max(c, 0.0), 1.0) * 255.0 + 0.5) as u32
 }
@@ -167,11 +155,9 @@ impl SoftDraw<'_> {
     /// has already made are not repeated.
     pub fn fixed_setup(&self, f: &mut SoftFixedTex) -> bool {
         let base = self.texture_base;
-        let mipmap: bool;
-        let edge_only: bool;
         let mut border = [0.0f64; 4];
 
-        if SOFT_TEXTURE_PATH.load(std::sync::atomic::Ordering::Relaxed) == SGI_RASTER_TEXTURE_DOUBLE
+        if SOFT_TEXTURE_PATH.with(|p| p.get()) == SGI_RASTER_TEXTURE_DOUBLE
             || self.texture.is_none()
             || self.texels_cache.is_none()
             || self.t.mixed_frame
@@ -196,14 +182,14 @@ impl SoftDraw<'_> {
         f.wrap_t = im.wrap_t;
         f.upper_s = if im.max_clamp { im.max_clamp_s } else { 1.0 };
         f.upper_t = if im.max_clamp { im.max_clamp_t } else { 1.0 };
-        mipmap = soft_texture_mipmap(f.min);
+        let mipmap: bool = soft_texture_mipmap(f.min);
         if f.format == SGI_GL_DEPTH_COMPONENT
             || (f.mag != SGI_GL_NEAREST && f.mag != SGI_GL_LINEAR)
             || (f.min != SGI_GL_NEAREST && f.min != SGI_GL_LINEAR && !mipmap)
         {
             return false;
         }
-        edge_only = (f.wrap_s == SGI_GL_REPEAT || f.wrap_s == SGI_GL_CLAMP_TO_EDGE)
+        let edge_only: bool = (f.wrap_s == SGI_GL_REPEAT || f.wrap_s == SGI_GL_CLAMP_TO_EDGE)
             && (f.wrap_t == SGI_GL_REPEAT || f.wrap_t == SGI_GL_CLAMP_TO_EDGE);
         f.range = if base.is_some() { self.texture_last.wrapping_sub(p.unwrap().base_level) } else { 0 };
         if f.range as usize >= SGI_SOFT_FIXED_LEVELS {
@@ -364,10 +350,9 @@ impl SoftFixedTex {
 
 impl SoftDraw<'_> {
     /// Read every texel of the levels draw r can sample into this thread's
-    /// plain arrays, which f then shares with the draw's bands: for a large
-    /// draw that covers about as many pixels as those levels have texels,
-    /// which then reads each once rather than once in each band, and taps
-    /// them without a tag. False, and the draw reads texels as it reaches them,
+    /// plain arrays, which f then lends the draw: for a large draw that
+    /// covers about as many pixels as those levels have texels, which then
+    /// taps them without a tag. False, and the draw reads texels as it reaches them,
     /// where any read fails or the arrays cannot be allocated.
     pub fn fixed_prefill(&self, f: &mut SoftFixedTex) -> bool {
         let mut first = 0u32;
@@ -580,8 +565,8 @@ pub fn soft_fixed_log2_init() -> &'static [i16; 1024] {
     SOFT_FIXED_LOG2.get_or_init(|| {
         let mut t = [0i16; 1024];
 
-        for i in 0..t.len() {
-            t[i] = (128.0 * (1.0 + (i as f64 + 0.5) / 1024.0).log2()).round() as i16;
+        for (i, v) in t.iter_mut().enumerate() {
+            *v = (128.0 * (1.0 + (i as f64 + 0.5) / 1024.0).log2()).round() as i16;
         }
         t
     })
@@ -628,38 +613,36 @@ impl SoftFixedTex {
     }
 
     /// A fragment's s, t and lambda from the triangle's planes g at pixel
-    /// column px, whose row terms are row; false where the fixed sampler
-    /// cannot take it. rho2_flat, where Q/W is the same across the triangle,
-    /// is its footprint squared there, the same at every fragment.
+    /// column px, whose row terms are row; None where the fixed sampler
+    /// cannot take it. flat_lambda, where Q/W is the same across the
+    /// triangle, is the lambda of every fragment.
     #[inline(always)]
-    pub fn fixed_coords(&self, g: &SoftTexPlane, row: &[f64; 4], px: i32, flat_lambda: Option<i32>, s: &mut f64, t: &mut f64, lambda: &mut i32) -> bool {
+    pub fn fixed_coords(&self, g: &SoftTexPlane, row: &[f64; 4], px: i32, flat_lambda: Option<i32>) -> Option<(f64, f64, i32)> {
         let x = px as f64 + 0.5 - g.x;
         let q = g.value[2] + x * g.dx[2] + row[2];
 
         if !(q > 0.0) {
-            return false;
+            return None;
         }
         let iq = 1.0 / q;
-        *s = (g.value[0] + x * g.dx[0] + row[0]) * iq;
-        *t = (g.value[1] + x * g.dx[1] + row[1]) * iq;
+        let s = (g.value[0] + x * g.dx[0] + row[0]) * iq;
+        let t = (g.value[1] + x * g.dx[1] + row[1]) * iq;
         if !(s.abs() < 1073741824.0 && t.abs() < 1073741824.0) {
-            return false;
+            return None;
         }
         if !self.lod || flat_lambda.is_some() {
-            *lambda = flat_lambda.unwrap_or(0);
-            return true;
+            return Some((s, t, flat_lambda.unwrap_or(0)));
         }
         // d(S/Q)/dx is (dS/dx - s dQ/dx) / Q, and so on.
-        let a = self.ns * (g.dx[0] - *s * g.dx[2]) * iq;
-        let b = self.nt * (g.dx[1] - *t * g.dx[2]) * iq;
-        let c = self.ns * (g.dy[0] - *s * g.dy[2]) * iq;
-        let e = self.nt * (g.dy[1] - *t * g.dy[2]) * iq;
+        let a = self.ns * (g.dx[0] - s * g.dx[2]) * iq;
+        let b = self.nt * (g.dx[1] - t * g.dx[2]) * iq;
+        let c = self.ns * (g.dy[0] - s * g.dy[2]) * iq;
+        let e = self.nt * (g.dy[1] - t * g.dy[2]) * iq;
         let rho2 = fx_max(a * a + b * b, c * c + e * e);
         if !(rho2 <= f64::MAX) {
-            return false;
+            return None;
         }
-        *lambda = self.fixed_decide(rho2, soft_fixed_lambda(rho2));
-        true
+        Some((s, t, self.fixed_decide(rho2, soft_fixed_lambda(rho2))))
     }
 }
 
@@ -761,8 +744,8 @@ impl SoftDraw<'_> {
     }
 }
 
-/// One triangle's fixed inputs to a textured row loop
-/// (SoftDraw::texture_row()), and the row it is on.
+/// One triangle's fixed inputs to a row loop (SoftDraw::fill_row()), and
+/// the row it is on.
 #[derive(Clone, Copy)]
 pub struct SoftTexSpan<'a> {
     /// three, wound as the rows step
@@ -784,278 +767,12 @@ pub struct SoftTexSpan<'a> {
     pub constant: u8,
 }
 
-impl SoftDraw<'_> {
-    /// Pixels px0 to px1 of row py of a textured triangle, whose edge values
-    /// for v[2]-v[0] and v[0]-v[1] at px0 are e1 and e2, under state
-    /// SoftDraw::fixed_span_select() admits: what the general loop and
-    /// SoftDraw::fragment_at() leave for each fragment, with the fixed-point
-    /// sampler, and the same planes; only the order of target calls differs,
-    /// the depth read coming before the texture's. It stops at the first
-    /// fragment the fixed sampler cannot take and returns its column, which
-    /// the caller draws through the general loop, or px1 + 1 when the row is
-    /// done. The constant arguments select a specialisation each: the
-    /// sampler's kernel and wrap, the environment and base format where
-    /// nonzero, and with KNOWN set, a depth-tested draw without blending or
-    /// fog, so the per-pixel loop carries no test of them.
-    #[inline(always)]
-    pub fn texture_row<
-        const KERNEL: u32,
-        const REPEAT: bool,
-        const ENV_KNOWN: u32,
-        const FORMAT_KNOWN: u32,
-        const KNOWN: bool,
-    >(&self, sp: &SoftTexSpan, py: i32, mut px0: i32, mut px1: i32, mut e1: i64, mut e2: i64) -> i32 {
-        let rules: &RasterRules = &self.rules;
-        let st: &GlDrawState = &self.st;
-        let t: &RasterTarget = self.t;
-        let v: &[SoftVertex; 3] = sp.v;
-        let y = self.win.oy.wrapping_add(py);
-        let mut clipped = self.win.clip.n > 1;
-        let depth_test = KNOWN || st.depth_test != 0;
-        let fog = !KNOWN && st.fog != 0;
-        let rgba_read = t.store_rgba && self.rgba_read;
-        let env = if ENV_KNOWN != 0 { ENV_KNOWN } else { st.texture_env_mode };
-        let format = if FORMAT_KNOWN != 0 { FORMAT_KNOWN } else { self.fixed_tex().format };
-        // REPLACE leaves none of the colour of these formats' fragments.
-        let keeps = env != SGI_GL_REPLACE
-            || (format != SGI_GL_RGBA && format != SGI_GL_INTENSITY && format != SGI_GL_LUMINANCE_ALPHA);
-        let end = px1 + 1;
-        let mut frag: SoftFrag = *sp.flat;
-        let mut dest = [RasterColour::default(); SGI_GL_MAX_TARGETS as usize];
-
-        let mut i = 0u32;
-        while clipped && i < fx_min(self.win.clip.n, SGI_CLIP_MAX as u32) {
-            // One of the window's rectangles holds the whole row.
-            let c = &self.win.clip.r[i as usize];
-
-            clipped = !(y >= c.y0
-                && y <= c.y1
-                && (self.win.ox as i64) + px0 as i64 >= c.x0 as i64
-                && (self.win.ox as i64) + px1 as i64 <= c.x1 as i64);
-            i += 1;
-        }
-        if st.scissor_test != 0 && !clipped {
-            // SoftDraw::owned_at()'s scissor test, decided for the whole row.
-            let sx0 = st.scissor[0] as i64;
-            let sx1 = st.scissor[0] as i64 + st.scissor[2] as i64 - 1;
-
-            if !(py >= st.scissor[1] && (py as i64) < st.scissor[1] as i64 + st.scissor[3] as i64) {
-                return end;
-            }
-            if sx0 > px0 as i64 {
-                if sx0 > px1 as i64 {
-                    return end;
-                }
-                e1 = e1.wrapping_add((sx0 - px0 as i64).wrapping_mul(sp.step1));
-                e2 = e2.wrapping_add((sx0 - px0 as i64).wrapping_mul(sp.step2));
-                px0 = sx0 as i32;
-            }
-            px1 = fx_min(px1 as i64, sx1) as i32;
-        }
-        let mut px = px0;
-        let mut first_pixel = true;
-        loop {
-            // The loop increment, run before every pixel but the first so
-            // that a continue still steps.
-            if !first_pixel {
-                px += 1;
-                e1 = e1.wrapping_add(sp.step1);
-                e2 = e2.wrapping_add(sp.step2);
-            }
-            first_pixel = false;
-            if px > px1 {
-                break;
-            }
-            let x = self.win.ox.wrapping_add(px);
-            let b1 = e1 as f64 / sp.area as f64;
-            let b2 = e2 as f64 / sp.area as f64;
-            let mut z = v[0].z + b1 * (v[1].z - v[0].z) + b2 * (v[2].z - v[0].z);
-            let w0 = (1.0 - b1 - b2) * v[0].inv_w;
-            let w1 = b1 * v[1].inv_w;
-            let w2 = b2 * v[2].inv_w;
-            let sum = w0 + w1 + w2;
-            let mut off = sp.offset;
-            let mut zw = 0.0f64;
-            let mut s = 0.0f64;
-            let mut tc = 0.0f64;
-            let mut lambda = 0i32;
-            let mut zq = 0u32;
-
-            if rules.depth_row_given {
-                let depth_w = (1.0 - b1 - b2) * v[0].depth_w + b1 * v[1].depth_w + b2 * v[2].depth_w;
-                let slack = rules.depth_slack;
-
-                z = (z + off) / depth_w;
-                off = 0.0;
-                if z < 0.0 && z >= -slack {
-                    z = 0.0;
-                } else if z > 1.0 && z <= 1.0 + slack {
-                    z = 1.0;
-                }
-            }
-            if !st.window_depth(z, off, &mut zw) || !(zw >= 0.0 && zw <= 1.0) {
-                continue;
-            }
-            if clipped && !self.owned_at(px, py) {
-                continue;
-            }
-            if depth_test {
-                zq = rules.depth_code(zw);
-                if !soft_compare(st.depth_func, zq, self.px.load_depth(x, y)) {
-                    continue;
-                }
-            }
-            if !self.fixed_tex().fixed_coords(sp.g, &sp.row, px, sp.flat_lambda, &mut s, &mut tc, &mut lambda)
-                || !SoftDraw::fixed_sample::<KERNEL, REPEAT>(self, s, tc, lambda, &mut frag.texel)
-            {
-                return px;
-            }
-            if sp.smooth && keeps {
-                for k in 0..4 {
-                    frag.rgba[k] = if sp.constant & (1u8 << k) != 0 {
-                        v[0].rgba[k]
-                    } else {
-                        (w0 * v[0].rgba[k] + w1 * v[1].rgba[k] + w2 * v[2].rgba[k]) / sum
-                    };
-                }
-            } else {
-                frag.rgba = sp.flat.rgba;
-            }
-            self.texture_apply(format, env, &mut frag.texel, &mut frag.rgba);
-            if fog {
-                frag.fog = (w0 * v[0].fog + w1 * v[1].fog + w2 * v[2].fog) / sum;
-                self.fog(&mut frag, zw);
-            }
-            if rgba_read && !rules.rgba_load(self.px, &self.targets, self.ntargets, x, y, &mut dest, &self.reports.rgba) {
-                continue;
-            }
-            if depth_test && st.depth_mask != 0 {
-                self.px.store_depth(x, y, zq);
-            }
-            self.fragment_store(x, y, &frag, &dest);
-        }
-        end
-    }
-}
-
-/// A specialisation of SoftDraw::texture_row() under a name, as this
-/// macro stamps them out.
-macro_rules! SGI_SOFT_TEXTURE_SPAN {
-    ($name:ident, $kernel:expr, $repeat:expr, $env:expr, $format:expr, $known:expr) => {
-        pub fn $name(
-            r: &SoftDraw,
-            sp: &SoftTexSpan,
-            py: i32,
-            px0: i32,
-            px1: i32,
-            e1: i64,
-            e2: i64,
-        ) -> i32 {
-            SoftDraw::texture_row::<{ $kernel }, { $repeat }, { $env }, { $format }, { $known }>(
-                r, sp, py, px0, px1, e1, e2,
-            )
-        }
-    };
-}
-
-// Any state the row loops take, tested per pixel.
-SGI_SOFT_TEXTURE_SPAN!(sgi_soft_texture_span_any, SGI_SOFT_FIXED_ANY, false, 0, 0, false);
-
-// The states drawing commonly textures in, one loop each: a repeated RGB
-// or RGBA image, nearest, bilinear or trilinear, replacing or modulating
-// the fragment's colour, depth tested, without blending or fog.
-SGI_SOFT_TEXTURE_SPAN!(sgi_soft_texture_span_nearest_replace_rgba, SGI_SOFT_FIXED_NEAREST, true, SGI_GL_REPLACE, SGI_GL_RGBA, true);
-SGI_SOFT_TEXTURE_SPAN!(sgi_soft_texture_span_nearest_replace_rgb, SGI_SOFT_FIXED_NEAREST, true, SGI_GL_REPLACE, SGI_GL_RGB, true);
-SGI_SOFT_TEXTURE_SPAN!(sgi_soft_texture_span_nearest_modulate_rgba, SGI_SOFT_FIXED_NEAREST, true, SGI_GL_MODULATE, SGI_GL_RGBA, true);
-SGI_SOFT_TEXTURE_SPAN!(sgi_soft_texture_span_nearest_modulate_rgb, SGI_SOFT_FIXED_NEAREST, true, SGI_GL_MODULATE, SGI_GL_RGB, true);
-SGI_SOFT_TEXTURE_SPAN!(sgi_soft_texture_span_linear_replace_rgba, SGI_SOFT_FIXED_LINEAR, true, SGI_GL_REPLACE, SGI_GL_RGBA, true);
-SGI_SOFT_TEXTURE_SPAN!(sgi_soft_texture_span_linear_replace_rgb, SGI_SOFT_FIXED_LINEAR, true, SGI_GL_REPLACE, SGI_GL_RGB, true);
-SGI_SOFT_TEXTURE_SPAN!(sgi_soft_texture_span_linear_modulate_rgba, SGI_SOFT_FIXED_LINEAR, true, SGI_GL_MODULATE, SGI_GL_RGBA, true);
-SGI_SOFT_TEXTURE_SPAN!(sgi_soft_texture_span_linear_modulate_rgb, SGI_SOFT_FIXED_LINEAR, true, SGI_GL_MODULATE, SGI_GL_RGB, true);
-SGI_SOFT_TEXTURE_SPAN!(sgi_soft_texture_span_trilinear_replace_rgba, SGI_SOFT_FIXED_TRILINEAR, true, SGI_GL_REPLACE, SGI_GL_RGBA, true);
-SGI_SOFT_TEXTURE_SPAN!(sgi_soft_texture_span_trilinear_replace_rgb, SGI_SOFT_FIXED_TRILINEAR, true, SGI_GL_REPLACE, SGI_GL_RGB, true);
-SGI_SOFT_TEXTURE_SPAN!(sgi_soft_texture_span_trilinear_modulate_rgba, SGI_SOFT_FIXED_TRILINEAR, true, SGI_GL_MODULATE, SGI_GL_RGBA, true);
-SGI_SOFT_TEXTURE_SPAN!(sgi_soft_texture_span_trilinear_modulate_rgb, SGI_SOFT_FIXED_TRILINEAR, true, SGI_GL_MODULATE, SGI_GL_RGB, true);
-
-/// By kernel less one, then replace or modulate, then RGBA or RGB.
-pub static SOFT_TEXTURE_SPANS: [[[SoftTexSpanFn; 2]; 2]; 3] = [
-    [
-        [sgi_soft_texture_span_nearest_replace_rgba, sgi_soft_texture_span_nearest_replace_rgb],
-        [sgi_soft_texture_span_nearest_modulate_rgba, sgi_soft_texture_span_nearest_modulate_rgb],
-    ],
-    [
-        [sgi_soft_texture_span_linear_replace_rgba, sgi_soft_texture_span_linear_replace_rgb],
-        [sgi_soft_texture_span_linear_modulate_rgba, sgi_soft_texture_span_linear_modulate_rgb],
-    ],
-    [
-        [sgi_soft_texture_span_trilinear_replace_rgba, sgi_soft_texture_span_trilinear_replace_rgb],
-        [sgi_soft_texture_span_trilinear_modulate_rgba, sgi_soft_texture_span_trilinear_modulate_rgb],
-    ],
-];
-
-impl SoftDraw<'_> {
-    /// The row loop for draw r's textured triangles, or None for the general
-    /// loop: under SGI_RASTER_TEXTURE_SPANS, for state whose per-fragment
-    /// work is ownership, the depth test, the texture, fog, blending and the
-    /// store, whatever the colour mask, dither and targets. A loop of its own
-    /// for the common states named above; the others take the loop that tests
-    /// the state per pixel.
-    pub fn fixed_span_select(&self, f: &SoftFixedTex) -> Option<SoftTexSpanFn> {
-        let st: &GlDrawState = self.st;
-        let t: &RasterTarget = self.t;
-        let mut smax = 0u32;
-
-        if SOFT_TEXTURE_PATH.load(std::sync::atomic::Ordering::Relaxed) != SGI_RASTER_TEXTURE_SPANS
-            || self.polygon_stipple.is_some()
-            || st.clip_planes != 0
-            || (st.stencil_test != 0 && self.rules.stencil_max(t, &mut smax))
-        {
-            return None;
-        }
-        let kernel: i32 = if !f.lod && f.min == SGI_GL_NEAREST {
-            0
-        } else if !f.lod && f.min == SGI_GL_LINEAR {
-            1
-        } else if f.min == SGI_GL_LINEAR_MIPMAP_LINEAR && f.mag == SGI_GL_LINEAR {
-            2
-        } else {
-            -1
-        };
-        let env: i32 = if st.texture_env_mode == SGI_GL_REPLACE {
-            0
-        } else if st.texture_env_mode == SGI_GL_MODULATE {
-            1
-        } else {
-            -1
-        };
-        let format: i32 = if f.format == SGI_GL_RGBA {
-            0
-        } else if f.format == SGI_GL_RGB {
-            1
-        } else {
-            -1
-        };
-        if kernel < 0
-            || env < 0
-            || format < 0
-            || f.wrap_s != SGI_GL_REPEAT
-            || f.wrap_t != SGI_GL_REPEAT
-            || st.depth_test == 0
-            || self.blend
-            || st.fog != 0
-        {
-            return Some(sgi_soft_texture_span_any);
-        }
-        Some(SOFT_TEXTURE_SPANS[kernel as usize][env as usize][format as usize])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // Large enough that the draw covers more pixels than the texture path
-    // prefills for, and than bands share.
+    // prefills for.
     const W: usize = 128;
 
     /// A colour and a depth plane of W by W words.
@@ -1069,31 +786,14 @@ mod tests {
         depth: Rows<'a, u32>,
     }
 
-    // The names of the threads that stored a pixel.
-    static WRITERS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-
     impl PlaneStore for Fb<'_> {
         fn planes(&mut self) -> Box<dyn Planes + '_> {
             Box::new(FbView { colour: self.colour.view(), depth: self.depth.view() })
-        }
-        fn split(&mut self, bands: u32) -> Vec<Box<dyn PlaneStore + '_>> {
-            self.colour
-                .split(bands)
-                .into_iter()
-                .zip(self.depth.split(bands))
-                .map(|(colour, depth)| Box::new(Fb { colour, depth }) as Box<dyn PlaneStore + '_>)
-                .collect()
         }
     }
 
     impl Planes for FbView<'_> {
         fn store_colour(&self, _t: ColourTarget, x: i32, y: i32, c: u32) {
-            let name = std::thread::current().name().unwrap_or("").to_string();
-            let mut w = WRITERS.lock().unwrap();
-            if !w.contains(&name) {
-                w.push(name);
-            }
-            drop(w);
             self.colour.get(y as usize, x as usize, 1).unwrap()[0].set(c);
         }
         fn load_colour(&self, _t: ColourTarget, x: i32, y: i32) -> u32 {
@@ -1125,7 +825,7 @@ mod tests {
         }
     }
 
-    fn draw(path: RasterTexturePath, filter: u32, bands: bool) -> (Vec<u32>, Vec<u32>) {
+    fn draw(path: RasterTexturePath, filter: u32) -> (Vec<u32>, Vec<u32>) {
         let rules = RasterRules {
             subpixel_bits: 4,
             color_bits: 8,
@@ -1153,8 +853,6 @@ mod tests {
             store_colour: true,
             load_colour: true,
             texture: Some(image),
-            concurrent_pixels: bands,
-            band_min_pixels: 1,
             ..Default::default()
         };
         let mut id = [0.0f32; 16];
@@ -1194,11 +892,8 @@ mod tests {
         let mut fb = Fb { colour: RowsMut::new(&mut colour, W), depth: RowsMut::new(&mut depth, W) };
 
         raster_set_texture_path(path);
-        raster_set_parallel(4, 1);
         rules.draw(&target, &mut fb, &Hashed, &mut d);
         raster_set_texture_path(SGI_RASTER_TEXTURE_SPANS);
-        raster_set_parallel(0, SGI_RASTER_PARALLEL_MIN_PIXELS);
-        drop(fb);
         (colour, depth)
     }
 
@@ -1210,26 +905,13 @@ mod tests {
     #[test]
     fn fixed_and_double_paths_agree() {
         for filter in [SGI_GL_NEAREST, SGI_GL_LINEAR] {
-            let (dc, dz) = draw(SGI_RASTER_TEXTURE_DOUBLE, filter, false);
-            let (sc, sz) = draw(SGI_RASTER_TEXTURE_SPANS, filter, false);
-            let (fc, fz) = draw(SGI_RASTER_TEXTURE_FIXED, filter, false);
+            let (dc, dz) = draw(SGI_RASTER_TEXTURE_DOUBLE, filter);
+            let (sc, sz) = draw(SGI_RASTER_TEXTURE_SPANS, filter);
+            let (fc, fz) = draw(SGI_RASTER_TEXTURE_FIXED, filter);
             let tol = if filter == SGI_GL_NEAREST { 0 } else { 2 };
             let mut differ = 0;
 
             assert!(dc.iter().any(|&c| c != 0), "triangle drew nothing");
-            // Bands draw the same pixels as one pass, double or fixed.
-            for path in [SGI_RASTER_TEXTURE_DOUBLE, SGI_RASTER_TEXTURE_SPANS, SGI_RASTER_TEXTURE_FIXED] {
-                WRITERS.lock().unwrap().clear();
-                let (bc, bz) = draw(path, filter, true);
-                assert!(
-                    WRITERS.lock().unwrap().iter().any(|n| n.starts_with("sgi-raster-")),
-                    "no pool worker drew a pixel: {:?}",
-                    WRITERS.lock().unwrap()
-                );
-                let (oc, oz) = draw(path, filter, false);
-
-                assert!(bc == oc && bz == oz, "banded draw differs, path {path} filter {filter:#x}");
-            }
             assert_eq!(sc, fc, "span and general loops differ, filter {filter:#x}");
             assert_eq!(sz, fz);
             assert_eq!(dz, fz, "depth differs, filter {filter:#x}");

@@ -9,25 +9,42 @@ use super::*;
 
 use std::cell::Cell;
 
-pub const SGI_PLANE_NONE: u32 = u32::MAX;
 pub const SGI_PLANES_MAX: usize = 32;
 
-pub type PlaneFormat = u32;
-pub const SGI_PLANE_CI8: PlaneFormat = 0; // 1 byte: colour index
-pub const SGI_PLANE_RGB12: PlaneFormat = 1; // 2 bytes: 12-bit colour in a 16-bit word
-pub const SGI_PLANE_RGB24: PlaneFormat = 2; // 4 bytes: 24-bit colour in a 32-bit word
-pub const SGI_PLANE_RGBA8: PlaneFormat = 3; // 4 bytes
-pub const SGI_PLANE_Z24: PlaneFormat = 4; // 4 bytes: 24-bit depth in a 32-bit word
-pub const SGI_PLANE_S8: PlaneFormat = 5; // 1 byte: stencil
-pub const SGI_PLANE_TAG: PlaneFormat = 6; // 1 byte: per-pixel tag
-pub const SGI_PLANE_OVERLAY8: PlaneFormat = 7; // 1 byte
-pub const SGI_PLANE_TEXTURE: PlaneFormat = 8; // 4 bytes
-pub const SGI_PLANE_RAW: PlaneFormat = 9; // 4 bytes: a word the family interprets
+/// How a plane's pixels are stored.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum PlaneFormat {
+    /// 1 byte: colour index
+    #[default]
+    Ci8,
+    /// 2 bytes: 12-bit colour in a 16-bit word
+    Rgb12,
+    /// 4 bytes: 24-bit colour in a 32-bit word
+    Rgb24,
+    /// 4 bytes
+    Rgba8,
+    /// 4 bytes: 24-bit depth in a 32-bit word
+    Z24,
+    /// 1 byte: stencil
+    S8,
+    /// 1 byte: per-pixel tag
+    Tag,
+    /// 1 byte
+    Overlay8,
+    /// 4 bytes
+    Texture,
+    /// 4 bytes: a word the family interprets
+    Raw,
+}
 
-pub type Packing = u32;
-pub const SGI_PACK_LE_RED_LOW: Packing = 0;
-pub const SGI_PACK_LE_RED_HIGH: Packing = 1;
-pub const SGI_PACK_BE_RED_HIGH: Packing = 3;
+/// The byte order and channel order the model writes a plane's words in.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum Packing {
+    #[default]
+    LeRedLow,
+    LeRedHigh,
+    BeRedHigh,
+}
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Plane {
@@ -105,48 +122,43 @@ pub fn plane_bytes_per_pixel(format: PlaneFormat) -> u32 {
 
 impl BoardMemory {
     /// Declare a plane. Its id is assigned here and returned; the rest of
-    /// *plane is copied. Fails, returning SGI_PLANE_NONE (and setting errp),
-    /// when the plane does not fit the memory, its rows do not fit its stride
-    /// and length, or the table already holds SGI_PLANES_MAX planes.
-    pub fn add_plane(&mut self, plane: &Plane, errp: &mut Option<String>) -> u32 {
+    /// *plane is copied. Fails when the plane does not fit the memory, its
+    /// rows do not fit its stride and length, or the table already holds
+    /// SGI_PLANES_MAX planes.
+    pub fn add_plane(&mut self, plane: &Plane) -> Result<u32, String> {
         let bpp = plane_bytes_per_pixel(plane.format);
         let row = plane.width as u64 * bpp as u64;
 
         if plane.width == 0 || plane.height == 0 {
-            *errp = Some("plane has no pixels".to_string());
-            return SGI_PLANE_NONE;
+            return Err("plane has no pixels".to_string());
         }
         if (plane.stride as u64) < row {
-            *errp = Some(format!(
+            return Err(format!(
                 "plane stride {} is shorter than its {}-byte rows",
                 plane.stride, row
             ));
-            return SGI_PLANE_NONE;
         }
         let need = (plane.height as u64 - 1) * plane.stride as u64 + row;
         if need > plane.len {
-            *errp = Some(format!("plane needs {} bytes but has {}", need, plane.len));
-            return SGI_PLANE_NONE;
+            return Err(format!("plane needs {} bytes but has {}", need, plane.len));
         }
         if plane.base > self.size || plane.len > self.size - plane.base {
-            *errp = Some(format!(
+            return Err(format!(
                 "plane {:#x}+{:#x} is outside {:#x} bytes of board memory",
                 plane.base, plane.len, self.size
             ));
-            return SGI_PLANE_NONE;
         }
 
         if self.nplanes as usize == SGI_PLANES_MAX {
-            *errp = Some(format!("board memory already has {} planes", SGI_PLANES_MAX));
-            return SGI_PLANE_NONE;
+            return Err(format!("board memory already has {} planes", SGI_PLANES_MAX));
         }
         let id = self.nplanes;
         self.nplanes += 1;
         let p = &mut self.planes[id as usize];
         *p = *plane;
         p.id = id;
-        crate::dlog!(LogModule::Odyssey, "sgi_plane_add: plane {} base {:#x} len {:#x} {}x{} stride {} format {}", p.id, p.base, p.len, p.width, p.height, p.stride, p.format as i32);
-        p.id
+        crate::dlog!(LogModule::Odyssey, "sgi-odyssey: plane added: plane {} base {:#x} len {:#x} {}x{} stride {} format {:?}", p.id, p.base, p.len, p.width, p.height, p.stride, p.format);
+        Ok(p.id)
     }
     /// The plane with this id, if there is one.
     pub fn plane(&self, id: u32) -> Option<Plane> {
@@ -263,9 +275,9 @@ pub fn plane_word_store(bytes: &mut [u8], bpp: u32, le: bool, word: u32) {
         }
         _ => {
             if le {
-                bytes[..4].copy_from_slice(&(word as u32).to_le_bytes());
+                bytes[..4].copy_from_slice(&word.to_le_bytes());
             } else {
-                bytes[..4].copy_from_slice(&(word as u32).to_be_bytes());
+                bytes[..4].copy_from_slice(&word.to_be_bytes());
             }
         }
     }
@@ -285,16 +297,15 @@ impl Plane {
 #[inline]
 pub fn plane_bpp(format: PlaneFormat) -> u32 {
     match format {
-        SGI_PLANE_CI8 | SGI_PLANE_S8 | SGI_PLANE_TAG | SGI_PLANE_OVERLAY8 => 1,
-        SGI_PLANE_RGB12 => 2,
-        SGI_PLANE_RGB24 | SGI_PLANE_RGBA8 | SGI_PLANE_Z24 | SGI_PLANE_TEXTURE | SGI_PLANE_RAW => 4,
-        _ => unreachable!(),
+        PlaneFormat::Ci8 | PlaneFormat::S8 | PlaneFormat::Tag | PlaneFormat::Overlay8 => 1,
+        PlaneFormat::Rgb12 => 2,
+        PlaneFormat::Rgb24 | PlaneFormat::Rgba8 | PlaneFormat::Z24 | PlaneFormat::Texture | PlaneFormat::Raw => 4,
     }
 }
 
 impl Plane {
     pub fn is_le(&self) -> bool {
-        self.packing == SGI_PACK_LE_RED_LOW || self.packing == SGI_PACK_LE_RED_HIGH
+        matches!(self.packing, Packing::LeRedLow | Packing::LeRedHigh)
     }
 
     #[inline]
@@ -316,74 +327,36 @@ impl Plane {
     }
 }
 
-/// A pixel array's rows as a draw borrows them: the whole array, or the
-/// rows of one band of a banded draw. A band has every bands-th run of
-/// 2^SGI_SOFT_BAND_ROWS_SHIFT rows (SoftDraw::row_in_band()), so bands of
-/// one draw never share a row and can write theirs on separate threads.
+/// A pixel array's rows as a draw borrows them.
 pub struct RowsMut<'a, T> {
     /// Elements from the start of one row to the next.
     stride: usize,
-    chunks: RowChunks<&'a mut [T]>,
-}
-
-enum RowChunks<S> {
-    Whole(S),
-    /// Indexed by row >> SGI_SOFT_BAND_ROWS_SHIFT; None for another band's.
-    Band(Vec<Option<S>>),
+    data: &'a mut [T],
 }
 
 impl<'a, T> RowsMut<'a, T> {
     pub fn new(data: &'a mut [T], stride: usize) -> Self {
-        RowsMut { stride, chunks: RowChunks::Whole(data) }
+        RowsMut { stride, data }
     }
 
-    /// One RowsMut per band, band b holding its rows. Only whole rows split.
-    pub fn split(&mut self, bands: u32) -> Vec<RowsMut<'_, T>> {
-        let RowChunks::Whole(data) = &mut self.chunks else {
-            panic!("a band's rows split again");
-        };
-        let run = (self.stride << SGI_SOFT_BAND_ROWS_SHIFT).max(1);
-        let bands = bands as usize;
-        let n = data.len().div_ceil(run);
-        let mut out: Vec<Vec<Option<&mut [T]>>> = (0..bands).map(|_| (0..n).map(|_| None).collect()).collect();
-
-        for (i, chunk) in data.chunks_mut(run).enumerate() {
-            out[i % bands][i] = Some(chunk);
-        }
-        out.into_iter().map(|chunks| RowsMut { stride: self.stride, chunks: RowChunks::Band(chunks) }).collect()
-    }
-
-    /// The rows as one thread writes them.
+    /// The rows as the draw writes them.
     pub fn view(&mut self) -> Rows<'_, T> {
-        let chunks = match &mut self.chunks {
-            RowChunks::Whole(data) => RowChunks::Whole(Cell::from_mut(&mut **data).as_slice_of_cells()),
-            RowChunks::Band(chunks) => RowChunks::Band(
-                chunks.iter_mut().map(|c| c.as_mut().map(|c| Cell::from_mut(&mut **c).as_slice_of_cells())).collect(),
-            ),
-        };
-        Rows { stride: self.stride, chunks }
+        Rows { stride: self.stride, data: Cell::from_mut(&mut *self.data).as_slice_of_cells() }
     }
 }
 
-/// RowsMut as one thread writes it, through shared references.
+/// RowsMut as the draw writes it, through shared references.
 pub struct Rows<'a, T> {
     stride: usize,
-    chunks: RowChunks<&'a [Cell<T>]>,
+    data: &'a [Cell<T>],
 }
 
 impl<T> Rows<'_, T> {
-    /// The len elements at element `offset` of row y, when that row is
-    /// these rows' and long enough.
+    /// The len elements at element `offset` of row y, when the array is
+    /// long enough.
     #[inline]
     pub fn get(&self, y: usize, offset: usize, len: usize) -> Option<&[Cell<T>]> {
-        let (data, at) = match &self.chunks {
-            RowChunks::Whole(data) => (*data, y * self.stride + offset),
-            RowChunks::Band(chunks) => {
-                let chunk = (*chunks.get(y >> SGI_SOFT_BAND_ROWS_SHIFT)?)?;
-                (chunk, (y & ((1 << SGI_SOFT_BAND_ROWS_SHIFT) - 1)) * self.stride + offset)
-            }
-        };
-        data.get(at..)?.get(..len)
+        self.data.get(y * self.stride + offset..)?.get(..len)
     }
 }
 
