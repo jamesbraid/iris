@@ -72,6 +72,7 @@ pub mod hub_md;
 pub mod hub_ni;
 pub mod hub_pi;
 pub mod dp83840;
+pub mod bedrock_flash;
 pub mod bedrock_io;
 pub mod bedrock_ni;
 pub mod bedrock_xb;
