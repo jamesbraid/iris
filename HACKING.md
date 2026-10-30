@@ -368,7 +368,11 @@ consumer thread never takes `rec`.
   Uncached SB/SH use a masked 64-bit bus transaction. The addressed byte or
   halfword carries the source register's low bits; inactive lanes retain
   deterministic source bits for compatibility, but their values are
-  undefined by hardware.
+  undefined by hardware. EntryLo keeps the R10000 family's uncached
+  attribute in bits 63:62, and a mapped uncached or uncached-accelerated
+  access carries it to the bus as address bits 58:57, as an xkphys access
+  does. A machine whose bus decodes fewer physical bits (`phys_mask`)
+  folds the attribute away; other models drop the bits at EntryLo.
 - With `opcodefusion` (implied by `lightning`), the interpreter executes
   common pairs (branch + NOP, LUI + ORI/ADDIU, address + load/store) as one
   dispatch.

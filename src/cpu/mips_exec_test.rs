@@ -3875,6 +3875,30 @@ mod tests {
         check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(0xF_FFFF_FFFF);
     }
 
+    /// EntryLo holds the R10000 family's uncached attribute in bits 63:62
+    /// (R10000 User's Manual v2.0, uncached attribute) and keeps nothing above
+    /// the PFN on the other models.
+    #[test]
+    fn entrylo_keeps_the_uncached_attribute_on_the_r10000_family() {
+        fn check<C: crate::cpu::mips_cache_v2::CpuModel + From<Arc<dyn BusDevice>>>(want: u64) {
+            let mem = Arc::new(MockMemory::new());
+            let bus: Arc<dyn BusDevice> = mem.clone();
+            let mut exec = MipsExecutor::<PassthroughTlb, C>::new(
+                bus, PassthroughTlb::default(), &MipsCpuConfig::indy());
+            disable_jitv2(&mut exec);
+            exec.core.write_gpr(1, u64::MAX);
+            for reg in [2u32, 3] {
+                // DMTC0 $1, EntryLo0/1; the readback is the writable field.
+                assert_eq!(exec.exec((0x10 << 26) | (5 << 21) | (1 << 16) | (reg << 11)), EXEC_COMPLETE);
+                assert_eq!(exec.core.read_cp0(reg), want, "EntryLo{}", reg - 2);
+            }
+        }
+        check::<PassthroughCache>(0x3FFF_FFFF);
+        check::<crate::cpu::mips_cache_v2::R4400Cache>(0x3FFF_FFFF);
+        check::<crate::cpu::mips_cache_v2::R10000Cache>(0xC000_0000_3FFF_FFFF);
+        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(0xC000_0000_3FFF_FFFF);
+    }
+
     /// The Indy, Indigo2 and O2 decode 32 physical bits, and IRIX relies on
     /// it: on the IP28 the kernel stack's wired entry carries PTE software
     /// bits as PA[34:33]. `phys_mask` must fold them away before the bus.

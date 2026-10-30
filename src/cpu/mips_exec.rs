@@ -2739,6 +2739,9 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
         if C::ENTRYHI_FULL_VA {
             core.entryhi_mask = 0xC000_0000_0000_00FF | (((1u64 << C::VA_BITS) - 1) & !0x1fff);
         }
+        if C::TLB_UNCACHED_ATTRIBUTE {
+            core.entrylo_mask |= 3 << 62;
+        }
 
         // Cache geometry comes from the model type C, so Config describes this CPU.
         // `mut` is only used by the Triton L2-enable sync below.

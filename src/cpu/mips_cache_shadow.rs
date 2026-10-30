@@ -373,6 +373,7 @@ impl<
     const FPU_FR1_WORD_WRITES_ZERO_UPPER: bool = Self::IS_R14000;
     const FPU_FR0_MOV_S_PRESERVES_PAIR: bool = Self::IS_R14000;
     const UNCACHED_MASKED_SUBWORD_STORES: bool = Self::IS_R14000;
+    const TLB_UNCACHED_ATTRIBUTE: bool = Self::R10K;
 }
 
 impl<

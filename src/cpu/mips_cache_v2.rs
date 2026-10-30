@@ -576,6 +576,12 @@ pub trait CpuModel: MipsCache {
     /// Walking Address diagnostic needs the source bits on the Bedrock ECC view.
     /// Inactive lanes carry compatibility bits, not measured silicon values.
     const UNCACHED_MASKED_SUBWORD_STORES: bool = false;
+    /// Keep the R10000 family's uncached attribute, EntryLo bits 63:62, and
+    /// put it on the bus for a mapped uncached access, as an unmapped xkphys
+    /// access carries its address bits 58:57. The R10000 User's Manual v2.0
+    /// (uncached attribute) loads it into the TLB from EntryLo0/1 for mapped
+    /// references. False keeps EntryLo to its PFN and flags.
+    const TLB_UNCACHED_ATTRIBUTE: bool = false;
 }
 
 pub trait MipsCache: Send + Sync {
@@ -3597,6 +3603,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
     const FIR: u32 = FIR;
     const TLB_ENTRIES: usize = TLB_ENTRIES;
     const R10K_CACHE_OPS: bool = MODEL == model::R10000;
+    const TLB_UNCACHED_ATTRIBUTE: bool = MODEL == model::R10000;
     // 44 implemented virtual address bits on the R10000, as the shadow
     // model already says; XContext's layout follows them.
     const VA_BITS: u32 = if MODEL == model::R10000 { 44 } else { 40 };

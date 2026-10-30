@@ -147,6 +147,22 @@ pub enum AccessType {
     Debug = 3,
 }
 
+/// The physical base a TLB entry's EntryLo maps. A model that keeps the
+/// R10000 family's uncached attribute (EntryLo bits 63:62, see
+/// `CpuModel::TLB_UNCACHED_ATTRIBUTE`) has it carried to physical bits 58:57
+/// for an uncached or uncached-accelerated page, where an unmapped xkphys
+/// access carries it; other models never store those bits. For a mapped
+/// reference the R10000 takes the two-bit uncached attribute from the TLB's
+/// uncached-attribute field, loaded from EntryLo0/1 bits 63:62 (R10000
+/// User's Manual v2.0, uncached attribute; origami's address-space model
+/// review records it).
+#[inline]
+fn pfn_base(lo: u64, pfn_mask: u64) -> u64 {
+    let uncached = matches!((lo >> 3) & 7, 2 | 7);
+    let attribute = if uncached { ((lo >> 62) & 3) << 57 } else { 0 };
+    ((lo << 6) & pfn_mask) | attribute
+}
+
 /// TLB Entry structure matching R4000 TLB format
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TlbEntry {
@@ -1074,8 +1090,8 @@ impl Tlb for MipsTlb {
             entry.offset_mask = (1u64 << entry.selector_bit_shift) - 1;
             let pfn_mask = 0xFF_FFFF_FFFF_000 & !entry.offset_mask;
             entry.pfn_base = [
-                (entry.entry_lo[0] << 6) & pfn_mask,
-                (entry.entry_lo[1] << 6) & pfn_mask,
+                pfn_base(entry.entry_lo[0], pfn_mask),
+                pfn_base(entry.entry_lo[1], pfn_mask),
             ];
             let old_range = Self::vmap_range(&self.entries[index]);
             self.entries[index] = entry;
@@ -1260,7 +1276,7 @@ impl Tlb for MipsTlb {
                     vcmp64,
                     vpn_hi64: entry_hi & vcmp64,
                     offset_mask,
-                    pfn_base: [(lo[0] << 6) & pfn_mask, (lo[1] << 6) & pfn_mask],
+                    pfn_base: [pfn_base(lo[0], pfn_mask), pfn_base(lo[1], pfn_mask)],
                 };
             }
         }

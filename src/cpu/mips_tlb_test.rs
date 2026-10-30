@@ -492,3 +492,18 @@ fn tlb_write_inside_a_larger_entry_count_is_kept() {
     assert_eq!(r10000.read(63).entry_hi, entry.entry_hi, "...and its last slot");
 }
 }
+
+/// A mapped uncached page carries EntryLo's uncached attribute (bits 63:62)
+/// to the bus as physical bits 58:57, where IRIX on the Fuel puts its
+/// graphics FIFO's I/O space; a cached page never does, whatever those bits
+/// hold, and no attribute leaves the PFN alone.
+#[test]
+fn only_uncached_pages_carry_the_uncached_attribute() {
+    let pfn_mask = 0xFF_FFFF_FFFF_000;
+    let pfn = 0x0d100u64 << 6;
+    for (cca, expect) in [(2u64, 1u64 << 57), (7, 1 << 57), (3, 0), (5, 0)] {
+        let lo = (1 << 62) | pfn | (cca << 3) | 0x6;
+        assert_eq!(super::pfn_base(lo, pfn_mask), 0x0d10_0000 | expect, "cca {cca}");
+    }
+    assert_eq!(super::pfn_base(pfn | (2 << 3), pfn_mask), 0x0d10_0000);
+}
