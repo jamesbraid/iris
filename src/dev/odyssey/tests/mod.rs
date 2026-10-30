@@ -25,6 +25,7 @@ mod display;
 mod dma;
 mod fifo;
 mod interrupts;
+mod pixels;
 mod raster;
 mod registers;
 
