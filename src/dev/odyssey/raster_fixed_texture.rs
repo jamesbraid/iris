@@ -1,8 +1,9 @@
-//! Fixed-point texturing for filled triangles: the sampler's state, its
+//! The fixed-point fast path for textured triangles: the sampler's state, its
 //! texel reads and filters, the lambda table, and the row loops that draw a
 //! textured triangle's pixels through it. The row loops are a generic
 //! function with const parameters, stamped out as a set of named spans by
-//! a macro_rules!.
+//! a macro_rules!. Its colours stay within 3/255 of the double-precision
+//! path's; it is faster, not more accurate.
 //!
 //! Ported from hw/display/sgi/rasterizer.c in jamesbraid/qemu-sgi-origami.
 
@@ -11,12 +12,12 @@ use super::*;
 /// MAX and MIN as conditionals: the first operand when the comparison fails,
 /// so a NaN operand is dropped.
 #[inline(always)]
-fn fx_max<T: PartialOrd>(a: T, b: T) -> T {
+pub fn fx_max<T: PartialOrd>(a: T, b: T) -> T {
     if a > b { a } else { b }
 }
 
 #[inline(always)]
-fn fx_min<T: PartialOrd>(a: T, b: T) -> T {
+pub fn fx_min<T: PartialOrd>(a: T, b: T) -> T {
     if a < b { a } else { b }
 }
 
@@ -299,7 +300,7 @@ impl SoftDraw {
 }
 
 /// Allocate zeroed cells for size texels, or None where that fails.
-fn soft_fixed_alloc(size: usize) -> Option<Vec<u64>> {
+pub fn soft_fixed_alloc(size: usize) -> Option<Vec<u64>> {
     let mut v: Vec<u64> = Vec::new();
 
     if v.try_reserve_exact(size).is_err() {

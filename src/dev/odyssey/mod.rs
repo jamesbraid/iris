@@ -26,8 +26,12 @@
 //! - `gl`, `geometry`: GL fragment state and texturing; the geometry
 //!   program, lighting and the GL primitives.
 //! - `gl_context`: the GL state machine the command stream drives.
-//! - `rasterizer`, `rasterizer2`, `rasterizer_fixed`: the scalar
-//!   rasteriser and its fixed-point texturing.
+//! - `raster`: the scalar rasteriser's rules, fragment path and draw entry;
+//!   `raster_triangle`, `raster_line`, `raster_pixels`: triangles and
+//!   polygons, lines and points, pixel rectangles, bitmaps, clears and
+//!   raster ops; `raster_texture`: texture sampling; `raster_bands`:
+//!   drawing in bands of rows on host threads; `raster_fixed_texture`: the
+//!   fixed-point fast path for textured triangles.
 //! - `memory`, `scanout`, `display`: board memory and planes; the scanned
 //!   frame and retrace; what reaches the window.
 //! - `pixel_dma`, `hooks`, `pi_gfx`: DMA between guest memory and planes,
@@ -61,9 +65,13 @@ pub mod objects;
 pub mod pi_gfx;
 pub mod pixel_dma;
 pub mod ptr;
-pub mod rasterizer;
-pub mod rasterizer2;
-pub mod rasterizer_fixed;
+pub mod raster;
+pub mod raster_bands;
+pub mod raster_fixed_texture;
+pub mod raster_line;
+pub mod raster_pixels;
+pub mod raster_texture;
+pub mod raster_triangle;
 pub mod registers;
 pub mod scanout;
 pub mod worker;
@@ -89,9 +97,13 @@ pub use objects::*;
 pub use pi_gfx::*;
 pub use pixel_dma::*;
 pub use ptr::*;
-pub use rasterizer::*;
-pub use rasterizer2::*;
-pub use rasterizer_fixed::*;
+pub use raster::*;
+pub use raster_bands::*;
+pub use raster_fixed_texture::*;
+pub use raster_line::*;
+pub use raster_pixels::*;
+pub use raster_texture::*;
+pub use raster_triangle::*;
 pub use registers::*;
 pub use scanout::*;
 pub use worker::*;
