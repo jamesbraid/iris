@@ -1419,3 +1419,77 @@ fn the_uarts_are_in_the_superio_block() {
     assert_eq!(r.r8(reg::SERIAL_B + 7), 0);
     assert_eq!(r.r32(reg::PIN_DATA) >> 2 & 1, 1, "an original Octane");
 }
+
+/// The Octane keeps the IOC3's PCI header across a chip reset; only the
+/// Fuel population resets it along with the chip.
+#[test]
+fn an_octane_chip_reset_keeps_the_pci_header() {
+    let r = Rig::new();
+    let cfg = r.c.config();
+    cfg.write(1, 0xffff_0146);
+    cfg.write(3, 0xffff_ffff);
+    r.c.reset();
+    assert_eq!(cfg.read(1), 0x0200_0146);
+    assert_eq!(cfg.read(3), 0);
+}
+
+/// Fuel's IOC3 has its own header write policy and resets the header with
+/// the chip, reaches the flat Timekeeper on byte-bus device 0, leaves the
+/// Dallas clock ports unfitted, and has no PHY reset on GPIO 5.
+#[test]
+fn the_fuel_population_keeps_its_clock_and_header_policy_across_reset() {
+    let r = Rig::with(Ioc3::new(Ioc3Config::fuel(MAC)));
+    let clock = Arc::new(crate::dev::timekeeper::Timekeeper::fuel_at(2026, 1, 1, 0, 0, 0).unwrap());
+    r.c.attach_timekeeper(clock.clone());
+    let cfg = r.c.config();
+    cfg.write(1, 0xffff_0146);
+    cfg.write(3, 0xffff_ffff);
+    assert_eq!(cfg.read(1), 0x0280_0146);
+    assert_eq!(cfg.read(3), 0x0000_ff00);
+    let base = reg::BYTEBUS_DEV0;
+    r.w8(base + 0x7f8, 0xa5);
+    r.c.reset();
+    clock.power_on();
+    assert_eq!(r.r8(base + 0x7fff), 0x58);
+    assert_eq!(r.r8(base + 0x7f8), 0xa5);
+    assert_eq!(cfg.read(1), 0x0280_0000);
+    assert_eq!(cfg.read(3), 0);
+    // Fuel selects the flat clock, leaving indexed Dallas ports unfitted.
+    r.w8(reg::BYTEBUS_DEV1, 0x40);
+    r.w8(reg::BYTEBUS_DEV2, 0x55);
+    assert_eq!(r.r8(reg::BYTEBUS_DEV2), 0);
+    r.c.attach_eth(crate::dev::ioc3_eth::Ioc3Eth::new_fuel(MAC));
+    use crate::dev::ioc3_eth::{bits::MII_READ, reg::{MII_CONTROL, MII_DATA_R, MII_DATA_W}};
+    r.w32(MII_DATA_W, 7);
+    r.w32(MII_CONTROL, (1 << 5) | 0x19);
+    r.w32(reg::PIN_CONTROL_SET, 1 << 5);
+    r.w32(reg::PIN_REG_FIRST + 5 * 4, 0);
+    r.w32(reg::PIN_DATA, 1 << 5);
+    r.w32(MII_CONTROL, MII_READ | (7 << 5) | 3);
+    assert_eq!(r.r32(MII_DATA_R), 0x5c10, "Fuel GPIO5 has no PHY reset connection");
+}
+
+/// Fuel's IOC3 has no keyboard or mouse ports: a guest probing them must
+/// see silence before and after a reset, and host input must not leak in.
+#[test]
+fn the_fuel_ioc3_answers_no_keyboard_or_mouse_traffic_across_reset() {
+    let r = Rig::with(Ioc3::new(Ioc3Config::fuel(MAC)));
+    for _ in 0..2 {
+        r.c.reset();
+        r.c.ps2().power_on();
+        r.w32(CTRL, KBC_K_CLAMP_3 | KBC_M_CLAMP_3);
+        assert_eq!(r.r32(CTRL), KBC_K_CLAMP_3 | KBC_M_CLAMP_3);
+        for command in [0xff, 0xf2, 0xf4] {
+            r.w32(K_TX, command);
+            r.w32(M_TX, command);
+            assert_eq!(r.r32(K_RX), 0);
+            assert_eq!(r.r32(M_RX), 0);
+        }
+        r.c.ps2().push_kb(winit::keyboard::KeyCode::KeyA, true);
+        r.c.ps2().push_mouse_input(1, 10, 10, 0);
+        assert_eq!(r.r32(K_RX), 0);
+        assert_eq!(r.r32(M_RX), 0);
+        assert_eq!(r.r32(reg::INT_STATUS) & int::KEYBOARD, 0);
+        assert!(!r.superio.level());
+    }
+}
