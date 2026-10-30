@@ -151,6 +151,9 @@ impl Board {
                     || self.dest_base == self.dma_colour_base
                 {
                     self.dma_colour_base = self.dest_base;
+                    if self.screen_base == 0 {
+                        self.screen_base = self.dest_base;
+                    }
                 } else {
                     // An off-screen object: create it, or update its row length.
                     let width = self.cmd_operand[ODSY_DEST_WIDTH_INDEX].wrapping_mul(ODSY_DEST_WIDTH_UNIT);
@@ -778,6 +781,7 @@ impl Board {
                 };
                 self.image_group_painted = 0;
                 self.image_code = self.cmd_operand[0] & ODSY_IMAGE_CODE_MASK;
+                self.image_write_code = self.cmd_operand[0] & ODSY_WRITE_CODE_MASK;
                 self.image_nbytes = 0;
                 self.image_bytes = 0;
             }
@@ -965,7 +969,7 @@ impl Board {
         // an image the same register-select is an ordinary state word.
         if self.image_active && operands > 0 && image_burst_fmt(reg, &mut fmt) {
             self.image_fmt = fmt;
-            if !image_pairing_supported(self.image_code, fmt) {
+            if !self.image_burst_supported(fmt) {
                 self.cmd_unimplemented(word);
             }
             self.cmd_state = ODSY_CMD_IMAGE_BURST;
@@ -998,6 +1002,9 @@ impl Board {
             self.query_begin();
             self.query_kind = word - 0x4c0;
             return;
+        }
+        if word == ODSY_RASTER_POS_LATCH_WORD {
+            self.query_raster_latch();
         }
         if word == 0x2f00c02e || word == 0x3000c02e {
             self.cmd_start(word, 0);

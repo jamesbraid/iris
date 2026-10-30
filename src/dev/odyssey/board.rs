@@ -219,7 +219,11 @@ pub struct Board {
     // The command-FIFO interpreter (0x110000).
     pub query_current: [[u32; 5]; 5],
     pub query_captured: [[u32; 5]; 5],
+    /// The index, colour and texture-coordinate records the raster position
+    /// latched (indexed like `query_current`; the others are unused).
+    pub query_latched: [[u32; 5]; 5],
     pub query_current_valid: u32,
+    pub query_latched_valid: u32,
     pub query_captured_valid: u32,
     pub query_stage: u32,
     /// The open query's kind (word 0x4c0 + kind).
@@ -379,6 +383,9 @@ pub struct Board {
     /// The colour buffer's base: the first operand of the last colour 0x1017
     /// block (0x2000 for the screen).
     pub dma_colour_base: u32,
+    /// The first colour buffer the X server selected: the screen's. A pixel
+    /// buffer's select can look the same, and moves dma_colour_base.
+    pub screen_base: u32,
 
     // The screen-to-screen copy command's fixed literal template's three runtime slots.
     pub copy_src: u32,
@@ -407,6 +414,10 @@ pub struct Board {
     pub image_group_len: u32,
     pub image_group_painted: u32,
     pub image_code: u32,
+    /// The header's whole write code, format and type (ODSY_WRITE_CODE_MASK).
+    pub image_write_code: u32,
+    /// The bytes of the pixel a write-table image is part way through.
+    pub image_pixel: [u8; 16],
     pub image_bytes: u32,
     pub image_nbytes: u32,
     pub image_code_reported: bool,
@@ -543,7 +554,9 @@ impl Default for Board {
             aux_image_reported: false,
             query_current: [[0; 5]; 5],
             query_captured: [[0; 5]; 5],
+            query_latched: [[0; 5]; 5],
             query_current_valid: 0,
+            query_latched_valid: 0,
             query_captured_valid: 0,
             query_stage: 0,
             query_kind: 0,
@@ -666,6 +679,7 @@ impl Default for Board {
             dest_buffer_word: 0,
             plane_write_mask: 0,
             dma_colour_base: 0,
+            screen_base: 0,
             copy_src: 0,
             copy_size: 0,
             copy_dst: 0,
@@ -686,6 +700,8 @@ impl Default for Board {
             image_group_len: 0,
             image_group_painted: 0,
             image_code: 0,
+            image_write_code: 0,
+            image_pixel: [0; 16],
             image_bytes: 0,
             image_nbytes: 0,
             image_code_reported: false,
@@ -891,6 +907,7 @@ impl Board {
         self.dest_buffer_word = 0;
         self.plane_write_mask = 0;
         self.dma_colour_base = 0;
+        self.screen_base = 0;
         self.dest_base = 0;
         self.obj_count = 0;
         self.obj_used = 0;
@@ -1091,6 +1108,7 @@ impl Board {
         self.image_group_len = 0;
         self.image_group_painted = 0;
         self.image_code = 0;
+        self.image_write_code = 0;
         self.image_bytes = 0;
         self.image_nbytes = 0;
         self.image_code_reported = false;
