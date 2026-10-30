@@ -39,6 +39,7 @@ use parking_lot::Mutex;
 use crate::traits::{BusDevice, BusRead16, BUS_ERR, BUS_OK};
 
 pub(crate) mod storage;
+pub(crate) mod amd;
 use self::storage::FlashBacking;
 
 /// The Octane's part: 1 MiB.
