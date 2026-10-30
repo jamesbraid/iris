@@ -4,9 +4,9 @@
 //! between those chunks and a plane.
 //!
 //! Chunk buffers: iris has no dma_memory_map(), so every chunk is the C's
-//! "bounce" case. `SGIDMAChunk::host` is an owned `Vec<u8>` of `len` bytes,
+//! "bounce" case. `DmaChunk::host` is an owned `Vec<u8>` of `len` bytes,
 //! filled from guest memory at map time for TO_DEVICE, and written back
-//! (the `written_start..written_end` run) by sgi_dma_unmap() for FROM_DEVICE.
+//! (the `written_start..written_end` run) by DmaMap::unmap() for FROM_DEVICE.
 //! `bounce` is therefore always true. Offsets within a chunk are indices
 //! into that Vec. `nchunks`/`capacity` are the Vec's len/capacity and are
 //! dropped.
@@ -14,7 +14,7 @@
 //! Other adaptations: `AddressSpace *as` is an owned `AddressSpace` clone
 //! (field `as_`, `as` being a keyword); the page list's `addr` is an owned
 //! `Vec<u64>` (npages kept); (void*, len) buffers are slices; `bus->ops` is
-//! a `P<SGIHeadOps>`.
+//! a `P<HeadOps>`.
 use super::*;
 
 pub const SGI_DMA_CHUNK_MAX: u32 = 4096;
@@ -25,22 +25,22 @@ pub const SGI_DMA_MIN_PAGE_SIZE: u32 = SGI_DMA_CHUNK_MAX;
 
 /// A head's view of guest memory.
 #[derive(Clone, Default)]
-pub struct SGIDMABus {
+pub struct DmaBus {
     pub as_: AddressSpace, // the head's bus address space
-    pub ops: P<SGIHeadOps>, // dma_address, dma_chunk, publish
+    pub ops: P<HeadOps>, // dma_address, dma_chunk, publish
     pub opaque: Opaque,
 }
 
 /// A guest buffer as the driver described it: page i at addr[i].
 #[derive(Clone, Default)]
-pub struct SGIDMAPageList {
+pub struct DmaPageList {
     pub addr: Vec<u64>, // device addresses
     pub npages: u32,
     pub page_size: u32,
 }
 
 #[derive(Clone, Default)]
-pub struct SGIDMAChunk {
+pub struct DmaChunk {
     pub host: Vec<u8>, // the chunk's bytes (always a bounce buffer here)
     pub len: u32,
     pub pos: u64,      // offset within the page-listed buffer
@@ -54,14 +54,14 @@ pub struct SGIDMAChunk {
 }
 
 #[derive(Clone, Default)]
-pub struct SGIDMAMap {
-    pub chunks: Vec<SGIDMAChunk>,
+pub struct DmaMap {
+    pub chunks: Vec<DmaChunk>,
     pub cursor: u32, // the chunk the last copy ended in
     pub as_: AddressSpace,
     pub dir: DMADirection,
 }
 
-impl SGIDMAPageList {
+impl DmaPageList {
     /// The bytes a page list maps, or 0 (logged) when its page size is not a
     /// power of two of at least SGI_DMA_MIN_PAGE_SIZE.
     pub fn bytes(&self) -> u64 {
@@ -77,7 +77,7 @@ impl SGIDMAPageList {
     }
 }
 
-impl SGIDMABus {
+impl DmaBus {
     /// Read buf.len() bytes at device address addr, composed through
     /// dma_address(), tracing them in chunks when `trace` is set. Returns
     /// false, having logged a guest error, when the read fails.
@@ -114,8 +114,8 @@ impl SGIDMABus {
     }
 
     /// Resolve [offset, offset + len) of a page-listed buffer and append its
-    /// chunks to map. Returns 0, or an SGIFailure after logging a guest error.
-    pub fn map(&self, map: &mut SGIDMAMap, pl: &SGIDMAPageList, offset: u64, len: u64, dir: DMADirection, trace: bool, trace_seq: u64) -> i32 {
+    /// chunks to map. Returns 0, or an Failure after logging a guest error.
+    pub fn map(&self, map: &mut DmaMap, pl: &DmaPageList, offset: u64, len: u64, dir: DMADirection, trace: bool, trace_seq: u64) -> i32 {
         let total = pl.bytes();
         let mut pos = offset;
 
@@ -158,7 +158,7 @@ impl SGIDMABus {
             }
             // No dma_memory_map() here: always a bounce buffer.
             crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_dma_bounce: addr {:#x} len {}", addr, n);
-            let mut c = SGIDMAChunk {
+            let mut c = DmaChunk {
                 host: vec![0u8; n as usize],
                 len: n as u32,
                 pos,
@@ -188,7 +188,7 @@ impl SGIDMABus {
     }
 }
 
-impl SGIDMAMap {
+impl DmaMap {
     /// Copy buf.len() bytes at buffer offset pos between map and buf. Returns
     /// false when map does not cover the range. `to_guest`: buf is copied into
     /// map; otherwise map into buf. (buf is `&mut` for both directions.)
@@ -237,17 +237,17 @@ impl SGIDMAMap {
                 }
             }
         }
-        *self = SGIDMAMap::default();
+        *self = DmaMap::default();
     }
 }
 
-pub type SGIPixelDMADir = u32;
-pub const SGI_DMA_TO_PLANE: SGIPixelDMADir = 0;
-pub const SGI_DMA_FROM_PLANE: SGIPixelDMADir = 1;
+pub type PixelDmaDir = u32;
+pub const SGI_DMA_TO_PLANE: PixelDmaDir = 0;
+pub const SGI_DMA_FROM_PLANE: PixelDmaDir = 1;
 
 #[derive(Clone, Default)]
-pub struct SGIPixelDMA {
-    pub dir: SGIPixelDMADir,
+pub struct PixelDma {
+    pub dir: PixelDmaDir,
     pub plane: u32,
     pub x: i32,
     pub y: i32,
@@ -260,23 +260,23 @@ pub struct SGIPixelDMA {
     pub mask: u32,      // plane bits a store may change
     pub tag_plane: u32, // SGI_PLANE_NONE: no tag written
     pub tag: u8,        // stored in tag_plane per pixel written
-    pub clip: SGIClipList,
+    pub clip: ClipList,
     pub trace_chunks: bool,
     pub trace_seq: u64,
     pub seq: u64,    // the completion's sequence number
     pub cookie: u64, // the family's tag for the completion
     pub offset: u64, // buffer offset of row 0
-    pub map: SGIDMAMap, // resolved by sgi_dma_pixels_map()
+    pub map: DmaMap, // resolved by PixelDma::dma_pixels_map()
 }
 
-impl SGIPixelDMA {
+impl PixelDma {
     /// m is the board memory whose plane the transfer targets, read for the
-    /// plane's size only. Returns 0 or an SGIFailure.
-    pub fn dma_pixels_map(&mut self, bus: &SGIDMABus, pl: &SGIDMAPageList, m: &SGIBoardMemory) -> i32 {
+    /// plane's size only. Returns 0 or an Failure.
+    pub fn dma_pixels_map(&mut self, bus: &DmaBus, pl: &DmaPageList, m: &BoardMemory) -> i32 {
         let dir = if self.dir == SGI_DMA_TO_PLANE { DMA_DIRECTION_TO_DEVICE } else { DMA_DIRECTION_FROM_DEVICE };
         let row = self.dma_pixels_row_bytes();
 
-        self.map = SGIDMAMap::default();
+        self.map = DmaMap::default();
         if self.w <= 0 || self.h <= 0 || self.guest_bpp == 0 {
             return 0;
         }
@@ -304,10 +304,10 @@ impl SGIPixelDMA {
         }
         0
     }
-    /// Host memory only. Returns 0 or an SGIFailure.
-    pub fn dma_pixels_run(&mut self, m: &mut SGIBoardMemory, ops: &SGIHeadOps, opaque: Opaque) -> i32 {
+    /// Host memory only. Returns 0 or an Failure.
+    pub fn dma_pixels_run(&mut self, m: &mut BoardMemory, ops: &HeadOps, opaque: Opaque) -> i32 {
         let pp = m.plane(self.plane);
-        let mut tag: Option<SGIPlane> = None;
+        let mut tag: Option<Plane> = None;
         let row = self.dma_pixels_row_bytes();
 
         if self.w <= 0 || self.h <= 0 || self.guest_bpp == 0 {
@@ -317,7 +317,7 @@ impl SGIPixelDMA {
             crate::qlog!("sgi-dma: no plane {}", self.plane);
             return SGI_FAIL_BOUNDS as i32;
         }
-        let p: SGIPlane = *pp.get();
+        let p: Plane = *pp.get();
         if self.tag_plane != SGI_PLANE_NONE {
             let tp = m.plane(self.tag_plane);
             if tp.is_null() {
@@ -338,7 +338,7 @@ impl SGIPixelDMA {
             );
             return SGI_FAIL_BOUNDS as i32;
         }
-        let pbpp = sgi_plane_bytes_per_pixel(p.format);
+        let pbpp = plane_bytes_per_pixel(p.format);
         if ops.convert_row.is_none() && self.guest_bpp as u32 != pbpp {
             crate::qlog!(
                 "sgi-dma: {}-byte guest pixels to plane {}'s {}-byte pixels need a conversion",
@@ -405,7 +405,7 @@ impl SGIPixelDMA {
     }
     /// Release the map and publish WRITTEN with the bytes moved, or FAILED
     /// with status when status is non-zero.
-    pub fn dma_pixels_finish(&mut self, status: i32, ops: &SGIHeadOps, opaque: Opaque) {
+    pub fn dma_pixels_finish(&mut self, status: i32, ops: &HeadOps, opaque: Opaque) {
         let moved: u64 = if self.w > 0 && self.h > 0 {
             self.dma_pixels_row_bytes().wrapping_mul(self.h as u64)
         } else {
@@ -420,8 +420,8 @@ impl SGIPixelDMA {
             ops.publish(opaque, self.seq, SGI_DONE_WRITTEN, self.cookie, moved);
         }
     }
-    /// All three steps, for a synchronous head. Returns 0 or an SGIFailure.
-    pub fn dma_pixels(&mut self, bus: &SGIDMABus, pl: &SGIDMAPageList, m: &mut SGIBoardMemory) -> i32 {
+    /// All three steps, for a synchronous head. Returns 0 or an Failure.
+    pub fn dma_pixels(&mut self, bus: &DmaBus, pl: &DmaPageList, m: &mut BoardMemory) -> i32 {
         let mut ret = self.dma_pixels_map(bus, pl, m);
 
         if ret == 0 {
@@ -432,7 +432,7 @@ impl SGIPixelDMA {
     }
 }
 
-impl SGIDMABus {
+impl DmaBus {
     pub fn compose(&self, addr: u64, out: &mut u64) -> bool {
         if let Some(ops) = self.ops.as_opt() {
             if let Some(dma_address) = ops.dma_address {
@@ -454,7 +454,7 @@ impl SGIDMABus {
     }
 }
 
-impl SGIDMAMap {
+impl DmaMap {
     pub fn copy_from(&mut self, start: u32, pos: u64, p: &mut [u8], to_guest: bool) -> u64 {
         let len = p.len() as u64;
         let mut done: u64 = 0;
@@ -493,14 +493,14 @@ impl SGIDMAMap {
     }
 }
 
-impl SGIPixelDMA {
+impl PixelDma {
     pub fn dma_pixels_row_bytes(&self) -> u64 {
         (self.w as i64 as u64).wrapping_mul(self.guest_bpp as u64)
     }
 
     // Every size here can come from a guest's descriptor, so the transfer must
     // fit its plane and its page list before anything is mapped or allocated.
-    pub fn dma_pixels_check(&self, pl: &SGIDMAPageList, m: &SGIBoardMemory) -> i32 {
+    pub fn dma_pixels_check(&self, pl: &DmaPageList, m: &BoardMemory) -> i32 {
         let pp = m.plane(self.plane);
         let total = pl.bytes();
         let row = self.dma_pixels_row_bytes();
@@ -509,7 +509,7 @@ impl SGIPixelDMA {
             crate::qlog!("sgi-dma: no plane {}", self.plane);
             return SGI_FAIL_BOUNDS as i32;
         }
-        let p: SGIPlane = *pp.get();
+        let p: Plane = *pp.get();
         if self.w as u32 > p.width || self.h as u32 > p.height {
             crate::qlog!(
                 "sgi-dma: {}x{} pixels exceed plane {}'s {}x{}",

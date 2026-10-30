@@ -4,7 +4,7 @@ use super::*;
 
 /// What a program asks for, as far as the model recognises it.
 #[derive(Clone, Copy, Default)]
-pub struct OdysseyProgram {
+pub struct Program {
     pub known: bool,
     pub lit: bool,
     pub local_viewer: bool,
@@ -15,16 +15,16 @@ pub struct OdysseyProgram {
     pub linear_texgen: u32,
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// Walk the list the engine continues through, constants[k] up to the
     /// terminator. With strict, every word must be a routine this model names
     /// (an assembled lit list); otherwise only the texgen and clip-plane stages
     /// are picked out (a precompiled program's list, which its entries already
     /// identify, so the result is not needed). False when the terminator is not
     /// reached or, when strict, a word is not recognised.
-    pub fn gl_walk_list(&mut self, k: u32, strict: bool, p: &mut OdysseyProgram) -> bool {
+    pub fn gl_walk_list(&mut self, k: u32, strict: bool, p: &mut Program) -> bool {
         let nc = SGI_ODYSSEY_GL_CONSTANTS;
-        let at = |s: &SGIOdysseyState, i: u32| -> u32 { s.gl_const[(k.wrapping_add(i) % nc) as usize] };
+        let at = |s: &Board, i: u32| -> u32 { s.gl_const[(k.wrapping_add(i) % nc) as usize] };
         let mut n: u32 = 0;
         while n < ODSY_PROG_LIST_MAX {
             let a = at(self, n);
@@ -74,7 +74,7 @@ impl SGIOdysseyState {
                     continue;
                 }
             }
-            if odyssey_ucode_is_texgen(a) {
+            if ucode_is_texgen(a) {
                 p.texgen = true;
                 n += 1;
                 continue;
@@ -131,7 +131,7 @@ impl SGIOdysseyState {
     }
 }
 
-pub fn odyssey_prog_in_window(a: u32) -> bool {
+pub fn prog_in_window(a: u32) -> bool {
     a >= ODSY_PROG_WINDOW_BASE && a < ODSY_PROG_WINDOW_BASE + ODSY_PROG_WINDOW_ENTRIES
 }
 
@@ -144,8 +144,8 @@ pub fn odyssey_prog_in_window(a: u32) -> bool {
 /// subset of it, so the texture, texture-generation and two-sided bits it
 /// also carries do not say the context uses them. The model lights every
 /// program here from the light blocks as it does an assembled list
-/// (odyssey_gl_light()).
-pub static odyssey_ucode_lit_records: [[u32; 3]; 6] = [
+/// (Board::gl_light()).
+pub static UCODE_LIT_RECORDS: [[u32; 3]; 6] = [
     [0x5cb, 0x5d8, 0x5e5], // record 3: one light
     [0x62c, 0x63d, 0x64d], // record 6: two lights, texgen
     [0x6d8, 0x6eb, 0x6fd], // record 7: one light, two-sided, texgen
@@ -154,8 +154,8 @@ pub static odyssey_ucode_lit_records: [[u32; 3]; 6] = [
     [0x699, 0x6b4, 0x6ce], // record 11: four lights, texgen
 ];
 
-pub fn odyssey_gl_lit_record(e: &[u32; 3]) -> bool {
-    for r in odyssey_ucode_lit_records.iter() {
+pub fn gl_lit_record(e: &[u32; 3]) -> bool {
+    for r in UCODE_LIT_RECORDS.iter() {
         if e == r {
             return true;
         }
@@ -191,7 +191,7 @@ pub fn odyssey_gl_lit_record(e: &[u32; 3]) -> bool {
 /// local-viewer context selects records 18 and 19; key bit 0x1 is two-sided
 /// lighting (INFERRED: it is set in resident record 7, the two-sided one).
 #[derive(Clone, Copy, Default)]
-pub struct OdysseyWindowRecord {
+pub struct WindowRecord {
     pub record: u8,
     pub local_viewer: bool,
     pub two_sided: bool,
@@ -200,19 +200,19 @@ pub struct OdysseyWindowRecord {
     pub crc: u64,
 }
 
-pub static odyssey_window_records: [OdysseyWindowRecord; 8] = [
-    OdysseyWindowRecord { record: 13, local_viewer: false, two_sided: true, entry: [0x706, 0x720, 0x73b], entries: 199, crc: 0xde5dd7f66d4e70cf },
-    OdysseyWindowRecord { record: 14, local_viewer: false, two_sided: false, entry: [0x4c5, 0x4c5, 0x4c5], entries: 199, crc: 0x5aa6880e8d77c0b2 },
-    OdysseyWindowRecord { record: 15, local_viewer: false, two_sided: true, entry: [0x4c5, 0x4c5, 0x4c5], entries: 199, crc: 0x9391fc6eed0accdc },
-    OdysseyWindowRecord { record: 16, local_viewer: false, two_sided: false, entry: [0x738, 0x75a, 0x77b], entries: 199, crc: 0xb1da870f5523467f },
-    OdysseyWindowRecord { record: 17, local_viewer: false, two_sided: false, entry: [0x738, 0x75b, 0x77d], entries: 199, crc: 0xc4bf2cd3423da137 },
-    OdysseyWindowRecord { record: 18, local_viewer: true, two_sided: false, entry: [0x738, 0x75b, 0x77d], entries: 199, crc: 0xe15a6186144f9887 },
-    OdysseyWindowRecord { record: 19, local_viewer: true, two_sided: false, entry: [0x738, 0x75b, 0x77d], entries: 199, crc: 0xa419c456a8238b77 },
-    OdysseyWindowRecord { record: 23, local_viewer: false, two_sided: false, entry: [0x738, 0x760, 0x787], entries: 199, crc: 0x8d6174822a99856f },
+pub static WINDOW_RECORDS: [WindowRecord; 8] = [
+    WindowRecord { record: 13, local_viewer: false, two_sided: true, entry: [0x706, 0x720, 0x73b], entries: 199, crc: 0xde5dd7f66d4e70cf },
+    WindowRecord { record: 14, local_viewer: false, two_sided: false, entry: [0x4c5, 0x4c5, 0x4c5], entries: 199, crc: 0x5aa6880e8d77c0b2 },
+    WindowRecord { record: 15, local_viewer: false, two_sided: true, entry: [0x4c5, 0x4c5, 0x4c5], entries: 199, crc: 0x9391fc6eed0accdc },
+    WindowRecord { record: 16, local_viewer: false, two_sided: false, entry: [0x738, 0x75a, 0x77b], entries: 199, crc: 0xb1da870f5523467f },
+    WindowRecord { record: 17, local_viewer: false, two_sided: false, entry: [0x738, 0x75b, 0x77d], entries: 199, crc: 0xc4bf2cd3423da137 },
+    WindowRecord { record: 18, local_viewer: true, two_sided: false, entry: [0x738, 0x75b, 0x77d], entries: 199, crc: 0xe15a6186144f9887 },
+    WindowRecord { record: 19, local_viewer: true, two_sided: false, entry: [0x738, 0x75b, 0x77d], entries: 199, crc: 0xa419c456a8238b77 },
+    WindowRecord { record: 23, local_viewer: false, two_sided: false, entry: [0x738, 0x760, 0x787], entries: 199, crc: 0x8d6174822a99856f },
 ];
 
 
-impl SGIOdysseyState {
+impl Board {
     /// CRC-64/ECMA-182 (no reflection, zero initial value) of n window entries.
     pub fn window_crc(&self, n: u32) -> u64 {
         let base = (ODSY_PROG_WINDOW_BASE * ODSY_PROG_ENTRY_HALFWORDS) as usize;
@@ -229,8 +229,8 @@ impl SGIOdysseyState {
     }
 
     /// The lit window record the entries and window body identify, or None.
-    pub fn gl_window_record(&self, e: &[u32; 3]) -> Option<&'static OdysseyWindowRecord> {
-        for w in odyssey_window_records.iter() {
+    pub fn gl_window_record(&self, e: &[u32; 3]) -> Option<&'static WindowRecord> {
+        for w in WINDOW_RECORDS.iter() {
             if e[0] == w.entry[0] as u32 && e[1] == w.entry[1] as u32 && e[2] == w.entry[2] as u32 && self.window_crc(w.entries as u32) == w.crc {
                 return Some(w);
             }
@@ -240,16 +240,16 @@ impl SGIOdysseyState {
 }
 
 /// Uploaded program bodies have no reviewed decoder.
-pub fn odyssey_gl_resident(e: &[u32; 3]) -> bool {
+pub fn gl_resident(e: &[u32; 3]) -> bool {
     for i in 0..3 {
-        if odyssey_prog_in_window(e[i]) {
+        if prog_in_window(e[i]) {
             return false;
         }
     }
     true
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// Recognise the program the library just set (on every 0x2c write, the last
     /// word of each program set, and after migration). APPROXIMATION, see
     /// ODSY_UCODE_END: a precompiled program is recognised by its three entries,
@@ -266,8 +266,8 @@ impl SGIOdysseyState {
         let r: [u32; 3] = [self.gl_entry[ODSY_ENTRY_29], self.gl_entry[ODSY_ENTRY_2A], self.gl_entry[ODSY_ENTRY_2C]];
         let (e29, e2a, e2c) = (r[0], r[1], r[2]);
         let k = self.gl_entry[ODSY_ENTRY_33];
-        let mut p = OdysseyProgram::default();
-        let resident = odyssey_gl_resident(&r);
+        let mut p = Program::default();
+        let resident = gl_resident(&r);
         let window = self.gl_window_record(&r);
 
         if let Some(window) = window {
@@ -287,7 +287,7 @@ impl SGIOdysseyState {
         } else if r[0] == ODSY_UCODE_UNLIT_CLIP && r[1] == ODSY_UCODE_UNLIT_CLIP_2A && r[2] == ODSY_UCODE_UNLIT_CLIP_2C {
             self.gl_walk_list(k, false, &mut p);
             p.known = true;
-        } else if odyssey_gl_lit_record(&r) {
+        } else if gl_lit_record(&r) {
             self.gl_walk_list(k, false, &mut p);
             p.known = true;
             p.lit = true;
@@ -378,9 +378,9 @@ impl SGIOdysseyState {
         }
     }
 
-    /// One program word (odyssey_is_program_word()).
+    /// One program word (is_program_word()).
     pub fn gl_program_word(&mut self, word: u32) {
-        let v = odyssey_prog_value(word);
+        let v = prog_value(word);
         let cls = word >> ODSY_PROG_CLASS_SHIFT;
 
         if cls >= ODSY_PROG_SEQ_FIRST && cls <= ODSY_PROG_SEQ_LAST {
@@ -443,11 +443,11 @@ pub fn odyssey_f32(bits: u32) -> f64 {
     f32::from_bits(bits) as f64
 }
 
-pub fn odyssey_f32_bits(f: f32) -> u32 {
+pub fn f32_bits(f: f32) -> u32 {
     f.to_bits()
 }
 
-pub fn odyssey_normalize3(v: &mut [f64; 3]) {
+pub fn normalize3(v: &mut [f64; 3]) {
     let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
 
     if n > 0.0 {
@@ -466,7 +466,7 @@ fn cmin(a: f64, b: f64) -> f64 {
     if a < b { a } else { b }
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// OpenGL 1.2.1's lighting equation (section 2.13.1, equation 2.5) at one
     /// vertex, front material, from the kept light, material and matrix words.
     /// Under colour material (section 2.13.3) the current colour replaces each
@@ -510,7 +510,7 @@ impl SGIOdysseyState {
                 n[r] += odyssey_f32(self.gl_normal_matrix[r * 4 + k]) * odyssey_f32(self.gl_normal[k]);
             }
         }
-        odyssey_normalize3(&mut n);
+        normalize3(&mut n);
         for k in 0..4usize {
             let colour = odyssey_f32(self.gl_colour[k]);
             let cm = self.gl_colour_material;
@@ -551,13 +551,13 @@ impl SGIOdysseyState {
                 for k in 0..3usize {
                     l[k] = odyssey_f32(blk[ODSY_LIGHT_POS + k]);
                 }
-                odyssey_normalize3(&mut l);
+                normalize3(&mut l);
             } else {
                 for k in 0..3usize {
                     l[k] = odyssey_f32(blk[ODSY_LIGHT_POS + k]) - eye[k];
                 }
                 let d = (l[0] * l[0] + l[1] * l[1] + l[2] * l[2]).sqrt();
-                odyssey_normalize3(&mut l);
+                normalize3(&mut l);
                 let denom = odyssey_f32(blk[ODSY_LIGHT_ATTEN]) + odyssey_f32(blk[ODSY_LIGHT_ATTEN + 1]) * d + odyssey_f32(blk[ODSY_LIGHT_ATTEN + 2]) * d * d;
                 atten = if denom > 0.0 { 1.0 / denom } else { 1.0 };
                 let cut = -odyssey_f32(blk[ODSY_LIGHT_SPOT_COS]);
@@ -577,14 +577,14 @@ impl SGIOdysseyState {
             if self.gl_local_viewer {
                 let mut v = [-eye[0], -eye[1], -eye[2]];
 
-                odyssey_normalize3(&mut v);
+                normalize3(&mut v);
                 for k in 0..3usize {
                     h[k] += v[k];
                 }
             } else {
                 h[2] += 1.0;
             }
-            odyssey_normalize3(&mut h);
+            normalize3(&mut h);
             let nh = cmax(n[0] * h[0] + n[1] * h[1] + n[2] * h[2], 0.0);
             let fs = if nl > 0.0 { nh.powf(shin) } else { 0.0 };
             for k in 0..3usize {
@@ -615,7 +615,7 @@ impl SGIOdysseyState {
                 self.gl_index_lit_reported = true;
                 crate::qlog!("sgi-odyssey: colour-index lighting is not modeled; drawn with the current index");
             }
-            odyssey_gl_index_rgba(self.gl_color_index, &mut rgba);
+            gl_index_rgba(self.gl_color_index, &mut rgba);
             let words = rgba.map(f32::to_bits);
             self.gl_feed(SGI_GL_OP_COLOR4F as u16, &words);
             self.gl_colour_overridden = true;
@@ -640,7 +640,7 @@ impl SGIOdysseyState {
     /// model-view is ESTABLISHED from a capture: its fourth row is minus the
     /// third row of the model-view it loads into slot 0x24, as a frustum times
     /// that model-view gives. So the model-view (slot 0x24) is kept only for
-    /// lighting's eye position (odyssey_gl_light()), and the shared context's own
+    /// lighting's eye position (Board::gl_light()), and the shared context's own
     /// model-view stays the identity. For a 128x128 window under an identity
     /// model-view and projection it is x' = 64x + 64, y' = -64y + 63.996, and
     /// glOrtho(-2, 2, -2, 2, -1, 1) halves the x and y scales. The two cannot be
@@ -678,7 +678,7 @@ impl SGIOdysseyState {
     /// The depth reaches the shared rasterizer as its rules' depth row,
     /// row2 / (2S block16[3]), and depth divisor, block16 / block16[3], each
     /// applied to the object coordinates and interpolated with perspective
-    /// correction (odyssey_gl_operation_rules()). Under perspective the shared
+    /// correction (Board::gl_operation_rules()). Under perspective the shared
     /// projection's z row is 0, so no depth is carried as a difference from w,
     /// which a float row could not resolve; a fragment outside depth [0, 1] by
     /// more than the rounding slack (ODSY_GL_DEPTH_SLACK) is dropped, which is
@@ -704,7 +704,7 @@ impl SGIOdysseyState {
     /// A non-default glDepthRange changes the row in a way this rule does not
     /// fit: it is drawn with the default [0, 1] range, and the near and far clip
     /// planes the library adds for it are reported as a program stage
-    /// (odyssey_gl_program()).
+    /// (Board::gl_program()).
     ///
     /// A matrix whose x or y row is zero -- the library's load before its window
     /// exists, or the kernel's zero restore at a context switch -- leaves an empty
@@ -747,12 +747,12 @@ impl SGIOdysseyState {
 }
 
 /// A board-side matrix load: 16 IEEE-754 floats, ROW-major on the wire.
-/// sgi_gl_set_matrix() takes column-major, so transpose before the call.
+/// GlContext::set_matrix() takes column-major, so transpose before the call.
 /// gl_matrix_slot is the slot the last matrix-select chose; the normal slot
 /// (ODSY_GL_SLOT_NORMAL) is one the context refuses, and its false return is
 /// expected. The texture matrix is kept as sent and applied to the current
 /// ST by the shared context.
-pub fn odyssey_gl_transpose(rows: &[u32], m: &mut [f32; 16]) {
+pub fn gl_transpose(rows: &[u32], m: &mut [f32; 16]) {
     for row in 0..4usize {
         for col in 0..4usize {
             m[col * 4 + row] = f32::from_bits(rows[row * 4 + col]);
@@ -760,12 +760,12 @@ pub fn odyssey_gl_transpose(rows: &[u32], m: &mut [f32; 16]) {
     }
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// Apply the kept slot-0x00 matrix under the kept block-16 sign.
     pub fn gl_reload_combined(&mut self) {
         let mut m = [0f32; 16];
 
-        odyssey_gl_transpose(&self.gl_combined, &mut m);
+        gl_transpose(&self.gl_combined, &mut m);
         self.gl_load_combined(&m);
     }
 
@@ -787,7 +787,7 @@ impl SGIOdysseyState {
         }
         if self.gl_matrix_slot == SGI_GL_MODELVIEW {
             // The combined matrix already carries the model-view
-            // (odyssey_gl_load_combined()), so the shared context keeps its
+            // (Board::gl_load_combined()), so the shared context keeps its
             // identity model-view; this copy serves lighting's eye position.
             self.gl_modelview = self.gl_matrix;
             for i in 0..SGI_GL_CLIP_PLANES {
@@ -795,7 +795,7 @@ impl SGIOdysseyState {
             }
             return;
         }
-        odyssey_gl_transpose(&self.gl_matrix, &mut m);
+        gl_transpose(&self.gl_matrix, &mut m);
         let slot = self.gl_matrix_slot;
         self.gl_ctx.set_matrix(slot, &m);
     }
@@ -844,7 +844,7 @@ impl SGIOdysseyState {
         let mut anchor_y: u32 = 0;
         let patterned = (self.pattern_mode & ODSY_GL_RECT_PATTERN_ENABLE) != 0;
         let rules = self.gl_operation_rules();
-        let mut op = SGIRasterOp {
+        let mut op = RasterOp {
             kind: SGI_RASTER_CLEAR,
             clear_colour_mask: u32::MAX,
             ..Default::default()
@@ -949,13 +949,13 @@ impl SGIOdysseyState {
         if (op.clear_buffers & SGI_GL_COLOR_BUFFER_BIT) != 0 {
             if self.gl_index_mode() {
                 // glClearIndex travels as the first float (the probe's 3.0).
-                odyssey_gl_index_rgba(odyssey_float_index(self.gl_rect[0]), &mut op.clear_rgba);
+                gl_index_rgba(float_index(self.gl_rect[0]), &mut op.clear_rgba);
             } else {
                 op.clear_rgba.copy_from_slice(&f[..4]);
             }
         }
         if !patterned {
-            odyssey_gl_raster(P::new(&mut *self).opaque(), &op);
+            gl_raster(P::new(&mut *self).opaque(), &op);
             return;
         }
         let target = self.gl_target();
@@ -1025,7 +1025,7 @@ impl SGIOdysseyState {
         // not touch the colour framebuffer. The id value is the raw COLOR_INDEX
         // operand (id << 3), the mask the 0x1023 operand shifted down from its <<
         // 12 position. A pattern quad there is overlay text and goes through
-        // the pattern path, which odyssey_paint_integer() sends to the same
+        // the pattern path, which Board::paint_integer() sends to the same
         // bytes.
         if self.dest_is_id_planes() && !self.pattern_enabled() {
             let value = self.gl_color_index as u8;
@@ -1061,7 +1061,7 @@ impl SGIOdysseyState {
     /// centre, rounded down. With the stipple enabled (0x0404 bits 3 and 4) the k-th
     /// covered pixel from the first vertex, k = 1 next to it, is painted only where
     /// bit (k & 31) of the 0x0c48 pattern is set, and where it is clear, with 0x0404
-    /// bit 17 set, in the 0x0c21 constant colour (odyssey_pattern_background()),
+    /// bit 17 set, in the 0x0c21 constant colour (Board::pattern_background()),
     /// when 0x0c21's factors are ONE, ZERO. The X server's stippled-span and
     /// dashed-line routines write no 0x043f, so its shape is whatever an earlier
     /// fill left; they set bit 17 and send 0x0c21 = ONE, ZERO, background exactly
@@ -1223,7 +1223,7 @@ impl SGIOdysseyState {
     /// reported at END.
     ///
     /// A POINTS vertex paints pixel (x, y). INFERRED: a line's pixels lie at the
-    /// minor-axis position rounded down (odyssey_gl_segment()), so an integer
+    /// minor-axis position rounded down (Board::gl_segment()), so an integer
     /// vertex names the top-left corner of its pixel, and a size-one point lands
     /// on the pixel GL's rule (floor of each coordinate) picks. The point size is
     /// not modeled.

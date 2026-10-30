@@ -243,7 +243,7 @@ pub const ODSY_CMD_ARITY_SHIFT: u32 = 10;
 pub const ODSY_CMD_ARITY_MASK: u32 = 0xf;
 pub const ODSY_CMD_ARITY_BURST: u32 = 16;
 
-// A GL-class word's operands-follow bit (odyssey_cmd_classify()).
+// A GL-class word's operands-follow bit (Board::cmd_classify()).
 pub const ODSY_CMD_GL_OPERANDS: u32 = 0x00800000;
 pub const ODSY_REG_QUICK_FLUSH_ARG: u32 = 0x0443; // 1 operand: 0xfa or 0x96 seen
 pub const ODSY_REG_STROBE: u32 = 0x0046; // 0 operands, repeated in flush
@@ -611,14 +611,14 @@ pub const ODSY_F32_POINT_TWO: u32 = 0x3e4ccccd;
 pub const ODSY_F32_POINT_EIGHT: u32 = 0x3f4ccccd;
 pub const ODSY_DEPTH24_MAX: u32 = 0xffffff;
 
-// A GL matrix mode the shared context does not keep (neither modelview nor projection), so sgi_gl_set_matrix() logs and refuses a load aimed at it.
+// A GL matrix mode the shared context does not keep (neither modelview nor projection), so GlContext::set_matrix() logs and refuses a load aimed at it.
 pub const ODSY_GL_SLOT_NORMAL: u32 = 0x1702;
 
 // This model's own slots for the combined and texture matrices.
 pub const ODSY_GL_SLOT_COMBINED: u32 = 0x10000;
 pub const ODSY_GL_SLOT_TEXTURE: u32 = 0x10001;
 
-// Half the extent of the fixed viewport the shared context draws through (odyssey_gl_load_combined())
+// Half the extent of the fixed viewport the shared context draws through (Board::gl_load_combined())
 pub const ODSY_GL_WINDOW_REACH: i32 = 8192;
 
 // The screen-aligned rectangle.
@@ -999,7 +999,7 @@ pub const ODSY_ENTRY_33: usize = 3;
 // value 15 encoding a 16-word burst. A register-select's low 16 bits carry
 // the same field, so this reads correctly given the whole word or just the
 // register.
-pub fn odyssey_cmd_arity(word: u32) -> u32 {
+pub fn cmd_arity(word: u32) -> u32 {
     let count = (word >> ODSY_CMD_ARITY_SHIFT) & ODSY_CMD_ARITY_MASK;
 
     if count == ODSY_CMD_ARITY_MASK { ODSY_CMD_ARITY_BURST } else { count }

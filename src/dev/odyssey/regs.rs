@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl SGIOdysseyState {
+impl Board {
     pub fn identity(&mut self) -> u32 {
         (self.revision << 28) | (ODSY_PART << 12) | (ODSY_MANUFACTURER << 1) | 1
     }
@@ -61,7 +61,7 @@ impl SGIOdysseyState {
 /// base and at base+4 across the block). Every other register has only been
 /// seen as a 32-bit access. Other widths, alignments and offsets are
 /// unmodeled rather than an error.
-pub fn odyssey_reg(addr: u64, size: u32) -> i64 {
+pub fn reg(addr: u64, size: u32) -> i64 {
     if addr < ODSY_BLOCK_END {
         if (size == 8 || size == 4) && (addr & 7) == 0 {
             return addr as i64;
@@ -119,7 +119,7 @@ pub fn odyssey_reg(addr: u64, size: u32) -> i64 {
     }
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// One bit slot, reported finished inside the write the guest polls after.
     pub fn nic_slot(&mut self, value: u32) {
         let pulse = (value & ODSY_NIC_PULSE_MASK) >> ODSY_NIC_PULSE_SHIFT;
@@ -198,11 +198,11 @@ impl SGIOdysseyState {
 }
 
 /// A colour word, ten bits a channel, as 0x00RRGGBB from the top eight.
-pub fn odyssey_cursor_rgb(word: u32) -> u32 {
+pub fn cursor_rgb(word: u32) -> u32 {
     (((word >> ODSY_LUT_RED_SHIFT) & 0xff) << 16) | (((word >> ODSY_LUT_GREEN_SHIFT) & 0xff) << 8) | ((word >> ODSY_LUT_BLUE_SHIFT) & 0xff)
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// Report the values a stored word carries that have no known meaning.
     pub fn cursor_check(&mut self, index: u32, data: u32) {
         if index < ODSY_CURSOR_POSITION {
@@ -292,7 +292,7 @@ impl SGIOdysseyState {
             return;
         }
         if self.cursor[ODSY_CURSOR_CONTROL as usize] & ODSY_CURSOR_CTL_CROSSHAIR != 0 {
-            let colour = odyssey_cursor_rgb(self.cursor[ODSY_CURSOR_COLOURS as usize + 1]);
+            let colour = cursor_rgb(self.cursor[ODSY_CURSOR_COLOURS as usize + 1]);
 
             if row == 0 {
                 for x in 0..width as usize {
@@ -314,7 +314,7 @@ impl SGIOdysseyState {
             if x < 0 || x >= width as i32 || plane != 3 || glyph == 0xf {
                 continue;
             }
-            dst[x as usize] = odyssey_cursor_rgb(self.cursor[ODSY_CURSOR_COLOURS as usize + glyph as usize]);
+            dst[x as usize] = cursor_rgb(self.cursor[ODSY_CURSOR_COLOURS as usize + glyph as usize]);
         }
     }
 
@@ -345,12 +345,12 @@ impl SGIOdysseyState {
 //
 // The scanout entries 0x2800 and 0x2801, 0x2807 and 0x2809 are stored and
 // not used: APPROXIMATION, the model scans out its own colour buffers
-// (odyssey_resolve_row()) rather than locating the displayed buffer in board
+// (resolve_row()) rather than locating the displayed buffer in board
 // memory by these entries. The 16 x 16-pixel tiling of board memory is not
 // modeled.
 
 /// The entries the kernel writes (the datasheet's back-end entry table).
-pub fn odyssey_backend_ctl_known(index: u32) -> bool {
+pub fn backend_ctl_known(index: u32) -> bool {
     (0x2000..=0x247f).contains(&index)
         || (0x2481..=0x2483).contains(&index)
         || index == 0x2600
@@ -365,7 +365,7 @@ pub fn odyssey_backend_ctl_known(index: u32) -> bool {
         || index == 0x2b00
 }
 
-impl SGIOdysseyState {
+impl Board {
     pub fn backend_ctl_read(&mut self, addr: u64, size: u32, value: &mut u64) -> bool {
         let first = ODSY_BACKEND_READ_BASE + ((ODSY_BACKEND_CTL_BASE as u64) << 3);
 
@@ -402,22 +402,22 @@ impl SGIOdysseyState {
     }
 }
 
-pub fn odyssey_i2c_status(command: u32) -> u32 {
+pub fn i2c_status(command: u32) -> u32 {
     ODSY_I2C_STATUS_READY | if command != 0 { ODSY_I2C_STATUS_DONE } else { 0 }
 }
 
-impl SGIOdysseyState {
+impl Board {
     pub fn read(&mut self, addr: u64, size: u32) -> u64 {
         // Registers that do not wait for the board's work live in the front
         // (front.rs).
-        if odyssey_front_register(addr, size, false) {
+        if front_register(addr, size, false) {
             return self.front.lock().read(addr, size);
         }
         let mut value: u64 = 0;
         let sequence = self.trace_sequence;
         self.trace_sequence = self.trace_sequence.wrapping_add(1);
 
-        let reg = odyssey_reg(addr, size);
+        let reg = reg(addr, size);
         let key = if reg < 0 { u64::MAX } else { reg as u64 };
         match key {
             ODSY_CFIFO_SELFTEST => {
@@ -436,9 +436,9 @@ impl SGIOdysseyState {
             ODSY_BUZZ_6 => value = self.buzz[5] as u64,
             ODSY_NIC_PROM | ODSY_NIC_KERNEL => value = self.nic as u64,
             ODSY_I2C_MAIN_CMD_READ => value = self.i2c_main_cmd as u64,
-            ODSY_I2C_MAIN_STATUS_READ => value = odyssey_i2c_status(self.i2c_main_cmd) as u64,
+            ODSY_I2C_MAIN_STATUS_READ => value = i2c_status(self.i2c_main_cmd) as u64,
             ODSY_I2C_OPT_CMD_READ => value = self.i2c_opt_cmd as u64,
-            ODSY_I2C_OPT_STATUS_READ => value = odyssey_i2c_status(self.i2c_opt_cmd) as u64,
+            ODSY_I2C_OPT_STATUS_READ => value = i2c_status(self.i2c_opt_cmd) as u64,
             ODSY_BACKEND_VERSION => value = (self.backend_version & 7) as u64,
             ODSY_HOST_WRITE_ADDR_UPPER
             | ODSY_HOST_WRITE_ADDR_LOWER
@@ -466,7 +466,7 @@ impl SGIOdysseyState {
     /// Present the plane's top-left width x height at the 1280x1024 rate.
     pub fn set_scanout_size(&mut self, width: u32, height: u32) {
         self.scanout.set_mode(
-            &SGIScanoutMode { width, height, frame_clocks: ODSY_FRAME_CLOCKS as u64, clock_hz: ODSY_PIXEL_CLOCK_HZ },
+            &ScanoutMode { width, height, frame_clocks: ODSY_FRAME_CLOCKS as u64, clock_hz: ODSY_PIXEL_CLOCK_HZ },
         );
     }
 
@@ -505,7 +505,7 @@ impl SGIOdysseyState {
     /// header selected. The colour lookup RAM and the per-drawable display-mode
     /// registers take their words here; the two I2C command indices keep their
     /// existing dispatch. Entries 0x2000-0x2fff are also kept for the read
-    /// window (odyssey_backend_ctl_read()); one the kernel is not known to write
+    /// window (Board::backend_ctl_read()); one the kernel is not known to write
     /// is still reported.
     pub fn backend_data(&mut self, index: u32, data: u32) {
         if index >= ODSY_BACKEND_CTL_BASE && index < ODSY_BACKEND_CTL_BASE + ODSY_BACKEND_CTL_ENTRIES {
@@ -540,7 +540,7 @@ impl SGIOdysseyState {
             ODSY_I2C_MAIN_CMD_INDEX => self.i2c_main_cmd = data,
             ODSY_I2C_OPT_CMD_INDEX => self.i2c_opt_cmd = data,
             _ => {
-                if !odyssey_backend_ctl_known(index) {
+                if !backend_ctl_known(index) {
                     self.unimplemented(ODSY_BACKEND_SELECT, 8, true);
                 }
             }
@@ -552,7 +552,7 @@ impl SGIOdysseyState {
     /// starting at `index` (a zero count is a pad). Any word without the tag at a
     /// header position has no established meaning and is reported rather than
     /// guessed. While a record is open the word is a data word for the running
-    /// index, which then advances (see odyssey_backend_data).
+    /// index, which then advances (see Board::backend_data).
     pub fn backend_word(&mut self, word: u32) {
         if self.backend_count == 0 {
             if ((word >> ODSY_BACKEND_TAG_SHIFT) & ODSY_BACKEND_TAG_MASK) != ODSY_BACKEND_TAG_HEADER {
@@ -583,7 +583,7 @@ impl SGIOdysseyState {
 /// Deterministic model defaults; physical back-material reset is unknown.
 /// (The ODSY_QUERY_* enum and the hardware shadow-page constants are in
 /// draw.rs and defs.rs.)
-pub const odyssey_back_material_defaults: [u32; 16] = [
+pub const BACK_MATERIAL_DEFAULTS: [u32; 16] = [
     ODSY_F32_POINT_TWO,
     ODSY_F32_POINT_TWO,
     ODSY_F32_POINT_TWO,

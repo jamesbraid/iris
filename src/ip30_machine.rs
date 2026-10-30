@@ -26,7 +26,7 @@ use crate::dev::ioc3::Ioc3;
 use crate::dev::ioc3_eth::Ioc3Eth;
 use crate::dev::isp1040::Isp1040;
 use crate::dev::mgras::hq4::ImpactXio;
-use crate::dev::odyssey::OdysseyXio;
+use crate::dev::odyssey::Odyssey;
 use crate::dev::rad1::Rad1;
 use crate::dev::sflash::{CfiFlash, FLASH_SIZE};
 use crate::dev::w1;
@@ -97,7 +97,7 @@ pub struct OctaneMachine {
     /// The IMPACT board, when `[graphics] board` names one.
     pub gfx: Option<Arc<ImpactXio>>,
     /// The VPro board, with `[graphics] board = "v12"`.
-    pub vpro: Option<Arc<OdysseyXio>>,
+    pub vpro: Option<Arc<Odyssey>>,
     nat: Option<(Arc<crate::net::NatControl>, (std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr))>,
     /// Guest frames the network backend has processed.
     frames: Option<Arc<std::sync::atomic::AtomicU64>>,
@@ -202,7 +202,7 @@ impl OctaneMachine {
         // shared with the graphics board before the CPU exists.
         let fasttick = Arc::new(AtomicU64::new(0));
         let gfx = board.map(|b| ImpactXio::with_board(WIDGET_GFX, b, heart.clone(), mem.clone(), heartbeat, fasttick.clone()));
-        let vpro = if has_vpro { Some(OdysseyXio::new(WIDGET_GFX, "v12", heart.clone(), mem.clone())?) } else { None };
+        let vpro = if has_vpro { Some(Odyssey::new(WIDGET_GFX, "v12", heart.clone(), mem.clone())?) } else { None };
 
         // The bus over them, then the table.
         let phys = Ip30Bus::new(ram.clone());

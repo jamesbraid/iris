@@ -4,13 +4,13 @@
 //! the processor goes on while a primitive is drawn. Meanwhile the driver
 //! stores more commands and polls the registers that do not wait for the
 //! drawing: identity, control, the interrupt bank, the routing, the swap
-//! bank and the FIFO status (`odyssey_access_waits`). Every other access
+//! bank and the FIFO status (`access_waits`). Every other access
 //! waits until the drawing behind the stores before it is done.
 //!
 //! So the board is two states under two locks. The host interface
-//! (`OdysseyFront`) holds those registers, the interrupt state and the
+//! (`HostInterface`) holds those registers, the interrupt state and the
 //! queue of stores the board has not run yet. The rest of the board
-//! (`SGIOdysseyState`) sits behind the board lock, which the board's thread
+//! (`Board`) sits behind the board lock, which the board's thread
 //! holds for a whole slice of stores (worker.rs). A processor's front
 //! access and its command stores take only the front lock and never wait
 //! for a draw; every other access takes the board lock, which waits out the
@@ -25,13 +25,13 @@ use super::*;
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-pub struct OdysseyFront {
+pub struct HostInterface {
     /// The crosstalk widget number.
     pub slot: u32,
     /// Where interrupt packets go (the iris glue's HEART).
     pub irq: Option<Arc<dyn crate::irq::InterruptController>>,
     /// The master node's processor interface, for graphics credits.
-    pub pi: Option<Arc<dyn SGIPIGfxLink>>,
+    pub pi: Option<Arc<dyn PiGfxLink>>,
     /// The widget number of HEART, the packets' destination.
     pub heart_widget: u32,
     /// ODSY_IDENTITY, composed from the revision at reset.
@@ -62,7 +62,7 @@ pub struct OdysseyFront {
     pub displayed_written: bool,
 
     // Command-FIFO stores waiting for the board's thread (worker.rs).
-    pub work_queue: Vec<OdysseyQueuedStore>,
+    pub work_queue: Vec<QueuedStore>,
     /// The oldest waiting stores, this many, are in the FIFO and credited.
     pub work_in_fifo: u32,
     /// The board's thread, while it runs.
@@ -87,9 +87,9 @@ pub struct OdysseyFront {
     pub trace_sequence: u64,
 }
 
-impl Default for OdysseyFront {
+impl Default for HostInterface {
     fn default() -> Self {
-        OdysseyFront {
+        HostInterface {
             slot: 0,
             irq: None,
             pi: None,
@@ -133,22 +133,22 @@ impl Default for OdysseyFront {
 
 /// The two locks a processor's access goes through.
 #[derive(Clone)]
-pub struct OdysseyHandles {
-    pub board: Arc<Mutex<Box<SGIOdysseyState>>>,
-    pub front: Arc<Mutex<OdysseyFront>>,
+pub struct BoardLocks {
+    pub board: Arc<Mutex<Box<Board>>>,
+    pub front: Arc<Mutex<HostInterface>>,
 }
 
-impl OdysseyHandles {
-    pub fn new(s: Box<SGIOdysseyState>) -> Self {
+impl BoardLocks {
+    pub fn new(s: Box<Board>) -> Self {
         let front = s.front.clone();
-        OdysseyHandles { board: Arc::new(Mutex::new(s)), front }
+        BoardLocks { board: Arc::new(Mutex::new(s)), front }
     }
 }
 
 // Interrupts. Every source is delivered from the front, which holds the
 // routing and the flag bank.
 
-impl OdysseyFront {
+impl HostInterface {
     /// An interrupt packet into the widget-addressed fabric.
     pub fn send_packet(&mut self, where_: u64, vector: u8, set: bool) {
         self.send_interrupt(where_, vector, set);
@@ -160,7 +160,7 @@ pub fn odyssey_xio_compose(widget: u32, address: u64, fabric: &mut u64) -> bool 
     sgi_xio_compose("sgi-odyssey", widget, address, fabric)
 }
 
-impl OdysseyFront {
+impl HostInterface {
     /// One routed source's interrupt. Every routed source shares one
     /// destination (ODSY_ROUTE_DEST_UPPER/_LOWER), distinct from
     /// int_dest_upper/int_dest_lower, which the kernel driver gives its
@@ -168,7 +168,7 @@ impl OdysseyFront {
     /// ODSY_ROUTE_VECTORS. The vectors are read from the register, never
     /// assumed. The flag source is a level the guest clears through
     /// ODSY_INTR_CLEAR, so it sends a clearing packet as it falls
-    /// (odyssey_update_irq()); the softsync, retrace and DMA-done handlers ack
+    /// (HostInterface::update_irq()); the softsync, retrace and DMA-done handlers ack
     /// nothing, and those sources send a single set pulse.
     pub fn deliver_routed(&mut self, shift: u32, what: &str, set: bool) {
         let widget = (self.route_dest_upper >> ODSY_ROUTE_DEST_WIDGET_SHIFT) & ((1u32 << ODSY_INT_DEST_WIDGET_BITS) - 1);
@@ -233,7 +233,7 @@ impl OdysseyFront {
     /// A counted store's credit, to the processor interface the node names.
     pub fn return_credit(&mut self) {
         if let Some(pi) = &self.pi {
-            sgi_pi_gfx_return_credits(pi.as_ref(), self.slot, 1);
+            pi_gfx_return_credits(pi.as_ref(), self.slot, 1);
         } else {
             crate::qlog!("sgi-odyssey: counted graphics store has no processor interface for its return\n");
         }
@@ -241,14 +241,14 @@ impl OdysseyFront {
 
     /// Waiting stores that have moved up into the FIFO get their credits. One
     /// that waited outside it repays a credit the node holds as owed
-    /// (sgi_pi_gfx_owe_credits()).
+    /// (pi_gfx_owe_credits()).
     pub fn work_admit(&mut self) {
         while self.work_in_fifo < self.work_queue.len() as u32 && self.work_in_fifo < ODSY_CFIFO_DEPTH {
             let q = self.work_queue[self.work_in_fifo as usize];
 
             if q.owed {
                 if let Some(pi) = &self.pi {
-                    sgi_pi_gfx_repay_credits(pi.as_ref(), self.slot, 1);
+                    pi_gfx_repay_credits(pi.as_ref(), self.slot, 1);
                 }
                 self.work_queue[self.work_in_fifo as usize].owed = false;
             } else if q.counted {
@@ -261,7 +261,7 @@ impl OdysseyFront {
     /// Queue a store and have the board's thread run it. With no thread
     /// started the caller, which holds the board lock, drains it.
     pub fn work_append(&mut self, addr: u64, value: u64, size: u32, counted: bool) {
-        let q = OdysseyQueuedStore {
+        let q = QueuedStore {
             value,
             addr: addr as u32,
             size: size as u8,
@@ -275,7 +275,7 @@ impl OdysseyFront {
         if counted && self.work_in_fifo < self.work_queue.len() as u32 && self.pi.is_some() {
             let last = self.work_queue.len() - 1;
             self.work_queue[last].owed = true;
-            sgi_pi_gfx_owe_credits(self.pi.as_ref().unwrap().as_ref(), self.slot, 1);
+            pi_gfx_owe_credits(self.pi.as_ref().unwrap().as_ref(), self.slot, 1);
         }
         if self.worker_waiting {
             self.kick.notify_one();
@@ -283,7 +283,7 @@ impl OdysseyFront {
     }
 
     /// The oldest waiting store, out of the queue and the FIFO.
-    pub fn work_take(&mut self) -> Option<OdysseyQueuedStore> {
+    pub fn work_take(&mut self) -> Option<QueuedStore> {
         if self.work_queue.is_empty() {
             return None;
         }
@@ -299,7 +299,7 @@ impl OdysseyFront {
     /// the processor's thread, and otherwise behind any store that already
     /// waits.
     pub fn store_queues(&self, addr: u64, size: u32) -> bool {
-        if !odyssey_command_store(addr, size) {
+        if !command_store(addr, size) {
             return false;
         }
         self.worker.is_some() || self.pending() || self.queue_held()
@@ -323,24 +323,24 @@ impl OdysseyFront {
 /// registers that do not wait for the board's work. The other accesses
 /// that do not wait (the back end's read window, unmodeled offsets) report
 /// through state the board lock covers, so they take it.
-pub fn odyssey_front_register(addr: u64, size: u32, write: bool) -> bool {
-    if odyssey_fifo_port(addr) || odyssey_reg(addr, size) < 0 || odyssey_access_waits(addr, size, write) {
+pub fn front_register(addr: u64, size: u32, write: bool) -> bool {
+    if fifo_port(addr) || reg(addr, size) < 0 || access_waits(addr, size, write) {
         return false;
     }
     if !write {
         // Reads of these two fall to the unmodeled-access report.
-        return !matches!(odyssey_reg(addr, size) as u64, ODSY_INTR_CLEAR | ODSY_INTR_ENABLE_CLEAR);
+        return !matches!(reg(addr, size) as u64, ODSY_INTR_CLEAR | ODSY_INTR_ENABLE_CLEAR);
     }
     true
 }
 
-impl OdysseyFront {
+impl HostInterface {
     pub fn read(&mut self, addr: u64, size: u32) -> u64 {
         let mut value: u64 = 0;
         let sequence = self.trace_sequence;
         self.trace_sequence = self.trace_sequence.wrapping_add(1);
 
-        match odyssey_reg(addr, size) as u64 {
+        match reg(addr, size) as u64 {
             ODSY_IDENTITY => value = self.identity as u64,
             ODSY_CONTROL => value = self.widget_control as u64,
             ODSY_XT_REQ_TIMEOUT => value = self.xt_req_timeout as u64,
@@ -353,7 +353,7 @@ impl OdysseyFront {
             ODSY_INTR_FLAGS => value = self.intr_flags as u64,
             ODSY_INTR_ENABLE_SET => value = self.intr_enable as u64,
             ODSY_STATUS0 => {
-                // The waiting stores are its level (odyssey_fifo_level()).
+                // The waiting stores are its level (HostInterface::fifo_level()).
                 let level = self.fifo_level();
                 value = (ODSY_STATUS0_FIFO_ENABLED
                     | if level != 0 { 0 } else { ODSY_STATUS0_FIFO_EMPTY }
@@ -364,7 +364,7 @@ impl OdysseyFront {
             ODSY_SWAP_PENDING => value = self.swap_pending as u64,
             ODSY_SWAP_CONTROL => value = self.swap_control as u64,
             ODSY_SWAP_CONTROL_COMPANION => value = self.swap_control_companion as u64,
-            // The buffer the last latched swap put on screen (odyssey_retrace()).
+            // The buffer the last latched swap put on screen (retrace()).
             ODSY_DISPLAYED_BUFFER => value = self.displayed_buffer as u64,
             ODSY_ROUTE_DEST_UPPER | ODSY_ROUTE_DEST_LOWER | ODSY_ROUTE_VECTORS => {
                 crate::qlog!("sgi-odyssey: read of the write-only register at {:#x}\n", addr);
@@ -379,7 +379,7 @@ impl OdysseyFront {
         crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_mmio: front seq {} offset {:#x} size {} value {:#x} write=1", self.trace_sequence, addr, size, value);
         self.trace_sequence = self.trace_sequence.wrapping_add(1);
 
-        match odyssey_reg(addr, size) as u64 {
+        match reg(addr, size) as u64 {
             ODSY_CONTROL => self.widget_control = value as u32,
             ODSY_XT_REQ_TIMEOUT => self.xt_req_timeout = value as u32,
             ODSY_INT_DEST_UPPER => self.int_dest_upper = value as u32,
@@ -451,8 +451,8 @@ impl OdysseyFront {
 
 /// A processor's read through the front alone: Some when it is a front
 /// register, None when the access needs the board lock.
-pub fn odyssey_front_mmio_read(f: &Mutex<OdysseyFront>, addr: u64, size: u32) -> Option<u64> {
-    if !odyssey_front_register(addr, size, false) {
+pub fn front_mmio_read(f: &Mutex<HostInterface>, addr: u64, size: u32) -> Option<u64> {
+    if !front_register(addr, size, false) {
         return None;
     }
     Some(f.lock().read(addr, size))
@@ -461,9 +461,9 @@ pub fn odyssey_front_mmio_read(f: &Mutex<OdysseyFront>, addr: u64, size: u32) ->
 /// A processor's store through the front alone: true when it went to a
 /// front register or joined the queue for the board's thread, false when
 /// it needs the board lock. `counted`: the processor interface counted it.
-pub fn odyssey_front_mmio_write(f: &Mutex<OdysseyFront>, addr: u64, value: u64, size: u32, counted: bool) -> bool {
+pub fn front_mmio_write(f: &Mutex<HostInterface>, addr: u64, value: u64, size: u32, counted: bool) -> bool {
     let mut f = f.lock();
-    if odyssey_front_register(addr, size, true) {
+    if front_register(addr, size, true) {
         f.write(addr, value, size);
         if counted {
             f.return_credit();

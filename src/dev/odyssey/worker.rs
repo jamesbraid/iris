@@ -33,26 +33,26 @@ pub const GAP: Duration = Duration::from_micros(100);
 /// How much one slice may do: host time, and for tests a count of stores.
 /// A slice checks the budget between stores, so it always runs at least one
 /// and stops at the first store boundary past the deadline.
-pub struct OdysseyBudget {
+pub struct Budget {
     deadline: Option<Instant>,
     words: Option<u32>,
 }
 
-impl OdysseyBudget {
+impl Budget {
     /// A slice on the board's thread: `SLICE` of host time, or `words`
     /// stores when not zero.
     pub fn slice(words: u32) -> Self {
-        OdysseyBudget { deadline: Some(Instant::now() + SLICE), words: (words != 0).then_some(words) }
+        Budget { deadline: Some(Instant::now() + SLICE), words: (words != 0).then_some(words) }
     }
 
     /// Exactly `words` stores, or fewer if the queue runs dry.
     pub fn words(words: u32) -> Self {
-        OdysseyBudget { deadline: None, words: Some(words) }
+        Budget { deadline: None, words: Some(words) }
     }
 
     /// Everything that waits.
     pub fn unlimited() -> Self {
-        OdysseyBudget { deadline: None, words: None }
+        Budget { deadline: None, words: None }
     }
 
     /// Count one store against the budget; true when the slice must stop.
@@ -67,7 +67,7 @@ impl OdysseyBudget {
     }
 }
 
-impl OdysseyHandles {
+impl BoardLocks {
     /// Start the board's thread.
     pub fn work_start(&self) {
         let mut f = self.front.lock();
@@ -90,7 +90,7 @@ impl OdysseyHandles {
         {
             let mut s = self.board.lock();
             let waiting = s.front.lock().work_queue.len() as u32;
-            s.work_step(&mut OdysseyBudget::words(waiting));
+            s.work_step(&mut Budget::words(waiting));
         }
         let thread = {
             let mut f = self.front.lock();
@@ -126,7 +126,7 @@ impl OdysseyHandles {
             f.slice = true;
             MutexGuard::unlocked(&mut f, || {
                 let mut s = self.board.lock();
-                s.work_step(&mut OdysseyBudget::slice(words));
+                s.work_step(&mut Budget::slice(words));
             });
             f.slice = false;
         }

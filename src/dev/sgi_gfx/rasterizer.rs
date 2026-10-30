@@ -14,47 +14,47 @@ use super::*;
 
 // The rules a head's rasterizer follows where OpenGL leaves a choice.
 
-pub type SGIRounding = u32;
-pub const SGI_ROUND_FLOOR: SGIRounding = 0;
-pub const SGI_ROUND_HALF_UP: SGIRounding = 1;
-pub const SGI_ROUND_HALF_EVEN: SGIRounding = 2;
-pub const SGI_ROUND_HALF_AWAY: SGIRounding = 3;
+pub type Rounding = u32;
+pub const SGI_ROUND_FLOOR: Rounding = 0;
+pub const SGI_ROUND_HALF_UP: Rounding = 1;
+pub const SGI_ROUND_HALF_EVEN: Rounding = 2;
+pub const SGI_ROUND_HALF_AWAY: Rounding = 3;
 
-pub type SGIArith = u32;
-pub const SGI_ARITH_FIXED16: SGIArith = 0;
-pub const SGI_ARITH_DOUBLE: SGIArith = 1;
+pub type Arith = u32;
+pub const SGI_ARITH_FIXED16: Arith = 0;
+pub const SGI_ARITH_DOUBLE: Arith = 1;
 
-pub type SGITieRule = u32;
-pub const SGI_TIE_TOP_LEFT: SGITieRule = 0;
-pub const SGI_TIE_TOP_LEFT_BOTTOM_ORIGIN: SGITieRule = 1;
+pub type TieRule = u32;
+pub const SGI_TIE_TOP_LEFT: TieRule = 0;
+pub const SGI_TIE_TOP_LEFT_BOTTOM_ORIGIN: TieRule = 1;
 
-pub type SGILineRule = u32;
-pub const SGI_LINE_BRESENHAM_DIAMOND: SGILineRule = 0;
-pub const SGI_LINE_COVERAGE_DOUBLE: SGILineRule = 1;
+pub type LineRule = u32;
+pub const SGI_LINE_BRESENHAM_DIAMOND: LineRule = 0;
+pub const SGI_LINE_COVERAGE_DOUBLE: LineRule = 1;
 
-pub type SGIDither = u32;
-pub const SGI_DITHER_NONE: SGIDither = 0;
-pub const SGI_DITHER_BAYER4_TOP_ROWS: SGIDither = 1;
+pub type Dither = u32;
+pub const SGI_DITHER_NONE: Dither = 0;
+pub const SGI_DITHER_BAYER4_TOP_ROWS: Dither = 1;
 
-pub type SGIDitherAnchor = u32;
-pub const SGI_DITHER_SCREEN: SGIDitherAnchor = 0;
-pub const SGI_DITHER_WINDOW: SGIDitherAnchor = 1;
+pub type DitherAnchor = u32;
+pub const SGI_DITHER_SCREEN: DitherAnchor = 0;
+pub const SGI_DITHER_WINDOW: DitherAnchor = 1;
 
-pub type SGISmoothRule = u32;
-pub const SGI_SMOOTH_AREA: SGISmoothRule = 0;
-pub const SGI_SMOOTH_TWO_PIXEL_FILTER: SGISmoothRule = 1;
+pub type SmoothRule = u32;
+pub const SGI_SMOOTH_AREA: SmoothRule = 0;
+pub const SGI_SMOOTH_TWO_PIXEL_FILTER: SmoothRule = 1;
 
-// SGIRounding: how a window coordinate or depth is rounded to its grid
-// (SGI_ROUND_HALF_AWAY is llround()). SGITieRule: which pixel centres on a
+// Rounding: how a window coordinate or depth is rounded to its grid
+// (SGI_ROUND_HALF_AWAY is llround()). TieRule: which pixel centres on a
 // shared triangle edge the edge owns, rows counted from the top or from the
-// bottom. SGILineRule: which pixels a width-1 segment covers. SGIDither:
+// bottom. LineRule: which pixels a width-1 segment covers. Dither:
 // BAYER4_TOP_ROWS is a 4x4 ordered dither, floor(c * max + B / 16) with B
 // from the Bayer index matrix at (column, row) mod 4, rows from the top.
-// SGIDitherAnchor: the display or the window. SGISmoothRule: AREA is the
+// DitherAnchor: the display or the window. SmoothRule: AREA is the
 // exact box filter; TWO_PIXEL_FILTER the separable tent filter.
 
 #[derive(Clone, Default)]
-pub struct SGIRasterRules {
+pub struct RasterRules {
     /// window coordinates snap to 2^-n pixel
     pub subpixel_bits: u8,
     /// per channel of a stored colour
@@ -63,17 +63,17 @@ pub struct SGIRasterRules {
     pub depth_bits: u8,
     /// of a stored stencil value, 0 for planes with no stencil buffer
     pub stencil_bits: u8,
-    /// SGIRounding, for snapping and depth
+    /// Rounding, for snapping and depth
     pub rounding: u8,
-    /// SGITieRule
+    /// TieRule
     pub tie_rule: u8,
-    /// SGIArith
+    /// Arith
     pub arith: u8,
-    /// SGILineRule
+    /// LineRule
     pub line_rule: u8,
-    /// SGIDither
+    /// Dither
     pub dither: u8,
-    /// SGIDitherAnchor
+    /// DitherAnchor
     pub dither_anchor: u8,
     /// stored A width, zero means no alpha
     pub alpha_bits: u8,
@@ -82,7 +82,7 @@ pub struct SGIRasterRules {
     /// Smooth points, lines and polygons as their enables ask; without it
     /// a smoothed primitive is drawn aliased and reported.
     pub smooth_primitives: bool,
-    /// SGISmoothRule
+    /// SmoothRule
     pub smooth_rule: u8,
     /// Depth linear in eye distance (a w-buffer): a vertex's window depth
     /// is depth_row . e for its eye coordinates e, perspective-corrected
@@ -97,22 +97,22 @@ pub struct SGIRasterRules {
     /// clamped rather than dropped.
     pub depth_slack: f64,
     /// Stored depth is the IEEE single bits of the window depth shifted
-    /// right by 30 - depth_bits (sgi_raster_depth_code()); needs depth_bits
+    /// right by 30 - depth_bits (RasterRules::depth_code()); needs depth_bits
     /// 10 to 30.
     pub depth_float: bool,
 }
 
 /// A vertex in clip coordinates, as view-volume clipping takes and makes it.
 #[derive(Clone)]
-pub struct SGIVolumeVertex {
+pub struct VolumeVertex {
     pub clip: [f64; 4],
     pub eye: [f64; 4],
     pub attr: [f32; SGI_GL_VERTEX_FLOATS],
 }
 
-impl Default for SGIVolumeVertex {
+impl Default for VolumeVertex {
     fn default() -> Self {
-        SGIVolumeVertex { clip: [0.0; 4], eye: [0.0; 4], attr: [0.0; SGI_GL_VERTEX_FLOATS] }
+        VolumeVertex { clip: [0.0; 4], eye: [0.0; 4], attr: [0.0; SGI_GL_VERTEX_FLOATS] }
     }
 }
 
@@ -125,7 +125,7 @@ pub const SGI_GL_TEX_LEVELS_MAX: u32 = 31;
 /// Absolute level identities in a borrowed, immutable normalized image view.
 /// `rgba` / `component` out-parameters are `&mut`.
 #[derive(Clone, Default)]
-pub struct SGIGLTexLevel {
+pub struct GlTexLevel {
     pub level: u32,
     pub width: u32,
     pub height: u32,
@@ -149,9 +149,9 @@ pub struct SGIGLTexLevel {
 }
 
 #[derive(Clone, Default)]
-pub struct SGIGLTexPyramid {
+pub struct GlTexPyramid {
     /// `count` levels.
-    pub levels: P<SGIGLTexLevel>,
+    pub levels: P<GlTexLevel>,
     pub count: u32,
     pub base_level: u32,
     pub max_level: u32,
@@ -166,7 +166,7 @@ pub struct SGIGLTexPyramid {
 /// channels normalized by component_bits. Borrowed, immutable through each
 /// synchronous draw; no pointer is retained.
 #[derive(Clone, Default)]
-pub struct SGIGLTexImage {
+pub struct GlTexImage {
     pub width: u32,
     pub height: u32,
     pub depth: u32,
@@ -184,7 +184,7 @@ pub struct SGIGLTexImage {
     pub one_dimensional: bool,
     pub opaque: Opaque,
     /// NULL selects the level-zero image fields.
-    pub pyramid: P<SGIGLTexPyramid>,
+    pub pyramid: P<GlTexPyramid>,
     /// Required for a 2D image with border == 1; outside the interior only.
     pub read_border_texel: Option<fn(Opaque, i32, i32, &mut u32) -> bool>,
     /// Positive per-axis derivative factors; zero preserves identity.
@@ -199,7 +199,7 @@ pub struct SGIGLTexImage {
     /// NULL selects the public default curve; lambda is already clamped.
     pub read_filter_weight: Option<fn(Opaque, f64, &mut f64) -> bool>,
     /// Borrowed level-zero detail image; L <= 0, mode ADD or MODULATE.
-    pub detail_image: P<SGIGLTexLevel>,
+    pub detail_image: P<GlTexLevel>,
     pub detail_level: i32,
     pub detail_mode: u32,
     /// Zero disables comparison. SGIX operators compare depth to projected R.
@@ -220,72 +220,72 @@ pub struct SGIGLTexImage {
 
 /// Quantized scalar channels, each normalized by its own declared maximum.
 #[derive(Clone, Copy, Default)]
-pub struct SGIRasterColour {
+pub struct RasterColour {
     /// R, G, B, A; absent alpha is canonical zero
     pub component: [u32; 4],
 }
 
-pub type SGIRenderResult = u32;
-pub const SGI_RENDER_OK: SGIRenderResult = 0;
-pub const SGI_RENDER_OOM: SGIRenderResult = 1;
-pub const SGI_RENDER_UNSUPPORTED: SGIRenderResult = 2;
-pub const SGI_RENDER_RESOURCE_ERROR: SGIRenderResult = 3;
-pub const SGI_RENDER_HOST_ERROR: SGIRenderResult = 4;
+pub type RenderResult = u32;
+pub const SGI_RENDER_OK: RenderResult = 0;
+pub const SGI_RENDER_OOM: RenderResult = 1;
+pub const SGI_RENDER_UNSUPPORTED: RenderResult = 2;
+pub const SGI_RENDER_RESOURCE_ERROR: RenderResult = 3;
+pub const SGI_RENDER_HOST_ERROR: RenderResult = 4;
 
-pub type SGIRenderRole = u32;
-pub const SGI_RENDER_COLOUR: SGIRenderRole = 0;
-pub const SGI_RENDER_INDEX: SGIRenderRole = 1;
-pub const SGI_RENDER_DEPTH: SGIRenderRole = 2;
-pub const SGI_RENDER_STENCIL: SGIRenderRole = 3;
-pub const SGI_RENDER_OVERLAY: SGIRenderRole = 4;
-pub const SGI_RENDER_WID: SGIRenderRole = 5;
-pub const SGI_RENDER_TAG: SGIRenderRole = 6;
-pub const SGI_RENDER_ACCUM: SGIRenderRole = 7;
-pub const SGI_RENDER_TEXTURE: SGIRenderRole = 8;
+pub type RenderRole = u32;
+pub const SGI_RENDER_COLOUR: RenderRole = 0;
+pub const SGI_RENDER_INDEX: RenderRole = 1;
+pub const SGI_RENDER_DEPTH: RenderRole = 2;
+pub const SGI_RENDER_STENCIL: RenderRole = 3;
+pub const SGI_RENDER_OVERLAY: RenderRole = 4;
+pub const SGI_RENDER_WID: RenderRole = 5;
+pub const SGI_RENDER_TAG: RenderRole = 6;
+pub const SGI_RENDER_ACCUM: RenderRole = 7;
+pub const SGI_RENDER_TEXTURE: RenderRole = 8;
 
-pub type SGIRenderBuffer = u32;
-pub const SGI_RENDER_BUFFER_NONE: SGIRenderBuffer = 0;
-pub const SGI_RENDER_FRONT: SGIRenderBuffer = 1;
-pub const SGI_RENDER_BACK: SGIRenderBuffer = 2;
-pub const SGI_RENDER_AUX: SGIRenderBuffer = 3;
+pub type RenderBuffer = u32;
+pub const SGI_RENDER_BUFFER_NONE: RenderBuffer = 0;
+pub const SGI_RENDER_FRONT: RenderBuffer = 1;
+pub const SGI_RENDER_BACK: RenderBuffer = 2;
+pub const SGI_RENDER_AUX: RenderBuffer = 3;
 
-pub type SGIRenderEye = u32;
-pub const SGI_RENDER_MONO: SGIRenderEye = 0;
-pub const SGI_RENDER_LEFT: SGIRenderEye = 1;
-pub const SGI_RENDER_RIGHT: SGIRenderEye = 2;
+pub type RenderEye = u32;
+pub const SGI_RENDER_MONO: RenderEye = 0;
+pub const SGI_RENDER_LEFT: RenderEye = 1;
+pub const SGI_RENDER_RIGHT: RenderEye = 2;
 
-pub type SGIRenderNumeric = u32;
-pub const SGI_RENDER_UINT: SGIRenderNumeric = 0;
-pub const SGI_RENDER_SINT: SGIRenderNumeric = 1;
-pub const SGI_RENDER_UNORM: SGIRenderNumeric = 2;
-pub const SGI_RENDER_SNORM: SGIRenderNumeric = 3;
-pub const SGI_RENDER_FLOAT: SGIRenderNumeric = 4;
+pub type RenderNumeric = u32;
+pub const SGI_RENDER_UINT: RenderNumeric = 0;
+pub const SGI_RENDER_SINT: RenderNumeric = 1;
+pub const SGI_RENDER_UNORM: RenderNumeric = 2;
+pub const SGI_RENDER_SNORM: RenderNumeric = 3;
+pub const SGI_RENDER_FLOAT: RenderNumeric = 4;
 
-pub type SGIRenderChannel = u32;
-pub const SGI_RENDER_R: SGIRenderChannel = 0;
-pub const SGI_RENDER_G: SGIRenderChannel = 1;
-pub const SGI_RENDER_B: SGIRenderChannel = 2;
-pub const SGI_RENDER_A: SGIRenderChannel = 3;
-pub const SGI_RENDER_SCALAR: SGIRenderChannel = 4;
+pub type RenderChannel = u32;
+pub const SGI_RENDER_R: RenderChannel = 0;
+pub const SGI_RENDER_G: RenderChannel = 1;
+pub const SGI_RENDER_B: RenderChannel = 2;
+pub const SGI_RENDER_A: RenderChannel = 3;
+pub const SGI_RENDER_SCALAR: RenderChannel = 4;
 
 #[derive(Clone, Copy, Default)]
-pub struct SGIRenderComponent {
-    pub channel: SGIRenderChannel,
-    pub numeric: SGIRenderNumeric,
+pub struct RenderComponent {
+    pub channel: RenderChannel,
+    pub numeric: RenderNumeric,
     pub storage_bits: u8,
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct SGIRenderResource {
+pub struct RenderResource {
     pub backing_id: u64,
     pub backing_generation: u64,
     pub view_id: u64,
     pub view_generation: u64,
-    pub role: SGIRenderRole,
-    pub target: SGIColourTarget,
-    pub buffer: SGIRenderBuffer,
+    pub role: RenderRole,
+    pub target: ColourTarget,
+    pub buffer: RenderBuffer,
     pub auxiliary_index: u32,
-    pub eye: SGIRenderEye,
+    pub eye: RenderEye,
     pub width: u32,
     pub height: u32,
     pub depth: u32,
@@ -293,11 +293,11 @@ pub struct SGIRenderResource {
     pub border: [u8; 3],
     pub bottom_origin: bool,
     pub component_count: u8,
-    pub component: [SGIRenderComponent; 4],
+    pub component: [RenderComponent; 4],
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct SGIRenderRect {
+pub struct RenderRect {
     pub x0: u32,
     pub y0: u32,
     pub x1: u32,
@@ -305,8 +305,8 @@ pub struct SGIRenderRect {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct SGIRenderCommitResult {
-    pub status: SGIRenderResult,
+pub struct RenderCommitResult {
+    pub status: RenderResult,
     pub complete_pixels: u64,
     pub partial_pixel: bool,
     pub extent_known: bool,
@@ -314,7 +314,7 @@ pub struct SGIRenderCommitResult {
 
 /// One byte per pixel, in the resource's row order, borrowed for one call.
 #[derive(Clone, Copy, Default)]
-pub struct SGIRenderWriteCoverage {
+pub struct RenderWriteCoverage {
     pub pixel: P<u8>,
     pub stride_bytes: usize,
     pub capacity_bytes: usize,
@@ -324,28 +324,28 @@ pub struct SGIRenderWriteCoverage {
 /// slot words; `stride_slots`/`capacity_slots` are as the C passes them.
 /// The C `Error **errp` is dropped.
 #[derive(Clone, Default)]
-pub struct SGIRenderResourceOps {
-    pub snapshot: Option<fn(Opaque, &SGIRenderResource, u32, &SGIRenderRect, &mut [u32], usize, usize) -> SGIRenderResult>,
-    pub commit: Option<fn(Opaque, &SGIRenderResource, u32, &SGIRenderRect, &[u32], usize, usize) -> SGIRenderCommitResult>,
+pub struct RenderResourceOps {
+    pub snapshot: Option<fn(Opaque, &RenderResource, u32, &RenderRect, &mut [u32], usize, usize) -> RenderResult>,
+    pub commit: Option<fn(Opaque, &RenderResource, u32, &RenderRect, &[u32], usize, usize) -> RenderCommitResult>,
     /// (opaque, resource, slice, rect, slots, stride_slots, capacity_slots, writes)
-    pub commit_covered: Option<fn(Opaque, &SGIRenderResource, u32, &SGIRenderRect, &[u32], usize, usize, Option<&SGIRenderWriteCoverage>) -> SGIRenderCommitResult>,
+    pub commit_covered: Option<fn(Opaque, &RenderResource, u32, &RenderRect, &[u32], usize, usize, Option<&RenderWriteCoverage>) -> RenderCommitResult>,
     /// An index resource's commit: slots hold final indices already merged
     /// under effective_mask; uncovered pixels must keep their state.
     /// (..., writes, effective_mask)
-    pub commit_index_covered: Option<fn(Opaque, &SGIRenderResource, u32, &SGIRenderRect, &[u32], usize, usize, Option<&SGIRenderWriteCoverage>, u32) -> SGIRenderCommitResult>,
+    pub commit_index_covered: Option<fn(Opaque, &RenderResource, u32, &RenderRect, &[u32], usize, usize, Option<&RenderWriteCoverage>, u32) -> RenderCommitResult>,
 }
 
 /// The family's planes as the rasterizer reaches them, in plane pixels.
 /// target is one of the drawable's colour targets, which only the family
 /// interprets; a colour is the rules' color_bits a channel, red highest.
 #[derive(Clone, Default)]
-pub struct SGIRasterTarget {
-    pub store_colour: Option<fn(Opaque, SGIColourTarget, i32, i32, u32)>,
+pub struct RasterTarget {
+    pub store_colour: Option<fn(Opaque, ColourTarget, i32, i32, u32)>,
     /// The colour stored at (x, y), or in colour-index mode the index;
     /// None for planes that cannot be read back.
-    pub load_colour: Option<fn(Opaque, SGIColourTarget, i32, i32) -> u32>,
+    pub load_colour: Option<fn(Opaque, ColourTarget, i32, i32) -> u32>,
     /// (opaque, target, x, y, index, mask)
-    pub store_index: Option<fn(Opaque, SGIColourTarget, i32, i32, u32, u32)>,
+    pub store_index: Option<fn(Opaque, ColourTarget, i32, i32, u32, u32)>,
     pub load_depth: Option<fn(Opaque, i32, i32) -> u32>,
     pub store_depth: Option<fn(Opaque, i32, i32, u32)>,
     /// The stencil buffer; None for planes without one.
@@ -360,7 +360,7 @@ pub struct SGIRasterTarget {
     /// Whether plane rows below the top line have larger y.
     pub screen_rows_down: bool,
     /// Current binding; resolved once by the family before drawing.
-    pub texture: P<SGIGLTexImage>,
+    pub texture: P<GlTexImage>,
     /// An opaque polygon stipple: a fragment whose stipple bit is clear
     /// takes stipple_background (or stipple_background_index).
     pub stipple_opaque: bool,
@@ -368,63 +368,63 @@ pub struct SGIRasterTarget {
     pub stipple_background_index: u32,
     /// Optional complete RGBA stores and reads. Positive alpha_bits
     /// requires the store.
-    pub store_rgba: Option<fn(Opaque, SGIColourTarget, i32, i32, &SGIRasterColour)>,
-    pub load_rgba: Option<fn(Opaque, SGIColourTarget, i32, i32, &mut SGIRasterColour) -> bool>,
+    pub store_rgba: Option<fn(Opaque, ColourTarget, i32, i32, &RasterColour)>,
+    pub load_rgba: Option<fn(Opaque, ColourTarget, i32, i32, &mut RasterColour) -> bool>,
     /// `resource_count` resources, borrowed until the draw returns.
-    pub resources: P<SGIRenderResource>,
+    pub resources: P<RenderResource>,
     pub resource_count: usize,
-    pub resource_ops: P<SGIRenderResourceOps>,
+    pub resource_ops: P<RenderResourceOps>,
     /// Kept for the C initializer; bands run serially here.
     pub concurrent_pixels: bool,
     pub band_min_pixels: u32,
     pub mixed_frame: bool,
 }
 
-pub type SGIRasterTexturePath = u32;
-pub const SGI_RASTER_TEXTURE_SPANS: SGIRasterTexturePath = 0;
-pub const SGI_RASTER_TEXTURE_FIXED: SGIRasterTexturePath = 1;
-pub const SGI_RASTER_TEXTURE_DOUBLE: SGIRasterTexturePath = 2;
+pub type RasterTexturePath = u32;
+pub const SGI_RASTER_TEXTURE_SPANS: RasterTexturePath = 0;
+pub const SGI_RASTER_TEXTURE_FIXED: RasterTexturePath = 1;
+pub const SGI_RASTER_TEXTURE_DOUBLE: RasterTexturePath = 2;
 
 /// Why a checked draw or raster operation was refused (host renderer
 /// feature rows; the Odyssey model only names and counts them).
-pub type SGIRenderRefusal = u32;
-pub const SGI_RENDER_REFUSAL_NONE: SGIRenderRefusal = 0;
-pub const SGI_RENDER_REFUSAL_RULES: SGIRenderRefusal = 1;
-pub const SGI_RENDER_REFUSAL_DITHER: SGIRenderRefusal = 2;
-pub const SGI_RENDER_REFUSAL_PRIMITIVE: SGIRenderRefusal = 3;
-pub const SGI_RENDER_REFUSAL_SMOOTHING: SGIRenderRefusal = 4;
-pub const SGI_RENDER_REFUSAL_COLOUR_INDEX: SGIRenderRefusal = 5;
-pub const SGI_RENDER_REFUSAL_INDEX_CLIPPED: SGIRenderRefusal = 6;
-pub const SGI_RENDER_REFUSAL_BUFFERS: SGIRenderRefusal = 7;
-pub const SGI_RENDER_REFUSAL_FRAGMENT_TESTS: SGIRenderRefusal = 8;
-pub const SGI_RENDER_REFUSAL_FOG: SGIRenderRefusal = 9;
-pub const SGI_RENDER_REFUSAL_FACING: SGIRenderRefusal = 10;
-pub const SGI_RENDER_REFUSAL_CLIP_PLANES: SGIRenderRefusal = 11;
-pub const SGI_RENDER_REFUSAL_LOGIC_OP: SGIRenderRefusal = 12;
-pub const SGI_RENDER_REFUSAL_POLYGON_OFFSET: SGIRenderRefusal = 13;
-pub const SGI_RENDER_REFUSAL_WINDOW: SGIRenderRefusal = 14;
-pub const SGI_RENDER_REFUSAL_GEOMETRY: SGIRenderRefusal = 15;
-pub const SGI_RENDER_REFUSAL_LINE_SHAPE: SGIRenderRefusal = 16;
-pub const SGI_RENDER_REFUSAL_RESOURCE: SGIRenderRefusal = 17;
-pub const SGI_RENDER_REFUSAL_STORE_WIDTH: SGIRenderRefusal = 18;
-pub const SGI_RENDER_REFUSAL_BLEND: SGIRenderRefusal = 19;
-pub const SGI_RENDER_REFUSAL_BLEND_OVERLAP: SGIRenderRefusal = 20;
-pub const SGI_RENDER_REFUSAL_TEXTURE: SGIRenderRefusal = 21;
-pub const SGI_RENDER_REFUSAL_PROVIDER: SGIRenderRefusal = 22;
-pub const SGI_RENDER_REFUSAL_RASTER_OP: SGIRenderRefusal = 23;
-pub const SGI_RENDER_REFUSAL_MIXED_FRAME: SGIRenderRefusal = 24;
-pub const SGI_RENDER_REFUSAL_HOST_VIEWPORT: SGIRenderRefusal = 25;
-pub const SGI_RENDER_REFUSAL_HOST_POINT_SIZE: SGIRenderRefusal = 26;
-pub const SGI_RENDER_REFUSAL_HOST_PROGRAM: SGIRenderRefusal = 27;
-pub const SGI_RENDER_REFUSAL_HOST_PROBE: SGIRenderRefusal = 28;
-pub const SGI_RENDER_REFUSAL_HOST_STAGING: SGIRenderRefusal = 29;
-pub const SGI_RENDER_REFUSAL_HOST_DRIVER: SGIRenderRefusal = 30;
-pub const SGI_RENDER_REFUSAL_SNAPSHOT: SGIRenderRefusal = 31;
-pub const SGI_RENDER_REFUSAL_PRECISION: SGIRenderRefusal = 32;
-pub const SGI_RENDER_REFUSAL__MAX: SGIRenderRefusal = 33;
+pub type RenderRefusal = u32;
+pub const SGI_RENDER_REFUSAL_NONE: RenderRefusal = 0;
+pub const SGI_RENDER_REFUSAL_RULES: RenderRefusal = 1;
+pub const SGI_RENDER_REFUSAL_DITHER: RenderRefusal = 2;
+pub const SGI_RENDER_REFUSAL_PRIMITIVE: RenderRefusal = 3;
+pub const SGI_RENDER_REFUSAL_SMOOTHING: RenderRefusal = 4;
+pub const SGI_RENDER_REFUSAL_COLOUR_INDEX: RenderRefusal = 5;
+pub const SGI_RENDER_REFUSAL_INDEX_CLIPPED: RenderRefusal = 6;
+pub const SGI_RENDER_REFUSAL_BUFFERS: RenderRefusal = 7;
+pub const SGI_RENDER_REFUSAL_FRAGMENT_TESTS: RenderRefusal = 8;
+pub const SGI_RENDER_REFUSAL_FOG: RenderRefusal = 9;
+pub const SGI_RENDER_REFUSAL_FACING: RenderRefusal = 10;
+pub const SGI_RENDER_REFUSAL_CLIP_PLANES: RenderRefusal = 11;
+pub const SGI_RENDER_REFUSAL_LOGIC_OP: RenderRefusal = 12;
+pub const SGI_RENDER_REFUSAL_POLYGON_OFFSET: RenderRefusal = 13;
+pub const SGI_RENDER_REFUSAL_WINDOW: RenderRefusal = 14;
+pub const SGI_RENDER_REFUSAL_GEOMETRY: RenderRefusal = 15;
+pub const SGI_RENDER_REFUSAL_LINE_SHAPE: RenderRefusal = 16;
+pub const SGI_RENDER_REFUSAL_RESOURCE: RenderRefusal = 17;
+pub const SGI_RENDER_REFUSAL_STORE_WIDTH: RenderRefusal = 18;
+pub const SGI_RENDER_REFUSAL_BLEND: RenderRefusal = 19;
+pub const SGI_RENDER_REFUSAL_BLEND_OVERLAP: RenderRefusal = 20;
+pub const SGI_RENDER_REFUSAL_TEXTURE: RenderRefusal = 21;
+pub const SGI_RENDER_REFUSAL_PROVIDER: RenderRefusal = 22;
+pub const SGI_RENDER_REFUSAL_RASTER_OP: RenderRefusal = 23;
+pub const SGI_RENDER_REFUSAL_MIXED_FRAME: RenderRefusal = 24;
+pub const SGI_RENDER_REFUSAL_HOST_VIEWPORT: RenderRefusal = 25;
+pub const SGI_RENDER_REFUSAL_HOST_POINT_SIZE: RenderRefusal = 26;
+pub const SGI_RENDER_REFUSAL_HOST_PROGRAM: RenderRefusal = 27;
+pub const SGI_RENDER_REFUSAL_HOST_PROBE: RenderRefusal = 28;
+pub const SGI_RENDER_REFUSAL_HOST_STAGING: RenderRefusal = 29;
+pub const SGI_RENDER_REFUSAL_HOST_DRIVER: RenderRefusal = 30;
+pub const SGI_RENDER_REFUSAL_SNAPSHOT: RenderRefusal = 31;
+pub const SGI_RENDER_REFUSAL_PRECISION: RenderRefusal = 32;
+pub const SGI_RENDER_REFUSAL__MAX: RenderRefusal = 33;
 
 /// A stable lowercase name for counters and traces, such as "fog".
-pub fn sgi_render_refusal_name(reason: SGIRenderRefusal) -> &'static str {
+pub fn render_refusal_name(reason: RenderRefusal) -> &'static str {
     // hw/display/sgi/renderer.c, sgi_render_refusals[].name.
     const NAMES: [&str; SGI_RENDER_REFUSAL__MAX as usize] = [
         "none", "rules", "dither", "primitive", "smoothing", "colour-index", "index-clipped", "buffers", "fragment-tests", "fog", "facing", "clip-planes", "logic-op", "polygon-offset", "window", "geometry", "line-shape", "resource", "store-width", "blend", "blend-overlap", "texture", "provider", "raster-op", "mixed-frame", "host-viewport", "host-point-size", "host-program", "host-probe", "host-staging", "host-driver", "snapshot", "precision"
@@ -435,18 +435,18 @@ pub fn sgi_render_refusal_name(reason: SGIRenderRefusal) -> &'static str {
 /// A prepared texture sampler (private to rasterizer.c). Borrowed state and image stay immutable until it is
 /// dropped.
 #[derive(Clone, Default)]
-pub struct SGIRasterTexture {
-    pub target: SGIRasterTarget,
-    pub draw: SGISoftDraw,
+pub struct RasterTexture {
+    pub target: RasterTarget,
+    pub draw: SoftDraw,
     pub reports: u32,
 }
 
-pub type SGIRasterTextureResult = u32;
-pub const SGI_RASTER_TEXTURE_READY: SGIRasterTextureResult = 0;
-pub const SGI_RASTER_TEXTURE_DISABLED: SGIRasterTextureResult = 1;
-pub const SGI_RASTER_TEXTURE_INCOMPLETE: SGIRasterTextureResult = 2;
-pub const SGI_RASTER_TEXTURE_UNSUPPORTED: SGIRasterTextureResult = 3;
-pub const SGI_RASTER_TEXTURE_OOM: SGIRasterTextureResult = 4;
+pub type RasterTextureResult = u32;
+pub const SGI_RASTER_TEXTURE_READY: RasterTextureResult = 0;
+pub const SGI_RASTER_TEXTURE_DISABLED: RasterTextureResult = 1;
+pub const SGI_RASTER_TEXTURE_INCOMPLETE: RasterTextureResult = 2;
+pub const SGI_RASTER_TEXTURE_UNSUPPORTED: RasterTextureResult = 3;
+pub const SGI_RASTER_TEXTURE_OOM: RasterTextureResult = 4;
 
 // ---------------------------------------------------------------------
 // Ported from hw/display/sgi/rasterizer.c lines 1-3145 (the fixed-point
@@ -463,24 +463,24 @@ pub fn fmin(a: f64, b: f64) -> f64 {
 /// The drawable's window: its origin and the bounds of the pixels it owns,
 /// in plane pixels, and the rectangles themselves.
 #[derive(Clone, Copy, Default)]
-pub struct SGISoftWindow {
+pub struct SoftWindow {
     pub ox: i32,
     pub oy: i32,
     pub x0: i32,
     pub y0: i32,
     pub x1: i32,
     pub y1: i32,
-    pub clip: P<SGIClipList>,
+    pub clip: P<ClipList>,
 }
 
 /// One draw's fixed inputs.
 #[derive(Clone, Copy, Default)]
-pub struct SGISoftDraw {
-    pub rules: P<SGIRasterRules>,
-    pub t: P<SGIRasterTarget>,
-    pub st: P<SGIGLDrawState>,
-    pub win: SGISoftWindow,
-    pub targets: [SGIColourTarget; SGI_GL_MAX_TARGETS as usize],
+pub struct SoftDraw {
+    pub rules: P<RasterRules>,
+    pub t: P<RasterTarget>,
+    pub st: P<GlDrawState>,
+    pub win: SoftWindow,
+    pub targets: [ColourTarget; SGI_GL_MAX_TARGETS as usize],
     pub ntargets: u32,
     /// Back-facing polygons take the vertices' back colours.
     pub back_colors: bool,
@@ -492,8 +492,8 @@ pub struct SGISoftDraw {
     pub colour_mask: u32,
     /// The stored colour is dithered: GL_DITHER and the rules' dither.
     pub dither: bool,
-    pub texture: P<SGIGLTexImage>,
-    pub texture_base: P<SGIGLTexLevel>,
+    pub texture: P<GlTexImage>,
+    pub texture_base: P<GlTexLevel>,
     pub texture_last: u32,
     pub texture_reports: P<u32>,
     pub point_size: u32,
@@ -508,17 +508,17 @@ pub struct SGISoftDraw {
     pub rgba_read: bool,
     pub rgba_reported: P<bool>,
     /// Texels already read in this draw, or NULL (sgi_soft_texel_cache).
-    pub texels: P<SGISoftTexelCache>,
+    pub texels: P<SoftTexelCache>,
     /// Filled triangles sample in fixed point, or NULL (sgi_soft_fixed).
-    pub fixed: P<SGISoftFixedTex>,
-    /// Of bands > 1, the rows this pass draws (sgi_soft_row_in_band()).
+    pub fixed: P<SoftFixedTex>,
+    /// Of bands > 1, the rows this pass draws (SoftDraw::row_in_band()).
     pub band: u32,
     pub bands: u32,
 }
 
 /// A vertex after transformation, ready to rasterize.
 #[derive(Clone, Copy)]
-pub struct SGISoftVertex {
+pub struct SoftVertex {
     /// window position in subpixels
     pub x: i64,
     pub y: i64,
@@ -538,9 +538,9 @@ pub struct SGISoftVertex {
     pub clip: [f64; SGI_GL_CLIP_PLANES as usize],
 }
 
-impl Default for SGISoftVertex {
+impl Default for SoftVertex {
     fn default() -> Self {
-        SGISoftVertex {
+        SoftVertex {
             x: 0,
             y: 0,
             z: 0.0,
@@ -559,7 +559,7 @@ impl Default for SGISoftVertex {
 /// before the per-fragment operations of chapter 4: its colour, each
 /// component in [0, 1], and in colour-index mode its index.
 #[derive(Clone, Copy, Default)]
-pub struct SGISoftFrag {
+pub struct SoftFrag {
     pub rgba: [f64; 4],
     pub texcoord: [f64; 4],
     pub texture_rho: f64,
@@ -579,28 +579,28 @@ pub const SGI_RASTER_PARALLEL_MIN_PIXELS: u64 = 2048;
 
 pub const SGI_SOFT_BAND_ROWS_SHIFT: u32 = 3; // rows interleave in runs of 8
 
-pub static sgi_soft_bands_wanted: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-pub static sgi_soft_bands_min_pixels: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(SGI_RASTER_PARALLEL_MIN_PIXELS);
-/// The host's processors, read once (sgi_soft_pool_init()): every draw and
+pub static SOFT_BANDS_WANTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub static SOFT_BANDS_MIN_PIXELS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(SGI_RASTER_PARALLEL_MIN_PIXELS);
+/// The host's processors, read once (soft_pool_init()): every draw and
 /// clear chooses its bands. A later change to the host's processors is not
 /// seen.
-pub static sgi_soft_host_processors: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+pub static SOFT_HOST_PROCESSORS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
 
 thread_local! {
     /// A band other than the first repeats the primitive work: say it once.
     pub static sgi_soft_band_quiet: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-pub type SGISoftBandFn = fn(Opaque, u32, u32);
+pub type SoftBandFn = fn(Opaque, u32, u32);
 
-/// The pool's shared state, under sgi_soft_pool.lock. The job's opaque
+/// The pool's shared state, under SOFT_POOL.lock. The job's opaque
 /// pointer is a P, which is Send: a band's data is the caller's, which the
 /// caller keeps alive until every band is done.
 #[derive(Default)]
-pub struct SGISoftPoolState {
+pub struct SoftPoolState {
     pub threads: u32,
     pub generation: u64,
-    pub fn_: Option<SGISoftBandFn>,
+    pub fn_: Option<SoftBandFn>,
     pub opaque: Opaque,
     pub bands: u32,
     pub pending: u32,
@@ -608,17 +608,17 @@ pub struct SGISoftPoolState {
     pub panicked: bool,
 }
 
-pub struct SGISoftPool {
+pub struct SoftPool {
     /// one band-parallel call at a time
     pub run: std::sync::Mutex<()>,
-    pub lock: std::sync::Mutex<SGISoftPoolState>,
+    pub lock: std::sync::Mutex<SoftPoolState>,
     pub start: std::sync::Condvar,
     pub done: std::sync::Condvar,
 }
 
-pub static sgi_soft_pool: SGISoftPool = SGISoftPool {
+pub static SOFT_POOL: SoftPool = SoftPool {
     run: std::sync::Mutex::new(()),
-    lock: std::sync::Mutex::new(SGISoftPoolState {
+    lock: std::sync::Mutex::new(SoftPoolState {
         threads: 0,
         generation: 0,
         fn_: None,
@@ -633,21 +633,21 @@ pub static sgi_soft_pool: SGISoftPool = SGISoftPool {
 
 /// Count the host's processors, once, on the first draw or clear that
 /// chooses its bands. Workers start only when a draw first runs in bands.
-pub fn sgi_soft_pool_init() {
-    sgi_soft_host_processors.get_or_init(|| {
+pub fn soft_pool_init() {
+    SOFT_HOST_PROCESSORS.get_or_init(|| {
         std::cmp::max(std::thread::available_parallelism().map_or(1, |n| n.get() as u32), 1)
     });
 }
 
 /// A band worker: waits for each generation of the pool's job, runs its
 /// band of it if it has one, and counts itself done.
-pub fn sgi_soft_band_worker(band: u32) {
+pub fn soft_band_worker(band: u32) {
     let mut seen: u64 = 0;
-    let mut g = sgi_soft_pool.lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut g = SOFT_POOL.lock.lock().unwrap_or_else(|e| e.into_inner());
 
     loop {
         while g.generation == seen {
-            g = sgi_soft_pool.start.wait(g).unwrap_or_else(|e| e.into_inner());
+            g = SOFT_POOL.start.wait(g).unwrap_or_else(|e| e.into_inner());
         }
         seen = g.generation;
         if band >= g.bands {
@@ -658,23 +658,23 @@ pub fn sgi_soft_band_worker(band: u32) {
         let bands = g.bands;
         drop(g);
         let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fn_(job, band, bands))).is_ok();
-        g = sgi_soft_pool.lock.lock().unwrap_or_else(|e| e.into_inner());
+        g = SOFT_POOL.lock.lock().unwrap_or_else(|e| e.into_inner());
         if !ok {
             g.panicked = true;
         }
         g.pending -= 1;
         if g.pending == 0 {
-            sgi_soft_pool.done.notify_one();
+            SOFT_POOL.done.notify_one();
         }
     }
 }
 
-pub fn sgi_soft_bands() -> u32 {
-    sgi_soft_pool_init();
-    let mut bands = sgi_soft_bands_wanted.load(std::sync::atomic::Ordering::Relaxed);
+pub fn soft_bands() -> u32 {
+    soft_pool_init();
+    let mut bands = SOFT_BANDS_WANTED.load(std::sync::atomic::Ordering::Relaxed);
 
     if bands == 0 {
-        bands = std::cmp::min(SGI_RASTER_PARALLEL_DEFAULT_BANDS, *sgi_soft_host_processors.get().unwrap());
+        bands = std::cmp::min(SGI_RASTER_PARALLEL_DEFAULT_BANDS, *SOFT_HOST_PROCESSORS.get().unwrap());
     }
     std::cmp::min(bands, SGI_RASTER_PARALLEL_MAX_BANDS)
 }
@@ -682,20 +682,20 @@ pub fn sgi_soft_bands() -> u32 {
 /// fn(opaque, band, bands) for each band, band 0 on this thread, the rest
 /// on workers, returning when all have; false, having run none, when
 /// another thread is using the workers.
-pub fn sgi_soft_bands_run(f: SGISoftBandFn, opaque: Opaque, bands: u32) -> bool {
-    sgi_soft_pool_init();
-    let _run = match sgi_soft_pool.run.try_lock() {
+pub fn soft_bands_run(f: SoftBandFn, opaque: Opaque, bands: u32) -> bool {
+    soft_pool_init();
+    let _run = match SOFT_POOL.run.try_lock() {
         Ok(g) => g,
         Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
         Err(std::sync::TryLockError::WouldBlock) => return false,
     };
-    let mut g = sgi_soft_pool.lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut g = SOFT_POOL.lock.lock().unwrap_or_else(|e| e.into_inner());
     while g.threads < bands - 1 {
         let n = g.threads + 1;
 
         let spawned = std::thread::Builder::new()
             .name(format!("sgi-raster-{}", n))
-            .spawn(move || sgi_soft_band_worker(n));
+            .spawn(move || soft_band_worker(n));
         if spawned.is_err() {
             // No thread to run that band: draw on fewer threads is not an
             // option once the bands are chosen, so run none.
@@ -709,14 +709,14 @@ pub fn sgi_soft_bands_run(f: SGISoftBandFn, opaque: Opaque, bands: u32) -> bool 
     g.pending = bands - 1;
     g.panicked = false;
     g.generation += 1;
-    sgi_soft_pool.start.notify_all();
+    SOFT_POOL.start.notify_all();
     drop(g);
 
     let own = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(opaque, 0, bands)));
 
-    let mut g = sgi_soft_pool.lock.lock().unwrap_or_else(|e| e.into_inner());
+    let mut g = SOFT_POOL.lock.lock().unwrap_or_else(|e| e.into_inner());
     while g.pending != 0 {
-        g = sgi_soft_pool.done.wait(g).unwrap_or_else(|e| e.into_inner());
+        g = SOFT_POOL.done.wait(g).unwrap_or_else(|e| e.into_inner());
     }
     let panicked = g.panicked;
     drop(g);
@@ -730,25 +730,25 @@ pub fn sgi_soft_bands_run(f: SGISoftBandFn, opaque: Opaque, bands: u32) -> bool 
     true
 }
 
-impl SGIRasterTarget {
+impl RasterTarget {
     /// The pixel count from which a draw or clear into @t runs in bands.
     pub fn soft_band_min_pixels(&self) -> u64 {
         if self.band_min_pixels != 0 {
             self.band_min_pixels as u64
         } else {
-            sgi_soft_bands_min_pixels.load(std::sync::atomic::Ordering::Relaxed)
+            SOFT_BANDS_MIN_PIXELS.load(std::sync::atomic::Ordering::Relaxed)
         }
     }
 }
 
-impl SGISoftDraw {
+impl SoftDraw {
     pub fn row_in_band(&self, py: i32) -> bool {
         self.bands <= 1 || ((py as u32) >> SGI_SOFT_BAND_ROWS_SHIFT) % self.bands == self.band
     }
 }
 
-impl SGIGLDrawState {
-    pub fn window(&self, win: &mut SGISoftWindow) -> bool {
+impl GlDrawState {
+    pub fn window(&self, win: &mut SoftWindow) -> bool {
         let d = &self.drawable;
 
         if d.bound == 0 {
@@ -776,7 +776,7 @@ impl SGIGLDrawState {
     }
 }
 
-impl SGIRasterRules {
+impl RasterRules {
     pub fn rules_supported(&self) -> bool {
         self.subpixel_bits >= 1 && self.subpixel_bits <= 12 &&
             self.color_bits >= 1 && self.color_bits <= 10 &&
@@ -811,7 +811,7 @@ impl SGIRasterRules {
     }
 }
 
-impl SGIRasterTarget {
+impl RasterTarget {
     /// Whether the target can take the colour-index work a draw state asks.
     pub fn soft_check_index(&self, index_bits: u32) -> bool {
         if index_bits != 0 && self.store_index.is_none() {
@@ -822,7 +822,7 @@ impl SGIRasterTarget {
     }
 }
 
-impl SGIRasterRules {
+impl RasterRules {
     /// x rounded to an integer by the rules' rounding.
     pub fn round(&self, x: f64) -> i64 {
         let rounding = self.rounding as u32;
@@ -928,7 +928,7 @@ impl SGIRasterRules {
     }
 
     /// Reject unsupported capabilities before the operation can write any plane.
-    pub fn rgba_capable(&self, t: &SGIRasterTarget, read: bool) -> bool {
+    pub fn rgba_capable(&self, t: &RasterTarget, read: bool) -> bool {
         if (self.alpha_bits != 0 && t.store_rgba.is_none()) ||
             (t.store_rgba.is_some() && read && t.load_rgba.is_none()) ||
             (t.store_rgba.is_none() && t.load_rgba.is_some())
@@ -940,7 +940,7 @@ impl SGIRasterRules {
     }
 
     /// Read every selected destination before any colour/depth/stencil write.
-    pub fn rgba_load(&self, t: &SGIRasterTarget, targets: &[SGIColourTarget], count: u32, x: i32, y: i32, dest: &mut [SGIRasterColour; SGI_GL_MAX_TARGETS as usize], reported: &mut bool) -> bool {
+    pub fn rgba_load(&self, t: &RasterTarget, targets: &[ColourTarget], count: u32, x: i32, y: i32, dest: &mut [RasterColour; SGI_GL_MAX_TARGETS as usize], reported: &mut bool) -> bool {
         for i in 0..count as usize {
             let mut valid = (t.load_rgba.unwrap())(t.opaque, targets[i], x, y, &mut dest[i]);
 
@@ -953,7 +953,7 @@ impl SGIRasterRules {
                 k += 1;
             }
             if !valid {
-                // Bands of one draw share the flag (sgi_soft_bands_run()).
+                // Bands of one draw share the flag (soft_bands_run()).
                 let old = *reported;
                 *reported = true;
                 if !old {
@@ -977,16 +977,16 @@ impl SGIRasterRules {
 }
 
 /// SGI_DITHER_BAYER4_TOP_ROWS's thresholds, in sixteenths of a step.
-pub static sgi_soft_bayer4: [[u8; 4]; 4] = [
+pub static SOFT_BAYER4: [[u8; 4]; 4] = [
     [0, 8, 2, 10],
     [12, 4, 14, 6],
     [3, 11, 1, 9],
     [15, 7, 13, 5],
 ];
 
-impl SGISoftDraw {
+impl SoftDraw {
     /// A fragment's colour at plane pixel (x, y) as the planes store it:
-    /// dithered while the draw dithers, otherwise rounded as sgi_soft_rgb()
+    /// dithered while the draw dithers, otherwise rounded as RasterRules::rgb()
     /// rounds. A clamped component of 0 or 1 is exact either way, and one
     /// below 1 stays below max + 1 with the largest threshold added.
     pub fn store_rgb(&self, x: i32, y: i32, c: &[f64]) -> u32 {
@@ -1002,7 +1002,7 @@ impl SGISoftDraw {
         } else {
             self.t.screen_top as i64 - y as i64
         };
-        let b = sgi_soft_bayer4[(row & 3) as usize][(x & 3) as usize] as f64 / 16.0;
+        let b = SOFT_BAYER4[(row & 3) as usize][(x & 3) as usize] as f64 / 16.0;
         for k in 0..3usize {
             let v: u32;
 
@@ -1019,8 +1019,8 @@ impl SGISoftDraw {
     }
 }
 
-impl SGISoftVertex {
-    pub fn edge(&self, b: &SGISoftVertex, px: i64, py: i64) -> i64 {
+impl SoftVertex {
+    pub fn edge(&self, b: &SoftVertex, px: i64, py: i64) -> i64 {
         (b.x.wrapping_sub(self.x)).wrapping_mul(py.wrapping_sub(self.y))
             .wrapping_sub((b.y.wrapping_sub(self.y)).wrapping_mul(px.wrapping_sub(self.x)))
     }
@@ -1030,7 +1030,7 @@ impl SGISoftVertex {
     /// (horizontal, running left), with rows counted up from the bottom of the
     /// plane, so two triangles sharing an edge never both draw its centres, as
     /// OpenGL 1.2.1, 3.5.1 requires.
-    pub fn owns(&self, b: &SGISoftVertex, e: i64) -> bool {
+    pub fn owns(&self, b: &SoftVertex, e: i64) -> bool {
         if e != 0 {
             return e > 0;
         }
@@ -1038,11 +1038,11 @@ impl SGISoftVertex {
     }
 
     /// Narrow [*lo, *hi], pixel steps along a row from a start whose edge value
-    /// is e, to the steps where sgi_soft_owns() holds for the edge from a to b,
+    /// is e, to the steps where SoftVertex::owns() holds for the edge from a to b,
     /// whose value moves by step a pixel. The edge function is linear along the
     /// row, so the owned steps are one run: e + k * step >= need, where need is
     /// 0 for an edge that owns the centres on it and 1 for one that does not.
-    pub fn owned_run(&self, b: &SGISoftVertex, e: i64, step: i64, lo: &mut i64, hi: &mut i64) {
+    pub fn owned_run(&self, b: &SoftVertex, e: i64, step: i64, lo: &mut i64, hi: &mut i64) {
         let need: i64 = if self.owns(b, 0) { 0 } else { 1 };
         let d = need.wrapping_sub(e);
 
@@ -1065,7 +1065,7 @@ impl SGISoftVertex {
 /// stored one (4.1.5), the alpha test's alpha against its reference
 /// (4.1.4), the stencil test's masked reference against the masked stored
 /// value (4.1.5).
-pub fn sgi_soft_compare(func: u32, value: u32, ref_: u32) -> bool {
+pub fn soft_compare(func: u32, value: u32, ref_: u32) -> bool {
     match func {
         SGI_GL_NEVER => false,
         SGI_GL_LESS => value < ref_,
@@ -1078,23 +1078,23 @@ pub fn sgi_soft_compare(func: u32, value: u32, ref_: u32) -> bool {
     }
 }
 
-impl SGIRasterRules {
+impl RasterRules {
     pub fn alpha_test(&self, func: u32, alpha: f64, ref_: f64) -> bool {
-        sgi_soft_compare(func, self.soft_alpha_test(alpha), self.soft_alpha_test(ref_))
+        soft_compare(func, self.soft_alpha_test(alpha), self.soft_alpha_test(ref_))
     }
 
     /// Whether the planes have a stencil buffer, and its largest value.
-    pub fn stencil_max(&self, t: &SGIRasterTarget, max: &mut u32) -> bool {
+    pub fn stencil_max(&self, t: &RasterTarget, max: &mut u32) -> bool {
         *max = (1u32.wrapping_shl(self.stencil_bits as u32)).wrapping_sub(1);
         self.stencil_bits != 0 && t.load_stencil.is_some() && t.store_stencil.is_some()
     }
 }
 
-impl SGIGLDrawState {
+impl GlDrawState {
     /// One of glStencilOp's operations on the stencil value at (x, y), the
     /// result written under the stencil write mask (4.1.5, 4.2.2). GL_INCR
     /// and GL_DECR clamp to the buffer's range.
-    pub fn stencil_op(&self, t: &SGIRasterTarget, x: i32, y: i32, op: u32, max: u32, ref_: u32) {
+    pub fn stencil_op(&self, t: &RasterTarget, x: i32, y: i32, op: u32, max: u32, ref_: u32) {
         let old = (t.load_stencil.unwrap())(t.opaque, x, y) & max;
         let mask = self.stencil_write_mask & max;
         let value: u32;
@@ -1111,8 +1111,8 @@ impl SGIGLDrawState {
     }
 }
 
-impl SGIRasterRules {
-    pub fn depth_stencil(&self, st: &SGIGLDrawState, t: &SGIRasterTarget, x: i32, y: i32, z: f64) -> bool {
+impl RasterRules {
+    pub fn depth_stencil(&self, st: &GlDrawState, t: &RasterTarget, x: i32, y: i32, z: f64) -> bool {
         let mut smax: u32 = 0;
         let mut sref: u32 = 0;
 
@@ -1128,7 +1128,7 @@ impl SGIRasterRules {
             let vmask = st.stencil_value_mask;
 
             sref = if st.stencil_ref < 0 { 0 } else { std::cmp::min(st.stencil_ref as u32, smax) };
-            if !sgi_soft_compare(
+            if !soft_compare(
                 st.stencil_func,
                 sref & vmask,
                 (t.load_stencil.unwrap())(t.opaque, x, y) & smax & vmask,
@@ -1139,7 +1139,7 @@ impl SGIRasterRules {
         }
         let zq = self.depth_code(z);
         if st.depth_test != 0 {
-            if !sgi_soft_compare(st.depth_func, zq, (t.load_depth.unwrap())(t.opaque, x, y)) {
+            if !soft_compare(st.depth_func, zq, (t.load_depth.unwrap())(t.opaque, x, y)) {
                 if stencil {
                     st.stencil_op(t, x, y, st.stencil_op[1], smax, sref);
                 }
@@ -1159,7 +1159,7 @@ impl SGIRasterRules {
 
 /// One blend factor (OpenGL 1.2.1, tables 4.1 and 4.2) for component k,
 /// red to alpha, from the source s, destination d and constant colour c.
-pub fn sgi_soft_blend_factor(factor: u32, k: usize, s: &[f64; 4], d: &[f64; 4], c: &[f32; 4]) -> f64 {
+pub fn soft_blend_factor(factor: u32, k: usize, s: &[f64; 4], d: &[f64; 4], c: &[f32; 4]) -> f64 {
     match factor {
         1 => 1.0,
         SGI_GL_SRC_COLOR => s[k],
@@ -1179,10 +1179,10 @@ pub fn sgi_soft_blend_factor(factor: u32, k: usize, s: &[f64; 4], d: &[f64; 4], 
     }
 }
 
-impl SGIGLDrawState {
+impl GlDrawState {
     pub fn blend_component(&self, k: usize, src: &[f64; 4], dst: &[f64; 4]) -> f64 {
-        let sf = sgi_soft_blend_factor(self.blend_src, k, src, dst, &self.blend_color);
-        let df = sgi_soft_blend_factor(self.blend_dst, k, src, dst, &self.blend_color);
+        let sf = soft_blend_factor(self.blend_src, k, src, dst, &self.blend_color);
+        let df = soft_blend_factor(self.blend_dst, k, src, dst, &self.blend_color);
 
         match self.blend_equation {
             SGI_GL_MIN => fmin(src[k], dst[k]),
@@ -1194,13 +1194,13 @@ impl SGIGLDrawState {
     }
 }
 
-impl SGIRasterRules {
+impl RasterRules {
     /// Blend the packed source colour src, with alpha alpha, and the packed
     /// destination dst (4.1.6), each component the fixed point of the rules'
     /// colour bits taken as a fraction of its largest value. The planes hold
     /// no alpha, so the destination's alpha is 1. The result is clamped to
     /// [0, 1] by the subsequent colour conversion.
-    pub fn soft_blend_rgb(&self, st: &SGIGLDrawState, src: u32, alpha: f64, dst: u32, out: &mut [f64; 3]) {
+    pub fn soft_blend_rgb(&self, st: &GlDrawState, src: u32, alpha: f64, dst: u32, out: &mut [f64; 3]) {
         let bits = self.color_bits as u32;
         let max: f64 = ((1u32 << bits) - 1) as f64;
         let mut s = [0.0f64; 4];
@@ -1219,7 +1219,7 @@ impl SGIRasterRules {
         }
     }
 
-    pub fn blend_rgb(&self, st: &SGIGLDrawState, src: u32, alpha: f64, dst: u32) -> u32 {
+    pub fn blend_rgb(&self, st: &GlDrawState, src: u32, alpha: f64, dst: u32) -> u32 {
         let mut out = [0.0f64; 3];
 
         let alpha = self.alpha(alpha) as f64 / self.alpha_max() as f64;
@@ -1228,7 +1228,7 @@ impl SGIRasterRules {
     }
 }
 
-impl SGISoftDraw {
+impl SoftDraw {
     pub fn blend(&self, x: i32, y: i32, src: u32, alpha: f64, dst: u32) -> u32 {
         let mut out = [0.0f64; 3];
 
@@ -1239,14 +1239,14 @@ impl SGISoftDraw {
 
 /// glLogicOp's operation (4.1.8, table 4.3) on the source s and the
 /// destination d, bit by bit.
-pub fn sgi_soft_logic_op(op: u32, s: u32, d: u32) -> u32 {
-    sgi_x_logic_op(op.wrapping_sub(SGI_GL_CLEAR), s, d)
+pub fn soft_logic_op(op: u32, s: u32, d: u32) -> u32 {
+    x_logic_op(op.wrapping_sub(SGI_GL_CLEAR), s, d)
 }
 
-impl SGIRasterRules {
+impl RasterRules {
     /// RGB retains its existing arithmetic; spatial alpha dithering is omitted.
-    pub fn rgba_value(&self, rgb: u32, alpha: f64) -> SGIRasterColour {
-        let mut c = SGIRasterColour::default();
+    pub fn rgba_value(&self, rgb: u32, alpha: f64) -> RasterColour {
+        let mut c = RasterColour::default();
         let max = (1u32 << self.color_bits) - 1;
 
         for k in 0..3usize {
@@ -1257,9 +1257,9 @@ impl SGIRasterRules {
     }
 }
 
-impl SGISoftDraw {
-    pub fn rgba_result(&self, x: i32, y: i32, frag: &SGISoftFrag, dest: &SGIRasterColour) -> SGIRasterColour {
-        let mut out = SGIRasterColour::default();
+impl SoftDraw {
+    pub fn rgba_result(&self, x: i32, y: i32, frag: &SoftFrag, dest: &RasterColour) -> RasterColour {
+        let mut out = RasterColour::default();
         let rules = &*self.rules;
         let max = (1u32 << rules.color_bits) - 1;
         let alpha_max = rules.alpha_max();
@@ -1268,7 +1268,7 @@ impl SGISoftDraw {
         let rgb = if self.blend { rules.rgb(&frag.rgba) } else { self.store_rgb(x, y, &frag.rgba) };
 
         if !self.blend && !self.logic_op && self.rgba_mask == rules.rgba_mask(SGI_GL_COLOUR_MASK_ALL) {
-            // sgi_soft_rgba_value()'s stored alpha, sgi_soft_alpha() of
+            // RasterRules::rgba_value()'s stored alpha, RasterRules::alpha() of
             // alpha_q / alpha_max scaled to the stored bits, without the round
             // trip: alpha_q / alpha_max * alpha_max + 0.5 truncates to alpha_q
             // for every alpha_q up to 1023.
@@ -1305,7 +1305,7 @@ impl SGISoftDraw {
             let bits = if k == 3 { rules.alpha_bits } else { rules.color_bits } as u32;
 
             if self.logic_op {
-                out.component[k] = sgi_soft_logic_op(self.st.logic_op_mode, out.component[k], dest.component[k])
+                out.component[k] = soft_logic_op(self.st.logic_op_mode, out.component[k], dest.component[k])
                     & (1u32.wrapping_shl(bits)).wrapping_sub(1);
             }
             if self.rgba_mask & (1u32 << k) == 0 {
@@ -1316,7 +1316,7 @@ impl SGISoftDraw {
     }
 }
 
-impl SGIRasterRules {
+impl RasterRules {
     /// The bits of a packed colour of the rules' colour bits that a
     /// glColorMask channel mask lets through. The planes hold no alpha, so
     /// its bit has no effect.
@@ -1338,7 +1338,7 @@ impl SGIRasterRules {
     }
 }
 
-impl SGISoftDraw {
+impl SoftDraw {
     /// Which of the operations that read the stored colour a draw state
     /// enables. The logical operation applies to a colour index while
     /// GL_INDEX_LOGIC_OP is enabled, and to an RGBA colour while
@@ -1387,7 +1387,7 @@ impl SGISoftDraw {
 
     /// Runtime errors are observable without logging once for every pixel.
     pub fn texture_report(&self, reason: u32, message: &str) {
-        // Bands of one draw share the reports (sgi_soft_bands_run()).
+        // Bands of one draw share the reports (soft_bands_run()).
         let rep = self.texture_reports.get();
         let old = *rep;
         *rep |= reason;
@@ -1397,20 +1397,20 @@ impl SGISoftDraw {
     }
 }
 
-pub fn sgi_soft_texture_format(format: u32) -> bool {
+pub fn soft_texture_format(format: u32) -> bool {
     format == SGI_GL_ALPHA || format == SGI_GL_LUMINANCE ||
         format == SGI_GL_LUMINANCE_ALPHA || format == SGI_GL_INTENSITY ||
         format == SGI_GL_RGB || format == SGI_GL_RGBA ||
         format == SGI_GL_DEPTH_COMPONENT
 }
 
-pub fn sgi_soft_texture_wrap(wrap: u32) -> bool {
+pub fn soft_texture_wrap(wrap: u32) -> bool {
     wrap == SGI_GL_REPEAT || wrap == SGI_GL_CLAMP ||
         wrap == SGI_GL_CLAMP_TO_EDGE || wrap == SGI_GL_CLAMP_TO_BORDER
 }
 
 /// OpenGL 1.2.1 table 3.16: exact identities remain distinct in a chain.
-pub fn sgi_soft_texture_internal_format(format: u32) -> u32 {
+pub fn soft_texture_internal_format(format: u32) -> u32 {
     match format {
         SGI_GL_DEPTH_COMPONENT16_SGIX | SGI_GL_DEPTH_COMPONENT24_SGIX | SGI_GL_DEPTH_COMPONENT32_SGIX => SGI_GL_DEPTH_COMPONENT,
         SGI_GL_ALPHA4 | SGI_GL_ALPHA8 | SGI_GL_ALPHA12 | SGI_GL_ALPHA16 => SGI_GL_ALPHA,
@@ -1420,30 +1420,30 @@ pub fn sgi_soft_texture_internal_format(format: u32) -> u32 {
         SGI_GL_INTENSITY4 | SGI_GL_INTENSITY8 | SGI_GL_INTENSITY12 | SGI_GL_INTENSITY16 => SGI_GL_INTENSITY,
         SGI_GL_R3_G3_B2 | SGI_GL_RGB4 | SGI_GL_RGB5 | SGI_GL_RGB8 | SGI_GL_RGB10 | SGI_GL_RGB12 | SGI_GL_RGB16 => SGI_GL_RGB,
         SGI_GL_RGBA2 | SGI_GL_RGBA4 | SGI_GL_RGB5_A1 | SGI_GL_RGBA8 | SGI_GL_RGB10_A2 | SGI_GL_RGBA12 | SGI_GL_RGBA16 => SGI_GL_RGBA,
-        _ => if sgi_soft_texture_format(format) { format } else { 0 },
+        _ => if soft_texture_format(format) { format } else { 0 },
     }
 }
 
-pub fn sgi_soft_texture_mipmap(filter: u32) -> bool {
+pub fn soft_texture_mipmap(filter: u32) -> bool {
     filter >= SGI_GL_NEAREST_MIPMAP_NEAREST && filter <= SGI_GL_LINEAR_MIPMAP_LINEAR
 }
 
-pub fn sgi_soft_texture_sharpen(filter: u32) -> bool {
+pub fn soft_texture_sharpen(filter: u32) -> bool {
     filter == SGI_GL_LINEAR_SHARPEN_SGIS || filter == SGI_GL_LINEAR_SHARPEN_ALPHA_SGIS ||
         filter == SGI_GL_LINEAR_SHARPEN_COLOR_SGIS
 }
 
-pub fn sgi_soft_texture_detail(filter: u32) -> bool {
+pub fn soft_texture_detail(filter: u32) -> bool {
     filter == SGI_GL_LINEAR_DETAIL_SGIS || filter == SGI_GL_LINEAR_DETAIL_ALPHA_SGIS ||
         filter == SGI_GL_LINEAR_DETAIL_COLOR_SGIS
 }
 
-pub fn sgi_soft_texture_dimensions(w: u32, h: u32) -> bool {
+pub fn soft_texture_dimensions(w: u32, h: u32) -> bool {
     w != 0 && h != 0 && w <= i32::MAX as u32 && h <= i32::MAX as u32 &&
         is_power_of_2(w as u64) && is_power_of_2(h as u64)
 }
 
-pub fn sgi_soft_texture_component_mask(format: u32) -> u8 {
+pub fn soft_texture_component_mask(format: u32) -> u8 {
     match format {
         SGI_GL_ALPHA => 1u8 << 3,
         SGI_GL_LUMINANCE | SGI_GL_INTENSITY => 1,
@@ -1454,8 +1454,8 @@ pub fn sgi_soft_texture_component_mask(format: u32) -> u8 {
     }
 }
 
-pub fn sgi_soft_texture_component_bits_valid(format: u32, bits: &[u8; 4]) -> bool {
-    let mask = sgi_soft_texture_component_mask(format);
+pub fn soft_texture_component_bits_valid(format: u32, bits: &[u8; 4]) -> bool {
+    let mask = soft_texture_component_mask(format);
 
     if mask == 0 {
         return false;
@@ -1468,13 +1468,13 @@ pub fn sgi_soft_texture_component_bits_valid(format: u32, bits: &[u8; 4]) -> boo
     true
 }
 
-impl SGIGLTexPyramid {
+impl GlTexPyramid {
     /// p->levels[i].
-    pub fn tex_level_at<'a>(&self, i: usize) -> &'a SGIGLTexLevel {
+    pub fn tex_level_at<'a>(&self, i: usize) -> &'a GlTexLevel {
         unsafe { &*self.levels.0.add(i) }
     }
 
-    pub fn soft_texture_level<'a>(&self, level: u32) -> Option<&'a SGIGLTexLevel> {
+    pub fn soft_texture_level<'a>(&self, level: u32) -> Option<&'a GlTexLevel> {
         for i in 0..self.count as usize {
             let l = self.tex_level_at(i);
             if l.level == level {
@@ -1485,8 +1485,8 @@ impl SGIGLTexPyramid {
     }
 }
 
-impl SGIGLTexImage {
-    pub fn soft_texture_border_supported(&self, level: Option<&SGIGLTexLevel>) -> bool {
+impl GlTexImage {
+    pub fn soft_texture_border_supported(&self, level: Option<&GlTexLevel>) -> bool {
         let border = match level { Some(l) => l.border, None => self.border };
         let callback = if self.volume {
             match level {
@@ -1514,15 +1514,15 @@ impl SGIGLTexImage {
         }
         // SGIX_depth_texture alone does not define a texture environment.
         format != SGI_GL_DEPTH_COMPONENT ||
-            (self.shadow_compare != 0 && !sgi_soft_texture_sharpen(self.mag_filter) &&
-             !sgi_soft_texture_detail(self.mag_filter))
+            (self.shadow_compare != 0 && !soft_texture_sharpen(self.mag_filter) &&
+             !soft_texture_detail(self.mag_filter))
     }
 }
 
-impl SGISoftDraw {
-    pub fn texture_pyramid(&mut self, im: &SGIGLTexImage, report: bool) -> bool {
+impl SoftDraw {
+    pub fn texture_pyramid(&mut self, im: &GlTexImage, report: bool) -> bool {
         let p = im.pyramid.get();
-        let mipmap = sgi_soft_texture_mipmap(im.min_filter);
+        let mipmap = soft_texture_mipmap(im.min_filter);
         let mut border_finite = true;
 
         #[derive(PartialEq)]
@@ -1534,16 +1534,16 @@ impl SGISoftDraw {
             if p.count > SGI_GL_TEX_LEVELS_MAX || (p.count != 0 && p.levels.is_null()) ||
                 !p.min_lod.is_finite() || !p.max_lod.is_finite() ||
                 p.min_lod > p.max_lod || !border_finite ||
-                !sgi_soft_texture_wrap(im.wrap_s) ||
-                (!im.one_dimensional && !sgi_soft_texture_wrap(im.wrap_t)) ||
-                (im.volume && !sgi_soft_texture_wrap(im.wrap_r)) ||
+                !soft_texture_wrap(im.wrap_s) ||
+                (!im.one_dimensional && !soft_texture_wrap(im.wrap_t)) ||
+                (im.volume && !soft_texture_wrap(im.wrap_r)) ||
                 (im.min_filter != SGI_GL_NEAREST && im.min_filter != SGI_GL_LINEAR && !mipmap) ||
-                (sgi_soft_texture_detail(im.mag_filter) && !im.detail_image.is_null() &&
+                (soft_texture_detail(im.mag_filter) && !im.detail_image.is_null() &&
                  (im.detail_image.read_texel_components.is_some() ||
                   im.detail_image.read_border_texel_components.is_some()) &&
-                 !sgi_soft_texture_component_bits_valid(im.detail_image.base_format, &im.detail_image.component_bits)) ||
+                 !soft_texture_component_bits_valid(im.detail_image.base_format, &im.detail_image.component_bits)) ||
                 (im.mag_filter != SGI_GL_NEAREST && im.mag_filter != SGI_GL_LINEAR &&
-                 !sgi_soft_texture_sharpen(im.mag_filter) && !sgi_soft_texture_detail(im.mag_filter))
+                 !soft_texture_sharpen(im.mag_filter) && !soft_texture_detail(im.mag_filter))
             {
                 return Out::Unsupported;
             }
@@ -1561,12 +1561,12 @@ impl SGISoftDraw {
             };
             if !im.soft_texture_shadow_supported(base.base_format) ||
                 !im.soft_texture_border_supported(Some(base)) ||
-                sgi_soft_texture_internal_format(base.internal_format) != base.base_format ||
-                !sgi_soft_texture_format(base.base_format) ||
+                soft_texture_internal_format(base.internal_format) != base.base_format ||
+                !soft_texture_format(base.base_format) ||
                 ((base.read_texel_components.is_some() || base.read_texel_3d_components.is_some() ||
                   base.read_border_texel_components.is_some() ||
                   base.read_border_texel_3d_components.is_some()) &&
-                 !sgi_soft_texture_component_bits_valid(base.base_format, &base.component_bits)) ||
+                 !soft_texture_component_bits_valid(base.base_format, &base.component_bits)) ||
                 (self.st.texture_env_mode == SGI_GL_DECAL &&
                  base.base_format != SGI_GL_RGB && base.base_format != SGI_GL_RGBA)
             {
@@ -1575,7 +1575,7 @@ impl SGISoftDraw {
             if im.one_dimensional && base.height != 1 {
                 return Out::Unsupported;
             }
-            if !sgi_soft_texture_dimensions(base.width, base.height) ||
+            if !soft_texture_dimensions(base.width, base.height) ||
                 (im.volume && (base.depth == 0 || base.depth > i32::MAX as u32 || !is_power_of_2(base.depth as u64)))
             {
                 return Out::Incomplete;
@@ -1604,12 +1604,12 @@ impl SGISoftDraw {
                     return Out::Unsupported;
                 }
                 if !im.soft_texture_border_supported(Some(&*l)) ||
-                    !sgi_soft_texture_format(l.base_format) ||
-                    sgi_soft_texture_internal_format(l.internal_format) != l.base_format ||
+                    !soft_texture_format(l.base_format) ||
+                    soft_texture_internal_format(l.internal_format) != l.base_format ||
                     ((l.read_texel_components.is_some() || l.read_texel_3d_components.is_some() ||
                       l.read_border_texel_components.is_some() ||
                       l.read_border_texel_3d_components.is_some()) &&
-                     !sgi_soft_texture_component_bits_valid(l.base_format, &l.component_bits))
+                     !soft_texture_component_bits_valid(l.base_format, &l.component_bits))
                 {
                     return Out::Unsupported;
                 }
@@ -1735,18 +1735,18 @@ impl SGISoftDraw {
             if !im.soft_texture_shadow_supported(im.base_format) ||
                 !im.soft_texture_border_supported(None) ||
                 !border_finite ||
-                !sgi_soft_texture_format(im.base_format) ||
+                !soft_texture_format(im.base_format) ||
                 ((im.read_texel_components.is_some() || im.read_texel_3d_components.is_some() ||
                   im.read_border_texel_components.is_some() ||
                   im.read_border_texel_3d_components.is_some()) &&
-                 !sgi_soft_texture_component_bits_valid(im.base_format, &im.component_bits)) ||
-                (sgi_soft_texture_detail(im.mag_filter) && !im.detail_image.is_null() &&
+                 !soft_texture_component_bits_valid(im.base_format, &im.component_bits)) ||
+                (soft_texture_detail(im.mag_filter) && !im.detail_image.is_null() &&
                  (im.detail_image.read_texel_components.is_some() ||
                   im.detail_image.read_border_texel_components.is_some()) &&
-                 !sgi_soft_texture_component_bits_valid(im.detail_image.base_format, &im.detail_image.component_bits)) ||
-                !sgi_soft_texture_wrap(im.wrap_s) ||
-                (!im.one_dimensional && !sgi_soft_texture_wrap(im.wrap_t)) ||
-                (im.volume && !sgi_soft_texture_wrap(im.wrap_r)) ||
+                 !soft_texture_component_bits_valid(im.detail_image.base_format, &im.detail_image.component_bits)) ||
+                !soft_texture_wrap(im.wrap_s) ||
+                (!im.one_dimensional && !soft_texture_wrap(im.wrap_t)) ||
+                (im.volume && !soft_texture_wrap(im.wrap_r)) ||
                 im.min_filter != im.mag_filter ||
                 (im.min_filter != SGI_GL_NEAREST && im.min_filter != SGI_GL_LINEAR) ||
                 (st.texture_env_mode == SGI_GL_DECAL && im.base_format != SGI_GL_RGB && im.base_format != SGI_GL_RGBA)
@@ -1787,11 +1787,11 @@ impl SGISoftDraw {
     }
 }
 
-impl SGIGLTexImage {
+impl GlTexImage {
     /// Whether a clipped vertex has a clip w and the texture coordinates im
     /// uses: s and q always, t unless the image is one-dimensional, and r for
     /// a shadow comparison against a depth image.
-    pub fn soft_texcoord_valid(&self, base: Option<&SGIGLTexLevel>, v: &SGIVolumeVertex) -> bool {
+    pub fn soft_texcoord_valid(&self, base: Option<&GlTexLevel>, v: &VolumeVertex) -> bool {
         let mut valid = v.clip[3].is_finite() && v.clip[3] > 0.0 && v.attr[SGI_GL_V_TEXCOORD + 3] > 0.0;
 
         for k in 0..4usize {
@@ -1806,8 +1806,8 @@ impl SGIGLTexImage {
     }
 }
 
-impl SGISoftDraw {
-    pub fn texture_vertex_valid(&self, v: &SGIVolumeVertex) -> bool {
+impl SoftDraw {
+    pub fn texture_vertex_valid(&self, v: &VolumeVertex) -> bool {
         if self.texture.is_null() {
             return true;
         }
@@ -1820,7 +1820,7 @@ impl SGISoftDraw {
 }
 
 /// Meaningful base components, including the border, before filtering.
-pub fn sgi_soft_texture_components(format: u32, v: &mut [f64; 4]) {
+pub fn soft_texture_components(format: u32, v: &mut [f64; 4]) {
     match format {
         SGI_GL_ALPHA => {
             v[0] = 1.0;
@@ -1848,7 +1848,7 @@ pub fn sgi_soft_texture_components(format: u32, v: &mut [f64; 4]) {
     }
 }
 
-impl SGIGLTexImage {
+impl GlTexImage {
     pub fn soft_texture_shadow(&self, depth: f64, reference: f64, out: &mut [f64; 4]) {
         let pass = if self.shadow_compare == SGI_GL_TEXTURE_LEQUAL_R_SGIX { depth <= reference } else { depth >= reference };
 
@@ -1863,7 +1863,7 @@ impl SGIGLTexImage {
 /// GL_REPEAT's wrap of a texel index into [0, n). Image and level sizes are
 /// powers of two wherever setup admits them, and there the mask gives the
 /// remainder without two 64-bit divisions a tap.
-pub fn sgi_soft_texture_repeat(i: i64, n: u32) -> i64 {
+pub fn soft_texture_repeat(i: i64, n: u32) -> i64 {
     if is_power_of_2(n as u64) {
         i & (n as i64 - 1)
     } else {
@@ -1872,7 +1872,7 @@ pub fn sgi_soft_texture_repeat(i: i64, n: u32) -> i64 {
 }
 
 /// An 8-bit channel normalized, k / 255.0 for each byte k.
-pub fn sgi_soft_unorm8(k: u32) -> f64 {
+pub fn soft_unorm8(k: u32) -> f64 {
     k as f64 / 255.0
 }
 
@@ -1882,9 +1882,9 @@ pub const SGI_SOFT_FIXED_FAILED: u32 = 0x80000000;
 
 /// The fixed-point sampler's texels of one level for one draw, by interior
 /// index: each the read tag in the high word and the packed RGBA8 texel,
-/// components expanded, in the low (sgi_soft_fixed_texel()).
+/// components expanded, in the low (SoftDraw::fixed_texel()).
 #[derive(Clone, Default)]
-pub struct SGISoftFixedStore {
+pub struct SoftFixedStore {
     pub cell: Vec<u64>,
     pub size: usize,
     pub plain: Vec<u64>,
@@ -1892,7 +1892,7 @@ pub struct SGISoftFixedStore {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct SGISoftTexelEntry {
+pub struct SoftTexelEntry {
     pub serial: u64,
     /// the level's address, 0 for the image itself
     pub level: usize,
@@ -1904,38 +1904,38 @@ pub struct SGISoftTexelEntry {
 
 /// The texels one draw has read, by level and interior index, after
 /// conversion to components in [0, 1]. A family's image stays unchanged
-/// through a synchronous draw (SGIGLTexImage), so a texel read twice in one
+/// through a synchronous draw (GlTexImage), so a texel read twice in one
 /// draw reads the same both times. A draw starts by taking a new serial,
 /// which empties the table without clearing it. Border texels, depth
 /// texels and failed reads always go to the family.
-pub struct SGISoftTexelCache {
+pub struct SoftTexelCache {
     pub serial: u64,
-    pub image: P<SGIGLTexImage>,
+    pub image: P<GlTexImage>,
     /// Set for a fragment that minifies by more than two texels a pixel
     /// without mipmaps.
     pub bypass: bool,
     pub tag: u32,
-    pub fixed: Vec<SGISoftFixedStore>,
-    pub entry: Vec<SGISoftTexelEntry>,
+    pub fixed: Vec<SoftFixedStore>,
+    pub entry: Vec<SoftTexelEntry>,
 }
 
 thread_local! {
-    pub static sgi_soft_texel_cache: std::cell::RefCell<Option<Box<SGISoftTexelCache>>> =
+    pub static sgi_soft_texel_cache: std::cell::RefCell<Option<Box<SoftTexelCache>>> =
         const { std::cell::RefCell::new(None) };
 }
 
-impl SGIGLTexImage {
-    pub fn soft_texel_cache_begin(&self) -> P<SGISoftTexelCache> {
+impl GlTexImage {
+    pub fn soft_texel_cache_begin(&self) -> P<SoftTexelCache> {
         sgi_soft_texel_cache.with(|cell| {
             let mut slot = cell.borrow_mut();
             if slot.is_none() {
-                *slot = Some(Box::new(SGISoftTexelCache {
+                *slot = Some(Box::new(SoftTexelCache {
                     serial: 0,
                     image: P::null(),
                     bypass: false,
                     tag: 0,
-                    fixed: vec![SGISoftFixedStore::default(); SGI_SOFT_FIXED_LEVELS],
-                    entry: vec![SGISoftTexelEntry::default(); SGI_SOFT_TEXEL_CACHE_SIZE],
+                    fixed: vec![SoftFixedStore::default(); SGI_SOFT_FIXED_LEVELS],
+                    entry: vec![SoftTexelEntry::default(); SGI_SOFT_TEXEL_CACHE_SIZE],
                 }));
             }
             let c = slot.as_mut().unwrap();
@@ -1958,7 +1958,7 @@ impl SGIGLTexImage {
     }
 }
 
-impl SGISoftTexelCache {
+impl SoftTexelCache {
     pub fn texel_slot(&self, level: usize, x: u32, y: u32, z: u32) -> usize {
         let hash: u32 = x.wrapping_mul(0x9e3779b1)
             ^ y.wrapping_mul(0x85ebca77)
@@ -1969,10 +1969,10 @@ impl SGISoftTexelCache {
     }
 }
 
-impl SGISoftDraw {
+impl SoftDraw {
     /// None is the C's read_failure exit.
-    pub fn texture_tap_inner(&self, level: Option<&SGIGLTexLevel>, mut x: i64, mut y: i64, mut z: i64, reference: f64, out: &mut [f64; 4]) -> Option<bool> {
-        let im: &SGIGLTexImage = &self.texture;
+    pub fn texture_tap_inner(&self, level: Option<&GlTexLevel>, mut x: i64, mut y: i64, mut z: i64, reference: f64, out: &mut [f64; 4]) -> Option<bool> {
+        let im: &GlTexImage = &self.texture;
         let width = level.map_or(im.width, |l| l.width);
         let height = level.map_or(im.height, |l| l.height);
         let depth = if im.volume { level.map_or(im.depth, |l| l.depth) } else { 1 };
@@ -1981,16 +1981,16 @@ impl SGISoftDraw {
         let mut component = [0u16; 4];
         let raw_components: bool;
         let mut slot: Option<usize> = None;
-        let level_addr = level.map_or(0usize, |l| l as *const SGIGLTexLevel as usize);
+        let level_addr = level.map_or(0usize, |l| l as *const GlTexLevel as usize);
 
         if im.wrap_s == SGI_GL_REPEAT {
-            x = sgi_soft_texture_repeat(x, width);
+            x = soft_texture_repeat(x, width);
         }
         if !im.one_dimensional && im.wrap_t == SGI_GL_REPEAT {
-            y = sgi_soft_texture_repeat(y, height);
+            y = soft_texture_repeat(y, height);
         }
         if im.volume && im.wrap_r == SGI_GL_REPEAT {
-            z = sgi_soft_texture_repeat(z, depth);
+            z = soft_texture_repeat(z, depth);
         }
         if x < 0 || y < 0 || z < 0 || x >= width as i64 || y >= height as i64 || z >= depth as i64 {
             let border = level.map_or(im.border, |l| l.border);
@@ -2003,7 +2003,7 @@ impl SGISoftDraw {
                     let o0 = out[0];
                     im.soft_texture_shadow(o0, reference, out);
                 } else {
-                    sgi_soft_texture_components(format, out);
+                    soft_texture_components(format, out);
                 }
                 return Some(true);
             }
@@ -2146,9 +2146,9 @@ impl SGISoftDraw {
         }
         if raw_components {
             let bits = level.map_or(&im.component_bits, |l| &l.component_bits);
-            let mask = sgi_soft_texture_component_mask(format);
+            let mask = soft_texture_component_mask(format);
 
-            if !sgi_soft_texture_component_bits_valid(format, bits) {
+            if !soft_texture_component_bits_valid(format, bits) {
                 return None;
             }
             for k in 0..4usize {
@@ -2164,13 +2164,13 @@ impl SGISoftDraw {
             }
         } else {
             for k in 0..4u32 {
-                out[k as usize] = sgi_soft_unorm8((rgba >> (24 - k * 8)) & 255);
+                out[k as usize] = soft_unorm8((rgba >> (24 - k * 8)) & 255);
             }
         }
-        sgi_soft_texture_components(format, out);
+        soft_texture_components(format, out);
         if let Some(idx) = slot {
             let c = self.texels.get();
-            c.entry[idx] = SGISoftTexelEntry {
+            c.entry[idx] = SoftTexelEntry {
                 serial: c.serial,
                 level: level_addr,
                 x: x as u32,
@@ -2182,7 +2182,7 @@ impl SGISoftDraw {
         Some(true)
     }
 
-    pub fn texture_tap(&self, level: Option<&SGIGLTexLevel>, x: i64, y: i64, z: i64, reference: f64, out: &mut [f64; 4]) -> bool {
+    pub fn texture_tap(&self, level: Option<&GlTexLevel>, x: i64, y: i64, z: i64, reference: f64, out: &mut [f64; 4]) -> bool {
         match self.texture_tap_inner(level, x, y, z, reference, out) {
             Some(b) => b,
             None => {
@@ -2194,7 +2194,7 @@ impl SGISoftDraw {
 }
 
 /// Reduce finite coordinates before any float-to-integer conversion.
-pub fn sgi_soft_texture_axis(x: f64, n: u32, wrap: u32, upper: f64) -> f64 {
+pub fn soft_texture_axis(x: f64, n: u32, wrap: u32, upper: f64) -> f64 {
     let half = 0.5 / n as f64;
 
     match wrap {
@@ -2205,10 +2205,10 @@ pub fn sgi_soft_texture_axis(x: f64, n: u32, wrap: u32, upper: f64) -> f64 {
     }
 }
 
-impl SGISoftDraw {
+impl SoftDraw {
     /// Sampling always reduces coordinates before any integer conversion.
-    pub fn texture_sample(&self, level: Option<&SGIGLTexLevel>, filter: u32, s: f64, t: f64, rr: f64, texel: &mut [f64; 4]) -> bool {
-        let im: &SGIGLTexImage = &self.texture;
+    pub fn texture_sample(&self, level: Option<&GlTexLevel>, filter: u32, s: f64, t: f64, rr: f64, texel: &mut [f64; 4]) -> bool {
+        let im: &GlTexImage = &self.texture;
         let width = level.map_or(im.width, |l| l.width);
         let height = level.map_or(im.height, |l| l.height);
         let depth = if im.volume { level.map_or(im.depth, |l| l.depth) } else { 1 };
@@ -2217,14 +2217,14 @@ impl SGISoftDraw {
         let mut rr = rr;
 
         *texel = [0.0; 4];
-        let s = sgi_soft_texture_axis(s, width, im.wrap_s, if im.max_clamp { im.max_clamp_s } else { 1.0 });
+        let s = soft_texture_axis(s, width, im.wrap_s, if im.max_clamp { im.max_clamp_s } else { 1.0 });
         let t = if im.one_dimensional {
             0.0
         } else {
-            sgi_soft_texture_axis(t, height, im.wrap_t, if im.max_clamp { im.max_clamp_t } else { 1.0 })
+            soft_texture_axis(t, height, im.wrap_t, if im.max_clamp { im.max_clamp_t } else { 1.0 })
         };
         if im.volume {
-            rr = sgi_soft_texture_axis(rr, depth, im.wrap_r, if im.max_clamp { im.max_clamp_r } else { 1.0 });
+            rr = soft_texture_axis(rr, depth, im.wrap_r, if im.max_clamp { im.max_clamp_r } else { 1.0 });
         }
         if filter == SGI_GL_NEAREST {
             let mut x = (width as f64 * s).floor() as i64;
@@ -2276,7 +2276,7 @@ impl SGISoftDraw {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct SGISoftTexSelection {
+pub struct SoftTexSelection {
     pub first: u32,
     pub second: u32,
     pub filter: u32,
@@ -2285,8 +2285,8 @@ pub struct SGISoftTexSelection {
 }
 
 /// Relative levels avoid rounding a large absolute base in floating point.
-pub fn sgi_soft_texture_select(min: u32, mag: u32, p: &SGIGLTexPyramid, last: u32, rho: f64, out: &mut SGISoftTexSelection) -> bool {
-    let enhanced = sgi_soft_texture_sharpen(mag) || sgi_soft_texture_detail(mag);
+pub fn soft_texture_select(min: u32, mag: u32, p: &GlTexPyramid, last: u32, rho: f64, out: &mut SoftTexSelection) -> bool {
+    let enhanced = soft_texture_sharpen(mag) || soft_texture_detail(mag);
     let c: f64 = if enhanced {
         if min == SGI_GL_NEAREST_MIPMAP_NEAREST || min == SGI_GL_LINEAR_MIPMAP_NEAREST { 0.5 } else { 0.0 }
     } else if mag == SGI_GL_LINEAR && (min == SGI_GL_NEAREST_MIPMAP_NEAREST || min == SGI_GL_NEAREST_MIPMAP_LINEAR) {
@@ -2304,14 +2304,14 @@ pub fn sgi_soft_texture_select(min: u32, mag: u32, p: &SGIGLTexPyramid, last: u3
         return false;
     }
     lambda = fmin(fmax(lambda, p.min_lod), p.max_lod);
-    *out = SGISoftTexSelection {
+    *out = SoftTexSelection {
         first: p.base_level,
         second: p.base_level,
         filter: if lambda <= c { mag } else { min },
         alpha: 0.0,
         lambda,
     };
-    if lambda <= c || !sgi_soft_texture_mipmap(min) {
+    if lambda <= c || !soft_texture_mipmap(min) {
         return true;
     }
     out.filter = if min == SGI_GL_NEAREST_MIPMAP_NEAREST || min == SGI_GL_NEAREST_MIPMAP_LINEAR {
@@ -2345,11 +2345,11 @@ pub fn sgi_soft_texture_select(min: u32, mag: u32, p: &SGIGLTexPyramid, last: u3
 }
 
 /// Projective gradients precede wrapping; D is Q/W, not geometry W.
-pub fn sgi_soft_texture_lod_scale(scale: f64) -> f64 {
+pub fn soft_texture_lod_scale(scale: f64) -> f64 {
     if scale != 0.0 { scale } else { 1.0 }
 }
 
-pub fn sgi_soft_texture_derivatives(
+pub fn soft_texture_derivatives(
     value: &[f64; 4],
     dx: &[f64; 4],
     dy: &[f64; 4],
@@ -2390,24 +2390,24 @@ pub fn sgi_soft_texture_derivatives(
 /// The last level selection a thread's draw made, by the footprint it was
 /// made for.
 #[derive(Clone, Copy, Default)]
-pub struct SGISoftTexSelectionMemo {
+pub struct SoftTexSelectionMemo {
     pub serial: u64,
     pub rho: u64,
-    pub selected: SGISoftTexSelection,
+    pub selected: SoftTexSelection,
 }
 
 thread_local! {
-    pub static sgi_soft_texture_selected: std::cell::Cell<SGISoftTexSelectionMemo> =
-        std::cell::Cell::new(SGISoftTexSelectionMemo {
+    pub static sgi_soft_texture_selected: std::cell::Cell<SoftTexSelectionMemo> =
+        std::cell::Cell::new(SoftTexSelectionMemo {
             serial: 0,
             rho: 0,
-            selected: SGISoftTexSelection { first: 0, second: 0, filter: 0, alpha: 0.0, lambda: 0.0 },
+            selected: SoftTexSelection { first: 0, second: 0, filter: 0, alpha: 0.0, lambda: 0.0 },
         });
 }
 
-impl SGISoftDraw {
-    pub fn texture_select_memo(&self, rho: f64, out: &mut SGISoftTexSelection) -> bool {
-        let im: &SGIGLTexImage = &self.texture;
+impl SoftDraw {
+    pub fn texture_select_memo(&self, rho: f64, out: &mut SoftTexSelection) -> bool {
+        let im: &GlTexImage = &self.texture;
         let memo = !self.texels.is_null() && self.texels.image == P::from_ref(im);
         let bits = rho.to_bits();
 
@@ -2418,27 +2418,27 @@ impl SGISoftDraw {
                 return true;
             }
         }
-        if !sgi_soft_texture_select(im.min_filter, im.mag_filter, &im.pyramid, self.texture_last, rho, out) {
+        if !soft_texture_select(im.min_filter, im.mag_filter, &im.pyramid, self.texture_last, rho, out) {
             return false;
         }
         if memo {
             sgi_soft_texture_selected.with(|c| {
-                c.set(SGISoftTexSelectionMemo { serial: self.texels.serial, rho: bits, selected: *out })
+                c.set(SoftTexSelectionMemo { serial: self.texels.serial, rho: bits, selected: *out })
             });
         }
         true
     }
 }
 
-pub fn sgi_soft_texture_mix(value: &mut [f64; 4], other: &[f64; 4], alpha: f64) {
+pub fn soft_texture_mix(value: &mut [f64; 4], other: &[f64; 4], alpha: f64) {
     for k in 0..4usize {
         value[k] = (1.0 - alpha) * value[k] + alpha * other[k];
     }
 }
 
-impl SGISoftDraw {
+impl SoftDraw {
     pub fn texture_weight(&self, lambda: f64, weight: &mut f64) -> bool {
-        let im: &SGIGLTexImage = &self.texture;
+        let im: &GlTexImage = &self.texture;
 
         *weight = fmin(fmax(-lambda / 4.0, 0.0), 1.0);
         if let Some(f) = im.read_filter_weight {
@@ -2451,9 +2451,9 @@ impl SGISoftDraw {
     }
 
     pub fn texture_sharpen_sample(&self, filter: u32, lambda: f64, s: f64, t: f64, rr: f64, texel: &mut [f64; 4]) -> bool {
-        let im: &SGIGLTexImage = &self.texture;
-        let p: &SGIGLTexPyramid = &im.pyramid;
-        let base: &SGIGLTexLevel = &self.texture_base;
+        let im: &GlTexImage = &self.texture;
+        let p: &GlTexPyramid = &im.pyramid;
+        let base: &GlTexLevel = &self.texture_base;
         let mut extent = std::cmp::max(base.width, base.height);
         let mut other = [0.0f64; 4];
         let mut weight = 0.0f64;
@@ -2512,12 +2512,12 @@ pub fn scalbn(x: f64, n: i32) -> f64 {
     x * 2f64.powi(n)
 }
 
-impl SGISoftDraw {
+impl SoftDraw {
     pub fn texture_detail_sample(&self, filter: u32, lambda: f64, s: f64, t: f64, rr: f64, texel: &mut [f64; 4]) -> bool {
-        let im: &SGIGLTexImage = &self.texture;
-        let base: &SGIGLTexLevel = &self.texture_base;
-        let mut repeat: SGIGLTexImage = im.clone();
-        let mut draw: SGISoftDraw = *self;
+        let im: &GlTexImage = &self.texture;
+        let base: &GlTexLevel = &self.texture_base;
+        let mut repeat: GlTexImage = im.clone();
+        let mut draw: SoftDraw = *self;
         let mut other = [0.0f64; 4];
         let mut weight = 0.0f64;
         let scale: i32 = std::cmp::min(-(im.detail_level as i64), i32::MAX as i64) as i32;
@@ -2529,7 +2529,7 @@ impl SGISoftDraw {
             Some(d) if !(im.one_dimensional || im.volume || im.pyramid.base_level != 0 ||
                 d.level != 0 || d.border != 0 ||
                 !(d.read_texel.is_some() || d.read_texel_components.is_some()) ||
-                !sgi_soft_texture_dimensions(d.width, d.height) ||
+                !soft_texture_dimensions(d.width, d.height) ||
                 d.internal_format != base.internal_format ||
                 d.base_format != base.base_format || im.detail_level > 0) => d,
             _ => return true,
@@ -2576,7 +2576,7 @@ impl SGISoftDraw {
     /// for an image of base format format (OpenGL 1.2.1, 3.8.9).
     #[inline(always)]
     pub fn texture_apply(&self, format: u32, env: u32, texel: &mut [f64; 4], rgba: &mut [f64; 4]) {
-        let im: &SGIGLTexImage = &self.texture;
+        let im: &GlTexImage = &self.texture;
         let mut format = format;
 
         if let Some(f) = im.post_filter {
@@ -2618,9 +2618,9 @@ impl SGISoftDraw {
         }
     }
 
-    pub fn texture(&self, frag: &mut SGISoftFrag) -> bool {
-        let im: &SGIGLTexImage = &self.texture;
-        let st: &SGIGLDrawState = &self.st;
+    pub fn texture(&self, frag: &mut SoftFrag) -> bool {
+        let im: &GlTexImage = &self.texture;
+        let st: &GlDrawState = &self.st;
         let base = self.texture_base.as_opt().map(|b| &*b);
         let format = base.map_or(im.base_format, |b| b.base_format);
         let mut texel = [0.0f64; 4];
@@ -2643,7 +2643,7 @@ impl SGISoftDraw {
             return false;
         }
         if let Some(base) = base {
-            let mut selected = SGISoftTexSelection::default();
+            let mut selected = SoftTexSelection::default();
             let mut other = [0.0f64; 4];
 
             if !self.texture_select_memo(frag.texture_rho, &mut selected) {
@@ -2652,13 +2652,13 @@ impl SGISoftDraw {
             }
             let mut level = im.pyramid.soft_texture_level(selected.first);
             if !self.texels.is_null() {
-                self.texels.get().bypass = selected.lambda > 1.0 && !sgi_soft_texture_mipmap(im.min_filter);
+                self.texels.get().bypass = selected.lambda > 1.0 && !soft_texture_mipmap(im.min_filter);
             }
-            if sgi_soft_texture_sharpen(selected.filter) {
+            if soft_texture_sharpen(selected.filter) {
                 if !self.texture_sharpen_sample(selected.filter, selected.lambda, s, t, rr, &mut texel) {
                     return false;
                 }
-            } else if sgi_soft_texture_detail(selected.filter) {
+            } else if soft_texture_detail(selected.filter) {
                 if !self.texture_detail_sample(selected.filter, selected.lambda, s, t, rr, &mut texel) {
                     return false;
                 }
@@ -2670,7 +2670,7 @@ impl SGISoftDraw {
                 if !self.texture_sample(level, selected.filter, s, t, rr, &mut other) {
                     return false;
                 }
-                sgi_soft_texture_mix(&mut texel, &other, selected.alpha);
+                soft_texture_mix(&mut texel, &other, selected.alpha);
             }
             let _ = base;
         } else if !self.texture_sample(None, im.min_filter, s, t, rr, &mut texel) {
@@ -2680,7 +2680,7 @@ impl SGISoftDraw {
         true
     }
 
-    pub fn raster_texture_check_draw(&mut self, report: bool) -> SGIRasterTextureResult {
+    pub fn raster_texture_check_draw(&mut self, report: bool) -> RasterTextureResult {
         let state = self.st.get();
 
         if self.st.is_null() || !self.texture_setup(report) {
@@ -2696,12 +2696,12 @@ impl SGISoftDraw {
     }
 }
 
-impl SGIGLDrawState {
-    pub fn texture_check(&self, texture: &SGIGLTexImage) -> SGIRasterTextureResult {
-        let mut target = SGIRasterTarget::default();
+impl GlDrawState {
+    pub fn texture_check(&self, texture: &GlTexImage) -> RasterTextureResult {
+        let mut target = RasterTarget::default();
         let mut reports: u32 = 0;
         target.texture = P::from_ref(texture);
-        let mut draw = SGISoftDraw::default();
+        let mut draw = SoftDraw::default();
         draw.t = P::new(&mut target);
         draw.st = P::from_ref(self);
         draw.texture_reports = P::new(&mut reports);
@@ -2709,11 +2709,11 @@ impl SGIGLDrawState {
         draw.raster_texture_check_draw(false)
     }
 
-    pub fn texture_prepare(&self, texture: &SGIGLTexImage, out: &mut Option<Box<SGIRasterTexture>>) -> SGIRasterTextureResult {
-        let mut target = SGIRasterTarget::default();
+    pub fn texture_prepare(&self, texture: &GlTexImage, out: &mut Option<Box<RasterTexture>>) -> RasterTextureResult {
+        let mut target = RasterTarget::default();
         let mut reports: u32 = 0;
         target.texture = P::from_ref(texture);
-        let mut draw = SGISoftDraw::default();
+        let mut draw = SoftDraw::default();
         draw.t = P::new(&mut target);
         draw.st = P::from_ref(self);
         draw.texture_reports = P::new(&mut reports);
@@ -2723,8 +2723,8 @@ impl SGIGLDrawState {
         if result != SGI_RASTER_TEXTURE_READY {
             return result;
         }
-        let mut sampler = Box::new(SGIRasterTexture {
-            target: SGIRasterTarget::default(),
+        let mut sampler = Box::new(RasterTexture {
+            target: RasterTarget::default(),
             draw,
             reports: 0,
         });
@@ -2736,14 +2736,14 @@ impl SGIGLDrawState {
     }
 }
 
-impl SGIRasterTexture {
+impl RasterTexture {
     /// Stop the sampler's reports.
     pub fn quiet(&mut self) {
         self.reports = u32::MAX;
     }
 
     pub fn fragment(&mut self, coord: &[f64; 4], color: &mut [f64; 4]) -> bool {
-        let mut frag = SGISoftFrag::default();
+        let mut frag = SoftFrag::default();
 
         frag.texcoord = *coord;
         frag.rgba = *color;
@@ -2755,16 +2755,16 @@ impl SGIRasterTexture {
     }
 }
 
-impl SGIGLDrawState {
-    pub fn texture_apply_pixel(&self, texture: &SGIGLTexImage, coord: &[f32; 4], color: &[f32; 4], out: &mut [f32; 4]) -> bool {
+impl GlDrawState {
+    pub fn texture_apply_pixel(&self, texture: &GlTexImage, coord: &[f32; 4], color: &[f32; 4], out: &mut [f32; 4]) -> bool {
         let mut reports: u32 = 0;
-        let mut target = SGIRasterTarget::default();
+        let mut target = RasterTarget::default();
         target.texture = P::from_ref(texture);
-        let mut r = SGISoftDraw::default();
+        let mut r = SoftDraw::default();
         r.t = P::new(&mut target);
         r.st = P::from_ref(self);
         r.texture_reports = P::new(&mut reports);
-        let mut frag = SGISoftFrag::default();
+        let mut frag = SoftFrag::default();
 
         if !r.texture_setup(true) || r.texture.is_null() {
             return false;
@@ -2783,7 +2783,7 @@ impl SGIGLDrawState {
     }
 }
 
-impl SGISoftDraw {
+impl SoftDraw {
     /// Fog (3.10): the fog factor f from the fragment's fog coordinate c by
     /// the mode, clamped to [0, 1], blends an RGBA fragment's red, green and
     /// blue toward the fog colour, f C + (1 - f) Cf, and adds (1 - f) times
@@ -2791,8 +2791,8 @@ impl SGISoftDraw {
     /// f from the window depth and fog coordinate instead. GL_LINEAR with start
     /// equal to end divides by zero; the model takes f as 1 before the end and
     /// 0 from it, the limit of the equation from either side.
-    pub fn fog(&self, frag: &mut SGISoftFrag, z: f64) {
-        let st: &SGIGLDrawState = &self.st;
+    pub fn fog(&self, frag: &mut SoftFrag, z: f64) {
+        let st: &GlDrawState = &self.st;
         let c = frag.fog;
         let mut f: f64;
         let dens = st.fog_density as f64;
@@ -2822,7 +2822,7 @@ impl SGISoftDraw {
     }
 }
 
-impl SGIGLDrawState {
+impl GlDrawState {
     /// Whether a point whose client clip plane values are d lies outside an
     /// enabled plane (2.11).
     pub fn clipped(&self, d: &[f64]) -> bool {
@@ -2835,16 +2835,16 @@ impl SGIGLDrawState {
     }
 }
 
-impl SGISoftDraw {
+impl SoftDraw {
     /// A fragment's colour value from an interpolated or flat index.
     pub fn soft_index(&self, index: f64) -> u32 {
-        sgi_gl_index_value(self.st.index_bits, index)
+        gl_index_value(self.st.index_bits, index)
     }
 
     pub fn owned_at(&self, px: i32, py: i32) -> bool {
         let x = self.win.ox.wrapping_add(px);
         let y = self.win.oy.wrapping_add(py);
-        let st: &SGIGLDrawState = &self.st;
+        let st: &GlDrawState = &self.st;
 
         (self.win.clip.n <= 1 || self.win.clip.contains(x, y)) &&
             (st.scissor_test == 0 ||
@@ -2859,9 +2859,9 @@ impl SGISoftDraw {
     /// by the logical operation with what is there, dithered and masked, from
     /// dest in RGBA mode, which the caller has read where the draw reads it.
     #[inline(always)]
-    pub fn fragment_store(&self, x: i32, y: i32, f: &SGISoftFrag, dest: &[SGIRasterColour; SGI_GL_MAX_TARGETS as usize]) {
-        let t: &SGIRasterTarget = &self.t;
-        let st: &SGIGLDrawState = &self.st;
+    pub fn fragment_store(&self, x: i32, y: i32, f: &SoftFrag, dest: &[RasterColour; SGI_GL_MAX_TARGETS as usize]) {
+        let t: &RasterTarget = &self.t;
+        let st: &GlDrawState = &self.st;
 
         if st.index_bits == 0 && t.store_rgba.is_some() {
             let mut i = 0;
@@ -2888,7 +2888,7 @@ impl SGISoftDraw {
             if self.logic_op {
                 let bits: u32 = if st.index_bits != 0 { st.index_bits } else { 3 * self.rules.color_bits as u32 };
 
-                out = sgi_soft_logic_op(
+                out = soft_logic_op(
                     st.logic_op_mode,
                     colour,
                     (t.load_colour.unwrap())(t.opaque, self.targets[i], x, y),
@@ -2917,13 +2917,13 @@ impl SGISoftDraw {
         }
     }
 
-    pub fn fragment_at(&self, px: i32, py: i32, z: f64, frag: &SGISoftFrag, coverage: f64, antialias: bool) {
-        let t: &SGIRasterTarget = &self.t;
-        let st: &SGIGLDrawState = &self.st;
+    pub fn fragment_at(&self, px: i32, py: i32, z: f64, frag: &SoftFrag, coverage: f64, antialias: bool) {
+        let t: &RasterTarget = &self.t;
+        let st: &GlDrawState = &self.st;
         let mut fogged = *frag;
         let x = self.win.ox.wrapping_add(px);
         let y = self.win.oy.wrapping_add(py);
-        let mut dest = [SGIRasterColour::default(); SGI_GL_MAX_TARGETS as usize];
+        let mut dest = [RasterColour::default(); SGI_GL_MAX_TARGETS as usize];
 
         if !(z >= 0.0 && z <= 1.0) {
             return;
@@ -2974,7 +2974,7 @@ impl SGISoftDraw {
     }
 }
 
-impl SGIGLDrawState {
+impl GlDrawState {
     /// The depth range [n, f] normalized depth is mapped through (2.10.1): the
     /// draw state's, or [0, 1] under a window matrix, whose depth is already
     /// window depth.
@@ -2997,12 +2997,12 @@ impl SGIGLDrawState {
     }
 }
 
-impl SGISoftDraw {
+impl SoftDraw {
     /// The window pixels a primitive's fragments may fall on, inclusive: the
     /// bounds of those the window owns, within the viewport unless a window
     /// matrix replaces it. False when there are none.
     pub fn bounds(&self, x0: &mut i32, y0: &mut i32, x1: &mut i32, y1: &mut i32) -> bool {
-        let st: &SGIGLDrawState = &self.st;
+        let st: &GlDrawState = &self.st;
         let win = &self.win;
         let vx = st.viewport[0];
         let vy = st.viewport[1];
@@ -3028,7 +3028,7 @@ impl SGISoftDraw {
 
     /// Whether a polygon fragment at (px, py) is drawn under the polygon
     /// stipple, and in *background whether it takes the target's opaque
-    /// stipple background (SGIRasterTarget's stipple_opaque).
+    /// stipple background (RasterTarget's stipple_opaque).
     pub fn stipple_pass(&self, px: i32, py: i32, background: &mut bool) -> bool {
         *background = false;
         if self.polygon_stipple.is_null() ||
@@ -3040,7 +3040,7 @@ impl SGISoftDraw {
         *background
     }
 
-    pub fn stipple_background(&self, frag: &mut SGISoftFrag) {
+    pub fn stipple_background(&self, frag: &mut SoftFrag) {
         for k in 0..4usize {
             frag.rgba[k] = self.t.stipple_background[k] as f64;
         }
@@ -3053,7 +3053,7 @@ impl SGISoftDraw {
     /// otherwise mapped to window depth n + (f - n) z through the depth range
     /// [n, f] (OpenGL 1.2.1, 2.10.1). A polygon's offset is then added to the
     /// window depth, and the sum clamped to [0, 1] (3.5.5).
-    pub fn fragment_coverage(&self, px: i32, py: i32, z: f64, offset: f64, depth_w: f64, frag: &SGISoftFrag, coverage: f64, antialias: bool) {
+    pub fn fragment_coverage(&self, px: i32, py: i32, z: f64, offset: f64, depth_w: f64, frag: &SoftFrag, coverage: f64, antialias: bool) {
         let mut z = z;
         let mut offset = offset;
         let mut zw = 0.0;
@@ -3077,12 +3077,12 @@ impl SGISoftDraw {
         self.fragment_at(px, py, zw, frag, coverage, antialias);
     }
 
-    pub fn fragment(&self, px: i32, py: i32, z: f64, offset: f64, depth_w: f64, frag: &SGISoftFrag) {
+    pub fn fragment(&self, px: i32, py: i32, z: f64, offset: f64, depth_w: f64, frag: &SoftFrag) {
         self.fragment_coverage(px, py, z, offset, depth_w, frag, 1.0, false);
     }
 }
 
-impl SGIGLDrawState {
+impl GlDrawState {
     /// A triangle's polygon offset (3.5.5), o = m factor + r units, where m is
     /// the larger magnitude of its window depth's slopes in x and y, which the
     /// specification allows in place of their length, and r the rules' one
@@ -3108,8 +3108,8 @@ impl SGIGLDrawState {
     }
 }
 
-impl SGISoftDraw {
-    pub fn window_vertices(&self, v: &[SGISoftVertex; 3], window: &mut [[f64; 3]; 3]) {
+impl SoftDraw {
+    pub fn window_vertices(&self, v: &[SoftVertex; 3], window: &mut [[f64; 3]; 3]) {
         let sub = (1i32 << self.rules.subpixel_bits) as f64;
 
         for i in 0..3usize {
@@ -3119,7 +3119,7 @@ impl SGISoftDraw {
         }
     }
 
-    pub fn slope(&self, v: &[SGISoftVertex; 3]) -> f64 {
+    pub fn slope(&self, v: &[SoftVertex; 3]) -> f64 {
         let mut window = [[0.0f64; 3]; 3];
 
         self.window_vertices(v, &mut window);
@@ -3127,8 +3127,8 @@ impl SGISoftDraw {
     }
 }
 
-impl SGIRasterRules {
-    pub fn polygon_offset(&self, st: &SGIGLDrawState, window: &[[f64; 3]; 3]) -> f64 {
+impl RasterRules {
+    pub fn polygon_offset(&self, st: &GlDrawState, window: &[[f64; 3]; 3]) -> f64 {
         if st.polygon_offset & SGI_GL_OFFSET_FILL == 0 {
             return 0.0;
         }
@@ -3138,8 +3138,8 @@ impl SGIRasterRules {
     }
 }
 
-impl SGISoftDraw {
-    pub fn offset(&self, v: &[SGISoftVertex; 3]) -> f64 {
+impl SoftDraw {
+    pub fn offset(&self, v: &[SoftVertex; 3]) -> f64 {
         let mut window = [[0.0f64; 3]; 3];
 
         self.window_vertices(v, &mut window);
@@ -3151,7 +3151,7 @@ impl SGISoftDraw {
 /// z <= w, as each one's value at a point, which is >= 0 inside it.
 pub const SGI_VOLUME_PLANES: i32 = 6;
 
-impl SGIVolumeVertex {
+impl VolumeVertex {
     pub fn plane(&self, plane: i32) -> f64 {
         let c = self.clip[(plane / 2) as usize];
 
@@ -3170,7 +3170,7 @@ impl SGIVolumeVertex {
     /// The point at t along from in to out, in clip and eye coordinates and
     /// every float attribute (2.13.8); the material index and edge flag are
     /// bit patterns and stay in's.
-    pub fn lerp(&self, out: &SGIVolumeVertex, t: f64, r: &mut SGIVolumeVertex) {
+    pub fn lerp(&self, out: &VolumeVertex, t: f64, r: &mut VolumeVertex) {
         for k in 0..4usize {
             r.clip[k] = self.clip[k] + t * (out.clip[k] - self.clip[k]);
             r.eye[k] = self.eye[k] + t * (out.eye[k] - self.eye[k]);
@@ -3187,7 +3187,7 @@ impl SGIVolumeVertex {
     /// Where the edge from in, inside a plane with value din, to out, outside
     /// it with value dout, meets the plane. It is always found from the inside
     /// end, so that two primitives sharing the edge make the same vertex.
-    pub fn cut(&self, din: f64, out: &SGIVolumeVertex, dout: f64, r: &mut SGIVolumeVertex) {
+    pub fn cut(&self, din: f64, out: &VolumeVertex, dout: f64, r: &mut VolumeVertex) {
         self.lerp(out, din / (din - dout), r);
     }
 }
@@ -3195,9 +3195,9 @@ impl SGIVolumeVertex {
 /// Sutherland and Hodgman's clipping, one plane at a time: each edge
 /// keeps its inside end and adds the point where it crosses the plane.
 /// A value that is not a number is outside.
-pub fn sgi_volume_clip_triangle(in_: &[SGIVolumeVertex; 3], out: &mut [SGIVolumeVertex; SGI_VOLUME_TRIANGLE_MAX]) -> u32 {
-    let mut src: [SGIVolumeVertex; SGI_VOLUME_TRIANGLE_MAX] = std::array::from_fn(|_| SGIVolumeVertex::default());
-    let mut dst: [SGIVolumeVertex; SGI_VOLUME_TRIANGLE_MAX] = std::array::from_fn(|_| SGIVolumeVertex::default());
+pub fn volume_clip_triangle(in_: &[VolumeVertex; 3], out: &mut [VolumeVertex; SGI_VOLUME_TRIANGLE_MAX]) -> u32 {
+    let mut src: [VolumeVertex; SGI_VOLUME_TRIANGLE_MAX] = std::array::from_fn(|_| VolumeVertex::default());
+    let mut dst: [VolumeVertex; SGI_VOLUME_TRIANGLE_MAX] = std::array::from_fn(|_| VolumeVertex::default());
     let mut n: usize = 3;
 
     for i in 0..3 {
@@ -3220,13 +3220,13 @@ pub fn sgi_volume_clip_triangle(in_: &[SGIVolumeVertex; 3], out: &mut [SGIVolume
                 dst[m] = a.clone();
                 m += 1;
                 if !(db >= 0.0) {
-                    let mut c = SGIVolumeVertex::default();
+                    let mut c = VolumeVertex::default();
                     a.cut(da, b, db, &mut c);
                     dst[m] = c;
                     m += 1;
                 }
             } else if db >= 0.0 {
-                let mut c = SGIVolumeVertex::default();
+                let mut c = VolumeVertex::default();
                 b.cut(db, a, da, &mut c);
                 dst[m] = c;
                 m += 1;
@@ -3244,12 +3244,12 @@ pub fn sgi_volume_clip_triangle(in_: &[SGIVolumeVertex; 3], out: &mut [SGIVolume
     n as u32
 }
 
-impl SGIVolumeVertex {
+impl VolumeVertex {
     /// Liang and Barsky's clipping: the segment keeps the part every plane
     /// allows. Each end that a plane bounds moves to where the segment meets
     /// that plane, found from the other end, inside it, as a triangle's cut
     /// is: a fraction sa of the way from b to a, and tb from a to b.
-    pub fn clip_segment(&mut self, b: &mut SGIVolumeVertex) -> bool {
+    pub fn clip_segment(&mut self, b: &mut VolumeVertex) -> bool {
         let mut na = self.clone();
         let mut nb = b.clone();
         let mut sa = 1.0f64;
@@ -3286,11 +3286,11 @@ impl SGIVolumeVertex {
     }
 }
 
-impl SGIGLDrawState {
+impl GlDrawState {
     /// One vertex to clip coordinates (OpenGL 1.2.1, 2.10): object to eye by
     /// the modelview and eye to clip by the projection, or by the window
-    /// matrix as sgi_gl_eye_to_clip() takes it.
-    pub fn volume_from_draw_vertex(&self, v: &[f32], out: &mut SGIVolumeVertex) {
+    /// matrix as GlDrawState::eye_to_clip() takes it.
+    pub fn volume_from_draw_vertex(&self, v: &[f32], out: &mut VolumeVertex) {
         for row in 0..4usize {
             out.eye[row] = 0.0;
             for k in 0..4usize {
@@ -3302,7 +3302,7 @@ impl SGIGLDrawState {
     }
 }
 
-impl SGISoftDraw {
+impl SoftDraw {
     /// Map one clipped vertex (2.10): the divide by w and the viewport map,
     /// with depth left normalized to [0, 1]; the depth range maps it per
     /// fragment. Under a window matrix the position is the matrix's and the
@@ -3314,8 +3314,8 @@ impl SGISoftDraw {
     /// A vertex with w <= 0 is in the volume only at the clip-space origin,
     /// where the divide has no answer, and returns false, as does one mapped
     /// beyond the rasterizer's range.
-    pub fn project(&self, cv: &SGIVolumeVertex, out: &mut SGISoftVertex) -> bool {
-        let st: &SGIGLDrawState = &self.st;
+    pub fn project(&self, cv: &VolumeVertex, out: &mut SoftVertex) -> bool {
+        let st: &GlDrawState = &self.st;
         let clip = &cv.clip;
         let eye = &cv.eye;
         let mut win = [0.0f64; 3];
@@ -3382,7 +3382,7 @@ impl SGISoftDraw {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct SGISoftTexPlane {
+pub struct SoftTexPlane {
     /// S/W, T/W, Q/W and, for volumes, R/W.
     pub value: [f64; 4],
     pub dx: [f64; 4],
@@ -3391,7 +3391,7 @@ pub struct SGISoftTexPlane {
     pub y: f64,
 }
 
-pub fn sgi_raster_set_parallel(bands: u32, min_pixels: u64) {
-    sgi_soft_bands_wanted.store(bands, std::sync::atomic::Ordering::Relaxed);
-    sgi_soft_bands_min_pixels.store(min_pixels, std::sync::atomic::Ordering::Relaxed);
+pub fn raster_set_parallel(bands: u32, min_pixels: u64) {
+    SOFT_BANDS_WANTED.store(bands, std::sync::atomic::Ordering::Relaxed);
+    SOFT_BANDS_MIN_PIXELS.store(min_pixels, std::sync::atomic::Ordering::Relaxed);
 }

@@ -2,7 +2,7 @@
 //!
 //! The Odyssey (VPro) board's constants and state. The QOM class and the
 //! native-Mesa fields are gone; the interrupt packet path is the `irq` field
-//! of the host interface (`OdysseyFront`, front.rs).
+//! of the host interface (`HostInterface`, front.rs).
 use super::*;
 
 /// Distinct unimplemented offsets reported before the device falls silent
@@ -47,7 +47,7 @@ pub const SGI_ODYSSEY_WIDTH: u32 = 1280;
 pub const SGI_ODYSSEY_HEIGHT: u32 = 1024;
 
 #[derive(Clone, Copy, Default)]
-pub struct SGIOdysseyOpenVertex {
+pub struct OpenVertex {
     pub word: u32,
     pub operands: [u32; 4],
     pub attribute: [[u32; 5]; 19],
@@ -56,7 +56,7 @@ pub struct SGIOdysseyOpenVertex {
 
 /// A command-FIFO store waiting for the board's thread.
 #[derive(Clone, Copy)]
-pub struct OdysseyQueuedStore {
+pub struct QueuedStore {
     pub value: u64,
     pub addr: u32,
     pub size: u8,
@@ -68,13 +68,13 @@ pub struct OdysseyQueuedStore {
     pub queued_at: std::time::Instant,
 }
 
-pub struct SGIOdysseyState {
+pub struct Board {
     /// The crosstalk widget number (the C's parent_obj.slot).
     pub slot: u32,
     /// The host interface, under its own lock (front.rs): the registers a
     /// processor may touch while the board works, the interrupt routing
     /// and the command-FIFO queue.
-    pub front: std::sync::Arc<parking_lot::Mutex<OdysseyFront>>,
+    pub front: std::sync::Arc<parking_lot::Mutex<HostInterface>>,
     pub nic_bus: Option<crate::dev::w1::Bus>,
 
     // Properties.
@@ -144,12 +144,12 @@ pub struct SGIOdysseyState {
     pub cfifo_selftest_ready: bool,
 
     /// Colour buffer 0's RGBA8 plane over the shared board memory.
-    pub mem: SGIBoardMemory,
-    /// The id sgi_board_memory_add_plane returned.
+    pub mem: BoardMemory,
+    /// The id BoardMemory::add_plane returned.
     pub colour_plane: u32,
 
     /// The second colour buffer (buffer 1 in the displayed-buffer sense).
-    pub buffer1_mem: SGIBoardMemory,
+    pub buffer1_mem: BoardMemory,
     pub buffer1_plane: u32,
 
     // Buffer selection.
@@ -161,12 +161,12 @@ pub struct SGIOdysseyState {
     pub drawable_word_reported: bool,
 
     // The board-memory objects (ODSY_OBJ_POOL_BYTES).
-    pub obj_mem: SGIBoardMemory,
+    pub obj_mem: BoardMemory,
     pub dest_base: u32,
     pub obj_count: u32,
     pub obj_used: u32,
     pub obj_base: [u32; SGI_ODYSSEY_OBJECTS as usize],
-    /// obj_base inverted, base to index + 1 (odyssey_object_find()).
+    /// obj_base inverted, base to index + 1 (Board::object_find()).
     pub obj_index: std::collections::HashMap<u32, u32>,
     pub obj_width: [u32; SGI_ODYSSEY_OBJECTS as usize],
     pub obj_offset: [u32; SGI_ODYSSEY_OBJECTS as usize],
@@ -250,7 +250,7 @@ pub struct SGIOdysseyState {
     /// The second operand of the last 0x840 (enable, mask and value).
     pub id_compare: u32,
     pub clip_kept: u32,
-    pub clip_rect: [SGIClipRect; SGI_ODYSSEY_CLIP_RECTS as usize],
+    pub clip_rect: [ClipRect; SGI_ODYSSEY_CLIP_RECTS as usize],
     // The window as the kernel last pushed it on its own port.
     pub win_committed_origin: [i32; 2],
     pub win_committed_clip: [u32; (2 * SGI_ODYSSEY_CLIP_RECTS) as usize],
@@ -274,9 +274,9 @@ pub struct SGIOdysseyState {
     pub poly_col_lo: u32,
 
     // The true-colour OpenGL path.
-    pub gl_ctx: SGIGLContext,
-    /// The drawable odyssey_gl_bind() last built for the shared context.
-    pub gl_bind_drawable: SGIGLDrawable,
+    pub gl_ctx: GlContext,
+    /// The drawable Board::gl_bind() last built for the shared context.
+    pub gl_bind_drawable: GlDrawable,
     /// Host-only: GL draws may run in bands of rows (x-raster-bands); the
     /// bands run serially here.
     pub raster_bands: bool,
@@ -290,7 +290,7 @@ pub struct SGIOdysseyState {
     pub gl_open_m3: u32,
     pub gl_open_m4: u32,
     pub gl_open_held: u32,
-    pub gl_open_vertex: [SGIOdysseyOpenVertex; 3],
+    pub gl_open_vertex: [OpenVertex; 3],
     pub gl_restart_type: u32,
     pub gl_restart_select: u32,
     pub gl_restart_absorb: u32,
@@ -314,9 +314,9 @@ pub struct SGIOdysseyState {
     pub gl_rect_stencil_logged: bool,
     pub gl_rect_pattern_logged: bool,
     pub gl_index_mask_logged: bool,
-    pub depth_mem: SGIBoardMemory,
+    pub depth_mem: BoardMemory,
     pub depth_plane: u32,
-    pub stencil_mem: SGIBoardMemory,
+    pub stencil_mem: BoardMemory,
     pub stencil_plane: u32,
 
     /// The scissor and window clip box, 0x081d, as last written.
@@ -427,8 +427,8 @@ pub struct SGIOdysseyState {
     pub test_object_base: u32,
 
     /// The shared scanout; resolves the colour plane through
-    /// odyssey_head_ops.resolve_row.
-    pub scanout: SGIScanout,
+    /// HEAD_OPS.resolve_row.
+    pub scanout: Scanout,
 
     // Diagnostic bookkeeping, not guest state.
     pub reported_addr: [u32; SGI_ODYSSEY_UNIMP_REPORTS as usize],
@@ -443,9 +443,9 @@ pub struct SGIOdysseyState {
     pub dma_read_reported: u32,
 }
 
-impl Default for SGIOdysseyState {
+impl Default for Board {
     fn default() -> Self {
-        SGIOdysseyState {
+        Board {
             slot: 0,
             front: Default::default(),
             nic_bus: None,

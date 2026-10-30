@@ -7,10 +7,10 @@
 //! presented frame (`Vec<u32>` of 0x00RRGGBB, `frame_width` x `frame_height`),
 //! which the iris glue copies to the screen; `dirty` is one bool per display
 //! line instead of a bitmap. The retrace QEMUTimer is `retrace_deadline`
-//! (virtual ns, -1 = disarmed), fired by sgi_scanout_poll(). `con`,
-//! `sgi_scanout_init(_head)`'s DeviceState/head arguments and VMState are
+//! (virtual ns, -1 = disarmed), fired by Scanout::poll(). `con`,
+//! `Scanout::init(_head)`'s DeviceState/head arguments and VMState are
 //! dropped (init_head is kept with its `head` number, unused). `ops` is a
-//! `P<SGIHeadOps>`.
+//! `P<HeadOps>`.
 use super::*;
 
 pub const SGI_CURSOR_MAX: usize = 64;
@@ -20,7 +20,7 @@ pub const SGI_SCANOUT_MAX_DIM: u32 = 16384;
 pub const SGI_SCANOUT_MIN_PERIOD_NS: i64 = 1000000;
 
 #[derive(Clone, Copy, Default, Debug)]
-pub struct SGIScanoutMode {
+pub struct ScanoutMode {
     pub width: u32, // visible pixels and lines
     pub height: u32,
     pub frame_clocks: u64, // clocks per frame, blanking included
@@ -28,18 +28,18 @@ pub struct SGIScanoutMode {
 }
 
 #[derive(Clone, Copy, Default, Debug)]
-pub struct SGISwapRecord {
+pub struct SwapRecord {
     pub seq: u64,
     pub cookie: u64,
 }
 
 #[derive(Clone)]
-pub struct SGIScanout {
-    pub ops: P<SGIHeadOps>,
+pub struct Scanout {
+    pub ops: P<HeadOps>,
     pub opaque: Opaque,
     pub composite_cursor: bool, // draw the cursor into the frame
 
-    pub mode: SGIScanoutMode,
+    pub mode: ScanoutMode,
     pub frame: Vec<u32>,  // frame_width x frame_height of 0x00RRGGBB; empty: none
     pub dirty: Vec<bool>, // one flag per display line
     pub frame_width: u32,
@@ -49,7 +49,7 @@ pub struct SGIScanout {
     pub epoch: i64,            // virtual time of retrace 0
     pub frames: u64,           // retraces since the epoch
 
-    pub swaps: [SGISwapRecord; SGI_SWAP_MAX],
+    pub swaps: [SwapRecord; SGI_SWAP_MAX],
     pub swap_head: u32,
     pub swap_count: u32,
 
@@ -67,13 +67,13 @@ pub struct SGIScanout {
     pub cursor_drawn_last: i32,
 }
 
-impl Default for SGIScanout {
+impl Default for Scanout {
     fn default() -> Self {
-        SGIScanout {
+        Scanout {
             ops: P::null(),
             opaque: P::null(),
             composite_cursor: false,
-            mode: SGIScanoutMode::default(),
+            mode: ScanoutMode::default(),
             frame: Vec::new(),
             dirty: Vec::new(),
             frame_width: 0,
@@ -81,7 +81,7 @@ impl Default for SGIScanout {
             retrace_deadline: -1,
             epoch: 0,
             frames: 0,
-            swaps: [SGISwapRecord::default(); SGI_SWAP_MAX],
+            swaps: [SwapRecord::default(); SGI_SWAP_MAX],
             swap_head: 0,
             swap_count: 0,
             cursor_image: [0; SGI_CURSOR_MAX * SGI_CURSOR_MAX],
@@ -98,14 +98,14 @@ impl Default for SGIScanout {
     }
 }
 
-impl SGIScanout {
+impl Scanout {
     /// Bind a scanout to its head. ops.resolve_row is required; ops.publish is
     /// required once a swap is queued. No mode yet.
-    pub fn init(&mut self, ops: &SGIHeadOps, opaque: Opaque) {
+    pub fn init(&mut self, ops: &HeadOps, opaque: Opaque) {
         self.init_head(0, ops, opaque);
     }
     /// The same, for a family with several outputs (`head` is its number).
-    pub fn init_head(&mut self, head: u32, ops: &SGIHeadOps, opaque: Opaque) {
+    pub fn init_head(&mut self, head: u32, ops: &HeadOps, opaque: Opaque) {
         let _ = head;
         assert!(ops.resolve_row.is_some());
         self.ops = P::from_ref(ops);
@@ -123,7 +123,7 @@ impl SGIScanout {
     }
 
     /// A new mode: new frame, everything dirty, retrace phase restarted now.
-    pub fn set_mode(&mut self, mode: &SGIScanoutMode) {
+    pub fn set_mode(&mut self, mode: &ScanoutMode) {
         self.mode = *mode;
         self.mode.sanitize();
         crate::dlog!(crate::devlog::LogModule::Odyssey, "sgi_scanout_mode: {}x{} frame {} clocks at {} Hz", self.mode.width, self.mode.height, self.mode.frame_clocks, self.mode.clock_hz);
@@ -207,7 +207,7 @@ impl SGIScanout {
     /// Plane rows y0 .. y1 changed. The plane is the displayed one and exactly
     /// as tall as the mode: a bottom-origin row maps to display line
     /// p.height - 1 - y.
-    pub fn invalidate_plane(&mut self, p: &SGIPlane, y0: i32, y1: i32) {
+    pub fn invalidate_plane(&mut self, p: &Plane, y0: i32, y1: i32) {
         if p.bottom_origin {
             let first = p.height as i32 - 1 - y0.max(y1);
             let last = p.height as i32 - 1 - y0.min(y1);
@@ -306,7 +306,7 @@ impl SGIScanout {
             self.ops.get().publish(self.opaque, seq, SGI_DONE_FAILED, cookie, SGI_FAIL_FULL as u64);
             return;
         }
-        self.swaps[((self.swap_head + self.swap_count) as usize) % SGI_SWAP_MAX] = SGISwapRecord { seq, cookie };
+        self.swaps[((self.swap_head + self.swap_count) as usize) % SGI_SWAP_MAX] = SwapRecord { seq, cookie };
         self.swap_count += 1;
     }
 }
@@ -315,7 +315,7 @@ pub fn muldiv64(a: u64, b: u64, c: u64) -> u64 {
     ((a as u128 * b as u128) / c as u128) as u64
 }
 
-impl SGIScanoutMode {
+impl ScanoutMode {
     /// A mode may be derived from guest-programmed timing tables, so it is
     /// checked before anything is allocated or armed from it. A size past
     /// SGI_SCANOUT_MAX_DIM presents nothing, and a period shorter than
@@ -354,7 +354,7 @@ impl SGIScanoutMode {
     }
 }
 
-impl SGIScanout {
+impl Scanout {
     pub fn arm(&mut self) {
         let when = self.retrace_time(self.frames + 1);
 
@@ -416,7 +416,7 @@ impl SGIScanout {
     }
 }
 
-pub fn sgi_scanout_blend(src: u32, dst: u32) -> u32 {
+pub fn scanout_blend(src: u32, dst: u32) -> u32 {
     let a = src >> 24;
     let mut out: u32 = 0;
 
@@ -434,7 +434,7 @@ pub fn sgi_scanout_blend(src: u32, dst: u32) -> u32 {
     out
 }
 
-impl SGIScanout {
+impl Scanout {
     pub fn draw_cursor(&mut self, first: i32, last: i32) {
         let left = self.cursor_x - self.cursor_hot_x;
         let top = self.cursor_y - self.cursor_hot_y;
@@ -458,7 +458,7 @@ impl SGIScanout {
                     continue;
                 }
                 let d = &mut self.frame[dst0 + x as usize];
-                *d = sgi_scanout_blend(src, *d);
+                *d = scanout_blend(src, *d);
             }
             y += 1;
         }

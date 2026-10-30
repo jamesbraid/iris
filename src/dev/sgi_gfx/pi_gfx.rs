@@ -4,9 +4,9 @@
 //! Graphics flow control in the Hub and Bedrock processor interfaces. The
 //! Octane has no processor-interface link (its board's `pi` stays `None`),
 //! so on that machine the credit calls are no-ops, as they are in QEMU
-//! when the board's `pi` property is unset. `SGIPIGfx` is the register
+//! when the board's `pi` property is unset. `PiGfx` is the register
 //! block a node's processor interface embeds; its functions are pure state.
-//! The QOM interface (`TYPE_SGI_PI_GFX`) becomes the `SGIPIGfxLink` trait.
+//! The QOM interface (`TYPE_SGI_PI_GFX`) becomes the `PiGfxLink` trait.
 //! Skipped: the vmstate description, and the per-thread forwarding-source
 //! mark (sgi_pi_gfx_mark_source/store_source), which names a QOM node.
 
@@ -36,7 +36,7 @@ pub const SGI_PI_GFX_BIAS_MASK: u32 = 0xfff;
 pub const SGI_PI_GFX_INT_MASK: u32 = 0x3ffffff;
 
 #[derive(Clone, Copy, Default)]
-pub struct SGIPIGfx {
+pub struct PiGfx {
     pub page: [u64; SGI_PI_GFX_SLOTS],
     pub credit: [u32; SGI_PI_GFX_SLOTS],
     pub bias: [u32; SGI_PI_GFX_SLOTS],
@@ -61,7 +61,7 @@ pub struct SGIPIGfx {
 /// (the C's TYPE_SGI_PI_GFX class: return_credits, owe_credits,
 /// repay_credits). `widget` is the head's crosstalk widget number, the
 /// value the driver writes into the node-widget map.
-pub trait SGIPIGfxLink: Send + Sync {
+pub trait PiGfxLink: Send + Sync {
     /// A graphics head took `n` counted stores off its port.
     fn return_credits(&self, widget: u32, n: u32);
     /// Credits a head owes for counted stores it has not yet taken off its
@@ -77,22 +77,22 @@ pub trait SGIPIGfxLink: Send + Sync {
     }
 }
 
-/// sgi_pi_gfx_return_credits().
-pub fn sgi_pi_gfx_return_credits(node: &dyn SGIPIGfxLink, widget: u32, credits: u32) {
+/// pi_gfx_return_credits().
+pub fn pi_gfx_return_credits(node: &dyn PiGfxLink, widget: u32, credits: u32) {
     node.return_credits(widget, credits);
 }
 
-/// sgi_pi_gfx_owe_credits().
-pub fn sgi_pi_gfx_owe_credits(node: &dyn SGIPIGfxLink, widget: u32, credits: i32) {
+/// pi_gfx_owe_credits().
+pub fn pi_gfx_owe_credits(node: &dyn PiGfxLink, widget: u32, credits: i32) {
     node.owe_credits(widget, credits);
 }
 
-/// sgi_pi_gfx_repay_credits().
-pub fn sgi_pi_gfx_repay_credits(node: &dyn SGIPIGfxLink, widget: u32, credits: u32) {
+/// pi_gfx_repay_credits().
+pub fn pi_gfx_repay_credits(node: &dyn PiGfxLink, widget: u32, credits: u32) {
     node.repay_credits(widget, credits);
 }
 
-impl SGIPIGfx {
+impl PiGfx {
     /// The counter above the bias re-arms the slot's graphics interrupt.
     fn rearm(&mut self, slot: usize) {
         if self.credit[slot] > self.bias[slot] {
@@ -102,7 +102,7 @@ impl SGIPIGfx {
 
     /// Every register zero, every page disabled (the model's choice).
     pub fn reset(&mut self) {
-        *self = SGIPIGfx::default();
+        *self = PiGfx::default();
     }
 
     /// Register n of the block, 0 to SGI_PI_GFX_REGS - 1, counted in
@@ -233,21 +233,21 @@ thread_local! {
 }
 
 /// A processor interface marks each store it forwards down its I/O path;
-/// returns the previous mark, to be restored with sgi_pi_gfx_unmark_store().
-pub fn sgi_pi_gfx_mark_store(counted: bool) -> bool {
+/// returns the previous mark, to be restored with pi_gfx_unmark_store().
+pub fn pi_gfx_mark_store(counted: bool) -> bool {
     SGI_PI_GFX_FORWARDING_COUNTED.with(|m| m.replace(counted))
 }
 
-pub fn sgi_pi_gfx_unmark_store(previous: bool) {
+pub fn pi_gfx_unmark_store(previous: bool) {
     SGI_PI_GFX_FORWARDING_COUNTED.with(|m| m.set(previous));
 }
 
 /// The one-shot read: the call clears the mark.
-pub fn sgi_pi_gfx_take_mark() -> bool {
+pub fn pi_gfx_take_mark() -> bool {
     SGI_PI_GFX_FORWARDING_COUNTED.with(|m| m.replace(false))
 }
 
-impl SGIPIGfx {
+impl PiGfx {
     /// `credits` credits returned to `slot`.
     pub fn add_credits(&mut self, slot: usize, credits: u32, who: &str) {
         assert!(slot < SGI_PI_GFX_SLOTS);
@@ -262,7 +262,7 @@ impl SGIPIGfx {
 
 /// Where a graphics node-widget map sends a widget's credits.
 #[derive(Clone, Copy, Default)]
-pub struct SGIPIGfxRoute {
+pub struct PiGfxRoute {
     pub node: u32,
     pub pi: u32,
     pub slot: u32,
@@ -270,7 +270,7 @@ pub struct SGIPIGfxRoute {
 
 /// The Hub's map: widget 3:0, node 12:4, processor 16, valid 20. The first
 /// matching entry wins.
-pub fn sgi_pi_gfx_route_hub(map: &[u64; 2], widget: u32, route: &mut SGIPIGfxRoute) -> bool {
+pub fn pi_gfx_route_hub(map: &[u64; 2], widget: u32, route: &mut PiGfxRoute) -> bool {
     for entry in map.iter().copied() {
         if entry & (1 << 20) == 0 || (entry & 0xf) as u32 != widget {
             continue;
@@ -285,7 +285,7 @@ pub fn sgi_pi_gfx_route_hub(map: &[u64; 2], widget: u32, route: &mut SGIPIGfxRou
 
 /// The Bedrock's map: widget 3:0, PI 4, node 12:5, processor 16. There is
 /// no valid bit, so an entry of zero names widget 0 on node 0.
-pub fn sgi_pi_gfx_route_bedrock(map: &[u64; 2], widget: u32, route: &mut SGIPIGfxRoute) -> bool {
+pub fn pi_gfx_route_bedrock(map: &[u64; 2], widget: u32, route: &mut PiGfxRoute) -> bool {
     for entry in map.iter().copied() {
         if (entry & 0xf) as u32 != widget {
             continue;

@@ -5,7 +5,7 @@
 
 use super::*;
 
-impl SGIOdysseyState {
+impl Board {
     pub fn cmd_dispatch(&mut self, tag: u32) {
         let mut after_tail = false;
 
@@ -18,7 +18,7 @@ impl SGIOdysseyState {
             after_tail = self.win_after_tail;
             self.win_after_tail = false;
         }
-        if odyssey_is_program_word(tag) {
+        if is_program_word(tag) {
             self.gl_program_word(tag);
             return;
         }
@@ -77,11 +77,11 @@ impl SGIOdysseyState {
             || tag == ODSY_GL_TEXCOORD_3I
             || tag == ODSY_GL_TEXCOORD_4I
         {
-            let n = odyssey_cmd_arity(tag);
+            let n = cmd_arity(tag);
             let mut c: [u32; 4] = [0, 0, 0, ODSY_F32_ONE];
 
             for i in 0..n as usize {
-                c[i] = odyssey_f32_bits((self.cmd_operand[i] as i32) as f32);
+                c[i] = f32_bits((self.cmd_operand[i] as i32) as f32);
             }
             self.tex_coord[0] = c[0];
             self.tex_coord[1] = c[1];
@@ -96,7 +96,7 @@ impl SGIOdysseyState {
         }
         if (tag & ODSY_GL_MATRIX_SELECT_SHAPE) == ODSY_GL_MATRIX_SELECT_TAG {
             self.gl_seq[((ODSY_GL_MATRIX_SELECT_TAG >> ODSY_PROG_CLASS_SHIFT) - ODSY_PROG_SEQ_FIRST) as usize] =
-                odyssey_prog_value(tag);
+                prog_value(tag);
             // Pick the shared matrix slot the following load targets.
             self.gl_matrix_slot = match tag & 0xff {
                 ODSY_GL_MATRIX_SELECT_COMBINED => ODSY_GL_SLOT_COMBINED,
@@ -111,7 +111,7 @@ impl SGIOdysseyState {
         }
         match tag {
             ODSY_GL_COLOR_3UB => {
-                self.gl_color = odyssey_pack_pixel(self.cmd_operand[0], self.cmd_operand[1], self.cmd_operand[2]);
+                self.gl_color = pack_pixel(self.cmd_operand[0], self.cmd_operand[1], self.cmd_operand[2]);
                 self.gl_color_is_index = false;
                 if !self.gl_index_mode() {
                     let mut colour = [0u32; SGI_GL_GET_WORDS];
@@ -132,7 +132,7 @@ impl SGIOdysseyState {
                 self.gl_color_is_index = true;
             }
             ODSY_GL_COLOR_INDEX_F | ODSY_GL_REPLAY_INDEX_F => {
-                self.gl_color_index = odyssey_float_index(self.cmd_operand[0]);
+                self.gl_color_index = float_index(self.cmd_operand[0]);
                 self.gl_color_is_index = true;
             }
             ODSY_REG_DEST_SELECT => {
@@ -225,15 +225,15 @@ impl SGIOdysseyState {
             | ODSY_GL_COLOR_4I => {
                 // The current colour of the true-colour GL stream (glColor3f,
                 // glColor4f and the integer forms), or the kernel's replay of one
-                // odyssey_ctx_save() saved. Kept so an unlit vertex after lit ones
+                // Board::ctx_save() saved. Kept so an unlit vertex after lit ones
                 // takes it back, and so colour material lights with it.
-                let n = odyssey_cmd_arity(tag);
+                let n = cmd_arity(tag);
                 let mut rgba = [0u32; 4];
 
                 rgba.copy_from_slice(&self.cmd_operand[..4]);
                 if tag != ODSY_GL_COLOR_3F && tag != ODSY_GL_COLOR_4F {
                     for i in 0..n as usize {
-                        rgba[i] = odyssey_integer_colour(tag, self.cmd_operand[i]);
+                        rgba[i] = integer_colour(tag, self.cmd_operand[i]);
                     }
                 }
                 if n == 3 {
@@ -247,17 +247,17 @@ impl SGIOdysseyState {
                     self.gl_feed(SGI_GL_OP_COLOR3F as u16, &rgba[..3]);
                 }
                 if !self.gl_index_mode() {
-                    self.gl_color = odyssey_pack_pixel(
-                        odyssey_float_channel(rgba[0]),
-                        odyssey_float_channel(rgba[1]),
-                        odyssey_float_channel(rgba[2]),
+                    self.gl_color = pack_pixel(
+                        float_channel(rgba[0]),
+                        float_channel(rgba[1]),
+                        float_channel(rgba[2]),
                     );
                     self.gl_color_is_index = false;
                 }
             }
             ODSY_GL_NORMAL_3B | ODSY_GL_NORMAL_3S | ODSY_GL_NORMAL_3I => {
                 for i in 0..3 {
-                    self.gl_normal[i] = odyssey_signed_to_float(self.cmd_operand[i], tag & 0x3f);
+                    self.gl_normal[i] = signed_to_float(self.cmd_operand[i], tag & 0x3f);
                 }
             }
             ODSY_GL_NORMAL_3F => {
@@ -387,7 +387,7 @@ impl SGIOdysseyState {
 
                 if tag == ODSY_GL_VERTEX_3I {
                     for k in 0..3 {
-                        xyz[k] = odyssey_f32_bits((self.cmd_operand[k] as i32) as f32);
+                        xyz[k] = f32_bits((self.cmd_operand[k] as i32) as f32);
                     }
                 }
                 if !self.gl_in_prim && self.gl_restart_absorb == 0 {
@@ -461,7 +461,7 @@ impl SGIOdysseyState {
                 let mut args = [0u32; 2];
 
                 args[0] = SGI_GL_NEVER_ENUM + ((word >> ODSY_ALPHA_FUNC_SHIFT) & ODSY_ALPHA_FUNC_MASK);
-                args[1] = odyssey_f32_bits((word & ODSY_ALPHA_REF_MASK) as f32 / ODSY_ALPHA_REF_SCALE);
+                args[1] = f32_bits((word & ODSY_ALPHA_REF_MASK) as f32 / ODSY_ALPHA_REF_SCALE);
                 self.gl_feed(SGI_GL_OP_ALPHA_FUNC as u16, &args);
             }
             ODSY_REG_STENCIL_FUNC => {
@@ -473,9 +473,9 @@ impl SGIOdysseyState {
                 args[2] = (word >> ODSY_STENCIL_VALUE_MASK_SHIFT) & ODSY_STENCIL_VALUE_MASK_MASK;
                 self.gl_feed(SGI_GL_OP_STENCIL_FUNC as u16, &args);
 
-                let fail = odyssey_stencil_op((word >> ODSY_STENCIL_OP_FAIL_SHIFT) & ODSY_STENCIL_OP_MASK);
-                let zfail = odyssey_stencil_op((word >> ODSY_STENCIL_OP_ZFAIL_SHIFT) & ODSY_STENCIL_OP_MASK);
-                let zpass = odyssey_stencil_op((word >> ODSY_STENCIL_OP_ZPASS_SHIFT) & ODSY_STENCIL_OP_MASK);
+                let fail = stencil_op((word >> ODSY_STENCIL_OP_FAIL_SHIFT) & ODSY_STENCIL_OP_MASK);
+                let zfail = stencil_op((word >> ODSY_STENCIL_OP_ZFAIL_SHIFT) & ODSY_STENCIL_OP_MASK);
+                let zpass = stencil_op((word >> ODSY_STENCIL_OP_ZPASS_SHIFT) & ODSY_STENCIL_OP_MASK);
                 if fail == u32::MAX || zfail == u32::MAX || zpass == u32::MAX {
                     crate::qlog!("sgi-odyssey: stencil op word {:#x} is not modeled", word);
                 } else {
@@ -496,8 +496,8 @@ impl SGIOdysseyState {
                 self.blend_word = self.cmd_operand[0];
                 let word = self.cmd_operand[0];
                 let eq = (word >> ODSY_BLEND_EQ_SHIFT) & ODSY_BLEND_EQ_MASK;
-                let src = odyssey_blend_factor((word >> ODSY_BLEND_SRC_SHIFT) & ODSY_BLEND_SRC_MASK, false);
-                let dst = odyssey_blend_factor(word & ODSY_BLEND_DST_MASK, true);
+                let src = blend_factor((word >> ODSY_BLEND_SRC_SHIFT) & ODSY_BLEND_SRC_MASK, false);
+                let dst = blend_factor(word & ODSY_BLEND_DST_MASK, true);
                 if src == u32::MAX || dst == u32::MAX {
                     crate::qlog!("sgi-odyssey: blend factor word {:#x} is not modeled", word);
                 } else {
@@ -511,15 +511,15 @@ impl SGIOdysseyState {
                         eq
                     );
                 } else {
-                    args[0] = odyssey_blend_equation[eq as usize];
+                    args[0] = BLEND_EQUATION[eq as usize];
                     self.gl_feed(SGI_GL_OP_BLEND_EQUATION as u16, &args[..1]);
                 }
                 let c1 = self.cmd_operand[1];
                 let c2 = self.cmd_operand[2];
-                args[0] = odyssey_f32_bits(((c1 >> ODSY_BLEND_COLOUR_SHIFT) & ODSY_BLEND_COLOUR_MASK) as f32 / ODSY_BLEND_COLOUR_SCALE);
-                args[1] = odyssey_f32_bits((c1 & ODSY_BLEND_COLOUR_MASK) as f32 / ODSY_BLEND_COLOUR_SCALE);
-                args[2] = odyssey_f32_bits(((c2 >> ODSY_BLEND_COLOUR_SHIFT) & ODSY_BLEND_COLOUR_MASK) as f32 / ODSY_BLEND_COLOUR_SCALE);
-                args[3] = odyssey_f32_bits((c2 & ODSY_BLEND_COLOUR_MASK) as f32 / ODSY_BLEND_COLOUR_SCALE);
+                args[0] = f32_bits(((c1 >> ODSY_BLEND_COLOUR_SHIFT) & ODSY_BLEND_COLOUR_MASK) as f32 / ODSY_BLEND_COLOUR_SCALE);
+                args[1] = f32_bits((c1 & ODSY_BLEND_COLOUR_MASK) as f32 / ODSY_BLEND_COLOUR_SCALE);
+                args[2] = f32_bits(((c2 >> ODSY_BLEND_COLOUR_SHIFT) & ODSY_BLEND_COLOUR_MASK) as f32 / ODSY_BLEND_COLOUR_SCALE);
+                args[3] = f32_bits((c2 & ODSY_BLEND_COLOUR_MASK) as f32 / ODSY_BLEND_COLOUR_SCALE);
                 self.gl_feed(SGI_GL_OP_BLEND_COLOR as u16, &args);
             }
             ODSY_REG_LOGIC_OP => {
@@ -530,11 +530,11 @@ impl SGIOdysseyState {
             ODSY_REG_LINE_POINT_SIZE => {
                 let mut args = [0u32; 2];
 
-                args[0] = odyssey_f32_bits(
+                args[0] = f32_bits(
                     (self.cmd_operand[0] & ODSY_LINE_POINT_SIZE_MASK) as f32 / ODSY_LINE_POINT_SIZE_SCALE,
                 );
                 self.gl_feed_raster_state(SGI_GL_OP_LINE_WIDTH as u16, &args[0..1]);
-                args[1] = odyssey_f32_bits(
+                args[1] = f32_bits(
                     (self.cmd_operand[1] & ODSY_LINE_POINT_SIZE_MASK) as f32 / ODSY_LINE_POINT_SIZE_SCALE,
                 );
                 self.gl_feed_raster_state(SGI_GL_OP_POINT_SIZE as u16, &args[1..2]);
@@ -544,12 +544,12 @@ impl SGIOdysseyState {
                 let mut back = [0u32; 2];
 
                 front[0] = SGI_GL_FRONT;
-                front[1] = odyssey_polygon_mode(
+                front[1] = polygon_mode(
                     (self.cmd_operand[0] >> ODSY_POLYGON_MODE_FRONT_SHIFT) & ODSY_POLYGON_MODE_MASK,
                 );
                 self.gl_feed_raster_state(SGI_GL_OP_POLYGON_MODE as u16, &front);
                 back[0] = SGI_GL_BACK;
-                back[1] = odyssey_polygon_mode(
+                back[1] = polygon_mode(
                     (self.cmd_operand[0] >> ODSY_POLYGON_MODE_BACK_SHIFT) & ODSY_POLYGON_MODE_MASK,
                 );
                 self.gl_feed_raster_state(SGI_GL_OP_POLYGON_MODE as u16, &back);
@@ -557,8 +557,8 @@ impl SGIOdysseyState {
             ODSY_REG_POLYGON_OFFSET => {
                 let mut args = [0u32; 2];
 
-                args[0] = odyssey_f32_bits(0.0f32);
-                args[1] = odyssey_f32_bits(
+                args[0] = f32_bits(0.0f32);
+                args[1] = f32_bits(
                     sextract32(self.cmd_operand[0], 0, ODSY_POLYGON_OFFSET_BITS) as f32 * ODSY_POLYGON_OFFSET_SCALE,
                 );
                 self.gl_feed(SGI_GL_OP_POLYGON_OFFSET_EXT as u16, &args);
@@ -844,7 +844,7 @@ impl SGIOdysseyState {
                 // The bound drawing and reading drawable words, kept raw and
                 // independently (ODSY_REG_DRAW_MASK): neither changes where the
                 // model draws. The swap completes on the retrace hook
-                // (odyssey_retrace()).
+                // (retrace()).
                 self.draw_word = self.cmd_operand[0];
                 crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_buffer_word: reg {:#x} word {:#x}", tag, self.draw_word);
             }
@@ -892,13 +892,13 @@ impl SGIOdysseyState {
                 // completion signal, so it raises the same fence the DMA engine's
                 // completion does, through the one fence implementation: op0's slot
                 // and interrupt bit and op1's token become the completion cookie,
-                // published to odyssey_publish() -> odyssey_fence(). op0's interrupt
+                // published to publish() -> Board::fence(). op0's interrupt
                 // bit and op1's token already sit at the fence word's own positions
                 // (ODSY_HOST_WRITE_INTERRUPT is the fence word's bit 15).
                 let word: u32 = ((op1 & 0xffff) << ODSY_DMA_FENCE_TOKEN_SHIFT)
                     | (op0 & (ODSY_DMA_FENCE_INTERRUPT | ODSY_DMA_FENCE_SLOT_MASK));
 
-                odyssey_head_ops.publish(
+                HEAD_OPS.publish(
                     P::new(self).opaque(),
                     0,
                     SGI_DONE_WRITTEN,
@@ -940,15 +940,15 @@ impl SGIOdysseyState {
     // this shape, so it is tested first rather than after every by-value match.
     pub fn cmd_classify_register(&mut self, word: u32) {
         let reg = word & !ODSY_CMD_REGISTER_SHAPE;
-        let operands = odyssey_cmd_arity(reg);
+        let operands = cmd_arity(reg);
         let mut fmt = 0u32;
 
         // A pixel burst while an image is open: its data words paint into the
         // box rather than streaming through the generic operand path. Outside
         // an image the same register-select is an ordinary state word.
-        if self.image_active && operands > 0 && odyssey_image_burst_fmt(reg, &mut fmt) {
+        if self.image_active && operands > 0 && image_burst_fmt(reg, &mut fmt) {
             self.image_fmt = fmt;
-            if !odyssey_image_pairing_supported(self.image_code, fmt) {
+            if !image_pairing_supported(self.image_code, fmt) {
                 self.cmd_unimplemented(word);
             }
             self.cmd_state = ODSY_CMD_IMAGE_BURST;
@@ -1003,7 +1003,7 @@ impl SGIOdysseyState {
             return;
         }
         // A page-table DMA descriptor: the opcode word, then three more words the
-        // generic operand path gathers before odyssey_cmd_dispatch() runs the
+        // generic operand path gathers before Board::cmd_dispatch() runs the
         // transfer (the two-doubleword descriptor reaches here as four words).
         if word == ODSY_DMA_DESC_UPLOAD || word == ODSY_DMA_DESC_READBACK {
             self.cmd_start(word, ODSY_DMA_DESC_OPERANDS);
@@ -1012,7 +1012,7 @@ impl SGIOdysseyState {
         // The two buffer-select doublewords: each opcode word takes one operand
         // word. Consumed cleanly so the parser stays word-aligned; the swap
         // completion is delivered from the retrace hook, not here (see the
-        // ODSY_SWAP_SYNC_* constants and odyssey_retrace()).
+        // ODSY_SWAP_SYNC_* constants and retrace()).
         if word == ODSY_SWAP_SYNC_A || word == ODSY_SWAP_SYNC_B {
             self.cmd_start(word, ODSY_SWAP_SYNC_OPERANDS);
             return;
@@ -1043,7 +1043,7 @@ impl SGIOdysseyState {
             || (word & ODSY_GL_TEXCOORD_SHAPE) == ODSY_GL_TEXCOORD_TAG
             || word == ODSY_GL_TEX_RECT
         {
-            self.cmd_start(word, odyssey_cmd_arity(word));
+            self.cmd_start(word, cmd_arity(word));
             return;
         }
         if word == ODSY_CMD_WINDOW_RESTORE {
@@ -1059,12 +1059,12 @@ impl SGIOdysseyState {
             || word == ODSY_GL_INDEX_MODE_COLOR_4F
             || word == ODSY_GL_COLOR_3I
             || word == ODSY_GL_COLOR_4F
-            || odyssey_is_integer_colour(word)
+            || is_integer_colour(word)
             || word == ODSY_GL_NORMAL_3B
             || word == ODSY_GL_NORMAL_3S
             || word == ODSY_GL_NORMAL_3I
         {
-            self.cmd_start(word, odyssey_cmd_arity(word));
+            self.cmd_start(word, cmd_arity(word));
             return;
         }
         // The true-colour GL words, matched by value: the float colour and vertex
@@ -1094,14 +1094,14 @@ impl SGIOdysseyState {
         // The lighting words, matched by value; each carries its operand count
         // in bits 13:10 like every other word. The program words carry none and
         // are matched by class ahead of the image path's 0x29 state word, which
-        // is the same class (odyssey_is_program_word()).
-        for i in 0..odyssey_gl_light_words.len() {
-            if word == odyssey_gl_light_words[i] {
-                self.cmd_start(word, odyssey_cmd_arity(word));
+        // is the same class (is_program_word()).
+        for i in 0..GL_LIGHT_WORDS.len() {
+            if word == GL_LIGHT_WORDS[i] {
+                self.cmd_start(word, cmd_arity(word));
                 return;
             }
         }
-        if odyssey_is_program_word(word) {
+        if is_program_word(word) {
             self.cmd_start(word, 0);
             return;
         }
@@ -1135,7 +1135,7 @@ impl SGIOdysseyState {
         // path, the header setting the group length as it dispatches.
         if word == ODSY_CMD_IMAGE_BOX {
             self.cmd_state = ODSY_CMD_IMAGE_BOX_LOAD;
-            self.cmd_operand_count = odyssey_cmd_arity(word);
+            self.cmd_operand_count = cmd_arity(word);
             self.cmd_operand_index = 0;
             return;
         }
@@ -1143,11 +1143,11 @@ impl SGIOdysseyState {
             || word == ODSY_CMD_IMAGE_HEADER
             || word == ODSY_CMD_IMAGE_HEADER_TAIL
         {
-            self.cmd_start(word, odyssey_cmd_arity(word));
+            self.cmd_start(word, cmd_arity(word));
             return;
         }
         // A word this model does not know still carries its operand count in
-        // bits 13:10 (odyssey_cmd_arity()), so pass over that many words and
+        // bits 13:10 (cmd_arity()), so pass over that many words and
         // keep the parser on the stream's command positions. The kernel's
         // context restore replays words of every class this way: 0x3cf8 to
         // 0x3cfb and 0x3f41 with 16 zero operands each, 0x0f41 with 3, 0x04b0
@@ -1162,13 +1162,13 @@ impl SGIOdysseyState {
         // clear GL word the model knows has a zero field and no operands, and
         // every one with operands has the bit set (0x9080bda2, 0x90808800).
         // INFERRED from that pattern; the bit's meaning on the board is UNKNOWN.
-        if odyssey_cmd_arity(word) != 0 && ((word >> 24) == 0 || (word & ODSY_CMD_GL_OPERANDS) != 0) {
-            let note = format!("; skipping {} operands", odyssey_cmd_arity(word));
+        if cmd_arity(word) != 0 && ((word >> 24) == 0 || (word & ODSY_CMD_GL_OPERANDS) != 0) {
+            let note = format!("; skipping {} operands", cmd_arity(word));
             self.cmd_report(word, &note);
             self.cmd_state = ODSY_CMD_SKIP;
-            self.cmd_operand_count = odyssey_cmd_arity(word);
+            self.cmd_operand_count = cmd_arity(word);
             self.cmd_operand_index = 0;
-        } else if odyssey_cmd_arity(word) != 0 {
+        } else if cmd_arity(word) != 0 {
             self.cmd_report(word, "; bit 23 clear, no operands");
         } else {
             self.cmd_report(word, "; no operands");
@@ -1254,10 +1254,10 @@ impl SGIOdysseyState {
                 // corners; the rest are the zero the DDX's private was allocated with.
                 // Set the cursor to the top-left corner once all ten have arrived.
                 match self.cmd_operand_index {
-                    ODSY_IMAGE_BOX_X1_INDEX => self.image_x1 = odyssey_float_to_u32(word),
-                    ODSY_IMAGE_BOX_Y1_INDEX => self.image_y1 = odyssey_float_to_u32(word),
-                    ODSY_IMAGE_BOX_X2_INDEX => self.image_x2 = odyssey_float_to_u32(word),
-                    ODSY_IMAGE_BOX_Y2_INDEX => self.image_y2 = odyssey_float_to_u32(word),
+                    ODSY_IMAGE_BOX_X1_INDEX => self.image_x1 = float_to_u32(word),
+                    ODSY_IMAGE_BOX_Y1_INDEX => self.image_y1 = float_to_u32(word),
+                    ODSY_IMAGE_BOX_X2_INDEX => self.image_x2 = float_to_u32(word),
+                    ODSY_IMAGE_BOX_Y2_INDEX => self.image_y2 = float_to_u32(word),
                     _ => {}
                 }
                 self.cmd_operand_index += 1;
@@ -1325,7 +1325,7 @@ impl SGIOdysseyState {
 }
 
 /// One step of the command-FIFO self-test preamble.
-pub struct OdysseyCfifoPreamble {
+pub struct CfifoPreamble {
     pub port: u64,
     pub size: u32,
     pub value: u64,
@@ -1338,38 +1338,38 @@ pub struct OdysseyCfifoPreamble {
 /// ODSY_CFIFO_SELFTEST answer OK. (The real driver sends the five 8-byte
 /// words to 0x110000, not to the backend-select port, confirmed by a boot
 /// trace.)
-pub static odyssey_cfifo_preamble: [OdysseyCfifoPreamble; 9] = [
-    OdysseyCfifoPreamble { port: ODSY_CMD_FIFO, size: 4, value: 0x00010854 },
-    OdysseyCfifoPreamble { port: ODSY_CMD_FIFO, size: 4, value: 0x00000000 },
-    OdysseyCfifoPreamble { port: ODSY_CMD_FIFO, size: 4, value: 0x0fffffff },
-    OdysseyCfifoPreamble { port: ODSY_CMD_FIFO, size: 8, value: 0x000006b000000000 },
-    OdysseyCfifoPreamble { port: ODSY_CMD_FIFO, size: 8, value: 0x000006b100000100 },
-    OdysseyCfifoPreamble { port: ODSY_CMD_FIFO, size: 8, value: 0x000006b300005e50 },
-    OdysseyCfifoPreamble { port: ODSY_CMD_FIFO, size: 8, value: 0x000006b200007dc0 },
-    OdysseyCfifoPreamble { port: ODSY_CMD_FIFO, size: 8, value: 0x000007b500000001 },
-    OdysseyCfifoPreamble { port: ODSY_CMD_FIFO, size: 4, value: 0x00010046 },
+pub static CFIFO_PREAMBLE: [CfifoPreamble; 9] = [
+    CfifoPreamble { port: ODSY_CMD_FIFO, size: 4, value: 0x00010854 },
+    CfifoPreamble { port: ODSY_CMD_FIFO, size: 4, value: 0x00000000 },
+    CfifoPreamble { port: ODSY_CMD_FIFO, size: 4, value: 0x0fffffff },
+    CfifoPreamble { port: ODSY_CMD_FIFO, size: 8, value: 0x000006b000000000 },
+    CfifoPreamble { port: ODSY_CMD_FIFO, size: 8, value: 0x000006b100000100 },
+    CfifoPreamble { port: ODSY_CMD_FIFO, size: 8, value: 0x000006b300005e50 },
+    CfifoPreamble { port: ODSY_CMD_FIFO, size: 8, value: 0x000006b200007dc0 },
+    CfifoPreamble { port: ODSY_CMD_FIFO, size: 8, value: 0x000007b500000001 },
+    CfifoPreamble { port: ODSY_CMD_FIFO, size: 4, value: 0x00010046 },
 ];
 
-impl SGIOdysseyState {
+impl Board {
     pub fn selftest_track(&mut self, port: u64, size: u32, value: u64) {
         let next = self.selftest_progress as usize;
 
-        if next < odyssey_cfifo_preamble.len()
-            && odyssey_cfifo_preamble[next].port == port
-            && odyssey_cfifo_preamble[next].size == size
-            && odyssey_cfifo_preamble[next].value == value
+        if next < CFIFO_PREAMBLE.len()
+            && CFIFO_PREAMBLE[next].port == port
+            && CFIFO_PREAMBLE[next].size == size
+            && CFIFO_PREAMBLE[next].value == value
         {
             self.selftest_progress = next as u32 + 1;
-            if self.selftest_progress as usize == odyssey_cfifo_preamble.len() {
+            if self.selftest_progress as usize == CFIFO_PREAMBLE.len() {
                 self.cfifo_selftest_ready = true;
                 self.selftest_progress = 0;
             }
             return;
         }
         // A break in the sequence restarts it, counting a fresh first word.
-        self.selftest_progress = if odyssey_cfifo_preamble[0].port == port
-            && odyssey_cfifo_preamble[0].size == size
-            && odyssey_cfifo_preamble[0].value == value
+        self.selftest_progress = if CFIFO_PREAMBLE[0].port == port
+            && CFIFO_PREAMBLE[0].size == size
+            && CFIFO_PREAMBLE[0].value == value
         {
             1
         } else {

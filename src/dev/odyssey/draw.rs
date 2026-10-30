@@ -2,17 +2,17 @@
 
 use super::*;
 
-/// The clip-rectangle runs of one row (odyssey_row_runs).
+/// The clip-rectangle runs of one row (Board::row_runs).
 #[derive(Clone, Copy)]
-pub struct OdysseyRowRuns {
+pub struct RowRuns {
     pub n: u32,
     pub start: [i64; SGI_ODYSSEY_CLIP_RECTS as usize],
     pub end: [i64; SGI_ODYSSEY_CLIP_RECTS as usize],
 }
 
-impl Default for OdysseyRowRuns {
+impl Default for RowRuns {
     fn default() -> Self {
-        OdysseyRowRuns { n: 0, start: [0; SGI_ODYSSEY_CLIP_RECTS as usize], end: [0; SGI_ODYSSEY_CLIP_RECTS as usize] }
+        RowRuns { n: 0, start: [0; SGI_ODYSSEY_CLIP_RECTS as usize], end: [0; SGI_ODYSSEY_CLIP_RECTS as usize] }
     }
 }
 
@@ -23,9 +23,9 @@ pub const ODSY_QUERY_NORMAL: u32 = 2;
 pub const ODSY_QUERY_TEXCOORD: u32 = 3;
 pub const ODSY_QUERY_EDGE: u32 = 4;
 
-impl SGIOdysseyState {
+impl Board {
     pub fn back_material_reset(&mut self) {
-        self.gl_back_material.copy_from_slice(&odyssey_back_material_defaults);
+        self.gl_back_material.copy_from_slice(&BACK_MATERIAL_DEFAULTS);
         self.gl_back_shininess_sqrt = 0;
     }
 
@@ -103,9 +103,9 @@ impl SGIOdysseyState {
     }
 
     pub fn open_record_vertex(&mut self, word: u32) {
-        let mut v = SGIOdysseyOpenVertex { word, slot: self.gl_open_r, ..Default::default() };
+        let mut v = OpenVertex { word, slot: self.gl_open_r, ..Default::default() };
         let mut n = self.gl_open_held as usize;
-        let arity = (odyssey_cmd_arity(word) as usize).min(4);
+        let arity = (cmd_arity(word) as usize).min(4);
 
         v.operands[..arity].copy_from_slice(&self.cmd_operand[..arity]);
         self.open_current_records(&mut v.attribute);
@@ -229,7 +229,7 @@ impl SGIOdysseyState {
         let normal = self.query_current[ODSY_QUERY_NORMAL as usize];
         let edge = self.query_current[ODSY_QUERY_EDGE as usize][0];
         let open = self.gl_begin_open && !self.gl_integer_prim && self.gl_primitive <= 8;
-        let ar = |w: u32| (odyssey_cmd_arity(w) as usize).min(4);
+        let ar = |w: u32| (cmd_arity(w) as usize).min(4);
 
         if self.gl_begin_open && !open && !self.ctx_open_prim_logged {
             self.ctx_open_prim_logged = true;
@@ -243,11 +243,11 @@ impl SGIOdysseyState {
             self.shadow_put(base, ODSY_HW_CURRENT_ATTRIBUTES + 4 * i, 0);
         }
         self.shadow_put(base, ODSY_HW_INDEX_WORD, index[0]);
-        for i in 0..odyssey_cmd_arity(index[0]) {
+        for i in 0..cmd_arity(index[0]) {
             self.shadow_put(base, ODSY_HW_INDEX_OPERANDS + 4 * i, index[1 + (i as usize).min(3)]);
         }
         self.shadow_put(base, ODSY_HW_COLOUR_WORD, colour[0]);
-        for i in 0..odyssey_cmd_arity(colour[0]) {
+        for i in 0..cmd_arity(colour[0]) {
             self.shadow_put(base, ODSY_HW_COLOUR_OPERANDS + 4 * i, colour[1 + (i as usize).min(3)]);
         }
         self.shadow_ring(base, ODSY_HW_ATTR_INDEX as u32, 0, index[0], &index[1..1 + ar(index[0])]);
@@ -333,7 +333,7 @@ impl SGIOdysseyState {
     /// The kernel driver's context switch: a single 8-byte store to
     /// ODSY_CTX_SWITCH_PORT, not a command-FIFO word. The new context id in bits
     /// 31:16 is not modelled: the board learns the context from the shadow address
-    /// pair, which names where the outgoing state is saved (odyssey_ctx_save()),
+    /// pair, which names where the outgoing state is saved (Board::ctx_save()),
     /// and the kernel restores the rest. A store naming context 0x7f is the
     /// kernel driver's shadow snapshot and saves the same way. Any other shape at
     /// this port has no established meaning and is reported unimplemented instead
@@ -362,19 +362,19 @@ impl SGIOdysseyState {
 
 /// 2D fills carry no alpha channel in this grammar; the framebuffer's fourth
 /// byte is modelled fully opaque (the colour plane's red-high R,G,B,A packing,
-/// resolved by odyssey_resolve_row() below).
-pub fn odyssey_pack_pixel(r: u32, g: u32, b: u32) -> u32 {
+/// resolved by resolve_row() below).
+pub fn pack_pixel(r: u32, g: u32, b: u32) -> u32 {
     (r << 24) | (g << 16) | (b << 8) | 0xff
 }
 
-impl SGIOdysseyState {
-    /// Colour buffer b's board memory and plane (odyssey_realize()), b being 0 or
+impl Board {
+    /// Colour buffer b's board memory and plane (Board::realize()), b being 0 or
     /// 1 in the displayed-buffer bits' sense (ODSY_REG_DRAW_MASK).
-    pub fn buffer_mem(&mut self, b: u32) -> P<SGIBoardMemory> {
+    pub fn buffer_mem(&mut self, b: u32) -> P<BoardMemory> {
         if b != 0 { P::new(&mut self.buffer1_mem) } else { P::new(&mut self.mem) }
     }
 
-    pub fn buffer_plane(&mut self, b: u32) -> P<SGIPlane> {
+    pub fn buffer_plane(&mut self, b: u32) -> P<Plane> {
         if b != 0 {
             self.buffer1_mem.plane(self.buffer1_plane)
         } else {
@@ -433,8 +433,8 @@ impl SGIOdysseyState {
 /// fence a written transfer signals; retrace is the vertical-retrace callback
 /// the shared scanout drives at the mode's rate. dma_address stays None: the
 /// inbound path is direct-mapped.
-pub fn odyssey_publish(opaque: Opaque, c: &SGICompletion) {
-    let s = from_opaque::<SGIOdysseyState>(opaque);
+pub fn publish(opaque: Opaque, c: &Completion) {
+    let s = from_opaque::<Board>(opaque);
 
     // A transfer that reached board or guest memory raises the fence; a
     // failed one does not, so the driver's DMA wait times out as it would on
@@ -446,10 +446,10 @@ pub fn odyssey_publish(opaque: Opaque, c: &SGICompletion) {
 }
 
 /// A run of guest bytes the DMA engine read: the C only traced it.
-pub fn odyssey_dma_chunk(opaque: Opaque, seq: u64, addr: u64, bytes: &[u8]) {
+pub fn dma_chunk(opaque: Opaque, seq: u64, addr: u64, bytes: &[u8]) {
     let _ = seq;
     // The chunks belong to the MMIO write that caused the RAM read.
-    let s = from_opaque::<SGIOdysseyState>(opaque);
+    let s = from_opaque::<Board>(opaque);
     crate::dlog_dev!(
         crate::devlog::LogModule::Odyssey,
         "sgi_odyssey_dma_chunk: seq {} addr {:#x} len {} hex {}",
@@ -460,7 +460,7 @@ pub fn odyssey_dma_chunk(opaque: Opaque, seq: u64, addr: u64, bytes: &[u8]) {
     );
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// The top eight bits of a lookup-RAM entry's ten-bit channels, as RGB.
     pub fn lut_rgb(&mut self, entry: u32) -> u32 {
         let word = if entry < ODSY_LUT_SIZE { self.lut[entry as usize] } else { 0 };
@@ -505,7 +505,7 @@ impl SGIOdysseyState {
 /// shows it: a 4- or 5-bit visual's channel keeps its top bits, repeated down
 /// to fill the byte as a full-scale value. How the board itself stores a
 /// narrow pixel is unknown.
-pub fn odyssey_display_channel(mode: u32, c: u32) -> u32 {
+pub fn display_channel(mode: u32, c: u32) -> u32 {
     match (mode >> ODSY_DISPMODE_WIDTH_SHIFT) & ODSY_DISPMODE_WIDTH_MASK {
         ODSY_DISPMODE_WIDTH_4 => (c & 0xf0) | (c >> 4),
         ODSY_DISPMODE_WIDTH_5 => (c & 0xf8) | (c >> 5),
@@ -523,10 +523,10 @@ pub fn odyssey_display_channel(mode: u32, c: u32) -> u32 {
 /// resolves as an index table and is reported once as unverified. Over all of
 /// that, a pixel whose overlay id's mode is enabled and whose overlay pixel is
 /// not zero shows the overlay colormap entry instead.
-pub fn odyssey_resolve_row(opaque: Opaque, y: u32, dst: &mut [u32]) {
-    let s = from_opaque::<SGIOdysseyState>(opaque);
+pub fn resolve_row(opaque: Opaque, y: u32, dst: &mut [u32]) {
+    let s = from_opaque::<Board>(opaque);
     let width = s.scanout.mode.width.min(SGI_ODYSSEY_WIDTH);
-    // Swaps latch under the board lock (odyssey_retrace()), so the selection
+    // Swaps latch under the board lock (retrace()), so the selection
     // holds for the row.
     let displayed = s.front.lock().displayed_buffer;
 
@@ -547,9 +547,9 @@ pub fn odyssey_resolve_row(opaque: Opaque, y: u32, dst: &mut [u32]) {
         }
         if group >= ODSY_GAMMA_GROUP {
             let mode = s.dispmode[main_id as usize];
-            let r = odyssey_display_channel(mode, word >> 24);
-            let g = odyssey_display_channel(mode, (word >> 16) & 0xff);
-            let b = odyssey_display_channel(mode, (word >> 8) & 0xff);
+            let r = display_channel(mode, word >> 24);
+            let g = display_channel(mode, (word >> 16) & 0xff);
+            let b = display_channel(mode, (word >> 8) & 0xff);
 
             dst[x as usize] = s.gamma(r, ODSY_LUT_RED_SHIFT) << 16
                 | s.gamma(g, ODSY_LUT_GREEN_SHIFT) << 8
@@ -580,8 +580,8 @@ pub fn odyssey_resolve_row(opaque: Opaque, y: u32, dst: &mut [u32]) {
 /// unknown. The model latches at its retrace callback and repaints the whole
 /// frame from the new selection; a frame is never presented half from each
 /// buffer.
-pub fn odyssey_retrace(opaque: Opaque) {
-    let s = from_opaque::<SGIOdysseyState>(opaque);
+pub fn retrace(opaque: Opaque) {
+    let s = from_opaque::<Board>(opaque);
     let mut f = s.front.lock();
     let flips = f.swap_arm;
     let mut repaint = false;
@@ -610,8 +610,8 @@ pub fn odyssey_retrace(opaque: Opaque) {
 /// Scanout reads the planes under the board lock, which the board's thread
 /// holds for a whole slice, so no draw runs meanwhile. A processor's write
 /// of the displayed-buffer register reached only the front: repaint for it.
-pub fn odyssey_pre_update(opaque: Opaque) {
-    let s = from_opaque::<SGIOdysseyState>(opaque);
+pub fn pre_update(opaque: Opaque) {
+    let s = from_opaque::<Board>(opaque);
     let written = std::mem::take(&mut s.front.lock().displayed_written);
 
     if written {
@@ -619,25 +619,25 @@ pub fn odyssey_pre_update(opaque: Opaque) {
     }
 }
 
-pub static odyssey_head_ops: SGIHeadOps = SGIHeadOps {
-    publish: Some(odyssey_publish),
-    resolve_row: Some(odyssey_resolve_row),
-    pre_update: Some(odyssey_pre_update),
+pub static HEAD_OPS: HeadOps = HeadOps {
+    publish: Some(publish),
+    resolve_row: Some(resolve_row),
+    pre_update: Some(pre_update),
     convert_row: None,
     answer: None,
     dma_address: None,
-    dma_chunk: Some(odyssey_dma_chunk),
-    retrace: Some(odyssey_retrace),
+    dma_chunk: Some(dma_chunk),
+    retrace: Some(retrace),
 };
 
-impl SGIOdysseyState {
+impl Board {
     /// Rebuild the kept (non-empty) clip rectangles from the raw 0x204b words.
     pub fn clip_update(&mut self) {
         self.clip_kept = 0;
         for i in 0..SGI_ODYSSEY_CLIP_RECTS as usize {
             let lo = self.clip_words[2 * i];
             let hi = self.clip_words[2 * i + 1];
-            let r = SGIClipRect {
+            let r = ClipRect {
                 x0: ((lo >> ODSY_CLIP_X_SHIFT) & ODSY_CLIP_FIELD_MASK) as i32,
                 y0: (lo & ODSY_CLIP_FIELD_MASK) as i32,
                 x1: ((hi >> ODSY_CLIP_X_SHIFT) & ODSY_CLIP_FIELD_MASK) as i32,
@@ -665,7 +665,7 @@ impl SGIOdysseyState {
 
     /// The plane bound. The plane itself drops an out-of-plane store, but the
     /// family checks first so the shared code never has to guess whose error it
-    /// is. odyssey_pixel_allowed() adds the window tests for every write except a
+    /// is. Board::pixel_allowed() adds the window tests for every write except a
     /// copy destination, which calls this helper directly.
     pub fn pixel_in_bounds(&mut self, x: i64, y: i64) -> bool {
         x >= 0 && y >= 0 && x < SGI_ODYSSEY_WIDTH as i64 && y < SGI_ODYSSEY_HEIGHT as i64
@@ -700,11 +700,11 @@ impl SGIOdysseyState {
         false
     }
 
-    /// The pixels of one row that odyssey_pixel_allowed() passes before its id
+    /// The pixels of one row that Board::pixel_allowed() passes before its id
     /// test: the plane bound and the union of the kept clip rectangles, as
     /// ascending, disjoint, non-touching [start, end) runs. The 2D fills walk
     /// these a row at a time; they still apply the id test per pixel.
-    pub fn row_runs(&mut self, y: i64, runs: &mut OdysseyRowRuns) {
+    pub fn row_runs(&mut self, y: i64, runs: &mut RowRuns) {
         let mut n = 0usize;
         let mut kept = 0usize;
 
@@ -746,12 +746,12 @@ impl SGIOdysseyState {
 
     /// Colour buffer b's bytes for the n pixels of row y from x, when all of them
     /// lie in its plane and its device-backed memory: the same bytes
-    /// sgi_plane_store() and sgi_plane_load() reach one pixel at a time. Null
+    /// BoardMemory::plane_store() and BoardMemory::plane_load() reach one pixel at a time. Null
     /// otherwise, and the caller goes a pixel at a time.
-    pub fn buffer_row(&mut self, b: u32, x: i64, y: i64, n: i64, plane: &mut P<SGIPlane>, bpp: &mut u32) -> P<u8> {
+    pub fn buffer_row(&mut self, b: u32, x: i64, y: i64, n: i64, plane: &mut P<Plane>, bpp: &mut u32) -> P<u8> {
         let m = self.buffer_mem(b);
         let p = self.buffer_plane(b);
-        let size = sgi_plane_bytes_per_pixel(p.format);
+        let size = plane_bytes_per_pixel(p.format);
 
         if m.bytes.is_empty() || n <= 0 || x < 0 || y < 0 || x + n > p.width as i64 || y >= p.height as i64 {
             return P::null();
@@ -784,11 +784,11 @@ impl SGIOdysseyState {
 /// The plane word a fill stores: the packed RGB pixel of an RGB fill, or the
 /// raw index of a colour-index fill. No colormap is applied here: scanout
 /// resolves each pixel through its own drawable.
-pub fn odyssey_fill_pixel(is_index: bool, value: u32) -> u32 {
+pub fn fill_pixel(is_index: bool, value: u32) -> u32 {
     if is_index { value & ODSY_INDEX_MASK } else { value }
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// One pixel's id-plane write: the bits mask selects of the id byte when the
     /// drawing mask selects buffer 0, and of the overlay pixel byte when it
     /// selects buffer 1.
@@ -821,7 +821,7 @@ impl SGIOdysseyState {
         if op as u32 != SGI_LOGIC_COPY {
             let dst = if buffers & (1u32 << ODSY_AUX_OVERLAY_BUFFER) != 0 { self.overlay[at as usize] } else { self.did[at as usize] };
 
-            byte = sgi_logic_op(op, index, dst as u32) as u8;
+            byte = logic_op(op, index, dst as u32) as u8;
         }
         self.aux_store(at, buffers, byte, (self.plane_write_mask >> ODSY_PLANE_MASK_SHIFT) as u8);
     }
@@ -844,7 +844,7 @@ impl SGIOdysseyState {
     /// instead, under the 0x1023 plane mask. Its logical operation reads the
     /// overlay byte when buffer 1 is selected and the id byte otherwise.
     pub fn paint_integer(&mut self, x: i64, y: i64, is_index: bool, value: u32) {
-        let src = odyssey_fill_pixel(is_index, value);
+        let src = fill_pixel(is_index, value);
         let enable = if is_index { ODSY_MODE_INDEX_LOGIC_OP } else { ODSY_MODE_COLOR_LOGIC_OP };
         let op = self.gl_ctx.cur.logic_op_mode.wrapping_sub(SGI_GL_CLEAR) as u8;
         let buffers = self.draw_buffers();
@@ -864,20 +864,20 @@ impl SGIOdysseyState {
         }
         for b in 0..ODSY_BUFFERS {
             if buffers & (1u32 << b) != 0 {
-                let out = sgi_logic_op(op, src, self.buffer_load(b, x, y));
+                let out = logic_op(op, src, self.buffer_load(b, x, y));
 
                 self.buffer_store(b, x, y, if is_index { out & ODSY_INDEX_MASK } else { out | 0xff });
             }
         }
     }
 
-    /// odyssey_paint_integer() at each pixel of row y from x0 up to x1, given the
+    /// Board::paint_integer() at each pixel of row y from x0 up to x1, given the
     /// row's runs, a run of the buffer's bytes at a time. Each pixel is tested,
     /// combined and stored exactly as the per-pixel path does it. Pixels are
     /// independent, so going a buffer at a time rather than a pixel at a time
     /// stores the same bytes.
-    pub fn paint_integer_span(&mut self, runs: &OdysseyRowRuns, y: i64, x0: i64, x1: i64, is_index: bool, value: u32) {
-        let src = odyssey_fill_pixel(is_index, value);
+    pub fn paint_integer_span(&mut self, runs: &RowRuns, y: i64, x0: i64, x1: i64, is_index: bool, value: u32) {
+        let src = fill_pixel(is_index, value);
         let enable = if is_index { ODSY_MODE_INDEX_LOGIC_OP } else { ODSY_MODE_COLOR_LOGIC_OP };
         let op = self.gl_ctx.cur.logic_op_mode.wrapping_sub(SGI_GL_CLEAR) as u8;
         let logic = (self.pattern_mode & enable) != 0 && op as u32 != SGI_LOGIC_COPY;
@@ -905,7 +905,7 @@ impl SGIOdysseyState {
                 continue;
             }
             for b in 0..ODSY_BUFFERS {
-                let mut plane: P<SGIPlane> = P::null();
+                let mut plane: P<Plane> = P::null();
                 let mut word = [0u8; 4];
                 let mut bpp = 0u32;
 
@@ -921,7 +921,7 @@ impl SGIOdysseyState {
                             continue;
                         }
                         if logic {
-                            out = sgi_logic_op(op, src, self.buffer_load(b, x, y));
+                            out = logic_op(op, src, self.buffer_load(b, x, y));
                             out = if is_index { out & ODSY_INDEX_MASK } else { out | 0xff };
                         }
                         self.buffer_store(b, x, y, out);
@@ -940,7 +940,7 @@ impl SGIOdysseyState {
                         px.copy_from_slice(&word[..bpp as usize]);
                         continue;
                     }
-                    let out = sgi_logic_op(op, src, plane.decode(px));
+                    let out = logic_op(op, src, plane.decode(px));
                     plane.encode(if is_index { out & ODSY_INDEX_MASK } else { out | 0xff }, px);
                 }
             }
@@ -948,12 +948,12 @@ impl SGIOdysseyState {
     }
 
     /// odyssey_fillrect(): BEGIN(QUADS)/COLOR_3UB or COLOR_INDEX/four VERTEX_2I
-    /// corners/END drives the solid rectangle fill. odyssey_gl_end() routes a
-    /// QUADS fill here when pattern mode is off, and to odyssey_pattern_fill()
+    /// corners/END drives the solid rectangle fill. Board::gl_end() routes a
+    /// QUADS fill here when pattern mode is off, and to Board::pattern_fill()
     /// when it is on. is_index selects whether value is a packed RGB pixel or a
     /// PseudoColor index resolved per pixel.
     pub fn fill_rect(&mut self, x: u32, y: u32, w: u32, h: u32, is_index: bool, value: u32) {
-        let mut runs = OdysseyRowRuns::default();
+        let mut runs = RowRuns::default();
 
         for row in 0..h {
             self.row_runs(y as i64 + row as i64, &mut runs);
@@ -962,7 +962,7 @@ impl SGIOdysseyState {
         self.scanout.invalidate_all();
     }
 
-    /// odyssey_clear_planes(): the X server's write to the id-plane destination.
+    /// Board::clear_planes(): the X server's write to the id-plane destination.
     /// For each pixel of the rectangle, replace the plane bits the 0x1023 mask
     /// selects with the value the COLOR_INDEX word carried, in the id byte when
     /// the drawing mask selects buffer 0 and in the overlay pixel byte when it
@@ -970,7 +970,7 @@ impl SGIOdysseyState {
     pub fn clear_planes(&mut self, x: u32, y: u32, w: u32, h: u32, value: u8, mask: u8) {
         let buffers = self.draw_buffers();
         let id_test = self.id_compare_active();
-        let mut runs = OdysseyRowRuns::default();
+        let mut runs = RowRuns::default();
 
         for row in 0..h {
             let py = y as i64 + row as i64;
@@ -1001,8 +1001,8 @@ impl SGIOdysseyState {
     /// uncleared read selection, so the copy runs within each buffer the drawing
     /// mask selects, source and destination in the same buffer.
     ///
-    /// Approximation, inferred: a destination pixel passes odyssey_pixel_in_bounds()
-    /// only, not the window-clip rectangles odyssey_pixel_allowed() also tests.
+    /// Approximation, inferred: a destination pixel passes Board::pixel_in_bounds()
+    /// only, not the window-clip rectangles Board::pixel_allowed() also tests.
     pub fn copy_rect_buffer(&mut self, source: u32, dest: u32) {
         let sx = self.copy_src & 0xffff;
         let sy = (self.copy_src >> 16) & 0xffff;
@@ -1017,8 +1017,8 @@ impl SGIOdysseyState {
 
         for row in 0..h_clip {
             let sr = if reverse_rows { h_clip - 1 - row } else { row };
-            let mut src_plane: P<SGIPlane> = P::null();
-            let mut dst_plane: P<SGIPlane> = P::null();
+            let mut src_plane: P<Plane> = P::null();
+            let mut dst_plane: P<Plane> = P::null();
             let mut src_bpp = 0u32;
             let mut dst_bpp = 0u32;
             let src_row = if w_clip != 0 {
@@ -1155,7 +1155,7 @@ impl SGIOdysseyState {
         if is_index {
             return r;
         }
-        odyssey_pack_pixel(r >> 4, g >> 4, b >> 4)
+        pack_pixel(r >> 4, g >> 4, b >> 4)
     }
 
     /// A pattern quad: paint the current colour at each pixel whose pattern bit is
@@ -1166,7 +1166,7 @@ impl SGIOdysseyState {
     pub fn pattern_fill(&mut self, x: u32, y: u32, w: u32, h: u32, pat_u0: u32, pat_v0: u32, is_index: bool, value: u32) {
         let opaque = self.pattern_shape & ODSY_PATTERN_SHAPE_OPAQUE != 0;
         let background = self.pattern_background(is_index);
-        let mut runs = OdysseyRowRuns::default();
+        let mut runs = RowRuns::default();
 
         // Each row as spans of equal pattern bits, painted a span at a time.
         for v in 0..h {
@@ -1207,7 +1207,7 @@ impl SGIOdysseyState {
 /// with an integer-to-float convert, so the 32-bit operand is a float bit
 /// pattern, not an integer. Truncate toward zero; a NaN or negative clamps to
 /// the screen origin.
-pub fn odyssey_float_to_u32(bits: u32) -> u32 {
+pub fn float_to_u32(bits: u32) -> u32 {
     let f = f32::from_bits(bits);
 
     if !(f > 0.0f32) {
@@ -1216,9 +1216,9 @@ pub fn odyssey_float_to_u32(bits: u32) -> u32 {
     f as u32
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// The index of the object at board base base, or -1. A base names at most
-    /// one live object (odyssey_object_select()), so the index's entry is the one
+    /// one live object (Board::object_select()), so the index's entry is the one
     /// a search of obj_base would find.
     pub fn object_find(&mut self, base: u32) -> i32 {
         if base == 0 {
@@ -1592,7 +1592,7 @@ impl SGIOdysseyState {
     }
 
     /// Lay one image pixel, as 0xRRGGBBAA, at the raster cursor in the selected
-    /// buffer (odyssey_image_object()) and advance it. Each axis is a directed
+    /// buffer (Board::image_object()) and advance it. Each axis is a directed
     /// half-open interval: increasing endpoints visit [first, last), while
     /// decreasing endpoints visit [first - 1, last]. Payload advances along X,
     /// then along Y.
@@ -1659,12 +1659,12 @@ impl SGIOdysseyState {
     }
 }
 
-pub fn odyssey_unorm16_to_8(v: u32) -> u32 {
+pub fn unorm16_to_8(v: u32) -> u32 {
     (v.wrapping_mul(255).wrapping_add(65535 / 2)) / 65535
 }
 
 /// Components of a 12-bit texture source code, or 0 for any other code.
-pub fn odyssey_texel12_components(code: u32) -> u32 {
+pub fn texel12_components(code: u32) -> u32 {
     match code {
         ODSY_IMAGE_CODE_LUM12 => 1,
         ODSY_IMAGE_CODE_LUM_ALPHA12 => 2,
@@ -1676,34 +1676,34 @@ pub fn odyssey_texel12_components(code: u32) -> u32 {
 
 /// A 12-bit texture source pixel as 0xRRGGBBAA: its components, each a byte or
 /// (wide) a big-endian 16-bit word, in the order its code names.
-pub fn odyssey_decode_texel12(code: u32, b: &[u8], wide: bool) -> u32 {
+pub fn decode_texel12(code: u32, b: &[u8], wide: bool) -> u32 {
     let mut c = [0u32; 4];
-    let n = odyssey_texel12_components(code) as usize;
+    let n = texel12_components(code) as usize;
 
     for i in 0..n {
-        c[i] = if wide { odyssey_unorm16_to_8(lduw_be_p(&b[2 * i..])) } else { b[i] as u32 };
+        c[i] = if wide { unorm16_to_8(lduw_be_p(&b[2 * i..])) } else { b[i] as u32 };
     }
     match code {
-        ODSY_IMAGE_CODE_LUM12 => odyssey_pack_pixel(c[0], c[0], c[0]),
-        ODSY_IMAGE_CODE_LUM_ALPHA12 => (odyssey_pack_pixel(c[0], c[0], c[0]) & !0xffu32) | c[1],
-        ODSY_IMAGE_CODE_RGB12 => odyssey_pack_pixel(c[0], c[1], c[2]),
-        ODSY_IMAGE_CODE_ABGR12 => (odyssey_pack_pixel(c[3], c[2], c[1]) & !0xffu32) | c[0],
-        _ => (odyssey_pack_pixel(c[0], c[1], c[2]) & !0xffu32) | c[3],
+        ODSY_IMAGE_CODE_LUM12 => pack_pixel(c[0], c[0], c[0]),
+        ODSY_IMAGE_CODE_LUM_ALPHA12 => (pack_pixel(c[0], c[0], c[0]) & !0xffu32) | c[1],
+        ODSY_IMAGE_CODE_RGB12 => pack_pixel(c[0], c[1], c[2]),
+        ODSY_IMAGE_CODE_ABGR12 => (pack_pixel(c[3], c[2], c[1]) & !0xffu32) | c[0],
+        _ => (pack_pixel(c[0], c[1], c[2]) & !0xffu32) | c[3],
     }
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// Decode one pixel of a byte-stream source format whose bytes are b[0 ..]:
     /// its 0xRRGGBBAA word, or for 0x41 and 0x61 the raw index. False for a code
     /// this model does not know.
     pub fn decode_pixel(&mut self, code: u32, b: &[u8], rgba: &mut u32) -> bool {
         match code {
             ODSY_IMAGE_CODE_ABGR => {
-                *rgba = odyssey_pack_pixel(b[3] as u32, b[2] as u32, b[1] as u32);
+                *rgba = pack_pixel(b[3] as u32, b[2] as u32, b[1] as u32);
                 true
             }
             ODSY_IMAGE_CODE_FALLBACK_XRGB => {
-                *rgba = odyssey_pack_pixel(b[1] as u32, b[2] as u32, b[3] as u32);
+                *rgba = pack_pixel(b[1] as u32, b[2] as u32, b[3] as u32);
                 true
             }
             ODSY_IMAGE_CODE_RGBA | ODSY_IMAGE_CODE_RGBA12 => {
@@ -1711,20 +1711,20 @@ impl SGIOdysseyState {
                 true
             }
             ODSY_IMAGE_CODE_RGB => {
-                *rgba = odyssey_pack_pixel(b[0] as u32, b[1] as u32, b[2] as u32);
+                *rgba = pack_pixel(b[0] as u32, b[1] as u32, b[2] as u32);
                 true
             }
             ODSY_IMAGE_CODE_LUM => {
-                *rgba = odyssey_pack_pixel(b[0] as u32, b[0] as u32, b[0] as u32);
+                *rgba = pack_pixel(b[0] as u32, b[0] as u32, b[0] as u32);
                 true
             }
             ODSY_IMAGE_CODE_LUM_ALPHA => {
-                *rgba = (odyssey_pack_pixel(b[0] as u32, b[0] as u32, b[0] as u32) & !0xffu32) | b[1] as u32;
+                *rgba = (pack_pixel(b[0] as u32, b[0] as u32, b[0] as u32) & !0xffu32) | b[1] as u32;
                 true
             }
             ODSY_IMAGE_CODE_LUM12 | ODSY_IMAGE_CODE_LUM_ALPHA12 => {
-                // A burst's 16-bit components (odyssey_pixel_bytes()).
-                *rgba = odyssey_decode_texel12(code, b, true);
+                // A burst's 16-bit components (pixel_bytes()).
+                *rgba = decode_texel12(code, b, true);
                 true
             }
             ODSY_IMAGE_CODE_CI => {
@@ -1742,12 +1742,12 @@ impl SGIOdysseyState {
 }
 
 /// Whether a source format carries colour indices rather than colours.
-pub fn odyssey_code_is_index(code: u32) -> bool {
+pub fn code_is_index(code: u32) -> bool {
     code == ODSY_IMAGE_CODE_CI || code == ODSY_IMAGE_CODE_CI16
 }
 
 /// Bytes a pixel of a source format takes, 0 for an unknown code.
-pub fn odyssey_pixel_bytes(code: u32) -> u32 {
+pub fn pixel_bytes(code: u32) -> u32 {
     match code {
         ODSY_IMAGE_CODE_ABGR | ODSY_IMAGE_CODE_FALLBACK_XRGB | ODSY_IMAGE_CODE_RGBA | ODSY_IMAGE_CODE_RGBA12 => 4,
         ODSY_IMAGE_CODE_RGB => 3,
@@ -1758,7 +1758,7 @@ pub fn odyssey_pixel_bytes(code: u32) -> u32 {
     }
 }
 
-pub fn odyssey_image_pairing_supported(code: u32, fmt: u32) -> bool {
+pub fn image_pairing_supported(code: u32, fmt: u32) -> bool {
     if code == ODSY_IMAGE_CODE_RGBA12 {
         return fmt == ODSY_IMAGE_FMT_RGB || fmt == ODSY_IMAGE_FMT_RGBA16;
     }
@@ -1771,28 +1771,28 @@ pub fn odyssey_image_pairing_supported(code: u32, fmt: u32) -> bool {
     fmt != ODSY_IMAGE_FMT_RGBA16
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// One data word of a pixel burst, laid out by the transfer header's format
     /// code: its bytes join a stream that yields a pixel every
-    /// odyssey_pixel_bytes() bytes, so a three-byte pixel may span two words. A
+    /// pixel_bytes() bytes, so a three-byte pixel may span two words. A
     /// bounded group's trailing padding (past image_group_len) is dropped with any
     /// partial pixel, so the raster position stays exact. A header with a code
     /// this model does not know falls back on the burst tag's format, 0x11 one
     /// 0x00RRGGBB pixel a word and 0x10 four indices, and is reported once.
     pub fn image_burst_word(&mut self, word: u32) {
         let mut code = self.image_code;
-        let mut n = odyssey_pixel_bytes(code);
+        let mut n = pixel_bytes(code);
         let mut b = [0u8; 4];
 
-        if !odyssey_image_pairing_supported(code, self.image_fmt) {
+        if !image_pairing_supported(code, self.image_fmt) {
             return;
         }
         if self.image_fmt == ODSY_IMAGE_FMT_RGBA16 {
             // A stream of 16-bit components, high half first, a pixel every
-            // odyssey_texel12_components() halves: two words for 0x6b and 0x6c, a
+            // texel12_components() halves: two words for 0x6b and 0x6c, a
             // word and a half for 0x69. At most two halves wait between words;
             // image_nbytes counts them, image_bytes holds them.
-            let comps = odyssey_texel12_components(code) as usize;
+            let comps = texel12_components(code) as usize;
             let mut halves = [0u16; 4];
             let mut held = self.image_nbytes.min(2) as usize;
 
@@ -1813,7 +1813,7 @@ impl SGIOdysseyState {
                 for i in 0..comps {
                     stw_be_p(&mut px[2 * i..], halves[i] as u32);
                 }
-                self.image_put(odyssey_decode_texel12(code, &px, true), false, true);
+                self.image_put(decode_texel12(code, &px, true), false, true);
                 held = 0;
             }
             self.image_bytes = if held > 1 {
@@ -1838,7 +1838,7 @@ impl SGIOdysseyState {
                 crate::qlog!("sgi-odyssey: image source format {:#x} is not modeled; laid out by the burst tag", code);
             }
             code = if self.image_fmt == ODSY_IMAGE_FMT_RGB { ODSY_IMAGE_CODE_FALLBACK_XRGB } else { ODSY_IMAGE_CODE_CI };
-            n = odyssey_pixel_bytes(code);
+            n = pixel_bytes(code);
         }
         stl_be_p(&mut b, word);
         for i in 0..4 {
@@ -1854,13 +1854,13 @@ impl SGIOdysseyState {
             // The pixel's bytes, first byte highest, at the start of px[].
             stl_be_p(&mut px, self.image_bytes << (8 * (4 - n)));
             self.decode_pixel(code, &px, &mut rgba);
-            self.image_texel(rgba, odyssey_code_is_index(code));
+            self.image_texel(rgba, code_is_index(code));
         }
     }
 }
 
 /// True, and set *fmt, when reg is a pixel-burst register-select word.
-pub fn odyssey_image_burst_fmt(reg: u32, fmt: &mut u32) -> bool {
+pub fn image_burst_fmt(reg: u32, fmt: &mut u32) -> bool {
     let f = reg & ODSY_IMAGE_BURST_FMT_MASK;
 
     if (reg & ODSY_IMAGE_BURST_BASE) == 0 || (reg & ODSY_IMAGE_BURST_RESERVED_MASK) != 0 {
@@ -1878,14 +1878,14 @@ pub fn odyssey_image_burst_fmt(reg: u32, fmt: &mut u32) -> bool {
 
 /// The family side of the shared OpenGL context and software rasterizer: a
 /// thin decoder. The rasterizer rule set is chosen, pending capture: the
-/// Octane RE4 set is the only one sgi_raster_rules_supported() implements,
+/// Octane RE4 set is the only one RasterRules::rules_supported() implements,
 /// and a flat single triangle in one colour exercises none of the parameters
 /// that distinguish heads. The board's own subpixel grid and
 /// interpolated-colour depth are unmeasured. The floating-point depth rule is
 /// inferred, not measured. (A function, not a static: the struct is not const
 /// constructible.)
-pub fn odyssey_gl_rules() -> SGIRasterRules {
-    SGIRasterRules {
+pub fn gl_rules() -> RasterRules {
+    RasterRules {
         subpixel_bits: 8,
         color_bits: 8,
         depth_bits: 24,
@@ -1896,7 +1896,7 @@ pub fn odyssey_gl_rules() -> SGIRasterRules {
         line_rule: SGI_LINE_COVERAGE_DOUBLE as u8,
         alpha_test_bits: 12,
         smooth_primitives: true,
-        // The board's own depth format; odyssey_gl_load_combined().
+        // The board's own depth format; Board::gl_load_combined().
         depth_float: true,
         ..Default::default()
     }

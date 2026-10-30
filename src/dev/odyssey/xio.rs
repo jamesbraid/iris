@@ -46,8 +46,8 @@ pub fn sgi_xio_compose(who: &str, widget: u32, address: u64, packet: &mut u64) -
 /// HEART's interrupt-packet register in its widget space.
 const HEART_PACKET: u64 = 0x80;
 
-impl OdysseyFront {
-    /// `sgi_xio_send_interrupt(&s->fabric_as, packet, number, set)`: the
+impl HostInterface {
+    /// `HostInterface::send_interrupt(&s->fabric_as, packet, number, set)`: the
     /// interrupt-modify write. HEART takes it at 0x80 of widget 8.
     pub fn send_interrupt(&mut self, packet: u64, number: u8, set: bool) -> MemTxResult {
         let widget = (packet >> SGI_XIO_PACKET_ADDRESS_BITS) as u32;
@@ -67,7 +67,7 @@ impl OdysseyFront {
 }
 
 /// The window the board shows the guest: what `GfxDisplay` hands out.
-pub struct OdysseyDisplay {
+pub struct Display {
     pub renderer: Mutex<Option<Box<dyn Renderer>>>,
     pub screen: Mutex<Rex3Screen>,
     pub cycles: Mutex<CyclesPtr>,
@@ -83,7 +83,7 @@ struct Local {
     size: (usize, usize),
 }
 
-impl OdysseyDisplay {
+impl Display {
     fn new() -> Self {
         Self {
             renderer: Mutex::new(None),
@@ -154,16 +154,16 @@ impl OdysseyDisplay {
 
 /// The VPro board on widget `slot`: a `BusDevice` for the widget's
 /// windows.
-pub struct OdysseyXio {
+pub struct Odyssey {
     small: u64,
     large: u64,
-    pub state: OdysseyHandles,
-    pub display: Arc<OdysseyDisplay>,
+    pub state: BoardLocks,
+    pub display: Arc<Display>,
     running: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
-impl OdysseyXio {
+impl Odyssey {
     /// A board of `product` (v12, v10, v8, v6) at `widget`: its interrupt
     /// packets reach `irq` (HEART), its DMA reaches `mem`.
     pub fn new(
@@ -178,8 +178,8 @@ impl OdysseyXio {
         Ok(Arc::new(Self {
             small: widget_small_base(widget),
             large: widget_large_base(widget),
-            state: OdysseyHandles::new(s),
-            display: Arc::new(OdysseyDisplay::new()),
+            state: BoardLocks::new(s),
+            display: Arc::new(Display::new()),
             running: Arc::new(AtomicBool::new(false)),
             thread: Mutex::new(None),
         }))
@@ -220,7 +220,7 @@ impl OdysseyXio {
 
     /// One display frame: the retrace if it is due, then the dirty lines
     /// resolved and the frame presented.
-    fn frame(state: &OdysseyHandles, display: &OdysseyDisplay) {
+    fn frame(state: &BoardLocks, display: &Display) {
         let (frame, w, h) = {
             let mut s = state.board.lock();
             s.scanout.poll(qemu_clock_virtual_ns());
@@ -233,7 +233,7 @@ impl OdysseyXio {
     }
 }
 
-impl crate::gfx_display::GfxDisplay for OdysseyDisplay {
+impl crate::gfx_display::GfxDisplay for Display {
     fn renderer_slot(&self) -> &Mutex<Option<Box<dyn Renderer>>> {
         &self.renderer
     }
@@ -257,7 +257,7 @@ impl crate::gfx_display::GfxDisplay for OdysseyDisplay {
     }
 }
 
-impl BusDevice for OdysseyXio {
+impl BusDevice for Odyssey {
     fn read8(&self, addr: u64) -> BusRead8 {
         let (status, data) = self.read(addr, 1);
         BusRead8 { status, data: data as u8 }
@@ -291,7 +291,7 @@ impl BusDevice for OdysseyXio {
 /// The display thread's frame period: the modelled mode's 60 Hz.
 const FRAME_PERIOD: std::time::Duration = std::time::Duration::from_micros(16_667);
 
-impl Device for OdysseyXio {
+impl Device for Odyssey {
     fn step(&self, _cycles: u64) {}
 
     fn start(&self) {
@@ -308,7 +308,7 @@ impl Device for OdysseyXio {
                 .spawn(move || {
                     let mut next = std::time::Instant::now();
                     while running.load(Ordering::Acquire) {
-                        OdysseyXio::frame(&state, &display);
+                        Odyssey::frame(&state, &display);
                         next += FRAME_PERIOD;
                         let now = std::time::Instant::now();
                         if next > now {
@@ -340,7 +340,7 @@ impl Device for OdysseyXio {
     }
 }
 
-impl Drop for OdysseyXio {
+impl Drop for Odyssey {
     fn drop(&mut self) {
         // The work thread holds a clone of the state's handles; stop it
         // so the state can go.
@@ -348,7 +348,7 @@ impl Drop for OdysseyXio {
     }
 }
 
-impl Resettable for OdysseyXio {
+impl Resettable for Odyssey {
     fn power_on(&self) {
         self.state.board.lock().reset_hold();
     }
@@ -368,10 +368,10 @@ mod tests {
     const WIDGET: u8 = 11;
     const VECTOR: u32 = 18;
 
-    fn board() -> (Arc<Heart>, Arc<OdysseyXio>) {
+    fn board() -> (Arc<Heart>, Arc<Odyssey>) {
         let heart = Arc::new(Heart::new(HeartConfig::octane([128 << 20, 0, 0, 0]), host_clock()));
         let ram = Arc::new(HeartRam::try_new([128, 0, 0, 0]).expect("ram"));
-        let v = OdysseyXio::new(WIDGET, "v12", heart.clone(), ram.dma_view()).expect("board");
+        let v = Odyssey::new(WIDGET, "v12", heart.clone(), ram.dma_view()).expect("board");
         (heart, v)
     }
 

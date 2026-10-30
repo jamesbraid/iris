@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl SGIOdysseyState {
+impl Board {
     pub fn write_dispatch(&mut self, addr: u64, value: u64, size: u32) {
         crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_mmio: seq {} offset {:#x} size {} value {:#x} write=1", self.trace_sequence, addr, size, value);
         self.trace_sequence = self.trace_sequence.wrapping_add(1);
@@ -31,13 +31,13 @@ impl SGIOdysseyState {
 
         // Registers that do not wait for the board's work live in the front
         // (front.rs).
-        if odyssey_front_register(addr, size, true) {
+        if front_register(addr, size, true) {
             self.front.lock().write(addr, value, size);
             return;
         }
 
         // -1 (no register) becomes u64::MAX, which no constant matches.
-        match odyssey_reg(addr, size) as u64 {
+        match reg(addr, size) as u64 {
             ODSY_RESET_CONTROL => {
                 crate::qlog!(
                     "sgi-odyssey: write of {:#x} to the reset control register accepted; its effect is unknown\n",
@@ -121,7 +121,7 @@ impl SGIOdysseyState {
     // So every store that joins the command stream waits in a queue, in
     // order, and the board's thread (worker.rs) runs the queue in slices under
     // the board lock. Accesses that must see the drawing take the board lock
-    // and run what is still queued first (odyssey_work_drain). With no thread
+    // and run what is still queued first (Board::work_drain). With no thread
     // running (unit tests) the storing caller runs the store itself.
     //
     // The Octane has no PI link (only Hub and Bedrock machines have graphics
@@ -133,25 +133,25 @@ impl SGIOdysseyState {
     }
 }
 
-pub fn odyssey_fifo_port(addr: u64) -> bool {
+pub fn fifo_port(addr: u64) -> bool {
     addr == ODSY_USER_CMD_FIFO || addr == ODSY_CMD_FIFO
 }
 
 /// The stores that join the command stream: the two command-FIFO ports, and
 /// the kernel's context switch, the shadow address it names and the switch
 /// store itself.
-pub fn odyssey_command_store(addr: u64, size: u32) -> bool {
-    odyssey_fifo_port(addr)
+pub fn command_store(addr: u64, size: u32) -> bool {
+    fifo_port(addr)
         || (addr == ODSY_CTX_SWITCH_PORT && size == 8)
-        || odyssey_reg(addr, size) == ODSY_CTX_SHADOW_ADDR_UPPER as i64
-        || odyssey_reg(addr, size) == ODSY_CTX_SHADOW_ADDR_LOWER as i64
+        || reg(addr, size) == ODSY_CTX_SHADOW_ADDR_UPPER as i64
+        || reg(addr, size) == ODSY_CTX_SHADOW_ADDR_LOWER as i64
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// Run the oldest waiting stores until the budget is spent. The caller
     /// holds the board lock and not the front lock: the board's thread for a
     /// slice, or an access that drains.
-    pub fn work_step(&mut self, b: &mut OdysseyBudget) {
+    pub fn work_step(&mut self, b: &mut Budget) {
         #[cfg(test)]
         {
             // A slice that holds the board as a long draw would.
@@ -191,7 +191,7 @@ impl SGIOdysseyState {
             return;
         }
         let start = std::time::Instant::now();
-        self.work_step(&mut OdysseyBudget::words(waiting));
+        self.work_step(&mut Budget::words(waiting));
         crate::dlog_dev!(crate::devlog::LogModule::Odyssey, "sgi_odyssey_work: drained offset {:#x} in {:?}", addr, start.elapsed());
     }
 }
@@ -199,13 +199,13 @@ impl SGIOdysseyState {
 /// Accesses that need not wait for the queued stores, and act on the board
 /// as it stands. Inferred from what a driver does while the board works,
 /// not measured on a board; every other access waits.
-pub fn odyssey_access_waits(addr: u64, size: u32, write: bool) -> bool {
+pub fn access_waits(addr: u64, size: u32, write: bool) -> bool {
     let cursor = ODSY_BACKEND_READ_BASE + ((ODSY_CURSOR_BASE as u64) << 3);
 
-    if odyssey_fifo_port(addr) {
+    if fifo_port(addr) {
         return !write;
     }
-    if odyssey_reg(addr, size) < 0 {
+    if reg(addr, size) < 0 {
         // Outside the modeled registers only the back-end and
         // context-switch ports and the cursor do anything; the rest is
         // logged and answers zero, so it need not wait.
@@ -218,7 +218,7 @@ pub fn odyssey_access_waits(addr: u64, size: u32, write: bool) -> bool {
         return false;
     }
     !matches!(
-        odyssey_reg(addr, size) as u64,
+        reg(addr, size) as u64,
         ODSY_IDENTITY
             | ODSY_STATUS
             | ODSY_ERROR_ADDR_UPPER
@@ -245,10 +245,10 @@ pub fn odyssey_access_waits(addr: u64, size: u32, write: bool) -> bool {
     )
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// A read with the board lock held.
     pub fn mmio_read(&mut self, addr: u64, size: u32) -> u64 {
-        if odyssey_access_waits(addr, size, false) && self.work_pending() {
+        if access_waits(addr, size, false) && self.work_pending() {
             self.work_drain(addr);
         }
         self.read(addr, size)
@@ -256,20 +256,20 @@ impl SGIOdysseyState {
 }
 
 /// Whether this store is counted: the processor interface's mark.
-pub fn odyssey_store_counted(front: &parking_lot::Mutex<OdysseyFront>) -> bool {
+pub fn store_counted(front: &parking_lot::Mutex<HostInterface>) -> bool {
     // The Octane has no PI link, so nothing sets the mark there.
     #[cfg(test)]
     if front.lock().test_counted_stores != 0 {
         return true;
     }
     let _ = front;
-    sgi_pi_gfx_take_mark()
+    pi_gfx_take_mark()
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// A store with the board lock held.
     pub fn mmio_write(&mut self, addr: u64, value: u64, size: u32) {
-        let counted = odyssey_store_counted(&self.front);
+        let counted = store_counted(&self.front);
         self.mmio_write_counted(addr, value, size, counted);
     }
 
@@ -286,7 +286,7 @@ impl SGIOdysseyState {
             }
         };
         if queued {
-            // Credited as it enters the FIFO (odyssey_work_admit()). With no
+            // Credited as it enters the FIFO (HostInterface::work_admit()). With no
             // board thread running the storing caller runs it.
             counted = false;
             let f = self.front.lock();
@@ -295,12 +295,12 @@ impl SGIOdysseyState {
             if run_here {
                 self.work_drain(addr);
             }
-        } else if odyssey_command_store(addr, size) {
+        } else if command_store(addr, size) {
             // The queue is full: run what waits and then this store, in order.
             self.work_drain(addr);
             self.write_dispatch(addr, value, size);
         } else {
-            if odyssey_access_waits(addr, size, true) && self.work_pending() {
+            if access_waits(addr, size, true) && self.work_pending() {
                 self.work_drain(addr);
             }
             self.write_dispatch(addr, value, size);
@@ -312,11 +312,11 @@ impl SGIOdysseyState {
     }
 }
 
-impl OdysseyHandles {
+impl BoardLocks {
     /// A processor's read: through the front alone when it can, else under the
     /// board lock.
     pub fn read(&self, addr: u64, size: u32) -> u64 {
-        match odyssey_front_mmio_read(&self.front, addr, size) {
+        match front_mmio_read(&self.front, addr, size) {
             Some(v) => v,
             None => self.board.lock().mmio_read(addr, size),
         }
@@ -325,14 +325,14 @@ impl OdysseyHandles {
     /// A processor's store: through the front alone when it can, else under the
     /// board lock.
     pub fn write(&self, addr: u64, value: u64, size: u32) {
-        let counted = odyssey_store_counted(&self.front);
-        if !odyssey_front_mmio_write(&self.front, addr, value, size, counted) {
+        let counted = store_counted(&self.front);
+        if !front_mmio_write(&self.front, addr, value, size, counted) {
             self.board.lock().mmio_write_counted(addr, value, size, counted);
         }
     }
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// Reset clears the FIFO and abandons the waiting stores. The caller holds
     /// the board lock, so no slice runs.
     pub fn work_reset(&mut self) {
@@ -341,7 +341,7 @@ impl SGIOdysseyState {
         for q in f.work_queue.iter() {
             if q.owed {
                 if let Some(pi) = &f.pi {
-                    sgi_pi_gfx_owe_credits(pi.as_ref(), f.slot, -1);
+                    pi_gfx_owe_credits(pi.as_ref(), f.slot, -1);
                 }
             }
         }
@@ -593,7 +593,7 @@ impl SGIOdysseyState {
         // The shared GL context to OpenGL's initial state (identity matrices,
         // white current colour, depth test off), unbound until the first GL
         // command binds the drawable. A guest reset can land mid-primitive, with
-        // an open polygon's vertex buffer still allocated; sgi_gl_reset() frees
+        // an open polygon's vertex buffer still allocated; GlContext::reset() frees
         // it before reinitializing. It is safe here even before realize
         // allocates the colour plane. Its viewport starts empty: nothing is
         // drawn until the client's combined matrix arrives.
@@ -603,7 +603,7 @@ impl SGIOdysseyState {
             // line stipple: unset, it silently keeps every face at legacy FILL
             // no matter what 0x0415 decodes to. The sink built here always
             // carries the checked draw callback, this call's one precondition;
-            // sgi_gl_reset() above has already cleared in_begin, satisfying the
+            // GlContext::reset() above has already cleared in_begin, satisfying the
             // other precondition even when reset lands mid-primitive.
             let sink = self.gl_sink();
 
@@ -626,7 +626,7 @@ impl SGIOdysseyState {
         self.gl_restart_m3 = 0;
         self.gl_restart_m4 = 0;
         self.gl_restart_armed = false;
-        // The clip box and its scissor test: sgi_gl_init() leaves the shared
+        // The clip box and its scissor test: GlContext::init() leaves the shared
         // context's scissor box and test both at zero, which would clip away
         // every draw if the test were simply switched on. There is no reset
         // pattern-mode value that already matches a usable scissor default, so
@@ -753,7 +753,7 @@ impl SGIOdysseyState {
 
 /// One marketed board: name, revision, memory size, banks, back-end
 /// version, identity record.
-pub struct OdysseyProduct {
+pub struct Product {
     pub name: &'static str,
     pub revision: u32,
     pub memory_size: u32,
@@ -773,19 +773,19 @@ pub struct OdysseyProduct {
 /// tool prints a fixed "Banks: 2" line for any 32 MB board. Every product is
 /// CAS latency 3. The identity record is the Octane board's name as the
 /// inventory prints it.
-pub static odyssey_products: [OdysseyProduct; 4] = [
-    OdysseyProduct { name: "v12", revision: 0xa, memory_size: 128, memory_banks: 4, backend_version: 1, record: "Name:ODY128VERSIONB" }, // 030-1611
-    OdysseyProduct { name: "v10", revision: 0xa, memory_size: 32, memory_banks: 2, backend_version: 1, record: "Name:ODY32VERSIONB" }, // 030-1655
-    OdysseyProduct { name: "v8", revision: 0x2, memory_size: 128, memory_banks: 4, backend_version: 1, record: "Name:ODY128" }, // 030-1404
-    OdysseyProduct { name: "v6", revision: 0x2, memory_size: 32, memory_banks: 2, backend_version: 1, record: "Name:ODY32" }, // 030-1403
+pub static PRODUCTS: [Product; 4] = [
+    Product { name: "v12", revision: 0xa, memory_size: 128, memory_banks: 4, backend_version: 1, record: "Name:ODY128VERSIONB" }, // 030-1611
+    Product { name: "v10", revision: 0xa, memory_size: 32, memory_banks: 2, backend_version: 1, record: "Name:ODY32VERSIONB" }, // 030-1655
+    Product { name: "v8", revision: 0x2, memory_size: 128, memory_banks: 4, backend_version: 1, record: "Name:ODY128" }, // 030-1404
+    Product { name: "v6", revision: 0x2, memory_size: 32, memory_banks: 2, backend_version: 1, record: "Name:ODY32" }, // 030-1403
 ];
 
-impl SGIOdysseyState {
+impl Board {
     pub fn resolve_product(&mut self) -> Result<(), String> {
         if self.product.is_empty() {
             return Ok(());
         }
-        for p in odyssey_products.iter() {
+        for p in PRODUCTS.iter() {
             if self.product == p.name {
                 self.revision = p.revision;
                 self.memory_size = p.memory_size;
@@ -820,7 +820,7 @@ impl SGIOdysseyState {
         let pixels = SGI_ODYSSEY_WIDTH as u64 * SGI_ODYSSEY_HEIGHT as u64;
         self.mem.init(pixels * 4);
         {
-            let plane = SGIPlane {
+            let plane = Plane {
                 format: SGI_PLANE_RGBA8,
                 packing: SGI_PACK_BE_RED_HIGH,
                 width: SGI_ODYSSEY_WIDTH,
@@ -841,7 +841,7 @@ impl SGIOdysseyState {
         }
 
         // The board-memory object store: device-backed words the objects are
-        // laid in by odyssey_object_rows(), addressed directly.
+        // laid in by Board::object_rows(), addressed directly.
         self.obj_mem.init(ODSY_OBJ_POOL_BYTES as u64);
 
         self.did = vec![0u8; pixels as usize];
@@ -854,7 +854,7 @@ impl SGIOdysseyState {
         // this plane. 24 bits matches the Z24 names in the GL library.
         self.depth_mem.init(pixels * 4);
         {
-            let depth = SGIPlane {
+            let depth = Plane {
                 format: SGI_PLANE_Z24,
                 packing: SGI_PACK_BE_RED_HIGH,
                 width: SGI_ODYSSEY_WIDTH,
@@ -873,7 +873,7 @@ impl SGIOdysseyState {
         // like the depth plane, no aperture reaches it.
         self.stencil_mem.init(pixels);
         {
-            let stencil = SGIPlane {
+            let stencil = Plane {
                 format: SGI_PLANE_S8,
                 packing: SGI_PACK_BE_RED_HIGH,
                 width: SGI_ODYSSEY_WIDTH,
@@ -892,12 +892,12 @@ impl SGIOdysseyState {
         }
 
         // The shared scanout owns the presented frame, resolving the colour
-        // plane through odyssey_head_ops.resolve_row. Setting the mode allocates
+        // plane through HEAD_OPS.resolve_row. Setting the mode allocates
         // the frame, marks it all dirty and arms the retrace at the mode's rate.
         // The state never moves after sgi_odyssey_new returns, so its address is
         // a stable opaque.
         let opaque = P::new(&mut *self).opaque();
-        self.scanout.init(&odyssey_head_ops, opaque);
+        self.scanout.init(&HEAD_OPS, opaque);
         self.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
         self.front.lock().work_queue = Vec::new();
         Ok(())
@@ -906,7 +906,7 @@ impl SGIOdysseyState {
     pub fn unrealize(&mut self) {
         {
             // The board's thread may wait for the board lock the caller holds;
-            // it is stopped beforehand (odyssey_work_stop()).
+            // it is stopped beforehand (BoardLocks::work_stop()).
             let mut f = self.front.lock();
             assert!(f.worker.is_none(), "odyssey: the work thread outlived the machine");
             f.work_queue = Vec::new();
@@ -927,7 +927,7 @@ impl SGIOdysseyState {
         self.work_reset();
         self.reset_registers();
         self.front.lock().update_irq();
-        // odyssey_build_widget() also calls odyssey_reset_registers(), before
+        // Board::build_widget() also calls Board::reset_registers(), before
         // the board memory exists (realize initializes it afterwards) -- this
         // runs strictly after realize, so the board memory exists here. Zero the
         // device-backed colour plane's bytes directly; its planes are realize-
@@ -959,7 +959,7 @@ impl SGIOdysseyState {
 
     pub fn instance_init(&mut self) {
         self.obj_index = Default::default();
-        // The fixed part of the drawable odyssey_gl_bind() hands over.
+        // The fixed part of the drawable Board::gl_bind() hands over.
         self.gl_bind_drawable.bound = 1;
         self.gl_bind_drawable.front = 0;
         self.gl_bind_drawable.back = 1;
@@ -967,14 +967,14 @@ impl SGIOdysseyState {
 }
 
 /// The synthetic one-wire serial for a component letter and index.
-pub fn sgi_synthetic_onewire_serial(letter: char, index: u32) -> u64 {
+pub fn synthetic_onewire_serial(letter: char, index: u32) -> u64 {
     0x51454d55u64 << 16 | (letter as u64) << 8 | index as u64
 }
 
 /// The board as the QEMU device is built: instance_init, the property
 /// defaults (odyssey_properties), `product` and the slot, then realize.
-pub fn sgi_odyssey_new(product: &str, slot: u32) -> Result<Box<SGIOdysseyState>, String> {
-    let mut s = Box::new(SGIOdysseyState::default());
+pub fn sgi_odyssey_new(product: &str, slot: u32) -> Result<Box<Board>, String> {
+    let mut s = Box::new(Board::default());
 
     s.instance_init();
     // Property defaults.
@@ -983,7 +983,7 @@ pub fn sgi_odyssey_new(product: &str, slot: u32) -> Result<Box<SGIOdysseyState>,
     s.memory_banks = 4;
     s.cas_latency = 3;
     s.backend_version = 1;
-    s.nic_serial = sgi_synthetic_onewire_serial('G', 0);
+    s.nic_serial = synthetic_onewire_serial('G', 0);
     s.raster_bands = true;
     s.raster_band_pixels = 0;
     s.posted_fifo = true;
@@ -1038,7 +1038,7 @@ mod tests {
         }
     }
 
-    fn board(product: &str) -> (Box<SGIOdysseyState>, Arc<Recorder>) {
+    fn board(product: &str) -> (Box<Board>, Arc<Recorder>) {
         let rec = Arc::new(Recorder::default());
         let s = sgi_odyssey_new(product, VPRO_WIDGET).expect("board");
         s.front.lock().irq = Some(rec.clone());
@@ -1098,9 +1098,9 @@ mod tests {
 
     /// A board on its own thread, routed to the recorder and with the
     /// low-water source enabled and clear.
-    fn threaded_board() -> (OdysseyHandles, Arc<Recorder>) {
+    fn threaded_board() -> (BoardLocks, Arc<Recorder>) {
         let (s, rec) = board("v12");
-        let h = OdysseyHandles::new(s);
+        let h = BoardLocks::new(s);
 
         h.work_start();
         h.write(ROUTE_DEST_UPPER, HEART_WIDGET << 25, 4);
@@ -1113,8 +1113,8 @@ mod tests {
     }
 
     /// The self-test preamble twice: it completes only in order.
-    fn preamble_twice() -> Vec<&'static OdysseyCfifoPreamble> {
-        let words: Vec<_> = odyssey_cfifo_preamble.iter().chain(odyssey_cfifo_preamble.iter()).collect();
+    fn preamble_twice() -> Vec<&'static CfifoPreamble> {
+        let words: Vec<_> = CFIFO_PREAMBLE.iter().chain(CFIFO_PREAMBLE.iter()).collect();
         assert!(words.len() as u32 > ODSY_CFIFO_LOW_WATER);
         words
     }
@@ -1122,7 +1122,7 @@ mod tests {
     /// Queue every FIFO store and have the first slice hold the board for
     /// `hold_ms` as a long draw would; store the first word and return
     /// once that slice holds the board lock.
-    fn start_long_slice(h: &OdysseyHandles, words: &[&OdysseyCfifoPreamble], hold_ms: u32) {
+    fn start_long_slice(h: &BoardLocks, words: &[&CfifoPreamble], hold_ms: u32) {
         h.front.lock().test_words = 1;
         h.board.lock().test_slice_sleep_ms = hold_ms;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -1217,7 +1217,7 @@ mod tests {
     #[derive(Default)]
     struct PiStub(Mutex<Vec<(&'static str, u32, i64)>>);
 
-    impl SGIPIGfxLink for PiStub {
+    impl PiGfxLink for PiStub {
         fn return_credits(&self, widget: u32, n: u32) {
             self.0.lock().push(("return", widget, n as i64));
         }
@@ -1240,7 +1240,7 @@ mod tests {
     }
 
     /// A board whose stores are all counted and queued, with a stub link.
-    fn credit_board() -> (Box<SGIOdysseyState>, Arc<PiStub>) {
+    fn credit_board() -> (Box<Board>, Arc<PiStub>) {
         let (s, _) = board("v12");
         let pi = Arc::new(PiStub::default());
         {
@@ -1275,11 +1275,11 @@ mod tests {
         assert!(pi.0.lock().iter().all(|c| c.1 == VPRO_WIDGET));
 
         // One store runs per slice: the next one moves up and is repaid.
-        s.work_step(&mut OdysseyBudget::words(1));
+        s.work_step(&mut Budget::words(1));
         assert_eq!(pi.count("repay"), 1);
         assert_eq!(pi.settled(), ODSY_CFIFO_DEPTH as i64 + 1);
 
-        s.work_step(&mut OdysseyBudget::unlimited());
+        s.work_step(&mut Budget::unlimited());
         assert!(s.front.lock().work_queue.is_empty());
         assert_eq!(pi.settled(), stores as i64);
 
@@ -1323,9 +1323,9 @@ mod tests {
         s.mmio_write(ODSY_CMD_FIFO, 0, 8);
         assert_eq!(pi.settled(), 0);
 
-        let previous = sgi_pi_gfx_mark_store(true);
+        let previous = pi_gfx_mark_store(true);
         s.mmio_write(ODSY_CMD_FIFO, 0, 8);
-        sgi_pi_gfx_unmark_store(previous);
+        pi_gfx_unmark_store(previous);
         assert_eq!(pi.0.lock().as_slice(), &[("return", VPRO_WIDGET, 1)]);
 
         // One-shot: the mark was taken by the first store.
@@ -1334,16 +1334,16 @@ mod tests {
 
         // The Octane: no link, so the credit is dropped with a log line.
         s.front.lock().pi = None;
-        sgi_pi_gfx_mark_store(true);
+        pi_gfx_mark_store(true);
         s.mmio_write(ODSY_CMD_FIFO, 0, 8);
         assert_eq!(pi.settled(), 1);
-        assert!(!sgi_pi_gfx_take_mark());
+        assert!(!pi_gfx_take_mark());
     }
 
     /// The register block's pure state (pi-gfx.c).
     #[test]
     fn pi_gfx_block_counts_and_starves() {
-        let mut g = SGIPIGfx::default();
+        let mut g = PiGfx::default();
 
         g.write(SGI_PI_GFX_PAGE, SGI_PI_GFX_PAGE_ENABLE | 0x2_0000);
         g.write(SGI_PI_GFX_CREDIT, 3);

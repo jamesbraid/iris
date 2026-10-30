@@ -11,8 +11,8 @@ fn cmax<T: PartialOrd>(a: T, b: T) -> T {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct OdysseyTexture {
-    pub s: P<SGIOdysseyState>,
+pub struct Texture {
+    pub s: P<Board>,
     pub offset: u32,
     pub stride: u32,
     pub width: u32,
@@ -25,15 +25,15 @@ pub struct OdysseyTexture {
 
 /// First and last detail function weights, and whether the table is flat.
 #[derive(Clone, Copy, Default)]
-pub struct OdysseyTextureDetailWeight {
+pub struct TextureDetailWeight {
     pub constant: bool,
     pub first: f64,
     pub last: f64,
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct OdysseyTextureVolume {
-    pub s: P<SGIOdysseyState>,
+pub struct TextureVolume {
+    pub s: P<Board>,
     pub base: u32,
     pub stride_units: u32,
     pub level_word2: u32,
@@ -49,26 +49,26 @@ pub struct OdysseyTextureVolume {
     pub border: bool,
     pub colour_table: bool,
     pub scale_bias: bool,
-    pub detail_weight: OdysseyTextureDetailWeight,
+    pub detail_weight: TextureDetailWeight,
 }
 
 /// `volume` comes first (repr(C)) so one opaque pointer serves both the
 /// post-filter callback and the 3D reader, as in the C.
 #[derive(Clone, Default)]
 #[repr(C)]
-pub struct OdysseyTextureChain {
+pub struct TextureChain {
     /// Also supplies the state pointer for the post-filter callback.
-    pub volume: OdysseyTextureVolume,
-    pub volumes: [OdysseyTextureVolume; SGI_GL_TEX_LEVELS_MAX as usize],
-    pub storage: [OdysseyTexture; SGI_GL_TEX_LEVELS_MAX as usize],
-    pub levels: [SGIGLTexLevel; SGI_GL_TEX_LEVELS_MAX as usize],
-    pub pyramid: SGIGLTexPyramid,
-    pub detail_storage: OdysseyTexture,
-    pub detail_image: SGIGLTexLevel,
+    pub volume: TextureVolume,
+    pub volumes: [TextureVolume; SGI_GL_TEX_LEVELS_MAX as usize],
+    pub storage: [Texture; SGI_GL_TEX_LEVELS_MAX as usize],
+    pub levels: [GlTexLevel; SGI_GL_TEX_LEVELS_MAX as usize],
+    pub pyramid: GlTexPyramid,
+    pub detail_storage: Texture,
+    pub detail_image: GlTexLevel,
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct OdysseyTextureDetailSampler {
+pub struct TextureDetailSampler {
     pub descriptor: u32,
     pub width: u32,
     pub height: u32,
@@ -76,7 +76,7 @@ pub struct OdysseyTextureDetailSampler {
     pub mode: u32,
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// Whether a GL fragment's colour is an index (ODSY_PROG_COLOUR_MODE).
     pub fn gl_index_mode(&mut self) -> bool {
         self.colour_mode[0] & ODSY_COLOUR_MODE_INDEX != 0
@@ -86,9 +86,9 @@ impl SGIOdysseyState {
 /// A colour index carried through the shared rasterizer, which knows only
 /// RGBA: bits 7:0 of the index ride in blue and bits 11:8 in green, so at
 /// the rules' eight colour bits the stored colour's low twelve bits are the
-/// index again (odyssey_gl_store_colour()). Smooth shading then
+/// index again (gl_store_colour()). Smooth shading then
 /// interpolates the index as GL does, within one run of 256.
-pub fn odyssey_gl_index_rgba(index: u32, rgba: &mut [f32; 4]) {
+pub fn gl_index_rgba(index: u32, rgba: &mut [f32; 4]) {
     rgba[0] = 0.0;
     rgba[1] = ((index >> 8) & 0xf) as f32 / 255.0f32;
     rgba[2] = (index & 0xff) as f32 / 255.0f32;
@@ -97,7 +97,7 @@ pub fn odyssey_gl_index_rgba(index: u32, rgba: &mut [f32; 4]) {
 
 /// A float index (glIndexf, glClearIndex): its integer part, wrapped to the
 /// twelve index bits the way a write keeps only the buffer's bits.
-pub fn odyssey_float_index(bits: u32) -> u32 {
+pub fn float_index(bits: u32) -> u32 {
     let mut f = f32::from_bits(bits);
 
     if !f.is_finite() {
@@ -112,7 +112,7 @@ pub fn odyssey_float_index(bits: u32) -> u32 {
     (f as u32) & ODSY_INDEX_MASK
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// Whether GL draws go to the id-plane destination: it is selected and the
     /// kernel has bound it as the draw drawable (0x608, bit 31 aside), as it
     /// does for flight's overlay context (0x80142000; OBSERVED). The X server
@@ -139,7 +139,7 @@ impl SGIOdysseyState {
     /// context's drawing (ODSY_OVERLAY_MODE_BASE). Buffer 1 is the overlay
     /// pixel byte and takes the index's low eight bits; the id byte is the X
     /// server's alone, so a GL write to buffer 0 is reported and dropped.
-    pub fn gl_store_aux(&mut self, target: SGIColourTarget, x: i32, y: i32, colour: u32) {
+    pub fn gl_store_aux(&mut self, target: ColourTarget, x: i32, y: i32, colour: u32) {
         if target == ODSY_AUX_OVERLAY_BUFFER {
             let at = (y as i64 as u64).wrapping_mul(SGI_ODYSSEY_WIDTH as u64).wrapping_add(x as i64 as u64);
             self.overlay[at as usize] = (colour & 0xff) as u8;
@@ -174,8 +174,8 @@ impl SGIOdysseyState {
     }
 }
 
-pub fn odyssey_gl_store_colour(opaque: Opaque, target: SGIColourTarget, x: i32, y: i32, colour: u32) {
-    let s = from_opaque::<SGIOdysseyState>(opaque);
+pub fn gl_store_colour(opaque: Opaque, target: ColourTarget, x: i32, y: i32, colour: u32) {
+    let s = from_opaque::<Board>(opaque);
     let mask = (s.gl_write_mask >> ODSY_WRITE_COLOUR_SHIFT) & ODSY_WRITE_COLOUR_MASK;
 
     if mask == 0 || target >= ODSY_BUFFERS || !s.pixel_allowed(x as i64, y as i64) {
@@ -189,8 +189,8 @@ pub fn odyssey_gl_store_colour(opaque: Opaque, target: SGIColourTarget, x: i32, 
 }
 
 /// The shared renderer supplies all four already quantized channel bytes.
-pub fn odyssey_gl_store_rgba(opaque: Opaque, target: SGIColourTarget, x: i32, y: i32, colour: &SGIRasterColour) {
-    let s = from_opaque::<SGIOdysseyState>(opaque);
+pub fn gl_store_rgba(opaque: Opaque, target: ColourTarget, x: i32, y: i32, colour: &RasterColour) {
+    let s = from_opaque::<Board>(opaque);
     let c = &colour.component;
     let allowed = target < ODSY_BUFFERS && s.pixel_allowed(x as i64, y as i64);
 
@@ -204,8 +204,8 @@ pub fn odyssey_gl_store_rgba(opaque: Opaque, target: SGIColourTarget, x: i32, y:
     }
 }
 
-pub fn odyssey_gl_load_rgba(opaque: Opaque, target: SGIColourTarget, x: i32, y: i32, colour: &mut SGIRasterColour) -> bool {
-    let s = from_opaque::<SGIOdysseyState>(opaque);
+pub fn gl_load_rgba(opaque: Opaque, target: ColourTarget, x: i32, y: i32, colour: &mut RasterColour) -> bool {
+    let s = from_opaque::<Board>(opaque);
 
     if target >= ODSY_BUFFERS {
         return false;
@@ -213,7 +213,7 @@ pub fn odyssey_gl_load_rgba(opaque: Opaque, target: SGIColourTarget, x: i32, y: 
     let mem = s.buffer_mem(target);
     let p = s.buffer_plane(target);
     let limit = cmin(mem.size, mem.bytes_len as u64);
-    // Invalid storage reads as zero through sgi_plane_load(), not success.
+    // Invalid storage reads as zero through BoardMemory::plane_load(), not success.
     if p.is_null() || mem.bytes.is_empty() || !p.contains(x, y) {
         return false;
     }
@@ -235,7 +235,7 @@ pub fn odyssey_gl_load_rgba(opaque: Opaque, target: SGIColourTarget, x: i32, y: 
     true
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// How far past [0, 1] a fragment's depth may round and still be drawn,
     /// clamped: 16 units in the last place of a single near 1 (ODSY_GL_DEPTH_SLACK
     /// in defs.rs). APPROXIMATION: the depth row and block 16 arrive as
@@ -245,13 +245,13 @@ impl SGIOdysseyState {
     /// is UNKNOWN.
     ///
     /// The depth row over the block-16 row, in units of the client's [0, 1]
-    /// depth (odyssey_gl_load_combined()). The shared context's model-view is
+    /// depth (Board::gl_load_combined()). The shared context's model-view is
     /// the identity, so its eye coordinates are the object coordinates the
     /// combined matrix takes. Block 16 is the divisor only when all four of its
     /// words are finite and the fourth is not zero; otherwise the sign-only
     /// fallback divides by a constant.
-    pub fn gl_operation_rules(&mut self) -> SGIRasterRules {
-        let mut rules = odyssey_gl_rules().clone();
+    pub fn gl_operation_rules(&mut self) -> RasterRules {
+        let mut rules = gl_rules().clone();
         let scale = 2.0 * ODSY_GL_DEPTH_S * self.gl_depth_scale();
         let mut block16 = [0.0f64; 4];
         let mut divisor = true;
@@ -274,11 +274,11 @@ impl SGIOdysseyState {
     }
 }
 
-/// The depth plane (odyssey_realize()): 24-bit depth, 0 nearest, through
+/// The depth plane (Board::realize()): 24-bit depth, 0 nearest, through
 /// the same pixel test as a colour write. It is a model plane because the
 /// board memory the real depth buffer occupies is not known.
-pub fn odyssey_gl_load_depth(opaque: Opaque, x: i32, y: i32) -> u32 {
-    let s = from_opaque::<SGIOdysseyState>(opaque);
+pub fn gl_load_depth(opaque: Opaque, x: i32, y: i32) -> u32 {
+    let s = from_opaque::<Board>(opaque);
     let p = s.depth_mem.plane(s.depth_plane);
 
     if p.is_null() {
@@ -287,8 +287,8 @@ pub fn odyssey_gl_load_depth(opaque: Opaque, x: i32, y: i32) -> u32 {
     s.depth_mem.plane_load(&p, x, y)
 }
 
-pub fn odyssey_gl_store_depth(opaque: Opaque, x: i32, y: i32, depth: u32) {
-    let s = from_opaque::<SGIOdysseyState>(opaque);
+pub fn gl_store_depth(opaque: Opaque, x: i32, y: i32, depth: u32) {
+    let s = from_opaque::<Board>(opaque);
 
     // The overlay has no depth; an overlay clear leaves the main depth.
     if s.gl_to_aux() {
@@ -303,11 +303,11 @@ pub fn odyssey_gl_store_depth(opaque: Opaque, x: i32, y: i32, depth: u32) {
     }
 }
 
-/// The stencil plane (odyssey_realize()): 8 bits, through the same pixel
+/// The stencil plane (Board::realize()): 8 bits, through the same pixel
 /// test as a depth write. A model plane: where the board keeps its stencil
 /// planes is not known.
-pub fn odyssey_gl_load_stencil(opaque: Opaque, x: i32, y: i32) -> u32 {
-    let s = from_opaque::<SGIOdysseyState>(opaque);
+pub fn gl_load_stencil(opaque: Opaque, x: i32, y: i32) -> u32 {
+    let s = from_opaque::<Board>(opaque);
     let p = s.stencil_mem.plane(s.stencil_plane);
 
     if p.is_null() {
@@ -316,8 +316,8 @@ pub fn odyssey_gl_load_stencil(opaque: Opaque, x: i32, y: i32) -> u32 {
     s.stencil_mem.plane_load(&p, x, y)
 }
 
-pub fn odyssey_gl_store_stencil(opaque: Opaque, x: i32, y: i32, stencil: u32) {
-    let s = from_opaque::<SGIOdysseyState>(opaque);
+pub fn gl_store_stencil(opaque: Opaque, x: i32, y: i32, stencil: u32) {
+    let s = from_opaque::<Board>(opaque);
 
     if s.pixel_allowed(x as i64, y as i64) {
         let p = s.stencil_mem.plane(s.stencil_plane);
@@ -329,8 +329,8 @@ pub fn odyssey_gl_store_stencil(opaque: Opaque, x: i32, y: i32, stencil: u32) {
 }
 
 /// Experimental policy; the board's scale sign and clamps are unmeasured.
-pub fn odyssey_gl_fog_factor(opaque: Opaque, window_z: f32, eye_z: f32) -> f32 {
-    let s = from_opaque::<SGIOdysseyState>(opaque);
+pub fn gl_fog_factor(opaque: Opaque, window_z: f32, eye_z: f32) -> f32 {
+    let s = from_opaque::<Board>(opaque);
     let w = &s.gl_fog;
     let scale = if (w[2] & 0xffffff) != 0 {
         odyssey_f32(((w[2] & 0xffffff) << 5).wrapping_add(96u32 << 23)).abs()
@@ -353,14 +353,14 @@ pub fn odyssey_gl_fog_factor(opaque: Opaque, window_z: f32, eye_z: f32) -> f32 {
     (if f >= 1.0 { 1.0 } else if f > 0.0 { f } else { 0.0 }) as f32
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// An opaque polygon stipple (0x043f bit 4 with shape 0, the GL stipple):
     /// clear bits take the 0x0c21 constant colour, as the 2D path's opaque
-    /// patterns do (odyssey_pattern_background()). That the board paints the
+    /// patterns do (Board::pattern_background()). That the board paints the
     /// clear bits here as it does for the 2D quads is INFERRED: it is the only
     /// reading under which the X server's FillOpaqueStippled sequence draws an
     /// opaque stipple.
-    pub fn gl_stipple_background(&mut self, t: &mut SGIRasterTarget) {
+    pub fn gl_stipple_background(&mut self, t: &mut RasterTarget) {
         if (self.pattern_shape & ODSY_PATTERN_SHAPE_OPAQUE) == 0 {
             return;
         }
@@ -368,7 +368,7 @@ impl SGIOdysseyState {
         if self.gl_index_mode() {
             t.stipple_background_index = self.pattern_background(true);
             let idx = t.stipple_background_index;
-            odyssey_gl_index_rgba(idx, &mut t.stipple_background);
+            gl_index_rgba(idx, &mut t.stipple_background);
         } else {
             let pixel = self.pattern_background(false);
 
@@ -381,18 +381,18 @@ impl SGIOdysseyState {
 
     /// The callbacks may run on band workers in the C; here they run serially.
     /// Each stores only its own pixel's bytes. Their once-only reports are
-    /// made before the draw (odyssey_gl_report_refusals()).
-    pub fn gl_target(&mut self) -> SGIRasterTarget {
+    /// made before the draw (Board::gl_report_refusals()).
+    pub fn gl_target(&mut self) -> RasterTarget {
         let index = self.gl_index_mode();
-        let mut t = SGIRasterTarget {
-            store_colour: if index { Some(odyssey_gl_store_colour) } else { None },
-            store_rgba: if index { None } else { Some(odyssey_gl_store_rgba) },
-            load_rgba: if index { None } else { Some(odyssey_gl_load_rgba) },
-            load_depth: Some(odyssey_gl_load_depth),
-            store_depth: Some(odyssey_gl_store_depth),
-            load_stencil: Some(odyssey_gl_load_stencil),
-            store_stencil: Some(odyssey_gl_store_stencil),
-            fog_factor: Some(odyssey_gl_fog_factor),
+        let mut t = RasterTarget {
+            store_colour: if index { Some(gl_store_colour) } else { None },
+            store_rgba: if index { None } else { Some(gl_store_rgba) },
+            load_rgba: if index { None } else { Some(gl_load_rgba) },
+            load_depth: Some(gl_load_depth),
+            store_depth: Some(gl_store_depth),
+            load_stencil: Some(gl_load_stencil),
+            store_stencil: Some(gl_store_stencil),
+            fog_factor: Some(gl_fog_factor),
             opaque: P::new(self).opaque(),
             concurrent_pixels: self.raster_bands,
             band_min_pixels: self.raster_band_pixels,
@@ -405,8 +405,8 @@ impl SGIOdysseyState {
     }
 }
 
-pub fn odyssey_texture_read(opaque: Opaque, x: u32, y: u32, rgba: &mut u32) -> bool {
-    let texture = from_opaque::<OdysseyTexture>(opaque);
+pub fn texture_read(opaque: Opaque, x: u32, y: u32, rgba: &mut u32) -> bool {
+    let texture = from_opaque::<Texture>(opaque);
     let s = texture.s.get();
 
     if x >= texture.width || y >= texture.height {
@@ -435,11 +435,11 @@ pub fn odyssey_texture_read(opaque: Opaque, x: u32, y: u32, rgba: &mut u32) -> b
 /// 128x128x64 RGBA volume (word 2 6, 64 slice objects 0x1000 apart). That
 /// word 2 is the log2 of the slice allocation is INFERRED.
 
-pub fn odyssey_volume_slice_stride(level_word2: u32) -> u64 {
+pub fn volume_slice_stride(level_word2: u32) -> u64 {
     64u64.wrapping_shl(level_word2)
 }
 
-impl OdysseyTextureVolume {
+impl TextureVolume {
     pub fn read_3d_at(&self, x: i32, y: i32, z: i32, border: bool, rgba: &mut u32) -> bool {
         let s = self.s.get();
 
@@ -451,7 +451,7 @@ impl OdysseyTextureVolume {
             return false;
         }
         // Setup found and checked the object of every slice a read in these
-        // bounds can reach (odyssey_texture_setup()), so the slice's place in
+        // bounds can reach (Board::texture_setup()), so the slice's place in
         // the object store is read from its table, not looked up per texel.
         let slice = if border { (z + 1) as u32 } else { z as u32 };
         if slice >= self.slices {
@@ -471,7 +471,7 @@ impl OdysseyTextureVolume {
                 None => return false,
             };
         }
-        let texture = OdysseyTexture {
+        let texture = Texture {
             s: self.s,
             offset: if border { offset as u32 } else { s.tex_slice_offset[at] },
             stride,
@@ -481,38 +481,38 @@ impl OdysseyTextureVolume {
             words: self.words,
             border_rows: false,
         };
-        odyssey_texture_read(P::from_ref(&texture).opaque(), px, py, rgba)
+        texture_read(P::from_ref(&texture).opaque(), px, py, rgba)
     }
 }
 
-pub fn odyssey_texture_read_3d(opaque: Opaque, x: u32, y: u32, z: u32, rgba: &mut u32) -> bool {
-    let volume = from_opaque::<OdysseyTextureVolume>(opaque);
+pub fn texture_read_3d(opaque: Opaque, x: u32, y: u32, z: u32, rgba: &mut u32) -> bool {
+    let volume = from_opaque::<TextureVolume>(opaque);
 
     volume.read_3d_at(x as i32, y as i32, z as i32, volume.border, rgba)
 }
 
-pub fn odyssey_texture_read_border_3d(opaque: Opaque, x: i32, y: i32, z: i32, rgba: &mut u32) -> bool {
-    (from_opaque::<OdysseyTextureVolume>(opaque)).read_3d_at(x, y, z, true, rgba)
+pub fn texture_read_border_3d(opaque: Opaque, x: i32, y: i32, z: i32, rgba: &mut u32) -> bool {
+    (from_opaque::<TextureVolume>(opaque)).read_3d_at(x, y, z, true, rgba)
 }
 
-pub fn odyssey_texture_read_volume_level(opaque: Opaque, level: u32, x: u32, y: u32, z: u32, rgba: &mut u32) -> bool {
-    let chain = from_opaque::<OdysseyTextureChain>(opaque);
+pub fn texture_read_volume_level(opaque: Opaque, level: u32, x: u32, y: u32, z: u32, rgba: &mut u32) -> bool {
+    let chain = from_opaque::<TextureChain>(opaque);
 
     (level as usize) < chain.volumes.len()
-        && odyssey_texture_read_3d(P::from_ref(&chain.volumes[level as usize]).opaque(), x, y, z, rgba)
+        && texture_read_3d(P::from_ref(&chain.volumes[level as usize]).opaque(), x, y, z, rgba)
 }
 
-pub fn odyssey_texture_read_level(opaque: Opaque, level: u32, x: u32, y: u32, rgba: &mut u32) -> bool {
-    let chain = from_opaque::<OdysseyTextureChain>(opaque);
+pub fn texture_read_level(opaque: Opaque, level: u32, x: u32, y: u32, rgba: &mut u32) -> bool {
+    let chain = from_opaque::<TextureChain>(opaque);
 
     (level as usize) < chain.storage.len()
-        && odyssey_texture_read(P::from_ref(&chain.storage[level as usize]).opaque(), x, y, rgba)
+        && texture_read(P::from_ref(&chain.storage[level as usize]).opaque(), x, y, rgba)
 }
 
-pub fn odyssey_texture_read_detail(opaque: Opaque, level: u32, x: u32, y: u32, rgba: &mut u32) -> bool {
-    let chain = from_opaque::<OdysseyTextureChain>(opaque);
+pub fn texture_read_detail(opaque: Opaque, level: u32, x: u32, y: u32, rgba: &mut u32) -> bool {
+    let chain = from_opaque::<TextureChain>(opaque);
 
-    level == 0 && odyssey_texture_read(P::from_ref(&chain.detail_storage).opaque(), x, y, rgba)
+    level == 0 && texture_read(P::from_ref(&chain.detail_storage).opaque(), x, y, rgba)
 }
 
 /// The stock driver's two-point function (-4, 1/4), (0, 1/2) fills entry 0
@@ -523,8 +523,8 @@ pub fn odyssey_texture_read_detail(opaque: Opaque, level: u32, x: u32, y: u32, r
 /// How the board indexes and interpolates the table at LODs in between is
 /// not known, so a nonconstant table refuses them.
 
-pub fn odyssey_texture_detail_weight(opaque: Opaque, lambda: f64, weight: &mut f64) -> bool {
-    let volume = from_opaque::<OdysseyTextureVolume>(opaque);
+pub fn texture_detail_weight(opaque: Opaque, lambda: f64, weight: &mut f64) -> bool {
+    let volume = from_opaque::<TextureVolume>(opaque);
     let detail = &volume.detail_weight;
 
     if detail.constant || lambda <= ODSY_TEX_DETAIL_FUNCTION_LAST_LOD {
@@ -538,8 +538,8 @@ pub fn odyssey_texture_detail_weight(opaque: Opaque, lambda: f64, weight: &mut f
     false
 }
 
-pub fn odyssey_texture_read_border_level(opaque: Opaque, level: u32, x: i32, y: i32, rgba: &mut u32) -> bool {
-    let chain = from_opaque::<OdysseyTextureChain>(opaque);
+pub fn texture_read_border_level(opaque: Opaque, level: u32, x: i32, y: i32, rgba: &mut u32) -> bool {
+    let chain = from_opaque::<TextureChain>(opaque);
 
     if level as usize >= chain.storage.len() {
         return false;
@@ -555,7 +555,7 @@ pub fn odyssey_texture_read_border_level(opaque: Opaque, level: u32, x: i32, y: 
         }
         texture.offset -= 1;
         texture.width += 2;
-        return odyssey_texture_read(P::from_ref(&texture).opaque(), (x + 1) as u32, 0, rgba);
+        return texture_read(P::from_ref(&texture).opaque(), (x + 1) as u32, 0, rgba);
     }
     if x < -1
         || x > texture.width as i32
@@ -571,10 +571,10 @@ pub fn odyssey_texture_read_border_level(opaque: Opaque, level: u32, x: i32, y: 
     texture.offset -= texture.stride + 1;
     texture.width += 2;
     texture.height += 2;
-    odyssey_texture_read(P::from_ref(&texture).opaque(), (x + 1) as u32, (y + 1) as u32, rgba)
+    texture_read(P::from_ref(&texture).opaque(), (x + 1) as u32, (y + 1) as u32, rgba)
 }
 
-impl OdysseyTextureVolume {
+impl TextureVolume {
     /// Each normalized component indexes the table after filtering.
     pub fn colour_table(&self, rgba: &mut [f64; 4]) {
         let s = self.s.get();
@@ -606,7 +606,7 @@ impl OdysseyTextureVolume {
 /// and drops the draw. The reset value is the library's default, a model
 /// choice.
 
-impl SGIOdysseyState {
+impl Board {
     pub fn texture_scale_bias_known(&self) -> bool {
         for i in 0..ODSY_TEX_SCALE_BIAS_WORDS as usize {
             if (self.tex_scale_bias[i] >> ODSY_TEX_SCALE_BIAS_BITS) != 0 {
@@ -640,8 +640,8 @@ impl SGIOdysseyState {
     }
 }
 
-pub fn odyssey_texture_post_filter(opaque: Opaque, rgba: &mut [f64; 4]) {
-    let texture = from_opaque::<OdysseyTextureVolume>(opaque);
+pub fn texture_post_filter(opaque: Opaque, rgba: &mut [f64; 4]) {
+    let texture = from_opaque::<TextureVolume>(opaque);
 
     if texture.scale_bias {
         texture.s.get().texture_scale_bias(rgba);
@@ -651,8 +651,8 @@ pub fn odyssey_texture_post_filter(opaque: Opaque, rgba: &mut [f64; 4]) {
     }
 }
 
-pub fn odyssey_texture_detail_sampler(sampler: u32, detail: &mut OdysseyTextureDetailSampler) -> bool {
-    *detail = OdysseyTextureDetailSampler { descriptor: 62, width: 2, height: 2, level: -2, mode: SGI_GL_ADD };
+pub fn texture_detail_sampler(sampler: u32, detail: &mut TextureDetailSampler) -> bool {
+    *detail = TextureDetailSampler { descriptor: 62, width: 2, height: 2, level: -2, mode: SGI_GL_ADD };
     match sampler {
         0x02108000 => {
             detail.descriptor = 63;
@@ -681,7 +681,7 @@ pub fn odyssey_texture_detail_sampler(sampler: u32, detail: &mut OdysseyTextureD
     }
 }
 
-pub fn odyssey_texture_detail_entry_weight(value: u32, weight: &mut f64) -> bool {
+pub fn texture_detail_entry_weight(value: u32, weight: &mut f64) -> bool {
     match value {
         0x00000000 | 0x00400000 | 0x00555000 | 0x00800000 | 0x00fff000 => {
             *weight = value as f64 / 16777216.0;
@@ -691,8 +691,8 @@ pub fn odyssey_texture_detail_entry_weight(value: u32, weight: &mut f64) -> bool
     }
 }
 
-impl SGIOdysseyState {
-    pub fn texture_detail_function_weight(&self, weight: &mut OdysseyTextureDetailWeight) -> bool {
+impl Board {
+    pub fn texture_detail_function_weight(&self, weight: &mut TextureDetailWeight) -> bool {
         let table = &self.tex_detail_function;
         let last = (SGI_ODYSSEY_TEX_DETAIL_FUNCTION_ENTRIES - 1) as usize;
 
@@ -706,8 +706,8 @@ impl SGIOdysseyState {
                 break;
             }
         }
-        odyssey_texture_detail_entry_weight(table[0], &mut weight.first)
-            && odyssey_texture_detail_entry_weight(table[last], &mut weight.last)
+        texture_detail_entry_weight(table[0], &mut weight.first)
+            && texture_detail_entry_weight(table[last], &mut weight.last)
     }
 }
 
@@ -725,7 +725,7 @@ impl SGIOdysseyState {
 /// code says and ignores the bit; with any other code it can only mean
 /// GL_PHASE_SGIX, which the model does not implement, so the draw drops.
 
-pub fn odyssey_texture_detail_filter(word: u32) -> u32 {
+pub fn texture_detail_filter(word: u32) -> u32 {
     let min = word & ODSY_TEX_MIN_MASK;
 
     if min != ODSY_TEX_MIN_NEAREST_MIPMAP_NEAREST && min != ODSY_TEX_MIN_LINEAR_MIPMAP_LINEAR {
@@ -739,8 +739,8 @@ pub fn odyssey_texture_detail_filter(word: u32) -> u32 {
     }
 }
 
-impl SGIOdysseyState {
-    pub fn texture_detail_backing_setup(&mut self, chain: &mut OdysseyTextureChain, descriptor: u32, width: u32, height: u32, base_format: u32) -> bool {
+impl Board {
+    pub fn texture_detail_backing_setup(&mut self, chain: &mut TextureChain, descriptor: u32, width: u32, height: u32, base_format: u32) -> bool {
         let e = (descriptor * 3) as usize;
         let entry = [self.tex_levels[e], self.tex_levels[e + 1], self.tex_levels[e + 2]];
         let base = entry[0] & 0x1fffffff;
@@ -766,7 +766,7 @@ impl SGIOdysseyState {
         {
             return false;
         }
-        chain.detail_storage = OdysseyTexture {
+        chain.detail_storage = Texture {
             s: P::new(self),
             offset: self.obj_offset[o],
             stride: self.obj_width[o],
@@ -776,14 +776,14 @@ impl SGIOdysseyState {
             words: self.obj_used,
             border_rows: false,
         };
-        chain.detail_image = SGIGLTexLevel {
+        chain.detail_image = GlTexLevel {
             level: 0,
             width,
             height,
             depth: 1,
             base_format,
             internal_format: base_format,
-            read_texel: Some(odyssey_texture_read_detail),
+            read_texel: Some(texture_read_detail),
             opaque: P::new(chain).opaque(),
             ..Default::default()
         };
@@ -796,7 +796,7 @@ impl SGIOdysseyState {
 /// library's conversion). It never sets bits 31:14, so a word that does is
 /// unknown state and drops the draw.
 
-pub fn odyssey_texture_lod_word(word: u32) -> i32 {
+pub fn texture_lod_word(word: u32) -> i32 {
     sextract32(word, 0, ODSY_TEX_LOD_BITS)
 }
 
@@ -804,11 +804,11 @@ pub fn odyssey_texture_lod_word(word: u32) -> i32 {
 /// +/-15 before writing them (ESTABLISHED); the field holds +/-32. What the
 /// board does with a limit past 15 is UNKNOWN, as no stock client sends
 /// one: the model clamps it the way the library does, an approximation.
-pub fn odyssey_texture_lod_limit(word: u32) -> i32 {
-    cmin(cmax(odyssey_texture_lod_word(word), -(ODSY_TEX_LOD_LIMIT as i32)), ODSY_TEX_LOD_LIMIT as i32)
+pub fn texture_lod_limit(word: u32) -> i32 {
+    cmin(cmax(texture_lod_word(word), -(ODSY_TEX_LOD_LIMIT as i32)), ODSY_TEX_LOD_LIMIT as i32)
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// LOD bias S and T (words 0 and 1). The library clamps each to -32 through
     /// 31.99609375, the field's whole range, so every value is one it can send
     /// (ESTABLISHED). The R bias never reaches a register. The model applies a
@@ -816,16 +816,16 @@ impl SGIOdysseyState {
     /// derivatives by 2^bias before the LOD is computed: INFERRED, since the
     /// board's LOD arithmetic is not documented. A zero bias leaves the scale
     /// unset, so an unbiased draw keeps the exact unscaled path.
-    pub fn texture_lod_bias(&self, image: &mut SGIGLTexImage) {
-        let bias_s = odyssey_texture_lod_word(self.tex_lod[0]);
-        let bias_t = odyssey_texture_lod_word(self.tex_lod[1]);
+    pub fn texture_lod_bias(&self, image: &mut GlTexImage) {
+        let bias_s = texture_lod_word(self.tex_lod[0]);
+        let bias_t = texture_lod_word(self.tex_lod[1]);
 
         image.lod_scale_s = if bias_s != 0 { (bias_s as f64 / ODSY_TEX_LOD_ONE as f64).exp2() } else { 0.0 };
         image.lod_scale_t = if bias_t != 0 { (bias_t as f64 / ODSY_TEX_LOD_ONE as f64).exp2() } else { 0.0 };
     }
 }
 
-impl SGIGLTexImage {
+impl GlTexImage {
     /// Sampler words 1 and 2, bits 16:0, hold each axis's maximum clamp in
     /// whole texels of the base level: the library writes trunc(2^log2size *
     /// GL_TEXTURE_MAX_CLAMP_*_SGIX), so the default 1.0 gives the size itself
@@ -874,8 +874,8 @@ fn gl_uadd_ovf(a: u64, b: u64, r: &mut u64) -> bool {
     o
 }
 
-impl SGIOdysseyState {
-    pub fn texture_setup(&mut self, image: &mut SGIGLTexImage, chain: &mut OdysseyTextureChain, resolved: &mut P<SGIGLTexImage>) -> bool {
+impl Board {
+    pub fn texture_setup(&mut self, image: &mut GlTexImage, chain: &mut TextureChain, resolved: &mut P<GlTexImage>) -> bool {
         let width_word = self.tex_sampler[1];
         let height_word = self.tex_sampler[2];
         let mut width = width_word;
@@ -886,10 +886,10 @@ impl SGIOdysseyState {
         let word = self.tex_sampler[4] & !ODSY_TEX_SAMPLER_BIT17;
         let components = word & 0x0f800000;
         let mut sampler_size = self.tex_sampler[0];
-        let mut detail_sampler = OdysseyTextureDetailSampler::default();
-        let mut detail_weight = OdysseyTextureDetailWeight::default();
-        let detail_identity = odyssey_texture_detail_sampler(sampler_size, &mut detail_sampler);
-        let detail_filter = if detail_identity { odyssey_texture_detail_filter(word) } else { 0 };
+        let mut detail_sampler = TextureDetailSampler::default();
+        let mut detail_weight = TextureDetailWeight::default();
+        let detail_identity = texture_detail_sampler(sampler_size, &mut detail_sampler);
+        let detail_filter = if detail_identity { texture_detail_filter(word) } else { 0 };
         let tex_shape = self.tex_mode & (ODSY_TEX_MODE_1D | ODSY_TEX_MODE_2D | ODSY_TEX_MODE_3D);
         let three_d = (self.tex_mode & ODSY_TEX_MODE_3D) != 0;
         let three_d_shape = tex_shape == ODSY_TEX_MODE_3D
@@ -953,8 +953,8 @@ impl SGIOdysseyState {
         let first = self.tex_level0 & 0x3f;
         let count: u32;
         let terminal: u32;
-        let lo = odyssey_texture_lod_limit(self.tex_lod[2]);
-        let hi = odyssey_texture_lod_limit(self.tex_lod[3]);
+        let lo = texture_lod_limit(self.tex_lod[2]);
+        let hi = texture_lod_limit(self.tex_lod[3]);
         const MIN_FILTERS: [u32; 6] = [
             SGI_GL_NEAREST,
             SGI_GL_LINEAR,
@@ -1158,7 +1158,7 @@ impl SGIOdysseyState {
                 {
                     break 'unsupported;
                 }
-                let slice_stride = odyssey_volume_slice_stride(entry[2]);
+                let slice_stride = volume_slice_stride(entry[2]);
                 // The captured 2x2x2 stored upload starts 15 slice strides above
                 // the level base. For this one captured profile the rule applies
                 // at any level base: a compatibility approximation of model
@@ -1180,7 +1180,7 @@ impl SGIOdysseyState {
                 if count > SGI_GL_TEX_LEVELS_MAX {
                     break 'unsupported;
                 }
-                *chain = OdysseyTextureChain::default();
+                *chain = TextureChain::default();
                 let chain_opaque = P::new(chain).opaque();
                 let mut slice_next: u32 = 0;
                 for i in 0..count {
@@ -1245,7 +1245,7 @@ impl SGIOdysseyState {
                         slice_next += 1;
                         z += 1;
                     }
-                    chain.volumes[i as usize] = OdysseyTextureVolume {
+                    chain.volumes[i as usize] = TextureVolume {
                         s: P::new(self),
                         base,
                         stride_units,
@@ -1260,14 +1260,14 @@ impl SGIOdysseyState {
                         slices: slice_next - level_slice,
                         ..Default::default()
                     };
-                    chain.levels[i as usize] = SGIGLTexLevel {
+                    chain.levels[i as usize] = GlTexLevel {
                         level: i,
                         width: level_width,
                         height: level_height,
                         depth: level_depth,
                         base_format: image.base_format,
                         internal_format: image.base_format,
-                        read_texel_3d: Some(odyssey_texture_read_volume_level),
+                        read_texel_3d: Some(texture_read_volume_level),
                         opaque: chain_opaque,
                         ..Default::default()
                     };
@@ -1291,20 +1291,20 @@ impl SGIOdysseyState {
                 } else {
                     SGI_GL_REPEAT
                 };
-                image.read_texel_3d = Some(odyssey_texture_read_3d);
+                image.read_texel_3d = Some(texture_read_3d);
                 image.border = three_d_stored as u32;
                 if three_d_stored {
                     image.wrap_s = SGI_GL_CLAMP;
                     image.wrap_t = SGI_GL_CLAMP;
-                    image.read_border_texel_3d = Some(odyssey_texture_read_border_3d);
+                    image.read_border_texel_3d = Some(texture_read_border_3d);
                 }
                 image.opaque = P::new(&mut chain.volume).opaque();
                 if !self.texture_scale_bias_identity() {
                     chain.volume.scale_bias = true;
-                    image.post_filter = Some(odyssey_texture_post_filter);
+                    image.post_filter = Some(texture_post_filter);
                 }
                 if mipmap {
-                    chain.pyramid = SGIGLTexPyramid {
+                    chain.pyramid = GlTexPyramid {
                         levels: P(chain.levels.as_mut_ptr()),
                         count,
                         base_level: 0,
@@ -1323,7 +1323,7 @@ impl SGIOdysseyState {
             if count > SGI_GL_TEX_LEVELS_MAX || first + count > SGI_ODYSSEY_TEX_LEVELS {
                 break 'unsupported;
             }
-            *chain = OdysseyTextureChain::default();
+            *chain = TextureChain::default();
             let chain_opaque = P::new(chain).opaque();
             chain.volume.s = P::new(self);
             chain.volume.colour_table_alpha = colour_table_rgba8_rgba || word == 0x11600001;
@@ -1331,7 +1331,7 @@ impl SGIOdysseyState {
             chain.volume.colour_table = colour_table;
             chain.volume.scale_bias = !self.texture_scale_bias_identity();
             if chain.volume.colour_table || chain.volume.scale_bias {
-                image.post_filter = Some(odyssey_texture_post_filter);
+                image.post_filter = Some(texture_post_filter);
             }
             for i in 0..count {
                 let e = ((first + i) * 3) as usize;
@@ -1366,7 +1366,7 @@ impl SGIOdysseyState {
                 {
                     break 'unsupported;
                 }
-                chain.levels[i as usize] = SGIGLTexLevel {
+                chain.levels[i as usize] = GlTexLevel {
                     level: i,
                     width: level_width,
                     height: level_height,
@@ -1414,7 +1414,7 @@ impl SGIOdysseyState {
                         break 'unsupported;
                     }
                 }
-                chain.storage[i as usize] = OdysseyTexture {
+                chain.storage[i as usize] = Texture {
                     // Captured stored-border policy uses interior coordinate 16.
                     s: P::new(self),
                     offset: self.obj_offset[o].wrapping_add(interior_y.wrapping_mul(self.obj_width[o])).wrapping_add(interior_x),
@@ -1425,13 +1425,13 @@ impl SGIOdysseyState {
                     words: self.obj_used,
                     border_rows: two_d_stored || general_border,
                 };
-                chain.levels[i as usize].read_texel = Some(odyssey_texture_read_level);
+                chain.levels[i as usize].read_texel = Some(texture_read_level);
                 if bordered {
                     chain.levels[i as usize].border = 1;
-                    chain.levels[i as usize].read_border_texel = Some(odyssey_texture_read_border_level);
+                    chain.levels[i as usize].read_border_texel = Some(texture_read_border_level);
                 }
             }
-            chain.pyramid = SGIGLTexPyramid {
+            chain.pyramid = GlTexPyramid {
                 levels: P(chain.levels.as_mut_ptr()),
                 count,
                 base_level: 0,
@@ -1454,7 +1454,7 @@ impl SGIOdysseyState {
                 image.detail_image = P::new(&mut chain.detail_image);
                 image.detail_level = detail_sampler.level;
                 image.detail_mode = detail_sampler.mode;
-                image.read_filter_weight = Some(odyssey_texture_detail_weight);
+                image.read_filter_weight = Some(texture_detail_weight);
             }
             *resolved = P::new(image);
             return true;
@@ -1525,7 +1525,7 @@ impl SGIOdysseyState {
             }
         }
         let rows = self.gl_texture_matrix;
-        odyssey_gl_transpose(&rows, &mut matrix);
+        gl_transpose(&rows, &mut matrix);
         // Input T may transform S, but transformed T cannot affect 1D sampling.
         if one_d {
             for i in 0..4usize {
@@ -1540,17 +1540,17 @@ impl SGIOdysseyState {
 /// The context emits one assembled primitive here; rasterize it into the
 /// plane. Shared between the fire-and-forget and checked sink callbacks
 /// below; only the out-of-memory result differs in how it is reported back.
-pub fn odyssey_gl_draw_result(opaque: Opaque, d: &SGIGLDraw) -> SGIGLDrawResult {
-    let s = from_opaque::<SGIOdysseyState>(opaque);
+pub fn gl_draw_result(opaque: Opaque, d: &GlDraw) -> GlDrawResult {
+    let s = from_opaque::<Board>(opaque);
     let mut t = s.gl_target();
     let rules = s.gl_operation_rules();
-    let mut state: SGIGLDrawState = *d.state;
+    let mut state: GlDrawState = *d.state;
     let mut draw = *d;
-    let mut image = SGIGLTexImage::default();
-    // Some 7 KB that only a textured draw uses, and odyssey_texture_setup()
+    let mut image = GlTexImage::default();
+    // Some 7 KB that only a textured draw uses, and Board::texture_setup()
     // clears before it fills any of it, so it is not built for every
     // primitive.
-    let mut texture: Option<Box<OdysseyTextureChain>> = None;
+    let mut texture: Option<Box<TextureChain>> = None;
 
     if d.state.texture_2d != 0 || d.state.texture_3d != 0 {
         let chain = texture.insert(Box::default());
@@ -1587,22 +1587,22 @@ pub fn odyssey_gl_draw_result(opaque: Opaque, d: &SGIGLDraw) -> SGIGLDrawResult 
     result
 }
 
-pub fn odyssey_gl_draw(opaque: Opaque, d: &SGIGLDraw) {
-    odyssey_gl_draw_result(opaque, d);
+pub fn gl_draw(opaque: Opaque, d: &GlDraw) {
+    gl_draw_result(opaque, d);
 }
 
 /// The checked path the shared context requires once per-face polygon modes
-/// are activated (odyssey_reset_registers): it relays sgi_soft_draw()'s
+/// are activated (Board::reset_registers): it relays RasterRules::draw()'s
 /// out-of-memory signal from GL_POLYGON's dynamic vertex assembly back to
 /// the shared context synchronously instead of dropping it. The native
 /// renderer does not exist here, so this is always the scalar draw.
-pub fn odyssey_gl_draw_checked(opaque: Opaque, d: &SGIGLDraw) -> SGIGLDrawResult {
-    odyssey_gl_draw_result(opaque, d)
+pub fn gl_draw_checked(opaque: Opaque, d: &GlDraw) -> GlDrawResult {
+    gl_draw_result(opaque, d)
 }
 
 /// glClear's raster op: not on the first-triangle path, wired for later.
-pub fn odyssey_gl_raster(opaque: Opaque, op: &SGIRasterOp) {
-    let s = from_opaque::<SGIOdysseyState>(opaque);
+pub fn gl_raster(opaque: Opaque, op: &RasterOp) {
+    let s = from_opaque::<Board>(opaque);
     let t = s.gl_target();
     let rules = s.gl_operation_rules();
 
@@ -1613,12 +1613,12 @@ pub fn odyssey_gl_raster(opaque: Opaque, op: &SGIRasterOp) {
     s.scanout.invalidate_all();
 }
 
-impl SGIOdysseyState {
-    pub fn gl_sink(&mut self) -> SGIGLSink {
-        SGIGLSink {
-            draw: Some(odyssey_gl_draw),
-            draw_checked: Some(odyssey_gl_draw_checked),
-            raster: Some(odyssey_gl_raster),
+impl Board {
+    pub fn gl_sink(&mut self) -> GlSink {
+        GlSink {
+            draw: Some(gl_draw),
+            draw_checked: Some(gl_draw_checked),
+            raster: Some(gl_raster),
             fence: None,
             opaque: P::new(self).opaque(),
             result: P::null(),
@@ -1626,15 +1626,15 @@ impl SGIOdysseyState {
     }
 }
 
-impl SGIClipRect {
-    fn gl_clip_rect_eq(&self, b: &SGIClipRect) -> bool {
+impl ClipRect {
+    fn gl_clip_rect_eq(&self, b: &ClipRect) -> bool {
         self.x0 == b.x0 && self.y0 == b.y0 && self.x1 == b.x1 && self.y1 == b.y1
     }
 }
 
-impl SGIGLDrawable {
+impl GlDrawable {
     // The C compares the two drawables byte for byte.
-    fn drawable_eq(&self, b: &SGIGLDrawable) -> bool {
+    fn drawable_eq(&self, b: &GlDrawable) -> bool {
         self.bound == b.bound
             && self.origin == b.origin
             && self.width == b.width
@@ -1649,7 +1649,7 @@ impl SGIGLDrawable {
     }
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// Point the shared context at the current window: its origin from 0x841
     /// and the kept 0x204b rectangles as the pixels it owns, in plane
     /// coordinates. Called before every command, so a change to either
@@ -1665,7 +1665,7 @@ impl SGIOdysseyState {
     ///
     /// The shared rasterizer adds window rows to the origin as they come; the
     /// client's combined matrix already counts them down from the window's top
-    /// row, the one 0x841 names (odyssey_gl_load_combined()), so the origin,
+    /// row, the one 0x841 names (Board::gl_load_combined()), so the origin,
     /// rectangles and id plane all stay in the registers' top-down plane
     /// coordinates.
     pub fn gl_bind(&mut self) {
@@ -1692,12 +1692,12 @@ impl SGIOdysseyState {
                     d.clip.r[i] = clip_rect[i];
                 }
             } else {
-                // An all-empty clip; SGIClipList.empty replaces this at rebase.
-                d.clip.r[0] = SGIClipRect { x0: 1, y0: 1, x1: 0, y1: 0 };
+                // An all-empty clip; ClipList.empty replaces this at rebase.
+                d.clip.r[0] = ClipRect { x0: 1, y0: 1, x1: 0, y1: 0 };
             }
             if d.clip.n > n {
                 for i in n as usize..d.clip.n as usize {
-                    d.clip.r[i] = SGIClipRect::default();
+                    d.clip.r[i] = ClipRect::default();
                 }
             }
             d.clip.n = n;
@@ -1708,7 +1708,7 @@ impl SGIOdysseyState {
         }
         if self.gl_ctx.cur.draw_buffers != draw {
             let sink = self.gl_sink();
-            let cmd = SGIGLCmd::new(SGI_GL_OP_DRAW_BUFFERS as u16, std::slice::from_mut(&mut draw));
+            let cmd = GlCmd::new(SGI_GL_OP_DRAW_BUFFERS as u16, std::slice::from_mut(&mut draw));
 
             self.gl_ctx.command(&sink, &cmd);
         }
@@ -1717,14 +1717,14 @@ impl SGIOdysseyState {
     /// Decode one command into the shared context.
     pub fn gl_feed(&mut self, op: u16, args: &[u32]) {
         let sink = self.gl_sink();
-        let cmd = SGIGLCmd::new(op, args);
+        let cmd = GlCmd::new(op, args);
 
         self.gl_bind();
         self.gl_ctx.command(&sink, &cmd);
     }
 
-    // odyssey_gl_feed with the op as the shared layer's u32 enum.
-    fn gl_feed32(&mut self, op: SGIGLOp, args: &[u32]) {
+    // Board::gl_feed with the op as the shared layer's u32 enum.
+    fn gl_feed32(&mut self, op: GlOp, args: &[u32]) {
         self.gl_feed(op as u16, args);
     }
 }
@@ -1733,7 +1733,7 @@ impl SGIOdysseyState {
 /// GL_FRONT 10, GL_FRONT_AND_BACK 11. Returns UINT32_MAX for 00, which no
 /// probe word has sent; the shared layer's own glCullFace validation then
 /// rejects it, leaving the previous mode in place.
-pub fn odyssey_cull_face_mode(code: u32) -> u32 {
+pub fn cull_face_mode(code: u32) -> u32 {
     match code {
         1 => SGI_GL_BACK,
         2 => SGI_GL_FRONT,
@@ -1744,18 +1744,18 @@ pub fn odyssey_cull_face_mode(code: u32) -> u32 {
 
 /// 0x404 bit 23 to the shared layer's glFrontFace sense, inverted -- see
 /// the ODSY_MODE_FRONT_FACE_CW comment for why.
-pub fn odyssey_front_face(pattern_mode: u32) -> u32 {
+pub fn front_face(pattern_mode: u32) -> u32 {
     if (pattern_mode & ODSY_MODE_FRONT_FACE_CW) != 0 { SGI_GL_CCW } else { SGI_GL_CW }
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// Feed one raster-state register (polygon mode, line width and point
     /// size, line stipple and its enable). A context swap drops the outgoing
     /// primitive and only then re-pushes the owner's polygon mode, sizes and
     /// stipple; on the board no primitive is open by then. The model is
     /// different: it keeps a GL_POLYGON open across the switch, because it
     /// assembles a polygon whole and the board's way of continuing one after a
-    /// switch is unknown (odyssey_cmd_dispatch()'s 0x0444 and 0x0850 cases).
+    /// switch is unknown (Board::cmd_dispatch()'s 0x0444 and 0x0850 cases).
     /// The shared layer would refuse the restored values as GL calls inside
     /// glBegin and keep what the other context left, so while a GL_POLYGON is
     /// held open its begin flag is set aside for the one call. APPROXIMATION:
@@ -1824,8 +1824,8 @@ impl SGIOdysseyState {
 
     pub fn gl_apply_mode(&mut self) {
         let shade = if (self.pattern_mode & ODSY_MODE_FLAT_SHADE) != 0 { SGI_GL_FLAT } else { SGI_GL_SMOOTH };
-        let cull_mode = odyssey_cull_face_mode((self.pattern_mode >> ODSY_MODE_CULL_MODE_SHIFT) & ODSY_MODE_CULL_MODE_MASK);
-        let front_face = odyssey_front_face(self.pattern_mode);
+        let cull_mode = cull_face_mode((self.pattern_mode >> ODSY_MODE_CULL_MODE_SHIFT) & ODSY_MODE_CULL_MODE_MASK);
+        let front_face = front_face(self.pattern_mode);
         let pm = self.pattern_mode;
         let en = |bit: u32| if (pm & bit) != 0 { SGI_GL_OP_ENABLE } else { SGI_GL_OP_DISABLE };
 
@@ -1835,7 +1835,7 @@ impl SGIOdysseyState {
         self.gl_feed32(en(ODSY_MODE_LINE_SMOOTH), &[SGI_GL_LINE_SMOOTH]);
         // The shared layer has no dither rule yet, so the bit is kept as family
         // state and reported at the first draw it would affect
-        // (odyssey_gl_vertex_colour()). Once the shared rule lands this feeds
+        // (Board::gl_vertex_colour()). Once the shared rule lands this feeds
         // SGI_GL_OP_ENABLE/DISABLE of SGI_GL_DITHER instead.
         self.gl_dither = (self.pattern_mode & ODSY_MODE_DITHER) != 0;
         self.gl_feed32(en(ODSY_MODE_DEPTH_TEST), &[SGI_GL_DEPTH_TEST]);
@@ -1900,7 +1900,7 @@ impl SGIOdysseyState {
             }
         }
         for k in 0..4usize {
-            args[1 + k] = odyssey_f32_bits(obj[k] as f32);
+            args[1 + k] = f32_bits(obj[k] as f32);
         }
         self.gl_feed32(SGI_GL_OP_CLIP_PLANE, &args);
     }
@@ -1932,7 +1932,7 @@ impl SGIOdysseyState {
 /// 0x10 pairing, 0x39 through 0x3c the "one minus" of 0x18/0x20/0x28/0x30
 /// in turn, and 0x40, a source-only code, GL_SRC_ALPHA_SATURATE. Returns
 /// UINT32_MAX for a code with no factor at the requested position.
-pub fn odyssey_blend_factor(code: u32, dst: bool) -> u32 {
+pub fn blend_factor(code: u32, dst: bool) -> u32 {
     match code {
         0x00 => 0, // GL_ZERO
         0x08 => 1, // GL_ONE
@@ -1960,7 +1960,7 @@ pub fn odyssey_blend_factor(code: u32, dst: bool) -> u32 {
 /// 0x041f's three 3-bit stencil-op fields (fail, depth-fail, depth-pass)
 /// to the shared layer's enum: KEEP 0, ZERO 1, REPLACE 2, INCR 3, DECR 4,
 /// INVERT 5. Returns UINT32_MAX for the two codes the board leaves unused.
-pub fn odyssey_stencil_op(code: u32) -> u32 {
+pub fn stencil_op(code: u32) -> u32 {
     match code {
         0 => SGI_GL_KEEP,
         1 => 0, // GL_ZERO
@@ -1976,7 +1976,7 @@ pub fn odyssey_stencil_op(code: u32) -> u32 {
 /// GL_POINT 0 to GL_FILL 2. Returns UINT32_MAX for the one code the board
 /// leaves undefined, which the shared layer's own glPolygonMode validation
 /// then rejects, leaving the previous mode in place.
-pub fn odyssey_polygon_mode(code: u32) -> u32 {
+pub fn polygon_mode(code: u32) -> u32 {
     match code {
         0 => SGI_GL_POINT,
         1 => SGI_GL_LINE,
@@ -1987,10 +1987,10 @@ pub fn odyssey_polygon_mode(code: u32) -> u32 {
 
 /// 0x0c21 word 0 bits 15:13 to the shared layer's blend equation. Codes 3
 /// and 4, the SGIX alpha min/max extension, have no shared equivalent
-/// (sgi_gl_blend_equation_valid() accepts only the other six), so the
+/// (gl_blend_equation_valid() accepts only the other six), so the
 /// dispatch case reports and skips them rather than feeding a code the
 /// shared layer would reject.
-pub static odyssey_blend_equation: [u32; 8] = [
+pub static BLEND_EQUATION: [u32; 8] = [
     SGI_GL_FUNC_ADD,
     SGI_GL_MIN,
     SGI_GL_MAX,
@@ -2001,7 +2001,7 @@ pub static odyssey_blend_equation: [u32; 8] = [
     SGI_GL_FUNC_REVERSE_SUBTRACT,
 ];
 
-impl SGIOdysseyState {
+impl Board {
     /// 0x0420 and 0x0452 to the shared context's comparison and depth mask.
     pub fn gl_apply_depth(&mut self) {
         let func = SGI_GL_NEVER_ENUM + (self.gl_depth_func & ODSY_DEPTH_FUNC_MASK);
@@ -2013,7 +2013,7 @@ impl SGIOdysseyState {
 }
 
 /// The lighting words matched by value (ODSY_GL_NORMAL_3F and the rest).
-pub static odyssey_gl_light_words: [u32; 16] = [
+pub static GL_LIGHT_WORDS: [u32; 16] = [
     ODSY_GL_NORMAL_3F,
     ODSY_GL_MATERIAL_AMBIENT,
     ODSY_GL_MATERIAL_DIFFUSE,
@@ -2033,15 +2033,15 @@ pub static odyssey_gl_light_words: [u32; 16] = [
 ];
 
 /// The texture-coordinate and generation fragments.
-pub static odyssey_ucode_texgen: [u32; 14] = [
+pub static UCODE_TEXGEN: [u32; 14] = [
     0x033, 0x04d, 0x052, 0x057, 0x05c, 0x061, 0x066, 0x06b, 0x06c, 0x077, 0x07b, 0x07f, 0x091, 0x09f,
 ];
 
-pub fn odyssey_prog_value(word: u32) -> u32 {
+pub fn prog_value(word: u32) -> u32 {
     (word & ODSY_PROG_LOW_MASK) | (((word >> ODSY_PROG_HIGH_SHIFT) & 1) << 10)
 }
 
-pub fn odyssey_is_program_word(word: u32) -> bool {
+pub fn is_program_word(word: u32) -> bool {
     let cls = word >> ODSY_PROG_CLASS_SHIFT;
 
     if (word & ODSY_PROG_SHAPE) != ODSY_PROG_TAG {
@@ -2074,9 +2074,9 @@ pub fn odyssey_is_program_word(word: u32) -> bool {
     )
 }
 
-pub fn odyssey_ucode_is_texgen(a: u32) -> bool {
-    for i in 0..odyssey_ucode_texgen.len() {
-        if a == odyssey_ucode_texgen[i] {
+pub fn ucode_is_texgen(a: u32) -> bool {
+    for i in 0..UCODE_TEXGEN.len() {
+        if a == UCODE_TEXGEN[i] {
             return true;
         }
     }

@@ -3,30 +3,30 @@ use super::*;
 
 pub const SGI_X_GC_WORDS: usize = 13;
 
-pub type SGIXGCTarget = u32;
-pub const SGI_X_GC_UNSUPPORTED: SGIXGCTarget = 0;
-pub const SGI_X_GC_MAIN_CI8: SGIXGCTarget = 1;
-pub const SGI_X_GC_MAIN_INDEX16: SGIXGCTarget = 2;
-pub const SGI_X_GC_MAIN_RGB8: SGIXGCTarget = 3;
-pub const SGI_X_GC_OVERLAY0: SGIXGCTarget = 4;
-pub const SGI_X_GC_OVERLAY1: SGIXGCTarget = 5;
-pub const SGI_X_GC_POPUP: SGIXGCTarget = 6;
-pub const SGI_X_GC_DID: SGIXGCTarget = 7;
+pub type XgcTarget = u32;
+pub const SGI_X_GC_UNSUPPORTED: XgcTarget = 0;
+pub const SGI_X_GC_MAIN_CI8: XgcTarget = 1;
+pub const SGI_X_GC_MAIN_INDEX16: XgcTarget = 2;
+pub const SGI_X_GC_MAIN_RGB8: XgcTarget = 3;
+pub const SGI_X_GC_OVERLAY0: XgcTarget = 4;
+pub const SGI_X_GC_OVERLAY1: XgcTarget = 5;
+pub const SGI_X_GC_POPUP: XgcTarget = 6;
+pub const SGI_X_GC_DID: XgcTarget = 7;
 /// Both overlay buffers at once, the same 8-bit index in each.
-pub const SGI_X_GC_OVERLAY_BOTH: SGIXGCTarget = 8;
+pub const SGI_X_GC_OVERLAY_BOTH: XgcTarget = 8;
 
-pub type SGIXGCStatus = u32;
-pub const SGI_X_GC_OK: SGIXGCStatus = 0;
-pub const SGI_X_GC_BAD_FIELDS: SGIXGCStatus = 1;
-pub const SGI_X_GC_BAD_COLOR: SGIXGCStatus = 2;
-pub const SGI_X_GC_BAD_MASK: SGIXGCStatus = 3;
-pub const SGI_X_GC_MIXED_DID: SGIXGCStatus = 4;
-pub const SGI_X_GC_DEFERRED: SGIXGCStatus = 5;
+pub type XgcStatus = u32;
+pub const SGI_X_GC_OK: XgcStatus = 0;
+pub const SGI_X_GC_BAD_FIELDS: XgcStatus = 1;
+pub const SGI_X_GC_BAD_COLOR: XgcStatus = 2;
+pub const SGI_X_GC_BAD_MASK: XgcStatus = 3;
+pub const SGI_X_GC_MIXED_DID: XgcStatus = 4;
+pub const SGI_X_GC_DEFERRED: XgcStatus = 5;
 
 #[derive(Clone, Copy, Default, Debug)]
-pub struct SGIXGC {
+pub struct Xgc {
     pub raw: [u32; SGI_X_GC_WORDS],
-    pub target: SGIXGCTarget,
+    pub target: XgcTarget,
     pub foreground: u32,
     pub background: u32,
     pub mask: u32,
@@ -38,21 +38,21 @@ pub struct SGIXGC {
 }
 
 /// GX numbers are shared with GL enums after subtracting GL_CLEAR.
-pub fn sgi_x_logic_op(gx: u32, source: u32, destination: u32) -> u32 {
+pub fn x_logic_op(gx: u32, source: u32, destination: u32) -> u32 {
     // The board-memory helper masks op, while invalid GL enums use source.
     if gx <= 15 {
-        sgi_logic_op(gx as u8, source, destination)
+        logic_op(gx as u8, source, destination)
     } else {
         source
     }
 }
 
 /// RGB8 accepts zero or full alpha, with all field-gap bits zero.
-pub fn sgi_x_gc_decode(words: &[u32; SGI_X_GC_WORDS], decoded: &mut SGIXGC) -> SGIXGCStatus {
+pub fn x_gc_decode(words: &[u32; SGI_X_GC_WORDS], decoded: &mut Xgc) -> XgcStatus {
     decode(words, decoded, false)
 }
 /// Preserve the full native main-plane index and mask.
-pub fn sgi_x_gc_decode_main_index(words: &[u32; SGI_X_GC_WORDS], decoded: &mut SGIXGC) -> SGIXGCStatus {
+pub fn x_gc_decode_main_index(words: &[u32; SGI_X_GC_WORDS], decoded: &mut Xgc) -> XgcStatus {
     let status = decode(words, decoded, true);
 
     if status == SGI_X_GC_OK && decoded.target != SGI_X_GC_MAIN_INDEX16 {
@@ -61,9 +61,9 @@ pub fn sgi_x_gc_decode_main_index(words: &[u32; SGI_X_GC_WORDS], decoded: &mut S
         status
     }
 }
-impl SGIXGC {
+impl Xgc {
     pub fn apply(&self, source: u32, destination: u32) -> u32 {
-        ((sgi_x_logic_op(self.gx as u32, source, destination) & self.mask) | (destination & !self.mask))
+        ((x_logic_op(self.gx as u32, source, destination) & self.mask) | (destination & !self.mask))
             & self.width_mask
     }
     pub fn noop(&self) -> bool {
@@ -121,7 +121,7 @@ pub fn canonical_rgb(color: u64, rgb30: bool, out: &mut u32) -> bool {
     true
 }
 
-pub fn decode_did(w: &[u32; SGI_X_GC_WORDS], gc: &mut SGIXGC) -> SGIXGCStatus {
+pub fn decode_did(w: &[u32; SGI_X_GC_WORDS], gc: &mut Xgc) -> XgcStatus {
     let high = w[0] != 0 || w[4] != 0;
     let low = w[1] != 0 || w[5] != 0;
 
@@ -151,7 +151,7 @@ pub fn decode_did(w: &[u32; SGI_X_GC_WORDS], gc: &mut SGIXGC) -> SGIXGCStatus {
     SGI_X_GC_OK
 }
 
-pub fn decode(words: &[u32; SGI_X_GC_WORDS], gc: &mut SGIXGC, native_index: bool) -> SGIXGCStatus {
+pub fn decode(words: &[u32; SGI_X_GC_WORDS], gc: &mut Xgc, native_index: bool) -> XgcStatus {
     let w = words;
     let plane = w[6] & 0x3c;
     let mask_word = w[4] & !0x80000000u32;
@@ -164,7 +164,7 @@ pub fn decode(words: &[u32; SGI_X_GC_WORDS], gc: &mut SGIXGC, native_index: bool
     let geometry = w[10] == 0;
     let rgb30 = w[6] == 0 && (w[10] == 0 || w[10] == 9);
 
-    *gc = SGIXGC::default();
+    *gc = Xgc::default();
     gc.raw = *w;
     if w[9] > 30 || (w[9] & 1) != 0 {
         return SGI_X_GC_BAD_FIELDS;

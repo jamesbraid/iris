@@ -4,20 +4,20 @@
 use super::*;
 
 #[derive(Clone, Copy, Default)]
-pub struct OdysseyDMAEntry {
+pub struct DmaEntry {
     pub addr: u64,
     pub len: u32,
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct OdysseyDMALayout {
+pub struct DmaLayout {
     pub code: u8,
     pub bytes: u8,
     pub from: [u8; 8],
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct OdysseyDMASource {
+pub struct DmaSource {
     pub obj: i32,
     pub front: bool,
     pub x: i64,
@@ -25,8 +25,8 @@ pub struct OdysseyDMASource {
 }
 
 #[derive(Clone, Default)]
-pub struct OdysseyDMAPiece {
-    pub map: SGIDMAMap,
+pub struct DmaPiece {
+    pub map: DmaMap,
     pub at: u64,
     pub src: u64,
     pub len: u32,
@@ -44,16 +44,16 @@ pub const ODSY_CMD_GL_RECT: u32 = 7;
 pub const ODSY_CMD_SKIP: u32 = 8;
 
 /// The table's physical address half, unpacked from a descriptor word.
-pub fn odyssey_dma_desc_half(word: u32) -> u64 {
+pub fn dma_desc_half(word: u32) -> u64 {
     ((word & ODSY_DMA_DESC_ADDR_LOW_MASK) as u64)
         | ((((word >> ODSY_DMA_DESC_ADDR_HIGH_SHIFT) & ODSY_DMA_DESC_ADDR_HIGH_MASK) as u64) << 17)
 }
 
-pub fn odyssey_dma_table_address(w1: u32, w3: u32) -> u64 {
-    (odyssey_dma_desc_half(w1) << 24) | odyssey_dma_desc_half(w3)
+pub fn dma_table_address(w1: u32, w3: u32) -> u64 {
+    (dma_desc_half(w1) << 24) | dma_desc_half(w3)
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// The hard DMA-done interrupt: the routed source whose vector is byte 15:8
     /// of the route-vectors register. A DMA the driver asks to be told about
     /// completes on two events, the fence and this interrupt; the model raises it
@@ -68,12 +68,12 @@ impl SGIOdysseyState {
 }
 
 /// Bytes per pixel, indexed by word 7's bits 18:16.
-pub static odyssey_dma_bpp: [u8; (ODSY_DMA_BPP_MASK + 1) as usize] = [2, 4, 8, 16, 12, 1, 6, 3];
+pub static DMA_BPP: [u8; (ODSY_DMA_BPP_MASK + 1) as usize] = [2, 4, 8, 16, 12, 1, 6, 3];
 
-impl SGIDMABus {
+impl DmaBus {
     /// The entry's page pairs, up to a zero pair or the twelfth, into e[].
     /// Returns how many, or -1 when a read fails.
-    pub fn entries(&self, table: u64, seq: u64, e: &mut [OdysseyDMAEntry]) -> i32 {
+    pub fn entries(&self, table: u64, seq: u64, e: &mut [DmaEntry]) -> i32 {
         let mut n: usize = 0;
 
         while n < ODSY_DMA_MAX_PAGES {
@@ -94,7 +94,7 @@ impl SGIDMABus {
     }
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// One pixel of a transfer at (x, y) of object obj, or of the colour buffers
     /// the drawing mask selects when obj is -1, decoded by the header's source
     /// format as an image transfer's pixel is. Clipped to the plane only.
@@ -113,7 +113,7 @@ impl SGIOdysseyState {
         }
         for b in 0..ODSY_BUFFERS {
             if self.draw_buffers() & (1u32 << b) != 0 {
-                let word = if odyssey_code_is_index(code) { pixel } else { (pixel & !0xffu32) | 0xff };
+                let word = if code_is_index(code) { pixel } else { (pixel & !0xffu32) | 0xff };
                 self.buffer_store(b, x, y, word);
             }
         }
@@ -125,7 +125,7 @@ impl SGIOdysseyState {
     pub fn dma_code(&mut self, hdr: &[u32], bpp: u32) -> u32 {
         let code = hdr[ODSY_DMA_HDR_CONTROL] & ODSY_IMAGE_CODE_MASK;
 
-        if odyssey_pixel_bytes(code) == bpp {
+        if pixel_bytes(code) == bpp {
             return code;
         }
         if !self.dma_code_reported {
@@ -137,14 +137,14 @@ impl SGIOdysseyState {
 }
 
 /// True when hdr is a backing-store page the model copies, bpp a texel.
-pub fn odyssey_dma_raw(hdr: &[u32], bpp: u32) -> bool {
+pub fn dma_raw(hdr: &[u32], bpp: u32) -> bool {
     let fmt = hdr[ODSY_DMA_HDR_FORMAT];
 
     (hdr[ODSY_DMA_HDR_CONTROL] & ODSY_IMAGE_CODE_MASK) == 0
         && ((fmt == ODSY_DMA_FMT_RAW16 && bpp == 2) || (fmt == ODSY_DMA_FMT_RAW32 && bpp == 4))
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// True, reported once, when hdr is an 8-byte backing-store page.
     pub fn dma_raw64(&mut self, hdr: &[u32], bpp: u32) -> bool {
         if hdr[ODSY_DMA_HDR_FORMAT] != ODSY_DMA_FMT_RAW64
@@ -163,27 +163,27 @@ impl SGIOdysseyState {
     }
 }
 
-pub fn odyssey_raw_nibble(byte: u32) -> u32 {
+pub fn raw_nibble(byte: u32) -> u32 {
     (byte * 15 + 127) / 255
 }
 
 /// A stored texel as a backing-store page's bpp raw bytes.
-pub fn odyssey_raw_pack(rgba: u32, bpp: u32, dst: &mut [u8]) {
+pub fn raw_pack(rgba: u32, bpp: u32, dst: &mut [u8]) {
     if bpp == 4 {
         stl_be_p(dst, rgba);
         return;
     }
     stw_be_p(
         dst,
-        odyssey_raw_nibble(rgba >> 24) << 12
-            | odyssey_raw_nibble((rgba >> 16) & 0xff) << 8
-            | odyssey_raw_nibble((rgba >> 8) & 0xff) << 4
-            | odyssey_raw_nibble(rgba & 0xff),
+        raw_nibble(rgba >> 24) << 12
+            | raw_nibble((rgba >> 16) & 0xff) << 8
+            | raw_nibble((rgba >> 8) & 0xff) << 4
+            | raw_nibble(rgba & 0xff),
     );
 }
 
 /// A backing-store page's bpp raw bytes back as a stored texel.
-pub fn odyssey_raw_unpack(src: &[u8], bpp: u32) -> u32 {
+pub fn raw_unpack(src: &[u8], bpp: u32) -> u32 {
     if bpp == 4 {
         return ldl_be_p(src);
     }
@@ -194,28 +194,28 @@ pub fn odyssey_raw_unpack(src: &[u8], bpp: u32) -> u32 {
         | (v & 0xf) * 0x11u32
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// A transfer into the colour buffer the screen shows (obj -1) or into
     /// board-memory object obj: paint the header's rectangle from the source.
     /// The source is a stream of pixel bytes spread over the entries: each row
     /// takes rowbytes bytes, moving to the next entry whenever the current one's
     /// count runs out, then the cursor steps over skip uncounted bytes. No byte
     /// outside the entries is read.
-    pub fn dma_to_buffer(&mut self, bus: &SGIDMABus, table: u64, seq: u64, hdr: &[u32], obj: i32) {
-        let mut e = [OdysseyDMAEntry::default(); ODSY_DMA_MAX_PAGES];
+    pub fn dma_to_buffer(&mut self, bus: &DmaBus, table: u64, seq: u64, hdr: &[u32], obj: i32) {
+        let mut e = [DmaEntry::default(); ODSY_DMA_MAX_PAGES];
         let x = hdr[ODSY_DMA_HDR_ORIGIN] & 0xffff;
         let y = hdr[ODSY_DMA_HDR_ORIGIN] >> 16;
         let w = hdr[ODSY_DMA_HDR_SIZE] & 0xffff;
         let h = if hdr[ODSY_DMA_HDR_SIZE] >> 16 != 0 { hdr[ODSY_DMA_HDR_SIZE] >> 16 } else { 0x10000 };
         let skip = hdr[ODSY_DMA_HDR_SKIP];
         let rowbytes = hdr[ODSY_DMA_HDR_ROWBYTES] & ODSY_DMA_ROWBYTES_MASK;
-        let bpp = odyssey_dma_bpp[((hdr[ODSY_DMA_HDR_CONTROL] >> ODSY_DMA_BPP_SHIFT) & ODSY_DMA_BPP_MASK) as usize] as u32;
-        let comps = odyssey_texel12_components(hdr[ODSY_DMA_HDR_CONTROL] & ODSY_IMAGE_CODE_MASK);
+        let bpp = DMA_BPP[((hdr[ODSY_DMA_HDR_CONTROL] >> ODSY_DMA_BPP_SHIFT) & ODSY_DMA_BPP_MASK) as usize] as u32;
+        let comps = texel12_components(hdr[ODSY_DMA_HDR_CONTROL] & ODSY_IMAGE_CODE_MASK);
         // A 12-bit texture source into an object: a byte or two a component.
         let texel12 = obj >= 0 && comps != 0 && (bpp == comps || bpp == 2 * comps);
         // An 8-bit luminance-alpha source into an object, two bytes a pixel.
         let lum_alpha = obj >= 0 && bpp == 2 && (hdr[ODSY_DMA_HDR_CONTROL] & ODSY_IMAGE_CODE_MASK) == ODSY_IMAGE_CODE_LUM_ALPHA;
-        let raw = obj >= 0 && odyssey_dma_raw(hdr, bpp);
+        let raw = obj >= 0 && dma_raw(hdr, bpp);
         let mut payload: u64 = 0;
         let mut pos: u64 = 0;
 
@@ -286,7 +286,7 @@ impl SGIOdysseyState {
                 for c in 0..w {
                     let px = &row[(c * bpp) as usize..];
                     if raw {
-                        self.object_store(obj, x.wrapping_add(c), y.wrapping_add(r), odyssey_raw_unpack(px, bpp));
+                        self.object_store(obj, x.wrapping_add(c), y.wrapping_add(r), raw_unpack(px, bpp));
                         continue;
                     }
                     if texel12 {
@@ -294,7 +294,7 @@ impl SGIOdysseyState {
                             obj,
                             x.wrapping_add(c),
                             y.wrapping_add(r),
-                            odyssey_decode_texel12(code, px, bpp != comps),
+                            decode_texel12(code, px, bpp != comps),
                         );
                         continue;
                     }
@@ -325,7 +325,7 @@ impl SGIOdysseyState {
 /// The draw-sentinel uploads this model takes: the captured RGBA16 write
 /// (eight bytes a pixel), the ABGR write and the movie write (four bytes a
 /// pixel; the movie sets *top_down). 0 for any other upload.
-pub fn odyssey_dma_draw_sentinel_bytes(hdr: &[u32], top_down: &mut bool) -> u32 {
+pub fn dma_draw_sentinel_bytes(hdr: &[u32], top_down: &mut bool) -> u32 {
     let control = hdr[ODSY_DMA_HDR_CONTROL];
 
     *top_down = false;
@@ -344,12 +344,12 @@ pub fn odyssey_dma_draw_sentinel_bytes(hdr: &[u32], top_down: &mut bool) -> u32 
     0
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// Stage the pixel bytes first so a failed source read cannot leave a
     /// partially painted rectangle. Entry lengths count pixels; row gaps advance
     /// the address cursor only while the current entry has bytes remaining.
-    pub fn dma_draw_sentinel_short(&mut self, bus: &SGIDMABus, table: u64, seq: u64, hdr: &[u32]) {
-        let mut e = [OdysseyDMAEntry::default(); ODSY_DMA_MAX_PAGES];
+    pub fn dma_draw_sentinel_short(&mut self, bus: &DmaBus, table: u64, seq: u64, hdr: &[u32]) {
+        let mut e = [DmaEntry::default(); ODSY_DMA_MAX_PAGES];
         let x = hdr[ODSY_DMA_HDR_ORIGIN] & 0xffff;
         let y = hdr[ODSY_DMA_HDR_ORIGIN] >> 16;
         let w = hdr[ODSY_DMA_HDR_SIZE] & 0xffff;
@@ -360,7 +360,7 @@ impl SGIOdysseyState {
         let mut pos: u64 = 0;
         let mut out: u64 = 0;
         let mut top_down = false;
-        let psize = odyssey_dma_draw_sentinel_bytes(hdr, &mut top_down);
+        let psize = dma_draw_sentinel_bytes(hdr, &mut top_down);
         // APPROXIMATION: the window's height, for a top-down write's bottom-up y,
         // taken from the clip box's last row; the header carries no height. A
         // capture with a scissor box smaller than the window would tell this
@@ -438,14 +438,14 @@ impl SGIOdysseyState {
                 let mut rgba: u32;
 
                 if psize == 4 {
-                    rgba = (odyssey_pack_pixel(src[3] as u32, src[2] as u32, src[1] as u32) & !0xffu32) | src[0] as u32;
+                    rgba = (pack_pixel(src[3] as u32, src[2] as u32, src[1] as u32) & !0xffu32) | src[0] as u32;
                 } else {
                     let red = lduw_be_p(src);
                     let green = lduw_be_p(&src[2..]);
                     let blue = lduw_be_p(&src[4..]);
                     let alpha = lduw_be_p(&src[6..]);
 
-                    rgba = odyssey_pack_pixel(
+                    rgba = pack_pixel(
                         (red * 255 + 65535 / 2) / 65535,
                         (green * 255 + 65535 / 2) / 65535,
                         (blue * 255 + 65535 / 2) / 65535,
@@ -468,8 +468,8 @@ impl SGIOdysseyState {
     }
 }
 
-const fn lay(code: u32, bytes: u8, from: [u8; 8]) -> OdysseyDMALayout {
-    OdysseyDMALayout { code: code as u8, bytes, from }
+const fn lay(code: u32, bytes: u8, from: [u8; 8]) -> DmaLayout {
+    DmaLayout { code: code as u8, bytes, from }
 }
 
 const BZ: u8 = ODSY_DMA_BYTE_ZERO as u8;
@@ -479,7 +479,7 @@ const BI: u8 = ODSY_DMA_BYTE_INDEX as u8;
 /// code. The model keeps eight bits a channel, so a byte read returns them as
 /// stored and a 16-bit read replicates each byte. APPROXIMATION: how the
 /// board narrows a 12-bit channel to eight bits is unknown.
-pub static odyssey_dma_gl_layouts: [OdysseyDMALayout; 5] = [
+pub static DMA_GL_LAYOUTS: [DmaLayout; 5] = [
     lay(1, 4, [0, 1, 2, 3, 0, 0, 0, 0]),  // RGBA, UNSIGNED_BYTE: R, G, B, A
     lay(6, 4, [3, 2, 1, 0, 0, 0, 0, 0]),  // A, B, G, R
     lay(2, 3, [0, 1, 2, 0, 0, 0, 0, 0]),  // RGB, UNSIGNED_BYTE
@@ -488,40 +488,40 @@ pub static odyssey_dma_gl_layouts: [OdysseyDMALayout; 5] = [
 ];
 
 /// An eight-bit RGBA visual uses code 8 for RGBA/UNSIGNED_BYTE.
-pub static odyssey_dma_gl_rgba8_layout: OdysseyDMALayout = lay(8, 4, [0, 1, 2, 3, 0, 0, 0, 0]);
+pub static DMA_GL_RGBA8_LAYOUT: DmaLayout = lay(8, 4, [0, 1, 2, 3, 0, 0, 0, 0]);
 
 /// X reads, by word 7's format byte: the upload decode run backwards. The
 /// luminance code is not invertible and no read of it has been seen.
-pub static odyssey_dma_x_layouts: [OdysseyDMALayout; 4] = [
+pub static DMA_X_LAYOUTS: [DmaLayout; 4] = [
     lay(ODSY_IMAGE_CODE_ABGR, 4, [BZ, 2, 1, 0, 0, 0, 0, 0]),
     lay(ODSY_IMAGE_CODE_RGBA, 4, [0, 1, 2, 3, 0, 0, 0, 0]),
     lay(ODSY_IMAGE_CODE_RGB, 3, [0, 1, 2, 0, 0, 0, 0, 0]),
     lay(ODSY_IMAGE_CODE_CI, 1, [BI, 0, 0, 0, 0, 0, 0, 0]),
 ];
 
-impl SGIOdysseyState {
+impl Board {
     /// The read's layout, or None (reported once) when it is not modeled.
-    pub fn dma_read_layout(&mut self, hdr: &[u32], bpp: u32) -> Option<&'static OdysseyDMALayout> {
+    pub fn dma_read_layout(&mut self, hdr: &[u32], bpp: u32) -> Option<&'static DmaLayout> {
         let xcode = hdr[ODSY_DMA_HDR_CONTROL] & ODSY_IMAGE_CODE_MASK;
         let fmt = hdr[ODSY_DMA_HDR_FORMAT];
         let cls = fmt & ODSY_DMA_FMT_CLASS_MASK;
         let code = (fmt >> ODSY_DMA_FMT_CODE_SHIFT) & ODSY_DMA_FMT_CODE_MASK;
-        let mut l: Option<&'static OdysseyDMALayout> = None;
+        let mut l: Option<&'static DmaLayout> = None;
 
         if xcode != 0 {
-            for t in odyssey_dma_x_layouts.iter() {
+            for t in DMA_X_LAYOUTS.iter() {
                 if t.code as u32 == xcode {
                     l = Some(t);
                 }
             }
         } else if cls == ODSY_DMA_GL_CLASS_RGBA12 {
-            for t in odyssey_dma_gl_layouts.iter() {
+            for t in DMA_GL_LAYOUTS.iter() {
                 if t.code as u32 == code {
                     l = Some(t);
                 }
             }
         } else if cls == ODSY_DMA_GL_CLASS_RGBA8 && code == 8 {
-            l = Some(&odyssey_dma_gl_rgba8_layout);
+            l = Some(&DMA_GL_RGBA8_LAYOUT);
         }
         if let Some(t) = l {
             if t.bytes as u32 == bpp {
@@ -540,13 +540,13 @@ impl SGIOdysseyState {
     /// Resolve word 0 to the read's source. False, reported once, when it names
     /// nothing the model can read. A sentinel never creates or names a
     /// board-memory object.
-    pub fn dma_read_source(&mut self, hdr: &[u32], src: &mut OdysseyDMASource) -> bool {
+    pub fn dma_read_source(&mut self, hdr: &[u32], src: &mut DmaSource) -> bool {
         let base = hdr[ODSY_DMA_HDR_DEST];
         let fmt = hdr[ODSY_DMA_HDR_FORMAT];
         let selector = (fmt >> ODSY_DMA_FMT_SELECTOR_SHIFT) & ODSY_DMA_FMT_SELECTOR_MASK;
 
         src.obj = -1;
-        // Front and back per pixel (odyssey_dma_read_pixel()).
+        // Front and back per pixel (Board::dma_read_pixel()).
         src.front = true;
         src.x = (hdr[ODSY_DMA_HDR_ORIGIN] & 0xffff) as i64;
         src.y = (hdr[ODSY_DMA_HDR_ORIGIN] >> 16) as i64;
@@ -588,7 +588,7 @@ impl SGIOdysseyState {
     /// Source pixel (x, y) as the plane's 0xRRGGBBAA word, or a raw index. A
     /// colour-buffer pixel comes from the buffer its main drawable shows, or from
     /// the other buffer for a back read. (x, y) is inside the plane.
-    pub fn dma_read_pixel(&mut self, src: &OdysseyDMASource, x: i64, y: i64) -> u32 {
+    pub fn dma_read_pixel(&mut self, src: &DmaSource, x: i64, y: i64) -> u32 {
         if src.obj >= 0 {
             return self.object_load(src.obj, x as u32, y as u32);
         }
@@ -598,10 +598,10 @@ impl SGIOdysseyState {
     }
 }
 
-impl SGIDMABus {
+impl DmaBus {
     /// Map piece p at guest address addr: an entry is one physical extent, so
     /// the pages it runs over are consecutive.
-    pub fn map_piece(&self, p: &mut OdysseyDMAPiece, addr: u64) -> i32 {
+    pub fn map_piece(&self, p: &mut DmaPiece, addr: u64) -> i32 {
         let first = addr & !(ODSY_DMA_PAGE_SIZE - 1);
         let npages = (addr - first + p.len as u64).div_ceil(ODSY_DMA_PAGE_SIZE) as u32;
         let mut pages = vec![0u64; npages as usize];
@@ -609,13 +609,13 @@ impl SGIDMABus {
         for (i, pg) in pages.iter_mut().enumerate() {
             *pg = first + (i as u64) * ODSY_DMA_PAGE_SIZE;
         }
-        let pl = SGIDMAPageList { addr: pages, npages, page_size: ODSY_DMA_PAGE_SIZE as u32 };
+        let pl = DmaPageList { addr: pages, npages, page_size: ODSY_DMA_PAGE_SIZE as u32 };
         p.at = addr - first;
         self.map(&mut p.map, &pl, p.at, p.len as u64, DMA_DIRECTION_FROM_DEVICE, false, 0)
     }
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// Pack the read's rectangle into out, host row by host row, rowbytes each.
     /// A colour-index byte is the plane word itself, taken only where scanout
     /// would take that word as an index: a colour-buffer pixel whose main
@@ -623,7 +623,7 @@ impl SGIOdysseyState {
     /// bits. Anything else refuses the whole read, reported once. A colour
     /// layout over an index-mode pixel returns the raw index word's bytes as
     /// colour and is reported once: no inverse colormap is applied.
-    pub fn dma_read_pack(&mut self, src: &OdysseyDMASource, l: &OdysseyDMALayout, w: u32, h: u32, bottom_up: bool, out: &mut [u8]) -> bool {
+    pub fn dma_read_pack(&mut self, src: &DmaSource, l: &DmaLayout, w: u32, h: u32, bottom_up: bool, out: &mut [u8]) -> bool {
         let index_read = l.from[0] as u32 == ODSY_DMA_BYTE_INDEX;
         let mut o: usize = 0;
 
@@ -686,9 +686,9 @@ impl SGIOdysseyState {
     /// uncounted bytes, exactly as an upload reads its source. Every piece is
     /// mapped before any byte is written, so a table that fails to map writes
     /// nothing. No byte outside the pieces is touched.
-    pub fn dma_read_write(&mut self, bus: &SGIDMABus, e: &[OdysseyDMAEntry], rowbytes: u32, h: u32, skip: u32, payload: &mut [u8]) -> bool {
+    pub fn dma_read_write(&mut self, bus: &DmaBus, e: &[DmaEntry], rowbytes: u32, h: u32, skip: u32, payload: &mut [u8]) -> bool {
         let n = e.len();
-        let mut pieces: Vec<OdysseyDMAPiece> = Vec::new();
+        let mut pieces: Vec<DmaPiece> = Vec::new();
         let mut pos: u64 = 0;
         let mut done: u64 = 0;
         let mut left: u32 = if n > 0 { e[0].len } else { 0 };
@@ -700,7 +700,7 @@ impl SGIOdysseyState {
             let mut got: u32 = 0;
 
             while got < rowbytes {
-                let mut p = OdysseyDMAPiece::default();
+                let mut p = DmaPiece::default();
 
                 if left == 0 {
                     // Checked by the caller: the entries hold exactly h rows.
@@ -746,17 +746,17 @@ impl SGIOdysseyState {
     /// entries. Any refusal is reported once and writes nothing to the guest; the
     /// caller still raises DMA-done when bit 31 asks for it. The payload is in
     /// guest memory before this returns.
-    pub fn dma_from_board(&mut self, bus: &SGIDMABus, table: u64, seq: u64, hdr: &[u32]) {
-        let mut e = [OdysseyDMAEntry::default(); ODSY_DMA_MAX_PAGES];
+    pub fn dma_from_board(&mut self, bus: &DmaBus, table: u64, seq: u64, hdr: &[u32]) {
+        let mut e = [DmaEntry::default(); ODSY_DMA_MAX_PAGES];
         let w = hdr[ODSY_DMA_HDR_SIZE] & 0xffff;
         let h = if hdr[ODSY_DMA_HDR_SIZE] >> 16 != 0 { hdr[ODSY_DMA_HDR_SIZE] >> 16 } else { 0x10000 };
         let skip = hdr[ODSY_DMA_HDR_SKIP];
         let rowbytes = hdr[ODSY_DMA_HDR_ROWBYTES] & ODSY_DMA_ROWBYTES_MASK;
-        let bpp = odyssey_dma_bpp[((hdr[ODSY_DMA_HDR_CONTROL] >> ODSY_DMA_BPP_SHIFT) & ODSY_DMA_BPP_MASK) as usize] as u32;
-        let mut src = OdysseyDMASource::default();
+        let bpp = DMA_BPP[((hdr[ODSY_DMA_HDR_CONTROL] >> ODSY_DMA_BPP_SHIFT) & ODSY_DMA_BPP_MASK) as usize] as u32;
+        let mut src = DmaSource::default();
         let mut total: u64 = 0;
 
-        let raw = odyssey_dma_raw(hdr, bpp);
+        let raw = dma_raw(hdr, bpp);
 
         if self.dma_raw64(hdr, bpp) {
             return;
@@ -817,7 +817,7 @@ impl SGIOdysseyState {
                 for c in 0..w {
                     let word = self.object_load(src.obj, (src.x + c as i64) as u32, (src.y + r as i64) as u32);
                     let off = ((r as u64) * (rowbytes as u64) + (c as u64) * (bpp as u64)) as usize;
-                    odyssey_raw_pack(word, bpp, &mut payload[off..]);
+                    raw_pack(word, bpp, &mut payload[off..]);
                 }
             }
             if self.dma_read_write(bus, &e[..n], rowbytes, h, skip, &mut payload) {
@@ -844,12 +844,12 @@ impl SGIOdysseyState {
     /// sentinel (GL's DMA image write) is accepted only by the draw-sentinel
     /// adapter. The 0xe03 opcode is reported and not performed.
     pub fn dma_descriptor(&mut self, readback: bool) {
-        let table = odyssey_dma_table_address(self.cmd_operand[0], self.cmd_operand[1]);
+        let table = dma_table_address(self.cmd_operand[0], self.cmd_operand[1]);
         self.dma_seq += 1;
         let seq = self.dma_seq;
-        let bus = SGIDMABus {
+        let bus = DmaBus {
             as_: address_space_memory(),
-            ops: P::from_ref(&odyssey_head_ops),
+            ops: P::from_ref(&HEAD_OPS),
             opaque: P::new(self).opaque(),
         };
         let mut raw = [0u8; ODSY_DMA_TABLE_HEADER as usize];
@@ -911,10 +911,10 @@ impl SGIOdysseyState {
 // unlit, and the current texture coordinate untransformed, beside the kind-0
 // records. Lit raster colours and kinds 1 and 2 are not modeled.
 
-pub static odyssey_query_offset: [u32; 5] = [0x900, 0x914, 0x928, 0x950, 0x978];
+pub static QUERY_OFFSET: [u32; 5] = [0x900, 0x914, 0x928, 0x950, 0x978];
 
 /// Public initial values: index 1, colour white, normal +Z, edge true.
-pub static odyssey_query_defaults: [[u32; 5]; 5] = [
+pub static QUERY_DEFAULTS: [[u32; 5]; 5] = [
     [ODSY_GL_COLOR_INDEX, 1, 0, 0, 0],
     [ODSY_GL_COLOR_3F, ODSY_F32_ONE, ODSY_F32_ONE, ODSY_F32_ONE, 0],
     [ODSY_GL_NORMAL_3F, 0, 0, ODSY_F32_ONE, 0],
@@ -922,9 +922,9 @@ pub static odyssey_query_defaults: [[u32; 5]; 5] = [
     [0x2f00c02e, 0, 0, 0, 0],
 ];
 
-impl SGIOdysseyState {
+impl Board {
     pub fn query_records_reset(&mut self) {
-        self.query_current = odyssey_query_defaults;
+        self.query_current = QUERY_DEFAULTS;
         self.query_current_valid = 0x1f;
     }
 
@@ -1020,7 +1020,7 @@ impl SGIOdysseyState {
         self.query_current_valid &= !(1u32 << record);
         if record != ODSY_QUERY_TEXCOORD || supported {
             // Every word mapped to a record above has at most four operands.
-            let arity = odyssey_cmd_arity(tag) as usize;
+            let arity = cmd_arity(tag) as usize;
             assert!(arity < self.query_current[rec].len());
             self.query_current[rec] = [0; 5];
             self.query_current[rec][0] = tag;
@@ -1036,10 +1036,10 @@ impl SGIOdysseyState {
     }
 }
 
-impl SGIDMABus {
+impl DmaBus {
     /// A query's completion words must not report failure after changing guest
     /// memory. Admit only a whole aligned scalar, big-endian. Returns 0 or an
-    /// SGIFailure. (The QEMU model also demanded a direct writable RAM section;
+    /// Failure. (The QEMU model also demanded a direct writable RAM section;
     /// here guest memory is written through the bus.)
     pub fn publish_word(&self, addr: u64, value: u32, size: u32) -> i32 {
         let size64 = size as u64;
@@ -1082,7 +1082,7 @@ impl SGIDMABus {
     }
 }
 
-impl SGIOdysseyState {
+impl Board {
     pub fn query_begin(&mut self) {
         self.query_stage = 1;
         self.query_base = (((self.ctx_shadow_addr_upper & 0xffff) as u64) << 32) | self.ctx_shadow_addr_lower as u64;
@@ -1093,15 +1093,15 @@ impl SGIOdysseyState {
     }
 
     pub fn query_finish(&mut self, sequence: u32) {
-        let bus = SGIDMABus {
+        let bus = DmaBus {
             as_: address_space_memory(),
-            ops: P::from_ref(&odyssey_head_ops),
+            ops: P::from_ref(&HEAD_OPS),
             opaque: P::new(self).opaque(),
         };
         let sync_offset: u64 = 2 * (self.query_sync_index & ODSY_DMA_FENCE_SLOT_MASK) as u64;
 
         self.query_stage = 0;
-        for i in 0..odyssey_query_offset.len() {
+        for i in 0..QUERY_OFFSET.len() {
             if self.query_captured_valid & (1u32 << i) == 0 {
                 crate::qlog!("sgi-odyssey: unsupported current-query record {} in snapshot", i);
             }
@@ -1114,11 +1114,11 @@ impl SGIOdysseyState {
             crate::qlog!("sgi-odyssey: unsupported current-query snapshot");
             return;
         }
-        for i in 0..odyssey_query_offset.len() {
-            let words = 1 + odyssey_cmd_arity(self.query_captured[i][0]) as usize;
+        for i in 0..QUERY_OFFSET.len() {
+            let words = 1 + cmd_arity(self.query_captured[i][0]) as usize;
 
             for j in 0..words {
-                let addr = self.query_base + odyssey_query_offset[i] as u64 + 4 * j as u64;
+                let addr = self.query_base + QUERY_OFFSET[i] as u64 + 4 * j as u64;
 
                 if bus.publish_be32(addr, self.query_captured[i][j]) != 0 {
                     crate::qlog!("sgi-odyssey: current-query payload failed");
@@ -1131,7 +1131,7 @@ impl SGIOdysseyState {
             let rec = self.query_captured[if i != 0 { ODSY_QUERY_COLOUR } else { ODSY_QUERY_INDEX } as usize];
             let at = self.query_base + (if i != 0 { ODSY_QUERY_RASTER_COLOUR } else { ODSY_QUERY_RASTER_INDEX }) as u64;
 
-            for j in 0..(1 + odyssey_cmd_arity(rec[0]) as usize) {
+            for j in 0..(1 + cmd_arity(rec[0]) as usize) {
                 if bus.publish_be32(at + 4 * j as u64, rec[j]) != 0 {
                     crate::qlog!("sgi-odyssey: raster query payload failed");
                     return;
@@ -1156,7 +1156,7 @@ impl SGIOdysseyState {
 }
 
 /// Match the shared rasterizer's eight-bit channel conversion.
-pub fn odyssey_float_channel(bits: u32) -> u32 {
+pub fn float_channel(bits: u32) -> u32 {
     let c = odyssey_f32(bits);
 
     if !(c > 0.0) {
@@ -1176,7 +1176,7 @@ pub fn odyssey_float_channel(bits: u32) -> u32 {
 /// and 24 convert v first, then form v * 2 + 1 with a fused multiply-add.
 /// This is the software's expectation for what the current value means; the
 /// board's own arithmetic is unknown.
-pub fn odyssey_signed_to_float(word: u32, format: u32) -> u32 {
+pub fn signed_to_float(word: u32, format: u32) -> u32 {
     let scale_bits: u32;
     let mut f: f32;
 
@@ -1203,7 +1203,7 @@ pub fn odyssey_signed_to_float(word: u32, format: u32) -> u32 {
 /// for an unsigned type and (2c + 1) / (2^n - 1) for a signed one; the int
 /// type keeps glColor3i's existing conversion. INFERRED: that the board
 /// converts by OpenGL's rule; the library sends the raw components.
-pub fn odyssey_integer_colour(tag: u32, word: u32) -> u32 {
+pub fn integer_colour(tag: u32, word: u32) -> u32 {
     let mut code = tag & ODSY_GL_COLOR_TYPE_MASK;
     let c: f64;
 
@@ -1214,13 +1214,13 @@ pub fn odyssey_integer_colour(tag: u32, word: u32) -> u32 {
         2 => c = word as f64 / 4294967295.0,
         3 => c = (2.0 * ((word as u8 as i8) as f64) + 1.0) / 255.0,
         4 => c = (2.0 * ((word as u16 as i16) as f64) + 1.0) / 65535.0,
-        _ => return odyssey_signed_to_float(word, ODSY_GL_COLOR_3I & ODSY_GL_COLOR_TYPE_MASK),
+        _ => return signed_to_float(word, ODSY_GL_COLOR_3I & ODSY_GL_COLOR_TYPE_MASK),
     }
-    odyssey_f32_bits(c as f32)
+    f32_bits(c as f32)
 }
 
 /// True for the integer colour words other than glColor3ub and glColor3i.
-pub fn odyssey_is_integer_colour(word: u32) -> bool {
+pub fn is_integer_colour(word: u32) -> bool {
     matches!(
         word,
         ODSY_GL_COLOR_3US
@@ -1236,7 +1236,7 @@ pub fn odyssey_is_integer_colour(word: u32) -> bool {
     )
 }
 
-impl SGIOdysseyState {
+impl Board {
     /// True when base lies within the board memory the active product reports
     /// (the "memory-size" property, in megabytes), false and reported, once per
     /// reset, otherwise. A destination select's base is in 16-byte units, so the
@@ -1297,13 +1297,13 @@ impl SGIOdysseyState {
             || p[4] != 0
             || p[5] != 0
             || p[6] != 0
-            || p[7] != odyssey_f32_bits(wd as f32)
-            || p[8] != odyssey_f32_bits(hd as f32)
+            || p[7] != f32_bits(wd as f32)
+            || p[8] != f32_bits(hd as f32)
             || p[9] != 0
             || p[10] != 0
             || p[11] != 0
-            || p[12] != odyssey_f32_bits(1.0f32 - 0.5f32 / wd as f32)
-            || p[13] != odyssey_f32_bits(1.0f32 - 0.5f32 / hd as f32)
+            || p[12] != f32_bits(1.0f32 - 0.5f32 / wd as f32)
+            || p[13] != f32_bits(1.0f32 - 0.5f32 / hd as f32)
         {
             return false;
         }

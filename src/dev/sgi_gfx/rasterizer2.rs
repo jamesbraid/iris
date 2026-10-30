@@ -6,7 +6,7 @@
 
 use super::*;
 
-impl SGISoftVertex {
+impl SoftVertex {
     pub fn texture_values(&self, volume: bool, one_dimensional: bool, value: &mut [f64; 4]) {
         value[0] = self.texcoord[0] * self.inv_w;
         value[1] = if one_dimensional { 0.0 } else { self.texcoord[1] * self.inv_w };
@@ -15,7 +15,7 @@ impl SGISoftVertex {
     }
 }
 
-pub fn sgi_soft_texture_plane(v: &[SGISoftVertex], sub: u32, volume: bool, one_dimensional: bool, g: &mut SGISoftTexPlane) -> bool {
+pub fn soft_texture_plane(v: &[SoftVertex], sub: u32, volume: bool, one_dimensional: bool, g: &mut SoftTexPlane) -> bool {
     let scale = (1i32 << sub) as f64;
     let x1 = (v[1].x - v[0].x) as f64 / scale;
     let y1 = (v[1].y - v[0].y) as f64 / scale;
@@ -24,7 +24,7 @@ pub fn sgi_soft_texture_plane(v: &[SGISoftVertex], sub: u32, volume: bool, one_d
     let area = x1 * y2 - x2 * y1;
     let mut values = [[0.0f64; 4]; 3];
 
-    *g = SGISoftTexPlane { x: v[0].x as f64 / scale, y: v[0].y as f64 / scale, ..Default::default() };
+    *g = SoftTexPlane { x: v[0].x as f64 / scale, y: v[0].y as f64 / scale, ..Default::default() };
     if area == 0.0 {
         return true;
     }
@@ -48,8 +48,8 @@ pub fn sgi_soft_texture_plane(v: &[SGISoftVertex], sub: u32, volume: bool, one_d
     true
 }
 
-impl SGISoftVertex {
-    pub fn texture_line_gradient(&self, b: &SGISoftVertex, sub: u32, volume: bool, one_dimensional: bool, values: &mut [f64; 4], delta: &mut [f64; 4], length: &mut f64) -> bool {
+impl SoftVertex {
+    pub fn texture_line_gradient(&self, b: &SoftVertex, sub: u32, volume: bool, one_dimensional: bool, values: &mut [f64; 4], delta: &mut [f64; 4], length: &mut f64) -> bool {
         let mut end = [0.0f64; 4];
 
         *length = ((b.x - self.x) as f64).hypot((b.y - self.y) as f64) / (1i32 << sub) as f64;
@@ -68,12 +68,12 @@ impl SGISoftVertex {
     }
 }
 
-impl SGISoftDraw {
-    pub fn texture_coefficients(&self, v: &[SGISoftVertex]) -> bool {
-        let mut g = SGISoftTexPlane::default();
+impl SoftDraw {
+    pub fn texture_coefficients(&self, v: &[SoftVertex]) -> bool {
+        let mut g = SoftTexPlane::default();
 
         if self.texture_base.is_null()
-            || sgi_soft_texture_plane(v, self.rules.subpixel_bits as u32, self.texture.volume, self.texture.one_dimensional, &mut g)
+            || soft_texture_plane(v, self.rules.subpixel_bits as u32, self.texture.volume, self.texture.one_dimensional, &mut g)
         {
             return true;
         }
@@ -81,7 +81,7 @@ impl SGISoftDraw {
         false
     }
 
-    /// Whether a triangle's fragments can take sgi_soft_simple_row() instead of
+    /// Whether a triangle's fragments can take SoftDraw::simple_row() instead of
     /// the full per-fragment path.
     pub fn simple_fragments(&self) -> bool {
         let st = &*self.st;
@@ -99,7 +99,7 @@ impl SGISoftDraw {
         {
             return false;
         }
-        // sgi_raster_depth_stencil() drops every fragment of such a draw.
+        // RasterRules::depth_stencil() drops every fragment of such a draw.
         if st.depth_test != 0 && (t.load_depth.is_none() || (st.depth_mask != 0 && t.store_depth.is_none())) {
             return false;
         }
@@ -109,10 +109,10 @@ impl SGISoftDraw {
         self.colour_mask == 0 || self.colour_mask == self.rules.colour_bits()
     }
 
-    /// One row of a triangle under sgi_soft_simple_fragments(): pixels px0 to
+    /// One row of a triangle under SoftDraw::simple_fragments(): pixels px0 to
     /// px1 of row py, whose edge values for v[2]-v[0] and v[0]-v[1] at px0 are
     /// e1 and e2.
-    pub fn simple_row(&self, v: &[SGISoftVertex], py: i32, mut px0: i32, mut px1: i32, mut e1: i64, mut e2: i64, step1: i64, step2: i64, area: i64, offset: f64, flat: &SGISoftFrag, smooth: bool, rgba: bool, depth_row: bool) {
+    pub fn simple_row(&self, v: &[SoftVertex], py: i32, mut px0: i32, mut px1: i32, mut e1: i64, mut e2: i64, step1: i64, step2: i64, area: i64, offset: f64, flat: &SoftFrag, smooth: bool, rgba: bool, depth_row: bool) {
         let rules = &*self.rules;
         let st = &*self.st;
         let t = &*self.t;
@@ -121,11 +121,11 @@ impl SGISoftDraw {
         let fixed = !smooth && !self.dither;
         let store = if rgba { self.rgba_mask != 0 && self.ntargets != 0 } else { self.colour_mask != 0 };
         let clipped = self.win.clip.n > 1;
-        let mut fixed_rgba = SGIRasterColour::default();
+        let mut fixed_rgba = RasterColour::default();
         let mut fixed_colour = 0u32;
 
         if st.scissor_test != 0 && !clipped {
-            // sgi_soft_owned_at()'s scissor test, decided for the whole row.
+            // SoftDraw::owned_at()'s scissor test, decided for the whole row.
             let sx0 = st.scissor[0] as i64;
             let sx1 = st.scissor[0] as i64 + st.scissor[2] as i64 - 1;
 
@@ -184,7 +184,7 @@ impl SGISoftDraw {
                     let zq = rules.depth_code(zw);
 
                     if st.depth_test != 0 {
-                        if !sgi_soft_compare(st.depth_func, zq, (t.load_depth.unwrap())(t.opaque, x, y)) {
+                        if !soft_compare(st.depth_func, zq, (t.load_depth.unwrap())(t.opaque, x, y)) {
                             break 'pixel;
                         }
                         if st.depth_mask != 0 {
@@ -233,7 +233,7 @@ impl SGISoftDraw {
     }
 
     /// Out of line, once a row.
-    pub fn simple_span(&self, v: &[SGISoftVertex], py: i32, px0: i32, px1: i32, e1: i64, e2: i64, step1: i64, step2: i64, area: i64, offset: f64, flat: &SGISoftFrag, smooth: bool) {
+    pub fn simple_span(&self, v: &[SoftVertex], py: i32, px0: i32, px1: i32, e1: i64, e2: i64, step1: i64, step2: i64, area: i64, offset: f64, flat: &SoftFrag, smooth: bool) {
         let rgba = self.t.store_rgba.is_some();
         let depth_row = self.rules.depth_row_given;
 
@@ -243,15 +243,15 @@ impl SGISoftDraw {
     /// Map and rasterize one triangle of a clipped polygon, given its three
     /// vertices in the view volume and, for flat shading, the provoking vertex
     /// of the triangle it was clipped from.
-    pub fn clipped_triangle(&self, va: &SGIVolumeVertex, vb: &SGIVolumeVertex, vc: &SGIVolumeVertex, provoking: &[f32]) {
+    pub fn clipped_triangle(&self, va: &VolumeVertex, vb: &VolumeVertex, vc: &VolumeVertex, provoking: &[f32]) {
         let st = &*self.st;
-        let verts: [&SGIVolumeVertex; 3] = [va, vb, vc];
+        let verts: [&VolumeVertex; 3] = [va, vb, vc];
         let mut flat = &provoking[SGI_GL_V_COLOR..SGI_GL_V_COLOR + 4];
         let mut flat_index = provoking[SGI_GL_V_INDEX];
-        let mut flat_frag = SGISoftFrag::default();
+        let mut flat_frag = SoftFrag::default();
         let mut frag;
-        let mut v: [SGISoftVertex; 3] = Default::default();
-        let mut gradient = SGISoftTexPlane::default();
+        let mut v: [SoftVertex; 3] = Default::default();
+        let mut gradient = SoftTexPlane::default();
         // The footprint's per-axis scales, and its value where Q/W is flat.
         let mut tex_ns = 0.0f64;
         let mut tex_nt = 0.0f64;
@@ -263,8 +263,8 @@ impl SGISoftDraw {
         let fixed: bool;
         let mut fixed_flat: Option<i32> = None;
         // The row loop for textured fragments, and its inputs.
-        let mut span: Option<SGISoftTexSpanFn> = None;
-        let mut sp = SGISoftTexSpan::default();
+        let mut span: Option<SoftTexSpanFn> = None;
+        let mut sp = SoftTexSpan::default();
         let mut area: i64;
         let offset: f64;
         let ccw: bool;
@@ -285,17 +285,17 @@ impl SGISoftDraw {
             return;
         }
         if !self.texture_base.is_null()
-            && !sgi_soft_texture_plane(&v, sub as u32, self.texture.volume, self.texture.one_dimensional, &mut gradient)
+            && !soft_texture_plane(&v, sub as u32, self.texture.volume, self.texture.one_dimensional, &mut gradient)
         {
             self.texture_report(16, "invalid primitive coefficients, primitive dropped");
             return;
         }
         // An image with no pyramid has no planes to fail: it samples in double.
         fixed = !self.fixed.is_null()
-            && (!self.texture_base.is_null() || sgi_soft_texture_plane(&v, sub as u32, false, false, &mut gradient));
+            && (!self.texture_base.is_null() || soft_texture_plane(&v, sub as u32, false, false, &mut gradient));
         if fixed && self.fixed.lod && gradient.dx[2] == 0.0 && gradient.dy[2] == 0.0 {
             // Q/W flat, as for the double footprint below: every fragment's
-            // lambda is this one, which sgi_soft_fixed_coords() would compute
+            // lambda is this one, which SoftFixedTex::fixed_coords() would compute
             // for each of them, since s dQ/dx and t dQ/dx are then zero.
             let q = gradient.value[2];
 
@@ -308,19 +308,19 @@ impl SGISoftDraw {
                 let rho2 = if a * a + b * b > c * c + e * e { a * a + b * b } else { c * c + e * e };
 
                 if rho2 <= f64::MAX {
-                    fixed_flat = Some(self.fixed.fixed_decide(rho2, sgi_soft_fixed_lambda(rho2)));
+                    fixed_flat = Some(self.fixed.fixed_decide(rho2, soft_fixed_lambda(rho2)));
                 }
             }
         }
         if !self.texture_base.is_null() {
-            tex_ns = self.texture_base.width as f64 * sgi_soft_texture_lod_scale(self.texture.lod_scale_s);
+            tex_ns = self.texture_base.width as f64 * soft_texture_lod_scale(self.texture.lod_scale_s);
             tex_nt = if self.texture.one_dimensional {
                 0.0
             } else {
-                self.texture_base.height as f64 * sgi_soft_texture_lod_scale(self.texture.lod_scale_t)
+                self.texture_base.height as f64 * soft_texture_lod_scale(self.texture.lod_scale_t)
             };
             tex_nr = if self.texture.volume {
-                self.texture_base.depth as f64 * sgi_soft_texture_lod_scale(self.texture.lod_scale_r)
+                self.texture_base.depth as f64 * soft_texture_lod_scale(self.texture.lod_scale_r)
             } else {
                 0.0
             };
@@ -330,7 +330,7 @@ impl SGISoftDraw {
                 let value = [0.0, 0.0, gradient.value[2], 0.0];
                 let mut out = [0.0f64; 5];
 
-                flat_ok = sgi_soft_texture_derivatives(&value, &gradient.dx, &gradient.dy, tex_ns, tex_nt, tex_nr, &mut out);
+                flat_ok = soft_texture_derivatives(&value, &gradient.dx, &gradient.dy, tex_ns, tex_nt, tex_nr, &mut out);
                 flat_rho = out[4];
             }
         }
@@ -389,7 +389,7 @@ impl SGISoftDraw {
         let step2: i64 = -(v[1].y - v[0].y) * (1i64 << sub);
         if fixed && self.fixed.span.is_some() {
             span = self.fixed.span;
-            sp = SGISoftTexSpan {
+            sp = SoftTexSpan {
                 v: P::new(&mut v),
                 g: P::new(&mut gradient),
                 row: P::new(&mut tex_row),
@@ -497,7 +497,7 @@ impl SGISoftDraw {
                     let mut lambda = 0i32;
 
                     frag.fixed = self.fixed.fixed_coords(&gradient, &tex_row, px, fixed_flat, &mut s, &mut t, &mut lambda)
-                        && SGISoftDraw::fixed_sample::<SGI_SOFT_FIXED_ANY, false>(self, s, t, lambda, &mut frag.texel);
+                        && SoftDraw::fixed_sample::<SGI_SOFT_FIXED_ANY, false>(self, s, t, lambda, &mut frag.texel);
                 }
                 // Only texturing reads the coordinates, only fog the distance.
                 if !self.texture.is_null() && !frag.fixed {
@@ -546,7 +546,7 @@ impl SGISoftDraw {
                             f64::NAN
                         };
                     } else {
-                        frag.texture_rho = if sgi_soft_texture_derivatives(&value, &gradient.dx, &gradient.dy, tex_ns, tex_nt, tex_nr, &mut out) {
+                        frag.texture_rho = if soft_texture_derivatives(&value, &gradient.dx, &gradient.dy, tex_ns, tex_nt, tex_nr, &mut out) {
                             out[4]
                         } else {
                             f64::NAN
@@ -564,14 +564,14 @@ impl SGISoftDraw {
     /// Transform, clip and rasterize one triangle. Clipped to the view volume
     /// in clip coordinates, what is left is drawn as a fan from its first
     /// vertex, each flat shaded from the triangle's provoking vertex.
-    pub fn clip_triangle(&self, va: &[f32], vb: &[f32], vc: &[f32], poly: &mut [SGIVolumeVertex; SGI_VOLUME_TRIANGLE_MAX], n: &mut u32) -> bool {
+    pub fn clip_triangle(&self, va: &[f32], vb: &[f32], vc: &[f32], poly: &mut [VolumeVertex; SGI_VOLUME_TRIANGLE_MAX], n: &mut u32) -> bool {
         let verts: [&[f32]; 3] = [va, vb, vc];
-        let mut in_: [SGIVolumeVertex; 3] = Default::default();
+        let mut in_: [VolumeVertex; 3] = Default::default();
 
         for i in 0..3 {
             self.st.volume_from_draw_vertex(verts[i], &mut in_[i]);
         }
-        *n = sgi_volume_clip_triangle(&in_, poly);
+        *n = volume_clip_triangle(&in_, poly);
         for i in 0..*n as usize {
             if !self.texture_vertex_valid(&poly[i]) {
                 return false;
@@ -580,8 +580,8 @@ impl SGISoftDraw {
         if !self.texture_base.is_null() {
             let mut i = 1usize;
             while i + 1 < *n as usize {
-                let vertices: [&SGIVolumeVertex; 3] = [&poly[0], &poly[i], &poly[i + 1]];
-                let mut projected: [SGISoftVertex; 3] = Default::default();
+                let vertices: [&VolumeVertex; 3] = [&poly[0], &poly[i], &poly[i + 1]];
+                let mut projected: [SoftVertex; 3] = Default::default();
 
                 for j in 0..3 {
                     if !self.project(vertices[j], &mut projected[j]) {
@@ -599,14 +599,14 @@ impl SGISoftDraw {
 
     /// A quad or polygon validates all its clipped pieces before any are drawn.
     pub fn texture_triangle_valid(&self, a: &[f32], b: &[f32], c: &[f32]) -> bool {
-        let mut poly: [SGIVolumeVertex; SGI_VOLUME_TRIANGLE_MAX] = Default::default();
+        let mut poly: [VolumeVertex; SGI_VOLUME_TRIANGLE_MAX] = Default::default();
         let mut n = 0u32;
 
         self.clip_triangle(a, b, c, &mut poly, &mut n)
     }
 
     pub fn triangle(&self, va: &[f32], vb: &[f32], vc: &[f32], provoking: &[f32]) {
-        let mut poly: [SGIVolumeVertex; SGI_VOLUME_TRIANGLE_MAX] = Default::default();
+        let mut poly: [VolumeVertex; SGI_VOLUME_TRIANGLE_MAX] = Default::default();
         let mut n = 0u32;
         let (mut x0, mut y0, mut x1, mut y1) = (0i32, 0i32, 0i32, 0i32);
 
@@ -632,17 +632,17 @@ fn r2_min<T: PartialOrd>(a: T, b: T) -> T {
 }
 
 /// Sign of v + e1 * epsilon + e2 * epsilon squared as epsilon -> 0+.
-pub fn sgi_soft_limit_sign(v: i64, e1: i64, e2: i64) -> i32 {
+pub fn soft_limit_sign(v: i64, e1: i64, e2: i64) -> i32 {
     let first = if v != 0 { v } else if e1 != 0 { e1 } else { e2 };
 
     (first > 0) as i32 - (first < 0) as i32
 }
 
 /// Whether |v + e1*epsilon + e2*epsilon squared| is strictly below bound.
-pub fn sgi_soft_limit_abs(v: i64, e1: i64, e2: i64, bound: i64) -> bool {
-    let sign = sgi_soft_limit_sign(v, e1, e2) as i64;
+pub fn soft_limit_abs(v: i64, e1: i64, e2: i64, bound: i64) -> bool {
+    let sign = soft_limit_sign(v, e1, e2) as i64;
 
-    sgi_soft_limit_sign(
+    soft_limit_sign(
         sign.wrapping_mul(v).wrapping_sub(bound),
         sign.wrapping_mul(e1),
         sign.wrapping_mul(e2),
@@ -650,22 +650,22 @@ pub fn sgi_soft_limit_abs(v: i64, e1: i64, e2: i64, bound: i64) -> bool {
 }
 
 /// The endpoint minus (epsilon, epsilon squared) lies in the open diamond.
-pub fn sgi_soft_diamond_contains(x: i64, y: i64, half: i64) -> bool {
-    let sx = sgi_soft_limit_sign(x, -1, 0) as i64;
-    let sy = sgi_soft_limit_sign(y, 0, -1) as i64;
+pub fn soft_diamond_contains(x: i64, y: i64, half: i64) -> bool {
+    let sx = soft_limit_sign(x, -1, 0) as i64;
+    let sy = soft_limit_sign(y, 0, -1) as i64;
 
-    sgi_soft_limit_sign(
+    soft_limit_sign(
         sx.wrapping_mul(x).wrapping_add(sy.wrapping_mul(y)).wrapping_sub(half),
         -sx,
         -sy,
     ) < 0
 }
 
-impl SGISoftVertex {
+impl SoftVertex {
     /// A segment produces a fragment if it enters the open diamond and its
     /// final endpoint is outside (OpenGL 1.2.1, 3.4.1, with the limiting
     /// perturbation done in lexicographic coefficients on the snapped grid).
-    pub fn line_covers(&self, b: &SGISoftVertex, px: i64, py: i64, sub: i32) -> bool {
+    pub fn line_covers(&self, b: &SoftVertex, px: i64, py: i64, sub: i32) -> bool {
         let half: i64 = 1i64 << (sub - 1);
         let cx = px.wrapping_mul(1i64 << sub).wrapping_add(half);
         let cy = py.wrapping_mul(1i64 << sub).wrapping_add(half);
@@ -676,17 +676,17 @@ impl SGISoftVertex {
         let sdx: i32 = if dx > 0 { 1 } else { -1 };
         let sdy: i32 = if dy > 0 { 1 } else { -1 };
 
-        if sgi_soft_diamond_contains(b.x.wrapping_sub(cx), b.y.wrapping_sub(cy), half) {
+        if soft_diamond_contains(b.x.wrapping_sub(cx), b.y.wrapping_sub(cy), half) {
             return false;
         }
-        if sgi_soft_diamond_contains(ex.wrapping_neg(), ey.wrapping_neg(), half) {
+        if soft_diamond_contains(ex.wrapping_neg(), ey.wrapping_neg(), half) {
             return true;
         }
         // The perturbed column crossing has parameter (ex + epsilon) / dx.
         if dx != 0
-            && sgi_soft_limit_sign(ex, 1, 0) * sdx >= 0
-            && sgi_soft_limit_sign(dx.wrapping_sub(ex), -1, 0) * sdx >= 0
-            && sgi_soft_limit_abs(
+            && soft_limit_sign(ex, 1, 0) * sdx >= 0
+            && soft_limit_sign(dx.wrapping_sub(ex), -1, 0) * sdx >= 0
+            && soft_limit_abs(
                 dy.wrapping_mul(ex).wrapping_sub(ey.wrapping_mul(dx)),
                 dy,
                 dx.wrapping_neg(),
@@ -696,9 +696,9 @@ impl SGISoftVertex {
             return true;
         }
         dy != 0
-            && sgi_soft_limit_sign(ey, 0, 1) * sdy >= 0
-            && sgi_soft_limit_sign(dy.wrapping_sub(ey), 0, -1) * sdy >= 0
-            && sgi_soft_limit_abs(
+            && soft_limit_sign(ey, 0, 1) * sdy >= 0
+            && soft_limit_sign(dy.wrapping_sub(ey), 0, -1) * sdy >= 0
+            && soft_limit_abs(
                 dx.wrapping_mul(ey).wrapping_sub(ex.wrapping_mul(dy)),
                 dy.wrapping_neg(),
                 dx,
@@ -708,15 +708,15 @@ impl SGISoftVertex {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct SGISoftPoint2 {
+pub struct SoftPoint2 {
     pub x: f64,
     pub y: f64,
 }
 
-pub fn sgi_soft_clip_edge(
-    in_: &[SGISoftPoint2],
+pub fn soft_clip_edge(
+    in_: &[SoftPoint2],
     n: u32,
-    out: &mut [SGISoftPoint2],
+    out: &mut [SoftPoint2],
     axis: u32,
     bound: f64,
     greater: bool,
@@ -733,7 +733,7 @@ pub fn sgi_soft_clip_edge(
 
         if ai != bi {
             let t = (bound - av) / (bv - av);
-            let mut p = SGISoftPoint2 { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) };
+            let mut p = SoftPoint2 { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) };
 
             if axis != 0 {
                 p.y = bound;
@@ -751,17 +751,17 @@ pub fn sgi_soft_clip_edge(
     count as u32
 }
 
-pub fn sgi_soft_polygon_square_area(polygon: &[SGISoftPoint2], n: u32, x: i32, y: i32) -> f64 {
-    let mut a = [SGISoftPoint2::default(); 12];
-    let mut b = [SGISoftPoint2::default(); 12];
+pub fn soft_polygon_square_area(polygon: &[SoftPoint2], n: u32, x: i32, y: i32) -> f64 {
+    let mut a = [SoftPoint2::default(); 12];
+    let mut b = [SoftPoint2::default(); 12];
     let mut area = 0.0f64;
     let mut n = n;
 
     a[..n as usize].copy_from_slice(&polygon[..n as usize]);
-    n = sgi_soft_clip_edge(&a, n, &mut b, 0, x as f64, true);
-    n = sgi_soft_clip_edge(&b, n, &mut a, 0, (x + 1) as f64, false);
-    n = sgi_soft_clip_edge(&a, n, &mut b, 1, y as f64, true);
-    n = sgi_soft_clip_edge(&b, n, &mut a, 1, (y + 1) as f64, false);
+    n = soft_clip_edge(&a, n, &mut b, 0, x as f64, true);
+    n = soft_clip_edge(&b, n, &mut a, 0, (x + 1) as f64, false);
+    n = soft_clip_edge(&a, n, &mut b, 1, y as f64, true);
+    n = soft_clip_edge(&b, n, &mut a, 1, (y + 1) as f64, false);
     for i in 0..n as usize {
         let p = &a[i];
         let q = &a[(i + 1) % n as usize];
@@ -771,7 +771,7 @@ pub fn sgi_soft_polygon_square_area(polygon: &[SGISoftPoint2], n: u32, x: i32, y
     r2_min(1.0, area.abs() * 0.5)
 }
 
-pub fn sgi_soft_line_coverage(ax: f64, ay: f64, bx: f64, by: f64, width: f64, x: i32, y: i32) -> f64 {
+pub fn soft_line_coverage(ax: f64, ay: f64, bx: f64, by: f64, width: f64, x: i32, y: i32) -> f64 {
     let dx = bx - ax;
     let dy = by - ay;
     let length = dx.hypot(dy);
@@ -782,21 +782,21 @@ pub fn sgi_soft_line_coverage(ax: f64, ay: f64, bx: f64, by: f64, width: f64, x:
     let nx = -dy * width / (2.0 * length);
     let ny = dx * width / (2.0 * length);
     let rectangle = [
-        SGISoftPoint2 { x: ax + nx, y: ay + ny },
-        SGISoftPoint2 { x: bx + nx, y: by + ny },
-        SGISoftPoint2 { x: bx - nx, y: by - ny },
-        SGISoftPoint2 { x: ax - nx, y: ay - ny },
+        SoftPoint2 { x: ax + nx, y: ay + ny },
+        SoftPoint2 { x: bx + nx, y: by + ny },
+        SoftPoint2 { x: bx - nx, y: by - ny },
+        SoftPoint2 { x: ax - nx, y: ay - ny },
     ];
-    sgi_soft_polygon_square_area(&rectangle, 4, x, y)
+    soft_polygon_square_area(&rectangle, 4, x, y)
 }
 
-pub fn sgi_soft_circle_integral(x: f64, radius: f64) -> f64 {
+pub fn soft_circle_integral(x: f64, radius: f64) -> f64 {
     let y = r2_max(0.0, radius * radius - x * x).sqrt();
 
     0.5 * (x * y + radius * radius * (x / radius).asin())
 }
 
-pub fn sgi_soft_circle_coverage(cx: f64, cy: f64, radius: f64, x: i32, y: i32) -> f64 {
+pub fn soft_circle_coverage(cx: f64, cy: f64, radius: f64, x: i32, y: i32) -> f64 {
     let mut cuts = [0.0f64; 8];
     let mut area = 0.0f64;
     let mut n = 0usize;
@@ -845,7 +845,7 @@ pub fn sgi_soft_circle_coverage(cx: f64, cy: f64, radius: f64, x: i32, y: i32) -
         let ymax = (y + 1) as f64 - cy;
         let top = r2_min(ymax, circle);
         let bottom = r2_max(ymin, -circle);
-        let arc = sgi_soft_circle_integral(b, radius) - sgi_soft_circle_integral(a, radius);
+        let arc = soft_circle_integral(b, radius) - soft_circle_integral(a, radius);
 
         if top <= bottom {
             continue;
@@ -859,15 +859,15 @@ pub fn sgi_soft_circle_coverage(cx: f64, cy: f64, radius: f64, x: i32, y: i32) -
 /// SGI_SMOOTH_TWO_PIXEL_FILTER's weight in one axis for a fragment whose
 /// centre is d from a footprint of the given size: a box of that size
 /// filtered by a one-pixel tent.
-pub fn sgi_soft_filter_weight(size: f64, d: f64) -> f64 {
+pub fn soft_filter_weight(size: f64, d: f64) -> f64 {
     r2_min(1.0, r2_max(0.0, (size + 1.0) * 0.5 - d.abs()))
 }
 
-pub fn sgi_soft_point_filter(cx: f64, cy: f64, size: f64, x: i32, y: i32) -> f64 {
-    sgi_soft_filter_weight(size, cx - (x as f64 + 0.5)) * sgi_soft_filter_weight(size, cy - (y as f64 + 0.5))
+pub fn soft_point_filter(cx: f64, cy: f64, size: f64, x: i32, y: i32) -> f64 {
+    soft_filter_weight(size, cx - (x as f64 + 0.5)) * soft_filter_weight(size, cy - (y as f64 + 0.5))
 }
 
-pub fn sgi_soft_line_filter(ax: f64, ay: f64, bx: f64, by: f64, width: f64, x: i32, y: i32) -> f64 {
+pub fn soft_line_filter(ax: f64, ay: f64, bx: f64, by: f64, width: f64, x: i32, y: i32) -> f64 {
     let x_major = (bx - ax).abs() >= (by - ay).abs();
     let mut l0 = if x_major { ax } else { ay };
     let mut l1 = if x_major { bx } else { by };
@@ -896,22 +896,22 @@ pub fn sgi_soft_line_filter(ax: f64, ay: f64, bx: f64, by: f64, width: f64, x: i
     let slope = (n1 - n0) / (l1 - l0);
     let minor = n0 + slope * ((lo + hi) * 0.5 - l0);
     let d = minor - (n as f64 + 0.5);
-    r2_min(1.0, sgi_soft_filter_weight(width, d) * (1.0 + slope * slope).sqrt()) * (hi - lo)
+    r2_min(1.0, soft_filter_weight(width, d) * (1.0 + slope * slope).sqrt()) * (hi - lo)
 }
 
-impl SGIRasterRules {
+impl RasterRules {
     pub fn point_coverage(&self, cx: f64, cy: f64, size: f64, x: i32, y: i32) -> f64 {
         if self.smooth_rule as u32 == SGI_SMOOTH_TWO_PIXEL_FILTER {
-            return sgi_soft_point_filter(cx, cy, size, x, y);
+            return soft_point_filter(cx, cy, size, x, y);
         }
-        sgi_soft_circle_coverage(cx, cy, size * 0.5, x, y)
+        soft_circle_coverage(cx, cy, size * 0.5, x, y)
     }
 
     pub fn line_coverage(&self, ax: f64, ay: f64, bx: f64, by: f64, width: f64, x: i32, y: i32) -> f64 {
         if self.smooth_rule as u32 == SGI_SMOOTH_TWO_PIXEL_FILTER {
-            return sgi_soft_line_filter(ax, ay, bx, by, width, x, y);
+            return soft_line_filter(ax, ay, bx, by, width, x, y);
         }
-        sgi_soft_line_coverage(ax, ay, bx, by, width, x, y)
+        soft_line_coverage(ax, ay, bx, by, width, x, y)
     }
 
     /// How far from a smoothed point's centre, or a smoothed line, in pixels,
@@ -926,7 +926,7 @@ impl SGIRasterRules {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct SGISoftLineStipple {
+pub struct SoftLineStipple {
     pub counter: u32,
     pub repeat: u32,
     pub pattern: u32,
@@ -934,8 +934,8 @@ pub struct SGISoftLineStipple {
     pub consumed: bool,
 }
 
-impl SGISoftVertex {
-    pub fn line_vertex_at(&self, b: &SGISoftVertex, t: f64, out: &mut SGISoftVertex) {
+impl SoftVertex {
+    pub fn line_vertex_at(&self, b: &SoftVertex, t: f64, out: &mut SoftVertex) {
         let wa = (1.0 - t) * self.inv_w;
         let wb = t * b.inv_w;
         let sum = wa + wb;
@@ -957,13 +957,13 @@ impl SGISoftVertex {
     }
 }
 
-impl SGISoftDraw {
+impl SoftDraw {
     /// Map and rasterize one aliased segment, already projected, with the
     /// provoking vertex's colour when flat shaded. Width follows the
     /// minor-axis shift and replication of 3.4.3. A smoothed segment takes the
     /// coverage of the rules' smooth_rule (3.4.2), stippled as one-pixel pieces
     /// along its length.
-    pub fn line_projected(&self, pa: &SGISoftVertex, pb: &SGISoftVertex, provoking: &[f32], offset: f64, stipple: Option<&mut SGISoftLineStipple>, client_clip: bool) {
+    pub fn line_projected(&self, pa: &SoftVertex, pb: &SoftVertex, provoking: &[f32], offset: f64, stipple: Option<&mut SoftLineStipple>, client_clip: bool) {
         let mut stipple = stipple;
         let st = &*self.st;
         let smooth = st.shade_model != SGI_GL_FLAT;
@@ -1005,8 +1005,8 @@ impl SGISoftDraw {
                 s.counter = (s.counter.wrapping_add(1)) % 16u32.wrapping_mul(s.repeat);
                 s.consumed = true;
                 if keep {
-                    let mut start = SGISoftVertex::default();
-                    let mut end = SGISoftVertex::default();
+                    let mut start = SoftVertex::default();
+                    let mut end = SoftVertex::default();
                     let t0 = i / length;
                     let t1 = r2_min((i + 1.0) / length, 1.0);
 
@@ -1179,7 +1179,7 @@ impl SGISoftDraw {
                     let py: i32 = if x_major { rep as i32 } else { m };
                     let cx = (px as f64 + 0.5) * one_sub;
                     let cy = (py as f64 + 0.5) * one_sub;
-                    let mut frag = SGISoftFrag::default();
+                    let mut frag = SoftFrag::default();
 
                     frag.fixed = false;
                     let mut t = ((cx - a.x as f64) * (b.x - a.x) as f64 + (cy - a.y as f64) * (b.y - a.y) as f64) / len2;
@@ -1217,18 +1217,18 @@ impl SGISoftDraw {
                         for k in 0..4 {
                             value[k] = texture_value[k] + t * texture_delta[k];
                         }
-                        frag.texture_rho = if sgi_soft_texture_derivatives(
+                        frag.texture_rho = if soft_texture_derivatives(
                             &value,
                             &texture_delta,
                             &zero,
-                            self.texture_base.width as f64 * sgi_soft_texture_lod_scale(self.texture.lod_scale_s),
+                            self.texture_base.width as f64 * soft_texture_lod_scale(self.texture.lod_scale_s),
                             if self.texture.one_dimensional {
                                 0.0
                             } else {
-                                self.texture_base.height as f64 * sgi_soft_texture_lod_scale(self.texture.lod_scale_t)
+                                self.texture_base.height as f64 * soft_texture_lod_scale(self.texture.lod_scale_t)
                             },
                             if self.texture.volume {
-                                self.texture_base.depth as f64 * sgi_soft_texture_lod_scale(self.texture.lod_scale_r)
+                                self.texture_base.depth as f64 * soft_texture_lod_scale(self.texture.lod_scale_r)
                             } else {
                                 0.0
                             },
@@ -1255,11 +1255,11 @@ impl SGISoftDraw {
     }
 
     /// Keep standalone client-plane rejection after geometric counting.
-    pub fn line(&self, va: &[f32], vb: &[f32], provoking: &[f32], stipple: Option<&mut SGISoftLineStipple>) {
-        let mut ca = SGIVolumeVertex::default();
-        let mut cb = SGIVolumeVertex::default();
-        let mut a = SGISoftVertex::default();
-        let mut b = SGISoftVertex::default();
+    pub fn line(&self, va: &[f32], vb: &[f32], provoking: &[f32], stipple: Option<&mut SoftLineStipple>) {
+        let mut ca = VolumeVertex::default();
+        let mut cb = VolumeVertex::default();
+        let mut a = SoftVertex::default();
+        let mut b = SoftVertex::default();
         let (mut bx0, mut by0, mut bx1, mut by1) = (0i32, 0i32, 0i32, 0i32);
 
         if stipple.is_none() && !self.bounds(&mut bx0, &mut by0, &mut bx1, &mut by1) {
@@ -1275,10 +1275,10 @@ impl SGISoftDraw {
     /// Aliased square-point centring follows OpenGL 1.2.1, 3.3, on the shared
     /// snapped subpixel grid. A smoothed point takes the coverage of the
     /// rules' smooth_rule about its snapped centre (3.3.2).
-    pub fn point_projected(&self, pv: &SGISoftVertex, provoking: Option<&[f32]>, offset: f64) {
+    pub fn point_projected(&self, pv: &SoftVertex, provoking: Option<&[f32]>, offset: f64) {
         let sub = self.rules.subpixel_bits as i32;
         let v = pv.clone();
-        let mut frag = SGISoftFrag::default();
+        let mut frag = SoftFrag::default();
         let (mut bx0, mut by0, mut bx1, mut by1) = (0i32, 0i32, 0i32, 0i32);
         let psize = self.point_size as i64;
 
@@ -1341,8 +1341,8 @@ impl SGISoftDraw {
     }
 
     pub fn point(&self, vp: &[f32]) {
-        let mut cv = SGIVolumeVertex::default();
-        let mut v = SGISoftVertex::default();
+        let mut cv = VolumeVertex::default();
+        let mut v = SoftVertex::default();
 
         self.st.volume_from_draw_vertex(vp, &mut cv);
         if cv.contains() && self.project(&cv, &mut v) && !self.st.clipped(&v.clip) {
@@ -1352,7 +1352,7 @@ impl SGISoftDraw {
 }
 
 /// Internal representation bound, not an SGI width range. Half ties round up.
-pub fn sgi_soft_dimension(requested: f32, rounded: &mut u32) -> bool {
+pub fn soft_dimension(requested: f32, rounded: &mut u32) -> bool {
     let n = if requested == 0.0 { 1.0 } else { (requested as f64 + 0.5).floor() };
 
     if !requested.is_finite() || requested < 0.0 || n > i32::MAX as f64 {
@@ -1363,7 +1363,7 @@ pub fn sgi_soft_dimension(requested: f32, rounded: &mut u32) -> bool {
     true
 }
 
-impl SGIVolumeVertex {
+impl VolumeVertex {
     pub fn soft_boundary_edge(&self) -> bool {
         self.attr[SGI_GL_V_EDGE].to_bits() != 0
     }
@@ -1373,8 +1373,8 @@ impl SGIVolumeVertex {
     }
 }
 
-impl SGISoftDraw {
-    pub fn boundary_plane(&self, v: &SGIVolumeVertex, p: u32) -> f64 {
+impl SoftDraw {
+    pub fn boundary_plane(&self, v: &VolumeVertex, p: u32) -> f64 {
         if p < SGI_VOLUME_PLANES as u32 {
             v.plane(p as _)
         } else {
@@ -1388,7 +1388,7 @@ impl SGISoftDraw {
     /// retained edges keep their flags; the newly connecting cut edges are
     /// true. The C swaps its two workspace pointers; here the result is left
     /// in `poly` by swapping the vectors at the end.
-    pub fn boundary_clip(&self, poly: &mut Vec<SGIVolumeVertex>, other: &mut Vec<SGIVolumeVertex>, count: &mut usize, capacity: usize) -> bool {
+    pub fn boundary_clip(&self, poly: &mut Vec<VolumeVertex>, other: &mut Vec<VolumeVertex>, count: &mut usize, capacity: usize) -> bool {
         let mut src_is_poly = true;
         let mut n = *count;
 
@@ -1398,7 +1398,7 @@ impl SGISoftDraw {
             if p >= SGI_VOLUME_PLANES as u32 && (self.st.clip_planes & (1u32 << (p - SGI_VOLUME_PLANES as u32))) == 0 {
                 continue;
             }
-            let (src, dst): (&Vec<SGIVolumeVertex>, &mut Vec<SGIVolumeVertex>) =
+            let (src, dst): (&Vec<VolumeVertex>, &mut Vec<VolumeVertex>) =
                 if src_is_poly { (&*poly, &mut *other) } else { (&*other, &mut *poly) };
             for i in 0..n {
                 let a = &src[i];
@@ -1448,7 +1448,7 @@ impl SGISoftDraw {
     }
 }
 
-impl SGIGLDraw {
+impl GlDraw {
     pub fn soft_polygon_vertex<'a>(&self, indices: Option<&[u32]>, i: usize) -> &'a [f32] {
         let index = match indices {
             Some(ix) => ix[i] as usize,
@@ -1460,19 +1460,19 @@ impl SGIGLDraw {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct SGISoftAAPoint {
+pub struct SoftAaPoint {
     pub x: f64,
     pub y: f64,
 }
 
-pub type SGISoftAAEdge = u32;
-pub const SGI_AA_LEFT: SGISoftAAEdge = 0;
-pub const SGI_AA_RIGHT: SGISoftAAEdge = 1;
-pub const SGI_AA_BOTTOM: SGISoftAAEdge = 2;
-pub const SGI_AA_TOP: SGISoftAAEdge = 3;
+pub type SoftAaEdge = u32;
+pub const SGI_AA_LEFT: SoftAaEdge = 0;
+pub const SGI_AA_RIGHT: SoftAaEdge = 1;
+pub const SGI_AA_BOTTOM: SoftAaEdge = 2;
+pub const SGI_AA_TOP: SoftAaEdge = 3;
 
-impl SGISoftAAPoint {
-    pub fn aa_inside(&self, edge: SGISoftAAEdge, value: f64) -> bool {
+impl SoftAaPoint {
+    pub fn aa_inside(&self, edge: SoftAaEdge, value: f64) -> bool {
         match edge {
             SGI_AA_LEFT => self.x >= value,
             SGI_AA_RIGHT => self.x <= value,
@@ -1482,20 +1482,20 @@ impl SGISoftAAPoint {
         }
     }
 
-    pub fn aa_intersection(&self, b: &SGISoftAAPoint, edge: SGISoftAAEdge, value: f64) -> SGISoftAAPoint {
+    pub fn aa_intersection(&self, b: &SoftAaPoint, edge: SoftAaEdge, value: f64) -> SoftAaPoint {
         let t = if edge <= SGI_AA_RIGHT { (value - self.x) / (b.x - self.x) } else { (value - self.y) / (b.y - self.y) };
 
-        SGISoftAAPoint { x: self.x + t * (b.x - self.x), y: self.y + t * (b.y - self.y) }
+        SoftAaPoint { x: self.x + t * (b.x - self.x), y: self.y + t * (b.y - self.y) }
     }
 }
 
 /// Clip a convex window-space polygon to one side of a pixel square.
-pub fn sgi_soft_aa_clip(
-    src: &[SGISoftAAPoint],
+pub fn soft_aa_clip(
+    src: &[SoftAaPoint],
     n: usize,
-    dst: &mut [SGISoftAAPoint],
+    dst: &mut [SoftAaPoint],
     capacity: usize,
-    edge: SGISoftAAEdge,
+    edge: SoftAaEdge,
     value: f64,
     out_n: &mut usize,
 ) -> bool {
@@ -1531,14 +1531,14 @@ pub fn sgi_soft_aa_clip(
     true
 }
 
-impl SGISoftVertex {
-    pub fn aa_edge(&self, b: &SGISoftVertex, x: f64, y: f64) -> f64 {
+impl SoftVertex {
+    pub fn aa_edge(&self, b: &SoftVertex, x: f64, y: f64) -> f64 {
         (b.x.wrapping_sub(self.x)) as f64 * (y - self.y as f64) - (b.y.wrapping_sub(self.y)) as f64 * (x - self.x as f64)
     }
 }
 
 /// A convex polygon contains the square when it contains all four corners.
-pub fn sgi_soft_aa_contains_pixel(v: &[SGISoftVertex], n: usize, px: i32, py: i32, scale: f64, ccw: bool) -> bool {
+pub fn soft_aa_contains_pixel(v: &[SoftVertex], n: usize, px: i32, py: i32, scale: f64, ccw: bool) -> bool {
     for i in 0..n {
         let a = &v[i];
         let b = &v[(i + 1) % n];
@@ -1564,12 +1564,12 @@ pub fn sgi_soft_aa_contains_pixel(v: &[SGISoftVertex], n: usize, px: i32, py: i3
     true
 }
 
-impl SGISoftDraw {
+impl SoftDraw {
     /// Rasterize one clipped convex polygon once. Pixel-square clipping
     /// computes geometric coverage; centroid sampling is exact for affine
     /// datums and an approximation for perspective-correct varyings.
-    pub fn polygon_coverage(&self, v: &[SGISoftVertex], n: usize, flat_color: &[f32], flat_index: f64, offset: f64) {
-        let mut flat = SGISoftFrag::default();
+    pub fn polygon_coverage(&self, v: &[SoftVertex], n: usize, flat_color: &[f32], flat_index: f64, offset: f64) {
+        let mut flat = SoftFrag::default();
         let (mut px0, mut py0, mut px1, mut py1) = (0i32, 0i32, 0i32, 0i32);
         let sub = self.rules.subpixel_bits as i32;
         let scale = (1i32 << sub) as f64;
@@ -1579,8 +1579,8 @@ impl SGISoftDraw {
             return;
         }
         let capacity = n + 8;
-        let mut a = vec![SGISoftAAPoint::default(); capacity];
-        let mut b = vec![SGISoftAAPoint::default(); capacity];
+        let mut a = vec![SoftAaPoint::default(); capacity];
+        let mut b = vec![SoftAaPoint::default(); capacity];
         let mut min_x = v[0].x;
         let mut max_x = v[0].x;
         let mut min_y = v[0].y;
@@ -1622,7 +1622,7 @@ impl SGISoftDraw {
                 if !self.stipple_pass(px, py, &mut background) {
                     continue;
                 }
-                if sgi_soft_aa_contains_pixel(v, n, px, py, scale, polygon_area > 0.0) {
+                if soft_aa_contains_pixel(v, n, px, py, scale, polygon_area > 0.0) {
                     coverage = 1.0;
                     x = px as f64 + 0.5;
                     y = py as f64 + 0.5;
@@ -1635,7 +1635,7 @@ impl SGISoftDraw {
 
                     // Restore the polygon before clipping this pixel.
                     for i in 0..n {
-                        a[i] = SGISoftAAPoint { x: v[i].x as f64 / scale, y: v[i].y as f64 / scale };
+                        a[i] = SoftAaPoint { x: v[i].x as f64 / scale, y: v[i].y as f64 / scale };
                     }
                     for e in SGI_AA_LEFT..=SGI_AA_TOP {
                         let bound = if e == SGI_AA_LEFT {
@@ -1648,9 +1648,9 @@ impl SGISoftDraw {
                             (py + 1) as f64
                         };
                         let ok = if src_is_a {
-                            sgi_soft_aa_clip(&a, count, &mut b, capacity, e, bound, &mut count)
+                            soft_aa_clip(&a, count, &mut b, capacity, e, bound, &mut count)
                         } else {
-                            sgi_soft_aa_clip(&b, count, &mut a, capacity, e, bound, &mut count)
+                            soft_aa_clip(&b, count, &mut a, capacity, e, bound, &mut count)
                         };
 
                         if !ok {
@@ -1747,11 +1747,11 @@ impl SGISoftDraw {
                         }
                     }
                     if !self.texture_base.is_null() {
-                        let mut gradient = SGISoftTexPlane::default();
+                        let mut gradient = SoftTexPlane::default();
                         let mut value = [0.0f64; 4];
                         let mut out = [0.0f64; 5];
 
-                        if !sgi_soft_texture_plane(&fan, sub as u32, self.texture.volume, self.texture.one_dimensional, &mut gradient) {
+                        if !soft_texture_plane(&fan, sub as u32, self.texture.volume, self.texture.one_dimensional, &mut gradient) {
                             continue;
                         }
                         for k in 0..4 {
@@ -1759,18 +1759,18 @@ impl SGISoftDraw {
                                 + (px as f64 + 0.5 - gradient.x) * gradient.dx[k]
                                 + (py as f64 + 0.5 - gradient.y) * gradient.dy[k];
                         }
-                        frag.texture_rho = if sgi_soft_texture_derivatives(
+                        frag.texture_rho = if soft_texture_derivatives(
                             &value,
                             &gradient.dx,
                             &gradient.dy,
-                            self.texture_base.width as f64 * sgi_soft_texture_lod_scale(self.texture.lod_scale_s),
+                            self.texture_base.width as f64 * soft_texture_lod_scale(self.texture.lod_scale_s),
                             if self.texture.one_dimensional {
                                 0.0
                             } else {
-                                self.texture_base.height as f64 * sgi_soft_texture_lod_scale(self.texture.lod_scale_t)
+                                self.texture_base.height as f64 * soft_texture_lod_scale(self.texture.lod_scale_t)
                             },
                             if self.texture.volume {
-                                self.texture_base.depth as f64 * sgi_soft_texture_lod_scale(self.texture.lod_scale_r)
+                                self.texture_base.depth as f64 * soft_texture_lod_scale(self.texture.lod_scale_r)
                             } else {
                                 0.0
                             },
@@ -1790,8 +1790,8 @@ impl SGISoftDraw {
         }
     }
 
-    pub fn polygon_smooth(&self, poly: &[SGIVolumeVertex], n: usize, provoking: &[f32], front: bool, slope: f64) {
-        let mut v: Vec<SGISoftVertex> = vec![SGISoftVertex::default(); n];
+    pub fn polygon_smooth(&self, poly: &[VolumeVertex], n: usize, provoking: &[f32], front: bool, slope: f64) {
+        let mut v: Vec<SoftVertex> = vec![SoftVertex::default(); n];
         let mut offset = 0.0f64;
         let mut flat_color = &provoking[SGI_GL_V_COLOR..SGI_GL_V_COLOR + 4];
         let mut flat_index = provoking[SGI_GL_V_INDEX];
@@ -1833,7 +1833,7 @@ impl SGISoftDraw {
     }
 
     /// Replay the original fan, including its validation and fragment ordering.
-    pub fn polygon_fill(&self, d: &SGIGLDraw, indices: Option<&[u32]>, n: usize, provoking: &[f32]) {
+    pub fn polygon_fill(&self, d: &GlDraw, indices: Option<&[u32]>, n: usize, provoking: &[f32]) {
         let v0 = d.soft_polygon_vertex(indices, 0);
         let prevalidate = !self.texture.is_null() && !(d.mode == SGI_GL_POLYGON && d.fill_by_triangle);
 
@@ -1863,14 +1863,14 @@ impl SGISoftDraw {
     }
 
     /// Workspace bounds are internal representations, not hardware maxima.
-    pub fn polygon(&self, d: &SGIGLDraw, indices: Option<&[u32]>, count: usize, provoking: &[f32], force_edges: bool) -> SGIGLDrawResult {
+    pub fn polygon(&self, d: &GlDraw, indices: Option<&[u32]>, count: usize, provoking: &[f32], force_edges: bool) -> GlDrawResult {
         let mut positions = self.clone();
         let mut coverage = self.clone();
-        let mut fan: [SGISoftVertex; 3] = Default::default();
-        let mut first = SGISoftVertex::default();
-        let mut previous: SGISoftVertex;
-        let mut current = SGISoftVertex::default();
-        let mut stipple = SGISoftLineStipple {
+        let mut fan: [SoftVertex; 3] = Default::default();
+        let mut first = SoftVertex::default();
+        let mut previous: SoftVertex;
+        let mut current = SoftVertex::default();
+        let mut stipple = SoftLineStipple {
             enabled: d.line_stipple_enabled,
             repeat: r2_max(1, r2_min(d.line_stipple_repeat, 256)),
             pattern: d.line_stipple_pattern,
@@ -1891,8 +1891,8 @@ impl SGISoftDraw {
             return SGI_GL_DRAW_OUT_OF_MEMORY;
         }
         let capacity = count + SGI_VOLUME_PLANES as usize + SGI_GL_CLIP_PLANES as usize;
-        let mut poly: Vec<SGIVolumeVertex> = vec![SGIVolumeVertex::default(); capacity];
-        let mut other: Vec<SGIVolumeVertex> = vec![SGIVolumeVertex::default(); capacity];
+        let mut poly: Vec<VolumeVertex> = vec![VolumeVertex::default(); capacity];
+        let mut other: Vec<VolumeVertex> = vec![VolumeVertex::default(); capacity];
         // Facing must not prevalidate texture Q and erase a valid FILL prefix.
         positions.texture = P::null();
         for i in 0..count {
@@ -1954,8 +1954,8 @@ impl SGISoftDraw {
             crate::qlog!("sgi-gl: invalid polygon mode {:#x} ignored", mode);
             return SGI_GL_DRAW_OK;
         }
-        if (mode == SGI_GL_LINE && !sgi_soft_dimension(d.line_width, &mut coverage.line_width))
-            || (mode == SGI_GL_POINT && !sgi_soft_dimension(d.point_size, &mut coverage.point_size))
+        if (mode == SGI_GL_LINE && !soft_dimension(d.line_width, &mut coverage.line_width))
+            || (mode == SGI_GL_POINT && !soft_dimension(d.point_size, &mut coverage.point_size))
         {
             return SGI_GL_DRAW_OK;
         }
@@ -1972,7 +1972,7 @@ impl SGISoftDraw {
                 return SGI_GL_DRAW_OK;
             }
             if !self.texture_base.is_null() && mode == SGI_GL_LINE {
-                let mut next = SGISoftVertex::default();
+                let mut next = SoftVertex::default();
                 let mut values = [0.0f64; 4];
                 let mut delta = [0.0f64; 4];
                 let mut length = 0.0f64;
@@ -2000,7 +2000,7 @@ impl SGISoftDraw {
                 + self.st.offset_bias as f64;
         }
         for i in 0..n {
-            let mut next = SGISoftVertex::default();
+            let mut next = SoftVertex::default();
 
             if !poly[i].soft_boundary_edge() {
                 continue;
@@ -2017,7 +2017,7 @@ impl SGISoftDraw {
     }
 
     /// Dispatch each independently assembled polygon, preserving provoking rules.
-    pub fn polygon_modes(&self, d: &SGIGLDraw) -> SGIGLDrawResult {
+    pub fn polygon_modes(&self, d: &GlDraw) -> GlDrawResult {
         let fill_modes: [u32; 2] = [SGI_GL_FILL, SGI_GL_FILL];
         let mut indices = [0u32; 4];
         let n = d.count;
@@ -2078,7 +2078,7 @@ impl SGISoftDraw {
     }
 
     /// The filled primitives of a draw, from SGI_GL_TRIANGLES on, in order.
-    pub fn draw_triangles(&self, d: &SGIGLDraw) {
+    pub fn draw_triangles(&self, d: &GlDraw) {
         let n = d.count as usize;
         let v = |i: usize| -> &[f32] { d.soft_polygon_vertex(None, i) };
 
@@ -2156,7 +2156,7 @@ impl SGISoftDraw {
     /// one with its vertices moved into the pixels the window owns, summed
     /// until it reaches limit. A vertex with no window position counts as
     /// reaching it.
-    pub fn draw_pixels(&self, d: &SGIGLDraw, limit: u64) -> u64 {
+    pub fn draw_pixels(&self, d: &GlDraw, limit: u64) -> u64 {
         let n = d.count as usize;
         let mut sum = 0u64;
         let (mut x0, mut y0, mut x1, mut y1) = (0i32, 0i32, 0i32, 0i32);
@@ -2166,7 +2166,7 @@ impl SGISoftDraw {
         }
         let mut xy = vec![0.0f64; 2 * n];
         for i in 0..n {
-            let mut cv = SGIVolumeVertex::default();
+            let mut cv = VolumeVertex::default();
             let mut win = [0.0f64; 3];
 
             self.st.volume_from_draw_vertex(d.soft_polygon_vertex(None, i), &mut cv);
@@ -2212,9 +2212,9 @@ impl SGISoftDraw {
     /// Whether every vertex of a draw has the texture coordinates its image
     /// uses: a draw with one that has not drops that primitive unread, so it
     /// reads its texels as it reaches them rather than all of them first.
-    pub fn fixed_coordinates_valid(&self, d: &SGIGLDraw) -> bool {
+    pub fn fixed_coordinates_valid(&self, d: &GlDraw) -> bool {
         for i in 0..d.count as usize {
-            let mut v = SGIVolumeVertex::default();
+            let mut v = VolumeVertex::default();
 
             self.st.volume_from_draw_vertex(d.soft_polygon_vertex(None, i), &mut v);
             if !self.texture.soft_texcoord_valid(self.texture_base.as_opt().map(|b| &*b), &v) {
@@ -2227,14 +2227,14 @@ impl SGISoftDraw {
 
 /// A draw handed to the band pool: pointers to the caller's draw, which
 /// stays alive until every band has returned.
-pub struct SGISoftBandDraw {
-    pub r: P<SGISoftDraw>,
-    pub d: P<SGIGLDraw>,
+pub struct SoftBandDraw {
+    pub r: P<SoftDraw>,
+    pub d: P<GlDraw>,
 }
 
-pub fn sgi_soft_band_draw(opaque: Opaque, band: u32, bands: u32) {
-    let job: &SGISoftBandDraw = from_opaque(opaque);
-    let mut r: SGISoftDraw = *job.r;
+pub fn soft_band_draw(opaque: Opaque, band: u32, bands: u32) {
+    let job: &SoftBandDraw = from_opaque(opaque);
+    let mut r: SoftDraw = *job.r;
 
     r.band = band;
     r.bands = bands;
@@ -2249,26 +2249,26 @@ pub fn sgi_soft_band_draw(opaque: Opaque, band: u32, bands: u32) {
     sgi_soft_band_quiet.with(|q| q.set(false));
 }
 
-impl SGISoftDraw {
+impl SoftDraw {
     /// Draw the filled primitives in bands when the target allows it and they
     /// cover enough pixels to pay for repeating each primitive's setup in
     /// every band; false, having drawn nothing, otherwise.
-    pub fn draw_parallel(&self, d: &SGIGLDraw) -> bool {
-        let bands = sgi_soft_bands();
+    pub fn draw_parallel(&self, d: &GlDraw) -> bool {
+        let bands = soft_bands();
         let min_pixels = self.t.soft_band_min_pixels();
-        let mut job = SGISoftBandDraw { r: P::from_ref(self), d: P::from_ref(d) };
+        let mut job = SoftBandDraw { r: P::from_ref(self), d: P::from_ref(d) };
 
         if !self.t.concurrent_pixels || bands < 2 || self.draw_pixels(d, min_pixels) < min_pixels {
             return false;
         }
-        sgi_soft_bands_run(sgi_soft_band_draw, P::new(&mut job).opaque(), bands)
+        soft_bands_run(soft_band_draw, P::new(&mut job).opaque(), bands)
     }
 }
 
-impl SGIRasterRules {
+impl RasterRules {
     /// Draw a draw's primitives.
-    pub fn draw(&self, t: &SGIRasterTarget, d: &SGIGLDraw) -> SGIGLDrawResult {
-        let mut r = SGISoftDraw {
+    pub fn draw(&self, t: &RasterTarget, d: &GlDraw) -> GlDrawResult {
+        let mut r = SoftDraw {
             rules: P::from_ref(self),
             t: P::from_ref(t),
             st: d.state,
@@ -2281,7 +2281,7 @@ impl SGIRasterRules {
             polygon_stipple: if d.polygon_stipple_enabled { d.polygon_stipple } else { P::null() },
             ..Default::default()
         };
-        let mut line = SGISoftLineStipple {
+        let mut line = SoftLineStipple {
             counter: if !d.line_phase.is_null() && !d.line_phase_reset { *d.line_phase } else { 0 },
             enabled: d.line_stipple_enabled,
             repeat: r2_max(1, r2_min(d.line_stipple_repeat, 256)),
@@ -2292,7 +2292,7 @@ impl SGIRasterRules {
         let n = d.count as usize;
         let mut texture_reports = 0u32;
         let mut rgba_reported = false;
-        let mut fixed = SGISoftFixedTex::default();
+        let mut fixed = SoftFixedTex::default();
 
         line.counter %= 16u32.wrapping_mul(line.repeat);
         r.texture_reports = P::new(&mut texture_reports);
@@ -2372,7 +2372,7 @@ impl SGIRasterRules {
         }
         match d.mode {
             SGI_GL_POINTS => {
-                if !sgi_soft_dimension(d.point_size, &mut r.point_size) {
+                if !soft_dimension(d.point_size, &mut r.point_size) {
                     return SGI_GL_DRAW_OK;
                 }
                 for i in 0..n {
@@ -2381,7 +2381,7 @@ impl SGIRasterRules {
                 SGI_GL_DRAW_OK
             }
             SGI_GL_LINES => {
-                if !sgi_soft_dimension(d.line_width, &mut r.line_width) {
+                if !soft_dimension(d.line_width, &mut r.line_width) {
                     return SGI_GL_DRAW_OK;
                 }
                 let mut i = 0usize;
@@ -2398,7 +2398,7 @@ impl SGIRasterRules {
                 SGI_GL_DRAW_OK
             }
             SGI_GL_LINE_STRIP | SGI_GL_LINE_LOOP => {
-                if !sgi_soft_dimension(d.line_width, &mut r.line_width) {
+                if !soft_dimension(d.line_width, &mut r.line_width) {
                     return SGI_GL_DRAW_OK;
                 }
                 let mut i = 0usize;
@@ -2433,17 +2433,17 @@ fn r2_clamp(val: f64, low: f64, high: f64) -> f64 {
     if val > high { high } else if val < low { low } else { val }
 }
 
-impl SGIRasterRules {
+impl RasterRules {
     /// A run of a bitmap's image (OpenGL 1.2.1, 3.7): a fragment for each set
     /// bit, at the image's corner plus the bit's column and row, bounded by the
     /// window the draw state's drawable owns and not by the viewport.
-    pub fn bitmap(&self, t: &SGIRasterTarget, op: &SGIRasterOp) {
+    pub fn bitmap(&self, t: &RasterTarget, op: &RasterOp) {
         let b = &op.bitmap;
-        let mut r = SGISoftDraw { rules: P::from_ref(self), t: P::from_ref(t), st: b.state, ..Default::default() };
+        let mut r = SoftDraw { rules: P::from_ref(self), t: P::from_ref(t), st: b.state, ..Default::default() };
         let row_bytes: u32 = (b.width + 7) / 8;
         let mut rgba_reported = false;
         let mut texture_reports = 0u32;
-        let mut frag = SGISoftFrag::default();
+        let mut frag = SoftFrag::default();
 
         frag.rgba = [b.rgba[0] as f64, b.rgba[1] as f64, b.rgba[2] as f64, b.rgba[3] as f64];
         frag.texcoord = [b.texcoord[0] as f64, b.texcoord[1] as f64, b.texcoord[2] as f64, b.texcoord[3] as f64];
@@ -2494,7 +2494,7 @@ impl SGIRasterRules {
         }
     }
 
-    pub fn pixels(&self, t: &SGIRasterTarget, op: &SGIRasterOp) {
+    pub fn pixels(&self, t: &RasterTarget, op: &RasterOp) {
         let p = &op.pixels;
         let image = !p.rgba.is_null()
             || !p.rgba_float.is_null()
@@ -2502,8 +2502,8 @@ impl SGIRasterRules {
             || !p.depth.is_null()
             || !p.stencil.is_null()
             || !p.index.is_null();
-        let mut r = SGISoftDraw { rules: P::from_ref(self), t: P::from_ref(t), st: p.state, ..Default::default() };
-        let mut frag = SGISoftFrag::default();
+        let mut r = SoftDraw { rules: P::from_ref(self), t: P::from_ref(t), st: p.state, ..Default::default() };
+        let mut frag = SoftFrag::default();
         let mut rgba_reported = false;
         let mut texture_reports = 0u32;
         let mut stencil_max = 0u32;
@@ -2627,7 +2627,7 @@ impl SGIRasterRules {
     }
 }
 
-impl SGIClipList {
+impl ClipList {
     /// Whether one rectangle of a non-empty clip list holds all of row y from
     /// x0 to x1, so that each pixel's own test would pass.
     pub fn soft_clip_covers_row(&self, x0: i32, x1: i32, y: i32) -> bool {
@@ -2643,10 +2643,10 @@ impl SGIClipList {
 }
 
 /// A clear's decided values, which every row of it stores.
-pub struct SGISoftClear<'a> {
-    pub rules: &'a SGIRasterRules,
-    pub t: &'a SGIRasterTarget,
-    pub op: &'a SGIRasterOp,
+pub struct SoftClear<'a> {
+    pub rules: &'a RasterRules,
+    pub t: &'a RasterTarget,
+    pub op: &'a RasterOp,
     pub colour: bool,
     pub depth: bool,
     pub stencil: bool,
@@ -2658,18 +2658,18 @@ pub struct SGISoftClear<'a> {
     pub rgba_mask: u32,
     pub ntargets: u32,
     pub depth_value: u32,
-    pub clear: SGIRasterColour,
+    pub clear: RasterColour,
     pub rgba_reported: P<bool>,
 }
 
-impl SGISoftClear<'_> {
-    /// The rows of a clear that are band's of bands (sgi_soft_row_in_band()).
+impl SoftClear<'_> {
+    /// The rows of a clear that are band's of bands (SoftDraw::row_in_band()).
     pub fn rows(&self, band: u32, bands: u32) {
         let rules = self.rules;
         let t = self.t;
         let op = self.op;
         // Only a read fills it, and only a read's targets are read back.
-        let mut dest = [SGIRasterColour::default(); SGI_GL_MAX_TARGETS as usize];
+        let mut dest = [RasterColour::default(); SGI_GL_MAX_TARGETS as usize];
 
         for y in op.y0..=op.y1 {
             if !(bands <= 1 || ((y as u32) >> SGI_SOFT_BAND_ROWS_SHIFT) % bands == band) {
@@ -2682,7 +2682,7 @@ impl SGISoftClear<'_> {
                 }
 
                 if self.rgba && self.rgba_read {
-                    dest = [SGIRasterColour::default(); SGI_GL_MAX_TARGETS as usize];
+                    dest = [RasterColour::default(); SGI_GL_MAX_TARGETS as usize];
                     if !rules.rgba_load(t, &op.targets, self.ntargets, x, y, &mut dest, self.rgba_reported.get()) {
                         continue;
                     }
@@ -2731,14 +2731,14 @@ impl SGISoftClear<'_> {
     }
 }
 
-/// sgi_soft_clear_rows() as the band pool calls it.
-pub fn sgi_soft_clear_rows_band(opaque: Opaque, band: u32, bands: u32) {
-    let c: &SGISoftClear = from_opaque(opaque);
+/// SoftClear::rows() as the band pool calls it.
+pub fn soft_clear_rows_band(opaque: Opaque, band: u32, bands: u32) {
+    let c: &SoftClear = from_opaque(opaque);
 
     c.rows(band, bands);
 }
 
-impl SGIRasterRules {
+impl RasterRules {
     /// CLEAR writes the clear colour under the colour mask, or in colour-index
     /// mode the clear index under the index mask, to the op's targets, the
     /// clear depth to the depth plane and the clear stencil value under its
@@ -2746,7 +2746,7 @@ impl SGIRasterRules {
     /// its rectangle its clip list keeps. BITMAP draws its run of a bitmap, and
     /// PIXELS draws a zoomed RGBA rectangle. The other kinds are not executed
     /// here yet.
-    pub fn raster(&self, t: &SGIRasterTarget, op: &SGIRasterOp) {
+    pub fn raster(&self, t: &RasterTarget, op: &RasterOp) {
         let mut colour = op.clear_buffers & SGI_GL_COLOR_BUFFER_BIT != 0;
         let depth = op.clear_buffers & SGI_GL_DEPTH_BUFFER_BIT != 0;
         let mut stencil = op.clear_buffers & SGI_GL_STENCIL_BUFFER_BIT != 0;
@@ -2761,7 +2761,7 @@ impl SGIRasterRules {
             && rgba_mask != self.rgba_mask(SGI_GL_COLOUR_MASK_ALL);
         let ntargets = r2_min(op.ntargets, SGI_GL_MAX_TARGETS);
         let mut rgba_reported = false;
-        let mut clear = SGIRasterColour::default();
+        let mut clear = RasterColour::default();
 
         if !self.check_rules() {
             return;
@@ -2805,7 +2805,7 @@ impl SGIRasterRules {
             // Clears remain undithered: no dither state is submitted.
             clear = self.rgba_value(rgb, op.clear_rgba[3] as f64);
         }
-        let rows = SGISoftClear {
+        let rows = SoftClear {
             rules: self,
             t,
             op,
@@ -2823,13 +2823,13 @@ impl SGIRasterRules {
             clear,
             rgba_reported: P::new(&mut rgba_reported),
         };
-        let bands = sgi_soft_bands();
+        let bands = soft_bands();
         if !t.concurrent_pixels
             || bands < 2
             || op.y1 < op.y0
             || op.x1 < op.x0
             || ((op.x1 - op.x0 + 1) as u64) * ((op.y1 - op.y0 + 1) as u64) < t.soft_band_min_pixels()
-            || !sgi_soft_bands_run(sgi_soft_clear_rows_band, P::from_ref(&rows).opaque(), bands)
+            || !soft_bands_run(soft_clear_rows_band, P::from_ref(&rows).opaque(), bands)
         {
             rows.rows(0, 1);
         }
