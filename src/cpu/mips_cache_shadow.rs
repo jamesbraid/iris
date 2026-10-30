@@ -104,7 +104,7 @@ const L2_TAG_MASK: u64 = u64::MAX;
 /// Fuel uses this layout as a compatibility mask, not a measurement of R14000
 /// silicon. Existing R10000 models retain L2_TAG_MASK: an earlier narrower
 /// mask broke IP28 PROM diagnostics. Extending this policy needs IP28/Octane
-/// diagnostic comparisons; establishing R14000 behavior needs its own evidence.
+/// diagnostic comparisons. Establishing R14000 behavior needs its own evidence.
 const R14000_L2_TAG_MASK: u64 = 0x8000_000f_ffff_cdff;
 
 /// Is the shadow cache's operation trace on, at this level of detail?
@@ -372,6 +372,7 @@ impl<
     const LWR_PRESERVES_UPPER: bool = Self::IS_R14000;
     const FPU_FR1_WORD_WRITES_ZERO_UPPER: bool = Self::IS_R14000;
     const FPU_FR0_MOV_S_PRESERVES_PAIR: bool = Self::IS_R14000;
+    const UNCACHED_MASKED_SUBWORD_STORES: bool = Self::IS_R14000;
 }
 
 impl<
@@ -799,7 +800,8 @@ mod tests {
         assert_eq!(r14.cache_op(C_ILT | CACH_SD, 0, 0), R14000_L2_TAG_MASK);
     }
 
-    /// Fuel's primary diagnostic data must round-trip while IP28 keeps its secondary-only shadow.
+    /// Fuel's primary diagnostic data must round-trip while IP28 keeps its
+    /// secondary-only shadow.
     #[test]
     fn diagnostic_data_round_trips_without_adding_primary_arrays_to_existing_models() {
         let c = cache();

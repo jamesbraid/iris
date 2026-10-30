@@ -365,6 +365,10 @@ consumer thread never takes `rec`.
   clear it, and FR=0 MOV.S preserves the paired word. These choices match
   Fuel's existing emulation model; they are not measurements of R14000
   silicon. `CpuModel` defaults preserve the existing machines' behavior.
+  Uncached SB/SH use a masked 64-bit bus transaction. The addressed byte or
+  halfword carries the source register's low bits; inactive lanes retain
+  deterministic source bits for compatibility, but their values are
+  undefined by hardware.
 - With `opcodefusion` (implied by `lightning`), the interpreter executes
   common pairs (branch + NOP, LUI + ORI/ADDIU, address + load/store) as one
   dispatch.

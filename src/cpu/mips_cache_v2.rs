@@ -572,6 +572,10 @@ pub trait CpuModel: MipsCache {
     const FPU_FR1_WORD_WRITES_ZERO_UPPER: bool = false;
     /// Preserve the other paired word on FR=0 MOV.S.
     const FPU_FR0_MOV_S_PRESERVES_PAIR: bool = false;
+    /// Send uncached SB/SH as a masked 64-bit bus write. Fuel PROM 6.210's
+    /// Walking Address diagnostic needs the source bits on the Bedrock ECC view.
+    /// Inactive lanes carry compatibility bits, not measured silicon values.
+    const UNCACHED_MASKED_SUBWORD_STORES: bool = false;
 }
 
 pub trait MipsCache: Send + Sync {

@@ -1888,20 +1888,24 @@ unsafe extern "C" fn jit_read64<T: Tlb, C: CpuModel>(ctx: *mut core::ffi::c_void
 #[cfg(feature = "jitv2")]
 unsafe extern "C" fn jit_write8<T: Tlb, C: CpuModel>(ctx: *mut core::ffi::c_void, va: u64, val: u64) -> u32 {
     let exec = unsafe { &mut *exec_from_core::<T, C>(ctx) };
-    let val = val as u8; // mask to the real width ourselves — see write8_fn's doc comment on why the FFI parameter is u64
+    // Keep the original GPR for R14000's uncached masked-lane transaction.
+    // Other models retain the old narrow-callout value.
+    let val = if C::UNCACHED_MASKED_SUBWORD_STORES { val } else { val as u8 as u64 };
     #[cfg(feature = "jitv2_lockstep")]
-    { return exec.lockstep_jit_write::<1>(va, val as u64); }
+    { return exec.lockstep_jit_write::<1>(va, val); }
     #[cfg(not(feature = "jitv2_lockstep"))]
-    exec.write_data::<1>(va, val as u64)
+    exec.write_data::<1>(va, val)
 }
 #[cfg(feature = "jitv2")]
 unsafe extern "C" fn jit_write16<T: Tlb, C: CpuModel>(ctx: *mut core::ffi::c_void, va: u64, val: u64) -> u32 {
     let exec = unsafe { &mut *exec_from_core::<T, C>(ctx) };
-    let val = val as u16; // mask to the real width ourselves — see write16_fn's doc comment
+    // Keep the original GPR for R14000's uncached masked-lane transaction.
+    // Other models retain the old narrow-callout value.
+    let val = if C::UNCACHED_MASKED_SUBWORD_STORES { val } else { val as u16 as u64 };
     #[cfg(feature = "jitv2_lockstep")]
-    { return exec.lockstep_jit_write::<2>(va, val as u64); }
+    { return exec.lockstep_jit_write::<2>(va, val); }
     #[cfg(not(feature = "jitv2_lockstep"))]
-    exec.write_data::<2>(va, val as u64)
+    exec.write_data::<2>(va, val)
 }
 #[cfg(feature = "jitv2")]
 unsafe extern "C" fn jit_write32<T: Tlb, C: CpuModel>(ctx: *mut core::ffi::c_void, va: u64, val: u64) -> u32 {
@@ -5553,7 +5557,21 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             if !DEBUG && mips_log(MIPS_LOG_MEM) {
                 dlog_dev!(LogModule::Mips, "Uncached Write{}: PC={:016x} VA={:016x} PA={:016x} Val={:016x}", SIZE*8, self.core.pc, virt_addr, phys_addr, val);
             }
-            let ws = if SIZE == 1 {
+            let ws = if !DEBUG && C::UNCACHED_MASKED_SUBWORD_STORES && (SIZE == 1 || SIZE == 2) {
+                // Valid byte lanes carry the architectural low byte/halfword.
+                // Fuel PROM 6.210's Walking Address test needs the source
+                // bits on Bedrock's ECC view: scalar dispatch reads zero
+                // instead of the expected halfword and reports diag_rc 43.
+                // Inactive lanes retain those bits for compatibility;
+                // hardware does not define their values.
+                let lane_shift = ((8 - SIZE - (phys_addr & 7) as usize) * 8) as u32;
+                let low_mask = if SIZE == 1 { u8::MAX as u64 } else { u16::MAX as u64 };
+                self.sysad.write64_masked(
+                    phys_addr & !7,
+                    val.rotate_left(lane_shift),
+                    low_mask << lane_shift,
+                )
+            } else if SIZE == 1 {
                 self.sysad.write8(phys_addr, val as u8)
             } else if SIZE == 2 {
                 self.sysad.write16(phys_addr, val as u16)

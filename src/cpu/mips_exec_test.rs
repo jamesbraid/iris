@@ -13,12 +13,16 @@ mod tests {
     // Mock Memory Interface
     pub struct MockMemory {
         pub data: Mutex<HashMap<u64, u8>>,
+        pub narrow_writes: Mutex<Vec<(usize, u64, u64)>>,
+        pub masked_writes: Mutex<Vec<(u64, u64, u64)>>,
     }
 
     impl MockMemory {
         pub fn new() -> Self {
             Self {
                 data: Mutex::new(HashMap::new()),
+                narrow_writes: Mutex::new(Vec::new()),
+                masked_writes: Mutex::new(Vec::new()),
             }
         }
 
@@ -67,6 +71,7 @@ mod tests {
         }
 
         fn write8(&self, addr: u64, val: u8) -> u32 {
+            self.narrow_writes.lock().unwrap().push((1, addr, val as u64));
             self.set_byte(addr as u64, val);
             BUS_OK
         }
@@ -82,6 +87,7 @@ mod tests {
 
         fn write16(&self, addr: u64, val: u16) -> u32 {
             let aligned_addr = (addr & !1) as u64;
+            self.narrow_writes.lock().unwrap().push((2, aligned_addr, val as u64));
             let bytes = val.to_be_bytes();
             for i in 0..2 {
                 self.set_byte(aligned_addr + i as u64, bytes[i]);
@@ -108,6 +114,18 @@ mod tests {
         fn write64(&self, addr: u64, val: u64) -> u32 {
             let aligned_addr = (addr & !7) as u64;
             self.set_double(aligned_addr, val);
+            BUS_OK
+        }
+
+        fn write64_masked(&self, addr: u64, val: u64, mask: u64) -> u32 {
+            let aligned_addr = addr & !7;
+            self.masked_writes.lock().unwrap().push((aligned_addr, val, mask));
+            for lane in 0..8 {
+                let shift = (7 - lane) * 8;
+                if mask & (0xffu64 << shift) != 0 {
+                    self.set_byte(aligned_addr + lane as u64, (val >> shift) as u8);
+                }
+            }
             BUS_OK
         }
 
@@ -573,6 +591,155 @@ mod tests {
         assert_eq!(exec.exec(instr), EXEC_COMPLETE);
         assert_eq!(mem.get_byte(0x100A), 0xBE);
         assert_eq!(mem.get_byte(0x100B), 0xEF);
+    }
+
+    /// Fuel PROM memory diagnostics need source bits on the ECC view
+    /// without changing other CPUs.
+    #[test]
+    fn r14000_masked_uncached_sb_sh_preserve_full_source_and_lane_data() {
+        fn check<C: CpuModel + From<Arc<dyn BusDevice>>>(masked: bool) {
+            let mem = Arc::new(MockMemory::new());
+            let bus: Arc<dyn BusDevice> = mem.clone();
+            let cfg = MipsCpuConfig::for_model::<C>();
+            let mut exec = MipsExecutor::<PassthroughTlb, C>::new(
+                bus,
+                PassthroughTlb::default(),
+                &cfg,
+            );
+            disable_jitv2(&mut exec);
+
+            let base = 0x2000u64;
+            let source = 0xFEDC_BA98_7654_3210u64;
+            let original = 0xAABB_CCDD_EEFF_0011u64;
+            exec.core.write_gpr(2, base);
+            exec.core.write_gpr(1, source);
+
+            for (size, op, offsets) in [(1usize, OP_SB, vec![0u64, 1, 2, 3, 4, 5, 6, 7]),
+                                        (2usize, OP_SH, vec![0u64, 2, 4, 6])] {
+                for offset in offsets {
+                    mem.set_double(base, original);
+                    mem.narrow_writes.lock().unwrap().clear();
+                    mem.masked_writes.lock().unwrap().clear();
+                    let instr = make_i(op, 2, 1, offset as u16);
+                    assert_eq!(exec.exec(instr), EXEC_COMPLETE);
+
+                    let addr = base + offset;
+                    if masked {
+                        let shift = ((8 - size - (addr & 7) as usize) * 8) as u32;
+                        let low_mask = if size == 1 { u8::MAX as u64 } else { u16::MAX as u64 };
+                        assert_eq!(
+                            *mem.masked_writes.lock().unwrap(),
+                            vec![(addr & !7, source.rotate_left(shift), low_mask << shift)],
+                            "masked SB/SH tuple at byte offset {offset}",
+                        );
+                        assert!(mem.narrow_writes.lock().unwrap().is_empty());
+                    } else {
+                        let val = if size == 1 { source as u8 as u64 } else { source as u16 as u64 };
+                        assert_eq!(*mem.narrow_writes.lock().unwrap(), vec![(size, addr & !(size as u64 - 1), val)]);
+                        assert!(mem.masked_writes.lock().unwrap().is_empty());
+                    }
+
+                    let first = if size == 1 { source as u8 } else { (source as u16 >> 8) as u8 };
+                    let last = if size == 1 { first } else { source as u8 };
+                    assert_eq!(mem.get_byte(addr), first, "stored leading byte at offset {offset}");
+                    if size == 2 {
+                        assert_eq!(mem.get_byte(addr + 1), last, "stored trailing byte at offset {offset}");
+                    }
+                    let original_bytes = original.to_be_bytes();
+                    for lane in 0..8u64 {
+                        if lane < offset || lane >= offset + size as u64 {
+                            assert_eq!(mem.get_byte(base + lane), original_bytes[lane as usize],
+                                "inactive byte lane {lane} at subword offset {offset}");
+                        }
+                    }
+                }
+            }
+
+            // A zero source register still issues the transaction and clears
+            // only its valid byte lanes.
+            exec.core.write_gpr(0, u64::MAX);
+            mem.set_double(base, original);
+            exec.core.write_gpr(2, base + 7);
+            assert_eq!(exec.exec(make_i(OP_SB, 2, 0, 0)), EXEC_COMPLETE);
+            assert_eq!(mem.get_byte(base + 7), 0);
+            if masked {
+                assert_eq!(mem.masked_writes.lock().unwrap().last().unwrap().2, 0xff);
+            } else {
+                assert_eq!(mem.narrow_writes.lock().unwrap().last().unwrap().0, 1);
+            }
+
+            mem.set_double(base, original);
+            exec.core.write_gpr(2, base + 6);
+            assert_eq!(exec.exec(make_i(OP_SH, 2, 0, 0)), EXEC_COMPLETE);
+            assert_eq!(mem.get_byte(base + 6), 0);
+            assert_eq!(mem.get_byte(base + 7), 0);
+            if masked {
+                assert_eq!(mem.masked_writes.lock().unwrap().last().unwrap().2, 0xffff);
+            } else {
+                assert_eq!(mem.narrow_writes.lock().unwrap().last().unwrap().0, 2);
+            }
+
+            mem.narrow_writes.lock().unwrap().clear();
+            mem.masked_writes.lock().unwrap().clear();
+            assert_eq!(exec.debug_write(base + 1, source, 1, u64::MAX), EXEC_COMPLETE);
+            assert_eq!(*mem.narrow_writes.lock().unwrap(), vec![(1, base + 1, source as u8 as u64)]);
+            assert!(mem.masked_writes.lock().unwrap().is_empty(), "debug writes keep the ordinary-width path");
+        }
+
+        check::<crate::cpu::mips_cache_shadow::R14000ShadowCache>(true);
+        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(false);
+    }
+
+    /// JIT store callouts must preserve the same Fuel diagnostic source
+    /// bits as the interpreter.
+    #[test]
+    #[cfg(feature = "jitv2")]
+    fn jit_subword_hooks_preserve_r14000_source_for_masked_calls_only() {
+        fn check<C: CpuModel + From<Arc<dyn BusDevice>>>(masked: bool) {
+            let mem = Arc::new(MockMemory::new());
+            let bus: Arc<dyn BusDevice> = mem.clone();
+            let cfg = MipsCpuConfig::for_model::<C>();
+            let mut exec = MipsExecutor::<PassthroughTlb, C>::new(
+                bus,
+                PassthroughTlb::default(),
+                &cfg,
+            );
+            disable_jitv2(&mut exec);
+            exec.install_jit_hooks();
+
+            let base = 0x2000u64;
+            let source = 0xFEDC_BA98_7654_3210u64;
+            let write8 = exec.core.write8_fn;
+            let write16 = exec.core.write16_fn;
+            let core = &mut exec.core as *mut crate::cpu::mips_core::MipsCore;
+            // JIT callouts receive the core pointer biased by the shared
+            // ABI constant; core_from_arg removes this before recovery.
+            let ctx = core.cast::<u8>()
+                .wrapping_add(crate::cpu::jitv2::codegen::CALLOUT_CORE_BIAS as usize)
+                .cast();
+            unsafe {
+                write8(ctx, base, source);
+                write16(ctx, base + 2, source);
+            }
+            if masked {
+                assert_eq!(
+                    *mem.masked_writes.lock().unwrap(),
+                    vec![
+                        (base, source.rotate_left(56), 0xff00_0000_0000_0000),
+                        (base, source.rotate_left(32), 0x0000_ffff_0000_0000),
+                    ],
+                );
+            } else {
+                assert_eq!(
+                    *mem.narrow_writes.lock().unwrap(),
+                    vec![(1, base, source as u8 as u64), (2, base + 2, source as u16 as u64)],
+                );
+                assert!(mem.masked_writes.lock().unwrap().is_empty());
+            }
+        }
+
+        check::<crate::cpu::mips_cache_shadow::R14000ShadowCache>(true);
+        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(false);
     }
 
     #[test]
@@ -6406,7 +6573,8 @@ mod tests {
         check::<crate::cpu::mips_cache_shadow::R14000ShadowCache>(true);
     }
 
-    /// Fuel retains the upper word on partial LWR while a complete word still sign-extends.
+    /// Fuel retains the upper word on partial LWR while a complete word
+    /// still sign-extends.
     #[test]
     fn r14000_partial_lwr_preserves_upper_only_for_partial_loads() {
         fn check<C: CpuModel + From<Arc<dyn BusDevice>>>(preserve_upper: bool) {
@@ -6449,7 +6617,8 @@ mod tests {
         check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(false);
     }
 
-    /// Fuel floating-point compatibility choices must leave the existing CPU models unchanged.
+    /// Fuel floating-point compatibility choices must leave the existing
+    /// CPU models unchanged.
     #[test]
     fn r14000_fpr_word_and_move_policies_are_model_scoped() {
         fn check<C: CpuModel + From<Arc<dyn BusDevice>>>(r14000: bool) {
