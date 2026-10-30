@@ -407,8 +407,8 @@ pub struct Board {
     pub image_nbytes: u32,
     pub image_code_reported: bool,
 
-    /// The shared scanout; resolves the colour plane through
-    /// HEAD_OPS.resolve_row.
+    /// The presented frame and retrace; Board::scanout_update() resolves
+    /// the colour planes into it.
     pub scanout: Scanout,
 
     // Diagnostic bookkeeping, not guest state.
@@ -1231,13 +1231,8 @@ impl Board {
             panic!("sgi-odyssey: {}", e);
         }
 
-        // The shared scanout owns the presented frame, resolving the colour
-        // plane through HEAD_OPS.resolve_row. Setting the mode allocates
-        // the frame, marks it all dirty and arms the retrace at the mode's rate.
-        // The state never moves after sgi_odyssey_new returns, so its address is
-        // a stable opaque.
-        let opaque = P::new(&mut *self).opaque();
-        self.scanout.init(&HEAD_OPS, opaque);
+        // Setting the mode allocates the scanout's frame, marks it all dirty
+        // and arms the retrace at the mode's rate.
         self.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
         Ok(())
     }
@@ -1268,8 +1263,8 @@ impl Board {
                 self.depth_mem.plane_store(&depth, x, y, ODSY_DEPTH24_MAX);
             }
         }
-        // Back to the boot size, then forget swaps and the cursor, repaint the
-        // cleared plane and restart the phase.
+        // Back to the boot size, then repaint the cleared plane and restart
+        // the phase.
         if self.scanout.mode.width != SGI_ODYSSEY_WIDTH || self.scanout.mode.height != SGI_ODYSSEY_HEIGHT {
             self.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
         }
