@@ -1,4 +1,8 @@
-//! Ported from hw/misc/sgi-odyssey.c in jamesbraid/qemu-sgi-origami.
+//! GL vertex work for the board: the vertex-program upload and its lit and
+//! window records, per-vertex lighting and colour, the depth scale and the
+//! combined matrix loads.
+//!
+//! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 
@@ -251,7 +255,7 @@ pub fn gl_resident(e: &[u32; 3]) -> bool {
 
 impl Board {
     /// Recognise the program the library just set (on every 0x2c write, the last
-    /// word of each program set, and after migration). APPROXIMATION, see
+    /// word of each program set). APPROXIMATION, see
     /// ODSY_UCODE_END: a precompiled program is recognised by its three entries,
     /// an assembled one (0x2a and 0x2c both the terminator) by the routines in
     /// its list, the head (0x29) giving the viewer and saying lighting is on, or,
@@ -458,7 +462,7 @@ pub fn normalize3(v: &mut [f64; 3]) {
     }
 }
 
-// C's MAX/MIN macros: the first operand wins ties and NaN comparisons.
+// MAX/MIN as the draw maths needs them: the first operand wins ties and NaN comparisons.
 fn cmax(a: f64, b: f64) -> f64 {
     if a > b { a } else { b }
 }
@@ -489,7 +493,7 @@ impl Board {
     /// normal transform (0x2b6) and with GL_NORMALIZE (0x29c) draw alike, where
     /// GL without GL_NORMALIZE under a scaling model-view does not renormalise
     /// (INFERRED to be harmless: the captures' normal matrix is the identity).
-    /// A zero shininess gives a specular factor of 1 at any n.h, by C's
+    /// A zero shininess gives a specular factor of 1 at any n.h, by
     /// pow(0, 0) = 1, a case the GL text leaves open.
     pub fn gl_light(&mut self, obj: &[f64; 4], out: &mut [f32; 4]) {
         let mut eye = [0f64; 3];
@@ -1285,7 +1289,7 @@ impl Board {
         // END always closes the current primitive, the same as a real
         // immediate-mode glEnd(): the next BEGIN starts a fresh vertex count,
         // and a stray END with nothing newly accumulated since -- exactly
-        // what odyssey_putchar() issues to close out its per-row pixel runs,
+        // what the console text path issues to close out its per-row pixel runs,
         // which never call BEGIN again -- paints nothing.
         self.gl_vertex_count = 0;
 

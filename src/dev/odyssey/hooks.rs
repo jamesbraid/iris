@@ -1,13 +1,7 @@
-//! Ported from include/hw/display/sgi/head-ops.h in jamesbraid/qemu-sgi-origami.
-//!
 //! The hooks an SGI graphics head gives the shared graphics code. A hook
 //! the family leaves None takes the default its comment names.
 //!
-//! Adaptations: `void *opaque` is `Opaque`; (pointer, length) pairs are
-//! slices, so `answer`'s request count `n`, `dma_chunk`'s `len` and
-//! `resolve_row`/`convert_row` pixel counts come from the slice lengths
-//! (`convert_row` keeps `pixels`, `resolve_row` takes `dst.len()` = width);
-//! `dma_address` returns the bus address through `&mut u64`.
+//! Ported from include/hw/display/sgi/head-ops.h in jamesbraid/qemu-sgi-origami.
 use super::*;
 
 pub type CompletionKind = u32;
@@ -63,7 +57,7 @@ impl HeadOps {
     }
 }
 
-/// The shared graphics foundation's head hooks (head_ops.rs). resolve_row
+/// The board's hooks for the scanout and pixel DMA. resolve_row
 /// turns the colour plane into displayed colour through each pixel's
 /// drawable, display mode and the lookup RAM; publish raises the completion
 /// fence a written transfer signals; retrace is the vertical-retrace callback
@@ -81,7 +75,7 @@ pub fn publish(opaque: Opaque, c: &Completion) {
     }
 }
 
-/// A run of guest bytes the DMA engine read: the C only traced it.
+/// A run of guest bytes the DMA engine read; it is only traced.
 pub fn dma_chunk(opaque: Opaque, seq: u64, addr: u64, bytes: &[u8]) {
     let _ = seq;
     // The chunks belong to the MMIO write that caused the RAM read.

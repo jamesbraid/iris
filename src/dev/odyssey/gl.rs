@@ -1,8 +1,11 @@
-//! Ported from hw/misc/sgi-odyssey.c in jamesbraid/qemu-sgi-origami.
+//! The colour, depth, stencil, fog and texture hooks the board gives the shared
+//! rasterizer, and the state its GL draws are made under.
+//!
+//! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 
-// C's MIN/MAX: the second operand wins ties and NaNs.
+// MIN/MAX: the second operand wins ties and NaNs.
 fn cmin<T: PartialOrd>(a: T, b: T) -> T {
     if a < b { a } else { b }
 }
@@ -53,7 +56,7 @@ pub struct TextureVolume {
 }
 
 /// `volume` comes first (repr(C)) so one opaque pointer serves both the
-/// post-filter callback and the 3D reader, as in the C.
+/// post-filter callback and the 3D reader.
 #[derive(Clone, Default)]
 #[repr(C)]
 pub struct TextureChain {
@@ -238,7 +241,7 @@ pub fn gl_load_rgba(opaque: Opaque, target: ColourTarget, x: i32, y: i32, colour
 impl Board {
     /// How far past [0, 1] a fragment's depth may round and still be drawn,
     /// clamped: 16 units in the last place of a single near 1 (ODSY_GL_DEPTH_SLACK
-    /// in defs.rs). APPROXIMATION: the depth row and block 16 arrive as
+    /// in consts.rs). APPROXIMATION: the depth row and block 16 arrive as
     /// singles, and a library that maps the far plane to 0.99999999 of the range
     /// leaves less margin than their rounding takes. A board does its
     /// arithmetic in its own precision and the clip it applies at the far plane
@@ -274,7 +277,7 @@ impl Board {
     }
 }
 
-/// The depth plane (Board::realize()): 24-bit depth, 0 nearest, through
+/// The depth plane (set up by Board::allocate()): 24-bit depth, 0 nearest, through
 /// the same pixel test as a colour write. It is a model plane because the
 /// board memory the real depth buffer occupies is not known.
 pub fn gl_load_depth(opaque: Opaque, x: i32, y: i32) -> u32 {
@@ -303,7 +306,7 @@ pub fn gl_store_depth(opaque: Opaque, x: i32, y: i32, depth: u32) {
     }
 }
 
-/// The stencil plane (Board::realize()): 8 bits, through the same pixel
+/// The stencil plane (set up by Board::allocate()): 8 bits, through the same pixel
 /// test as a depth write. A model plane: where the board keeps its stencil
 /// planes is not known.
 pub fn gl_load_stencil(opaque: Opaque, x: i32, y: i32) -> u32 {
@@ -379,7 +382,7 @@ impl Board {
         }
     }
 
-    /// The callbacks may run on band workers in the C; here they run serially.
+    /// The callbacks run serially, not on band workers.
     /// Each stores only its own pixel's bytes. Their once-only reports are
     /// made before the draw (Board::gl_report_refusals()).
     pub fn gl_target(&mut self) -> RasterTarget {
@@ -1580,7 +1583,7 @@ pub fn gl_draw_result(opaque: Opaque, d: &GlDraw) -> GlDrawResult {
     s.gl_report_refusals(true);
     // The board's thread holds the board lock for the whole draw; a
     // processor's accesses that need not wait for it use the front lock
-    // (front.rs).
+    // (interface.rs).
     let result = rules.draw(&t, &draw);
     crate::dlog_dev!(LogModule::Odyssey, "sgi_odyssey_gl_draw_path: backend scalar result {} called=1", result);
     s.scanout.invalidate_all();
@@ -1634,7 +1637,7 @@ impl ClipRect {
 }
 
 impl GlDrawable {
-    // The C compares the two drawables byte for byte.
+    // Compares the two drawables field by field.
     fn drawable_eq(&self, b: &GlDrawable) -> bool {
         self.bound == b.bound
             && self.origin == b.origin
@@ -1681,7 +1684,7 @@ impl Board {
         // This runs before every command, but the drawable changes only with
         // the window registers, so it is built in place and handed over only
         // when it differs from the shared context's. gl_bind_drawable's other
-        // fields keep their instance_init values, and its rectangles past the
+        // fields keep their initial values, and its rectangles past the
         // count stay zero, so it is the drawable a fresh build would make.
         {
             let d = &mut self.gl_bind_drawable;
@@ -1909,7 +1912,7 @@ impl Board {
     /// Recompute which of the shared context's six clip-plane slots are
     /// tested, from 0x0405 bits 2:0's thermometer count n (see
     /// ODSY_TEX_MODE_CLIP_COUNT_MASK's comment): slots 0..n-1 enabled, the rest
-    /// disabled. Called on every 0x0405 write and after migration; does not
+    /// disabled. Called on every 0x0405 write; does not
     /// touch the loaded coefficients themselves, which a separate load
     /// (ODSY_GL_CLIP_PLANE_LOAD) feeds.
     pub fn gl_apply_clip_planes(&mut self) {

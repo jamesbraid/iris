@@ -1,17 +1,15 @@
-//! Ported from hw/display/sgi/rasterizer.c (the fixed-point texture path)
-//! in jamesbraid/qemu-sgi-origami.
-//!
 //! Fixed-point texturing for filled triangles: the sampler's state, its
 //! texel reads and filters, the lambda table, and the row loops that draw a
-//! textured triangle's pixels through it. The C writes the row loops as one
-//! always-inlined function and a macro that stamps out a specialisation of
-//! it; here that is a generic function with const parameters and a
-//! macro_rules! that stamps the same set of named spans.
+//! textured triangle's pixels through it. The row loops are a generic
+//! function with const parameters, stamped out as a set of named spans by
+//! a macro_rules!.
+//!
+//! Ported from hw/display/sgi/rasterizer.c in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 
-/// C's MAX() and MIN(): the first operand when the comparison fails, so a
-/// NaN is dropped the way the C drops it.
+/// MAX and MIN as conditionals: the first operand when the comparison fails,
+/// so a NaN operand is dropped.
 #[inline(always)]
 fn fx_max<T: PartialOrd>(a: T, b: T) -> T {
     if a > b { a } else { b }
@@ -71,7 +69,7 @@ pub fn raster_set_texture_path(path: RasterTexturePath) {
 
 #[derive(Clone, Copy, Default)]
 pub struct SoftFixedLevel {
-    /// NULL: the image's level-zero fields
+    /// Null: the image's level-zero fields
     pub level: P<GlTexLevel>,
     pub width: u32,
     pub height: u32,
@@ -603,7 +601,7 @@ impl SoftDraw {
 /// round(128 log2(1 + (i + 0.5) / 1024)): lambda's table, in 1/256.
 pub static SOFT_FIXED_LOG2: std::sync::OnceLock<[i16; 1024]> = std::sync::OnceLock::new();
 
-/// The table, built on first use (the C builds it in a constructor).
+/// The table, built on first use (not at start-up).
 #[inline(always)]
 pub fn soft_fixed_log2_init() -> &'static [i16; 1024] {
     SOFT_FIXED_LOG2.get_or_init(|| {
@@ -885,7 +883,7 @@ impl SoftDraw {
         let mut px = px0;
         let mut first_pixel = true;
         loop {
-            // The C's for-increment, run before every pixel but the first so
+            // The loop increment, run before every pixel but the first so
             // that a continue still steps.
             if !first_pixel {
                 px += 1;
@@ -968,8 +966,8 @@ impl SoftDraw {
     }
 }
 
-/// A specialisation of SoftDraw::texture_row() under a name, as the C's
-/// SGI_SOFT_TEXTURE_SPAN macro stamps them out.
+/// A specialisation of SoftDraw::texture_row() under a name, as this
+/// macro stamps them out.
 macro_rules! SGI_SOFT_TEXTURE_SPAN {
     ($name:ident, $kernel:expr, $repeat:expr, $env:expr, $format:expr, $known:expr) => {
         pub fn $name(

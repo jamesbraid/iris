@@ -1,5 +1,6 @@
-//! Ported from hw/misc/sgi-odyssey.c (pixel DMA, queries, colour conversions,
-//! texture level build) in jamesbraid/qemu-sgi-origami.
+//! Pixel DMA, queries, colour conversions and the texture level build.
+//!
+//! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 
@@ -1050,8 +1051,7 @@ impl Board {
 impl DmaBus {
     /// A query's completion words must not report failure after changing guest
     /// memory. Admit only a whole aligned scalar, big-endian. Returns 0 or an
-    /// Failure. (The QEMU model also demanded a direct writable RAM section;
-    /// here guest memory is written through the bus.)
+    /// Failure. Guest memory is written through the bus.
     pub fn publish_word(&self, addr: u64, value: u32, size: u32) -> i32 {
         let size64 = size as u64;
         let mut bus_addr: u64 = addr;

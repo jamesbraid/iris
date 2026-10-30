@@ -1,7 +1,7 @@
-//! Ported from hw/misc/sgi-odyssey.c in jamesbraid/qemu-sgi-origami.
-//!
 //! The command-FIFO interpreter: word classification, operand gathering and
 //! the one big dispatch of a completed command.
+//!
+//! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 
@@ -667,7 +667,7 @@ impl Board {
             }
             ODSY_REG_GL_END => {
                 // A GL geometry primitive closes on the shared context; the greeter's
-                // QUADS fill (and odyssey_putchar()'s stray END) close on the 2D path.
+                // QUADS fill (and the console text path's stray END) close on the 2D path.
                 self.gl_begin_open = false;
                 self.gl_open_held = 0;
                 if self.gl_in_prim {

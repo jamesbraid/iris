@@ -2,7 +2,7 @@
 //!
 //! The board decodes and draws behind the processor, so the model does its
 //! decoding and drawing on a thread of its own rather than inside the
-//! processor's store (front.rs explains the two locks). The thread sleeps
+//! processor's store (interface.rs explains the two locks). The thread sleeps
 //! until a store joins an empty queue, then runs the queue in slices: each
 //! slice holds the board lock for at most `SLICE` of host time, and the
 //! thread leaves both locks free for `GAP` before the next, so that a

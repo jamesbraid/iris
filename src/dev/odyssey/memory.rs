@@ -1,15 +1,10 @@
-//! Ported from include/hw/display/sgi/board-memory.h in jamesbraid/qemu-sgi-origami.
-//!
 //! SGI graphics board memory and the planes over it. A plane is a typed
 //! window (format, size, stride, packing, row origin) over one head's
 //! memory; pixel (x, y) is at byte `base + y * stride + x * bpp`. Planes
 //! may overlap. Out-of-plane loads read zero and out-of-plane stores are
 //! dropped.
 //!
-//! Adaptations: `Error **errp` is `&mut Option<String>`; the page `host`
-//! pointer and a plane run's `host` are `P<u8>` (the family resolves them);
-//! `BoardMemory::plane` returns a `P<Plane>` (null when absent);
-//! (pointer, length) pairs are slices; VMState is dropped.
+//! Ported from include/hw/display/sgi/board-memory.h in jamesbraid/qemu-sgi-origami.
 use super::*;
 
 pub const SGI_PLANE_NONE: u32 = u32::MAX;
@@ -103,7 +98,7 @@ pub const SGI_LOGIC_NAND: u32 = 14;
 impl BoardMemory {
     /// A zeroed device-backed memory of size bytes, at most 4 GiB - 1.
     pub fn init(&mut self, size: u64) {
-        // A family constant; the limit is the migration buffer's length.
+        // A family constant; the limit is the 32-bit offsets planes use.
         assert!(size != 0 && size <= u32::MAX as u64);
         *self = BoardMemory::default();
         self.size = size;

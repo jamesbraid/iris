@@ -1,14 +1,10 @@
-//! Ported from include/hw/mips/sgi/pi-gfx.h, hw/mips/sgi/pi-gfx.c and
-//! hw/mips/sgi/pi-gfx-state.c in jamesbraid/qemu-sgi-origami.
-//!
 //! Graphics flow control in the Hub and Bedrock processor interfaces. The
 //! Octane has no processor-interface link (its board's `pi` stays `None`),
-//! so on that machine the credit calls are no-ops, as they are in QEMU
-//! when the board's `pi` property is unset. `PiGfx` is the register
+//! so on that machine the credit calls are no-ops. `PiGfx` is the register
 //! block a node's processor interface embeds; its functions are pure state.
-//! The QOM interface (`TYPE_SGI_PI_GFX`) becomes the `PiGfxLink` trait.
-//! Skipped: the vmstate description, and the per-thread forwarding-source
-//! mark (sgi_pi_gfx_mark_source/store_source), which names a QOM node.
+//! The board reaches the link through the `PiGfxLink` trait.
+//!
+//! Ported from hw/mips/sgi/pi-gfx.c in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 use std::cell::Cell;
@@ -54,8 +50,7 @@ pub struct PiGfx {
 }
 
 /// The interface a node device implements for the graphics heads behind it
-/// (the C's TYPE_SGI_PI_GFX class: return_credits, owe_credits,
-/// repay_credits). `widget` is the head's crosstalk widget number, the
+/// (return_credits, owe_credits and repay_credits). `widget` is the head's crosstalk widget number, the
 /// value the driver writes into the node-widget map.
 pub trait PiGfxLink: Send + Sync {
     /// A graphics head took `n` counted stores off its port.
@@ -73,17 +68,17 @@ pub trait PiGfxLink: Send + Sync {
     }
 }
 
-/// pi_gfx_return_credits().
+/// Return `credits` to `node` for stores a head took off its port.
 pub fn pi_gfx_return_credits(node: &dyn PiGfxLink, widget: u32, credits: u32) {
     node.return_credits(widget, credits);
 }
 
-/// pi_gfx_owe_credits().
+/// Record `credits` a head owes `node` for stores it has not yet taken.
 pub fn pi_gfx_owe_credits(node: &dyn PiGfxLink, widget: u32, credits: i32) {
     node.owe_credits(widget, credits);
 }
 
-/// pi_gfx_repay_credits().
+/// Repay `credits` that `node` held as owed.
 pub fn pi_gfx_repay_credits(node: &dyn PiGfxLink, widget: u32, credits: u32) {
     node.repay_credits(widget, credits);
 }
@@ -186,7 +181,7 @@ thread_local! {
 }
 
 /// A processor interface marks each store it forwards down its I/O path;
-/// returns the previous mark, to be restored with pi_gfx_unmark_store().
+/// returns the previous mark, to be restored with pi_gfx_unmark_store.
 pub fn pi_gfx_mark_store(counted: bool) -> bool {
     SGI_PI_GFX_FORWARDING_COUNTED.with(|m| m.replace(counted))
 }

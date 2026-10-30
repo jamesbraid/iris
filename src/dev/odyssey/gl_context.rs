@@ -1,6 +1,3 @@
-//! Ported from hw/display/sgi/gl-context.h (include/hw/display/sgi/) in
-//! jamesbraid/qemu-sgi-origami.
-//!
 //! One OpenGL context's state, in the shape the SGI graphics heads share.
 //! A head's family code frames and decodes its own command words and keeps
 //! its own table of contexts. What one table entry holds is here: the GL
@@ -9,8 +6,7 @@
 //! assembled. Colours, matrices and vertex components are IEEE single
 //! floats holding exactly the bits the client sent; arithmetic is double.
 //!
-//! Function bodies are ported from gl-context.c; the migration description
-//! and its helpers (post-load, field-by-field state) are dropped.
+//! Ported from hw/display/sgi/gl-context.h in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 
@@ -726,10 +722,9 @@ pub struct GlDrawState {
     /// window_depth_scale * h2 / h3. With window_rows_down 1 window y
     /// counts rows down the display from the drawable's origin (then the
     /// window's top-left pixel). Clipping keeps near and far planes, window
-    /// depth 0 and 1, and bounds x and y by SGI_GL_WINDOW_GUARD. See
-    /// gl-context.h for the departures from OpenGL this implies (raster
-    /// position validity, bitmap rows, tie rule, scissor measured from the
-    /// top).
+    /// depth 0 and 1, and bounds x and y by SGI_GL_WINDOW_GUARD. This
+    /// departs from OpenGL in raster position validity, bitmap rows, the tie
+    /// rule and the scissor, which is measured from the top.
     pub window_matrix_given: u32,
     pub window_matrix: [f32; 16],
     pub window_depth_scale: f32,
@@ -752,7 +747,7 @@ pub struct GlPolygonAssembly {
     pub capacity: u32,
     pub failed: u32,
     pub error: u32,
-    /// Host activation and transient migration marker, never serialized.
+    /// Host activation marker; not part of the context's GL state.
     pub enabled: u32,
     pub loaded: u32,
 }
@@ -851,7 +846,7 @@ pub struct GlContext {
     pub strip_swap: u32,
     pub cur_texcoord: [f32; 4],
     pub raster_texcoord: [f32; 4],
-    /// Host policy and migration-presence markers are never serialized.
+    /// Host policy and presence markers; not part of the context's GL state.
     pub standalone_stipple: bool,
     pub line_phase_loaded: bool,
     pub draw_error_loaded: bool,
@@ -885,7 +880,7 @@ pub struct GlCmd {
 }
 
 impl GlCmd {
-    /// `args` as a slice (added for the port; the C indexes the pointer).
+    /// `args` as a slice; empty when there are no arguments.
     pub fn args(&self) -> &[u32] {
         if self.args.is_null() || self.nargs == 0 {
             return &[];
@@ -964,16 +959,16 @@ pub struct GlSink {
 /// The most words one GlContext::get() answer takes: a matrix's.
 pub const SGI_GL_GET_WORDS: usize = 16;
 
-// Functions. Ported from vpro-src/shared/gl-context.c (the migration
-// description at the end of the file is not ported).
+// Functions.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-// The last client clip plane and light enumerants (case ranges in the C).
+// The last client clip plane and light enumerants.
 pub const SGI_GL_CLIP_PLANE_LAST: u32 = SGI_GL_CLIP_PLANE0 + SGI_GL_CLIP_PLANES - 1;
 pub const SGI_GL_LIGHT_LAST: u32 = SGI_GL_LIGHT0 + SGI_GL_LIGHTS - 1;
 
-/// MIN/MAX of the C: `(a) < (b) ? (a) : (b)` and `(a) > (b) ? (a) : (b)`.
+/// MIN/MAX as conditionals, `(a) < (b) ? (a) : (b)` and `(a) > (b) ? (a) : (b)`:
+/// a NaN operand picks b.
 pub fn gl_c_min(a: f32, b: f32) -> f32 {
     if a < b { a } else { b }
 }
@@ -982,7 +977,7 @@ pub fn gl_c_max(a: f32, b: f32) -> f32 {
     if a > b { a } else { b }
 }
 
-/// error_report_once()/warn_report_once(): one message per site.
+/// Print a message once per site.
 pub fn gl_report_once(site: u32, msg: &str) {
     static REPORTED: AtomicU32 = AtomicU32::new(0);
     let bit = 1u32 << site;
@@ -992,8 +987,8 @@ pub fn gl_report_once(site: u32, msg: &str) {
     }
 }
 
-/// The word `i` of a command's arguments (the C reads the pointer; a short
-/// list reads as 0 here rather than past the end).
+/// The word `i` of a command's arguments (a short list reads as 0 rather
+/// than past the end).
 pub fn gl_arg(p: &[u32], i: usize) -> u32 {
     p.get(i).copied().unwrap_or(0)
 }
@@ -1491,8 +1486,8 @@ impl GlContext {
     /// least OpenGL 1.2.1 allows for the modelview stack (table 6.25). A push
     /// onto a full stack and a pop of the last matrix change nothing, which is
     /// what the specification has the stack-overflow and stack-underflow errors
-    /// do; the client reports the errors itself, if at all. (The C passes the
-    /// current matrix's pointer; here the slot it came from.)
+    /// do; the client reports the errors itself, if at all. `slot` names the matrix the
+    /// command applies to.
     pub fn stack_command(&mut self, op: u16, slot: u32) {
         let (m, stack, depth) = if slot == SGI_GL_MODELVIEW {
             (&mut self.cur.modelview, &mut self.mv_stack, &mut self.mv_depth)
@@ -3676,8 +3671,7 @@ impl GlContext {
                 }
             }
             _ => {
-                // g_assert_not_reached() in the C: every op the table lists is
-                // handled above.
+                // Unreachable: every op the table lists is handled above.
             }
         }
     }

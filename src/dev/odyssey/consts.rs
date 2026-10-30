@@ -1,5 +1,6 @@
-//! Ported from hw/misc/sgi-odyssey.c (constants, enums and the command
-//! arity helper) in jamesbraid/qemu-sgi-origami.
+//! Register offsets, command words, enums and the command arity helper.
+//!
+//! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 
@@ -628,7 +629,7 @@ pub const ODSY_GL_CLEAR_BOX: u32 = 0x8f80a92f;
 // The identity the shared GL context keys draws by
 pub const ODSY_GL_CONTEXT_HW_ID: u32 = 1;
 
-// odyssey_copyrect()'s command is a fixed 8-word literal template following a bare trigger, not decomposed through the generic register-select ...
+// The screen-to-screen copy command is a fixed 8-word literal template following a bare trigger, not decomposed through the generic register-select ...
 pub const ODSY_CMD_COPY_RECT_TRIGGER: u32 = 0x00002031;
 pub const ODSY_CMD_COPY_RECT_WORDS: u32 = 8;
 pub const ODSY_CMD_COPY_RECT_SRC_INDEX: u32 = 1;

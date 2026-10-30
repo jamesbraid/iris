@@ -1,4 +1,7 @@
-//! Ported from hw/misc/sgi-odyssey.c in jamesbraid/qemu-sgi-origami.
+//! The MMIO aperture: write dispatch, which accesses wait for drawing, and the
+//! locks the board is reached through.
+//!
+//! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 
@@ -30,7 +33,7 @@ impl Board {
         }
 
         // Registers that do not wait for the board's work live in the front
-        // (front.rs).
+        // (interface.rs).
         if front_register(addr, size, true) {
             self.front.lock().write(addr, value, size);
             return;

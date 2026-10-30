@@ -1,8 +1,8 @@
-//! Ported from hw/display/sgi/rasterizer.c in jamesbraid/qemu-sgi-origami.
-//!
 //! The second half of the software rasterizer: texture plane helpers,
 //! triangles, lines, points, polygons, the draw entry point, bitmaps,
 //! pixel rectangles, clears and raster ops.
+//!
+//! Ported from hw/display/sgi/rasterizer.c in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 
@@ -621,7 +621,7 @@ impl SoftDraw {
     }
 }
 
-// MIN and MAX as the C macros evaluate them (a NaN operand picks the
+// MIN and MAX as conditionals (a NaN operand picks the
 // second), unlike f64::min and f64::max.
 fn r2_max<T: PartialOrd>(a: T, b: T) -> T {
     if a > b { a } else { b }
@@ -1386,8 +1386,8 @@ impl SoftDraw {
 
     /// Carry outgoing flags through complete polygon clipping (2.11). Original
     /// retained edges keep their flags; the newly connecting cut edges are
-    /// true. The C swaps its two workspace pointers; here the result is left
-    /// in `poly` by swapping the vectors at the end.
+    /// true. The two workspaces swap each pass; the result is left in `poly` by
+    /// swapping the vectors at the end.
     pub fn boundary_clip(&self, poly: &mut Vec<VolumeVertex>, other: &mut Vec<VolumeVertex>, count: &mut usize, capacity: usize) -> bool {
         let mut src_is_poly = true;
         let mut n = *count;

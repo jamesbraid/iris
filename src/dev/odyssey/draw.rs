@@ -1,4 +1,7 @@
-//! Ported from hw/misc/sgi-odyssey.c in jamesbraid/qemu-sgi-origami.
+//! The board's 2D drawing: colour-buffer access, clipping and id-plane tests,
+//! integer pixel paints, rectangle fill and copy, and pixel bursts.
+//!
+//! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 
@@ -24,7 +27,7 @@ pub fn pack_pixel(r: u32, g: u32, b: u32) -> u32 {
 }
 
 impl Board {
-    /// Colour buffer b's board memory and plane (Board::realize()), b being 0 or
+    /// Colour buffer b's board memory and plane (set up by Board::allocate()), b being 0 or
     /// 1 in the displayed-buffer bits' sense (ODSY_REG_DRAW_MASK).
     pub fn buffer_mem(&mut self, b: u32) -> P<BoardMemory> {
         if b != 0 { P::new(&mut self.buffer1_mem) } else { P::new(&mut self.mem) }
@@ -401,7 +404,7 @@ impl Board {
         }
     }
 
-    /// odyssey_fillrect(): BEGIN(QUADS)/COLOR_3UB or COLOR_INDEX/four VERTEX_2I
+    /// The solid rectangle fill: BEGIN(QUADS)/COLOR_3UB or COLOR_INDEX/four VERTEX_2I
     /// corners/END drives the solid rectangle fill. Board::gl_end() routes a
     /// QUADS fill here when pattern mode is off, and to Board::pattern_fill()
     /// when it is on. is_index selects whether value is a packed RGB pixel or a
@@ -445,7 +448,7 @@ impl Board {
         self.scanout.invalidate_all();
     }
 
-    /// odyssey_copyrect()'s screen-to-screen blit, the console-scroll primitive.
+    /// The screen-to-screen blit (Board::copy_rect()), the console-scroll primitive.
     /// Copies in whichever row/column direction keeps a read ahead of the matching
     /// write, so an overlapping source and destination in the same framebuffer --
     /// the case a scroll relies on -- reads the old contents before they are

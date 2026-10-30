@@ -1,14 +1,8 @@
-//! Ported from include/hw/display/sgi/rasterizer.h in
-//! jamesbraid/qemu-sgi-origami.
-//!
 //! The software rasterizer the SGI graphics heads share: GL draws turned
-//! into fragments and stored through the family's planes.
+//! into fragments and stored through the family's planes. The fixed-point
+//! texture path is in rasterizer_fixed.rs.
 //!
-//! Not ported (host renderer and test hooks only): the sgi_render_* draw,
-//! raster, signature and resource-commit entry points,
-//! SGIRasterTriangle/SGIRasterLineSpan and their helpers. Callback
-//! `Error **errp` parameters are dropped. The fixed-point texture path is in
-//! rasterizer_fixed.rs.
+//! Ported from include/hw/display/sgi/rasterizer.h in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 
@@ -40,7 +34,7 @@ pub type SmoothRule = u32;
 pub const SGI_SMOOTH_TWO_PIXEL_FILTER: SmoothRule = 1;
 
 // Rounding: how a window coordinate or depth is rounded to its grid
-// (SGI_ROUND_HALF_AWAY is llround()). TieRule: which pixel centres on a
+// (SGI_ROUND_HALF_AWAY is round half away from zero). TieRule: which pixel centres on a
 // shared triangle edge the edge owns, rows counted from the top or from the
 // bottom. LineRule: which pixels a width-1 segment covers. Dither:
 // BAYER4_TOP_ROWS is a 4x4 ordered dither, floor(c * max + B / 16) with B
@@ -112,7 +106,7 @@ impl Default for VolumeVertex {
 }
 
 /// The most vertices clipping a triangle by the six planes leaves. usize
-/// (the C #define) so it can size arrays.
+/// so it can size arrays.
 pub const SGI_VOLUME_TRIANGLE_MAX: usize = 3 + 6;
 
 pub const SGI_GL_TEX_LEVELS_MAX: u32 = 31;
@@ -178,7 +172,7 @@ pub struct GlTexImage {
     pub volume: bool,
     pub one_dimensional: bool,
     pub opaque: Opaque,
-    /// NULL selects the level-zero image fields.
+    /// Null selects the level-zero image fields.
     pub pyramid: P<GlTexPyramid>,
     /// Required for a 2D image with border == 1; outside the interior only.
     pub read_border_texel: Option<fn(Opaque, i32, i32, &mut u32) -> bool>,
@@ -191,7 +185,7 @@ pub struct GlTexImage {
     pub read_border_texel_3d: Option<fn(Opaque, i32, i32, i32, &mut u32) -> bool>,
     /// Positive volume R derivative factor; zero preserves identity.
     pub lod_scale_r: f64,
-    /// NULL selects the public default curve; lambda is already clamped.
+    /// Null selects the public default curve; lambda is already clamped.
     pub read_filter_weight: Option<fn(Opaque, f64, &mut f64) -> bool>,
     /// Borrowed level-zero detail image; L <= 0, mode ADD or MODULATE.
     pub detail_image: P<GlTexLevel>,
@@ -285,8 +279,7 @@ pub struct RenderWriteCoverage {
 }
 
 /// The resource callbacks a family gives its planes. `slots` are the raw
-/// slot words; `stride_slots`/`capacity_slots` are as the C passes them.
-/// The C `Error **errp` is dropped.
+/// slot words; `stride_slots` and `capacity_slots` count slot words.
 #[derive(Clone, Default)]
 pub struct RenderResourceOps {
     pub snapshot: Option<fn(Opaque, &RenderResource, u32, &RenderRect, &mut [u32], usize, usize) -> RenderResult>,
@@ -338,7 +331,7 @@ pub struct RasterTarget {
     pub resources: P<RenderResource>,
     pub resource_count: usize,
     pub resource_ops: P<RenderResourceOps>,
-    /// Kept for the C initializer; bands run serially here.
+    /// Bands run serially.
     pub concurrent_pixels: bool,
     pub band_min_pixels: u32,
     pub mixed_frame: bool,
@@ -350,8 +343,7 @@ pub const SGI_RASTER_TEXTURE_FIXED: RasterTexturePath = 1;
 pub const SGI_RASTER_TEXTURE_DOUBLE: RasterTexturePath = 2;
 
 // ---------------------------------------------------------------------
-// Ported from hw/display/sgi/rasterizer.c lines 1-3145 (the fixed-point
-// texture path, lines 3146-4089, is not ported).
+// The draw itself. The fixed-point texture path is in rasterizer_fixed.rs.
 // ---------------------------------------------------------------------
 
 pub fn fmax(a: f64, b: f64) -> f64 {
@@ -408,9 +400,9 @@ pub struct SoftDraw {
     pub rgba_mask: u32,
     pub rgba_read: bool,
     pub rgba_reported: P<bool>,
-    /// Texels already read in this draw, or NULL (SOFT_TEXEL_CACHE).
+    /// Texels already read in this draw, or null.
     pub texels: P<SoftTexelCache>,
-    /// Filled triangles sample in fixed point, or NULL (sgi_soft_fixed).
+    /// Filled triangles sample in fixed point, or null.
     pub fixed: P<SoftFixedTex>,
     /// Of bands > 1, the rows this pass draws (SoftDraw::row_in_band()).
     pub band: u32,
@@ -728,7 +720,7 @@ impl RasterRules {
     pub fn round(&self, x: f64) -> i64 {
         let rounding = self.rounding as u32;
         if rounding != SGI_ROUND_FLOOR && rounding != SGI_ROUND_HALF_UP && rounding != SGI_ROUND_HALF_EVEN {
-            // llround(), without the call: x less its truncation is exact, so
+            // Round half away from zero, without a libm call: x less its truncation is exact, so
             // a fraction of a half or more rounds away from zero.
             let t = x as i64;
             let frac = x - t as f64;
@@ -1865,7 +1857,7 @@ impl SoftTexelCache {
 }
 
 impl SoftDraw {
-    /// None is the C's read_failure exit.
+    /// None is the read-failure exit.
     pub fn texture_tap_inner(&self, level: Option<&GlTexLevel>, mut x: i64, mut y: i64, mut z: i64, reference: f64, out: &mut [f64; 4]) -> Option<bool> {
         let im: &GlTexImage = &self.texture;
         let width = level.map_or(im.width, |l| l.width);
@@ -2389,7 +2381,7 @@ impl SoftDraw {
     }
 }
 
-/// C scalbn(): x * 2^n, exact.
+/// scalbn: x * 2^n, exact.
 pub fn scalbn(x: f64, n: i32) -> f64 {
     if x == 0.0 || !x.is_finite() {
         return x;

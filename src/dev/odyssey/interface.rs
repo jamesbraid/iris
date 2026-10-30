@@ -228,7 +228,7 @@ impl HostInterface {
 
     /// Waiting stores that have moved up into the FIFO get their credits. One
     /// that waited outside it repays a credit the node holds as owed
-    /// (pi_gfx_owe_credits()).
+    /// (pi_gfx_owe_credits).
     pub fn work_admit(&mut self) {
         while self.work_in_fifo < self.work_queue.len() as u32 && self.work_in_fifo < ODSY_CFIFO_DEPTH {
             let q = self.work_queue[self.work_in_fifo as usize];

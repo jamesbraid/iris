@@ -5,9 +5,7 @@ use crate::irq::InterruptController;
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-// Ported from tests/qtest/octane-vpro-test.c: the register contract of
-// the board in the Octane's graphics port. The posted-FIFO test is left
-// out (QEMU TCG-specific).
+// The register contract of the board in the Octane's graphics port.
 
 const VPRO_WIDGET: u32 = 11;
 const HEART_WIDGET: u64 = 8;
@@ -257,8 +255,7 @@ fn credit_board() -> (Box<Board>, Arc<PiStub>) {
     (s, pi)
 }
 
-/// Ported from tests/qtest/sn1-odyssey-test.c,
-/// test_command_work_credits_at_fifo_entry: a counted store's credit
+/// Command work credits at FIFO entry: a counted store's credit
 /// comes back when the board takes it into its FIFO, the oldest 64
 /// waiting stores at once; each store behind them is owed, then
 /// repaid as the work ahead runs and it moves up. A store that does
@@ -344,7 +341,7 @@ fn processor_mark_counts_one_store() {
     assert!(!pi_gfx_take_mark());
 }
 
-/// The register block's pure state (pi-gfx.c).
+/// The register block's pure state (PiGfx).
 #[test]
 fn pi_gfx_block_counts_and_starves() {
     let mut g = PiGfx::default();
@@ -365,7 +362,7 @@ fn pi_gfx_block_counts_and_starves() {
 }
 
 mod widget {
-    //! The Octane VPro integration checks of QEMU's octane-vpro-test.c:
+    //! The Octane VPro integration checks:
     //! the board answers through both widget-11 windows, the Crossbow
     //! carries its link only when it is fitted, and a routed interrupt
     //! sets and clears its vector in HEART's pending register.

@@ -1,5 +1,3 @@
-//! Ported from include/hw/display/sgi/pixel-dma.h in jamesbraid/qemu-sgi-origami.
-//!
 //! SGI graphics DMA: guest pages resolved to chunks, and pixel transfers
 //! between those chunks and a plane.
 //!
@@ -8,6 +6,8 @@
 //! is read whole when the transfer is mapped, and of a target only the run
 //! of bytes the head wrote goes back when it is unmapped, so a target the
 //! head did not fully write keeps its other bytes.
+//!
+//! Ported from include/hw/display/sgi/pixel-dma.h in jamesbraid/qemu-sgi-origami.
 use super::*;
 
 use std::sync::Arc;

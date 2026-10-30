@@ -1,8 +1,7 @@
-//! Ported from include/hw/misc/sgi-odyssey.h in jamesbraid/qemu-sgi-origami.
+//! The Odyssey (VPro) board's constants and state. The interrupt packet path
+//! is the `irq` field of the host interface (`HostInterface`, interface.rs).
 //!
-//! The Odyssey (VPro) board's constants and state. The QOM class and the
-//! native-Mesa fields are gone; the interrupt packet path is the `irq` field
-//! of the host interface (`HostInterface`, front.rs).
+//! Ported from include/hw/misc/sgi-odyssey.h in jamesbraid/qemu-sgi-origami.
 use super::*;
 
 /// Distinct unimplemented offsets reported before the device falls silent
@@ -68,9 +67,9 @@ pub struct QueuedStore {
 }
 
 pub struct Board {
-    /// The crosstalk widget number (the C's parent_obj.slot).
+    /// The crosstalk widget number.
     pub slot: u32,
-    /// The host interface, under its own lock (front.rs): the registers a
+    /// The host interface, under its own lock (interface.rs): the registers a
     /// processor may touch while the board works, the interrupt routing
     /// and the command-FIFO queue.
     pub front: std::sync::Arc<parking_lot::Mutex<HostInterface>>,
@@ -91,7 +90,7 @@ pub struct Board {
     pub nic_serial: u64,
     pub nic_record: String,
 
-    // Composed at realize from the properties above.
+    // Composed in Board::configure from the properties above.
     /// The product's record, if nic-record unset.
     pub product_record: String,
     pub memory_config: u32,
@@ -279,7 +278,7 @@ pub struct Board {
     /// Host-only: GL draws may run in bands of rows (x-raster-bands); the
     /// bands run serially here.
     pub raster_bands: bool,
-    /// Host-only qtest band threshold (x-test-raster-band-pixels).
+    /// Host-only band threshold, lowered by tests to force banding.
     pub raster_band_pixels: u32,
     pub gl_in_prim: bool,
     pub gl_begin_open: bool,
@@ -387,7 +386,7 @@ pub struct Board {
     /// block (0x2000 for the screen).
     pub dma_colour_base: u32,
 
-    // odyssey_copyrect()'s fixed literal template's three runtime slots.
+    // The screen-to-screen copy command's fixed literal template's three runtime slots.
     pub copy_src: u32,
     pub copy_size: u32,
     pub copy_dst: u32,
@@ -929,7 +928,7 @@ impl Board {
         self.line_stipple[0] = 0xffff;
         self.line_stipple[1] = 0xffff;
         self.line_stipple[2] = 0;
-        // No polygon is open; reset_hold clears the marks themselves.
+        // No polygon is open; Board::reset clears the marks themselves.
         self.poly_row_lo = SGI_ODYSSEY_HEIGHT;
         self.poly_row_hi = 0;
         self.poly_col_lo = SGI_ODYSSEY_WIDTH;
@@ -937,7 +936,7 @@ impl Board {
         // white current colour, depth test off), unbound until the first GL
         // command binds the drawable. A guest reset can land mid-primitive, with
         // an open polygon's vertex buffer still allocated; GlContext::reset() frees
-        // it before reinitializing. It is safe here even before realize
+        // it before reinitializing. It is safe here even before Board::allocate
         // allocates the colour plane. Its viewport starts empty: nothing is
         // drawn until the client's combined matrix arrives.
         self.gl_ctx.reset(ODSY_GL_CONTEXT_HW_ID);

@@ -1,4 +1,7 @@
-//! Ported from hw/misc/sgi-odyssey.c in jamesbraid/qemu-sgi-origami.
+//! Register-level behaviour: identity, cursor, channel and back-end registers,
+//! and the reports made for offsets and commands the board does not implement.
+//!
+//! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 
@@ -411,7 +414,7 @@ pub fn i2c_status(command: u32) -> u32 {
 impl Board {
     pub fn read(&mut self, addr: u64, size: u32) -> u64 {
         // Registers that do not wait for the board's work live in the front
-        // (front.rs).
+        // (interface.rs).
         if front_register(addr, size, false) {
             return self.front.lock().read(addr, size);
         }
@@ -585,7 +588,7 @@ impl Board {
 
 /// Deterministic model defaults; physical back-material reset is unknown.
 /// (The ODSY_QUERY_* enum and the hardware shadow-page constants are in
-/// draw.rs and defs.rs.)
+/// draw.rs and consts.rs.)
 pub const BACK_MATERIAL_DEFAULTS: [u32; 16] = [
     ODSY_F32_POINT_TWO,
     ODSY_F32_POINT_TWO,
