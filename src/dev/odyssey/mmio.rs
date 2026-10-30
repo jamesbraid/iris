@@ -199,11 +199,39 @@ pub fn access_waits(addr: u64, size: u32, write: bool) -> bool {
     )
 }
 
+/// Whether a read that waits for the queued stores also waits for the
+/// raster work they handed on.
+///
+/// Every field of the memory word `0x106c` is a level or a strap, never a
+/// drawing result (Odyssey datasheet, "Board and kernel", "Back-end
+/// records" and "Flags, status and flow control"): the straps in bits
+/// 31:24, the back-end FIFO's fill in bits 6:0, which the model's back-end
+/// writes leave at 0 once the stores before them have run, and the command
+/// FIFO's level in bits 15:7, 0 once the stores have run. The datasheet's
+/// completion points keep command-FIFO space and data drain apart from
+/// raster work reaching memory. So the word waits for the front end and
+/// not for the raster unit. The kernel reads it at every flow-control
+/// attach, which a GL client's make-current runs, so a raster wait there
+/// stalls the processor for the drawing of each frame.
+///
+/// Every other waiting read keeps both waits: the datasheet does not
+/// settle what they need.
+pub fn read_waits_for_raster(addr: u64, size: u32) -> bool {
+    reg(addr, size) != ODSY_MEMORY_CONFIG as i64
+}
+
 impl Board {
     /// A read with the board lock held.
     pub fn mmio_read(&mut self, addr: u64, size: u32) -> u64 {
-        if access_waits(addr, size, false) && self.work_pending() {
-            self.work_drain(addr);
+        if access_waits(addr, size, false) {
+            // The stores before it, and, unless the register holds only
+            // levels and straps, the raster work they handed on.
+            if self.work_pending() {
+                self.work_drain(addr);
+            }
+            if read_waits_for_raster(addr, size) {
+                self.raster_wait();
+            }
         }
         self.read(addr, size)
     }
@@ -238,7 +266,8 @@ impl Board {
                 self.work_drain(addr);
             }
         } else if command_store(addr, size) {
-            // The queue is full: run what waits and then this store, in order.
+            // The queue is full and nobody waits for room (a caller other
+            // than the bus): run what waits and then this store, in order.
             self.work_drain(addr);
             self.write_dispatch(addr, value, size);
         } else {
@@ -254,18 +283,20 @@ impl Board {
     }
 }
 
-/// The two locks a processor's access goes through.
+/// The two locks a processor's access goes through, and the queues behind
+/// them.
 #[derive(Clone)]
 pub struct BoardLocks {
     pub board: Arc<Mutex<Box<Board>>>,
     pub front: Arc<Mutex<HostInterface>>,
     pub fifo: Arc<CommandFifo>,
+    pub raster: Arc<RasterQueue>,
 }
 
 impl BoardLocks {
     pub fn new(s: Box<Board>) -> Self {
-        let (front, fifo) = (s.front.clone(), s.fifo.clone());
-        BoardLocks { board: Arc::new(Mutex::new(s)), front, fifo }
+        let (front, fifo, raster) = (s.front.clone(), s.fifo.clone(), s.raster.clone());
+        BoardLocks { board: Arc::new(Mutex::new(s)), front, fifo, raster }
     }
 
     /// A processor's read: through the front alone when it can, else under the
@@ -275,6 +306,57 @@ impl BoardLocks {
             Some(v) => v,
             None => self.board.lock().mmio_read(addr, size),
         }
+    }
+
+    /// A processor's read as the bus takes it. None, for the bus to answer
+    /// busy, while the work the read must see is still queued on the
+    /// board's threads: the command stores before it, and, unless it is the
+    /// memory word, the raster work they handed on. The processor retries
+    /// the load, taking its interrupts meanwhile, while the board's threads
+    /// run that work, as IMPACT's waiting reads do; the read then finds
+    /// nothing to drain. Without the board's thread the read drains the
+    /// queue itself.
+    pub fn bus_read(&self, addr: u64, size: u32) -> Option<u64> {
+        if let Some(v) = front_mmio_read(&self.front, addr, size) {
+            return Some(v);
+        }
+        if access_waits(addr, size, false) && self.fifo.running.load(std::sync::atomic::Ordering::SeqCst) {
+            if self.fifo.pending() {
+                self.fifo.hurry();
+                return None;
+            }
+            if read_waits_for_raster(addr, size) && self.raster.pending() != 0 {
+                return None;
+            }
+        }
+        Some(self.board.lock().mmio_read(addr, size))
+    }
+
+    /// A processor's store as the bus takes it. False, for the bus to
+    /// answer busy, when it waits for queued stores the board's thread will
+    /// run, or when it is a command store and the model's FIFO has no
+    /// room for it while the board's thread runs: the processor retries
+    /// the store, taking its interrupts meanwhile, while the board's thread
+    /// makes room. What a full FIFO does to a store on the hardware is
+    /// unknown (datasheet, "Grades for withdrawn claims"); the stall is a
+    /// model choice. The
+    /// processor interface's mark stays untaken until the store goes in.
+    pub fn bus_write(&self, addr: u64, value: u64, size: u32) -> bool {
+        if command_store(addr, size) && self.fifo.full_for(size) {
+            self.fifo.hurry();
+            return false;
+        }
+        // A store that waits for the work, as a waiting read does.
+        if !command_store(addr, size)
+            && access_waits(addr, size, true)
+            && self.fifo.running.load(std::sync::atomic::Ordering::SeqCst)
+            && self.fifo.pending()
+        {
+            self.fifo.hurry();
+            return false;
+        }
+        self.write(addr, value, size);
+        true
     }
 
     /// A processor's store: through the front alone when it can, else under the

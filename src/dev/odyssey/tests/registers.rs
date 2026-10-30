@@ -256,9 +256,28 @@ fn the_fifo_set_up_doublewords_are_stored() {
     assert_eq!(s.reported_cmd_count, 0);
 }
 
-/// The program-sequencer registers, classes 0x20 to 0x35, are not
-/// commands the model fails to recognise, and the stream stays aligned
-/// after them.
+/// The kernels write the doubleword 0x7f0 = 10^9 after the set-up; its unit
+/// and meaning are unknown. The board stores it, runs no timer, reports no
+/// unmodelled command word, and the stream stays aligned behind it. Flags
+/// bit 1 stays clear because no timer runs on the value.
+///
+/// QEMU: command-fifo-sync-timeout-register.
+#[test]
+fn the_0x7f0_doubleword_is_stored_and_runs_no_timer() {
+    let (mut s, _) = board("v12");
+
+    cmd64(&mut s, 0x7f0, 1_000_000_000);
+    assert_eq!(s.setup_7f0, 1_000_000_000);
+    cmd64(&mut s, 0x6b0, 7);
+    assert_eq!(s.fifo_setup[0], 7);
+    assert_eq!(s.reported_cmd_count, 0);
+    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS) & 0x2, 0);
+}
+
+/// Classes 0x20 to 0x35 are not commands the model fails to recognise, and
+/// the stream stays aligned after them. The kernel writes 0x26 = 0x7f and
+/// 0x2e = 0x380 at set-up: the values are established and the roles of 0x26
+/// and 0x2e are not.
 ///
 /// QEMU: command-fifo-sequencer-registers.
 #[test]

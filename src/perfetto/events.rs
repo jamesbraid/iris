@@ -218,6 +218,11 @@ pub static ODSY_CFIFO_LOW_WATER: EventDef = EventDef::new("cfifo low water", cat
 /// thread (arg: stores waiting).
 pub static ODSY_SLICE: EventDef = EventDef::new("slice", cat::GFX).with_arg("waiting");
 pub static ODSY_DRAIN: EventDef = EventDef::new("drain", cat::GFX).with_arg("waiting");
+/// One slice of the raster thread running raster jobs (arg: jobs pending
+/// when it began), and the front end waiting for the raster unit to finish
+/// its jobs before it touches the planes itself (arg: jobs pending).
+pub static ODSY_RASTER_SLICE: EventDef = EventDef::new("raster slice", cat::GFX).with_arg("pending");
+pub static ODSY_RASTER_WAIT: EventDef = EventDef::new("raster wait", cat::GFX).with_arg("pending");
 /// A page-table DMA descriptor run (arg: table address).
 pub static ODSY_DMA: EventDef = EventDef::new("dma descriptor", cat::GFX | cat::DMA).with_arg("table");
 /// The DMA-done interrupt raised after a transfer that asked for it.
@@ -233,6 +238,9 @@ pub static ODSY_RETRACE: EventDef = EventDef::new("retrace", cat::GFX).on_track(
 /// The refresh thread resolving dirty lines, and handing the frame on.
 pub static ODSY_CAPTURE: EventDef = EventDef::new("frame capture", cat::GFX).on_track("VPro capture").in_group(GFX_GROUP);
 pub static ODSY_PRESENT: EventDef = EventDef::new("present", cat::GFX).on_track("VPro present").in_group(GFX_GROUP);
+/// The display holding the planes against the raster unit while it copies
+/// a frame's dirty lines aside (on the display thread).
+pub static ODSY_FRAME_PLANES: EventDef = EventDef::new("frame planes", cat::GFX);
 
 // ── jitv2 ────────────────────────────────────────────────────────────────────
 

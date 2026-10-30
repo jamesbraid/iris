@@ -3,11 +3,13 @@
 //! The board is a crosstalk widget. The processor stores commands into a
 //! command FIFO; the board decodes them, draws integer and GL primitives
 //! into its own memory, moves pixels to and from guest memory by DMA, and
-//! scans the colour planes out to the display. Three threads reach the
-//! board: the processor's widget accesses, the display thread, which counts
-//! the retrace and copies the scanout's frame to the window 60 times a
-//! second, and the board's own thread (worker.rs), which runs the queued
-//! command-FIFO stores. interface.rs describes the two locks they share.
+//! scans the colour planes out to the display. Four threads reach the
+//! board: the processor's widget accesses; the board's own thread
+//! (worker.rs), BUZZ's front end, which runs the queued command-FIFO stores;
+//! BUZZ's raster unit (raster_unit.rs), which draws what the front end sets
+//! up; and the display thread, the back end, which counts the retrace and
+//! copies the scanout's frame to the window 60 times a second.
+//! interface.rs describes the two locks the first two share.
 //! Interrupt packets go to HEART, the only interrupt target on the Octane:
 //! a packet to widget 8 sets or clears the HEART pending bit of its vector.
 //!
@@ -17,6 +19,7 @@
 //! - `mmio`: register accesses, and which of them wait for the drawing.
 //! - `fifo`: the command FIFO between the processor and the board's thread.
 //! - `worker`: the board's thread, which runs the queued stores.
+//! - `raster_unit`: the raster unit's thread and the queue that feeds it.
 //! - `registers`: identity, the board NIC, the cursor and the back end's
 //!   register file.
 //! - `command`: the command-FIFO interpreter.
@@ -80,6 +83,7 @@ pub mod raster_line;
 pub mod raster_pixels;
 pub mod raster_texture;
 pub mod raster_triangle;
+pub mod raster_unit;
 pub mod registers;
 pub mod scanout;
 pub mod worker;
@@ -111,6 +115,7 @@ pub use raster_line::*;
 pub use raster_pixels::*;
 pub use raster_texture::*;
 pub use raster_triangle::*;
+pub use raster_unit::*;
 pub use registers::*;
 pub use scanout::*;
 pub use worker::*;
@@ -126,7 +131,7 @@ use crate::dev::ng1::rex3::Renderer;
 use crate::disp::{Rex3Screen, FB_STRIDE};
 use crate::ip30::{widget_large_base, widget_small_base};
 use crate::irq::InterruptController;
-use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, Device, Resettable, BUS_ERR, BUS_OK};
+use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, Device, Resettable, BUS_BUSY, BUS_ERR, BUS_OK};
 
 /// The VPro board on widget `slot`: a `BusDevice` for the widget's
 /// windows.
@@ -184,9 +189,10 @@ impl Odyssey {
 
     fn read(&self, addr: u64, size: u32) -> (u32, u64) {
         match self.offset(addr) {
-            Some(off) => {
-                (BUS_OK, self.state.read(off, size))
-            }
+            Some(off) => match self.state.bus_read(off, size) {
+                Some(v) => (BUS_OK, v),
+                None => (BUS_BUSY, 0),
+            },
             None => (BUS_ERR, 0),
         }
     }
@@ -194,8 +200,11 @@ impl Odyssey {
     fn write(&self, addr: u64, size: u32, val: u64) -> u32 {
         match self.offset(addr) {
             Some(off) => {
-                self.state.write(off, val, size);
-                BUS_OK
+                if self.state.bus_write(off, val, size) {
+                    BUS_OK
+                } else {
+                    BUS_BUSY
+                }
             }
             None => BUS_ERR,
         }
@@ -209,7 +218,28 @@ impl Odyssey {
         let mut s = state.board.lock();
         s.scanout_poll(monotonic_ns());
         let (w, h) = (s.scanout.frame_width as usize, s.scanout.frame_height as usize);
-        let span = s.scanout_update();
+        // The planes are the raster unit's: wait out its slice in flight and
+        // hold off the next while the frame's lines are copied aside. What
+        // it drew since the last frame is drawn again. The raster unit draws
+        // on while the copy is resolved.
+        let planes = state.raster.planes();
+        crate::pf_begin!(crate::perfetto::events::ODSY_FRAME_PLANES);
+        if state.raster.take_drawn() {
+            s.scanout.invalidate_all();
+        }
+        s.scanout_stage();
+        crate::pf_end!(crate::perfetto::events::ODSY_FRAME_PLANES);
+        drop(planes);
+        // The copy resolves with no lock held, so neither the front end
+        // nor the raster unit waits for it.
+        let mut job = s.scanout_take();
+        drop(s);
+        if let Some(job) = &mut job {
+            job.resolve();
+        }
+        let mut s = state.board.lock();
+        let span = s.scanout_finish(job);
+        let (w, h) = (s.scanout.frame_width as usize, s.scanout.frame_height as usize);
         if w == 0 || h == 0 || s.scanout.frame.len() < w * h {
             crate::pf_end!(crate::perfetto::events::ODSY_CAPTURE);
             return;
@@ -224,7 +254,7 @@ impl Odyssey {
         let (first, end) = span.unwrap_or((0, 0));
         let rows = s.scanout.frame[first * w..end * w].to_vec();
         drop(s);
-        set_display_fifo_pending(state.fifo.level() as usize);
+        set_display_fifo_pending(state.fifo.level() as usize + state.raster.pending() as usize);
         crate::pf_end!(crate::perfetto::events::ODSY_CAPTURE);
         crate::pf_begin!(crate::perfetto::events::ODSY_PRESENT);
         display.present(&rows, w, h, first);

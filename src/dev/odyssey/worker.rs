@@ -72,12 +72,14 @@ impl Budget {
 }
 
 impl BoardLocks {
-    /// Start the board's thread.
+    /// Start the board's thread, the front end, and the raster unit's
+    /// behind it.
     pub fn work_start(&self) {
         let mut thread = self.fifo.thread.lock();
         if thread.is_some() {
             return;
         }
+        self.raster.start();
         self.fifo.start();
         self.fifo.running.store(true, SeqCst);
         let handles = self.clone();
@@ -100,12 +102,17 @@ impl BoardLocks {
         self.fifo.running.store(false, SeqCst);
         let mut s = self.board.lock();
         s.work_step(&mut Budget::unlimited());
+        // Then the raster work those stores handed on.
+        self.raster.stop();
     }
 
     fn work_run(&self) {
         while self.fifo.wait_for_work() {
-            // Let a burst of stores land before the slice runs.
-            std::thread::sleep(GAP);
+            // Let a burst of stores land before the slice runs, unless the
+            // processor already waits for it.
+            if !self.fifo.take_hurry() {
+                std::thread::sleep(GAP);
+            }
             if self.fifo.exiting() {
                 break;
             }

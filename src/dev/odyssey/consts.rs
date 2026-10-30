@@ -153,9 +153,18 @@ pub const ODSY_FLCTL_INTR_TARGET_SHIFT: u32 = 17;
 // the_threshold_follows_6b2.
 pub const ODSY_REG_FIFO_SETUP_FIRST: u32 = 0x6b0;
 pub const ODSY_REG_FIFO_SETUP_LAST: u32 = 0x6b3;
+// The model's own name for the 0x6b2 slot, see above.
 pub const ODSY_REG_FIFO_SETUP_6B2: u32 = 0x6b2;
 pub const ODSY_REG_FIFO_SETUP_7B5: u32 = 0x7b5;
 pub const ODSY_FIFO_SETUP_7B5_INDEX: usize = 4;
+// 0x7f0. The kernels' FIFO set-up writes the doubleword 0x7f0 =
+// 1,000,000,000 once, after the program load (the doubleword and the single
+// write are ESTABLISHED). That the register is 0x3f0 is INFERRED; its unit
+// and meaning are UNKNOWN: a sync timeout in board clocks, in nanoseconds or
+// a non-timeout limit all fit (datasheet, "Grades for withdrawn claims", row
+// for 0x7f0). The model accepts the write and records the value, runs no
+// timer, and raises no flag because of it.
+pub const ODSY_REG_SETUP_7F0: u32 = 0x7f0;
 
 // ODSY_INTR_FLAGS' low-water bit, the command-FIFO low-water interrupt (the kernel's flags decode names it as the low-water flag bit).
 pub const ODSY_INTR_FIFO_LOW_WATER: u32 = 0x00000200;
@@ -529,6 +538,13 @@ pub const ODSY_PROG_RUN_ONCE: u32 = 0x90808800; // 2 operands
 
 // How far a program list is read before it counts as unrecognised.
 pub const ODSY_PROG_LIST_MAX: u32 = 64;
+// The older GL libraries' program image lacks the 99-record spot routine at
+// records 792 to 890 and every record from 2365 on, so they number each
+// routine from 891 on 99 lower than the current libraries do.
+pub const ODSY_UCODE_SPOT_FIRST: u32 = 792;
+pub const ODSY_UCODE_SPOT_RECORDS: u32 = 99;
+// The older image's length: records 0-791 and 891-2364 of the current one.
+pub const ODSY_UCODE_OLDER_RECORDS: u32 = 2266;
 pub const ODSY_UCODE_END: u32 = 0x4c5;
 pub const ODSY_UCODE_UNLIT: u32 = 0x0d6;
 pub const ODSY_UCODE_UNLIT_2A: u32 = 0x0e0;
