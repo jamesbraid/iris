@@ -368,7 +368,10 @@ consumer thread never takes `rec`.
   (MIPS IV permits either). These are compatibility approximations, not
   measurements of R14000 silicon. The JIT reads such choices from a
   `ModelPolicy` on `Codegen`, published once with the other compile-pool
-  inputs, so the pool must start after `install_jit_mem_ptrs`. `CpuModel`
+  inputs, so the pool must start after `install_jit_mem_ptrs`. Its uncached
+  SB/SH go to the bus through `BusDevice::write_narrow_from` with the whole
+  source register: the byte or halfword is the low bits, the other lanes are
+  undefined by hardware, and only Bedrock's ECC view reads them. `CpuModel`
   defaults preserve the existing machines.
 - With `opcodefusion` (implied by `lightning`), the interpreter executes
   common pairs (branch + NOP, LUI + ORI/ADDIU, address + load/store) as one

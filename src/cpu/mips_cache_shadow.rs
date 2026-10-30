@@ -346,6 +346,7 @@ impl<
     const R10K_PRIMARY_DATA_OPS: bool = model::profile(MODEL).primary_diag_data;
     const SECONDARY_TAG_MASK: u64 = model::profile(MODEL).l2_tag_mask;
     const LWR_PRESERVES_UPPER: bool = model::profile(MODEL).lwr_preserves_upper;
+    const NARROW_STORES_CARRY_GPR: bool = model::profile(MODEL).narrow_stores_carry_gpr;
 }
 
 impl<
@@ -1026,6 +1027,8 @@ mod tests {
         assert_eq!(<R14K as CpuModel>::SECONDARY_TAG_MASK, 0x8000_000f_ffff_cdff);
         assert!(!<R10K as CpuModel>::LWR_PRESERVES_UPPER);
         assert!(<R14K as CpuModel>::LWR_PRESERVES_UPPER);
+        assert!(!<R10K as CpuModel>::NARROW_STORES_CARRY_GPR);
+        assert!(<R14K as CpuModel>::NARROW_STORES_CARRY_GPR);
         assert_eq!((<R14K as CpuModel>::VA_BITS, <R14K as CpuModel>::PA_BITS), (44, 40));
     }
 

@@ -572,6 +572,10 @@ pub trait CpuModel: MipsCache {
     /// Preserve the upper word on partial LWR loads. A full-word load still
     /// sign-extends bit 31.
     const LWR_PRESERVES_UPPER: bool = false;
+    /// Send uncached SB/SH through `BusDevice::write_narrow_from` with the whole
+    /// source register. Which other lanes a real processor drives is undefined,
+    /// so this is a model policy, not a measurement.
+    const NARROW_STORES_CARRY_GPR: bool = false;
 }
 
 pub trait MipsCache: Send + Sync {
@@ -1445,6 +1449,12 @@ pub mod model {
         /// today, so turning this on for their rows is a separate change with
         /// its own tests. A full-word LWR always sign-extends.
         pub lwr_preserves_upper: bool,
+        /// An uncached SB/SH reaches the bus through `write_narrow_from` with
+        /// the whole source register, not as `write8`/`write16` with its low
+        /// bits. Fuel PROM 6.210's memory test stores each check word with SH
+        /// from a register whose low 16 bits are zero, and Bedrock's ECC view
+        /// has to see where the word sits in the register.
+        pub narrow_stores_carry_gpr: bool,
     }
 
     impl Profile {
@@ -1459,6 +1469,7 @@ pub mod model {
             nec_diag_layout: false,
             l2_tag_mask: u64::MAX,
             lwr_preserves_upper: false,
+            narrow_stores_carry_gpr: false,
         };
         /// The existing R10000 types (IP28, Octane, O2): family behaviour,
         /// none of the later approximations.
@@ -1484,6 +1495,8 @@ pub mod model {
                 entryhi_full_va: true,
                 primary_diag_data: true,
                 nec_diag_layout: true,
+                // An R12000 PIMM in an IP35 stores to the same Bedrock.
+                narrow_stores_carry_gpr: true,
                 ..Profile::R10K
             },
             // Fuel. The only part whose approximations are switched on. The
@@ -1498,6 +1511,7 @@ pub mod model {
                 nec_diag_layout: true,
                 l2_tag_mask: 0x8000_000f_ffff_cdff,
                 lwr_preserves_upper: true,
+                narrow_stores_carry_gpr: true,
                 ..Profile::R10K
             },
             // Left at the family defaults: no R16000 behaviour is established
@@ -3725,6 +3739,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
     const R10K_PRIMARY_DATA_OPS: bool = model::profile(MODEL).primary_diag_data;
     const SECONDARY_TAG_MASK: u64 = model::profile(MODEL).l2_tag_mask;
     const LWR_PRESERVES_UPPER: bool = model::profile(MODEL).lwr_preserves_upper;
+    const NARROW_STORES_CARRY_GPR: bool = model::profile(MODEL).narrow_stores_carry_gpr;
     const NAME: &'static str = model::profile(MODEL).name;
 }
 
