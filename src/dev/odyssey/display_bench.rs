@@ -192,7 +192,7 @@ fn a_mode_wider_than_the_planes_still_resolves() {
 /// for the lines presented and nothing else.
 #[test]
 fn present_swaps_each_pixel_into_both_buffers() {
-    let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let display = Display::new(crate::disp::StatusSource::detached());
     let (w, h) = (ODSY_WIDTH as usize, ODSY_HEIGHT as usize);
     let frame = resolved(Scene::Mixed);
     let rows = &frame[100 * w..300 * w];
@@ -269,7 +269,7 @@ fn resolve_and_present_timings() {
     }
     for (rows, name) in [(480, "480 lines"), (1024, "every line")] {
         let locks = BoardLocks::new(scene_board(Scene::Rgb));
-        let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        let display = Display::new(crate::disp::StatusSource::detached());
         let first = (ODSY_HEIGHT as i32 - rows) / 2;
 
         Odyssey::frame(&locks, &display);
@@ -279,7 +279,7 @@ fn resolve_and_present_timings() {
         });
         println!("frame {name:18} dirty, resolved and presented: {ms:.3} ms");
     }
-    let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let display = Display::new(crate::disp::StatusSource::detached());
     let frame = resolved(Scene::Mixed);
     let (w, h) = (ODSY_WIDTH as usize, ODSY_HEIGHT as usize);
     let ms = bench(|| display.present(&frame, w, h, 0));

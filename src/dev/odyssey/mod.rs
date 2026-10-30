@@ -163,8 +163,7 @@ impl Odyssey {
         product: &str,
         irq: Arc<dyn InterruptController>,
         mem: Arc<dyn BusDevice>,
-        heartbeat: Arc<std::sync::atomic::AtomicU64>,
-        fasttick: Arc<std::sync::atomic::AtomicU64>,
+        status: Arc<crate::disp::StatusSource>,
     ) -> Result<Arc<Self>, String> {
         let mut s = Board::new(product, widget as u32)?;
         let rec = match std::env::var("IRIS_ODSY_REC") {
@@ -181,7 +180,7 @@ impl Odyssey {
             small: widget_small_base(widget),
             large: widget_large_base(widget),
             state: BoardLocks::new(s),
-            display: Arc::new(Display::new(heartbeat, fasttick)),
+            display: Arc::new(Display::new(status)),
             running: Arc::new(AtomicBool::new(false)),
             thread: Mutex::new(None),
             rec,
@@ -190,15 +189,6 @@ impl Odyssey {
 
     pub fn display(&self) -> Arc<dyn crate::gfx_display::GfxDisplay> {
         self.display.clone()
-    }
-
-    pub fn set_cpu_cycles(&self, cycles: CyclesPtr) {
-        *self.display.cycles.lock() = cycles;
-    }
-
-    /// One more CPU for the status bar.
-    pub fn add_cpu_stats(&self, cycles: CyclesPtr, fasttick: Arc<std::sync::atomic::AtomicU64>) {
-        self.display.more_cpus.lock().push((cycles, fasttick));
     }
 
     /// The aperture offset of `addr`, in either window.

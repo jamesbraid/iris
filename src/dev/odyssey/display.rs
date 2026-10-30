@@ -19,9 +19,6 @@ const IDLE_REFRESH: u32 = 6;
 pub struct Display {
     pub renderer: Mutex<Option<Box<dyn Renderer>>>,
     pub screen: Mutex<Rex3Screen>,
-    pub cycles: Mutex<CyclesPtr>,
-    /// The other CPUs' cycle counters and tick counts, for the status bar.
-    pub(super) more_cpus: Mutex<Vec<(CyclesPtr, Arc<AtomicU64>)>>,
     pub screenshot: AtomicBool,
     pub frame: AtomicBool,
     /// Whether the display thread releases the renderer when it ends.
@@ -34,11 +31,8 @@ pub struct Display {
     idle: AtomicU32,
     /// The frame size last copied to the screen; (0, 0) before the first.
     shown: Mutex<(usize, usize)>,
-    /// The machine's status-bar word: front-panel LEDs and the disk and
-    /// network activity bits other devices set.
-    heartbeat: Arc<AtomicU64>,
-    /// The CPU's Compare matches, for the status bar's timer rate.
-    fasttick: Arc<AtomicU64>,
+    /// The machine's status-bar inputs.
+    status: Arc<crate::disp::StatusSource>,
 }
 
 struct Local {
@@ -48,22 +42,11 @@ struct Local {
     size: (usize, usize),
 }
 
-/// The status-bar bits that stay lit until changed: the front-panel LEDs.
-const PERSISTENT: u64 = crate::dev::ng1::rex3::Rex3::HB_LED_RED | crate::dev::ng1::rex3::Rex3::HB_LED_GREEN;
-
 impl Display {
-    /// The other CPUs' figures for the status bar, one per CPU after the first.
-    fn more_cpu_stats(&self) -> [Option<(u64, u64)>; crate::disp::MORE_CPUS] {
-        let more = self.more_cpus.lock();
-        std::array::from_fn(|i| more.get(i).map(|(c, f)| (c.get(), f.load(Ordering::Relaxed))))
-    }
-
-    pub(super) fn new(heartbeat: Arc<AtomicU64>, fasttick: Arc<AtomicU64>) -> Self {
+    pub(super) fn new(status: Arc<crate::disp::StatusSource>) -> Self {
         Self {
             renderer: Mutex::new(None),
             screen: Mutex::new(Rex3Screen::new()),
-            cycles: Mutex::new(CyclesPtr::dangling()),
-            more_cpus: Mutex::new(Vec::new()),
             screenshot: AtomicBool::new(false),
             frame: AtomicBool::new(false),
             display_stop: Default::default(),
@@ -71,8 +54,7 @@ impl Display {
             reader: Mutex::new(ScanoutReader::default()),
             idle: AtomicU32::new(0),
             shown: Mutex::new((0, 0)),
-            heartbeat,
-            fasttick,
+            status,
         }
     }
 
@@ -140,20 +122,7 @@ impl Display {
                 renderer.resize(w, h);
                 local.size = (w, h);
             }
-            let stats = crate::disp::BarStats {
-                now: std::time::Instant::now(),
-                cycles: self.cycles.lock().get(),
-                fasttick: self.fasttick.load(Ordering::Relaxed),
-                more_cpus: self.more_cpu_stats(),
-                decoded_delta: 0,
-                l1i_hits: 0,
-                l1i_fetches: 0,
-                uncached: 0,
-                // Activity bits clear once shown; the LEDs persist, as on IMPACT.
-                hb: self.heartbeat.fetch_and(PERSISTENT, Ordering::Relaxed),
-                count_hz: 0,
-                gfifo_pending: display_fifo_pending(),
-            };
+            let stats = self.status.snapshot(std::time::Instant::now(), display_fifo_pending());
             renderer.present(&mut screen, &mut local.overlay, &mut local.status, &mut local.texture, &stats, false, None, None);
         }
         self.screenshot.store(false, Ordering::Release);
@@ -596,7 +565,7 @@ impl crate::gfx_display::GfxDisplay for Display {
         self.screenshot.load(Ordering::Acquire)
     }
     fn cycles(&self) -> CyclesPtr {
-        *self.cycles.lock()
+        self.status.cycles()
     }
     fn request_frame(&self) {
         self.frame.store(true, Ordering::Release);
