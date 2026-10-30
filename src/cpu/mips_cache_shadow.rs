@@ -814,6 +814,13 @@ pub type R12000O2ShadowCache =
 pub type R14000ShadowCache =
     ShadowCache<32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0f24, 0x0000_0900, 64, { model::R14000 }>;
 
+/// R14000, as the Fuel has it: the Octane part at revision 2.3 (PRId 0x0f23),
+/// the revision a public software inventory of a Fuel prints. The raw CP0
+/// word, the FIR and the 128-byte lines are taken from the Octane part, not
+/// read from a Fuel.
+pub type R14000FuelShadowCache =
+    ShadowCache<32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0f23, 0x0000_0900, 64, { model::R14000 }>;
+
 /// R16000, as the 800 MHz Tezro and Fuel have it. No machine takes this part
 /// yet.
 ///
