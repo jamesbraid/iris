@@ -532,13 +532,15 @@ cargo run --release                                   # interpreter
 cargo run --release --features lightning,gpujit       # fastest stable build
 cargo run --release --features jitv2,gpujit           # with the MIPS JIT
 cargo run --profile developer --features developer    # debugging build (CPU starts paused)
+cargo run --profile quick --features jitv2            # fast to rebuild, for iterating
 cargo run -p iris-gui --release                       # GUI front-end
 ```
 
 `developer` adds intrusive debugging aids (undo buffer, instruction tracing,
 `jitcheck`, graphics traces) and cannot be combined with `lightning`, which
 strips breakpoint checks for speed. `cargo build --profile profiling` builds
-with full debug info for `perf` and flamegraphs. Every feature is listed in
+with full debug info for `perf` and flamegraphs. `quick` drops LTO so edits
+rebuild in seconds; it runs a little slower, so time things with `release`. Every feature is listed in
 [FEATURES.md](FEATURES.md).
 
 Tests: `cargo test --workspace` (unit tests, including per-device snapshot
