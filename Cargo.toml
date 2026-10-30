@@ -367,6 +367,17 @@ lto = "fat"
 codegen-units = 1
 
 
+# Quick profile: optimised, but built for the edit-build-run loop. No LTO and
+# many codegen units, so a one-line change relinks in seconds rather than
+# minutes. Runs somewhat slower than release; don't use it for benchmarks.
+# Usage: cargo run --profile quick --features jitv2
+[profile.quick]
+inherits = "release"
+lto = "off"
+codegen-units = 256
+incremental = true
+debug = 0
+
 # Profiling profile: release optimizations + full debug info for flamegraph/perf.
 # Usage: cargo build --profile profiling && perf record ./target/profiling/iris
 #        cargo flamegraph --profile profiling
