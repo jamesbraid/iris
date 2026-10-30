@@ -390,6 +390,10 @@ consumer thread never takes `rec`.
   only the meaning of cache ops 5, 6 and 7. `SECONDARY_TAG_MASK` is the bits
   `Index_Store_Tag` keeps for the secondary cache: the family drops the reserved
   tag bits.
+  Every uncached SB/SH goes to the bus through `BusDevice::write_narrow_from`
+  with the whole source register: the byte or halfword is the low bits, the
+  other lanes are undefined by hardware, and only Bedrock's ECC view reads
+  them.
 - With `opcodefusion` (implied by `lightning`), the interpreter executes
   common pairs (branch + NOP, LUI + ORI/ADDIU, address + load/store) as one
   dispatch.
