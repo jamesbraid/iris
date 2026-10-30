@@ -576,6 +576,12 @@ pub trait CpuModel: MipsCache {
     /// source register. Which other lanes a real processor drives is undefined,
     /// so this is a model policy, not a measurement.
     const NARROW_STORES_CARRY_GPR: bool = false;
+    /// Keep the R10000 family's uncached attribute, EntryLo bits 63:62, and
+    /// put it on the bus for a mapped uncached access, as an unmapped xkphys
+    /// access carries its address bits 58:57. The R10000 User's Manual v2.0
+    /// (uncached attribute) loads it into the TLB from EntryLo0/1 for mapped
+    /// references. False keeps EntryLo to its PFN and flags.
+    const TLB_UNCACHED_ATTRIBUTE: bool = false;
 }
 
 pub trait MipsCache: Send + Sync {
@@ -3731,6 +3737,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
     const FIR: u32 = FIR;
     const TLB_ENTRIES: usize = TLB_ENTRIES;
     const R10K_CACHE_OPS: bool = model::profile(MODEL).r10k_family;
+    const TLB_UNCACHED_ATTRIBUTE: bool = model::profile(MODEL).r10k_family;
     // 44 implemented virtual address bits on the R10000 family, as the shadow
     // model already says; XContext's layout follows them.
     const VA_BITS: u32 = model::profile(MODEL).va_bits;

@@ -342,6 +342,7 @@ impl<
     const NAME: &'static str = if MODEL == model::R10000 { "shadow" } else { model::profile(MODEL).name };
     const CACHE_KIND: &'static str = "shadow";
     const R10K_CACHE_OPS: bool = model::profile(MODEL).r10k_family;
+    const TLB_UNCACHED_ATTRIBUTE: bool = model::profile(MODEL).r10k_family;
     const ENTRYHI_FULL_VA: bool = model::profile(MODEL).entryhi_full_va;
     const R10K_PRIMARY_DATA_OPS: bool = model::profile(MODEL).primary_diag_data;
     const SECONDARY_TAG_MASK: u64 = model::profile(MODEL).l2_tag_mask;
