@@ -68,6 +68,7 @@ pub enum LogModule {
     /// counter reads) and interrupt vectors raised and lowered.
     Heart = 33,
     L1 = 34,
+    Usb = 35,
 }
 
 // Mask bits shared by L1i / L1d / L2c
@@ -76,7 +77,7 @@ pub const CACHE_LOG_MISS: u32 = 0x2;  // log misses and fills
 pub const CACHE_LOG_OP:   u32 = 0x4;  // log CACHE instruction ops
 
 impl LogModule {
-    pub const COUNT: usize = 35;
+    pub const COUNT: usize = 36;
 
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
@@ -115,6 +116,7 @@ impl LogModule {
             "bridge" => Some(Self::Bridge),
             "heart"  => Some(Self::Heart),
             "l1" => Some(Self::L1),
+            "usb" => Some(Self::Usb),
             _        => None,
         }
     }
@@ -156,6 +158,7 @@ impl LogModule {
             Self::Bridge => "bridge",
             Self::Heart  => "heart",
             Self::L1 => "l1",
+            Self::Usb => "usb",
         }
     }
 
@@ -168,7 +171,7 @@ impl LogModule {
             Self::L1i, Self::L1d, Self::L2c, Self::Ultra, Self::Scsi1,
             Self::Nveeprom, Self::Gr2, Self::Rad1, Self::Odyssey, Self::Bedrock,
             Self::Hub, Self::Pci, Self::Bridge, Self::Heart,
-            Self::L1,
+            Self::L1, Self::Usb,
         ]
     }
 
@@ -316,6 +319,7 @@ impl DevLog {
                 ModuleLog::new(), // Bridge
                 ModuleLog::new(), // Heart
                 ModuleLog::new(), // L1
+                ModuleLog::new(), // Usb
             ],
         }
     }
