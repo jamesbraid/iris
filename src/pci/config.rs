@@ -45,6 +45,51 @@ pub enum Space {
     Mem,
 }
 
+/// Initial value and writable bits for a function-specific configuration dword.
+#[derive(Clone, Copy, Debug)]
+pub struct PciRegisterPolicy {
+    /// Dword index. Header, BAR, subsystem identity, expansion ROM and
+    /// interrupt dwords are managed separately.
+    pub reg_dword: usize,
+    /// Value restored by [`PciConfig::reset`].
+    pub initial: u32,
+    /// Bits that configuration writes may change.
+    pub writable_mask: u32,
+}
+
+/// Function-specific write behavior for a type 0 PCI configuration header.
+///
+/// Register policies are copied into the header during construction; the
+/// borrowed slice is not retained.
+#[derive(Clone, Copy, Debug)]
+pub struct PciConfigPolicy<'a> {
+    /// Fixed Status bits that read as one.
+    pub status: u16,
+    /// Device-latched Status bits that writes acknowledge with one.
+    pub status_w1c_mask: u16,
+    /// Writable Command bits.
+    pub command_mask: u16,
+    /// Writable bits in the latency timer byte.
+    pub latency_mask: u8,
+    /// Writable bits in the cache-line-size byte.
+    pub cache_line_mask: u8,
+    /// Initial values and write masks for function-specific dwords.
+    pub registers: &'a [PciRegisterPolicy],
+}
+
+impl<'a> Default for PciConfigPolicy<'a> {
+    fn default() -> Self {
+        Self {
+            status: 0x0200,
+            status_w1c_mask: 0,
+            command_mask: 0xffff,
+            latency_mask: 0xff,
+            cache_line_mask: 0xff,
+            registers: &[],
+        }
+    }
+}
+
 /// One function's type 0 configuration header.
 ///
 /// Enough of it to be discovered and configured: identity, class, command
@@ -63,6 +108,12 @@ pub struct PciConfig {
     /// A type 1 header (PCI-to-PCI bridge): no BARs, and dwords 6 to 12 are
     /// bus numbers and forwarding windows.
     type1: bool,
+    status: u16,
+    status_w1c_mask: u16,
+    command_mask: u16,
+    latency_mask: u8,
+    cache_line_mask: u8,
+    writable_masks: [u32; 64],
 }
 
 impl PciConfig {
@@ -70,6 +121,19 @@ impl PciConfig {
     /// three bytes of register 0x08. `pin` is 0 for none, or [`PCI_INTA`]
     /// and on; the line register is left for firmware to assign.
     pub fn new(vendor: u16, device: u16, class: u32, revision: u8, bars: [Bar; 6], pin: u8) -> Self {
+        Self::new_with_policy(vendor, device, class, revision, bars, pin, PciConfigPolicy::default())
+    }
+
+    /// [`Self::new`] with function-specific register behavior.
+    pub fn new_with_policy(
+        vendor: u16,
+        device: u16,
+        class: u32,
+        revision: u8,
+        bars: [Bar; 6],
+        pin: u8,
+        policy: PciConfigPolicy<'_>,
+    ) -> Self {
         let mut slots = bars.map(BarSlot::Bar);
         for i in 0..5 {
             if let Bar::Mem64(_) = bars[i] {
@@ -90,7 +154,27 @@ impl PciConfig {
                 _ => {}
             }
         }
-        Self { regs: Mutex::new(r), bars: slots, power_on: r, caps_end: 0, type1: false }
+        let mut writable_masks = [u32::MAX; 64];
+        for register in policy.registers {
+            assert!(
+                matches!(register.reg_dword, 10 | 13 | 14 | 16..=63),
+                "pci: register policy requires a function-specific dword in 0..64");
+            r[register.reg_dword] = register.initial;
+            writable_masks[register.reg_dword] = register.writable_mask;
+        }
+        Self {
+            regs: Mutex::new(r),
+            bars: slots,
+            power_on: r,
+            caps_end: 0,
+            type1: false,
+            status: policy.status,
+            status_w1c_mask: policy.status_w1c_mask,
+            command_mask: policy.command_mask,
+            latency_mask: policy.latency_mask,
+            cache_line_mask: policy.cache_line_mask,
+            writable_masks,
+        }
     }
 
     /// A PCI-to-PCI bridge's type 1 header: class 0604, header type 1, no
@@ -177,38 +261,61 @@ impl PciConfig {
     pub fn read(&self, reg: usize) -> u32 {
         let r = self.regs.lock().unwrap();
         match reg {
-            // Status: a medium-speed device with no errors to report.
-            // A function with a capability list also sets status bit 4.
-            1 => (r[1] & 0xffff) | 0x0200_0000 | if r[13] != 0 { 0x0010_0000 } else { 0 },
+            // The fixed Status bits, the latched events not yet acknowledged,
+            // and bit 4 for a function with a capability list.
+            1 => (r[1] & (0xffff | ((self.status_w1c_mask as u32) << 16)))
+                | ((self.status as u32) << 16)
+                | if r[13] != 0 { 0x0010_0000 } else { 0 },
             _ => r[reg],
         }
     }
 
     pub fn write(&self, reg: usize, val: u32) {
+        self.write_masked(reg, val, u32::MAX);
+    }
+
+    /// Write the bits of dword `reg` that `mask` selects; `val` and `mask`
+    /// use the register's bit positions. This is the only write path: the
+    /// bus calls it with a narrow access's byte enables, and the header
+    /// decides which of the selected bits stick. Status events are
+    /// acknowledged only by selected ones.
+    pub fn write_masked(&self, reg: usize, val: u32, mask: u32) {
+        if mask == 0 {
+            return;
+        }
         let mut r = self.regs.lock().unwrap();
+        let old = r[reg];
+        // The selected bits of `val` over `old`, restricted to `allowed`.
+        let merge = |allowed: u32| (old & !(mask & allowed)) | (val & mask & allowed);
         match reg {
             // Identity and class are read-only.
             0 | 2 => {}
             // Cache line size and latency timer are stored; the header type
             // and BIST bytes above them are not.
-            3 => r[3] = (r[3] & 0xffff_0000) | (val & 0xffff),
-            // Command; status bits are write-one-to-clear and none are set.
-            1 => r[1] = val & 0xffff,
+            3 => r[3] = merge(((self.latency_mask as u32) << 8) | self.cache_line_mask as u32),
+            // Command writes replace selected bits; Status events clear on ones.
+            1 => {
+                let clear = val & mask & ((self.status_w1c_mask as u32) << 16);
+                r[1] = (merge(self.command_mask as u32)) & !clear;
+            }
             // A bridge's bus numbers and forwarding windows. The low nibbles
             // of the base and limit registers are read-only zero (16-bit I/O
             // and 32-bit memory), which also makes the upper halves of the
             // prefetchable and I/O windows (dwords 10 to 12) read-only zero;
             // the I/O secondary status is not kept.
-            6 if self.type1 => r[reg] = val,
+            6 if self.type1 => r[reg] = merge(u32::MAX),
             10..=12 if self.type1 => {}
             // I/O base and limit; the secondary status above them is
             // write-one-to-clear, and only received master abort is kept.
-            7 if self.type1 => r[reg] = (val & 0x0000_f0f0) | (r[reg] & !val & SEC_STATUS_MASTER_ABORT),
-            8 | 9 if self.type1 => r[reg] = val & 0xfff0_fff0,
+            7 if self.type1 => {
+                r[reg] = (merge(0x0000_f0f0) & 0x0000_f0f0) | (old & !(val & mask) & SEC_STATUS_MASTER_ABORT)
+            }
+            8 | 9 if self.type1 => r[reg] = merge(0xfff0_fff0),
             // A type 1 header's expansion ROM base is dword 14, and the
             // bridge has no ROM either.
             14 if self.type1 => {}
             4..=9 => {
+                let val = merge(u32::MAX);
                 r[reg] = match self.bars[reg - 4] {
                     BarSlot::Bar(Bar::Unused) => 0,
                     // The upper half of a 64-bit base takes every bit.
@@ -229,9 +336,14 @@ impl PciConfig {
             // The capability list is read-only.
             16.. if reg < self.caps_end => {}
             // Interrupt pin is read-only; the line is firmware's scratch.
-            15 => r[15] = (r[15] & 0xff00) | (val & !0xff00),
-            _ => r[reg] = val,
+            15 => r[15] = merge(!0xff00),
+            _ => r[reg] = merge(self.writable_masks[reg]),
         }
+    }
+
+    /// Latch selected device Status events without replacing earlier events.
+    pub fn set_status_bits(&self, bits: u16) {
+        self.regs.lock().unwrap()[1] |= ((bits & self.status_w1c_mask) as u32) << 16;
     }
 
     /// The base address firmware programmed into BAR `i`, type bits masked.
@@ -303,6 +415,14 @@ mod tests {
     fn scsi_like() -> PciConfig {
         PciConfig::new(0x9004, 0x8078, 0x0100_00, 1,
             [Bar::Io(0x100), Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused], PCI_INTA)
+    }
+
+    fn scsi_like_with_policy(policy: PciConfigPolicy<'_>) -> PciConfig {
+        PciConfig::new_with_policy(
+            0x9004, 0x8078, 0x0100_00, 1,
+            [Bar::Io(0x100), Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused], PCI_INTA,
+            policy,
+        )
     }
 
     /// Firmware learns how much space a device wants by writing all ones to
@@ -453,5 +573,120 @@ mod tests {
         assert_eq!(c.read(15) & 0xffff, 0x0109, "line 9 assigned, pin A kept");
         c.write(15, 0);
         assert_eq!(c.interrupt_pin(), PCI_INTA);
+    }
+
+    #[test]
+    fn header_policies_mask_writes_and_restore_reset_values() {
+        for (status, command, latency, cache) in [(0x0200, 0xffff, 0, 0), (0x02b0, 0x0156, 0xf0, 0x0f)] {
+            let c = scsi_like_with_policy(PciConfigPolicy {
+                status,
+                status_w1c_mask: 0,
+                command_mask: command,
+                latency_mask: latency,
+                cache_line_mask: cache,
+                registers: &[PciRegisterPolicy {
+                    reg_dword: 18,
+                    initial: 0xaabb_0020,
+                    writable_mask: 0xff00,
+                }],
+            });
+            c.write(1, u32::MAX);
+            c.write(3, u32::MAX);
+            c.write(18, u32::MAX);
+            assert_eq!(c.read(1), (u32::from(status) << 16) | u32::from(command));
+            assert_eq!(c.read(3), (u32::from(latency) << 8) | u32::from(cache));
+            assert_eq!(c.read(18), 0xaabb_ff20);
+            c.reset();
+            assert_eq!(c.read(1), u32::from(status) << 16);
+            assert_eq!(c.read(3), 0);
+            assert_eq!(c.read(18), 0xaabb_0020);
+        }
+    }
+
+    #[test]
+    fn masked_writes_preserve_unselected_fields_and_status_events() {
+        let c = scsi_like_with_policy(PciConfigPolicy {
+            status: 0x0200,
+            status_w1c_mask: 0x8040,
+            command_mask: 0x0157,
+            latency_mask: 0xff,
+            cache_line_mask: 0xff,
+            registers: &[PciRegisterPolicy {
+                reg_dword: 18,
+                initial: 0xaabb_0000,
+                writable_mask: 0xffff,
+            }],
+        });
+        c.set_status_bits(0x8040);
+        c.write(1, 0x0157);
+        c.write(3, 0x1234);
+        c.write(5, 0x1234_5000);
+        c.write(4, 0x1201);
+        for (reg, value, mask, expected) in [
+            (1, 0xffff_0002, 0xff, 0x8240_0102),
+            (1, 0xffff_0000, 0x8000_0000, 0x0240_0102),
+            (1, 0x0040_0000, 0x00ff_0000, 0x0200_0102),
+            (1, u32::MAX, 0, 0x0200_0102),
+            (3, 0xffff_00ab, 0xff, 0x12ab),
+            (5, 0xabcd_ffff, 0xffff_0000, 0xabcd_5000),
+            (4, 0x3400, 0xff00, 0x3401),
+            (15, u32::MAX, 0xff00, 0x0100),
+            (18, u32::MAX, 0xff, 0xaabb_00ff),
+        ] {
+            c.write_masked(reg, value, mask);
+            assert_eq!(c.read(reg), expected, "register {reg}");
+        }
+        c.set_status_bits(u16::MAX);
+        c.reset();
+        assert_eq!(c.read(1), 0x0200_0000);
+        let default = scsi_like();
+        default.set_status_bits(u16::MAX);
+        assert_eq!(default.read(1), 0x0200_0000);
+    }
+
+    #[test]
+    fn snapshots_restore_registers_with_destination_write_policies() {
+        use crate::traits::Saveable;
+        let src = scsi_like_with_policy(PciConfigPolicy {
+            status: 0x02b0,
+            status_w1c_mask: 0xc000,
+            command_mask: 0x0157,
+            latency_mask: 0xff,
+            cache_line_mask: 0xff,
+            registers: &[PciRegisterPolicy {
+                reg_dword: 18,
+                initial: 0,
+                writable_mask: 0x100,
+            }],
+        });
+        src.set_status_bits(0x8000);
+        src.write(3, 0x1234);
+        src.write(18, 0x100);
+        let saved = src.save_state();
+        for (events, command, cache) in [(0, 7, 0x0f), (0xc000, 0x0157, 0xff)] {
+            let dst = scsi_like_with_policy(PciConfigPolicy {
+                status: 0x0200,
+                status_w1c_mask: events,
+                command_mask: command,
+                latency_mask: 0,
+                cache_line_mask: cache,
+                registers: &[PciRegisterPolicy {
+                    reg_dword: 18,
+                    initial: 0x20,
+                    writable_mask: 0x200,
+                }],
+            });
+            dst.load_state(&saved).unwrap();
+            assert_eq!(dst.save_state(), saved);
+            assert_eq!(dst.read(1), 0x0200_0000 | ((0x8000 & u32::from(events)) << 16));
+            dst.write_masked(1, u32::MAX, u32::MAX);
+            dst.write(3, u32::MAX);
+            dst.write(18, u32::MAX);
+            assert_eq!(dst.read(1), 0x0200_0000 | u32::from(command));
+            assert_eq!(dst.read(3), (0x1234 & !u32::from(cache)) | u32::from(cache));
+            assert_eq!(dst.read(18), 0x300);
+            dst.reset();
+            assert_eq!(dst.read(18), 0x20);
+        }
     }
 }

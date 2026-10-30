@@ -220,7 +220,7 @@ impl PciBus {
         let (cfg, reg, shift) = (f.state().config(), off / 4, (off & 3) * 8);
         let mask = (u32::MAX >> (32 - 8 * width)) << shift;
         let old = cfg.read(reg);
-        cfg.write(reg, (old & !mask) | ((val << shift) & mask));
+        cfg.write_masked(reg, val << shift, mask);
         let new = cfg.read(reg);
         if new != old {
             f.config_written(reg, old, new);
