@@ -6502,4 +6502,43 @@ mod tests {
         check::<crate::cpu::mips_cache_shadow::R14000ShadowCache>(true);
         check::<crate::cpu::mips_cache_shadow::R16000ShadowCache>(true);
     }
+
+    /// The O2's no-ECC alias of RAM at 0x8000_0000 is matched on the address the
+    /// board decodes (32 bits), so a PTE software bit above the PFN cannot make
+    /// a mapped page miss the alias window.
+    #[test]
+    fn phys_alias_is_matched_after_the_physical_mask() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                use crate::cpu::mips_tlb::MipsTlb;
+                type C = crate::cpu::mips_cache_shadow::R5000ShadowCache;
+                const VA: u64 = 0x4000_0000;
+                let bus: Arc<dyn BusDevice> = Arc::new(MockMemory::new());
+                let cfg = MipsCpuConfig::for_model::<C>(Arc::new(crate::ip22_bus::memory_map(false)));
+                let mut exec = Box::new(MipsExecutor::<MipsTlb, C>::new(bus, MipsTlb::default(), &cfg));
+                disable_jitv2(&mut exec);
+                exec.install_status_cb();
+                let dmtc0 = |exec: &mut Box<MipsExecutor<MipsTlb, C>>, rd: u32, value: u64| {
+                    exec.core.write_gpr(1, value);
+                    let op = (OP_COP0 << 26) | (RS_DMTC0 << 21) | (1 << 16) | (rd << 11);
+                    assert_eq!(exec.exec(op), EXEC_COMPLETE);
+                };
+                let status = (exec.core.cp0_status & !crate::cpu::mips_core::STATUS_ERL) | STATUS_KX;
+                dmtc0(&mut exec, 12, status as u64);
+                dmtc0(&mut exec, 10, VA);
+                dmtc0(&mut exec, 0, 0);
+                dmtc0(&mut exec, 5, 0);
+                // PA 0x1_8000_0000: bit 32 is above what the board decodes.
+                dmtc0(&mut exec, 2, ((0x1_8000_0000u64 >> 12) << 6) | (3 << 3) | (1 << 2) | (1 << 1));
+                dmtc0(&mut exec, 3, 0);
+                assert_eq!(exec.exec((OP_COP0 << 26) | (RS_TLB << 21) | FUNCT_TLBWI), EXEC_COMPLETE);
+                exec.phys_mask = u32::MAX as u64;
+                exec.phys_alias = Some((0x8000_0000, 0x1000_0000, 0));
+                assert_eq!(exec.debug_translate(VA).phys, 0);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }
