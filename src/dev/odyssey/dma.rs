@@ -59,8 +59,9 @@ pub fn odyssey_dma_table_address(w1: u32, w3: u32) -> u64 {
 /// for exactly the descriptors whose header word 7 bit 31 asks for it, once
 /// the transfer is finished. Nothing is delivered before the driver routes it.
 pub fn odyssey_dma_done(s: &mut SGIOdysseyState) {
-    if s.route_dest_upper != 0 || s.route_dest_lower != 0 {
-        odyssey_deliver_routed(s, ODSY_ROUTE_VECTOR_DMA_SHIFT, "DMA-done", true);
+    let mut f = s.front.lock();
+    if odyssey_routed(&f) {
+        odyssey_deliver_routed(&mut f, ODSY_ROUTE_VECTOR_DMA_SHIFT, "DMA-done", true);
     }
 }
 
@@ -581,7 +582,7 @@ pub fn odyssey_dma_read_pixel(s: &mut SGIOdysseyState, src: &OdysseyDMASource, x
         return odyssey_object_load(s, src.obj, x as u32, y as u32);
     }
     let id = odyssey_main_id(s, x as u32, y as u32);
-    let shown = s.displayed_buffer.checked_shr(id).unwrap_or(0) & 1;
+    let shown = s.front.lock().displayed_buffer.checked_shr(id).unwrap_or(0) & 1;
     odyssey_buffer_load(s, if src.front { shown } else { (shown == 0) as u32 }, x, y)
 }
 
@@ -1129,7 +1130,7 @@ pub fn odyssey_query_finish(s: &mut SGIOdysseyState, sequence: u32) {
         return;
     }
     if s.query_sync_index & ODSY_DMA_FENCE_INTERRUPT != 0 {
-        odyssey_deliver_softsync(s);
+        odyssey_deliver_softsync(&mut s.front.lock());
     }
 }
 

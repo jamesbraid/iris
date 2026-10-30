@@ -58,38 +58,29 @@ pub fn odyssey_current_cpu() -> bool {
     ODYSSEY_CURRENT_CPU.with(|c| c.get())
 }
 
-/// The board state's mutex as the head work's big lock.
-pub struct OdysseyBql(pub Arc<Mutex<Box<SGIOdysseyState>>>);
-
-impl SGIHeadWorkBql for OdysseyBql {
-    fn lock(&self) {
-        // The hold outlives the guard; unlock() or the caller's own guard
-        // gives it back.
-        std::mem::forget(self.0.lock());
-    }
-    unsafe fn unlock(&self) {
-        // SAFETY: the caller holds the lock (trait contract).
-        unsafe { self.0.force_unlock() };
-    }
-}
-
 /// The board thread's name.
 pub const ODYSSEY_WORK_THREAD: &str = "odyssey-work";
 
-/// Start the board's work thread.
-pub fn odyssey_work_start(state: &Arc<Mutex<Box<SGIOdysseyState>>>) {
-    let mut s = state.lock();
-    let bql: Arc<dyn SGIHeadWorkBql> = Arc::new(OdysseyBql(state.clone()));
-    sgi_head_work_start(&mut s.work, ODYSSEY_WORK_THREAD, bql);
+/// Start the board's work thread: its scheduling under the front lock, its
+/// slices under the board lock.
+pub fn odyssey_work_start(h: &OdysseyHandles) {
+    let front: Arc<dyn SGIHeadWorkBql> = Arc::new(OdysseyFrontLock(h.front.clone()));
+    let board: Arc<dyn SGIHeadWorkBql> = Arc::new(OdysseyBoardLock(h.board.clone()));
+    let mut f = h.front.lock();
+    sgi_head_work_start_split(&mut f.work, ODYSSEY_WORK_THREAD, front, board);
 }
 
 /// The machine stops: finish the waiting work (the C's run-state handler),
-/// then stop the board's work thread.
-pub fn odyssey_work_stop(state: &Arc<Mutex<Box<SGIOdysseyState>>>) {
-    let mut s = state.lock();
-    let opaque = P::new(&mut **s).opaque();
-    odyssey_work_vm_state(opaque, false, 0);
-    sgi_head_work_cleanup(&mut s.work);
+/// then stop the board's work thread. The board lock is let go first: the
+/// thread may be waiting for it to start a slice.
+pub fn odyssey_work_stop(h: &OdysseyHandles) {
+    {
+        let mut s = h.board.lock();
+        let opaque = P::new(&mut **s).opaque();
+        odyssey_work_vm_state(opaque, false, 0);
+    }
+    let mut f = h.front.lock();
+    sgi_head_work_cleanup(&mut f.work);
 }
 
 /// HEART's interrupt-packet register in its widget space.
@@ -97,7 +88,7 @@ const HEART_PACKET: u64 = 0x80;
 
 /// `sgi_xio_send_interrupt(&s->fabric_as, packet, number, set)`: the
 /// interrupt-modify write. HEART takes it at 0x80 of widget 8.
-pub fn sgi_xio_send_interrupt(s: &mut SGIOdysseyState, packet: u64, number: u8, set: bool) -> MemTxResult {
+pub fn sgi_xio_send_interrupt(s: &mut OdysseyFront, packet: u64, number: u8, set: bool) -> MemTxResult {
     let widget = (packet >> SGI_XIO_PACKET_ADDRESS_BITS) as u32;
     let address = packet & ((1u64 << SGI_XIO_PACKET_ADDRESS_BITS) - 1);
     if widget != s.heart_widget || address != HEART_PACKET {
@@ -204,7 +195,7 @@ impl OdysseyDisplay {
 pub struct OdysseyXio {
     small: u64,
     large: u64,
-    pub state: Arc<Mutex<Box<SGIOdysseyState>>>,
+    pub state: OdysseyHandles,
     pub display: Arc<OdysseyDisplay>,
     running: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
@@ -220,12 +211,12 @@ impl OdysseyXio {
         mem: Arc<dyn BusDevice>,
     ) -> Result<Arc<Self>, String> {
         set_address_space_memory(mem);
-        let mut s = sgi_odyssey_new(product, widget as u32)?;
-        s.irq = Some(irq);
+        let s = sgi_odyssey_new(product, widget as u32)?;
+        s.front.lock().irq = Some(irq);
         Ok(Arc::new(Self {
             small: widget_small_base(widget),
             large: widget_large_base(widget),
-            state: Arc::new(Mutex::new(s)),
+            state: OdysseyHandles::new(s),
             display: Arc::new(OdysseyDisplay::new()),
             running: Arc::new(AtomicBool::new(false)),
             thread: Mutex::new(None),
@@ -250,7 +241,7 @@ impl OdysseyXio {
         match self.offset(addr) {
             Some(off) => {
                 let cpu = ODYSSEY_CURRENT_CPU.with(|c| c.replace(true));
-                let data = odyssey_mmio_read(&mut self.state.lock(), off, size);
+                let data = odyssey_handles_read(&self.state, off, size);
                 ODYSSEY_CURRENT_CPU.with(|c| c.set(cpu));
                 (BUS_OK, data)
             }
@@ -262,7 +253,7 @@ impl OdysseyXio {
         match self.offset(addr) {
             Some(off) => {
                 let cpu = ODYSSEY_CURRENT_CPU.with(|c| c.replace(true));
-                odyssey_mmio_write(&mut self.state.lock(), off, val, size);
+                odyssey_handles_write(&self.state, off, val, size);
                 ODYSSEY_CURRENT_CPU.with(|c| c.set(cpu));
                 BUS_OK
             }
@@ -272,9 +263,9 @@ impl OdysseyXio {
 
     /// One display frame: the retrace if it is due, then the dirty lines
     /// resolved and the frame presented.
-    fn frame(state: &Mutex<Box<SGIOdysseyState>>, display: &OdysseyDisplay) {
+    fn frame(state: &OdysseyHandles, display: &OdysseyDisplay) {
         let (frame, w, h) = {
-            let mut s = state.lock();
+            let mut s = state.board.lock();
             sgi_scanout_poll(&mut s.scanout, qemu_clock_virtual_ns());
             sgi_scanout_update(&mut s.scanout);
             (s.scanout.frame.clone(), s.scanout.frame_width as usize, s.scanout.frame_height as usize)
@@ -402,7 +393,7 @@ impl Drop for OdysseyXio {
 
 impl Resettable for OdysseyXio {
     fn power_on(&self) {
-        odyssey_reset_hold(&mut self.state.lock());
+        odyssey_reset_hold(&mut self.state.board.lock());
     }
 }
 

@@ -117,78 +117,6 @@ pub fn odyssey_reg(addr: u64, size: u32) -> i64 {
     }
 }
 
-/// An interrupt packet into the widget-addressed fabric, through the XIO
-/// widget layer.
-pub fn odyssey_send_packet(s: &mut SGIOdysseyState, where_: u64, vector: u8, set: bool) {
-    // Retain the packet for host-only qtest inspection.
-    s.test_last_interrupt_addr = where_;
-    s.test_last_interrupt_value = vector as u64 | if set { SGI_XIO_INTERRUPT_SET } else { 0 };
-    sgi_xio_send_interrupt(s, where_, vector, set);
-}
-
-/// The fabric address of a widget/address pair: the widget in bits 51:48.
-pub fn odyssey_xio_compose(_s: &mut SGIOdysseyState, widget: u32, address: u64, fabric: &mut u64) -> bool {
-    sgi_xio_compose("sgi-odyssey", widget, address, fabric)
-}
-
-/// One routed source's interrupt. Every routed source shares one
-/// destination (ODSY_ROUTE_DEST_UPPER/_LOWER), distinct from
-/// int_dest_upper/int_dest_lower, which the kernel driver gives its
-/// crosstalk error handler; the sources differ only in their byte of
-/// ODSY_ROUTE_VECTORS. The vectors are read from the register, never
-/// assumed. The flag source is a level the guest clears through
-/// ODSY_INTR_CLEAR, so it sends a clearing packet as it falls
-/// (odyssey_update_irq()); the softsync, retrace and DMA-done handlers ack
-/// nothing, and those sources send a single set pulse.
-pub fn odyssey_deliver_routed(s: &mut SGIOdysseyState, shift: u32, what: &str, set: bool) {
-    let widget = (s.route_dest_upper >> ODSY_ROUTE_DEST_WIDGET_SHIFT) & ((1u32 << ODSY_INT_DEST_WIDGET_BITS) - 1);
-    let addr = (((s.route_dest_upper & 0xffff) as u64) << 32) | s.route_dest_lower as u64;
-    let vector = s.route_vectors.checked_shr(shift).unwrap_or(0) as u8;
-    let mut where_ = 0u64;
-
-    if s.route_dest_upper == 0 && s.route_dest_lower == 0 {
-        crate::qlog!(
-            "sgi-odyssey: {} interrupt {} with no destination programmed; no packet sent\n",
-            what,
-            if set { "raised" } else { "lowered" }
-        );
-        return;
-    }
-    if !odyssey_xio_compose(s, widget, addr, &mut where_) {
-        return;
-    }
-    odyssey_send_packet(s, where_, vector, set);
-}
-
-/// The softsync source ODSY_REG_HOST_WRITE (0x0a5a) raises.
-pub fn odyssey_deliver_softsync(s: &mut SGIOdysseyState) {
-    odyssey_deliver_routed(s, ODSY_ROUTE_VECTOR_SOFTSYNC_SHIFT, "softsync", true);
-}
-
-pub fn odyssey_update_irq(s: &mut SGIOdysseyState) {
-    let level = (s.intr_flags & s.intr_enable) != 0;
-
-    if level != s.interrupt_asserted {
-        s.interrupt_asserted = level;
-        odyssey_deliver_routed(s, ODSY_ROUTE_VECTOR_FLAG_SHIFT, "flag", level);
-    }
-}
-
-/// The command FIFO's level: the stores waiting for the board's work.
-pub fn odyssey_fifo_level(s: &mut SGIOdysseyState) -> u32 {
-    s.work_queue.len() as u32
-}
-
-/// The FIFO's level went from 'before' to its current value. Falling below
-/// the low-water mark latches the low-water flag whatever the enable mask
-/// says; it reaches the driver only while the source is enabled.
-pub fn odyssey_fifo_level_changed(s: &mut SGIOdysseyState, before: u32) {
-    if before >= ODSY_CFIFO_LOW_WATER && odyssey_fifo_level(s) < ODSY_CFIFO_LOW_WATER {
-        s.intr_flags |= ODSY_INTR_FIFO_LOW_WATER;
-        odyssey_update_irq(s);
-    }
-}
-
 /// One bit slot, reported finished inside the write the guest polls after.
 pub fn odyssey_nic_slot(s: &mut SGIOdysseyState, value: u32) {
     let pulse = (value & ODSY_NIC_PULSE_MASK) >> ODSY_NIC_PULSE_SHIFT;
@@ -476,6 +404,11 @@ pub fn odyssey_i2c_status(command: u32) -> u32 {
 }
 
 pub fn odyssey_read(s: &mut SGIOdysseyState, addr: u64, size: u32) -> u64 {
+    // Registers that do not wait for the board's work live in the front
+    // (front.rs).
+    if odyssey_front_register(addr, size, false) {
+        return odyssey_front_read(&mut s.front.lock(), addr, size);
+    }
     let mut value: u64 = 0;
     let sequence = s.trace_sequence;
     s.trace_sequence = s.trace_sequence.wrapping_add(1);
@@ -483,24 +416,6 @@ pub fn odyssey_read(s: &mut SGIOdysseyState, addr: u64, size: u32) -> u64 {
     let reg = odyssey_reg(addr, size);
     let key = if reg < 0 { u64::MAX } else { reg as u64 };
     match key {
-        ODSY_IDENTITY => value = odyssey_identity(s) as u64,
-        ODSY_CONTROL => value = s.widget_control as u64,
-        ODSY_XT_REQ_TIMEOUT => value = s.xt_req_timeout as u64,
-        ODSY_INT_DEST_UPPER => value = s.int_dest_upper as u64,
-        ODSY_INT_DEST_LOWER => value = s.int_dest_lower as u64,
-        ODSY_ERROR_COMMAND => value = s.error_command as u64,
-        ODSY_STATUS | ODSY_ERROR_ADDR_UPPER | ODSY_ERROR_ADDR_LOWER => {
-            // No crosstalk error is ever posted, so the error class is clear.
-        }
-        ODSY_INTR_FLAGS => value = s.intr_flags as u64,
-        ODSY_INTR_ENABLE_SET => value = s.intr_enable as u64,
-        ODSY_STATUS0 => {
-            // The waiting stores are its level (odyssey_fifo_level()).
-            let level = odyssey_fifo_level(s);
-            value = (ODSY_STATUS0_FIFO_ENABLED
-                | if level != 0 { 0 } else { ODSY_STATUS0_FIFO_EMPTY }
-                | if level < ODSY_CFIFO_LOW_WATER { ODSY_STATUS0_FIFO_LOW_WATER } else { 0 }) as u64;
-        }
         ODSY_CFIFO_SELFTEST => {
             // Answers OK only after the kernel driver's command-FIFO
             // initialisation preamble; zero before.
@@ -509,29 +424,19 @@ pub fn odyssey_read(s: &mut SGIOdysseyState, addr: u64, size: u32) -> u64 {
         ODSY_MEMORY_CONFIG => value = s.memory_config as u64,
         ODSY_FLCTL_CONFIG => value = s.flctl_config as u64,
         ODSY_FLCTL_TARGET => value = s.flctl_target as u64,
-        ODSY_SW_TOKEN => value = s.sw_token as u64,
         ODSY_BUZZ_1 => value = s.buzz[0] as u64,
         ODSY_BUZZ_2 => value = s.buzz[1] as u64,
         ODSY_BUZZ_3 => value = s.buzz[2] as u64,
         ODSY_BUZZ_4 => value = s.buzz[3] as u64,
         ODSY_BUZZ_5 => value = s.buzz[4] as u64,
         ODSY_BUZZ_6 => value = s.buzz[5] as u64,
-        ODSY_SWAP_ARM => value = s.swap_arm as u64,
-        ODSY_SWAP_PENDING => value = s.swap_pending as u64,
-        ODSY_SWAP_CONTROL => value = s.swap_control as u64,
-        ODSY_SWAP_CONTROL_COMPANION => value = s.swap_control_companion as u64,
-        // The buffer the last latched swap put on screen (odyssey_retrace()).
-        ODSY_DISPLAYED_BUFFER => value = s.displayed_buffer as u64,
         ODSY_NIC_PROM | ODSY_NIC_KERNEL => value = s.nic as u64,
         ODSY_I2C_MAIN_CMD_READ => value = s.i2c_main_cmd as u64,
         ODSY_I2C_MAIN_STATUS_READ => value = odyssey_i2c_status(s.i2c_main_cmd) as u64,
         ODSY_I2C_OPT_CMD_READ => value = s.i2c_opt_cmd as u64,
         ODSY_I2C_OPT_STATUS_READ => value = odyssey_i2c_status(s.i2c_opt_cmd) as u64,
         ODSY_BACKEND_VERSION => value = (s.backend_version & 7) as u64,
-        ODSY_ROUTE_DEST_UPPER
-        | ODSY_ROUTE_DEST_LOWER
-        | ODSY_ROUTE_VECTORS
-        | ODSY_HOST_WRITE_ADDR_UPPER
+        ODSY_HOST_WRITE_ADDR_UPPER
         | ODSY_HOST_WRITE_ADDR_LOWER
         | ODSY_STATS_ADDR_UPPER
         | ODSY_STATS_ADDR_LOWER

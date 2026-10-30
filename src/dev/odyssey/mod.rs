@@ -15,6 +15,8 @@
 //! - `glprog`: the geometry program, lighting and the GL primitives.
 //! - `dma`: pixel DMA, queries and fences.
 //! - `cmd`: the command-FIFO interpreter.
+//! - `front`: the host interface under its own lock: the registers that
+//!   do not wait for the board's work, interrupts and the command queue.
 //! - `device`: the work queue, MMIO, reset and construction.
 //! - `xio`: the board as an iris widget: the bus, HEART and the display.
 
@@ -27,6 +29,7 @@ pub mod defs;
 pub mod device;
 pub mod dma;
 pub mod draw;
+pub mod front;
 pub mod gl;
 pub mod glprog;
 pub mod regs;
@@ -38,6 +41,7 @@ pub use defs::*;
 pub use device::*;
 pub use dma::*;
 pub use draw::*;
+pub use front::*;
 pub use gl::*;
 pub use glprog::*;
 pub use regs::*;
