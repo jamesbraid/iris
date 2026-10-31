@@ -494,6 +494,11 @@ pub enum MachineProfile {
     OctaneIp30,
     /// Serial-only Fuel IP34 board using the IP35 software platform.
     FuelIp34,
+    /// Serial-only Tezro: the IP53 board on the IP35 software platform,
+    /// configured by the shared keys and the `[tezro]` section; see
+    /// `src/ip53_machine.rs`. Named `tezro` in configs.
+    #[serde(rename = "tezro")]
+    TezroIp53,
 }
 
 impl MachineProfile {
@@ -509,6 +514,7 @@ impl MachineProfile {
         match self {
             Self::OctaneIp30 => &[0, 64, 128, 256, 512],
             Self::FuelIp34 => &[0, 256],
+            Self::TezroIp53 => &[0, 512, 1024],
             Self::Indigo2Ip28 | Self::O2Ip32 => VALID_BANK_SIZES,
             _ => &[0, 8, 16, 32, 64, 128],
         }
@@ -522,6 +528,7 @@ impl MachineProfile {
             Self::O2Ip32 => "SGI O2 (IP32)",
             Self::OctaneIp30 => "SGI Octane (IP30)",
             Self::FuelIp34 => "SGI Fuel (IP34)",
+            Self::TezroIp53 => "SGI Tezro (IP53)",
         }
     }
 
@@ -531,15 +538,19 @@ impl MachineProfile {
     /// connector), one on the Indy.
     pub fn scsi_controllers(self) -> u8 {
         match self {
-            Self::Indigo2Ip22 | Self::O2Ip32 | Self::OctaneIp30 | Self::FuelIp34 => 2,
+            Self::Indigo2Ip22 | Self::O2Ip32 | Self::OctaneIp30 | Self::FuelIp34 | Self::TezroIp53 => 2,
             _ => 1,
         }
     }
 
-    /// Four banks on the MC, HEART and O2, two on Fuel.
+    /// Four banks on the MC, HEART and O2, two on Fuel, eight on Tezro.
     /// `banks` has room for more; unused entries must be zero.
     pub fn memory_banks(self) -> usize {
-        if self == Self::FuelIp34 { 2 } else { 4 }
+        match self {
+            Self::FuelIp34 => 2,
+            Self::TezroIp53 => MAX_BANKS,
+            _ => 4,
+        }
     }
 
     pub fn guinness(self) -> bool {
@@ -651,6 +662,7 @@ impl GraphicsBoard {
         match profile {
             MachineProfile::OctaneIp30 => self.is_impact() || self.is_vpro() || self == Self::None,
             MachineProfile::FuelIp34 => matches!(self, Self::V10 | Self::V12 | Self::None),
+            MachineProfile::TezroIp53 => self == Self::None,
             MachineProfile::Indigo2Ip22 => !self.is_vpro() && self != Self::None,
             _ => !self.is_vpro() && !matches!(self, Self::Extreme | Self::None),
         }
@@ -660,7 +672,7 @@ impl GraphicsBoard {
     pub fn default_for(profile: MachineProfile) -> Self {
         match profile {
             MachineProfile::OctaneIp30 => Self::SolidImpact,
-            MachineProfile::FuelIp34 => Self::None,
+            MachineProfile::FuelIp34 | MachineProfile::TezroIp53 => Self::None,
             _ => Self::Newport,
         }
     }
@@ -1477,6 +1489,85 @@ impl FuelSection {
     }
 }
 
+/// The Tezro's serial connections: the L1 and the IOC4's four ports. The
+/// selected console serves CI and serial_log.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TezroConsole {
+    #[default]
+    L1,
+    Ioc4A,
+    Ioc4B,
+    Ioc4C,
+    Ioc4D,
+}
+
+impl TezroConsole {
+    /// The connection's index: 0 for the L1, then the IOC4's ports.
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// The processor counts a Tezro board fits.
+pub const TEZRO_CPUS: [u8; 1] = [1];
+
+fn default_tezro_cpus() -> u8 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TezroSection {
+    /// Processors fitted. Only the first runs.
+    #[serde(default = "default_tezro_cpus")]
+    pub cpus: u8,
+    /// Persistent 16 MiB boot flash store; absent means volatile flash.
+    #[serde(default)]
+    pub flash: Option<String>,
+    #[serde(default)]
+    pub console: TezroConsole,
+    /// L1 host console TCP port; IOC4 ports 0 and 1 keep serial_port_a and
+    /// serial_port_b.
+    #[serde(default)]
+    pub l1_port: Option<u16>,
+    /// Separate L1 log when an IOC4 port is selected as console.
+    #[serde(default)]
+    pub l1_log: Option<String>,
+    /// Host TCP ports of IOC4 ports 2 and 3.
+    #[serde(default)]
+    pub serial_port_c: Option<u16>,
+    #[serde(default)]
+    pub serial_port_d: Option<u16>,
+}
+
+impl Default for TezroSection {
+    fn default() -> Self {
+        Self {
+            cpus: default_tezro_cpus(),
+            flash: None,
+            console: TezroConsole::default(),
+            l1_port: None,
+            l1_log: None,
+            serial_port_c: None,
+            serial_port_d: None,
+        }
+    }
+}
+
+impl TezroSection {
+    /// Left out of a written config when nothing in it was set.
+    fn is_default(&self) -> bool {
+        self.cpus == default_tezro_cpus()
+            && self.flash.is_none()
+            && self.console == TezroConsole::default()
+            && self.l1_port.is_none()
+            && self.l1_log.is_none()
+            && self.serial_port_c.is_none()
+            && self.serial_port_d.is_none()
+    }
+}
+
 /// Top-level machine configuration.
 ///
 /// Field order matters for TOML export: the `toml` serializer requires every
@@ -1702,6 +1793,10 @@ pub struct MachineConfig {
     #[serde(default, skip_serializing_if = "FuelSection::is_default")]
     pub fuel: FuelSection,
 
+    /// Processors, serial console and flash storage for the Tezro.
+    #[serde(default, skip_serializing_if = "TezroSection::is_default")]
+    pub tezro: TezroSection,
+
     /// Host performance tuning (`[perf]` section).
     #[serde(default)]
     pub perf: PerfConfig,
@@ -1875,6 +1970,7 @@ impl Default for MachineConfig {
             o2: O2Section::default(),
             octane: OctaneSection::default(),
             fuel: FuelSection::default(),
+            tezro: TezroSection::default(),
             perf: PerfConfig::default(),
             clock: ClockConfig::default(),
             rtc_offset: RtcOffset::default(),
@@ -2015,6 +2111,21 @@ impl MachineConfig {
         self.banks[..n].to_vec()
     }
 
+    /// The Tezro's memory: `banks` from locational bank 0, or the board's
+    /// 4 GiB default when `banks` is left at the generic default, which names
+    /// a bank size no Tezro takes.
+    pub fn tezro_memory(&self) -> Result<crate::dev::bedrock_mem::MemoryPopulation, String> {
+        use crate::dev::bedrock_mem::MemoryPopulation;
+        if self.banks == default_banks() {
+            return Ok(MemoryPopulation::default());
+        }
+        let n = self.banks.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+        if let Some(gap) = self.banks[..n].iter().position(|&b| b == 0) {
+            return Err(format!("banks: bank {gap} is empty but a later bank is populated; fill the banks from 0"));
+        }
+        MemoryPopulation::from_mib(&self.banks[..n]).map_err(|e| format!("banks: {e}"))
+    }
+
     /// Validate bank sizes, returns a description of any errors.
     /// The graphics board: `[graphics] board`, or the machine's default
     /// (Solid IMPACT on Octane, none on Fuel, Newport elsewhere).
@@ -2065,7 +2176,7 @@ impl MachineConfig {
         for key in keys {
             let dev = &self.scsi[&key];
             let (controller, id) = dev.placement(key);
-            let max_id = if self.machine.profile == MachineProfile::FuelIp34 { 15 } else { 7 };
+            let max_id = if matches!(self.machine.profile, MachineProfile::FuelIp34 | MachineProfile::TezroIp53) { 15 } else { 7 };
             if id == 0 || id > max_id {
                 return Err(format!("scsi.{}: SCSI ID {} is out of range (1–{}; the controller itself is 0)", key, id, max_id));
             }
@@ -2089,7 +2200,7 @@ impl MachineConfig {
                     "scsi.{} and scsi.{} both name {}", other, key, scsi_label(controller, id)
                 ));
             }
-            if dev.is_daynaport() && matches!(self.machine.profile, MachineProfile::O2Ip32 | MachineProfile::FuelIp34) {
+            if dev.is_daynaport() && matches!(self.machine.profile, MachineProfile::O2Ip32 | MachineProfile::FuelIp34 | MachineProfile::TezroIp53) {
                 return Err(format!(
                     "scsi.{}: kind = \"daynaport\" is not available on {} (its Ethernet is built in)", key, self.machine.profile.label()
                 ));
@@ -2127,6 +2238,18 @@ impl MachineConfig {
             }
             if !board.supports(MachineProfile::FuelIp34) {
                 return Err(format!("graphics.board \"{}\" is not a Fuel board (valid: v12, v10, none)", board.as_str()));
+            }
+        } else if self.machine.profile == MachineProfile::TezroIp53 {
+            // The machine always models the R16000; the key names its family.
+            if self.machine.cpu != CpuModel::R10000 {
+                return Err("a Tezro has R16000s: set [machine] cpu = \"r10000\" (the R10000 family)".into());
+            }
+            if !TEZRO_CPUS.contains(&self.tezro.cpus) {
+                return Err(format!("tezro.cpus = {} is not a Tezro board's population (valid: {TEZRO_CPUS:?})", self.tezro.cpus));
+            }
+            self.tezro_memory()?.check_for_cpus(usize::from(self.tezro.cpus)).map_err(|e| format!("banks: {e}"))?;
+            if board != GraphicsBoard::None {
+                return Err("Tezro currently supports graphics.board = \"none\" only".into());
             }
         } else if self.machine.profile == MachineProfile::OctaneIp30 {
             // A HEART bank is a matched DIMM pair: 64 to 512 MB, filled from
@@ -2173,8 +2296,8 @@ impl MachineConfig {
             }
         }
         match (self.network.mode, self.machine.profile) {
-            (NetMode::Off, p) if p != MachineProfile::O2Ip32 && p != MachineProfile::OctaneIp30 && p != MachineProfile::FuelIp34 => {
-                return Err("network.mode = \"off\" is only available on the O2, Octane and Fuel; the Indy and Indigo2 always have their Ethernet".into());
+            (NetMode::Off, p) if !matches!(p, MachineProfile::O2Ip32 | MachineProfile::OctaneIp30 | MachineProfile::FuelIp34 | MachineProfile::TezroIp53) => {
+                return Err("network.mode = \"off\" is only available on the O2, Octane, Fuel and Tezro; the Indy and Indigo2 always have their Ethernet".into());
             }
             _ => {}
         }
@@ -3296,5 +3419,85 @@ mod fuel_input_tests {
         cfg.validate().unwrap();
         cfg.machine.profile = MachineProfile::OctaneIp30;
         assert!(cfg.validate().unwrap_err().contains("out of range"));
+    }
+}
+
+#[cfg(test)]
+mod tezro_config_tests {
+    use super::*;
+
+    fn tezro() -> MachineConfig {
+        let mut cfg = MachineConfig::default();
+        cfg.machine.profile = MachineProfile::TezroIp53;
+        cfg.machine.cpu = CpuModel::R10000;
+        cfg.scsi.clear();
+        cfg
+    }
+
+    /// Left at the generic default, `banks` gives the Tezro its 4 GiB layout;
+    /// a listed population is taken bank by bank.
+    #[test]
+    fn tezro_memory_defaults_to_the_4_gib_layout_and_takes_listed_banks() {
+        let mut cfg = tezro();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.tezro_memory().unwrap(), crate::dev::bedrock_mem::MemoryPopulation::default());
+        cfg.banks = [1024, 512, 0, 0, 0, 0, 0, 0];
+        cfg.validate().unwrap();
+        assert_eq!(cfg.tezro_memory().unwrap().banks_mib(), [1024, 512]);
+        cfg.banks = [1024, 0, 512, 0, 0, 0, 0, 0];
+        assert!(cfg.validate().unwrap_err().contains("fill the banks"));
+        cfg.banks = [256, 256, 0, 0, 0, 0, 0, 0];
+        assert!(cfg.validate().unwrap_err().contains("512 or 1024"));
+    }
+
+    /// The processor is fixed and graphics is absent; only the R10000 family
+    /// key and no graphics board pass.
+    #[test]
+    fn tezro_requires_the_r10000_family_and_no_graphics() {
+        let mut cfg = tezro();
+        cfg.machine.cpu = CpuModel::R4400;
+        assert!(cfg.validate().unwrap_err().contains("r10000"));
+        let mut cfg = tezro();
+        assert_eq!(cfg.graphics_board(), GraphicsBoard::None);
+        cfg.graphics.board = Some(GraphicsBoard::Newport);
+        assert!(cfg.validate().is_err());
+        let mut cfg = tezro();
+        cfg.network.mode = NetMode::Off;
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn tezro_refuses_a_processor_count_its_board_does_not_fit() {
+        for cpus in [0, 3, 5] {
+            let mut cfg = tezro();
+            cfg.tezro.cpus = cpus;
+            assert!(cfg.validate().unwrap_err().contains("tezro.cpus"), "{cpus}");
+        }
+    }
+
+    /// The sample configuration in the repository root is a valid Tezro.
+    #[test]
+    fn the_sample_tezro_configuration_validates() {
+        let cfg: MachineConfig = toml::from_str(include_str!("../tezro.toml.example")).unwrap();
+        assert_eq!(cfg.machine.profile, MachineProfile::TezroIp53);
+        cfg.validate().unwrap();
+        assert_eq!(cfg.tezro_memory().unwrap().total_mib(), 4096);
+    }
+
+    /// A `[tezro]` table is written only when something in it was set, and
+    /// what was set survives a save and reload.
+    #[test]
+    fn only_a_configured_tezro_section_is_saved_and_it_round_trips() {
+        let saved = toml::to_string(&MachineConfig::default()).unwrap();
+        assert!(!saved.contains("[tezro]"), "{saved}");
+        let text = "[machine]\nprofile = \"tezro\"\ncpu = \"r10000\"\n[tezro]\nconsole = \"ioc4_b\"\nflash = \"flash.bin\"\nl1_port = 18882\nserial_port_c = 18883\n";
+        let loaded: MachineConfig = toml::from_str(text).unwrap();
+        assert_eq!(loaded.machine.profile, MachineProfile::TezroIp53);
+        assert_eq!(loaded.tezro.console, TezroConsole::Ioc4B);
+        assert_eq!(loaded.tezro.console.index(), 2);
+        let again: MachineConfig = toml::from_str(&toml::to_string(&loaded).unwrap()).unwrap();
+        assert_eq!(again.tezro.flash.as_deref(), Some("flash.bin"));
+        assert_eq!((again.tezro.l1_port, again.tezro.serial_port_c), (Some(18882), Some(18883)));
+        assert!(!MachineProfile::ALL.contains(&MachineProfile::TezroIp53));
     }
 }
