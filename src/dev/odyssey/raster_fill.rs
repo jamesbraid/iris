@@ -139,7 +139,7 @@ impl<
     }
     #[inline(always)]
     fn depth_test(st: &GlDrawState) -> bool {
-        if DEPTH == FILL_DYN { st.depth_test != 0 } else { DEPTH != 0 }
+        if DEPTH == FILL_DYN { st.depth_test } else { DEPTH != 0 }
     }
     #[inline(always)]
     fn depth_func(st: &GlDrawState) -> u32 {
@@ -147,7 +147,7 @@ impl<
     }
     #[inline(always)]
     fn depth_write(st: &GlDrawState) -> bool {
-        if WRITE == FILL_DYN { st.depth_mask != 0 } else { WRITE != 0 }
+        if WRITE == FILL_DYN { st.depth_mask } else { WRITE != 0 }
     }
     #[inline(always)]
     fn smooth(sp: &SoftTexSpan) -> bool {
@@ -171,11 +171,11 @@ impl<
     }
     #[inline(always)]
     fn fog(st: &GlDrawState) -> bool {
-        if FOG == FILL_DYN { st.fog != 0 } else { FOG != 0 }
+        if FOG == FILL_DYN { st.fog } else { FOG != 0 }
     }
     #[inline(always)]
     fn stencil(r: &SoftDraw) -> bool {
-        STENCIL == FILL_DYN && r.st.stencil_test != 0 && r.rules.stencil_max(r.t).is_some()
+        STENCIL == FILL_DYN && r.st.stencil_test && r.rules.stencil_max(r.t).is_some()
     }
     #[inline(always)]
     fn clip(st: &GlDrawState) -> bool {
@@ -285,7 +285,7 @@ impl SoftDraw<'_> {
                 && (self.win.ox as i64) + px1 as i64 <= c.x1 as i64);
             i += 1;
         }
-        if st.scissor_test != 0 && !clipped {
+        if st.scissor_test && !clipped {
             // SoftDraw::owned_at()'s scissor test, decided for the whole row.
             let sx0 = st.scissor[0] as i64;
             let sx1 = st.scissor[0] as i64 + st.scissor[2] as i64 - 1;
@@ -447,7 +447,6 @@ impl SoftDraw<'_> {
                 let y = self.win.oy.wrapping_add(py);
                 let mut z = zi[i];
                 let mut off = offset;
-                let mut zw = 0.0f64;
                 let mut zq = 0u32;
 
                 if rules.depth_row_given {
@@ -461,9 +460,9 @@ impl SoftDraw<'_> {
                         z = 1.0;
                     }
                 }
-                if !st.window_depth(z, off, &mut zw) || !(0.0..=1.0).contains(&zw) {
+                let Some(zw) = st.window_depth(z, off) else {
                     continue;
-                }
+                };
                 if runs[r].is_some_and(|run| run.clipped) && !self.owned_at(col, py) {
                     continue;
                 }
@@ -817,7 +816,7 @@ impl SoftDraw<'_> {
     pub fn fill_admits(&self) -> bool {
         let st: &GlDrawState = self.st;
 
-        st.index_bits == 0 && st.alpha_test == 0 && !self.logic_op && self.polygon_stipple.is_none()
+        st.index_bits == 0 && !st.alpha_test && !self.logic_op && self.polygon_stipple.is_none()
     }
 
     /// The row loop for the draw's untextured filled triangles, or None for
@@ -829,9 +828,9 @@ impl SoftDraw<'_> {
         if path == FillPath::Off || self.texture.is_some() || !self.fill_admits() {
             return None;
         }
-        let depth: i32 = if st.depth_test == 0 {
+        let depth: i32 = if !st.depth_test {
             0
-        } else if st.depth_mask == 0 {
+        } else if !st.depth_mask {
             -1
         } else if st.depth_func == SGI_GL_LESS {
             1
@@ -847,8 +846,8 @@ impl SoftDraw<'_> {
         } else {
             -1
         };
-        let stencil = st.stencil_test != 0 && self.rules.stencil_max(self.t).is_some();
-        if path == FillPath::Dynamic || depth < 0 || blend < 0 || st.fog != 0 || stencil || st.clip_planes != 0 {
+        let stencil = st.stencil_test && self.rules.stencil_max(self.t).is_some();
+        if path == FillPath::Dynamic || depth < 0 || blend < 0 || st.fog || stencil || st.clip_planes != 0 {
             return Some(FillRow::FillAny);
         }
         let smooth = (st.shade_model != SGI_GL_FLAT) as usize;
@@ -901,8 +900,8 @@ impl SoftDraw<'_> {
         if SOFT_FILL_PATH.with(|p| p.get()) == FillPath::Dynamic
             || kernel < 0
             || env < 0
-            || st.depth_test == 0
-            || st.fog != 0
+            || !st.depth_test
+            || st.fog
         {
             return Some(FillRow::TextureAny);
         }
@@ -910,15 +909,15 @@ impl SoftDraw<'_> {
         if self.blend {
             // The two blended states named for themselves.
             let over = repeat && env == 1 && self.fill_blend_over();
-            if over && kernel == 1 && format == 1 && st.depth_func == SGI_GL_LESS && st.depth_mask != 0 {
+            if over && kernel == 1 && format == 1 && st.depth_func == SGI_GL_LESS && st.depth_mask {
                 return Some(FillRow::LinearModulateRgbLessOver);
             }
-            if over && kernel == 2 && format == 0 && st.depth_func == SGI_GL_ALWAYS && st.depth_mask == 0 {
+            if over && kernel == 2 && format == 0 && st.depth_func == SGI_GL_ALWAYS && !st.depth_mask {
                 return Some(FillRow::TrilinearModulateRgbaAlwaysOver);
             }
             return Some(FillRow::TextureAny);
         }
-        if format < 0 || func < 0 || st.depth_mask == 0 {
+        if format < 0 || func < 0 || !st.depth_mask {
             return Some(FillRow::TextureAny);
         }
         let (func, kernel, env, format) = (func as usize, kernel as usize, env as usize, format as usize);
@@ -948,13 +947,13 @@ mod tests {
         let mut rng = Lcg(seed.wrapping_mul(0x9e3779b97f4a7c15) | 1);
         let st = &mut b.st;
 
-        st.depth_test = (rng.next_u32() % 4 != 0) as u32;
+        st.depth_test = rng.next_u32() % 4 != 0;
         st.depth_func = pick(&mut rng, &[SGI_GL_LESS, SGI_GL_LEQUAL, SGI_GL_LESS, SGI_GL_LEQUAL, SGI_GL_GREATER, SGI_GL_ALWAYS, SGI_GL_EQUAL, SGI_GL_NOTEQUAL, SGI_GL_NEVER]);
-        st.depth_mask = (rng.next_u32() % 5 != 0) as u32;
+        st.depth_mask = rng.next_u32() % 5 != 0;
         st.shade_model = pick(&mut rng, &[SGI_GL_FLAT, SGI_GL_SMOOTH]);
-        st.dither = rng.next_u32() % 2;
+        st.dither = rng.next_u32() % 2 != 0;
         if rng.next_u32() % 2 == 0 {
-            st.blend = 1;
+            st.blend = true;
             if rng.next_u32() % 2 == 0 {
                 st.blend_src = SGI_GL_SRC_ALPHA;
                 st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
@@ -967,7 +966,7 @@ mod tests {
             st.blend_equation = pick(&mut rng, &[0, SGI_GL_FUNC_ADD, SGI_GL_FUNC_ADD, SGI_GL_MIN, SGI_GL_FUNC_SUBTRACT]);
         }
         if rng.next_u32() % 4 == 0 {
-            st.fog = 1;
+            st.fog = true;
             st.fog_mode = pick(&mut rng, &[SGI_GL_LINEAR, SGI_GL_EXP, SGI_GL_EXP2]);
             st.fog_start = 0.0;
             st.fog_end = 2.5;
@@ -979,7 +978,7 @@ mod tests {
             st.colour_mask = rng.next_u32() % 16;
         }
         if rng.next_u32() % 4 == 0 {
-            st.scissor_test = 1;
+            st.scissor_test = true;
             st.scissor = [rng.next_u32() as i32 % 60, rng.next_u32() as i32 % 60, 40 + rng.next_u32() as i32 % 100, 40 + rng.next_u32() as i32 % 100];
         }
         if rng.next_u32() % 4 == 0 {
@@ -1008,7 +1007,7 @@ mod tests {
             if rng.next_u32() % 4 == 0 {
                 tex.wrap_t = SGI_GL_CLAMP_TO_EDGE;
             }
-            st.texture_2d = 1;
+            st.texture_2d = true;
             st.texture_env_mode = pick(&mut rng, &[SGI_GL_REPLACE, SGI_GL_MODULATE, SGI_GL_MODULATE, SGI_GL_DECAL, SGI_GL_BLEND]);
             st.texture_env_color = [0.9, 0.2, 0.4, 0.6];
             if seed % 2 == 0 {
@@ -1016,11 +1015,11 @@ mod tests {
                 let kernel = pick(&mut rng, &[(SGI_GL_NEAREST, SGI_GL_NEAREST), (SGI_GL_LINEAR, SGI_GL_LINEAR), (SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR)]);
                 tex = BenchTexture::new(32, kernel.0, kernel.1, pick(&mut rng, &[SGI_GL_RGBA, SGI_GL_RGB]));
                 st.texture_env_mode = pick(&mut rng, &[SGI_GL_REPLACE, SGI_GL_MODULATE]);
-                st.depth_test = 1;
-                st.depth_mask = 1;
+                st.depth_test = true;
+                st.depth_mask = true;
                 st.depth_func = pick(&mut rng, &[SGI_GL_LESS, SGI_GL_LEQUAL]);
-                st.blend = 0;
-                st.fog = 0;
+                st.blend = false;
+                st.fog = false;
             }
             b.tex = Some(tex);
         }
@@ -1059,7 +1058,7 @@ mod tests {
     fn random_stencil(rng: &mut Lcg, st: &mut GlDrawState) {
         let ops = [SGI_GL_KEEP, SGI_GL_KEEP, 0, SGI_GL_REPLACE, SGI_GL_INCR, SGI_GL_DECR, SGI_GL_INVERT];
 
-        st.stencil_test = 1;
+        st.stencil_test = true;
         st.stencil_func = rng.next_u32() % 8;
         st.stencil_ref = pick(rng, &[0, 1, 2, 3, -1, 300]);
         st.stencil_value_mask = pick(rng, &[u32::MAX, 0xff, 0x3, 0x2]);
@@ -1202,13 +1201,13 @@ mod tests {
                     for format in [SGI_GL_RGBA, SGI_GL_RGB] {
                         let make = || {
                             let mut b = case(seed, true);
-                            b.st.depth_test = 1;
-                            b.st.depth_mask = 1;
+                            b.st.depth_test = true;
+                            b.st.depth_mask = true;
                             b.st.depth_func = func;
                             b.st.shade_model = SGI_GL_SMOOTH;
-                            b.st.blend = 0;
-                            b.st.fog = 0;
-                            b.st.stencil_test = 0;
+                            b.st.blend = false;
+                            b.st.fog = false;
+                            b.st.stencil_test = false;
                             if seed % 2 == 1 {
                                 random_stencil(&mut Lcg(seed), &mut b.st);
                             }
@@ -1269,8 +1268,8 @@ mod tests {
     #[test]
     fn stencil_draws_take_the_row_loops() {
         let mut b = Bench::empty();
-        b.st.depth_test = 1;
-        b.st.stencil_test = 1;
+        b.st.depth_test = true;
+        b.st.stencil_test = true;
         b.st.stencil_func = SGI_GL_EQUAL;
         b.st.stencil_op = [SGI_GL_KEEP; 3];
         let t = b.board.gl_target();
@@ -1287,7 +1286,7 @@ mod tests {
     #[test]
     fn clipped_draws_take_the_row_loops() {
         let mut b = Bench::empty();
-        b.st.depth_test = 1;
+        b.st.depth_test = true;
         b.st.clip_planes = 1;
         let t = b.board.gl_target();
         let reports = SoftReports::default();
@@ -1307,14 +1306,14 @@ mod tests {
             let sky = seed % 2 == 0;
             let make = || {
                 let mut b = case(seed, true);
-                b.st.depth_test = 1;
+                b.st.depth_test = true;
                 b.st.depth_func = if sky { SGI_GL_ALWAYS } else { SGI_GL_LESS };
-                b.st.depth_mask = (!sky) as u32;
-                b.st.blend = 1;
+                b.st.depth_mask = !sky;
+                b.st.blend = true;
                 b.st.blend_src = SGI_GL_SRC_ALPHA;
                 b.st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
                 b.st.blend_equation = SGI_GL_FUNC_ADD;
-                b.st.fog = 0;
+                b.st.fog = false;
                 b.st.texture_env_mode = SGI_GL_MODULATE;
                 b.tex = Some(if sky {
                     BenchTexture::new(32, SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR, SGI_GL_RGBA)
@@ -1335,17 +1334,17 @@ mod tests {
     fn selection_reaches_each_texture_entry() {
         let mut seen = Vec::new();
         let mut b = Bench::empty();
-        b.st.depth_test = 1;
+        b.st.depth_test = true;
         for blend in [false, true] {
             for wrap in [SGI_GL_REPEAT, SGI_GL_CLAMP_TO_EDGE] {
-                for (func, mask) in [(SGI_GL_LESS, 1), (SGI_GL_LEQUAL, 1), (SGI_GL_ALWAYS, 0)] {
+                for (func, mask) in [(SGI_GL_LESS, true), (SGI_GL_LEQUAL, true), (SGI_GL_ALWAYS, false)] {
                     for (min, mag) in [(SGI_GL_NEAREST, SGI_GL_NEAREST), (SGI_GL_LINEAR, SGI_GL_LINEAR), (SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR)] {
                         for env in [SGI_GL_REPLACE, SGI_GL_MODULATE] {
                             for format in [SGI_GL_RGBA, SGI_GL_RGB] {
                                 b.st.depth_func = func;
                                 b.st.depth_mask = mask;
                                 b.st.texture_env_mode = env;
-                                b.st.blend = blend as u32;
+                                b.st.blend = blend;
                                 b.st.blend_src = SGI_GL_SRC_ALPHA;
                                 b.st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
                                 let t = b.board.gl_target();
@@ -1376,9 +1375,9 @@ mod tests {
     #[test]
     fn clamped_texture_selects_its_loop() {
         let mut b = Bench::empty();
-        b.st.depth_test = 1;
+        b.st.depth_test = true;
         b.st.depth_func = SGI_GL_LEQUAL;
-        b.st.depth_mask = 1;
+        b.st.depth_mask = true;
         b.st.texture_env_mode = SGI_GL_MODULATE;
         let t = b.board.gl_target();
         let reports = SoftReports::default();
@@ -1406,11 +1405,11 @@ mod tests {
         for seed in 600..=620u64 {
             let make = |wrap_s| {
                 let mut b = case(seed, true);
-                b.st.depth_test = 1;
+                b.st.depth_test = true;
                 b.st.depth_func = SGI_GL_LEQUAL;
-                b.st.depth_mask = 1;
-                b.st.blend = 0;
-                b.st.fog = 0;
+                b.st.depth_mask = true;
+                b.st.blend = false;
+                b.st.fog = false;
                 b.st.texture_env_mode = SGI_GL_MODULATE;
                 let mut tex = BenchTexture::new(32, SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR, SGI_GL_RGB);
 
@@ -1511,8 +1510,8 @@ mod tests {
         let stipple = [0u32; 32];
         let v: Vec<f32> = vertices.iter().flatten().copied().collect();
 
-        b.st.dither = 0;
-        b.st.texture_2d = 1;
+        b.st.dither = false;
+        b.st.texture_2d = true;
         b.st.texture_env_mode = SGI_GL_REPLACE;
         b.board.tex_lod = lod;
         b.board.texture_lod_bias(&mut image);
@@ -1658,11 +1657,11 @@ mod tests {
             for smooth in [SGI_GL_FLAT, SGI_GL_SMOOTH] {
                 for over in [false, true] {
                     let mut b = Bench::empty();
-                    b.st.depth_test = (depth != 0) as u32;
+                    b.st.depth_test = depth != 0;
                     b.st.depth_func = if depth == 2 { SGI_GL_LEQUAL } else { SGI_GL_LESS };
                     b.st.shade_model = smooth;
                     if over {
-                        b.st.blend = 1;
+                        b.st.blend = true;
                         b.st.blend_src = SGI_GL_SRC_ALPHA;
                         b.st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
                     }

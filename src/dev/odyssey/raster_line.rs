@@ -10,16 +10,14 @@ impl SoftVertex {
     /// The texture values at this end of the line to b, their change along
     /// it, and its length in pixels; None where one is not finite.
     pub fn texture_line_gradient(&self, b: &SoftVertex, sub: u32, volume: bool, one_dimensional: bool) -> Option<([f64; 4], [f64; 4], f64)> {
-        let mut values = [0.0f64; 4];
-        let mut end = [0.0f64; 4];
         let mut delta = [0.0f64; 4];
 
         let length = ((b.x - self.x) as f64).hypot((b.y - self.y) as f64) / (1i32 << sub) as f64;
         if !length.is_finite() {
             return None;
         }
-        self.texture_values(volume, one_dimensional, &mut values);
-        b.texture_values(volume, one_dimensional, &mut end);
+        let values = self.texture_values(volume, one_dimensional);
+        let end = b.texture_values(volume, one_dimensional);
         for k in 0..4 {
             delta[k] = end[k] - values[k];
             if !values[k].is_finite() || !delta[k].is_finite() {
@@ -335,7 +333,8 @@ pub struct SoftLineStipple {
 }
 
 impl SoftVertex {
-    pub fn line_vertex_at(&self, b: &SoftVertex, t: f64, out: &mut SoftVertex) {
+    pub fn line_vertex_at(&self, b: &SoftVertex, t: f64) -> SoftVertex {
+        let mut out = SoftVertex::default();
         let wa = (1.0 - t) * self.inv_w;
         let wb = t * b.inv_w;
         let sum = wa + wb;
@@ -354,6 +353,7 @@ impl SoftVertex {
         for i in 0..SGI_GL_CLIP_PLANES as usize {
             out.clip[i] = (wa * self.clip[i] + wb * b.clip[i]) / sum;
         }
+        out
     }
 }
 
@@ -407,13 +407,10 @@ impl SoftDraw<'_> {
                 s.counter = (s.counter.wrapping_add(1)) % 16u32.wrapping_mul(s.repeat);
                 s.consumed = true;
                 if keep {
-                    let mut start = SoftVertex::default();
-                    let mut end = SoftVertex::default();
                     let t0 = i / length;
                     let t1 = r2_min((i + 1.0) / length, 1.0);
-
-                    a.line_vertex_at(&b, t0, &mut start);
-                    a.line_vertex_at(&b, t1, &mut end);
+                    let start = a.line_vertex_at(&b, t0);
+                    let end = a.line_vertex_at(&b, t1);
                     self.line_projected(&start, &end, provoking, offset, None, client_clip);
                 }
                 i += 1.0;
@@ -645,14 +642,11 @@ impl SoftDraw<'_> {
 
     /// Keep standalone client-plane rejection after geometric counting.
     pub fn line(&self, va: &[f32], vb: &[f32], provoking: &[f32], stipple: Option<&mut SoftLineStipple>) {
-        let mut ca = VolumeVertex::default();
-        let mut cb = VolumeVertex::default();
-
         if stipple.is_none() && self.bounds().is_none() {
             return;
         }
-        self.st.volume_from_draw_vertex(va, &mut ca);
-        self.st.volume_from_draw_vertex(vb, &mut cb);
+        let mut ca = self.st.volume_from_draw_vertex(va);
+        let mut cb = self.st.volume_from_draw_vertex(vb);
         if !ca.clip_segment(&mut cb) {
             return;
         }
@@ -729,9 +723,7 @@ impl SoftDraw<'_> {
     }
 
     pub fn point(&self, vp: &[f32]) {
-        let mut cv = VolumeVertex::default();
-
-        self.st.volume_from_draw_vertex(vp, &mut cv);
+        let cv = self.st.volume_from_draw_vertex(vp);
         if !cv.contains() {
             return;
         }

@@ -321,9 +321,9 @@ mod tests {
             projection: id,
             viewport: [0, 0, WIDTH as i32, WIDTH as i32],
             shade_model: SGI_GL_FLAT,
-            depth_test: 1,
+            depth_test: true,
             depth_func: func,
-            depth_mask: 1,
+            depth_mask: true,
             depth_range: [0.0, 1.0],
             draw_buffers: 1,
             colour_mask: SGI_GL_COLOUR_MASK_ALL,
@@ -334,7 +334,7 @@ mod tests {
             offset_units: units,
             ..Default::default()
         };
-        st.drawable.bound = 1;
+        st.drawable.bound = true;
         st.drawable.front = 1;
         st.drawable.clip.n = 1;
         st.drawable.clip.r[0] = ClipRect { x0: 0, y0: 0, x1: WIDTH as i32 - 1, y1: WIDTH as i32 - 1 };

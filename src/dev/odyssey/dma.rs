@@ -49,7 +49,8 @@ pub enum ReadPlane {
 
 #[derive(Clone, Copy, Default)]
 pub struct DmaSource {
-    pub obj: i32,
+    /// The board-memory object read, or None for the colour buffer.
+    pub obj: Option<usize>,
     pub front: bool,
     pub x: i64,
     pub y: i64,
@@ -131,9 +132,7 @@ impl Board {
     /// mask selects, decoded by the header's source format as an image
     /// transfer's pixel is. Clipped to the plane only.
     pub fn dma_put(&mut self, x: i64, y: i64, src: &[u8], code: u32) {
-        let mut pixel: u32 = 0;
-
-        self.decode_pixel(code, src, &mut pixel);
+        let pixel = self.decode_pixel(code, src).unwrap_or(0);
         if x < 0 || y < 0 || x >= SGI_ODYSSEY_WIDTH as i64 || y >= SGI_ODYSSEY_HEIGHT as i64 {
             return;
         }
@@ -226,7 +225,7 @@ impl Board {
     /// takes rowbytes bytes, moving to the next entry whenever the current one's
     /// count runs out, then the cursor steps over skip uncounted bytes. No byte
     /// outside the entries is read.
-    pub fn dma_to_buffer(&mut self, bus: &DmaBus, table: u64, seq: u64, hdr: &[u32], obj: i32) {
+    pub fn dma_to_buffer(&mut self, bus: &DmaBus, table: u64, seq: u64, hdr: &[u32], obj: Option<usize>) {
         let mut e = [DmaEntry::default(); ODSY_DMA_MAX_PAGES];
         let x = hdr[ODSY_DMA_HDR_ORIGIN] & 0xffff;
         let y = hdr[ODSY_DMA_HDR_ORIGIN] >> 16;
@@ -237,14 +236,14 @@ impl Board {
         let bpp = DMA_BPP[((hdr[ODSY_DMA_HDR_CONTROL] >> ODSY_DMA_BPP_SHIFT) & ODSY_DMA_BPP_MASK) as usize] as u32;
         let comps = texel12_components(hdr[ODSY_DMA_HDR_CONTROL] & ODSY_IMAGE_CODE_MASK);
         // A 12-bit texture source into an object: a byte or two a component.
-        let texel12 = obj >= 0 && comps != 0 && (bpp == comps || bpp == 2 * comps);
+        let texel12 = obj.is_some() && comps != 0 && (bpp == comps || bpp == 2 * comps);
         // An 8-bit luminance-alpha source into an object, two bytes a pixel.
-        let lum_alpha = obj >= 0 && bpp == 2 && (hdr[ODSY_DMA_HDR_CONTROL] & ODSY_IMAGE_CODE_MASK) == ODSY_IMAGE_CODE_LUM_ALPHA;
-        let raw = obj >= 0 && dma_raw(hdr, bpp);
+        let lum_alpha = obj.is_some() && bpp == 2 && (hdr[ODSY_DMA_HDR_CONTROL] & ODSY_IMAGE_CODE_MASK) == ODSY_IMAGE_CODE_LUM_ALPHA;
+        let raw = obj.is_some() && dma_raw(hdr, bpp);
         let mut payload: u64 = 0;
         let mut pos: u64 = 0;
 
-        if obj >= 0 && self.dma_raw64(hdr, bpp) {
+        if obj.is_some() && self.dma_raw64(hdr, bpp) {
             return;
         }
         if bpp != 4 && bpp != 3 && bpp != 1 && !texel12 && !lum_alpha && !raw {
@@ -312,17 +311,16 @@ impl Board {
                     // An object's texels land on the raster unit, in order
                     // behind the draws that may still read the old ones.
                     let (ox, oy) = (x.wrapping_add(c), y.wrapping_add(r));
-                    if raw {
+                    if let (true, Some(obj)) = (raw, obj) {
                         self.object_stage(&mut staged, obj, ox, oy, raw_unpack(px, bpp));
                         continue;
                     }
-                    if texel12 {
+                    if let (true, Some(obj)) = (texel12, obj) {
                         self.object_stage(&mut staged, obj, ox, oy, decode_texel12(code, px, bpp != comps));
                         continue;
                     }
-                    if obj >= 0 {
-                        let mut pixel = 0;
-                        self.decode_pixel(code, px, &mut pixel);
+                    if let Some(obj) = obj {
+                        let pixel = self.decode_pixel(code, px).unwrap_or(0);
                         self.object_stage(&mut staged, obj, ox, oy, pixel);
                         continue;
                     }
@@ -332,7 +330,7 @@ impl Board {
         }
         self.object_flush(&mut staged);
         // An object is board memory the raster unit samples, not a line the display scans.
-        if obj < 0 {
+        if obj.is_none() {
             self.scanout.invalidate_rows_for(DirtySite::Dma, y, h);
         }
     }
@@ -807,7 +805,7 @@ impl Board {
         let fmt = hdr[ODSY_DMA_HDR_FORMAT];
         let selector = (fmt >> ODSY_DMA_FMT_SELECTOR_SHIFT) & ODSY_DMA_FMT_SELECTOR_MASK;
 
-        src.obj = -1;
+        src.obj = None;
         // Front and back per pixel (Board::dma_read_pixel()).
         src.front = true;
         src.x = (hdr[ODSY_DMA_HDR_ORIGIN] & 0xffff) as i64;
@@ -838,8 +836,8 @@ impl Board {
         if base != 0 && base == self.dma_colour_base {
             return true;
         }
-        src.obj = if base != 0 { self.object_find(base) } else { -1 };
-        if src.obj < 0 {
+        src.obj = self.object_find(base);
+        if src.obj.is_none() {
             if self.dma_report(ODSY_DMA_REPORT_SOURCE) {
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA read of board base {:#x}, which holds no buffer", base);
             }
@@ -852,8 +850,8 @@ impl Board {
     /// colour-buffer pixel comes from the buffer its main drawable shows, or from
     /// the other buffer for a back read. (x, y) is inside the plane.
     pub fn dma_read_pixel(&mut self, src: &DmaSource, x: i64, y: i64) -> u32 {
-        if src.obj >= 0 {
-            return self.object_load(src.obj, x as u32, y as u32);
+        if let Some(obj) = src.obj {
+            return self.object_load(obj, x as u32, y as u32);
         }
         let buffer = self.read_buffer(src.front, x, y);
         self.buffer_load(buffer, x, y)
@@ -945,12 +943,12 @@ impl Board {
         let index_max: u32 = if first == ODSY_DMA_BYTE_INDEX_HIGH { 0xfff } else { 0xff };
         let mut o: usize = 0;
 
-        if index_read && src.obj >= 0 {
+        if let (true, Some(obj)) = (index_read, src.obj) {
             if self.dma_report(ODSY_DMA_REPORT_INDEX_OBJECT) {
                 crate::dlog!(
                     LogModule::Odyssey,
                     "sgi-odyssey: DMA index read of board object {:#x}, which records no display mode",
-                    self.obj_base[src.obj as usize]
+                    self.obj_base[obj]
                 );
             }
             return false;
@@ -976,7 +974,7 @@ impl Board {
                 let word = self.dma_read_pixel(src, x, y);
                 let mut group = ODSY_GAMMA_GROUP;
 
-                if src.obj < 0 {
+                if src.obj.is_none() {
                     let id = self.main_id(x as u32, y as u32);
                     group = self.display_group(id);
                 }
@@ -1114,7 +1112,7 @@ impl Board {
         if (!raw && l.is_none()) || !self.dma_read_source(hdr, &mut src) {
             return;
         }
-        if raw && src.obj < 0 {
+        if raw && src.obj.is_none() {
             if self.dma_report(ODSY_DMA_REPORT_SOURCE) {
                 crate::dlog!(
                     LogModule::Odyssey,
@@ -1138,11 +1136,10 @@ impl Board {
             }
             return;
         }
-        let inside = if src.obj >= 0 {
+        let inside = if let Some(obj) = src.obj {
             // Rows past an object's store were never written: the model holds no
             // value for them, so a read reaching them is refused, not zero-filled.
-            src.x + (w as i64) <= self.obj_width[src.obj as usize] as i64
-                && src.y + (h as i64) <= self.obj_rows[src.obj as usize] as i64
+            src.x + (w as i64) <= self.obj_width[obj] as i64 && src.y + (h as i64) <= self.obj_rows[obj] as i64
         } else {
             src.x >= 0
                 && src.y >= 0
@@ -1160,10 +1157,10 @@ impl Board {
             return;
         }
         let mut payload = vec![0u8; total as usize];
-        if raw {
+        if let (true, Some(obj)) = (raw, src.obj) {
             for r in 0..h {
                 for c in 0..w {
-                    let word = self.object_load(src.obj, (src.x + c as i64) as u32, (src.y + r as i64) as u32);
+                    let word = self.object_load(obj, (src.x + c as i64) as u32, (src.y + r as i64) as u32);
                     let off = ((r as u64) * (rowbytes as u64) + (c as u64) * (bpp as u64)) as usize;
                     raw_pack(word, bpp, &mut payload[off..]);
                 }
@@ -1228,7 +1225,7 @@ impl Board {
                 );
             }
         } else if self.dma_colour_base != 0 && hdr[ODSY_DMA_HDR_DEST] == self.dma_colour_base {
-            self.dma_to_buffer(&bus, table, seq, &hdr, -1);
+            self.dma_to_buffer(&bus, table, seq, &hdr, None);
         } else if hdr[ODSY_DMA_HDR_DEST] == 0 {
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA header at {:#x} names no destination buffer", table);
         } else {
@@ -1238,9 +1235,7 @@ impl Board {
                 hdr[ODSY_DMA_HDR_WIDTH].wrapping_mul(ODSY_DEST_WIDTH_UNIT),
             );
 
-            if obj >= 0 {
-                self.dma_to_buffer(&bus, table, seq, &hdr, obj);
-            }
+            self.dma_to_buffer(&bus, table, seq, &hdr, Some(obj));
         }
         if hdr[ODSY_DMA_HDR_CONTROL] & ODSY_DMA_IRQ_REQUEST != 0 {
             self.dma_done();
@@ -1683,12 +1678,9 @@ impl Board {
         if source_base == 0 || source_base == self.dest_base || self.obj_count > SGI_ODYSSEY_OBJECTS {
             return false;
         }
-        let source = self.object_find(source_base);
-        let dest = self.image_object();
-        if source < 0 || dest < 0 {
+        let (Some(su), Some(du)) = (self.object_find(source_base), self.image_object()) else {
             return false;
-        }
-        let (su, du) = (source as usize, dest as usize);
+        };
         if self.obj_width[su] != source_units * 16 || self.obj_rows[su] < hs || self.obj_width[du] != dest_units * 16 {
             return false;
         }
@@ -1697,13 +1689,13 @@ impl Board {
             .and_then(|v| v.checked_add(self.obj_offset[su] as u64))
             .and_then(|v| v.checked_add(ws as u64));
         let Some(source_end) = source_end else { return false };
-        if source_end > self.obj_used as u64 || source_end > self.obj_mem.size / 4 || !self.object_rows(dest, hd) {
+        if source_end > self.obj_used as u64 || source_end > self.obj_mem.size / 4 || !self.object_rows(du, hd) {
             return false;
         }
         for y in 0..hd {
             for x in 0..wd {
-                let v = self.object_load(source, 2 * x, 2 * y);
-                self.object_store(dest, x, y, v);
+                let v = self.object_load(su, 2 * x, 2 * y);
+                self.object_store(du, x, y, v);
             }
         }
         true

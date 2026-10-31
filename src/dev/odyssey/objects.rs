@@ -1,23 +1,21 @@
 use super::*;
 
 impl Board {
-    /// The index of the object at board base base, or -1. A base names at most
-    /// one live object (Board::object_select()), so the index's entry is the one
-    /// a search of obj_base would find.
-    pub fn object_find(&mut self, base: u32) -> i32 {
+    /// The index of the object at board base base. A base names at most one
+    /// live object (Board::object_select()), so the index's entry is the one a
+    /// search of obj_base would find.
+    pub fn object_find(&mut self, base: u32) -> Option<usize> {
         if base == 0 {
-            return -1;
+            return None;
         }
         match self.obj_index.get(&base) {
-            Some(slot) if *slot != 0 => (*slot - 1) as i32,
-            _ => -1,
+            Some(slot) if *slot != 0 => Some((*slot - 1) as usize),
+            _ => None,
         }
     }
 
     /// Give object i the base base, keeping obj_index in step.
-    pub fn object_set_base(&mut self, i: i32, base: u32) {
-        let i = i as usize;
-
+    pub fn object_set_base(&mut self, i: usize, base: u32) {
         if self.obj_base[i] != 0 {
             self.obj_index.remove(&self.obj_base[i]);
         }
@@ -64,8 +62,7 @@ impl Board {
         }
     }
 
-    pub fn object_region_written(&self, object: i32, x: u32, y: u32, width: u32, height: u32) -> bool {
-        let o = object as usize;
+    pub fn object_region_written(&self, o: usize, x: u32, y: u32, width: u32, height: u32) -> bool {
 
         if x > self.obj_width[o] || width > self.obj_width[o] - x || y > self.obj_rows[o] || height > self.obj_rows[o] - y {
             return false;
@@ -87,47 +84,46 @@ impl Board {
     /// every frame but uploaded once is the first to go when the store or
     /// the table fills. Model policy, not board behaviour (origami datasheet
     /// odyssey.md, "Board-memory object store", origami#3192).
-    pub fn object_touch(&mut self, i: i32) {
+    pub fn object_touch(&mut self, i: usize) {
         self.obj_clock += 1;
-        self.obj_stamp[i as usize] = self.obj_clock;
+        self.obj_stamp[i] = self.obj_clock;
     }
 
     /// Forget object i: its slot stays, with base 0, for a later object.
-    pub fn object_forget(&mut self, i: i32) {
+    pub fn object_forget(&mut self, i: usize) {
         self.object_set_base(i, 0);
-        let i = i as usize;
         self.obj_width[i] = 0;
         self.obj_rows[i] = 0;
         self.obj_offset[i] = 0;
         self.obj_stamp[i] = 0;
     }
 
-    /// The least recently used live object other than keep, or -1.
-    pub fn object_oldest(&mut self, keep: i32) -> i32 {
-        let mut oldest: i32 = -1;
+    /// The least recently used live object other than keep.
+    pub fn object_oldest(&mut self, keep: Option<usize>) -> Option<usize> {
+        let mut oldest: Option<usize> = None;
 
         for i in 0..self.obj_count as usize {
-            if i as i32 != keep && self.obj_base[i] != 0 && (oldest < 0 || self.obj_stamp[i] < self.obj_stamp[oldest as usize]) {
-                oldest = i as i32;
+            if Some(i) != keep && self.obj_base[i] != 0 && oldest.is_none_or(|o| self.obj_stamp[i] < self.obj_stamp[o]) {
+                oldest = Some(i);
             }
         }
         oldest
     }
 
     /// Pack the objects that hold rows to the front of the store, in store order,
-    /// so the space between them is reclaimed, then object last (when not -1)
+    /// so the space between them is reclaimed, then object last (when given)
     /// after them all, so that it can grow in place. Indices do not change.
-    pub fn object_compact(&mut self, last: i32) {
+    pub fn object_compact(&mut self, last: Option<usize>) {
         // A queued textured draw may still read the store.
         self.raster_wait();
-        let last_size: u64 = if last >= 0 { self.obj_width[last as usize] as u64 * self.obj_rows[last as usize] as u64 } else { 0 };
+        let last_size: u64 = last.map_or(0, |l| self.obj_width[l] as u64 * self.obj_rows[l] as u64);
         let mut held: Vec<u8> = Vec::new();
         let mut held_valid: Vec<bool> = Vec::new();
         let mut next: u64 = 0;
 
         // Packing the others may overwrite last's words: keep them aside.
         if last_size != 0 {
-            let off = self.obj_offset[last as usize] as u64;
+            let off = last.map_or(0, |l| self.obj_offset[l]) as u64;
 
             held = self.obj_mem.bytes[(off * 4) as usize..((off + last_size) * 4) as usize].to_vec();
             for k in 0..last_size {
@@ -138,7 +134,7 @@ impl Board {
         // one not yet packed. One whose words a packed object now covers is
         // left where it is, as a search from `next` would leave it.
         let mut order: Vec<usize> = (0..self.obj_count as usize)
-            .filter(|&i| i as i32 != last && self.obj_base[i] != 0 && self.obj_rows[i] != 0)
+            .filter(|&i| Some(i) != last && self.obj_base[i] != 0 && self.obj_rows[i] != 0)
             .collect();
         order.sort_unstable_by_key(|&i| (self.obj_offset[i], i));
         for p in order {
@@ -154,13 +150,13 @@ impl Board {
             }
             next += size;
         }
-        if last_size != 0 {
+        if let (Some(last), true) = (last, last_size != 0) {
             let at = next as usize * 4;
             self.obj_mem.bytes[at..at + held.len()].copy_from_slice(&held);
             for k in 0..last_size {
                 self.object_word_set_valid(next + k, held_valid[k as usize]);
             }
-            self.obj_offset[last as usize] = next as u32;
+            self.obj_offset[last] = next as u32;
             next += last_size;
         }
         // Growth in place assumes the words past the store's end are zero.
@@ -175,40 +171,42 @@ impl Board {
     /// does not exist; a new row length for an existing object discards its
     /// storage (its layout changed). When the table is full, the least recently
     /// used object is forgotten, reported once.
-    pub fn object_select(&mut self, base: u32, width: u32) -> i32 {
-        let mut i = self.object_find(base);
-
-        if i < 0 {
-            if let Some(j) = self.obj_base[..self.obj_count as usize].iter().position(|&b| b == 0) {
-                i = j as i32;
+    pub fn object_select(&mut self, base: u32, width: u32) -> usize {
+        if let Some(i) = self.object_find(base) {
+            if width != 0 && self.obj_width[i] != width {
+                self.obj_width[i] = width;
+                self.obj_rows[i] = 0;
             }
+            self.object_touch(i);
+            return i;
         }
-        if i < 0 && self.obj_count == SGI_ODYSSEY_OBJECTS {
-            i = self.object_oldest(-1);
-            if !self.obj_full_reported {
-                self.obj_full_reported = true;
-                crate::dlog!(
-                    LogModule::Odyssey,
-                    "sgi-odyssey: more than {} board-memory objects; the least recently used, {:#x}, is forgotten",
-                    SGI_ODYSSEY_OBJECTS,
-                    self.obj_base[i as usize]
-                );
+        let free = self.obj_base[..self.obj_count as usize].iter().position(|&b| b == 0);
+        let i = match free {
+            Some(j) => j,
+            None if self.obj_count == SGI_ODYSSEY_OBJECTS => {
+                // A full table has no free slot, so every entry is live.
+                let i = self.object_oldest(None).expect("a full table has a live object");
+                if !self.obj_full_reported {
+                    self.obj_full_reported = true;
+                    crate::dlog!(
+                        LogModule::Odyssey,
+                        "sgi-odyssey: more than {} board-memory objects; the least recently used, {:#x}, is forgotten",
+                        SGI_ODYSSEY_OBJECTS,
+                        self.obj_base[i]
+                    );
+                }
+                self.object_forget(i);
+                i
             }
-            self.object_forget(i);
-        }
-        if i < 0 || self.obj_base[i as usize] == 0 {
-            if i < 0 {
-                i = self.obj_count as i32;
+            None => {
                 self.obj_count += 1;
+                self.obj_count as usize - 1
             }
-            self.object_set_base(i, base);
-            self.obj_width[i as usize] = width;
-            self.obj_offset[i as usize] = 0;
-            self.obj_rows[i as usize] = 0;
-        } else if width != 0 && self.obj_width[i as usize] != width {
-            self.obj_width[i as usize] = width;
-            self.obj_rows[i as usize] = 0;
-        }
+        };
+        self.object_set_base(i, base);
+        self.obj_width[i] = width;
+        self.obj_offset[i] = 0;
+        self.obj_rows[i] = 0;
         self.object_touch(i);
         i
     }
@@ -218,8 +216,8 @@ impl Board {
     /// least recently used other objects until the live objects and i's new size
     /// fit, reporting the first object forgotten, then pack the store once with i
     /// last. False, reported once, when i alone does not fit.
-    pub fn object_rows(&mut self, i: i32, rows: u32) -> bool {
-        let iu = i as usize;
+    pub fn object_rows(&mut self, i: usize, rows: u32) -> bool {
+        let iu = i;
         let pool = ODSY_OBJ_POOL_WORDS as u64;
         let need = self.obj_width[iu] as u64 * rows as u64;
         let have = self.obj_width[iu] as u64 * self.obj_rows[iu] as u64;
@@ -241,12 +239,9 @@ impl Board {
                 }
             }
             while live + need > pool {
-                let victim = self.object_oldest(i);
-
-                if victim < 0 {
+                let Some(v) = self.object_oldest(Some(i)) else {
                     break;
-                }
-                let v = victim as usize;
+                };
                 live -= self.obj_width[v] as u64 * self.obj_rows[v] as u64;
                 if !self.obj_forget_reported {
                     self.obj_forget_reported = true;
@@ -257,9 +252,9 @@ impl Board {
                         self.obj_base[v]
                     );
                 }
-                self.object_forget(victim);
+                self.object_forget(v);
             }
-            self.object_compact(if have != 0 { i } else { -1 });
+            self.object_compact((have != 0).then_some(i));
         }
         if have != 0 && self.obj_offset[iu] as u64 + have == self.obj_used as u64 && self.obj_offset[iu] as u64 + need <= pool {
             self.obj_used = (self.obj_offset[iu] as u64 + need) as u32;
@@ -294,11 +289,11 @@ impl Board {
     }
 
     /// Object i's texel (x, y) as 0xRRGGBBAA; outside its rows or width, dropped.
-    pub fn object_store(&mut self, i: i32, x: u32, y: u32, rgba: u32) {
-        if x >= self.obj_width[i as usize] || !self.object_rows(i, y.wrapping_add(1)) {
+    pub fn object_store(&mut self, i: usize, x: u32, y: u32, rgba: u32) {
+        if x >= self.obj_width[i] || !self.object_rows(i, y.wrapping_add(1)) {
             return;
         }
-        let word = self.obj_offset[i as usize] as u64 + y as u64 * self.obj_width[i as usize] as u64 + x as u64;
+        let word = self.obj_offset[i] as u64 + y as u64 * self.obj_width[i] as u64 + x as u64;
         self.raster_wait();
         self.obj_mem.bytes[(word * 4) as usize..][..4].copy_from_slice(&rgba.to_be_bytes());
         self.object_word_set_valid(word, true);
@@ -309,8 +304,8 @@ impl Board {
     /// hand on. A queued textured draw may still read the texels this
     /// replaces, and the raster unit runs its jobs in order, so the write
     /// queues behind that draw instead of waiting for it.
-    pub fn object_stage(&mut self, staged: &mut Vec<(u32, u32)>, i: i32, x: u32, y: u32, rgba: u32) {
-        let iu = i as usize;
+    pub fn object_stage(&mut self, staged: &mut Vec<(u32, u32)>, i: usize, x: u32, y: u32, rgba: u32) {
+        let iu = i;
 
         if x >= self.obj_width[iu] {
             return;
@@ -349,8 +344,8 @@ impl Board {
         });
     }
 
-    pub fn object_load(&mut self, i: i32, x: u32, y: u32) -> u32 {
-        let iu = i as usize;
+    pub fn object_load(&mut self, i: usize, x: u32, y: u32) -> u32 {
+        let iu = i;
 
         if x >= self.obj_width[iu] || y >= self.obj_rows[iu] {
             return 0;
@@ -400,14 +395,16 @@ impl Board {
         let from_window = c.src_base == ODSY_DMA_SENTINEL_READ;
         let to_window = c.dest_base == ODSY_DMA_SENTINEL_DRAW;
         let (w, h) = c.size;
-        let src = if from_window { -1 } else { self.object_find(c.src_base) };
-        let dest = if to_window { -1 } else { self.object_find(c.dest_base) };
+        let src = if from_window { None } else { self.object_find(c.src_base) };
+        let dest = if to_window { None } else { self.object_find(c.dest_base) };
 
-        if (!from_window && src < 0) || (!to_window && dest < 0) {
+        if (!from_window && src.is_none()) || (!to_window && dest.is_none()) {
             return false;
         }
-        if dest >= 0 && (c.dest.0 as u64 + w as u64 > self.obj_width[dest as usize] as u64 || !self.object_rows(dest, c.dest.1.wrapping_add(h))) {
-            return false;
+        if let Some(d) = dest {
+            if c.dest.0 as u64 + w as u64 > self.obj_width[d] as u64 || !self.object_rows(d, c.dest.1.wrapping_add(h)) {
+                return false;
+            }
         }
         if w == 0 || h == 0 {
             return true;
@@ -416,9 +413,11 @@ impl Board {
 
         for y in 0..h {
             for x in 0..w {
-                words.push(if from_window {
+                words.push(if let Some(src) = src {
+                    self.object_load(src, c.src.0 + x, c.src.1 + y)
+                } else {
                     // Into an object the window's rows go bottom first.
-                    let row = if dest >= 0 { h - 1 - y } else { y };
+                    let row = if dest.is_some() { h - 1 - y } else { y };
                     let (px, py) = ((c.src.0 + x) as i64 + self.read_origin[0] as i64, (c.src.1 + row) as i64 + self.read_origin[1] as i64);
 
                     if px < 0 || py < 0 || px >= SGI_ODYSSEY_WIDTH as i64 || py >= SGI_ODYSSEY_HEIGHT as i64 {
@@ -428,8 +427,6 @@ impl Board {
 
                         self.buffer_load(buffer, px, py)
                     }
-                } else {
-                    self.object_load(src, c.src.0 + x, c.src.1 + y)
                 });
             }
         }
@@ -442,14 +439,14 @@ impl Board {
                 let word = words[(y * w + x) as usize];
                 let y = if flip { h - 1 - y } else { y };
 
-                if to_window {
+                if let Some(dest) = dest {
+                    self.object_store(dest, c.dest.0 + x, c.dest.1 + y, word);
+                } else {
                     self.paint_pixel(
                         (c.dest.0 + x) as i64 + self.win_origin[0] as i64,
                         (c.dest.1 + y) as i64 + self.win_origin[1] as i64,
                         word,
                     );
-                } else {
-                    self.object_store(dest, c.dest.0 + x, c.dest.1 + y, word);
                 }
             }
         }

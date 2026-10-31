@@ -227,7 +227,7 @@ impl<'a> SoftDraw<'a> {
         // With several targets enabled the highest dimension wins: 3D, then
         // 2D, then 1D (OpenGL 1.2.1, 3.8.10). The family supplies the winning
         // target's image, so the image is checked against that target only.
-        let target: u32 = if st.texture_3d != 0 { 3 } else if st.texture_2d != 0 { 2 } else if st.texture_1d != 0 { 1 } else { 0 };
+        let target: u32 = if st.texture_3d { 3 } else if st.texture_2d { 2 } else if st.texture_1d { 1 } else { 0 };
 
         if target == 0 || st.index_bits != 0 {
             return true;
@@ -246,7 +246,7 @@ impl<'a> SoftDraw<'a> {
         // A volume image under the 2D enable alone stays accepted, as before
         // targets were ranked. With 1D enabled as well the 2D binding wins,
         // and a volume is not a 2D image.
-        if target == 2 && im.is_some_and( |i| i.volume) && st.texture_1d != 0 {
+        if target == 2 && im.is_some_and( |i| i.volume) && st.texture_1d {
             if report {
                 crate::dlog!(LogModule::Odyssey, "sgi-gl: volume texture image for a 2D target, draw dropped");
             }
