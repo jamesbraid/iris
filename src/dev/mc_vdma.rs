@@ -116,13 +116,8 @@ pub const REG_DMA_MEMADRDS: u32 = 0x2070;
 /// against the 32768 qwords it carries.
 pub const VDMA_CHUNK_QWORDS: usize = (256 * 1024) / 8;
 
-// A chunk must fit in REX3's data-port array, and the batch write pushes the
-// token plus one GFIFO entry per word, so it must fit the queue too. Both are
-// silent corruption if they ever stop holding: the device would truncate the
-// transfer, or push_batch would spin forever waiting for room that cannot
-// exist.
-const _: () = assert!(VDMA_CHUNK_QWORDS <= crate::dev::ng1::rex3::HOSTRW_BUF_QWORDS);
-const _: () = assert!(VDMA_CHUNK_QWORDS + 1 < crate::dev::ng1::rex3::GFIFO_DEPTH);
+// ip22_bus.rs, which wires the MC to the REX3, asserts that a chunk fits
+// REX3's data-port array and its GFIFO.
 
 // ── State ───────────────────────────────────────────────────────────────────
 
