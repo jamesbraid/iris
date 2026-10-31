@@ -191,8 +191,9 @@ pub struct CommandFifo {
     /// The board's thread is parked (`wait_for_work`): a producer unparks it
     /// only then, so a store reads a line nobody writes instead of locking.
     asleep: CachePadded<AtomicBool>,
-    /// The processor waits for the board's thread: its next slice starts
-    /// without the pause for a burst of stores.
+    /// The processor waits for the board's thread, for a refused access or
+    /// a counted store whose credit is owed: its next slice starts without
+    /// the pause for a burst of stores, and a pause under way ends.
     hurry: CachePadded<AtomicBool>,
     /// The board's thread is running stores.
     pub slice: CachePadded<AtomicBool>,
@@ -205,6 +206,13 @@ pub struct CommandFifo {
     /// run this many per slice.
     #[cfg(test)]
     pub test_words: AtomicU32,
+    /// Tests: the board's thread's pause in milliseconds instead of `GAP`.
+    #[cfg(test)]
+    pub test_gap_ms: AtomicU32,
+    /// Tests: how many times the board's thread has gone to sleep in `gap`,
+    /// counted after its last look at the hurry request.
+    #[cfg(test)]
+    pub test_parked: AtomicU32,
 }
 
 impl Default for CommandFifo {
@@ -227,6 +235,10 @@ impl Default for CommandFifo {
             pf_level: crate::PfValue::new(),
             #[cfg(test)]
             test_words: AtomicU32::new(0),
+            #[cfg(test)]
+            test_gap_ms: AtomicU32::new(0),
+            #[cfg(test)]
+            test_parked: AtomicU32::new(0),
         }
     }
 }
@@ -287,12 +299,42 @@ impl CommandFifo {
         self.running.load(SeqCst) && !self.has_room(store_words(size))
     }
 
-    /// The processor waits for the board's thread to run what is queued.
+    /// The processor waits for the board's thread to run what is queued:
+    /// a refused access, or a counted store whose credit is owed. A thread
+    /// already in its pause (`gap`) is woken to run at once.
     pub fn hurry(&self) {
         // A refused store retries in a loop; write the line only when it
         // changes, as IMPACT does for its asleep flag.
         if !self.hurry.load(SeqCst) {
             self.hurry.store(true, SeqCst);
+            if let Some(t) = self.sleeper.lock().as_ref() {
+                t.unpark();
+            }
+        }
+    }
+
+    /// The board's thread's pause before a slice (`GAP`), cut short when the
+    /// processor asks it to hurry.
+    pub fn gap(&self) {
+        #[cfg(test)]
+        let gap = match self.test_gap_ms.load(SeqCst) {
+            0 => GAP,
+            ms => std::time::Duration::from_millis(ms as u64),
+        };
+        #[cfg(not(test))]
+        let gap = GAP;
+        let end = std::time::Instant::now() + gap;
+        loop {
+            if self.take_hurry() {
+                return;
+            }
+            let now = std::time::Instant::now();
+            if now >= end {
+                return;
+            }
+            #[cfg(test)]
+            self.test_parked.fetch_add(1, SeqCst);
+            std::thread::park_timeout(end - now);
         }
     }
 
@@ -348,8 +390,16 @@ impl CommandFifo {
             let mut f = front.lock();
             if credited {
                 f.return_credit();
-            } else if let Some(pi) = &f.pi {
-                pi_gfx_owe_credits(pi.as_ref(), f.slot, 1);
+            } else {
+                if let Some(pi) = &f.pi {
+                    pi_gfx_owe_credits(pi.as_ref(), f.slot, 1);
+                }
+                drop(f);
+                // The credit comes back only as the stores ahead retire, and
+                // the processor can be watching its credit count (a read the
+                // bus does not refuse), so the board's thread runs without
+                // its pause.
+                self.hurry();
             }
             self.levels.counted.fetch_add(1, SeqCst);
         }

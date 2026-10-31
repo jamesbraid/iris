@@ -734,6 +734,61 @@ fn the_fifo_set_up_does_not_widen_the_credit_depth() {
     assert_eq!(pi.settled(), 72);
 }
 
+/// A counted store whose credit is owed has the board's thread run without
+/// its pause, so the credit comes back as soon as the stores ahead retire.
+/// A guest that watches its credit count reads a register the bus does not
+/// refuse, so nothing else hurries the thread; with the pause the kernel saw
+/// its count fall below the bias in a burst of a few hundred stores and gave
+/// the FIFO up as stuck. The stores inside the model's depth are credited
+/// at once and do not hurry.
+#[test]
+fn a_counted_store_owed_its_credit_hurries_the_board_thread() {
+    let (mut s, pi) = credit_board();
+    for _ in 0..ODSY_CFIFO_DEPTH {
+        s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    }
+    assert!(!s.fifo.take_hurry(), "a credited store leaves the pause alone");
+    s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    assert_eq!(pi.count("owe"), 1);
+    assert!(s.fifo.take_hurry(), "an owed credit hurries the board's thread");
+    finish(&mut s);
+
+    // On the board's thread, with a pause far longer than the wait below:
+    // only the hurry runs the burst in time.
+    let stores = 200u32;
+    let h = BoardLocks::new(s);
+    h.fifo.test_gap_ms.store(60_000, SeqCst);
+    // credit_board holds the queue for stepping by hand.
+    h.fifo.test_words.store(0, SeqCst);
+    pi.0.lock().clear();
+    h.work_start();
+    // One credited store starts the thread, and the burst waits until the
+    // thread is in its pause: a burst that lands before it would find the
+    // request already made and prove nothing about waking a sleeper.
+    h.write(ODSY_CMD_FIFO, 0, 8);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while h.fifo.test_parked.load(SeqCst) == 0 {
+        assert!(std::time::Instant::now() < deadline, "the board's thread never reached its pause");
+        std::thread::yield_now();
+    }
+    for _ in 1..stores {
+        h.write(ODSY_CMD_FIFO, 0, 8);
+    }
+    // The last few stores may find the queue run dry and wait out a pause
+    // of their own, but inside the depth they are credited at the store.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while pi.settled() != stores as i64 {
+        assert!(std::time::Instant::now() < deadline, "the board's thread kept its pause: {} stores wait, {} of {stores} credits back", h.fifo.stores(), pi.settled());
+        std::thread::yield_now();
+    }
+    assert!(pi.count("owe") > 0, "the burst ran past the model's depth");
+    assert_eq!(pi.count("repay"), pi.count("owe"));
+    // Cut a pause still under way short, so the stop does not wait it out.
+    h.fifo.hurry();
+    h.work_stop();
+    assert_eq!(h.fifo.stores(), 0);
+}
+
 /// A stopping machine finishes the work waiting; a reset abandons it.
 ///
 /// QEMU: command-work-stop-and-reset.
