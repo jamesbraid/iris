@@ -339,7 +339,7 @@ impl Device for Odyssey {
     fn step(&self, _cycles: u64) {}
 
     fn register_commands(&self) -> Vec<(String, String)> {
-        vec![("vpro".to_string(), "VPro bus refusals by reason and register: vpro refusals [reset]".to_string())]
+        vec![("vpro".to_string(), "VPro counters: vpro refusals [reset] (bus refusals by reason and register), vpro dirty [reset] (display)".to_string())]
     }
 
     fn execute_command(&self, cmd: &str, args: &[&str], mut w: Box<dyn std::io::Write + Send>) -> Result<(), String> {
@@ -352,7 +352,12 @@ impl Device for Odyssey {
                 self.state.refusals.reset();
                 Ok(())
             }
-            _ => Err("Usage: vpro refusals [reset]".to_string()),
+            ["dirty"] => self.state.board.lock().scanout.stats.report(&mut *w).map_err(|e| e.to_string()),
+            ["dirty", "reset"] => {
+                self.state.board.lock().scanout.stats = DirtyStats::default();
+                Ok(())
+            }
+            _ => Err("Usage: vpro refusals [reset] | vpro dirty [reset]".to_string()),
         }
     }
 
@@ -399,24 +404,6 @@ impl Device for Odyssey {
 
     fn get_clock(&self) -> u64 {
         0
-    }
-
-    fn register_commands(&self) -> Vec<(String, String)> {
-        vec![("vpro".to_string(), "VPro display counters: vpro dirty [reset]".to_string())]
-    }
-
-    fn execute_command(&self, cmd: &str, args: &[&str], mut w: Box<dyn std::io::Write + Send>) -> Result<(), String> {
-        if cmd != "vpro" {
-            return Err(format!("unknown command: {cmd}"));
-        }
-        match args {
-            ["dirty"] => self.state.board.lock().scanout.stats.report(&mut *w).map_err(|e| e.to_string()),
-            ["dirty", "reset"] => {
-                self.state.board.lock().scanout.stats = DirtyStats::default();
-                Ok(())
-            }
-            _ => Err("Usage: vpro dirty [reset]".to_string()),
-        }
     }
 }
 
