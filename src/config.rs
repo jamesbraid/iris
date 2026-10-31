@@ -496,8 +496,9 @@ pub enum MachineProfile {
     FuelIp34,
     /// Serial-only Tezro: the IP53 board on the IP35 software platform,
     /// configured by the shared keys and the `[tezro]` section; see
-    /// `src/ip53_machine.rs`.
-    Tezro,
+    /// `src/ip53_machine.rs`. Named `tezro` in configs.
+    #[serde(rename = "tezro")]
+    TezroIp53,
 }
 
 impl MachineProfile {
@@ -513,7 +514,7 @@ impl MachineProfile {
         match self {
             Self::OctaneIp30 => &[0, 64, 128, 256, 512],
             Self::FuelIp34 => &[0, 256],
-            Self::Tezro => &[0, 512, 1024],
+            Self::TezroIp53 => &[0, 512, 1024],
             Self::Indigo2Ip28 | Self::O2Ip32 => VALID_BANK_SIZES,
             _ => &[0, 8, 16, 32, 64, 128],
         }
@@ -527,7 +528,7 @@ impl MachineProfile {
             Self::O2Ip32 => "SGI O2 (IP32)",
             Self::OctaneIp30 => "SGI Octane (IP30)",
             Self::FuelIp34 => "SGI Fuel (IP34)",
-            Self::Tezro => "SGI Tezro (IP53)",
+            Self::TezroIp53 => "SGI Tezro (IP53)",
         }
     }
 
@@ -537,7 +538,7 @@ impl MachineProfile {
     /// connector), one on the Indy.
     pub fn scsi_controllers(self) -> u8 {
         match self {
-            Self::Indigo2Ip22 | Self::O2Ip32 | Self::OctaneIp30 | Self::FuelIp34 | Self::Tezro => 2,
+            Self::Indigo2Ip22 | Self::O2Ip32 | Self::OctaneIp30 | Self::FuelIp34 | Self::TezroIp53 => 2,
             _ => 1,
         }
     }
@@ -547,7 +548,7 @@ impl MachineProfile {
     pub fn memory_banks(self) -> usize {
         match self {
             Self::FuelIp34 => 2,
-            Self::Tezro => MAX_BANKS,
+            Self::TezroIp53 => MAX_BANKS,
             _ => 4,
         }
     }
@@ -635,7 +636,7 @@ impl GraphicsBoard {
     pub fn supports(self, profile: MachineProfile) -> bool {
         match profile {
             MachineProfile::OctaneIp30 => self.is_impact() || self == Self::None,
-            MachineProfile::FuelIp34 | MachineProfile::Tezro => self == Self::None,
+            MachineProfile::FuelIp34 | MachineProfile::TezroIp53 => self == Self::None,
             MachineProfile::Indigo2Ip22 => self != Self::None,
             _ => !matches!(self, Self::Extreme | Self::None),
         }
@@ -645,7 +646,7 @@ impl GraphicsBoard {
     pub fn default_for(profile: MachineProfile) -> Self {
         match profile {
             MachineProfile::OctaneIp30 => Self::SolidImpact,
-            MachineProfile::FuelIp34 | MachineProfile::Tezro => Self::None,
+            MachineProfile::FuelIp34 | MachineProfile::TezroIp53 => Self::None,
             _ => Self::Newport,
         }
     }
@@ -2108,7 +2109,7 @@ impl MachineConfig {
         for key in keys {
             let dev = &self.scsi[&key];
             let (controller, id) = dev.placement(key);
-            let max_id = if matches!(self.machine.profile, MachineProfile::FuelIp34 | MachineProfile::Tezro) { 15 } else { 7 };
+            let max_id = if matches!(self.machine.profile, MachineProfile::FuelIp34 | MachineProfile::TezroIp53) { 15 } else { 7 };
             if id == 0 || id > max_id {
                 return Err(format!("scsi.{}: SCSI ID {} is out of range (1–{}; the controller itself is 0)", key, id, max_id));
             }
@@ -2132,7 +2133,7 @@ impl MachineConfig {
                     "scsi.{} and scsi.{} both name {}", other, key, scsi_label(controller, id)
                 ));
             }
-            if dev.is_daynaport() && matches!(self.machine.profile, MachineProfile::O2Ip32 | MachineProfile::FuelIp34 | MachineProfile::Tezro) {
+            if dev.is_daynaport() && matches!(self.machine.profile, MachineProfile::O2Ip32 | MachineProfile::FuelIp34 | MachineProfile::TezroIp53) {
                 return Err(format!(
                     "scsi.{}: kind = \"daynaport\" is not available on {} (its Ethernet is built in)", key, self.machine.profile.label()
                 ));
@@ -2170,7 +2171,7 @@ impl MachineConfig {
             if board != GraphicsBoard::None {
                 return Err("Fuel currently supports graphics.board = \"none\" only".into());
             }
-        } else if self.machine.profile == MachineProfile::Tezro {
+        } else if self.machine.profile == MachineProfile::TezroIp53 {
             // The machine always models the R16000; the key names its family.
             if self.machine.cpu != CpuModel::R10000 {
                 return Err("a Tezro has R16000s: set [machine] cpu = \"r10000\" (the R10000 family)".into());
@@ -2227,7 +2228,7 @@ impl MachineConfig {
             }
         }
         match (self.network.mode, self.machine.profile) {
-            (NetMode::Off, p) if !matches!(p, MachineProfile::O2Ip32 | MachineProfile::OctaneIp30 | MachineProfile::FuelIp34 | MachineProfile::Tezro) => {
+            (NetMode::Off, p) if !matches!(p, MachineProfile::O2Ip32 | MachineProfile::OctaneIp30 | MachineProfile::FuelIp34 | MachineProfile::TezroIp53) => {
                 return Err("network.mode = \"off\" is only available on the O2, Octane, Fuel and Tezro; the Indy and Indigo2 always have their Ethernet".into());
             }
             _ => {}
@@ -3322,7 +3323,7 @@ mod tezro_config_tests {
 
     fn tezro() -> MachineConfig {
         let mut cfg = MachineConfig::default();
-        cfg.machine.profile = MachineProfile::Tezro;
+        cfg.machine.profile = MachineProfile::TezroIp53;
         cfg.machine.cpu = CpuModel::R10000;
         cfg.scsi.clear();
         cfg
@@ -3373,7 +3374,7 @@ mod tezro_config_tests {
     #[test]
     fn the_sample_tezro_configuration_validates() {
         let cfg: MachineConfig = toml::from_str(include_str!("../tezro.toml.example")).unwrap();
-        assert_eq!(cfg.machine.profile, MachineProfile::Tezro);
+        assert_eq!(cfg.machine.profile, MachineProfile::TezroIp53);
         cfg.validate().unwrap();
         assert_eq!(cfg.tezro_memory().unwrap().total_mib(), 4096);
     }
@@ -3386,12 +3387,12 @@ mod tezro_config_tests {
         assert!(!saved.contains("[tezro]"), "{saved}");
         let text = "[machine]\nprofile = \"tezro\"\ncpu = \"r10000\"\n[tezro]\nconsole = \"ioc4_b\"\nflash = \"flash.bin\"\nl1_port = 18882\nserial_port_c = 18883\n";
         let loaded: MachineConfig = toml::from_str(text).unwrap();
-        assert_eq!(loaded.machine.profile, MachineProfile::Tezro);
+        assert_eq!(loaded.machine.profile, MachineProfile::TezroIp53);
         assert_eq!(loaded.tezro.console, TezroConsole::Ioc4B);
         assert_eq!(loaded.tezro.console.index(), 2);
         let again: MachineConfig = toml::from_str(&toml::to_string(&loaded).unwrap()).unwrap();
         assert_eq!(again.tezro.flash.as_deref(), Some("flash.bin"));
         assert_eq!((again.tezro.l1_port, again.tezro.serial_port_c), (Some(18882), Some(18883)));
-        assert!(!MachineProfile::ALL.contains(&MachineProfile::Tezro));
+        assert!(!MachineProfile::ALL.contains(&MachineProfile::TezroIp53));
     }
 }
