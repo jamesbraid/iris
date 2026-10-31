@@ -13,21 +13,25 @@ impl Board {
     pub fn unimplemented(&mut self, addr: u64, size: u32, write: bool) {
         let token = (addr as u32) | if write { ODSY_UNIMP_WRITE } else { 0 };
 
-        if self.reported_addr[..self.reported_addr_count as usize].contains(&token) {
+        // A processor's access to an unmodelled offset reaches this while the
+        // board's thread may be running a store of its own, so the count is
+        // bounded on every use; a race can only log an offset twice.
+        let seen = (self.reported_addr_count as usize).min(self.reported_addr.len());
+        if self.reported_addr[..seen].contains(&token) {
             return;
         }
-        if self.reported_addr_count == SGI_ODYSSEY_UNIMP_REPORTS {
+        if seen == self.reported_addr.len() {
             return;
         }
-        self.reported_addr[self.reported_addr_count as usize] = token;
-        self.reported_addr_count += 1;
+        self.reported_addr[seen] = token;
+        self.reported_addr_count = seen as u32 + 1;
         crate::dlog!(
             LogModule::Odyssey,
             "sgi-odyssey: {}-byte {} at {:#x} is not modeled{}",
             size,
             if write { "write" } else { "read" },
             addr,
-            if self.reported_addr_count == SGI_ODYSSEY_UNIMP_REPORTS { "; further offsets stay silent" } else { "" }
+            if seen + 1 == self.reported_addr.len() { "; further offsets stay silent" } else { "" }
         );
     }
 

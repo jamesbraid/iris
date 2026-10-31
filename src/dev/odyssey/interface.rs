@@ -7,17 +7,14 @@
 //! bank and the FIFO status (`access_waits`). Every other access
 //! waits until the drawing behind the stores before it is done.
 //!
-//! So the board is two states under two locks. The host interface
-//! (`HostInterface`) holds those registers, the interrupt state and the
-//! queue of stores the board has not run yet. The rest of the board
-//! (`Board`) sits behind the board lock, which the board's thread
-//! holds for a whole slice of stores (worker.rs). A processor's front
-//! access and its command stores take only the front lock and never wait
-//! for a draw; every other access takes the board lock, which waits out the
-//! slice, and then runs whatever is still queued before it.
-//!
-//! Lock order: board, then front. Nothing takes the board lock while it
-//! holds the front lock.
+//! So the board is two states. The host interface (`HostInterface`) holds
+//! those registers and the interrupt state; its lock only serialises the
+//! register file, and is held for a few instructions. The rest of the board
+//! (`Board`) is the board's thread's (worker.rs), with no lock: a processor's
+//! front access and its command stores never wait for a draw, and every
+//! other access is answered busy until the stores before it and the raster
+//! work they handed on are done (`BoardLocks::bus_read`), so the processor
+//! touches the state only while the board's thread is idle.
 //!
 //! Ported from hw/misc/sgi-odyssey.c in jamesbraid/qemu-sgi-origami.
 use super::*;
@@ -49,7 +46,7 @@ pub struct HostInterface {
     pub sw_token: u32,
     /// The flow-control target word (+0x1074), as last written. Stored, not
     /// routed: nothing consumes it, so it is a front register that neither
-    /// waits for the command FIFO nor takes the board lock.
+    /// waits for the command FIFO nor touches the board's state.
     pub flctl_target: u32,
     pub flctl_target_reported: bool,
     pub route_dest_upper: u32,
@@ -252,8 +249,8 @@ impl HostInterface {
 
 /// Whether `addr` is a front register for this access: one of the
 /// registers that do not wait for the board's work. The other accesses
-/// that do not wait (the back end's read window, unmodeled offsets) report
-/// through state the board lock covers, so they take it.
+/// that do not wait (the back end's read window, unmodeled offsets) read
+/// the board's state directly (`BoardCell`).
 pub fn front_register(addr: u64, size: u32, write: bool) -> bool {
     if fifo_port(addr) || reg(addr, size) < 0 || access_waits(addr, size, write) {
         return false;
@@ -399,7 +396,7 @@ impl HostInterface {
 }
 
 /// A processor's read through the front alone: Some when it is a front
-/// register, None when the access needs the board lock.
+/// register, None when the access needs the board's state.
 pub fn front_mmio_read(f: &Mutex<HostInterface>, addr: u64, size: u32) -> Option<u64> {
     if !front_register(addr, size, false) {
         return None;
@@ -409,7 +406,7 @@ pub fn front_mmio_read(f: &Mutex<HostInterface>, addr: u64, size: u32) -> Option
 
 /// A processor's store through the front alone: true when it went to a
 /// front register or joined the command FIFO for the board's thread, false
-/// when it needs the board lock. `counted`: the processor interface counted
+/// when it needs the board's state. `counted`: the processor interface counted
 /// it.
 pub fn front_mmio_write(f: &Mutex<HostInterface>, fifo: &CommandFifo, addr: u64, value: u64, size: u32, counted: bool) -> bool {
     if front_register(addr, size, true) {
@@ -421,7 +418,7 @@ pub fn front_mmio_write(f: &Mutex<HostInterface>, fifo: &CommandFifo, addr: u64,
         return true;
     }
     // A queued store needs the board's thread to run it, and the queue to
-    // have room; otherwise the store drains the queue under the board lock.
+    // have room; otherwise the caller runs it.
     command_store(addr, size) && fifo.running.load(std::sync::atomic::Ordering::SeqCst) && fifo.push(f, addr, value, size, counted)
 }
 

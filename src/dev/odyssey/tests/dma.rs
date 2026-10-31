@@ -162,7 +162,7 @@ fn an_object_transfer_queues_behind_the_raster_work_before_it() {
     let h = BoardLocks::new(s);
     put_table(&ram, TABLE, object_header(1, false), &[pte(PAGE_A, 64)]);
     // The object exists with its row before the raster unit has work.
-    descriptor(&mut h.board.lock(), TABLE);
+    descriptor(&mut h.board.get(), TABLE);
     h.raster.start();
     // The raster unit's next slice holds it for 300 ms, as a long draw would.
     h.raster.test_slice_sleep_ms.store(300, std::sync::atomic::Ordering::SeqCst);
@@ -170,7 +170,7 @@ fn an_object_transfer_queues_behind_the_raster_work_before_it() {
     let row: Vec<u8> = (0..16u32).flat_map(|i| (0xdd00_0000u32 | i).to_be_bytes()).collect();
     ram.put(PAGE_A, &row);
     {
-        let mut s = h.board.lock();
+        let mut s = h.board.get();
         descriptor(&mut s, TABLE);
         assert_eq!(h.raster.pending(), 2, "the transfer queues behind the raster work");
         assert_eq!(object_word(&mut s, 0), 0xdd00_0000);
