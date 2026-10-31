@@ -579,7 +579,7 @@ code into host code with Cranelift. The concepts:
   reached. A write bumps the counter of the device that holds the bytes it changed:
   a cached store to RAM over the reset window leaves the PROM's page alone, a flash
   command on the PROM invalidates it, and where both views reach the same RAM
-  they share its counter. Frames above 4 GiB and the I/O attributes still run in
+  they share its counter. Frames above 4 GiB and uncached attributes 1 to 3 still run in
   the interpreter.
 - Compiled pages can optionally be cached on disk across runs
   (`[jitv2] cache`, [docs/jitv2-persistent-cache.md](docs/jitv2-persistent-cache.md)).

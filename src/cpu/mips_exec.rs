@@ -999,7 +999,7 @@ pub struct MipsExecutor<T: Tlb, C: CpuModel> {
     /// is compiled from what the uncached view returns. Set by
     /// [`Self::enable_jitv2_uncached_views`]; off on every other machine.
     #[cfg(feature = "jitv2")]
-    jitv2_uncached_views: bool,
+    pub(crate) jitv2_uncached_views: bool,
     /// The bus compiles read code through, when it is not `sysad` itself
     /// (see [`Self::enable_jitv2_uncached_views`]).
     #[cfg(feature = "jitv2")]
@@ -2990,7 +2990,9 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     /// [`Self::smc_check_report`].
     ///
     /// `cur_code_pfn == u32::MAX` (no page tracked) can never match a real
-    /// frame, so the "nothing tracked" case needs no separate test.
+    /// frame, so the "nothing tracked" case needs no separate test. The
+    /// comparison masks the view bit off `cur_code_pfn`, which leaves the
+    /// sentinel as 0xFFEFFFFF: still beyond any 32-bit frame number.
     #[cfg(all(feature = "jitv2", feature = "jitv2_smc_check"))]
     #[inline(always)]
     fn smc_check_write(&mut self, virt_addr: u64, phys_addr: u64, size: usize) {
@@ -3122,7 +3124,9 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     #[inline(always)]
     fn jitv2_track_pcp(&mut self, phys_addr: u64, uncached: bool) {
         // Code above the JIT's pfn map gets no page and runs in the
-        // interpreter (`step_jit` checks for the null page). Where the
+        // interpreter (`step_jit` checks for the null page). That includes
+        // uncached attributes 1 to 3: their bits 58:57 sit in `phys_addr`,
+        // so `pfn_of` rejects them with everything over 4 GiB. Where the
         // uncached bus view differs from the cached one, an uncached fetch
         // keys a page of its own (`code_key`).
         let Some(pfn) = crate::cpu::jitv2::jitv2::code_key(phys_addr, uncached && self.jitv2_uncached_views) else {

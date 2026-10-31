@@ -315,6 +315,8 @@ impl BusDevice for Ip35Bus {
             // so its generation is that device's. Writes through the cached
             // view change other bytes where the views differ, and bump the
             // same RAM counter where they coincide.
+            // The PROM view's counter covers the whole flash, so any flash
+            // write invalidates every PROM page (over-invalidation, safe).
             let pa = address & !UNCACHED_VIEW_ADDR;
             return if pa & !PA_MASK == 0 { self.views[0].gen_ptr(pa) } else { std::ptr::null() };
         }
