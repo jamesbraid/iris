@@ -274,6 +274,9 @@ struct Selection {
     due: i64,
     /// The completion to post then.
     done: Pending,
+    /// The driver replaced the request ring after the entry was read: the
+    /// command ran once all the same, but its entry is not in the new ring.
+    orphan: bool,
 }
 
 /// The request ring as a step of the walk found it, for the part of the
@@ -669,10 +672,10 @@ impl Core {
     /// selection timeout has passed. False when the thread must look at the
     /// ring again first: it was parked, or a reset took the entry away.
     fn select_absent(&self, st: &mut MutexGuard<'_, State>, ring: &Ring, cons: u32, done: Pending) -> bool {
-        if !matches!(&st.ctl.selecting, Some(sel) if sel.cons == cons) {
+        if !matches!(&st.ctl.selecting, Some(sel) if sel.cons == cons && !sel.orphan) {
             let wait = SELECTION_TIMEOUT_UNIT * u32::from(st.selection_timeout);
             let due = self.now_ns(st).saturating_add(wait.as_nanos() as i64);
-            st.ctl.selecting = Some(Selection { cons, due, done });
+            st.ctl.selecting = Some(Selection { cons, due, done, orphan: false });
         }
         // Whoever waits for the ring to settle may now see it waiting on a
         // selection, a resumed one included.
@@ -682,6 +685,7 @@ impl Core {
 
     /// Wait for the selection in `ctl.selecting` to time out. False when
     /// the thread must look again first: parked, or a reset cancelled it.
+    /// A new request ring does not cancel it.
     fn wait_selection(&self, st: &mut MutexGuard<'_, State>, gen: u64) -> bool {
         loop {
             let Some(due) = st.ctl.selecting.as_ref().map(|sel| sel.due) else {
@@ -992,6 +996,9 @@ impl Core {
                     st.mailbox[0] = mbox::PARAM_ERROR;
                 } else if cmd == mbox::INIT_REQ_QUEUE || cmd == mbox::INIT_REQ_QUEUE_A64 {
                     st.ctl.rqst_epoch += 1;
+                    if let Some(sel) = st.ctl.selecting.as_mut() {
+                        sel.orphan = true;
+                    }
                     st.rqst_base = addr;
                     st.rqst_len = st.mailbox[1];
                     st.rqst_cons = 0;
@@ -1406,6 +1413,19 @@ impl Core {
                 MutexGuard::unlocked(&mut st, || self.sync_irq());
                 continue;
             }
+            // A selection whose entry the driver replaced the ring under
+            // still ends with its completion.
+            if st.ctl.selecting.as_ref().is_some_and(|sel| sel.orphan) {
+                let gen = st.ctl.gen;
+                self.wake.notify_all();
+                if self.wait_selection(&mut st, gen) {
+                    if let Some(sel) = st.ctl.selecting.take() {
+                        st = self.post(st, sel.done);
+                    }
+                    MutexGuard::unlocked(&mut st, || self.sync_irq());
+                }
+                continue;
+            }
             if st.rqst_len == 0 {
                 return st;
             }
@@ -1440,6 +1460,7 @@ impl Core {
                     if !self.select_absent(&mut st, &ring, cons, p) {
                         continue;
                     }
+                    // The wait may have outlived the ring; see `orphan`.
                     st.ctl.selecting.take().map(|sel| sel.done)
                 }
                 Prepared::Run(job) => {
@@ -1741,6 +1762,7 @@ impl Isp1040 {
             let mut m = toml::map::Map::new();
             m.insert("left_ns".into(), toml::Value::Integer(left.max(0)));
             m.insert("cons".into(), toml::Value::Integer(i64::from(sel.cons)));
+            m.insert("orphan".into(), toml::Value::Boolean(sel.orphan));
             m.insert("handle".into(), hex_u32(sel.done.handle));
             m.insert("scsi_status".into(), hex_u16(sel.done.scsi_status));
             m.insert("completion".into(), hex_u16(sel.done.completion));
@@ -1826,8 +1848,9 @@ impl Isp1040 {
                     Some(toml::Value::Integer(n)) => *n as u32,
                     _ => 0,
                 };
+                let orphan = matches!(get_field(sel, "orphan"), Some(toml::Value::Boolean(true)));
                 st.ctl.selecting =
-                    Some(Selection { cons, due: now.saturating_add(left), done: load_pending(sel) });
+                    Some(Selection { cons, due: now.saturating_add(left), done: load_pending(sel), orphan });
             }
         }
     }

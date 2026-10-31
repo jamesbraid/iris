@@ -775,6 +775,24 @@ fn a_response_queue_initialisation_does_not_cancel_a_waiting_selection() {
 }
 
 #[test]
+fn a_request_queue_initialisation_does_not_cancel_a_waiting_selection() {
+    let r = Rig::with_disk("selection-req-init", 1, 64);
+    r.init_rings(4, 4);
+    r.clock(0);
+    queue_absent(&r, 0, 0x6b);
+    r.clock(100 * MS);
+    assert_eq!(r.init_queue(mbox::INIT_REQ_QUEUE, 4, RQST + 0x400), mbox::COMPLETE);
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS - 1);
+    assert!(!posted(&r, 0x6b), "not before its timeout");
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    assert!(posted(&r, 0x6b), "the command ran once; its completion is not lost");
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 0, "the new ring's consumer is untouched");
+    r.clock(10_000 * MS);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1, "and it posts once");
+}
+
+#[test]
 fn a_paused_adapter_posts_a_selection_that_ran_out_meanwhile_when_it_resumes() {
     let r = Rig::with_disk("selection-pause", 1, 64);
     r.init_rings(4, 4);
@@ -846,7 +864,6 @@ fn a_snapshot_taken_during_a_selection_resumes_with_the_time_left() {
         assert_eq!(dst.r(reg::REQUEST_QUEUE), 1);
     }
 }
-
 
 #[test]
 fn a_present_target_does_not_wait_for_the_selection_timeout() {
