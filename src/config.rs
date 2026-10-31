@@ -2155,7 +2155,7 @@ impl MachineConfig {
 // ---------------------------------------------------------------------------
 
 /// Config file used when `--config` is not given. A missing one is not an
-/// error (defaults are used); a missing *explicit* one is — see `load_config`.
+/// error (defaults are used); a missing *explicit* one is — see `load_config` in main.rs.
 pub const DEFAULT_CONFIG: &str = "iris.toml";
 
 #[derive(Parser, Debug)]
@@ -2503,46 +2503,6 @@ impl Cli {
     }
 }
 
-/// Parse CLI, load TOML, merge, and validate. Exits on error.
-/// Returns (machine_config, window_scale) where window_scale is 1 or 2.
-pub fn load_config() -> (MachineConfig, u32) {
-    let cli = Cli::parse();
-
-    // --list-net-interfaces: print candidate PCAP interfaces and exit. Handled
-    // here (before machine construction) since it only needs the parsed CLI.
-    if cli.list_net_interfaces {
-        #[cfg(feature = "pcap")]
-        {
-            print!("{}", crate::net::net_pcap::format_interfaces());
-            std::process::exit(0);
-        }
-        #[cfg(not(feature = "pcap"))]
-        {
-            eprintln!("iris: --list-net-interfaces requires a build with --features pcap");
-            std::process::exit(1);
-        }
-    }
-
-    // A missing `iris.toml` is fine — that's the "just run it" path, and
-    // load_toml falls back to defaults. But a config the user *named* on the
-    // command line and that isn't there is a typo or a relative path resolved
-    // against the wrong cwd, and silently booting a default machine instead
-    // (different disks, no DaynaPort, whatever they configured) wastes a run
-    // before anyone notices.
-    if cli.config != DEFAULT_CONFIG && !std::path::Path::new(&cli.config).exists() {
-        eprintln!("Configuration error: --config {} does not exist", cli.config);
-        std::process::exit(1);
-    }
-
-    let toml_cfg = MachineConfig::load_toml(&cli.config);
-    let cfg = cli.apply(toml_cfg);
-    let scale = cfg.scale;
-    if let Err(e) = cfg.validate() {
-        eprintln!("Configuration error: {}", e);
-        std::process::exit(1);
-    }
-    (cfg, scale)
-}
 
 /// Parse a CIDR string like "192.168.5.0/24" and return
 /// `(gateway_ip, client_ip, netmask)` where gateway=host .1, client=host .2.
