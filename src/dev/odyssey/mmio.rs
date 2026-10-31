@@ -259,26 +259,35 @@ impl Board {
     }
 }
 
-/// The board's state, which the front end's thread owns. There is no lock:
-/// the board's units reach their memory and registers at the same time, and
-/// software orders them. Here that order is the command FIFO (stores run in
-/// arrival order on the board's thread), the waiting accesses (a processor's
-/// read or store that must see the drawing is answered busy until the FIFO
-/// and the raster queue are empty, so the board's thread is idle when the
-/// processor touches the state), and the host interface's registers, which
-/// the processor reaches without waiting (`HostInterface`).
+/// The board's state, which the front end's thread owns. There is no lock
+/// between the processor and the front end: the board's units reach their
+/// memory and registers at the same time, and software orders them. Here
+/// that order is the command FIFO (stores run in arrival order on the
+/// board's thread), the waiting accesses (a processor's read or store that
+/// must see the drawing is answered busy until the FIFO and the raster queue
+/// are empty, so the board's thread is idle when the processor touches the
+/// state), and the host interface's registers, which the processor reaches
+/// without waiting (`HostInterface`).
+///
+/// Processors are serialised against each other by `BoardLocks::submit`, as
+/// MGRAS's producers are by its `submit` lock: a processor holds it across
+/// its busy check and its access, and across a command push, so a second
+/// processor's push cannot wake the board's thread under a first
+/// processor's access. The board's thread and the raster thread never take
+/// it, so it adds no wait for drawing.
 ///
 /// A processor access that does not wait and reaches the board (the level
-/// word, the cursor and back-end read windows, an unmodelled offset) reads
-/// words the board's thread writes only in whole stores, or counts in
-/// bounded arrays; a race shows the old or the new value.
+/// word, the back-end read window, an unmodelled offset) still borrows the
+/// whole board while the board's thread may run: it reads words the thread
+/// writes only in whole stores, or atomics, and shows the old or the new
+/// value. That is the other boards' tolerated racy read, not a lock.
 pub struct BoardCell(std::cell::UnsafeCell<Box<Board>>);
 
 // SAFETY: see the type's comment: the board's thread owns the state while it
-// runs stores; the processor touches it after the waiting accesses have
-// drained the FIFO and the raster queue, with the machine stopped, or for the
-// whole-word reads above. This is the other boards' contract between a CPU
-// thread and an engine's FIFO.
+// runs stores; a processor touches it holding `submit` after the waiting
+// accesses have drained the FIFO and the raster queue, with the machine
+// stopped, or for the whole-word reads above. This is the other boards'
+// contract between a CPU thread and an engine's FIFO.
 unsafe impl Sync for BoardCell {}
 unsafe impl Send for BoardCell {}
 
@@ -287,10 +296,17 @@ impl BoardCell {
         BoardCell(std::cell::UnsafeCell::new(b))
     }
 
-    /// The board, for the thread that may touch it now (see the type).
+    /// The board, for the thread that may touch it now.
+    ///
+    /// # Safety
+    /// The caller is the board's thread running stores; or a processor
+    /// holding `BoardLocks::submit` with the FIFO and the raster queue empty
+    /// (the waiting accesses) or making a whole-word read the type's comment
+    /// describes; or the only thread using the board (machine stopped,
+    /// tests). No other `&mut Board` is used while the result is.
     #[allow(clippy::mut_from_ref)]
-    pub fn get(&self) -> &mut Board {
-        // SAFETY: see the type's comment.
+    pub(super) unsafe fn get(&self) -> &mut Board {
+        // SAFETY: the caller's contract.
         unsafe { &mut *self.0.get() }
     }
 }
@@ -299,7 +315,11 @@ impl BoardCell {
 /// board's state, and the queues behind them.
 #[derive(Clone)]
 pub struct BoardLocks {
-    pub board: Arc<BoardCell>,
+    pub(super) board: Arc<BoardCell>,
+    /// Serialises the processors' accesses to the board against each other
+    /// (see `BoardCell`). Never held by the board's thread or the raster
+    /// thread.
+    submit: Arc<crate::locks::SpinLock<()>>,
     pub front: Arc<Mutex<HostInterface>>,
     pub fifo: Arc<CommandFifo>,
     pub raster: Arc<RasterQueue>,
@@ -398,7 +418,15 @@ impl Default for RefusalStats {
 impl BoardLocks {
     pub fn new(s: Box<Board>) -> Self {
         let (front, fifo, raster, shared) = (s.front.clone(), s.fifo.clone(), s.raster.clone(), s.scanout.shared.clone());
-        BoardLocks { board: Arc::new(BoardCell::new(s)), front, fifo, raster, refusals: Arc::new(RefusalStats::new()), shared }
+        BoardLocks {
+            board: Arc::new(BoardCell::new(s)),
+            submit: Arc::new(crate::locks::SpinLock::new(())),
+            front,
+            fifo,
+            raster,
+            refusals: Arc::new(RefusalStats::new()),
+            shared,
+        }
     }
 
     /// A read for a caller other than the bus (tests, the monitor): through the
@@ -407,7 +435,12 @@ impl BoardLocks {
     pub fn read(&self, addr: u64, size: u32) -> u64 {
         match front_mmio_read(&self.front, addr, size) {
             Some(v) => v,
-            None => self.board.get().mmio_read(addr, size),
+            None => {
+                let _cpu = self.submit.lock();
+                // SAFETY: see BoardCell: the caller owns the board with its
+                // thread stopped, or accepts the race of a whole-word read.
+                unsafe { self.board.get() }.mmio_read(addr, size)
+            }
         }
     }
 
@@ -423,6 +456,9 @@ impl BoardLocks {
         if let Some(v) = front_mmio_read(&self.front, addr, size) {
             return Some(v);
         }
+        // From the busy check to the end of the access no other processor
+        // pushes a store that would wake the board's thread under it.
+        let _cpu = self.submit.lock();
         if access_waits(addr, size, false) && !level_word(addr, size) && self.fifo.running.load(std::sync::atomic::Ordering::SeqCst) {
             if self.fifo.pending() {
                 self.fifo.hurry();
@@ -434,7 +470,9 @@ impl BoardLocks {
                 return None;
             }
         }
-        Some(self.board.get().mmio_read(addr, size))
+        // SAFETY: see BoardCell: the FIFO and the raster queue are empty and
+        // `submit` is held, or the access is a whole-word read.
+        Some(unsafe { self.board.get() }.mmio_read(addr, size))
     }
 
     /// A processor's store as the bus takes it. False, for the bus to
@@ -444,9 +482,21 @@ impl BoardLocks {
     /// the store, taking its interrupts meanwhile, while the board's thread
     /// makes room. What a full FIFO does to a store on the hardware is
     /// unknown (datasheet, "Grades for withdrawn claims"); the stall is a
-    /// model choice. The
-    /// processor interface's mark stays untaken until the store goes in.
+    /// model choice. The processor interface's mark stays untaken until the
+    /// store goes in.
+    ///
+    /// A store that waits is held back for the command FIFO only, not the
+    /// raster queue: the raster unit never shared a lock with the board's
+    /// state, and a store that touches the planes waits for the raster queue
+    /// itself (`Board::raster_wait`). A read, which reads the planes' results,
+    /// checks both.
     pub fn bus_write(&self, addr: u64, value: u64, size: u32) -> bool {
+        if front_register(addr, size, true) {
+            // The host interface's registers: no board state, no wait.
+            self.write(addr, value, size);
+            return true;
+        }
+        let _cpu = self.submit.lock();
         // Classified once: a command store goes straight to the FIFO.
         if command_store(addr, size) {
             if self.fifo.full_for(size) {
@@ -463,25 +513,34 @@ impl BoardLocks {
             self.refusals.note(Refusal::StoreWaits, addr, size);
             return false;
         }
-        self.write(addr, value, size);
+        self.write_board(addr, value, size);
         true
     }
 
-    /// A command store the caller has classified: it joins the FIFO for the
-    /// board's thread, else, with no thread, runs here.
+    /// A command store the caller has classified, holding `submit`: it joins
+    /// the FIFO for the board's thread, else, with no thread, runs here.
     fn write_command(&self, addr: u64, value: u64, size: u32) {
         let counted = store_counted(&self.front);
         while self.fifo.running.load(std::sync::atomic::Ordering::SeqCst) {
-            // The ring refuses a push that loses its lock to the other
-            // processor, or finds the last place taken between the room
-            // check and the push: the board's thread owns the state, so the
-            // store goes in behind it rather than around it.
+            // The ring refuses a push that finds the last place taken between
+            // the room check and the push: the board's thread owns the state,
+            // so the store goes in behind it rather than around it.
             if self.fifo.push(&self.front, addr, value, size, counted) {
                 return;
             }
             std::thread::yield_now();
         }
-        self.board.get().mmio_write_counted(addr, value, size, counted);
+        // SAFETY: no board thread is running; `submit` is held.
+        unsafe { self.board.get() }.mmio_write_counted(addr, value, size, counted);
+    }
+
+    /// A store to the board's state that is not a command store, holding
+    /// `submit`.
+    fn write_board(&self, addr: u64, value: u64, size: u32) {
+        let counted = store_counted(&self.front);
+        // SAFETY: see BoardCell: the waiting accesses have drained the FIFO,
+        // `submit` is held, or the board's thread is stopped.
+        unsafe { self.board.get() }.mmio_write_counted(addr, value, size, counted);
     }
 
     /// A store for a caller other than the bus: through the front alone when it
@@ -489,12 +548,35 @@ impl BoardLocks {
     /// the store. With the board's thread running, call `bus_write` and retry
     /// for a store that waits.
     pub fn write(&self, addr: u64, value: u64, size: u32) {
+        if front_register(addr, size, true) {
+            let counted = store_counted(&self.front);
+            front_mmio_write(&self.front, &self.fifo, addr, value, size, counted);
+            return;
+        }
+        let _cpu = self.submit.lock();
         if command_store(addr, size) {
             return self.write_command(addr, value, size);
         }
-        let counted = store_counted(&self.front);
-        if !front_mmio_write(&self.front, &self.fifo, addr, value, size, counted) {
-            self.board.get().mmio_write_counted(addr, value, size, counted);
-        }
+        self.write_board(addr, value, size);
+    }
+}
+
+#[cfg(test)]
+impl BoardLocks {
+    /// The board, for a test that is the only thread using it, or whose
+    /// board thread is idle.
+    #[allow(clippy::mut_from_ref)]
+    pub(super) fn test_board(&self) -> &mut Board {
+        // SAFETY: the test's contract.
+        unsafe { self.board.get() }
+    }
+}
+
+#[cfg(test)]
+impl BoardLocks {
+    /// Hold the processors' lock, as a processor in the middle of an access
+    /// does.
+    pub(super) fn test_submit(&self) -> crate::locks::SpinGuard<'_, ()> {
+        self.submit.lock()
     }
 }
