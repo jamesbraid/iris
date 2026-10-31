@@ -18,6 +18,12 @@
 //! stock PROM resets each link it finds and expects it back), and register
 //! accesses are 32-bit at the data half of each eight-byte slot only.
 //!
+//! Revision 5 and later add the reset fences and the resource lock, and the
+//! chip can carry a part number and manufacturer, a source field in its
+//! status reads and an interrupt that goes to a packet sink instead of
+//! HEART: what [`Pxbow`](super::pxbow::Pxbow) needs behind a PIC. Warm reset
+//! is not modeled, so the fences are stored and read back and gate nothing.
+//!
 //! Ported from hw/misc/sgi-xbow.c in jamesbraid/qemu-sgi-origami.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -57,6 +63,19 @@ const ARB_RELOAD: u32 = 0x58;
 const PERF_A: u32 = 0x60;
 const PERF_B: u32 = 0x68;
 const NIC: u32 = 0x70;
+/// Revision 5 ("Crossbow 2.0") and later: a fence mask for widget 0's core,
+/// one per link, and the resource lock.
+const FENCED_REVISION: u32 = 5;
+const FENCE: u32 = 0x78;
+const LINK_FENCE_BASE: u32 = 0x80;
+const LINK_FENCE_END: u32 = LINK_FENCE_BASE + 8 * LINKS as u32;
+const FENCE_RESET: u8 = 0xff;
+const LOCK: u32 = 0xc0;
+const LOCK_CLEAR: u32 = 0xc8;
+/// Where a status read carries the widget that asked, when the chip is told
+/// to.
+const STATUS_SOURCE_SHIFT: u32 = 6;
+const STATUS_SOURCE_MASK: u32 = 0xf << STATUS_SOURCE_SHIFT;
 const LINK_BASE: u32 = 0x100;
 const LINK_STRIDE: u32 = 0x40;
 const LINK_END: u32 = LINK_BASE + LINK_STRIDE * LINKS as u32;
@@ -120,6 +139,9 @@ struct Regs {
     perf_a: u32,
     perf_b: u32,
     nic: u32,
+    fence: u8,
+    link_fence: [u8; LINKS],
+    lock: u8,
     link_control: [u32; LINKS],
     link_status: [u32; LINKS],
     link_arb_upper: [u32; LINKS],
@@ -151,6 +173,9 @@ impl Regs {
             perf_a: PERF_RESET,
             perf_b: PERF_RESET,
             nic: NIC_RESET,
+            fence: FENCE_RESET,
+            link_fence: [FENCE_RESET; LINKS],
+            lock: 0,
             link_control: [LINK_CREDIT_RESET; LINKS],
             link_status: [0; LINKS],
             link_arb_upper: [0; LINKS],
@@ -170,13 +195,25 @@ impl Regs {
 struct Out {
     /// Widget 0's interrupt packets to HEART: (vector, set).
     packets: Vec<(u8, bool)>,
+    /// Packets to a widget other than HEART: widget, address, vector, set.
+    xio: Vec<(u8, u64, u8, bool)>,
     /// A link reset's far-end widget.
     link_reset: Option<u8>,
 }
 
+/// Where widget 0's interrupt goes when its target is not HEART: the target
+/// widget, the 48-bit address, the vector and whether it raises. False is a
+/// refusal.
+pub type PacketSink = Box<dyn Fn(u8, u64, u8, bool) -> bool + Send + Sync>;
+
 pub struct Xbow {
     regs: Mutex<Regs>,
     revision: u32,
+    part: u32,
+    manufacturer: u32,
+    /// The widget a status read reports as its source, if the chip does.
+    status_source: Option<u8>,
+    packets: OnceLock<PacketSink>,
     /// Links with something attached, bit n for widget 8 + n.
     present: AtomicU8,
     /// Links passing traffic, as `present`. Written under `regs`.
@@ -210,6 +247,10 @@ impl Xbow {
         Self {
             regs: Mutex::new(Regs::reset(present)),
             revision,
+            part: 0,
+            manufacturer: 0,
+            status_source: None,
+            packets: OnceLock::new(),
             present: AtomicU8::new(present),
             alive: AtomicU8::new(present),
             irq_order: Mutex::new(()),
@@ -219,6 +260,26 @@ impl Xbow {
             unsupported: Mutex::new(Vec::new()),
             unsupported_full: AtomicBool::new(false),
         }
+    }
+
+    /// Answer to `part` and `manufacturer` in the identification word
+    /// instead of the Crossbow's zeros.
+    pub fn with_identity(mut self, part: u32, manufacturer: u32) -> Self {
+        self.part = part;
+        self.manufacturer = manufacturer;
+        self
+    }
+
+    /// Report `widget` in bits 9:6 of every status read.
+    pub fn with_status_source(mut self, widget: u8) -> Self {
+        self.status_source = Some(widget);
+        self
+    }
+
+    /// Send widget 0's interrupt to `sink` when it targets a widget other
+    /// than HEART. Once, before the machine runs.
+    pub fn connect_packets(&self, sink: PacketSink) {
+        let _ = self.packets.set(sink);
     }
 
     /// Where widget 0's interrupt packets go: HEART, whose line is the
@@ -260,6 +321,13 @@ impl Xbow {
                 h.set_line(vector as u32, set);
             }
         }
+        if let Some(sink) = self.packets.get() {
+            for (widget, address, vector, set) in out.xio {
+                if !sink(widget, address, vector, set) {
+                    crate::dlog!(crate::devlog::LogModule::Bedrock, "xbow: interrupt packet to widget {widget} refused");
+                }
+            }
+        }
         drop(order);
         let changed = before ^ self.alive.load(Ordering::Acquire);
         if let Some(cb) = self.on_link_change.get() {
@@ -294,8 +362,16 @@ impl Xbow {
     }
 
     fn identification(&self) -> u32 {
-        // Part number and manufacturer are zero on Crossbow.
-        (self.revision << 28) | 1
+        (self.revision << 28) | (self.part << 12) | (self.manufacturer << 1) | 1
+    }
+
+    /// A status word as a read reports it: with the asking widget in the
+    /// source field, when the chip has one.
+    fn reported_status(&self, status: u32) -> u32 {
+        match self.status_source {
+            Some(widget) => (status & !STATUS_SOURCE_MASK) | ((widget as u32) << STATUS_SOURCE_SHIFT),
+            None => status,
+        }
     }
 
     fn link_state(&self, r: &Regs, link: usize) -> u32 {
@@ -356,10 +432,21 @@ impl Xbow {
         }
         let target = ((r.int_upper >> 16) & 0xf) as u8;
         let vector = (r.int_upper >> 24) as u8;
-        if target != WIDGET_HEART || !self.carries(target) || self.heart.get().is_none() {
+        if !self.carries(target) {
             return;
         }
-        out.packets.push((vector, pending));
+        if target == WIDGET_HEART {
+            if self.heart.get().is_none() {
+                return;
+            }
+            out.packets.push((vector, pending));
+        } else {
+            if self.packets.get().is_none() {
+                return;
+            }
+            let address = ((r.int_upper as u64 & 0xffff) << 32) | r.int_lower as u64;
+            out.xio.push((target, address, vector, pending));
+        }
         r.interrupt_asserted = pending;
     }
 
@@ -384,11 +471,13 @@ impl Xbow {
         }
     }
 
-    fn accessible(slot: u32, write: bool) -> bool {
+    fn accessible(&self, slot: u32, write: bool) -> bool {
         match slot {
             IDENTIFICATION | STATUS | ERR_UPPER | ERR_LOWER | STATUS_CLEAR => !write,
             CONTROL | PACKET_TIMEOUT | INT_UPPER | INT_LOWER | ERR_CMD | LLP_CONTROL | ARB_RELOAD | PERF_A
             | PERF_B | NIC => true,
+            FENCE | LOCK | LOCK_CLEAR => self.revision >= FENCED_REVISION,
+            s if (LINK_FENCE_BASE..LINK_FENCE_END).contains(&s) => self.revision >= FENCED_REVISION,
             s if (LINK_BASE..LINK_END).contains(&s) => match (s - LINK_BASE) % LINK_STRIDE {
                 LINK_FLUSH | LINK_STATUS | LINK_STATUS_CLEAR | LINK_AUX_STATUS => !write,
                 LINK_CONTROL | LINK_ARB_UPPER | LINK_ARB_LOWER => true,
@@ -409,7 +498,7 @@ impl Xbow {
             return None;
         }
         let slot = off.wrapping_sub(4);
-        if size != 4 || off % 8 != 4 || !Self::accessible(slot, write) {
+        if size != 4 || off % 8 != 4 || !self.accessible(slot, write) {
             self.note(off, size, write);
             self.record_access_error(r, out);
             return None;
@@ -423,7 +512,7 @@ impl Xbow {
             let slot = self.decode(r, out, off, size, false)?;
             let v = match slot {
                 IDENTIFICATION => self.identification(),
-                STATUS => r.status,
+                STATUS => self.reported_status(r.status),
                 ERR_UPPER => r.err_upper,
                 ERR_LOWER => r.err_lower,
                 CONTROL => r.control,
@@ -435,7 +524,7 @@ impl Xbow {
                 STATUS_CLEAR => {
                     // Acknowledges widget 0's own errors and request; each
                     // link's request is acknowledged at its own alias.
-                    let v = r.status;
+                    let v = self.reported_status(r.status);
                     r.status &= !(STATUS_WIDGET0_ERRORS | STATUS_REQUEST);
                     self.update_interrupt(r, out);
                     v
@@ -444,6 +533,11 @@ impl Xbow {
                 PERF_A => r.perf_a,
                 PERF_B => r.perf_b,
                 NIC => r.nic,
+                FENCE => r.fence as u32,
+                LOCK | LOCK_CLEAR => r.lock as u32,
+                s if (LINK_FENCE_BASE..LINK_FENCE_END).contains(&s) => {
+                    r.link_fence[((s - LINK_FENCE_BASE) / 8) as usize] as u32
+                }
                 s => {
                     let link = ((s - LINK_BASE) / LINK_STRIDE) as usize;
                     match (s - LINK_BASE) % LINK_STRIDE {
@@ -495,6 +589,17 @@ impl Xbow {
                 PERF_A => r.perf_a = val & PERF_SELECT_MASK,
                 PERF_B => r.perf_b = val & PERF_SELECT_MASK,
                 NIC => r.nic = val & NIC_MASK,
+                FENCE => r.fence = val as u8,
+                // A test-and-set: the write only takes while the lock is free.
+                LOCK => {
+                    if r.lock == 0 {
+                        r.lock = val as u8;
+                    }
+                }
+                LOCK_CLEAR => r.lock = 0,
+                s if (LINK_FENCE_BASE..LINK_FENCE_END).contains(&s) => {
+                    r.link_fence[((s - LINK_FENCE_BASE) / 8) as usize] = val as u8
+                }
                 s => {
                     let link = ((s - LINK_BASE) / LINK_STRIDE) as usize;
                     match (s - LINK_BASE) % LINK_STRIDE {
@@ -702,6 +807,23 @@ mod tests {
         assert_eq!(x.write32(0x1000_0000 + INT_LOWER as u64 + 4, 0x55), BUS_OK);
         assert_eq!(x.read32(0x1000_0000 + INT_LOWER as u64 + 4).data, 0x55);
         assert_eq!(x.write32(0x1000_0000 + IDENTIFICATION as u64 + 4, 0), BUS_ERR);
+    }
+
+    /// The fences, the lock and a non-zero part number belong to revision 5
+    /// and later; the Octane's revision 4 leaves them reserved.
+    #[test]
+    fn fences_the_lock_and_the_identity_fields_need_the_revision_that_has_them() {
+        let x = octane();
+        for slot in [FENCE, LINK_FENCE_BASE, LOCK, LOCK_CLEAR] {
+            assert_eq!(x.read(slot + 4, 4), None, "slot {slot:#x} is reserved on revision 4");
+            assert!(!x.write(slot + 4, 4, 1));
+        }
+        assert_eq!(x.read(IDENTIFICATION + 4, 4), Some(0x4000_0001));
+        let y = Xbow::new(5, 0x8400).with_identity(0xd100, 0);
+        assert_eq!(y.read(IDENTIFICATION + 4, 4), Some(0x5d10_0001));
+        assert_eq!(y.read(FENCE + 4, 4), Some(0xff));
+        assert!(y.write(FENCE + 4, 4, 0x1ff));
+        assert_eq!(y.read(FENCE + 4, 4), Some(0xff), "a fence is eight bits");
     }
 
     #[test]
