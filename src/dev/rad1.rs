@@ -484,6 +484,9 @@ struct State {
     dma_bank: [u32; DMA_BANK_WORDS],
     sample_pos: [u32; POS_WORDS],
     analog_out_en: u32,
+    /// An end-of-descriptor transfer has been reported finished while it
+    /// still plays (see [`Inner::read`]); its remaining frames are not muted.
+    out_early_done: bool,
     /// The clock generator the analog output runs from, from the select
     /// bits of 0x58.
     out_cg: usize,
@@ -527,6 +530,7 @@ impl State {
             dma_bank: [0; DMA_BANK_WORDS],
             sample_pos: [0; POS_WORDS],
             analog_out_en: 0,
+            out_early_done: false,
             out_cg: OUT_DEFAULT_CG,
             cg_loaded: [None; NUM_CG],
             relay_muted: None,
@@ -702,6 +706,7 @@ impl State {
         let info = &CHAN_INFO[idx];
         let words = (self.bank(info.ring[0]), self.bank(info.ring[1]), self.bank(info.ring[2]));
         let Some(d) = self.decode_desc(idx, words) else { return };
+        self.out_early_done = false;
         self.chan[idx] = Chan {
             running: true,
             base: d.base,
@@ -723,6 +728,7 @@ impl State {
     fn descriptor_end(&mut self, idx: usize) -> bool {
         let c = self.chan[idx];
         if c.eod {
+            self.out_early_done = false;
             self.chan[idx].running = false;
             if idx == CH_OUT {
                 self.analog_out_en &= !ENABLE_BIT;
@@ -1074,6 +1080,22 @@ impl Inner {
             if off == REG_ANALOG_OUT_EN {
                 // The enable bit clears when a one-shot transfer ends.
                 self.sync_chan(&mut s, CH_OUT, now);
+                // Approximation: an end-of-descriptor transfer still playing
+                // reads as finished. The Octane PROM checks bit 0 after its
+                // startup work and treats "set" as a failed tune; the
+                // datasheet's reading is that the chip clears it when the
+                // pass ends, and that on hardware the check comes after the
+                // 2.252 s pass. Emulation compresses the PROM's work, so the
+                // check can land first (1.4 s after the start without a
+                // graphics board). The report is early and nothing else
+                // changes: the rest of the buffer still plays (the relay
+                // mute the PROM writes next does not silence it), the
+                // position registers keep counting, and the real clear still
+                // happens at the end. The ring path is untouched.
+                if s.chan[CH_OUT].running && s.chan[CH_OUT].eod {
+                    s.out_early_done = true;
+                    return s.analog_out_en & !ENABLE_BIT;
+                }
                 return s.analog_out_en;
             }
             if off == REG_STATUS_DMA_CTRL {
@@ -1466,6 +1488,7 @@ impl Inner {
             // Stop where the sample clock has got to.
             self.sync_chan(s, idx, now);
             s.chan[idx].running = false;
+            s.out_early_done = false;
         }
     }
 
@@ -1524,7 +1547,9 @@ impl Inner {
                 let samples = &mut pcm[..n as usize * PCM_CHANNELS];
                 frames_to_pcm(buf, samples, ANALOG_WORDS);
                 if let Some(sink) = self.sink.lock().as_mut() {
-                    sink.play(samples, s.rate(idx).rounded_hz(), s.muted());
+                    // The PROM mutes the relay right after its early check; the
+                    // tune it reported finished is still heard.
+                    sink.play(samples, s.rate(idx).rounded_hz(), s.muted() && !s.out_early_done);
                 }
             }
             let c = &mut s.chan[idx];
