@@ -63,14 +63,14 @@ pub const SGI_SOFT_FIXED_PREFILL_MIN_PIXELS: u64 = 2048;
 pub const SGI_SOFT_FIXED_LAMBDA_MAX: i32 = 1 << 24;
 
 thread_local! {
-    pub static SOFT_TEXTURE_PATH: std::cell::Cell<RasterTexturePath> =
-        const { std::cell::Cell::new(SGI_RASTER_TEXTURE_SPANS) };
+    pub static SOFT_TEXTURE_PATH: std::cell::Cell<TexturePath> =
+        const { std::cell::Cell::new(TexturePath::Spans) };
 }
 
 /// How filled triangles drawn on this thread sample a texture, for tests.
 /// Per thread, so that tests running at once cannot change each other's
 /// path.
-pub fn raster_set_texture_path(path: RasterTexturePath) {
+pub fn raster_set_texture_path(path: TexturePath) {
     SOFT_TEXTURE_PATH.with(|p| p.set(path));
 }
 
@@ -157,7 +157,7 @@ impl SoftDraw<'_> {
         let base = self.texture_base;
         let mut border = [0.0f64; 4];
 
-        if SOFT_TEXTURE_PATH.with(|p| p.get()) == SGI_RASTER_TEXTURE_DOUBLE
+        if SOFT_TEXTURE_PATH.with(|p| p.get()) == TexturePath::Double
             || self.texture.is_none()
             || self.texels_cache.is_none()
             || self.t.mixed_frame
@@ -859,15 +859,12 @@ mod tests {
         }
     }
 
-    fn draw(path: RasterTexturePath, filter: u32) -> (Vec<u32>, Vec<u32>) {
+    fn draw(path: TexturePath, filter: u32) -> (Vec<u32>, Vec<u32>) {
         let rules = RasterRules {
             subpixel_bits: 4,
             color_bits: 8,
             depth_bits: 24,
-            rounding: SGI_ROUND_HALF_AWAY as u8,
-            tie_rule: SGI_TIE_TOP_LEFT_BOTTOM_ORIGIN as u8,
-            arith: SGI_ARITH_DOUBLE as u8,
-            line_rule: SGI_LINE_COVERAGE_DOUBLE as u8,
+            line_rule: LineRule::Diamond,
             ..Default::default()
         };
         let mut colour = vec![0u32; W * W];
@@ -927,7 +924,7 @@ mod tests {
 
         raster_set_texture_path(path);
         rules.draw(&target, &mut fb, &Hashed, &mut d);
-        raster_set_texture_path(SGI_RASTER_TEXTURE_SPANS);
+        raster_set_texture_path(TexturePath::Spans);
         (colour, depth)
     }
 
@@ -989,9 +986,9 @@ mod tests {
     #[test]
     fn fixed_and_double_paths_agree() {
         for filter in [SGI_GL_NEAREST, SGI_GL_LINEAR] {
-            let (dc, dz) = draw(SGI_RASTER_TEXTURE_DOUBLE, filter);
-            let (sc, sz) = draw(SGI_RASTER_TEXTURE_SPANS, filter);
-            let (fc, fz) = draw(SGI_RASTER_TEXTURE_FIXED, filter);
+            let (dc, dz) = draw(TexturePath::Double, filter);
+            let (sc, sz) = draw(TexturePath::Spans, filter);
+            let (fc, fz) = draw(TexturePath::Fixed, filter);
             let tol = if filter == SGI_GL_NEAREST { 0 } else { 2 };
             let mut differ = 0;
 

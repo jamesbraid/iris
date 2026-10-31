@@ -9,46 +9,24 @@
 
 use super::*;
 
-// The rules a head's rasterizer follows where OpenGL leaves a choice.
+/// Which pixels a width-1 segment covers.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum LineRule {
+    /// OpenGL's diamond-exit rule (1.2.1, 3.4.1) on the snapped grid.
+    #[default]
+    Diamond,
+    /// One pixel per major-axis column (or row) whose centre lies between the
+    /// ends, the start's side included: the minor-axis pixel holding the
+    /// segment at that centre, a crossing exactly on a pixel edge taking the
+    /// lower pixel. Width and smoothing as for `Diamond`.
+    CentreSampled,
+}
 
-pub type Rounding = u32;
-pub const SGI_ROUND_FLOOR: Rounding = 0;
-pub const SGI_ROUND_HALF_UP: Rounding = 1;
-pub const SGI_ROUND_HALF_EVEN: Rounding = 2;
-pub const SGI_ROUND_HALF_AWAY: Rounding = 3;
-
-pub type Arith = u32;
-pub const SGI_ARITH_DOUBLE: Arith = 1;
-
-pub type TieRule = u32;
-pub const SGI_TIE_TOP_LEFT_BOTTOM_ORIGIN: TieRule = 1;
-
-pub type LineRule = u32;
-pub const SGI_LINE_COVERAGE_DOUBLE: LineRule = 1;
-/// One pixel per major-axis column (or row) whose centre lies between the
-/// ends, the start's side included: the minor-axis pixel holding the segment
-/// at that centre, a crossing exactly on a pixel edge taking the lower
-/// pixel. Width and smoothing as SGI_LINE_COVERAGE_DOUBLE.
-pub const SGI_LINE_CENTRE_SAMPLED: LineRule = 2;
-
-pub type Dither = u32;
-pub const SGI_DITHER_NONE: Dither = 0;
-pub const SGI_DITHER_BAYER4_TOP_ROWS: Dither = 1;
-
-pub type DitherAnchor = u32;
-pub const SGI_DITHER_SCREEN: DitherAnchor = 0;
-
-pub type SmoothRule = u32;
-pub const SGI_SMOOTH_TWO_PIXEL_FILTER: SmoothRule = 1;
-
-// Rounding: how a window coordinate or depth is rounded to its grid
-// (SGI_ROUND_HALF_AWAY is round half away from zero). TieRule: which pixel centres on a
-// shared triangle edge the edge owns, rows counted from the top or from the
-// bottom. LineRule: which pixels a width-1 segment covers. Dither:
-// BAYER4_TOP_ROWS is a 4x4 ordered dither, floor(c * max + B / 16) with B
-// from the Bayer index matrix at (column, row) mod 4, rows from the top.
-// DitherAnchor: the display or the window. SmoothRule: AREA is the
-// exact box filter; TWO_PIXEL_FILTER the separable tent filter.
+// Window coordinates and depths round half away from zero. A counter-clockwise
+// triangle edge owns the pixel centres on it when it is a left or a top edge,
+// rows counted up from the bottom of the plane (SoftVertex::owns()). Smoothed
+// points and lines take the exact box filter's coverage. The board does not
+// dither (Board::gl_vertex_colour() reports GL_DITHER).
 
 #[derive(Clone, Default)]
 pub struct RasterRules {
@@ -60,18 +38,7 @@ pub struct RasterRules {
     pub depth_bits: u8,
     /// of a stored stencil value, 0 for planes with no stencil buffer
     pub stencil_bits: u8,
-    /// Rounding, for snapping and depth
-    pub rounding: u8,
-    /// TieRule
-    pub tie_rule: u8,
-    /// Arith
-    pub arith: u8,
-    /// LineRule
-    pub line_rule: u8,
-    /// Dither
-    pub dither: u8,
-    /// DitherAnchor
-    pub dither_anchor: u8,
+    pub line_rule: LineRule,
     /// stored A width, zero means no alpha
     pub alpha_bits: u8,
     /// Zero derives precision from color/alpha bits.
@@ -79,8 +46,6 @@ pub struct RasterRules {
     /// Smooth points, lines and polygons as their enables ask; without it
     /// a smoothed primitive is drawn aliased and reported.
     pub smooth_primitives: bool,
-    /// SmoothRule
-    pub smooth_rule: u8,
     /// Depth linear in eye distance (a w-buffer): a vertex's window depth
     /// is depth_row . e for its eye coordinates e, perspective-corrected
     /// per fragment; a depth outside [0, 1] is dropped.
@@ -340,10 +305,6 @@ pub struct RasterTarget<'a> {
     pub stencil: bool,
     /// Planes::fog_factor() replaces the built-in fog modes.
     pub fog_factor: bool,
-    /// Plane row of the display's top line, for a screen-anchored dither.
-    pub screen_top: i32,
-    /// Whether plane rows below the top line have larger y.
-    pub screen_rows_down: bool,
     /// Current binding; resolved once by the family before drawing.
     pub texture: Option<GlTexImage<'a>>,
     /// An opaque polygon stipple: a fragment whose stipple bit is clear
@@ -354,10 +315,14 @@ pub struct RasterTarget<'a> {
     pub mixed_frame: bool,
 }
 
-pub type RasterTexturePath = u32;
-pub const SGI_RASTER_TEXTURE_SPANS: RasterTexturePath = 0;
-pub const SGI_RASTER_TEXTURE_FIXED: RasterTexturePath = 1;
-pub const SGI_RASTER_TEXTURE_DOUBLE: RasterTexturePath = 2;
+/// How filled triangles sample a texture, for tests (raster_set_texture_path()):
+/// the row loops, the fixed-point sampler alone, or the double-precision path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TexturePath {
+    Spans,
+    Fixed,
+    Double,
+}
 
 // ---------------------------------------------------------------------
 // The draw itself. The fixed-point texture path is in raster_fixed_texture.rs.
@@ -409,8 +374,6 @@ pub struct SoftShared<'a> {
     pub logic_op: bool,
     /// In RGBA mode, the packed colour's bits glColorMask lets through.
     pub colour_mask: u32,
-    /// The stored colour is dithered: GL_DITHER and the rules' dither.
-    pub dither: bool,
     pub texture: Option<&'a GlTexImage<'a>>,
     pub texture_base: Option<&'a GlTexLevel>,
     pub texture_last: u32,
@@ -474,7 +437,6 @@ impl<'a> SoftDraw<'a> {
                 blend: false,
                 logic_op: false,
                 colour_mask: 0,
-                dither: false,
                 texture: None,
                 texture_base: None,
                 texture_last: 0,
@@ -632,15 +594,7 @@ impl RasterRules {
               self.depth_divisor[2].is_finite() && self.depth_divisor[3].is_finite())) &&
             self.depth_slack >= 0.0 && self.depth_slack < 1.0 &&
             self.stencil_bits <= 16 && self.alpha_bits <= 10 &&
-            self.alpha_test_bits <= 16 &&
-            (self.rounding as u32) <= SGI_ROUND_HALF_AWAY &&
-            (self.tie_rule as u32) == SGI_TIE_TOP_LEFT_BOTTOM_ORIGIN &&
-            (self.arith as u32) == SGI_ARITH_DOUBLE &&
-            ((self.line_rule as u32) == SGI_LINE_COVERAGE_DOUBLE || (self.line_rule as u32) == SGI_LINE_CENTRE_SAMPLED) &&
-            (self.dither as u32) <= SGI_DITHER_BAYER4_TOP_ROWS &&
-            (self.smooth_rule as u32) <= SGI_SMOOTH_TWO_PIXEL_FILTER &&
-            (self.dither as u32 == SGI_DITHER_NONE ||
-             self.dither_anchor as u32 == SGI_DITHER_SCREEN)
+            self.alpha_test_bits <= 16
     }
 
     pub fn check_rules(&self) -> bool {
@@ -664,29 +618,14 @@ impl RasterTarget<'_> {
 }
 
 impl RasterRules {
-    /// x rounded to an integer by the rules' rounding.
+    /// x rounded to an integer, half away from zero, without a libm call:
+    /// x less its truncation is exact, so a fraction of a half or more
+    /// rounds away from zero.
     #[inline]
     pub fn round(&self, x: f64) -> i64 {
-        let rounding = self.rounding as u32;
-        if rounding != SGI_ROUND_FLOOR && rounding != SGI_ROUND_HALF_UP && rounding != SGI_ROUND_HALF_EVEN {
-            // Round half away from zero, without a libm call: x less its truncation is exact, so
-            // a fraction of a half or more rounds away from zero.
-            let t = x as i64;
-            let frac = x - t as f64;
-            return t + (frac >= 0.5) as i64 - (frac <= -0.5) as i64;
-        }
-        let f = x.floor();
-        let frac = x - f;
-        match rounding {
-            SGI_ROUND_FLOOR => f as i64,
-            SGI_ROUND_HALF_UP => f as i64 + (frac >= 0.5) as i64,
-            _ => {
-                if frac == 0.5 {
-                    return f as i64 + ((f as i64) & 1);
-                }
-                f as i64 + (frac > 0.5) as i64
-            }
-        }
+        let t = x as i64;
+        let frac = x - t as f64;
+        t + (frac >= 0.5) as i64 - (frac <= -0.5) as i64
     }
 
     /// The largest stored depth.
@@ -891,63 +830,13 @@ pub fn soft_unit(c: u32, max: u32) -> f64 {
     }
 }
 
-/// SGI_DITHER_BAYER4_TOP_ROWS's thresholds, in sixteenths of a step.
-pub static SOFT_BAYER4: [[u8; 4]; 4] = [
-    [0, 8, 2, 10],
-    [12, 4, 14, 6],
-    [3, 11, 1, 9],
-    [15, 7, 13, 5],
-];
-
-impl SoftDraw<'_> {
-    /// A fragment's colour at plane pixel (x, y) as the planes store it:
-    /// dithered while the draw dithers, otherwise rounded as RasterRules::rgb()
-    /// rounds. A clamped component of 0 or 1 is exact either way, and one
-    /// below 1 stays below max + 1 with the largest threshold added.
-    #[inline]
-    pub fn store_rgb(&self, x: i32, y: i32, c: &[f64]) -> u32 {
-        let bits = self.rules.color_bits as u32;
-        let max: u32 = (1u32 << bits) - 1;
-        let mut out: u32 = 0;
-
-        if !self.dither {
-            return self.rules.rgb(c);
-        }
-        let row: i64 = if self.t.screen_rows_down {
-            y as i64 - self.t.screen_top as i64
-        } else {
-            self.t.screen_top as i64 - y as i64
-        };
-        let b = SOFT_BAYER4[(row & 3) as usize][(x & 3) as usize] as f64 / 16.0;
-        for (k, &ck) in c.iter().enumerate().take(3) {
-            out |= soft_dither_channel(ck, max, b).wrapping_shl((2 - k as u32) * bits);
-        }
-        out
-    }
-}
-
-/// A colour component ck as a value of at most max, offset by the dither
-/// threshold b (in [0, 1)) before it is truncated. A clamped component of 0
-/// or 1 is exact either way.
-#[inline(always)]
-pub fn soft_dither_channel(ck: f64, max: u32, b: f64) -> u32 {
-    if !(ck > 0.0) {
-        0
-    } else if ck >= 1.0 {
-        max
-    } else {
-        // Positive, so truncating is the floor.
-        (ck * max as f64 + b) as u32
-    }
-}
-
 impl SoftVertex {
     pub fn edge(&self, b: &SoftVertex, px: i64, py: i64) -> i64 {
         (b.x.wrapping_sub(self.x)).wrapping_mul(py.wrapping_sub(self.y))
             .wrapping_sub((b.y.wrapping_sub(self.y)).wrapping_mul(px.wrapping_sub(self.x)))
     }
 
-    /// SGI_TIE_TOP_LEFT_BOTTOM_ORIGIN: a counter-clockwise edge owns the pixel
+    /// The tie rule: a counter-clockwise edge owns the pixel
     /// centres on it when it is a left edge (running down) or a top edge
     /// (horizontal, running left), with rows counted up from the bottom of the
     /// plane, so two triangles sharing an edge never both draw its centres, as
@@ -1150,7 +1039,7 @@ impl SoftDraw<'_> {
         let mut out = [0.0f64; 3];
 
         self.rules.soft_blend_rgb(self.st, src, alpha, dst, &mut out);
-        self.store_rgb(x, y, &out)
+        self.rules.rgb(&out)
     }
 }
 
@@ -1183,7 +1072,7 @@ impl SoftDraw<'_> {
         let alpha_max = rules.alpha_max();
         let alpha_q = rules.alpha(frag.rgba[3]);
         let alpha = alpha_q as f64 / alpha_max as f64;
-        let rgb = if self.blend { rules.rgb(&frag.rgba) } else { self.store_rgb(x, y, &frag.rgba) };
+        let rgb = rules.rgb(&frag.rgba);
 
         if !self.blend && !self.logic_op && self.rgba_mask == rules.rgba_mask(SGI_GL_COLOUR_MASK_ALL) {
             // RasterRules::rgba_value()'s stored alpha, RasterRules::alpha() of
@@ -1217,7 +1106,7 @@ impl SoftDraw<'_> {
             for (k, b) in blended.iter_mut().enumerate() {
                 *b = self.st.blend_component(k, &src, &dst);
             }
-            out = rules.rgba_value(self.store_rgb(x, y, &blended), blended[3]);
+            out = rules.rgba_value(rules.rgb(&blended), blended[3]);
         }
         for k in 0..4usize {
             let bits = if k == 3 { rules.alpha_bits } else { rules.color_bits } as u32;
@@ -1265,8 +1154,7 @@ impl SoftDraw<'_> {
     /// (4.1.8). A colour mask with some channels clear keeps the stored
     /// bits of those (4.2.2). Planes that cannot be read draw as if the
     /// operations were disabled and the mask were all ones, logged once for
-    /// the draw. An RGBA draw is dithered while GL_DITHER is enabled under
-    /// rules that name a dither; a colour index never is.
+    /// the draw.
     pub fn setup_ops(&mut self) -> bool {
         let st = self.st;
 
@@ -1278,7 +1166,6 @@ impl SoftDraw<'_> {
             self.blend = st.blend != 0 && !self.logic_op;
         }
         self.colour_mask = self.rules.colour_mask(st.colour_mask);
-        self.dither = st.dither != 0 && self.rules.dither as u32 != SGI_DITHER_NONE;
         if st.index_bits == 0 {
             self.rgba_mask = self.rules.rgba_mask(st.colour_mask);
             self.rgba_read = self.ntargets != 0 && self.rgba_mask != 0 &&
@@ -1422,7 +1309,7 @@ impl SoftDraw<'_> {
 
     /// The colour of a fragment that has passed every test written to the
     /// draw's colour targets at plane pixel (x, y): blended with or combined
-    /// by the logical operation with what is there, dithered and masked, from
+    /// by the logical operation with what is there and masked, from
     /// dest in RGBA mode, which the caller has read where the draw reads it.
     #[inline(always)]
     pub fn fragment_store(&self, x: i32, y: i32, f: &SoftFrag, dest: &[RasterColour; SGI_GL_MAX_TARGETS as usize]) {
@@ -1439,15 +1326,7 @@ impl SoftDraw<'_> {
             }
             return;
         }
-        // Dithering follows blending (4.1.7), so a colour to be blended is
-        // rounded and the blend's result dithered.
-        let colour = if st.index_bits != 0 {
-            self.soft_index(f.index)
-        } else if self.blend {
-            self.rules.rgb(&f.rgba)
-        } else {
-            self.store_rgb(x, y, &f.rgba)
-        };
+        let colour = if st.index_bits != 0 { self.soft_index(f.index) } else { self.rules.rgb(&f.rgba) };
         for i in 0..self.ntargets as usize {
             let mut out = colour;
 
@@ -2045,30 +1924,6 @@ mod colour_tests {
                 let want = (r.channel(c).wrapping_shl(2 * bits as u32)) | (r.channel(d).wrapping_shl(bits as u32)) | r.channel(e);
 
                 assert_eq!(r.rgb(&[c, d, e]), want, "{bits} bits, {c} {d} {e}");
-            }
-        }
-    }
-
-    // The dither threshold floors what it adds to: a component of 0.5 + b
-    // steps down to the step below.
-    #[test]
-    fn dither_truncates_as_floor_does() {
-        for bits in [1u32, 5, 8, 12] {
-            let max = (1u32 << bits) - 1;
-
-            for &c in &components(bits) {
-                for t in 0..16 {
-                    let b = t as f64 / 16.0;
-                    let want = if !(c > 0.0) {
-                        0
-                    } else if c >= 1.0 {
-                        max
-                    } else {
-                        (c * max as f64 + b).floor() as u32
-                    };
-
-                    assert_eq!(soft_dither_channel(c, max, b), want, "{bits} bits, {c} + {b}");
-                }
             }
         }
     }

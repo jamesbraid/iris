@@ -117,7 +117,7 @@ impl SoftVertex {
 }
 
 impl SoftVertex {
-    /// SGI_LINE_CENTRE_SAMPLED: pixel (px, py) is on the segment to b if its
+    /// LineRule::CentreSampled: pixel (px, py) is on the segment to b if its
     /// column (row, for a y-major segment) has its centre between the ends,
     /// the start included and the end not, and it is the minor-axis pixel
     /// holding the segment at that centre, an exact crossing on a pixel edge
@@ -151,11 +151,10 @@ impl SoftVertex {
     }
 
     /// Whether the segment to b covers pixel (px, py) under the line rule.
-    pub fn line_covered(&self, rule: u8, b: &SoftVertex, px: i64, py: i64, sub: i32) -> bool {
-        if rule as u32 == SGI_LINE_CENTRE_SAMPLED {
-            self.line_centre_covers(b, px, py, sub)
-        } else {
-            self.line_covers(b, px, py, sub)
+    pub fn line_covered(&self, rule: LineRule, b: &SoftVertex, px: i64, py: i64, sub: i32) -> bool {
+        match rule {
+            LineRule::CentreSampled => self.line_centre_covers(b, px, py, sub),
+            LineRule::Diamond => self.line_covers(b, px, py, sub),
         }
     }
 }
@@ -309,68 +308,20 @@ pub fn soft_circle_coverage(cx: f64, cy: f64, radius: f64, x: i32, y: i32) -> f6
     r2_min(1.0, r2_max(0.0, area))
 }
 
-/// SGI_SMOOTH_TWO_PIXEL_FILTER's weight in one axis for a fragment whose
-/// centre is d from a footprint of the given size: a box of that size
-/// filtered by a one-pixel tent.
-pub fn soft_filter_weight(size: f64, d: f64) -> f64 {
-    r2_min(1.0, r2_max(0.0, (size + 1.0) * 0.5 - d.abs()))
-}
-
-pub fn soft_point_filter(cx: f64, cy: f64, size: f64, x: i32, y: i32) -> f64 {
-    soft_filter_weight(size, cx - (x as f64 + 0.5)) * soft_filter_weight(size, cy - (y as f64 + 0.5))
-}
-
-pub fn soft_line_filter(ax: f64, ay: f64, bx: f64, by: f64, width: f64, x: i32, y: i32) -> f64 {
-    let x_major = (bx - ax).abs() >= (by - ay).abs();
-    let mut l0 = if x_major { ax } else { ay };
-    let mut l1 = if x_major { bx } else { by };
-    let mut n0 = if x_major { ay } else { ax };
-    let mut n1 = if x_major { by } else { bx };
-    let m = if x_major { x } else { y };
-    let n = if x_major { y } else { x };
-
-    if !(l1 != l0) {
-        return 0.0;
-    }
-    if l1 < l0 {
-        std::mem::swap(&mut l0, &mut l1);
-        std::mem::swap(&mut n0, &mut n1);
-    }
-    let lo = r2_max(l0, m as f64);
-    let hi = r2_min(l1, m as f64 + 1.0);
-    if !(hi > lo) {
-        return 0.0;
-    }
-    let slope = (n1 - n0) / (l1 - l0);
-    let minor = n0 + slope * ((lo + hi) * 0.5 - l0);
-    let d = minor - (n as f64 + 0.5);
-    r2_min(1.0, soft_filter_weight(width, d) * (1.0 + slope * slope).sqrt()) * (hi - lo)
-}
-
 impl RasterRules {
     pub fn point_coverage(&self, cx: f64, cy: f64, size: f64, x: i32, y: i32) -> f64 {
-        if self.smooth_rule as u32 == SGI_SMOOTH_TWO_PIXEL_FILTER {
-            return soft_point_filter(cx, cy, size, x, y);
-        }
         soft_circle_coverage(cx, cy, size * 0.5, x, y)
     }
 
     #[allow(clippy::too_many_arguments, reason = "two end points, a width and a pixel")]
     pub fn line_coverage(&self, ax: f64, ay: f64, bx: f64, by: f64, width: f64, x: i32, y: i32) -> f64 {
-        if self.smooth_rule as u32 == SGI_SMOOTH_TWO_PIXEL_FILTER {
-            return soft_line_filter(ax, ay, bx, by, width, x, y);
-        }
         soft_line_coverage(ax, ay, bx, by, width, x, y)
     }
 
     /// How far from a smoothed point's centre, or a smoothed line, in pixels,
     /// a fragment can have coverage.
     pub fn smooth_reach(&self, size: f64) -> f64 {
-        if self.smooth_rule as u32 == SGI_SMOOTH_TWO_PIXEL_FILTER {
-            (size + 1.0) * 0.5
-        } else {
-            size * 0.5
-        }
+        size * 0.5
     }
 }
 
@@ -410,7 +361,7 @@ impl SoftDraw<'_> {
     /// Map and rasterize one aliased segment, already projected, with the
     /// provoking vertex's colour when flat shaded. Width follows the
     /// minor-axis shift and replication of 3.4.3. A smoothed segment takes the
-    /// coverage of the rules' smooth_rule (3.4.2), stippled as one-pixel pieces
+    /// box-filter coverage (3.4.2), stippled as one-pixel pieces
     /// along its length.
     pub fn line_projected(&self, pa: &SoftVertex, pb: &SoftVertex, provoking: &[f32], offset: f64, stipple: Option<&mut SoftLineStipple>, client_clip: bool) {
         let mut stipple = stipple;
@@ -711,8 +662,8 @@ impl SoftDraw<'_> {
     }
 
     /// Aliased square-point centring follows OpenGL 1.2.1, 3.3, on the shared
-    /// snapped subpixel grid. A smoothed point takes the coverage of the
-    /// rules' smooth_rule about its snapped centre (3.3.2).
+    /// snapped subpixel grid. A smoothed point takes the
+    /// box-filter coverage about its snapped centre (3.3.2).
     pub fn point_projected(&self, pv: &SoftVertex, provoking: Option<&[f32]>, offset: f64) {
         let sub = self.rules.subpixel_bits as i32;
         let v = *pv;
