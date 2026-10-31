@@ -30,6 +30,7 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::SeqCst};
 use std::thread::JoinHandle;
 
+use crossbeam_utils::CachePadded;
 use parking_lot::{Condvar, Mutex};
 
 use crate::gfifo::GFifo;
@@ -108,29 +109,38 @@ impl Run {
     }
 }
 
-pub struct CommandFifo {
-    ring: Box<CommandRing>,
-    /// Serialises the consumers (the board lock already does for the queue's
-    /// runners; reset's clear takes it too). The producers need no lock of
-    /// their own: the ring's spinlock orders them.
-    pop: Mutex<()>,
+/// The counts the processor's pushes raise and the board's thread's
+/// retirements lower.
+struct Levels {
     /// The level: FIFO words pushed and not yet taken out.
     words: AtomicU32,
     /// Stores pushed and not yet taken out.
     stores: AtomicU32,
     /// Counted stores waiting; while zero no store needs credit work.
     counted: AtomicU32,
-    /// The high-water mark from `0x6b2`, in words; zero until set up.
-    high_mark: AtomicU32,
+}
+
+pub struct CommandFifo {
+    ring: Box<CommandRing>,
+    /// Serialises the consumers (the board lock already does for the queue's
+    /// runners; reset's clear takes it too). The producers need no lock of
+    /// their own: the ring's spinlock orders them.
+    pop: Mutex<()>,
+    /// What both sides count, on a line of its own.
+    levels: CachePadded<Levels>,
+    /// The high-water mark from `0x6b2`, in words; zero until set up. This
+    /// and `running` are read on every store and written rarely, so each has
+    /// a line no counter shares.
+    high_mark: CachePadded<AtomicU32>,
     /// The board's thread runs, so command stores queue.
-    pub running: AtomicBool,
+    pub running: CachePadded<AtomicBool>,
     /// The board's thread sleeps on `kick`.
     waiting: AtomicBool,
     /// The processor waits for the board's thread: its next slice starts
     /// without the pause for a burst of stores.
-    hurry: AtomicBool,
+    hurry: CachePadded<AtomicBool>,
     /// The board's thread is running stores under the board lock.
-    pub slice: AtomicBool,
+    pub slice: CachePadded<AtomicBool>,
     exit: AtomicBool,
     wake: Mutex<()>,
     kick: Condvar,
@@ -150,14 +160,12 @@ impl Default for CommandFifo {
             // place because the ring is too big for the stack.
             ring: unsafe { Box::new_zeroed().assume_init() },
             pop: Mutex::new(()),
-            words: AtomicU32::new(0),
-            stores: AtomicU32::new(0),
-            counted: AtomicU32::new(0),
-            high_mark: AtomicU32::new(0),
-            running: AtomicBool::new(false),
+            levels: CachePadded::new(Levels { words: AtomicU32::new(0), stores: AtomicU32::new(0), counted: AtomicU32::new(0) }),
+            high_mark: CachePadded::new(AtomicU32::new(0)),
+            running: CachePadded::new(AtomicBool::new(false)),
             waiting: AtomicBool::new(false),
-            hurry: AtomicBool::new(false),
-            slice: AtomicBool::new(false),
+            hurry: CachePadded::new(AtomicBool::new(false)),
+            slice: CachePadded::new(AtomicBool::new(false)),
             exit: AtomicBool::new(false),
             wake: Mutex::new(()),
             kick: Condvar::new(),
@@ -172,12 +180,12 @@ impl Default for CommandFifo {
 impl CommandFifo {
     /// The FIFO words waiting: the level STATUS0 reports.
     pub fn level(&self) -> u32 {
-        self.words.load(SeqCst)
+        self.levels.words.load(SeqCst)
     }
 
     /// The stores waiting.
     pub fn stores(&self) -> u32 {
-        self.stores.load(SeqCst)
+        self.levels.stores.load(SeqCst)
     }
 
     pub fn pending(&self) -> bool {
@@ -204,7 +212,11 @@ impl CommandFifo {
 
     /// The processor waits for the board's thread to run what is queued.
     pub fn hurry(&self) {
-        self.hurry.store(true, SeqCst);
+        // A refused store retries in a loop; write the line only when it
+        // changes, as IMPACT does for its asleep flag.
+        if !self.hurry.load(SeqCst) {
+            self.hurry.store(true, SeqCst);
+        }
     }
 
     /// Whether the board's thread's next slice is awaited, clearing it.
@@ -259,10 +271,10 @@ impl CommandFifo {
             } else if let Some(pi) = &f.pi {
                 pi_gfx_owe_credits(pi.as_ref(), f.slot, 1);
             }
-            self.counted.fetch_add(1, SeqCst);
+            self.levels.counted.fetch_add(1, SeqCst);
         }
-        self.stores.fetch_add(1, SeqCst);
-        let after = self.words.fetch_add(words, SeqCst) + words;
+        self.levels.stores.fetch_add(1, SeqCst);
+        let after = self.levels.words.fetch_add(words, SeqCst) + words;
         let mark = self.high_mark.load(SeqCst);
         if mark != 0 && before < mark && after >= mark {
             // Reaching the high-water mark raises its flag, whatever the
@@ -283,7 +295,7 @@ impl CommandFifo {
     /// a counted store waits the run is one store, so each credit is settled
     /// as that store leaves, as it always was.
     pub fn take_run(&self, run: &mut Run) {
-        let max = if self.counted.load(SeqCst) != 0 { 1 } else { RUN_MAX };
+        let max = if self.levels.counted.load(SeqCst) != 0 { 1 } else { RUN_MAX };
         let mut raw = [(0u32, 0u64); RUN_MAX];
         run.len = self.ring.peek_run_at(0, &mut raw[..max]);
         for (store, (addr, value)) in run.stores.iter_mut().zip(&raw[..run.len]) {
@@ -311,22 +323,22 @@ impl CommandFifo {
         let counted_ran = ran.iter().filter(|q| q.counted).count() as u32;
         let _c = self.pop.lock();
         self.ring.consume_n_at(0, n);
-        if self.words.load(SeqCst) < ODSY_CFIFO_LOW_WATER + words {
+        if self.levels.words.load(SeqCst) < ODSY_CFIFO_LOW_WATER + words {
             let mut f = front.lock();
-            let before = self.words.fetch_sub(words, SeqCst);
+            let before = self.levels.words.fetch_sub(words, SeqCst);
             if before >= ODSY_CFIFO_LOW_WATER && before - words < ODSY_CFIFO_LOW_WATER {
                 f.intr_flags |= ODSY_INTR_FIFO_LOW_WATER;
                 crate::pf_instant!(crate::perfetto::events::ODSY_CFIFO_LOW_WATER, before - words);
                 f.update_irq();
             }
         } else {
-            self.words.fetch_sub(words, SeqCst);
+            self.levels.words.fetch_sub(words, SeqCst);
         }
-        let stores_before = self.stores.fetch_sub(n as u32, SeqCst);
+        let stores_before = self.levels.stores.fetch_sub(n as u32, SeqCst);
         if counted_ran != 0 {
-            self.counted.fetch_sub(counted_ran, SeqCst);
+            self.levels.counted.fetch_sub(counted_ran, SeqCst);
         }
-        if self.counted.load(SeqCst) == 0 {
+        if self.levels.counted.load(SeqCst) == 0 {
             return;
         }
         // The next waiting store moves into the FIFO's last credited place
@@ -359,10 +371,10 @@ impl CommandFifo {
         while let Some((addr, value)) = self.ring.peek() {
             self.ring.consume();
             let q = QueuedStore::from_entry(addr, value);
-            self.words.fetch_sub(q.words(), SeqCst);
-            self.stores.fetch_sub(1, SeqCst);
+            self.levels.words.fetch_sub(q.words(), SeqCst);
+            self.levels.stores.fetch_sub(1, SeqCst);
             if q.counted {
-                self.counted.fetch_sub(1, SeqCst);
+                self.levels.counted.fetch_sub(1, SeqCst);
             }
             if q.owed && index >= ODSY_CFIFO_DEPTH {
                 let f = front.lock();
