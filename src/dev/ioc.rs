@@ -7,7 +7,7 @@ use crate::traits::{BusRead8, BusRead16, BusRead32, BusRead64, BUS_OK, BUS_ERR, 
 use crate::snapshot::{get_field, toml_u8, hex_u8};
 use crate::dev::z85c30::Z85c30;
 use crate::dev::pit8254::{Pit8254, TimerCallback};
-use crate::cpu::mips_core::{CAUSE_IP2, CAUSE_IP3, CAUSE_IP4, CAUSE_IP5, CAUSE_IP6};
+use crate::cpu::mips_isa::{CAUSE_IP2, CAUSE_IP3, CAUSE_IP4, CAUSE_IP5, CAUSE_IP6};
 use crate::dev::ps2::Ps2Controller;
 use crate::hptimer::TimerManager;
 use crate::irq::{InterruptController, IrqLine};
@@ -1459,7 +1459,7 @@ mod tests {
     /// neither of which the IOC owns, so a reset must leave both alone.
     #[test]
     fn power_on_clears_only_the_cpu_lines_the_ioc_drives() {
-        use crate::cpu::mips_core::{CAUSE_IP2, CAUSE_IP3, CAUSE_IP4, CAUSE_IP5, CAUSE_IP6};
+        use crate::cpu::mips_isa::{CAUSE_IP2, CAUSE_IP3, CAUSE_IP4, CAUSE_IP5, CAUSE_IP6};
         assert_eq!(
             IOC_OWNED_LINES,
             (CAUSE_IP2 | CAUSE_IP3 | CAUSE_IP4 | CAUSE_IP5 | CAUSE_IP6) as u64,

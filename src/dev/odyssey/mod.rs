@@ -135,7 +135,7 @@ use std::thread::JoinHandle;
 
 use parking_lot::Mutex;
 
-use crate::cpu::mips_core::CyclesPtr;
+use crate::cpu::cycles::CyclesPtr;
 use crate::dev::ng1::rex3::Renderer;
 use crate::disp::{Rex3Screen, FB_STRIDE};
 use crate::ip30::{widget_large_base, widget_small_base};

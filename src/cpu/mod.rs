@@ -4,6 +4,7 @@
 
 pub mod mips_isa;
 pub mod mips_dis;
+pub mod cycles;
 pub mod mips_core;
 pub mod mips_tlb;
 pub mod mips_cache_v2;

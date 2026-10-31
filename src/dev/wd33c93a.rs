@@ -321,7 +321,7 @@ pub struct Wd33c93a {
     /// device is constructed before it does, so this can't be a constructor
     /// parameter) but strictly before `start()` spawns the worker thread
     /// that actually reads it, so a plain `Cell` is enough.
-    cpu_cycles: Cell<crate::cpu::mips_core::CyclesPtr>,
+    cpu_cycles: Cell<crate::cpu::cycles::CyclesPtr>,
     /// Defer SCSI status interrupts: clear CIP, spin 1000 cycles, then assert INT.
     /// Required for OpenBSD/NetBSD so wd33c93_loop exits before INT fires.
     deferred_int: Arc<AtomicBool>,
@@ -379,7 +379,7 @@ impl Wd33c93a {
             running: Arc::new(AtomicBool::new(false)),
             dma,
             heartbeat,
-            cpu_cycles: Cell::new(crate::cpu::mips_core::CyclesPtr::dangling()),
+            cpu_cycles: Cell::new(crate::cpu::cycles::CyclesPtr::dangling()),
             deferred_int: deferred_int_arc,
         }
     }
@@ -388,7 +388,7 @@ impl Wd33c93a {
     /// `MipsCpu` exists (this device is constructed before it does, so this
     /// can't be a constructor parameter; see `MipsCpu::cycles_ptr`). Must be
     /// called before `start()` — see `cpu_cycles`'s own doc comment.
-    pub fn set_cpu_cycles(&self, ptr: crate::cpu::mips_core::CyclesPtr) {
+    pub fn set_cpu_cycles(&self, ptr: crate::cpu::cycles::CyclesPtr) {
         self.cpu_cycles.set(ptr);
     }
 

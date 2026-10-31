@@ -373,9 +373,9 @@ pub struct Mgras {
     screenshot_pending: AtomicBool,
     heartbeat: Arc<AtomicU64>,
     fasttick: Arc<AtomicU64>,
-    cycles: SpinLock<crate::cpu::mips_core::CyclesPtr>,
+    cycles: SpinLock<crate::cpu::cycles::CyclesPtr>,
     /// The other CPUs, for the status bar.
-    more_cpus: SpinLock<Vec<(crate::cpu::mips_core::CyclesPtr, Arc<AtomicU64>)>>,
+    more_cpus: SpinLock<Vec<(crate::cpu::cycles::CyclesPtr, Arc<AtomicU64>)>>,
     /// Annotated trace (`mgras trace`); `trace_mask` gates the hot paths.
     trace: SpinLock<debug::MgrasTrace>,
     trace_mask: AtomicU32,
@@ -540,7 +540,7 @@ impl Mgras {
             addr_of_mut!((*p).screen).write(Mutex::new(crate::disp::Rex3Screen::new()));
             addr_of_mut!((*p).heartbeat).write(heartbeat);
             addr_of_mut!((*p).fasttick).write(fasttick);
-            addr_of_mut!((*p).cycles).write(SpinLock::new(crate::cpu::mips_core::CyclesPtr::dangling()));
+            addr_of_mut!((*p).cycles).write(SpinLock::new(crate::cpu::cycles::CyclesPtr::dangling()));
             addr_of_mut!((*p).more_cpus).write(SpinLock::new(Vec::new()));
             addr_of_mut!((*p).trace).write(SpinLock::new(debug::MgrasTrace::new()));
             a.assume_init()
@@ -973,12 +973,12 @@ impl Mgras {
     }
 
     /// Wire up the CPU cycle counter for the status bar's MIPS figure.
-    pub fn set_cpu_cycles(&self, ptr: crate::cpu::mips_core::CyclesPtr) {
+    pub fn set_cpu_cycles(&self, ptr: crate::cpu::cycles::CyclesPtr) {
         *self.cycles.lock() = ptr;
     }
 
     /// One more CPU for the status bar.
-    pub fn add_cpu_stats(&self, cycles: crate::cpu::mips_core::CyclesPtr, fasttick: Arc<AtomicU64>) {
+    pub fn add_cpu_stats(&self, cycles: crate::cpu::cycles::CyclesPtr, fasttick: Arc<AtomicU64>) {
         self.more_cpus.lock().push((cycles, fasttick));
     }
 
@@ -1600,7 +1600,7 @@ impl crate::gfx_display::GfxDisplay for Mgras {
     fn renderer_slot(&self) -> &Mutex<Option<Box<dyn Renderer>>> { &self.renderer }
     fn screen(&self) -> &Mutex<crate::disp::Rex3Screen> { &self.screen }
     fn request_screenshot(&self) { self.screenshot_pending.store(true, Ordering::Relaxed); }
-    fn cycles(&self) -> crate::cpu::mips_core::CyclesPtr { *self.cycles.lock() }
+    fn cycles(&self) -> crate::cpu::cycles::CyclesPtr { *self.cycles.lock() }
     fn hw_cursor(&self) -> Option<crate::gfx_display::HwCursor> {
         // A racy read of the VC3, as the display thread's snapshot does.
         let vc3 = &self.front_view().dcb.vc3;

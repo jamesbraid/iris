@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::cpu::mips_core::CyclesPtr;
+use crate::cpu::cycles::CyclesPtr;
 use crate::dev::ng1::rex3::Renderer;
 use crate::disp::{Rex3Screen, FB_STRIDE};
 

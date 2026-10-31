@@ -9,7 +9,7 @@
 use parking_lot::Mutex;
 
 use crate::disp::Rex3Screen;
-use crate::cpu::mips_core::CyclesPtr;
+use crate::cpu::cycles::CyclesPtr;
 use crate::dev::ng1::rex3::Renderer;
 
 pub trait GfxDisplay: Send + Sync {

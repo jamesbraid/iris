@@ -170,7 +170,7 @@ fn guest_clock_uses_instruction_count() {
     let _g = SERIAL.lock();
     let counter: &'static mut u64 = Box::leak(Box::new(1000));
     let cp = counter as *mut u64;
-    set_guest_cycles(Some(crate::cpu::mips_core::CyclesPtr::new(cp)));
+    set_guest_cycles(Some(crate::cpu::cycles::CyclesPtr::new(cp)));
     let path = temp_path("guest");
     start(&path, cat::ALL, Clock::Guest).unwrap();
     crate::pf_instant!(T_INSTANT);

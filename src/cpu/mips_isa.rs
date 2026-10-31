@@ -264,3 +264,17 @@ pub const C_HSV: u32 = 0x1C;      // Hit Set Virtual (SI, SD)
 // R5K/Triton-specific secondary cache ops (target must be SI or SD)
 pub const C_INVALL:  u32 = 0x00;  // Triton: Invalidate all secondary cache lines (same encoding as C_IINV)
 pub const C_INVPAGE: u32 = 0x14;  // Triton: Invalidate secondary cache page (same encoding as C_HWBINV)
+
+// CP0 Cause Register bit definitions
+pub const CAUSE_EXCCODE_MASK: u32 = 0x1F << 2; // Exception Code mask
+pub const CAUSE_EXCCODE_SHIFT: u32 = 2;        // Exception Code shift
+pub const CAUSE_IP_MASK: u32 = 0xFF << 8;      // Interrupt Pending mask
+pub const CAUSE_IP_SHIFT: u32 = 8;             // Interrupt Pending shift
+pub const CAUSE_IP0: u32 = 1 << 8;
+pub const CAUSE_IP1: u32 = 1 << 9;
+pub const CAUSE_IP2: u32 = 1 << 10;
+pub const CAUSE_IP3: u32 = 1 << 11;
+pub const CAUSE_IP4: u32 = 1 << 12;
+pub const CAUSE_IP5: u32 = 1 << 13;
+pub const CAUSE_IP6: u32 = 1 << 14;
+pub const CAUSE_IP7: u32 = 1 << 15;            // Timer interrupt (IP7)
