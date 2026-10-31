@@ -157,6 +157,11 @@ impl Display {
         self.frame.store(false, Ordering::Release);
     }
 
+    /// Drop the frame state but leave the renderer as it is.
+    pub(super) fn release_frame(&self) {
+        self.local.lock().take();
+    }
+
     pub(super) fn stop(&self) {
         if let Some(renderer) = self.renderer.lock().as_mut() {
             renderer.stop();

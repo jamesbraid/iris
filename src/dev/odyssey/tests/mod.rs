@@ -31,6 +31,7 @@ mod program;
 mod query;
 mod raster;
 mod registers;
+mod stop;
 
 pub(super) const VPRO_WIDGET: u32 = 11;
 const HEART_WIDGET: u64 = 8;
