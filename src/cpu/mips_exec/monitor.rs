@@ -1603,7 +1603,7 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> MipsCpu<T, C> {
                 let target = exp::parse_reg_target(actual_args[0])
                     .ok_or_else(|| format!("Unknown register: {}", actual_args[0]))?;
                 let val = parse_cpu_arg(actual_args[1], &exec.core, Some(&symbols))?;
-                exp::write_reg_target(&target, &mut exec.core, val);
+                crate::cpu::mips_core::write_reg_target(&target, &mut exec.core, val);
                 writeln!(writer, "{} = {:016x}", actual_args[0], val).unwrap();
                 Ok(())
             }

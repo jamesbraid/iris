@@ -1,4 +1,3 @@
-use crate::cpu::mips_core::MipsCore;
 use crate::cpu::mips_dis::{self, SymbolTable};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,26 +65,14 @@ pub fn parse_reg_target(arg: &str) -> Option<RegTarget> {
     None
 }
 
-pub fn read_reg_target(target: &RegTarget, core: &MipsCore) -> u64 {
-    match target {
-        RegTarget::Pc      => core.pc,
-        RegTarget::Hi      => core.hi,
-        RegTarget::Lo      => core.lo,
-        RegTarget::Gpr(i)  => core.read_gpr(*i),
-        RegTarget::Cp0(i)  => core.read_cp0_debug(*i),
-        RegTarget::Fpr(i)  => core.fpr[*i as usize],
-    }
+/// A register file an expression can read. `MipsCore` implements it
+/// (cpu/mips_core.rs); the trait keeps the parser free of the CPU.
+pub trait RegRead {
+    fn read_reg(&self, target: &RegTarget) -> u64;
 }
 
-pub fn write_reg_target(target: &RegTarget, core: &mut MipsCore, val: u64) {
-    match target {
-        RegTarget::Pc      => core.pc = val,
-        RegTarget::Hi      => core.hi = val,
-        RegTarget::Lo      => core.lo = val,
-        RegTarget::Gpr(i)  => core.write_gpr(*i, val),
-        RegTarget::Cp0(i)  => core.write_cp0(*i, val),
-        RegTarget::Fpr(i)  => core.fpr[*i as usize] = val,
-    }
+pub fn read_reg_target<R: RegRead + ?Sized>(target: &RegTarget, core: &R) -> u64 {
+    core.read_reg(target)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -111,7 +98,7 @@ pub enum Expr {
 }
 
 impl Expr {
-    pub fn eval(&self, core: &MipsCore, symbols: Option<&SymbolTable>) -> Result<u64, String> {
+    pub fn eval<R: RegRead + ?Sized>(&self, core: &R, symbols: Option<&SymbolTable>) -> Result<u64, String> {
         match self {
             Expr::Literal(val) => Ok(*val),
             Expr::Register(reg) => Ok(read_reg_target(reg, core)),
@@ -431,7 +418,7 @@ impl Parser {
     }
 }
 
-pub fn parse_and_eval(input: &str, core: &MipsCore, symbols: Option<&SymbolTable>) -> Result<u64, String> {
+pub fn parse_and_eval<R: RegRead + ?Sized>(input: &str, core: &R, symbols: Option<&SymbolTable>) -> Result<u64, String> {
     let expr = Expr::parse(input)?;
     let folded = expr.fold(symbols);
     folded.eval(core, symbols)
