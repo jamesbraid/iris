@@ -219,7 +219,7 @@ impl SoftDraw<'_> {
         let max = (1u32 << rules.color_bits) - 1;
         let alpha_max = rules.alpha_max();
         let alpha_q = rules.alpha(frag.rgba[3]);
-        let alpha = alpha_q as f64 / alpha_max as f64;
+        let alpha = soft_unit(alpha_q, alpha_max);
         let blend = M::blend(self);
         let rgb = if blend { rules.rgb(&frag.rgba) } else { self.store_rgb(x, y, &frag.rgba) };
 
@@ -239,12 +239,12 @@ impl SoftDraw<'_> {
             let mut blended = [0.0f64; 4];
 
             for k in 0..3usize {
-                src[k] = out.component[k] as f64 / max as f64;
-                dst[k] = dest.component[k] as f64 / max as f64;
+                src[k] = soft_unit(out.component[k], max);
+                dst[k] = soft_unit(dest.component[k], max);
             }
             src[3] = alpha;
             dst[3] = if rules.alpha_bits != 0 {
-                dest.component[3] as f64 / ((1u32 << rules.alpha_bits) - 1) as f64
+                soft_unit(dest.component[3], (1u32 << rules.alpha_bits) - 1)
             } else {
                 1.0
             };

@@ -159,9 +159,12 @@ pub enum Scene {
     /// Small bilinear RGB quads, depth tested: each quad's two triangles
     /// validated as a pair before either draws.
     TexQuads,
+    /// Bilinear RGB blended over what is there, depth tested LESS and
+    /// written (Smoke & Mirrors' glass).
+    TexGlass,
 }
 
-pub const ALL_SCENES: [Scene; 18] = [
+pub const ALL_SCENES: [Scene; 19] = [
     Scene::FlatFill,
     Scene::SmoothDepth,
     Scene::SmoothBlend,
@@ -180,6 +183,7 @@ pub const ALL_SCENES: [Scene; 18] = [
     Scene::TexBlendOver,
     Scene::TexStencilClip,
     Scene::TexQuads,
+    Scene::TexGlass,
 ];
 
 /// One scene, built: the board, the draw state, the vertex lists of its
@@ -403,6 +407,17 @@ impl Bench {
                 st.blend_src = SGI_GL_SRC_ALPHA;
                 st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
                 b.tex = Some(BenchTexture::new(256, SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR, SGI_GL_RGBA));
+                tris(&mut b.prims, &mut b.pixels, 40.0, 1.5 / 256.0);
+            }
+            Scene::TexGlass => {
+                st.depth_test = 1;
+                st.texture_2d = 1;
+                st.blend = 1;
+                st.blend_src = SGI_GL_SRC_ALPHA;
+                st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
+                // The bilinear texture has no alpha, so the blend weighs the
+                // vertices' own.
+                b.tex = Some(BenchTexture::new(256, SGI_GL_LINEAR, SGI_GL_LINEAR, SGI_GL_RGB));
                 tris(&mut b.prims, &mut b.pixels, 40.0, 1.5 / 256.0);
             }
             Scene::TexQuads => {

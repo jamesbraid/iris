@@ -299,12 +299,11 @@ impl<'a> SoftDraw<'a> {
             let size = (f.level[i].width as usize) * (f.level[i].height as usize);
 
             if store.size < size {
-                store.cell = Vec::new();
-                store.tag = Vec::new();
+                store.cells = Vec::new();
                 store.size = 0;
-                match (soft_fixed_alloc(size), soft_fixed_alloc(size)) {
-                    (Some(cell), Some(tag)) => (store.cell, store.tag) = (cell, tag),
-                    _ => return false,
+                match soft_fixed_alloc(size) {
+                    Some(cells) => store.cells = cells,
+                    None => return false,
                 }
                 store.size = size;
             }
@@ -327,12 +326,13 @@ impl<'a> SoftDraw<'a> {
     pub fn fixed_fill(&self, store: &mut SoftFixedStore, index: usize, i: u32, x: u32, y: u32, tag: u32) -> Option<u64> {
         match self.fixed_read(self.fixed_tex(), i, x, y) {
             Some(texel) => {
-                store.tag[index] = tag;
-                store.cell[index] = soft_fixed_lanes(texel);
-                Some(store.cell[index])
+                let lanes = soft_fixed_lanes(texel);
+
+                store.cells[index] = SoftFixedCell { lanes, tag };
+                Some(lanes)
             }
             None => {
-                store.tag[index] = tag | SGI_SOFT_FIXED_FAILED;
+                store.cells[index].tag = tag | SGI_SOFT_FIXED_FAILED;
                 None
             }
         }
@@ -422,13 +422,13 @@ impl<'a> SoftDraw<'a> {
         };
         let tag = cache.tag;
         let store = &mut cache.fixed[i as usize];
-        let cell = store.tag[index];
+        let cell = store.cells[index];
 
-        if cell == tag {
-            *lanes = store.cell[index];
+        if cell.tag == tag {
+            *lanes = cell.lanes;
             return true;
         }
-        if cell == (tag | SGI_SOFT_FIXED_FAILED) {
+        if cell.tag == (tag | SGI_SOFT_FIXED_FAILED) {
             return false;
         }
         match self.fixed_fill(store, index, i, x, y, tag) {

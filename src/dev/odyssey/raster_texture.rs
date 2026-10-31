@@ -473,7 +473,7 @@ impl SoftTexelCache {
         if self.tag == 0 {
             // Tags have come round: cells from 2^31 draws ago would match.
             for store in self.fixed.iter_mut() {
-                store.tag.fill(0);
+                store.cells.fill(SoftFixedCell::default());
             }
             self.serial += 1;
             self.tag = (self.serial & !(SGI_SOFT_FIXED_FAILED as u64)) as u32;
