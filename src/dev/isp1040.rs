@@ -24,8 +24,9 @@
 //!   any completion is held.
 //! * The target model has no bus reset, so a bus reset or soft reset does not
 //!   arm a unit attention on the disk as QEMU's SCSI devices do. A bus reset
-//!   does not retire the command in flight either: it completes as it would
-//!   have.
+//!   retires a selection still waiting on an absent target at once, with the
+//!   reset completion the public drivers expect for a command the reset
+//!   destroyed.
 //! * Only logical unit 0 of a present target exists. A command for another
 //!   unit is passed to the target with that unit number, which answers as
 //!   SCSI says (INQUIRY: no device at this unit; anything else: check
@@ -199,6 +200,7 @@ pub const SCSI_STATUS_SENSE_VALID: u16 = 0x0200;
 
 pub const IOCB_COMPLETE: u16 = 0x0000;
 pub const IOCB_INCOMPLETE: u16 = 0x0001;
+pub const IOCB_RESET: u16 = 0x0004;
 pub const IOCB_DATA_UNDERRUN: u16 = 0x0015;
 
 pub const STATE_GOT_BUS: u16 = 0x0100;
@@ -1018,9 +1020,18 @@ impl Core {
                 }
             }
             // Resets the bus, not the adapter: chip state survives. Mailbox 1
-            // holds the configured reset delay, not a selector. A command in
-            // flight is not retired; it completes as it would have.
-            mbox::BUS_RESET => st.mailbox[0] = mbox::COMPLETE,
+            // holds the configured reset delay, not a selector. The reset
+            // destroys a selection still waiting on an absent target: it
+            // ends now with the reset completion, and posts once.
+            mbox::BUS_RESET => {
+                let now = self.now_ns(st);
+                if let Some(sel) = st.ctl.selecting.as_mut() {
+                    sel.due = now;
+                    sel.done = Pending { handle: sel.done.handle, completion: IOCB_RESET, ..Default::default() };
+                }
+                self.wake.notify_all();
+                st.mailbox[0] = mbox::COMPLETE;
+            }
             _ => {
                 self.note(format!("mailbox command {cmd:#06x} not modelled"));
                 st.mailbox[0] = mbox::INVALID;

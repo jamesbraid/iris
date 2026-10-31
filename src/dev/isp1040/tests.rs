@@ -719,20 +719,28 @@ fn a_programmed_timeout_of_zero_answers_at_once() {
     assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
 }
 
+/// A bus reset destroys the commands outstanding on the bus, and the public
+/// drivers all read a reset completion for those. A selection still waiting
+/// on an absent target is one of them: it ends at once with that completion
+/// instead of running out its timeout, and it completes only once.
 #[test]
-fn a_bus_reset_does_not_retire_a_waiting_selection() {
+fn a_bus_reset_retires_a_waiting_selection_with_a_reset_completion() {
     let r = Rig::with_disk("selection-bus-reset", 1, 64);
     r.init_rings(4, 4);
     r.clock(0);
     queue_absent(&r, 0, 0x67);
     r.clock(100 * MS);
+    assert!(!posted(&r, 0x67));
     assert_eq!(r.cmd(&[mbox::BUS_RESET, 5]), mbox::COMPLETE);
-    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS - 1);
-    assert!(!posted(&r, 0x67), "the bus reset did not cut the wait short");
+    r.isp.wait_idle();
+    assert!(posted(&r, 0x67), "retired by the reset, 150 ms before the timeout");
+    let s = r.status(0);
+    assert_eq!((g16(&s, 10), g16(&s, 12), g16(&s, 14)), (IOCB_RESET, 0, 0));
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
     r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS);
-    assert!(posted(&r, 0x67), "it completes when it would have");
     r.clock(10_000 * MS);
-    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1, "and only once");
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1, "the timeout posts nothing more");
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 1, "and the entry was consumed once");
 }
 
 #[test]
