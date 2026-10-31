@@ -56,9 +56,7 @@ const _: () = assert!(SDRAM_SPACE_END == widget_large_base(8));
 /// The boot flash window, both chip selects, as the processor addresses it.
 pub const BOOT_FLASH: std::ops::Range<u64> = 0x1fc0_0000..0x2000_0000;
 
-/// Where the CPU was at the end of its last batch, for the unmapped log.
-/// The machine's batch hook stores it.
-pub static LAST_PC: [AtomicU64; crate::cpu::smp::MAX_CPUS] = [const { AtomicU64::new(0) }; crate::cpu::smp::MAX_CPUS];
+pub use crate::cpu::smp::LAST_PC;
 
 /// What answers an address nothing claims: a bus error, noted with the PC
 /// for the monitor's `ip30 unmapped`.

@@ -873,7 +873,7 @@ impl ImpactXio {
             _ => {
                 drop(s);
                 // The CPU's PC at its last batch boundary: the caller, to within a batch.
-                let pc = crate::ip30::LAST_PC[crate::cpu::smp::current_cpu()].load(Ordering::Relaxed);
+                let pc = crate::cpu::smp::LAST_PC[crate::cpu::smp::current_cpu()].load(Ordering::Relaxed);
                 self.shared.note(format!("read of {off:#08x} at pc {pc:#x}"));
                 0
             }
@@ -1042,7 +1042,7 @@ impl ImpactXio {
             true
         });
         if !known {
-            let pc = crate::ip30::LAST_PC[crate::cpu::smp::current_cpu()].load(Ordering::Relaxed);
+            let pc = crate::cpu::smp::LAST_PC[crate::cpu::smp::current_cpu()].load(Ordering::Relaxed);
             self.shared.note(format!("write of {v:#x} to {off:#08x} at pc {pc:#x}"));
             return BUS_OK;
         }
