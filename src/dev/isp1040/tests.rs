@@ -697,6 +697,125 @@ fn a_reset_cancels_a_selection_in_progress() {
     assert!(!posted(&r, 0x64), "no completion after the reset");
 }
 
+/// An absent-target command (target 3 of a rig whose disk is at 1) queued
+/// in `slot` and the ring told; the thread is waiting out its selection
+/// when this returns, because `clock` has synchronised with it.
+fn queue_absent(r: &Rig, slot: u32, handle: u32) {
+    r.put_entry(slot, &request(handle, 3, &[0, 0, 0, 0, 0, 0], &[]));
+    r.doorbell(slot as u16 + 1);
+}
+
+#[test]
+fn a_programmed_timeout_of_zero_answers_at_once() {
+    let r = Rig::with_disk("selection-zero", 1, 64);
+    r.init_rings(4, 4);
+    r.clock(0);
+    assert_eq!(r.cmd(&[mbox::SET_SELECTION_TIMEOUT, 0]), mbox::COMPLETE);
+    queue_absent(&r, 0, 0x66);
+    r.isp.wait_idle();
+    let s = r.status(0);
+    assert_eq!(g32(&s, 4), 0x66, "answered with the clock still at zero, not the default");
+    assert_eq!((g16(&s, 10), g16(&s, 14)), (IOCB_INCOMPLETE, STATUS_FLAG_TIMEOUT));
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+}
+
+#[test]
+fn a_bus_reset_does_not_retire_a_waiting_selection() {
+    let r = Rig::with_disk("selection-bus-reset", 1, 64);
+    r.init_rings(4, 4);
+    r.clock(0);
+    queue_absent(&r, 0, 0x67);
+    r.clock(100 * MS);
+    assert_eq!(r.cmd(&[mbox::BUS_RESET, 5]), mbox::COMPLETE);
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS - 1);
+    assert!(!posted(&r, 0x67), "the bus reset did not cut the wait short");
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    assert!(posted(&r, 0x67), "it completes when it would have");
+    r.clock(10_000 * MS);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1, "and only once");
+}
+
+#[test]
+fn a_reset_leaves_no_late_completion_for_a_waiting_selection() {
+    let r = Rig::with_disk("selection-late", 1, 64);
+    r.init_rings(4, 4);
+    r.clock(0);
+    queue_absent(&r, 0, 0x68);
+    r.clock(100 * MS);
+    r.w(reg::BUS_CTRL, CTRL_SOFT_RESET);
+    // The driver starts over on the same rings before the old wait was up.
+    r.init_rings(4, 4);
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    r.clock(10_000 * MS);
+    assert!(!posted(&r, 0x68), "nothing for the cancelled command, then or later");
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 0, "the new ring's consumer is untouched");
+    // The next absent target waits its own full timeout from when it starts.
+    queue_absent(&r, 0, 0x69);
+    r.clock(10_000 * MS + DEFAULT_SELECTION_TIMEOUT as i64 * MS - 1);
+    assert!(!posted(&r, 0x69));
+    r.clock(10_000 * MS + DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    assert!(posted(&r, 0x69));
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+}
+
+#[test]
+fn a_response_queue_initialisation_does_not_cancel_a_waiting_selection() {
+    let r = Rig::with_disk("selection-resp-init", 1, 64);
+    r.init_rings(4, 4);
+    r.clock(0);
+    queue_absent(&r, 0, 0x6a);
+    r.clock(100 * MS);
+    assert_eq!(r.init_queue(mbox::INIT_RSP_QUEUE, 4, RESP + 0x100), mbox::COMPLETE);
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    let s: [u8; ENTRY_SIZE] = r.mem.get(RESP + 0x100, ENTRY_SIZE).try_into().unwrap();
+    assert_eq!(g32(&s, 4), 0x6a, "posted into the ring in place when the wait ended");
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 1, "and the command is consumed from its ring");
+}
+
+#[test]
+fn a_paused_adapter_posts_a_selection_that_ran_out_meanwhile_when_it_resumes() {
+    let r = Rig::with_disk("selection-pause", 1, 64);
+    r.init_rings(4, 4);
+    r.clock(0);
+    queue_absent(&r, 0, 0x6c);
+    r.clock(100 * MS);
+    r.isp.pause();
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS + 50 * MS);
+    assert!(!posted(&r, 0x6c), "a stopped machine posts nothing, however the clock reads");
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 0, "the entry is still the adapter's to take");
+    r.isp.resume();
+    r.isp.wait_idle();
+    assert!(posted(&r, 0x6c));
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 1);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+}
+
+/// On the real clock the time the machine stood still is not time spent
+/// selecting: a wait paused for longer than its timeout still has all it
+/// had left when the machine runs again.
+#[test]
+fn time_the_machine_was_stopped_does_not_count_against_a_selection() {
+    let r = Rig::with_disk("selection-stopped", 1, 64);
+    r.init_rings(4, 4);
+    assert_eq!(r.cmd(&[mbox::SET_SELECTION_TIMEOUT, 300]), mbox::COMPLETE);
+    queue_absent(&r, 0, 0x6d);
+    while r.isp.st.lock().ctl.selecting.is_none() { std::thread::yield_now(); }
+    r.isp.pause();
+    let frozen = r.isp.now_ns(&r.isp.st.lock());
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(r.isp.now_ns(&r.isp.st.lock()), frozen, "the adapter's clock stands still with the machine");
+    r.isp.resume();
+    r.isp.wait_idle();
+    assert!(!posted(&r, 0x6d), "twice its timeout passed on the host, none on the adapter's clock");
+    let st = r.isp.st.lock();
+    assert!(st.ctl.selecting.is_some_and(|(_, _, due)| r.isp.now_ns(&st) < due));
+}
+
+/// A snapshot taken mid-wait carries what is left of it, so the command
+/// completes that long after the load whatever the clock reads there.
 #[test]
 fn a_present_target_does_not_wait_for_the_selection_timeout() {
     let r = Rig::with_disk("selection-present", 1, 64);
