@@ -222,13 +222,16 @@ impl Odyssey {
         // hold off the next while the frame's lines are copied aside. The
         // colour rows it wrote since the last frame are resolved again.
         // The raster unit draws on while the copy is resolved.
+        let asked = std::time::Instant::now();
         let mut planes = state.raster.planes();
+        let held = std::time::Instant::now();
         crate::pf_begin!(crate::perfetto::events::ODSY_FRAME_PLANES);
         let displayed = s.front.lock().displayed_buffer;
         planes.take_rows(displayed, &mut s.scanout);
         s.scanout_stage();
         crate::pf_end!(crate::perfetto::events::ODSY_FRAME_PLANES);
         drop(planes);
+        s.scanout.stats.locked(held - asked, held.elapsed());
         // The copy resolves with no lock held, so neither the front end
         // nor the raster unit waits for it.
         let mut job = s.scanout_take();

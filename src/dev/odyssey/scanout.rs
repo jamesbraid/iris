@@ -118,6 +118,13 @@ pub struct DirtyStats {
     pub max_rows: u64,
     /// Swaps latched at a retrace.
     pub swaps: u64,
+    /// The frame's wait for the raster unit's context while it held the
+    /// board lock, and its hold of both for the plane copy: totals and
+    /// longest, in nanoseconds.
+    pub wait_ns: u64,
+    pub wait_max_ns: u64,
+    pub copy_ns: u64,
+    pub copy_max_ns: u64,
 }
 
 impl DirtyStats {
@@ -130,8 +137,26 @@ impl DirtyStats {
         }
     }
 
+    /// Time one frame took waiting for the planes and copying them.
+    pub fn locked(&mut self, wait: std::time::Duration, copy: std::time::Duration) {
+        let (wait, copy) = (wait.as_nanos() as u64, copy.as_nanos() as u64);
+
+        self.wait_ns += wait;
+        self.wait_max_ns = self.wait_max_ns.max(wait);
+        self.copy_ns += copy;
+        self.copy_max_ns = self.copy_max_ns.max(copy);
+    }
+
     pub fn report(&self, w: &mut dyn std::io::Write) -> std::io::Result<()> {
         writeln!(w, "frames {} busy {} rows {} max {} swaps {}", self.frames, self.busy_frames, self.rows, self.max_rows, self.swaps)?;
+        writeln!(
+            w,
+            "planes wait_us {} max {} copy_us {} max {}",
+            self.wait_ns / 1000,
+            self.wait_max_ns / 1000,
+            self.copy_ns / 1000,
+            self.copy_max_ns / 1000
+        )?;
         for (site, c) in DirtySite::ALL.iter().zip(&self.sites) {
             if c[0] != 0 {
                 writeln!(w, "site {} marks {} rows {}", site.name(), c[0], c[1])?;
