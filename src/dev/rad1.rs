@@ -46,6 +46,10 @@
 //!   wall time by the hold-ups; on-time completions win 1/32 of an interval
 //!   back each, and at most 200 ms is held back. Time the guest has read is
 //!   never taken back.
+//! * The relay (0x88 = 2) and DAC (0x8c = 3) mute words silence the host
+//!   output while the transfer runs on. That they mute is inferred from
+//!   when the PROM, IRIX and Linux write them; the power-on state is
+//!   unknown and taken as not muted.
 //! * A BAR0 access the model does not recognise is logged and reads zero.
 //!   The model fails the bus access instead, which the PCI bus layer here
 //!   cannot express.
@@ -122,10 +126,12 @@ const CTRL_NEXT_SHIFT: u32 = 3;
 const CTRL_NEXT_MASK: u32 = 0xf;
 /// Control word bit 2: end of descriptor; the transfer stops after it.
 const CTRL_EOD: u32 = 4;
-/// The descriptor RAM: 16 entries of three words from 0x400. The model keeps
-/// only the entries the supported rings use (see [`RINGS`]); a link to any
-/// other reads as never programmed.
+/// The descriptor RAM: 16 entries of three words from 0x400, all stored. A
+/// link to an entry still all zero is in no source and stops the output (see
+/// [`State::descriptor_end`]).
 const DESC_RAM_ENTRY_BYTES: u32 = 12;
+const DESC_RAM_ENTRIES: u32 = 16;
+const DESC_RAM_LAST: u32 = DMA_BANK_FIRST + DESC_RAM_ENTRIES * DESC_RAM_ENTRY_BYTES - 4;
 /// The analog output's enable register: bit 0 starts the channel, bit 29 or
 /// 30 picks generator 1 or 2 (mediaio-rad1-audio, output channel). The
 /// "bit 28 + n" pattern is inferred from those two; other bits are unknown.
@@ -1086,7 +1092,7 @@ impl Inner {
     }
 
     fn is_descriptor(off: u32) -> bool {
-        RINGS.iter().any(|r| r.contains(&off))
+        RINGS.iter().any(|r| r.contains(&off)) || (DMA_BANK_FIRST..=DESC_RAM_LAST).contains(&off)
     }
 
     fn subcode_access(off: u32, width: usize) -> bool {
@@ -1213,6 +1219,11 @@ impl Inner {
                     s.dma_bank[((off - DMA_BANK_FIRST) / 4) as usize] = val;
                     return Some(());
                 }
+            } else if (DMA_BANK_FIRST..=DESC_RAM_LAST).contains(&off) {
+                // A descriptor RAM entry no supported ring's registers
+                // cover: stored for a link to load.
+                s.dma_bank[((off - DMA_BANK_FIRST) / 4) as usize] = val;
+                return Some(());
             } else if off == REG_ANALOG_OUT_EN {
                 return self.analog_out_write(s, val, now);
             } else if off == REG_STATUS_DMA_CTRL {

@@ -147,11 +147,17 @@ fn descriptor_bank_storage() {
         wr(&r, off, v);
         assert_eq!(rd(&r, off), v);
     }
-    // Words in the bank that belong to no supported ring are refused.
-    wr(&r, 0x420, 7);
-    assert_eq!(rd(&r, 0x420), 0);
+    // Every descriptor RAM entry (0x400 + 12 i, 16 of them) is stored; past
+    // them, words that belong to no supported ring are refused.
+    for i in 0..16u32 {
+        wr(&r, 0x408 + 12 * i, 0x100 + i);
+        assert_eq!(rd(&r, 0x408 + 12 * i), 0x100 + i, "entry {i}");
+    }
+    wr(&r, 0x4c4, 7);
+    assert_eq!(rd(&r, 0x4c4), 0);
     r.reset();
     assert_eq!(rd(&r, 0x500), 0);
+    assert_eq!(rd(&r, 0x420), 0);
 }
 
 #[test]
@@ -1108,7 +1114,7 @@ fn a_link_to_an_unprogrammed_descriptor_plays_one_lap_and_stops() {
 
 #[test]
 fn a_link_loads_the_descriptor_ram_entry_it_names() {
-    for entry in [1u32] {
+    for entry in [1u32, 3, 7] {
         let (r, _ram, tap) = tune_card();
         // The first 512 frames link to `entry`, which holds 256 frames
         // elsewhere with end of descriptor.
