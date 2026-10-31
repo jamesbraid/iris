@@ -352,7 +352,7 @@ impl Heart {
         if set != 0 {
             word.fetch_or(set, Ordering::SeqCst);
             #[cfg(feature = "idle-pause")]
-            crate::cpu::idle_park::wake();
+            crate::cpu::smp::wake();
         }
         if clear != 0 {
             word.fetch_and(!clear, Ordering::SeqCst);

@@ -71,14 +71,9 @@ const PARK_BACKOFF_CYCLES: u64 = 2_000_000;
 /// boot; keep it at full speed, then start parking once it has settled.
 const PARK_WARMUP: Duration = Duration::from_secs(60);
 
-/// The CPU thread while it is parked in [`IdleParkState::park`], so an
-/// interrupt source can wake it at once instead of leaving it to notice on its
-/// next slice. One slot per CPU.
-static PARKER: parking_lot::Mutex<[Option<std::thread::Thread>; MAX_CPUS]> = parking_lot::const_mutex([const { None }; MAX_CPUS]);
-/// A bit per CPU, set while its thread is between its last look at the pending
-/// word and its sleep. Paired with the writers' order (set the bit, then read
-/// this) so a wakeup cannot be lost.
-static PARKED: AtomicU8 = AtomicU8::new(0);
+use crate::cpu::smp::{PARKED, PARKER};
+pub use crate::cpu::smp::wake;
+
 /// When this process first built an `IdleParkState`. One `Machine` per
 /// process, and the warm-up must not restart every time the monitor stops and
 /// starts the CPU thread (which builds a fresh state), so it is process-wide.
@@ -99,19 +94,6 @@ pub static RESET_USER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 pub static WINDOW_FULL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static WINDOW_SAMPLES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static WINDOW_DISTINCT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Wake the parked CPU threads. Call after setting a bit in `hot.interrupts`
-/// from any thread; one relaxed-cost atomic load when no CPU is parked. Every
-/// parked CPU wakes and looks at its own word, so the caller need not say whose
-/// bit it set; one that finds nothing sleeps again.
-#[inline]
-pub fn wake() {
-    if PARKED.load(Ordering::SeqCst) != 0 {
-        for t in PARKER.lock().iter().flatten() {
-            t.unpark();
-        }
-    }
-}
 
 fn announce_parked(core: &MipsCore) {
     PARKED.fetch_or(1 << core.cpu_id, Ordering::SeqCst);

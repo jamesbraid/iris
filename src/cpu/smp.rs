@@ -9,7 +9,7 @@
 //! per batch.
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -28,6 +28,28 @@ pub const HOLD_HEART: u32 = 1 << 0;
 pub const HOLD_WORLD: u32 = 1 << 1;
 
 const NOT_A_CPU: u8 = u8::MAX;
+
+/// The CPU thread while it is parked in `IdleParkState::park` (cpu/idle_park.rs), so an
+/// interrupt source can wake it at once instead of leaving it to notice on its
+/// next slice. One slot per CPU.
+pub static PARKER: parking_lot::Mutex<[Option<std::thread::Thread>; MAX_CPUS]> = parking_lot::const_mutex([const { None }; MAX_CPUS]);
+/// A bit per CPU, set while its thread is between its last look at the pending
+/// word and its sleep. Paired with the writers' order (set the bit, then read
+/// this) so a wakeup cannot be lost.
+pub static PARKED: AtomicU8 = AtomicU8::new(0);
+
+/// Wake the parked CPU threads. Call after setting a bit in `hot.interrupts`
+/// from any thread; one relaxed-cost atomic load when no CPU is parked. Every
+/// parked CPU wakes and looks at its own word, so the caller need not say whose
+/// bit it set; one that finds nothing sleeps again.
+#[inline]
+pub fn wake() {
+    if PARKED.load(Ordering::SeqCst) != 0 {
+        for t in PARKER.lock().iter().flatten() {
+            t.unpark();
+        }
+    }
+}
 
 thread_local! {
     static CURRENT_CPU: Cell<u8> = const { Cell::new(NOT_A_CPU) };
@@ -91,7 +113,7 @@ impl ParkSlot {
         s.holds |= why;
         self.word().fetch_or(HOST_PARK_BIT, Ordering::SeqCst);
         #[cfg(feature = "idle-pause")]
-        crate::cpu::idle_park::wake();
+        crate::cpu::smp::wake();
     }
 
     /// Drop one reason to stop; the CPU continues when none is left.
