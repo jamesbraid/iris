@@ -553,14 +553,17 @@ impl Board {
     /// direction that keeps a source row ahead of the writes, so an overlapping
     /// copy reads the bytes it had before. Approximation, as for the colour
     /// copy: a destination byte passes the plane bounds only, and a source
-    /// outside the plane is not copied.
+    /// outside the plane reads as zero (model policy; the hardware behaviour is
+    /// unknown).
     pub fn copy_rect_id_planes(&mut self) {
         let (sx, sy) = (self.copy_src & 0xffff, (self.copy_src >> 16) & 0xffff);
         let dx = self.copy_dst & 0xffff;
         let (dy, h_clip) = self.copy_dest_rows();
         let w = self.copy_size & 0xffff;
-        let w_clip = w.min(SGI_ODYSSEY_WIDTH.saturating_sub(dx)).min(SGI_ODYSSEY_WIDTH.saturating_sub(sx)) as usize;
-        let rows = h_clip.min(SGI_ODYSSEY_HEIGHT.saturating_sub(sy));
+        let w_clip = w.min(SGI_ODYSSEY_WIDTH.saturating_sub(dx)) as usize;
+        let rows = h_clip;
+        // The source pixels inside the plane on a row; the rest read as zero.
+        let src_w = w_clip.min(SGI_ODYSSEY_WIDTH.saturating_sub(sx) as usize);
         let buffers = self.draw_buffers();
         let mask = (self.plane_write_mask >> ODSY_PLANE_MASK_SHIFT) as u8;
         let mut staged = vec![0u8; w_clip];
@@ -585,7 +588,10 @@ impl Board {
                 }
                 let plane = if b == ODSY_AUX_ID_BUFFER { &mut self.did } else { &mut self.overlay };
 
-                staged.copy_from_slice(&plane[from..from + w_clip]);
+                staged.fill(0);
+                if sy + r < SGI_ODYSSEY_HEIGHT {
+                    staged[..src_w].copy_from_slice(&plane[from..from + src_w]);
+                }
                 for (d, s) in plane[to..to + w_clip].iter_mut().zip(&staged) {
                     *d = (*d & !mask) | (*s & mask);
                 }
