@@ -516,6 +516,34 @@ fn a_window_cycle_nobody_claims_is_a_master_timeout() {
 }
 
 #[test]
+fn an_empty_slot_config_read_is_an_expected_fault() {
+    let r = Rig::new();
+    r.card(1, PCI_INTA);
+    let at = |slot: u32, reg: u32| u64::from(Rig::cfg(slot, reg));
+
+    // Empty slots, any register, any word-or-narrower width.
+    for slot in [0, 2, 7] {
+        assert!(r.bridge.fault_is_expected(at(slot, 0), 4));
+        assert!(r.bridge.fault_is_expected(at(slot, Rig::aim(0x0e, 1)), 1));
+    }
+    // Function 1 of any slot has nothing behind it either.
+    assert!(r.bridge.fault_is_expected(at(1, 0x100), 4));
+    // The expectation follows the population, and the read still fails.
+    assert!(!r.bridge.fault_is_expected(at(1, 0), 4));
+    assert!(!r.bridge.read32(at(0, 0)).is_ok());
+    r.card(0, PCI_INTA);
+    assert!(!r.bridge.fault_is_expected(at(0, 0), 4));
+    // A doubleword config read fails for another reason.
+    assert!(!r.bridge.fault_is_expected(at(2, 0), 8));
+    // Other spaces: registers, device windows and the table.
+    assert!(!r.bridge.fault_is_expected(0x10, 4));
+    assert!(!r.bridge.fault_is_expected(u64::from(Rig::win(1) + 0x1000), 4));
+    assert!(!r.bridge.fault_is_expected(u64::from(ATE_BASE), 4));
+    // The Bridge decodes the full physical address; only the window offset counts.
+    assert!(r.bridge.fault_is_expected(0x1f00_0000 + at(3, 0), 4));
+}
+
+#[test]
 fn a_disabled_command_register_hides_the_bars() {
     let r = Rig::new();
     let c = r.card(1, PCI_INTA);

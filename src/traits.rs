@@ -80,6 +80,13 @@ pub trait BusDevice: Send + Sync {
     fn read64 (&self, _addr: u64) -> BusRead64 { BusRead64::err() }
     fn write64(&self, _addr: u64, _val: u64) -> u32 { BUS_ERR }
 
+    /// Is a failed `size`-byte read at `addr` routine on this device, so the
+    /// CPU need not report it? Asked only after a read has already failed;
+    /// it never changes the status, the exception or any device state. A
+    /// device overrides it for a failure software provokes on purpose, such
+    /// as probing for a card that is not there.
+    fn fault_is_expected(&self, _addr: u64, _size: usize) -> bool { false }
+
     /// 64-bit access issued by a DMA engine (e.g. MC's VDMA), as opposed to
     /// CPU-driven PIO. Defaults to plain `read64`/`write64` — most devices don't
     /// distinguish. A device whose PIO protocol has GO-triggered side effects

@@ -4886,7 +4886,12 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                                     };
                                     #[cfg(not(feature = "developer"))]
                                     let jitcheck_pass = "";
-                                    eprintln!("Bus error on uncached read{}: PC={:016x} VA={:016x} PA={:016x} status={:08x}{}", SIZE*8, self.core.pc, virt_addr, phys_addr, r.status, jitcheck_pass);
+                                    // Asked only on this path, so a good read never pays.
+                                    // A probe the device expects (an empty PCI slot) is
+                                    // still a bus error, just not worth a log line.
+                                    if !self.sysad.fault_is_expected(phys_addr, SIZE) {
+                                        eprintln!("Bus error on uncached read{}: PC={:016x} VA={:016x} PA={:016x} status={:08x}{}", SIZE*8, self.core.pc, virt_addr, phys_addr, r.status, jitcheck_pass);
+                                    }
                                     self.core.cp0_badvaddr = virt_addr;
                                 }
                             }

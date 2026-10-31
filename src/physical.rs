@@ -121,6 +121,7 @@ impl BusDevice for AliasBus {
     fn write32(&self, addr: u64, val: u32) -> u32 { unsafe { (*self.target).write32(self.target_addr(addr), val) } }
     fn read64(&self, addr: u64) -> BusRead64  { unsafe { (*self.target).read64(self.target_addr(addr)) } }
     fn write64(&self, addr: u64, val: u64) -> u32 { unsafe { (*self.target).write64(self.target_addr(addr), val) } }
+    fn fault_is_expected(&self, addr: u64, size: usize) -> bool { unsafe { (*self.target).fault_is_expected(self.target_addr(addr), size) } }
 
     /// Forward the generation counter lookup too — an alias is the same
     /// physical memory, so it must resolve to the same counter.
@@ -811,6 +812,13 @@ impl Device for Physical {
 }
 
 impl BusDevice for Physical {
+    /// Ask the device the decode table names for `addr`, as a read of it
+    /// would have been routed.
+    fn fault_is_expected(&self, addr: u64, size: usize) -> bool {
+        let addr = addr & PHYS_MASK;
+        unsafe { (*self.dev_at(addr)).fault_is_expected(addr, size) }
+    }
+
     #[inline(always)]
     fn read8(&self, addr: u64) -> BusRead8 {
         let addr = addr & PHYS_MASK;
