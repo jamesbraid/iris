@@ -389,7 +389,7 @@ impl Machine {
         // (CPU cycle counter is no longer among these: it lives inline on
         // MipsCore.hot.cycles now, wired into devices via set_cpu_cycles
         // after the executor/CPU exist — see Hot::cycles's doc comment.)
-        let heartbeat     = Arc::new(AtomicU64::new(0)); // activity bits: see Rex3::HB_*
+        let heartbeat     = Arc::new(AtomicU64::new(0)); // activity bits: see crate::heartbeat::HB_*
         let fasttick_count = Arc::new(AtomicU64::new(0)); // CP0 Compare match counter
         // What every graphics board's status bar reads; the CPU feeds its
         // fetch counters and the cycle counter is wired in below.

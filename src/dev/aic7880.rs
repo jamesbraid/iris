@@ -849,7 +849,7 @@ impl Aic7880 {
         const CHECK_CONDITION: u8 = 0x02;
         // The bar has lights for SCSI ids 0-5.
         if let (Some(hb), 0..=5) = (self.heartbeat.get(), target) {
-            hb.fetch_or(1u64 << (crate::dev::ng1::rex3::Rex3::HB_SCSI_BASE as u64 + target as u64), Ordering::Relaxed);
+            hb.fetch_or(1u64 << (crate::heartbeat::HB_SCSI_BASE as u64 + target as u64), Ordering::Relaxed);
         }
         if cdb[0] == scsi_cmd::REQUEST_SENSE {
             if let Some((key, asc, ascq)) = self.sense.lock().unwrap().take() {

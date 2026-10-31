@@ -547,7 +547,7 @@ pub struct BarStats {
 /// What stays with the board is what only the board knows: the depth of its
 /// command queue (`gfifo_pending`).
 pub struct StatusSource {
-    /// LEDs and SCSI/network activity bits (`Rex3::HB_*`). Devices set bits;
+    /// LEDs and SCSI/network activity bits (`crate::heartbeat`). Devices set bits;
     /// `snapshot` clears the activity bits once they have been shown.
     heartbeat: Arc<AtomicU64>,
     /// CP0 Compare-match counter, for the bar's Hz figure.
@@ -571,7 +571,7 @@ pub struct StatusSource {
 impl StatusSource {
     /// Heartbeat bits that stay lit between frames (the front-panel LEDs).
     /// Everything else in the heartbeat is activity and clears once shown.
-    pub const PERSISTENT: u64 = Rex3::HB_PERSISTENT;
+    pub const PERSISTENT: u64 = crate::heartbeat::HB_PERSISTENT;
 
     pub fn new(heartbeat: Arc<AtomicU64>, fasttick: Arc<AtomicU64>) -> Arc<Self> {
         Arc::new(Self {
@@ -753,15 +753,15 @@ impl StatusBar {
 
     pub fn update(&mut self, hb: u64) {
         use crate::dev::ng1::rex3::Rex3;
-        if hb & Rex3::HB_ENET_TX != 0 { self.enet_tx_fade = FADE_FRAMES; }
-        if hb & Rex3::HB_ENET_RX != 0 { self.enet_rx_fade = FADE_FRAMES; }
+        if hb & crate::heartbeat::HB_ENET_TX != 0 { self.enet_tx_fade = FADE_FRAMES; }
+        if hb & crate::heartbeat::HB_ENET_RX != 0 { self.enet_rx_fade = FADE_FRAMES; }
         for i in 0..7usize {
-            if hb & (1 << (Rex3::HB_SCSI_BASE as u64 + i as u64)) != 0 {
+            if hb & (1 << (crate::heartbeat::HB_SCSI_BASE as u64 + i as u64)) != 0 {
                 self.scsi_fade[i] = FADE_FRAMES;
             }
         }
-        self.led_red   = hb & Rex3::HB_LED_RED   != 0;
-        self.led_green = hb & Rex3::HB_LED_GREEN  != 0;
+        self.led_red   = hb & crate::heartbeat::HB_LED_RED   != 0;
+        self.led_green = hb & crate::heartbeat::HB_LED_GREEN  != 0;
         if self.enet_tx_fade > 0 { self.enet_tx_fade -= 1; }
         if self.enet_rx_fade > 0 { self.enet_rx_fade -= 1; }
         for f in self.scsi_fade.iter_mut() { if *f > 0 { *f -= 1; } }

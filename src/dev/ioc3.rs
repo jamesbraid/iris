@@ -2175,7 +2175,6 @@ impl Shared {
     /// Mirror the system board's front lightbar into the status bar when
     /// pins 0 and 1 changed from `before`.
     fn show_lightbar(&self, st: &St, before: u32) {
-        use crate::dev::ng1::rex3::Rex3;
         let Some(hb) = self.heartbeat.get() else { return };
         if st.cfg.subsystem_id != SUBSYS_IP30_SYSBOARD {
             return;
@@ -2185,7 +2184,7 @@ impl Shared {
         // shows white as its green LED. Set to false if the pins turn out
         // to be active low.
         const LIT_WHEN_HIGH: bool = true;
-        for (pin, led) in [(0, Rex3::HB_LED_GREEN), (1, Rex3::HB_LED_RED)] {
+        for (pin, led) in [(0, crate::heartbeat::HB_LED_GREEN), (1, crate::heartbeat::HB_LED_RED)] {
             let (old, new) = ((before >> pin) & 1, (st.pin_data >> pin) & 1);
             if old == new {
                 continue;

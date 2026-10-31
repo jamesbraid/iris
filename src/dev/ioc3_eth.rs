@@ -1136,7 +1136,7 @@ impl Ioc3Eth {
         if frames.is_empty() {
             return;
         }
-        self.blink(crate::dev::ng1::rex3::Rex3::HB_ENET_TX);
+        self.blink(crate::heartbeat::HB_ENET_TX);
         if let Some(link) = self.link.lock().as_mut() {
             for f in frames {
                 let _ = link.to_net.push(f);
@@ -1261,7 +1261,7 @@ impl Ioc3Eth {
                 let mut st = self.st.lock();
                 if st.rx_ready() && st.rx_filter(&frame) {
                     st.deliver(&*dma, &frame, false);
-                    self.blink(crate::dev::ng1::rex3::Rex3::HB_ENET_RX);
+                    self.blink(crate::heartbeat::HB_ENET_RX);
                 }
             }
             self.irq_flush();
