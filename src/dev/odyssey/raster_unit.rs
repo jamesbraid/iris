@@ -21,17 +21,17 @@
 //! The planes belong to the raster unit. They stay where the board keeps
 //! them, and a job reaches them through raw spans (`PlaneSpans`), as the
 //! IMPACT model's raster engines reach their pixel memory through pointers.
-//! Two other threads need them:
+//! Two other threads touch them:
 //!
 //! - The front end's own plane work (integer and image drawing, pixel DMA,
 //!   the object store, reset) first waits for the raster unit to finish
-//!   every job queued (`Board::raster_wait`), so the two never touch the
-//!   planes at once. A DMA's texels for an object that already has its
+//!   every job queued (`Board::raster_wait`). That orders the command
+//!   stream, in which the board's pipeline runs a plane access behind the
+//!   drawing before it. A DMA's texels for an object that already has its
 //!   rows go to the raster unit as a job instead (`Board::object_stage`).
-//! - The display thread resolves the frame while holding the raster unit's
-//!   context lock (`RasterQueue::planes`), which the raster thread holds for
-//!   each slice of jobs, so a frame waits out a slice in flight and never
-//!   reads a half-drawn primitive.
+//! - The display thread copies rows out with no lock and no wait, as the
+//!   hardware's back end reads memory while the pipeline writes it. A row
+//!   it copies half-drawn is drawn again by the next frame (reader.rs).
 //!
 //! The rows a job wrote are the display's business too. The raster thread
 //! keeps them in its context while it draws and publishes them to a cell
@@ -55,7 +55,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::SeqCst};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use parking_lot::{Condvar, Mutex, MutexGuard};
+use parking_lot::{Condvar, Mutex};
 
 use crate::gfifo::GFifo;
 
@@ -90,8 +90,8 @@ pub const RASTER_CLEAR_DIVISOR: u32 = 8;
 /// The cost a ring entry's word can hold.
 const COST_MAX: u64 = (1 << 30) - 1;
 
-/// The longest the raster thread holds its context lock before letting a
-/// waiting display frame in, checked between jobs.
+/// The longest the raster thread runs jobs before it publishes the rows it
+/// drew, checked between jobs.
 pub const RASTER_SLICE: Duration = Duration::from_millis(1);
 
 /// What a GL draw hands back to its context in place of the line-stipple
@@ -320,20 +320,6 @@ pub fn primitive_cost(mode: u32, points: impl Iterator<Item = Option<(f64, f64)>
 /// that finds none allocates; one finished while this many wait is freed.
 const SPARE_DRAWS: usize = 1024;
 
-/// The planes as the display holds them: no raster job runs meanwhile.
-pub struct PlanesHeld<'a> {
-    _ctx: MutexGuard<'a, RasterCtx>,
-    published: &'a Mutex<DrawnRows>,
-}
-
-impl PlanesHeld<'_> {
-    /// The colour rows the raster unit published since the last call, to
-    /// the scanout (DrawnRows::take()).
-    pub fn take_rows(&mut self, displayed: u32, differ: &mut Differ, marks: &RowMarks) {
-        self.published.lock().take(displayed, differ, marks);
-    }
-}
-
 /// The queue between the front end and the raster unit. `HEADS` is the
 /// GFifo's consumer heads: one, because the board has one raster unit. A
 /// second would need the jobs to split the rows between the heads, as the
@@ -344,8 +330,9 @@ pub struct RasterQueue<const HEADS: usize = 1> {
     /// its submit) back to the front end, which takes them under the board
     /// lock.
     spare: Box<GFifo<SPARE_DRAWS>>,
-    /// Held by the raster thread for a slice of jobs, by a job run inside
-    /// the submit, and by the display while it reads the planes.
+    /// Held by the raster thread for a slice of jobs and by a job run
+    /// inside the submit. It owns the raster unit's own state, not the
+    /// planes: the display does not take it.
     ctx: Mutex<RasterCtx>,
     /// The rows the raster unit has published and the display has not yet
     /// taken (RasterCtx::publish()).
@@ -613,24 +600,6 @@ impl RasterQueue {
         }
     }
 
-    /// The planes for the display: waits out a slice in flight, and holds
-    /// off the next until dropped.
-    pub fn planes(&self) -> PlanesHeld<'_> {
-        let ctx = self.ctx.lock();
-        PlanesHeld { _ctx: ctx, published: &self.published }
-    }
-
-    /// The planes for the display if no slice is running now.
-    pub fn try_planes(&self) -> Option<PlanesHeld<'_>> {
-        let ctx = self.ctx.try_lock()?;
-        Some(PlanesHeld { _ctx: ctx, published: &self.published })
-    }
-
-    /// Wait out the slice in flight, holding nothing.
-    pub fn wait_slice(&self) {
-        drop(self.ctx.lock());
-    }
-
     /// Tests: finished draw jobs waiting to be filled again.
     #[cfg(test)]
     pub fn spare_draws(&self) -> usize {
@@ -638,9 +607,8 @@ impl RasterQueue {
     }
 
     /// The rows the raster unit published and the display has not taken:
-    /// those a window shows go to `marks`, and all join `differ`. Takes the
-    /// cell's lock and nothing else, so it does not wait for a slice in
-    /// flight.
+    /// those a window shows go to `marks`, and all join `differ`. It waits
+    /// for no slice in flight.
     pub fn take_published_rows(&self, displayed: u32, differ: &mut Differ, marks: &RowMarks) {
         self.published.lock().take(displayed, differ, marks);
     }
@@ -770,8 +738,7 @@ impl RasterQueue {
             // display can go without them.
             ctx.publish();
             crate::pf_end!(crate::perfetto::events::ODSY_RASTER_SLICE);
-            // A display frame waiting for the planes gets them next.
-            MutexGuard::unlock_fair(ctx);
+            drop(ctx);
         }
     }
 }
