@@ -110,11 +110,9 @@ impl Run {
 
 pub struct CommandFifo {
     ring: Box<CommandRing>,
-    /// Serialises the producers: the processor's front stores and stores
-    /// made under the board lock.
-    push: Mutex<()>,
     /// Serialises the consumers (the board lock already does for the queue's
-    /// runners; reset's clear takes it too). Taken after `push` when both are.
+    /// runners; reset's clear takes it too). The producers need no lock of
+    /// their own: the ring's spinlock orders them.
     pop: Mutex<()>,
     /// The level: FIFO words pushed and not yet taken out.
     words: AtomicU32,
@@ -151,7 +149,6 @@ impl Default for CommandFifo {
             // SAFETY: a zeroed GFifo is an empty one (GFifo::new); built in
             // place because the ring is too big for the stack.
             ring: unsafe { Box::new_zeroed().assume_init() },
-            push: Mutex::new(()),
             pop: Mutex::new(()),
             words: AtomicU32::new(0),
             stores: AtomicU32::new(0),
@@ -239,7 +236,6 @@ impl CommandFifo {
     /// inside the FIFO's first places and owed otherwise. False when the
     /// board's FIFO has no room for it.
     pub fn push(&self, front: &Mutex<HostInterface>, addr: u64, value: u64, size: u32, counted: bool) -> bool {
-        let _p = self.push.lock();
         let words = store_words(size);
         let before = self.level();
         if before + words > ODSY_CFIFO_WORDS {
@@ -251,8 +247,8 @@ impl CommandFifo {
         let credited = counted && self.stores() < ODSY_CFIFO_DEPTH;
         q.owed = counted && !credited;
         if !self.ring.try_push(q.entry(), q.value) {
-            // The ring is deeper than the board's FIFO, and `push` keeps
-            // this the only producer.
+            // The ring is deeper than the board's FIFO, and the processor
+            // is its only producer.
             debug_assert!(false, "the command ring refused a store the board's FIFO had room for");
             return false;
         }
