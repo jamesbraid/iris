@@ -487,6 +487,14 @@ pub const EXEC_CACHE_ERR: ExecStatus = EXEC_IS_EXCEPTION | EXEC_IS_CACHE_ERR;
 pub const EXEC_BUS_ERR: ExecStatus = exec_exception_const(EXC_DBE);  // 0x0800_001C
 pub const EXEC_BUS_VCE: ExecStatus = exec_exception_const(EXC_VCED); // 0x0800_007C
 
+// Compile-time asserts: BUS_* constants must equal the corresponding ExecStatus values.
+// If these fail, update BOTH sets of constants to agree.
+// See also: traits.rs BUS_OK / BUS_BUSY / BUS_ERR / BUS_VCE.
+const _: () = assert!(crate::traits::BUS_OK   == EXEC_COMPLETE);
+const _: () = assert!(crate::traits::BUS_BUSY == EXEC_RETRY);
+const _: () = assert!(crate::traits::BUS_ERR  == EXEC_BUS_ERR);
+const _: () = assert!(crate::traits::BUS_VCE  == EXEC_BUS_VCE);
+
 /// `const`-evaluable version of exec_exception (for use in const initializers).
 #[inline(always)]
 pub const fn exec_exception_const(code: u32) -> ExecStatus {
