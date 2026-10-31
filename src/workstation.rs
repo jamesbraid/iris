@@ -220,9 +220,7 @@ pub trait Workstation: Send {
     /// Make every disk's accepted writes survive the process, including a
     /// copy-on-write overlay's record of the sectors it holds. Run it before
     /// the process exits without dropping the machine.
-    fn flush_disks(&self) -> std::io::Result<()> {
-        Ok(())
-    }
+    fn flush_disks(&self) -> std::io::Result<()>;
     /// Fold pending CHD diffs into their bases (see `Machine::sync_chd_disks`).
     fn sync_chd_disks(
         &self,
@@ -369,8 +367,18 @@ unsafe impl Sync for MachineRef {}
 /// instead of freed memory.
 pub type MachineSlot = Arc<Mutex<MachineRef>>;
 
+/// Stop `machine` and flush its disks: what every path that ends the process
+/// without dropping the machine does first. A failed flush is reported, not
+/// fatal, since the process is going away either way.
+pub fn stop_and_flush(machine: &mut dyn Workstation, at: &str) {
+    machine.stop();
+    if let Err(e) = machine.flush_disks() {
+        eprintln!("iris: disk flush at {at} failed: {e} (guest writes may be lost)");
+    }
+}
+
 /// Run `f` against the machine behind `slot`, or fail if it has been dropped.
-pub(crate) fn with_machine_slot<R>(slot: &MachineSlot, f: impl FnOnce(&mut dyn Workstation) -> R) -> Result<R, String> {
+pub fn with_machine_slot<R>(slot: &MachineSlot, f: impl FnOnce(&mut dyn Workstation) -> R) -> Result<R, String> {
     let guard = slot.lock();
     let ptr = guard.0;
     if ptr.is_null() {
@@ -415,13 +423,10 @@ pub(crate) fn register_system_controller(
                         }
                         MachineEvent::PowerOff => {
                             println!("Machine: soft power-off");
-                            machine.stop();
                             // The process may exit below without dropping the
                             // disks, and an overlay's sector record is only
                             // written out on a flush.
-                            if let Err(e) = machine.flush_disks() {
-                                eprintln!("iris: disk flush at power-off failed: {e} (guest writes may be lost)");
-                            }
+                            stop_and_flush(machine, "power-off");
                             // Hosts that embed iris as a library (e.g. iris-gui)
                             // set IRIS_NO_EXIT_ON_POWEROFF=1 so a guest halt
                             // does not kill the host process.

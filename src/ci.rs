@@ -407,9 +407,10 @@ fn cmd_quit(server: &CiServer, args: &Value) -> Response {
         }
     }
     // `process::exit` below skips Drop, which is where an overlay's sector
-    // record would otherwise be written out.
-    if let Err(e) = server.with_machine_result(|m| m.flush_disks()) {
-        eprintln!("iris: disk flush at quit failed: {e} (guest writes may be lost)");
+    // record would otherwise be written out. Stop first, so the guest writes
+    // nothing after the flush.
+    if let Err(e) = server.with_machine(|m| crate::workstation::stop_and_flush(m, "quit")) {
+        eprintln!("iris: could not stop the machine to flush its disks at quit: {e}");
     }
     // Schedule process exit after a brief delay so the response flushes.
     thread::spawn(|| {
