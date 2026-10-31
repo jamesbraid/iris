@@ -533,9 +533,8 @@ impl LightScratch {
         Box::new(LightScratch { state: fresh, fresh, lit: 0 })
     }
 
-    /// Put the state back to the initial one with no lights enabled, writing
-    /// only the lights the last fill set up: the fill sets everything else
-    /// itself.
+    /// Put the lights the last fill set up back to their initial state: the
+    /// fill sets everything else, the light chain included, itself.
     pub fn restore(&mut self) {
         let mut lit = self.lit;
 
@@ -545,8 +544,6 @@ impl LightScratch {
             self.state.lights[i] = self.fresh.lights[i];
             lit &= lit - 1;
         }
-        self.state.head = self.fresh.head;
-        self.state.count = 0;
         self.lit = 0;
     }
 }
@@ -588,8 +585,8 @@ impl Board {
         front
     }
 
-    /// Fill `lt`, which holds the initial state with no lights, from the
-    /// kept words.
+    /// Fill `lt`, whose lights hold their initial state, from the kept
+    /// words, and link the lights it sets up as the enabled ones.
     pub fn gl_light_fill(&self, lt: &mut Lighting, obj: &[f64; 4]) -> LitVertex {
         let f = |w: u32| f32::from_bits(w);
         let obj = [obj[0] as f32, obj[1] as f32, obj[2] as f32, obj[3] as f32];
@@ -630,7 +627,6 @@ impl Board {
         let ambient = ODSY_GL_LIGHT_MODEL_AMBIENT as usize * 4;
         lt.amb_sum = std::array::from_fn(|k| f(self.gl_light_colour[ambient + k]));
 
-        let mut last = -1i32;
         let mut lit = 0u8;
         for i in 0..ODSY_GL_LIGHTS as usize {
             let blk = &self.gl_light_vec[i * ODSY_GL_LIGHT_VEC_FLOATS as usize..];
@@ -663,14 +659,15 @@ impl Board {
                     l.spot_exp = -f(blk[ODSY_LIGHT_SPOT_EXP]);
                 }
             }
-            if last < 0 {
-                lt.head = i as i32;
-            } else {
-                lt.lights[last as usize].next = i as i32;
-            }
-            last = i as i32;
-            lt.count += 1;
         }
+        // The core walks the enabled lights as a chain from head, -1 ending it.
+        let mut next = -1i32;
+        for i in (0..ODSY_GL_LIGHTS as usize).rev().filter(|&i| lit & (1 << i) != 0) {
+            lt.lights[i].next = next;
+            next = i as i32;
+        }
+        lt.head = next;
+        lt.count = lit.count_ones();
         let normal = self.gl_normal.map(f);
         LitVertex { eye, normal, colour, alpha: md[3], lit }
     }
