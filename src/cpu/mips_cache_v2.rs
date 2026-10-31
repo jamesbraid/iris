@@ -1520,9 +1520,11 @@ pub mod model {
                 narrow_stores_carry_gpr: true,
                 ..Profile::R10K
             },
-            // Left at the family defaults: no R16000 behaviour is established
-            // here, and its PRId, caches and policies belong with its machine.
-            R16000 => Profile { name: "R16000", ..Profile::R10K },
+            // Tezro. The QEMU Tezro model derives the R16000's policies from
+            // the R14000 and notes that no R16000 specification backs them, so
+            // the row starts from the R14000's. Its own policies are the
+            // fields set here. All are approximations, not measurements.
+            R16000 => Profile { name: "R16000", ..profile(R14000) },
             _ => Profile::BASE,
         }
     }

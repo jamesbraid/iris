@@ -678,6 +678,43 @@ mod tests {
         check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(false);
     }
 
+    /// The R16000 takes the core's R10000-family soft reset and floating-point
+    /// rules (Config and the watch registers survive a soft reset; a denormal
+    /// ADD.S operand is Unimplemented Operation). QEMU's R16000 sets
+    /// soft_reset_preserves_watch and fp_traps_denormal_input in
+    /// target/mips/cpu-defs.c.inc. Pin both on the model so a change to the
+    /// shared rules shows up as an R16000 change.
+    #[test]
+    fn r16000_soft_reset_keeps_config_and_watch_and_denormal_operands_trap() {
+        let mem = Arc::new(MockMemory::new());
+        let bus: Arc<dyn BusDevice> = mem.clone();
+        type C = crate::cpu::mips_cache_shadow::R16000ShadowCache;
+        let cfg = MipsCpuConfig::for_model::<C>();
+        let mut exec = MipsExecutor::<PassthroughTlb, C>::new(bus, PassthroughTlb::default(), &cfg);
+        disable_jitv2(&mut exec);
+        assert_eq!(exec.core.read_cp0(15) & 0xffff, 0x0f50, "PRId");
+
+        exec.core.cp0_config = 0x6c9b_ad85;
+        exec.core.cp0_watchlo = 0x1234_5000;
+        exec.core.cp0_watchhi = 0x0000_0001;
+        exec.core.reset(true);
+        assert_eq!(exec.core.cp0_config, 0x6c9b_ad85, "soft reset keeps Config");
+        assert_eq!((exec.core.cp0_watchlo, exec.core.cp0_watchhi), (0x1234_5000, 1), "and the watch registers");
+        assert_ne!(exec.core.cp0_status & crate::cpu::mips_core::STATUS_SR, 0);
+        exec.core.reset(false);
+        assert_eq!(exec.core.cp0_watchlo, 0, "a cold reset clears them");
+
+        exec.core.cp0_status |= STATUS_CU1 | STATUS_FR;
+        exec.update_fpr_mode();
+        exec.core.write_fpr_w(1, 0x0000_0001);
+        exec.core.write_fpr_s(2, 1.0);
+        exec.core.write_fpr_w(0, 0x5a5a_5a5a);
+        let s = exec.exec(make_cop1_compute(RS_S, 2, 1, 0, FUNCT_FADD));
+        assert!(s & EXEC_IS_EXCEPTION != 0, "a denormal operand must trap");
+        assert_eq!((s >> 2) & 0x1F, crate::cpu::mips_exec::EXC_FPE);
+        assert_eq!(exec.core.read_fpr_w(0), 0x5a5a_5a5a, "the destination is untouched");
+    }
+
     /// JIT store callouts must carry the same source register as the
     /// interpreter, and only for a model that asks for it.
     #[test]
