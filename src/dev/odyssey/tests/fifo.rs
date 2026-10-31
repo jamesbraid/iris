@@ -26,15 +26,15 @@ fn preamble_twice() -> Vec<&'static CfifoPreamble> {
     words
 }
 
-/// Queue every FIFO store and have the first slice hold the board for
+/// Queue every FIFO store and have the first run last
 /// `hold_ms` as a long draw would; store the first word and return
-/// once that slice holds the board lock.
+/// once that run is under way.
 fn start_long_slice(h: &BoardLocks, words: &[&CfifoPreamble], hold_ms: u32) {
     h.fifo.test_words.store(1, SeqCst);
-    h.board.lock().test_slice_sleep_ms = hold_ms;
+    h.board.get().test_slice_sleep_ms = hold_ms;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     h.write(words[0].port, words[0].value, words[0].size);
-    while !(h.fifo.slice.load(SeqCst) && h.board.is_locked()) {
+    while !(h.fifo.slice.load(SeqCst)) {
         assert!(std::time::Instant::now() < deadline, "the first slice did not start");
         std::thread::yield_now();
     }
@@ -53,7 +53,7 @@ fn the_board_thread_runs_queued_stores_in_order_and_latches_low_water() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
 
     start_long_slice(&h, &words, 2000);
-    // The rest go in while the first slice holds the board lock: only
+    // The rest go in while the first run is under way: only
     // the front lock is needed.
     for w in &words[1..] {
         h.write(w.port, w.value, w.size);
@@ -67,7 +67,7 @@ fn the_board_thread_runs_queued_stores_in_order_and_latches_low_water() {
         assert_eq!(status & (ODSY_STATUS0_FIFO_EMPTY | ODSY_STATUS0_FIFO_LOW_WATER), 0);
         assert_eq!(h.fifo.level(), level);
         // All of that while the slice still held the board.
-        assert!(h.board.is_locked() && h.fifo.slice.load(SeqCst));
+        assert!(h.fifo.slice.load(SeqCst));
     }
 
     // Watch the queue drain on the board's thread, without draining it
@@ -86,7 +86,7 @@ fn the_board_thread_runs_queued_stores_in_order_and_latches_low_water() {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     {
-        let s = h.board.lock();
+        let s = h.board.get();
         assert!(s.cfifo_selftest_ready);
         assert_eq!(s.selftest_progress, 0);
     }
@@ -100,10 +100,10 @@ fn the_board_thread_runs_queued_stores_in_order_and_latches_low_water() {
     assert!(h.fifo.thread.lock().is_none());
 }
 
-/// A read that waits for the work, issued while a long slice holds the
-/// board, answers only after every store queued before it has run: the
-/// self-test register reads OK, though the board's thread runs one
-/// store per slice and most were still queued when the read began.
+/// A read that waits for the work, issued while the board's thread is in a
+/// long run, is answered busy until every store queued before it has run:
+/// the self-test register reads OK, though the board's thread runs one store
+/// per run and most were still queued when the read began.
 #[test]
 fn a_read_that_waits_sees_every_earlier_store() {
     let (h, _rec) = threaded_board();
@@ -114,7 +114,14 @@ fn a_read_that_waits_sees_every_earlier_store() {
         h.write(w.port, w.value, w.size);
     }
     assert!(h.fifo.level() > 1);
-    let selftest = h.read(ODSY_CFIFO_SELFTEST, 4) as u32;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let selftest = loop {
+        if let Some(v) = h.bus_read(ODSY_CFIFO_SELFTEST, 4) {
+            break v as u32;
+        }
+        assert!(std::time::Instant::now() < deadline, "the read stayed busy");
+        std::thread::yield_now();
+    };
     assert_eq!(selftest, ODSY_CFIFO_SELFTEST_OK);
     assert_eq!(h.fifo.level(), 0);
     h.work_stop();
@@ -143,7 +150,7 @@ fn a_full_fifo_holds_the_store_back_until_the_board_makes_room() {
     assert!(!h.bus_write(ODSY_CMD_FIFO, 0, 4), "a full FIFO refuses the store");
     assert!(!h.bus_write(ODSY_CMD_FIFO, 0, 8));
     assert_eq!((h.fifo.level(), h.fifo.stores()), (ODSY_CFIFO_WORDS, stores), "nothing ran on the processor's thread");
-    assert!(h.fifo.slice.load(SeqCst) && h.board.is_locked(), "the board's thread still holds the board");
+    assert!(h.fifo.slice.load(SeqCst), "the board's thread still holds the board");
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while !h.bus_write(ODSY_CMD_FIFO, 0, 8) {
@@ -740,7 +747,7 @@ fn stopping_finishes_the_waiting_work_and_a_reset_abandons_it() {
     assert!(!h.fifo.pending());
     assert_eq!(ram.half(HOST_WRITE_BASE + 6), 0xa5a5);
 
-    let mut s = h.board.lock();
+    let mut s = h.board.get();
     for w in [select(ODSY_REG_HOST_WRITE), 4, 0x1234] {
         cmd(&mut s, w);
     }

@@ -2,72 +2,56 @@
 //!
 //! The board decodes and draws behind the processor, so the model does its
 //! decoding and drawing on a thread of its own rather than inside the
-//! processor's store (interface.rs explains the two locks, fifo.rs the
-//! queue). The thread sleeps until a store joins an empty queue, then runs
-//! the queue in slices: each slice holds the board lock for at most `SLICE`
-//! of host time and hands it fairly to a waiting processor access; the
-//! thread pauses `GAP` before each slice so a burst of stores lands first.
-//!
-//! A slice never lets go of the board lock part-way: whatever a processor
-//! may touch during one lives under the front lock.
+//! processor's store (interface.rs explains the front registers, fifo.rs the
+//! queue). The thread sleeps until a store joins an empty queue, pauses
+//! `GAP` so a burst of stores lands first, then runs the queue until it is
+//! empty. It owns the board's state while it runs: a processor access that
+//! must see the stores is answered busy until the queue and the raster queue
+//! are empty (`BoardLocks::bus_read`), and whatever a processor may touch
+//! meanwhile lives in the host interface.
 
 use super::*;
 
 use std::sync::atomic::Ordering::SeqCst;
-use std::time::{Duration, Instant};
-
-use parking_lot::MutexGuard;
+use std::time::Duration;
 
 /// The board thread's name.
 pub const ODYSSEY_WORK_THREAD: &str = "odyssey-work";
 
-/// One slice of host time. The guest's scheduler clock ticks every 10 ms,
-/// so a slice stays well below that.
-pub const SLICE: Duration = Duration::from_millis(1);
-
-/// The pause before each slice, with both locks free. A thread that lets go
-/// of a lock and takes it straight back usually wins it again, so without
-/// the pause a processor waiting for the board could wait out many slices.
+/// The pause before the board's thread runs a burst, so the stores of the
+/// burst land first and one run takes them together.
 pub const GAP: Duration = Duration::from_micros(100);
 
-/// How much one slice may do: host time, and for tests a count of stores.
-/// A slice checks the budget between stores, so it always runs at least one
-/// and stops at the first store boundary past the deadline.
+/// How much one run may do: for tests a count of stores. The budget is
+/// checked between stores, so a run always runs at least one.
 pub struct Budget {
-    deadline: Option<Instant>,
     words: Option<u32>,
-    count: u32,
 }
 
 impl Budget {
-    /// A slice on the board's thread: `SLICE` of host time, or `words`
+    /// A run on the board's thread: everything that waits, or `words`
     /// stores when not zero.
     pub fn slice(words: u32) -> Self {
-        Budget { deadline: Some(Instant::now() + SLICE), words: (words != 0).then_some(words), count: 0 }
+        Budget { words: (words != 0).then_some(words) }
     }
 
     /// Exactly `stores` stores, or fewer if the queue runs dry.
     pub fn stores(stores: u32) -> Self {
-        Budget { deadline: None, words: Some(stores), count: 0 }
+        Budget { words: Some(stores) }
     }
 
     /// Everything that waits.
     pub fn unlimited() -> Self {
-        Budget { deadline: None, words: None, count: 0 }
+        Budget { words: None }
     }
 
-    /// Count one store against the budget; true when the slice must stop.
+    /// Count one store against the budget; true when the run must stop.
     pub fn spent(&mut self) -> bool {
         if let Some(w) = &mut self.words {
             *w = w.saturating_sub(1);
-            if *w == 0 {
-                return true;
-            }
+            return *w == 0;
         }
-        // The clock is read every 16 stores; a store costs far less than a
-        // slice.
-        self.count = self.count.wrapping_add(1);
-        self.count % 16 == 0 && self.deadline.is_some_and(|d| Instant::now() >= d)
+        false
     }
 }
 
@@ -100,7 +84,7 @@ impl BoardLocks {
             let _ = t.join();
         }
         self.fifo.running.store(false, SeqCst);
-        let mut s = self.board.lock();
+        let s = self.board.get();
         s.work_step(&mut Budget::unlimited());
         // Then the raster work those stores handed on.
         self.raster.stop();
@@ -108,7 +92,7 @@ impl BoardLocks {
 
     fn work_run(&self) {
         while self.fifo.wait_for_work() {
-            // Let a burst of stores land before the slice runs, unless the
+            // Let a burst of stores land before the run, unless the
             // processor already waits for it.
             if !self.fifo.take_hurry() {
                 std::thread::sleep(GAP);
@@ -122,14 +106,12 @@ impl BoardLocks {
             let words = 0;
             self.fifo.slice.store(true, SeqCst);
             {
-                let mut s = self.board.lock();
+                let s = self.board.get();
                 crate::pf_value!(self.fifo.pf_level, crate::perfetto::events::ODSY_CFIFO_LEVEL, self.fifo.level());
                 crate::pf_begin!(crate::perfetto::events::ODSY_SLICE, self.fifo.level());
                 s.work_step(&mut Budget::slice(words));
                 crate::pf_end!(crate::perfetto::events::ODSY_SLICE);
                 crate::pf_value!(self.fifo.pf_level, crate::perfetto::events::ODSY_CFIFO_LEVEL, self.fifo.level());
-                // A processor access waiting for the board gets it next.
-                MutexGuard::unlock_fair(s);
             }
             self.fifo.slice.store(false, SeqCst);
         }
@@ -142,12 +124,12 @@ impl Board {
     }
 
     /// Run the oldest waiting stores until the budget is spent. The caller
-    /// holds the board lock and not the front lock: the board's thread for a
-    /// slice, or an access that drains.
+    /// is the board's thread, or an access that drains with that thread
+    /// stopped; it does not hold the front lock.
     pub fn work_step(&mut self, b: &mut Budget) {
         #[cfg(test)]
         {
-            // A slice that holds the board as a long draw would.
+            // A run that takes as long as a long draw would.
             let sleep_ms = std::mem::take(&mut self.test_slice_sleep_ms);
             if sleep_ms != 0 {
                 std::thread::sleep(std::time::Duration::from_millis(sleep_ms as u64));
@@ -183,13 +165,16 @@ impl Board {
         }
     }
 
-    /// Finish the waiting work now, for an access at addr that must see it. The
-    /// caller holds the board lock, so no slice runs. The stores queued when
-    /// the drain starts run here; any a processor adds meanwhile are left to
-    /// the board's thread.
+    /// Finish the waiting work now, for an access at addr that must see it,
+    /// with the board's thread stopped. The stores queued when the drain
+    /// starts run here; any a processor adds meanwhile are left to the
+    /// board's thread.
     pub fn work_drain(&mut self, addr: u64) {
         let waiting = self.fifo.stores();
-        if waiting == 0 {
+        // With the board's thread running the stores are its to run: a
+        // second runner would be two threads in the state. The bus answers a
+        // waiting access busy until it has (BoardLocks::bus_read).
+        if waiting == 0 || self.fifo.running.load(SeqCst) {
             return;
         }
         let start = std::time::Instant::now();
@@ -198,8 +183,7 @@ impl Board {
         crate::dlog_dev!(LogModule::Odyssey, "sgi-odyssey: worker: drained offset {:#x} in {:?}", addr, start.elapsed());
     }
 
-    /// Reset clears the FIFO and abandons the waiting stores. The caller holds
-    /// the board lock, so no slice runs.
+    /// Reset clears the FIFO and abandons the waiting stores.
     pub fn work_reset(&mut self) {
         self.fifo.clear(&self.front);
     }
