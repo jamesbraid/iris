@@ -35,9 +35,9 @@ Status: rule (2026-10-30).
   the guest refuses 1280x1024_60 at 16-byte depth on BUZZ A.1. That is not a
   scanout bug.
 
-- **Retrace can be late by a slice.** It is counted under the board lock,
-  which the worker holds for up to 1 ms. Swap timing measured to better than
-  that is noise.
+- **Retrace is counted by the display thread.** It latches swaps at its own
+  frame pace, up to a frame (about 16 ms) after the guest arms one. Swap
+  timing measured to better than that is noise.
 
 - **Model choices to remember.** The FIFO's depth is unknown in any unit
   (datasheet, "Grades for withdrawn claims"). The model keeps 64 stores for

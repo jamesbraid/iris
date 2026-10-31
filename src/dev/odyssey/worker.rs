@@ -58,6 +58,9 @@ impl Budget {
 impl BoardLocks {
     /// Start the board's thread, the front end, and the raster unit's
     /// behind it.
+    ///
+    /// Devices start before the processors, so no processor store is in
+    /// flight on the unthreaded path when `running` is set below.
     pub fn work_start(&self) {
         let mut thread = self.fifo.thread.lock();
         if thread.is_some() {

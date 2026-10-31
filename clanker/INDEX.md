@@ -252,7 +252,7 @@ Odyssey (VPro V6/V8/V10/V12): the Octane2/Fuel/Tezro graphics board. Modelled on
 | [bringup.md](odyssey/bringup.md) | howto | VPro on the Octane: board catalogue, Crossbow code 5, PROM/IRIX minimums, disk images |
 | [gotchas.md](odyssey/gotchas.md) | rule | VPro gotchas: IMPACT installs lack the driver, textport FIFO cost, the f64 depth path |
 | [public-references.md](odyssey/public-references.md) | open | Odyssey (VPro) public references: two console-level drivers, no GL stream |
-| [threads-and-locks.md](odyssey/threads-and-locks.md) | design | VPro threads, the host-interface and board locks, the 1 ms slice, the command ring and its six ordering rules |
+| [threads-and-locks.md](odyssey/threads-and-locks.md) | design | VPro threads, who owns the board and raster state, the processors' lock, the lock-free display, the command ring and its ordering rules |
 
 ## hostgl/
 

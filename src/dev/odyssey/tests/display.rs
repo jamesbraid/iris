@@ -295,10 +295,9 @@ fn the_two_colour_buffers_hold_opposite_colours() {
     assert_eq!(pixel(&s, 1, 105, 105), 0x0000_ffff);
 }
 
-/// The display copies a frame's lines aside while it holds the planes
-/// against the raster unit and resolves the copy after letting the raster
-/// unit go on: what is drawn after the copy shows only in the next frame,
-/// never part-way through this one.
+/// The display copies a frame's lines aside, with no lock, and resolves the
+/// copy while the raster unit goes on: what is drawn after the copy shows
+/// only in the next frame, never part-way through this one.
 #[test]
 fn a_frame_resolves_the_lines_it_copied_while_the_raster_unit_draws_on() {
     let (mut s, _) = board("v12");
