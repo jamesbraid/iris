@@ -138,7 +138,7 @@ use parking_lot::Mutex;
 use crate::cpu::cycles::CyclesPtr;
 use crate::dev::ng1::rex3::Renderer;
 use crate::disp::{Rex3Screen, FB_STRIDE};
-use crate::ip30::{widget_large_base, widget_small_base};
+use crate::ip30_map::{widget_large_base, widget_small_base};
 use crate::irq::InterruptController;
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, Device, Resettable, BUS_BUSY, BUS_ERR, BUS_OK};
 
