@@ -32,7 +32,7 @@ impl Board {
     /// reached or, when strict, a word is not recognised. With `older` the
     /// list is in the older libraries' numbering (see `ucode_current`).
     pub fn gl_walk_list(&mut self, k: u32, strict: bool, older: bool, p: &mut Program) -> bool {
-        let nc = SGI_ODYSSEY_GL_CONSTANTS;
+        let nc = ODSY_GL_CONSTANTS;
         let at = |s: &Board, i: u32| -> u32 {
             let a = s.gl_const[(k.wrapping_add(i) % nc) as usize];
             if older { ucode_current(a) } else { a }
@@ -129,10 +129,10 @@ impl Board {
     pub fn gl_program_halfword(&mut self, word: u32) {
         let h: u16 = ((word & ODSY_PROG_LOW_MASK) | (((word >> ODSY_PROG_HIGH_SHIFT) & ODSY_PROG_HALFWORD_HIGH_MASK) << 10)) as u16;
 
-        if self.gl_program_addr >= SGI_ODYSSEY_GL_PROGRAM_ENTRIES {
+        if self.gl_program_addr >= ODSY_GL_PROGRAM_ENTRIES {
             if !self.gl_program_mem_reported {
                 self.gl_program_mem_reported = true;
-                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: program-memory store past entry {:#x} is not modeled", SGI_ODYSSEY_GL_PROGRAM_ENTRIES - 1);
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: program-memory store past entry {:#x} is not modeled", ODSY_GL_PROGRAM_ENTRIES - 1);
             }
             return;
         }
@@ -370,8 +370,8 @@ impl Board {
                 }
                 i += 1;
             }
-            if i == self.gl_program_logged_count && i < SGI_ODYSSEY_GL_PROGRAM_REPORTS {
-                let m = SGI_ODYSSEY_GL_CONSTANTS - 1;
+            if i == self.gl_program_logged_count && i < ODSY_GL_PROGRAM_REPORTS {
+                let m = ODSY_GL_CONSTANTS - 1;
                 let c = |j: u32| -> u32 { self.gl_const[(k.wrapping_add(j) & m) as usize] };
                 let (c0, c1, c2, c3, c4, c5, c6, c7) = (c(0), c(1), c(2), c(3), c(4), c(5), c(6), c(7));
 
@@ -446,8 +446,8 @@ impl Board {
                 self.gl_const_index = v;
             }
             ODSY_PROG_CONST_STORE => {
-                self.gl_const[(self.gl_const_index % SGI_ODYSSEY_GL_CONSTANTS) as usize] = v;
-                self.gl_const_index = (self.gl_const_index + 1) % SGI_ODYSSEY_GL_CONSTANTS;
+                self.gl_const[(self.gl_const_index % ODSY_GL_CONSTANTS) as usize] = v;
+                self.gl_const_index = (self.gl_const_index + 1) % ODSY_GL_CONSTANTS;
             }
             ODSY_PROG_ENTRY_29 => {
                 // Alone, 0x29 selects the stream for light loads (0x19a) or pixel
@@ -634,7 +634,7 @@ impl Board {
 
         let mut last = -1i32;
         let mut lit = 0u8;
-        for i in 0..SGI_ODYSSEY_GL_LIGHTS as usize {
+        for i in 0..ODSY_GL_LIGHTS as usize {
             let blk = &self.gl_light_vec[i * ODSY_GL_LIGHT_VEC_FLOATS as usize..];
             let col = &self.gl_light_colour[i * 3 * 4..];
             let rgb = |base: usize| -> [f32; 3] { std::array::from_fn(|k| f(col[base + k])) };
@@ -694,15 +694,15 @@ impl Board {
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: colour-index lighting is not modeled; drawn with the current index");
             }
             let words = gl_index_rgba(self.gl_color_index).map(f32::to_bits);
-            self.gl_feed(SGI_GL_OP_COLOR4F as u16, &words);
+            self.gl_feed(GL_OP_COLOR4F as u16, &words);
             self.gl_colour_overridden = true;
         } else if self.gl_lit {
             let words = self.gl_light(&[xyz[0], xyz[1], xyz[2], 1.0]).map(f32::to_bits);
-            self.gl_feed(SGI_GL_OP_COLOR4F as u16, &words);
+            self.gl_feed(GL_OP_COLOR4F as u16, &words);
             self.gl_colour_overridden = true;
         } else if self.gl_colour_overridden {
             let words = self.gl_colour;
-            self.gl_feed(SGI_GL_OP_COLOR4F as u16, &words);
+            self.gl_feed(GL_OP_COLOR4F as u16, &words);
             self.gl_colour_overridden = false;
         }
     }
@@ -813,7 +813,7 @@ impl Board {
             };
             p[col * 4 + 3] = m[col * 4 + 3];
         }
-        self.gl().set_matrix(SGI_GL_PROJECTION, &p);
+        self.gl().set_matrix(GL_PROJECTION, &p);
         let vp = &mut self.gl().cur.viewport;
         vp[0] = -ODSY_GL_WINDOW_REACH;
         vp[1] = -ODSY_GL_WINDOW_REACH;
@@ -853,12 +853,12 @@ impl Board {
             self.gl_reload_combined();
             return;
         }
-        if self.gl_matrix_slot == SGI_GL_MODELVIEW {
+        if self.gl_matrix_slot == GL_MODELVIEW {
             // The combined matrix already carries the model-view
             // (Board::gl_load_combined()), so the shared context keeps its
             // identity model-view; this copy serves lighting's eye position.
             self.gl_modelview = self.gl_matrix;
-            for i in 0..SGI_GL_CLIP_PLANES {
+            for i in 0..GL_CLIP_PLANES {
                 self.gl_apply_clip_plane(i);
             }
             return;
@@ -913,7 +913,7 @@ impl Board {
         let patterned = (self.pattern_mode & ODSY_GL_RECT_PATTERN_ENABLE) != 0;
         let rules = self.gl_operation_rules();
         let mut op = RasterOp {
-            kind: SGI_RASTER_CLEAR,
+            kind: RASTER_CLEAR,
             clear_colour_mask: u32::MAX,
             ..Default::default()
         };
@@ -943,20 +943,20 @@ impl Board {
             anchor_y = ((self.win_origin[1] % 32).wrapping_add(((f[5] as f64) % 32.0) as i32) & 31) as u32;
         }
         if ((self.gl_write_mask >> ODSY_WRITE_COLOUR_SHIFT) & ODSY_WRITE_COLOUR_MASK) != 0 {
-            op.clear_buffers |= SGI_GL_COLOR_BUFFER_BIT;
+            op.clear_buffers |= GL_COLOR_BUFFER_BIT;
         }
         if (self.gl_write_mask & ODSY_WRITE_DEPTH) != 0 {
             let mut d = f[6] as f64 / (2.0 * ODSY_GL_DEPTH_S);
             d = cmin(cmax(d, 0.0), 1.0);
-            op.clear_buffers |= SGI_GL_DEPTH_BUFFER_BIT;
+            op.clear_buffers |= GL_DEPTH_BUFFER_BIT;
             op.clear_depth24 = rules.depth_code(d);
         }
         if (self.pattern_mode & ODSY_MODE_STENCIL_TEST) != 0 && self.gl_ref().cur.stencil_write_mask != 0 {
             let st = &self.gl_ref().cur;
 
-            if st.stencil_func == SGI_GL_ALWAYS && st.stencil_op[2] == SGI_GL_REPLACE {
+            if st.stencil_func == GL_ALWAYS && st.stencil_op[2] == GL_REPLACE {
                 // glClear's form (ODSY_MODE_STENCIL_TEST): write the reference.
-                op.clear_buffers |= SGI_GL_STENCIL_BUFFER_BIT;
+                op.clear_buffers |= GL_STENCIL_BUFFER_BIT;
                 op.clear_stencil = st.stencil_ref as u32;
                 op.stencil_mask = st.stencil_write_mask;
             } else if !self.gl_rect_stencil_logged {
@@ -965,7 +965,7 @@ impl Board {
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: stencil-tested rectangle under comparison {} and operation {:#x} is not modeled; stencil left unchanged", func, sop);
             }
         }
-        if (self.pattern_mode & ODSY_MODE_DEPTH_TEST) != 0 && (self.gl_depth_func & ODSY_DEPTH_FUNC_MASK) != SGI_GL_ALWAYS && !self.gl_rect_depth_logged {
+        if (self.pattern_mode & ODSY_MODE_DEPTH_TEST) != 0 && (self.gl_depth_func & ODSY_DEPTH_FUNC_MASK) != GL_ALWAYS && !self.gl_rect_depth_logged {
             self.gl_rect_depth_logged = true;
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: depth-tested rectangle under comparison {} is not modeled; written unconditionally", self.gl_depth_func & ODSY_DEPTH_FUNC_MASK);
         }
@@ -989,8 +989,8 @@ impl Board {
         // Pixel p is covered when x0 <= p + 0.5 < x1, clamped to the plane.
         x0 = cmax((x0 - 0.5).ceil(), 0.0);
         y0 = cmax((y0 - 0.5).ceil(), 0.0);
-        x1 = cmin((x1 - 0.5).ceil(), SGI_ODYSSEY_WIDTH as f64) - 1.0;
-        y1 = cmin((y1 - 0.5).ceil(), SGI_ODYSSEY_HEIGHT as f64) - 1.0;
+        x1 = cmin((x1 - 0.5).ceil(), ODSY_WIDTH as f64) - 1.0;
+        y1 = cmin((y1 - 0.5).ceil(), ODSY_HEIGHT as f64) - 1.0;
         if x0 > x1 || y0 > y1 {
             return;
         }
@@ -1014,7 +1014,7 @@ impl Board {
         if !self.gl_index_mode() {
             op.clear_colour_mask = (self.gl_write_mask >> ODSY_WRITE_COLOUR_SHIFT) & ODSY_WRITE_COLOUR_MASK;
         }
-        if (op.clear_buffers & SGI_GL_COLOR_BUFFER_BIT) != 0 {
+        if (op.clear_buffers & GL_COLOR_BUFFER_BIT) != 0 {
             if self.gl_index_mode() {
                 // glClearIndex travels as the first float (the probe's 3.0).
                 op.clear_rgba = gl_index_rgba(float_index(self.gl_rect[0]));
@@ -1058,7 +1058,7 @@ impl Board {
             y += 1;
         }
         if runs.is_empty() {
-            self.gl_report_refusals(op.kind != SGI_RASTER_CLEAR || (op.clear_buffers & SGI_GL_COLOR_BUFFER_BIT) != 0);
+            self.gl_report_refusals(op.kind != RASTER_CLEAR || (op.clear_buffers & GL_COLOR_BUFFER_BIT) != 0);
         }
         self.gl_raster_ops(runs);
     }
@@ -1083,9 +1083,9 @@ impl Board {
         }
 
         let x0 = (minx as i64).max(0);
-        let x1 = (maxx as i64).min(SGI_ODYSSEY_WIDTH as i64);
+        let x1 = (maxx as i64).min(ODSY_WIDTH as i64);
         let y0 = (miny as i64).max(0);
-        let y1 = (maxy as i64).min(SGI_ODYSSEY_HEIGHT as i64);
+        let y1 = (maxy as i64).min(ODSY_HEIGHT as i64);
         if x0 >= x1 || y0 >= y1 {
             return;
         }
@@ -1165,7 +1165,7 @@ impl Board {
         // The bit's physical meaning is unknown. Limit this model policy to
         // solid axial independent lines; other integer paths retain their rules.
         if !stippled
-            && self.gl_primitive == SGI_GL_LINES
+            && self.gl_primitive == GL_LINES
             && ((self.pattern_mode & !(1u32 << 25)) == 0x00080000 || (self.pattern_mode & !(1u32 << 25)) == 0x00100000)
             && (x1 == x2 || y1 == y2)
         {
@@ -1173,7 +1173,7 @@ impl Board {
 
             if y1 == y2 {
                 let lo = (x1.min(x2) as i64).max(0);
-                let hi = (x1.max(x2) as i64).min(SGI_ODYSSEY_WIDTH as i64 - 1);
+                let hi = (x1.max(x2) as i64).min(ODSY_WIDTH as i64 - 1);
                 let mut i = lo;
                 while i <= hi {
                     if !omit_last || i != x2 as i64 {
@@ -1183,7 +1183,7 @@ impl Board {
                 }
             } else {
                 let lo = (y1.min(y2) as i64).max(0);
-                let hi = (y1.max(y2) as i64).min(SGI_ODYSSEY_HEIGHT as i64 - 1);
+                let hi = (y1.max(y2) as i64).min(ODSY_HEIGHT as i64 - 1);
                 let mut i = lo;
                 while i <= hi {
                     if !omit_last || i != y2 as i64 {
@@ -1199,7 +1199,7 @@ impl Board {
         }
         if dx.abs() >= dy.abs() {
             let lo = (x1.min(x2) as i64).max(0);
-            let hi = (x1.max(x2) as i64).min(SGI_ODYSSEY_WIDTH as i64);
+            let hi = (x1.max(x2) as i64).min(ODSY_WIDTH as i64);
             let mut i = lo;
             while i < hi {
                 let c = i as f64 + 0.5;
@@ -1210,7 +1210,7 @@ impl Board {
             }
         } else {
             let lo = (y1.min(y2) as i64).max(0);
-            let hi = (y1.max(y2) as i64).min(SGI_ODYSSEY_HEIGHT as i64);
+            let hi = (y1.max(y2) as i64).min(ODSY_HEIGHT as i64);
             let mut i = lo;
             while i < hi {
                 let c = i as f64 + 0.5;
@@ -1233,7 +1233,7 @@ impl Board {
     /// convex trapezoids, for which every inside rule agrees.
     pub fn gl_polygon_edge(&mut self, x1: i32, y1: i32, x2: i32, y2: i32) {
         let lo = (y1.min(y2) as i64).max(0);
-        let hi = (y1.max(y2) as i64).min(SGI_ODYSSEY_HEIGHT as i64);
+        let hi = (y1.max(y2) as i64).min(ODSY_HEIGHT as i64);
         let mut row = lo;
 
         while row < hi {
@@ -1241,12 +1241,12 @@ impl Board {
             let px = (x1 as f64 + (c - y1 as f64) * (x2 as f64 - x1 as f64) / (y2 as f64 - y1 as f64) - 0.5).ceil();
 
             // A crossing right of the plane leaves every plane pixel outside.
-            if px >= SGI_ODYSSEY_WIDTH as f64 {
+            if px >= ODSY_WIDTH as f64 {
                 row += 1;
                 continue;
             }
             let col: u32 = if px > 0.0 { px as u32 } else { 0 };
-            self.poly_marks[(row as usize) * SGI_ODYSSEY_WIDTH as usize + col as usize] ^= 1;
+            self.poly_marks[(row as usize) * ODSY_WIDTH as usize + col as usize] ^= 1;
             self.poly_row_lo = (self.poly_row_lo as i64).min(row) as u32;
             self.poly_row_hi = (self.poly_row_hi as i64).max(row + 1) as u32;
             self.poly_col_lo = self.poly_col_lo.min(col);
@@ -1259,11 +1259,11 @@ impl Board {
         let mut row = self.poly_row_lo;
 
         while row < self.poly_row_hi {
-            let base = row as usize * SGI_ODYSSEY_WIDTH as usize;
+            let base = row as usize * ODSY_WIDTH as usize;
             let mut inside: u8 = 0;
 
             let mut col = self.poly_col_lo;
-            while col < SGI_ODYSSEY_WIDTH {
+            while col < ODSY_WIDTH {
                 inside ^= self.poly_marks[base + col as usize];
                 self.poly_marks[base + col as usize] = 0;
                 if paint && inside != 0 {
@@ -1273,9 +1273,9 @@ impl Board {
             }
             row += 1;
         }
-        self.poly_row_lo = SGI_ODYSSEY_HEIGHT;
+        self.poly_row_lo = ODSY_HEIGHT;
         self.poly_row_hi = 0;
-        self.poly_col_lo = SGI_ODYSSEY_WIDTH;
+        self.poly_col_lo = ODSY_WIDTH;
     }
 
     pub fn gl_hold(&mut self, slot: u32, x: u32, y: u32) {

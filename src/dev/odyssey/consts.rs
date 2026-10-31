@@ -385,8 +385,6 @@ pub const ODSY_DMA_FMT_RAW32: u32 = 0x13002;
 pub const ODSY_DMA_FMT_RAW64: u32 = 0x25004;
 
 // Off-screen board-memory objects.
-pub const ODSY_OBJ_POOL_BYTES: usize = SGI_ODYSSEY_OBJ_POOL_BYTES as usize;
-pub const ODSY_OBJ_POOL_WORDS: usize = SGI_ODYSSEY_OBJ_POOL_WORDS as usize;
 pub const ODSY_DEST_WIDTH_INDEX: usize = 1; // 0x1017's row length, 16-pixel units
 pub const ODSY_DEST_WIDTH_UNIT: u32 = 16;
 
@@ -557,7 +555,7 @@ pub const ODSY_UCODE_UNLIT_CLIP: u32 = 0x0f3;
 pub const ODSY_UCODE_UNLIT_CLIP_2A: u32 = 0x100;
 pub const ODSY_UCODE_UNLIT_CLIP_2C: u32 = 0x10c;
 pub const ODSY_PROG_WINDOW_BASE: u32 = 0x738;
-pub const ODSY_PROG_WINDOW_ENTRIES: u32 = SGI_ODYSSEY_GL_WINDOW_ENTRIES;
+pub const ODSY_PROG_WINDOW_ENTRIES: u32 = ODSY_GL_WINDOW_ENTRIES;
 
 // The assembled unlit list
 pub const ODSY_UCODE_HEAD_UNLIT: u32 = 0x4ae;
@@ -987,7 +985,7 @@ pub const ODSY_GL_DEPTH_SLACK: f64 = 1.0f64 / (1u32 << 20) as f64;
 pub const ODSY_VOLUME_SLICE_SHIFT_MAX: u32 = 20;
 
 // The stock driver's two-point function (-4, 1/4), (0, 1/2) fills entry 0 with 1/2, falls by 1/512 per entry to 1/4 at entry 128 and holds 1/4 through ...
-pub const ODSY_TEX_DETAIL_FUNCTION_LAST_LOD: f64 = -((SGI_ODYSSEY_TEX_DETAIL_FUNCTION_ENTRIES as f64) - 1.0) / 32.0;
+pub const ODSY_TEX_DETAIL_FUNCTION_LAST_LOD: f64 = -((ODSY_TEX_DETAIL_FUNCTION_ENTRIES as f64) - 1.0) / 32.0;
 
 // Post-filter scale and bias (0x203b, where texture validation sends a texture's words)
 pub const ODSY_TEX_SCALE_BIAS_WORDS: u32 = 8;

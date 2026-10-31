@@ -401,7 +401,7 @@ impl PlaneView {
             }
             RowOf::Did | RowOf::Overlay => {
                 let raw = if let RowOf::Did = what { self.did } else { self.overlay };
-                (raw, y as usize * SGI_ODYSSEY_WIDTH as usize, false)
+                (raw, y as usize * ODSY_WIDTH as usize, false)
             }
         };
         if at.checked_add(out.len())? > raw.len {
@@ -456,7 +456,7 @@ impl PlaneView {
         let mut saw_unverified = false;
 
         for x in 0..width {
-            let at = (y * SGI_ODYSSEY_WIDTH + x) as usize;
+            let at = (y * ODSY_WIDTH + x) as usize;
             let did = self.byte(RowOf::Did, at);
             let main_id = ((did as u32) >> ODSY_DID_MAIN_SHIFT) & (ODSY_DISPMODE_COUNT - 1);
             let word = self.load(((displayed >> main_id) & 1) as usize, x as i64, y as i64);
@@ -711,7 +711,7 @@ impl ScanoutReader {
         if !self.frame.is_empty() {
             let h = self.clock.mode.height as usize;
             let w = self.clock.mode.width as usize;
-            let width = self.clock.mode.width.min(SGI_ODYSSEY_WIDTH) as usize;
+            let width = self.clock.mode.width.min(ODSY_WIDTH) as usize;
             let mut dirty = std::mem::take(&mut self.dirty);
 
             dirty.clear();
@@ -750,7 +750,7 @@ impl ScanoutReader {
     /// main drawable id) changes: the rows where that window's two buffers
     /// differ. A row where they are equal shows the same pixels either way.
     fn flip_rows(&mut self, shared: &DisplayShared, flipped: u32) {
-        if self.clock.mode.height > SGI_ODYSSEY_HEIGHT {
+        if self.clock.mode.height > ODSY_HEIGHT {
             return shared.marks.repaint(DirtySite::Flip, 0, self.clock.mode.height as i32);
         }
         if shared.marks.unnamed_pending() {
@@ -781,7 +781,7 @@ impl ScanoutReader {
     /// again, for the next swap), the rows are copied, and the result is
     /// set in `differ`, which only the display writes.
     fn measure_differ(&mut self, shared: &DisplayShared) {
-        let width = self.clock.mode.width.min(SGI_ODYSSEY_WIDTH) as usize;
+        let width = self.clock.mode.width.min(ODSY_WIDTH) as usize;
         let unnamed = shared.marks.take_unnamed();
         let [l0, l1, did] = &mut self.scratch;
 
@@ -840,7 +840,7 @@ impl ScanoutReader {
             stage,
             ctx,
             w: self.clock.mode.width as usize,
-            width: self.clock.mode.width.min(SGI_ODYSSEY_WIDTH),
+            width: self.clock.mode.width.min(ODSY_WIDTH),
             frame: (self.frame_width, self.frame_height),
             rows: std::mem::take(&mut self.rows),
             saw_unverified: false,

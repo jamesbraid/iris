@@ -16,9 +16,9 @@ use super::*;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SGI_SCANOUT_MAX_DIM: u32 = 16384;
+pub const SCANOUT_MAX_DIM: u32 = 16384;
 /// 1 kHz: well above any SGI display's field rate.
-pub const SGI_SCANOUT_MIN_PERIOD_NS: i64 = 1000000;
+pub const SCANOUT_MIN_PERIOD_NS: i64 = 1000000;
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct ScanoutMode {
@@ -253,7 +253,7 @@ impl Scanout {
 }
 
 /// Words of the dirty-line bitset: a bit a display line of the largest mode.
-pub const DIRTY_WORDS: usize = (SGI_SCANOUT_MAX_DIM as usize).div_ceil(64);
+pub const DIRTY_WORDS: usize = (SCANOUT_MAX_DIM as usize).div_ceil(64);
 
 /// The display lines that must be resolved again, and the lines a writer
 /// touched without naming a colour buffer, as bitsets any thread may set.
@@ -440,21 +440,21 @@ pub fn mul_div(a: u64, b: u64, c: u64) -> u64 {
 impl ScanoutMode {
     /// A mode may be derived from guest-programmed timing tables, so it is
     /// checked before anything is allocated or armed from it. A size past
-    /// SGI_SCANOUT_MAX_DIM presents nothing, and a period shorter than
-    /// SGI_SCANOUT_MIN_PERIOD_NS, which would re-arm the retrace faster than
+    /// SCANOUT_MAX_DIM presents nothing, and a period shorter than
+    /// SCANOUT_MIN_PERIOD_NS, which would re-arm the retrace faster than
     /// the host can run it, or a frame too long to count, has no retrace.
     /// Returns whether the mode was used as given.
     pub fn sanitize(&mut self) -> bool {
         let mut ok = true;
 
-        if self.width > SGI_SCANOUT_MAX_DIM || self.height > SGI_SCANOUT_MAX_DIM {
+        if self.width > SCANOUT_MAX_DIM || self.height > SCANOUT_MAX_DIM {
             crate::dlog!(
                 LogModule::Odyssey,
                 "sgi-scanout: {}x{} exceeds the largest mode, {}x{}",
                 self.width,
                 self.height,
-                SGI_SCANOUT_MAX_DIM,
-                SGI_SCANOUT_MAX_DIM
+                SCANOUT_MAX_DIM,
+                SCANOUT_MAX_DIM
             );
             self.width = 0;
             self.height = 0;
@@ -463,7 +463,7 @@ impl ScanoutMode {
         if self.clock_hz != 0
             && (self.frame_clocks > u32::MAX as u64
                 || (mul_div(self.frame_clocks, NS_PER_SECOND, self.clock_hz as u64) as i64)
-                    < SGI_SCANOUT_MIN_PERIOD_NS)
+                    < SCANOUT_MIN_PERIOD_NS)
         {
             crate::dlog!(
                 LogModule::Odyssey,

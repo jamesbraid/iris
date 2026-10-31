@@ -133,7 +133,7 @@ impl Board {
     /// transfer's pixel is. Clipped to the plane only.
     pub fn dma_put(&mut self, x: i64, y: i64, src: &[u8], code: u32) {
         let pixel = self.decode_pixel(code, src).unwrap_or(0);
-        if x < 0 || y < 0 || x >= SGI_ODYSSEY_WIDTH as i64 || y >= SGI_ODYSSEY_HEIGHT as i64 {
+        if x < 0 || y < 0 || x >= ODSY_WIDTH as i64 || y >= ODSY_HEIGHT as i64 {
             return;
         }
         for b in 0..ODSY_BUFFERS {
@@ -1143,8 +1143,8 @@ impl Board {
         } else {
             src.x >= 0
                 && src.y >= 0
-                && src.x + (w as i64) <= SGI_ODYSSEY_WIDTH as i64
-                && src.y + (h as i64) <= SGI_ODYSSEY_HEIGHT as i64
+                && src.x + (w as i64) <= ODSY_WIDTH as i64
+                && src.y + (h as i64) <= ODSY_HEIGHT as i64
         };
         if !inside {
             if self.dma_report(ODSY_DMA_REPORT_BOUNDS) {
@@ -1311,7 +1311,7 @@ impl Board {
         self.cmd_tag = 0;
         self.cmd_operand_count = 0;
         self.cmd_operand_index = 0;
-        self.cmd_operand = [0; SGI_ODYSSEY_CMD_OPERANDS as usize];
+        self.cmd_operand = [0; ODSY_CMD_OPERANDS_MAX as usize];
     }
 
     /// Retain a completed setter in its public record: the whole command word
@@ -1675,7 +1675,7 @@ impl Board {
             return false;
         }
         let source_base = entry[0] & 0x1fffffff;
-        if source_base == 0 || source_base == self.dest_base || self.obj_count > SGI_ODYSSEY_OBJECTS {
+        if source_base == 0 || source_base == self.dest_base || self.obj_count > ODSY_OBJECTS {
             return false;
         }
         let (Some(su), Some(du)) = (self.object_find(source_base), self.image_object()) else {

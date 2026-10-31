@@ -6,47 +6,47 @@ use super::*;
 
 /// Distinct unimplemented offsets reported before the device falls silent
 /// about them. Diagnostic bookkeeping, not guest state.
-pub const SGI_ODYSSEY_UNIMP_REPORTS: u32 = 64;
+pub const ODSY_UNIMP_REPORTS: u32 = 64;
 
 /// The vertices an integer GL primitive holds while it streams: a QUADS
 /// rectangle's four, or a strip's first and previous vertex.
-pub const SGI_ODYSSEY_GL_HELD_VERTICES: u32 = 4;
+pub const ODSY_GL_HELD_VERTICES: u32 = 4;
 
 /// The operands a register-select word's gather keeps: the arity field's
 /// largest count, a 16-word burst.
-pub const SGI_ODYSSEY_CMD_OPERANDS: u32 = 16;
+pub const ODSY_CMD_OPERANDS_MAX: u32 = 16;
 
 /// The window-clip register's four rectangles, two words each.
-pub const SGI_ODYSSEY_CLIP_RECTS: u32 = 4;
+pub const ODSY_CLIP_RECTS: u32 = 4;
 
 /// Geometry engine program state: constant-memory entries an 11-bit index
 /// reaches.
-pub const SGI_ODYSSEY_GL_CONSTANTS: u32 = 2048;
+pub const ODSY_GL_CONSTANTS: u32 = 2048;
 /// Off-screen board-memory objects the model keeps (texture levels). A
 /// model budget, not a board limit: TyrQuake holds some 1,500 levels at once
 /// and samples its oldest every frame, which a table of 1024 forgot.
-pub const SGI_ODYSSEY_OBJECTS: u32 = 16384;
+pub const ODSY_OBJECTS: u32 = 16384;
 /// The slices of one volume texture a draw samples (Board::texture_setup()).
-pub const SGI_ODYSSEY_VOLUME_SLICES: u32 = 1024;
-pub const SGI_ODYSSEY_OBJ_POOL_BYTES: u32 = 128 * 1024 * 1024;
-pub const SGI_ODYSSEY_OBJ_POOL_WORDS: u32 = SGI_ODYSSEY_OBJ_POOL_BYTES / 4;
-pub const SGI_ODYSSEY_OBJ_VALID_BYTES: u32 = SGI_ODYSSEY_OBJ_POOL_WORDS / 8;
+pub const ODSY_VOLUME_SLICES: u32 = 1024;
+pub const ODSY_OBJ_POOL_BYTES: usize = 128 * 1024 * 1024;
+pub const ODSY_OBJ_POOL_WORDS: usize = ODSY_OBJ_POOL_BYTES / 4;
+pub const ODSY_OBJ_VALID_BYTES: usize = ODSY_OBJ_POOL_WORDS / 8;
 /// The texture level table's entries (0x0e80 .. 0x0ebf).
-pub const SGI_ODYSSEY_TEX_LEVELS: u32 = 64;
-pub const SGI_ODYSSEY_TEX_COLOUR_TABLE_ENTRIES: u32 = 256;
-pub const SGI_ODYSSEY_TEX_DETAIL_FUNCTION_ENTRIES: u32 = 256;
-pub const SGI_ODYSSEY_GL_ENTRIES: u32 = 4;
-pub const SGI_ODYSSEY_GL_LIGHTS: u32 = 8;
-pub const SGI_ODYSSEY_GL_LIGHT_COLOURS: u32 = 25;
-pub const SGI_ODYSSEY_GL_PROGRAM_REPORTS: u32 = 16;
+pub const ODSY_TEX_LEVELS: u32 = 64;
+pub const ODSY_TEX_COLOUR_TABLE_ENTRIES: u32 = 256;
+pub const ODSY_TEX_DETAIL_FUNCTION_ENTRIES: u32 = 256;
+pub const ODSY_GL_ENTRIES: u32 = 4;
+pub const ODSY_GL_LIGHTS: u32 = 8;
+pub const ODSY_GL_LIGHT_COLOURS: u32 = 25;
+pub const ODSY_GL_PROGRAM_REPORTS: u32 = 16;
 /// Program memory: 2048 instructions of six halfwords, of which the window
 /// at 0x738 is the last 0xc7 (ODSY_PROG_WINDOW_BASE).
-pub const SGI_ODYSSEY_GL_PROGRAM_ENTRIES: u32 = 2048;
-pub const SGI_ODYSSEY_GL_WINDOW_ENTRIES: u32 = 0xc7;
+pub const ODSY_GL_PROGRAM_ENTRIES: u32 = 2048;
+pub const ODSY_GL_WINDOW_ENTRIES: u32 = 0xc7;
 
 /// The one modeled mode: the desktop target size.
-pub const SGI_ODYSSEY_WIDTH: u32 = 1280;
-pub const SGI_ODYSSEY_HEIGHT: u32 = 1024;
+pub const ODSY_WIDTH: u32 = 1280;
+pub const ODSY_HEIGHT: u32 = 1024;
 
 #[derive(Clone, Copy, Default)]
 pub struct OpenVertex {
@@ -166,7 +166,7 @@ pub struct Board {
     /// When each object was last selected or grown (obj_clock's count).
     pub obj_stamp: Vec<u64>,
     pub obj_clock: u64,
-    /// SGI_ODYSSEY_OBJ_VALID_BYTES bytes.
+    /// ODSY_OBJ_VALID_BYTES bytes.
     pub obj_valid: Vec<u8>,
     pub obj_full_reported: bool,
     pub obj_forget_reported: bool,
@@ -175,14 +175,14 @@ pub struct Board {
     // The texture state words as last pushed.
     pub tex_mode: u32,
     pub tex_sampler: [u32; 7],
-    pub tex_colour_table: [[u32; SGI_ODYSSEY_TEX_COLOUR_TABLE_ENTRIES as usize]; 2],
+    pub tex_colour_table: [[u32; ODSY_TEX_COLOUR_TABLE_ENTRIES as usize]; 2],
     pub tex_colour_table_valid: [u32; 2],
-    pub tex_detail_function: [u32; SGI_ODYSSEY_TEX_DETAIL_FUNCTION_ENTRIES as usize],
+    pub tex_detail_function: [u32; ODSY_TEX_DETAIL_FUNCTION_ENTRIES as usize],
     pub tex_detail_function_valid: u32,
     pub tex_env: [u32; 5],
-    pub tex_levels: [u32; (SGI_ODYSSEY_TEX_LEVELS * 3) as usize],
-    pub tex_slice_offset: [u32; (SGI_ODYSSEY_VOLUME_SLICES + 2) as usize],
-    pub tex_slice_width: [u32; (SGI_ODYSSEY_VOLUME_SLICES + 2) as usize],
+    pub tex_levels: [u32; (ODSY_TEX_LEVELS * 3) as usize],
+    pub tex_slice_offset: [u32; (ODSY_VOLUME_SLICES + 2) as usize],
+    pub tex_slice_width: [u32; (ODSY_VOLUME_SLICES + 2) as usize],
     pub tex_level0: u32,
     pub tex_lod: [u32; 4],
     /// The 0x203b post-filter scale and bias words, R, G, B, A.
@@ -237,21 +237,21 @@ pub struct Board {
 
     pub cmd_state: u32,
     pub cmd_tag: u32,
-    pub cmd_operand: [u32; SGI_ODYSSEY_CMD_OPERANDS as usize],
+    pub cmd_operand: [u32; ODSY_CMD_OPERANDS_MAX as usize],
     pub cmd_operand_count: u32,
     pub cmd_operand_index: u32,
 
     // Where the current context's window is.
     pub win_origin: [i32; 2],
     pub read_origin: [i32; 2],
-    pub clip_words: [u32; (2 * SGI_ODYSSEY_CLIP_RECTS) as usize],
+    pub clip_words: [u32; (2 * ODSY_CLIP_RECTS) as usize],
     /// The second operand of the last 0x840 (enable, mask and value).
     pub id_compare: u32,
     pub clip_kept: u32,
-    pub clip_rect: [ClipRect; SGI_ODYSSEY_CLIP_RECTS as usize],
+    pub clip_rect: [ClipRect; ODSY_CLIP_RECTS as usize],
     // The window as the kernel last pushed it on its own port.
     pub win_committed_origin: [i32; 2],
-    pub win_committed_clip: [u32; (2 * SGI_ODYSSEY_CLIP_RECTS) as usize],
+    pub win_committed_clip: [u32; (2 * ODSY_CLIP_RECTS) as usize],
     pub win_committed_id_compare: u32,
     pub win_prior_origin: [i32; 2],
     pub win_origin_pending: bool,
@@ -261,8 +261,8 @@ pub struct Board {
     // The 2D stream's GL immediate-mode subset.
     pub gl_primitive: u32,
     pub gl_color: u32,
-    pub gl_vertex_x: [u32; SGI_ODYSSEY_GL_HELD_VERTICES as usize],
-    pub gl_vertex_y: [u32; SGI_ODYSSEY_GL_HELD_VERTICES as usize],
+    pub gl_vertex_x: [u32; ODSY_GL_HELD_VERTICES as usize],
+    pub gl_vertex_y: [u32; ODSY_GL_HELD_VERTICES as usize],
     pub gl_vertex_count: u32,
     pub line_stipple: [u32; 3],
     /// One byte per framebuffer pixel; crossing marks of an open POLYGON.
@@ -296,7 +296,7 @@ pub struct Board {
     pub gl_restart_m3: u32,
     pub gl_restart_m4: u32,
     pub gl_restart_armed: bool,
-    pub gl_restart_vertex: [[f32; SGI_GL_VERTEX_FLOATS]; 3],
+    pub gl_restart_vertex: [[f32; GL_VERTEX_FLOATS]; 3],
     pub gl_matrix_slot: u32,
     pub gl_matrix: [u32; 16],
     pub gl_texture_matrix: [u32; 16],
@@ -321,11 +321,11 @@ pub struct Board {
     pub gl_fog: [u32; 6],
 
     // Lighting: the geometry engine's program state.
-    pub gl_const: [u32; SGI_ODYSSEY_GL_CONSTANTS as usize],
+    pub gl_const: [u32; ODSY_GL_CONSTANTS as usize],
     pub gl_const_index: u32,
-    pub gl_entry: [u32; SGI_ODYSSEY_GL_ENTRIES as usize],
-    pub gl_light_colour: [u32; (SGI_ODYSSEY_GL_LIGHT_COLOURS * 4) as usize],
-    pub gl_light_vec: [u32; (SGI_ODYSSEY_GL_LIGHTS * 16) as usize],
+    pub gl_entry: [u32; ODSY_GL_ENTRIES as usize],
+    pub gl_light_colour: [u32; (ODSY_GL_LIGHT_COLOURS * 4) as usize],
+    pub gl_light_vec: [u32; (ODSY_GL_LIGHTS * 16) as usize],
     pub gl_light_colour_sel: u32,
     pub gl_light_vec_sel: u32,
     pub gl_material: [u32; 16],
@@ -341,15 +341,15 @@ pub struct Board {
     /// The model-view (slot 0x24), row-major float bits as sent.
     pub gl_modelview: [u32; 16],
     /// The user clip planes in eye coordinates, four floats' bits a plane.
-    pub gl_clip_eye: [u32; (SGI_GL_CLIP_PLANES * 4) as usize],
+    pub gl_clip_eye: [u32; (GL_CLIP_PLANES * 4) as usize],
     pub gl_lit: bool,
     pub gl_local_viewer: bool,
     /// The geometry program renormalises transformed normals.
     pub gl_normalize: bool,
     pub gl_colour_overridden: bool,
-    pub gl_program_logged: [u32; (SGI_ODYSSEY_GL_PROGRAM_REPORTS * 3) as usize],
+    pub gl_program_logged: [u32; (ODSY_GL_PROGRAM_REPORTS * 3) as usize],
     pub gl_program_logged_count: u32,
-    /// Program memory as uploaded: SGI_ODYSSEY_GL_PROGRAM_ENTRIES * 6
+    /// Program memory as uploaded: ODSY_GL_PROGRAM_ENTRIES * 6
     /// halfwords.
     pub gl_program_mem: Vec<u16>,
     pub gl_program_addr: u32,
@@ -433,9 +433,9 @@ pub struct Board {
     pub reader: ScanoutReader,
 
     // Diagnostic bookkeeping, not guest state.
-    pub reported_addr: [std::sync::atomic::AtomicU32; SGI_ODYSSEY_UNIMP_REPORTS as usize],
+    pub reported_addr: [std::sync::atomic::AtomicU32; ODSY_UNIMP_REPORTS as usize],
     pub reported_addr_count: std::sync::atomic::AtomicU32,
-    pub reported_cmd: [u32; SGI_ODYSSEY_UNIMP_REPORTS as usize],
+    pub reported_cmd: [u32; ODSY_UNIMP_REPORTS as usize],
     pub reported_cmd_count: u32,
     pub line_stipple_reported: bool,
     pub dma_bpp_reported: bool,
@@ -508,27 +508,27 @@ impl Default for Board {
             dest_base: 0,
             obj_count: 0,
             obj_used: 0,
-            obj_base: vec![0; SGI_ODYSSEY_OBJECTS as usize],
+            obj_base: vec![0; ODSY_OBJECTS as usize],
             obj_index: Default::default(),
-            obj_width: vec![0; SGI_ODYSSEY_OBJECTS as usize],
-            obj_offset: vec![0; SGI_ODYSSEY_OBJECTS as usize],
-            obj_rows: vec![0; SGI_ODYSSEY_OBJECTS as usize],
-            obj_stamp: vec![0; SGI_ODYSSEY_OBJECTS as usize],
+            obj_width: vec![0; ODSY_OBJECTS as usize],
+            obj_offset: vec![0; ODSY_OBJECTS as usize],
+            obj_rows: vec![0; ODSY_OBJECTS as usize],
+            obj_stamp: vec![0; ODSY_OBJECTS as usize],
             obj_clock: 0,
-            obj_valid: vec![0; SGI_ODYSSEY_OBJ_VALID_BYTES as usize],
+            obj_valid: vec![0; ODSY_OBJ_VALID_BYTES],
             obj_full_reported: false,
             obj_forget_reported: false,
             board_oob_reported: false,
             tex_mode: 0,
             tex_sampler: [0; 7],
-            tex_colour_table: [[0; SGI_ODYSSEY_TEX_COLOUR_TABLE_ENTRIES as usize]; 2],
+            tex_colour_table: [[0; ODSY_TEX_COLOUR_TABLE_ENTRIES as usize]; 2],
             tex_colour_table_valid: [0; 2],
-            tex_detail_function: [0; SGI_ODYSSEY_TEX_DETAIL_FUNCTION_ENTRIES as usize],
+            tex_detail_function: [0; ODSY_TEX_DETAIL_FUNCTION_ENTRIES as usize],
             tex_detail_function_valid: 0,
             tex_env: [0; 5],
-            tex_levels: [0; (SGI_ODYSSEY_TEX_LEVELS * 3) as usize],
-            tex_slice_offset: [0; (SGI_ODYSSEY_VOLUME_SLICES + 2) as usize],
-            tex_slice_width: [0; (SGI_ODYSSEY_VOLUME_SLICES + 2) as usize],
+            tex_levels: [0; (ODSY_TEX_LEVELS * 3) as usize],
+            tex_slice_offset: [0; (ODSY_VOLUME_SLICES + 2) as usize],
+            tex_slice_width: [0; (ODSY_VOLUME_SLICES + 2) as usize],
             tex_level0: 0,
             tex_lod: [0; 4],
             tex_scale_bias: [0; 8],
@@ -567,17 +567,17 @@ impl Default for Board {
             query_sync_base: 0,
             cmd_state: 0,
             cmd_tag: 0,
-            cmd_operand: [0; SGI_ODYSSEY_CMD_OPERANDS as usize],
+            cmd_operand: [0; ODSY_CMD_OPERANDS_MAX as usize],
             cmd_operand_count: 0,
             cmd_operand_index: 0,
             win_origin: [0; 2],
             read_origin: [0; 2],
-            clip_words: [0; (2 * SGI_ODYSSEY_CLIP_RECTS) as usize],
+            clip_words: [0; (2 * ODSY_CLIP_RECTS) as usize],
             id_compare: 0,
             clip_kept: 0,
             clip_rect: std::array::from_fn(|_| Default::default()),
             win_committed_origin: [0; 2],
-            win_committed_clip: [0; (2 * SGI_ODYSSEY_CLIP_RECTS) as usize],
+            win_committed_clip: [0; (2 * ODSY_CLIP_RECTS) as usize],
             win_committed_id_compare: 0,
             win_prior_origin: [0; 2],
             win_origin_pending: false,
@@ -585,8 +585,8 @@ impl Default for Board {
             cmd_from_kernel: false,
             gl_primitive: 0,
             gl_color: 0,
-            gl_vertex_x: [0; SGI_ODYSSEY_GL_HELD_VERTICES as usize],
-            gl_vertex_y: [0; SGI_ODYSSEY_GL_HELD_VERTICES as usize],
+            gl_vertex_x: [0; ODSY_GL_HELD_VERTICES as usize],
+            gl_vertex_y: [0; ODSY_GL_HELD_VERTICES as usize],
             gl_vertex_count: 0,
             line_stipple: [0; 3],
             poly_marks: Vec::new(),
@@ -613,7 +613,7 @@ impl Default for Board {
             gl_restart_m3: 0,
             gl_restart_m4: 0,
             gl_restart_armed: false,
-            gl_restart_vertex: [[0.0; SGI_GL_VERTEX_FLOATS]; 3],
+            gl_restart_vertex: [[0.0; GL_VERTEX_FLOATS]; 3],
             gl_matrix_slot: 0,
             gl_matrix: [0; 16],
             gl_texture_matrix: [0; 16],
@@ -632,11 +632,11 @@ impl Default for Board {
             stencil_plane: 0,
             gl_clip_box: [0; 2],
             gl_fog: [0; 6],
-            gl_const: [0; SGI_ODYSSEY_GL_CONSTANTS as usize],
+            gl_const: [0; ODSY_GL_CONSTANTS as usize],
             gl_const_index: 0,
-            gl_entry: [0; SGI_ODYSSEY_GL_ENTRIES as usize],
-            gl_light_colour: [0; (SGI_ODYSSEY_GL_LIGHT_COLOURS * 4) as usize],
-            gl_light_vec: [0; (SGI_ODYSSEY_GL_LIGHTS * 16) as usize],
+            gl_entry: [0; ODSY_GL_ENTRIES as usize],
+            gl_light_colour: [0; (ODSY_GL_LIGHT_COLOURS * 4) as usize],
+            gl_light_vec: [0; (ODSY_GL_LIGHTS * 16) as usize],
             gl_light_colour_sel: 0,
             gl_light_vec_sel: 0,
             gl_material: [0; 16],
@@ -648,14 +648,14 @@ impl Default for Board {
             gl_normal_matrix: [0; 16],
             gl_colour: [0; 4],
             gl_modelview: [0; 16],
-            gl_clip_eye: [0; (SGI_GL_CLIP_PLANES * 4) as usize],
+            gl_clip_eye: [0; (GL_CLIP_PLANES * 4) as usize],
             gl_lit: false,
             gl_local_viewer: false,
             gl_normalize: false,
             gl_colour_overridden: false,
-            gl_program_logged: [0; (SGI_ODYSSEY_GL_PROGRAM_REPORTS * 3) as usize],
+            gl_program_logged: [0; (ODSY_GL_PROGRAM_REPORTS * 3) as usize],
             gl_program_logged_count: 0,
-            gl_program_mem: vec![0; (SGI_ODYSSEY_GL_PROGRAM_ENTRIES * 6) as usize],
+            gl_program_mem: vec![0; (ODSY_GL_PROGRAM_ENTRIES * 6) as usize],
             gl_program_addr: 0,
             gl_regs_20_35: [0; 22],
             gl_program_half: 0,
@@ -709,7 +709,7 @@ impl Default for Board {
             reader: Default::default(),
             reported_addr: std::array::from_fn(|_| std::sync::atomic::AtomicU32::new(0)),
             reported_addr_count: std::sync::atomic::AtomicU32::new(0),
-            reported_cmd: [0; SGI_ODYSSEY_UNIMP_REPORTS as usize],
+            reported_cmd: [0; ODSY_UNIMP_REPORTS as usize],
             reported_cmd_count: 0,
             line_stipple_reported: false,
             dma_bpp_reported: false,
@@ -873,7 +873,7 @@ impl Board {
         self.query_records_reset();
         self.win_origin = [0; 2];
         self.read_origin = [0; 2];
-        for i in 0..SGI_ODYSSEY_CLIP_RECTS as usize {
+        for i in 0..ODSY_CLIP_RECTS as usize {
             self.clip_words[2 * i] = if i != 0 { ODSY_CLIP_RESET_EMPTY } else { 0 };
             self.clip_words[2 * i + 1] = if i != 0 { 0 } else { ODSY_CLIP_RESET_FULL };
         }
@@ -951,9 +951,9 @@ impl Board {
         self.line_stipple[1] = 0xffff;
         self.line_stipple[2] = 0;
         // No polygon is open; Board::reset clears the marks themselves.
-        self.poly_row_lo = SGI_ODYSSEY_HEIGHT;
+        self.poly_row_lo = ODSY_HEIGHT;
         self.poly_row_hi = 0;
-        self.poly_col_lo = SGI_ODYSSEY_WIDTH;
+        self.poly_col_lo = ODSY_WIDTH;
         // The shared GL context to OpenGL's initial state (identity matrices,
         // white current colour, depth test off), unbound until the first GL
         // command binds the drawable. A guest reset can land mid-primitive, with
@@ -993,16 +993,16 @@ impl Board {
         // pattern-mode value that already matches a usable scissor default, so
         // the full window is set here explicitly before the test is enabled,
         // once and for good.
-        self.gl_clip_box[0] = ODSY_CLIP_BOX_FIELD_MASK & (SGI_ODYSSEY_WIDTH - 1);
-        self.gl_clip_box[1] = ODSY_CLIP_BOX_FIELD_MASK & (SGI_ODYSSEY_HEIGHT - 1);
+        self.gl_clip_box[0] = ODSY_CLIP_BOX_FIELD_MASK & (ODSY_WIDTH - 1);
+        self.gl_clip_box[1] = ODSY_CLIP_BOX_FIELD_MASK & (ODSY_HEIGHT - 1);
         self.gl_fog = [0; 6];
         self.gl_apply_clip_box();
         {
-            let scissor_test = SGI_GL_SCISSOR_TEST;
+            let scissor_test = GL_SCISSOR_TEST;
 
-            self.gl_feed(SGI_GL_OP_ENABLE as u16, &[scissor_test]);
+            self.gl_feed(GL_OP_ENABLE as u16, &[scissor_test]);
         }
-        self.gl_matrix_slot = SGI_GL_MODELVIEW;
+        self.gl_matrix_slot = GL_MODELVIEW;
         self.gl_modelview = [0; 16];
         for i in 0..4usize {
             self.gl_modelview[i * 5] = ODSY_F32_ONE;
@@ -1038,7 +1038,7 @@ impl Board {
         self.gl_program_half = 0;
         self.gl_program_mem_reported = false;
         self.gl_const_index = 0;
-        self.gl_entry = [0; SGI_ODYSSEY_GL_ENTRIES as usize];
+        self.gl_entry = [0; ODSY_GL_ENTRIES as usize];
         // GL's own initial state, colour material off, as the library sends.
         self.gl_colour_material = 0;
         self.gl_light_colour.fill(0);
@@ -1181,15 +1181,15 @@ impl Board {
         // each over device-backed board memory of its own: a model-owned byte
         // array. It is not page-backed onto guest RAM. add_plane can only fail
         // on a programming error in these fixed sizes.
-        let pixels = SGI_ODYSSEY_WIDTH as u64 * SGI_ODYSSEY_HEIGHT as u64;
+        let pixels = ODSY_WIDTH as u64 * ODSY_HEIGHT as u64;
         self.mem.init(pixels * 4);
         {
             let plane = Plane {
                 format: PlaneFormat::Rgba8,
                 packing: Packing::BeRedHigh,
-                width: SGI_ODYSSEY_WIDTH,
-                height: SGI_ODYSSEY_HEIGHT,
-                stride: SGI_ODYSSEY_WIDTH * 4,
+                width: ODSY_WIDTH,
+                height: ODSY_HEIGHT,
+                stride: ODSY_WIDTH * 4,
                 base: 0,
                 len: pixels * 4,
                 bottom_origin: false,
@@ -1222,9 +1222,9 @@ impl Board {
             let depth = Plane {
                 format: PlaneFormat::Z24,
                 packing: Packing::BeRedHigh,
-                width: SGI_ODYSSEY_WIDTH,
-                height: SGI_ODYSSEY_HEIGHT,
-                stride: SGI_ODYSSEY_WIDTH * 4,
+                width: ODSY_WIDTH,
+                height: ODSY_HEIGHT,
+                stride: ODSY_WIDTH * 4,
                 base: 0,
                 len: pixels * 4,
                 bottom_origin: false,
@@ -1241,9 +1241,9 @@ impl Board {
             let stencil = Plane {
                 format: PlaneFormat::S8,
                 packing: Packing::BeRedHigh,
-                width: SGI_ODYSSEY_WIDTH,
-                height: SGI_ODYSSEY_HEIGHT,
-                stride: SGI_ODYSSEY_WIDTH,
+                width: ODSY_WIDTH,
+                height: ODSY_HEIGHT,
+                stride: ODSY_WIDTH,
                 base: 0,
                 len: pixels,
                 bottom_origin: false,
@@ -1261,7 +1261,7 @@ impl Board {
 
         // Setting the mode marks the scanout's frame all dirty and
         // restarts the retrace at the mode's rate.
-        self.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
+        self.set_scanout_size(ODSY_WIDTH, ODSY_HEIGHT);
         Ok(())
     }
 
@@ -1287,15 +1287,15 @@ impl Board {
         // 2S, is word 0xfffffe, and every drawn depth is at most that, so all
         // ones, the largest word, compares as farther than any fragment.
         let depth = self.depth_mem.plane(self.depth_plane).expect("the depth plane");
-        for y in 0..SGI_ODYSSEY_HEIGHT as i32 {
-            for x in 0..SGI_ODYSSEY_WIDTH as i32 {
+        for y in 0..ODSY_HEIGHT as i32 {
+            for x in 0..ODSY_WIDTH as i32 {
                 self.depth_mem.plane_store(&depth, x, y, ODSY_DEPTH24_MAX);
             }
         }
         // Back to the boot size, then repaint the cleared plane and restart
         // the phase.
-        if self.scanout.mode.width != SGI_ODYSSEY_WIDTH || self.scanout.mode.height != SGI_ODYSSEY_HEIGHT {
-            self.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
+        if self.scanout.mode.width != ODSY_WIDTH || self.scanout.mode.height != ODSY_HEIGHT {
+            self.set_scanout_size(ODSY_WIDTH, ODSY_HEIGHT);
         }
         self.scanout.reset();
     }

@@ -43,7 +43,7 @@ impl Board {
         if self.reported_cmd[..self.reported_cmd_count as usize].contains(&word) {
             return;
         }
-        if self.reported_cmd_count == SGI_ODYSSEY_UNIMP_REPORTS {
+        if self.reported_cmd_count == ODSY_UNIMP_REPORTS {
             return;
         }
         self.reported_cmd[self.reported_cmd_count as usize] = word;
@@ -53,7 +53,7 @@ impl Board {
             "sgi-odyssey: command FIFO word {:#010x} is not modeled{}{}",
             word,
             note,
-            if self.reported_cmd_count == SGI_ODYSSEY_UNIMP_REPORTS { "; further words stay silent" } else { "" }
+            if self.reported_cmd_count == ODSY_UNIMP_REPORTS { "; further words stay silent" } else { "" }
         );
     }
 
@@ -440,17 +440,17 @@ impl Board {
         } else {
             height = data;
         }
-        if width > SGI_ODYSSEY_WIDTH || height > SGI_ODYSSEY_HEIGHT {
+        if width > ODSY_WIDTH || height > ODSY_HEIGHT {
             crate::dlog!(
                 LogModule::Odyssey,
                 "sgi-odyssey: display channel {}x{} is larger than the modeled {}x{} planes",
                 width,
                 height,
-                SGI_ODYSSEY_WIDTH,
-                SGI_ODYSSEY_HEIGHT
+                ODSY_WIDTH,
+                ODSY_HEIGHT
             );
-            width = width.min(SGI_ODYSSEY_WIDTH);
-            height = height.min(SGI_ODYSSEY_HEIGHT);
+            width = width.min(ODSY_WIDTH);
+            height = height.min(ODSY_HEIGHT);
         }
         if width != self.scanout.mode.width || height != self.scanout.mode.height {
             self.set_scanout_size(width, height);

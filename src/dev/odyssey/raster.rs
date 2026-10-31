@@ -69,20 +69,20 @@ pub struct RasterRules {
 pub struct VolumeVertex {
     pub clip: [f64; 4],
     pub eye: [f64; 4],
-    pub attr: [f32; SGI_GL_VERTEX_FLOATS],
+    pub attr: [f32; GL_VERTEX_FLOATS],
 }
 
 impl Default for VolumeVertex {
     fn default() -> Self {
-        VolumeVertex { clip: [0.0; 4], eye: [0.0; 4], attr: [0.0; SGI_GL_VERTEX_FLOATS] }
+        VolumeVertex { clip: [0.0; 4], eye: [0.0; 4], attr: [0.0; GL_VERTEX_FLOATS] }
     }
 }
 
 /// The most vertices clipping a triangle by the six planes leaves. usize
 /// so it can size arrays.
-pub const SGI_VOLUME_TRIANGLE_MAX: usize = 3 + 6;
+pub const VOLUME_TRIANGLE_MAX: usize = 3 + 6;
 
-pub const SGI_GL_TEX_LEVELS_MAX: u32 = 31;
+pub const GL_TEX_LEVELS_MAX: u32 = 31;
 
 /// One level of a texture image, as the family describes it. The `read_*`
 /// flags say which reads the draw's Texels answer for it.
@@ -364,7 +364,7 @@ pub struct SoftShared<'a> {
     pub texels: &'a dyn Texels,
     pub reports: &'a SoftReports,
     pub win: SoftWindow,
-    pub targets: [ColourTarget; SGI_GL_MAX_TARGETS as usize],
+    pub targets: [ColourTarget; GL_MAX_TARGETS as usize],
     pub ntargets: u32,
     /// Back-facing polygons take the vertices' back colours.
     pub back_colors: bool,
@@ -431,7 +431,7 @@ impl<'a> SoftDraw<'a> {
                 texels: &NoTexels,
                 reports,
                 win: SoftWindow::default(),
-                targets: [0; SGI_GL_MAX_TARGETS as usize],
+                targets: [0; GL_MAX_TARGETS as usize],
                 ntargets: 0,
                 back_colors: false,
                 blend: false,
@@ -508,7 +508,7 @@ pub struct SoftVertex {
     /// the fog coordinate, |z| in eye coordinates
     pub fog: f64,
     /// Each client clip plane's value at the vertex, kept where >= 0.
-    pub clip: [f64; SGI_GL_CLIP_PLANES as usize],
+    pub clip: [f64; GL_CLIP_PLANES as usize],
 }
 
 impl Default for SoftVertex {
@@ -523,7 +523,7 @@ impl Default for SoftVertex {
             texcoord: [0.0; 4],
             index: 0.0,
             fog: 0.0,
-            clip: [0.0; SGI_GL_CLIP_PLANES as usize],
+            clip: [0.0; GL_CLIP_PLANES as usize],
         }
     }
 }
@@ -568,7 +568,7 @@ impl GlDrawState {
         win.y0 = d.clip.r[0].y0;
         win.x1 = d.clip.r[0].x1;
         win.y1 = d.clip.r[0].y1;
-        for r in &d.clip.r[1..std::cmp::min(d.clip.n as usize, SGI_CLIP_MAX)] {
+        for r in &d.clip.r[1..std::cmp::min(d.clip.n as usize, CLIP_MAX)] {
             win.x0 = win.x0.min(r.x0);
             win.y0 = win.y0.min(r.y0);
             win.x1 = win.x1.max(r.x1);
@@ -740,7 +740,7 @@ impl RasterRules {
 
     #[inline]
     pub fn rgba_mask(&self, mask: u32) -> u32 {
-        mask & if self.alpha_bits != 0 { SGI_GL_COLOUR_MASK_ALL } else { SGI_GL_COLOUR_MASK_ALPHA - 1 }
+        mask & if self.alpha_bits != 0 { GL_COLOUR_MASK_ALL } else { GL_COLOUR_MASK_ALPHA - 1 }
     }
 
     /// Reject unsupported capabilities before the operation can write any plane.
@@ -758,7 +758,7 @@ impl RasterRules {
     /// Read every selected destination before any colour/depth/stencil write.
     #[allow(clippy::too_many_arguments, reason = "the fragment path takes a fragment as its parts")]
     #[inline]
-    pub fn rgba_load<P: Planes + ?Sized>(&self, px: &P, targets: &[ColourTarget], count: u32, x: i32, y: i32, dest: &mut [RasterColour; SGI_GL_MAX_TARGETS as usize], reported: &std::sync::atomic::AtomicBool) -> bool {
+    pub fn rgba_load<P: Planes + ?Sized>(&self, px: &P, targets: &[ColourTarget], count: u32, x: i32, y: i32, dest: &mut [RasterColour; GL_MAX_TARGETS as usize], reported: &std::sync::atomic::AtomicBool) -> bool {
         for i in 0..count as usize {
             let loaded = px.load_rgba(targets[i], x, y);
             let mut valid = loaded.is_some();
@@ -880,13 +880,13 @@ impl SoftVertex {
 #[inline]
 pub fn soft_compare(func: u32, value: u32, ref_: u32) -> bool {
     match func {
-        SGI_GL_NEVER => false,
-        SGI_GL_LESS => value < ref_,
-        SGI_GL_EQUAL => value == ref_,
-        SGI_GL_LEQUAL => value <= ref_,
-        SGI_GL_GREATER => value > ref_,
-        SGI_GL_NOTEQUAL => value != ref_,
-        SGI_GL_GEQUAL => value >= ref_,
+        GL_NEVER => false,
+        GL_LESS => value < ref_,
+        GL_EQUAL => value == ref_,
+        GL_LEQUAL => value <= ref_,
+        GL_GREATER => value > ref_,
+        GL_NOTEQUAL => value != ref_,
+        GL_GEQUAL => value >= ref_,
         _ => true,
     }
 }
@@ -912,11 +912,11 @@ impl GlDrawState {
         let mask = self.stencil_write_mask & max;
 
         let value: u32 = match op {
-            SGI_GL_KEEP => return,
-            SGI_GL_REPLACE => ref_,
-            SGI_GL_INCR => if old < max { old + 1 } else { max },
-            SGI_GL_DECR => if old != 0 { old - 1 } else { 0 },
-            SGI_GL_INVERT => !old & max,
+            GL_KEEP => return,
+            GL_REPLACE => ref_,
+            GL_INCR => if old < max { old + 1 } else { max },
+            GL_DECR => if old != 0 { old - 1 } else { 0 },
+            GL_INVERT => !old & max,
             _ => 0,
         };
         px.store_stencil(x, y, (old & !mask) | (value & mask));
@@ -975,19 +975,19 @@ impl RasterRules {
 pub fn soft_blend_factor(factor: u32, k: usize, s: &[f64; 4], d: &[f64; 4], c: &[f32; 4]) -> f64 {
     match factor {
         1 => 1.0,
-        SGI_GL_SRC_COLOR => s[k],
-        SGI_GL_ONE_MINUS_SRC_COLOR => 1.0 - s[k],
-        SGI_GL_DST_COLOR => d[k],
-        SGI_GL_ONE_MINUS_DST_COLOR => 1.0 - d[k],
-        SGI_GL_SRC_ALPHA => s[3],
-        SGI_GL_ONE_MINUS_SRC_ALPHA => 1.0 - s[3],
-        SGI_GL_DST_ALPHA => d[3],
-        SGI_GL_ONE_MINUS_DST_ALPHA => 1.0 - d[3],
-        SGI_GL_SRC_ALPHA_SATURATE => if k == 3 { 1.0 } else { fmin(s[3], 1.0 - d[3]) },
-        SGI_GL_CONSTANT_COLOR => c[k] as f64,
-        SGI_GL_ONE_MINUS_CONSTANT_COLOR => 1.0 - c[k] as f64,
-        SGI_GL_CONSTANT_ALPHA => c[3] as f64,
-        SGI_GL_ONE_MINUS_CONSTANT_ALPHA => 1.0 - c[3] as f64,
+        GL_SRC_COLOR => s[k],
+        GL_ONE_MINUS_SRC_COLOR => 1.0 - s[k],
+        GL_DST_COLOR => d[k],
+        GL_ONE_MINUS_DST_COLOR => 1.0 - d[k],
+        GL_SRC_ALPHA => s[3],
+        GL_ONE_MINUS_SRC_ALPHA => 1.0 - s[3],
+        GL_DST_ALPHA => d[3],
+        GL_ONE_MINUS_DST_ALPHA => 1.0 - d[3],
+        GL_SRC_ALPHA_SATURATE => if k == 3 { 1.0 } else { fmin(s[3], 1.0 - d[3]) },
+        GL_CONSTANT_COLOR => c[k] as f64,
+        GL_ONE_MINUS_CONSTANT_COLOR => 1.0 - c[k] as f64,
+        GL_CONSTANT_ALPHA => c[3] as f64,
+        GL_ONE_MINUS_CONSTANT_ALPHA => 1.0 - c[3] as f64,
         _ => 0.0,
     }
 }
@@ -998,10 +998,10 @@ impl GlDrawState {
         let df = soft_blend_factor(self.blend_dst, k, src, dst, &self.blend_color);
 
         match self.blend_equation {
-            SGI_GL_MIN => fmin(src[k], dst[k]),
-            SGI_GL_MAX => fmax(src[k], dst[k]),
-            SGI_GL_FUNC_SUBTRACT => src[k] * sf - dst[k] * df,
-            SGI_GL_FUNC_REVERSE_SUBTRACT => dst[k] * df - src[k] * sf,
+            GL_MIN => fmin(src[k], dst[k]),
+            GL_MAX => fmax(src[k], dst[k]),
+            GL_FUNC_SUBTRACT => src[k] * sf - dst[k] * df,
+            GL_FUNC_REVERSE_SUBTRACT => dst[k] * df - src[k] * sf,
             _ => src[k] * sf + dst[k] * df,
         }
     }
@@ -1041,7 +1041,7 @@ impl SoftDraw<'_> {
 /// glLogicOp's operation (4.1.8, table 4.3) on the source s and the
 /// destination d, bit by bit.
 pub fn soft_logic_op(op: u32, s: u32, d: u32) -> u32 {
-    x_logic_op(op.wrapping_sub(SGI_GL_CLEAR), s, d)
+    x_logic_op(op.wrapping_sub(GL_CLEAR), s, d)
 }
 
 impl RasterRules {
@@ -1069,7 +1069,7 @@ impl SoftDraw<'_> {
         let alpha = alpha_q as f64 / alpha_max as f64;
         let rgb = rules.rgb(&frag.rgba);
 
-        if !self.blend && !self.logic_op && self.rgba_mask == rules.rgba_mask(SGI_GL_COLOUR_MASK_ALL) {
+        if !self.blend && !self.logic_op && self.rgba_mask == rules.rgba_mask(GL_COLOUR_MASK_ALL) {
             // RasterRules::rgba_value()'s stored alpha, RasterRules::alpha() of
             // alpha_q / alpha_max scaled to the stored bits, without the round
             // trip: alpha_q / alpha_max * alpha_max + 0.5 truncates to alpha_q
@@ -1127,7 +1127,7 @@ impl RasterRules {
         let mut out = 0u32;
 
         for k in 0..3u32 {
-            if mask & (SGI_GL_COLOUR_MASK_RED << k) != 0 {
+            if mask & (GL_COLOUR_MASK_RED << k) != 0 {
                 out |= channel << ((2 - k) * self.color_bits as u32);
             }
         }
@@ -1136,7 +1136,7 @@ impl RasterRules {
 
     /// The packed colour's bits, all of which a full mask writes.
     pub fn colour_bits(&self) -> u32 {
-        self.colour_mask(SGI_GL_COLOUR_MASK_ALL)
+        self.colour_mask(GL_COLOUR_MASK_ALL)
     }
 }
 
@@ -1157,7 +1157,7 @@ impl SoftDraw<'_> {
             self.blend = false;
             self.logic_op = st.index_logic_op;
         } else {
-            self.logic_op = st.color_logic_op || (st.blend && st.blend_equation == SGI_GL_LOGIC_OP);
+            self.logic_op = st.color_logic_op || (st.blend && st.blend_equation == GL_LOGIC_OP);
             self.blend = st.blend && !self.logic_op;
         }
         self.colour_mask = self.rules.colour_mask(st.colour_mask);
@@ -1165,7 +1165,7 @@ impl SoftDraw<'_> {
             self.rgba_mask = self.rules.rgba_mask(st.colour_mask);
             self.rgba_read = self.ntargets != 0 && self.rgba_mask != 0 &&
                 (self.blend || self.logic_op ||
-                 self.rgba_mask != self.rules.rgba_mask(SGI_GL_COLOUR_MASK_ALL));
+                 self.rgba_mask != self.rules.rgba_mask(GL_COLOUR_MASK_ALL));
             if !self.rules.rgba_capable(self.t, self.rgba_read) {
                 return false;
             }
@@ -1187,8 +1187,8 @@ impl SoftDraw<'_> {
 
 }
 
-pub const SGI_SOFT_FIXED_LEVELS: usize = 14;
-pub const SGI_SOFT_FIXED_FAILED: u32 = 0x80000000;
+pub const FIXED_LEVELS: usize = 14;
+pub const FIXED_FAILED: u32 = 0x80000000;
 
 /// One texel of the fixed-point sampler's store: the packed RGBA8 texel,
 /// components expanded, in lanes (soft_fixed_lanes()), and the tag of the
@@ -1248,13 +1248,13 @@ impl SoftDraw<'_> {
         if self.t.fog_factor {
             // A family's own curve replaces the mode; the blend is the same.
             f = self.px.fog_factor(z as f32, c as f32) as f64;
-        } else if st.fog_mode == SGI_GL_LINEAR {
+        } else if st.fog_mode == GL_LINEAR {
             f = if st.fog_end == st.fog_start {
                 if c < st.fog_end as f64 { 1.0 } else { 0.0 }
             } else {
                 (st.fog_end as f64 - c) / (st.fog_end as f64 - st.fog_start as f64)
             };
-        } else if st.fog_mode == SGI_GL_EXP2 {
+        } else if st.fog_mode == GL_EXP2 {
             f = (-(dens * c) * (dens * c)).exp();
         } else {
             f = (-dens * c).exp();
@@ -1274,7 +1274,7 @@ impl GlDrawState {
     /// Whether a point whose client clip plane values are d lies outside an
     /// enabled plane (2.11).
     pub fn clipped(&self, d: &[f64]) -> bool {
-        for (i, &di) in d.iter().enumerate().take(SGI_GL_CLIP_PLANES as usize) {
+        for (i, &di) in d.iter().enumerate().take(GL_CLIP_PLANES as usize) {
             if (self.clip_planes & (1u32 << i)) != 0 && !(di >= 0.0) {
                 return true;
             }
@@ -1307,7 +1307,7 @@ impl SoftDraw<'_> {
     /// by the logical operation with what is there and masked, from
     /// dest in RGBA mode, which the caller has read where the draw reads it.
     #[inline(always)]
-    pub fn fragment_store(&self, x: i32, y: i32, f: &SoftFrag, dest: &[RasterColour; SGI_GL_MAX_TARGETS as usize]) {
+    pub fn fragment_store(&self, x: i32, y: i32, f: &SoftFrag, dest: &[RasterColour; GL_MAX_TARGETS as usize]) {
         let t: &RasterTarget = self.t;
         let st: &GlDrawState = self.st;
 
@@ -1370,7 +1370,7 @@ impl SoftDraw<'_> {
         let mut fogged = *frag;
         let x = self.win.ox.wrapping_add(px);
         let y = self.win.oy.wrapping_add(py);
-        let mut dest = [RasterColour::default(); SGI_GL_MAX_TARGETS as usize];
+        let mut dest = [RasterColour::default(); GL_MAX_TARGETS as usize];
 
         if !(0.0..=1.0).contains(&z) {
             return;
@@ -1575,7 +1575,7 @@ impl SoftDraw<'_> {
 
 impl RasterRules {
     pub fn polygon_offset(&self, st: &GlDrawState, window: &[[f64; 3]; 3]) -> f64 {
-        if st.polygon_offset & SGI_GL_OFFSET_FILL == 0 {
+        if st.polygon_offset & GL_OFFSET_FILL == 0 {
             return 0.0;
         }
         self.offset_amount(st, st.depth_slope(window))
@@ -1635,7 +1635,7 @@ impl SoftDraw<'_> {
             return None;
         }
         for k in 0..4usize {
-            out.texcoord[k] = cv.attr[SGI_GL_V_TEXCOORD + k] as f64;
+            out.texcoord[k] = cv.attr[GL_V_TEXCOORD + k] as f64;
         }
         let sub = (1i32 << self.rules.subpixel_bits) as f64;
         out.x = self.rules.round(xw * sub);
@@ -1660,18 +1660,18 @@ impl SoftDraw<'_> {
         // 3.10 allows; it is affine in eye space, so interpolating it as a
         // vertex attribute gives it exactly at each fragment.
         out.fog = (if eye[3] != 0.0 { eye[2] / eye[3] } else { eye[2] }).abs();
-        for i in 0..SGI_GL_CLIP_PLANES as usize {
+        for i in 0..GL_CLIP_PLANES as usize {
             let p = &st.clip_plane[i];
 
             out.clip[i] = p[0] as f64 * eye[0] + p[1] as f64 * eye[1] + p[2] as f64 * eye[2] + p[3] as f64 * eye[3];
         }
         for k in 0..4usize {
-            let a = cv.attr[SGI_GL_V_COLOR + k];
+            let a = cv.attr[GL_V_COLOR + k];
             let m = if a > 0.0 { a } else { 0.0 };
             let n = if m < 1.0 { m } else { 1.0 };
             out.rgba[k] = n as f64;
         }
-        out.index = cv.attr[SGI_GL_V_INDEX] as f64;
+        out.index = cv.attr[GL_V_INDEX] as f64;
         Some(out)
     }
 }
@@ -1717,44 +1717,44 @@ impl RasterRules {
         line.counter %= 16u32.wrapping_mul(line.repeat);
         r.ntargets = d.state.draw_targets(&mut r.targets);
         if !self.check_rules() || !t.soft_check_index(d.state.index_bits) {
-            return SGI_GL_DRAW_OK;
+            return GL_DRAW_OK;
         }
         if let Some(win) = d.state.window() {
             r.win = win;
         } else {
             if !use_stipple
-                || d.mode < SGI_GL_LINES
-                || d.mode > SGI_GL_LINE_STRIP
+                || d.mode < GL_LINES
+                || d.mode > GL_LINE_STRIP
                 || !d.state.drawable.bound
                 || d.state.drawable.clip.n != 0
             {
-                return SGI_GL_DRAW_OK;
+                return GL_DRAW_OK;
             }
             // Empty ownership still counts standalone geometric coverage.
             r.win.x1 = -1;
             r.win.y1 = -1;
         }
         if !r.texture_setup(true) {
-            return SGI_GL_DRAW_OK;
+            return GL_DRAW_OK;
         }
         if r.texture.is_some() {
             r.texels_cache = Some(cache);
         }
         if !r.setup_ops() {
-            return SGI_GL_DRAW_OK;
+            return GL_DRAW_OK;
         }
-        if d.mode >= SGI_GL_TRIANGLES && d.mode <= SGI_GL_POLYGON {
+        if d.mode >= GL_TRIANGLES && d.mode <= GL_POLYGON {
             r.fill = r.fill_select();
         }
         let mut fixed_on = false;
-        if d.mode >= SGI_GL_TRIANGLES && d.mode <= SGI_GL_POLYGON && r.fixed_setup(&mut fixed) {
+        if d.mode >= GL_TRIANGLES && d.mode <= GL_POLYGON && r.fixed_setup(&mut fixed) {
             let mut texels = 0u64;
             fixed.span = r.fixed_span_select(&fixed);
             let (first, last) = fixed.fixed_reach();
             for i in first..=last {
                 texels += fixed.level[i as usize].width as u64 * fixed.level[i as usize].height as u64;
             }
-            texels = r2_max(texels, SGI_SOFT_FIXED_PREFILL_MIN_PIXELS);
+            texels = r2_max(texels, FIXED_PREFILL_MIN_PIXELS);
             fixed_on = (r.draw_pixels(d, texels) >= texels
                 && r.fixed_coordinates_valid(d)
                 && r.fixed_prefill(&mut fixed))
@@ -1784,29 +1784,29 @@ impl<'a> SoftDraw<'a> {
         if !self.rules.smooth_primitives {
             let mut smooth: Option<&str> = None;
 
-            if d.mode == SGI_GL_POINTS && d.point_smooth {
+            if d.mode == GL_POINTS && d.point_smooth {
                 smooth = Some("point");
-            } else if d.mode >= SGI_GL_LINES && d.mode <= SGI_GL_LINE_STRIP && d.line_smooth {
+            } else if d.mode >= GL_LINES && d.mode <= GL_LINE_STRIP && d.line_smooth {
                 smooth = Some("line");
-            } else if d.mode >= SGI_GL_TRIANGLES && d.mode <= SGI_GL_POLYGON && d.polygon_smooth {
+            } else if d.mode >= GL_TRIANGLES && d.mode <= GL_POLYGON && d.polygon_smooth {
                 smooth = Some("polygon");
             }
             if let Some(s) = smooth {
                 crate::dlog!(LogModule::Odyssey, "sgi-gl: {} smoothing requested but unsupported by raster rules; drawn aliased", s);
             }
         }
-        let filled = d.mode >= SGI_GL_TRIANGLES && d.mode <= SGI_GL_POLYGON;
+        let filled = d.mode >= GL_TRIANGLES && d.mode <= GL_POLYGON;
         if filled
-            && (self.polygon_smooth || d.polygon_modes.is_some_and(|m| m != [SGI_GL_FILL, SGI_GL_FILL]))
+            && (self.polygon_smooth || d.polygon_modes.is_some_and(|m| m != [GL_FILL, GL_FILL]))
         {
             let px = planes.planes();
             return self.with_planes(&*px).polygon_modes(d);
         }
         let mut r = *self;
         match d.mode {
-            SGI_GL_POINTS => {
+            GL_POINTS => {
                 let Some(size) = soft_dimension(d.point_size) else {
-                    return SGI_GL_DRAW_OK;
+                    return GL_DRAW_OK;
                 };
                 r.point_size = size;
                 let px = planes.planes();
@@ -1814,11 +1814,11 @@ impl<'a> SoftDraw<'a> {
                 for i in 0..n {
                     r.point(v(i));
                 }
-                SGI_GL_DRAW_OK
+                GL_DRAW_OK
             }
-            SGI_GL_LINES => {
+            GL_LINES => {
                 let Some(width) = soft_dimension(d.line_width) else {
-                    return SGI_GL_DRAW_OK;
+                    return GL_DRAW_OK;
                 };
                 r.line_width = width;
                 let px = planes.planes();
@@ -1831,11 +1831,11 @@ impl<'a> SoftDraw<'a> {
                     r.line(v(i), v(i + 1), v(i + 1), if use_stipple { Some(&mut *line) } else { None });
                     i += 2;
                 }
-                SGI_GL_DRAW_OK
+                GL_DRAW_OK
             }
-            SGI_GL_LINE_STRIP | SGI_GL_LINE_LOOP => {
+            GL_LINE_STRIP | GL_LINE_LOOP => {
                 let Some(width) = soft_dimension(d.line_width) else {
-                    return SGI_GL_DRAW_OK;
+                    return GL_DRAW_OK;
                 };
                 r.line_width = width;
                 let px = planes.planes();
@@ -1845,20 +1845,20 @@ impl<'a> SoftDraw<'a> {
                     r.line(v(i), v(i + 1), v(i + 1), if use_stipple { Some(&mut *line) } else { None });
                     i += 1;
                 }
-                if d.mode == SGI_GL_LINE_LOOP && n >= 2 {
+                if d.mode == GL_LINE_LOOP && n >= 2 {
                     r.line(v(n - 1), v(0), v(0), if use_stipple { Some(&mut *line) } else { None });
                 }
-                SGI_GL_DRAW_OK
+                GL_DRAW_OK
             }
-            SGI_GL_TRIANGLES | SGI_GL_TRIANGLE_STRIP | SGI_GL_TRIANGLE_FAN | SGI_GL_POLYGON | SGI_GL_QUADS
-            | SGI_GL_QUAD_STRIP => {
+            GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POLYGON | GL_QUADS
+            | GL_QUAD_STRIP => {
                 let px = planes.planes();
                 r.with_planes(&*px).draw_triangles(d);
-                SGI_GL_DRAW_OK
+                GL_DRAW_OK
             }
             _ => {
                 crate::dlog!(LogModule::Odyssey, "sgi-gl: draw of mode {} ignored", d.mode);
-                SGI_GL_DRAW_OK
+                GL_DRAW_OK
             }
         }
     }

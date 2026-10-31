@@ -18,44 +18,44 @@ impl SoftDraw<'_> {
 }
 
 pub fn soft_texture_format(format: u32) -> bool {
-    format == SGI_GL_ALPHA || format == SGI_GL_LUMINANCE ||
-        format == SGI_GL_LUMINANCE_ALPHA || format == SGI_GL_INTENSITY ||
-        format == SGI_GL_RGB || format == SGI_GL_RGBA ||
-        format == SGI_GL_DEPTH_COMPONENT
+    format == GL_ALPHA || format == GL_LUMINANCE ||
+        format == GL_LUMINANCE_ALPHA || format == GL_INTENSITY ||
+        format == GL_RGB || format == GL_RGBA ||
+        format == GL_DEPTH_COMPONENT
 }
 
 pub fn soft_texture_wrap(wrap: u32) -> bool {
-    wrap == SGI_GL_REPEAT || wrap == SGI_GL_CLAMP ||
-        wrap == SGI_GL_CLAMP_TO_EDGE || wrap == SGI_GL_CLAMP_TO_BORDER
+    wrap == GL_REPEAT || wrap == GL_CLAMP ||
+        wrap == GL_CLAMP_TO_EDGE || wrap == GL_CLAMP_TO_BORDER
 }
 
 /// OpenGL 1.2.1 table 3.16: exact identities remain distinct in a chain.
 pub fn soft_texture_internal_format(format: u32) -> u32 {
     match format {
-        SGI_GL_DEPTH_COMPONENT16_SGIX | SGI_GL_DEPTH_COMPONENT24_SGIX | SGI_GL_DEPTH_COMPONENT32_SGIX => SGI_GL_DEPTH_COMPONENT,
-        SGI_GL_ALPHA4 | SGI_GL_ALPHA8 | SGI_GL_ALPHA12 | SGI_GL_ALPHA16 => SGI_GL_ALPHA,
-        SGI_GL_LUMINANCE4 | SGI_GL_LUMINANCE8 | SGI_GL_LUMINANCE12 | SGI_GL_LUMINANCE16 => SGI_GL_LUMINANCE,
-        SGI_GL_LUMINANCE4_ALPHA4 | SGI_GL_LUMINANCE6_ALPHA2 | SGI_GL_LUMINANCE8_ALPHA8 |
-        SGI_GL_LUMINANCE12_ALPHA4 | SGI_GL_LUMINANCE12_ALPHA12 | SGI_GL_LUMINANCE16_ALPHA16 => SGI_GL_LUMINANCE_ALPHA,
-        SGI_GL_INTENSITY4 | SGI_GL_INTENSITY8 | SGI_GL_INTENSITY12 | SGI_GL_INTENSITY16 => SGI_GL_INTENSITY,
-        SGI_GL_R3_G3_B2 | SGI_GL_RGB4 | SGI_GL_RGB5 | SGI_GL_RGB8 | SGI_GL_RGB10 | SGI_GL_RGB12 | SGI_GL_RGB16 => SGI_GL_RGB,
-        SGI_GL_RGBA2 | SGI_GL_RGBA4 | SGI_GL_RGB5_A1 | SGI_GL_RGBA8 | SGI_GL_RGB10_A2 | SGI_GL_RGBA12 | SGI_GL_RGBA16 => SGI_GL_RGBA,
+        GL_DEPTH_COMPONENT16_SGIX | GL_DEPTH_COMPONENT24_SGIX | GL_DEPTH_COMPONENT32_SGIX => GL_DEPTH_COMPONENT,
+        GL_ALPHA4 | GL_ALPHA8 | GL_ALPHA12 | GL_ALPHA16 => GL_ALPHA,
+        GL_LUMINANCE4 | GL_LUMINANCE8 | GL_LUMINANCE12 | GL_LUMINANCE16 => GL_LUMINANCE,
+        GL_LUMINANCE4_ALPHA4 | GL_LUMINANCE6_ALPHA2 | GL_LUMINANCE8_ALPHA8 |
+        GL_LUMINANCE12_ALPHA4 | GL_LUMINANCE12_ALPHA12 | GL_LUMINANCE16_ALPHA16 => GL_LUMINANCE_ALPHA,
+        GL_INTENSITY4 | GL_INTENSITY8 | GL_INTENSITY12 | GL_INTENSITY16 => GL_INTENSITY,
+        GL_R3_G3_B2 | GL_RGB4 | GL_RGB5 | GL_RGB8 | GL_RGB10 | GL_RGB12 | GL_RGB16 => GL_RGB,
+        GL_RGBA2 | GL_RGBA4 | GL_RGB5_A1 | GL_RGBA8 | GL_RGB10_A2 | GL_RGBA12 | GL_RGBA16 => GL_RGBA,
         _ => if soft_texture_format(format) { format } else { 0 },
     }
 }
 
 pub fn soft_texture_mipmap(filter: u32) -> bool {
-    (SGI_GL_NEAREST_MIPMAP_NEAREST..=SGI_GL_LINEAR_MIPMAP_LINEAR).contains(&filter)
+    (GL_NEAREST_MIPMAP_NEAREST..=GL_LINEAR_MIPMAP_LINEAR).contains(&filter)
 }
 
 pub fn soft_texture_sharpen(filter: u32) -> bool {
-    filter == SGI_GL_LINEAR_SHARPEN_SGIS || filter == SGI_GL_LINEAR_SHARPEN_ALPHA_SGIS ||
-        filter == SGI_GL_LINEAR_SHARPEN_COLOR_SGIS
+    filter == GL_LINEAR_SHARPEN_SGIS || filter == GL_LINEAR_SHARPEN_ALPHA_SGIS ||
+        filter == GL_LINEAR_SHARPEN_COLOR_SGIS
 }
 
 pub fn soft_texture_detail(filter: u32) -> bool {
-    filter == SGI_GL_LINEAR_DETAIL_SGIS || filter == SGI_GL_LINEAR_DETAIL_ALPHA_SGIS ||
-        filter == SGI_GL_LINEAR_DETAIL_COLOR_SGIS
+    filter == GL_LINEAR_DETAIL_SGIS || filter == GL_LINEAR_DETAIL_ALPHA_SGIS ||
+        filter == GL_LINEAR_DETAIL_COLOR_SGIS
 }
 
 pub fn soft_texture_dimensions(w: u32, h: u32) -> bool {
@@ -89,15 +89,15 @@ impl GlTexImage<'_> {
 
     pub fn soft_texture_shadow_supported(&self, format: u32) -> bool {
         if (self.shadow_compare != 0 &&
-            self.shadow_compare != SGI_GL_TEXTURE_LEQUAL_R_SGIX &&
-            self.shadow_compare != SGI_GL_TEXTURE_GEQUAL_R_SGIX) ||
+            self.shadow_compare != GL_TEXTURE_LEQUAL_R_SGIX &&
+            self.shadow_compare != GL_TEXTURE_GEQUAL_R_SGIX) ||
             (self.shadow_compare != 0 &&
              (!self.shadow_ambient.is_finite() || self.shadow_ambient < 0.0 || self.shadow_ambient > 1.0))
         {
             return false;
         }
         // SGIX_depth_texture alone does not define a texture environment.
-        format != SGI_GL_DEPTH_COMPONENT ||
+        format != GL_DEPTH_COMPONENT ||
             (self.shadow_compare != 0 && !soft_texture_sharpen(self.mag_filter) &&
              !soft_texture_detail(self.mag_filter))
     }
@@ -113,14 +113,14 @@ impl<'a> SoftDraw<'a> {
         enum Out { Unsupported, Incomplete, Done }
         let res = (|| -> Out {
             border_finite &= im.border_color.iter().all(|c| c.is_finite());
-            if p.levels.len() > SGI_GL_TEX_LEVELS_MAX as usize ||
+            if p.levels.len() > GL_TEX_LEVELS_MAX as usize ||
                 !p.min_lod.is_finite() || !p.max_lod.is_finite() ||
                 p.min_lod > p.max_lod || !border_finite ||
                 !soft_texture_wrap(im.wrap_s) ||
                 (!im.one_dimensional && !soft_texture_wrap(im.wrap_t)) ||
                 (im.volume && !soft_texture_wrap(im.wrap_r)) ||
-                (im.min_filter != SGI_GL_NEAREST && im.min_filter != SGI_GL_LINEAR && !mipmap) ||
-                (im.mag_filter != SGI_GL_NEAREST && im.mag_filter != SGI_GL_LINEAR &&
+                (im.min_filter != GL_NEAREST && im.min_filter != GL_LINEAR && !mipmap) ||
+                (im.mag_filter != GL_NEAREST && im.mag_filter != GL_LINEAR &&
                  !soft_texture_sharpen(im.mag_filter) && !soft_texture_detail(im.mag_filter))
             {
                 return Out::Unsupported;
@@ -139,8 +139,8 @@ impl<'a> SoftDraw<'a> {
                 !im.soft_texture_border_supported(Some(base)) ||
                 soft_texture_internal_format(base.internal_format) != base.base_format ||
                 !soft_texture_format(base.base_format) ||
-                (self.st.texture_env_mode == SGI_GL_DECAL &&
-                 base.base_format != SGI_GL_RGB && base.base_format != SGI_GL_RGBA)
+                (self.st.texture_env_mode == GL_DECAL &&
+                 base.base_format != GL_RGB && base.base_format != GL_RGBA)
             {
                 return Out::Unsupported;
             }
@@ -258,8 +258,8 @@ impl<'a> SoftDraw<'a> {
             }
             return false;
         }
-        if st.texture_env_mode != SGI_GL_REPLACE && st.texture_env_mode != SGI_GL_MODULATE &&
-            st.texture_env_mode != SGI_GL_DECAL && st.texture_env_mode != SGI_GL_BLEND
+        if st.texture_env_mode != GL_REPLACE && st.texture_env_mode != GL_MODULATE &&
+            st.texture_env_mode != GL_DECAL && st.texture_env_mode != GL_BLEND
         {
             if report {
                 crate::dlog!(LogModule::Odyssey, "sgi-gl: unsupported texture state environment {:#x}, draw dropped", st.texture_env_mode);
@@ -300,8 +300,8 @@ impl<'a> SoftDraw<'a> {
                 (!im.one_dimensional && !soft_texture_wrap(im.wrap_t)) ||
                 (im.volume && !soft_texture_wrap(im.wrap_r)) ||
                 im.min_filter != im.mag_filter ||
-                (im.min_filter != SGI_GL_NEAREST && im.min_filter != SGI_GL_LINEAR) ||
-                (st.texture_env_mode == SGI_GL_DECAL && im.base_format != SGI_GL_RGB && im.base_format != SGI_GL_RGBA)
+                (im.min_filter != GL_NEAREST && im.min_filter != GL_LINEAR) ||
+                (st.texture_env_mode == GL_DECAL && im.base_format != GL_RGB && im.base_format != GL_RGBA)
             {
                 if report {
                     crate::dlog!(
@@ -341,14 +341,14 @@ impl GlTexImage<'_> {
     /// uses: s and q always, t unless the image is one-dimensional, and r for
     /// a shadow comparison against a depth image.
     pub fn soft_texcoord_valid(&self, base: Option<&GlTexLevel>, v: &VolumeVertex) -> bool {
-        let mut valid = v.clip[3].is_finite() && v.clip[3] > 0.0 && v.attr[SGI_GL_V_TEXCOORD + 3] > 0.0;
+        let mut valid = v.clip[3].is_finite() && v.clip[3] > 0.0 && v.attr[GL_V_TEXCOORD + 3] > 0.0;
 
         for k in 0..4usize {
             if !self.one_dimensional || k == 0 || k == 3 ||
                 (k == 2 && self.shadow_compare != 0 &&
-                 base.map_or(self.base_format, |b| b.base_format) == SGI_GL_DEPTH_COMPONENT)
+                 base.map_or(self.base_format, |b| b.base_format) == GL_DEPTH_COMPONENT)
             {
-                valid &= v.attr[SGI_GL_V_TEXCOORD + k].is_finite();
+                valid &= v.attr[GL_V_TEXCOORD + k].is_finite();
             }
         }
         valid
@@ -371,26 +371,26 @@ impl SoftDraw<'_> {
 /// Meaningful base components, including the border, before filtering.
 pub fn soft_texture_components(format: u32, v: &mut [f64; 4]) {
     match format {
-        SGI_GL_ALPHA => {
+        GL_ALPHA => {
             v[0] = 1.0;
             v[1] = 1.0;
             v[2] = 1.0;
         }
-        SGI_GL_LUMINANCE => {
+        GL_LUMINANCE => {
             v[3] = 1.0;
             v[1] = v[0];
             v[2] = v[0];
         }
-        SGI_GL_LUMINANCE_ALPHA => {
+        GL_LUMINANCE_ALPHA => {
             v[1] = v[0];
             v[2] = v[0];
         }
-        SGI_GL_INTENSITY => {
+        GL_INTENSITY => {
             v[1] = v[0];
             v[2] = v[0];
             v[3] = v[0];
         }
-        SGI_GL_RGB => {
+        GL_RGB => {
             v[3] = 1.0;
         }
         _ => {}
@@ -399,7 +399,7 @@ pub fn soft_texture_components(format: u32, v: &mut [f64; 4]) {
 
 impl GlTexImage<'_> {
     pub fn soft_texture_shadow(&self, depth: f64, reference: f64, out: &mut [f64; 4]) {
-        let pass = if self.shadow_compare == SGI_GL_TEXTURE_LEQUAL_R_SGIX { depth <= reference } else { depth >= reference };
+        let pass = if self.shadow_compare == GL_TEXTURE_LEQUAL_R_SGIX { depth <= reference } else { depth >= reference };
 
         let v = if pass { 1.0 } else { self.shadow_ambient };
         out[0] = v;
@@ -425,7 +425,7 @@ pub fn soft_unorm8(k: u32) -> f64 {
     k as f64 / 255.0
 }
 
-pub const SGI_SOFT_TEXEL_CACHE_SIZE: usize = 4096;
+pub const TEXEL_CACHE_SIZE: usize = 4096;
 
 #[derive(Clone, Copy, Default)]
 pub struct SoftTexelEntry {
@@ -460,8 +460,8 @@ impl SoftTexelCache {
             serial: 0,
             bypass: false,
             tag: 0,
-            fixed: vec![SoftFixedStore::default(); SGI_SOFT_FIXED_LEVELS],
-            entry: vec![SoftTexelEntry::default(); SGI_SOFT_TEXEL_CACHE_SIZE],
+            fixed: vec![SoftFixedStore::default(); FIXED_LEVELS],
+            entry: vec![SoftTexelEntry::default(); TEXEL_CACHE_SIZE],
         }
     }
 
@@ -469,14 +469,14 @@ impl SoftTexelCache {
     pub fn begin(&mut self) {
         self.serial += 1;
         self.bypass = false;
-        self.tag = (self.serial & !(SGI_SOFT_FIXED_FAILED as u64)) as u32;
+        self.tag = (self.serial & !(FIXED_FAILED as u64)) as u32;
         if self.tag == 0 {
             // Tags have come round: cells from 2^31 draws ago would match.
             for store in self.fixed.iter_mut() {
                 store.cells.fill(SoftFixedCell::default());
             }
             self.serial += 1;
-            self.tag = (self.serial & !(SGI_SOFT_FIXED_FAILED as u64)) as u32;
+            self.tag = (self.serial & !(FIXED_FAILED as u64)) as u32;
         }
     }
 }
@@ -494,7 +494,7 @@ impl SoftTexelCache {
             ^ z.wrapping_mul(0xc2b2ae3d)
             ^ (level as u32).wrapping_mul(0x27d4eb2f);
 
-        ((hash ^ (hash >> 15)) as usize) & (SGI_SOFT_TEXEL_CACHE_SIZE - 1)
+        ((hash ^ (hash >> 15)) as usize) & (TEXEL_CACHE_SIZE - 1)
     }
 }
 
@@ -510,13 +510,13 @@ impl SoftDraw<'_> {
         // The cache's name for the level: 0 for the image itself.
         let key = level.map_or(0usize, |l| l.level as usize + 1);
 
-        if im.wrap_s == SGI_GL_REPEAT {
+        if im.wrap_s == GL_REPEAT {
             x = soft_texture_repeat(x, width);
         }
-        if !im.one_dimensional && im.wrap_t == SGI_GL_REPEAT {
+        if !im.one_dimensional && im.wrap_t == GL_REPEAT {
             y = soft_texture_repeat(y, height);
         }
-        if im.volume && im.wrap_r == SGI_GL_REPEAT {
+        if im.volume && im.wrap_r == GL_REPEAT {
             z = soft_texture_repeat(z, depth);
         }
         let rgba = if x < 0 || y < 0 || z < 0 || x >= width as i64 || y >= height as i64 || z >= depth as i64 {
@@ -526,7 +526,7 @@ impl SoftDraw<'_> {
                 for k in 0..4usize {
                     out[k] = fmin(fmax(im.border_color[k] as f64, 0.0), 1.0);
                 }
-                if format == SGI_GL_DEPTH_COMPONENT {
+                if format == GL_DEPTH_COMPONENT {
                     let o0 = out[0];
                     im.soft_texture_shadow(o0, reference, out);
                 } else {
@@ -557,7 +557,7 @@ impl SoftDraw<'_> {
             if let Some(cache) = self.texels_cache {
                 let c = cache.borrow();
 
-                if !c.bypass && format != SGI_GL_DEPTH_COMPONENT {
+                if !c.bypass && format != GL_DEPTH_COMPONENT {
                     let idx = c.texel_slot(key, x as u32, y as u32, z as u32);
                     let e = &c.entry[idx];
                     if e.serial == c.serial && e.level == key &&
@@ -575,7 +575,7 @@ impl SoftDraw<'_> {
                 self.texels.texel(level, x as u32, y as u32)?
             }
         };
-        if format == SGI_GL_DEPTH_COMPONENT {
+        if format == GL_DEPTH_COMPONENT {
             im.soft_texture_shadow(rgba as f64 / u32::MAX as f64, reference, out);
             return Some(true);
         }
@@ -615,9 +615,9 @@ pub fn soft_texture_axis(x: f64, n: u32, wrap: u32, upper: f64) -> f64 {
     let half = 0.5 / n as f64;
 
     match wrap {
-        SGI_GL_REPEAT => x - x.floor(),
-        SGI_GL_CLAMP_TO_EDGE => fmin(fmax(x, half), 1.0 - half),
-        SGI_GL_CLAMP_TO_BORDER => fmin(fmax(x, -half), 1.0 + half),
+        GL_REPEAT => x - x.floor(),
+        GL_CLAMP_TO_EDGE => fmin(fmax(x, half), 1.0 - half),
+        GL_CLAMP_TO_BORDER => fmin(fmax(x, -half), 1.0 + half),
         _ => fmin(fmax(x, 0.0), upper),
     }
 }
@@ -643,18 +643,18 @@ impl SoftDraw<'_> {
         if im.volume {
             rr = soft_texture_axis(rr, depth, im.wrap_r, if im.max_clamp { im.max_clamp_r } else { 1.0 });
         }
-        if filter == SGI_GL_NEAREST {
+        if filter == GL_NEAREST {
             let mut x = (width as f64 * s).floor() as i64;
             let mut y = (height as f64 * t).floor() as i64;
             let mut z = if im.volume { (depth as f64 * rr).floor() as i64 } else { 0 };
 
-            if s == 1.0 && im.wrap_s != SGI_GL_CLAMP_TO_BORDER {
+            if s == 1.0 && im.wrap_s != GL_CLAMP_TO_BORDER {
                 x = width as i64 - 1;
             }
-            if t == 1.0 && im.wrap_t != SGI_GL_CLAMP_TO_BORDER {
+            if t == 1.0 && im.wrap_t != GL_CLAMP_TO_BORDER {
                 y = height as i64 - 1;
             }
-            if rr == 1.0 && im.volume && im.wrap_r != SGI_GL_CLAMP_TO_BORDER {
+            if rr == 1.0 && im.volume && im.wrap_r != GL_CLAMP_TO_BORDER {
                 z = depth as i64 - 1;
             }
             return self.texture_tap(level, x, y, z, reference, texel);
@@ -705,8 +705,8 @@ pub struct SoftTexSelection {
 pub fn soft_texture_select(min: u32, mag: u32, p: &GlTexPyramid, last: u32, rho: f64, out: &mut SoftTexSelection) -> bool {
     let enhanced = soft_texture_sharpen(mag) || soft_texture_detail(mag);
     let c: f64 = if enhanced {
-        if min == SGI_GL_NEAREST_MIPMAP_NEAREST || min == SGI_GL_LINEAR_MIPMAP_NEAREST { 0.5 } else { 0.0 }
-    } else if mag == SGI_GL_LINEAR && (min == SGI_GL_NEAREST_MIPMAP_NEAREST || min == SGI_GL_NEAREST_MIPMAP_LINEAR) {
+        if min == GL_NEAREST_MIPMAP_NEAREST || min == GL_LINEAR_MIPMAP_NEAREST { 0.5 } else { 0.0 }
+    } else if mag == GL_LINEAR && (min == GL_NEAREST_MIPMAP_NEAREST || min == GL_NEAREST_MIPMAP_LINEAR) {
         0.5
     } else {
         0.0
@@ -731,12 +731,12 @@ pub fn soft_texture_select(min: u32, mag: u32, p: &GlTexPyramid, last: u32, rho:
     if lambda <= c || !soft_texture_mipmap(min) {
         return true;
     }
-    out.filter = if min == SGI_GL_NEAREST_MIPMAP_NEAREST || min == SGI_GL_NEAREST_MIPMAP_LINEAR {
-        SGI_GL_NEAREST
+    out.filter = if min == GL_NEAREST_MIPMAP_NEAREST || min == GL_NEAREST_MIPMAP_LINEAR {
+        GL_NEAREST
     } else {
-        SGI_GL_LINEAR
+        GL_LINEAR
     };
-    if min == SGI_GL_NEAREST_MIPMAP_NEAREST || min == SGI_GL_LINEAR_MIPMAP_NEAREST {
+    if min == GL_NEAREST_MIPMAP_NEAREST || min == GL_LINEAR_MIPMAP_NEAREST {
         let mut relative: f64;
 
         if lambda <= 0.5 {
@@ -965,7 +965,7 @@ impl SoftDraw<'_> {
         let mut extent = std::cmp::max(base.width, base.height);
         let mut other = [0.0f64; 4];
 
-        if !self.texture_sample(Some(base), SGI_GL_LINEAR, s, t, rr, texel) {
+        if !self.texture_sample(Some(base), GL_LINEAR, s, t, rr, texel) {
             return false;
         }
         if im.volume {
@@ -987,12 +987,12 @@ impl SoftDraw<'_> {
         let Some(weight) = self.texture_weight(lambda) else {
             return false;
         };
-        if !self.texture_sample(Some(coarse), SGI_GL_LINEAR, s, t, rr, &mut other) {
+        if !self.texture_sample(Some(coarse), GL_LINEAR, s, t, rr, &mut other) {
             return false;
         }
         for k in 0..4usize {
-            if (k == 3 && filter == SGI_GL_LINEAR_SHARPEN_COLOR_SGIS) ||
-                (k != 3 && filter == SGI_GL_LINEAR_SHARPEN_ALPHA_SGIS)
+            if (k == 3 && filter == GL_LINEAR_SHARPEN_COLOR_SGIS) ||
+                (k != 3 && filter == GL_LINEAR_SHARPEN_ALPHA_SGIS)
             {
                 continue;
             }
@@ -1028,7 +1028,7 @@ impl SoftDraw<'_> {
         let mut other = [0.0f64; 4];
         let scale: i32 = std::cmp::min(-(im.detail_level as i64), i32::MAX as i64) as i32;
 
-        if !self.texture_sample(Some(base), SGI_GL_LINEAR, s, t, rr, texel) {
+        if !self.texture_sample(Some(base), GL_LINEAR, s, t, rr, texel) {
             return false;
         }
         let detail = match im.detail_image {
@@ -1040,7 +1040,7 @@ impl SoftDraw<'_> {
                 d.base_format != base.base_format || im.detail_level > 0) => d,
             _ => return true,
         };
-        if im.detail_mode != SGI_GL_ADD && im.detail_mode != SGI_GL_MODULATE {
+        if im.detail_mode != GL_ADD && im.detail_mode != GL_MODULATE {
             self.texture_report(32, "unsupported detail mode, fragment dropped");
             return false;
         }
@@ -1051,8 +1051,8 @@ impl SoftDraw<'_> {
             self.texture_report(32, "invalid detail coordinates, fragment dropped");
             return false;
         }
-        repeat.wrap_s = SGI_GL_REPEAT;
-        repeat.wrap_t = SGI_GL_REPEAT;
+        repeat.wrap_s = GL_REPEAT;
+        repeat.wrap_t = GL_REPEAT;
         // The detail image is not the draw's image: its texels are not cached.
         let mut draw = *self;
         draw.texture = Some(&repeat);
@@ -1060,18 +1060,18 @@ impl SoftDraw<'_> {
         let Some(weight) = self.texture_weight(lambda) else {
             return false;
         };
-        if !draw.texture_sample(Some(&detail), SGI_GL_LINEAR, ds, dt, 0.0, &mut other) {
+        if !draw.texture_sample(Some(&detail), GL_LINEAR, ds, dt, 0.0, &mut other) {
             return false;
         }
         for k in 0..4usize {
             let signed_detail = weight * (2.0 * other[k] - 1.0);
 
-            if (k == 3 && filter == SGI_GL_LINEAR_DETAIL_COLOR_SGIS) ||
-                (k != 3 && filter == SGI_GL_LINEAR_DETAIL_ALPHA_SGIS)
+            if (k == 3 && filter == GL_LINEAR_DETAIL_COLOR_SGIS) ||
+                (k != 3 && filter == GL_LINEAR_DETAIL_ALPHA_SGIS)
             {
                 continue;
             }
-            texel[k] = if im.detail_mode == SGI_GL_ADD {
+            texel[k] = if im.detail_mode == GL_ADD {
                 texel[k] + signed_detail
             } else {
                 texel[k] * (1.0 + signed_detail)
@@ -1092,31 +1092,31 @@ impl SoftDraw<'_> {
         if im.post_filter {
             self.texels.post_filter(texel);
         }
-        if format == SGI_GL_DEPTH_COMPONENT {
-            format = SGI_GL_LUMINANCE;
+        if format == GL_DEPTH_COMPONENT {
+            format = GL_LUMINANCE;
         }
         for k in 0..4usize {
             let alpha = k == 3;
 
-            if (!alpha && format == SGI_GL_ALPHA) ||
-                (alpha && (format == SGI_GL_RGB || format == SGI_GL_LUMINANCE))
+            if (!alpha && format == GL_ALPHA) ||
+                (alpha && (format == GL_RGB || format == GL_LUMINANCE))
             {
                 continue;
             }
             match env {
-                SGI_GL_REPLACE => rgba[k] = texel[k],
-                SGI_GL_MODULATE => rgba[k] *= texel[k],
-                SGI_GL_DECAL => {
+                GL_REPLACE => rgba[k] = texel[k],
+                GL_MODULATE => rgba[k] *= texel[k],
+                GL_DECAL => {
                     if !alpha {
-                        rgba[k] = if format == SGI_GL_RGB {
+                        rgba[k] = if format == GL_RGB {
                             texel[k]
                         } else {
                             rgba[k] * (1.0 - texel[3]) + texel[k] * texel[3]
                         };
                     }
                 }
-                SGI_GL_BLEND => {
-                    rgba[k] = if alpha && format != SGI_GL_INTENSITY {
+                GL_BLEND => {
+                    rgba[k] = if alpha && format != GL_INTENSITY {
                         rgba[k] * texel[k]
                     } else {
                         rgba[k] * (1.0 - texel[k])
@@ -1143,11 +1143,11 @@ impl SoftDraw<'_> {
         }
         let s = frag.texcoord[0] / q;
         let t = if im.one_dimensional { 0.0 } else { frag.texcoord[1] / q };
-        if im.volume || (format == SGI_GL_DEPTH_COMPONENT && im.shadow_compare != 0) {
+        if im.volume || (format == GL_DEPTH_COMPONENT && im.shadow_compare != 0) {
             rr = frag.texcoord[2] / q;
         }
         if !s.is_finite() || !t.is_finite() || !rr.is_finite() ||
-            (format == SGI_GL_DEPTH_COMPONENT && (rr < 0.0 || rr > 1.0))
+            (format == GL_DEPTH_COMPONENT && (rr < 0.0 || rr > 1.0))
         {
             self.texture_report(2, "invalid projected coordinates, fragment dropped");
             return false;

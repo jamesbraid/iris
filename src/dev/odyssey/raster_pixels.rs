@@ -28,16 +28,16 @@ impl SoftDraw<'_> {
             xy[2 * i + 1] = win[1];
         }
         // Each primitive's own vertices; a fan's first is left out.
-        let step: usize = if d.mode == SGI_GL_TRIANGLES {
+        let step: usize = if d.mode == GL_TRIANGLES {
             3
-        } else if d.mode == SGI_GL_QUADS {
+        } else if d.mode == GL_QUADS {
             4
-        } else if d.mode == SGI_GL_QUAD_STRIP {
+        } else if d.mode == GL_QUAD_STRIP {
             2
         } else {
             1
         };
-        let size: usize = if d.mode == SGI_GL_QUADS || d.mode == SGI_GL_QUAD_STRIP { 4 } else { 3 };
+        let size: usize = if d.mode == GL_QUADS || d.mode == GL_QUAD_STRIP { 4 } else { 3 };
         let mut i = 0usize;
         while i + size <= n && sum < limit {
             let mut px = [0.0f64; 4];
@@ -64,7 +64,7 @@ impl ClipList {
     /// Whether one rectangle of a non-empty clip list holds all of row y from
     /// x0 to x1, so that each pixel's own test would pass.
     pub fn soft_clip_covers_row(&self, x0: i32, x1: i32, y: i32) -> bool {
-        for i in 0..r2_min(self.n, SGI_CLIP_MAX as u32) {
+        for i in 0..r2_min(self.n, CLIP_MAX as u32) {
             let r = &self.r[i as usize];
 
             if y >= r.y0 && y <= r.y1 && x0 >= r.x0 && x1 <= r.x1 {
@@ -145,7 +145,7 @@ impl SoftClear<'_> {
         let rules = self.rules;
         let op = self.op;
         // Only a read fills it, and only a read's targets are read back.
-        let mut dest = [RasterColour::default(); SGI_GL_MAX_TARGETS as usize];
+        let mut dest = [RasterColour::default(); GL_MAX_TARGETS as usize];
 
         for x in op.x0..=op.x1 {
             if !whole_row && !op.clip.contains(x, y) {
@@ -153,7 +153,7 @@ impl SoftClear<'_> {
             }
 
             if self.rgba && self.rgba_read {
-                dest = [RasterColour::default(); SGI_GL_MAX_TARGETS as usize];
+                dest = [RasterColour::default(); GL_MAX_TARGETS as usize];
                 if !rules.rgba_load(px, &op.targets, self.ntargets, x, y, &mut dest, &self.rgba_reported) {
                     continue;
                 }
@@ -226,9 +226,9 @@ impl RasterRules {
     /// its rectangle its clip list keeps. The other kinds are not executed
     /// here.
     pub fn raster(&self, t: &RasterTarget, planes: &mut dyn PlaneStore, op: &RasterOp) {
-        let mut colour = op.clear_buffers & SGI_GL_COLOR_BUFFER_BIT != 0;
-        let depth = op.clear_buffers & SGI_GL_DEPTH_BUFFER_BIT != 0;
-        let mut stencil = op.clear_buffers & SGI_GL_STENCIL_BUFFER_BIT != 0;
+        let mut colour = op.clear_buffers & GL_COLOR_BUFFER_BIT != 0;
+        let depth = op.clear_buffers & GL_DEPTH_BUFFER_BIT != 0;
+        let mut stencil = op.clear_buffers & GL_STENCIL_BUFFER_BIT != 0;
         let mut rgb = 0u32;
         let mut smax = 0u32;
         let mut mask = self.colour_bits();
@@ -237,8 +237,8 @@ impl RasterRules {
         let rgba_read = colour
             && op.ntargets != 0
             && rgba_mask != 0
-            && rgba_mask != self.rgba_mask(SGI_GL_COLOUR_MASK_ALL);
-        let ntargets = r2_min(op.ntargets, SGI_GL_MAX_TARGETS);
+            && rgba_mask != self.rgba_mask(GL_COLOUR_MASK_ALL);
+        let ntargets = r2_min(op.ntargets, GL_MAX_TARGETS);
         let mut clear = RasterColour::default();
 
         if !self.check_rules() {
@@ -246,7 +246,7 @@ impl RasterRules {
         }
         // After the check: the depth maximum shifts by 32 - depth_bits.
         let depth_value = op.clear_depth24 & self.depth_max();
-        if op.kind != SGI_RASTER_CLEAR {
+        if op.kind != RASTER_CLEAR {
             crate::dlog!(LogModule::Odyssey, "sgi-gl: raster op of kind {} is not executed", op.kind);
             return;
         }
@@ -409,7 +409,7 @@ mod tests {
         let x0 = (rng.next_u32() % 40) as i32;
         let y0 = (rng.next_u32() % 40) as i32;
         let mut op = RasterOp {
-            kind: SGI_RASTER_CLEAR,
+            kind: RASTER_CLEAR,
             ntargets: 1 + rng.next_u32() % 2,
             targets: [0, 1, 0, 0],
             x0,
@@ -417,16 +417,16 @@ mod tests {
             x1: x0 + 10 + (rng.next_u32() % 50) as i32,
             y1: y0 + 10 + (rng.next_u32() % 50) as i32,
             clear_buffers: [
-                SGI_GL_COLOR_BUFFER_BIT | SGI_GL_DEPTH_BUFFER_BIT,
-                SGI_GL_COLOR_BUFFER_BIT | SGI_GL_DEPTH_BUFFER_BIT | SGI_GL_STENCIL_BUFFER_BIT,
-                SGI_GL_DEPTH_BUFFER_BIT,
-                SGI_GL_STENCIL_BUFFER_BIT,
-                SGI_GL_COLOR_BUFFER_BIT,
-                SGI_GL_DEPTH_BUFFER_BIT | SGI_GL_STENCIL_BUFFER_BIT,
-                SGI_GL_COLOR_BUFFER_BIT | SGI_GL_STENCIL_BUFFER_BIT,
+                GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT,
+                GL_DEPTH_BUFFER_BIT,
+                GL_STENCIL_BUFFER_BIT,
+                GL_COLOR_BUFFER_BIT,
+                GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT,
+                GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT,
             ][rng.next_u32() as usize % 7],
             clear_rgba: [0.2, 0.7, 0.4, 0.9],
-            clear_colour_mask: if rng.next_u32() % 3 == 0 { rng.next_u32() % 16 } else { SGI_GL_COLOUR_MASK_ALL },
+            clear_colour_mask: if rng.next_u32() % 3 == 0 { rng.next_u32() % 16 } else { GL_COLOUR_MASK_ALL },
             clear_depth24: 0x123456,
             clear_stencil: 0x5a,
             stencil_mask: [u32::MAX, 0x0f, 0x81][rng.next_u32() as usize % 3],

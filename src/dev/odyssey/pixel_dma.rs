@@ -39,9 +39,9 @@ pub enum DmaDirection {
     FromDevice,
 }
 
-pub const SGI_DMA_CHUNK_MAX: u32 = 4096;
+pub const DMA_CHUNK_MAX: u32 = 4096;
 /// The smallest page a page list may name.
-pub const SGI_DMA_MIN_PAGE_SIZE: u32 = SGI_DMA_CHUNK_MAX;
+pub const DMA_MIN_PAGE_SIZE: u32 = DMA_CHUNK_MAX;
 
 /// Why a DMA transfer to or from guest memory failed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -93,14 +93,14 @@ pub struct DmaMap {
 
 impl DmaPageList {
     /// The bytes a page list maps, or 0 (logged) when its page size is not a
-    /// power of two of at least SGI_DMA_MIN_PAGE_SIZE.
+    /// power of two of at least DMA_MIN_PAGE_SIZE.
     pub fn bytes(&self) -> u64 {
-        if self.page_size < SGI_DMA_MIN_PAGE_SIZE || !(self.page_size as u64).is_power_of_two() {
+        if self.page_size < DMA_MIN_PAGE_SIZE || !(self.page_size as u64).is_power_of_two() {
             crate::dlog!(
                 LogModule::Odyssey,
                 "sgi-dma: page size {} is not a power of two of at least {}",
                 self.page_size,
-                SGI_DMA_MIN_PAGE_SIZE
+                DMA_MIN_PAGE_SIZE
             );
             return 0;
         }
@@ -121,7 +121,7 @@ impl DmaBus {
         // and never crosses a page of any size the families use.
         while done < len {
             let at = addr.wrapping_add(done as u64);
-            let n = (len - done).min(SGI_DMA_CHUNK_MAX - (at & (SGI_DMA_CHUNK_MAX as u64 - 1)) as u32);
+            let n = (len - done).min(DMA_CHUNK_MAX - (at & (DMA_CHUNK_MAX as u64 - 1)) as u32);
             let bus_addr = at;
             let dst = &mut buf[done as usize..(done + n) as usize];
             if !read_guest(&self.mem, bus_addr, dst) {
@@ -165,7 +165,7 @@ impl DmaBus {
             // The cut at the page's end is what keeps a chunk off guest memory
             // the driver did not hand over: the next page of the buffer is
             // wherever the list says, not the physically next one.
-            let n = (offset + len - pos).min(ps - in_page).min(SGI_DMA_CHUNK_MAX as u64);
+            let n = (offset + len - pos).min(ps - in_page).min(DMA_CHUNK_MAX as u64);
             let bus_addr = addr;
 
             if page & (ps - 1) != 0 {

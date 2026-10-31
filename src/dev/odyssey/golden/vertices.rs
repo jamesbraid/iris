@@ -60,7 +60,7 @@ fn rows() -> Vec<Row> {
             st.window_rows_down = name == "window_matrix_rot";
         }
         for (i, p) in points.iter().enumerate() {
-            let mut vertex = [0.0f32; SGI_GL_VERTEX_FLOATS];
+            let mut vertex = [0.0f32; GL_VERTEX_FLOATS];
             vertex[..4].copy_from_slice(p);
             let vv = st.volume_from_draw_vertex(&vertex);
             out.push(Row { name: format!("{name}/{i}"), kind: "eye", vals: vv.eye.to_vec() });
