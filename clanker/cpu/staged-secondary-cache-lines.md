@@ -36,21 +36,33 @@ instruction in TagLo. A fetch hit decodes it with the layout origami's
 `r10000-cache-index-ops.md` infers from a shipped PROM's table, for sampled
 opcodes only (`l1i_decode`, `L1I_CLASSES`). `addiu $4,$0,2` is `0x3_4420_0004`.
 - A word of a class not in the table is refused: reported once per class on
-  stderr, and the fetch is treated as a miss and reads the secondary cache or
-  memory. An approximation, approved by the owner, not hardware behavior
-  (hardware runs the word). Chosen over a Cache Error because memory holds the
-  instruction a word was built from in all but a few stale entries, so a miss
-  executes the right instruction for nearly every staged word, where an error
-  stops a guest the hardware runs. The limit: a staged entry that is stale
-  against memory runs the memory word, not the staged one, which is why it is
-  reported. The Fuel PROM stages seven unsampled classes (0x00, 0x08, 0x1e,
-  0x35, 0x3f, 0x41, 0x71) and boots on this fallback; only 0x1a (addiu) is
-  decoded.
+  stderr, and the fetch is treated as a miss and reads the staged secondary line
+  if there is one, else memory. An approximation, approved by the owner, not
+  hardware behavior (hardware runs the word). Chosen over a Cache Error because
+  memory holds the instruction a word was built from in all but a few stale
+  entries, so a miss executes the right instruction for nearly every staged
+  word, where an error stops a guest the hardware runs. The limit: a staged
+  entry that is stale against memory runs the memory word, not the staged one,
+  which is why it is reported.
+- The class table is the 11 classes of origami #3113 (0x00 nop, 0x08 dsll/dsll32,
+  0x18 or, 0x1a addi/addiu/ori/lui, 0x1e daddiu, 0x35 cache, 0x36 ld, 0x3f mtc0,
+  0x40 jal, 0x41 jr/j, 0x71 REGIMM), all inferred. Class, p[28:26] and, for the
+  SPECIAL classes, the function field identify the instruction; a known class
+  with anything else is refused too. The Fuel PROM boots with no refusals.
+- A cached fetch that misses the primary I cache and hits a staged secondary
+  line refills a 64-byte primary block from it (the only refill; ordinary
+  fetches are not tracked). The victim is an Invalid way before a Valid one, and
+  way 0 when both are valid: a model choice, the sheet states no victim rule. The
+  words are stored in the raw encoding with even parity, the architectural word
+  carried in place of hardware's predecoded form. The block is tagged with the
+  fetch's PA, valid, so Index Load Tag/Data (I) return it and a readback stored
+  verbatim into another line executes. Invalidating a secondary block
+  invalidates the primary I lines inside it.
 - Parity is checked on a fetch hit: even over the 36 bits and ECC[0]. A bad word
   posts a Cache Error (CacheErr.ED) unless Status.DE or ERL is set.
 - Index Load Data (I) returns the stored word and parity as stored, so a readback
-  stored back verbatim round-trips and executes. A refill is not modelled: a line
-  the guest never staged reads back as the shadow's contents, not as the
+  stored back verbatim round-trips and executes. A line the guest never staged
+  and the model did not refill reads back as the shadow's contents, not as the
   predecoded memory word. A word with p[35:32] = 0xf is this model's own encoding
   of a raw instruction in p[31:0] (`L1I_RAW`), so a word outside the sampled set
   can round-trip. Model choice; the hardware contents are unknown.
@@ -85,7 +97,7 @@ Dropping any of the first three fails `a_compiled_load_hits_a_staged_line_not_th
 - Every CACHE operand is translated first (exceptions: TLB Refill/Invalid, privilege Address Error, never TLB Modified). The secondary set, way and quadword come from the operand's physical address (`set_cache_op_pa`), the primaries' from its virtual address. An operand on an uncached page is undefined on the R10000 and goes ahead as if cached.
 - The datasheet clears the R10000. The R12000, R14000 and R16000 use the same
   tag layout here, which is an inference.
-- Not modelled: the predecode of unsampled classes, refills, primary data cache staged hits, ECC and check bits, the
+- Not modelled: the predecode of unsampled classes, primary data cache staged hits, ECC and check bits, the
   virtual-index purge, the BadVAddr/Context/EntryHi values after a CACHE-raised TLB exception, Status.CH, the
   tag rewrite on invalidate (only the state clears), coherence with other CPUs
   and DMA.
