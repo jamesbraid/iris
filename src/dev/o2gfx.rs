@@ -274,7 +274,7 @@ impl Gbe {
     }
 
     fn read_reg(&self, off: u32) -> u32 {
-        if crate::ip32::hot_counters() {
+        if crate::ip32_map::hot_counters() {
             *self.hot.lock().unwrap().entry(off).or_insert(0) += 1;
         }
         let mut s = self.s.lock().unwrap();
@@ -1438,7 +1438,7 @@ impl CrimeRe {
     /// A CPU read: `None` (the CPU retries) for a register while the
     /// engine is busy.
     fn read_reg(&self, off: u32) -> Option<u32> {
-        if crate::ip32::hot_counters() {
+        if crate::ip32_map::hot_counters() {
             *self.hot.lock().unwrap().entry(off & !3).or_insert(0) += 1;
         }
         match off & !3 {

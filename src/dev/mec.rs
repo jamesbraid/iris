@@ -647,32 +647,32 @@ fn crc32(data: &[u8]) -> u32 {
 /// write pointer as a halfword).
 impl crate::traits::BusDevice for Mec {
     fn read8(&self, addr: u64) -> crate::traits::BusRead8 {
-        crate::traits::BusRead8::ok(self.read_part((addr - crate::ip32::MACE_MEC as u64) as u32, 1) as u8)
+        crate::traits::BusRead8::ok(self.read_part((addr - crate::ip32_map::MACE_MEC as u64) as u32, 1) as u8)
     }
     fn read16(&self, addr: u64) -> crate::traits::BusRead16 {
-        crate::traits::BusRead16::ok(self.read_part((addr - crate::ip32::MACE_MEC as u64) as u32, 2) as u16)
+        crate::traits::BusRead16::ok(self.read_part((addr - crate::ip32_map::MACE_MEC as u64) as u32, 2) as u16)
     }
     fn read32(&self, addr: u64) -> crate::traits::BusRead32 {
-        let v = self.read64(((addr - crate::ip32::MACE_MEC as u64) as u32) & !7);
+        let v = self.read64(((addr - crate::ip32_map::MACE_MEC as u64) as u32) & !7);
         crate::traits::BusRead32::ok(if addr & 4 == 0 { (v >> 32) as u32 } else { v as u32 })
     }
     fn read64(&self, addr: u64) -> crate::traits::BusRead64 {
-        crate::traits::BusRead64::ok(Mec::read64(self, (addr - crate::ip32::MACE_MEC as u64) as u32))
+        crate::traits::BusRead64::ok(Mec::read64(self, (addr - crate::ip32_map::MACE_MEC as u64) as u32))
     }
     fn write8(&self, addr: u64, val: u8) -> u32 {
-        self.write_part((addr - crate::ip32::MACE_MEC as u64) as u32, 1, val as u64);
+        self.write_part((addr - crate::ip32_map::MACE_MEC as u64) as u32, 1, val as u64);
         crate::traits::BUS_OK
     }
     fn write16(&self, addr: u64, val: u16) -> u32 {
-        self.write_part((addr - crate::ip32::MACE_MEC as u64) as u32, 2, val as u64);
+        self.write_part((addr - crate::ip32_map::MACE_MEC as u64) as u32, 2, val as u64);
         crate::traits::BUS_OK
     }
     fn write32(&self, addr: u64, val: u32) -> u32 {
-        Mec::write64(self, ((addr - crate::ip32::MACE_MEC as u64) as u32) & !7, val as u64);
+        Mec::write64(self, ((addr - crate::ip32_map::MACE_MEC as u64) as u32) & !7, val as u64);
         crate::traits::BUS_OK
     }
     fn write64(&self, addr: u64, val: u64) -> u32 {
-        Mec::write64(self, (addr - crate::ip32::MACE_MEC as u64) as u32, val);
+        Mec::write64(self, (addr - crate::ip32_map::MACE_MEC as u64) as u32, val);
         crate::traits::BUS_OK
     }
 }
@@ -783,7 +783,7 @@ impl crate::traits::Device for Mec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ip32::RAM_BASE;
+    use crate::ip32_map::RAM_BASE;
 
     fn mec() -> (Mec, Arc<crate::dev::crime_mem::O2Memory>) {
         let ram = Arc::new(crate::dev::crime_mem::O2Memory::single(1 << 20));

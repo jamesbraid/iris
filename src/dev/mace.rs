@@ -7,6 +7,8 @@
 //! storing register file (`regs`).
 
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
+use crate::ip32_map::hot_counters;
 
 use crate::dev::crime::Crime;
 use crate::dev::crime_mem::O2Memory;
@@ -20,8 +22,8 @@ use crate::dev::mace_ust::MaceUst;
 use crate::dev::mec::Mec;
 use crate::dev::mace_uart::MaceUart;
 use crate::dev::mace_id::{MaceId, DEFAULT_MAC};
-use crate::ip32::{
-    Stub, IP32_MEC_CRIME_INT, MACE_BASE, MACE_COM0, MACE_COM1, MACE_COM_SIZE, MACE_ISA_FLASH_NIC_REG,
+use crate::ip32_map::{
+    IP32_MEC_CRIME_INT, MACE_BASE, MACE_COM0, MACE_COM1, MACE_COM_SIZE, MACE_ISA_FLASH_NIC_REG,
     MACE_MEC, MACE_MEC_SIZE, MACE_PS2, MACE_PS2_SIZE, MACE_RTC, MACE_RTC_SIZE, MACE_SIZE, MACE_UST_MSC,
     MACE_UST_MSC_SIZE, MACEPCI_BASE, MACEPCI_SIZE,
 };
@@ -639,4 +641,115 @@ impl BusDevice for Mace {
         self.regs_wrote(a);
         r
     }
+}
+
+/// A register file that remembers what it is told, and counts accesses per
+/// offset. Stands in for MACE until there is a reason to build it properly.
+///
+/// Storing matters more than it looks: the PROM does read-modify-write on
+/// several of these (the LED register among them), and a register that always
+/// reads back zero silently discards every bit the firmware thought it had
+/// set.
+pub struct Stub {
+    pub name: &'static str,
+    reads: std::sync::atomic::AtomicU64,
+    writes: std::sync::atomic::AtomicU64,
+    /// Per-offset access counts. A stub that is being polled hard is the guest
+    /// waiting on a bit we are not setting, and the offset says which.
+    hot: Mutex<std::collections::BTreeMap<u32, (u64, u64)>>,
+    /// Per-offset stored value.
+    cells: Mutex<std::collections::BTreeMap<u32, u64>>,
+}
+
+impl Stub {
+    pub fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            reads: std::sync::atomic::AtomicU64::new(0),
+            writes: std::sync::atomic::AtomicU64::new(0),
+            hot: Mutex::new(std::collections::BTreeMap::new()),
+            cells: Mutex::new(std::collections::BTreeMap::new()),
+        }
+    }
+    pub fn counts(&self) -> (u64, u64) {
+        (self.reads.load(Ordering::Relaxed), self.writes.load(Ordering::Relaxed))
+    }
+    /// Offsets by access count, busiest first: `(offset, reads, writes)`.
+    pub fn hottest(&self) -> Vec<(u32, u64, u64)> {
+        let mut v: Vec<(u32, u64, u64)> =
+            self.hot.lock().unwrap().iter().map(|(&o, &(r, w))| (o, r, w)).collect();
+        v.sort_by_key(|&(_, r, w)| std::cmp::Reverse(r + w));
+        v
+    }
+    // The totals are for the bring-up report; a `lightning` build keeps
+    // none.
+    #[inline]
+    pub(crate) fn r(&self) {
+        #[cfg(not(feature = "lightning"))]
+        self.reads.fetch_add(1, Ordering::Relaxed);
+    }
+    #[inline]
+    pub(crate) fn w(&self) {
+        #[cfg(not(feature = "lightning"))]
+        self.writes.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn cell(&self, addr: u32) -> u64 {
+        *self.cells.lock().unwrap().get(&(addr & 0x007f_ffff & !7)).unwrap_or(&0)
+    }
+    pub fn cell_pub(&self, addr: u32) -> u64 {
+        self.cell(addr)
+    }
+    pub fn set_cell_pub(&self, addr: u32, val: u64) {
+        self.set_cell(addr, val)
+    }
+    fn set_cell(&self, addr: u32, val: u64) {
+        self.cells.lock().unwrap().insert(addr & 0x007f_ffff & !7, val);
+    }
+    pub(crate) fn hit(&self, addr: u32, write: bool) {
+        if !hot_counters() {
+            return;
+        }
+        let off = addr & 0x007f_ffff & !3;
+        let mut h = self.hot.lock().unwrap();
+        let e = h.entry(off).or_insert((0, 0));
+        if write { e.1 += 1 } else { e.0 += 1 }
+    }
+}
+
+/// The values written, by offset; the access counts are for finding a
+/// driver waiting on a missing bit, not state.
+impl crate::traits::Saveable for Stub {
+    fn save_state(&self) -> toml::Value {
+        let mut t = toml::map::Map::new();
+        for (off, v) in self.cells.lock().unwrap().iter() {
+            t.insert(format!("{off:#x}"), crate::snapshot::hex_u64(*v));
+        }
+        let mut s = toml::map::Map::new();
+        s.insert("cells".into(), toml::Value::Table(t));
+        toml::Value::Table(s)
+    }
+
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        let mut cells = self.cells.lock().unwrap();
+        cells.clear();
+        if let Some(toml::Value::Table(t)) = crate::snapshot::get_field(v, "cells") {
+            for (k, v) in t {
+                let off = u32::from_str_radix(k.trim_start_matches("0x"), 16)
+                    .map_err(|_| format!("{}: bad offset {k:?}", self.name))?;
+                cells.insert(off, crate::snapshot::toml_u64(v).unwrap_or(0));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl BusDevice for Stub {
+    fn read8(&self, a: u64) -> BusRead8 { self.r(); self.hit(a as u32, false); BusRead8::ok(self.cell(a as u32) as u8) }
+    fn read16(&self, a: u64) -> BusRead16 { self.r(); self.hit(a as u32, false); BusRead16::ok(self.cell(a as u32) as u16) }
+    fn read32(&self, a: u64) -> BusRead32 { self.r(); self.hit(a as u32, false); BusRead32::ok(self.cell(a as u32) as u32) }
+    fn read64(&self, a: u64) -> BusRead64 { self.r(); self.hit(a as u32, false); BusRead64::ok(self.cell(a as u32)) }
+    fn write8(&self, a: u64, v: u8) -> u32 { self.w(); self.hit(a as u32, true); self.set_cell(a as u32, v as u64); BUS_OK }
+    fn write16(&self, a: u64, v: u16) -> u32 { self.w(); self.hit(a as u32, true); self.set_cell(a as u32, v as u64); BUS_OK }
+    fn write32(&self, a: u64, v: u32) -> u32 { self.w(); self.hit(a as u32, true); self.set_cell(a as u32, v as u64); BUS_OK }
+    fn write64(&self, a: u64, v: u64) -> u32 { self.w(); self.hit(a as u32, true); self.set_cell(a as u32, v); BUS_OK }
 }

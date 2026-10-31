@@ -3,7 +3,7 @@
 //!
 //! CRIME has eight memory banks, each 32 MB or 128 MB, and a control register
 //! per bank that says where in the 1 GB memory window (from
-//! [`RAM_BASE`](crate::ip32::RAM_BASE)) that bank answers and how large the
+//! [`RAM_BASE`](crate::ip32_map::RAM_BASE)) that bank answers and how large the
 //! controller should take it to be: bits 0-4 are the base in 32 MB units, bit
 //! 8 selects 128 MB. Nothing tells the firmware what is fitted; it finds out by
 //! programming a bank and looking at what comes back, so the decode has to
@@ -63,7 +63,7 @@
 //! or with the machine stopped (a snapshot); a lock keeps two from
 //! interleaving.
 
-use crate::ip32::{LOW_ALIAS_SIZE, RAM_BASE, RAM_WINDOW_SIZE};
+use crate::ip32_map::{LOW_ALIAS_SIZE, RAM_BASE, RAM_WINDOW_SIZE};
 use crate::physical::{Physical, RamBank};
 use crate::ppmem::MappedMemory;
 use crate::ppmem::devmap::SLOT_SHIFT;

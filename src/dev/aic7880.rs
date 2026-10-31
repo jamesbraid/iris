@@ -1871,7 +1871,7 @@ mod tests {
         std::fs::write(&img, vec![0u8; 64 * BLOCK_SIZE]).expect("test image");
         c.bus().attach_image(1, &img, false).expect("attach");
 
-        let base = crate::ip32::RAM_BASE;
+        let base = crate::ip32_map::RAM_BASE;
         let (array, scb_addr, cdb_addr, sg_addr, buf, qout) =
             (0x1000u32, 0x2000u32, 0x2100u32, 0x2200u32, 0x3000u32, 0x4000u32);
         {
@@ -1927,7 +1927,7 @@ mod tests {
         std::fs::write(&img, vec![0u8; 64 * BLOCK_SIZE]).expect("test image");
         c.bus().attach_image(1, &img, false).expect("attach");
 
-        let base = crate::ip32::RAM_BASE;
+        let base = crate::ip32_map::RAM_BASE;
         let (array, scb, cdb, sg, buf, qout) =
             (0x1000u32, 0x2000u32, 0x2100u32, 0x2200u32, 0x3000u32, 0x4000u32);
         let pattern: Vec<u8> = (0..BLOCK_SIZE).map(|i| (i % 251) as u8).collect();
@@ -1981,7 +1981,7 @@ mod tests {
         std::fs::write(&img, &pattern).expect("test image");
         c.bus().attach_image(1, &img, false).expect("attach");
 
-        let base = crate::ip32::RAM_BASE;
+        let base = crate::ip32_map::RAM_BASE;
         let (array, scb, cdb, sg, buf, qout) =
             (0x1000u32, 0x2000u32, 0x2100u32, 0x4000u32, 0x100000u32, 0x3000u32);
         // 264 blocks into 4 KiB pages: 33 entries, one past the old bound.
@@ -2040,7 +2040,7 @@ mod tests {
         ram.write(0x40, &[0xa5]);
         let c = on(ram);
         assert_eq!(c.dma_read8(0x40), 0xa5, "the low alias");
-        assert_eq!(c.dma_read8(crate::ip32::RAM_BASE + 0x40), 0xa5, "and memory's own base");
+        assert_eq!(c.dma_read8(crate::ip32_map::RAM_BASE + 0x40), 0xa5, "and memory's own base");
     }
 
     #[test]
@@ -2089,7 +2089,7 @@ mod tests {
         let img = image_path(name);
         std::fs::write(&img, vec![0u8; 64 * BLOCK_SIZE]).expect("test image");
         c.bus().attach_image(1, &img, false).expect("attach");
-        let base = crate::ip32::RAM_BASE;
+        let base = crate::ip32_map::RAM_BASE;
         for (off, v) in [(sram::SCB_ARRAY, base + ARRAY), (sram::QOUTFIFO, base + QOUT)] {
             for (i, b) in v.to_le_bytes().iter().enumerate() {
                 c.write(off + i as u32, *b as u32, 1);
@@ -2109,7 +2109,7 @@ mod tests {
     /// Build a command for `tag` in host memory, the way the HIM does: the
     /// SCB's address in the array, one scatter-gather entry marked last.
     fn put_cmd(ram: &Ram, tag: u8, target: u8, cdb: &[u8], len: u32) {
-        let base = crate::ip32::RAM_BASE;
+        let base = crate::ip32_map::RAM_BASE;
         let scb = scb_at(tag);
         put32(ram, ARRAY + tag as u32 * 4, base + scb);
         {
@@ -2362,7 +2362,7 @@ mod tests {
         let sense_buf = 0x9000u32;
         put32(&ram, sense_list, sense_buf);
         put32(&ram, sense_list + 4, 18 | SG_LAST);
-        put32(&ram, scb_at(tag) + scb::SG_PTR as u32, crate::ip32::RAM_BASE + sense_list);
+        put32(&ram, scb_at(tag) + scb::SG_PTR as u32, crate::ip32_map::RAM_BASE + sense_list);
         ram.write(cdb_at(tag) as usize, &[0x03, 0, 0, 0, 18, 0]);
         c.write(reg::QINFIFO, tag as u32, 1);
         assert_eq!(c.read(reg::QINCNT, 1), 1, "held while the sequencer is stopped");

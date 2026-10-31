@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::dev::mace_sdma::sdma;
 use crate::irq::{InterruptController, IrqLine};
-use crate::ip32::*;
+use crate::ip32_map::*;
 use crate::snapshot::{get_field, hex_u64, toml_u64};
 use crate::traits::{BusDevice, BusRead8, BusRead16, BusRead32, BusRead64, Device, Resettable, Saveable, BUS_OK};
 

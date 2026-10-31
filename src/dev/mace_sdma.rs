@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use crate::dev::crime_mem::O2Memory;
 use crate::dev::mace_uart::MaceUart;
 use crate::snapshot::{get_field, hex_u32, hex_u64, toml_u32, toml_u64};
-use crate::ip32::*;
+use crate::ip32_map::*;
 
 /// The serial DMA control registers, rings and status bits, as MACE's
 /// datasheet lays them out.
