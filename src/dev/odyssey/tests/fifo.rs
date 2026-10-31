@@ -120,7 +120,8 @@ fn a_read_that_waits_sees_every_earlier_store() {
     h.work_stop();
 }
 
-/// A processor store that finds the board's 32,768-word FIFO full while
+/// A processor store that finds the model's 32,768-word FIFO (its own size,
+/// ODSY_CFIFO_WORDS) full while
 /// the board's thread runs is refused with the bus busy, and nothing runs
 /// on the processor's thread: the level stays at the brim and the slice
 /// in flight keeps the board. The retried store goes in, once, when the
@@ -573,11 +574,13 @@ fn the_status_shows_waiting_stores_until_they_have_run() {
     assert_eq!(reg_read(&mut s, ODSY_STATUS0), 0x1003_0000);
 }
 
-/// The level counts the FIFO's 32-bit words: a doubleword store fills two.
-/// Status bit 15 reads set at or above the kernel's `0x6b2` mark, and
-/// reaching the mark raises flags bit 25; with no mark set up it never
-/// reads set. A store that would overfill the board's 32,768-word FIFO is
-/// not queued: the storing caller runs the queue and then the store.
+/// MODEL CONTRACT ONLY, no evidence for the hardware: the roles of `0x6b2`
+/// are unknown. The level counts the FIFO's 32-bit words (a model choice): a
+/// doubleword store fills two. The model reads status bit 15 set at or above
+/// the written `0x6b2`, and reaching it raises flags bit 25; with no `0x6b2`
+/// written it never reads set. A store that would overfill the model's
+/// 32,768-word FIFO is not queued: the storing caller runs the queue and then
+/// the store.
 #[test]
 fn the_level_counts_words_against_the_board_fifo_and_its_high_mark() {
     let (mut s, _, _) = queued_board();
@@ -599,7 +602,7 @@ fn the_level_counts_words_against_the_board_fifo_and_its_high_mark() {
     s.mmio_write(ODSY_CMD_FIFO, 0, 4);
     assert!(!s.work_pending());
 
-    // The kernel's set-up mark, 576 words below full.
+    // The 0x6b2 value the kernel writes, 576 words below the model's size.
     cmd64(&mut s, 0x6b2, 32192);
     finish(&mut s);
     reg_write(&mut s, ODSY_INTR_CLEAR, ODSY_INTR_FIFO_HIGH_WATER);
@@ -615,6 +618,56 @@ fn the_level_counts_words_against_the_board_fifo_and_its_high_mark() {
     step(&mut s);
     assert_eq!(reg_read(&mut s, ODSY_STATUS0) & high, 0, "below the mark again");
     finish(&mut s);
+}
+
+/// MODEL CONTRACT ONLY, no evidence for the hardware: the roles of `0x6b2` and
+/// `0x6b3` are unknown. The model applies `0x6b2` to status bit 15 and only
+/// stores `0x6b3`. With `0x6b2` = 12 and `0x6b3` = 8, eight waiting words
+/// leave bit 15 clear; swapped, they set it. Flags bit 25 is covered by
+/// `the_level_counts_words_against_the_board_fifo_and_its_high_mark`.
+///
+/// QEMU: command-fifo-high-mark-follows-6b2.
+#[test]
+fn the_high_mark_follows_6b2() {
+    let (mut s, _, _) = queued_board();
+    let high = ODSY_STATUS0_FIFO_HIGH_WATER;
+
+    for (mark_6b2, word_6b3, expect) in [(12, 8, 0), (8, 12, high)] {
+        cmd64(&mut s, 0x6b1, 256);
+        cmd64(&mut s, 0x6b3, word_6b3);
+        cmd64(&mut s, 0x6b2, mark_6b2);
+        finish(&mut s);
+        for _ in 0..4 {
+            cmd64(&mut s, 0x6b0, 0);
+        }
+        assert_eq!(s.fifo.level(), 8);
+        assert_eq!(reg_read(&mut s, ODSY_STATUS0) & high, expect, "0x6b2 = {mark_6b2}, 0x6b3 = {word_6b3}");
+        finish(&mut s);
+    }
+}
+
+/// MODEL CONTRACT ONLY: the FIFO's size is unknown and the model's size is
+/// its own choice. Whatever `0x6b1` the set-up stores, the level clamps at
+/// ODSY_CFIFO_WORDS and a store that would overfill it runs the queue first.
+///
+/// QEMU: command-work-credit-depth-ignores-setup covers the credit depth.
+#[test]
+fn the_fifo_size_ignores_the_set_up_words() {
+    for word_6b1 in [1u32, 256, 0x7fff_ffff] {
+        let (mut s, _, _) = queued_board();
+        s.fifo.set_depth(FifoDepth::Shallow);
+
+        cmd64(&mut s, 0x6b1, word_6b1);
+        finish(&mut s);
+        for _ in 0..ODSY_CFIFO_WORDS / 2 {
+            cmd64(&mut s, 0x6b0, 0);
+        }
+        assert_eq!(s.fifo.level(), ODSY_CFIFO_WORDS, "0x6b1 = {word_6b1:#x}");
+        // Full: the next store runs everything waiting, then itself.
+        s.mmio_write(ODSY_CMD_FIFO, 0, 4);
+        assert!(!s.work_pending(), "0x6b1 = {word_6b1:#x}");
+        finish(&mut s);
+    }
 }
 
 /// The kernel's credit flow control clears low water, finds the FIFO above
@@ -646,10 +699,12 @@ fn low_water_is_raised_as_the_queue_falls_below_the_mark() {
     assert_eq!(rec.events(FLAG_VECTOR), [true]);
 }
 
-/// The FIFO's size from the kernel's set-up does not widen the credits:
-/// after the set-up (256 tiles, 32,768 words) only the oldest 64 waiting
-/// stores have their credits back, so the processor interface still holds
-/// back a writer that runs ahead of the slow board.
+/// MODEL CONTRACT ONLY: the FIFO's depth is unknown and the model's depth is
+/// its own choice. The stored `0x6b1` and `0x6b2` values (256 and 32192, as
+/// the kernels write them) do not widen the credits: only the oldest 64
+/// waiting stores, the model's depth, have their credits back, so the
+/// processor interface still holds back a writer that runs ahead of the slow
+/// board.
 ///
 /// QEMU: command-work-credit-depth-ignores-setup.
 #[test]
@@ -751,10 +806,10 @@ fn two_processors_storing_to_the_fifo_lose_nothing_and_keep_each_ones_order() {
     assert_eq!((h.fifo.stores(), h.fifo.level()), (0, 0));
 }
 
-/// The deep ring takes stores past the board's 32,768 words, and the guest
-/// still reads the board's own FIFO: the level clamped at the brim, so
+/// The deep ring takes stores past the model's 32,768 words, and the guest
+/// still reads the model's own FIFO: the level clamped at the brim, so
 /// STATUS0 and the `0x106c` doubleword count read a full FIFO and the
-/// high-water flag is up, never a count the board cannot hold. Level 0
+/// high-water flag is up, never a count past the model's size. Level 0
 /// returns only once the backlog has run.
 #[test]
 fn the_deep_ring_accepts_past_the_brim_and_the_guest_reads_a_full_fifo() {

@@ -21,8 +21,10 @@ documents" and "Board and kernel"):
 | `odyssey-raster` | BUZZ raster unit: raster, texture, shading, framebuffer writes | one raster unit: inferred (US 6,259,460) |
 | `odyssey-display` | PB&J back end: retrace, colour map, cursor, scanout | PB&J as the display back end with no drawing role: established (`108-0314-003` p. 1) |
 
-The command FIFO lives in board SDRAM, 32,768 words as the kernel sets it
-up (established, `0x6b1`; the porting guide gives about 1 ms of commands).
+The command FIFO lives in board SDRAM. Its depth, in any unit, is unknown
+(datasheet, "Grades for withdrawn claims"); the model gives it 32,768 words,
+a model choice independent of the `0x6b1` the kernel stores (the porting guide
+gives about 1 ms of commands).
 The split between the two BUZZ threads follows US 6,417,858, which puts an
 output FIFO between the transform engine and the rasteriser (inferred to
 apply to BUZZ). Nothing models more than one raster unit.
@@ -32,7 +34,7 @@ apply to BUZZ). Nothing models more than one raster unit.
 - **Command FIFO** (`fifo.rs`, CPU to `odyssey-work`): the processor's
   stores to the two command-FIFO ports and the context-switch stores, each
   as (offset, size, value) with its credit state. The level the guest sees
-  is in words, against the board's 32,768.
+  is in words, against the model's 32,768.
 - **Raster queue** (`raster_unit.rs`, `odyssey-work` to `odyssey-raster`):
   jobs, each owning what its raster work reads, captured when the front
   end set it up. A GL primitive is a `GlDrawJob`: its raster rules, draw
@@ -146,17 +148,19 @@ board has left to take. While a counted store waits a run is one store.
 While the worker runs every command store queues, so decoding and drawing
 never run on the processor's thread.
 
-The guest sees the board's FIFO, not the ring: 32,768 words, the size the
-kernel's `0x6b1` set-up gives it (datasheet, "Command FIFO level and
-credits"). The level is the words waiting, a doubleword store counting two.
-STATUS0 bit 16 is empty, bit 17 below the model's 16-word low mark, bit 15
-at or above the kernel's `0x6b2` high mark (flags bit 25 rises on reaching
-it). A processor store is refused with the bus busy
+The guest sees the model's FIFO, not the ring: 32,768 words, a model choice
+whatever the kernel's `0x6b1` set-up stores (datasheet, "Command FIFO level
+and credits"). The level is the words waiting, a doubleword store counting
+two (also a model choice). STATUS0 bit 16 is empty, bit 17 below the model's
+16-word low-water threshold, bit 15 at or above the stored `0x6b2` (flags bit
+25 rises on reaching it). Which register is a high-water mark is unknown:
+applying `0x6b2` there is a model choice. A processor store is refused with the bus busy
 (`BoardLocks::bus_write`) only when the 64K-entry host ring is full, as
 IMPACT's and GR2's are: the processor retries the instruction, taking
 interrupts meanwhile, and the board's thread, which then starts its next
 slice without the pause, makes room. Past 32,768 words the guest reads a
-full FIFO with the high-water flag up while its stores still succeed.
+full FIFO (high-water bit up once a `0x6b2` is set) while its stores still
+succeed.
 `IRIS_VPRO_FIFO=shallow` (or `32768`) refuses at 32,768 words as it used to,
 for A/B runs. A caller other than the bus still runs the queue and then
 its store. The flow-control target word `+0x1074` is stored, not routed, so
@@ -164,7 +168,8 @@ a store to it goes in at once even while the FIFO holds work.
 
 Counted stores (machines whose processor interface counts graphics credits;
 the Octane has none and the calls are no-ops) are credited as they enter the
-FIFO's first 64 places, counted in stores: at the store when there is room,
+FIFO's first 64 places (the model's depth, a model choice), counted in
+stores: at the store when there is room,
 or when the stores ahead have run, with the node holding the credit as owed
 meanwhile.
 
@@ -190,7 +195,7 @@ must keep them.
    themselves.
 3. STATUS0's empty, low-water and high-water bits follow the words in the
    command FIFO, not the raster queue: they are the board's FIFO.
-4. The low-water flag latches as a store retires below the mark (16 words),
+4. The low-water flag latches as a store retires below the model's threshold (16 words),
    whatever the enable mask says; it reaches the driver only while enabled.
 5. Completion words are written when the raster unit is done with the work
    before them: fences and a current-state query's publication (snapshot,

@@ -228,7 +228,8 @@ impl HostInterface {
     }
 
     /// The FIFO's level went from 'before' to its current value. Falling below
-    /// the low-water mark latches the low-water flag whatever the enable mask
+    /// the model's low-water threshold (ODSY_CFIFO_LOW_WATER, a model choice)
+    /// latches the low-water flag whatever the enable mask
     /// says; it reaches the driver only while the source is enabled.
     pub fn fifo_level_changed(&mut self, before: u32) {
         if before >= ODSY_CFIFO_LOW_WATER && self.fifo_level() < ODSY_CFIFO_LOW_WATER {
@@ -284,6 +285,8 @@ impl HostInterface {
             ODSY_INTR_ENABLE_SET => value = self.intr_enable as u64,
             ODSY_STATUS0 => {
                 // The waiting stores are its level (HostInterface::fifo_level()).
+                // Bit 15 and bit 17 use model-chosen thresholds, see ODSY_CFIFO_LOW_WATER
+                // and ODSY_REG_FIFO_SETUP_FIRST.
                 let level = self.fifo_level();
                 crate::pf_value!(self.fifo.pf_level, crate::perfetto::events::ODSY_CFIFO_LEVEL, level);
                 value = (ODSY_STATUS0_FIFO_ENABLED

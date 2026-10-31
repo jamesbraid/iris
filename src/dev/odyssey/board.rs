@@ -91,10 +91,12 @@ pub struct Board {
     /// The memory controller's configuration word (+0x1004), as written.
     pub memory_control: u32,
     pub memory_control_reported: bool,
-    /// The FIFO set-up registers 0x6b0-0x6b3 and 0x7b5, as last written.
+    /// The FIFO set-up registers 0x6b0-0x6b3 and 0x7b5, in that order, as
+    /// last written. Values only: their roles are unknown.
     pub fifo_setup: [u32; 5],
-    /// The hardware-sync timeout (0x7f0) as last written, and whether a
-    /// nonzero one has been reported as unable to expire.
+    /// Register 0x7f0 as last written. Its unit and meaning are unknown; the
+    /// model records the value and runs no timer. Whether a nonzero value has
+    /// been reported.
     pub sync_timeout: u32,
     pub sync_timeout_reported: bool,
 
@@ -344,7 +346,7 @@ pub struct Board {
     /// halfwords.
     pub gl_program_mem: Vec<u16>,
     pub gl_program_addr: u32,
-    /// The program-sequencer registers, classes 0x20 to 0x35, as written.
+    /// The classes 0x20 to 0x35 as written; 0x27 also sets gl_program_addr.
     pub gl_seq: [u32; 22],
     pub gl_program_half: u32,
     pub gl_program_mem_reported: bool,

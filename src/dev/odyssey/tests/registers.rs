@@ -235,8 +235,9 @@ fn the_statistics_region_is_stored_and_the_buffer_left_alone() {
 }
 
 /// The five FIFO set-up doublewords carry a register in the high word and
-/// its value in the low word. The model stores them, reports none as an
-/// unmodelled command, and keeps its own low-water mark.
+/// its value in the low word. The values are established and their roles are
+/// not. The model stores them, reports none as an unmodelled command, and
+/// keeps its own low-water threshold.
 ///
 /// QEMU: command-fifo-setup-registers.
 #[test]
@@ -254,14 +255,14 @@ fn the_fifo_set_up_doublewords_are_stored() {
     assert_eq!(s.reported_cmd_count, 0);
 }
 
-/// The kernels write the hardware-sync timeout, 10^9 board clocks, as the
-/// doubleword 0x7f0 after the set-up. The board stores it, reports no
-/// unmodelled command word, and the stream stays aligned behind it. No
-/// sync waits here, so the timeout flag (flags bit 1) never rises.
+/// The kernels write the doubleword 0x7f0 = 10^9 after the set-up; its unit
+/// and meaning are unknown. The board stores it, runs no timer, reports no
+/// unmodelled command word, and the stream stays aligned behind it. Flags
+/// bit 1 stays clear because no timer runs on the value.
 ///
 /// QEMU: command-fifo-sync-timeout-register.
 #[test]
-fn the_sync_timeout_doubleword_is_stored() {
+fn the_0x7f0_doubleword_is_stored_and_runs_no_timer() {
     let (mut s, _) = board("v12");
 
     cmd64(&mut s, 0x7f0, 1_000_000_000);
@@ -272,13 +273,14 @@ fn the_sync_timeout_doubleword_is_stored() {
     assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS) & 0x2, 0);
 }
 
-/// The program-sequencer registers, classes 0x20 to 0x35, are not
-/// commands the model fails to recognise, and the stream stays aligned
-/// after them.
+/// Classes 0x20 to 0x35 are not commands the model fails to recognise, and
+/// the stream stays aligned after them. The kernel writes 0x26 = 0x7f and
+/// 0x2e = 0x380 at set-up: the values are established and the roles of 0x26
+/// and 0x2e are not.
 ///
 /// QEMU: command-fifo-sequencer-registers.
 #[test]
-fn the_sequencer_registers_are_not_reported_as_unknown_commands() {
+fn the_classes_0x20_to_0x35_are_not_reported_as_unknown_commands() {
     let (mut s, _) = board("v12");
 
     cmd(&mut s, 0x2600807f);

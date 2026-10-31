@@ -87,8 +87,8 @@ impl Board {
             | (if self.draw_mask & ODSY_DRAW_MASK_BUFFER1 != 0 { 2 } else { 0 })
     }
 
-    /// The one completion fence, shared by the standalone 0x0a5a host-write
-    /// command and the DMA engine's publish(): write the cookie's 16-bit token,
+    /// The one completion fence, shared by the 0x0a5a host-write command and
+    /// the DMA engine's publish(): write the cookie's 16-bit token,
     /// big-endian, to the guest fence slot at the host-write base plus twice the
     /// slot, and pulse the softsync interrupt when the cookie asks.
     ///

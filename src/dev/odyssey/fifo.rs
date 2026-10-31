@@ -6,33 +6,38 @@
 //! taking the host interface's lock; the board's thread is woken only when
 //! it is asleep, and otherwise finds the store when it next looks.
 //!
-//! The guest sees the board's FIFO, never the host ring. The board keeps
-//! its command FIFO in its own memory, 32,768 words as the kernel sets it
-//! up (`ODSY_CFIFO_WORDS`). The level STATUS0 reports is the 32-bit words
-//! of the stores pushed and not yet taken out, a doubleword store counting
-//! two, clamped to that 32,768 (`level`); the high-water bit compares it
-//! against the mark the kernel sends in `0x6b2`, and the low-water bit
-//! against the model's 16-word mark. Level 0 is the FIFO empty and every
-//! store run.
+//! The guest sees the board's FIFO, never the host ring. The FIFO's depth,
+//! in any unit, is UNKNOWN (datasheet, "Grades for withdrawn claims"); the
+//! model gives it a size of 32,768 words (`ODSY_CFIFO_WORDS`), a MODEL
+//! CHOICE independent of the `0x6bX` values the kernel stores. The level
+//! STATUS0 reports is the 32-bit words of the stores pushed and not yet
+//! taken out, a doubleword store counting two, clamped to that 32,768
+//! (`level`); the high-water bit compares it against the `0x6b2` value
+//! (a model choice: the register's role is unknown), and the low-water bit
+//! against the model's 16-word threshold. Level 0 is the FIFO empty and
+//! every store run.
 //!
 //! Where a store is refused is a model choice, not a recorded hardware
-//! fact. The datasheet establishes the FIFO's size and marks; it does not
-//! say what a full FIFO does to the processor, and it gives the FIFO no
-//! wrap protection of its own, the kernel's flow control keeping it from
-//! filling. On the Octane that flow control (the node's counted graphics
-//! credits and the kernel's high-water path) is not modelled, so the old
-//! stall at 32,768 words stood in for it. IMPACT and GR2 do not stall
+//! fact. The datasheet does not say what a full FIFO does to the processor
+//! (it infers only that software avoids overflow by credits and
+//! descheduling, and that a board-side overflow is a flagged error), and it
+//! gives the FIFO no wrap protection of its own, the kernel's flow control
+//! keeping it from filling. On the Octane that flow control (the node's
+//! counted graphics credits and the kernel's high-water path) is not
+//! modelled, so the old stall at 32,768 words stood in for it. IMPACT and
+//! GR2 do not stall
 //! there. Their host ring is deep, a store is refused with the bus busy
 //! only when the ring is full, and the guest-visible level is the board's,
 //! clamped to what the real FIFO can hold. The VPro follows them by
 //! default (`FifoDepth::Deep`): the ring holds `ODSY_WORK_QUEUE_MAX`
 //! entries, a store is one entry whatever its width, so it takes at least
-//! twice the board's FIFO in words, and the processor runs ahead of the
+//! twice the model's FIFO in words, and the processor runs ahead of the
 //! board by that much. Everything the guest can read comes from the
-//! clamped level, so it never sees a value the board cannot produce: past
-//! the brim it reads a full, high-water FIFO while its stores still
-//! succeed. `IRIS_VPRO_FIFO=shallow` restores the old stall: a store that
-//! would overfill the board's 32,768 words is refused, and the processor
+//! clamped level, so it never sees a level above the model's size: past
+//! the brim it reads a full FIFO (and a high-water bit, once a `0x6b2`
+//! threshold is set) while its stores still succeed.
+//! `IRIS_VPRO_FIFO=shallow` restores the old stall: a store that
+//! would overfill the model's 32,768 words is refused, and the processor
 //! retries it while the board's thread makes room (`BoardLocks::bus_write`).
 //! The ring is 64K entries as IMPACT's and GR2's are.
 //!
@@ -41,7 +46,11 @@
 //! the consumer. Graphics credits, which only machines whose processor
 //! interface counts stores use, are settled as a store enters the FIFO's
 //! first `ODSY_CFIFO_DEPTH` places: at the store when there is room, or
-//! when the stores ahead of it have run.
+//! when the stores ahead of it have run. That depth (64 stores) is a MODEL
+//! CHOICE, independent of the stored `0x6bX` values (the same choice as
+//! in QEMU's model, which found that credits for a full FIFO's backlog let
+//! the processor run too far ahead of its slower board). Whether a 32-bit store costs the hardware a
+//! whole credit is UNKNOWN; the model credits one per store.
 
 use super::*;
 
@@ -133,7 +142,7 @@ impl Run {
 pub enum FifoDepth {
     /// Only when the host ring is full, as IMPACT and GR2 do.
     Deep,
-    /// When the board's 32,768-word FIFO would overfill: the old stall.
+    /// When the model's 32,768-word FIFO would overfill: the old stall.
     Shallow,
 }
 
@@ -170,7 +179,8 @@ pub struct CommandFifo {
     pop: Mutex<()>,
     /// What both sides count, on a line of its own.
     levels: CachePadded<Levels>,
-    /// The high-water mark from `0x6b2`, in words; zero until set up. This
+    /// The threshold for status bit 15 and flag 25 from `0x6b2`, in words
+    /// (a model choice: the register's role is unknown); zero until set up. This
     /// and `running` are read on every store and written rarely, so each has
     /// a line no counter shares.
     high_mark: CachePadded<AtomicU32>,
@@ -258,13 +268,14 @@ impl CommandFifo {
         self.level() != 0
     }
 
-    /// Whether the level is at or above a set-up high-water mark.
+    /// Whether the level is at or above the model's high-water threshold.
     pub fn high_water(&self) -> bool {
         let mark = self.high_mark.load(SeqCst);
         mark != 0 && self.level() >= mark
     }
 
-    /// The kernel's `0x6b2`: the high-water mark, in words.
+    /// The stored `0x6b2`, applied as the high-water threshold in words. MODEL
+    /// CHOICE (see `ODSY_REG_FIFO_SETUP_FIRST`).
     pub fn set_high_mark(&self, words: u32) {
         self.high_mark.store(words, SeqCst);
     }

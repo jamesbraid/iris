@@ -485,7 +485,7 @@ impl Board {
                 if (word >> ODSY_PROG_CLASS_SHIFT) >= ODSY_PROG_PROGRAM_HALFWORD {
                     self.gl_program_halfword(word);
                 }
-                // The other sequencer classes: kept in gl_seq[] only.
+                // The other classes of 0x20 to 0x35: kept in gl_seq[] only.
             }
         }
     }

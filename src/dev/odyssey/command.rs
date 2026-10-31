@@ -616,13 +616,13 @@ impl Board {
             ODSY_REG_FIFO_SETUP_7B5 => {
                 self.fifo_setup[ODSY_FIFO_SETUP_7B5_INDEX] = self.cmd_operand[0];
             }
-            ODSY_REG_SYNC_TIMEOUT => {
+            ODSY_REG_SETUP_7F0 => {
                 self.sync_timeout = self.cmd_operand[0];
                 if self.sync_timeout != 0 && !self.sync_timeout_reported {
                     self.sync_timeout_reported = true;
                     crate::dlog!(
                         LogModule::Odyssey,
-                        "sgi-odyssey: hardware-sync timeout {} is stored; no sync waits, so it never expires",
+                        "sgi-odyssey: register 0x7f0 written with {}; the value is stored and its role is unknown, so no timer runs",
                         self.sync_timeout
                     );
                 }
@@ -913,8 +913,10 @@ impl Board {
             ODSY_REG_HOST_WRITE => {
                 let op0 = self.cmd_operand[0];
                 let op1 = self.cmd_operand[1];
-                // The standalone host-write/sync command is the board's own DMA
-                // completion signal, so it raises the same fence the DMA engine's
+                // The host-write command's word and the halfword it writes are
+                // ESTABLISHED as the kernel's accesses; that the board treats it
+                // as its DMA completion signal is INFERRED (datasheet, DMA tag
+                // write-back). The model raises the same fence the DMA engine's
                 // completion does, through the one fence implementation: op0's slot
                 // and interrupt bit and op1's token become the completion cookie,
                 // raised by Board::fence(). op0's interrupt
@@ -1014,7 +1016,7 @@ impl Board {
         }
         if (ODSY_REG_FIFO_SETUP_FIRST..=ODSY_REG_FIFO_SETUP_LAST).contains(&word)
             || word == ODSY_REG_FIFO_SETUP_7B5
-            || word == ODSY_REG_SYNC_TIMEOUT
+            || word == ODSY_REG_SETUP_7F0
         {
             self.cmd_start(word, 1);
             return;
@@ -1356,7 +1358,11 @@ pub struct CfifoPreamble {
 /// order, all through the command FIFO: three 4-byte command words, five
 /// 8-byte pushes (a 32-bit selector in the upper half, data in the lower),
 /// and one closing 4-byte word. Seeing the whole sequence makes
-/// ODSY_CFIFO_SELFTEST answer OK. (The real driver sends the five 8-byte
+/// ODSY_CFIFO_SELFTEST answer OK. The values are ESTABLISHED as the
+/// kernel's first stores; the role of the three command words (0x00010854,
+/// 0 and 0x0fffffff) is UNKNOWN, and nothing found names them a
+/// memory-protect command. The tracker only matches the sequence. (The real
+/// driver sends the five 8-byte
 /// words to 0x110000, not to the backend-select port, confirmed by a boot
 /// trace.)
 pub static CFIFO_PREAMBLE: [CfifoPreamble; 9] = [

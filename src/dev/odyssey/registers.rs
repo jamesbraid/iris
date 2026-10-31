@@ -367,10 +367,13 @@ impl Board {
                 value = if self.cfifo_selftest_ready { ODSY_CFIFO_SELFTEST_OK as u64 } else { 0 };
             }
             ODSY_MEMORY_CONFIG => {
-                // Bits 15:7 count the command stream's pending doublewords
-                // (established unit); the model's pending words round up.
-                // It reads 0 once the board has run the queue, which the
-                // start-up and flow-reset drain waits need.
+                // Bits 15:7: the field and the drain waits are ESTABLISHED,
+                // its unit UNKNOWN, and a count of unreturned credits
+                // INFERRED (datasheet, "Grades for withdrawn claims", level
+                // word). MODEL CHOICE: pending doublewords, the model's
+                // pending words rounded up. Only reading 0 once the board has
+                // run the queue is needed, by the start-up and flow-reset
+                // drain waits.
                 let doublewords = self.fifo.level().div_ceil(2).min(0x1ff);
                 value = (self.memory_config | (doublewords << 7)) as u64;
             }
