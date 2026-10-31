@@ -302,10 +302,7 @@ mod tests {
             subpixel_bits: 4,
             color_bits: 8,
             depth_bits: 24,
-            rounding: SGI_ROUND_HALF_AWAY as u8,
-            tie_rule: SGI_TIE_TOP_LEFT_BOTTOM_ORIGIN as u8,
-            arith: SGI_ARITH_DOUBLE as u8,
-            line_rule: SGI_LINE_COVERAGE_DOUBLE as u8,
+            line_rule: LineRule::Diamond,
             depth_float: true,
             ..Default::default()
         };
