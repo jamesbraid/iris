@@ -351,28 +351,6 @@ impl Board {
 // of the window. What tells the board the rows run top down, and the window
 // height its bottom-up y needs, remain unknown.
 
-/// The draw-sentinel uploads this model takes: the captured RGBA16 write
-/// (eight bytes a pixel), the ABGR write and the movie write (four bytes a
-/// pixel; the movie sets *top_down). 0 for any other upload.
-pub fn dma_draw_sentinel_bytes(hdr: &[u32], top_down: &mut bool) -> u32 {
-    let control = hdr[ODSY_DMA_HDR_CONTROL];
-
-    *top_down = false;
-    if hdr[ODSY_DMA_HDR_FORMAT] == 0x02635000 && control == 0x7a02006b {
-        return 8;
-    }
-    if hdr[ODSY_DMA_HDR_FORMAT] == 0x80035000 && (control & !ODSY_DMA_ABGR_CONTROL_IGNORED) == ODSY_DMA_ABGR_CONTROL {
-        return 4;
-    }
-    if hdr[ODSY_DMA_HDR_FORMAT] == ODSY_DMA_MOVIE_FORMAT
-        && (control & !ODSY_DMA_ABGR_CONTROL_IGNORED) == ODSY_DMA_MOVIE_CONTROL
-    {
-        *top_down = true;
-        return 4;
-    }
-    0
-}
-
 /// What a depth or stencil image write names (see dma_depth_stencil_write()).
 #[derive(Clone, Copy, PartialEq)]
 pub enum DepthStencil {
@@ -402,6 +380,31 @@ pub fn dma_depth_stencil_write(hdr: &[u32]) -> Option<DepthStencil> {
         ODSY_DMA_FMT_SIZE_STENCIL => Some(DepthStencil::Stencil),
         _ => None,
     }
+}
+
+/// The draw-sentinel upload's pixel form: word 7's format and type through
+/// the write table (pixel_write.rs), at the bytes a pixel its bpp field
+/// names. None for a form the table does not take. Word 4's low byte is zero
+/// in every write the library builds. The movie write (dmplay's frames:
+/// code 0x4c under its own word 4) also sets *top_down.
+///
+/// The movie's picture is OBSERVED on the model: each 320x240 frame arrives
+/// as nine tiles covering it exactly, rows of 4 * width bytes with the rest
+/// of each source row skipped, first tile sent holding the first source
+/// rows. INFERRED from the picture: the byte order, that the source's first
+/// row is the top of the picture, and that the header's y counts up from
+/// the bottom of the window. What tells the board the rows run top down,
+/// and the window height its bottom-up y needs, remain unknown.
+pub fn dma_draw_sentinel_form(hdr: &[u32], top_down: &mut bool) -> Option<WriteForm> {
+    let control = hdr[ODSY_DMA_HDR_CONTROL];
+    let bpp = DMA_BPP[((control >> ODSY_DMA_BPP_SHIFT) & ODSY_DMA_BPP_MASK) as usize] as u32;
+
+    *top_down = hdr[ODSY_DMA_HDR_FORMAT] == ODSY_DMA_MOVIE_FORMAT
+        && (control & !ODSY_DMA_ABGR_CONTROL_IGNORED) == ODSY_DMA_MOVIE_CONTROL;
+    if hdr[ODSY_DMA_HDR_FORMAT] & 0xff != 0 {
+        return None;
+    }
+    write_form(control & ODSY_WRITE_CODE_MASK).filter(|form| form.bytes == bpp)
 }
 
 impl Board {
@@ -446,7 +449,8 @@ impl Board {
         let mut out: u64 = 0;
         let mut top_down = false;
         let depth_stencil = dma_depth_stencil_write(hdr);
-        let psize = if depth_stencil.is_some() { 4 } else { dma_draw_sentinel_bytes(hdr, &mut top_down) };
+        let form = dma_draw_sentinel_form(hdr, &mut top_down);
+        let psize = if depth_stencil.is_some() { 4 } else { form.as_ref().map_or(0, |f| f.bytes) };
         // APPROXIMATION: the window's height, for a top-down write's bottom-up y,
         // taken from the clip box's last row; the header carries no height. A
         // capture with a scissor box smaller than the window would tell this
@@ -518,8 +522,6 @@ impl Board {
                 } else {
                     (y as i64) + (h as i64) - 1 - (r as i64)
                 }) + self.win_origin[1] as i64;
-                let mut rgba: u32;
-
                 if let Some(plane) = depth_stencil {
                     let value = u32::from_be_bytes(src[..4].try_into().unwrap());
 
@@ -532,22 +534,7 @@ impl Board {
                     }
                     continue;
                 }
-
-                if psize == 4 {
-                    rgba = (pack_pixel(src[3] as u32, src[2] as u32, src[1] as u32) & !0xffu32) | src[0] as u32;
-                } else {
-                    let red = u16::from_be_bytes(src[..2].try_into().unwrap()) as u32;
-                    let green = u16::from_be_bytes(src[2..][..2].try_into().unwrap()) as u32;
-                    let blue = u16::from_be_bytes(src[4..][..2].try_into().unwrap()) as u32;
-                    let alpha = u16::from_be_bytes(src[6..][..2].try_into().unwrap()) as u32;
-
-                    rgba = pack_pixel(
-                        (red * 255 + 65535 / 2) / 65535,
-                        (green * 255 + 65535 / 2) / 65535,
-                        (blue * 255 + 65535 / 2) / 65535,
-                    );
-                    rgba = (rgba & !0xffu32) | ((alpha * 255 + 65535 / 2) / 65535);
-                }
+                let rgba = form.as_ref().expect("a form when not depth or stencil").decode(src);
                 self.paint_pixel(px, py, rgba);
             }
         }

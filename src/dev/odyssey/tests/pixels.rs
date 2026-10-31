@@ -253,12 +253,19 @@ fn a_colour_index_read_returns_the_index() {
 /// `payload` for a `w` x 1 box at (x, y) under word 4 `word4` and word 7's
 /// low bits `code`, four bytes a pixel, rows bottom-up.
 fn dma_write(s: &mut Board, ram: &Ram, (x, y, w): (u32, u32, u32), word4: u32, code: u32, payload: &[u8]) {
+    dma_write_sized(s, ram, (x, y, w), word4, code, payload.len() as u32 / w, payload);
+}
+
+/// The same at `bytes` bytes a pixel.
+fn dma_write_sized(s: &mut Board, ram: &Ram, (x, y, w): (u32, u32, u32), word4: u32, code: u32, bytes: u32, payload: &[u8]) {
+    let bpp_code = DMA_BPP.iter().position(|&b| b as u32 == bytes).expect("a size the header can name") as u32;
+
     ram.put(PAGE_A, payload);
     put_table(
         ram,
         TABLE,
-        [ODSY_DMA_SENTINEL_DRAW, y << 16 | x, 0x50, 1 << 16 | w, word4, 0, w * 4, 1 << 30 | 1 << 16 | code],
-        &[pte(PAGE_A, w * 4)],
+        [ODSY_DMA_SENTINEL_DRAW, y << 16 | x, 0x50, 1 << 16 | w, word4, 0, w * bytes, 1 << 30 | bpp_code << 16 | code],
+        &[pte(PAGE_A, w * bytes)],
     );
     descriptor(s, TABLE);
 }
@@ -338,4 +345,90 @@ fn a_depth_or_stencil_image_by_burst_paints_nothing() {
         assert_eq!(pixel(&s, buffer, 40, 10), 0);
         assert_eq!(pixel(&s, buffer, 41, 10), 0);
     }
+}
+
+/// glDrawPixels of types the model once dropped or laid out by the burst
+/// tag. The library names each pair as a format (word 7 bits 4:0) and a type
+/// (bits 8:5); a packed type is under the format with its memory order.
+/// Small images come as pixel bursts, so the pixels here are the bytes of
+/// the stream: two 16-bit pixels a word, a pixel every byte, and so on.
+///
+/// Datasheet: "Image-write table" (established as what the library sends;
+/// the widening of narrow fields to a byte is inferred).
+#[test]
+fn a_burst_image_of_a_packed_or_single_channel_type_lands_as_that_pixel() {
+    let (mut s, _) = window();
+
+    // RGBA, 4_4_4_4 (format 0xb, type 6): two pixels in one word.
+    burst_image(&mut s, (40, 10, 42, 11), 0x0021_10cb, ODSY_IMAGE_FMT_RGB, &[0xa53f_1234]);
+    assert_eq!(pixel(&s, 0, 40, 10), 0xaa55_33ff);
+    assert_eq!(pixel(&s, 0, 41, 10), 0x1122_3344);
+
+    // RGBA, 5_5_5_1 (type 7).
+    burst_image(&mut s, (40, 11, 41, 12), 0x0011_10eb, ODSY_IMAGE_FMT_RGB, &[0xa2cf_0000]);
+    assert_eq!(pixel(&s, 0, 40, 11), 0xa55a_3aff);
+
+    // RGBA, 10_10_10_2 (type 8): a word a pixel.
+    burst_image(&mut s, (40, 12, 41, 13), 0x0011_110b, ODSY_IMAGE_FMT_RGB, &[0xa596_93c3]);
+    assert_eq!(pixel(&s, 0, 40, 12), 0xa55a_3cff);
+
+    // RED, ALPHA and BGR bytes (formats 4, 7, 0xd; type 2): the channels
+    // the source lacks are 0 and full alpha.
+    burst_image(&mut s, (40, 13, 41, 14), 0x0111_1044, ODSY_IMAGE_FMT_RGB, &[0x8000_0000]);
+    assert_eq!(pixel(&s, 0, 40, 13), 0x8000_00ff);
+    burst_image(&mut s, (40, 14, 41, 15), 0x0111_1047, ODSY_IMAGE_FMT_RGB, &[0x4000_0000]);
+    assert_eq!(pixel(&s, 0, 40, 14), 0x0000_0040);
+    burst_image(&mut s, (40, 15, 41, 16), 0x0111_104d, ODSY_IMAGE_FMT_RGB, &[0x3c5a_a500]);
+    assert_eq!(pixel(&s, 0, 40, 15), 0xa55a_3cff);
+
+    // RGBA, UNSIGNED_INT: four words a pixel, under either burst tag.
+    for (i, fmt) in [ODSY_IMAGE_FMT_RGB, ODSY_IMAGE_FMT_RGBA16].into_iter().enumerate() {
+        let (y, row) = (16 + i as u32, 16 + i as i32);
+
+        burst_image(&mut s, (40, y, 42, y + 1), 0x0021_108b, fmt, &[0x8000_0000, 0xffff_ffff, 0, 0x4000_0000, 0xffff_ffff, 0, 0xffff_ffff, 0]);
+        assert_eq!(pixel(&s, 0, 40, row), 0x80ff_0040);
+        assert_eq!(pixel(&s, 0, 41, row), 0xff00_ff00);
+    }
+}
+
+/// Image writes by DMA to the draw drawable of the types that came with a
+/// larger image: unsigned-int components, 3_3_2 bytes, BGRA bytes and
+/// 16-bit luminance.
+#[test]
+fn a_dma_image_of_an_int_or_packed_type_lands_as_that_pixel() {
+    let (mut s, ram) = window();
+
+    // RGBA, UNSIGNED_INT (format 0xb, type 4): 16 bytes a pixel.
+    let mut word = vec![];
+    for c in [0x8000_0000u32, 0xffff_ffff, 0, 0x4000_0000] {
+        word.extend_from_slice(&c.to_be_bytes());
+    }
+    dma_write_sized(&mut s, &ram, (50, 20, 1), 0x1000, 0x08b, 16, &word);
+    assert_eq!(pixel(&s, 0, 50, 20), 0x80ff_0040);
+
+    // RGB, 3_3_2 (format 9, type 5): 0xe3 is red 7, green 0, blue 3.
+    dma_write_sized(&mut s, &ram, (50, 21, 1), 0x1000, 0x0a9, 1, &[0xe3]);
+    assert_eq!(pixel(&s, 0, 50, 21), 0xff00_ffff);
+
+    // BGRA, UNSIGNED_BYTE (format 0x11, type 2).
+    dma_write_sized(&mut s, &ram, (50, 22, 1), 0x1000, 0x051, 4, &[0x3c, 0x5a, 0xa5, 0x22]);
+    assert_eq!(pixel(&s, 0, 50, 22), 0xa55a_3c22);
+
+    // LUMINANCE, UNSIGNED_SHORT (format 2, type 3): spread over red, green
+    // and blue.
+    dma_write_sized(&mut s, &ram, (50, 23, 1), 0x1000, 0x062, 2, &[0x80, 0x80]);
+    assert_eq!(pixel(&s, 0, 50, 23), 0x8080_80ff);
+}
+
+/// The table maps a few codes it should refuse: depth and stencil (format
+/// 0) have their own planes, the 4:2:2 forms are not modelled, and a type
+/// the format has no packing for is not a pixel.
+#[test]
+fn a_write_code_without_a_pixel_form_is_refused() {
+    assert!(write_form(0x080).is_none(), "depth and stencil");
+    assert!(write_form(0x04a).is_none(), "4:2:2");
+    assert!(write_form(0x0c1).is_none(), "colour index in a packed type");
+    assert_eq!(write_form(0x0eb).map(|f| f.bytes), Some(2));
+    assert_eq!(write_form(0x16c).map(|f| f.bytes), Some(4));
+    assert_eq!(write_form(0x06b).map(|f| f.bytes), Some(8));
 }

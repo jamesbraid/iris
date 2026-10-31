@@ -765,6 +765,16 @@ impl Board {
         self.image_put(rgba, code_is_index(code), code_carries_alpha(code));
         self.image_group_painted += 1;
     }
+
+    /// The same for a pixel of the library's write table: `b` holds its bytes
+    /// first byte first. It stores the alpha the source carries.
+    pub fn image_texel_form(&mut self, form: &WriteForm, b: &[u8]) {
+        if self.image_group_len != 0 && self.image_group_painted >= self.image_group_len {
+            return;
+        }
+        self.image_put(form.decode(b), form.is_index(), form.has_alpha());
+        self.image_group_painted += 1;
+    }
 }
 
 /// Whether a GL image write under source format `code` stores the source's
@@ -906,6 +916,15 @@ pub fn image_pairing_supported(code: u32, fmt: u32) -> bool {
 }
 
 impl Board {
+    /// Whether the open image's header and a burst's format tag go together:
+    /// image_pairing_supported() for the codes the byte-stream tables know,
+    /// and for any other code, whatever the write table (pixel_write.rs)
+    /// takes, under any tag.
+    pub fn image_burst_supported(&self, fmt: u32) -> bool {
+        image_pairing_supported(self.image_code, fmt)
+            || (pixel_bytes(self.image_code) == 0 && texel12_components(self.image_code) == 0 && write_form(self.image_write_code).is_some())
+    }
+
     /// One data word of a pixel burst, laid out by the transfer header's format
     /// code: its bytes join a stream that yields a pixel every
     /// pixel_bytes() bytes, so a three-byte pixel may span two words. A
@@ -918,7 +937,7 @@ impl Board {
         let mut n = pixel_bytes(code);
         let mut b = [0u8; 4];
 
-        if !image_pairing_supported(code, self.image_fmt) {
+        if !self.image_burst_supported(self.image_fmt) {
             return;
         }
         if code == ODSY_IMAGE_CODE_DEPTH_STENCIL {
@@ -932,7 +951,7 @@ impl Board {
             }
             return;
         }
-        if self.image_fmt == ODSY_IMAGE_FMT_RGBA16 {
+        if self.image_fmt == ODSY_IMAGE_FMT_RGBA16 && texel12_components(code) != 0 {
             // A stream of 16-bit components, high half first, a pixel every
             // texel12_components() halves: two words for 0x6b and 0x6c, a
             // word and a half for 0x69. At most two halves wait between words;
@@ -977,15 +996,44 @@ impl Board {
             return;
         }
 
+        let mut form = None;
+
         if n == 0 {
-            if !self.image_code_reported {
-                self.image_code_reported = true;
-                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: image source format {:#x} is not modeled; laid out by the burst tag", code);
+            // A code the byte-stream tables above do not know: the library's
+            // write table (pixel_write.rs), for pixels of up to sixteen bytes.
+            form = write_form(self.image_write_code).filter(|f| f.bytes <= 16);
+            if let Some(f) = &form {
+                n = f.bytes;
+            } else {
+                if !self.image_code_reported {
+                    self.image_code_reported = true;
+                    crate::dlog!(
+                        LogModule::Odyssey,
+                        "sgi-odyssey: image source format {:#x} is not modeled; laid out by the burst tag",
+                        self.image_write_code
+                    );
+                }
+                code = if self.image_fmt == ODSY_IMAGE_FMT_RGB { ODSY_IMAGE_CODE_FALLBACK_XRGB } else { ODSY_IMAGE_CODE_CI };
+                n = pixel_bytes(code);
             }
-            code = if self.image_fmt == ODSY_IMAGE_FMT_RGB { ODSY_IMAGE_CODE_FALLBACK_XRGB } else { ODSY_IMAGE_CODE_CI };
-            n = pixel_bytes(code);
         }
         b[..4].copy_from_slice(&word.to_be_bytes());
+        if let Some(f) = &form {
+            // The write table's pixels: any number of bytes up to a pixel of
+            // four 32-bit components, in arrival order.
+            for &byte in &b[..4] {
+                self.image_pixel[self.image_nbytes as usize] = byte;
+                self.image_nbytes += 1;
+                if self.image_nbytes < f.bytes {
+                    continue;
+                }
+                self.image_nbytes = 0;
+                let px = self.image_pixel;
+
+                self.image_texel_form(f, &px);
+            }
+            return;
+        }
         for &byte in &b[..4] {
             let mut px = [0u8; 4];
             let mut rgba = 0u32;
