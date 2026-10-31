@@ -1919,6 +1919,31 @@ impl Board {
             if count > SGI_GL_TEX_LEVELS_MAX || first + count > SGI_ODYSSEY_TEX_LEVELS {
                 break 'unsupported;
             }
+            // An object holds only the rows a transfer wrote, and a client may
+            // define a level with no data and then write part of it, as SDL
+            // streams a frame into a larger texture. The rest of the level is
+            // still its storage, with contents GL leaves undefined: grow the
+            // object to the level's rows, the new ones reading 0. Before any
+            // level's place is taken, since growing may move objects.
+            if !bordered && !texture_move {
+                for i in 0..count {
+                    let e = ((first + i) * 3) as usize;
+                    let object = self.object_find(self.tex_levels[e] & 0x1fffffff);
+                    let stride_units = self.tex_levels[e + 1] & 0xfff;
+                    let (level_width, level_height) = (cmax(1, width >> i), cmax(1, height >> i));
+
+                    if object >= 0 && self.obj_count <= SGI_ODYSSEY_OBJECTS {
+                        let o = object as usize;
+
+                        if self.obj_width[o] >= level_width
+                            && (stride_units == 0 || self.obj_width[o] == stride_units * 16)
+                            && self.obj_rows[o] < level_height
+                        {
+                            self.object_rows(object, level_height);
+                        }
+                    }
+                }
+            }
             chain.clear();
             chain.volume.colour_table_alpha = colour_table_rgba8_rgba || word == 0x11600001;
             chain.volume.colour_table = colour_table;
