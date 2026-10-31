@@ -265,6 +265,9 @@ pub struct GlPixels<'a> {
     /// The colour buffers a lent row's stores may reach, bit b for buffer
     /// b: what the draw's targets name. A lent row marks them all.
     pub row_targets: u32,
+    /// GlPlanes::row() lends rows; tests clear it to compare the row loops
+    /// with the per-pixel path.
+    pub lend_rows: bool,
 }
 
 impl GlPixels<'_> {
@@ -280,11 +283,12 @@ impl GlPixels<'_> {
     }
 }
 
-impl PlaneStore for GlPixels<'_> {
-    fn planes(&mut self) -> Box<dyn Planes + '_> {
+impl GlPixels<'_> {
+    /// The planes, for drawing on this thread.
+    pub fn planes(&mut self) -> GlPlanes<'_> {
         let [c0, c1] = &mut self.colour;
 
-        Box::new(GlPlanes {
+        GlPlanes {
             state: self.state,
             colour: [c0.view(), c1.view()],
             depth: self.depth.view(),
@@ -292,11 +296,12 @@ impl PlaneStore for GlPixels<'_> {
             overlay: self.overlay.view(),
             touched: &self.touched,
             row_targets: self.row_targets,
-        })
+            lend_rows: self.lend_rows,
+        }
     }
 }
 
-/// GlPixels as one thread of a draw stores to them. Colour index draws use
+/// GlPixels as one thread of a draw stores to them. Colour-index draws use
 /// store_colour; RGBA draws store_rgba and load_rgba (Board::gl_target()).
 /// Their once-only reports are made before the draw
 /// (Board::gl_report_refusals()).
@@ -310,6 +315,7 @@ pub struct GlPlanes<'a> {
     /// `row_targets`) reached, by buffer: what the display resolves again.
     touched: &'a TouchedRows,
     row_targets: u32,
+    lend_rows: bool,
 }
 
 /// One row of GlPlanes as a row loop reaches it (Planes::row()): the depth
@@ -526,15 +532,17 @@ impl GlPlanes<'_> {
     }
 }
 
-impl Planes for GlPlanes<'_> {
-    /// The whole row on the screen and inside one kept clip rectangle, and
-    /// in the depth plane and both colour planes; otherwise None, and the
-    /// row loop tests each pixel.
-    fn row(&self, y: i32, x0: i32, x1: i32) -> Option<GlPlaneRow<'_>> {
+impl GlPlanes<'_> {
+    /// Plane pixels x0 to x1 of row y as a row loop reaches them, with the
+    /// plane bounds and clip rectangles tested once for the row: when the
+    /// whole row is on the screen, inside one kept clip rectangle, and in
+    /// the depth plane and both colour planes. Otherwise None, and the loop
+    /// reaches each pixel through GlPlanes itself, with the same results.
+    pub fn row(&self, y: i32, x0: i32, x1: i32) -> Option<GlPlaneRow<'_>> {
         let s = &self.state;
         let n = (x1 as i64 - x0 as i64 + 1) as usize;
 
-        if x0 < 0 || y < 0 || x1 >= ODSY_WIDTH as i32 || y >= ODSY_HEIGHT as i32 || x1 < x0 {
+        if !self.lend_rows || x0 < 0 || y < 0 || x1 >= ODSY_WIDTH as i32 || y >= ODSY_HEIGHT as i32 || x1 < x0 {
             return None;
         }
         if !s.clip_rect[..s.clip_kept as usize].iter().any(|r| y >= r.y0 && y <= r.y1 && x0 >= r.x0 && x1 <= r.x1) {
@@ -569,7 +577,8 @@ impl Planes for GlPlanes<'_> {
         })
     }
 
-    fn store_colour(&self, target: ColourTarget, x: i32, y: i32, colour: u32) {
+    /// A colour-index fragment's packed index word.
+    pub fn store_colour(&self, target: ColourTarget, x: i32, y: i32, colour: u32) {
         let s = &self.state;
         let mask = (s.write_mask >> ODSY_WRITE_COLOUR_SHIFT) & ODSY_WRITE_COLOUR_MASK;
 
@@ -594,6 +603,31 @@ impl Planes for GlPlanes<'_> {
         self.colour[target as usize].plane_store(&s.colour[target as usize], x, y, colour & ODSY_INDEX_MASK);
     }
 
+    /// Experimental policy; the board's scale sign and clamps are unmeasured.
+    pub fn fog_factor(&self, window_z: f32, _eye_z: f32) -> f32 {
+        let w = &self.state.fog;
+        let scale = if (w[2] & 0xffffff) != 0 {
+            odyssey_f32(((w[2] & 0xffffff) << 5).wrapping_add(96u32 << 23)).abs()
+        } else {
+            0.0
+        };
+        let mut t = (scale * window_z as f64 + sextract32(w[3], 0, 12) as f64 / 256.0)
+            * 2.0f64.powi(((w[3] >> 12) & 7) as i32);
+        let p = [
+            sextract32(w[4] >> 12, 0, 12) as f64 / 256.0,
+            sextract32(w[4], 0, 12) as f64 / 256.0,
+            sextract32(w[5] >> 12, 0, 12) as f64 / 256.0,
+            sextract32(w[5], 0, 12) as f64 / 256.0,
+        ];
+
+        t = t.clamp(0.0, 1.0);
+        let u = 1.0 - t;
+        let f = p[0] * u * u * u + 3.0 * p[1] * u * u * t + 3.0 * p[2] * u * t * t + p[3] * t * t * t;
+        (if f >= 1.0 { 1.0 } else if f > 0.0 { f } else { 0.0 }) as f32
+    }
+}
+
+impl Planes for GlPlanes<'_> {
     /// The shared renderer supplies all four already quantized channel bytes.
     fn store_rgba(&self, target: ColourTarget, x: i32, y: i32, colour: &RasterColour) {
         let s = &self.state;
@@ -652,29 +686,6 @@ impl Planes for GlPlanes<'_> {
             self.stencil.plane_store(&self.state.stencil, x, y, stencil & ODSY_STENCIL_MAX);
         }
     }
-
-    /// Experimental policy; the board's scale sign and clamps are unmeasured.
-    fn fog_factor(&self, window_z: f32, _eye_z: f32) -> f32 {
-        let w = &self.state.fog;
-        let scale = if (w[2] & 0xffffff) != 0 {
-            odyssey_f32(((w[2] & 0xffffff) << 5).wrapping_add(96u32 << 23)).abs()
-        } else {
-            0.0
-        };
-        let mut t = (scale * window_z as f64 + sextract32(w[3], 0, 12) as f64 / 256.0)
-            * 2.0f64.powi(((w[3] >> 12) & 7) as i32);
-        let p = [
-            sextract32(w[4] >> 12, 0, 12) as f64 / 256.0,
-            sextract32(w[4], 0, 12) as f64 / 256.0,
-            sextract32(w[5] >> 12, 0, 12) as f64 / 256.0,
-            sextract32(w[5], 0, 12) as f64 / 256.0,
-        ];
-
-        t = t.clamp(0.0, 1.0);
-        let u = 1.0 - t;
-        let f = p[0] * u * u * u + 3.0 * p[1] * u * u * t + 3.0 * p[2] * u * t * t + p[3] * t * t * t;
-        (if f >= 1.0 { 1.0 } else if f > 0.0 { f } else { 0.0 }) as f32
-    }
 }
 
 /// The board's planes and pixel state as a raster job takes them: the
@@ -707,6 +718,7 @@ impl GlPixelJob {
                 overlay: RowsMut::new(s.overlay.bytes(), ODSY_WIDTH as usize),
                 touched: Default::default(),
                 row_targets: 3,
+                lend_rows: true,
             }
         }
     }
@@ -928,6 +940,7 @@ impl Board {
             overlay: RowsMut::new(&mut self.overlay, ODSY_WIDTH as usize),
             touched: Default::default(),
             row_targets: 3,
+            lend_rows: true,
         };
         (pixels, texels)
     }
@@ -985,9 +998,7 @@ impl Board {
         }
         t.stipple_opaque = true;
         if self.gl_index_mode() {
-            t.stipple_background_index = self.pattern_background(true);
-            let idx = t.stipple_background_index;
-            t.stipple_background = gl_index_rgba(idx);
+            t.stipple_background = gl_index_rgba(self.pattern_background(true));
         } else {
             let pixel = self.pattern_background(false);
 
@@ -1000,16 +1011,7 @@ impl Board {
 
     /// What the board's planes offer a GL draw (GlPlanes).
     pub fn gl_target(&mut self) -> RasterTarget<'static> {
-        let index = self.gl_index_mode();
-        let mut t = RasterTarget {
-            store_colour: index,
-            store_rgba: !index,
-            load_rgba: !index,
-            stencil: true,
-            fog_factor: true,
-            mixed_frame: false,
-            ..Default::default()
-        };
+        let mut t = RasterTarget { index: self.gl_index_mode(), ..Default::default() };
 
         self.gl_stipple_background(&mut t);
         t
@@ -2089,14 +2091,14 @@ impl Board {
         false
     }
 
-    /// Rebuild shared state from family words; no borrowed image survives a draw.
+    /// Rebuild shared state from board words; no borrowed image survives a draw.
     pub fn texture_vertex(&mut self) {
         const ENVIRONMENTS: [u32; 5] = [GL_REPLACE, GL_REPLACE, GL_MODULATE, GL_DECAL, GL_BLEND];
         let mut strq: [u32; 4] = [self.tex_coord[0], self.tex_coord[1], self.tex_coord_r, self.tex_coord_q];
         let one_d = (self.tex_mode & (ODSY_TEX_MODE_1D | ODSY_TEX_MODE_2D)) == ODSY_TEX_MODE_1D;
         self.gl().cur.texture_2d = (self.tex_mode & (ODSY_TEX_MODE_1D | ODSY_TEX_MODE_2D)) != 0;
         self.gl().cur.texture_3d = (self.tex_mode & ODSY_TEX_MODE_3D) != 0;
-        // Excluded environments are rejected by the family before rasterization.
+        // Excluded environments are rejected by the board before rasterization.
         self.gl().cur.texture_env_mode = GL_REPLACE;
         if (self.tex_env[0] as usize) < ENVIRONMENTS.len() {
             self.gl().cur.texture_env_mode = ENVIRONMENTS[self.tex_env[0] as usize];
@@ -2203,7 +2205,7 @@ impl Board {
             }
         }
         if (state.texture_2d || state.texture_3d) && self.tex_env[0] == 4 {
-            // The family words pack two normalized 12-bit components each.
+            // The board words pack two normalized 12-bit components each.
             state.texture_env_color[0] = ((self.tex_env[1] >> 12) & 0xfff) as f32 / 4095.0f32;
             state.texture_env_color[1] = (self.tex_env[1] & 0xfff) as f32 / 4095.0f32;
             state.texture_env_color[2] = ((self.tex_env[2] >> 12) & 0xfff) as f32 / 4095.0f32;
@@ -2531,7 +2533,7 @@ impl Board {
         // Bit assignments follow the library's fragment-state encoding.
         self.gl_feed32(en(ODSY_MODE_POINT_SMOOTH), &[GL_POINT_SMOOTH]);
         self.gl_feed32(en(ODSY_MODE_LINE_SMOOTH), &[GL_LINE_SMOOTH]);
-        // The shared layer has no dither rule yet, so the bit is kept as family
+        // The shared layer has no dither rule yet, so the bit is kept as board
         // state and reported at the first draw it would affect
         // (Board::gl_vertex_colour()). Once the shared rule lands this feeds
         // GL_OP_ENABLE/DISABLE of GL_DITHER instead.
@@ -2560,7 +2562,7 @@ impl Board {
         self.gl_feed_raster_state(GL_OP_LINE_STIPPLE as u16, &args);
     }
 
-    /// Push the family-shadowed clip box (ODSY_REG_CLIP_BOX) to the shared
+    /// Push the board-shadowed clip box (ODSY_REG_CLIP_BOX) to the shared
     /// context's scissor rectangle (see the macro's own comment for the
     /// encoding and the always-on rationale). min > max -- including the
     /// library's own 0x1000, 0x1000 empty encoding -- clips every fragment,

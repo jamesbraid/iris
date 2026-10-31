@@ -1,5 +1,5 @@
 //! Quad loops for filled triangles, specialised by draw state and by the
-//! family's planes.
+//! planes they reach.
 //!
 //! A filled triangle is drawn two rows at a time, in 2x2 pixel quads: the
 //! texture unit takes one level of detail per quad (soft_quad_rho()), and
@@ -15,10 +15,9 @@
 //! loops admit, and the two cannot disagree: the arithmetic is the same
 //! expressions in the same order, only the branches around it differ.
 //!
-//! The loop is also generic over the Planes implementation, through
-//! Planes::fill_quads(), whose default body each implementation inherits as
-//! its own copy: a plane access in the loop is a direct call the compiler
-//! can inline, not one through the draw's `dyn Planes`.
+//! The loop is also generic over the Planes implementation, the board's
+//! planes whole or one row of them a loop borrows (GlPlaneRow), so a plane
+//! access in the loop is a direct call the compiler can inline.
 //!
 //! FillRow names the specialisations, the states measured as common;
 //! SoftDraw::fill_select() and SoftDraw::fixed_span_select() choose one per
@@ -175,7 +174,7 @@ impl<
     }
     #[inline(always)]
     fn stencil(r: &SoftDraw) -> bool {
-        STENCIL == FILL_DYN && r.st.stencil_test && r.rules.stencil_max(r.t).is_some()
+        STENCIL == FILL_DYN && r.st.stencil_test && r.rules.stencil_max().is_some()
     }
     #[inline(always)]
     fn clip(st: &GlDrawState) -> bool {
@@ -339,10 +338,10 @@ impl SoftDraw<'_> {
         // reference clamped to the buffer's range, compared under the value
         // mask, and the operation each outcome names.
         let stencil = M::stencil(self);
-        let smax = if stencil { self.rules.stencil_max(t).unwrap_or(0) } else { 0 };
+        let smax = if stencil { self.rules.stencil_max().unwrap_or(0) } else { 0 };
         let sref = if st.stencil_ref < 0 { 0 } else { fx_min(st.stencil_ref as u32, smax) };
         let svalue = sref & st.stencil_value_mask;
-        let rgba = t.store_rgba;
+        let rgba = !t.index;
         let rgba_read = rgba && self.rgba_read;
         let store = self.rgba_mask != 0 && self.ntargets != 0;
         let env = if !M::TEX { 0 } else if M::ENV != 0 { M::ENV } else { st.texture_env_mode };
@@ -606,10 +605,11 @@ macro_rules! fill_rows {
             $($id,)*
         }
 
-        /// Planes::fill_quads()'s body: the quad loop row names, on planes px.
+        /// The quads of rows qy and qy + 1 of a filled triangle, whose owned
+        /// runs are rows, through the quad loop row names, on planes px.
         #[inline]
-        pub fn fill_quads_dispatch<P: Planes + ?Sized>(
-            px: &P,
+        pub fn fill_quads_dispatch(
+            px: &GlPlanes,
             r: &SoftDraw,
             row: FillRow,
             sp: &SoftTexSpan,
@@ -621,20 +621,20 @@ macro_rules! fill_rows {
                 $(FillRow::$id => fill_quads_instance::<FillMode<
                     { $tex }, { $kernel }, { $repeat }, { $env }, { $format },
                     { $depth }, { $func }, { $write }, { $smooth }, { $blend }, { $fog }, { $stencil }, { $clip },
-                >, P>(px, r, sp, qy, rows, general),)*
+                >>(px, r, sp, qy, rows, general),)*
             }
         }
     };
 }
 
 /// One specialisation as a function of its own. It writes through the rows
-/// of planes Planes::row() lends, which test the plane bounds and clip
+/// of planes GlPlanes::row() lends, which test the plane bounds and clip
 /// rectangles once for a row; where the planes cannot lend a row, the
 /// fallback with the same texturing draws the quads a pixel at a time
 /// through the planes' own methods, which give the same pixels.
 #[inline(never)]
-fn fill_quads_instance<M: Fill, P: Planes + ?Sized>(
-    px: &P,
+fn fill_quads_instance<M: Fill>(
+    px: &GlPlanes,
     r: &SoftDraw,
     sp: &SoftTexSpan,
     qy: i32,
@@ -663,21 +663,21 @@ fn fill_quads_instance<M: Fill, P: Planes + ?Sized>(
 
         r.fill_quads::<M, GlPlaneRow>([lent[0].as_ref().unwrap_or(other), lent[1].as_ref().unwrap_or(other)], sp, qy, &runs, general);
     } else {
-        fill_quads_pixels::<M::Dyn, P>(px, r, sp, qy, &runs, general);
+        fill_quads_pixels::<M::Dyn>(px, r, sp, qy, &runs, general);
     }
 }
 
 /// Quads a pixel at a time through planes px (fill_quads_instance()).
 #[inline(never)]
-fn fill_quads_pixels<M: Fill, P: Planes + ?Sized>(
-    px: &P,
+fn fill_quads_pixels<M: Fill>(
+    px: &GlPlanes,
     r: &SoftDraw,
     sp: &SoftTexSpan,
     qy: i32,
     runs: &[Option<FillRun>; 2],
     general: &QuadGeneral,
 ) {
-    r.fill_quads::<M, P>([px, px], sp, qy, runs, general)
+    r.fill_quads::<M, GlPlanes>([px, px], sp, qy, runs, general)
 }
 
 const D: u32 = FILL_DYN;
@@ -811,12 +811,12 @@ impl SoftDraw<'_> {
     }
 
     /// The state every row loop leaves to SoftDraw::fragment_at(): what none
-    /// of them does per fragment. RGBA colour, with no alpha test, logical
-    /// operation or polygon stipple.
+    /// of them does per fragment: an alpha test, a logical operation or a
+    /// polygon stipple.
     pub fn fill_admits(&self) -> bool {
         let st: &GlDrawState = self.st;
 
-        st.index_bits == 0 && !st.alpha_test && !self.logic_op && self.polygon_stipple.is_none()
+        !st.alpha_test && !self.logic_op && self.polygon_stipple.is_none()
     }
 
     /// The row loop for the draw's untextured filled triangles, or None for
@@ -846,7 +846,7 @@ impl SoftDraw<'_> {
         } else {
             -1
         };
-        let stencil = st.stencil_test && self.rules.stencil_max(self.t).is_some();
+        let stencil = st.stencil_test && self.rules.stencil_max().is_some();
         if path == FillPath::Dynamic || depth < 0 || blend < 0 || st.fog || stencil || st.clip_planes != 0 {
             return Some(FillRow::FillAny);
         }
@@ -972,7 +972,6 @@ mod tests {
             st.fog_end = 2.5;
             st.fog_density = 0.7;
             st.fog_color = [0.1, 0.8, 0.3, 1.0];
-            b.builtin_fog = rng.next_u32() % 2 == 0;
         }
         if rng.next_u32() % 4 == 0 {
             st.colour_mask = rng.next_u32() % 16;
@@ -1274,9 +1273,11 @@ mod tests {
         b.st.stencil_op = [GL_KEEP; 3];
         let t = b.board.gl_target();
         let reports = SoftReports::default();
-        let mut r = SoftDraw::new(&b.rules, &t, &b.st, &reports);
+        let mut parts = b.board.gl_parts(None).0;
+        let px = parts.planes();
+        let mut r = SoftDraw::new(&b.rules, &t, &b.st, &reports, &px);
         r.ntargets = 1;
-        assert!(r.setup_ops());
+        r.setup_ops();
         assert_eq!(r.fill_select(), Some(FillRow::FillAny));
         let f = SoftFixedTex { min: GL_LINEAR, mag: GL_LINEAR, format: GL_RGB, wrap_s: GL_REPEAT, wrap_t: GL_REPEAT, ..Default::default() };
         assert_eq!(r.fixed_span_select(&f), Some(FillRow::LinearModulateRgbLess));
@@ -1290,9 +1291,11 @@ mod tests {
         b.st.clip_planes = 1;
         let t = b.board.gl_target();
         let reports = SoftReports::default();
-        let mut r = SoftDraw::new(&b.rules, &t, &b.st, &reports);
+        let mut parts = b.board.gl_parts(None).0;
+        let px = parts.planes();
+        let mut r = SoftDraw::new(&b.rules, &t, &b.st, &reports, &px);
         r.ntargets = 1;
-        assert!(r.setup_ops());
+        r.setup_ops();
         assert_eq!(r.fill_select(), Some(FillRow::FillAny));
         let f = SoftFixedTex { min: GL_LINEAR, mag: GL_LINEAR, format: GL_RGB, wrap_s: GL_REPEAT, wrap_t: GL_REPEAT, ..Default::default() };
         assert_eq!(r.fixed_span_select(&f), Some(FillRow::LinearModulateRgbLess));
@@ -1349,9 +1352,11 @@ mod tests {
                                 b.st.blend_dst = GL_ONE_MINUS_SRC_ALPHA;
                                 let t = b.board.gl_target();
                                 let reports = SoftReports::default();
-                                let mut r = SoftDraw::new(&b.rules, &t, &b.st, &reports);
+                                let mut parts = b.board.gl_parts(None).0;
+                                let px = parts.planes();
+                                let mut r = SoftDraw::new(&b.rules, &t, &b.st, &reports, &px);
                                 r.ntargets = 1;
-                                assert!(r.setup_ops());
+                                r.setup_ops();
                                 let lod = min != mag;
                                 let f = SoftFixedTex { min, mag, lod, format, wrap_s: wrap, wrap_t: GL_REPEAT, ..Default::default() };
                                 let row = r.fixed_span_select(&f).expect("a row loop");
@@ -1381,9 +1386,11 @@ mod tests {
         b.st.texture_env_mode = GL_MODULATE;
         let t = b.board.gl_target();
         let reports = SoftReports::default();
-        let mut r = SoftDraw::new(&b.rules, &t, &b.st, &reports);
+        let mut parts = b.board.gl_parts(None).0;
+        let px = parts.planes();
+        let mut r = SoftDraw::new(&b.rules, &t, &b.st, &reports, &px);
         r.ntargets = 1;
-        assert!(r.setup_ops());
+        r.setup_ops();
         let f = |min, mag, format, wrap_s, wrap_t| SoftFixedTex { min, mag, lod: min != mag, format, wrap_s, wrap_t, ..Default::default() };
         let tri = |format, wrap_s, wrap_t| f(GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR, format, wrap_s, wrap_t);
         let (rep, edge) = (GL_REPEAT, GL_CLAMP_TO_EDGE);
@@ -1667,9 +1674,11 @@ mod tests {
                     }
                     let t = b.board.gl_target();
                     let reports = SoftReports::default();
-                    let mut r = SoftDraw::new(&b.rules, &t, &b.st, &reports);
+                    let mut parts = b.board.gl_parts(None).0;
+                    let px = parts.planes();
+                    let mut r = SoftDraw::new(&b.rules, &t, &b.st, &reports, &px);
                     r.ntargets = 1;
-                    assert!(r.setup_ops());
+                    r.setup_ops();
                     let f = r.fill_select().expect("a row loop");
                     assert_eq!(f, table[(smooth == GL_SMOOTH) as usize][over as usize]);
                     if !seen.contains(&f) {
