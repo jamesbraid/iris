@@ -7,7 +7,8 @@ use std::sync::Mutex;
 
 use crate::snapshot::{get_field, hex_u64, load_u64_slice, toml_u64, u64_slice_to_toml};
 use crate::traits::{BusDevice, BusRead32, BusRead64, Device, Resettable, Saveable, BUS_OK};
-use crate::ip32::*;
+use crate::ip32_map::*;
+use crate::dev::mace_ust::MaceUst;
 
 // ── CRIME registers ─────────────────────────────────────────────────────────
 // Offsets follow the names NetBSD's crimereg.h uses, so the two can be read

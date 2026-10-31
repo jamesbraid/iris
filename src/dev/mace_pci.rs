@@ -11,7 +11,7 @@ use crate::dev::crime_mem::O2Memory;
 use crate::pci::{bar_runs, BarAt, BarRun, BarRunSink, PciBar, PciBusDevice, PciDma, PciDmaStatus, PciLanes, Space};
 use crate::snapshot::{get_field, hex_u32, load_u32_slice, toml_u32, u32_slice_to_toml};
 use crate::traits::{BusDevice, BusRead32, BusRead64, Saveable, BUS_OK};
-use crate::ip32::*;
+use crate::ip32_map::*;
 
 pub mod macepci_reg {
     pub const ERROR_ADDR: u32 = 0x0000;
@@ -116,7 +116,7 @@ pub const PCI_IO_SIZE: u32 = 0x0200_0000;
 /// the low window above. Physical addresses reach this bus as 32 bits, so it
 /// arrives as 0x8000_0000 and up. CRIME's no-ECC memory alias has the same
 /// low 32 bits (0x00_8000_0000); the CPU folds that one onto memory before it
-/// gets here ([`crate::ip32::NO_ECC_BASE`]).
+/// gets here ([`crate::ip32_map::NO_ECC_BASE`]).
 pub const PCI_HI_MEM_BASE: u32 = 0x8000_0000;
 
 /// Host memory on the PCI bus, as bus masters see it (MACE spec 9.3.1): the

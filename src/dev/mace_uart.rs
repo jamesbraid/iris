@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crate::dev::ns16550::{com_reg, Ns16550};
 use crate::dev::serial_host::SerialBackend;
-use crate::ip32::*;
+use crate::ip32_map::*;
 use crate::irq::IrqLine;
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, Device, Resettable, Saveable, BUS_OK};
 
