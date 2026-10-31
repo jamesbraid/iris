@@ -147,9 +147,6 @@ pub struct Odyssey {
     pub state: BoardLocks,
     pub display: Arc<Display>,
     running: Arc<AtomicBool>,
-    /// Set by a stop from the process's main thread: the display thread
-    /// leaves the renderer alone, because releasing it can need that thread.
-    keep_renderer: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
     /// `IRIS_ODSY_REC`: the recording of the bus accesses (record.rs).
     rec: Option<record::RecHandle>,
@@ -183,7 +180,6 @@ impl Odyssey {
             state: BoardLocks::new(s),
             display: Arc::new(Display::new(heartbeat, fasttick)),
             running: Arc::new(AtomicBool::new(false)),
-            keep_renderer: Arc::new(AtomicBool::new(false)),
             thread: Mutex::new(None),
             rec,
         }))
@@ -367,10 +363,8 @@ impl Device for Odyssey {
             return;
         }
         self.state.work_start();
-        self.keep_renderer.store(false, Ordering::Release);
         self.running.store(true, Ordering::Release);
         let (state, display, running) = (self.state.clone(), self.display.clone(), self.running.clone());
-        let keep_renderer = self.keep_renderer.clone();
         *t = Some(
             std::thread::Builder::new()
                 .name("odyssey-display".into())
@@ -387,23 +381,16 @@ impl Device for Odyssey {
                         }
                     }
                     // The renderer is released on this thread, which owns its
-                    // context. On macOS that release is a request to the main
-                    // thread, so a stop from the main thread (the window
-                    // closed, the process ending) cannot wait for it.
-                    if keep_renderer.load(Ordering::Acquire) {
-                        display.release_frame();
-                    } else {
-                        display.stop();
-                    }
+                    // context; a stop from the main thread leaves it alone
+                    // (`DisplayStop`).
+                    display.stop();
                 })
                 .expect("odyssey display thread"),
         );
     }
 
     fn stop(&self) {
-        if std::thread::current().name() == Some("main") {
-            self.keep_renderer.store(true, Ordering::Release);
-        }
+        self.display.display_stop.request();
         self.running.store(false, Ordering::Release);
         if let Some(t) = self.thread.lock().take() {
             let _ = t.join();
