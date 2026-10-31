@@ -173,6 +173,48 @@ contain only `clanker/CLANKER.md`: open that file. The skill links become
 plain files, so agents will not find the skills; point your agent at
 `clanker/skills/` directly or re-clone with symlinks enabled.
 
+## Sending changes upstream
+
+- **Small, focused pull requests.** One subsystem or one fix per PR, so it can
+  be reviewed and merged on its own. Do not pile unrelated work onto an open PR.
+- **One commit per logical change.** Subjects are `component: lowercase
+  imperative`, bodies say why. Before a PR merges, fold review fixes, CI fixes
+  and "tighten after review" follow-ups into the commit they fix: no fixup
+  commits. Squash with a rebase that keeps each committer date equal to its
+  author date, check that every commit builds and that the final tree equals
+  the pre-squash tip, then force-push your own branch with a lease. A merged
+  commit cannot be folded; its follow-ups are new commits, one per logical
+  change.
+- **Stay on top of tree.** When a PR stops building or conflicts, sync to
+  `main`, rebase and push again.
+- **Hot paths stay clean.** Do not add a check to memory-access, cache or other
+  hot paths for a special case. Measure such a change with user-space
+  benchmarks: the in-tree benchmarks run in kernel mode and do not represent
+  a working system, where most accesses go through the TLB.
+- **Do not out-lock the hardware.** Where real hardware lets two units touch
+  memory at once with no borrow or lock (the display and the renderer),
+  software is what keeps them in step, with fences and sync bits. Do not add
+  borrows or locks that make it safer than the hardware; a synchronisation
+  problem means the behaviour was modelled wrongly.
+- **Match the sibling machine.** Model an aliasing or address-map detail the
+  way the Indy already does it.
+- **FPU: good enough, fast.** Use the host FPU wherever it matches, fall back
+  to emulation where it does not, signal only what is clearly wrong and get
+  that signalling right. Do not trade speed for exactness that only an
+  obscure diagnostic notices.
+
+### Tests
+
+CI runs `cargo test --workspace` (`.github/workflows/rust.yml`), not nextest.
+A new test must pass there, so:
+
+- tests run in parallel threads of one process: no fixed files in `/tmp` or any
+  shared path (use a per-test temporary directory), and no global counters or
+  other process-wide state that another test can disturb;
+- tests that read the wall clock must tolerate a loaded runner (macOS and
+  Windows results are informational, Linux gates);
+- free what a test builds; see `clanker/testing/device-tests-must-free-their-boards.md`.
+
 ## Build & run
 
 ```
