@@ -537,8 +537,8 @@ fn the_wav_capture_stays_at_44100_whatever_the_card_rate() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("o.wav");
     let mut sink = Sink { host: None, host_failed_at: None, wav: Wav::create(path.as_os_str()), tap: None };
-    sink.play(&[0i16; 2 * 2205], 22050);
-    sink.play(&[0i16; 2 * 4410], 44100);
+    sink.play(&[0i16; 2 * 2205], 22050, false);
+    sink.play(&[0i16; 2 * 4410], 44100, false);
     let b = std::fs::read(&path).unwrap();
     assert_eq!(u32::from_le_bytes(b[24..28].try_into().unwrap()), 44100);
     let frames = u32::from_le_bytes(b[40..44].try_into().unwrap()) / 4;
@@ -992,96 +992,6 @@ fn a_recorded_adat_frame_plays_back_unchanged() {
     assert_eq!(back, pcm);
 }
 
-#[test]
-fn a_failed_host_open_is_retried_after_a_wait() {
-    let now = Instant::now();
-    let mut sink = Sink { host: None, host_failed_at: None, wav: None, tap: None };
-    assert!(sink.host_retry_due(now), "never tried");
-    sink.host_failed_at = Some(now);
-    assert!(!sink.host_retry_due(now), "just failed");
-    assert!(sink.host_retry_due(now + HOST_RETRY), "due again later");
-}
-
-// Output channel clock selection: the Octane PROM's generator 2.
-
-const SEC: i64 = 1_000_000_000;
-
-fn tapped(r: &Rad1) -> Arc<parking_lot::Mutex<Vec<i16>>> {
-    let tap = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    *r.sink.lock() = Some(Sink { host: None, host_failed_at: None, wav: None, tap: Some(tap.clone()) });
-    tap
-}
-
-#[test]
-fn the_master_select_after_the_load_sets_the_rate() {
-    // Generator 2 at divisor 6 is 32 kHz from the 192 kHz master and 29.4 kHz
-    // from the 176.4 kHz one. The Octane PROM loads, then selects.
-    for (select_first, frames) in [(true, 320), (false, 320)] {
-        let (r, _ram) = dma_card();
-        let tap = tapped(&r);
-        wr(&r, 0xa4, 0xffff);
-        wr(&r, 0x58, 0x4000_0000);
-        if select_first {
-            wr(&r, 0xac, 1);
-        }
-        wr(&r, 0xa0, 0x4000_0405);
-        if !select_first {
-            wr(&r, 0xac, 1);
-        }
-        program(&r, &RING_OUTPUT, 0x10_0000, 0xffff_f008);
-        wr(&r, 0x58, 0x4000_0001);
-        at(&r, SEC / 100);
-        rd(&r, 0x18);
-        assert_eq!(tap.lock().len(), frames * 2, "select first: {select_first}");
-    }
-    // Withheld, the load alone computes 29400 Hz.
-    let (r, _ram) = dma_card();
-    let tap = tapped(&r);
-    wr(&r, 0xa4, 0xffff);
-    wr(&r, 0xa0, 0x4000_0405);
-    program(&r, &RING_OUTPUT, 0x10_0000, 0xffff_f008);
-    wr(&r, 0x58, 0x4000_0001);
-    at(&r, SEC / 100);
-    rd(&r, 0x18);
-    assert_eq!(tap.lock().len(), 294 * 2);
-}
-
-#[test]
-fn the_output_follows_the_generator_0x58_names() {
-    // Generator 2 is loaded for 32 kHz; the output on generator 1 stays at 44.1 kHz.
-    let (r, _ram) = dma_card();
-    let tap = tapped(&r);
-    set_clock(&r, 2, 1, 0x0000_ffff, 0x405);
-    program(&r, &RING_OUTPUT, 0x10_0000, 0xffff_f008);
-    wr(&r, 0x58, 0x2000_0001);
-    // Short looks: a look-away of two rings or more skips whole laps.
-    at(&r, SEC / 100);
-    rd(&r, 0x18);
-    assert_eq!(tap.lock().len(), 441 * 2);
-    // Switching to generator 2 while running counts from then at 32 kHz.
-    wr(&r, 0x58, 0x4000_0001);
-    at(&r, SEC / 100 + SEC / 100);
-    rd(&r, 0x18);
-    assert_eq!(tap.lock().len(), (441 + 320) * 2);
-}
-
-#[test]
-fn analog_output_enable_takes_only_the_two_known_selects() {
-    let r = card();
-    for v in [0x4000_0000, 0x2000_0000] {
-        wr(&r, 0x58, v);
-        assert_eq!(rd(&r, 0x58), v);
-    }
-    wr(&r, 0x58, 0x4000_0000);
-    for v in [0x6000_0000, 0x8000_0000, 0x1000_0000, 0x4200_0000, 0x0000_0000, 0x4000_0002] {
-        wr(&r, 0x58, v);
-        assert_eq!(rd(&r, 0x58), 0x4000_0000, "{v:#x} is unsupported");
-    }
-    wr(&r, 0x58, 0x4000_0001);
-    assert_eq!(rd(&r, 0x58), 0x4000_0000, "no ring programmed");
-}
-
-
 // The Octane PROM's boot tune: output channel on clock generator 2, a single
 // end-of-descriptor buffer, relay and DAC mute words.
 
@@ -1089,6 +999,7 @@ const TUNE_BUF: u64 = 0x10_0000;
 /// 4504 units of 128 bytes: 576,512 bytes, 72,064 frames.
 const TUNE_CTRL: u32 = 0xfff7_3404;
 const TUNE_FRAMES: usize = 72_064;
+const SEC: i64 = 1_000_000_000;
 
 /// The sample the tune buffer holds in frame `n`, left; right is its negation.
 fn tune_sample(n: usize) -> i16 {
@@ -1102,6 +1013,12 @@ fn fill_tune(ram: &Ram, at: u64, frames: usize, tag: i16) {
         m[a..a + 4].copy_from_slice(&sample_to_word(tune_sample(n) + tag).to_le_bytes());
         m[a + 4..a + 8].copy_from_slice(&sample_to_word(-(tune_sample(n) + tag)).to_le_bytes());
     }
+}
+
+fn tapped(r: &Rad1) -> Arc<parking_lot::Mutex<Vec<i16>>> {
+    let tap = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    *r.sink.lock() = Some(Sink { host: None, host_failed_at: None, wav: None, tap: Some(tap.clone()) });
+    tap
 }
 
 /// A card with the tune in RAM and a tap on what it plays.
@@ -1191,6 +1108,40 @@ fn the_prom_tune_runs_at_29400_hz_until_the_select_arrives() {
 }
 
 #[test]
+fn the_output_follows_the_generator_0x58_names() {
+    // Generator 2 is loaded for 32 kHz; the output on generator 1 stays at 44.1 kHz.
+    let (r, _ram, tap) = tune_card();
+    set_clock(&r, 2, 1, 0x0000_ffff, 0x405);
+    program(&r, &RING_OUTPUT, TUNE_BUF as u32, 0xffff_f008);
+    wr(&r, 0x58, 0x2000_0001);
+    // Short looks: a look-away of two rings or more skips whole laps.
+    at(&r, SEC / 100);
+    rd(&r, 0x58);
+    assert_eq!(tap.lock().len(), 441 * 2);
+    // Switching to generator 2 while running counts from then at 32 kHz.
+    wr(&r, 0x58, 0x4000_0001);
+    at(&r, SEC / 100 + SEC / 100);
+    rd(&r, 0x58);
+    assert_eq!(tap.lock().len(), (441 + 320) * 2);
+}
+
+#[test]
+fn analog_output_enable_takes_only_the_two_known_selects() {
+    let r = card();
+    for v in [0x4000_0000, 0x2000_0000] {
+        wr(&r, 0x58, v);
+        assert_eq!(rd(&r, 0x58), v);
+    }
+    wr(&r, 0x58, 0x4000_0000);
+    for v in [0x6000_0000, 0x8000_0000, 0x1000_0000, 0x4200_0000, 0x0000_0000, 0x4000_0002] {
+        wr(&r, 0x58, v);
+        assert_eq!(rd(&r, 0x58), 0x4000_0000, "{v:#x} is unsupported");
+    }
+    wr(&r, 0x58, 0x4000_0001);
+    assert_eq!(rd(&r, 0x58), 0x4000_0000, "no ring programmed");
+}
+
+#[test]
 fn the_prom_tune_from_an_unmapped_buffer_publishes_nothing() {
     let (r, _ram, tap) = tune_card();
     prom_tune(&r, 0xf000_0000, TUNE_CTRL, true);
@@ -1260,3 +1211,53 @@ fn a_finished_transfer_can_be_started_again() {
     assert_eq!(tap.lock().len(), 2 * TUNE_FRAMES * 2);
 }
 
+#[test]
+fn relay_and_dac_mute_words_set_the_mute_state_and_leave_the_transfer_alone() {
+    let (r, _ram, tap) = tune_card();
+    assert!(!r.state.lock().muted(), "the power-on state is not assumed muted");
+    wr(&r, 0x88, 2);
+    assert!(r.state.lock().muted());
+    wr(&r, 0x88, 3);
+    assert!(!r.state.lock().muted());
+    wr(&r, 0x88, 2);
+    wr(&r, 0x88, 0);
+    assert!(r.state.lock().muted(), "0 is neither word");
+    assert_eq!(rd(&r, 0x88), 0, "stored regardless");
+    wr(&r, 0x88, 3);
+    wr(&r, 0x8c, 3);
+    assert!(r.state.lock().muted(), "the DAC mute alone mutes");
+    wr(&r, 0x8c, 2);
+    assert!(!r.state.lock().muted());
+    // Muting mid-transfer does not stop it.
+    program(&r, &RING_OUTPUT, TUNE_BUF as u32, 0xffff_f008);
+    wr(&r, 0x58, 0x2000_0001);
+    wr(&r, 0x88, 2);
+    at(&r, SEC / 100);
+    rd(&r, 0x58);
+    assert!(r.state.lock().chan[CH_OUT].running);
+    assert_eq!(tap.lock().len(), 441 * 2);
+    r.reset();
+    assert!(!r.state.lock().muted());
+}
+
+#[test]
+fn muted_frames_reach_the_host_as_silence() {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("rad1-mute-{}.wav", std::process::id()));
+    let mut sink = Sink { host: None, host_failed_at: None, wav: Wav::create(path.as_os_str()), tap: None };
+    sink.play(&[1000i16; 2 * 4410], 44100, true);
+    let bytes = std::fs::read(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(bytes.len(), 44 + 2 * 2 * 4410);
+    assert!(bytes[44..].iter().all(|&b| b == 0));
+}
+
+#[test]
+fn a_failed_host_open_is_retried_after_a_wait() {
+    let now = Instant::now();
+    let mut sink = Sink { host: None, host_failed_at: None, wav: None, tap: None };
+    assert!(sink.host_retry_due(now), "never tried");
+    sink.host_failed_at = Some(now);
+    assert!(!sink.host_retry_due(now), "just failed");
+    assert!(sink.host_retry_due(now + HOST_RETRY), "due again later");
+}
