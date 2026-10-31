@@ -1399,11 +1399,14 @@ pub mod model {
     pub const R12000: u8 = 3;
     pub const R14000: u8 = 4;
     pub const R16000: u8 = 5;
+    /// Set on a shadow cache's model id to make it serve the lines a guest
+    /// stages (`mips_cache_shadow`). The part is the id without this bit.
+    pub const STAGING: u8 = 0x80;
 
     /// The R10000 family: R10000 and the parts that follow it, which share one
     /// programming model.
     pub const fn r10k_family(model: u8) -> bool {
-        matches!(model, R10000 | R12000 | R14000 | R16000)
+        matches!(model & !STAGING, R10000 | R12000 | R14000 | R16000)
     }
 }
 
