@@ -18,7 +18,14 @@ fn window() -> (Box<Board>, Arc<Ram>) {
 /// glDrawPixels: BEGIN with the image primitive, the raster box from
 /// (x1, y1) to (x2, y2), the transfer header, then the data words under
 /// the burst register for `fmt`, at most 16 a burst.
-fn burst_image(s: &mut Board, (x1, y1, x2, y2): (u32, u32, u32, u32), header: u32, fmt: u32, words: &[u32]) {
+fn burst_image(s: &mut Board, bounds: (u32, u32, u32, u32), header: u32, fmt: u32, words: &[u32]) {
+    burst_image_groups(s, bounds, &[(header, &[(fmt, words)])]);
+}
+
+/// The same for an image the library sends as several transfer headers,
+/// each followed by its bursts (a tag and its words): the shape of a draw
+/// wider than one burst, where a header finishes the previous row.
+fn burst_image_groups(s: &mut Board, (x1, y1, x2, y2): (u32, u32, u32, u32), groups: &[(u32, &[(u32, &[u32])])]) {
     cmd(s, select(ODSY_REG_GL_BEGIN));
     cmd(s, ODSY_GL_PRIMITIVE_IMAGE);
     cmd(s, ODSY_CMD_IMAGE_BOX);
@@ -32,13 +39,17 @@ fn burst_image(s: &mut Board, (x1, y1, x2, y2): (u32, u32, u32, u32), header: u3
         };
         cmd(s, (v as f32).to_bits());
     }
-    cmd(s, ODSY_CMD_IMAGE_HEADER);
-    cmd(s, header);
-    for chunk in words.chunks(16) {
-        let n = if chunk.len() == 16 { ODSY_CMD_ARITY_MASK } else { chunk.len() as u32 };
-        cmd(s, select(ODSY_IMAGE_BURST_BASE | n << ODSY_CMD_ARITY_SHIFT | fmt));
-        for &w in chunk {
-            cmd(s, w);
+    for &(header, bursts) in groups {
+        cmd(s, ODSY_CMD_IMAGE_HEADER);
+        cmd(s, header);
+        for &(fmt, words) in bursts {
+            for chunk in words.chunks(16) {
+                let n = if chunk.len() == 16 { ODSY_CMD_ARITY_MASK } else { chunk.len() as u32 };
+                cmd(s, select(ODSY_IMAGE_BURST_BASE | n << ODSY_CMD_ARITY_SHIFT | fmt));
+                for &w in chunk {
+                    cmd(s, w);
+                }
+            }
         }
     }
     cmd(s, select(ODSY_REG_GL_END));
@@ -552,6 +563,99 @@ fn a_gl_copy_moves_pixels_between_an_object_and_the_drawables() {
     assert_eq!(s.object_load(obj, 5, 1), 0x0a0b_0c0d);
 }
 
+/// A copy from the window into an object lists the rectangle's rows
+/// bottom first. glReadPixels and glCopyTexImage copy the window into an
+/// object (block 0x2031 with the source at the rectangle's top row,
+/// operands replayed from a guest trace) and then read the object top row
+/// first, with no bottom-up bit, yet expect the lowest row of the
+/// rectangle first. Before this the host got the top row where it wanted
+/// the bottom one.
+#[test]
+fn a_copy_from_the_window_into_an_object_lists_the_rows_bottom_first() {
+    let (mut s, _) = window();
+    let base = 0x16b000;
+    let obj = s.object_select(base, 16);
+    assert!(obj >= 0);
+    // A 2x3 rectangle at (20, 221) down: row n holds n in its low byte.
+    for y in 0..3 {
+        for x in 0..2 {
+            pixel_write(&mut s, 20 + x, 221 + y, (x as u32) << 8 | y as u32);
+        }
+    }
+    s.draw_mask = 4;
+    copy_block(&mut s, [0x3000_0019, 221 << 16 | 20, 0x8020_0050, 3 << 16 | 2, 0x9263_3042, base, 0, 0x3802_204b]);
+    for y in 0..3u32 {
+        for x in 0..2u32 {
+            assert_eq!(s.object_load(obj, x, y), x << 8 | (2 - y), "object ({x}, {y})");
+        }
+    }
+}
+
+/// The copy that ends a signed-type glDrawPixels, replayed from a guest trace
+/// (signed BYTE, RGBA, 1 pixel wide, 2 rows). The raw bursts reach an object
+/// as the unsigned type's would: row 0 holds the bytes 0x91 0xec 0x47 0xa2
+/// (signed -111, -20, 71, -94), row 1 0x05 0x60 0xbb 0x16. The library then
+/// programs block 0x203b with 0x2000, 0x0001 in each of R, G, B and A and
+/// copies the object to the window (operands as traced).
+///
+/// Two things must happen. The rows land bottom first (row 1 above row 0),
+/// and the pass reads the bytes as signed: 2c + 1 of GL's conversion, clamped.
+/// Before this the window held the raw bytes with the rows the wrong way up,
+/// which a test pattern with 29 per row reads as raw + 0x74 for a 4-row image.
+///
+/// The expected bytes are INFERRED from the 3.12 words (2 * c / 255 + 1/4096,
+/// rounded), one below GL's 2c + 1 where that is positive.
+#[test]
+fn a_signed_type_copy_lists_rows_bottom_first_and_applies_the_signed_pass() {
+    let (mut s, _) = window();
+    let base = 0x16b000;
+    let obj = s.object_select(base, 16);
+    assert!(obj >= 0);
+    s.object_store(obj, 0, 0, 0x91ec_47a2);
+    s.object_store(obj, 0, 1, 0x0560_bb16);
+    s.draw_mask = 1;
+
+    // Identity filter first: raw bytes, only the rows move.
+    copy_block(&mut s, [base, 0, 0x0050_2020, 2 << 16 | 1, 0x8002_500b, 0x3000_0010, 20 << 16 | 50, 0x3863_204b]);
+    assert_eq!(pixel(&s, 0, 50, 20), 0x0560_bb16, "row 1 is the rectangle's top row");
+    assert_eq!(pixel(&s, 0, 50, 21), 0x91ec_47a2);
+
+    for c in 0..4 {
+        s.tex_scale_bias[c * 2] = 0x2000;
+        s.tex_scale_bias[c * 2 + 1] = 0x0001;
+    }
+    // A source without alpha programs the alpha bias 0x1000: alpha reads 1.0.
+    s.tex_scale_bias[7] = 0x1000;
+    copy_block(&mut s, [base, 0, 0x0050_2020, 2 << 16 | 1, 0x8002_500b, 0x3000_0010, 20 << 16 | 50, 0x3863_204b]);
+    assert_eq!(pixel(&s, 0, 50, 21) & 0xff, 0xff, "alpha lane");
+    s.tex_scale_bias[7] = 1;
+    copy_block(&mut s, [base, 0, 0x0050_2020, 2 << 16 | 1, 0x8002_500b, 0x3000_0010, 20 << 16 | 50, 0x3863_204b]);
+    assert_eq!(pixel(&s, 0, 50, 20), 0x0a_c0_00_2c, "5, 96, -69, 22");
+    assert_eq!(pixel(&s, 0, 50, 21), 0x00_00_8e_00, "-111, -20, 71, -94");
+}
+
+/// A copy from the window through a non-identity scale and bias reads its
+/// bytes as unsigned: scale 0.5 and bias 0.25 (3.12 words 0x0800, 0x0400)
+/// give b / 2 + 63.75 per lane, rounded, and a lane the filter does not change
+/// (scale 1.0, bias 0) keeps its byte. INFERRED arithmetic: the 3.12 words
+/// are the only datasheet-established part.
+#[test]
+fn a_copy_from_the_window_applies_the_programmed_scale_and_bias_unsigned() {
+    let (mut s, _) = window();
+    let base = 0x16b000;
+    let obj = s.object_select(base, 16);
+    assert!(obj >= 0);
+    pixel_write(&mut s, 70, 21, 0x00ff_8010);
+    s.draw_mask = 4;
+    for c in [0, 1, 2] {
+        s.tex_scale_bias[c * 2] = 0x0800;
+        s.tex_scale_bias[c * 2 + 1] = 0x0400;
+    }
+    copy_block(&mut s, [0x3000_0019, 21 << 16 | 70, 0x8020_0050, 1 << 16 | 1, 0x9263_3042, base, 0, 0x3802_204b]);
+    // 0x00 -> 64, 0xff -> 191, 0x80 -> 128, alpha lane untouched (0x10).
+    assert_eq!(s.object_load(obj, 0, 0), 0x40bf_8010);
+}
+
 /// The read buffer register (0x609) names the drawable a read comes from.
 fn bind_read_drawable(s: &mut Board, word: u32) {
     cmd(s, select(ODSY_SWAP_SYNC_B));
@@ -752,4 +856,178 @@ fn an_integer_pixel_through_a_logic_op_or_to_the_id_planes_dirties_its_row() {
     s.dest_buffer_word = ODSY_DEST_ID_PLANES;
     s.paint_integer(40, 130, true, 0x10);
     assert_eq!(lines(&s), vec![130], "an id-plane pixel");
+}
+
+/// Luminance sources reach the board under tags the byte-stream tables did
+/// not pair with them. Replayed from guest traces of the GL test suite's
+/// 13x5 draws (box 40,206 to 53,201, the y range decreasing): 16-bit
+/// luminance (0x62) arrives as two 16-bit values a word under tag 0x12,
+/// 16-bit luminance-alpha (0x68) as a luminance and an alpha half a pixel,
+/// and 8-bit luminance-alpha (0x48) as byte pairs under tag 0x11.
+#[test]
+fn luminance_images_land_under_the_tags_the_library_sends_them_with() {
+    let (mut s, _) = window();
+
+    // LUMINANCE/UNSIGNED_SHORT: eight pixels, then the five that finish the row.
+    burst_image_groups(
+        &mut s,
+        (40, 206, 53, 205),
+        &[
+            (0x0f00_1262, &[(ODSY_IMAGE_FMT_RGBA16, &[0x1111_4646, 0x7b7b_b0b0, 0xe5e5_1a1a, 0x4f4f_8484])]),
+            (0x0fa5_1262, &[(ODSY_IMAGE_FMT_RGBA16, &[0xb9b9_eeee, 0x2323_5858, 0x8d8d_5a5a])]),
+        ],
+    );
+    for (x, l) in [0x11, 0x46, 0x7b, 0xb0, 0xe5, 0x1a, 0x4f, 0x84, 0xb9, 0xee, 0x23, 0x58, 0x8d].into_iter().enumerate() {
+        assert_eq!(pixel(&s, 0, 40 + x as i32, 205), l << 24 | l << 16 | l << 8 | 0xff, "pixel {x}");
+    }
+
+    // LUMINANCE_ALPHA/UNSIGNED_SHORT: a luminance half then an alpha half.
+    burst_image_groups(&mut s, (40, 210, 43, 211), &[(0x0f00_1268, &[(ODSY_IMAGE_FMT_RGBA16, &[0x1111_6c6c, 0x4646_a1a1])])]);
+    assert_eq!(pixel(&s, 0, 40, 210), 0x1111_116c);
+    assert_eq!(pixel(&s, 0, 41, 210), 0x4646_46a1);
+
+    // LUMINANCE_ALPHA/UNSIGNED_BYTE: a luminance and an alpha byte a pixel,
+    // under the RGB tag; the last word of a 13-pixel row carries two pad bytes.
+    burst_image_groups(
+        &mut s,
+        (40, 212, 53, 213),
+        &[(0x0fd5_1248, &[(ODSY_IMAGE_FMT_RGB, &[0x116c_46a1, 0x7bd6_b00b, 0xe540_1a75, 0x4faa_84df, 0xb914_ee49, 0x237e_58b3, 0x8de8_5a5a])])],
+    );
+    assert_eq!(pixel(&s, 0, 40, 212), 0x1111_116c);
+    assert_eq!(pixel(&s, 0, 41, 212), 0x4646_46a1);
+    assert_eq!(pixel(&s, 0, 52, 212), 0x8d8d_8de8);
+}
+
+/// A 16-bit luminance texture upload: the library writes the level into a
+/// scratch object (box 0,0 to 16,8, destination base 0x100800 on the V6, the
+/// first row's eight words in two four-word bursts under tag 0x12, replayed
+/// from the guest trace of the GL test suite's tex/RGBA8/LUMINANCE/
+/// UNSIGNED_SHORT case). The bursts used to be refused, which left the level
+/// holding whatever the object held before and the case failing on a board
+/// whose object memory started out different.
+#[test]
+fn a_16_bit_luminance_texture_upload_lands_in_its_object() {
+    let (mut s, _) = window();
+    let base = 0x10_0800;
+    let obj = s.object_select(base, 16);
+    assert!(obj >= 0);
+    for x in 0..16 {
+        s.object_store(obj, x, 0, 0xffff_ffff);
+    }
+    s.dest_base = base;
+    burst_image_groups(
+        &mut s,
+        (0, 0, 16, 8),
+        &[(
+            0x0f00_1262,
+            &[
+                (ODSY_IMAGE_FMT_RGBA16, &[0x1111_4646, 0x7b7b_b0b0, 0xe5e5_1a1a, 0x4f4f_8484]),
+                (ODSY_IMAGE_FMT_RGBA16, &[0xb9b9_eeee, 0x2323_5858, 0x8d8d_c2c2, 0xf7f7_2c2c]),
+            ],
+        )],
+    );
+    let row = [0x11, 0x46, 0x7b, 0xb0, 0xe5, 0x1a, 0x4f, 0x84, 0xb9, 0xee, 0x23, 0x58, 0x8d, 0xc2, 0xf7, 0x2c];
+    for (x, l) in row.into_iter().enumerate() {
+        assert_eq!(s.object_load(obj, x as u32, 0), l << 24 | l << 16 | l << 8 | 0xff, "texel {x}");
+    }
+}
+
+/// A row whose data does not fill its last word leaves pad in that word,
+/// and the next row starts on a fresh word. Replayed from guest traces of
+/// the GL test suite's draws (box 40,206 to 53,201, the y range
+/// decreasing, so rows run from y 205 down). The pad is 0x5a; the row
+/// that follows used to start with it.
+#[test]
+fn a_row_that_ends_inside_a_word_drops_the_rest_of_the_word() {
+    let (mut s, _) = window();
+    let tag = ODSY_IMAGE_FMT_RGBA16;
+
+    // RGB/UNSIGNED_SHORT (0x69): 13 pixels are 39 halves, so the 20th word
+    // of the row carries one pad half.
+    burst_image_groups(
+        &mut s,
+        (40, 206, 53, 204),
+        &[
+            (
+                0x0f00_1069,
+                &[(
+                    tag,
+                    &[
+                        0x1111_6c6c, 0xc7c7_4646, 0xa1a1_fcfc, 0x7b7b_d6d6, 0x3131_b0b0, 0x0b0b_6666, 0xe5e5_4040, 0x9b9b_1a1a, 0x7575_d0d0, 0x4f4f_aaaa, 0x0505_8484,
+                        0xdfdf_3a3a,
+                    ],
+                )],
+            ),
+            (
+                0x0fa5_1069,
+                &[
+                    (tag, &[0xb9b9_1414, 0x6f6f_eeee, 0x4949_a4a4, 0x2323_7e7e, 0xd9d9_5858, 0xb3b3_0e0e, 0x8d8d_e8e8, 0x4343_5a5a]),
+                    (
+                        tag,
+                        &[
+                            0x2e2e_8989, 0xe4e4_6a6a, 0xc5c5_2020, 0xa6a6_0101, 0x5c5c_e2e2, 0x3d3d_9898, 0x1e1e_7979, 0xd4d4_5a5a, 0xb5b5_1010, 0x9696_f1f1, 0x4c4c_d2d2,
+                            0x2d2d_8888,
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    );
+    assert_eq!(pixel(&s, 0, 40, 205), 0x116c_c7ff);
+    assert_eq!(pixel(&s, 0, 52, 205), 0x8de8_43ff);
+    assert_eq!(pixel(&s, 0, 40, 204), 0x2e89_e4ff);
+    assert_eq!(pixel(&s, 0, 41, 204), 0x6ac5_20ff);
+
+    // RED/UNSIGNED_SHORT (0x64): 13 halves, one pad half.
+    burst_image_groups(
+        &mut s,
+        (40, 216, 53, 214),
+        &[
+            (0x0f00_1064, &[(tag, &[0x1111_4646, 0x7b7b_b0b0, 0xe5e5_1a1a, 0x4f4f_8484])]),
+            (
+                0x0fa5_1064,
+                &[(tag, &[0xb9b9_eeee, 0x2323_5858, 0x8d8d_5a5a]), (tag, &[0x2e2e_6a6a, 0xa6a6_e2e2, 0x1e1e_5a5a, 0x9696_d2d2])],
+            ),
+        ],
+    );
+    assert_eq!(pixel(&s, 0, 52, 215), 0x8d00_00ff);
+    assert_eq!(pixel(&s, 0, 40, 214), 0x2e00_00ff);
+    assert_eq!(pixel(&s, 0, 41, 214), 0x6a00_00ff);
+
+    // RGB/UNSIGNED_BYTE (0x49), 93 pixels a row: 279 bytes, one pad byte,
+    // the row sent as five 12-word bursts and a 10-word one.
+    let full: &[(u32, &[u32])] = &[
+        (
+            ODSY_IMAGE_FMT_RGB,
+            &[0x116c_c746, 0xa1fc_7bd6, 0x31b0_0b66, 0xe540_9b1a, 0x75d0_4faa, 0x0584_df3a, 0xb914_6fee, 0x49a4_237e, 0xd958_b30e, 0x8de8_43c2, 0x1d78_f752, 0xad2c_87e2],
+        ),
+        (
+            ODSY_IMAGE_FMT_RGB,
+            &[0x61bc_1796, 0xf14c_cb26, 0x8100_5bb6, 0x3590_eb6a, 0xc520_9ffa, 0x55d4_2f8a, 0x0964_bf3e, 0x99f4_73ce, 0x29a8_035e, 0xdd38_9312, 0x6dc8_47a2, 0xfd7c_d732],
+        ),
+        (
+            ODSY_IMAGE_FMT_RGB,
+            &[0xb10c_67e6, 0x419c_1b76, 0xd150_ab06, 0x85e0_3bba, 0x1570_ef4a, 0xa524_7fda, 0x59b4_0f8e, 0xe944_c31e, 0x79f8_53ae, 0x2d88_e362, 0xbd18_97f2, 0x4dcc_2782],
+        ),
+        (
+            ODSY_IMAGE_FMT_RGB,
+            &[0x015c_b736, 0x91ec_6bc6, 0x21a0_fb56, 0xd530_8b0a, 0x65c0_3f9a, 0xf574_cf2a, 0xa904_5fde, 0x3994_136e, 0xc948_a3fe, 0x7dd8_33b2, 0x0d68_e742, 0x9d1c_77d2],
+        ),
+        (
+            ODSY_IMAGE_FMT_RGB,
+            &[0x51ac_0786, 0xe13c_bb16, 0x71f0_4ba6, 0x2580_db5a, 0xb510_8fea, 0x45c4_1f7a, 0xf954_af2e, 0x89e4_63be, 0x1998_f34e, 0xcd28_8302, 0x5db8_3792, 0xed6c_c722],
+        ),
+    ];
+    let tail: &[(u32, &[u32])] = &[
+        (ODSY_IMAGE_FMT_RGB, &[0xa1fc_57d6, 0x318c_0b66, 0xc140_9bf6, 0x75d0_2baa, 0x0560_df3a, 0x9514_6fca, 0x49a4_ff7e, 0xd934_b30e, 0x69e8_439e, 0x1d78_d35a]),
+        (
+            ODSY_IMAGE_FMT_RGB,
+            &[0x2e89_e46a, 0xc520_a601, 0x5ce2_3d98, 0x1e79_d45a, 0xb510_96f1, 0x4cd2_2d88, 0x0e69_c44a, 0xa500_86e1, 0x3cc2_1d78, 0xfe59_b43a, 0x95f0_76d1, 0x2cb2_0d68],
+        ),
+    ];
+    burst_image_groups(&mut s, (40, 226, 133, 224), &[(0x0f00_1049, full), (0x0fd3_1049, tail)]);
+    assert_eq!(pixel(&s, 0, 40, 225), 0x116c_c7ff);
+    assert_eq!(pixel(&s, 0, 132, 225), 0x1d78_d3ff);
+    assert_eq!(pixel(&s, 0, 40, 224), 0x2e89_e4ff);
+    assert_eq!(pixel(&s, 0, 41, 224), 0x6ac5_20ff);
 }
