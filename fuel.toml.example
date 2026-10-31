@@ -16,9 +16,9 @@ serial_port_b = 18881
 
 [machine]
 profile = "fuel_ip34"
-# Required: names the R14000. The machine always runs its one R14000 at
-# 500 MHz with a 2 MiB secondary cache; other values are refused.
-cpu = "r14000"
+# Required: names the R10000 family. The machine always runs its one
+# R14000 at 500 MHz with a 2 MiB secondary cache; other values are refused.
+cpu = "r10000"
 
 [graphics]
 board = "none"
