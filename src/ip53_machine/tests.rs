@@ -163,3 +163,80 @@ fn the_poll_retires_lifted_pages_once_an_interval() {
     assert_eq!(board.last_retire.load(Ordering::SeqCst), RETIRE_INTERVAL_NS);
     board.running.store(false, Ordering::SeqCst);
 }
+
+fn on_a_big_stack(f: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap();
+}
+
+/// A board with a payload of recognisable words, and its first bank
+/// enabled over the reset window, as the PROM leaves it once memory is up.
+fn board_with_ram_over_the_prom() -> (TezroBoard, Vec<u8>) {
+    let payload: Vec<u8> = (0..0x2000u32).flat_map(|i| (0x5000_0000 | i).to_be_bytes()).collect();
+    let board = TezroBoard::with_config(TezroBoardConfig {
+        payload: &payload,
+        clock: Arc::new(|| 0),
+        flash_path: None,
+        station_mac: L1Config::default().mac,
+        timekeeper: Arc::new(Ds1744::new(YearBase::From(1968)).unwrap()),
+        memory: &MemoryPopulation::default(),
+        cpus: 1,
+    })
+    .unwrap();
+    // Banks 0 and 1 enabled at 1 GiB each: bank 0 covers 0x1fc0_0000.
+    assert_eq!(board.node.md.md_bus().write64(8, 0x53), BUS_OK);
+    (board, payload)
+}
+
+/// With RAM over the reset window, the PROM's noncoherent cached references
+/// (cache algorithm 3, as KSEG0 and xkphys 0x98 give) still read the PROM,
+/// coherent ones (xkphys 0xa8) read RAM, and the uncached views keep the
+/// PROM they map there. The plane bit keeps the two kinds of cached line
+/// apart in the cache.
+#[test]
+fn cached_prom_references_stay_on_the_prom_when_ram_covers_it() {
+    // An executor is built on the stack; give it room.
+    on_a_big_stack(|| {
+        let (board, payload) = board_with_ram_over_the_prom();
+        let word = |i: usize| u64::from(u32::from_be_bytes(payload[i * 4..i * 4 + 4].try_into().unwrap()));
+        // RAM under the window holds something else.
+        let ram = board.node.md.dma_view();
+        assert_eq!(ram.write64(0x1fc0_0010, 0x1111_2222_3333_4444), BUS_OK);
+        let mut cpu = build_cpu(&board);
+        cpu.core.cp0_status |= crate::cpu::mips_core::STATUS_KX;
+        cpu.core.cp0_config = (cpu.core.cp0_config & !7) | 3;
+        cpu.resync_privilege_state();
+        let read = |cpu: &mut TezroCpu, va: u64| cpu.debug_read(va, 4).unwrap();
+        assert_eq!(read(&mut cpu, 0x9800_0000_1fc0_0010), word(4), "cache algorithm 3 reads the PROM");
+        assert_eq!(read(&mut cpu, 0xffff_ffff_9fc0_0010), word(4), "KSEG0 with K0 = 3 reads the PROM");
+        assert_eq!(read(&mut cpu, 0xa800_0000_1fc0_0010), 0x1111_2222, "a coherent reference reads RAM");
+        assert_eq!(read(&mut cpu, 0xffff_ffff_bfc0_0010), word(4), "KSEG1 reads the PROM");
+        assert_eq!(read(&mut cpu, 0x9600_0000_1fc0_0010), 0x1111_2222, "uncached memory space reads RAM");
+        // Outside the payload the window does not apply.
+        let end = 0x1fc0_0000 + payload.len() as u64;
+        assert_eq!(ram.write64(end, 0x5555_6666_7777_8888), BUS_OK);
+        assert_eq!(read(&mut cpu, 0x9800_0000_0000_0000 | end), 0x5555_6666);
+    });
+}
+
+/// The CPU tags a cache algorithm 3 reference in the window with the plane
+/// bit and leaves every other reference alone; a board that sets no window
+/// sees no plane at all.
+#[test]
+fn only_algorithm_3_inside_the_window_takes_the_plane() {
+    // An executor is built on the stack; give it room.
+    on_a_big_stack(|| {
+        let (board, payload) = board_with_ram_over_the_prom();
+        let mut cpu = build_cpu(&board);
+        cpu.core.cp0_status |= crate::cpu::mips_core::STATUS_KX;
+        cpu.resync_privilege_state();
+        let phys = |cpu: &mut TezroCpu, va: u64| cpu.debug_translate(va).phys;
+        assert_eq!(phys(&mut cpu, 0x9800_0000_1fc0_0000), PROM_PLANE | 0x1fc0_0000);
+        assert_eq!(phys(&mut cpu, 0xa800_0000_1fc0_0000), 0x1fc0_0000);
+        assert_eq!(phys(&mut cpu, 0x9000_0000_1fc0_0000), 0x1fc0_0000);
+        assert_eq!(phys(&mut cpu, 0x9800_0000_1fbf_fff8), 0x1fbf_fff8);
+        let end = 0x1fc0_0000 + payload.len() as u64;
+        assert_eq!(phys(&mut cpu, 0x9800_0000_0000_0000 | end), end);
+        cpu.cached_plane = None;
+        assert_eq!(phys(&mut cpu, 0x9800_0000_1fc0_0000), 0x1fc0_0000);
+    });
+}
