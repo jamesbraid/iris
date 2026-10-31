@@ -3983,6 +3983,33 @@ mod tests {
             .unwrap();
     }
 
+    /// A board's cached plane marks noncoherent cached references (cache
+    /// algorithm 3) inside its window, from KSEG0, xkphys and mapped pages
+    /// alike, and nothing else: coherent and uncached references and
+    /// addresses outside the window keep their plain address.
+    #[test]
+    fn the_cached_plane_marks_only_algorithm_3_inside_its_window() {
+        let mem = Arc::new(MockMemory::new());
+        let bus: Arc<dyn BusDevice> = mem.clone();
+        let mut exec = MipsExecutor::<PassthroughTlb, crate::cpu::mips_cache_shadow::R10000ShadowCache>::new(
+            bus, PassthroughTlb::default(), &MipsCpuConfig::indy());
+        disable_jitv2(&mut exec);
+        exec.core.cp0_status |= crate::cpu::mips_core::STATUS_KX;
+        exec.core.cp0_config = (exec.core.cp0_config & !7) | 3;
+        exec.resync_privilege_state();
+        const PLANE: u64 = 1 << 56;
+        assert_eq!(exec.debug_translate(0x9800_0000_1fc0_0000).phys, 0x1fc0_0000, "no plane by default");
+        exec.cached_plane = Some((0x1fc0_0000, 0x1000, PLANE));
+        let phys = |exec: &mut MipsExecutor<PassthroughTlb, _>, va: u64| exec.debug_translate(va).phys;
+        assert_eq!(phys(&mut exec, 0x9800_0000_1fc0_0ff8), PLANE | 0x1fc0_0ff8, "xkphys algorithm 3");
+        assert_eq!(phys(&mut exec, 0xffff_ffff_9fc0_0010), PLANE | 0x1fc0_0010, "KSEG0, K0 = 3");
+        assert_eq!(phys(&mut exec, 0xa800_0000_1fc0_0010), 0x1fc0_0010, "coherent");
+        assert_eq!(phys(&mut exec, 0x9000_0000_1fc0_0010), 0x1fc0_0010, "uncached");
+        assert_eq!(phys(&mut exec, 0xffff_ffff_bfc0_0010), 0x1fc0_0010, "KSEG1");
+        assert_eq!(phys(&mut exec, 0x9800_0000_1fc0_1000), 0x1fc0_1000, "past the window");
+        assert_eq!(phys(&mut exec, 0x9800_0000_1fbf_fff8), 0x1fbf_fff8, "before the window");
+    }
+
     /// An uncached store the bus refuses is posted on the R10000 family: the
     /// processor gets no completion for a write, so it takes no Data Bus
     /// Error (R10000 User's Manual v2.0). The R4400 still takes one.

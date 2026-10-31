@@ -1040,6 +1040,15 @@ pub struct MipsExecutor<T: Tlb, C: CpuModel> {
     /// 0x8000_0000 that would otherwise reach the PCI window the bus decodes
     /// there. None on the other machines.
     pub phys_alias: Option<(u64, u64, u64)>,
+    /// A physical window whose noncoherent cached references (cache
+    /// algorithm 3) the board answers on another plane, `(base, size,
+    /// plane)`: such a translation inside the window gets the `plane` bit,
+    /// which the board decodes to the window's other device. The IP35 reset
+    /// PROM uses it. The stock PROM keeps fetching cached code in its reset
+    /// window after it enables RAM there, and QEMU's IP35 compatibility
+    /// carrier serves algorithm 3 from the PROM while coherent references
+    /// reach RAM. None on the other machines.
+    pub cached_plane: Option<(u64, u64, u64)>,
     /// The physical address bits the board decodes, applied to mapped,
     /// XKPHYS and ERL-identity translations before [`Self::phys_alias`]. The
     /// CPU drives 36 or 40 bits, but the Indy, Indigo2 and O2 decode 32 and
@@ -2478,6 +2487,7 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             jitv2_dispatch_enabled: !matches!(std::env::var("IRIS_JIT_DISPATCH").as_deref(), Ok("off") | Ok("0")),
             batch_hook: None,
             phys_alias: None,
+            cached_plane: None,
             phys_mask: u64::MAX,
             #[cfg(feature = "developer")]
             hw_read_fixup_replay: None,
@@ -4465,7 +4475,8 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             // from Config.K0 — see `kseg0_cache_attr`)
             4 => {
                 if PRIV == PRIV_KERNEL {
-                    TranslateResult::ok((virt_addr32 & 0x1FFFFFFF) as u64, self.kseg0_cache_attr())
+                    let c = self.kseg0_cache_attr();
+                    TranslateResult::ok(self.plane((virt_addr32 & 0x1FFFFFFF) as u64, c), c)
                 } else {
                     if !DEBUG { self.core.cp0_badvaddr = virt_addr; }
                     TranslateResult::exc(addr_exc(access_type == AccessType::Write))
@@ -4554,7 +4565,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                         // bits_61_59 is the C field, with this model's meaning:
                         // the Octane's IRIX reaches memory through 0xa000... (C=4).
                         let c = Self::decode_cache_attr(bits_61_59 as u32);
-                        TranslateResult::ok(self.fold_phys(phys_addr), c)
+                        TranslateResult::ok(self.plane(self.fold_phys(phys_addr), c), c)
                     } else {
                         if !DEBUG { self.core.cp0_badvaddr = virt_addr; }
                         TranslateResult::exc(exec_exception(if access_type == AccessType::Write { EXC_ADES } else { EXC_ADEL }))
@@ -4574,7 +4585,10 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                         match (addr_32 >> 29) & 0x7 {
                             // ckseg0 — same Config.K0 control as the 32-bit
                             // KSEG0 arm; it is the same physical window.
-                            4 => return TranslateResult::ok((addr_32 & 0x1FFFFFFF) as u64, self.kseg0_cache_attr()),
+                            4 => {
+                                let c = self.kseg0_cache_attr();
+                                return TranslateResult::ok(self.plane((addr_32 & 0x1FFFFFFF) as u64, c), c);
+                            }
                             5 => return TranslateResult::ok((addr_32 & 0x1FFFFFFF) as u64, TR_UNCACHED),
                             // KSSEG/KSEG3 compat: TLB mapped. `xtlb=1` even
                             // though the address is 32-bit-shaped — we are only
@@ -4604,6 +4618,16 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             }
 
             _ => unreachable!(),
+        }
+    }
+
+    /// A translated physical address with its plane: [`Self::cached_plane`]'s
+    /// bit for a noncoherent cached reference inside its window.
+    #[inline(always)]
+    fn plane(&self, pa: u64, cache_attr: u32) -> u64 {
+        match self.cached_plane {
+            Some((base, size, plane)) if cache_attr == TR_CACHEABLE && pa.wrapping_sub(base) < size => pa | plane,
+            _ => pa,
         }
     }
 
@@ -4646,7 +4670,8 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                     // ok_mapped, not ok: this came from the TLB, so the nutlb
                     // fill needs TR_MAPPED plus the entry's G bit to decide
                     // whether to ASID-qualify the tag it stores.
-                    TranslateResult::ok_mapped(self.fold_phys(phys_addr), cache_attr as u32, global)
+                    let c = cache_attr as u32;
+                    TranslateResult::ok_mapped(self.plane(self.fold_phys(phys_addr), c), c, global)
                 }
             }
             TlbResult::Miss { .. } => {
