@@ -1112,6 +1112,50 @@ mod tests {
         assert!(drawn > 10000, "the cases drew too little to compare: {drawn}");
     }
 
+    // Antialiased polygons visit the pixels of each row they can reach, not
+    // their whole bounding box, and draw the same: random states, and
+    // triangles with edges on pixel boundaries and corners at pixel corners.
+    #[test]
+    fn antialiased_polygons_match_the_whole_box() {
+        let mut drawn = 0;
+        for seed in 300..=340u64 {
+            for textured in [false, true] {
+                let scene = || {
+                    let mut b = case(seed, textured);
+                    let aligned = [
+                        [(10.0f32, 10.0f32), (50.0, 10.0), (10.0, 50.0)],
+                        [(20.0, 20.0), (21.0, 20.0), (20.0, 21.0)],
+                        [(30.0, 5.0), (30.5, 90.0), (31.0, 5.0)],
+                        [(5.0, 60.0), (100.0, 60.25), (50.0, 61.0)],
+                        [(60.0, 60.0), (90.0, 60.0), (60.0, 60.0)],
+                    ];
+
+                    b.polygon_smooth = true;
+                    for pts in aligned {
+                        let mut v = b.prims[0].clone();
+
+                        for (i, &(x, y)) in pts.iter().enumerate() {
+                            let o = &mut v[i * SGI_GL_VERTEX_FLOATS + SGI_GL_V_POSITION..];
+
+                            o[..4].copy_from_slice(&[x / BENCH_W as f32 * 2.0 - 1.0, y / BENCH_H as f32 * 2.0 - 1.0, 0.0, 1.0]);
+                        }
+                        b.prims.push(v);
+                    }
+                    b
+                };
+
+                raster_set_aa_whole_box(true);
+                let want = draw_bench(scene(), SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_SPANS);
+                raster_set_aa_whole_box(false);
+                let got = draw_bench(scene(), SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_SPANS);
+
+                compare(seed, "antialiased rows", &want, &got);
+                drawn += want.0.iter().filter(|&&c| c != 0).count();
+            }
+        }
+        assert!(drawn > 10000, "the cases drew too little to compare: {drawn}");
+    }
+
     // Textured fills, many in perspective, so that each quad takes its own
     // level of detail: the loops draw what the general path draws with the
     // same fixed-point sampler and the same quads.

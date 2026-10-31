@@ -162,9 +162,11 @@ pub enum Scene {
     /// Bilinear RGB blended over what is there, depth tested LESS and
     /// written (Smoke & Mirrors' glass).
     TexGlass,
+    /// Antialiased triangles, smooth shaded, blended and depth tested.
+    PolySmooth,
 }
 
-pub const ALL_SCENES: [Scene; 19] = [
+pub const ALL_SCENES: [Scene; 20] = [
     Scene::FlatFill,
     Scene::SmoothDepth,
     Scene::SmoothBlend,
@@ -184,6 +186,7 @@ pub const ALL_SCENES: [Scene; 19] = [
     Scene::TexStencilClip,
     Scene::TexQuads,
     Scene::TexGlass,
+    Scene::PolySmooth,
 ];
 
 /// One scene, built: the board, the draw state, the vertex lists of its
@@ -201,6 +204,8 @@ pub struct Bench {
     pub clears: usize,
     /// Fog by the draw state's mode rather than the board's own curve.
     pub builtin_fog: bool,
+    /// Polygons antialiased (the draw's own flag, not the state's).
+    pub polygon_smooth: bool,
 }
 
 fn identity() -> [f32; 16] {
@@ -287,6 +292,7 @@ impl Bench {
             pixels: 0.0,
             clears: 0,
             builtin_fog: false,
+            polygon_smooth: false,
         }
     }
 
@@ -408,6 +414,14 @@ impl Bench {
                 st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
                 b.tex = Some(BenchTexture::new(256, SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR, SGI_GL_RGBA));
                 tris(&mut b.prims, &mut b.pixels, 40.0, 1.5 / 256.0);
+            }
+            Scene::PolySmooth => {
+                st.depth_test = 1;
+                b.polygon_smooth = true;
+                st.blend = 1;
+                st.blend_src = SGI_GL_SRC_ALPHA;
+                st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
+                tris(&mut b.prims, &mut b.pixels, 40.0, 0.0);
             }
             Scene::TexGlass => {
                 st.depth_test = 1;
@@ -534,6 +548,7 @@ impl Bench {
         for v in self.prims.iter() {
             let mut d = GlDraw::new(self.mode, v.len() as u32 / floats, v, &self.st, &stipple);
 
+            d.polygon_smooth = self.polygon_smooth;
             self.rules.draw(&t, &mut self.board.gl_parts(None).0, &HashTexels, &mut d);
         }
     }
@@ -564,6 +579,7 @@ pub fn bench_count(scene: Scene) -> usize {
     match scene {
         Scene::BigQuads | Scene::BigTexTrilinear | Scene::Clear => 8,
         Scene::MidSmooth => 1000,
+        Scene::PolySmooth => 1000,
         Scene::Lines => 20000,
         _ => 4000,
     }

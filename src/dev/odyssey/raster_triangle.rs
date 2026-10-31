@@ -1006,6 +1006,53 @@ pub fn soft_aa_contains_pixel(v: &[SoftVertex], n: usize, px: i32, py: i32, scal
     true
 }
 
+thread_local! {
+    /// Visit every pixel of an antialiased polygon's bounding box, not just
+    /// the span of each row it can reach (tests and the benchmark).
+    pub static SOFT_AA_WHOLE_BOX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Select the whole bounding box for antialiased polygons drawn on this
+/// thread. Per thread, so that tests running at once cannot change each
+/// other's path.
+pub fn raster_set_aa_whole_box(whole: bool) {
+    SOFT_AA_WHOLE_BOX.with(|c| c.set(whole));
+}
+
+/// The pixels of row py that the convex polygon v (n vertices, in subpixels
+/// of scale to the pixel) can overlap, a pixel wider on each side: from the
+/// polygon's extent along the row's strip, py to py + 1. None where the
+/// strip holds none of the polygon. The clipping of a pixel's square
+/// against the polygon finds nothing beyond this (soft_aa_clip()).
+pub fn soft_aa_row_span(v: &[SoftVertex], n: usize, scale: f64, py: i32) -> Option<(i32, i32)> {
+    let (y0, y1) = (py as f64, py as f64 + 1.0);
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+
+    for i in 0..n {
+        let (ax, ay) = (v[i].x as f64 / scale, v[i].y as f64 / scale);
+        let (bx, by) = (v[(i + 1) % n].x as f64 / scale, v[(i + 1) % n].y as f64 / scale);
+
+        if ay >= y0 && ay <= y1 {
+            lo = lo.min(ax);
+            hi = hi.max(ax);
+        }
+        // Where the edge crosses either side of the strip.
+        for y in [y0, y1] {
+            if (ay < y) != (by < y) {
+                let x = ax + (y - ay) * (bx - ax) / (by - ay);
+
+                lo = lo.min(x);
+                hi = hi.max(x);
+            }
+        }
+    }
+    if !(lo <= hi) {
+        return None;
+    }
+    Some(((lo.floor() as i32).saturating_sub(1), (hi.floor() as i32).saturating_add(1)))
+}
+
 impl SoftDraw<'_> {
     /// Rasterize one clipped convex polygon once. Pixel-square clipping
     /// computes geometric coverage; centroid sampling is exact for affine
@@ -1048,8 +1095,22 @@ impl SoftDraw<'_> {
         }
         flat.index = flat_index;
 
+        let whole_box = SOFT_AA_WHOLE_BOX.with(|c| c.get());
         for py in py0..=py1 {
-            for px in px0..=px1 {
+            let (mut x0, mut x1) = (px0, px1);
+
+            if !whole_box {
+                // Pixels beyond the polygon's extent in this row are left
+                // with no overlap by the clipping below.
+                match soft_aa_row_span(v, n, scale, py) {
+                    Some((lo, hi)) => {
+                        x0 = x0.max(lo);
+                        x1 = x1.min(hi);
+                    }
+                    None => continue,
+                }
+            }
+            for px in x0..=x1 {
                 let coverage: f64;
                 let x: f64;
                 let y: f64;
