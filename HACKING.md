@@ -23,8 +23,11 @@ IP28 takes the R10000; the Octane the R10000, R12000 or R14000; the O2 the
 R5000, R10000 or R12000; the Fuel its 500 MHz R14000). Graphics is Newport
 (REX3), GR2 (XZ/Extreme) or IMPACT on the Indy and Indigo2, GBE on the O2, and
 Solid IMPACT on the Octane. Fuel has no graphics board and runs headless on
-its serial console. The graphical machines boot their real PROMs and IRIX 5.3
-or 6.5 to a desktop with networking.
+its serial console. It does have a PS/2 keyboard and mouse on its IOC3, fed
+from the host's input and the default as in the Fuel's manual, and `[fuel]
+usb_input = true` adds a USB keyboard and mouse on its OHCI controller;
+`ps2_input = false` turns PS/2 off. The graphical machines boot their real
+PROMs and IRIX 5.3 or 6.5 to a desktop with networking.
 
 It is **not cycle-accurate**, anywhere. IRIX is interrupt-driven and does not
 care how many cycles an instruction takes, so IRIS models behaviour
