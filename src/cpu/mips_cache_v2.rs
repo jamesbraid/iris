@@ -583,6 +583,10 @@ pub trait CpuModel: MipsCache {
     /// while FCSR.FS is clear. False: the operand traps whatever FS says. A
     /// quiet NaN operand traps either way.
     const FPU_DENORMAL_INPUT_NEEDS_FS_CLEAR: bool = false;
+    /// Plain CVT.L (not ROUND, TRUNC, CEIL or FLOOR.L) accepts only results
+    /// that fit 52 signed bits, `-2^51..2^51`, and takes Unimplemented
+    /// Operation for anything else, a NaN or an infinity included.
+    const FPU_CVT_L_LIMITED_TO_52_BITS: bool = false;
     /// Keep the R10000 family's uncached attribute, EntryLo bits 63:62, and
     /// put it on the bus for a mapped uncached access, as an unmapped xkphys
     /// access carries its address bits 58:57. NEC U10278EJ4V0UM section 11.3,
@@ -1477,6 +1481,12 @@ pub mod model {
         /// on it. Off: the operand traps whatever FS says. A quiet NaN
         /// operand traps either way.
         pub fpu_denormal_input_needs_fs_clear: bool,
+        /// Plain CVT.L (not ROUND, TRUNC, CEIL or FLOOR.L) accepts only
+        /// results that fit 52 signed bits, `-2^51..2^51`, and takes
+        /// Unimplemented Operation for anything else, a NaN or an infinity
+        /// included, leaving the destination untouched. Off: the full 64-bit
+        /// range, saturating with Invalid.
+        pub fpu_cvt_l_limited_to_52_bits: bool,
     }
 
     impl Profile {
@@ -1494,6 +1504,7 @@ pub mod model {
             narrow_stores_carry_gpr: false,
             cp0_diag_write_mask: 0,
             fpu_denormal_input_needs_fs_clear: false,
+            fpu_cvt_l_limited_to_52_bits: false,
         };
         /// The existing R10000 types (IP28, Octane, O2): family behaviour,
         /// none of the later approximations.
@@ -1548,6 +1559,8 @@ pub mod model {
                 cp0_diag_write_mask: 0x0403_cffb,
                 // QEMU's check_denormal_input_s tests FCSR.FS for ADD.S and DIV.S.
                 fpu_denormal_input_needs_fs_clear: true,
+                // QEMU's check_cvt_l_result, which sign-extends from 52 bits.
+                fpu_cvt_l_limited_to_52_bits: true,
                 ..profile(R14000)
             },
             _ => Profile::BASE,
@@ -3776,6 +3789,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
     const NARROW_STORES_CARRY_GPR: bool = model::profile(MODEL).narrow_stores_carry_gpr;
     const CP0_DIAG_WRITE_MASK: u32 = model::profile(MODEL).cp0_diag_write_mask;
     const FPU_DENORMAL_INPUT_NEEDS_FS_CLEAR: bool = model::profile(MODEL).fpu_denormal_input_needs_fs_clear;
+    const FPU_CVT_L_LIMITED_TO_52_BITS: bool = model::profile(MODEL).fpu_cvt_l_limited_to_52_bits;
     const NAME: &'static str = model::profile(MODEL).name;
 }
 

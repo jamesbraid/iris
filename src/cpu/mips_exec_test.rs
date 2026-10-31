@@ -840,6 +840,68 @@ mod tests {
         assert_eq!(trapped, Some(crate::cpu::mips_exec::EXC_FPE));
     }
 
+    /// CVT.L on the R16000 accepts only results of 52 signed bits (-2^51 up to
+    /// 2^51 - 1) and otherwise takes Unimplemented Operation with the
+    /// destination untouched, a NaN included. The other models keep the full
+    /// range, and TRUNC.L is not limited. Vectors from check_cvt_l in
+    /// tests/functional/mips64/roms/fpucond.c (single and double sources) in
+    /// jamesbraid/qemu-sgi-origami; the NaN case follows check_cvt_l_result in
+    /// target/mips/tcg/r10k_fpu.c, which refuses an `invalid` conversion.
+    #[test]
+    fn r16000_cvt_l_takes_only_52_bit_results() {
+        use crate::cpu::mips_cache_shadow::{R14000ShadowCache, R16000ShadowCache};
+        const SENTINEL: u64 = 0x1234_5678_9abc_def0;
+        /// `(trapped, FCSR, destination)` after one conversion of `source`.
+        fn run<C: CpuModel + From<Arc<dyn BusDevice>>>(
+            single: bool, funct: u32, source: u64,
+        ) -> (bool, u32, u64) {
+            let bus: Arc<dyn BusDevice> = Arc::new(MockMemory::new());
+            let cfg = MipsCpuConfig::for_model::<C>();
+            let mut exec = MipsExecutor::<PassthroughTlb, C>::new(bus, PassthroughTlb::default(), &cfg);
+            disable_jitv2(&mut exec);
+            exec.core.cp0_status |= STATUS_CU1 | STATUS_FR;
+            exec.update_fpr_mode();
+            exec.core.fpr[0] = source;
+            exec.core.fpr[2] = SENTINEL;
+            let fmt = if single { RS_S } else { RS_D };
+            let status = exec.exec(make_cop1_compute(fmt, 0, 0, 2, funct));
+            (status & EXEC_IS_EXCEPTION != 0, exec.core.read_fpu_control(31), exec.core.fpr[2])
+        }
+        // (single, source bits, result, refused)
+        let vectors: [(bool, u64, u64, bool); 8] = [
+            (false, 0xc320_0000_0000_0000, 0xfff8_0000_0000_0000, false), // -2^51
+            (false, 0x431f_ffff_ffff_fffc, 0x0007_ffff_ffff_ffff, false), // 2^51 - 1
+            (false, 0xc320_0000_0000_0002, 0, true),                      // -2^51 - 1
+            (false, 0x4320_0000_0000_0000, 0, true),                      // 2^51
+            (true, 0xd900_0000, 0xfff8_0000_0000_0000, false),
+            (true, 0x58ff_ffff, 0x0007_ffff_f800_0000, false),
+            (true, 0xd900_0001, 0, true),
+            (true, 0x5900_0000, 0, true),
+        ];
+        for (single, source, result, refused) in vectors {
+            let (trapped, fcsr, dest) = run::<R16000ShadowCache>(single, FUNCT_FCVT_L, source);
+            if refused {
+                assert!(trapped, "{source:#x} must trap");
+                assert_eq!((fcsr >> 12) & 0x3f, 0x20, "{source:#x}: cause E alone");
+                assert_eq!(dest, SENTINEL, "{source:#x}: destination untouched");
+            } else {
+                assert!(!trapped, "{source:#x} must complete");
+                assert_eq!(dest, result, "{source:#x}");
+            }
+            // The R14000 converts them all.
+            assert!(!run::<R14000ShadowCache>(single, FUNCT_FCVT_L, source).0, "R14000 {source:#x}");
+        }
+        // A NaN has no 52-bit result either; the older model saturates instead.
+        let nan = 0x7ff0_0000_0000_0001;
+        let (trapped, fcsr, dest) = run::<R16000ShadowCache>(false, FUNCT_FCVT_L, nan);
+        assert!(trapped && (fcsr >> 12) & 0x3f == 0x20 && dest == SENTINEL);
+        assert!(!run::<R14000ShadowCache>(false, FUNCT_FCVT_L, nan).0);
+        // TRUNC.L keeps the full 64-bit range on the R16000.
+        let (trapped, _, dest) = run::<R16000ShadowCache>(false, FUNCT_FTRUNC_L, 0x4330_0000_0000_0000);
+        assert!(!trapped);
+        assert_eq!(dest, 1 << 52);
+    }
+
     /// JIT store callouts must carry the same source register as the
     /// interpreter, and only for a model that asks for it.
     #[test]

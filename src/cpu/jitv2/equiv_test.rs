@@ -4496,6 +4496,46 @@ mod tests {
         }
     }
 
+    /// A model that limits CVT.L to 52-bit results must behave the same
+    /// compiled as interpreted: values inside the limit take the inline path,
+    /// everything else (outside it, a NaN, and every rounding mode but
+    /// nearest-even) the callout that refuses; TRUNC.L keeps the full range.
+    /// Source values are the vectors of check_cvt_l in
+    /// tests/functional/mips64/roms/fpucond.c (jamesbraid/qemu-sgi-origami).
+    #[test]
+    fn r16000_jit_limits_cvt_l_to_52_bit_results() {
+        use crate::cpu::mips_isa::{FUNCT_FCVT_L, FUNCT_FTRUNC_L, OP_COP1, RS_D, RS_S};
+        let sources: [(u32, u64); 9] = [
+            (RS_D, 0xc320_0000_0000_0000), // -2^51
+            (RS_D, 0x431f_ffff_ffff_fffc), // 2^51 - 1
+            (RS_D, 0xc320_0000_0000_0002), // -2^51 - 1
+            (RS_D, 0x4320_0000_0000_0000), // 2^51
+            (RS_D, 0x7ff0_0000_0000_0001), // NaN
+            (RS_D, 0x4330_0000_0000_0000), // 2^52
+            (RS_S, 0xd900_0000),
+            (RS_S, 0x5900_0000),
+            (RS_S, 0x4120_0000), // 10.0
+        ];
+        // FCSR.RM 0 (nearest even, inline) and 1 (toward zero, callout).
+        for (fmt, source) in sources {
+            for (funct, fcsr) in [(FUNCT_FCVT_L, 0), (FUNCT_FCVT_L, 1), (FUNCT_FTRUNC_L, 0)] {
+                let mut fpr = [0u64; 32];
+                fpr[1] = source;
+                fpr[3] = 0x1234_5678_9abc_def0;
+                let instr = make_r(OP_COP1, fmt, 0, 1, 3, funct);
+                let (interp, jit) = r16000_interpreter_and_jit(instr, fpr, fcsr)
+                    .expect("CVT.L and TRUNC.L must compile");
+                assert_eq!(jit, interp, "fmt {fmt:#x} source {source:#x} funct {funct:#x} fcsr {fcsr:#x}");
+            }
+        }
+        // The limit is observable: 2^51 is refused, the destination untouched.
+        let mut fpr = [0u64; 32];
+        fpr[1] = 0x4320_0000_0000_0000;
+        fpr[3] = 0x1234_5678_9abc_def0;
+        let (interp, jit) = r16000_interpreter_and_jit(make_r(OP_COP1, RS_D, 0, 1, 3, FUNCT_FCVT_L), fpr, 0).unwrap();
+        assert_eq!((jit.fpr[3], interp.fpr[3]), (0x1234_5678_9abc_def0, 0x1234_5678_9abc_def0));
+    }
+
     #[test]
     fn lwl_lwr_combine_to_a_full_unaligned_word_load_matches_interpreter() {
         // The canonical compiler-generated idiom for an unaligned word

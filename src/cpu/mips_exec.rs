@@ -1630,7 +1630,7 @@ unsafe extern "C" fn jit_cvt_to_int<T: Tlb, C: CpuModel>(
     rm: u32,
 ) -> u32 {
     let exec = unsafe { &mut *exec_from_core::<T, C>(ctx) };
-    cvt_to_int_and_commit(&mut exec.core, fs_reg, fd_reg, fr1 != 0, src_f64 != 0, dst_i64 != 0, rm as u8) as u32
+    cvt_to_int_and_commit::<C>(&mut exec.core, fs_reg, fd_reg, fr1 != 0, src_f64 != 0, dst_i64 != 0, rm as u8) as u32
 }
 
 /// Single-implementation CVT.S.W/D.W/S.L/D.L — see `cvt_int_to_float_and_commit`'s
@@ -1687,6 +1687,10 @@ unsafe extern "C" fn jit_lockstep_compare<T: Tlb, C: CpuModel>(ctx: *mut core::f
 /// TRUNC/CEIL/FLOOR pass a fixed mode instead — see `RM_*` usage at each
 /// call site).
 pub const RM_NEAREST_EVEN: u8 = 0;
+/// Set in the rounding-mode argument of `cvt_to_int_and_commit` by plain CVT.L,
+/// which rounds per FCSR.RM, to tell it from ROUND/TRUNC/CEIL/FLOOR.L. The mode
+/// is bits 1:0.
+pub(crate) const RM_PLAIN_CVT: u8 = 4;
 pub const RM_TOWARD_ZERO: u8 = 1;
 pub const RM_TOWARD_POS_INF: u8 = 2;
 pub const RM_TOWARD_NEG_INF: u8 = 3;
@@ -1957,7 +1961,13 @@ fn cvt_f64_to_int_by_value(x: f64, dst_bits: u32) -> (u64, bool, bool) {
 /// encoding (0=nearest-even, 1=toward-zero, 2=toward+inf, 3=toward-inf) —
 /// callers pass a fixed mode for ROUND/TRUNC/CEIL/FLOOR or FCSR's live low
 /// 2 bits for plain CVT.W/CVT.L.
-fn cvt_to_int_and_commit(core: &mut MipsCore, fs_reg: u32, fd_reg: u32, fr1: bool, src_f64: bool, dst_i64: bool, rm: u8) -> bool {
+///
+/// The plain CVT.L passes `RM_PLAIN_CVT` or'ed into `rm`, so a model that
+/// limits it (`CpuModel::FPU_CVT_L_LIMITED_TO_52_BITS`) can tell it from the
+/// fixed-mode forms that reach here with the same other arguments.
+fn cvt_to_int_and_commit<C: CpuModel>(core: &mut MipsCore, fs_reg: u32, fd_reg: u32, fr1: bool, src_f64: bool, dst_i64: bool, rm: u8) -> bool {
+    let plain_cvt = rm & RM_PLAIN_CVT != 0;
+    let rm = rm & !RM_PLAIN_CVT;
     let dst_bits = if dst_i64 { 64 } else { 32 };
     let (result, invalid, inexact) = if src_f64 {
         let bits = if fr1 { core.read_fpr_l(fs_reg) } else { read_fpr_l_fr0(core, fs_reg) };
@@ -1970,6 +1980,16 @@ fn cvt_to_int_and_commit(core: &mut MipsCore, fs_reg: u32, fd_reg: u32, fr1: boo
         let rounded = round_f32_to_int_mode(x, rm);
         cvt_f32_to_int_by_value(rounded, dst_bits)
     };
+
+    // A model that limits CVT.L refuses what does not fit 52 signed bits, a
+    // NaN or infinity included, before anything is written. ROUND/TRUNC/CEIL/
+    // FLOOR.L keep the full 64-bit range.
+    if C::FPU_CVT_L_LIMITED_TO_52_BITS && dst_i64 && plain_cvt
+        && (invalid || (result as i64) << 12 >> 12 != result as i64)
+    {
+        core.fpu_fcsr = (core.fpu_fcsr & !FCSR_CM) | FCSR_CE;
+        return true;
+    }
 
     core.fpu_fcsr &= !FCSR_CM;
     let write_result = |core: &mut MipsCore| {
@@ -8120,7 +8140,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     #[inline]
     fn fpu_cvt_to_int(&mut self, fs_reg: u32, fd_reg: u32, src_f64: bool, dst_i64: bool, rm: u8) -> ExecStatus {
         let fr1 = (self.core.cp0_status & STATUS_FR) != 0;
-        if cvt_to_int_and_commit(&mut self.core, fs_reg, fd_reg, fr1, src_f64, dst_i64, rm) {
+        if cvt_to_int_and_commit::<C>(&mut self.core, fs_reg, fd_reg, fr1, src_f64, dst_i64, rm) {
             let s = exec_exception(EXC_FPE);
             self.handle_exception(s)
         } else {
@@ -8162,7 +8182,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     fn exec_fcvt_l_s(&mut self, d: &DecodedInstr) -> ExecStatus {
         if (self.core.cp0_status & STATUS_CU1) == 0 { return self.cpu_unusable(1); }
         let fs_reg = d.rd as u32; let fd_reg = d.sa as u32;
-        self.fpu_cvt_to_int(fs_reg, fd_reg, false, true, (self.core.fpu_fcsr & 0x3) as u8)
+        self.fpu_cvt_to_int(fs_reg, fd_reg, false, true, (self.core.fpu_fcsr & 0x3) as u8 | RM_PLAIN_CVT)
     }
     // S-format compare (all 16 conditions share one handler; funct 0x30-0x3F)
     fn exec_fcc_s(&mut self, d: &DecodedInstr) -> ExecStatus {
@@ -8404,7 +8424,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     fn exec_fcvt_l_d(&mut self, d: &DecodedInstr) -> ExecStatus {
         if (self.core.cp0_status & STATUS_CU1) == 0 { return self.cpu_unusable(1); }
         let fs_reg = d.rd as u32; let fd_reg = d.sa as u32;
-        self.fpu_cvt_to_int(fs_reg, fd_reg, true, true, (self.core.fpu_fcsr & 0x3) as u8)
+        self.fpu_cvt_to_int(fs_reg, fd_reg, true, true, (self.core.fpu_fcsr & 0x3) as u8 | RM_PLAIN_CVT)
     }
     // D-format compare (all 16 conditions share one handler; funct 0x30-0x3F)
     fn exec_fcc_d(&mut self, d: &DecodedInstr) -> ExecStatus {
