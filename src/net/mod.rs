@@ -98,6 +98,9 @@ pub struct GatewayConfig {
     /// gateway): `rsh <gateway> cat|ls|echo|pwd`. Nothing is executed on the
     /// host. None disables it, and 514 is then relayed to the host like any port.
     pub rsh_dir: Option<std::path::PathBuf>,
+    /// How long a reply to a guest frame waits before it goes on the ring
+    /// (see `NatEngine::step`). Zero hands it over in the same pass.
+    pub reply_hold: std::time::Duration,
 }
 
 impl Default for GatewayConfig {
@@ -116,6 +119,7 @@ impl Default for GatewayConfig {
             nfs_pcap_ip:  None,
             tftp_dir:     None,
             rsh_dir:      None,
+            reply_hold:   engine::REPLY_HOLD,
         }
     }
 }

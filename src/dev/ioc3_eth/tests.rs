@@ -790,3 +790,103 @@ fn stopping_the_mac_joins_its_threads() {
     drop(eth);
     assert!(probe.upgrade().is_none());
 }
+
+/// A guest that does nothing but ACK: the whole host side of a lock-step
+/// TFTP read (transmit descriptor, NAT thread, built-in server, receive
+/// thread, receive ring), with the guest's own software left out. The
+/// round trip measured here is what the device and gateway add to every
+/// 512-byte block.
+fn tftp_block_round_trips(reply_hold: Duration) -> Vec<Duration> {
+    use crate::net::packet::{Ether, Ipv4Route};
+    const BLOCKS: u16 = 400;
+    const GUEST_IP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 0, 2, 2);
+
+    let root = std::env::temp_dir().join(format!("iris-ioc3-tftp-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let data: Vec<u8> = (0..BLOCKS as usize * 512 + 7).map(|i| (i % 251) as u8).collect();
+    std::fs::write(root.join("big"), &data).unwrap();
+
+    let gw = crate::net::GatewayConfig { tftp_dir: Some(root.clone()), reply_hold, ..crate::net::GatewayConfig::default() };
+    let (gw_mac, gw_ip) = (gw.gateway_mac, gw.gateway_ip);
+    let eth = Ioc3Eth::with_negotiation_delay(STATION, Duration::ZERO);
+    let mem = Arc::new(Mem(Mutex::new(vec![0; MEM_SIZE])));
+    eth.connect(mem.clone(), Box::new(|_| {}));
+    eth.attach(crate::net::Link::with_gateway(gw).unwrap().expect("NAT"));
+    let t = Rig { eth, mem, irq: Arc::new(Mutex::new(Vec::new())), sent: rtrb::RingBuffer::new(1).1, inject: rtrb::RingBuffer::new(1).0 };
+
+    // 512 receive entries over 32 buffers, reused as the guest consumes.
+    for i in 0..512u32 {
+        t.put(RX_RING + i * 8, &u64::from(RX_BUFS + (i % 32) * 0x800).to_be_bytes());
+    }
+    t.w(RX_RING_LO, RX_RING);
+    t.w(RX_CONSUME, 0);
+    t.w(RX_PRODUCE, (16 * 8) | RPIR_ARM);
+    t.w(MAC_CONTROL, MCR_RX_DMA_EN | MCR_RX_EN | (33 << MCR_RXOFF_SHIFT));
+    t.w(MAC_ADDR_LO, u32::from_le_bytes(STATION[..4].try_into().unwrap()));
+    t.w(MAC_ADDR_HI, u32::from(STATION[4]) | u32::from(STATION[5]) << 8);
+    t.tx_setup(0);
+    t.eth.start();
+
+    let route = Ipv4Route::new(gw_mac, STATION, GUEST_IP, gw_ip);
+    let mut tx_idx = 0u32;
+    let mut send = |t: &Rig, payload: &[u8]| {
+        let f = route.udp(tx_idx as u16 + 1, 4270, 69, payload);
+        assert!(f.len() <= 104, "fits the inline area");
+        t.desc(tx_idx % 128, f.len() as u32 | TXD_DATA_VALID, f.len() as u32, 0, 0, &f);
+        tx_idx += 1;
+        t.w(TX_PRODUCE, (tx_idx % 128) * 128);
+    };
+    // The next frame in the receive ring, as the guest driver would find it:
+    // spin on the buffer's valid bit (not on a register, which would contend
+    // with the receive thread for the device lock), read it, hand it back.
+    let mut rx_seen = 0u32;
+    let recv = |t: &Rig, rx_seen: &mut u32| -> Vec<u8> {
+        let end = Instant::now() + Duration::from_secs(5);
+        let buf = RX_BUFS + (*rx_seen % 32) * 0x800;
+        while t.get32(buf) & RXH_VALID == 0 {
+            assert!(Instant::now() < end, "no frame after {} received (tx {:?})", rx_seen, t.eth.counts());
+            std::hint::spin_loop();
+        }
+        let len = ((t.get32(buf) & RXH_BYTECNT_MASK) >> RXH_BYTECNT_SHIFT) as usize - 4;
+        let f = t.get(buf + 66, len);
+        t.put(buf, &[0; 4]);
+        *rx_seen = (*rx_seen + 1) % 512;
+        t.w(RX_PRODUCE, ((*rx_seen + 16) % 512) * 8 | RPIR_ARM);
+        f
+    };
+
+    let data_of = |f: &[u8], block: u16| -> Vec<u8> {
+        let udp = Ether::parse(f).and_then(|e| e.ipv4()).and_then(|i| i.udp()).expect("a UDP frame");
+        let p = udp.payload();
+        assert_eq!(&p[..4], &[0, 3, (block >> 8) as u8, block as u8], "DATA {}", block);
+        p[4..].to_vec()
+    };
+    send(&t, b"\x00\x01big\x00octet\x00");
+    let f = recv(&t, &mut rx_seen);
+    let mut got = data_of(&f, 1);
+    let mut rtts = Vec::new();
+    for block in 1..=BLOCKS {
+        let acked = Instant::now();
+        send(&t, &[0, 4, (block >> 8) as u8, block as u8]);
+        let f = recv(&t, &mut rx_seen);
+        rtts.push(acked.elapsed());
+        got.extend_from_slice(&data_of(&f, block + 1));
+    }
+    t.eth.stop();
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(got, data);
+    rtts.sort();
+    eprintln!("hold {:?}: round trip median {:?}, p90 {:?}, max {:?}",
+              reply_hold, rtts[rtts.len() / 2], rtts[rtts.len() * 9 / 10], rtts[rtts.len() - 1]);
+    rtts
+}
+
+/// The IOC3 asks the gateway for no reply hold: its interrupt status is
+/// write-one-to-clear and a completion landing between a read and the
+/// acknowledge is kept (see `a_completion_landing_on_a_set_bit_comes_back_as_an_edge`).
+/// Two thread hand-offs are all that is left on a block.
+#[test]
+fn a_tftp_block_round_trip_stays_in_the_tens_of_microseconds() {
+    let rtts = tftp_block_round_trips(Duration::ZERO);
+    assert!(rtts[rtts.len() / 2] < Duration::from_micros(100), "median {:?}", rtts[rtts.len() / 2]);
+}

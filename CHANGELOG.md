@@ -544,6 +544,16 @@ hashes are given where a change is easiest to understand by reading the commit.
   Windows). Lock-step exchanges paid that tick on every packet: the built-in
   TFTP server was capped near 450 KB/s on Linux and 30 KB/s on Windows, and
   NFS and DNS replies were delayed the same way.
+- **The Octane's gateway replies are no longer held back.** The hold above
+  exists for the Indy's HPC3 interrupt handling. The IOC3 keeps a completion
+  that lands between the driver's read of its interrupt status and the
+  acknowledge, so the Octane's Ethernet asks for no hold
+  (`GatewayConfig::reply_hold`). The host side of a lock-step TFTP block, from
+  the guest's ACK leaving the transmit ring to the next DATA in the receive
+  ring, went from a median 238 µs to 24 µs. IRIX's own time per block
+  (about 0.6 ms on an idle guest, several ms while the post-boot man-page
+  indexer runs) is unchanged. `IRIS_TFTP_TRACE` now also reports the mean ACK
+  round trip, which separates the two.
 - **A built-in rsh server at the gateway.** `[network] rsh_dir = "DIR"` (or
   `--rsh-dir DIR`) answers TCP 514 at the gateway with `cat`, `dd`, `ls`, `echo`
   and `pwd` on DIR, read-only, so the guest can pull files with

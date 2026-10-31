@@ -194,7 +194,7 @@ impl NatEngine {
             return Duration::from_millis(1);
         }
         if !self.next_pass.is_empty() {
-            return REPLY_HOLD;
+            return self.config.reply_hold;
         }
         let now = Instant::now();
         self.tcp_nat.values()
@@ -326,7 +326,7 @@ impl NatEngine {
         if self.ctl.dbg_tcp() {
             log_frame("<<", &frame);
         }
-        if self.handling_guest_frames {
+        if self.handling_guest_frames && !self.config.reply_hold.is_zero() {
             self.next_pass.push_back(frame);
         } else {
             self.to_guest.push_back(frame);

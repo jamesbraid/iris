@@ -402,7 +402,10 @@ impl OctaneMachine {
 
         // The Ethernet on the NAT gateway `[network]` describes.
         let (mut nat, mut frames) = (None, None);
-        let net = crate::net::GatewayConfig::from_network(&cfg.network());
+        let mut net = crate::net::GatewayConfig::from_network(&cfg.network());
+        // The IOC3 keeps a completion that lands between the driver's read of
+        // the interrupt status and its acknowledge, so replies need no hold.
+        net.reply_hold = std::time::Duration::ZERO;
         if let Some(link) = crate::net::Link::with_gateway(net.clone())? {
             eprintln!("iris: Octane Ethernet on NAT: gateway {}, guest {} (DHCP)", net.gateway_ip, net.client_ip);
             frames = Some(link.frames());

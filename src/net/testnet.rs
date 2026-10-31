@@ -1279,6 +1279,26 @@ fn tftp_blocks_are_not_paced_by_the_poll_tick() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// An adapter that asks for no reply hold gets the reply on the ring in the
+/// pass that handled the guest's frame, and the engine has nothing to come
+/// back for.
+#[test]
+fn a_zero_reply_hold_answers_in_the_same_pass() {
+    let root = tmp_dir("tftp-nohold");
+    std::fs::write(root.join("f"), pattern(600)).unwrap();
+    let mut net = TestNet::new(GatewayConfig {
+        tftp_dir: Some(root.clone()), reply_hold: Duration::ZERO, ..GatewayConfig::default() });
+    let gw = net.gw_ip;
+    let id = net.next_id();
+    let f = net.route_to(gw).udp(id, 4271, 69, b"\x00\x01f\x00octet\x00");
+    net.send_via_nic(f);
+    net.run_pass();
+    assert_eq!(net.inbox.len(), 1, "DATA 1 is on the ring after one pass");
+    assert_ne!(net.e.idle_timeout(), Duration::ZERO);
+    assert!(net.e.idle_timeout() >= Duration::from_millis(1), "nothing is held for a later pass");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn tftp_retransmits_through_the_service_timer() {
     let root = tmp_dir("tftp-rtx");
