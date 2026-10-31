@@ -2917,3 +2917,29 @@ mod ip7_ticket_tests {
         assert!(compare_delay_ns(0x10, 0x20, hz) > 40_000_000_000);
     }
 }
+
+impl crate::exp::RegRead for MipsCore {
+    fn read_reg(&self, target: &crate::exp::RegTarget) -> u64 {
+        use crate::exp::RegTarget;
+        match target {
+            RegTarget::Pc      => self.pc,
+            RegTarget::Hi      => self.hi,
+            RegTarget::Lo      => self.lo,
+            RegTarget::Gpr(i)  => self.read_gpr(*i),
+            RegTarget::Cp0(i)  => self.read_cp0_debug(*i),
+            RegTarget::Fpr(i)  => self.fpr[*i as usize],
+        }
+    }
+}
+
+/// Write a register a monitor command named (see `exp::parse_reg_target`).
+pub fn write_reg_target(target: &crate::exp::RegTarget, core: &mut MipsCore, val: u64) {
+    match target {
+        crate::exp::RegTarget::Pc      => core.pc = val,
+        crate::exp::RegTarget::Hi      => core.hi = val,
+        crate::exp::RegTarget::Lo      => core.lo = val,
+        crate::exp::RegTarget::Gpr(i)  => core.write_gpr(*i, val),
+        crate::exp::RegTarget::Cp0(i)  => core.write_cp0(*i, val),
+        crate::exp::RegTarget::Fpr(i)  => core.fpr[*i as usize] = val,
+    }
+}
