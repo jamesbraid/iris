@@ -27,7 +27,7 @@ use parking_lot::Mutex;
 use crate::config::{CpuModel, MachineConfig};
 use crate::cpu::mips_core::CyclesPtr;
 use crate::cpu::mips_exec::{CpuDevice, MipsCpu, MipsCpuConfig, MipsExecutor};
-use crate::cpu::mips_cache_shadow::{R10000O2ShadowCache, R12000O2ShadowCache, R5000ShadowCache};
+use crate::cpu::mips_cache_shadow::R5000ShadowCache;
 use crate::cpu::mips_cache_v2::MipsCache;
 use crate::cpu::mips_tlb::MipsTlb;
 use crate::dev::crime_mem::O2Memory;
@@ -152,7 +152,9 @@ const SNAPSHOT_MACHINE: &str = "o2_ip32";
 /// release's, named as SGI shipped it. The O2 has no embedded PROM.
 pub const O2_PROM_FILE: &str = "ip32prom.rev4.18.bin";
 
-/// CP0 Count when `[clock] fixed_mhz` is unset: half of a 180 MHz CPU.
+/// CP0 Count when `[clock] fixed_mhz` is unset and the part is an R5000: half
+/// of a 180 MHz CPU. The R10000 family takes its clock from its configuration
+/// (`cpu_variants::VARIANTS`).
 pub const O2_COUNT_MHZ: f64 = 90.0;
 
 impl O2Machine {
@@ -233,14 +235,15 @@ impl O2Machine {
         let arcs_fpu = o2.arcs_fpu;
         // `[clock] fixed_mhz` is CP0 Count; the CPU clock the PROM measures
         // and reports is twice it.
-        let count_mhz = cfg.clock.fixed_mhz.unwrap_or(O2_COUNT_MHZ);
+        let variant = cfg.cpu_variant()?;
+        let count_mhz = cfg.clock.fixed_mhz.unwrap_or_else(|| variant.map_or(O2_COUNT_MHZ, |v| v.count_hz() as f64 / 1e6));
         let cpu_mhz = (count_mhz * 2.0).round().max(1.0) as u32;
         let boot = Arc::new(BootState::new());
-        let cpu: Arc<dyn CpuDevice> = match cfg.machine.cpu {
-            CpuModel::R10000 => Self::build_cpu::<R10000O2ShadowCache>(sysad, &timer_manager, arcs_fpu, cpu_mhz, boot.clone(), bus.ram.clone()),
-            CpuModel::R12000 => Self::build_cpu::<R12000O2ShadowCache>(sysad, &timer_manager, arcs_fpu, cpu_mhz, boot.clone(), bus.ram.clone()),
-            CpuModel::R5000 => Self::build_cpu::<R5000ShadowCache>(sysad, &timer_manager, arcs_fpu, cpu_mhz, boot.clone(), bus.ram.clone()),
-            CpuModel::R4400 | CpuModel::R14000 => return Err("an O2 has an R5000, R10000 or R12000 ([machine] cpu)".into()),
+        let cpu: Arc<dyn CpuDevice> = match variant {
+            Some(v) => crate::shadow_for!(v, C => Self::build_cpu::<C>(sysad, &timer_manager, arcs_fpu, cpu_mhz, boot.clone(), bus.ram.clone()),
+                                          _ => unreachable!("cpu_variants::shadow_for has a model for every O2 row")),
+            None if cfg.machine.cpu == CpuModel::R5000 => Self::build_cpu::<R5000ShadowCache>(sysad, &timer_manager, arcs_fpu, cpu_mhz, boot.clone(), bus.ram.clone()),
+            None => return Err("an O2 has an R5000, R10000 or R12000 ([machine] cpu)".into()),
         };
 
         // ppmem: the CPU's cache and the JIT reach RAM through the memory's

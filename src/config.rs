@@ -811,9 +811,15 @@ pub enum CpuModel {
     /// MIPS R14000, an R10000-family part: the Fuel's, and the Octane's
     /// revision 2.4 with 2 MiB of secondary cache.
     R14000,
+    /// MIPS R16000, the Tezro's part. Its cache model exists, but no machine
+    /// in this tree has a recorded configuration for it, so every profile
+    /// refuses it (`cpu_variants::unselectable_reason`) and it is not in
+    /// [`CpuModel::ALL`].
+    R16000,
 }
 
 impl CpuModel {
+    /// The parts a user can pick, in display order.
     pub const ALL: [Self; 5] = [Self::R4400, Self::R5000, Self::R10000, Self::R12000, Self::R14000];
 
     pub fn label(self) -> &'static str {
@@ -823,21 +829,7 @@ impl CpuModel {
             Self::R10000 => "MIPS R10000",
             Self::R12000 => "MIPS R12000",
             Self::R14000 => "MIPS R14000",
-        }
-    }
-
-    /// Whether `profile` shipped with this part. The R12000 and R14000 are
-    /// limited to the machines a source records them in (origami's datasheets):
-    /// the Octane2's R12000 (`ip30-r12000.md`), a dual-R14000 Octane
-    /// (`r14000.md`, IP30 identity and cache review), the O2's 300 MHz R12000
-    /// (`o2-hardware-findings.md`) and the Fuel's R14000 (`ip34-fuel.md`). No
-    /// source has a Fuel with another part. The older parts keep the choices
-    /// the machines already had.
-    pub fn fits(self, profile: MachineProfile) -> bool {
-        match self {
-            Self::R12000 => matches!(profile, MachineProfile::OctaneIp30 | MachineProfile::O2Ip32),
-            Self::R14000 => matches!(profile, MachineProfile::OctaneIp30 | MachineProfile::FuelIp34),
-            _ => true,
+            Self::R16000 => "MIPS R16000",
         }
     }
 }
@@ -868,7 +860,7 @@ impl CacheModel {
     /// Whether `cpu` runs the shadow cache under this setting.
     pub fn is_shadow(self, cpu: CpuModel) -> bool {
         match (cpu, self) {
-            (CpuModel::R10000 | CpuModel::R12000 | CpuModel::R14000, _) => true,
+            (CpuModel::R10000 | CpuModel::R12000 | CpuModel::R14000 | CpuModel::R16000, _) => true,
             (_, Self::Full) => false,
             (_, Self::Shadow) => true,
             (_, Self::Auto) => cfg!(feature = "jitv2"),
@@ -886,6 +878,13 @@ pub struct MachineSection {
     pub cpu: CpuModel,
     #[serde(default)]
     pub cache: CacheModel,
+    /// Pipeline clock of an R10000-family part, in MHz. Left out, the
+    /// machine's first listed configuration of `cpu` (`cpu_variants::VARIANTS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_mhz: Option<u32>,
+    /// Secondary cache of an R10000-family part, in MiB. Left out, as `cpu_mhz`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_l2_mib: Option<u32>,
     /// Processors fitted. More than one only on the Octane.
     #[serde(default = "default_cpus")]
     pub cpus: u8,
@@ -897,7 +896,7 @@ fn default_cpus() -> u8 {
 
 impl Default for MachineSection {
     fn default() -> Self {
-        Self { profile: MachineProfile::default(), cpu: CpuModel::default(), cache: CacheModel::default(), cpus: default_cpus() }
+        Self { profile: MachineProfile::default(), cpu: CpuModel::default(), cache: CacheModel::default(), cpu_mhz: None, cpu_l2_mib: None, cpus: default_cpus() }
     }
 }
 
@@ -2022,10 +2021,15 @@ impl MachineConfig {
         self.graphics.board.unwrap_or_else(|| GraphicsBoard::default_for(self.machine.profile))
     }
 
+    /// The shipped processor configuration `[machine]` names, or `None` for a
+    /// machine that does not constrain it (the Indy and Indigo2).
+    pub fn cpu_variant(&self) -> Result<Option<&'static crate::cpu_variants::CpuVariant>, String> {
+        let m = &self.machine;
+        crate::cpu_variants::select(m.profile, m.cpu, m.cpu_mhz, m.cpu_l2_mib)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
-        if !self.machine.cpu.fits(self.machine.profile) {
-            return Err(format!("{} is not a processor the {:?} shipped with", self.machine.cpu.label(), self.machine.profile));
-        }
+        self.cpu_variant()?;
         if self.machine.cpus != 1 && self.machine.profile != MachineProfile::OctaneIp30 {
             return Err(format!("[machine] cpus = {}: only the Octane has more than one processor", self.machine.cpus));
         }
@@ -2690,22 +2694,28 @@ mod export_tests {
     use super::*;
 
     /// The R12000 and R14000 are accepted only where a source records them.
+    /// (Clock and cache pairs are in `cpu_variants`' tests.)
     #[test]
     fn r12000_and_r14000_are_limited_to_the_machines_they_shipped_in() {
         for (profile, r12, r14) in [
             (MachineProfile::OctaneIp30, true, true),
             (MachineProfile::O2Ip32, true, false),
             (MachineProfile::FuelIp34, false, true),
-            (MachineProfile::IndyIp24, false, false),
-            (MachineProfile::Indigo2Ip22, false, false),
             (MachineProfile::Indigo2Ip28, false, false),
         ] {
-            assert_eq!(CpuModel::R12000.fits(profile), r12, "R12000 on {profile:?}");
-            assert_eq!(CpuModel::R14000.fits(profile), r14, "R14000 on {profile:?}");
-            assert!(CpuModel::R10000.fits(profile));
+            let ok = |m| crate::cpu_variants::select(profile, m, None, None).is_ok();
+            assert_eq!(ok(CpuModel::R12000), r12, "R12000 on {profile:?}");
+            assert_eq!(ok(CpuModel::R14000), r14, "R14000 on {profile:?}");
+        }
+        // The Indy and Indigo2 never shipped them.
+        for profile in [MachineProfile::IndyIp24, MachineProfile::Indigo2Ip22] {
+            let mut cfg = MachineConfig::default();
+            cfg.machine.profile = profile;
+            cfg.machine.cpu = CpuModel::R12000;
+            assert!(cfg.validate().unwrap_err().contains("R12000"), "{profile:?}");
         }
         let mut cfg = MachineConfig::default();
-        cfg.machine.profile = MachineProfile::IndyIp24;
+        cfg.machine.profile = MachineProfile::FuelIp34;
         cfg.machine.cpu = CpuModel::R12000;
         assert!(cfg.validate().unwrap_err().contains("R12000"));
     }
