@@ -16,6 +16,7 @@ pub mod smp;
 pub mod mips_exec_test;
 pub mod mips_instr_stats;
 pub mod trace;
+pub mod testdev;
 #[cfg(feature = "idle-pause")]
 pub mod idle_park;
 #[cfg(feature = "jitv2")]
