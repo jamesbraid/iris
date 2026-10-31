@@ -2061,6 +2061,9 @@ impl Workstation for Machine {
     }
     fn remount_cdrom_guest(&self, scsi_id: u8) { Machine::remount_cdrom_guest(self, scsi_id) }
     fn pending_chd_sync_count(&self) -> usize { Machine::pending_chd_sync_count(self) }
+    fn flush_disks(&self) -> std::io::Result<()> {
+        self.scsi_buses().iter().try_for_each(|b| b.flush())
+    }
     fn sync_chd_disks(
         &self,
         only: Option<usize>,

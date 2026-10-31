@@ -55,6 +55,11 @@ pub trait ScsiTarget: Send {
     /// leaves, with a CD-ROM at 512 bytes if `cdrom_512`.
     fn reset_block_size(&mut self, _cdrom_512: bool) {}
 
+    /// Make what the target has accepted so far survive the process: for a
+    /// copy-on-write disk, the overlay and the record of which sectors it
+    /// holds. Nothing to do for a target with no storage.
+    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+
     // ---- copy-on-write layer -----------------------------------------
 
     /// Uncommitted sectors, `None` when the target has no such layer.
@@ -214,6 +219,19 @@ impl ScsiBus {
         }
     }
 
+    /// Flush every target's storage (see [`ScsiTarget::flush`]). Every target
+    /// is tried; the first error is returned.
+    pub fn flush(&self) -> io::Result<()> {
+        let mut first = None;
+        self.for_each(|id, t| {
+            if let Err(e) = t.flush() {
+                eprintln!("iris: flushing SCSI id {id} failed: {e}");
+                first.get_or_insert(e);
+            }
+        });
+        first.map_or(Ok(()), Err)
+    }
+
     /// Targets whose `.diff.chd` holds changes waiting to be folded back into
     /// the base on a clean shutdown.
     pub fn pending_chd_sync_count(&self) -> usize {
@@ -337,6 +355,75 @@ mod tests {
         let e = attach(&b, 8, &p, false).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
         assert!(attach(&bus(16), 8, &p, false).is_ok(), "a wide bus has id 8");
+        std::fs::remove_file(p).unwrap();
+    }
+
+    fn write_block(lba: u32, byte: u8) -> ScsiRequest {
+        let l = lba.to_be_bytes();
+        ScsiRequest {
+            cdb: vec![scsi_cmd::WRITE_10, 0, l[0], l[1], l[2], l[3], 0, 0, 1, 0],
+            data_len: crate::scsi::ScsiDataLength::Unlimited,
+            data_in: Some(vec![byte; 512]),
+        }
+    }
+
+    fn read_block(lba: u32) -> ScsiRequest {
+        let l = lba.to_be_bytes();
+        ScsiRequest {
+            cdb: vec![scsi_cmd::READ_10, 0, l[0], l[1], l[2], l[3], 0, 0, 1, 0],
+            data_len: crate::scsi::ScsiDataLength::Unlimited,
+            data_in: None,
+        }
+    }
+
+    /// The machine can exit without dropping the bus (`process::exit` after
+    /// a guest power-off), so [`ScsiBus::flush`] is what the next run's
+    /// overlay depends on. `mem::forget` stands in for that exit.
+    #[test]
+    fn flushed_overlay_writes_survive_an_exit_that_skips_drop() {
+        let p = image("exit", 4);
+        let first = bus(8);
+        attach(&first, 1, &p, true).unwrap();
+        for (lba, byte) in [(1, 0x5A), (3, 0xC3)] {
+            first.request(1, &write_block(lba, byte)).unwrap().unwrap();
+        }
+        first.flush().unwrap();
+        std::mem::forget(first);
+
+        let second = bus(8);
+        attach(&second, 1, &p, true).unwrap();
+        for (lba, byte) in [(0, 0x00), (1, 0x5A), (2, 0x00), (3, 0xC3)] {
+            let r = second.request(1, &read_block(lba)).unwrap().unwrap();
+            assert_eq!(r.data, vec![byte; 512], "block {lba}");
+        }
+        drop(second);
+        let _ = std::fs::remove_file(format!("{}.overlay", p.display()));
+        let _ = std::fs::remove_file(format!("{}.overlay.dirty", p.display()));
+        std::fs::remove_file(p).unwrap();
+    }
+
+    /// A guest's SYNCHRONIZE CACHE is its way of asking for the same.
+    #[test]
+    fn synchronize_cache_flushes_the_overlay() {
+        let p = image("synccache", 4);
+        let first = bus(8);
+        attach(&first, 1, &p, true).unwrap();
+        first.request(1, &write_block(2, 0x77)).unwrap().unwrap();
+        let sync = ScsiRequest {
+            cdb: vec![scsi_cmd::SYNCHRONIZE_CACHE_10, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            data_len: crate::scsi::ScsiDataLength::Unlimited,
+            data_in: None,
+        };
+        assert_eq!(first.request(1, &sync).unwrap().unwrap().status, 0);
+        std::mem::forget(first);
+
+        let second = bus(8);
+        attach(&second, 1, &p, true).unwrap();
+        let r = second.request(1, &read_block(2)).unwrap().unwrap();
+        assert_eq!(r.data, vec![0x77; 512]);
+        drop(second);
+        let _ = std::fs::remove_file(format!("{}.overlay", p.display()));
+        let _ = std::fs::remove_file(format!("{}.overlay.dirty", p.display()));
         std::fs::remove_file(p).unwrap();
     }
 

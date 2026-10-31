@@ -829,6 +829,10 @@ impl Workstation for O2Machine {
     fn pending_chd_sync_count(&self) -> usize {
         self.bus.scsi.lock().unwrap().iter().map(|c| c.bus().pending_chd_sync_count()).sum()
     }
+    fn flush_disks(&self) -> std::io::Result<()> {
+        let controllers = self.bus.scsi.lock().unwrap().clone();
+        controllers.iter().try_for_each(|c| c.bus().flush())
+    }
     fn sync_chd_disks(
         &self,
         only: Option<usize>,

@@ -216,6 +216,12 @@ pub trait Workstation: Send {
     fn pending_chd_sync_count(&self) -> usize {
         0
     }
+    /// Make every disk's accepted writes survive the process, including a
+    /// copy-on-write overlay's record of the sectors it holds. Run it before
+    /// the process exits without dropping the machine.
+    fn flush_disks(&self) -> std::io::Result<()> {
+        Ok(())
+    }
     /// Fold pending CHD diffs into their bases (see `Machine::sync_chd_disks`).
     fn sync_chd_disks(
         &self,
@@ -409,6 +415,12 @@ pub(crate) fn register_system_controller(
                         MachineEvent::PowerOff => {
                             println!("Machine: soft power-off");
                             machine.stop();
+                            // The process may exit below without dropping the
+                            // disks, and an overlay's sector record is only
+                            // written out on a flush.
+                            if let Err(e) = machine.flush_disks() {
+                                eprintln!("iris: disk flush at power-off failed: {e} (guest writes may be lost)");
+                            }
                             // Hosts that embed iris as a library (e.g. iris-gui)
                             // set IRIS_NO_EXIT_ON_POWEROFF=1 so a guest halt
                             // does not kill the host process.
