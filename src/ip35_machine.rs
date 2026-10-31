@@ -117,46 +117,7 @@ impl FuelMachine {
         let poll_board = board.clone();
         exec.batch_hook = Some(Box::new(move |_| poll_board.poll()));
         let cpu: Arc<dyn CpuDevice> = Arc::new(MipsCpu::<_, R14000ShadowCache>::new(*exec));
-        if let Some(space) = board.md.physical().ppmem_space() {
-            use crate::ppmem::MappedMemory;
-            unsafe {
-                space.set_bitmap_sink(cpu.ppmem_bitmap_ptr());
-                cpu.set_tcache_window(space.window_base());
-                let bitmap = cpu.tcache_bitmap_ptr();
-                if !bitmap.is_null() { space.set_bitmap_sink2(bitmap); }
-                #[cfg(feature = "jitv2")]
-                cpu.set_tcache_gen_window(board.md.generation_base());
-            }
-            board.md.physical().resync_ppmem_bitmap();
-            board.md.rebuild_memory();
-        }
-        board.pi[0].set_interrupt_controller(Arc::new(CpuIrq(Arc::downgrade(&cpu))));
-        let (tx, rx) = channel();
-        let reset_tx = tx.clone();
-        board.lb.connect_soft_reset(Arc::new(move || {
-            let _ = reset_tx.send(MachineEvent::HardReset);
-        }));
-        let reset_tx = tx.clone();
-        board.ni.connect_local_reset(Arc::new(move || {
-            let _ = reset_tx.send(MachineEvent::HardReset);
-        }));
-        let weak_cpu = Arc::downgrade(&cpu);
-        board.l1.set_event_handler(Arc::new(move |event| {
-            match event {
-                L1Event::Power(false) | L1Event::Shutdown => {
-                    let _ = tx.send(MachineEvent::PowerOff);
-                }
-                L1Event::Power(true) | L1Event::Reset => {
-                    let _ = tx.send(MachineEvent::HardReset);
-                }
-                L1Event::SoftReset => {
-                    if let Some(cpu) = weak_cpu.upgrade() {
-                        cpu.as_device().signal(Signal::Reset(true));
-                    }
-                }
-                L1Event::Nmi => dlog!(LogModule::L1, "Fuel: NMI entry is not implemented by the CPU"),
-            }
-        }));
+        let rx = connect_cpu("Fuel", &board.md, &board.pi[0], &board.lb, &board.ni, &board.l1, &cpu);
         let scratch = Self::attach_scsi(cfg, &board)?;
         let console = match cfg.fuel.console {
             FuelConsole::L1 => 0,
@@ -231,52 +192,33 @@ impl FuelMachine {
         console: usize,
     ) -> Result<(), String> {
         let [a, b] = cfg.serial_ports();
-        let ports = [cfg.fuel.l1_port.unwrap_or(8882), a, b];
-        if ports[0] == ports[1] || ports[0] == ports[2] || ports[1] == ports[2] {
-            return Err("Fuel L1 and IOC3 serial ports must be distinct".into());
-        }
-        let labels = ["L1", "IOC3 A", "IOC3 B"];
-        let settings = ["fuel.l1_port", "serial_port_a", "serial_port_b"];
-        let mut log_config = cfg.clone();
-        for (index, port) in ports.into_iter().enumerate() {
-            log_config.serial_log = if index == console {
-                cfg.serial_log.clone()
-            } else if index == 0 {
-                cfg.fuel.l1_log.clone()
-            } else {
-                None
-            };
-            let tag = format!("Fuel {}", labels[index]);
-            let log = open_log(&log_config, &tag, LogMode::Fresh);
-            let backend: Arc<dyn SerialBackend> = if cfg.ci && index == console {
-                if let Some(log) = log {
-                    board.serial[index].set_log(log);
-                }
-                board.serial[index].clone()
-            } else {
-                let mut backend = null_serial_backend();
-                match tcp_serial_backend(port) {
-                    Some((socket, actual_port)) => {
-                        eprintln!("iris: {tag} on 127.0.0.1:{actual_port}");
-                        backend = socket;
-                    }
-                    None => eprintln!(
-                        "iris: {tag}: port {port} unavailable; is another iris using it? ({})",
-                        settings[index]
-                    ),
-                }
-                match log {
-                    Some(log) => Arc::new(TeeBackend::new(backend, log)),
-                    None => backend,
-                }
-            };
-            if index == 0 {
-                board.l1.set_serial_backend(backend);
-            } else {
-                board.ioc3.set_serial_backend(index - 1, backend);
-            }
-        }
-        Ok(())
+        let ports = [
+            SerialPort {
+                label: "L1",
+                port: cfg.fuel.l1_port.unwrap_or(8882),
+                setting: "fuel.l1_port",
+                ci: &board.serial[0],
+                log: cfg.fuel.l1_log.clone(),
+                connect: Box::new(|backend| board.l1.set_serial_backend(backend)),
+            },
+            SerialPort {
+                label: "IOC3 A",
+                port: a,
+                setting: "serial_port_a",
+                ci: &board.serial[1],
+                log: None,
+                connect: Box::new(|backend| board.ioc3.set_serial_backend(0, backend)),
+            },
+            SerialPort {
+                label: "IOC3 B",
+                port: b,
+                setting: "serial_port_b",
+                ci: &board.serial[2],
+                log: None,
+                connect: Box::new(|backend| board.ioc3.set_serial_backend(1, backend)),
+            },
+        ];
+        connect_serial_ports(cfg, "Fuel", &ports, console)
     }
 
     #[cfg(test)]
@@ -284,6 +226,121 @@ impl FuelMachine {
         Self::connect_serial(cfg, board, console)
     }
 
+}
+
+/// Give a node's memory and devices to its running CPU: the direct-access
+/// window, interrupts from PI0 slot A, and the resets and power events the
+/// local bus, network block and L1 raise. The events arrive on the receiver
+/// the system controller takes.
+pub(crate) fn connect_cpu(
+    name: &'static str,
+    md: &Arc<BedrockMd>,
+    pi0: &BedrockPi,
+    lb: &BedrockLb,
+    ni: &BedrockNi,
+    l1: &L1,
+    cpu: &Arc<dyn CpuDevice>,
+) -> Receiver<MachineEvent> {
+    if let Some(space) = md.physical().ppmem_space() {
+        use crate::ppmem::MappedMemory;
+        unsafe {
+            space.set_bitmap_sink(cpu.ppmem_bitmap_ptr());
+            cpu.set_tcache_window(space.window_base());
+            let bitmap = cpu.tcache_bitmap_ptr();
+            if !bitmap.is_null() { space.set_bitmap_sink2(bitmap); }
+            #[cfg(feature = "jitv2")]
+            cpu.set_tcache_gen_window(md.generation_base());
+        }
+        md.physical().resync_ppmem_bitmap();
+        md.rebuild_memory();
+    }
+    pi0.set_interrupt_controller(Arc::new(CpuIrq(Arc::downgrade(cpu))));
+    let (tx, rx) = channel();
+    let reset_tx = tx.clone();
+    lb.connect_soft_reset(Arc::new(move || {
+        let _ = reset_tx.send(MachineEvent::HardReset);
+    }));
+    let reset_tx = tx.clone();
+    ni.connect_local_reset(Arc::new(move || {
+        let _ = reset_tx.send(MachineEvent::HardReset);
+    }));
+    let weak_cpu = Arc::downgrade(cpu);
+    l1.set_event_handler(Arc::new(move |event| {
+        match event {
+            L1Event::Power(false) | L1Event::Shutdown => {
+                let _ = tx.send(MachineEvent::PowerOff);
+            }
+            L1Event::Power(true) | L1Event::Reset => {
+                let _ = tx.send(MachineEvent::HardReset);
+            }
+            L1Event::SoftReset => {
+                if let Some(cpu) = weak_cpu.upgrade() {
+                    cpu.as_device().signal(Signal::Reset(true));
+                }
+            }
+            L1Event::Nmi => dlog!(LogModule::L1, "{name}: NMI entry is not implemented by the CPU"),
+        }
+    }));
+    rx
+}
+
+/// One of a board's serial connections: what it is called, the TCP port and
+/// the setting that names the port, the CI backend it uses when it is the
+/// console, the log it keeps when it is not, and where the host end goes.
+pub(crate) struct SerialPort<'a> {
+    pub label: &'static str,
+    pub port: u16,
+    pub setting: &'static str,
+    pub ci: &'a Arc<CiSerialBackend>,
+    pub log: Option<String>,
+    pub connect: Box<dyn Fn(Arc<dyn SerialBackend>) + 'a>,
+}
+
+/// Connect a board's serial ports to the host. The console takes
+/// `serial_log` and, under CI, the in-process backend; the others listen on
+/// their TCP ports, and a port that is taken leaves its stream unconnected
+/// rather than stopping the machine.
+pub(crate) fn connect_serial_ports(
+    cfg: &MachineConfig,
+    name: &str,
+    ports: &[SerialPort<'_>],
+    console: usize,
+) -> Result<(), String> {
+    for (i, a) in ports.iter().enumerate() {
+        if let Some(b) = ports[i + 1..].iter().find(|b| b.port == a.port) {
+            return Err(format!("{name} {} and {} serial ports must be distinct", a.label, b.label));
+        }
+    }
+    let mut log_config = cfg.clone();
+    for (index, port) in ports.iter().enumerate() {
+        log_config.serial_log = if index == console { cfg.serial_log.clone() } else { port.log.clone() };
+        let tag = format!("{name} {}", port.label);
+        let log = open_log(&log_config, &tag, LogMode::Fresh);
+        let backend: Arc<dyn SerialBackend> = if cfg.ci && index == console {
+            if let Some(log) = log {
+                port.ci.set_log(log);
+            }
+            port.ci.clone()
+        } else {
+            let mut backend = null_serial_backend();
+            match tcp_serial_backend(port.port) {
+                Some((socket, actual_port)) => {
+                    eprintln!("iris: {tag} on 127.0.0.1:{actual_port}");
+                    backend = socket;
+                }
+                None => eprintln!(
+                    "iris: {tag}: port {} unavailable; is another iris using it? ({})",
+                    port.port, port.setting
+                ),
+            }
+            match log {
+                Some(log) => Arc::new(TeeBackend::new(backend, log)),
+                None => backend,
+            }
+        };
+        (port.connect)(backend);
+    }
+    Ok(())
 }
 
 struct CpuIrq(std::sync::Weak<dyn CpuDevice>);
@@ -528,25 +585,273 @@ impl FuelBoard {
 
     pub fn with_config(config: FuelBoardConfig<'_>) -> Result<Self, String> {
         let FuelBoardConfig { payload, clock, flash_path, station_mac, timekeeper, ps2_input, usb_input } = config;
-        let md = BedrockMd::with_clock(&FUEL_BANKS_MIB, clock.clone())?;
+        let node = Node::build(NodeConfig {
+            name: "Fuel",
+            payload,
+            clock: clock.clone(),
+            flash_path,
+            banks_mib: &FUEL_BANKS_MIB,
+            population: Population::SINGLE,
+            firmware: FirmwareRecord::FUEL,
+            board_id: FUEL_BOARD_ID,
+            l1: L1Config { mac: station_mac, ..Default::default() },
+        })?;
+        let (md, io) = (&node.md, &node.io);
+        let serial = std::array::from_fn(|_| Arc::new(CiSerialBackend::new()));
+        node.l1.set_serial_backend(serial[0].clone());
+        let xbridge = XBridge::new(md.dma_view());
+        for widget in [0, 10, 14, 15] {
+            io.connect_widget(widget, xbridge.widget(widget).unwrap());
+        }
+        let weak_io = Arc::downgrade(io);
+        xbridge.set_interrupt_sender(Arc::new(move |packet| {
+            if packet.widget != 10 {
+                return false;
+            }
+            weak_io.upgrade().is_some_and(|io| {
+                io.inbound_write(
+                    packet.source_widget,
+                    None,
+                    packet.address,
+                    8,
+                    packet.vector as u64 | if packet.level { 1 << 8 } else { 0 },
+                ) == BUS_OK
+            })
+        }));
+        let weak_io = Arc::downgrade(io);
+        xbridge.set_dma_sender(Arc::new(move |packet, bytes| {
+            if packet.widget != 10 || packet.half_read_requested || packet.half_write_requested {
+                dlog!(LogModule::Bedrock,
+                    "Fuel: unsupported XBridge DMA destination or halfword placement {packet:?}"
+                );
+                return false;
+            }
+            let Some(io) = weak_io.upgrade() else {
+                return false;
+            };
+            // Preserve the width of XBridge's naturally aligned packet legs,
+            // including Hub registers whose narrower accesses are refused.
+            let size = bytes.len();
+            if matches!(size, 1 | 2 | 4 | 8)
+                && packet.address & (size as u64 - 1) == 0
+            {
+                if packet.write {
+                    let value = bytes.iter().fold(0u64, |value, byte| (value << 8) | *byte as u64);
+                    return io.inbound_write(
+                        packet.source_widget, Some(packet.slot), packet.address, size as u8, value,
+                    ) == BUS_OK;
+                }
+                let value = io.inbound_read(
+                    packet.source_widget, Some(packet.slot), packet.address, size as u8,
+                );
+                if value.status != BUS_OK {
+                    return false;
+                }
+                bytes.copy_from_slice(&value.data.to_be_bytes()[8 - size..]);
+                return true;
+            }
+            for (i, byte) in bytes.iter_mut().enumerate() {
+                let a = packet.address + i as u64;
+                if packet.write {
+                    if io.inbound_write(packet.source_widget, Some(packet.slot), a, 1, *byte as u64)
+                        != BUS_OK
+                    {
+                        return false;
+                    }
+                } else {
+                    let value = io.inbound_read(packet.source_widget, Some(packet.slot), a, 1);
+                    if value.status != BUS_OK {
+                        return false;
+                    }
+                    *byte = value.data as u8;
+                }
+            }
+            true
+        }));
+        let mac = node.l1.station_mac();
+        let mut ioc3_config = Ioc3Config::fuel(mac);
+        ioc3_config.keyboard_mouse = ps2_input;
+        let ioc3 = Arc::new(Ioc3::new(ioc3_config));
+        let eth = Ioc3Eth::new_fuel(mac);
+        ioc3.attach_eth(eth.clone());
+        ioc3.attach_timekeeper(timekeeper);
+        ioc3.set_serial_backend(0, serial[1].clone());
+        ioc3.set_serial_backend(1, serial[2].clone());
+        let scsi = Arc::new(Isp12160::new(
+            Isp12160::new_bus(),
+            Isp12160::new_bus(),
+        ));
+        xbridge.attach(15, 1, scsi.clone());
+        xbridge.attach(15, 4, ioc3.clone());
+        let usb = Ohci::new();
+        if usb_input {
+            // Host input reaches the USB devices through the same controller
+            // object the GUI, VNC and CI already drive; each device drops
+            // what its guest has not enabled.
+            let keyboard = UsbKeyboard::new();
+            let mouse = UsbMouse::new();
+            usb.attach(0, keyboard.clone())?;
+            usb.attach(1, mouse.clone())?;
+            ioc3.ps2().add_sink(keyboard);
+            ioc3.ps2().add_sink(mouse);
+        }
+        xbridge.attach(15, 5, usb.clone());
+        for slot in [1, 4, 5] {
+            xbridge.set_pci_irq(15, slot, 0, xbridge.pin_line(15, slot));
+        }
+        ioc3.connect_superio_interrupt(xbridge.pin_line(15, 0));
+        let reset_ioc3 = ioc3.clone();
+        let reset_eth = eth.clone();
+        let reset_scsi = scsi.clone();
+        let reset_usb = usb.clone();
+        xbridge.set_reset_output(Arc::new(move |port| {
+            if port == 15 {
+                reset_ioc3.power_on();
+                reset_eth.power_on();
+                reset_scsi.power_on();
+                reset_usb.power_on();
+            }
+        }));
+        Ok(Self {
+            bus: node.bus,
+            pi: node.pi,
+            md: node.md,
+            l1: node.l1,
+            flash: node.flash,
+            lb: node.lb,
+            io: node.io,
+            ni: node.ni,
+            xb: node.xb,
+            xbridge,
+            ioc3,
+            eth,
+            scsi,
+            usb,
+            serial,
+            #[cfg(test)]
+            irq: node.irq,
+            last_clock: AtomicU64::new(clock()),
+            usb_elapsed_ns: AtomicU64::new(0),
+            clock,
+            running: AtomicBool::new(false),
+        })
+    }
+
+    pub fn cached_bus(&self) -> Arc<dyn BusDevice> {
+        self.bus.cached_view(self.md.dma_view(), self.md.ram_extent())
+    }
+
+    pub fn build_cpu(&self) -> Box<FuelCpu> {
+        let mut cpu = build_cpu(self.bus.clone());
+        cpu.cache = R14000ShadowCache::new(self.cached_bus());
+        // The PROM keeps its stack in cache lines it tags for a window with no
+        // memory behind it yet; the controller answers that window while they stand.
+        let memory = self.md.clone();
+        cpu.cache.set_pd_tag_store_hook(Box::new(move |tag| memory.startup_tag_store(tag)));
+        cpu
+    }
+
+    pub fn start(&self) {
+        self.last_clock
+            .store((self.clock)(), Ordering::Release);
+        self.md.start_clock();
+        self.running
+            .store(true, Ordering::Release);
+        for pi in &self.pi {
+            pi.start();
+        }
+        self.l1.start();
+        self.ioc3.start();
+        self.eth.start();
+        self.scsi.start();
+        self.usb.start();
+    }
+    pub fn poll(&self) {
+        if self.running.load(Ordering::Acquire) {
+            let now = (self.clock)();
+            let previous = self
+                .last_clock
+                .swap(now, Ordering::AcqRel);
+            self.flash.advance_ns(now.saturating_sub(previous));
+            let delta = now.saturating_sub(previous);
+            let old = self.usb_elapsed_ns.fetch_add(delta, Ordering::Relaxed);
+            let frames = (old + delta) / 1_000_000 - old / 1_000_000;
+            if frames != 0 { self.usb.advance_frames(frames); }
+            for pi in &self.pi {
+                pi.poll();
+            }
+        }
+    }
+    pub fn stop(&self) {
+        self.poll();
+        self.running
+            .store(false, Ordering::Release);
+        self.md.stop_clock();
+        self.usb.stop();
+        self.scsi.stop();
+        self.eth.stop();
+        self.ioc3.stop();
+        self.l1.stop();
+        for pi in &self.pi {
+            pi.stop();
+        }
+    }
+}
+
+/// What a board gives its Bedrock node.
+pub(crate) struct NodeConfig<'a> {
+    /// The board's name in logs and map names.
+    pub name: &'static str,
+    pub payload: &'a [u8],
+    pub clock: Clock,
+    pub flash_path: Option<&'a Path>,
+    /// The memory banks in MiB, locational bank 0 upward.
+    pub banks_mib: &'a [u32],
+    /// The processor slots the board fits.
+    pub population: Population,
+    pub firmware: FirmwareRecord,
+    /// The word the board reads back at the Hub-special board-id window.
+    pub board_id: u64,
+    pub l1: L1Config,
+}
+
+/// One Bedrock node as the IP35 boards share it: the processor bus with its
+/// four views, the two PIs, MD with its memory, the L1, the boot flash and
+/// the node's I/O, local-bus, network and crossbar blocks, wired together.
+/// The board adds its XIO widgets to `io` and its serial backends to `l1`.
+pub(crate) struct Node {
+    pub bus: Arc<Ip35Bus>,
+    pub pi: [Arc<BedrockPi>; 2],
+    pub md: Arc<BedrockMd>,
+    pub l1: Arc<L1>,
+    pub flash: Arc<Flash>,
+    pub lb: Arc<BedrockLb>,
+    pub io: Arc<BedrockIo>,
+    pub ni: Arc<BedrockNi>,
+    pub xb: Arc<BedrockXb>,
+    #[cfg(test)]
+    pub irq: Arc<PendingIrq>,
+}
+
+impl Node {
+    pub fn build(config: NodeConfig<'_>) -> Result<Self, String> {
+        let NodeConfig { name, payload, clock, flash_path, banks_mib, population, firmware, board_id, l1 } = config;
+        let md = BedrockMd::with_clock(banks_mib, clock.clone())?;
         let phys = md.physical().clone();
         let pi: [Arc<BedrockPi>; 2] = std::array::from_fn(|interface| {
             BedrockPi::new(
                 BedrockPiConfig {
                     interface: interface as u8,
                     request_region: 0,
-                    population: Population::SINGLE,
+                    population,
                 },
                 clock.clone(),
             )
         });
-        let l1 = Arc::new(L1::new(L1Config {
-            mac: station_mac,
-            ..Default::default()
-        })?);
+        let l1 = Arc::new(L1::new(l1)?);
         let flash = Arc::new(match flash_path {
-            Some(path) => Flash::with_file(payload, path, FirmwareRecord::FUEL),
-            None => Flash::new(payload, FirmwareRecord::FUEL),
+            Some(path) => Flash::with_file(payload, path, firmware),
+            None => Flash::new(payload, firmware),
         }.map_err(|e| e.to_string())?);
         let lb = Arc::new(BedrockLb::new(clock.clone()));
         let io = Arc::new(BedrockIo::new());
@@ -631,121 +936,6 @@ impl FuelBoard {
         #[cfg(test)]
         pi[0].set_interrupt_controller(irq.clone());
         l1.set_irq(IrqLine::new(Arc::new(UartIrq(pi.clone())), 0));
-        let serial = std::array::from_fn(|_| Arc::new(CiSerialBackend::new()));
-        l1.set_serial_backend(serial[0].clone());
-        let xbridge = XBridge::new(md.dma_view());
-        for widget in [0, 10, 14, 15] {
-            io.connect_widget(widget, xbridge.widget(widget).unwrap());
-        }
-        let weak_io = Arc::downgrade(&io);
-        xbridge.set_interrupt_sender(Arc::new(move |packet| {
-            if packet.widget != 10 {
-                return false;
-            }
-            weak_io.upgrade().is_some_and(|io| {
-                io.inbound_write(
-                    packet.source_widget,
-                    None,
-                    packet.address,
-                    8,
-                    packet.vector as u64 | if packet.level { 1 << 8 } else { 0 },
-                ) == BUS_OK
-            })
-        }));
-        let weak_io = Arc::downgrade(&io);
-        xbridge.set_dma_sender(Arc::new(move |packet, bytes| {
-            if packet.widget != 10 || packet.half_read_requested || packet.half_write_requested {
-                dlog!(LogModule::Bedrock,
-                    "Fuel: unsupported XBridge DMA destination or halfword placement {packet:?}"
-                );
-                return false;
-            }
-            let Some(io) = weak_io.upgrade() else {
-                return false;
-            };
-            // Preserve the width of XBridge's naturally aligned packet legs,
-            // including Hub registers whose narrower accesses are refused.
-            let size = bytes.len();
-            if matches!(size, 1 | 2 | 4 | 8)
-                && packet.address & (size as u64 - 1) == 0
-            {
-                if packet.write {
-                    let value = bytes.iter().fold(0u64, |value, byte| (value << 8) | *byte as u64);
-                    return io.inbound_write(
-                        packet.source_widget, Some(packet.slot), packet.address, size as u8, value,
-                    ) == BUS_OK;
-                }
-                let value = io.inbound_read(
-                    packet.source_widget, Some(packet.slot), packet.address, size as u8,
-                );
-                if value.status != BUS_OK {
-                    return false;
-                }
-                bytes.copy_from_slice(&value.data.to_be_bytes()[8 - size..]);
-                return true;
-            }
-            for (i, byte) in bytes.iter_mut().enumerate() {
-                let a = packet.address + i as u64;
-                if packet.write {
-                    if io.inbound_write(packet.source_widget, Some(packet.slot), a, 1, *byte as u64)
-                        != BUS_OK
-                    {
-                        return false;
-                    }
-                } else {
-                    let value = io.inbound_read(packet.source_widget, Some(packet.slot), a, 1);
-                    if value.status != BUS_OK {
-                        return false;
-                    }
-                    *byte = value.data as u8;
-                }
-            }
-            true
-        }));
-        let mac = l1.station_mac();
-        let mut ioc3_config = Ioc3Config::fuel(mac);
-        ioc3_config.keyboard_mouse = ps2_input;
-        let ioc3 = Arc::new(Ioc3::new(ioc3_config));
-        let eth = Ioc3Eth::new_fuel(mac);
-        ioc3.attach_eth(eth.clone());
-        ioc3.attach_timekeeper(timekeeper);
-        ioc3.set_serial_backend(0, serial[1].clone());
-        ioc3.set_serial_backend(1, serial[2].clone());
-        let scsi = Arc::new(Isp12160::new(
-            Isp12160::new_bus(),
-            Isp12160::new_bus(),
-        ));
-        xbridge.attach(15, 1, scsi.clone());
-        xbridge.attach(15, 4, ioc3.clone());
-        let usb = Ohci::new();
-        if usb_input {
-            // Host input reaches the USB devices through the same controller
-            // object the GUI, VNC and CI already drive; each device drops
-            // what its guest has not enabled.
-            let keyboard = UsbKeyboard::new();
-            let mouse = UsbMouse::new();
-            usb.attach(0, keyboard.clone())?;
-            usb.attach(1, mouse.clone())?;
-            ioc3.ps2().add_sink(keyboard);
-            ioc3.ps2().add_sink(mouse);
-        }
-        xbridge.attach(15, 5, usb.clone());
-        for slot in [1, 4, 5] {
-            xbridge.set_pci_irq(15, slot, 0, xbridge.pin_line(15, slot));
-        }
-        ioc3.connect_superio_interrupt(xbridge.pin_line(15, 0));
-        let reset_ioc3 = ioc3.clone();
-        let reset_eth = eth.clone();
-        let reset_scsi = scsi.clone();
-        let reset_usb = usb.clone();
-        xbridge.set_reset_output(Arc::new(move |port| {
-            if port == 15 {
-                reset_ioc3.power_on();
-                reset_eth.power_on();
-                reset_scsi.power_on();
-                reset_usb.power_on();
-            }
-        }));
         let mut bus = Ip35Bus::new(phys.clone());
         #[cfg(feature = "jitv2")]
         bus.set_ram_generations(md.dma_view());
@@ -781,7 +971,7 @@ impl FuelBoard {
                 0x1fc0_0000,
                 payload.len() as u64,
                 prom.clone(),
-                "Fuel cached reset PROM",
+                &format!("{name} cached reset PROM"),
             );
         }
         let leds = Arc::new(Leds {
@@ -791,14 +981,14 @@ impl FuelBoard {
         // The three windows occupy the same processor register page.
         let special = Arc::new(HubSpecialPage {
             windows: [
-                Window::new(0, 0x80, Arc::new(HubHead)).permitted(permission.clone()),
+                Window::new(0, 0x80, Arc::new(HubHead(name))).permitted(permission.clone()),
                 Window::new(0x80, 0x40, l1.clone()).permitted(permission.clone()),
                 Window::new(0xc0, 0x20, leds).permitted(permission.clone()),
             ],
         });
         for base in [0x1000_0000, 0x3000_0000] {
             bus.map(0, base, 1 << SLOT_SHIFT, special.clone());
-            bus.map(0, base + 0x400_0000, 8, Arc::new(BoardId(md.clone())));
+            bus.map(0, base + 0x400_0000, 8, Arc::new(BoardId { md: md.clone(), word: board_id }));
         }
         bus.map(0, 0x1_c000_0000, 1 << 30, md.directory_bus());
         bus.map_masked_writes(0, 0x1_4000_0000, 1 << 30, md.ecc_bus());
@@ -814,79 +1004,9 @@ impl FuelBoard {
             io,
             ni,
             xb,
-            xbridge,
-            ioc3,
-            eth,
-            scsi,
-            usb,
-            serial,
             #[cfg(test)]
             irq,
-            last_clock: AtomicU64::new(clock()),
-            usb_elapsed_ns: AtomicU64::new(0),
-            clock,
-            running: AtomicBool::new(false),
         })
-    }
-
-    pub fn cached_bus(&self) -> Arc<dyn BusDevice> {
-        self.bus.cached_view(self.md.dma_view(), self.md.ram_extent())
-    }
-
-    pub fn build_cpu(&self) -> Box<FuelCpu> {
-        let mut cpu = build_cpu(self.bus.clone());
-        cpu.cache = R14000ShadowCache::new(self.cached_bus());
-        // The PROM keeps its stack in cache lines it tags for a window with no
-        // memory behind it yet; the controller answers that window while they stand.
-        let memory = self.md.clone();
-        cpu.cache.set_pd_tag_store_hook(Box::new(move |tag| memory.startup_tag_store(tag)));
-        cpu
-    }
-
-    pub fn start(&self) {
-        self.last_clock
-            .store((self.clock)(), Ordering::Release);
-        self.md.start_clock();
-        self.running
-            .store(true, Ordering::Release);
-        for pi in &self.pi {
-            pi.start();
-        }
-        self.l1.start();
-        self.ioc3.start();
-        self.eth.start();
-        self.scsi.start();
-        self.usb.start();
-    }
-    pub fn poll(&self) {
-        if self.running.load(Ordering::Acquire) {
-            let now = (self.clock)();
-            let previous = self
-                .last_clock
-                .swap(now, Ordering::AcqRel);
-            self.flash.advance_ns(now.saturating_sub(previous));
-            let delta = now.saturating_sub(previous);
-            let old = self.usb_elapsed_ns.fetch_add(delta, Ordering::Relaxed);
-            let frames = (old + delta) / 1_000_000 - old / 1_000_000;
-            if frames != 0 { self.usb.advance_frames(frames); }
-            for pi in &self.pi {
-                pi.poll();
-            }
-        }
-    }
-    pub fn stop(&self) {
-        self.poll();
-        self.running
-            .store(false, Ordering::Release);
-        self.md.stop_clock();
-        self.usb.stop();
-        self.scsi.stop();
-        self.eth.stop();
-        self.ioc3.stop();
-        self.l1.stop();
-        for pi in &self.pi {
-            pi.stop();
-        }
     }
 }
 
@@ -928,11 +1048,14 @@ impl BusDevice for HubSpecialPage {
     hub_page_access!(read64, write64, u64, BusRead64, 8);
 }
 
-struct BoardId(Arc<BedrockMd>);
+struct BoardId {
+    md: Arc<BedrockMd>,
+    word: u64,
+}
 impl BusDevice for BoardId {
     fn read64(&self, a: u64) -> BusRead64 {
-        if a == 0 && self.0.current_cell() & 1 != 0 {
-            BusRead64::ok(FUEL_BOARD_ID)
+        if a == 0 && self.md.current_cell() & 1 != 0 {
+            BusRead64::ok(self.word)
         } else {
             BusRead64::err()
         }
@@ -942,19 +1065,22 @@ impl BusDevice for BoardId {
 // PROM 6.210 writes 0x2000 at offsets 0 and 0x40 before DRAM discovery.
 // Retain the existing zero-read/acknowledged-write model, with accesses
 // observable through the Bedrock log, until the register behavior is known.
-struct HubHead;
+/// The board name for the log.
+struct HubHead(&'static str);
 macro_rules! head_access {
     ($r:ident,$w:ident,$ty:ty,$result:ident) => {
         fn $r(&self, a: u64) -> $result {
             dlog!(LogModule::Bedrock,
-                "Fuel: unidentified Hub-special read {} bytes at {a:#x}",
+                "{}: unidentified Hub-special read {} bytes at {a:#x}",
+                self.0,
                 std::mem::size_of::<$ty>()
             );
             $result::ok(0)
         }
         fn $w(&self, a: u64, v: $ty) -> u32 {
             dlog!(LogModule::Bedrock,
-                "Fuel: unidentified Hub-special write {} bytes at {a:#x} value {v:#x}",
+                "{}: unidentified Hub-special write {} bytes at {a:#x} value {v:#x}",
+                self.0,
                 std::mem::size_of::<$ty>()
             );
             BUS_OK
