@@ -254,11 +254,21 @@ impl Rate {
 /// plain buffer of the card's own frames.
 struct Sink {
     host: Option<(HostOut, Resampler)>,
+    /// When the host stream was last tried and failed to open.
+    host_failed_at: Option<Instant>,
     wav: Option<Wav>,
     tap: Option<Arc<Mutex<Vec<i16>>>>,
 }
 
+/// How long to wait before trying to open the host stream again.
+const HOST_RETRY: Duration = Duration::from_secs(1);
+
 impl Sink {
+    /// Whether the host stream, wanted but not open, is due another try.
+    fn host_retry_due(&self, now: Instant) -> bool {
+        self.host.is_none() && self.host_failed_at.is_none_or(|t| now.duration_since(t) >= HOST_RETRY)
+    }
+
     /// Play stereo frames the card produced at `rate` Hz.
     fn play(&mut self, pcm: &[i16], rate: u32) {
         if let Some((out, rs)) = self.host.as_mut() {
@@ -736,6 +746,9 @@ impl Inner {
         let mut s = self.state.lock();
         self.sync_chan(&mut s, CH_OUT, now);
         if s.chan[CH_OUT].running {
+            if self.sink.lock().as_ref().is_some_and(|sk| sk.host_retry_due(Instant::now())) {
+                self.open_sink(false);
+            }
             TimerReturn::Continue
         } else {
             s.audio_timer = None;
@@ -748,13 +761,20 @@ impl Inner {
         let _ = self.timers.set(tm);
     }
 
-    /// Open the output sink on the first start of the analog output.
-    fn open_sink(&self) {
+    /// Open the output sink on the first start of the analog output, and
+    /// try the host stream again if an earlier open failed, so a sound that
+    /// starts before the host can play it is not lost for the whole run.
+    /// `force` skips the wait between tries.
+    fn open_sink(&self, force: bool) {
         let mut sink = self.sink.lock();
-        if sink.is_some() {
+        let Some(cfg) = self.audio_cfg.lock().clone() else {
             return;
+        };
+        let now = Instant::now();
+        match sink.as_mut() {
+            Some(sk) if !(sk.host_retry_due(now) || force && sk.host.is_none()) => return,
+            _ => {}
         }
-        let Some(cfg) = self.audio_cfg.lock().clone() else { return };
         let ring = |rate: u32| rate as usize * 2 / 5; // 200 ms of stereo
         let host = crate::host_audio::open_output(
             &cfg,
@@ -768,8 +788,17 @@ impl Inner {
             let rs = Resampler::new(FREQ_ANALOG as u32, out.stream_rate);
             (out, rs)
         });
-        let wav = std::env::var_os("IRIS_OCTANE_AUDIO_WAV").and_then(|p| Wav::create(&p));
-        *sink = Some(Sink { host, wav, tap: None });
+        let failed_at = host.is_none().then_some(now);
+        match sink.as_mut() {
+            Some(sk) => {
+                sk.host = host;
+                sk.host_failed_at = failed_at;
+            }
+            None => {
+                let wav = std::env::var_os("IRIS_OCTANE_AUDIO_WAV").and_then(|p| Wav::create(&p));
+                *sink = Some(Sink { host, host_failed_at: failed_at, wav, tap: None });
+            }
+        }
     }
 
     fn now(&self) -> i64 {
@@ -1207,7 +1236,7 @@ impl Inner {
             if !s.chan[idx].running {
                 s.chan_start(idx, now);
                 if idx == CH_OUT && s.chan[idx].running {
-                    self.open_sink();
+                    self.open_sink(true);
                 }
             }
         } else {
