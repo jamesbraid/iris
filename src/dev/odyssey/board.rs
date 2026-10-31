@@ -22,8 +22,12 @@ pub const SGI_ODYSSEY_CLIP_RECTS: u32 = 4;
 /// Geometry engine program state: constant-memory entries an 11-bit index
 /// reaches.
 pub const SGI_ODYSSEY_GL_CONSTANTS: u32 = 2048;
-/// Off-screen board-memory objects the model keeps (texture levels).
-pub const SGI_ODYSSEY_OBJECTS: u32 = 1024;
+/// Off-screen board-memory objects the model keeps (texture levels). A
+/// model budget, not a board limit: TyrQuake holds some 1,500 levels at once
+/// and samples its oldest every frame, which a table of 1024 forgot.
+pub const SGI_ODYSSEY_OBJECTS: u32 = 16384;
+/// The slices of one volume texture a draw samples (Board::texture_setup()).
+pub const SGI_ODYSSEY_VOLUME_SLICES: u32 = 1024;
 pub const SGI_ODYSSEY_OBJ_POOL_BYTES: u32 = 128 * 1024 * 1024;
 pub const SGI_ODYSSEY_OBJ_POOL_WORDS: u32 = SGI_ODYSSEY_OBJ_POOL_BYTES / 4;
 pub const SGI_ODYSSEY_OBJ_VALID_BYTES: u32 = SGI_ODYSSEY_OBJ_POOL_WORDS / 8;
@@ -153,14 +157,14 @@ pub struct Board {
     pub dest_base: u32,
     pub obj_count: u32,
     pub obj_used: u32,
-    pub obj_base: [u32; SGI_ODYSSEY_OBJECTS as usize],
+    pub obj_base: Vec<u32>,
     /// obj_base inverted, base to index + 1 (Board::object_find()).
     pub obj_index: std::collections::HashMap<u32, u32>,
-    pub obj_width: [u32; SGI_ODYSSEY_OBJECTS as usize],
-    pub obj_offset: [u32; SGI_ODYSSEY_OBJECTS as usize],
-    pub obj_rows: [u32; SGI_ODYSSEY_OBJECTS as usize],
+    pub obj_width: Vec<u32>,
+    pub obj_offset: Vec<u32>,
+    pub obj_rows: Vec<u32>,
     /// When each object was last selected or grown (obj_clock's count).
-    pub obj_stamp: [u64; SGI_ODYSSEY_OBJECTS as usize],
+    pub obj_stamp: Vec<u64>,
     pub obj_clock: u64,
     /// SGI_ODYSSEY_OBJ_VALID_BYTES bytes.
     pub obj_valid: Vec<u8>,
@@ -177,8 +181,8 @@ pub struct Board {
     pub tex_detail_function_valid: u32,
     pub tex_env: [u32; 5],
     pub tex_levels: [u32; (SGI_ODYSSEY_TEX_LEVELS * 3) as usize],
-    pub tex_slice_offset: [u32; (SGI_ODYSSEY_OBJECTS + 2) as usize],
-    pub tex_slice_width: [u32; (SGI_ODYSSEY_OBJECTS + 2) as usize],
+    pub tex_slice_offset: [u32; (SGI_ODYSSEY_VOLUME_SLICES + 2) as usize],
+    pub tex_slice_width: [u32; (SGI_ODYSSEY_VOLUME_SLICES + 2) as usize],
     pub tex_level0: u32,
     pub tex_lod: [u32; 4],
     /// The 0x203b post-filter scale and bias words, R, G, B, A.
@@ -504,12 +508,12 @@ impl Default for Board {
             dest_base: 0,
             obj_count: 0,
             obj_used: 0,
-            obj_base: [0; SGI_ODYSSEY_OBJECTS as usize],
+            obj_base: vec![0; SGI_ODYSSEY_OBJECTS as usize],
             obj_index: Default::default(),
-            obj_width: [0; SGI_ODYSSEY_OBJECTS as usize],
-            obj_offset: [0; SGI_ODYSSEY_OBJECTS as usize],
-            obj_rows: [0; SGI_ODYSSEY_OBJECTS as usize],
-            obj_stamp: [0; SGI_ODYSSEY_OBJECTS as usize],
+            obj_width: vec![0; SGI_ODYSSEY_OBJECTS as usize],
+            obj_offset: vec![0; SGI_ODYSSEY_OBJECTS as usize],
+            obj_rows: vec![0; SGI_ODYSSEY_OBJECTS as usize],
+            obj_stamp: vec![0; SGI_ODYSSEY_OBJECTS as usize],
             obj_clock: 0,
             obj_valid: vec![0; SGI_ODYSSEY_OBJ_VALID_BYTES as usize],
             obj_full_reported: false,
@@ -523,8 +527,8 @@ impl Default for Board {
             tex_detail_function_valid: 0,
             tex_env: [0; 5],
             tex_levels: [0; (SGI_ODYSSEY_TEX_LEVELS * 3) as usize],
-            tex_slice_offset: [0; (SGI_ODYSSEY_OBJECTS + 2) as usize],
-            tex_slice_width: [0; (SGI_ODYSSEY_OBJECTS + 2) as usize],
+            tex_slice_offset: [0; (SGI_ODYSSEY_VOLUME_SLICES + 2) as usize],
+            tex_slice_width: [0; (SGI_ODYSSEY_VOLUME_SLICES + 2) as usize],
             tex_level0: 0,
             tex_lod: [0; 4],
             tex_scale_bias: [0; 8],
