@@ -949,11 +949,13 @@ impl Board {
     /// and leaves the stencil mask. INFERRED: the enables decide which part of
     /// the stored pixel changes, so the model writes the depth plane's word
     /// (bits 23:0) when bit 24 is set, and the stencil plane's bits 19:12 of
-    /// block 0x052 select as `(data & mask) | (old & !mask)`. OBSERVED on the
-    /// model: the library's stencil index arrives in bits 23:16 of the word
-    /// (index 0x11 as 0x0011_0000), so that byte is the data the mask applies
-    /// to; the datasheet does not place the stencil in the word (where the
-    /// board keeps it inside a stored pixel is UNKNOWN). UNKNOWN: whether
+    /// block 0x052 select as `(data & mask) | (old & !mask)`. ESTABLISHED
+    /// (datasheet, "The stencil word and the write paths"): the library packs
+    /// the stencil index at bits 23:16 with no mask (index 0x11 is
+    /// 0x0011_0000) and the burst copies the word, so that byte is the data;
+    /// the 8-bit mask in bits 19:12 of block 0x052 applies to it, not to the
+    /// word as sent. UNKNOWN: how the board aligns the two, and where it
+    /// keeps the index inside a stored pixel. UNKNOWN: whether
     /// the board runs the burst through the depth and stencil tests, and the
     /// effect of their enables on it; the model applies neither. The same
     /// clip-rectangle and window-ID tests as a GL fragment apply (model
