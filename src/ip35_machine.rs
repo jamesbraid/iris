@@ -37,6 +37,7 @@ use crate::dev::ioc3_eth::Ioc3Eth;
 use crate::dev::isp12160::Isp12160;
 use crate::dev::l1::{L1, L1Config, L1Event};
 use crate::dev::ohci::Ohci;
+use crate::dev::usb_hid::{UsbKeyboard, UsbMouse};
 use crate::dev::prom_image;
 use crate::dev::ps2::Ps2Controller;
 use crate::dev::serial_host::{null_serial_backend, open_log, tcp_serial_backend, CiSerialBackend, LogMode, SerialBackend, TeeBackend};
@@ -100,6 +101,8 @@ impl FuelMachine {
             flash_path: cfg.fuel.flash.as_deref().map(Path::new),
             station_mac: cfg.network().mac,
             timekeeper: timekeeper.clone(),
+            ps2_input: cfg.fuel.ps2_input,
+            usb_input: cfg.fuel.usb_input,
         })?);
         let timers = Arc::new(TimerManager::new());
         let mut exec = board.build_cpu();
@@ -195,6 +198,8 @@ impl FuelMachine {
         monitor.register_device(board.md.physical().clone());
         monitor.register_device(board.l1.clone());
         monitor.register_device(board.scsi.clone());
+        // `ps2 type` and friends: the keyboard and mouse from the monitor.
+        monitor.register_device(board.ioc3.ps2());
         cpu.register_locks();
         board.scsi.register_locks();
         board.ioc3.register_locks();
@@ -527,6 +532,10 @@ pub(crate) struct FuelBoardConfig<'a> {
     pub flash_path: Option<&'a Path>,
     pub station_mac: [u8; 6],
     pub timekeeper: Arc<Timekeeper>,
+    /// The IOC3's PS/2 keyboard and mouse controller.
+    pub ps2_input: bool,
+    /// A USB keyboard and mouse on the OHCI root ports.
+    pub usb_input: bool,
 }
 
 impl FuelBoard {
@@ -536,11 +545,13 @@ impl FuelBoard {
             payload, clock, flash_path: None,
             station_mac: L1Config::default().mac,
             timekeeper: Arc::new(Timekeeper::fuel()?),
+            ps2_input: true,
+            usb_input: false,
         })
     }
 
     pub fn with_config(config: FuelBoardConfig<'_>) -> Result<Self, String> {
-        let FuelBoardConfig { payload, clock, flash_path, station_mac, timekeeper } = config;
+        let FuelBoardConfig { payload, clock, flash_path, station_mac, timekeeper, ps2_input, usb_input } = config;
         let md = BedrockMd::with_clock(clock.clone());
         let phys = md.physical().clone();
         let pi: [Arc<BedrockPi>; 2] = std::array::from_fn(|interface| {
@@ -717,7 +728,9 @@ impl FuelBoard {
             true
         }));
         let mac = l1.station_mac();
-        let ioc3 = Arc::new(Ioc3::new(Ioc3Config::fuel(mac)));
+        let mut ioc3_config = Ioc3Config::fuel(mac);
+        ioc3_config.keyboard_mouse = ps2_input;
+        let ioc3 = Arc::new(Ioc3::new(ioc3_config));
         let eth = Ioc3Eth::new_fuel(mac);
         ioc3.attach_eth(eth.clone());
         ioc3.attach_timekeeper(timekeeper);
@@ -730,6 +743,17 @@ impl FuelBoard {
         xbridge.attach(15, 1, scsi.clone());
         xbridge.attach(15, 4, ioc3.clone());
         let usb = Ohci::new();
+        if usb_input {
+            // Host input reaches the USB devices through the same controller
+            // object the GUI, VNC and CI already drive; each device drops
+            // what its guest has not enabled.
+            let keyboard = UsbKeyboard::new();
+            let mouse = UsbMouse::new();
+            usb.attach(0, keyboard.clone())?;
+            usb.attach(1, mouse.clone())?;
+            ioc3.ps2().add_sink(keyboard);
+            ioc3.ps2().add_sink(mouse);
+        }
         xbridge.attach(15, 5, usb.clone());
         for slot in [1, 4, 5] {
             xbridge.set_pci_irq(15, slot, 0, xbridge.pin_line(15, slot));
