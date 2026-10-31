@@ -578,6 +578,11 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ### NAT gateway
 
+- **Gateway replies go to the guest at once.** A reply to a guest frame was
+  held for an engine pass, about 150 µs, against a suspected interrupt race in
+  the Indy's Ethernet that does not show up without it. On an Indy, 4 MB TFTP
+  gets through the built-in server took 8.6-14.9 s instead of 12.2-17.7 s, with
+  no retransmits either way.
 - **Gateway replies no longer wait for a poll tick.** A reply to a guest
   frame is still held for one engine pass, but the engine now comes back for
   it after 150 µs instead of a whole 1 ms `poll(2)` tick (about 15.6 ms on
