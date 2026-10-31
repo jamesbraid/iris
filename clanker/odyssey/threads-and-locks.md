@@ -1,4 +1,4 @@
-# VPro threads, the locks and the two queues
+# VPro threads, the lock-free state and the two queues
 
 Status: design (iris `src/dev/odyssey/{interface,fifo,worker,raster_unit,mod}.rs`,
 2026-10-30). Check against the code before relying on details.
@@ -85,35 +85,45 @@ the front end, and through the full command FIFO the processor, wait for
 the raster unit, and cut mirrors from about 4 to 3.0, 3.2 and 3.6 swaps a
 second; perfly did not change.
 
-## Locks
+## Locks and who owns what
 
-`Board` (everything but the host registers) is behind the board lock.
-`HostInterface` is behind the front lock and holds the registers that do not
-wait for drawing: identity, control, the interrupt bank, the routing, the
-swap bank and the FIFO status, plus the interrupt state and the credit
-return. The board lock is the front end's own state machine: it orders the
-processor's accesses against the front end's command execution, which is
-one in-order unit. It is not taken by the display or the raster unit, and
-guards no memory they share.
+There is no board lock and no raster lock. As on the other iris boards
+(GR2's `regs`, `re3` and `hq_engine`, MGRAS's `eng` and `rss`), the state of
+a unit is an `UnsafeCell` owned by the unit's thread, and a processor thread
+touches it only after the unit's FIFO has drained, with the contract written
+at the `unsafe impl Sync` (`BoardCell` in `mmio.rs`, the raster queue's
+`ctx`).
 
-- Lock order: board, then front. Nothing takes the board lock while holding
-  the front lock.
-- A front access (those registers, and command stores) takes only the front
-  lock and never waits for a draw.
-- Every other access takes the board lock, which waits out the current
-  slice, then runs whatever is still queued before it (`work_drain`), so it
-  sees all earlier stores. A processor's access on the bus answers busy
-  instead while stores it must see are queued (rule 2 below), so the drain
-  normally finds nothing to run.
-- The raster thread takes only its context lock, which owns the raster
-  unit's own state (the stipple phase and the rows drawn), and, for a
-  fence's interrupt, the front lock. Nothing else takes the context lock
-  while the raster thread runs. The front end waits for the raster queue to
-  empty with the board lock held; the raster unit takes no lock the front
-  end holds.
-- The display thread takes the front lock, to latch swaps and read the
-  displayed-buffer bits, and its own state's lock. It takes neither the
-  board lock nor the context lock and waits for no drawing.
+- **`Board`** (everything but the host registers, `BoardCell`) belongs to
+  the front end's thread while it runs stores. A processor's access reaches
+  it by one of three ways: a store goes into the command FIFO
+  (`CommandFifo::push`); an access that must see the drawing is answered
+  busy by the bus until the FIFO and the raster queue are empty
+  (`BoardLocks::bus_read`, `bus_write`, rule 2 below), and then runs on the
+  processor's thread with the front end idle; and a few accesses that do
+  not wait (the level word, the cursor and back-end read windows, an
+  unmodelled offset) read whole words the front end writes only as whole
+  words, and show the old or the new value. With the front end stopped
+  (tests, a stopped machine) the caller runs what is queued
+  (`Board::work_drain`).
+- **`HostInterface`** is behind the front lock, a register file's own
+  lock held for a few instructions: identity, control, the interrupt bank,
+  the routing, the swap bank and the FIFO status, plus the interrupt state
+  and the credit return. A front access (those registers) takes only it
+  and never waits for a draw. It is a leaf; the raster thread takes it for
+  a fence's interrupt, and the display takes it to latch swaps.
+- **The raster unit's state** (`RasterCtx`: the stipple phase and the rows
+  drawn) belongs to the raster thread while jobs are queued. The front end
+  runs a job itself only with no raster thread or an empty queue.
+- **The display** takes no board or raster state and waits for no drawing.
+- What remains are the queues' own locks: the command ring's, the ring
+  consumer's accounting against reset (`CommandFifo::pop`), the raster
+  queue's wake and idle condition variables, and the thread handles.
+
+A guest that stores to a register while it waits on a drain, or two
+processors that program the board without their own ordering, can race the
+front end. The hardware has no interlock there either; a fault shows as a
+wrong frame or a lost register store, not as a model that hides it.
 
 ## The display
 
@@ -151,16 +161,14 @@ next frame copies the row or entry again. A guest that arms a swap before
 its drawing is done sees the half-drawn frame for as long as the queue
 takes, as it would on the board.
 
-## The 1 ms slice
+## The front end's run
 
 The worker sleeps on a condvar until a store joins an empty queue, waits
-`GAP` (100 us, the board lock free), then holds the board lock for a slice of
-at most `SLICE` (1 ms of host time, checked every 16 stores) and releases it
-with `unlock_fair`. The gap exists because a thread that drops a lock and
-takes it straight back usually wins it again; without the gap a processor
-waiting for the board could wait out many slices. A slice never lets go
-part-way: a draw holds `&mut` into the board. 1 ms stays well under the
-guest's 10 ms clock tick. A slice always runs at least one store.
+`GAP` (100 us) so a burst of stores lands first, then runs the queue until
+it is empty. It needs no slices: nothing waits for it to let go of the
+board. A processor access that must see the stores is told busy and retries,
+taking its interrupts meanwhile, so the guest's 10 ms clock tick is never
+held behind a long draw. A run always runs at least one store.
 
 ## The command ring
 
@@ -171,10 +179,9 @@ pushes without the front lock and wakes the worker only when it sleeps. With
 two processors (`[machine] cpus = 2`) a second producer pushes the same way:
 the ring's own lock orders them, with no lock of ours above it. A push that
 loses that lock to the other processor, or finds the last place taken between
-the room check and the push, is refused, and its store takes the board lock
-instead (`BoardLocks::write_command`), which runs what waits and then the
-store. The ring is deeper than the board's FIFO, so a second producer's
-overshoot of the level by a store is absorbed. The consumer, whoever holds the board lock (worker or a draining access), looks
+the room check and the push, is refused, and its store retries the push behind the thread's run
+(`BoardLocks::write_command`), not around it. The ring is deeper than the board's FIFO, so a second producer's
+overshoot of the level by a store is absorbed. The consumer (the worker, or a draining access with the worker stopped) looks
 at up to 32 stores, runs them, and takes the ones it ran out together
 (`CommandFifo::take_run`, `retire`): the level, the store count and the
 credits move once a run, not once a store, because each store costs the
@@ -194,12 +201,12 @@ applying `0x6b2` there is a model choice. A processor store is refused with the 
 (`BoardLocks::bus_write`) only when the 64K-entry host ring is full, as
 IMPACT's and GR2's are: the processor retries the instruction, taking
 interrupts meanwhile, and the board's thread, which then starts its next
-slice without the pause, makes room. Past 32,768 words the guest reads a
+run without the pause, makes room. Past 32,768 words the guest reads a
 full FIFO (high-water bit up once a `0x6b2` is set) while its stores still
 succeed.
 `IRIS_VPRO_FIFO=shallow` (or `32768`) refuses at 32,768 words as it used to,
-for A/B runs. A caller other than the bus still runs the queue and then
-its store. The flow-control target word `+0x1074` is stored, not routed, so
+for A/B runs. A caller other than the bus, with the board's thread stopped, still runs
+the queue and then its store. The flow-control target word `+0x1074` is stored, not routed, so
 a store to it goes in at once even while the FIFO holds work.
 
 Counted stores (machines whose processor interface counts graphics credits;
@@ -227,7 +234,7 @@ must keep them.
    (`BoardLocks::bus_read`, `bus_write`) such an access answers busy while
    that work is still queued and the board's threads run: the processor
    retries it, taking interrupts, and the board's threads run the work,
-   as IMPACT's waiting reads do. Callers other than the bus drain it
+   as IMPACT's waiting reads do. Callers other than the bus, with the board's thread stopped, drain it
    themselves.
 3. STATUS0's empty, low-water and high-water bits follow the words in the
    command FIFO, not the raster queue: they are the board's FIFO.
@@ -248,9 +255,9 @@ must keep them.
 
 ## Tracing it
 
-`docs/perfetto.md`: `VPro cfifo level` is sampled at slice edges and STATUS0
+`docs/perfetto.md`: `VPro cfifo level` is sampled at run edges and STATUS0
 reads, not per store. The `slice` slice on `odyssey-work` against `drain` on
 the CPU thread shows who is running the commands, and `raster slice` on
 `odyssey-raster` who is drawing. A long `raster wait` on `odyssey-work`
 points at front-end plane work behind queued drawing; a long `slice` with
-the CPU blocked on a read, at the front end holding the board lock.
+the CPU answered busy on a read, at the front end still running stores.
