@@ -319,10 +319,5 @@ pub trait Device: Send + Sync {
     }
 }
 
-// Compile-time asserts: BUS_* constants must equal the corresponding ExecStatus values.
-// If these fail, update BOTH sets of constants to agree.
-// See also: mips_exec.rs EXEC_BUS_ERR / EXEC_BUS_VCE / EXEC_COMPLETE / EXEC_RETRY.
-const _: () = assert!(BUS_OK   == crate::cpu::mips_exec::EXEC_COMPLETE);
-const _: () = assert!(BUS_BUSY == crate::cpu::mips_exec::EXEC_RETRY);
-const _: () = assert!(BUS_ERR  == crate::cpu::mips_exec::EXEC_BUS_ERR);
-const _: () = assert!(BUS_VCE  == crate::cpu::mips_exec::EXEC_BUS_VCE);
+// The CPU asserts at compile time that these BUS_* codes equal its ExecStatus
+// values (mips_exec.rs, next to EXEC_BUS_VCE).
