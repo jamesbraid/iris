@@ -677,9 +677,33 @@ fn a_pixel_zoom_samples_with_the_contexts_magnification_filter() {
     assert_ne!(blended, pixel(&nearest, 0, 21, 11), "linear blends where nearest copies");
 }
 
-/// Draws the 2x2 image at zoom 2 into the 4x4 square at (20, 10), with
-/// `word4` as the sampler's word 4, and returns the board.
+/// The size word's texture-offset code is 2 only when the scratch object's
+/// two offset fields are both 2, and 0 otherwise; bit 27 is that code's
+/// low bit, so a move whose size word has it set is the same zoom, and bit
+/// 26 is never set.
+///
+/// Datasheet: "Pixel zoom: the texture move and its rectangle" (ESTABLISHED).
+#[test]
+fn a_pixel_zoom_draws_with_the_offset_code_bit_set_or_clear() {
+    let plain = zoom_2x2_sized(0x0364_0000, 0);
+    let offset2 = zoom_2x2_sized(0x0364_0000, 0x0800_0000);
+
+    for y in 10..14 {
+        for x in 20..24 {
+            assert_eq!(pixel(&offset2, 0, x, y), pixel(&plain, 0, x, y), "pixel ({x}, {y})");
+        }
+    }
+    assert_eq!(pixel(&offset2, 0, 20, 10), 0x1100_00ff);
+}
+
 fn zoom_2x2(word4: u32) -> Box<Board> {
+    zoom_2x2_sized(word4, 0)
+}
+
+/// Draws the 2x2 image at zoom 2 into the 4x4 square at (20, 10), with
+/// `word4` as the sampler's word 4 and `size_bits` or-ed into its size
+/// word, and returns the board.
+fn zoom_2x2_sized(word4: u32, size_bits: u32) -> Box<Board> {
     let (mut s, _) = window();
     let base = 0x16b000;
     let obj = s.object_select(base, 512);
@@ -695,7 +719,7 @@ fn zoom_2x2(word4: u32) -> Box<Board> {
     s.tex_mode = ODSY_TEX_MODE_2D;
     s.tex_level0 = 60;
     s.tex_levels[180..183].copy_from_slice(&[base, 0x8210_0020, 0]);
-    s.tex_sampler = [(9 << 10) | (6 << 5), 512, 64, 0, word4, 0, 0];
+    s.tex_sampler = [(9 << 10) | (6 << 5) | size_bits, 512, 64, 0, word4, 0, 0];
     s.tex_env = [1, 0, 0, 0, 0];
 
     cmd(&mut s, select(ODSY_REG_GL_BEGIN));
