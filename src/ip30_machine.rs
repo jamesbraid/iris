@@ -165,7 +165,7 @@ impl OctaneMachine {
         if prom.len() > FLASH_SIZE {
             return Err(format!("Octane PROM {prom_path} is {} bytes; the flash holds {FLASH_SIZE}", prom.len()));
         }
-        let cpu_count = cfg.machine.cpus;
+        let cpu_count = cfg.machine.cpus();
         if !(1..=2).contains(&cpu_count) {
             return Err(format!("[machine] cpus = {cpu_count}: IRIX runs an Octane with 1 or 2"));
         }
