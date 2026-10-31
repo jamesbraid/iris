@@ -90,6 +90,25 @@ impl<'a> Default for PciConfigPolicy<'a> {
     }
 }
 
+/// A function that computes some of its own configuration registers: the
+/// indirect register and memory windows of a NIC, or a status bit the chip
+/// drives. The header reaches it from every configuration cycle, whichever
+/// bridge generated it.
+///
+/// Calls arrive with no header lock held, so a hook may use the header.
+pub trait PciConfigHook: Send + Sync {
+    /// The value dword `reg` reads as, when the function computes it.
+    fn read(&self, reg: usize) -> Option<u32>;
+
+    /// A write of `val` under `mask` to dword `reg`. `true` means the
+    /// function took it and the header stores nothing. Only a full-dword
+    /// write is offered: narrower ones take the header's own path.
+    fn write(&self, reg: usize, val: u32, mask: u32) -> bool;
+
+    /// Dword `reg` was written through the header's own path.
+    fn written(&self, _reg: usize) {}
+}
+
 /// One function's type 0 configuration header.
 ///
 /// Enough of it to be discovered and configured: identity, class, command
@@ -108,6 +127,7 @@ pub struct PciConfig {
     latency_mask: u8,
     cache_line_mask: u8,
     writable_masks: [u32; 64],
+    hook: std::sync::OnceLock<Arc<dyn PciConfigHook>>,
 }
 
 impl PciConfig {
@@ -163,7 +183,19 @@ impl PciConfig {
             latency_mask: policy.latency_mask,
             cache_line_mask: policy.cache_line_mask,
             writable_masks,
+            hook: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Let the function compute some registers. Set once, after construction.
+    pub fn set_hook(&self, hook: Arc<dyn PciConfigHook>) {
+        let _ = self.hook.set(hook);
+    }
+
+    /// Change dword `reg` as the chip does, outside the guest's write mask.
+    pub fn update(&self, reg: usize, f: impl FnOnce(u32) -> u32) {
+        let mut r = self.regs.lock().unwrap();
+        r[reg] = f(r[reg]);
     }
 
     /// RST#: back to the power-up header. The command register clears, so
@@ -180,6 +212,9 @@ impl PciConfig {
 
     /// Register `reg` (a dword index, 0..64).
     pub fn read(&self, reg: usize) -> u32 {
+        if let Some(value) = self.hook.get().and_then(|h| h.read(reg)) {
+            return value;
+        }
         let r = self.regs.lock().unwrap();
         match reg {
             1 => (r[1] & (0xffff | ((self.status_w1c_mask as u32) << 16)))
@@ -198,6 +233,18 @@ impl PciConfig {
         if mask == 0 {
             return;
         }
+        if let Some(hook) = self.hook.get() {
+            if mask == u32::MAX && hook.write(reg, val, mask) {
+                return;
+            }
+            self.write_stored(reg, val, mask);
+            hook.written(reg);
+            return;
+        }
+        self.write_stored(reg, val, mask);
+    }
+
+    fn write_stored(&self, reg: usize, val: u32, mask: u32) {
         let mut r = self.regs.lock().unwrap();
         match reg {
             // Identity, class and header type are read-only.
