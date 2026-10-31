@@ -202,6 +202,7 @@ fn the_configured_station_address_reaches_the_l1_and_the_ethernet() {
         payload: &[], clock: Arc::new(|| 0), flash_path: None,
         station_mac: mac,
         timekeeper: Arc::new(crate::dev::timekeeper::Timekeeper::fuel().unwrap()),
+        ps2_input: true, usb_input: true,
     }).unwrap();
     assert_eq!(board.l1.station_mac(), mac);
     assert_eq!(board.eth.mac(), mac);
@@ -550,4 +551,35 @@ fn unavailable_serial_ports_and_logs_do_not_abort_the_machine() {
     }
     config.ci = false;
     crate::ip35_machine::FuelMachine::connect_serial_for_test(&config, &board, 0).unwrap();
+}
+
+/// The Fuel's OHCI root ports each carry a low-speed device, and host
+/// input reaches them through the IOC3's PS/2 controller object; the USB
+/// pair is fitted only when asked for.
+#[test]
+fn the_fuel_plugs_a_usb_keyboard_and_mouse_only_when_configured_on() {
+    use crate::pci::PciBusDevice;
+    let ports = |usb_input| {
+        let board = crate::ip35_machine::FuelBoard::with_config(crate::ip35_machine::FuelBoardConfig {
+            payload: &[], clock: Arc::new(|| 0), flash_path: None,
+            station_mac: [8, 0, 0x69, 0x12, 0x34, 0x56],
+            timekeeper: Arc::new(crate::dev::timekeeper::Timekeeper::fuel().unwrap()),
+            ps2_input: true, usb_input,
+        }).unwrap();
+        // Power each port: one with a device shows it connected.
+        board.usb.bar_write(0, 0x54, 0x100, 4);
+        board.usb.bar_write(0, 0x58, 0x100, 4);
+        let status = [0x54, 0x58].map(|at| board.usb.bar_read(0, at, 4));
+        (board, status)
+    };
+    let (board, status) = ports(true);
+    for s in status {
+        assert_eq!(s & 1, 1, "device connected");
+        assert_eq!(s & 0x200, 0x200, "low speed");
+    }
+    // The mouse the USB side fits makes the shared controller report a mouse
+    // only once the guest has configured it.
+    assert!(!board.ioc3.ps2().mouse_enabled());
+    let (_, status) = ports(false);
+    assert_eq!(status.map(|s| s & 1), [0, 0], "nothing plugged in");
 }
