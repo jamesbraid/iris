@@ -91,15 +91,14 @@ pub struct Board {
     /// The memory controller's configuration word (+0x1004), as written.
     pub memory_control: u32,
     pub memory_control_reported: bool,
-    pub flctl_target: u32,
-    /// The FIFO set-up registers 0x6b0-0x6b3 and 0x7b5, as last written.
+    /// The FIFO set-up registers 0x6b0-0x6b3 and 0x7b5, in that order, as
+    /// last written. Values only: their roles are unknown.
     pub fifo_setup: [u32; 5],
     /// Register 0x7f0 as last written. Its unit and meaning are unknown; the
     /// model records the value and runs no timer. Whether a nonzero value has
     /// been reported.
     pub setup_7f0: u32,
     pub setup_7f0_reported: bool,
-    pub flctl_target_reported: bool,
 
     // The DMA-sync command's host-write base (48-bit guest physical address).
     pub host_write_addr_upper: u32,
@@ -471,11 +470,9 @@ impl Default for Board {
             flctl_config: 0,
             memory_control: 0,
             memory_control_reported: false,
-            flctl_target: 0,
             fifo_setup: [0; 5],
             setup_7f0: 0,
             setup_7f0_reported: false,
-            flctl_target_reported: false,
             host_write_addr_upper: 0,
             host_write_addr_lower: 0,
             stats_addr_upper: 0,
@@ -819,6 +816,8 @@ impl Board {
         // below, so no clearing packet has anywhere to go.
         f.interrupt_asserted = false;
         f.sw_token = 0;
+        f.flctl_target = 0;
+        f.flctl_target_reported = false;
         f.route_dest_upper = 0;
         f.route_dest_lower = 0;
         f.route_vectors = 0;
@@ -833,7 +832,6 @@ impl Board {
         drop(f);
         self.flctl_config = ODSY_FLCTL_CONFIG_RESET;
         self.memory_control = 0;
-        self.flctl_target = 0;
         self.fifo_setup = [0; 5];
         self.setup_7f0 = 0;
         self.host_write_addr_upper = 0;
