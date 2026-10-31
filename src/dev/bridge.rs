@@ -1010,11 +1010,24 @@ impl Bridge {
         Some((dword >> (8 * (reg & 3))) & (u64::MAX >> (64 - 8 * size)))
     }
 
-    /// A configuration read of a slot nothing answers fails by design: the
-    /// PROM and the kernel probe every slot and rely on the time-out.
-    fn cfg_read_is_unanswered(&self, off: u32, size: usize) -> bool {
-        // A read wider than a word is refused before any slot is chosen.
-        size <= 4 && self.cfg_target(off, size).2.is_none()
+    /// Why a configuration access failed, when the cause is that nothing
+    /// answered: the PROM and the kernel probe every slot and rely on the
+    /// time-out.
+    fn cfg_fault(&self, off: u32, size: usize) -> Option<String> {
+        // A transfer wider than a word is refused before any slot is chosen.
+        if size > 4 {
+            return None;
+        }
+        let (slot, _, dev) = self.cfg_target(off, size);
+        if dev.is_some() {
+            return None;
+        }
+        let func = (off >> 8) & 7;
+        Some(if self.slots.read()[slot].is_none() {
+            format!("PCI config master timeout: empty slot {slot} function {func}")
+        } else {
+            format!("PCI config master timeout: slot {slot} has no function {func}")
+        })
     }
 
     /// A store posts: it has no response to carry a failure back.
@@ -1485,9 +1498,9 @@ impl PciLanes for Lanes {
 }
 
 impl BusDevice for Bridge {
-    fn fault_is_expected(&self, addr: u64, size: usize) -> bool {
+    fn describe_fault(&self, addr: u64, size: usize) -> Option<String> {
         let off = addr as u32 & WINDOW_MASK;
-        (CFG0_BASE..CFG0_BASE + CFG0_SIZE).contains(&off) && self.cfg_read_is_unanswered(off - CFG0_BASE, size)
+        if (CFG0_BASE..CFG0_BASE + CFG0_SIZE).contains(&off) { self.cfg_fault(off - CFG0_BASE, size) } else { None }
     }
 
     fn read8(&self, addr: u64) -> BusRead8 {

@@ -516,31 +516,35 @@ fn a_window_cycle_nobody_claims_is_a_master_timeout() {
 }
 
 #[test]
-fn an_empty_slot_config_read_is_an_expected_fault() {
+fn an_empty_slot_config_read_names_the_master_timeout() {
     let r = Rig::new();
     r.card(1, PCI_INTA);
     let at = |slot: u32, reg: u32| u64::from(Rig::cfg(slot, reg));
+    let empty = |slot: u32| Some(format!("PCI config master timeout: empty slot {slot} function 0"));
 
     // Empty slots, any register, any word-or-narrower width.
     for slot in [0, 2, 7] {
-        assert!(r.bridge.fault_is_expected(at(slot, 0), 4));
-        assert!(r.bridge.fault_is_expected(at(slot, Rig::aim(0x0e, 1)), 1));
+        assert_eq!(r.bridge.describe_fault(at(slot, 0), 4), empty(slot));
+        assert_eq!(r.bridge.describe_fault(at(slot, Rig::aim(0x0e, 1)), 1), empty(slot));
     }
-    // Function 1 of any slot has nothing behind it either.
-    assert!(r.bridge.fault_is_expected(at(1, 0x100), 4));
-    // The expectation follows the population, and the read still fails.
-    assert!(!r.bridge.fault_is_expected(at(1, 0), 4));
+    // Function 1 of a populated slot has nothing behind it either.
+    assert_eq!(
+        r.bridge.describe_fault(at(1, 0x100), 4),
+        Some("PCI config master timeout: slot 1 has no function 1".to_string())
+    );
+    // The description follows the population, and the read still fails.
+    assert_eq!(r.bridge.describe_fault(at(1, 0), 4), None);
     assert!(!r.bridge.read32(at(0, 0)).is_ok());
     r.card(0, PCI_INTA);
-    assert!(!r.bridge.fault_is_expected(at(0, 0), 4));
+    assert_eq!(r.bridge.describe_fault(at(0, 0), 4), None);
     // A doubleword config read fails for another reason.
-    assert!(!r.bridge.fault_is_expected(at(2, 0), 8));
+    assert_eq!(r.bridge.describe_fault(at(2, 0), 8), None);
     // Other spaces: registers, device windows and the table.
-    assert!(!r.bridge.fault_is_expected(0x10, 4));
-    assert!(!r.bridge.fault_is_expected(u64::from(Rig::win(1) + 0x1000), 4));
-    assert!(!r.bridge.fault_is_expected(u64::from(ATE_BASE), 4));
+    assert_eq!(r.bridge.describe_fault(0x10, 4), None);
+    assert_eq!(r.bridge.describe_fault(u64::from(Rig::win(1) + 0x1000), 4), None);
+    assert_eq!(r.bridge.describe_fault(u64::from(ATE_BASE), 4), None);
     // The Bridge decodes the full physical address; only the window offset counts.
-    assert!(r.bridge.fault_is_expected(0x1f00_0000 + at(3, 0), 4));
+    assert_eq!(r.bridge.describe_fault(0x1f00_0000 + at(3, 0), 4), empty(3));
 }
 
 #[test]

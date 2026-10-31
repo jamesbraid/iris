@@ -6323,10 +6323,10 @@ mod tests {
         }
     }
 
-    /// A bus whose reads fail, counting how often it is asked whether the
-    /// failure was expected.
+    /// A bus whose reads fail, recording each time it is asked to explain
+    /// a failure.
     struct FailingProbe {
-        expected: bool,
+        explains: bool,
         asked: Mutex<Vec<(u64, usize)>>,
     }
 
@@ -6334,19 +6334,19 @@ mod tests {
         fn read32(&self, addr: u64) -> BusRead32 {
             if addr == 0x2000 { BusRead32::ok(0x1234_5678) } else { BusRead32::err() }
         }
-        fn fault_is_expected(&self, addr: u64, size: usize) -> bool {
+        fn describe_fault(&self, addr: u64, size: usize) -> Option<String> {
             self.asked.lock().unwrap().push((addr, size));
-            self.expected
+            self.explains.then(|| "probe failed".to_string())
         }
     }
 
-    /// An expected fault is quiet but not different: the same exception and
-    /// BadVAddr, and the bus is asked only after a read has failed.
+    /// A described fault is labelled but not different: the same exception
+    /// and BadVAddr, and the bus is asked only after a read has failed.
     #[test]
-    fn test_expected_uncached_read_fault_still_raises_the_bus_error() {
+    fn test_described_uncached_read_fault_still_raises_the_bus_error() {
         let mut outcome = Vec::new();
-        for expected in [false, true] {
-            let bus = Arc::new(FailingProbe { expected, asked: Mutex::new(Vec::new()) });
+        for explains in [false, true] {
+            let bus = Arc::new(FailingProbe { explains, asked: Mutex::new(Vec::new()) });
             let dev: Arc<dyn BusDevice> = bus.clone();
             let mut exec: MipsExecutor<PassthroughTlb, PassthroughCache> = MipsExecutor::new(dev, PassthroughTlb::default(), &MipsCpuConfig::indy());
             disable_jitv2(&mut exec);
@@ -6363,6 +6363,6 @@ mod tests {
             assert_eq!(*bus.asked.lock().unwrap(), vec![(0x100, 4)]);
             outcome.push((st, exec.core.cp0_badvaddr, exec.core.cp0_cause));
         }
-        assert_eq!(outcome[0], outcome[1], "expectedness must not change what the guest sees");
+        assert_eq!(outcome[0], outcome[1], "an explanation must not change what the guest sees");
     }
 }
