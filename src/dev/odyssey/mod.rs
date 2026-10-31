@@ -45,9 +45,6 @@
 //!   credits for machines whose processor interface counts them.
 //! - `depth_word`: the board's 24-bit float depth word and its offset.
 //! - `consts`: register, command and field constants.
-//!
-//! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code
-//! (hw/display/sgi/) in jamesbraid/qemu-sgi-origami.
 
 // The rasteriser writes its range tests as !(x > 0.0) and the like so that
 // a NaN fails them.

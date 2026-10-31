@@ -1,7 +1,5 @@
 //! The MMIO aperture: write dispatch, which accesses wait for drawing, and the
 //! locks the board is reached through.
-//!
-//! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 

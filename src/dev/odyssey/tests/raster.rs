@@ -14,19 +14,19 @@ const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 fn gl_board() -> (Box<Board>, GlDrawState) {
     let mut b = Bench::empty();
     b.board.gl_write_mask |= ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT;
-    b.st.shade_model = SGI_GL_FLAT;
+    b.st.shade_model = GL_FLAT;
     b.st.dither = false;
     (b.board, b.st)
 }
 
 /// Vertices at window pixels (x, y), in the colour given.
 fn vertices(points: &[(f32, f32)], colour: [f32; 4]) -> Vec<f32> {
-    let mut v = vec![0.0f32; points.len() * SGI_GL_VERTEX_FLOATS];
+    let mut v = vec![0.0f32; points.len() * GL_VERTEX_FLOATS];
     for (i, &(x, y)) in points.iter().enumerate() {
-        let o = &mut v[i * SGI_GL_VERTEX_FLOATS..][..SGI_GL_VERTEX_FLOATS];
+        let o = &mut v[i * GL_VERTEX_FLOATS..][..GL_VERTEX_FLOATS];
         let ndc = |p: f32, size: u32| p / size as f32 * 2.0 - 1.0;
-        o[SGI_GL_V_POSITION..][..4].copy_from_slice(&[ndc(x, SGI_ODYSSEY_WIDTH), ndc(y, SGI_ODYSSEY_HEIGHT), 0.0, 1.0]);
-        o[SGI_GL_V_COLOR..][..4].copy_from_slice(&colour);
+        o[GL_V_POSITION..][..4].copy_from_slice(&[ndc(x, ODSY_WIDTH), ndc(y, ODSY_HEIGHT), 0.0, 1.0]);
+        o[GL_V_COLOR..][..4].copy_from_slice(&colour);
     }
     v
 }
@@ -34,10 +34,10 @@ fn vertices(points: &[(f32, f32)], colour: [f32; 4]) -> Vec<f32> {
 /// One red triangle over the left half of the screen, through the board's
 /// own GL draw: set up by the front end, drawn by the raster unit.
 fn red_triangle(s: &mut Board, st: &GlDrawState) {
-    let v = vertices(&[(0.0, 0.0), (SGI_ODYSSEY_WIDTH as f32, 0.0), (0.0, SGI_ODYSSEY_HEIGHT as f32)], RED);
+    let v = vertices(&[(0.0, 0.0), (ODSY_WIDTH as f32, 0.0), (0.0, ODSY_HEIGHT as f32)], RED);
     let stipple = [0u32; 32];
-    let mut d = GlDraw::new(SGI_GL_TRIANGLES, 3, &v, st, &stipple);
-    assert_eq!(s.gl_draw(&mut d), SGI_GL_DRAW_OK);
+    let mut d = GlDraw::new(GL_TRIANGLES, 3, &v, st, &stipple);
+    assert_eq!(s.gl_draw(&mut d), GL_DRAW_OK);
 }
 
 /// A board with its raster unit on a thread of its own, whose next slice
@@ -217,7 +217,7 @@ struct FreshRows {
 
 fn fresh_scanout() -> FreshRows {
     let marks = RowMarks::default();
-    marks.set_height(SGI_ODYSSEY_HEIGHT);
+    marks.set_height(ODSY_HEIGHT);
     FreshRows { differ: Box::new([[0; ROW_WORDS]; ODSY_DISPMODE_COUNT as usize]), marks }
 }
 
@@ -254,12 +254,12 @@ fn the_stipple_phase_carries_across_draws_on_the_raster_thread() {
         let mut phase = Some(0);
         for (a, b) in [((10.5f32, 20.5f32), (17.5f32, 20.5f32)), ((17.5, 20.5), (60.5, 20.5))] {
             let v = vertices(&[a, b], RED);
-            let mut d = GlDraw::new(SGI_GL_LINES, 2, &v, st, &stipple);
+            let mut d = GlDraw::new(GL_LINES, 2, &v, st, &stipple);
             d.line_stipple_enabled = true;
             d.line_stipple_repeat = 1;
             d.line_stipple_pattern = 0x0f0f;
             d.line_phase = phase;
-            assert_eq!(h.test_board().gl_draw(&mut d), SGI_GL_DRAW_OK);
+            assert_eq!(h.test_board().gl_draw(&mut d), GL_DRAW_OK);
             phase = d.line_phase;
         }
         let s = h.test_board();
@@ -284,21 +284,21 @@ fn a_reused_draw_job_draws_only_its_new_primitive() {
     const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
     fn draws(h: &BoardLocks, st: &GlDrawState) -> Vec<u32> {
         let stipple = [0u32; 32];
-        let (w, ht) = (SGI_ODYSSEY_WIDTH as f32, SGI_ODYSSEY_HEIGHT as f32);
+        let (w, ht) = (ODSY_WIDTH as f32, ODSY_HEIGHT as f32);
         // A six-vertex pair of triangles, then once that is drawn a
         // three-vertex one that covers less.
         let quad = vertices(&[(0.0, 0.0), (64.0, 0.0), (0.0, 64.0), (64.0, 0.0), (64.0, 64.0), (0.0, 64.0)], RED);
-        let mut d = GlDraw::new(SGI_GL_TRIANGLES, 6, &quad, st, &stipple);
-        assert_eq!(h.test_board().gl_draw(&mut d), SGI_GL_DRAW_OK);
+        let mut d = GlDraw::new(GL_TRIANGLES, 6, &quad, st, &stipple);
+        assert_eq!(h.test_board().gl_draw(&mut d), GL_DRAW_OK);
         h.test_board().raster_wait();
         let tri = vertices(&[(w - 64.0, ht - 64.0), (w, ht - 64.0), (w - 64.0, ht)], BLUE);
-        let mut d = GlDraw::new(SGI_GL_TRIANGLES, 3, &tri, st, &stipple);
-        assert_eq!(h.test_board().gl_draw(&mut d), SGI_GL_DRAW_OK);
+        let mut d = GlDraw::new(GL_TRIANGLES, 3, &tri, st, &stipple);
+        assert_eq!(h.test_board().gl_draw(&mut d), GL_DRAW_OK);
         let s = h.test_board();
         s.raster_wait();
         let mut px = Vec::new();
-        for y in (0..SGI_ODYSSEY_HEIGHT as i32).step_by(8) {
-            for x in (0..SGI_ODYSSEY_WIDTH as i32).step_by(8) {
+        for y in (0..ODSY_HEIGHT as i32).step_by(8) {
+            for x in (0..ODSY_WIDTH as i32).step_by(8) {
                 px.push(pixel(&s, 0, x, y));
             }
         }
@@ -373,20 +373,20 @@ fn drawn_rows(h: &BoardLocks, displayed: u32) -> Vec<u32> {
 /// Which rows of colour buffer b differ between two snapshots.
 fn changed_rows(s: &Board, b: u32, before: &[u32]) -> Vec<u32> {
     let w = 64;
-    (0..SGI_ODYSSEY_HEIGHT).filter(|&y| (0..w).any(|x| pixel(s, b, x, y as i32) != before[(y * w as u32 + x as u32) as usize])).collect()
+    (0..ODSY_HEIGHT).filter(|&y| (0..w).any(|x| pixel(s, b, x, y as i32) != before[(y * w as u32 + x as u32) as usize])).collect()
 }
 
 /// The pixels of the first 64 columns of colour buffer b.
 fn snapshot(s: &Board, b: u32) -> Vec<u32> {
-    (0..SGI_ODYSSEY_HEIGHT as i32).flat_map(|y| (0..64).map(move |x| (y, x))).map(|(y, x)| pixel(s, b, x, y)).collect()
+    (0..ODSY_HEIGHT as i32).flat_map(|y| (0..64).map(move |x| (y, x))).map(|(y, x)| pixel(s, b, x, y)).collect()
 }
 
 /// A small triangle at window row `y`, in the first 64 columns.
 fn small_triangle(s: &mut Board, st: &GlDrawState, y: f32, colour: [f32; 4]) {
     let v = vertices(&[(2.0, y), (60.0, y + 3.0), (4.0, y + 40.0)], colour);
     let stipple = [0u32; 32];
-    let mut d = GlDraw::new(SGI_GL_TRIANGLES, 3, &v, st, &stipple);
-    assert_eq!(s.gl_draw(&mut d), SGI_GL_DRAW_OK);
+    let mut d = GlDraw::new(GL_TRIANGLES, 3, &v, st, &stipple);
+    assert_eq!(s.gl_draw(&mut d), GL_DRAW_OK);
 }
 
 /// What the display resolves again covers every row of the colour buffer
@@ -446,15 +446,15 @@ fn a_clear_asks_the_display_for_its_rows() {
     let h = BoardLocks::new(s);
     let mut s = h.test_board();
     let mut op = RasterOp {
-        kind: SGI_RASTER_CLEAR,
+        kind: RASTER_CLEAR,
         ntargets: 1,
         x0: 0,
         y0: 200,
         x1: 63,
         y1: 299,
-        clear_buffers: SGI_GL_COLOR_BUFFER_BIT,
+        clear_buffers: GL_COLOR_BUFFER_BIT,
         clear_rgba: [0.2, 0.3, 0.4, 1.0],
-        clear_colour_mask: SGI_GL_COLOUR_MASK_ALL,
+        clear_colour_mask: GL_COLOUR_MASK_ALL,
         ..Default::default()
     };
     op.clip.n = 1;
@@ -471,10 +471,10 @@ fn a_clear_asks_the_display_for_its_rows() {
 fn line_pixels(rule: LineRule, a: (f32, f32), b: (f32, f32)) -> Vec<(i32, i32)> {
     let mut bench = Bench::empty();
     bench.board.gl_write_mask |= ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT;
-    bench.st.shade_model = SGI_GL_FLAT;
+    bench.st.shade_model = GL_FLAT;
     bench.st.dither = false;
     bench.rules.line_rule = rule;
-    bench.mode = SGI_GL_LINES;
+    bench.mode = GL_LINES;
     bench.prims = vec![vertices(&[a, b], RED)];
     bench.run();
     (0..64).flat_map(|y| (0..80).map(move |x| (x, y))).filter(|&(x, y)| pixel(&bench.board, 0, x, y) != 0).collect()
@@ -548,7 +548,7 @@ fn resolved_rows(s: &mut Board, h: &BoardLocks) -> Vec<u32> {
 #[test]
 fn a_swap_resolves_the_rows_drawn_into_the_other_buffer_and_no_others() {
     let (mut s, mut st) = gl_board();
-    s.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
+    s.set_scanout_size(ODSY_WIDTH, ODSY_HEIGHT);
     let h = BoardLocks::new(s);
     let mut s = h.test_board();
     st.drawable.front = 1;
@@ -581,7 +581,7 @@ fn a_swap_resolves_the_rows_drawn_into_the_other_buffer_and_no_others() {
 #[test]
 fn a_swap_after_an_unnamed_write_resolves_only_the_rows_the_buffers_differ_in() {
     let (mut s, _) = gl_board();
-    s.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
+    s.set_scanout_size(ODSY_WIDTH, ODSY_HEIGHT);
     let h = BoardLocks::new(s);
     let mut s = h.test_board();
     s.scanout_update();
@@ -600,7 +600,7 @@ fn a_swap_after_an_unnamed_write_resolves_only_the_rows_the_buffers_differ_in() 
 #[test]
 fn a_swap_measures_only_the_lines_an_unnamed_write_marked() {
     let (mut s, mut st) = gl_board();
-    s.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
+    s.set_scanout_size(ODSY_WIDTH, ODSY_HEIGHT);
     let h = BoardLocks::new(s);
     let mut s = h.test_board();
     st.drawable.front = 1;
@@ -632,14 +632,14 @@ fn a_swap_measures_only_the_lines_an_unnamed_write_marked() {
 fn incremental_updates_keep_the_frame_a_whole_resolve_makes() {
     use crate::dev::odyssey::raster_bench::Lcg;
     let (mut s, mut st) = gl_board();
-    s.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
+    s.set_scanout_size(ODSY_WIDTH, ODSY_HEIGHT);
     let mut rng = Lcg(0x5a17);
     for i in 0..4096 {
         s.regs().set_lut(i, rng.next_u32() & ODSY_LUT_ENTRY_MASK);
     }
     // Four windows in vertical bands.
     for (i, d) in s.did.iter_mut().enumerate() {
-        *d = (((i % SGI_ODYSSEY_WIDTH as usize) / 320) as u8) << ODSY_DID_MAIN_SHIFT;
+        *d = (((i % ODSY_WIDTH as usize) / 320) as u8) << ODSY_DID_MAIN_SHIFT;
     }
     let h = BoardLocks::new(s);
     let mut s = h.test_board();
@@ -692,7 +692,7 @@ fn the_screen_follows_the_frame_through_frames_that_present_a_few_lines() {
     use crate::dev::odyssey::raster_bench::Lcg;
     use std::sync::atomic::AtomicU64;
     let (mut s, mut st) = gl_board();
-    s.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
+    s.set_scanout_size(ODSY_WIDTH, ODSY_HEIGHT);
     let mut rng = Lcg(0xfeed);
     for i in 0..4096 {
         s.regs().set_lut(i, rng.next_u32() & ODSY_LUT_ENTRY_MASK);
@@ -707,7 +707,7 @@ fn the_screen_follows_the_frame_through_frames_that_present_a_few_lines() {
     s.regs().set_cursor(ODSY_CURSOR_CONTROL as usize, ODSY_CURSOR_CTL_ENABLE);
     let h = BoardLocks::new(s);
     let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let (w, ht) = (SGI_ODYSSEY_WIDTH as usize, SGI_ODYSSEY_HEIGHT as usize);
+    let (w, ht) = (ODSY_WIDTH as usize, ODSY_HEIGHT as usize);
 
     for step in 0..8 {
         {
@@ -884,8 +884,8 @@ fn a_reused_lighting_state_lights_a_vertex_as_a_fresh_one_does() {
 fn tiny_triangle(s: &mut Board, st: &GlDrawState) {
     let v = vertices(&[(10.0, 10.0), (14.0, 10.0), (10.0, 14.0)], RED);
     let stipple = [0u32; 32];
-    let mut d = GlDraw::new(SGI_GL_TRIANGLES, 3, &v, st, &stipple);
-    assert_eq!(s.gl_draw(&mut d), SGI_GL_DRAW_OK);
+    let mut d = GlDraw::new(GL_TRIANGLES, 3, &v, st, &stipple);
+    assert_eq!(s.gl_draw(&mut d), GL_DRAW_OK);
 }
 
 /// A draw's cost follows its area; a clear's pixels count for less.
@@ -893,12 +893,12 @@ fn tiny_triangle(s: &mut Board, st: &GlDrawState) {
 fn a_job_costs_its_pixels() {
     let p = |mode, pts: &[(f64, f64)]| primitive_cost(mode, pts.iter().map(|&p| Some(p)), 1.0, 1.0);
 
-    assert_eq!(p(SGI_GL_TRIANGLES, &[(0.0, 0.0), (100.0, 0.0), (0.0, 100.0)]), RASTER_JOB_OVERHEAD + 5000);
-    assert_eq!(p(SGI_GL_QUADS, &[(0.0, 0.0), (100.0, 0.0), (100.0, 10.0), (0.0, 10.0)]), RASTER_JOB_OVERHEAD + 1000);
-    assert_eq!(p(SGI_GL_LINES, &[(0.0, 0.0), (99.0, 3.0)]), RASTER_JOB_OVERHEAD + 100);
+    assert_eq!(p(GL_TRIANGLES, &[(0.0, 0.0), (100.0, 0.0), (0.0, 100.0)]), RASTER_JOB_OVERHEAD + 5000);
+    assert_eq!(p(GL_QUADS, &[(0.0, 0.0), (100.0, 0.0), (100.0, 10.0), (0.0, 10.0)]), RASTER_JOB_OVERHEAD + 1000);
+    assert_eq!(p(GL_LINES, &[(0.0, 0.0), (99.0, 3.0)]), RASTER_JOB_OVERHEAD + 100);
     // Off the screen counts for nothing; a vertex behind the eye, for all of it.
-    assert_eq!(p(SGI_GL_QUADS, &[(-500.0, -500.0), (-400.0, -500.0), (-400.0, -400.0), (-500.0, -400.0)]), RASTER_JOB_OVERHEAD);
-    assert_eq!(primitive_cost(SGI_GL_TRIANGLES, [Some((0.0, 0.0)), None, Some((1.0, 1.0))].into_iter(), 1.0, 1.0), RASTER_JOB_OVERHEAD + SGI_ODYSSEY_WIDTH * SGI_ODYSSEY_HEIGHT);
+    assert_eq!(p(GL_QUADS, &[(-500.0, -500.0), (-400.0, -500.0), (-400.0, -400.0), (-500.0, -400.0)]), RASTER_JOB_OVERHEAD);
+    assert_eq!(primitive_cost(GL_TRIANGLES, [Some((0.0, 0.0)), None, Some((1.0, 1.0))].into_iter(), 1.0, 1.0), RASTER_JOB_OVERHEAD + ODSY_WIDTH * ODSY_HEIGHT);
     assert_eq!(rect_cost(0, 0, 80, 80, true), RASTER_JOB_OVERHEAD + 80 * 80 / RASTER_CLEAR_DIVISOR);
     assert_eq!(rect_cost(0, 0, 80, 80, false), RASTER_JOB_OVERHEAD + 80 * 80);
 }
@@ -1016,9 +1016,9 @@ fn display_rig() -> (BoardLocks, GlDrawState, Arc<Display>) {
         s.regs().set_dispmode(id as usize, ODSY_GAMMA_GROUP << ODSY_DISPMODE_GROUP_SHIFT);
     }
     for (i, d) in s.did.iter_mut().enumerate() {
-        *d = (((i % SGI_ODYSSEY_WIDTH as usize) / 320) as u8) << ODSY_DID_MAIN_SHIFT;
+        *d = (((i % ODSY_WIDTH as usize) / 320) as u8) << ODSY_DID_MAIN_SHIFT;
     }
-    s.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
+    s.set_scanout_size(ODSY_WIDTH, ODSY_HEIGHT);
     let h = BoardLocks::new(s);
     h.raster.start();
     let display = Arc::new(Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))));
@@ -1195,7 +1195,7 @@ fn swap_atomicity() {
         })
     };
     let ram = Ram::new(1 << 20);
-    let (wf, hf) = (SGI_ODYSSEY_WIDTH as f32, SGI_ODYSSEY_HEIGHT as f32);
+    let (wf, hf) = (ODSY_WIDTH as f32, ODSY_HEIGHT as f32);
 
     std::thread::sleep(Duration::from_millis(100));
     // Two swaps with nothing drawn: the first measures the buffers the
@@ -1215,8 +1215,8 @@ fn swap_atomicity() {
             st.drawable.back = back;
             let v = vertices(&[(-wf, -hf), (3.0 * wf, -hf), (-wf, 3.0 * hf)], [red, 0.0, 0.0, 1.0]);
             let stipple = [0u32; 32];
-            let mut d = GlDraw::new(SGI_GL_TRIANGLES, 3, &v, &st, &stipple);
-            assert_eq!(s.gl_draw(&mut d), SGI_GL_DRAW_OK);
+            let mut d = GlDraw::new(GL_TRIANGLES, 3, &v, &st, &stipple);
+            assert_eq!(s.gl_draw(&mut d), GL_DRAW_OK);
             // The completion the guest waits for, slow to finish after it
             // has written its token.
             let r = ram.clone();
@@ -1289,15 +1289,15 @@ fn a_lookup_store_between_taking_the_marks_and_copying_the_registers_is_not_lost
         let shared = h.shared.clone();
         display.reader.lock().test_between = Some(Box::new(move || {
             shared.regs.set_lut((0) as usize, 0x0123_4567 & ODSY_LUT_ENTRY_MASK);
-            shared.marks.repaint(DirtySite::Lut, 0, SGI_ODYSSEY_HEIGHT as i32);
+            shared.marks.repaint(DirtySite::Lut, 0, ODSY_HEIGHT as i32);
         }));
     }
-    h.shared.marks.repaint(DirtySite::Other, 0, SGI_ODYSSEY_HEIGHT as i32);
+    h.shared.marks.repaint(DirtySite::Other, 0, ODSY_HEIGHT as i32);
     Odyssey::frame(&h, &display);
     display.reader.lock().test_between = None;
     Odyssey::frame(&h, &display);
     Odyssey::frame(&h, &display);
     let want = h.shared.regs.read().lut_rgb(0);
     assert_ne!(want, 0);
-    assert_eq!(display.reader.lock().frame[10 * SGI_ODYSSEY_WIDTH as usize + 10], want, "the picture shows the old table");
+    assert_eq!(display.reader.lock().frame[10 * ODSY_WIDTH as usize + 10], want, "the picture shows the old table");
 }

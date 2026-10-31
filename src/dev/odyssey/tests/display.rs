@@ -4,7 +4,7 @@
 
 use super::*;
 
-const WIDTH: i32 = SGI_ODYSSEY_WIDTH as i32;
+const WIDTH: i32 = ODSY_WIDTH as i32;
 /// The display mode of a drawable showing 24-bit RGB through the gamma
 /// ramp, and of one showing colour map group 17 (the X server's modes).
 const DISPMODE_RGB: u32 = 0x0052_15a6;
@@ -798,10 +798,10 @@ fn a_2d_draw_dirties_only_its_rows() {
     assert_eq!(dirty_rows(&s), (600..607).collect::<Vec<_>>(), "a screen-to-screen copy marks its destination");
     s.scanout_update();
 
-    s.copy_dst = (SGI_ODYSSEY_HEIGHT - 2) << 16;
+    s.copy_dst = (ODSY_HEIGHT - 2) << 16;
     s.copy_size = 50 << 16 | 8;
     s.copy_rect();
-    let h = SGI_ODYSSEY_HEIGHT as usize;
+    let h = ODSY_HEIGHT as usize;
     assert_eq!(dirty_rows(&s), vec![h - 2, h - 1], "a copy past the bottom is clipped to the plane");
 }
 

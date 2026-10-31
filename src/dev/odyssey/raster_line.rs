@@ -1,8 +1,6 @@
 //! Lines and points: projection, the diamond-exit and centre-sampled rules
 //! for aliased lines,
 //! antialiased line and point coverage, wide lines and line stipple.
-//!
-//! Ported from hw/display/sgi/rasterizer.c in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 
@@ -123,9 +121,6 @@ impl SoftVertex {
     /// with the minor coordinate at the centre v = n + t / den, the pixel is
     /// ceil(v / 2^sub) - 1. Coordinate differences are at most 2^29, so t
     /// fits, and the minor base shifted by the width stays below 2^43.
-    ///
-    /// Ported from sgi_soft_line_centre_covers() in QEMU sgi-origami
-    /// ab9b3f98f25f.
     pub fn line_centre_covers(&self, b: &SoftVertex, px: i64, py: i64, sub: i32) -> bool {
         let one = 1i64 << sub;
         let half = one >> 1;
@@ -350,7 +345,7 @@ impl SoftVertex {
         }
         out.index = (wa * self.index + wb * b.index) / sum;
         out.fog = (wa * self.fog + wb * b.fog) / sum;
-        for i in 0..SGI_GL_CLIP_PLANES as usize {
+        for i in 0..GL_CLIP_PLANES as usize {
             out.clip[i] = (wa * self.clip[i] + wb * b.clip[i]) / sum;
         }
         out
@@ -366,7 +361,7 @@ impl SoftDraw<'_> {
     pub fn line_projected(&self, pa: &SoftVertex, pb: &SoftVertex, provoking: &[f32], offset: f64, stipple: Option<&mut SoftLineStipple>, client_clip: bool) {
         let mut stipple = stipple;
         let st = self.st;
-        let smooth = st.shade_model != SGI_GL_FLAT;
+        let smooth = st.shade_model != GL_FLAT;
         let sub = self.rules.subpixel_bits as i32;
         let one_sub = (1i32 << sub) as f64;
         let a = *pa;
@@ -427,7 +422,7 @@ impl SoftDraw<'_> {
         };
         let mut flat = [0.0f64; 4];
         for k in 0..4 {
-            flat[k] = provoking[SGI_GL_V_COLOR + k] as f64;
+            flat[k] = provoking[GL_V_COLOR + k] as f64;
         }
         let len2 = (b.x - a.x) as f64 * (b.x - a.x) as f64 + (b.y - a.y) as f64 * (b.y - a.y) as f64;
         let x_major = (b.x - a.x).wrapping_abs() >= (b.y - a.y).wrapping_abs();
@@ -576,16 +571,16 @@ impl SoftDraw<'_> {
                     frag.index = if smooth {
                         a.index + wb * (b.index - a.index) / (wa + wb)
                     } else {
-                        provoking[SGI_GL_V_INDEX] as f64
+                        provoking[GL_V_INDEX] as f64
                     };
                     for k in 0..4 {
                         frag.texcoord[k] = (wa * a.texcoord[k] + wb * b.texcoord[k]) / (wa + wb);
                     }
                     frag.fog = (wa * a.fog + wb * b.fog) / (wa + wb);
                     if st.clip_planes != 0 && client_clip {
-                        let mut d = [0.0f64; SGI_GL_CLIP_PLANES as usize];
+                        let mut d = [0.0f64; GL_CLIP_PLANES as usize];
 
-                        for i in 0..SGI_GL_CLIP_PLANES as usize {
+                        for i in 0..GL_CLIP_PLANES as usize {
                             d[i] = (wa * a.clip[i] + wb * b.clip[i]) / (wa + wb);
                         }
                         if st.clipped(&d) {
@@ -678,10 +673,10 @@ impl SoftDraw<'_> {
         frag.index = v.index;
         frag.fixed = false;
         if let Some(p) = provoking {
-            if self.st.shade_model == SGI_GL_FLAT {
-                frag.index = p[SGI_GL_V_INDEX] as f64;
+            if self.st.shade_model == GL_FLAT {
+                frag.index = p[GL_V_INDEX] as f64;
                 for k in 0..4 {
-                    frag.rgba[k] = p[SGI_GL_V_COLOR + k] as f64;
+                    frag.rgba[k] = p[GL_V_COLOR + k] as f64;
                 }
             }
         }
