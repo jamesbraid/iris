@@ -67,6 +67,8 @@ mod display_bench;
 pub mod dma;
 pub mod draw;
 pub mod fifo;
+#[cfg(test)]
+mod golden;
 pub mod geometry;
 pub mod gl;
 pub mod gl_context;
