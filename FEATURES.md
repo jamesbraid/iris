@@ -168,7 +168,7 @@ the first `[section]`, because TOML tables continue until the next header.
 | Key | Default | Values and behavior |
 |---|---|---|
 | `machine.profile` | `indy_ip24` | indy_ip24, indigo2_ip22, indigo2_ip28, o2_ip32 (configured by `[o2]`, see [the O2 guide](docs/o2-ip32.md)), octane_ip30 (configured by `[octane]`, see [the Octane guide](docs/octane-ip30.md)). |
-| `machine.cpu` | `r4400` | r4400, r5000, r10000; CPU/ISA choice is independent of build features. |
+| `machine.cpu` | `r4400` | r4400, r5000, r10000, r12000 (Octane, O2), r14000 (Octane); CPU/ISA choice is independent of build features. |
 | `machine.cpus` | `1` | Processors fitted. 2 only on the Octane; see [its guide](docs/Octane/multiprocessor.md). |
 
 ### [graphics]
@@ -327,8 +327,8 @@ the file is loaded, with a note, and never written back.
 
 ### [octane]
 
-Used with `machine.profile = "octane_ip30"`, which needs `machine.cpu =
-"r10000"`. An Octane is configured by the shared keys: `prom` (the IP30 PROM,
+Used with `machine.profile = "octane_ip30"`, which needs `machine.cpu` of
+`r10000`, `r12000` or `r14000`. An Octane is configured by the shared keys: `prom` (the IP30 PROM,
 not embedded; `IP30prom.bin` is tried when it is left unset), `nvram` (the
 DS1685's NVRAM, behind IOC3), `banks` (the MB in each HEART bank: 64, 128, 256
 or 512, filled from bank 0 with no gap, 2048 in all), `serial_port_a` and

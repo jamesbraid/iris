@@ -336,6 +336,7 @@ impl Machine {
             crate::config::CpuModel::R4400 => <R4400Cache as MipsCache>::L2_SIZE > 0,
             crate::config::CpuModel::R5000 => <R5000Cache as MipsCache>::L2_SIZE > 0,
             crate::config::CpuModel::R10000 => <R10000ShadowCache as MipsCache>::L2_SIZE > 0,
+            crate::config::CpuModel::R12000 | crate::config::CpuModel::R14000 => unreachable!("an Indy or Indigo2 never has this part; MachineConfig::validate"),
         };
         if !model_has_l2 {
             eeprom_mc.lock().set_cachsz(0);
@@ -735,6 +736,7 @@ impl Machine {
             // tag and data arrays that exist only to answer CACHE ops and the
             // PROM's diagnostics. See mips_cache_shadow.rs.
             crate::config::CpuModel::R10000 => build_cpu!(R10000ShadowCache),
+            crate::config::CpuModel::R12000 | crate::config::CpuModel::R14000 => unreachable!("an Indy or Indigo2 never has this part; MachineConfig::validate"),
         };
 
         // Share count_hz_atomic from MipsCore with Rex3 so the refresh thread can display it.
