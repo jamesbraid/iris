@@ -152,6 +152,7 @@ fn the_poll_retires_lifted_pages_once_an_interval() {
         timekeeper: Arc::new(Ds1744::new(YearBase::From(1968)).unwrap()),
         memory: &MemoryPopulation::default(),
         cpus: 1,
+        v12: false,
     })
     .unwrap();
     board.running.store(true, Ordering::SeqCst);
@@ -180,6 +181,7 @@ fn board_with_ram_over_the_prom() -> (TezroBoard, Vec<u8>) {
         timekeeper: Arc::new(Ds1744::new(YearBase::From(1968)).unwrap()),
         memory: &MemoryPopulation::default(),
         cpus: 1,
+        v12: false,
     })
     .unwrap();
     // Banks 0 and 1 enabled at 1 GiB each: bank 0 covers 0x1fc0_0000.
@@ -258,4 +260,61 @@ fn the_processor_reads_and_writes_ioc4_registers_in_its_own_byte_order() {
     assert_eq!(io.pio_read(reg(0x24), 4).data, 1, "MISC: the 66 MHz clock");
     assert_eq!(io.pio_write(reg(0x314), 4, 0x3f8), BUS_OK);
     assert_eq!(io.pio_read(reg(0x314), 4).data, 0x3f8, "port 0 TX producer");
+}
+
+fn board_with_v12(cpus: usize) -> TezroBoard {
+    TezroBoard::with_config(TezroBoardConfig {
+        payload: &[],
+        clock: Arc::new(|| 0),
+        flash_path: None,
+        station_mac: L1Config::default().mac,
+        timekeeper: Arc::new(Ds1744::new(YearBase::From(1968)).unwrap()),
+        memory: &MemoryPopulation::default(),
+        cpus,
+        v12: true,
+    })
+    .unwrap()
+}
+
+/// The V12 answers as widget 12 behind the PXBOW on either board, with its
+/// Odyssey identity, and widget 12 stays empty without one. (On the
+/// one-processor board the placement is inferred; see V12_WIDGET.)
+#[test]
+fn the_v12_answers_at_widget_12_on_both_boards() {
+    for cpus in [1, 4] {
+        let board = board_with_v12(cpus);
+        let id = board.node.io.pio_read(widget(12, 4), 4);
+        assert_eq!((id.status, id.data), (BUS_OK, 0xac01_3047), "{cpus} CPUs");
+        assert_eq!(board.pics[board.pics.len() - 1].pxbow().unwrap().endpoint_widgets() & (1 << 12), 1 << 12);
+    }
+    assert_eq!(TezroBoard::new(1).unwrap().node.io.pio_read(widget(12, 4), 4).status, BUS_ERR);
+}
+
+/// A CPU 0 store into its enabled graphics page is counted against PI0's
+/// slot A credits and, once the V12 has executed it, the credit comes back
+/// along the node's graphics map. A store outside the page costs nothing.
+/// Follows sn1/pi-gfx/ip53-odyssey-credit-return and
+/// uncovered-stores-not-counted in tests/qtest/sn1-pi-gfx-test.c.
+#[test]
+fn a_counted_store_to_the_v12_returns_its_credit() {
+    use crate::dev::bedrock_io::reg::GFX_MAP_BASE;
+    let board = board_with_v12(4);
+    let (pi, io, bus) = (&board.node.pi[0], &board.node.io, &board.node.bus);
+    // The page of widget 12's small window, enabled, with 16 credits.
+    assert_eq!(pi.write64(0x300, crate::dev::pi_gfx::PAGE_ENABLE | (12 << 24)), BUS_OK);
+    assert_eq!(pi.write64(0x308, 16), BUS_OK);
+    // Widget 12's credits go to node 0, PI0, slot A.
+    assert_eq!(io.write64(GFX_MAP_BASE, 12), BUS_OK);
+    let io_view = 1u64 << 57;
+    board.v12.as_ref().unwrap().start();
+    assert_eq!(bus.write64(io_view | widget(12, 0x110000), (0xc580_c406u64 << 32) | 5), BUS_OK);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while pi.read64(0x308).data != 16 {
+        assert!(std::time::Instant::now() < deadline, "credit {} not returned", pi.read64(0x308).data);
+        std::thread::yield_now();
+    }
+    // Outside the page: neither counted nor returned.
+    let _ = bus.write64(io_view | widget(11, 0x100), 0);
+    assert_eq!(pi.read64(0x308).data, 16);
+    board.v12.as_ref().unwrap().stop();
 }
