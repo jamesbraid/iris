@@ -10,28 +10,30 @@ impl Board {
         (self.revision << 28) | (ODSY_PART << 12) | (ODSY_MANUFACTURER << 1) | 1
     }
 
-    pub fn unimplemented(&mut self, addr: u64, size: u32, write: bool) {
+    pub fn unimplemented(&self, addr: u64, size: u32, write: bool) {
         let token = (addr as u32) | if write { ODSY_UNIMP_WRITE } else { 0 };
 
         // A processor's access to an unmodelled offset reaches this while the
-        // board's thread may be running a store of its own, so the count is
-        // bounded on every use; a race can only log an offset twice.
-        let seen = (self.reported_addr_count as usize).min(self.reported_addr.len());
-        if self.reported_addr[..seen].contains(&token) {
+        // board's thread may be running a store of its own, so the report
+        // table is atomic and the count bounded on every use; a race can only
+        // log an offset twice.
+        let len = self.reported_addr.len();
+        let seen = (self.reported_addr_count.load(Ordering::Relaxed) as usize).min(len);
+        if self.reported_addr[..seen].iter().any(|a| a.load(Ordering::Relaxed) == token) || seen == len {
             return;
         }
-        if seen == self.reported_addr.len() {
+        let slot = self.reported_addr_count.fetch_add(1, Ordering::Relaxed) as usize;
+        if slot >= len {
             return;
         }
-        self.reported_addr[seen] = token;
-        self.reported_addr_count = seen as u32 + 1;
+        self.reported_addr[slot].store(token, Ordering::Relaxed);
         crate::dlog!(
             LogModule::Odyssey,
             "sgi-odyssey: {}-byte {} at {:#x} is not modeled{}",
             size,
             if write { "write" } else { "read" },
             addr,
-            if seen + 1 == self.reported_addr.len() { "; further offsets stay silent" } else { "" }
+            if slot + 1 == len { "; further offsets stay silent" } else { "" }
         );
     }
 
@@ -359,8 +361,7 @@ impl Board {
             return self.front.lock().read(addr, size);
         }
         let mut value: u64 = 0;
-        let sequence = self.trace_sequence;
-        self.trace_sequence = self.trace_sequence.wrapping_add(1);
+        let sequence = self.trace_sequence.fetch_add(1, Ordering::Relaxed);
 
         let reg = reg(addr, size);
         let key = if reg < 0 { u64::MAX } else { reg as u64 };

@@ -159,7 +159,7 @@ fn the_kernels_reset_pulse_and_memory_set_up_are_accepted() {
     }
     assert_eq!(reg_read(&mut s, IDENTITY), IDENTITY_DEFAULT);
     assert_eq!(reg_read(&mut s, MEMORY_CONFIG) & 0xf000_0000, 0xa000_0000);
-    assert_eq!(s.reported_addr_count, 0, "neither register is reported as unmodelled");
+    assert_eq!(s.reported_addr_count.load(Ordering::Relaxed), 0, "neither register is reported as unmodelled");
 }
 
 /// The registers the stock firmware's graphics diagnostic reads before it
@@ -232,7 +232,7 @@ fn the_statistics_region_is_stored_and_the_buffer_left_alone() {
     assert_eq!(s.stats_addr_lower, 0);
 
     assert_eq!(ram.get(0xb90000, 4), 0x1234_5678u32.to_be_bytes());
-    assert_eq!(s.reported_addr_count, 0, "none of the three is reported as unmodelled");
+    assert_eq!(s.reported_addr_count.load(Ordering::Relaxed), 0, "none of the three is reported as unmodelled");
 }
 
 /// The five FIFO set-up doublewords carry a register in the high word and
@@ -328,7 +328,7 @@ fn an_unrecognised_width_or_command_word_is_reported_not_guessed() {
     assert_eq!(s.mmio_read(ODSY_CMD_FIFO, 4), 0, "the FIFO has no read side");
     assert_eq!(s.mmio_read(ODSY_CMD_FIFO, 4), 0);
     s.mmio_write(ODSY_CMD_FIFO, 0x1234, 2);
-    assert_eq!(s.reported_addr_count, 2, "a read and a write, once each however often they repeat");
+    assert_eq!(s.reported_addr_count.load(Ordering::Relaxed), 2, "a read and a write, once each however often they repeat");
 
     cmd(&mut s, 0x0000_7777);
     cmd(&mut s, 0x0000_7777);
@@ -512,7 +512,7 @@ fn back_end_tables_are_kept_and_read_back_from_the_window() {
     backend_push(&mut s, gain);
     assert_eq!(backend_readback(&mut s, 0x26c0), 0x00a5_26c2);
     assert_eq!(backend_readback(&mut s, 0x2701) & 7, 1);
-    assert_eq!(s.reported_addr_count, 0);
+    assert_eq!(s.reported_addr_count.load(Ordering::Relaxed), 0);
 }
 
 /// The display modes start at zero, keep each word as written, and a reset
@@ -565,7 +565,7 @@ fn filling_the_command_report_budget_leaves_the_register_budget_alone() {
     assert_eq!(s.reported_cmd_count, SGI_ODYSSEY_UNIMP_REPORTS, "further words stay silent");
 
     assert_eq!(s.mmio_read(0x8, 1), 0);
-    assert_eq!(s.reported_addr_count, 1, "an unmodelled register is still reported");
+    assert_eq!(s.reported_addr_count.load(Ordering::Relaxed), 1, "an unmodelled register is still reported");
 }
 
 /// An unmodelled word still names its operand count in bits 13:10, and the
