@@ -705,6 +705,8 @@ fn queue_absent(r: &Rig, slot: u32, handle: u32) {
     r.doorbell(slot as u16 + 1);
 }
 
+/// A programmed zero is no wait. A model choice: the datasheet says nothing
+/// about zero.
 #[test]
 fn a_programmed_timeout_of_zero_answers_at_once() {
     let r = Rig::with_disk("selection-zero", 1, 64);
@@ -720,9 +722,11 @@ fn a_programmed_timeout_of_zero_answers_at_once() {
 }
 
 /// A bus reset destroys the commands outstanding on the bus, and the public
-/// drivers all read a reset completion for those. A selection still waiting
-/// on an absent target is one of them: it ends at once with that completion
-/// instead of running out its timeout, and it completes only once.
+/// drivers all handle a reset completion for those; that much is
+/// established. That the firmware sends one for a selection still waiting on
+/// an absent target is inferred. The model does so: the selection ends at
+/// once with that completion instead of running out its timeout, and it
+/// completes only once.
 #[test]
 fn a_bus_reset_retires_a_waiting_selection_with_a_reset_completion() {
     let r = Rig::with_disk("selection-bus-reset", 1, 64);
@@ -767,6 +771,8 @@ fn a_reset_leaves_no_late_completion_for_a_waiting_selection() {
     assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
 }
 
+/// A model choice: the datasheet is silent on what the chip does to a
+/// selection in progress when a queue is initialised.
 #[test]
 fn a_response_queue_initialisation_does_not_cancel_a_waiting_selection() {
     let r = Rig::with_disk("selection-resp-init", 1, 64);
@@ -782,6 +788,7 @@ fn a_response_queue_initialisation_does_not_cancel_a_waiting_selection() {
     assert_eq!(r.r(reg::REQUEST_QUEUE), 1, "and the command is consumed from its ring");
 }
 
+/// A model choice, as for the response queue above.
 #[test]
 fn a_request_queue_initialisation_does_not_cancel_a_waiting_selection() {
     let r = Rig::with_disk("selection-req-init", 1, 64);
