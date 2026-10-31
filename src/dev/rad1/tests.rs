@@ -536,7 +536,7 @@ fn the_wav_capture_stays_at_44100_whatever_the_card_rate() {
     let dir = std::env::temp_dir().join(format!("rad1-wav-rate-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("o.wav");
-    let mut sink = Sink { host: None, wav: Wav::create(path.as_os_str()), tap: None };
+    let mut sink = Sink { host: None, host_failed_at: None, wav: Wav::create(path.as_os_str()), tap: None };
     sink.play(&[0i16; 2 * 2205], 22050);
     sink.play(&[0i16; 2 * 4410], 44100);
     let b = std::fs::read(&path).unwrap();
@@ -851,7 +851,7 @@ fn host_frames_encode_into_ring_frames() {
 fn output_ring_reaches_the_sink() {
     let (r, ram) = dma_card();
     let tap = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    *r.sink.lock() = Some(Sink { host: None, wav: None, tap: Some(tap.clone()) });
+    *r.sink.lock() = Some(Sink { host: None, host_failed_at: None, wav: None, tap: Some(tap.clone()) });
     // A 512-frame ring (4 KiB), each frame left = n, right = -n.
     {
         let mut m = ram.0.lock().unwrap();
@@ -889,7 +889,7 @@ fn output_ring_reaches_the_sink() {
 fn input_ring_is_not_played() {
     let (r, _ram) = dma_card();
     let tap = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    *r.sink.lock() = Some(Sink { host: None, wav: None, tap: Some(tap.clone()) });
+    *r.sink.lock() = Some(Sink { host: None, host_failed_at: None, wav: None, tap: Some(tap.clone()) });
     program(&r, &RING_INPUT, 0x11_0000, 0xffff_f000);
     wr(&r, 0x4c, 1);
     at(&r, 1_000_000);
@@ -991,3 +991,14 @@ fn a_recorded_adat_frame_plays_back_unchanged() {
     frames_to_pcm(&ring, &mut back, ADAT_WORDS);
     assert_eq!(back, pcm);
 }
+
+#[test]
+fn a_failed_host_open_is_retried_after_a_wait() {
+    let now = Instant::now();
+    let mut sink = Sink { host: None, host_failed_at: None, wav: None, tap: None };
+    assert!(sink.host_retry_due(now), "never tried");
+    sink.host_failed_at = Some(now);
+    assert!(!sink.host_retry_due(now), "just failed");
+    assert!(sink.host_retry_due(now + HOST_RETRY), "due again later");
+}
+
