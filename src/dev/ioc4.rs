@@ -482,6 +482,11 @@ impl St {
     // ----- control registers -----
 
     fn read32(&mut self, a: u32) -> u32 {
+        let v = self.read32_traced(a);
+        crate::dlog!(crate::devlog::LogModule::Ioc, "TRACE r32 {a:#x} = {v:#x}");
+        v
+    }
+    fn read32_traced(&mut self, a: u32) -> u32 {
         self.sdma_catch_up(Instant::now());
         if let Some(r) = sdma_decode(a) {
             let (sdma, mut host) = self.sdma_engine_split();
@@ -508,6 +513,7 @@ impl St {
     }
 
     fn write32(&mut self, a: u32, v: u32) {
+        crate::dlog!(crate::devlog::LogModule::Ioc, "TRACE w32 {a:#x} <- {v:#x}");
         self.sdma_catch_up(Instant::now());
         if let Some(r) = sdma_decode(a) {
             match r {
@@ -937,7 +943,9 @@ impl PciBusDevice for Ioc4 {
                 Ioc4::refuse("UART read", width, off);
                 return 0;
             }
-            return u32::from(self.sh.with_st(|st| st.uart_read(p, r)));
+            let v = u32::from(self.sh.with_st(|st| st.uart_read(p, r)));
+            crate::dlog!(crate::devlog::LogModule::Ioc, "TRACE ur {p}.{r} = {v:#x}");
+            return v;
         }
         if let Some(clock) = self.clock.get().filter(|_| in_clock(off)) {
             if width != 1 {
@@ -969,6 +977,7 @@ impl PciBusDevice for Ioc4 {
                 Ioc4::refuse("UART write", width, off);
                 return;
             }
+            crate::dlog!(crate::devlog::LogModule::Ioc, "TRACE uw {p}.{r} <- {val:#x}");
             self.sh.with_st(|st| st.uart_write(p, r, val as u8));
             return;
         }
