@@ -243,7 +243,8 @@ fn a_reused_draw_job_draws_only_its_new_primitive() {
     assert_eq!(threaded, inline);
 }
 
-/// A current-state query behind a queued draw: the front end goes on at
+/// A current-state query behind a queued draw (a small one: a draw of a
+/// screenful makes the front end wait for room): the front end goes on at
 /// once, and the query's sync word, like a fence, lands only after the
 /// draw is in the planes, its snapshot already in place.
 #[test]
@@ -256,7 +257,7 @@ fn a_query_behind_a_queued_draw_syncs_after_the_draw_without_holding_the_front_e
         s.guest = Some(ram.clone());
         s.ctx_shadow_addr_lower = 0x2000;
         s.host_write_addr_lower = 0x1000;
-        red_triangle(&mut s, &st);
+        tiny_triangle(&mut s, &st);
         for word in [0x4c0, 7, 0x10a5a, 3, 0x5a5a] {
             cmd(&mut s, word);
         }
@@ -666,4 +667,268 @@ fn the_screen_follows_the_frame_through_frames_that_present_a_few_lines() {
             }
         }
     }
+}
+
+/// The drawable comparison that runs before every command looks at the clip
+/// rectangles the list counts and no others: a change inside the count is
+/// seen, and one past it, where nothing is drawn against, is not.
+#[test]
+fn the_drawable_comparison_covers_the_rectangles_the_list_counts() {
+    let mut a = GlDrawable::default();
+    a.clip.n = 2;
+    a.clip.r[0] = ClipRect { x0: 0, y0: 0, x1: 9, y1: 9 };
+    a.clip.r[1] = ClipRect { x0: 20, y0: 0, x1: 29, y1: 9 };
+    let mut b = a;
+    assert!(a.drawable_eq(&b));
+
+    b.clip.r[5] = ClipRect { x0: 1, y0: 2, x1: 3, y1: 4 };
+    assert!(a.drawable_eq(&b), "past the count");
+
+    for i in 0..2 {
+        let mut c = a;
+        c.clip.r[i].y1 += 1;
+        assert!(!a.drawable_eq(&c), "rectangle {i}");
+    }
+    let mut c = a;
+    c.clip.n = 3;
+    assert!(!a.drawable_eq(&c), "the count");
+}
+
+/// A texture chain a setup filled is the default one again after `clear`,
+/// though `clear` writes only the levels the setup touched: a deeper
+/// texture's levels do not leak into the next draw's sampling, which reads
+/// every volume's slice count and any level by number.
+#[test]
+fn a_cleared_texture_chain_is_the_default_one_again() {
+    let mut chain = TextureChain::default();
+
+    for i in [0u32, 1, 6] {
+        chain.touch(i);
+        chain.volumes[i as usize] = TextureVolume { slices: 3, width: 8 >> i.min(3), ..Default::default() };
+        chain.storage[i as usize] = Texture { offset: 5, width: 4, border_rows: true, ..Default::default() };
+        chain.levels[i as usize] = GlTexLevel { level: i, width: 4, read_texel: true, ..Default::default() };
+    }
+    chain.volume = chain.volumes[0];
+    chain.pyramid = Some(PyramidShape { count: 7, ..Default::default() });
+    chain.detail_storage = Texture { stride: 32, ..Default::default() };
+    chain.detail_image = GlTexLevel { detail: true, ..Default::default() };
+
+    chain.clear();
+    let fresh = TextureChain::default();
+
+    assert!(chain.volumes == fresh.volumes && chain.storage == fresh.storage && chain.levels == fresh.levels);
+    assert!(chain.volume == fresh.volume && chain.pyramid.is_none());
+    assert!(chain.detail_storage == fresh.detail_storage && chain.detail_image == fresh.detail_image);
+    // A second clear has nothing left to write.
+    chain.clear();
+    assert!(chain.levels == fresh.levels);
+}
+
+/// Lighting a vertex reuses one lighting state and puts back only the lights
+/// the last vertex enabled, and the colour is what a fresh state gives:
+/// across lights switching on, changing and off, with a spot, a positional
+/// and a directional light, and with none.
+#[test]
+fn a_reused_lighting_state_lights_a_vertex_as_a_fresh_one_does() {
+    use crate::dev::gl::light::Lighting;
+
+    fn fresh(s: &Board, obj: &[f64; 4]) -> [f32; 4] {
+        let mut lt = Lighting::default();
+        lt.init();
+        let v = s.gl_light_fill(&mut lt, obj);
+        let (front, _) = lt.light_vertex(v.eye, v.normal, v.colour);
+        [front[0], front[1], front[2], v.alpha]
+    }
+    fn set_light(s: &mut Board, i: usize, colour: [f32; 3], directional: bool, spot: bool) {
+        for k in 0..3 {
+            s.gl_light_colour[i * 12 + k] = (0.1f32 * (i + 1) as f32).to_bits();
+            s.gl_light_colour[i * 12 + 4 + k] = colour[k].to_bits();
+            s.gl_light_colour[i * 12 + 8 + k] = (colour[k] * 0.5).to_bits();
+        }
+        let blk = &mut s.gl_light_vec[i * ODSY_GL_LIGHT_VEC_FLOATS as usize..];
+        for k in 0..3 {
+            blk[ODSY_LIGHT_POS + k] = [2.0f32, 3.0, 4.0 + i as f32][k].to_bits();
+            blk[ODSY_LIGHT_HALF + k] = (if directional { [0.0f32, 0.6, 0.8][k] } else { 0.0 }).to_bits();
+        }
+        blk[ODSY_LIGHT_ATTEN] = 1.0f32.to_bits();
+        blk[ODSY_LIGHT_ATTEN + 1] = 0.1f32.to_bits();
+        blk[ODSY_LIGHT_ATTEN + 2] = 0.01f32.to_bits();
+        blk[ODSY_LIGHT_SPOT_COS] = (if spot { -0.5f32 } else { 1.0 }).to_bits();
+        blk[ODSY_LIGHT_SPOT_EXP] = (-2.0f32).to_bits();
+        for k in 0..3 {
+            blk[ODSY_LIGHT_SPOT_DIR + k] = [0.0f32, 0.0, 1.0][k].to_bits();
+        }
+    }
+    fn clear_light(s: &mut Board, i: usize) {
+        s.gl_light_colour[i * 12..i * 12 + 12].fill(0);
+    }
+
+    let (mut s, _) = board("v12");
+    let identity: [f32; 16] = [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.];
+    s.gl_modelview = identity.map(f32::to_bits);
+    s.gl_normal_matrix = identity.map(f32::to_bits);
+    s.gl_normal = [0.0f32, 0.6, 0.8].map(f32::to_bits);
+    s.gl_colour = [0.7f32, 0.5, 0.3, 0.9].map(f32::to_bits);
+    for k in 0..4 {
+        s.gl_material[k] = 0.2f32.to_bits();
+        s.gl_material[4 + k] = [0.8f32, 0.4, 0.6, 0.5][k].to_bits();
+        s.gl_material[8 + k] = 0.5f32.to_bits();
+    }
+    s.gl_shininess_sqrt = 4.0f32.to_bits();
+    let obj = [1.0, 2.0, 3.0, 1.0];
+    let mut seen = Vec::new();
+    let mut out = [0f32; 4];
+
+    let check = |s: &mut Board, what: &str, out: &mut [f32; 4]| {
+        s.gl_light(&obj, out);
+        let want = fresh(s, &obj);
+        assert_eq!(out.map(f32::to_bits), want.map(f32::to_bits), "{what}");
+        want
+    };
+
+    seen.push(check(&mut s, "no lights", &mut out));
+    set_light(&mut s, 0, [1.0, 0.2, 0.1], true, false);
+    set_light(&mut s, 3, [0.3, 0.9, 0.2], false, true);
+    seen.push(check(&mut s, "a directional light and a spot", &mut out));
+    seen.push(check(&mut s, "the same again", &mut out));
+    clear_light(&mut s, 0);
+    set_light(&mut s, 5, [0.2, 0.2, 0.9], false, false);
+    seen.push(check(&mut s, "light 0 off, light 5 on", &mut out));
+    clear_light(&mut s, 3);
+    clear_light(&mut s, 5);
+    seen.push(check(&mut s, "all off again", &mut out));
+    // Light 3 was a spot and returns as a plain positional light: nothing of
+    // its spot may be left over.
+    set_light(&mut s, 3, [0.3, 0.9, 0.2], false, false);
+    seen.push(check(&mut s, "light 3 back without its spot", &mut out));
+    clear_light(&mut s, 3);
+    s.gl_colour_material = ODSY_COLOUR_MATERIAL_DIFFUSE;
+    set_light(&mut s, 7, [0.6, 0.6, 0.6], false, false);
+    seen.push(check(&mut s, "colour material, light 7", &mut out));
+
+    // The cases differ, so the comparisons above could have failed.
+    assert_ne!(seen[0], seen[1]);
+    assert_ne!(seen[1], seen[3]);
+}
+
+/// A triangle a few pixels across.
+fn tiny_triangle(s: &mut Board, st: &GlDrawState) {
+    let v = vertices(&[(10.0, 10.0), (14.0, 10.0), (10.0, 14.0)], RED);
+    let stipple = [0u32; 32];
+    let mut d = GlDraw::new(SGI_GL_TRIANGLES, 3, &v, st, &stipple);
+    assert_eq!(s.gl_draw(&mut d), SGI_GL_DRAW_OK);
+}
+
+/// A draw's cost follows its area; a clear's pixels count for less.
+#[test]
+fn a_job_costs_its_pixels() {
+    let p = |mode, pts: &[(f64, f64)]| primitive_cost(mode, pts.iter().map(|&p| Some(p)), 1.0, 1.0);
+
+    assert_eq!(p(SGI_GL_TRIANGLES, &[(0.0, 0.0), (100.0, 0.0), (0.0, 100.0)]), RASTER_JOB_OVERHEAD + 5000);
+    assert_eq!(p(SGI_GL_QUADS, &[(0.0, 0.0), (100.0, 0.0), (100.0, 10.0), (0.0, 10.0)]), RASTER_JOB_OVERHEAD + 1000);
+    assert_eq!(p(SGI_GL_LINES, &[(0.0, 0.0), (99.0, 3.0)]), RASTER_JOB_OVERHEAD + 100);
+    // Off the screen counts for nothing; a vertex behind the eye, for all of it.
+    assert_eq!(p(SGI_GL_QUADS, &[(-500.0, -500.0), (-400.0, -500.0), (-400.0, -400.0), (-500.0, -400.0)]), RASTER_JOB_OVERHEAD);
+    assert_eq!(primitive_cost(SGI_GL_TRIANGLES, [Some((0.0, 0.0)), None, Some((1.0, 1.0))].into_iter(), 1.0, 1.0), RASTER_JOB_OVERHEAD + SGI_ODYSSEY_WIDTH * SGI_ODYSSEY_HEIGHT);
+    assert_eq!(rect_cost(0, 0, 80, 80, true), RASTER_JOB_OVERHEAD + 80 * 80 / RASTER_CLEAR_DIVISOR);
+    assert_eq!(rect_cost(0, 0, 80, 80, false), RASTER_JOB_OVERHEAD + 80 * 80);
+}
+
+/// Many small primitives queue behind a busy raster unit without the front
+/// end waiting, however many there are in a frame; the queue's work is the
+/// sum of theirs.
+#[test]
+fn many_small_jobs_queue_without_the_front_end_waiting() {
+    let (h, st) = slow_raster(300);
+    let start = Instant::now();
+    let mut s = h.board.lock();
+
+    for _ in 0..1000 {
+        tiny_triangle(&mut s, &st);
+    }
+    assert!(start.elapsed() < Duration::from_millis(250), "the slice still holds the raster unit");
+    assert_eq!(h.raster.pending(), 1000, "no small job waited for room");
+    assert!(h.raster.queued() < RASTER_WORK_BUDGET, "{} queued", h.raster.queued());
+    assert!(h.raster.queued() >= 1000 * RASTER_JOB_OVERHEAD as u64);
+    drop(s);
+    eventually("the queue did not drain", || h.raster.pending() == 0);
+    assert_eq!(h.raster.queued(), 0);
+    h.raster.stop();
+}
+
+/// One primitive that is a whole screen of work makes the next job wait
+/// until the raster unit has drawn it.
+#[test]
+fn one_big_job_makes_the_front_end_wait() {
+    let (h, st) = slow_raster(300);
+    let start = Instant::now();
+    {
+        let mut s = h.board.lock();
+        red_triangle(&mut s, &st);
+        assert!(h.raster.queued() >= RASTER_WORK_BUDGET, "{} queued", h.raster.queued());
+        assert!(start.elapsed() < Duration::from_millis(250), "the first job does not wait");
+        tiny_triangle(&mut s, &st);
+        assert!(start.elapsed() >= Duration::from_millis(250), "the second waited for the slice to draw");
+        assert!(h.raster.queued() <= RASTER_WORK_BUDGET / 2, "{} queued", h.raster.queued());
+    }
+    eventually("the queue did not drain", || h.raster.pending() == 0);
+    assert_ne!(pixel(&h.board.lock(), 0, 10, 10), 0);
+    h.raster.stop();
+}
+
+/// The wait ends once the raster unit has worked the queue down to half the
+/// budget, not at the first job it finishes and not at the last; every job
+/// runs, in order.
+#[test]
+fn the_bound_releases_as_the_raster_unit_works() {
+    let (h, _st) = slow_raster(200);
+    let ran = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let job = |i: u32| {
+        let ran = ran.clone();
+        move |_: &mut RasterCtx| ran.lock().push(i)
+    };
+
+    h.raster.set_budget(1000);
+    h.raster.submit_work(400, job(0));
+    h.raster.submit_work(400, job(1));
+    h.raster.submit_work(400, job(2));
+    assert_eq!(h.raster.queued(), 1200, "under the budget, a job does not wait; at it, the next does");
+    let start = Instant::now();
+    h.raster.submit_work(400, job(3));
+    assert!(start.elapsed() >= Duration::from_millis(150), "the fourth waited for the slice");
+    assert!(h.raster.queued() <= 500 + 400, "{} queued", h.raster.queued());
+    assert!(ran.lock().len() >= 2, "released after the queue fell to half the budget");
+    eventually("the queue did not drain", || h.raster.pending() == 0);
+    assert_eq!(*ran.lock(), vec![0, 1, 2, 3]);
+    h.raster.stop();
+}
+
+/// A stop sets a waiting front end going at once, without waiting for the
+/// raster unit's slice; the stop still finishes every job, in order.
+#[test]
+fn stop_releases_a_waiting_front_end() {
+    let (h, _st) = slow_raster(1500);
+    let ran = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let job = |i: u32| {
+        let ran = ran.clone();
+        move |_: &mut RasterCtx| ran.lock().push(i)
+    };
+
+    h.raster.set_budget(1000);
+    h.raster.submit_work(2000, job(0));
+    let start = Instant::now();
+    std::thread::scope(|sc| {
+        let waiter = sc.spawn(|| {
+            h.raster.submit_work(1, job(1));
+            start.elapsed()
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!waiter.is_finished(), "the front end waits for room");
+        let stopper = sc.spawn(|| h.raster.stop());
+        let waited = waiter.join().unwrap();
+        assert!(waited < Duration::from_millis(1000), "released by the stop after {waited:?}, not by the slice");
+        stopper.join().unwrap();
+    });
+    assert_eq!(*ran.lock(), vec![0, 1]);
+    assert_eq!(h.raster.queued(), 0);
 }
