@@ -43,6 +43,9 @@ pub struct HostInterface {
     pub intr_enable: u32,
     /// The flag source's transition state, for the packet edge.
     pub interrupt_asserted: bool,
+    /// The flag level rose with no destination programmed and its set
+    /// packet waits for one (`HostInterface::deliver_held_flag`).
+    pub flag_held: bool,
     pub sw_token: u32,
     /// The flow-control target word (+0x1074), as last written. Stored, not
     /// routed: nothing consumes it, so it is a front register that neither
@@ -89,6 +92,7 @@ impl Default for HostInterface {
             intr_flags: 0,
             intr_enable: 0,
             interrupt_asserted: false,
+            flag_held: false,
             sw_token: 0,
             flctl_target: 0,
             flctl_target_reported: false,
@@ -184,7 +188,7 @@ impl HostInterface {
         let vector = self.route_vectors.checked_shr(shift).unwrap_or(0) as u8;
         let mut where_ = 0u64;
 
-        if self.route_dest_upper == 0 && self.route_dest_lower == 0 {
+        if !self.routed() {
             crate::dlog!(
                 LogModule::Odyssey,
                 "sgi-odyssey: {} interrupt {} with no destination programmed; no packet sent",
@@ -200,9 +204,14 @@ impl HostInterface {
         self.send_packet(where_, vector, set);
     }
 
-    /// Whether the routed destination is programmed.
+    /// Whether the routing is programmed: both halves of the destination and
+    /// the vector table written. The kernel's interrupt set-up writes all
+    /// three, the vectors first and the upper half, which carries the target
+    /// widget, last, so a routing with one of them still zero is not yet the
+    /// one it means, and no source sends to it. Limitation: a routing with a
+    /// zero lower half or vector table never takes an interrupt.
     pub fn routed(&self) -> bool {
-        self.route_dest_upper != 0 || self.route_dest_lower != 0
+        self.route_dest_upper != 0 && self.route_dest_lower != 0 && self.route_vectors != 0
     }
 
     /// The softsync source ODSY_REG_HOST_WRITE (0x0a5a) raises.
@@ -215,7 +224,29 @@ impl HostInterface {
 
         if level != self.interrupt_asserted {
             self.interrupt_asserted = level;
-            self.deliver_routed(ODSY_ROUTE_VECTOR_FLAG_SHIFT, "flag", level);
+            self.flag_held = level && !self.routed();
+            if self.flag_held {
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: flag interrupt raised with no destination programmed; held until one is");
+            } else {
+                // A level that falls while held was never sent, and with no
+                // routing programmed there is no packet for its clear.
+                self.deliver_routed(ODSY_ROUTE_VECTOR_FLAG_SHIFT, "flag", level);
+            }
+        }
+    }
+
+    /// A routing write: send the flag level that rose before the destination
+    /// was programmed, if it is still raised. MODEL CHOICE, from the
+    /// datasheet's entry "DMA completion with no tag": the kernel enables
+    /// flow control, and so can raise low water, before its interrupt set-up
+    /// programs 0x1044, 0x104c and 0x1054, so the model holds the level
+    /// pending and sends it once the destination is written. What the board
+    /// does with such a flag (drop it, hold it, or send it to address zero)
+    /// is unknown.
+    fn deliver_held_flag(&mut self) {
+        if self.flag_held && self.routed() {
+            self.flag_held = false;
+            self.deliver_routed(ODSY_ROUTE_VECTOR_FLAG_SHIFT, "held flag", true);
         }
     }
 
@@ -384,9 +415,18 @@ impl HostInterface {
                 self.displayed_buffer = value as u32;
                 self.displayed_written = true;
             }
-            ODSY_ROUTE_DEST_UPPER => self.route_dest_upper = value as u32,
-            ODSY_ROUTE_DEST_LOWER => self.route_dest_lower = value as u32,
-            ODSY_ROUTE_VECTORS => self.route_vectors = value as u32,
+            ODSY_ROUTE_DEST_UPPER => {
+                self.route_dest_upper = value as u32;
+                self.deliver_held_flag();
+            }
+            ODSY_ROUTE_DEST_LOWER => {
+                self.route_dest_lower = value as u32;
+                self.deliver_held_flag();
+            }
+            ODSY_ROUTE_VECTORS => {
+                self.route_vectors = value as u32;
+                self.deliver_held_flag();
+            }
             ODSY_IDENTITY | ODSY_STATUS | ODSY_ERROR_ADDR_UPPER | ODSY_ERROR_ADDR_LOWER => {
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: write of {:#x} to the read-only register at {:#x}", value, addr);
             }
