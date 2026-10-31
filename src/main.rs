@@ -1,4 +1,5 @@
-use iris::config::load_config;
+use clap::Parser;
+use iris::config::{Cli, MachineConfig, DEFAULT_CONFIG};
 use iris::machine::Machine;
 
 fn main() {
@@ -238,3 +239,43 @@ fn print_build_features() {
     eprintln!("iris: build features: {}", iris::build_features::banner());
 }
 
+/// Parse CLI, load TOML, merge, and validate. Exits on error.
+/// Returns (machine_config, window_scale) where window_scale is 1 or 2.
+fn load_config() -> (MachineConfig, u32) {
+    let cli = Cli::parse();
+
+    // --list-net-interfaces: print candidate PCAP interfaces and exit. Handled
+    // here (before machine construction) since it only needs the parsed CLI.
+    if cli.list_net_interfaces {
+        #[cfg(feature = "pcap")]
+        {
+            print!("{}", iris::net::net_pcap::format_interfaces());
+            std::process::exit(0);
+        }
+        #[cfg(not(feature = "pcap"))]
+        {
+            eprintln!("iris: --list-net-interfaces requires a build with --features pcap");
+            std::process::exit(1);
+        }
+    }
+
+    // A missing `iris.toml` is fine — that's the "just run it" path, and
+    // load_toml falls back to defaults. But a config the user *named* on the
+    // command line and that isn't there is a typo or a relative path resolved
+    // against the wrong cwd, and silently booting a default machine instead
+    // (different disks, no DaynaPort, whatever they configured) wastes a run
+    // before anyone notices.
+    if cli.config != DEFAULT_CONFIG && !std::path::Path::new(&cli.config).exists() {
+        eprintln!("Configuration error: --config {} does not exist", cli.config);
+        std::process::exit(1);
+    }
+
+    let toml_cfg = MachineConfig::load_toml(&cli.config);
+    let cfg = cli.apply(toml_cfg);
+    let scale = cfg.scale;
+    if let Err(e) = cfg.validate() {
+        eprintln!("Configuration error: {}", e);
+        std::process::exit(1);
+    }
+    (cfg, scale)
+}
