@@ -198,7 +198,7 @@ static GUEST_CYCLES: AtomicPtr<u64> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Point the guest clock at the CPU's cycle counter. Pass `None` before the
 /// core goes away.
-pub fn set_guest_cycles(ptr: Option<crate::cpu::mips_core::CyclesPtr>) {
+pub fn set_guest_cycles(ptr: Option<crate::cpu::cycles::CyclesPtr>) {
     GUEST_CYCLES.store(ptr.map_or(std::ptr::null_mut(), |p| p.raw() as *mut u64), Ordering::Release);
 }
 

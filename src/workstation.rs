@@ -167,7 +167,7 @@ pub trait Workstation: Send {
     /// Every CPU's retired-cycle counter and clock-tick counter, CPU 0 first,
     /// for the front-end's MIPS and Hz. A machine with one CPU needs no more
     /// than the default.
-    fn cpu_counters(&self) -> Vec<(crate::cpu::mips_core::CyclesPtr, Arc<AtomicU64>)> {
+    fn cpu_counters(&self) -> Vec<(crate::cpu::cycles::CyclesPtr, Arc<AtomicU64>)> {
         self.get_display().map(|d| (d.cycles(), self.fasttick_count())).into_iter().collect()
     }
 

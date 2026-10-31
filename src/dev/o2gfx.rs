@@ -116,7 +116,7 @@ pub struct Gbe {
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
     /// The beam's clock when it should follow the CPU instead: microseconds
     /// from the instruction count (see `use_cpu_clock`).
-    cpu_clock: std::sync::OnceLock<(crate::cpu::mips_core::CyclesPtr, u64)>,
+    cpu_clock: std::sync::OnceLock<(crate::cpu::cycles::CyclesPtr, u64)>,
     /// The control port's `pixel X Y`: the point to describe on the next
     /// frame, and what the scan-out found there.
     pub probe: Mutex<(Option<(usize, usize)>, String)>,
@@ -159,7 +159,7 @@ impl Gbe {
     /// IRIX's interrupt dispatcher -- which re-reads CRIME until nothing is
     /// pending -- found GBE latched again before each pass was out and never
     /// returned.
-    pub fn use_cpu_clock(&self, cycles: crate::cpu::mips_core::CyclesPtr, mhz: u32) {
+    pub fn use_cpu_clock(&self, cycles: crate::cpu::cycles::CyclesPtr, mhz: u32) {
         let _ = self.cpu_clock.set((cycles, mhz.max(1) as u64));
     }
 

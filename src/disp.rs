@@ -554,12 +554,12 @@ pub struct StatusSource {
     fasttick: Arc<AtomicU64>,
     /// The CPU's cycle counter; wired once the CPU exists, because the boards
     /// are built first (see `CyclesPtr::dangling`).
-    cycles: Mutex<crate::cpu::mips_core::CyclesPtr>,
+    cycles: Mutex<crate::cpu::cycles::CyclesPtr>,
     /// CPU Count rate, for the developer bar. Replaced when the CPU exists.
     count_hz: Mutex<Arc<AtomicU64>>,
     /// The other CPUs' cycle counters and Compare-match counts, one per CPU
     /// after the first.
-    more_cpus: Mutex<Vec<(crate::cpu::mips_core::CyclesPtr, Arc<AtomicU64>)>>,
+    more_cpus: Mutex<Vec<(crate::cpu::cycles::CyclesPtr, Arc<AtomicU64>)>>,
     /// Fetch counters the CPU bumps, read and cleared per frame by the
     /// developer bar. Zero on machines whose CPU does not feed them.
     decoded: Arc<AtomicU64>,
@@ -577,8 +577,8 @@ impl StatusSource {
         Arc::new(Self {
             heartbeat,
             fasttick,
-            cycles: Mutex::new(crate::cpu::mips_core::CyclesPtr::dangling()),
-            count_hz: Mutex::new(Arc::new(AtomicU64::new(crate::cpu::mips_core::DEFAULT_COUNT_HZ))),
+            cycles: Mutex::new(crate::cpu::cycles::CyclesPtr::dangling()),
+            count_hz: Mutex::new(Arc::new(AtomicU64::new(crate::cpu::cycles::DEFAULT_COUNT_HZ))),
             more_cpus: Mutex::new(Vec::new()),
             decoded: Arc::new(AtomicU64::new(0)),
             l1i_hits: Arc::new(AtomicU64::new(0)),
@@ -599,11 +599,11 @@ impl StatusSource {
         [self.decoded.clone(), self.l1i_hits.clone(), self.l1i_fetches.clone(), self.uncached.clone()]
     }
 
-    pub fn set_cpu_cycles(&self, ptr: crate::cpu::mips_core::CyclesPtr) {
+    pub fn set_cpu_cycles(&self, ptr: crate::cpu::cycles::CyclesPtr) {
         *self.cycles.lock() = ptr;
     }
 
-    pub fn cycles(&self) -> crate::cpu::mips_core::CyclesPtr {
+    pub fn cycles(&self) -> crate::cpu::cycles::CyclesPtr {
         *self.cycles.lock()
     }
 
@@ -612,7 +612,7 @@ impl StatusSource {
     }
 
     /// One more CPU for the bar's MIPS and Hz columns.
-    pub fn add_cpu_stats(&self, cycles: crate::cpu::mips_core::CyclesPtr, fasttick: Arc<AtomicU64>) {
+    pub fn add_cpu_stats(&self, cycles: crate::cpu::cycles::CyclesPtr, fasttick: Arc<AtomicU64>) {
         self.more_cpus.lock().push((cycles, fasttick));
     }
 
@@ -1032,7 +1032,7 @@ mod rate_figure_tests {
 #[cfg(test)]
 mod status_source_tests {
     use super::StatusSource;
-    use crate::cpu::mips_core::CyclesPtr;
+    use crate::cpu::cycles::CyclesPtr;
     use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
     use std::time::Instant;

@@ -60,26 +60,9 @@ pub fn cp0_log() -> bool {
             & crate::cpu::mips_exec::MIPS_LOG_CP0) != 0
 }
 
-// CP0 Cause Register bit definitions
-pub const CAUSE_EXCCODE_MASK: u32 = 0x1F << 2; // Exception Code mask
-pub const CAUSE_EXCCODE_SHIFT: u32 = 2;        // Exception Code shift
-pub const CAUSE_IP_MASK: u32 = 0xFF << 8;      // Interrupt Pending mask
-pub const CAUSE_IP_SHIFT: u32 = 8;             // Interrupt Pending shift
-pub const CAUSE_IP0: u32 = 1 << 8;
-pub const CAUSE_IP1: u32 = 1 << 9;
-pub const CAUSE_IP2: u32 = 1 << 10;
-pub const CAUSE_IP3: u32 = 1 << 11;
-pub const CAUSE_IP4: u32 = 1 << 12;
-pub const CAUSE_IP5: u32 = 1 << 13;
-pub const CAUSE_IP6: u32 = 1 << 14;
-pub const CAUSE_IP7: u32 = 1 << 15;            // Timer interrupt (IP7)
+pub use crate::cpu::mips_isa::{CAUSE_EXCCODE_MASK, CAUSE_EXCCODE_SHIFT, CAUSE_IP_MASK, CAUSE_IP_SHIFT, CAUSE_IP0, CAUSE_IP1, CAUSE_IP2, CAUSE_IP3, CAUSE_IP4, CAUSE_IP5, CAUSE_IP6, CAUSE_IP7};
 
-/// Virtual CP0 Count frequency. Fixed for the life of the core — override
-/// with `[clock] fixed_mhz` or the CLI. Guests infer CPU speed from it
-/// (IRIX's `hinv` reports 66 MHz for a 33 MHz Count); since these systems are
-/// interrupt-driven, the emulator running faster or slower than the reported
-/// speed has no ill effects.
-pub const DEFAULT_COUNT_HZ: u64 = 33_000_000;
+pub use crate::cpu::cycles::{CyclesPtr, DEFAULT_COUNT_HZ};
 
 
 /// ci_clock: synthetic nanoseconds per retired instruction (~100 MIPS R4400).
@@ -217,71 +200,6 @@ pub struct Hot {
     pub parked_cycles: u64,
 }
 
-/// A raw pointer into `Hot::cycles`, handed out by `MipsExecutor::cycles_ptr`/
-/// `MipsCpu::cycles_ptr` to devices on other threads that need to read the
-/// live cycle count (status displays, `Wd33c93a`'s deferred-interrupt
-/// spin-wait). Wraps the bare `*const u64` in a `Send`/`Sync` newtype
-/// instead of blanket-asserting `unsafe impl Send`/`Sync` on every struct
-/// that stores one — narrows the safety claim to exactly this one pointer
-/// (valid for the process lifetime once obtained: it points into the
-/// `MipsCore` owned by the executor's own top-level `Arc<Mutex<...>>`, which
-/// outlives every device) rather than silencing the compiler's check for a
-/// struct's other fields too, which would then need re-verifying by
-/// inspection every time a new field is added.
-///
-/// `Copy`: cheap to pass/store by value everywhere a bare pointer would be,
-/// no lifetime to track. Read with `.get()`, which does the
-/// `ptr::read_volatile` itself — see `Hot::cycles`'s doc comment for why a
-/// volatile read, not a plain one.
-#[derive(Clone, Copy)]
-pub struct CyclesPtr(*const u64, *const u64);
-
-unsafe impl Send for CyclesPtr {}
-unsafe impl Sync for CyclesPtr {}
-
-impl CyclesPtr {
-    /// Construct from a raw pointer obtained via `MipsExecutor::cycles_ptr`/
-    /// `MipsCpu::cycles_ptr` — never call this with anything else.
-    pub fn new(ptr: *const u64) -> Self {
-        Self(ptr, std::ptr::null())
-    }
-
-    /// As [`new`](Self::new), also reading the CPU's `Hot::parked_cycles`
-    /// word so [`retired`](Self::retired) can leave out parked time.
-    pub fn with_parked(cycles: *const u64, parked: *const u64) -> Self {
-        Self(cycles, parked)
-    }
-
-    /// A `CyclesPtr` that reads as `0` forever — for fields not yet wired up
-    /// (`Rex3`/`Wd33c93a` are constructed before the CPU exists; see
-    /// `set_cpu_cycles` on each).
-    pub const fn dangling() -> Self {
-        Self(std::ptr::null(), std::ptr::null())
-    }
-
-    /// Read the current cycle count. Volatile: see `Hot::cycles`'s doc
-    /// comment for why a plain read isn't enough. Returns 0 if this
-    /// `CyclesPtr` hasn't been wired up yet (`dangling()`/not yet set).
-    pub fn get(self) -> u64 {
-        if self.0.is_null() { 0 } else { unsafe { std::ptr::read_volatile(self.0) } }
-    }
-
-    /// Cycles that retired instructions: [`get`](Self::get) less the time the
-    /// CPU spent parked. This is what a MIPS figure should divide; `get`
-    /// keeps moving through a park so timing readers see progress. Reads the
-    /// parked word first, so a park ending between the two reads can only
-    /// overstate the result by that one slice, never wrap it.
-    pub fn retired(self) -> u64 {
-        let parked = if self.1.is_null() { 0 } else { unsafe { std::ptr::read_volatile(self.1) } };
-        self.get().saturating_sub(parked)
-    }
-
-    /// The counter's address (null when dangling), for readers that keep it
-    /// somewhere a `CyclesPtr` cannot go, such as an `AtomicPtr`.
-    pub fn raw(self) -> *const u64 {
-        self.0
-    }
-}
 
 /// MIPS CPU Core with full register state.
 ///
