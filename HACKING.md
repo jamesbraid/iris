@@ -17,9 +17,10 @@ Other documents:
 ## 1. What IRIS is
 
 IRIS emulates the Indy (IP24), Indigo2 (IP22), Indigo2 IMPACT (IP28), O2
-(IP32), Octane (IP30) and Fuel (IP34 board, IP35 software platform). The CPU
-models depend on the machine. The Octane uses an R10000. Fuel uses a fixed
-500 MHz R14000. Graphics is Newport (REX3), GR2 (XZ/Extreme) or IMPACT on
+(IP32), Octane (IP30), Fuel (IP34 board, IP35 software platform) and Tezro
+(IP53 board, IP35 software platform). The CPU models depend on the machine.
+The Octane uses an R10000. Fuel uses a fixed 500 MHz R14000, Tezro the
+700 MHz R16000. Graphics is Newport (REX3), GR2 (XZ/Extreme) or IMPACT on
 the Indy and Indigo2, GBE on the O2, and Solid IMPACT on the Octane. Fuel has
 no graphics board and runs headless on its serial console. It does have a
 PS/2 keyboard and mouse on its IOC3, fed from the host's input and the
@@ -301,7 +302,9 @@ Every device that has real work to do runs on its own thread:
 | `ISP1040-0`, `ISP1040-1` | Octane SCSI request rings and disk transfers |
 | `ISP12160-0` | Fuel SCSI request ring for both ISP12160 channels |
 | `IOC3-RX-A`, `IOC3-RX-B`, `IOC3-NVRAM` | Octane and Fuel IOC3 serial input and NVRAM writer (IOC3's other deadlines are `hptimer` one-shots) |
-| `l1-serial` | Fuel L1 console UART worker. Its other serial ports are IOC3 A and B |
+| `l1-serial` | Fuel and Tezro L1 console UART worker. The Fuel's other serial ports are IOC3 A and B |
+| `IOC4-RX-0` to `IOC4-RX-3` | Tezro IOC4 serial input |
+| `bcm5701-rx`, `bcm5701-net` | Tezro BCM5701 receive pump and network backend |
 | `ip30-eth-rx`, `ip30-eth-net` | Octane ethernet receive pump; the network backend |
 | `ioc3-eth-rx`, `ioc3-eth-net` | Fuel IOC3 Ethernet receive pump and network backend |
 
@@ -561,6 +564,12 @@ introspection commands are in [debug.md](debug.md#jit-v2).
   serial-flash devices share `FlashBacking` storage, with separate command
   handling. V12/Odyssey graphics and snapshots are unsupported. See the
   [Fuel guide](docs/fuel-ip34.md).
+- **IP53 board, IP35 software platform (Tezro)**: its own board
+  (`src/ip53_machine.rs`) on the Bedrock node it shares with the Fuel
+  (`ip35::node`): 700 MHz R16000s, of which only CPU 0 runs, memory from 512
+  and 1024 MiB banks (4 GiB by default), and a PIC whose PXBOW is widget 0,
+  carrying the IO9's IOC4, ISP12160 and BCM5701. It runs headless on the L1
+  or an IOC4 serial console. See the [Tezro guide](docs/tezro-ip53.md).
 
 The Indy and Indigo2 profiles each have an embedded PROM fallback;
 `src/platform.rs` and `src/machine.rs` wire their differences, and
