@@ -695,7 +695,7 @@ fn no_process_exit_bypasses_the_flush() {
         // Machine::new's two startup failures, before a guest has run.
         ("machine.rs", 2, "bad SCSI configuration at start-up"),
         // The bare-metal test device ends the run with the guest's exit code.
-        ("dev/testdev.rs", 1, "bare-metal test device, a harness only"),
+        ("cpu/testdev.rs", 1, "bare-metal test device, a harness only"),
         // Command-line and configuration front ends: nothing is running yet.
         ("config.rs", 1, "configuration file errors"),
         ("iris_ci_main.rs", 1, "the iris-ci client"),

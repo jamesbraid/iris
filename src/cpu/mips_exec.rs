@@ -7050,7 +7050,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             self.cache.set_cache_ecc(self.core.cp0_ecc);
         }
         if reg == 26 && self.cheritest_dump_hook {
-            self.sysad.write32((crate::dev::testdev::TEST_DEV_BASE + crate::dev::testdev::REG_DUMP) as u64,
+            self.sysad.write32((crate::cpu::testdev::TEST_DEV_BASE + crate::cpu::testdev::REG_DUMP) as u64,
                                self.core.cp0_ecc);
         }
         #[cfg(feature = "r5ksc_triton")]

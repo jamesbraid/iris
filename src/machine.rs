@@ -304,7 +304,7 @@ impl Machine {
     /// `process::exit` (`crate::bench_runner`, `TestDevice::new_embedded`).
     pub fn new_with_testdev(
         cfg: MachineConfig,
-        testdev_override: Option<Arc<crate::dev::testdev::TestDevice>>,
+        testdev_override: Option<Arc<crate::cpu::testdev::TestDevice>>,
     ) -> Self {
         // Capture config flags that are needed after the local `cfg` binding
         // is shadowed later in this function.
@@ -603,10 +603,10 @@ impl Machine {
                 ultra64.is_some(),
             );
             let path = cfg.test_device_dump.clone()
-                .unwrap_or_else(|| crate::dev::testdev::DEFAULT_DUMP_PATH.to_string());
+                .unwrap_or_else(|| crate::cpu::testdev::DEFAULT_DUMP_PATH.to_string());
             eprintln!("iris: test device enabled at {:#010x}, dumps to {}",
-                      crate::dev::testdev::TEST_DEV_BASE, path);
-            Some(Arc::new(crate::dev::testdev::TestDevice::new(path)))
+                      crate::cpu::testdev::TEST_DEV_BASE, path);
+            Some(Arc::new(crate::cpu::testdev::TestDevice::new(path)))
         } else {
             None
         };

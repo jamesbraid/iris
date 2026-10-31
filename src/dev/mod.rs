@@ -51,7 +51,6 @@ pub mod prom;
 pub mod ps2;
 pub mod saa7191;
 pub mod seeq8003;
-pub mod testdev;
 pub mod timer;
 pub mod ultra64;
 pub mod vino;

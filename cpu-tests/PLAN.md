@@ -161,7 +161,7 @@ Secondary path (debugging + the external `cheritest` corpus): the IRIS **test
 device** — a signature register the guest probes for, plus `PUTC`, a full
 machine-state `DUMP`, and an `EXIT` that sets the process exit code. Absent on
 real hardware, so the suite probes for it and falls back to SCC-only output.
-Landed as `--test-device` (`src/dev/testdev.rs`).
+Landed as `--test-device` (`src/cpu/testdev.rs`).
 
 ### 4.2 Console
 

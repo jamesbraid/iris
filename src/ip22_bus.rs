@@ -212,7 +212,7 @@ pub struct Ip22Bus {
     pub mgras: Option<Arc<Mgras>>,
     pub ultra64: Option<Arc<Ultra64>>,
     /// Bare-metal test device (`--test-device`), in GIO expansion slot 0.
-    pub testdev: Option<Arc<crate::dev::testdev::TestDevice>>,
+    pub testdev: Option<Arc<crate::cpu::testdev::TestDevice>>,
     pub vino: Vino,
     /// Where the 512 KB alias at physical 0 points — see `alias_offset_for`.
     alias_offset: u32,
@@ -230,7 +230,7 @@ pub struct Ip22Devices {
     pub gr2: Option<Arc<Gr2>>,
     pub mgras: Option<Arc<Mgras>>,
     pub ultra64: Option<Arc<Ultra64>>,
-    pub testdev: Option<Arc<crate::dev::testdev::TestDevice>>,
+    pub testdev: Option<Arc<crate::cpu::testdev::TestDevice>>,
     pub vino: Vino,
     pub mc: MemoryController,
     pub hpc3: Hpc3,
@@ -312,7 +312,7 @@ impl Ip22Bus {
         // Test device (--test-device): GIO expansion slot 0, which is empty on a
         // stock Indy and otherwise answers with a GIO timeout. See testdev.rs.
         if let Some(td) = &d.testdev {
-            use crate::dev::testdev::{TEST_DEV_BASE, TEST_DEV_SIZE};
+            use crate::cpu::testdev::{TEST_DEV_BASE, TEST_DEV_SIZE};
             set(TEST_DEV_BASE, TEST_DEV_BASE + TEST_DEV_SIZE, td.clone(), "test device");
         }
 

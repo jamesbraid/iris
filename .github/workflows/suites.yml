@@ -43,7 +43,7 @@ on:
       - 'src/cpu/mips_*.rs'
       - 'src/cpu/jitv2/**'
       - 'src/elf.rs'
-      - 'src/dev/testdev.rs'
+      - 'src/cpu/testdev.rs'
       - 'src/bench_report.rs'
       - 'src/bench_runner.rs'
       - 'src/benchsuite.rs'

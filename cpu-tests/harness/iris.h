@@ -38,7 +38,7 @@
 #define MEMCFG_BASE(h)    (((h) & 0xFFu) << 22)
 #define MEMCFG_MB(h)      (((((h) >> 8) & 0x1Fu) + 1u) * 4u << (((h) >> 14) & 1u))
 
-/* ── IRIS test device, GIO64 expansion slot 0 (src/dev/testdev.rs) ────────────── */
+/* ── IRIS test device, GIO64 expansion slot 0 (src/cpu/testdev.rs) ────────────── */
 #define TESTDEV_BASE      0xBF400000u
 #define TESTDEV_SIGNATURE (TESTDEV_BASE + 0x00)  /* reads "IRIS" */
 #define TESTDEV_PUTC      (TESTDEV_BASE + 0x04)
@@ -60,7 +60,7 @@
  * image loaded with --load-elf has no argv and no environment, so this register
  * is the only way to ask it for a shorter run. Every field is "unrestricted"
  * when zero, which is what an emulator without TESTDEV_CAP_RUN_CONFIG returns,
- * so it can be read unconditionally. See src/dev/testdev.rs's RunConfig.
+ * so it can be read unconditionally. See src/cpu/testdev.rs's RunConfig.
  *
  *   31            16 15   12 11             0
  *   +---------------+-------+---------------+

@@ -1513,7 +1513,7 @@ pub struct MachineConfig {
     pub perfetto_clock: Option<String>,
 
     /// Map the bare-metal test device (guest console, machine-state dump, exit
-    /// code) into GIO expansion slot 0. Off by default; see src/dev/testdev.rs.
+    /// code) into GIO expansion slot 0. Off by default; see src/cpu/testdev.rs.
     #[serde(default)]
     pub test_device: bool,
 
