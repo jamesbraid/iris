@@ -1449,10 +1449,11 @@ impl TezroConsole {
 }
 
 /// The processor counts a Tezro board fits.
-pub const TEZRO_CPUS: [u8; 1] = [1];
+pub const TEZRO_CPUS: [u8; 3] = [1, 2, 4];
 
+/// Four, as in the Tezros whose inventories have been seen.
 fn default_tezro_cpus() -> u8 {
-    1
+    4
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
