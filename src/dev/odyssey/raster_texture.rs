@@ -225,7 +225,7 @@ impl<'a> SoftDraw<'a> {
         let st = self.st;
 
         // With several targets enabled the highest dimension wins: 3D, then
-        // 2D, then 1D (OpenGL 1.2.1, 3.8.10). The family supplies the winning
+        // 2D, then 1D (OpenGL 1.2.1, 3.8.10). The board supplies the winning
         // target's image, so the image is checked against that target only.
         let target: u32 = if st.texture_3d { 3 } else if st.texture_2d { 2 } else if st.texture_1d { 1 } else { 0 };
 
@@ -439,11 +439,11 @@ pub struct SoftTexelEntry {
 }
 
 /// The texels one draw has read, by level and interior index, after
-/// conversion to components in [0, 1]. A family's image stays unchanged
+/// conversion to components in [0, 1]. The board's image stays unchanged
 /// through a synchronous draw (GlTexImage), so a texel read twice in one
 /// draw reads the same both times. A draw starts by taking a new serial,
 /// which empties the table without clearing it. Border texels, depth
-/// texels and failed reads always go to the family.
+/// texels and failed reads always go to the board.
 pub struct SoftTexelCache {
     pub serial: u64,
     /// Set for a fragment that minifies by more than two texels a pixel

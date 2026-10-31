@@ -144,8 +144,8 @@ impl Board {
     }
 
     /// The plane bound. The plane itself drops an out-of-plane store, but the
-    /// family checks first so the shared code never has to guess whose error it
-    /// is. Board::pixel_allowed() adds the window tests for every write except a
+    /// board checks first so the drawing code never has to guess whose error
+    /// it is. Board::pixel_allowed() adds the window tests for every write except a
     /// copy destination, which calls this helper directly.
     pub fn pixel_in_bounds(&self, x: i64, y: i64) -> bool {
         x >= 0 && y >= 0 && x < ODSY_WIDTH as i64 && y < ODSY_HEIGHT as i64
@@ -1232,11 +1232,7 @@ pub fn image_burst_fmt(reg: u32) -> Option<u32> {
     }
 }
 
-/// The family side of the shared OpenGL context and software rasterizer: a
-/// thin decoder. The rasterizer rule set is chosen, pending capture: the
-/// Octane RE4 set is the only one RasterRules::rules_supported() implements,
-/// and a flat single triangle in one colour exercises none of the parameters
-/// that distinguish heads. The board's own subpixel grid and
+/// The board's raster rules. The board's own subpixel grid and
 /// interpolated-colour depth are unmeasured. The depth word is the board's
 /// 24-bit float (depth_word.rs). (A function, not a static: the struct is not const
 /// constructible.)

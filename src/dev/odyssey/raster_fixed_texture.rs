@@ -22,7 +22,7 @@ pub fn fx_min<T: PartialOrd>(a: T, b: T) -> T {
 
 // Fixed-point texturing for filled triangles.
 //
-// Approximated: no source gives any family's sub-texel, filter-weight or
+// Approximated: no source gives the board's sub-texel, filter-weight or
 // level-of-detail widths, and the double arithmetic of SoftDraw::texture()
 // is no closer to a board's than another choice. Where the state allows,
 // a filled triangle samples instead with:
@@ -47,8 +47,7 @@ pub fn fx_min<T: PartialOrd>(a: T, b: T) -> T {
 // which convert to 8 bits exactly; levels of at most 8192 texels a side
 // and 2^22 texels; NEAREST, LINEAR or a mipmap minification filter with
 // NEAREST or LINEAR magnification; any wrap, a border image only under
-// REPEAT or CLAMP_TO_EDGE, which never reach it; a target that does not
-// draw mixed frames (RasterTarget.mixed_frame); no alpha test, whose
+// REPEAT or CLAMP_TO_EDGE, which never reach it; no alpha test, whose
 // outcome would move with the texel's alpha; and no logical operation,
 // which turns a difference in the lowest bit into one in any. Anything
 // else, and a fragment the fixed sampler cannot take (a coordinate beyond
@@ -160,10 +159,8 @@ impl SoftDraw<'_> {
         if SOFT_TEXTURE_PATH.with(|p| p.get()) == TexturePath::Double
             || self.texture.is_none()
             || self.texels_cache.is_none()
-            || self.t.mixed_frame
             || self.image().volume
             || self.image().one_dimensional
-            || self.st.index_bits != 0
             || self.st.alpha_test
             || self.logic_op
         {
@@ -802,38 +799,6 @@ mod tests {
     // prefills for.
     const W: usize = 128;
 
-    /// A colour and a depth plane of W by W words.
-    struct Fb<'a> {
-        colour: RowsMut<'a, u32>,
-        depth: RowsMut<'a, u32>,
-    }
-
-    struct FbView<'a> {
-        colour: Rows<'a, u32>,
-        depth: Rows<'a, u32>,
-    }
-
-    impl PlaneStore for Fb<'_> {
-        fn planes(&mut self) -> Box<dyn Planes + '_> {
-            Box::new(FbView { colour: self.colour.view(), depth: self.depth.view() })
-        }
-    }
-
-    impl Planes for FbView<'_> {
-        fn store_colour(&self, _t: ColourTarget, x: i32, y: i32, c: u32) {
-            self.colour.get(y as usize, x as usize, 1).unwrap()[0].set(c);
-        }
-        fn load_colour(&self, _t: ColourTarget, x: i32, y: i32) -> u32 {
-            self.colour.get(y as usize, x as usize, 1).unwrap()[0].get()
-        }
-        fn store_depth(&self, x: i32, y: i32, z: u32) {
-            self.depth.get(y as usize, x as usize, 1).unwrap()[0].set(z);
-        }
-        fn load_depth(&self, x: i32, y: i32) -> u32 {
-            self.depth.get(y as usize, x as usize, 1).unwrap()[0].get()
-        }
-    }
-
     struct Hashed;
 
     impl Texels for Hashed {
@@ -860,8 +825,6 @@ mod tests {
             line_rule: LineRule::Diamond,
             ..Default::default()
         };
-        let mut colour = vec![0u32; W * W];
-        let mut depth = vec![0x00ffffffu32; W * W];
         let image = GlTexImage {
             width: 8,
             height: 8,
@@ -873,12 +836,8 @@ mod tests {
             read_texel: true,
             ..Default::default()
         };
-        let target = RasterTarget {
-            store_colour: true,
-            load_colour: true,
-            texture: Some(image),
-            ..Default::default()
-        };
+        let mut b = raster_bench::Bench::empty();
+        let target = RasterTarget { texture: Some(image), ..b.board.gl_target() };
         let mut id = [0.0f32; 16];
         for k in 0..4 {
             id[k * 5] = 1.0;
@@ -913,12 +872,15 @@ mod tests {
         }
         let stipple = [0u32; 32];
         let mut d = GlDraw::new(GL_TRIANGLES, 3, &verts, &st, &stipple);
-        let mut fb = Fb { colour: RowsMut::new(&mut colour, W), depth: RowsMut::new(&mut depth, W) };
 
+        b.rules = rules;
+        b.set_depth(W as i32, &vec![0x00ffffffu32; W * W]);
         raster_set_texture_path(path);
-        rules.draw(&target, &mut fb, &Hashed, &mut d);
+        b.draw(&target, &Hashed, &mut d);
         raster_set_texture_path(TexturePath::Spans);
-        (colour, depth)
+        // Buffer 1, the drawable's front; its red, green and blue as one word.
+        let colour = (0..W * W).map(|i| b.board.buffer_load(1, (i % W) as i64, (i / W) as i64) >> 8).collect();
+        (colour, b.depth(W as i32))
     }
 
     // A quad's four fragments take the coordinates its footprint was made

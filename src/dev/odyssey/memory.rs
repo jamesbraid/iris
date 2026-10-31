@@ -33,7 +33,7 @@ pub enum PlaneFormat {
     Overlay8,
     /// 4 bytes
     Texture,
-    /// 4 bytes: a word the family interprets
+    /// 4 bytes: a word the board interprets
     Raw,
 }
 
@@ -108,7 +108,7 @@ pub const LOGIC_NAND: u32 = 14;
 impl BoardMemory {
     /// A zeroed memory of size bytes, at most 4 GiB - 1.
     pub fn init(&mut self, size: u64) {
-        // A family constant; the limit is the 32-bit offsets planes use.
+        // A board constant; the limit is the 32-bit offsets planes use.
         assert!(size != 0 && size <= u32::MAX as u64);
         *self = BoardMemory::default();
         self.size = size;
