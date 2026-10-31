@@ -634,8 +634,8 @@ fn incremental_updates_keep_the_frame_a_whole_resolve_makes() {
     let (mut s, mut st) = gl_board();
     s.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
     let mut rng = Lcg(0x5a17);
-    for v in s.regs().edit().lut.iter_mut().take(4096) {
-        *v = rng.next_u32() & ODSY_LUT_ENTRY_MASK;
+    for i in 0..4096 {
+        s.regs().set_lut(i, rng.next_u32() & ODSY_LUT_ENTRY_MASK);
     }
     // Four windows in vertical bands.
     for (i, d) in s.did.iter_mut().enumerate() {
@@ -661,7 +661,7 @@ fn incremental_updates_keep_the_frame_a_whole_resolve_makes() {
             }
             3 => {
                 let i = (rng.next_u32() % 4096) as usize;
-                s.regs().edit().lut[i] = rng.next_u32() & ODSY_LUT_ENTRY_MASK;
+                s.regs().set_lut(i, rng.next_u32() & ODSY_LUT_ENTRY_MASK);
                 s.scanout.repaint_all();
             }
             _ => {
@@ -694,17 +694,17 @@ fn the_screen_follows_the_frame_through_frames_that_present_a_few_lines() {
     let (mut s, mut st) = gl_board();
     s.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
     let mut rng = Lcg(0xfeed);
-    for v in s.regs().edit().lut.iter_mut().take(4096) {
-        *v = rng.next_u32() & ODSY_LUT_ENTRY_MASK;
+    for i in 0..4096 {
+        s.regs().set_lut(i, rng.next_u32() & ODSY_LUT_ENTRY_MASK);
     }
-    s.regs().edit().cursor[ODSY_CURSOR_POSITION as usize] = 100 << 16 | 40;
+    s.regs().set_cursor(ODSY_CURSOR_POSITION as usize, 100 << 16 | 40);
     for i in 0..ODSY_CURSOR_COLOUR_COUNT {
-        s.regs().edit().cursor[(ODSY_CURSOR_COLOURS + 1 + i) as usize] = rng.next_u32() & ODSY_LUT_ENTRY_MASK;
+        s.regs().set_cursor((ODSY_CURSOR_COLOURS + 1 + i) as usize, rng.next_u32() & ODSY_LUT_ENTRY_MASK);
     }
     for w in 0..128u32 {
-        s.regs().edit().cursor[(ODSY_CURSOR_GLYPH + w) as usize] = rng.next_u32();
+        s.regs().set_cursor((ODSY_CURSOR_GLYPH + w) as usize, rng.next_u32());
     }
-    s.regs().edit().cursor[ODSY_CURSOR_CONTROL as usize] = ODSY_CURSOR_CTL_ENABLE;
+    s.regs().set_cursor(ODSY_CURSOR_CONTROL as usize, ODSY_CURSOR_CTL_ENABLE);
     let h = BoardLocks::new(s);
     let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     let (w, ht) = (SGI_ODYSSEY_WIDTH as usize, SGI_ODYSSEY_HEIGHT as usize);
@@ -717,7 +717,7 @@ fn the_screen_follows_the_frame_through_frames_that_present_a_few_lines() {
             st.drawable.back = target;
             small_triangle(&mut s, &st, 20.0 + 120.0 * step as f32, [1.0, (step & 1) as f32, 1.0, 1.0]);
             if step == 5 {
-                s.regs().edit().cursor[ODSY_CURSOR_POSITION as usize] = 200 << 16 | 500;
+                s.regs().set_cursor(ODSY_CURSOR_POSITION as usize, 200 << 16 | 500);
                 let span = s.cursor_span();
                 s.cursor_invalidate(span);
             }
@@ -1012,10 +1012,10 @@ fn display_rig() -> (BoardLocks, GlDrawState, Arc<Display>) {
     let (mut s, st) = gl_board();
     for i in 0..0x600u32 {
         let v = (i * 0x3ff / 0x5ff) & 0x3ff;
-        s.regs().edit().lut[(ODSY_GAMMA_BASE + i) as usize] = v << 20 | v << 10 | v;
+        s.regs().set_lut((ODSY_GAMMA_BASE + i) as usize, v << 20 | v << 10 | v);
     }
     for id in 0..ODSY_DISPMODE_COUNT {
-        s.regs().edit().dispmode[id as usize] = ODSY_GAMMA_GROUP << ODSY_DISPMODE_GROUP_SHIFT;
+        s.regs().set_dispmode(id as usize, ODSY_GAMMA_GROUP << ODSY_DISPMODE_GROUP_SHIFT);
     }
     for (i, d) in s.did.iter_mut().enumerate() {
         *d = (((i % SGI_ODYSSEY_WIDTH as usize) / 320) as u8) << ODSY_DID_MAIN_SHIFT;
@@ -1290,7 +1290,7 @@ fn a_lookup_store_between_taking_the_marks_and_copying_the_registers_is_not_lost
     {
         let shared = h.shared.clone();
         display.reader.lock().test_between = Some(Box::new(move || {
-            shared.regs.edit().lut[0] = 0x0123_4567 & ODSY_LUT_ENTRY_MASK;
+            shared.regs.set_lut((0) as usize, 0x0123_4567 & ODSY_LUT_ENTRY_MASK);
             shared.marks.repaint(DirtySite::Lut, 0, SGI_ODYSSEY_HEIGHT as i32);
         }));
     }
