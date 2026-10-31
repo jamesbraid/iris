@@ -333,14 +333,53 @@ fn a_depth_or_stencil_image_by_dma_writes_its_own_plane() {
     assert_eq!(pixel(&s, 0, 30, 40), READ_PIXEL, "and colour");
 }
 
-/// The same code by pixel burst names no plane: nothing says depth or
-/// stencil, so it paints neither, and does not land in the colour planes as
-/// RGB.
+/// The burst carries no size field, so the plane comes from the write-mask
+/// block (0x052) sent just before it. A burst writes depth when bit 24 is
+/// set; stencil goes through bits 19:12 as `(data & mask) | (old & !mask)`.
+/// Neither lands in the colour planes. The library's depth download clears
+/// the stencil mask and its stencil download clears bit 24, so each leaves
+/// the other plane alone.
+///
+/// Datasheet: "Depth and stencil by pixel burst" (ESTABLISHED: the burst has
+/// no plane selector and the library sets block 0x052 as above; INFERRED:
+/// the enables pick the part that changes; UNKNOWN: depth and stencil tests
+/// on the burst, which the model does not apply).
 #[test]
-fn a_depth_or_stencil_image_by_burst_paints_nothing() {
+fn a_depth_or_stencil_burst_writes_the_plane_the_write_mask_names() {
     let (mut s, _) = window();
+    let write_mask = |s: &mut Board, v: u32| {
+        cmd(s, select(ODSY_REG_WRITE_MASK));
+        cmd(s, v);
+    };
+    // Depth download: bit 24 set, stencil mask clear.
+    write_mask(&mut s, ODSY_WRITE_DEPTH);
+    burst_image(&mut s, (40, 10, 42, 11), 0x0021_1080, ODSY_IMAGE_FMT_RGB, &[0xff12_3456, 0x00ab_cdef]);
+    assert_eq!(s.depth_load(40, 10), 0x0012_3456, "bits 31:24 are not depth");
+    assert_eq!(s.depth_load(41, 10), 0x00ab_cdef);
+    assert_eq!(stencil_at(&s, 40, 10), 0, "a depth download leaves stencil");
 
-    burst_image(&mut s, (40, 10, 42, 11), 0x0021_1080, ODSY_IMAGE_FMT_RGB, &[0x0012_3456, 0x00ab_cdef]);
+    // Stencil download: bit 24 clear, mask 0xf0 in bits 19:12.
+    s.stencil_store(40, 10, 0x0f);
+    s.stencil_store(41, 10, 0x0f);
+    write_mask(&mut s, 0xf0 << 12);
+    burst_image(&mut s, (40, 10, 42, 11), 0x0021_1080, ODSY_IMAGE_FMT_RGB, &[0x00a5_0000, 0x005a_0000]);
+    assert_eq!(stencil_at(&s, 40, 10), 0xaf, "the masked bits change, the rest keep");
+    assert_eq!(stencil_at(&s, 41, 10), 0x5f);
+    assert_eq!(s.depth_load(40, 10), 0x0012_3456, "a stencil download leaves depth");
+
+    // The mask applies to the index in bits 23:16, not to the word as sent:
+    // data in bits 19:12 (where the mask sits) is not the index.
+    s.stencil_store(42, 10, 0x3c);
+    write_mask(&mut s, 0xff << 12);
+    burst_image(&mut s, (42, 10, 44, 11), 0x0021_1080, ODSY_IMAGE_FMT_RGB, &[0x0000_f000, 0x0081_f0ff]);
+    assert_eq!(stencil_at(&s, 42, 10), 0x00, "bits 19:12 alone are index 0");
+    assert_eq!(stencil_at(&s, 43, 10), 0x81, "the index is bits 23:16");
+
+    // A zero stencil mask and no depth bit: nothing is written.
+    write_mask(&mut s, 0);
+    burst_image(&mut s, (40, 10, 41, 11), 0x0011_1080, ODSY_IMAGE_FMT_RGB, &[0x0099_0000]);
+    assert_eq!(s.depth_load(40, 10), 0x0012_3456);
+    assert_eq!(stencil_at(&s, 40, 10), 0xaf);
     for buffer in 0..2 {
         assert_eq!(pixel(&s, buffer, 40, 10), 0);
         assert_eq!(pixel(&s, buffer, 41, 10), 0);
@@ -594,4 +633,103 @@ fn a_gl_pixel_write_marks_the_display_lines_it_wrote() {
 
     copy_block(&mut s, [0x3000_0019, 10 << 16 | 40, 0x0050_2050, 2 << 16 | 2, 0x9263_3042, 0x3000_0010, 30 << 16 | 60, 0x3863_204b]);
     assert_eq!(dirty_lines(&s), [30, 31], "a pixel copy");
+}
+
+/// The library draws a pixel zoom as a texture move: the image sits in a
+/// scratch object under level descriptor 60, BEGIN of type 7 opens quads,
+/// one 14-float word per source row draws a rectangle, and END closes. The
+/// floats are a constant colour (0, 0, 0, 1), the destination corners
+/// (x0, ya, z) and (x1, yb, z) in window pixels, and the source corners
+/// (s0, t0) and (s1, t1) as fractions of the object's power-of-two size,
+/// which the image only partly fills. Here a 2x2 image is drawn at zoom 2 into a 4x4 square: each source texel fills a 2x2 block.
+///
+/// Datasheet: "Pixel zoom: the texture move and its rectangle"
+/// (ESTABLISHED: the word sequence and layout; INFERRED: the colour floats
+/// and that the corners are window pixels).
+#[test]
+fn a_pixel_zoom_rectangle_draws_the_scratch_texture_over_the_destination() {
+    let s = zoom_2x2(0x0364_0000);
+
+    for (x, y, want) in [(20, 10, 0x1100_00ffu32), (21, 11, 0x1100_00ff), (22, 10, 0x2200_00ff), (23, 11, 0x2200_00ff),
+                         (20, 12, 0x3300_00ff), (23, 13, 0x4400_00ff)] {
+        assert_eq!(pixel(&s, 0, x, y), want, "pixel ({x}, {y})");
+    }
+    assert_eq!(pixel(&s, 0, 24, 10), 0, "right of the rectangle");
+    assert_eq!(pixel(&s, 0, 20, 14), 0, "below the rectangle");
+}
+
+/// The texture move writes no wrap or filter bit of the sampler's word 4
+/// (bits 13:0), so they are the context's, and the zoom samples with the
+/// filter the context holds: a linear magnification blends the neighbouring
+/// texels where nearest copies one.
+///
+/// Datasheet: "Pixel zoom: the texture move and its rectangle" (ESTABLISHED:
+/// the move sends no wrap or filter bit; INFERRED: magnification is linear
+/// by default).
+#[test]
+fn a_pixel_zoom_samples_with_the_contexts_magnification_filter() {
+    let nearest = zoom_2x2(0x0364_0000);
+    let linear = zoom_2x2(0x0364_0002);
+
+    assert_eq!(pixel(&nearest, 0, 21, 11), 0x1100_00ff, "nearest copies a texel");
+    let blended = pixel(&linear, 0, 21, 11);
+    assert_ne!(blended, 0, "the linear zoom still draws");
+    assert_ne!(blended, pixel(&nearest, 0, 21, 11), "linear blends where nearest copies");
+}
+
+/// The size word's texture-offset code is 2 only when the scratch object's
+/// two offset fields are both 2, and 0 otherwise; bit 27 is that code's
+/// low bit, so a move whose size word has it set is the same zoom, and bit
+/// 26 is never set.
+///
+/// Datasheet: "Pixel zoom: the texture move and its rectangle" (ESTABLISHED).
+#[test]
+fn a_pixel_zoom_draws_with_the_offset_code_bit_set_or_clear() {
+    let plain = zoom_2x2_sized(0x0364_0000, 0);
+    let offset2 = zoom_2x2_sized(0x0364_0000, 0x0800_0000);
+
+    for y in 10..14 {
+        for x in 20..24 {
+            assert_eq!(pixel(&offset2, 0, x, y), pixel(&plain, 0, x, y), "pixel ({x}, {y})");
+        }
+    }
+    assert_eq!(pixel(&offset2, 0, 20, 10), 0x1100_00ff);
+}
+
+fn zoom_2x2(word4: u32) -> Box<Board> {
+    zoom_2x2_sized(word4, 0)
+}
+
+/// Draws the 2x2 image at zoom 2 into the 4x4 square at (20, 10), with
+/// `word4` as the sampler's word 4 and `size_bits` or-ed into its size
+/// word, and returns the board.
+fn zoom_2x2_sized(word4: u32, size_bits: u32) -> Box<Board> {
+    let (mut s, _) = window();
+    let base = 0x16b000;
+    let obj = s.object_select(base, 512);
+    let texels = [[0x1100_00ffu32, 0x2200_00ff], [0x3300_00ff, 0x4400_00ff]];
+
+    assert!(s.object_rows(obj, 2));
+    for (y, row) in texels.iter().enumerate() {
+        for (x, &t) in row.iter().enumerate() {
+            s.object_store(obj, x as u32, y as u32, t);
+        }
+    }
+    // The move's own raster state: 2D texturing, replace, nearest, level 60.
+    s.tex_mode = ODSY_TEX_MODE_2D;
+    s.tex_level0 = 60;
+    s.tex_levels[180..183].copy_from_slice(&[base, 0x8210_0020, 0]);
+    s.tex_sampler = [(9 << 10) | (6 << 5) | size_bits, 512, 64, 0, word4, 0, 0];
+    s.tex_env = [1, 0, 0, 0, 0];
+
+    cmd(&mut s, select(ODSY_REG_GL_BEGIN));
+    cmd(&mut s, ODSY_GL_QUADS);
+    for (ya, yb, t0, t1) in [(10.0f32, 12.0f32, 0.0f32, 1.0 / 64.0), (12.0, 14.0, 1.0 / 64.0, 2.0 / 64.0)] {
+        cmd(&mut s, ODSY_GL_TEX_RECT);
+        for f in [0.0f32, 0.0, 0.0, 1.0, 20.0, ya, 0.0, 24.0, yb, 0.0, 0.0, t0, 2.0 / 512.0, t1] {
+            cmd(&mut s, f.to_bits());
+        }
+    }
+    cmd(&mut s, select(ODSY_REG_GL_END));
+    s
 }

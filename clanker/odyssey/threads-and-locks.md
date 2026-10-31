@@ -61,12 +61,19 @@ apply to BUZZ). Nothing models more than one raster unit.
 
 Both rings are the shared `GFifo`, 64K entries. The IMPACT model's raster
 FIFO has a head per raster engine with scanline interleave; the VPro's has
-one head, as the board has one raster unit. The raster queue is not
-bounded below the ring: Smoke & Mirrors runs up to about 11,700 jobs
-ahead of the raster unit. Bounding it at 256, 1,024 or 4,096 jobs made
-the front end, and through the full command FIFO the processor, wait
-for the raster unit, and cut mirrors from about 4 to 3.0, 3.2 and 3.6
-swaps a second; perfly did not change.
+one head, as the board has one raster unit.
+
+The front end is bounded by estimated work, not jobs. Each job carries a
+cost in pixels (a draw's area from its vertices' window positions, a
+clear's or block fill's pixels at an eighth, plus a small fixed overhead),
+and the raster queue keeps their running total. A front end that finds
+more than `RASTER_WORK_BUDGET` (2^17 pixels, a few milliseconds of shaded
+fill) queued waits on a condition variable until the raster unit has
+worked it down to half, and a stop wakes it. Smoke & Mirrors queues up to
+about 11,700 small triangles, so a bound of 256, 1,024 or 4,096 jobs made
+the front end, and through the full command FIFO the processor, wait for
+the raster unit, and cut mirrors from about 4 to 3.0, 3.2 and 3.6 swaps a
+second; perfly did not change.
 
 ## Locks
 
@@ -124,7 +131,13 @@ The PROM's and IRIX's textports send hundreds of thousands of FIFO words per
 scrolled line, so a store must cost little. Stores go into iris's shared
 `GFifo` (`src/gfifo.rs`, 64K entries; `fifo.rs` wraps it). The processor
 pushes without the front lock and wakes the worker only when it sleeps. The
-consumer, whoever holds the board lock (worker or a draining access), pops.
+consumer, whoever holds the board lock (worker or a draining access), looks
+at up to 32 stores, runs them, and takes the ones it ran out together
+(`CommandFifo::take_run`, `retire`): the level, the store count and the
+credits move once a run, not once a store, because each store costs the
+worker little and the processor reads those words. A store that has run but
+not retired still counts in the level, so the level never reads below what the
+board has left to take. While a counted store waits a run is one store.
 While the worker runs every command store queues, so decoding and drawing
 never run on the processor's thread.
 
