@@ -33,6 +33,11 @@ hashes are given where a change is easiest to understand by reading the commit.
   Bedrock, dual-head XBridge, IOC3 networking and two-channel ISP12160 SCSI.
   The normal interpreter boot reaches the IRIX 6.5.30 root shell with PROM
   6.210. See the [Fuel guide](docs/fuel-ip34.md).
+- Marking an ECC doubleword or a directory line in Bedrock's memory no longer
+  rebuilds the whole memory map. The PROM's memory test marks and lifts a few
+  hundred of them thousands of times. A mark now changes only its own page,
+  and a lifted mark's page stays on Bedrock's checking path until a batch
+  returns it.
 
 ### PCI configuration
 
