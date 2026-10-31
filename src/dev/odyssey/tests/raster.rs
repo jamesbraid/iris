@@ -121,12 +121,106 @@ fn a_fence_behind_a_queued_draw_lands_after_the_draw() {
     h.raster.stop();
 }
 
+/// The rows the raster unit has published, as the display would take them,
+/// found without waiting for a slice in flight.
+fn published_rows(h: &BoardLocks) -> Vec<u32> {
+    let mut scanout = fresh_scanout();
+    h.raster.take_published_rows(0, &mut scanout.differ, &scanout.marks);
+    scanout.marks.dirty_rows().into_iter().map(|y| y as u32).collect()
+}
+
+/// A job that holds the raster unit for `ms`, as a long draw would.
+fn busy(h: &BoardLocks, ms: u64) {
+    h.raster.submit(move |_| std::thread::sleep(Duration::from_millis(ms)));
+}
+
+/// The rows a draw wrote are published before the fence behind it writes
+/// its token: a guest that sees the token and arms a swap has all of its
+/// rows known to the display. A job queued behind the fence keeps the
+/// queue from draining and the slice from ending meanwhile.
+#[test]
+fn a_fence_publishes_the_rows_drawn_before_it() {
+    // The first slice waits while everything is queued, and then runs it all.
+    let (h, st) = slow_raster(50);
+    h.raster.test_slice_limit_ms.store(10_000, SeqCst);
+    let ram = Ram::new(1 << 20);
+    {
+        let mut s = h.board.lock();
+        s.guest = Some(ram.clone());
+        s.host_write_addr_lower = 0x1000;
+        small_triangle(&mut s, &st, 100.0, RED);
+        s.fence(0x5a5a << ODSY_DMA_FENCE_TOKEN_SHIFT | 3);
+        busy(&h, 300);
+    }
+    eventually("the fence did not land", || ram.half(0x1006) == 0x5a5a);
+    assert!(published_rows(&h).contains(&110), "the token was visible before the draw's rows were");
+    h.raster.stop();
+}
+
+/// A query's answer is a completion too.
+#[test]
+fn a_query_publishes_the_rows_drawn_before_it() {
+    let (h, st) = slow_raster(50);
+    h.raster.test_slice_limit_ms.store(10_000, SeqCst);
+    let ram = Ram::new(1 << 20);
+    {
+        let mut s = h.board.lock();
+        s.guest = Some(ram.clone());
+        s.ctx_shadow_addr_lower = 0x2000;
+        s.host_write_addr_lower = 0x1000;
+        small_triangle(&mut s, &st, 100.0, RED);
+        for word in [0x4c0, 7, 0x10a5a, 3, 0x5a5a] {
+            cmd(&mut s, word);
+        }
+        busy(&h, 300);
+    }
+    eventually("the query did not sync", || ram.half(0x1006) == 0x5a5a);
+    assert!(published_rows(&h).contains(&110), "the sync word was visible before the draw's rows were published");
+    h.raster.stop();
+}
+
+/// The queue publishes when it drains, before a caller that waited for it
+/// looks at the planes.
+#[test]
+fn a_drained_queue_has_published_its_rows() {
+    let (h, st) = slow_raster(50);
+    h.raster.test_slice_limit_ms.store(10_000, SeqCst);
+    h.raster.test_slice_end_ms.store(400, SeqCst);
+    small_triangle(&mut h.board.lock(), &st, 100.0, RED);
+    h.raster.wait_idle();
+    assert!(published_rows(&h).contains(&110), "the queue was idle but its rows were not out");
+    h.raster.test_slice_end_ms.store(0, SeqCst);
+    h.raster.stop();
+}
+
+/// A slice that ends with work still queued publishes what it drew, so the
+/// display never goes a long job without the rows of the short ones.
+#[test]
+fn a_slice_end_publishes_the_rows_drawn_in_it() {
+    let (h, st) = slow_raster(50);
+    {
+        let mut s = h.board.lock();
+        small_triangle(&mut s, &st, 100.0, RED);
+        busy(&h, 5);
+        busy(&h, 400);
+    }
+    eventually("the first jobs did not finish", || h.raster.pending() == 1);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(h.raster.pending(), 1, "the long job is still running");
+    assert!(published_rows(&h).contains(&110), "the slice ended without its rows");
+    h.raster.stop();
+}
+
 /// A scanout with the whole frame resolved.
-fn fresh_scanout() -> Scanout {
-    let mut scanout = Scanout::default();
-    scanout.set_mode(&ScanoutMode { width: SGI_ODYSSEY_WIDTH, height: SGI_ODYSSEY_HEIGHT, frame_clocks: 0, clock_hz: 0 });
-    scanout.dirty.fill(false);
-    scanout
+struct FreshRows {
+    differ: Box<Differ>,
+    marks: RowMarks,
+}
+
+fn fresh_scanout() -> FreshRows {
+    let marks = RowMarks::default();
+    marks.set_height(SGI_ODYSSEY_HEIGHT);
+    FreshRows { differ: Box::new([[0; ROW_WORDS]; ODSY_DISPMODE_COUNT as usize]), marks }
 }
 
 /// The display takes the planes only between the raster unit's slices: a
@@ -141,8 +235,8 @@ fn the_display_waits_out_a_raster_slice_in_flight() {
     let mut planes = h.raster.planes();
     assert_ne!(pixel(&s, 0, 10, 10), 0, "the frame saw the whole draw");
     let mut scanout = fresh_scanout();
-    planes.take_rows(0, &mut scanout);
-    let rows: Vec<u32> = (0..SGI_ODYSSEY_HEIGHT).filter(|&y| scanout.dirty[y as usize]).collect();
+    planes.take_rows(0, &mut scanout.differ, &scanout.marks);
+    let rows: Vec<u32> = scanout.marks.dirty_rows().into_iter().map(|y| y as u32).collect();
     assert!(rows.contains(&10), "and the display hears which rows the raster unit drew: {rows:?}");
     drop(planes);
     drop(s);
@@ -296,8 +390,8 @@ fn a_waiting_bus_read_is_busy_until_the_raster_unit_has_drawn() {
 /// whose windows show the buffers `displayed` names.
 fn drawn_rows(h: &BoardLocks, displayed: u32) -> Vec<u32> {
     let mut scanout = fresh_scanout();
-    h.raster.planes().take_rows(displayed, &mut scanout);
-    (0..SGI_ODYSSEY_HEIGHT).filter(|&y| scanout.dirty[y as usize]).collect()
+    h.raster.planes().take_rows(displayed, &mut scanout.differ, &scanout.marks);
+    scanout.marks.dirty_rows().into_iter().map(|y| y as u32).collect()
 }
 
 /// Which rows of colour buffer b differ between two snapshots.
@@ -462,13 +556,13 @@ fn swap_every_window(s: &mut Board) {
 /// the test left in every row first.
 fn resolved_rows(s: &mut Board, h: &BoardLocks) -> Vec<u32> {
     const MARK: u32 = 0xdead_0000;
-    let (w, ht) = (s.scanout.frame_width as usize, s.scanout.frame_height as usize);
+    let (w, ht) = (s.reader.frame_width as usize, s.reader.frame_height as usize);
 
-    s.scanout.frame.fill(MARK);
+    s.reader.frame.fill(MARK);
     let displayed = s.front.lock().displayed_buffer;
-    h.raster.planes().take_rows(displayed, &mut s.scanout);
+    s.test_take_rows(h, displayed);
     s.scanout_update();
-    (0..ht as u32).filter(|&y| s.scanout.frame[y as usize * w] != MARK).collect()
+    (0..ht as u32).filter(|&y| s.reader.frame[y as usize * w] != MARK).collect()
 }
 
 /// A swap resolves the rows where the window's two buffers differ and no
@@ -490,7 +584,7 @@ fn a_swap_resolves_the_rows_drawn_into_the_other_buffer_and_no_others() {
     s.scanout_update();
     swap_every_window(&mut s);
     s.scanout_update();
-    assert!(s.scanout.unnamed.iter().all(|&w| w == 0));
+    assert!(!s.scanout.marks.unnamed_pending());
 
     let before = snapshot(&s, 1);
     small_triangle(&mut s, &st, 100.0, RED);
@@ -553,7 +647,7 @@ fn a_swap_measures_only_the_lines_an_unnamed_write_marked() {
     assert_eq!(resolved_rows(&mut s, &h), vec![700, 800], "the written lines repaint");
     swap_every_window(&mut s);
     assert_eq!(resolved_rows(&mut s, &h), want, "the swap shows the drawn rows and the line that differs, not the one that does not");
-    assert!(s.scanout.unnamed.iter().all(|&w| w == 0), "the swap measured the marked lines");
+    assert!(!s.scanout.marks.unnamed_pending(), "the swap measured the marked lines");
 }
 
 /// Whatever the draws, unnamed writes, swaps and lookup changes, the frame
@@ -564,7 +658,7 @@ fn incremental_updates_keep_the_frame_a_whole_resolve_makes() {
     let (mut s, mut st) = gl_board();
     s.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
     let mut rng = Lcg(0x5a17);
-    for v in s.lut.iter_mut().take(4096) {
+    for v in s.regs().edit().lut.iter_mut().take(4096) {
         *v = rng.next_u32() & ODSY_LUT_ENTRY_MASK;
     }
     // Four windows in vertical bands.
@@ -591,7 +685,7 @@ fn incremental_updates_keep_the_frame_a_whole_resolve_makes() {
             }
             3 => {
                 let i = (rng.next_u32() % 4096) as usize;
-                s.lut[i] = rng.next_u32() & ODSY_LUT_ENTRY_MASK;
+                s.regs().edit().lut[i] = rng.next_u32() & ODSY_LUT_ENTRY_MASK;
                 s.scanout.repaint_all();
             }
             _ => {
@@ -602,13 +696,13 @@ fn incremental_updates_keep_the_frame_a_whole_resolve_makes() {
         if rng.next_u32() % 2 == 0 {
             h.raster.wait_idle();
             let displayed = s.front.lock().displayed_buffer;
-            h.raster.planes().take_rows(displayed, &mut s.scanout);
+            s.test_take_rows(&h, displayed);
             s.scanout_update();
-            let w = s.scanout.frame_width;
+            let w = s.reader.frame_width;
             let mut want = vec![0u32; w as usize];
-            for y in 0..s.scanout.frame_height {
+            for y in 0..s.reader.frame_height {
                 s.resolve_row_generic(y, &mut want);
-                assert_eq!(&s.scanout.frame[(y * w) as usize..((y + 1) * w) as usize], &want[..], "step {step}, row {y}");
+                assert_eq!(&s.reader.frame[(y * w) as usize..((y + 1) * w) as usize], &want[..], "step {step}, row {y}");
             }
         }
     }
@@ -624,17 +718,17 @@ fn the_screen_follows_the_frame_through_frames_that_present_a_few_lines() {
     let (mut s, mut st) = gl_board();
     s.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
     let mut rng = Lcg(0xfeed);
-    for v in s.lut.iter_mut().take(4096) {
+    for v in s.regs().edit().lut.iter_mut().take(4096) {
         *v = rng.next_u32() & ODSY_LUT_ENTRY_MASK;
     }
-    s.cursor[ODSY_CURSOR_POSITION as usize] = 100 << 16 | 40;
+    s.regs().edit().cursor[ODSY_CURSOR_POSITION as usize] = 100 << 16 | 40;
     for i in 0..ODSY_CURSOR_COLOUR_COUNT {
-        s.cursor[(ODSY_CURSOR_COLOURS + 1 + i) as usize] = rng.next_u32() & ODSY_LUT_ENTRY_MASK;
+        s.regs().edit().cursor[(ODSY_CURSOR_COLOURS + 1 + i) as usize] = rng.next_u32() & ODSY_LUT_ENTRY_MASK;
     }
     for w in 0..128u32 {
-        s.cursor[(ODSY_CURSOR_GLYPH + w) as usize] = rng.next_u32();
+        s.regs().edit().cursor[(ODSY_CURSOR_GLYPH + w) as usize] = rng.next_u32();
     }
-    s.cursor[ODSY_CURSOR_CONTROL as usize] = ODSY_CURSOR_CTL_ENABLE;
+    s.regs().edit().cursor[ODSY_CURSOR_CONTROL as usize] = ODSY_CURSOR_CTL_ENABLE;
     let h = BoardLocks::new(s);
     let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     let (w, ht) = (SGI_ODYSSEY_WIDTH as usize, SGI_ODYSSEY_HEIGHT as usize);
@@ -647,7 +741,7 @@ fn the_screen_follows_the_frame_through_frames_that_present_a_few_lines() {
             st.drawable.back = target;
             small_triangle(&mut s, &st, 20.0 + 120.0 * step as f32, [1.0, (step & 1) as f32, 1.0, 1.0]);
             if step == 5 {
-                s.cursor[ODSY_CURSOR_POSITION as usize] = 200 << 16 | 500;
+                s.regs().edit().cursor[ODSY_CURSOR_POSITION as usize] = 200 << 16 | 500;
                 let span = s.cursor_span();
                 s.cursor_invalidate(span);
             }
@@ -657,11 +751,11 @@ fn the_screen_follows_the_frame_through_frames_that_present_a_few_lines() {
         }
         h.raster.wait_idle();
         Odyssey::frame(&h, &display);
-        let s = h.board.lock();
+        let reader = display.reader.lock();
         let screen = display.screen.lock();
         for y in 0..ht {
             for x in 0..w {
-                let rgb = s.scanout.frame[y * w + x];
+                let rgb = reader.frame[y * w + x];
                 let want = 0xff00_0000 | (rgb & 0xff) << 16 | rgb & 0xff00 | (rgb >> 16) & 0xff;
                 let at = y * crate::disp::FB_STRIDE + x;
                 assert_eq!((screen.fb_rgb[at], screen.rgba[at]), (want, want), "step {step} ({x}, {y})");
@@ -957,10 +1051,328 @@ fn a_frame_waiting_for_a_slice_leaves_the_board_free() {
     assert!(h.raster.in_slice(), "the slice was still running");
 
     frame.join().unwrap();
-    let s = h.board.lock();
-    assert!(s.scanout.stats.retries >= 1, "the frame let the board go to wait");
-    assert_eq!(s.scanout.stats.fallbacks, 0);
-    assert_eq!(s.scanout.stats.frames, 1, "and then staged its lines");
-    drop(s);
+    let reader = display.reader.lock();
+    assert!(reader.stats.retries >= 1, "the frame let the board go to wait");
+    assert_eq!(reader.stats.fallbacks, 0);
+    assert_eq!(reader.stats.frames, 1, "and then staged its lines");
+    drop(reader);
     h.raster.stop();
+}
+
+// The display with no lock held (IRIS_VPRO_DISPLAY=lockless), and the locked
+// frame that runs the same code, held to the same pictures.
+
+/// A board whose every drawable is an RGB visual through a gamma ramp, four
+/// windows in vertical bands, and its display in `lockless` mode; the raster
+/// unit running.
+fn display_rig(lockless: bool) -> (BoardLocks, GlDrawState, Arc<Display>) {
+    let (mut s, st) = gl_board();
+    for i in 0..0x600u32 {
+        let v = (i * 0x3ff / 0x5ff) & 0x3ff;
+        s.regs().edit().lut[(ODSY_GAMMA_BASE + i) as usize] = v << 20 | v << 10 | v;
+    }
+    for id in 0..ODSY_DISPMODE_COUNT {
+        s.regs().edit().dispmode[id as usize] = ODSY_GAMMA_GROUP << ODSY_DISPMODE_GROUP_SHIFT;
+    }
+    for (i, d) in s.did.iter_mut().enumerate() {
+        *d = (((i % SGI_ODYSSEY_WIDTH as usize) / 320) as u8) << ODSY_DID_MAIN_SHIFT;
+    }
+    s.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
+    let h = BoardLocks::new(s);
+    h.raster.start();
+    let display = Arc::new(Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))));
+    display.set_lockless(lockless);
+    (h, st, display)
+}
+
+/// Run the display until `stop`, as its thread does with no pause.
+fn run_display(h: &BoardLocks, display: &Arc<Display>, stop: &Arc<std::sync::atomic::AtomicBool>) -> std::thread::JoinHandle<()> {
+    let (h, display, stop) = (h.clone(), display.clone(), stop.clone());
+    std::thread::spawn(move || {
+        while !stop.load(SeqCst) {
+            Odyssey::frame(&h, &display);
+        }
+    })
+}
+
+/// Frames at the display's pace after the writers stopped, so the retrace
+/// comes due and the last marks are consumed.
+fn settle(h: &BoardLocks, display: &Display, frames: u32) {
+    for _ in 0..frames {
+        std::thread::sleep(Duration::from_millis(20));
+        Odyssey::frame(h, display);
+    }
+}
+
+/// The presented frame against a whole per-pixel resolve of the planes.
+fn assert_frame_is_whole_resolve(h: &BoardLocks, display: &Display, what: &str) {
+    h.raster.wait_idle();
+    let mut s = h.board.lock();
+    let reader = display.reader.lock();
+    let w = reader.frame_width as usize;
+    let mut want = vec![0u32; w];
+    for y in 0..reader.frame_height {
+        s.resolve_row_generic(y, &mut want);
+        assert_eq!(&reader.frame[y as usize * w..(y as usize + 1) * w], &want[..], "{what}: row {y}");
+    }
+}
+
+/// One front-end thread, the raster unit, lookup and cursor stores and
+/// swap arms run against `Odyssey::frame` with no pause; when the writers
+/// stop and the raster queue drains the presented frame is a whole resolve
+/// of the planes, and a hundred idle frames leave it so without resolving a
+/// line.
+fn stress(lockless: bool, seed: u64, last_is_lut: bool) {
+    use crate::dev::odyssey::raster_bench::Lcg;
+    let (h, mut st, display) = display_rig(lockless);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shown = run_display(&h, &display, &stop);
+    let mut rng = Lcg(seed);
+    let end = Instant::now() + Duration::from_millis(600);
+
+    while Instant::now() < end {
+        let mut s = h.board.lock();
+        for _ in 0..8 {
+            match rng.next_u32() % 9 {
+                0 | 1 => {
+                    let target = rng.next_u32() & 1;
+                    st.drawable.front = target;
+                    st.drawable.back = target;
+                    let y = (rng.next_u32() % 960) as f32;
+                    small_triangle(&mut s, &st, y, [(rng.next_u32() % 2) as f32, (rng.next_u32() % 2) as f32, 1.0, 1.0]);
+                }
+                2 | 3 => {
+                    let (x, y) = ((rng.next_u32() % 1280) as i64, (rng.next_u32() % 1024) as i64);
+                    s.draw_mask = if rng.next_u32() & 1 == 0 { ODSY_DRAW_MASK_BUFFER0 } else { ODSY_DRAW_MASK_BUFFER1 };
+                    s.paint_pixel(x, y, rng.next_u32());
+                }
+                4 => {
+                    let (x, y) = ((rng.next_u32() % 1200) as i64, (rng.next_u32() % 1000) as i64);
+                    s.buffer_store(rng.next_u32() & 1, x, y, rng.next_u32());
+                    s.scanout.invalidate(y as i32, 1);
+                }
+                5 => {
+                    let i = rng.next_u32() % 0x600;
+                    s.backend_data(ODSY_GAMMA_BASE + i, rng.next_u32() & ODSY_LUT_ENTRY_MASK);
+                }
+                6 => s.backend_data(ODSY_CURSOR_BASE + ODSY_CURSOR_POSITION, (rng.next_u32() % 1200) << 16 | (rng.next_u32() % 1000)),
+                7 => {
+                    let (x, y) = (rng.next_u32() % 1200, rng.next_u32() % 1000);
+                    s.draw_mask = ODSY_DRAW_MASK_BUFFER0;
+                    s.clear_planes(x, y, 40, 3, (rng.next_u32() & 0xf8) as u8, 0xff);
+                }
+                _ => h.front.lock().swap_arm |= rng.next_u32() & 0xf,
+            }
+        }
+        drop(s);
+        std::thread::yield_now();
+    }
+    // A slow tail of single stores of one kind, so the last of them lands at
+    // a random point of a frame the display is making. A lookup store marks
+    // every line, so a tail of pixels and a tail of lookup stores are run
+    // apart: either would repair what the other left stale.
+    // No swap is left to repaint what the tail leaves stale.
+    h.front.lock().swap_arm = 0;
+    std::thread::sleep(Duration::from_millis(40));
+    for _ in 0..100u32 {
+        {
+            let mut s = h.board.lock();
+            if !last_is_lut {
+                s.draw_mask = ODSY_DRAW_MASK_BUFFER0 | ODSY_DRAW_MASK_BUFFER1;
+                s.paint_pixel((rng.next_u32() % 1280) as i64, (rng.next_u32() % 1024) as i64, rng.next_u32());
+            } else {
+                // The entry every black pixel is looked up in.
+                s.backend_data(ODSY_GAMMA_BASE, rng.next_u32() & ODSY_LUT_ENTRY_MASK);
+            }
+        }
+        std::thread::sleep(Duration::from_micros(1500));
+    }
+    stop.store(true, SeqCst);
+    shown.join().unwrap();
+    h.raster.wait_idle();
+    settle(&h, &display, 4);
+    assert_frame_is_whole_resolve(&h, &display, "after the writers stopped");
+
+    let (before, rows) = {
+        let reader = display.reader.lock();
+        (reader.frame.clone(), reader.stats.rows)
+    };
+    for _ in 0..100 {
+        Odyssey::frame(&h, &display);
+    }
+    let reader = display.reader.lock();
+    assert!(reader.frame == before, "an idle frame changed the picture");
+    assert_eq!(reader.stats.rows, rows, "idle frames resolved lines nobody marked");
+    drop(reader);
+    assert_frame_is_whole_resolve(&h, &display, "after idle frames");
+    h.raster.stop();
+}
+
+#[test]
+fn the_locked_frame_ends_as_a_whole_resolve_under_live_writers() {
+    for (seed, lut) in [(0x5a17, false), (0x77, true), (0xbeef, false), (0x31, true), (0x42, false), (0x99, true)] {
+        stress(false, seed, lut);
+    }
+}
+
+#[test]
+fn the_lockless_frame_ends_as_a_whole_resolve_under_live_writers() {
+    for (seed, lut) in [(0x5a17, false), (0x77, true), (0xbeef, false), (0x31, true), (0x42, false), (0x99, true)] {
+        stress(true, seed, lut);
+    }
+}
+
+/// A guest that waits for its fence before it arms a swap never sees a
+/// frame that is not the buffer the latch put on the screen: each frame the
+/// display makes is one colour, the one drawn into the buffer it shows.
+fn swap_atomicity(lockless: bool) {
+    let (h, mut st, display) = display_rig(lockless);
+    // One window, so the one swap bit is the whole picture.
+    {
+        let mut s = h.board.lock();
+        s.did.fill(0);
+        s.mem.bytes.fill(0);
+        s.buffer1_mem.bytes.fill(0);
+        s.scanout.invalidate_all();
+    }
+    h.raster.test_slice_limit_ms.store(10_000, SeqCst);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let colours = [Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))];
+    let bad = Arc::new(Mutex::new(Vec::<String>::new()));
+    let shown = {
+        let (h, display, stop, colours, bad) = (h.clone(), display.clone(), stop.clone(), colours.clone(), bad.clone());
+        std::thread::spawn(move || {
+            while !stop.load(SeqCst) {
+                Odyssey::frame(&h, &display);
+                let reader = display.reader.lock();
+                let w = reader.frame_width as usize;
+                let bit = (h.front.lock().displayed_buffer & 1) as usize;
+                let want = colours[bit].load(SeqCst) as u32;
+                // Every 8th pixel of every 8th line, and the corners.
+                let mut seen = std::collections::BTreeSet::new();
+                for y in (0..reader.frame_height as usize).step_by(8).chain([1023]) {
+                    for x in (0..w).step_by(8).chain([w - 1]) {
+                        seen.insert(reader.frame[y * w + x] & 0xff_ffff);
+                    }
+                }
+                                if seen.len() != 1 || *seen.iter().next().unwrap() != want {
+                    bad.lock().push(format!("displayed buffer {bit}: wanted {want:#08x}, saw {seen:06x?}"));
+                }
+            }
+        })
+    };
+    let ram = Ram::new(1 << 20);
+    let (wf, hf) = (SGI_ODYSSEY_WIDTH as f32, SGI_ODYSSEY_HEIGHT as f32);
+
+    std::thread::sleep(Duration::from_millis(100));
+    // Two swaps with nothing drawn: the first measures the buffers the
+    // mode change left unnamed, so from here the display knows the rows
+    // the buffers differ in only from the rows the raster unit publishes.
+    for _ in 0..2 {
+        h.front.lock().swap_arm |= 1;
+        eventually("the swap did not latch", || h.front.lock().swap_arm == 0);
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    for i in 1..=10u32 {
+        let back = 1 - (h.front.lock().displayed_buffer & 1);
+        let red = (i * 9) as f32 / 255.0;
+        {
+            let mut s = h.board.lock();
+            st.drawable.front = back;
+            st.drawable.back = back;
+            let v = vertices(&[(-wf, -hf), (3.0 * wf, -hf), (-wf, 3.0 * hf)], [red, 0.0, 0.0, 1.0]);
+            let stipple = [0u32; 32];
+            let mut d = GlDraw::new(SGI_GL_TRIANGLES, 3, &v, &st, &stipple);
+            assert_eq!(s.gl_draw(&mut d), SGI_GL_DRAW_OK);
+            // The completion the guest waits for, slow to finish after it
+            // has written its token.
+            let r = ram.clone();
+            s.raster.submit_completion(move |_| {
+                r.put(0x1000, &[1]);
+                std::thread::sleep(Duration::from_millis(150));
+            });
+        }
+        eventually("the completion did not land", || ram.get(0x1000, 1)[0] == 1);
+        ram.put(0x1000, &[0]);
+        // What the display shows of this buffer once it is latched: the
+        // red the client drew through the gamma ramp.
+        let want = {
+            let s = h.board.lock();
+            let regs = s.regs().read();
+            let r = i * 9;
+            regs.gamma(r, ODSY_LUT_RED_SHIFT) << 16 | regs.gamma(0, ODSY_LUT_GREEN_SHIFT) << 8 | regs.gamma(0, ODSY_LUT_BLUE_SHIFT)
+        };
+        colours[back as usize].store(want as u64, SeqCst);
+        h.front.lock().swap_arm |= 1;
+        eventually("the swap did not latch", || h.front.lock().swap_arm == 0);
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    stop.store(true, SeqCst);
+    shown.join().unwrap();
+    h.raster.stop();
+    let bad = bad.lock();
+    assert!(bad.is_empty(), "{} mixed or stale frames, first: {:?}", bad.len(), bad.first());
+}
+
+#[test]
+fn a_swap_after_a_fence_shows_the_whole_new_frame_with_the_locked_frame() {
+    swap_atomicity(false);
+}
+
+#[test]
+fn a_swap_after_a_fence_shows_the_whole_new_frame_with_no_lock() {
+    swap_atomicity(true);
+}
+
+/// The frame waits for no slice and holds no lock the front end needs when
+/// it runs with no lock: a slice that holds the raster unit for 400 ms
+/// delays neither the board nor the frame.
+#[test]
+fn a_lockless_frame_waits_for_no_slice_and_takes_no_lock() {
+    let (h, st) = slow_raster(400);
+    let display = Arc::new(Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))));
+    display.set_lockless(true);
+
+    red_triangle(&mut h.board.lock(), &st);
+    eventually("the raster unit began its slice", || h.raster.in_slice());
+    let board = h.board.lock();
+    let t = Instant::now();
+    Odyssey::frame(&h, &display);
+    assert!(t.elapsed() < Duration::from_millis(200), "the frame waited: {:?}", t.elapsed());
+    drop(board);
+    assert!(h.raster.in_slice(), "the slice was still running");
+    let reader = display.reader.lock();
+    assert_eq!(reader.stats.frames, 1, "and the frame staged its lines");
+    assert_eq!((reader.stats.retries, reader.stats.fallbacks), (0, 0));
+    drop(reader);
+    h.raster.stop();
+}
+
+/// A lookup store that lands after the display took its marks and before it
+/// copied the registers is in the frame it is making, and its repaint mark
+/// is kept for the next: the frame ends up showing the new table. With the
+/// registers copied first the store would be marked, taken and resolved
+/// with the old table, and the picture would stay wrong.
+#[test]
+fn a_lookup_store_between_taking_the_marks_and_copying_the_registers_is_not_lost() {
+    let (s, _) = gl_board();
+    let h = BoardLocks::new(s);
+    let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    display.set_lockless(true);
+    Odyssey::frame(&h, &display);
+    {
+        let shared = h.shared.clone();
+        display.reader.lock().test_between = Some(Box::new(move || {
+            shared.regs.edit().lut[0] = 0x0123_4567 & ODSY_LUT_ENTRY_MASK;
+            shared.marks.repaint(DirtySite::Lut, 0, SGI_ODYSSEY_HEIGHT as i32);
+        }));
+    }
+    h.shared.marks.repaint(DirtySite::Other, 0, SGI_ODYSSEY_HEIGHT as i32);
+    Odyssey::frame(&h, &display);
+    display.reader.lock().test_between = None;
+    Odyssey::frame(&h, &display);
+    Odyssey::frame(&h, &display);
+    let want = h.shared.regs.read().lut_rgb(0);
+    assert_ne!(want, 0);
+    assert_eq!(display.reader.lock().frame[10 * SGI_ODYSSEY_WIDTH as usize + 10], want, "the picture shows the old table");
 }
