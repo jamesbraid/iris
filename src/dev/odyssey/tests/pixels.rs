@@ -912,3 +912,37 @@ fn a_row_that_ends_inside_a_word_drops_the_rest_of_the_word() {
     assert_eq!(pixel(&s, 0, 40, 224), 0x2e89_e4ff);
     assert_eq!(pixel(&s, 0, 41, 224), 0x6ac5_20ff);
 }
+
+/// A 16-bit luminance texture upload: the library writes the level into a
+/// scratch object (box 0,0 to 16,8, destination base 0x100800 on the V6, the
+/// first row's eight words in two four-word bursts under tag 0x12, replayed
+/// from the guest trace of the GL test suite's tex/RGBA8/LUMINANCE/
+/// UNSIGNED_SHORT case). The bursts used to be refused, which left the level
+/// holding whatever the object held before and the case failing on a board
+/// whose object memory started out different.
+#[test]
+fn a_16_bit_luminance_texture_upload_lands_in_its_object() {
+    let (mut s, _) = window();
+    let base = 0x10_0800;
+    let obj = s.object_select(base, 16);
+    assert!(obj >= 0);
+    for x in 0..16 {
+        s.object_store(obj, x, 0, 0xffff_ffff);
+    }
+    s.dest_base = base;
+    burst_image_groups(
+        &mut s,
+        (0, 0, 16, 8),
+        &[(
+            0x0f00_1262,
+            &[
+                (ODSY_IMAGE_FMT_RGBA16, &[0x1111_4646, 0x7b7b_b0b0, 0xe5e5_1a1a, 0x4f4f_8484]),
+                (ODSY_IMAGE_FMT_RGBA16, &[0xb9b9_eeee, 0x2323_5858, 0x8d8d_c2c2, 0xf7f7_2c2c]),
+            ],
+        )],
+    );
+    let row = [0x11, 0x46, 0x7b, 0xb0, 0xe5, 0x1a, 0x4f, 0x84, 0xb9, 0xee, 0x23, 0x58, 0x8d, 0xc2, 0xf7, 0x2c];
+    for (x, l) in row.into_iter().enumerate() {
+        assert_eq!(s.object_load(obj, x as u32, 0), l << 24 | l << 16 | l << 8 | 0xff, "texel {x}");
+    }
+}
