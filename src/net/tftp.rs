@@ -91,6 +91,8 @@ struct Transfer {
     retransmits: u32,
     dup_acks: u32,
     slowest_ack: Duration,
+    ack_time: Duration,
+    acks: u32,
 }
 
 pub struct TftpServer {
@@ -223,6 +225,8 @@ impl TftpServer {
             retransmits: 0,
             dup_acks: 0,
             slowest_ack: Duration::ZERO,
+            ack_time: Duration::ZERO,
+            acks: 0,
             source,
             block: 0,
             offset: 0,
@@ -263,14 +267,17 @@ impl TftpServer {
         }
         let rtt = now.duration_since(t.sent_at);
         t.slowest_ack = t.slowest_ack.max(rtt);
+        t.ack_time += rtt;
+        t.acks += 1;
         if trace && rtt >= SLOW_ACK {
             eprintln!("iris: tftp {} slow ACK for {:?} block {}: {} ms", who(client), t.name, block, rtt.as_millis());
         }
         if t.final_block {
             if let Some(t) = self.transfers.remove(&client) {
-                ttrace!(self, "{} complete {:?}: {} bytes, {} blocks, {} retransmits, {} duplicate ACKs, slowest ACK {} ms, {} ms total",
+                ttrace!(self, "{} complete {:?}: {} bytes, {} blocks, {} retransmits, {} duplicate ACKs, ACK {} us mean / {} ms slowest, {} ms total",
                         who(client), t.name, t.offset + t.last_packet.len().saturating_sub(4) as u64,
-                        block, t.retransmits, t.dup_acks, t.slowest_ack.as_millis(),
+                        block, t.retransmits, t.dup_acks,
+                        (t.ack_time / t.acks.max(1)).as_micros(), t.slowest_ack.as_millis(),
                         now.duration_since(t.started).as_millis());
             }
             return None;
