@@ -479,7 +479,7 @@ fn code_generations_use_the_cached_plane_and_stable_ram_endpoint() {
     bus.set_ram_generations(stable_ram.clone());
     bus.map(3, 0, 0x1000, stable_ram.clone());
     bus.map(3, 0x3000, 8, stable_ram.clone());
-    let cached = bus.cached_view(stable_ram.clone());
+    let cached = bus.cached_view(stable_ram.clone(), crate::dev::bedrock_mem::RamExtent::new(&[256, 256]));
     assert_eq!(bus.gen_ptr(0x40), &stable_ram.generation as *const AtomicU64);
     assert_eq!(cached.gen_ptr(0x40), &stable_ram.generation as *const AtomicU64);
     assert_eq!(bus.gen_ptr(0x1fc00000), &rom.generation as *const AtomicU64);
