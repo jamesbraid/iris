@@ -1724,21 +1724,25 @@ fn parked_commands_start_oldest_first() {
 /// entries, then read back: the second must not take the first's segments.
 fn parked_writes_keep_their_own_segments(a64: bool) {
     let r = hold_rig(if a64 { "hold-segments-a64" } else { "hold-segments" });
-    // Each write is three 1 KiB (type 1) or 512-byte (64-bit) pieces: the
+    // Each write is made of pieces of 1 KiB (type 1) or 512 bytes (64-bit): the
     // last in the entry after the command's.
     let piece: u32 = if a64 { 512 } else { 1024 };
     let page = |i: u32| BUF + i * 0x1000;
     let data = |i: u32| -> Vec<u8> { (0..piece).map(|j| (j as u8).wrapping_mul(3) ^ (i as u8 + 1)).collect() };
-    for i in 0..8 {
+    for i in 0..16 {
         r.mem.put(page(i), &data(i));
     }
-    let blocks = (3 * piece / BLOCK_SIZE as u32) as u16;
+    // Type 1 carries four segments in the command entry, the 64-bit entry
+    // two: one more piece goes in the continuation entry after it, which
+    // must be counted for that piece to be written.
+    let total: u32 = if a64 { 3 } else { 5 };
+    let blocks = (total * piece / BLOCK_SIZE as u32) as u16;
     bus_reset(&r, 1, 0);
     for n in 0..2u32 {
         let slot = n * 2;
-        let cdb = cdb10(scsi_cmd::WRITE_10, 16 + 8 * n, blocks);
-        let first: Vec<u32> = (0..if a64 { 2 } else { 3 }).map(|i| page(n * 4 + i)).collect();
-        let last = page(n * 4 + first.len() as u32);
+        let cdb = cdb10(scsi_cmd::WRITE_10, 16 + 16 * n, blocks);
+        let first: Vec<u32> = (0..total - 1).map(|i| page(n * 8 + i)).collect();
+        let last = page(n * 8 + first.len() as u32);
         let mut cont = [0u8; ENTRY_SIZE];
         let mut e = if a64 {
             let segs: Vec<(u64, u32)> = first.iter().map(|&a| (u64::from(a), piece)).collect();
@@ -1754,7 +1758,7 @@ fn parked_writes_keep_their_own_segments(a64: bool) {
             request(0x90 + n, 1, &cdb, &segs)
         };
         e[1] = 2;
-        p16(&mut e, 18, if a64 { 3 } else { 4 });
+        p16(&mut e, 18, total as u16);
         r.put_entry(slot, &e);
         r.put_entry(slot + 1, &cont);
     }
@@ -1768,12 +1772,12 @@ fn parked_writes_keep_their_own_segments(a64: bool) {
     // Read both back, whole.
     let rd = BUF + 0x40000;
     for n in 0..2u32 {
-        let cdb = cdb10(scsi_cmd::READ_10, 16 + 8 * n, blocks);
-        r.put_entry(4 + n, &request(0xb0 + n, 1, &cdb, &[(rd + n * 0x4000, 3 * piece)]));
+        let cdb = cdb10(scsi_cmd::READ_10, 16 + 16 * n, blocks);
+        r.put_entry(4 + n, &request(0xb0 + n, 1, &cdb, &[(rd + n * 0x4000, total * piece)]));
     }
     r.doorbell(6);
     for n in 0..2u32 {
-        let want: Vec<u8> = (0..3).flat_map(|i| data(n * 4 + i)).collect();
+        let want: Vec<u8> = (0..total).flat_map(|i| data(n * 8 + i)).collect();
         assert_eq!(r.mem.get(rd + n * 0x4000, want.len()), want, "write {n}");
     }
 }
@@ -1947,4 +1951,151 @@ fn a_hold_that_ended_unfired_still_crosses_a_snapshot() {
     assert_eq!(dst.r(reg::RESPONSE_QUEUE), 0);
     dst.clock(9 * S + DEFAULT_SELECTION_TIMEOUT as i64 * MS);
     assert_eq!(handles(&dst, 1), [0x6c], "it starts at the load");
+}
+
+
+// ---- the hold-off on the real clock, and thread timing ----
+fn wait_resp(r: &Rig, n: u16, max: Duration) -> bool {
+    let t = std::time::Instant::now();
+    while t.elapsed() < max {
+        if r.r(reg::RESPONSE_QUEUE) >= n { return true; }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    false
+}
+
+#[test]
+fn a_hold_on_the_real_clock_releases_without_a_poke() {
+    let r = Rig::with_disk("rv-real", 1, 64);
+    r.init_rings(8, 8);
+    bus_reset(&r, 1, 0);
+    let t = std::time::Instant::now();
+    r.put_entry(0, &tur1(0x41));
+    r.doorbell(1);
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0);
+    assert!(wait_resp(&r, 1, Duration::from_secs(4)), "never released");
+    assert!(t.elapsed() >= Duration::from_millis(990), "released early {:?}", t.elapsed());
+}
+
+#[test]
+fn the_hold_does_not_run_while_the_machine_is_stopped() {
+    let r = Rig::with_disk("rv-pause", 1, 64);
+    r.init_rings(8, 8);
+    bus_reset(&r, 1, 0);
+    r.put_entry(0, &tur1(0x42));
+    r.doorbell(1);
+    r.isp.pause();
+    std::thread::sleep(Duration::from_millis(1400));
+    r.isp.resume();
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0, "hold ran while stopped");
+    assert!(wait_resp(&r, 1, Duration::from_secs(4)), "never released after resume");
+}
+
+#[test]
+fn on_the_real_clock_an_absent_target_waits_hold_plus_timeout_and_a_reset_retires() {
+    let r = Rig::with_disk("rv-abs", 1, 64);
+    r.init_rings(8, 8);
+    bus_reset(&r, 1, 0);
+    queue_absent(&r, 0, 0x43);
+    let t = std::time::Instant::now();
+    assert!(wait_resp(&r, 1, Duration::from_secs(4)));
+    assert!(t.elapsed() >= Duration::from_millis(1240), "{:?}", t.elapsed());
+    // a long hold, then a second reset ends it promptly
+    bus_reset(&r, 600, 0);
+    r.put_entry(1, &tur1(0x44));
+    r.doorbell(2);
+    std::thread::sleep(Duration::from_millis(100));
+    bus_reset(&r, 0, 0);
+    assert!(wait_resp(&r, 2, Duration::from_secs(2)));
+    assert_eq!(g16(&r.status(1), 10), IOCB_RESET);
+}
+
+#[test]
+fn a_soft_reset_with_a_parked_command_leaves_nothing_to_run_before_the_rings_return() {
+    let r = hold_rig("rv-soft");
+    bus_reset(&r, 5, 0);
+    r.put_entry(0, &tur1(0x51));
+    r.doorbell(1);
+    r.w(reg::BUS_CTRL, CTRL_SOFT_RESET);
+    r.isp.wait_idle();
+    r.clock(20 * S);
+    assert!(r.isp.notes().iter().all(|n| !n.contains("before the response queue")), "{:?}", r.isp.notes());
+}
+
+#[test]
+fn a_full_response_ring_does_not_spin_the_thread_on_a_released_command() {
+    let r = Rig::with_disk("rv-full", 1, 64);
+    assert_eq!(r.init_queue(mbox::INIT_REQ_QUEUE, 8, RQST), mbox::COMPLETE);
+    assert_eq!(r.init_queue(mbox::INIT_RSP_QUEUE, 2, RESP), mbox::COMPLETE);
+    r.clock(0);
+    bus_reset(&r, 1, 0);
+    for i in 0..3 { r.put_entry(i, &tur1(0x60 + i)); }
+    r.doorbell(3);
+    r.isp.fake_ns.store(S, Ordering::Relaxed);
+    r.isp.wake.notify_all();
+    let isp = r.isp.core.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || { isp.wait_idle(); let _ = tx.send(()); });
+    assert!(rx.recv_timeout(Duration::from_secs(3)).is_ok(), "wait_idle never returned: thread spinning on a full response ring");
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+    r.w(reg::RESPONSE_QUEUE, 1);
+    r.isp.wait_idle();
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0);
+}
+
+#[test]
+fn a_reset_naming_a_missing_bus_leaves_a_waiting_selection_and_is_noted() {
+    let r = hold_rig("rv-sel");
+    queue_absent(&r, 0, 0x52);
+    r.clock(100 * MS);
+    bus_reset(&r, 0, 1);
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS - 1);
+    assert!(!posted(&r, 0x52));
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    assert_eq!(g16(&r.status(0), 10), IOCB_INCOMPLETE);
+    assert!(r.isp.notes().iter().any(|n| n.contains("does not have")), "noted: {:?}", r.isp.notes());
+}
+
+#[test]
+fn a_command_taken_up_before_a_pause_is_retired_once_by_a_later_reset() {
+    let r = hold_rig("rv-started");
+    bus_reset(&r, 1, 0);
+    queue_absent(&r, 0, 0x53);
+    r.clock(S);
+    while r.isp.st.lock().ctl.selecting.is_none() { std::thread::yield_now(); }
+    r.isp.pause();
+    bus_reset(&r, 5, 0);
+    r.isp.resume();
+    r.isp.wait_idle();
+    assert_eq!((g32(&r.status(0), 4), g16(&r.status(0), 10)), (0x53, IOCB_RESET));
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1, "one completion");
+}
+
+#[test]
+fn a_late_thread_still_counts_the_timeout_from_the_hold_end() {
+    let r = hold_rig("rv-late");
+    bus_reset(&r, 1, 0);
+    queue_absent(&r, 0, 0x54);
+    r.clock(S + 100 * MS);
+    r.clock(S + DEFAULT_SELECTION_TIMEOUT as i64 * MS - 1);
+    assert!(!posted(&r, 0x54));
+    r.clock(S + DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    assert!(posted(&r, 0x54));
+}
+
+#[test]
+fn a_snapshot_with_parked_commands_but_no_ring_loads_quietly() {
+    let src = hold_rig("rv-norg-src");
+    bus_reset(&src, 1, 0);
+    src.put_entry(0, &tur1(0x55));
+    src.doorbell(1);
+    let mut saved = src.isp.save_state();
+    if let toml::Value::Table(t) = &mut saved { t.insert("rqst_len".into(), toml::Value::Integer(0)); }
+    let dst = Rig::with_disk("rv-norg-dst", 1, 64);
+    dst.clock(0);
+    dst.isp.load_state(&saved).expect("load");
+    dst.clock(2 * S);
+    assert!(dst.isp.core.st.lock().ctl.walking == false);
 }

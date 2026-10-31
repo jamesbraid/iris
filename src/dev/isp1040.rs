@@ -37,7 +37,8 @@
 //!   mailbox value does the same is inferred. The rest are model choices:
 //!   a command for the quiet bus waits and starts, oldest first, when the
 //!   hold ends (refusing it would be as well supported); the other bus and
-//!   mailbox commands carry on; nothing is posted when the hold ends; a
+//!   mailbox commands carry on (inferred, not established); nothing is
+//!   posted when the hold ends; a
 //!   delay of 0 holds nothing and a later reset replaces the hold; the delay
 //!   is not clamped to the vendor's 0-15 s; an absent target then waits its
 //!   selection timeout from the end of the hold; a second reset retires the
@@ -248,7 +249,10 @@ const DEFAULT_SELECTION_TIMEOUT: u16 = 250;
 
 /// What one unit of the bus-reset delay (mailbox command 0x0018, mailbox 1)
 /// lasts. Seconds is inferred from the vendor's NVRAM setting, which the
-/// drivers pass through; no firmware interface document is held.
+/// drivers pass through; no firmware interface document is held. The
+/// datasheet puts the hold on the guest's virtual clock; iris has no such
+/// source for a device, so it runs on the adapter's clock, host wall time
+/// less the time the machine was stopped, like the selection timeout.
 const BUS_RESET_DELAY_UNIT: Duration = Duration::from_secs(1);
 /// The SCSI buses this part drives. The hold-off, the parked commands and the
 /// selection are all kept per bus, so a two-bus part widens this and decodes
@@ -789,7 +793,12 @@ impl Core {
     /// ends, when none has ended yet.
     fn next_release(&self, st: &State) -> Option<i64> {
         let now = self.now_ns(st);
-        st.parked.iter().filter_map(|p| st.quiet_until[usize::from(p.bus)]).map(|until| until - now).min()
+        st.parked
+            .iter()
+            .filter_map(|p| st.quiet_until[usize::from(p.bus)])
+            .map(|until| until - now)
+            .filter(|&left| left > 0)
+            .min()
     }
 
     /// Wait out the selection of an absent target on the ring entry at
@@ -1169,7 +1178,13 @@ impl Core {
             mbox::BUS_RESET => {
                 let now = self.now_ns(st);
                 let bus = usize::from(st.mailbox[2]);
-                if bus < BUSES {
+                if bus >= BUSES {
+                    // A bus this part does not have: nothing to quiet or
+                    // retire, and the datasheet's per-bus hold leaves the
+                    // real bus alone. Noted so a driver that leaves mailbox 2
+                    // unset on this single-bus part is not silently unheld.
+                    self.note(format!("bus reset names bus {bus}, which this part does not have; ignored"));
+                } else {
                     if let Some(sel) = st.ctl.selecting.as_mut().filter(|sel| usize::from(sel.bus) == bus) {
                         sel.due = now;
                         sel.done = Pending { handle: sel.done.handle, completion: IOCB_RESET, ..Default::default() };
