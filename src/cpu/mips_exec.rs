@@ -783,6 +783,47 @@ pub struct LlSiteStats {
     pub max_run: u64,
 }
 
+/// Which refused stores have been reported, so that a guest probe loop writing
+/// to one dead address logs a few lines and then a sparse reminder rather than
+/// one line per store. Each address reports its first few stores, then the
+/// 8th, 16th, 32nd and so on, with the running count so the gaps are visible.
+/// The table is capped. Addresses that arrive after it is full share one
+/// counter, so together they get the same first few lines and then the sparse
+/// reminders; a late dead address can therefore be silent, but the line that
+/// does print says it is a count across such addresses.
+#[derive(Default)]
+pub struct PostedStoreLog {
+    counts: std::collections::HashMap<u64, u64>,
+    /// Stores to addresses that did not fit in the table.
+    overflow: u64,
+}
+
+impl PostedStoreLog {
+    pub const MAX_ADDRS: usize = 4096;
+    const ALWAYS: u64 = 4;
+
+    /// Count a refused store to `phys_addr`. `Some((n, shared))` means print
+    /// it: this is store number `n` to that address, or, with `shared`, number
+    /// `n` among all addresses that did not fit in the table.
+    pub fn note(&mut self, phys_addr: u64) -> Option<(u64, bool)> {
+        let (n, shared) = if let Some(n) = self.counts.get_mut(&phys_addr) {
+            *n += 1;
+            (*n, false)
+        } else if self.counts.len() < Self::MAX_ADDRS {
+            self.counts.insert(phys_addr, 1);
+            (1, false)
+        } else {
+            self.overflow += 1;
+            (self.overflow, true)
+        };
+        (n <= Self::ALWAYS || n.is_power_of_two()).then_some((n, shared))
+    }
+
+    pub fn should_log(&mut self, phys_addr: u64) -> bool { self.note(phys_addr).is_some() }
+
+    pub fn tracked(&self) -> usize { self.counts.len() }
+}
+
 pub struct MipsExecutor<T: Tlb, C: CpuModel> {
     pub core: MipsCore,
     pub sysad: Arc<dyn BusDevice>,
@@ -858,6 +899,8 @@ pub struct MipsExecutor<T: Tlb, C: CpuModel> {
     pub decoded_count: Arc<AtomicU64>,
     /// Count of instructions fetched from uncached address space.
     pub uncached_fetch_count: Arc<AtomicU64>,
+    /// Refused uncached stores already reported (see `C::POSTS_UNCACHED_STORES`).
+    posted_store_log: PostedStoreLog,
     /// Hot-path translation function pointer, updated whenever CP0 Status changes.
     /// Always the non-debug variant; selects the correct 32/64-bit × privilege specialisation.
     pub translate_fn: fn(&mut Self, u64, AccessType) -> TranslateResult,
@@ -2203,6 +2246,20 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
         self.sysad.describe_fault(phys_addr, size).map_or_else(String::new, |why| format!(" [{why}]"))
     }
 
+    /// An uncached store the system refused, on a model where that is no
+    /// exception (`CpuModel::POSTS_UNCACHED_STORES`): say so, rate-limited per
+    /// address, and let the store complete. The caller returns `BUS_OK`.
+    /// Always built: a refused store is a missing device or a guest bug, and
+    /// stays visible in every build.
+    #[cold]
+    fn post_refused_store(&mut self, virt_addr: u64, phys_addr: u64, size: usize, val: u64, status: u32) {
+        if let Some((n, shared)) = self.posted_store_log.note(phys_addr) {
+            eprintln!("Unsupported uncached write{} (posted, completes): PC={:016x} VA={:016x} PA={:016x} val={:016x} status={:08x}{} [store {}{}]",
+                size * 8, self.core.pc, virt_addr, phys_addr, val, status, self.fault_note(phys_addr, size),
+                n, if shared { " among addresses past the log table" } else { " to this address" });
+        }
+    }
+
     /// Create a new executor from a config and a bus (sysad) and a TLB.
     /// The cache hierarchy is constructed internally as a unified R4000Cache.
     pub fn new(sysad: Arc<dyn BusDevice>, mut tlb: T, cfg: &MipsCpuConfig) -> Self
@@ -2397,6 +2454,7 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             ins: DecodedInstr::default(), // scratch slot for uncached fetches
             decoded_count: Arc::new(AtomicU64::new(0)),
             uncached_fetch_count: Arc::new(AtomicU64::new(0)),
+            posted_store_log: PostedStoreLog::default(),
             // Placeholder — overwritten immediately by update_translate_fn below.
             translate_fn: translate_32_kernel::<T, C>,
             // Placeholder — overwritten immediately by update_fpr_mode below.
@@ -5127,9 +5185,16 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 self.sysad.write64(phys_addr, val)
             };
             if ws != BUS_OK && ws != BUS_BUSY && !DEBUG {
-                eprintln!("Bus error on uncached write{}: PC={:016x} VA={:016x} PA={:016x} val={:016x} status={:08x}{}", SIZE*8, self.core.pc, virt_addr, phys_addr, val, ws, self.fault_note(phys_addr, SIZE));
+                if C::POSTS_UNCACHED_STORES {
+                    self.post_refused_store(virt_addr, phys_addr, SIZE, val, ws);
+                    BUS_OK
+                } else {
+                    eprintln!("Bus error on uncached write{}: PC={:016x} VA={:016x} PA={:016x} val={:016x} status={:08x}{}", SIZE*8, self.core.pc, virt_addr, phys_addr, val, ws, self.fault_note(phys_addr, SIZE));
+                    ws
+                }
+            } else {
+                ws
             }
-            ws
         };
         // jitv2_lockstep's load/store verification (see MipsCore's
         // lockstep_mem field doc comment, and read_data_impl's matching
@@ -5183,9 +5248,16 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             }
             let ws = self.sysad.write64_masked(phys_addr, val, mask);
             if ws != BUS_OK && ws != BUS_BUSY && !DEBUG {
-                eprintln!("Bus error on uncached write64_masked: PC={:016x} VA={:016x} PA={:016x} val={:016x} mask={:016x} status={:08x}{}", self.core.pc, virt_addr, phys_addr, val, mask, ws, self.fault_note(phys_addr, 8));
+                if C::POSTS_UNCACHED_STORES {
+                    self.post_refused_store(virt_addr, phys_addr, mask.count_ones() as usize / 8, val, ws);
+                    BUS_OK
+                } else {
+                    eprintln!("Bus error on uncached write64_masked: PC={:016x} VA={:016x} PA={:016x} val={:016x} mask={:016x} status={:08x}{}", self.core.pc, virt_addr, phys_addr, val, mask, ws, self.fault_note(phys_addr, 8));
+                    ws
+                }
+            } else {
+                ws
             }
-            ws
         }
     }
 
