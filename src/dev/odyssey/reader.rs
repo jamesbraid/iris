@@ -282,14 +282,32 @@ impl SharedRegs {
 }
 
 /// The scanout mode as the front end last set it, and the counts a display
-/// compares to notice a new one.
-#[derive(Default)]
+/// compares to notice a new one. The fields are separate atomic words: the
+/// counts move after the mode is stored and the display reads them before
+/// it reads the mode, so a mode read mid-store is read again at the next
+/// frame.
 struct ModeCell {
-    mode: ScanoutMode,
+    width: AtomicU32,
+    height: AtomicU32,
+    frame_clocks: AtomicU64,
+    clock_hz: AtomicU32,
     /// Moves when the mode is set.
-    gen: u64,
+    gen: AtomicU64,
     /// Moves when the retrace phase restarts: a new mode or a reset.
-    restart: u64,
+    restart: AtomicU64,
+}
+
+impl ModeCell {
+    fn new() -> Self {
+        ModeCell {
+            width: AtomicU32::new(0),
+            height: AtomicU32::new(0),
+            frame_clocks: AtomicU64::new(0),
+            clock_hz: AtomicU32::new(0),
+            gen: AtomicU64::new(1),
+            restart: AtomicU64::new(1),
+        }
+    }
 }
 
 /// One byte range of board memory, as the display sees it.
@@ -462,7 +480,7 @@ impl PlaneView {
 pub struct DisplayShared {
     pub marks: Arc<RowMarks>,
     pub regs: SharedRegs,
-    mode: Mutex<ModeCell>,
+    mode: ModeCell,
     pub planes: OnceLock<PlaneView>,
     pub front: Arc<Mutex<HostInterface>>,
     pub raster: Arc<RasterQueue>,
@@ -477,7 +495,7 @@ impl DisplayShared {
         DisplayShared {
             marks,
             regs: SharedRegs::default(),
-            mode: Mutex::new(ModeCell { gen: 1, restart: 1, ..Default::default() }),
+            mode: ModeCell::new(),
             planes: OnceLock::new(),
             front,
             raster,
@@ -489,16 +507,19 @@ impl DisplayShared {
     /// A new mode: the display reallocates its frame and restarts the
     /// retrace phase when it next looks.
     pub fn publish_mode(&self, mode: ScanoutMode) {
-        let mut cell = self.mode.lock();
+        let cell = &self.mode;
 
-        cell.mode = mode;
-        cell.gen += 1;
-        cell.restart += 1;
+        cell.width.store(mode.width, Relaxed);
+        cell.height.store(mode.height, Relaxed);
+        cell.frame_clocks.store(mode.frame_clocks, Relaxed);
+        cell.clock_hz.store(mode.clock_hz, Relaxed);
+        cell.restart.fetch_add(1, Release);
+        cell.gen.fetch_add(1, Release);
     }
 
     /// The retrace phase restarts, as for a reset.
     pub fn restart_retrace(&self) {
-        self.mode.lock().restart += 1;
+        self.mode.restart.fetch_add(1, Release);
     }
 
     /// A vertical retrace: the host interface latches the swaps armed and
@@ -589,9 +610,13 @@ impl ScanoutReader {
 
     /// Take a new mode and retrace restart the front end published.
     fn sync(&mut self, shared: &DisplayShared) {
-        let (mode, gen, restart) = {
-            let cell = shared.mode.lock();
-            (cell.mode, cell.gen, cell.restart)
+        let cell = &shared.mode;
+        let (gen, restart) = (cell.gen.load(Acquire), cell.restart.load(Acquire));
+        let mode = ScanoutMode {
+            width: cell.width.load(Relaxed),
+            height: cell.height.load(Relaxed),
+            frame_clocks: cell.frame_clocks.load(Relaxed),
+            clock_hz: cell.clock_hz.load(Relaxed),
         };
 
         if gen != self.mode_gen {
