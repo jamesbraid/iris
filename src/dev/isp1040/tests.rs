@@ -1198,6 +1198,21 @@ fn a_disk_attaches_where_asked_and_the_monitor_can_see_it() {
     assert!(r.isp.bus().attach_image(16, &image("attach", 32), false).is_err());
 }
 
+#[test]
+fn a_disk_at_id_15_answers_inquiry_on_the_wide_bus() {
+    let r = Rig::with_disk("wide15", 15, 64);
+    assert!(r.isp.bus().has_target(15));
+    r.init_rings(4, 4);
+    r.put_entry(0, &request(0x1515, 15, &[0x12, 0, 0, 0, 36, 0], &[(BUF, 36)]));
+    r.doorbell(1);
+    let s = r.status(0);
+    assert_eq!(g32(&s, 4), 0x1515);
+    assert_eq!(g16(&s, 8), 0, "GOOD");
+    assert_eq!(g16(&s, 10), IOCB_COMPLETE);
+    assert_eq!(&r.mem.get(BUF + 8, 8), b"SGI     ");
+    assert!(r.isp.bus().attach_image(16, &image("wide15", 64), false).is_err());
+}
+
 /// Records the bus address of each transfer.
 struct AddrProbe(Mutex<Vec<u64>>);
 
