@@ -7623,12 +7623,12 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     /// computing on either operand of ADD/SUB/MUL/DIV/SQRT; returns `Some`
     /// (the terminal ExecStatus, already dispatched) when the operand check
     /// itself must end the instruction, `None` to proceed to computation.
-    #[inline]
+    #[inline(always)]
     fn fpu_check_denorm_operand_s(&mut self, bits: u32) -> Option<ExecStatus> {
         let v = f32::from_bits(bits);
         (v.is_subnormal() || is_qnan_s(bits)).then(|| self.fpu_unimplemented())
     }
-    #[inline]
+    #[inline(always)]
     fn fpu_check_denorm_operand_d(&mut self, bits: u64) -> Option<ExecStatus> {
         let v = f64::from_bits(bits);
         (v.is_subnormal() || is_qnan_d(bits)).then(|| self.fpu_unimplemented())
