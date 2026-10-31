@@ -168,11 +168,11 @@ pub struct GlTexImage<'a> {
     pub max_clamp_r: f64,
 }
 
-/// Where a draw's texels come from: the board's texture storage. `level`
-/// is one of the image's pyramid levels or its detail image, or None for
-/// the level-zero image itself. A read outside the storage is None. Bands
-/// of one draw read through it at once.
-pub trait Texels: Sync {
+/// Where a draw's texels come from: the board's texture storage
+/// (BoardTexels), or a test's. `level` is one of the image's pyramid levels
+/// or its detail image, or None for the level-zero image itself. A read
+/// outside the storage is None.
+pub trait Texels {
     fn texel(&self, level: Option<&GlTexLevel>, x: u32, y: u32) -> Option<u32>;
     fn border_texel(&self, level: Option<&GlTexLevel>, x: i32, y: i32) -> Option<u32>;
     fn texel_3d(&self, level: Option<&GlTexLevel>, x: u32, y: u32, z: u32) -> Option<u32>;
@@ -284,14 +284,19 @@ pub struct SoftReports {
     pub rgba: std::sync::atomic::AtomicBool,
 }
 
-/// One draw's fixed inputs, apart from its planes and texel cache.
+/// One draw as the rasteriser runs it: its rules, state and planes, and
+/// what its setup decided.
 #[derive(Clone, Copy)]
-pub struct SoftShared<'a> {
+pub struct SoftDraw<'a> {
     pub rules: &'a RasterRules,
     pub t: &'a RasterTarget<'a>,
     pub st: &'a GlDrawState,
     pub texels: &'a dyn Texels,
     pub reports: &'a SoftReports,
+    /// The board's planes.
+    pub px: &'a GlPlanes<'a>,
+    /// This thread's texel cache, when texels read in this draw are kept.
+    pub texels_cache: Option<&'a std::cell::RefCell<SoftTexelCache>>,
     pub win: SoftWindow,
     pub targets: [ColourTarget; GL_MAX_TARGETS as usize],
     pub ntargets: u32,
@@ -323,67 +328,40 @@ pub struct SoftShared<'a> {
     pub fill: Option<FillRow>,
 }
 
-/// A draw as one thread runs it: the shared inputs, and the planes and
-/// texel cache that are this thread's alone. It derefs to the shared part,
-/// so the drawing code reads `self.rules` whichever part a field is in.
-#[derive(Clone, Copy)]
-pub struct SoftDraw<'a> {
-    pub shared: SoftShared<'a>,
-    /// The board's planes.
-    pub px: &'a GlPlanes<'a>,
-    /// This thread's texel cache, when texels read in this draw are kept.
-    pub texels_cache: Option<&'a std::cell::RefCell<SoftTexelCache>>,
-}
-
-impl<'a> std::ops::Deref for SoftDraw<'a> {
-    type Target = SoftShared<'a>;
-    fn deref(&self) -> &SoftShared<'a> {
-        &self.shared
-    }
-}
-
-impl std::ops::DerefMut for SoftDraw<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.shared
-    }
-}
-
 impl<'a> SoftDraw<'a> {
     /// A draw under rules into target, in state st, with nothing else
     /// decided yet.
     pub fn new(rules: &'a RasterRules, t: &'a RasterTarget<'a>, st: &'a GlDrawState, reports: &'a SoftReports, px: &'a GlPlanes<'a>) -> Self {
         SoftDraw {
-            shared: SoftShared {
-                rules,
-                t,
-                st,
-                texels: &NoTexels,
-                reports,
-                win: SoftWindow::default(),
-                targets: [0; GL_MAX_TARGETS as usize],
-                ntargets: 0,
-                back_colors: false,
-                blend: false,
-                logic_op: false,
-                colour_mask: 0,
-                texture: None,
-                texture_base: None,
-                texture_last: 0,
-                point_size: 0,
-                line_width: 0,
-                point_smooth: false,
-                line_smooth: false,
-                smooth_point_size: 0.0,
-                smooth_line_width: 0.0,
-                polygon_smooth: false,
-                polygon_stipple: None,
-                rgba_mask: 0,
-                rgba_read: false,
-                fixed: None,
-                fill: None,
-            },
+            rules,
+            t,
+            st,
+            texels: &NoTexels,
+            reports,
             px,
             texels_cache: None,
+            win: SoftWindow::default(),
+            targets: [0; GL_MAX_TARGETS as usize],
+            ntargets: 0,
+            back_colors: false,
+            blend: false,
+            logic_op: false,
+            colour_mask: 0,
+            texture: None,
+            texture_base: None,
+            texture_last: 0,
+            point_size: 0,
+            line_width: 0,
+            point_smooth: false,
+            line_smooth: false,
+            smooth_point_size: 0.0,
+            smooth_line_width: 0.0,
+            polygon_smooth: false,
+            polygon_stipple: None,
+            rgba_mask: 0,
+            rgba_read: false,
+            fixed: None,
+            fill: None,
         }
     }
 
