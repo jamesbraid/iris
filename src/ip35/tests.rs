@@ -193,6 +193,44 @@ fn fuel_link_reset_resets_the_attached_scsi_engine() {
     assert_eq!(isp.bar_read(1, reg::MAILBOX_BASE + 2, 2), 0x4953);
 }
 
+/// A guest power-off exits the process without dropping the board, so the
+/// flush is what carries an overlay's writes to the next run. `mem::forget`
+/// stands in for that exit.
+#[test]
+fn flushed_overlay_writes_survive_a_power_off_that_skips_drop() {
+    use crate::scsi::{scsi_cmd, ScsiDataLength, ScsiRequest};
+    let path = std::env::temp_dir().join(format!("iris-fuel-flush-{}", std::process::id()));
+    std::fs::write(&path, vec![0u8; 4 * 512]).unwrap();
+    let attach = |board: &crate::ip35_machine::FuelBoard| {
+        let bus = board.scsi.bus_for_channel(0).unwrap();
+        bus.attach_device(1, path.to_str().unwrap(), false, Vec::new(), true, None).unwrap();
+    };
+    let board = crate::ip35_machine::FuelBoard::new(&[], Arc::new(|| 0)).unwrap();
+    attach(&board);
+    let write = ScsiRequest {
+        cdb: vec![scsi_cmd::WRITE_10, 0, 0, 0, 0, 2, 0, 0, 1, 0],
+        data_len: ScsiDataLength::Unlimited,
+        data_in: Some(vec![0x5A; 512]),
+    };
+    board.scsi.bus_for_channel(0).unwrap().request(1, &write).unwrap().unwrap();
+    board.flush_disks().unwrap();
+    std::mem::forget(board);
+
+    let board = crate::ip35_machine::FuelBoard::new(&[], Arc::new(|| 0)).unwrap();
+    attach(&board);
+    let read = ScsiRequest {
+        cdb: vec![scsi_cmd::READ_10, 0, 0, 0, 0, 2, 0, 0, 1, 0],
+        data_len: ScsiDataLength::Unlimited,
+        data_in: None,
+    };
+    let got = board.scsi.bus_for_channel(0).unwrap().request(1, &read).unwrap().unwrap();
+    assert_eq!(got.data, vec![0x5A; 512]);
+    drop(board);
+    let _ = std::fs::remove_file(format!("{}.overlay", path.display()));
+    let _ = std::fs::remove_file(format!("{}.overlay.dirty", path.display()));
+    let _ = std::fs::remove_file(&path);
+}
+
 /// The PROM reads the station address from the L1 and IRIX from the
 /// Ethernet; both must report the configured one.
 #[test]
