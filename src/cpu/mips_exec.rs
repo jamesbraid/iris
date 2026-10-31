@@ -6331,15 +6331,8 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 let mask = 0xFFFFFFFFu32 >> shift;
                 let result = (mem_word >> shift) | (rt_val & !mask);
 
-                // The R10000 family keeps bits 63:32 on a partial LWR (MIPS IV
-                // permits either). A full word still sign-extends.
-                let value = if C::R10K_CACHE_OPS && byte_offset != 3 {
-                    (self.core.read_gpr(rt_reg) & 0xffff_ffff_0000_0000) | result as u64
-                } else {
-                    // Sign-extend to 64 bits
-                    result as i32 as i64 as u64
-                };
-                self.core.write_gpr(rt_reg, value);
+                // Sign-extend to 64 bits
+                self.core.write_gpr(rt_reg, result as i32 as i64 as u64);
                 self.handle_exec_complete()
             }
             Err(status) => self.finish_status(status)
