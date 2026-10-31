@@ -168,7 +168,9 @@ the first `[section]`, because TOML tables continue until the next header.
 | Key | Default | Values and behavior |
 |---|---|---|
 | `machine.profile` | `indy_ip24` | indy_ip24, indigo2_ip22, indigo2_ip28, o2_ip32 (configured by `[o2]`, see [the O2 guide](docs/o2-ip32.md)), octane_ip30 (configured by `[octane]`, see [the Octane guide](docs/octane-ip30.md)), fuel_ip34 (see [the Fuel guide](docs/fuel-ip34.md)). |
-| `machine.cpu` | `r4400` | r4400, r5000, r10000. CPU/ISA choice is independent of build features. A Fuel always runs its one R14000, and the key must be `r10000`; any other value is refused. |
+| `machine.cpu` | `r4400` | r4400, r5000, r10000, r12000, r14000. CPU/ISA choice is independent of build features. The R10000 family is accepted only where it shipped: IP28 (r10000), O2 (r10000, r12000), Octane (r10000, r12000, r14000), Fuel (r14000, also spelled `r10000`). `r16000` is recognised but refused everywhere: no machine in this tree has a recorded R16000 configuration. |
+| `machine.cpu_mhz` | the machine's first listed configuration | Pipeline clock in MHz of an R10000-family part. Must be a clock the machine shipped with that part; CP0 Count runs at half of it unless `clock.fixed_mhz` is set. The table is `VARIANTS` in `src/cpu_variants.rs`. |
+| `machine.cpu_l2_mib` | as `cpu_mhz` | Secondary cache in MiB of an R10000-family part, paired with `cpu_mhz`: the part, clock and cache must be one shipped configuration (Octane: r10000 195 MHz/1, r10000 250 MHz/1, r12000 360 MHz/2, r14000 600 MHz/2; O2: r10000 195/1, r12000 300/1; Fuel: r14000 500/2; IP28: r10000 195/1). |
 | `machine.cpus` | `1` | Processors fitted. 2 only on the Octane; see [its guide](docs/Octane/multiprocessor.md). |
 
 ### [fuel]

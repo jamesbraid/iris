@@ -162,6 +162,7 @@ pub mod build_features {
 }
 
 pub mod config;
+pub mod cpu_variants;
 pub mod traits;
 #[macro_use]
 pub mod devlog;

@@ -15,9 +15,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::config::{CpuModel, MachineConfig};
-use crate::cpu::mips_cache_shadow::{R10000ShadowCache, R12000ShadowCache, R14000Ip30ShadowCache};
-use crate::cpu::mips_cache_v2::CpuModel as _;
+use crate::config::MachineConfig;
 use crate::cpu::smp::World;
 use crate::cpu::mips_exec::{CpuDevice, MipsCpu, MipsCpuConfig, MipsExecutor};
 use crate::cpu::mips_tlb::MipsTlb;
@@ -45,16 +43,6 @@ use crate::workstation::{MachineRef, MachineSlot, Workstation};
 /// The PROM image tried when `prom` is left at the shared default, named
 /// as IRIX ships it in /usr/cpu/firmware. The Octane has no embedded PROM.
 pub const OCTANE_PROM_FILE: &str = "IP30prom.bin";
-/// The 195 MHz R10000 of SGI's standard 128 MB Octane configurations (the
-/// OCTANE Technical Report): Count at half that.
-pub const OCTANE_COUNT_HZ: u64 = 97_500_000;
-/// The 360 MHz R12000 of an Octane2 (origami's `ip30-r12000.md`): Count at
-/// half that.
-pub const OCTANE2_R12000_COUNT_HZ: u64 = 180_000_000;
-/// R10000 revision 2.7, as an Octane's hinv reports it; the raw PRId is
-/// inferred from the R10000 manual's encoding. The R12000 and R14000 report
-/// the PRId of their `CpuModel`.
-pub const OCTANE_PRID: u32 = 0x0927;
 /// The Crossbow on the Octane reports revision code 4.
 const XBOW_REVISION: u32 = 4;
 /// The Octane2's Crossbow: revision code 5, which IRIX's inventory names
@@ -150,9 +138,9 @@ pub struct OctaneMachine {
 
 impl OctaneMachine {
     pub fn new(cfg: &MachineConfig) -> Result<Self, String> {
-        if !matches!(cfg.machine.cpu, CpuModel::R10000 | CpuModel::R12000 | CpuModel::R14000) {
-            return Err("an Octane has an R10000, R12000 or R14000 ([machine] cpu = \"r10000\")".into());
-        }
+        // The part, clock and secondary cache come from the shipped
+        // configuration `[machine]` names (`cpu_variants::VARIANTS`).
+        let variant = cfg.cpu_variant()?.ok_or("an Octane has an R10000, R12000 or R14000 ([machine] cpu = \"r10000\")")?;
         // `prom`, or IRIX's file name when `prom` is the shared default and
         // that file is not there: there is no embedded Octane PROM.
         let prom_path = if cfg.prom != crate::config::DEFAULT_PROM || std::path::Path::new(&cfg.prom).exists() {
@@ -340,8 +328,7 @@ impl OctaneMachine {
             if has_vpro { kind.label() } else { board.map_or("no graphics", |b| b.label()) }
         );
 
-        let default_count_hz = if cfg.machine.cpu == CpuModel::R12000 { OCTANE2_R12000_COUNT_HZ } else { OCTANE_COUNT_HZ };
-        let count_hz = cfg.clock.fixed_mhz.map_or(default_count_hz, |mhz| (mhz * 1_000_000.0) as u64);
+        let count_hz = cfg.clock.fixed_mhz.map_or(variant.count_hz(), |mhz| (mhz * 1_000_000.0) as u64);
         let flash_lines: Vec<_> = (0..cpu_count)
             .map(|_| {
                 let bus: Arc<dyn BusDevice> = phys.phys.clone();
@@ -354,11 +341,8 @@ impl OctaneMachine {
         let cpus: Vec<Arc<dyn CpuDevice>> = (0..cpu_count)
             .map(|id| {
                 let (sysad, cached, hz, tick) = (phys.phys.clone(), flash_lines[id as usize].clone(), count_hz.max(1), ticks[id as usize].clone());
-                match cfg.machine.cpu {
-                    CpuModel::R12000 => Self::build_cpu::<R12000ShadowCache>(id, cpu_count, sysad, cached, &timer_manager, hz, tick, R12000ShadowCache::PRID),
-                    CpuModel::R14000 => Self::build_cpu::<R14000Ip30ShadowCache>(id, cpu_count, sysad, cached, &timer_manager, hz, tick, R14000Ip30ShadowCache::PRID),
-                    _ => Self::build_cpu::<R10000ShadowCache>(id, cpu_count, sysad, cached, &timer_manager, hz, tick, OCTANE_PRID),
-                }
+                crate::shadow_for!(variant, C => Self::build_cpu::<C>(id, cpu_count, sysad, cached, &timer_manager, hz, tick, variant.prid),
+                                   _ => unreachable!("cpu_variants::shadow_for has a model for every Octane row"))
             })
             .collect();
         let cpu = cpus[0].clone();

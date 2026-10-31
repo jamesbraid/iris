@@ -116,6 +116,9 @@ impl FuelMachine {
             graphics: cfg.graphics_board(),
         })?);
         let timers = Arc::new(TimerManager::new());
+        // The Fuel's one R14000, named by `cpu_variants::VARIANTS`; the
+        // board's Config reset word below is the 500 MHz, 2 MiB record's.
+        let variant = cfg.cpu_variant()?.ok_or("a Fuel has an R14000: set [machine] cpu = \"r14000\"")?;
         let mut exec = board.build_cpu();
         // The CPU's Compare matches blink the graphics status bar's LED.
         exec.core.fasttick_count = board.fasttick.clone();
@@ -123,7 +126,7 @@ impl FuelMachine {
         exec.core.set_count_hz(
             cfg.clock
                 .fixed_mhz
-                .map_or(250_000_000, |mhz| (mhz * 1_000_000.0) as u64)
+                .map_or(variant.count_hz(), |mhz| (mhz * 1_000_000.0) as u64)
                 .max(1),
         );
         exec.core.count_write_samples = true;

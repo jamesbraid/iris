@@ -13,6 +13,21 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## October 2026
 
+### Processor configurations
+
+- **Part, clock and secondary cache are chosen together** for the IP28, O2, Octane and
+  Fuel from one table of shipped configurations (`src/cpu_variants.rs`), each graded
+  against the origami datasheets. `[machine] cpu_mhz` and `cpu_l2_mib` pick a row;
+  a combination the machine did not ship with is refused, listing what it did.
+  The Octane's R10000 can be the 250 MHz revision 3.4 module, and its R14000 now runs
+  at the 600 MHz the IP30 capture reports instead of 195 MHz.
+- **CP0 Config reports the real secondary cache size** (SS = 512 KiB << SS). It said
+  1 MiB for every R10000-family part, so a 2 MiB R12000 or R14000 disagreed with its
+  own cache operations. The O2's default R10000 now runs at the catalogue's 195 MHz,
+  not 180.
+- The R16000 can be named but no machine accepts it yet. The R12000A, R14000A and
+  R16000A are not modelled; the table has a `Stepping` to hang them on.
+
 ### Two processors on the Octane
 
 - **`[machine] cpus = 2`** runs an Octane with two R10000s on two host threads.

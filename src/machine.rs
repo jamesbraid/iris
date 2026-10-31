@@ -20,9 +20,6 @@ use crate::physical::RamBank;
 use crate::dev::prom::Prom;
 use crate::dev::mc::MemoryController;
 
-/// Count on the IP28's 195 MHz R10000: half the pipeline clock, and what
-/// IRIX assumes there (see where the MC is created).
-const IP28_COUNT_HZ: u64 = 97_500_000;
 use crate::cpu::mips_tlb::MipsTlb;
 use crate::cpu::mips_exec::{MipsExecutor, MipsCpu, MipsCpuConfig, MipsCpuDebugAdapter};
 use crate::gdb_stub::CpuDebug;
@@ -337,7 +334,7 @@ impl Machine {
             crate::config::CpuModel::R4400 => <R4400Cache as MipsCache>::L2_SIZE > 0,
             crate::config::CpuModel::R5000 => <R5000Cache as MipsCache>::L2_SIZE > 0,
             crate::config::CpuModel::R10000 => <R10000ShadowCache as MipsCache>::L2_SIZE > 0,
-            crate::config::CpuModel::R12000 | crate::config::CpuModel::R14000 => unreachable!("an Indy or Indigo2 never has this part; MachineConfig::validate"),
+            crate::config::CpuModel::R12000 | crate::config::CpuModel::R14000 | crate::config::CpuModel::R16000 => unreachable!("an Indy or Indigo2 never has this part; MachineConfig::validate"),
         };
         if !model_has_l2 {
             eeprom_mc.lock().set_cachsz(0);
@@ -356,7 +353,8 @@ impl Machine {
         // UST run at a third of real time (Quake in slow motion) and the
         // cycle counter at a quarter.
         let ip28_count_hz: Option<u64> = if cfg.machine.profile.ip28() {
-            Some(clock_fixed_mhz.map_or(IP28_COUNT_HZ, |mhz| (mhz * 1_000_000.0) as u64))
+            let default_hz = cfg.cpu_variant().ok().flatten().map_or(97_500_000, |v| v.count_hz());
+            Some(clock_fixed_mhz.map_or(default_hz, |mhz| (mhz * 1_000_000.0) as u64))
         } else {
             None
         };
@@ -737,7 +735,7 @@ impl Machine {
             // tag and data arrays that exist only to answer CACHE ops and the
             // PROM's diagnostics. See mips_cache_shadow.rs.
             crate::config::CpuModel::R10000 => build_cpu!(R10000ShadowCache),
-            crate::config::CpuModel::R12000 | crate::config::CpuModel::R14000 => unreachable!("an Indy or Indigo2 never has this part; MachineConfig::validate"),
+            crate::config::CpuModel::R12000 | crate::config::CpuModel::R14000 | crate::config::CpuModel::R16000 => unreachable!("an Indy or Indigo2 never has this part; MachineConfig::validate"),
         };
 
         // Share count_hz_atomic from MipsCore with Rex3 so the refresh thread can display it.
