@@ -301,7 +301,8 @@ impl Odyssey {
     }
     /// Forward a store already counted by the processor interface. BUS_BUSY
     /// consumes nothing and returns no credit; the caller retains the mark
-    /// across its retry. Ordinary BusDevice writes are never counted here.
+    /// across its retry. A BusDevice write is counted when the processor
+    /// interface forwarding it marked it so ([`crate::dev::pi_gfx::with_mark`]).
     pub fn write_counted(&self, address: u64, width: u8, value: u64) -> u32 {
         if ![1, 2, 4, 8].contains(&width) {
             return crate::traits::BUS_ERR;
@@ -363,7 +364,7 @@ impl Odyssey {
         }
     }
     fn write(&self, address: u64, width: u8, value: u64) -> u32 {
-        self.write_impl(address, width, value, false)
+        self.write_impl(address, width, value, crate::dev::pi_gfx::take_mark())
     }
     fn write_impl(&self, address: u64, width: u8, value: u64, counted: bool) -> u32 {
         let a = (address & 0xffffff) as u32;
