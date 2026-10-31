@@ -1465,19 +1465,19 @@ fn stop_joins_the_threads_and_removes_the_timers() {
     assert_eq!(r.c.threads.lock().len(), 3, "two receive threads and the NVRAM writer");
     r.w32(reg::INT_ENABLE_SET, int::RT_OUTPUT_PULSE);
     r.w32(reg::INT_OUTPUT, IO_PERIODIC | 1000);
-    assert!(r.c.sh.armed.lock()[K_INT_OUT].is_some());
+    assert!(r.c.sh.timers.is_armed(K_INT_OUT));
     r.c.stop();
     r.c.stop();
     assert!(!r.c.is_running());
     assert!(r.c.threads.lock().is_empty());
-    assert!(r.c.sh.armed.lock().iter().all(|a| a.is_none()));
+    assert!(r.c.sh.timers.none_armed());
     // Typed input waits in the backend while stopped.
     r.wire[0].inp.lock().unwrap().extend(b"x");
     std::thread::sleep(Duration::from_millis(20));
     assert!(r.c.sh.st.lock().uart[0].core.rx_pending() == 0);
     r.c.start();
     assert!(within_two_seconds(|| r.c.sh.st.lock().uart[0].core.rx_pending() != 0));
-    assert!(r.c.sh.armed.lock()[K_INT_OUT].is_some(), "start arms the deadlines the chip holds");
+    assert!(r.c.sh.timers.is_armed(K_INT_OUT), "start arms the deadlines the chip holds");
     r.c.stop();
 }
 
