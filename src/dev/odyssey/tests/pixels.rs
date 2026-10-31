@@ -712,9 +712,9 @@ fn an_overlay_copy_up_onto_itself_reads_the_source_as_it_was() {
     assert_eq!(column, [3, 4, 0, 0, 0, 0], "rows 52 and 53 moved up; rows below keep their old bytes");
 }
 
-/// A copy running off the plane copies what is inside it, from either end:
-/// past the right edge of the source or the destination, and past the
-/// bottom.
+/// A copy running off the plane is clipped by its destination, and a source
+/// pixel outside the plane reads as zero (model policy, as the colour copy
+/// does), past the right edge or the bottom.
 #[test]
 fn an_overlay_copy_is_clipped_to_the_plane_at_both_ends() {
     let w = SGI_ODYSSEY_WIDTH;
@@ -725,19 +725,23 @@ fn an_overlay_copy_is_clipped_to_the_plane_at_both_ends() {
         s.overlay[(40 * w + w - 2 + x.min(1)) as usize] = 9;
         s.overlay[(60 * w + 10 + x) as usize] = x as u8 + 1;
     }
-    // Source past the right edge: only its last two pixels exist, and the
-    // next row's first bytes (made distinct) are not read as if they followed.
+    // Source past the right edge: only its last two pixels exist, the rest
+    // read as zero and overwrite what was there (made non-zero), and the next
+    // row's first bytes (made distinct) are not read as if they followed.
     for x in 0..6u32 {
         s.overlay[(41 * w + x) as usize] = 5;
+        s.overlay[(41 * w + 12 + x) as usize] = 6;
     }
     overlay_copy(&mut s, (w - 2, 40), (8, 1), (10, 41));
-    let row: Vec<u8> = (8..14).map(|x| overlay_at(&s, x, 41)).collect();
-    assert_eq!(row, [0, 0, 9, 9, 0, 0]);
+    let row: Vec<u8> = (8..18).map(|x| overlay_at(&s, x, 41)).collect();
+    assert_eq!(row, [0, 0, 9, 9, 0, 0, 0, 0, 0, 0]);
     // Destination past the right edge: only two pixels land, and the next
     // row's first bytes are not written.
     overlay_copy(&mut s, (10, 60), (8, 1), (w - 2, 62));
     assert_eq!((overlay_at(&s, w - 2, 62), overlay_at(&s, w - 1, 62), overlay_at(&s, 0, 63)), (1, 2, 0));
-    // Rows past the bottom, source or destination.
+    // Rows past the bottom, source or destination: source rows off the plane
+    // read as zero.
+    s.overlay[(102 * w + 20) as usize] = 3;
     s.overlay[((h - 2) * w + 5) as usize] = 7;
     s.overlay[((h - 1) * w + 5) as usize] = 8;
     overlay_copy(&mut s, (5, h - 2), (1, 6), (20, 100));
