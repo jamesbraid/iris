@@ -604,7 +604,7 @@ impl GlPlanes<'_> {
     }
 
     /// Experimental policy; the board's scale sign and clamps are unmeasured.
-    pub fn fog_factor(&self, window_z: f32, _eye_z: f32) -> f32 {
+    pub fn fog_factor(&self, window_z: f32) -> f32 {
         let w = &self.state.fog;
         let scale = if (w[2] & 0xffffff) != 0 {
             odyssey_f32(((w[2] & 0xffffff) << 5).wrapping_add(96u32 << 23)).abs()
@@ -2218,7 +2218,6 @@ impl Board {
         state.fog_color[1] = (self.gl_fog[0] & 0xfff) as f32 / 4096.0f32;
         state.fog_color[2] = ((self.gl_fog[1] >> 12) & 0xfff) as f32 / 4096.0f32;
         state.fog_color[3] = (self.gl_fog[1] & 0xfff) as f32 / 4096.0f32;
-        state.fog_index = ((self.gl_fog[0] >> 12) & 0xfff) as f32;
         self.gl_report_refusals(true);
         t.texture = None;
         let tables = TexelTables::of(self, texture.as_deref().filter(|_| textured));

@@ -219,7 +219,6 @@ impl SoftDraw<'_> {
         let st = self.st;
         let verts: [&VolumeVertex; 3] = [va, vb, vc];
         let mut flat = &provoking[GL_V_COLOR..GL_V_COLOR + 4];
-        let mut flat_index = provoking[GL_V_INDEX];
         let mut flat_frag = SoftFrag::default();
         let mut v: [SoftVertex; 3] = Default::default();
         let mut gradient = SoftTexPlane::default();
@@ -304,7 +303,6 @@ impl SoftDraw<'_> {
         }
         if !front && self.back_colors {
             flat = &provoking[GL_V_BACK_COLOR..GL_V_BACK_COLOR + 4];
-            flat_index = provoking[GL_V_BACK_INDEX];
             for i in 0..3 {
                 let back = &verts[i].attr[GL_V_BACK_COLOR..GL_V_BACK_COLOR + 4];
 
@@ -314,13 +312,11 @@ impl SoftDraw<'_> {
                     let c = back[k].max(0.0).min(1.0);
                     v[i].rgba[k] = c as f64;
                 }
-                v[i].index = verts[i].attr[GL_V_BACK_INDEX] as f64;
             }
         }
         for k in 0..4 {
             flat_frag.rgba[k] = flat[k] as f64;
         }
-        flat_frag.index = flat_index as f64;
         flat_frag.fixed = false;
         let offset: f64 = self.offset(&v);
         if area < 0 {
@@ -433,7 +429,6 @@ impl SoftDraw<'_> {
                 }
             }
             if st.fog {
-                frag.fog = (w0 * v[0].fog + w1 * v[1].fog + w2 * v[2].fog) / sum;
             }
             if st.clip_planes != 0 {
                 let mut d = [0.0f64; GL_CLIP_PLANES as usize];
@@ -449,9 +444,6 @@ impl SoftDraw<'_> {
                 for k in 0..4 {
                     frag.rgba[k] = (w0 * v[0].rgba[k] + w1 * v[1].rgba[k] + w2 * v[2].rgba[k]) / sum;
                 }
-                // An index is taken as a difference from the first vertex's,
-                // so a constant one stays exact before its integer part is taken.
-                frag.index = v[0].index + (w1 * (v[1].index - v[0].index) + w2 * (v[2].index - v[0].index)) / sum;
             }
             if self.texture_base.is_some() && !frag.fixed {
                 let mut value = [0.0f64; 4];
@@ -879,7 +871,7 @@ impl SoftDraw<'_> {
     /// Rasterize one clipped convex polygon once. Pixel-square clipping
     /// computes geometric coverage; centroid sampling is exact for affine
     /// datums and an approximation for perspective-correct varyings.
-    pub fn polygon_coverage(&self, v: &[SoftVertex], n: usize, flat_color: &[f32], flat_index: f64, offset: f64) {
+    pub fn polygon_coverage(&self, v: &[SoftVertex], n: usize, flat_color: &[f32], offset: f64) {
         let mut flat = SoftFrag::default();
         let sub = self.rules.subpixel_bits as i32;
         let scale = (1i32 << sub) as f64;
@@ -915,7 +907,6 @@ impl SoftDraw<'_> {
         for k in 0..4 {
             flat.rgba[k] = flat_color[k] as f64;
         }
-        flat.index = flat_index;
 
         let whole_box = SOFT_AA_WHOLE_BOX.with(|c| c.get());
         for py in py0..=py1 {
@@ -1054,11 +1045,6 @@ impl SoftDraw<'_> {
                             frag.rgba[k] = (w[0] * v[0].rgba[k] + w[1] * v[i].rgba[k] + w[2] * v[i + 1].rgba[k]) / sum;
                         }
                     }
-                    frag.fog = (w[0] * v[0].fog + w[1] * v[i].fog + w[2] * v[i + 1].fog) / sum;
-                    if self.st.shade_model != GL_FLAT {
-                        frag.index = v[0].index
-                            + (w[1] * (v[i].index - v[0].index) + w[2] * (v[i + 1].index - v[0].index)) / sum;
-                    }
                     if self.st.clip_planes != 0 {
                         let mut d = [0.0f64; GL_CLIP_PLANES as usize];
 
@@ -1115,11 +1101,9 @@ impl SoftDraw<'_> {
         let mut v: Vec<SoftVertex> = vec![SoftVertex::default(); n];
         let mut offset = 0.0f64;
         let mut flat_color = &provoking[GL_V_COLOR..GL_V_COLOR + 4];
-        let mut flat_index = provoking[GL_V_INDEX];
 
         if !front && self.back_colors {
             flat_color = &provoking[GL_V_BACK_COLOR..GL_V_BACK_COLOR + 4];
-            flat_index = provoking[GL_V_BACK_INDEX];
         }
         for i in 0..n {
             let Some(p) = self.project(&poly[i]) else {
@@ -1132,7 +1116,6 @@ impl SoftDraw<'_> {
                 for k in 0..4 {
                     v[i].rgba[k] = r2_min(r2_max(back[k], 0.0f32), 1.0f32) as f64;
                 }
-                v[i].index = poly[i].attr[GL_V_BACK_INDEX] as f64;
             }
         }
         if self.texture_base.is_some() {
@@ -1149,7 +1132,7 @@ impl SoftDraw<'_> {
         if self.st.polygon_offset & GL_OFFSET_FILL != 0 {
             offset = self.rules.offset_amount(&self.st, slope);
         }
-        self.polygon_coverage(&v, n, flat_color, flat_index as f64, offset);
+        self.polygon_coverage(&v, n, flat_color, offset);
     }
 
     /// Replay the original fan, including its validation and fragment ordering.
