@@ -405,3 +405,80 @@ fn scenes_of_one_family_are_told_apart() {
         }
     }
 }
+
+/// A clip vector scaled by a tiny positive w is the same point: the
+/// mapping keeps VPro's w > 0 rule rather than the shared core's cut at
+/// w <= 1e-6 (the board's rule for a small w is unknown).
+#[test]
+fn a_small_positive_w_maps_as_the_same_point() {
+    let st = scenes::Ctx::new().st;
+    let sub = (1i32 << gl_rules().subpixel_bits) as f32;
+    let at = |w: f64| st.clip_to_window(&[0.5 * w, -0.25 * w, 0.125 * w, w], sub);
+    let want = at(1.0).expect("a window position");
+
+    for w in [1e-6, 5e-7, 1e-7, 1e-12] {
+        assert_eq!(at(w), Some(want), "w {w}");
+    }
+    assert_eq!(at(0.0), None);
+    assert_eq!(at(-1e-7), None);
+}
+
+/// A triangle drawn at w = 1e-7 covers the pixels the same triangle does at
+/// w = 1.
+#[test]
+fn a_triangle_at_a_small_w_draws_as_at_one() {
+    let draw = |w: f32| {
+        let mut c = scenes::Ctx::new();
+        let g = [0.0, 1.0, 0.0, 1.0];
+        // The same point, its whole clip vector scaled by w.
+        let at = |x: f32, y: f32| {
+            let mut v = scenes::v(x, y, 0.25, g);
+
+            v.p = v.p.map(|c| c * w);
+            v
+        };
+
+        c.tri(at(10.0, 10.0), at(110.0, 20.0), at(40.0, 110.0));
+        Frame::of(&c.board)
+    };
+    let (one, small) = (draw(1.0), draw(1e-7));
+    let blank = scenes::Ctx::new().blank();
+
+    assert!(one.colour.iter().zip(&blank.colour).filter(|(a, b)| a != b).count() > 1000, "the triangle draws");
+    assert_eq!(small.colour, one.colour);
+}
+
+/// amesh's block 16 is the clip w row itself and its depth row the same row
+/// times 0.99999999 (odyssey.md, "Depth"). The depth row and divisor are now
+/// taken on eye and w rounded to single precision, which moves the ratio by
+/// about 6e-8: it must stay inside the 2^-20 slack, so a wall from the floor
+/// to a peak still draws, and the depth it writes is the far plane's give or
+/// take the steps that error is worth.
+#[test]
+fn the_depth_row_on_single_precision_eye_stays_in_the_slack() {
+    let block16 = [-0.0f32, -6.84, -2.31, 65.93];
+    let draw = |rows: bool| {
+        let mut c = scenes::Ctx::new();
+        let g = [0.0, 1.0, 0.0, 1.0];
+
+        if rows {
+            for k in 0..4 {
+                c.board.gl_block16[k] = block16[k].to_bits();
+            }
+            // The board's divisor is block 16 over its own w.
+            c.depth_row(block16.map(|b| b as f64 * 0.99999999 / block16[3] as f64));
+        } else {
+            c.depth_row([0.0, 0.0, 0.0, 1.0]);
+        }
+        c.clear([0.0; 4], 0, 0);
+        c.tri(scenes::v(10.0, 10.0, -0.9, g), scenes::v(110.0, 20.0, 0.9, g), scenes::v(40.0, 110.0, 0.3, g));
+        Frame::of(&c.board)
+    };
+    let (rows, far) = (draw(true), draw(false));
+
+    assert!(far.colour.iter().filter(|&&p| p != 0).count() > 1000, "the reference draws");
+    assert_eq!(rows.colour, far.colour, "every pixel the far plane draws is drawn");
+    let worst = rows.depth.iter().zip(&far.depth).map(|(a, b)| (a & 0xff_ffff).abs_diff(b & 0xff_ffff)).max().unwrap();
+    eprintln!("worst depth steps from the far plane: {worst}");
+    assert!(worst <= 2, "{worst} steps from the far plane");
+}

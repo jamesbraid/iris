@@ -2165,7 +2165,7 @@ fn gl_draw_cost(d: &GlDraw) -> u32 {
         if !(clip[3] > 0.0) {
             return None;
         }
-        let win = d.state.clip_to_window(&clip);
+        let win = d.state.clip_to_window(&clip, (1i32 << gl_rules().subpixel_bits) as f32)?;
         Some((win[0], win[1]))
     });
     primitive_cost(d.mode, points, d.point_size, d.line_width)

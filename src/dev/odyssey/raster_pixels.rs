@@ -21,7 +21,9 @@ impl SoftDraw<'_> {
             if !(cv.clip[3] > 0.0) {
                 return limit;
             }
-            let win = self.st.clip_to_window(&cv.clip);
+            let Some(win) = self.st.clip_to_window(&cv.clip, (1i32 << self.rules.subpixel_bits) as f32) else {
+                return limit;
+            };
             xy[2 * i] = win[0];
             xy[2 * i + 1] = win[1];
         }
