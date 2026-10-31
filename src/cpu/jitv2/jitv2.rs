@@ -2498,6 +2498,11 @@ impl Jitv2 {
         Some(slot)
     }
 
+    /// Whether the pool holds uncached-view pages (`enable_uncached_views`).
+    pub fn uncached_views_enabled(&self) -> bool {
+        self.pfn_to_slot.has_views()
+    }
+
     /// Let the pool hold uncached-view pages ([`UNCACHED_VIEW_PFN`]). Call
     /// before any page is claimed and before an executor captures the lookup
     /// pointers (`jitv2_bind_fast_lookup`); the map is reallocated.
