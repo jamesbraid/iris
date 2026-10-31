@@ -56,6 +56,42 @@ hashes are given where a change is easiest to understand by reading the commit.
   unavailable; is another iris using it? (serial_port_b)", each channel
   prints where it listens, and an Indigo2 is named as such.
 
+### R10000 family behaviour
+
+- **R12000, R14000 and R16000** are selectable: `[machine] cpu = "r12000"`, or
+  `--cpu r14000`. The Octane takes the R10000, R12000 and R14000, the O2 the R5000,
+  R10000 and R12000, and the IP28 the R10000; no machine takes the R16000 yet, and
+  `iris-bench` runs it. They share the R10000's programming model and differ in PRId
+  and secondary-cache size, and every family part reads the secondary-cache tag's
+  reserved bits as zero. Config reports the part's secondary-cache size. An Octane
+  R12000 or R14000 defaults to a clock that part shipped at (360 and 600 MHz).
+  `iris-bench` gained a cell for each. Every part's PRId low 16 bits come from the
+  revision IRIX prints, and the R12000's and R14000's whole PRId words from Linux
+  boot and Oops prints. The R14000's FIR rests on one capture with no retained
+  kernel source, the upper 16 bits of the R16000's PRId are inferred, the O2 R12000's raw
+  PRId and FIR are inferred, and the R16000's FIR is unknown (it reads 0x900, the
+  family's). See `src/cpu/mips_cache_shadow.rs` for what each rests on.
+- **44-bit virtual addresses.** EntryHi and the TLB keep VPN2 bits 43:13 on the
+  R10000 family (Octane, IP28), where they stopped at bit 39.
+- **EntryLo** reads back the full 28-bit PFN (bits 33:6) and the uncached attribute
+  (bits 63:62) on the R10000 family, where it kept 30 bits. The TLB maps the whole
+  PFN, physical bits 39:12.
+- **FrameMask** (CP0 register 21) exists on the R10000 family: bits 15:0 clear
+  EntryLo bits 33:18 as a TLB write passes them on. It was ignored before.
+- **Cache index operations** on the R10000's primary caches keep data, and the
+  secondary cache's data slot is the address shifted right by 3 (it was 4), one
+  slot per doubleword.
+- A partial `LWR` keeps bits 63:32 of the destination on the R10000.
+- **Refused uncached stores** (Octane, IP28, R10000 O2) complete instead of raising a Data Bus
+  Error, as the processor has no response to a write request to report one with.
+  The refusal is logged to stderr as "Unsupported uncached write ... (posted,
+  completes)", the first four and then at each power of two. Reads, instruction
+  fetches and the R4400 and R5000 are unchanged.
+- **O2 memory alias** is matched after the physical address mask. The O2 takes the
+  R12000 (revision 3.5, 2 MB secondary cache, 64-byte lines).
+- The persistent JIT code cache fingerprint gained the `LWR` choice, so the first
+  start after this builds the cache cold.
+
 ### Debugging on two CPUs is unsupported
 
 - Stepping one CPU of two cannot keep the guest healthy, whichever way the other
