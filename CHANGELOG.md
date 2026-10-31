@@ -27,6 +27,23 @@ hashes are given where a change is easiest to understand by reading the commit.
 - **Masked stores to RAM** (`SWL`, `SWR`, `SDL`, `SDR`) use a compare-exchange, so a
   DMA engine or another CPU storing beside them is not lost.
 
+### R10000 family behaviour
+
+- **R12000, R14000 and R16000 model ids**, and `CpuModel::R10K_FAMILY` for what the
+  family shares. No machine uses the new parts yet.
+- **44-bit virtual addresses.** EntryHi and the TLB keep VPN2 bits 43:13 on the
+  R10000 (Octane, IP28), where they stopped at bit 39.
+- **EntryLo bits 63:62** (the uncached attribute) read back on the R10000, and a
+  partial `LWR` keeps bits 63:32 of the destination.
+- **Refused uncached stores** (Octane, IP28) complete instead of raising a Data Bus
+  Error, as the processor has no response to a write request to report one with.
+  The refusal is logged to stderr as "Unsupported uncached write ... (posted,
+  completes)", a few lines per address and then sparsely. Reads, instruction
+  fetches and the R4400 and R5000 are unchanged.
+- **O2 memory alias** is matched after the physical address mask.
+- The persistent JIT code cache fingerprint gained the `LWR` choice, so the first
+  start after this builds the cache cold.
+
 ### Debugging on two CPUs is unsupported
 
 - Stepping one CPU of two cannot keep the guest healthy, whichever way the other

@@ -370,6 +370,12 @@ consumer thread never takes `rec`.
   monomorphised over it, so all three CPUs are in every binary with no
   per-model branch on the hot path. `Machine::new` picks one from `[machine]
   cpu`.
+- A CPU part is a `CpuModel` alias, and `mips_cache_v2::model` ids tell apart
+  parts that share a PRId. `CpuModel::R10K_FAMILY` is what the R10000, R12000,
+  R14000 and R16000 share: 44-bit virtual and 40-bit physical addresses, the
+  EntryLo uncached attribute, a partial `LWR` that keeps bits 63:32, and
+  uncached stores that complete when the bus refuses them. `R10K_CACHE_OPS` is
+  only the meaning of cache ops 5, 6 and 7.
 - With `opcodefusion` (implied by `lightning`), the interpreter executes
   common pairs (branch + NOP, LUI + ORI/ADDIU, address + load/store) as one
   dispatch.
