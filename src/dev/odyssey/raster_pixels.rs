@@ -96,11 +96,11 @@ pub struct SoftClear<'a> {
 impl SoftClear<'_> {
     /// The clear's rows, stored to px. A row a single clip rectangle of the
     /// op holds whole is stored through the row of planes px lends for it
-    /// (Planes::row()), where it lends one and the clear stores only what a
+    /// (GlPlanes::row()), where it lends one and the clear stores only what a
     /// lent row takes: RGBA colour, depth and stencil.
-    pub fn rows(&self, px: &dyn Planes) {
+    pub fn rows(&self, px: &GlPlanes) {
         let op = self.op;
-        let lend = !self.colour || (op.index_bits == 0 && self.rgba);
+        let lend = !self.colour || self.rgba;
         // A lent row that reads nothing back stores the same words at every
         // pixel: the loop for the planes the clear names.
         let stores: Option<fn(&SoftClear, &GlPlaneRow, i32)> = match (self.rgba_read, self.depth, self.stencil, self.colour) {
@@ -133,13 +133,16 @@ impl SoftClear<'_> {
                 }
             }
             self.row(px, y, whole_row);
+            if self.colour && !self.rgba {
+                self.index_row(px, y, whole_row);
+            }
         }
     }
 
-    /// Row y of the clear, stored to px; with whole_row unset each pixel
-    /// tests the op's clip list.
+    /// Row y of the clear's depth, stencil and RGBA colour, stored to px;
+    /// with whole_row unset each pixel tests the op's clip list.
     #[inline(always)]
-    fn row<P: Planes + ?Sized>(&self, px: &P, y: i32, whole_row: bool) {
+    fn row<P: Planes>(&self, px: &P, y: i32, whole_row: bool) {
         let rules = self.rules;
         let op = self.op;
         // Only a read fills it, and only a read's targets are read back.
@@ -165,26 +168,30 @@ impl SoftClear<'_> {
                 px.store_stencil(x, y, (px.load_stencil(x, y) & !smask & self.smax) | (op.clear_stencil & smask));
             }
             let mut i = 0u32;
-            while self.colour && i < self.ntargets {
-                let target = op.targets[i as usize];
+            while self.colour && self.rgba && i < self.ntargets {
+                let mut out = self.clear;
 
-                if op.index_bits != 0 {
-                    px.store_index(target, x, y, op.clear_index, op.index_mask);
-                } else if self.rgba {
-                    let mut out = self.clear;
-
-                    for k in 0..4 {
-                        if self.rgba_mask & (1u32 << k) == 0 {
-                            out.component[k] = dest[i as usize].component[k];
-                        }
+                for k in 0..4 {
+                    if self.rgba_mask & (1u32 << k) == 0 {
+                        out.component[k] = dest[i as usize].component[k];
                     }
-                    px.store_rgba(target, x, y, &out);
-                } else if self.mask == rules.colour_bits() {
-                    px.store_colour(target, x, y, self.rgb);
-                } else {
-                    px.store_colour(target, x, y, (self.rgb & self.mask) | (px.load_colour(target, x, y) & !self.mask));
                 }
+                px.store_rgba(op.targets[i as usize], x, y, &out);
                 i += 1;
+            }
+        }
+    }
+
+    /// Row y of a colour-index clear's colour, the packed clear colour under
+    /// a full mask (RasterRules::raster()).
+    fn index_row(&self, px: &GlPlanes, y: i32, whole_row: bool) {
+        let op = self.op;
+
+        for x in op.x0..=op.x1 {
+            if whole_row || op.clip.contains(x, y) {
+                for &target in &op.targets[..self.ntargets as usize] {
+                    px.store_colour(target, x, y, self.rgb);
+                }
             }
         }
     }
@@ -223,7 +230,7 @@ impl RasterRules {
     /// mask to the stencil buffer, where the planes have one, at every pixel of
     /// its rectangle its clip list keeps. The other kinds are not executed
     /// here.
-    pub fn raster(&self, t: &RasterTarget, planes: &mut dyn PlaneStore, op: &RasterOp) {
+    pub fn raster(&self, t: &RasterTarget, pixels: &mut GlPixels, op: &RasterOp) {
         let mut colour = op.clear_buffers & GL_COLOR_BUFFER_BIT != 0;
         let depth = op.clear_buffers & GL_DEPTH_BUFFER_BIT != 0;
         let mut stencil = op.clear_buffers & GL_STENCIL_BUFFER_BIT != 0;
@@ -231,7 +238,7 @@ impl RasterRules {
         let mut smax = 0u32;
         let mut mask = self.colour_bits();
         let rgba_mask = self.rgba_mask(op.clear_colour_mask);
-        let rgba = op.index_bits == 0 && t.store_rgba;
+        let rgba = !t.index;
         let rgba_read = colour
             && op.ntargets != 0
             && rgba_mask != 0
@@ -252,22 +259,16 @@ impl RasterRules {
             return;
         }
         if stencil {
-            match self.stencil_max(t) {
+            match self.stencil_max() {
                 Some(max) => smax = max,
                 None => stencil = false,
             }
         }
-        if colour && op.index_bits != 0 && !t.soft_check_index(op.index_bits) {
-            colour = false;
-        }
-        if op.index_bits == 0 && !self.rgba_capable(t, rgba_read) {
-            return;
-        }
-        if colour && op.index_bits == 0 {
+        if colour {
             let c = [op.clear_rgba[0] as f64, op.clear_rgba[1] as f64, op.clear_rgba[2] as f64];
 
             mask = self.colour_mask(op.clear_colour_mask);
-            if !rgba && mask != self.colour_bits() && mask != 0 && !t.load_colour {
+            if !rgba && mask != self.colour_bits() && mask != 0 {
                 crate::dlog!(LogModule::Odyssey, "sgi-gl: a partial colour mask needs planes that can be read back; cleared without it");
                 mask = self.colour_bits();
             }
@@ -294,7 +295,7 @@ impl RasterRules {
             clear,
             rgba_reported: Default::default(),
         };
-        rows.rows(&*planes.planes());
+        rows.rows(&pixels.planes());
     }
 }
 
@@ -312,48 +313,6 @@ pub fn x_logic_op(gx: u32, source: u32, destination: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::dev::odyssey::raster_bench::*;
-
-    /// The planes of inner, but lending no rows: every pixel through the
-    /// planes' own methods.
-    struct Unlent<'a>(Box<dyn Planes + 'a>);
-
-    impl Planes for Unlent<'_> {
-        fn store_colour(&self, target: ColourTarget, x: i32, y: i32, colour: u32) {
-            self.0.store_colour(target, x, y, colour)
-        }
-        fn load_colour(&self, target: ColourTarget, x: i32, y: i32) -> u32 {
-            self.0.load_colour(target, x, y)
-        }
-        fn store_index(&self, target: ColourTarget, x: i32, y: i32, index: u32, mask: u32) {
-            self.0.store_index(target, x, y, index, mask)
-        }
-        fn store_rgba(&self, target: ColourTarget, x: i32, y: i32, colour: &RasterColour) {
-            self.0.store_rgba(target, x, y, colour)
-        }
-        fn load_rgba(&self, target: ColourTarget, x: i32, y: i32) -> Option<RasterColour> {
-            self.0.load_rgba(target, x, y)
-        }
-        fn load_depth(&self, x: i32, y: i32) -> u32 {
-            self.0.load_depth(x, y)
-        }
-        fn store_depth(&self, x: i32, y: i32, depth: u32) {
-            self.0.store_depth(x, y, depth)
-        }
-        fn load_stencil(&self, x: i32, y: i32) -> u32 {
-            self.0.load_stencil(x, y)
-        }
-        fn store_stencil(&self, x: i32, y: i32, stencil: u32) {
-            self.0.store_stencil(x, y, stencil)
-        }
-    }
-
-    struct UnlentStore<'a>(&'a mut dyn PlaneStore);
-
-    impl PlaneStore for UnlentStore<'_> {
-        fn planes(&mut self) -> Box<dyn Planes + '_> {
-            Box::new(Unlent(self.0.planes()))
-        }
-    }
 
     /// The square of plane pixels the cases clear in.
     const SIDE: i32 = 96;
@@ -440,11 +399,8 @@ mod tests {
         }
         let t = b.board.gl_target();
         let mut parts = b.board.gl_parts(None).0;
-        if lend {
-            b.rules.raster(&t, &mut parts, &op);
-        } else {
-            b.rules.raster(&t, &mut UnlentStore(&mut parts), &op);
-        }
+        parts.lend_rows = lend;
+        b.rules.raster(&t, &mut parts, &op);
         drop(parts);
         snapshot(&b)
     }

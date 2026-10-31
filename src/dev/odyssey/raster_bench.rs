@@ -202,8 +202,6 @@ pub struct Bench {
     /// The pixels the scene covers, by area, for the rate.
     pub pixels: f64,
     pub clears: usize,
-    /// Fog by the draw state's mode rather than the board's own curve.
-    pub builtin_fog: bool,
     /// Polygons antialiased (the draw's own flag, not the state's).
     pub polygon_smooth: bool,
 }
@@ -291,7 +289,6 @@ impl Bench {
             mode: GL_TRIANGLES,
             pixels: 0.0,
             clears: 0,
-            builtin_fog: false,
             polygon_smooth: false,
         }
     }
@@ -536,9 +533,6 @@ impl Bench {
         let stipple = [0u32; 32];
 
         t.texture = self.tex.as_ref().map(|tex| tex.image());
-        if self.builtin_fog {
-            t.fog_factor = false;
-        }
         for _ in 0..self.clears {
             let op = Bench::clear_op(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -550,6 +544,31 @@ impl Bench {
 
             d.polygon_smooth = self.polygon_smooth;
             self.rules.draw(&t, &mut self.board.gl_parts(None).0, &HashTexels, &mut d);
+        }
+    }
+
+    /// Draw d on the board under the bench's rules, as Board::gl_draw()
+    /// would, reading texels from texels.
+    pub fn draw(&mut self, t: &RasterTarget, texels: &dyn Texels, d: &mut GlDraw) -> GlDrawResult {
+        self.rules.draw(t, &mut self.board.gl_parts(None).0, texels, d)
+    }
+
+    /// The depth plane's words in the square from (0, 0) to side - 1, row
+    /// by row.
+    pub fn depth(&self, side: i32) -> Vec<u32> {
+        self.snapshot(side).1
+    }
+
+    /// Set the depth plane's words in the square from (0, 0) to side - 1
+    /// from words, row by row.
+    pub fn set_depth(&mut self, side: i32, words: &[u32]) {
+        let b = &mut self.board;
+        let depth = b.depth_mem.plane(b.depth_plane).expect("the depth plane");
+
+        for y in 0..side {
+            for x in 0..side {
+                b.depth_mem.plane_store(&depth, x, y, words[(y * side + x) as usize]);
+            }
         }
     }
 

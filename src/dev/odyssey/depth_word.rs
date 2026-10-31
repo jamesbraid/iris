@@ -259,34 +259,6 @@ mod tests {
         assert_eq!(library_offset_steps(0.0, -1.0e9, 70.0, 1.0, 1.0, 2.0), OFFSET_STEPS_MIN);
     }
 
-    /// A depth plane of WIDTH by WIDTH words; colour goes nowhere.
-    struct Fb<'a> {
-        depth: RowsMut<'a, u32>,
-    }
-
-    struct FbView<'a> {
-        depth: Rows<'a, u32>,
-    }
-
-    impl PlaneStore for Fb<'_> {
-        fn planes(&mut self) -> Box<dyn Planes + '_> {
-            Box::new(FbView { depth: self.depth.view() })
-        }
-    }
-
-    impl Planes for FbView<'_> {
-        fn store_colour(&self, _t: ColourTarget, _x: i32, _y: i32, _c: u32) {}
-        fn load_colour(&self, _t: ColourTarget, _x: i32, _y: i32) -> u32 {
-            0
-        }
-        fn store_depth(&self, x: i32, y: i32, z: u32) {
-            self.depth.get(y as usize, x as usize, 1).unwrap()[0].set(z);
-        }
-        fn load_depth(&self, x: i32, y: i32) -> u32 {
-            self.depth.get(y as usize, x as usize, 1).unwrap()[0].get()
-        }
-    }
-
     /// Draw one triangle covering the plane at window depth `zw` with the
     /// board's depth rules, depth test `func`, and `steps` of polygon offset
     /// through the register's path (the shared context's bias).
@@ -307,11 +279,6 @@ mod tests {
             ..Default::default()
         };
         assert!(rules.rules_supported());
-        let target = RasterTarget {
-            store_colour: true,
-            load_colour: true,
-            ..Default::default()
-        };
         let mut id = [0.0f32; 16];
         for k in 0..4 {
             id[k * 5] = 1.0;
@@ -349,9 +316,13 @@ mod tests {
         }
         let stipple = [0u32; 32];
         let mut d = GlDraw::new(GL_TRIANGLES, 3, &verts, &st, &stipple);
-        let mut fb = Fb { depth: RowsMut::new(depth, WIDTH) };
+        let mut b = raster_bench::Bench::empty();
 
-        rules.draw(&target, &mut fb, &NoTexels, &mut d);
+        b.rules = rules;
+        b.set_depth(WIDTH as i32, depth);
+        let t = b.board.gl_target();
+        b.draw(&t, &NoTexels, &mut d);
+        depth.copy_from_slice(&b.depth(WIDTH as i32));
     }
 
     fn plane(initial: u32) -> Vec<u32> {

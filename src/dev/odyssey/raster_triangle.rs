@@ -522,7 +522,7 @@ impl SoftDraw<'_> {
                 continue;
             }
             if let Some((row_loop, sp)) = &span {
-                self.px.fill_quads(self, *row_loop, sp, quad_y, &rows, &quad_general);
+                fill_quads_dispatch(self.px, self, *row_loop, sp, quad_y, &rows, &quad_general);
                 continue;
             }
             let (x_lo, x_hi) = match rows {
