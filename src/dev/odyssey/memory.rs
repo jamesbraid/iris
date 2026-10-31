@@ -3,13 +3,11 @@
 //! memory; pixel (x, y) is at byte `base + y * stride + x * bpp`. Planes
 //! may overlap. Out-of-plane loads read zero and out-of-plane stores are
 //! dropped.
-//!
-//! Ported from include/hw/display/sgi/board-memory.h in jamesbraid/qemu-sgi-origami.
 use super::*;
 
 use std::cell::Cell;
 
-pub const SGI_PLANES_MAX: usize = 32;
+pub const PLANES_MAX: usize = 32;
 
 /// How a plane's pixels are stored.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -65,13 +63,13 @@ pub struct BoardMemory {
     pub size: u64,
     pub bytes: Vec<u8>,
     /// A fixed table, so a plane index stays valid for the memory's life.
-    pub planes: [Plane; SGI_PLANES_MAX],
+    pub planes: [Plane; PLANES_MAX],
     pub nplanes: u32,
 }
 
 /// Up to 16 inclusive rectangles, in plane coordinates. With n 0 the list
 /// is no clip, unless empty is set: then it keeps no pixel.
-pub const SGI_CLIP_MAX: usize = 16;
+pub const CLIP_MAX: usize = 16;
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct ClipRect {
@@ -85,25 +83,25 @@ pub struct ClipRect {
 pub struct ClipList {
     pub n: u32,
     pub empty: u32, // 0 or 1; with n 0, 1 keeps nothing
-    pub r: [ClipRect; SGI_CLIP_MAX],
+    pub r: [ClipRect; CLIP_MAX],
 }
 
 // The sixteen logic ops, in OpenGL's order (GL_CLEAR + op).
-pub const SGI_LOGIC_CLEAR: u32 = 0;
-pub const SGI_LOGIC_AND: u32 = 1;
-pub const SGI_LOGIC_AND_REVERSE: u32 = 2;
-pub const SGI_LOGIC_COPY: u32 = 3;
-pub const SGI_LOGIC_AND_INVERTED: u32 = 4;
-pub const SGI_LOGIC_NOOP: u32 = 5;
-pub const SGI_LOGIC_XOR: u32 = 6;
-pub const SGI_LOGIC_OR: u32 = 7;
-pub const SGI_LOGIC_NOR: u32 = 8;
-pub const SGI_LOGIC_EQUIV: u32 = 9;
-pub const SGI_LOGIC_INVERT: u32 = 10;
-pub const SGI_LOGIC_OR_REVERSE: u32 = 11;
-pub const SGI_LOGIC_COPY_INVERTED: u32 = 12;
-pub const SGI_LOGIC_OR_INVERTED: u32 = 13;
-pub const SGI_LOGIC_NAND: u32 = 14;
+pub const LOGIC_CLEAR: u32 = 0;
+pub const LOGIC_AND: u32 = 1;
+pub const LOGIC_AND_REVERSE: u32 = 2;
+pub const LOGIC_COPY: u32 = 3;
+pub const LOGIC_AND_INVERTED: u32 = 4;
+pub const LOGIC_NOOP: u32 = 5;
+pub const LOGIC_XOR: u32 = 6;
+pub const LOGIC_OR: u32 = 7;
+pub const LOGIC_NOR: u32 = 8;
+pub const LOGIC_EQUIV: u32 = 9;
+pub const LOGIC_INVERT: u32 = 10;
+pub const LOGIC_OR_REVERSE: u32 = 11;
+pub const LOGIC_COPY_INVERTED: u32 = 12;
+pub const LOGIC_OR_INVERTED: u32 = 13;
+pub const LOGIC_NAND: u32 = 14;
 
 impl BoardMemory {
     /// A zeroed memory of size bytes, at most 4 GiB - 1.
@@ -124,7 +122,7 @@ impl BoardMemory {
     /// Declare a plane. Its id is assigned here and returned; the rest of
     /// *plane is copied. Fails when the plane does not fit the memory, its
     /// rows do not fit its stride and length, or the table already holds
-    /// SGI_PLANES_MAX planes.
+    /// PLANES_MAX planes.
     pub fn add_plane(&mut self, plane: &Plane) -> Result<u32, String> {
         let bpp = plane_bytes_per_pixel(plane.format);
         let row = plane.width as u64 * bpp as u64;
@@ -149,8 +147,8 @@ impl BoardMemory {
             ));
         }
 
-        if self.nplanes as usize == SGI_PLANES_MAX {
-            return Err(format!("board memory already has {} planes", SGI_PLANES_MAX));
+        if self.nplanes as usize == PLANES_MAX {
+            return Err(format!("board memory already has {} planes", PLANES_MAX));
         }
         let id = self.nplanes;
         self.nplanes += 1;
@@ -178,7 +176,7 @@ impl ClipList {
         if self.n == 0 {
             return self.empty == 0;
         }
-        for i in 0..self.n.min(SGI_CLIP_MAX as u32) {
+        for i in 0..self.n.min(CLIP_MAX as u32) {
             let r = &self.r[i as usize];
 
             if x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1 {
@@ -192,22 +190,22 @@ pub fn logic_op(op: u8, src: u32, dst: u32) -> u32 {
     let s = src;
     let d = dst;
     match (op & 0xf) as u32 {
-        SGI_LOGIC_CLEAR => 0,
-        SGI_LOGIC_AND => s & d,
-        SGI_LOGIC_AND_REVERSE => s & !d,
-        SGI_LOGIC_COPY => s,
-        SGI_LOGIC_AND_INVERTED => !s & d,
-        SGI_LOGIC_NOOP => d,
-        SGI_LOGIC_XOR => s ^ d,
-        SGI_LOGIC_OR => s | d,
-        SGI_LOGIC_NOR => !(s | d),
-        SGI_LOGIC_EQUIV => !(s ^ d),
-        SGI_LOGIC_INVERT => !d,
-        SGI_LOGIC_OR_REVERSE => s | !d,
-        SGI_LOGIC_COPY_INVERTED => !s,
-        SGI_LOGIC_OR_INVERTED => !s | d,
-        SGI_LOGIC_NAND => !(s & d),
-        _ => !0u32, // SGI_LOGIC_SET
+        LOGIC_CLEAR => 0,
+        LOGIC_AND => s & d,
+        LOGIC_AND_REVERSE => s & !d,
+        LOGIC_COPY => s,
+        LOGIC_AND_INVERTED => !s & d,
+        LOGIC_NOOP => d,
+        LOGIC_XOR => s ^ d,
+        LOGIC_OR => s | d,
+        LOGIC_NOR => !(s | d),
+        LOGIC_EQUIV => !(s ^ d),
+        LOGIC_INVERT => !d,
+        LOGIC_OR_REVERSE => s | !d,
+        LOGIC_COPY_INVERTED => !s,
+        LOGIC_OR_INVERTED => !s | d,
+        LOGIC_NAND => !(s & d),
+        _ => !0u32, // LOGIC_SET
     }
 }
 

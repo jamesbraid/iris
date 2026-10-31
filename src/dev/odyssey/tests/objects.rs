@@ -7,20 +7,20 @@ use super::*;
 /// once, each its own board-memory object, and samples the first ones it
 /// loaded, the console font and the menu pictures, every frame. A table of
 /// 1024 objects forgot the oldest and those draws went untextured, white.
-/// The table holds SGI_ODYSSEY_OBJECTS, and only the one past that forgets.
+/// The table holds ODSY_OBJECTS, and only the one past that forgets.
 #[test]
 fn the_object_table_keeps_every_level_a_game_loads() {
     let (mut s, _, _) = board_with_ram();
     let base = |i: u32| 0x16b000 + i * 0x100;
 
-    for i in 0..SGI_ODYSSEY_OBJECTS {
+    for i in 0..ODSY_OBJECTS {
         let o = s.object_select(base(i), 16);
         assert!(s.object_rows(o, 1), "object {i}");
     }
     assert!(s.object_find(base(0)).is_some(), "the first object loaded was forgotten");
-    s.object_select(base(SGI_ODYSSEY_OBJECTS), 16);
+    s.object_select(base(ODSY_OBJECTS), 16);
     assert!(s.object_find(base(0)).is_none(), "a full table forgets the oldest");
-    assert!(s.object_find(base(1)).is_some() && s.object_find(base(SGI_ODYSSEY_OBJECTS)).is_some());
+    assert!(s.object_find(base(1)).is_some() && s.object_find(base(ODSY_OBJECTS)).is_some());
 }
 
 /// The texture state of a plain 2D RGBA level, as chocolate-doom's SDL
@@ -140,7 +140,7 @@ fn a_texture_move_does_not_grow_its_object() {
 #[test]
 fn packing_a_full_table_keeps_each_object_in_store_order() {
     let (mut s, _, _) = board_with_ram();
-    let n = SGI_ODYSSEY_OBJECTS as usize;
+    let n = ODSY_OBJECTS as usize;
 
     for i in 0..n {
         let o = s.object_select(0x10_0000 + i as u32 * 0x100, 16);

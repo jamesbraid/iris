@@ -1,7 +1,5 @@
 //! The command-FIFO interpreter: word classification, operand gathering and
 //! the one big dispatch of a completed command.
-//!
-//! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 
@@ -58,7 +56,7 @@ impl Board {
             self.tex_colour_table_valid[plane] |= 1u32 << block;
             return;
         }
-        if (ODSY_REG_TEX_LEVEL..ODSY_REG_TEX_LEVEL + SGI_ODYSSEY_TEX_LEVELS).contains(&tag) {
+        if (ODSY_REG_TEX_LEVEL..ODSY_REG_TEX_LEVEL + ODSY_TEX_LEVELS).contains(&tag) {
             let at = (tag - ODSY_REG_TEX_LEVEL) as usize * 3;
             self.tex_levels[at..at + 3].copy_from_slice(&self.cmd_operand[..3]);
             return;
@@ -98,7 +96,7 @@ impl Board {
             self.gl_matrix_slot = match tag & 0xff {
                 ODSY_GL_MATRIX_SELECT_COMBINED => ODSY_GL_SLOT_COMBINED,
                 ODSY_GL_MATRIX_SELECT_TEXTURE => ODSY_GL_SLOT_TEXTURE,
-                ODSY_GL_MATRIX_SELECT_MODELVIEW => SGI_GL_MODELVIEW,
+                ODSY_GL_MATRIX_SELECT_MODELVIEW => GL_MODELVIEW,
                 ODSY_GL_MATRIX_SELECT_BLOCK16 => ODSY_GL_SLOT_BLOCK16,
                 ODSY_GL_MATRIX_SELECT_NORMAL => ODSY_GL_SLOT_NORMAL_MATRIX,
                 // Any other block: no home.
@@ -111,12 +109,12 @@ impl Board {
                 self.gl_color = pack_pixel(self.cmd_operand[0], self.cmd_operand[1], self.cmd_operand[2]);
                 self.gl_color_is_index = false;
                 if !self.gl_index_mode() {
-                    let mut colour = [0u32; SGI_GL_GET_WORDS];
+                    let mut colour = [0u32; GL_GET_WORDS];
                     let mut n = 0u32;
                     let opd = self.cmd_operand;
 
-                    self.gl_feed(SGI_GL_OP_COLOR3UB as u16, &opd[..3]);
-                    let queried = self.gl().get(SGI_GL_CURRENT_COLOR, &mut colour, &mut n);
+                    self.gl_feed(GL_OP_COLOR3UB as u16, &opd[..3]);
+                    let queried = self.gl().get(GL_CURRENT_COLOR, &mut colour, &mut n);
                     assert!(queried && n as usize == self.gl_colour.len());
                     let l = self.gl_colour.len();
                     self.gl_colour.copy_from_slice(&colour[..l]);
@@ -197,12 +195,12 @@ impl Board {
                     if !self.gl_in_prim {
                         let mode = self.gl_primitive;
 
-                        self.gl_feed(SGI_GL_OP_BEGIN as u16, &[mode]);
+                        self.gl_feed(GL_OP_BEGIN as u16, &[mode]);
                         self.gl_in_prim = true;
                     }
                     self.gl_vertex_colour(&xyz);
                     self.texture_vertex();
-                    self.gl_feed(SGI_GL_OP_VERTEX2I as u16, &opd[..2]);
+                    self.gl_feed(GL_OP_VERTEX2I as u16, &opd[..2]);
                 } else {
                     // The X path uses window-relative integer coordinates.
                     let x = self.cmd_operand[0].wrapping_add(self.win_origin[0] as u32);
@@ -242,9 +240,9 @@ impl Board {
                 self.gl_colour.copy_from_slice(&rgba);
                 self.gl_colour_overridden = false;
                 if n == 4 {
-                    self.gl_feed(SGI_GL_OP_COLOR4F as u16, &rgba[..4]);
+                    self.gl_feed(GL_OP_COLOR4F as u16, &rgba[..4]);
                 } else {
-                    self.gl_feed(SGI_GL_OP_COLOR3F as u16, &rgba[..3]);
+                    self.gl_feed(GL_OP_COLOR3F as u16, &rgba[..3]);
                 }
                 if !self.gl_index_mode() {
                     self.gl_color = pack_pixel(
@@ -318,7 +316,7 @@ impl Board {
                 {
                     let plane = (self.gl_light_vec_sel - ODSY_GL_CLIP_PLANE_BASE) / ODSY_GL_CLIP_PLANE_STRIDE;
 
-                    if plane < SGI_GL_CLIP_PLANES {
+                    if plane < GL_CLIP_PLANES {
                         let at = plane as usize * 4;
                         self.gl_clip_eye[at..at + 4].copy_from_slice(&self.cmd_operand[..4]);
                         self.gl_apply_clip_plane(plane);
@@ -333,7 +331,7 @@ impl Board {
                 }
             }
             ODSY_GL_LIGHT_COLOUR_LOAD => {
-                if self.gl_light_colour_sel < SGI_ODYSSEY_GL_LIGHT_COLOURS {
+                if self.gl_light_colour_sel < ODSY_GL_LIGHT_COLOURS {
                     let at = self.gl_light_colour_sel as usize * 4;
                     self.gl_light_colour[at..at + 4].copy_from_slice(&self.cmd_operand[..4]);
                 } else if !self.gl_block_logged {
@@ -357,7 +355,7 @@ impl Board {
                 // Index 16 i is light i. Other context setup blocks at 0x80
                 // to 0x1e0 remain unknown and are reported once, not per index.
                 if self.gl_light_vec_sel.is_multiple_of(ODSY_GL_LIGHT_VEC_FLOATS)
-                    && self.gl_light_vec_sel / ODSY_GL_LIGHT_VEC_FLOATS < SGI_ODYSSEY_GL_LIGHTS
+                    && self.gl_light_vec_sel / ODSY_GL_LIGHT_VEC_FLOATS < ODSY_GL_LIGHTS
                 {
                     let at = self.gl_light_vec_sel as usize;
                     let n = ODSY_GL_LIGHT_VEC_FLOATS as usize;
@@ -396,7 +394,7 @@ impl Board {
                 if !self.gl_in_prim && self.gl_restart_absorb == 0 {
                     let mode = self.gl_primitive;
 
-                    self.gl_feed(SGI_GL_OP_BEGIN as u16, &[mode]);
+                    self.gl_feed(GL_OP_BEGIN as u16, &[mode]);
                     self.gl_in_prim = true;
                 }
                 if self.gl_begin_open && !self.gl_integer_prim && self.gl_primitive <= 8 {
@@ -425,11 +423,11 @@ impl Board {
                     return;
                 }
                 let op = if components == 4 {
-                    SGI_GL_OP_VERTEX4F
+                    GL_OP_VERTEX4F
                 } else if components == 3 {
-                    SGI_GL_OP_VERTEX3F
+                    GL_OP_VERTEX3F
                 } else {
-                    SGI_GL_OP_VERTEX2F
+                    GL_OP_VERTEX2F
                 };
                 self.gl_feed(op as u16, &xyz[..components as usize]);
             }
@@ -454,24 +452,24 @@ impl Board {
                 self.gl_write_mask = self.cmd_operand[0];
                 self.gl_apply_depth();
                 // The library forces it to 0 for a drawable with no stencil.
-                self.gl_feed(SGI_GL_OP_STENCIL_MASK as u16, &[stencil_mask]);
+                self.gl_feed(GL_OP_STENCIL_MASK as u16, &[stencil_mask]);
             }
             ODSY_REG_ALPHA_FUNC => {
                 let word = self.cmd_operand[0];
                 let mut args = [0u32; 2];
 
-                args[0] = SGI_GL_NEVER_ENUM + ((word >> ODSY_ALPHA_FUNC_SHIFT) & ODSY_ALPHA_FUNC_MASK);
+                args[0] = GL_NEVER_ENUM + ((word >> ODSY_ALPHA_FUNC_SHIFT) & ODSY_ALPHA_FUNC_MASK);
                 args[1] = f32_bits((word & ODSY_ALPHA_REF_MASK) as f32 / ODSY_ALPHA_REF_SCALE);
-                self.gl_feed(SGI_GL_OP_ALPHA_FUNC as u16, &args);
+                self.gl_feed(GL_OP_ALPHA_FUNC as u16, &args);
             }
             ODSY_REG_STENCIL_FUNC => {
                 let word = self.cmd_operand[0];
                 let mut args = [0u32; 3];
 
-                args[0] = SGI_GL_NEVER_ENUM + ((word >> ODSY_STENCIL_FUNC_SHIFT) & ODSY_STENCIL_FUNC_MASK);
+                args[0] = GL_NEVER_ENUM + ((word >> ODSY_STENCIL_FUNC_SHIFT) & ODSY_STENCIL_FUNC_MASK);
                 args[1] = word & ODSY_STENCIL_REF_MASK;
                 args[2] = (word >> ODSY_STENCIL_VALUE_MASK_SHIFT) & ODSY_STENCIL_VALUE_MASK_MASK;
-                self.gl_feed(SGI_GL_OP_STENCIL_FUNC as u16, &args);
+                self.gl_feed(GL_OP_STENCIL_FUNC as u16, &args);
 
                 let fail = stencil_op((word >> ODSY_STENCIL_OP_FAIL_SHIFT) & ODSY_STENCIL_OP_MASK);
                 let zfail = stencil_op((word >> ODSY_STENCIL_OP_ZFAIL_SHIFT) & ODSY_STENCIL_OP_MASK);
@@ -482,7 +480,7 @@ impl Board {
                     args[0] = fail;
                     args[1] = zfail;
                     args[2] = zpass;
-                    self.gl_feed(SGI_GL_OP_STENCIL_OP as u16, &args);
+                    self.gl_feed(GL_OP_STENCIL_OP as u16, &args);
                 }
             }
             ODSY_REG_BLEND => {
@@ -503,7 +501,7 @@ impl Board {
                 } else {
                     args[0] = src;
                     args[1] = dst;
-                    self.gl_feed(SGI_GL_OP_BLEND_FUNC as u16, &args[..2]);
+                    self.gl_feed(GL_OP_BLEND_FUNC as u16, &args[..2]);
                 }
                 if eq == 3 || eq == 4 {
                     crate::dlog!(
@@ -513,7 +511,7 @@ impl Board {
                     );
                 } else {
                     args[0] = BLEND_EQUATION[eq as usize];
-                    self.gl_feed(SGI_GL_OP_BLEND_EQUATION as u16, &args[..1]);
+                    self.gl_feed(GL_OP_BLEND_EQUATION as u16, &args[..1]);
                 }
                 let c1 = self.cmd_operand[1];
                 let c2 = self.cmd_operand[2];
@@ -521,12 +519,12 @@ impl Board {
                 args[1] = f32_bits((c1 & ODSY_BLEND_COLOUR_MASK) as f32 / ODSY_BLEND_COLOUR_SCALE);
                 args[2] = f32_bits(((c2 >> ODSY_BLEND_COLOUR_SHIFT) & ODSY_BLEND_COLOUR_MASK) as f32 / ODSY_BLEND_COLOUR_SCALE);
                 args[3] = f32_bits((c2 & ODSY_BLEND_COLOUR_MASK) as f32 / ODSY_BLEND_COLOUR_SCALE);
-                self.gl_feed(SGI_GL_OP_BLEND_COLOR as u16, &args);
+                self.gl_feed(GL_OP_BLEND_COLOR as u16, &args);
             }
             ODSY_REG_LOGIC_OP => {
-                let mode = SGI_GL_CLEAR + (self.cmd_operand[0] & ODSY_LOGIC_OP_MASK);
+                let mode = GL_CLEAR + (self.cmd_operand[0] & ODSY_LOGIC_OP_MASK);
 
-                self.gl_feed(SGI_GL_OP_LOGIC_OP as u16, &[mode]);
+                self.gl_feed(GL_OP_LOGIC_OP as u16, &[mode]);
             }
             ODSY_REG_LINE_POINT_SIZE => {
                 let mut args = [0u32; 2];
@@ -534,26 +532,26 @@ impl Board {
                 args[0] = f32_bits(
                     (self.cmd_operand[0] & ODSY_LINE_POINT_SIZE_MASK) as f32 / ODSY_LINE_POINT_SIZE_SCALE,
                 );
-                self.gl_feed_raster_state(SGI_GL_OP_LINE_WIDTH as u16, &args[0..1]);
+                self.gl_feed_raster_state(GL_OP_LINE_WIDTH as u16, &args[0..1]);
                 args[1] = f32_bits(
                     (self.cmd_operand[1] & ODSY_LINE_POINT_SIZE_MASK) as f32 / ODSY_LINE_POINT_SIZE_SCALE,
                 );
-                self.gl_feed_raster_state(SGI_GL_OP_POINT_SIZE as u16, &args[1..2]);
+                self.gl_feed_raster_state(GL_OP_POINT_SIZE as u16, &args[1..2]);
             }
             ODSY_REG_POLYGON_MODE => {
                 let mut front = [0u32; 2];
                 let mut back = [0u32; 2];
 
-                front[0] = SGI_GL_FRONT;
+                front[0] = GL_FRONT;
                 front[1] = polygon_mode(
                     (self.cmd_operand[0] >> ODSY_POLYGON_MODE_FRONT_SHIFT) & ODSY_POLYGON_MODE_MASK,
                 );
-                self.gl_feed_raster_state(SGI_GL_OP_POLYGON_MODE as u16, &front);
-                back[0] = SGI_GL_BACK;
+                self.gl_feed_raster_state(GL_OP_POLYGON_MODE as u16, &front);
+                back[0] = GL_BACK;
                 back[1] = polygon_mode(
                     (self.cmd_operand[0] >> ODSY_POLYGON_MODE_BACK_SHIFT) & ODSY_POLYGON_MODE_MASK,
                 );
-                self.gl_feed_raster_state(SGI_GL_OP_POLYGON_MODE as u16, &back);
+                self.gl_feed_raster_state(GL_OP_POLYGON_MODE as u16, &back);
             }
             ODSY_REG_POLYGON_OFFSET => {
                 let mut args = [0u32; 2];
@@ -562,7 +560,7 @@ impl Board {
                 args[1] = f32_bits(
                     sextract32(self.cmd_operand[0], 0, ODSY_POLYGON_OFFSET_BITS) as f32 * ODSY_POLYGON_OFFSET_SCALE,
                 );
-                self.gl_feed(SGI_GL_OP_POLYGON_OFFSET_EXT as u16, &args);
+                self.gl_feed(GL_OP_POLYGON_OFFSET_EXT as u16, &args);
             }
             ODSY_REG_CLIP_BOX => {
                 self.gl_clip_box[0] = self.cmd_operand[0];
@@ -681,7 +679,7 @@ impl Board {
                 self.gl_begin_open = false;
                 self.gl_open_held = 0;
                 if self.gl_in_prim {
-                    self.gl_feed(SGI_GL_OP_END as u16, &[]);
+                    self.gl_feed(GL_OP_END as u16, &[]);
                     self.gl_in_prim = false;
                 } else {
                     self.gl_end();

@@ -320,14 +320,14 @@ mod tests {
             modelview: id,
             projection: id,
             viewport: [0, 0, WIDTH as i32, WIDTH as i32],
-            shade_model: SGI_GL_FLAT,
+            shade_model: GL_FLAT,
             depth_test: true,
             depth_func: func,
             depth_mask: true,
             depth_range: [0.0, 1.0],
             draw_buffers: 1,
-            colour_mask: SGI_GL_COLOUR_MASK_ALL,
-            polygon_offset: SGI_GL_OFFSET_FILL,
+            colour_mask: GL_COLOUR_MASK_ALL,
+            polygon_offset: GL_OFFSET_FILL,
             // What the 0x058 write puts in the shared context.
             offset_bias: steps as f32 * ODSY_POLYGON_OFFSET_SCALE,
             offset_factor: factor,
@@ -338,17 +338,17 @@ mod tests {
         st.drawable.front = 1;
         st.drawable.clip.n = 1;
         st.drawable.clip.r[0] = ClipRect { x0: 0, y0: 0, x1: WIDTH as i32 - 1, y1: WIDTH as i32 - 1 };
-        let mut verts = vec![0.0f32; 3 * SGI_GL_VERTEX_FLOATS];
+        let mut verts = vec![0.0f32; 3 * GL_VERTEX_FLOATS];
         let ndc_z = (zw * 2.0 - 1.0) as f32;
 
         for (i, (x, y)) in [(-1.0f32, -1.0f32), (3.0, -1.0), (-1.0, 3.0)].iter().enumerate() {
-            let v = &mut verts[i * SGI_GL_VERTEX_FLOATS..(i + 1) * SGI_GL_VERTEX_FLOATS];
+            let v = &mut verts[i * GL_VERTEX_FLOATS..(i + 1) * GL_VERTEX_FLOATS];
             let z = if i == 2 { ndc_z + (tilt * 2.0) as f32 } else { ndc_z };
-            v[SGI_GL_V_POSITION..SGI_GL_V_POSITION + 4].copy_from_slice(&[*x, *y, z, 1.0]);
-            v[SGI_GL_V_COLOR..SGI_GL_V_COLOR + 4].copy_from_slice(&[1.0; 4]);
+            v[GL_V_POSITION..GL_V_POSITION + 4].copy_from_slice(&[*x, *y, z, 1.0]);
+            v[GL_V_COLOR..GL_V_COLOR + 4].copy_from_slice(&[1.0; 4]);
         }
         let stipple = [0u32; 32];
-        let mut d = GlDraw::new(SGI_GL_TRIANGLES, 3, &verts, &st, &stipple);
+        let mut d = GlDraw::new(GL_TRIANGLES, 3, &verts, &st, &stipple);
         let mut fb = Fb { depth: RowsMut::new(depth, WIDTH) };
 
         rules.draw(&target, &mut fb, &NoTexels, &mut d);
@@ -362,7 +362,7 @@ mod tests {
     fn a_rasterised_depth_is_stored_as_the_board_word() {
         let mut fb = plane(ODSY_DEPTH24_MAX);
 
-        draw_flat(&mut fb, 0.25, SGI_GL_LESS, 0);
+        draw_flat(&mut fb, 0.25, GL_LESS, 0);
         assert!(fb.iter().all(|&w| w == word_for_fraction(0.25)), "{:#x}", fb[0]);
         assert!((decode_host(fb[0]) as f64 - DEPTH_2S * 0.25).abs() < DEPTH_2S * 2f64.powi(-20));
     }
@@ -371,19 +371,19 @@ mod tests {
     fn depth_compares_in_the_board_format_pass_nearer_and_fail_farther() {
         let mut fb = plane(word_for_fraction(0.5));
 
-        draw_flat(&mut fb, 0.75, SGI_GL_LESS, 0);
+        draw_flat(&mut fb, 0.75, GL_LESS, 0);
         assert!(fb.iter().all(|&w| w == word_for_fraction(0.5)), "a farther polygon fails GL_LESS");
-        draw_flat(&mut fb, 0.5, SGI_GL_LESS, 0);
+        draw_flat(&mut fb, 0.5, GL_LESS, 0);
         assert!(fb.iter().all(|&w| w == word_for_fraction(0.5)), "an equal one fails GL_LESS");
-        draw_flat(&mut fb, 0.5, SGI_GL_LEQUAL, 0);
+        draw_flat(&mut fb, 0.5, GL_LEQUAL, 0);
         assert!(fb.iter().all(|&w| w == word_for_fraction(0.5)));
-        draw_flat(&mut fb, 0.25, SGI_GL_LESS, 0);
+        draw_flat(&mut fb, 0.25, GL_LESS, 0);
         assert!(fb.iter().all(|&w| w == word_for_fraction(0.25)), "a nearer one passes");
         // One mantissa step nearer in the top binade still passes: the
         // format resolves 2^-18 relative at every depth.
         let near = word_for_fraction(0.25) - 1;
         let mut fb = plane(word_for_fraction(0.25));
-        draw_flat(&mut fb, decode_host(near) as f64 / DEPTH_2S, SGI_GL_LESS, 0);
+        draw_flat(&mut fb, decode_host(near) as f64 / DEPTH_2S, GL_LESS, 0);
         assert!(fb.iter().all(|&w| w == near), "{:#x} against {near:#x}", fb[0]);
     }
 
@@ -395,11 +395,11 @@ mod tests {
         for zw in [0.25, 0.75] {
             let mut fb = plane(ODSY_DEPTH24_MAX);
 
-            draw_flat(&mut fb, zw, SGI_GL_LESS, 100);
+            draw_flat(&mut fb, zw, GL_LESS, 100);
             assert!(fb.iter().all(|&w| w == word_for_fraction(zw) + 100), "zw {zw}: {:#x}", fb[0]);
         }
         let mut fb = plane(ODSY_DEPTH24_MAX);
-        draw_flat(&mut fb, 0.25, SGI_GL_LESS, -100);
+        draw_flat(&mut fb, 0.25, GL_LESS, -100);
         assert!(fb.iter().all(|&w| w == word_for_fraction(0.25) - 100), "a negative offset pulls nearer");
     }
 
@@ -411,8 +411,8 @@ mod tests {
         let mut plain = plane(ODSY_DEPTH24_MAX);
         let mut loaded = plane(ODSY_DEPTH24_MAX);
 
-        draw_sloped(&mut plain, 0.25, 0.5, SGI_GL_LESS, 40, (0.0, 0.0));
-        draw_sloped(&mut loaded, 0.25, 0.5, SGI_GL_LESS, 40, (1.5, 2000.0));
+        draw_sloped(&mut plain, 0.25, 0.5, GL_LESS, 40, (0.0, 0.0));
+        draw_sloped(&mut loaded, 0.25, 0.5, GL_LESS, 40, (1.5, 2000.0));
         assert_ne!(plain[0], ODSY_DEPTH24_MAX, "the triangle drew");
         assert!(plain.iter().zip(&loaded).all(|(a, b)| a == b), "factor and units changed the stored depth");
         // Same word delta from the unoffset draw at two depths.
@@ -420,8 +420,8 @@ mod tests {
             let mut off = plane(ODSY_DEPTH24_MAX);
             let mut none = plane(ODSY_DEPTH24_MAX);
 
-            draw_sloped(&mut off, zw, 0.25, SGI_GL_LESS, 40, (1.5, 2000.0));
-            draw_sloped(&mut none, zw, 0.25, SGI_GL_LESS, 0, (0.0, 0.0));
+            draw_sloped(&mut off, zw, 0.25, GL_LESS, 40, (1.5, 2000.0));
+            draw_sloped(&mut none, zw, 0.25, GL_LESS, 0, (0.0, 0.0));
             assert!(off.iter().zip(&none).all(|(a, b)| *b == ODSY_DEPTH24_MAX || *a == *b + 40), "zw {zw}");
         }
     }
@@ -430,11 +430,11 @@ mod tests {
     fn a_decal_offset_towards_the_viewer_wins_the_depth_test_over_coplanar_geometry() {
         let mut fb = plane(ODSY_DEPTH24_MAX);
 
-        draw_flat(&mut fb, 0.5, SGI_GL_LESS, 0);
-        draw_flat(&mut fb, 0.5, SGI_GL_LESS, -4);
+        draw_flat(&mut fb, 0.5, GL_LESS, 0);
+        draw_flat(&mut fb, 0.5, GL_LESS, -4);
         assert!(fb.iter().all(|&w| w == word_for_fraction(0.5) - 4));
         // And a positive one loses.
-        draw_flat(&mut fb, 0.5, SGI_GL_LESS, 4);
+        draw_flat(&mut fb, 0.5, GL_LESS, 4);
         assert!(fb.iter().all(|&w| w == word_for_fraction(0.5) - 4));
     }
 
@@ -442,10 +442,10 @@ mod tests {
     fn an_offset_that_would_pass_the_ends_of_the_word_range_clamps() {
         let mut fb = plane(ODSY_DEPTH24_MAX);
 
-        draw_flat(&mut fb, 0.0, SGI_GL_LESS, -(1 << 24));
+        draw_flat(&mut fb, 0.0, GL_LESS, -(1 << 24));
         assert!(fb.iter().all(|&w| w == 0));
         let mut fb = plane(ODSY_DEPTH24_MAX);
-        draw_flat(&mut fb, 1.0, SGI_GL_LEQUAL, (1 << 24) - 1);
+        draw_flat(&mut fb, 1.0, GL_LEQUAL, (1 << 24) - 1);
         assert!(fb.iter().all(|&w| w == 0xffffff));
     }
 }

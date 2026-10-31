@@ -28,7 +28,7 @@ pub const EVERY: usize = 500_000;
 /// and the object memory in use.
 pub fn plane_hash(b: &Board) -> String {
     let mut h = blake3::Hasher::new();
-    let (w, ht) = (SGI_ODYSSEY_WIDTH as i32, SGI_ODYSSEY_HEIGHT as i32);
+    let (w, ht) = (ODSY_WIDTH as i32, ODSY_HEIGHT as i32);
     let depth = b.depth_mem.plane(b.depth_plane).expect("the depth plane");
     let stencil = b.stencil_mem.plane(b.stencil_plane).expect("the stencil plane");
     let mut row = Vec::with_capacity(w as usize * 16);
@@ -208,7 +208,7 @@ pub fn replay_file(path: &Path, png: Option<&str>) -> Result<Report, String> {
 }
 
 fn save_screen(b: &Board, path: &str) {
-    let (w, h) = (SGI_ODYSSEY_WIDTH as u32, SGI_ODYSSEY_HEIGHT as u32);
+    let (w, h) = (ODSY_WIDTH as u32, ODSY_HEIGHT as u32);
     let mut rgb = Vec::with_capacity(w as usize * h as usize * 3);
     for y in 0..h {
         for x in 0..w {
@@ -276,7 +276,7 @@ fn replay_bless() {
 
 fn window(b: &mut Board) {
     b.clip_kept = 1;
-    b.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: SGI_ODYSSEY_WIDTH as i32 - 1, y1: SGI_ODYSSEY_HEIGHT as i32 - 1 };
+    b.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: ODSY_WIDTH as i32 - 1, y1: ODSY_HEIGHT as i32 - 1 };
 }
 
 /// A glDrawPixels of two pixels by pixel burst, as a store sequence: the same

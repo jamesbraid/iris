@@ -557,12 +557,12 @@ fn filling_the_command_report_budget_leaves_the_register_budget_alone() {
 
     // Distinct words of no recognised shape that take no operands, so each
     // fills one slot of its own.
-    for i in 0..SGI_ODYSSEY_UNIMP_REPORTS {
+    for i in 0..ODSY_UNIMP_REPORTS {
         cmd(&mut s, 0x0000_0100 | i);
     }
-    assert_eq!(s.reported_cmd_count, SGI_ODYSSEY_UNIMP_REPORTS);
+    assert_eq!(s.reported_cmd_count, ODSY_UNIMP_REPORTS);
     cmd(&mut s, 0x0000_7800);
-    assert_eq!(s.reported_cmd_count, SGI_ODYSSEY_UNIMP_REPORTS, "further words stay silent");
+    assert_eq!(s.reported_cmd_count, ODSY_UNIMP_REPORTS, "further words stay silent");
 
     assert_eq!(s.mmio_read(0x8, 1), 0);
     assert_eq!(s.reported_addr_count.load(Ordering::Relaxed), 1, "an unmodelled register is still reported");

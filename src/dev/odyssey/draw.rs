@@ -1,7 +1,5 @@
 //! The board's 2D drawing: colour-buffer access, clipping and id-plane tests,
 //! integer pixel paints, rectangle fill and copy, and pixel bursts.
-//!
-//! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code in jamesbraid/qemu-sgi-origami.
 
 use super::*;
 
@@ -9,13 +7,13 @@ use super::*;
 #[derive(Clone, Copy)]
 pub struct RowRuns {
     pub n: u32,
-    pub start: [i64; SGI_ODYSSEY_CLIP_RECTS as usize],
-    pub end: [i64; SGI_ODYSSEY_CLIP_RECTS as usize],
+    pub start: [i64; ODSY_CLIP_RECTS as usize],
+    pub end: [i64; ODSY_CLIP_RECTS as usize],
 }
 
 impl Default for RowRuns {
     fn default() -> Self {
-        RowRuns { n: 0, start: [0; SGI_ODYSSEY_CLIP_RECTS as usize], end: [0; SGI_ODYSSEY_CLIP_RECTS as usize] }
+        RowRuns { n: 0, start: [0; ODSY_CLIP_RECTS as usize], end: [0; ODSY_CLIP_RECTS as usize] }
     }
 }
 
@@ -32,7 +30,7 @@ pub fn id_compare_passes(did: &[u8], id_compare: u32, x: i64, y: i64) -> bool {
     let mask = (id_compare >> ODSY_ID_COMPARE_MASK_SHIFT) as u8;
 
     id_compare & ODSY_ID_COMPARE_ENABLE == 0
-        || ((did[(y * SGI_ODYSSEY_WIDTH as i64 + x) as usize] ^ id_compare as u8) & mask) == 0
+        || ((did[(y * ODSY_WIDTH as i64 + x) as usize] ^ id_compare as u8) & mask) == 0
 }
 
 impl Board {
@@ -114,7 +112,7 @@ impl Board {
     /// Rebuild the kept (non-empty) clip rectangles from the raw 0x204b words.
     pub fn clip_update(&mut self) {
         self.clip_kept = 0;
-        for i in 0..SGI_ODYSSEY_CLIP_RECTS as usize {
+        for i in 0..ODSY_CLIP_RECTS as usize {
             let lo = self.clip_words[2 * i];
             let hi = self.clip_words[2 * i + 1];
             let r = ClipRect {
@@ -133,7 +131,7 @@ impl Board {
 
     /// Whether clip_words is the off-screen form (ODSY_CMD_WINDOW_RESTORE).
     pub fn clip_is_offscreen(&self) -> bool {
-        for (i, &word) in self.clip_words.iter().enumerate().take((2 * SGI_ODYSSEY_CLIP_RECTS) as usize) {
+        for (i, &word) in self.clip_words.iter().enumerate().take((2 * ODSY_CLIP_RECTS) as usize) {
             let want = if i == 1 { ODSY_CLIP_OFFSCREEN_HI } else { 0 };
 
             if (word & ODSY_CLIP_WORD_MASK) != want {
@@ -148,7 +146,7 @@ impl Board {
     /// is. Board::pixel_allowed() adds the window tests for every write except a
     /// copy destination, which calls this helper directly.
     pub fn pixel_in_bounds(&self, x: i64, y: i64) -> bool {
-        x >= 0 && y >= 0 && x < SGI_ODYSSEY_WIDTH as i64 && y < SGI_ODYSSEY_HEIGHT as i64
+        x >= 0 && y >= 0 && x < ODSY_WIDTH as i64 && y < ODSY_HEIGHT as i64
     }
 
     pub fn id_compare_active(&self) -> bool {
@@ -185,12 +183,12 @@ impl Board {
         let mut n = 0usize;
         let mut kept = 0usize;
 
-        if y < 0 || y >= SGI_ODYSSEY_HEIGHT as i64 {
+        if y < 0 || y >= ODSY_HEIGHT as i64 {
             return runs;
         }
         for &r in &self.clip_rect[..self.clip_kept as usize] {
             let a = (r.x0 as i64).max(0);
-            let b = (r.x1 as i64 + 1).min(SGI_ODYSSEY_WIDTH as i64);
+            let b = (r.x1 as i64 + 1).min(ODSY_WIDTH as i64);
             let mut j = n;
 
             n += 1;
@@ -302,7 +300,7 @@ impl Board {
         let mut byte = index as u8;
 
         self.raster_wait();
-        if op as u32 != SGI_LOGIC_COPY {
+        if op as u32 != LOGIC_COPY {
             let dst = if buffers & (1u32 << ODSY_AUX_OVERLAY_BUFFER) != 0 { self.overlay[at as usize] } else { self.did[at as usize] };
 
             byte = logic_op(op, index, dst as u32) as u8;
@@ -312,7 +310,7 @@ impl Board {
 
     pub fn paint_aux(&mut self, x: i64, y: i64, index: u32, op: u8) {
         if self.pixel_allowed(x, y) {
-            self.paint_aux_at(y as u64 * SGI_ODYSSEY_WIDTH as u64 + x as u64, index, op);
+            self.paint_aux_at(y as u64 * ODSY_WIDTH as u64 + x as u64, index, op);
         }
     }
 
@@ -330,17 +328,17 @@ impl Board {
     pub fn paint_integer(&mut self, x: i64, y: i64, is_index: bool, value: u32) {
         let src = fill_pixel(is_index, value);
         let enable = if is_index { ODSY_MODE_INDEX_LOGIC_OP } else { ODSY_MODE_COLOR_LOGIC_OP };
-        let op = self.gl_ref().cur.logic_op_mode.wrapping_sub(SGI_GL_CLEAR) as u8;
+        let op = self.gl_ref().cur.logic_op_mode.wrapping_sub(GL_CLEAR) as u8;
         let buffers = self.draw_buffers();
 
         if self.dest_is_id_planes() {
-            let use_op = (self.pattern_mode & enable) != 0 && op as u32 != SGI_LOGIC_COPY;
+            let use_op = (self.pattern_mode & enable) != 0 && op as u32 != LOGIC_COPY;
 
-            self.paint_aux(x, y, src, if use_op { op } else { SGI_LOGIC_COPY as u8 });
+            self.paint_aux(x, y, src, if use_op { op } else { LOGIC_COPY as u8 });
             self.scanout.invalidate_for(DirtySite::Integer, y as i32, 1);
             return;
         }
-        if (self.pattern_mode & enable) == 0 || op as u32 == SGI_LOGIC_COPY {
+        if (self.pattern_mode & enable) == 0 || op as u32 == LOGIC_COPY {
             self.paint_pixel(x, y, src);
             return;
         }
@@ -365,8 +363,8 @@ impl Board {
     pub fn paint_integer_span(&mut self, runs: &RowRuns, y: i64, x0: i64, x1: i64, is_index: bool, value: u32) {
         let src = fill_pixel(is_index, value);
         let enable = if is_index { ODSY_MODE_INDEX_LOGIC_OP } else { ODSY_MODE_COLOR_LOGIC_OP };
-        let op = self.gl_ref().cur.logic_op_mode.wrapping_sub(SGI_GL_CLEAR) as u8;
-        let logic = (self.pattern_mode & enable) != 0 && op as u32 != SGI_LOGIC_COPY;
+        let op = self.gl_ref().cur.logic_op_mode.wrapping_sub(GL_CLEAR) as u8;
+        let logic = (self.pattern_mode & enable) != 0 && op as u32 != LOGIC_COPY;
         let id_test = self.id_compare_active();
         let buffers = self.draw_buffers();
         let aux = self.dest_is_id_planes();
@@ -382,9 +380,9 @@ impl Board {
                 for x in a..e {
                     if !id_test || self.id_compare_passes(x, y) {
                         self.paint_aux_at(
-                            y as u64 * SGI_ODYSSEY_WIDTH as u64 + x as u64,
+                            y as u64 * ODSY_WIDTH as u64 + x as u64,
                             src,
-                            if logic { op } else { SGI_LOGIC_COPY as u8 },
+                            if logic { op } else { LOGIC_COPY as u8 },
                         );
                     }
                 }
@@ -461,7 +459,7 @@ impl Board {
 
                 for px in a..e {
                     if !id_test || self.id_compare_passes(px, py) {
-                        self.aux_store(py as u64 * SGI_ODYSSEY_WIDTH as u64 + px as u64, buffers, value, mask);
+                        self.aux_store(py as u64 * ODSY_WIDTH as u64 + px as u64, buffers, value, mask);
                     }
                 }
             }
@@ -489,7 +487,7 @@ impl Board {
         let h = (self.copy_size >> 16) & 0xffff;
         let dx = self.copy_dst & 0xffff;
         let (dy, h_clip) = self.copy_dest_rows();
-        let w_clip = if dx < SGI_ODYSSEY_WIDTH { w.min(SGI_ODYSSEY_WIDTH - dx) } else { 0 };
+        let w_clip = if dx < ODSY_WIDTH { w.min(ODSY_WIDTH - dx) } else { 0 };
         let reverse_rows = dy > sy;
         let reverse_cols = dx > sx;
 
@@ -560,10 +558,10 @@ impl Board {
         let dx = self.copy_dst & 0xffff;
         let (dy, h_clip) = self.copy_dest_rows();
         let w = self.copy_size & 0xffff;
-        let w_clip = w.min(SGI_ODYSSEY_WIDTH.saturating_sub(dx)) as usize;
+        let w_clip = w.min(ODSY_WIDTH.saturating_sub(dx)) as usize;
         let rows = h_clip;
         // The source pixels inside the plane on a row; the rest read as zero.
-        let src_w = w_clip.min(SGI_ODYSSEY_WIDTH.saturating_sub(sx) as usize);
+        let src_w = w_clip.min(ODSY_WIDTH.saturating_sub(sx) as usize);
         let buffers = self.draw_buffers();
         let mask = (self.plane_write_mask >> ODSY_PLANE_MASK_SHIFT) as u8;
         let mut staged = vec![0u8; w_clip];
@@ -579,8 +577,8 @@ impl Board {
         self.raster_wait();
         for row in 0..rows {
             let r = if dy > sy { rows - 1 - row } else { row };
-            let from = ((sy + r) * SGI_ODYSSEY_WIDTH + sx) as usize;
-            let to = ((dy + r) * SGI_ODYSSEY_WIDTH + dx) as usize;
+            let from = ((sy + r) * ODSY_WIDTH + sx) as usize;
+            let to = ((dy + r) * ODSY_WIDTH + dx) as usize;
 
             for b in [ODSY_AUX_ID_BUFFER, ODSY_AUX_OVERLAY_BUFFER] {
                 if buffers & (1u32 << b) == 0 {
@@ -589,7 +587,7 @@ impl Board {
                 let plane = if b == ODSY_AUX_ID_BUFFER { &mut self.did } else { &mut self.overlay };
 
                 staged.fill(0);
-                if sy + r < SGI_ODYSSEY_HEIGHT {
+                if sy + r < ODSY_HEIGHT {
                     staged[..src_w].copy_from_slice(&plane[from..from + src_w]);
                 }
                 for (d, s) in plane[to..to + w_clip].iter_mut().zip(&staged) {
@@ -604,7 +602,7 @@ impl Board {
         let h = (self.copy_size >> 16) & 0xffff;
         let dy = (self.copy_dst >> 16) & 0xffff;
 
-        (dy, if dy < SGI_ODYSSEY_HEIGHT { h.min(SGI_ODYSSEY_HEIGHT - dy) } else { 0 })
+        (dy, if dy < ODSY_HEIGHT { h.min(ODSY_HEIGHT - dy) } else { 0 })
     }
 
     pub fn copy_rect(&mut self) {
@@ -827,7 +825,7 @@ impl Board {
                     self.image_cur_x as i64 + self.win_origin[0] as i64,
                     self.image_cur_y as i64 + self.win_origin[1] as i64,
                     rgba,
-                    SGI_LOGIC_COPY as u8,
+                    LOGIC_COPY as u8,
                 );
                 self.scanout.invalidate_for(DirtySite::Image, self.image_cur_y as i32 + self.win_origin[1], 1);
             } else if !self.aux_image_reported {

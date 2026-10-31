@@ -10,7 +10,7 @@ use super::*;
 fn window() -> (Box<Board>, Arc<Ram>) {
     let (mut s, _, ram) = board_with_ram();
     s.clip_kept = 1;
-    s.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: SGI_ODYSSEY_WIDTH as i32 - 1, y1: SGI_ODYSSEY_HEIGHT as i32 - 1 };
+    s.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: ODSY_WIDTH as i32 - 1, y1: ODSY_HEIGHT as i32 - 1 };
     (s, ram)
 }
 
@@ -557,7 +557,7 @@ fn overlay_copy(s: &mut Board, (sx, sy): (u32, u32), (w, h): (u32, u32), (dx, dy
 }
 
 fn overlay_at(s: &Board, x: u32, y: u32) -> u8 {
-    s.overlay[(y * SGI_ODYSSEY_WIDTH + x) as usize]
+    s.overlay[(y * ODSY_WIDTH + x) as usize]
 }
 
 /// A menu's pattern fill replicates a seed by copying the id-plane base onto
@@ -572,7 +572,7 @@ fn a_copy_at_the_id_plane_base_moves_overlay_bytes_not_colour() {
     let (mut s, _) = window();
     select_overlay_destination(&mut s);
     for x in 0..4u32 {
-        s.overlay[(40 * SGI_ODYSSEY_WIDTH + 30 + x) as usize] = 0x11 * (x as u8 + 1);
+        s.overlay[(40 * ODSY_WIDTH + 30 + x) as usize] = 0x11 * (x as u8 + 1);
         pixel_write(&mut s, 30 + x as i32, 40, 0xaa00_00ff | x << 8);
     }
     let colour: Vec<u32> = (30..70).map(|x| pixel(&s, 0, x, 40)).collect();
@@ -596,7 +596,7 @@ fn an_overlay_copy_onto_itself_reads_the_source_as_it_was() {
     let (mut s, _) = window();
     select_overlay_destination(&mut s);
     for x in 0..4u32 {
-        s.overlay[(40 * SGI_ODYSSEY_WIDTH + 30 + x) as usize] = x as u8 + 1;
+        s.overlay[(40 * ODSY_WIDTH + 30 + x) as usize] = x as u8 + 1;
     }
     overlay_copy(&mut s, (30, 40), (4, 1), (32, 40));
     let row: Vec<u8> = (30..36).map(|x| overlay_at(&s, x, 40)).collect();
@@ -607,7 +607,7 @@ fn an_overlay_copy_onto_itself_reads_the_source_as_it_was() {
     assert_eq!(row, [1, 2, 3, 4, 3, 4], "a copy to the left");
 
     for y in 0..4u32 {
-        s.overlay[((50 + y) * SGI_ODYSSEY_WIDTH + 70) as usize] = y as u8 + 1;
+        s.overlay[((50 + y) * ODSY_WIDTH + 70) as usize] = y as u8 + 1;
     }
     overlay_copy(&mut s, (70, 50), (1, 4), (70, 52));
     let column: Vec<u8> = (50..56).map(|y| overlay_at(&s, 70, y)).collect();
@@ -621,8 +621,8 @@ fn an_overlay_copy_changes_only_the_bits_of_the_plane_mask() {
     let (mut s, _) = window();
     select_overlay_destination(&mut s);
     s.plane_write_mask = 0x0f << ODSY_PLANE_MASK_SHIFT;
-    s.overlay[(40 * SGI_ODYSSEY_WIDTH + 30) as usize] = 0xa5;
-    s.overlay[(40 * SGI_ODYSSEY_WIDTH + 60) as usize] = 0xf0;
+    s.overlay[(40 * ODSY_WIDTH + 30) as usize] = 0xa5;
+    s.overlay[(40 * ODSY_WIDTH + 60) as usize] = 0xf0;
     overlay_copy(&mut s, (30, 40), (1, 1), (60, 40));
     assert_eq!(overlay_at(&s, 60, 40), 0xf5);
 }
@@ -635,13 +635,13 @@ fn copy_bases(s: &mut Board, (src_base, dest_base): (u32, u32), (sx, sy): (u32, 
 /// Seed the overlay, the id byte and colour buffer 0 at (30, 40) with three
 /// distinct values, so a copy to (60, 41) shows which plane it moved.
 fn seed_three_planes(s: &mut Board) {
-    s.overlay[(40 * SGI_ODYSSEY_WIDTH + 30) as usize] = 0x77;
-    s.did[(40 * SGI_ODYSSEY_WIDTH + 30) as usize] = 0x55;
+    s.overlay[(40 * ODSY_WIDTH + 30) as usize] = 0x77;
+    s.did[(40 * ODSY_WIDTH + 30) as usize] = 0x55;
     pixel_write(s, 30, 40, 0xaa00_00ff);
 }
 
 fn planes_at(s: &Board, x: u32, y: u32) -> (u8, u8, u32) {
-    (overlay_at(s, x, y), s.did[(y * SGI_ODYSSEY_WIDTH + x) as usize], pixel(s, 0, x as i32, y as i32))
+    (overlay_at(s, x, y), s.did[(y * ODSY_WIDTH + x) as usize], pixel(s, 0, x as i32, y as i32))
 }
 
 /// What sends a copy to the overlay: both base words at the id-plane base
@@ -705,7 +705,7 @@ fn an_overlay_copy_up_onto_itself_reads_the_source_as_it_was() {
     let (mut s, _) = window();
     select_overlay_destination(&mut s);
     for y in 0..4u32 {
-        s.overlay[((50 + y) * SGI_ODYSSEY_WIDTH + 70) as usize] = y as u8 + 1;
+        s.overlay[((50 + y) * ODSY_WIDTH + 70) as usize] = y as u8 + 1;
     }
     overlay_copy(&mut s, (70, 52), (1, 4), (70, 50));
     let column: Vec<u8> = (50..56).map(|y| overlay_at(&s, 70, y)).collect();
@@ -717,8 +717,8 @@ fn an_overlay_copy_up_onto_itself_reads_the_source_as_it_was() {
 /// does), past the right edge or the bottom.
 #[test]
 fn an_overlay_copy_is_clipped_to_the_plane_at_both_ends() {
-    let w = SGI_ODYSSEY_WIDTH;
-    let h = SGI_ODYSSEY_HEIGHT;
+    let w = ODSY_WIDTH;
+    let h = ODSY_HEIGHT;
     let (mut s, _) = window();
     select_overlay_destination(&mut s);
     for x in 0..8u32 {
@@ -1054,7 +1054,7 @@ fn an_integer_pixel_through_a_logic_op_or_to_the_id_planes_dirties_its_row() {
     s.scanout_update();
 
     s.pattern_mode |= ODSY_MODE_COLOR_LOGIC_OP;
-    s.gl_ctx.as_mut().unwrap().cur.logic_op_mode = SGI_GL_CLEAR + SGI_LOGIC_XOR;
+    s.gl_ctx.as_mut().unwrap().cur.logic_op_mode = GL_CLEAR + LOGIC_XOR;
     s.paint_integer(40, 120, false, 0x00ff_ff00);
     assert_eq!(lines(&s), vec![120], "a logic-op pixel");
     s.scanout_update();
