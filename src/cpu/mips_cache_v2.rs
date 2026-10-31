@@ -568,6 +568,10 @@ pub trait CpuModel: MipsCache {
     /// software writes. Zero: the model has no such register, it reads zero
     /// and writes are ignored.
     const CP0_DIAG_WRITE_MASK: u32 = 0;
+    /// Take Unimplemented Operation for a denormal floating-point operand only
+    /// while FCSR.FS is clear. False: the operand traps whatever FS says.
+    /// A quiet NaN operand traps either way.
+    const FPU_DENORMAL_INPUT_NEEDS_FS_CLEAR: bool = false;
     /// Preserve the upper word on partial LWR loads.
     /// Full-word loads still sign-extend bit 31.
     const LWR_PRESERVES_UPPER: bool = false;

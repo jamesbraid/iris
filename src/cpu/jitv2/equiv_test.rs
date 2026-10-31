@@ -4436,6 +4436,53 @@ mod tests {
         }
     }
 
+    /// A model that spares denormal operands while FCSR.FS is set (the R16000)
+    /// must behave the same compiled as interpreted: the trap with FS clear,
+    /// completion with FS set, and a quiet NaN refused either way.
+    #[test]
+    fn r16000_jit_spares_a_denormal_operand_only_while_fs_is_set() {
+        use crate::cpu::mips_cache_shadow::R16000ShadowCache;
+        use crate::cpu::mips_isa::{FUNCT_FADD, FUNCT_FDIV, OP_COP1, RS_S};
+        const FS: u32 = 1 << 24;
+        let pc = 0xFFFF_FFFF_8000_1000u64;
+        let word_offset = (pc as u16 / 4) & 0x3FF;
+        let consts = crate::cpu::jitv2::codegen::JitConsts {
+            fpu_denormal_input_needs_fs_clear: true,
+            ..Default::default()
+        };
+        let denormal = 1u64;
+        let (one, nan) = (1.0f32.to_bits() as u64, 0x7fc0_0000u64);
+        for (funct, fs_bits, ft_bits, fcsr, completes) in [
+            (FUNCT_FADD, one, denormal, 0x100, false),
+            (FUNCT_FADD, one, denormal, FS | 0x100, true),
+            (FUNCT_FDIV, 0, denormal, 0x100, false),
+            (FUNCT_FDIV, 0, denormal, FS | 0x100, true),
+            (FUNCT_FADD, one, nan, FS, false),
+        ] {
+            let mut fpr = [0u64; 32];
+            fpr[1] = fs_bits;
+            fpr[2] = ft_bits;
+            fpr[3] = 0x5a5a_5a5a;
+            let instr = make_r(OP_COP1, RS_S, 2, 1, 3, funct);
+
+            let bus: Arc<dyn BusDevice> = Arc::new(MockMemory::new_not_compilable());
+            let cfg = MipsCpuConfig::for_model::<R16000ShadowCache>();
+            let mut interp = MipsExecutor::<PassthroughTlb, R16000ShadowCache>::new(
+                bus, PassthroughTlb::default(), &cfg);
+            interp.core.pc = pc;
+            interp.core.fpr = fpr;
+            interp.set_cp0_status(crate::cpu::mips_core::STATUS_CU1 | crate::cpu::mips_core::STATUS_FR);
+            interp.core.fpu_fcsr = fcsr;
+            interp.exec(instr);
+            let interp = CoreSnapshot::capture(&interp.core);
+
+            let jit = run_jit_fpu_fcsr_with_consts(instr, [0u64; 32], fpr, pc, word_offset, true, Some(fcsr), consts)
+                .expect("ADD.S and DIV.S must compile");
+            assert_eq!(jit, interp, "funct {funct:#x} fcsr {fcsr:#x}");
+            assert_eq!(jit.fpr[3] != 0x5a5a_5a5a, completes, "funct {funct:#x} fcsr {fcsr:#x}: wrote the destination");
+        }
+    }
+
     #[test]
     fn lwl_lwr_combine_to_a_full_unaligned_word_load_matches_interpreter() {
         // The canonical compiler-generated idiom for an unaligned word

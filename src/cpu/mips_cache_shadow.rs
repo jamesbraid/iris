@@ -375,6 +375,7 @@ impl<
     const R10K_PRIMARY_DATA_OPS: bool = Self::IS_R14000;
     const SECONDARY_TAG_MASK: u64 = if Self::IS_R14000 { R14000_L2_TAG_MASK } else { L2_TAG_MASK };
     const CP0_DIAG_WRITE_MASK: u32 = if Self::IS_R16000 { 0x0403_cffb } else { 0 };
+    const FPU_DENORMAL_INPUT_NEEDS_FS_CLEAR: bool = Self::IS_R16000;
     const LWR_PRESERVES_UPPER: bool = Self::IS_R14000;
     const FPU_FR1_WORD_WRITES_ZERO_UPPER: bool = Self::IS_R14000;
     const FPU_FR0_MOV_S_PRESERVES_PAIR: bool = Self::IS_R14000;
@@ -764,16 +765,16 @@ pub type R14000ShadowCache =
 /// PRId 0x0f50 is what the Tezro's PROM prints for every processor. The FPU
 /// revision is the R14000 compatibility value. No R16000 specification is
 /// available, so this is the R14000 model with a 4 MiB secondary cache and
-/// its own name. The two policies the QEMU model selects for it are already
-/// the core's for every R10000-family model: a soft reset keeps Config and
-/// the watch registers, and a denormal ADD.S or DIV.S operand raises
-/// Unimplemented Operation. All are approximations, not measurements of
-/// silicon.
+/// its own name. A soft reset that keeps Config and the watch registers is
+/// already the core's for every R10000-family model. All of these policies are
+/// approximations, not measurements of silicon.
 ///
-/// Differences from the QEMU model, shared with the R14000 here: the core
-/// refuses a denormal operand whatever FCSR.FS says, where QEMU refuses it
-/// only with FS clear; and CVT.L has no 52-bit limit. The CP0 diagnostic
-/// register, with the mask QEMU gives it, is this model's alone.
+/// Differences from the QEMU model, shared with the R14000 here: CVT.L has
+/// no 52-bit limit. The CP0 diagnostic register, with the mask QEMU gives it,
+/// and the rule that a denormal ADD.S or DIV.S operand traps only while
+/// FCSR.FS is clear, are this model's alone. The core applies the FS rule to
+/// every instruction that checks operands, where QEMU applies it to ADD.S and
+/// DIV.S only and traps no other denormal operand.
 pub type R16000ShadowCache =
     ShadowCache<32768, 64, 32768, 32, 4194304, 128, true, 0x0000_0f50, 0x0000_0900, 64, { model::R10000 }>;
 
