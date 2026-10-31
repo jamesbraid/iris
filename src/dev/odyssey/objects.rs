@@ -393,7 +393,6 @@ impl Board {
         if w == 0 || h == 0 {
             return true;
         }
-        let displayed = self.front.lock().displayed_buffer;
         let mut words = Vec::with_capacity(w as usize * h as usize);
 
         for y in 0..h {
@@ -404,9 +403,9 @@ impl Board {
                     if px < 0 || py < 0 || px >= SGI_ODYSSEY_WIDTH as i64 || py >= SGI_ODYSSEY_HEIGHT as i64 {
                         0
                     } else {
-                        let shown = (displayed >> self.main_id(px as u32, py as u32)) & 1;
+                        let buffer = self.read_buffer(c.read_front(), px, py);
 
-                        self.buffer_load(if c.read_front() { shown } else { shown ^ 1 }, px, py)
+                        self.buffer_load(buffer, px, py)
                     }
                 } else {
                     self.object_load(src, c.src.0 + x, c.src.1 + y)

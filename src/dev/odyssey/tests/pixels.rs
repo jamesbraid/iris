@@ -2,7 +2,7 @@
 //! copy block, against the headers the datasheet's "Pixel transfer
 //! headers from the OpenGL library" section records.
 
-use super::dma::{PAGE_A, TABLE, descriptor, pte, put_table};
+use super::dma::{PAGE_A, TABLE, colour_destination, descriptor, pte, put_table};
 use super::*;
 
 /// A board with guest RAM whose one clip rectangle covers the screen, so
@@ -511,4 +511,58 @@ fn a_gl_copy_moves_pixels_between_an_object_and_the_drawables() {
     pixel_write(&mut s, 70, 21, 0x0a0b_0c0d);
     copy_block(&mut s, [0x3000_0019, 21 << 16 | 70, 0x8020_0050, 1 << 16 | 1, 0x9263_3042, base, 1 << 16 | 5, 0x3802_204b]);
     assert_eq!(s.object_load(obj, 5, 1), 0x0a0b_0c0d);
+}
+
+/// The read buffer register (0x609) names the drawable a read comes from.
+fn bind_read_drawable(s: &mut Board, word: u32) {
+    cmd(s, select(ODSY_SWAP_SYNC_B));
+    cmd(s, word);
+}
+
+/// A window's logical front is the buffer its id displays. A pixel buffer
+/// has no id on screen, so its front is the buffer a front draw mask writes:
+/// bit 31 of the read buffer register (0x609) set means the drawable's swap
+/// state is zero and the mask is unexchanged, so front is buffer 0; clear
+/// means front and back are exchanged, so front is buffer 1. The read
+/// drawable is the off-screen object when 0x609 names one and not the
+/// screen's colour buffer. A DMA read and a copy follow the same rule.
+///
+/// Datasheet: "Front and back of a pixel buffer" (the kernel's mask rule is
+/// established; that a pixel buffer's front is the front mask's buffer is
+/// inferred).
+#[test]
+fn a_pixel_buffers_front_is_the_buffer_a_front_draw_mask_writes() {
+    let (mut s, ram) = read_window();
+    colour_destination(&mut s);
+    let p = s.buffer1_mem.plane(s.buffer1_plane).expect("the second colour plane");
+    s.buffer1_mem.plane_store(&p, 30, 40, 0x0102_0304);
+    let front = read_word4(2, 8);
+    let back = front & !ODSY_DMA_FMT_FRONT;
+    let in_buffer_0 = READ_PIXEL.to_be_bytes();
+    let in_buffer_1 = 0x0102_0304u32.to_be_bytes();
+
+    // The window's id displays buffer 1: its front is buffer 1.
+    s.front.lock().displayed_buffer = 1;
+    bind_read_drawable(&mut s, 0x8000_2000);
+    assert_eq!(dma_read(&mut s, &ram, (30, 40, 1), front, 4)[..4], in_buffer_1, "window front: displayed");
+    assert_eq!(dma_read(&mut s, &ram, (30, 40, 1), back, 4)[..4], in_buffer_0, "window back");
+
+    // A pixel buffer, whichever buffer the ids under it display.
+    for displayed in [0, 1] {
+        s.front.lock().displayed_buffer = displayed;
+
+        bind_read_drawable(&mut s, 0x8016_a800);
+        assert_eq!(dma_read(&mut s, &ram, (30, 40, 1), front, 4)[..4], in_buffer_0, "unswapped front: buffer 0");
+        assert_eq!(dma_read(&mut s, &ram, (30, 40, 1), back, 4)[..4], in_buffer_1, "unswapped back: buffer 1");
+
+        bind_read_drawable(&mut s, 0x0016_a800);
+        assert_eq!(dma_read(&mut s, &ram, (30, 40, 1), front, 4)[..4], in_buffer_1, "swapped front: buffer 1");
+        assert_eq!(dma_read(&mut s, &ram, (30, 40, 1), back, 4)[..4], in_buffer_0, "swapped back: buffer 0");
+    }
+
+    // The copy into a scratch object takes the same buffer.
+    let base = 0x16b000;
+    let obj = s.object_select(base, 16);
+    copy_block(&mut s, [0x3000_0019, 40 << 16 | 30, 0x8020_0050, 1 << 16 | 1, front, base, 0, 0x3802_204b]);
+    assert_eq!(s.object_load(obj, 0, 0), 0x0102_0304, "swapped front");
 }

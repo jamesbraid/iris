@@ -848,9 +848,47 @@ impl Board {
         if src.obj >= 0 {
             return self.object_load(src.obj, x as u32, y as u32);
         }
+        let buffer = self.read_buffer(src.front, x, y);
+        self.buffer_load(buffer, x, y)
+    }
+
+    /// Whether the bound read drawable is an off-screen object (a pixel
+    /// buffer) and not the screen: the base 0x609 names is not the first
+    /// colour buffer the X server selected, which is the screen's.
+    pub fn read_drawable_offscreen(&self) -> bool {
+        let base = self.read_word & !ODSY_DRAW_WORD_STATE;
+
+        self.screen_base != 0 && base != 0 && base != self.screen_base
+    }
+
+    /// The colour buffer, 0 or 1, that a GL read of pixel (x, y) names by
+    /// its front bit (word 4 bit 31 of the read header). `front` is logical.
+    ///
+    /// A window's logical front is the buffer its id displays and its back
+    /// the other: the draw mask the kernel sends is absolute, with front and
+    /// back exchanged once the window has swapped, so a front draw lands in
+    /// the displayed buffer.
+    ///
+    /// INFERRED (datasheet, "Front and back of a pixel buffer"): a pixel
+    /// buffer has no on-screen id, so its front is the buffer a front draw
+    /// mask writes. ESTABLISHED there: the kernel sends the mask unchanged
+    /// and sets bit 31 of the buffer registers 0x608 and 0x609 when the
+    /// drawable's swap halfword is zero, and sends the mask with front and
+    /// back exchanged and bit 31 clear when it is not. So bit 31 of the read
+    /// register set means front is buffer 0, clear means buffer 1, whatever
+    /// the displayed bits of the ids under the pixel buffer's plane
+    /// coordinates say. How the board itself resolves the bit is unknown, and
+    /// the model keys on the register, not on a swap state of its own.
+    pub fn read_buffer(&mut self, front: bool, x: i64, y: i64) -> u32 {
+        if self.read_drawable_offscreen() {
+            let buffer_0_is_front = self.read_word & ODSY_DRAW_WORD_STATE != 0;
+
+            return if front == buffer_0_is_front { 0 } else { 1 };
+        }
         let id = self.main_id(x as u32, y as u32);
         let shown = self.front.lock().displayed_buffer.checked_shr(id).unwrap_or(0) & 1;
-        self.buffer_load(if src.front { shown } else { (shown == 0) as u32 }, x, y)
+
+        if front { shown } else { shown ^ 1 }
     }
 }
 
