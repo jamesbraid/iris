@@ -223,13 +223,7 @@ pub fn push_hot_request(req: CompileRequest) {
 }
 
 
-/// Page size for JIT v2 (§2.4) — matches the MIPS TLB/cache page granularity
-/// used throughout the codebase, and the granularity of the per-page
-/// generation counters. An architectural property of the machine: JIT v2
-/// keys pages by PFN at this size, and `mem.rs` re-exports it as
-/// `JITV2_PAGE_SIZE` for its own generation-counter indexing. Canonical home
-/// for this constant.
-pub const PAGE_SIZE: u32 = 4096;
+pub use crate::ppmem::CODE_PAGE_SIZE as PAGE_SIZE;
 
 /// Number of possible entry offsets per page: one per 4-byte-aligned word
 /// (MIPS instructions are always word-aligned), i.e. `PAGE_SIZE / 4` (§2.4:

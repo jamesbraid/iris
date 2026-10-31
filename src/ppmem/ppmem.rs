@@ -39,7 +39,7 @@ use crate::traits::{
 };
 
 #[cfg(feature = "jitv2")]
-const JITV2_PAGE_SIZE: usize = crate::cpu::jitv2::jitv2::PAGE_SIZE as usize;
+const JITV2_PAGE_SIZE: usize = crate::ppmem::CODE_PAGE_SIZE as usize;
 
 /// Size of the emulated physical address space the window covers: 4GB, unless
 /// the machine asks for [`LARGE_WINDOW_SIZE`].

@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicU64;
 use crate::traits::{BusRead8, BusRead16, BusRead32, BusRead64, BusDevice, BUS_OK, BUS_ERR, Resettable};
 
 #[cfg(feature = "jitv2")]
-const JITV2_PAGE_SIZE: usize = crate::cpu::jitv2::jitv2::PAGE_SIZE as usize;
+const JITV2_PAGE_SIZE: usize = crate::ppmem::CODE_PAGE_SIZE as usize;
 
 /// Memory Module with direct word access
 ///
