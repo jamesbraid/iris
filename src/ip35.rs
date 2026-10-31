@@ -13,7 +13,7 @@
 //!
 //! Ported from hw/mips/sgi/sn1-node.c in jamesbraid/qemu-sgi-origami.
 
-use crate::dev::bedrock_mem::{BANK_SPAN, FITTED_BANK};
+use crate::dev::bedrock_mem::RamExtent;
 use crate::physical::Physical;
 use crate::traits::*;
 #[cfg(feature = "jitv2")]
@@ -232,10 +232,13 @@ impl Ip35Bus {
     pub fn code_view(self: &Arc<Self>, cached: Arc<dyn BusDevice>) -> Arc<dyn BusDevice> {
         Arc::new(CodeViews { cached, uncached: self.clone() })
     }
-    pub fn cached_view(&self, plain_memory: Arc<dyn BusDevice>) -> Arc<dyn BusDevice> {
+    /// Cached RAM, with `plain_memory` answering wherever `extent` says
+    /// fitted RAM can be.
+    pub fn cached_view(&self, plain_memory: Arc<dyn BusDevice>, extent: RamExtent) -> Arc<dyn BusDevice> {
         Arc::new(CachedPhysical {
             phys: self.phys.clone(),
             plain_memory,
+            extent,
         })
     }
 }
@@ -268,6 +271,7 @@ impl BusDevice for CodeViews {
 struct CachedPhysical {
     phys: Arc<Physical>,
     plain_memory: Arc<dyn BusDevice>,
+    extent: RamExtent,
 }
 impl CachedPhysical {
     fn memory_target(&self, a: u64, n: u64) -> Option<(&dyn BusDevice, u64)> {
@@ -275,7 +279,7 @@ impl CachedPhysical {
             // MD owns every guest write to a possible fitted-RAM prefix, so
             // all paths update its stable logical generation counters. PROM
             // and other devices retain the cached Physical connection.
-            let memory: &dyn BusDevice = if pa / BANK_SPAN < 4 && pa % BANK_SPAN < FITTED_BANK {
+            let memory: &dyn BusDevice = if self.extent.contains(pa) {
                 self.plain_memory.as_ref()
             } else { physical };
             (memory, pa)

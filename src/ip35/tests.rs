@@ -518,7 +518,7 @@ fn code_generations_use_the_cached_plane_and_stable_ram_endpoint() {
     bus.set_ram_generations(stable_ram.clone());
     bus.map(3, 0, 0x1000, stable_ram.clone());
     bus.map(3, 0x3000, 8, stable_ram.clone());
-    let cached = bus.cached_view(stable_ram.clone());
+    let cached = bus.cached_view(stable_ram.clone(), crate::dev::bedrock_mem::RamExtent::new(&[256, 256]));
     assert_eq!(bus.gen_ptr(0x40), &stable_ram.generation as *const AtomicU64);
     assert_eq!(cached.gen_ptr(0x40), &stable_ram.generation as *const AtomicU64);
     assert_eq!(bus.gen_ptr(0x1fc00000), &rom.generation as *const AtomicU64);
@@ -678,10 +678,10 @@ fn uncached_fetch_compiles_the_uncached_view_body() {
     bus.set_ram_generations(ram.clone());
     bus.map(0, reset_vector, 0x1000, rom.clone());
     let bus = Arc::new(bus);
-    let code_bus = bus.code_view(bus.cached_view(ram.clone()));
+    let code_bus = bus.code_view(bus.cached_view(ram.clone(), crate::dev::bedrock_mem::RamExtent::new(&[512])));
     // The two views really disagree here.
     assert_eq!(bus.read32(reset_vector).data, addiu_r1);
-    assert_eq!(bus.cached_view(ram.clone()).read32(reset_vector).data, JIT_REGION_BOUNDARY_SENTINEL);
+    assert_eq!(bus.cached_view(ram.clone(), crate::dev::bedrock_mem::RamExtent::new(&[512])).read32(reset_vector).data, JIT_REGION_BOUNDARY_SENTINEL);
 
     let mut cpu = crate::ip35_machine::build_cpu(bus.clone());
     cpu.enable_jitv2_uncached_views(code_bus.clone());
@@ -768,7 +768,7 @@ mod code_views {
         let bus = Arc::new(bus);
         let mut cpu = crate::ip35_machine::build_cpu(bus.clone());
         if opted_in {
-            let cached = bus.cached_view(ram);
+            let cached = bus.cached_view(ram, crate::dev::bedrock_mem::RamExtent::new(&[512]));
             cpu.enable_jitv2_uncached_views(bus.code_view(cached));
         }
         (bus, cpu)
