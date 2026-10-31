@@ -19,13 +19,13 @@ profile = "tezro"
 # Required: names the R10000 family. The machine always runs the
 # R16000 at 700 MHz with a 4 MiB secondary cache; other values are refused.
 cpu = "r10000"
+# Processors fitted: 1, 2 or 4 (the default). Only CPU 0 runs.
+cpus = 4
 
 [graphics]
 board = "none"
 
 [tezro]
-# Processors fitted: 1, 2 or 4 (the default). Only CPU 0 runs.
-cpus = 4
 flash = "ignore/tezro/flash.bin"
 console = "l1"
 l1_port = 18882

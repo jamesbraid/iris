@@ -845,18 +845,28 @@ pub struct MachineSection {
     pub cpu: CpuModel,
     #[serde(default)]
     pub cache: CacheModel,
-    /// Processors fitted. More than one only on the Octane.
-    #[serde(default = "default_cpus")]
-    pub cpus: u8,
+    /// Processors fitted, or the profile's default when unset: read it with
+    /// [`MachineSection::cpus`]. More than one only on the Octane and the
+    /// Tezro.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<u8>,
 }
 
-fn default_cpus() -> u8 {
-    1
+impl MachineSection {
+    /// The processors fitted: `cpus` as set, or the profile's default, four
+    /// on the Tezro as in the Tezros whose inventories have been seen and
+    /// one elsewhere.
+    pub fn cpus(&self) -> u8 {
+        self.cpus.unwrap_or(match self.profile {
+            MachineProfile::TezroIp53 => 4,
+            _ => 1,
+        })
+    }
 }
 
 impl Default for MachineSection {
     fn default() -> Self {
-        Self { profile: MachineProfile::default(), cpu: CpuModel::default(), cache: CacheModel::default(), cpus: default_cpus() }
+        Self { profile: MachineProfile::default(), cpu: CpuModel::default(), cache: CacheModel::default(), cpus: None }
     }
 }
 
@@ -1459,17 +1469,10 @@ impl TezroConsole {
 /// The processor counts a Tezro board fits.
 pub const TEZRO_CPUS: [u8; 3] = [1, 2, 4];
 
-/// Four, as in the Tezros whose inventories have been seen.
-fn default_tezro_cpus() -> u8 {
-    4
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TezroSection {
-    /// Processors fitted. Only the first runs.
-    #[serde(default = "default_tezro_cpus")]
-    pub cpus: u8,
     /// Persistent 16 MiB boot flash store; absent means volatile flash.
     #[serde(default)]
     pub flash: Option<String>,
@@ -1492,7 +1495,6 @@ pub struct TezroSection {
 impl Default for TezroSection {
     fn default() -> Self {
         Self {
-            cpus: default_tezro_cpus(),
             flash: None,
             console: TezroConsole::default(),
             l1_port: None,
@@ -1506,8 +1508,7 @@ impl Default for TezroSection {
 impl TezroSection {
     /// Left out of a written config when nothing in it was set.
     fn is_default(&self) -> bool {
-        self.cpus == default_tezro_cpus()
-            && self.flash.is_none()
+        self.flash.is_none()
             && self.console == TezroConsole::default()
             && self.l1_port.is_none()
             && self.l1_log.is_none()
@@ -2082,8 +2083,8 @@ impl MachineConfig {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.machine.cpus != 1 && self.machine.profile != MachineProfile::OctaneIp30 {
-            return Err(format!("[machine] cpus = {}: only the Octane has more than one processor", self.machine.cpus));
+        if self.machine.cpus() != 1 && !matches!(self.machine.profile, MachineProfile::OctaneIp30 | MachineProfile::TezroIp53) {
+            return Err(format!("[machine] cpus = {}: only the Octane and the Tezro have more than one processor", self.machine.cpus()));
         }
         if self.graphics.heads != 1 && self.graphics.heads != 2 {
             return Err(format!(
@@ -2186,10 +2187,10 @@ impl MachineConfig {
             if self.machine.cpu != CpuModel::R10000 {
                 return Err("a Tezro has R16000s: set [machine] cpu = \"r10000\" (the R10000 family)".into());
             }
-            if !TEZRO_CPUS.contains(&self.tezro.cpus) {
-                return Err(format!("tezro.cpus = {} is not a Tezro board's population (valid: {TEZRO_CPUS:?})", self.tezro.cpus));
+            if !TEZRO_CPUS.contains(&self.machine.cpus()) {
+                return Err(format!("[machine] cpus = {} is not a Tezro board's population (valid: {TEZRO_CPUS:?})", self.machine.cpus()));
             }
-            self.tezro_memory()?.check_for_cpus(usize::from(self.tezro.cpus)).map_err(|e| format!("banks: {e}"))?;
+            self.tezro_memory()?.check_for_cpus(usize::from(self.machine.cpus())).map_err(|e| format!("banks: {e}"))?;
             if board != GraphicsBoard::None {
                 return Err("Tezro currently supports graphics.board = \"none\" only".into());
             }
@@ -3371,12 +3372,33 @@ mod tezro_config_tests {
         cfg.validate().unwrap();
     }
 
+    /// `[machine] cpus` is the processors fitted: four on a Tezro unless
+    /// set, one elsewhere, and only the Octane and the Tezro take more.
+    #[test]
+    fn machine_cpus_defaults_to_four_on_the_tezro_and_one_elsewhere() {
+        let mut cfg = tezro();
+        assert_eq!(cfg.machine.cpus(), 4);
+        cfg.validate().unwrap();
+        for cpus in [1, 2] {
+            cfg.machine.cpus = Some(cpus);
+            cfg.validate().unwrap();
+            assert_eq!(cfg.machine.cpus(), cpus);
+        }
+        assert_eq!(MachineConfig::default().machine.cpus(), 1);
+        let loaded: MachineConfig = toml::from_str("[machine]\nprofile = \"tezro\"\ncpu = \"r10000\"\ncpus = 2\n").unwrap();
+        assert_eq!(loaded.machine.cpus(), 2);
+        let mut fuel = MachineConfig::default();
+        fuel.machine.profile = MachineProfile::FuelIp34;
+        fuel.machine.cpus = Some(2);
+        assert!(fuel.validate().unwrap_err().contains("only the Octane and the Tezro"));
+    }
+
     #[test]
     fn tezro_refuses_a_processor_count_its_board_does_not_fit() {
         for cpus in [0, 3, 5] {
             let mut cfg = tezro();
-            cfg.tezro.cpus = cpus;
-            assert!(cfg.validate().unwrap_err().contains("tezro.cpus"), "{cpus}");
+            cfg.machine.cpus = Some(cpus);
+            assert!(cfg.validate().unwrap_err().contains("[machine] cpus"), "{cpus}");
         }
     }
 
