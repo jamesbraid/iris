@@ -362,14 +362,14 @@ fn a_depth_or_stencil_burst_writes_the_plane_the_write_mask_names() {
     s.stencil_store(40, 10, 0x0f);
     s.stencil_store(41, 10, 0x0f);
     write_mask(&mut s, 0xf0 << 12);
-    burst_image(&mut s, (40, 10, 42, 11), 0x0021_1080, ODSY_IMAGE_FMT_RGB, &[0x0000_00a5, 0x0000_005a]);
+    burst_image(&mut s, (40, 10, 42, 11), 0x0021_1080, ODSY_IMAGE_FMT_RGB, &[0x00a5_0000, 0x005a_0000]);
     assert_eq!(stencil_at(&s, 40, 10), 0xaf, "the masked bits change, the rest keep");
     assert_eq!(stencil_at(&s, 41, 10), 0x5f);
     assert_eq!(s.depth_load(40, 10), 0x0012_3456, "a stencil download leaves depth");
 
     // A zero stencil mask and no depth bit: nothing is written.
     write_mask(&mut s, 0);
-    burst_image(&mut s, (40, 10, 41, 11), 0x0011_1080, ODSY_IMAGE_FMT_RGB, &[0x0099_9999]);
+    burst_image(&mut s, (40, 10, 41, 11), 0x0011_1080, ODSY_IMAGE_FMT_RGB, &[0x0099_0000]);
     assert_eq!(s.depth_load(40, 10), 0x0012_3456);
     assert_eq!(stencil_at(&s, 40, 10), 0xaf);
     for buffer in 0..2 {
