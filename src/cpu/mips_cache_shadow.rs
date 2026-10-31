@@ -200,6 +200,9 @@ impl<
     /// PRId-specific compatibility policies approximate R14000 behavior;
     /// they are not measurements of R14000 silicon.
     const IS_R14000: bool = MODEL == model::R10000 && ((PRID >> 8) & 0xff) == 0x0f;
+    /// The R16000 shares the R14000's implementation field (0x0f) and takes
+    /// every R14000 policy; only its PRId, cache size and name differ.
+    const IS_R16000: bool = Self::IS_R14000 && PRID == 0x0000_0f50;
     const R5K: bool = MODEL == model::R5000;
     const IC_LINES: usize = if IC_LINE == 0 { 0 } else { IC_SIZE / IC_LINE };
     const DC_LINES: usize = if DC_LINE == 0 { 0 } else { DC_SIZE / DC_LINE };
@@ -355,7 +358,9 @@ impl<
     // a mismatch reads as a cache-kind difference rather than a different CPU.
     // The R10000 keeps its historical "shadow", which existing IP28
     // snapshots carry.
-    const NAME: &'static str = if Self::IS_R14000 {
+    const NAME: &'static str = if Self::IS_R16000 {
+        "R16000"
+    } else if Self::IS_R14000 {
         "R14000"
     } else {
         match MODEL {
@@ -753,6 +758,24 @@ pub type R10000O2ShadowCache =
 pub type R14000ShadowCache =
     ShadowCache<32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0f23, 0x0000_0900, 64, { model::R10000 }>;
 
+/// SGI Tezro R16000 (IP53 board) with its 4 MiB secondary cache.
+///
+/// PRId 0x0f50 is what the Tezro's PROM prints for every processor. The FPU
+/// revision is the R14000 compatibility value. No R16000 specification is
+/// available, so this is the R14000 model with a 4 MiB secondary cache and
+/// its own name. The two policies the QEMU model selects for it are already
+/// the core's for every R10000-family model: a soft reset keeps Config and
+/// the watch registers, and a denormal ADD.S or DIV.S operand raises
+/// Unimplemented Operation. All are approximations, not measurements of
+/// silicon.
+///
+/// Differences from the QEMU model, shared with the R14000 here: the core
+/// refuses a denormal operand whatever FCSR.FS says, where QEMU refuses it
+/// only with FS clear; CVT.L has no 52-bit limit; and the CP0 diagnostic
+/// register is not modelled.
+pub type R16000ShadowCache =
+    ShadowCache<32768, 64, 32768, 32, 4194304, 128, true, 0x0000_0f50, 0x0000_0900, 64, { model::R10000 }>;
+
 /// SGI Indy / Indigo2 R4400: the full model's geometry and identity — 16 KB
 /// direct-mapped primaries with 16-byte lines, a 1 MB secondary with 128-byte
 /// lines, PRId/FIR, 48 TLB entries, MIPS III — so CP0 Config and a PROM's
@@ -1015,6 +1038,44 @@ mod tests {
         assert!(<R14K as CpuModel>::LWR_PRESERVES_UPPER);
         assert!(<R14K as CpuModel>::FPU_FR1_WORD_WRITES_ZERO_UPPER);
         assert!(<R14K as CpuModel>::FPU_FR0_MOV_S_PRESERVES_PAIR);
+    }
+
+    /// The Tezro's PROM prints PRId 0x0f50 and sizes the secondary cache from
+    /// Config, so those and the name a snapshot checks must be the R16000's,
+    /// while the R14000 policies the PROM was seen to need stay on.
+    #[test]
+    fn the_r16000_is_the_r14000_with_a_4_mib_secondary_cache() {
+        type R16K = R16000ShadowCache;
+        type R14K = R14000ShadowCache;
+        assert_eq!(<R16K as CpuModel>::PRID, 0x0000_0f50);
+        assert_eq!(<R16K as CpuModel>::NAME, "R16000");
+        assert_eq!(<R14K as CpuModel>::NAME, "R14000", "the Fuel's snapshots keep their name");
+        assert_eq!(<R16K as MipsCache>::L2_SIZE, 4 * 1024 * 1024);
+        assert_eq!(<R16K as MipsCache>::L2_LINE, 128);
+        assert_eq!(
+            (<R16K as CpuModel>::FIR, <R16K as CpuModel>::TLB_ENTRIES, <R16K as CpuModel>::MIPS4,
+             <R16K as MipsCache>::IC_SIZE, <R16K as MipsCache>::IC_LINE,
+             <R16K as MipsCache>::DC_SIZE, <R16K as MipsCache>::DC_LINE),
+            (<R14K as CpuModel>::FIR, <R14K as CpuModel>::TLB_ENTRIES, <R14K as CpuModel>::MIPS4,
+             <R14K as MipsCache>::IC_SIZE, <R14K as MipsCache>::IC_LINE,
+             <R14K as MipsCache>::DC_SIZE, <R14K as MipsCache>::DC_LINE),
+        );
+        assert!(<R16K as CpuModel>::ENTRYHI_FULL_VA);
+        assert!(<R16K as CpuModel>::R10K_PRIMARY_DATA_OPS);
+        assert_eq!(<R16K as CpuModel>::SECONDARY_TAG_MASK, R14000_L2_TAG_MASK);
+        assert!(<R16K as CpuModel>::LWR_PRESERVES_UPPER);
+        assert!(<R16K as CpuModel>::UNCACHED_MASKED_SUBWORD_STORES);
+    }
+
+    /// A 4 MiB secondary cache has twice the lines of the Fuel's, and a
+    /// diagnostic reaches the last of them: the tag array must be that big.
+    #[test]
+    fn the_r16000_secondary_tags_cover_all_of_the_4_mib() {
+        let r16 = R16000ShadowCache::new(Arc::new(Memory::new(1)));
+        let last = (4 * 1024 * 1024 - 128) as u64;
+        r16.cache_op(C_IST | CACH_SD, last, 0x1234_5000);
+        assert_eq!(r16.cache_op(C_ILT | CACH_SD, last, 0), 0x1234_5000 & R14000_L2_TAG_MASK);
+        assert_eq!(r16.get_config(CACH_SD), (4 * 1024 * 1024, 128));
     }
 
     /// The O2 R10000 differs from the IP28's only in its secondary line size.
