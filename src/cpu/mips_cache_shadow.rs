@@ -21,8 +21,8 @@
 //!   for a missed writeback to lose data.
 //! - **Diagnostics round-trip by default.** The shadow stores whatever bits
 //!   are written to it and returns them unchanged, so walking-1s tests pass
-//!   without knowing the hardware's field layout. The R14000 alone masks its
-//!   secondary tags (`R14000_L2_TAG_MASK`).
+//!   without knowing the hardware's field layout. The R14000 and R16000 alone
+//!   mask their secondary tags (`R14000_L2_TAG_MASK`).
 //!
 //! The shadow is deliberately not consulted by `read`/`write`/`fetch`. If it
 //! ever needs to be, this type is the wrong shape and should say so loudly
@@ -92,7 +92,10 @@ const WAYS: usize = 2;
 /// Bits an R14000 secondary-cache tag retains: MRU, physical tag, state,
 /// virtual index and ECC, from the R10000 tag format in NEC U10278EJ4V0UM
 /// p.270, figure 11-31. It is a compatibility choice for the Fuel PROM's tag
-/// check, not a measurement of R14000 silicon. A 36-bit mask once inferred
+/// check, not a measurement of R14000 silicon. The R16000 takes it for the
+/// same PROM, 6.210, on the Tezro: its secondary-cache tag march expects bits
+/// 9 and 12 to read back clear and disables the CPU when they do not. A
+/// 36-bit mask once inferred
 /// from the IP28 PROM's walking-0s phase broke its diagnostics, so the other
 /// parts keep every bit and extending this one needs IP28 and Octane
 /// diagnostic comparisons.
@@ -348,7 +351,7 @@ impl<
     };
     const CACHE_KIND: &'static str = "shadow";
     const R10K_CACHE_OPS: bool = Self::R10K;
-    const SECONDARY_TAG_MASK: u64 = if MODEL == model::R14000 { R14000_L2_TAG_MASK } else { u64::MAX };
+    const SECONDARY_TAG_MASK: u64 = if MODEL == model::R14000 || MODEL == model::R16000 { R14000_L2_TAG_MASK } else { u64::MAX };
     const POSTS_UNCACHED_STORES: bool = Self::R10K;
 }
 
@@ -797,7 +800,8 @@ pub type R14000Ip30ShadowCache =
 /// and the Origin 3900 part has 8 MiB. Its 128-byte line is unestablished.
 /// Linux treats the R16000 secondary cache like the family's (c-r4k.c,
 /// 374-390). Nothing else of the R16000 is modelled: its CP0 diagnostic
-/// register, denormal handling and CVT.L limit are the R14000's.
+/// register, denormal handling, CVT.L limit and secondary tag mask are the
+/// R14000's.
 pub type R16000ShadowCache =
     ShadowCache<32768, 64, 32768, 32, 4194304, 128, true, 0x0000_0f50, 0x0000_0900, 64, { model::R16000 }>;
 
@@ -1041,7 +1045,7 @@ mod tests {
 
     /// Each R10000-family part reports its own identity, and all of them are
     /// the family: 44 virtual and 40 physical address bits, R10000 cache
-    /// operations. Only the R14000 masks its secondary tags.
+    /// operations. Only the R14000 and R16000 mask their secondary tags.
     #[test]
     fn the_r10000_family_parts_report_their_own_identity() {
         fn id<C: CpuModel>() -> (u32, u32, usize, bool, &'static str, u32, u32, u64) {
@@ -1054,7 +1058,7 @@ mod tests {
         assert_eq!(id::<R12000ShadowCache>(), (0xe35, 0x900, 64, true, "R12000", 44, 40, u64::MAX));
         assert_eq!(id::<R14000ShadowCache>(), (0xf23, 0x900, 64, true, "R14000", 44, 40, R14000_L2_TAG_MASK));
         assert_eq!(id::<R14000Ip30ShadowCache>(), (0xf24, 0x900, 64, true, "R14000", 44, 40, R14000_L2_TAG_MASK));
-        assert_eq!(id::<R16000ShadowCache>(), (0xf50, 0x900, 64, true, "R16000", 44, 40, u64::MAX));
+        assert_eq!(id::<R16000ShadowCache>(), (0xf50, 0x900, 64, true, "R16000", 44, 40, R14000_L2_TAG_MASK));
         assert_eq!(caches::<R12000ShadowCache>(), (32768, 64, 32768, 32, 2 << 20, 128));
         assert_eq!(caches::<R12000O2ShadowCache>(), (32768, 64, 32768, 32, 1 << 20, 64));
         assert_eq!(caches::<R14000ShadowCache>(), (32768, 64, 32768, 32, 2 << 20, 128));
@@ -1074,10 +1078,10 @@ mod tests {
     }
 
     /// The secondary tag mask is the one difference between the family's parts
-    /// that diagnostics see: the R14000 keeps MRU, tag, state, index and ECC,
-    /// and the rest keep every bit.
+    /// that diagnostics see: the R14000 and R16000 keep MRU, tag, state, index
+    /// and ECC, and the rest keep every bit.
     #[test]
-    fn only_the_r14000_masks_secondary_tags() {
+    fn only_the_r14000_and_r16000_mask_secondary_tags() {
         fn stored<C: CpuModel + MipsCache + From<Arc<dyn BusDevice>>>() -> u64 {
             let c = C::from(Arc::new(Memory::new(1)) as Arc<dyn BusDevice>);
             c.cache_op(C_IST | CACH_SD, 0, u64::MAX);
@@ -1085,8 +1089,8 @@ mod tests {
         }
         assert_eq!(stored::<R10000ShadowCache>(), u64::MAX);
         assert_eq!(stored::<R12000ShadowCache>(), u64::MAX);
-        assert_eq!(stored::<R16000ShadowCache>(), u64::MAX);
         assert_eq!(stored::<R14000ShadowCache>(), 0x8000_000f_ffff_cdff);
+        assert_eq!(stored::<R16000ShadowCache>(), 0x8000_000f_ffff_cdff);
     }
 
     /// The O2 R10000 differs from the IP28's only in its secondary line size.
