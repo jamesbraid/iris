@@ -791,11 +791,11 @@ pub fn float_to_u32(bits: u32) -> u32 {
 
 impl Board {
 
-    /// The object an image transfer writes, or -1 for the screen: the last 0x1017
-    /// select, when it named a base other than the colour buffer's.
-    pub fn image_object(&mut self) -> i32 {
+    /// The object an image transfer writes, or None for the screen: the last
+    /// 0x1017 select, when it named a base other than the colour buffer's.
+    pub fn image_object(&mut self) -> Option<usize> {
         if self.dest_base == 0 || self.dest_base == self.dma_colour_base || self.dest_is_id_planes() {
-            return -1;
+            return None;
         }
         self.object_find(self.dest_base)
     }
@@ -817,8 +817,7 @@ impl Board {
         if self.image_x2 == self.image_x1 || self.image_y2 == self.image_y1 || y_finished {
             return;
         }
-        let obj = self.image_object();
-        if obj >= 0 {
+        if let Some(obj) = self.image_object() {
             // An off-screen object: box coordinates, no window or id tests.
             self.object_store(obj, self.image_cur_x, self.image_cur_y, rgba);
         } else if self.dest_is_id_planes() {
@@ -945,49 +944,26 @@ pub fn decode_texel12(code: u32, b: &[u8], wide: bool) -> u32 {
 
 impl Board {
     /// Decode one pixel of a byte-stream source format whose bytes are b[0 ..]:
-    /// its 0xRRGGBBAA word, or for 0x41 and 0x61 the raw index. False for a code
+    /// its 0xRRGGBBAA word, or for 0x41 and 0x61 the raw index. None for a code
     /// this model does not know.
-    pub fn decode_pixel(&mut self, code: u32, b: &[u8], rgba: &mut u32) -> bool {
+    pub fn decode_pixel(&mut self, code: u32, b: &[u8]) -> Option<u32> {
         match code {
-            ODSY_IMAGE_CODE_ABGR => {
-                *rgba = (pack_pixel(b[3] as u32, b[2] as u32, b[1] as u32) & !0xffu32) | b[0] as u32;
-                true
-            }
-            ODSY_IMAGE_CODE_FALLBACK_XRGB => {
-                *rgba = pack_pixel(b[1] as u32, b[2] as u32, b[3] as u32);
-                true
-            }
-            ODSY_IMAGE_CODE_RGBA | ODSY_IMAGE_CODE_RGBA12 => {
-                *rgba = u32::from_be_bytes(b[..4].try_into().unwrap());
-                true
-            }
-            ODSY_IMAGE_CODE_RGB => {
-                *rgba = pack_pixel(b[0] as u32, b[1] as u32, b[2] as u32);
-                true
-            }
-            ODSY_IMAGE_CODE_LUM => {
-                *rgba = pack_pixel(b[0] as u32, b[0] as u32, b[0] as u32);
-                true
-            }
-            ODSY_IMAGE_CODE_LUM_ALPHA => {
-                *rgba = (pack_pixel(b[0] as u32, b[0] as u32, b[0] as u32) & !0xffu32) | b[1] as u32;
-                true
-            }
+            ODSY_IMAGE_CODE_ABGR => Some((pack_pixel(b[3] as u32, b[2] as u32, b[1] as u32) & !0xffu32) | b[0] as u32),
+            ODSY_IMAGE_CODE_FALLBACK_XRGB => Some(pack_pixel(b[1] as u32, b[2] as u32, b[3] as u32)),
+            ODSY_IMAGE_CODE_RGBA | ODSY_IMAGE_CODE_RGBA12 => Some(u32::from_be_bytes(b[..4].try_into().unwrap())),
+            ODSY_IMAGE_CODE_RGB => Some(pack_pixel(b[0] as u32, b[1] as u32, b[2] as u32)),
+            ODSY_IMAGE_CODE_LUM => Some(pack_pixel(b[0] as u32, b[0] as u32, b[0] as u32)),
+            ODSY_IMAGE_CODE_LUM_ALPHA => Some((pack_pixel(b[0] as u32, b[0] as u32, b[0] as u32) & !0xffu32) | b[1] as u32),
             ODSY_IMAGE_CODE_LUM12 | ODSY_IMAGE_CODE_LUM_ALPHA12 => {
                 // A burst's 16-bit components (pixel_bytes()).
-                *rgba = decode_texel12(code, b, true);
-                true
+                Some(decode_texel12(code, b, true))
             }
             ODSY_IMAGE_CODE_CI => {
                 // The raw index: scanout resolves it through the pixel's drawable.
-                *rgba = b[0] as u32;
-                true
+                Some(b[0] as u32)
             }
-            ODSY_IMAGE_CODE_CI16 => {
-                *rgba = u16::from_be_bytes(b[..2].try_into().unwrap()) as u32 & ODSY_INDEX_MASK;
-                true
-            }
-            _ => false,
+            ODSY_IMAGE_CODE_CI16 => Some(u16::from_be_bytes(b[..2].try_into().unwrap()) as u32 & ODSY_INDEX_MASK),
+            _ => None,
         }
     }
 }
@@ -1084,7 +1060,7 @@ impl Board {
         let y = self.image_cur_y as i64 + self.win_origin[1] as i64;
 
         // An off-screen object and the id planes hold no depth or stencil.
-        if self.image_object() < 0 && !self.dest_is_id_planes() && self.pixel_allowed(x, y) {
+        if self.image_object().is_none() && !self.dest_is_id_planes() && self.pixel_allowed(x, y) {
             let mask = (self.gl_write_mask >> ODSY_WRITE_STENCIL_SHIFT) & ODSY_WRITE_STENCIL_MASK;
 
             if self.gl_write_mask & ODSY_WRITE_DEPTH != 0 {
@@ -1222,7 +1198,6 @@ impl Board {
 
         for (i, &byte) in b[..4].iter().enumerate() {
             let mut px = [0u8; 4];
-            let mut rgba = 0u32;
 
             self.image_bytes = (self.image_bytes << 8) | byte as u32;
             self.image_nbytes += 1;
@@ -1232,7 +1207,7 @@ impl Board {
             self.image_nbytes = 0;
             // The pixel's bytes, first byte highest, at the start of px[].
             px[..4].copy_from_slice(&(self.image_bytes << (8 * (4 - n))).to_be_bytes());
-            self.decode_pixel(code, &px, &mut rgba);
+            let rgba = self.decode_pixel(code, &px).unwrap_or(0);
             let row = self.image_cur_y;
 
             self.image_texel(rgba, code);
@@ -1243,20 +1218,17 @@ impl Board {
     }
 }
 
-/// True, and set *fmt, when reg is a pixel-burst register-select word.
-pub fn image_burst_fmt(reg: u32, fmt: &mut u32) -> bool {
+/// The format of a pixel-burst register-select word, None for any other.
+pub fn image_burst_fmt(reg: u32) -> Option<u32> {
     let f = reg & ODSY_IMAGE_BURST_FMT_MASK;
 
     if (reg & ODSY_IMAGE_BURST_BASE) == 0 || (reg & ODSY_IMAGE_BURST_RESERVED_MASK) != 0 {
-        return false;
+        return None;
     }
     match f {
-        ODSY_IMAGE_FMT_CI | ODSY_IMAGE_FMT_RGB | ODSY_IMAGE_FMT_RGBA16 => {
-            *fmt = f;
-            true
-        }
+        ODSY_IMAGE_FMT_CI | ODSY_IMAGE_FMT_RGB | ODSY_IMAGE_FMT_RGBA16 => Some(f),
         // Other documented pixel-burst formats remain unsupported.
-        _ => false,
+        _ => None,
     }
 }
 

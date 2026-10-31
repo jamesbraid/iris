@@ -1316,7 +1316,7 @@ impl Board {
 
         s.obj_index = Default::default();
         // The fixed part of the drawable Board::gl_bind() hands over.
-        s.gl_bind_drawable.bound = 1;
+        s.gl_bind_drawable.bound = true;
         s.gl_bind_drawable.front = 0;
         s.gl_bind_drawable.back = 1;
         s.revision = 0xa;

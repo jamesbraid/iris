@@ -554,7 +554,7 @@ impl GlDrawState {
         let d = &self.drawable;
         let mut win = SoftWindow::default();
 
-        if d.bound == 0 {
+        if !d.bound {
             crate::dlog!(LogModule::Odyssey, "sgi-gl: draw with no window bound dropped");
             return None;
         }
@@ -933,7 +933,7 @@ impl RasterRules {
         }
         // The reference clamps to the buffer's range; with no stencil buffer
         // the test passes and nothing is written.
-        let smax = if st.stencil_test != 0 { self.stencil_max(t) } else { None };
+        let smax = if st.stencil_test { self.stencil_max(t) } else { None };
         let stencil = smax.is_some();
         let smax = smax.unwrap_or(0);
         if stencil {
@@ -950,14 +950,14 @@ impl RasterRules {
             }
         }
         let zq = self.depth_code_offset(z, steps);
-        if st.depth_test != 0 {
+        if st.depth_test {
             if !soft_compare(st.depth_func, zq, px.load_depth(x, y)) {
                 if stencil {
                     st.stencil_op(px, x, y, st.stencil_op[1], smax, sref);
                 }
                 return false;
             }
-            if st.depth_mask != 0 {
+            if st.depth_mask {
                 px.store_depth(x, y, zq);
             }
         }
@@ -1013,7 +1013,7 @@ impl RasterRules {
     /// colour bits taken as a fraction of its largest value. The planes hold
     /// no alpha, so the destination's alpha is 1. The result is clamped to
     /// [0, 1] by the subsequent colour conversion.
-    pub fn soft_blend_rgb(&self, st: &GlDrawState, src: u32, alpha: f64, dst: u32, out: &mut [f64; 3]) {
+    pub fn soft_blend_rgb(&self, st: &GlDrawState, src: u32, alpha: f64, dst: u32) -> [f64; 3] {
         let bits = self.color_bits as u32;
         let max: f64 = ((1u32 << bits) - 1) as f64;
         let mut s = [0.0f64; 4];
@@ -1027,19 +1027,14 @@ impl RasterRules {
         }
         s[3] = alpha;
         d[3] = 1.0;
-        for (k, o) in out.iter_mut().enumerate() {
-            *o = st.blend_component(k, &s, &d);
-        }
+        std::array::from_fn(|k| st.blend_component(k, &s, &d))
     }
 
 }
 
 impl SoftDraw<'_> {
     pub fn blend(&self, x: i32, y: i32, src: u32, alpha: f64, dst: u32) -> u32 {
-        let mut out = [0.0f64; 3];
-
-        self.rules.soft_blend_rgb(self.st, src, alpha, dst, &mut out);
-        self.rules.rgb(&out)
+        self.rules.rgb(&self.rules.soft_blend_rgb(self.st, src, alpha, dst))
     }
 }
 
@@ -1160,10 +1155,10 @@ impl SoftDraw<'_> {
 
         if st.index_bits != 0 {
             self.blend = false;
-            self.logic_op = st.index_logic_op != 0;
+            self.logic_op = st.index_logic_op;
         } else {
-            self.logic_op = st.color_logic_op != 0 || (st.blend != 0 && st.blend_equation == SGI_GL_LOGIC_OP);
-            self.blend = st.blend != 0 && !self.logic_op;
+            self.logic_op = st.color_logic_op || (st.blend && st.blend_equation == SGI_GL_LOGIC_OP);
+            self.blend = st.blend && !self.logic_op;
         }
         self.colour_mask = self.rules.colour_mask(st.colour_mask);
         if st.index_bits == 0 {
@@ -1300,7 +1295,7 @@ impl SoftDraw<'_> {
         let st: &GlDrawState = self.st;
 
         (self.win.clip.n <= 1 || self.win.clip.contains(x, y)) &&
-            (st.scissor_test == 0 ||
+            (!st.scissor_test ||
              (px >= st.scissor[0] &&
               (px as i64) < st.scissor[0] as i64 + st.scissor[2] as i64 &&
               py >= st.scissor[1] &&
@@ -1391,7 +1386,7 @@ impl SoftDraw<'_> {
                 return;
             }
         }
-        if st.fog != 0 {
+        if st.fog {
             self.fog(&mut fogged, z);
         }
         fogged.rgba[3] *= coverage;
@@ -1409,7 +1404,7 @@ impl SoftDraw<'_> {
         // Incoming alpha and reference use at least two bits and at least the
         // stored alpha width, independently of the colour mask (4.1.4, 2.13.9).
         let f = &fogged;
-        if st.alpha_test != 0 && st.index_bits == 0 &&
+        if st.alpha_test && st.index_bits == 0 &&
             !self.rules.alpha_test(st.alpha_func, f.rgba[3], st.alpha_ref as f64)
         {
             return;
@@ -1431,23 +1426,24 @@ impl GlDrawState {
     /// draw state's, or [0, 1] under a window matrix, whose depth is already
     /// window depth.
     #[inline]
-    pub fn depth_range(&self, n: &mut f64, f: &mut f64) {
-        *n = if self.window_matrix_given != 0 { 0.0 } else { self.depth_range[0] as f64 };
-        *f = if self.window_matrix_given != 0 { 1.0 } else { self.depth_range[1] as f64 };
+    pub fn depth_range(&self) -> (f64, f64) {
+        if self.window_matrix_given {
+            (0.0, 1.0)
+        } else {
+            (self.depth_range[0] as f64, self.depth_range[1] as f64)
+        }
     }
 
+    /// Normalized depth z, which must be in [0, 1], and an offset, mapped
+    /// through the depth range and clamped to [0, 1].
     #[inline]
-    pub fn window_depth(&self, z: f64, offset: f64, window: &mut f64) -> bool {
-        let mut n = 0.0;
-        let mut f = 0.0;
-
+    pub fn window_depth(&self, z: f64, offset: f64) -> Option<f64> {
         if !(0.0..=1.0).contains(&z) {
-            return false;
+            return None;
         }
-        self.depth_range(&mut n, &mut f);
+        let (n, f) = self.depth_range();
         let zw = n + (f - n) * z + offset;
-        *window = if zw >= 1.0 { 1.0 } else if zw > 0.0 { zw } else { 0.0 };
-        true
+        Some(if zw >= 1.0 { 1.0 } else if zw > 0.0 { zw } else { 0.0 })
     }
 }
 
@@ -1463,7 +1459,7 @@ impl SoftDraw<'_> {
         let vw = st.viewport[2];
         let vh = st.viewport[3];
 
-        if st.window_matrix_given != 0 {
+        if st.window_matrix_given {
             return Some((x0, y0, x1, y1));
         }
         if vw <= 0 || vh <= 0 {
@@ -1491,15 +1487,13 @@ impl SoftDraw<'_> {
     }
 
     /// Whether a polygon fragment at (px, py) is drawn under the polygon
-    /// stipple, and in *background whether it takes the target's opaque
-    /// stipple background (RasterTarget's stipple_opaque).
-    pub fn stipple_pass(&self, px: i32, py: i32, background: &mut bool) -> bool {
-        *background = false;
+    /// stipple: None when it is not, else whether it takes the target's
+    /// opaque stipple background (RasterTarget's stipple_opaque).
+    pub fn stipple_pass(&self, px: i32, py: i32) -> Option<bool> {
         if self.polygon_stipple.is_none_or(|rows| rows[((py as u32) & 31) as usize] & (1u32 << ((px as u32) & 31)) != 0) {
-            return true;
+            return Some(false);
         }
-        *background = self.t.stipple_opaque;
-        *background
+        self.t.stipple_opaque.then_some(true)
     }
 
     pub fn stipple_background(&self, frag: &mut SoftFrag) {
@@ -1519,7 +1513,6 @@ impl SoftDraw<'_> {
     pub fn fragment_coverage(&self, px: i32, py: i32, z: f64, offset: f64, depth_w: f64, frag: &SoftFrag, coverage: f64, antialias: bool) {
         let mut z = z;
         let (mut offset, steps) = self.rules.split_offset(offset);
-        let mut zw = 0.0;
 
         if self.rules.depth_row_given {
             let slack = self.rules.depth_slack;
@@ -1534,9 +1527,9 @@ impl SoftDraw<'_> {
                 z = 1.0;
             }
         }
-        if !(coverage > 0.0) || !self.st.window_depth(z, offset, &mut zw) {
+        let Some(zw) = self.st.window_depth(z, offset).filter(|_| coverage > 0.0) else {
             return;
-        }
+        };
         self.fragment_at_offset(px, py, zw, steps, frag, coverage, antialias);
     }
 
@@ -1552,10 +1545,7 @@ impl GlDrawState {
     /// depth step; EXT_polygon_offset's bias adds in window depth. Boundary modes
     /// share this slope calculation and select their own offset enable.
     pub fn depth_slope(&self, window: &[[f64; 3]; 3]) -> f64 {
-        let mut n = 0.0;
-        let mut f = 0.0;
-
-        self.depth_range(&mut n, &mut f);
+        let (n, f) = self.depth_range();
         let x1 = window[1][0] - window[0][0];
         let y1 = window[1][1] - window[0][1];
         let x2 = window[2][0] - window[0][0];
@@ -1572,21 +1562,14 @@ impl GlDrawState {
 }
 
 impl SoftDraw<'_> {
-    pub fn window_vertices(&self, v: &[SoftVertex; 3], window: &mut [[f64; 3]; 3]) {
+    pub fn window_vertices(&self, v: &[SoftVertex; 3]) -> [[f64; 3]; 3] {
         let sub = (1i32 << self.rules.subpixel_bits) as f64;
 
-        for i in 0..3usize {
-            window[i][0] = v[i].x as f64 / sub;
-            window[i][1] = v[i].y as f64 / sub;
-            window[i][2] = v[i].z;
-        }
+        v.map(|v| [v.x as f64 / sub, v.y as f64 / sub, v.z])
     }
 
     pub fn slope(&self, v: &[SoftVertex; 3]) -> f64 {
-        let mut window = [[0.0f64; 3]; 3];
-
-        self.window_vertices(v, &mut window);
-        self.st.depth_slope(&window)
+        self.st.depth_slope(&self.window_vertices(v))
     }
 }
 
@@ -1616,10 +1599,7 @@ impl RasterRules {
 
 impl SoftDraw<'_> {
     pub fn offset(&self, v: &[SoftVertex; 3]) -> f64 {
-        let mut window = [[0.0f64; 3]; 3];
-
-        self.window_vertices(v, &mut window);
-        self.rules.polygon_offset(self.st, &window)
+        self.rules.polygon_offset(self.st, &self.window_vertices(v))
     }
 }
 
@@ -1640,8 +1620,6 @@ impl SoftDraw<'_> {
         let st: &GlDrawState = self.st;
         let clip = &cv.clip;
         let eye = &cv.eye;
-        let mut win = [0.0f64; 3];
-
         if !self.texture_vertex_valid(cv) {
             return None;
         }
@@ -1649,7 +1627,7 @@ impl SoftDraw<'_> {
             crate::dlog!(LogModule::Odyssey, "sgi-gl: clipped vertex at w {} has no window position, primitive dropped", clip[3]);
             return None;
         }
-        st.clip_to_window(clip, &mut win);
+        let win = st.clip_to_window(clip);
         let xw = win[0];
         let yw = win[1];
         if !(xw.abs() < 65536.0 && yw.abs() < 65536.0) {
@@ -1747,7 +1725,7 @@ impl RasterRules {
             if !use_stipple
                 || d.mode < SGI_GL_LINES
                 || d.mode > SGI_GL_LINE_STRIP
-                || d.state.drawable.bound == 0
+                || !d.state.drawable.bound
                 || d.state.drawable.clip.n != 0
             {
                 return SGI_GL_DRAW_OK;
@@ -1771,11 +1749,8 @@ impl RasterRules {
         let mut fixed_on = false;
         if d.mode >= SGI_GL_TRIANGLES && d.mode <= SGI_GL_POLYGON && r.fixed_setup(&mut fixed) {
             let mut texels = 0u64;
-            let mut first = 0u32;
-            let mut last = 0u32;
-
             fixed.span = r.fixed_span_select(&fixed);
-            fixed.fixed_reach(&mut first, &mut last);
+            let (first, last) = fixed.fixed_reach();
             for i in first..=last {
                 texels += fixed.level[i as usize].width as u64 * fixed.level[i as usize].height as u64;
             }

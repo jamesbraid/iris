@@ -150,11 +150,8 @@ impl Board {
 /// the rules' eight colour bits the stored colour's low twelve bits are the
 /// index again (gl_store_colour()). Smooth shading then
 /// interpolates the index as GL does, within one run of 256.
-pub fn gl_index_rgba(index: u32, rgba: &mut [f32; 4]) {
-    rgba[0] = 0.0;
-    rgba[1] = ((index >> 8) & 0xf) as f32 / 255.0f32;
-    rgba[2] = (index & 0xff) as f32 / 255.0f32;
-    rgba[3] = 1.0;
+pub fn gl_index_rgba(index: u32) -> [f32; 4] {
+    [0.0, ((index >> 8) & 0xf) as f32 / 255.0f32, (index & 0xff) as f32 / 255.0f32, 1.0]
 }
 
 /// A float index (glIndexf, glClearIndex): its integer part, wrapped to the
@@ -992,7 +989,7 @@ impl Board {
         if self.gl_index_mode() {
             t.stipple_background_index = self.pattern_background(true);
             let idx = t.stipple_background_index;
-            gl_index_rgba(idx, &mut t.stipple_background);
+            t.stipple_background = gl_index_rgba(idx);
         } else {
             let pixel = self.pattern_background(false);
 
@@ -1350,16 +1347,14 @@ impl Board {
         if base == 0 || entry[1] != 0x41100002 || entry[2] != 0 || self.obj_count > SGI_ODYSSEY_OBJECTS {
             return false;
         }
-        let object = self.object_find(base);
-        if object < 0 {
+        let Some(o) = self.object_find(base) else {
             return false;
-        }
-        let o = object as usize;
+        };
         let end = (height.wrapping_sub(1) as u64)
             .wrapping_mul(self.obj_width[o] as u64)
             .wrapping_add(self.obj_offset[o] as u64)
             .wrapping_add(width as u64);
-        let region_written = self.object_region_written(object, 0, 0, width, height);
+        let region_written = self.object_region_written(o, 0, 0, width, height);
         if self.obj_width[o] != 32
             || self.obj_rows[o] < height
             || end > self.obj_used as u64
@@ -1438,27 +1433,29 @@ impl GlTexImage<'_> {
     /// the size cannot come from the library and is left to fail the size
     /// check. Limitation: the R axis's clamp (word 3) is not applied; a volume
     /// whose word 3 is below its depth stays unsupported.
-    pub fn texture_max_clamp(&mut self, sampler_size: u32, ws: u32, wt: u32, width: &mut u32, height: &mut u32) {
+    /// Returns the width and height the sampler then takes.
+    pub fn texture_max_clamp(&mut self, sampler_size: u32, ws: u32, wt: u32, mut width: u32, mut height: u32) -> (u32, u32) {
         let span_s = 1u32 << ((sampler_size >> 10) & 31);
         let span_t = 1u32 << ((sampler_size >> 5) & 31);
 
         self.max_clamp_s = 1.0;
         self.max_clamp_t = 1.0;
         self.max_clamp_r = 1.0;
-        if *width < span_s {
+        if width < span_s {
             if ws == 2 {
                 self.max_clamp = true;
-                self.max_clamp_s = *width as f64 / span_s as f64;
+                self.max_clamp_s = width as f64 / span_s as f64;
             }
-            *width = span_s;
+            width = span_s;
         }
-        if *height < span_t {
+        if height < span_t {
             if wt == 2 {
                 self.max_clamp = true;
-                self.max_clamp_t = *height as f64 / span_t as f64;
+                self.max_clamp_t = height as f64 / span_t as f64;
             }
-            *height = span_t;
+            height = span_t;
         }
+        (width, height)
     }
 }
 
@@ -1607,7 +1604,7 @@ impl Board {
                 }
             }
             if !detail_identity {
-                image.texture_max_clamp(sampler_size, ws, wt, &mut width, &mut height);
+                (width, height) = image.texture_max_clamp(sampler_size, ws, wt, width, height);
             }
             if self.gl_index_mode() {
                 break 'unsupported;
@@ -1815,11 +1812,9 @@ impl Board {
                         let Some(slice_base) = slice_base else {
                             break 'unsupported;
                         };
-                        let object = self.object_find(slice_base);
-                        if object < 0 {
+                        let Some(o) = self.object_find(slice_base) else {
                             break 'unsupported;
-                        }
-                        let o = object as usize;
+                        };
                         let sb: u32 = if three_d_stored { 15 } else { 0 };
                         let sb2: u32 = if three_d_stored { 2 } else { 0 };
                         let storage_end = (sb as u64 + level_height as u64 - 1 + sb2 as u64)
@@ -1834,7 +1829,7 @@ impl Board {
                         {
                             break 'unsupported;
                         }
-                        if three_d_stored && !self.object_region_written(object, 15, 15, level_width + 2, level_height + 2) {
+                        if three_d_stored && !self.object_region_written(o, 15, 15, level_width + 2, level_height + 2) {
                             break 'unsupported;
                         }
                         if slice_next as usize >= self.tex_slice_offset.len() {
@@ -1941,16 +1936,14 @@ impl Board {
                     let stride_units = self.tex_levels[e + 1] & 0xfff;
                     let (level_width, level_height) = (cmax(1, width >> i), cmax(1, height >> i));
 
-                    if object >= 0 {
-                        let o = object as usize;
-
+                    if let Some(o) = object {
                         if self.obj_width[o] >= level_width
                             && (stride_units == 0 || self.obj_width[o] == stride_units * 16)
                             && self.obj_rows[o] != 0
                             && self.obj_rows[o] < level_height
                             && self.obj_width[o] as u64 * level_height as u64 <= ODSY_OBJ_POOL_WORDS as u64
                         {
-                            self.object_rows(object, level_height);
+                            self.object_rows(o, level_height);
                         }
                     }
                 }
@@ -2011,8 +2004,7 @@ impl Board {
                     continue;
                 }
                 let object = self.object_find(base);
-                let backed = object >= 0 && {
-                    let o = object as usize;
+                let backed = object.filter(|&o| {
                     // The texture move rounds the image up to a power of two
                     // and the object holds only the rows written, which is
                     // all the rectangle's coordinates reach.
@@ -2026,17 +2018,16 @@ impl Board {
                         || (stride_units != 0 && self.obj_width[o] != stride_units * 16)
                         || self.obj_rows[o] < rows
                         || !end.is_some_and(|e| e <= self.obj_used as u64 && e <= self.obj_mem.size / 4))
-                };
-                if !backed {
+                });
+                let Some(o) = backed else {
                     if require_backing {
                         break 'unsupported;
                     }
                     continue;
-                }
-                let o = object as usize;
+                };
                 if require_backing {
                     let written = self.object_region_written(
-                        object,
+                        o,
                         interior_x - 1,
                         if two_d_stored { interior_y - 1 } else { 0 },
                         level_width + 2,
@@ -2105,10 +2096,8 @@ impl Board {
         const ENVIRONMENTS: [u32; 5] = [SGI_GL_REPLACE, SGI_GL_REPLACE, SGI_GL_MODULATE, SGI_GL_DECAL, SGI_GL_BLEND];
         let mut strq: [u32; 4] = [self.tex_coord[0], self.tex_coord[1], self.tex_coord_r, self.tex_coord_q];
         let one_d = (self.tex_mode & (ODSY_TEX_MODE_1D | ODSY_TEX_MODE_2D)) == ODSY_TEX_MODE_1D;
-        let mut matrix = [0.0f32; 16];
-
-        self.gl().cur.texture_2d = ((self.tex_mode & (ODSY_TEX_MODE_1D | ODSY_TEX_MODE_2D)) != 0) as u32;
-        self.gl().cur.texture_3d = ((self.tex_mode & ODSY_TEX_MODE_3D) != 0) as u32;
+        self.gl().cur.texture_2d = (self.tex_mode & (ODSY_TEX_MODE_1D | ODSY_TEX_MODE_2D)) != 0;
+        self.gl().cur.texture_3d = (self.tex_mode & ODSY_TEX_MODE_3D) != 0;
         // Excluded environments are rejected by the family before rasterization.
         self.gl().cur.texture_env_mode = SGI_GL_REPLACE;
         if (self.tex_env[0] as usize) < ENVIRONMENTS.len() {
@@ -2156,7 +2145,7 @@ impl Board {
             }
         }
         let rows = self.gl_texture_matrix;
-        gl_transpose(&rows, &mut matrix);
+        let mut matrix = gl_transpose(&rows);
         // Input T may transform S, but transformed T cannot affect 1D sampling.
         if one_d {
             for i in 0..4usize {
@@ -2173,12 +2162,10 @@ impl Board {
 fn gl_draw_cost(d: &GlDraw) -> u32 {
     let points = d.vertices.chunks_exact(SGI_GL_VERTEX_FLOATS).take(d.count as usize).map(|v| {
         let clip = [v[SGI_GL_V_POSITION] as f64, v[SGI_GL_V_POSITION + 1] as f64, v[SGI_GL_V_POSITION + 2] as f64, v[SGI_GL_V_POSITION + 3] as f64];
-        let mut win = [0.0f64; 3];
-
         if !(clip[3] > 0.0) {
             return None;
         }
-        d.state.clip_to_window(&clip, &mut win);
+        let win = d.state.clip_to_window(&clip);
         Some((win[0], win[1]))
     });
     primitive_cost(d.mode, points, d.point_size, d.line_width)
@@ -2203,7 +2190,7 @@ impl Board {
         // clears before it fills any of it, so it is not built for every
         // primitive, and a reused job's is reused.
         let mut texture: Option<Box<TextureChain>> = spare.as_mut().and_then(|j| j.chain.take());
-        let textured = d.state.texture_2d != 0 || d.state.texture_3d != 0;
+        let textured = d.state.texture_2d || d.state.texture_3d;
 
         if textured {
             let chain = texture.get_or_insert_with(Box::default);
@@ -2217,7 +2204,7 @@ impl Board {
                 return SGI_GL_DRAW_OK;
             }
         }
-        if (state.texture_2d != 0 || state.texture_3d != 0) && self.tex_env[0] == 4 {
+        if (state.texture_2d || state.texture_3d) && self.tex_env[0] == 4 {
             // The family words pack two normalized 12-bit components each.
             state.texture_env_color[0] = ((self.tex_env[1] >> 12) & 0xfff) as f32 / 4095.0f32;
             state.texture_env_color[1] = (self.tex_env[1] & 0xfff) as f32 / 4095.0f32;
@@ -2482,7 +2469,7 @@ impl Board {
         let held_polygon = self.gl_begin_open && self.gl_primitive == 9;
 
         if held_polygon {
-            self.gl().in_begin = 0;
+            self.gl().in_begin = false;
         }
         self.gl_feed(op, args);
         self.gl().in_begin = in_begin;

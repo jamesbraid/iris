@@ -15,7 +15,7 @@ fn gl_board() -> (Box<Board>, GlDrawState) {
     let mut b = Bench::empty();
     b.board.gl_write_mask |= ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT;
     b.st.shade_model = SGI_GL_FLAT;
-    b.st.dither = 0;
+    b.st.dither = false;
     (b.board, b.st)
 }
 
@@ -488,7 +488,7 @@ fn line_pixels(rule: LineRule, a: (f32, f32), b: (f32, f32)) -> Vec<(i32, i32)> 
     let mut bench = Bench::empty();
     bench.board.gl_write_mask |= ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT;
     bench.st.shade_model = SGI_GL_FLAT;
-    bench.st.dither = 0;
+    bench.st.dither = false;
     bench.rules.line_rule = rule;
     bench.mode = SGI_GL_LINES;
     bench.prims = vec![vertices(&[a, b], RED)];
@@ -864,34 +864,32 @@ fn a_reused_lighting_state_lights_a_vertex_as_a_fresh_one_does() {
     s.gl_shininess_sqrt = 4.0f32.to_bits();
     let obj = [1.0, 2.0, 3.0, 1.0];
     let mut seen = Vec::new();
-    let mut out = [0f32; 4];
-
-    let check = |s: &mut Board, what: &str, out: &mut [f32; 4]| {
-        s.gl_light(&obj, out);
+    let check = |s: &mut Board, what: &str| {
+        let out = s.gl_light(&obj);
         let want = fresh(s, &obj);
         assert_eq!(out.map(f32::to_bits), want.map(f32::to_bits), "{what}");
         want
     };
 
-    seen.push(check(&mut s, "no lights", &mut out));
+    seen.push(check(&mut s, "no lights"));
     set_light(&mut s, 0, [1.0, 0.2, 0.1], true, false);
     set_light(&mut s, 3, [0.3, 0.9, 0.2], false, true);
-    seen.push(check(&mut s, "a directional light and a spot", &mut out));
-    seen.push(check(&mut s, "the same again", &mut out));
+    seen.push(check(&mut s, "a directional light and a spot"));
+    seen.push(check(&mut s, "the same again"));
     clear_light(&mut s, 0);
     set_light(&mut s, 5, [0.2, 0.2, 0.9], false, false);
-    seen.push(check(&mut s, "light 0 off, light 5 on", &mut out));
+    seen.push(check(&mut s, "light 0 off, light 5 on"));
     clear_light(&mut s, 3);
     clear_light(&mut s, 5);
-    seen.push(check(&mut s, "all off again", &mut out));
+    seen.push(check(&mut s, "all off again"));
     // Light 3 was a spot and returns as a plain positional light: nothing of
     // its spot may be left over.
     set_light(&mut s, 3, [0.3, 0.9, 0.2], false, false);
-    seen.push(check(&mut s, "light 3 back without its spot", &mut out));
+    seen.push(check(&mut s, "light 3 back without its spot"));
     clear_light(&mut s, 3);
     s.gl_colour_material = ODSY_COLOUR_MATERIAL_DIFFUSE;
     set_light(&mut s, 7, [0.6, 0.6, 0.6], false, false);
-    seen.push(check(&mut s, "colour material, light 7", &mut out));
+    seen.push(check(&mut s, "colour material, light 7"));
 
     // The cases differ, so the comparisons above could have failed.
     assert_ne!(seen[0], seen[1]);

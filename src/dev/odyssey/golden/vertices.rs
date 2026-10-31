@@ -54,22 +54,20 @@ fn rows() -> Vec<Row> {
     for (name, mv, proj, vp, wm) in setups {
         let mut st = GlDrawState { modelview: mv, projection: proj, viewport: vp, ..Default::default() };
         if let Some(w) = wm {
-            st.window_matrix_given = 1;
+            st.window_matrix_given = true;
             st.window_matrix = w;
             st.window_depth_scale = 0.75;
-            st.window_rows_down = (name == "window_matrix_rot") as u32;
+            st.window_rows_down = name == "window_matrix_rot";
         }
         for (i, p) in points.iter().enumerate() {
             let mut vertex = [0.0f32; SGI_GL_VERTEX_FLOATS];
             vertex[..4].copy_from_slice(p);
-            let mut vv = VolumeVertex::default();
-            st.volume_from_draw_vertex(&vertex, &mut vv);
+            let vv = st.volume_from_draw_vertex(&vertex);
             out.push(Row { name: format!("{name}/{i}"), kind: "eye", vals: vv.eye.to_vec() });
             out.push(Row { name: format!("{name}/{i}"), kind: "clip", vals: vv.clip.to_vec() });
             // A vertex at or behind the eye has no window position.
             if vv.clip[3] > 0.0 {
-                let mut win = [0.0f64; 3];
-                st.clip_to_window(&vv.clip, &mut win);
+                let win = st.clip_to_window(&vv.clip);
                 out.push(Row { name: format!("{name}/{i}"), kind: "win", vals: win.to_vec() });
             }
         }
@@ -96,8 +94,7 @@ fn rows() -> Vec<Row> {
             nrm = nrm.map(|x| x / len);
             board.gl_normal = nrm.map(f32::to_bits);
             let obj = [rng.range(-1.0, 1.0) as f64, rng.range(-1.0, 1.0) as f64, rng.range(-1.0, 1.0) as f64, 1.0];
-            let mut rgba = [0f32; 4];
-            board.gl_light(&obj, &mut rgba);
+            let rgba = board.gl_light(&obj);
             out.push(Row { name: format!("light_{name}/{i}"), kind: "rgba", vals: rgba.iter().map(|&c| c as f64).collect() });
         }
     }

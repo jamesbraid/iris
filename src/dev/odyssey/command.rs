@@ -417,12 +417,8 @@ impl Board {
                     let slot = (self.gl_restart_total - self.gl_restart_absorb) as usize;
 
                     if slot < self.gl_restart_vertex.len() {
-                        self.gl_ctx.as_mut().expect("the GL context").capture_vertex(
-                            self.gl_restart_type,
-                            &xyz,
-                            components,
-                            &mut self.gl_restart_vertex[slot],
-                        );
+                        self.gl_restart_vertex[slot] =
+                            self.gl_ctx.as_ref().expect("the GL context").capture_vertex(self.gl_restart_type, &xyz, components);
                     }
                     self.gl_restart_absorb -= 1;
                     self.restart_finish();
@@ -962,12 +958,11 @@ impl Board {
     pub fn cmd_classify_register(&mut self, word: u32) {
         let reg = word & !ODSY_CMD_REGISTER_SHAPE;
         let operands = cmd_arity(reg);
-        let mut fmt = 0u32;
 
         // A pixel burst while an image is open: its data words paint into the
         // box rather than streaming through the generic operand path. Outside
         // an image the same register-select is an ordinary state word.
-        if self.image_active && operands > 0 && image_burst_fmt(reg, &mut fmt) {
+        if let Some(fmt) = image_burst_fmt(reg).filter(|_| self.image_active && operands > 0) {
             self.image_fmt = fmt;
             if !self.image_burst_supported(fmt) {
                 self.cmd_unimplemented(word);
