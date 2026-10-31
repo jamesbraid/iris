@@ -149,7 +149,7 @@ pub enum AccessType {
 
 /// The physical base a TLB entry's EntryLo maps. A model that keeps the
 /// R10000 family's uncached attribute (EntryLo bits 63:62, see
-/// `CpuModel::TLB_UNCACHED_ATTRIBUTE`) has it carried to physical bits 58:57
+/// `CpuModel::R10K_CACHE_OPS`) has it carried to physical bits 58:57
 /// for an uncached page, where an unmapped xkphys access carries it; other
 /// models never store those bits. For a mapped reference the R10000 takes the
 /// two-bit uncached attribute from the TLB's uncached-attribute field, loaded

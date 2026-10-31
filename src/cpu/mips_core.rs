@@ -860,10 +860,10 @@ pub struct MipsCore {
 
     pub tlb_entries: u32,     // Total TLB entries
     /// Writable EntryHi bits: region, ASID and as much VPN2 as the model keeps
-    /// (`CpuModel::ENTRYHI_FULL_VA`). Set once by the executor.
+    /// (`CpuModel::VA_BITS`). Set once by the executor.
     pub entryhi_mask: u64,
     /// Writable EntryLo bits: the PFN and flags (29:0), and on models that have
-    /// it the uncached attribute in bits 63:62 (`CpuModel::TLB_UNCACHED_ATTRIBUTE`).
+    /// it the uncached attribute in bits 63:62 (`CpuModel::R10K_CACHE_OPS`).
     pub entrylo_mask: u64,
     /// CP0 PRId / CP1 FIR reset values, supplied by the CPU model at construction.
     pub reset_prid: u32,
@@ -2026,8 +2026,8 @@ impl MipsCore {
             }
             10 => { // always use 64bit mask because the entries need to be valid in 64 bit mode even when they were set from 32 bit mode
                 // `log mips mask cp0` shows what the guest wrote against
-                // what survives the mask: the model's VPN2 width (40 bits,
-                // or the implemented 44 where its profile keeps them).
+                // what survives the mask: the model's VPN2 width, 40 bits or the
+                // R10000 family's 44.
                 if cp0_log() && (value & !self.entryhi_mask) != 0 {
                     crate::dlog!(crate::devlog::LogModule::Mips,
                         "ip28ehi: wrote {value:#018x} -> kept {:#018x} (lost {:#018x}) pc={:#018x}",

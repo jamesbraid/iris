@@ -590,12 +590,13 @@ mod tests {
     }
 
     /// Fuel PROM memory diagnostics need the whole source register on the ECC
-    /// view. A model that carries it calls `write_narrow_from`; every other
-    /// CPU keeps `write8`/`write16` with the low bits. The addressed lanes
-    /// hold the architectural byte or halfword either way.
+    /// view, so every CPU hands an uncached SB or SH to
+    /// `BusDevice::write_narrow_from` with it. The default of that call stores
+    /// the architectural byte or halfword, which is all an ordinary device
+    /// sees, and the addressed lanes hold it either way.
     #[test]
-    fn r14000_uncached_sb_sh_carry_the_whole_source_register() {
-        fn check<C: CpuModel + From<Arc<dyn BusDevice>>>(carries: bool) {
+    fn uncached_sb_sh_carry_the_whole_source_register() {
+        fn check<C: CpuModel + From<Arc<dyn BusDevice>>>() {
             let mem = Arc::new(MockMemory::new());
             let bus: Arc<dyn BusDevice> = mem.clone();
             let cfg = MipsCpuConfig::for_model::<C>();
@@ -622,17 +623,11 @@ mod tests {
                     assert_eq!(exec.exec(instr), EXEC_COMPLETE);
 
                     let addr = base + offset;
-                    if carries {
-                        assert_eq!(
-                            *mem.narrow_from_writes.lock().unwrap(),
-                            vec![(size, addr, source)],
-                            "SB/SH source register at byte offset {offset}",
-                        );
-                    } else {
-                        let val = if size == 1 { source as u8 as u64 } else { source as u16 as u64 };
-                        assert_eq!(*mem.narrow_writes.lock().unwrap(), vec![(size, addr, val)]);
-                        assert!(mem.narrow_from_writes.lock().unwrap().is_empty());
-                    }
+                    assert_eq!(
+                        *mem.narrow_from_writes.lock().unwrap(),
+                        vec![(size, addr, source)],
+                        "SB/SH source register at byte offset {offset}",
+                    );
 
                     let first = if size == 1 { source as u8 } else { (source as u16 >> 8) as u8 };
                     let last = if size == 1 { first } else { source as u8 };
@@ -658,14 +653,14 @@ mod tests {
             exec.core.write_gpr(2, base + 7);
             assert_eq!(exec.exec(make_i(OP_SB, 2, 0, 0)), EXEC_COMPLETE);
             assert_eq!(mem.get_byte(base + 7), 0);
-            assert_eq!(mem.narrow_from_writes.lock().unwrap().len(), carries as usize);
+            assert_eq!(mem.narrow_from_writes.lock().unwrap().len(), 1);
 
             mem.set_double(base, original);
             exec.core.write_gpr(2, base + 6);
             assert_eq!(exec.exec(make_i(OP_SH, 2, 0, 0)), EXEC_COMPLETE);
             assert_eq!(mem.get_byte(base + 6), 0);
             assert_eq!(mem.get_byte(base + 7), 0);
-            assert_eq!(mem.narrow_from_writes.lock().unwrap().len(), 2 * carries as usize);
+            assert_eq!(mem.narrow_from_writes.lock().unwrap().len(), 2);
 
             mem.narrow_writes.lock().unwrap().clear();
             mem.narrow_from_writes.lock().unwrap().clear();
@@ -674,16 +669,17 @@ mod tests {
             assert!(mem.narrow_from_writes.lock().unwrap().is_empty(), "debug writes keep the ordinary-width path");
         }
 
-        check::<crate::cpu::mips_cache_shadow::R14000ShadowCache>(true);
-        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(false);
+        check::<crate::cpu::mips_cache_shadow::R4400ShadowCache>();
+        check::<crate::cpu::mips_cache_shadow::R5000ShadowCache>();
+        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>();
+        check::<crate::cpu::mips_cache_shadow::R14000ShadowCache>();
     }
 
-    /// JIT store callouts must carry the same source register as the
-    /// interpreter, and only for a model that asks for it.
+    /// JIT store callouts carry the same source register as the interpreter.
     #[test]
     #[cfg(feature = "jitv2")]
-    fn jit_subword_hooks_carry_the_source_register_only_where_the_model_asks() {
-        fn check<C: CpuModel + From<Arc<dyn BusDevice>>>(carries: bool) {
+    fn jit_subword_hooks_carry_the_source_register() {
+        fn check<C: CpuModel + From<Arc<dyn BusDevice>>>() {
             let mem = Arc::new(MockMemory::new());
             let bus: Arc<dyn BusDevice> = mem.clone();
             let cfg = MipsCpuConfig::for_model::<C>();
@@ -709,22 +705,14 @@ mod tests {
                 write8(ctx, base, source);
                 write16(ctx, base + 2, source);
             }
-            if carries {
-                assert_eq!(
-                    *mem.narrow_from_writes.lock().unwrap(),
-                    vec![(1, base, source), (2, base + 2, source)],
-                );
-            } else {
-                assert_eq!(
-                    *mem.narrow_writes.lock().unwrap(),
-                    vec![(1, base, source as u8 as u64), (2, base + 2, source as u16 as u64)],
-                );
-                assert!(mem.narrow_from_writes.lock().unwrap().is_empty());
-            }
+            assert_eq!(
+                *mem.narrow_from_writes.lock().unwrap(),
+                vec![(1, base, source), (2, base + 2, source)],
+            );
         }
 
-        check::<crate::cpu::mips_cache_shadow::R14000ShadowCache>(true);
-        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(false);
+        check::<crate::cpu::mips_cache_shadow::R5000ShadowCache>();
+        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>();
     }
 
     #[test]
@@ -6561,18 +6549,20 @@ mod tests {
         }
     }
 
-    /// Fuel IRIX places n64 stacks above the existing 40-bit compatibility limit.
+    /// EntryHi and the TLB keep every implemented VPN2 bit: 44 virtual-address
+    /// bits on the R10000 family, 40 on the R4400 and R5000. Fuel IRIX places
+    /// n64 stacks above the 40-bit limit.
     #[test]
-    fn r14000_cp0_entryhi_and_tlb_match_full_xuseg_va() {
+    fn cp0_entryhi_and_tlb_match_full_xuseg_va() {
         std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)
-            .spawn(r14000_cp0_entryhi_and_tlb_match_full_xuseg_va_inner)
+            .spawn(cp0_entryhi_and_tlb_match_full_xuseg_va_inner)
             .unwrap()
             .join()
             .unwrap();
     }
 
-    fn r14000_cp0_entryhi_and_tlb_match_full_xuseg_va_inner() {
+    fn cp0_entryhi_and_tlb_match_full_xuseg_va_inner() {
         use crate::cpu::mips_tlb::MipsTlb;
 
         const VA: u64 = 0x0000_0123_4000_0000;
@@ -6640,13 +6630,18 @@ mod tests {
             }
         }
 
-        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(false);
+        check::<crate::cpu::mips_cache_shadow::R4400ShadowCache>(false);
+        check::<crate::cpu::mips_cache_shadow::R5000ShadowCache>(false);
+        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(true);
+        check::<crate::cpu::mips_cache_shadow::R12000ShadowCache>(true);
         check::<crate::cpu::mips_cache_shadow::R14000ShadowCache>(true);
+        check::<crate::cpu::mips_cache_shadow::R16000ShadowCache>(true);
     }
 
-    /// Fuel retains the upper word on partial LWR while a complete word still sign-extends.
+    /// The R10000 family retains the upper word on a partial LWR while a
+    /// complete word still sign-extends; the R4400 and R5000 sign-extend.
     #[test]
-    fn r14000_partial_lwr_preserves_upper_only_for_partial_loads() {
+    fn partial_lwr_preserves_upper_only_on_the_r10000_family() {
         fn check<C: CpuModel + From<Arc<dyn BusDevice>>>(preserve_upper: bool) {
             let mem = Arc::new(MockMemory::new());
             mem.set_word(0x2000, 0x89ab_cdef);
@@ -6683,7 +6678,11 @@ mod tests {
             }
         }
 
+        check::<crate::cpu::mips_cache_shadow::R4400ShadowCache>(false);
+        check::<crate::cpu::mips_cache_shadow::R5000ShadowCache>(false);
+        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(true);
+        check::<crate::cpu::mips_cache_shadow::R12000ShadowCache>(true);
         check::<crate::cpu::mips_cache_shadow::R14000ShadowCache>(true);
-        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(false);
+        check::<crate::cpu::mips_cache_shadow::R16000ShadowCache>(true);
     }
 }

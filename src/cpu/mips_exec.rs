@@ -584,25 +584,17 @@ fn nutlb_cacheable_segment<C: CpuModel>(va: u64, is_64bit: bool) -> bool {
         // address whose finished translation is worth caching.
         return true;
     }
-    // xuseg: bits 63:`model_vpn_bits` must be zero to be a valid user address.
+    // xuseg: bits 63:`C::VA_BITS` must be zero to be a valid user address.
     // Every other 64-bit segment (xsseg, xkphys, xkseg and the 0xFFFFFFFF_*
     // compat windows) is fine — translate_64bit_impl raises before returning ok
     // for the illegal xkphys sub-ranges, so nothing invalid reaches a fill.
-    (va >> 62) != 0 || (va >> model_vpn_bits::<C>()) == 0
+    (va >> 62) != 0 || (va >> C::VA_BITS) == 0
 }
 
-/// Virtual-address bits EntryHi, the TLB and the xuseg check keep. The model's
-/// full width where its profile asks for it; otherwise the 40 bits the IP28
-/// and Octane guests were brought up with.
-#[inline(always)]
-const fn model_vpn_bits<C: CpuModel>() -> u32 {
-    if C::ENTRYHI_FULL_VA { C::VA_BITS } else { 40 }
-}
-
-/// The EntryHi bits this model keeps: region, VPN2 and ASID.
+/// The EntryHi bits this model keeps: region, VPN2 up to `C::VA_BITS` and ASID.
 #[inline(always)]
 const fn model_entryhi_mask<C: CpuModel>() -> u64 {
-    0xC000_0000_0000_00FF | crate::cpu::mips_tlb::vpn2_mask(model_vpn_bits::<C>())
+    0xC000_0000_0000_00FF | crate::cpu::mips_tlb::vpn2_mask(C::VA_BITS)
 }
 
 /// Per-access-class tally of how far a guest load/store would get through the
@@ -1354,25 +1346,12 @@ unsafe extern "C" fn jit_read64<T: Tlb, C: CpuModel>(ctx: *mut core::ffi::c_void
         Err(status) => status,
     }
 }
-/// The value a JIT SB/SH callout hands to `write_data`. The FFI parameter is a
-/// u64 (see `write8_fn`'s doc comment), so the callout masks it to the real
-/// width itself, except where the model's uncached narrow stores carry the
-/// whole register to the bus (`NARROW_STORES_CARRY_GPR`).
-#[cfg(feature = "jitv2")]
-#[inline(always)]
-fn narrow_store_source<C: CpuModel>(val: u64, size: usize) -> u64 {
-    if C::NARROW_STORES_CARRY_GPR {
-        val
-    } else if size == 1 {
-        val as u8 as u64
-    } else {
-        val as u16 as u64
-    }
-}
 #[cfg(feature = "jitv2")]
 unsafe extern "C" fn jit_write8<T: Tlb, C: CpuModel>(ctx: *mut core::ffi::c_void, va: u64, val: u64) -> u32 {
     let exec = unsafe { &mut *exec_from_core::<T, C>(ctx) };
-    let val = narrow_store_source::<C>(val, 1);
+    // The whole register, as the interpreter's SB passes it: `write_data`
+    // narrows it where it stores, and an uncached store hands it to the bus
+    // (`BusDevice::write_narrow_from`).
     #[cfg(feature = "jitv2_lockstep")]
     { return exec.lockstep_jit_write::<1>(va, val); }
     #[cfg(not(feature = "jitv2_lockstep"))]
@@ -1381,7 +1360,6 @@ unsafe extern "C" fn jit_write8<T: Tlb, C: CpuModel>(ctx: *mut core::ffi::c_void
 #[cfg(feature = "jitv2")]
 unsafe extern "C" fn jit_write16<T: Tlb, C: CpuModel>(ctx: *mut core::ffi::c_void, va: u64, val: u64) -> u32 {
     let exec = unsafe { &mut *exec_from_core::<T, C>(ctx) };
-    let val = narrow_store_source::<C>(val, 2);
     #[cfg(feature = "jitv2_lockstep")]
     { return exec.lockstep_jit_write::<2>(va, val); }
     #[cfg(not(feature = "jitv2_lockstep"))]
@@ -2216,10 +2194,10 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
         let mut core = MipsCore::new();
         // Mapped pages decode their C field with this model's table, as KSEG0
         // and xkphys do.
-        if C::ENTRYHI_FULL_VA { tlb.set_va_bits(C::VA_BITS); }
+        tlb.set_va_bits(C::VA_BITS);
         tlb.set_cache_attrs(Self::cache_attr_table());
         core.entryhi_mask = model_entryhi_mask::<C>();
-        if C::TLB_UNCACHED_ATTRIBUTE {
+        if C::R10K_CACHE_OPS {
             core.entrylo_mask |= 3 << 62;
         }
 
@@ -2629,10 +2607,9 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
                 // set) -- the property a persistent code cache needs.
                 // Several CPUs share compiled code, so no one core's address.
                 core: if self.core.smp || std::env::var_os("IRIS_JIT_PIC").is_some() { None } else { core::num::NonZeroUsize::new(core_addr) },
+                lwr_keeps_upper: C::R10K_CACHE_OPS,
             };
             *j.jit_consts.lock() = consts;
-            let policy = crate::cpu::jitv2::codegen::ModelPolicy::of::<C>();
-            *j.model_policy.lock() = policy;
             // The inline-compile path (`jitv2_compile_inline`) takes this
             // `Codegen` directly rather than going through `worker_loop`, so
             // it has to be stamped here too — it was built by `Jitv2::new`,
@@ -2641,7 +2618,6 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             if let Some(cg) = cg_slot.as_mut() {
                 cg.dc_geometry = geom;
                 cg.jit_consts = consts;
-                cg.model_policy = policy;
             }
         }
         if geom.supported {
@@ -4517,10 +4493,10 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         let top_bits = virt_addr >> 62;
 
         match top_bits {
-            // xuseg is user-mapped below 2^model_vpn_bits::<C>() (0x0000_00FF_FFFF_FFFF
+            // xuseg is user-mapped below 2^C::VA_BITS (0x0000_00FF_FFFF_FFFF
             // for the 40-bit models) and accessible from every privilege level.
             0 => {
-                if (virt_addr >> model_vpn_bits::<C>()) != 0 {
+                if (virt_addr >> C::VA_BITS) != 0 {
                     // Bits above the model's implemented user VA must be zero
                     if !DEBUG { self.core.cp0_badvaddr = virt_addr; }
                     return TranslateResult::exc(exec_exception(if access_type == AccessType::Write { EXC_ADES } else { EXC_ADEL }));
@@ -4677,7 +4653,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     fn update_tlb_exception_registers<const XTLB: u8>(&mut self, virt_addr: u64) {
         const EH_VPN2_32: u64 = 0x0000_0000_FFFF_E000;
         const EH_REGION:  u64 = 0xC000_0000_0000_0000;
-        let eh_vpn2_64 = crate::cpu::mips_tlb::vpn2_mask(model_vpn_bits::<C>());
+        let eh_vpn2_64 = crate::cpu::mips_tlb::vpn2_mask(C::VA_BITS);
 
         self.core.cp0_badvaddr = virt_addr;
 
@@ -4724,14 +4700,12 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         // nested miss is unrecoverable, and IRIX panics with "Entered tlbmiss
         // with invalid vaddr".
         //
-        // EntryHi and TLB matching keep the 40-bit VPN2 field unless the model
-        // sets `ENTRYHI_FULL_VA`: the IP28 and Octane kernels zero-fill those
-        // upper bits themselves when they build an EntryHi value, and widening
-        // the mask for them breaks it. The R14000 opts in (NEC U10278EJ4V0UM
-        // pp.219 and 288: VPN2 bits 43:13, a 16 TiB xuseg) because Fuel's IRIX
-        // n64 stack reaches 0x0fff_ffff_aee4, above the 40-bit limit. This
-        // comment sits above the XContext line, but the mask choice is made
-        // by `model_entryhi_mask` and `eh_vpn2_64` above.
+        // EntryHi and TLB matching keep every implemented VPN2 bit: 43:13 on the
+        // R10000 family, a 16 TiB xuseg (NEC U10278EJ4V0UM pp.219 and 288), and
+        // 39:13 on the R4x00 and R5000. Fuel's IRIX n64 stack reaches
+        // 0x0fff_ffff_aee4, above 40 bits. This comment sits above the
+        // XContext line, but the mask choice is made by `model_entryhi_mask`
+        // and `eh_vpn2_64` above.
         self.core.cp0_xcontext =
             xcontext_on_miss(C::VA_BITS, self.core.cp0_xcontext, virt_addr);
     }
@@ -5079,12 +5053,13 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             if !DEBUG && mips_log(MIPS_LOG_MEM) {
                 dlog_dev!(LogModule::Mips, "Uncached Write{}: PC={:016x} VA={:016x} PA={:016x} Val={:016x}", SIZE*8, self.core.pc, virt_addr, phys_addr, val);
             }
-            let ws = if !DEBUG && C::NARROW_STORES_CARRY_GPR && SIZE <= 2 {
+            let ws = if !DEBUG && SIZE <= 2 {
                 // The bus sees the whole source register: Fuel PROM 6.210's
                 // Walking Address test reads its check words back from
                 // Bedrock's ECC view, and the word sits elsewhere in the
                 // register than the addressed lanes. Ordinary devices take
-                // the architectural low bits.
+                // the architectural low bits. Debug writes carry just the
+                // value they name, so they keep the ordinary-width path.
                 self.sysad.write_narrow_from(phys_addr, SIZE, val)
             } else if SIZE == 1 {
                 self.sysad.write8(phys_addr, val as u8)
@@ -6372,9 +6347,9 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 let mask = 0xFFFFFFFFu32 >> shift;
                 let result = (mem_word >> shift) | (rt_val & !mask);
 
-                // A model whose profile says so keeps bits 63:32 on a partial
-                // LWR (MIPS IV permits either). A full word still sign-extends.
-                let value = if C::LWR_PRESERVES_UPPER && byte_offset != 3 {
+                // The R10000 family keeps bits 63:32 on a partial LWR (MIPS IV
+                // permits either). A full word still sign-extends.
+                let value = if C::R10K_CACHE_OPS && byte_offset != 3 {
                     (self.core.read_gpr(rt_reg) & 0xffff_ffff_0000_0000) | result as u64
                 } else {
                     // Sign-extend to 64 bits
@@ -6566,7 +6541,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         // R4000 hit operations — translating them would fault on an index that
         // is not a valid virtual address. See C_R10K_ISD in mips_cache_v2.
         let sel = cache_op & 3;
-        let primary_data_op = C::R10K_PRIMARY_DATA_OPS
+        let primary_data_op = C::R10K_CACHE_OPS
             && matches!(sel, CACH_PI | CACH_PD)
             && matches!(op, C_R10K_ILD | C_R10K_ISD);
         let r10k_index_op = C::R10K_CACHE_OPS
@@ -8933,7 +8908,6 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             // Stamp the L1-D geometry the inline load/store path needs. No
             // helper build here — see the note in Jitv2::worker_loop.
             codegen.dc_geometry = self.cache.jit_dc_geometry();
-            codegen.model_policy = crate::cpu::jitv2::codegen::ModelPolicy::of::<C>();
             #[cfg(feature = "developer")]
             {
                 let stats = self.jitv2.lock().stats.clone();

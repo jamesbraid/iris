@@ -4355,19 +4355,29 @@ mod tests {
         }
     }
 
+    /// The R10000 family keeps bits 63:32 on a partial LWR; the R5000 sign-extends.
+    /// The JIT and the interpreter must agree for each, and the JIT learns the
+    /// choice from the model's `CpuModel` constants.
     #[test]
-    fn r14000_jit_lwr_preserves_upper_for_partial_words() {
-        type R14000 = crate::cpu::mips_cache_shadow::R14000ShadowCache;
+    fn jit_lwr_preserves_upper_for_partial_words_on_the_r10000_family() {
+        use crate::cpu::mips_cache_shadow::{R10000ShadowCache, R12000ShadowCache, R14000ShadowCache, R5000ShadowCache};
+        lwr_across_offsets::<R10000ShadowCache>(true);
+        lwr_across_offsets::<R12000ShadowCache>(true);
+        lwr_across_offsets::<R14000ShadowCache>(true);
+        lwr_across_offsets::<R5000ShadowCache>(false);
+    }
 
+    fn lwr_across_offsets<C: crate::cpu::mips_cache_v2::CpuModel + From<Arc<dyn BusDevice>> + 'static>(keeps_upper: bool) {
         let aligned = 0x2000u64;
         let pc = 0x1000u64;
         let lwr = make_i(crate::cpu::mips_isa::OP_LWR, 1, 2, 0);
-        let policy = crate::cpu::jitv2::codegen::ModelPolicy::of::<R14000>();
-        assert!(policy.lwr_preserves_upper);
+        assert_eq!(C::R10K_CACHE_OPS, keeps_upper);
+        // Without the family's choice the result is the word sign-extended.
+        let signed = |w: u64| if keeps_upper { w } else { w as u32 as i32 as i64 as u64 };
         for (offset, expected) in [
-            (0, 0x1122_3344_5566_77DE),
-            (1, 0x1122_3344_5566_DEAD),
-            (2, 0x1122_3344_55DE_ADBE),
+            (0, signed(0x1122_3344_5566_77DE)),
+            (1, signed(0x1122_3344_5566_DEAD)),
+            (2, signed(0x1122_3344_55DE_ADBE)),
             (3, 0xFFFF_FFFF_DEAD_BEEF),
         ] {
             let mut gpr = [0u64; 32];
@@ -4377,8 +4387,8 @@ mod tests {
             let interp_mem = Arc::new(MockMemory::new_not_compilable());
             interp_mem.set_word(aligned, 0xDEAD_BEEF);
             let interp_bus: Arc<dyn BusDevice> = interp_mem;
-            let cfg = MipsCpuConfig::for_model::<R14000>();
-            let mut interp = MipsExecutor::<PassthroughTlb, R14000>::new(
+            let cfg = MipsCpuConfig::for_model::<C>();
+            let mut interp = MipsExecutor::<PassthroughTlb, C>::new(
                 interp_bus,
                 PassthroughTlb::default(),
                 &cfg,
@@ -4395,7 +4405,7 @@ mod tests {
             assert!(non_empty, "LWR must be admitted to compilation");
             let mut instrs_owned = *walked;
             let mut codegen = Codegen::new();
-            codegen.model_policy = policy;
+            codegen.jit_consts.lwr_keeps_upper = keeps_upper;
             let jit_fn: JitFn = codegen.compile_region(&mut instrs_owned, 0, true, false)
                 .expect("LWR must compile");
 
@@ -4404,7 +4414,7 @@ mod tests {
             jit_mem.set_word(pc, lwr);
             jit_mem.set_word(pc & 0x1FFF_FFFF, lwr);
             let jit_bus: Arc<dyn BusDevice> = jit_mem;
-            let mut jit = Box::new(MipsExecutor::<PassthroughTlb, R14000>::new(
+            let mut jit = Box::new(MipsExecutor::<PassthroughTlb, C>::new(
                 jit_bus,
                 PassthroughTlb::default(),
                 &cfg,
@@ -4412,16 +4422,16 @@ mod tests {
             jit.core.gpr = gpr;
             jit.core.pc = pc;
             jit.install_jit_hooks();
-            // The production path publishes the model's policy for the compile
-            // pool's workers; stamping `Codegen` above would not catch it missing.
-            assert_eq!(*jit.jitv2.lock().model_policy.lock(), policy);
+            // The production path publishes the choice for the compile pool's
+            // workers; stamping `Codegen` above would not catch it missing.
+            assert_eq!(jit.jitv2.lock().jit_consts.lock().lwr_keeps_upper, keeps_upper);
             unsafe { jit_fn(&mut jit.core as *mut MipsCore) };
             std::mem::forget(codegen);
 
             let interp = CoreSnapshot::capture(&interp.core);
             let jit = CoreSnapshot::capture(&jit.core);
-            assert_eq!(jit, interp, "R14000 JIT/interpreter LWR offset {offset}");
-            assert_eq!(jit.gpr[2], expected, "R14000 LWR offset {offset}");
+            assert_eq!(jit, interp, "JIT/interpreter LWR offset {offset}");
+            assert_eq!(jit.gpr[2], expected, "LWR offset {offset}");
         }
     }
 
