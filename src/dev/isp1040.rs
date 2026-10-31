@@ -29,7 +29,12 @@
 //! * Only logical unit 0 of a present target exists. A command for another
 //!   unit is passed to the target with that unit number, which answers as
 //!   SCSI says (INQUIRY: no device at this unit; anything else: check
-//!   condition, logical unit not supported). An absent target times out.
+//!   condition, logical unit not supported). An absent target times out:
+//!   its completion is posted once the selection timeout the driver
+//!   programmed has passed on the adapter's clock, as the part's would be
+//!   after its selection attempt. That clock is host wall time less the time
+//!   the machine was stopped; iris has no emulated-time source a device can
+//!   read, so the wait does not follow the guest's instruction rate.
 //!
 //! Register windows: BAR 0 is I/O space and BAR 1 memory space, both 256
 //! bytes onto the same sixteen-bit registers. Accesses of any other width
@@ -39,8 +44,9 @@
 //! Ported from hw/scsi/qlogic-isp.c in jamesbraid/qemu-sgi-origami.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex, MutexGuard};
 
@@ -202,6 +208,14 @@ pub const STATE_GOT_SENSE: u16 = 0x2000;
 pub const STATE_ALL_PHASES: u16 = 0x7f00;
 pub const STATUS_FLAG_TIMEOUT: u16 = 0x0040;
 
+/// What one unit of the selection timeout (mailbox command 0x0031, mailbox
+/// 1) lasts. Milliseconds is the public Linux qla1280 driver's reading, and
+/// the datasheet's confirmation is pending.
+const SELECTION_TIMEOUT_UNIT: Duration = Duration::from_millis(1);
+/// The selection timeout in force until the driver programs one, in
+/// [`SELECTION_TIMEOUT_UNIT`]s: qla1280's default.
+const DEFAULT_SELECTION_TIMEOUT: u16 = 250;
+
 const CHECK_CONDITION: u8 = 0x02;
 const MAX_TARGET: u8 = 15;
 const MAX_LUN: u8 = 7;
@@ -242,6 +256,14 @@ struct Ctl {
     /// The machine is stopped: the thread takes no further entries.
     paused: bool,
     shutdown: bool,
+    /// The selection of an absent target the thread is waiting out: the
+    /// request ring epoch and consumer it belongs to, and when the adapter's
+    /// clock says it ends. It survives the thread being parked meanwhile.
+    selecting: Option<(u64, u32, i64)>,
+    /// When the adapter's clock last stopped with the machine, and how long
+    /// it has stood still in all.
+    stopped_at: Option<Instant>,
+    stopped_ns: i64,
 }
 
 /// The request ring as a step of the walk found it, for the part of the
@@ -274,6 +296,8 @@ enum Prepared {
     Skipped,
     /// Answered without reaching a target.
     Answered(Pending),
+    /// Answered when selecting an absent target times out.
+    Absent(Pending),
     Run(Job),
 }
 
@@ -292,6 +316,8 @@ struct State {
     sxp_bank: [u16; BANK_WORDS],
     risc_ram: Vec<u16>,
     reset_delay: u16,
+    /// Mailbox command 0x0031's value, in [`SELECTION_TIMEOUT_UNIT`]s.
+    selection_timeout: u16,
     rqst_base: u64,
     resp_base: u64,
     rqst_len: u16,
@@ -320,6 +346,7 @@ impl State {
             sxp_bank: [0; BANK_WORDS],
             risc_ram: vec![0; RAM_WORDS],
             reset_delay: 0,
+            selection_timeout: DEFAULT_SELECTION_TIMEOUT,
             rqst_base: 0,
             resp_base: 0,
             rqst_len: 0,
@@ -355,6 +382,8 @@ impl State {
         // The driver re-downloads firmware after every reset.
         self.risc_ram.iter_mut().for_each(|w| *w = 0);
         self.reset_delay = 0;
+        self.selection_timeout = DEFAULT_SELECTION_TIMEOUT;
+        self.ctl.selecting = None;
         self.rqst_base = 0;
         self.resp_base = 0;
         self.rqst_len = 0;
@@ -427,6 +456,10 @@ pub struct Core {
     odd_accesses: Mutex<u32>,
     /// The status bar's activity bits, shared with the display thread.
     heartbeat: OnceLock<Arc<AtomicU64>>,
+    /// Where the adapter's clock starts.
+    start: Instant,
+    /// When not `i64::MIN`, the clock in nanoseconds, for tests.
+    fake_ns: AtomicI64,
 }
 
 fn le16(b: &[u8], off: usize) -> u16 { u16::from_le_bytes([b[off], b[off + 1]]) }
@@ -530,6 +563,8 @@ impl Core {
             dma_misses: Mutex::new(std::collections::BTreeSet::new()),
             odd_accesses: Mutex::new(0),
             heartbeat: OnceLock::new(),
+            start: Instant::now(),
+            fake_ns: AtomicI64::new(i64::MIN),
         }
     }
 
@@ -544,6 +579,7 @@ impl Core {
             let mut st = self.st.lock();
             st.reset();
             self.publish_gen(&st);
+            self.wake.notify_all();
         }
         self.retire_stores();
         self.sync_irq();
@@ -596,10 +632,59 @@ impl Core {
 
     /// Block until the ring thread has run everything it was given and is
     /// waiting for more (or is held on a full response ring).
+    /// A selection still timing out does not hold it.
     pub fn wait_idle(&self) {
         let mut st = self.st.lock();
-        while (st.ctl.work && st.ctl.hold == 0 && !st.ctl.paused) || st.ctl.walking {
+        while (st.ctl.work && st.ctl.hold == 0 && !st.ctl.paused)
+            || (st.ctl.walking && !st.ctl.selecting.is_some_and(|(_, _, due)| self.now_ns(&st) < due))
+        {
             self.wake.wait(&mut st);
+        }
+    }
+
+    /// The adapter's clock in nanoseconds: host wall time less the time the
+    /// machine was stopped.
+    fn now_ns(&self, st: &State) -> i64 {
+        match self.fake_ns.load(Ordering::Relaxed) {
+            i64::MIN => {
+                let at = st.ctl.stopped_at.unwrap_or_else(Instant::now);
+                at.duration_since(self.start).as_nanos() as i64 - st.ctl.stopped_ns
+            }
+            t => t,
+        }
+    }
+
+    /// Wait out the selection of an absent target on the ring entry at
+    /// `cons`, with the state unlocked while the thread waits. True once the
+    /// selection timeout has passed. False when the thread must look at the
+    /// ring again first: it was parked, or a reset or a new request ring
+    /// took the entry away.
+    fn select_absent(&self, st: &mut MutexGuard<'_, State>, ring: &Ring, cons: u32) -> bool {
+        let due = match st.ctl.selecting {
+            Some((e, c, due)) if e == ring.epoch && c == cons => due,
+            _ => {
+                let wait = SELECTION_TIMEOUT_UNIT * u32::from(st.selection_timeout);
+                let due = self.now_ns(st).saturating_add(wait.as_nanos() as i64);
+                st.ctl.selecting = Some((ring.epoch, cons, due));
+                self.wake.notify_all();
+                due
+            }
+        };
+        loop {
+            if st.ctl.shutdown || st.ctl.hold > 0 || st.ctl.paused || st.ctl.gen != ring.gen || st.ctl.rqst_epoch != ring.epoch {
+                return false;
+            }
+            let left = due - self.now_ns(st);
+            if left <= 0 {
+                st.ctl.selecting = None;
+                return true;
+            }
+            // A test clock only moves when the test moves it.
+            if self.fake_ns.load(Ordering::Relaxed) == i64::MIN {
+                self.wake.wait_for(st, Duration::from_nanos(left as u64));
+            } else {
+                self.wake.wait(st);
+            }
         }
     }
 
@@ -610,6 +695,9 @@ impl Core {
     pub fn pause(&self) {
         let mut st = self.st.lock();
         st.ctl.paused = true;
+        st.ctl.stopped_at.get_or_insert_with(Instant::now);
+        // Parked mid-selection, the thread lets go of its entry.
+        self.wake.notify_all();
         while st.ctl.walking {
             self.wake.wait(&mut st);
         }
@@ -620,6 +708,9 @@ impl Core {
     pub fn resume(&self) {
         let mut st = self.st.lock();
         st.ctl.paused = false;
+        if let Some(t) = st.ctl.stopped_at.take() {
+            st.ctl.stopped_ns += t.elapsed().as_nanos() as i64;
+        }
         self.kick(&mut st);
     }
 
@@ -641,6 +732,7 @@ impl Core {
     fn quiesced<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
         let mut st = self.st.lock();
         st.ctl.hold += 1;
+        self.wake.notify_all();
         while st.ctl.walking {
             self.wake.wait(&mut st);
         }
@@ -861,13 +953,16 @@ impl Core {
             | mbox::SET_ASYNC_DATA_SETUP
             | mbox::SET_ACTIVE_NEGATION
             | mbox::SET_TAG_AGE_LIMIT
-            | mbox::SET_SELECTION_TIMEOUT
             | mbox::SET_INITIATOR_ID
             | mbox::SET_TARGET_PARAMETERS
             | mbox::SET_DEVICE_QUEUE
             | mbox::SET_PCI_CONTROL
             | mbox::SET_SYSTEM_PARAMETER
             | mbox::SET_DATA_OVERRUN_RECOVERY => st.mailbox[0] = mbox::COMPLETE,
+            mbox::SET_SELECTION_TIMEOUT => {
+                st.selection_timeout = st.mailbox[1];
+                st.mailbox[0] = mbox::COMPLETE;
+            }
             mbox::SET_RESET_DELAY_PARAMS => {
                 st.reset_delay = st.mailbox[1];
                 st.mailbox[0] = mbox::COMPLETE;
@@ -1136,7 +1231,10 @@ impl Core {
         }
         // GOT_BUS alone is Linux's bad-target; the timeout bit beside it is
         // what lets the empty slot be treated as benign.
-        if target > MAX_TARGET || lun > MAX_LUN || !self.has_target(target) {
+        if target > MAX_TARGET || !self.has_target(target) {
+            return Prepared::Absent(Self::incomplete(handle, STATE_GOT_BUS, STATUS_FLAG_TIMEOUT));
+        }
+        if lun > MAX_LUN {
             return Prepared::Answered(Self::incomplete(handle, STATE_GOT_BUS, STATUS_FLAG_TIMEOUT));
         }
 
@@ -1323,6 +1421,12 @@ impl Core {
                 }
                 Prepared::Skipped => None,
                 Prepared::Answered(p) => Some(p),
+                Prepared::Absent(p) => {
+                    if !self.select_absent(&mut st, &ring, cons) {
+                        continue;
+                    }
+                    Some(p)
+                }
                 Prepared::Run(job) => {
                     st.total_cmds += 1;
                     st.ctl.busy = true;
@@ -1428,6 +1532,7 @@ impl Core {
                 if val & CTRL_SOFT_RESET != 0 {
                     st.reset();
                     self.publish_gen(&st);
+                    self.wake.notify_all();
                     drop(st);
                     self.retire_stores();
                 }
@@ -1582,6 +1687,7 @@ impl Isp1040 {
             ("dma_cmd_cfg", st.dma_cmd_cfg), ("dma_data_cfg", st.dma_data_cfg),
             ("rqst_len", st.rqst_len), ("resp_len", st.resp_len), ("rqst_cons", st.rqst_cons),
             ("resp_prod", st.resp_prod), ("resp_cons", st.resp_cons), ("reset_delay", st.reset_delay),
+            ("selection_timeout", st.selection_timeout),
         ] {
             t.insert(k.into(), hex_u16(v));
         }
@@ -1622,6 +1728,7 @@ impl Isp1040 {
             st.ctl.gen += 1;
             st.ctl.rqst_epoch += 1;
             st.ctl.resp_epoch += 1;
+            st.ctl.selecting = None;
             st.ctl.work = true;
             let u16f = |k: &str| get_field(v, k).and_then(toml_u16).unwrap_or(0);
             let u32f = |k: &str| get_field(v, k).and_then(toml_u32).unwrap_or(0);
@@ -1639,6 +1746,7 @@ impl Isp1040 {
             st.resp_prod = u16f("resp_prod");
             st.resp_cons = u16f("resp_cons");
             st.reset_delay = u16f("reset_delay");
+            st.selection_timeout = get_field(v, "selection_timeout").and_then(toml_u16).unwrap_or(DEFAULT_SELECTION_TIMEOUT);
             // Indices fold into their rings, whatever the file says.
             if st.rqst_len != 0 {
                 st.rqst_cons %= st.rqst_len;
