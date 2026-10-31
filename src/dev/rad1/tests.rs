@@ -1002,3 +1002,82 @@ fn a_failed_host_open_is_retried_after_a_wait() {
     assert!(sink.host_retry_due(now + HOST_RETRY), "due again later");
 }
 
+// Output channel clock selection: the Octane PROM's generator 2.
+
+const SEC: i64 = 1_000_000_000;
+
+fn tapped(r: &Rad1) -> Arc<parking_lot::Mutex<Vec<i16>>> {
+    let tap = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    *r.sink.lock() = Some(Sink { host: None, host_failed_at: None, wav: None, tap: Some(tap.clone()) });
+    tap
+}
+
+#[test]
+fn the_master_select_after_the_load_sets_the_rate() {
+    // Generator 2 at divisor 6 is 32 kHz from the 192 kHz master and 29.4 kHz
+    // from the 176.4 kHz one. The Octane PROM loads, then selects.
+    for (select_first, frames) in [(true, 320), (false, 320)] {
+        let (r, _ram) = dma_card();
+        let tap = tapped(&r);
+        wr(&r, 0xa4, 0xffff);
+        wr(&r, 0x58, 0x4000_0000);
+        if select_first {
+            wr(&r, 0xac, 1);
+        }
+        wr(&r, 0xa0, 0x4000_0405);
+        if !select_first {
+            wr(&r, 0xac, 1);
+        }
+        program(&r, &RING_OUTPUT, 0x10_0000, 0xffff_f008);
+        wr(&r, 0x58, 0x4000_0001);
+        at(&r, SEC / 100);
+        rd(&r, 0x18);
+        assert_eq!(tap.lock().len(), frames * 2, "select first: {select_first}");
+    }
+    // Withheld, the load alone computes 29400 Hz.
+    let (r, _ram) = dma_card();
+    let tap = tapped(&r);
+    wr(&r, 0xa4, 0xffff);
+    wr(&r, 0xa0, 0x4000_0405);
+    program(&r, &RING_OUTPUT, 0x10_0000, 0xffff_f008);
+    wr(&r, 0x58, 0x4000_0001);
+    at(&r, SEC / 100);
+    rd(&r, 0x18);
+    assert_eq!(tap.lock().len(), 294 * 2);
+}
+
+#[test]
+fn the_output_follows_the_generator_0x58_names() {
+    // Generator 2 is loaded for 32 kHz; the output on generator 1 stays at 44.1 kHz.
+    let (r, _ram) = dma_card();
+    let tap = tapped(&r);
+    set_clock(&r, 2, 1, 0x0000_ffff, 0x405);
+    program(&r, &RING_OUTPUT, 0x10_0000, 0xffff_f008);
+    wr(&r, 0x58, 0x2000_0001);
+    // Short looks: a look-away of two rings or more skips whole laps.
+    at(&r, SEC / 100);
+    rd(&r, 0x18);
+    assert_eq!(tap.lock().len(), 441 * 2);
+    // Switching to generator 2 while running counts from then at 32 kHz.
+    wr(&r, 0x58, 0x4000_0001);
+    at(&r, SEC / 100 + SEC / 100);
+    rd(&r, 0x18);
+    assert_eq!(tap.lock().len(), (441 + 320) * 2);
+}
+
+#[test]
+fn analog_output_enable_takes_only_the_two_known_selects() {
+    let r = card();
+    for v in [0x4000_0000, 0x2000_0000] {
+        wr(&r, 0x58, v);
+        assert_eq!(rd(&r, 0x58), v);
+    }
+    wr(&r, 0x58, 0x4000_0000);
+    for v in [0x6000_0000, 0x8000_0000, 0x1000_0000, 0x4200_0000, 0x0000_0000, 0x4000_0002] {
+        wr(&r, 0x58, v);
+        assert_eq!(rd(&r, 0x58), 0x4000_0000, "{v:#x} is unsupported");
+    }
+    wr(&r, 0x58, 0x4000_0001);
+    assert_eq!(rd(&r, 0x58), 0x4000_0000, "no ring programmed");
+}
+
