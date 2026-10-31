@@ -6365,4 +6365,157 @@ mod tests {
         }
         assert_eq!(outcome[0], outcome[1], "an explanation must not change what the guest sees");
     }
+
+    /// A bus where nothing answers: every read and write is refused.
+    struct RefusingBus;
+
+    impl BusDevice for RefusingBus {
+        fn read8(&self, _addr: u64) -> BusRead8 { BusRead8::err() }
+        fn read16(&self, _addr: u64) -> BusRead16 { BusRead16::err() }
+        fn read32(&self, _addr: u64) -> BusRead32 { BusRead32::err() }
+        fn read64(&self, _addr: u64) -> BusRead64 { BusRead64::err() }
+        fn write8(&self, _addr: u64, _val: u8) -> u32 { crate::traits::BUS_ERR }
+        fn write16(&self, _addr: u64, _val: u16) -> u32 { crate::traits::BUS_ERR }
+        fn write32(&self, _addr: u64, _val: u32) -> u32 { crate::traits::BUS_ERR }
+        fn write64(&self, _addr: u64, _val: u64) -> u32 { crate::traits::BUS_ERR }
+        fn write64_masked(&self, _addr: u64, _val: u64, _mask: u64) -> u32 { crate::traits::BUS_ERR }
+    }
+
+    fn refusing_executor<C: CpuModel + From<Arc<dyn BusDevice>>>() -> MipsExecutor<PassthroughTlb, C> {
+        let bus: Arc<dyn BusDevice> = Arc::new(RefusingBus);
+        let mut exec = MipsExecutor::new(bus, PassthroughTlb::default(), &MipsCpuConfig::indy());
+        disable_jitv2(&mut exec);
+        // kseg1 base: every offset below is uncached and refused.
+        exec.core.write_gpr(4, 0xFFFF_FFFF_A100_0000);
+        exec.core.write_gpr(6, 0x1234_5678);
+        exec
+    }
+
+    /// R10000 family: a store the system refuses leaves the processor as a
+    /// write request, which has no response, so it completes. NEC U10278EJ4V0UM
+    /// p.104 (a write request has no response) and p.316 (Bus Error comes only
+    /// from an ERR on a read or upgrade, or uncorrectable read data).
+    fn check_uncached_stores_post<C: CpuModel + From<Arc<dyn BusDevice>>>(name: &str) {
+        let stores = [
+            ("SB", make_i(OP_SB, 4, 6, 3)),
+            ("SH", make_i(OP_SH, 4, 6, 2)),
+            ("SW", make_i(OP_SW, 4, 6, 4)),
+            ("SD", make_i(OP_SD, 4, 6, 8)),
+            ("SWL", make_i(OP_SWL, 4, 6, 5)),
+            ("SDR", make_i(OP_SDR, 4, 6, 9)),
+        ];
+        for (op, store) in stores {
+            let mut exec = refusing_executor::<C>();
+            exec.core.pc = 0xFFFF_FFFF_8000_1000;
+            let st = exec.exec(store);
+            assert_eq!(st, EXEC_COMPLETE, "{name} {op}: a refused uncached store must complete");
+            assert_eq!(exec.core.cp0_status & crate::cpu::mips_core::STATUS_EXL, 0,
+                "{name} {op}: no exception may be taken");
+            assert_eq!(exec.core.cp0_badvaddr, 0, "{name} {op}: no BadVAddr");
+            // The next instruction runs.
+            let next = exec.exec(make_i(OP_ADDIU, 0, 5, 7));
+            assert_eq!(next, EXEC_COMPLETE);
+            assert_eq!(exec.core.read_gpr(5), 7, "{name} {op}: the following instruction executed");
+        }
+    }
+
+    #[test]
+    fn test_r10000_refused_uncached_store_is_posted() {
+        check_uncached_stores_post::<crate::cpu::mips_cache_v2::R10000Cache>("R10000");
+        check_uncached_stores_post::<crate::cpu::mips_cache_shadow::R10000ShadowCache>("R10000 shadow");
+    }
+
+    /// Reads keep their bus error on every model, R10000 included.
+    #[test]
+    fn test_r10000_refused_uncached_load_still_raises_the_bus_error() {
+        fn check<C: CpuModel + From<Arc<dyn BusDevice>>>(name: &str) {
+            for (op, load, off) in [("LW", make_i(OP_LW, 4, 8, 4), 4u64), ("LB", make_i(OP_LB, 4, 8, 3), 3),
+                                    ("LD", make_i(OP_LD, 4, 8, 8), 8)] {
+                let mut exec = refusing_executor::<C>();
+                let st = exec.exec(load);
+                assert_eq!(st, crate::traits::BUS_ERR, "{name} {op}: the read must still fault");
+                assert_eq!(exec.core.cp0_badvaddr, 0xFFFF_FFFF_A100_0000 + off);
+            }
+        }
+        check::<crate::cpu::mips_cache_v2::R10000Cache>("R10000");
+        check::<crate::cpu::mips_cache_shadow::R10000ShadowCache>("R10000 shadow");
+    }
+
+    /// Other models keep the synchronous Data Bus Error on a refused store.
+    #[test]
+    fn test_r4400_and_r5000_refused_uncached_store_still_raises_the_bus_error() {
+        fn check<C: CpuModel + From<Arc<dyn BusDevice>>>(name: &str) {
+            for (op, store) in [("SB", make_i(OP_SB, 4, 6, 3)), ("SW", make_i(OP_SW, 4, 6, 4)),
+                                ("SD", make_i(OP_SD, 4, 6, 8)), ("SWL", make_i(OP_SWL, 4, 6, 5))] {
+                let mut exec = refusing_executor::<C>();
+                let st = exec.exec(store);
+                assert_eq!(st, crate::traits::BUS_ERR, "{name} {op}: the store must still fault");
+            }
+        }
+        check::<crate::cpu::mips_cache_v2::R4400Cache>("R4400");
+        check::<crate::cpu::mips_cache_v2::R5000Cache>("R5000");
+        check::<crate::cpu::mips_cache_shadow::R4400ShadowCache>("R4400 shadow");
+        check::<crate::cpu::mips_cache_shadow::R5000ShadowCache>("R5000 shadow");
+    }
+
+    /// Posting is a property of the CPU model, not of the bus.
+    #[test]
+    fn test_posted_stores_are_an_r10000_model_property() {
+        assert!(<crate::cpu::mips_cache_v2::R10000Cache as CpuModel>::POSTS_UNCACHED_STORES);
+        assert!(<crate::cpu::mips_cache_shadow::R10000ShadowCache as CpuModel>::POSTS_UNCACHED_STORES);
+        assert!(<crate::cpu::mips_cache_shadow::R10000O2ShadowCache as CpuModel>::POSTS_UNCACHED_STORES);
+        assert!(!<R4400Cache as CpuModel>::POSTS_UNCACHED_STORES);
+        assert!(!<crate::cpu::mips_cache_v2::R5000Cache as CpuModel>::POSTS_UNCACHED_STORES);
+        assert!(!<PassthroughCache as CpuModel>::POSTS_UNCACHED_STORES);
+    }
+
+    /// The refusal log is bounded per address: a probe loop must not flood
+    /// stderr, but it is never silent.
+    #[test]
+    fn test_posted_store_log_is_bounded_per_address() {
+        use crate::cpu::mips_exec::PostedStoreLog;
+        let mut log = PostedStoreLog::default();
+        let shown = (1..=10_000).filter(|_| log.should_log(0x1e13_0400)).count();
+        assert!(shown >= 4 && shown <= 24, "first few and then sparse, got {shown}");
+        assert!(log.should_log(0x1e13_0408), "a different address logs from the start");
+        // The table itself stays bounded.
+        for pa in 0..100_000u64 { log.should_log(pa << 3); }
+        assert!(log.tracked() <= PostedStoreLog::MAX_ADDRS);
+    }
+
+    /// Past the table, new addresses still print, labelled as a shared count.
+    #[test]
+    fn test_posted_store_log_when_the_table_is_full() {
+        use crate::cpu::mips_exec::PostedStoreLog;
+        let mut log = PostedStoreLog::default();
+        for pa in 0..PostedStoreLog::MAX_ADDRS as u64 { assert!(log.note(pa << 3).is_some()); }
+        assert_eq!(log.tracked(), PostedStoreLog::MAX_ADDRS);
+        // A tracked address keeps its own count.
+        assert_eq!(log.note(0), Some((2, false)));
+        // Untracked addresses share one: first four print, labelled shared.
+        let big = 1u64 << 40;
+        for i in 1..=4u64 { assert_eq!(log.note(big + i * 8), Some((i, true))); }
+        assert_eq!(log.note(big + 0x100), None, "5th shared store is suppressed");
+        assert_eq!(log.tracked(), PostedStoreLog::MAX_ADDRS);
+    }
+
+    /// A refused uncached SC/SCD completes and succeeds (a model choice: see
+    /// `CpuModel::POSTS_UNCACHED_STORES`); on other models it faults.
+    #[test]
+    fn test_refused_uncached_sc_follows_the_store_rule() {
+        fn run<C: CpuModel + From<Arc<dyn BusDevice>>>(op: u32) -> (u32, u64) {
+            let mut exec = refusing_executor::<C>();
+            exec.cache.set_llbit(true);
+            let st = exec.exec(make_i(op, 4, 6, 8));
+            (st, exec.core.read_gpr(6))
+        }
+        for op in [OP_SC, OP_SCD] {
+            let (st, rt) = run::<crate::cpu::mips_cache_v2::R10000Cache>(op);
+            assert_eq!((st, rt), (EXEC_COMPLETE, 1), "R10000 posted SC succeeds");
+            let (st, rt) = run::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(op);
+            assert_eq!((st, rt), (EXEC_COMPLETE, 1), "R10000 shadow posted SC succeeds");
+            let (st, _) = run::<crate::cpu::mips_cache_v2::R5000Cache>(op);
+            assert_eq!(st, crate::traits::BUS_ERR, "R5000 SC still faults");
+        }
+    }
 }

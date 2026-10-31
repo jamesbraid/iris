@@ -7879,4 +7879,125 @@ mod tests {
             println!("{:<12} {:8.3} ns/instruction", name, ns);
         }
     }
+
+    /// A bus that refuses everything, for the posted-store checks below.
+    struct RefusingBus;
+
+    impl BusDevice for RefusingBus {
+        fn read8(&self, _addr: u64) -> BusRead8 { BusRead8::err() }
+        fn read16(&self, _addr: u64) -> BusRead16 { BusRead16::err() }
+        fn read32(&self, _addr: u64) -> BusRead32 { BusRead32::err() }
+        fn read64(&self, _addr: u64) -> BusRead64 { BusRead64::err() }
+        fn write8(&self, _addr: u64, _val: u8) -> u32 { BUS_ERR }
+        fn write16(&self, _addr: u64, _val: u16) -> u32 { BUS_ERR }
+        fn write32(&self, _addr: u64, _val: u32) -> u32 { BUS_ERR }
+        fn write64(&self, _addr: u64, _val: u64) -> u32 { BUS_ERR }
+        fn write64_masked(&self, _addr: u64, _val: u64, _mask: u64) -> u32 { BUS_ERR }
+    }
+
+    /// Run `[ADDIU r5,r0,1 ; op r6, 0(r16) ; ADDIU r7,r0,2]` once through the
+    /// interpreter and once as a compiled region, over a bus that refuses
+    /// every access, on CPU model `C`. The two must agree.
+    fn refused_access_both_engines<C>(op: u32) -> (CoreSnapshot, CoreSnapshot)
+    where
+        C: crate::cpu::mips_cache_v2::CpuModel + From<Arc<dyn BusDevice>>,
+    {
+        let pc = 0xFFFF_FFFF_8000_0000u64;
+        let mut gpr = [0u64; 32];
+        gpr[16] = 0xFFFF_FFFF_A100_0000; // kseg1: uncached, refused
+        gpr[6] = 0x1234_5678;
+        let page: Vec<(u16, u32)> = vec![
+            (0, make_i(crate::cpu::mips_isa::OP_ADDIU, 0, 5, 1)),
+            (1, make_i(op, 16, 6, 0)),
+            (2, make_i(crate::cpu::mips_isa::OP_ADDIU, 0, 7, 2)),
+        ];
+        let page_base = pc & !(PAGE_SIZE as u64 - 1);
+        let build = || {
+            let bus: Arc<dyn BusDevice> = Arc::new(RefusingBus);
+            let mut exec: MipsExecutor<PassthroughTlb, C> =
+                MipsExecutor::new(bus, PassthroughTlb::default(), &MipsCpuConfig::indy());
+            exec.core.gpr = gpr;
+            exec.core.pc = pc;
+            exec.core.hot.interrupts.store(0, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(feature = "fetchverify")]
+            { exec.core.fetch_verify_on = false; }
+            exec
+        };
+
+        let interp = {
+            let mut exec = build();
+            exec.jitv2_dispatch_enabled = false;
+            for _ in 0..3 {
+                let at = exec.core.pc;
+                let word = page.iter().find(|(w, _)| page_base + (*w as u64) * 4 == at).map(|p| p.1);
+                let Some(word) = word else { break };
+                exec.exec(word);
+            }
+            CoreSnapshot::capture(&exec.core)
+        };
+
+        let jit = {
+            let mut page_words = [0u32; ENTRIES_PER_PAGE];
+            for &(word, raw) in &page {
+                page_words[word as usize] = raw;
+            }
+            let mut analyzer = Analyzer::new();
+            let (walked, non_empty) = analyzer.walk_bounded(&page_words, 0, page_base as u32, 3);
+            assert!(non_empty);
+            let mut instrs_owned = *walked;
+            let mut codegen = Codegen::new();
+            let jit_fn: JitFn = codegen.compile_region(&mut instrs_owned, 0, true, false)
+                .expect("region must be compilable for this test to be meaningful");
+            let mut exec = Box::new(build());
+            exec.install_jit_hooks();
+            unsafe { jit_fn(&mut exec.core as *mut MipsCore) };
+            std::mem::forget(codegen);
+            CoreSnapshot::capture(&exec.core)
+        };
+        (interp, jit)
+    }
+
+    /// R10000: a refused uncached store completes in compiled code exactly as
+    /// in the interpreter, and the instructions after it run. The same access
+    /// as a load still faults in both engines.
+    #[test]
+    fn refused_uncached_store_is_posted_in_both_engines_on_r10000() {
+        use crate::cpu::mips_cache_v2::R10000Cache;
+        use crate::cpu::mips_cache_shadow::R10000ShadowCache;
+        use crate::cpu::mips_core::STATUS_EXL;
+        use crate::cpu::mips_isa::{OP_SW, OP_SD, OP_SB, OP_LW};
+        // SWL/SWR/SDL/SDR leave through the masked-store helper, a separate site.
+        use crate::cpu::mips_isa::{OP_SWL, OP_SWR, OP_SDL, OP_SDR};
+        for (name, op) in [("SW", OP_SW), ("SD", OP_SD), ("SB", OP_SB),
+                           ("SWL", OP_SWL), ("SWR", OP_SWR), ("SDL", OP_SDL), ("SDR", OP_SDR)] {
+            for (cname, (interp, jit)) in [
+                ("R10000", refused_access_both_engines::<R10000Cache>(op)),
+                ("R10000 shadow", refused_access_both_engines::<R10000ShadowCache>(op)),
+            ] {
+                assert_eq!(jit, interp, "{cname} {name}: JIT and interpreter diverged");
+                assert_eq!(jit.cp0_status & STATUS_EXL, 0, "{cname} {name}: no exception");
+                assert_eq!(jit.gpr[7], 2, "{cname} {name}: the instruction after the store ran");
+            }
+        }
+        let (interp, jit) = refused_access_both_engines::<R10000Cache>(OP_LW);
+        assert_eq!(jit, interp, "load: JIT and interpreter diverged");
+        assert_ne!(jit.cp0_status & STATUS_EXL, 0, "the load must still take its Data Bus Error");
+        assert_eq!(jit.gpr[7], 0, "nothing after the faulting load ran");
+    }
+
+    /// R4400 and R5000 keep the Data Bus Error on a refused store, in both engines.
+    #[test]
+    fn refused_uncached_store_still_faults_in_both_engines_on_r4400_and_r5000() {
+        use crate::cpu::mips_cache_v2::{R4400Cache, R5000Cache};
+        use crate::cpu::mips_core::STATUS_EXL;
+        use crate::cpu::mips_isa::OP_SW;
+        for (cname, (interp, jit)) in [
+            ("R4400", refused_access_both_engines::<R4400Cache>(OP_SW)),
+            ("R5000", refused_access_both_engines::<R5000Cache>(OP_SW)),
+        ] {
+            assert_eq!(jit, interp, "{cname}: JIT and interpreter diverged");
+            assert_ne!(jit.cp0_status & STATUS_EXL, 0, "{cname}: the store must take its Data Bus Error");
+            assert_eq!(jit.gpr[7], 0, "{cname}: nothing after the faulting store ran");
+        }
+    }
 }

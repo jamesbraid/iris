@@ -345,6 +345,7 @@ impl<
     };
     const CACHE_KIND: &'static str = "shadow";
     const R10K_CACHE_OPS: bool = MODEL == model::R10000;
+    const POSTS_UNCACHED_STORES: bool = MODEL == model::R10000;
 }
 
 impl<
