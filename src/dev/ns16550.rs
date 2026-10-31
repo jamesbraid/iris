@@ -195,6 +195,11 @@ pub struct Ns16550 {
     /// A held byte was given up on: the backend counts as disconnected, and
     /// bytes complete without waiting, until it takes one.
     backend_dead: bool,
+    /// In loopback the serial input is disconnected, as on a PC16550D: what
+    /// arrives from outside is discarded, not kept for later. QEMU's core
+    /// would take it, so only a chip that wants the part's behaviour asks
+    /// for this.
+    discard_in_loopback: bool,
 }
 
 /// How long a refused byte is retried before the backend counts as
@@ -230,6 +235,7 @@ impl Ns16550 {
             held: VecDeque::new(),
             held_since: None,
             backend_dead: false,
+            discard_in_loopback: false,
         };
         s.reset();
         s
@@ -257,6 +263,12 @@ impl Ns16550 {
         self.thr_ipending = false;
         self.held.clear();
         self.held_since = None;
+    }
+
+    /// Discard input from the host end while in loopback, and say so in the
+    /// log, instead of holding it for after.
+    pub fn set_discard_in_loopback(&mut self, discard: bool) {
+        self.discard_in_loopback = discard;
     }
 
     pub fn set_backend(&mut self, backend: Arc<dyn SerialBackend>) {
@@ -693,6 +705,16 @@ impl Ns16550 {
     /// and on status and data reads, so a driver polling for data sees it at
     /// once.
     pub fn pump(&mut self) -> bool {
+        if self.discard_in_loopback && self.loopback() {
+            let mut dropped = 0;
+            while self.typed.pop_front().map(Ok).unwrap_or_else(|| self.backend.recv_byte()).is_ok() {
+                dropped += 1;
+            }
+            if dropped > 0 {
+                crate::dlog!(crate::devlog::LogModule::Ioc, "serial port discarded {dropped} character(s) from outside while in loopback");
+            }
+            return false;
+        }
         let mut moved = false;
         loop {
             let n = self.can_receive();
@@ -1118,5 +1140,22 @@ mod tests {
         let mut want = vec![0];
         want.extend(3..FIFO_LENGTH as u8 + 3);
         assert_eq!(*g.out.lock().unwrap(), want, "the byte in the shift register survives");
+    }
+
+    /// A port that disconnects its input in loopback drops what the host
+    /// sends meanwhile; one that does not keeps it for after.
+    #[test]
+    fn loopback_input_from_outside_is_dropped_only_where_asked() {
+        for (discard, kept) in [(true, 0), (false, 1)] {
+            let (mut u, w) = uart();
+            u.set_discard_in_loopback(discard);
+            u.write(MCR, MCR_LOOP);
+            w.inp.lock().unwrap().push_back(b'x');
+            u.pump();
+            u.write(MCR, 0);
+            u.pump();
+            assert_eq!(u.read(LSR) & 1, kept);
+            assert!(w.inp.lock().unwrap().is_empty(), "taken off the line either way");
+        }
     }
 }
