@@ -15,15 +15,13 @@
 //! Ported from src/mame/shared/xbox_usb.cpp and xbox_usb.h in MAME,
 //! revision 2ee9b1e30299b122b131cab0bd7912abc2b095ba.
 
-use crate::hptimer::{TimerId, TimerManager, TimerReturn};
+use crate::dev::heart::{host_clock, Clock};
 use crate::irq::IrqLine;
 use crate::pci::{Bar, PciBusDevice, PciConfig, PciConfigPolicy, PciDma, PCI_INTA};
-use crate::dev::heart::{host_clock, Clock};
 use crate::traits::{Device, Resettable};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -154,13 +152,11 @@ pub struct Ohci {
     dma: Mutex<Option<Arc<dyn PciDma>>>,
     irq: Mutex<IrqLine>,
     running: AtomicBool,
-    me: Weak<Self>,
     /// Source of the frame count: the machine's own clock, so the guest's
     /// idea of a millisecond and the controller's agree.
-    time: Mutex<Clock>,
+    time: OnceLock<Clock>,
     /// `time` reading at the last frame boundary delivered; `None` while stopped.
     clock: Mutex<Option<u64>>,
-    timer: Mutex<Option<(Arc<TimerManager>, Option<TimerId>)>>,
 }
 impl Ohci {
     pub fn new() -> Arc<Self> {
@@ -188,33 +184,26 @@ impl Ohci {
             },
         );
         config.set_subsystem_identity(0xffff_ffff);
-        Arc::new_cyclic(|me| Self {
+        Arc::new(Self {
             config,
             state: Mutex::new(State::new()),
             pass: Mutex::new(()),
             dma: Mutex::new(None),
             irq: Mutex::new(IrqLine::unconnected()),
             running: AtomicBool::new(false),
-            me: me.clone(),
-            time: Mutex::new(host_clock()),
+            time: OnceLock::new(),
             clock: Mutex::new(None),
-            timer: Mutex::new(None),
         })
-    }
-    pub fn set_timer_manager(&self, timers: Arc<TimerManager>) {
-        assert!(
-            !self.running.load(Ordering::Acquire),
-            "connect OHCI timers before start"
-        );
-        *self.timer.lock() = Some((timers, None));
     }
     /// Use `clock` for frame timing. Call before `start`.
     pub fn set_clock(&self, clock: Clock) {
         assert!(
-            !self.running.load(Ordering::Acquire),
-            "connect the OHCI clock before start"
+            !self.running.load(Ordering::Acquire) && self.time.set(clock).is_ok(),
+            "connect the OHCI clock once, before start"
         );
-        *self.time.lock() = clock;
+    }
+    fn now(&self) -> u64 {
+        (self.time.get_or_init(host_clock))()
     }
     /// Deliver every frame boundary the clock has passed. Every register
     /// access calls this, so a read sees the frame count the guest's own
@@ -224,7 +213,7 @@ impl Ohci {
         // consumed and read the frame count before the first has applied it.
         let mut clock = self.clock.lock();
         let Some(at) = clock.as_mut() else { return };
-        let now = (self.time.lock().clone())();
+        let now = self.now();
         let elapsed = now.saturating_sub(*at) / 1_000_000;
         *at += elapsed * 1_000_000;
         self.advance_frames(elapsed);
@@ -288,7 +277,7 @@ impl Ohci {
         self.drive_irq();
         Ok(())
     }
-    /// Deterministic millisecond ticks; the machine uses the same path from TimerManager.
+    /// Deterministic millisecond ticks; `sync_clock` delivers the same ticks from the clock.
     pub fn advance_frames(&self, count: u64) {
         for _ in 0..count {
             if !self.running.load(Ordering::Acquire) {
@@ -372,6 +361,9 @@ impl PciBusDevice for Ohci {
             return;
         }
         self.sync_clock();
+        // Taken before `pass`, as `sync_clock` orders them. Only a control
+        // write can restart the frame phase.
+        let mut anchor = (off == 4).then(|| self.clock.lock());
         let mut reset = None;
         {
             let _pass = self.pass.lock();
@@ -381,8 +373,23 @@ impl PciBusDevice for Ohci {
                     let old = s.r[1];
                     s.r[1] = val & 0x7ff;
                     if val & 0xc0 == 0x80 && old & 0xc0 != 0x80 {
+                        // OpenHCI 1.0a 6.2.1, 7.3.2, 7.3.3: entering
+                        // UsbOperational loads HcFmRemaining from the frame
+                        // interval and increments HcFmNumber, with no SOF at
+                        // the load; the first follows one frame later. The
+                        // free-running clock's phase therefore restarts here.
                         s.bit_credit = 0;
                         s.active_fi = s.r[13];
+                        s.r[14] = (s.r[13] & 0x8000_0000) | (s.r[13] & 0x3fff);
+                        let old_frame = s.r[15] as u16;
+                        let frame = old_frame.wrapping_add(1);
+                        s.r[15] = u32::from(frame);
+                        if (old_frame ^ frame) & 0x8000 != 0 {
+                            s.r[3] |= 32;
+                        }
+                        if let Some(Some(at)) = anchor.as_deref_mut() {
+                            *at = self.now();
+                        }
                     }
                     if val & 0xc0 == 0 && old & 0xc0 != 0 {
                         s.r[18] = 0x10000902;
@@ -498,6 +505,7 @@ impl PciBusDevice for Ohci {
                 }
             }
         }
+        drop(anchor);
         if let Some(f) = reset {
             f.reset();
         }
@@ -528,33 +536,13 @@ impl Device for Ohci {
         if self.running.swap(true, Ordering::AcqRel) {
             return;
         }
-        *self.clock.lock() = Some((self.time.lock().clone())());
-        if let Some((tm, id)) = self.timer.lock().as_mut() {
-            let weak = self.me.clone();
-            *id = Some(tm.add_recurring(
-                Instant::now() + Duration::from_millis(1),
-                Duration::from_millis(1),
-                weak,
-                |weak| {
-                    if let Some(h) = weak.upgrade() {
-                        h.sync_clock();
-                        TimerReturn::Continue
-                    } else {
-                        TimerReturn::Delete
-                    }
-                },
-            ));
-        }
+        let now = self.now();
+        *self.clock.lock() = Some(now);
     }
     fn stop(&self) {
         self.sync_clock();
         self.running.store(false, Ordering::Release);
         *self.clock.lock() = None;
-        if let Some((tm, id)) = self.timer.lock().as_mut() {
-            if let Some(id) = id.take() {
-                tm.remove(id);
-            }
-        }
         drop(self.pass.lock());
     }
     fn is_running(&self) -> bool {

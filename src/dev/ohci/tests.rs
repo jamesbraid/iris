@@ -6,6 +6,7 @@ use super::*;
 use crate::pci::{PciBusDevice, PciDmaStatus};
 use crate::traits::{Device, Resettable};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Weak;
 
 struct Memory {
     bytes: Mutex<Vec<u8>>,
@@ -382,16 +383,70 @@ fn frame_number_follows_the_clock_with_no_poll_or_timer() {
     // Part-way into a frame period when the guest sets operational.
     now.store(10_400_000, Ordering::Relaxed);
     h.bar_write(0, 4, 0x80, 4);
-    assert_eq!(h.bar_read(0, 0x3c, 4), 0);
-    // 1.1 ms on the guest's clock: one frame boundary has passed.
-    now.store(11_500_000, Ordering::Relaxed);
+    // Entering Operational increments the frame number at once.
     assert_eq!(h.bar_read(0, 0x3c, 4), 1);
+    // 1.1 ms on the guest's clock: the first boundary, 1 ms after the write, has passed.
+    now.store(11_500_000, Ordering::Relaxed);
+    assert_eq!(h.bar_read(0, 0x3c, 4), 2);
     // A long guest-time gap is delivered in full at the next access.
     now.store(31_500_000, Ordering::Relaxed);
-    assert_eq!(h.bar_read(0, 0x3c, 4), 21);
+    assert_eq!(h.bar_read(0, 0x3c, 4), 22);
     // Time that has not passed on the guest's clock delivers nothing.
-    assert_eq!(h.bar_read(0, 0x3c, 4), 21);
+    assert_eq!(h.bar_read(0, 0x3c, 4), 22);
     h.stop();
+}
+
+fn fake_clock_ohci(start_ns: usize) -> (Arc<Ohci>, Arc<AtomicUsize>) {
+    let h = Ohci::new();
+    let now = Arc::new(AtomicUsize::new(start_ns));
+    let t = now.clone();
+    h.set_clock(Arc::new(move || t.load(Ordering::Relaxed) as u64));
+    h.start();
+    (h, now)
+}
+
+/// OpenHCI 1.0a sections 6.2.1 and 7.3.3: entering UsbOperational loads
+/// HcFmRemaining from the frame interval, increments HcFmNumber, and sends the
+/// first SOF one frame later, whatever the phase of the free-running clock.
+fn operational_entry_restarts_the_frame(suspend_first: bool) {
+    let (h, now) = fake_clock_ohci(10_000_000);
+    let m = Memory::new();
+    h.connect_dma(m.clone());
+    h.config().write(1, 6);
+    h.bar_write(0, 0x18, 0x1000, 4);
+    // Not operational: no frames count however much time passes.
+    if suspend_first {
+        h.bar_write(0, 4, 0x40, 4);
+    }
+    now.store(15_000_000, Ordering::Relaxed);
+    assert_eq!(h.bar_read(0, 0x3c, 4), 0);
+    now.store(15_400_000, Ordering::Relaxed);
+    h.bar_write(0, 4, 0x80, 4);
+    assert_eq!(h.bar_read(0, 0x3c, 4), 1);
+    assert_eq!(h.bar_read(0, 0x38, 4), 0x2edf);
+    assert_eq!(h.bar_read(0, 0x0c, 4) & 4, 0, "no SOF at the load");
+    assert_eq!(m.bytes.lock()[0x1080], 0xa5, "no HCCA write at the load");
+    // Just short of one frame after the write: still nothing.
+    now.store(16_399_999, Ordering::Relaxed);
+    assert_eq!(h.bar_read(0, 0x3c, 4), 1);
+    assert_eq!(h.bar_read(0, 0x0c, 4) & 4, 0);
+    assert_eq!(m.bytes.lock()[0x1080], 0xa5);
+    // Exactly one frame after: the first SOF and its HCCA frame number.
+    now.store(16_400_000, Ordering::Relaxed);
+    assert_eq!(h.bar_read(0, 0x0c, 4) & 4, 4);
+    assert_eq!(h.bar_read(0, 0x3c, 4), 2);
+    assert_eq!(m.bytes.lock()[0x1080], 2);
+    h.stop();
+}
+
+#[test]
+fn operational_entry_from_reset_restarts_the_frame() {
+    operational_entry_restarts_the_frame(false);
+}
+
+#[test]
+fn operational_entry_from_suspend_restarts_the_frame() {
+    operational_entry_restarts_the_frame(true);
 }
 
 /// An interrupt handler can acknowledge a line while the controller raises it.
