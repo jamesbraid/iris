@@ -276,12 +276,14 @@ pub struct BoardLocks {
     pub front: Arc<Mutex<HostInterface>>,
     pub fifo: Arc<CommandFifo>,
     pub raster: Arc<RasterQueue>,
+    /// What the display thread reads of the board.
+    pub shared: Arc<DisplayShared>,
 }
 
 impl BoardLocks {
     pub fn new(s: Box<Board>) -> Self {
-        let (front, fifo, raster) = (s.front.clone(), s.fifo.clone(), s.raster.clone());
-        BoardLocks { board: Arc::new(Mutex::new(s)), front, fifo, raster }
+        let (front, fifo, raster, shared) = (s.front.clone(), s.fifo.clone(), s.raster.clone(), s.scanout.shared.clone());
+        BoardLocks { board: Arc::new(Mutex::new(s)), front, fifo, raster, shared }
     }
 
     /// A processor's read: through the front alone when it can, else under the
