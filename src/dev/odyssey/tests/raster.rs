@@ -68,7 +68,7 @@ fn eventually(what: &str, mut done: impl FnMut() -> bool) {
 fn a_waiting_read_behind_a_queued_draw_sees_it_drawn() {
     let (h, st) = slow_raster(300);
 
-    red_triangle(&mut h.board.lock(), &st);
+    red_triangle(&mut h.board.get(), &st);
     assert_eq!(h.raster.pending(), 1, "the draw waits for the raster unit");
     h.write(ODSY_SW_TOKEN, 7, 4);
     assert_eq!(h.read(ODSY_SW_TOKEN, 4), 7);
@@ -76,7 +76,7 @@ fn a_waiting_read_behind_a_queued_draw_sees_it_drawn() {
 
     h.read(ODSY_BUZZ_1, 4);
     assert_eq!(h.raster.pending(), 0);
-    let s = h.board.lock();
+    let s = h.board.get();
     assert_ne!(pixel(&s, 0, 10, 10), 0, "drawn before the read answered");
     drop(s);
     h.raster.stop();
@@ -90,7 +90,7 @@ fn a_waiting_read_behind_a_queued_draw_sees_it_drawn() {
 fn the_memory_word_answers_while_a_draw_is_queued() {
     let (h, st) = slow_raster(300);
 
-    red_triangle(&mut h.board.lock(), &st);
+    red_triangle(&mut h.board.get(), &st);
     assert_eq!(h.raster.pending(), 1, "the draw waits for the raster unit");
     assert_eq!(h.read(MEMORY_CONFIG, 4) & 0xff00_0000, 0xa100_0000);
     assert_eq!(h.raster.pending(), 1, "the memory word does not wait for the drawing");
@@ -105,7 +105,7 @@ fn a_fence_behind_a_queued_draw_lands_after_the_draw() {
     let (h, st) = slow_raster(300);
     let ram = Ram::new(1 << 20);
     {
-        let mut s = h.board.lock();
+        let mut s = h.board.get();
         s.guest = Some(ram.clone());
         s.host_write_addr_lower = 0x1000;
         red_triangle(&mut s, &st);
@@ -113,7 +113,7 @@ fn a_fence_behind_a_queued_draw_lands_after_the_draw() {
     }
     assert_eq!(ram.half(0x1006), 0, "the fence waits for the draw before it");
     eventually("the fence did not land", || ram.half(0x1006) == 0x5a5a);
-    let s = h.board.lock();
+    let s = h.board.get();
     assert_ne!(pixel(&s, 0, 10, 10), 0, "the draw was in the planes before the fence");
     drop(s);
     h.raster.stop();
@@ -143,7 +143,7 @@ fn a_fence_publishes_the_rows_drawn_before_it() {
     h.raster.test_slice_limit_ms.store(10_000, SeqCst);
     let ram = Ram::new(1 << 20);
     {
-        let mut s = h.board.lock();
+        let mut s = h.board.get();
         s.guest = Some(ram.clone());
         s.host_write_addr_lower = 0x1000;
         small_triangle(&mut s, &st, 100.0, RED);
@@ -162,7 +162,7 @@ fn a_query_publishes_the_rows_drawn_before_it() {
     h.raster.test_slice_limit_ms.store(10_000, SeqCst);
     let ram = Ram::new(1 << 20);
     {
-        let mut s = h.board.lock();
+        let mut s = h.board.get();
         s.guest = Some(ram.clone());
         s.ctx_shadow_addr_lower = 0x2000;
         s.host_write_addr_lower = 0x1000;
@@ -184,7 +184,7 @@ fn a_drained_queue_has_published_its_rows() {
     let (h, st) = slow_raster(50);
     h.raster.test_slice_limit_ms.store(10_000, SeqCst);
     h.raster.test_slice_end_ms.store(400, SeqCst);
-    small_triangle(&mut h.board.lock(), &st, 100.0, RED);
+    small_triangle(&mut h.board.get(), &st, 100.0, RED);
     h.raster.wait_idle();
     assert!(published_rows(&h).contains(&110), "the queue was idle but its rows were not out");
     h.raster.test_slice_end_ms.store(0, SeqCst);
@@ -197,7 +197,7 @@ fn a_drained_queue_has_published_its_rows() {
 fn a_slice_end_publishes_the_rows_drawn_in_it() {
     let (h, st) = slow_raster(50);
     {
-        let mut s = h.board.lock();
+        let mut s = h.board.get();
         small_triangle(&mut s, &st, 100.0, RED);
         busy(&h, 5);
         busy(&h, 400);
@@ -227,15 +227,15 @@ fn fresh_scanout() -> FreshRows {
 #[test]
 fn stop_and_reset_finish_the_raster_queue_first() {
     let (h, st) = slow_raster(200);
-    red_triangle(&mut h.board.lock(), &st);
+    red_triangle(&mut h.board.get(), &st);
     h.work_stop();
     assert!(!h.raster.threaded());
     assert_eq!(h.raster.pending(), 0);
-    assert_ne!(pixel(&h.board.lock(), 0, 10, 10), 0);
+    assert_ne!(pixel(&h.board.get(), 0, 10, 10), 0);
 
     h.raster.start();
     h.raster.test_slice_sleep_ms.store(200, SeqCst);
-    let mut s = h.board.lock();
+    let mut s = h.board.get();
     red_triangle(&mut s, &st);
     s.reset();
     assert_eq!(h.raster.pending(), 0);
@@ -259,10 +259,10 @@ fn the_stipple_phase_carries_across_draws_on_the_raster_thread() {
             d.line_stipple_repeat = 1;
             d.line_stipple_pattern = 0x0f0f;
             d.line_phase = phase;
-            assert_eq!(h.board.lock().gl_draw(&mut d), SGI_GL_DRAW_OK);
+            assert_eq!(h.board.get().gl_draw(&mut d), SGI_GL_DRAW_OK);
             phase = d.line_phase;
         }
-        let s = h.board.lock();
+        let s = h.board.get();
         s.raster_wait();
         (0..64).map(|x| pixel(&s, 0, x, 20)).collect()
     }
@@ -289,12 +289,12 @@ fn a_reused_draw_job_draws_only_its_new_primitive() {
         // three-vertex one that covers less.
         let quad = vertices(&[(0.0, 0.0), (64.0, 0.0), (0.0, 64.0), (64.0, 0.0), (64.0, 64.0), (0.0, 64.0)], RED);
         let mut d = GlDraw::new(SGI_GL_TRIANGLES, 6, &quad, st, &stipple);
-        assert_eq!(h.board.lock().gl_draw(&mut d), SGI_GL_DRAW_OK);
-        h.board.lock().raster_wait();
+        assert_eq!(h.board.get().gl_draw(&mut d), SGI_GL_DRAW_OK);
+        h.board.get().raster_wait();
         let tri = vertices(&[(w - 64.0, ht - 64.0), (w, ht - 64.0), (w - 64.0, ht)], BLUE);
         let mut d = GlDraw::new(SGI_GL_TRIANGLES, 3, &tri, st, &stipple);
-        assert_eq!(h.board.lock().gl_draw(&mut d), SGI_GL_DRAW_OK);
-        let s = h.board.lock();
+        assert_eq!(h.board.get().gl_draw(&mut d), SGI_GL_DRAW_OK);
+        let s = h.board.get();
         s.raster_wait();
         let mut px = Vec::new();
         for y in (0..SGI_ODYSSEY_HEIGHT as i32).step_by(8) {
@@ -326,7 +326,7 @@ fn a_query_behind_a_queued_draw_syncs_after_the_draw_without_holding_the_front_e
     let ram = Ram::new(1 << 20);
     let start = Instant::now();
     {
-        let mut s = h.board.lock();
+        let mut s = h.board.get();
         s.guest = Some(ram.clone());
         s.ctx_shadow_addr_lower = 0x2000;
         s.host_write_addr_lower = 0x1000;
@@ -339,7 +339,7 @@ fn a_query_behind_a_queued_draw_syncs_after_the_draw_without_holding_the_front_e
     assert_eq!(ram.half(0x1006), 0, "the sync word waits for the draw before it");
     eventually("the query did not sync", || ram.half(0x1006) == 0x5a5a);
     assert_eq!(ram.get(0x2000 + 0x97c, 4), 7u32.to_be_bytes(), "the counter was published before the sync word");
-    let s = h.board.lock();
+    let s = h.board.get();
     assert_ne!(pixel(&s, 0, 10, 10), 0, "the draw was in the planes before the sync word");
     drop(s);
     h.raster.stop();
@@ -353,12 +353,12 @@ fn a_waiting_bus_read_is_busy_until_the_raster_unit_has_drawn() {
     let (h, st) = slow_raster(300);
     h.work_start();
 
-    red_triangle(&mut h.board.lock(), &st);
+    red_triangle(&mut h.board.get(), &st);
     assert_eq!(h.bus_read(ODSY_BUZZ_1, 4), None, "busy while the draw is queued");
     assert_eq!(h.raster.pending(), 1, "and the read did not wait for it");
     assert_eq!(h.bus_read(MEMORY_CONFIG, 4).map(|v| v & 0xff00_0000), Some(0xa100_0000));
     eventually("the read stayed busy", || h.bus_read(ODSY_BUZZ_1, 4).is_some());
-    assert_ne!(pixel(&h.board.lock(), 0, 10, 10), 0, "drawn before the read answered");
+    assert_ne!(pixel(&h.board.get(), 0, 10, 10), 0, "drawn before the read answered");
     h.work_stop();
 }
 
@@ -400,7 +400,7 @@ fn a_draw_asks_the_display_for_the_rows_it_changed_in_a_buffer_a_window_shows() 
         let h = BoardLocks::new(s);
         st.drawable.front = target;
         st.drawable.back = target;
-        let mut s = h.board.lock();
+        let mut s = h.board.get();
         let before = snapshot(&s, target);
 
         small_triangle(&mut s, &st, 100.0, RED);
@@ -430,7 +430,7 @@ fn a_draw_under_an_id_test_asks_only_for_the_window_it_reaches() {
     st.drawable.front = 1;
     st.drawable.back = 1;
     let h = BoardLocks::new(s);
-    let mut s = h.board.lock();
+    let mut s = h.board.get();
 
     small_triangle(&mut s, &st, 100.0, RED);
     assert_ne!(pixel(&s, 1, 10, 110), 0, "the draw passed the id test");
@@ -444,7 +444,7 @@ fn a_draw_under_an_id_test_asks_only_for_the_window_it_reaches() {
 fn a_clear_asks_the_display_for_its_rows() {
     let (s, _) = gl_board();
     let h = BoardLocks::new(s);
-    let mut s = h.board.lock();
+    let mut s = h.board.get();
     let mut op = RasterOp {
         kind: SGI_RASTER_CLEAR,
         ntargets: 1,
@@ -550,7 +550,7 @@ fn a_swap_resolves_the_rows_drawn_into_the_other_buffer_and_no_others() {
     let (mut s, mut st) = gl_board();
     s.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
     let h = BoardLocks::new(s);
-    let mut s = h.board.lock();
+    let mut s = h.board.get();
     st.drawable.front = 1;
     st.drawable.back = 1;
     s.scanout_update();
@@ -583,7 +583,7 @@ fn a_swap_after_an_unnamed_write_resolves_only_the_rows_the_buffers_differ_in() 
     let (mut s, _) = gl_board();
     s.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
     let h = BoardLocks::new(s);
-    let mut s = h.board.lock();
+    let mut s = h.board.get();
     s.scanout_update();
 
     for y in 50..60 {
@@ -602,7 +602,7 @@ fn a_swap_measures_only_the_lines_an_unnamed_write_marked() {
     let (mut s, mut st) = gl_board();
     s.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
     let h = BoardLocks::new(s);
-    let mut s = h.board.lock();
+    let mut s = h.board.get();
     st.drawable.front = 1;
     st.drawable.back = 1;
     swap_every_window(&mut s);
@@ -642,7 +642,7 @@ fn incremental_updates_keep_the_frame_a_whole_resolve_makes() {
         *d = (((i % SGI_ODYSSEY_WIDTH as usize) / 320) as u8) << ODSY_DID_MAIN_SHIFT;
     }
     let h = BoardLocks::new(s);
-    let mut s = h.board.lock();
+    let mut s = h.board.get();
     s.scanout_update();
 
     for step in 0..120 {
@@ -711,7 +711,7 @@ fn the_screen_follows_the_frame_through_frames_that_present_a_few_lines() {
 
     for step in 0..8 {
         {
-            let mut s = h.board.lock();
+            let mut s = h.board.get();
             let target = step & 1;
             st.drawable.front = target;
             st.drawable.back = target;
@@ -912,7 +912,7 @@ fn a_job_costs_its_pixels() {
 fn many_small_jobs_queue_without_the_front_end_waiting() {
     let (h, st) = slow_raster(300);
     let start = Instant::now();
-    let mut s = h.board.lock();
+    let mut s = h.board.get();
 
     for _ in 0..1000 {
         tiny_triangle(&mut s, &st);
@@ -934,7 +934,7 @@ fn one_big_job_makes_the_front_end_wait() {
     let (h, st) = slow_raster(300);
     let start = Instant::now();
     {
-        let mut s = h.board.lock();
+        let mut s = h.board.get();
         red_triangle(&mut s, &st);
         assert!(h.raster.queued() >= RASTER_WORK_BUDGET, "{} queued", h.raster.queued());
         assert!(start.elapsed() < Duration::from_millis(250), "the first job does not wait");
@@ -943,7 +943,7 @@ fn one_big_job_makes_the_front_end_wait() {
         assert!(h.raster.queued() <= RASTER_WORK_BUDGET / 2, "{} queued", h.raster.queued());
     }
     eventually("the queue did not drain", || h.raster.pending() == 0);
-    assert_ne!(pixel(&h.board.lock(), 0, 10, 10), 0);
+    assert_ne!(pixel(&h.board.get(), 0, 10, 10), 0);
     h.raster.stop();
 }
 
@@ -1049,7 +1049,7 @@ fn settle(h: &BoardLocks, display: &Display, frames: u32) {
 /// The presented frame against a whole per-pixel resolve of the planes.
 fn assert_frame_is_whole_resolve(h: &BoardLocks, display: &Display, what: &str) {
     h.raster.wait_idle();
-    let mut s = h.board.lock();
+    let mut s = h.board.get();
     let reader = display.reader.lock();
     let w = reader.frame_width as usize;
     let mut want = vec![0u32; w];
@@ -1073,7 +1073,7 @@ fn stress(seed: u64, last_is_lut: bool) {
     let end = Instant::now() + Duration::from_millis(600);
 
     while Instant::now() < end {
-        let mut s = h.board.lock();
+        let mut s = h.board.get();
         for _ in 0..8 {
             match rng.next_u32() % 9 {
                 0 | 1 => {
@@ -1118,7 +1118,7 @@ fn stress(seed: u64, last_is_lut: bool) {
     std::thread::sleep(Duration::from_millis(40));
     for _ in 0..100u32 {
         {
-            let mut s = h.board.lock();
+            let mut s = h.board.get();
             if !last_is_lut {
                 s.draw_mask = ODSY_DRAW_MASK_BUFFER0 | ODSY_DRAW_MASK_BUFFER1;
                 s.paint_pixel((rng.next_u32() % 1280) as i64, (rng.next_u32() % 1024) as i64, rng.next_u32());
@@ -1164,7 +1164,7 @@ fn swap_atomicity() {
     let (h, mut st, display) = display_rig();
     // One window, so the one swap bit is the whole picture.
     {
-        let mut s = h.board.lock();
+        let mut s = h.board.get();
         s.did.fill(0);
         s.mem.bytes.fill(0);
         s.buffer1_mem.bytes.fill(0);
@@ -1212,7 +1212,7 @@ fn swap_atomicity() {
         let back = 1 - (h.front.lock().displayed_buffer & 1);
         let red = (i * 9) as f32 / 255.0;
         {
-            let mut s = h.board.lock();
+            let mut s = h.board.get();
             st.drawable.front = back;
             st.drawable.back = back;
             let v = vertices(&[(-wf, -hf), (3.0 * wf, -hf), (-wf, 3.0 * hf)], [red, 0.0, 0.0, 1.0]);
@@ -1232,7 +1232,7 @@ fn swap_atomicity() {
         // What the display shows of this buffer once it is latched: the
         // red the client drew through the gamma ramp.
         let want = {
-            let s = h.board.lock();
+            let s = h.board.get();
             let regs = s.regs().read();
             let r = i * 9;
             regs.gamma(r, ODSY_LUT_RED_SHIFT) << 16 | regs.gamma(0, ODSY_LUT_GREEN_SHIFT) << 8 | regs.gamma(0, ODSY_LUT_BLUE_SHIFT)
@@ -1262,9 +1262,9 @@ fn a_frame_waits_for_no_slice_and_takes_no_lock() {
     let (h, st) = slow_raster(400);
     let display = Arc::new(Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))));
 
-    red_triangle(&mut h.board.lock(), &st);
+    red_triangle(&mut h.board.get(), &st);
     eventually("the raster unit began its slice", || h.raster.in_slice());
-    let board = h.board.lock();
+    let board = h.board.get();
     let t = Instant::now();
     Odyssey::frame(&h, &display);
     assert!(t.elapsed() < Duration::from_millis(200), "the frame waited: {:?}", t.elapsed());

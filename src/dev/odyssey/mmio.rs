@@ -113,10 +113,10 @@ impl Board {
     // make up lost ticks.
     //
     // So every store that joins the command stream waits in a queue, in
-    // order, and the board's thread (worker.rs) runs the queue in slices under
-    // the board lock. Accesses that must see the drawing take the board lock
-    // and run what is still queued first (Board::work_drain). With no thread
-    // running (unit tests) the storing caller runs the store itself.
+    // order, and the board's thread (worker.rs) runs it. Accesses that must
+    // see the drawing are answered busy until the queue is empty
+    // (BoardLocks::bus_read) or, with no thread running (unit tests), run what
+    // is queued first (Board::work_drain).
     //
     // The Octane has no PI link (only Hub and Bedrock machines have graphics
     // credits), so the front's `pi` stays None there and every credit call is
@@ -200,7 +200,7 @@ pub fn access_waits(addr: u64, size: u32, write: bool) -> bool {
 }
 
 impl Board {
-    /// A read with the board lock held.
+    /// A read of the board's state.
     pub fn mmio_read(&mut self, addr: u64, size: u32) -> u64 {
         if access_waits(addr, size, false) && !level_word(addr, size) {
             // The stores before it and the raster work they handed on.
@@ -225,7 +225,7 @@ pub fn store_counted(front: &parking_lot::Mutex<HostInterface>) -> bool {
 }
 
 impl Board {
-    /// A store with the board lock held.
+    /// A store to the board's state.
     pub fn mmio_write(&mut self, addr: u64, value: u64, size: u32) {
         let counted = store_counted(&self.front);
         self.mmio_write_counted(addr, value, size, counted);
@@ -259,11 +259,47 @@ impl Board {
     }
 }
 
-/// The two locks a processor's access goes through, and the queues behind
-/// them.
+/// The board's state, which the front end's thread owns. There is no lock:
+/// the board's units reach their memory and registers at the same time, and
+/// software orders them. Here that order is the command FIFO (stores run in
+/// arrival order on the board's thread), the waiting accesses (a processor's
+/// read or store that must see the drawing is answered busy until the FIFO
+/// and the raster queue are empty, so the board's thread is idle when the
+/// processor touches the state), and the host interface's registers, which
+/// the processor reaches without waiting (`HostInterface`).
+///
+/// A processor access that does not wait and reaches the board (the level
+/// word, the cursor and back-end read windows, an unmodelled offset) reads
+/// words the board's thread writes only in whole stores, or counts in
+/// bounded arrays; a race shows the old or the new value.
+pub struct BoardCell(std::cell::UnsafeCell<Box<Board>>);
+
+// SAFETY: see the type's comment: the board's thread owns the state while it
+// runs stores; the processor touches it after the waiting accesses have
+// drained the FIFO and the raster queue, with the machine stopped, or for the
+// whole-word reads above. This is the other boards' contract between a CPU
+// thread and an engine's FIFO.
+unsafe impl Sync for BoardCell {}
+unsafe impl Send for BoardCell {}
+
+impl BoardCell {
+    pub fn new(b: Box<Board>) -> Self {
+        BoardCell(std::cell::UnsafeCell::new(b))
+    }
+
+    /// The board, for the thread that may touch it now (see the type).
+    #[allow(clippy::mut_from_ref)]
+    pub fn get(&self) -> &mut Board {
+        // SAFETY: see the type's comment.
+        unsafe { &mut *self.0.get() }
+    }
+}
+
+/// What a processor's access goes through: the host interface's lock, the
+/// board's state, and the queues behind them.
 #[derive(Clone)]
 pub struct BoardLocks {
-    pub board: Arc<Mutex<Box<Board>>>,
+    pub board: Arc<BoardCell>,
     pub front: Arc<Mutex<HostInterface>>,
     pub fifo: Arc<CommandFifo>,
     pub raster: Arc<RasterQueue>,
@@ -362,15 +398,16 @@ impl Default for RefusalStats {
 impl BoardLocks {
     pub fn new(s: Box<Board>) -> Self {
         let (front, fifo, raster, shared) = (s.front.clone(), s.fifo.clone(), s.raster.clone(), s.scanout.shared.clone());
-        BoardLocks { board: Arc::new(Mutex::new(s)), front, fifo, raster, refusals: Arc::new(RefusalStats::new()), shared }
+        BoardLocks { board: Arc::new(BoardCell::new(s)), front, fifo, raster, refusals: Arc::new(RefusalStats::new()), shared }
     }
 
-    /// A processor's read: through the front alone when it can, else under the
-    /// board lock.
+    /// A read for a caller other than the bus (tests, the monitor): through the
+    /// front alone when it can, else it runs what waits and reads the state.
+    /// With the board's thread running, call `bus_read` and retry instead.
     pub fn read(&self, addr: u64, size: u32) -> u64 {
         match front_mmio_read(&self.front, addr, size) {
             Some(v) => v,
-            None => self.board.lock().mmio_read(addr, size),
+            None => self.board.get().mmio_read(addr, size),
         }
     }
 
@@ -397,7 +434,7 @@ impl BoardLocks {
                 return None;
             }
         }
-        Some(self.board.lock().mmio_read(addr, size))
+        Some(self.board.get().mmio_read(addr, size))
     }
 
     /// A processor's store as the bus takes it. False, for the bus to
@@ -431,21 +468,33 @@ impl BoardLocks {
     }
 
     /// A command store the caller has classified: it joins the FIFO for the
-    /// board's thread, else takes the board lock.
+    /// board's thread, else, with no thread, runs here.
     fn write_command(&self, addr: u64, value: u64, size: u32) {
         let counted = store_counted(&self.front);
-        let queued = self.fifo.running.load(std::sync::atomic::Ordering::SeqCst) && self.fifo.push(&self.front, addr, value, size, counted);
-        if !queued {
-            self.board.lock().mmio_write_counted(addr, value, size, counted);
+        while self.fifo.running.load(std::sync::atomic::Ordering::SeqCst) {
+            // The ring refuses a push that loses its lock to the other
+            // processor, or finds the last place taken between the room
+            // check and the push: the board's thread owns the state, so the
+            // store goes in behind it rather than around it.
+            if self.fifo.push(&self.front, addr, value, size, counted) {
+                return;
+            }
+            std::thread::yield_now();
         }
+        self.board.get().mmio_write_counted(addr, value, size, counted);
     }
 
-    /// A processor's store: through the front alone when it can, else under the
-    /// board lock.
+    /// A store for a caller other than the bus: through the front alone when it
+    /// can, a command store into the FIFO, else it runs what waits and then
+    /// the store. With the board's thread running, call `bus_write` and retry
+    /// for a store that waits.
     pub fn write(&self, addr: u64, value: u64, size: u32) {
+        if command_store(addr, size) {
+            return self.write_command(addr, value, size);
+        }
         let counted = store_counted(&self.front);
         if !front_mmio_write(&self.front, &self.fifo, addr, value, size, counted) {
-            self.board.lock().mmio_write_counted(addr, value, size, counted);
+            self.board.get().mmio_write_counted(addr, value, size, counted);
         }
     }
 }

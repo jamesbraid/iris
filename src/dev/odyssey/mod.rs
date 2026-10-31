@@ -391,6 +391,7 @@ impl Drop for Odyssey {
 
 impl Resettable for Odyssey {
     fn power_on(&self) {
-        self.state.board.lock().reset();
+        // Power-on comes before the machine starts the board's threads.
+        self.state.board.get().reset();
     }
 }

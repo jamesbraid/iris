@@ -42,8 +42,8 @@
 //! The ring is 64K entries as IMPACT's and GR2's are.
 //!
 //! The processor's stores are the producer; whoever runs the queue (the
-//! board's thread, or an access that drains it) holds the board lock and is
-//! the consumer. Graphics credits, which only machines whose processor
+//! board's thread, or an access that drains it with that thread stopped)
+//! is the consumer. Graphics credits, which only machines whose processor
 //! interface counts stores use, are settled as a store enters the FIFO's
 //! first `ODSY_CFIFO_DEPTH` places: at the store when there is room, or
 //! when the stores ahead of it have run. That depth (64 stores) is a MODEL
@@ -173,9 +173,8 @@ struct Levels {
 
 pub struct CommandFifo {
     ring: Box<CommandRing>,
-    /// Serialises the consumers (the board lock already does for the queue's
-    /// runners; reset's clear takes it too). The producers need no lock of
-    /// their own: the ring's spinlock orders them.
+    /// Serialises the consumers' accounting against reset's clear. The
+    /// producers need no lock of their own: the ring's spinlock orders them.
     pop: Mutex<()>,
     /// What both sides count, on a line of its own.
     levels: CachePadded<Levels>,
@@ -195,7 +194,7 @@ pub struct CommandFifo {
     /// The processor waits for the board's thread: its next slice starts
     /// without the pause for a burst of stores.
     hurry: CachePadded<AtomicBool>,
-    /// The board's thread is running stores under the board lock.
+    /// The board's thread is running stores.
     pub slice: CachePadded<AtomicBool>,
     exit: AtomicBool,
     sleeper: Mutex<Option<std::thread::Thread>>,
