@@ -27,11 +27,11 @@
 use super::*;
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::{Relaxed, SeqCst}};
 use std::thread::JoinHandle;
 
 use crossbeam_utils::CachePadded;
-use parking_lot::{Condvar, Mutex};
+use parking_lot::Mutex;
 
 use crate::gfifo::GFifo;
 
@@ -134,16 +134,16 @@ pub struct CommandFifo {
     high_mark: CachePadded<AtomicU32>,
     /// The board's thread runs, so command stores queue.
     pub running: CachePadded<AtomicBool>,
-    /// The board's thread sleeps on `kick`.
-    waiting: AtomicBool,
+    /// The board's thread is parked (`wait_for_work`): a producer unparks it
+    /// only then, so a store reads a line nobody writes instead of locking.
+    asleep: CachePadded<AtomicBool>,
     /// The processor waits for the board's thread: its next slice starts
     /// without the pause for a burst of stores.
     hurry: CachePadded<AtomicBool>,
     /// The board's thread is running stores under the board lock.
     pub slice: CachePadded<AtomicBool>,
     exit: AtomicBool,
-    wake: Mutex<()>,
-    kick: Condvar,
+    sleeper: Mutex<Option<std::thread::Thread>>,
     pub thread: Mutex<Option<JoinHandle<()>>>,
     /// Edge filter for the traced level; zero-sized without the feature.
     pub pf_level: crate::PfValue,
@@ -163,12 +163,11 @@ impl Default for CommandFifo {
             levels: CachePadded::new(Levels { words: AtomicU32::new(0), stores: AtomicU32::new(0), counted: AtomicU32::new(0) }),
             high_mark: CachePadded::new(AtomicU32::new(0)),
             running: CachePadded::new(AtomicBool::new(false)),
-            waiting: AtomicBool::new(false),
+            asleep: CachePadded::new(AtomicBool::new(false)),
             hurry: CachePadded::new(AtomicBool::new(false)),
             slice: CachePadded::new(AtomicBool::new(false)),
             exit: AtomicBool::new(false),
-            wake: Mutex::new(()),
-            kick: Condvar::new(),
+            sleeper: Mutex::new(None),
             thread: Mutex::new(None),
             pf_level: crate::PfValue::new(),
             #[cfg(test)]
@@ -283,10 +282,7 @@ impl CommandFifo {
             f.intr_flags |= ODSY_INTR_FIFO_HIGH_WATER;
             f.update_irq();
         }
-        if self.waiting.load(SeqCst) {
-            let _g = self.wake.lock();
-            self.kick.notify_one();
-        }
+        self.wake();
         true
     }
 
@@ -386,15 +382,31 @@ impl CommandFifo {
         }
     }
 
-    /// The board's thread: sleep until a store waits or `stop` asks.
-    /// Returns false when the thread is to finish.
-    pub fn wait_for_work(&self) -> bool {
-        let mut g = self.wake.lock();
-        self.waiting.store(true, SeqCst);
-        while !self.pending() && !self.exit.load(SeqCst) {
-            self.kick.wait(&mut g);
+    /// After a push or a stop: unpark the board's thread if it is asleep.
+    /// The fence pairs with `wait_for_work`'s: either this sees the thread
+    /// asleep, or the thread sees the push before it parks.
+    fn wake(&self) {
+        std::sync::atomic::fence(SeqCst);
+        if self.asleep.load(Relaxed) {
+            if let Some(t) = self.sleeper.lock().as_ref() {
+                t.unpark();
+            }
         }
-        self.waiting.store(false, SeqCst);
+    }
+
+    /// The board's thread: sleep until a store waits or `stop` asks.
+    /// Returns false when the thread is to finish. The timeout is only a
+    /// backstop for a wake the fence protocol should never lose.
+    pub fn wait_for_work(&self) -> bool {
+        *self.sleeper.lock() = Some(std::thread::current());
+        while !self.pending() && !self.exit.load(SeqCst) {
+            self.asleep.store(true, Relaxed);
+            std::sync::atomic::fence(SeqCst);
+            if !self.pending() && !self.exit.load(SeqCst) {
+                std::thread::park_timeout(std::time::Duration::from_millis(50));
+            }
+            self.asleep.store(false, Relaxed);
+        }
         !self.exit.load(SeqCst)
     }
 
@@ -405,8 +417,7 @@ impl CommandFifo {
     /// Ask the board's thread to finish.
     pub fn stop(&self) {
         self.exit.store(true, SeqCst);
-        let _g = self.wake.lock();
-        self.kick.notify_one();
+        self.wake();
     }
 
     pub fn start(&self) {
