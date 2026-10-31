@@ -174,7 +174,7 @@ impl Board {
     /// The colormap group main drawable main_id shows through: bits 8:4 of its
     /// display mode. Below ODSY_GAMMA_GROUP the plane word is an index.
     pub fn display_group(&mut self, main_id: u32) -> u32 {
-        self.scanout.shared.regs.read().display_group(main_id)
+        self.scanout.shared.regs.display_group(main_id)
     }
 
     /// A vertical retrace: the host interface latches the swaps armed and

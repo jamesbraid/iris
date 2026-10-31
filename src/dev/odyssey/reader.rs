@@ -6,22 +6,18 @@
 //! change them (`RowMarks`) and the display takes the marks before it reads
 //! (`ScanoutReader::stage`): a row copied half-written is marked again after
 //! the writer's last store and copied whole by the next frame. The rest of
-//! what a frame reads is shared through cells of its own, each held only to
-//! copy:
+//! what a frame reads is shared the same way, with no lock between the
+//! writers and the display:
 //!
 //! - the rows the raster unit drew, published as atomic words at
 //!   completions, at drain and at the end of a slice (`RasterCtx::publish`,
 //!   `PublishedRows`);
-//! - the lookup RAM, the display modes and the cursor (`DisplayRegs`), with
-//!   a generation that moves when the front end stores to them;
+//! - the lookup RAM, the display modes and the cursor (`SharedRegs`), one
+//!   atomic word an entry, with a generation that moves after each store;
 //! - the scanout mode and the retrace restart (`DisplayShared::publish_mode`);
 //! - the swap latch and the displayed-buffer bits, which are the host
-//!   interface's (`HostInterface::retrace`).
-//!
-//! Lock order: the board lock, then `DisplayRegs`; the display takes
-//! `DisplayRegs`, the mode cell, the published rows and the host interface
-//! one at a time and never the board lock. `DisplayRegs` is a leaf: nothing
-//! is taken while it is held.
+//!   interface's (`HostInterface::retrace`): the buffer swap is the
+//!   hardware's own synchronisation point, so it keeps its register lock.
 //!
 //! The display never calls a `Board` method. Plane memory is fixed at
 //! `Board::allocate`, and `PlaneView` holds its base pointers, lengths and
@@ -29,10 +25,10 @@
 //! reads memory a writer may be storing to.
 use super::*;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, Ordering::{Acquire, Relaxed, Release}};
 use std::sync::{Arc, OnceLock};
 
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::Mutex;
 
 /// The rows of each main drawable id where its two colour buffers may
 /// differ, a bit a row (see [`ScanoutReader::differ`]).
@@ -50,13 +46,11 @@ pub struct DisplayRegs {
     pub overlay_mode: [u32; 8],
     /// The cursor's backend entries 0x2500-0x25ff.
     pub cursor: [u32; 0x100],
-    /// Moves on every store through [`SharedRegs::edit`].
-    gen: u64,
 }
 
 impl Default for DisplayRegs {
     fn default() -> Self {
-        DisplayRegs { lut: vec![0; ODSY_LUT_SIZE as usize], dispmode: [0; 32], overlay_mode: [0; 8], cursor: [0; 0x100], gen: 0 }
+        DisplayRegs { lut: vec![0; ODSY_LUT_SIZE as usize], dispmode: [0; 32], overlay_mode: [0; 8], cursor: [0; 0x100] }
     }
 }
 
@@ -121,14 +115,7 @@ impl DisplayRegs {
     /// The first and last display line the cursor covers as it stands in a
     /// frame whose last line is `bottom`, or None when it covers none.
     pub fn cursor_span(&self, bottom: i32) -> Option<(i32, i32)> {
-        if !self.cursor_shown() {
-            return None;
-        }
-        if self.cursor[ODSY_CURSOR_CONTROL as usize] & ODSY_CURSOR_CTL_CROSSHAIR != 0 {
-            // The vertical line crosses every line.
-            return Some((0, bottom));
-        }
-        Some((self.cursor_y().max(0), (self.cursor_y() + ODSY_CURSOR_SIZE as i32 - 1).min(bottom)))
+        cursor_span_of(self.cursor[ODSY_CURSOR_CONTROL as usize], self.cursor[ODSY_CURSOR_POSITION as usize], bottom)
     }
 
     /// Draw the cursor over display line y, already resolved into dst. With bit
@@ -169,39 +156,128 @@ impl DisplayRegs {
     }
 }
 
-/// [`DisplayRegs`] behind a mutex of its own. The front end holds it for
-/// the store of a register and marks the lines afterwards; the display holds
-/// it to copy.
-#[derive(Default)]
-pub struct SharedRegs(Mutex<DisplayRegs>);
+/// The first and last display line a cursor with these control and position
+/// words covers in a frame whose last line is `bottom`, or None when it
+/// covers none.
+fn cursor_span_of(control: u32, position: u32, bottom: i32) -> Option<(i32, i32)> {
+    if (control & ODSY_CURSOR_CTL_ENABLE) == 0 || (control & ODSY_CURSOR_CTL_CHANNEL1) != 0 {
+        return None;
+    }
+    if control & ODSY_CURSOR_CTL_CROSSHAIR != 0 {
+        // The vertical line crosses every line.
+        return Some((0, bottom));
+    }
+    let y = position as i16 as i32;
+    Some((y.max(0), (y + ODSY_CURSOR_SIZE as i32 - 1).min(bottom)))
+}
+
+/// The back end's registers as the front end stores them and the display
+/// reads them: one atomic word per entry, no lock. The board's back end
+/// reads its lookup RAM and cursor registers while the front end writes
+/// them, so a frame that races a store shows the old or the new entry; the
+/// store marks every line it changes afterwards, and the next frame
+/// resolves them again.
+///
+/// `gen` moves after each store. The display reads it before it copies
+/// ([`SharedRegs::snapshot`]), so a store that lands during the copy leaves
+/// the generation ahead of the one the copy is filed under, and the next
+/// frame copies again.
+pub struct SharedRegs {
+    lut: Box<[AtomicU32]>,
+    dispmode: [AtomicU32; 32],
+    overlay_mode: [AtomicU32; 8],
+    cursor: [AtomicU32; 0x100],
+    gen: AtomicU64,
+}
+
+impl Default for SharedRegs {
+    fn default() -> Self {
+        SharedRegs {
+            lut: (0..ODSY_LUT_SIZE).map(|_| AtomicU32::new(0)).collect(),
+            dispmode: std::array::from_fn(|_| AtomicU32::new(0)),
+            overlay_mode: std::array::from_fn(|_| AtomicU32::new(0)),
+            cursor: std::array::from_fn(|_| AtomicU32::new(0)),
+            gen: AtomicU64::new(0),
+        }
+    }
+}
 
 impl SharedRegs {
-    pub fn read(&self) -> MutexGuard<'_, DisplayRegs> {
-        self.0.lock()
+    /// Store a register. Mark the lines the store changes afterwards.
+    pub fn set_lut(&self, index: usize, value: u32) {
+        self.lut[index].store(value, Relaxed);
+        self.gen.fetch_add(1, Release);
     }
 
-    /// The registers for a store: the generation moves as the guard is
-    /// written through, so a reader that sees it unchanged has seen
-    /// every store. Mark the lines the store changes after dropping the
-    /// guard.
-    pub fn edit(&self) -> RegsEdit<'_> {
-        RegsEdit(self.0.lock())
+    pub fn set_dispmode(&self, index: usize, value: u32) {
+        self.dispmode[index].store(value, Relaxed);
+        self.gen.fetch_add(1, Release);
     }
-}
 
-pub struct RegsEdit<'a>(MutexGuard<'a, DisplayRegs>);
-
-impl std::ops::Deref for RegsEdit<'_> {
-    type Target = DisplayRegs;
-    fn deref(&self) -> &DisplayRegs {
-        &self.0
+    pub fn set_overlay_mode(&self, index: usize, value: u32) {
+        self.overlay_mode[index].store(value, Relaxed);
+        self.gen.fetch_add(1, Release);
     }
-}
 
-impl std::ops::DerefMut for RegsEdit<'_> {
-    fn deref_mut(&mut self) -> &mut DisplayRegs {
-        self.0.gen += 1;
-        &mut self.0
+    pub fn set_cursor(&self, index: usize, value: u32) {
+        self.cursor[index].store(value, Relaxed);
+        self.gen.fetch_add(1, Release);
+    }
+
+    /// Back to the reset values (DisplayRegs::reset()).
+    pub fn reset(&self) {
+        for w in self.lut.iter().chain(&self.dispmode).chain(&self.overlay_mode).chain(&self.cursor) {
+            w.store(0, Relaxed);
+        }
+        self.gen.fetch_add(1, Release);
+    }
+
+    pub fn cursor(&self, index: usize) -> u32 {
+        self.cursor[index].load(Relaxed)
+    }
+
+    /// The colormap group main drawable `main_id` shows through
+    /// (DisplayRegs::display_group()).
+    pub fn display_group(&self, main_id: u32) -> u32 {
+        (self.dispmode[main_id as usize].load(Relaxed) >> ODSY_DISPMODE_GROUP_SHIFT) & ODSY_DISPMODE_GROUP_MASK
+    }
+
+    /// The lines the cursor covers (DisplayRegs::cursor_span()).
+    pub fn cursor_span(&self, bottom: i32) -> Option<(i32, i32)> {
+        cursor_span_of(self.cursor(ODSY_CURSOR_CONTROL as usize), self.cursor(ODSY_CURSOR_POSITION as usize), bottom)
+    }
+
+    /// Copy the registers into `out` when a store has landed since `seen`
+    /// (a generation `snapshot` returned), and return the generation the
+    /// copy is filed under: the one read before the copy began.
+    pub fn snapshot(&self, out: &mut DisplayRegs, seen: u64) -> u64 {
+        let gen = self.gen.load(Acquire);
+
+        if gen != seen {
+            for (o, w) in out.lut.iter_mut().zip(self.lut.iter()) {
+                *o = w.load(Relaxed);
+            }
+            for (o, w) in out.dispmode.iter_mut().zip(&self.dispmode) {
+                *o = w.load(Relaxed);
+            }
+            for (o, w) in out.overlay_mode.iter_mut().zip(&self.overlay_mode) {
+                *o = w.load(Relaxed);
+            }
+            for (o, w) in out.cursor.iter_mut().zip(&self.cursor) {
+                *o = w.load(Relaxed);
+            }
+        }
+        gen
+    }
+
+    /// The registers as they are now, for the tests and the benchmark,
+    /// which resolve on a board they hold.
+    #[cfg(test)]
+    pub fn read(&self) -> DisplayRegs {
+        let mut regs = DisplayRegs::default();
+
+        self.snapshot(&mut regs, u64::MAX);
+        regs
     }
 }
 
@@ -554,12 +630,7 @@ impl ScanoutReader {
     /// The registers as of now, copied when the front end has stored to
     /// them since the last copy.
     fn snapshot(&mut self, shared: &DisplayShared) {
-        let regs = shared.regs.read();
-
-        if regs.gen != self.snap_gen {
-            self.snap.clone_from(&regs);
-            self.snap_gen = regs.gen;
-        }
+        self.snap_gen = shared.regs.snapshot(&mut self.snap, self.snap_gen);
     }
 
     /// The rows the raster unit published since the last call: the rows
