@@ -148,6 +148,8 @@ pub mod int {
         | PARALLEL_SERVICE
         | serial(0, RX_HIGH_WATER)
         | serial(1, RX_HIGH_WATER)
+        | serial(0, RX_RING_FULL)
+        | serial(1, RX_RING_FULL)
         | serial(0, TX_RING_EMPTY)
         | serial(1, TX_RING_EMPTY);
 }
