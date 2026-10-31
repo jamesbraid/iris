@@ -846,7 +846,7 @@ impl Board {
         self.i2c_main_cmd = 0;
         self.i2c_opt_cmd = 0;
         self.backend_ctl.fill(0);
-        self.regs().edit().reset();
+        self.regs().reset();
         self.overlay_mode_reported = false;
         self.cursor_reported = 0;
         self.gl_aux_reported = false;
