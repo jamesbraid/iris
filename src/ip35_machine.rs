@@ -461,6 +461,9 @@ impl Workstation for FuelMachine {
     fn pending_chd_sync_count(&self) -> usize {
         (0..2).map(|channel| self.board.scsi.bus_for_channel(channel).unwrap().pending_chd_sync_count()).sum()
     }
+    fn flush_disks(&self) -> std::io::Result<()> {
+        self.board.flush_disks()
+    }
     fn sync_chd_disks(
         &self,
         only: Option<usize>,
@@ -568,6 +571,11 @@ pub(crate) struct FuelBoardConfig<'a> {
 }
 
 impl FuelBoard {
+    /// Flush the disks on both channels of the storage controller.
+    pub fn flush_disks(&self) -> std::io::Result<()> {
+        (0..2).try_for_each(|channel| self.scsi.bus_for_channel(channel).unwrap().flush())
+    }
+
     #[cfg(test)]
     pub fn new(payload: &[u8], clock: Clock) -> Result<Self, String> {
         Self::with_config(FuelBoardConfig {
