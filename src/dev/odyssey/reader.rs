@@ -188,6 +188,10 @@ pub struct SharedRegs {
     overlay_mode: [AtomicU32; 8],
     cursor: [AtomicU32; 0x100],
     gen: AtomicU64,
+    /// Tests: run once the copy is done, where a store can land that the
+    /// copy missed.
+    #[cfg(test)]
+    pub test_after_copy: Mutex<Option<Box<dyn FnMut(&SharedRegs) + Send>>>,
 }
 
 impl Default for SharedRegs {
@@ -198,6 +202,8 @@ impl Default for SharedRegs {
             overlay_mode: std::array::from_fn(|_| AtomicU32::new(0)),
             cursor: std::array::from_fn(|_| AtomicU32::new(0)),
             gen: AtomicU64::new(0),
+            #[cfg(test)]
+            test_after_copy: Mutex::new(None),
         }
     }
 }
@@ -265,6 +271,10 @@ impl SharedRegs {
             }
             for (o, w) in out.cursor.iter_mut().zip(&self.cursor) {
                 *o = w.load(Relaxed);
+            }
+            #[cfg(test)]
+            if let Some(hook) = self.test_after_copy.lock().as_mut() {
+                hook(self);
             }
         }
         gen
