@@ -1081,3 +1081,182 @@ fn analog_output_enable_takes_only_the_two_known_selects() {
     assert_eq!(rd(&r, 0x58), 0x4000_0000, "no ring programmed");
 }
 
+
+// The Octane PROM's boot tune: output channel on clock generator 2, a single
+// end-of-descriptor buffer, relay and DAC mute words.
+
+const TUNE_BUF: u64 = 0x10_0000;
+/// 4504 units of 128 bytes: 576,512 bytes, 72,064 frames.
+const TUNE_CTRL: u32 = 0xfff7_3404;
+const TUNE_FRAMES: usize = 72_064;
+
+/// The sample the tune buffer holds in frame `n`, left; right is its negation.
+fn tune_sample(n: usize) -> i16 {
+    (n % 30_000) as i16 + 1
+}
+
+fn fill_tune(ram: &Ram, at: u64, frames: usize, tag: i16) {
+    let mut m = ram.0.lock().unwrap();
+    for n in 0..frames {
+        let a = at as usize + n * 8;
+        m[a..a + 4].copy_from_slice(&sample_to_word(tune_sample(n) + tag).to_le_bytes());
+        m[a + 4..a + 8].copy_from_slice(&sample_to_word(-(tune_sample(n) + tag)).to_le_bytes());
+    }
+}
+
+/// A card with the tune in RAM and a tap on what it plays.
+fn tune_card() -> (Rad1, Arc<Ram>, Arc<parking_lot::Mutex<Vec<i16>>>) {
+    let (r, ram) = dma_card();
+    fill_tune(&ram, TUNE_BUF, TUNE_FRAMES, 0);
+    let tap = tapped(&r);
+    (r, ram, tap)
+}
+
+/// The Rev 4.17 PROM's writes from the reset releases to the start. `late`
+/// puts the master select after the load, as that PROM does.
+fn prom_tune(r: &Rad1, buf: u32, ctrl: u32, late_select: bool) {
+    wr(r, 0x7c, 0xc0c0_c0c0);
+    wr(r, 0x70, 0x480);
+    wr(r, 0x80, 0xffff_fffe);
+    wr(r, 0x78, 0x00fa_c688);
+    wr(r, 0x74, 0x0800_0010);
+    wr(r, 0x80, 0xffff_cbfc);
+    wr(r, 0xa4, 0x0000_ffff);
+    wr(r, 0x58, 0x4000_0000);
+    if !late_select {
+        wr(r, 0xac, 1);
+    }
+    wr(r, 0xa0, 0x4000_0405);
+    if late_select {
+        wr(r, 0xac, 1);
+    }
+    wr(r, 0x80, 0xffff_8bfc);
+    wr(r, 0x8c, 2);
+    wr(r, 0x4c, 0x0300_0000);
+    wr(r, 0x524, 0);
+    wr(r, 0x4f8, buf);
+    wr(r, 0x4fc, ctrl);
+    wr(r, 0x88, 3);
+    wr(r, 0x58, 0x4000_0001);
+}
+
+#[test]
+fn the_prom_tune_plays_once_at_32khz_and_clears_the_enable_bit() {
+    let (r, _ram, tap) = tune_card();
+    start_ust(&r);
+    prom_tune(&r, TUNE_BUF as u32, TUNE_CTRL, true);
+    assert_eq!(rd(&r, 0x58), 0x4000_0001);
+    // 32 kHz: one second in, 32000 frames are out and the channel still runs.
+    at(&r, SEC);
+    assert_eq!(rd(&r, 0x58), 0x4000_0001, "an early check sees the channel busy");
+    assert_eq!(tap.lock().len(), 32_000 * 2);
+    // One pass is 2.252 s.
+    at(&r, 2_251 * SEC / 1000);
+    assert_eq!(rd(&r, 0x58) & 1, 1);
+    at(&r, 2_260 * SEC / 1000);
+    assert_eq!(rd(&r, 0x58), 0x4000_0000, "the channel cleared the bit itself");
+    assert!(!r.state.lock().chan[CH_OUT].running);
+    // Later reads change nothing: exactly one pass reached the backend.
+    at(&r, 10 * SEC);
+    assert_eq!(rd(&r, 0x58), 0x4000_0000);
+    let t = tap.lock();
+    assert_eq!(t.len(), TUNE_FRAMES * 2);
+    for n in [0, 1, 511, 512, 29_999, 30_000, TUNE_FRAMES - 1] {
+        assert_eq!(t[n * 2], tune_sample(n), "left {n}");
+        assert_eq!(t[n * 2 + 1], -tune_sample(n), "right {n}");
+    }
+    // The position holds where the pass ended.
+    assert_eq!((rd(&r, 0x2c) >> 18) as usize, TUNE_FRAMES & 0x3fff);
+}
+
+#[test]
+fn the_prom_tune_runs_at_29400_hz_until_the_select_arrives() {
+    let (r, _ram, tap) = tune_card();
+    prom_tune(&r, TUNE_BUF as u32, TUNE_CTRL, false);
+    // The select came first here, so the load already had the 192 kHz master.
+    at(&r, SEC);
+    rd(&r, 0x58);
+    assert_eq!(tap.lock().len(), 32_000 * 2, "select before the load: same rate");
+
+    let (r, _ram, tap) = tune_card();
+    wr(&r, 0xa4, 0xffff);
+    wr(&r, 0x58, 0x4000_0000);
+    wr(&r, 0xa0, 0x4000_0405);
+    wr(&r, 0x4f8, TUNE_BUF as u32);
+    wr(&r, 0x4fc, TUNE_CTRL);
+    wr(&r, 0x58, 0x4000_0001);
+    at(&r, SEC);
+    rd(&r, 0x58);
+    assert_eq!(tap.lock().len(), 29_400 * 2, "176.4 kHz master until 0xac is written");
+}
+
+#[test]
+fn the_prom_tune_from_an_unmapped_buffer_publishes_nothing() {
+    let (r, _ram, tap) = tune_card();
+    prom_tune(&r, 0xf000_0000, TUNE_CTRL, true);
+    at(&r, SEC);
+    rd(&r, 0x58);
+    assert!(tap.lock().is_empty());
+    assert!(!r.state.lock().chan[CH_OUT].running, "the transfer error stops the channel");
+}
+
+#[test]
+fn a_link_to_an_unprogrammed_descriptor_plays_one_lap_and_stops() {
+    let (r, _ram, tap) = tune_card();
+    // Bit 2 clear, next index 0, and descriptor RAM entry 0 never written.
+    prom_tune(&r, TUNE_BUF as u32, 0xfff7_3400, true);
+    at(&r, 10 * SEC);
+    rd(&r, 0x58);
+    assert_eq!(tap.lock().len(), TUNE_FRAMES * 2, "the first lap only");
+    assert_eq!(rd(&r, 0x58) & 1, 1, "nothing is reported as finished");
+    assert!(r.state.lock().chan[CH_OUT].stalled);
+    at(&r, 20 * SEC);
+    rd(&r, 0x58);
+    assert_eq!(tap.lock().len(), TUNE_FRAMES * 2);
+}
+
+#[test]
+fn a_linked_descriptor_continues_the_transfer_and_end_of_descriptor_ends_it() {
+    let (r, ram, tap) = tune_card();
+    // 512 frames at the tune buffer link to entry 1 (the output's second
+    // set), which holds 256 frames elsewhere with end of descriptor.
+    fill_tune(&ram, 0x20_0000, 256, 7000);
+    wr(&r, 0x40c, 0x20_0000);
+    wr(&r, 0x410, 0);
+    wr(&r, 0x414, 0xffff_f804);
+    prom_tune(&r, TUNE_BUF as u32, 0xffff_f008, true);
+    at(&r, SEC);
+    rd(&r, 0x58);
+    let t = tap.lock();
+    assert_eq!(t.len(), (512 + 256) * 2);
+    assert_eq!(t[511 * 2], tune_sample(511));
+    assert_eq!(t[512 * 2], tune_sample(0) + 7000);
+    assert_eq!(t[(512 + 255) * 2], tune_sample(255) + 7000);
+    assert_eq!(rd(&r, 0x58), 0x4000_0000);
+}
+
+#[test]
+fn a_link_to_an_entry_the_model_does_not_keep_reads_as_unprogrammed() {
+    let (r, _ram, tap) = tune_card();
+    wr(&r, 0x424, TUNE_BUF as u32);
+    wr(&r, 0x428, 0);
+    wr(&r, 0x42c, TUNE_CTRL & !4);
+    prom_tune(&r, TUNE_BUF as u32, 0xffff_f018, true);
+    at(&r, SEC);
+    rd(&r, 0x58);
+    assert_eq!(tap.lock().len(), 512 * 2);
+    assert!(r.state.lock().chan[CH_OUT].stalled);
+}
+
+#[test]
+fn a_finished_transfer_can_be_started_again() {
+    let (r, _ram, tap) = tune_card();
+    prom_tune(&r, TUNE_BUF as u32, TUNE_CTRL, true);
+    at(&r, 3 * SEC);
+    assert_eq!(rd(&r, 0x58), 0x4000_0000);
+    wr(&r, 0x58, 0x4000_0001);
+    at(&r, 7 * SEC);
+    assert_eq!(rd(&r, 0x58), 0x4000_0000);
+    assert_eq!(tap.lock().len(), 2 * TUNE_FRAMES * 2);
+}
+
