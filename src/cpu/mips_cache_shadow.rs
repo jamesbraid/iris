@@ -751,6 +751,7 @@ impl<
     };
     const CACHE_KIND: &'static str = "shadow";
     const R10K_CACHE_OPS: bool = Self::R10K;
+    const FETCH_ALIAS: bool = MODEL == model::R16000;
 }
 
 impl<

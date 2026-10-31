@@ -482,6 +482,13 @@ where they differed:
   Bedrock, dual-head XBridge, IOC3 networking and two-channel ISP12160 SCSI.
   The normal interpreter boot reaches the IRIX 6.5.30 root shell with PROM
   6.210. See the [Fuel guide](docs/fuel-ip34.md).
+- **jitv2 compiles the reset PROM from the PROM.** The PROM runs from the reset
+  window uncached; once memory covers that window the cached view returns RAM
+  there, and the compile pool used to compile RAM's bytes in place of the
+  PROM's. The board now presents an uncached instruction fetch of that window at
+  an address of the PROM's own (`MipsExecutor::uncached_fetch_alias`), so its
+  code page is keyed, compiled and invalidated by address like any other. The
+  other machines are unchanged.
 
 ### PCI configuration
 

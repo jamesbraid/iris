@@ -159,9 +159,9 @@ impl FuelMachine {
         // After the windows above: each compile worker takes the cache's
         // geometry and the CPU model's policies once, as it starts, and
         // without the windows the geometry has no inline load or store path.
-        // Workers read plain physical code addresses through the CPU's cached
-        // bus, which serves them; the uncached views would decode them as Hub
-        // registers.
+        // Workers read plain physical code addresses through the CPU's code
+        // bus: the cached bus, plus the reset PROM's uncached-fetch window.
+        // The uncached views would decode plain addresses as Hub registers.
         #[cfg(feature = "jitv2")]
         {
             let cpu_device: Arc<dyn Device> = cpu.clone().as_device();
@@ -176,7 +176,7 @@ impl FuelMachine {
             #[cfg(not(feature = "jitv2_lockstep"))]
             {
                 let stats = g.stats.clone();
-                g.compile_queue.start(board.cached_bus(), stats);
+                g.compile_queue.start(board.code_bus(), stats);
             }
             // The compile pool keeps only a weak handle on the CPU.
             std::mem::forget(cpu_device);
@@ -548,6 +548,10 @@ pub(crate) struct FuelBoard {
     /// Cacheable memory at plain physical addresses: what the cache fills
     /// from, and the one bus the JIT and its compile pool read code through.
     cached: Arc<dyn BusDevice>,
+    /// What the JIT compiles code through: `cached`, and the reset PROM's
+    /// uncached-fetch window ([`Ip35Bus::code_view`]).
+    #[cfg(feature = "jitv2")]
+    code: Arc<dyn BusDevice>,
     pub pi: [Arc<BedrockPi>; 2],
     pub md: Arc<BedrockMd>,
     pub l1: Arc<L1>,
@@ -918,6 +922,9 @@ impl FuelBoard {
         }
         // Reset execution always sees stored bytes, independently of commands.
         bus.map(0, 0x1fc0_0000, 0x40_0000, prom.clone());
+        // The same PROM where an uncached instruction fetch of that window is
+        // presented (`MipsExecutor::uncached_fetch_alias`).
+        bus.map(0, crate::ip35::RESET_WINDOW_FETCH, crate::ip35::RESET_WINDOW_SIZE, prom.clone());
         if !payload.is_empty() {
             map_device(
                 &phys,
@@ -949,9 +956,13 @@ impl FuelBoard {
         bus.map(2, 0, 1 << 33, md.fetchop_bus());
         let bus = Arc::new(bus);
         let cached = bus.cached_view(md.dma_view());
+        #[cfg(feature = "jitv2")]
+        let code = bus.code_view(cached.clone());
         Ok(Self {
             bus,
             cached,
+            #[cfg(feature = "jitv2")]
+            code,
             pi,
             md,
             l1,
@@ -982,9 +993,18 @@ impl FuelBoard {
         self.cached.clone()
     }
 
+    /// The bus the JIT compiles code through; see [`Ip35Bus::code_view`].
+    #[cfg(feature = "jitv2")]
+    pub fn code_bus(&self) -> Arc<dyn BusDevice> {
+        self.code.clone()
+    }
+
     pub fn build_cpu(&self, part: &Part) -> Box<FuelCpu> {
         let mut cpu = build_cpu(self.bus.clone(), part);
         cpu.cache = R12000ShadowCache::new(self.cached_bus());
+        #[cfg(feature = "jitv2")]
+        cpu.set_cached_bus(self.code_bus());
+        #[cfg(not(feature = "jitv2"))]
         cpu.set_cached_bus(self.cached_bus());
         cpu
     }
