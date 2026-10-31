@@ -211,8 +211,8 @@ pub trait BusDevice: Send + Sync {
 
     /// An uncached SB (`size` 1) or SH (`size` 2) to `addr`, with the whole
     /// source register `gpr` for a bus that can see the lanes the store does
-    /// not select. A CPU model whose profile sets `narrow_stores_carry_gpr`
-    /// calls this instead of `write8`/`write16`.
+    /// not select. The CPU calls this instead of `write8`/`write16` for an
+    /// uncached SB or SH.
     ///
     /// The architectural byte or halfword is the low bits of `gpr`, which is
     /// all the default delivers. Which other lanes a real processor drives for
