@@ -181,8 +181,9 @@ impl TezroMachine {
         let rx = connect_cpu("Tezro", &node.md, &node.pi[0], &node.lb, &node.ni, &node.l1, &cpu);
         // After connect_cpu set the windows: each compile worker takes the
         // cache's geometry and the CPU model's policies once, as it starts.
-        // Workers read plain physical code addresses, which the cached plane
-        // serves; the uncached views would decode them as Hub registers.
+        // Workers read plain physical code addresses through the view the CPU
+        // fetched each page by: the cached plane for cached pages, the
+        // uncached attribute-0 view for the reset PROM's uncached fetches.
         #[cfg(feature = "jitv2")]
         {
             let cpu_device: Arc<dyn Device> = cpu.clone().as_device();
@@ -194,7 +195,7 @@ impl TezroMachine {
             #[cfg(not(feature = "jitv2_lockstep"))]
             {
                 let stats = g.stats.clone();
-                g.compile_queue.start(board.cached_bus(), stats);
+                g.compile_queue.start(board.code_bus(), stats);
             }
             // The compile pool keeps only a weak handle on the CPU.
             std::mem::forget(cpu_device);
@@ -482,6 +483,10 @@ fn build_cpu<C: CacheCpuModel + From<Arc<dyn BusDevice>>>(board: &TezroBoard) ->
     // agree, or the PROM enters its error routine before GP is set.
     cpu.core.cp0_config = FirmwareRecord::TEZRO.reset_config0();
     cpu.cache = C::from(board.cached_bus());
+    // The PROM fetches its own code uncached; with memory over its window
+    // the cached and uncached views of it differ.
+    #[cfg(feature = "jitv2")]
+    cpu.enable_jitv2_uncached_views(board.code_bus());
     // The PROM keeps its stack in cache lines it tags for a window with no
     // memory behind it yet; the controller answers that window while they stand.
     let memory = board.node.md.clone();
@@ -643,6 +648,12 @@ impl TezroBoard {
 
     pub fn cached_bus(&self) -> Arc<dyn BusDevice> {
         self.node.bus.cached_view(self.node.md.dma_view(), self.node.md.ram_extent())
+    }
+
+    /// The bus the JIT compiles code through; see [`crate::ip35::Ip35Bus::code_view`].
+    #[cfg(feature = "jitv2")]
+    pub fn code_bus(&self) -> Arc<dyn BusDevice> {
+        self.node.bus.code_view(self.cached_bus())
     }
 
     /// Everything back to its power-on state. The functions reset before
