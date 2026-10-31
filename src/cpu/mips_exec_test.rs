@@ -3861,7 +3861,7 @@ mod tests {
     }
 
     /// EntryLo holds the R10000 family's uncached attribute in bits 63:62
-    /// (R10000 User's Manual v2.0, uncached attribute) and keeps nothing above
+    /// (NEC U10278EJ4V0UM section 11.3, p.214) and keeps nothing above
     /// the PFN on the other models.
     #[test]
     fn entrylo_keeps_the_uncached_attribute_on_the_r10000_family() {

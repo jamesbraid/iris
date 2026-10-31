@@ -578,8 +578,8 @@ pub trait CpuModel: MipsCache {
     const NARROW_STORES_CARRY_GPR: bool = false;
     /// Keep the R10000 family's uncached attribute, EntryLo bits 63:62, and
     /// put it on the bus for a mapped uncached access, as an unmapped xkphys
-    /// access carries its address bits 58:57. The R10000 User's Manual v2.0
-    /// (uncached attribute) loads it into the TLB from EntryLo0/1 for mapped
+    /// access carries its address bits 58:57. NEC U10278EJ4V0UM section 11.3,
+    /// p.214 (in docs/) loads it into the TLB from EntryLo0/1 for mapped
     /// references. False keeps EntryLo to its PFN and flags.
     const TLB_UNCACHED_ATTRIBUTE: bool = false;
 }
