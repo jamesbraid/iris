@@ -8,13 +8,13 @@
 //! derived from its port and direction, and no register reads it back.
 //!
 //! The chip around the engine owns its register window, its interrupt status
-//! words and the 16550s. The engine reaches them through [`Host`], so the same
+//! words and the 16550s. The engine reaches them through [`SerialDmaHost`], so the same
 //! walk serves the IOC3 (two ports, nine interrupt bits each) and the IOC4
 //! (four ports, eight bits each, DMA errors reported elsewhere).
 //!
 //! # What differs between the chips
 //!
-//! [`Params`] holds what the two do differently and nothing else:
+//! [`SerialDmaParams`] holds what the two do differently and nothing else:
 //!
 //! * IOC3 reports the packer's held-character count in the receive producer
 //!   index. IOC4's register map does not define the field, so whether the
@@ -32,6 +32,21 @@
 //!   left. No source says what the part does.
 //! * Receive-ring-full is a level that follows a held entry; what the part
 //!   does is not known.
+//!
+//! # Mapping to QEMU
+//!
+//! The split is QEMU's: this file is the shared engine, `ioc3.rs` and
+//! `ioc4.rs` are the chips that use it.
+//!
+//! | QEMU (`hw/char/sgi-ioc-serial-dma.c`) | here |
+//! |---|---|
+//! | `SGIIOCSerialDMA`, `SGIIOCSerialDMAPort` | [`SerialDma`], [`SerialDmaPort`] |
+//! | `SGIIOCSerialDMAParams` | [`SerialDmaParams`] |
+//! | `SGIIOCSerialDMAOps` and its `opaque` | [`SerialDmaHost`], implemented by the chip |
+//! | `SGIIOCSerialDMASource` | [`SerialDmaSource`] |
+//! | the port's `SerialState *uart` | [`SerialDmaUart`] |
+//! | `sgi_ioc_sdma_port_read`, `_port_write`, `_kick`, `_catch_up`, `_reset` | `port_read`, `port_write`, `run`, `catch_up`, `reset` |
+//! | `sgi_ioc_sdma_base_read`, `_base_write` | `base_read`, `base_write` |
 //!
 //! Ported from hw/char/sgi-ioc-serial-dma.c in jamesbraid/qemu-sgi-origami,
 //! in the form the IOC3 had before the engine was shared.
@@ -108,7 +123,7 @@ const RX_DATA_OK: u8 = 0x80;
 /// A port's interrupt sources, numbered as the IOC3 lays them out in its
 /// status word. The IOC4 places all but the DMA error the same way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Source {
+pub enum SerialDmaSource {
     TxEmpty = 0,
     RxFull = 1,
     RxHighWater = 2,
@@ -119,7 +134,7 @@ pub enum Source {
 
 /// What differs between the chips, fixed per chip.
 #[derive(Clone, Copy, Debug)]
-pub struct Params {
+pub struct SerialDmaParams {
     /// The receive producer index reports the packer's held count.
     pub held_counts: bool,
     /// A failed transfer stops the port until a channel reset.
@@ -127,7 +142,7 @@ pub struct Params {
 }
 
 /// A 16550 as the engine drives it.
-pub trait EngineUart {
+pub trait SerialDmaUart {
     fn loopback(&self) -> bool;
     /// A read with the chip's side effects left out: the 16550 proper.
     fn read_core(&mut self, reg: u32) -> u8;
@@ -138,12 +153,12 @@ pub trait EngineUart {
 }
 
 /// The chip around the engine.
-pub trait Host {
-    fn uart(&mut self, port: usize) -> &mut dyn EngineUart;
+pub trait SerialDmaHost {
+    fn uart(&mut self, port: usize) -> &mut dyn SerialDmaUart;
     /// Latch a source; the chip's write-one-to-clear acknowledges it.
-    fn raise(&mut self, port: usize, src: Source);
+    fn raise(&mut self, port: usize, src: SerialDmaSource);
     /// Drive a source that follows a level and ignores acknowledgement.
-    fn set_level(&mut self, port: usize, src: Source, level: bool);
+    fn set_level(&mut self, port: usize, src: SerialDmaSource, level: bool);
     /// The port's 16550 is fitted and the engine is aimed at it.
     fn reachable(&self, port: usize) -> bool;
     /// The 16550's interrupt line may have moved: reflect it in the chip's
@@ -153,12 +168,12 @@ pub trait Host {
     fn dma_write(&self, addr: u64, data: &[u8]) -> bool;
     /// A transfer failed at `addr`: a receive post or a transmit fetch.
     fn dma_error(&mut self, port: usize, _rx: bool, _addr: u64) {
-        self.raise(port, Source::DmaError);
+        self.raise(port, SerialDmaSource::DmaError);
     }
 }
 
 #[derive(Default)]
-pub struct SdmaPort {
+pub struct SerialDmaPort {
     reg: [u32; off::REGS as usize],
     packer: [u8; ENTRY],
     packed: usize,
@@ -181,27 +196,27 @@ pub struct SdmaPort {
     tx_delay_irq: bool,
 }
 
-pub struct Sdma {
-    params: Params,
+pub struct SerialDma {
+    params: SerialDmaParams,
     base_hi: [u32; MAX_PORTS / PAIR],
     base_lo: [u32; MAX_PORTS / PAIR],
-    pub port: Vec<SdmaPort>,
+    pub port: Vec<SerialDmaPort>,
 }
 
-impl Sdma {
-    pub fn new(ports: usize, params: Params) -> Sdma {
+impl SerialDma {
+    pub fn new(ports: usize, params: SerialDmaParams) -> SerialDma {
         assert!((1..=MAX_PORTS).contains(&ports));
-        Sdma {
+        SerialDma {
             params,
             base_hi: [0; MAX_PORTS / PAIR],
             base_lo: [0; MAX_PORTS / PAIR],
-            port: (0..ports).map(|_| SdmaPort::default()).collect(),
+            port: (0..ports).map(|_| SerialDmaPort::default()).collect(),
         }
     }
 
     /// Back to the power-on state: the ring bases and every port.
     pub fn reset(&mut self) {
-        *self = Sdma::new(self.port.len(), self.params);
+        *self = SerialDma::new(self.port.len(), self.params);
     }
 
     pub fn base_read(&self, pair: usize, high: bool) -> u32 {
@@ -270,7 +285,7 @@ impl Sdma {
     }
 
     /// A transfer the fabric refused: the chip reports it, and may halt.
-    fn dma_failed(&mut self, p: usize, rx: bool, addr: u64, host: &mut dyn Host) {
+    fn dma_failed(&mut self, p: usize, rx: bool, addr: u64, host: &mut dyn SerialDmaHost) {
         if self.params.halt_on_dma_error {
             self.port[p].halted = true;
         }
@@ -279,14 +294,14 @@ impl Sdma {
 
     /// Transmit-ring-empty is a level: ring DMA on, nothing left in the ring
     /// or held by the engine.
-    fn update_tx_empty(&self, p: usize, host: &mut dyn Host) {
+    fn update_tx_empty(&self, p: usize, host: &mut dyn SerialDmaHost) {
         let mask = self.mask(p);
         let port = &self.port[p];
         let empty = self.control(p) & ctl::ENABLE != 0
             && (port.reg[1] ^ port.reg[2]) & mask == 0
             && !port.tx_fetched
             && port.tx_delay_deadline.is_none();
-        host.set_level(p, Source::TxEmpty, empty);
+        host.set_level(p, SerialDmaSource::TxEmpty, empty);
     }
 
     /// The receive high-water mark counts ring entries; a level. So is
@@ -296,22 +311,22 @@ impl Sdma {
     /// consumer makes room, whether or not the held entry has posted yet. A
     /// ring filled exactly, with nothing waiting, does not raise it. A model
     /// choice; what the part does is not known.
-    fn update_high_water(&mut self, p: usize, host: &mut dyn Host) {
+    fn update_high_water(&mut self, p: usize, host: &mut dyn SerialDmaHost) {
         let mask = self.mask(p);
         let hw = self.control(p) & ctl::HIGH_WATER;
         let enabled = self.control(p) & ctl::ENABLE != 0;
         let port = &mut self.port[p];
         let waiting = port.reg[3].wrapping_sub(port.reg[4]) & mask;
-        host.set_level(p, Source::RxHighWater, hw != 0 && waiting / ENTRY as u32 >= hw);
+        host.set_level(p, SerialDmaSource::RxHighWater, hw != 0 && waiting / ENTRY as u32 >= hw);
         if (port.reg[3] + ENTRY as u32) & mask != port.reg[4] & mask {
             port.post_refused = false;
         }
-        host.set_level(p, Source::RxFull, enabled && port.post_refused);
+        host.set_level(p, SerialDmaSource::RxFull, enabled && port.post_refused);
     }
 
     /// Post the packer as one entry. Fails, keeping the characters, when the
     /// ring is full or the write is refused.
-    fn post(&mut self, p: usize, host: &mut dyn Host) -> bool {
+    fn post(&mut self, p: usize, host: &mut dyn SerialDmaHost) -> bool {
         let mask = self.mask(p);
         let ring = self.ring(p, 1);
         let (produce, consume, packer) = {
@@ -350,7 +365,7 @@ impl Sdma {
         }
     }
 
-    fn rx_timer_expired(&mut self, p: usize, host: &mut dyn Host) {
+    fn rx_timer_expired(&mut self, p: usize, host: &mut dyn SerialDmaHost) {
         self.port[p].rx_idle_count = 0;
         self.port[p].rx_deadline = None;
         if self.port[p].packed != 0 {
@@ -358,14 +373,14 @@ impl Sdma {
         }
         // Raised at every expiry, even over an empty ring; the arm is spent.
         if self.port[p].armed {
-            host.raise(p, Source::RxTimer);
+            host.raise(p, SerialDmaSource::RxTimer);
         }
         self.port[p].armed = false;
         self.update_high_water(p, host);
     }
 
     /// Expiries already due happen before an access.
-    pub fn catch_up(&mut self, now: Instant, host: &mut dyn Host) {
+    pub fn catch_up(&mut self, now: Instant, host: &mut dyn SerialDmaHost) {
         for p in 0..self.port.len() {
             if let Some(d) = self.port[p].tx_delay_deadline {
                 if !self.port[p].paused && d <= now {
@@ -380,19 +395,19 @@ impl Sdma {
         }
     }
 
-    fn tx_delay_ended(&mut self, p: usize, when: Instant, host: &mut dyn Host) {
+    fn tx_delay_ended(&mut self, p: usize, when: Instant, host: &mut dyn SerialDmaHost) {
         let irq = {
             let port = &mut self.port[p];
             port.tx_delay_deadline = None;
             std::mem::take(&mut port.tx_delay_irq)
         };
         if irq {
-            host.raise(p, Source::TxExplicit);
+            host.raise(p, SerialDmaSource::TxExplicit);
         }
         self.run_from(p, when, host);
     }
 
-    fn receive(&mut self, p: usize, since: Instant, host: &mut dyn Host) {
+    fn receive(&mut self, p: usize, since: Instant, host: &mut dyn SerialDmaHost) {
         while self.running(p) {
             if self.port[p].packed == ENTRY_CHARS && !self.post(p, host) {
                 break;
@@ -444,7 +459,7 @@ impl Sdma {
 
     /// Each control byte types its data byte; the empty type ends the entry,
     /// wherever it sits.
-    fn transmit(&mut self, p: usize, since: Instant, host: &mut dyn Host) {
+    fn transmit(&mut self, p: usize, since: Instant, host: &mut dyn SerialDmaHost) {
         let mask = self.mask(p);
         let ring = self.ring(p, 0);
         if self.port[p].tx_delay_deadline.is_some() {
@@ -505,7 +520,7 @@ impl Sdma {
                 slot += 1;
                 self.port[p].tx_slot = slot;
                 if control & TX_INTERRUPT != 0 {
-                    host.raise(p, Source::TxExplicit);
+                    host.raise(p, SerialDmaSource::TxExplicit);
                 }
             }
             let port = &mut self.port[p];
@@ -518,7 +533,7 @@ impl Sdma {
 
     /// The drain posts what the packer holds and reads back set until it has;
     /// it waits while ring DMA is off or paused and while the ring is full.
-    fn drain(&mut self, p: usize, host: &mut dyn Host) {
+    fn drain(&mut self, p: usize, host: &mut dyn SerialDmaHost) {
         if !self.port[p].drain_pending || !self.running(p) {
             return;
         }
@@ -530,7 +545,7 @@ impl Sdma {
 
     /// Walk the port's rings from `since`: where a transmit delay ended, or
     /// now.
-    pub fn run_from(&mut self, p: usize, since: Instant, host: &mut dyn Host) {
+    pub fn run_from(&mut self, p: usize, since: Instant, host: &mut dyn SerialDmaHost) {
         if !host.reachable(p) || self.port[p].busy {
             return;
         }
@@ -543,12 +558,12 @@ impl Sdma {
         self.port[p].busy = false;
     }
 
-    pub fn run(&mut self, p: usize, host: &mut dyn Host) {
+    pub fn run(&mut self, p: usize, host: &mut dyn SerialDmaHost) {
         self.run_from(p, Instant::now(), host);
     }
 
     /// A passive mirror of the 16550's lines; no read side effects.
-    fn shadow(&self, p: usize, host: &mut dyn Host) -> u32 {
+    fn shadow(&self, p: usize, host: &mut dyn SerialDmaHost) -> u32 {
         let u = host.uart(p);
         let (lsr, mcr, mut msr) = (u.lsr(), u.mcr(), u.msr());
         if self.flow_cts(p, u.loopback()) {
@@ -568,7 +583,7 @@ impl Sdma {
         s
     }
 
-    pub fn port_read(&mut self, p: usize, offset: u32, host: &mut dyn Host) -> u32 {
+    pub fn port_read(&mut self, p: usize, offset: u32, host: &mut dyn SerialDmaHost) -> u32 {
         let now = Instant::now();
         self.catch_up(now, host);
         if offset == off::SHADOW {
@@ -631,7 +646,7 @@ impl Sdma {
         port.rx_idle_count = 0;
     }
 
-    pub fn port_write(&mut self, p: usize, offset: u32, val: u32, host: &mut dyn Host) {
+    pub fn port_write(&mut self, p: usize, offset: u32, val: u32, host: &mut dyn SerialDmaHost) {
         let now = Instant::now();
         self.catch_up(now, host);
         let mask = self.mask(p);
@@ -688,7 +703,7 @@ impl Sdma {
     }
 }
 
-impl EngineUart for Ns16550 {
+impl SerialDmaUart for Ns16550 {
     fn loopback(&self) -> bool {
         Ns16550::loopback(self)
     }
@@ -728,7 +743,7 @@ mod tests {
         rx: std::collections::VecDeque<u8>,
     }
 
-    impl EngineUart for FakeUart {
+    impl SerialDmaUart for FakeUart {
         fn loopback(&self) -> bool {
             false
         }
@@ -760,7 +775,7 @@ mod tests {
         mem: Vec<u8>,
         /// Transfers below this address are refused.
         refuse_below: u64,
-        raised: Vec<(usize, Source)>,
+        raised: Vec<(usize, SerialDmaSource)>,
         errors: Vec<(usize, bool, u64)>,
         /// Whether the chip reports errors itself, as IOC4 does.
         reports_errors: bool,
@@ -779,14 +794,14 @@ mod tests {
         }
     }
 
-    impl Host for Chip {
-        fn uart(&mut self, port: usize) -> &mut dyn EngineUart {
+    impl SerialDmaHost for Chip {
+        fn uart(&mut self, port: usize) -> &mut dyn SerialDmaUart {
             &mut self.uart[port]
         }
-        fn raise(&mut self, port: usize, src: Source) {
+        fn raise(&mut self, port: usize, src: SerialDmaSource) {
             self.raised.push((port, src));
         }
-        fn set_level(&mut self, _port: usize, _src: Source, _level: bool) {}
+        fn set_level(&mut self, _port: usize, _src: SerialDmaSource, _level: bool) {}
         fn reachable(&self, _port: usize) -> bool {
             true
         }
@@ -805,29 +820,29 @@ mod tests {
             if self.reports_errors {
                 self.errors.push((port, rx, addr));
             } else {
-                self.raise(port, Source::DmaError);
+                self.raise(port, SerialDmaSource::DmaError);
             }
         }
     }
 
-    const FOUR: Params = Params { held_counts: false, halt_on_dma_error: true };
-    const TWO: Params = Params { held_counts: true, halt_on_dma_error: false };
+    const FOUR: SerialDmaParams = SerialDmaParams { held_counts: false, halt_on_dma_error: true };
+    const TWO: SerialDmaParams = SerialDmaParams { held_counts: true, halt_on_dma_error: false };
 
     /// One transmit entry holding `byte`, in the port's transmit ring.
-    fn queue_char(sdma: &mut Sdma, chip: &mut Chip, p: usize, byte: u8) {
+    fn queue_char(sdma: &mut SerialDma, chip: &mut Chip, p: usize, byte: u8) {
         let at = sdma.ring(p, 0) as usize;
         chip.mem[at..at + ENTRY].copy_from_slice(&[byte, 0, 0, 0, TX_CHARACTER, 0, 0, 0]);
         let produce = sdma.stored(p, off::TX_PRODUCE);
         sdma.port_write(p, off::TX_PRODUCE, produce + ENTRY as u32, chip);
     }
 
-    fn enable(sdma: &mut Sdma, chip: &mut Chip, p: usize) {
+    fn enable(sdma: &mut SerialDma, chip: &mut Chip, p: usize) {
         sdma.port_write(p, off::CONTROL, ctl::ENABLE, chip);
     }
 
     #[test]
     fn a_port_in_the_second_pair_uses_the_second_ring_base() {
-        let mut sdma = Sdma::new(4, FOUR);
+        let mut sdma = SerialDma::new(4, FOUR);
         let mut chip = Chip::new();
         sdma.base_write(0, false, 0x1000);
         sdma.base_write(1, false, 0x2000);
@@ -843,7 +858,7 @@ mod tests {
 
     #[test]
     fn a_failed_fetch_halts_the_port_until_a_channel_reset() {
-        let mut sdma = Sdma::new(4, FOUR);
+        let mut sdma = SerialDma::new(4, FOUR);
         let mut chip = Chip::new();
         sdma.base_write(0, false, 0x1000);
         enable(&mut sdma, &mut chip, 0);
@@ -863,14 +878,14 @@ mod tests {
 
     #[test]
     fn a_failed_fetch_leaves_a_chip_that_does_not_halt_running() {
-        let mut sdma = Sdma::new(2, TWO);
+        let mut sdma = SerialDma::new(2, TWO);
         let mut chip = Chip::new();
         chip.reports_errors = false;
         sdma.base_write(0, false, 0x1000);
         enable(&mut sdma, &mut chip, 0);
         chip.refuse_below = 0x2000;
         queue_char(&mut sdma, &mut chip, 0, b'a');
-        assert_eq!(chip.raised.last(), Some(&(0, Source::DmaError)), "the default report is the port's own source");
+        assert_eq!(chip.raised.last(), Some(&(0, SerialDmaSource::DmaError)), "the default report is the port's own source");
         assert!(!sdma.halted(0));
         chip.refuse_below = 0;
         sdma.run(0, &mut chip);
@@ -880,7 +895,7 @@ mod tests {
     #[test]
     fn only_a_chip_that_reports_held_counts_shows_them() {
         for (params, shown) in [(TWO, true), (FOUR, false)] {
-            let mut sdma = Sdma::new(2, params);
+            let mut sdma = SerialDma::new(2, params);
             let mut chip = Chip::new();
             sdma.base_write(0, false, 0x1000);
             enable(&mut sdma, &mut chip, 0);
