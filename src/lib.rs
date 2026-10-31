@@ -161,87 +161,90 @@ pub mod build_features {
     }
 }
 
-pub mod config;
-pub mod traits;
-#[macro_use]
-pub mod devlog;
-pub mod prombin;
-pub mod prombini2;
-pub mod prombinip28;
-pub mod ppmem;
+pub use iris_core::config;
+pub use iris_core::traits;
+pub use iris_core::devlog;
+pub use iris_dev::prombin;
+pub use iris_dev::prombini2;
+pub use iris_dev::prombinip28;
+pub use iris_core::ppmem;
 pub mod machine;
 pub mod workstation;
 /// The SGI O2 (IP32): its bus and devices -- see `docs/o2-ip32.md` (and, for how it was built, `clanker/devices/ip32-o2-bringup-log.md`).
 /// Not yet wired into `Physical`; `ip32_machine` drives the CPU against it.
 pub mod ip32;
-pub mod ip32_map;
+pub use iris_dev::ip32_map;
 pub mod ip32_screen;
 pub mod ip32_machine;
 /// The SGI Octane (IP30): its bus and machine -- see `docs/Octane/ip30-address-map.md`.
 pub mod ip30;
-pub mod ip30_map;
+pub use iris_core::ip30_map;
 pub mod ip30_machine;
 pub mod machine_state;
-pub mod platform;
-pub mod physical;
+pub use iris_core::platform;
+pub use iris_core::physical;
 pub mod ip22_bus;
-pub mod ip22_map;
+pub use iris_core::ip22_map;
 pub mod monitor;
-pub mod locks;
-pub mod net;
+pub use iris_core::locks;
+pub use iris_dev::net;
 pub mod bench_report;
 pub mod benchsuite;
 pub mod bench_runner;
-pub mod cow_disk;
-pub mod chd_disk;
-pub mod block_node;
-pub mod scsi;
-pub mod scsi_monitor;
-pub mod irq;
-pub mod host_audio;
-pub mod pci;
+pub use iris_dev::cow_disk;
+pub use iris_dev::chd_disk;
+pub use iris_dev::block_node;
+pub use iris_dev::scsi;
+pub use iris_dev::scsi_monitor;
+pub use iris_core::irq;
+pub use iris_dev::host_audio;
+pub use iris_dev::pci;
 pub mod ui;
-pub mod cpu;
-pub mod dev;
-pub mod gfifo;
-pub mod trace_writer;
-pub mod gfx_display;
+pub use iris_cpu::cpu;
+pub mod dev {
+    pub use iris_dev::dev::*;
+    pub use iris_gfx::dev::*;
+}
+pub use iris_core::gfifo;
+pub use iris_core::trace_writer;
+pub use iris_gfx::gfx_display;
 pub mod hostinput;
 pub mod keysym;
 pub mod vnc;
-pub mod compositor;
+pub use iris_gfx::compositor;
 pub mod gl_compositor;
 pub mod headless_gl;
-pub mod debug_overlay;
-pub mod disp;
-pub mod heartbeat;
-pub mod screenshot;
-pub mod exp;
-pub mod gdb_stub;
-pub mod snapshot;
-pub mod sgi_vh;
-pub mod elf;
-pub mod chunk_store;
+pub use iris_gfx::debug_overlay;
+pub use iris_gfx::disp;
+pub use iris_core::heartbeat;
+pub use iris_core::screenshot;
+pub use iris_core::exp;
+pub use iris_cpu::gdb_stub;
+pub use iris_core::snapshot;
+pub use iris_core::sgi_vh;
+pub use iris_core::elf;
+pub use iris_core::chunk_store;
 pub mod validate;
 pub mod registry;
-pub mod thread_affinity;
+pub use iris_core::thread_affinity;
 pub mod perf_monitor;
 pub mod ci;
-pub mod hptimer;
-pub mod hptimer_tests;
-pub mod vga_font;
-pub mod video_source;
-pub mod ultra_proto;
+pub use iris_core::hptimer;
+pub use iris_core::hptimer_tests;
+pub use iris_gfx::vga_font;
+pub use iris_dev::video_source;
+pub use iris_dev::ultra_proto;
 pub mod crash_diag;
-mod nv_storage;
+
 pub mod hwwatch;
 #[macro_use]
-mod perfetto_macros;
-pub use perfetto_macros::{PfBits, PfLevel, PfValue};
+extern crate iris_core;
+pub use iris_core::{PfBits, PfLevel, PfValue};
+pub use iris_core::{dlog, dlog_unconditional, dlog_dev, pf_instant, pf_begin, pf_end, pf_counter, pf_scope, pf_level, pf_bits, pf_value};
 #[cfg(feature = "perfetto")]
-pub mod perfetto;
+pub use iris_core::perfetto;
 
 #[cfg(test)]
 mod platform_profile_tests;
 #[cfg(test)]
-pub(crate) mod test_board;
+pub use iris_core::test_board;

@@ -196,7 +196,7 @@ impl Crime {
     }
 
     /// INTSTAT: the level sources, the latched ones and the software ones.
-    pub(crate) fn intstat(&self) -> u64 {
+    pub fn intstat(&self) -> u64 {
         self.int.lock().unwrap().intstat()
     }
 

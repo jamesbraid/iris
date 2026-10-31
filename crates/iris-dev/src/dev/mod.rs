@@ -4,8 +4,6 @@
 pub mod aic7880;
 pub mod crime_mem;
 pub mod o2gfx;
-pub mod gl;
-pub mod gr2;
 pub mod mec;
 pub mod mace;
 pub mod mace_audio;
@@ -26,15 +24,11 @@ pub mod mace_uart;
 pub mod mace_ust;
 pub mod ns16550;
 pub mod rad1;
-pub mod mgras;
-pub mod odyssey;
-pub mod ng1;
 pub mod serial_host;
 pub mod serial_log;
 pub mod sflash;
 pub mod xbow;
 pub mod bridge;
-pub mod w1;
 
 pub mod camera;
 pub mod cdmc;
@@ -46,7 +40,6 @@ pub mod hpc3;
 pub mod ioc;
 pub mod mc;
 pub mod mc_vdma;
-pub mod mem;
 pub mod pit8254;
 pub mod prom;
 pub mod ps2;
@@ -57,3 +50,8 @@ pub mod ultra64;
 pub mod vino;
 pub mod wd33c93a;
 pub mod z85c30;
+
+pub use iris_core::dev::{mem, w1};
+// The end-to-end VDMA tests drive a real REX3.
+#[cfg(test)]
+pub use iris_gfx::dev::ng1;

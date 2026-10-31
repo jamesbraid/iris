@@ -390,7 +390,7 @@ impl<const DEPTH: usize, const HEADS: usize> GFifo<DEPTH, HEADS> {
     /// that sees the token always sees the payload too — which makes it
     /// impossible to test the drain loop's mid-batch behaviour honestly
     /// without this. Not compiled into a normal build.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn rewind_tail_for_test(&self, t: usize) {
         self.tail.store(t & Self::MASK, Ordering::Release);
         for st in &self.shadow_tail {
@@ -399,7 +399,7 @@ impl<const DEPTH: usize, const HEADS: usize> GFifo<DEPTH, HEADS> {
     }
 
     /// Test hook: publish up to `t` entries, undoing `rewind_tail_for_test`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn restore_tail_for_test(&self, t: usize) {
         self.tail.store(t & Self::MASK, Ordering::Release);
     }

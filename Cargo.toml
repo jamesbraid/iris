@@ -1,5 +1,5 @@
 [workspace]
-members = ["iris-gui", "iris-hostcall"]
+members = ["iris-gui", "iris-hostcall", "crates/iris-core", "crates/iris-cpu", "crates/iris-dev", "crates/iris-gfx"]
 # iris-hostgl is built only through `--features hostgl`, never by a plain or
 # `--workspace` build: it links the host's OpenGL (OpenGL.framework, libGL), which hosts
 # such as RISC-V boards do not have.
@@ -13,29 +13,29 @@ default-run = "iris"
 
 [features]
 # Uncomment to enable cache debug tracking (tracks specific cache line across all operations)
-debug_cache = []
-developer = ["gputrace"]
+debug_cache = ["iris-core/debug_cache", "iris-cpu/debug_cache", "iris-dev/debug_cache", "iris-gfx/debug_cache"]
+developer = ["gputrace", "iris-core/developer", "iris-cpu/developer", "iris-dev/developer", "iris-gfx/developer"]
 # Graphics bus taps: REX3 annotated trace (`rex trace`) and replayable
 # recording (`rex rec`, src/dev/ng1/rex3_rec.rs), and the GR2 and IMPACT
 # annotated traces (`gr2 trace`, `mgras trace`, IRIS_MGRAS_TRACE). Without it
 # every bus access and FIFO entry goes straight to the device, with not even
 # the relaxed load that checks whether a trace runs. On with `developer`; opt
 # in for plain and `lightning` builds with `--features gputrace`.
-gputrace = []
-developer_ip7 = []  # CP0 Compare/timer calibration stats and debug prints
-developerx = []     # Extended developer logging: breaks on IBE/DBE/ADEL/ADES/TLB errors
+gputrace = ["iris-core/gputrace", "iris-cpu/gputrace", "iris-dev/gputrace", "iris-gfx/gputrace"]
+developer_ip7 = ["iris-core/developer_ip7", "iris-cpu/developer_ip7", "iris-dev/developer_ip7", "iris-gfx/developer_ip7"]  # CP0 Compare/timer calibration stats and debug prints
+developerx = ["iris-core/developerx", "iris-cpu/developerx", "iris-dev/developerx", "iris-gfx/developerx"]     # Extended developer logging: breaks on IBE/DBE/ADEL/ADES/TLB errors
 # Per-LL-address LL/SC reservation histogram, queryable with `ll stats`.
 # Deliberately NOT part of `developer`: `developer` is mutually exclusive with
 # `lightning`, and the thing this exists to diagnose (a kernel LL/SC loop that
 # never lands its store, i.e. threads that sleep forever) so far only
 # reproduces at full JIT speed. Cheap enough to carry in a `lightning` build —
 # a fixed-size direct-mapped table, no allocation, no hashing.
-llstats = []
+llstats = ["iris-core/llstats", "iris-cpu/llstats", "iris-dev/llstats", "iris-gfx/llstats"]
 # Perfetto tracing: per-thread event rings drained by a writer thread into a
 # .pftrace file for ui.perfetto.dev (src/perfetto/, docs/perfetto.md).
 # Without it the pf_* macros compile to nothing. Controlled at run time with
 # `perfetto start|stop|status|cats` on the monitor or `--perfetto FILE`.
-perfetto = []
+perfetto = ["iris-core/perfetto", "iris-cpu/perfetto", "iris-dev/perfetto", "iris-gfx/perfetto"]
 # REX3 per-GO activity bits and dispatch counters (`rex status`, `perf
 # snapshot`): the DIAG_LOOP_EXECUTE_GO / DIAG_LOOP_DRAW_BLOCK flips and the
 # jit_go_count / interp_go_count / simd_fill_rows increments.
@@ -54,7 +54,7 @@ perfetto = []
 # bits are once per mutex acquisition rather than per primitive, so they stay
 # live either way. jit_go_count is load-bearing in tests: several JIT tests
 # assert on it to prove they compared compiled code, not the interpreter.
-rexdiag = []
+rexdiag = ["iris-core/rexdiag", "iris-cpu/rexdiag", "iris-dev/rexdiag", "iris-gfx/rexdiag"]
 # Stale-code detector: verify, at execution time, that the instruction word an
 # engine is about to run still matches what memory holds at that VA.
 #
@@ -68,12 +68,12 @@ rexdiag = []
 # decode against a re-read. Expensive (a memory read per instruction), so it is
 # its own feature rather than part of `developer`, and like `llstats` it is kept
 # `lightning`-compatible so it can run at the speed a timing bug needs.
-fetchverify = []
+fetchverify = ["iris-core/fetchverify", "iris-cpu/fetchverify", "iris-dev/fetchverify", "iris-gfx/fetchverify"]
 # Synthetic deterministic clock for CP0 Compare calibration: dt_ns derived from
 # (instructions executed) * 10ns instead of host Instant::now(). Required for
 # the snapshot determinism validator (Phase 3.3). Default OFF preserves the
 # wallclock-anchored timer that interactive desktop builds expect.
-ci_clock = []
+ci_clock = ["iris-core/ci_clock", "iris-cpu/ci_clock", "iris-dev/ci_clock", "iris-gfx/ci_clock"]
 # MIPS opcode fusion: branch/jump+NOP delay slot, LUI+ORI/ADDIU (32-bit
 # immediate materialization), and ADDU/SUBU/ADDIU+load/store (address-calc
 # then dereference) each collapse into a single decode/dispatch. Real perf
@@ -82,17 +82,17 @@ ci_clock = []
 # — so a PC/VirtFetch/PhysFetch breakpoint set on that instruction's address
 # silently never fires. Incompatible with reliable interactive debugging;
 # implied by `lightning` (same "give up debuggability for speed" tradeoff).
-opcodefusion = []
+opcodefusion = ["iris-core/opcodefusion", "iris-cpu/opcodefusion", "iris-dev/opcodefusion", "iris-gfx/opcodefusion"]
 # Lightning: pedal-to-the-metal build — disables breakpoint checks and traceback buffer updates.
 # Incompatible with interactive debugging. For end-user / benchmarking builds only.
-lightning = ["opcodefusion"]
+lightning = ["opcodefusion", "iris-core/lightning", "iris-cpu/lightning", "iris-dev/lightning", "iris-gfx/lightning"]
 # O(1) TLB fast path: 512KB inline vmap indexed by VA[31:13] replaces linear scan
 # for 32-bit and sign-extended 64-bit VAs. Always on; kept as a feature flag so
 # downstream tooling that passes --features tlbvmap still compiles cleanly.
-tlbvmap = []
+tlbvmap = ["iris-core/tlbvmap", "iris-cpu/tlbvmap", "iris-dev/tlbvmap", "iris-gfx/tlbvmap"]
 # TLB translation statistics: per-AccessType counters for nanotlb, vmap, and
 # MRU scan paths including entries-walked totals.  Print at emulator exit.
-tlbstats = []
+tlbstats = ["iris-core/tlbstats", "iris-cpu/tlbstats", "iris-dev/tlbstats", "iris-gfx/tlbstats"]
 # jitstats: instrumentation for the JIT inline load/store path
 # (docs/nutlb-design.md, docs/jit-inline-memory.md). Counts, per load/store,
 # how far an access gets through the checks compiled code would emit —
@@ -103,7 +103,7 @@ tlbstats = []
 # for TCG/DRC-class performance, and nutlb + tcache exist to enable it. These
 # counters say which cases are worth emitting and where the fallbacks land.
 # Diagnostic only; adds a probe to every cached access.
-jitstats = []
+jitstats = ["iris-core/jitstats", "iris-cpu/jitstats", "iris-dev/jitstats", "iris-gfx/jitstats"]
 # TLB consistency checker: after every TLBWI/TLBWR, walk the whole JTLB and
 # verify there are no duplicate/overlapping entries, that the shadow array
 # matches the architectural entries, that each MRU list visits every valid
@@ -112,7 +112,7 @@ jitstats = []
 # Exists because bogus "duplicate TLB entry" IRIX panics turned out to be
 # emulator TLB-management bugs; this catches them at the moment they occur
 # instead of many instructions later at a confusing kernel panic.
-tlbcheck = []
+tlbcheck = ["iris-core/tlbcheck", "iris-cpu/tlbcheck", "iris-dev/tlbcheck", "iris-gfx/tlbcheck"]
 # Per-instruction decode and execution frequency counters (all ~205 MIPS
 # III/IV opcodes), printed at emulator exit with a MIPS III/IV usage rollup,
 # plus diffable instr_used.txt/instr_counts.txt dumps. Diagnostic only —
@@ -124,24 +124,24 @@ tlbcheck = []
 # (InstrKind/classify_instr) always compiles, independent of this flag —
 # jitv2::opcode_support depends on it unconditionally for its own
 # emitter-coverage gating. See mips_instr_stats.rs.
-instr_stats = []
+instr_stats = ["iris-core/instr_stats", "iris-cpu/instr_stats", "iris-dev/instr_stats", "iris-gfx/instr_stats"]
 # Secondary cache variants are currently refused by src/lib.rs pending fixes.
 # The intended model below describes the disabled implementation.
 # Secondary cache present. Without this flag the CPU reports SC=1 (no secondary cache)
 # and the L2 is bypassed entirely. Use alone for external R4600SC-style cache sized via
 # EEPROM, or together with r5ksc_triton for Triton on-die L2.
-r5ksc = []
+r5ksc = ["iris-core/r5ksc", "iris-cpu/r5ksc", "iris-dev/r5ksc", "iris-gfx/r5ksc"]
 # Triton integrated L2: on-die 1MB/32B cache reported via CONFIG.SC=0, controlled via
 # CONFIG.SE (bit 12 enable/disable), and sized via CONFIG.SS (bits 23:22).
 # Implies r5ksc (Triton always has secondary cache present).
-r5ksc_triton = ["r5ksc"]
+r5ksc_triton = ["r5ksc", "iris-core/r5ksc_triton", "iris-cpu/r5ksc_triton", "iris-dev/r5ksc_triton", "iris-gfx/r5ksc_triton"]
 # Idle detection + in-place CPU park: when the guest sits in its interrupt-enabled
 # idle loop, sleep the CPU thread until the next timer tick / device interrupt
 # rather than spinning the host core (see clanker/perf/idle-pause-work.md). Wallclock-
 # anchored timing; the IRIS_NO_IDLE env var disables it at runtime when compiled
 # in. OFF by default (the CPU thread spins) — opt in with --features idle-pause;
 # off keeps deterministic-clock and raw-benchmark builds simple.
-idle-pause = []
+idle-pause = ["iris-core/idle-pause", "iris-cpu/idle-pause", "iris-dev/idle-pause", "iris-gfx/idle-pause"]
 # Transparent cache (docs/tcache-design.md): keep the whole cache tag/state
 # machine — line states, LRU, dirty bits, VCE, CACHE-instruction semantics —
 # but stop storing line *data* for cacheable RAM. Reads and writes go straight
@@ -150,39 +150,39 @@ idle-pause = []
 # exception and are still filled — they cache work, not memory.
 # Always on with jitv2 (which implies it); can also be enabled alone for an
 # interpreter build. ppmem (docs/ppmem-design.md) is unconditional.
-tcache = []
+tcache = ["iris-core/tcache", "iris-cpu/tcache", "iris-dev/tcache", "iris-gfx/tcache"]
 # tcache self-check: after every cacheable access, assert that ppmem's window is
 # authoritative for transparent addresses — no BACKED L1D line over a
 # transparent address, and no DIRTY L2 line whose data disagrees with RAM.
 # Panics at the exact diverging access instead of letting corruption surface as
 # a guest crash much later. Very slow; diagnostic only.
-tcache_verify = ["tcache"]
+tcache_verify = ["tcache", "iris-core/tcache_verify", "iris-cpu/tcache_verify", "iris-dev/tcache_verify", "iris-gfx/tcache_verify"]
 # Cache parity/ECC injection and the Cache Error exception, for SGI's IDE
 # cache diagnostics (dcache1, icache1, scache1): Status.CE forcing the ECC
 # register into stored check bits, Index_Load_Tag loading check bits into CP0
 # ECC, and the Cache Error a mismatch raises. Nothing but a diagnostic ever
 # observes any of it, and it costs a check on every D-cache miss and a Status
 # sync on every exception, so it is off by default.
-cache-ecc = []
+cache-ecc = ["iris-core/cache-ecc", "iris-cpu/cache-ecc", "iris-dev/cache-ecc", "iris-gfx/cache-ecc"]
 # Decoded-instruction cache for the shadow cache (src/cpu/decode_cache.rs).
 # Always built now; this flag does nothing and is kept so command lines that
 # still pass `--features decode-cache` keep working.
-decode-cache = []
+decode-cache = ["iris-core/decode-cache", "iris-cpu/decode-cache", "iris-dev/decode-cache", "iris-gfx/decode-cache"]
 default = ["tlbvmap", "rexdiag"]
 # Cranelift-based JIT compiler for REX3 graphics draw shaders.
-rex-jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native"]
+rex-jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native", "iris-core/rex-jit", "iris-cpu/rex-jit", "iris-dev/rex-jit", "iris-gfx/rex-jit"]
 # Cranelift-based JIT for IMPACT (GR4) raster shaders: RSS/TE1 pixel
 # pipelines monomorphised on a 64-bit key (src/dev/mgras/rss_jit).
-gr4-jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native"]
+gr4-jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native", "iris-core/gr4-jit", "iris-cpu/gr4-jit", "iris-dev/gr4-jit", "iris-gfx/gr4-jit"]
 # Cranelift-based JIT for GR2 (XZ / Extreme) RE3 spans: SHADED / FLAT
 # span pipelines monomorphised on a packed key (src/dev/gr2/re3_jit).
-gr2-jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native"]
+gr2-jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native", "iris-core/gr2-jit", "iris-cpu/gr2-jit", "iris-dev/gr2-jit", "iris-gfx/gr2-jit"]
 # Every graphics JIT: `--features gpujit` for `rex-jit,gr4-jit,gr2-jit`.
-gpujit = ["rex-jit", "gr4-jit", "gr2-jit"]
+gpujit = ["rex-jit", "gr4-jit", "gr2-jit", "iris-core/gpujit", "iris-cpu/gpujit", "iris-dev/gpujit", "iris-gfx/gpujit"]
 # JIT v2: physical-page PIC region compiler (see clanker/jitv2/jit-v2-design.md).
 # Unconditionally-correct-at-publish redesign, replacing the speculative v1
 # tiered JIT (removed). Whole-page compilation implies transparent caching.
-jitv2 = ["tcache", "cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native", "target-lexicon", "region", "wasmtime-jit-icache-coherence"]
+jitv2 = ["tcache", "cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native", "target-lexicon", "region", "wasmtime-jit-icache-coherence", "iris-core/jitv2", "iris-cpu/jitv2", "iris-dev/jitv2", "iris-gfx/jitv2"]
 # jitv2 opcode fusion: LUI+ORI/ADDIU (32-bit immediate materialization) and
 # branch/jump+NOP delay-slot collapsing, jitv2's counterparts to the
 # interpreter's `opcodefusion` feature. OFF by default (unlike the
@@ -195,12 +195,12 @@ jitv2 = ["tcache", "cranelift-codegen", "cranelift-frontend", "cranelift-jit", "
 # debuggability/complexity cost for the perf it buys in the jitv2 pipeline
 # specifically; opt in with --features jitv2_opcodefusion once it's earned
 # more confidence.
-jitv2_opcodefusion = ["jitv2"]
+jitv2_opcodefusion = ["jitv2", "iris-core/jitv2_opcodefusion", "iris-cpu/jitv2_opcodefusion", "iris-dev/jitv2_opcodefusion", "iris-gfx/jitv2_opcodefusion"]
 # jitv2 whole-page compile (§13, clanker/jitv2/jit-v2-design.md): whole-page
 # compilation is now the standard and only JIT v2 design. Kept as a compatibility
 # alias for `jitv2` so downstream scripts and builds specifying `--features j2wp`
 # continue to work.
-j2wp = ["jitv2"]
+j2wp = ["jitv2", "iris-core/j2wp", "iris-cpu/j2wp", "iris-dev/j2wp", "iris-gfx/j2wp"]
 # jitv2 dev tool: temporary in-process lockstep verifier. On every dispatch,
 # classifies the current instruction (alu/branch/load-store/fpu) and, for the
 # categories currently wired up (ALU, load/store, CP1), inline-compiles just
@@ -218,7 +218,7 @@ j2wp = ["jitv2"]
 # verifies memory through. `lightning`/`opcodefusion` are refused outright in
 # src/lib.rs: Cargo features are additive, so an incompatible one can only be
 # rejected, never unset.
-jitv2_lockstep = ["jitv2", "developer"]
+jitv2_lockstep = ["jitv2", "developer", "iris-core/jitv2_lockstep", "iris-cpu/jitv2_lockstep", "iris-dev/jitv2_lockstep", "iris-gfx/jitv2_lockstep"]
 # jitv2 diagnostic: detect self-modifying code landing on the physical page the
 # CPU is currently fetching/compiling from. Every data write, after translation,
 # compares its physical frame against `core.cur_code_pfn` (the pfn mirror of
@@ -232,7 +232,7 @@ jitv2_lockstep = ["jitv2", "developer"]
 # every write, so it is off by default. **Run it with `j2 inline_mem off`**: the
 # inline store fast path writes the ppmem RAM window directly and bypasses
 # `write_data_impl`, so stores that take it are invisible to this check.
-jitv2_smc_check = ["jitv2"]
+jitv2_smc_check = ["jitv2", "iris-core/jitv2_smc_check", "iris-cpu/jitv2_smc_check", "iris-dev/jitv2_smc_check", "iris-gfx/jitv2_smc_check"]
 # PCAP/bridged networking backend: instead of the built-in software NAT gateway,
 # bridge the guest's raw Ethernet frames onto a real host interface via libpcap.
 # Lets the guest appear as a real L2 host on the physical LAN. Requires a pcap
@@ -245,14 +245,14 @@ jitv2_smc_check = ["jitv2"]
 #                 so the runtime driver's license does not attach to IRIS.
 # Off by default — enable with `cargo build --features pcap`. Select at runtime
 # with `[network] mode = "pcap"` in iris.toml.
-pcap = ["dep:pcap"]
+pcap = ["dep:pcap", "iris-core/pcap", "iris-cpu/pcap", "iris-dev/pcap", "iris-gfx/pcap"]
 # Host services for IRIX programs, reached through the private system calls
 # 3000-3009 (iris-hostcall/): the trap in `exec_syscall` and the self-test
 # service. The trap answers only user-mode `syscall`s outside a delay slot,
 # and only for a number a service is registered for; everything else goes to
 # IRIX untouched. Off by default -- a guest that never issues one cannot tell
 # the difference.
-hostcall = ["dep:iris-hostcall"]
+hostcall = ["dep:iris-hostcall", "iris-core/hostcall", "iris-cpu/hostcall", "iris-dev/hostcall", "iris-gfx/hostcall"]
 # Host OpenGL for IRIX programs (iris-hostgl/): host call 3000, answered by
 # replaying the replacement libGL's command stream on the host GPU. The IRIX
 # side libraries are the iris-guest-tools project
@@ -261,9 +261,13 @@ hostcall = ["dep:iris-hostcall"]
 # says so.
 # Off by default, and iris-hostgl is outside the workspace members, so
 # nothing builds it unless this feature is asked for.
-hostgl = ["hostcall", "dep:iris-hostgl"]
+hostgl = ["hostcall", "dep:iris-hostgl", "iris-core/hostgl", "iris-cpu/hostgl", "iris-dev/hostgl", "iris-gfx/hostgl"]
 
 [dependencies]
+iris-core = { path = "crates/iris-core", default-features = false }
+iris-cpu = { path = "crates/iris-cpu", default-features = false }
+iris-dev = { path = "crates/iris-dev", default-features = false }
+iris-gfx = { path = "crates/iris-gfx", default-features = false }
 clap = { version = "4", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
@@ -350,6 +354,9 @@ libc = "0.2"
 # package's normal dependencies; serde_json is needed to parse the monitor's
 # and CI socket's JSON replies.
 serde_json = "1.0"
+iris-core = { path = "crates/iris-core", default-features = false, features = ["test-support"] }
+iris-dev = { path = "crates/iris-dev", default-features = false, features = ["test-support"] }
+iris-gfx = { path = "crates/iris-gfx", default-features = false, features = ["test-support"] }
 
 [profile.release]
 lto = "fat"

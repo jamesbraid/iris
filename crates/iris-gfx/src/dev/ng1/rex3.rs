@@ -699,7 +699,7 @@ pub trait Rex3RegisterOps {
     /// # Example
     /// For a 12.4.7 format (12+4=16 value bits, top 9 bits unused, 7 bottom bits masked):
     /// ```
-    /// use iris::dev::ng1::rex3::Rex3RegisterOps;
+    /// use iris_gfx::dev::ng1::rex3::Rex3RegisterOps;
     /// let val = 0x12345678u32.rexset(9, 7); // Input: uuuuuuuuuVVVVVVVVVVVVVVVVbbbbbbb
     ///                                        // Output: SSSSSSSSSVVVVVVVVVVVVVVVV0000000
     /// ```
@@ -716,7 +716,7 @@ pub trait Rex3RegisterOps {
     /// # Example
     /// For reading a 12.4.7 format register (16 value bits, 9 top bits, 7 bottom bits):
     /// ```
-    /// use iris::dev::ng1::rex3::Rex3RegisterOps;
+    /// use iris_gfx::dev::ng1::rex3::Rex3RegisterOps;
     /// let raw_register = 0u32;
     /// let val = raw_register.rexget(9, 7); // Input: SSSSSSSSSVVVVVVVVVVVVVVVV0000000
     ///                                       // Output: 000000000VVVVVVVVVVVVVVVV0000000
@@ -2536,7 +2536,7 @@ impl Rex3 {
         }
     }
 
-    pub(crate) fn wait_idle(&self) {
+    pub fn wait_idle(&self) {
         loop {
             // Publish before testing: unlike the bus read paths this one has no
             // retry escape — it spins here until the queue reports empty — so a

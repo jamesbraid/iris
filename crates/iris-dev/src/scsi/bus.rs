@@ -190,7 +190,7 @@ impl ScsiBus {
     }
 
     /// A raw image as a disk or CD-ROM, for the controllers' tests.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn attach_image(&self, id: u8, path: &std::path::Path, cdrom: bool) -> io::Result<u64> {
         self.attach_device(id, path.to_str().unwrap(), cdrom, Vec::new(), false, None)
     }

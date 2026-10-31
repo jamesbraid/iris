@@ -46,11 +46,11 @@ impl IrqLine {
 struct Unconnected;
 
 /// A controller with one input, for tests: the level last driven.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
 pub struct LevelProbe(std::sync::Mutex<bool>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl LevelProbe {
     /// A probe and a line into it.
     pub fn line() -> (Arc<Self>, IrqLine) {
@@ -63,7 +63,7 @@ impl LevelProbe {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl InterruptController for LevelProbe {
     fn set_line(&self, _line: u32, level: bool) {
         *self.0.lock().unwrap() = level;

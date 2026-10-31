@@ -35,10 +35,10 @@ cargo_test() { # ENV... -- FILTER [TEST-HARNESS-ARGS...]
     local filter=$1
     shift
     # shellcheck disable=SC2086
-    $run env "${envs[@]}" cargo test --release --lib "$filter" -- "$@"
+    $run env "${envs[@]}" cargo test --release -p iris-gfx --lib "$filter" -- "$@"
 }
 
-baseline=src/dev/odyssey/testdata/perf/raster_bench.tsv
+baseline=crates/iris-gfx/src/dev/odyssey/testdata/perf/raster_bench.tsv
 
 # Run raster_bench; prints "scene best-Mpix/s" for each scene, the best of
 # PERF_RUNS runs (default 3), since a loaded host only ever slows a pass down.
@@ -47,7 +47,7 @@ bench() {
     local n=${PERF_RUNS:-3}
     for _ in $(seq "$n"); do
         # shellcheck disable=SC2086
-        $run env BENCH_SECS=1 ${only:+BENCH_SCENE=$only} cargo test --release --lib odyssey::raster_bench -- --ignored --nocapture --test-threads=1 2>&1 < /dev/null
+        $run env BENCH_SECS=1 ${only:+BENCH_SCENE=$only} cargo test --release -p iris-gfx --lib odyssey::raster_bench -- --ignored --nocapture --test-threads=1 2>&1 < /dev/null
     done | awk 'match($0, /bench [A-Za-z0-9]+ +[0-9.]+ Mpix\/s best/) {
                     # The first line follows the harness'"'"'s "test ... " on the same line.
                     split(substr($0, RSTART, RLENGTH), f, " ")

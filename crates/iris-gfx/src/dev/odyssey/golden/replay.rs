@@ -149,7 +149,7 @@ pub fn run(recs: &[Rec], setup: impl FnOnce(&mut Board), every: usize) -> (Repor
 pub fn recordings_dir() -> PathBuf {
     match std::env::var("VPRO_REPLAY_DIR") {
         Ok(d) => PathBuf::from(d),
-        Err(_) => Path::new(env!("CARGO_MANIFEST_DIR")).join("ignore/vpro-golden"),
+        Err(_) => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ignore/vpro-golden"),
     }
 }
 

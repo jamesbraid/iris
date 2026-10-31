@@ -2,9 +2,6 @@
 //! compiler, and the CPU thread's supporting pieces (idle parking, execution
 //! trace, JIT status feedback).
 
-pub mod mips_isa;
-pub mod mips_dis;
-pub mod cycles;
 pub mod mips_core;
 pub mod mips_tlb;
 pub mod mips_cache_v2;
@@ -12,7 +9,6 @@ pub mod mips_cache_shadow;
 pub mod decode_cache;
 pub mod mips_exec;
 pub mod cpu_monitor;
-pub mod smp;
 pub mod mips_exec_test;
 pub mod mips_instr_stats;
 pub mod trace;
@@ -23,4 +19,5 @@ pub mod idle_park;
 pub mod jitv2;
 #[cfg(feature = "jitv2")]
 pub mod jitv2_html_j2wp;
-pub mod jit_feedback;
+
+pub use iris_core::cpu::{mips_isa, mips_dis, cycles, smp, jit_feedback};
