@@ -92,7 +92,9 @@ There is no board lock and no raster lock. As on the other iris boards
 a unit is an `UnsafeCell` owned by the unit's thread, and a processor thread
 touches it only after the unit's FIFO has drained, with the contract written
 at the `unsafe impl Sync` (`BoardCell` in `mmio.rs`, the raster queue's
-`ctx`).
+`ctx`). Unlike GR2, which has one writer, VPro supports two processors
+(`[machine] cpus = 2`), so the processors take a small lock against each
+other, as MGRAS's producers take its `submit` lock (below).
 
 - **`Board`** (everything but the host registers, `BoardCell`) belongs to
   the front end's thread while it runs stores. A processor's access reaches
@@ -103,9 +105,17 @@ at the `unsafe impl Sync` (`BoardCell` in `mmio.rs`, the raster queue's
   processor's thread with the front end idle; and a few accesses that do
   not wait (the level word, the cursor and back-end read windows, an
   unmodelled offset) read whole words the front end writes only as whole
-  words, and show the old or the new value. With the front end stopped
-  (tests, a stopped machine) the caller runs what is queued
-  (`Board::work_drain`).
+  words or atomics, and show the old or the new value (`BoardCell::get` is
+  `unsafe`, with its contract; it is visible to the board's module only).
+  With the front end stopped (tests, a stopped machine) the caller runs
+  what is queued (`Board::work_drain`); with the front end running it runs
+  nothing.
+- **The processors' lock** (`BoardLocks::submit`) serialises one processor's
+  access against the other's, from its busy check to the end of the access
+  and across a command push, so two processors cannot both pass the check
+  and borrow the board, or wake the front end under each other. The front
+  end's thread and the raster thread never take it, so it adds no wait for
+  drawing. A processor access to a host-interface register does not take it.
 - **`HostInterface`** is behind the front lock, a register file's own
   lock held for a few instructions: identity, control, the interrupt bank,
   the routing, the swap bank and the FIFO status, plus the interrupt state
@@ -113,16 +123,19 @@ at the `unsafe impl Sync` (`BoardCell` in `mmio.rs`, the raster queue's
   and never waits for a draw. It is a leaf; the raster thread takes it for
   a fence's interrupt, and the display takes it to latch swaps.
 - **The raster unit's state** (`RasterCtx`: the stipple phase and the rows
-  drawn) belongs to the raster thread while jobs are queued. The front end
-  runs a job itself only with no raster thread or an empty queue.
+  drawn) belongs to the raster thread while it runs. The front end runs a
+  job itself only with no raster thread (tests, a stopped machine); the
+  raster thread can still publish its rows after `pending` falls to 0, and
+  nothing else touches the state then.
 - **The display** takes no board or raster state and waits for no drawing.
 - What remains are the queues' own locks: the command ring's, the ring
   consumer's accounting against reset (`CommandFifo::pop`), the raster
   queue's wake and idle condition variables, and the thread handles.
 
 A guest that stores to a register while it waits on a drain, or two
-processors that program the board without their own ordering, can race the
-front end. The hardware has no interlock there either; a fault shows as a
+processors that program the board without their own ordering, can race each
+other's register values (the processors' lock keeps the borrows apart, not
+the guest's order). The hardware has no interlock there either; a fault shows as a
 wrong frame or a lost register store, not as a model that hides it.
 
 ## The display
@@ -163,10 +176,13 @@ takes, as it would on the board.
 
 ## The front end's run
 
-The worker sleeps on a condvar until a store joins an empty queue, waits
-`GAP` (100 us) so a burst of stores lands first, then runs the queue until
-it is empty. It needs no slices: nothing waits for it to let go of the
-board. A processor access that must see the stores is told busy and retries,
+The worker parks (`park_timeout`, 50 ms, and an unpark from a store that
+joins an empty queue), waits `GAP` (100 us) so a burst of stores lands
+first, then runs the queue until it is empty. It needs no time slices:
+nothing waits for it to let go of the board (the `slice` flag and the
+`odyssey-work` `slice` trace event mark a run). Devices start before the
+processors, so no processor store is in flight when `work_start` sets
+`running`. A processor access that must see the stores is told busy and retries,
 taking its interrupts meanwhile, so the guest's 10 ms clock tick is never
 held behind a long draw. A run always runs at least one store.
 
@@ -225,11 +241,13 @@ must keep them.
    order the front end set them up.
 2. A register read that waits (`access_waits`) drains the command FIFO and
    then the raster queue, so it sees the drawing of every store before it.
-   The memory word `0x106c` drains only the command FIFO: its fields are
-   straps and FIFO levels, none a drawing result
-   (`read_waits_for_raster`). The kernel reads it at every flow-control
-   attach, which each GL make-current runs; waiting for the raster queue
-   there stalled the processor behind the drawing of each frame. The
+   The memory word `0x106c` never waits (`level_word`): its fields are
+   straps and FIFO levels, none a drawing result. The kernel reads it at
+   every flow-control attach, which each GL make-current runs; waiting
+   there stalled the processor behind the drawing of each frame. A waiting
+   store is held back for the command FIFO only (`BoardLocks::bus_write`);
+   the raster unit never shared state with it, and a store that touches the
+   planes waits for the raster queue itself (`Board::raster_wait`). The
    registers that do not wait answer from the front at once. On the bus
    (`BoardLocks::bus_read`, `bus_write`) such an access answers busy while
    that work is still queued and the board's threads run: the processor

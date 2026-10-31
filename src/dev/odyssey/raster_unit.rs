@@ -356,7 +356,7 @@ pub struct RasterQueue<const HEADS: usize = 1> {
     /// The raster unit's own state (the stipple phase and the rows drawn,
     /// not the planes). The raster thread owns it while it runs jobs; the
     /// front end uses it only for a job it runs itself, with no raster thread
-    /// or with the queue empty (`RasterQueue::ctx`).
+    /// (`RasterQueue::ctx`).
     ctx: UnsafeCell<RasterCtx>,
     /// The rows the raster unit has published and the display has not yet
     /// taken (RasterCtx::publish()).
@@ -405,9 +405,9 @@ pub struct RasterQueue<const HEADS: usize = 1> {
 
 // SAFETY: the jobs in the ring are Send; the ring itself is shared as GFifo
 // documents (one producer at a time, the front end; one consumer, the raster
-// thread). `ctx` is the raster thread's while jobs are queued; the front end
-// touches it only when none are, as the other boards' CPU threads touch an
-// engine's state only after its FIFO has drained. A guest that stores while
+// thread). `ctx` is the raster thread's while it runs; the front end touches
+// it only with no raster thread (`!threaded()`), as the other boards' CPU
+// threads touch an engine's state only after its threads have stopped. A guest that stores while
 // it waits for a drain gets whatever ordering it asked for, not a lock.
 unsafe impl<const HEADS: usize> Send for RasterQueue<HEADS> {}
 unsafe impl<const HEADS: usize> Sync for RasterQueue<HEADS> {}
@@ -586,7 +586,7 @@ impl RasterQueue {
     }
 
     /// A finished draw job to fill again, if one is back. The caller is the
-    /// front end, under the board lock: the only taker.
+    /// front end: the only taker.
     pub fn take_draw(&self) -> Option<Box<GlDrawJob>> {
         let (_, value) = self.spare.peek()?;
         self.spare.consume();
