@@ -47,7 +47,7 @@ struct Local {
 }
 
 /// The status-bar bits that stay lit until changed: the front-panel LEDs.
-const PERSISTENT: u64 = crate::dev::ng1::rex3::Rex3::HB_LED_RED | crate::dev::ng1::rex3::Rex3::HB_LED_GREEN;
+const PERSISTENT: u64 = crate::heartbeat::HB_LED_RED | crate::heartbeat::HB_LED_GREEN;
 
 impl Display {
     /// The other CPUs' figures for the status bar, one per CPU after the first.

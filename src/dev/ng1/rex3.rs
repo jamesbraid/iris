@@ -1642,15 +1642,6 @@ impl Rex3 {
         }
     }
 
-    /// Heartbeat bit definitions — all share the single heartbeat atomic
-    pub const HB_ENET_TX:   u64 = 1 << 0;
-    pub const HB_ENET_RX:   u64 = 1 << 1;
-    pub const HB_LED_RED:   u64 = 1 << 2; // IOC front-panel red LED (persistent)
-    pub const HB_LED_GREEN: u64 = 1 << 3; // IOC front-panel green LED (persistent)
-    pub const HB_SCSI_BASE: u32 = 8; // bits 8-13 = SCSI IDs 0-5
-
-    /// Mask of persistent bits that are NOT cleared by the per-frame fetch_and.
-    pub const HB_PERSISTENT: u64 = Self::HB_LED_RED | Self::HB_LED_GREEN;
 
     // diag atomic bit assignments — set while holding a lock or inside a loop section.
     // Mutex bits (set between lock() and drop of guard)
@@ -2971,7 +2962,7 @@ impl Rex3 {
             let bar_stats = crate::disp::BarStats {
                 more_cpus: Default::default(),
                 now:          start,
-                hb:           self.heartbeat.fetch_and(Self::HB_PERSISTENT, Ordering::Relaxed),
+                hb:           self.heartbeat.fetch_and(crate::heartbeat::HB_PERSISTENT, Ordering::Relaxed),
                 cycles:       self.cycles.get().get(),
                 fasttick:     self.fasttick_count.load(Ordering::Relaxed),
                 #[cfg(feature = "developer")]

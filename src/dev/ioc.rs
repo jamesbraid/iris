@@ -996,21 +996,20 @@ impl BusDevice for Ioc {
             }
             IOC_DMA_SEL => state.dma_sel = val,
             IOC_RESET => {
-                use crate::dev::ng1::rex3::Rex3;
                 state.reset_reg = val;
 
                 // LED bits are active-low: 0x10=LED_RED_OFF, 0x20=LED_GREEN_OFF
                 // bit SET = LED off, bit CLEAR = LED on — update heartbeat unconditionally
                 if let Some(hb) = self.heartbeat.get() {
                     if (val & 0x10) == 0 {
-                        hb.fetch_or(Rex3::HB_LED_RED, Ordering::Relaxed);
+                        hb.fetch_or(crate::heartbeat::HB_LED_RED, Ordering::Relaxed);
                     } else {
-                        hb.fetch_and(!Rex3::HB_LED_RED, Ordering::Relaxed);
+                        hb.fetch_and(!crate::heartbeat::HB_LED_RED, Ordering::Relaxed);
                     }
                     if (val & 0x20) == 0 {
-                        hb.fetch_or(Rex3::HB_LED_GREEN, Ordering::Relaxed);
+                        hb.fetch_or(crate::heartbeat::HB_LED_GREEN, Ordering::Relaxed);
                     } else {
-                        hb.fetch_and(!Rex3::HB_LED_GREEN, Ordering::Relaxed);
+                        hb.fetch_and(!crate::heartbeat::HB_LED_GREEN, Ordering::Relaxed);
                     }
                 }
             },

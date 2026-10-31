@@ -228,7 +228,7 @@ impl Mgras {
         let mut frames = 0u32;
         let mut last_rec_flush = std::time::Instant::now();
         let mut snap = plain::boxed_zeroed::<Frame>();
-        const PERSISTENT: u64 = crate::dev::ng1::rex3::Rex3::HB_LED_RED | crate::dev::ng1::rex3::Rex3::HB_LED_GREEN;
+        const PERSISTENT: u64 = crate::heartbeat::HB_LED_RED | crate::heartbeat::HB_LED_GREEN;
 
         while self.running.load(Ordering::Relaxed) {
             let start = std::time::Instant::now();

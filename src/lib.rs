@@ -211,6 +211,7 @@ pub mod gl_compositor;
 pub mod headless_gl;
 pub mod debug_overlay;
 pub mod disp;
+pub mod heartbeat;
 pub mod exp;
 pub mod gdb_stub;
 pub mod snapshot;

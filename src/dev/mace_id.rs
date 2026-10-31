@@ -20,7 +20,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::dev::ng1::rex3::Rex3;
 
 use crate::dev::w1::{self, sgi};
 use crate::snapshot::{get_field, toml_u64};
@@ -76,7 +75,7 @@ struct State {
 
 pub struct MaceId {
     st: Mutex<State>,
-    /// The LEDs as the status bar shows them: `Rex3::HB_LED_RED` and
+    /// The LEDs as the status bar shows them: `crate::heartbeat::HB_LED_RED` and
     /// `HB_LED_GREEN`.
     pub heartbeat: Arc<AtomicU64>,
 }
@@ -179,7 +178,7 @@ impl MaceId {
     /// An LED lights when its bit is clear: writing zero enables both
     /// outputs, and the register resets with only the green one disabled.
     fn show_leds(&self, bits: u8) {
-        for (bit, led) in [(RED_LED, Rex3::HB_LED_RED), (GREEN_LED, Rex3::HB_LED_GREEN)] {
+        for (bit, led) in [(RED_LED, crate::heartbeat::HB_LED_RED), (GREEN_LED, crate::heartbeat::HB_LED_GREEN)] {
             if bits & bit == 0 {
                 self.heartbeat.fetch_or(led, Ordering::Relaxed);
             } else {

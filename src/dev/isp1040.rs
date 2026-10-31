@@ -1173,7 +1173,7 @@ impl Core {
         let Job { handle, target, cdb, xfer, to_dev, segs, described } = job;
         // The bar has lights for SCSI ids 0-5.
         if let (Some(hb), 0..=5) = (self.heartbeat.get(), target) {
-            hb.fetch_or(1u64 << (crate::dev::ng1::rex3::Rex3::HB_SCSI_BASE as u64 + target as u64), Ordering::Relaxed);
+            hb.fetch_or(1u64 << (crate::heartbeat::HB_SCSI_BASE as u64 + target as u64), Ordering::Relaxed);
         }
         let (status, moved);
         if to_dev {

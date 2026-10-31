@@ -915,7 +915,7 @@ impl O2Display {
                 let stats = crate::disp::BarStats {
                     more_cpus: Default::default(),
                     now: start,
-                    hb: self.bus.mace.id.heartbeat.fetch_and(crate::dev::ng1::rex3::Rex3::HB_PERSISTENT, Ordering::Relaxed),
+                    hb: self.bus.mace.id.heartbeat.fetch_and(crate::heartbeat::HB_PERSISTENT, Ordering::Relaxed),
                     cycles: self.cycles.get(),
                     fasttick: self.ticks.load(Ordering::Relaxed),
                     decoded_delta: 0,
