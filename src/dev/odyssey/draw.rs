@@ -538,8 +538,10 @@ impl Board {
         let format_source = (self.cmd_operand[4] >> ODSY_COPY_RECT_FORMAT_SOURCE_SHIFT) & 0xf;
         let format_dest = (self.cmd_operand[4] >> ODSY_COPY_RECT_DEST_SHIFT) & 0xf;
 
-        if self.cmd_operand[0] == ODSY_DMA_SENTINEL_READ {
-            if !self.copy_rect_to_object() {
+        let operands = CopyOperands::decode(&self.cmd_operand);
+
+        if operands.src_base == ODSY_DMA_SENTINEL_READ || operands.dest_base == ODSY_DMA_SENTINEL_DRAW {
+            if !self.copy_rect_gl(&operands) {
                 self.cmd_unimplemented(ODSY_CMD_COPY_RECT_TRIGGER);
             }
             return;
