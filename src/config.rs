@@ -1396,7 +1396,7 @@ pub enum FuelConsole {
     Ioc3B,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FuelSection {
     /// Persistent 16 MiB boot flash store; absent means volatile flash.
@@ -1410,6 +1410,30 @@ pub struct FuelSection {
     /// Separate L1 log when an IOC3 port is selected as console.
     #[serde(default)]
     pub l1_log: Option<String>,
+    /// Fit the PS/2 keyboard and mouse controller in the onboard IOC3 and
+    /// feed it the host's keyboard and mouse.
+    #[serde(default = "default_fuel_input")]
+    pub ps2_input: bool,
+    /// Plug a USB keyboard and mouse into the OHCI root ports and feed them
+    /// the same host input. Off by default: the Fuel's manual and the PROM
+    /// treat PS/2 as the standard keyboard and mouse.
+    #[serde(default)]
+    pub usb_input: bool,
+}
+
+fn default_fuel_input() -> bool { true }
+
+impl Default for FuelSection {
+    fn default() -> Self {
+        Self {
+            flash: None,
+            console: FuelConsole::default(),
+            l1_port: None,
+            l1_log: None,
+            ps2_input: true,
+            usb_input: false,
+        }
+    }
 }
 
 impl FuelSection {
@@ -1419,6 +1443,8 @@ impl FuelSection {
             && self.console == FuelConsole::default()
             && self.l1_port.is_none()
             && self.l1_log.is_none()
+            && self.ps2_input
+            && !self.usb_input
     }
 }
 
@@ -3156,6 +3182,8 @@ mod fuel_input_tests {
         fuel.fuel.flash = Some("flash.bin".into());
         fuel.fuel.l1_port = Some(18882);
         fuel.fuel.l1_log = Some("l1.log".into());
+        fuel.fuel.usb_input = true;
+        fuel.fuel.ps2_input = false;
         let saved = toml::to_string(&fuel).unwrap();
         assert!(saved.contains("[fuel]"), "{saved}");
         let loaded: MachineConfig = toml::from_str(&saved).unwrap();
@@ -3163,7 +3191,20 @@ mod fuel_input_tests {
         assert_eq!(loaded.fuel.flash.as_deref(), Some("flash.bin"));
         assert_eq!(loaded.fuel.l1_port, Some(18882));
         assert_eq!(loaded.fuel.l1_log.as_deref(), Some("l1.log"));
+        assert!(!loaded.fuel.ps2_input && loaded.fuel.usb_input);
         assert!(!MachineProfile::ALL.contains(&MachineProfile::FuelIp34));
+    }
+
+    /// PS/2 is the Fuel's standard keyboard and mouse; USB is opt-in, and a
+    /// `[fuel]` table that names neither key keeps both defaults.
+    #[test]
+    fn fuel_input_defaults_to_ps2_with_usb_opt_in() {
+        let none: MachineConfig = toml::from_str("[fuel]\nflash = \"flash.bin\"\n").unwrap();
+        assert!(none.fuel.ps2_input && !none.fuel.usb_input);
+        assert!(MachineConfig::default().fuel.is_default());
+        let usb: MachineConfig = toml::from_str("[fuel]\nusb_input = true\n").unwrap();
+        assert!(usb.fuel.ps2_input && usb.fuel.usb_input);
+        assert!(!usb.fuel.is_default(), "an opt-in is written back");
     }
 
     /// The Fuel's processor is fixed, so `machine.cpu` may only name it (or the

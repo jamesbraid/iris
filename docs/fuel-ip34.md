@@ -53,8 +53,12 @@ The ordinary interpreter configuration is the one with recorded Fuel boot
 evidence. `lightning` and experimental `jitv2` builds are available, but no
 Fuel guest boot with either is claimed here.
 
-The V12/Odyssey graphics path is not attached. The USB controller is present,
-but no USB functions are attached. Machine snapshots are unsupported.
+The V12/Odyssey graphics path is not attached. The IOC3 carries a PS/2
+keyboard and mouse, fed from host input; they are the default, as in the
+Fuel's manual. `[fuel] usb_input = true` also plugs a USB keyboard and mouse
+into the OHCI controller, and `ps2_input = false` leaves the PS/2 pair out.
+Machine snapshots are
+unsupported.
 
 ## Source basis
 
