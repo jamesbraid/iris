@@ -10,9 +10,8 @@ two SCSI channels. The machine runs headless on its L1 or IOC3 serial console.
 Copy [`fuel.toml.example`](../fuel.toml.example) to `fuel.toml`, provide the
 PROM and disk files named there, then run `iris --config fuel.toml` from the
 repository root. The sample selects `machine.profile = "fuel_ip34"` and
-`machine.cpu = "r14000"`. The machine always runs its one R14000; `cpu`
-must name it (`r10000`, the family, is also accepted), and any other value is
-refused. The sample
+`machine.cpu = "r10000"`. The machine always runs its one R14000; `cpu`
+must name the R10000 family, and any other value is refused. The sample
 sets `banks = [256, 256]`, `headless = true`, `no_audio = true`, serial
 ports 18880 and 18881, and `graphics.board = "none"`. The `[fuel]` settings
 select the flash backing file, console, and optional L1 port and log. The
