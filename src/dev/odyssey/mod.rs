@@ -213,22 +213,48 @@ impl Odyssey {
     /// retrace fires either way.
     fn frame(state: &BoardLocks, display: &Display) {
         crate::pf_begin!(crate::perfetto::events::ODSY_CAPTURE);
-        let mut s = state.board.lock();
-        if let Some(done) = display.done.lock().take() {
-            s.scanout_recycle(done);
-        }
-        s.scanout_poll(monotonic_ns());
         // The planes are the raster unit's: wait out its slice in flight and
         // hold off the next while the frame's lines are copied aside. The
         // colour rows it wrote since the last frame are resolved again.
         // The raster unit draws on while the copy is resolved.
-        let mut planes = state.raster.planes();
+        //
+        // A slice runs up to a millisecond or one long draw, and the front
+        // end and the processor's accesses need the board lock the whole
+        // wait. So a frame that finds a slice running lets the board go,
+        // waits for the slice to end with nothing held, and asks again. Lock
+        // order stays board, then raster context. A raster unit that keeps
+        // starting slices could starve the retries: after FRAME_TRIES a
+        // frame waits for the planes with the board held, as it always did.
+        // Nothing is taken from the board or the planes until both are held,
+        // so no dirty row or swap is lost between tries.
+        let mut tries = 0;
+        let (mut s, mut planes, asked, held) = loop {
+            let mut s = state.board.lock();
+            if let Some(done) = display.done.lock().take() {
+                s.scanout_recycle(done);
+            }
+            s.scanout_poll(monotonic_ns());
+            let asked = std::time::Instant::now();
+            if let Some(planes) = state.raster.try_planes() {
+                break (s, planes, asked, std::time::Instant::now());
+            }
+            if tries == FRAME_TRIES {
+                s.scanout.stats.fallbacks += 1;
+                let planes = state.raster.planes();
+                break (s, planes, asked, std::time::Instant::now());
+            }
+            tries += 1;
+            s.scanout.stats.retries += 1;
+            drop(s);
+            state.raster.wait_slice();
+        };
         crate::pf_begin!(crate::perfetto::events::ODSY_FRAME_PLANES);
         let displayed = s.front.lock().displayed_buffer;
         planes.take_rows(displayed, &mut s.scanout);
         s.scanout_stage();
         crate::pf_end!(crate::perfetto::events::ODSY_FRAME_PLANES);
         drop(planes);
+        s.scanout.stats.locked(held - asked, held.elapsed());
         // The copy resolves with no lock held, so neither the front end
         // nor the raster unit waits for it.
         let mut job = s.scanout_take();
@@ -302,6 +328,10 @@ impl BusDevice for Odyssey {
     }
 }
 
+/// How many times a frame lets the board lock go to wait for a raster slice
+/// before it waits with the lock held.
+const FRAME_TRIES: u32 = 3;
+
 /// The display thread's frame period: the modelled mode's 60 Hz.
 const FRAME_PERIOD: std::time::Duration = std::time::Duration::from_micros(16_667);
 
@@ -369,6 +399,24 @@ impl Device for Odyssey {
 
     fn get_clock(&self) -> u64 {
         0
+    }
+
+    fn register_commands(&self) -> Vec<(String, String)> {
+        vec![("vpro".to_string(), "VPro display counters: vpro dirty [reset]".to_string())]
+    }
+
+    fn execute_command(&self, cmd: &str, args: &[&str], mut w: Box<dyn std::io::Write + Send>) -> Result<(), String> {
+        if cmd != "vpro" {
+            return Err(format!("unknown command: {cmd}"));
+        }
+        match args {
+            ["dirty"] => self.state.board.lock().scanout.stats.report(&mut *w).map_err(|e| e.to_string()),
+            ["dirty", "reset"] => {
+                self.state.board.lock().scanout.stats = DirtyStats::default();
+                Ok(())
+            }
+            _ => Err("Usage: vpro dirty [reset]".to_string()),
+        }
     }
 }
 
