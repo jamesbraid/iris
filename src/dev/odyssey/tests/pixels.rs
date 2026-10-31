@@ -527,9 +527,10 @@ fn bind_read_drawable(s: &mut Board, word: u32) {
 /// drawable is the off-screen object when 0x609 names one and not the
 /// screen's colour buffer. A DMA read and a copy follow the same rule.
 ///
-/// Datasheet: "Front and back of a pixel buffer" (the kernel's mask rule is
-/// established; that a pixel buffer's front is the front mask's buffer is
-/// inferred).
+/// Datasheet: "Front and back of a pixel buffer" (ESTABLISHED: the kernel
+/// alone writes bit 31 of 0x609, from the drawable's swap halfword, and a
+/// pixel buffer's pane swaps like a window's; INFERRED: a read's front is
+/// the buffer a front draw mask writes).
 #[test]
 fn a_pixel_buffers_front_is_the_buffer_a_front_draw_mask_writes() {
     let (mut s, ram) = read_window();

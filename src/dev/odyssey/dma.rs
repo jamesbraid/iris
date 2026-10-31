@@ -868,16 +868,20 @@ impl Board {
     /// back exchanged once the window has swapped, so a front draw lands in
     /// the displayed buffer.
     ///
-    /// INFERRED (datasheet, "Front and back of a pixel buffer"): a pixel
-    /// buffer has no on-screen id, so its front is the buffer a front draw
-    /// mask writes. ESTABLISHED there: the kernel sends the mask unchanged
-    /// and sets bit 31 of the buffer registers 0x608 and 0x609 when the
-    /// drawable's swap halfword is zero, and sends the mask with front and
-    /// back exchanged and bit 31 clear when it is not. So bit 31 of the read
-    /// register set means front is buffer 0, clear means buffer 1, whatever
-    /// the displayed bits of the ids under the pixel buffer's plane
-    /// coordinates say. How the board itself resolves the bit is unknown, and
-    /// the model keys on the register, not on a swap state of its own.
+    /// Datasheet, "Front and back of a pixel buffer". ESTABLISHED there: the
+    /// kernel alone writes bit 31 of the buffer registers 0x608 and 0x609, and
+    /// sets it when the drawable's pane has a zero swap halfword; it sends the
+    /// draw mask unchanged then, and with front and back exchanged (bit 31
+    /// clear) once the halfword is nonzero. A pixel buffer's pane is an
+    /// ordinary pane, so a double-buffered pixel buffer swaps like a window.
+    /// INFERRED: a read with header bit 31 set returns the buffer a front draw
+    /// mask writes, for a window and a pixel buffer alike. A pixel buffer has
+    /// no on-screen id, so the model follows bit 31 of 0x609: set means front
+    /// is buffer 0, clear means buffer 1, whatever the ids under the pixel
+    /// buffer's plane coordinates display. UNKNOWN: how the board encodes bit
+    /// 31 of 0x609 together with the header's bit 31. Windows keep the
+    /// displayed-buffer rule, which gives the same buffer as the swap state
+    /// does; the model has no swap state of its own.
     pub fn read_buffer(&mut self, front: bool, x: i64, y: i64) -> u32 {
         if self.read_drawable_offscreen() {
             let buffer_0_is_front = self.read_word & ODSY_DRAW_WORD_STATE != 0;
