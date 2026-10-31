@@ -51,6 +51,12 @@ pub fn wake() {
     }
 }
 
+
+/// Where each CPU was at the end of its last batch, for logs written off
+/// the CPU thread (the Octane's unmapped-access log, the IMPACT's warnings).
+/// A machine's batch hook stores it.
+pub static LAST_PC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
 thread_local! {
     static CURRENT_CPU: Cell<u8> = const { Cell::new(NOT_A_CPU) };
 }

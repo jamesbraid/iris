@@ -58,9 +58,7 @@ pub fn memory_map(banks_mb: &[u32]) -> crate::memory_map::MemoryMap {
     ])
 }
 
-/// Where the CPU was at the end of its last batch, for the unmapped log.
-/// The machine's batch hook stores it.
-pub static LAST_PC: [AtomicU64; crate::cpu::smp::MAX_CPUS] = [const { AtomicU64::new(0) }; crate::cpu::smp::MAX_CPUS];
+pub use crate::cpu::smp::LAST_PC;
 
 /// What answers an address nothing claims: a bus error, noted with the PC
 /// for the monitor's `ip30 unmapped`.
