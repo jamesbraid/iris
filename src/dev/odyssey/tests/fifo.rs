@@ -31,7 +31,7 @@ fn preamble_twice() -> Vec<&'static CfifoPreamble> {
 /// once that run is under way.
 fn start_long_slice(h: &BoardLocks, words: &[&CfifoPreamble], hold_ms: u32) {
     h.fifo.test_words.store(1, SeqCst);
-    h.board.get().test_slice_sleep_ms = hold_ms;
+    h.test_board().test_slice_sleep_ms = hold_ms;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     h.write(words[0].port, words[0].value, words[0].size);
     while !(h.fifo.slice.load(SeqCst)) {
@@ -86,7 +86,7 @@ fn the_board_thread_runs_queued_stores_in_order_and_latches_low_water() {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     {
-        let s = h.board.get();
+        let s = h.test_board();
         assert!(s.cfifo_selftest_ready);
         assert_eq!(s.selftest_progress, 0);
     }
@@ -747,7 +747,7 @@ fn stopping_finishes_the_waiting_work_and_a_reset_abandons_it() {
     assert!(!h.fifo.pending());
     assert_eq!(ram.half(HOST_WRITE_BASE + 6), 0xa5a5);
 
-    let mut s = h.board.get();
+    let mut s = h.test_board();
     for w in [select(ODSY_REG_HOST_WRITE), 4, 0x1234] {
         cmd(&mut s, w);
     }
@@ -966,4 +966,54 @@ fn two_processors_racing_for_the_last_place_in_the_ring_leave_one_store_in() {
     for r in racers {
         assert_eq!(r.join().unwrap(), 0, "a push panicked");
     }
+}
+
+/// Two processors are serialised against each other and not against the
+/// board's thread: while one holds the processors' lock in the middle of an
+/// access, a second processor's waiting read, command store and waiting
+/// store all wait for it, and the board's thread, which never takes it, runs
+/// the queue meanwhile.
+#[test]
+fn processors_wait_for_each_other_and_the_board_thread_does_not_wait_for_them() {
+    let (h, _rec) = threaded_board();
+    let words = preamble_twice();
+    let held = h.test_submit();
+    let started = Arc::new(AtomicU64::new(0));
+    let done = Arc::new(AtomicU64::new(0));
+    let mut others = Vec::new();
+    for which in 0..3u32 {
+        let (h, started, done) = (h.clone(), started.clone(), done.clone());
+        others.push(std::thread::spawn(move || {
+            started.fetch_add(1, SeqCst);
+            match which {
+                0 => while h.bus_read(ODSY_CFIFO_SELFTEST, 4).is_none() {},
+                1 => assert!(h.bus_write(ODSY_CMD_FIFO, 0, 4)),
+                _ => while !h.bus_write(ODSY_BUZZ_1, 1, 4) {},
+            }
+            done.fetch_add(1, SeqCst);
+        }));
+    }
+    while started.load(SeqCst) != 3 {
+        std::thread::yield_now();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert_eq!(done.load(SeqCst), 0, "a processor ran an access under another's");
+    // The board's thread takes no processor lock: it runs what was queued
+    // before the lock was held. Nothing is queued here, so queue through the
+    // unlocked ring and see it drain.
+    for w in &words[..4] {
+        assert!(h.fifo.push(&h.front, w.port, w.value, w.size as u32, false));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while h.fifo.pending() {
+        assert!(std::time::Instant::now() < deadline, "the board's thread did not run under the processors' lock");
+        std::thread::yield_now();
+    }
+    assert_eq!(done.load(SeqCst), 0);
+    drop(held);
+    for t in others {
+        t.join().unwrap();
+    }
+    assert_eq!(done.load(SeqCst), 3);
+    h.work_stop();
 }
