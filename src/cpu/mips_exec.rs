@@ -6549,10 +6549,8 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         let cache_op = d.rt as u32;  // Encoded operation: cache_sel in bits[1:0], op in bits[4:2]
         let op = cache_op & 0x1C;
 
-        // Determine if this is a Hit operation that needs address translation
         // On an R10000 the encodings for 5/6/7 are index operations, not the
-        // R4000 hit operations — translating them would fault on an index that
-        // is not a valid virtual address. See C_R10K_ISD in mips_cache_v2.
+        // R4000 hit operations. See C_R10K_ISD in mips_cache_v2.
         let sel = cache_op & 3;
         let primary_data_op = C::R10K_CACHE_OPS
             && matches!(sel, CACH_PI | CACH_PD)
@@ -6564,22 +6562,35 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 C_R10K_ISD => matches!(sel, CACH_SI | CACH_SD),
                 _ => false,
             };
-        // A primary diagnostic access selects by VA, but a mapped one still
-        // takes TLB Refill/Invalid (NEC U12754E, p. 15); a read excludes TLB
-        // Modified. Older index operations keep their existing translation
-        // behavior, including the secondary diagnostic limitation.
-        let needs_translation = primary_data_op
-            || (!r10k_index_op && matches!(op, C_CDX | C_HINV | C_HWBINV | C_HWB | C_HSV));
+        // On the R10000 every CACHE operand is translated like a data address
+        // before the operation, index operations included (NEC U12754EJ1V0UMJ1
+        // pp.70, 72, origami `r10000-cache-index-ops.md`, "Mapped operands").
+        // A mapped operand can take TLB Refill, TLB Invalid or a privilege
+        // Address Error. It is translated as a read, so it never takes TLB
+        // Modified. The primary caches index by the virtual address and only
+        // use the translation for its exceptions. The secondary cache takes its
+        // set and way from the physical address (`set_cache_op_pa`). A Cache
+        // Barrier names no line and is not translated. An operand on an
+        // uncached page is undefined on the R10000; it is translated and the
+        // operation goes ahead as if the page were cached.
+        // The older models translate hit operations only, as before.
+        let cache_barrier = op == C_R10K_CBARRIER && sel == CACH_PI;
+        let needs_translation = if C::R10K_CACHE_OPS {
+            !cache_barrier
+        } else {
+            matches!(op, C_CDX | C_HINV | C_HWBINV | C_HWB | C_HSV)
+        };
 
         let phys_addr = if needs_translation {
-            // Hit operations need address translation
             let tr = self.nanotlb_translate::<{AccessType::Read as u8}>(virt_addr);
             if tr.is_exception() { return self.handle_exception(tr.status); }
             tr.phys
         } else {
-            // Index operations use virt_addr as index, no translation needed
             virt_addr
         };
+        if C::R10K_CACHE_OPS && needs_translation {
+            self.cache.set_cache_op_pa(phys_addr);
+        }
 
         // For Index_Store_Tag, pass TagLo via phys_addr
         let op = cache_op & 0x1C;

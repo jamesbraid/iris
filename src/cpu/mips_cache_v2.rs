@@ -762,6 +762,12 @@ pub trait MipsCache: Send + Sync {
     /// takes them from this register and `Index_Load_Data` returns them
     /// there. Models that do not keep them ignore both of these.
     fn set_cache_ecc(&self, _v: u32) {}
+    /// The translated physical address of the CACHE operand about to be
+    /// passed to `cache_op`. The R10000's secondary index and way come from it
+    /// rather than from the virtual address (NEC U12754EJ1V0UMJ1 pp.14-15).
+    /// Taken by the next `cache_op`, which falls back to the virtual address
+    /// if none was set. Models that index by the virtual address ignore it.
+    fn set_cache_op_pa(&self, _pa: u64) {}
     /// The Status bits that govern cache error checking: CE (store the ECC
     /// register as check bits instead of computing them) and whether errors
     /// are detected at all (neither DE nor ERL set). Pushed by the executor on
