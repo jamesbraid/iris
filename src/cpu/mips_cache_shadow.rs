@@ -165,10 +165,32 @@ fn l1i_parity_of(p: u64) -> u32 {
 /// class is refused (`Err(class)`), never guessed.
 ///
 /// Example: `addiu $4,$0,2` (0x24040002) is 0x3_4420_0004.
-const L1I_CLASSES: &[(u8, u32, bool)] = &[
-    // class, f[31:29], p[4:0] is rt
-    (0x1a, 0b001, true), // addiu
+const L1I_CLASSES: &[L1iClass] = &[
+    // Every row is inferred.
+    L1iClass { class: 0x00, hi3: 0b000, rt_low: false, ops: &[0], funct: &[0x00] },
+    L1iClass { class: 0x08, hi3: 0b000, rt_low: false, ops: &[0], funct: &[0x38, 0x3c] }, // dsll, dsll32
+    L1iClass { class: 0x18, hi3: 0b000, rt_low: false, ops: &[0], funct: &[0x25] },       // or
+    L1iClass { class: 0x1a, hi3: 0b001, rt_low: true, ops: &[0, 1, 5, 7], funct: &[] },   // addi addiu ori lui
+    L1iClass { class: 0x1e, hi3: 0b011, rt_low: true, ops: &[1], funct: &[] },            // daddiu
+    L1iClass { class: 0x35, hi3: 0b101, rt_low: false, ops: &[7], funct: &[] },           // cache
+    L1iClass { class: 0x36, hi3: 0b110, rt_low: true, ops: &[7], funct: &[] },            // ld
+    L1iClass { class: 0x3f, hi3: 0b010, rt_low: false, ops: &[0], funct: &[] },           // mtc0
+    L1iClass { class: 0x40, hi3: 0b000, rt_low: false, ops: &[3], funct: &[] },           // jal
+    L1iClass { class: 0x41, hi3: 0b000, rt_low: false, ops: &[0, 2], funct: &[0x08] },    // jr (op 0, funct 8), j (op 2)
+    L1iClass { class: 0x71, hi3: 0b000, rt_low: false, ops: &[1], funct: &[] },           // REGIMM
 ];
+
+/// One row of the class table. `ops` are the p[28:26] values (f[28:26]) the
+/// class holds, `funct` the function fields allowed for its SPECIAL members
+/// (checked when p[28:26] is 0 and the class is a SPECIAL one), `rt_low`
+/// whether p[4:0] is the rt position (else the rd position).
+struct L1iClass {
+    class: u8,
+    hi3: u32,
+    rt_low: bool,
+    ops: &'static [u8],
+    funct: &'static [u8],
+}
 
 /// **Model choice, hardware contents unknown.** A word whose p[35:32] is 0xf
 /// is this model's encoding of a raw instruction: p[31:0] is the instruction.
@@ -183,7 +205,16 @@ fn l1i_decode(p: u64) -> Result<u32, u8> {
         return Ok(p as u32);
     }
     let class = (p >> 29) as u8 & 0x7f;
-    let &(_, hi3, rt_low) = L1I_CLASSES.iter().find(|c| c.0 == class).ok_or(class)?;
+    let row = L1I_CLASSES.iter().find(|c| c.class == class).ok_or(class)?;
+    let op = (p >> 26) as u8 & 7;
+    let funct = (p >> 20) as u8 & 0x3f;
+    // The class, p[28:26] and for the SPECIAL members the function field
+    // identify the instruction; anything else in a known class is refused.
+    let special = !row.funct.is_empty() && op == 0;
+    if !row.ops.contains(&op) || (special && !row.funct.contains(&funct)) || (class == 0 && p != 0) {
+        return Err(class);
+    }
+    let (hi3, rt_low) = (row.hi3, row.rt_low);
     let (low, high) = ((p & 0x1f) as u32, ((p >> 5) & 0x1f) as u32);
     let (rt, rd) = if rt_low { (low, high) } else { (high, low) };
     Ok(hi3 << 29
@@ -2536,11 +2567,52 @@ mod tests {
         assert_eq!(l1i_decode(0x3_4420_0004 | 0x1f << 15), Ok(0x2404_0002 | 0x1f << 6), "p[19:15] is f[10:6]");
     }
 
+    /// One example per class of the table, built from the instruction by the
+    /// layout, decoded back: includes dsll/dsll32, jr/j and the nop.
+    #[test]
+    fn every_class_in_the_table_decodes() {
+        fn predecode(class: u64, f: u32, rt_low: bool) -> u64 {
+            let (rt, rd) = ((f as u64 >> 16) & 0x1f, (f as u64 >> 11) & 0x1f);
+            let (lo, hi) = if rt_low { (rt, rd) } else { (rd, rt) };
+            class << 29 | ((f as u64 >> 26) & 7) << 26 | (f as u64 & 0x3f) << 20
+                | ((f as u64 >> 6) & 0x1f) << 15 | ((f as u64 >> 21) & 0x1f) << 10 | hi << 5 | lo
+        }
+        let cases: &[(u64, u32, bool, &str)] = &[
+            (0x08, 0x0009_20f8, false, "dsll $4,$9,3"),   // funct 0x38
+            (0x08, 0x0009_20fc, false, "dsll32 $4,$9,3"), // funct 0x3c
+            (0x18, 0x0109_5025, false, "or $10,$8,$9"),
+            (0x1a, 0x2084_0010, true, "addi"),
+            (0x1a, 0x2484_0010, true, "addiu"),
+            (0x1a, 0x3484_0010, true, "ori"),
+            (0x1a, 0x3c04_8000, true, "lui"),
+            (0x1e, 0x6484_0010, true, "daddiu"),
+            (0x35, 0xbd04_0040, false, "cache"),
+            (0x36, 0xdd04_0008, true, "ld"),
+            (0x3f, 0x4084_6000, false, "mtc0"),
+            (0x40, 0x0c00_1234, false, "jal"),
+            (0x41, 0x03e0_0008, false, "jr $31"),
+            (0x41, 0x0800_1234, false, "j"),
+            (0x71, 0x0481_0004, false, "bgez"),
+        ];
+        for &(class, f, rt_low, name) in cases {
+            assert_eq!(l1i_decode(predecode(class, f, rt_low)), Ok(f), "{name}");
+        }
+        assert_eq!(l1i_decode(0), Ok(0), "the nop");
+        assert_eq!(l1i_decode(0x3_4420_0004), Ok(0x2404_0002));
+        // Known class, instruction outside its rows: refused.
+        assert_eq!(l1i_decode(predecode(0x08, 0x0009_20c0, false)), Err(0x08), "funct 0x00 is not dsll");
+        assert_eq!(l1i_decode(predecode(0x1a, 0x2884_0010, true)), Err(0x1a), "op 0x0a is not in 0x1a");
+        assert_eq!(l1i_decode(1), Err(0), "class 0 is only the nop");
+        // Classes share an opcode top: the class picks f[31:29].
+        assert_ne!(l1i_decode(predecode(0x1a, 0x2484_0010, true)), l1i_decode(predecode(0x1e, 0x2484_0010, true)));
+    }
+
     /// A class not in the table is refused, not guessed: the fetch is
     /// treated as a miss and reads memory, and the refusal is reported.
     #[test]
     fn an_unsampled_class_is_refused_and_the_fetch_reads_memory() {
         assert_eq!(l1i_decode(0x5_0000_0004), Err(0x28));
+        assert_eq!(l1i_decode(0x2a << 29), Err(0x2a));
         let (c, bus) = staged_cache();
         let (pa, va) = (0x0030_0000u64, 0xffff_ffff_8030_0000u64);
         stage_i_tag(&c, va, pa, 1, true);
