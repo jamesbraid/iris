@@ -207,6 +207,9 @@ pub struct Board {
     pub overlay: Vec<u8>,
     pub gl_aux_reported: bool,
     pub aux_mask_reported: bool,
+    /// A rectangle copy with exactly one base at the id-plane base was
+    /// refused and noted once.
+    pub copy_mixed_base_reported: bool,
     pub aux_image_reported: bool,
 
     // The command-FIFO interpreter (0x110000).
@@ -542,6 +545,7 @@ impl Default for Board {
             overlay: Vec::new(),
             gl_aux_reported: false,
             aux_mask_reported: false,
+            copy_mixed_base_reported: false,
             aux_image_reported: false,
             query_current: [[0; 5]; 5],
             query_captured: [[0; 5]; 5],
@@ -847,6 +851,7 @@ impl Board {
         self.cursor_reported = 0;
         self.gl_aux_reported = false;
         self.aux_mask_reported = false;
+        self.copy_mixed_base_reported = false;
         self.aux_image_reported = false;
         self.backend_index = 0;
         self.backend_count = 0;

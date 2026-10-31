@@ -538,6 +538,61 @@ impl Board {
         }
     }
 
+    /// The rectangle copy whose source and destination are both the id-plane
+    /// base the X server last selected: the id or overlay byte the drawing
+    /// mask names, under the 0x1023 plane mask, as every other write there.
+    /// The server draws a menu's stipple by copying a seed over itself with
+    /// these, so running them through the colour planes smeared whatever the
+    /// menu covered.
+    ///
+    /// INFERRED: that these copies belong to the overlay is read from a trace
+    /// of the words and the menus' appearance; the datasheet does not record
+    /// it.
+    ///
+    /// Each row is read whole before it is written, and the rows run in the
+    /// direction that keeps a source row ahead of the writes, so an overlapping
+    /// copy reads the bytes it had before. Approximation, as for the colour
+    /// copy: a destination byte passes the plane bounds only, and a source
+    /// outside the plane is not copied.
+    pub fn copy_rect_id_planes(&mut self) {
+        let (sx, sy) = (self.copy_src & 0xffff, (self.copy_src >> 16) & 0xffff);
+        let dx = self.copy_dst & 0xffff;
+        let (dy, h_clip) = self.copy_dest_rows();
+        let w = self.copy_size & 0xffff;
+        let w_clip = w.min(SGI_ODYSSEY_WIDTH.saturating_sub(dx)).min(SGI_ODYSSEY_WIDTH.saturating_sub(sx)) as usize;
+        let rows = h_clip.min(SGI_ODYSSEY_HEIGHT.saturating_sub(sy));
+        let buffers = self.draw_buffers();
+        let mask = (self.plane_write_mask >> ODSY_PLANE_MASK_SHIFT) as u8;
+        let mut staged = vec![0u8; w_clip];
+
+        if buffers == 0 && !self.aux_mask_reported {
+            self.aux_mask_reported = true;
+            crate::dlog!(
+                LogModule::Odyssey,
+                "sgi-odyssey: id-plane copy with drawing mask {:#x} selects neither the id nor the overlay byte; dropped",
+                self.draw_mask
+            );
+        }
+        self.raster_wait();
+        for row in 0..rows {
+            let r = if dy > sy { rows - 1 - row } else { row };
+            let from = ((sy + r) * SGI_ODYSSEY_WIDTH + sx) as usize;
+            let to = ((dy + r) * SGI_ODYSSEY_WIDTH + dx) as usize;
+
+            for b in [ODSY_AUX_ID_BUFFER, ODSY_AUX_OVERLAY_BUFFER] {
+                if buffers & (1u32 << b) == 0 {
+                    continue;
+                }
+                let plane = if b == ODSY_AUX_ID_BUFFER { &mut self.did } else { &mut self.overlay };
+
+                staged.copy_from_slice(&plane[from..from + w_clip]);
+                for (d, s) in plane[to..to + w_clip].iter_mut().zip(&staged) {
+                    *d = (*d & !mask) | (*s & mask);
+                }
+            }
+        }
+    }
+
     /// The first row and count of the rows a copy writes, clipped to the plane.
     fn copy_dest_rows(&self) -> (u32, u32) {
         let h = (self.copy_size >> 16) & 0xffff;
@@ -571,7 +626,31 @@ impl Board {
         // values choose model buffers 0 and 1, but do not identify physical
         // memory banks. Source and destination choices stay separate so a copy
         // never changes another colour buffer.
-        if (source == 0 || source == 4) && (dest == 0 || dest == 4) {
+        // dest_base is 0 until a select names a buffer, and the all-zero GL context
+        // selects leave it 0 while a copy's own base words can be 0 too: without
+        // the test two zero words would read as "both at the id-plane base".
+        let id_base = self.dest_base != 0 && self.dest_is_id_planes();
+        let (src_at_id, dest_at_id) = (operands.src_base == self.dest_base, operands.dest_base == self.dest_base);
+
+        if id_base && src_at_id != dest_at_id {
+            // Not traced: a copy between the overlay and a colour buffer. Running
+            // it through colour buffer 0 is the smear this path exists to avoid.
+            if !self.copy_mixed_base_reported {
+                self.copy_mixed_base_reported = true;
+                crate::dlog!(
+                    LogModule::Odyssey,
+                    "sgi-odyssey: rectangle copy from base {:#x} to base {:#x} with the id-plane base {:#x} selected is not modeled; dropped",
+                    operands.src_base,
+                    operands.dest_base,
+                    self.dest_base
+                );
+            }
+            self.cmd_unimplemented(ODSY_CMD_COPY_RECT_TRIGGER);
+            return;
+        }
+        if id_base && src_at_id && dest_at_id {
+            self.copy_rect_id_planes();
+        } else if (source == 0 || source == 4) && (dest == 0 || dest == 4) {
             self.copy_rect_buffer(source >> 2, dest >> 2);
         } else if source == dest && (source == 2 || source == 3) {
             // Existing public and modelled templates retain draw-mask behaviour.

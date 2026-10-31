@@ -540,6 +540,212 @@ fn a_gl_copy_between_the_drawables_moves_the_rectangle() {
     assert_eq!(got, [0x1100_00ff, 0x2200_00ff, 0x1100_00ff, 0x2200_00ff, 0x3300_00ff, 0x4400_00ff]);
 }
 
+/// The id-plane destination as the X server selects it for a menu: the
+/// overlay byte under drawing mask 0xc, every bit writable.
+fn select_overlay_destination(s: &mut Board) {
+    s.dest_buffer_word = ODSY_DEST_ID_PLANES;
+    s.dest_base = 0x14_2000;
+    s.draw_mask = ODSY_DRAW_MASK_BUFFER1;
+    s.plane_write_mask = 0xff << ODSY_PLANE_MASK_SHIFT;
+}
+
+/// A rectangle copy between two points of the id-plane base. The operand
+/// words are the ones a trace of a menu opening showed the X server sending
+/// (the datasheet does not record them): both base words name the id planes.
+fn overlay_copy(s: &mut Board, (sx, sy): (u32, u32), (w, h): (u32, u32), (dx, dy): (u32, u32)) {
+    copy_block(s, [0x14_2000, sy << 16 | sx, 0x0050_0050, h << 16 | w, 0x8000_1000, 0x14_2000, dy << 16 | dx, 0x3a00_0041]);
+}
+
+fn overlay_at(s: &Board, x: u32, y: u32) -> u8 {
+    s.overlay[(y * SGI_ODYSSEY_WIDTH + x) as usize]
+}
+
+/// A menu's pattern fill replicates a seed by copying the id-plane base onto
+/// itself. The copy moves the overlay bytes and leaves the colour planes
+/// alone: copying colour there smeared the window under every popup menu.
+///
+/// Datasheet: "X server drawing in the overlay and the select's flag bits"
+/// (the menu is drawn at the id-plane base; that its copies stay there is
+/// inferred).
+#[test]
+fn a_copy_at_the_id_plane_base_moves_overlay_bytes_not_colour() {
+    let (mut s, _) = window();
+    select_overlay_destination(&mut s);
+    for x in 0..4u32 {
+        s.overlay[(40 * SGI_ODYSSEY_WIDTH + 30 + x) as usize] = 0x11 * (x as u8 + 1);
+        pixel_write(&mut s, 30 + x as i32, 40, 0xaa00_00ff | x << 8);
+    }
+    let colour: Vec<u32> = (30..70).map(|x| pixel(&s, 0, x, 40)).collect();
+    s.scanout_update();
+
+    overlay_copy(&mut s, (30, 40), (4, 1), (60, 41));
+    for x in 0..4u32 {
+        assert_eq!(overlay_at(&s, 60 + x, 41), 0x11 * (x as u8 + 1), "overlay byte {x}");
+    }
+    let after: Vec<u32> = (30..70).map(|x| pixel(&s, 0, x, 40)).collect();
+    assert_eq!(after, colour, "colour row 40 is untouched");
+    assert!((60..64).all(|x| pixel(&s, 0, x, 41) == 0), "colour row 41 is untouched");
+    assert!((0..2).all(|b| (0..4).all(|x| pixel(&s, b, 60 + x, 41) == 0)));
+    assert_eq!(s.scanout.marks.dirty_rows(), vec![41], "the destination row is resolved again");
+}
+
+/// A copy of the overlay onto itself, shifted, reads its source as it was:
+/// along a row (the shift is smaller than the width) and down a column.
+#[test]
+fn an_overlay_copy_onto_itself_reads_the_source_as_it_was() {
+    let (mut s, _) = window();
+    select_overlay_destination(&mut s);
+    for x in 0..4u32 {
+        s.overlay[(40 * SGI_ODYSSEY_WIDTH + 30 + x) as usize] = x as u8 + 1;
+    }
+    overlay_copy(&mut s, (30, 40), (4, 1), (32, 40));
+    let row: Vec<u8> = (30..36).map(|x| overlay_at(&s, x, 40)).collect();
+    assert_eq!(row, [1, 2, 1, 2, 3, 4], "a copy to the right");
+
+    overlay_copy(&mut s, (32, 40), (4, 1), (30, 40));
+    let row: Vec<u8> = (30..36).map(|x| overlay_at(&s, x, 40)).collect();
+    assert_eq!(row, [1, 2, 3, 4, 3, 4], "a copy to the left");
+
+    for y in 0..4u32 {
+        s.overlay[((50 + y) * SGI_ODYSSEY_WIDTH + 70) as usize] = y as u8 + 1;
+    }
+    overlay_copy(&mut s, (70, 50), (1, 4), (70, 52));
+    let column: Vec<u8> = (50..56).map(|y| overlay_at(&s, 70, y)).collect();
+    assert_eq!(column, [1, 2, 1, 2, 3, 4], "a copy down");
+}
+
+/// The 0x1023 plane mask limits which overlay bits a copy changes, as it does
+/// for every other write there.
+#[test]
+fn an_overlay_copy_changes_only_the_bits_of_the_plane_mask() {
+    let (mut s, _) = window();
+    select_overlay_destination(&mut s);
+    s.plane_write_mask = 0x0f << ODSY_PLANE_MASK_SHIFT;
+    s.overlay[(40 * SGI_ODYSSEY_WIDTH + 30) as usize] = 0xa5;
+    s.overlay[(40 * SGI_ODYSSEY_WIDTH + 60) as usize] = 0xf0;
+    overlay_copy(&mut s, (30, 40), (1, 1), (60, 40));
+    assert_eq!(overlay_at(&s, 60, 40), 0xf5);
+}
+
+/// The same copy block with the base words given.
+fn copy_bases(s: &mut Board, (src_base, dest_base): (u32, u32), (sx, sy): (u32, u32), (w, h): (u32, u32), (dx, dy): (u32, u32)) {
+    copy_block(s, [src_base, sy << 16 | sx, 0x0050_0050, h << 16 | w, 0x8000_1000, dest_base, dy << 16 | dx, 0x3a00_0041]);
+}
+
+/// Seed the overlay, the id byte and colour buffer 0 at (30, 40) with three
+/// distinct values, so a copy to (60, 41) shows which plane it moved.
+fn seed_three_planes(s: &mut Board) {
+    s.overlay[(40 * SGI_ODYSSEY_WIDTH + 30) as usize] = 0x77;
+    s.did[(40 * SGI_ODYSSEY_WIDTH + 30) as usize] = 0x55;
+    pixel_write(s, 30, 40, 0xaa00_00ff);
+}
+
+fn planes_at(s: &Board, x: u32, y: u32) -> (u8, u8, u32) {
+    (overlay_at(s, x, y), s.did[(y * SGI_ODYSSEY_WIDTH + x) as usize], pixel(s, 0, x as i32, y as i32))
+}
+
+/// What sends a copy to the overlay: both base words at the id-plane base
+/// the last select named, with that select naming the id planes. Each
+/// condition alone, dropped, would send some other copy there.
+#[test]
+fn a_copy_goes_to_the_overlay_only_when_both_bases_and_the_select_say_so() {
+    // Both bases at the base, but the select names a colour buffer: colour.
+    let (mut s, _) = window();
+    seed_three_planes(&mut s);
+    select_overlay_destination(&mut s);
+    s.dest_buffer_word = 0x6950;
+    overlay_copy(&mut s, (30, 40), (1, 1), (60, 41));
+    assert_eq!(planes_at(&s, 60, 41), (0, 0, 0xaa00_00ff), "a colour select keeps the copy in colour");
+
+    // One base at the id-plane base and the other not: refused, nothing moves.
+    for bases in [(0x14_2000, 0x2000), (0x2000, 0x14_2000)] {
+        let (mut s, _) = window();
+        seed_three_planes(&mut s);
+        select_overlay_destination(&mut s);
+        copy_bases(&mut s, bases, (30, 40), (1, 1), (60, 41));
+        assert_eq!(planes_at(&s, 60, 41), (0, 0, 0), "bases {bases:x?}");
+        assert!(s.copy_mixed_base_reported, "bases {bases:x?} are noted");
+    }
+
+    // The id-plane select with no base named (0) and zero base words is not
+    // "both at the base": the copy is a colour copy.
+    let (mut s, _) = window();
+    seed_three_planes(&mut s);
+    select_overlay_destination(&mut s);
+    s.dest_base = 0;
+    copy_bases(&mut s, (0, 0), (30, 40), (1, 1), (60, 41));
+    assert_eq!(planes_at(&s, 60, 41), (0, 0, 0xaa00_00ff));
+
+    // A copy at the colour base is colour even while the id planes are selected.
+    let (mut s, _) = window();
+    seed_three_planes(&mut s);
+    select_overlay_destination(&mut s);
+    copy_bases(&mut s, (0x2000, 0x2000), (30, 40), (1, 1), (60, 41));
+    assert_eq!(planes_at(&s, 60, 41), (0, 0, 0xaa00_00ff));
+}
+
+/// The drawing mask names the byte a copy moves, and the other byte stays.
+#[test]
+fn an_id_plane_copy_moves_the_byte_the_drawing_mask_names() {
+    for (mask, want) in [(ODSY_DRAW_MASK_BUFFER1, (0x77, 0, 0)), (ODSY_DRAW_MASK_BUFFER0, (0, 0x55, 0)), (0, (0, 0, 0))] {
+        let (mut s, _) = window();
+        seed_three_planes(&mut s);
+        select_overlay_destination(&mut s);
+        s.draw_mask = mask;
+        overlay_copy(&mut s, (30, 40), (1, 1), (60, 41));
+        let (o, d, c) = planes_at(&s, 60, 41);
+        assert_eq!((o, d, c), want, "drawing mask {mask:#x}");
+        assert_eq!(s.aux_mask_reported, mask == 0, "a mask naming neither byte is noted once");
+    }
+}
+
+/// A copy up a column onto itself reads the rows as they were.
+#[test]
+fn an_overlay_copy_up_onto_itself_reads_the_source_as_it_was() {
+    let (mut s, _) = window();
+    select_overlay_destination(&mut s);
+    for y in 0..4u32 {
+        s.overlay[((50 + y) * SGI_ODYSSEY_WIDTH + 70) as usize] = y as u8 + 1;
+    }
+    overlay_copy(&mut s, (70, 52), (1, 4), (70, 50));
+    let column: Vec<u8> = (50..56).map(|y| overlay_at(&s, 70, y)).collect();
+    assert_eq!(column, [3, 4, 0, 0, 0, 0], "rows 52 and 53 moved up; rows below keep their old bytes");
+}
+
+/// A copy running off the plane copies what is inside it, from either end:
+/// past the right edge of the source or the destination, and past the
+/// bottom.
+#[test]
+fn an_overlay_copy_is_clipped_to_the_plane_at_both_ends() {
+    let w = SGI_ODYSSEY_WIDTH;
+    let h = SGI_ODYSSEY_HEIGHT;
+    let (mut s, _) = window();
+    select_overlay_destination(&mut s);
+    for x in 0..8u32 {
+        s.overlay[(40 * w + w - 2 + x.min(1)) as usize] = 9;
+        s.overlay[(60 * w + 10 + x) as usize] = x as u8 + 1;
+    }
+    // Source past the right edge: only its last two pixels exist, and the
+    // next row's first bytes (made distinct) are not read as if they followed.
+    for x in 0..6u32 {
+        s.overlay[(41 * w + x) as usize] = 5;
+    }
+    overlay_copy(&mut s, (w - 2, 40), (8, 1), (10, 41));
+    let row: Vec<u8> = (8..14).map(|x| overlay_at(&s, x, 41)).collect();
+    assert_eq!(row, [0, 0, 9, 9, 0, 0]);
+    // Destination past the right edge: only two pixels land, and the next
+    // row's first bytes are not written.
+    overlay_copy(&mut s, (10, 60), (8, 1), (w - 2, 62));
+    assert_eq!((overlay_at(&s, w - 2, 62), overlay_at(&s, w - 1, 62), overlay_at(&s, 0, 63)), (1, 2, 0));
+    // Rows past the bottom, source or destination.
+    s.overlay[((h - 2) * w + 5) as usize] = 7;
+    s.overlay[((h - 1) * w + 5) as usize] = 8;
+    overlay_copy(&mut s, (5, h - 2), (1, 6), (20, 100));
+    assert_eq!((overlay_at(&s, 20, 100), overlay_at(&s, 20, 101), overlay_at(&s, 20, 102)), (7, 8, 0));
+    overlay_copy(&mut s, (5, h - 2), (1, 6), (30, h - 1));
+    assert_eq!((overlay_at(&s, 30, h - 1), overlay_at(&s, 30, 0)), (7, 0));
+}
+
 /// An object copies to the draw drawable and back: the scratch-object path
 /// the library takes for the signed types, and for readback conversions.
 #[test]
