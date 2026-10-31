@@ -811,11 +811,43 @@ fn time_the_machine_was_stopped_does_not_count_against_a_selection() {
     r.isp.wait_idle();
     assert!(!posted(&r, 0x6d), "twice its timeout passed on the host, none on the adapter's clock");
     let st = r.isp.st.lock();
-    assert!(st.ctl.selecting.is_some_and(|(_, _, due)| r.isp.now_ns(&st) < due));
+    assert!(st.ctl.selecting.as_ref().is_some_and(|sel| r.isp.now_ns(&st) < sel.due));
 }
 
 /// A snapshot taken mid-wait carries what is left of it, so the command
 /// completes that long after the load whatever the clock reads there.
+#[test]
+fn a_snapshot_taken_during_a_selection_resumes_with_the_time_left() {
+    let src = Rig::with_disk("selection-save-src", 1, 64);
+    src.init_rings(4, 4);
+    src.clock(100 * MS);
+    queue_absent(&src, 0, 0x6e);
+    src.clock(150 * MS);
+    let saved = src.isp.save_state();
+
+    // The source goes on as if nothing had happened.
+    src.clock(100 * MS + DEFAULT_SELECTION_TIMEOUT as i64 * MS - 1);
+    assert!(!posted(&src, 0x6e));
+    src.clock(100 * MS + DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    assert!(posted(&src, 0x6e));
+
+    // The load is on a machine whose clock starts from somewhere else.
+    for base in [0, 7_000 * MS] {
+        let dst = Rig::with_disk("selection-save-dst", 1, 64);
+        dst.put_entry(0, &request(0x6e, 3, &[0, 0, 0, 0, 0, 0], &[]));
+        dst.clock(base);
+        dst.isp.load_state(&saved).expect("load_state");
+        dst.clock(base + 200 * MS - 1);
+        assert!(!posted(&dst, 0x6e), "200 ms were left at the save; base {base}");
+        assert_eq!(dst.r(reg::RESPONSE_QUEUE), 0);
+        dst.clock(base + 200 * MS);
+        assert!(posted(&dst, 0x6e), "completes when the time left is up; base {base}");
+        assert_eq!(dst.r(reg::RESPONSE_QUEUE), 1);
+        assert_eq!(dst.r(reg::REQUEST_QUEUE), 1);
+    }
+}
+
+
 #[test]
 fn a_present_target_does_not_wait_for_the_selection_timeout() {
     let r = Rig::with_disk("selection-present", 1, 64);
