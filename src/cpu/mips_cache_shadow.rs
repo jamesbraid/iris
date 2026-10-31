@@ -352,6 +352,7 @@ impl<
     const CACHE_KIND: &'static str = "shadow";
     const R10K_CACHE_OPS: bool = Self::R10K;
     const SECONDARY_TAG_MASK: u64 = if MODEL == model::R14000 { R14000_L2_TAG_MASK } else { u64::MAX };
+    const POSTS_UNCACHED_STORES: bool = Self::R10K;
 }
 
 impl<
