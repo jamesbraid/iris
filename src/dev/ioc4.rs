@@ -242,7 +242,11 @@ impl St {
             error_low: 0,
             error_high: 0,
             ata_readback: 0,
-            uart: std::array::from_fn(|_| Ns16550::new(cfg.clock.hz() / 16)),
+            uart: std::array::from_fn(|_| {
+                let mut u = Ns16550::new(cfg.clock.hz() / 16);
+                u.set_discard_in_loopback(true);
+                u
+            }),
             sdma: SerialDma::new(PORTS, IOC4_SDMA_PARAMS),
             dma: None,
         }

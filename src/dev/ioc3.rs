@@ -193,7 +193,9 @@ struct Uart {
 
 impl Uart {
     fn new() -> Uart {
-        Uart { core: Ns16550::new(115200), predivider: 0, mcr_afe: 0, lsr_test: 0, msr_test: 0 }
+        let mut core = Ns16550::new(115200);
+        core.set_discard_in_loopback(true);
+        Uart { core, predivider: 0, mcr_afe: 0, lsr_test: 0, msr_test: 0 }
     }
 
     fn reset(&mut self) {
