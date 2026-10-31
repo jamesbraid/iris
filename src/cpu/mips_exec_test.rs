@@ -3983,6 +3983,36 @@ mod tests {
             .unwrap();
     }
 
+    /// An uncached store the bus refuses is posted on the R10000 family: the
+    /// processor gets no completion for a write, so it takes no Data Bus
+    /// Error (R10000 User's Manual v2.0). The R4400 still takes one.
+    #[test]
+    fn a_refused_uncached_store_is_posted_on_the_r10000_family() {
+        struct Refusing;
+        impl BusDevice for Refusing {
+            fn write32(&self, _: u64, _: u32) -> u32 {
+                crate::traits::BUS_ERR
+            }
+            fn write64_masked(&self, _: u64, _: u64, _: u64) -> u32 {
+                crate::traits::BUS_ERR
+            }
+        }
+        fn store<C: crate::cpu::mips_cache_v2::CpuModel + From<Arc<dyn BusDevice>>>() -> crate::cpu::mips_exec::ExecStatus {
+            let bus: Arc<dyn BusDevice> = Arc::new(Refusing);
+            let mut exec = MipsExecutor::<PassthroughTlb, C>::new(bus, PassthroughTlb::default(), &MipsCpuConfig::indy());
+            disable_jitv2(&mut exec);
+            // SW $1, 0($2) with $2 in KSEG1, uncached.
+            exec.core.write_gpr(2, 0xffff_ffff_a000_1000);
+            exec.exec((0x2b << 26) | (2 << 21) | (1 << 16))
+        }
+        assert_eq!(store::<crate::cpu::mips_cache_v2::R10000Cache>(), EXEC_COMPLETE);
+        assert_eq!(store::<crate::cpu::mips_cache_shadow::R10000ShadowCache>(), EXEC_COMPLETE);
+        assert_eq!(store::<crate::cpu::mips_cache_shadow::R14000ShadowCache>(), EXEC_COMPLETE);
+        assert_eq!(store::<crate::cpu::mips_cache_shadow::R16000ShadowCache>(), EXEC_COMPLETE);
+        assert_ne!(store::<crate::cpu::mips_cache_v2::R4400Cache>(), EXEC_COMPLETE);
+        assert_ne!(store::<PassthroughCache>(), EXEC_COMPLETE);
+    }
+
     /// The Indy, Indigo2 and O2 decode 32 physical bits, and IRIX relies on
     /// it: on the IP28 the kernel stack's wired entry carries PTE software
     /// bits as PA[34:33]. `phys_mask` must fold them away before the bus.
