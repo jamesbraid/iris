@@ -292,7 +292,7 @@ pub struct NfsConfig {
     pub shared_dir: String,
     /// NFS protocol version to serve (Auto answers whatever the guest mounts).
     #[serde(default)]
-    pub version: crate::net::nfsudp::NfsVersion,
+    pub version: NfsVersion,
 }
 
 /// Pre-parsed NAT subnet derived from a CIDR string.
@@ -744,7 +744,7 @@ pub struct GraphicsSection {
     pub heads: u8,
     /// Host-forced Newport video mode at VM start (`guest` = IRIX/setmon controls VC2).
     #[serde(default)]
-    pub resolution: crate::dev::ng1::vc2_timings::NewportResolution,
+    pub resolution: NewportResolution,
 }
 
 impl GraphicsSection {
@@ -763,7 +763,7 @@ impl Default for GraphicsSection {
         Self {
             board: None,
             heads: default_graphics_heads(),
-            resolution: crate::dev::ng1::vc2_timings::NewportResolution::default(),
+            resolution: NewportResolution::default(),
         }
     }
 }
@@ -1475,7 +1475,7 @@ pub struct MachineConfig {
 
     /// TCP ports of the serial channels on 127.0.0.1: A (tty2) and B (tty1,
     /// the console). None means 8880 and 8881
-    /// (`crate::dev::z85c30::DEFAULT_PORTS`); like the monitor's, they have to
+    /// (`DEFAULT_SERIAL_PORTS`); like the monitor's, they have to
     /// differ between iris processes running at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_port_a: Option<u16>,
@@ -1572,7 +1572,7 @@ pub struct MachineConfig {
     /// Prefix each completed line of `serial_log` with a UTC ISO-8601 stamp.
     /// `off` (the default) writes raw bytes, byte-for-byte a transcript.
     #[serde(default)]
-    pub serial_log_timestamps: crate::dev::serial_log::SerialLogTimestamps,
+    pub serial_log_timestamps: SerialLogTimestamps,
 
     /// Files that receive what the guest sends on serial channel A or B when
     /// that channel is not the console (`serial_log` is the console's):
@@ -1843,7 +1843,7 @@ fn is_default_keyboard(k: &KeyboardLayout) -> bool { *k == KeyboardLayout::defau
 impl MachineConfig {
     /// The serial channels' TCP ports (A, B), defaults filled in.
     pub fn serial_ports(&self) -> [u16; 2] {
-        let [a, b] = crate::dev::z85c30::DEFAULT_PORTS;
+        let [a, b] = DEFAULT_SERIAL_PORTS;
         [self.serial_port_a.unwrap_or(a), self.serial_port_b.unwrap_or(b)]
     }
 
@@ -1899,7 +1899,7 @@ impl MachineConfig {
             moved.push("o2.flash -> nvram");
         }
         if let Some(mb) = self.o2.ram_mb.take() {
-            match crate::dev::crime_mem::kits_for(mb) {
+            match kits_for(mb) {
                 Ok(kits) if self.banks == default_banks() => {
                     self.banks = [0; MAX_BANKS];
                     self.banks[..kits.len()].copy_from_slice(&kits);
@@ -2069,7 +2069,7 @@ impl MachineConfig {
                     return Err(format!("banks: DIMM pair {} is empty but a later pair is populated; fill the pairs from A", (b'A' + gap as u8) as char));
                 }
             }
-            crate::dev::crime_mem::check_kits(&self.o2_kits()).map_err(|e| format!("banks: {e}"))?;
+            check_kits(&self.o2_kits()).map_err(|e| format!("banks: {e}"))?;
         } else if self.machine.profile == MachineProfile::OctaneIp30 {
             // A HEART bank is a matched DIMM pair: 64 MB to 2 GB, filled from
             // bank 0 without a gap, 8 GB at most (SGI's memory upgrade guide).
@@ -2492,7 +2492,7 @@ pub struct Cli {
     /// `off` (raw transcript) or `wall`: prefix each completed serial-log
     /// line with a UTC ISO-8601 timestamp.
     #[arg(long = "serial-log-timestamps", value_name = "MODE")]
-    pub serial_log_timestamps: Option<crate::dev::serial_log::SerialLogTimestamps>,
+    pub serial_log_timestamps: Option<SerialLogTimestamps>,
 
     /// Write what the guest sends on serial channel A to this file when A is
     /// not the console (Indy, Indigo2).
@@ -3219,3 +3219,123 @@ mod apply_env_tests {
         assert!(std::env::var_os(OURS).is_none());
     }
 }
+
+/// Which NFS version(s) to serve. `Auto` answers whatever the guest mounts with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NfsVersion {
+    #[default]
+    Auto,
+    V2,
+    V3,
+}
+
+/// How `--serial-log` stamps its lines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+#[clap(rename_all = "lower")]
+pub enum SerialLogTimestamps {
+    /// Raw bytes, byte-for-byte a transcript (the default).
+    #[default]
+    Off,
+    /// `[YYYY-MM-DDTHH:MM:SS.ffffffZ] ` before each completed line.
+    Wall,
+}
+
+/// Loopback TCP ports of the serial channels unless the config says otherwise:
+/// channel A (tty2) on 8880, channel B (tty1, the console) on 8881.
+pub const DEFAULT_SERIAL_PORTS: [u16; 2] = [8880, 8881];
+
+/// Standard Newport modes that fit the 1280×1024 framebuffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewportResolution {
+    /// Leave VC2 untouched — IRIX/PROM programs the mode.
+    #[default]
+    Guest,
+    /// 1024×768 @ ~60 Hz (4:3).
+    #[serde(rename = "1024x768")]
+    Res1024x768,
+    /// 1280×960 (4:3 within 1024-line VRAM).
+    #[serde(rename = "1280x960")]
+    Res1280x960,
+    /// 1280×1024 @ ~72 Hz (5:4 Indy default).
+    #[serde(rename = "1280x1024")]
+    Res1280x1024,
+}
+
+impl NewportResolution {
+    /// All selectable modes, in display order. Single source of truth for the
+    /// GUI dropdowns (Config tab + New Machine dialog) so they never drift.
+    pub const ALL: [Self; 4] = [
+        Self::Guest,
+        Self::Res1024x768,
+        Self::Res1280x960,
+        Self::Res1280x1024,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Guest => "Guest (IRIX / setmon)",
+            Self::Res1024x768 => "1024×768",
+            Self::Res1280x960 => "1280×960",
+            Self::Res1280x1024 => "1280×1024 (default)",
+        }
+    }
+
+    pub fn is_guest(self) -> bool {
+        matches!(self, Self::Guest)
+    }
+
+    /// Visible pixel size for host window sizing; `None` when guest-controlled.
+    pub fn visible_size(self) -> Option<(u32, u32)> {
+        match self {
+            Self::Guest => None,
+            Self::Res1024x768 => Some((1024, 768)),
+            Self::Res1280x960 => Some((1280, 960)),
+            Self::Res1280x1024 => Some((1280, 1024)),
+        }
+    }
+}
+
+/// Whether `kits` is a fitting SGI's rules allow.
+pub fn check_kits(kits: &[u32]) -> Result<(), String> {
+    if kits.is_empty() {
+        return Err("pair A must be populated".into());
+    }
+    if kits.len() > 4 {
+        return Err(format!("{} kits, but an O2 has four DIMM pairs", kits.len()));
+    }
+    for (pair, &k) in kits.iter().enumerate() {
+        let name = (b'A' + pair as u8) as char;
+        if !KITS_MB.contains(&k) {
+            return Err(format!("pair {name}: no {k} MB kit (SGI sold 32, 64, 128 and 256 MB)"));
+        }
+        if pair > 0 && k > kits[pair - 1] {
+            return Err(format!("pair {name} ({k} MB) is larger than the pair before it; the largest kit goes in pair A"));
+        }
+    }
+    Ok(())
+}
+
+/// The fewest kits that make `mb`, largest first.
+pub fn kits_for(mb: u32) -> Result<Vec<u32>, String> {
+    if mb == 0 || mb % 32 != 0 || mb > 1024 {
+        return Err(format!("{mb} MB: an O2 holds 32 MB to 1 GB in steps of 32 MB"));
+    }
+    let mut kits = Vec::new();
+    let mut left = mb;
+    for &k in KITS_MB.iter().rev() {
+        while left >= k {
+            kits.push(k);
+            left -= k;
+        }
+    }
+    if kits.len() > 4 {
+        return Err(format!("{mb} MB would take {} kits, but an O2 has four DIMM pairs", kits.len()));
+    }
+    Ok(kits)
+}
+
+/// The kits SGI sold, in MB per pair.
+pub const KITS_MB: [u32; 4] = [32, 64, 128, 256];

@@ -11,67 +11,18 @@ use crate::dev::ng1::vc2::{
     VC2_REG_VIDEO_ENTRY_PTR, VC2_REG_VT_FRAME_PTR, VT_CBLANK_XMAP_N, VT_HPOS_VC_N,
 };
 
-/// Standard Newport modes that fit the 1280×1024 framebuffer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NewportResolution {
-    /// Leave VC2 untouched — IRIX/PROM programs the mode.
-    #[default]
-    Guest,
-    /// 1024×768 @ ~60 Hz (4:3).
-    #[serde(rename = "1024x768")]
-    Res1024x768,
-    /// 1280×960 (4:3 within 1024-line VRAM).
-    #[serde(rename = "1280x960")]
-    Res1280x960,
-    /// 1280×1024 @ ~72 Hz (5:4 Indy default).
-    #[serde(rename = "1280x1024")]
-    Res1280x1024,
-}
+pub use crate::config::NewportResolution;
 
-impl NewportResolution {
-    /// All selectable modes, in display order. Single source of truth for the
-    /// GUI dropdowns (Config tab + New Machine dialog) so they never drift.
-    pub const ALL: [Self; 4] = [
-        Self::Guest,
-        Self::Res1024x768,
-        Self::Res1280x960,
-        Self::Res1280x1024,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Guest => "Guest (IRIX / setmon)",
-            Self::Res1024x768 => "1024×768",
-            Self::Res1280x960 => "1280×960",
-            Self::Res1280x1024 => "1280×1024 (default)",
-        }
-    }
-
-    pub fn is_guest(self) -> bool {
-        matches!(self, Self::Guest)
-    }
-
-    /// Visible pixel size for host window sizing; `None` when guest-controlled.
-    pub fn visible_size(self) -> Option<(u32, u32)> {
-        match self {
-            Self::Guest => None,
-            Self::Res1024x768 => Some((1024, 768)),
-            Self::Res1280x960 => Some((1280, 960)),
-            Self::Res1280x1024 => Some((1280, 1024)),
-        }
-    }
-
-    fn geometry(self) -> Option<(u16, u16, u16)> {
-        // (width, height, horizontal blank before active in pixels)
-        match self {
-            Self::Guest => None,
-            Self::Res1024x768 => Some((1024, 768, 320)),
-            Self::Res1280x960 => Some((1280, 960, 408)),
-            Self::Res1280x1024 => Some((1280, 1024, 408)),
-        }
+fn geometry(mode: NewportResolution) -> Option<(u16, u16, u16)> {
+    // (width, height, horizontal blank before active in pixels)
+    match mode {
+        NewportResolution::Guest => None,
+        NewportResolution::Res1024x768 => Some((1024, 768, 320)),
+        NewportResolution::Res1280x960 => Some((1280, 960, 408)),
+        NewportResolution::Res1280x1024 => Some((1280, 1024, 408)),
     }
 }
+
 
 /// Decode visible width/height from VC2 register file + RAM (shared with compositor).
 pub fn decode_vc2_visible_size(regs: &[u16; 32], ram: &[u16]) -> (usize, usize) {
@@ -154,7 +105,7 @@ fn build_mode_ram(width: u16, height: u16, h_blank_lead: u16) -> ([u16; 32], Vec
 
 /// Program VC2 RAM/regs for a standard Newport resolution.
 pub fn apply_newport_resolution(vc2: &mut Vc2, mode: NewportResolution) {
-    let Some((width, height, h_blank)) = mode.geometry() else {
+    let Some((width, height, h_blank)) = geometry(mode) else {
         return;
     };
     let (regs, ram) = build_mode_ram(width, height, h_blank);
@@ -174,14 +125,14 @@ mod tests {
             NewportResolution::Res1280x960,
             NewportResolution::Res1280x1024,
         ] {
-            let Some((ew, eh, _)) = mode.geometry().map(|(w, h, b)| (w as usize, h as usize, b)) else {
+            let Some((ew, eh, _)) = geometry(mode).map(|(w, h, b)| (w as usize, h as usize, b)) else {
                 continue;
             };
             let (regs, ram) = {
                 let (r, ram) = build_mode_ram(
-                    mode.geometry().unwrap().0,
-                    mode.geometry().unwrap().1,
-                    mode.geometry().unwrap().2,
+                    geometry(mode).unwrap().0,
+                    geometry(mode).unwrap().1,
+                    geometry(mode).unwrap().2,
                 );
                 (r, ram)
             };
@@ -223,7 +174,7 @@ mod tests {
             NewportResolution::Res1280x960,
             NewportResolution::Res1280x1024,
         ] {
-            let (width, height, h_blank) = mode.geometry().unwrap();
+            let (width, height, h_blank) = geometry(mode).unwrap();
             let (regs, ram) = build_mode_ram(width, height, h_blank);
             let (_, _, decoded_adjust) = decode_vc2_timings(&regs, &ram);
             assert_eq!(

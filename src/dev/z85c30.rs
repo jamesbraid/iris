@@ -374,9 +374,8 @@ pub struct Z85c30 {
 /// any single probe response; the buffer is drained on each read.
 const CONSOLE_TAP_CAP: usize = 64 * 1024;
 
-/// Loopback TCP ports of the serial channels unless the config says otherwise:
-/// channel A (tty2) on 8880, channel B (tty1, the console) on 8881.
-pub const DEFAULT_PORTS: [u16; 2] = [8880, 8881];
+
+pub use crate::config::DEFAULT_SERIAL_PORTS as DEFAULT_PORTS;
 
 impl Z85c30 {
     /// A controller whose channels are wired to nothing: the machine installs

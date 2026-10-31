@@ -91,8 +91,7 @@ const TAG_STATE: u32 = 0xc0;
 /// TagLo's physical page number.
 const TAG_PAGE_SHIFT: u32 = 8;
 
-/// The kits SGI sold, in MB per pair.
-pub const KITS_MB: [u32; 4] = [32, 64, 128, 256];
+pub use crate::config::KITS_MB;
 
 /// What a 32 MB slot of the window decodes to.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -872,44 +871,9 @@ impl Drop for Draw<'_> {
 }
 
 
-/// Whether `kits` is a fitting SGI's rules allow.
-pub fn check_kits(kits: &[u32]) -> Result<(), String> {
-    if kits.is_empty() {
-        return Err("pair A must be populated".into());
-    }
-    if kits.len() > 4 {
-        return Err(format!("{} kits, but an O2 has four DIMM pairs", kits.len()));
-    }
-    for (pair, &k) in kits.iter().enumerate() {
-        let name = (b'A' + pair as u8) as char;
-        if !KITS_MB.contains(&k) {
-            return Err(format!("pair {name}: no {k} MB kit (SGI sold 32, 64, 128 and 256 MB)"));
-        }
-        if pair > 0 && k > kits[pair - 1] {
-            return Err(format!("pair {name} ({k} MB) is larger than the pair before it; the largest kit goes in pair A"));
-        }
-    }
-    Ok(())
-}
+pub use crate::config::check_kits;
 
-/// The fewest kits that make `mb`, largest first.
-pub fn kits_for(mb: u32) -> Result<Vec<u32>, String> {
-    if mb == 0 || mb % 32 != 0 || mb > 1024 {
-        return Err(format!("{mb} MB: an O2 holds 32 MB to 1 GB in steps of 32 MB"));
-    }
-    let mut kits = Vec::new();
-    let mut left = mb;
-    for &k in KITS_MB.iter().rev() {
-        while left >= k {
-            kits.push(k);
-            left -= k;
-        }
-    }
-    if kits.len() > 4 {
-        return Err(format!("{mb} MB would take {} kits, but an O2 has four DIMM pairs", kits.len()));
-    }
-    Ok(kits)
-}
+pub use crate::config::kits_for;
 
 /// Every fitting SGI's rules allow, as kit lists from pair A.
 pub fn all_fittings() -> Vec<Vec<u32>> {

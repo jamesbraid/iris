@@ -1351,15 +1351,7 @@ pub fn mount_call(call: &RpcCall, args: &mut Cur) -> Vec<u8> {
 
 // ── server: program/version dispatch + duplicate-request cache ──────────────
 
-/// Which NFS version(s) to serve. `Auto` answers whatever the guest mounts with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum NfsVersion {
-    #[default]
-    Auto,
-    V2,
-    V3,
-}
+pub use crate::config::NfsVersion;
 
 /// Duplicate-request cache: NFS-over-UDP clients retransmit on timeout, so
 /// non-idempotent ops (WRITE/CREATE/REMOVE/...) must not be re-applied. We cache
