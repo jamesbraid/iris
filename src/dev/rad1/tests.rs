@@ -1157,6 +1157,53 @@ fn the_relay_and_dac_mute_words_silence_the_output_but_not_the_transfer() {
     let _ = std::fs::remove_file(&path);
 }
 
+thread_local! {
+    /// The consumer end of the ring `slow_host` opened: the test plays it.
+    static HOST_RING: std::cell::RefCell<Option<rtrb::Consumer<i16>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A host stream that takes 300 ms to open, as a first launch on macOS can:
+/// the card's clock runs on meanwhile. 32 kHz, so the tune passes through
+/// unresampled, with the card's 200 ms ring.
+fn slow_host(card: &Inner, _: &crate::config::AudioConfig) -> Option<HostOut> {
+    card.fake_ns.fetch_add(300 * SEC / 1000, Ordering::Relaxed);
+    let (p, c) = rtrb::RingBuffer::new(32_000 * 2 / 5);
+    HOST_RING.with(|h| *h.borrow_mut() = Some(c));
+    Some(HostOut::detached(32_000, p))
+}
+
+/// A slow host open is over when the machine starts, before the guest
+/// plays: the PROM's boot tune reaches the host whole. Opened at the tune's
+/// start instead, the frames due by the first look overflow the 200 ms ring
+/// and the tune loses 200 ms near its start.
+#[test]
+fn a_host_slow_to_open_does_not_cost_the_boot_tune_its_start() {
+    let r = Rad1 { inner: Arc::new_cyclic(|me| Inner { open_host: slow_host, ..Inner::new(me.clone()) }) };
+    r.config().write(4, BAR as u32);
+    r.config().write(1, PCI_COMMAND_MEMORY_ON);
+    r.fake_ns.store(0, Ordering::Relaxed);
+    let ram = Arc::new(Ram(Mutex::new(vec![0; 0x40_0000])));
+    // A recognisable tune: every frame's samples count up from 1.
+    for (f, w) in ram.0.lock().unwrap()[TUNE_BUF as usize..][..TUNE_FRAMES * 8].chunks_exact_mut(4).enumerate() {
+        w.copy_from_slice(&sample_to_word((f / 2 % 30_000 + 1) as i16).to_le_bytes());
+    }
+    r.connect_dma(ram);
+    r.enable_output(crate::config::AudioConfig::default());
+    Device::start(&r);
+    prom_tune(&r, TUNE_CTRL);
+    let start = r.fake_ns.load(Ordering::Relaxed);
+    let mut played = Vec::new();
+    for step in 1..=25 {
+        at(&r, start + step * 100 * SEC / 1000);
+        rd(&r, 0x58);
+        HOST_RING.with(|h| played.extend(std::iter::from_fn(|| h.borrow_mut().as_mut().unwrap().pop().ok())));
+    }
+    assert_eq!(rd(&r, 0x58) & 1, 0, "the tune is over");
+    assert_eq!(played.len(), TUNE_FRAMES * 2, "every frame reached the host");
+    let want: Vec<i16> = (0..TUNE_FRAMES * 2).map(|i| (i / 2 % 30_000 + 1) as i16).collect();
+    assert!(played == want, "in order, none dropped");
+}
+
 /// Completion `k` of IRIX's continuous status schedule (interval 8251 at
 /// 33 MHz, 250 us) is due at this time.
 fn irix_due(k: i64) -> i64 {

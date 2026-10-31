@@ -312,8 +312,9 @@ impl Sink {
     }
 
     /// Play stereo frames the card produced at `rate` Hz. A muted output
-    /// still moves the ring; the host and the WAV get silence.
-    fn play(&mut self, pcm: &[i16], rate: u32, muted: bool) {
+    /// still moves the ring; the host and the WAV get silence. Returns the
+    /// host ring's free and total samples.
+    fn play(&mut self, pcm: &[i16], rate: u32, muted: bool) -> Option<(usize, usize)> {
         let silence;
         let host_pcm = if muted {
             silence = vec![0i16; pcm.len()];
@@ -335,6 +336,7 @@ impl Sink {
         if let Some(t) = self.tap.as_ref() {
             t.lock().extend_from_slice(pcm);
         }
+        self.host.as_ref().map(|(out, _)| (out.producer.slots(), out.producer.buffer().capacity()))
     }
 }
 
@@ -839,8 +841,19 @@ pub struct Inner {
     /// `no_audio`) keeps the output channel running silently.
     audio_cfg: Mutex<Option<AudioConfig>>,
     sink: Mutex<Option<Sink>>,
+    /// Opens the host stream; tests put their own ring behind it.
+    open_host: fn(&Inner, &AudioConfig) -> Option<HostOut>,
+    /// Whether the host ring is full, so each run of dropped output is
+    /// logged once.
+    host_full: AtomicBool,
     underruns: Arc<AtomicU64>,
     me: Weak<Inner>,
+}
+
+/// The host stream: 200 ms of stereo ring at the stream's rate.
+fn open_host_output(card: &Inner, cfg: &AudioConfig) -> Option<HostOut> {
+    let ring = |rate: u32| rate as usize * 2 / 5;
+    crate::host_audio::open_output(cfg, card.underruns.clone(), Arc::new(AtomicBool::new(true)), ring, "Octane audio", "IRIS_OCTANE_AUDIO_CAPTURE")
 }
 
 impl Inner {
@@ -867,14 +880,23 @@ impl Inner {
             dma: OnceLock::new(),
             audio_cfg: Mutex::new(None),
             sink: Mutex::new(None),
+            open_host: open_host_output,
+            host_full: AtomicBool::new(false),
             underruns: Arc::new(AtomicU64::new(0)),
             me,
         }
     }
 
-    /// Play the analog output through the host with `audio`'s settings. The
-    /// stream opens when the output first starts. While the output runs, a
-    /// timer keeps its frames moving between the guest's own looks.
+    /// Play the analog output through the host with `audio`'s settings. While
+    /// the output runs, a timer keeps its frames moving between the guest's
+    /// own looks.
+    ///
+    /// The host stream opens when the machine starts, before the guest
+    /// runs, so a host slow to open or to take its first samples is ready
+    /// before the guest plays.
+    /// The card's clock runs on wall time: frames falling due before the
+    /// host drains its 200 ms ring are dropped. A failed open is retried
+    /// when the output starts and then once a second.
     pub fn enable_output(&self, audio: AudioConfig) {
         *self.audio_cfg.lock() = Some(audio);
         let mut s = self.state.lock();
@@ -945,9 +967,9 @@ impl Inner {
         let _ = self.timers.set(tm);
     }
 
-    /// Open the output sink on the first start of the analog output, and
-    /// retry a failed host stream open so an early sound is not lost for the
-    /// run. `force` skips the wait between tries.
+    /// Open the output sink when host output is enabled, and retry a failed
+    /// host stream open so an early sound is not lost for the run. `force`
+    /// skips the wait between tries.
     fn open_sink(&self, force: bool) {
         let mut sink = self.sink.lock();
         let Some(cfg) = self.audio_cfg.lock().clone() else {
@@ -958,16 +980,9 @@ impl Inner {
             Some(sk) if !(sk.host_retry_due(now) || force && sk.host.is_none()) => return,
             _ => {}
         }
-        let ring = |rate: u32| rate as usize * 2 / 5; // 200 ms of stereo
-        let host = crate::host_audio::open_output(
-            &cfg,
-            self.underruns.clone(),
-            Arc::new(AtomicBool::new(true)),
-            ring,
-            "Octane audio",
-            "IRIS_OCTANE_AUDIO_CAPTURE",
-        )
-        .map(|out| {
+        let host = (self.open_host)(self, &cfg);
+        crate::dlog!(LogModule::Rad1, "rad1: host audio open took {:.1} ms ({})", now.elapsed().as_secs_f64() * 1e3, if host.is_some() { "open" } else { "failed" });
+        let host = host.map(|out| {
             let rs = Resampler::new(FREQ_ANALOG as u32, out.stream_rate);
             (out, rs)
         });
@@ -1041,8 +1056,10 @@ impl Inner {
         drop(self.tick_pass.lock());
     }
 
-    /// Run the clock again from where it stopped.
+    /// Run the clock again from where it stopped. The first start opens the
+    /// host stream (see [`Inner::enable_output`]).
     fn resume(&self) {
+        self.open_sink(false);
         {
             let mut at = self.stopped_at.lock();
             if let Some(t) = at.take() {
@@ -1589,7 +1606,15 @@ impl Inner {
                 let samples = &mut pcm[..n as usize * PCM_CHANNELS];
                 frames_to_pcm(buf, samples, ANALOG_WORDS);
                 if let Some(sink) = self.sink.lock().as_mut() {
-                    sink.play(samples, s.rate(idx).rounded_hz(), s.muted());
+                    if let Some((free, size)) = sink.play(samples, s.rate(idx).rounded_hz(), s.muted()) {
+                        let was = self.host_full.load(Ordering::Relaxed);
+                        // Full until half the ring is free again.
+                        let full = if was { free < size / 2 } else { free < PCM_CHANNELS };
+                        if full != was {
+                            self.host_full.store(full, Ordering::Relaxed);
+                            crate::dlog!(LogModule::Rad1, "rad1: host audio ring {}", if full { "full: the host is not taking samples, output is being dropped" } else { "draining again" });
+                        }
+                    }
                 }
             }
             let c = &mut s.chan[idx];
