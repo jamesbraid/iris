@@ -406,6 +406,11 @@ fn cmd_quit(server: &CiServer, args: &Value) -> Response {
             Err(e) => return Response::err(format!("chd sync failed: {e}")),
         }
     }
+    // `process::exit` below skips Drop, which is where an overlay's sector
+    // record would otherwise be written out.
+    if let Err(e) = server.with_machine_result(|m| m.flush_disks()) {
+        eprintln!("iris: disk flush at quit failed: {e} (guest writes may be lost)");
+    }
     // Schedule process exit after a brief delay so the response flushes.
     thread::spawn(|| {
         thread::sleep(Duration::from_millis(50));

@@ -1110,6 +1110,45 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// The process can exit without dropping the node (`process::exit` after a
+    /// guest power-off), so a flush is all that carries the writes over to
+    /// the next run. `mem::forget` stands in for that exit.
+    #[test]
+    fn cow_flushed_writes_survive_an_exit_that_skips_drop() {
+        let (backing, backing_path) = raw_filled(0xAA, 8 * SECTOR_BYTES);
+        let overlay_path = tmp_path("cow-exit");
+        let size = 8 * SECTOR_SIZE;
+        let mut expect = vec![0xAAu8; size as usize];
+
+        let mut node = CowNode::new(Some(Box::new(backing)), &overlay_path, size).unwrap();
+        // Not sector aligned, across a sector boundary.
+        let span = vec![0x5Au8; 700];
+        node.write(100, &span).unwrap();
+        expect[100..800].copy_from_slice(&span);
+        // A written sector of zeros is data, not a hole in the overlay file.
+        node.write(6 * SECTOR_SIZE, &[0u8; SECTOR_BYTES]).unwrap();
+        expect[6 * SECTOR_BYTES..7 * SECTOR_BYTES].fill(0);
+        // The last sector, written in two halves.
+        node.write(7 * SECTOR_SIZE, &[0x11u8; 256]).unwrap();
+        node.write(7 * SECTOR_SIZE + 256, &[0x22u8; 256]).unwrap();
+        expect[7 * SECTOR_BYTES..7 * SECTOR_BYTES + 256].fill(0x11);
+        expect[7 * SECTOR_BYTES + 256..8 * SECTOR_BYTES].fill(0x22);
+
+        node.flush().unwrap();
+        std::mem::forget(node);
+
+        let backing = RawNode::open_readonly(&backing_path).unwrap();
+        let mut node = CowNode::new(Some(Box::new(backing)), &overlay_path, size).unwrap();
+        assert_eq!(node.dirty_count(), 4, "sectors 0, 1, 6 and 7 come back as held");
+        let mut got = vec![0u8; size as usize];
+        node.read(0, &mut got).unwrap();
+        assert!(got == expect, "reopened overlay does not read back what was written");
+
+        drop(node);
+        cleanup(&overlay_path);
+        let _ = std::fs::remove_file(backing_path);
+    }
+
     #[test]
     fn cow_unwritten_range_reads_through_to_backing() {
         let (backing, backing_path) = raw_filled(0xAA, 4 * SECTOR_BYTES);

@@ -187,6 +187,9 @@ fn main() {
     }
 
     machine.stop();
+    if let Err(e) = machine.flush_disks() {
+        eprintln!("iris: disk flush at exit failed: {e} (guest writes may be lost)");
+    }
     #[cfg(feature = "perfetto")]
     iris::perfetto::shutdown();
 }

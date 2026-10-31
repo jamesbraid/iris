@@ -807,6 +807,9 @@ impl Workstation for OctaneMachine {
     fn pending_chd_sync_count(&self) -> usize {
         self.scsi.iter().map(|c| c.bus().pending_chd_sync_count()).sum()
     }
+    fn flush_disks(&self) -> std::io::Result<()> {
+        self.scsi.iter().try_for_each(|c| c.bus().flush())
+    }
     fn sync_chd_disks(
         &self,
         only: Option<usize>,
