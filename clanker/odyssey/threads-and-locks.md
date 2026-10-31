@@ -5,8 +5,15 @@ Status: design (iris `src/dev/odyssey/{interface,fifo,worker,raster_unit,mod}.rs
 
 **Why it is shaped this way.** The board decodes and draws behind the
 processor: the driver stores more commands and polls registers while a
-primitive is drawn. The model must let the processor go on, yet never let a
-draw and a processor access touch the same board state.
+primitive is drawn. The model lets the processor go on. Where the board's
+own units share memory it shares it the same way: the display and the
+rendering engine read and write the planes, the lookup RAM and the mode
+registers at the same time, with no lock or borrow between them. Software
+orders them with buffer swaps, fences, query sync words, flag bits and
+waiting reads, and the model keeps exactly those. A synchronisation fault
+in a guest, or in the model, shows as a flash of wrong planes or colours
+for a frame, as it does on the hardware; a persistent fault means a
+behaviour is not modelled. Do not add a lock or a borrow to hide one.
 
 ## Chips and threads
 
@@ -47,17 +54,20 @@ apply to BUZZ). Nothing models more than one raster unit.
   the model's own: the hardware's is unknown. Capturing state at its place
   in the stream is how raster state reaches the raster unit in order.
 - **The planes** stay where `Board` keeps them. The raster unit owns them
-  while it has jobs and reaches them through raw spans, as the IMPACT model's
-  engines reach their pixel memory (`clanker/mgras/DESIGN.md`). The front
-  end's own plane work (integer and image drawing, pixel DMA, the object
-  store, reset) waits for the raster queue to empty first
-  (`Board::raster_wait`). A DMA into an object that already has its rows
-  does not: its texels go to the raster unit as a job, behind the draws
-  that may still read the old ones (`Board::object_stage`). A texture
-  upload otherwise drained the whole raster queue, up to 180 ms of drawing
-  in Smoke & Mirrors. The display holds the raster unit's context lock
-  while it copies a frame's dirty lines aside, and resolves the copy with
-  no lock held.
+  while it has jobs and reaches them through raw spans, as the IMPACT
+  model's engines reach their pixel memory (`clanker/mgras/DESIGN.md`). The
+  front end's own plane work (integer and image drawing, pixel DMA, the
+  object store, reset) waits for the raster queue to empty first
+  (`Board::raster_wait`). That wait is the command stream's order, not a
+  lock: the board's pipeline runs a plane access behind the drawing before
+  it. A DMA into an object that already has its rows does not wait: its
+  texels go to the raster unit as a job, behind the draws that may still
+  read the old ones (`Board::object_stage`). A texture upload otherwise
+  drained the whole raster queue, up to 180 ms of drawing in Smoke &
+  Mirrors.
+- **The display** takes nothing from any of them. It reads the planes
+  through raw pointers (`PlaneView`, reader.rs), as the MGRAS, REX3 and GR2
+  displays read theirs. See "The display" below.
 
 Both rings are the shared `GFifo`, 64K entries. The IMPACT model's raster
 FIFO has a head per raster engine with scanline interleave; the VPro's has
@@ -81,7 +91,10 @@ second; perfly did not change.
 `HostInterface` is behind the front lock and holds the registers that do not
 wait for drawing: identity, control, the interrupt bank, the routing, the
 swap bank and the FIFO status, plus the interrupt state and the credit
-return.
+return. The board lock is the front end's own state machine: it orders the
+processor's accesses against the front end's command execution, which is
+one in-order unit. It is not taken by the display or the raster unit, and
+guards no memory they share.
 
 - Lock order: board, then front. Nothing takes the board lock while holding
   the front lock.
@@ -92,32 +105,56 @@ return.
   sees all earlier stores. A processor's access on the bus answers busy
   instead while stores it must see are queued (rule 2 below), so the drain
   normally finds nothing to run.
-- The display thread takes the board lock, then the raster unit's context
-  lock, which the raster thread holds for each slice of jobs (at most 1 ms,
-  checked between jobs). A frame therefore waits out a raster slice in
-  flight and never reads a half-drawn primitive. It holds both locks only
-  while it copies the dirty lines' plane bytes aside
-  (`Board::scanout_stage`), lets both go while it resolves the copy
-  (`ScanoutJob::resolve`), and takes the board lock again to put the
-  lines in the presented frame with the cursor over them. Resolving a
-  whole frame under both locks held the raster unit up about 6 ms of
-  every 16.7 ms frame while a GL program drew. The retrace is counted
-  under the board lock and can be up to one slice late. A swap does not
-  repaint the frame: the frame update compares the displayed-buffer bits
-  with the ones it last staged and repaints only the rows where the
-  flipped windows' two buffers differ (`Scanout::differ`, kept from the
-  rows each draw reports and measured from the planes after a writer
-  that does not report rows).
-- Lock order: board, then raster context, then front. The raster thread
-  takes only its context lock and, for a fence's interrupt, the front lock.
-  The front end waits for the raster queue to empty with the board lock
-  held; the display, which also needs the board lock first, cannot then be
-  holding the raster unit up.
+- The raster thread takes only its context lock, which owns the raster
+  unit's own state (the stipple phase and the rows drawn), and, for a
+  fence's interrupt, the front lock. Nothing else takes the context lock
+  while the raster thread runs. The front end waits for the raster queue to
+  empty with the board lock held; the raster unit takes no lock the front
+  end holds.
+- The display thread takes the front lock, to latch swaps and read the
+  displayed-buffer bits, and its own state's lock. It takes neither the
+  board lock nor the context lock and waits for no drawing.
+
+## The display
+
+The display thread (`Odyssey::frame`) polls the retrace, stages, resolves
+and presents with nothing held against the board. A frame reads:
+
+| What | How it is shared | Ordering it relies on |
+| --- | --- | --- |
+| Colour, id and overlay planes | raw pointers (`PlaneView::copy_row`), the one function that reads memory a writer may be storing to | the writer marks a row after its last store; the frame takes the marks before it copies |
+| Dirty and unnamed rows | atomic bitsets (`RowMarks`) | store, then mark; the frame takes the marks first |
+| Rows the raster unit drew | atomic words (`PublishedRows`) | published before a fence, query or sync word the guest can see, when the queue drains and at the end of a slice |
+| Lookup RAM, display modes, overlay modes, cursor | atomic words (`SharedRegs`) and a generation | the store marks every line after it, and the frame copies the registers after it takes the marks; the generation is read before the copy |
+| Scanout mode, retrace restart | atomic words (`ModeCell`) and two counters | counters move after the fields and are read before them |
+| Swap latch, displayed-buffer bits, retrace interrupt | the host interface, under the front lock | see below |
+
+Sync points kept, each because the hardware has it:
+
+- **The buffer swap.** The swap arm is latched at the vertical retrace, and
+  only the display thread latches. The displayed-buffer bits are read once
+  per frame, after the latch, and used for the flip, the lines staged and
+  the resolve. A guest that draws into the buffer that is not on the screen
+  and arms the swap after its fence never shows a mix of two frames. The
+  host-interface lock only serialises the register file the swap bank lives
+  in; the display holds it for a few instructions.
+- **Fences, queries and sync words.** The raster unit publishes the rows it
+  drew before it runs a completion job, so a guest that waits for one before
+  it arms a swap has its rows known to the display when the swap latches.
+- **Waiting reads.** A register read that waits drains the command FIFO and
+  the raster queue (rule 2 below).
+
+What is not kept, because the hardware has none: a frame can copy a row the
+raster unit is drawing, a lookup entry the front end is storing, or the old
+and new halves of a mode change. The writer marks after it stores, so the
+next frame copies the row or entry again. A guest that arms a swap before
+its drawing is done sees the half-drawn frame for as long as the queue
+takes, as it would on the board.
 
 ## The 1 ms slice
 
 The worker sleeps on a condvar until a store joins an empty queue, waits
-`GAP` (100 us, both locks free), then holds the board lock for a slice of
+`GAP` (100 us, the board lock free), then holds the board lock for a slice of
 at most `SLICE` (1 ms of host time, checked every 16 stores) and releases it
 with `unlock_fair`. The gap exists because a thread that drops a lock and
 takes it straight back usually wins it again; without the gap a processor
@@ -203,7 +240,9 @@ must keep them.
 6. Stopping the machine finishes the command FIFO and then the raster queue;
    a reset abandons the waiting stores and waits for the raster queue before
    it clears the planes.
-7. The display waits for a raster slice in flight (the context lock).
+7. The display waits for nothing: it copies what is in the planes and the
+   registers when the frame runs. Rows and entries it copies half-written
+   are copied again at the next frame.
 8. The back end's display-FIFO level (`0x106c` bits 6:0) stays 0: back-end
    writes apply when the front end runs them.
 
