@@ -167,3 +167,45 @@ fn packing_a_full_table_keeps_each_object_in_store_order() {
     }
     assert_eq!(s.obj_used, next);
 }
+
+/// A stored volume's slices keep their own check: every row and texel the
+/// volume needs must be written. A slice written in part leaves the volume
+/// unusable, and is not grown to look complete as a 2D level is. The
+/// control, with every slice whole, shows the state is a usable volume.
+#[test]
+fn a_stored_volume_slice_written_in_part_does_not_grow() {
+    for partial in [false, true] {
+        let (mut s, _, _) = board_with_ram();
+        let base = 0x10_0000;
+        // A 4x4x4 RGBA volume with its border stored: each slice an object
+        // 64 texels wide, the level 15 rows and columns in, plus the two
+        // border slices.
+        let (w, h, d) = (4u32, 4u32, 4u32);
+        let stride = volume_slice_stride(h + 2) as u32;
+        let mut rows = Vec::new();
+
+        for z in 0..d + 2 {
+            let o = s.object_select(base + z * stride, 64);
+            let n = if partial && z == 2 { 18 } else { 15 + h + 2 };
+            for y in 0..n {
+                for x in 0..64 {
+                    s.object_store(o, x, y, 0x1020_30ff);
+                }
+            }
+            rows.push((o, n));
+        }
+        s.tex_mode = ODSY_TEX_MODE_3D;
+        s.tex_level0 = 0;
+        s.tex_levels[..3].copy_from_slice(&[base, 0x4110_0004, h + 2]);
+        s.tex_sampler = [0x0800_0000 | (2 << 10) | (2 << 5) | 2, w, h, d, 0x0300_2a00, 0, 0x0100_0000];
+        s.tex_env = [1, 0, 0, 0, 0];
+        let mut image = GlTexImage::default();
+        let mut chain = Box::<TextureChain>::default();
+        let taken = s.texture_setup(&mut image, &mut chain) && chain.levels[0].read_texel_3d;
+
+        assert_eq!(taken, !partial, "partial {partial}");
+        for (o, n) in rows {
+            assert_eq!(s.obj_rows[o as usize], n, "slice object {o}, partial {partial}");
+        }
+    }
+}

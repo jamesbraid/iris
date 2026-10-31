@@ -1928,7 +1928,13 @@ impl Board {
             // that fits the store always succeeds (object_rows() forgets
             // others to make room), and one that cannot is not tried, so a
             // draw never waits on the raster unit for a growth that fails.
-            if !bordered && !texture_move {
+            // Only an ordinary 2D level that holds some rows grows (origami
+            // datasheet, "Board-memory object store", origami#3192): an object
+            // that holds none stays missing, as before, since whether such a
+            // level is present is not decided; volume slices keep their own
+            // checks above. Sampling is not use, so finding a level here does
+            // not touch its object (Board::object_touch()).
+            if tex_shape == ODSY_TEX_MODE_2D && !bordered && !texture_move {
                 for i in 0..count {
                     let e = ((first + i) * 3) as usize;
                     let object = self.object_find(self.tex_levels[e] & 0x1fffffff);
@@ -1940,6 +1946,7 @@ impl Board {
 
                         if self.obj_width[o] >= level_width
                             && (stride_units == 0 || self.obj_width[o] == stride_units * 16)
+                            && self.obj_rows[o] != 0
                             && self.obj_rows[o] < level_height
                             && self.obj_width[o] as u64 * level_height as u64 <= ODSY_OBJ_POOL_WORDS as u64
                         {
