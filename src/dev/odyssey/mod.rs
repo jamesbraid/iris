@@ -352,6 +352,24 @@ impl Device for Odyssey {
     fn get_clock(&self) -> u64 {
         0
     }
+
+    fn register_commands(&self) -> Vec<(String, String)> {
+        vec![("vpro".to_string(), "VPro display counters: vpro dirty [reset]".to_string())]
+    }
+
+    fn execute_command(&self, cmd: &str, args: &[&str], mut w: Box<dyn std::io::Write + Send>) -> Result<(), String> {
+        if cmd != "vpro" {
+            return Err(format!("unknown command: {cmd}"));
+        }
+        match args {
+            ["dirty"] => self.state.board.lock().scanout.stats.report(&mut *w).map_err(|e| e.to_string()),
+            ["dirty", "reset"] => {
+                self.state.board.lock().scanout.stats = DirtyStats::default();
+                Ok(())
+            }
+            _ => Err("Usage: vpro dirty [reset]".to_string()),
+        }
+    }
 }
 
 impl Drop for Odyssey {
