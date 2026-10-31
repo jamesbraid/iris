@@ -4558,6 +4558,7 @@ mod tests {
         for w in 0..16u64 {
             let word = words.get(w as usize).copied().unwrap_or(0);
             // The model's raw encoding (p[35:32] = 0xf), with even parity.
+            exec.cache.issue_raw_for_test(0xfu64 << 32 | word as u64);
             exec.core.cp0_ecc = (0xfu64 << 32 | word as u64).count_ones() & 1;
             cache_op(&mut exec, 0x1c, 4 * w + 1, word, 0xf);
         }

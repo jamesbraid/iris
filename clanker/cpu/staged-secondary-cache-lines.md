@@ -56,19 +56,30 @@ opcodes only (`l1i_decode`, `L1I_CLASSES`). `addiu $4,$0,2` is `0x3_4420_0004`.
   words are stored in the raw encoding with even parity, the architectural word
   carried in place of hardware's predecoded form. The block is tagged with the
   fetch's PA, valid, so Index Load Tag/Data (I) return it and a readback stored
-  verbatim into another line executes. Invalidating a secondary block
-  invalidates the primary I lines inside it.
+  verbatim into another line executes.
+- Index Writeback Invalidate (S), Hit Invalidate (S) and Hit Writeback
+  Invalidate (S) purge the primary I and D lines inside the secondary block,
+  found through the stored tag's physical block and its virtual index
+  (TagLo[8:7]): a line of the block at another VA[13:12] survives. A line the
+  model refilled itself is purged whatever its index, because its index is the
+  fetch's and the model leaves the guest's staged tag alone. Approximation: the
+  hardware would have recorded the fetch's index in the tag.
 - Parity is checked on a fetch hit: even over the 36 bits and ECC[0]. A bad word
   posts a Cache Error (CacheErr.ED) unless Status.DE or ERL is set.
 - Index Load Data (I) returns the stored word and parity as stored, so a readback
   stored back verbatim round-trips and executes. A line the guest never staged
   and the model did not refill reads back as the shadow's contents, not as the
-  predecoded memory word. A word with p[35:32] = 0xf is this model's own encoding
-  of a raw instruction in p[31:0] (`L1I_RAW`), so a word outside the sampled set
-  can round-trip. Model choice; the hardware contents are unknown.
+  predecoded memory word. A word with p[35:32] = 0xf and the model's raw flag
+  (set by a refill, kept by a verbatim Index Store Data of a word Index Load
+  Data handed out) is this model's own encoding of a raw instruction in p[31:0]
+  (`L1I_RAW`), so a word outside the sampled set can round-trip. Model choice;
+  the hardware contents are unknown.
 
-The primary data cache is not served: its dirty lines write back to the secondary
-cache and the state-modifier field has no model.
+The primary data cache is not served: loads never hit a line staged in it. Its
+tags and words are the diagnostic shadow, and only the inclusion purge acts on
+them: a secondary invalidate clears the state and modifier of its lines, and
+the writeback forms first copy a line with modifier 010 into the secondary
+line, which a DirtyExclusive block then sends to memory.
 
 ## Why the fast paths must be told
 
@@ -97,9 +108,19 @@ Dropping any of the first three fails `a_compiled_load_hits_a_staged_line_not_th
 - Every CACHE operand is translated first (exceptions: TLB Refill/Invalid, privilege Address Error, never TLB Modified). The secondary set, way and quadword come from the operand's physical address (`set_cache_op_pa`), the primaries' from its virtual address. An operand on an uncached page is undefined on the R10000 and goes ahead as if cached.
 - The datasheet clears the R10000. The R12000, R14000 and R16000 use the same
   tag layout here, which is an inference.
-- Not modelled: the predecode of unsampled classes, primary data cache staged hits, ECC and check bits, the
-  virtual-index purge, the BadVAddr/Context/EntryHi values after a CACHE-raised TLB exception, Status.CH, the
+- Not modelled: the predecode of unsampled classes, primary data cache staged
+  hits, ECC and check bits, the purge a cached access makes when its VA[13:12]
+  differs from the tag's recorded index, the BadVAddr/Context/EntryHi values after a CACHE-raised TLB exception, Status.CH, the
   tag rewrite on invalidate (only the state clears), coherence with other CPUs
   and DMA.
 - Staged lines are saved in snapshots (`save_cache_state`). The rest of the
   shadow arrays, which only diagnostics read, are not.
+- The raw words Index Load Data handed out (`l1i_issued`) are bounded at 64 Ki
+  and not saved. A raw word read before a snapshot and stored after it is stored
+  without the model's flag, so it is refused and reported like a guest-built
+  0xf word; it never runs as raw bits.
+
+Staged-line counts (`l2 probe 0`, the only CPU in these configurations): 0 at
+login on the Octane, Fuel and O2. The Fuel PROM stages about 16,000 secondary
+lines and 54 primary I lines in 69 pages while it copies itself, and has none
+left by the time it probes USB.
