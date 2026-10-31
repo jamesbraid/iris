@@ -240,3 +240,22 @@ fn only_algorithm_3_inside_the_window_takes_the_plane() {
         assert_eq!(phys(&mut cpu, 0x9800_0000_1fc0_0000), 0x1fc0_0000);
     });
 }
+
+/// IOC4 reads its 32-bit registers in the processor's byte order through
+/// the IO9 PIC's self-ordered slot: what the processor writes is the
+/// register's value, as on the QEMU Tezro, where PROM 6.210 writes the
+/// serial DMA control 0x100201ff and the TX producer 0x3f8.
+#[test]
+fn the_processor_reads_and_writes_ioc4_registers_in_its_own_byte_order() {
+    let board = TezroBoard::new(1).unwrap();
+    let io = &board.node.io;
+    // IOC4's BAR at PCI memory 0x200000, decoding memory, reached through
+    // head 0's first short window.
+    assert_eq!(io.pio_write(config_id(1) + 0x10, 4, 0x20_0000), BUS_OK);
+    assert_eq!(io.pio_write(config_id(1) + 4, 4, 2), BUS_OK);
+    assert_eq!(io.pio_write(widget(15, 0x200), 8, (1 << 12) | 2), BUS_OK);
+    let reg = |offset: u64| widget(15, 0x20_0000 + offset);
+    assert_eq!(io.pio_read(reg(0x24), 4).data, 1, "MISC: the 66 MHz clock");
+    assert_eq!(io.pio_write(reg(0x314), 4, 0x3f8), BUS_OK);
+    assert_eq!(io.pio_read(reg(0x314), 4).data, 0x3f8, "port 0 TX producer");
+}
