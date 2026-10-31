@@ -27,8 +27,8 @@
 //! modelled, so the old stall at 32,768 words stood in for it. IMPACT and
 //! GR2 do not stall
 //! there. Their host ring is deep, a store is refused with the bus busy
-//! only when the ring is full, and the guest-visible level is the board's,
-//! clamped to what the real FIFO can hold. The VPro follows them by
+//! only when the ring is full, and the guest-visible level is the model's,
+//! clamped to the model's FIFO size (a model choice, `ODSY_CFIFO_WORDS`). The VPro follows them by
 //! default (`FifoDepth::Deep`): the ring holds `ODSY_WORK_QUEUE_MAX`
 //! entries, a store is one entry whatever its width, so it takes at least
 //! twice the model's FIFO in words, and the processor runs ahead of the
@@ -183,7 +183,7 @@ pub struct CommandFifo {
     /// (a model choice: the register's role is unknown); zero until set up. This
     /// and `running` are read on every store and written rarely, so each has
     /// a line no counter shares.
-    high_mark: CachePadded<AtomicU32>,
+    threshold_6b2: CachePadded<AtomicU32>,
     /// Where a store is refused (`FifoDepth`); read on every store, set at
     /// construction.
     deep: CachePadded<AtomicBool>,
@@ -216,7 +216,7 @@ impl Default for CommandFifo {
             ring: unsafe { Box::new_zeroed().assume_init() },
             pop: Mutex::new(()),
             levels: CachePadded::new(Levels { words: AtomicU32::new(0), stores: AtomicU32::new(0), counted: AtomicU32::new(0) }),
-            high_mark: CachePadded::new(AtomicU32::new(0)),
+            threshold_6b2: CachePadded::new(AtomicU32::new(0)),
             deep: CachePadded::new(AtomicBool::new(FifoDepth::from_env() == FifoDepth::Deep)),
             running: CachePadded::new(AtomicBool::new(false)),
             asleep: CachePadded::new(AtomicBool::new(false)),
@@ -233,9 +233,9 @@ impl Default for CommandFifo {
 }
 
 impl CommandFifo {
-    /// The FIFO words waiting, as the guest sees them: the board's FIFO
-    /// holds no more than `ODSY_CFIFO_WORDS`, so a deeper backlog in the
-    /// host ring reads as a full FIFO. Zero only when nothing waits.
+    /// The FIFO words waiting, as the guest sees them: the model's FIFO
+    /// holds no more than `ODSY_CFIFO_WORDS` (a model choice), so a deeper
+    /// backlog in the host ring reads as a full FIFO. Zero only when nothing waits.
     pub fn level(&self) -> u32 {
         self.queued_words().min(ODSY_CFIFO_WORDS)
     }
@@ -270,14 +270,14 @@ impl CommandFifo {
 
     /// Whether the level is at or above the model's high-water threshold.
     pub fn high_water(&self) -> bool {
-        let mark = self.high_mark.load(SeqCst);
+        let mark = self.threshold_6b2.load(SeqCst);
         mark != 0 && self.level() >= mark
     }
 
     /// The stored `0x6b2`, applied as the high-water threshold in words. MODEL
     /// CHOICE (see `ODSY_REG_FIFO_SETUP_FIRST`).
-    pub fn set_high_mark(&self, words: u32) {
-        self.high_mark.store(words, SeqCst);
+    pub fn set_threshold_6b2(&self, words: u32) {
+        self.threshold_6b2.store(words, SeqCst);
     }
 
     /// Whether a store of `size` bytes finds the board's FIFO full while
@@ -358,10 +358,10 @@ impl CommandFifo {
         // The board's thread may retire this store before the level counts it,
         // which wraps the level for a moment; the sum wraps back.
         let after = self.levels.words.fetch_add(words, SeqCst).wrapping_add(words);
-        let mark = self.high_mark.load(SeqCst);
+        let mark = self.threshold_6b2.load(SeqCst);
         if mark != 0 && before < mark && after >= mark {
-            // Reaching the high-water mark raises its flag, whatever the
-            // enable mask says.
+            // Reaching the model's 0x6b2 threshold raises flag 25, whatever
+            // the enable mask says.
             let mut f = front.lock();
             f.intr_flags |= ODSY_INTR_FIFO_HIGH_WATER;
             f.update_irq();

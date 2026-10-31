@@ -435,8 +435,8 @@ impl Board {
         let v = prog_value(word);
         let cls = word >> ODSY_PROG_CLASS_SHIFT;
 
-        if (ODSY_PROG_SEQ_FIRST..=ODSY_PROG_SEQ_LAST).contains(&cls) {
-            self.gl_seq[(cls - ODSY_PROG_SEQ_FIRST) as usize] = v;
+        if (ODSY_PROG_REG_FIRST..=ODSY_PROG_REG_LAST).contains(&cls) {
+            self.gl_regs_20_35[(cls - ODSY_PROG_REG_FIRST) as usize] = v;
         }
         match cls {
             ODSY_PROG_COLOUR_MODE | ODSY_PROG_COLOUR_MODE_B => {
@@ -485,7 +485,7 @@ impl Board {
                 if (word >> ODSY_PROG_CLASS_SHIFT) >= ODSY_PROG_PROGRAM_HALFWORD {
                     self.gl_program_halfword(word);
                 }
-                // The other classes of 0x20 to 0x35: kept in gl_seq[] only.
+                // The other classes of 0x20 to 0x35: kept in gl_regs_20_35[] only.
             }
         }
     }

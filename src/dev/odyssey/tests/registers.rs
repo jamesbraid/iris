@@ -188,8 +188,9 @@ fn the_firmware_diagnostic_registers_reset_and_store() {
     }
 }
 
-/// At flow-control attach the kernel stores the interrupt target shifted
-/// left 17, the credit target shifted left 12 and 0xc8. The model stores
+/// At flow-control attach the kernel stores a word with an interrupt target
+/// shifted left 17, a credit target shifted left 12 and 0xc8; the roles of
+/// those fields are not established. The model stores
 /// the word; the targets change neither the FIFO status nor the config
 /// register, which keeps its own reset value.
 ///
@@ -266,7 +267,7 @@ fn the_0x7f0_doubleword_is_stored_and_runs_no_timer() {
     let (mut s, _) = board("v12");
 
     cmd64(&mut s, 0x7f0, 1_000_000_000);
-    assert_eq!(s.sync_timeout, 1_000_000_000);
+    assert_eq!(s.setup_7f0, 1_000_000_000);
     cmd64(&mut s, 0x6b0, 7);
     assert_eq!(s.fifo_setup[0], 7);
     assert_eq!(s.reported_cmd_count, 0);

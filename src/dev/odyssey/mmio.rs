@@ -402,10 +402,12 @@ impl BoardLocks {
 
     /// A processor's store as the bus takes it. False, for the bus to
     /// answer busy, when it waits for queued stores the board's thread will
-    /// run, or when it is a command store and the board's FIFO has no
+    /// run, or when it is a command store and the model's FIFO has no
     /// room for it while the board's thread runs: the processor retries
     /// the store, taking its interrupts meanwhile, while the board's thread
-    /// makes room, as a full FIFO holds the store back on the board. The
+    /// makes room. What a full FIFO does to a store on the hardware is
+    /// unknown (datasheet, "Grades for withdrawn claims"); the stall is a
+    /// model choice. The
     /// processor interface's mark stays untaken until the store goes in.
     pub fn bus_write(&self, addr: u64, value: u64, size: u32) -> bool {
         // Classified once: a command store goes straight to the FIFO.

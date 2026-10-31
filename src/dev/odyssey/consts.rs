@@ -149,12 +149,12 @@ pub const ODSY_FLCTL_INTR_TARGET_SHIFT: u32 = 17;
 // two) is a model choice, as is the FIFO's size (ODSY_CFIFO_WORDS) and depth
 // (ODSY_CFIFO_DEPTH), independent of the stored values, and so is the
 // low-water threshold (ODSY_CFIFO_LOW_WATER). The model contract is pinned by
-// the_level_counts_words_against_the_board_fifo_and_its_high_mark and
-// the_high_mark_follows_6b2.
+// the_level_counts_words_against_the_model_fifo_and_the_6b2_threshold and
+// the_threshold_follows_6b2.
 pub const ODSY_REG_FIFO_SETUP_FIRST: u32 = 0x6b0;
 pub const ODSY_REG_FIFO_SETUP_LAST: u32 = 0x6b3;
 // The model's own name for the 0x6b2 slot, see above.
-pub const ODSY_REG_FIFO_HIGH_WATER: u32 = 0x6b2;
+pub const ODSY_REG_FIFO_SETUP_6B2: u32 = 0x6b2;
 pub const ODSY_REG_FIFO_SETUP_7B5: u32 = 0x7b5;
 pub const ODSY_FIFO_SETUP_7B5_INDEX: usize = 4;
 // 0x7f0. The kernels' FIFO set-up writes the doubleword 0x7f0 =
@@ -529,10 +529,10 @@ pub const ODSY_COLOUR_MATERIAL_EMISSION: u32 = 0x8;
 // kernel writes 0x2e = 0x380 and 0x26 = 0x7f at set-up: the values are
 // ESTABLISHED and their roles UNKNOWN (datasheet, "Grades for withdrawn
 // claims", row for classes 0x27, 0x2e and 0x26). The model acts on the
-// classes it names, keeps every value in gl_seq[] and accepts the rest, whose
+// classes it names, keeps every value in gl_regs_20_35[] and accepts the rest, whose
 // meaning is UNKNOWN, without effect.
-pub const ODSY_PROG_SEQ_FIRST: u32 = 0x20;
-pub const ODSY_PROG_SEQ_LAST: u32 = 0x35;
+pub const ODSY_PROG_REG_FIRST: u32 = 0x20;
+pub const ODSY_PROG_REG_LAST: u32 = 0x35;
 pub const ODSY_PROG_PROGRAM_HALFWORD: u32 = 0x40;
 pub const ODSY_PROG_PROGRAM_HALFWORD_LAST: u32 = 0x5f;
 pub const ODSY_PROG_CONST_STORE: u32 = 0x60;
@@ -1044,8 +1044,8 @@ pub const ODSY_F32_SCALE_16: u32 = 0x37800080;
 pub const ODSY_F32_SCALE_32: u32 = 0x2f800005;
 
 // The host ring under the command FIFO, in entries (fifo.rs). A store is one
-// entry whatever its width, so it holds at least twice the board's FIFO in
-// words; a store is refused only when it is full.
+// entry whatever its width, so it holds at least twice the model's FIFO in
+// words (ODSY_CFIFO_WORDS, a model choice); a store is refused only when it is full.
 pub const ODSY_WORK_QUEUE_MAX: u32 = 65536;
 
 // The command FIFO's size in 32-bit words that the model clamps the level to

@@ -97,8 +97,8 @@ pub struct Board {
     /// Register 0x7f0 as last written. Its unit and meaning are unknown; the
     /// model records the value and runs no timer. Whether a nonzero value has
     /// been reported.
-    pub sync_timeout: u32,
-    pub sync_timeout_reported: bool,
+    pub setup_7f0: u32,
+    pub setup_7f0_reported: bool,
 
     // The DMA-sync command's host-write base (48-bit guest physical address).
     pub host_write_addr_upper: u32,
@@ -347,7 +347,7 @@ pub struct Board {
     pub gl_program_mem: Vec<u16>,
     pub gl_program_addr: u32,
     /// The classes 0x20 to 0x35 as written; 0x27 also sets gl_program_addr.
-    pub gl_seq: [u32; 22],
+    pub gl_regs_20_35: [u32; 22],
     pub gl_program_half: u32,
     pub gl_program_mem_reported: bool,
     pub gl_two_sided_logged: bool,
@@ -466,8 +466,8 @@ impl Default for Board {
             memory_control: 0,
             memory_control_reported: false,
             fifo_setup: [0; 5],
-            sync_timeout: 0,
-            sync_timeout_reported: false,
+            setup_7f0: 0,
+            setup_7f0_reported: false,
             host_write_addr_upper: 0,
             host_write_addr_lower: 0,
             stats_addr_upper: 0,
@@ -649,7 +649,7 @@ impl Default for Board {
             gl_program_logged_count: 0,
             gl_program_mem: vec![0; (SGI_ODYSSEY_GL_PROGRAM_ENTRIES * 6) as usize],
             gl_program_addr: 0,
-            gl_seq: [0; 22],
+            gl_regs_20_35: [0; 22],
             gl_program_half: 0,
             gl_program_mem_reported: false,
             gl_two_sided_logged: false,
@@ -823,7 +823,7 @@ impl Board {
         self.flctl_config = ODSY_FLCTL_CONFIG_RESET;
         self.memory_control = 0;
         self.fifo_setup = [0; 5];
-        self.sync_timeout = 0;
+        self.setup_7f0 = 0;
         self.host_write_addr_upper = 0;
         self.host_write_addr_lower = 0;
         self.stats_addr_upper = 0;
@@ -1025,7 +1025,7 @@ impl Board {
         // Program memory's reset content is unknown; the kernel loads it.
         self.gl_program_mem.fill(0);
         self.gl_program_addr = 0;
-        self.gl_seq = [0; 22];
+        self.gl_regs_20_35 = [0; 22];
         self.gl_program_half = 0;
         self.gl_program_mem_reported = false;
         self.gl_const_index = 0;

@@ -92,7 +92,7 @@ impl Board {
             return;
         }
         if (tag & ODSY_GL_MATRIX_SELECT_SHAPE) == ODSY_GL_MATRIX_SELECT_TAG {
-            self.gl_seq[((ODSY_GL_MATRIX_SELECT_TAG >> ODSY_PROG_CLASS_SHIFT) - ODSY_PROG_SEQ_FIRST) as usize] =
+            self.gl_regs_20_35[((ODSY_GL_MATRIX_SELECT_TAG >> ODSY_PROG_CLASS_SHIFT) - ODSY_PROG_REG_FIRST) as usize] =
                 prog_value(tag);
             // Pick the shared matrix slot the following load targets.
             self.gl_matrix_slot = match tag & 0xff {
@@ -609,21 +609,21 @@ impl Board {
             }
             ODSY_REG_FIFO_SETUP_FIRST..=ODSY_REG_FIFO_SETUP_LAST => {
                 self.fifo_setup[(tag - ODSY_REG_FIFO_SETUP_FIRST) as usize] = self.cmd_operand[0];
-                if tag == ODSY_REG_FIFO_HIGH_WATER {
-                    self.fifo.set_high_mark(self.cmd_operand[0]);
+                if tag == ODSY_REG_FIFO_SETUP_6B2 {
+                    self.fifo.set_threshold_6b2(self.cmd_operand[0]);
                 }
             }
             ODSY_REG_FIFO_SETUP_7B5 => {
                 self.fifo_setup[ODSY_FIFO_SETUP_7B5_INDEX] = self.cmd_operand[0];
             }
             ODSY_REG_SETUP_7F0 => {
-                self.sync_timeout = self.cmd_operand[0];
-                if self.sync_timeout != 0 && !self.sync_timeout_reported {
-                    self.sync_timeout_reported = true;
+                self.setup_7f0 = self.cmd_operand[0];
+                if self.setup_7f0 != 0 && !self.setup_7f0_reported {
+                    self.setup_7f0_reported = true;
                     crate::dlog!(
                         LogModule::Odyssey,
                         "sgi-odyssey: register 0x7f0 written with {}; the value is stored and its role is unknown, so no timer runs",
-                        self.sync_timeout
+                        self.setup_7f0
                     );
                 }
             }

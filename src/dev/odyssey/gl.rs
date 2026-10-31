@@ -2727,7 +2727,7 @@ pub fn is_program_word(word: u32) -> bool {
     if (ODSY_PROG_PROGRAM_HALFWORD..=ODSY_PROG_PROGRAM_HALFWORD_LAST).contains(&cls) {
         return true;
     }
-    if (ODSY_PROG_SEQ_FIRST..=ODSY_PROG_SEQ_LAST).contains(&cls)
+    if (ODSY_PROG_REG_FIRST..=ODSY_PROG_REG_LAST).contains(&cls)
         && (word & ODSY_GL_MATRIX_SELECT_SHAPE) != ODSY_GL_MATRIX_SELECT_TAG
     {
         return true;

@@ -23,8 +23,7 @@ documents" and "Board and kernel"):
 
 The command FIFO lives in board SDRAM. Its depth, in any unit, is unknown
 (datasheet, "Grades for withdrawn claims"); the model gives it 32,768 words,
-a model choice independent of the `0x6b1` the kernel stores (the porting guide
-gives about 1 ms of commands).
+a model choice independent of the `0x6b1` the kernel stores.
 The split between the two BUZZ threads follows US 6,417,858, which puts an
 output FIFO between the transform engine and the rasteriser (inferred to
 apply to BUZZ). Nothing models more than one raster unit.
