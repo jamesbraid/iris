@@ -67,7 +67,7 @@ fn rows() -> Vec<Row> {
             out.push(Row { name: format!("{name}/{i}"), kind: "clip", vals: vv.clip.to_vec() });
             // A vertex at or behind the eye has no window position.
             if vv.clip[3] > 0.0 {
-                let win = st.clip_to_window(&vv.clip);
+                let win = st.clip_to_window(&vv.clip, (1i32 << gl_rules().subpixel_bits) as f32).expect("a window position");
                 out.push(Row { name: format!("{name}/{i}"), kind: "win", vals: win.to_vec() });
             }
         }
