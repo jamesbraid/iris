@@ -256,14 +256,24 @@ struct Ctl {
     /// The machine is stopped: the thread takes no further entries.
     paused: bool,
     shutdown: bool,
-    /// The selection of an absent target the thread is waiting out: the
-    /// request ring epoch and consumer it belongs to, and when the adapter's
-    /// clock says it ends. It survives the thread being parked meanwhile.
-    selecting: Option<(u64, u32, i64)>,
+    /// The selection of an absent target the thread is waiting out. It
+    /// survives the thread being parked meanwhile.
+    selecting: Option<Selection>,
     /// When the adapter's clock last stopped with the machine, and how long
     /// it has stood still in all.
     stopped_at: Option<Instant>,
     stopped_ns: i64,
+}
+
+/// A selection of an absent target in progress.
+#[derive(Clone, Debug)]
+struct Selection {
+    /// The request ring consumer position of its entry.
+    cons: u32,
+    /// When the adapter's clock says the selection times out.
+    due: i64,
+    /// The completion to post then.
+    done: Pending,
 }
 
 /// The request ring as a step of the walk found it, for the part of the
@@ -636,7 +646,7 @@ impl Core {
     pub fn wait_idle(&self) {
         let mut st = self.st.lock();
         while (st.ctl.work && st.ctl.hold == 0 && !st.ctl.paused)
-            || (st.ctl.walking && !st.ctl.selecting.is_some_and(|(_, _, due)| self.now_ns(&st) < due))
+            || (st.ctl.walking && !st.ctl.selecting.as_ref().is_some_and(|sel| self.now_ns(&st) < sel.due))
         {
             self.wake.wait(&mut st);
         }
@@ -657,26 +667,31 @@ impl Core {
     /// Wait out the selection of an absent target on the ring entry at
     /// `cons`, with the state unlocked while the thread waits. True once the
     /// selection timeout has passed. False when the thread must look at the
-    /// ring again first: it was parked, or a reset or a new request ring
-    /// took the entry away.
-    fn select_absent(&self, st: &mut MutexGuard<'_, State>, ring: &Ring, cons: u32) -> bool {
-        let due = match st.ctl.selecting {
-            Some((e, c, due)) if e == ring.epoch && c == cons => due,
-            _ => {
-                let wait = SELECTION_TIMEOUT_UNIT * u32::from(st.selection_timeout);
-                let due = self.now_ns(st).saturating_add(wait.as_nanos() as i64);
-                st.ctl.selecting = Some((ring.epoch, cons, due));
-                self.wake.notify_all();
-                due
-            }
-        };
+    /// ring again first: it was parked, or a reset took the entry away.
+    fn select_absent(&self, st: &mut MutexGuard<'_, State>, ring: &Ring, cons: u32, done: Pending) -> bool {
+        if !matches!(&st.ctl.selecting, Some(sel) if sel.cons == cons) {
+            let wait = SELECTION_TIMEOUT_UNIT * u32::from(st.selection_timeout);
+            let due = self.now_ns(st).saturating_add(wait.as_nanos() as i64);
+            st.ctl.selecting = Some(Selection { cons, due, done });
+        }
+        // Whoever waits for the ring to settle may now see it waiting on a
+        // selection, a resumed one included.
+        self.wake.notify_all();
+        self.wait_selection(st, ring.gen)
+    }
+
+    /// Wait for the selection in `ctl.selecting` to time out. False when
+    /// the thread must look again first: parked, or a reset cancelled it.
+    fn wait_selection(&self, st: &mut MutexGuard<'_, State>, gen: u64) -> bool {
         loop {
-            if st.ctl.shutdown || st.ctl.hold > 0 || st.ctl.paused || st.ctl.gen != ring.gen || st.ctl.rqst_epoch != ring.epoch {
+            let Some(due) = st.ctl.selecting.as_ref().map(|sel| sel.due) else {
+                return false;
+            };
+            if st.ctl.shutdown || st.ctl.hold > 0 || st.ctl.paused || st.ctl.gen != gen {
                 return false;
             }
             let left = due - self.now_ns(st);
             if left <= 0 {
-                st.ctl.selecting = None;
                 return true;
             }
             // A test clock only moves when the test moves it.
@@ -1422,10 +1437,10 @@ impl Core {
                 Prepared::Skipped => None,
                 Prepared::Answered(p) => Some(p),
                 Prepared::Absent(p) => {
-                    if !self.select_absent(&mut st, &ring, cons) {
+                    if !self.select_absent(&mut st, &ring, cons, p) {
                         continue;
                     }
-                    Some(p)
+                    st.ctl.selecting.take().map(|sel| sel.done)
                 }
                 Prepared::Run(job) => {
                     st.total_cmds += 1;
@@ -1665,12 +1680,17 @@ impl PciBusDevice for Isp1040 {
 
 impl crate::traits::Saveable for Isp1040 {
     fn save_state(&self) -> toml::Value {
-        self.quiesced(|st| Self::save_locked(st))
+        self.quiesced(|st| {
+            // Absolute deadlines mean nothing on another run's clock.
+            let left = st.ctl.selecting.as_ref().map(|sel| sel.due - self.now_ns(st));
+            Self::save_locked(st, left)
+        })
     }
 
     fn load_state(&self, v: &toml::Value) -> Result<(), String> {
         self.quiesced(|st| {
-            Self::load_locked(st, v);
+            let now = self.now_ns(st);
+            Self::load_locked(st, v, now);
             self.publish_gen(st);
         });
         self.sync_irq();
@@ -1679,7 +1699,7 @@ impl crate::traits::Saveable for Isp1040 {
 }
 
 impl Isp1040 {
-    fn save_locked(st: &State) -> toml::Value {
+    fn save_locked(st: &State, selecting_left: Option<i64>) -> toml::Value {
         let mut t = toml::map::Map::new();
         for (k, v) in [
             ("bus_cfg1", st.bus_cfg1), ("bus_ctrl", st.bus_ctrl), ("bus_status", st.bus_status),
@@ -1715,12 +1735,27 @@ impl Isp1040 {
             toml::Value::Table(m)
         });
         t.insert("pending".into(), toml::Value::Array(pending.collect()));
+        // A selection still timing out: what is left of it, and the
+        // completion it ends in.
+        if let (Some(sel), Some(left)) = (&st.ctl.selecting, selecting_left) {
+            let mut m = toml::map::Map::new();
+            m.insert("left_ns".into(), toml::Value::Integer(left.max(0)));
+            m.insert("cons".into(), toml::Value::Integer(i64::from(sel.cons)));
+            m.insert("handle".into(), hex_u32(sel.done.handle));
+            m.insert("scsi_status".into(), hex_u16(sel.done.scsi_status));
+            m.insert("completion".into(), hex_u16(sel.done.completion));
+            m.insert("state_flags".into(), hex_u16(sel.done.state_flags));
+            m.insert("status_flags".into(), hex_u16(sel.done.status_flags));
+            m.insert("resid".into(), hex_u32(sel.done.resid));
+            m.insert("sense".into(), u8_slice_to_toml(&sel.done.sense));
+            t.insert("selecting".into(), toml::Value::Table(m));
+        }
         toml::Value::Table(t)
     }
 
     /// Unprocessed request entries survive: the ring thread is kicked and
     /// runs them after the load.
-    fn load_locked(st: &mut State, v: &toml::Value) {
+    fn load_locked(st: &mut State, v: &toml::Value, now: i64) {
         {
             let ctl = std::mem::take(&mut st.ctl);
             *st = State::new();
@@ -1761,22 +1796,38 @@ impl Isp1040 {
             if let Some(m) = get_field(v, "risc_bank") { load_u16_slice(m, &mut st.risc_bank); }
             if let Some(m) = get_field(v, "sxp_bank") { load_u16_slice(m, &mut st.sxp_bank); }
             if let Some(m) = get_field(v, "risc_ram") { load_u16_slice(m, &mut st.risc_ram); }
+            let load_pending = |p: &toml::Value| {
+                let sense = match get_field(p, "sense") {
+                    Some(toml::Value::Array(s)) => s.iter().take(SENSE_MAX).map(|x| toml_u8(x).unwrap_or(0)).collect(),
+                    _ => Vec::new(),
+                };
+                Pending {
+                    handle: get_field(p, "handle").and_then(toml_u32).unwrap_or(0),
+                    scsi_status: get_field(p, "scsi_status").and_then(toml_u16).unwrap_or(0),
+                    completion: get_field(p, "completion").and_then(toml_u16).unwrap_or(0),
+                    state_flags: get_field(p, "state_flags").and_then(toml_u16).unwrap_or(0),
+                    status_flags: get_field(p, "status_flags").and_then(toml_u16).unwrap_or(0),
+                    resid: get_field(p, "resid").and_then(toml_u32).unwrap_or(0),
+                    sense,
+                }
+            };
             if let Some(toml::Value::Array(a)) = get_field(v, "pending") {
                 for p in a {
-                    let sense = match get_field(p, "sense") {
-                        Some(toml::Value::Array(s)) => s.iter().take(SENSE_MAX).map(|x| toml_u8(x).unwrap_or(0)).collect(),
-                        _ => Vec::new(),
-                    };
-                    st.pending.push_back(Pending {
-                        handle: get_field(p, "handle").and_then(toml_u32).unwrap_or(0),
-                        scsi_status: get_field(p, "scsi_status").and_then(toml_u16).unwrap_or(0),
-                        completion: get_field(p, "completion").and_then(toml_u16).unwrap_or(0),
-                        state_flags: get_field(p, "state_flags").and_then(toml_u16).unwrap_or(0),
-                        status_flags: get_field(p, "status_flags").and_then(toml_u16).unwrap_or(0),
-                        resid: get_field(p, "resid").and_then(toml_u32).unwrap_or(0),
-                        sense,
-                    });
+                    st.pending.push_back(load_pending(p));
                 }
+            }
+            // The wait goes on for what was left of it, from this clock.
+            if let Some(sel) = get_field(v, "selecting") {
+                let left = match get_field(sel, "left_ns") {
+                    Some(toml::Value::Integer(n)) => (*n).max(0),
+                    _ => 0,
+                };
+                let cons = match get_field(sel, "cons") {
+                    Some(toml::Value::Integer(n)) => *n as u32,
+                    _ => 0,
+                };
+                st.ctl.selecting =
+                    Some(Selection { cons, due: now.saturating_add(left), done: load_pending(sel) });
             }
         }
     }
