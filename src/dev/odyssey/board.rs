@@ -811,6 +811,7 @@ impl Board {
         // The level falls with the enables. The routed destination is reset
         // below, so no clearing packet has anywhere to go.
         f.interrupt_asserted = false;
+        f.flag_held = false;
         f.sw_token = 0;
         f.flctl_target = 0;
         f.flctl_target_reported = false;
