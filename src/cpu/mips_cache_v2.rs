@@ -591,9 +591,8 @@ pub trait CpuModel: MipsCache {
     /// give a write request no response and say nothing about uncached
     /// store-conditional, so the model has nothing to fail it with.
     ///
-    /// iris models the R10000 only. The NEC manual covers the R12000 with the
-    /// same system interface; the R14000 and R16000 are inferred to share it,
-    /// and would set this too.
+    /// The R10000 family sets this. The NEC manual covers the R12000 with the
+    /// same system interface; the R14000 and R16000 are inferred to share it.
     const POSTS_UNCACHED_STORES: bool = false;
 }
 
@@ -3633,7 +3632,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
     const FIR: u32 = FIR;
     const TLB_ENTRIES: usize = TLB_ENTRIES;
     const R10K_CACHE_OPS: bool = model::r10k_family(MODEL);
-    const POSTS_UNCACHED_STORES: bool = MODEL == model::R10000;
+    const POSTS_UNCACHED_STORES: bool = model::r10k_family(MODEL);
     // 44 implemented virtual address bits on the R10000 family, as the shadow
     // model already says; XContext's layout follows them.
     const VA_BITS: u32 = if model::r10k_family(MODEL) { 44 } else { 40 };

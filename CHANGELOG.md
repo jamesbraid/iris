@@ -26,12 +26,12 @@ hashes are given where a change is easiest to understand by reading the commit.
 - **HEART's software reset** (`MODE` bit 22) now resets the machine.
 - **Masked stores to RAM** (`SWL`, `SWR`, `SDL`, `SDR`) use a compare-exchange, so a
   DMA engine or another CPU storing beside them is not lost.
-- **Refused uncached stores on the R10000** (Octane and IP28 guests) now
+- **Refused uncached stores on the R10000 family** (Octane, IP28 and Fuel guests) now
   complete instead of raising a Data Bus Error, as the processor has no response
   to a write request to report one with. The refusal is logged to stderr as
   "Unsupported uncached write ... (posted, completes)", a few lines per address
   and then sparsely. Reads, instruction fetches and the R4400 and R5000 are
-  unchanged.
+  unchanged. The R14000 and R16000 follow the R12000 by inference.
 
 ### SGI Fuel (IP34 board, IP35 software platform)
 
