@@ -1465,7 +1465,7 @@ fn stop_joins_the_threads_and_removes_the_timers() {
     assert_eq!(r.c.threads.lock().len(), 3, "two receive threads and the NVRAM writer");
     r.w32(reg::INT_ENABLE_SET, int::RT_OUTPUT_PULSE);
     r.w32(reg::INT_OUTPUT, IO_PERIODIC | 1000);
-    assert!(r.c.sh.timers.is_armed(K_INT_OUT));
+    assert!(within_two_seconds(|| r.c.sh.timers.is_armed(K_INT_OUT)));
     r.c.stop();
     r.c.stop();
     assert!(!r.c.is_running());
@@ -1477,7 +1477,10 @@ fn stop_joins_the_threads_and_removes_the_timers() {
     assert!(r.c.sh.st.lock().uart[0].core.rx_pending() == 0);
     r.c.start();
     assert!(within_two_seconds(|| r.c.sh.st.lock().uart[0].core.rx_pending() != 0));
-    assert!(r.c.sh.timers.is_armed(K_INT_OUT), "start arms the deadlines the chip holds");
+    // The periodic deadline can fire, and leave its slot empty until the
+    // catch-up re-arms it, between any two looks; wait for it rather than
+    // sample once.
+    assert!(within_two_seconds(|| r.c.sh.timers.is_armed(K_INT_OUT)), "start arms the deadlines the chip holds");
     r.c.stop();
 }
 
