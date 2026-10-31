@@ -130,24 +130,17 @@ impl Board {
                 held_valid.push(self.object_word_valid(off + k));
             }
         }
-        loop {
-            let mut pick: i32 = -1;
-
-            // The lowest-placed object not yet packed: at or past next.
-            for i in 0..self.obj_count as usize {
-                if i as i32 != last
-                    && self.obj_base[i] != 0
-                    && self.obj_rows[i] != 0
-                    && self.obj_offset[i] as u64 >= next
-                    && (pick < 0 || self.obj_offset[i] < self.obj_offset[pick as usize])
-                {
-                    pick = i as i32;
-                }
+        // The others in store order, once: each is then the lowest-placed
+        // one not yet packed. One whose words a packed object now covers is
+        // left where it is, as a search from `next` would leave it.
+        let mut order: Vec<usize> = (0..self.obj_count as usize)
+            .filter(|&i| i as i32 != last && self.obj_base[i] != 0 && self.obj_rows[i] != 0)
+            .collect();
+        order.sort_unstable_by_key(|&i| (self.obj_offset[i], i));
+        for p in order {
+            if (self.obj_offset[p] as u64) < next {
+                continue;
             }
-            if pick < 0 {
-                break;
-            }
-            let p = pick as usize;
             let size = self.obj_width[p] as u64 * self.obj_rows[p] as u64;
             if self.obj_offset[p] as u64 != next {
                 let from = self.obj_offset[p] as usize * 4;

@@ -131,3 +131,39 @@ fn a_texture_move_does_not_grow_its_object() {
     assert!(s.texture_setup(&mut image, &mut chain));
     assert_eq!(s.obj_rows[obj as usize], 2);
 }
+
+/// Packing the store keeps every live object's texels and its place in
+/// store order, closes the holes forgotten objects left, and puts them all
+/// at the front. With a full table of 16384 objects, some moved to the end
+/// by growing and a third forgotten, this is also the case where a packing
+/// that searched the table for each object took a third of a second.
+#[test]
+fn packing_a_full_table_keeps_each_object_in_store_order() {
+    let (mut s, _, _) = board_with_ram();
+    let n = SGI_ODYSSEY_OBJECTS as i32;
+
+    for i in 0..n {
+        let o = s.object_select(0x10_0000 + i as u32 * 0x100, 16);
+        assert_eq!(o, i);
+        s.object_store(o, 0, 0, i as u32);
+    }
+    for i in (0..n).step_by(7) {
+        // Growth moves the object to the store's end.
+        s.object_store(i, 0, 1, !(i as u32));
+    }
+    for i in (1..n).step_by(3) {
+        s.object_forget(i);
+    }
+    let mut live: Vec<i32> = (0..n).filter(|&i| s.obj_base[i as usize] != 0).collect();
+    live.sort_by_key(|&i| s.obj_offset[i as usize]);
+
+    s.object_compact(-1);
+    let mut next = 0u32;
+    for &i in &live {
+        let o = i as usize;
+        assert_eq!(s.obj_offset[o], next, "object {i} is not packed in store order");
+        next += s.obj_width[o] * s.obj_rows[o];
+        assert_eq!(s.object_load(i, 0, 0), i as u32, "object {i}'s texel");
+    }
+    assert_eq!(s.obj_used, next);
+}
