@@ -49,7 +49,7 @@
 
 use super::*;
 
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::{Acquire, Release, SeqCst}};
 use std::thread::JoinHandle;
@@ -353,10 +353,11 @@ pub struct RasterQueue<const HEADS: usize = 1> {
     /// its submit) back to the front end, which takes them under the board
     /// lock.
     spare: Box<GFifo<SPARE_DRAWS>>,
-    /// Held by the raster thread for a slice of jobs and by a job run
-    /// inside the submit. It owns the raster unit's own state, not the
-    /// planes: the display does not take it.
-    ctx: Mutex<RasterCtx>,
+    /// The raster unit's own state (the stipple phase and the rows drawn,
+    /// not the planes). The raster thread owns it while it runs jobs; the
+    /// front end uses it only for a job it runs itself, with no raster thread
+    /// or with the queue empty (`RasterQueue::ctx`).
+    ctx: UnsafeCell<RasterCtx>,
     /// The rows the raster unit has published and the display has not yet
     /// taken (RasterCtx::publish()).
     published: Arc<PublishedRows>,
@@ -386,8 +387,10 @@ pub struct RasterQueue<const HEADS: usize = 1> {
     idle: Mutex<()>,
     idle_kick: Condvar,
     thread: Mutex<Option<JoinHandle<()>>>,
-    /// Tests: each slice first holds the context lock this long, as a long
-    /// draw would.
+    /// Tests: the raster thread is in a slice.
+    #[cfg(test)]
+    test_in_slice: AtomicBool,
+    /// Tests: each slice first runs this long, as a long draw would.
     #[cfg(test)]
     pub test_slice_sleep_ms: AtomicU32,
     /// Tests: each slice sleeps this long between its last job and its
@@ -401,8 +404,11 @@ pub struct RasterQueue<const HEADS: usize = 1> {
 }
 
 // SAFETY: the jobs in the ring are Send; the ring itself is shared as GFifo
-// documents (one producer at a time, the board lock; one consumer, the
-// raster thread).
+// documents (one producer at a time, the front end; one consumer, the raster
+// thread). `ctx` is the raster thread's while jobs are queued; the front end
+// touches it only when none are, as the other boards' CPU threads touch an
+// engine's state only after its FIFO has drained. A guest that stores while
+// it waits for a drain gets whatever ordering it asked for, not a lock.
 unsafe impl<const HEADS: usize> Send for RasterQueue<HEADS> {}
 unsafe impl<const HEADS: usize> Sync for RasterQueue<HEADS> {}
 
@@ -416,7 +422,7 @@ impl<const HEADS: usize> Default for RasterQueue<HEADS> {
             ring: unsafe { Box::new_zeroed().assume_init() },
             // SAFETY: as the ring.
             spare: unsafe { Box::new_zeroed().assume_init() },
-            ctx: Mutex::new(RasterCtx::new(published.clone())),
+            ctx: UnsafeCell::new(RasterCtx::new(published.clone())),
             published,
             pending: AtomicU32::new(0),
             queued: AtomicU64::new(0),
@@ -435,6 +441,8 @@ impl<const HEADS: usize> Default for RasterQueue<HEADS> {
             idle: Mutex::new(()),
             idle_kick: Condvar::new(),
             thread: Mutex::new(None),
+            #[cfg(test)]
+            test_in_slice: AtomicBool::new(false),
             #[cfg(test)]
             test_slice_sleep_ms: AtomicU32::new(0),
             #[cfg(test)]
@@ -502,11 +510,11 @@ impl RasterQueue {
     /// estimate of its work in pixels (`rect_cost`, `primitive_cost`). With
     /// no raster thread it runs now. A job that writes the colour planes
     /// records the rows it wrote in the context (RasterCtx::drawn). The
-    /// caller is the front end, under the board lock.
+    /// caller is the front end.
     pub fn submit_work(&self, cost: u32, job: impl FnOnce(&mut RasterCtx) + Send + 'static) {
         if !self.threaded() {
-            let mut ctx = self.ctx.lock();
-            job(&mut ctx);
+            let ctx = self.ctx();
+            job(ctx);
             ctx.publish();
             return;
         }
@@ -528,7 +536,7 @@ impl RasterQueue {
 
     /// Hand a GL draw to the raster unit, behind every job before it. The
     /// raster thread gives the job back when drawn (`take_draw`). The
-    /// caller is the front end, under the board lock, with the raster
+    /// caller is the front end, with the raster
     /// thread running.
     pub fn submit_draw(&self, job: Box<GlDrawJob>, cost: u32) {
         debug_assert!(self.threaded());
@@ -542,7 +550,7 @@ impl RasterQueue {
     }
 
     /// Wait while the raster unit holds more work than the budget, down to
-    /// half of it. The caller is the front end, under the board lock; the
+    /// half of it. The caller is the front end; the
     /// raster thread needs neither that nor anything the front end holds. A
     /// stop, or no raster thread, ends the wait.
     fn wait_room(&self) {
@@ -605,8 +613,8 @@ impl RasterQueue {
     /// answer: with no raster thread, a GL draw's result and stipple phase.
     pub fn run_now<R>(&self, job: impl FnOnce(&mut RasterCtx) -> R) -> R {
         self.wait_idle();
-        let mut ctx = self.ctx.lock();
-        let result = job(&mut ctx);
+        let ctx = self.ctx();
+        let result = job(ctx);
         ctx.publish();
         result
     }
@@ -636,10 +644,18 @@ impl RasterQueue {
         self.published.take(displayed, differ, marks);
     }
 
-    /// Tests: a slice holds the raster unit's context.
+    /// Tests: the raster thread is running a slice of jobs.
     #[cfg(test)]
     pub fn in_slice(&self) -> bool {
-        self.ctx.is_locked()
+        self.test_in_slice.load(SeqCst)
+    }
+
+    /// The raster unit's state, for whoever runs a job: the raster thread, or
+    /// the front end when no job is queued.
+    #[allow(clippy::mut_from_ref)]
+    fn ctx(&self) -> &mut RasterCtx {
+        // SAFETY: see the Sync impl.
+        unsafe { &mut *self.ctx.get() }
     }
 
     /// Start the raster thread.
@@ -685,7 +701,7 @@ impl RasterQueue {
     }
 
     /// The raster thread: sleep until a job is pushed, then run the ring in
-    /// slices under the context lock.
+    /// slices.
     fn run(&self) {
         loop {
             {
@@ -699,7 +715,9 @@ impl RasterQueue {
             if self.pushed.load(SeqCst) == self.taken.load(SeqCst) && self.exit.load(SeqCst) {
                 return;
             }
-            let mut ctx = self.ctx.lock();
+            let ctx = self.ctx();
+            #[cfg(test)]
+            self.test_in_slice.store(true, SeqCst);
             #[cfg(test)]
             {
                 let ms = self.test_slice_sleep_ms.swap(0, SeqCst);
@@ -724,12 +742,12 @@ impl RasterQueue {
                 if kind == ENTRY_DRAW {
                     // SAFETY: submit_draw() put it there, and it is taken once.
                     let job = unsafe { Box::from_raw(value as *mut GlDrawJob) };
-                    job.run(&mut ctx);
+                    job.run(ctx);
                     self.give_back(job);
                 } else {
                     // SAFETY: submit() put it there, and it is taken once.
                     let job = unsafe { Box::from_raw(value as *mut RasterJob) };
-                    job(&mut ctx);
+                    job(ctx);
                 }
                 let left = self.queued.fetch_sub(cost, SeqCst) - cost;
                 if self.pending.load(SeqCst) == 1 {
@@ -761,7 +779,8 @@ impl RasterQueue {
             // display can go without them.
             ctx.publish();
             crate::pf_end!(crate::perfetto::events::ODSY_RASTER_SLICE);
-            drop(ctx);
+            #[cfg(test)]
+            self.test_in_slice.store(false, SeqCst);
         }
     }
 }
