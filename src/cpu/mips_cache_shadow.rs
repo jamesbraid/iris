@@ -348,6 +348,7 @@ impl<
     const SECONDARY_TAG_MASK: u64 = model::profile(MODEL).l2_tag_mask;
     const LWR_PRESERVES_UPPER: bool = model::profile(MODEL).lwr_preserves_upper;
     const NARROW_STORES_CARRY_GPR: bool = model::profile(MODEL).narrow_stores_carry_gpr;
+    const CP0_DIAG_WRITE_MASK: u32 = model::profile(MODEL).cp0_diag_write_mask;
 }
 
 impl<
@@ -1081,6 +1082,9 @@ mod tests {
         assert_eq!(<R16K as CpuModel>::SECONDARY_TAG_MASK, <R14K as CpuModel>::SECONDARY_TAG_MASK);
         assert!(<R16K as CpuModel>::LWR_PRESERVES_UPPER);
         assert!(<R16K as CpuModel>::NARROW_STORES_CARRY_GPR);
+        assert_eq!(<R16K as CpuModel>::CP0_DIAG_WRITE_MASK, 0x0403_cffb);
+        assert_eq!(<R14K as CpuModel>::CP0_DIAG_WRITE_MASK, 0, "only the R16000 has the register");
+        assert_eq!(<R10000ShadowCache as CpuModel>::CP0_DIAG_WRITE_MASK, 0);
     }
 
     /// A 4 MiB secondary cache has twice the lines of the Fuel's, and a

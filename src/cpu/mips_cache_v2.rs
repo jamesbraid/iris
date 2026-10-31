@@ -576,6 +576,9 @@ pub trait CpuModel: MipsCache {
     /// source register. Which other lanes a real processor drives is undefined,
     /// so this is a model policy, not a measurement.
     const NARROW_STORES_CARRY_GPR: bool = false;
+    /// Bits of CP0 register 22, the Diagnostic register, that software writes.
+    /// Zero: the model has no such register; it reads zero and ignores writes.
+    const CP0_DIAG_WRITE_MASK: u32 = 0;
     /// Keep the R10000 family's uncached attribute, EntryLo bits 63:62, and
     /// put it on the bus for a mapped uncached access, as an unmapped xkphys
     /// access carries its address bits 58:57. NEC U10278EJ4V0UM section 11.3,
@@ -1461,6 +1464,10 @@ pub mod model {
         /// from a register whose low 16 bits are zero, and Bedrock's ECC view
         /// has to see where the word sits in the register.
         pub narrow_stores_carry_gpr: bool,
+        /// Bits of CP0 register 22, the R10000 family's Diagnostic register,
+        /// that software writes. Zero: no such register, it reads zero and
+        /// writes are ignored.
+        pub cp0_diag_write_mask: u32,
     }
 
     impl Profile {
@@ -1476,6 +1483,7 @@ pub mod model {
             l2_tag_mask: u64::MAX,
             lwr_preserves_upper: false,
             narrow_stores_carry_gpr: false,
+            cp0_diag_write_mask: 0,
         };
         /// The existing R10000 types (IP28, Octane, O2): family behaviour,
         /// none of the later approximations.
@@ -1524,7 +1532,12 @@ pub mod model {
             // the R14000 and notes that no R16000 specification backs them, so
             // the row starts from the R14000's. Its own policies are the
             // fields set here. All are approximations, not measurements.
-            R16000 => Profile { name: "R16000", ..profile(R14000) },
+            R16000 => Profile {
+                name: "R16000",
+                // QEMU's R16000 diagnostic_rw_bitmask.
+                cp0_diag_write_mask: 0x0403_cffb,
+                ..profile(R14000)
+            },
             _ => Profile::BASE,
         }
     }
@@ -3749,6 +3762,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
     const SECONDARY_TAG_MASK: u64 = model::profile(MODEL).l2_tag_mask;
     const LWR_PRESERVES_UPPER: bool = model::profile(MODEL).lwr_preserves_upper;
     const NARROW_STORES_CARRY_GPR: bool = model::profile(MODEL).narrow_stores_carry_gpr;
+    const CP0_DIAG_WRITE_MASK: u32 = model::profile(MODEL).cp0_diag_write_mask;
     const NAME: &'static str = model::profile(MODEL).name;
 }
 
