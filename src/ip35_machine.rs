@@ -603,7 +603,7 @@ impl FuelBoard {
         for widget in [0, 10, 14, 15] {
             io.connect_widget(widget, xbridge.widget(widget).unwrap());
         }
-        let weak_io = Arc::downgrade(&io);
+        let weak_io = Arc::downgrade(io);
         xbridge.set_interrupt_sender(Arc::new(move |packet| {
             if packet.widget != 10 {
                 return false;
@@ -618,7 +618,7 @@ impl FuelBoard {
                 ) == BUS_OK
             })
         }));
-        let weak_io = Arc::downgrade(&io);
+        let weak_io = Arc::downgrade(io);
         xbridge.set_dma_sender(Arc::new(move |packet, bytes| {
             if packet.widget != 10 || packet.half_read_requested || packet.half_write_requested {
                 dlog!(LogModule::Bedrock,
