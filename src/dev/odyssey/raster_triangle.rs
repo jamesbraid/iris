@@ -6,6 +6,8 @@
 
 use super::*;
 
+use crate::dev::gl::math::xform;
+
 /// The six planes of the view volume (OpenGL 1.2.1, 2.11), -w <= x, y,
 /// z <= w, as each one's value at a point, which is >= 0 inside it.
 pub const VOLUME_PLANES: i32 = 6;
@@ -145,18 +147,19 @@ impl VolumeVertex {
 }
 
 impl GlDrawState {
-    /// One vertex to clip coordinates (OpenGL 1.2.1, 2.10): object to eye by
-    /// the modelview and eye to clip by the projection, or by the window
-    /// matrix as GlDrawState::eye_to_clip() takes it.
+    /// One vertex to clip coordinates (OpenGL 1.2.1, 2.10), in single
+    /// precision through the shared transform: object to eye by the
+    /// modelview and eye to clip by the projection, or by the window matrix
+    /// as GlDrawState::eye_to_clip() takes it. Clipping then works in double
+    /// on the result.
     pub fn volume_from_draw_vertex(&self, v: &[f32]) -> VolumeVertex {
-        let mut eye = [0.0f64; 4];
+        let eye = xform(&self.modelview, v[GL_V_POSITION..GL_V_POSITION + 4].try_into().expect("a position"));
 
-        for row in 0..4usize {
-            for k in 0..4usize {
-                eye[row] += self.modelview[k * 4 + row] as f64 * v[GL_V_POSITION + k] as f64;
-            }
+        VolumeVertex {
+            clip: self.eye_to_clip(eye).map(f64::from),
+            eye: eye.map(f64::from),
+            attr: v[..GL_VERTEX_FLOATS].try_into().expect("a whole vertex"),
         }
-        VolumeVertex { clip: self.eye_to_clip(&eye), eye, attr: v[..GL_VERTEX_FLOATS].try_into().expect("a whole vertex") }
     }
 }
 

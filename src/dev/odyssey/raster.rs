@@ -1375,12 +1375,14 @@ impl SoftDraw<'_> {
 
 impl SoftDraw<'_> {
     /// Map one clipped vertex (2.10): the divide by w and the viewport map,
-    /// with depth left normalized to [0, 1]; the depth range maps it per
-    /// fragment. Under a window matrix the position is the matrix's and the
-    /// depth its window depth. Clipping has put the vertex in the view volume,
-    /// so its normalized depth is clamped to [0, 1] against rounding. Under the
-    /// rules' depth row the depth is the row's over w instead, unclamped, as
-    /// clipping does not bound it. The colour is the front colour; a back-facing
+    /// in single precision through the shared mapping
+    /// (GlDrawState::clip_to_window()), with depth left normalized to
+    /// [0, 1]; the depth range maps it per fragment. Under a window matrix
+    /// the position is the matrix's and the depth its window depth. Clipping
+    /// has put the vertex in the view volume, so its normalized depth is
+    /// clamped to [0, 1] against rounding. Under the rules' depth row the
+    /// depth is the row's over w instead, unclamped, as clipping does not
+    /// bound it. The colour is the front colour; a back-facing
     /// triangle takes its back colour later.
     /// A vertex with w <= 0 is in the volume only at the clip-space origin,
     /// where the divide has no answer, and returns None, as does one mapped
@@ -1393,11 +1395,11 @@ impl SoftDraw<'_> {
         if !self.texture_vertex_valid(cv) {
             return None;
         }
-        if !(clip[3] > 0.0) {
+        let sub = (1i32 << self.rules.subpixel_bits) as f64;
+        let Some(win) = st.clip_to_window(clip, sub as f32) else {
             crate::dlog!(LogModule::Odyssey, "sgi-gl: clipped vertex at w {} has no window position, primitive dropped", clip[3]);
             return None;
-        }
-        let win = st.clip_to_window(clip);
+        };
         let xw = win[0];
         let yw = win[1];
         if !(xw.abs() < 65536.0 && yw.abs() < 65536.0) {
@@ -1407,7 +1409,6 @@ impl SoftDraw<'_> {
         for k in 0..4usize {
             out.texcoord[k] = cv.attr[GL_V_TEXCOORD + k] as f64;
         }
-        let sub = (1i32 << self.rules.subpixel_bits) as f64;
         out.x = self.rules.round(xw * sub);
         out.y = self.rules.round(yw * sub);
         if !self.rules.depth_row_given {

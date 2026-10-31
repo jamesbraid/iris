@@ -10,6 +10,7 @@
 use super::*;
 
 use crate::dev::gl::math::{xform, IDENT};
+use crate::dev::gl::vertex::{Viewport, Wv};
 
 /// A raster operation: pixel work on a head's planes that is not a GL
 /// primitive, queued beside draws in the order the head received it.
@@ -1358,42 +1359,56 @@ impl GlContext {
 }
 
 impl GlDrawState {
-    /// An eye position's clip coordinates (2.10) under the draw state: by the
-    /// projection, or under a window matrix the window matrix's h with x and y
-    /// scaled by 1 / GL_WINDOW_GUARD and z by 2 window_depth_scale, less w.
-    pub fn eye_to_clip(&self, eye: &[f64; 4]) -> [f64; 4] {
-        let m = if self.window_matrix_given { &self.window_matrix } else { &self.projection };
-        let mut clip = [0.0f64; 4];
-
-        for row in 0..4 {
-            for k in 0..4 {
-                clip[row] += (m[k * 4 + row] as f64) * eye[k];
-            }
+    /// An eye position's clip coordinates (2.10) under the draw state, in
+    /// single precision through the shared transform (dev::gl::math): by the
+    /// projection, or under a window matrix the window matrix's h with x and
+    /// y scaled by 1 / GL_WINDOW_GUARD and z by 2 window_depth_scale, less w.
+    pub fn eye_to_clip(&self, eye: [f32; 4]) -> [f32; 4] {
+        if !self.window_matrix_given {
+            return xform(&self.projection, eye);
         }
-        if self.window_matrix_given {
-            clip[0] /= GL_WINDOW_GUARD as f64;
-            clip[1] /= GL_WINDOW_GUARD as f64;
-            clip[2] = 2.0 * self.window_depth_scale as f64 * clip[2] - clip[3];
-        }
-        clip
+        let h = xform(&self.window_matrix, eye);
+        let guard = GL_WINDOW_GUARD as f32;
+        [h[0] / guard, h[1] / guard, 2.0 * self.window_depth_scale * h[2] - h[3], h[3]]
     }
 
-    /// Clip coordinates as GlDrawState::eye_to_clip() gives them to window x and y
-    /// and normalized depth, (z / w + 1) / 2. w must be positive.
-    pub fn clip_to_window(&self, clip: &[f64; 4]) -> [f64; 3] {
-        let vp = &self.viewport;
-        let z = (clip[2] / clip[3] + 1.0) / 2.0;
+    /// The viewport as the shared viewport mapping takes it, depth [0, 1]
+    /// left normalized: the depth range maps it per fragment.
+    pub fn gl_viewport(&self) -> Viewport {
+        let [x, y, w, h] = self.viewport.map(|v| v as f32);
+        let mut vp = Viewport::default();
 
-        if self.window_matrix_given {
-            [clip[0] * GL_WINDOW_GUARD as f64 / clip[3], clip[1] * GL_WINDOW_GUARD as f64 / clip[3], z]
-        } else {
-            // 2.10.1: xw = (px / 2) xd + ox, ox = x + w / 2.
-            [
-                (clip[0] / clip[3] + 1.0) * vp[2] as f64 / 2.0 + vp[0] as f64,
-                (clip[1] / clip[3] + 1.0) * vp[3] as f64 / 2.0 + vp[1] as f64,
-                z,
-            ]
+        vp.set(x, y, w, h, 0.0, 1.0, 1.0);
+        vp
+    }
+
+    /// Clip coordinates as GlDrawState::eye_to_clip() gives them to window x
+    /// and y, snapped to 1 / subpixel of a pixel, and normalized depth,
+    /// (z / w + 1) / 2, in single precision: the shared viewport mapping
+    /// (dev::gl::vertex::Viewport::project()), or under a window matrix the
+    /// window position the matrix gives. None for a w of zero or less.
+    ///
+    /// The shared mapping drops a w of at most 1e-6, which breaks the
+    /// homogeneous scale of a clip vector: a vertex scaled by 1e-7 is the
+    /// same point. The board's rule for a small w is UNKNOWN (the datasheet
+    /// is silent), so VPro keeps its earlier one, w > 0, by dividing such a
+    /// vertex through by w before the mapping, which leaves it at w = 1.
+    pub fn clip_to_window(&self, clip: &[f64; 4], subpixel: f32) -> Option<[f64; 3]> {
+        let mut h = clip.map(|c| c as f32);
+
+        if !(h[3] > 0.0) {
+            return None;
         }
+        if !self.window_matrix_given {
+            if h[3] <= 1e-6 {
+                h = h.map(|c| c / h[3]);
+            }
+            let v = self.gl_viewport().project(Wv::<0, 0> { h, ..Default::default() }, [0.0, 0.0], subpixel);
+            return (v.ok != 0).then_some([v.x as f64, v.y as f64, v.z as f64]);
+        }
+        let guard = GL_WINDOW_GUARD as f32;
+        let snap = |v: f32| (v * subpixel).round() / subpixel;
+        Some([snap(h[0] * guard / h[3]) as f64, snap(h[1] * guard / h[3]) as f64, ((h[2] / h[3] + 1.0) * 0.5) as f64])
     }
 }
 
