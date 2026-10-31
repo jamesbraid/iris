@@ -16,6 +16,7 @@
 //! check for a change that moves numerics on purpose (the vertex side moving
 //! to 32-bit floats); a change that must not move a pixel uses the default.
 
+pub mod replay;
 pub mod scenes;
 pub mod vertices;
 
