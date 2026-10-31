@@ -187,9 +187,6 @@ pub mod reg {
     pub const MD_SIZE: u64 = 0x8_0000;
 }
 
-/// Where the processor's reset vector and the PROM payload start.
-const RESET_BASE: u64 = 0x1fc0_0000;
-
 /// What a board gives its Bedrock node.
 pub(crate) struct NodeConfig<'a> {
     /// The board's name in logs and map names.
@@ -221,10 +218,6 @@ pub(crate) struct Node {
     pub io: Arc<BedrockIo>,
     pub ni: Arc<BedrockNi>,
     pub xb: Arc<BedrockXb>,
-    /// The reset PROM's window, `(base, size)`: the payload at 0x1fc0_0000.
-    /// A board whose RAM can cover it gives it to its CPU as the cached
-    /// plane, so the PROM's noncoherent cached fetches stay on the PROM.
-    pub reset_window: Option<(u64, u64)>,
     #[cfg(test)]
     pub irq: Arc<PendingIrq>,
 }
@@ -361,12 +354,14 @@ impl Node {
         }
         // Reset execution always sees stored bytes, independently of commands.
         bus.map(0, 0x1fc0_0000, 0x40_0000, prom.clone());
-        let reset_window = (!payload.is_empty()).then_some((RESET_BASE, payload.len() as u64));
-        if let Some((base, size)) = reset_window {
-            map_device(&phys, base, size, prom.clone(), &format!("{name} cached reset PROM"));
-            // References on the PROM plane reach these bytes whatever RAM
-            // later covers the window.
-            bus.set_prom_plane(base, size, Arc::new(Window::new(base, size, prom.clone())));
+        if !payload.is_empty() {
+            map_device(
+                &phys,
+                0x1fc0_0000,
+                payload.len() as u64,
+                prom.clone(),
+                &format!("{name} cached reset PROM"),
+            );
         }
         let leds = Arc::new(Leds {
             md: md.clone(),
@@ -390,7 +385,6 @@ impl Node {
         bus.map(2, 0, 1 << 33, md.fetchop_bus());
         Ok(Self {
             bus: Arc::new(bus),
-            reset_window,
             pi,
             md,
             l1,
