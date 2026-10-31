@@ -9,8 +9,9 @@
 //! what a frame reads is shared through cells of its own, each held only to
 //! copy:
 //!
-//! - the rows the raster unit drew, published at completions, at drain and
-//!   at the end of a slice (`RasterCtx::publish`);
+//! - the rows the raster unit drew, published as atomic words at
+//!   completions, at drain and at the end of a slice (`RasterCtx::publish`,
+//!   `PublishedRows`);
 //! - the lookup RAM, the display modes and the cursor (`DisplayRegs`), with
 //!   a generation that moves when the front end stores to them;
 //! - the scanout mode and the retrace restart (`DisplayShared::publish_mode`);

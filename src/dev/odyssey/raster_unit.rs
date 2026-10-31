@@ -34,7 +34,7 @@
 //!   it copies half-drawn is drawn again by the next frame (reader.rs).
 //!
 //! The rows a job wrote are the display's business too. The raster thread
-//! keeps them in its context while it draws and publishes them to a cell
+//! keeps them in its context while it draws and publishes them to words
 //! the display takes from (`RasterCtx::publish`): before it runs a job
 //! that tells the guest something (`RasterQueue::submit_completion`), when
 //! the queue drains, and when a slice ends. A guest that waits for a
@@ -51,7 +51,7 @@ use super::*;
 
 use std::cell::Cell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::{Acquire, Release, SeqCst}};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -167,24 +167,52 @@ impl DrawnRows {
             }
         }
     }
+}
 
-    /// Move every row `from` holds into this set, leaving `from` empty.
-    pub fn absorb(&mut self, from: &mut DrawnRows) {
+/// The rows the raster unit has published and the display has not yet
+/// taken: the same sets as [`DrawnRows`], as atomic words. The raster thread
+/// ORs its rows in after the stores that drew them and the display swaps
+/// each word out, so neither waits for the other. A word the display takes
+/// just before a publish lands is taken at its next frame.
+pub struct PublishedRows {
+    by_id: Box<[[[AtomicU64; ROW_WORDS]; ODSY_DISPMODE_COUNT as usize]; ODSY_BUFFERS as usize]>,
+    overlay: [AtomicU64; ROW_WORDS],
+    /// Some row may be held.
+    any: AtomicBool,
+}
+
+impl Default for PublishedRows {
+    fn default() -> Self {
+        PublishedRows {
+            by_id: Box::new(std::array::from_fn(|_| std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))))),
+            overlay: std::array::from_fn(|_| AtomicU64::new(0)),
+            any: AtomicBool::new(false),
+        }
+    }
+}
+
+impl PublishedRows {
+    /// Move every row `from` holds into the published set, leaving `from`
+    /// empty.
+    pub fn absorb(&self, from: &mut DrawnRows) {
         if !std::mem::take(&mut from.any) {
             return;
         }
-        self.any = true;
-        for (o, f) in self.overlay.iter_mut().zip(from.overlay.iter_mut()) {
-            *o |= std::mem::take(f);
+        for (o, f) in self.overlay.iter().zip(from.overlay.iter_mut()) {
+            if *f != 0 {
+                o.fetch_or(std::mem::take(f), Release);
+            }
         }
-        for (ids, from_ids) in self.by_id.iter_mut().zip(from.by_id.iter_mut()) {
-            for (rows, from_rows) in ids.iter_mut().zip(from_ids.iter_mut()) {
-                for (o, f) in rows.iter_mut().zip(from_rows.iter_mut()) {
-                    *o |= std::mem::take(f);
+        for (ids, from_ids) in self.by_id.iter().zip(from.by_id.iter_mut()) {
+            for (rows, from_rows) in ids.iter().zip(from_ids.iter_mut()) {
+                for (o, f) in rows.iter().zip(from_rows.iter_mut()) {
+                    if *f != 0 {
+                        o.fetch_or(std::mem::take(f), Release);
+                    }
                 }
             }
         }
-        from.overlay = [0; ROW_WORDS];
+        self.any.store(true, Release);
     }
 
     /// Hand the display the rows the draws so far changed, and forget
@@ -192,25 +220,24 @@ impl DrawnRows {
     /// there: the scanout repaints it. A row written to either buffer
     /// joins the rows where the window's buffers may differ (`differ`),
     /// which a swap of that window repaints.
-    pub fn take(&mut self, displayed: u32, differ: &mut Differ, marks: &RowMarks) {
-        if !std::mem::take(&mut self.any) {
+    pub fn take(&self, displayed: u32, differ: &mut Differ, marks: &RowMarks) {
+        if !self.any.swap(false, Acquire) {
             return;
         }
-        let mut shown = self.overlay;
+        let mut shown: [u64; ROW_WORDS] = std::array::from_fn(|i| self.overlay[i].swap(0, Acquire));
 
-        for (b, ids) in self.by_id.iter_mut().enumerate() {
-            for (id, rows) in ids.iter_mut().enumerate() {
-                if (displayed >> id) & 1 == b as u32 {
-                    for (s, w) in shown.iter_mut().zip(rows.iter()) {
-                        *s |= w;
+        for (b, ids) in self.by_id.iter().enumerate() {
+            for (id, rows) in ids.iter().enumerate() {
+                for (w, (d, row)) in differ[id].iter_mut().zip(rows.iter()).enumerate() {
+                    let bits = row.swap(0, Acquire);
+
+                    *d |= bits;
+                    if (displayed >> id) & 1 == b as u32 {
+                        shown[w] |= bits;
                     }
-                }
-                for (d, w) in differ[id].iter_mut().zip(rows.iter_mut()) {
-                    *d |= std::mem::take(w);
                 }
             }
         }
-        self.overlay = [0; ROW_WORDS];
         for (i, mut w) in shown.into_iter().enumerate() {
             while w != 0 {
                 marks.repaint(DirtySite::Raster, (i as u32 * 64 + w.trailing_zeros()) as i32, 1);
@@ -219,10 +246,6 @@ impl DrawnRows {
         }
     }
 }
-
-/// The cell the raster unit publishes its drawn rows to and the display takes
-/// them from.
-pub type PublishedRows = Arc<Mutex<DrawnRows>>;
 
 /// The raster unit's own state.
 #[derive(Default)]
@@ -235,21 +258,21 @@ pub struct RasterCtx {
     /// them.
     pub drawn: DrawnRows,
     /// Where `publish` puts them.
-    published: PublishedRows,
+    published: Arc<PublishedRows>,
 }
 
 impl RasterCtx {
-    fn new(published: PublishedRows) -> Self {
+    fn new(published: Arc<PublishedRows>) -> Self {
         RasterCtx { line_phase: 0, drawn: DrawnRows::default(), published }
     }
 
     /// Hand the rows drawn so far to the display. Called before anything the
     /// guest can see that follows the drawing, when the queue drains and
-    /// when a slice ends; the cell's lock is held for a copy of at most the
-    /// rows' bitsets and never across a draw.
+    /// when a slice ends: the guest's own fences and swaps are what order the
+    /// display's view of the drawing, as on the board.
     pub fn publish(&mut self) {
         if self.drawn.any {
-            self.published.lock().absorb(&mut self.drawn);
+            self.published.absorb(&mut self.drawn);
         }
     }
 }
@@ -336,7 +359,7 @@ pub struct RasterQueue<const HEADS: usize = 1> {
     ctx: Mutex<RasterCtx>,
     /// The rows the raster unit has published and the display has not yet
     /// taken (RasterCtx::publish()).
-    published: PublishedRows,
+    published: Arc<PublishedRows>,
     /// Jobs submitted and not yet finished.
     pending: AtomicU32,
     /// The estimated work of those jobs, in pixels (`RASTER_WORK_BUDGET`).
@@ -386,7 +409,7 @@ unsafe impl<const HEADS: usize> Sync for RasterQueue<HEADS> {}
 impl<const HEADS: usize> Default for RasterQueue<HEADS> {
     fn default() -> Self {
         const { assert!(HEADS == 1, "the board has one raster unit") };
-        let published = PublishedRows::default();
+        let published = Arc::<PublishedRows>::default();
         RasterQueue {
             // SAFETY: a zeroed GFifo is an empty one (GFifo::new); built in
             // place because the ring is too big for the stack.
@@ -610,7 +633,7 @@ impl RasterQueue {
     /// those a window shows go to `marks`, and all join `differ`. It waits
     /// for no slice in flight.
     pub fn take_published_rows(&self, displayed: u32, differ: &mut Differ, marks: &RowMarks) {
-        self.published.lock().take(displayed, differ, marks);
+        self.published.take(displayed, differ, marks);
     }
 
     /// Tests: a slice holds the raster unit's context.
