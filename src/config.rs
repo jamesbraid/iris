@@ -799,16 +799,38 @@ pub enum CpuModel {
     /// the Indigo2 IMPACT (IP28). The machine uses shadow cache arrays;
     /// see `docs/indigo2-ip28.md` and `src/cpu/mips_cache_shadow.rs`.
     R10000,
+    /// MIPS R12000, an R10000-family part: the Octane2's 360 MHz R12000 with
+    /// 2 MiB of secondary cache, or the O2's 300 MHz part with 1 MiB.
+    R12000,
+    /// MIPS R14000, an R10000-family part: the Octane's revision 2.4 with
+    /// 2 MiB of secondary cache.
+    R14000,
 }
 
 impl CpuModel {
-    pub const ALL: [Self; 3] = [Self::R4400, Self::R5000, Self::R10000];
+    pub const ALL: [Self; 5] = [Self::R4400, Self::R5000, Self::R10000, Self::R12000, Self::R14000];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::R4400 => "MIPS R4400",
             Self::R5000 => "MIPS R5000",
             Self::R10000 => "MIPS R10000",
+            Self::R12000 => "MIPS R12000",
+            Self::R14000 => "MIPS R14000",
+        }
+    }
+
+    /// Whether `profile` shipped with this part. The R12000 and R14000 are
+    /// limited to the machines a source records them in (origami's datasheets):
+    /// the Octane2's R12000 (`ip30-r12000.md`), a dual-R14000 Octane
+    /// (`r14000.md`, IP30 identity and cache review) and the O2's 300 MHz
+    /// R12000 (`o2-hardware-findings.md`). The older parts keep the choices
+    /// the machines already had.
+    pub fn fits(self, profile: MachineProfile) -> bool {
+        match self {
+            Self::R12000 => matches!(profile, MachineProfile::OctaneIp30 | MachineProfile::O2Ip32),
+            Self::R14000 => matches!(profile, MachineProfile::OctaneIp30),
+            _ => true,
         }
     }
 }
@@ -839,7 +861,7 @@ impl CacheModel {
     /// Whether `cpu` runs the shadow cache under this setting.
     pub fn is_shadow(self, cpu: CpuModel) -> bool {
         match (cpu, self) {
-            (CpuModel::R10000, _) => true,
+            (CpuModel::R10000 | CpuModel::R12000 | CpuModel::R14000, _) => true,
             (_, Self::Full) => false,
             (_, Self::Shadow) => true,
             (_, Self::Auto) => cfg!(feature = "jitv2"),
@@ -1927,6 +1949,9 @@ impl MachineConfig {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if !self.machine.cpu.fits(self.machine.profile) {
+            return Err(format!("{} is not a processor the {:?} shipped with", self.machine.cpu.label(), self.machine.profile));
+        }
         if self.machine.cpus != 1 && self.machine.profile != MachineProfile::OctaneIp30 {
             return Err(format!("[machine] cpus = {}: only the Octane has more than one processor", self.machine.cpus));
         }
@@ -2286,9 +2311,10 @@ pub struct Cli {
     #[arg(long = "no-scsi-deferred-int", default_value_t = false)]
     pub no_scsi_deferred_int: bool,
 
-    /// Emulated CPU: `r4400` (default), `r5000`, or `r10000`. Overrides `[machine] cpu`.
+    /// Emulated CPU: `r4400` (default), `r5000`, `r10000`, `r12000` or `r14000`. Overrides `[machine] cpu`.
+    /// The last two are limited to the machines they shipped in.
     ///
-    /// All three models are compiled into every build — each is its own
+    /// Every model is compiled into every build — each is its own
     /// monomorphisation, so the hot path carries no per-model branch — and this
     /// picks between them at construction. The `r5k` Cargo feature is removed.
     #[arg(long = "cpu", value_name = "MODEL")]
@@ -2572,6 +2598,26 @@ pub fn parse_nat_subnet(cidr: &str) -> Result<(std::net::Ipv4Addr, std::net::Ipv
 #[cfg(test)]
 mod export_tests {
     use super::*;
+
+    /// The R12000 and R14000 are accepted only where a source records them.
+    #[test]
+    fn r12000_and_r14000_are_limited_to_the_machines_they_shipped_in() {
+        for (profile, r12, r14) in [
+            (MachineProfile::OctaneIp30, true, true),
+            (MachineProfile::O2Ip32, true, false),
+            (MachineProfile::IndyIp24, false, false),
+            (MachineProfile::Indigo2Ip22, false, false),
+            (MachineProfile::Indigo2Ip28, false, false),
+        ] {
+            assert_eq!(CpuModel::R12000.fits(profile), r12, "R12000 on {profile:?}");
+            assert_eq!(CpuModel::R14000.fits(profile), r14, "R14000 on {profile:?}");
+            assert!(CpuModel::R10000.fits(profile));
+        }
+        let mut cfg = MachineConfig::default();
+        cfg.machine.profile = MachineProfile::IndyIp24;
+        cfg.machine.cpu = CpuModel::R12000;
+        assert!(cfg.validate().unwrap_err().contains("R12000"));
+    }
 
     #[test]
     fn toml_export_roundtrips() {
