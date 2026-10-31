@@ -427,7 +427,6 @@ impl Board {
                 }
             }
         }
-        self.scanout.invalidate_all();
         true
     }
 }

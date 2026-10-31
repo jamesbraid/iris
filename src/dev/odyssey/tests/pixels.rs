@@ -566,3 +566,31 @@ fn a_pixel_buffers_front_is_the_buffer_a_front_draw_mask_writes() {
     copy_block(&mut s, [0x3000_0019, 40 << 16 | 30, 0x8020_0050, 1 << 16 | 1, front, base, 0, 0x3802_204b]);
     assert_eq!(s.object_load(obj, 0, 0), 0x0102_0304, "swapped front");
 }
+
+/// The display lines still waiting to be resolved again.
+fn dirty_lines(s: &Board) -> Vec<usize> {
+    s.scanout.dirty.iter().enumerate().filter(|(_, d)| **d).map(|(y, _)| y).collect()
+}
+
+/// A GL image write, by burst or by DMA, and a pixel copy write colour
+/// planes from the front end and not as a raster job, so nothing else
+/// records their rows: each marks the display lines it wrote, those and no
+/// others, or the display would not show the pixels (or would resolve the
+/// whole frame for one).
+#[test]
+fn a_gl_pixel_write_marks_the_display_lines_it_wrote() {
+    let (mut s, ram) = window();
+    s.scanout_update();
+    assert_eq!(dirty_lines(&s), Vec::<usize>::new(), "a settled display has nothing to resolve");
+
+    burst_image(&mut s, (40, 10, 42, 12), 0x0001_104b, ODSY_IMAGE_FMT_RGB, &[0x1100_00ff, 0x2200_00ff, 0x3300_00ff, 0x4400_00ff]);
+    assert_eq!(dirty_lines(&s), [10, 11], "a burst image");
+    s.scanout_update();
+
+    dma_write(&mut s, &ram, (50, 20, 2), 0x1000, 0x04b, &[1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(dirty_lines(&s), [20], "a DMA image");
+    s.scanout_update();
+
+    copy_block(&mut s, [0x3000_0019, 10 << 16 | 40, 0x0050_2050, 2 << 16 | 2, 0x9263_3042, 0x3000_0010, 30 << 16 | 60, 0x3863_204b]);
+    assert_eq!(dirty_lines(&s), [30, 31], "a pixel copy");
+}

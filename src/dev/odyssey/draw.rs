@@ -242,6 +242,8 @@ impl Board {
     }
 
     /// A colour write, into each buffer the drawing mask selects.
+    ///
+    /// Marks the pixel's display line to be resolved again.
     pub fn paint_pixel(&mut self, x: i64, y: i64, pixel: u32) {
         let buffers = self.draw_buffers();
 
@@ -253,6 +255,9 @@ impl Board {
                 self.buffer_store(b, x, y, pixel);
             }
         }
+        // A store from the front end, not a raster job: the display line is
+        // marked here, since no job records the row (see RasterQueue::submit()).
+        self.scanout.invalidate(y as i32, 1);
     }
 }
 
@@ -730,6 +735,7 @@ impl Board {
                     rgba,
                     SGI_LOGIC_COPY as u8,
                 );
+                self.scanout.invalidate(self.image_cur_y as i32 + self.win_origin[1], 1);
             } else if !self.aux_image_reported {
                 self.aux_image_reported = true;
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: an RGB image to the id-plane destination is not modeled; dropped");
@@ -754,7 +760,6 @@ impl Board {
         } else {
             self.image_cur_x = self.image_cur_x.wrapping_add(1);
         }
-        self.scanout.invalidate_all();
     }
 
     /// One byte-stream texel of the open image at the raster cursor, bounded by

@@ -538,7 +538,6 @@ impl Board {
                 self.paint_pixel(px, py, rgba);
             }
         }
-        self.scanout.invalidate_all();
     }
 
     /// True the first time reason (ODSY_DMA_REPORT_*) comes up: report it then.
