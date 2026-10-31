@@ -1924,7 +1924,10 @@ impl Board {
             // streams a frame into a larger texture. The rest of the level is
             // still its storage, with contents GL leaves undefined: grow the
             // object to the level's rows, the new ones reading 0. Before any
-            // level's place is taken, since growing may move objects.
+            // level's place is taken, since growing may move objects. Growth
+            // that fits the store always succeeds (object_rows() forgets
+            // others to make room), and one that cannot is not tried, so a
+            // draw never waits on the raster unit for a growth that fails.
             if !bordered && !texture_move {
                 for i in 0..count {
                     let e = ((first + i) * 3) as usize;
@@ -1932,12 +1935,13 @@ impl Board {
                     let stride_units = self.tex_levels[e + 1] & 0xfff;
                     let (level_width, level_height) = (cmax(1, width >> i), cmax(1, height >> i));
 
-                    if object >= 0 && self.obj_count <= SGI_ODYSSEY_OBJECTS {
+                    if object >= 0 {
                         let o = object as usize;
 
                         if self.obj_width[o] >= level_width
                             && (stride_units == 0 || self.obj_width[o] == stride_units * 16)
                             && self.obj_rows[o] < level_height
+                            && self.obj_width[o] as u64 * level_height as u64 <= ODSY_OBJ_POOL_WORDS as u64
                         {
                             self.object_rows(object, level_height);
                         }
