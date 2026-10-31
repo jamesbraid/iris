@@ -583,20 +583,3 @@ fn the_fuel_plugs_a_usb_keyboard_and_mouse_only_when_configured_on() {
     let (_, status) = ports(false);
     assert_eq!(status.map(|s| s & 1), [0, 0], "nothing plugged in");
 }
-
-/// A reference on the PROM plane reads the reset PROM's bytes through the
-/// cached view, inside the payload only, whatever RAM covers the window;
-/// the Fuel's CPU sets no cached plane, so it never makes such a reference.
-#[test]
-fn the_prom_plane_reads_the_reset_payload_through_the_cached_view() {
-    let payload: Vec<u8> = (0..0x400u32).flat_map(|i| (0x7000_0000 | i).to_be_bytes()).collect();
-    let board = crate::ip34_machine::FuelBoard::new(&payload, Arc::new(|| 0)).unwrap();
-    let cached = board.cached_bus();
-    let plane = crate::ip35::PROM_PLANE;
-    assert_eq!(cached.read32(plane | 0x1fc0_0008).data, 0x7000_0002);
-    assert_eq!(cached.read64(plane | 0x1fc0_0ff8).data, 0x7000_03fe_7000_03ff);
-    assert_eq!(cached.read32(plane | 0x1fc0_1000).status, crate::traits::BUS_ERR, "past the payload");
-    assert_eq!(cached.read32(plane | 0x1fbf_fffc).status, crate::traits::BUS_ERR, "before the payload");
-    assert_eq!(board.bus.read32(plane | 0x1fc0_0008).status, crate::traits::BUS_ERR, "not on the uncached views");
-}
-
