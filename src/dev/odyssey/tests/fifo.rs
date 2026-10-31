@@ -813,6 +813,34 @@ fn two_processors_storing_to_the_fifo_lose_nothing_and_keep_each_ones_order() {
     assert_eq!((h.fifo.stores(), h.fifo.level()), (0, 0));
 }
 
+/// The board's thread can take a store out of the ring the moment it lands,
+/// before the processor's push has returned. The level already counts it
+/// then: the retire takes off no more words than the level holds, so the
+/// level reads empty rather than wrapping to a full FIFO, and the fall
+/// from 20 words to none latches the low-water flag.
+#[test]
+fn a_store_run_before_its_push_returns_is_already_in_the_level() {
+    let (s, _) = board("v12");
+    let h = BoardLocks::new(s);
+    h.front.lock().intr_flags &= !ODSY_INTR_FIFO_LOW_WATER;
+    for seq in 0..20 {
+        assert!(h.fifo.push(&h.front, ODSY_CMD_FIFO, seq, 4, false));
+    }
+    fn run_everything(fifo: &CommandFifo, front: &Mutex<HostInterface>) {
+        let mut run = Run::new();
+        fifo.take_run(&mut run);
+        let n = run.stores().len();
+        assert_eq!(n, 21, "the store being pushed is in the ring");
+        fifo.retire(front, &run, n);
+        assert_eq!((fifo.stores(), fifo.level()), (0, 0), "the run took out what the level counted");
+    }
+    *h.fifo.test_after_ring_push.lock() = Some(run_everything);
+    assert!(h.fifo.push(&h.front, ODSY_CMD_FIFO, 20, 8, false));
+    assert!(h.fifo.test_after_ring_push.lock().is_none(), "the consumer ran inside the push");
+    assert_eq!((h.fifo.stores(), h.fifo.level()), (0, 0));
+    assert_ne!(h.front.lock().intr_flags & ODSY_INTR_FIFO_LOW_WATER, 0, "the level fell through the mark");
+}
+
 /// The deep ring takes stores past the model's 32,768 words, and the guest
 /// still reads the model's own FIFO: the level clamped at the brim, so
 /// STATUS0 and the `0x106c` doubleword count read a full FIFO and the

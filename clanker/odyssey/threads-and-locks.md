@@ -203,7 +203,11 @@ at up to 32 stores, runs them, and takes the ones it ran out together
 credits move once a run, not once a store, because each store costs the
 worker little and the processor reads those words. A store that has run but
 not retired still counts in the level, so the level never reads below what the
-board has left to take. While a counted store waits a run is one store.
+board has left to take. A push counts its store (level, store count, counted
+stores) before the ring shows it and takes the counts back off if the ring
+refuses it: the worker can take a store and retire it the instant it lands,
+before the push returns, and a retire must find every store it takes already
+counted or the level goes below zero. While a counted store waits a run is one store.
 While the worker runs every command store queues, so decoding and drawing
 never run on the processor's thread.
 

@@ -205,6 +205,11 @@ pub struct CommandFifo {
     /// run this many per slice.
     #[cfg(test)]
     pub test_words: AtomicU32,
+    /// Tests: the next uncounted push calls this, once, as soon as its
+    /// store is in the ring: a consumer that takes the store at that
+    /// moment, before the push has returned.
+    #[cfg(test)]
+    pub test_after_ring_push: Mutex<Option<fn(&CommandFifo, &Mutex<HostInterface>)>>,
 }
 
 impl Default for CommandFifo {
@@ -227,6 +232,8 @@ impl Default for CommandFifo {
             pf_level: crate::PfValue::new(),
             #[cfg(test)]
             test_words: AtomicU32::new(0),
+            #[cfg(test)]
+            test_after_ring_push: Mutex::new(None),
         }
     }
 }
@@ -329,11 +336,20 @@ impl CommandFifo {
         if !self.has_room(words) {
             return false;
         }
-        let before = self.queued_words();
         let mut q = QueuedStore { value, addr: addr as u32, size: size as u8, counted, owed: false };
         // A counted store's place is settled against the consumer's pops.
         let _c = counted.then(|| self.pop.lock());
-        let credited = counted && self.stores() < ODSY_CFIFO_DEPTH;
+        // Count the store before the ring shows it. The board's thread can
+        // take it and retire it the moment it is in the ring, and a retire
+        // must find every store it takes already counted, or the level falls
+        // below zero. Until the push lands the counts are a store high,
+        // which reads as a store still waiting, never as one gone.
+        if counted {
+            self.levels.counted.fetch_add(1, SeqCst);
+        }
+        let stores_before = self.levels.stores.fetch_add(1, SeqCst);
+        let before = self.levels.words.fetch_add(words, SeqCst);
+        let credited = counted && stores_before < ODSY_CFIFO_DEPTH;
         q.owed = counted && !credited;
         if !self.ring.try_push(q.entry(), q.value) {
             // With one processor this cannot happen: has_room counted the
@@ -341,8 +357,19 @@ impl CommandFifo {
             // processor's store can hold the ring's lock, or take the last
             // place between has_room and here. Refused, the store goes the
             // board-lock way (`write_command`), which runs what waits and
-            // then the store.
+            // then the store. Nothing took it out, so its counts come back off.
+            self.levels.words.fetch_sub(words, SeqCst);
+            self.levels.stores.fetch_sub(1, SeqCst);
+            if counted {
+                self.levels.counted.fetch_sub(1, SeqCst);
+            }
             return false;
+        }
+        #[cfg(test)]
+        if !counted {
+            if let Some(consumer) = self.test_after_ring_push.lock().take() {
+                consumer(self, front);
+            }
         }
         if counted {
             let mut f = front.lock();
@@ -351,12 +378,8 @@ impl CommandFifo {
             } else if let Some(pi) = &f.pi {
                 pi_gfx_owe_credits(pi.as_ref(), f.slot, 1);
             }
-            self.levels.counted.fetch_add(1, SeqCst);
         }
-        self.levels.stores.fetch_add(1, SeqCst);
-        // The board's thread may retire this store before the level counts it,
-        // which wraps the level for a moment; the sum wraps back.
-        let after = self.levels.words.fetch_add(words, SeqCst).wrapping_add(words);
+        let after = before + words;
         let mark = self.threshold_6b2.load(SeqCst);
         if mark != 0 && before < mark && after >= mark {
             // Reaching the model's 0x6b2 threshold raises flag 25, whatever
@@ -405,6 +428,7 @@ impl CommandFifo {
         if self.levels.words.load(SeqCst) < ODSY_CFIFO_LOW_WATER + words {
             let mut f = front.lock();
             let before = self.levels.words.fetch_sub(words, SeqCst);
+            debug_assert!(before >= words, "the level counts every store before the ring shows it (push)");
             if before >= ODSY_CFIFO_LOW_WATER && before - words < ODSY_CFIFO_LOW_WATER {
                 f.intr_flags |= ODSY_INTR_FIFO_LOW_WATER;
                 crate::pf_instant!(crate::perfetto::events::ODSY_CFIFO_LOW_WATER, before - words);
