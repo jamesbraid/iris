@@ -45,18 +45,20 @@ pub const FILL_BLEND_OVER: u32 = 1;
 /// fallback loops for every state they admit, OFF no loop for untextured
 /// fills (the general per-fragment path; textured fills keep their own
 /// switch, raster_set_texture_path()).
-pub type RasterFillPath = u32;
-pub const SGI_RASTER_FILL_TABLE: RasterFillPath = 0;
-pub const SGI_RASTER_FILL_DYNAMIC: RasterFillPath = 1;
-pub const SGI_RASTER_FILL_OFF: RasterFillPath = 2;
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FillPath {
+    Table,
+    Dynamic,
+    Off,
+}
 
 thread_local! {
-    pub static SOFT_FILL_PATH: std::cell::Cell<RasterFillPath> = const { std::cell::Cell::new(SGI_RASTER_FILL_TABLE) };
+    pub static SOFT_FILL_PATH: std::cell::Cell<FillPath> = const { std::cell::Cell::new(FillPath::Table) };
 }
 
 /// Select the row loops for draws made on this thread. Per thread, so that
 /// tests running at once cannot change each other's path.
-pub fn raster_set_fill_path(path: RasterFillPath) {
+pub fn raster_set_fill_path(path: FillPath) {
     SOFT_FILL_PATH.with(|p| p.set(path));
 }
 
@@ -221,7 +223,7 @@ impl SoftDraw<'_> {
         let alpha_q = rules.alpha(frag.rgba[3]);
         let alpha = soft_unit(alpha_q, alpha_max);
         let blend = M::blend(self);
-        let rgb = if blend { rules.rgb(&frag.rgba) } else { self.store_rgb(x, y, &frag.rgba) };
+        let rgb = rules.rgb(&frag.rgba);
 
         if !blend && self.rgba_mask == rules.rgba_mask(SGI_GL_COLOUR_MASK_ALL) {
             let stored = (1u32.wrapping_shl(rules.alpha_bits as u32)).wrapping_sub(1);
@@ -251,7 +253,7 @@ impl SoftDraw<'_> {
             for (k, b) in blended.iter_mut().enumerate() {
                 *b = self.fill_blend_component::<M>(k, &src, &dst);
             }
-            out = rules.rgba_value(self.store_rgb(x, y, &blended), blended[3]);
+            out = rules.rgba_value(rules.rgb(&blended), blended[3]);
         }
         for k in 0..4usize {
             if self.rgba_mask & (1u32 << k) == 0 {
@@ -359,8 +361,8 @@ impl SoftDraw<'_> {
         };
 
         // Nothing in an untextured flat colour varies over the triangle
-        // unless it is dithered (SoftDraw::store_rgb()), fogged or blended.
-        let uniform = rgba && store && !M::TEX && !smooth && !fog && !self.dither && !rgba_read;
+        // unless it is fogged or blended.
+        let uniform = rgba && store && !M::TEX && !smooth && !fog && !rgba_read;
         let flat_out = if uniform {
             self.fill_rgba_result::<M>(self.win.ox.wrapping_add(x_lo), self.win.oy.wrapping_add(qy), &frag, &dest[0])
         } else {
@@ -824,7 +826,7 @@ impl SoftDraw<'_> {
         let st: &GlDrawState = self.st;
         let path = SOFT_FILL_PATH.with(|p| p.get());
 
-        if path == SGI_RASTER_FILL_OFF || self.texture.is_some() || !self.fill_admits() {
+        if path == FillPath::Off || self.texture.is_some() || !self.fill_admits() {
             return None;
         }
         let depth: i32 = if st.depth_test == 0 {
@@ -846,7 +848,7 @@ impl SoftDraw<'_> {
             -1
         };
         let stencil = st.stencil_test != 0 && self.rules.stencil_max(self.t).is_some();
-        if path == SGI_RASTER_FILL_DYNAMIC || depth < 0 || blend < 0 || st.fog != 0 || stencil || st.clip_planes != 0 {
+        if path == FillPath::Dynamic || depth < 0 || blend < 0 || st.fog != 0 || stencil || st.clip_planes != 0 {
             return Some(FillRow::FillAny);
         }
         let smooth = (st.shade_model != SGI_GL_FLAT) as usize;
@@ -854,7 +856,7 @@ impl SoftDraw<'_> {
     }
 
     /// The row loop for the draw's textured triangles, sampled through f, or
-    /// None for the general loop: under SGI_RASTER_TEXTURE_SPANS, for state
+    /// None for the general loop: under TexturePath::Spans, for state
     /// SoftDraw::fill_admits() takes (the fixed-point sampler already
     /// excludes the rest). A loop of its own for the common states
     /// SOFT_TEXTURE_SPANS, SOFT_TEXTURE_SPANS_EDGE and the two blended
@@ -863,7 +865,7 @@ impl SoftDraw<'_> {
     pub fn fixed_span_select(&self, f: &SoftFixedTex) -> Option<FillRow> {
         let st: &GlDrawState = self.st;
 
-        if SOFT_TEXTURE_PATH.with(|p| p.get()) != SGI_RASTER_TEXTURE_SPANS || !self.fill_admits() {
+        if SOFT_TEXTURE_PATH.with(|p| p.get()) != TexturePath::Spans || !self.fill_admits() {
             return None;
         }
         let kernel: i32 = if !f.lod && f.min == SGI_GL_NEAREST {
@@ -896,7 +898,7 @@ impl SoftDraw<'_> {
         } else {
             -1
         };
-        if SOFT_FILL_PATH.with(|p| p.get()) == SGI_RASTER_FILL_DYNAMIC
+        if SOFT_FILL_PATH.with(|p| p.get()) == FillPath::Dynamic
             || kernel < 0
             || env < 0
             || st.depth_test == 0
@@ -951,9 +953,6 @@ mod tests {
         st.depth_mask = (rng.next_u32() % 5 != 0) as u32;
         st.shade_model = pick(&mut rng, &[SGI_GL_FLAT, SGI_GL_SMOOTH]);
         st.dither = rng.next_u32() % 2;
-        if rng.next_u32() % 3 == 0 {
-            b.rules.dither = SGI_DITHER_BAYER4_TOP_ROWS as u8;
-        }
         if rng.next_u32() % 2 == 0 {
             st.blend = 1;
             if rng.next_u32() % 2 == 0 {
@@ -1079,11 +1078,11 @@ mod tests {
 
     type Planes3 = (Vec<u32>, Vec<u32>, Vec<u32>);
 
-    fn draw(seed: u64, textured: bool, fill: RasterFillPath, texture: RasterTexturePath) -> Planes3 {
+    fn draw(seed: u64, textured: bool, fill: FillPath, texture: TexturePath) -> Planes3 {
         draw_bench(case(seed, textured), fill, texture)
     }
 
-    fn draw_bench(mut b: Bench, fill: RasterFillPath, texture: RasterTexturePath) -> Planes3 {
+    fn draw_bench(mut b: Bench, fill: FillPath, texture: TexturePath) -> Planes3 {
         b.prepare();
         // Stencil values 0 to 3 in a pattern, for the stencil test to tell apart.
         for (i, v) in b.board.stencil_mem.bytes.iter_mut().enumerate() {
@@ -1092,8 +1091,8 @@ mod tests {
         raster_set_fill_path(fill);
         raster_set_texture_path(texture);
         b.run();
-        raster_set_fill_path(SGI_RASTER_FILL_TABLE);
-        raster_set_texture_path(SGI_RASTER_TEXTURE_SPANS);
+        raster_set_fill_path(FillPath::Table);
+        raster_set_texture_path(TexturePath::Spans);
         b.snapshot(SIDE)
     }
 
@@ -1121,9 +1120,9 @@ mod tests {
     fn fill_rows_match_the_general_path() {
         let mut drawn = 0;
         for seed in 1..=40u64 {
-            let want = draw(seed, false, SGI_RASTER_FILL_OFF, SGI_RASTER_TEXTURE_SPANS);
-            let dynamic = draw(seed, false, SGI_RASTER_FILL_DYNAMIC, SGI_RASTER_TEXTURE_SPANS);
-            let table = draw(seed, false, SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_SPANS);
+            let want = draw(seed, false, FillPath::Off, TexturePath::Spans);
+            let dynamic = draw(seed, false, FillPath::Dynamic, TexturePath::Spans);
+            let table = draw(seed, false, FillPath::Table, TexturePath::Spans);
 
             compare(seed, "dynamic loop", &want, &dynamic);
             compare(seed, "specialised loop", &want, &table);
@@ -1165,9 +1164,9 @@ mod tests {
                 };
 
                 raster_set_aa_whole_box(true);
-                let want = draw_bench(scene(), SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_SPANS);
+                let want = draw_bench(scene(), FillPath::Table, TexturePath::Spans);
                 raster_set_aa_whole_box(false);
-                let got = draw_bench(scene(), SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_SPANS);
+                let got = draw_bench(scene(), FillPath::Table, TexturePath::Spans);
 
                 compare(seed, "antialiased rows", &want, &got);
                 drawn += want.0.iter().filter(|&&c| c != 0).count();
@@ -1182,9 +1181,9 @@ mod tests {
     #[test]
     fn texture_rows_match_the_general_path() {
         for seed in 100..=140u64 {
-            let want = draw(seed, true, SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_FIXED);
-            let dynamic = draw(seed, true, SGI_RASTER_FILL_DYNAMIC, SGI_RASTER_TEXTURE_SPANS);
-            let table = draw(seed, true, SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_SPANS);
+            let want = draw(seed, true, FillPath::Table, TexturePath::Fixed);
+            let dynamic = draw(seed, true, FillPath::Dynamic, TexturePath::Spans);
+            let table = draw(seed, true, FillPath::Table, TexturePath::Spans);
 
             compare(seed, "dynamic textured loop", &want, &dynamic);
             compare(seed, "specialised textured loop", &want, &table);
@@ -1219,8 +1218,8 @@ mod tests {
                             b.tex = Some(tex);
                             b
                         };
-                        let want = draw_bench(make(), SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_FIXED);
-                        let table = draw_bench(make(), SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_SPANS);
+                        let want = draw_bench(make(), FillPath::Table, TexturePath::Fixed);
+                        let table = draw_bench(make(), FillPath::Table, TexturePath::Spans);
 
                         compare(seed, "specialised textured loop", &want, &table);
                         seed += 1;
@@ -1248,15 +1247,15 @@ mod tests {
                 b
             };
             let (fill, texture) = if textured {
-                (SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_FIXED)
+                (FillPath::Table, TexturePath::Fixed)
             } else {
-                (SGI_RASTER_FILL_OFF, SGI_RASTER_TEXTURE_SPANS)
+                (FillPath::Off, TexturePath::Spans)
             };
             // The stencil pattern draw_bench() starts from.
             let before = draw_bench(Bench::empty(), fill, texture).2;
             let want = draw_bench(make(), fill, texture);
-            let dynamic = draw_bench(make(), SGI_RASTER_FILL_DYNAMIC, SGI_RASTER_TEXTURE_SPANS);
-            let table = draw_bench(make(), SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_SPANS);
+            let dynamic = draw_bench(make(), FillPath::Dynamic, TexturePath::Spans);
+            let table = draw_bench(make(), FillPath::Table, TexturePath::Spans);
 
             compare(seed, "dynamic loop under the stencil test", &want, &dynamic);
             compare(seed, "row loop under the stencil test", &want, &table);
@@ -1324,8 +1323,8 @@ mod tests {
                 });
                 b
             };
-            let want = draw_bench(make(), SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_FIXED);
-            let table = draw_bench(make(), SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_SPANS);
+            let want = draw_bench(make(), FillPath::Table, TexturePath::Fixed);
+            let table = draw_bench(make(), FillPath::Table, TexturePath::Spans);
 
             compare(seed, "blended textured loop", &want, &table);
         }
@@ -1419,10 +1418,10 @@ mod tests {
                 b.tex = Some(tex);
                 b
             };
-            let want = draw_bench(make(SGI_GL_CLAMP_TO_EDGE), SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_FIXED);
-            let fallback = draw_bench(make(SGI_GL_CLAMP_TO_EDGE), SGI_RASTER_FILL_DYNAMIC, SGI_RASTER_TEXTURE_SPANS);
-            let table = draw_bench(make(SGI_GL_CLAMP_TO_EDGE), SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_SPANS);
-            let repeated = draw_bench(make(SGI_GL_REPEAT), SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_SPANS);
+            let want = draw_bench(make(SGI_GL_CLAMP_TO_EDGE), FillPath::Table, TexturePath::Fixed);
+            let fallback = draw_bench(make(SGI_GL_CLAMP_TO_EDGE), FillPath::Dynamic, TexturePath::Spans);
+            let table = draw_bench(make(SGI_GL_CLAMP_TO_EDGE), FillPath::Table, TexturePath::Spans);
+            let repeated = draw_bench(make(SGI_GL_REPEAT), FillPath::Table, TexturePath::Spans);
 
             compare(seed, "fallback loop", &want, &fallback);
             compare(seed, "clamped loop", &want, &table);
@@ -1459,12 +1458,12 @@ mod tests {
                 b
             };
             let (fill, texture) = if textured {
-                (SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_FIXED)
+                (FillPath::Table, TexturePath::Fixed)
             } else {
-                (SGI_RASTER_FILL_OFF, SGI_RASTER_TEXTURE_SPANS)
+                (FillPath::Off, TexturePath::Spans)
             };
             let want = draw_bench(make(), fill, texture);
-            let table = draw_bench(make(), SGI_RASTER_FILL_TABLE, SGI_RASTER_TEXTURE_SPANS);
+            let table = draw_bench(make(), FillPath::Table, TexturePath::Spans);
 
             compare(seed, "row loop under the board's pixel tests", &want, &table);
         }
@@ -1505,7 +1504,7 @@ mod tests {
     /// the 0x1013 words lod (Board::texture_lod_bias(), texture_lod_limit()),
     /// through texture path path; and return each drawn pixel as (x, y,
     /// level).
-    fn draw_levels(vertices: &[[f32; SGI_GL_VERTEX_FLOATS]; 3], lod: [u32; 4], path: RasterTexturePath) -> Vec<(i32, i32, u32)> {
+    fn draw_levels(vertices: &[[f32; SGI_GL_VERTEX_FLOATS]; 3], lod: [u32; 4], path: TexturePath) -> Vec<(i32, i32, u32)> {
         let mut b = Bench::empty();
         let tex = BenchTexture::new(256, SGI_GL_NEAREST_MIPMAP_NEAREST, SGI_GL_NEAREST, SGI_GL_RGBA);
         let mut image = tex.image();
@@ -1526,7 +1525,7 @@ mod tests {
         raster_set_texture_path(path);
         let mut d = GlDraw::new(SGI_GL_TRIANGLES, 3, &v, &b.st, &stipple);
         b.rules.draw(&t, &mut b.board.gl_parts(None).0, &LevelTexels, &mut d);
-        raster_set_texture_path(SGI_RASTER_TEXTURE_SPANS);
+        raster_set_texture_path(TexturePath::Spans);
 
         let mut out = Vec::new();
         for y in 0..BENCH_H {
@@ -1583,13 +1582,13 @@ mod tests {
             let u = (x - XL) / (XR - XL);
             (1.0 / 8.0) / ((1.0 - 7.0 * u / 8.0) * (1.0 - 7.0 * u / 8.0)) / (XR - XL)
         };
-        for path in [SGI_RASTER_TEXTURE_SPANS, SGI_RASTER_TEXTURE_FIXED, SGI_RASTER_TEXTURE_DOUBLE] {
+        for path in [TexturePath::Spans, TexturePath::Fixed, TexturePath::Double] {
             let drawn = draw_levels(&vertices, [0, 0, (-15i32 * 256) as u32 & 0x3fff, 15 * 256], path);
             let at: std::collections::HashSet<(i32, i32)> = drawn.iter().map(|&(x, y, _)| (x, y)).collect();
             let mut checked = 0;
             let mut edge_differs = 0;
 
-            assert!(drawn.len() > 500, "path {path}: the triangle drew {} pixels", drawn.len());
+            assert!(drawn.len() > 500, "path {path:?}: the triangle drew {} pixels", drawn.len());
             for &(x, y, level) in &drawn {
                 let qx = (x & !1) as f64;
                 let quad = (256.0 * (s(qx + 1.5) - s(qx + 0.5)).abs()).log2();
@@ -1599,13 +1598,13 @@ mod tests {
                     continue;
                 }
                 checked += 1;
-                assert_eq!(level, nearest_level(quad), "path {path}: pixel ({x}, {y}) took level {level}, its quad's lambda is {quad}, its own {own}");
+                assert_eq!(level, nearest_level(quad), "path {path:?}: pixel ({x}, {y}) took level {level}, its quad's lambda is {quad}, its own {own}");
                 if !at.contains(&(x ^ 1, y)) && !near_a_choice(own, 0.02) && nearest_level(own) != level {
                     edge_differs += 1;
                 }
             }
-            assert!(checked > 400, "path {path}: only {checked} pixels away from a level change");
-            assert!(edge_differs >= 32, "path {path}: {edge_differs} edge pixels whose own footprint picks another level");
+            assert!(checked > 400, "path {path:?}: only {checked} pixels away from a level change");
+            assert!(edge_differs >= 32, "path {path:?}: {edge_differs} edge pixels whose own footprint picks another level");
         }
     }
 
@@ -1640,12 +1639,12 @@ mod tests {
             // A minimum past 15 is taken as 15: past the last level.
             ([0, 0, word(20.0), word(20.0)], 8),
         ] {
-            for path in [SGI_RASTER_TEXTURE_SPANS, SGI_RASTER_TEXTURE_FIXED, SGI_RASTER_TEXTURE_DOUBLE] {
+            for path in [TexturePath::Spans, TexturePath::Fixed, TexturePath::Double] {
                 let drawn = draw_levels(&vertices, lod, path);
 
-                assert!(drawn.len() > 5000, "words {lod:x?}, path {path}: the triangle drew {} pixels", drawn.len());
+                assert!(drawn.len() > 5000, "words {lod:x?}, path {path:?}: the triangle drew {} pixels", drawn.len());
                 for &(x, y, level) in &drawn {
-                    assert_eq!(level, want, "words {lod:x?}, path {path}: pixel ({x}, {y})");
+                    assert_eq!(level, want, "words {lod:x?}, path {path:?}: pixel ({x}, {y})");
                 }
             }
         }

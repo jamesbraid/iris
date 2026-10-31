@@ -591,9 +591,9 @@ fn raster_bench() {
     let only = std::env::var("BENCH_SCENE").ok();
     let secs: f64 = std::env::var("BENCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let fill = match std::env::var("BENCH_FILL").as_deref() {
-        Ok("dynamic") => SGI_RASTER_FILL_DYNAMIC,
-        Ok("off") => SGI_RASTER_FILL_OFF,
-        _ => SGI_RASTER_FILL_TABLE,
+        Ok("dynamic") => FillPath::Dynamic,
+        Ok("off") => FillPath::Off,
+        _ => FillPath::Table,
     };
 
     raster_set_fill_path(fill);
@@ -628,5 +628,5 @@ fn raster_bench() {
             runs
         );
     }
-    raster_set_fill_path(SGI_RASTER_FILL_TABLE);
+    raster_set_fill_path(FillPath::Table);
 }

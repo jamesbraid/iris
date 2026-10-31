@@ -473,7 +473,7 @@ fn line_pixels(rule: LineRule, a: (f32, f32), b: (f32, f32)) -> Vec<(i32, i32)> 
     bench.board.gl_write_mask |= ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT;
     bench.st.shade_model = SGI_GL_FLAT;
     bench.st.dither = 0;
-    bench.rules.line_rule = rule as u8;
+    bench.rules.line_rule = rule;
     bench.mode = SGI_GL_LINES;
     bench.prims = vec![vertices(&[a, b], RED)];
     bench.run();
@@ -500,8 +500,8 @@ fn a_line_takes_the_centre_sampled_rule() {
     ];
 
     for (a, b, diamond_differs, want) in cases {
-        let centre = line_pixels(SGI_LINE_CENTRE_SAMPLED, a, b);
-        let diamond = line_pixels(SGI_LINE_COVERAGE_DOUBLE, a, b);
+        let centre = line_pixels(LineRule::CentreSampled, a, b);
+        let diamond = line_pixels(LineRule::Diamond, a, b);
 
         assert_eq!(centre, want, "centre-sampled {a:?} to {b:?}");
         assert_eq!(diamond != want, diamond_differs, "diamond-exit {a:?} to {b:?}: {diamond:?}");
@@ -515,10 +515,10 @@ fn a_line_takes_the_centre_sampled_rule() {
 /// columns takes the lower row, sharing it with the column after.
 #[test]
 fn centre_sampled_lines_light_the_pixels_the_rule_names() {
-    let horizontal = line_pixels(SGI_LINE_CENTRE_SAMPLED, (60.0, 10.5), (70.75, 10.5));
+    let horizontal = line_pixels(LineRule::CentreSampled, (60.0, 10.5), (70.75, 10.5));
     assert_eq!(horizontal, (60..=70).map(|x| (x, 10)).collect::<Vec<_>>());
 
-    let rising = line_pixels(SGI_LINE_CENTRE_SAMPLED, (60.0, 9.75), (68.0, 13.75));
+    let rising = line_pixels(LineRule::CentreSampled, (60.0, 9.75), (68.0, 13.75));
     assert_eq!(rising, [(60, 9), (61, 10), (62, 10), (63, 11), (64, 11), (65, 12), (66, 12), (67, 13)]);
 }
 
