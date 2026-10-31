@@ -647,7 +647,7 @@ impl SoftDraw<'_> {
             self.fragment(px, py, z, offset, depth_w, &frag);
         };
         let quad_general = QuadGeneral {
-            rho: &quad_rho,
+            scales: quad_lod.then_some((tex_ns, tex_nt)),
             fragment: &|px, py, e1, e2| general(px, py, e1, e2, quad_rho(px & !1, py & !1)),
         };
         // Two rows at a time, from an even one: the rows of a line of quads.

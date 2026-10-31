@@ -419,12 +419,19 @@ impl SoftDraw<'_> {
                 depth_w[i] = (1.0 - b1[i] - b2[i]) * v[0].depth_w + b1[i] * v[1].depth_w + b2[i] * v[2].depth_w;
             }
             // The quad's level of detail, where it has one.
+            // Its pixels' coordinates come with the footprint, where that is
+            // taken from them.
+            let mut coords: Option<SoftQuadCoords> = None;
             let lambda = if !lod {
                 None
             } else if sp.flat_lambda.is_some() {
                 sp.flat_lambda
+            } else if let Some((ns, nt)) = general.scales {
+                let c = coords.insert(soft_quad_coords(g, quad_x, qy));
+
+                soft_quad_rho_of(c, ns, nt).and_then(|rho| self.fixed_tex().quad_lambda(rho))
             } else {
-                (general.rho)(quad_x, qy).and_then(|rho| self.fixed_tex().quad_lambda(rho))
+                None
             };
             for i in 0..4 {
                 if !drawn[i] {
@@ -487,7 +494,11 @@ impl SoftDraw<'_> {
                     continue;
                 }
                 if M::TEX {
-                    match self.fixed_tex().fixed_coords(g, &tex_row[r], col, lambda) {
+                    let at = match (&coords, lambda) {
+                        (Some(c), Some(l)) => SoftFixedTex::quad_coords(c, i, l),
+                        _ => self.fixed_tex().fixed_coords(g, &tex_row[r], col, lambda),
+                    };
+                    match at {
                         Some((s, tc, l)) if M::sample(self, s, tc, l, &mut frag.texel) => {}
                         _ => {
                             (general.fragment)(col, py, e1[i], e2[i]);
@@ -558,14 +569,14 @@ impl SoftDraw<'_> {
     }
 }
 
-/// What a quad loop leaves to the triangle's general path: rho, the
-/// footprint of the quad at window pixel (qx, qy) under the diagonal rule
-/// (soft_quad_rho()), or None where its fragments take their own; and
-/// fragment, which draws the fragment at window pixel (px, py) whose edge
+/// What a quad loop leaves to the triangle's general path: scales, the
+/// per-axis scales (ns, nt) of the footprint of a quad under the diagonal
+/// rule (soft_quad_rho_of()), or None where its fragments take their own;
+/// and fragment, which draws the fragment at window pixel (px, py) whose edge
 /// values for v[2]-v[0] and v[0]-v[1] are e1 and e2 through the general
 /// path, its quad's footprint included.
 pub struct QuadGeneral<'g> {
-    pub rho: &'g dyn Fn(i32, i32) -> Option<f64>,
+    pub scales: Option<(f64, f64)>,
     pub fragment: &'g dyn Fn(i32, i32, i64, i64),
 }
 
