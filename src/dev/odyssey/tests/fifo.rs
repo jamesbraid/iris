@@ -128,6 +128,7 @@ fn a_read_that_waits_sees_every_earlier_store() {
 #[test]
 fn a_full_fifo_holds_the_store_back_until_the_board_makes_room() {
     let (h, _rec) = threaded_board();
+    h.fifo.set_depth(FifoDepth::Shallow);
     let words = preamble_twice();
 
     start_long_slice(&h, &words, 2000);
@@ -580,6 +581,7 @@ fn the_status_shows_waiting_stores_until_they_have_run() {
 #[test]
 fn the_level_counts_words_against_the_board_fifo_and_its_high_mark() {
     let (mut s, _, _) = queued_board();
+    s.fifo.set_depth(FifoDepth::Shallow);
     let (high, flag) = (ODSY_STATUS0_FIFO_HIGH_WATER, ODSY_INTR_FIFO_HIGH_WATER);
 
     s.mmio_write(ODSY_CMD_FIFO, 0, 8);
@@ -691,4 +693,68 @@ fn stopping_finishes_the_waiting_work_and_a_reset_abandons_it() {
     s.reset();
     assert!(!s.work_pending());
     assert_eq!(ram.half(HOST_WRITE_BASE + 8), 0);
+}
+
+/// The deep ring takes stores past the board's 32,768 words, and the guest
+/// still reads the board's own FIFO: the level clamped at the brim, so
+/// STATUS0 and the `0x106c` doubleword count read a full FIFO and the
+/// high-water flag is up, never a count the board cannot hold. Level 0
+/// returns only once the backlog has run.
+#[test]
+fn the_deep_ring_accepts_past_the_brim_and_the_guest_reads_a_full_fifo() {
+    let (mut s, _, _) = queued_board();
+    s.fifo.set_depth(FifoDepth::Deep);
+    cmd64(&mut s, 0x6b2, 32192);
+    finish(&mut s);
+    reg_write(&mut s, ODSY_INTR_CLEAR, ODSY_INTR_FIFO_HIGH_WATER);
+    assert_eq!(s.fifo.level(), 0);
+    assert_ne!(reg_read(&mut s, ODSY_STATUS0) & ODSY_STATUS0_FIFO_EMPTY, 0, "idle reads empty");
+
+    for _ in 0..ODSY_CFIFO_WORDS / 2 + 5000 {
+        s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    }
+    assert!(s.fifo.queued_words() > ODSY_CFIFO_WORDS, "the ring took more than the board's FIFO");
+    assert_eq!(s.fifo.level(), ODSY_CFIFO_WORDS);
+    let status = reg_read(&mut s, ODSY_STATUS0);
+    assert_ne!(status & ODSY_STATUS0_FIFO_HIGH_WATER, 0);
+    assert_eq!(status & (ODSY_STATUS0_FIFO_EMPTY | ODSY_STATUS0_FIFO_LOW_WATER), 0);
+    assert_ne!(reg_read(&mut s, ODSY_INTR_FLAGS) & ODSY_INTR_FIFO_HIGH_WATER, 0);
+    assert_eq!((reg_read(&mut s, MEMORY_CONFIG) >> 7) & 0x1ff, 0x1ff, "the doubleword count is at its field's top");
+
+    // Draining the backlog keeps the guest's view pinned at the brim until
+    // the ring is under it, and level 0 only when everything has run.
+    s.work_step(&mut Budget::stores(1000));
+    assert_eq!(s.fifo.level(), ODSY_CFIFO_WORDS);
+    finish(&mut s);
+    assert_eq!(s.fifo.level(), 0);
+    let status = reg_read(&mut s, ODSY_STATUS0);
+    assert_eq!(status & ODSY_STATUS0_FIFO_HIGH_WATER, 0);
+    assert_ne!(status & ODSY_STATUS0_FIFO_EMPTY, 0);
+    assert_eq!((reg_read(&mut s, MEMORY_CONFIG) >> 7) & 0x1ff, 0);
+}
+
+/// With the deep ring a store is refused with the bus busy only when the
+/// host ring is full, not at the board's 32,768 words; the shallow mode
+/// still refuses there, and neither lets the guest read past the brim.
+#[test]
+fn the_bus_is_busy_only_when_the_ring_is_full_and_the_shallow_mode_stalls_at_the_brim() {
+    for depth in [FifoDepth::Deep, FifoDepth::Shallow] {
+        let (h, _rec) = threaded_board();
+        h.fifo.set_depth(depth);
+        let words = preamble_twice();
+        start_long_slice(&h, &words, 3000);
+        let limit = if depth == FifoDepth::Deep { RING_STORES } else { ODSY_CFIFO_WORDS };
+        // The slice's own first word may have left the ring: count what waits.
+        while h.fifo.stores() < limit {
+            assert!(h.bus_write(ODSY_CMD_FIFO, 0, 4), "{depth:?}: refused at {} stores, {} words", h.fifo.stores(), h.fifo.queued_words());
+            assert!(h.fifo.level() <= ODSY_CFIFO_WORDS);
+        }
+        assert_eq!(h.fifo.stores(), limit);
+        assert!(!h.bus_write(ODSY_CMD_FIFO, 0, 4), "{depth:?}: full refuses");
+        assert_eq!(h.fifo.stores(), limit);
+        assert_eq!(h.fifo.level(), ODSY_CFIFO_WORDS);
+        h.fifo.test_words.store(0, SeqCst);
+        h.work_stop();
+        assert_eq!(h.fifo.level(), 0, "{depth:?}: idle reads zero");
+    }
 }
