@@ -37,6 +37,8 @@
 
 use std::time::{Duration, Instant};
 
+use crate::dev::ns16550::Ns16550;
+
 use crate::dev::ns16550::com_reg::{
     LSR_BI, LSR_DR, LSR_FE, LSR_OE, LSR_PE, MCR_DTR, MCR_LOOP, MCR_OUT1, MCR_OUT2, MCR_RTS, MSR_CTS, MSR_DCD,
     MSR_DCTS, MSR_DDCD,
@@ -665,6 +667,32 @@ impl Sdma {
             _ => {}
         }
         self.update_tx_empty(p, host);
+    }
+}
+
+impl EngineUart for Ns16550 {
+    fn loopback(&self) -> bool {
+        Ns16550::loopback(self)
+    }
+
+    fn read_core(&mut self, r: u32) -> u8 {
+        self.read(r)
+    }
+
+    fn write(&mut self, r: u32, v: u8) {
+        Ns16550::write(self, r, v);
+    }
+
+    fn lsr(&self) -> u8 {
+        Ns16550::lsr(self)
+    }
+
+    fn mcr(&self) -> u8 {
+        Ns16550::mcr(self)
+    }
+
+    fn msr(&self) -> u8 {
+        Ns16550::msr(self)
     }
 }
 
