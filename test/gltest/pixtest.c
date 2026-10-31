@@ -56,8 +56,7 @@ static int npass = 0, nfail = 0, nskip = 0, nxfail = 0;
 /* Cases where IRIX's libGLcore itself departs from GL 1.1 on IMPACT (the
    board does what it is told): reported XFAIL / XPASS, not counted as
    failures. */
-enum { ALL_BOARDS, GR2_ONLY, VPRO_ONLY };
-static const struct { const char *name; const char *why; int board; } xfails[] = {
+static const struct { const char *name; const char *why; int gr2_only; } xfails[] = {
     { "read/RGBA/UNSIGNED_BYTE/scale-bias",
       "libGLcore sends no pixel transfer for glReadPixels (plain read)" },
     { "read/RGBA/UNSIGNED_BYTE/map256",
@@ -99,31 +98,24 @@ static const struct { const char *name; const char *why; int board; } xfails[] =
     /* GR2 (XZ / Extreme), libGLcore EXPRESS: pixel transfer, colour-index
        maps and textures are all done on the host. */
     { "draw/COLOR_INDEX/UNSIGNED_BYTE/shift-1-offset0",
-      "libGLcore EXPRESS rounds a right-shifted UNSIGNED_BYTE index (17 >> 1 = 8.5 -> 9) before the I_TO_* lookup", GR2_ONLY },
+      "libGLcore EXPRESS rounds a right-shifted UNSIGNED_BYTE index (17 >> 1 = 8.5 -> 9) before the I_TO_* lookup", 1 },
     { "gettex/RGBA8/LUMINANCE/UNSIGNED_BYTE",
-      "libGLcore EXPRESS (software textures) returns luminance as R + G + B, clamped (ReadPixels' rule), not R", GR2_ONLY },
+      "libGLcore EXPRESS (software textures) returns luminance as R + G + B, clamped (ReadPixels' rule), not R", 1 },
     { "gettex/RGBA8/LUMINANCE_ALPHA/UNSIGNED_BYTE",
-      "libGLcore EXPRESS (software textures) returns luminance as R + G + B, clamped (ReadPixels' rule), not R", GR2_ONLY },
+      "libGLcore EXPRESS (software textures) returns luminance as R + G + B, clamped (ReadPixels' rule), not R", 1 },
     { "stencil/draw-read/UNSIGNED_BYTE",
-      "libGLcore EXPRESS's stencil Fetch masks the depth word with 0xF; z20 s4 keeps the stencil above Z (bits 23:20; inferred from its depth reads)", GR2_ONLY },
+      "libGLcore EXPRESS's stencil Fetch masks the depth word with 0xF; z20 s4 keeps the stencil above Z (bits 23:20; inferred from its depth reads)", 1 },
     { "stencil/draw/shift-offset-mask",
-      "libGLcore EXPRESS's stencil Fetch masks the depth word with 0xF; z20 s4 keeps the stencil above Z (bits 23:20; inferred from its depth reads)", GR2_ONLY },
+      "libGLcore EXPRESS's stencil Fetch masks the depth word with 0xF; z20 s4 keeps the stencil above Z (bits 23:20; inferred from its depth reads)", 1 },
     { "ci8/read/UNSIGNED_SHORT/swap",
-      "libGLcore EXPRESS's Pack1 read (READ_RECT through the mailbox) ignores GL_PACK_SWAP_BYTES", GR2_ONLY },
+      "libGLcore EXPRESS's Pack1 read (READ_RECT through the mailbox) ignores GL_PACK_SWAP_BYTES", 1 },
     { "ci12/read/UNSIGNED_SHORT/swap",
-      "libGLcore EXPRESS's Pack1 read (READ_RECT through the mailbox) ignores GL_PACK_SWAP_BYTES", GR2_ONLY },
+      "libGLcore EXPRESS's Pack1 read (READ_RECT through the mailbox) ignores GL_PACK_SWAP_BYTES", 1 },
     { "stencil/copy",
-      "libGLcore EXPRESS's stencil Fetch masks the depth word with 0xF; z20 s4 keeps the stencil above Z (bits 23:20; inferred from its depth reads)", GR2_ONLY },
-    /* VPro (Odyssey), IRIX 6.5.30 libGLcore. */
-    { "depth/draw-read/FLOAT", "the board's depth word keeps an 18-bit mantissa (datasheet depth encoding), so the last step of a 24-bit expectation is lost", VPRO_ONLY },
-    { "depth/read/UNSIGNED_INT", "the board's depth word keeps an 18-bit mantissa (datasheet depth encoding), so the last step of a 24-bit expectation is lost", VPRO_ONLY },
-    { "depth/draw/scale-bias", "the board's depth word keeps an 18-bit mantissa (datasheet depth encoding), so the last step of a 24-bit expectation is lost", VPRO_ONLY },
-    { "depth/copy", "the board's depth word keeps an 18-bit mantissa (datasheet depth encoding), so the last step of a 24-bit expectation is lost", VPRO_ONLY },
-    { "buffers/geometry-front-back",
-      "libGLcore enables front-and-back drawing only for BUZZ revision 2 or later; the model reports BUZZ B.1 (renderer VPRO/B), as the real board does", VPRO_ONLY },
+      "libGLcore EXPRESS's stencil Fetch masks the depth word with 0xF; z20 s4 keeps the stencil above Z (bits 23:20; inferred from its depth reads)", 1 },
 };
 
-static int gr2, vpro;
+static int gr2;
 
 static const char *xfail_why(const char *name)
 {
@@ -131,14 +123,10 @@ static const char *xfail_why(const char *name)
     /* On GR2 its own entries first (their reasons replace IMPACT's). */
     if (gr2)
         for (i = 0; i < sizeof xfails / sizeof xfails[0]; i++)
-            if (xfails[i].board == GR2_ONLY && !strcmp(name, xfails[i].name))
-                return xfails[i].why;
-    if (vpro)
-        for (i = 0; i < sizeof xfails / sizeof xfails[0]; i++)
-            if (xfails[i].board == VPRO_ONLY && !strcmp(name, xfails[i].name))
+            if (xfails[i].gr2_only && !strcmp(name, xfails[i].name))
                 return xfails[i].why;
     for (i = 0; i < sizeof xfails / sizeof xfails[0]; i++)
-        if (xfails[i].board == ALL_BOARDS && !strcmp(name, xfails[i].name))
+        if (!xfails[i].gr2_only && !strcmp(name, xfails[i].name))
             return xfails[i].why;
     return 0;
 }
@@ -2740,7 +2728,6 @@ int main(int argc, char **argv)
     {
         const char *rn = (const char *)glGetString(GL_RENDERER);
         gr2 = rn && (!strncmp(rn, "GR", 2) || !strncmp(rn, "GU", 2));
-        vpro = rn && !strncmp(rn, "VPRO", 4);
     }
     ext = (const char *)glGetString(GL_EXTENSIONS);
     ext_abgr = ext && strstr(ext, "GL_EXT_abgr") != 0;
