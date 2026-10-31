@@ -1557,3 +1557,394 @@ fn a_controller_built_on_a_filled_bus_answers_for_its_target() {
     assert!(isp.bus().has_target(4), "a target attached after boot goes on the same bus");
     let _ = std::fs::remove_file(img);
 }
+
+// ---- the hold-off after a bus reset ---------------------------------------
+//
+// Datasheet, "Bus-reset hold-off (0x0018)": after the reset the chip starts no
+// SCSI activity on that bus for mailbox 1 seconds, and the mailbox command and
+// the other bus are unaffected. That a command for the quiet bus waits, rather
+// than being refused or failed, is a model choice; so are the rest of what
+// these tests pin: nothing is posted when the hold ends, the delay is not
+// clamped, a second reset retires what the first parked, and request-out stays
+// at the oldest parked entry.
+
+const S: i64 = 1_000_000_000;
+
+/// A bus reset of `bus` with `secs` seconds of hold-off.
+fn bus_reset(r: &Rig, secs: u16, bus: u16) {
+    assert_eq!(r.cmd(&[mbox::BUS_RESET, secs, bus]), mbox::COMPLETE);
+}
+
+/// A TUR for the disk at target 1.
+fn tur1(handle: u32) -> [u8; ENTRY_SIZE] {
+    request(handle, 1, &[0, 0, 0, 0, 0, 0], &[])
+}
+
+/// A TUR the part's second bus would carry; this part has none.
+fn tur_bus1(handle: u32) -> [u8; ENTRY_SIZE] {
+    let mut e = tur1(handle);
+    p16(&mut e, 8, 0x8100);
+    e
+}
+
+/// A rig with a disk at target 1, rings of 8 and the clock at zero.
+fn hold_rig(name: &str) -> Rig {
+    let r = Rig::with_disk(name, 1, 256);
+    r.init_rings(8, 8);
+    r.clock(0);
+    r
+}
+
+fn handles(r: &Rig, n: u32) -> Vec<u32> {
+    (0..n).map(|i| g32(&r.status(i), 4)).collect()
+}
+
+#[test]
+fn a_command_for_a_quiet_bus_starts_when_the_hold_ends() {
+    let r = hold_rig("hold-present");
+    bus_reset(&r, 1, 0);
+    r.put_entry(0, &tur1(0x81));
+    r.doorbell(1);
+    r.clock(S - 1);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0, "nothing a nanosecond before the hold ends");
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 0, "request-out stays at the parked entry");
+    assert_eq!(r.r(reg::BUS_STATUS) & STATUS_RISC_INT_REQ, 0, "and no interrupt");
+    r.clock(S);
+    assert_eq!(handles(&r, 1), [0x81]);
+    assert_eq!(g16(&r.status(0), 10), IOCB_COMPLETE);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 1);
+    r.clock(11 * S);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1, "one completion, nothing more");
+}
+
+#[test]
+fn the_mailbox_command_and_the_end_of_the_hold_post_nothing_themselves() {
+    let r = hold_rig("hold-quiet");
+    bus_reset(&r, 3, 0);
+    assert_eq!(r.cmd(&[mbox::NOP]), mbox::COMPLETE, "mailbox commands carry on during the hold");
+    r.clock(4 * S);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0, "no event when the hold ends");
+    assert_eq!(r.r(reg::BUS_STATUS), 0);
+}
+
+#[test]
+fn a_delay_of_zero_holds_nothing() {
+    let r = hold_rig("hold-zero");
+    bus_reset(&r, 0, 0);
+    r.put_entry(0, &tur1(0x82));
+    r.doorbell(1);
+    r.isp.wait_idle();
+    assert_eq!(handles(&r, 1), [0x82], "answered with the clock still at zero");
+}
+
+/// The vendor's range of 0 to 15 seconds is the NVRAM setting's; a larger
+/// mailbox value is held for exactly the seconds asked. A model choice.
+#[test]
+fn the_delay_is_not_clamped() {
+    let r = hold_rig("hold-unclamped");
+    bus_reset(&r, 600, 0);
+    r.put_entry(0, &tur1(0x83));
+    r.doorbell(1);
+    r.clock(600 * S - 1);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0);
+    r.clock(600 * S);
+    assert_eq!(handles(&r, 1), [0x83]);
+}
+
+#[test]
+fn the_other_bus_is_not_held() {
+    let r = hold_rig("hold-other");
+    bus_reset(&r, 1, 0);
+    // A held bus 0 around a command for the part's absent bus 1.
+    r.put_entry(0, &tur1(0x91));
+    r.put_entry(1, &tur_bus1(0x92));
+    r.put_entry(2, &tur1(0x93));
+    r.doorbell(3);
+    assert_eq!(handles(&r, 1), [0x92], "the free bus's command behind a parked one runs at once");
+    assert_eq!(g16(&r.status(0), 10), IOCB_INCOMPLETE);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 0, "request-out stays at the oldest parked entry, with the ring walked to 2");
+    r.clock(S);
+    assert_eq!(handles(&r, 3), [0x92, 0x91, 0x93]);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 3);
+
+    // And the other way: a reset of bus 1 holds nothing on bus 0, and does
+    // not end bus 0's hold either.
+    let r = hold_rig("hold-other2");
+    bus_reset(&r, 5, 1);
+    r.put_entry(0, &tur1(0x94));
+    r.doorbell(1);
+    r.isp.wait_idle();
+    assert_eq!(handles(&r, 1), [0x94], "a reset of bus 1 leaves bus 0 free");
+    bus_reset(&r, 5, 0);
+    bus_reset(&r, 0, 1);
+    r.put_entry(1, &tur1(0x95));
+    r.doorbell(2);
+    r.clock(5 * S - 1);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1, "bus 1's reset did not end bus 0's hold");
+    r.clock(5 * S);
+    assert_eq!(handles(&r, 2), [0x94, 0x95]);
+}
+
+#[test]
+fn an_absent_target_waits_out_the_hold_and_then_its_timeout() {
+    let r = hold_rig("hold-absent");
+    bus_reset(&r, 1, 0);
+    queue_absent(&r, 0, 0x71);
+    r.clock(S);
+    assert!(!posted(&r, 0x71), "selection starts when the hold ends");
+    r.clock(S + DEFAULT_SELECTION_TIMEOUT as i64 * MS - 1);
+    assert!(!posted(&r, 0x71), "not at 1.25 s minus a nanosecond");
+    r.clock(S + DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    let s = r.status(0);
+    assert_eq!(g32(&s, 4), 0x71);
+    assert_eq!((g16(&s, 10), g16(&s, 14)), (IOCB_INCOMPLETE, STATUS_FLAG_TIMEOUT));
+}
+
+#[test]
+fn parked_commands_start_oldest_first() {
+    let r = hold_rig("hold-order");
+    bus_reset(&r, 1, 0);
+    r.put_entry(0, &tur1(0x71));
+    r.put_entry(1, &request(0x72, 3, &[0, 0, 0, 0, 0, 0], &[]));
+    r.put_entry(2, &tur1(0x73));
+    r.doorbell(3);
+    r.clock(S);
+    assert_eq!(handles(&r, 1), [0x71]);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1, "the absent target is selecting, the one behind it waits its turn");
+    r.clock(S + DEFAULT_SELECTION_TIMEOUT as i64 * MS - 1);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1);
+    r.clock(S + DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    assert_eq!(handles(&r, 3), [0x71, 0x72, 0x73]);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 3);
+}
+
+/// Two writes parked behind a hold, each with its data in continuation
+/// entries, then read back: the second must not take the first's segments.
+fn parked_writes_keep_their_own_segments(a64: bool) {
+    let r = hold_rig(if a64 { "hold-segments-a64" } else { "hold-segments" });
+    // Each write is three 1 KiB (type 1) or 512-byte (64-bit) pieces: the
+    // last in the entry after the command's.
+    let piece: u32 = if a64 { 512 } else { 1024 };
+    let page = |i: u32| BUF + i * 0x1000;
+    let data = |i: u32| -> Vec<u8> { (0..piece).map(|j| (j as u8).wrapping_mul(3) ^ (i as u8 + 1)).collect() };
+    for i in 0..8 {
+        r.mem.put(page(i), &data(i));
+    }
+    let blocks = (3 * piece / BLOCK_SIZE as u32) as u16;
+    bus_reset(&r, 1, 0);
+    for n in 0..2u32 {
+        let slot = n * 2;
+        let cdb = cdb10(scsi_cmd::WRITE_10, 16 + 8 * n, blocks);
+        let first: Vec<u32> = (0..if a64 { 2 } else { 3 }).map(|i| page(n * 4 + i)).collect();
+        let last = page(n * 4 + first.len() as u32);
+        let mut cont = [0u8; ENTRY_SIZE];
+        let mut e = if a64 {
+            let segs: Vec<(u64, u32)> = first.iter().map(|&a| (u64::from(a), piece)).collect();
+            cont[0] = 0x0a;
+            p32(&mut cont, 4, last);
+            p32(&mut cont, 12, piece);
+            a64_request(0x90 + n, 1, &cdb, &segs)
+        } else {
+            let segs: Vec<(u32, u32)> = first.iter().map(|&a| (a, piece)).collect();
+            cont[0] = 2;
+            p32(&mut cont, 8, last);
+            p32(&mut cont, 12, piece);
+            request(0x90 + n, 1, &cdb, &segs)
+        };
+        e[1] = 2;
+        p16(&mut e, 18, if a64 { 3 } else { 4 });
+        r.put_entry(slot, &e);
+        r.put_entry(slot + 1, &cont);
+    }
+    r.doorbell(4);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0);
+    r.clock(S);
+    assert_eq!(handles(&r, 2), [0x90, 0x91]);
+    assert!((0..2).all(|i| g16(&r.status(i), 10) == IOCB_COMPLETE));
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 4, "the continuation entries were consumed with their commands");
+
+    // Read both back, whole.
+    let rd = BUF + 0x40000;
+    for n in 0..2u32 {
+        let cdb = cdb10(scsi_cmd::READ_10, 16 + 8 * n, blocks);
+        r.put_entry(4 + n, &request(0xb0 + n, 1, &cdb, &[(rd + n * 0x4000, 3 * piece)]));
+    }
+    r.doorbell(6);
+    for n in 0..2u32 {
+        let want: Vec<u8> = (0..3).flat_map(|i| data(n * 4 + i)).collect();
+        assert_eq!(r.mem.get(rd + n * 0x4000, want.len()), want, "write {n}");
+    }
+}
+
+#[test]
+fn a_parked_write_reads_its_segments_from_its_own_slots() {
+    parked_writes_keep_their_own_segments(false);
+}
+
+#[test]
+fn a_parked_64_bit_write_reads_its_segments_from_its_own_slots() {
+    parked_writes_keep_their_own_segments(true);
+}
+
+#[test]
+fn a_second_reset_retires_the_parked_commands_and_replaces_the_hold() {
+    let r = hold_rig("hold-retire");
+    bus_reset(&r, 5, 0);
+    r.put_entry(0, &tur1(0x74));
+    r.put_entry(1, &tur1(0x75));
+    r.doorbell(2);
+    r.clock(2 * S);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0);
+    // A shorter hold replaces the five seconds, and ends the parked pair.
+    bus_reset(&r, 1, 0);
+    r.isp.wait_idle();
+    assert_eq!(handles(&r, 2), [0x74, 0x75], "retired at once, in order");
+    assert!((0..2).all(|i| g16(&r.status(i), 10) == IOCB_RESET));
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 2);
+    r.put_entry(2, &tur1(0x76));
+    r.doorbell(3);
+    r.clock(3 * S - 1);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 2, "the new hold, from the second reset");
+    r.clock(3 * S);
+    assert_eq!(handles(&r, 3), [0x74, 0x75, 0x76]);
+    r.clock(20 * S);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 3, "the retired commands post nothing more");
+
+    // A delay of zero ends the hold the same way.
+    let r = hold_rig("hold-retire0");
+    bus_reset(&r, 5, 0);
+    r.put_entry(0, &tur1(0x77));
+    r.doorbell(1);
+    bus_reset(&r, 0, 0);
+    r.isp.wait_idle();
+    assert_eq!((handles(&r, 1), g16(&r.status(0), 10)), (vec![0x77], IOCB_RESET));
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 1);
+    queue_absent(&r, 1, 0x78);
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS - 1);
+    assert_ne!(g32(&r.status(1), 4), 0x78);
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    assert_eq!(g32(&r.status(1), 4), 0x78, "no hold left: the timeout alone");
+}
+
+#[test]
+fn a_guest_reset_clears_the_hold_and_drops_the_parked_commands() {
+    let r = hold_rig("hold-guest-reset");
+    bus_reset(&r, 5, 0);
+    r.put_entry(0, &tur1(0x79));
+    r.doorbell(1);
+    r.w(reg::BUS_CTRL, CTRL_SOFT_RESET);
+    r.init_rings(8, 8);
+    r.clock(0);
+    queue_absent(&r, 0, 0x7a);
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    assert_eq!(handles(&r, 1), [0x7a], "answered at 250 ms, not 5.25 s");
+    r.clock(20 * S);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1, "the old command never appears");
+}
+
+#[test]
+fn a_new_request_ring_drops_the_parked_commands_but_not_the_hold() {
+    let r = hold_rig("hold-rebuild");
+    bus_reset(&r, 5, 0);
+    r.put_entry(0, &tur1(0x7b));
+    r.doorbell(1);
+    assert_eq!(r.init_queue(mbox::INIT_REQ_QUEUE, 8, RQST), mbox::COMPLETE);
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 0);
+    r.put_entry(0, &tur1(0x7c));
+    r.doorbell(1);
+    r.clock(5 * S - 1);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0, "the hold persists");
+    r.clock(5 * S);
+    assert_eq!(handles(&r, 1), [0x7c]);
+    r.clock(20 * S);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1, "the dropped command got no completion");
+}
+
+#[test]
+fn a_rewritten_entry_is_answered_incomplete_for_its_handle() {
+    let r = hold_rig("hold-rewritten");
+    bus_reset(&r, 1, 0);
+    r.put_entry(0, &tur1(0x80));
+    r.doorbell(1);
+    // The driver reuses the slot while the command is parked.
+    r.put_entry(0, &tur1(0x99));
+    r.clock(S);
+    let s = r.status(0);
+    assert_eq!((g32(&s, 4), g16(&s, 10)), (0x80, IOCB_INCOMPLETE));
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 1, "the new entry is not run in its place");
+}
+
+#[test]
+fn a_refused_cdb_read_when_the_hold_ends_drops_the_command() {
+    let r = Rig::with_disk("hold-refused", 1, 64);
+    // Two entries at the very end of memory: the first's header can be read
+    // but its CDB runs off the bus.
+    let at = (MEM - 24) as u32;
+    assert_eq!(r.cmd(&[mbox::INIT_REQ_QUEUE, 2, (at >> 16) as u16, at as u16]), mbox::COMPLETE);
+    assert_eq!(r.init_queue(mbox::INIT_RSP_QUEUE, 4, RESP), mbox::COMPLETE);
+    r.clock(0);
+    bus_reset(&r, 1, 0);
+    r.mem.put(at, &tur1(0x7d)[..24]);
+    r.doorbell(1);
+    r.clock(S);
+    assert_eq!(r.r(reg::RESPONSE_QUEUE), 0, "nothing is answered");
+    assert_eq!(r.r(reg::REQUEST_QUEUE), 1, "and the command is gone");
+    assert!(r.isp.notes().iter().any(|n| n.contains("dropped")), "logged: {:?}", r.isp.notes());
+}
+
+/// A snapshot carries each bus's remaining hold and where the parked
+/// commands are.
+#[test]
+fn a_snapshot_taken_during_a_hold_resumes_with_the_time_left() {
+    let src = hold_rig("hold-save-src");
+    bus_reset(&src, 2, 0);
+    queue_absent(&src, 0, 0x6e);
+    src.clock(500 * MS);
+    let saved = src.isp.save_state();
+
+    for base in [0, 7_000 * MS] {
+        let dst = Rig::with_disk("hold-save-dst", 1, 64);
+        dst.put_entry(0, &request(0x6e, 3, &[0, 0, 0, 0, 0, 0], &[]));
+        dst.clock(base);
+        dst.isp.load_state(&saved).expect("load_state");
+        dst.isp.wait_idle();
+        assert_eq!(dst.r(reg::REQUEST_QUEUE), 0, "the parked command holds request-out; base {base}");
+        assert_eq!(dst.r(reg::RESPONSE_QUEUE), 0);
+        // A second command joins the hold.
+        dst.put_entry(1, &request(0x6f, 3, &[0, 0, 0, 0, 0, 0], &[]));
+        dst.doorbell(2);
+        let ends = base + 1_500 * MS + DEFAULT_SELECTION_TIMEOUT as i64 * MS;
+        dst.clock(ends - 1);
+        assert_eq!(dst.r(reg::RESPONSE_QUEUE), 0, "1.5 s of hold and the timeout were left; base {base}");
+        dst.clock(ends);
+        assert_eq!(handles(&dst, 2), [0x6e, 0x6f], "both answered, oldest first; base {base}");
+        assert_eq!(dst.r(reg::REQUEST_QUEUE), 2);
+    }
+}
+
+/// A hold that has run out but that the ring thread had not yet acted on
+/// still crosses, and the load re-arms it at zero.
+#[test]
+fn a_hold_that_ended_unfired_still_crosses_a_snapshot() {
+    let src = hold_rig("hold-expired-src");
+    bus_reset(&src, 1, 0);
+    queue_absent(&src, 0, 0x6c);
+    src.isp.pause();
+    src.clock(5 * S);
+    let saved = src.isp.save_state();
+    let hold = get_field(&saved, "bus_hold").expect("bus_hold");
+    let toml::Value::Array(hold) = hold else { panic!("bus_hold is not an array") };
+    assert_eq!(hold.len(), 1, "the ended hold is carried");
+    assert_eq!(get_field(&hold[0], "left_ns"), Some(&toml::Value::Integer(0)));
+
+    let dst = Rig::with_disk("hold-expired-dst", 1, 64);
+    dst.put_entry(0, &request(0x6c, 3, &[0, 0, 0, 0, 0, 0], &[]));
+    dst.clock(9 * S);
+    dst.isp.load_state(&saved).expect("load_state");
+    dst.clock(9 * S + DEFAULT_SELECTION_TIMEOUT as i64 * MS - 1);
+    assert_eq!(dst.r(reg::RESPONSE_QUEUE), 0);
+    dst.clock(9 * S + DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    assert_eq!(handles(&dst, 1), [0x6c], "it starts at the load");
+}
