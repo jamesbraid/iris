@@ -611,3 +611,59 @@ fn incremental_updates_keep_the_frame_a_whole_resolve_makes() {
         }
     }
 }
+
+/// The screen the display keeps holds the frame, cursor and all, however
+/// few lines each frame presents: the first frame takes the whole picture
+/// and the ones after it only the lines they resolved.
+#[test]
+fn the_screen_follows_the_frame_through_frames_that_present_a_few_lines() {
+    use crate::dev::odyssey::raster_bench::Lcg;
+    use std::sync::atomic::AtomicU64;
+    let (mut s, mut st) = gl_board();
+    s.set_scanout_size(SGI_ODYSSEY_WIDTH, SGI_ODYSSEY_HEIGHT);
+    let mut rng = Lcg(0xfeed);
+    for v in s.lut.iter_mut().take(4096) {
+        *v = rng.next_u32() & ODSY_LUT_ENTRY_MASK;
+    }
+    s.cursor[ODSY_CURSOR_POSITION as usize] = 100 << 16 | 40;
+    for i in 0..ODSY_CURSOR_COLOUR_COUNT {
+        s.cursor[(ODSY_CURSOR_COLOURS + 1 + i) as usize] = rng.next_u32() & ODSY_LUT_ENTRY_MASK;
+    }
+    for w in 0..128u32 {
+        s.cursor[(ODSY_CURSOR_GLYPH + w) as usize] = rng.next_u32();
+    }
+    s.cursor[ODSY_CURSOR_CONTROL as usize] = ODSY_CURSOR_CTL_ENABLE;
+    let h = BoardLocks::new(s);
+    let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let (w, ht) = (SGI_ODYSSEY_WIDTH as usize, SGI_ODYSSEY_HEIGHT as usize);
+
+    for step in 0..8 {
+        {
+            let mut s = h.board.lock();
+            let target = step & 1;
+            st.drawable.front = target;
+            st.drawable.back = target;
+            small_triangle(&mut s, &st, 20.0 + 120.0 * step as f32, [1.0, (step & 1) as f32, 1.0, 1.0]);
+            if step == 5 {
+                s.cursor[ODSY_CURSOR_POSITION as usize] = 200 << 16 | 500;
+                let span = s.cursor_span();
+                s.cursor_invalidate(span);
+            }
+            if step % 3 == 2 {
+                s.front.lock().swap_arm = u32::MAX;
+            }
+        }
+        h.raster.wait_idle();
+        Odyssey::frame(&h, &display);
+        let s = h.board.lock();
+        let screen = display.screen.lock();
+        for y in 0..ht {
+            for x in 0..w {
+                let rgb = s.scanout.frame[y * w + x];
+                let want = 0xff00_0000 | (rgb & 0xff) << 16 | rgb & 0xff00 | (rgb >> 16) & 0xff;
+                let at = y * crate::disp::FB_STRIDE + x;
+                assert_eq!((screen.fb_rgb[at], screen.rgba[at]), (want, want), "step {step} ({x}, {y})");
+            }
+        }
+    }
+}

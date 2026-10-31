@@ -23,6 +23,9 @@ pub struct Display {
     pub screenshot: AtomicBool,
     pub frame: AtomicBool,
     local: Mutex<Option<Local>>,
+    /// The last frame's update, kept for the board to take its buffers
+    /// back at the start of the next (Board::scanout_recycle()).
+    pub(super) done: Mutex<Option<ScanoutJob>>,
     /// Frames since the last present.
     idle: AtomicU32,
     /// The frame size last copied to the screen; (0, 0) before the first.
@@ -53,6 +56,7 @@ impl Display {
             screenshot: AtomicBool::new(false),
             frame: AtomicBool::new(false),
             local: Mutex::new(None),
+            done: Mutex::new(None),
             idle: AtomicU32::new(0),
             shown: Mutex::new((0, 0)),
             heartbeat,
@@ -81,6 +85,11 @@ impl Display {
     /// line `first` of a frame `height` lines tall) into the screen and
     /// present it. No rows: present the screen as it is.
     pub(super) fn present(&self, rows: &[u32], width: usize, height: usize, first: usize) {
+        self.present_lines(rows.chunks_exact(width.max(1)).enumerate().map(|(i, row)| (first + i, row)), width, height);
+    }
+
+    /// As present(), for lines given with their numbers.
+    pub(super) fn present_lines<'a>(&self, lines: impl Iterator<Item = (usize, &'a [u32])>, width: usize, height: usize) {
         let mut screen = self.screen.lock();
         let w = width.min(FB_STRIDE);
         let h = height.min(screen.rgba.len() / FB_STRIDE);
@@ -89,17 +98,20 @@ impl Display {
         screen.prebuilt = true;
         screen.status_bar_only = false;
         let planes = &mut *screen;
-        for (i, src) in rows.chunks_exact(width).enumerate() {
-            let y = first + i;
+        for (y, src) in lines {
             if y >= h {
-                break;
+                continue;
             }
-            // 0x00RRGGBB to opaque 0xAABBGGRR: a byte swap with alpha set.
-            let line = &mut planes.fb_rgb[y * FB_STRIDE..y * FB_STRIDE + w];
-            for (d, &rgb) in line.iter_mut().zip(&src[..w]) {
-                *d = 0xff00_0000 | rgb.swap_bytes() >> 8;
+            // 0x00RRGGBB to opaque 0xAABBGGRR: a byte swap with alpha set,
+            // written to both copies in one pass.
+            let at = y * FB_STRIDE;
+            let line = &mut planes.fb_rgb[at..at + w];
+            let rgba = &mut planes.rgba[at..at + w];
+            for ((d, e), &rgb) in line.iter_mut().zip(rgba.iter_mut()).zip(&src[..w]) {
+                let v = 0xff00_0000 | rgb.swap_bytes() >> 8;
+                *d = v;
+                *e = v;
             }
-            planes.rgba[y * FB_STRIDE..y * FB_STRIDE + w].copy_from_slice(line);
         }
         *self.shown.lock() = (width, height);
         screen.frame_seq = screen.frame_seq.wrapping_add(1);
@@ -651,6 +663,7 @@ impl Board {
             frame: (self.scanout.frame_width, self.scanout.frame_height),
             rows: std::mem::take(&mut self.scanout_rows),
             saw_unverified: false,
+            committed: false,
         })
     }
 
@@ -659,32 +672,49 @@ impl Board {
     /// the frame changed shape meanwhile the lines are dropped and the
     /// whole new frame is dirty. The span of lines changed.
     pub fn scanout_finish(&mut self, job: Option<ScanoutJob>) -> Option<(usize, usize)> {
-        let job = job?;
+        let mut job = job?;
+        let span = self.scanout_commit(&mut job);
+        self.scanout_recycle(job);
+        span
+    }
+
+    /// scanout_finish() but for the job's buffers, which stay with the
+    /// caller: afterwards the job's rows (ScanoutJob::lines()) are the
+    /// presented lines, the cursor over them, for the display to convert
+    /// with no lock held. Hand the job to scanout_recycle() when done.
+    pub fn scanout_commit(&mut self, job: &mut ScanoutJob) -> Option<(usize, usize)> {
         let mut span: Option<(usize, usize)> = None;
+        job.committed = false;
         if job.w == 0 || job.frame != (self.scanout.frame_width, self.scanout.frame_height) || job.w != self.scanout.mode.width as usize {
             self.scanout.invalidate_all();
-        } else {
-            let w = job.w;
-            let mut rows = job.rows.chunks_exact(w);
-            let mut row = vec![0u32; w];
-            for &(y, staged) in &job.stage.lines {
-                let y = y as usize;
-                if let (true, Some(resolved)) = (staged, rows.next()) {
-                    row.copy_from_slice(resolved);
-                    self.cursor_row(y as u32, &mut row, job.width);
-                    self.scanout.frame[y * w..(y + 1) * w].copy_from_slice(&row);
-                }
-                span = Some(span.map_or((y, y + 1), |(a, b)| (a.min(y), b.max(y + 1))));
-            }
-            if job.saw_unverified && !self.scanout_group25_reported {
-                self.scanout_group25_reported = true;
-                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: colormap group 25 (0x1900) resolved as an index table; unverified");
-            }
-            crate::dlog_dev!(LogModule::Odyssey, "sgi-odyssey: scanout update: {} lines", job.stage.lines.len());
+            return None;
         }
+        let w = job.w;
+        job.rows.resize(job.stage.lines.len() * w, 0);
+        for (&(y, staged), row) in job.stage.lines.iter().zip(job.rows.chunks_exact_mut(w)) {
+            let y = y as usize;
+            if staged {
+                self.cursor_row(y as u32, row, job.width);
+                self.scanout.frame[y * w..(y + 1) * w].copy_from_slice(row);
+            } else {
+                // Resolved into the frame when it was staged.
+                row.copy_from_slice(&self.scanout.frame[y * w..(y + 1) * w]);
+            }
+            span = Some(span.map_or((y, y + 1), |(a, b)| (a.min(y), b.max(y + 1))));
+        }
+        if job.saw_unverified && !self.scanout_group25_reported {
+            self.scanout_group25_reported = true;
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: colormap group 25 (0x1900) resolved as an index table; unverified");
+        }
+        crate::dlog_dev!(LogModule::Odyssey, "sgi-odyssey: scanout update: {} lines", job.stage.lines.len());
+        job.committed = true;
+        span
+    }
+
+    /// Take a finished job's buffers back for the next frame.
+    pub fn scanout_recycle(&mut self, job: ScanoutJob) {
         self.scanout_stage = job.stage;
         self.scanout_rows = job.rows;
-        span
     }
 }
 
@@ -701,26 +731,42 @@ pub struct ScanoutJob {
     /// The staged lines resolved, `w` pixels each.
     rows: Vec<u32>,
     saw_unverified: bool,
+    /// scanout_commit() put the rows in the frame.
+    committed: bool,
 }
 
 impl ScanoutJob {
+    /// The lines of a committed job, as (line, `w` pixels) in order; none
+    /// before scanout_commit() or if it dropped them.
+    pub fn lines(&self) -> impl Iterator<Item = (usize, &[u32])> {
+        let committed = self.committed;
+        self.stage.lines.iter().zip(self.rows.chunks_exact(self.w.max(1))).filter(move |_| committed).map(|(&(y, _), row)| (y as usize, row))
+    }
+
+    pub fn committed(&self) -> bool {
+        self.committed
+    }
+
     /// Resolve the staged lines. Needs nothing of the board: the display
     /// runs it with no lock held, while the front end and the raster unit
     /// go on.
     pub fn resolve(&mut self) {
-        let Some(ctx) = &self.ctx else { return };
         let (w, width) = (self.w, self.width as usize);
         if w == 0 {
             return;
         }
-        let staged = self.stage.lines.iter().filter(|&&(_, staged)| staged).count();
+        // A row for every line, in order; a line not staged is filled in
+        // by scanout_commit().
         self.rows.clear();
-        self.rows.resize(staged * w, 0);
+        self.rows.resize(self.stage.lines.len() * w, 0);
+        let Some(ctx) = &self.ctx else { return };
         let mut at = 0;
-        for out in self.rows.chunks_exact_mut(w) {
-            let (line, next) = self.stage.line(at, width);
-            at = next;
-            self.saw_unverified |= resolve_line(ctx, line, out);
+        for (&(_, staged), out) in self.stage.lines.iter().zip(self.rows.chunks_exact_mut(w)) {
+            if staged {
+                let (line, next) = self.stage.line(at, width);
+                at = next;
+                self.saw_unverified |= resolve_line(ctx, line, out);
+            }
         }
     }
 }
