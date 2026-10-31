@@ -144,9 +144,12 @@ impl FuelMachine {
             let v = space
                 .add_cached_view(&[cpu.ppmem_bitmap_ptr(), cpu.tcache_bitmap_ptr()])
                 .map_err(|e| format!("ppmem: the CPU's cached view: {e}"))?;
-            for slot in 0..4u64 {
-                let at = slot * crate::dev::bedrock_mem::BANK_SPAN;
-                space.allow_unbacked_lines(at, at + crate::dev::bedrock_mem::FITTED_BANK);
+            let extent = board.md.ram_extent();
+            for slot in 0..crate::dev::bedrock_mem::SLOTS {
+                if extent.prefix(slot) > 0 {
+                    let at = slot as u64 * crate::dev::bedrock_mem::BANK_SPAN;
+                    space.allow_unbacked_lines(at, at + extent.prefix(slot));
+                }
             }
             unsafe {
                 cpu.set_tcache_window(space.view_base(v));
@@ -511,6 +514,8 @@ pub(crate) type FuelCpu = MipsExecutor<MipsTlb, R12000ShadowCache>;
 // The 500 MHz / 2 MiB PROM record selects these boot-mode inputs.
 const FUEL_CP0_CONFIG: u32 = 0x6c9a_a985;
 const FUEL_BOARD_ID: u64 = 0x4004;
+/// Two 256 MiB banks, locational banks 0 and 1.
+const FUEL_BANKS_MIB: [u32; 2] = [256, 256];
 
 /// The local node register blocks projected into the processor's I/O view.
 pub mod reg {
@@ -527,7 +532,7 @@ pub mod reg {
 /// Build the Fuel's processor, `part` being the one the config resolved, and
 /// set the PROM boot-mode inputs.
 pub(crate) fn build_cpu(bus: Arc<Ip35Bus>, part: &Part) -> Box<FuelCpu> {
-    let cfg = MipsCpuConfig::for_model::<R12000ShadowCache>(Arc::new(crate::ip35::memory_map()))
+    let cfg = MipsCpuConfig::for_model::<R12000ShadowCache>(Arc::new(crate::ip35::memory_map(&crate::dev::bedrock_mem::RamExtent::new(&FUEL_BANKS_MIB))))
         .with_prid(part.prid());
     let mut cpu = Box::new(MipsExecutor::new(
         bus as Arc<dyn BusDevice>,
@@ -632,7 +637,7 @@ impl FuelBoard {
 
     pub fn with_config(config: FuelBoardConfig<'_>) -> Result<Self, String> {
         let FuelBoardConfig { payload, clock, flash_path, station_mac, timekeeper, ps2_input, usb_input, l1: l1_identity, graphics, graphics_pool, graphics_raster } = config;
-        let md = BedrockMd::with_clock(clock.clone());
+        let md = BedrockMd::with_clock(&FUEL_BANKS_MIB, clock.clone())?;
         let phys = md.physical().clone();
         let pi: [Arc<BedrockPi>; 2] = std::array::from_fn(|interface| {
             BedrockPi::new(
@@ -955,7 +960,7 @@ impl FuelBoard {
         bus.map(0, 0x1_0000_0000, 1 << 30, md.ecc_scrub_bus());
         bus.map(2, 0, 1 << 33, md.fetchop_bus());
         let bus = Arc::new(bus);
-        let cached = bus.cached_view(md.dma_view());
+        let cached = bus.cached_view(md.dma_view(), md.ram_extent());
         #[cfg(feature = "jitv2")]
         let code = bus.code_view(cached.clone());
         Ok(Self {

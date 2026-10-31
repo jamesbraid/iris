@@ -651,6 +651,13 @@ struct Mapping {
     period: u64,
 }
 
+impl Mapping {
+    /// The part of this mapping in `[from, to)`, laid from the same bytes.
+    fn part(&self, from: u64, to: u64) -> Mapping {
+        Mapping { at: from, len: to - from, src: self.src + (from - self.at), ..*self }
+    }
+}
+
 /// The 4GB window that banks are mapped into, plus the banks themselves.
 ///
 /// Holding the banks here is what lets `map_bank` take an index — matching the
@@ -690,6 +697,9 @@ struct SpaceState {
     /// The window's size in bytes. Never changes.
     window: u64,
     mappings: Vec<Mapping>,
+    /// Ranges still mapped on the host but off the direct path; see
+    /// [`PpMemSpace::withdraw_range`].
+    withdrawn: Vec<Mapping>,
     /// Where the bitmap is published. Points at `own_bitmap` until a consumer
     /// hands over its own inline field, so it is never null and publication is
     /// an unconditional store.
@@ -776,6 +786,7 @@ impl PpMemSpace {
             state: UnsafeCell::new(SpaceState {
                 window,
                 mappings: Vec::new(),
+                withdrawn: Vec::new(),
                 sink,
                 sink2,
                 bits: 0,
@@ -814,6 +825,12 @@ impl PpMemSpace {
         self.banks.len()
     }
 
+    /// How many ranges are mapped now; a remap scrubs each one.
+    #[cfg(test)]
+    pub(crate) fn mapping_count(&self) -> usize {
+        unsafe { &*self.state.get() }.mappings.len()
+    }
+
     /// Map `size` bytes of `bank`, from object offset `src`, at window
     /// `offset`, without repeating, with the generation counters in lockstep.
     /// The O2 maps its memory this way: one 32 MB slot of the window at a
@@ -843,6 +860,72 @@ impl PpMemSpace {
         Self::record(st, Mapping { at: offset, len: size, bank, src, period: 0 });
         self.marks(true);
         Ok(())
+    }
+
+    /// Return `at..at + len` of the window, and its counters, to unmapped.
+    fn scrub_range(&self, at: u64, len: u64) {
+        // Best-effort: a failure here leaves the range mapped, which is
+        // still safe — it just isn't reverted.
+        // `scrub`, not `unmap`: see `AddrSpace::scrub`.
+        let _ = unsafe { self.space.scrub(at as usize, len as usize) };
+        #[cfg(feature = "jitv2")]
+        {
+            let gen_off = at / GEN_RATIO;
+            let gen_len = len / GEN_RATIO;
+            let gran = super::map::granularity() as u64;
+            if gen_len >= gran && gen_off % gran == 0 && gen_len % gran == 0 {
+                let _ = unsafe { self.gen_space.scrub(gen_off as usize, gen_len as usize) };
+            }
+        }
+    }
+
+    /// Take `offset..offset + size` off the direct path without unmapping
+    /// it. The bitmap is republished to every sink with the regions this
+    /// leaves partly covered clear; the host mapping and its counters stay,
+    /// so a processor that read the old bitmap an instant ago still reaches
+    /// the bank's bytes rather than a scrubbed page, and needs no other
+    /// processor stopped. A mapping that only partly overlaps keeps the rest
+    /// on the path, but a bit is set only for a region still wholly mapped,
+    /// so withdrawing part of a region takes the whole region off.
+    /// [`Self::restore_range`] puts it back. CPU thread only, as the rest.
+    pub fn withdraw_range(&self, offset: u64, size: u64) {
+        assert!(offset + size <= self.window_size(), "ppmem: [{offset:#x}, +{size:#x}) escapes the window");
+        let st = unsafe { &mut *self.state.get() };
+        let end = offset + size;
+        let mut kept = Vec::with_capacity(st.mappings.len() + 1);
+        for m in std::mem::take(&mut st.mappings) {
+            if m.at >= end || m.at + m.len <= offset {
+                kept.push(m);
+                continue;
+            }
+            let (from, to) = (m.at.max(offset), (m.at + m.len).min(end));
+            st.withdrawn.push(m.part(from, to));
+            if m.at < offset {
+                kept.push(m.part(m.at, offset));
+            }
+            if m.at + m.len > end {
+                kept.push(m.part(end, m.at + m.len));
+            }
+        }
+        st.mappings = kept;
+        Self::recompute_bitmap(st);
+    }
+
+    /// Put what [`Self::withdraw_range`] took off the direct path in
+    /// `offset..offset + size` back on it, republishing the bitmap. Returns
+    /// whether anything was withdrawn there; if not, nothing was mapped
+    /// and the caller maps the range with [`Self::map_range`].
+    pub fn restore_range(&self, offset: u64, size: u64) -> bool {
+        let st = unsafe { &mut *self.state.get() };
+        let end = offset + size;
+        let (back, still): (Vec<_>, Vec<_>) = std::mem::take(&mut st.withdrawn)
+            .into_iter()
+            .partition(|m| m.at >= offset && m.at + m.len <= end);
+        st.withdrawn = still;
+        let any = !back.is_empty();
+        st.mappings.extend(back);
+        Self::recompute_bitmap(st);
+        any
     }
 
     /// Recompute the bitmap from the live mapping list.
@@ -905,8 +988,19 @@ impl PpMemSpace {
         state
             .mappings
             .retain(|m| !(m.at >= at && m.at + m.len <= at + len));
+        state
+            .withdrawn
+            .retain(|m| !(m.at >= at && m.at + m.len <= at + len));
         state.mappings.push(m);
         Self::recompute_bitmap(state);
+    }
+}
+
+impl SpaceState {
+    /// Every range with memory behind it: the mappings, and the ranges taken
+    /// off the direct path but still mapped (`PpMemSpace::withdraw_range`).
+    fn present(&self) -> impl Iterator<Item = &Mapping> {
+        self.mappings.iter().chain(&self.withdrawn)
     }
 }
 
@@ -937,7 +1031,7 @@ impl PpMemSpace {
         let sinks = sinks.iter().copied().filter(|p| !p.is_null()).collect();
         st.views.push(View { space, sinks, held: Default::default() });
         let v = st.views.len() - 1;
-        for m in st.mappings.clone() {
+        for m in st.present().copied().collect::<Vec<_>>() {
             self.lay(st, v, &m, m.at, m.at + m.len)?;
         }
         Self::publish_view(st, v);
@@ -1002,7 +1096,7 @@ impl PpMemSpace {
         let st = unsafe { &*self.state.get() };
         let gran = granularity() as u64;
         let page = pa & !(gran - 1);
-        st.mappings.iter().any(|m| m.at <= page && m.at + m.len >= page + gran)
+        st.present().any(|m| m.at <= page && m.at + m.len >= page + gran)
     }
 
     /// Let held pages in `[start, end)` stand with no memory mapped behind
@@ -1030,7 +1124,7 @@ impl PpMemSpace {
             self.mark(st, page, false);
         }
         let _ = unsafe { st.views[v].space.scrub(page as usize, gran as usize) };
-        for m in st.mappings.iter().filter(|m| m.at < page + gran && m.at + m.len > page) {
+        for m in st.present().filter(|m| m.at < page + gran && m.at + m.len > page) {
             let _ = self.lay(st, v, m, page.max(m.at), (page + gran).min(m.at + m.len));
         }
         Self::publish_view(st, v);
@@ -1049,7 +1143,7 @@ impl PpMemSpace {
         {
             use crate::cpu::jitv2::jitv2::{GEN_HELD, PAGE_SIZE};
             let end = page + granularity() as u64;
-            if !st.mappings.iter().any(|m| m.at <= page && m.at + m.len >= end) {
+            if !st.present().any(|m| m.at <= page && m.at + m.len >= end) {
                 return;
             }
             let d = if on { GEN_HELD } else { 1u64.wrapping_sub(GEN_HELD) };
@@ -1077,18 +1171,18 @@ impl PpMemSpace {
         let end = r + len;
         let mut at = r;
         while at < end {
-            if let Some(m) = st.mappings.iter().find(|m| m.at <= at && m.at + m.len > at) {
+            if let Some(m) = st.present().find(|m| m.at <= at && m.at + m.len > at) {
                 at = m.at + m.len;
                 continue;
             }
-            let next = st.mappings.iter().filter(|m| m.at > at && m.at < end).map(|m| m.at).min().unwrap_or(end);
+            let next = st.present().filter(|m| m.at > at && m.at < end).map(|m| m.at).min().unwrap_or(end);
             let _ = unsafe { st.views[v].space.scrub(at as usize, (next - at) as usize) };
             #[cfg(feature = "jitv2")]
             {
                 let g = granularity() as u64;
                 let (gs, ge) = ((at / GEN_RATIO) & !(g - 1), (next / GEN_RATIO).div_ceil(g) * g);
                 let touches = |m: &Mapping| m.at < ge * GEN_RATIO && m.at + m.len > gs * GEN_RATIO;
-                if !st.mappings.iter().any(touches) {
+                if !st.present().any(touches) {
                     let _ = unsafe { self.gen_space.scrub(gs as usize, (ge - gs) as usize) };
                 }
             }
@@ -1160,27 +1254,13 @@ impl MappedMemory for PpMemSpace {
         // view never shows memory the shared window no longer maps.
         for view in &st.views {
             let saved = Self::save_held(view, 0, st.window);
-            for m in &st.mappings {
+            for m in st.mappings.iter().chain(&st.withdrawn) {
                 let _ = unsafe { view.space.scrub(m.at as usize, m.len as usize) };
             }
             Self::put_held(view, saved);
         }
-        for m in std::mem::take(&mut st.mappings) {
-            // Best-effort: a failure here leaves the range mapped, which is
-            // still safe — it just isn't reverted.
-            // `scrub`, not `unmap`: see `AddrSpace::scrub`.
-            let _ = unsafe { self.space.scrub(m.at as usize, m.len as usize) };
-            #[cfg(feature = "jitv2")]
-            {
-                let gen_off = m.at / GEN_RATIO;
-                let gen_len = m.len / GEN_RATIO;
-                let gran = super::map::granularity() as u64;
-                if gen_len >= gran && gen_off % gran == 0 && gen_len % gran == 0 {
-                    let _ = unsafe {
-                        self.gen_space.scrub(gen_off as usize, gen_len as usize)
-                    };
-                }
-            }
+        for m in std::mem::take(&mut st.mappings).into_iter().chain(std::mem::take(&mut st.withdrawn)) {
+            self.scrub_range(m.at, m.len);
         }
         Self::recompute_bitmap(st);
     }
@@ -1724,6 +1804,39 @@ mod tests {
         assert_eq!(space.mapped_bitmap(), 0, "bitmap not cleared");
     }
 
+    /// Withdrawing one region clears only its bit in every sink and leaves
+    /// the host mapping, so the bank's bytes stay reachable; restoring it sets
+    /// the bit again without mapping anything. Clearing the mappings scrubs
+    /// withdrawn ranges too.
+    #[test]
+    fn withdraw_range_clears_one_region_in_every_sink_and_keeps_the_mapping() {
+        let (space, banks) = PpMemSpace::with_bank_sizes(&[256]).unwrap();
+        let mut third = 0u64;
+        unsafe {
+            space.set_bitmap_sink2(&mut third);
+        }
+        let region = 64 * MB as u64;
+        for i in 0..3 {
+            space.map_range(0, i * region, i * region, region).unwrap();
+        }
+        assert_eq!((space.mapped_bitmap(), third), (0b111, 0b111));
+        space.withdraw_range(region, region);
+        assert_eq!((space.mapped_bitmap(), third), (0b101, 0b101));
+        assert_eq!(space.mapping_count(), 2);
+        // The host mapping is still there: a store through the window lands in the bank.
+        unsafe { *(space.window_base().add(region as usize + 0x100) as *mut u32) = 0x0BAD_C0DE };
+        assert_eq!(banks[0].read32(region + 0x100).data, 0x0BAD_C0DE);
+        assert!(space.restore_range(region, region));
+        assert_eq!((space.mapped_bitmap(), third), (0b111, 0b111));
+        assert!(!space.restore_range(region, region), "nothing left to restore");
+        // Part of a region leaves the whole region off the direct path.
+        space.withdraw_range(region + 0x1000, 0x1000);
+        assert_eq!((space.mapped_bitmap(), third), (0b101, 0b101));
+        space.clear_mappings();
+        assert!(!space.restore_range(0, 3 * region), "a clear scrubs what was withdrawn");
+        assert_eq!((space.mapped_bitmap(), third), (0, 0));
+    }
+
     /// The low-512KB alias: bank 0's first 512KB visible at physical 0, the
     /// same pages as at LOMEM_BASE. Replaces `physical.rs`'s AliasBus.
     #[test]
@@ -2024,6 +2137,36 @@ mod tests {
         banks[0].write32(0x3010, 0x9999_9999);
         assert_eq!(word(space.view_base(v), 0x3010), 0x9999_9999);
         assert_eq!(word(space.view_base(v), 0x200_3010), 0x9999_9999, "laid again with the bank's period");
+    }
+
+    /// A region withdrawn from the direct path leaves a view's bytes where
+    /// they are: a page the view holds in it, released while it is off the
+    /// path, shows the bank again, and the region returns to every sink.
+    #[test]
+    fn a_withdrawn_region_keeps_its_bytes_in_every_view() {
+        let (space, banks) = PpMemSpace::with_bank_sizes(&[256]).unwrap();
+        let region = 64 * MB as u64;
+        for i in 0..4 {
+            space.map_range(0, i * region, i * region, region).unwrap();
+        }
+        let (v, field) = view_of(&space);
+        banks[0].write32(region + 0x2040, 0x1234_5678);
+        assert_eq!(*field, 0b1111);
+        space.withdraw_range(region, region);
+        assert_eq!(*field, 0b1101, "the view's bitmap follows the withdrawal");
+        assert_eq!(word(space.view_base(v), region + 0x2040), 0x1234_5678, "its bytes stay mapped");
+        assert!(space.backs(region + 0x2000), "withdrawn memory is still there");
+        // A page held and released while the region is off the path lays the bank again.
+        assert_eq!(space.hold_line_page(v, region + 0x2000), Some(true));
+        assert_eq!(*field, 0b1111, "a held page makes its region the view's");
+        set_word(space.view_base(v), region + 0x2040, 0x7777_7777);
+        assert_eq!(banks[0].read32(region + 0x2040).data, 0x1234_5678);
+        assert!(space.release_line_page(v, region + 0x2000));
+        assert_eq!(*field, 0b1101);
+        assert_eq!(word(space.view_base(v), region + 0x2040), 0x1234_5678);
+        assert!(space.restore_range(region, region));
+        assert_eq!(*field, 0b1111);
+        assert_eq!(word(space.view_base(v), region + 0x2040), 0x1234_5678);
     }
 
     /// A page with no memory behind it cannot be held. One in a region the
