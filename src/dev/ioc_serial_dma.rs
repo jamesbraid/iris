@@ -28,7 +28,8 @@
 //! * The receive timer and a transmit delay run on host time. A pause freezes
 //!   both where they stand and a resume lets each finish the time it had
 //!   left. No source says what the part does.
-//! * Receive-ring-full is latched each time a post is refused.
+//! * Receive-ring-full is a level that follows a held entry; what the part
+//!   does is not known.
 //!
 //! # Mapping to QEMU
 //!
@@ -186,6 +187,8 @@ pub struct SerialDmaPort {
     drain_pending: bool,
     busy: bool,
     halted: bool,
+    /// The last post was turned away for lack of ring room.
+    post_refused: bool,
     paused: bool,
     pub rx_deadline: Option<Instant>,
     rx_idle_count: u32,
@@ -314,13 +317,24 @@ impl SerialDma {
         host.set_level(p, SerialDmaSource::TxEmpty, empty);
     }
 
-    /// The receive high-water mark counts ring entries; a level.
-    fn update_high_water(&self, p: usize, host: &mut dyn SerialDmaHost) {
+    /// The receive high-water mark counts ring entries; a level. So is
+    /// receive-ring-full: set while ring DMA is on and an entry waits, turned
+    /// away for lack of ring room. It does not come back with every refused
+    /// retry after software has acknowledged it, and it falls once the
+    /// consumer makes room, whether or not the held entry has posted yet. A
+    /// ring filled exactly, with nothing waiting, does not raise it. A model
+    /// choice; what the part does is not known.
+    fn update_high_water(&mut self, p: usize, host: &mut dyn SerialDmaHost) {
         let mask = self.mask(p);
-        let port = &self.port[p];
         let hw = self.control(p) & ctl::HIGH_WATER;
+        let enabled = self.control(p) & ctl::ENABLE != 0;
+        let port = &mut self.port[p];
         let waiting = port.reg[3].wrapping_sub(port.reg[4]) & mask;
         host.set_level(p, SerialDmaSource::RxHighWater, hw != 0 && waiting / ENTRY as u32 >= hw);
+        if (port.reg[3] + ENTRY as u32) & mask != port.reg[4] & mask {
+            port.post_refused = false;
+        }
+        host.set_level(p, SerialDmaSource::RxFull, enabled && port.post_refused);
     }
 
     /// Post the packer as one entry. Fails, keeping the characters, when the
@@ -334,7 +348,8 @@ impl SerialDma {
         };
         let next = (produce + ENTRY as u32) & mask;
         if next == consume & mask {
-            host.raise(p, SerialDmaSource::RxFull);
+            // Full: refuse. The characters keep in the packer and the FIFO.
+            self.port[p].post_refused = true;
             return false;
         }
         let at = ring.saturating_add(u64::from(produce & mask));
@@ -344,6 +359,7 @@ impl SerialDma {
         }
         let port = &mut self.port[p];
         port.reg[3] = next;
+        port.post_refused = false;
         port.packed = 0;
         port.packer = [0; ENTRY];
         true
@@ -653,6 +669,7 @@ impl SerialDma {
         port.reg[1..=4].fill(0);
         port.armed = false;
         port.drain_pending = false;
+        port.post_refused = false;
         port.packed = 0;
         port.packer = [0; ENTRY];
         port.tx_slot = 0;
@@ -717,6 +734,7 @@ impl SerialDma {
             _ => {}
         }
         self.update_tx_empty(p, host);
+        self.update_high_water(p, host);
     }
 }
 
