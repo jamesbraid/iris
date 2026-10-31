@@ -294,6 +294,9 @@ pub struct CowNode {
     overlay: File,
     overlay_path: PathBuf,
     dirty: HashSet<u64>,
+    /// Set by anything that changes the overlay or its sector set, cleared by
+    /// a flush, so a flush with nothing new to write costs nothing.
+    unflushed: bool,
     size: u64,
 }
 
@@ -344,7 +347,7 @@ impl CowNode {
             overlay_path.display(),
             sidecar.display()
         );
-        Ok(Self { backing, base_path, overlay, overlay_path, dirty, size })
+        Ok(Self { backing, base_path, overlay, overlay_path, dirty, unflushed: false, size })
     }
 
     /// Record the base image path explicitly. `add_device` knows it; `new`
@@ -447,16 +450,20 @@ impl BlockNode for CowNode {
             self.overlay.seek(SeekFrom::Start(lba * SECTOR_SIZE))?;
             self.overlay.write_all(&sector)?;
             self.dirty.insert(lba);
+            self.unflushed = true;
         }
         Ok(())
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        if !self.unflushed {
+            return Ok(());
+        }
         self.overlay.sync_all()?;
         crate::cow_disk::save_dirty_sidecar(&self.sidecar_path(), &self.dirty)?;
-        if let Some(backing) = self.backing.as_mut() {
-            backing.flush()?;
-        }
+        // The backing is never written through this node, so it has nothing
+        // of ours to flush.
+        self.unflushed = false;
         Ok(())
     }
 
@@ -468,6 +475,7 @@ impl BlockNode for CowNode {
         let (first, last) = sectors_for(offset, len);
         for lba in first..last {
             self.dirty.remove(&lba);
+            self.unflushed = true;
         }
         Ok(())
     }
@@ -532,6 +540,7 @@ impl BlockNode for CowNode {
         }
         base_rw.sync_all()?;
         self.dirty.clear();
+        self.unflushed = true;
         self.overlay.set_len(0)?;
         eprintln!("iris: COW committed {} sectors to {}", committed, base_path.display());
         Ok(committed)
@@ -541,6 +550,7 @@ impl BlockNode for CowNode {
     /// [`crate::cow_disk::CowDisk::reset_overlay`].
     fn rollback(&mut self) -> io::Result<()> {
         self.dirty.clear();
+        self.unflushed = true;
         self.overlay.set_len(0)?;
         self.overlay.seek(SeekFrom::Start(0))?;
         let _ = std::fs::remove_file(self.sidecar_path());
@@ -571,6 +581,7 @@ impl BlockNode for CowNode {
             .create(true)
             .open(&self.overlay_path)?;
         self.dirty = dirty.into_iter().collect();
+        self.unflushed = true;
         Ok(())
     }
 }
@@ -1143,6 +1154,31 @@ mod tests {
         let mut got = vec![0u8; size as usize];
         node.read(0, &mut got).unwrap();
         assert!(got == expect, "reopened overlay does not read back what was written");
+
+        drop(node);
+        cleanup(&overlay_path);
+        let _ = std::fs::remove_file(backing_path);
+    }
+
+    /// A guest can issue SYNCHRONIZE CACHE often; a flush with nothing new
+    /// must not rewrite the sector record.
+    #[test]
+    fn cow_flush_with_nothing_new_leaves_the_record_alone() {
+        let (backing, backing_path) = raw_filled(0, 4 * SECTOR_BYTES);
+        let overlay_path = tmp_path("cow-idle");
+        let mut node = CowNode::new(Some(Box::new(backing)), &overlay_path, 4 * SECTOR_SIZE).unwrap();
+        let sidecar = crate::cow_disk::sidecar_path_for(&overlay_path);
+
+        node.write(0, &[1u8; SECTOR_BYTES]).unwrap();
+        node.flush().unwrap();
+        assert!(sidecar.exists());
+        std::fs::remove_file(&sidecar).unwrap();
+        node.flush().unwrap();
+        assert!(!sidecar.exists(), "an idle flush rewrote the record");
+
+        node.discard(0, SECTOR_SIZE).unwrap();
+        node.flush().unwrap();
+        assert!(sidecar.exists(), "a discard is a change the record must carry");
 
         drop(node);
         cleanup(&overlay_path);
