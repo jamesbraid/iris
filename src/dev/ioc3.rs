@@ -743,7 +743,7 @@ impl BoardRecordText {
 }
 
 impl Ioc3Config {
-    /// Fuel's IOC3 has no PS/2 devices or indexed Dallas clock.
+    /// Fuel's IOC3 fits the keyboard and mouse controller but no indexed Dallas clock.
     pub fn fuel(mac: [u8; 6]) -> Self {
         Self {
             subsystem_id: SUBSYS_IP34_SYSBOARD,
@@ -758,7 +758,7 @@ impl Ioc3Config {
             mac,
             serial: [true, true],
             parallel: true,
-            keyboard_mouse: false,
+            keyboard_mouse: true,
             rtc: false,
             gpio_input_mask: 0,
             gpio_input_values: 0,
