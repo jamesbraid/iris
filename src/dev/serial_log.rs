@@ -13,17 +13,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// How `--serial-log` stamps its lines.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "snake_case")]
-#[clap(rename_all = "lower")]
-pub enum SerialLogTimestamps {
-    /// Raw bytes, byte-for-byte a transcript (the default).
-    #[default]
-    Off,
-    /// `[YYYY-MM-DDTHH:MM:SS.ffffffZ] ` before each completed line.
-    Wall,
-}
+pub use crate::config::SerialLogTimestamps;
 
 struct Inner {
     file: File,
