@@ -115,10 +115,23 @@ static const struct { const char *name; const char *why; int board; } xfails[] =
     { "stencil/copy",
       "libGLcore EXPRESS's stencil Fetch masks the depth word with 0xF; z20 s4 keeps the stencil above Z (bits 23:20; inferred from its depth reads)", GR2_ONLY },
     /* VPro (Odyssey), IRIX 6.5.30 libGLcore. */
-    { "depth/draw-read/FLOAT", "the board's depth word keeps an 18-bit mantissa (datasheet depth encoding), so the last step of a 24-bit expectation is lost", VPRO_ONLY },
-    { "depth/read/UNSIGNED_INT", "the board's depth word keeps an 18-bit mantissa (datasheet depth encoding), so the last step of a 24-bit expectation is lost", VPRO_ONLY },
-    { "depth/draw/scale-bias", "the board's depth word keeps an 18-bit mantissa (datasheet depth encoding), so the last step of a 24-bit expectation is lost", VPRO_ONLY },
-    { "depth/copy", "the board's depth word keeps an 18-bit mantissa (datasheet depth encoding), so the last step of a 24-bit expectation is lost", VPRO_ONLY },
+    /* The library encodes a depth to the board's depth word, an 18-bit mantissa
+       float (origami datasheet, depth encoding; docs/odyssey-pixel-gaps4). In
+       [0.5, 1) its step is 2^-19 (1.9e-6), above this test's 2^-20 tolerance. */
+    { "depth/draw-read/FLOAT", "the board's depth word keeps an 18-bit mantissa (datasheet depth encoding): its step in [0.5,1) is 1.9e-6, above the test's 2^-20 tolerance", VPRO_ONLY },
+    { "depth/read/UNSIGNED_INT", "the board's depth word keeps an 18-bit mantissa (datasheet depth encoding): its step in [0.5,1) is 1.9e-6, above the test's 2^-20 tolerance", VPRO_ONLY },
+    { "depth/draw/scale-bias", "the board's depth word keeps an 18-bit mantissa (datasheet depth encoding): its step in [0.5,1) is 1.9e-6, above the test's 2^-20 tolerance", VPRO_ONLY },
+    { "depth/copy", "the board's depth word keeps an 18-bit mantissa (datasheet depth encoding): its step in [0.5,1) is 1.9e-6, above the test's 2^-20 tolerance", VPRO_ONLY },
+    /* Pixel transfers run under the library's default block, not the
+       application's state (origami PR #3034, docs/odyssey-pixel-gaps4). */
+    { "stencil/draw/shift-offset-mask",
+      "libGLcore runs a transfer under its default block: a stencil download has an all-ones write mask, so glStencilMask(0x0f) never reaches it (host does shift/offset: 219 stored, test wants 11)", VPRO_ONLY },
+    { "depth/colour-draw/less",
+      "libGLcore runs a transfer under its default block: a window colour draw has no depth test, so glDepthFunc does not keep the nearer colour", VPRO_ONLY },
+    { "depth/colour-draw/less-nomask",
+      "libGLcore runs a transfer under its default block: a window colour draw has no depth test, so glDepthFunc does not keep the nearer colour", VPRO_ONLY },
+    { "depth/colour-copy/less",
+      "libGLcore runs a transfer under its default block: a window colour copy has no depth test, so glDepthFunc does not keep the nearer colour", VPRO_ONLY },
     { "buffers/geometry-front-back",
       "libGLcore enables front-and-back drawing only for BUZZ revision 2 or later; the model reports BUZZ B.1 (renderer VPRO/B), as the real board does", VPRO_ONLY },
 };
