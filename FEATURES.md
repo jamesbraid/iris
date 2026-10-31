@@ -168,7 +168,7 @@ the first `[section]`, because TOML tables continue until the next header.
 | Key | Default | Values and behavior |
 |---|---|---|
 | `machine.profile` | `indy_ip24` | indy_ip24, indigo2_ip22, indigo2_ip28, o2_ip32 (configured by `[o2]`, see [the O2 guide](docs/o2-ip32.md)), octane_ip30 (configured by `[octane]`, see [the Octane guide](docs/octane-ip30.md)), fuel_ip34 (see [the Fuel guide](docs/fuel-ip34.md)). |
-| `machine.cpu` | `r4400` | r4400, r5000, r10000, r12000 (Octane, O2), r14000 (Octane, Fuel). CPU/ISA choice is independent of build features. A Fuel always runs its one R14000: set `r14000` (`r10000`, the family, is also accepted); any other value is refused. |
+| `machine.cpu` | `r4400` | r4400, r5000, r10000. CPU/ISA choice is independent of build features. A Fuel always runs its one R14000, and the key must be `r10000`; any other value is refused. |
 | `machine.cpus` | `1` | Processors fitted. 2 only on the Octane; see [its guide](docs/Octane/multiprocessor.md). |
 
 ### [fuel]
