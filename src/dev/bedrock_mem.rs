@@ -217,6 +217,9 @@ impl Generations {
     pub(crate) fn base(&self) -> *mut AtomicU64 {
         self.0.as_ptr() as *mut AtomicU64
     }
+    pub(crate) fn pages(&self) -> usize {
+        self.0.len()
+    }
     fn bump(&self, address: u64) {
         if let Some(counter) = self.0.get((address >> 12) as usize) {
             counter.fetch_add(1, Ordering::Relaxed);
