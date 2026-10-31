@@ -594,6 +594,13 @@ pub trait CpuModel: MipsCache {
     /// (uncached attribute) loads it into the TLB from EntryLo0/1 for mapped
     /// references. False keeps EntryLo to its PFN and flags.
     const TLB_UNCACHED_ATTRIBUTE: bool = false;
+    /// An uncached store the bus refuses completes. The R10000 sends one as
+    /// a write request with an address and a data cycle and no completion
+    /// response, and its Bus Error exception has one cause, an ERR
+    /// completion of a read (R10000 User's Manual v2.0, Bus Error exception
+    /// and System interface); what becomes of the write is the memory
+    /// system's to report. False raises a Data Bus Error, as before.
+    const UNCACHED_STORES_POSTED: bool = false;
 }
 
 pub trait MipsCache: Send + Sync {
@@ -3616,6 +3623,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
     const TLB_ENTRIES: usize = TLB_ENTRIES;
     const R10K_CACHE_OPS: bool = MODEL == model::R10000;
     const TLB_UNCACHED_ATTRIBUTE: bool = MODEL == model::R10000;
+    const UNCACHED_STORES_POSTED: bool = MODEL == model::R10000;
     // 44 implemented virtual address bits on the R10000, as the shadow
     // model already says; XContext's layout follows them.
     const VA_BITS: u32 = if MODEL == model::R10000 { 44 } else { 40 };

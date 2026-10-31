@@ -382,6 +382,7 @@ impl<
     const FPU_FR0_MOV_S_PRESERVES_PAIR: bool = Self::IS_R14000;
     const UNCACHED_MASKED_SUBWORD_STORES: bool = Self::IS_R14000;
     const TLB_UNCACHED_ATTRIBUTE: bool = Self::R10K;
+    const UNCACHED_STORES_POSTED: bool = Self::R10K;
 }
 
 impl<

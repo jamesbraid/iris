@@ -5604,9 +5604,16 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 self.sysad.write64(phys_addr, val)
             };
             if ws != BUS_OK && ws != BUS_BUSY && !DEBUG {
-                eprintln!("Bus error on uncached write{}: PC={:016x} VA={:016x} PA={:016x} val={:016x} status={:08x}", SIZE*8, self.core.pc, virt_addr, phys_addr, val, ws);
+                if C::UNCACHED_STORES_POSTED {
+                    eprintln!("Uncached write{} refused and posted: PC={:016x} VA={:016x} PA={:016x} val={:016x} status={:08x}", SIZE*8, self.core.pc, virt_addr, phys_addr, val, ws);
+                    BUS_OK
+                } else {
+                    eprintln!("Bus error on uncached write{}: PC={:016x} VA={:016x} PA={:016x} val={:016x} status={:08x}", SIZE*8, self.core.pc, virt_addr, phys_addr, val, ws);
+                    ws
+                }
+            } else {
+                ws
             }
-            ws
         };
         // jitv2_lockstep's load/store verification (see MipsCore's
         // lockstep_mem field doc comment, and read_data_impl's matching
@@ -5659,6 +5666,10 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 dlog_dev!(LogModule::Mips, "Uncached Write64Masked: PC={:016x} VA={:016x} PA={:016x} Val={:016x} Mask={:016x}", self.core.pc, virt_addr, phys_addr, val, mask);
             }
             let ws = self.sysad.write64_masked(phys_addr, val, mask);
+            if ws != BUS_OK && ws != BUS_BUSY && !DEBUG && C::UNCACHED_STORES_POSTED {
+                eprintln!("Uncached write64_masked refused and posted: PC={:016x} VA={:016x} PA={:016x} val={:016x} mask={:016x} status={:08x}", self.core.pc, virt_addr, phys_addr, val, mask, ws);
+                return BUS_OK;
+            }
             if ws != BUS_OK && ws != BUS_BUSY && !DEBUG {
                 eprintln!("Bus error on uncached write64_masked: PC={:016x} VA={:016x} PA={:016x} val={:016x} mask={:016x} status={:08x}", self.core.pc, virt_addr, phys_addr, val, mask, ws);
             }
