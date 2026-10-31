@@ -209,6 +209,24 @@ mod tests {
         (exec, mem)
     }
 
+    /// CP0 Config's SS field is 512 KiB << SS on the R10000 family, so it must
+    /// follow the model's secondary cache: a 2 MiB part used to report 1 MiB.
+    #[test]
+    fn r10k_config_reports_the_secondary_cache_size() {
+        use crate::cpu::mips_cache_shadow::{R10000ShadowCache, R12000ShadowCache, R16000ShadowCache};
+        fn ss<C: CpuModel + MipsCache + From<Arc<dyn BusDevice>>>() -> u32 {
+            // An executor is larger than a test thread's stack.
+            std::thread::Builder::new().stack_size(64 << 20).spawn(|| {
+                let mem: Arc<dyn BusDevice> = Arc::new(MockMemory::new());
+                let e: MipsExecutor<PassthroughTlb, C> = MipsExecutor::new(mem, PassthroughTlb::default(), &MipsCpuConfig::indy());
+                (e.core.cp0_config >> 16) & 7
+            }).unwrap().join().unwrap()
+        }
+        assert_eq!(ss::<R10000ShadowCache>(), 1, "1 MiB");
+        assert_eq!(ss::<R12000ShadowCache>(), 2, "2 MiB");
+        assert_eq!(ss::<R16000ShadowCache>(), 3, "4 MiB");
+    }
+
     /// A model's identity must be live the moment the executor exists — MipsCore::new
     /// runs reset_registers before the model is known, so the constructor has to set
     /// both the reset value and the live register. Caught a real bug: the guest read

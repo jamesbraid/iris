@@ -2355,15 +2355,12 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             c |= log2(32768) << 26;          // 32 KB L1D
             c |= 1 << 15;                    // big endian
             if C::L2_LINE == 128 { c |= 1 << 13; }
-            // Secondary cache size. The encoding is not in anything to hand,
-            // so it was swept against the PROM rather than guessed.
-            //
-            // 1 is the value to keep: IRIX reports "Secondary unified
-            // instruction/data cache size: 1 Mbyte", which agrees with this
-            // model's own `L2_SIZE`, and the PROM's power-on diagnostics pass
-            // and IRIX boots with it. 4 also passes POST but has IRIX report
-            // 8 MB, contradicting the model.
-            c |= 1 << 16;
+            // Secondary cache size: 512 KiB << SS (the NEC VR10000/VR12000
+            // manual's Config SS field; origami's ip30-r12000 sheet), so
+            // 1 MiB is 1, 2 MiB is 2 and 4 MiB is 3. Reporting 1 for every
+            // size left a 2 MiB part's Config contradicting its cache ops.
+            let ss = if C::L2_SIZE >= 512 << 10 { (C::L2_SIZE >> 19).trailing_zeros() } else { 0 };
+            c |= ss << 16;
             c |= 2;                          // K0 = uncached at reset
             config = c;
         }
