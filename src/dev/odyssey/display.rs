@@ -462,33 +462,26 @@ impl Board {
     ///
     /// Approximation: the board's encoding of ODSY_DISPLAYED_BUFFER is inferred
     /// from the driver's compare, and the latch's timing within the retrace is
-    /// unknown. The model latches at its retrace callback and repaints the whole
-    /// frame from the new selection; a frame is never presented half from each
-    /// buffer.
+    /// unknown. The model latches at its retrace callback and repaints the
+    /// rows the new selection changes (flip_rows()) in the next frame's
+    /// update; a frame is never presented half from each buffer.
     pub fn retrace(&mut self) {
         let mut f = self.front.lock();
         let flips = f.swap_arm;
-        let mut repaint = false;
 
         if f.swap_set != 0 || f.swap_clear != 0 {
             f.displayed_buffer = (f.displayed_buffer | f.swap_set) & !f.swap_clear;
             f.swap_set = 0;
             f.swap_clear = 0;
-            repaint = true;
         }
         if flips != 0 {
             f.swap_arm = 0;
             f.displayed_buffer ^= flips;
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: swap latch: arm {:#x} displayed {:#x}", flips, f.displayed_buffer);
-            repaint = true;
         }
         crate::pf_instant!(crate::perfetto::events::ODSY_RETRACE, f.displayed_buffer);
         if f.routed() {
             f.deliver_routed(ODSY_ROUTE_VECTOR_RETRACE_SHIFT, "retrace", true);
-        }
-        drop(f);
-        if repaint {
-            self.scanout.invalidate_all();
         }
     }
 
@@ -513,14 +506,21 @@ impl Board {
     /// that the resolve itself (scanout_resolve()) can run while the
     /// raster unit draws on. A line of an unusual plane shape is resolved
     /// here instead, pixel by pixel. A processor's write of the
-    /// displayed-buffer register reached only the front: repaint for it.
+    /// displayed-buffer register reached only the front: the windows whose
+    /// buffer it changed repaint the rows their buffers differ in.
     ///
     /// Resolving a whole 1280x1024 frame under the raster unit's lock held
     /// the raster unit up about 6 ms of every 16.7 ms frame while a GL
     /// program drew, and the front end with it under the board lock.
     pub fn scanout_stage(&mut self) {
-        if std::mem::take(&mut self.front.lock().displayed_written) {
-            self.scanout.invalidate_all();
+        let displayed = {
+            let mut f = self.front.lock();
+            f.displayed_written = false;
+            f.displayed_buffer
+        };
+        let flipped = std::mem::replace(&mut self.scanout.staged_displayed, displayed) ^ displayed;
+        if flipped != 0 && !self.scanout.frame.is_empty() {
+            self.flip_rows(flipped);
         }
         let mut stage = std::mem::take(&mut self.scanout_stage);
         stage.lines.clear();
@@ -563,6 +563,75 @@ impl Board {
             job.resolve();
         }
         self.scanout_finish(job)
+    }
+
+    /// Repaint what a flip of the displayed buffers `flipped` (a bit per
+    /// main drawable id) changes: the rows where that window's two buffers
+    /// differ. A row where they are equal shows the same pixels either way.
+    fn flip_rows(&mut self, flipped: u32) {
+        if self.scanout.mode.height > SGI_ODYSSEY_HEIGHT {
+            return self.scanout.repaint_all();
+        }
+        if self.scanout.unnamed.iter().any(|&w| w != 0) {
+            self.measure_differ();
+        }
+        let mut rows = [0u64; ROW_WORDS];
+        for (id, differ) in self.scanout.differ.iter().enumerate() {
+            if (flipped >> id) & 1 != 0 {
+                for (r, d) in rows.iter_mut().zip(differ) {
+                    *r |= d;
+                }
+            }
+        }
+        for (i, mut w) in rows.into_iter().enumerate() {
+            while w != 0 {
+                self.scanout.repaint((i as u32 * 64 + w.trailing_zeros()) as i32, 1);
+                w &= w - 1;
+            }
+        }
+    }
+
+    /// Find, in the lines a writer did not name its buffer or drawable for
+    /// (Scanout::unnamed), the rows where each main drawable's pixels
+    /// differ between the two colour buffers. A row the planes do not cover
+    /// whole differs for every id.
+    fn measure_differ(&mut self) {
+        let width = self.scanout.mode.width.min(SGI_ODYSSEY_WIDTH) as usize;
+        let unnamed = std::mem::replace(&mut self.scanout.unnamed, [0; ROW_WORDS]);
+
+        for (i, mut word) in unnamed.into_iter().enumerate() {
+            while word != 0 {
+                let y = (i * 64 + word.trailing_zeros() as usize) as u32;
+                word &= word - 1;
+                if y >= self.scanout.mode.height {
+                    continue;
+                }
+                let bit = (y as usize >> 6, 1u64 << (y & 63));
+                let at = y as usize * SGI_ODYSSEY_WIDTH as usize;
+                let planes = self.colour_line(0, y, width).zip(self.colour_line(1, y, width)).zip(self.did.get(at..at + width));
+                // The ids whose pixels differ in this row.
+                let mut ids = 0u32;
+
+                match planes.filter(|(((_, be0), (_, be1)), _)| be0 == be1) {
+                    None => ids = u32::MAX,
+                    Some((((l0, _), (l1, _)), did)) if l0 != l1 => {
+                        let mut x = 0;
+                        while x < width {
+                            let d = did[x];
+                            let end = x + 1 + did[x + 1..].iter().take_while(|&&v| v == d).count();
+                            if l0[x * 4..end * 4] != l1[x * 4..end * 4] {
+                                ids |= 1 << ((d >> ODSY_DID_MAIN_SHIFT) as usize & (ODSY_DISPMODE_COUNT as usize - 1));
+                            }
+                            x = end;
+                        }
+                    }
+                    Some(_) => {}
+                }
+                for (id, d) in self.scanout.differ.iter_mut().enumerate() {
+                    d[bit.0] = d[bit.0] & !bit.1 | if (ids >> id) & 1 != 0 { bit.1 } else { 0 };
+                }
+            }
+        }
     }
 
     /// The staged lines and everything their resolve reads outside the

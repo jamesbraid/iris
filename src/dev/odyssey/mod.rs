@@ -223,7 +223,7 @@ impl Odyssey {
         let mut planes = state.raster.planes();
         crate::pf_begin!(crate::perfetto::events::ODSY_FRAME_PLANES);
         let displayed = s.front.lock().displayed_buffer;
-        planes.take_rows(displayed, |y| s.scanout.invalidate(y as i32, 1));
+        planes.take_rows(displayed, &mut s.scanout);
         s.scanout_stage();
         crate::pf_end!(crate::perfetto::events::ODSY_FRAME_PLANES);
         drop(planes);

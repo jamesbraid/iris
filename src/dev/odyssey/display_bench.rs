@@ -5,7 +5,8 @@
 //! display modes, overlay and cursor, then resolved whole. The tests hold
 //! the resolved frame to a stored hash, so a change to the resolve that moves
 //! one pixel fails. The benchmark reports the resolve of a full 1280x1024
-//! screen and the conversion of that frame into the window's buffers:
+//! screen, a swap of a window that differs from its other buffer in part of
+//! the screen, and the conversion of that frame into the window's buffers:
 //!
 //!     cargo test --release --lib odyssey::display_bench -- --ignored --nocapture --test-threads=1
 //!
@@ -111,6 +112,20 @@ fn scene_board(scene: Scene) -> Box<Board> {
     if let Scene::Small = scene {
         s.set_scanout_size(1000, 700);
     }
+    s
+}
+
+/// An RGB screen whose two colour buffers differ in the `rows` rows from the
+/// middle out: what a swap of a window that size changes.
+fn swap_board(rows: usize) -> Box<Board> {
+    let mut s = scene_board(Scene::Rgb);
+    let stride = SGI_ODYSSEY_WIDTH as usize * 4;
+    let mut rng = Lcg(0x5eed_0002);
+    let first = (SGI_ODYSSEY_HEIGHT as usize - rows) / 2;
+
+    let same = s.mem.bytes.clone();
+    s.buffer1_mem.bytes.copy_from_slice(&same);
+    fill_random(&mut s.buffer1_mem.bytes[first * stride..(first + rows) * stride], &mut rng);
     s
 }
 
@@ -221,6 +236,16 @@ fn resolve_and_present_timings() {
             s.scanout_update();
         });
         println!("resolve {name:10} {}x{}: {ms:.3} ms per full resolve", s.scanout.mode.width, s.scanout.mode.height);
+    }
+    for (rows, name) in [(480, "a 480-row window"), (1024, "every row")] {
+        let mut s = swap_board(rows);
+        s.scanout_update();
+        let ms = bench(|| {
+            s.front.lock().swap_arm = u32::MAX;
+            s.retrace();
+            s.scanout_update();
+        });
+        println!("swap {name:18} {}x{}: {ms:.3} ms per swap and update", s.scanout.mode.width, s.scanout.mode.height);
     }
     let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     let frame = resolved(Scene::Mixed);
