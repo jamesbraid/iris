@@ -75,6 +75,14 @@ impl BusDevice for GioBusErrorDevice {
 
 pub use crate::ip22_map::{BANK_SIZE, HIMEM_BASE, HIMEM_END, LOMEM_BASE, LOMEM_END};
 
+// A chunk must fit in REX3's data-port array, and the batch write pushes the
+// token plus one GFIFO entry per word, so it must fit the queue too. Both are
+// silent corruption if they ever stop holding: the device would truncate the
+// transfer, or push_batch would spin forever waiting for room that cannot
+// exist.
+const _: () = assert!(crate::dev::mc_vdma::VDMA_CHUNK_QWORDS <= crate::dev::ng1::rex3::HOSTRW_BUF_QWORDS);
+const _: () = assert!(crate::dev::mc_vdma::VDMA_CHUNK_QWORDS + 1 < crate::dev::ng1::rex3::GFIFO_DEPTH);
+
 // Newport Graphics (4MB GIO slot at 0x1F000000)
 const NEWPORT_BASE: u32 = 0x1F000000;
 const NEWPORT_END: u32  = 0x1F400000;
