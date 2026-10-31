@@ -234,8 +234,7 @@ fn a_reset_lowers_the_flag_level_without_a_packet() {
 fn a_packet_needs_a_destination_and_an_edge() {
     let (mut s, rec) = board("v12");
 
-    // No destination: the rising edge sends nothing but still latches, so
-    // the next edge is the falling one.
+    // No destination: the rising edge sends nothing but is held.
     reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
     assert!(rec.silent());
 
@@ -243,16 +242,92 @@ fn a_packet_needs_a_destination_and_an_edge() {
     reg_write(&mut s, ODSY_INT_DEST_LOWER, 0x9abc_def0);
     assert_eq!(reg_read(&mut s, ODSY_INT_DEST_UPPER), 0x1234_5678);
     assert_eq!(reg_read(&mut s, ODSY_INT_DEST_LOWER), 0x9abc_def0);
+    assert!(rec.silent(), "the crosstalk error destination carries nothing");
     route_to_heart(&mut s);
-    assert!(rec.silent(), "programming the destination alone is not an edge");
+    assert_eq!(rec.events(FLAG_VECTOR), [true], "the held level goes out with the routing");
 
     // Acknowledging the still-pending flag is the falling edge.
     reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
-    assert_eq!(rec.events(FLAG_VECTOR), [false]);
+    assert_eq!(rec.events(FLAG_VECTOR), [true, false]);
 
     // The flag set again readdresses the same destination, setting it.
     reg_write(&mut s, ODSY_INTR_FLAGS, LOW_WATER);
-    assert_eq!(rec.events(FLAG_VECTOR), [false, true]);
+    assert_eq!(rec.events(FLAG_VECTOR), [true, false, true]);
+}
+
+/// MODEL CHOICE (datasheet, "DMA completion with no tag"): the kernel can
+/// raise low water through flow control before its interrupt set-up
+/// programs the routing, so a flag raised with no destination is held and
+/// sent once the routing is written, in the kernel's order (vectors, lower
+/// half, upper half), and only once. A level that falls while held sends
+/// nothing.
+#[test]
+fn a_flag_raised_before_the_routing_is_sent_once_it_is_programmed() {
+    let (mut s, rec) = board("v12");
+    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    assert!(rec.silent(), "no packet without a destination");
+
+    reg_write(&mut s, ODSY_ROUTE_VECTORS, SOFTSYNC_VECTOR << 24 | RETRACE_VECTOR << 16 | DMA_VECTOR << 8 | FLAG_VECTOR);
+    reg_write(&mut s, ODSY_ROUTE_DEST_LOWER, HEART_PACKET as u32);
+    assert!(rec.silent(), "half a destination takes no packet");
+    reg_write(&mut s, ODSY_ROUTE_DEST_UPPER, (HEART_WIDGET << 25) as u32);
+    assert_eq!(rec.events(FLAG_VECTOR), [true]);
+
+    // Writing the routing again sends nothing more.
+    route_to_heart(&mut s);
+    assert_eq!(rec.0.lock().len(), 1, "exactly one packet");
+
+    // A level that rises and falls before any routing sends nothing.
+    s.reset();
+    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
+    route_to_heart(&mut s);
+    assert_eq!(rec.0.lock().len(), 1, "a level gone before the routing sends nothing");
+}
+
+/// A level that falls while its packet is held sends nothing, not even a
+/// clear, with a routing only partly programmed. Both halves of the
+/// destination without the vector table is a partial routing that composes
+/// a packet address, so only the rule that all three are written keeps it
+/// silent. Writing the rest of the routing afterwards finds no level and
+/// sends nothing.
+#[test]
+fn a_flag_that_falls_while_held_sends_nothing() {
+    let (mut s, rec) = board("v12");
+    reg_write(&mut s, ODSY_ROUTE_VECTORS, SOFTSYNC_VECTOR << 24 | RETRACE_VECTOR << 16 | DMA_VECTOR << 8 | FLAG_VECTOR);
+    reg_write(&mut s, ODSY_ROUTE_DEST_LOWER, HEART_PACKET as u32);
+    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
+    assert!(rec.silent(), "vectors and a lower half are no destination");
+
+    s.reset();
+    reg_write(&mut s, ODSY_ROUTE_DEST_UPPER, (HEART_WIDGET << 25) as u32);
+    reg_write(&mut s, ODSY_ROUTE_DEST_LOWER, HEART_PACKET as u32);
+    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    assert!(rec.silent(), "both halves without the vectors take no packet");
+    reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
+    assert!(rec.silent(), "a held level that falls was never sent, so it sends no clear");
+
+    reg_write(&mut s, ODSY_ROUTE_VECTORS, SOFTSYNC_VECTOR << 24 | RETRACE_VECTOR << 16 | DMA_VECTOR << 8 | FLAG_VECTOR);
+    assert!(rec.silent(), "the level is gone when the routing is complete");
+}
+
+/// A reset drops a held flag with the level: programming the routing
+/// afterwards sends nothing, and the next rise and fall is an ordinary
+/// pair of packets.
+#[test]
+fn a_reset_drops_a_held_flag() {
+    let (mut s, rec) = board("v12");
+    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    assert!(rec.silent(), "no packet without a destination");
+
+    s.reset();
+    route_to_heart(&mut s);
+    assert!(rec.silent(), "the reset dropped the held flag");
+
+    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
+    assert_eq!(rec.events(FLAG_VECTOR), [true, false], "a rise and its fall are both sent");
 }
 
 /// The kernel gives the routed table's low byte to its flag handler and
