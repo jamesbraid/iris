@@ -193,7 +193,7 @@ the first `[section]`, because TOML tables continue until the next header.
 | `scsi.<ID>.size_mb` | `64 when unset` | Size of a newly created scratch image; existing files are unchanged. |
 | `scsi.<ID>.controller` | `0` | 0 or 1; controller 1 is accepted on indigo2_ip22 and o2_ip32 (on the O2 it is the external bus). A key of 16 + ID names controller 1 directly and does not need it. |
 
-IDs are 1–7. The key is a slot: `[scsi.N]` with N 1–7 is id N on controller 0
+IDs are 1–7, or 1–15 on the Octane's wide ISP1040 buses. The key is a slot: `[scsi.N]` with N 1–7 is id N on controller 0
 (or on `controller`, when set), and N = 16 + id is that id on controller 1,
 so both controllers can carry the same id; two tables naming one target are
 rejected. If `scsi` is entirely omitted, core defaults attach SCSI #1 as

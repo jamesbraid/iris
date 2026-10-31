@@ -92,7 +92,7 @@ console.
 
 ## Disks
 
-The `[scsi.N]` tables list the devices on the two ISP1040s: `N` 1-7 is the
+The `[scsi.N]` tables list the devices on the two ISP1040s: `N` 1-15 is the
 id on the internal bus (controller 0), `N` = 16 + id that id on the external
 bus (controller 1), or use `controller = 1`. IRIX expects its system disk at
 id 1 on controller 0. Raw images and `overlay = true` work as on the other

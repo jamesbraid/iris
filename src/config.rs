@@ -132,7 +132,7 @@ impl ScsiDeviceConfig {
     pub fn is_daynaport(&self) -> bool { self.kind() == ScsiKind::Daynaport }
 
     /// Where the `[scsi.KEY]` table puts this target, as (controller, id).
-    /// Keys 1–7 are ids on `controller` (0 unless the key says otherwise);
+    /// Keys 1–15 are ids on `controller` (1–7 off the Octane; 0 unless the key says otherwise);
     /// a key of 16 + id names controller 1 directly, so the same id can be
     /// used on both controllers. See [`scsi_slot`].
     pub fn placement(&self, key: u8) -> (u8, u8) {
@@ -529,6 +529,18 @@ impl MachineProfile {
         match self {
             Self::Indigo2Ip22 | Self::O2Ip32 | Self::OctaneIp30 => 2,
             _ => 1,
+        }
+    }
+
+    /// The highest SCSI id a `[scsi.N]` table can name. The Octane's ISP1040
+    /// buses are wide, with ids 0 to 15 and the controller on 0. The Indy's
+    /// and Indigo2's WD33C93A chips are narrow, with ids 0 to 7. The O2's
+    /// Adaptec buses are wide too, but stay at 7 until they are widened on
+    /// purpose.
+    pub fn max_scsi_id(self) -> u8 {
+        match self {
+            Self::OctaneIp30 => 15,
+            _ => 7,
         }
     }
 
@@ -1513,7 +1525,7 @@ pub struct MachineConfig {
 
     // --- table / array-of-table fields: must be emitted after all scalars ---
 
-    /// SCSI devices keyed by ID 1–7. Missing IDs are not attached.
+    /// SCSI devices keyed by ID 1–7 (1–15 on the Octane). Missing IDs are not attached.
     #[serde(default = "default_scsi", with = "scsi_keys")]
     pub scsi: std::collections::HashMap<u8, ScsiDeviceConfig>,
 
@@ -1925,8 +1937,9 @@ impl MachineConfig {
         for key in keys {
             let dev = &self.scsi[&key];
             let (controller, id) = dev.placement(key);
-            if id == 0 || id > 7 {
-                return Err(format!("scsi.{}: SCSI ID {} is out of range (1–7; the controller itself is 0)", key, id));
+            let max_id = self.machine.profile.max_scsi_id();
+            if id == 0 || id > max_id {
+                return Err(format!("scsi.{}: SCSI ID {} is out of range (1–{}; the controller itself is 0)", key, id, max_id));
             }
             if key >= 16 && dev.controller != 0 && dev.controller != controller {
                 return Err(format!(
@@ -2546,6 +2559,28 @@ mod export_tests {
         assert_eq!(back.scsi[&1].path, cfg.scsi[&1].path);
         assert_eq!(back.scsi[&4].cdrom, true);
         println!("--- exported toml ---\n{s}");
+    }
+
+    /// IDs 1 to 15 are valid on the Octane's wide buses, and 1 to 7 on the
+    /// narrow Indy; the controller's own ID 0 is refused everywhere.
+    #[test]
+    fn scsi_id_limit_is_15_on_the_octane_and_7_elsewhere() {
+        let octane = |key: u8| -> MachineConfig {
+            toml::from_str(&format!(
+                "banks = [128, 0, 0, 0]\n[machine]\nprofile = \"octane_ip30\"\ncpu = \"r10000\"\n[scsi.{key}]\npath = \"wide.raw\"\n"
+            )).expect("parse")
+        };
+        octane(15).validate().expect("id 15 on controller 0");
+        octane(31).validate().expect("id 15 on controller 1");
+        let err = octane(16).validate().unwrap_err();
+        assert!(err.contains("SCSI ID 0"), "key 16 names controller 1's ID 0: {err}");
+        let indy = |key: u8| -> MachineConfig {
+            toml::from_str(&format!("[scsi.{key}]\npath = \"narrow.raw\"\n")).expect("parse")
+        };
+        indy(7).validate().expect("id 7 on the Indy");
+        let err = indy(8).validate().unwrap_err();
+        assert!(err.contains("SCSI ID 8") && err.contains("1–7"), "{err}");
+        assert!(indy(0).validate().is_err(), "the controller is ID 0");
     }
 
     #[test]
