@@ -1062,15 +1062,14 @@ fn the_prom_tune_plays_once_at_32khz_and_clears_the_enable_bit() {
     let (r, _ram, tap) = tune_card();
     start_ust(&r);
     prom_tune(&r, TUNE_BUF as u32, TUNE_CTRL, true);
-    assert_eq!(rd(&r, 0x58), 0x4000_0000, "a running one-shot reads finished");
+    assert_eq!(rd(&r, 0x58), 0x4000_0001);
     // 32 kHz: one second in, 32000 frames are out and the channel still runs.
     at(&r, SEC);
-    rd(&r, 0x58);
+    assert_eq!(rd(&r, 0x58), 0x4000_0001, "an early check sees the channel busy");
     assert_eq!(tap.lock().len(), 32_000 * 2);
-    // One pass is 2.252 s: the channel is still moving frames just before.
+    // One pass is 2.252 s.
     at(&r, 2_251 * SEC / 1000);
-    rd(&r, 0x58);
-    assert!(r.state.lock().chan[CH_OUT].running);
+    assert_eq!(rd(&r, 0x58) & 1, 1);
     at(&r, 2_260 * SEC / 1000);
     assert_eq!(rd(&r, 0x58), 0x4000_0000, "the channel cleared the bit itself");
     assert!(!r.state.lock().chan[CH_OUT].running);
@@ -1261,73 +1260,4 @@ fn a_failed_host_open_is_retried_after_a_wait() {
     sink.host_failed_at = Some(now);
     assert!(!sink.host_retry_due(now), "just failed");
     assert!(sink.host_retry_due(now + HOST_RETRY), "due again later");
-}
-
-#[test]
-fn an_early_read_reports_an_end_of_descriptor_transfer_done_and_the_tune_still_plays() {
-    let (r, _ram, tap) = tune_card();
-    prom_tune(&r, TUNE_BUF as u32, TUNE_CTRL, true);
-    // The PROM's check lands 1 s into the 2.252 s pass.
-    at(&r, SEC);
-    assert_eq!(rd(&r, 0x58), 0x4000_0000, "reads finished");
-    assert!(r.state.lock().chan[CH_OUT].running, "but the channel keeps playing");
-    assert_eq!(tap.lock().len(), 32_000 * 2);
-    // The whole buffer reaches the host.
-    at(&r, 10 * SEC);
-    assert_eq!(rd(&r, 0x58), 0x4000_0000);
-    assert!(!r.state.lock().chan[CH_OUT].running);
-    assert_eq!(tap.lock().len(), TUNE_FRAMES * 2);
-    assert_eq!(tap.lock()[(TUNE_FRAMES - 1) * 2], tune_sample(TUNE_FRAMES - 1));
-}
-
-#[test]
-fn a_late_read_and_a_later_start_behave_as_before() {
-    let (r, _ram, tap) = tune_card();
-    prom_tune(&r, TUNE_BUF as u32, TUNE_CTRL, true);
-    at(&r, 3 * SEC);
-    assert_eq!(rd(&r, 0x58), 0x4000_0000);
-    assert_eq!(tap.lock().len(), TUNE_FRAMES * 2);
-    // A start after the pass plays again.
-    wr(&r, 0x58, 0x4000_0001);
-    assert_eq!(rd(&r, 0x58), 0x4000_0000, "reads finished at once");
-    assert!(r.state.lock().chan[CH_OUT].running);
-    at(&r, 6 * SEC);
-    rd(&r, 0x58);
-    assert_eq!(tap.lock().len(), 2 * TUNE_FRAMES * 2);
-}
-
-#[test]
-fn the_ring_path_still_reads_busy_while_it_runs() {
-    let (r, _ram, _tap) = tune_card();
-    program(&r, &RING_OUTPUT, TUNE_BUF as u32, 0xffff_f008);
-    wr(&r, 0x58, 0x2000_0001);
-    at(&r, SEC / 100);
-    assert_eq!(rd(&r, 0x58), 0x2000_0001);
-    // A one-descriptor transfer without end of descriptor is not one-shot.
-    let (r, _ram, _tap) = tune_card();
-    prom_tune(&r, TUNE_BUF as u32, TUNE_CTRL & !4, true);
-    at(&r, SEC / 100);
-    assert_eq!(rd(&r, 0x58), 0x4000_0001);
-}
-
-#[test]
-fn the_relay_mute_after_an_early_check_does_not_cut_the_tune() {
-    // The PROM mutes the relay straight after its check. Frames reach the
-    // host through the muted sink as silence, so count them there.
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!("rad1-early-{}.wav", std::process::id()));
-    let (r, ram) = dma_card();
-    fill_tune(&ram, TUNE_BUF, TUNE_FRAMES, 0);
-    *r.sink.lock() = Some(Sink { host: None, host_failed_at: None, wav: Wav::create(path.as_os_str()), tap: None });
-    prom_tune(&r, TUNE_BUF as u32, TUNE_CTRL, true);
-    at(&r, SEC);
-    assert_eq!(rd(&r, 0x58), 0x4000_0000);
-    wr(&r, 0x88, 2);
-    at(&r, 10 * SEC);
-    rd(&r, 0x58);
-    let bytes = std::fs::read(&path).unwrap();
-    let _ = std::fs::remove_file(&path);
-    let samples: Vec<i16> = bytes[44..].chunks(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
-    let loud = samples.iter().rposition(|&x| x.abs() > 64).unwrap();
-    assert!(loud > samples.len() * 9 / 10, "audible to the end of the tune, last at {loud} of {}", samples.len());
 }
