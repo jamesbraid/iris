@@ -70,6 +70,7 @@ pub mod bedrock_md;
 pub mod bedrock_mem;
 pub mod bedrock_ni;
 pub mod bedrock_pi;
+pub mod bcm5701;
 pub mod bedrock_xb;
 pub mod dp83843;
 pub mod ics1890;
