@@ -512,6 +512,9 @@ impl O2Machine {
                     return;
                 }
                 running.store(false, Ordering::SeqCst);
+                if let Err(e) = bus.flush_disks() {
+                    eprintln!("iris: disk flush at power-off failed: {e} (guest writes may be lost)");
+                }
                 std::process::exit(0);
             }
             std::thread::sleep(poll);
@@ -830,8 +833,7 @@ impl Workstation for O2Machine {
         self.bus.scsi.lock().unwrap().iter().map(|c| c.bus().pending_chd_sync_count()).sum()
     }
     fn flush_disks(&self) -> std::io::Result<()> {
-        let controllers = self.bus.scsi.lock().unwrap().clone();
-        controllers.iter().try_for_each(|c| c.bus().flush())
+        self.bus.flush_disks()
     }
     fn sync_chd_disks(
         &self,

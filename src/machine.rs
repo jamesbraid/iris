@@ -1046,7 +1046,7 @@ impl Machine {
     /// (`quit`) the process exits, so `addr` must be this process's own
     /// monitor (`monitor_addr`): another iris's would take this one down
     /// with it when it quits.
-    pub fn run_console_client(addr: std::net::SocketAddr) {
+    pub fn run_console_client(addr: std::net::SocketAddr, on_eof: impl FnOnce() + Send + 'static) {
         println!("IRIS: {}", emulator_name());
         println!("Connecting to monitor socket...");
 
@@ -1073,6 +1073,10 @@ impl Machine {
                     Err(_) => break,
                 }
             }
+            // The monitor closed the connection (`quit`, or iris going away).
+            // The exit below skips Drop, so the caller stops the machine and
+            // flushes its disks first.
+            on_eof();
             std::process::exit(0);
         });
 
@@ -2166,6 +2170,55 @@ mod controller_lifetime_tests {
         let ack = machine.start_guest().expect("start after halt");
         assert_eq!(ack.text(), "halted -> starting -> running");
         machine.stop();
+    }
+
+    /// A guest power-off ends the process without dropping the machine (and so
+    /// without the disks' Drop), so the power-off path has to flush the disks
+    /// itself. Drives the event the IOC sends and looks for the overlay's
+    /// sector record on disk.
+    #[test]
+    fn guest_power_off_flushes_overlay_disks() {
+        use crate::scsi::{scsi_cmd, ScsiDataLength, ScsiRequest};
+        let path = std::env::temp_dir().join(format!("iris-poweroff-{}", std::process::id()));
+        std::fs::write(&path, vec![0u8; 8 * 512]).unwrap();
+        let sidecar = format!("{}.overlay.dirty", path.display());
+        let _ = std::fs::remove_file(&sidecar);
+
+        let path_str = path.to_str().unwrap().to_string();
+        let mut machine = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let mut cfg = crate::bench_runner::bench_config([16, 0, 0, 0], crate::config::CpuModel::default());
+                cfg.scsi.insert(1, crate::config::ScsiDeviceConfig { path: path_str, overlay: true, ..Default::default() });
+                Box::new(Machine::new(cfg))
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        let write = ScsiRequest {
+            cdb: vec![scsi_cmd::WRITE_10, 0, 0, 0, 0, 3, 0, 0, 1, 0],
+            data_len: ScsiDataLength::Unlimited,
+            data_in: Some(vec![0xA5; 512]),
+        };
+        machine.scsi_buses()[0].request(1, &write).unwrap().unwrap();
+        assert!(!std::path::Path::new(&sidecar).exists(), "nothing has flushed yet");
+
+        // The handler would otherwise exit this test process.
+        std::env::set_var("IRIS_NO_EXIT_ON_POWEROFF", "1");
+        machine.register_system_controller();
+        machine.event_tx.send(crate::traits::MachineEvent::PowerOff).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !std::path::Path::new(&sidecar).exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let held = crate::cow_disk::load_dirty_sidecar(std::path::Path::new(&sidecar)).unwrap_or_default();
+        assert!(held.contains(&3), "power-off left no record of the written sector");
+
+        // Leak the machine as the process exit would.
+        std::mem::forget(machine);
+        let _ = std::fs::remove_file(format!("{}.overlay", path.display()));
+        let _ = std::fs::remove_file(&sidecar);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// iris-gui drops a Machine on Stop while the monitor keeps its

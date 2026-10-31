@@ -1034,11 +1034,6 @@ impl ScsiTarget for ScsiDevice {
         Ok(response)
     }
 
-    /// Commit the divergence layer into the base image ("apply the changes").
-    /// Raw: copies the dirty sectors in place; CHD: rebuilds the base from the
-    /// diff (recompressing) and reopens a fresh overlay. No-op if not overlaid.
-    /// Returns a coarse count of what was committed. The concrete behaviour is
-    /// [`BlockNode::commit`] — including the CHD handle close/reopen.
     fn flush(&mut self) -> io::Result<()> {
         if self.is_cdrom() {
             return Ok(());
@@ -1046,6 +1041,11 @@ impl ScsiTarget for ScsiDevice {
         self.media.node_mut().flush()
     }
 
+    /// Commit the divergence layer into the base image ("apply the changes").
+    /// Raw: copies the dirty sectors in place; CHD: rebuilds the base from the
+    /// diff (recompressing) and reopens a fresh overlay. No-op if not overlaid.
+    /// Returns a coarse count of what was committed. The concrete behaviour is
+    /// [`BlockNode::commit`] — including the CHD handle close/reopen.
     fn cow_commit(&mut self) -> io::Result<usize> {
         self.media.node_mut().commit()
     }
