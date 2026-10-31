@@ -845,6 +845,9 @@ pub struct MipsCore {
     pub cp0_watchlo: u32,     // 18: Watchpoint Low
     pub cp0_watchhi: u32,     // 19: Watchpoint High
     pub cp0_xcontext: u64,    // 20: Extended Context (64-bit)
+    /// 22: Diagnostic register and the branch prediction table behind it.
+    /// Absent (reads zero) unless the model gives it a writable mask.
+    pub cp0_diag: crate::cpu::branch_diag::BranchDiag,
     pub cp0_ecc: u32,         // 26: ECC Register
     pub cp0_cacheerr: u32,    // 27: Cache Error
     /// 28: Cache Tag Low. 64 bits, not 32.
@@ -1381,6 +1384,7 @@ impl MipsCore {
             cp0_watchlo: 0,
             cp0_watchhi: 0,
             cp0_xcontext: 0,
+            cp0_diag: Default::default(),
             cp0_ecc: 0,
             cp0_cacheerr: 0,
             cp0_taglo: 0,
@@ -1467,6 +1471,7 @@ impl MipsCore {
             self.cp0_watchlo = 0;
             self.cp0_watchhi = 0;
             self.cp0_xcontext = 0;
+            self.cp0_diag.reset();
             self.cp0_ecc = 0;
             self.cp0_cacheerr = 0;
             self.cp0_taglo = 0;
@@ -1604,6 +1609,7 @@ impl MipsCore {
             18 => self.cp0_watchlo as u64,
             19 => self.cp0_watchhi as u64,
             20 => self.cp0_xcontext,
+            22 => self.cp0_diag.read(),
             25 => {
                 // PerfCnt: R4400 has no performance counters. Log any probe so
                 // a guest expecting them (and routing their overflow onto the
@@ -1656,6 +1662,7 @@ impl MipsCore {
             18 => self.cp0_watchlo as u64,
             19 => self.cp0_watchhi as u64,
             20 => self.cp0_xcontext,
+            22 => self.cp0_diag.read(),
             26 => self.cp0_ecc as u64,
             27 => self.cp0_cacheerr as u64,
             28 => self.cp0_taglo,
@@ -2218,6 +2225,7 @@ impl MipsCore {
                 }
                 self.cp0_xcontext = value;
             }
+            22 => self.cp0_diag.write(value),
             25 => {
                 #[cfg(feature = "developer_ip7")]
                 eprintln!("[ip7] MTC0 PerfCnt (reg 25) write {:#018x} (ignored)", value);

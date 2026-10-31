@@ -725,6 +725,55 @@ mod tests {
         assert_eq!(exec.core.read_fpr_w(0), 0x5a5a_5a5a, "the destination is untouched");
     }
 
+    /// The Diagnostic register (CP0 register 22) belongs to the R16000 model:
+    /// the R14000 and R10000 still read zero and ignore writes. Its value and
+    /// prediction table survive a snapshot and are cleared by a cold reset but
+    /// not a soft one. Follows tests/functional/mips64/roms/diagregs.c.
+    #[test]
+    fn r16000_alone_has_the_diagnostic_register_and_snapshots_it() {
+        use crate::cpu::mips_cache_shadow::{R10000ShadowCache, R14000ShadowCache, R16000ShadowCache};
+        use crate::cpu::mips_exec::MipsCpu;
+        use crate::traits::{Resettable, Saveable};
+        fn core_with<C: CpuModel + From<Arc<dyn BusDevice>>>() -> MipsExecutor<PassthroughTlb, C> {
+            let bus: Arc<dyn BusDevice> = Arc::new(MockMemory::new());
+            let cfg = MipsCpuConfig::for_model::<C>();
+            MipsExecutor::new(bus, PassthroughTlb::default(), &cfg)
+        }
+        let mut r14 = core_with::<R14000ShadowCache>();
+        let mut r10 = core_with::<R10000ShadowCache>();
+        for core in [&mut r14.core, &mut r10.core] {
+            core.write_cp0(22, u64::MAX);
+            assert_eq!(core.read_cp0(22), 0, "no such register");
+        }
+
+        let mut r16 = core_with::<R16000ShadowCache>();
+        assert_eq!(r16.core.read_cp0(22), 0);
+        r16.core.write_cp0(22, u64::MAX);
+        assert_eq!(r16.core.read_cp0(22), 0x0403_cffb, "exactly the writable bits");
+        // Write entry 5 = 3, then park the index on it with the mode set.
+        r16.core.write_cp0(22, (5 << 3) | (3 << 14) | 1);
+        r16.core.write_cp0(22, (1 << 16) | (5 << 3));
+        assert_eq!(r16.core.read_cp0(22), (1 << 16) | (5 << 3) | (3 << 14));
+
+        r16.core.reset(true);
+        assert_eq!(r16.core.read_cp0(22), (1 << 16) | (5 << 3) | (3 << 14), "a soft reset keeps it");
+
+        // A snapshot carries the register and table for the R16000 alone, and a
+        // fresh R16000 loads it back to the same state.
+        let saved = MipsCpu::new(r16).save_state();
+        let cp0 = saved.get("cp0").expect("cp0 table");
+        assert!(cp0.get("cp0_diag").is_some() && cp0.get("cp0_diag_table").is_some());
+        assert!(MipsCpu::new(r14).save_state().get("cp0").unwrap().get("cp0_diag").is_none());
+        let fresh = MipsCpu::new(core_with::<R16000ShadowCache>());
+        fresh.load_state(&saved).unwrap();
+        assert_eq!(fresh.save_state(), saved);
+
+        let mut r16 = core_with::<R16000ShadowCache>();
+        r16.core.write_cp0(22, 5 << 3 | 1);
+        r16.core.reset(false);
+        assert_eq!(r16.core.read_cp0(22), 0, "a cold reset clears it");
+    }
+
     /// JIT store callouts must preserve the same Fuel diagnostic source
     /// bits as the interpreter.
     #[test]

@@ -564,6 +564,10 @@ pub trait CpuModel: MipsCache {
     const R10K_PRIMARY_DATA_OPS: bool = false;
     /// Bits retained by Index_Store_Tag to the secondary cache.
     const SECONDARY_TAG_MASK: u64 = u64::MAX;
+    /// Bits of CP0 register 22, the R10000 family's Diagnostic register, that
+    /// software writes. Zero: the model has no such register, it reads zero
+    /// and writes are ignored.
+    const CP0_DIAG_WRITE_MASK: u32 = 0;
     /// Preserve the upper word on partial LWR loads.
     /// Full-word loads still sign-extend bit 31.
     const LWR_PRESERVES_UPPER: bool = false;

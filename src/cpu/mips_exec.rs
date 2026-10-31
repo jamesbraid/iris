@@ -2840,6 +2840,7 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
         // MipsCore::new already ran reset_registers, so set both the reset value
         // and the live register — otherwise the model's identity only appears
         // after the next power_on.
+        core.cp0_diag = crate::cpu::branch_diag::BranchDiag::with_mask(C::CP0_DIAG_WRITE_MASK);
         core.reset_prid = C::PRID;
         core.reset_fir = C::FIR;
         core.cp0_prid = C::PRID;
@@ -15097,6 +15098,10 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Saveable for MipsCpu
         cp0u32!(cp0_status); cp0u32!(cp0_cause);
         cp0u32!(cp0_prid); cp0u32!(cp0_config); cp0u64!(cp0_lladdr);
         cp0u32!(cp0_watchlo); cp0u32!(cp0_watchhi); cp0u32!(cp0_ecc); cp0u32!(cp0_cacheerr);
+        if c.cp0_diag.is_present() {
+            cp0.insert("cp0_diag".into(), hex_u32(c.cp0_diag.read() as u32));
+            cp0.insert("cp0_diag_table".into(), u64_slice_to_toml(&c.cp0_diag.table_words()));
+        }
         cp0u64!(cp0_taglo); cp0u32!(cp0_taghi);
         cp0u64!(cp0_badvaddr); cp0u64!(cp0_epc); cp0u64!(cp0_errorepc);
         cp0u64!(cp0_entrylo0); cp0u64!(cp0_entrylo1); cp0u64!(cp0_context);
@@ -15163,6 +15168,11 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Saveable for MipsCpu
             ld32!(cp0_status); ld32!(cp0_cause); ld32!(cp0_prid);
             ld32!(cp0_config); ld64!(cp0_lladdr); ld32!(cp0_watchlo); ld32!(cp0_watchhi);
             ld32!(cp0_ecc); ld32!(cp0_cacheerr); ld64!(cp0_taglo); ld32!(cp0_taghi);
+            if let Some(x) = get_field(cp0, "cp0_diag") {
+                let mut words = [0u64; 16];
+                if let Some(arr) = get_field(cp0, "cp0_diag_table") { load_u64_slice(arr, &mut words); }
+                c.cp0_diag.restore(toml_u32(x).unwrap_or(0), &words);
+            }
             ld64!(cp0_entrylo0); ld64!(cp0_entrylo1); ld64!(cp0_context);
             ld64!(cp0_pagemask); ld64!(cp0_badvaddr); ld64!(cp0_entryhi);
             ld64!(cp0_xcontext); ld64!(cp0_epc); ld64!(cp0_errorepc);

@@ -374,6 +374,7 @@ impl<
     const ENTRYHI_FULL_VA: bool = Self::IS_R14000;
     const R10K_PRIMARY_DATA_OPS: bool = Self::IS_R14000;
     const SECONDARY_TAG_MASK: u64 = if Self::IS_R14000 { R14000_L2_TAG_MASK } else { L2_TAG_MASK };
+    const CP0_DIAG_WRITE_MASK: u32 = if Self::IS_R16000 { 0x0403_cffb } else { 0 };
     const LWR_PRESERVES_UPPER: bool = Self::IS_R14000;
     const FPU_FR1_WORD_WRITES_ZERO_UPPER: bool = Self::IS_R14000;
     const FPU_FR0_MOV_S_PRESERVES_PAIR: bool = Self::IS_R14000;
@@ -771,8 +772,8 @@ pub type R14000ShadowCache =
 ///
 /// Differences from the QEMU model, shared with the R14000 here: the core
 /// refuses a denormal operand whatever FCSR.FS says, where QEMU refuses it
-/// only with FS clear; CVT.L has no 52-bit limit; and the CP0 diagnostic
-/// register is not modelled.
+/// only with FS clear; and CVT.L has no 52-bit limit. The CP0 diagnostic
+/// register, with the mask QEMU gives it, is this model's alone.
 pub type R16000ShadowCache =
     ShadowCache<32768, 64, 32768, 32, 4194304, 128, true, 0x0000_0f50, 0x0000_0900, 64, { model::R10000 }>;
 
@@ -1065,6 +1066,9 @@ mod tests {
         assert_eq!(<R16K as CpuModel>::SECONDARY_TAG_MASK, R14000_L2_TAG_MASK);
         assert!(<R16K as CpuModel>::LWR_PRESERVES_UPPER);
         assert!(<R16K as CpuModel>::UNCACHED_MASKED_SUBWORD_STORES);
+        assert_eq!(<R16K as CpuModel>::CP0_DIAG_WRITE_MASK, 0x0403_cffb);
+        assert_eq!(<R14K as CpuModel>::CP0_DIAG_WRITE_MASK, 0, "only the R16000 has the register");
+        assert_eq!(<R10000ShadowCache as CpuModel>::CP0_DIAG_WRITE_MASK, 0);
     }
 
     /// A 4 MiB secondary cache has twice the lines of the Fuel's, and a
