@@ -13,6 +13,10 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## October 2026
 
+### SGI Tezro (IP53 board, IP35 software platform)
+
+- Added a headless Tezro profile with the 700 MHz R16000, 4 MiB cache, 4 GiB RAM, a PIC with PXBOW, and the IO9's IOC4, ISP12160 and BCM5701; see the [Tezro guide](docs/tezro-ip53.md).
+
 ### SGI Fuel (IP34 board, IP35 software platform)
 
 - Added a headless Fuel profile with the 500 MHz R14000, 512 MiB RAM,
