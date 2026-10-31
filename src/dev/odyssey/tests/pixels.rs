@@ -139,7 +139,7 @@ fn read_window() -> (Box<Board>, Arc<Ram>) {
     let (mut s, ram) = window();
     pixel_write(&mut s, 30, 40, READ_PIXEL);
     // A colour-map-free RGB mode, so the pixel is a colour and not an index.
-    s.dispmode[0] = ODSY_GAMMA_GROUP << ODSY_DISPMODE_GROUP_SHIFT;
+    s.regs().edit().dispmode[0] = ODSY_GAMMA_GROUP << ODSY_DISPMODE_GROUP_SHIFT;
     (s, ram)
 }
 
@@ -235,7 +235,7 @@ fn field_codes_separate_a_colour_read_from_a_depth_or_stencil_read() {
     let got = dma_read(&mut s, &ram, (30, 40, 1), with_fields(read_word4(0, 0), 0, 0), 1);
     assert_eq!(got[..2], [0xa5, 0xa5], "refused on an RGB window");
     pixel_write(&mut s, 31, 40, 0x2a);
-    s.dispmode[0] = 0;
+    s.regs().edit().dispmode[0] = 0;
     let got = dma_read(&mut s, &ram, (31, 40, 1), with_fields(read_word4(0, 0), 0, 0), 1);
     assert_eq!(got[..2], [0x2a, 0xa5]);
 }
@@ -247,7 +247,7 @@ fn field_codes_separate_a_colour_read_from_a_depth_or_stencil_read() {
 fn a_colour_index_read_returns_the_index() {
     let (mut s, ram) = read_window();
     pixel_write(&mut s, 31, 40, 0x5a3);
-    s.dispmode[0] = 0;
+    s.regs().edit().dispmode[0] = 0;
 
     let got = dma_read(&mut s, &ram, (31, 40, 1), read_word4(1, 14), 2);
     assert_eq!(got[..3], [0x05, 0xa3, 0xa5]);
@@ -255,7 +255,7 @@ fn a_colour_index_read_returns_the_index() {
     let got = dma_read(&mut s, &ram, (31, 40, 1), read_word4(0, 1), 1);
     assert_eq!(got[..2], [0x2a, 0xa5]);
 
-    s.dispmode[0] = ODSY_GAMMA_GROUP << ODSY_DISPMODE_GROUP_SHIFT;
+    s.regs().edit().dispmode[0] = ODSY_GAMMA_GROUP << ODSY_DISPMODE_GROUP_SHIFT;
     let got = dma_read(&mut s, &ram, (30, 40, 1), read_word4(0, 1), 1);
     assert_eq!(got[..2], [0xa5, 0xa5], "the red byte of 0xa55a3cff");
 }
@@ -713,7 +713,7 @@ fn a_pixel_buffers_front_is_the_buffer_a_front_draw_mask_writes() {
 
 /// The display lines still waiting to be resolved again.
 fn dirty_lines(s: &Board) -> Vec<usize> {
-    s.scanout.dirty.iter().enumerate().filter(|(_, d)| **d).map(|(y, _)| y).collect()
+    s.scanout.marks.dirty_rows()
 }
 
 /// A GL image write, by burst or by DMA, and a pixel copy write colour
@@ -844,7 +844,7 @@ fn zoom_2x2_sized(word4: u32, size_bits: u32) -> Box<Board> {
 #[test]
 fn an_integer_pixel_through_a_logic_op_or_to_the_id_planes_dirties_its_row() {
     let (mut s, _) = window();
-    let lines = |s: &Board| (0..s.scanout.dirty.len()).filter(|&y| s.scanout.dirty[y]).collect::<Vec<_>>();
+    let lines = |s: &Board| s.scanout.marks.dirty_rows();
     s.scanout_update();
 
     s.pattern_mode |= ODSY_MODE_COLOR_LOGIC_OP;
