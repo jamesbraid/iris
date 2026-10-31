@@ -75,6 +75,14 @@ impl Rig {
         r
     }
 
+    /// Take the adapter's clock off the host's and set it to `ns`; the
+    /// ring thread has seen the new time when this returns.
+    fn clock(&self, ns: i64) {
+        self.isp.fake_ns.store(ns, Ordering::Relaxed);
+        self.isp.wake.notify_all();
+        self.isp.wait_idle();
+    }
+
     fn r(&self, off: u32) -> u16 { self.isp.read(off, 2) as u16 }
     /// A register write. Commands run on the adapter's own thread, so a
     /// write that can start them waits for the ring to settle.
@@ -608,12 +616,96 @@ fn a_check_condition_carries_its_sense() {
 fn an_absent_target_is_incomplete_with_a_timeout() {
     let r = Rig::with_disk("absent", 1, 64);
     r.init_rings(4, 4);
+    r.clock(0);
     r.put_entry(0, &request(0x55, 3, &[0, 0, 0, 0, 0, 0], &[]));
     r.doorbell(1);
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * 1_000_000);
     let s = r.status(0);
     assert_eq!(g16(&s, 10), IOCB_INCOMPLETE);
     assert_eq!(g16(&s, 12), STATE_GOT_BUS);
     assert_eq!(g16(&s, 14), STATUS_FLAG_TIMEOUT);
+}
+
+const MS: i64 = 1_000_000;
+
+/// Whether the response ring holds a completion for `handle` in slot 0.
+fn posted(r: &Rig, handle: u32) -> bool {
+    g32(&r.status(0), 4) == handle
+}
+
+#[test]
+fn an_absent_target_times_out_after_the_default_selection_timeout() {
+    let r = Rig::with_disk("selection-default", 1, 64);
+    r.init_rings(4, 4);
+    r.clock(0);
+    r.put_entry(0, &request(0x55, 3, &[0, 0, 0, 0, 0, 0], &[]));
+    r.doorbell(1);
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS - 1);
+    assert!(!posted(&r, 0x55), "not before the timeout");
+    assert_eq!(r.r(reg::BUS_STATUS) & STATUS_RISC_INT_REQ, 0, "and no interrupt");
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    assert!(posted(&r, 0x55), "at the timeout");
+}
+
+#[test]
+fn the_programmed_selection_timeout_sets_the_delay() {
+    let r = Rig::with_disk("selection-programmed", 1, 64);
+    r.init_rings(4, 4);
+    r.clock(0);
+    assert_eq!(r.cmd(&[mbox::SET_SELECTION_TIMEOUT, 1000]), mbox::COMPLETE);
+    r.put_entry(0, &request(0x61, 3, &[0, 0, 0, 0, 0, 0], &[]));
+    r.doorbell(1);
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    assert!(!posted(&r, 0x61), "the default no longer applies");
+    r.clock(999 * MS);
+    assert!(!posted(&r, 0x61));
+    r.clock(1000 * MS);
+    assert!(posted(&r, 0x61));
+
+    // A shorter one, for the next command, from the time it starts.
+    assert_eq!(r.cmd(&[mbox::SET_SELECTION_TIMEOUT, 10]), mbox::COMPLETE);
+    r.put_entry(1, &request(0x62, 3, &[0, 0, 0, 0, 0, 0], &[]));
+    r.doorbell(2);
+    r.clock(1009 * MS);
+    assert_ne!(g32(&r.status(1), 4), 0x62);
+    r.clock(1010 * MS);
+    assert_eq!(g32(&r.status(1), 4), 0x62);
+}
+
+#[test]
+fn a_reset_takes_the_selection_timeout_back_to_the_default() {
+    let r = Rig::with_disk("selection-reset", 1, 64);
+    assert_eq!(r.cmd(&[mbox::SET_SELECTION_TIMEOUT, 1000]), mbox::COMPLETE);
+    r.w(reg::BUS_CTRL, CTRL_SOFT_RESET);
+    r.init_rings(4, 4);
+    r.clock(0);
+    r.put_entry(0, &request(0x63, 3, &[0, 0, 0, 0, 0, 0], &[]));
+    r.doorbell(1);
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    assert!(posted(&r, 0x63));
+}
+
+#[test]
+fn a_reset_cancels_a_selection_in_progress() {
+    let r = Rig::with_disk("selection-cancel", 1, 64);
+    r.init_rings(4, 4);
+    r.clock(0);
+    r.put_entry(0, &request(0x64, 3, &[0, 0, 0, 0, 0, 0], &[]));
+    r.doorbell(1);
+    r.w(reg::BUS_CTRL, CTRL_SOFT_RESET);
+    r.clock(DEFAULT_SELECTION_TIMEOUT as i64 * MS);
+    assert!(!posted(&r, 0x64), "no completion after the reset");
+}
+
+#[test]
+fn a_present_target_does_not_wait_for_the_selection_timeout() {
+    let r = Rig::with_disk("selection-present", 1, 64);
+    r.init_rings(4, 4);
+    r.clock(0);
+    r.put_entry(0, &request(0x65, 1, &[0, 0, 0, 0, 0, 0], &[]));
+    r.doorbell(1);
+    r.isp.wait_idle();
+    assert!(posted(&r, 0x65), "answered with the clock still at zero");
 }
 
 #[test]
@@ -825,7 +917,7 @@ fn a64_inquiry_and_continuation_segments() {
 
 #[test]
 fn a_queue_above_four_gigabytes_cannot_be_reached_on_a_32_bit_bus() {
-    let r = Rig::with_disk("high", 1, 64);
+    let r = Rig::with_disk("high", 0, 64);
     assert_eq!(r.cmd(&[mbox::INIT_REQ_QUEUE_A64, 4, 0, RQST as u16, 0, 0, 0, 0]), mbox::COMPLETE);
     assert_eq!(r.cmd(&[mbox::INIT_RSP_QUEUE_A64, 4, 0, 0x2000, 0, 0, 1, 0]), mbox::COMPLETE);
     r.put_entry(0, &tur_entry(1));
