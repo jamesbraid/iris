@@ -89,6 +89,7 @@ pub mod raster_pixels;
 pub mod raster_texture;
 pub mod raster_triangle;
 pub mod raster_unit;
+pub mod record;
 pub mod reader;
 pub mod registers;
 pub mod scanout;
@@ -153,6 +154,8 @@ pub struct Odyssey {
     /// leaves the renderer alone, because releasing it can need that thread.
     keep_renderer: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    /// `IRIS_ODSY_REC`: the recording of the bus accesses (record.rs).
+    rec: Option<record::RecHandle>,
 }
 
 impl Odyssey {
@@ -167,6 +170,14 @@ impl Odyssey {
         fasttick: Arc<std::sync::atomic::AtomicU64>,
     ) -> Result<Arc<Self>, String> {
         let mut s = Board::new(product, widget as u32)?;
+        let rec = match std::env::var("IRIS_ODSY_REC") {
+            Ok(path) => Some(record::Recorder::create(&path).map_err(|e| format!("IRIS_ODSY_REC {path}: {e}"))?),
+            Err(_) => None,
+        };
+        let mem: Arc<dyn BusDevice> = match &rec {
+            Some(r) => Arc::new(record::RecordingMem { inner: mem, rec: r.clone() }),
+            None => mem,
+        };
         s.guest = Some(mem);
         s.front.lock().irq = Some(irq);
         Ok(Arc::new(Self {
@@ -177,6 +188,7 @@ impl Odyssey {
             running: Arc::new(AtomicBool::new(false)),
             keep_renderer: Arc::new(AtomicBool::new(false)),
             thread: Mutex::new(None),
+            rec,
         }))
     }
 
@@ -202,7 +214,12 @@ impl Odyssey {
     fn read(&self, addr: u64, size: u32) -> (u32, u64) {
         match self.offset(addr) {
             Some(off) => match self.state.bus_read(off, size) {
-                Some(v) => (BUS_OK, v),
+                Some(v) => {
+                    if let Some(r) = &self.rec {
+                        r.lock().read(size as u8, off as u32, v);
+                    }
+                    (BUS_OK, v)
+                }
                 None => (BUS_BUSY, 0),
             },
             None => (BUS_ERR, 0),
@@ -212,7 +229,13 @@ impl Odyssey {
     fn write(&self, addr: u64, size: u32, val: u64) -> u32 {
         match self.offset(addr) {
             Some(off) => {
+                // The recording lock is held across the store and its record,
+                // so records come out in the order the stores were taken.
+                let rec = self.rec.as_ref().map(|r| r.lock());
                 if self.state.bus_write(off, val, size) {
+                    if let Some(mut r) = rec {
+                        r.write(size as u8, off as u32, val);
+                    }
                     BUS_OK
                 } else {
                     BUS_BUSY
