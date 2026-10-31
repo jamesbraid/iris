@@ -75,7 +75,7 @@ use crate::devlog::{init_devlog, LogModule};
 use crate::gdb_stub::CpuDebug;
 use crate::gfx_display::GfxDisplay;
 use crate::hptimer::TimerManager;
-use crate::ip35::{CPU_PHYS_MASK, PROM_PLANE};
+use crate::ip35::CPU_PHYS_MASK;
 use crate::ip35::node::{connect_cpu, connect_serial_ports, Node, NodeConfig, SerialPort};
 use crate::machine_state::GuestState;
 use crate::monitor::{Monitor, DEFAULT_PORT as DEFAULT_MONITOR_PORT};
@@ -444,9 +444,6 @@ fn build_cpu(board: &TezroBoard) -> Box<TezroCpu> {
     // The flash record's mode word and the processor's reset mode must
     // agree, or the PROM enters its error routine before GP is set.
     cpu.core.cp0_config = FirmwareRecord::TEZRO.reset_config0();
-    // The Tezro's first bank covers the reset window: the PROM's noncoherent
-    // cached fetches there must still reach the PROM.
-    cpu.cached_plane = board.node.reset_window.map(|(base, size)| (base, size, PROM_PLANE));
     cpu.cache = TezroCache::new(board.cached_bus());
     // The PROM keeps its stack in cache lines it tags for a window with no
     // memory behind it yet; the controller answers that window while they stand.
