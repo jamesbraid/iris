@@ -6823,10 +6823,15 @@ mod tests {
 
     /// Posting is a property of the CPU model, not of the bus.
     #[test]
-    fn test_posted_stores_are_an_r10000_model_property() {
+    fn test_posted_stores_are_an_r10000_family_model_property() {
         assert!(<crate::cpu::mips_cache_v2::R10000Cache as CpuModel>::POSTS_UNCACHED_STORES);
         assert!(<crate::cpu::mips_cache_shadow::R10000ShadowCache as CpuModel>::POSTS_UNCACHED_STORES);
         assert!(<crate::cpu::mips_cache_shadow::R10000O2ShadowCache as CpuModel>::POSTS_UNCACHED_STORES);
+        assert!(<crate::cpu::mips_cache_shadow::R12000ShadowCache as CpuModel>::POSTS_UNCACHED_STORES);
+        assert!(<crate::cpu::mips_cache_shadow::R12000O2ShadowCache as CpuModel>::POSTS_UNCACHED_STORES);
+        assert!(<crate::cpu::mips_cache_shadow::R14000ShadowCache as CpuModel>::POSTS_UNCACHED_STORES);
+        assert!(<crate::cpu::mips_cache_shadow::R14000Ip30ShadowCache as CpuModel>::POSTS_UNCACHED_STORES);
+        assert!(<crate::cpu::mips_cache_shadow::R16000ShadowCache as CpuModel>::POSTS_UNCACHED_STORES);
         assert!(!<R4400Cache as CpuModel>::POSTS_UNCACHED_STORES);
         assert!(!<crate::cpu::mips_cache_v2::R5000Cache as CpuModel>::POSTS_UNCACHED_STORES);
         assert!(!<PassthroughCache as CpuModel>::POSTS_UNCACHED_STORES);
