@@ -574,6 +574,27 @@ pub trait CpuModel: MipsCache {
     /// as TagHi[31]. Extending a mask to another part needs IP28 and Octane
     /// diagnostic comparisons.
     const SECONDARY_TAG_MASK: u64 = u64::MAX;
+    /// A store the system refuses completes anyway, and is logged.
+    ///
+    /// On the R10000 family an uncached store leaves the processor as a
+    /// double/single/partial-word write request, which has no response
+    /// (NEC U10278EJ4V0UM p.104). Bus Error comes only from an ERR response
+    /// to a read or upgrade request, or uncorrectable read data (p.316), so
+    /// no response to a store can raise it. What the memory system does with
+    /// a refused write is not stated there; any report of it is the memory
+    /// system's own. Reads and instruction fetches keep their Bus Error.
+    /// R4x00 and R5000 keep the synchronous exception for stores: no manual
+    /// in the Library says otherwise for them.
+    ///
+    /// A refused uncached SC/SCD also completes, and succeeds (rt = 1). That
+    /// is a model choice, not documented hardware behaviour: the cited pages
+    /// give a write request no response and say nothing about uncached
+    /// store-conditional, so the model has nothing to fail it with.
+    ///
+    /// iris models the R10000 only. The NEC manual covers the R12000 with the
+    /// same system interface; the R14000 and R16000 are inferred to share it,
+    /// and would set this too.
+    const POSTS_UNCACHED_STORES: bool = false;
 }
 
 pub trait MipsCache: Send + Sync {
@@ -3612,6 +3633,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
     const FIR: u32 = FIR;
     const TLB_ENTRIES: usize = TLB_ENTRIES;
     const R10K_CACHE_OPS: bool = model::r10k_family(MODEL);
+    const POSTS_UNCACHED_STORES: bool = MODEL == model::R10000;
     // 44 implemented virtual address bits on the R10000 family, as the shadow
     // model already says; XContext's layout follows them.
     const VA_BITS: u32 = if model::r10k_family(MODEL) { 44 } else { 40 };
