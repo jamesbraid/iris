@@ -114,9 +114,7 @@ fn a_fence_behind_a_queued_draw_lands_after_the_draw() {
     assert_eq!(ram.half(0x1006), 0, "the fence waits for the draw before it");
     eventually("the fence did not land", || ram.half(0x1006) == 0x5a5a);
     let s = h.board.lock();
-    let _planes = h.raster.planes();
     assert_ne!(pixel(&s, 0, 10, 10), 0, "the draw was in the planes before the fence");
-    drop(_planes);
     drop(s);
     h.raster.stop();
 }
@@ -221,26 +219,6 @@ fn fresh_scanout() -> FreshRows {
     let marks = RowMarks::default();
     marks.set_height(SGI_ODYSSEY_HEIGHT);
     FreshRows { differ: Box::new([[0; ROW_WORDS]; ODSY_DISPMODE_COUNT as usize]), marks }
-}
-
-/// The display takes the planes only between the raster unit's slices: a
-/// frame that starts while a slice is drawing waits for it to end.
-#[test]
-fn the_display_waits_out_a_raster_slice_in_flight() {
-    let (h, st) = slow_raster(200);
-
-    red_triangle(&mut h.board.lock(), &st);
-    eventually("the raster slice did not start", || h.raster.in_slice());
-    let s = h.board.lock();
-    let mut planes = h.raster.planes();
-    assert_ne!(pixel(&s, 0, 10, 10), 0, "the frame saw the whole draw");
-    let mut scanout = fresh_scanout();
-    planes.take_rows(0, &mut scanout.differ, &scanout.marks);
-    let rows: Vec<u32> = scanout.marks.dirty_rows().into_iter().map(|y| y as u32).collect();
-    assert!(rows.contains(&10), "and the display hears which rows the raster unit drew: {rows:?}");
-    drop(planes);
-    drop(s);
-    h.raster.stop();
 }
 
 /// Stopping the machine finishes the raster unit's queued work; a reset
@@ -362,9 +340,7 @@ fn a_query_behind_a_queued_draw_syncs_after_the_draw_without_holding_the_front_e
     eventually("the query did not sync", || ram.half(0x1006) == 0x5a5a);
     assert_eq!(ram.get(0x2000 + 0x97c, 4), 7u32.to_be_bytes(), "the counter was published before the sync word");
     let s = h.board.lock();
-    let _planes = h.raster.planes();
     assert_ne!(pixel(&s, 0, 10, 10), 0, "the draw was in the planes before the sync word");
-    drop(_planes);
     drop(s);
     h.raster.stop();
 }
@@ -390,7 +366,7 @@ fn a_waiting_bus_read_is_busy_until_the_raster_unit_has_drawn() {
 /// whose windows show the buffers `displayed` names.
 fn drawn_rows(h: &BoardLocks, displayed: u32) -> Vec<u32> {
     let mut scanout = fresh_scanout();
-    h.raster.planes().take_rows(displayed, &mut scanout.differ, &scanout.marks);
+    h.raster.take_published_rows(displayed, &mut scanout.differ, &scanout.marks);
     scanout.marks.dirty_rows().into_iter().map(|y| y as u32).collect()
 }
 
@@ -1028,44 +1004,11 @@ fn stop_releases_a_waiting_front_end() {
     assert_eq!(h.raster.queued(), 0);
 }
 
-/// A display frame that finds a raster slice running does not hold the
-/// board lock while it waits for the slice to end: the front end and the
-/// processor's accesses take the board meanwhile. Once the slice ends the
-/// frame takes the planes and resolves the dirty lines.
-#[test]
-fn a_frame_waiting_for_a_slice_leaves_the_board_free() {
-    let (h, st) = slow_raster(400);
-    let display = Arc::new(Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))));
-
-    red_triangle(&mut h.board.lock(), &st);
-    eventually("the raster unit began its slice", || h.raster.in_slice());
-    let frame = {
-        let (h, display) = (h.clone(), display.clone());
-        std::thread::spawn(move || Odyssey::frame(&h, &display))
-    };
-    std::thread::sleep(Duration::from_millis(60));
-
-    let t = Instant::now();
-    drop(h.board.lock());
-    assert!(t.elapsed() < Duration::from_millis(150), "the frame held the board for the slice: {:?}", t.elapsed());
-    assert!(h.raster.in_slice(), "the slice was still running");
-
-    frame.join().unwrap();
-    let reader = display.reader.lock();
-    assert!(reader.stats.retries >= 1, "the frame let the board go to wait");
-    assert_eq!(reader.stats.fallbacks, 0);
-    assert_eq!(reader.stats.frames, 1, "and then staged its lines");
-    drop(reader);
-    h.raster.stop();
-}
-
-// The display with no lock held (IRIS_VPRO_DISPLAY=lockless), and the locked
-// frame that runs the same code, held to the same pictures.
+// The display with no lock held, against live writers.
 
 /// A board whose every drawable is an RGB visual through a gamma ramp, four
-/// windows in vertical bands, and its display in `lockless` mode; the raster
-/// unit running.
-fn display_rig(lockless: bool) -> (BoardLocks, GlDrawState, Arc<Display>) {
+/// windows in vertical bands; the raster unit running.
+fn display_rig() -> (BoardLocks, GlDrawState, Arc<Display>) {
     let (mut s, st) = gl_board();
     for i in 0..0x600u32 {
         let v = (i * 0x3ff / 0x5ff) & 0x3ff;
@@ -1081,7 +1024,6 @@ fn display_rig(lockless: bool) -> (BoardLocks, GlDrawState, Arc<Display>) {
     let h = BoardLocks::new(s);
     h.raster.start();
     let display = Arc::new(Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))));
-    display.set_lockless(lockless);
     (h, st, display)
 }
 
@@ -1122,9 +1064,9 @@ fn assert_frame_is_whole_resolve(h: &BoardLocks, display: &Display, what: &str) 
 /// stop and the raster queue drains the presented frame is a whole resolve
 /// of the planes, and a hundred idle frames leave it so without resolving a
 /// line.
-fn stress(lockless: bool, seed: u64, last_is_lut: bool) {
+fn stress(seed: u64, last_is_lut: bool) {
     use crate::dev::odyssey::raster_bench::Lcg;
-    let (h, mut st, display) = display_rig(lockless);
+    let (h, mut st, display) = display_rig();
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let shown = run_display(&h, &display, &stop);
     let mut rng = Lcg(seed);
@@ -1209,24 +1151,17 @@ fn stress(lockless: bool, seed: u64, last_is_lut: bool) {
 }
 
 #[test]
-fn the_locked_frame_ends_as_a_whole_resolve_under_live_writers() {
+fn the_frame_ends_as_a_whole_resolve_under_live_writers() {
     for (seed, lut) in [(0x5a17, false), (0x77, true), (0xbeef, false), (0x31, true), (0x42, false), (0x99, true)] {
-        stress(false, seed, lut);
-    }
-}
-
-#[test]
-fn the_lockless_frame_ends_as_a_whole_resolve_under_live_writers() {
-    for (seed, lut) in [(0x5a17, false), (0x77, true), (0xbeef, false), (0x31, true), (0x42, false), (0x99, true)] {
-        stress(true, seed, lut);
+        stress(seed, lut);
     }
 }
 
 /// A guest that waits for its fence before it arms a swap never sees a
 /// frame that is not the buffer the latch put on the screen: each frame the
 /// display makes is one colour, the one drawn into the buffer it shows.
-fn swap_atomicity(lockless: bool) {
-    let (h, mut st, display) = display_rig(lockless);
+fn swap_atomicity() {
+    let (h, mut st, display) = display_rig();
     // One window, so the one swap bit is the whole picture.
     {
         let mut s = h.board.lock();
@@ -1315,23 +1250,17 @@ fn swap_atomicity(lockless: bool) {
 }
 
 #[test]
-fn a_swap_after_a_fence_shows_the_whole_new_frame_with_the_locked_frame() {
-    swap_atomicity(false);
-}
-
-#[test]
 fn a_swap_after_a_fence_shows_the_whole_new_frame_with_no_lock() {
-    swap_atomicity(true);
+    swap_atomicity();
 }
 
-/// The frame waits for no slice and holds no lock the front end needs when
-/// it runs with no lock: a slice that holds the raster unit for 400 ms
-/// delays neither the board nor the frame.
+/// The frame waits for no slice and holds no lock the front end needs: a
+/// slice that holds the raster unit for 400 ms delays neither the board nor
+/// the frame.
 #[test]
-fn a_lockless_frame_waits_for_no_slice_and_takes_no_lock() {
+fn a_frame_waits_for_no_slice_and_takes_no_lock() {
     let (h, st) = slow_raster(400);
     let display = Arc::new(Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))));
-    display.set_lockless(true);
 
     red_triangle(&mut h.board.lock(), &st);
     eventually("the raster unit began its slice", || h.raster.in_slice());
@@ -1343,7 +1272,6 @@ fn a_lockless_frame_waits_for_no_slice_and_takes_no_lock() {
     assert!(h.raster.in_slice(), "the slice was still running");
     let reader = display.reader.lock();
     assert_eq!(reader.stats.frames, 1, "and the frame staged its lines");
-    assert_eq!((reader.stats.retries, reader.stats.fallbacks), (0, 0));
     drop(reader);
     h.raster.stop();
 }
@@ -1358,7 +1286,6 @@ fn a_lookup_store_between_taking_the_marks_and_copying_the_registers_is_not_lost
     let (s, _) = gl_board();
     let h = BoardLocks::new(s);
     let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    display.set_lockless(true);
     Odyssey::frame(&h, &display);
     {
         let shared = h.shared.clone();

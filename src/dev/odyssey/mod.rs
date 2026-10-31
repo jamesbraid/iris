@@ -224,69 +224,22 @@ impl Odyssey {
         let mut reader = display.reader.lock();
         reader.attach(&state.shared);
         reader.recycle_last();
-        if display.lockless() {
-            // No lock: the writers mark rows after their stores and the
-            // reader takes the marks before it reads (reader.rs).
-            reader.poll(monotonic_ns());
-            let copy = std::time::Instant::now();
-            reader.stage();
-            reader.stats.locked(std::time::Duration::ZERO, copy.elapsed());
-            let mut job = reader.take();
-            if let Some(job) = &mut job {
-                job.resolve();
-            }
-            let span = job.as_mut().and_then(|job| reader.commit(job));
-            return Self::present_frame(state, display, reader, job, span);
-        }
-        // Locked mode runs the same code with the locks held around it.
-        //
-        // The planes are the raster unit's: wait out its slice in flight and
-        // hold off the next while the frame's lines are copied aside. The
-        // colour rows it wrote since the last frame are resolved again.
-        // The raster unit draws on while the copy is resolved.
-        //
-        // A slice runs up to a millisecond or one long draw, and the front
-        // end and the processor's accesses need the board lock the whole
-        // wait. So a frame that finds a slice running lets the board go,
-        // waits for the slice to end with nothing held, and asks again. Lock
-        // order stays board, then raster context. A raster unit that keeps
-        // starting slices could starve the retries: after FRAME_TRIES a
-        // frame waits for the planes with the board held, as it always did.
-        // Nothing is taken from the board or the planes until both are held,
-        // so no dirty row or swap is lost between tries.
-        let mut tries = 0;
-        let (s, planes, asked, held) = loop {
-            let s = state.board.lock();
-            reader.poll(monotonic_ns());
-            let asked = std::time::Instant::now();
-            if let Some(planes) = state.raster.try_planes() {
-                break (s, planes, asked, std::time::Instant::now());
-            }
-            if tries == FRAME_TRIES {
-                reader.stats.fallbacks += 1;
-                let planes = state.raster.planes();
-                break (s, planes, asked, std::time::Instant::now());
-            }
-            tries += 1;
-            reader.stats.retries += 1;
-            drop(s);
-            state.raster.wait_slice();
-        };
+        // The display takes no board lock and waits for no drawing. It
+        // reads the planes while the raster unit and the front end write
+        // them, as the other graphics boards' displays do: a row copied
+        // half-written is wrong for one frame, then marked again by its
+        // writer and copied whole (reader.rs).
+        reader.poll(monotonic_ns());
+        let copy = std::time::Instant::now();
         crate::pf_begin!(crate::perfetto::events::ODSY_FRAME_PLANES);
         reader.stage();
         crate::pf_end!(crate::perfetto::events::ODSY_FRAME_PLANES);
-        drop(planes);
-        reader.stats.locked(held - asked, held.elapsed());
-        // The copy resolves with no lock held, so neither the front end
-        // nor the raster unit waits for it.
+        reader.stats.copied(copy.elapsed());
         let mut job = reader.take();
-        drop(s);
         if let Some(job) = &mut job {
             job.resolve();
         }
-        let s = state.board.lock();
         let span = job.as_mut().and_then(|job| reader.commit(job));
-        drop(s);
         Self::present_frame(state, display, reader, job, span);
     }
 
@@ -351,10 +304,6 @@ impl BusDevice for Odyssey {
         self.write(addr, 8, val)
     }
 }
-
-/// How many times a frame lets the board lock go to wait for a raster slice
-/// before it waits with the lock held.
-const FRAME_TRIES: u32 = 3;
 
 /// The display thread's frame period: the modelled mode's 60 Hz.
 const FRAME_PERIOD: std::time::Duration = std::time::Duration::from_micros(16_667);
