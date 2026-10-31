@@ -4346,6 +4346,8 @@ pub struct JitConsts {
     pub fpu_fr0_mov_s_preserves_pair: bool,
     /// A denormal operand takes Unimplemented Operation only while FCSR.FS is clear.
     pub fpu_denormal_input_needs_fs_clear: bool,
+    /// Plain CVT.L accepts only results of 52 signed bits.
+    pub fpu_cvt_l_limited_to_52_bits: bool,
 }
 
 impl JitConsts {
@@ -8447,7 +8449,19 @@ fn emit_fcvt_to_int(ctx: &mut EmitCtx, fr_mode: FrMode, src_f64: bool, dst_i64: 
         }
     };
 
-    let (min, max, max_inclusive) = cvt_int_bounds(ctx, src_f64, dst_i64);
+    // A limited CVT.L is in range only inside 52 signed bits; the rest is for
+    // the callout, which refuses it.
+    let limited = ctx.jit_consts.fpu_cvt_l_limited_to_52_bits && dst_i64 && matches!(mode, RoundMode::Dynamic);
+    let (min, max, max_inclusive) = if limited {
+        // Exact in both formats: -2^51 included, 2^51 excluded.
+        if src_f64 {
+            (ctx.builder.ins().f64const(-2251799813685248.0f64), ctx.builder.ins().f64const(2251799813685248.0f64), false)
+        } else {
+            (ctx.builder.ins().f32const(-2251799813685248.0f32), ctx.builder.ins().f32const(2251799813685248.0f32), false)
+        }
+    } else {
+        cvt_int_bounds(ctx, src_f64, dst_i64)
+    };
     let ge_min = ctx.builder.ins().fcmp(FloatCC::GreaterThanOrEqual, rounded, min);
     let le_max = if max_inclusive {
         ctx.builder.ins().fcmp(FloatCC::LessThanOrEqual, rounded, max)
@@ -8502,7 +8516,9 @@ fn emit_fcvt_to_int_callout(ctx: &mut EmitCtx, fr_mode: FrMode, src_f64: bool, d
         RoundMode::Dynamic => {
             let fcsr_off = ir::immediates::Offset32::new(core_offset_of_fpu_fcsr());
             let fcsr = ctx.builder.ins().load(i32t, mem, ctx.core_ptr, fcsr_off);
-            ctx.builder.ins().band_imm_s(fcsr, 0x3)
+            let rm = ctx.builder.ins().band_imm_s(fcsr, 0x3);
+            // Plain CVT says so, for a model that limits CVT.L.
+            ctx.builder.ins().bor_imm_s(rm, 4)
         }
     };
     let fs_val = ctx.builder.ins().iconst(i32t, fs as i64);

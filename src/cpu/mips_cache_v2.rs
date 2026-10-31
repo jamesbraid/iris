@@ -572,6 +572,10 @@ pub trait CpuModel: MipsCache {
     /// while FCSR.FS is clear. False: the operand traps whatever FS says.
     /// A quiet NaN operand traps either way.
     const FPU_DENORMAL_INPUT_NEEDS_FS_CLEAR: bool = false;
+    /// CVT.L (the plain conversion, not ROUND/TRUNC/CEIL/FLOOR.L) accepts only
+    /// results that fit 52 signed bits, `-2^51..2^51`, and takes Unimplemented
+    /// Operation for anything else, a NaN or an infinity included.
+    const FPU_CVT_L_LIMITED_TO_52_BITS: bool = false;
     /// Preserve the upper word on partial LWR loads.
     /// Full-word loads still sign-extend bit 31.
     const LWR_PRESERVES_UPPER: bool = false;
