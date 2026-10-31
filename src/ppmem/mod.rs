@@ -18,3 +18,9 @@ pub mod ppmem;
 pub use map::{align_up, granularity, is_aligned, AddrSpace, Prot, SharedMem};
 pub use devmap::SparseDeviceMap;
 pub use ppmem::{bitmap_maps, MappedMemory, PpMemSpace, PpMemory, BITMAP_SHIFT, WINDOW_SIZE};
+
+/// Page size JIT v2 (§2.4 of its design) compiles and invalidates by, and the
+/// granularity of the per-page generation counters in `mem.rs` and
+/// `ppmem.rs`. Matches the MIPS TLB/cache page granularity. jitv2 re-exports
+/// it as `jitv2::PAGE_SIZE`; it lives here so memory does not name the JIT.
+pub const CODE_PAGE_SIZE: u32 = 4096;
