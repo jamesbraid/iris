@@ -1633,7 +1633,7 @@ impl Board {
                 || !(height as u64).is_power_of_two()
                 || (three_d
                     && (depth == 0
-                        || depth > SGI_ODYSSEY_OBJECTS
+                        || depth > SGI_ODYSSEY_VOLUME_SLICES
                         || !(depth as u64).is_power_of_two()
                         || (self.tex_mode & (ODSY_TEX_MODE_1D | ODSY_TEX_MODE_2D)) != 0))
                 || (!three_d && depth != 1)

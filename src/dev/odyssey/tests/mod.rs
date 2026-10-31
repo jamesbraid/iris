@@ -26,6 +26,7 @@ mod dma;
 mod fifo;
 mod interrupts;
 mod marks;
+mod objects;
 mod pixels;
 mod program;
 mod query;
