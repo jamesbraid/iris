@@ -67,7 +67,16 @@ BCM5701's slot. No EEPROM image is fitted for the IO9 board, the node board
 or the BCM5701, because no reviewed source gives their contents. PIC DMA to
 any widget other than Bedrock IO is refused.
 
-Graphics is not attached. Machine snapshots are unsupported.
+`[graphics] board = "v12"` fits a VPro V12 (the Odyssey device) at widget 12
+behind the PXBOW, on either board. On the two- and four-processor board this
+is QEMU's graphics slot. On the one-processor board the tower guide gives one
+XIO connector for a VPro board but names neither its widget nor its route,
+so widget 12 there is inferred. The Odyssey device lacks scalar GL command
+execution, pixel DMA, object storage and context save and restore. CPU 0's
+stores into its graphics page are counted against PI0's credits and the V12
+returns them along the node's graphics map; the write stall and the
+interrupt counter are not modelled. Without it the machine has no graphics.
+Machine snapshots are unsupported.
 
 ## Source basis
 

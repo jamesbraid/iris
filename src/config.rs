@@ -590,6 +590,9 @@ pub enum GraphicsBoard {
     /// and Fuel.
     #[clap(name = "none")]
     None,
+    /// VPro V12 (Odyssey) on the Tezro's crossbar.
+    #[clap(name = "v12", alias = "vpro")]
+    V12,
 }
 
 impl GraphicsBoard {
@@ -611,6 +614,7 @@ impl GraphicsBoard {
             Self::HighImpact => "IMPACT High",
             Self::MaxImpact => "IMPACT Maximum",
             Self::None => "None",
+            Self::V12 => "VPro V12",
         }
     }
 
@@ -623,6 +627,7 @@ impl GraphicsBoard {
             Self::HighImpact => "highimpact",
             Self::MaxImpact => "maximpact",
             Self::None => "none",
+            Self::V12 => "v12",
         }
     }
 
@@ -636,7 +641,8 @@ impl GraphicsBoard {
     pub fn supports(self, profile: MachineProfile) -> bool {
         match profile {
             MachineProfile::OctaneIp30 => self.is_impact() || self == Self::None,
-            MachineProfile::FuelIp34 | MachineProfile::TezroIp53 => self == Self::None,
+            MachineProfile::FuelIp34 => self == Self::None,
+            MachineProfile::TezroIp53 => matches!(self, Self::None | Self::V12),
             MachineProfile::Indigo2Ip22 => self != Self::None,
             _ => !matches!(self, Self::Extreme | Self::None),
         }
@@ -665,8 +671,9 @@ impl std::str::FromStr for GraphicsBoard {
             "highimpact" | "impact:high" | "high_impact" | "high-impact" | "high" => Ok(Self::HighImpact),
             "maximpact" | "impact:max" | "max_impact" | "max-impact" | "maximumimpact" | "maximum_impact" | "maximum-impact" | "max" => Ok(Self::MaxImpact),
             "none" => Ok(Self::None),
+            "v12" | "vpro" => Ok(Self::V12),
             _ => Err(format!(
-                "invalid graphics board \"{s}\" (valid: newport, xz, extreme, solidimpact, highimpact, maximpact, impact:solid, impact:high, impact:max, none)"
+                "invalid graphics board \"{s}\" (valid: newport, xz, extreme, solidimpact, highimpact, maximpact, impact:solid, impact:high, impact:max, none, v12)"
             )),
         }
     }
@@ -2191,8 +2198,8 @@ impl MachineConfig {
                 return Err(format!("[machine] cpus = {} is not a Tezro board's population (valid: {TEZRO_CPUS:?})", self.machine.cpus()));
             }
             self.tezro_memory()?.check_for_cpus(usize::from(self.machine.cpus())).map_err(|e| format!("banks: {e}"))?;
-            if board != GraphicsBoard::None {
-                return Err("Tezro currently supports graphics.board = \"none\" only".into());
+            if !matches!(board, GraphicsBoard::None | GraphicsBoard::V12) {
+                return Err("a Tezro takes graphics.board = \"none\" or \"v12\"".into());
             }
         } else if self.machine.profile == MachineProfile::OctaneIp30 {
             // A HEART bank is a matched DIMM pair: 64 to 512 MB, filled from
@@ -3367,6 +3374,12 @@ mod tezro_config_tests {
         assert_eq!(cfg.graphics_board(), GraphicsBoard::None);
         cfg.graphics.board = Some(GraphicsBoard::Newport);
         assert!(cfg.validate().is_err());
+        for cpus in [1, 4] {
+            cfg.graphics.board = Some(GraphicsBoard::V12);
+            cfg.machine.cpus = Some(cpus);
+            cfg.validate().unwrap();
+        }
+        assert_eq!("v12".parse::<GraphicsBoard>().unwrap(), GraphicsBoard::V12);
         let mut cfg = tezro();
         cfg.network.mode = NetMode::Off;
         cfg.validate().unwrap();
