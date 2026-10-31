@@ -20,13 +20,18 @@ hashes are given where a change is easiest to understand by reading the commit.
   against the origami datasheets. `[machine] cpu_mhz` and `cpu_l2_mib` pick a row;
   a combination the machine did not ship with is refused, listing what it did.
   The Octane's R10000 can be the 250 MHz revision 3.4 module, and its R14000 now runs
-  at the 600 MHz the IP30 capture reports instead of 195 MHz.
+  at the 600 MHz the IP30 capture reports instead of 195 MHz. The table covers every
+  clock and cache the origami R10000-family sheet records for the IP28, O2, Octane and
+  Fuel; each row's PRId is applied on every machine, so the O2's 300 MHz R12000 reads
+  revision 2.3 (it read 3.5).
 - **CP0 Config reports the real secondary cache size** (SS = 512 KiB << SS). It said
   1 MiB for every R10000-family part, so a 2 MiB R12000 or R14000 disagreed with its
   own cache operations. The O2's default R10000 now runs at the catalogue's 195 MHz,
   not 180.
 - The R16000 can be named but no machine accepts it yet. The R12000A, R14000A and
-  R16000A are not modelled; the table has a `Stepping` to hang them on.
+  R16000A are not separate guest-visible parts (no PRId is reserved for them, and an
+  R12000A 400 MHz module prints `R12000 3.5`), so they are the plain rows. The
+  secondary-cache syndrome field of performance control 0 is not modelled.
 
 ### Two processors on the Octane
 

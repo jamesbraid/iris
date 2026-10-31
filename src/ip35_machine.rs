@@ -120,6 +120,8 @@ impl FuelMachine {
         // board's Config reset word below is the 500 MHz, 2 MiB record's.
         let variant = cfg.cpu_variant()?.ok_or("a Fuel has an R14000: set [machine] cpu = \"r14000\"")?;
         let mut exec = board.build_cpu();
+        exec.core.reset_prid = variant.prid;
+        exec.core.cp0_prid = variant.prid;
         // The CPU's Compare matches blink the graphics status bar's LED.
         exec.core.fasttick_count = board.fasttick.clone();
         exec.core.set_timer_manager(timers.clone());

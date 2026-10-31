@@ -7,11 +7,12 @@
 //! to the cache model (the L2 size is a const parameter of that model, so
 //! a row without an arm there cannot be built).
 //!
-//! Every field is graded against the origami datasheets at their latest
-//! revision on trunk. `Grade::Observed` is an inventory, capture or product
-//! catalogue; `Grade::Inferred` is derived from one by a published encoding
-//! (the PRId nibbles of the R10000 manual); `Grade::Borrowed` is a value this
-//! emulator already used that no datasheet states for that machine.
+//! Every field is graded against origami's `r10000-family-identity` datasheet,
+//! the owner of part, revision and machine pairings. `Grade::Observed` is an
+//! inventory, capture or product catalogue; `Grade::Inferred` is derived from
+//! one, or picked from a set of printed values (the PRId nibbles of the R10000
+//! manual); `Grade::Borrowed` is a value this emulator already used that no
+//! datasheet states for that machine (none now).
 //!
 //! # Adding a row
 //!
@@ -23,13 +24,17 @@
 //!
 //! # The A parts
 //!
-//! The R12000A, R14000A and R16000A are not here. What separates them from
-//! the base parts is still being recorded in the origami CPU datasheets, so
-//! [`Stepping`] has only `Base`. A part with an A variant gets a `Stepping::A`
-//! arm, a row with it, and whatever the datasheet says it changes (PRId,
-//! Config reset word, performance counters); nothing reads `stepping` yet
-//! except the selector, so adding the arm needs no change in the machines
-//! until a behaviour differs.
+//! The R12000A, R14000A and R16000A are not a separate guest-visible
+//! identity. No PRId is reserved for them, and the IRIX and PROM name tables
+//! have no entry for one: a module SGI sold as an R12000A at 400 MHz prints
+//! `R12000 3.5`, and an R14000A at 600 MHz prints `R14000 2.4` (origami's
+//! `r10000-family-identity`, "What the A parts are"). Those modules are
+//! ordinary rows with the sheet's PRId, so [`Stepping`] has only `Base`.
+//!
+//! Two things the sheet reports about the A die are not modelled and need
+//! their own contract reviews before they are: the nine-bit secondary-cache
+//! syndrome in performance control 0, and tying a `vr12000a` variant to
+//! revision major 3.
 
 use crate::config::{CpuModel, MachineProfile};
 
@@ -41,12 +46,13 @@ pub enum Grade {
     /// Derived from an observation by a published encoding.
     Inferred,
     /// Used by this emulator for the machine before; no datasheet states it
-    /// for this machine. Replace it when one does.
+    /// for this machine. Replace it when one does. No row uses it now.
     Borrowed,
 }
 
-/// Silicon variant of a part. Only the base parts are modelled; see the
-/// module documentation for where the A parts go.
+/// Silicon variant of a part. Only `Base` exists: the A parts are not a
+/// separate guest-visible identity, so a module sold as one is the plain part
+/// (see the module documentation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stepping {
     Base,
@@ -83,7 +89,7 @@ impl CpuVariant {
 }
 
 use CpuModel::{R10000, R12000, R14000};
-use Grade::{Borrowed, Inferred, Observed};
+use Grade::{Inferred, Observed};
 use MachineProfile::{FuelIp34, Indigo2Ip28, O2Ip32, OctaneIp30};
 
 const fn row(
@@ -93,32 +99,74 @@ const fn row(
     CpuVariant { profile, model, stepping: Stepping::Base, mhz, l2_mib, prid, config, prid_grade, source }
 }
 
-/// Every shipped base-part configuration this emulator models.
+/// Every shipped configuration this emulator models, from the "Machine and
+/// part matrix" and "Identity registers per part" sections of origami's
+/// `r10000-family-identity` datasheet (cited below as the sheet).
 ///
-/// Waiting for the variant matrix the origami datasheets are collecting, so
-/// deliberately absent: the Octane's 175 MHz R10000 (`ip30-classic-clock-public`
-/// names the module, not its cache), a Fuel at 600 MHz (`ip34-fuel` names the
-/// clock and a 4 MiB option, no inventory pairs them), the Fuel R16000 (one
-/// repair capture, no cache size or PRId), the O2's 400 MHz R12000A
-/// (`o2-plus-r12000-module`; an A part), every other IP28 clock, and the
-/// Tezro, which has no machine in this tree.
+/// The sheet prints a set of revisions for some clock ranges (for example
+/// R10000 2.4, 2.5 and 2.6 at 175 and 195 MHz) without saying which clock got
+/// which. Those rows take one member of the printed set and are graded
+/// `Inferred`; the clock and cache are still `Observed`. A module SGI sold as
+/// an R12000A or R14000A is the plain part with the revision the sheet records
+/// for it: the A name is not guest-visible.
+///
+/// Deliberately absent: the Fuel at 600 MHz with 4 MiB and the Fuel R16000
+/// (sheet rows, but the Fuel PROM takes its Config boot-mode word from a
+/// per-configuration flash record and only the 500 MHz, 2 MiB record is known,
+/// see `ip35_machine::FUEL_CP0_CONFIG`), and the Tezro and Origin machines,
+/// which this tree does not model.
 pub const VARIANTS: &[CpuVariant] = &[
-    row(Indigo2Ip28, R10000, 195, 1, Borrowed, 0x925, Borrowed,
-        "existing IP28 model; no origami datasheet records an IP28 processor"),
-    row(O2Ip32, R10000, 195, 1, Observed, 0x925, Borrowed,
-        "o2-r10000-module (catalogue: 195 MHz, 1 MiB); revision not stated"),
-    row(O2Ip32, R12000, 300, 1, Observed, 0x0e35, Borrowed,
-        "o2-hardware-findings (SGI July 2000 release); PRId borrowed from ip30-r12000"),
+    // Indigo2 IMPACT R10000 (IP28). Sheet: R10000 2.4, 2.5, 2.6 at 175 and
+    // 195 MHz with 1 MiB; 2.5 at 250 MHz with 2 MiB.
+    row(Indigo2Ip28, R10000, 195, 1, Observed, 0x0925, Inferred,
+        "sheet, matrix: IP28 R10000 2.4/2.5/2.6, 175 and 195 MHz, 1 MiB (revision picked from the set)"),
+    row(Indigo2Ip28, R10000, 175, 1, Observed, 0x0925, Inferred,
+        "sheet, matrix: as the 195 MHz row"),
+    row(Indigo2Ip28, R10000, 250, 2, Observed, 0x0925, Observed,
+        "sheet, matrix: IP28 R10000 2.5, 250 MHz, 2 MiB"),
+    // O2 (IP32). Sheet: R10000 2.5/2.6/2.7 at 150, 174, 175, 195 MHz, 1 MiB;
+    // R10000 3.4 at 225 and 250 MHz, 1 MiB; R12000 2.3 at 270 and 300 MHz,
+    // 1 MiB; R12000 3.5 (the O2+, sold as R12000A) at 400 MHz, 2 MiB.
+    row(O2Ip32, R10000, 195, 1, Observed, 0x0925, Inferred,
+        "sheet, matrix: O2 R10000 2.5/2.6/2.7, 150-195 MHz, 1 MiB (revision picked from the set)"),
+    row(O2Ip32, R10000, 175, 1, Observed, 0x0925, Inferred, "sheet, matrix: as the 195 MHz row"),
+    row(O2Ip32, R10000, 174, 1, Observed, 0x0925, Inferred, "sheet, matrix: as the 195 MHz row"),
+    row(O2Ip32, R10000, 150, 1, Observed, 0x0925, Inferred, "sheet, matrix: as the 195 MHz row"),
+    row(O2Ip32, R10000, 250, 1, Observed, 0x0934, Observed, "sheet, matrix: O2 R10000 3.4, 225 and 250 MHz, 1 MiB"),
+    row(O2Ip32, R10000, 225, 1, Observed, 0x0934, Observed, "sheet, matrix: as the 250 MHz row"),
+    row(O2Ip32, R12000, 300, 1, Observed, 0x0e23, Observed,
+        "sheet, matrix: O2 R12000 2.3, 270 and 300 MHz, 1 MiB"),
+    row(O2Ip32, R12000, 270, 1, Observed, 0x0e23, Observed, "sheet, matrix: as the 300 MHz row"),
+    row(O2Ip32, R12000, 400, 2, Observed, 0x0e35, Observed,
+        "sheet, matrix: O2 R12000 3.5, 400 MHz, 2 MiB (the O2+ upgrade, sold as R12000A)"),
+    // Octane and Octane2 (IP30). Sheet: R10000 2.6/2.7/3.1 at 175 and 195 MHz,
+    // 1 MiB; 3.4 at 225 and 250 MHz, 1 MiB or (some 250 MHz) 2 MiB; R12000 2.3
+    // 300 MHz, 3.5 at 360 and 400 MHz (the 400 MHz module is the R12000A),
+    // 2 MiB; R14000 2.3 at 550 MHz, 2.4 at 500 and 600 MHz (the 550 and 600 MHz
+    // modules are the R14000A), 2 MiB.
     row(OctaneIp30, R10000, 195, 1, Observed, 0x0927, Inferred,
-        "ip30-machine, ip30-r10000 (OCTANE Technical Report; hinv revision 2.7)"),
-    row(OctaneIp30, R10000, 250, 1, Observed, 0x0934, Inferred,
-        "ip30-machine (published inventory, revision 3.4, PM10250MHZ)"),
-    row(OctaneIp30, R12000, 360, 2, Observed, 0x0e35, Inferred,
-        "ip30-r12000, ip30-octane2-machine (owner Octane2, revision 3.5)"),
+        "sheet, matrix: Octane R10000 2.6/2.7/3.1, 175 and 195 MHz, 1 MiB (2.7 is the technical report's hinv)"),
+    row(OctaneIp30, R10000, 175, 1, Observed, 0x0927, Inferred, "sheet, matrix: as the 195 MHz row"),
+    row(OctaneIp30, R10000, 250, 1, Observed, 0x0934, Observed,
+        "sheet, matrix: Octane R10000 3.4, 225 and 250 MHz, 1 MiB"),
+    row(OctaneIp30, R10000, 225, 1, Observed, 0x0934, Observed, "sheet, matrix: as the 250 MHz row"),
+    row(OctaneIp30, R10000, 250, 2, Observed, 0x0934, Observed,
+        "sheet, matrix: Octane R10000 3.4, 2 MiB on some 250 MHz parts"),
+    row(OctaneIp30, R12000, 360, 2, Observed, 0x0e35, Observed,
+        "sheet, matrix: Octane and Octane2 R12000 3.5, 360 MHz, 2 MiB (the owner's Octane2)"),
+    row(OctaneIp30, R12000, 300, 2, Observed, 0x0e23, Observed,
+        "sheet, matrix: Octane and Octane2 R12000 2.3, 300 MHz, 2 MiB"),
+    row(OctaneIp30, R12000, 400, 2, Observed, 0x0e35, Observed,
+        "sheet, matrix: R12000 3.5, 400 MHz, 2 MiB; the R12000A module prints this"),
     row(OctaneIp30, R14000, 600, 2, Observed, 0x0f24, Observed,
-        "r14000 (IP30 capture: two processors, revision 2.4, printed 00000f24)"),
-    row(FuelIp34, R14000, 500, 2, Observed, 0x0f23, Inferred,
-        "ip34-fuel (owner's guide 500 MHz, 2 MiB; hinv revision 2.3)"),
+        "sheet, matrix: Octane R14000 2.4, 600 MHz, 2 MiB; the R14000A module prints this"),
+    row(OctaneIp30, R14000, 500, 2, Observed, 0x0f24, Observed,
+        "sheet, matrix: Octane R14000 2.4, 500 MHz, 2 MiB (module name not stated)"),
+    row(OctaneIp30, R14000, 550, 2, Observed, 0x0f23, Observed,
+        "sheet, matrix: Octane R14000 2.3, 550 MHz, 2 MiB (R14000A module)"),
+    // Fuel (IP34). Sheet: R14000 2.3, 500 MHz, 2 MiB (SGI called it R14000A).
+    row(FuelIp34, R14000, 500, 2, Observed, 0x0f23, Observed,
+        "sheet, matrix: Fuel R14000 2.3, 500 MHz, 2 MiB"),
 ];
 
 /// Silicon variants of `model` whose configurations are not modelled: the
@@ -126,8 +174,8 @@ pub const VARIANTS: &[CpuVariant] = &[
 pub fn unselectable_reason(model: CpuModel) -> Option<&'static str> {
     match model {
         CpuModel::R16000 => Some(
-            "no machine in this tree has a recorded R16000 configuration: \
-             the Tezro is not modelled, and the one Fuel capture reports no cache size or PRId",
+            "no machine in this tree can take one: the Tezro is not modelled, \
+             and the Fuel PROM's Config record is known only for its 500 MHz R14000",
         ),
         _ => None,
     }
@@ -200,8 +248,10 @@ macro_rules! shadow_for {
         let v: &$crate::cpu_variants::CpuVariant = $v;
         match (v.profile, v.model, v.l2_mib) {
             (P::Indigo2Ip28 | P::OctaneIp30, M::R10000, 1) => { type $c = sc::R10000ShadowCache; $body }
+            (P::Indigo2Ip28 | P::OctaneIp30, M::R10000, 2) => { type $c = sc::R10000L2x2ShadowCache; $body }
             (P::O2Ip32, M::R10000, 1) => { type $c = sc::R10000O2ShadowCache; $body }
             (P::O2Ip32, M::R12000, 1) => { type $c = sc::R12000O2ShadowCache; $body }
+            (P::O2Ip32, M::R12000, 2) => { type $c = sc::R12000O2L2x2ShadowCache; $body }
             (P::OctaneIp30, M::R12000, 2) => { type $c = sc::R12000ShadowCache; $body }
             (P::OctaneIp30, M::R14000, 2) => { type $c = sc::R14000Ip30ShadowCache; $body }
             (P::FuelIp34, M::R14000, 2) => { type $c = sc::R14000ShadowCache; $body }
@@ -226,25 +276,22 @@ mod tests {
         for v in VARIANTS {
             let (prid, l2, _line, name) = built(v).unwrap_or_else(|| panic!("{v:?} has no cache model"));
             assert_eq!(l2, v.l2_bytes(), "{v:?}: secondary cache size");
-            // An Octane applies the row's PRId over the model's (a 195 MHz
-            // part reports revision 2.7, the model's default is the IP28's).
-            if v.profile != OctaneIp30 {
-                assert_eq!(prid, v.prid, "{v:?}: PRId");
-            }
+            // The machine applies the row's PRId over the model's default
+            // (a 195 MHz Octane part reports revision 2.7, the model's is 2.5).
             assert_eq!(prid >> 8, v.prid >> 8, "{v:?}: implementation field");
             assert!(name == "shadow" || name == format!("{}", v.model.label().trim_start_matches("MIPS ")), "{name}");
         }
     }
 
-    /// What a guest reads from CP0 on the processor a row builds: PRId (as the
-    /// machine applies it) and Config's SS field, 512 KiB << SS.
-    fn guest_view(v: &CpuVariant) -> (u32, u32) {
+    /// What a guest reads on the processor a row builds: CP0 PRId (as the
+    /// machine applies it), Config's SS field (512 KiB << SS) and CP1 FIR.
+    fn guest_view(v: &CpuVariant) -> (u32, u32, u32) {
         // An executor is far larger than a test thread's stack.
         let v = *v;
         std::thread::Builder::new().stack_size(64 << 20).spawn(move || guest_view_here(&v)).unwrap().join().unwrap()
     }
 
-    fn guest_view_here(v: &CpuVariant) -> (u32, u32) {
+    fn guest_view_here(v: &CpuVariant) -> (u32, u32, u32) {
         use crate::cpu::mips_exec::{MipsCpuConfig, MipsExecutor};
         use crate::cpu::mips_tlb::MipsTlb;
         use crate::traits::BusDevice;
@@ -256,17 +303,69 @@ mod tests {
             // The Octane sets the row's PRId on top of the model's, as `OctaneMachine` does.
             e.core.reset_prid = v.prid;
             e.core.reset(false);
-            (e.core.cp0_prid, (e.core.cp0_config >> 16) & 7)
+            (e.core.cp0_prid, (e.core.cp0_config >> 16) & 7, e.core.read_fpu_control(0))
         }, _ => panic!("{v:?} has no cache model"))
     }
 
     #[test]
     fn a_guest_reads_the_rows_prid_and_secondary_cache_size() {
         for v in VARIANTS {
-            let (prid, ss) = guest_view(v);
+            let (prid, ss, fir) = guest_view(v);
             assert_eq!(prid, v.prid, "{v:?}: PRId");
             assert_eq!(512 << 10 << ss, v.l2_bytes(), "{v:?}: Config SS {ss} names the wrong size");
+            // The sheet: every family part reads FIR 0x0900 (R10000 implementation
+            // 0x09), which is why hinv's FPU line is "0.0" on an Octane.
+            assert_eq!(fir, 0x0900, "{v:?}: FIR");
         }
+    }
+
+    /// The sheet's `cpu-identity` list (name, revision, PRId), and the hinv
+    /// naming rule over it: the key `implementation << 8 | major << 4 | minor`
+    /// against descending lower bounds, and for implementation 0x0f a major of
+    /// 3 or more printing as major minus two.
+    const SHEET: &[(&str, &str, u32)] = &[
+        ("R10000", "2.4", 0x0924), ("R10000", "2.5", 0x0925), ("R10000", "2.6", 0x0926),
+        ("R10000", "2.7", 0x0927), ("R10000", "3.1", 0x0931), ("R10000", "3.4", 0x0934),
+        ("R12000", "2.3", 0x0e23), ("R12000", "2.5", 0x0e25), ("R12000", "3.3", 0x0e33),
+        ("R12000", "3.5", 0x0e35), ("R14000", "1.4", 0x0f14), ("R14000", "2.3", 0x0f23),
+        ("R14000", "2.4", 0x0f24), ("R16000", "2.1", 0x0f41), ("R16000", "2.2", 0x0f42),
+        ("R16000", "3.0", 0x0f50),
+    ];
+
+    fn hinv_text(prid: u32) -> (&'static str, String) {
+        let name = match prid & 0xffff {
+            k if k >= 0x0f30 => "R16000",
+            k if k >= 0x0f00 => "R14000",
+            k if k >= 0x0e00 => "R12000",
+            k if k >= 0x0900 => "R10000",
+            _ => "older",
+        };
+        let (major, minor) = ((prid >> 4) & 0xf, prid & 0xf);
+        let major = if (prid >> 8) & 0xff == 0x0f && major >= 3 { major - 2 } else { major };
+        (name, format!("{major}.{minor}"))
+    }
+
+    #[test]
+    fn every_rows_prid_is_a_sheet_revision_that_prints_the_rows_part() {
+        for (name, rev, prid) in SHEET {
+            assert_eq!(hinv_text(*prid), (*name, rev.to_string()), "sheet rule");
+        }
+        for v in VARIANTS {
+            let (name, rev) = hinv_text(v.prid);
+            assert_eq!(name, v.model.label().trim_start_matches("MIPS "), "{v:?}");
+            assert!(SHEET.iter().any(|(n, r, p)| *n == name && *r == rev && *p == v.prid), "{v:?} is not a sheet revision");
+        }
+    }
+
+    /// The A modules are plain parts to a guest: SGI's R12000A at 400 MHz prints
+    /// R12000 3.5 and its R14000A at 600 MHz prints R14000 2.4 (the sheet,
+    /// "What the A parts are").
+    #[test]
+    fn the_a_modules_print_the_plain_part() {
+        let r12 = select(OctaneIp30, R12000, Some(400), None).unwrap().unwrap();
+        assert_eq!(hinv_text(r12.prid), ("R12000", "3.5".to_string()));
+        let r14 = select(OctaneIp30, R14000, Some(600), None).unwrap().unwrap();
+        assert_eq!(hinv_text(r14.prid), ("R14000", "2.4".to_string()));
     }
 
     /// Index CACHE ops wrap at the cache's own set count: two index addresses
@@ -310,6 +409,14 @@ mod tests {
         assert_eq!((octane.mhz, octane.prid), (195, 0x927));
         let o250 = select(OctaneIp30, R10000, Some(250), None).unwrap().unwrap();
         assert_eq!((o250.mhz, o250.l2_mib, o250.prid), (250, 1, 0x934));
+        let o250l2 = select(OctaneIp30, R10000, Some(250), Some(2)).unwrap().unwrap();
+        assert_eq!((o250l2.l2_mib, o250l2.prid), (2, 0x934));
+        // The Octane2's R12000 is the 360 MHz part; the others are named.
+        assert_eq!(select(OctaneIp30, R12000, None, None).unwrap().unwrap().mhz, 360);
+        assert_eq!(select(OctaneIp30, R14000, None, None).unwrap().unwrap().mhz, 600);
+        // The O2's R12000 is the 2.3 revision, the O2+ upgrade the 3.5.
+        assert_eq!(select(O2Ip32, R12000, None, None).unwrap().unwrap().prid, 0x0e23);
+        assert_eq!(select(O2Ip32, R12000, Some(400), None).unwrap().unwrap().l2_mib, 2);
     }
 
     #[test]
@@ -333,9 +440,14 @@ mod tests {
         assert!(select(OctaneIp30, R12000, Some(360), Some(1)).is_err(), "no 1 MiB Octane2");
         assert!(select(OctaneIp30, R10000, Some(360), None).is_err(), "360 MHz is the R12000");
         assert!(select(O2Ip32, R12000, Some(300), Some(1)).unwrap().is_some());
+        assert!(select(O2Ip32, R12000, Some(300), Some(2)).is_err(), "the 2 MiB O2 part is the 400 MHz one");
         assert!(select(O2Ip32, R12000, Some(360), None).is_err());
+        assert!(select(Indigo2Ip28, R10000, Some(250), Some(1)).is_err(), "the IP28's 250 MHz part has 2 MiB");
+        assert!(select(Indigo2Ip28, R10000, Some(250), Some(2)).unwrap().is_some());
+        assert!(select(OctaneIp30, R14000, Some(550), Some(2)).unwrap().is_some());
+        assert!(select(OctaneIp30, R14000, Some(600), Some(4)).is_err());
         assert!(select(FuelIp34, R14000, Some(500), Some(2)).unwrap().is_some());
-        assert!(select(FuelIp34, R14000, Some(600), None).is_err(), "waiting for the matrix");
+        assert!(select(FuelIp34, R14000, Some(600), None).is_err(), "the 600 MHz Fuel's Config record is not known");
         let e = select(FuelIp34, R12000, None, None).unwrap_err();
         assert!(e.contains("R12000") && e.contains("shipped"), "{e}");
     }

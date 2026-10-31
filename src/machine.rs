@@ -676,12 +676,18 @@ impl Machine {
         // 5. CPU config + TLB + Executor. The model is a runtime choice, but each
         //    arm below monomorphises its own CPU — no per-model branch on the hot path.
         let sysad: Arc<dyn BusDevice> = phys.clone();
+        let row_prid = cfg.cpu_variant().ok().flatten().map(|v| v.prid);
         macro_rules! build_cpu { ($cache:ty) => {{
         let cfg = MipsCpuConfig::for_model::<$cache>();
         let tlb = MipsTlb::new(cfg.tlb_entries);
         let mut executor: MipsExecutor<MipsTlb, $cache> = MipsExecutor::new(sysad.clone(), tlb, &cfg);
         // The MC decodes 32 physical address bits; see `MipsExecutor::phys_mask`.
         executor.phys_mask = u32::MAX as u64;
+        // The revision of the configuration `[machine]` names, where it has one.
+        if let Some(prid) = row_prid {
+            executor.core.reset_prid = prid;
+            executor.core.cp0_prid = prid;
+        }
 
         // Load default symbol maps if they exist
         {

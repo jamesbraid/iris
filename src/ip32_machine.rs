@@ -239,10 +239,11 @@ impl O2Machine {
         let count_mhz = cfg.clock.fixed_mhz.unwrap_or_else(|| variant.map_or(O2_COUNT_MHZ, |v| v.count_hz() as f64 / 1e6));
         let cpu_mhz = (count_mhz * 2.0).round().max(1.0) as u32;
         let boot = Arc::new(BootState::new());
+        let prid = variant.map(|v| v.prid);
         let cpu: Arc<dyn CpuDevice> = match variant {
-            Some(v) => crate::shadow_for!(v, C => Self::build_cpu::<C>(sysad, &timer_manager, arcs_fpu, cpu_mhz, boot.clone(), bus.ram.clone()),
+            Some(v) => crate::shadow_for!(v, C => Self::build_cpu::<C>(sysad, &timer_manager, arcs_fpu, cpu_mhz, boot.clone(), bus.ram.clone(), prid),
                                           _ => unreachable!("cpu_variants::shadow_for has a model for every O2 row")),
-            None if cfg.machine.cpu == CpuModel::R5000 => Self::build_cpu::<R5000ShadowCache>(sysad, &timer_manager, arcs_fpu, cpu_mhz, boot.clone(), bus.ram.clone()),
+            None if cfg.machine.cpu == CpuModel::R5000 => Self::build_cpu::<R5000ShadowCache>(sysad, &timer_manager, arcs_fpu, cpu_mhz, boot.clone(), bus.ram.clone(), prid),
             None => return Err("an O2 has an R5000, R10000 or R12000 ([machine] cpu)".into()),
         };
 
@@ -363,7 +364,7 @@ impl O2Machine {
     }
 
     fn build_cpu<C>(sysad: Arc<dyn BusDevice>, tm: &Arc<TimerManager>, arcs_fpu: bool, mhz: u32, boot: Arc<BootState>,
-                    ram: Arc<O2Memory>) -> Arc<dyn CpuDevice>
+                    ram: Arc<O2Memory>, prid: Option<u32>) -> Arc<dyn CpuDevice>
     where
         C: crate::cpu::mips_cache_v2::CpuModel + MipsCache + From<Arc<dyn BusDevice>> + 'static,
         MipsCpu<MipsTlb, C>: CpuDevice,
@@ -372,6 +373,11 @@ impl O2Machine {
         let tlb = MipsTlb::new(cfg.tlb_entries);
         let mut exec: MipsExecutor<MipsTlb, C> = MipsExecutor::new(sysad, tlb, &cfg);
         exec.cache.set_pd_tag_store_hook(Box::new(move |tag| ram.stack_tag_store(tag)));
+        // The revision of the configuration `[machine]` names.
+        if let Some(prid) = prid {
+            exec.core.reset_prid = prid;
+            exec.core.cp0_prid = prid;
+        }
         exec.core.set_timer_manager(tm.clone());
         // Count runs at half the pipeline clock on both CPUs.
         exec.core.set_count_hz(mhz.max(1) as u64 * 500_000);

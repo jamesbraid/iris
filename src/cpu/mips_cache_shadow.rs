@@ -751,6 +751,13 @@ pub type R10000ShadowCache =
 pub type R10000O2ShadowCache =
     ShadowCache<32768, 64, 32768, 32, 1048576, 64, true, 0x0000_0925, 0x0000_0900, 64, { model::R10000 }>;
 
+/// SGI R10000 with a 2 MiB secondary cache and 128-byte lines: the IP28's
+/// 250 MHz module and the Octane's 2 MiB 250 MHz option (origami's
+/// `r10000-family-identity`, machine and part matrix). Only the size differs
+/// from `R10000ShadowCache`; the machine applies the row's PRId.
+pub type R10000L2x2ShadowCache =
+    ShadowCache<32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0925, 0x0000_0900, 64, { model::R10000 }>;
+
 /// SGI Octane2 R12000 (IP30): revision 3.5, 2 MiB secondary cache.
 ///
 /// PRId 0x0e35 and FPU word 0x0900 are the kernel-inventory words of a running
@@ -772,6 +779,11 @@ pub type R12000ShadowCache =
 /// right.
 pub type R12000O2ShadowCache =
     ShadowCache<32768, 64, 32768, 32, 1048576, 64, true, 0x0000_0e35, 0x0000_0900, 64, { model::R12000 }>;
+
+/// SGI O2 R12000 with a 2 MiB secondary cache (the 400 MHz O2+ upgrade), keeping
+/// the 64-byte secondary line the O2 PROM needs.
+pub type R12000O2L2x2ShadowCache =
+    ShadowCache<32768, 64, 32768, 32, 2097152, 64, true, 0x0000_0e35, 0x0000_0900, 64, { model::R12000 }>;
 
 /// SGI Fuel R14000 (IP34): 2 MiB secondary cache.
 ///
