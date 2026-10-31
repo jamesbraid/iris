@@ -15,8 +15,6 @@
 //! other access is answered busy until the stores before it and the raster
 //! work they handed on are done (`BoardLocks::bus_read`), so the processor
 //! touches the state only while the board's thread is idle.
-//!
-//! Ported from hw/misc/sgi-odyssey.c in jamesbraid/qemu-sgi-origami.
 use super::*;
 
 use parking_lot::Mutex;

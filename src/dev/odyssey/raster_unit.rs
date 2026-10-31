@@ -101,7 +101,7 @@ pub const RASTER_SLICE: Duration = Duration::from_millis(1);
 pub const LINE_PHASE_ON_RASTER: u32 = u32::MAX;
 
 /// Words of a row set: one bit a plane row.
-pub const ROW_WORDS: usize = (SGI_ODYSSEY_HEIGHT as usize).div_ceil(64);
+pub const ROW_WORDS: usize = (ODSY_HEIGHT as usize).div_ceil(64);
 
 /// The rows a draw wrote, a bit each, by where it wrote: colour buffer 0,
 /// colour buffer 1 and the overlay byte.
@@ -113,7 +113,7 @@ pub const TOUCHED_OVERLAY: usize = ODSY_BUFFERS as usize;
 /// Note that a draw wrote row y of `slot`.
 #[inline(always)]
 pub fn touch_row(rows: &TouchedRows, slot: usize, y: i32) {
-    if (y as u32) < SGI_ODYSSEY_HEIGHT {
+    if (y as u32) < ODSY_HEIGHT {
         let w = &rows[slot][y as usize >> 6];
         w.set(w.get() | 1 << (y & 63));
     }
@@ -293,8 +293,8 @@ const ENTRY_COST_SHIFT: u32 = 2;
 /// The cost of a rectangle of pixels clipped to the screen, a clear's or a
 /// block fill's counted at `RASTER_CLEAR_DIVISOR`, plus the job's overhead.
 pub fn rect_cost(x0: i32, y0: i32, x1: i32, y1: i32, fast: bool) -> u32 {
-    let w = (x1.min(SGI_ODYSSEY_WIDTH as i32) - x0.max(0)).max(0) as u64;
-    let h = (y1.min(SGI_ODYSSEY_HEIGHT as i32) - y0.max(0)).max(0) as u64;
+    let w = (x1.min(ODSY_WIDTH as i32) - x0.max(0)).max(0) as u64;
+    let h = (y1.min(ODSY_HEIGHT as i32) - y0.max(0)).max(0) as u64;
     let px = w * h / if fast { RASTER_CLEAR_DIVISOR as u64 } else { 1 };
 
     RASTER_JOB_OVERHEAD.saturating_add(px.min(COST_MAX) as u32)
@@ -307,7 +307,7 @@ pub fn rect_cost(x0: i32, y0: i32, x1: i32, y1: i32, fast: bool) -> u32 {
 /// triangle its area and any other polygon its bounding box, each within
 /// the screen. An estimate, from the corners alone.
 pub fn primitive_cost(mode: u32, points: impl Iterator<Item = Option<(f64, f64)>>, point_size: f32, line_width: f32) -> u32 {
-    let (w, h) = (SGI_ODYSSEY_WIDTH as f64, SGI_ODYSSEY_HEIGHT as f64);
+    let (w, h) = (ODSY_WIDTH as f64, ODSY_HEIGHT as f64);
     let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
     let mut first = [(0.0f64, 0.0f64); 3];
     let mut n = 0;
@@ -328,9 +328,9 @@ pub fn primitive_cost(mode: u32, points: impl Iterator<Item = Option<(f64, f64)>
     let (bw, bh) = ((hi[0].min(w) - lo[0].max(0.0)).max(0.0), (hi[1].min(h) - lo[1].max(0.0)).max(0.0));
     let boxed = bw * bh;
     let px = match mode {
-        SGI_GL_POINTS => (point_size.max(1.0) as f64).powi(2) * n as f64,
-        SGI_GL_LINES | SGI_GL_LINE_LOOP | SGI_GL_LINE_STRIP => (bw.max(bh) + 1.0) * (line_width.max(1.0) as f64),
-        SGI_GL_TRIANGLES if n == 3 => {
+        GL_POINTS => (point_size.max(1.0) as f64).powi(2) * n as f64,
+        GL_LINES | GL_LINE_LOOP | GL_LINE_STRIP => (bw.max(bh) + 1.0) * (line_width.max(1.0) as f64),
+        GL_TRIANGLES if n == 3 => {
             let (a, b, c) = (first[0], first[1], first[2]);
             (((b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1)).abs() / 2.0).min(boxed)
         }

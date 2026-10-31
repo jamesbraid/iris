@@ -175,7 +175,7 @@ impl Display {
 impl Board {
     /// Pixel (x, y)'s main drawable id, bits 7:3 of its id-plane byte.
     pub fn main_id(&mut self, x: u32, y: u32) -> u32 {
-        ((self.did[(y * SGI_ODYSSEY_WIDTH + x) as usize] as u32) >> ODSY_DID_MAIN_SHIFT) & (ODSY_DISPMODE_COUNT - 1)
+        ((self.did[(y * ODSY_WIDTH + x) as usize] as u32) >> ODSY_DID_MAIN_SHIFT) & (ODSY_DISPMODE_COUNT - 1)
     }
 
     /// The colormap group main drawable main_id shows through: bits 8:4 of its
@@ -236,7 +236,7 @@ impl Board {
     /// is the same function for the colour planes the board allocates, and the
     /// tests hold the two to the same pixels.
     pub fn resolve_row_generic(&mut self, y: u32, dst: &mut [u32]) {
-        let width = self.scanout.mode.width.min(SGI_ODYSSEY_WIDTH);
+        let width = self.scanout.mode.width.min(ODSY_WIDTH);
         let displayed = self.front.lock().displayed_buffer;
         let shared = self.scanout.shared.clone();
 
@@ -270,7 +270,7 @@ impl Board {
     /// per-pixel decisions that depend only on a pixel's drawable id made once
     /// per update (ResolveCtx) and the planes read as lines of words.
     fn resolve_row_with(&mut self, ctx: &ResolveCtx, y: u32, dst: &mut [u32]) {
-        let width = self.scanout.mode.width.min(SGI_ODYSSEY_WIDTH);
+        let width = self.scanout.mode.width.min(ODSY_WIDTH);
         let Some(line) = self.scanout_line(y, width as usize) else {
             return self.resolve_row_generic(y, dst);
         };
@@ -287,7 +287,7 @@ impl Board {
     /// resolve_line(): both colour buffers in one byte order, the id
     /// bytes and the overlay bytes, each `width` pixels.
     pub(super) fn scanout_line(&self, y: u32, w: usize) -> Option<ScanoutLine<'_>> {
-        let at = y as usize * SGI_ODYSSEY_WIDTH as usize;
+        let at = y as usize * ODSY_WIDTH as usize;
         let (l0, be0) = self.colour_line(0, y, w)?;
         let (l1, be1) = self.colour_line(1, y, w)?;
         if be0 != be1 {

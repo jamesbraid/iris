@@ -128,7 +128,7 @@ impl<
     > Fill for FillMode<TEX, KERNEL, REPEAT, ENV, FORMAT, DEPTH, FUNC, WRITE, SMOOTH, BLEND, FOG, STENCIL, CLIP>
 {
     type Dyn =
-        FillMode<TEX, SGI_SOFT_FIXED_ANY, false, 0, 0, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN>;
+        FillMode<TEX, FIXED_ANY, false, 0, 0, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN>;
     const TEX: bool = TEX;
     const ENV: u32 = ENV;
     const FORMAT: u32 = FORMAT;
@@ -159,15 +159,15 @@ impl<
     }
     #[inline(always)]
     fn blend_src(st: &GlDrawState) -> u32 {
-        if BLEND == FILL_BLEND_OVER { SGI_GL_SRC_ALPHA } else { st.blend_src }
+        if BLEND == FILL_BLEND_OVER { GL_SRC_ALPHA } else { st.blend_src }
     }
     #[inline(always)]
     fn blend_dst(st: &GlDrawState) -> u32 {
-        if BLEND == FILL_BLEND_OVER { SGI_GL_ONE_MINUS_SRC_ALPHA } else { st.blend_dst }
+        if BLEND == FILL_BLEND_OVER { GL_ONE_MINUS_SRC_ALPHA } else { st.blend_dst }
     }
     #[inline(always)]
     fn blend_equation(st: &GlDrawState) -> u32 {
-        if BLEND == FILL_BLEND_OVER { SGI_GL_FUNC_ADD } else { st.blend_equation }
+        if BLEND == FILL_BLEND_OVER { GL_FUNC_ADD } else { st.blend_equation }
     }
     #[inline(always)]
     fn fog(st: &GlDrawState) -> bool {
@@ -204,10 +204,10 @@ impl SoftDraw<'_> {
         let df = soft_blend_factor(M::blend_dst(st), k, src, dst, &st.blend_color);
 
         match M::blend_equation(st) {
-            SGI_GL_MIN => fmin(src[k], dst[k]),
-            SGI_GL_MAX => fmax(src[k], dst[k]),
-            SGI_GL_FUNC_SUBTRACT => src[k] * sf - dst[k] * df,
-            SGI_GL_FUNC_REVERSE_SUBTRACT => dst[k] * df - src[k] * sf,
+            GL_MIN => fmin(src[k], dst[k]),
+            GL_MAX => fmax(src[k], dst[k]),
+            GL_FUNC_SUBTRACT => src[k] * sf - dst[k] * df,
+            GL_FUNC_REVERSE_SUBTRACT => dst[k] * df - src[k] * sf,
             _ => src[k] * sf + dst[k] * df,
         }
     }
@@ -225,7 +225,7 @@ impl SoftDraw<'_> {
         let blend = M::blend(self);
         let rgb = rules.rgb(&frag.rgba);
 
-        if !blend && self.rgba_mask == rules.rgba_mask(SGI_GL_COLOUR_MASK_ALL) {
+        if !blend && self.rgba_mask == rules.rgba_mask(GL_COLOUR_MASK_ALL) {
             let stored = (1u32.wrapping_shl(rules.alpha_bits as u32)).wrapping_sub(1);
 
             for (k, comp) in out.component.iter_mut().enumerate().take(3) {
@@ -275,7 +275,7 @@ impl SoftDraw<'_> {
         let mut clipped = self.win.clip.n > 1;
 
         let mut i = 0u32;
-        while clipped && i < fx_min(self.win.clip.n, SGI_CLIP_MAX as u32) {
+        while clipped && i < fx_min(self.win.clip.n, CLIP_MAX as u32) {
             // One of the window's rectangles holds the whole row.
             let c = &self.win.clip.r[i as usize];
 
@@ -350,10 +350,10 @@ impl SoftDraw<'_> {
         let lod = M::TEX && self.fixed_tex().lod;
         // REPLACE leaves none of the colour of these formats' fragments.
         let keeps = !M::TEX
-            || env != SGI_GL_REPLACE
-            || (format != SGI_GL_RGBA && format != SGI_GL_INTENSITY && format != SGI_GL_LUMINANCE_ALPHA);
+            || env != GL_REPLACE
+            || (format != GL_RGBA && format != GL_INTENSITY && format != GL_LUMINANCE_ALPHA);
         let mut frag: SoftFrag = *sp.flat;
-        let mut dest = [RasterColour::default(); SGI_GL_MAX_TARGETS as usize];
+        let mut dest = [RasterColour::default(); GL_MAX_TARGETS as usize];
         let (x_lo, x_hi) = match runs {
             [Some(a), Some(b)] => (fx_min(a.px0, b.px0), fx_max(a.px1, b.px1)),
             [Some(a), None] | [None, Some(a)] => (a.px0, a.px1),
@@ -467,7 +467,7 @@ impl SoftDraw<'_> {
                     continue;
                 }
                 if clip {
-                    let mut d = [0.0f64; SGI_GL_CLIP_PLANES as usize];
+                    let mut d = [0.0f64; GL_CLIP_PLANES as usize];
 
                     for (k, dk) in d.iter_mut().enumerate() {
                         if st.clip_planes & (1u32 << k) != 0 {
@@ -491,7 +491,7 @@ impl SoftDraw<'_> {
                     }
                 }
                 // A failed fragment that writes nothing is done with.
-                if outcome != 2 && !(stencil && st.stencil_op[outcome] != SGI_GL_KEEP) {
+                if outcome != 2 && !(stencil && st.stencil_op[outcome] != GL_KEEP) {
                     continue;
                 }
                 if M::TEX {
@@ -683,20 +683,20 @@ fn fill_quads_pixels<M: Fill, P: Planes + ?Sized>(
 const D: u32 = FILL_DYN;
 const OFF: u32 = FILL_BLEND_OFF;
 const OVER: u32 = FILL_BLEND_OVER;
-const NEAREST: u32 = SGI_SOFT_FIXED_NEAREST;
-const LINEAR: u32 = SGI_SOFT_FIXED_LINEAR;
-const TRILINEAR: u32 = SGI_SOFT_FIXED_TRILINEAR;
-const REPLACE: u32 = SGI_GL_REPLACE;
-const MODULATE: u32 = SGI_GL_MODULATE;
-const RGBA: u32 = SGI_GL_RGBA;
-const RGB: u32 = SGI_GL_RGB;
-const LESS: u32 = SGI_GL_LESS;
-const LEQUAL: u32 = SGI_GL_LEQUAL;
-const ALWAYS: u32 = SGI_GL_ALWAYS;
+const NEAREST: u32 = FIXED_NEAREST;
+const LINEAR: u32 = FIXED_LINEAR;
+const TRILINEAR: u32 = FIXED_TRILINEAR;
+const REPLACE: u32 = GL_REPLACE;
+const MODULATE: u32 = GL_MODULATE;
+const RGBA: u32 = GL_RGBA;
+const RGB: u32 = GL_RGB;
+const LESS: u32 = GL_LESS;
+const LEQUAL: u32 = GL_LEQUAL;
+const ALWAYS: u32 = GL_ALWAYS;
 
 fill_rows! {
     // The fallbacks: any state the loops take, tested per pixel.
-    TextureAny = (true, SGI_SOFT_FIXED_ANY, false, 0, 0, D, D, D, D, D, D, D, D);
+    TextureAny = (true, FIXED_ANY, false, 0, 0, D, D, D, D, D, D, D, D);
     FillAny = (false, 0, false, 0, 0, D, D, D, D, D, D, D, D);
 
     // Textured: a repeated RGB or RGBA image, nearest, bilinear or
@@ -802,12 +802,12 @@ impl SoftDraw<'_> {
     pub fn fill_blend_over(&self) -> bool {
         let st: &GlDrawState = self.st;
 
-        st.blend_src == SGI_GL_SRC_ALPHA
-            && st.blend_dst == SGI_GL_ONE_MINUS_SRC_ALPHA
-            && st.blend_equation != SGI_GL_MIN
-            && st.blend_equation != SGI_GL_MAX
-            && st.blend_equation != SGI_GL_FUNC_SUBTRACT
-            && st.blend_equation != SGI_GL_FUNC_REVERSE_SUBTRACT
+        st.blend_src == GL_SRC_ALPHA
+            && st.blend_dst == GL_ONE_MINUS_SRC_ALPHA
+            && st.blend_equation != GL_MIN
+            && st.blend_equation != GL_MAX
+            && st.blend_equation != GL_FUNC_SUBTRACT
+            && st.blend_equation != GL_FUNC_REVERSE_SUBTRACT
     }
 
     /// The state every row loop leaves to SoftDraw::fragment_at(): what none
@@ -832,9 +832,9 @@ impl SoftDraw<'_> {
             0
         } else if !st.depth_mask {
             -1
-        } else if st.depth_func == SGI_GL_LESS {
+        } else if st.depth_func == GL_LESS {
             1
-        } else if st.depth_func == SGI_GL_LEQUAL {
+        } else if st.depth_func == GL_LEQUAL {
             2
         } else {
             -1
@@ -850,7 +850,7 @@ impl SoftDraw<'_> {
         if path == FillPath::Dynamic || depth < 0 || blend < 0 || st.fog || stencil || st.clip_planes != 0 {
             return Some(FillRow::FillAny);
         }
-        let smooth = (st.shade_model != SGI_GL_FLAT) as usize;
+        let smooth = (st.shade_model != GL_FLAT) as usize;
         Some(SOFT_FILL_TABLE[depth as usize][smooth][blend as usize])
     }
 
@@ -867,32 +867,32 @@ impl SoftDraw<'_> {
         if SOFT_TEXTURE_PATH.with(|p| p.get()) != TexturePath::Spans || !self.fill_admits() {
             return None;
         }
-        let kernel: i32 = if !f.lod && f.min == SGI_GL_NEAREST {
+        let kernel: i32 = if !f.lod && f.min == GL_NEAREST {
             0
-        } else if !f.lod && f.min == SGI_GL_LINEAR {
+        } else if !f.lod && f.min == GL_LINEAR {
             1
-        } else if f.min == SGI_GL_LINEAR_MIPMAP_LINEAR && f.mag == SGI_GL_LINEAR {
+        } else if f.min == GL_LINEAR_MIPMAP_LINEAR && f.mag == GL_LINEAR {
             2
         } else {
             -1
         };
-        let env: i32 = if st.texture_env_mode == SGI_GL_REPLACE {
+        let env: i32 = if st.texture_env_mode == GL_REPLACE {
             0
-        } else if st.texture_env_mode == SGI_GL_MODULATE {
+        } else if st.texture_env_mode == GL_MODULATE {
             1
         } else {
             -1
         };
-        let format: i32 = if f.format == SGI_GL_RGBA {
+        let format: i32 = if f.format == GL_RGBA {
             0
-        } else if f.format == SGI_GL_RGB {
+        } else if f.format == GL_RGB {
             1
         } else {
             -1
         };
-        let func: i32 = if st.depth_func == SGI_GL_LESS {
+        let func: i32 = if st.depth_func == GL_LESS {
             0
-        } else if st.depth_func == SGI_GL_LEQUAL {
+        } else if st.depth_func == GL_LEQUAL {
             1
         } else {
             -1
@@ -905,14 +905,14 @@ impl SoftDraw<'_> {
         {
             return Some(FillRow::TextureAny);
         }
-        let repeat = f.wrap_s == SGI_GL_REPEAT && f.wrap_t == SGI_GL_REPEAT;
+        let repeat = f.wrap_s == GL_REPEAT && f.wrap_t == GL_REPEAT;
         if self.blend {
             // The two blended states named for themselves.
             let over = repeat && env == 1 && self.fill_blend_over();
-            if over && kernel == 1 && format == 1 && st.depth_func == SGI_GL_LESS && st.depth_mask {
+            if over && kernel == 1 && format == 1 && st.depth_func == GL_LESS && st.depth_mask {
                 return Some(FillRow::LinearModulateRgbLessOver);
             }
-            if over && kernel == 2 && format == 0 && st.depth_func == SGI_GL_ALWAYS && !st.depth_mask {
+            if over && kernel == 2 && format == 0 && st.depth_func == GL_ALWAYS && !st.depth_mask {
                 return Some(FillRow::TrilinearModulateRgbaAlwaysOver);
             }
             return Some(FillRow::TextureAny);
@@ -948,26 +948,26 @@ mod tests {
         let st = &mut b.st;
 
         st.depth_test = rng.next_u32() % 4 != 0;
-        st.depth_func = pick(&mut rng, &[SGI_GL_LESS, SGI_GL_LEQUAL, SGI_GL_LESS, SGI_GL_LEQUAL, SGI_GL_GREATER, SGI_GL_ALWAYS, SGI_GL_EQUAL, SGI_GL_NOTEQUAL, SGI_GL_NEVER]);
+        st.depth_func = pick(&mut rng, &[GL_LESS, GL_LEQUAL, GL_LESS, GL_LEQUAL, GL_GREATER, GL_ALWAYS, GL_EQUAL, GL_NOTEQUAL, GL_NEVER]);
         st.depth_mask = rng.next_u32() % 5 != 0;
-        st.shade_model = pick(&mut rng, &[SGI_GL_FLAT, SGI_GL_SMOOTH]);
+        st.shade_model = pick(&mut rng, &[GL_FLAT, GL_SMOOTH]);
         st.dither = rng.next_u32() % 2 != 0;
         if rng.next_u32() % 2 == 0 {
             st.blend = true;
             if rng.next_u32() % 2 == 0 {
-                st.blend_src = SGI_GL_SRC_ALPHA;
-                st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
+                st.blend_src = GL_SRC_ALPHA;
+                st.blend_dst = GL_ONE_MINUS_SRC_ALPHA;
             } else {
-                let factors = [0, 1, SGI_GL_SRC_ALPHA, SGI_GL_ONE_MINUS_SRC_ALPHA, SGI_GL_DST_ALPHA, SGI_GL_ONE_MINUS_DST_COLOR, SGI_GL_SRC_ALPHA_SATURATE, SGI_GL_CONSTANT_ALPHA];
+                let factors = [0, 1, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_COLOR, GL_SRC_ALPHA_SATURATE, GL_CONSTANT_ALPHA];
                 st.blend_src = pick(&mut rng, &factors);
                 st.blend_dst = pick(&mut rng, &factors);
                 st.blend_color = [0.25, 0.5, 0.75, 0.3];
             }
-            st.blend_equation = pick(&mut rng, &[0, SGI_GL_FUNC_ADD, SGI_GL_FUNC_ADD, SGI_GL_MIN, SGI_GL_FUNC_SUBTRACT]);
+            st.blend_equation = pick(&mut rng, &[0, GL_FUNC_ADD, GL_FUNC_ADD, GL_MIN, GL_FUNC_SUBTRACT]);
         }
         if rng.next_u32() % 4 == 0 {
             st.fog = true;
-            st.fog_mode = pick(&mut rng, &[SGI_GL_LINEAR, SGI_GL_EXP, SGI_GL_EXP2]);
+            st.fog_mode = pick(&mut rng, &[GL_LINEAR, GL_EXP, GL_EXP2]);
             st.fog_start = 0.0;
             st.fog_end = 2.5;
             st.fog_density = 0.7;
@@ -982,7 +982,7 @@ mod tests {
             st.scissor = [rng.next_u32() as i32 % 60, rng.next_u32() as i32 % 60, 40 + rng.next_u32() as i32 % 100, 40 + rng.next_u32() as i32 % 100];
         }
         if rng.next_u32() % 4 == 0 {
-            st.polygon_offset = SGI_GL_OFFSET_FILL;
+            st.polygon_offset = GL_OFFSET_FILL;
             st.offset_factor = 1.5;
             st.offset_units = 2.0;
         }
@@ -999,32 +999,32 @@ mod tests {
             random_clip(&mut rng, st);
         }
         if textured {
-            let min = pick(&mut rng, &[SGI_GL_NEAREST, SGI_GL_LINEAR, SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_NEAREST_MIPMAP_NEAREST]);
-            let mag = pick(&mut rng, &[SGI_GL_NEAREST, SGI_GL_LINEAR, SGI_GL_LINEAR]);
-            let format = pick(&mut rng, &[SGI_GL_RGBA, SGI_GL_RGB, SGI_GL_RGBA, SGI_GL_LUMINANCE]);
+            let min = pick(&mut rng, &[GL_NEAREST, GL_LINEAR, GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR_MIPMAP_LINEAR, GL_NEAREST_MIPMAP_NEAREST]);
+            let mag = pick(&mut rng, &[GL_NEAREST, GL_LINEAR, GL_LINEAR]);
+            let format = pick(&mut rng, &[GL_RGBA, GL_RGB, GL_RGBA, GL_LUMINANCE]);
             let mut tex = BenchTexture::new(32, min, mag, format);
 
             if rng.next_u32() % 4 == 0 {
-                tex.wrap_t = SGI_GL_CLAMP_TO_EDGE;
+                tex.wrap_t = GL_CLAMP_TO_EDGE;
             }
             st.texture_2d = true;
-            st.texture_env_mode = pick(&mut rng, &[SGI_GL_REPLACE, SGI_GL_MODULATE, SGI_GL_MODULATE, SGI_GL_DECAL, SGI_GL_BLEND]);
+            st.texture_env_mode = pick(&mut rng, &[GL_REPLACE, GL_MODULATE, GL_MODULATE, GL_DECAL, GL_BLEND]);
             st.texture_env_color = [0.9, 0.2, 0.4, 0.6];
             if seed % 2 == 0 {
                 // Half the cases in a state a specialisation names.
-                let kernel = pick(&mut rng, &[(SGI_GL_NEAREST, SGI_GL_NEAREST), (SGI_GL_LINEAR, SGI_GL_LINEAR), (SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR)]);
-                tex = BenchTexture::new(32, kernel.0, kernel.1, pick(&mut rng, &[SGI_GL_RGBA, SGI_GL_RGB]));
-                st.texture_env_mode = pick(&mut rng, &[SGI_GL_REPLACE, SGI_GL_MODULATE]);
+                let kernel = pick(&mut rng, &[(GL_NEAREST, GL_NEAREST), (GL_LINEAR, GL_LINEAR), (GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR)]);
+                tex = BenchTexture::new(32, kernel.0, kernel.1, pick(&mut rng, &[GL_RGBA, GL_RGB]));
+                st.texture_env_mode = pick(&mut rng, &[GL_REPLACE, GL_MODULATE]);
                 st.depth_test = true;
                 st.depth_mask = true;
-                st.depth_func = pick(&mut rng, &[SGI_GL_LESS, SGI_GL_LEQUAL]);
+                st.depth_func = pick(&mut rng, &[GL_LESS, GL_LEQUAL]);
                 st.blend = false;
                 st.fog = false;
             }
             b.tex = Some(tex);
         }
         for _ in 0..60 {
-            let mut v = vec![0.0f32; 3 * SGI_GL_VERTEX_FLOATS];
+            let mut v = vec![0.0f32; 3 * GL_VERTEX_FLOATS];
             let size = pick(&mut rng, &[3.0f32, 12.0, 40.0, 90.0]);
             let cx = rng.range(0.0, SIDE as f32);
             let cy = rng.range(0.0, SIDE as f32);
@@ -1034,18 +1034,18 @@ mod tests {
                 let y = cy + rng.range(-size, size);
                 let z = rng.range(-1.2, 1.2);
                 let w = rng.range(0.5, 2.0);
-                let o = &mut v[i * SGI_GL_VERTEX_FLOATS..(i + 1) * SGI_GL_VERTEX_FLOATS];
+                let o = &mut v[i * GL_VERTEX_FLOATS..(i + 1) * GL_VERTEX_FLOATS];
                 let nx = x / BENCH_W as f32 * 2.0 - 1.0;
                 let ny = y / BENCH_H as f32 * 2.0 - 1.0;
-                o[SGI_GL_V_POSITION..SGI_GL_V_POSITION + 4].copy_from_slice(&[nx * w, ny * w, z * w, w]);
+                o[GL_V_POSITION..GL_V_POSITION + 4].copy_from_slice(&[nx * w, ny * w, z * w, w]);
                 // Some triangles keep a component 0 or 1 at every vertex.
                 let c = if grey {
                     [1.0, 0.0, rng.range(0.0, 1.0), 1.0]
                 } else {
                     [rng.range(-0.1, 1.1), rng.range(0.0, 1.0), rng.range(0.0, 1.0), rng.range(0.0, 1.0)]
                 };
-                o[SGI_GL_V_COLOR..SGI_GL_V_COLOR + 4].copy_from_slice(&c);
-                o[SGI_GL_V_TEXCOORD..SGI_GL_V_TEXCOORD + 4]
+                o[GL_V_COLOR..GL_V_COLOR + 4].copy_from_slice(&c);
+                o[GL_V_TEXCOORD..GL_V_TEXCOORD + 4]
                     .copy_from_slice(&[rng.range(-2.0, 3.0) * w, rng.range(-2.0, 3.0) * w, 0.0, w]);
             }
             b.prims.push(v);
@@ -1056,7 +1056,7 @@ mod tests {
     /// A stencil test on: any function, reference and masks, and any
     /// operation for each outcome.
     fn random_stencil(rng: &mut Lcg, st: &mut GlDrawState) {
-        let ops = [SGI_GL_KEEP, SGI_GL_KEEP, 0, SGI_GL_REPLACE, SGI_GL_INCR, SGI_GL_DECR, SGI_GL_INVERT];
+        let ops = [GL_KEEP, GL_KEEP, 0, GL_REPLACE, GL_INCR, GL_DECR, GL_INVERT];
 
         st.stencil_test = true;
         st.stencil_func = rng.next_u32() % 8;
@@ -1153,7 +1153,7 @@ mod tests {
                         let mut v = b.prims[0].clone();
 
                         for (i, &(x, y)) in pts.iter().enumerate() {
-                            let o = &mut v[i * SGI_GL_VERTEX_FLOATS + SGI_GL_V_POSITION..];
+                            let o = &mut v[i * GL_VERTEX_FLOATS + GL_V_POSITION..];
 
                             o[..4].copy_from_slice(&[x / BENCH_W as f32 * 2.0 - 1.0, y / BENCH_H as f32 * 2.0 - 1.0, 0.0, 1.0]);
                         }
@@ -1195,16 +1195,16 @@ mod tests {
     #[test]
     fn every_texture_row_matches_the_general_path() {
         let mut seed = 200u64;
-        for (wrap, func) in [SGI_GL_REPEAT, SGI_GL_CLAMP_TO_EDGE].into_iter().flat_map(|w| [(w, SGI_GL_LESS), (w, SGI_GL_LEQUAL)]) {
-            for (min, mag) in [(SGI_GL_NEAREST, SGI_GL_NEAREST), (SGI_GL_LINEAR, SGI_GL_LINEAR), (SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR)] {
-                for env in [SGI_GL_REPLACE, SGI_GL_MODULATE] {
-                    for format in [SGI_GL_RGBA, SGI_GL_RGB] {
+        for (wrap, func) in [GL_REPEAT, GL_CLAMP_TO_EDGE].into_iter().flat_map(|w| [(w, GL_LESS), (w, GL_LEQUAL)]) {
+            for (min, mag) in [(GL_NEAREST, GL_NEAREST), (GL_LINEAR, GL_LINEAR), (GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR)] {
+                for env in [GL_REPLACE, GL_MODULATE] {
+                    for format in [GL_RGBA, GL_RGB] {
                         let make = || {
                             let mut b = case(seed, true);
                             b.st.depth_test = true;
                             b.st.depth_mask = true;
                             b.st.depth_func = func;
-                            b.st.shade_model = SGI_GL_SMOOTH;
+                            b.st.shade_model = GL_SMOOTH;
                             b.st.blend = false;
                             b.st.fog = false;
                             b.st.stencil_test = false;
@@ -1270,15 +1270,15 @@ mod tests {
         let mut b = Bench::empty();
         b.st.depth_test = true;
         b.st.stencil_test = true;
-        b.st.stencil_func = SGI_GL_EQUAL;
-        b.st.stencil_op = [SGI_GL_KEEP; 3];
+        b.st.stencil_func = GL_EQUAL;
+        b.st.stencil_op = [GL_KEEP; 3];
         let t = b.board.gl_target();
         let reports = SoftReports::default();
         let mut r = SoftDraw::new(&b.rules, &t, &b.st, &reports);
         r.ntargets = 1;
         assert!(r.setup_ops());
         assert_eq!(r.fill_select(), Some(FillRow::FillAny));
-        let f = SoftFixedTex { min: SGI_GL_LINEAR, mag: SGI_GL_LINEAR, format: SGI_GL_RGB, wrap_s: SGI_GL_REPEAT, wrap_t: SGI_GL_REPEAT, ..Default::default() };
+        let f = SoftFixedTex { min: GL_LINEAR, mag: GL_LINEAR, format: GL_RGB, wrap_s: GL_REPEAT, wrap_t: GL_REPEAT, ..Default::default() };
         assert_eq!(r.fixed_span_select(&f), Some(FillRow::LinearModulateRgbLess));
     }
 
@@ -1294,7 +1294,7 @@ mod tests {
         r.ntargets = 1;
         assert!(r.setup_ops());
         assert_eq!(r.fill_select(), Some(FillRow::FillAny));
-        let f = SoftFixedTex { min: SGI_GL_LINEAR, mag: SGI_GL_LINEAR, format: SGI_GL_RGB, wrap_s: SGI_GL_REPEAT, wrap_t: SGI_GL_REPEAT, ..Default::default() };
+        let f = SoftFixedTex { min: GL_LINEAR, mag: GL_LINEAR, format: GL_RGB, wrap_s: GL_REPEAT, wrap_t: GL_REPEAT, ..Default::default() };
         assert_eq!(r.fixed_span_select(&f), Some(FillRow::LinearModulateRgbLess));
     }
 
@@ -1307,18 +1307,18 @@ mod tests {
             let make = || {
                 let mut b = case(seed, true);
                 b.st.depth_test = true;
-                b.st.depth_func = if sky { SGI_GL_ALWAYS } else { SGI_GL_LESS };
+                b.st.depth_func = if sky { GL_ALWAYS } else { GL_LESS };
                 b.st.depth_mask = !sky;
                 b.st.blend = true;
-                b.st.blend_src = SGI_GL_SRC_ALPHA;
-                b.st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
-                b.st.blend_equation = SGI_GL_FUNC_ADD;
+                b.st.blend_src = GL_SRC_ALPHA;
+                b.st.blend_dst = GL_ONE_MINUS_SRC_ALPHA;
+                b.st.blend_equation = GL_FUNC_ADD;
                 b.st.fog = false;
-                b.st.texture_env_mode = SGI_GL_MODULATE;
+                b.st.texture_env_mode = GL_MODULATE;
                 b.tex = Some(if sky {
-                    BenchTexture::new(32, SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR, SGI_GL_RGBA)
+                    BenchTexture::new(32, GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR, GL_RGBA)
                 } else {
-                    BenchTexture::new(32, SGI_GL_LINEAR, SGI_GL_LINEAR, SGI_GL_RGB)
+                    BenchTexture::new(32, GL_LINEAR, GL_LINEAR, GL_RGB)
                 });
                 b
             };
@@ -1336,24 +1336,24 @@ mod tests {
         let mut b = Bench::empty();
         b.st.depth_test = true;
         for blend in [false, true] {
-            for wrap in [SGI_GL_REPEAT, SGI_GL_CLAMP_TO_EDGE] {
-                for (func, mask) in [(SGI_GL_LESS, true), (SGI_GL_LEQUAL, true), (SGI_GL_ALWAYS, false)] {
-                    for (min, mag) in [(SGI_GL_NEAREST, SGI_GL_NEAREST), (SGI_GL_LINEAR, SGI_GL_LINEAR), (SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR)] {
-                        for env in [SGI_GL_REPLACE, SGI_GL_MODULATE] {
-                            for format in [SGI_GL_RGBA, SGI_GL_RGB] {
+            for wrap in [GL_REPEAT, GL_CLAMP_TO_EDGE] {
+                for (func, mask) in [(GL_LESS, true), (GL_LEQUAL, true), (GL_ALWAYS, false)] {
+                    for (min, mag) in [(GL_NEAREST, GL_NEAREST), (GL_LINEAR, GL_LINEAR), (GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR)] {
+                        for env in [GL_REPLACE, GL_MODULATE] {
+                            for format in [GL_RGBA, GL_RGB] {
                                 b.st.depth_func = func;
                                 b.st.depth_mask = mask;
                                 b.st.texture_env_mode = env;
                                 b.st.blend = blend;
-                                b.st.blend_src = SGI_GL_SRC_ALPHA;
-                                b.st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
+                                b.st.blend_src = GL_SRC_ALPHA;
+                                b.st.blend_dst = GL_ONE_MINUS_SRC_ALPHA;
                                 let t = b.board.gl_target();
                                 let reports = SoftReports::default();
                                 let mut r = SoftDraw::new(&b.rules, &t, &b.st, &reports);
                                 r.ntargets = 1;
                                 assert!(r.setup_ops());
                                 let lod = min != mag;
-                                let f = SoftFixedTex { min, mag, lod, format, wrap_s: wrap, wrap_t: SGI_GL_REPEAT, ..Default::default() };
+                                let f = SoftFixedTex { min, mag, lod, format, wrap_s: wrap, wrap_t: GL_REPEAT, ..Default::default() };
                                 let row = r.fixed_span_select(&f).expect("a row loop");
                                 if !seen.contains(&row) {
                                     seen.push(row);
@@ -1376,25 +1376,25 @@ mod tests {
     fn clamped_texture_selects_its_loop() {
         let mut b = Bench::empty();
         b.st.depth_test = true;
-        b.st.depth_func = SGI_GL_LEQUAL;
+        b.st.depth_func = GL_LEQUAL;
         b.st.depth_mask = true;
-        b.st.texture_env_mode = SGI_GL_MODULATE;
+        b.st.texture_env_mode = GL_MODULATE;
         let t = b.board.gl_target();
         let reports = SoftReports::default();
         let mut r = SoftDraw::new(&b.rules, &t, &b.st, &reports);
         r.ntargets = 1;
         assert!(r.setup_ops());
         let f = |min, mag, format, wrap_s, wrap_t| SoftFixedTex { min, mag, lod: min != mag, format, wrap_s, wrap_t, ..Default::default() };
-        let tri = |format, wrap_s, wrap_t| f(SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR, format, wrap_s, wrap_t);
-        let (rep, edge) = (SGI_GL_REPEAT, SGI_GL_CLAMP_TO_EDGE);
+        let tri = |format, wrap_s, wrap_t| f(GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR, format, wrap_s, wrap_t);
+        let (rep, edge) = (GL_REPEAT, GL_CLAMP_TO_EDGE);
 
-        assert_eq!(r.fixed_span_select(&tri(SGI_GL_RGB, edge, rep)), Some(FillRow::TrilinearModulateRgbLequalEdge));
-        assert_eq!(r.fixed_span_select(&tri(SGI_GL_RGB, rep, edge)), Some(FillRow::TrilinearModulateRgbLequalEdge));
-        assert_eq!(r.fixed_span_select(&tri(SGI_GL_RGB, edge, edge)), Some(FillRow::TrilinearModulateRgbLequalEdge));
-        assert_eq!(r.fixed_span_select(&tri(SGI_GL_RGB, rep, rep)), Some(FillRow::TrilinearModulateRgbLequal));
+        assert_eq!(r.fixed_span_select(&tri(GL_RGB, edge, rep)), Some(FillRow::TrilinearModulateRgbLequalEdge));
+        assert_eq!(r.fixed_span_select(&tri(GL_RGB, rep, edge)), Some(FillRow::TrilinearModulateRgbLequalEdge));
+        assert_eq!(r.fixed_span_select(&tri(GL_RGB, edge, edge)), Some(FillRow::TrilinearModulateRgbLequalEdge));
+        assert_eq!(r.fixed_span_select(&tri(GL_RGB, rep, rep)), Some(FillRow::TrilinearModulateRgbLequal));
         // Other tuples have no clamped loop yet.
-        assert_eq!(r.fixed_span_select(&tri(SGI_GL_RGBA, edge, rep)), Some(FillRow::TextureAny));
-        assert_eq!(r.fixed_span_select(&f(SGI_GL_LINEAR, SGI_GL_LINEAR, SGI_GL_RGB, edge, rep)), Some(FillRow::TextureAny));
+        assert_eq!(r.fixed_span_select(&tri(GL_RGBA, edge, rep)), Some(FillRow::TextureAny));
+        assert_eq!(r.fixed_span_select(&f(GL_LINEAR, GL_LINEAR, GL_RGB, edge, rep)), Some(FillRow::TextureAny));
     }
 
     // That loop draws what the fallback and the general path draw, with
@@ -1406,21 +1406,21 @@ mod tests {
             let make = |wrap_s| {
                 let mut b = case(seed, true);
                 b.st.depth_test = true;
-                b.st.depth_func = SGI_GL_LEQUAL;
+                b.st.depth_func = GL_LEQUAL;
                 b.st.depth_mask = true;
                 b.st.blend = false;
                 b.st.fog = false;
-                b.st.texture_env_mode = SGI_GL_MODULATE;
-                let mut tex = BenchTexture::new(32, SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR, SGI_GL_RGB);
+                b.st.texture_env_mode = GL_MODULATE;
+                let mut tex = BenchTexture::new(32, GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR, GL_RGB);
 
                 tex.wrap_s = wrap_s;
                 b.tex = Some(tex);
                 b
             };
-            let want = draw_bench(make(SGI_GL_CLAMP_TO_EDGE), FillPath::Table, TexturePath::Fixed);
-            let fallback = draw_bench(make(SGI_GL_CLAMP_TO_EDGE), FillPath::Dynamic, TexturePath::Spans);
-            let table = draw_bench(make(SGI_GL_CLAMP_TO_EDGE), FillPath::Table, TexturePath::Spans);
-            let repeated = draw_bench(make(SGI_GL_REPEAT), FillPath::Table, TexturePath::Spans);
+            let want = draw_bench(make(GL_CLAMP_TO_EDGE), FillPath::Table, TexturePath::Fixed);
+            let fallback = draw_bench(make(GL_CLAMP_TO_EDGE), FillPath::Dynamic, TexturePath::Spans);
+            let table = draw_bench(make(GL_CLAMP_TO_EDGE), FillPath::Table, TexturePath::Spans);
+            let repeated = draw_bench(make(GL_REPEAT), FillPath::Table, TexturePath::Spans);
 
             compare(seed, "fallback loop", &want, &fallback);
             compare(seed, "clamped loop", &want, &table);
@@ -1488,13 +1488,13 @@ mod tests {
 
     /// A vertex at window pixel (x, y) of the bench board, with w and s, at
     /// depth one half: the bench's depth row takes (z + w) / 2.
-    fn lod_vertex(x: f32, y: f32, w: f32, s: f32) -> [f32; SGI_GL_VERTEX_FLOATS] {
-        let mut o = [0.0f32; SGI_GL_VERTEX_FLOATS];
+    fn lod_vertex(x: f32, y: f32, w: f32, s: f32) -> [f32; GL_VERTEX_FLOATS] {
+        let mut o = [0.0f32; GL_VERTEX_FLOATS];
 
-        o[SGI_GL_V_POSITION..SGI_GL_V_POSITION + 4]
+        o[GL_V_POSITION..GL_V_POSITION + 4]
             .copy_from_slice(&[(x / BENCH_W as f32 * 2.0 - 1.0) * w, (y / BENCH_H as f32 * 2.0 - 1.0) * w, 1.0 - w, w]);
-        o[SGI_GL_V_COLOR..SGI_GL_V_COLOR + 4].copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
-        o[SGI_GL_V_TEXCOORD..SGI_GL_V_TEXCOORD + 4].copy_from_slice(&[s, 0.0, 0.0, 1.0]);
+        o[GL_V_COLOR..GL_V_COLOR + 4].copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+        o[GL_V_TEXCOORD..GL_V_TEXCOORD + 4].copy_from_slice(&[s, 0.0, 0.0, 1.0]);
         o
     }
 
@@ -1503,16 +1503,16 @@ mod tests {
     /// the 0x1013 words lod (Board::texture_lod_bias(), texture_lod_limit()),
     /// through texture path path; and return each drawn pixel as (x, y,
     /// level).
-    fn draw_levels(vertices: &[[f32; SGI_GL_VERTEX_FLOATS]; 3], lod: [u32; 4], path: TexturePath) -> Vec<(i32, i32, u32)> {
+    fn draw_levels(vertices: &[[f32; GL_VERTEX_FLOATS]; 3], lod: [u32; 4], path: TexturePath) -> Vec<(i32, i32, u32)> {
         let mut b = Bench::empty();
-        let tex = BenchTexture::new(256, SGI_GL_NEAREST_MIPMAP_NEAREST, SGI_GL_NEAREST, SGI_GL_RGBA);
+        let tex = BenchTexture::new(256, GL_NEAREST_MIPMAP_NEAREST, GL_NEAREST, GL_RGBA);
         let mut image = tex.image();
         let stipple = [0u32; 32];
         let v: Vec<f32> = vertices.iter().flatten().copied().collect();
 
         b.st.dither = false;
         b.st.texture_2d = true;
-        b.st.texture_env_mode = SGI_GL_REPLACE;
+        b.st.texture_env_mode = GL_REPLACE;
         b.board.tex_lod = lod;
         b.board.texture_lod_bias(&mut image);
         if let Some(p) = image.pyramid.as_mut() {
@@ -1522,7 +1522,7 @@ mod tests {
         let mut t = b.board.gl_target();
         t.texture = Some(image);
         raster_set_texture_path(path);
-        let mut d = GlDraw::new(SGI_GL_TRIANGLES, 3, &v, &b.st, &stipple);
+        let mut d = GlDraw::new(GL_TRIANGLES, 3, &v, &b.st, &stipple);
         b.rules.draw(&t, &mut b.board.gl_parts(None).0, &LevelTexels, &mut d);
         raster_set_texture_path(TexturePath::Spans);
 
@@ -1654,16 +1654,16 @@ mod tests {
     fn selection_reaches_each_table_entry() {
         let mut seen = Vec::new();
         for (depth, table) in SOFT_FILL_TABLE.iter().enumerate() {
-            for smooth in [SGI_GL_FLAT, SGI_GL_SMOOTH] {
+            for smooth in [GL_FLAT, GL_SMOOTH] {
                 for over in [false, true] {
                     let mut b = Bench::empty();
                     b.st.depth_test = depth != 0;
-                    b.st.depth_func = if depth == 2 { SGI_GL_LEQUAL } else { SGI_GL_LESS };
+                    b.st.depth_func = if depth == 2 { GL_LEQUAL } else { GL_LESS };
                     b.st.shade_model = smooth;
                     if over {
                         b.st.blend = true;
-                        b.st.blend_src = SGI_GL_SRC_ALPHA;
-                        b.st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
+                        b.st.blend_src = GL_SRC_ALPHA;
+                        b.st.blend_dst = GL_ONE_MINUS_SRC_ALPHA;
                     }
                     let t = b.board.gl_target();
                     let reports = SoftReports::default();
@@ -1671,7 +1671,7 @@ mod tests {
                     r.ntargets = 1;
                     assert!(r.setup_ops());
                     let f = r.fill_select().expect("a row loop");
-                    assert_eq!(f, table[(smooth == SGI_GL_SMOOTH) as usize][over as usize]);
+                    assert_eq!(f, table[(smooth == GL_SMOOTH) as usize][over as usize]);
                     if !seen.contains(&f) {
                         seen.push(f);
                     }

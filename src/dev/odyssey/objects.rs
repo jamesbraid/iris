@@ -183,7 +183,7 @@ impl Board {
         let free = self.obj_base[..self.obj_count as usize].iter().position(|&b| b == 0);
         let i = match free {
             Some(j) => j,
-            None if self.obj_count == SGI_ODYSSEY_OBJECTS => {
+            None if self.obj_count == ODSY_OBJECTS => {
                 // A full table has no free slot, so every entry is live.
                 let i = self.object_oldest(None).expect("a full table has a live object");
                 if !self.obj_full_reported {
@@ -191,7 +191,7 @@ impl Board {
                     crate::dlog!(
                         LogModule::Odyssey,
                         "sgi-odyssey: more than {} board-memory objects; the least recently used, {:#x}, is forgotten",
-                        SGI_ODYSSEY_OBJECTS,
+                        ODSY_OBJECTS,
                         self.obj_base[i]
                     );
                 }
@@ -420,7 +420,7 @@ impl Board {
                     let row = if dest.is_some() { h - 1 - y } else { y };
                     let (px, py) = ((c.src.0 + x) as i64 + self.read_origin[0] as i64, (c.src.1 + row) as i64 + self.read_origin[1] as i64);
 
-                    if px < 0 || py < 0 || px >= SGI_ODYSSEY_WIDTH as i64 || py >= SGI_ODYSSEY_HEIGHT as i64 {
+                    if px < 0 || py < 0 || px >= ODSY_WIDTH as i64 || py >= ODSY_HEIGHT as i64 {
                         0
                     } else {
                         let buffer = self.read_buffer(c.read_front(), px, py);

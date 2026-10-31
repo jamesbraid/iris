@@ -46,14 +46,14 @@ impl V {
         self.t = [self.t[0] * w, self.t[1] * w, 0.0, w];
         self
     }
-    fn floats(&self) -> [f32; SGI_GL_VERTEX_FLOATS] {
-        let mut o = [0.0f32; SGI_GL_VERTEX_FLOATS];
-        o[SGI_GL_V_POSITION..][..4].copy_from_slice(&self.p);
-        o[SGI_GL_V_COLOR..][..4].copy_from_slice(&self.c);
-        o[SGI_GL_V_NORMAL..][..3].copy_from_slice(&self.n);
-        o[SGI_GL_V_TEXCOORD..][..4].copy_from_slice(&self.t);
-        o[SGI_GL_V_EDGE] = f32::from_bits(1);
-        o[SGI_GL_V_BACK_COLOR..][..4].copy_from_slice(&self.back.unwrap_or(self.c));
+    fn floats(&self) -> [f32; GL_VERTEX_FLOATS] {
+        let mut o = [0.0f32; GL_VERTEX_FLOATS];
+        o[GL_V_POSITION..][..4].copy_from_slice(&self.p);
+        o[GL_V_COLOR..][..4].copy_from_slice(&self.c);
+        o[GL_V_NORMAL..][..3].copy_from_slice(&self.n);
+        o[GL_V_TEXCOORD..][..4].copy_from_slice(&self.t);
+        o[GL_V_EDGE] = f32::from_bits(1);
+        o[GL_V_BACK_COLOR..][..4].copy_from_slice(&self.back.unwrap_or(self.c));
         o
     }
 }
@@ -91,7 +91,7 @@ impl Ctx {
         board.gl_write_mask |= ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT;
         st.drawable.clip.r[0] = rect;
         st.viewport = [0, 0, SIDE, SIDE];
-        st.shade_model = SGI_GL_SMOOTH;
+        st.shade_model = GL_SMOOTH;
         st.dither = false;
         let mut c = Ctx {
             board,
@@ -132,13 +132,13 @@ impl Ctx {
     pub fn clear(&mut self, rgba: [f32; 4], depth: u32, stencil: u32) {
         let t = self.board.gl_target();
         let mut op = RasterOp {
-            kind: SGI_RASTER_CLEAR,
+            kind: RASTER_CLEAR,
             ntargets: 1,
             x1: BENCH_W_MAX,
             y1: BENCH_H_MAX,
-            clear_buffers: SGI_GL_COLOR_BUFFER_BIT | SGI_GL_DEPTH_BUFFER_BIT | SGI_GL_STENCIL_BUFFER_BIT,
+            clear_buffers: GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT,
             clear_rgba: rgba,
-            clear_colour_mask: SGI_GL_COLOUR_MASK_ALL,
+            clear_colour_mask: GL_COLOUR_MASK_ALL,
             clear_depth24: depth,
             clear_stencil: stencil,
             stencil_mask: 0xff,
@@ -168,19 +168,19 @@ impl Ctx {
             d.line_stipple_pattern = pattern;
             d.line_phase = self.phase;
         }
-        assert_eq!(self.board.gl_draw(&mut d), SGI_GL_DRAW_OK);
+        assert_eq!(self.board.gl_draw(&mut d), GL_DRAW_OK);
         if self.line_stipple.is_some() {
             self.phase = d.line_phase;
         }
     }
 
     pub fn tri(&mut self, a: V, b: V, c: V) {
-        self.draw(SGI_GL_TRIANGLES, &[a, b, c]);
+        self.draw(GL_TRIANGLES, &[a, b, c]);
     }
 
     /// A rectangle of two triangles' worth, as one GL_QUADS primitive.
     pub fn rect(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, z: f32, c: [f32; 4]) {
-        self.draw(SGI_GL_QUADS, &[v(x0, y0, z, c), v(x1, y0, z, c), v(x1, y1, z, c), v(x0, y1, z, c)]);
+        self.draw(GL_QUADS, &[v(x0, y0, z, c), v(x1, y0, z, c), v(x1, y1, z, c), v(x0, y1, z, c)]);
     }
 
     pub fn depth_test(&mut self, func: u32) {
@@ -220,8 +220,8 @@ impl Ctx {
     }
 }
 
-const BENCH_W_MAX: i32 = SGI_ODYSSEY_WIDTH as i32 - 1;
-const BENCH_H_MAX: i32 = SGI_ODYSSEY_HEIGHT as i32 - 1;
+const BENCH_W_MAX: i32 = ODSY_WIDTH as i32 - 1;
+const BENCH_H_MAX: i32 = ODSY_HEIGHT as i32 - 1;
 
 // Textures. Each level lives in an object of the board's memory, found from
 // the sampler words the way the library's uploads leave them.
@@ -308,17 +308,17 @@ impl Ctx {
             b.tex_env[2] = 0x200 << 12 | 0xfff;
         }
         self.st.texture_2d = true;
-        self.st.texture_env_mode = [SGI_GL_REPLACE, SGI_GL_REPLACE, SGI_GL_MODULATE, SGI_GL_DECAL, SGI_GL_BLEND][t.env as usize];
+        self.st.texture_env_mode = [GL_REPLACE, GL_REPLACE, GL_MODULATE, GL_DECAL, GL_BLEND][t.env as usize];
     }
 }
 
 // Scenes. Each draws into a fresh `Ctx`.
 
 fn tri_flat(c: &mut Ctx) {
-    c.st.shade_model = SGI_GL_FLAT;
+    c.st.shade_model = GL_FLAT;
     c.tri(v(10.0, 10.0, 0.0, RED), v(70.0, 20.0, 0.0, GREEN), v(30.0, 80.0, 0.0, BLUE));
     c.tri(v(60.0, 60.0, 0.0, YELLOW), v(120.0, 70.0, 0.0, RED), v(90.0, 120.0, 0.0, GREEN));
-    c.draw(SGI_GL_QUADS, &[v(5.0, 90.0, 0.0, BLUE), v(40.0, 95.0, 0.0, GREEN), v(45.0, 125.0, 0.0, RED), v(8.0, 120.0, 0.0, YELLOW)]);
+    c.draw(GL_QUADS, &[v(5.0, 90.0, 0.0, BLUE), v(40.0, 95.0, 0.0, GREEN), v(45.0, 125.0, 0.0, RED), v(8.0, 120.0, 0.0, YELLOW)]);
 }
 
 fn tri_smooth(c: &mut Ctx) {
@@ -342,14 +342,14 @@ fn tri_tiny_and_thin(c: &mut Ctx) {
 
 fn quad_shared_edges(c: &mut Ctx) {
     // A grid of quads that share edges: no pixel drawn twice, none missed.
-    c.blend(SGI_GL_SRC_ALPHA, SGI_GL_ONE_MINUS_SRC_ALPHA);
+    c.blend(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     let n = 6;
     let step = 100.0 / n as f32;
     for i in 0..n {
         for j in 0..n {
             let (x, y) = (12.3 + step * i as f32, 9.7 + step * j as f32);
             let a = [0.5, 0.5, 0.5, 0.5];
-            c.draw(SGI_GL_QUADS, &[v(x, y, 0.0, a), v(x + step, y, 0.0, a), v(x + step, y + step, 0.0, a), v(x, y + step, 0.0, a)]);
+            c.draw(GL_QUADS, &[v(x, y, 0.0, a), v(x + step, y, 0.0, a), v(x + step, y + step, 0.0, a), v(x, y + step, 0.0, a)]);
         }
     }
 }
@@ -358,16 +358,16 @@ fn polygon_convex(c: &mut Ctx) {
     let pts = [(64.0, 8.0), (118.0, 40.0), (100.0, 110.0), (30.0, 118.0), (8.0, 50.0)];
     let cols = [RED, GREEN, BLUE, YELLOW, WHITE];
     let vs: Vec<V> = pts.iter().zip(cols).map(|(&(x, y), col)| v(x, y, 0.0, col)).collect();
-    c.draw(SGI_GL_POLYGON, &vs);
+    c.draw(GL_POLYGON, &vs);
 }
 
 fn polygon_modes_line_point(c: &mut Ctx) {
-    c.polygon_modes = Some([SGI_GL_LINE, SGI_GL_POINT]);
+    c.polygon_modes = Some([GL_LINE, GL_POINT]);
     c.point_size = 3.0;
     c.tri(v(10.0, 10.0, 0.0, RED), v(60.0, 15.0, 0.0, GREEN), v(30.0, 60.0, 0.0, BLUE));
-    c.polygon_modes = Some([SGI_GL_FILL, SGI_GL_LINE]);
+    c.polygon_modes = Some([GL_FILL, GL_LINE]);
     c.tri(v(70.0, 70.0, 0.0, RED), v(120.0, 120.0, 0.0, GREEN), v(70.0, 120.0, 0.0, BLUE));
-    c.polygon_modes = Some([SGI_GL_POINT, SGI_GL_FILL]);
+    c.polygon_modes = Some([GL_POINT, GL_FILL]);
     c.tri(v(70.0, 10.0, 0.0, YELLOW), v(120.0, 20.0, 0.0, YELLOW), v(90.0, 60.0, 0.0, YELLOW));
 }
 
@@ -382,22 +382,22 @@ fn polygon_stipple(c: &mut Ctx) {
 
 fn polygon_smooth(c: &mut Ctx) {
     c.polygon_smooth = true;
-    c.depth_test(SGI_GL_LESS);
-    c.blend(SGI_GL_SRC_ALPHA, SGI_GL_ONE_MINUS_SRC_ALPHA);
+    c.depth_test(GL_LESS);
+    c.blend(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     c.tri(v(10.0, 15.0, 0.0, RED), v(115.0, 35.0, 0.0, GREEN), v(50.0, 118.0, 0.0, BLUE));
 }
 
 fn cull_and_front_face(c: &mut Ctx) {
     c.st.cull_face = true;
-    c.st.cull_face_mode = SGI_GL_BACK;
-    c.st.front_face = SGI_GL_CCW;
+    c.st.cull_face_mode = GL_BACK;
+    c.st.front_face = GL_CCW;
     c.tri(v(5.0, 5.0, 0.0, RED), v(55.0, 8.0, 0.0, RED), v(20.0, 50.0, 0.0, RED));
     c.tri(v(5.0, 70.0, 0.0, GREEN), v(20.0, 120.0, 0.0, GREEN), v(55.0, 75.0, 0.0, GREEN));
-    c.st.cull_face_mode = SGI_GL_FRONT;
+    c.st.cull_face_mode = GL_FRONT;
     c.tri(v(70.0, 5.0, 0.0, BLUE), v(120.0, 8.0, 0.0, BLUE), v(85.0, 50.0, 0.0, BLUE));
     c.tri(v(70.0, 70.0, 0.0, YELLOW), v(85.0, 120.0, 0.0, YELLOW), v(120.0, 75.0, 0.0, YELLOW));
-    c.st.front_face = SGI_GL_CW;
-    c.st.cull_face_mode = SGI_GL_BACK;
+    c.st.front_face = GL_CW;
+    c.st.cull_face_mode = GL_BACK;
     c.tri(v(60.0, 60.0, 0.0, WHITE), v(75.0, 100.0, 0.0, WHITE), v(100.0, 62.0, 0.0, WHITE));
 }
 
@@ -410,9 +410,9 @@ fn two_sided_colours(c: &mut Ctx) {
 }
 
 fn polygon_offset(c: &mut Ctx) {
-    c.depth_test(SGI_GL_LEQUAL);
+    c.depth_test(GL_LEQUAL);
     c.rect(10.0, 10.0, 118.0, 118.0, 0.2, BLUE);
-    c.st.polygon_offset = SGI_GL_OFFSET_FILL;
+    c.st.polygon_offset = GL_OFFSET_FILL;
     c.st.offset_factor = 1.0;
     c.st.offset_units = -20000.0;
     c.tri(v(10.0, 10.0, 0.2, RED), v(118.0, 20.0, 0.2, RED), v(40.0, 118.0, 0.2, RED));
@@ -421,54 +421,54 @@ fn polygon_offset(c: &mut Ctx) {
 }
 
 fn lines_flat(c: &mut Ctx) {
-    c.st.shade_model = SGI_GL_FLAT;
+    c.st.shade_model = GL_FLAT;
     let mut rng = Lcg(11);
     for _ in 0..24 {
         let col = [rng.range(0.2, 1.0), rng.range(0.2, 1.0), rng.range(0.2, 1.0), 1.0];
         let (x0, y0, x1, y1) = (rng.range(2.0, 126.0), rng.range(2.0, 126.0), rng.range(2.0, 126.0), rng.range(2.0, 126.0));
-        c.draw(SGI_GL_LINES, &[v(x0, y0, 0.0, col), v(x1, y1, 0.0, col)]);
+        c.draw(GL_LINES, &[v(x0, y0, 0.0, col), v(x1, y1, 0.0, col)]);
     }
     // Axis-aligned and diagonal runs, where the end rule shows.
     for (i, (a, b)) in [((5.0, 5.0), (60.0, 5.0)), ((5.0, 8.0), (5.0, 60.0)), ((10.0, 10.0), (50.0, 50.0)), ((60.0, 60.0), (100.0, 20.0))].iter().enumerate() {
-        c.draw(SGI_GL_LINES, &[v(a.0 + 60.0, a.1 + 60.0 + i as f32, 0.0, WHITE), v(b.0 + 60.0, b.1 + 60.0 + i as f32, 0.0, WHITE)]);
+        c.draw(GL_LINES, &[v(a.0 + 60.0, a.1 + 60.0 + i as f32, 0.0, WHITE), v(b.0 + 60.0, b.1 + 60.0 + i as f32, 0.0, WHITE)]);
     }
 }
 
 fn lines_smooth_colour(c: &mut Ctx) {
-    c.draw(SGI_GL_LINES, &[v(8.5, 10.5, 0.0, RED), v(120.5, 40.5, 0.0, BLUE)]);
-    c.draw(SGI_GL_LINES, &[v(8.5, 120.5, 0.0, GREEN), v(120.5, 60.5, 0.0, YELLOW)]);
-    c.draw(SGI_GL_LINES, &[v(64.5, 5.5, 0.0, WHITE), v(64.5, 125.5, 0.0, RED)]);
+    c.draw(GL_LINES, &[v(8.5, 10.5, 0.0, RED), v(120.5, 40.5, 0.0, BLUE)]);
+    c.draw(GL_LINES, &[v(8.5, 120.5, 0.0, GREEN), v(120.5, 60.5, 0.0, YELLOW)]);
+    c.draw(GL_LINES, &[v(64.5, 5.5, 0.0, WHITE), v(64.5, 125.5, 0.0, RED)]);
 }
 
 fn lines_wide(c: &mut Ctx) {
     for (i, w) in [2.0, 3.0, 5.0].iter().enumerate() {
         c.line_width = *w;
         let y = 20.0 + 35.0 * i as f32;
-        c.draw(SGI_GL_LINES, &[v(10.0, y, 0.0, RED), v(110.0, y + 15.0, 0.0, GREEN)]);
-        c.draw(SGI_GL_LINES, &[v(20.0 + 40.0 * i as f32, 5.0, 0.0, BLUE), v(30.0 + 40.0 * i as f32, 120.0, 0.0, YELLOW)]);
+        c.draw(GL_LINES, &[v(10.0, y, 0.0, RED), v(110.0, y + 15.0, 0.0, GREEN)]);
+        c.draw(GL_LINES, &[v(20.0 + 40.0 * i as f32, 5.0, 0.0, BLUE), v(30.0 + 40.0 * i as f32, 120.0, 0.0, YELLOW)]);
     }
 }
 
 fn lines_smooth(c: &mut Ctx) {
     c.line_smooth = true;
-    c.blend(SGI_GL_SRC_ALPHA, SGI_GL_ONE_MINUS_SRC_ALPHA);
+    c.blend(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     for (i, w) in [1.0, 2.0, 4.0].iter().enumerate() {
         c.line_width = *w;
         let y = 15.0 + 35.0 * i as f32;
-        c.draw(SGI_GL_LINES, &[v(8.0, y, 0.0, WHITE), v(120.0, y + 20.0, 0.0, YELLOW)]);
+        c.draw(GL_LINES, &[v(8.0, y, 0.0, WHITE), v(120.0, y + 20.0, 0.0, YELLOW)]);
     }
 }
 
 fn lines_stippled(c: &mut Ctx) {
     c.line_stipple = Some((1, 0x0f0f));
-    c.draw(SGI_GL_LINES, &[v(5.0, 10.5, 0.0, WHITE), v(60.0, 10.5, 0.0, WHITE)]);
+    c.draw(GL_LINES, &[v(5.0, 10.5, 0.0, WHITE), v(60.0, 10.5, 0.0, WHITE)]);
     // The second piece continues the first's pattern.
-    c.draw(SGI_GL_LINES, &[v(60.0, 10.5, 0.0, WHITE), v(123.0, 10.5, 0.0, WHITE)]);
+    c.draw(GL_LINES, &[v(60.0, 10.5, 0.0, WHITE), v(123.0, 10.5, 0.0, WHITE)]);
     c.line_stipple = Some((3, 0x00ff));
-    c.draw(SGI_GL_LINES, &[v(5.0, 30.5, 0.0, YELLOW), v(120.0, 100.5, 0.0, YELLOW)]);
+    c.draw(GL_LINES, &[v(5.0, 30.5, 0.0, YELLOW), v(120.0, 100.5, 0.0, YELLOW)]);
     c.line_width = 3.0;
     c.line_stipple = Some((2, 0xaaaa));
-    c.draw(SGI_GL_LINES, &[v(5.0, 120.5, 0.0, RED), v(120.0, 60.5, 0.0, RED)]);
+    c.draw(GL_LINES, &[v(5.0, 120.5, 0.0, RED), v(120.0, 60.5, 0.0, RED)]);
 }
 
 fn points(c: &mut Ctx) {
@@ -477,18 +477,18 @@ fn points(c: &mut Ctx) {
         c.point_size = size;
         for _ in 0..12 {
             let col = [rng.range(0.2, 1.0), rng.range(0.2, 1.0), rng.range(0.2, 1.0), 1.0];
-            c.draw(SGI_GL_POINTS, &[v(rng.range(6.0, 122.0), rng.range(6.0, 122.0), 0.0, col)]);
+            c.draw(GL_POINTS, &[v(rng.range(6.0, 122.0), rng.range(6.0, 122.0), 0.0, col)]);
         }
     }
 }
 
 fn points_smooth(c: &mut Ctx) {
     c.point_smooth = true;
-    c.blend(SGI_GL_SRC_ALPHA, SGI_GL_ONE_MINUS_SRC_ALPHA);
+    c.blend(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     for (i, size) in [1.0, 2.5, 4.0, 7.0, 12.0].iter().enumerate() {
         c.point_size = *size;
-        c.draw(SGI_GL_POINTS, &[v(15.0 + 22.0 * i as f32, 30.3 + 12.0 * i as f32, 0.0, YELLOW)]);
-        c.draw(SGI_GL_POINTS, &[v(15.5 + 22.0 * i as f32, 100.5, 0.0, RED)]);
+        c.draw(GL_POINTS, &[v(15.0 + 22.0 * i as f32, 30.3 + 12.0 * i as f32, 0.0, YELLOW)]);
+        c.draw(GL_POINTS, &[v(15.5 + 22.0 * i as f32, 100.5, 0.0, RED)]);
     }
 }
 
@@ -500,38 +500,38 @@ fn crossing(c: &mut Ctx) {
 }
 
 fn depth_less(c: &mut Ctx) {
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     crossing(c);
 }
 
 fn depth_lequal_greater(c: &mut Ctx) {
-    c.depth_test(SGI_GL_GREATER);
+    c.depth_test(GL_GREATER);
     c.clear(CLEAR, 0, 0);
     crossing(c);
 }
 
 fn depth_always_masked(c: &mut Ctx) {
-    c.depth_test(SGI_GL_ALWAYS);
+    c.depth_test(GL_ALWAYS);
     c.st.depth_mask = false;
     c.rect(10.0, 10.0, 100.0, 100.0, 0.3, RED);
-    c.st.depth_func = SGI_GL_LESS;
+    c.st.depth_func = GL_LESS;
     c.st.depth_mask = true;
     c.rect(40.0, 40.0, 120.0, 120.0, 0.4, GREEN);
 }
 
 fn depth_equal_notequal(c: &mut Ctx) {
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     c.rect(10.0, 10.0, 80.0, 80.0, 0.25, BLUE);
-    c.st.depth_func = SGI_GL_EQUAL;
+    c.st.depth_func = GL_EQUAL;
     c.rect(30.0, 30.0, 110.0, 110.0, 0.25, YELLOW);
-    c.st.depth_func = SGI_GL_NOTEQUAL;
+    c.st.depth_func = GL_NOTEQUAL;
     c.rect(60.0, 5.0, 125.0, 60.0, 0.25, RED);
 }
 
 fn depth_range_wide(c: &mut Ctx) {
     // Window depth from the far plane to the near: the depth word's float
     // encoding across its exponents.
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     for i in 0..8 {
         let z = -0.95 + 0.27 * i as f32;
         let x = 5.0 + 14.0 * i as f32;
@@ -540,20 +540,20 @@ fn depth_range_wide(c: &mut Ctx) {
 }
 
 fn stencil_mark_then_masked(c: &mut Ctx) {
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     c.st.stencil_test = true;
-    c.st.stencil_func = SGI_GL_ALWAYS;
+    c.st.stencil_func = GL_ALWAYS;
     c.st.stencil_value_mask = u32::MAX;
     c.st.stencil_write_mask = u32::MAX;
-    c.st.stencil_op = [SGI_GL_KEEP, SGI_GL_KEEP, SGI_GL_INCR];
+    c.st.stencil_op = [GL_KEEP, GL_KEEP, GL_INCR];
     c.st.colour_mask = 0;
     c.board.gl_write_mask &= !(ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT);
     c.tri(v(10.0, 10.0, 0.0, RED), v(110.0, 30.0, 0.0, RED), v(40.0, 110.0, 0.0, RED));
     c.tri(v(30.0, 30.0, 0.0, RED), v(120.0, 90.0, 0.0, RED), v(20.0, 100.0, 0.0, RED));
     c.board.gl_write_mask |= ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT;
-    c.st.stencil_func = SGI_GL_EQUAL;
+    c.st.stencil_func = GL_EQUAL;
     c.st.stencil_ref = 2;
-    c.st.stencil_op = [SGI_GL_KEEP; 3];
+    c.st.stencil_op = [GL_KEEP; 3];
     c.rect(0.0, 0.0, 128.0, 128.0, -0.5, GREEN);
     c.st.stencil_ref = 1;
     c.rect(0.0, 0.0, 128.0, 128.0, -0.5, YELLOW);
@@ -563,80 +563,80 @@ fn stencil_ops(c: &mut Ctx) {
     c.st.stencil_test = true;
     c.st.stencil_value_mask = u32::MAX;
     c.st.stencil_write_mask = 0xff;
-    c.st.stencil_func = SGI_GL_ALWAYS;
+    c.st.stencil_func = GL_ALWAYS;
     c.st.stencil_ref = 0x35;
-    for (i, op) in [SGI_GL_REPLACE, SGI_GL_INCR, SGI_GL_DECR, SGI_GL_INVERT, SGI_GL_KEEP].iter().enumerate() {
-        c.st.stencil_op = [SGI_GL_KEEP, SGI_GL_KEEP, *op];
+    for (i, op) in [GL_REPLACE, GL_INCR, GL_DECR, GL_INVERT, GL_KEEP].iter().enumerate() {
+        c.st.stencil_op = [GL_KEEP, GL_KEEP, *op];
         let x = 4.0 + 24.0 * i as f32;
         c.rect(x, 10.0, x + 22.0, 60.0, 0.0, RED);
         c.rect(x, 10.0, x + 22.0, 40.0, 0.0, RED);
     }
-    c.st.stencil_func = SGI_GL_NOTEQUAL;
+    c.st.stencil_func = GL_NOTEQUAL;
     c.st.stencil_ref = 0x35;
     c.st.stencil_value_mask = 0x0f;
-    c.st.stencil_op = [SGI_GL_KEEP; 3];
+    c.st.stencil_op = [GL_KEEP; 3];
     c.rect(0.0, 70.0, 128.0, 120.0, 0.0, BLUE);
 }
 
 fn stencil_depth_fail(c: &mut Ctx) {
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     c.rect(20.0, 20.0, 100.0, 100.0, -0.5, BLUE);
     c.st.stencil_test = true;
-    c.st.stencil_func = SGI_GL_ALWAYS;
+    c.st.stencil_func = GL_ALWAYS;
     c.st.stencil_value_mask = u32::MAX;
     c.st.stencil_write_mask = 0xf0;
     c.st.stencil_ref = 0xff;
-    c.st.stencil_op = [SGI_GL_KEEP, SGI_GL_REPLACE, SGI_GL_INCR];
+    c.st.stencil_op = [GL_KEEP, GL_REPLACE, GL_INCR];
     c.rect(5.0, 5.0, 80.0, 80.0, 0.5, RED);
 }
 
 fn alpha_test(c: &mut Ctx) {
     c.st.alpha_test = true;
-    c.st.alpha_func = SGI_GL_GEQUAL;
+    c.st.alpha_func = GL_GEQUAL;
     c.st.alpha_ref = 0.5;
     c.tri(v(5.0, 5.0, 0.0, [1.0, 0.0, 0.0, 1.0]), v(120.0, 10.0, 0.0, [0.0, 1.0, 0.0, 0.0]), v(30.0, 120.0, 0.0, [0.0, 0.0, 1.0, 0.5]));
-    c.st.alpha_func = SGI_GL_LESS;
+    c.st.alpha_func = GL_LESS;
     c.st.alpha_ref = 0.3;
     c.tri(v(120.0, 120.0, 0.0, YELLOW), v(60.0, 60.0, 0.0, [1.0, 1.0, 1.0, 0.0]), v(120.0, 40.0, 0.0, WHITE));
 }
 
 /// A background to blend over: horizontal ramps.
 fn ramp_background(c: &mut Ctx) {
-    c.draw(SGI_GL_QUADS, &[v(0.0, 0.0, 0.9, [0.9, 0.2, 0.1, 0.8]), v(128.0, 0.0, 0.9, [0.1, 0.9, 0.3, 0.6]), v(128.0, 128.0, 0.9, [0.2, 0.3, 1.0, 0.4]), v(0.0, 128.0, 0.9, [1.0, 1.0, 0.1, 0.9])]);
+    c.draw(GL_QUADS, &[v(0.0, 0.0, 0.9, [0.9, 0.2, 0.1, 0.8]), v(128.0, 0.0, 0.9, [0.1, 0.9, 0.3, 0.6]), v(128.0, 128.0, 0.9, [0.2, 0.3, 1.0, 0.4]), v(0.0, 128.0, 0.9, [1.0, 1.0, 0.1, 0.9])]);
 }
 
 /// Every source factor against a few destination factors, in a grid.
 fn blend_factor_grid(c: &mut Ctx) {
     ramp_background(c);
-    let srcs = [SGI_GL_ZERO_F, SGI_GL_ONE_F, SGI_GL_DST_COLOR, SGI_GL_ONE_MINUS_DST_COLOR, SGI_GL_SRC_ALPHA, SGI_GL_ONE_MINUS_SRC_ALPHA, SGI_GL_DST_ALPHA, SGI_GL_ONE_MINUS_DST_ALPHA, SGI_GL_SRC_ALPHA_SATURATE];
-    let dsts = [SGI_GL_ZERO_F, SGI_GL_ONE_F, SGI_GL_SRC_COLOR, SGI_GL_ONE_MINUS_SRC_COLOR, SGI_GL_SRC_ALPHA, SGI_GL_ONE_MINUS_SRC_ALPHA];
+    let srcs = [GL_ZERO_F, GL_ONE_F, GL_DST_COLOR, GL_ONE_MINUS_DST_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA, GL_SRC_ALPHA_SATURATE];
+    let dsts = [GL_ZERO_F, GL_ONE_F, GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA];
     c.board.gl_write_mask |= ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT;
     for (i, &s) in srcs.iter().enumerate() {
         for (j, &d) in dsts.iter().enumerate() {
             c.blend(s, d);
             let (x, y) = (2.0 + 14.0 * i as f32, 2.0 + 20.0 * j as f32);
-            c.draw(SGI_GL_QUADS, &[v(x, y, 0.0, [0.8, 0.5, 0.2, 0.6]), v(x + 12.0, y, 0.0, [0.3, 0.9, 0.6, 0.3]), v(x + 12.0, y + 18.0, 0.0, [0.9, 0.2, 0.9, 0.8]), v(x, y + 18.0, 0.0, [0.5, 0.5, 0.5, 0.5])]);
+            c.draw(GL_QUADS, &[v(x, y, 0.0, [0.8, 0.5, 0.2, 0.6]), v(x + 12.0, y, 0.0, [0.3, 0.9, 0.6, 0.3]), v(x + 12.0, y + 18.0, 0.0, [0.9, 0.2, 0.9, 0.8]), v(x, y + 18.0, 0.0, [0.5, 0.5, 0.5, 0.5])]);
         }
     }
 }
 
-const SGI_GL_ZERO_F: u32 = 0;
-const SGI_GL_ONE_F: u32 = 1;
+const GL_ZERO_F: u32 = 0;
+const GL_ONE_F: u32 = 1;
 
 fn blend_equations(c: &mut Ctx) {
     ramp_background(c);
-    c.blend(SGI_GL_ONE_F, SGI_GL_ONE_F);
-    for (i, eq) in [SGI_GL_FUNC_ADD, SGI_GL_FUNC_SUBTRACT, SGI_GL_FUNC_REVERSE_SUBTRACT, SGI_GL_MIN, SGI_GL_MAX].iter().enumerate() {
+    c.blend(GL_ONE_F, GL_ONE_F);
+    for (i, eq) in [GL_FUNC_ADD, GL_FUNC_SUBTRACT, GL_FUNC_REVERSE_SUBTRACT, GL_MIN, GL_MAX].iter().enumerate() {
         c.st.blend_equation = *eq;
         let x = 4.0 + 24.0 * i as f32;
-        c.draw(SGI_GL_QUADS, &[v(x, 10.0, 0.0, [0.6, 0.4, 0.2, 0.7]), v(x + 22.0, 10.0, 0.0, [0.2, 0.7, 0.9, 0.7]), v(x + 22.0, 118.0, 0.0, [0.8, 0.8, 0.1, 0.3]), v(x, 118.0, 0.0, [0.1, 0.1, 0.6, 0.3])]);
+        c.draw(GL_QUADS, &[v(x, 10.0, 0.0, [0.6, 0.4, 0.2, 0.7]), v(x + 22.0, 10.0, 0.0, [0.2, 0.7, 0.9, 0.7]), v(x + 22.0, 118.0, 0.0, [0.8, 0.8, 0.1, 0.3]), v(x, 118.0, 0.0, [0.1, 0.1, 0.6, 0.3])]);
     }
 }
 
 fn blend_constant_colour(c: &mut Ctx) {
     ramp_background(c);
     c.st.blend_color = [0.25, 0.5, 0.75, 0.4];
-    for (i, (s, d)) in [(SGI_GL_CONSTANT_COLOR, SGI_GL_ONE_MINUS_CONSTANT_COLOR), (SGI_GL_CONSTANT_ALPHA, SGI_GL_ONE_MINUS_CONSTANT_ALPHA), (SGI_GL_ONE_MINUS_CONSTANT_COLOR, SGI_GL_CONSTANT_COLOR), (SGI_GL_ONE_MINUS_CONSTANT_ALPHA, SGI_GL_CONSTANT_ALPHA)].iter().enumerate() {
+    for (i, (s, d)) in [(GL_CONSTANT_COLOR, GL_ONE_MINUS_CONSTANT_COLOR), (GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA), (GL_ONE_MINUS_CONSTANT_COLOR, GL_CONSTANT_COLOR), (GL_ONE_MINUS_CONSTANT_ALPHA, GL_CONSTANT_ALPHA)].iter().enumerate() {
         c.blend(*s, *d);
         let x = 4.0 + 31.0 * i as f32;
         c.rect(x, 10.0, x + 28.0, 118.0, 0.0, [0.9, 0.3, 0.2, 0.5]);
@@ -645,7 +645,7 @@ fn blend_constant_colour(c: &mut Ctx) {
 
 fn blend_triangles_over(c: &mut Ctx) {
     ramp_background(c);
-    c.blend(SGI_GL_SRC_ALPHA, SGI_GL_ONE_MINUS_SRC_ALPHA);
+    c.blend(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     c.tri(v(10.0, 10.0, 0.0, [1.0, 0.0, 0.0, 0.8]), v(120.0, 20.0, 0.0, [0.0, 1.0, 0.0, 0.4]), v(40.0, 120.0, 0.0, [0.0, 0.0, 1.0, 0.1]));
     c.tri(v(120.0, 120.0, 0.0, [1.0, 1.0, 1.0, 0.7]), v(10.0, 100.0, 0.0, [1.0, 1.0, 1.0, 0.7]), v(100.0, 10.0, 0.0, [0.0, 0.0, 0.0, 0.7]));
 }
@@ -653,12 +653,12 @@ fn blend_triangles_over(c: &mut Ctx) {
 fn logic_op_and_colour_mask(c: &mut Ctx) {
     ramp_background(c);
     c.st.color_logic_op = true;
-    c.st.logic_op_mode = SGI_GL_CLEAR + 6; // XOR
+    c.st.logic_op_mode = GL_CLEAR + 6; // XOR
     c.rect(10.0, 10.0, 60.0, 118.0, 0.0, [0.5, 0.7, 0.2, 1.0]);
-    c.st.logic_op_mode = SGI_GL_CLEAR + 1; // AND
+    c.st.logic_op_mode = GL_CLEAR + 1; // AND
     c.rect(40.0, 40.0, 100.0, 100.0, 0.0, [0.9, 0.5, 0.8, 1.0]);
     c.st.color_logic_op = false;
-    c.board.gl_write_mask = (c.board.gl_write_mask & !(ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT)) | ((SGI_GL_COLOUR_MASK_RED | SGI_GL_COLOUR_MASK_ALPHA) << ODSY_WRITE_COLOUR_SHIFT);
+    c.board.gl_write_mask = (c.board.gl_write_mask & !(ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT)) | ((GL_COLOUR_MASK_RED | GL_COLOUR_MASK_ALPHA) << ODSY_WRITE_COLOUR_SHIFT);
     c.rect(70.0, 20.0, 120.0, 110.0, 0.0, [1.0, 1.0, 1.0, 0.5]);
 }
 
@@ -666,7 +666,7 @@ fn scissor(c: &mut Ctx) {
     c.st.scissor_test = true;
     c.st.scissor = [20, 30, 70, 50];
     c.tri(v(0.0, 0.0, 0.0, RED), v(128.0, 10.0, 0.0, GREEN), v(10.0, 128.0, 0.0, BLUE));
-    c.draw(SGI_GL_LINES, &[v(0.0, 40.5, 0.0, WHITE), v(128.0, 60.5, 0.0, WHITE)]);
+    c.draw(GL_LINES, &[v(0.0, 40.5, 0.0, WHITE), v(128.0, 60.5, 0.0, WHITE)]);
 }
 
 // Clipping.
@@ -676,12 +676,12 @@ fn clip_frustum_xy(c: &mut Ctx) {
     c.tri(v(-40.0, 20.0, 0.0, RED), v(60.0, -30.0, 0.0, GREEN), v(70.0, 70.0, 0.0, BLUE));
     c.tri(v(100.0, -20.0, 0.0, YELLOW), v(180.0, 60.0, 0.0, YELLOW), v(90.0, 50.0, 0.0, RED));
     c.tri(v(-20.0, 90.0, 0.0, WHITE), v(60.0, 90.0, 0.0, GREEN), v(20.0, 190.0, 0.0, BLUE));
-    c.draw(SGI_GL_QUADS, &[v(80.0, 80.0, 0.0, RED), v(200.0, 90.0, 0.0, GREEN), v(190.0, 200.0, 0.0, BLUE), v(70.0, 150.0, 0.0, YELLOW)]);
+    c.draw(GL_QUADS, &[v(80.0, 80.0, 0.0, RED), v(200.0, 90.0, 0.0, GREEN), v(190.0, 200.0, 0.0, BLUE), v(70.0, 150.0, 0.0, YELLOW)]);
 }
 
 /// Depth outside [-w, w]: the near and far planes cut, with w varying.
 fn clip_frustum_z(c: &mut Ctx) {
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     // z beyond -w (near) at one corner, beyond w (far) at another.
     c.tri(
         V { p: [-0.9, -0.9, -2.0, 1.0], ..v(0.0, 0.0, 0.0, RED) },
@@ -690,7 +690,7 @@ fn clip_frustum_z(c: &mut Ctx) {
     );
     // Window depth carried by w: a quad through the near plane in perspective.
     c.draw(
-        SGI_GL_QUADS,
+        GL_QUADS,
         &[
             v(70.0, 10.0, 0.0, YELLOW).persp(0.5, 0.2),
             v(120.0, 10.0, 0.0, YELLOW).persp(3.0, 0.9),
@@ -704,7 +704,7 @@ fn clip_frustum_z(c: &mut Ctx) {
 fn clip_w_behind_eye(c: &mut Ctx) {
     c.tri(v(10.0, 10.0, 0.0, RED).persp(1.0, 0.5), v(120.0, 20.0, 0.0, GREEN).persp(-1.0, 0.5), v(40.0, 110.0, 0.0, BLUE).persp(2.0, 0.5));
     c.tri(v(10.0, 120.0, 0.0, YELLOW).persp(1.0, 0.5), v(100.0, 100.0, 0.0, WHITE).persp(0.0, 0.5), v(120.0, 50.0, 0.0, RED).persp(1.5, 0.5));
-    c.draw(SGI_GL_LINES, &[v(10.0, 64.0, 0.0, WHITE).persp(2.0, 0.5), v(120.0, 64.0, 0.0, WHITE).persp(-0.5, 0.5)]);
+    c.draw(GL_LINES, &[v(10.0, 64.0, 0.0, WHITE).persp(2.0, 0.5), v(120.0, 64.0, 0.0, WHITE).persp(-0.5, 0.5)]);
 }
 
 fn clip_user_plane(c: &mut Ctx) {
@@ -712,10 +712,10 @@ fn clip_user_plane(c: &mut Ctx) {
     c.st.clip_planes = 1;
     c.st.clip_plane[0] = [1.0, 0.25, 0.0, 0.25];
     c.tri(v(5.0, 5.0, 0.0, RED), v(120.0, 20.0, 0.0, GREEN), v(30.0, 120.0, 0.0, BLUE));
-    c.draw(SGI_GL_LINES, &[v(0.0, 100.5, 0.0, WHITE), v(128.0, 30.5, 0.0, WHITE)]);
+    c.draw(GL_LINES, &[v(0.0, 100.5, 0.0, WHITE), v(128.0, 30.5, 0.0, WHITE)]);
     c.point_size = 4.0;
     for i in 0..6 {
-        c.draw(SGI_GL_POINTS, &[v(8.0 + 20.0 * i as f32, 8.0 + 20.0 * i as f32, 0.0, YELLOW)]);
+        c.draw(GL_POINTS, &[v(8.0 + 20.0 * i as f32, 8.0 + 20.0 * i as f32, 0.0, YELLOW)]);
     }
 }
 
@@ -735,7 +735,7 @@ fn clip_user_plane_textured_smooth(c: &mut Ctx) {
     c.texture(&Tex { min: 1, mag_linear: true, ..Tex::new(RGBA) });
     c.st.clip_planes = 2;
     c.st.clip_plane[1] = [-0.5, 1.0, 0.0, 0.1];
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     c.tri(v(5.0, 5.0, 0.0, WHITE).tex(0.0, 0.0), v(125.0, 10.0, 0.0, WHITE).tex(1.0, 0.0), v(60.0, 125.0, 0.0, WHITE).tex(0.5, 1.0));
 }
 
@@ -767,7 +767,7 @@ fn wv(x: f32, y: f32, z: f32, col: [f32; 4]) -> V {
 
 fn window_matrix_triangles(c: &mut Ctx) {
     window_matrix(c, false);
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     c.tri(wv(10.0, 10.0, 0.2, RED), wv(110.0, 25.0, 0.4, GREEN), wv(40.0, 115.0, 0.6, BLUE));
     c.tri(wv(100.0, 100.0, 0.1, YELLOW), wv(20.0, 90.0, 0.7, WHITE), wv(110.0, 20.0, 0.5, RED));
 }
@@ -775,21 +775,21 @@ fn window_matrix_triangles(c: &mut Ctx) {
 fn window_matrix_rows_down(c: &mut Ctx) {
     window_matrix(c, true);
     c.st.cull_face = true;
-    c.st.cull_face_mode = SGI_GL_BACK;
-    c.st.front_face = SGI_GL_CCW;
+    c.st.cull_face_mode = GL_BACK;
+    c.st.front_face = GL_CCW;
     c.tri(wv(10.0, 10.0, 0.5, RED), wv(60.0, 15.0, 0.5, GREEN), wv(20.0, 60.0, 0.5, BLUE));
     c.tri(wv(70.0, 10.0, 0.5, YELLOW), wv(80.0, 60.0, 0.5, YELLOW), wv(120.0, 15.0, 0.5, YELLOW));
 }
 
 fn window_matrix_clip_and_lines(c: &mut Ctx) {
     window_matrix(c, false);
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     // Outside the depth range and outside the window.
     c.tri(wv(-30.0, 10.0, 0.5, RED), wv(60.0, 5.0, 1.4, GREEN), wv(30.0, 90.0, -0.4, BLUE));
     c.tri(wv(90.0, 60.0, 0.3, YELLOW), wv(200.0, 70.0, 0.3, YELLOW), wv(120.0, 190.0, 0.3, WHITE));
-    c.draw(SGI_GL_LINES, &[wv(5.0, 100.5, 0.2, WHITE), wv(125.0, 120.5, 0.8, RED)]);
+    c.draw(GL_LINES, &[wv(5.0, 100.5, 0.2, WHITE), wv(125.0, 120.5, 0.8, RED)]);
     c.point_size = 3.0;
-    c.draw(SGI_GL_POINTS, &[wv(64.0, 64.0, 0.3, GREEN)]);
+    c.draw(GL_POINTS, &[wv(64.0, 64.0, 0.3, GREEN)]);
 }
 
 fn window_matrix_scaled(c: &mut Ctx) {
@@ -798,7 +798,7 @@ fn window_matrix_scaled(c: &mut Ctx) {
     c.st.window_depth_scale = 0.5;
     let (s, k) = (0.6f32, 0.8f32);
     c.st.window_matrix = [60.0 * k, 60.0 * s, 0.0, 0.0, -60.0 * s, 60.0 * k, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 64.0, 64.0, 0.0, 1.0];
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     c.tri(V { p: [-0.8, -0.8, 0.3, 1.0], ..wv(0.0, 0.0, 0.0, RED) }, V { p: [0.9, -0.7, 0.5, 1.0], ..wv(0.0, 0.0, 0.0, GREEN) }, V { p: [0.0, 0.9, 0.2, 1.0], ..wv(0.0, 0.0, 0.0, BLUE) });
 }
 
@@ -814,11 +814,11 @@ fn projection_frustum(c: &mut Ctx) {
     // The board's window depth is linear in eye distance, 0 at the near plane
     // and 1 at the far: the depth row applied to the eye position.
     c.depth_row([0.0, 0.0, -1.0 / (f - n) as f64, -n as f64 / (f - n) as f64]);
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     let o = |x: f32, y: f32, z: f32, col| V { p: [x, y, z, 1.0], ..v(0.0, 0.0, 0.0, col) };
     // A floor receding, a wall across it, a tilted slab through both.
-    c.draw(SGI_GL_QUADS, &[o(-2.0, -1.0, 2.0, RED), o(2.0, -1.0, 2.0, GREEN), o(2.0, -1.0, -10.0, BLUE), o(-2.0, -1.0, -10.0, YELLOW)]);
-    c.draw(SGI_GL_QUADS, &[o(-1.0, -1.0, -2.0, WHITE), o(1.0, -1.0, -2.0, WHITE), o(1.0, 1.0, -2.0, RED), o(-1.0, 1.0, -2.0, RED)]);
+    c.draw(GL_QUADS, &[o(-2.0, -1.0, 2.0, RED), o(2.0, -1.0, 2.0, GREEN), o(2.0, -1.0, -10.0, BLUE), o(-2.0, -1.0, -10.0, YELLOW)]);
+    c.draw(GL_QUADS, &[o(-1.0, -1.0, -2.0, WHITE), o(1.0, -1.0, -2.0, WHITE), o(1.0, 1.0, -2.0, RED), o(-1.0, 1.0, -2.0, RED)]);
     c.tri(o(-1.5, -0.5, 1.0, GREEN), o(1.5, 0.5, -3.0, BLUE), o(0.0, 1.5, -1.0, YELLOW));
 }
 
@@ -829,18 +829,18 @@ fn projection_ortho_rotated(c: &mut Ctx) {
     let (s, k) = (0.7071f32, 0.7071f32);
     c.st.modelview = [k, s, 0.0, 0.0, -s, k, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.3, -0.2, 0.0, 1.0];
     c.depth_row([0.0, 0.0, -0.5, 0.5]);
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     let o = |x: f32, y: f32, z: f32, col| V { p: [x, y, z, 1.0], ..v(0.0, 0.0, 0.0, col) };
     c.tri(o(-1.5, -1.0, -0.5, RED), o(1.5, -1.2, 0.5, GREEN), o(0.0, 1.7, 0.0, BLUE));
-    c.draw(SGI_GL_QUADS, &[o(-1.0, -1.0, 0.2, YELLOW), o(1.0, -1.0, 0.2, YELLOW), o(1.0, 1.0, -0.2, WHITE), o(-1.0, 1.0, -0.2, WHITE)]);
+    c.draw(GL_QUADS, &[o(-1.0, -1.0, 0.2, YELLOW), o(1.0, -1.0, 0.2, YELLOW), o(1.0, 1.0, -0.2, WHITE), o(-1.0, 1.0, -0.2, WHITE)]);
 }
 
 fn perspective_correct_colour(c: &mut Ctx) {
     // A quad that recedes: colour and texture are perspective-corrected.
     c.texture(&Tex { min: 1, mag_linear: true, ..Tex::new(RGB) });
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     c.draw(
-        SGI_GL_QUADS,
+        GL_QUADS,
         &[
             v(5.0, 5.0, 0.0, WHITE).tex(0.0, 0.0).persp(1.0, 0.1),
             v(123.0, 5.0, 0.0, WHITE).tex(4.0, 0.0).persp(4.0, 0.9),
@@ -855,7 +855,7 @@ fn perspective_correct_colour(c: &mut Ctx) {
 fn textured(c: &mut Ctx, t: Tex, vertex: [f32; 4]) {
     c.texture(&t);
     let col = vertex;
-    c.draw(SGI_GL_QUADS, &[v(8.0, 8.0, 0.0, col).tex(0.0, 0.0), v(120.0, 8.0, 0.0, col).tex(1.0, 0.0), v(120.0, 120.0, 0.0, col).tex(1.0, 1.0), v(8.0, 120.0, 0.0, col).tex(0.0, 1.0)]);
+    c.draw(GL_QUADS, &[v(8.0, 8.0, 0.0, col).tex(0.0, 0.0), v(120.0, 8.0, 0.0, col).tex(1.0, 0.0), v(120.0, 120.0, 0.0, col).tex(1.0, 1.0), v(8.0, 120.0, 0.0, col).tex(0.0, 1.0)]);
 }
 
 macro_rules! format_scenes {
@@ -878,7 +878,7 @@ format_scenes! {
 macro_rules! env_scenes {
     ($($name:ident: $env:expr, $fmt:expr,)*) => {$(
         fn $name(c: &mut Ctx) {
-            c.blend(SGI_GL_SRC_ALPHA, SGI_GL_ONE_MINUS_SRC_ALPHA);
+            c.blend(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             ramp_background(c);
             textured(c, Tex { env: $env, mag_linear: true, min: 1, ..Tex::new($fmt) }, [0.9, 0.5, 0.7, 0.7]);
         }
@@ -898,12 +898,12 @@ env_scenes! {
 
 fn tex_nearest_repeat(c: &mut Ctx) {
     c.texture(&Tex { min: 0, mag_linear: false, ..Tex::new(RGBA) });
-    c.draw(SGI_GL_QUADS, &[v(5.0, 5.0, 0.0, WHITE).tex(-1.0, -1.0), v(123.0, 5.0, 0.0, WHITE).tex(2.5, -1.0), v(123.0, 123.0, 0.0, WHITE).tex(2.5, 2.5), v(5.0, 123.0, 0.0, WHITE).tex(-1.0, 2.5)]);
+    c.draw(GL_QUADS, &[v(5.0, 5.0, 0.0, WHITE).tex(-1.0, -1.0), v(123.0, 5.0, 0.0, WHITE).tex(2.5, -1.0), v(123.0, 123.0, 0.0, WHITE).tex(2.5, 2.5), v(5.0, 123.0, 0.0, WHITE).tex(-1.0, 2.5)]);
 }
 
 fn tex_clamp_to_edge_linear(c: &mut Ctx) {
     c.texture(&Tex { min: 1, mag_linear: true, wrap: 1, ..Tex::new(RGBA) });
-    c.draw(SGI_GL_QUADS, &[v(5.0, 5.0, 0.0, WHITE).tex(-0.5, -0.5), v(123.0, 5.0, 0.0, WHITE).tex(1.5, -0.5), v(123.0, 123.0, 0.0, WHITE).tex(1.5, 1.5), v(5.0, 123.0, 0.0, WHITE).tex(-0.5, 1.5)]);
+    c.draw(GL_QUADS, &[v(5.0, 5.0, 0.0, WHITE).tex(-0.5, -0.5), v(123.0, 5.0, 0.0, WHITE).tex(1.5, -0.5), v(123.0, 123.0, 0.0, WHITE).tex(1.5, 1.5), v(5.0, 123.0, 0.0, WHITE).tex(-0.5, 1.5)]);
 }
 
 macro_rules! mip_scenes {
@@ -912,9 +912,9 @@ macro_rules! mip_scenes {
             // A texture of 32 texels minified to about a quarter, and a
             // recession through several levels.
             c.texture(&Tex { size: 32, min: $min, mag_linear: true, ..Tex::new(RGB) });
-            c.draw(SGI_GL_QUADS, &[v(4.0, 4.0, 0.0, WHITE).tex(0.0, 0.0), v(60.0, 4.0, 0.0, WHITE).tex(4.0, 0.0), v(60.0, 60.0, 0.0, WHITE).tex(4.0, 4.0), v(4.0, 60.0, 0.0, WHITE).tex(0.0, 4.0)]);
-            c.depth_test(SGI_GL_LESS);
-            c.draw(SGI_GL_QUADS, &[
+            c.draw(GL_QUADS, &[v(4.0, 4.0, 0.0, WHITE).tex(0.0, 0.0), v(60.0, 4.0, 0.0, WHITE).tex(4.0, 0.0), v(60.0, 60.0, 0.0, WHITE).tex(4.0, 4.0), v(4.0, 60.0, 0.0, WHITE).tex(0.0, 4.0)]);
+            c.depth_test(GL_LESS);
+            c.draw(GL_QUADS, &[
                 v(66.0, 4.0, 0.0, WHITE).tex(0.0, 0.0).persp(1.0, 0.2),
                 v(124.0, 4.0, 0.0, WHITE).tex(6.0, 0.0).persp(6.0, 0.8),
                 v(124.0, 124.0, 0.0, WHITE).tex(6.0, 6.0).persp(6.0, 0.8),
@@ -932,39 +932,39 @@ mip_scenes! {
 }
 
 fn tex_with_fog_blend_depth(c: &mut Ctx) {
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     c.fog([200, 210, 230], 1);
-    c.blend(SGI_GL_SRC_ALPHA, SGI_GL_ONE_MINUS_SRC_ALPHA);
+    c.blend(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     c.texture(&Tex { min: 5, size: 32, mag_linear: true, ..Tex::new(RGBA) });
     for i in 0..4 {
         let z = -0.6 + 0.4 * i as f32;
         let x = 6.0 + 20.0 * i as f32;
-        c.draw(SGI_GL_QUADS, &[v(x, 6.0, z, WHITE).tex(0.0, 0.0), v(x + 70.0, 6.0, z, WHITE).tex(2.0, 0.0), v(x + 70.0, 116.0, z, WHITE).tex(2.0, 2.0), v(x, 116.0, z, WHITE).tex(0.0, 2.0)]);
+        c.draw(GL_QUADS, &[v(x, 6.0, z, WHITE).tex(0.0, 0.0), v(x + 70.0, 6.0, z, WHITE).tex(2.0, 0.0), v(x + 70.0, 116.0, z, WHITE).tex(2.0, 2.0), v(x, 116.0, z, WHITE).tex(0.0, 2.0)]);
     }
 }
 
 // Fog.
 
 fn fog_ramp_triangles(c: &mut Ctx) {
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     c.fog([180, 190, 210], 1);
-    c.draw(SGI_GL_QUADS, &[v(5.0, 5.0, -0.9, RED), v(123.0, 5.0, 0.9, GREEN), v(123.0, 60.0, 0.9, GREEN), v(5.0, 60.0, -0.9, RED)]);
+    c.draw(GL_QUADS, &[v(5.0, 5.0, -0.9, RED), v(123.0, 5.0, 0.9, GREEN), v(123.0, 60.0, 0.9, GREEN), v(5.0, 60.0, -0.9, RED)]);
     c.tri(v(5.0, 70.0, -0.8, BLUE), v(120.0, 70.0, 0.2, YELLOW), v(60.0, 125.0, 0.8, WHITE));
 }
 
 fn fog_lines_and_points(c: &mut Ctx) {
     c.fog([255, 128, 0], 2);
-    c.draw(SGI_GL_LINES, &[v(5.0, 10.5, -0.9, WHITE), v(120.0, 40.5, 0.9, WHITE)]);
+    c.draw(GL_LINES, &[v(5.0, 10.5, -0.9, WHITE), v(120.0, 40.5, 0.9, WHITE)]);
     c.point_size = 5.0;
     for i in 0..6 {
-        c.draw(SGI_GL_POINTS, &[v(10.0 + 20.0 * i as f32, 80.0, -0.9 + 0.3 * i as f32, GREEN)]);
+        c.draw(GL_POINTS, &[v(10.0 + 20.0 * i as f32, 80.0, -0.9 + 0.3 * i as f32, GREEN)]);
     }
 }
 
 fn fog_over_blend(c: &mut Ctx) {
     ramp_background(c);
     c.fog([40, 40, 40], 1);
-    c.blend(SGI_GL_SRC_ALPHA, SGI_GL_ONE_MINUS_SRC_ALPHA);
+    c.blend(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     c.tri(v(5.0, 5.0, -0.9, [1.0, 1.0, 1.0, 0.8]), v(120.0, 20.0, 0.9, [1.0, 1.0, 1.0, 0.8]), v(40.0, 120.0, 0.0, [1.0, 1.0, 1.0, 0.8]));
 }
 
@@ -1043,7 +1043,7 @@ pub fn load_lights(b: &mut Board, lights: &[(usize, Light)], ambient: [f32; 3], 
 /// A sphere of radius 0.8 about the window's middle (and a flat disc behind
 /// it), lit vertex by vertex, drawn smooth and depth tested.
 fn lit_sphere(c: &mut Ctx, current_colour: [f32; 4]) {
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     c.board.gl_colour = current_colour.map(f32::to_bits);
     let (nlat, nlon) = (10usize, 16usize);
     let point = |i: usize, j: usize| -> [f32; 3] {
@@ -1062,8 +1062,8 @@ fn lit_sphere(c: &mut Ctx, current_colour: [f32; 4]) {
         for j in 0..nlon {
             let q = [point(i, j), point(i + 1, j), point(i + 1, j + 1), point(i, j + 1)];
             let vs: Vec<V> = q.iter().map(|&p| lit(c, p)).collect();
-            c.draw(SGI_GL_TRIANGLES, &[vs[0], vs[1], vs[2]]);
-            c.draw(SGI_GL_TRIANGLES, &[vs[0], vs[2], vs[3]]);
+            c.draw(GL_TRIANGLES, &[vs[0], vs[1], vs[2]]);
+            c.draw(GL_TRIANGLES, &[vs[0], vs[2], vs[3]]);
         }
     }
 }
@@ -1111,10 +1111,10 @@ fn light_lit_blended_textured(c: &mut Ctx) {
     let l = Light { pos: [0.5, 0.6, -0.62], directional: true, colour: [1.0, 1.0, 1.0], atten: [1.0, 0.0, 0.0], spot: None };
     load_lights(&mut c.board, &[(0, l)], [0.2, 0.2, 0.2], false, 20.0, MATERIAL, 0);
     c.texture(&Tex { min: 1, mag_linear: true, ..Tex::new(RGB) });
-    c.blend(SGI_GL_SRC_ALPHA, SGI_GL_ONE_MINUS_SRC_ALPHA);
+    c.blend(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     ramp_background(c);
     // Texture coordinates by latitude and longitude.
-    c.depth_test(SGI_GL_LESS);
+    c.depth_test(GL_LESS);
     let (nlat, nlon) = (8usize, 12usize);
     let pt = |c: &mut Ctx, i: usize, j: usize| -> V {
         let th = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / nlat as f32;
@@ -1128,7 +1128,7 @@ fn light_lit_blended_textured(c: &mut Ctx) {
     for i in 0..nlat {
         for j in 0..nlon {
             let q = [pt(c, i, j), pt(c, i + 1, j), pt(c, i + 1, j + 1), pt(c, i, j + 1)];
-            c.draw(SGI_GL_QUADS, &q);
+            c.draw(GL_QUADS, &q);
         }
     }
 }

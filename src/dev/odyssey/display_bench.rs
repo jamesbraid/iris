@@ -45,7 +45,7 @@ fn fill_random(bytes: &mut [u8], rng: &mut Lcg) {
 fn scene_board(scene: Scene) -> Box<Board> {
     let mut s = Board::new("v12", 11).expect("board");
     let mut rng = Lcg(0x5eed_0001);
-    let pixels = (SGI_ODYSSEY_WIDTH * SGI_ODYSSEY_HEIGHT) as usize;
+    let pixels = (ODSY_WIDTH * ODSY_HEIGHT) as usize;
 
     fill_random(&mut s.mem.bytes, &mut rng);
     fill_random(&mut s.buffer1_mem.bytes, &mut rng);
@@ -88,9 +88,9 @@ fn scene_board(scene: Scene) -> Box<Board> {
     }
     // Windows: 64-pixel blocks of one drawable id, each with an overlay id;
     // the overlay is set on about one pixel in five.
-    for y in 0..SGI_ODYSSEY_HEIGHT as usize {
-        for x in 0..SGI_ODYSSEY_WIDTH as usize {
-            let at = y * SGI_ODYSSEY_WIDTH as usize + x;
+    for y in 0..ODSY_HEIGHT as usize {
+        for x in 0..ODSY_WIDTH as usize {
+            let at = y * ODSY_WIDTH as usize + x;
             let block = (x / 64 + 3 * (y / 48)) as u32;
 
             s.did[at] = ((block % 32) << ODSY_DID_MAIN_SHIFT | (block / 3) % 8) as u8;
@@ -121,9 +121,9 @@ fn scene_board(scene: Scene) -> Box<Board> {
 /// middle out: what a swap of a window that size changes.
 fn swap_board(rows: usize) -> Box<Board> {
     let mut s = scene_board(Scene::Rgb);
-    let stride = SGI_ODYSSEY_WIDTH as usize * 4;
+    let stride = ODSY_WIDTH as usize * 4;
     let mut rng = Lcg(0x5eed_0002);
-    let first = (SGI_ODYSSEY_HEIGHT as usize - rows) / 2;
+    let first = (ODSY_HEIGHT as usize - rows) / 2;
 
     let same = s.mem.bytes.clone();
     s.buffer1_mem.bytes.copy_from_slice(&same);
@@ -193,7 +193,7 @@ fn a_mode_wider_than_the_planes_still_resolves() {
 #[test]
 fn present_swaps_each_pixel_into_both_buffers() {
     let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let (w, h) = (SGI_ODYSSEY_WIDTH as usize, SGI_ODYSSEY_HEIGHT as usize);
+    let (w, h) = (ODSY_WIDTH as usize, ODSY_HEIGHT as usize);
     let frame = resolved(Scene::Mixed);
     let rows = &frame[100 * w..300 * w];
 
@@ -246,7 +246,7 @@ fn resolve_and_present_timings() {
         let mut s = scene_board(scene);
         let ctx = s.resolve_ctx();
         let (w, h) = (s.scanout.mode.width as usize, s.scanout.mode.height);
-        let width = s.scanout.mode.width.min(SGI_ODYSSEY_WIDTH) as usize;
+        let width = s.scanout.mode.width.min(ODSY_WIDTH) as usize;
         let mut dst = vec![0u32; w];
         let ms = bench(|| {
             for y in 0..h {
@@ -270,7 +270,7 @@ fn resolve_and_present_timings() {
     for (rows, name) in [(480, "480 lines"), (1024, "every line")] {
         let locks = BoardLocks::new(scene_board(Scene::Rgb));
         let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-        let first = (SGI_ODYSSEY_HEIGHT as i32 - rows) / 2;
+        let first = (ODSY_HEIGHT as i32 - rows) / 2;
 
         Odyssey::frame(&locks, &display);
         let ms = bench(|| {
@@ -281,7 +281,7 @@ fn resolve_and_present_timings() {
     }
     let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     let frame = resolved(Scene::Mixed);
-    let (w, h) = (SGI_ODYSSEY_WIDTH as usize, SGI_ODYSSEY_HEIGHT as usize);
+    let (w, h) = (ODSY_WIDTH as usize, ODSY_HEIGHT as usize);
     let ms = bench(|| display.present(&frame, w, h, 0));
     println!("present {w}x{h}: {ms:.3} ms per full frame");
 }
