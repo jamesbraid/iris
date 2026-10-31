@@ -55,14 +55,12 @@ pub enum DirtySite {
     PatternFill,
     /// A DMA into the colour buffer (Board::dma_to_buffer()).
     Dma,
-    /// The end of an integer primitive (Board::gl_end()).
-    GlEnd,
     /// An integer pixel that goes through a logic operation or to the id planes.
     Integer,
 }
 
 impl DirtySite {
-    pub const ALL: [DirtySite; 16] = [
+    pub const ALL: [DirtySite; 15] = [
         DirtySite::Other,
         DirtySite::Mode,
         DirtySite::Raster,
@@ -77,8 +75,7 @@ impl DirtySite {
         DirtySite::CopyRect,
         DirtySite::PatternFill,
         DirtySite::Dma,
-        DirtySite::GlEnd,
-        DirtySite::Integer,
+                DirtySite::Integer,
     ];
 
     pub fn name(self) -> &'static str {
@@ -97,7 +94,6 @@ impl DirtySite {
             DirtySite::CopyRect => "copy_rect",
             DirtySite::PatternFill => "pattern_fill",
             DirtySite::Dma => "dma",
-            DirtySite::GlEnd => "gl_end",
             DirtySite::Integer => "integer",
         }
     }
@@ -125,6 +121,10 @@ pub struct DirtyStats {
     pub wait_max_ns: u64,
     pub copy_ns: u64,
     pub copy_max_ns: u64,
+    /// Frames that let the board lock go to wait for a slice, and those
+    /// that gave up and waited with it held.
+    pub retries: u64,
+    pub fallbacks: u64,
 }
 
 impl DirtyStats {
@@ -151,11 +151,13 @@ impl DirtyStats {
         writeln!(w, "frames {} busy {} rows {} max {} swaps {}", self.frames, self.busy_frames, self.rows, self.max_rows, self.swaps)?;
         writeln!(
             w,
-            "planes wait_us {} max {} copy_us {} max {}",
+            "planes wait_us {} max {} copy_us {} max {} retries {} fallbacks {}",
             self.wait_ns / 1000,
             self.wait_max_ns / 1000,
             self.copy_ns / 1000,
-            self.copy_max_ns / 1000
+            self.copy_max_ns / 1000,
+            self.retries,
+            self.fallbacks
         )?;
         for (site, c) in DirtySite::ALL.iter().zip(&self.sites) {
             if c[0] != 0 {
@@ -295,6 +297,14 @@ impl Scanout {
         for y in first.max(0)..=last {
             self.unnamed[y as usize >> 6] |= 1 << (y & 63);
         }
+    }
+    /// invalidate_for() the lines [y, y + h) of a rectangle, which a caller
+    /// has not clipped to the frame.
+    pub fn invalidate_rows_for(&mut self, site: DirtySite, y: u32, h: u32) {
+        let first = y.min(i32::MAX as u32);
+        let end = (y as u64 + h as u64).min(i32::MAX as u64) as u32;
+
+        self.invalidate_for(site, first as i32, (end - first) as i32);
     }
     pub fn invalidate_all(&mut self) {
         self.invalidate_all_for(DirtySite::Other);
