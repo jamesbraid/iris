@@ -173,6 +173,39 @@ contain only `clanker/CLANKER.md`: open that file. The skill links become
 plain files, so agents will not find the skills; point your agent at
 `clanker/skills/` directly or re-clone with symlinks enabled.
 
+## Sending changes upstream
+
+- **Small, focused pull requests.** One subsystem or one fix per PR, so it can
+  be reviewed and merged on its own. Do not pile unrelated work onto an open PR.
+- **One commit per logical change.** Subjects are `component: lowercase
+  imperative`, bodies say why. Before a PR merges, fold review fixes, CI fixes
+  and "tighten after review" follow-ups into the commit they fix: no fixup
+  commits. Squash with a rebase that keeps each committer date equal to its
+  author date, check that every commit builds and that the final tree equals
+  the pre-squash tip, then force-push your own branch with a lease. A merged
+  commit cannot be folded; its follow-ups are new commits, one per logical
+  change.
+- **Stay on top of tree.** When a PR stops building or conflicts, sync to
+  `main`, rebase and push again.
+- **Hot paths stay clean.** Do not add a check to memory-access, cache or other
+  hot paths for a special case, and mark hot functions inline on purpose
+  (`clanker/perf/hot-path-inlining-must-be-explicit.md`). `bench/` runs bare
+  metal in kernel mode, so it does not represent a working system, where most
+  accesses go through the TLB. Back such a change with a user-space benchmark
+  as well, such as Dhrystone in the IRIX guest.
+- **Do not out-lock the hardware.** Where real hardware lets two units touch
+  memory at once with no borrow or lock (the display and the renderer),
+  software is what keeps them in step, with fences and sync bits. Do not add
+  borrows or locks that make it safer than the hardware; a synchronisation
+  problem means the behaviour was modelled wrongly.
+- **Match the sibling machine.** Model an aliasing or address-map detail the
+  way the Indy already does it.
+- **FPU: good enough, fast.** Use the host FPU wherever it matches, fall back
+  to emulation where it does not, signal only what is clearly wrong and get
+  that signalling right. Do not trade speed for exactness that only an
+  obscure diagnostic notices (`clanker/cpu/fpu-exception-model-vs-r4400.md`
+  lists where IRIS differs from an R4400).
+
 ## Build & run
 
 ```
@@ -196,7 +229,17 @@ Binaries: `iris` (the emulator), `iris-ci` (CI/automation socket client),
 ## Testing and benchmarking
 
 - `cargo test --workspace` — unit tests (per-device snapshot round trips, CPU,
-  TLB, REX3; add `--features jitv2` for the JIT equivalence tests).
+  TLB, REX3; add `--features jitv2` for the JIT equivalence tests). This is
+  what CI runs (`.github/workflows/rust.yml`); nextest is a local convenience
+  (`TESTING.md`). A new test must pass under it:
+  - tests run as parallel threads of one process, so use no fixed path in
+    `/tmp` or elsewhere (a per-test directory under `std::env::temp_dir()`
+    keyed by name and process id, as `src/cow_disk.rs` does) and no global
+    counters or other process-wide state another test can disturb;
+  - tests that read the wall clock must tolerate a loaded runner. Linux
+    results gate; macOS and Windows are informational;
+  - free what a test builds, or the runner runs out of memory:
+    `clanker/testing/device-tests-must-free-their-boards.md`.
 - `cpu-tests/` — bare-metal MIPS III/IV correctness suite. "Is this instruction
   right", one instruction at a time. `make -C cpu-tests run`. It does not
   exit 0 on a healthy tree: compare with
@@ -207,8 +250,14 @@ Binaries: `iris` (the emulator), `iris-ci` (CI/automation socket client),
   interpreter/jitv2. Read `clanker/testing/benchmark-suite-gotchas.md` before
   adding a kernel — the accuracy check catches endianness, uninitialised
   memory and out-of-bounds reads, and every one of those has already happened.
-- Both share `cpu-tests/harness` (toolchain probe, SCC console, startup and
-  exception dispatch). Changing those files affects both suites.
+  A change to the CPU, the caches, the JIT or memory access runs
+  `make -C bench matrix` on the base and on the branch, including cells for
+  CPU models it does not target. The PR states the per-kernel deltas and the
+  Dhrystone and LINPACK numbers. Fix a checksum mismatch, or a slowdown on a
+  model the change does not target, before review. The first full run is in
+  `clanker/perf/bench-first-numbers.md`.
+- Both bare-metal suites share `cpu-tests/harness` (toolchain probe, SCC
+  console, startup and exception dispatch). Changing those files affects both.
 
 ## Hard invariants (from HACKING.md)
 
