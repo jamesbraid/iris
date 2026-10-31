@@ -61,7 +61,7 @@ use super::{Gl, Hq3Board, Mgras, MGRAS_SLOT_GFX_BASE};
 use crate::config::GraphicsBoard;
 use crate::dev::w1;
 use crate::dev::w1::sgi::{board_record_part, BoardRecord};
-use crate::ip30::widget_small_base;
+use crate::ip30_map::widget_small_base;
 use crate::irq::{InterruptController, IrqLine};
 use crate::traits::{
     BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, Device, Resettable, BUS_ERR, BUS_OK,
