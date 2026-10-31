@@ -7956,4 +7956,33 @@ mod tests {
             println!("{:<12} {:8.3} ns/instruction", name, ns);
         }
     }
+
+    /// R10000: a refused uncached store completes in compiled code exactly as
+    /// in the interpreter, through both store sites (SW, and SWL by the
+    /// masked-store helper), and the instructions after it run. The same access
+    /// as a load, and a store on the R5000, still fault in both engines.
+    #[test]
+    fn refused_uncached_store_matches_the_interpreter_on_the_r10000_and_r5000() {
+        use crate::cpu::mips_cache_v2::{R10000Cache, R5000Cache};
+        use crate::cpu::mips_core::STATUS_EXL;
+        use crate::cpu::mips_isa::{OP_ADDIU, OP_LW, OP_SW, OP_SWL};
+        fn run<C: crate::cpu::mips_cache_v2::CpuModel + From<Arc<dyn BusDevice>>>(op: u32) -> (CoreSnapshot, CoreSnapshot) {
+            let mut gpr = [0u64; 32];
+            gpr[16] = 0xFFFF_FFFF_A100_0000; // kseg1: uncached, and nothing answers
+            gpr[6] = 0x1234_5678;
+            let words = [make_i(op, 16, 6, 0), make_i(OP_ADDIU, 0, 7, 2)];
+            interpreter_and_jit::<C>(|| Arc::new(crate::cpu::mips_exec_test::RefusingBus), 0xFFFF_FFFF_8000_0000, gpr, &words)
+        }
+        for op in [OP_SW, OP_SWL] {
+            let (interp, jit) = run::<R10000Cache>(op);
+            assert_eq!(jit, interp, "op {op:#x}: JIT and interpreter diverged");
+            assert_eq!(jit.cp0_status & STATUS_EXL, 0, "op {op:#x}: no exception");
+            assert_eq!(jit.gpr[7], 2, "op {op:#x}: the instruction after the store ran");
+        }
+        for (name, (interp, jit)) in [("R10000 load", run::<R10000Cache>(OP_LW)), ("R5000 store", run::<R5000Cache>(OP_SW))] {
+            assert_eq!(jit, interp, "{name}: JIT and interpreter diverged");
+            assert_ne!(jit.cp0_status & STATUS_EXL, 0, "{name}: must take its Data Bus Error");
+            assert_eq!(jit.gpr[7], 0, "{name}: nothing after the fault ran");
+        }
+    }
 }
