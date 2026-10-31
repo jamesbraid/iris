@@ -540,6 +540,92 @@ fn a_gl_copy_between_the_drawables_moves_the_rectangle() {
     assert_eq!(got, [0x1100_00ff, 0x2200_00ff, 0x1100_00ff, 0x2200_00ff, 0x3300_00ff, 0x4400_00ff]);
 }
 
+/// The id-plane destination as the X server selects it for a menu: the
+/// overlay byte under drawing mask 0xc, every bit writable.
+fn select_overlay_destination(s: &mut Board) {
+    s.dest_buffer_word = ODSY_DEST_ID_PLANES;
+    s.dest_base = 0x14_2000;
+    s.draw_mask = ODSY_DRAW_MASK_BUFFER1;
+    s.plane_write_mask = 0xff << ODSY_PLANE_MASK_SHIFT;
+}
+
+/// A rectangle copy between two points of the id-plane base, as the X server
+/// sends it: both base words name the id planes.
+fn overlay_copy(s: &mut Board, (sx, sy): (u32, u32), (w, h): (u32, u32), (dx, dy): (u32, u32)) {
+    copy_block(s, [0x14_2000, sy << 16 | sx, 0x0050_0050, h << 16 | w, 0x8000_1000, 0x14_2000, dy << 16 | dx, 0x3a00_0041]);
+}
+
+fn overlay_at(s: &Board, x: u32, y: u32) -> u8 {
+    s.overlay[(y * SGI_ODYSSEY_WIDTH + x) as usize]
+}
+
+/// A menu's pattern fill replicates a seed by copying the id-plane base onto
+/// itself. The copy moves the overlay bytes and leaves the colour planes
+/// alone: copying colour there smeared the window under every popup menu.
+///
+/// Datasheet: "X server drawing in the overlay and the select's flag bits"
+/// (the menu is drawn at the id-plane base; that its copies stay there is
+/// inferred).
+#[test]
+fn a_copy_at_the_id_plane_base_moves_overlay_bytes_not_colour() {
+    let (mut s, _) = window();
+    select_overlay_destination(&mut s);
+    for x in 0..4u32 {
+        s.overlay[(40 * SGI_ODYSSEY_WIDTH + 30 + x) as usize] = 0x11 * (x as u8 + 1);
+        pixel_write(&mut s, 30 + x as i32, 40, 0xaa00_00ff | x << 8);
+    }
+    let colour: Vec<u32> = (30..70).map(|x| pixel(&s, 0, x, 40)).collect();
+    s.scanout_update();
+
+    overlay_copy(&mut s, (30, 40), (4, 1), (60, 41));
+    for x in 0..4u32 {
+        assert_eq!(overlay_at(&s, 60 + x, 41), 0x11 * (x as u8 + 1), "overlay byte {x}");
+    }
+    let after: Vec<u32> = (30..70).map(|x| pixel(&s, 0, x, 40)).collect();
+    assert_eq!(after, colour, "colour row 40 is untouched");
+    assert!((60..64).all(|x| pixel(&s, 0, x, 41) == 0), "colour row 41 is untouched");
+    assert!((0..2).all(|b| (0..4).all(|x| pixel(&s, b, 60 + x, 41) == 0)));
+    assert_eq!(s.scanout.marks.dirty_rows(), vec![41], "the destination row is resolved again");
+}
+
+/// A copy of the overlay onto itself, shifted, reads its source as it was:
+/// along a row (the shift is smaller than the width) and down a column.
+#[test]
+fn an_overlay_copy_onto_itself_reads_the_source_as_it_was() {
+    let (mut s, _) = window();
+    select_overlay_destination(&mut s);
+    for x in 0..4u32 {
+        s.overlay[(40 * SGI_ODYSSEY_WIDTH + 30 + x) as usize] = x as u8 + 1;
+    }
+    overlay_copy(&mut s, (30, 40), (4, 1), (32, 40));
+    let row: Vec<u8> = (30..36).map(|x| overlay_at(&s, x, 40)).collect();
+    assert_eq!(row, [1, 2, 1, 2, 3, 4], "a copy to the right");
+
+    overlay_copy(&mut s, (32, 40), (4, 1), (30, 40));
+    let row: Vec<u8> = (30..36).map(|x| overlay_at(&s, x, 40)).collect();
+    assert_eq!(row, [1, 2, 3, 4, 3, 4], "a copy to the left");
+
+    for y in 0..4u32 {
+        s.overlay[((50 + y) * SGI_ODYSSEY_WIDTH + 70) as usize] = y as u8 + 1;
+    }
+    overlay_copy(&mut s, (70, 50), (1, 4), (70, 52));
+    let column: Vec<u8> = (50..56).map(|y| overlay_at(&s, 70, y)).collect();
+    assert_eq!(column, [1, 2, 1, 2, 3, 4], "a copy down");
+}
+
+/// The 0x1023 plane mask limits which overlay bits a copy changes, as it does
+/// for every other write there.
+#[test]
+fn an_overlay_copy_changes_only_the_bits_of_the_plane_mask() {
+    let (mut s, _) = window();
+    select_overlay_destination(&mut s);
+    s.plane_write_mask = 0x0f << ODSY_PLANE_MASK_SHIFT;
+    s.overlay[(40 * SGI_ODYSSEY_WIDTH + 30) as usize] = 0xa5;
+    s.overlay[(40 * SGI_ODYSSEY_WIDTH + 60) as usize] = 0xf0;
+    overlay_copy(&mut s, (30, 40), (1, 1), (60, 40));
+    assert_eq!(overlay_at(&s, 60, 40), 0xf5);
+}
+
 /// An object copies to the draw drawable and back: the scratch-object path
 /// the library takes for the signed types, and for readback conversions.
 #[test]
