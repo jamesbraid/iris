@@ -1198,7 +1198,7 @@ impl Board {
         let seq = self.dma_seq;
         let bus = DmaBus {
             mem: self.guest.clone(),
-            trace_sequence: self.trace_sequence.wrapping_sub(1),
+            trace_sequence: self.trace_sequence.load(Ordering::Relaxed).wrapping_sub(1),
         };
         let mut raw = [0u8; ODSY_DMA_TABLE_HEADER as usize];
         let mut hdr = [0u32; ODSY_DMA_HDR_WORDS];
@@ -1507,7 +1507,7 @@ impl Board {
         let softsync = self.query_sync_index & ODSY_DMA_FENCE_INTERRUPT != 0;
         let bus = DmaBus {
             mem: self.guest.clone(),
-            trace_sequence: self.trace_sequence.wrapping_sub(1),
+            trace_sequence: self.trace_sequence.load(Ordering::Relaxed).wrapping_sub(1),
         };
         let front = self.front.clone();
 
