@@ -3346,6 +3346,30 @@ mod tests {
         }
     }
 
+    /// Parity suppression follows the real Status register (DE, ERL), not a
+    /// direct call, and does not need the cache-ecc feature.
+    #[test]
+    fn status_de_and_erl_suppress_the_parity_error() {
+        big_stack(|| {
+            use crate::cpu::mips_core::{STATUS_DE, STATUS_ERL};
+            let (mut exec, _) = mapped(3, 1, 0x3a5);
+            let (pa, va) = (0x0030_0000u64, 0xffff_ffff_8030_0000u64);
+            let p = 0x3_4420_0004u64;
+            cache_at(&mut exec, 0x08, va | 1, l1i_tag_of(pa) | L1I_VALID);
+            exec.core.cp0_ecc = l1i_parity_of(p) ^ 1;
+            cache_at(&mut exec, 0x1c, va | 1, p);
+            let status = exec.core.cp0_status & !(STATUS_DE | STATUS_ERL);
+            exec.set_cp0_status(status);
+            assert_eq!(exec.cache.fetch(va, pa).status, EXEC_CACHE_ERR, "detected");
+            exec.set_cp0_status(status | STATUS_DE);
+            assert_eq!(exec.cache.fetch(va, pa).status, crate::cpu::mips_exec::EXEC_COMPLETE, "DE set");
+            exec.set_cp0_status(status | STATUS_ERL);
+            assert_eq!(exec.cache.fetch(va, pa).status, crate::cpu::mips_exec::EXEC_COMPLETE, "ERL set");
+            exec.set_cp0_status(status);
+            assert_eq!(exec.cache.fetch(va, pa).status, EXEC_CACHE_ERR, "detected again");
+        });
+    }
+
     /// A snapshot that fails to parse leaves the staged lines as they were.
     #[test]
     fn a_failed_restore_changes_nothing() {
