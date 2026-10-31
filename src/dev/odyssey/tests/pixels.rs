@@ -757,7 +757,6 @@ fn a_gl_copy_moves_pixels_between_an_object_and_the_drawables() {
     let (mut s, _) = window();
     let base = 0x16a800;
     let obj = s.object_select(base, 16);
-    assert!(obj >= 0);
     for x in 0..3 {
         s.object_store(obj, x, 0, 0x8000_0000 | x << 8 | 0xff);
     }
@@ -785,7 +784,6 @@ fn a_copy_from_the_window_into_an_object_lists_the_rows_bottom_first() {
     let (mut s, _) = window();
     let base = 0x16b000;
     let obj = s.object_select(base, 16);
-    assert!(obj >= 0);
     // A 2x3 rectangle at (20, 221) down: row n holds n in its low byte.
     for y in 0..3 {
         for x in 0..2 {
@@ -820,7 +818,6 @@ fn a_signed_type_copy_lists_rows_bottom_first_and_applies_the_signed_pass() {
     let (mut s, _) = window();
     let base = 0x16b000;
     let obj = s.object_select(base, 16);
-    assert!(obj >= 0);
     s.object_store(obj, 0, 0, 0x91ec_47a2);
     s.object_store(obj, 0, 1, 0x0560_bb16);
     s.draw_mask = 1;
@@ -854,7 +851,6 @@ fn a_copy_from_the_window_applies_the_programmed_scale_and_bias_unsigned() {
     let (mut s, _) = window();
     let base = 0x16b000;
     let obj = s.object_select(base, 16);
-    assert!(obj >= 0);
     pixel_write(&mut s, 70, 21, 0x00ff_8010);
     s.draw_mask = 4;
     for c in [0, 1, 2] {
@@ -1120,7 +1116,6 @@ fn a_16_bit_luminance_texture_upload_lands_in_its_object() {
     let (mut s, _) = window();
     let base = 0x10_0800;
     let obj = s.object_select(base, 16);
-    assert!(obj >= 0);
     for x in 0..16 {
         s.object_store(obj, x, 0, 0xffff_ffff);
     }

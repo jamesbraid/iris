@@ -19,14 +19,11 @@ impl SoftDraw<'_> {
         };
         let mut xy = vec![0.0f64; 2 * n];
         for i in 0..n {
-            let mut cv = VolumeVertex::default();
-            let mut win = [0.0f64; 3];
-
-            self.st.volume_from_draw_vertex(d.soft_polygon_vertex(None, i), &mut cv);
+            let cv = self.st.volume_from_draw_vertex(d.soft_polygon_vertex(None, i));
             if !(cv.clip[3] > 0.0) {
                 return limit;
             }
-            self.st.clip_to_window(&cv.clip, &mut win);
+            let win = self.st.clip_to_window(&cv.clip);
             xy[2 * i] = win[0];
             xy[2 * i + 1] = win[1];
         }

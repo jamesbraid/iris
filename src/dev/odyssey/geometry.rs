@@ -574,7 +574,7 @@ impl Board {
     /// is then read as positional). A light with zero ambient, diffuse and
     /// specular colour, every disabled one as the library sends it, adds
     /// nothing and is left out. Shininess arrives as its square root.
-    pub fn gl_light(&mut self, obj: &[f64; 4], out: &mut [f32; 4]) {
+    pub fn gl_light(&mut self, obj: &[f64; 4]) -> [f32; 4] {
         // The lighting state is kept between vertices (LightScratch): building
         // its 3 KB afresh for every vertex was a visible share of the front
         // end's time in Smoke & Mirrors.
@@ -583,11 +583,11 @@ impl Board {
         scratch.restore();
         let v = self.gl_light_fill(&mut scratch.state, obj);
         scratch.lit = v.lit;
-        let (front, _) = scratch.state.light_vertex(v.eye, v.normal, v.colour);
-        *out = front;
+        let (mut front, _) = scratch.state.light_vertex(v.eye, v.normal, v.colour);
         // The board passes the diffuse alpha through unclamped.
-        out[3] = v.alpha;
+        front[3] = v.alpha;
         self.gl_light_scratch = Some(scratch);
+        front
     }
 
     /// Fill `lt`, which holds the initial state with no lights, from the
@@ -689,22 +689,15 @@ impl Board {
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: dither not modelled; drawing undithered");
         }
         if self.gl_index_mode() {
-            let mut rgba = [0f32; 4];
-
             if self.gl_lit && !self.gl_index_lit_reported {
                 self.gl_index_lit_reported = true;
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: colour-index lighting is not modeled; drawn with the current index");
             }
-            gl_index_rgba(self.gl_color_index, &mut rgba);
-            let words = rgba.map(f32::to_bits);
+            let words = gl_index_rgba(self.gl_color_index).map(f32::to_bits);
             self.gl_feed(SGI_GL_OP_COLOR4F as u16, &words);
             self.gl_colour_overridden = true;
         } else if self.gl_lit {
-            let obj = [xyz[0], xyz[1], xyz[2], 1.0];
-            let mut rgba = [0f32; 4];
-
-            self.gl_light(&obj, &mut rgba);
-            let words = rgba.map(f32::to_bits);
+            let words = self.gl_light(&[xyz[0], xyz[1], xyz[2], 1.0]).map(f32::to_bits);
             self.gl_feed(SGI_GL_OP_COLOR4F as u16, &words);
             self.gl_colour_overridden = true;
         } else if self.gl_colour_overridden {
@@ -835,26 +828,18 @@ impl Board {
 /// (ODSY_GL_SLOT_NORMAL) is one the context refuses, and its false return is
 /// expected. The texture matrix is kept as sent and applied to the current
 /// ST by the shared context.
-pub fn gl_transpose(rows: &[u32], m: &mut [f32; 16]) {
-    for row in 0..4usize {
-        for col in 0..4usize {
-            m[col * 4 + row] = f32::from_bits(rows[row * 4 + col]);
-        }
-    }
+pub fn gl_transpose(rows: &[u32]) -> [f32; 16] {
+    std::array::from_fn(|i| f32::from_bits(rows[(i % 4) * 4 + i / 4]))
 }
 
 impl Board {
     /// Apply the kept slot-0x00 matrix under the kept block-16 sign.
     pub fn gl_reload_combined(&mut self) {
-        let mut m = [0f32; 16];
-
-        gl_transpose(&self.gl_combined, &mut m);
+        let m = gl_transpose(&self.gl_combined);
         self.gl_load_combined(&m);
     }
 
     pub fn gl_load_matrix(&mut self) {
-        let mut m = [0f32; 16];
-
         if self.gl_matrix_slot == ODSY_GL_SLOT_TEXTURE {
             self.gl_texture_matrix = self.gl_matrix;
             return;
@@ -878,7 +863,7 @@ impl Board {
             }
             return;
         }
-        gl_transpose(&self.gl_matrix, &mut m);
+        let m = gl_transpose(&self.gl_matrix);
         let slot = self.gl_matrix_slot;
         self.gl().set_matrix(slot, &m);
     }
@@ -1032,7 +1017,7 @@ impl Board {
         if (op.clear_buffers & SGI_GL_COLOR_BUFFER_BIT) != 0 {
             if self.gl_index_mode() {
                 // glClearIndex travels as the first float (the probe's 3.0).
-                gl_index_rgba(float_index(self.gl_rect[0]), &mut op.clear_rgba);
+                op.clear_rgba = gl_index_rgba(float_index(self.gl_rect[0]));
             } else {
                 op.clear_rgba.copy_from_slice(&f[..4]);
             }

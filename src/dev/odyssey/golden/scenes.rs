@@ -92,7 +92,7 @@ impl Ctx {
         st.drawable.clip.r[0] = rect;
         st.viewport = [0, 0, SIDE, SIDE];
         st.shade_model = SGI_GL_SMOOTH;
-        st.dither = 0;
+        st.dither = false;
         let mut c = Ctx {
             board,
             st,
@@ -187,7 +187,7 @@ impl Ctx {
         if self.off == Some("depth") {
             return;
         }
-        self.st.depth_test = 1;
+        self.st.depth_test = true;
         self.st.depth_func = func;
     }
 
@@ -195,7 +195,7 @@ impl Ctx {
         if self.off == Some("blend") {
             return;
         }
-        self.st.blend = 1;
+        self.st.blend = true;
         self.st.blend_src = src;
         self.st.blend_dst = dst;
     }
@@ -208,7 +208,7 @@ impl Ctx {
             return;
         }
         let c12 = |f: f32| (f * 4095.0) as u32;
-        self.st.fog = 1;
+        self.st.fog = true;
         self.board.gl_fog = [
             c12(colour[0] as f32 / 255.0) << 12 | c12(colour[1] as f32 / 255.0),
             c12(colour[2] as f32 / 255.0) << 12 | 0xfff,
@@ -307,7 +307,7 @@ impl Ctx {
             b.tex_env[1] = 0xc00 << 12 | 0x400;
             b.tex_env[2] = 0x200 << 12 | 0xfff;
         }
-        self.st.texture_2d = 1;
+        self.st.texture_2d = true;
         self.st.texture_env_mode = [SGI_GL_REPLACE, SGI_GL_REPLACE, SGI_GL_MODULATE, SGI_GL_DECAL, SGI_GL_BLEND][t.env as usize];
     }
 }
@@ -388,7 +388,7 @@ fn polygon_smooth(c: &mut Ctx) {
 }
 
 fn cull_and_front_face(c: &mut Ctx) {
-    c.st.cull_face = 1;
+    c.st.cull_face = true;
     c.st.cull_face_mode = SGI_GL_BACK;
     c.st.front_face = SGI_GL_CCW;
     c.tri(v(5.0, 5.0, 0.0, RED), v(55.0, 8.0, 0.0, RED), v(20.0, 50.0, 0.0, RED));
@@ -512,10 +512,10 @@ fn depth_lequal_greater(c: &mut Ctx) {
 
 fn depth_always_masked(c: &mut Ctx) {
     c.depth_test(SGI_GL_ALWAYS);
-    c.st.depth_mask = 0;
+    c.st.depth_mask = false;
     c.rect(10.0, 10.0, 100.0, 100.0, 0.3, RED);
     c.st.depth_func = SGI_GL_LESS;
-    c.st.depth_mask = 1;
+    c.st.depth_mask = true;
     c.rect(40.0, 40.0, 120.0, 120.0, 0.4, GREEN);
 }
 
@@ -541,7 +541,7 @@ fn depth_range_wide(c: &mut Ctx) {
 
 fn stencil_mark_then_masked(c: &mut Ctx) {
     c.depth_test(SGI_GL_LESS);
-    c.st.stencil_test = 1;
+    c.st.stencil_test = true;
     c.st.stencil_func = SGI_GL_ALWAYS;
     c.st.stencil_value_mask = u32::MAX;
     c.st.stencil_write_mask = u32::MAX;
@@ -560,7 +560,7 @@ fn stencil_mark_then_masked(c: &mut Ctx) {
 }
 
 fn stencil_ops(c: &mut Ctx) {
-    c.st.stencil_test = 1;
+    c.st.stencil_test = true;
     c.st.stencil_value_mask = u32::MAX;
     c.st.stencil_write_mask = 0xff;
     c.st.stencil_func = SGI_GL_ALWAYS;
@@ -581,7 +581,7 @@ fn stencil_ops(c: &mut Ctx) {
 fn stencil_depth_fail(c: &mut Ctx) {
     c.depth_test(SGI_GL_LESS);
     c.rect(20.0, 20.0, 100.0, 100.0, -0.5, BLUE);
-    c.st.stencil_test = 1;
+    c.st.stencil_test = true;
     c.st.stencil_func = SGI_GL_ALWAYS;
     c.st.stencil_value_mask = u32::MAX;
     c.st.stencil_write_mask = 0xf0;
@@ -591,7 +591,7 @@ fn stencil_depth_fail(c: &mut Ctx) {
 }
 
 fn alpha_test(c: &mut Ctx) {
-    c.st.alpha_test = 1;
+    c.st.alpha_test = true;
     c.st.alpha_func = SGI_GL_GEQUAL;
     c.st.alpha_ref = 0.5;
     c.tri(v(5.0, 5.0, 0.0, [1.0, 0.0, 0.0, 1.0]), v(120.0, 10.0, 0.0, [0.0, 1.0, 0.0, 0.0]), v(30.0, 120.0, 0.0, [0.0, 0.0, 1.0, 0.5]));
@@ -652,18 +652,18 @@ fn blend_triangles_over(c: &mut Ctx) {
 
 fn logic_op_and_colour_mask(c: &mut Ctx) {
     ramp_background(c);
-    c.st.color_logic_op = 1;
+    c.st.color_logic_op = true;
     c.st.logic_op_mode = SGI_GL_CLEAR + 6; // XOR
     c.rect(10.0, 10.0, 60.0, 118.0, 0.0, [0.5, 0.7, 0.2, 1.0]);
     c.st.logic_op_mode = SGI_GL_CLEAR + 1; // AND
     c.rect(40.0, 40.0, 100.0, 100.0, 0.0, [0.9, 0.5, 0.8, 1.0]);
-    c.st.color_logic_op = 0;
+    c.st.color_logic_op = false;
     c.board.gl_write_mask = (c.board.gl_write_mask & !(ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT)) | ((SGI_GL_COLOUR_MASK_RED | SGI_GL_COLOUR_MASK_ALPHA) << ODSY_WRITE_COLOUR_SHIFT);
     c.rect(70.0, 20.0, 120.0, 110.0, 0.0, [1.0, 1.0, 1.0, 0.5]);
 }
 
 fn scissor(c: &mut Ctx) {
-    c.st.scissor_test = 1;
+    c.st.scissor_test = true;
     c.st.scissor = [20, 30, 70, 50];
     c.tri(v(0.0, 0.0, 0.0, RED), v(128.0, 10.0, 0.0, GREEN), v(10.0, 128.0, 0.0, BLUE));
     c.draw(SGI_GL_LINES, &[v(0.0, 40.5, 0.0, WHITE), v(128.0, 60.5, 0.0, WHITE)]);
@@ -743,9 +743,9 @@ fn clip_user_plane_textured_smooth(c: &mut Ctx) {
 // projection and the viewport map.
 
 fn window_matrix(c: &mut Ctx, rows_down: bool) {
-    c.st.window_matrix_given = 1;
+    c.st.window_matrix_given = true;
     c.st.window_depth_scale = 1.0;
-    c.st.window_rows_down = rows_down as u32;
+    c.st.window_rows_down = rows_down;
     // Eye coordinates are window pixels and depth in [0, 1].
     let mut m = [0.0f32; 16];
     m[0] = 1.0;
@@ -774,7 +774,7 @@ fn window_matrix_triangles(c: &mut Ctx) {
 
 fn window_matrix_rows_down(c: &mut Ctx) {
     window_matrix(c, true);
-    c.st.cull_face = 1;
+    c.st.cull_face = true;
     c.st.cull_face_mode = SGI_GL_BACK;
     c.st.front_face = SGI_GL_CCW;
     c.tri(wv(10.0, 10.0, 0.5, RED), wv(60.0, 15.0, 0.5, GREEN), wv(20.0, 60.0, 0.5, BLUE));
@@ -1055,8 +1055,7 @@ fn lit_sphere(c: &mut Ctx, current_colour: [f32; 4]) {
         let n = p;
         c.board.gl_normal = n.map(f32::to_bits);
         let obj = [(p[0] * 0.8) as f64, (p[1] * 0.8) as f64, (p[2] * 0.8) as f64, 1.0];
-        let mut rgba = [0f32; 4];
-        c.board.gl_light(&obj, &mut rgba);
+        let rgba = c.board.gl_light(&obj);
         V { p: [p[0] * 0.8, p[1] * 0.8, p[2] * 0.8, 1.0], c: rgba, t: [0.0, 0.0, 0.0, 1.0], n, back: None }
     };
     for i in 0..nlat {
@@ -1123,8 +1122,7 @@ fn light_lit_blended_textured(c: &mut Ctx) {
         let p = [th.cos() * ph.sin(), th.sin(), -th.cos() * ph.cos()];
         c.board.gl_normal = p.map(f32::to_bits);
         c.board.gl_colour = WHITE.map(f32::to_bits);
-        let mut rgba = [0f32; 4];
-        c.board.gl_light(&[(p[0] * 0.8) as f64, (p[1] * 0.8) as f64, (p[2] * 0.8) as f64, 1.0], &mut rgba);
+        let rgba = c.board.gl_light(&[(p[0] * 0.8) as f64, (p[1] * 0.8) as f64, (p[2] * 0.8) as f64, 1.0]);
         V { p: [p[0] * 0.8, p[1] * 0.8, p[2] * 0.8, 1.0], c: rgba, t: [j as f32 / nlon as f32 * 2.0, i as f32 / nlat as f32 * 2.0, 0.0, 1.0], n: p, back: None }
     };
     for i in 0..nlat {

@@ -269,15 +269,15 @@ impl Bench {
             viewport: [0, 0, BENCH_W, BENCH_H],
             shade_model: SGI_GL_SMOOTH,
             depth_func: SGI_GL_LESS,
-            depth_mask: 1,
+            depth_mask: true,
             depth_range: [0.0, 1.0],
             draw_buffers: 1,
             colour_mask: SGI_GL_COLOUR_MASK_ALL,
             texture_env_mode: SGI_GL_MODULATE,
-            dither: 1,
+            dither: true,
             ..Default::default()
         };
-        st.drawable.bound = 1;
+        st.drawable.bound = true;
         st.drawable.front = 0;
         st.drawable.back = 0;
         st.drawable.clip.n = 1;
@@ -311,13 +311,13 @@ impl Bench {
         match scene {
             Scene::FlatFill => {
                 st.shade_model = SGI_GL_FLAT;
-                st.dither = 0;
+                st.dither = false;
                 tris(&mut b.prims, &mut b.pixels, 40.0, 0.0);
             }
             Scene::SmoothDepth | Scene::SmoothBlend | Scene::MidSmooth => {
-                st.depth_test = 1;
+                st.depth_test = true;
                 if scene == Scene::SmoothBlend {
-                    st.blend = 1;
+                    st.blend = true;
                     st.blend_src = SGI_GL_SRC_ALPHA;
                     st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
                 }
@@ -329,15 +329,15 @@ impl Bench {
                 } else {
                     (SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR)
                 };
-                st.depth_test = 1;
-                st.texture_2d = 1;
+                st.depth_test = true;
+                st.texture_2d = true;
                 if scene == Scene::TexFogBlend {
-                    st.fog = 1;
+                    st.fog = true;
                     st.fog_mode = SGI_GL_LINEAR;
                     st.fog_start = 0.0;
                     st.fog_end = 2.0;
                     st.fog_color = [0.5, 0.5, 0.6, 1.0];
-                    st.blend = 1;
+                    st.blend = true;
                     st.blend_src = SGI_GL_SRC_ALPHA;
                     st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
                 }
@@ -346,8 +346,8 @@ impl Bench {
                 tris(&mut b.prims, &mut b.pixels, 40.0, 1.5 / 256.0);
             }
             Scene::TexPerspective | Scene::TexClampTrilinear => {
-                st.depth_test = 1;
-                st.texture_2d = 1;
+                st.depth_test = true;
+                st.texture_2d = true;
                 if scene == Scene::TexPerspective {
                     b.tex = Some(BenchTexture::new(256, SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR, SGI_GL_RGBA));
                 } else {
@@ -383,9 +383,9 @@ impl Bench {
                     st.clip_planes = 1;
                     st.clip_plane[0] = [1.0, 0.25, 0.0, 0.25];
                 }
-                st.depth_test = 1;
-                st.texture_2d = 1;
-                st.stencil_test = 1;
+                st.depth_test = true;
+                st.texture_2d = true;
+                st.stencil_test = true;
                 st.stencil_func = SGI_GL_EQUAL;
                 st.stencil_value_mask = u32::MAX;
                 st.stencil_write_mask = u32::MAX;
@@ -394,10 +394,10 @@ impl Bench {
                 tris(&mut b.prims, &mut b.pixels, 40.0, 1.5 / 256.0);
             }
             Scene::StencilMark => {
-                st.depth_test = 1;
-                st.depth_mask = 0;
+                st.depth_test = true;
+                st.depth_mask = false;
                 st.colour_mask = 0;
-                st.stencil_test = 1;
+                st.stencil_test = true;
                 st.stencil_func = SGI_GL_ALWAYS;
                 st.stencil_value_mask = u32::MAX;
                 st.stencil_write_mask = u32::MAX;
@@ -405,28 +405,28 @@ impl Bench {
                 tris(&mut b.prims, &mut b.pixels, 40.0, 0.0);
             }
             Scene::TexBlendOver => {
-                st.depth_test = 1;
+                st.depth_test = true;
                 st.depth_func = SGI_GL_ALWAYS;
-                st.depth_mask = 0;
-                st.texture_2d = 1;
-                st.blend = 1;
+                st.depth_mask = false;
+                st.texture_2d = true;
+                st.blend = true;
                 st.blend_src = SGI_GL_SRC_ALPHA;
                 st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
                 b.tex = Some(BenchTexture::new(256, SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR, SGI_GL_RGBA));
                 tris(&mut b.prims, &mut b.pixels, 40.0, 1.5 / 256.0);
             }
             Scene::PolySmooth => {
-                st.depth_test = 1;
+                st.depth_test = true;
                 b.polygon_smooth = true;
-                st.blend = 1;
+                st.blend = true;
                 st.blend_src = SGI_GL_SRC_ALPHA;
                 st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
                 tris(&mut b.prims, &mut b.pixels, 40.0, 0.0);
             }
             Scene::TexGlass => {
-                st.depth_test = 1;
-                st.texture_2d = 1;
-                st.blend = 1;
+                st.depth_test = true;
+                st.texture_2d = true;
+                st.blend = true;
                 st.blend_src = SGI_GL_SRC_ALPHA;
                 st.blend_dst = SGI_GL_ONE_MINUS_SRC_ALPHA;
                 // The bilinear texture has no alpha, so the blend weighs the
@@ -435,8 +435,8 @@ impl Bench {
                 tris(&mut b.prims, &mut b.pixels, 40.0, 1.5 / 256.0);
             }
             Scene::TexQuads => {
-                st.depth_test = 1;
-                st.texture_2d = 1;
+                st.depth_test = true;
+                st.texture_2d = true;
                 b.mode = SGI_GL_QUADS;
                 b.tex = Some(BenchTexture::new(256, SGI_GL_LINEAR, SGI_GL_LINEAR, SGI_GL_RGB));
                 for _ in 0..count {
@@ -451,10 +451,10 @@ impl Bench {
                 }
             }
             Scene::BigQuads | Scene::BigTexTrilinear => {
-                st.depth_test = 1;
+                st.depth_test = true;
                 b.mode = SGI_GL_QUADS;
                 if scene == Scene::BigTexTrilinear {
-                    st.texture_2d = 1;
+                    st.texture_2d = true;
                     b.tex = Some(BenchTexture::new(256, SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR, SGI_GL_RGBA));
                 }
                 for i in 0..count {
@@ -478,7 +478,7 @@ impl Bench {
             Scene::Lines => {
                 b.mode = SGI_GL_LINES;
                 st.shade_model = SGI_GL_FLAT;
-                st.dither = 0;
+                st.dither = false;
                 for _ in 0..count {
                     let mut v = vec![0.0f32; 2 * SGI_GL_VERTEX_FLOATS];
                     let x0 = rng.range(0.0, BENCH_W as f32);

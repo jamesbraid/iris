@@ -29,7 +29,9 @@ impl VolumeVertex {
     /// The point at t along from in to out, in clip and eye coordinates and
     /// every float attribute (2.13.8); the material index and edge flag are
     /// bit patterns and stay in's.
-    pub fn lerp(&self, out: &VolumeVertex, t: f64, r: &mut VolumeVertex) {
+    pub fn lerp(&self, out: &VolumeVertex, t: f64) -> VolumeVertex {
+        let mut r = VolumeVertex::default();
+
         for k in 0..4usize {
             r.clip[k] = self.clip[k] + t * (out.clip[k] - self.clip[k]);
             r.eye[k] = self.eye[k] + t * (out.eye[k] - self.eye[k]);
@@ -41,23 +43,27 @@ impl VolumeVertex {
                 (self.attr[k] as f64 + t * (out.attr[k] - self.attr[k]) as f64) as f32
             };
         }
+        r
     }
 
     /// Where the edge from in, inside a plane with value din, to out, outside
     /// it with value dout, meets the plane. It is always found from the inside
     /// end, so that two primitives sharing the edge make the same vertex.
-    pub fn cut(&self, din: f64, out: &VolumeVertex, dout: f64, r: &mut VolumeVertex) {
-        self.lerp(out, din / (din - dout), r);
+    pub fn cut(&self, din: f64, out: &VolumeVertex, dout: f64) -> VolumeVertex {
+        self.lerp(out, din / (din - dout))
     }
 }
 
 /// Sutherland and Hodgman's clipping, one plane at a time: each edge
 /// keeps its inside end and adds the point where it crosses the plane.
-/// A value that is not a number is outside.
-pub fn volume_clip_triangle(in_: &[VolumeVertex; 3], out: &mut [VolumeVertex; SGI_VOLUME_TRIANGLE_MAX]) -> u32 {
+/// A value that is not a number is outside. The polygon left, and its
+/// vertex count, 0 when nothing is.
+pub fn volume_clip_triangle(in_: &[VolumeVertex; 3]) -> ([VolumeVertex; SGI_VOLUME_TRIANGLE_MAX], usize) {
+    let mut out: [VolumeVertex; SGI_VOLUME_TRIANGLE_MAX] = Default::default();
+
     out[..3].clone_from_slice(in_);
     if in_[0].contains() && in_[1].contains() && in_[2].contains() {
-        return 3;
+        return (out, 3);
     }
     // Only a triangle that crosses a plane needs the working polygons.
     let mut src: [VolumeVertex; SGI_VOLUME_TRIANGLE_MAX] = std::array::from_fn(|_| VolumeVertex::default());
@@ -78,26 +84,22 @@ pub fn volume_clip_triangle(in_: &[VolumeVertex; 3], out: &mut [VolumeVertex; SG
                 dst[m] = a.clone();
                 m += 1;
                 if !(db >= 0.0) {
-                    let mut c = VolumeVertex::default();
-                    a.cut(da, b, db, &mut c);
-                    dst[m] = c;
+                    dst[m] = a.cut(da, b, db);
                     m += 1;
                 }
             } else if db >= 0.0 {
-                let mut c = VolumeVertex::default();
-                b.cut(db, a, da, &mut c);
-                dst[m] = c;
+                dst[m] = b.cut(db, a, da);
                 m += 1;
             }
         }
         n = m;
         std::mem::swap(&mut src, &mut dst);
         if n < 3 {
-            return 0;
+            return (out, 0);
         }
     }
     out[..n].clone_from_slice(&src[..n]);
-    n as u32
+    (out, n)
 }
 
 impl VolumeVertex {
@@ -131,10 +133,10 @@ impl VolumeVertex {
             return false;
         }
         if sa < 1.0 {
-            b.lerp(self, sa, &mut na);
+            na = b.lerp(self, sa);
         }
         if tb < 1.0 {
-            self.lerp(b, tb, &mut nb);
+            nb = self.lerp(b, tb);
         }
         *self = na;
         *b = nb;
@@ -146,46 +148,47 @@ impl GlDrawState {
     /// One vertex to clip coordinates (OpenGL 1.2.1, 2.10): object to eye by
     /// the modelview and eye to clip by the projection, or by the window
     /// matrix as GlDrawState::eye_to_clip() takes it.
-    pub fn volume_from_draw_vertex(&self, v: &[f32], out: &mut VolumeVertex) {
+    pub fn volume_from_draw_vertex(&self, v: &[f32]) -> VolumeVertex {
+        let mut eye = [0.0f64; 4];
+
         for row in 0..4usize {
-            out.eye[row] = 0.0;
             for k in 0..4usize {
-                out.eye[row] += self.modelview[k * 4 + row] as f64 * v[SGI_GL_V_POSITION + k] as f64;
+                eye[row] += self.modelview[k * 4 + row] as f64 * v[SGI_GL_V_POSITION + k] as f64;
             }
         }
-        self.eye_to_clip(&out.eye, &mut out.clip);
-        out.attr.copy_from_slice(&v[..SGI_GL_VERTEX_FLOATS]);
+        VolumeVertex { clip: self.eye_to_clip(&eye), eye, attr: v[..SGI_GL_VERTEX_FLOATS].try_into().expect("a whole vertex") }
     }
 }
 
 impl SoftVertex {
-    pub fn texture_values(&self, volume: bool, one_dimensional: bool, value: &mut [f64; 4]) {
-        value[0] = self.texcoord[0] * self.inv_w;
-        value[1] = if one_dimensional { 0.0 } else { self.texcoord[1] * self.inv_w };
-        value[2] = self.texcoord[3] * self.inv_w;
-        value[3] = if volume { self.texcoord[2] * self.inv_w } else { 0.0 };
+    pub fn texture_values(&self, volume: bool, one_dimensional: bool) -> [f64; 4] {
+        [
+            self.texcoord[0] * self.inv_w,
+            if one_dimensional { 0.0 } else { self.texcoord[1] * self.inv_w },
+            self.texcoord[3] * self.inv_w,
+            if volume { self.texcoord[2] * self.inv_w } else { 0.0 },
+        ]
     }
 }
 
-pub fn soft_texture_plane(v: &[SoftVertex], sub: u32, volume: bool, one_dimensional: bool, g: &mut SoftTexPlane) -> bool {
+/// The texture-coordinate planes across triangle v, or None where they are
+/// not finite. A triangle of no area has flat planes at its first vertex.
+pub fn soft_texture_plane(v: &[SoftVertex], sub: u32, volume: bool, one_dimensional: bool) -> Option<SoftTexPlane> {
     let scale = (1i32 << sub) as f64;
     let x1 = (v[1].x - v[0].x) as f64 / scale;
     let y1 = (v[1].y - v[0].y) as f64 / scale;
     let x2 = (v[2].x - v[0].x) as f64 / scale;
     let y2 = (v[2].y - v[0].y) as f64 / scale;
     let area = x1 * y2 - x2 * y1;
-    let mut values = [[0.0f64; 4]; 3];
+    let mut g = SoftTexPlane { x: v[0].x as f64 / scale, y: v[0].y as f64 / scale, ..Default::default() };
 
-    *g = SoftTexPlane { x: v[0].x as f64 / scale, y: v[0].y as f64 / scale, ..Default::default() };
     if area == 0.0 {
-        return true;
+        return Some(g);
     }
     if !area.is_finite() {
-        return false;
+        return None;
     }
-    for i in 0..3 {
-        v[i].texture_values(volume, one_dimensional, &mut values[i]);
-    }
+    let values: [[f64; 4]; 3] = std::array::from_fn(|i| v[i].texture_values(volume, one_dimensional));
     for k in 0..4 {
         let a = values[1][k] - values[0][k];
         let b = values[2][k] - values[0][k];
@@ -194,18 +197,16 @@ pub fn soft_texture_plane(v: &[SoftVertex], sub: u32, volume: bool, one_dimensio
         g.dx[k] = (a * y2 - b * y1) / area;
         g.dy[k] = (b * x1 - a * x2) / area;
         if !g.value[k].is_finite() || !g.dx[k].is_finite() || !g.dy[k].is_finite() {
-            return false;
+            return None;
         }
     }
-    true
+    Some(g)
 }
 
 impl SoftDraw<'_> {
     pub fn texture_coefficients(&self, v: &[SoftVertex]) -> bool {
-        let mut g = SoftTexPlane::default();
-
         if self.texture_base.is_none()
-            || soft_texture_plane(v, self.rules.subpixel_bits as u32, self.image().volume, self.image().one_dimensional, &mut g)
+            || soft_texture_plane(v, self.rules.subpixel_bits as u32, self.image().volume, self.image().one_dimensional).is_some()
         {
             return true;
         }
@@ -250,15 +251,17 @@ impl SoftDraw<'_> {
         if area == 0 {
             return;
         }
-        if self.texture_base.is_some()
-            && !soft_texture_plane(&v, sub as u32, self.image().volume, self.image().one_dimensional, &mut gradient)
-        {
-            self.texture_report(16, "invalid primitive coefficients, primitive dropped");
-            return;
+        if self.texture_base.is_some() {
+            let Some(g) = soft_texture_plane(&v, sub as u32, self.image().volume, self.image().one_dimensional) else {
+                self.texture_report(16, "invalid primitive coefficients, primitive dropped");
+                return;
+            };
+            gradient = g;
         }
         // An image with no pyramid has no planes to fail: it samples in double.
         let fixed: bool = self.fixed.is_some()
-            && (self.texture_base.is_some() || soft_texture_plane(&v, sub as u32, false, false, &mut gradient));
+            && (self.texture_base.is_some()
+                || soft_texture_plane(&v, sub as u32, false, false).inspect(|&g| gradient = g).is_some());
         if self.texture_base.is_some() {
             tex_ns = self.base_level().width as f64 * soft_texture_lod_scale(self.image().lod_scale_s);
             tex_nt = if self.image().one_dimensional {
@@ -293,9 +296,9 @@ impl SoftDraw<'_> {
             // would take from each quad's footprint.
             fixed_flat = self.fixed_tex().quad_lambda(flat_rho);
         }
-        let ccw: bool = if st.window_matrix_given != 0 && st.window_rows_down != 0 { area < 0 } else { area > 0 };
+        let ccw: bool = if st.window_matrix_given && st.window_rows_down { area < 0 } else { area > 0 };
         let front: bool = if st.front_face == SGI_GL_CW { !ccw } else { ccw };
-        if st.cull_face != 0
+        if st.cull_face
             && (st.cull_face_mode == SGI_GL_FRONT_AND_BACK
                 || st.cull_face_mode == (if front { SGI_GL_FRONT } else { SGI_GL_BACK }))
         {
@@ -390,13 +393,12 @@ impl SoftDraw<'_> {
         // rho: every fragment a quad loop does not draw, and every fragment
         // of a triangle with none.
         let general = |px: i32, py: i32, e1: i64, e2: i64, rho: Option<f64>| {
-            let mut background = false;
             let mut tex_row = [0.0f64; 4];
 
             // Window phase precedes plane translation and fragment work.
-            if !self.stipple_pass(px, py, &mut background) {
+            let Some(background) = self.stipple_pass(px, py) else {
                 return;
-            }
+            };
             if self.texture_base.is_some() || fixed {
                 for k in 0..4 {
                     tex_row[k] = (py as f64 + 0.5 - gradient.y) * gradient.dy[k];
@@ -432,7 +434,7 @@ impl SoftDraw<'_> {
                     frag.texcoord[k] = (w0 * v[0].texcoord[k] + w1 * v[1].texcoord[k] + w2 * v[2].texcoord[k]) / sum;
                 }
             }
-            if st.fog != 0 {
+            if st.fog {
                 frag.fog = (w0 * v[0].fog + w1 * v[1].fog + w2 * v[2].fog) / sum;
             }
             if st.clip_planes != 0 {
@@ -554,61 +556,52 @@ impl SoftDraw<'_> {
     /// Transform, clip and rasterize one triangle. Clipped to the view volume
     /// in clip coordinates, what is left is drawn as a fan from its first
     /// vertex, each flat shaded from the triangle's provoking vertex.
-    pub fn clip_triangle(&self, va: &[f32], vb: &[f32], vc: &[f32], poly: &mut [VolumeVertex; SGI_VOLUME_TRIANGLE_MAX], n: &mut u32) -> bool {
-        let verts: [&[f32]; 3] = [va, vb, vc];
-        let mut in_: [VolumeVertex; 3] = Default::default();
+    /// The polygon left and its vertex count, or None when a textured
+    /// piece is invalid.
+    pub fn clip_triangle(&self, va: &[f32], vb: &[f32], vc: &[f32]) -> Option<([VolumeVertex; SGI_VOLUME_TRIANGLE_MAX], usize)> {
+        let in_ = [va, vb, vc].map(|v| self.st.volume_from_draw_vertex(v));
+        let (poly, n) = volume_clip_triangle(&in_);
 
-        for (v, cv) in verts.iter().zip(in_.iter_mut()) {
-            self.st.volume_from_draw_vertex(v, cv);
-        }
-        *n = volume_clip_triangle(&in_, poly);
-        if !poly[..*n as usize].iter().all(|v| self.texture_vertex_valid(v)) {
-            return false;
+        if !poly[..n].iter().all(|v| self.texture_vertex_valid(v)) {
+            return None;
         }
         if self.texture_base.is_some() {
             let mut i = 1usize;
-            while i + 1 < *n as usize {
+            while i + 1 < n {
                 let vertices: [&VolumeVertex; 3] = [&poly[0], &poly[i], &poly[i + 1]];
                 let mut projected: [SoftVertex; 3] = Default::default();
 
                 for j in 0..3 {
-                    let Some(p) = self.project(vertices[j]) else {
-                        return false;
-                    };
-                    projected[j] = p;
+                    projected[j] = self.project(vertices[j])?;
                 }
                 if !self.texture_coefficients(&projected) {
-                    return false;
+                    return None;
                 }
                 i += 1;
             }
         }
-        true
+        Some((poly, n))
     }
 
     /// A quad or polygon validates all its clipped pieces before any are drawn.
     pub fn texture_triangle_valid(&self, a: &[f32], b: &[f32], c: &[f32]) -> bool {
-        let mut poly: [VolumeVertex; SGI_VOLUME_TRIANGLE_MAX] = Default::default();
-        let mut n = 0u32;
-
-        self.clip_triangle(a, b, c, &mut poly, &mut n)
+        self.clip_triangle(a, b, c).is_some()
     }
 
     pub fn triangle(&self, va: &[f32], vb: &[f32], vc: &[f32], provoking: &[f32]) {
-        let mut poly: [VolumeVertex; SGI_VOLUME_TRIANGLE_MAX] = Default::default();
-        let mut n = 0u32;
-
-        if self.bounds().is_none() || !self.clip_triangle(va, vb, vc, &mut poly, &mut n) {
+        if self.bounds().is_none() {
             return;
         }
-        self.clipped_fan(&poly, n, provoking);
+        if let Some((poly, n)) = self.clip_triangle(va, vb, vc) {
+            self.clipped_fan(&poly, n, provoking);
+        }
     }
 
     /// Rasterize what clipping left of a triangle, n vertices of poly, as a
     /// fan from its first vertex, each flat shaded from provoking.
-    pub fn clipped_fan(&self, poly: &[VolumeVertex; SGI_VOLUME_TRIANGLE_MAX], n: u32, provoking: &[f32]) {
+    pub fn clipped_fan(&self, poly: &[VolumeVertex; SGI_VOLUME_TRIANGLE_MAX], n: usize, provoking: &[f32]) {
         let mut i = 1usize;
-        while i + 1 < n as usize {
+        while i + 1 < n {
             self.clipped_triangle(&poly[0], &poly[i], &poly[i + 1], provoking);
             i += 1;
         }
@@ -619,13 +612,12 @@ impl SoftDraw<'_> {
     /// (SoftDraw::texture_triangle_valid()), and drawn from the clipping
     /// that validated them.
     pub fn texture_quad(&self, a: &[f32], b: &[f32], c: &[f32], d: &[f32], provoking: [&[f32]; 2]) {
-        let mut first: [VolumeVertex; SGI_VOLUME_TRIANGLE_MAX] = Default::default();
-        let mut second: [VolumeVertex; SGI_VOLUME_TRIANGLE_MAX] = Default::default();
-        let (mut n1, mut n2) = (0u32, 0u32);
-
-        if !self.clip_triangle(a, b, c, &mut first, &mut n1) || !self.clip_triangle(a, c, d, &mut second, &mut n2) {
+        let Some((first, n1)) = self.clip_triangle(a, b, c) else {
             return;
-        }
+        };
+        let Some((second, n2)) = self.clip_triangle(a, c, d) else {
+            return;
+        };
         if self.bounds().is_none() {
             return;
         }
@@ -690,7 +682,7 @@ impl SoftDraw<'_> {
                             if m == capacity {
                                 return false;
                             }
-                            a.cut(da, b, db, &mut dst[m]);
+                            dst[m] = a.cut(da, b, db);
                             dst[m].soft_boundary_set_edge(true);
                             m += 1;
                         }
@@ -699,7 +691,7 @@ impl SoftDraw<'_> {
                     if m == capacity {
                         return false;
                     }
-                    b.cut(db, a, da, &mut dst[m]);
+                    dst[m] = b.cut(db, a, da);
                     let edge = a.soft_boundary_edge();
                     dst[m].soft_boundary_set_edge(edge);
                     m += 1;
@@ -952,11 +944,9 @@ impl SoftDraw<'_> {
                 let mut fan_i = 0usize;
                 let mut frag = flat;
                 let mut found = false;
-                let mut background = false;
-
-                if !self.stipple_pass(px, py, &mut background) {
+                let Some(background) = self.stipple_pass(px, py) else {
                     continue;
-                }
+                };
                 if soft_aa_contains_pixel(v, n, px, py, scale, polygon_area > 0.0) {
                     coverage = 1.0;
                     x = px as f64 + 0.5;
@@ -1082,13 +1072,11 @@ impl SoftDraw<'_> {
                         }
                     }
                     if self.texture_base.is_some() {
-                        let mut gradient = SoftTexPlane::default();
                         let mut value = [0.0f64; 4];
                         let mut out = [0.0f64; 5];
-
-                        if !soft_texture_plane(&fan, sub as u32, self.image().volume, self.image().one_dimensional, &mut gradient) {
+                        let Some(gradient) = soft_texture_plane(&fan, sub as u32, self.image().volume, self.image().one_dimensional) else {
                             continue;
-                        }
+                        };
                         for k in 0..4 {
                             value[k] = gradient.value[k]
                                 + (px as f64 + 0.5 - gradient.x) * gradient.dx[k]
@@ -1227,7 +1215,7 @@ impl SoftDraw<'_> {
         // Facing must not prevalidate texture Q and erase a valid FILL prefix.
         positions.texture = None;
         for (i, v) in poly.iter_mut().enumerate().take(count) {
-            self.st.volume_from_draw_vertex(d.soft_polygon_vertex(indices, i), v);
+            *v = self.st.volume_from_draw_vertex(d.soft_polygon_vertex(indices, i));
             if !v.clip.iter().chain(&v.eye).all(|c| c.is_finite()) {
                 crate::dlog!(LogModule::Odyssey, "sgi-gl: invalid polygon position dropped");
                 return SGI_GL_DRAW_OK;
@@ -1259,14 +1247,14 @@ impl SoftDraw<'_> {
             }
             previous = current;
         }
-        if self.st.window_matrix_given != 0 && self.st.window_rows_down != 0 {
+        if self.st.window_matrix_given && self.st.window_rows_down {
             area = -area;
         }
         if self.st.front_face == SGI_GL_CW {
             area = -area;
         }
         let front: bool = area > 0.0; // Zero remains back-facing through both reversals.
-        if self.st.cull_face != 0
+        if self.st.cull_face
             && (self.st.cull_face_mode == SGI_GL_FRONT_AND_BACK
                 || self.st.cull_face_mode == (if front { SGI_GL_FRONT } else { SGI_GL_BACK }))
         {
@@ -1482,9 +1470,8 @@ impl SoftDraw<'_> {
     /// reads its texels as it reaches them rather than all of them first.
     pub fn fixed_coordinates_valid(&self, d: &GlDraw) -> bool {
         for i in 0..d.count as usize {
-            let mut v = VolumeVertex::default();
+            let v = self.st.volume_from_draw_vertex(d.soft_polygon_vertex(None, i));
 
-            self.st.volume_from_draw_vertex(d.soft_polygon_vertex(None, i), &mut v);
             if !self.image().soft_texcoord_valid(self.texture_base, &v) {
                 return false;
             }
@@ -1517,8 +1504,8 @@ mod tests {
     fn draw(mode: u32, prims: Vec<Vec<f32>>) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
         let mut b = Bench::empty();
 
-        b.st.depth_test = 1;
-        b.st.texture_2d = 1;
+        b.st.depth_test = true;
+        b.st.texture_2d = true;
         b.st.texture_env_mode = SGI_GL_MODULATE;
         b.tex = Some(BenchTexture::new(32, SGI_GL_LINEAR_MIPMAP_LINEAR, SGI_GL_LINEAR, SGI_GL_RGBA));
         b.mode = mode;

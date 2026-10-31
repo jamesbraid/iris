@@ -164,7 +164,7 @@ impl SoftDraw<'_> {
             || self.image().volume
             || self.image().one_dimensional
             || self.st.index_bits != 0
-            || self.st.alpha_test != 0
+            || self.st.alpha_test
             || self.logic_op
         {
             return false;
@@ -343,17 +343,13 @@ impl SoftFixedTex {
     /// The relative levels a draw's fragments can sample, first to last: the
     /// level clamp keeps lambda within [min_lod, max_lod], and a lambda above
     /// a half never magnifies, so no level outside reaches the sampler.
-    pub fn fixed_reach(&self, first: &mut u32, last: &mut u32) {
-        *first = 0;
-        *last = self.range;
+    pub fn fixed_reach(&self) -> (u32, u32) {
         if !self.lod {
-            return;
+            return (0, self.range);
         }
-        if self.min_lod > 128 {
-            *first = fx_min((self.min_lod >> 8) as u32, self.range);
-        }
-        *last = if self.max_lod <= 0 { 0 } else { fx_min((self.max_lod.wrapping_add(255)) >> 8, self.range as i32) as u32 };
-        *first = fx_min(*first, *last);
+        let first = if self.min_lod > 128 { fx_min((self.min_lod >> 8) as u32, self.range) } else { 0 };
+        let last = if self.max_lod <= 0 { 0 } else { fx_min((self.max_lod.wrapping_add(255)) >> 8, self.range as i32) as u32 };
+        (fx_min(first, last), last)
     }
 }
 
@@ -364,10 +360,7 @@ impl SoftDraw<'_> {
     /// taps them without a tag. False, and the draw reads texels as it reaches them,
     /// where any read fails or the arrays cannot be allocated.
     pub fn fixed_prefill(&self, f: &mut SoftFixedTex) -> bool {
-        let mut first = 0u32;
-        let mut last = 0u32;
-
-        f.fixed_reach(&mut first, &mut last);
+        let (first, last) = f.fixed_reach();
         for i in first..=last {
             let fl = f.level[i as usize];
             let size = (fl.width as usize) * (fl.height as usize);
@@ -895,17 +888,17 @@ mod tests {
             projection: id,
             viewport: [0, 0, W as i32, W as i32],
             shade_model: SGI_GL_SMOOTH,
-            depth_test: 1,
+            depth_test: true,
             depth_func: SGI_GL_LEQUAL,
-            depth_mask: 1,
+            depth_mask: true,
             depth_range: [0.0, 1.0],
             draw_buffers: 1,
             colour_mask: SGI_GL_COLOUR_MASK_ALL,
-            texture_2d: 1,
+            texture_2d: true,
             texture_env_mode: SGI_GL_REPLACE,
             ..Default::default()
         };
-        st.drawable.bound = 1;
+        st.drawable.bound = true;
         st.drawable.front = 1;
         st.drawable.clip.n = 1;
         st.drawable.clip.r[0] = ClipRect { x0: 0, y0: 0, x1: W as i32 - 1, y1: W as i32 - 1 };

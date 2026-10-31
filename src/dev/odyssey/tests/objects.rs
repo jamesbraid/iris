@@ -17,10 +17,10 @@ fn the_object_table_keeps_every_level_a_game_loads() {
         let o = s.object_select(base(i), 16);
         assert!(s.object_rows(o, 1), "object {i}");
     }
-    assert!(s.object_find(base(0)) >= 0, "the first object loaded was forgotten");
+    assert!(s.object_find(base(0)).is_some(), "the first object loaded was forgotten");
     s.object_select(base(SGI_ODYSSEY_OBJECTS), 16);
-    assert!(s.object_find(base(0)) < 0, "a full table forgets the oldest");
-    assert!(s.object_find(base(1)) >= 0 && s.object_find(base(SGI_ODYSSEY_OBJECTS)) >= 0);
+    assert!(s.object_find(base(0)).is_none(), "a full table forgets the oldest");
+    assert!(s.object_find(base(1)).is_some() && s.object_find(base(SGI_ODYSSEY_OBJECTS)).is_some());
 }
 
 /// The texture state of a plain 2D RGBA level, as chocolate-doom's SDL
@@ -140,7 +140,7 @@ fn a_texture_move_does_not_grow_its_object() {
 #[test]
 fn packing_a_full_table_keeps_each_object_in_store_order() {
     let (mut s, _, _) = board_with_ram();
-    let n = SGI_ODYSSEY_OBJECTS as i32;
+    let n = SGI_ODYSSEY_OBJECTS as usize;
 
     for i in 0..n {
         let o = s.object_select(0x10_0000 + i as u32 * 0x100, 16);
@@ -154,13 +154,13 @@ fn packing_a_full_table_keeps_each_object_in_store_order() {
     for i in (1..n).step_by(3) {
         s.object_forget(i);
     }
-    let mut live: Vec<i32> = (0..n).filter(|&i| s.obj_base[i as usize] != 0).collect();
-    live.sort_by_key(|&i| s.obj_offset[i as usize]);
+    let mut live: Vec<usize> = (0..n).filter(|&i| s.obj_base[i] != 0).collect();
+    live.sort_by_key(|&i| s.obj_offset[i]);
 
-    s.object_compact(-1);
+    s.object_compact(None);
     let mut next = 0u32;
     for &i in &live {
-        let o = i as usize;
+        let o = i;
         assert_eq!(s.obj_offset[o], next, "object {i} is not packed in store order");
         next += s.obj_width[o] * s.obj_rows[o];
         assert_eq!(s.object_load(i, 0, 0), i as u32, "object {i}'s texel");

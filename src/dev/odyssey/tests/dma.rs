@@ -51,7 +51,7 @@ fn object_header(rows: u32, irq: bool) -> [u32; 8] {
 /// Word `i` of the object, 16 texels a row.
 fn object_word(s: &mut Board, i: u32) -> u32 {
     let obj = s.object_find(OBJECT);
-    assert!(obj >= 0, "the transfer made the object");
+    let obj = obj.expect("the transfer made the object");
     s.object_load(obj, i % 16, i / 16)
 }
 
@@ -347,7 +347,7 @@ fn an_image_transfer_to_an_object_leaves_the_plane_alone() {
     descriptor(&mut s, TABLE);
 
     let obj = s.object_find(0x16a000);
-    assert!(obj >= 0);
+    let obj = obj.unwrap();
     assert_eq!(s.object_load(obj, 0, 0), 0x0000_ffff);
     assert_eq!(s.object_load(obj, 1, 0), 0xadbe_efff);
     assert_eq!(s.object_load(obj, 2, 0), 0x1122_33ff);
