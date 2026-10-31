@@ -4,9 +4,9 @@
 //! The Lucent USS-312 USB controller: two root ports, OHCI registers and
 //! descriptor processing through the PCI bridge's DMA interface.
 //!
-//! Fuel has no attached USB functions. The root-port, descriptor and packet
-//! scheduling engine stays because the tests drive it through a test-only
-//! function, which pins its behaviour for whatever attaches later. Isochronous
+//! Functions plug into a root port with `attach`: the Fuel fits a keyboard and
+//! a mouse (`usb_hid`), and the tests drive the descriptor and packet
+//! scheduling engine through a test-only function. Isochronous
 //! traffic, suspend/resume, external hubs, USB storage and legacy keyboard/SMI
 //! routing are unsupported. Scheduling uses synthetic work units rather than
 //! wire time. Register behavior follows OpenHCI 1.0a and the USS-312 revision 5
@@ -224,7 +224,6 @@ impl Ohci {
             }
         }
     }
-    #[cfg(test)]
     pub fn attach(&self, port: usize, function: Arc<dyn UsbFunction>) -> Result<(), String> {
         if port >= 2 {
             return Err("OHCI has two ports".into());

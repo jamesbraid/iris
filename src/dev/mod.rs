@@ -54,6 +54,7 @@ pub mod seeq8003;
 pub mod testdev;
 pub mod timer;
 pub mod ultra64;
+pub mod usb_hid;
 pub mod vino;
 pub mod wd33c93a;
 pub mod z85c30;
