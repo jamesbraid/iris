@@ -25,15 +25,22 @@
 //! * The target model has no bus reset, so a bus reset or soft reset does not
 //!   arm a unit attention on the disk as QEMU's SCSI devices do. A bus reset
 //!   retires a selection still waiting on an absent target at once, with the
-//!   reset completion the public drivers expect for a command the reset
-//!   destroyed.
+//!   reset completion the public drivers handle for a command the reset
+//!   destroyed. Inferred: the drivers establish only that they handle that
+//!   completion, not that the firmware sends it for a command still in
+//!   selection, and whether it also raises the bus-reset asynchronous event
+//!   for a driver-issued reset is unknown (the ISP1040 datasheet's
+//!   set-selection-timeout table grades both).
 //! * Only logical unit 0 of a present target exists. A command for another
 //!   unit is passed to the target with that unit number, which answers as
 //!   SCSI says (INQUIRY: no device at this unit; anything else: check
 //!   condition, logical unit not supported). An absent target times out:
 //!   its completion is posted once the selection timeout the driver
-//!   programmed has passed on the adapter's clock, as the part's would be
-//!   after its selection attempt. That clock is host wall time less the time
+//!   programmed has passed on the adapter's clock. The part is only known to
+//!   wait at least that long; the model answers exactly at the value. A
+//!   programmed value of zero is no wait, and a queue initialisation leaves
+//!   a waiting selection alone: both are model choices, the datasheet being
+//!   silent. That clock is host wall time less the time
 //!   the machine was stopped; iris has no emulated-time source a device can
 //!   read, so the wait does not follow the guest's instruction rate.
 //!
@@ -211,11 +218,14 @@ pub const STATE_ALL_PHASES: u16 = 0x7f00;
 pub const STATUS_FLAG_TIMEOUT: u16 = 0x0040;
 
 /// What one unit of the selection timeout (mailbox command 0x0031, mailbox
-/// 1) lasts. Milliseconds is the public Linux qla1280 driver's reading, and
-/// the datasheet's confirmation is pending.
+/// 1) lasts. Milliseconds is inferred, not established: three public drivers
+/// default the value to 250 and Sun's isp(7D) page says milliseconds, but no
+/// vendor document is held.
 const SELECTION_TIMEOUT_UNIT: Duration = Duration::from_millis(1);
 /// The selection timeout in force until the driver programs one, in
-/// [`SELECTION_TIMEOUT_UNIT`]s: qla1280's default.
+/// [`SELECTION_TIMEOUT_UNIT`]s: qla1280's default. The chip's own power-on
+/// default is unknown, so this is an approximation that only affects a
+/// driver that never programs a value.
 const DEFAULT_SELECTION_TIMEOUT: u16 = 250;
 
 const CHECK_CONDITION: u8 = 0x02;
@@ -675,6 +685,8 @@ impl Core {
     /// ring again first: it was parked, or a reset took the entry away.
     fn select_absent(&self, st: &mut MutexGuard<'_, State>, ring: &Ring, cons: u32, done: Pending) -> bool {
         if !matches!(&st.ctl.selecting, Some(sel) if sel.cons == cons && !sel.orphan) {
+            // A programmed zero is no wait: a model choice, the datasheet
+            // being silent on zero.
             let wait = SELECTION_TIMEOUT_UNIT * u32::from(st.selection_timeout);
             let due = self.now_ns(st).saturating_add(wait.as_nanos() as i64);
             st.ctl.selecting = Some(Selection { cons, due, done, orphan: false });
@@ -687,7 +699,8 @@ impl Core {
 
     /// Wait for the selection in `ctl.selecting` to time out. False when
     /// the thread must look again first: parked, or a reset cancelled it.
-    /// A new request ring does not cancel it.
+    /// A new request ring does not cancel it: a model choice, the datasheet
+    /// being silent on what the chip does to a selection in progress.
     fn wait_selection(&self, st: &mut MutexGuard<'_, State>, gen: u64) -> bool {
         loop {
             let Some(due) = st.ctl.selecting.as_ref().map(|sel| sel.due) else {
@@ -1022,7 +1035,8 @@ impl Core {
             // Resets the bus, not the adapter: chip state survives. Mailbox 1
             // holds the configured reset delay, not a selector. The reset
             // destroys a selection still waiting on an absent target: it
-            // ends now with the reset completion, and posts once.
+            // ends now with the reset completion, and posts once. Inferred:
+            // the drivers only establish that they handle that completion.
             mbox::BUS_RESET => {
                 let now = self.now_ns(st);
                 if let Some(sel) = st.ctl.selecting.as_mut() {
