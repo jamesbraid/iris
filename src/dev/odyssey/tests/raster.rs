@@ -692,3 +692,33 @@ fn the_drawable_comparison_covers_the_rectangles_the_list_counts() {
     c.clip.n = 3;
     assert!(!a.drawable_eq(&c), "the count");
 }
+
+/// A texture chain a setup filled is the default one again after `clear`,
+/// though `clear` writes only the levels the setup touched: a deeper
+/// texture's levels do not leak into the next draw's sampling, which reads
+/// every volume's slice count and any level by number.
+#[test]
+fn a_cleared_texture_chain_is_the_default_one_again() {
+    let mut chain = TextureChain::default();
+
+    for i in [0u32, 1, 6] {
+        chain.touch(i);
+        chain.volumes[i as usize] = TextureVolume { slices: 3, width: 8 >> i.min(3), ..Default::default() };
+        chain.storage[i as usize] = Texture { offset: 5, width: 4, border_rows: true, ..Default::default() };
+        chain.levels[i as usize] = GlTexLevel { level: i, width: 4, read_texel: true, ..Default::default() };
+    }
+    chain.volume = chain.volumes[0];
+    chain.pyramid = Some(PyramidShape { count: 7, ..Default::default() });
+    chain.detail_storage = Texture { stride: 32, ..Default::default() };
+    chain.detail_image = GlTexLevel { detail: true, ..Default::default() };
+
+    chain.clear();
+    let fresh = TextureChain::default();
+
+    assert!(chain.volumes == fresh.volumes && chain.storage == fresh.storage && chain.levels == fresh.levels);
+    assert!(chain.volume == fresh.volume && chain.pyramid.is_none());
+    assert!(chain.detail_storage == fresh.detail_storage && chain.detail_image == fresh.detail_image);
+    // A second clear has nothing left to write.
+    chain.clear();
+    assert!(chain.levels == fresh.levels);
+}
