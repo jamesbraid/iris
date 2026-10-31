@@ -515,6 +515,37 @@ impl MachineProfile {
         }
     }
 
+    /// The processors fitted at most: two on the Octane, one elsewhere.
+    pub fn max_cpus(self) -> u8 {
+        if self == Self::OctaneIp30 { 2 } else { 1 }
+    }
+
+    /// Whether this profile can have `cpus` processors, and why not if it
+    /// cannot.
+    pub fn accepts_cpus(self, cpus: u8) -> Result<(), String> {
+        if cpus != 1 && self.max_cpus() == 1 {
+            Err(format!("[machine] cpus = {cpus}: only the Octane has more than one processor"))
+        } else if !(1..=self.max_cpus()).contains(&cpus) {
+            Err(format!("[machine] cpus = {cpus}: IRIX runs an Octane with 1 or 2"))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Whether this profile can have `cpu`, and why not if it cannot. The
+    /// Octane and O2 build only the parts below.
+    pub fn accepts_cpu(self, cpu: CpuModel) -> Result<(), String> {
+        match self {
+            Self::OctaneIp30 if cpu != CpuModel::R10000 => {
+                Err("an Octane has an R10000 ([machine] cpu = \"r10000\")".into())
+            }
+            Self::O2Ip32 if !matches!(cpu, CpuModel::R5000 | CpuModel::R10000) => {
+                Err("an O2 has an R5000 or an R10000 ([machine] cpu)".into())
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::IndyIp24 => "SGI Indy (IP24)",
@@ -1937,9 +1968,8 @@ impl MachineConfig {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.machine.cpus != 1 && self.machine.profile != MachineProfile::OctaneIp30 {
-            return Err(format!("[machine] cpus = {}: only the Octane has more than one processor", self.machine.cpus));
-        }
+        self.machine.profile.accepts_cpu(self.machine.cpu)?;
+        self.machine.profile.accepts_cpus(self.machine.cpus)?;
         if self.graphics.heads != 1 && self.graphics.heads != 2 {
             return Err(format!(
                 "graphics.heads {} is invalid (valid: 1, 2)",
@@ -2895,6 +2925,41 @@ mod export_tests {
         let mut indy = MachineConfig::default();
         indy.network.mode = NetMode::Off;
         assert!(indy.validate().unwrap_err().contains("only available on the O2"));
+    }
+
+    /// A profile says which processors and counts it accepts, and `validate()`
+    /// and the Octane and O2 constructors refuse a bad processor with the
+    /// same words.
+    #[test]
+    fn a_profile_says_which_processors_it_accepts() {
+        let accepted = |p: MachineProfile| CpuModel::ALL.into_iter().filter(|&c| p.accepts_cpu(c).is_ok()).collect::<Vec<_>>();
+        assert_eq!(accepted(MachineProfile::OctaneIp30), [CpuModel::R10000]);
+        assert_eq!(accepted(MachineProfile::O2Ip32), [CpuModel::R5000, CpuModel::R10000]);
+        assert_eq!(accepted(MachineProfile::IndyIp24), [CpuModel::R4400, CpuModel::R5000, CpuModel::R10000]);
+
+        let mut octane = MachineConfig::default();
+        octane.machine.profile = MachineProfile::OctaneIp30;
+        octane.machine.cpu = CpuModel::R10000;
+        octane.banks = banks_from4([128, 0, 0, 0]);
+        octane.machine.cpus = 2;
+        octane.validate().expect("two processors");
+        octane.machine.cpus = 3;
+        assert!(octane.validate().unwrap_err().contains("1 or 2"));
+        octane.machine.cpus = 1;
+        octane.machine.cpu = CpuModel::R4400;
+        assert!(octane.validate().unwrap_err().contains("an Octane has an R10000"));
+
+        for (profile, cpu) in [(MachineProfile::OctaneIp30, CpuModel::R4400), (MachineProfile::O2Ip32, CpuModel::R4400)] {
+            let mut cfg = MachineConfig::default();
+            cfg.machine.profile = profile;
+            cfg.machine.cpu = cpu;
+            let from_validate = cfg.validate().unwrap_err();
+            let from_build = match profile {
+                MachineProfile::OctaneIp30 => crate::ip30_machine::OctaneMachine::new(&cfg).err(),
+                _ => crate::ip32_machine::O2Machine::new(&cfg).err(),
+            };
+            assert_eq!(from_build, Some(from_validate), "{profile:?}");
+        }
     }
 
     /// The serial sockets come from the file and the command line, must

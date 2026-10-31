@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use crate::config::{CpuModel, MachineConfig};
+use crate::config::{CpuModel, MachineConfig, MachineProfile};
 use crate::cpu::mips_core::CyclesPtr;
 use crate::cpu::mips_exec::{CpuDevice, MipsCpu, MipsCpuConfig, MipsExecutor};
 use crate::cpu::mips_cache_shadow::{R10000O2ShadowCache, R5000ShadowCache};
@@ -160,6 +160,7 @@ pub const O2_COUNT_MHZ: f64 = 90.0;
 impl O2Machine {
     pub fn new(cfg: &MachineConfig) -> Result<Self, String> {
         let o2 = &cfg.o2;
+        MachineProfile::O2Ip32.accepts_cpu(cfg.machine.cpu)?;
         // `prom`, or the last release's file when `prom` is the shared default
         // and that file is not there: there is no embedded O2 PROM.
         let prom_path = if cfg.prom != crate::config::DEFAULT_PROM || std::path::Path::new(&cfg.prom).exists() {
@@ -242,7 +243,7 @@ impl O2Machine {
         let cpu: Arc<dyn CpuDevice> = match cfg.machine.cpu {
             CpuModel::R10000 => Self::build_cpu::<R10000O2ShadowCache>(memory.clone(), sysad, &timer_manager, arcs_fpu, cpu_mhz, boot.clone(), bus.ram.clone()),
             CpuModel::R5000 => Self::build_cpu::<R5000ShadowCache>(memory.clone(), sysad, &timer_manager, arcs_fpu, cpu_mhz, boot.clone(), bus.ram.clone()),
-            CpuModel::R4400 => return Err("an O2 has an R5000 or an R10000 ([machine] cpu)".into()),
+            CpuModel::R4400 => return Err(MachineProfile::O2Ip32.accepts_cpu(CpuModel::R4400).err().unwrap_or_default()),
         };
 
         // ppmem: the CPU's cache and the JIT reach RAM through the memory's
