@@ -7,7 +7,7 @@
 
 use super::*;
 
-use crate::dev::gl::math::{xform, IDENT};
+use crate::dev::gl::math::{invert, xform, IDENT};
 use crate::dev::gl::vertex::{Viewport, Wv};
 
 /// A raster operation: pixel work on a head's planes that is not a GL
@@ -930,49 +930,6 @@ impl GlContext {
 
 }
 
-/// m^-1, both column-major, by cofactors in double precision; None for a
-/// singular or non-finite m.
-pub fn gl_invert(m: &[f32; 16]) -> Option<[f64; 16]> {
-    let mut inv = [0.0f64; 16];
-    let mut a = [0.0f64; 16];
-    let mut det = 0.0f64;
-
-    for i in 0..16 {
-        a[i] = m[i] as f64;
-    }
-    for col in 0..4usize {
-        for row in 0..4usize {
-            let mut minor = [0.0f64; 9];
-            let mut n = 0;
-
-            for c in 0..4usize {
-                for r in 0..4usize {
-                    if c != col && r != row {
-                        minor[n] = a[c * 4 + r];
-                        n += 1;
-                    }
-                }
-            }
-            // The cofactor of a[col][row] is the adjugate's [row][col].
-            let sign: f64 = if (row + col) & 1 != 0 { -1.0 } else { 1.0 };
-            inv[row * 4 + col] = sign
-                * (minor[0] * (minor[4] * minor[8] - minor[5] * minor[7])
-                    - minor[3] * (minor[1] * minor[8] - minor[2] * minor[7])
-                    + minor[6] * (minor[1] * minor[5] - minor[2] * minor[4]));
-        }
-    }
-    for k in 0..4 {
-        det += a[k * 4] * inv[k];
-    }
-    if det == 0.0 || !det.is_finite() {
-        return None;
-    }
-    for v in inv.iter_mut() {
-        *v /= det;
-    }
-    Some(inv)
-}
-
 impl GlContext {
     /// The current matrix of the stack a matrix mode names, or None.
     pub fn slot_matrix(&mut self, slot: u32) -> Option<&mut [f32; 16]> {
@@ -1447,19 +1404,13 @@ impl GlContext {
     /// the context does not keep, or a modelview with no inverse, which the
     /// specification leaves undefined, changes nothing.
     pub fn clip_plane(&mut self, plane: u32, p: &[f32; 4]) {
-        let Some(inv) = gl_invert(&self.cur.modelview).filter(|_| plane < GL_CLIP_PLANES) else {
+        let inverse = invert(&self.cur.modelview).filter(|m| m.iter().all(|v| v.is_finite()));
+        let Some(inv) = inverse.filter(|_| plane < GL_CLIP_PLANES) else {
             crate::dlog!(LogModule::Odyssey, "sgi-gl: glClipPlane of plane {} ignored", plane);
             return;
         };
-        for j in 0..4 {
-            let mut v = 0.0f64;
-
-            // (p M^-1)_j = sum_i p_i M^-1[i][j], M^-1[i][j] at inv[j * 4 + i].
-            for i in 0..4 {
-                v += p[i] as f64 * inv[j * 4 + i];
-            }
-            self.cur.clip_plane[plane as usize][j] = v as f32;
-        }
+        // (p M^-1)_j = sum_i p_i M^-1[i][j], M^-1[i][j] at inv[j * 4 + i].
+        self.cur.clip_plane[plane as usize] = std::array::from_fn(|j| (0..4).map(|i| p[i] * inv[j * 4 + i]).sum());
     }
 }
 
