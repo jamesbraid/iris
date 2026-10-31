@@ -413,10 +413,6 @@ pub struct SoftVertex {
     pub depth_w: f64,
     pub rgba: [f64; 4],
     pub texcoord: [f64; 4],
-    /// the colour index, in colour-index mode
-    pub index: f64,
-    /// the fog coordinate, |z| in eye coordinates
-    pub fog: f64,
     /// Each client clip plane's value at the vertex, kept where >= 0.
     pub clip: [f64; GL_CLIP_PLANES as usize],
 }
@@ -431,8 +427,6 @@ impl Default for SoftVertex {
             depth_w: 0.0,
             rgba: [0.0; 4],
             texcoord: [0.0; 4],
-            index: 0.0,
-            fog: 0.0,
             clip: [0.0; GL_CLIP_PLANES as usize],
         }
     }
@@ -440,7 +434,7 @@ impl Default for SoftVertex {
 
 /// A fragment's values as rasterization leaves them (OpenGL 1.2.1, 3.1),
 /// before the per-fragment operations of chapter 4: its colour, each
-/// component in [0, 1], and in colour-index mode its index.
+/// component in [0, 1], and its texture coordinates.
 #[derive(Clone, Copy, Default)]
 pub struct SoftFrag {
     pub rgba: [f64; 4],
@@ -451,13 +445,7 @@ pub struct SoftFrag {
     /// sampling texcoord.
     pub fixed: bool,
     pub texel: [f64; 4],
-    pub index: f64,
-    /// the fog coordinate (3.10)
-    pub fog: f64,
 }
-
- // rows interleave in runs of 8
-
 
 impl GlDrawState {
     pub fn window(&self) -> Option<SoftWindow> {
@@ -1107,7 +1095,7 @@ impl SoftDraw<'_> {
     /// green and blue toward the fog colour, f C + (1 - f) Cf.
     pub fn fog(&self, frag: &mut SoftFrag, z: f64) {
         let st: &GlDrawState = self.st;
-        let f = self.px.fog_factor(z as f32, frag.fog as f32) as f64;
+        let f = self.px.fog_factor(z as f32) as f64;
         let f = if f >= 1.0 { 1.0 } else if f > 0.0 { f } else { 0.0 };
 
         for k in 0..3usize {
@@ -1460,10 +1448,6 @@ impl SoftDraw<'_> {
 
             out.depth_w = (d[0] * eye[0] + d[1] * eye[1] + d[2] * eye[2] + d[3] * eye[3]) / clip[3];
         }
-        // The fog coordinate approximates the eye distance by |z|, which
-        // 3.10 allows; it is affine in eye space, so interpolating it as a
-        // vertex attribute gives it exactly at each fragment.
-        out.fog = (if eye[3] != 0.0 { eye[2] / eye[3] } else { eye[2] }).abs();
         for i in 0..GL_CLIP_PLANES as usize {
             let p = &st.clip_plane[i];
 
@@ -1475,7 +1459,6 @@ impl SoftDraw<'_> {
             let n = if m < 1.0 { m } else { 1.0 };
             out.rgba[k] = n as f64;
         }
-        out.index = cv.attr[GL_V_INDEX] as f64;
         Some(out)
     }
 }

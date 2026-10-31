@@ -379,11 +379,6 @@ pub struct RasterOp {
     /// stencil write mask; the plane keeps its low bits.
     pub clear_stencil: u32,
     pub stencil_mask: u32,
-    /// CLEAR in colour-index mode: nonzero index_bits, and the clear index
-    /// already masked to them, written under index_mask.
-    pub index_bits: u32,
-    pub clear_index: u32,
-    pub index_mask: u32,
 }
 
 /// Where a context draws, as the board's context switch, window clip and
@@ -430,9 +425,6 @@ pub struct GlDrawState {
     pub depth_range: [f32; 2],
     /// GL_DRAW_* bits; those the drawable has no target for are ignored.
     pub draw_buffers: u32,
-    /// 0 in RGBA mode; in colour-index mode the bits a colour index holds
-    /// (GlContext::set_index_mode()).
-    pub index_bits: u32,
     /// glIndexMask's write mask (4.2.2).
     pub index_mask: u32,
     /// glColorMask's channels, GL_COLOUR_MASK_RED and so on (4.2.2).
@@ -475,14 +467,14 @@ pub struct GlDrawState {
     pub color_logic_op: bool,
     pub logic_op_mode: u32,
     /// Fog (3.10): its enable, mode, density, start and end, the
-    /// fog colour clamped to [0, 1] and the fog index.
+    /// fog colour clamped to [0, 1]. The board applies its own curve
+    /// (GlPlanes::fog_factor()) and reads only the enable and the colour.
     pub fog: bool,
     pub fog_mode: u32,
     pub fog_density: f32,
     pub fog_start: f32,
     pub fog_end: f32,
     pub fog_color: [f32; 4],
-    pub fog_index: f32,
     /// Polygon offset (3.5.5): the enables as GL_OFFSET_FILL and so
     /// on, the factor, and the constant term, either glPolygonOffset's
     /// units or EXT_polygon_offset's bias; the command last given sets its
@@ -937,22 +929,6 @@ impl GlContext {
         true
     }
 
-}
-
-/// A colour index as a colour-index buffer of index_bits bits stores it
-/// (OpenGL 1.2.1, 2.13.9): the integer part, masked to the buffer's bits.
-/// 2.13.9 converts an index to fixed point with an unspecified number of
-/// fraction bits and keeps the integer part, which for a value already in
-/// fixed point is its floor; a value beyond 32 bits, or not a number,
-/// keeps nothing a buffer could hold and stores 0.
-pub fn gl_index_value(index_bits: u32, index: f64) -> u32 {
-    let mask: u32 = if index_bits >= 32 { u32::MAX } else { (1u32 << index_bits) - 1 };
-    let f = index.floor();
-
-    if !(-2147483648.0..4294967296.0).contains(&f) {
-        return 0;
-    }
-    (if f < 0.0 { (f as i32) as u32 } else { f as u32 }) & mask
 }
 
 /// m^-1, both column-major, by cofactors in double precision; None for a

@@ -542,7 +542,6 @@ impl SoftDraw<'_> {
                     self.texture_apply(format, env, &mut frag.texel, &mut frag.rgba);
                 }
                 if fog {
-                    frag.fog = (w0[i] * v[0].fog + w1[i] * v[1].fog + w2[i] * v[2].fog) / sum[i];
                     self.fog(&mut frag, zw);
                 }
                 if rgba_read && !rules.rgba_load(planes, &self.targets, self.ntargets, x, y, &mut dest, &self.reports.rgba) {

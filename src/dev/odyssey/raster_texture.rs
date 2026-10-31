@@ -229,7 +229,7 @@ impl<'a> SoftDraw<'a> {
         // target's image, so the image is checked against that target only.
         let target: u32 = if st.texture_3d { 3 } else if st.texture_2d { 2 } else if st.texture_1d { 1 } else { 0 };
 
-        if target == 0 || st.index_bits != 0 {
+        if target == 0 {
             return true;
         }
         if let Some(im) = im {

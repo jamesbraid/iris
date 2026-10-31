@@ -348,8 +348,6 @@ impl SoftVertex {
             out.rgba[k] = (wa * self.rgba[k] + wb * b.rgba[k]) / sum;
             out.texcoord[k] = (wa * self.texcoord[k] + wb * b.texcoord[k]) / sum;
         }
-        out.index = (wa * self.index + wb * b.index) / sum;
-        out.fog = (wa * self.fog + wb * b.fog) / sum;
         for i in 0..GL_CLIP_PLANES as usize {
             out.clip[i] = (wa * self.clip[i] + wb * b.clip[i]) / sum;
         }
@@ -573,15 +571,9 @@ impl SoftDraw<'_> {
                     t = r2_min(r2_max(t, 0.0), 1.0);
                     let wa = (1.0 - t) * a.inv_w;
                     let wb = t * b.inv_w;
-                    frag.index = if smooth {
-                        a.index + wb * (b.index - a.index) / (wa + wb)
-                    } else {
-                        provoking[GL_V_INDEX] as f64
-                    };
                     for k in 0..4 {
                         frag.texcoord[k] = (wa * a.texcoord[k] + wb * b.texcoord[k]) / (wa + wb);
                     }
-                    frag.fog = (wa * a.fog + wb * b.fog) / (wa + wb);
                     if st.clip_planes != 0 && client_clip {
                         let mut d = [0.0f64; GL_CLIP_PLANES as usize];
 
@@ -675,17 +667,14 @@ impl SoftDraw<'_> {
         let mut x1: i64 = r2_min(px - psize / 2 + psize - 1, bx1 as i64);
         let mut y1: i64 = r2_min(py - psize / 2 + psize - 1, by1 as i64);
         frag.rgba = v.rgba;
-        frag.index = v.index;
         frag.fixed = false;
         if let Some(p) = provoking {
             if self.st.shade_model == GL_FLAT {
-                frag.index = p[GL_V_INDEX] as f64;
                 for k in 0..4 {
                     frag.rgba[k] = p[GL_V_COLOR + k] as f64;
                 }
             }
         }
-        frag.fog = v.fog;
         frag.texture_rho = 1.0;
         frag.texcoord = v.texcoord;
         if self.point_smooth {
