@@ -363,7 +363,6 @@ impl Workstation for FuelMachine {
         self.board.eth.power_on();
         self.board.scsi.power_on();
         self.board.usb.power_on();
-        self.board.usb_elapsed_ns.store(0, Ordering::Relaxed);
         self.timekeeper.power_on();
         self.restart_peripherals();
     }
@@ -525,7 +524,6 @@ pub(crate) struct FuelBoard {
     pub irq: Arc<PendingIrq>,
     clock: Clock,
     last_clock: AtomicU64,
-    usb_elapsed_ns: AtomicU64,
     running: AtomicBool,
 }
 
@@ -746,6 +744,7 @@ impl FuelBoard {
         xbridge.attach(15, 1, scsi.clone());
         xbridge.attach(15, 4, ioc3.clone());
         let usb = Ohci::new();
+        usb.set_clock(clock.clone());
         if usb_input {
             // Host input reaches the USB devices through the same controller
             // object the GUI, VNC and CI already drive; each device drops
@@ -851,7 +850,6 @@ impl FuelBoard {
             #[cfg(test)]
             irq,
             last_clock: AtomicU64::new(clock()),
-            usb_elapsed_ns: AtomicU64::new(0),
             clock,
             running: AtomicBool::new(false),
         })
@@ -903,10 +901,7 @@ impl FuelBoard {
                 .last_clock
                 .swap(now, Ordering::AcqRel);
             self.flash.advance_ns(now.saturating_sub(previous));
-            let delta = now.saturating_sub(previous);
-            let old = self.usb_elapsed_ns.fetch_add(delta, Ordering::Relaxed);
-            let frames = (old + delta) / 1_000_000 - old / 1_000_000;
-            if frames != 0 { self.usb.advance_frames(frames); }
+            self.usb.sync_clock();
             for pi in &self.pi {
                 pi.poll();
             }

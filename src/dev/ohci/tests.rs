@@ -355,14 +355,43 @@ fn packet_crosses_nonadjacent_pages() {
 #[test]
 fn clock_read_catches_up_after_timer_starvation() {
     let h = Ohci::new();
+    let now = Arc::new(AtomicUsize::new(0));
+    let t = now.clone();
+    h.set_clock(Arc::new(move || t.load(Ordering::Relaxed) as u64));
     h.start();
     h.bar_write(0, 4, 0x80, 4);
-    *h.clock.lock() = Some(Instant::now() - Duration::from_millis(5));
+    now.store(5_000_000, Ordering::Relaxed);
     assert!(h.bar_read(0, 0x3c, 4) >= 5);
     h.stop();
     let frame = h.bar_read(0, 0x3c, 4);
     h.advance_frames(10);
     assert_eq!(h.bar_read(0, 0x3c, 4), frame);
+}
+
+/// The frame count follows the guest's clock, not when the machine's poll or
+/// a timer thread last ran: a guest that waits 1 ms after going operational
+/// and reads HcFmNumber sees the frame, even if nothing else advanced the
+/// controller in between (a slow or descheduled host thread).
+#[test]
+fn frame_number_follows_the_clock_with_no_poll_or_timer() {
+    let h = Ohci::new();
+    let now = Arc::new(AtomicUsize::new(10_000_000));
+    let t = now.clone();
+    h.set_clock(Arc::new(move || t.load(Ordering::Relaxed) as u64));
+    h.start();
+    // Part-way into a frame period when the guest sets operational.
+    now.store(10_400_000, Ordering::Relaxed);
+    h.bar_write(0, 4, 0x80, 4);
+    assert_eq!(h.bar_read(0, 0x3c, 4), 0);
+    // 1.1 ms on the guest's clock: one frame boundary has passed.
+    now.store(11_500_000, Ordering::Relaxed);
+    assert_eq!(h.bar_read(0, 0x3c, 4), 1);
+    // A long guest-time gap is delivered in full at the next access.
+    now.store(31_500_000, Ordering::Relaxed);
+    assert_eq!(h.bar_read(0, 0x3c, 4), 21);
+    // Time that has not passed on the guest's clock delivers nothing.
+    assert_eq!(h.bar_read(0, 0x3c, 4), 21);
+    h.stop();
 }
 
 /// An interrupt handler can acknowledge a line while the controller raises it.

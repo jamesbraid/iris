@@ -18,6 +18,7 @@
 use crate::hptimer::{TimerId, TimerManager, TimerReturn};
 use crate::irq::IrqLine;
 use crate::pci::{Bar, PciBusDevice, PciConfig, PciConfigPolicy, PciDma, PCI_INTA};
+use crate::dev::heart::{host_clock, Clock};
 use crate::traits::{Device, Resettable};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -154,7 +155,11 @@ pub struct Ohci {
     irq: Mutex<IrqLine>,
     running: AtomicBool,
     me: Weak<Self>,
-    clock: Mutex<Option<Instant>>,
+    /// Source of the frame count: the machine's own clock, so the guest's
+    /// idea of a millisecond and the controller's agree.
+    time: Mutex<Clock>,
+    /// `time` reading at the last frame boundary delivered; `None` while stopped.
+    clock: Mutex<Option<u64>>,
     timer: Mutex<Option<(Arc<TimerManager>, Option<TimerId>)>>,
 }
 impl Ohci {
@@ -191,6 +196,7 @@ impl Ohci {
             irq: Mutex::new(IrqLine::unconnected()),
             running: AtomicBool::new(false),
             me: me.clone(),
+            time: Mutex::new(host_clock()),
             clock: Mutex::new(None),
             timer: Mutex::new(None),
         })
@@ -202,14 +208,25 @@ impl Ohci {
         );
         *self.timer.lock() = Some((timers, None));
     }
-    fn sync_clock(&self) {
-        let elapsed = {
-            let mut clock = self.clock.lock();
-            let Some(at) = clock.as_mut() else { return };
-            let elapsed = at.elapsed().as_millis().min(u64::MAX as u128) as u64;
-            *at += Duration::from_millis(elapsed);
-            elapsed
-        };
+    /// Use `clock` for frame timing. Call before `start`.
+    pub fn set_clock(&self, clock: Clock) {
+        assert!(
+            !self.running.load(Ordering::Acquire),
+            "connect the OHCI clock before start"
+        );
+        *self.time.lock() = clock;
+    }
+    /// Deliver every frame boundary the clock has passed. Every register
+    /// access calls this, so a read sees the frame count the guest's own
+    /// clock implies, however late the machine's poll or timer ran.
+    pub fn sync_clock(&self) {
+        // Held through delivery: a second caller must not find the boundary
+        // consumed and read the frame count before the first has applied it.
+        let mut clock = self.clock.lock();
+        let Some(at) = clock.as_mut() else { return };
+        let now = (self.time.lock().clone())();
+        let elapsed = now.saturating_sub(*at) / 1_000_000;
+        *at += elapsed * 1_000_000;
         self.advance_frames(elapsed);
     }
     fn drive_irq(&self) {
@@ -354,6 +371,7 @@ impl PciBusDevice for Ohci {
             );
             return;
         }
+        self.sync_clock();
         let mut reset = None;
         {
             let _pass = self.pass.lock();
@@ -510,8 +528,8 @@ impl Device for Ohci {
         if self.running.swap(true, Ordering::AcqRel) {
             return;
         }
+        *self.clock.lock() = Some((self.time.lock().clone())());
         if let Some((tm, id)) = self.timer.lock().as_mut() {
-            *self.clock.lock() = Some(Instant::now());
             let weak = self.me.clone();
             *id = Some(tm.add_recurring(
                 Instant::now() + Duration::from_millis(1),
