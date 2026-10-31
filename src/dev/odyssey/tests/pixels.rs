@@ -648,6 +648,38 @@ fn a_gl_pixel_write_marks_the_display_lines_it_wrote() {
 /// and that the corners are window pixels).
 #[test]
 fn a_pixel_zoom_rectangle_draws_the_scratch_texture_over_the_destination() {
+    let s = zoom_2x2(0x0364_0000);
+
+    for (x, y, want) in [(20, 10, 0x1100_00ffu32), (21, 11, 0x1100_00ff), (22, 10, 0x2200_00ff), (23, 11, 0x2200_00ff),
+                         (20, 12, 0x3300_00ff), (23, 13, 0x4400_00ff)] {
+        assert_eq!(pixel(&s, 0, x, y), want, "pixel ({x}, {y})");
+    }
+    assert_eq!(pixel(&s, 0, 24, 10), 0, "right of the rectangle");
+    assert_eq!(pixel(&s, 0, 20, 14), 0, "below the rectangle");
+}
+
+/// The texture move writes no wrap or filter bit of the sampler's word 4
+/// (bits 13:0), so they are the context's, and the zoom samples with the
+/// filter the context holds: a linear magnification blends the neighbouring
+/// texels where nearest copies one.
+///
+/// Datasheet: "Pixel zoom: the texture move and its rectangle" (ESTABLISHED:
+/// the move sends no wrap or filter bit; INFERRED: magnification is linear
+/// by default).
+#[test]
+fn a_pixel_zoom_samples_with_the_contexts_magnification_filter() {
+    let nearest = zoom_2x2(0x0364_0000);
+    let linear = zoom_2x2(0x0364_0002);
+
+    assert_eq!(pixel(&nearest, 0, 21, 11), 0x1100_00ff, "nearest copies a texel");
+    let blended = pixel(&linear, 0, 21, 11);
+    assert_ne!(blended, 0, "the linear zoom still draws");
+    assert_ne!(blended, pixel(&nearest, 0, 21, 11), "linear blends where nearest copies");
+}
+
+/// Draws the 2x2 image at zoom 2 into the 4x4 square at (20, 10), with
+/// `word4` as the sampler's word 4, and returns the board.
+fn zoom_2x2(word4: u32) -> Box<Board> {
     let (mut s, _) = window();
     let base = 0x16b000;
     let obj = s.object_select(base, 512);
@@ -663,7 +695,7 @@ fn a_pixel_zoom_rectangle_draws_the_scratch_texture_over_the_destination() {
     s.tex_mode = ODSY_TEX_MODE_2D;
     s.tex_level0 = 60;
     s.tex_levels[180..183].copy_from_slice(&[base, 0x8210_0020, 0]);
-    s.tex_sampler = [(9 << 10) | (6 << 5), 512, 64, 0, 0x0364_0000, 0, 0];
+    s.tex_sampler = [(9 << 10) | (6 << 5), 512, 64, 0, word4, 0, 0];
     s.tex_env = [1, 0, 0, 0, 0];
 
     cmd(&mut s, select(ODSY_REG_GL_BEGIN));
@@ -675,11 +707,5 @@ fn a_pixel_zoom_rectangle_draws_the_scratch_texture_over_the_destination() {
         }
     }
     cmd(&mut s, select(ODSY_REG_GL_END));
-
-    for (x, y, want) in [(20, 10, 0x1100_00ffu32), (21, 11, 0x1100_00ff), (22, 10, 0x2200_00ff), (23, 11, 0x2200_00ff),
-                         (20, 12, 0x3300_00ff), (23, 13, 0x4400_00ff)] {
-        assert_eq!(pixel(&s, 0, x, y), want, "pixel ({x}, {y})");
-    }
-    assert_eq!(pixel(&s, 0, 24, 10), 0, "right of the rectangle");
-    assert_eq!(pixel(&s, 0, 20, 14), 0, "below the rectangle");
+    s
 }

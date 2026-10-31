@@ -1363,12 +1363,15 @@ impl Board {
         // mip-level builder (Board::texture_build_level()) sends the same
         // word with bit 28. INFERRED (datasheet, "Pixel zoom: the texture
         // move and its rectangle"): these are the move's own marks on an
-        // otherwise nearest-filtered, repeating 2D image. UNKNOWN: what the
-        // marked bits mean on the board. Read it as the plain image.
+        // otherwise plain 2D image. UNKNOWN: what the marked bits mean on the
+        // board. Read it as the plain image. The move writes no wrap or filter
+        // bit (word bits 13:0), so those are the context's and are read as
+        // they stand: the magnification filter is the context's (INFERRED
+        // linear by default), not one the zoom chooses.
         let texture_move = self.tex_level0 == 60
             && (sampler_size & 0x08000000) == 0
             && (word & 0x10000000) == 0
-            && (word & !components) == 0x00640000;
+            && (word & !components & !0x3fff) == 0x00640000;
         let word = if texture_move { (word & !0x00640000) | 0x10000000 } else { word };
         // It also leaves the depth word 0 where a 2D image carries 1.
         let depth = if texture_move { 1 } else { depth };
