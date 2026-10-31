@@ -1006,8 +1006,7 @@ impl Bridge {
             // empty slots only inside a bus-error guard.
             return None;
         };
-        let dword = dev.config().read((reg >> 2) as usize) as u64;
-        Some((dword >> (8 * (reg & 3))) & (u64::MAX >> (64 - 8 * size)))
+        Some(dev.config().read_sized(reg as usize, size) as u64)
     }
 
     /// A store posts: it has no response to carry a failure back.
