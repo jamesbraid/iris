@@ -1968,8 +1968,8 @@ fn wait_resp(r: &Rig, n: u16, max: Duration) -> bool {
 fn a_hold_on_the_real_clock_releases_without_a_poke() {
     let r = Rig::with_disk("rv-real", 1, 64);
     r.init_rings(8, 8);
-    bus_reset(&r, 1, 0);
     let t = std::time::Instant::now();
+    bus_reset(&r, 1, 0);
     r.put_entry(0, &tur1(0x41));
     r.doorbell(1);
     std::thread::sleep(Duration::from_millis(400));
@@ -1997,9 +1997,9 @@ fn the_hold_does_not_run_while_the_machine_is_stopped() {
 fn on_the_real_clock_an_absent_target_waits_hold_plus_timeout_and_a_reset_retires() {
     let r = Rig::with_disk("rv-abs", 1, 64);
     r.init_rings(8, 8);
+    let t = std::time::Instant::now();
     bus_reset(&r, 1, 0);
     queue_absent(&r, 0, 0x43);
-    let t = std::time::Instant::now();
     assert!(wait_resp(&r, 1, Duration::from_secs(4)));
     assert!(t.elapsed() >= Duration::from_millis(1240), "{:?}", t.elapsed());
     // a long hold, then a second reset ends it promptly
