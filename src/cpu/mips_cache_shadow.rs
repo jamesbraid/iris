@@ -349,6 +349,7 @@ impl<
     const LWR_PRESERVES_UPPER: bool = model::profile(MODEL).lwr_preserves_upper;
     const NARROW_STORES_CARRY_GPR: bool = model::profile(MODEL).narrow_stores_carry_gpr;
     const CP0_DIAG_WRITE_MASK: u32 = model::profile(MODEL).cp0_diag_write_mask;
+    const FPU_DENORMAL_INPUT_NEEDS_FS_CLEAR: bool = model::profile(MODEL).fpu_denormal_input_needs_fs_clear;
 }
 
 impl<
@@ -1085,6 +1086,8 @@ mod tests {
         assert_eq!(<R16K as CpuModel>::CP0_DIAG_WRITE_MASK, 0x0403_cffb);
         assert_eq!(<R14K as CpuModel>::CP0_DIAG_WRITE_MASK, 0, "only the R16000 has the register");
         assert_eq!(<R10000ShadowCache as CpuModel>::CP0_DIAG_WRITE_MASK, 0);
+        assert!(<R16K as CpuModel>::FPU_DENORMAL_INPUT_NEEDS_FS_CLEAR);
+        assert!(!<R14K as CpuModel>::FPU_DENORMAL_INPUT_NEEDS_FS_CLEAR);
     }
 
     /// A 4 MiB secondary cache has twice the lines of the Fuel's, and a

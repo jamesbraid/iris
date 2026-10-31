@@ -7680,12 +7680,18 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     #[inline]
     fn fpu_check_denorm_operand_s(&mut self, bits: u32) -> Option<ExecStatus> {
         let v = f32::from_bits(bits);
-        (v.is_subnormal() || is_qnan_s(bits)).then(|| self.fpu_unimplemented())
+        (self.fpu_denormal_input_traps(v.is_subnormal()) || is_qnan_s(bits)).then(|| self.fpu_unimplemented())
     }
     #[inline]
     fn fpu_check_denorm_operand_d(&mut self, bits: u64) -> Option<ExecStatus> {
         let v = f64::from_bits(bits);
-        (v.is_subnormal() || is_qnan_d(bits)).then(|| self.fpu_unimplemented())
+        (self.fpu_denormal_input_traps(v.is_subnormal()) || is_qnan_d(bits)).then(|| self.fpu_unimplemented())
+    }
+    /// Whether a denormal operand traps: always, unless the model takes the
+    /// trap only while FCSR.FS is clear (FS set computes on the operand).
+    #[inline]
+    fn fpu_denormal_input_traps(&self, subnormal: bool) -> bool {
+        subnormal && !(C::FPU_DENORMAL_INPUT_NEEDS_FS_CLEAR && self.core.fpu_fcsr & FCSR_FS != 0)
     }
 
     /// Flags [6:2] for ADD/SUB/MUL (S or D): Invalid if either operand is a

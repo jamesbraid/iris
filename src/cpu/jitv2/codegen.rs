@@ -4359,12 +4359,18 @@ pub struct ModelPolicy {
     /// A partial 32-bit LWR keeps bits 63:32 of the destination
     /// (`CpuModel::LWR_PRESERVES_UPPER`).
     pub lwr_preserves_upper: bool,
+    /// A denormal operand takes Unimplemented Operation only while FCSR.FS is
+    /// clear (`CpuModel::FPU_DENORMAL_INPUT_NEEDS_FS_CLEAR`).
+    pub fpu_denormal_input_needs_fs_clear: bool,
 }
 
 impl ModelPolicy {
     /// The policy a model's profile selects.
     pub fn of<C: crate::cpu::mips_cache_v2::CpuModel>() -> Self {
-        Self { lwr_preserves_upper: C::LWR_PRESERVES_UPPER }
+        Self {
+            lwr_preserves_upper: C::LWR_PRESERVES_UPPER,
+            fpu_denormal_input_needs_fs_clear: C::FPU_DENORMAL_INPUT_NEEDS_FS_CLEAR,
+        }
     }
 }
 
@@ -5408,10 +5414,17 @@ fn emit_is_qnan_d(ctx: &mut EmitCtx, bits: Value) -> Value {
 /// proceed there — callers should structure the two-operand case as
 /// sequential checks (fs then ft), each potentially terminating the region.
 fn emit_check_denorm_operand(ctx: &mut EmitCtx, bits: Value, is_d: bool) {
+    // A model that spares denormals while FS is set needs FCSR.FS first.
+    let fs_set = ctx.model_policy.fpu_denormal_input_needs_fs_clear.then(|| {
+        let fcsr_off = ir::immediates::Offset32::new(core_offset_of_fpu_fcsr());
+        let fcsr = ctx.builder.ins().load(ir::types::I32, MemFlagsData::trusted(), ctx.core_ptr, fcsr_off);
+        let fs = ctx.builder.ins().band_imm_s(fcsr, 0x0100_0000);
+        ctx.builder.ins().icmp_imm_s(IntCC::NotEqual, fs, 0)
+    });
     let is_denorm = if is_d {
-        emit_is_subnormal_or_qnan_d(ctx, bits)
+        emit_is_subnormal_or_qnan_d(ctx, bits, fs_set)
     } else {
-        emit_is_subnormal_or_qnan_s(ctx, bits)
+        emit_is_subnormal_or_qnan_s(ctx, bits, fs_set)
     };
     let bad_block = ctx.builder.create_block();
     let ok_block = ctx.builder.create_block();
@@ -5431,13 +5444,19 @@ fn emit_check_denorm_operand(ctx: &mut EmitCtx, bits: Value, is_d: bool) {
 /// mirrors `mips_exec.rs`'s bit-pattern helper; subnormal is exponent==0 and
 /// mantissa!=0 (zero itself, exponent==0 mantissa==0, is explicitly not
 /// denormal and must compute normally — e.g. `0.0 + 0.0`).
-fn emit_is_subnormal_or_qnan_s(ctx: &mut EmitCtx, bits: Value) -> Value {
+///
+/// `fs_set` is `Some` (FCSR.FS is set) for a model that spares denormals then.
+fn emit_is_subnormal_or_qnan_s(ctx: &mut EmitCtx, bits: Value, fs_set: Option<Value>) -> Value {
     let b = &mut ctx.builder;
     let exp = b.ins().band_imm_s(bits, 0x7F80_0000);
     let exp_is_zero = b.ins().icmp_imm_s(IntCC::Equal, exp, 0);
     let mantissa = b.ins().band_imm_s(bits, 0x007F_FFFF);
     let mantissa_nonzero = b.ins().icmp_imm_s(IntCC::NotEqual, mantissa, 0);
     let is_subnormal = b.ins().band(exp_is_zero, mantissa_nonzero);
+    let is_subnormal = match fs_set {
+        Some(fs_set) => b.ins().band_not(is_subnormal, fs_set),
+        None => is_subnormal,
+    };
 
     let exp_is_max = b.ins().icmp_imm_s(IntCC::Equal, exp, 0x7F80_0000);
     let is_nan = b.ins().band(exp_is_max, mantissa_nonzero);
@@ -5447,13 +5466,17 @@ fn emit_is_subnormal_or_qnan_s(ctx: &mut EmitCtx, bits: Value) -> Value {
 
     b.ins().bor(is_subnormal, is_qnan)
 }
-fn emit_is_subnormal_or_qnan_d(ctx: &mut EmitCtx, bits: Value) -> Value {
+fn emit_is_subnormal_or_qnan_d(ctx: &mut EmitCtx, bits: Value, fs_set: Option<Value>) -> Value {
     let b = &mut ctx.builder;
     let exp = b.ins().band_imm_s(bits, 0x7FF0_0000_0000_0000u64 as i64);
     let exp_is_zero = b.ins().icmp_imm_s(IntCC::Equal, exp, 0);
     let mantissa = b.ins().band_imm_s(bits, 0x000F_FFFF_FFFF_FFFFu64 as i64);
     let mantissa_nonzero = b.ins().icmp_imm_s(IntCC::NotEqual, mantissa, 0);
     let is_subnormal = b.ins().band(exp_is_zero, mantissa_nonzero);
+    let is_subnormal = match fs_set {
+        Some(fs_set) => b.ins().band_not(is_subnormal, fs_set),
+        None => is_subnormal,
+    };
 
     let exp_is_max = b.ins().icmp_imm_s(IntCC::Equal, exp, 0x7FF0_0000_0000_0000u64 as i64);
     let is_nan = b.ins().band(exp_is_max, mantissa_nonzero);
@@ -10811,7 +10834,7 @@ mod tests {
     fn cache_fingerprint_includes_the_model_policy() {
         let base = Codegen::new().cache_fingerprint(false).expect("default codegen is cacheable");
         let mut codegen = Codegen::new();
-        codegen.model_policy = ModelPolicy { lwr_preserves_upper: true };
+        codegen.model_policy = ModelPolicy { lwr_preserves_upper: true, ..Default::default() };
         assert_ne!(
             codegen.cache_fingerprint(false).expect("policy codegen is cacheable"),
             base,

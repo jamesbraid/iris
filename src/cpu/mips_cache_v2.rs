@@ -579,6 +579,10 @@ pub trait CpuModel: MipsCache {
     /// Bits of CP0 register 22, the Diagnostic register, that software writes.
     /// Zero: the model has no such register; it reads zero and ignores writes.
     const CP0_DIAG_WRITE_MASK: u32 = 0;
+    /// Take Unimplemented Operation for a denormal floating-point operand only
+    /// while FCSR.FS is clear. False: the operand traps whatever FS says. A
+    /// quiet NaN operand traps either way.
+    const FPU_DENORMAL_INPUT_NEEDS_FS_CLEAR: bool = false;
     /// Keep the R10000 family's uncached attribute, EntryLo bits 63:62, and
     /// put it on the bus for a mapped uncached access, as an unmapped xkphys
     /// access carries its address bits 58:57. NEC U10278EJ4V0UM section 11.3,
@@ -1468,6 +1472,11 @@ pub mod model {
         /// that software writes. Zero: no such register, it reads zero and
         /// writes are ignored.
         pub cp0_diag_write_mask: u32,
+        /// A denormal floating-point operand takes Unimplemented Operation
+        /// only while FCSR.FS is clear; with FS set the instruction computes
+        /// on it. Off: the operand traps whatever FS says. A quiet NaN
+        /// operand traps either way.
+        pub fpu_denormal_input_needs_fs_clear: bool,
     }
 
     impl Profile {
@@ -1484,6 +1493,7 @@ pub mod model {
             lwr_preserves_upper: false,
             narrow_stores_carry_gpr: false,
             cp0_diag_write_mask: 0,
+            fpu_denormal_input_needs_fs_clear: false,
         };
         /// The existing R10000 types (IP28, Octane, O2): family behaviour,
         /// none of the later approximations.
@@ -1536,6 +1546,8 @@ pub mod model {
                 name: "R16000",
                 // QEMU's R16000 diagnostic_rw_bitmask.
                 cp0_diag_write_mask: 0x0403_cffb,
+                // QEMU's check_denormal_input_s tests FCSR.FS for ADD.S and DIV.S.
+                fpu_denormal_input_needs_fs_clear: true,
                 ..profile(R14000)
             },
             _ => Profile::BASE,
@@ -3763,6 +3775,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
     const LWR_PRESERVES_UPPER: bool = model::profile(MODEL).lwr_preserves_upper;
     const NARROW_STORES_CARRY_GPR: bool = model::profile(MODEL).narrow_stores_carry_gpr;
     const CP0_DIAG_WRITE_MASK: u32 = model::profile(MODEL).cp0_diag_write_mask;
+    const FPU_DENORMAL_INPUT_NEEDS_FS_CLEAR: bool = model::profile(MODEL).fpu_denormal_input_needs_fs_clear;
     const NAME: &'static str = model::profile(MODEL).name;
 }
 

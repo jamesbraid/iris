@@ -782,6 +782,64 @@ mod tests {
         assert_eq!(table, diag(&MipsCpu::new(core_with::<R16000ShadowCache>())).1, "and the table");
     }
 
+    /// The R16000 takes Unimplemented Operation for a denormal ADD.S or DIV.S
+    /// operand only while FCSR.FS is clear; with FS set the instruction
+    /// completes on the operand. The R14000 and R10000 take the trap either
+    /// way. Vectors and FCSR values from tests/functional/mips64/test_r10k_fpu.py
+    /// in jamesbraid/qemu-sgi-origami (test_r16000_add_subnormal_input and
+    /// test_r16000_div_subnormal_input, with and without _fs), with the
+    /// underflow enable 0x100 set.
+    #[test]
+    fn r16000_traps_a_denormal_operand_only_while_fs_is_clear() {
+        use crate::cpu::mips_cache_shadow::{R10000ShadowCache, R14000ShadowCache, R16000ShadowCache};
+        const FS: u32 = 1 << 24;
+        const UNDERFLOW_ENABLE: u32 = 0x100;
+        const DENORMAL: u32 = 1; // 2^-149, the smallest single
+        fn run<C: CpuModel + From<Arc<dyn BusDevice>>>(
+            funct: u32, fs_bits: u32, ft_bits: u32, fcsr: u32,
+        ) -> (Option<u32>, u32, u32) {
+            let bus: Arc<dyn BusDevice> = Arc::new(MockMemory::new());
+            let cfg = MipsCpuConfig::for_model::<C>();
+            let mut exec = MipsExecutor::<PassthroughTlb, C>::new(bus, PassthroughTlb::default(), &cfg);
+            disable_jitv2(&mut exec);
+            exec.core.cp0_status |= STATUS_CU1 | STATUS_FR;
+            exec.update_fpr_mode();
+            exec.core.fpu_fcsr = fcsr;
+            exec.core.write_fpr_w(1, fs_bits);
+            exec.core.write_fpr_w(2, ft_bits);
+            exec.core.write_fpr_w(0, 0x5a5a_5a5a);
+            let status = exec.exec(make_cop1_compute(RS_S, 2, 1, 0, funct));
+            let trapped = (status & EXEC_IS_EXCEPTION != 0).then(|| (status >> 2) & 0x1f);
+            (trapped, exec.core.read_fpu_control(31), exec.core.read_fpr_w(0))
+        }
+        let one = 1.0f32.to_bits();
+        for (funct, fs_bits, ft_bits) in [(FUNCT_FADD, one, DENORMAL), (FUNCT_FDIV, 0, DENORMAL)] {
+            // FS clear: every model traps, with cause E alone and the destination untouched.
+            for (name, (trapped, fcsr, dest)) in [
+                ("R10000", run::<R10000ShadowCache>(funct, fs_bits, ft_bits, UNDERFLOW_ENABLE)),
+                ("R14000", run::<R14000ShadowCache>(funct, fs_bits, ft_bits, UNDERFLOW_ENABLE)),
+                ("R16000", run::<R16000ShadowCache>(funct, fs_bits, ft_bits, UNDERFLOW_ENABLE)),
+            ] {
+                assert_eq!(trapped, Some(crate::cpu::mips_exec::EXC_FPE), "{name} funct {funct:#x}");
+                assert_eq!(fcsr, UNDERFLOW_ENABLE | (1 << 17), "{name} funct {funct:#x}");
+                assert_eq!(dest, 0x5a5a_5a5a, "{name} funct {funct:#x}");
+            }
+            // FS set: the older models still trap.
+            let (trapped, ..) = run::<R14000ShadowCache>(funct, fs_bits, ft_bits, FS | UNDERFLOW_ENABLE);
+            assert_eq!(trapped, Some(crate::cpu::mips_exec::EXC_FPE), "R14000 funct {funct:#x}");
+        }
+        // FS set, R16000: 1.0 + 2^-149 completes as 1.0, and 0 / 2^-149 as exact zero.
+        // QEMU also reads Inexact (FCSR 0x01001104) for the sum; the Iris core raises
+        // no Inexact for any arithmetic instruction, so that bit is absent here.
+        assert_eq!(run::<R16000ShadowCache>(FUNCT_FADD, one, DENORMAL, FS | UNDERFLOW_ENABLE),
+                   (None, 0x0100_0100, one));
+        assert_eq!(run::<R16000ShadowCache>(FUNCT_FDIV, 0, DENORMAL, FS | UNDERFLOW_ENABLE),
+                   (None, 0x0100_0100, 0));
+        // A quiet NaN operand is still refused with FS set.
+        let (trapped, ..) = run::<R16000ShadowCache>(FUNCT_FADD, one, 0x7fc0_0000, FS);
+        assert_eq!(trapped, Some(crate::cpu::mips_exec::EXC_FPE));
+    }
+
     /// JIT store callouts must carry the same source register as the
     /// interpreter, and only for a model that asks for it.
     #[test]

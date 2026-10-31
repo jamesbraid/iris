@@ -4425,6 +4425,77 @@ mod tests {
         }
     }
 
+    /// The interpreter and the compiled code on an R16000 executor, from the
+    /// same FPR and FCSR state. The compiled run gets the model's own policy,
+    /// as the production path publishes it. `None` if the instruction does
+    /// not compile.
+    fn r16000_interpreter_and_jit(instr: u32, fpr: [u64; 32], fcsr: u32) -> Option<(CoreSnapshot, CoreSnapshot)> {
+        use crate::cpu::mips_cache_shadow::R16000ShadowCache;
+        let pc = 0xFFFF_FFFF_8000_1000u64;
+        let word_offset = (pc as u16 / 4) & 0x3FF;
+        let cfg = MipsCpuConfig::for_model::<R16000ShadowCache>();
+        let new_executor = || {
+            let bus: Arc<dyn BusDevice> = Arc::new(MockMemory::new_not_compilable());
+            let mut exec = Box::new(MipsExecutor::<PassthroughTlb, R16000ShadowCache>::new(
+                bus, PassthroughTlb::default(), &cfg));
+            exec.core.pc = pc;
+            exec.core.fpr = fpr;
+            exec.set_cp0_status(crate::cpu::mips_core::STATUS_CU1 | crate::cpu::mips_core::STATUS_FR);
+            exec.core.fpu_fcsr = fcsr;
+            exec
+        };
+        let mut interp = new_executor();
+        interp.exec(instr);
+        let interp = CoreSnapshot::capture(&interp.core);
+
+        let mut page = [0u32; ENTRIES_PER_PAGE];
+        page[word_offset as usize] = instr;
+        let mut analyzer = Analyzer::new();
+        let (walked, non_empty) = analyzer.walk_bounded(&page, word_offset, 0, 1);
+        assert!(non_empty, "instruction must be admitted to compilation");
+        let mut instrs_owned = *walked;
+        let mut codegen = Codegen::new();
+        codegen.model_policy = crate::cpu::jitv2::codegen::ModelPolicy::of::<R16000ShadowCache>();
+        let jit_fn: JitFn = codegen.compile_region(&mut instrs_owned, word_offset, true, false)?;
+        // The callouts recover the executor from the core, so it is an R16000 too.
+        let mut jit = new_executor();
+        jit.install_jit_hooks();
+        assert_eq!(*jit.jitv2.lock().model_policy.lock(), codegen.model_policy,
+                   "the production path publishes the model's policy to the compile pool");
+        unsafe { jit_fn(&mut jit.core as *mut MipsCore) };
+        std::mem::forget(codegen);
+        Some((interp, CoreSnapshot::capture(&jit.core)))
+    }
+
+    /// A model that spares denormal operands while FCSR.FS is set (the R16000)
+    /// must behave the same compiled as interpreted: the trap with FS clear,
+    /// completion with FS set, and a quiet NaN refused either way. Vectors as
+    /// in tests/functional/mips64/test_r10k_fpu.py (jamesbraid/qemu-sgi-origami).
+    #[test]
+    fn r16000_jit_spares_a_denormal_operand_only_while_fs_is_set() {
+        use crate::cpu::mips_isa::{FUNCT_FADD, FUNCT_FDIV, OP_COP1, RS_S};
+        const FS: u32 = 1 << 24;
+        let denormal = 1u64;
+        let (one, nan) = (1.0f32.to_bits() as u64, 0x7fc0_0000u64);
+        for (funct, fs_bits, ft_bits, fcsr, completes) in [
+            (FUNCT_FADD, one, denormal, 0x100, false),
+            (FUNCT_FADD, one, denormal, FS | 0x100, true),
+            (FUNCT_FDIV, 0, denormal, 0x100, false),
+            (FUNCT_FDIV, 0, denormal, FS | 0x100, true),
+            (FUNCT_FADD, one, nan, FS, false),
+        ] {
+            let mut fpr = [0u64; 32];
+            fpr[1] = fs_bits;
+            fpr[2] = ft_bits;
+            fpr[3] = 0x5a5a_5a5a;
+            let instr = make_r(OP_COP1, RS_S, 2, 1, 3, funct);
+            let (interp, jit) = r16000_interpreter_and_jit(instr, fpr, fcsr)
+                .expect("ADD.S and DIV.S must compile");
+            assert_eq!(jit, interp, "funct {funct:#x} fcsr {fcsr:#x}");
+            assert_eq!(jit.fpr[3] != 0x5a5a_5a5a, completes, "funct {funct:#x} fcsr {fcsr:#x}: wrote the destination");
+        }
+    }
+
     #[test]
     fn lwl_lwr_combine_to_a_full_unaligned_word_load_matches_interpreter() {
         // The canonical compiler-generated idiom for an unaligned word
