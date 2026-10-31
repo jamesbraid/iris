@@ -38,7 +38,8 @@ static int npass, nfail, nskip, nxfail;
 /* Where a driver itself departs from the GL spec (the board does as told),
    checked in its command stream: reported XFAIL / XPASS, not failures.
    IRIX 6.5.22 libGLcore on IMPACT. */
-static const struct { const char *name; const char *why; int gr2_only; } xfails[] = {
+enum { ALL_BOARDS, GR2_ONLY, VPRO_ONLY };
+static const struct { const char *name; const char *why; int board; } xfails[] = {
     { "enable/POLYGON_OFFSET_LINE/on", "libGLcore: glGetBooleanv(GL_POLYGON_OFFSET_LINE) is GL_INVALID_ENUM" },
     { "enable/POLYGON_OFFSET_LINE/off", "libGLcore: glGetBooleanv(GL_POLYGON_OFFSET_LINE) is GL_INVALID_ENUM" },
     { "enable/POLYGON_OFFSET_POINT/on", "libGLcore: glGetBooleanv(GL_POLYGON_OFFSET_POINT) is GL_INVALID_ENUM" },
@@ -57,22 +58,33 @@ static const struct { const char *name; const char *why; int gr2_only; } xfails[
     /* GR2 (XZ / Extreme), IRIX 6.5.22 libGLcore EXPRESS: it answers every
        query from its own state except the current and raster colour,
        index and normal (__glExpDoGet), and textures are all software. */
-    { "current/RASTER_DISTANCE", "libGLcore EXPRESS keeps the raster position itself and returns eye z (negative in front of the eye), not the distance", 1 },
-    { "texlevel/RED_SIZE", "libGLcore EXPRESS (software textures): an RGBA8 level reports 24 bits a component", 1 },
-    { "texlevel/GREEN_SIZE", "libGLcore EXPRESS (software textures): an RGBA8 level reports 24 bits a component", 1 },
-    { "texlevel/BLUE_SIZE", "libGLcore EXPRESS (software textures): an RGBA8 level reports 24 bits a component", 1 },
-    { "texlevel/ALPHA_SIZE", "libGLcore EXPRESS (software textures): an RGBA8 level reports 24 bits a component", 1 },
-    { "fb/INDEX_WRITEMASK", "libGLcore EXPRESS drops glIndexMask in RGBA mode", 1 },
-    { "fb/INDEX_CLEAR_VALUE", "libGLcore EXPRESS drops glClearIndex in RGBA mode", 1 },
+    { "current/RASTER_DISTANCE", "libGLcore EXPRESS keeps the raster position itself and returns eye z (negative in front of the eye), not the distance", GR2_ONLY },
+    { "texlevel/RED_SIZE", "libGLcore EXPRESS (software textures): an RGBA8 level reports 24 bits a component", GR2_ONLY },
+    { "texlevel/GREEN_SIZE", "libGLcore EXPRESS (software textures): an RGBA8 level reports 24 bits a component", GR2_ONLY },
+    { "texlevel/BLUE_SIZE", "libGLcore EXPRESS (software textures): an RGBA8 level reports 24 bits a component", GR2_ONLY },
+    { "texlevel/ALPHA_SIZE", "libGLcore EXPRESS (software textures): an RGBA8 level reports 24 bits a component", GR2_ONLY },
+    { "fb/INDEX_WRITEMASK", "libGLcore EXPRESS drops glIndexMask in RGBA mode", GR2_ONLY },
+    { "fb/INDEX_CLEAR_VALUE", "libGLcore EXPRESS drops glClearIndex in RGBA mode", GR2_ONLY },
+    /* VPro (Odyssey), IRIX 6.5.30 libGLcore. A board trace of each case shows
+       no board access in the set or the get, so these are the library's own
+       answers (see the datasheet's raster distance section). */
+    { "current/RASTER_DISTANCE", "libGLcore keeps the raster position itself and returns eye z (negative in front of the eye), not the distance", VPRO_ONLY },
+    { "fog/INDEX", "libGLcore answers glFogf(GL_FOG_INDEX) from no board state (observed: the set and the get touch no board register) and returns 0", VPRO_ONLY },
+    { "fb/INDEX_WRITEMASK", "libGLcore keeps glIndexMask out of RGBA mode (observed: no board word for set or get) and returns 0", VPRO_ONLY },
+    { "fb/INDEX_CLEAR_VALUE", "libGLcore keeps glClearIndex out of RGBA mode (observed: no board word for set or get) and returns 1", VPRO_ONLY },
+    { "enable/PIXEL_TEXTURE_SGIS/on", "libGLcore: glGetBooleanv(GL_PIXEL_TEXTURE_SGIS) is GL_INVALID_ENUM (observed: no board access)", VPRO_ONLY },
+    { "enable/PIXEL_TEXTURE_SGIS/off", "libGLcore: glGetBooleanv(GL_PIXEL_TEXTURE_SGIS) is GL_INVALID_ENUM (observed: no board access)", VPRO_ONLY },
 };
 
-static int gr2;
+static int gr2, vpro;
 
 static const char *xfail_why(const char *name)
 {
     unsigned i;
     for (i = 0; i < sizeof xfails / sizeof xfails[0]; i++)
-        if (!strcmp(name, xfails[i].name) && (gr2 || !xfails[i].gr2_only))
+        if (!strcmp(name, xfails[i].name) &&
+            (xfails[i].board == ALL_BOARDS || (xfails[i].board == GR2_ONLY && gr2) ||
+             (xfails[i].board == VPRO_ONLY && vpro)))
             return xfails[i].why;
     return 0;
 }
@@ -1362,6 +1374,7 @@ int main(int argc, char **argv)
     {
         const char *rn = (const char *)glGetString(GL_RENDERER);
         gr2 = rn && (!strncmp(rn, "GR", 2) || !strncmp(rn, "GU", 2));
+        vpro = rn && !strncmp(rn, "VPRO", 4);
     }
     printf("glstate: %s %s %s (visual 0x%x)\n", glGetString(GL_VENDOR), glGetString(GL_RENDERER),
            glGetString(GL_VERSION), (unsigned)vi->visualid);
