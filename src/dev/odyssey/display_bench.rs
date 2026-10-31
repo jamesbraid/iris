@@ -274,7 +274,7 @@ fn resolve_and_present_timings() {
 
         Odyssey::frame(&locks, &display);
         let ms = bench(|| {
-            locks.board.get().scanout.invalidate(first, rows);
+            locks.test_board().scanout.invalidate(first, rows);
             Odyssey::frame(&locks, &display);
         });
         println!("frame {name:18} dirty, resolved and presented: {ms:.3} ms");
