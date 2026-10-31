@@ -369,7 +369,10 @@ pub enum DepthStencil {
 ///   colour and the depth word alone;
 /// - a write passes the same clip-rectangle and window-ID tests as a GL
 ///   fragment;
-/// - a write ignores the stencil write mask (register 0x0452);
+/// - a write ignores the stencil write mask (register 0x0452). The library's
+///   burst does not: it sends the mask (draw.rs, image_depth_stencil_word()).
+///   Whether the DMA header's branch is ever taken for a depth or stencil
+///   image is not checked in the datasheet, so this choice stands;
 /// - a depth write is always the 24-bit word, bits 23:0 of each value.
 pub fn dma_depth_stencil_write(hdr: &[u32]) -> Option<DepthStencil> {
     if hdr[ODSY_DMA_HDR_CONTROL] & ODSY_WRITE_CODE_MASK != ODSY_IMAGE_CODE_DEPTH_STENCIL {
