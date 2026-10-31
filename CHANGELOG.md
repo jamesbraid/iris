@@ -33,6 +33,12 @@ hashes are given where a change is easiest to understand by reading the commit.
   Bedrock, dual-head XBridge, IOC3 networking and two-channel ISP12160 SCSI.
   The normal interpreter boot reaches the IRIX 6.5.30 root shell with PROM
   6.210. See the [Fuel guide](docs/fuel-ip34.md).
+- **jitv2 compiles uncached code from the uncached view.** The PROM runs from the
+  reset window uncached; once memory covers that window the cached view returns
+  RAM there, and the compile pool used to compile RAM's bytes in place of the
+  PROM's. An uncached fetch now keys a code page of its own and is compiled and
+  invalidated through the view the CPU fetched it by. Other machines are
+  unchanged.
 
 ### PCI configuration
 

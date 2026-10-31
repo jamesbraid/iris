@@ -469,7 +469,7 @@ pub fn write_jitv2_html(
     // (Jitv2::code_bytes_used doc comment) — fine for an on-demand dump,
     // not a hot path.
     for page in jit.claimed_pages() {
-        let phys_addr = page.pfn * crate::cpu::jitv2::PAGE_SIZE;
+        let phys_addr = page.phys_base();
         // PROM_BASE/PROM_SIZE mirror the private constants in
         // `prom.rs`/`physical.rs` (0x1FC00000, 1MB) — jitv2 can and does
         // compile boot-time PROM code (physical alias of

@@ -75,6 +75,42 @@ pub fn pfn_of(phys_addr: u64) -> Option<Pfn> {
     (pfn < PFN_MAP_ENTRIES as u64).then_some(pfn as Pfn)
 }
 
+/// Set in a page key when the CPU fetched the page uncached on a machine
+/// whose uncached bus view decodes differently from its cached one (IP35).
+/// The key is `pfn | UNCACHED_VIEW_PFN`; the other machines never set it.
+/// See [`code_key`].
+pub const UNCACHED_VIEW_PFN: Pfn = 1 << 20;
+
+/// Set in the bus address a code page is read or generation-tracked through
+/// when the page was fetched uncached. A bus that has no separate uncached
+/// code view never sees it (the key bit is never set there).
+pub const UNCACHED_VIEW_ADDR: u64 = 1 << 63;
+
+/// `PfnMap` entries when uncached views are enabled: one 32-bit frame space
+/// per view.
+pub const PFN_MAP_VIEW_ENTRIES: usize = PFN_MAP_ENTRIES * 2;
+
+/// The page key for a fetch at `phys_addr`: the frame, plus
+/// [`UNCACHED_VIEW_PFN`] when `uncached_view` says this fetch reached memory
+/// through the uncached view.
+#[inline(always)]
+pub fn code_key(phys_addr: u64, uncached_view: bool) -> Option<Pfn> {
+    pfn_of(phys_addr).map(|pfn| if uncached_view { pfn | UNCACHED_VIEW_PFN } else { pfn })
+}
+
+/// Physical base address of the frame a page key names, without the view bit.
+#[inline(always)]
+pub fn key_phys_base(key: Pfn) -> u32 {
+    (key & !UNCACHED_VIEW_PFN) * PAGE_SIZE
+}
+
+/// Bus address for reading or tracking the page `key`, in the view it names.
+#[inline(always)]
+pub fn key_bus_addr(key: Pfn, offset: u32) -> u64 {
+    let addr = (key & !UNCACHED_VIEW_PFN) as u64 * PAGE_SIZE as u64 + offset as u64;
+    if key & UNCACHED_VIEW_PFN != 0 { addr | UNCACHED_VIEW_ADDR } else { addr }
+}
+
 /// Direct-mapped `pfn -> PageSlot` lookup, replacing the `HashMap<Pfn,
 /// PageSlot>` both page pools used to carry.
 ///
@@ -102,7 +138,21 @@ pub const PFN_MAP_EMPTY: u32 = u32::MAX;
 impl PfnMap {
     /// One allocation, every frame empty.
     pub fn new() -> Self {
-        PfnMap((0..PFN_MAP_ENTRIES).map(|_| AtomicU32::new(PFN_MAP_EMPTY)).collect())
+        Self::with_entries(PFN_MAP_ENTRIES)
+    }
+
+    /// A map that also holds the uncached-view keys ([`UNCACHED_VIEW_PFN`]).
+    pub fn with_views() -> Self {
+        Self::with_entries(PFN_MAP_VIEW_ENTRIES)
+    }
+
+    fn with_entries(entries: usize) -> Self {
+        PfnMap((0..entries).map(|_| AtomicU32::new(PFN_MAP_EMPTY)).collect())
+    }
+
+    /// Whether uncached-view keys fit.
+    pub fn has_views(&self) -> bool {
+        self.0.len() >= PFN_MAP_VIEW_ENTRIES
     }
 
     /// The slot for `pfn`, or `None` when unmapped.
@@ -1280,6 +1330,18 @@ impl PhysicalCodePage {
         self.pfn != UNCLAIMED_PFN
     }
 
+    /// Physical base address of the frame this page covers.
+    #[inline]
+    pub fn phys_base(&self) -> u32 {
+        key_phys_base(self.pfn)
+    }
+
+    /// Whether the CPU fetched this page through the uncached view.
+    #[inline]
+    pub fn is_uncached_view(&self) -> bool {
+        self.pfn != UNCLAIMED_PFN && self.pfn & UNCACHED_VIEW_PFN != 0
+    }
+
     pub fn claim(&mut self, pfn: Pfn, gen: *const AtomicU64, fr1: bool) {
         debug_assert!(std::ptr::eq(self.gen, &NEVER_COMPILABLE_GEN) && self.pfn == UNCLAIMED_PFN,
             "claim() called on a slot that wasn't clean (pfn={:#x}) — every path that reuses a slot must reset it first (see reset_to_unclaimed)",
@@ -2426,11 +2488,25 @@ impl Jitv2 {
         }
         let slot = self.free_head;
         self.free_head = self.pages[slot as usize].next;
-        let gen = bus.gen_ptr(phys_addr as u64);
+        // The generation counter belongs to the view the page is read
+        // through: `phys_addr` names the frame, the key says which view.
+        let gen_addr = phys_addr as u64 | if pfn & UNCACHED_VIEW_PFN != 0 { UNCACHED_VIEW_ADDR } else { 0 };
+        let gen = bus.gen_ptr(gen_addr);
         self.pages[slot as usize].claim(pfn, gen, fr1);
         self.pages[slot as usize].next = NO_SLOT;
         self.pfn_to_slot.insert(pfn, slot);
         Some(slot)
+    }
+
+    /// Let the pool hold uncached-view pages ([`UNCACHED_VIEW_PFN`]). Call
+    /// before any page is claimed and before an executor captures the lookup
+    /// pointers (`jitv2_bind_fast_lookup`); the map is reallocated.
+    pub fn enable_uncached_views(&mut self) {
+        if self.pfn_to_slot.has_views() {
+            return;
+        }
+        assert_eq!(self.pages_used(), 0, "uncached code views must be enabled before any page is claimed");
+        self.pfn_to_slot = PfnMap::with_views();
     }
 
     /// Pointers for lock-free `pfn -> *mut PhysicalCodePage` fast lookup.
