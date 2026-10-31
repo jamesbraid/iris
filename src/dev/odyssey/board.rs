@@ -195,7 +195,7 @@ pub struct Board {
     pub tex_rect_reported: bool,
     pub dma_seq: u64,
     /// Monotonic for this device instance.
-    pub trace_sequence: u64,
+    pub trace_sequence: std::sync::atomic::AtomicU64,
 
     /// Tests: the next slice on the board's thread first sleeps this long.
     #[cfg(test)]
@@ -429,8 +429,8 @@ pub struct Board {
     pub reader: ScanoutReader,
 
     // Diagnostic bookkeeping, not guest state.
-    pub reported_addr: [u32; SGI_ODYSSEY_UNIMP_REPORTS as usize],
-    pub reported_addr_count: u32,
+    pub reported_addr: [std::sync::atomic::AtomicU32; SGI_ODYSSEY_UNIMP_REPORTS as usize],
+    pub reported_addr_count: std::sync::atomic::AtomicU32,
     pub reported_cmd: [u32; SGI_ODYSSEY_UNIMP_REPORTS as usize],
     pub reported_cmd_count: u32,
     pub line_stipple_reported: bool,
@@ -538,7 +538,7 @@ impl Default for Board {
             tex_linear_valid: 0,
             tex_rect_reported: false,
             dma_seq: 0,
-            trace_sequence: 0,
+            trace_sequence: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             test_slice_sleep_ms: 0,
             did: Vec::new(),
@@ -703,8 +703,8 @@ impl Default for Board {
             scanout,
             #[cfg(test)]
             reader: Default::default(),
-            reported_addr: [0; SGI_ODYSSEY_UNIMP_REPORTS as usize],
-            reported_addr_count: 0,
+            reported_addr: std::array::from_fn(|_| std::sync::atomic::AtomicU32::new(0)),
+            reported_addr_count: std::sync::atomic::AtomicU32::new(0),
             reported_cmd: [0; SGI_ODYSSEY_UNIMP_REPORTS as usize],
             reported_cmd_count: 0,
             line_stipple_reported: false,
@@ -855,7 +855,7 @@ impl Board {
         self.aux_image_reported = false;
         self.backend_index = 0;
         self.backend_count = 0;
-        self.reported_addr_count = 0;
+        self.reported_addr_count.store(0, std::sync::atomic::Ordering::Relaxed);
         self.reported_cmd_count = 0;
         self.line_stipple_reported = false;
         self.dma_bpp_reported = false;
