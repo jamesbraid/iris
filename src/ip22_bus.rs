@@ -74,16 +74,7 @@ impl BusDevice for GioBusErrorDevice {
 
 // Address range constants per MC/Indy hardware specification
 
-// Low memory (256MB at 0x08000000)
-pub const LOMEM_BASE: u32 = 0x08000000;
-pub const LOMEM_END: u32  = 0x18000000;
-
-// High memory (256MB at 0x20000000)
-pub const HIMEM_BASE: u32 = 0x20000000;
-pub const HIMEM_END: u32  = 0x30000000;
-
-// 128MB per bank; 4 banks total (0,1 in lomem; 2,3 in himem)
-pub const BANK_SIZE: u32 = 0x08000000;
+pub use crate::ip22_map::{BANK_SIZE, HIMEM_BASE, HIMEM_END, LOMEM_BASE, LOMEM_END};
 
 // Newport Graphics (4MB GIO slot at 0x1F000000)
 const NEWPORT_BASE: u32 = 0x1F000000;
