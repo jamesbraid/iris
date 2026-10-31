@@ -2603,7 +2603,6 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
                 // set) -- the property a persistent code cache needs.
                 // Several CPUs share compiled code, so no one core's address.
                 core: if self.core.smp || std::env::var_os("IRIS_JIT_PIC").is_some() { None } else { core::num::NonZeroUsize::new(core_addr) },
-                lwr_keeps_upper: C::R10K_CACHE_OPS,
             };
             *j.jit_consts.lock() = consts;
             // The inline-compile path (`jitv2_compile_inline`) takes this
