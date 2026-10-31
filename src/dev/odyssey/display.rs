@@ -24,6 +24,7 @@ pub struct Display {
     pub(super) more_cpus: Mutex<Vec<(CyclesPtr, Arc<AtomicU64>)>>,
     pub screenshot: AtomicBool,
     pub frame: AtomicBool,
+    /// Whether the display thread releases the renderer when it ends.
     pub(super) display_stop: crate::gfx_display::DisplayStop,
     local: Mutex<Option<Local>>,
     /// What the display keeps of the scanout: the presented frame, the
@@ -160,14 +161,10 @@ impl Display {
     }
 
     /// Drop the frame state but leave the renderer as it is.
-    pub(super) fn release_frame(&self) {
-        self.local.lock().take();
-    }
-
+    /// The display thread's last act: release the renderer, unless the stop
+    /// came from the main thread, and drop the per-frame overlay state.
     pub(super) fn stop(&self) {
-        if let Some(renderer) = self.renderer.lock().as_mut() {
-            renderer.stop();
-        }
+        self.display_stop.finish(&self.renderer);
         self.local.lock().take();
     }
 }
