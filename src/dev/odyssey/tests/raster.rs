@@ -667,3 +667,28 @@ fn the_screen_follows_the_frame_through_frames_that_present_a_few_lines() {
         }
     }
 }
+
+/// The drawable comparison that runs before every command looks at the clip
+/// rectangles the list counts and no others: a change inside the count is
+/// seen, and one past it, where nothing is drawn against, is not.
+#[test]
+fn the_drawable_comparison_covers_the_rectangles_the_list_counts() {
+    let mut a = GlDrawable::default();
+    a.clip.n = 2;
+    a.clip.r[0] = ClipRect { x0: 0, y0: 0, x1: 9, y1: 9 };
+    a.clip.r[1] = ClipRect { x0: 20, y0: 0, x1: 29, y1: 9 };
+    let mut b = a;
+    assert!(a.drawable_eq(&b));
+
+    b.clip.r[5] = ClipRect { x0: 1, y0: 2, x1: 3, y1: 4 };
+    assert!(a.drawable_eq(&b), "past the count");
+
+    for i in 0..2 {
+        let mut c = a;
+        c.clip.r[i].y1 += 1;
+        assert!(!a.drawable_eq(&c), "rectangle {i}");
+    }
+    let mut c = a;
+    c.clip.n = 3;
+    assert!(!a.drawable_eq(&c), "the count");
+}

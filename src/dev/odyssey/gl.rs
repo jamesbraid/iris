@@ -2114,14 +2114,17 @@ impl ClipRect {
 
 impl GlDrawable {
     // Compares the two drawables field by field.
-    fn drawable_eq(&self, b: &GlDrawable) -> bool {
+    pub fn drawable_eq(&self, b: &GlDrawable) -> bool {
         self.bound == b.bound
             && self.origin == b.origin
             && self.width == b.width
             && self.height == b.height
             && self.clip.n == b.clip.n
             && self.clip.empty == b.clip.empty
-            && self.clip.r.iter().zip(b.clip.r.iter()).all(|(x, y)| x.gl_clip_rect_eq(y))
+            // Only the rectangles the list counts: this runs before every
+            // command, and a window rarely owns more than one or two of the
+            // sixteen. Those past the count are not drawn against.
+            && self.clip.r.iter().zip(b.clip.r.iter()).take(self.clip.n as usize).all(|(x, y)| x.gl_clip_rect_eq(y))
             && self.front == b.front
             && self.back == b.back
             && self.extra == b.extra
