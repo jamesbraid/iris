@@ -60,7 +60,7 @@ opcodes only (`l1i_decode`, `L1I_CLASSES`). `addiu $4,$0,2` is `0x3_4420_0004`.
 - Index Load Data (I) returns the stored word and parity as stored, so a readback
   stored back verbatim round-trips and executes. A refill is not modelled: a line
   the guest never staged reads back as the shadow's contents, not as the
-  predecoded memory word. iris never refills a primary line, so there is no architectural word to carry; the readback of a staged word is the stored word. A word with p[35:32] = 0xf is this model's own encoding
+  predecoded memory word. iris never refills a primary line, so there is no architectural word to carry; the readback of a staged word is the stored word. A word with p[35:32] = 0xf and the model's raw flag (set by a refill, kept by a verbatim Index Store Data of a word Index Load Data handed out) is this model's own encoding
   of a raw instruction in p[31:0] (`L1I_RAW`), so a word outside the sampled set
   can round-trip. Model choice; the hardware contents are unknown.
 
@@ -100,3 +100,8 @@ Dropping any of the first three fails `a_compiled_load_hits_a_staged_line_not_th
   and DMA.
 - Staged lines are saved in snapshots (`save_cache_state`). The rest of the
   shadow arrays, which only diagnostics read, are not.
+
+Staged-line counts (`l2 probe 0`, the only CPU in these configurations): 0 at
+login on the Octane, Fuel and O2. The Fuel PROM stages about 16,000 secondary
+lines and 54 primary I lines in 69 pages while it copies itself, and has none
+left by the time it probes USB.

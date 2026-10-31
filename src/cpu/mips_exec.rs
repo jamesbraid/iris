@@ -3272,18 +3272,17 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         self.update_translate_fn();
         self.update_fpr_mode();
         self.nanotlb_invalidate();
-        #[cfg(feature = "cache-ecc")]
         self.sync_cache_error_control();
     }
 
     /// Tell the cache which Status bits govern parity: CE forces the ECC
     /// register into stored check bits, and DE or ERL turn detection off.
     /// Every Status change comes through `resync_privilege_state`.
-    #[cfg(feature = "cache-ecc")]
     #[inline]
     fn sync_cache_error_control(&self) {
         let s = self.core.cp0_status;
         self.cache.set_error_control(s & STATUS_CE != 0, s & (STATUS_DE | STATUS_ERL) == 0);
+        #[cfg(feature = "cache-ecc")]
         self.cache.set_cache_ecc(self.core.cp0_ecc);
     }
 
