@@ -455,6 +455,148 @@ fn write_job(job: Job) {
     }
 }
 
+// ---- in-session tier ----------------------------------------------------
+
+/// Compiled pages still in one code arena, under the same key and variant
+/// rules as the disk cache, so a page whose bytes return to an earlier
+/// version gets its earlier code back without a compile or a copy. Always
+/// on; it needs only a fingerprint, not `[jitv2] cache`.
+///
+/// The case it was built for: IRIX rewrites the first word of the refill and
+/// XTLB refill vectors on context switches (`ld k1` of the handler address,
+/// or a branch past it), so physical page 0 alternates between two contents.
+/// Without this, every switch recompiled the page, about 35 times a second
+/// under a GL demo on the Octane.
+///
+/// A record holds a function pointer into the arena, so the table belongs to
+/// the arena (`PagedArenaState::resident`): every arena reset (flush, page
+/// pool exhaustion, a new compile pool) starts with an empty one. Memory is
+/// bounded by [`RESIDENT_CAP`] records of about 4.3 KB each (the page copy a
+/// hit is verified against), least recently used evicted first, and
+/// [`MAX_VARIANTS`] per key as on disk. Evicting a record frees only that
+/// copy; its code stays in the arena until the arena goes.
+pub const RESIDENT_CAP: usize = 4096;
+
+/// What a hit hands back: a published function and what it was compiled
+/// for.
+#[derive(Clone, Copy, Debug)]
+pub struct Resident {
+    /// The published, sealed function.
+    pub func: *const (),
+    pub entries: Entries,
+    pub used: Entries,
+    pub instr_count: u32,
+    pub code_size: u32,
+}
+
+// Safety: `func` is sealed code in the arena that owns the table, callable
+// from any thread for as long as that arena lives.
+unsafe impl Send for Resident {}
+
+struct ResidentRec {
+    words: Box<[u32; ENTRIES_PER_PAGE]>,
+    r: Resident,
+    last_use: u64,
+}
+
+#[derive(Default)]
+struct ResidentInner {
+    pages: std::collections::HashMap<(Fingerprint, PageHash, bool), Vec<ResidentRec>>,
+    len: usize,
+    tick: u64,
+    hits: u64,
+}
+
+/// The in-session tier for one arena. See [`RESIDENT_CAP`].
+#[derive(Default)]
+pub struct ResidentTable(std::sync::Mutex<ResidentInner>);
+
+impl ResidentTable {
+    /// Find a compile of exactly `words` whose entries cover `want`; the one
+    /// with the most entries wins, as for [`lookup`].
+    pub fn lookup(
+        &self,
+        fp: &Fingerprint,
+        ph: &PageHash,
+        fr1: bool,
+        words: &[u32; ENTRIES_PER_PAGE],
+        want: &Entries,
+    ) -> Option<Resident> {
+        let mut t = self.0.lock().unwrap();
+        t.tick += 1;
+        let tick = t.tick;
+        let best = t.pages.get_mut(&(*fp, *ph, fr1))?
+            .iter_mut()
+            .filter(|r| covers(&r.r.entries, want) && *r.words == *words)
+            .max_by_key(|r| count(&r.r.entries))?;
+        best.last_use = tick;
+        let r = best.r;
+        t.hits += 1;
+        Some(r)
+    }
+
+    /// Every entry a variant of this page has, for union-on-miss.
+    pub fn known_entries(&self, fp: &Fingerprint, ph: &PageHash, fr1: bool) -> Entries {
+        let mut all = [0u64; BITMAP_WORDS];
+        if let Some(v) = self.0.lock().unwrap().pages.get(&(*fp, *ph, fr1)) {
+            for r in v {
+                for (a, e) in all.iter_mut().zip(&r.r.entries) {
+                    *a |= e;
+                }
+            }
+        }
+        all
+    }
+
+    /// Record a function just published for `words`. A variant the new one
+    /// covers is dropped, as on disk; a function already recorded (a hit
+    /// being republished) only counts as a use.
+    pub fn insert(&self, fp: Fingerprint, ph: PageHash, fr1: bool, words: &[u32; ENTRIES_PER_PAGE], r: Resident) {
+        let mut t = self.0.lock().unwrap();
+        t.tick += 1;
+        let tick = t.tick;
+        let v = t.pages.entry((fp, ph, fr1)).or_default();
+        if let Some(same) = v.iter_mut().find(|x| x.r.func == r.func) {
+            same.last_use = tick;
+            return;
+        }
+        let before = v.len();
+        v.retain(|x| !covers(&r.entries, &x.r.entries));
+        let mut dropped = before - v.len();
+        if v.len() >= MAX_VARIANTS {
+            // This page's least recently used variant makes room.
+            let i = v.iter().enumerate().min_by_key(|(_, x)| x.last_use).map(|(i, _)| i).unwrap();
+            v.swap_remove(i);
+            dropped += 1;
+        }
+        v.push(ResidentRec { words: Box::new(*words), r, last_use: tick });
+        t.len = t.len + 1 - dropped;
+        while t.len > RESIDENT_CAP {
+            Self::evict_lru(&mut t);
+        }
+    }
+
+    fn evict_lru(t: &mut ResidentInner) {
+        let Some((key, i)) = t.pages.iter()
+            .flat_map(|(k, v)| v.iter().enumerate().map(move |(i, r)| (r.last_use, k, i)))
+            .min_by_key(|x| x.0)
+            .map(|(_, k, i)| (*k, i))
+        else { return };
+        let v = t.pages.get_mut(&key).unwrap();
+        v.swap_remove(i);
+        if v.is_empty() {
+            t.pages.remove(&key);
+        }
+        t.len -= 1;
+    }
+
+    /// `(records, hits)`, for `j2 status`.
+    pub fn stats(&self) -> (usize, u64) {
+        let t = self.0.lock().unwrap();
+        (t.len, t.hits)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +631,63 @@ mod tests {
             assert!(decode(&bad, &fp, &ph, true).is_none(), "flip at {i}");
         }
         assert!(decode(&bytes[..bytes.len() - 1], &fp, &ph, true).is_none());
+    }
+
+    fn resident(entries: u64, func: usize) -> Resident {
+        let mut e = [0u64; BITMAP_WORDS];
+        e[0] = entries;
+        Resident { func: func as *const (), entries: e, used: e, instr_count: 1, code_size: 1 }
+    }
+
+    fn want(entries: u64) -> Entries {
+        let mut e = [0u64; BITMAP_WORDS];
+        e[0] = entries;
+        e
+    }
+
+    #[test]
+    fn resident_least_recently_used_record_is_evicted_at_the_cap() {
+        let t = ResidentTable::default();
+        let fp = [1u8; 16];
+        let words = [7u32; ENTRIES_PER_PAGE];
+        let key = |i: usize| -> PageHash { let mut h = [0u8; 16]; h[..8].copy_from_slice(&(i as u64).to_le_bytes()); h };
+        for i in 0..RESIDENT_CAP {
+            t.insert(fp, key(i), false, &words, resident(1, 0x1000 + i));
+        }
+        // Touch the oldest, so the second oldest is now the eviction target.
+        assert!(t.lookup(&fp, &key(0), false, &words, &want(1)).is_some());
+        t.insert(fp, key(RESIDENT_CAP), false, &words, resident(1, 0x9000_0000));
+        assert_eq!(t.stats().0, RESIDENT_CAP, "the table stays at its cap");
+        assert!(t.lookup(&fp, &key(0), false, &words, &want(1)).is_some(), "a recently used record survives");
+        assert!(t.lookup(&fp, &key(1), false, &words, &want(1)).is_none(), "the least recently used one goes");
+        assert!(t.lookup(&fp, &key(RESIDENT_CAP), false, &words, &want(1)).is_some());
+    }
+
+    #[test]
+    fn resident_variants_follow_the_disk_rules() {
+        let t = ResidentTable::default();
+        let (fp, ph) = ([1u8; 16], [2u8; 16]);
+        let words = [7u32; ENTRIES_PER_PAGE];
+        t.insert(fp, ph, false, &words, resident(0b001, 0x1000));
+        t.insert(fp, ph, false, &words, resident(0b010, 0x2000));
+        assert_eq!(t.stats().0, 2);
+        // A variant covering both replaces them, as `write_job` does on disk.
+        t.insert(fp, ph, false, &words, resident(0b111, 0x3000));
+        assert_eq!(t.stats().0, 1);
+        assert_eq!(t.lookup(&fp, &ph, false, &words, &want(0b010)).unwrap().func as usize, 0x3000);
+        // Other bytes under the same hash, the other FR mode, or an entry
+        // the variant lacks: no hit.
+        let mut other = words;
+        other[5] = 8;
+        assert!(t.lookup(&fp, &ph, false, &other, &want(1)).is_none());
+        assert!(t.lookup(&fp, &ph, true, &words, &want(1)).is_none());
+        assert!(t.lookup(&fp, &ph, false, &words, &want(0b1000)).is_none());
+        // At most MAX_VARIANTS per page; the least recently used goes.
+        for i in 0..MAX_VARIANTS as u32 {
+            t.insert(fp, ph, false, &words, resident(1 << (8 + i), 0x10_0000 + i as usize));
+        }
+        assert_eq!(t.stats().0, MAX_VARIANTS);
+        assert!(t.lookup(&fp, &ph, false, &words, &want(0b111)).is_none(), "the oldest variant made room");
     }
 
     #[test]

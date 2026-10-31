@@ -105,8 +105,8 @@ struct CompileInputs {
     /// One bit per word the walk decoded, delay slots included — the only
     /// words whose value could change what a recompile would emit.
     used: [u64; crate::cpu::jitv2::BITMAP_WORDS],
-    /// Content hash of `words`, when the persistent cache is in play for
-    /// this compile (`prepare_multi_entry_compile`'s `cache_fp`).
+    /// Content hash of `words`, when this compile has a cache key
+    /// (`prepare_multi_entry_compile`'s `cache_fp`).
     page_hash: Option<crate::cpu::jitv2::pcache::PageHash>,
 }
 
@@ -124,6 +124,7 @@ fn prepare_multi_entry_compile(
     bus: &Arc<dyn BusDevice>,
     analyzer: &mut Analyzer,
     cache_fp: Option<&crate::cpu::jitv2::pcache::Fingerprint>,
+    resident: Option<&crate::cpu::jitv2::pcache::ResidentTable>,
     #[cfg(feature = "developer")] stats: &crate::cpu::jitv2::JitStats,
 ) -> PrepareOutcome {
     let page = unsafe { &*req.page };
@@ -281,16 +282,20 @@ fn prepare_multi_entry_compile(
         page.mark_redundant_compile_rejected();
     }
 
-    // Persistent cache, union-on-miss: walk every entry any stored compile
-    // of these exact bytes had, as well as this round's. If a stored variant
-    // already covers the result, the caller loads it instead of compiling;
-    // if not, the new compile covers all of them and replaces the variants
-    // it subsumes, so a page's stored code converges on every entry it has
-    // ever needed instead of accumulating near-duplicates. Denied offsets
-    // stay out, exactly as for `candidate_bits`.
+    // Code caches, union-on-miss: walk every entry any kept compile of these
+    // exact bytes had, in this arena (`resident`) or on disk, as well as this
+    // round's. If a kept variant already covers the result, the caller reuses
+    // it instead of compiling; if not, the new compile covers all of them and
+    // replaces the variants it subsumes, so a page's kept code converges on
+    // every entry it has ever needed instead of accumulating near-duplicates.
+    // Denied offsets stay out, exactly as for `candidate_bits`.
     let page_hash = cache_fp.map(|_| crate::cpu::jitv2::pcache::page_hash(&words));
     if let (Some(fp), Some(ph)) = (cache_fp, &page_hash) {
-        let known = crate::cpu::jitv2::pcache::known_entries(fp, ph, req.compiled_for_fr1);
+        let mut known = resident.map_or([0u64; crate::cpu::jitv2::BITMAP_WORDS], |t| t.known_entries(fp, ph, req.compiled_for_fr1));
+        if crate::cpu::jitv2::pcache::enabled() {
+            let disk = crate::cpu::jitv2::pcache::known_entries(fp, ph, req.compiled_for_fr1);
+            for (k, d) in known.iter_mut().zip(disk) { *k |= d; }
+        }
         let denied = page.snapshot_denied_raw();
         let mut added = 0u32;
         for i in 0..crate::cpu::jitv2::BITMAP_WORDS {
@@ -452,9 +457,9 @@ pub fn handle_request(
     let _clear_scheduled = ClearScheduledOnDrop { page };
 
     #[cfg(feature = "developer")]
-    let outcome = prepare_multi_entry_compile(req, bus, analyzer, None, stats);
+    let outcome = prepare_multi_entry_compile(req, bus, analyzer, None, None, stats);
     #[cfg(not(feature = "developer"))]
-    let outcome = prepare_multi_entry_compile(req, bus, analyzer, None);
+    let outcome = prepare_multi_entry_compile(req, bus, analyzer, None, None);
     let (gen_snap, instr_count, inputs) = match outcome {
         PrepareOutcome::Done(early) => return early,
         PrepareOutcome::Ready { gen_snap, instr_count, snapshot } => (gen_snap, instr_count, snapshot),
@@ -635,14 +640,17 @@ pub fn handle_request_deferred(
     }
     let _clear_scheduled = ClearScheduledOnDrop { page };
 
-    // Persistent cache: only for a `Codegen` whose output can be stored
-    // (see `Codegen::cache_fingerprint`). `true` matches the
-    // `skip_entry_preamble` this path compiles with below.
-    let cache_fp = if crate::cpu::jitv2::pcache::enabled() { codegen.cache_fingerprint(true) } else { None };
+    // Code caches, in this arena and (opt-in) on disk: only for a `Codegen`
+    // whose output is keyed by its configuration (see
+    // `Codegen::cache_fingerprint`). `true` matches the `skip_entry_preamble`
+    // this path compiles with below.
+    let cache_fp = codegen.cache_fingerprint(true);
+    let disk = crate::cpu::jitv2::pcache::enabled();
+    let arena = codegen.arena_state().clone();
     #[cfg(feature = "developer")]
-    let outcome = prepare_multi_entry_compile(req, bus, analyzer, cache_fp.as_ref(), stats);
+    let outcome = prepare_multi_entry_compile(req, bus, analyzer, cache_fp.as_ref(), Some(&arena.resident), stats);
     #[cfg(not(feature = "developer"))]
-    let outcome = prepare_multi_entry_compile(req, bus, analyzer, cache_fp.as_ref());
+    let outcome = prepare_multi_entry_compile(req, bus, analyzer, cache_fp.as_ref(), Some(&arena.resident));
     let (gen_snap, mut instr_count, mut inputs) = match outcome {
         PrepareOutcome::Done(early) => return early,
         PrepareOutcome::Ready { gen_snap, instr_count, snapshot } => (gen_snap, instr_count, snapshot),
@@ -653,9 +661,30 @@ pub fn handle_request_deferred(
         new_entries[offset as usize >> 6] |= 1u64 << (offset % 64);
     }
 
-    let mut instrs_owned = analyzer.instrs_snapshot();
     let cache_key = cache_fp.zip(inputs.page_hash);
-    let cached = cache_key.as_ref().and_then(|(fp, ph)| {
+    let resident_key = || cache_key.map(|(fp, ph)| crate::cpu::jitv2::ResidentKey { state: arena.clone(), fp, ph });
+
+    // A function already in this arena for these exact bytes, covering this
+    // walk's entries: publish it again rather than compile or copy anything.
+    // It is sealed (it was published before), so it skips the seal queue.
+    if let Some(hit) = cache_key.as_ref().and_then(|(fp, ph)| {
+        arena.resident.lookup(fp, ph, req.compiled_for_fr1, &inputs.words, &new_entries)
+    }) {
+        let denied = page.snapshot_denied_raw(); // inverted: 1 = allowed
+        for i in 0..crate::cpu::jitv2::BITMAP_WORDS {
+            new_entries[i] = hit.entries[i] & denied[i];
+            inputs.used[i] |= hit.used[i];
+        }
+        page.stage_compile_snapshot_keyed(&inputs.words, &inputs.used, &new_entries, gen_snap, req.compiled_for_fr1, resident_key());
+        if page.publish(&new_entries, hit.func, gen_snap, hit.instr_count as usize, hit.code_size, req.compiled_for_fr1) {
+            page.clear_requested_bits(&new_entries);
+            page.commit_compile_snapshot(gen_snap, &new_entries, req.compiled_for_fr1);
+        }
+        return false;
+    }
+
+    let mut instrs_owned = analyzer.instrs_snapshot();
+    let cached = cache_key.as_ref().filter(|_| disk).and_then(|(fp, ph)| {
         crate::cpu::jitv2::pcache::lookup(fp, ph, req.compiled_for_fr1, &inputs.words, &new_entries)
     });
     let mut func_id = None;
@@ -687,7 +716,7 @@ pub fn handle_request_deferred(
         let t_compile = std::time::Instant::now();
         func_id = codegen.compile_region_uncommitted(&mut instrs_owned, req.compiled_for_fr1, true, analyzer.has_fpu(), req.page);
         crate::cpu::jitv2::hashstats::note_compile_time(t_compile.elapsed());
-        if let (Some(_), Some((fp, ph))) = (func_id, cache_key) {
+        if let (Some(_), Some((fp, ph)), true) = (func_id, cache_key, disk) {
             match codegen.take_last_blob() {
                 Some((code, align)) => crate::cpu::jitv2::pcache::store(fp, ph, req.compiled_for_fr1, crate::cpu::jitv2::pcache::Blob {
                     entries: new_entries,
@@ -717,7 +746,7 @@ pub fn handle_request_deferred(
             // only a `PublishInfo` in hand — which deliberately carries no
             // 4KB page snapshot (see `CompileSnapshot::valid`). `publish_all`
             // commits it once the publish actually lands.
-            page.stage_compile_snapshot(&inputs.words, &inputs.used, &new_entries, gen_snap, req.compiled_for_fr1);
+            page.stage_compile_snapshot_keyed(&inputs.words, &inputs.used, &new_entries, gen_snap, req.compiled_for_fr1, resident_key());
             // Finalize immediately, every compile — see this function's own
             // doc comment for why deferring finalize itself (rather than
             // just the seal) was the actual bug. finalize_batch_nonforced
@@ -1167,5 +1196,149 @@ mod tests {
         handle_request_deferred_for_test(&req, &bus, &mut analyzer, &mut codegen, &mut pending);
 
         assert!(page.try_schedule_page(), "scheduled bit must be cleared even though publish itself is deferred");
+    }
+
+    /// A page whose words the test rewrites: `ADDIU r1, r0, imm` at words
+    /// 4..12 (so a walk from 4 ends at the boundary sentinel at 12 and the
+    /// compile stays small), the sentinel everywhere else.
+    struct PageDevice(std::sync::Mutex<[u32; ENTRIES_PER_PAGE]>);
+    impl PageDevice {
+        fn new(imm: u32) -> Self {
+            let d = PageDevice(std::sync::Mutex::new([crate::cpu::mips_isa::JIT_REGION_BOUNDARY_SENTINEL; ENTRIES_PER_PAGE]));
+            d.set(imm);
+            d
+        }
+        fn set(&self, imm: u32) {
+            let mut w = self.0.lock().unwrap();
+            for i in 4..12 {
+                w[i] = (OP_ADDIU << 26) | (1 << 16) | imm;
+            }
+        }
+    }
+    impl BusDevice for PageDevice {
+        fn read8(&self, _addr: u64) -> BusRead8 { BusRead8::err() }
+        fn write8(&self, _addr: u64, _val: u8) -> u32 { BUS_ERR }
+        fn read16(&self, _addr: u64) -> BusRead16 { BusRead16::err() }
+        fn write16(&self, _addr: u64, _val: u16) -> u32 { BUS_ERR }
+        fn read32(&self, addr: u64) -> BusRead32 {
+            BusRead32::ok(self.0.lock().unwrap()[(addr as usize & 0xfff) >> 2])
+        }
+        fn write32(&self, _addr: u64, _val: u32) -> u32 { BUS_ERR }
+        fn read64(&self, _addr: u64) -> BusRead64 { BusRead64::err() }
+        fn write64(&self, _addr: u64, _val: u64) -> u32 { BUS_ERR }
+        fn gen_ptr(&self, _addr: u64) -> *const AtomicU64 { std::ptr::null() }
+    }
+
+    /// One page, its generation counter and the compile thread's state.
+    struct Flipper {
+        dev: Arc<PageDevice>,
+        bus: Arc<dyn BusDevice>,
+        counter: Box<AtomicU64>,
+        page: Box<PhysicalCodePage>,
+        analyzer: Analyzer,
+        codegen: Codegen,
+    }
+
+    impl Flipper {
+        fn new() -> Self {
+            let dev = Arc::new(PageDevice::new(1));
+            let counter = Box::new(AtomicU64::new(1));
+            let page = Box::new(PhysicalCodePage::new(0, &*counter as *const AtomicU64));
+            Flipper { bus: dev.clone(), dev, counter, page, analyzer: Analyzer::new(), codegen: Codegen::new() }
+        }
+
+        /// Rewrite the page to `imm`'s version, as a guest store would.
+        fn write(&self, imm: u32) {
+            self.dev.set(imm);
+            self.counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// Request `offsets` and run the request through the compile thread,
+        /// sealing whatever it compiled. Returns whether Cranelift ran.
+        fn request(&mut self, offsets: &[usize]) -> bool {
+            for &o in offsets {
+                self.page.mark_requested(o);
+            }
+            let req = CompileRequest { page: &mut *self.page as *mut PhysicalCodePage, compiled_for_fr1: true };
+            let before = self.codegen.function_count();
+            let mut pending: PendingCount = 0;
+            handle_request_deferred_for_test(&req, &self.bus, &mut self.analyzer, &mut self.codegen, &mut pending);
+            force_publish_pending(&mut self.codegen, &mut pending);
+            for &o in offsets {
+                assert!(self.page.is_runnable(o), "offset {o} must be dispatchable after the request");
+            }
+            self.codegen.function_count() != before
+        }
+    }
+
+    #[test]
+    fn bytes_flipping_back_reuse_the_earlier_compile() {
+        // IRIX rewrites the refill vectors' first word on context switches,
+        // so the vector page alternates between two versions. Each version
+        // compiles once; after that a flip reinstalls its function.
+        let mut f = Flipper::new();
+        assert!(f.request(&[4]));
+        let func_a = f.page.func();
+        f.write(2);
+        assert!(f.request(&[4]), "new bytes need a compile");
+        let func_b = f.page.func();
+        assert_ne!(func_a, func_b);
+
+        f.write(1);
+        assert!(!f.request(&[4]), "bytes back to the first version must not compile");
+        assert_eq!(f.page.func(), func_a, "the first version's function is reinstalled");
+        f.write(2);
+        assert!(!f.request(&[4]));
+        assert_eq!(f.page.func(), func_b);
+    }
+
+    #[test]
+    fn any_earlier_version_is_reused_not_only_the_last() {
+        let mut f = Flipper::new();
+        let mut funcs = Vec::new();
+        for imm in [1, 2, 3] {
+            f.write(imm);
+            assert!(f.request(&[4]), "version {imm} compiles once");
+            funcs.push(f.page.func());
+        }
+        for (imm, func) in [(1, funcs[0]), (3, funcs[2]), (2, funcs[1])] {
+            f.write(imm);
+            assert!(!f.request(&[4]), "version {imm} is reused");
+            assert_eq!(f.page.func(), func);
+        }
+    }
+
+    #[test]
+    fn a_variant_serves_a_subset_of_its_entries_but_not_more() {
+        let mut f = Flipper::new();
+        assert!(f.request(&[4, 8]));
+        let func_a = f.page.func();
+        f.write(2);
+        assert!(f.request(&[4]));
+
+        f.write(1);
+        assert!(!f.request(&[8]), "a request for a subset of the kept entries reuses that compile");
+        assert_eq!(f.page.func(), func_a);
+        assert!(f.page.is_runnable(4), "and the reused function still serves every kept entry");
+
+        f.write(2);
+        assert!(f.request(&[4, 6]), "an entry the kept compile has no case for needs a compile");
+    }
+
+    #[test]
+    fn a_new_arena_starts_with_nothing_to_reuse() {
+        // The table holds pointers into the arena, so it must go with it:
+        // after a reset nothing earlier may be handed back.
+        let mut f = Flipper::new();
+        assert!(f.request(&[4]));
+        f.write(2);
+        assert!(f.request(&[4]));
+        assert_eq!(f.codegen.arena_state().resident.stats().0, 2);
+
+        f.page.reset_compiled_state();
+        unsafe { f.codegen.reset(); }
+        assert_eq!(f.codegen.arena_state().resident.stats().0, 0, "a reset arena has an empty table");
+        f.write(1);
+        assert!(f.request(&[4]), "after an arena reset an earlier version compiles again");
     }
 }

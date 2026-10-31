@@ -1120,6 +1120,17 @@ struct CompileSnapshot {
     /// `PhysicalCodePage::kills` when this record was staged. A skip is
     /// refused once the count has moved.
     kills_at_stage: u32,
+    /// Where the commit records the published function for reuse by
+    /// content (`pcache::ResidentTable`), when the compile had a cache key.
+    resident: Option<ResidentKey>,
+}
+
+/// The in-session cache slot a compile's function goes into once published:
+/// its arena's table and the page's cache key.
+pub struct ResidentKey {
+    pub state: Arc<crate::cpu::jitv2::paged_memory::PagedArenaState>,
+    pub fp: crate::cpu::jitv2::pcache::Fingerprint,
+    pub ph: crate::cpu::jitv2::pcache::PageHash,
 }
 
 impl CompileSnapshot {
@@ -1132,6 +1143,7 @@ impl CompileSnapshot {
             entries: [0u64; BITMAP_WORDS],
             fr1: false,
             kills_at_stage: 0,
+            resident: None,
         }
     }
 }
@@ -1953,6 +1965,20 @@ impl PhysicalCodePage {
         gen_snap: u64,
         fr1: bool,
     ) {
+        self.stage_compile_snapshot_keyed(words, used, entries, gen_snap, fr1, None);
+    }
+
+    /// [`Self::stage_compile_snapshot`], and on commit also record the
+    /// published function in `resident`'s table for reuse by content.
+    pub fn stage_compile_snapshot_keyed(
+        &self,
+        words: &[u32; ENTRIES_PER_PAGE],
+        used: &[u64; BITMAP_WORDS],
+        entries: &[u64; BITMAP_WORDS],
+        gen_snap: u64,
+        fr1: bool,
+        resident: Option<ResidentKey>,
+    ) {
         // Into the staging slot only: `committed` keeps describing the
         // installed `func` until this compile's publish actually lands.
         let mut rec = Box::new(CompileSnapshot::new());
@@ -1962,6 +1988,7 @@ impl PhysicalCodePage {
         rec.entries.copy_from_slice(entries);
         rec.fr1 = fr1;
         rec.kills_at_stage = self.kills.load(Ordering::Acquire);
+        rec.resident = resident;
         self.snapshots.lock().staged = Some(rec);
     }
 
@@ -1984,6 +2011,15 @@ impl PhysicalCodePage {
         if matches {
             let mut rec = g.staged.take().unwrap();
             rec.valid = true;
+            if let Some(k) = rec.resident.take() {
+                k.state.resident.insert(k.fp, k.ph, rec.fr1, &rec.words, crate::cpu::jitv2::pcache::Resident {
+                    func: self.func.load(Ordering::Acquire) as *const (),
+                    entries: rec.entries,
+                    used: rec.used,
+                    instr_count: self.instr_count.load(Ordering::Relaxed),
+                    code_size: self.code_size.load(Ordering::Relaxed),
+                });
+            }
             g.committed = *rec;
         } else {
             // A publish landed that the staged record does not describe (a

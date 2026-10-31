@@ -77,6 +77,10 @@ pub struct PagedArenaState {
     /// `AnonHugePages` query to exactly this arena's address range.
     arena_ptr: AtomicU64,
     arena_len: AtomicU64,
+    /// Functions in this arena, by the page bytes they were compiled from,
+    /// for reuse when a page's bytes return to an earlier version. Lives
+    /// here so it goes with the arena (see `pcache::RESIDENT_CAP`).
+    pub resident: crate::cpu::jitv2::pcache::ResidentTable,
 }
 
 impl PagedArenaState {

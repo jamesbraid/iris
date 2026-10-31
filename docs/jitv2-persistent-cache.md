@@ -137,6 +137,33 @@ walk, both cheap):
 Nothing else changes: generation checks, the seal queue, churn avoidance and
 denials behave as for a compile.
 
+## In-session tier
+
+Within one session, a page's bytes can return to an earlier version: IRIX
+rewrites the first word of the refill and XTLB refill vectors on context
+switches (`ld k1` of the handler address, or a branch past it), so physical
+page 0 alternates between two contents. Under Smoke & Mirrors on the Octane
+V12 that recompiled page 0 about 35 times a second, 60 to 75% of all
+compiles. The churn check only compares against the code installed now, so it
+cannot catch a flip back.
+
+`pcache::ResidentTable` keeps, for each arena, the functions published in it
+under the same key (fingerprint, page hash, FR mode) and variant rules
+(a variant serves a subset of its entries, the widest one wins, a new variant
+replaces those it covers, at most `MAX_VARIANTS` per page). It stores
+function pointers rather than code, so a hit republishes the existing
+function: no compile, no copy, no seal. It is always on, whether or not the
+disk cache is, and union-on-miss consults it too. Each record keeps a copy of
+the page to verify a hit against, about 4.3 KB. The table is capped at
+`RESIDENT_CAP` (4,096) records, about 17 MB, with the least recently used
+record evicted first. Eviction frees only the copy; the code stays in the
+arena. The table lives in `PagedArenaState`, so every arena reset (flush,
+page-pool exhaustion, a new compile pool) starts with an empty one.
+
+It sits in the deferred (compile pool) path only. The inline path and code
+whose fingerprint is refused (`IRIS_BAKE_HOOKS`, `IRIS_MEM_HELPERS`) compile
+as before.
+
 ## Verification plan
 
 1. The page compare, fault-injected: `IRIS_BREAK=jitcache-skip-compare`

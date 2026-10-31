@@ -704,6 +704,12 @@ impl Codegen {
     /// `lockstep_flush_if_grown`, which clears `lockstep_cache` (the only
     /// place those pointers are ever stored — never published into the real
     /// `page`/`entries` table) in the same operation.
+    /// The bookkeeping of the arena this `Codegen` compiles into, shared by
+    /// every `Codegen` on that arena.
+    pub fn arena_state(&self) -> &std::sync::Arc<crate::cpu::jitv2::paged_memory::PagedArenaState> {
+        &self.paged_state
+    }
+
     pub unsafe fn reset(&mut self) {
         unsafe { self.reset_inner(Self::new_module(None, None)) }
     }
