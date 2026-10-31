@@ -177,7 +177,7 @@ the first `[section]`, because TOML tables continue until the next header.
 |---|---|---|
 | `machine.profile` | `indy_ip24` | indy_ip24, indigo2_ip22, indigo2_ip28, o2_ip32 (configured by `[o2]`, see [the O2 guide](docs/o2-ip32.md)), octane_ip30 (configured by `[octane]`, see [the Octane guide](docs/octane-ip30.md)), fuel_ip34 (see [the Fuel guide](docs/fuel-ip34.md)), tezro_ip53 (configured by `[tezro]`, see [the Tezro guide](docs/tezro-ip53.md)). |
 | `machine.cpu` | the machine's first | A family (`r4400`, `r5000`, `r10000`, `r12000`, `r14000`) or a part (`r14000_600`); independent of build features. Indy and `indigo2_ip22`: r4400, r5000; `indigo2_ip28`: r10000; O2: r5000, r10000, r12000; Octane: r10000, r12000, r14000; Fuel: r14000 (`r14000_500`); Tezro: r16000 (a bare `r16000` is `r16000_700`; `r16000_800`, `r16000_900` and `r16000_1000` are the other parts it ships with). The first listed is the default. |
-| `machine.cpus` | `1` | Processors fitted. 2 only on the Octane; see [its guide](docs/Octane/multiprocessor.md). A Tezro sets its fitted processors in `[tezro] cpus` and runs one. |
+| `machine.cpus` | `1`; `4` on the Tezro | Processors fitted. 2 on the Octane; see [its guide](docs/Octane/multiprocessor.md). 1, 2 or 4 on the Tezro, which runs only CPU 0; one selects the one-processor board with one PIC, two or four the board with two PICs. |
 
 ### [fuel]
 
@@ -204,7 +204,6 @@ Tezro-specific settings apply when `machine.profile = "tezro_ip53"`.
 
 | Key | Default | Values and behavior |
 |---|---|---|
-| `cpus` | `1` | Processors fitted: 1. Only CPU 0 runs. |
 | `flash` | unset | Persistent 16 MiB boot-flash file. Unset, the flash is volatile. |
 | `console` | `l1` | `l1`, `ioc4_a`, `ioc4_b`, `ioc4_c` or `ioc4_d`. Selects the guest console connection. |
 | `l1_port` | `8882` | Host TCP port for the L1 console. |
