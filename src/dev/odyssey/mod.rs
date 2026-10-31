@@ -123,7 +123,7 @@ pub use registers::*;
 pub use scanout::*;
 pub use worker::*;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -307,6 +307,24 @@ const FRAME_PERIOD: std::time::Duration = std::time::Duration::from_micros(16_66
 
 impl Device for Odyssey {
     fn step(&self, _cycles: u64) {}
+
+    fn register_commands(&self) -> Vec<(String, String)> {
+        vec![("vpro".to_string(), "VPro bus refusals by reason and register: vpro refusals [reset]".to_string())]
+    }
+
+    fn execute_command(&self, cmd: &str, args: &[&str], mut w: Box<dyn std::io::Write + Send>) -> Result<(), String> {
+        if cmd != "vpro" {
+            return Err(format!("unknown command: {cmd}"));
+        }
+        match args {
+            ["refusals"] => self.state.refusals.report(&mut *w).map_err(|e| e.to_string()),
+            ["refusals", "reset"] => {
+                self.state.refusals.reset();
+                Ok(())
+            }
+            _ => Err("Usage: vpro refusals [reset]".to_string()),
+        }
+    }
 
     fn start(&self) {
         let mut t = self.thread.lock();
