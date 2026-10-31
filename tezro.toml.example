@@ -16,9 +16,9 @@ serial_port_b = 18881
 
 [machine]
 profile = "tezro"
-# Required: names the R10000 family. The machine always runs the
-# R16000 at 700 MHz with a 4 MiB secondary cache; other values are refused.
-cpu = "r10000"
+# Required. The machine always runs the R16000 at 700 MHz with a 4 MiB
+# secondary cache; "r10000" names its family, and other values are refused.
+cpu = "r16000"
 
 [graphics]
 board = "none"

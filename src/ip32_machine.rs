@@ -240,7 +240,7 @@ impl O2Machine {
             CpuModel::R10000 => Self::build_cpu::<R10000O2ShadowCache>(sysad, &timer_manager, arcs_fpu, cpu_mhz, boot.clone(), bus.ram.clone()),
             CpuModel::R12000 => Self::build_cpu::<R12000O2ShadowCache>(sysad, &timer_manager, arcs_fpu, cpu_mhz, boot.clone(), bus.ram.clone()),
             CpuModel::R5000 => Self::build_cpu::<R5000ShadowCache>(sysad, &timer_manager, arcs_fpu, cpu_mhz, boot.clone(), bus.ram.clone()),
-            CpuModel::R4400 | CpuModel::R14000 => return Err("an O2 has an R5000, R10000 or R12000 ([machine] cpu)".into()),
+            CpuModel::R4400 | CpuModel::R14000 | CpuModel::R16000 => return Err("an O2 has an R5000, R10000 or R12000 ([machine] cpu)".into()),
         };
 
         // ppmem: the CPU's cache and the JIT reach RAM through the memory's

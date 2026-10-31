@@ -823,10 +823,13 @@ pub enum CpuModel {
     /// MIPS R14000, an R10000-family part: the Fuel's, and the Octane's
     /// revision 2.4 with 2 MiB of secondary cache.
     R14000,
+    /// MIPS R16000, an R10000-family part: the Tezro's 700 MHz part with
+    /// 4 MiB of secondary cache.
+    R16000,
 }
 
 impl CpuModel {
-    pub const ALL: [Self; 5] = [Self::R4400, Self::R5000, Self::R10000, Self::R12000, Self::R14000];
+    pub const ALL: [Self; 6] = [Self::R4400, Self::R5000, Self::R10000, Self::R12000, Self::R14000, Self::R16000];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -835,6 +838,7 @@ impl CpuModel {
             Self::R10000 => "MIPS R10000",
             Self::R12000 => "MIPS R12000",
             Self::R14000 => "MIPS R14000",
+            Self::R16000 => "MIPS R16000",
         }
     }
 
@@ -843,12 +847,15 @@ impl CpuModel {
     /// the Octane2's R12000 (`ip30-r12000.md`), a dual-R14000 Octane
     /// (`r14000.md`, IP30 identity and cache review), the O2's 300 MHz R12000
     /// (`o2-hardware-findings.md`) and the Fuel's R14000 (`ip34-fuel.md`). No
-    /// source has a Fuel with another part. The older parts keep the choices
+    /// source has a Fuel with another part. The R16000 is the Tezro's: a
+    /// Tezro PROM capture identifies its four processors as PRId `0x0f50`
+    /// (`r16000.md`, PROM CP0 PRId evidence). The older parts keep the choices
     /// the machines already had.
     pub fn fits(self, profile: MachineProfile) -> bool {
         match self {
             Self::R12000 => matches!(profile, MachineProfile::OctaneIp30 | MachineProfile::O2Ip32),
             Self::R14000 => matches!(profile, MachineProfile::OctaneIp30 | MachineProfile::FuelIp34),
+            Self::R16000 => profile == MachineProfile::TezroIp53,
             _ => true,
         }
     }
@@ -880,7 +887,7 @@ impl CacheModel {
     /// Whether `cpu` runs the shadow cache under this setting.
     pub fn is_shadow(self, cpu: CpuModel) -> bool {
         match (cpu, self) {
-            (CpuModel::R10000 | CpuModel::R12000 | CpuModel::R14000, _) => true,
+            (CpuModel::R10000 | CpuModel::R12000 | CpuModel::R14000 | CpuModel::R16000, _) => true,
             (_, Self::Full) => false,
             (_, Self::Shadow) => true,
             (_, Self::Auto) => cfg!(feature = "jitv2"),
@@ -2240,9 +2247,10 @@ impl MachineConfig {
                 return Err(format!("graphics.board \"{}\" is not a Fuel board (valid: v12, v10, none)", board.as_str()));
             }
         } else if self.machine.profile == MachineProfile::TezroIp53 {
-            // The machine always models the R16000; the key names its family.
-            if self.machine.cpu != CpuModel::R10000 {
-                return Err("a Tezro has R16000s: set [machine] cpu = \"r10000\" (the R10000 family)".into());
+            // The machine always models the R16000; `r10000` names the family,
+            // as on the Fuel, and a config cannot claim another processor.
+            if !matches!(self.machine.cpu, CpuModel::R10000 | CpuModel::R16000) {
+                return Err("a Tezro has R16000s: set [machine] cpu = \"r16000\"".into());
             }
             if !TEZRO_CPUS.contains(&self.tezro.cpus) {
                 return Err(format!("tezro.cpus = {} is not a Tezro board's population (valid: {TEZRO_CPUS:?})", self.tezro.cpus));
@@ -2524,8 +2532,8 @@ pub struct Cli {
     #[arg(long = "no-scsi-deferred-int", default_value_t = false)]
     pub no_scsi_deferred_int: bool,
 
-    /// Emulated CPU: `r4400` (default), `r5000`, `r10000`, `r12000` or `r14000`. Overrides `[machine] cpu`.
-    /// The last two are limited to the machines they shipped in.
+    /// Emulated CPU: `r4400` (default), `r5000`, `r10000`, `r12000`, `r14000` or `r16000`. Overrides `[machine] cpu`.
+    /// The last three are limited to the machines they shipped in.
     ///
     /// Every model is compiled into every build — each is its own
     /// monomorphisation, so the hot path carries no per-model branch — and this
@@ -3429,7 +3437,7 @@ mod tezro_config_tests {
     fn tezro() -> MachineConfig {
         let mut cfg = MachineConfig::default();
         cfg.machine.profile = MachineProfile::TezroIp53;
-        cfg.machine.cpu = CpuModel::R10000;
+        cfg.machine.cpu = CpuModel::R16000;
         cfg.scsi.clear();
         cfg
     }
@@ -3450,13 +3458,20 @@ mod tezro_config_tests {
         assert!(cfg.validate().unwrap_err().contains("512 or 1024"));
     }
 
-    /// The processor is fixed and graphics is absent; only the R10000 family
-    /// key and no graphics board pass.
+    /// The processor is fixed and graphics is absent; only the R16000 (or the
+    /// family, as on the Fuel) and no graphics board pass.
     #[test]
-    fn tezro_requires_the_r10000_family_and_no_graphics() {
+    fn tezro_requires_the_r16000_and_no_graphics() {
         let mut cfg = tezro();
         cfg.machine.cpu = CpuModel::R4400;
-        assert!(cfg.validate().unwrap_err().contains("r10000"));
+        assert!(cfg.validate().unwrap_err().contains("r16000"));
+        cfg.machine.cpu = CpuModel::R10000;
+        cfg.validate().unwrap();
+        cfg.machine.cpu = CpuModel::R14000;
+        assert!(cfg.validate().is_err(), "no source has a Tezro with an R14000");
+        for profile in [MachineProfile::FuelIp34, MachineProfile::OctaneIp30, MachineProfile::O2Ip32, MachineProfile::IndyIp24] {
+            assert!(!CpuModel::R16000.fits(profile), "R16000 on {profile:?}");
+        }
         let mut cfg = tezro();
         assert_eq!(cfg.graphics_board(), GraphicsBoard::None);
         cfg.graphics.board = Some(GraphicsBoard::Newport);

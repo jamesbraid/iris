@@ -42,9 +42,9 @@
 //! Board composition ported from hw/mips/sgi/sn-machine.c and
 //! hw/mips/sgi/sn1-node.c in jamesbraid/qemu-sgi-origami.
 
-use crate::config::{scsi_label, MachineConfig, TezroConsole};
+use crate::config::{scsi_label, CpuModel, MachineConfig, TezroConsole};
 use crate::cpu::mips_cache_shadow::R16000ShadowCache;
-use crate::cpu::mips_cache_v2::MipsCache;
+use crate::cpu::mips_cache_v2::{CpuModel as CacheCpuModel, MipsCache};
 use crate::cpu::mips_exec::{CpuDevice, MipsCpu, MipsCpuConfig, MipsExecutor};
 use crate::cpu::cpu_monitor::CpuMonitor;
 use crate::cpu::mips_tlb::MipsTlb;
@@ -81,10 +81,6 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc, Weak};
-
-/// The processor model, chosen here and nowhere else.
-pub(crate) type TezroCache = R16000ShadowCache;
-pub(crate) type TezroCpu = MipsExecutor<MipsTlb, TezroCache>;
 
 /// The Bedrock board word the QEMU Tezro profiles select.
 const BOARD_ID: u64 = 0x2001;
@@ -138,7 +134,7 @@ impl TezroMachine {
         let timers = Arc::new(TimerManager::new());
         board.ioc4.set_timer_manager(timers.clone());
         let count_hz = cfg.clock.fixed_mhz.map_or(DEFAULT_COUNT_HZ, |mhz| (mhz * 1_000_000.0) as u64).max(1);
-        let cpus = build_cpus(&board, &timers, count_hz);
+        let cpus = build_cpus(cfg.machine.cpu, &board, &timers, count_hz)?;
         let cpu = cpus[0].clone();
         let node = &board.node;
         // A rebuild of the whole memory map runs with the other processors
@@ -408,22 +404,36 @@ impl Drop for TezroMachine {
     }
 }
 
-/// The processors the machine runs, CPU 0 first. The board fits more, but
-/// only CPU 0 is built: starting the others is not modelled, and the PIs
-/// refuse and log what would reach them.
-fn build_cpus(board: &Arc<TezroBoard>, timers: &Arc<TimerManager>, count_hz: u64) -> Vec<Arc<dyn CpuDevice>> {
-    let mut exec = build_cpu(board);
+/// The processors the machine runs, CPU 0 first, of the part `cpu` names.
+/// The board fits more, but only CPU 0 is built: starting the others is not
+/// modelled, and the PIs refuse and log what would reach them.
+fn build_cpus(cpu: CpuModel, board: &Arc<TezroBoard>, timers: &Arc<TimerManager>, count_hz: u64) -> Result<Vec<Arc<dyn CpuDevice>>, String> {
+    match cpu {
+        // `r10000` names the family, as on the Fuel.
+        CpuModel::R10000 | CpuModel::R16000 => Ok(vec![start_cpu::<R16000ShadowCache>(board, timers, count_hz)]),
+        other => Err(format!("a Tezro has R16000s, not the {}", other.label())),
+    }
+}
+
+/// CPU 0 of type `C`, with its timers and the board's poll.
+fn start_cpu<C>(board: &Arc<TezroBoard>, timers: &Arc<TimerManager>, count_hz: u64) -> Arc<dyn CpuDevice>
+where
+    C: CacheCpuModel + From<Arc<dyn BusDevice>> + 'static,
+    MipsCpu<MipsTlb, C>: CpuDevice,
+{
+    let mut exec = build_cpu::<C>(board);
     exec.core.set_timer_manager(timers.clone());
     exec.core.set_count_hz(count_hz);
     exec.core.count_write_samples = true;
     let poll_board = board.clone();
     exec.batch_hook = Some(Box::new(move |_| poll_board.poll()));
-    vec![Arc::new(MipsCpu::<_, TezroCache>::new(*exec))]
+    Arc::new(MipsCpu::new(*exec))
 }
 
-/// The R16000 with the Tezro's reset-mode inputs, on the board's bus.
-fn build_cpu(board: &TezroBoard) -> Box<TezroCpu> {
-    let cfg = MipsCpuConfig::for_model::<TezroCache>();
+/// A processor of type `C` with the Tezro's reset-mode inputs, on the
+/// board's bus.
+fn build_cpu<C: CacheCpuModel + From<Arc<dyn BusDevice>>>(board: &TezroBoard) -> Box<MipsExecutor<MipsTlb, C>> {
+    let cfg = MipsCpuConfig::for_model::<C>();
     let mut cpu = Box::new(MipsExecutor::new(
         board.node.bus.clone() as Arc<dyn BusDevice>,
         MipsTlb::new(cfg.tlb_entries),
@@ -433,7 +443,7 @@ fn build_cpu(board: &TezroBoard) -> Box<TezroCpu> {
     // The flash record's mode word and the processor's reset mode must
     // agree, or the PROM enters its error routine before GP is set.
     cpu.core.cp0_config = FirmwareRecord::TEZRO.reset_config0();
-    cpu.cache = TezroCache::new(board.cached_bus());
+    cpu.cache = C::from(board.cached_bus());
     // The PROM keeps its stack in cache lines it tags for a window with no
     // memory behind it yet; the controller answers that window while they stand.
     let memory = board.node.md.clone();

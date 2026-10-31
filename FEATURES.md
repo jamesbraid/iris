@@ -168,7 +168,7 @@ the first `[section]`, because TOML tables continue until the next header.
 | Key | Default | Values and behavior |
 |---|---|---|
 | `machine.profile` | `indy_ip24` | indy_ip24, indigo2_ip22, indigo2_ip28, o2_ip32 (configured by `[o2]`, see [the O2 guide](docs/o2-ip32.md)), octane_ip30 (configured by `[octane]`, see [the Octane guide](docs/octane-ip30.md)), fuel_ip34 (see [the Fuel guide](docs/fuel-ip34.md)), tezro (configured by `[tezro]`, see [the Tezro guide](docs/tezro-ip53.md)). |
-| `machine.cpu` | `r4400` | r4400, r5000, r10000. CPU/ISA choice is independent of build features. A Fuel always runs its one R14000 and a Tezro its R16000, and the key must be `r10000`; any other value is refused. |
+| `machine.cpu` | `r4400` | r4400, r5000, r10000. CPU/ISA choice is independent of build features. A Fuel always runs its one R14000, and the key must be `r10000`; any other value is refused. A Tezro always runs its R16000, and the key is `r16000` or the family's `r10000`. |
 | `machine.cpus` | `1` | Processors fitted. 2 only on the Octane; see [its guide](docs/Octane/multiprocessor.md). A Tezro sets its fitted processors in `[tezro] cpus` and runs one. |
 
 ### [fuel]

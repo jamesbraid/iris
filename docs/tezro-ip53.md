@@ -14,8 +14,8 @@ headless on its L1 or IOC4 serial console.
 Copy [`tezro.toml.example`](../tezro.toml.example) to `tezro.toml`, provide
 the PROM and disk files named there, then run `iris --config tezro.toml` from
 the repository root. The sample selects `machine.profile = "tezro"` and
-`machine.cpu = "r10000"`. The machine always runs the R16000; `cpu` must name
-the R10000 family, and any other value is refused.
+`machine.cpu = "r16000"`. The machine always runs the R16000; `cpu` may also
+name the R10000 family, `r10000`, and any other value is refused.
 
 `[tezro] cpus` is the number of processors fitted. The one-processor board
 has one PIC at XIO widget 15 carrying the IO9.
