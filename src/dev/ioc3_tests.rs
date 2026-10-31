@@ -1469,27 +1469,32 @@ fn the_fuel_population_keeps_its_clock_and_header_policy_across_reset() {
     assert_eq!(r.r32(MII_DATA_R), 0x5c10, "Fuel GPIO5 has no PHY reset connection");
 }
 
-/// Fuel's IOC3 has no keyboard or mouse ports: a guest probing them must
-/// see silence before and after a reset, and host input must not leak in.
+/// Fuel's IOC3 fits the keyboard and mouse controller, as the Octane's does
+/// (OpenBSD configures it through the onboard IOC3's keyboard controller). A
+/// key pushed from the host arrives in K_RX through the IOC3 registers and
+/// latches the keyboard interrupt, and a mouse report arrives in M_RX; both
+/// survive a chip reset.
 #[test]
-fn the_fuel_ioc3_answers_no_keyboard_or_mouse_traffic_across_reset() {
+fn the_fuel_ioc3_delivers_keyboard_and_mouse_traffic_across_reset() {
     let r = Rig::with(Ioc3::new(Ioc3Config::fuel(MAC)));
     for _ in 0..2 {
         r.c.reset();
         r.c.ps2().power_on();
-        r.w32(CTRL, KBC_K_CLAMP_3 | KBC_M_CLAMP_3);
-        assert_eq!(r.r32(CTRL), KBC_K_CLAMP_3 | KBC_M_CLAMP_3);
-        for command in [0xff, 0xf2, 0xf4] {
-            r.w32(K_TX, command);
-            r.w32(M_TX, command);
-            assert_eq!(r.r32(K_RX), 0);
-            assert_eq!(r.r32(M_RX), 0);
-        }
+        r.w32(K_TX, 0xff);
+        let v = r.r32(K_RX);
+        assert_ne!(v & VALID[2], 0, "the keyboard answers a reset");
+        assert_eq!((v >> 16) & 0xff, 0xfa, "with an ACK");
+        r.w32(M_TX, 0xf2);
+        let v = r.r32(M_RX);
+        assert_ne!(v & (1 << 27), 0, "the mouse answers from its own port");
+        // Enable scanning, then inject a key from the host.
+        r.w32(K_TX, 0xf4);
+        while r.r32(K_RX) & VALID[2] != 0 {}
+        r.w32(reg::INT_STATUS, int::KEYBOARD);
         r.c.ps2().push_kb(winit::keyboard::KeyCode::KeyA, true);
-        r.c.ps2().push_mouse_input(1, 10, 10, 0);
-        assert_eq!(r.r32(K_RX), 0);
-        assert_eq!(r.r32(M_RX), 0);
-        assert_eq!(r.r32(reg::INT_STATUS) & int::KEYBOARD, 0);
-        assert!(!r.superio.level());
+        assert_ne!(r.r32(reg::INT_STATUS) & int::KEYBOARD, 0, "a key latches the interrupt");
+        let v = r.r32(K_RX);
+        assert_ne!(v & VALID[2], 0, "and arrives in K_RX");
+        assert_eq!(v & (1 << 27), 0, "from the keyboard");
     }
 }
