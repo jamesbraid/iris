@@ -805,3 +805,23 @@ fn a_2d_draw_dirties_only_its_rows() {
     let h = SGI_ODYSSEY_HEIGHT as usize;
     assert_eq!(dirty_rows(&s), vec![h - 2, h - 1], "a copy past the bottom is clipped to the plane");
 }
+
+/// A register store that lands after the display copied the registers and
+/// before it filed the copy is not lost: the copy is filed under the
+/// generation read before it began, so the next frame copies again and sees
+/// the store.
+#[test]
+fn a_register_store_during_the_copy_is_copied_by_the_next_frame() {
+    let regs = SharedRegs::default();
+    let mut copy = DisplayRegs::default();
+
+    regs.set_lut(0, 1);
+    *regs.test_after_copy.lock() = Some(Box::new(|r| {
+        r.set_lut(0, 0x2a5);
+    }));
+    let seen = regs.snapshot(&mut copy, u64::MAX);
+    assert_eq!(copy.lut[0], 1, "the store landed after the word was copied");
+    *regs.test_after_copy.lock() = None;
+    regs.snapshot(&mut copy, seen);
+    assert_eq!(copy.lut[0], 0x2a5, "the store during the copy was never copied");
+}

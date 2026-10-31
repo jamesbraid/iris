@@ -1017,3 +1017,58 @@ fn processors_wait_for_each_other_and_the_board_thread_does_not_wait_for_them() 
     assert_eq!(done.load(SeqCst), 3);
     h.work_stop();
 }
+
+/// A drain by an access, with the board's thread running, runs nothing: the
+/// stores are the thread's to run, in order, and a second runner would be
+/// two threads in the board's state.
+#[test]
+fn a_drain_with_the_board_thread_running_runs_no_store() {
+    let (h, _rec) = threaded_board();
+    let words = preamble_twice();
+
+    start_long_slice(&h, &words, 1000);
+    for w in &words[1..] {
+        h.write(w.port, w.value, w.size);
+    }
+    let (stores, level) = (h.fifo.stores(), h.fifo.level());
+    assert!(stores > 1);
+    // The test stands in for a caller that drains while the thread runs;
+    // the guard is what keeps it from running anything.
+    h.test_board().work_drain(ODSY_CFIFO_SELFTEST);
+    assert_eq!((h.fifo.stores(), h.fifo.level()), (stores, level), "the drain ran stores");
+    h.fifo.test_words.store(0, SeqCst);
+    h.work_stop();
+    assert_eq!(h.fifo.level(), 0);
+}
+
+/// A command store the ring refuses while the board's thread runs is not
+/// dropped and does not run around the thread: the caller retries the push
+/// until the thread has made room, then it goes in once.
+#[test]
+fn a_refused_command_push_retries_behind_the_board_thread() {
+    let (h, _rec) = threaded_board();
+    h.fifo.set_depth(FifoDepth::Shallow);
+    let words = preamble_twice();
+
+    start_long_slice(&h, &words, 1000);
+    while h.fifo.level() < ODSY_CFIFO_WORDS {
+        assert!(h.bus_write(ODSY_CMD_FIFO, 0, 4));
+    }
+    let stores = h.fifo.stores();
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let store = {
+        let (h, done) = (h.clone(), done.clone());
+        std::thread::spawn(move || {
+            h.write(ODSY_CMD_FIFO, 0, 4);
+            done.store(true, SeqCst);
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert!(!done.load(SeqCst), "the store was dropped or ran around the board's thread");
+    assert_eq!(h.fifo.stores(), stores);
+    store.join().unwrap();
+    assert!(h.fifo.level() <= ODSY_CFIFO_WORDS + 1);
+    h.fifo.test_words.store(0, SeqCst);
+    h.work_stop();
+    assert_eq!(h.fifo.level(), 0);
+}
