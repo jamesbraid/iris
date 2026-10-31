@@ -13,8 +13,8 @@ use crate::dev::gl::math::{xform, IDENT};
 /// primitive, queued beside draws in the order the head received it.
 pub type RasterKind = u32;
 
-/// Where colour is stored: a value the family's drawable gives and only
-/// the family's store hook reads. Shared code copies it, never interprets it.
+/// Where colour is stored: a value the board's drawable gives and only
+/// the board's store hook reads. Shared code copies it, never interprets it.
 pub type ColourTarget = u32;
 
 pub type GlDrawResult = u32;
@@ -135,7 +135,7 @@ pub const GL_ALWAYS: u32 = 7;
 pub const GL_DRAW_FRONT: u32 = 0x1;
 pub const GL_DRAW_BACK: u32 = 0x2;
 //
-// The family's overlay planes, a layer of their own: set, the draw goes
+// The board's overlay planes, a layer of their own: set, the draw goes
 // to the drawable's overlay target alone and the other bits name nothing.
 //
 pub const GL_DRAW_OVERLAY: u32 = 0x40;
@@ -363,7 +363,7 @@ pub struct RasterOp {
     pub x1: i32,
     pub y1: i32,
     /// Only pixels inside these are written; at most the rectangle's. An
-    /// empty list is how a family says its window has no visible pixel.
+    /// empty list is how the board says its window has no visible pixel.
     pub clip: ClipList,
     /// CLEAR: GL_COLOR_BUFFER_BIT and GL_DEPTH_BUFFER_BIT.
     pub clear_buffers: u32,
@@ -384,17 +384,17 @@ pub struct RasterOp {
     pub index_mask: u32,
 }
 
-/// Where a context draws, as the family's context switch, window clip and
+/// Where a context draws, as the board's context switch, window clip and
 /// buffer selection give it. Coordinates are plane pixels.
 #[derive(Clone, Copy, Default)]
 pub struct GlDrawable {
-    /// False while the family has no window for the context: nothing draws,
+    /// False while the board has no window for the context: nothing draws,
     /// and each draw, clear or bitmap is logged as dropped.
     pub bound: bool,
     /// The window's lower-left pixel, where window coordinates start; its
     /// top-left under a window matrix whose rows run down the display.
     pub origin: [i32; 2],
-    /// 0/0 until the family supplies a validated drawable extent.
+    /// 0/0 until the board supplies a validated drawable extent.
     pub width: u32,
     pub height: u32,
     /// The pixels the window owns. A bound window with no rectangle is one
@@ -496,7 +496,7 @@ pub struct GlDrawState {
     pub drawable: GlDrawable,
     /// GL_DITHER's enable, initially on (4.1.7).
     pub dither: bool,
-    /// A window matrix, for a family whose board takes one eye-to-window
+    /// A window matrix, for a board that takes one eye-to-window
     /// transform in place of a projection and a viewport; none of it is GL
     /// state (GlContext::set_window_matrix()). While window_matrix_given is set,
     /// an eye position e goes to h = W e by window_matrix W, column-major,
@@ -538,7 +538,7 @@ pub struct GlPolygonAssembly {
 
 #[derive(Clone, Default)]
 pub struct GlContext {
-    /// The hardware identity the family keys this context by.
+    /// The hardware identity the board keys this context by.
     pub hw_id: u32,
     pub cur: GlDrawState,
     /// The texture matrix (2.10.2), applied to each vertex before clipping.
@@ -553,7 +553,7 @@ pub struct GlContext {
     pub raster_valid: bool,
     pub raster_color: [f32; 4],
     pub raster_index: f32,
-    /// In the depth plane's units, as the family delivered it; a clear
+    /// In the depth plane's units, as the board delivered it; a clear
     /// keeps the low bits the plane holds, so all ones is 1.0 at any depth.
     pub clear_depth: u32,
     /// Aliased sizes and retained polygon modes (3.3 to 3.5).
