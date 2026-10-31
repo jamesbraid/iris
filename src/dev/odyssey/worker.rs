@@ -19,7 +19,10 @@ use std::time::Duration;
 pub const ODYSSEY_WORK_THREAD: &str = "odyssey-work";
 
 /// The pause before the board's thread runs a burst, so the stores of the
-/// burst land first and one run takes them together.
+/// burst land first and one run takes them together. A processor that
+/// waits on the thread cuts it short (`CommandFifo::hurry`): an access the
+/// bus refused, or a counted store whose credit stays owed until the stores
+/// ahead of it retire.
 pub const GAP: Duration = Duration::from_micros(100);
 
 /// How much one run may do: for tests a count of stores. The budget is
@@ -98,10 +101,8 @@ impl BoardLocks {
     fn work_run(&self) {
         while self.fifo.wait_for_work() {
             // Let a burst of stores land before the run, unless the
-            // processor already waits for it.
-            if !self.fifo.take_hurry() {
-                std::thread::sleep(GAP);
-            }
+            // processor waits for it.
+            self.fifo.gap();
             if self.fifo.exiting() {
                 break;
             }
