@@ -1357,6 +1357,24 @@ impl Board {
         let word = self.tex_sampler[4] & !ODSY_TEX_SAMPLER_BIT17;
         let components = word & 0x0f800000;
         let mut sampler_size = self.tex_sampler[0];
+        // The library's texture move (level descriptor 60), which draws a
+        // pixel zoom, sends its sampler without the size word's bit 27 and
+        // the sampler word's bit 28, and with bits 22, 21 and 18 set; the
+        // mip-level builder (Board::texture_build_level()) sends the same
+        // word with bit 28. INFERRED (datasheet, "Pixel zoom: the texture
+        // move and its rectangle"): these are the move's own marks on an
+        // otherwise nearest-filtered, repeating 2D image. UNKNOWN: what the
+        // marked bits mean on the board. Read it as the plain image.
+        let texture_move = self.tex_level0 == 60
+            && (sampler_size & 0x08000000) == 0
+            && (word & 0x10000000) == 0
+            && (word & !components) == 0x00640000;
+        let word = if texture_move { (word & !0x00640000) | 0x10000000 } else { word };
+        // It also leaves the depth word 0 where a 2D image carries 1.
+        let depth = if texture_move { 1 } else { depth };
+        if texture_move {
+            sampler_size |= 0x08000000;
+        }
         let detail = texture_detail_sampler(sampler_size);
         let detail_identity = detail.is_some();
         let detail_sampler = detail.unwrap_or_default();
@@ -1835,6 +1853,10 @@ impl Board {
                 let object = self.object_find(base);
                 let backed = object >= 0 && {
                     let o = object as usize;
+                    // The texture move rounds the image up to a power of two
+                    // and the object holds only the rows written, which is
+                    // all the rectangle's coordinates reach.
+                    let rows = if texture_move { rows.min(self.obj_rows[o]).max(1) } else { rows };
                     let end = ((rows - 1) as u64)
                         .checked_mul(self.obj_width[o] as u64)
                         .and_then(|e| e.checked_add(self.obj_offset[o] as u64))
