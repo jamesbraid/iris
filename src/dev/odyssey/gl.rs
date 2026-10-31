@@ -16,6 +16,7 @@ fn cmax<T: PartialOrd>(a: T, b: T) -> T {
 /// One level's texels in the object store: `width` by `height` words from
 /// word `offset`, rows `stride` words apart.
 #[derive(Clone, Copy, Default)]
+#[cfg_attr(test, derive(PartialEq, Debug))]
 pub struct Texture {
     pub offset: u32,
     pub stride: u32,
@@ -29,6 +30,7 @@ pub struct Texture {
 
 /// First and last detail function weights, and whether the table is flat.
 #[derive(Clone, Copy, Default)]
+#[cfg_attr(test, derive(PartialEq, Debug))]
 pub struct TextureDetailWeight {
     pub constant: bool,
     pub first: f64,
@@ -36,6 +38,7 @@ pub struct TextureDetailWeight {
 }
 
 #[derive(Clone, Copy, Default)]
+#[cfg_attr(test, derive(PartialEq, Debug))]
 pub struct TextureVolume {
     pub base: u32,
     pub stride_units: u32,
@@ -77,9 +80,40 @@ pub struct TextureChain {
     pub pyramid: Option<PyramidShape>,
     pub detail_storage: Texture,
     pub detail_image: GlTexLevel,
+    /// The leading entries of `volumes`, `storage` and `levels` written since
+    /// the chain was last cleared; the rest are still default.
+    filled: usize,
 }
 
 impl TextureChain {
+    /// Make the chain default again, writing only what a setup wrote. A chain
+    /// is about 7 KB, and a textured draw cleared all of it, though a typical
+    /// texture fills a few levels.
+    pub fn clear(&mut self) {
+        let n = self.filled.min(self.levels.len());
+
+        // Every setup in the tests proves `touch` covers what it writes.
+        #[cfg(test)]
+        {
+            assert!(self.volumes[n..].iter().all(|v| *v == TextureVolume::default()), "a written volume was not touched");
+            assert!(self.storage[n..].iter().all(|t| *t == Texture::default()), "a written level store was not touched");
+            assert!(self.levels[n..].iter().all(|l| *l == GlTexLevel::default()), "a written level was not touched");
+        }
+        self.volumes[..n].fill(TextureVolume::default());
+        self.storage[..n].fill(Texture::default());
+        self.levels[..n].fill(GlTexLevel::default());
+        self.volume = TextureVolume::default();
+        self.pyramid = None;
+        self.detail_storage = Texture::default();
+        self.detail_image = GlTexLevel::default();
+        self.filled = 0;
+    }
+
+    /// Note that level `i`'s entries are about to be written.
+    pub fn touch(&mut self, i: u32) {
+        self.filled = self.filled.max(i as usize + 1);
+    }
+
     /// image with this chain's pyramid.
     pub fn image<'a>(&'a self, image: &GlTexImage<'static>) -> GlTexImage<'a> {
         let mut image: GlTexImage<'a> = *image;
@@ -1323,6 +1357,31 @@ impl Board {
         let word = self.tex_sampler[4] & !ODSY_TEX_SAMPLER_BIT17;
         let components = word & 0x0f800000;
         let mut sampler_size = self.tex_sampler[0];
+        // The library's texture move (level descriptor 60), which draws a
+        // pixel zoom, sends its sampler without the size word's bit 27 and
+        // the sampler word's bit 28, and with bits 22, 21 and 18 set; the
+        // mip-level builder (Board::texture_build_level()) sends the same
+        // word with bit 28. INFERRED (datasheet, "Pixel zoom: the texture
+        // move and its rectangle"): these are the move's own marks on an
+        // otherwise plain 2D image. UNKNOWN: what the marked bits mean on the
+        // board. Read it as the plain image. The move writes no wrap or filter
+        // bit (word bits 13:0), so those are the context's and are read as
+        // they stand: the magnification filter is the context's (INFERRED
+        // linear by default), not one the zoom chooses. The size word's
+        // texture-offset code (bits 28:26) is 2 only for an object whose two
+        // offset fields are both 2, and 0 otherwise, so bit 27 may be set and
+        // bit 26 never is (ESTABLISHED, same section); the move is read as
+        // the plain image either way.
+        let texture_move = self.tex_level0 == 60
+            && (sampler_size & 0x04000000) == 0
+            && (word & 0x10000000) == 0
+            && (word & !components & !0x3fff) == 0x00640000;
+        let word = if texture_move { (word & !0x00640000) | 0x10000000 } else { word };
+        // It also leaves the depth word 0 where a 2D image carries 1.
+        let depth = if texture_move { 1 } else { depth };
+        if texture_move {
+            sampler_size |= 0x08000000;
+        }
         let detail = texture_detail_sampler(sampler_size);
         let detail_identity = detail.is_some();
         let detail_sampler = detail.unwrap_or_default();
@@ -1615,7 +1674,7 @@ impl Board {
                 if count > SGI_GL_TEX_LEVELS_MAX {
                     break 'unsupported;
                 }
-                *chain = TextureChain::default();
+                chain.clear();
                 let mut slice_next: u32 = 0;
                 for i in 0..count {
                     let level_width = cmax(1, width >> i);
@@ -1669,6 +1728,7 @@ impl Board {
                         slice_next += 1;
                         z += 1;
                     }
+                    chain.touch(i);
                     chain.volumes[i as usize] = TextureVolume {
                         base,
                         stride_units,
@@ -1683,6 +1743,7 @@ impl Board {
                         slices: slice_next - level_slice,
                         ..Default::default()
                     };
+                    chain.touch(i);
                     chain.levels[i as usize] = GlTexLevel {
                         level: i,
                         width: level_width,
@@ -1741,7 +1802,7 @@ impl Board {
             if count > SGI_GL_TEX_LEVELS_MAX || first + count > SGI_ODYSSEY_TEX_LEVELS {
                 break 'unsupported;
             }
-            *chain = TextureChain::default();
+            chain.clear();
             chain.volume.colour_table_alpha = colour_table_rgba8_rgba || word == 0x11600001;
             chain.volume.colour_table = colour_table;
             chain.volume.scale_bias = !self.texture_scale_bias_identity();
@@ -1781,6 +1842,7 @@ impl Board {
                 {
                     break 'unsupported;
                 }
+                chain.touch(i);
                 chain.levels[i as usize] = GlTexLevel {
                     level: i,
                     width: level_width,
@@ -1798,6 +1860,10 @@ impl Board {
                 let object = self.object_find(base);
                 let backed = object >= 0 && {
                     let o = object as usize;
+                    // The texture move rounds the image up to a power of two
+                    // and the object holds only the rows written, which is
+                    // all the rectangle's coordinates reach.
+                    let rows = if texture_move { rows.min(self.obj_rows[o]).max(1) } else { rows };
                     let end = ((rows - 1) as u64)
                         .checked_mul(self.obj_width[o] as u64)
                         .and_then(|e| e.checked_add(self.obj_offset[o] as u64))
@@ -1828,6 +1894,7 @@ impl Board {
                         break 'unsupported;
                     }
                 }
+                chain.touch(i);
                 chain.storage[i as usize] = Texture {
                     // Captured stored-border policy uses interior coordinate 16.
                     offset: self.obj_offset[o].wrapping_add(interior_y.wrapping_mul(self.obj_width[o])).wrapping_add(interior_x),
@@ -1948,6 +2015,22 @@ impl Board {
     }
 }
 
+/// A draw's estimated raster work in pixels, from its vertices' window
+/// positions (`primitive_cost`).
+fn gl_draw_cost(d: &GlDraw) -> u32 {
+    let points = d.vertices.chunks_exact(SGI_GL_VERTEX_FLOATS).take(d.count as usize).map(|v| {
+        let clip = [v[SGI_GL_V_POSITION] as f64, v[SGI_GL_V_POSITION + 1] as f64, v[SGI_GL_V_POSITION + 2] as f64, v[SGI_GL_V_POSITION + 3] as f64];
+        let mut win = [0.0f64; 3];
+
+        if !(clip[3] > 0.0) {
+            return None;
+        }
+        d.state.clip_to_window(&clip, &mut win);
+        Some((win[0], win[1]))
+    });
+    primitive_cost(d.mode, points, d.point_size, d.line_width)
+}
+
 impl Board {
     /// The context emits one assembled primitive here; rasterize it into the
     /// planes. The context requires the checked result once per-face polygon
@@ -2030,6 +2113,7 @@ impl Board {
                 pixels,
             }),
         };
+        let cost = gl_draw_cost(d);
         if !self.raster.threaded() {
             let (result, phase) = self.raster.run_now(|ctx| job.run(ctx));
             d.line_phase = phase;
@@ -2040,7 +2124,7 @@ impl Board {
         // every result but out-of-memory is only reported, and that one
         // needs a polygon of more vertices than the host can address. The
         // raster unit keeps the line-stipple phase the draw advances.
-        self.raster.submit_draw(job);
+        self.raster.submit_draw(job, cost);
         if d.line_phase.is_some() {
             d.line_phase = Some(LINE_PHASE_ON_RASTER);
         }
@@ -2062,7 +2146,8 @@ impl Board {
         if let Some(op) = ops.first() {
             self.gl_report_refusals(op.kind != SGI_RASTER_CLEAR || (op.clear_buffers & SGI_GL_COLOR_BUFFER_BIT) != 0);
         }
-        self.raster.submit(move |ctx| {
+        let cost = ops.iter().fold(0u32, |c, op| c.saturating_add(rect_cost(op.x0, op.y0, op.x1, op.y1, op.kind == SGI_RASTER_CLEAR)));
+        self.raster.submit_work(cost, move |ctx| {
             // SAFETY: the job runs before the front end next touches the
             // planes (PlaneSpans).
             let mut planes = unsafe { pixels.pixels() };
@@ -2114,14 +2199,17 @@ impl ClipRect {
 
 impl GlDrawable {
     // Compares the two drawables field by field.
-    fn drawable_eq(&self, b: &GlDrawable) -> bool {
+    pub fn drawable_eq(&self, b: &GlDrawable) -> bool {
         self.bound == b.bound
             && self.origin == b.origin
             && self.width == b.width
             && self.height == b.height
             && self.clip.n == b.clip.n
             && self.clip.empty == b.clip.empty
-            && self.clip.r.iter().zip(b.clip.r.iter()).all(|(x, y)| x.gl_clip_rect_eq(y))
+            // Only the rectangles the list counts: this runs before every
+            // command, and a window rarely owns more than one or two of the
+            // sixteen. Those past the count are not drawn against.
+            && self.clip.r.iter().zip(b.clip.r.iter()).take(self.clip.n as usize).all(|(x, y)| x.gl_clip_rect_eq(y))
             && self.front == b.front
             && self.back == b.back
             && self.extra == b.extra
