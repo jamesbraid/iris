@@ -21,6 +21,12 @@ use std::sync::{atomic::AtomicU64, OnceLock};
 use std::sync::Arc;
 
 pub(crate) const CPU_PHYS_MASK: u64 = ((1u64 << 40) - 1) | (3u64 << 57);
+/// The plane bit a CPU puts on a noncoherent cached reference inside the
+/// reset PROM's window (`MipsExecutor::cached_plane`). The cached view sends
+/// such a reference to the PROM, not to the RAM that may cover the window.
+/// It is above every address bit the node decodes, so a cache line on the
+/// plane never shares a tag with the RAM line at the same address.
+pub(crate) const PROM_PLANE: u64 = 1 << 56;
 const PA_MASK: u64 = (1u64 << 40) - 1;
 
 struct Unclaimed;
@@ -193,6 +199,25 @@ pub struct Ip35Bus {
     views: [SparseWindowMap; 4],
     #[cfg(feature = "jitv2")]
     ram_generations: OnceLock<Arc<dyn BusDevice>>,
+    /// What answers [`PROM_PLANE`]: the window and the device behind it.
+    prom_plane: Option<Arc<Plane>>,
+}
+/// A window of physical addresses on [`PROM_PLANE`] and its device, which
+/// takes the plain physical address.
+struct Plane {
+    base: u64,
+    size: u64,
+    device: Arc<dyn BusDevice>,
+}
+impl Plane {
+    /// The plain address of `n` bytes at `a` on the plane, inside the window.
+    fn target(&self, a: u64, n: u64) -> Option<(&dyn BusDevice, u64)> {
+        let pa = a & !PROM_PLANE;
+        let inside = pa.checked_sub(self.base).zip(pa.checked_add(n)).is_some_and(|(offset, end)| {
+            offset < self.size && end <= self.base + self.size
+        });
+        (inside && a & (n - 1) == 0).then_some((self.device.as_ref(), pa))
+    }
 }
 impl Ip35Bus {
     pub fn new(phys: Arc<Physical>) -> Self {
@@ -202,7 +227,15 @@ impl Ip35Bus {
             views: std::array::from_fn(|_| SparseWindowMap::default()),
             #[cfg(feature = "jitv2")]
             ram_generations: OnceLock::new(),
+            prom_plane: None,
         }
+    }
+    /// Answer [`PROM_PLANE`] references in `base..base + size` with
+    /// `device`, at their plain physical address. Once, before the views are
+    /// taken.
+    pub fn set_prom_plane(&mut self, base: u64, size: u64, device: Arc<dyn BusDevice>) {
+        assert!(self.prom_plane.is_none(), "IP35 PROM plane already set");
+        self.prom_plane = Some(Arc::new(Plane { base, size, device }));
     }
     /// Code pages use stable logical RAM generations across bank placement and
     /// diagnostic remaps; non-RAM pages keep their own device generations.
@@ -229,6 +262,7 @@ impl Ip35Bus {
             phys: self.phys.clone(),
             plain_memory,
             extent,
+            prom_plane: self.prom_plane.clone(),
         })
     }
 }
@@ -243,10 +277,19 @@ struct CachedPhysical {
     phys: Arc<Physical>,
     plain_memory: Arc<dyn BusDevice>,
     extent: RamExtent,
+    prom_plane: Option<Arc<Plane>>,
 }
 impl CachedPhysical {
+    /// `Some` for a reference on [`PROM_PLANE`]: its device and address, or
+    /// `None` inside when it falls outside the window.
+    fn plane(&self, a: u64, n: u64) -> Option<Option<(&dyn BusDevice, u64)>> {
+        (a & PROM_PLANE != 0).then(|| self.prom_plane.as_ref()?.target(a, n))
+    }
     fn memory_target(&self, a: u64, n: u64) -> Option<(&dyn BusDevice, u64)> {
-        self.target(a, n).map(|(physical, pa)| {
+        if let Some(plane) = self.plane(a, n) {
+            return plane;
+        }
+        self.physical_target(a, n).map(|(physical, pa)| {
             // MD owns every guest write to a possible fitted-RAM prefix, so
             // all paths update its stable logical generation counters. PROM
             // and other devices retain the cached Physical connection.
@@ -256,7 +299,13 @@ impl CachedPhysical {
             (memory, pa)
         })
     }
-    fn target(&self, a: u64, n: u64) -> Option<(&Physical, u64)> {
+    fn target(&self, a: u64, n: u64) -> Option<(&dyn BusDevice, u64)> {
+        if let Some(plane) = self.plane(a, n) {
+            return plane;
+        }
+        self.physical_target(a, n).map(|(physical, pa)| (physical as &dyn BusDevice, pa))
+    }
+    fn physical_target(&self, a: u64, n: u64) -> Option<(&Physical, u64)> {
         // UC selectors belong to the uncached SysAd connection. Reject them
         // here rather than turning a malformed cached request into an alias.
         if a & !PA_MASK != 0 || a & (n - 1) != 0 {
@@ -284,6 +333,10 @@ macro_rules! processor_access {
 impl BusDevice for Ip35Bus {
     #[cfg(feature = "jitv2")]
     fn gen_ptr(&self, address: u64) -> *const AtomicU64 {
+        if address & PROM_PLANE != 0 {
+            return self.prom_plane.as_ref().and_then(|plane| plane.target(address, 1))
+                .map_or(std::ptr::null(), |(device, pa)| device.gen_ptr(pa));
+        }
         if address & !PA_MASK == 0 {
             // JIT page lookup passes plain physical code addresses, without
             // a cache attribute. Raw UC0 therefore cannot select the MMIO map
@@ -324,7 +377,10 @@ impl BusDevice for CachedPhysical {
     }
     #[cfg(feature = "jitv2")]
     fn gen_ptr(&self, a: u64) -> *const AtomicU64 {
-        self.target(a, 1).map(|(view, pa)| {
+        if let Some(plane) = self.plane(a, 1) {
+            return plane.map_or(std::ptr::null(), |(device, pa)| device.gen_ptr(pa));
+        }
+        self.physical_target(a, 1).map(|(view, pa)| {
             let generation = self.plain_memory.gen_ptr(pa);
             if generation.is_null() { view.gen_ptr(pa) } else { generation }
         }).unwrap_or(std::ptr::null())
