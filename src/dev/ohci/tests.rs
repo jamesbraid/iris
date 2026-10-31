@@ -408,15 +408,15 @@ fn fake_clock_ohci(start_ns: usize) -> (Arc<Ohci>, Arc<AtomicUsize>) {
 /// OpenHCI 1.0a sections 6.2.1 and 7.3.3: entering UsbOperational loads
 /// HcFmRemaining from the frame interval, increments HcFmNumber, and sends the
 /// first SOF one frame later, whatever the phase of the free-running clock.
-fn operational_entry_restarts_the_frame(suspend_first: bool) {
+fn operational_entry_restarts_the_frame(from_hcfs: Option<u32>) {
     let (h, now) = fake_clock_ohci(10_000_000);
     let m = Memory::new();
     h.connect_dma(m.clone());
     h.config().write(1, 6);
     h.bar_write(0, 0x18, 0x1000, 4);
     // Not operational: no frames count however much time passes.
-    if suspend_first {
-        h.bar_write(0, 4, 0x40, 4);
+    if let Some(hcfs) = from_hcfs {
+        h.bar_write(0, 4, hcfs, 4);
     }
     now.store(15_000_000, Ordering::Relaxed);
     assert_eq!(h.bar_read(0, 0x3c, 4), 0);
@@ -441,12 +441,35 @@ fn operational_entry_restarts_the_frame(suspend_first: bool) {
 
 #[test]
 fn operational_entry_from_reset_restarts_the_frame() {
-    operational_entry_restarts_the_frame(false);
+    operational_entry_restarts_the_frame(None);
 }
 
 #[test]
 fn operational_entry_from_suspend_restarts_the_frame() {
-    operational_entry_restarts_the_frame(true);
+    // HCFS 11b.
+    operational_entry_restarts_the_frame(Some(0xc0));
+}
+
+#[test]
+fn operational_entry_from_resume_restarts_the_frame() {
+    // HCFS 01b.
+    operational_entry_restarts_the_frame(Some(0x40));
+}
+
+/// The increment on entry carries into the frame-number overflow flag like a
+/// frame's own, and HcFmRemaining takes the frame-interval toggle bit too.
+#[test]
+fn operational_entry_sets_overflow_and_loads_the_interval_toggle() {
+    for (before, after, overflow) in [(0x7fff, 0x8000, true), (0xffff, 0, true), (0x1234, 0x1235, false)] {
+        let (h, _now) = fake_clock_ohci(10_000_000);
+        h.state.lock().r[15] = before;
+        h.bar_write(0, 0x34, 0x8000_2edf, 4);
+        h.bar_write(0, 4, 0x80, 4);
+        assert_eq!(h.bar_read(0, 0x3c, 4), after, "from {before:#x}");
+        assert_eq!(h.bar_read(0, 0x0c, 4) & 32 != 0, overflow, "from {before:#x}");
+        assert_eq!(h.bar_read(0, 0x38, 4), 0x8000_2edf);
+        h.stop();
+    }
 }
 
 /// An interrupt handler can acknowledge a line while the controller raises it.
