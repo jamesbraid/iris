@@ -1,0 +1,34 @@
+# pixtest-ci8: the cases that passed on the VPro (PASS or XPASS). id name.
+# 49 cases: 26 PASS, 10 FAIL, 7 XFAIL, 6 XPASS, 0 SKIP.
+1 ci8/baseline/rects
+2 ci8/baseline/clear
+3 ci8/read/UNSIGNED_INT/high-planes
+4 ci8/draw/UNSIGNED_BYTE
+5 ci8/draw/BYTE
+6 ci8/draw/UNSIGNED_SHORT
+7 ci8/draw/SHORT
+8 ci8/draw/UNSIGNED_INT
+9 ci8/draw/INT
+10 ci8/draw/FLOAT
+11 ci8/read/UNSIGNED_BYTE
+12 ci8/read/BYTE
+14 ci8/read/SHORT
+15 ci8/read/UNSIGNED_INT
+16 ci8/read/INT
+17 ci8/read/FLOAT
+18 ci8/draw/UNSIGNED_BYTE/shift1
+19 ci8/draw/UNSIGNED_BYTE/shift-2
+20 ci8/draw/UNSIGNED_BYTE/offset7
+21 ci8/draw/UNSIGNED_SHORT/shift3-offset100
+22 ci8/draw/UNSIGNED_SHORT/offset-5
+23 ci8/draw/FLOAT/shift2-offset1
+24 ci8/draw/INT/shift-1-offset3
+29 ci8/draw/UNSIGNED_BYTE/align1
+30 ci8/draw/UNSIGNED_BYTE/align2
+31 ci8/draw/UNSIGNED_SHORT/align8
+32 ci8/draw/UNSIGNED_BYTE/rowlen20-skip3,2
+33 ci8/draw/UNSIGNED_SHORT/rowlen20-skip3,2
+38 ci8/read/UNSIGNED_BYTE/align1
+44 ci8/draw/BITMAP/offset9
+45 ci8/bitmap/raster-index
+47 ci8/copy
