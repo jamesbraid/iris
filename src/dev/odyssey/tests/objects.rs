@@ -9,7 +9,7 @@ use crate::dev::odyssey::gl_context::{
     GL_LUMINANCE_ALPHA, GL_MODULATE, GL_RGB, GL_RGBA,
 };
 use crate::dev::odyssey::sampler::{
-    texel_format, texture_class_format, texture_level_texel_format, Placement, TableFormat, Target, Wrap,
+    border_origin, level_pitch_units, texel_format, texture_class_format, texture_level_texel_format, Placement, TableFormat, Target, Wrap,
 };
 use crate::dev::odyssey::raster::GlTexImage;
 use crate::dev::odyssey::tests::board_with_ram;
@@ -748,4 +748,26 @@ fn the_volume_slice_stride_follows_the_booked_bytes() {
     assert_eq!(volume_slice_stride(6, f(17)), 0x1000);
     assert_eq!(volume_slice_stride(1, f(12)), 0x40);
     assert_eq!(volume_slice_stride(1, f(33)), 0x100);
+}
+
+/// A stored border's origin, row and slice spacing at any size. The pitch is
+/// the image's tiles plus the border on each side, rounded up to even, with
+/// 4096 stored as 1; widths here are the stored size, border included. The
+/// slice stride is (32 << size code) << word 2 for every texel size.
+#[test]
+fn stored_border_placement_follows_the_library_arithmetic_at_any_size() {
+    // (stored width, border, pitch in 16-texel units)
+    let pitch = [(4, 1, 4), (514, 1, 34), (17, 1, 4), (64, 0, 4), (65, 0, 6), (65536, 0, 1), (65521, 0, 1), (65504, 0, 4094), (65520, 0, 1)];
+
+    for (width, border, expect) in pitch {
+        assert_eq!(level_pitch_units(width, border), expect, "width {width}, border {border}");
+    }
+    assert_eq!((border_origin(0), border_origin(1)), (0, 15));
+
+    // (index, size code): a 2-, 4- and 8-byte texel.
+    for (index, c) in [(12u32, 0u64), (17, 1), (33, 2)] {
+        for word2 in 1..8u32 {
+            assert_eq!(volume_slice_stride(word2, texel_format(index).unwrap()), (32 << c) << word2, "index {index}, word 2 {word2}");
+        }
+    }
 }

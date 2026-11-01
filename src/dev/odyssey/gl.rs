@@ -1247,17 +1247,18 @@ impl Texels for BoardTexels<'_> {
     }
 }
 
-/// A volume level's slices sit 2^(word 2) tiles of 256 texels apart, each
-/// texel the bytes the library books for the level's format, in 16-byte
-/// address units. The library places each slice's upload so and sends the
-/// tile count's base-2 ceiling in word 2 (ESTABLISHED). That the board
-/// derives its slice stride the same way is INFERRED: it is the only reading
-/// under which an upload and a later sample agree, as are the 16-byte unit
-/// and the 256-texel tile. For a 4-byte format this gives the spacing seen
-/// three ways on the model: 0x80 apart for word 2 1, 0x400 for 4 and 0x1000
-/// for 6.
+/// A volume level's slices sit `(32 << c) << word 2` address units apart,
+/// with `c` the format's size code (2, 4 or 8 bytes a texel for 0, 1 or 2).
+/// The library rounds a slice's tile count up to a power of two, sends the
+/// base-2 ceiling of the unrounded count in word 2, and places slice z at
+/// (z + (16 - border) & 15) of those strides: ESTABLISHED as its arithmetic
+/// at any size, border and texel size. That the board derives its slice
+/// stride the same way is INFERRED: it is the only reading under which an
+/// upload and a later sample agree. For a 4-byte format this is 64 << word 2,
+/// the spacing seen three ways on the model: 0x80 apart for word 2 1, 0x400
+/// for 4 and 0x1000 for 6, and the captured 4x4x4 stored volume's 0x400.
 pub(super) fn volume_slice_stride(level_word2: u32, format: TexelFormat) -> u64 {
-    (256u64 * format.booked() as u64 / 16).wrapping_shl(level_word2)
+    (32u64 << format.size).wrapping_shl(level_word2)
 }
 
 /// The detail function table (0x3e40-0x3e4f): the GL library fills its 256

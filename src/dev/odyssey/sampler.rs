@@ -164,16 +164,39 @@ const LEVEL_WORD1_UNMODELLED: u32 = 0x3c0ff000;
 /// object by the texture move and have no known meaning.
 const LEVEL_ADDRESS_MASK: u32 = 0x1fffffff;
 
-/// A level's row, in 16-texel units rounded up to even, for a level `width`
-/// texels wide (ESTABLISHED as the library's rule for a primary level).
-pub(super) fn level_stride_units(width: u32) -> u32 {
-    (width.div_ceil(16) + 1) & !1u32
+/// The border width of a level stored with a texel offset. The library writes
+/// borders of 0 or 1 texels only, and the model reads a level with a stored
+/// border as 1 (Placement::TexelOffset).
+const STORED_BORDER: u32 = 1;
+
+/// A stored-border level's image starts this many texels in from the
+/// object's start on each axis it has: (16 - border) & 15, so the border
+/// sits at the one texel before a 16-texel boundary and the interior begins
+/// on it. ESTABLISHED as the library's placement arithmetic at any size, for
+/// any level; INFERRED for the board, from the only reading under which an
+/// upload and a later sample agree, and checked against the captured stored
+/// levels.
+pub(super) fn border_origin(border: u32) -> u32 {
+    (16 - border) & 15
 }
 
-/// A level stored with a texel offset sits this many texels in from its
-/// allocation's corner on each axis it has, its border at one less
-/// (TexelOffset).
-const OFFSET_TEXELS: u32 = 16;
+/// A level's row in 16-texel units, level word 1 bits 11:0, for a level
+/// `stored_width` texels wide with `border` texels of border, the border
+/// counted in the width. The tiles of the image proper plus the border on
+/// each side, rounded up to even, a result of 4096 stored as 1. ESTABLISHED
+/// as the library's rule for a primary level at any size; INFERRED as the
+/// board's.
+pub(super) fn level_pitch_units(stored_width: u32, border: u32) -> u32 {
+    pitch_ending(stored_width.saturating_sub(2 * border).div_ceil(16) + 2 * border)
+}
+
+/// The common ending of a primary level's row: round up to even, and store
+/// 4096 as 1 (ESTABLISHED as the library's rule; INFERRED as the board's).
+fn pitch_ending(tiles: u32) -> u32 {
+    let even = (tiles + 1) & !1u32;
+
+    if even == 4096 { 1 } else { even }
+}
 
 /// Why a draw's texture state is refused. Every refusal is logged with the
 /// state's words (Board::texture_setup()).
@@ -829,16 +852,17 @@ impl Board {
         let format_word = self.level_entry(first)[1] & LEVEL_FORMAT_MASK;
         // A stored border's interior starts 16 texels in on each axis the
         // image has (Placement::TexelOffset).
-        let interior_x = if offset { OFFSET_TEXELS } else { 0 };
-        let interior_y = if offset && two_d { OFFSET_TEXELS } else { 0 };
+        let border = if offset { STORED_BORDER } else { 0 };
+        let interior_x = border_origin(border) + border;
+        let interior_y = if two_d { interior_x } else { 0 };
         for i in 0..count {
             let entry = self.level_entry(first + i);
             let level_width = cmax(1, width >> i);
             let level_height = cmax(1, height >> i);
             let stride_units = entry[1] & LEVEL_STRIDE_MASK;
-            // A stored border's row is its width plus 16 texels each side,
-            // rounded as an ordinary row: INFERRED from the captured strides.
-            let expected_units = level_stride_units(level_width + 2 * interior_x);
+            // A stored border's row is its width plus the border on each side,
+            // rounded as level_pitch_units() says.
+            let expected_units = level_pitch_units(level_width + 2 * border, border);
             let base = entry[0] & LEVEL_ADDRESS_MASK;
             let rows = level_height + interior_y + (offset && two_d) as u32;
 
@@ -936,7 +960,7 @@ impl Board {
     }
 
     /// A volume's levels. Level 0 is entry 0; each slice is its own object,
-    /// the slices 64 << word 2 address units apart (volume_slice_stride()).
+    /// the slices (32 << size code) << word 2 address units apart (volume_slice_stride()).
     ///
     /// MODEL POLICY for mipmaps: the library fills entry 0 alone, and the
     /// model derives each further level as following the one before, one
@@ -952,11 +976,12 @@ impl Board {
         let offset = s.placement == Placement::TexelOffset;
         let mipmap = s.mipmap();
         // A stored border's slices hold the level 16 texels in, border at 15.
-        let interior = if offset { OFFSET_TEXELS } else { 0 };
+        let border = if offset { STORED_BORDER } else { 0 };
+        let interior = border_origin(border) + border;
         let border_texels = if offset { 2 } else { 0 };
 
         let format = Self::level_format_check(entry[1])?;
-        if stride_units != level_stride_units(width + 2 * interior) {
+        if stride_units != level_pitch_units(width + 2 * border, border) {
             return Err(Refusal("a volume row that is not the library's for its width"));
         }
         if (entry[0] & LEVEL_ADDRESS_MASK) == 0 || entry[2] == 0 || entry[2] > ODSY_VOLUME_SLICE_SHIFT_MAX {
