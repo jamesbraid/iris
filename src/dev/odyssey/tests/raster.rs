@@ -100,9 +100,7 @@ fn a_waiting_read_behind_a_queued_draw_sees_it_drawn() {
 
     h.read(ODSY_BUZZ_1, 4);
     assert_eq!(h.raster.pending(), 0);
-    let s = h.test_board();
-    assert_ne!(pixel(&s, 0, 10, 10), 0, "drawn before the read answered");
-    drop(s);
+    assert_ne!(pixel(h.test_board(), 0, 10, 10), 0, "drawn before the read answered");
     h.raster.stop();
 }
 
@@ -153,9 +151,7 @@ fn a_fence_behind_a_queued_draw_lands_after_the_draw() {
     assert_eq!(ram.half(0x1006), 0, "the fence waits for the draw before it");
     hold.store(false, SeqCst);
     eventually("the fence did not land", || ram.half(0x1006) == 0x5a5a);
-    let s = h.test_board();
-    assert_ne!(pixel(&s, 0, 10, 10), 0, "the draw was in the planes before the fence");
-    drop(s);
+    assert_ne!(pixel(h.test_board(), 0, 10, 10), 0, "the draw was in the planes before the fence");
     h.raster.stop();
 }
 
@@ -275,12 +271,10 @@ fn stop_and_reset_finish_the_raster_queue_first() {
 
     h.raster.start();
     h.raster.test_slice_sleep_ms.store(200, SeqCst);
-    let mut s = h.test_board();
-    red_triangle(&mut s, &st);
-    s.reset();
+    red_triangle(h.test_board(), &st);
+    h.test_board().reset();
     assert_eq!(h.raster.pending(), 0);
-    assert_eq!(pixel(&s, 0, 10, 10), 0, "the reset cleared the draw queued before it");
-    drop(s);
+    assert_eq!(pixel(h.test_board(), 0, 10, 10), 0, "the reset cleared the draw queued before it");
     h.raster.stop();
 }
 
@@ -379,9 +373,7 @@ fn a_query_behind_a_queued_draw_syncs_after_the_draw_without_holding_the_front_e
     assert_eq!(ram.half(0x1006), 0, "the sync word waits for the draw before it");
     eventually("the query did not sync", || ram.half(0x1006) == 0x5a5a);
     assert_eq!(ram.get(0x2000 + 0x97c, 4), 7u32.to_be_bytes(), "the counter was published before the sync word");
-    let s = h.test_board();
-    assert_ne!(pixel(&s, 0, 10, 10), 0, "the draw was in the planes before the sync word");
-    drop(s);
+    assert_ne!(pixel(h.test_board(), 0, 10, 10), 0, "the draw was in the planes before the sync word");
     h.raster.stop();
 }
 
@@ -484,7 +476,7 @@ fn a_draw_under_an_id_test_asks_only_for_the_window_it_reaches() {
 fn a_clear_asks_the_display_for_its_rows() {
     let (s, _) = gl_board();
     let h = BoardLocks::new(s);
-    let mut s = h.test_board();
+    let s = h.test_board();
     let mut op = RasterOp {
         kind: RASTER_CLEAR,
         ntargets: 1,
@@ -956,7 +948,6 @@ fn many_small_jobs_queue_without_the_front_end_waiting() {
     assert_eq!(h.raster.pending(), 1000, "no small job waited for room");
     assert!(h.raster.queued() < RASTER_WORK_BUDGET, "{} queued", h.raster.queued());
     assert!(h.raster.queued() >= 1000 * RASTER_JOB_OVERHEAD as u64);
-    drop(s);
     eventually("the queue did not drain", || h.raster.pending() == 0);
     assert_eq!(h.raster.queued(), 0);
     h.raster.stop();
@@ -1084,7 +1075,7 @@ fn settle(h: &BoardLocks, display: &Display, frames: u32) {
 /// The presented frame against a whole per-pixel resolve of the planes.
 fn assert_frame_is_whole_resolve(h: &BoardLocks, display: &Display, what: &str) {
     h.raster.wait_idle();
-    let mut s = h.test_board();
+    let s = h.test_board();
     let reader = display.reader.lock();
     let w = reader.frame_width as usize;
     let mut want = vec![0u32; w];
@@ -1141,7 +1132,6 @@ fn stress(seed: u64, last_is_lut: bool) {
                 _ => h.front.lock().swap_arm |= rng.next_u32() & 0xf,
             }
         }
-        drop(s);
         std::thread::yield_now();
     }
     // A slow tail of single stores of one kind, so the last of them lands at
@@ -1153,7 +1143,7 @@ fn stress(seed: u64, last_is_lut: bool) {
     std::thread::sleep(Duration::from_millis(40));
     for _ in 0..100u32 {
         {
-            let mut s = h.test_board();
+            let s = h.test_board();
             if !last_is_lut {
                 s.draw_mask = ODSY_DRAW_MASK_BUFFER0 | ODSY_DRAW_MASK_BUFFER1;
                 s.paint_pixel((rng.next_u32() % 1280) as i64, (rng.next_u32() % 1024) as i64, rng.next_u32());
@@ -1199,7 +1189,7 @@ fn swap_atomicity() {
     let (h, mut st, display) = display_rig();
     // One window, so the one swap bit is the whole picture.
     {
-        let mut s = h.test_board();
+        let s = h.test_board();
         s.planes.did.fill(0);
         s.planes.colour.bytes.fill(0);
         s.planes.buffer1.bytes.fill(0);
@@ -1247,7 +1237,7 @@ fn swap_atomicity() {
         let back = 1 - (h.front.lock().displayed_buffer & 1);
         let red = (i * 9) as f32 / 255.0;
         {
-            let mut s = h.test_board();
+            let s = h.test_board();
             st.drawable.front = back;
             st.drawable.back = back;
             let v = vertices(&[(-wf, -hf), (3.0 * wf, -hf), (-wf, 3.0 * hf)], [red, 0.0, 0.0, 1.0]);
@@ -1308,7 +1298,9 @@ fn a_frame_waits_for_no_slice_and_takes_no_lock() {
 
     red_triangle(&mut h.test_board(), &st);
     eventually("the raster unit began its slice", || h.raster.in_slice());
-    let board = h.test_board();
+    // The processors' lock is held across the frame, as an access in
+    // progress holds it: the display needs nothing a processor holds.
+    let cpu = h.test_submit();
     let framed = AtomicBool::new(false);
     std::thread::scope(|scope| {
         scope.spawn(|| {
@@ -1327,7 +1319,7 @@ fn a_frame_waits_for_no_slice_and_takes_no_lock() {
         assert!(ended, "the frame waited for the slice");
         assert!(in_slice, "the slice was still running");
     });
-    drop(board);
+    drop(cpu);
     let reader = display.reader.lock();
     assert_eq!(reader.stats.frames, 1, "and the frame staged its lines");
     drop(reader);
