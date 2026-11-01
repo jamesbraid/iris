@@ -21,7 +21,7 @@ use super::gl_context::{
     GL_RGBA2, GL_RGBA4, GL_RGBA8, GL_TEXTURE_GEQUAL_R_SGIX, GL_TEXTURE_LEQUAL_R_SGIX, GlDrawState,
 };
 use super::raster::{
-    fmax, fmin, FIXED_FAILED, FIXED_LEVELS, GL_TEX_LEVELS_MAX, GlTexImage, GlTexLevel,
+    cmax, cmin, FIXED_FAILED, FIXED_LEVELS, GL_TEX_LEVELS_MAX, GlTexImage, GlTexLevel,
     GlTexPyramid, SOFT_TEXTURE_SELECTED, SoftDraw, SoftFixedCell, SoftFixedStore, SoftFrag,
     VolumeVertex,
 };
@@ -542,7 +542,7 @@ impl SoftDraw<'_> {
 
             if border == 0 {
                 for k in 0..4usize {
-                    out[k] = fmin(fmax(im.border_color[k] as f64, 0.0), 1.0);
+                    out[k] = cmin(cmax(im.border_color[k] as f64, 0.0), 1.0);
                 }
                 if format == GL_DEPTH_COMPONENT {
                     let o0 = out[0];
@@ -634,9 +634,9 @@ pub(super) fn soft_texture_axis(x: f64, n: u32, wrap: u32, upper: f64) -> f64 {
 
     match wrap {
         GL_REPEAT => x - x.floor(),
-        GL_CLAMP_TO_EDGE => fmin(fmax(x, half), 1.0 - half),
-        GL_CLAMP_TO_BORDER => fmin(fmax(x, -half), 1.0 + half),
-        _ => fmin(fmax(x, 0.0), upper),
+        GL_CLAMP_TO_EDGE => cmin(cmax(x, half), 1.0 - half),
+        GL_CLAMP_TO_BORDER => cmin(cmax(x, -half), 1.0 + half),
+        _ => cmin(cmax(x, 0.0), upper),
     }
 }
 
@@ -738,7 +738,7 @@ pub(super) fn soft_texture_select(min: u32, mag: u32, p: &GlTexPyramid, last: u3
     if !lambda.is_finite() {
         return false;
     }
-    lambda = fmin(fmax(lambda, p.min_lod), p.max_lod);
+    lambda = cmin(cmax(lambda, p.min_lod), p.max_lod);
     *out = SoftTexSelection {
         first: p.base_level,
         second: p.base_level,
@@ -766,10 +766,10 @@ pub(super) fn soft_texture_select(min: u32, mag: u32, p: &GlTexPyramid, last: u3
             // Adding 0.5 can round the next value above a half tie onto it.
             relative += (lambda - relative > 0.5) as i32 as f64;
         }
-        out.first = out.first.wrapping_add(fmin(fmax(relative, 0.0), range as f64) as u32);
+        out.first = out.first.wrapping_add(cmin(cmax(relative, 0.0), range as f64) as u32);
         out.second = out.first;
     } else {
-        let relative = fmin(fmax(lambda, 0.0), range as f64);
+        let relative = cmin(cmax(lambda, 0.0), range as f64);
         let n = relative.floor() as u32;
 
         out.first = out.first.wrapping_add(n);
@@ -806,7 +806,7 @@ pub(super) fn soft_texture_derivatives(
             return false;
         }
     }
-    out[4] = fmax((ns * out[0]).hypot(nt * out[2]), (ns * out[1]).hypot(nt * out[3]));
+    out[4] = cmax((ns * out[0]).hypot(nt * out[2]), (ns * out[1]).hypot(nt * out[3]));
     if nr != 0.0 {
         let drdx = (dx[3] * d - value[3] * dx[2]) / d2;
         let drdy = (dy[3] * d - value[3] * dy[2]) / d2;
@@ -814,7 +814,7 @@ pub(super) fn soft_texture_derivatives(
         if !(value[3] / d).is_finite() || !drdx.is_finite() || !drdy.is_finite() {
             return false;
         }
-        out[4] = fmax(
+        out[4] = cmax(
             (ns * out[0]).hypot(nt * out[2]).hypot(nr * drdx),
             (ns * out[1]).hypot(nt * out[3]).hypot(nr * drdy),
         );
@@ -891,9 +891,9 @@ pub(super) fn soft_quad_rho_of(c: &SoftQuadCoords, ns: f64, nt: f64) -> Option<f
 
     for (a, b) in [(0, 3), (1, 2)] {
         if ok(a) && ok(b) {
-            let d = fmax((ns * (c.s[b] - c.s[a])).abs(), (nt * (c.t[b] - c.t[a])).abs());
+            let d = cmax((ns * (c.s[b] - c.s[a])).abs(), (nt * (c.t[b] - c.t[a])).abs());
 
-            rho = if rho.is_nan() { d } else { fmax(rho, d) };
+            rho = if rho.is_nan() { d } else { cmax(rho, d) };
         }
     }
     rho.is_finite().then_some(rho)
@@ -915,9 +915,9 @@ pub(super) fn soft_quad_flat_rho(g: &SoftTexPlane, ns: f64, nt: f64) -> Option<f
         return None;
     }
     let iq = 1.0 / q;
-    let rho = fmax(
-        fmax((ns * (g.dx[0] + g.dy[0]) * iq).abs(), (ns * (g.dy[0] - g.dx[0]) * iq).abs()),
-        fmax((nt * (g.dx[1] + g.dy[1]) * iq).abs(), (nt * (g.dy[1] - g.dx[1]) * iq).abs()),
+    let rho = cmax(
+        cmax((ns * (g.dx[0] + g.dy[0]) * iq).abs(), (ns * (g.dy[0] - g.dx[0]) * iq).abs()),
+        cmax((nt * (g.dx[1] + g.dy[1]) * iq).abs(), (nt * (g.dy[1] - g.dx[1]) * iq).abs()),
     );
     rho.is_finite().then_some(rho)
 }
@@ -973,7 +973,7 @@ impl SoftDraw<'_> {
                 }
             }
         }
-        Some(fmin(fmax(-lambda / 4.0, 0.0), 1.0))
+        Some(cmin(cmax(-lambda / 4.0, 0.0), 1.0))
     }
 
     pub fn texture_sharpen_sample(&self, filter: u32, lambda: f64, s: f64, t: f64, rr: f64, texel: &mut [f64; 4]) -> bool {
@@ -1014,7 +1014,7 @@ impl SoftDraw<'_> {
             {
                 continue;
             }
-            texel[k] = fmin(fmax(texel[k] + weight * (texel[k] - other[k]), 0.0), 1.0);
+            texel[k] = cmin(cmax(texel[k] + weight * (texel[k] - other[k]), 0.0), 1.0);
         }
         true
     }
@@ -1094,7 +1094,7 @@ impl SoftDraw<'_> {
             } else {
                 texel[k] * (1.0 + signed_detail)
             };
-            texel[k] = fmin(fmax(texel[k], 0.0), 1.0);
+            texel[k] = cmin(cmax(texel[k], 0.0), 1.0);
         }
         true
     }
@@ -1138,7 +1138,7 @@ impl SoftDraw<'_> {
                         rgba[k] * texel[k]
                     } else {
                         rgba[k] * (1.0 - texel[k])
-                            + fmin(fmax(self.st.texture_env_color[k] as f64, 0.0), 1.0) * texel[k]
+                            + cmin(cmax(self.st.texture_env_color[k] as f64, 0.0), 1.0) * texel[k]
                     };
                 }
                 _ => {}

@@ -5,7 +5,7 @@
 
 use crate::devlog::LogModule;
 use super::gl_context::{vtx, GL_CLIP_PLANES, GL_FLAT};
-use super::raster::{LineRule, RasterRules, SoftDraw, SoftFrag, SoftVertex};
+use super::raster::{cmax, cmin, LineRule, RasterRules, SoftDraw, SoftFrag, SoftVertex};
 use super::raster_texture::{soft_texture_derivatives, soft_texture_lod_scale};
 impl SoftVertex {
     /// The texture values at this end of the line to b, their change along
@@ -27,16 +27,6 @@ impl SoftVertex {
         }
         Some((values, delta, length))
     }
-}
-
-// MIN and MAX as conditionals (a NaN operand picks the
-// second), unlike f64::min and f64::max.
-pub(super) fn r2_max<T: PartialOrd>(a: T, b: T) -> T {
-    if a > b { a } else { b }
-}
-
-pub(super) fn r2_min<T: PartialOrd>(a: T, b: T) -> T {
-    if a < b { a } else { b }
 }
 
 /// Sign of v + e1 * epsilon + e2 * epsilon squared as epsilon -> 0+.
@@ -216,7 +206,7 @@ pub(super) fn soft_polygon_square_area(polygon: &[SoftPoint2], n: u32, x: i32, y
 
         area += p.x * q.y - p.y * q.x;
     }
-    r2_min(1.0, area.abs() * 0.5)
+    cmin(1.0, area.abs() * 0.5)
 }
 
 pub(super) fn soft_line_coverage(ax: f64, ay: f64, bx: f64, by: f64, width: f64, x: i32, y: i32) -> f64 {
@@ -239,7 +229,7 @@ pub(super) fn soft_line_coverage(ax: f64, ay: f64, bx: f64, by: f64, width: f64,
 }
 
 pub(super) fn soft_circle_integral(x: f64, radius: f64) -> f64 {
-    let y = r2_max(0.0, radius * radius - x * x).sqrt();
+    let y = cmax(0.0, radius * radius - x * x).sqrt();
 
     0.5 * (x * y + radius * radius * (x / radius).asin())
 }
@@ -248,8 +238,8 @@ pub(super) fn soft_circle_coverage(cx: f64, cy: f64, radius: f64, x: i32, y: i32
     let mut cuts = [0.0f64; 8];
     let mut area = 0.0f64;
     let mut n = 0usize;
-    let lo = r2_max(x as f64 - cx, -radius);
-    let hi = r2_min((x + 1) as f64 - cx, radius);
+    let lo = cmax(x as f64 - cx, -radius);
+    let hi = cmin((x + 1) as f64 - cx, radius);
 
     if !(lo < hi) || !(radius > 0.0) {
         return 0.0;
@@ -288,11 +278,11 @@ pub(super) fn soft_circle_coverage(cx: f64, cy: f64, radius: f64, x: i32, y: i32
         let a = cuts[i];
         let b = cuts[i + 1];
         let mid = (a + b) * 0.5;
-        let circle = r2_max(0.0, radius * radius - mid * mid).sqrt();
+        let circle = cmax(0.0, radius * radius - mid * mid).sqrt();
         let ymin = y as f64 - cy;
         let ymax = (y + 1) as f64 - cy;
-        let top = r2_min(ymax, circle);
-        let bottom = r2_max(ymin, -circle);
+        let top = cmin(ymax, circle);
+        let bottom = cmax(ymin, -circle);
         let arc = soft_circle_integral(b, radius) - soft_circle_integral(a, radius);
 
         if top <= bottom {
@@ -301,7 +291,7 @@ pub(super) fn soft_circle_coverage(cx: f64, cy: f64, radius: f64, x: i32, y: i32
         area += (if top == circle { arc } else { ymax * (b - a) })
             - (if bottom == -circle { -arc } else { ymin * (b - a) });
     }
-    r2_min(1.0, r2_max(0.0, area))
+    cmin(1.0, cmax(0.0, area))
 }
 
 impl RasterRules {
@@ -404,7 +394,7 @@ impl SoftDraw<'_> {
                 s.consumed = true;
                 if keep {
                     let t0 = i / length;
-                    let t1 = r2_min((i + 1.0) / length, 1.0);
+                    let t1 = cmin((i + 1.0) / length, 1.0);
                     let start = a.line_vertex_at(&b, t0);
                     let end = a.line_vertex_at(&b, t1);
                     self.line_projected(&start, &end, provoking, offset, None, client_clip);
@@ -450,8 +440,8 @@ impl SoftDraw<'_> {
             let l0 = (if x_major { a.x } else { a.y }) as f64;
             let l1 = (if x_major { b.x } else { b.y }) as f64;
 
-            major0 = (r2_min(l0, l1) / one_sub - pad).floor() as i32 - 1;
-            major1 = (r2_max(l0, l1) / one_sub + pad).ceil() as i32 + 1;
+            major0 = (cmin(l0, l1) / one_sub - pad).floor() as i32 - 1;
+            major1 = (cmax(l0, l1) / one_sub + pad).ceil() as i32 + 1;
         }
         let mut step = 1i32;
         if stipple.is_some() {
@@ -482,29 +472,29 @@ impl SoftDraw<'_> {
             let l1 = (if x_major { hi.x } else { hi.y }) as f64;
             let n0 = (if x_major { lo.y } else { lo.x }) as f64;
             let n1 = (if x_major { hi.y } else { hi.x }) as f64;
-            let mut e0 = r2_max(m as f64 * one_sub, l0);
-            let mut e1 = r2_min((m + 1) as f64 * one_sub, l1);
+            let mut e0 = cmax(m as f64 * one_sub, l0);
+            let mut e1 = cmin((m + 1) as f64 * one_sub, l1);
             let f0: f64;
             let f1: f64;
 
             if l1 > l0 {
-                e0 = r2_min(e0, l1);
-                e1 = r2_max(e1, l0);
+                e0 = cmin(e0, l1);
+                e1 = cmax(e1, l0);
                 f0 = n0 + (n1 - n0) * (e0 - l0) / (l1 - l0);
                 f1 = n0 + (n1 - n0) * (e1 - l0) / (l1 - l0);
             } else {
                 f0 = n0;
                 f1 = n1;
             }
-            let mut minor0 = (r2_min(f0, f1) / one_sub).floor() as i64 - 1;
-            let mut minor1 = (r2_max(f0, f1) / one_sub).floor() as i64 + 1;
+            let mut minor0 = (cmin(f0, f1) / one_sub).floor() as i64 - 1;
+            let mut minor1 = (cmax(f0, f1) / one_sub).floor() as i64 + 1;
             if self.line_smooth {
                 let pad = self.rules.smooth_reach(self.smooth_line_width);
                 let q0 = (if x_major { a.y } else { a.x }) as f64;
                 let q1 = (if x_major { b.y } else { b.x }) as f64;
 
-                minor0 = (r2_min(q0, q1) / one_sub - pad).floor() as i64 - 1;
-                minor1 = (r2_max(q0, q1) / one_sub + pad).ceil() as i64 + 1;
+                minor0 = (cmin(q0, q1) / one_sub - pad).floor() as i64 - 1;
+                minor1 = (cmax(q0, q1) / one_sub + pad).ceil() as i64 + 1;
             }
             let mut nn = minor0;
             while nn <= minor1 {
@@ -512,11 +502,11 @@ impl SoftDraw<'_> {
                 nn += 1;
                 let base_x: i64 = if x_major { m as i64 } else { n };
                 let base_y: i64 = if x_major { n } else { m as i64 };
-                let replica0: i64 = r2_max(n, (if x_major { by0 } else { bx0 }) as i64);
+                let replica0: i64 = cmax(n, (if x_major { by0 } else { bx0 }) as i64);
                 let replica1: i64 = if self.line_smooth {
                     replica0
                 } else {
-                    r2_min(n + self.line_width as i64 - 1, (if x_major { by1 } else { bx1 }) as i64)
+                    cmin(n + self.line_width as i64 - 1, (if x_major { by1 } else { bx1 }) as i64)
                 };
                 let mut keep = true;
                 let coverage = if self.line_smooth {
@@ -566,7 +556,7 @@ impl SoftDraw<'_> {
 
                     let mut t = ((cx - a.x as f64) * (b.x - a.x) as f64 + (cy - a.y as f64) * (b.y - a.y) as f64) / len2;
                     // Approximation: retain endpoint values, not extrapolation.
-                    t = r2_min(r2_max(t, 0.0), 1.0);
+                    t = cmin(cmax(t, 0.0), 1.0);
                     let wa = (1.0 - t) * a.inv_w;
                     let wb = t * b.inv_w;
                     for k in 0..4 {
@@ -660,10 +650,10 @@ impl SoftDraw<'_> {
         // Even dimensions centre on a pixel corner; odd ones on a centre.
         let px: i64 = (v.x + (if self.point_size % 2 != 0 { 0 } else { 1i64 << (sub - 1) })) >> sub;
         let py: i64 = (v.y + (if self.point_size % 2 != 0 { 0 } else { 1i64 << (sub - 1) })) >> sub;
-        let mut x0: i64 = r2_max(px - psize / 2, bx0 as i64);
-        let mut y0: i64 = r2_max(py - psize / 2, by0 as i64);
-        let mut x1: i64 = r2_min(px - psize / 2 + psize - 1, bx1 as i64);
-        let mut y1: i64 = r2_min(py - psize / 2 + psize - 1, by1 as i64);
+        let mut x0: i64 = cmax(px - psize / 2, bx0 as i64);
+        let mut y0: i64 = cmax(py - psize / 2, by0 as i64);
+        let mut x1: i64 = cmin(px - psize / 2 + psize - 1, bx1 as i64);
+        let mut y1: i64 = cmin(py - psize / 2 + psize - 1, by1 as i64);
         frag.rgba = v.rgba;
         frag.fixed = false;
         if let Some(p) = provoking {
@@ -681,10 +671,10 @@ impl SoftDraw<'_> {
             let cy = v.y as f64 / scale;
             let radius = self.rules.smooth_reach(self.smooth_point_size);
 
-            x0 = r2_max((cx - radius).floor() as i64, bx0 as i64);
-            y0 = r2_max((cy - radius).floor() as i64, by0 as i64);
-            x1 = r2_min((cx + radius).ceil() as i64 - 1, bx1 as i64);
-            y1 = r2_min((cy + radius).ceil() as i64 - 1, by1 as i64);
+            x0 = cmax((cx - radius).floor() as i64, bx0 as i64);
+            y0 = cmax((cy - radius).floor() as i64, by0 as i64);
+            x1 = cmin((cx + radius).ceil() as i64 - 1, bx1 as i64);
+            y1 = cmin((cy + radius).ceil() as i64 - 1, by1 as i64);
             let mut y = y0;
             while y <= y1 {
                 let mut x = x0;
@@ -728,5 +718,5 @@ pub(super) fn soft_dimension(requested: f32) -> Option<u32> {
         crate::dlog!(LogModule::Odyssey, "sgi-gl: unsupported aliased dimension {}", requested);
         return None;
     }
-    Some(r2_max(n, 1.0) as u32)
+    Some(cmax(n, 1.0) as u32)
 }

@@ -37,21 +37,13 @@ use super::gl_context::{
 };
 use super::memory::{plane_bpp, word_load, word_store, words_fill, ClipRect, Plane, Rows, RowsMut};
 use super::raster::{
-    GL_TEX_LEVELS_MAX, GlTexImage, GlTexLevel, GlTexPyramid, NoTexels, Planes, RasterColour,
-    RasterRules, RasterTarget, Texels,
+    cmax, cmin, GL_TEX_LEVELS_MAX, GlTexImage, GlTexLevel, GlTexPyramid, NoTexels, Planes,
+    RasterColour, RasterRules, RasterTarget, Texels,
 };
 use super::raster_unit::{
     primitive_cost, rect_cost, touch_row, LINE_PHASE_ON_RASTER, PlaneSpans, RasterCtx, Span,
     TOUCHED_OVERLAY, TouchedRows,
 };
-// MIN/MAX: the second operand wins ties and NaNs.
-fn cmin<T: PartialOrd>(a: T, b: T) -> T {
-    if a < b { a } else { b }
-}
-fn cmax<T: PartialOrd>(a: T, b: T) -> T {
-    if a > b { a } else { b }
-}
-
 /// One level's texels in the object store: `width` by `height` words from
 /// word `offset`, rows `stride` words apart.
 #[derive(Clone, Copy, Default)]
