@@ -790,9 +790,13 @@ pub type R12000ShadowCache =
 ///   keeps the secondary cache's size as the line size and runs out of
 ///   heap); 64 bytes boots.
 /// - Revision 2.3 (0x0e23, the 270 and 300 MHz O2 parts, 1 MB) is
-///   established as shipped but not offered: on this model the O2 PROM
-///   panics at start with it (a double panic on a read TLB miss), while 3.5
-///   boots with a 1 MB or a 2 MB cache. The cause is not known.
+///   established as shipped but not offered: nothing chooses a revision
+///   yet. With PRId 0x0e23 and 1 MB this model boots IRIX 6.5.30 to login,
+///   and hinv shows revision 2.3 with a 1 MB secondary cache. The early
+///   panic (a read TLB miss at 0xff800000) once put down to that revision
+///   was the rendering engine's status wait running out on a loaded host,
+///   and it hit revision 3.5 as well (`RE_STATUS_LOOP_WAIT`,
+///   `src/dev/o2gfx.rs`).
 pub type R12000O2ShadowCache =
     ShadowCache<32768, 64, 32768, 32, 2097152, 64, true, 0x0000_0e35, 0x0000_0900, 64, { model::R12000 }>;
 

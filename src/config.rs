@@ -786,8 +786,8 @@ pub enum CpuModel {
     /// the Indigo2 IMPACT (IP28). The machine uses shadow cache arrays;
     /// see `docs/indigo2-ip28.md` and `src/cpu/mips_cache_shadow.rs`.
     R10000,
-    /// MIPS R12000: the R10000's programming model. The Octane has it with a
-    /// 2 MB secondary cache (revision 3.5), the O2 with 1 MB (revision 2.3).
+    /// MIPS R12000: the R10000's programming model. The Octane and the O2
+    /// have it as revision 3.5 with a 2 MB secondary cache.
     R12000,
     /// MIPS R14000, revision 2.4, with a 2 MB secondary cache. Selectable on
     /// the Octane.
