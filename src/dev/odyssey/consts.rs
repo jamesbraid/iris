@@ -179,8 +179,9 @@ pub(super) mod reg {
     // the bit and raises the flag, and zero, as out of reset, is no threshold.
     // Neither the roles nor the link between bit 15, flag 25 and any 0x6bX value
     // is established. The level's unit (32-bit words, a doubleword store counting
-    // two) is a model choice, as is the FIFO's size (super::cfifo::WORDS),
-    // independent of the stored values, and so is the low-water threshold (super::cfifo::LOW_WATER). The model contract is pinned by
+    // two) is a model choice, as is the FIFO's size (super::cfifo::WORDS) and depth
+    // (super::cfifo::DEPTH), independent of the stored values, and so is the
+    // low-water threshold (super::cfifo::LOW_WATER). The model contract is pinned by
     // the_level_counts_words_against_the_model_fifo_and_the_6b2_threshold and
     // the_threshold_follows_6b2.
     pub const FIFO_SETUP_FIRST: u32 = 0x6b0;
@@ -319,6 +320,12 @@ pub(super) mod cfifo {
     // deeper or shallower. Test, a model contract:
     // the_fifo_size_ignores_the_set_up_words.
     pub const WORDS: u32 = 32768;
+
+    // The waiting stores whose credits have been returned, in stores. MODEL
+    // CHOICE: the FIFO's depth is UNKNOWN (see WORDS) and the model
+    // keeps 64 stores whatever the stored 0x6bX values say (fifo.rs). Test, a
+    // model contract: the_fifo_set_up_does_not_widen_the_credit_depth.
+    pub const DEPTH: u32 = 64;
 }
 
 pub(super) const ODSY_FIFO_SETUP_7B5_INDEX: usize = 4;
