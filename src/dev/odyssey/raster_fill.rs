@@ -309,13 +309,13 @@ impl SoftDraw<'_> {
     /// even), a 2x2 quad at a time, under state SoftDraw::fill_select() or
     /// SoftDraw::fixed_span_select() admits, and whose varying parts M names,
     /// into planes px, one for each row: self.px, or the rows of it
-    /// Planes::row() lends. Each quad interpolates its four pixels together,
+    /// GlPlanes::row() lends. Each quad interpolates its four pixels together,
     /// drawn or not, and a textured quad takes one level of detail for all
     /// four (soft_quad_rho()); then each pixel the runs hold is tested and
     /// stored on its own. A fragment the fixed sampler cannot take goes to
     /// the general path, general.
     #[inline(always)]
-    pub fn fill_quads<M: Fill, P: Planes + ?Sized>(
+    pub fn fill_quads<M: Fill, P: Planes>(
         &self,
         px: [&P; 2],
         sp: &SoftTexSpan,
@@ -1437,7 +1437,7 @@ mod tests {
     }
 
     // The board's own pixel tests: an id test that passes some pixels of a
-    // row and not others, which the row of planes Planes::row() lends
+    // row and not others, which the row of planes GlPlanes::row() lends
     // applies per pixel, and two clip rectangles that split rows, which it
     // cannot lend and the loops then draw a pixel at a time. Either way the
     // loops draw what the general path draws.

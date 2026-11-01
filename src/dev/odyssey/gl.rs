@@ -318,7 +318,7 @@ pub struct GlPlanes<'a> {
     lend_rows: bool,
 }
 
-/// One row of GlPlanes as a row loop reaches it (Planes::row()): the depth
+/// One row of GlPlanes as a row loop reaches it (GlPlanes::row()): the depth
 /// plane's and both colour buffers' words and the stencil plane's bytes for
 /// the row's pixels, and of GlPixelState::pixel_allowed() only the id test,
 /// which is per pixel; the plane bound and clip rectangles were tested for

@@ -609,7 +609,7 @@ impl RasterRules {
     /// Read every selected destination before any colour/depth/stencil write.
     #[allow(clippy::too_many_arguments, reason = "the fragment path takes a fragment as its parts")]
     #[inline]
-    pub fn rgba_load<P: Planes + ?Sized>(&self, px: &P, targets: &[ColourTarget], count: u32, x: i32, y: i32, dest: &mut [RasterColour; GL_MAX_TARGETS as usize], reported: &std::sync::atomic::AtomicBool) -> bool {
+    pub fn rgba_load<P: Planes>(&self, px: &P, targets: &[ColourTarget], count: u32, x: i32, y: i32, dest: &mut [RasterColour; GL_MAX_TARGETS as usize], reported: &std::sync::atomic::AtomicBool) -> bool {
         for i in 0..count as usize {
             let loaded = px.load_rgba(targets[i], x, y);
             let mut valid = loaded.is_some();
@@ -758,7 +758,7 @@ impl GlDrawState {
     /// result written under the stencil write mask (4.1.5, 4.2.2). GL_INCR
     /// and GL_DECR clamp to the buffer's range.
     #[inline(always)]
-    pub fn stencil_op<P: Planes + ?Sized>(&self, px: &P, x: i32, y: i32, op: u32, max: u32, ref_: u32) {
+    pub fn stencil_op<P: Planes>(&self, px: &P, x: i32, y: i32, op: u32, max: u32, ref_: u32) {
         let old = px.load_stencil(x, y) & max;
         let mask = self.stencil_write_mask & max;
 
