@@ -227,7 +227,7 @@ a store to it goes in at once even while the FIFO holds work.
 
 Counted stores (machines whose processor interface counts graphics credits;
 the Octane has none and the calls are no-ops) are credited as they enter the
-FIFO's first 64 places (the model's depth, a model choice), counted in
+FIFO's first 16,384 places (the model's depth, a model choice), counted in
 stores: at the store when there is room,
 or when the stores ahead have run, with the node holding the credit as owed
 meanwhile.
