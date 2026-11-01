@@ -982,7 +982,7 @@ pub(super) mod alpha {
     pub const FUNC_SHIFT: u32 = 12;
     pub const FUNC_MASK: u32 = 0x7;
     pub const REF_MASK: u32 = 0xfff;
-    pub const REF_SCALE: f32 = 4096.0;
+    pub const REF_SCALE: f32 = 4095.0;
 }
 
 pub(super) mod blend {

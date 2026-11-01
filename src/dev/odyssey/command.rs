@@ -479,6 +479,7 @@ impl Board {
                 let mut args = [0u32; 2];
 
                 args[0] = GL_NEVER_ENUM + ((word >> alpha::FUNC_SHIFT) & alpha::FUNC_MASK);
+                // The library encodes 1.0 as 4095 (ESTABLISHED).
                 args[1] = f32_bits((word & alpha::REF_MASK) as f32 / alpha::REF_SCALE);
                 self.gl_feed(op::ALPHA_FUNC as u16, &args);
             }
