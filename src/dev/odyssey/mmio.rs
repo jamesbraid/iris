@@ -512,12 +512,10 @@ impl BoardLocks {
 
     /// A processor's store as the bus takes it. False, for the bus to
     /// answer busy, when it waits for queued stores the board's thread will
-    /// run, or when it is a command store and the model's FIFO has no
-    /// room for it while the board's thread runs: the processor retries
-    /// the store, taking its interrupts meanwhile, while the board's thread
-    /// makes room. What a full FIFO does to a store on the hardware is
-    /// unknown; the stall is a model choice. The processor interface's mark stays untaken until the
-    /// store goes in.
+    /// run, or when it is a command store and the host ring is full while
+    /// the board's thread runs: the processor retries the store, taking its
+    /// interrupts meanwhile, while the board's thread makes room. The
+    /// processor interface's mark stays untaken until the store goes in.
     ///
     /// A store that waits is held back for the command FIFO only, not the
     /// raster queue: the raster unit never shared a lock with the board's

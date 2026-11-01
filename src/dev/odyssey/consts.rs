@@ -311,8 +311,8 @@ pub(super) mod cfifo {
     pub const SELFTEST: u64 = 0x201594;
     pub const SELFTEST_OK: u32 = 0x003d0046;
 
-    // The command FIFO's size in 32-bit words that the model clamps the level to
-    // and, with IRIS_VPRO_FIFO=shallow, refuses stores past. MODEL CHOICE: the
+    // The command FIFO's size in 32-bit words that the model clamps the level to.
+    // MODEL CHOICE: the
     // FIFO's depth, in any unit, and the figure 32,768 are UNKNOWN (no object
     // names a FIFO size). The model
     // keeps this figure whatever the stored 0x6bX values say, so the level the

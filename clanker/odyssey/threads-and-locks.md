@@ -221,8 +221,7 @@ interrupts meanwhile, and the board's thread, which then starts its next
 run without the pause, makes room. Past 32,768 words the guest reads a
 full FIFO (high-water bit up once a `0x6b2` is set) while its stores still
 succeed.
-`IRIS_VPRO_FIFO=shallow` (or `32768`) refuses at 32,768 words as it used to,
-for A/B runs. A caller other than the bus, with the board's thread stopped, still runs
+A caller other than the bus, with the board's thread stopped, still runs
 the queue and then its store. The flow-control target word `+0x1074` is stored, not routed, so
 a store to it goes in at once even while the FIFO holds work.
 

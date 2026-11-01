@@ -5,7 +5,7 @@ use crate::dev::odyssey::command::{CFIFO_PREAMBLE, CfifoPreamble};
 use crate::dev::odyssey::consts::{
     cfifo, ctx, flctl, host, intr, reg, self, status0, ODSY_BUZZ_1, ODSY_STATUS0, ODSY_SW_TOKEN,
 };
-use crate::dev::odyssey::fifo::{CommandFifo, FifoDepth, RING_STORES, RUN_MAX, Run};
+use crate::dev::odyssey::fifo::{CommandFifo, RING_STORES, RUN_MAX, Run};
 use crate::dev::odyssey::interface::HostInterface;
 use crate::dev::odyssey::mmio::BoardLocks;
 use crate::dev::odyssey::pi_gfx::{
@@ -147,27 +147,22 @@ fn a_read_that_waits_sees_every_earlier_store() {
     h.work_stop();
 }
 
-/// A processor store that finds the model's 32,768-word FIFO (its own size,
-/// cfifo::WORDS) full while
-/// the board's thread runs is refused with the bus busy, and nothing runs
-/// on the processor's thread: the level stays at the brim and the slice
-/// in flight keeps the board. The retried store goes in, once, when the
-/// board's thread has made room, and the level never passes the brim.
+/// A processor store that finds the host ring full while the board's thread
+/// runs is refused with the bus busy, and nothing runs on the processor's
+/// thread: the level stays at the brim and the slice in flight keeps the
+/// board. The retried store goes in, once, when the board's thread has made
+/// room, and the level never passes the model's FIFO size.
 #[test]
-fn a_full_fifo_holds_the_store_back_until_the_board_makes_room() {
+fn a_full_ring_holds_the_store_back_until_the_board_makes_room() {
     let (h, _rec) = threaded_board();
-    h.fifo.set_depth(FifoDepth::Shallow);
     let words = preamble_twice();
 
     start_long_slice(&h, &words, 2000);
-    while h.fifo.level() + 2 <= cfifo::WORDS {
-        assert!(h.bus_write(consts::cmd::FIFO, 0, 8));
-    }
-    while h.fifo.level() < cfifo::WORDS {
+    while h.fifo.stores() < RING_STORES {
         assert!(h.bus_write(consts::cmd::FIFO, 0, 4));
     }
     let stores = h.fifo.stores();
-    assert!(!h.bus_write(consts::cmd::FIFO, 0, 4), "a full FIFO refuses the store");
+    assert!(!h.bus_write(consts::cmd::FIFO, 0, 4), "a full ring refuses the store");
     assert!(!h.bus_write(consts::cmd::FIFO, 0, 8));
     assert_eq!((h.fifo.level(), h.fifo.stores()), (cfifo::WORDS, stores), "nothing ran on the processor's thread");
     assert!(h.fifo.slice.load(SeqCst), "the board's thread still holds the board");
@@ -605,13 +600,11 @@ fn the_status_shows_waiting_stores_until_they_have_run() {
 /// are unknown. The level counts the FIFO's 32-bit words (a model choice): a
 /// doubleword store fills two. The model reads status bit 15 set at or above
 /// the written `0x6b2`, and reaching it raises flags bit 25; with no `0x6b2`
-/// written it never reads set. A store that would overfill the model's
-/// 32,768-word FIFO is not queued: the storing caller runs the queue and then
-/// the store.
+/// written it never reads set. The level stops at the model's 32,768-word
+/// FIFO however many stores wait.
 #[test]
 fn the_level_counts_words_against_the_model_fifo_and_the_6b2_threshold() {
     let (mut s, _, _) = queued_board();
-    s.fifo.set_depth(FifoDepth::Shallow);
     let (high, flag) = (status0::FIFO_HIGH_WATER, intr::FIFO_HIGH_WATER);
 
     s.mmio_write(consts::cmd::FIFO, 0, 8);
@@ -625,9 +618,10 @@ fn the_level_counts_words_against_the_model_fifo_and_the_6b2_threshold() {
     }
     assert_eq!(s.fifo.level(), cfifo::WORDS);
     assert_eq!(reg_read(&mut s, ODSY_STATUS0) & high, 0);
-    // Full: the next store runs everything waiting, then itself.
+    // Full: the next store still queues, and the level stays at the brim.
     s.mmio_write(consts::cmd::FIFO, 0, 4);
-    assert!(!s.work_pending());
+    assert_eq!(s.fifo.level(), cfifo::WORDS);
+    finish(&mut s);
 
     // The 0x6b2 value the kernel writes, 576 words below the model's size.
     cmd64(&mut s, 0x6b2, 32192);
@@ -675,14 +669,13 @@ fn the_threshold_follows_6b2() {
 
 /// MODEL CONTRACT ONLY: the FIFO's size is unknown and the model's size is
 /// its own choice. Whatever `0x6b1` the set-up stores, the level clamps at
-/// cfifo::WORDS and a store that would overfill it runs the queue first.
+/// cfifo::WORDS however many stores wait.
 ///
 /// QEMU: command-work-credit-depth-ignores-setup covers the credit depth.
 #[test]
 fn the_fifo_size_ignores_the_set_up_words() {
     for word_6b1 in [1u32, 256, 0x7fff_ffff] {
         let (mut s, _, _) = queued_board();
-        s.fifo.set_depth(FifoDepth::Shallow);
 
         cmd64(&mut s, 0x6b1, word_6b1);
         finish(&mut s);
@@ -690,9 +683,9 @@ fn the_fifo_size_ignores_the_set_up_words() {
             cmd64(&mut s, 0x6b0, 0);
         }
         assert_eq!(s.fifo.level(), cfifo::WORDS, "0x6b1 = {word_6b1:#x}");
-        // Full: the next store runs everything waiting, then itself.
+        // Full: the next store still queues, and the level stays at the brim.
         s.mmio_write(consts::cmd::FIFO, 0, 4);
-        assert!(!s.work_pending(), "0x6b1 = {word_6b1:#x}");
+        assert_eq!(s.fifo.level(), cfifo::WORDS, "0x6b1 = {word_6b1:#x}");
         finish(&mut s);
     }
 }
@@ -924,7 +917,6 @@ fn a_store_run_before_its_push_returns_is_already_in_the_level() {
 #[test]
 fn the_deep_ring_accepts_past_the_brim_and_the_guest_reads_a_full_fifo() {
     let (mut s, _, _) = queued_board();
-    s.fifo.set_depth(FifoDepth::Deep);
     cmd64(&mut s, 0x6b2, 32192);
     finish(&mut s);
     reg_write(&mut s, intr::CLEAR, intr::FIFO_HIGH_WATER);
@@ -954,30 +946,25 @@ fn the_deep_ring_accepts_past_the_brim_and_the_guest_reads_a_full_fifo() {
     assert_eq!((reg_read(&mut s, MEMORY_CONFIG) >> 7) & 0x1ff, 0);
 }
 
-/// With the deep ring a store is refused with the bus busy only when the
-/// host ring is full, not at the model's 32,768 words; the shallow mode
-/// still refuses there, and neither lets the guest read past the brim.
+/// A store is refused with the bus busy only when the host ring is full, not
+/// at the model's 32,768 words, and the guest never reads past the brim.
 #[test]
-fn the_bus_is_busy_only_when_the_ring_is_full_and_the_shallow_mode_stalls_at_the_brim() {
-    for depth in [FifoDepth::Deep, FifoDepth::Shallow] {
-        let (h, _rec) = threaded_board();
-        h.fifo.set_depth(depth);
-        let words = preamble_twice();
-        start_long_slice(&h, &words, 3000);
-        let limit = if depth == FifoDepth::Deep { RING_STORES } else { cfifo::WORDS };
-        // The slice's own first word may have left the ring: count what waits.
-        while h.fifo.stores() < limit {
-            assert!(h.bus_write(consts::cmd::FIFO, 0, 4), "{depth:?}: refused at {} stores, {} words", h.fifo.stores(), h.fifo.queued_words());
-            assert!(h.fifo.level() <= cfifo::WORDS);
-        }
-        assert_eq!(h.fifo.stores(), limit);
-        assert!(!h.bus_write(consts::cmd::FIFO, 0, 4), "{depth:?}: full refuses");
-        assert_eq!(h.fifo.stores(), limit);
-        assert_eq!(h.fifo.level(), cfifo::WORDS);
-        h.fifo.test_words.store(0, SeqCst);
-        h.work_stop();
-        assert_eq!(h.fifo.level(), 0, "{depth:?}: idle reads zero");
+fn the_bus_is_busy_only_when_the_ring_is_full() {
+    let (h, _rec) = threaded_board();
+    let words = preamble_twice();
+    start_long_slice(&h, &words, 3000);
+    // The slice's own first word may have left the ring: count what waits.
+    while h.fifo.stores() < RING_STORES {
+        assert!(h.bus_write(consts::cmd::FIFO, 0, 4), "refused at {} stores, {} words", h.fifo.stores(), h.fifo.queued_words());
+        assert!(h.fifo.level() <= cfifo::WORDS);
     }
+    assert_eq!(h.fifo.stores(), RING_STORES);
+    assert!(!h.bus_write(consts::cmd::FIFO, 0, 4), "full refuses");
+    assert_eq!(h.fifo.stores(), RING_STORES);
+    assert_eq!(h.fifo.level(), cfifo::WORDS);
+    h.fifo.test_words.store(0, SeqCst);
+    h.work_stop();
+    assert_eq!(h.fifo.level(), 0, "idle reads zero");
 }
 
 /// The flow-control target word is stored, not routed, so a store to it
@@ -1016,7 +1003,6 @@ fn two_processors_racing_for_the_last_place_in_the_ring_leave_one_store_in() {
     const ROUNDS: u32 = 24;
     let (s, _) = board("v12");
     let h = Arc::new(BoardLocks::new(s));
-    h.fifo.set_depth(FifoDepth::Deep);
     // The ring has room for one more store when it holds RING_STORES - 1.
     let fill = |h: &BoardLocks| {
         for _ in 0..RING_STORES - 1 {
@@ -1150,11 +1136,10 @@ fn a_drain_with_the_board_thread_running_runs_no_store() {
 #[test]
 fn a_refused_command_push_retries_behind_the_board_thread() {
     let (h, _rec) = threaded_board();
-    h.fifo.set_depth(FifoDepth::Shallow);
     let words = preamble_twice();
 
     start_long_slice(&h, &words, 1000);
-    while h.fifo.level() < cfifo::WORDS {
+    while h.fifo.stores() < RING_STORES {
         assert!(h.bus_write(consts::cmd::FIFO, 0, 4));
     }
     let stores = h.fifo.stores();
@@ -1170,7 +1155,7 @@ fn a_refused_command_push_retries_behind_the_board_thread() {
     assert!(!done.load(SeqCst), "the store was dropped or ran around the board's thread");
     assert_eq!(h.fifo.stores(), stores);
     store.join().unwrap();
-    assert!(h.fifo.level() <= cfifo::WORDS + 1);
+    assert!(h.fifo.level() <= cfifo::WORDS);
     h.fifo.test_words.store(0, SeqCst);
     h.work_stop();
     assert_eq!(h.fifo.level(), 0);

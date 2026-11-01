@@ -21,24 +21,22 @@
 //! fact. What a full FIFO does to the processor is not known (software is
 //! inferred to avoid overflow by credits and descheduling, and a board-side
 //! overflow to be a flagged error), and the FIFO has no wrap protection of
-//! its own, the kernel's flow control keeping it from filling. On the Octane that flow control (the node's
-//! counted graphics credits and the kernel's high-water path) is not
-//! modelled, so the old stall at 32,768 words stood in for it. IMPACT and
-//! GR2 do not stall
-//! there. Their host ring is deep, a store is refused with the bus busy
-//! only when the ring is full, and the guest-visible level is the model's,
-//! clamped to the model's FIFO size (a model choice, `cfifo::WORDS`). The VPro follows them by
-//! default (`FifoDepth::Deep`): the ring holds `ODSY_WORK_QUEUE_MAX`
-//! entries, a store is one entry whatever its width, so it takes at least
-//! twice the model's FIFO in words, and the processor runs ahead of the
-//! board by that much. Everything the guest can read comes from the
-//! clamped level, so it never sees a level above the model's size: past
-//! the brim it reads a full FIFO (and a high-water bit, once a `0x6b2`
-//! threshold is set) while its stores still succeed.
-//! `IRIS_VPRO_FIFO=shallow` restores the old stall: a store that
-//! would overfill the model's 32,768 words is refused, and the processor
-//! retries it while the board's thread makes room (`BoardLocks::bus_write`).
-//! The ring is 64K entries as IMPACT's and GR2's are.
+//! its own, the kernel's flow control keeping it from filling. On the
+//! Octane that flow control (the node's counted graphics credits and the
+//! kernel's high-water path) is not modelled. IMPACT and GR2 do not stall
+//! at their FIFO's size either: their host ring is deep, a store is refused
+//! with the bus busy only when the ring is full, and the guest-visible
+//! level is the model's, clamped to the model's FIFO size (a model choice,
+//! `cfifo::WORDS`). The VPro does the same: the ring holds
+//! `ODSY_WORK_QUEUE_MAX` entries, a store is one entry whatever its width,
+//! so it takes at least twice the model's FIFO in words, and the processor
+//! runs ahead of the board by that much. Everything the guest can read
+//! comes from the clamped level, so it never sees a level above the
+//! model's size: past the brim it reads a full FIFO (and a high-water bit,
+//! once a `0x6b2` threshold is set) while its stores still succeed. A store
+//! the full ring refuses is retried by the processor while the board's
+//! thread makes room (`BoardLocks::bus_write`). The ring is 64K entries as
+//! IMPACT's and GR2's are.
 //!
 //! The processor's stores are the producer; whoever runs the queue (the
 //! board's thread, or an access that drains it with that thread stopped)
@@ -139,26 +137,6 @@ impl Run {
     }
 }
 
-/// Where a command store is refused with the bus busy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum FifoDepth {
-    /// Only when the host ring is full, as IMPACT and GR2 do.
-    Deep,
-    /// When the model's 32,768-word FIFO would overfill: the old stall.
-    Shallow,
-}
-
-impl FifoDepth {
-    /// `IRIS_VPRO_FIFO`: `shallow` or `32768` for the old stall, anything
-    /// else, or unset, for the deep ring.
-    pub fn from_env() -> Self {
-        match std::env::var("IRIS_VPRO_FIFO").as_deref() {
-            Ok("shallow") | Ok("32768") => FifoDepth::Shallow,
-            _ => FifoDepth::Deep,
-        }
-    }
-}
-
 /// The stores the host ring holds: it keeps one slot empty.
 pub(super) const RING_STORES: u32 = ODSY_WORK_QUEUE_MAX - 1;
 
@@ -185,9 +163,6 @@ pub(super) struct CommandFifo {
     /// and `running` are read on every store and written rarely, so each has
     /// a line no counter shares.
     threshold_6b2: CachePadded<AtomicU32>,
-    /// Where a store is refused (`FifoDepth`); read on every store, set at
-    /// construction.
-    deep: CachePadded<AtomicBool>,
     /// The board's thread runs, so command stores queue.
     pub running: CachePadded<AtomicBool>,
     /// The board's thread is parked (`wait_for_work`): a producer unparks it
@@ -231,7 +206,6 @@ impl Default for CommandFifo {
             pop: Mutex::new(()),
             levels: CachePadded::new(Levels { words: AtomicU32::new(0), stores: AtomicU32::new(0), counted: AtomicU32::new(0) }),
             threshold_6b2: CachePadded::new(AtomicU32::new(0)),
-            deep: CachePadded::new(AtomicBool::new(FifoDepth::from_env() == FifoDepth::Deep)),
             running: CachePadded::new(AtomicBool::new(false)),
             asleep: CachePadded::new(AtomicBool::new(false)),
             hurry: CachePadded::new(AtomicBool::new(false)),
@@ -265,18 +239,9 @@ impl CommandFifo {
         self.levels.words.load(SeqCst)
     }
 
-    /// Choose where a store is refused (`FifoDepth`).
-    pub fn set_depth(&self, depth: FifoDepth) {
-        self.deep.store(depth == FifoDepth::Deep, SeqCst);
-    }
-
-    /// Whether the FIFO has room for a store of `words` words.
-    fn has_room(&self, words: u32) -> bool {
-        if self.deep.load(Relaxed) {
-            self.stores() < RING_STORES
-        } else {
-            self.queued_words() + words <= cfifo::WORDS
-        }
+    /// Whether the host ring has room for another store.
+    fn has_room(&self) -> bool {
+        self.stores() < RING_STORES
     }
 
     /// The stores waiting.
@@ -305,7 +270,7 @@ impl CommandFifo {
     /// processors the room it sees can go to the other one's store first;
     /// `push` then refuses, and the store is not lost.
     pub fn full_for(&self, size: u32) -> bool {
-        self.running.load(SeqCst) && !self.has_room(store_words(size))
+        self.running.load(SeqCst) && !self.has_room()
     }
 
     /// The processor waits for the board's thread to run what is queued:
@@ -377,7 +342,7 @@ impl CommandFifo {
     /// board's FIFO has no room for it.
     pub fn push(&self, front: &Mutex<HostInterface>, addr: u64, value: u64, size: u32, counted: bool) -> bool {
         let words = store_words(size);
-        if !self.has_room(words) {
+        if !self.has_room() {
             return false;
         }
         let mut q = QueuedStore { value, addr: addr as u32, size: size as u8, counted, owed: false };

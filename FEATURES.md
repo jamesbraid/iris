@@ -509,7 +509,6 @@ and offline-tool controls are included so they are not mistaken for GUI settings
 | `IRIS_O2_AUDIO_DUMP` | File to record the O2's audio output at the guest's rate, before resampling. | [src/dev/mace_audio.rs](src/dev/mace_audio.rs) |
 | `IRIS_O2_AUDIO_TRACE` | Any presence traces every O2 audio register access and codec operation on stderr. | [src/dev/mace_audio.rs](src/dev/mace_audio.rs) |
 | `IRIS_ODSY_REC` | Record VPro bus stores, loads and DMA reads from power-on to this path (gzip; replayed by the tests in `src/dev/odyssey/golden/`). | [src/dev/odyssey/record.rs](src/dev/odyssey/record.rs) |
-| `IRIS_VPRO_FIFO` | `shallow` (or `32768`) makes the VPro refuse a command store that would take the command FIFO past the model's 32,768 words, so the processor retries it while the board's thread makes room; anything else or unset lets the processor run ahead of the board until the 64K-entry host ring is full, as IMPACT and GR2 do. | [src/dev/odyssey/fifo.rs](src/dev/odyssey/fifo.rs) |
 | `IRIS_REX3_REC` | Record REX3 bus operations from board start to this path (`gputrace` builds). | [src/dev/ng1/rex3_rec.rs](src/dev/ng1/rex3_rec.rs) |
 | `IRIS_REX3_TRACE` | Trace REX3 GFIFO and CPU accesses from board start to this path (`gputrace` builds). | [src/dev/ng1/rex3_trace.rs](src/dev/ng1/rex3_trace.rs) |
 | `IRIS_NO_EXIT_ON_POWEROFF` | Any presence prevents process exit on guest power-off/CI quit; set by GUI. | [src/ci.rs](src/ci.rs) |
