@@ -84,10 +84,13 @@ pub(super) struct RasterRules {
 }
 
 /// A vertex in clip coordinates, as view-volume clipping takes and makes it.
+/// Clipping is in single precision, as the shared GL core's (`dev::gl::vertex`)
+/// and MGRAS's are: a model choice, since the board's clip precision is
+/// unknown. The window position and 1/w come from this clip result.
 #[derive(Clone)]
 pub(super) struct VolumeVertex {
-    pub clip: [f64; 4],
-    pub eye: [f64; 4],
+    pub clip: [f32; 4],
+    pub eye: [f32; 4],
     pub attr: [f32; vtx::FLOATS],
 }
 
@@ -1373,14 +1376,13 @@ impl SoftDraw<'_> {
     pub fn project(&self, cv: &VolumeVertex) -> Option<SoftVertex> {
         let mut out = SoftVertex::default();
         let st: &GlDrawState = self.st;
-        let clip = &cv.clip;
-        let eye = &cv.eye;
+        let clip = cv.clip.map(f64::from);
+        let eye = cv.eye.map(f64::from);
         if !self.texture_vertex_valid(cv) {
             return None;
         }
         let sub = (1i32 << self.rules.subpixel_bits) as f64;
-        // Clipping works in double; the shared mapping takes single.
-        let Some(win) = st.clip_to_window(&clip.map(|c| c as f32), sub as f32).map(|w| w.map(f64::from)) else {
+        let Some(win) = st.clip_to_window(&cv.clip, sub as f32).map(|w| w.map(f64::from)) else {
             crate::dlog!(LogModule::Odyssey, "sgi-gl: clipped vertex at w {} has no window position, primitive dropped", clip[3]);
             return None;
         };

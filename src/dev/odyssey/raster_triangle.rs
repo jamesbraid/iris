@@ -27,7 +27,7 @@ use crate::dev::gl::math::xform;
 pub(super) const VOLUME_PLANES: i32 = 6;
 
 impl VolumeVertex {
-    pub fn plane(&self, plane: i32) -> f64 {
+    pub fn plane(&self, plane: i32) -> f32 {
         let c = self.clip[(plane / 2) as usize];
 
         if plane & 1 != 0 { self.clip[3] - c } else { self.clip[3] + c }
@@ -45,19 +45,17 @@ impl VolumeVertex {
     /// The point at t along from in to out, in clip and eye coordinates and
     /// every float attribute (2.13.8); the material index and edge flag are
     /// bit patterns and stay in's.
-    pub fn lerp(&self, out: &VolumeVertex, t: f64) -> VolumeVertex {
+    pub fn lerp(&self, out: &VolumeVertex, t: f32) -> VolumeVertex {
         let mut r = VolumeVertex::default();
+        // The shared core's crossing (`dev::gl::vertex::clip_cross`).
+        let l = |x: f32, y: f32| x + (y - x) * t;
 
         for k in 0..4usize {
-            r.clip[k] = self.clip[k] + t * (out.clip[k] - self.clip[k]);
-            r.eye[k] = self.eye[k] + t * (out.eye[k] - self.eye[k]);
+            r.clip[k] = l(self.clip[k], out.clip[k]);
+            r.eye[k] = l(self.eye[k], out.eye[k]);
         }
         for k in 0..vtx::FLOATS {
-            r.attr[k] = if k == vtx::MATERIAL || k == vtx::EDGE {
-                self.attr[k]
-            } else {
-                (self.attr[k] as f64 + t * (out.attr[k] - self.attr[k]) as f64) as f32
-            };
+            r.attr[k] = if k == vtx::MATERIAL || k == vtx::EDGE { self.attr[k] } else { l(self.attr[k], out.attr[k]) };
         }
         r
     }
@@ -65,7 +63,7 @@ impl VolumeVertex {
     /// Where the edge from in, inside a plane with value din, to out, outside
     /// it with value dout, meets the plane. It is always found from the inside
     /// end, so that two primitives sharing the edge make the same vertex.
-    pub fn cut(&self, din: f64, out: &VolumeVertex, dout: f64) -> VolumeVertex {
+    pub fn cut(&self, din: f32, out: &VolumeVertex, dout: f32) -> VolumeVertex {
         self.lerp(out, din / (din - dout))
     }
 }
@@ -126,8 +124,8 @@ impl VolumeVertex {
     pub fn clip_segment(&mut self, b: &mut VolumeVertex) -> bool {
         let mut na = self.clone();
         let mut nb = b.clone();
-        let mut sa = 1.0f64;
-        let mut tb = 1.0f64;
+        let mut sa = 1.0f32;
+        let mut tb = 1.0f32;
 
         for p in 0..VOLUME_PLANES {
             let da = self.plane(p);
@@ -176,8 +174,8 @@ impl GlDrawState {
         let eye = self.draw_vertex_eye(v);
 
         VolumeVertex {
-            clip: self.eye_to_clip(eye).map(f64::from),
-            eye: eye.map(f64::from),
+            clip: self.eye_to_clip(eye),
+            eye,
             attr: v[..vtx::FLOATS].try_into().expect("a whole vertex"),
         }
     }
@@ -650,13 +648,13 @@ impl VolumeVertex {
 }
 
 impl SoftDraw<'_> {
-    pub fn boundary_plane(&self, v: &VolumeVertex, p: u32) -> f64 {
+    pub fn boundary_plane(&self, v: &VolumeVertex, p: u32) -> f32 {
         if p < VOLUME_PLANES as u32 {
             v.plane(p as _)
         } else {
             let plane = &self.st.clip_plane[(p - VOLUME_PLANES as u32) as usize];
 
-            plane[0] as f64 * v.eye[0] + plane[1] as f64 * v.eye[1] + plane[2] as f64 * v.eye[2] + plane[3] as f64 * v.eye[3]
+            plane[0] * v.eye[0] + plane[1] * v.eye[1] + plane[2] * v.eye[2] + plane[3] * v.eye[3]
         }
     }
 

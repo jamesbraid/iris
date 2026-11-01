@@ -67,11 +67,11 @@ fn rows() -> Vec<Row> {
             let mut vertex = [0.0f32; vtx::FLOATS];
             vertex[..4].copy_from_slice(p);
             let vv = st.volume_from_draw_vertex(&vertex);
-            out.push(Row { name: format!("{name}/{i}"), kind: "eye", vals: vv.eye.to_vec() });
-            out.push(Row { name: format!("{name}/{i}"), kind: "clip", vals: vv.clip.to_vec() });
+            out.push(Row { name: format!("{name}/{i}"), kind: "eye", vals: vv.eye.iter().map(|&x| f64::from(x)).collect() });
+            out.push(Row { name: format!("{name}/{i}"), kind: "clip", vals: vv.clip.iter().map(|&x| f64::from(x)).collect() });
             // A vertex at or behind the eye has no window position.
             if vv.clip[3] > 0.0 {
-                let win = st.clip_to_window(&vv.clip.map(|c| c as f32), (1i32 << gl_rules().subpixel_bits) as f32).expect("a window position");
+                let win = st.clip_to_window(&vv.clip, (1i32 << gl_rules().subpixel_bits) as f32).expect("a window position");
                 out.push(Row { name: format!("{name}/{i}"), kind: "win", vals: win.iter().map(|&c| f64::from(c)).collect() });
             }
         }
