@@ -1,6 +1,7 @@
 //! Pixel DMA, queries, colour conversions and the texture level build.
 
 
+use super::bits::{be16, be32, be64};
 use crate::devlog::LogModule;
 use std::sync::atomic::Ordering;
 use super::board::{Board, ODSY_CMD_OPERANDS_MAX, ODSY_HEIGHT, ODSY_OBJECTS, ODSY_WIDTH};
@@ -128,7 +129,7 @@ impl DmaBus {
             if !self.read(table + dma::TABLE_HEADER + (n as u64) * 8, &mut raw, true, seq) {
                 return Err(DmaError::Bus);
             }
-            let pte = u64::from_be_bytes(raw[..8].try_into().unwrap());
+            let pte = be64(&raw[..8]);
             if pte & (dma::PTE_LEN_MASK as u64) == 0 {
                 return Ok(n);
             }
@@ -222,9 +223,9 @@ pub(super) fn raw_pack(rgba: u32, bpp: u32, dst: &mut [u8]) {
 /// A backing-store page's bpp raw bytes back as a stored texel.
 pub(super) fn raw_unpack(src: &[u8], bpp: u32) -> u32 {
     if bpp == 4 {
-        return u32::from_be_bytes(src[..4].try_into().unwrap());
+        return be32(&src[..4]);
     }
-    let v = u16::from_be_bytes(src[..2].try_into().unwrap()) as u32;
+    let v = be16(&src[..2]) as u32;
     (((v >> 12) & 0xf) * 0x11u32) << 24
         | (((v >> 8) & 0xf) * 0x11u32) << 16
         | (((v >> 4) & 0xf) * 0x11u32) << 8
@@ -542,7 +543,7 @@ impl Board {
                     (y as i64) + (h as i64) - 1 - (r as i64)
                 }) + self.win_origin[1] as i64;
                 if let Some(plane) = depth_stencil {
-                    let value = u32::from_be_bytes(src[..4].try_into().unwrap());
+                    let value = be32(&src[..4]);
 
                     if self.pixel_allowed(px, py) {
                         if plane == DepthStencil::Depth {
@@ -1071,8 +1072,9 @@ impl Board {
                 p.len = left.min(rowbytes - got);
                 p.src = done;
                 let plen = p.len;
+                let mapped = bus.map_piece(&mut p, e[i].addr + pos);
                 pieces.push(p);
-                if bus.map_piece(pieces.last_mut().unwrap(), e[i].addr + pos).is_err() {
+                if mapped.is_err() {
                     ok = false;
                     break;
                 }
@@ -1217,7 +1219,7 @@ impl Board {
             return;
         }
         for i in 0..dma::HDR_WORDS {
-            hdr[i] = u32::from_be_bytes(raw[i * 4..][..4].try_into().unwrap());
+            hdr[i] = be32(&raw[i * 4..][..4]);
         }
         if readback {
             if !self.dma_readback_reported {

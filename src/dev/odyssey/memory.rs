@@ -4,6 +4,7 @@
 //! may overlap. Out-of-plane loads read zero and out-of-plane stores are
 //! dropped.
 
+use super::bits::{be16, be32, le16, le32};
 use crate::devlog::LogModule;
 use std::cell::Cell;
 
@@ -246,16 +247,16 @@ pub(super) fn plane_word_load(bytes: &[u8], bpp: u32, le: bool) -> u32 {
         1 => bytes[0] as u32,
         2 => {
             if le {
-                u16::from_le_bytes(bytes[..2].try_into().unwrap()) as u32
+                le16(&bytes[..2]) as u32
             } else {
-                u16::from_be_bytes(bytes[..2].try_into().unwrap()) as u32
+                be16(&bytes[..2]) as u32
             }
         }
         _ => {
             if le {
-                u32::from_le_bytes(bytes[..4].try_into().unwrap())
+                le32(&bytes[..4])
             } else {
-                u32::from_be_bytes(bytes[..4].try_into().unwrap())
+                be32(&bytes[..4])
             }
         }
     }

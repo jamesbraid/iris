@@ -12,6 +12,7 @@
 //! intensity source spreads over red, green and blue, and a component the
 //! source lacks is 0, or full scale for alpha.
 
+use super::bits::be32;
 use super::consts::ODSY_INDEX_MASK;
 /// A source component.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -184,7 +185,7 @@ impl WriteForm {
                     let v = match comp_bytes {
                         1 => b[at] as u32,
                         2 => scale8(u16::from_be_bytes([b[at], b[at + 1]]) as u64, 16),
-                        _ => scale8(u32::from_be_bytes(b[at..at + 4].try_into().unwrap()) as u64, 32),
+                        _ => scale8(be32(&b[at..at + 4]) as u64, 32),
                     };
 
                     if comps[i] == Comp::Index {
@@ -192,7 +193,7 @@ impl WriteForm {
                         let raw = match comp_bytes {
                             1 => b[at] as u32,
                             2 => u16::from_be_bytes([b[at], b[at + 1]]) as u32,
-                            _ => u32::from_be_bytes(b[at..at + 4].try_into().unwrap()),
+                            _ => be32(&b[at..at + 4]),
                         };
                         return raw & ODSY_INDEX_MASK;
                     }

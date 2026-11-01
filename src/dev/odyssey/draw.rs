@@ -2,6 +2,7 @@
 //! integer pixel paints, rectangle fill and copy, and pixel bursts.
 
 
+use super::bits::{be16, be32};
 use crate::devlog::LogModule;
 use super::board::{Board, ODSY_CLIP_RECTS, ODSY_HEIGHT, ODSY_WIDTH};
 use super::consts::{
@@ -944,7 +945,7 @@ pub(super) fn decode_texel12(code: u32, b: &[u8], wide: bool) -> u32 {
     let n = texel12_components(code) as usize;
 
     for i in 0..n {
-        c[i] = if wide { unorm16_to_8(u16::from_be_bytes(b[2 * i..][..2].try_into().unwrap()) as u32) } else { b[i] as u32 };
+        c[i] = if wide { unorm16_to_8(be16(&b[2 * i..][..2]) as u32) } else { b[i] as u32 };
     }
     match code {
         image::CODE_LUM12 => pack_pixel(c[0], c[0], c[0]),
@@ -963,7 +964,7 @@ impl Board {
         match code {
             image::CODE_ABGR => Some((pack_pixel(b[3] as u32, b[2] as u32, b[1] as u32) & !0xffu32) | b[0] as u32),
             image::CODE_FALLBACK_XRGB => Some(pack_pixel(b[1] as u32, b[2] as u32, b[3] as u32)),
-            image::CODE_RGBA | image::CODE_RGBA12 => Some(u32::from_be_bytes(b[..4].try_into().unwrap())),
+            image::CODE_RGBA | image::CODE_RGBA12 => Some(be32(&b[..4])),
             image::CODE_RGB => Some(pack_pixel(b[0] as u32, b[1] as u32, b[2] as u32)),
             image::CODE_LUM => Some(pack_pixel(b[0] as u32, b[0] as u32, b[0] as u32)),
             image::CODE_LUM_ALPHA => Some((pack_pixel(b[0] as u32, b[0] as u32, b[0] as u32) & !0xffu32) | b[1] as u32),
@@ -975,7 +976,7 @@ impl Board {
                 // The raw index: scanout resolves it through the pixel's drawable.
                 Some(b[0] as u32)
             }
-            image::CODE_CI16 => Some(u16::from_be_bytes(b[..2].try_into().unwrap()) as u32 & ODSY_INDEX_MASK),
+            image::CODE_CI16 => Some(be16(&b[..2]) as u32 & ODSY_INDEX_MASK),
             _ => None,
         }
     }
