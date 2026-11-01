@@ -476,7 +476,7 @@ impl Board {
     /// signed source, the byte as a signed value over 255), scale and bias
     /// signed 3.12 fixed point (ESTABLISHED as the layout of the words). The
     /// bias is used as programmed: the library halves the application's bias
-    /// before it programs the step (ESTABLISHED, "Pixel transfer headers"), so
+    /// before it programs the step (ESTABLISHED), so
     /// the board does not halve again. That the filter governs a copy at all
     /// is INFERRED from the library's use of the block; the identity (scale
     /// 1.0, bias 0) leaves every word unchanged, as does a lane that is

@@ -850,7 +850,7 @@ pub(super) fn soft_texture_derivatives(
 //    positive, or whose s or t is not finite, has no coordinates: a
 //    diagonal with one is left out, and a quad with neither diagonal left
 //    has no level of detail of its own, so each of its fragments takes its
-//    own footprint, as before the rule was modelled.
+//    own footprint.
 
 /// The texture coordinates of the four pixels of the quad whose first pixel
 /// is window pixel (qx, qy), from a triangle's texture planes g: pixels 1

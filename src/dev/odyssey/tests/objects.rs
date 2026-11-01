@@ -300,8 +300,8 @@ fn quake_world_state(s: &mut Board, word4: u32, detail_word1: u32) {
 /// SGI Quake's world textures, replayed from its texture state: a 512x256
 /// RGB base with ten mip levels under GL_LINEAR_DETAIL_COLOR_SGIS (sampler
 /// word 4 0x128000a8: minification code 5, magnification code 4), modulate,
-/// and a 128x128 detail image in entry 60. Setup used to refuse every such
-/// draw, and the game's whole world went undrawn, black.
+/// and a 128x128 detail image in entry 60. Setup must accept it: a
+/// refused draw leaves the whole world undrawn, black.
 #[test]
 fn sgi_quake_world_texture_takes_its_detail_image() {
     let (mut s, _, _) = board_with_ram();

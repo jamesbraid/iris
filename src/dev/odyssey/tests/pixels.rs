@@ -1109,7 +1109,7 @@ fn luminance_images_land_under_the_tags_the_library_sends_them_with() {
 /// scratch object (box 0,0 to 16,8, destination base 0x100800 on the V6, the
 /// first row's eight words in two four-word bursts under tag 0x12, replayed
 /// from the guest trace of the GL test suite's tex/RGBA8/LUMINANCE/
-/// UNSIGNED_SHORT case). The bursts used to be refused, which left the level
+/// UNSIGNED_SHORT case). The bursts must be taken: refused, they leave the level
 /// holding whatever the object held before and the case failing on a board
 /// whose object memory started out different.
 #[test]
@@ -1142,7 +1142,7 @@ fn a_16_bit_luminance_texture_upload_lands_in_its_object() {
 /// and the next row starts on a fresh word. Replayed from guest traces of
 /// the GL test suite's draws (box 40,206 to 53,201, the y range
 /// decreasing, so rows run from y 205 down). The pad is 0x5a; the row
-/// that follows used to start with it.
+/// that follows does not start with it.
 #[test]
 fn a_row_that_ends_inside_a_word_drops_the_rest_of_the_word() {
     let (mut s, _) = window();

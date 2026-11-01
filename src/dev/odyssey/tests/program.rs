@@ -37,7 +37,7 @@ fn the_older_libraries_numbering_lights_their_programs() {
     assert!(s.geom.lit, "an older-numbered assembled list is recognised");
     assert!(!s.geom.local_viewer);
 
-    // The current numbering of the same record is recognised as before.
+    // The current numbering of the same record is recognised.
     set_program(&mut s, &[], 0, [0x5cb, 0x5d8, 0x5e5]);
     assert!(s.geom.lit);
 }
