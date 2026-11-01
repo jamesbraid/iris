@@ -405,16 +405,17 @@ impl ScsiDevice {
     fn exec_write_6(&mut self, cdb: &[u8], data_in: Option<&Vec<u8>>) -> Result<ScsiResponse, std::io::Error> {
         let lba = (((cdb[1] & 0x1F) as u64) << 16) | ((cdb[2] as u64) << 8) | (cdb[3] as u64);
         let count = if cdb[4] == 0 { 256 } else { cdb[4] as usize };
-        self.perform_write(lba, count, data_in)
+        self.perform_write(lba, count, data_in, false)
     }
 
     fn exec_write_10(&mut self, cdb: &[u8], data_in: Option<&Vec<u8>>) -> Result<ScsiResponse, std::io::Error> {
         let lba = ((cdb[2] as u64) << 24) | ((cdb[3] as u64) << 16) | ((cdb[4] as u64) << 8) | (cdb[5] as u64);
         let count = ((cdb[7] as usize) << 8) | (cdb[8] as usize);
-        self.perform_write(lba, count, data_in)
+        // Byte 1 bit 3 is FUA: the data must be stored before GOOD.
+        self.perform_write(lba, count, data_in, cdb[1] & 0x08 != 0)
     }
 
-    fn perform_write(&mut self, lba: u64, count: usize, data_in: Option<&Vec<u8>>) -> Result<ScsiResponse, std::io::Error> {
+    fn perform_write(&mut self, lba: u64, count: usize, data_in: Option<&Vec<u8>>, fua: bool) -> Result<ScsiResponse, std::io::Error> {
         // A failed write says why, so the REQUEST SENSE after it does not
         // report "no sense".
         if self.is_cdrom() {
@@ -446,6 +447,11 @@ impl ScsiDevice {
         }
         if self.media.node_mut().write(lba * 512, data).is_err() {
             return Ok(self.check_condition(0x03, 0x0c, 0x00)); // MEDIUM ERROR: write error
+        }
+        // The backend has the data, but only a sync puts it on the host's disk.
+        // The guest asks for that with FUA, or for every write by clearing WCE.
+        if (fua || !self.write_cache) && self.media.node_mut().flush_data().is_err() {
+            return Ok(self.check_condition(0x03, 0x0c, 0x00));
         }
 
         Ok(ScsiResponse {
@@ -1470,15 +1476,22 @@ mod tests {
     /// A disk in memory that counts the flushes it is asked for.
     struct CountingNode {
         data: Vec<u8>,
-        flushes: std::sync::Arc<AtomicU64>,
+        counts: std::sync::Arc<Counts>,
+    }
+
+    /// What a [`CountingNode`] was asked to make durable.
+    #[derive(Default)]
+    struct Counts {
+        flushes: AtomicU64,
+        data_syncs: AtomicU64,
     }
 
     impl CountingNode {
-        fn device(blocks: usize) -> (ScsiDevice, std::sync::Arc<AtomicU64>) {
-            let flushes = std::sync::Arc::new(AtomicU64::new(0));
-            let node = CountingNode { data: vec![0u8; blocks * 512], flushes: flushes.clone() };
+        fn device(blocks: usize) -> (ScsiDevice, std::sync::Arc<Counts>) {
+            let counts = std::sync::Arc::new(Counts::default());
+            let node = CountingNode { data: vec![0u8; blocks * 512], counts: counts.clone() };
             let identity = ScsiIdentity::new(b"TEST    ", b"DISK            ", b"1.0 ");
-            (ScsiDevice::new(Box::new(node), false, "mock".into(), Vec::new(), identity), flushes)
+            (ScsiDevice::new(Box::new(node), false, "mock".into(), Vec::new(), identity), counts)
         }
     }
 
@@ -1493,7 +1506,11 @@ mod tests {
             Ok(())
         }
         fn flush(&mut self) -> io::Result<()> {
-            self.flushes.fetch_add(1, Ordering::SeqCst);
+            self.counts.flushes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn flush_data(&mut self) -> io::Result<()> {
+            self.counts.data_syncs.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         fn discard(&mut self, _offset: u64, _len: u64) -> io::Result<()> { Ok(()) }
@@ -1507,13 +1524,94 @@ mod tests {
     /// return GOOD. (16) used to be an unknown command.
     #[test]
     fn synchronize_cache_flushes_in_both_cdb_sizes() {
-        let (mut dev, flushes) = CountingNode::device(8);
+        let (mut dev, counts) = CountingNode::device(8);
         assert_eq!(run(&mut dev, &[0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0]).status, 0x00);
-        assert_eq!(flushes.load(Ordering::SeqCst), 1);
+        assert_eq!(counts.flushes.load(Ordering::SeqCst), 1);
         let mut cdb = [0u8; 16];
         cdb[0] = 0x91;
         assert_eq!(run(&mut dev, &cdb).status, 0x00, "SYNCHRONIZE CACHE(16)");
-        assert_eq!(flushes.load(Ordering::SeqCst), 2);
+        assert_eq!(counts.flushes.load(Ordering::SeqCst), 2);
+    }
+
+    /// With WCE cleared by the guest every write is stored before GOOD, as
+    /// with FUA; with the default WCE=1 a plain write is not.
+    #[test]
+    fn clearing_wce_makes_every_write_durable_before_good() {
+        let (mut dev, counts) = CountingNode::device(8);
+        let write = |dev: &mut ScsiDevice, cdb: &[u8]| dev.request(&request(cdb, Some(vec![0x5a; 512]))).unwrap();
+        assert_eq!(write(&mut dev, &[0x2a, 0, 0, 0, 0, 1, 0, 0, 1, 0]).status, 0x00);
+        assert_eq!(counts.data_syncs.load(Ordering::SeqCst), 0, "WCE=1: cached");
+        let page = caching_select(&mut dev, 0x00);
+        assert_eq!(mode_select(&mut dev, &page).status, 0x00);
+        assert_eq!(write(&mut dev, &[0x2a, 0, 0, 0, 0, 1, 0, 0, 1, 0]).status, 0x00);
+        assert_eq!(counts.data_syncs.load(Ordering::SeqCst), 1, "WCE=0: WRITE(10) synced");
+        assert_eq!(write(&mut dev, &[0x0a, 0, 0, 1, 1, 0]).status, 0x00);
+        assert_eq!(counts.data_syncs.load(Ordering::SeqCst), 2, "WCE=0: WRITE(6) synced");
+        let page = caching_select(&mut dev, 0x04);
+        assert_eq!(mode_select(&mut dev, &page).status, 0x00);
+        assert_eq!(write(&mut dev, &[0x2a, 0, 0, 0, 0, 1, 0, 0, 1, 0]).status, 0x00);
+        assert_eq!(counts.data_syncs.load(Ordering::SeqCst), 2, "WCE=1 again: cached");
+    }
+
+    /// A WRITE(10) with FUA is stored before it returns GOOD; one without
+    /// is not made to wait. The sync is of that write's data, not a flush
+    /// of the whole disk.
+    #[test]
+    fn write_10_with_fua_syncs_before_good() {
+        let (mut dev, counts) = CountingNode::device(8);
+        let write = |dev: &mut ScsiDevice, flags: u8| {
+            dev.request(&request(&[0x2a, flags, 0, 0, 0, 1, 0, 0, 1, 0], Some(vec![0x5a; 512]))).unwrap()
+        };
+        assert_eq!(write(&mut dev, 0x00).status, 0x00);
+        assert_eq!(counts.data_syncs.load(Ordering::SeqCst), 0, "no FUA, no sync");
+        // DPO (bit 4) alone is only a hint.
+        assert_eq!(write(&mut dev, 0x10).status, 0x00);
+        assert_eq!(counts.data_syncs.load(Ordering::SeqCst), 0);
+        assert_eq!(write(&mut dev, 0x08).status, 0x00);
+        assert_eq!(counts.data_syncs.load(Ordering::SeqCst), 1, "FUA syncs");
+        assert_eq!(counts.flushes.load(Ordering::SeqCst), 0, "not a full flush");
+    }
+
+    /// A sync that fails is a write that failed.
+    #[test]
+    fn write_10_with_fua_reports_a_failed_sync() {
+        struct Failing(CountingNode);
+        impl crate::block_node::BlockNode for Failing {
+            fn size(&self) -> u64 { self.0.size() }
+            fn read(&mut self, o: u64, b: &mut [u8]) -> io::Result<()> { self.0.read(o, b) }
+            fn write(&mut self, o: u64, b: &[u8]) -> io::Result<()> { self.0.write(o, b) }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+            fn flush_data(&mut self) -> io::Result<()> { Err(io::Error::other("disk full")) }
+            fn discard(&mut self, o: u64, l: u64) -> io::Result<()> { self.0.discard(o, l) }
+            fn block_status(&self, o: u64, l: u64) -> io::Result<crate::block_node::BlockStatus> { self.0.block_status(o, l) }
+            fn backing(&self) -> Option<&dyn crate::block_node::BlockNode> { None }
+        }
+        let inner = CountingNode { data: vec![0u8; 8 * 512], counts: Default::default() };
+        let identity = ScsiIdentity::new(b"TEST    ", b"DISK            ", b"1.0 ");
+        let mut dev = ScsiDevice::new(Box::new(Failing(inner)), false, "mock".into(), Vec::new(), identity);
+        let r = dev.request(&request(&[0x2a, 0x08, 0, 0, 0, 1, 0, 0, 1, 0], Some(vec![0x5a; 512]))).unwrap();
+        assert_eq!(r.status, 0x02);
+        assert_eq!(sense_key_asc(&mut dev), (0x03, 0x0c));
+    }
+
+    /// The raw and overlay backends take FUA without error.
+    #[test]
+    fn write_10_with_fua_on_the_real_backends() {
+        let base = tmp("fua-base");
+        std::fs::write(&base, vec![0u8; 8 * 512]).unwrap();
+        let overlay = tmp("fua-overlay");
+        let identity = ScsiIdentity::new(b"TEST    ", b"DISK            ", b"1.0 ");
+        let raw = crate::block_node::RawNode::open(&base).unwrap();
+        let backing = crate::block_node::RawNode::open_readonly(&base).unwrap();
+        let cow = crate::block_node::CowNode::new(Some(Box::new(backing)), &overlay, 8 * 512).unwrap();
+        for node in [Box::new(raw) as Box<dyn BlockNode>, Box::new(cow)] {
+            let mut dev = ScsiDevice::new(node, false, "t".into(), Vec::new(), identity);
+            let r = dev.request(&request(&[0x2a, 0x08, 0, 0, 0, 2, 0, 0, 1, 0], Some(vec![0x77; 512]))).unwrap();
+            assert_eq!(r.status, 0x00);
+        }
+        let _ = std::fs::remove_file(&base);
+        let _ = std::fs::remove_file(&overlay);
+        let _ = std::fs::remove_file(crate::cow_disk::sidecar_path_for(&overlay));
     }
 
     /// NetBSD's cd driver reads the TOC asking for 12 bytes: header and
