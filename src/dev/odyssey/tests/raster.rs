@@ -4,7 +4,7 @@
 use super::*;
 use crate::dev::odyssey::raster_bench::Bench;
 use std::sync::atomic::Ordering::SeqCst;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::time::{Duration, Instant};
 
 const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
@@ -100,9 +100,23 @@ fn the_memory_word_answers_while_a_draw_is_queued() {
 
 /// A fence the front end runs behind a draw is written by the raster unit
 /// after the draw: its token never shows while the draw is still queued.
+///
+/// The raster unit is held by a job that waits for the test, not for a
+/// time, and the work budget is lifted. The half-screen triangle costs more
+/// than the budget, so with the default one the front end's fence waits
+/// for room until the raster unit has drawn it, and the token is then
+/// written in the moment the test looks.
 #[test]
 fn a_fence_behind_a_queued_draw_lands_after_the_draw() {
-    let (h, st) = slow_raster(300);
+    let (h, st) = slow_raster(0);
+    h.raster.set_budget(u64::MAX);
+    let hold = Arc::new(AtomicBool::new(true));
+    let held = hold.clone();
+    h.raster.submit(move |_| {
+        while held.load(SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
     let ram = Ram::new(1 << 20);
     {
         let mut s = h.test_board();
@@ -111,7 +125,9 @@ fn a_fence_behind_a_queued_draw_lands_after_the_draw() {
         red_triangle(&mut s, &st);
         s.fence(0x5a5a << ODSY_DMA_FENCE_TOKEN_SHIFT | 3);
     }
+    assert_eq!(h.raster.pending(), 3, "the hold, the draw and the fence are all queued");
     assert_eq!(ram.half(0x1006), 0, "the fence waits for the draw before it");
+    hold.store(false, SeqCst);
     eventually("the fence did not land", || ram.half(0x1006) == 0x5a5a);
     let s = h.test_board();
     assert_ne!(pixel(&s, 0, 10, 10), 0, "the draw was in the planes before the fence");
