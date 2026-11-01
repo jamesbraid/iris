@@ -149,6 +149,7 @@ The NAT stack and its built-in services: DNS, TCP, NFS, rsh, BOOTP/TFTP.
 
 | Note | Kind | Title |
 |---|---|---|
+| [irix-flood-ping-loses-fast-replies.md](net/irix-flood-ping-loses-fast-replies.md) | measure | IRIX flood ping loses replies that come back while its `sendto` is still running |
 | [nat-dns-host-resolver.md](net/nat-dns-host-resolver.md) | rule | NAT DNS follows the host's DNS server |
 | [nat-tcp-slow-host-reader.md](net/nat-tcp-slow-host-reader.md) | rule | NAT TCP: a slow host reader must not lose the guest's data |
 | [nat-throughput-and-latency.md](net/nat-throughput-and-latency.md) | measure | NAT throughput and latency: what actually limited it |

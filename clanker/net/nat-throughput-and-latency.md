@@ -87,6 +87,42 @@ it possible: a 10 Mb/s SEEQ cannot take a full frame faster than every 1.2
 ms. Pacing delivery to that, or to the guest's clock, is the fix if it
 matters.
 
+## The full ring is held back instead (2026-10-31)
+
+Why IRIX reset the interface, from the 6.5.22 IP22 kernel's receive
+interrupt path: when it finds the receive channel stopped, it compares the
+HPC's current-descriptor pointer with the last descriptor it reaped. Equal,
+and it restarts the channel at the next one; anything else, and it resets
+the interface and re-arms the whole ring. A burst that filled the ring while
+the handler was late left the channel stopped 26 descriptors past the last
+one reaped, hence the reset. Linux's sgiseeq and NetBSD's sq restart at
+their own position instead, and expect the HPC to stop at the end-of-ring
+descriptor, not wrap.
+
+Two changes keep the channel from stopping there. The HPC reads a receive
+descriptor's flags again before filling it, so a ring end the driver moved
+after the fetch takes effect. And the SEEQ thread holds back a frame that
+would fill the last descriptor of the chain while frames ahead of it are
+unreaped, up to `RX_HOLD_MAX` (50 ms), counted in `seeq status` as
+`rx_held`; the guest's next reap moves the end and the frame goes in. The
+NAT's queue to the guest is bounded at 4096 frames, beyond which new frames
+are dropped (`net status`), as a switch would.
+
+Six boots each, Indy, IRIX 6.5.22, `boot/bp/meas.sh`: four `rsh cat` of
+4 MB and four 4 MB TFTP gets per boot, then `ping -f` of 56 and 1400 bytes.
+
+| | before | after |
+|---|---|---|
+| boots that lost frames (rx_delivered - Ipkts) | 3 of 6, 26 each | 0 of 6 |
+| TCP completely duplicate packets per boot | 58, 100, 0, 142, 0, 0 | 0 in all |
+| rsh 4 MB, median of 24 | 3.37 s | 2.90 s |
+| TFTP 4 MB, median of 24 | 12.77 s | 11.65 s |
+| `rx_held` per boot | | 0-1, never expired |
+
+Host load averaged 110-120 throughout, so the times spread from 2 to 30 s;
+the medians do not show a slowdown. Flood ping is unchanged by this; see
+[irix-flood-ping-loses-fast-replies.md](irix-flood-ping-loses-fast-replies.md).
+
 ## Still open
 
 - seeq-enet keeps its 1 ms wait (0.9% of a core idle): HPC3 kicks it only when
