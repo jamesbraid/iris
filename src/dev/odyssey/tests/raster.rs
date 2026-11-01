@@ -714,7 +714,7 @@ fn incremental_updates_keep_the_frame_a_whole_resolve_makes() {
             3 => {
                 let i = (rng.next_u32() % 4096) as usize;
                 s.regs().set_lut(i, rng.next_u32() & lut::ENTRY_MASK);
-                s.scanout.repaint_all();
+                s.scanout.repaint_all_for(DirtySite::Other);
             }
             _ => {
                 s.front.lock().swap_arm = rng.next_u32() & 0xf;

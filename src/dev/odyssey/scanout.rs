@@ -223,9 +223,6 @@ impl Scanout {
     pub fn repaint_for(&mut self, site: DirtySite, first: i32, count: i32) {
         self.marks.repaint(site, first, count);
     }
-    pub fn repaint_all(&mut self) {
-        self.repaint_all_for(DirtySite::Other);
-    }
     pub fn repaint_all_for(&mut self, site: DirtySite) {
         self.repaint_for(site, 0, self.mode.height as i32);
     }
@@ -246,6 +243,7 @@ impl Scanout {
 
         self.invalidate_for(site, first as i32, (end - first) as i32);
     }
+    #[cfg(test)]
     pub fn invalidate_all(&mut self) {
         self.invalidate_all_for(DirtySite::Other);
     }

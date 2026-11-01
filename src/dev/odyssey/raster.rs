@@ -884,37 +884,6 @@ impl GlDrawState {
     }
 }
 
-impl RasterRules {
-    /// Blend the packed source colour src, with alpha alpha, and the packed
-    /// destination dst (4.1.6), each component the fixed point of the rules'
-    /// colour bits taken as a fraction of its largest value. The planes hold
-    /// no alpha, so the destination's alpha is 1. The result is clamped to
-    /// [0, 1] by the subsequent colour conversion.
-    pub fn soft_blend_rgb(&self, st: &GlDrawState, src: u32, alpha: f64, dst: u32) -> [f64; 3] {
-        let bits = self.color_bits as u32;
-        let max: f64 = ((1u32 << bits) - 1) as f64;
-        let mut s = [0.0f64; 4];
-        let mut d = [0.0f64; 4];
-
-        for k in 0..3usize {
-            let shift = (2 - k as u32) * bits;
-
-            s[k] = ((src >> shift) & (max as u32)) as f64 / max;
-            d[k] = ((dst >> shift) & (max as u32)) as f64 / max;
-        }
-        s[3] = alpha;
-        d[3] = 1.0;
-        std::array::from_fn(|k| st.blend_component(k, &s, &d))
-    }
-
-}
-
-impl SoftDraw<'_> {
-    pub fn blend(&self, x: i32, y: i32, src: u32, alpha: f64, dst: u32) -> u32 {
-        self.rules.rgb(&self.rules.soft_blend_rgb(self.st, src, alpha, dst))
-    }
-}
-
 /// glLogicOp's operation (4.1.8, table 4.3) on the source s and the
 /// destination d, bit by bit.
 pub(super) fn soft_logic_op(op: u32, s: u32, d: u32) -> u32 {

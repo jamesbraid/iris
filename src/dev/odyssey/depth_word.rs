@@ -9,38 +9,30 @@
 //! compare. Bits 31:24 of a 32-bit word are not depth.
 //!
 //! What is established is the library's reading of the plane after a DMA
-//! read: the host's encoder and decoder below, the 16-bit form and the
-//! polygon-offset field. That the plane holds exactly these bits is
-//! INFERRED. The rounding of a rasterised depth into the word is
-//! unknown; this model truncates, as the host encoder does.
+//! read: the encoding (`encode_f64`), the 16-bit form and the polygon-offset
+//! field. That the plane holds exactly these bits is INFERRED. The rounding
+//! of a rasterised depth into the word is unknown; this model truncates, as
+//! the library's encoder does.
 
 use super::consts::ODSY_DEPTH24_MAX;
 
 /// The depth range's far value, 2S = 2^33 - 2^15.
 pub(super) const DEPTH_2S: f64 = 8589901824.0;
 
-/// What the host encoder returns for an exponent of 160 or more. Wider than
+/// What the library's encoder returns for an exponent of 160 or more. Wider than
 /// the word: the plane keeps the low 24 bits.
 pub(super) const DEPTH_HOST_SATURATED: u32 = 0x0fffffff;
 
-/// A value below 2^-31 has no exponent; the host encoder maps it to 0.
+/// A value below 2^-31 has no exponent; the encoder maps it to 0.
 const DEPTH_MIN_VALUE: f64 = 1.0 / 2147483648.0;
 const DEPTH_EXP_BIAS: i32 = 31;
 const DEPTH_MANTISSA_BITS: u32 = 18;
 const DEPTH_MANTISSA_MASK: u32 = (1 << DEPTH_MANTISSA_BITS) - 1;
-/// The difference between an IEEE single's exponent and the word's.
-const IEEE_EXP_OFFSET: u32 = 96;
 
-/// The host encoder (ESTABLISHED): the IEEE single's
-/// exponent minus 96 and its top 18 mantissa bits, the rest truncated. An
-/// exponent below 96 gives 0, one of 160 or more gives 0x0fffffff, and the
+/// The library's encoder (ESTABLISHED), for a double: the exponent rebased
+/// so that 2^-31 is 0, and the top 18 mantissa bits, the rest truncated. A
+/// value below 2^-31 gives 0, one of 2^33 or more gives 0x0fffffff, and the
 /// sign is ignored.
-pub(super) fn encode_host(v: f32) -> u32 {
-    encode_f64(v as f64)
-}
-
-/// [`encode_host`] for a double, truncating its mantissa to 18 bits. A
-/// double's range holds a single's, so the result agrees for every single.
 pub(super) fn encode_f64(v: f64) -> u32 {
     let v = v.abs();
 
@@ -57,18 +49,6 @@ pub(super) fn encode_f64(v: f64) -> u32 {
     ((exp as u32) << DEPTH_MANTISSA_BITS) | ((bits >> (52 - DEPTH_MANTISSA_BITS)) as u32 & DEPTH_MANTISSA_MASK)
 }
 
-/// The host decoder (ESTABLISHED): the word's exponent plus 96, its mantissa
-/// at the top of the single's, and the low five mantissa bits refilled from
-/// the top five. Only the low 24 bits are read. Word 0 decodes to 2^-31
-/// by this rule, though the encoder maps everything below that to 0; whether
-/// the library special-cases it is not shown.
-pub(super) fn decode_host(word: u32) -> f32 {
-    let e = (word >> DEPTH_MANTISSA_BITS) & 0x3f;
-    let m = word & DEPTH_MANTISSA_MASK;
-
-    f32::from_bits(((e + IEEE_EXP_OFFSET) << 23) | (m << 5) | (m >> 13))
-}
-
 /// The word for an eye-linear depth fraction z in [0, 1] (0 at the near
 /// plane, 1 at the far plane): the encoding of 2S * z. A fraction outside
 /// [0, 1] clamps to it.
@@ -82,19 +62,10 @@ pub(super) fn word_for_fraction(z: f64) -> u32 {
 /// mantissa bits in 9:0, which is the 24-bit word shifted right by eight. The
 /// library reads it from windows whose visual is RGBA 12/12/12/12 and the
 /// 24-bit form from every other visual with depth. Why those visuals get the
-/// shorter word is not shown, and the model has no depth plane of that width
-/// or depth DMA read to attach it to, so only the conversion exists.
+/// shorter word is not shown; the model has no depth plane of that width, so
+/// a 16-bit depth read converts the 24-bit word (`ReadPlane::Depth16`).
 pub(super) fn word16_from_word24(word: u32) -> u32 {
     (word & ODSY_DEPTH24_MAX) >> 8
-}
-
-/// The 16-bit form's decode: the same refill as [`decode_host`], from the
-/// ten mantissa bits (their top five fill the low five of the 23).
-pub(super) fn decode_host16(word: u32) -> f32 {
-    let e = (word >> 10) & 0x3f;
-    let m = word & 0x3ff;
-
-    f32::from_bits(((e + IEEE_EXP_OFFSET) << 23) | (m << 13) | (m >> 5))
 }
 
 /// The polygon-offset field (block 0x058) is a signed 25-bit count of steps
@@ -128,57 +99,46 @@ mod tests {
 
     const WIDTH: usize = 32;
 
-    #[test]
-    fn a_depth_word_decodes_to_one_plus_mantissa_over_2_18_times_a_power_of_two() {
-        // e = 31 is exponent 0: 1.0 at m = 0, and half a unit up at the top
-        // bit. The refill of the low five mantissa bits from the top five
-        // (the library's rule) adds 16 of the single's 2^-23 steps there.
-        assert_eq!(decode_host(31 << 18), 1.0);
-        assert_eq!(decode_host((31 << 18) | (1 << 17)), 1.5 + 16.0 * 2f32.powi(-23));
-        // The extremes: 2^-31 and just under 2^33.
-        assert_eq!(decode_host(0), 1.0 / 2147483648.0);
-        assert_eq!(decode_host(0xffffff), f32::from_bits(0x4fffffff));
+    /// The value a word stands for: (1 + m / 2^18) * 2^(e - 31).
+    fn word_value(word: u32) -> f64 {
+        let e = (word >> 18) & 0x3f;
+        let m = word & 0x3ffff;
+
+        (1.0 + m as f64 / 262144.0) * 2f64.powi(e as i32 - 31)
     }
 
     #[test]
-    fn the_host_encoder_truncates_to_18_mantissa_bits_and_decodes_back_within_a_step() {
-        for v in [1.0f32, 1.5, 3.0e-5, 0.7, 123_456.79, 5.0e9] {
-            let w = encode_host(v);
-            let back = decode_host(w);
-
-            // The refill puts the decode inside the word's step, above or below v.
-            assert!((v - back).abs() < v * 2f32.powi(-17), "{v} decodes to {back}, further than a step");
-            // A word decodes to a value that encodes to the same word.
-            assert_eq!(encode_host(back), w, "{v}: the word does not survive a round trip");
-        }
+    fn the_encoder_truncates_to_18_mantissa_bits() {
+        assert_eq!(encode_f64(1.0), 31 << 18);
+        assert_eq!(encode_f64(1.5), (31 << 18) | (1 << 17));
         // Truncation, not rounding: just below 1 + 2^-18 is still the word for 1.
-        assert_eq!(encode_host(f32::from_bits(0x3f800000 | 0x1f)), 31 << 18);
-        assert_eq!(encode_host(f32::from_bits(0x3f800000 | 0x20)), (31 << 18) | 1);
-        // Every word below the saturation point round trips exactly.
+        assert_eq!(encode_f64(1.0 + 2f64.powi(-18) * 0.999), 31 << 18);
+        assert_eq!(encode_f64(1.0 + 2f64.powi(-18)), (31 << 18) | 1);
+        // Every word below the saturation point survives a round trip.
         for w in (0..=0xffffffu32).step_by(4099) {
-            assert_eq!(encode_host(decode_host(w)), w, "word {w:#x}");
+            assert_eq!(encode_f64(word_value(w)), w, "word {w:#x}");
         }
     }
 
     #[test]
     fn a_value_below_2_to_the_minus_31_encodes_to_zero_and_the_sign_is_ignored() {
-        assert_eq!(encode_host(0.0), 0);
-        assert_eq!(encode_host(f32::from_bits(0x2fffffff)), 0, "just under 2^-31");
-        assert_eq!(encode_host(f32::from_bits(0x30000000)), 0, "2^-31 is exponent 96, word 0 too");
-        assert_eq!(encode_host(f32::from_bits(0x30000020)), 1, "and its first mantissa step is word 1");
-        assert_eq!(encode_host(f32::NAN), 0);
-        assert_eq!(encode_host(-1.0), encode_host(1.0));
-        assert_eq!(encode_host(-1.0e-12), 0);
+        assert_eq!(encode_f64(0.0), 0);
+        assert_eq!(encode_f64(2f64.powi(-31) * 0.999), 0, "just under 2^-31");
+        assert_eq!(encode_f64(2f64.powi(-31)), 0, "2^-31 is word 0 too");
+        assert_eq!(encode_f64(2f64.powi(-31) * (1.0 + 2f64.powi(-18))), 1, "and its first mantissa step is word 1");
+        assert_eq!(encode_f64(f64::NAN), 0);
+        assert_eq!(encode_f64(-1.0), encode_f64(1.0));
+        assert_eq!(encode_f64(-1.0e-12), 0);
     }
 
     #[test]
     fn a_value_of_2_to_the_33_or_more_saturates_at_0x0fffffff() {
-        assert_eq!(encode_host(8589934592.0), DEPTH_HOST_SATURATED);
-        assert_eq!(encode_host(1.0e20), DEPTH_HOST_SATURATED);
-        assert_eq!(encode_host(f32::INFINITY), DEPTH_HOST_SATURATED);
-        assert_eq!(encode_host(-8589934592.0), DEPTH_HOST_SATURATED);
-        // The largest single below 2^33 is a real word, not the saturated one.
-        assert_eq!(encode_host(f32::from_bits(0x4fffffff)), 0xffffff);
+        assert_eq!(encode_f64(8589934592.0), DEPTH_HOST_SATURATED);
+        assert_eq!(encode_f64(1.0e20), DEPTH_HOST_SATURATED);
+        assert_eq!(encode_f64(f64::INFINITY), DEPTH_HOST_SATURATED);
+        assert_eq!(encode_f64(-8589934592.0), DEPTH_HOST_SATURATED);
+        // The largest value below 2^33 is a real word, not the saturated one.
+        assert_eq!(encode_f64(8589934591.0), 0xffffff);
         // The plane keeps the low 24 bits of a saturated word.
         assert_eq!(DEPTH_HOST_SATURATED & ODSY_DEPTH24_MAX, 0xffffff);
     }
@@ -188,12 +148,12 @@ mod tests {
         assert_eq!(word_for_fraction(0.0), 0);
         // 2S = 2^33 - 2^15: exponent 32 (e = 63), mantissa 2^18 - 2.
         assert_eq!(word_for_fraction(1.0), 0xfffffe);
-        assert!((decode_host(word_for_fraction(1.0)) as f64 - DEPTH_2S).abs() < DEPTH_2S * 2f64.powi(-17));
+        assert!((word_value(word_for_fraction(1.0)) - DEPTH_2S).abs() < DEPTH_2S * 2f64.powi(-17));
         // Outside the frustum clamps to it.
         assert_eq!(word_for_fraction(-0.5), 0);
         assert_eq!(word_for_fraction(2.0), 0xfffffe);
         // Halfway is linear in eye distance, so the value is S, not a log scale.
-        assert!((decode_host(word_for_fraction(0.5)) as f64 - DEPTH_2S / 2.0).abs() < DEPTH_2S * 2f64.powi(-18));
+        assert!((word_value(word_for_fraction(0.5)) - DEPTH_2S / 2.0).abs() < DEPTH_2S * 2f64.powi(-18));
     }
 
     #[test]
@@ -211,27 +171,19 @@ mod tests {
         // step, where a fixed-point depth would see no difference.
         let hi = word_for_fraction(0.75);
         let lo = word_for_fraction(1.0e-6);
-        let step = |w: u32| decode_host(w + 1) as f64 / decode_host(w) as f64 - 1.0;
-
-        assert!(step(hi) < 2f64.powi(-17) && step(lo) < 2f64.powi(-17));
+        assert!(word_for_fraction(0.75 * (1.0 + 2f64.powi(-16))) > hi);
         assert!(word_for_fraction(1.0e-6 * (1.0 + 2f64.powi(-16))) > lo);
     }
 
     #[test]
-    fn the_16_bit_form_is_the_top_16_bits_of_the_word_and_decodes_within_a_coarser_step() {
+    fn the_16_bit_form_is_the_top_16_bits_of_the_word() {
         for w in [0u32, 31 << 18, (31 << 18) | 0x3ffff, 0xfffffe, 0x123456] {
             let w16 = word16_from_word24(w);
 
             assert_eq!(w16, w >> 8);
             assert_eq!(w16 >> 10, w >> 18, "exponent in bits 15:10");
             assert_eq!(w16 & 0x3ff, (w >> 8) & 0x3ff, "top ten mantissa bits in 9:0");
-            let long = decode_host(w);
-            let short = decode_host16(w16);
-
-            assert!((long - short).abs() < long * 2f32.powi(-9), "{w:#x}: {long} against {short}");
         }
-        assert_eq!(decode_host16(31 << 10), 1.0);
-        assert_eq!(decode_host16((31 << 10) | 0x200), 1.5 + 16.0 * 2f32.powi(-23));
     }
 
     #[test]
@@ -343,7 +295,7 @@ mod tests {
 
         draw_flat(&mut fb, 0.25, GL_LESS, 0);
         assert!(fb.iter().all(|&w| w == word_for_fraction(0.25)), "{:#x}", fb[0]);
-        assert!((decode_host(fb[0]) as f64 - DEPTH_2S * 0.25).abs() < DEPTH_2S * 2f64.powi(-20));
+        assert!((word_value(fb[0]) - DEPTH_2S * 0.25).abs() < DEPTH_2S * 2f64.powi(-20));
     }
 
     #[test]
@@ -362,7 +314,7 @@ mod tests {
         // format resolves 2^-18 relative at every depth.
         let near = word_for_fraction(0.25) - 1;
         let mut fb = plane(word_for_fraction(0.25));
-        draw_flat(&mut fb, decode_host(near) as f64 / DEPTH_2S, GL_LESS, 0);
+        draw_flat(&mut fb, word_value(near) / DEPTH_2S, GL_LESS, 0);
         assert!(fb.iter().all(|&w| w == near), "{:#x} against {near:#x}", fb[0]);
     }
 
