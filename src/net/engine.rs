@@ -29,6 +29,13 @@ pub(super) type FlowKey = (u32, u16, u16);
 /// Frames queued toward the guest beyond which producers hold back (TCP stops
 /// reading host sockets). Datagram replies are never dropped for it.
 const QUEUE_SOFT_LIMIT: usize = 192;
+/// Frames queued toward the guest beyond which new ones are dropped, as a
+/// switch drops when its port buffer is full. The adapter holds frames back
+/// while the guest's receive ring has no room, so a guest that stops
+/// reaping backs the queue up; TCP stops at the soft limit, but datagrams
+/// (a forwarded UDP port, a flood ping's replies) would grow it without
+/// bound. About 6 MB of full-size frames.
+const QUEUE_HARD_LIMIT: usize = 4096;
 /// The status snapshot (`net status`, the GUI) is for people: refresh it at
 /// this rate, not every pass.
 const SNAPSHOT_EVERY: Duration = Duration::from_millis(200);
@@ -297,11 +304,15 @@ impl NatEngine {
         self.ip_id
     }
 
-    /// Queue a frame for the guest. Nothing queued is ever dropped; it waits
-    /// for room on the ring.
+    /// Queue a frame for the guest. A queued frame waits for room on the
+    /// ring; past `QUEUE_HARD_LIMIT` a new one is dropped and counted.
     pub(super) fn send(&mut self, frame: Vec<u8>) {
         if self.ctl.dbg_tcp() {
             log_frame("<<", &frame);
+        }
+        if self.to_guest.len() >= QUEUE_HARD_LIMIT {
+            self.ctl.to_guest_dropped.fetch_add(1, Ordering::Relaxed);
+            return;
         }
         self.to_guest.push_back(frame);
     }
@@ -445,5 +456,24 @@ pub(super) fn log_frame(dir: &str, frame: &[u8]) {
     if !t.payload().is_empty() {
         let hex: String = t.payload().iter().take(64).map(|b| format!(" {:02x}", b)).collect();
         dlog_dev!(LogModule::Net, "     data:{}", hex);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A guest that has stopped taking frames backs the queue up to the hard
+    /// limit; past it new frames are dropped and counted, and the ones
+    /// already queued keep their order.
+    #[test]
+    fn a_full_queue_to_the_guest_drops_new_frames() {
+        let mut net = super::super::testnet::TestNet::default();
+        for n in 0..QUEUE_HARD_LIMIT + 10 {
+            net.e.send((n as u32).to_be_bytes().to_vec());
+        }
+        assert_eq!(net.e.to_guest.len(), QUEUE_HARD_LIMIT);
+        assert_eq!(net.e.ctl.to_guest_dropped.load(Ordering::Relaxed), 10);
+        assert_eq!(net.e.to_guest.back().unwrap(), &((QUEUE_HARD_LIMIT - 1) as u32).to_be_bytes());
     }
 }

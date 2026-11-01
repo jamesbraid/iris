@@ -578,6 +578,11 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ### NAT gateway
 
+- **The NAT's queue to the guest is bounded.** Past 4096 frames, new ones are
+  dropped and counted in `net status`, as a switch drops when a port's buffer
+  is full. TCP already stops reading the host socket long before that; the
+  bound is for datagrams, which a guest that has stopped taking frames would
+  otherwise queue without limit.
 - **Gateway replies go to the guest at once.** A reply to a guest frame was
   held for an engine pass, about 150 µs, against a suspected interrupt race in
   the Indy's Ethernet that does not show up without it. On an Indy, 4 MB TFTP

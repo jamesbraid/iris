@@ -854,6 +854,10 @@ impl Device for Seeq8003 {
                         let show_tcp  = matches!(proto, "tcp"  | "all");
                         let show_udp  = matches!(proto, "udp"  | "all");
                         let show_icmp = matches!(proto, "icmp" | "all");
+                        if proto == "all" {
+                            writeln!(w, "Frames for the guest dropped, queue full: {}",
+                                     ctl.to_guest_dropped.load(Ordering::Relaxed)).ok();
+                        }
 
                         if show_tcp {
                             writeln!(w, "TCP NAT ({} entries):", snap.tcp.len()).ok();

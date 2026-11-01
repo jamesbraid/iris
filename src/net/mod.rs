@@ -244,6 +244,9 @@ pub struct NatControl {
     /// reboot. Unused in NAT mode.
     pub pending_pcap_iface: Mutex<Option<String>>,
     pub apply_pcap_iface:   AtomicBool,
+    /// Frames for the guest the NAT dropped because its queue to the guest
+    /// was full (see `QUEUE_HARD_LIMIT`).
+    pub to_guest_dropped: AtomicU64,
 }
 
 impl NatControl {
@@ -274,6 +277,7 @@ impl NatControl {
             pcap_status:      AtomicU8::new(PcapStatus::Inactive as u8),
             pending_pcap_iface: Mutex::new(None),
             apply_pcap_iface:   AtomicBool::new(false),
+            to_guest_dropped:   AtomicU64::new(0),
         })
     }
 
