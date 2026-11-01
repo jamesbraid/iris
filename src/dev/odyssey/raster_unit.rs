@@ -657,6 +657,12 @@ impl RasterQueue {
         self.published.take(displayed, differ, marks);
     }
 
+    /// Tests: the front end is waiting for room in the queue.
+    #[cfg(test)]
+    pub fn waiting_for_room(&self) -> bool {
+        self.room_waiting.load(SeqCst)
+    }
+
     /// Tests: the raster thread is running a slice of jobs.
     #[cfg(test)]
     pub fn in_slice(&self) -> bool {

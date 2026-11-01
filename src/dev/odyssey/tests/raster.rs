@@ -75,6 +75,21 @@ fn slow_raster(hold_ms: u32) -> (BoardLocks, GlDrawState) {
     (h, st)
 }
 
+/// Hold the raster unit with a job that runs until the returned flag is set
+/// (or 20 s pass, so a failing test ends instead of hanging), as a long draw
+/// would. The test, not a clock, decides how long the unit is busy.
+fn hold_raster(h: &BoardLocks) -> Arc<AtomicBool> {
+    let release = Arc::new(AtomicBool::new(false));
+    let flag = release.clone();
+    h.raster.submit(move |_| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !flag.load(SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+    release
+}
+
 /// Wait for `what`, up to 20 s.
 fn eventually(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -235,13 +250,18 @@ fn a_slice_end_publishes_the_rows_drawn_in_it() {
     {
         let mut s = h.test_board();
         small_triangle(&mut s, &st, 100.0, RED);
+        // Longer than a slice, so the slice ends after it.
         busy(&h, 5);
-        busy(&h, 400);
     }
+    let release = hold_raster(&h);
     eventually("the first jobs did not finish", || h.raster.pending() == 1);
-    std::thread::sleep(Duration::from_millis(100));
+    let mut rows = Vec::new();
+    eventually("the slice ended without its rows", || {
+        rows.extend(published_rows(&h));
+        rows.contains(&110)
+    });
     assert_eq!(h.raster.pending(), 1, "the long job is still running");
-    assert!(published_rows(&h).contains(&110), "the slice ended without its rows");
+    release.store(true, SeqCst);
     h.raster.stop();
 }
 
@@ -356,9 +376,9 @@ fn a_reused_draw_job_draws_only_its_new_primitive() {
 /// draw is in the planes, its snapshot already in place.
 #[test]
 fn a_query_behind_a_queued_draw_syncs_after_the_draw_without_holding_the_front_end() {
-    let (h, st) = slow_raster(300);
+    let (h, st) = slow_raster(0);
+    let release = hold_raster(&h);
     let ram = Ram::new(1 << 20);
-    let start = Instant::now();
     {
         let mut s = h.test_board();
         s.guest = Some(ram.clone());
@@ -369,8 +389,11 @@ fn a_query_behind_a_queued_draw_syncs_after_the_draw_without_holding_the_front_e
             cmd(&mut s, word);
         }
     }
-    assert!(start.elapsed() < Duration::from_millis(250), "the front end waited for the raster unit");
+    // The raster unit has not run a job since the hold began, so the front
+    // end went on without it.
+    assert!(h.raster.pending() >= 3, "the hold, the draw and the query wait for the raster unit");
     assert_eq!(ram.half(0x1006), 0, "the sync word waits for the draw before it");
+    release.store(true, SeqCst);
     eventually("the query did not sync", || ram.half(0x1006) == 0x5a5a);
     assert_eq!(ram.get(0x2000 + 0x97c, 4), 7u32.to_be_bytes(), "the counter was published before the sync word");
     assert_ne!(pixel(h.test_board(), 0, 10, 10), 0, "the draw was in the planes before the sync word");
@@ -937,17 +960,19 @@ fn a_job_costs_its_pixels() {
 /// sum of theirs.
 #[test]
 fn many_small_jobs_queue_without_the_front_end_waiting() {
-    let (h, st) = slow_raster(300);
-    let start = Instant::now();
+    let (h, st) = slow_raster(0);
+    let release = hold_raster(&h);
     let mut s = h.test_board();
 
     for _ in 0..1000 {
         tiny_triangle(&mut s, &st);
     }
-    assert!(start.elapsed() < Duration::from_millis(250), "the slice still holds the raster unit");
-    assert_eq!(h.raster.pending(), 1000, "no small job waited for room");
+    // The held raster unit has run none of them, and the front end did not
+    // wait for it.
+    assert_eq!(h.raster.pending(), 1001, "no small job waited for room");
     assert!(h.raster.queued() < RASTER_WORK_BUDGET, "{} queued", h.raster.queued());
     assert!(h.raster.queued() >= 1000 * RASTER_JOB_OVERHEAD as u64);
+    release.store(true, SeqCst);
     eventually("the queue did not drain", || h.raster.pending() == 0);
     assert_eq!(h.raster.queued(), 0);
     h.raster.stop();
@@ -957,17 +982,20 @@ fn many_small_jobs_queue_without_the_front_end_waiting() {
 /// until the raster unit has drawn it.
 #[test]
 fn one_big_job_makes_the_front_end_wait() {
-    let (h, st) = slow_raster(300);
-    let start = Instant::now();
-    {
-        let mut s = h.test_board();
-        red_triangle(&mut s, &st);
-        assert!(h.raster.queued() >= RASTER_WORK_BUDGET, "{} queued", h.raster.queued());
-        assert!(start.elapsed() < Duration::from_millis(250), "the first job does not wait");
-        tiny_triangle(&mut s, &st);
-        assert!(start.elapsed() >= Duration::from_millis(250), "the second waited for the slice to draw");
-        assert!(h.raster.queued() <= RASTER_WORK_BUDGET / 2, "{} queued", h.raster.queued());
-    }
+    let (h, st) = slow_raster(0);
+    let release = hold_raster(&h);
+    // The held raster unit runs nothing, so the first job returning shows it
+    // did not wait.
+    red_triangle(h.test_board(), &st);
+    assert!(h.raster.queued() >= RASTER_WORK_BUDGET, "{} queued", h.raster.queued());
+    std::thread::scope(|sc| {
+        let second = sc.spawn(|| tiny_triangle(h.test_board(), &st));
+        eventually("the second job did not wait for room", || h.raster.waiting_for_room());
+        assert!(!second.is_finished(), "the second job waits for the raster unit to draw");
+        release.store(true, SeqCst);
+        second.join().unwrap();
+    });
+    assert!(h.raster.queued() <= RASTER_WORK_BUDGET / 2, "{} queued", h.raster.queued());
     eventually("the queue did not drain", || h.raster.pending() == 0);
     assert_ne!(pixel(&h.test_board(), 0, 10, 10), 0);
     h.raster.stop();
