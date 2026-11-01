@@ -396,9 +396,9 @@ fn the_processor_mark_counts_exactly_one_store() {
 fn the_credit_block_starves_a_widget_that_runs_out_of_credits() {
     let mut g = PiGfx::default();
 
-    g.write(SGI_PI_GFX_PAGE, SGI_PI_GFX_PAGE_ENABLE | 0x2_0000);
-    g.write(SGI_PI_GFX_CREDIT, 3);
-    g.write(SGI_PI_GFX_BIAS, 2);
+    g.write(PI_GFX_PAGE, PI_GFX_PAGE_ENABLE | 0x2_0000);
+    g.write(PI_GFX_CREDIT, 3);
+    g.write(PI_GFX_BIAS, 2);
     assert!(g.covers(0, 0x2_1000));
     assert!(!g.covers(0, 0x4_0000));
     assert!(g.count_store(0, 0x2_0000, "t"));
@@ -407,7 +407,7 @@ fn the_credit_block_starves_a_widget_that_runs_out_of_credits() {
     assert!(g.take_starved(0, "t"));
     assert!(!g.take_starved(0, "t"));
     g.add_credits(0, 5, "t");
-    assert_eq!(g.read(SGI_PI_GFX_CREDIT), 6);
+    assert_eq!(g.read(PI_GFX_CREDIT), 6);
     assert!(!g.starved[0]);
 }
 
