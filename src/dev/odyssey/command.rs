@@ -756,7 +756,9 @@ impl Board {
             }
             0x0740 => {
                 self.prim.restart_select = self.cmd.operand[0];
-                if self.prim.restart_select != 0x1e0 {
+                // The kernel selects 0x1ed as well as 0x1e0. What 0x1ed selects is
+                // UNKNOWN: it is accepted and 0x0741 does nothing for it.
+                if self.prim.restart_select != 0x1e0 && self.prim.restart_select != 0x1ed {
                     self.cmd_unimplemented(0x740);
                 }
             }
