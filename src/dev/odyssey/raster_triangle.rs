@@ -7,7 +7,7 @@
 
 use crate::devlog::LogModule;
 use super::gl_context::{
-    vtx, GL_BACK, GL_CLIP_PLANES, GL_CW, GL_DRAW_OK, GL_DRAW_OUT_OF_MEMORY, GL_FILL, GL_FLAT,
+    report_w_plane_clip, vtx, GL_BACK, GL_CLIP_PLANES, GL_CW, GL_DRAW_OK, GL_DRAW_OUT_OF_MEMORY, GL_FILL, GL_FLAT,
     GL_FRONT, GL_FRONT_AND_BACK, GL_LINE, GL_OFFSET_FILL, GL_OFFSET_LINE, GL_OFFSET_POINT,
     GL_POINT, GL_POLYGON, GL_QUADS, GL_QUAD_STRIP, GL_TRIANGLES, GL_TRIANGLE_FAN,
     GL_TRIANGLE_STRIP, GlDraw, GlDrawResult, GlDrawState,
@@ -34,6 +34,9 @@ pub(super) fn volume_clip_triangle(clip: &Clip, in_: &[VolumeVertex; 3]) -> ([Vo
         return (out, 3);
     }
     // Only a triangle that crosses a plane needs the workspace.
+    if any & NearW::W_PLANE != 0 {
+        report_w_plane_clip();
+    }
     let mut tmp = [VolumeVertex::default(); VOLUME_TRIANGLE_MAX];
     let (n, _) = clip.clip_polygon_by::<NearW, _>(&mut out, &mut tmp, 3, any);
     (out, if n < 3 { 0 } else { n })
@@ -60,7 +63,7 @@ impl GlDrawState {
     /// One vertex to clip coordinates (OpenGL 1.2.1, 2.10), in single
     /// precision through the shared transform: object to eye by the
     /// modelview and eye to clip by the projection, or by the window matrix
-    /// as GlDrawState::eye_to_clip() takes it. Clipping then works in double
+    /// as GlDrawState::eye_to_clip() takes it. Clipping then works in single precision
     /// on the result.
     pub fn volume_from_draw_vertex(&self, v: &[f32]) -> VolumeVertex {
         let eye = self.draw_vertex_eye(v);
@@ -1037,6 +1040,9 @@ impl SoftDraw<'_> {
         let clip = self.st.volume_clip(true);
         let any = poly[..count].iter().fold(0, |o, v| o | clip.outcode_by::<NearW, _>(v));
         let over;
+        if any & NearW::W_PLANE != 0 {
+            report_w_plane_clip();
+        }
         (n, over) = clip.clip_polygon_by::<NearW, _>(&mut poly, &mut other, n, any);
         if over {
             crate::dlog!(LogModule::Odyssey, "sgi-gl: polygon exceeds convex clipping bound");

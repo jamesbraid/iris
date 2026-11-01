@@ -244,7 +244,28 @@ pub(super) const GL_CLIP_PLANES: u32 = 6;
 //
 pub(super) const GL_HELD_VERTICES: u32 = 3;
 
+/// Half the extent, in pixels, of the guard band the window-matrix path clips
+/// x and y to, about the drawable's origin: h0 and h1 are divided by it so
+/// that the shared clip planes (|x| <= w) fall on it. It is iris's choice,
+/// a limit of the integer edge arithmetic and not of the board, and is
+/// separate from `WINDOW_REACH` (8192, the combined-matrix path's band about
+/// the window) because a window position here is measured from the
+/// drawable's origin and a window can sit anywhere in it. Both are far
+/// inside the hard limit, the +-65536 check in `Board::project()`.
 pub(super) const GL_WINDOW_GUARD: i32 = 16384;
+
+/// Reports, once per process (a machine has one VPro board), that the w
+/// plane clipped a primitive: preclip is off by default, the library stores
+/// positions untested, and the board's behaviour at w <= 0 is unknown. iris
+/// clips there so nothing reaches the integer edge functions. Call it from
+/// a clip's slow path only.
+pub(super) fn report_w_plane_clip() {
+    static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        crate::dlog!(LogModule::Odyssey, "sgi-gl: a primitive reached w <= 0 and was clipped; the board's behaviour there is unknown");
+    }
+}
 
 pub(super) const GL_OUT_OF_MEMORY: u32 = 0x0505;
 
@@ -511,8 +532,9 @@ pub(super) struct GlDrawState {
     /// the drawable's origin, and window depth is
     /// window_depth_scale * h2 / h3. With window_rows_down set, window y
     /// counts rows down the display from the drawable's origin (then the
-    /// window's top-left pixel). Clipping keeps near and far planes, window
-    /// depth 0 and 1, and bounds x and y by GL_WINDOW_GUARD. This
+    /// window's top-left pixel). Clipping bounds x and y by GL_WINDOW_GUARD and
+    /// w by the near-w plane; near and far are no clip, the raster drops a
+    /// fragment by its window depth (0 and 1). This
     /// departs from OpenGL in raster position validity, bitmap rows, the tie
     /// rule and the scissor, which is measured from the top.
     pub window_matrix_given: bool,

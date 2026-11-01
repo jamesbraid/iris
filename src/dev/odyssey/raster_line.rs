@@ -7,7 +7,7 @@
 
 use crate::dev::gl::vertex::NearW;
 use crate::devlog::LogModule;
-use super::gl_context::{vtx, GL_CLIP_PLANES, GL_FLAT};
+use super::gl_context::{report_w_plane_clip, vtx, GL_CLIP_PLANES, GL_FLAT};
 use super::raster::{cmax, cmin, LineRule, RasterRules, SoftDraw, SoftFrag, SoftVertex};
 use super::raster_texture::{soft_texture_derivatives, soft_texture_lod_scale};
 impl SoftVertex {
@@ -632,6 +632,9 @@ impl SoftDraw<'_> {
         let cb = self.st.volume_from_draw_vertex(vb);
         let clip = self.st.volume_clip(false);
         let any = clip.outcode_by::<NearW, _>(&ca) | clip.outcode_by::<NearW, _>(&cb);
+        if any & NearW::W_PLANE != 0 {
+            report_w_plane_clip();
+        }
         let Some((ca, cb)) = clip.clip_line_by::<NearW, _>(ca, cb, any) else {
             return;
         };
@@ -708,7 +711,11 @@ impl SoftDraw<'_> {
 
     pub fn point(&self, vp: &[f32]) {
         let cv = self.st.volume_from_draw_vertex(vp);
-        if self.st.volume_clip(false).outcode_by::<NearW, _>(&cv) != 0 {
+        let oc = self.st.volume_clip(false).outcode_by::<NearW, _>(&cv);
+        if oc != 0 {
+            if oc & NearW::W_PLANE != 0 {
+                report_w_plane_clip();
+            }
             return;
         }
         if let Some(v) = self.project(&cv).filter(|v| !self.st.clipped(&v.clip)) {

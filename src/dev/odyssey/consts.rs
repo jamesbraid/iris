@@ -696,6 +696,9 @@ pub(super) mod gl_cmd {
     pub const SLOT_TEXTURE: u32 = 0x10001;
 
     // Half the extent of the fixed viewport the shared context draws through (Board::gl_load_combined())
+    // It is iris's own limit, set by its integer edge arithmetic, not a fact about the board. It matches the library's class-3 guard
+    // (|x| or |y| > 8192 |w|) and is twice the largest drawable (under 4096). The window-matrix path's GL_WINDOW_GUARD (16384) is
+    // separate: that path measures from the drawable's origin. The hard limit is the +-65536 check in project().
     pub const WINDOW_REACH: i32 = 8192;
 
     // The screen-aligned rectangle.
