@@ -737,6 +737,31 @@ addresses the second controller.
 
 ---
 
+## Listing the machines
+
+`iris --machines` prints the machines this build can emulate, one per line, and
+exits without reading a config or opening a window. `iris --machines NAME`
+prints that machine's block instead, each line named by the config key it
+describes; NAME is a profile name or a prefix of exactly one.
+
+```
+$ iris --machines octane
+octane_ip30: SGI Octane (IP30)
+  cpu: r10000
+  cpus: 1 or 2
+  banks: 4, each 64, 128, 256, 512, 1024 or 2048 MB or empty
+  graphics.board: solidimpact (default), highimpact, maximpact or none
+  scsi: 2 controllers, target IDs 1 to 15
+  section: [octane]
+```
+
+The first word is the value of `[machine] profile`. It is read from the same
+code that validates a config, so a processor, board or memory size listed is
+one `iris` accepts. `section` is the config section only that machine has; the
+other keys are shared. An unknown name exits 1 and lists the valid ones.
+
+---
+
 ## Checking a configuration
 
 `iris --validate --config FILE` reads a configuration the way a run would and
@@ -808,6 +833,7 @@ Automation and debugging
   --serial-log-timestamps <MODE>  off (raw) or wall: timestamp each completed line
   --monitor-port <PORT>       Monitor TCP port (default 8888)
   --vnc [ADDR]                VNC server on ADDR (host:port or port; default 127.0.0.1:5900)
+  --machines [NAME]           List the machines this build emulates, or describe one, and exit
   --validate                  Check the --config file and exit; 0 if iris would start
   --serial-port-a <PORT>      Serial channel A TCP port (default 8880)
   --serial-port-b <PORT>      Serial channel B TCP port (default 8881)

@@ -27,6 +27,13 @@ hashes are given where a change is easiest to understand by reading the commit.
 - **Masked stores to RAM** (`SWL`, `SWR`, `SDL`, `SDR`) use a compare-exchange, so a
   DMA engine or another CPU storing beside them is not lost.
 
+### Listing the machines
+
+- **`iris --machines [NAME]`** prints the machines this build emulates, one per
+  line, or with a name that machine's processors, memory banks, graphics boards
+  and SCSI IDs. It reads the same code that validates a config. See
+  [HELP.md](HELP.md#listing-the-machines).
+
 ### Checking a configuration
 
 - **`iris --validate --config FILE`** parses and validates a configuration and

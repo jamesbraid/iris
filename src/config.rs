@@ -532,6 +532,32 @@ impl MachineProfile {
         }
     }
 
+    /// Every profile, in the order `workstation::build` lists them. `ALL` is
+    /// only the ones the GUI offers.
+    pub const EVERY: [Self; 5] = [
+        Self::IndyIp24,
+        Self::Indigo2Ip22,
+        Self::Indigo2Ip28,
+        Self::O2Ip32,
+        Self::OctaneIp30,
+    ];
+
+    /// Whether `[graphics] board` picks a board in a slot. The O2's graphics
+    /// (GBE) are built in; the key does not apply.
+    pub fn takes_graphics_board(self) -> bool {
+        self != Self::O2Ip32
+    }
+
+    /// The config section only this profile has (`[o2]` or `[octane]`), if any.
+    /// The rest is the shared keys.
+    pub fn section(self) -> Option<&'static str> {
+        match self {
+            Self::O2Ip32 => Some("o2"),
+            Self::OctaneIp30 => Some("octane"),
+            _ => None,
+        }
+    }
+
     /// The processors fitted at most: two on the Octane, one elsewhere.
     pub fn max_cpus(self) -> u8 {
         if self == Self::OctaneIp30 { 2 } else { 1 }
@@ -649,6 +675,18 @@ impl GraphicsBoard {
         Self::SolidImpact,
         Self::HighImpact,
         Self::MaxImpact,
+    ];
+
+    /// Every board, including none. `ALL` is only the Newport, GR2 and
+    /// IMPACT boards the GUI offers.
+    pub const EVERY: [Self; 7] = [
+        Self::Newport,
+        Self::Xz,
+        Self::Extreme,
+        Self::SolidImpact,
+        Self::HighImpact,
+        Self::MaxImpact,
+        Self::None,
     ];
 
     pub fn label(self) -> &'static str {
@@ -2392,6 +2430,12 @@ pub struct Cli {
     #[arg(long = "pcap-interface", value_name = "IFACE")]
     pub pcap_interface: Option<String>,
 
+    /// Print the machines this build can emulate, one per line, then exit.
+    /// With a name (`--machines octane`), print that machine's processors,
+    /// memory, graphics boards and SCSI IDs instead.
+    #[arg(long = "machines", value_name = "NAME", num_args = 0..=1, default_missing_value = "")]
+    pub machines: Option<String>,
+
     /// Check the configuration (`--config`, with any other options applied)
     /// without starting the machine: that it parses, that its settings agree,
     /// that its files and directories exist and its ports differ. Exits 0 if
@@ -2685,6 +2729,17 @@ pub fn load_config() -> (MachineConfig, u32) {
     if cli.config != DEFAULT_CONFIG && !std::path::Path::new(&cli.config).exists() {
         eprintln!("Configuration error: --config {} does not exist", cli.config);
         std::process::exit(1);
+    }
+
+    if let Some(wanted) = &cli.machines {
+        match crate::machines::render((!wanted.is_empty()).then_some(wanted.as_str())) {
+            Ok(text) => print!("{text}"),
+            Err(e) => {
+                eprintln!("iris: --machines: {e}");
+                std::process::exit(1);
+            }
+        }
+        std::process::exit(0);
     }
 
     if cli.validate {
