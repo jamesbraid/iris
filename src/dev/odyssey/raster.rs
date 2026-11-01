@@ -1641,6 +1641,24 @@ impl<'a> SoftDraw<'a> {
 #[cfg(test)]
 mod colour_tests {
     use super::*;
+    use crate::dev::odyssey::raster_fixed_texture::{fx_max, fx_min};
+
+    /// The rasteriser's min and max keep C's operand order: a tie or a NaN
+    /// on either side gives the second operand, where f64::max and f64::min
+    /// would give the number. The fill arithmetic depends on it.
+    #[test]
+    fn min_and_max_give_ties_and_nans_to_the_second_operand() {
+        let nan = f64::NAN;
+        assert_eq!(fmax(nan, 1.0), 1.0);
+        assert!(fmax(1.0, nan).is_nan());
+        assert_eq!(fmin(nan, 1.0), 1.0);
+        assert!(fmin(1.0, nan).is_nan());
+        assert!(fmax(0.0, -0.0).is_sign_negative());
+        assert!(fmin(-0.0, 0.0).is_sign_positive());
+        assert_eq!((fmax(2.0, 1.0), fmin(2.0, 1.0)), (2.0, 1.0));
+        assert_eq!((fx_max(3i32, 7), fx_min(3i32, 7)), (7, 3));
+        assert_eq!((r2_max(-1i64, -5), r2_min(-1i64, -5)), (-1, -5));
+    }
 
     fn rules(color_bits: u8, alpha_bits: u8) -> RasterRules {
         RasterRules { color_bits, alpha_bits, ..Default::default() }
