@@ -659,6 +659,13 @@ hashes are given where a change is easiest to understand by reading the commit.
   took a descriptor's end-of-ring flag at fetch time only, so a driver that
   moved the end of its ring off a descriptor the channel had already fetched
   still had the channel stop after that descriptor's frame.
+- **Bulk TCP into an Indy no longer loses frames to a full receive ring.**
+  The SEEQ thread fills the guest's ring as fast as the host runs, and a
+  burst could fill all of it before IRIX's interrupt handler ran. The channel
+  stopped at the end of the ring, IRIX reset the interface and the frames in
+  the ring were lost (TCP recovered them). A frame that would fill the last
+  descriptor now waits on the host until the guest moves the end of its ring,
+  up to 50 ms. `seeq status` counts these as `rx_held`.
 - **The NAT stack was rebuilt, and is faster and no longer stalls.** Through
   a port forward, host → guest TCP went from about 1 to 6 MB/s and guest →
   host from 2.7 to 7 MB/s; FTP to a LAN server from 1 to 7 MB/s; a large

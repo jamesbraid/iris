@@ -280,6 +280,12 @@ pub trait DmaClient: Send + Sync {
     /// words beyond the position the guest last saw (see HAL2's codec A).
     /// `None` when it is not being polled.
     fn read_ahead_of_poll(&self) -> Option<u64> { None }
+    /// Receive channels: whether the next frame would fill the last
+    /// descriptor of the chain while frames the guest has not reaped are
+    /// still in the ring, so that taking it stops the channel. A device can
+    /// hold the frame back until the guest moves the end. `false` for
+    /// channels that cannot tell.
+    fn at_chain_end(&self) -> bool { false }
 }
 
 /// Asynchronous system-level events sent from devices to the machine event loop.

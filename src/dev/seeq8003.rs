@@ -17,7 +17,7 @@ use std::sync::Arc;
 use crate::devlog::LogModule;
 use parking_lot::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 
 use crate::net::{eth_summary, mac_str, GatewayConfig, Link, NatControl, Rings};
@@ -144,6 +144,10 @@ pub struct SeeqState {
     /// driver's reset of the interface). Nothing else reports either.
     rx_filtered: u64,
     rx_disabled: u64,
+    /// Frames held back at the end of the guest's receive ring (see
+    /// RX_HOLD_MAX), and of those, how many went in after the hold expired.
+    rx_held: u64,
+    rx_hold_expired: u64,
     /// Monotonic lock counter — incremented on every mutex acquisition.
     /// Prefix all debug messages with this to correlate across threads.
     pub ts:       u32,
@@ -160,6 +164,27 @@ const CHAN_CAPACITY: usize = 256;
 // guest's own frames. Bounded so TX and interrupt servicing still run.
 const RX_DRAIN_CAP: usize = 256;
 
+// How long a frame waits for the guest to move the end of its receive ring.
+//
+// The SEEQ thread copies frames in as fast as the host runs, while the
+// guest reaps them on its own clock, so a burst can fill every descriptor
+// the guest has handed over before its interrupt handler runs. The HPC
+// then stops on the last one with unreaped frames ahead of it. A 10 Mb/s
+// wire would have taken over a millisecond per full frame, and the guest
+// would have kept up. IRIX treats a channel that stopped anywhere but on
+// the last descriptor it reaped as hung: it resets the interface and
+// re-arms the ring, and every frame in it is lost.
+//
+// So a frame that would fill the last descriptor of the chain, with frames
+// already ahead of it this time round, waits in the host queue instead: as
+// if it were still on the wire. Arrival time is not something a guest can
+// see, and the ring keeps every frame. When the guest reaps and moves the
+// end, the channel reads the descriptor afresh and the frame goes in. If
+// the guest has not moved it by this deadline (a driver that only re-arms
+// a stopped ring), the frame goes in anyway and the channel stops at the
+// end, as on hardware.
+const RX_HOLD_MAX: Duration = Duration::from_millis(50);
+
 // ── Main device struct ────────────────────────────────────────────────────────
 pub struct Seeq8003 {
     state:    Arc<Mutex<SeeqState>>,
@@ -169,6 +194,8 @@ pub struct Seeq8003 {
     rx_dma:   Option<Arc<dyn DmaClient>>,
     tx_dma:   Option<Arc<dyn DmaClient>>,
     in_reset: Arc<AtomicBool>, // CH_RESET edge — lock-free check in pump thread
+    /// A frame is waiting for the guest to move the end of its receive ring.
+    holding:  Arc<AtomicBool>,
     config:   GatewayConfig,
     running:  Arc<AtomicBool>,
     /// The network backend: see [`Net`].
@@ -213,7 +240,10 @@ enum RxPumpResult {
     Nothing,
     Filtered, // frame rejected by address_filter (not for the guest) and discarded
     Refused,
-    Delivered { dma_irq: bool, frame_len: usize },
+    /// Waiting for the guest to move the end of its ring; `first` the
+    /// first pass this frame has waited.
+    Held { first: bool },
+    Delivered { dma_irq: bool, frame_len: usize, hold_expired: bool },
 }
 
 // ── Seeq8003 ─────────────────────────────────────────────────────────────────
@@ -247,10 +277,13 @@ impl Seeq8003 {
                 rx_nothing: 0,
                 rx_filtered: 0,
                 rx_disabled: 0,
+                rx_held: 0,
+                rx_hold_expired: 0,
                 ts:           0,
             })),
             irq, rx_dma, tx_dma,
             in_reset: Arc::new(AtomicBool::new(false)),
+            holding:  Arc::new(AtomicBool::new(false)),
             config,
             running:  Arc::new(AtomicBool::new(false)),
             net:      Mutex::new(Net { next: None, live: None, rx_wake: None, frames: None, nat: NatControl::new() }),
@@ -377,7 +410,8 @@ impl Seeq8003 {
                rx_cons: &mut rtrb::Consumer<Vec<u8>>,
                rx_cmd_snap: u8,
                station_addr_snap: [u8; 6],
-               in_reset: &Arc<AtomicBool>) -> RxPumpResult {
+               in_reset: &Arc<AtomicBool>,
+               held_since: &mut Option<Instant>) -> RxPumpResult {
         if in_reset.load(Ordering::Relaxed) {
             dlog_dev!(LogModule::Seeq, "SEEQ pump_rx: in reset, dropping frame");
             return RxPumpResult::Nothing;
@@ -395,6 +429,18 @@ impl Seeq8003 {
             crate::pf_instant!(crate::perfetto::events::ENET_RX_FILTERED);
             return RxPumpResult::Filtered;
         }
+
+        let mut hold_expired = false;
+        if rx_dma.at_chain_end() {
+            let first = held_since.is_none();
+            let since = *held_since.get_or_insert_with(Instant::now);
+            if since.elapsed() < RX_HOLD_MAX {
+                if first { dlog_dev!(LogModule::Seeq, "SEEQ pump_rx: holding at the ring's end: {}", eth_summary(frame)); }
+                return RxPumpResult::Held { first };
+            }
+            hold_expired = true;
+        }
+        *held_since = None;
 
         dlog_dev!(LogModule::Seeq, "SEEQ RX {} → guest DMA", eth_summary(frame));
 
@@ -418,7 +464,7 @@ impl Seeq8003 {
         dlog_dev!(LogModule::Seeq, "SEEQ pump_rx: frame delivered ({} bytes to DMA) dma_st={:#x} irq={}",
                   2 + frame.len() + 1, dma_st.0, dma_st.irq());
 
-        RxPumpResult::Delivered { dma_irq: dma_st.irq(), frame_len: frame.len() }
+        RxPumpResult::Delivered { dma_irq: dma_st.irq(), frame_len: frame.len(), hold_expired }
     }
 
     /// Return current RX status byte without side-effects (no OLD-marking).
@@ -443,6 +489,21 @@ impl Seeq8003 {
     /// Call this when the RX DMA channel is activated so queued frames aren't lost.
     pub fn kick_rx(&self) {
         self.kick_enet();
+    }
+
+    /// Wake the enet thread if a frame is waiting for the guest to move the
+    /// end of its receive ring. HPC3 calls this when the driver reads the
+    /// receive control register, which it does after reaping.
+    pub fn kick_if_holding(&self) {
+        if self.holding.load(Ordering::Relaxed) {
+            self.kick_enet();
+        }
+    }
+
+    /// Whether a frame is waiting at the end of the guest's receive ring.
+    #[cfg(test)]
+    pub(crate) fn is_holding(&self) -> bool {
+        self.holding.load(Ordering::Relaxed)
     }
 
     fn kick_enet(&self) {
@@ -608,6 +669,7 @@ impl Device for Seeq8003 {
         let state_enet    = self.state.clone();
         let irq      = self.irq.clone();
         let heartbeat_enet = self.heartbeat.clone();
+        let holding = self.holding.clone();
         thread::Builder::new().name("seeq-enet".into()).spawn(move || {
             let mut tx_prod = tx_prod;
             let mut rx_cons = rx_cons;
@@ -627,6 +689,9 @@ impl Device for Seeq8003 {
             // to 1ms, so bursts still drain at speed.
             const ENET_POLL_MAX: Duration = Duration::from_millis(50);
             let mut poll = Duration::from_millis(1);
+            // When the frame at the head of the queue started waiting for
+            // the guest to move the end of its ring (RX_HOLD_MAX).
+            let mut held_since: Option<Instant> = None;
             while running_enet.load(Ordering::Relaxed) {
                 let mut notified = false;
                 // Wait for an RX frame from NAT (or a TX kick), or the poll
@@ -659,13 +724,16 @@ impl Device for Seeq8003 {
                 let rx_result = if let Some(ref dma) = rx_dma {
                     let mut r = RxPumpResult::Nothing;
                     for _ in 0..RX_DRAIN_CAP {
-                        match Self::pump_rx(dma, &mut rx_cons, rx_cmd_snap, station_addr_snap, &in_reset_enet) {
+                        match Self::pump_rx(dma, &mut rx_cons, rx_cmd_snap, station_addr_snap, &in_reset_enet, &mut held_since) {
                             RxPumpResult::Filtered => { filtered += 1; continue }   // chatter discarded; keep draining
                             other => { r = other; break; }        // Delivered / Refused / Nothing
                         }
                     }
                     r
                 } else { RxPumpResult::Nothing };
+                let held = matches!(rx_result, RxPumpResult::Held { .. });
+                if !held { held_since = None; }
+                holding.store(held, Ordering::Relaxed);
 
                 // Now take SeeqState lock once to apply all results atomically.
                 let mut st = lock_state!(state_enet);
@@ -689,15 +757,19 @@ impl Device for Seeq8003 {
                 let rx_activity = !matches!(rx_result, RxPumpResult::Nothing);
                 let rx_moved = matches!(rx_result, RxPumpResult::Delivered { .. });
                 match rx_result {
-                    RxPumpResult::Delivered { dma_irq: irq, frame_len } => {
+                    RxPumpResult::Delivered { dma_irq: irq, frame_len, hold_expired } => {
                         dlog_dev!(LogModule::Seeq, "[ts={}] SEEQ RX delivered {} bytes dma_irq={}", st.ts, frame_len, irq);
                         st.rx_delivered += 1;
+                        if hold_expired { st.rx_hold_expired += 1; }
                         st.rx_stat = rx_stat::GOOD | rx_stat::END;
                         dma_irq |= irq;
                     }
                     RxPumpResult::Refused => {
                         dlog_dev!(LogModule::Seeq, "[ts={}] SEEQ RX DMA refused, retrying next tick", st.ts);
                         st.rx_refused += 1;
+                    }
+                    RxPumpResult::Held { first } => {
+                        if first { st.rx_held += 1; }
                     }
                     // Filtered never reaches here (the drain loop consumes it), but
                     // keep the match exhaustive over RxPumpResult.
@@ -764,6 +836,7 @@ impl Device for Seeq8003 {
                         writeln!(w, "intpend={} rx_delivered={} rx_refused={} rx_nothing={}",
                                  st.intpend, st.rx_delivered, st.rx_refused, st.rx_nothing).ok();
                         writeln!(w, "rx_filtered={} (receiver off: {})", st.rx_filtered, st.rx_disabled).ok();
+                        writeln!(w, "rx_held={} (hold expired: {})", st.rx_held, st.rx_hold_expired).ok();
                         writeln!(w, "rx_cmd={:#04x} rx_stat={:#04x} tx_cmd={:#04x} tx_stat={:#04x}",
                                  st.rx_cmd, st.rx_stat, st.tx_cmd, st.tx_stat).ok();
                         writeln!(w, "threads: {}", if self.is_running() { "running" } else { "stopped" }).ok();

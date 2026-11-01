@@ -377,6 +377,8 @@ struct PdmaChannel {
     rown:          bool,
     // RX: a byte has gone into the current descriptor since it was fetched.
     rx_started:    bool,
+    // RX: descriptors filled and handed back since the channel was last started.
+    rx_filled:     u32,
     // RX: last value returned from ENET_RX_CTRL read — suppress repeated debug prints
     last_rx_ctrl:  u32,
 }
@@ -408,7 +410,7 @@ impl PdmaChannel {
             reads_at_poll: 0,
             last_poll: None,
             width_16: false,
-            crbdp: 0, cpfxbdp: 0, ppfxbdp: 0, tx_new_packet: true, rown: false, rx_started: false, last_rx_ctrl: 0xFFFFFFFF,
+            crbdp: 0, cpfxbdp: 0, ppfxbdp: 0, tx_new_packet: true, rown: false, rx_started: false, rx_filled: 0, last_rx_ctrl: 0xFFFFFFFF,
         }
     }
 
@@ -430,6 +432,7 @@ fn start_transaction(&mut self) {
         if active {
             if !self.is_active() {
                 self.start_transaction();
+                self.rx_filled = 0;
                 crate::pf_begin!(crate::perfetto::events::PDMA_ACTIVE[self.id], self.nbdp);
             }
             self.ctrl |= self.active_mask;
@@ -538,6 +541,16 @@ fn start_transaction(&mut self) {
         self.eop  = (w_cnt & PDMA_DESC_EOP)  != 0;
         self.xie  = (w_cnt & PDMA_DESC_XIE)  != 0;
         self.rown = (w_cnt & PDMA_DESC_ROWN) != 0;
+    }
+
+    /// RX: whether the next frame would fill the last descriptor of the
+    /// chain after the channel has filled others since it was started: one
+    /// more frame stops the channel with the driver's earlier frames still
+    /// in the ring. A chain of one descriptor does not count.
+    fn rx_at_chain_end(&mut self) -> bool {
+        if self.id != 10 || !self.is_active() { return false; }
+        self.reread_rx_descriptor();
+        self.eox && self.rown && !self.rx_started && self.rx_filled > 0
     }
 
     fn get_name(&self) -> String {
@@ -750,6 +763,7 @@ fn start_transaction(&mut self) {
                     mem.write16((self.crbdp + 6) as u64, rem);
                 }
             }
+            self.rx_filled = self.rx_filled.saturating_add(1);
             bc_done = true;
         }
 
@@ -823,6 +837,9 @@ impl DmaClient for PdmaClientImpl {
     }
     fn write(&self, val: u32, eop: bool) -> DmaStatus {
         self.channel.lock().dma_write(val, eop)
+    }
+    fn at_chain_end(&self) -> bool {
+        self.channel.lock().rx_at_chain_end()
     }
 }
 
@@ -1001,6 +1018,9 @@ impl PdmaChannelOps for EnetRxDmaOps {
                     .map(|s| s.get_rx_status() as u32)
                     .unwrap_or(0);
                 let val = (chan.ctrl & !ENET_RX_CTRL_SEEQ_MASK) | (seeq_st & ENET_RX_CTRL_SEEQ_MASK);
+                // A driver reads this after reaping: a frame held at the end
+                // of the ring may fit now.
+                if let Some(s) = self.seeq.get() { s.kick_if_holding(); }
                 if val != chan.last_rx_ctrl {
                     dlog_dev!(LogModule::Hpc3, "PDMA[{}]: ENET_RX_CTRL read → {:08x} (ctrl={:08x} active={} seeq_st={:02x})",
                         chan.id, val, chan.ctrl, chan.is_active(), seeq_st);
@@ -2723,6 +2743,107 @@ mod enet_rx_chain_tests {
             "the channel stopped on a descriptor that was no longer the end of the ring");
         assert_eq!(hpc3.pdma_channels[10].lock().crbdp, 0x110);
         assert!(!rx.write(0, false).refused(), "the next frame was refused");
+    }
+
+    const RING: u32 = 16;
+    const RING_DESC: u32 = 0x1000;
+    const RING_BUF: u32 = 0x2000;
+    const ARMED: u32 = PDMA_DESC_ROWN | PDMA_DESC_EOP | PDMA_DESC_XIE | 0x600;
+    fn ring_desc(i: u32) -> u32 { RING_DESC + (i % RING) * 16 }
+
+    /// A started receive ring of RING descriptors, the last marked EOX,
+    /// with `frames` numbered broadcast frames queued for the SEEQ thread.
+    fn ring_with_burst(frames: u32) -> (Hpc3, Arc<Ram>, rtrb::Producer<Vec<u8>>) {
+        let hpc3 = hpc3_for_test();
+        let ram = Arc::new(Ram(Mutex::new(vec![0; (RING_BUF + RING * 0x800) as usize])));
+        hpc3.set_phys(ram.clone());
+        for i in 0..RING {
+            let d = ring_desc(i) as u64;
+            ram.write32(d, RING_BUF + i * 0x800);
+            ram.write32(d + 4, ARMED | if i == RING - 1 { PDMA_DESC_EOX } else { 0 });
+            ram.write32(d + 8, ring_desc(i + 1));
+        }
+        let (link, _sent, mut inject) = Link::loopback();
+        let wake = link.rx_wake();
+        hpc3.seeq.attach(link);
+        hpc3.write8(reg(SEEQ_BASE + 6 * 4), 0x9f); // station and broadcast
+        hpc3.write32(reg(ENET_RX_BASE + ENET_RX_NBDP), RING_DESC);
+        hpc3.write32(reg(ENET_RX_BASE + ENET_RX_CTRL), ENET_RX_CTRL_ACTIVE);
+        for n in 0..frames {
+            let mut f = vec![0xffu8; 64];
+            f[14..18].copy_from_slice(&n.to_be_bytes());
+            inject.push(f).unwrap();
+        }
+        hpc3.seeq.start();
+        wake.notify();
+        (hpc3, ram, inject)
+    }
+
+    /// A burst bigger than the guest's receive ring, arriving while the
+    /// driver is not looking. The driver here reaps the way sq_rxintr does,
+    /// moving the end of the ring as it goes, but only once the burst has
+    /// stopped coming in, as a guest whose handler runs late does. IRIX
+    /// resets the interface, losing the ring, if it finds the channel
+    /// stopped anywhere but on the last descriptor it reaped. So the
+    /// channel must not stop: the rest of the burst waits for room, and
+    /// every frame arrives, in order.
+    #[test]
+    fn a_burst_bigger_than_the_ring_arrives_whole_without_a_stop() {
+        const N: u32 = RING;
+        const FRAMES: u32 = 100;
+        const BUF: u32 = RING_BUF;
+        let (hpc3, ram, inject) = ring_with_burst(FRAMES);
+        let desc = ring_desc;
+
+        let active = || hpc3.read32(reg(ENET_RX_BASE + ENET_RX_CTRL)).data & ENET_RX_CTRL_ACTIVE != 0;
+        let (mut next, mut got) = (0u32, 0u32);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while got < FRAMES {
+            assert!(std::time::Instant::now() < deadline, "stalled after {got} frames");
+            // Late handler: wait for the burst to stop coming in.
+            while !hpc3.seeq.is_holding() && active() && inject_backlog(&inject) > 0 {
+                std::thread::yield_now();
+            }
+            assert!(active(), "the channel stopped at the end of the ring after {got} of {FRAMES} frames");
+            let start = next;
+            while ram.read32((desc(next) + 4) as u64).data & PDMA_DESC_ROWN == 0 {
+                let n = ram.read32((BUF + (next % N) * 0x800 + 2 + 14) as u64).data;
+                assert_eq!(n, got, "frames out of order");
+                got += 1;
+                ram.write32((desc(next) + 4) as u64, ARMED);
+                next += 1;
+            }
+            if next != start {
+                let e = desc(next + N - 1) + 4;
+                ram.write32(e as u64, ram.read32(e as u64).data | PDMA_DESC_EOX);
+                let o = desc(start + N - 1) + 4;
+                ram.write32(o as u64, ram.read32(o as u64).data & !PDMA_DESC_EOX);
+            }
+            assert!(active(), "the channel stopped at the end of the ring after {got} of {FRAMES} frames");
+        }
+        hpc3.seeq.stop();
+    }
+
+    /// A driver that never moves the end of its ring still gets a frame in
+    /// the last descriptor once the hold expires, and the channel stops
+    /// there, as on hardware: the hold delays, it does not refuse.
+    #[test]
+    fn a_ring_end_that_never_moves_fills_and_stops_after_the_hold() {
+        let (hpc3, ram, _inject) = ring_with_burst(RING + 4);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while hpc3.read32(reg(ENET_RX_BASE + ENET_RX_CTRL)).data & ENET_RX_CTRL_ACTIVE != 0 {
+            assert!(std::time::Instant::now() < deadline, "the held frame never went in");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        for i in 0..RING {
+            assert_eq!(ram.read32((ring_desc(i) + 4) as u64).data & PDMA_DESC_ROWN, 0, "descriptor {i} not filled");
+        }
+        hpc3.seeq.stop();
+    }
+
+    /// Frames still queued for the SEEQ thread.
+    fn inject_backlog(inject: &rtrb::Producer<Vec<u8>>) -> u32 {
+        (256 - inject.slots()) as u32
     }
 
     /// The same for transmit: a driver restarts a stopped transmit channel at
