@@ -40,14 +40,10 @@ use crate::ppmem::devmap::{entry_eq, Entry, SLOT_SHIFT};
 use crate::ppmem::{MappedMemory, LARGE_WINDOW_SIZE, WINDOW_SIZE};
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, BUS_ERR, BUS_OK};
 
-/// Where SDRAM space starts. Descriptors count from here in [`UNIT`]s.
-pub const RAM_BASE: u64 = 0x2000_0000;
+pub use crate::ip30_map::{LOW_SIZE, RAM_BASE};
 /// The descriptors' unit, and the window's mapping granule.
 pub const UNIT: u64 = 32 << 20;
 pub const BANKS: usize = 4;
-/// Low memory at physical 0: the first `LOW_SIZE` bytes of SDRAM, which the
-/// processor reaches only there.
-pub const LOW_SIZE: u64 = 0x4000;
 const GUARD: std::ops::Range<u64> = RAM_BASE..RAM_BASE + LOW_SIZE;
 /// Where SDRAM space ends: the first large widget window. A bus master's
 /// address outside `RAM_BASE..SDRAM_END` is not memory.

@@ -5132,7 +5132,7 @@ mod tests {
 
     #[test]
     fn pfn_of_stops_at_the_pfn_map() {
-        let octane = frames_for(&crate::ip30::memory_map(&[2048, 2048, 2048, 2048]));
+        let octane = frames_for(&crate::ip30_map::memory_map(&[2048, 2048, 2048, 2048]));
         assert_eq!(pfn_of(0x1fc0_0004, octane), Some(0x1fc00));
         assert_eq!(pfn_of(0xFFFF_F000, octane), Some(0xFFFFF));
         assert_eq!(pfn_of(0x2_1FFF_F000, octane), Some(0x21FFFF));

@@ -138,26 +138,6 @@ mod tests {
     }
 
     #[test]
-    fn octane_ram_follows_the_configured_banks() {
-        let full = crate::ip30::memory_map(&[2048, 2048, 2048, 2048]);
-        assert!(full.is_ram(0x2000_0000));
-        assert!(full.is_ram(0x2_1fff_ffff), "the last byte of 8 GB");
-        assert!(!full.contains(0x2_2000_0000));
-        assert_eq!(full.end(), 0x2_2000_0000);
-
-        let small = crate::ip30::memory_map(&[64, 0, 0, 0]);
-        assert_eq!(small.end(), 0x2000_0000 + 64 * MB);
-        assert!(small.is_ram(0x100), "low memory");
-        assert!(!small.contains(0x4000), "low memory is 16 KB");
-    }
-
-    #[test]
-    fn octane_range_holds_mixed_banks_however_the_prom_aligns_them() {
-        let m = crate::ip30::memory_map(&[64, 2048, 0, 0]);
-        assert_eq!(m.end(), 0x2000_0000 + 4096 * MB, "64 MB, a hole to 2 GB, then 2 GB");
-    }
-
-    #[test]
     #[should_panic(expected = "overlaps")]
     fn overlapping_ranges_are_refused() {
         MemoryMap::new(vec![

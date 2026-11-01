@@ -39,24 +39,7 @@ pub use crate::ip30_map::*;
 /// Where SDRAM space ends: the first large window.
 pub const SDRAM_SPACE_END: u64 = crate::dev::heart_mem::SDRAM_END;
 const _: () = assert!(SDRAM_SPACE_END == widget_large_base(8));
-/// The boot flash window, both chip selects, as the processor addresses it.
-pub const BOOT_FLASH: std::ops::Range<u64> = 0x1fc0_0000..0x2000_0000;
 
-/// Where an Octane can answer with memory, given `banks` in MB. The PROM
-/// chooses where each bank goes and may leave a hole to align one, so RAM is
-/// taken to reach as far as all the populated banks would if each had a slot
-/// the size of the largest.
-pub fn memory_map(banks_mb: &[u32]) -> crate::memory_map::MemoryMap {
-    use crate::dev::heart_mem::{LOW_SIZE, RAM_BASE};
-    use crate::memory_map::{MemKind, MemRange, MemoryMap};
-    let populated = banks_mb.iter().filter(|&&mb| mb != 0).count() as u64;
-    let largest = banks_mb.iter().copied().max().unwrap_or(0) as u64;
-    MemoryMap::new(vec![
-        MemRange::new("low memory", MemKind::Alias, 0, LOW_SIZE),
-        MemRange::new("flash", MemKind::Rom, BOOT_FLASH.start, BOOT_FLASH.end),
-        MemRange::new("ram", MemKind::Ram, RAM_BASE, RAM_BASE + (populated * largest << 20)),
-    ])
-}
 
 pub use crate::cpu::smp::LAST_PC;
 
