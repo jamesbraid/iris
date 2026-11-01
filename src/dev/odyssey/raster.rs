@@ -644,9 +644,8 @@ impl RasterRules {
         }
     }
 
-    /// The alpha-test comparison value. MODEL CHOICE: floor at the reference's
-    /// 12 bits extends the colour rule to the comparison, whose precision the
-    /// vendor frames do not test.
+    /// The alpha-test comparison value: min(4095, floor(4096 a)) at the 12-bit
+    /// reference. INFERRED (graded) from the vendor frames.
     pub fn soft_alpha_test(&self, value: f64) -> u32 {
         let max = if self.alpha_test_bits != 0 {
             (1u32.wrapping_shl(self.alpha_test_bits as u32)).wrapping_sub(1)
