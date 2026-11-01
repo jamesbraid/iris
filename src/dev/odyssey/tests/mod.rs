@@ -50,6 +50,7 @@ const CONTROL: u64 = 0x0024;
 const ROUTE_DEST_UPPER: u64 = 0x1044;
 const ROUTE_DEST_LOWER: u64 = 0x104c;
 const ROUTE_VECTORS: u64 = 0x1054;
+pub(super) const ROUTE_ENABLES: u32 = ODSY_ROUTE_ENABLE_DMA | ODSY_ROUTE_ENABLE_RETRACE | ODSY_ROUTE_ENABLE_SOFTSYNC;
 const INTR_CLEAR: u64 = 0x101c;
 const INTR_ENABLE_SET: u64 = 0x1034;
 const INTR_FIFO_LOW_WATER: u64 = 0x200;
@@ -198,9 +199,10 @@ pub(super) fn select(reg: u32) -> u32 {
 }
 
 /// Program the routed destination to HEART's packet register, with the
-/// four sources on their own vectors.
+/// four sources on their own vectors and all three source enables set,
+/// as the shipped kernel programs it.
 pub(super) fn route_to_heart(s: &mut Board) {
-    reg_write(s, ODSY_ROUTE_DEST_UPPER, (HEART_WIDGET << 25) as u32);
+    reg_write(s, ODSY_ROUTE_DEST_UPPER, (HEART_WIDGET << 25) as u32 | ROUTE_ENABLES);
     reg_write(s, ODSY_ROUTE_DEST_LOWER, HEART_PACKET as u32);
     reg_write(
         s,
