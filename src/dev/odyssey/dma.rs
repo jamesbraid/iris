@@ -1496,12 +1496,12 @@ impl Board {
         }
         // Each word in publication order, with what a failed write reports.
         let mut words: Vec<(u64, u32, &'static str)> = Vec::new();
-        for i in 0..QUERY_OFFSET.len() {
-            let n = 1 + cmd_arity(page[i][0]) as usize;
+        for (record, &offset) in page.iter().zip(QUERY_OFFSET.iter()) {
+            let n = 1 + cmd_arity(record[0]) as usize;
 
-            for j in 0..n {
-                let addr = self.query.base + QUERY_OFFSET[i] as u64 + 4 * j as u64;
-                words.push((addr, page[i][j], "sgi-odyssey: current-query payload failed"));
+            for (j, &word) in record[..n].iter().enumerate() {
+                let addr = self.query.base + offset as u64 + 4 * j as u64;
+                words.push((addr, word, "sgi-odyssey: current-query payload failed"));
             }
         }
         let mut i = 0;
