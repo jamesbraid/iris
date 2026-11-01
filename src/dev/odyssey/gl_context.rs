@@ -34,16 +34,14 @@ pub const GL_DEPTH_BUFFER_BIT: u32 = 0x0100;
 pub const GL_STENCIL_BUFFER_BIT: u32 = 0x0400;
 pub const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
 
-pub const GL_VERTEX_FLOATS: usize = 24;
+pub const GL_VERTEX_FLOATS: usize = 22;
 pub const GL_V_POSITION: usize = 0;
 pub const GL_V_COLOR: usize = 4;
 pub const GL_V_NORMAL: usize = 8;
 pub const GL_V_MATERIAL: usize = 11;
 pub const GL_V_TEXCOORD: usize = 12;
 pub const GL_V_EDGE: usize = 17;
-pub const GL_V_INDEX: usize = 18;
-pub const GL_V_BACK_INDEX: usize = 19;
-pub const GL_V_BACK_COLOR: usize = 20;
+pub const GL_V_BACK_COLOR: usize = 18;
 
 // OpenGL 1.2 enumerants the state holds.
 pub const GL_POINTS: u32 = 0;
@@ -537,7 +535,6 @@ pub struct GlContext {
     /// The texture matrix (2.10.2), applied to each vertex before clipping.
     pub texture: [f32; 16],
     pub cur_color: [f32; 4],
-    pub cur_index: f32,
     pub cur_normal: [f32; 3],
     pub cur_edge: u32,
     /// The current raster position (2.12): window x, y and z and clip w,
@@ -764,7 +761,6 @@ impl GlContext {
         self.cur.colour_mask = GL_COLOUR_MASK_ALL;
         self.cur.cull_face_mode = GL_BACK;
         self.cur.front_face = GL_CCW;
-        self.cur_index = 1.0;
         self.cur_normal[2] = 1.0;
         self.cur_edge = 1;
         self.raster_pos[3] = 1.0;
@@ -1154,10 +1150,8 @@ impl GlContext {
         out[GL_V_NORMAL..GL_V_NORMAL + 3].copy_from_slice(&self.cur_normal);
         out[GL_V_TEXCOORD..GL_V_TEXCOORD + 4].copy_from_slice(&self.texture_coord());
         out[GL_V_EDGE] = f32::from_bits(self.cur_edge);
-        out[GL_V_INDEX] = self.cur_index;
         // Material and lighting belong to the instant this vertex arrived.
         out[GL_V_BACK_COLOR..GL_V_BACK_COLOR + 4].copy_from_slice(&self.cur_color);
-        out[GL_V_BACK_INDEX] = out[GL_V_INDEX];
 
         if self.polygon.enabled
             && (mode == GL_TRIANGLE_STRIP || mode == GL_TRIANGLE_FAN || mode == GL_QUAD_STRIP)
