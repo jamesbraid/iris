@@ -33,26 +33,34 @@ The record grows as each write lands, so ending iris any way at all (Ctrl-C,
 made. To the guest that is a power cut: its filesystem recovers as it would on
 real hardware, from its log.
 
-A crash or power loss of the host itself is different. The disk reports a
-write cache (WCE=1 in the caching mode page), because a plain write reaches
-the host's file but is not on the host's disk when it returns GOOD. IRIX never
-reads that page, sends SYNCHRONIZE CACHE or sets FUA, so it relies on every
-write being stored; iris cannot sync every write without slowing the guest to
-the host disk's speed, so it syncs in the background instead. A thread syncs
-each writable raw image and overlay (the overlay and its record) about 5 s
-after the first write that follows a sync, and does nothing while the guest
-writes nothing. A host crash can therefore lose up to about 5 s of the guest's
-most recent writes, in any order, and so can tear the guest's filesystem.
+A crash or power loss of the host itself is different, and what it costs
+depends on the disk's `write_cache` setting in `[scsi.N]` (or `--write-cache`
+for every disk), which is the caching mode page's WCE bit:
 
-A guest can ask for more. SYNCHRONIZE CACHE (10) or (16) and a WRITE(10) with
-FUA sync before they return, and a guest that clears WCE with MODE SELECT gets
-every write synced before GOOD, which is slow. NetBSD and Linux send
-SYNCHRONIZE CACHE to a disk with a write cache, and it is honoured.
+- `write_cache = false` (the default) is a drive as SGI shipped them. The disk
+  reports its write cache off, and every write is stored on the host's disk
+  before the command completes, so a host crash loses no write the guest was
+  told had finished. That is what IRIX relies on: it never reads that page,
+  sends SYNCHRONIZE CACHE or sets FUA. It is slower, because each write waits
+  for the host disk.
+- `write_cache = true` reports a write cache. A plain write is complete once
+  the host has it, and may be lost in a host crash until SYNCHRONIZE CACHE (10)
+  or (16), a WRITE(10) with FUA, or a background sync stores it. A thread syncs
+  each writable raw image and overlay (the overlay and its record) about 5 s
+  after the first write that follows a sync, doing nothing while the guest
+  writes nothing. A host crash can lose up to about 5 s of the guest's most
+  recent writes, in any order, and so can tear the guest's filesystem. NetBSD
+  and Linux send SYNCHRONIZE CACHE to a disk with a write cache.
+
+A guest can change the setting either way with MODE SELECT (the caching page's
+WCE bit); a bus reset puts it back.
 
 A CHD disk has no background sync: its writes are only durable after a flush,
-which closes and reopens the file. They reach the file on SYNCHRONIZE CACHE,
-`cow commit`, a power-off and iris stopping, so a host crash loses everything
-since then. Stop iris cleanly before you expect the host to go down.
+which closes and reopens the file. A CHD disk with a write cache reaches the file on
+SYNCHRONIZE CACHE, `cow commit`, a power-off and iris stopping, so a host crash
+loses everything since then; stop iris cleanly before you expect the host to
+go down. A CHD disk without one does that close and reopen on every write, which
+is very slow, so set `write_cache = true` for a CHD.
 
 An older iris reads only what the last flush recorded, so after a kill it
 sees the disk as it was before the appended writes, torn as before. Open an

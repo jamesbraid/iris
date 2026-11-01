@@ -170,8 +170,10 @@ pub struct ScsiDevice {
     /// What INQUIRY reports (the attaching controller's choice).
     identity: ScsiIdentity,
     /// The caching page's WCE bit: the disk may acknowledge a write before it
-    /// is stored. Set at power-up; a MODE SELECT can clear it.
+    /// is stored. Starts as `policy` says; a MODE SELECT can change it.
     write_cache: bool,
+    /// What WCE the disk powers up with, and returns to on a bus reset.
+    power_on_write_cache: bool,
     /// The disk's background sync, whose thread runs until this is dropped.
     /// A read-only or CHD image has none.
     background: Option<std::sync::Arc<Background>>,
@@ -223,7 +225,8 @@ impl ScsiDevice {
             // HDD defaults to 512. dksc switches CD-ROM to 512 for EFS, back to 2048 for ISO.
             logical_block_size: if is_cdrom { 2048 } else { 512 },
             identity,
-            write_cache: true,
+            write_cache: false,
+            power_on_write_cache: false,
             background,
         }
     }
@@ -240,9 +243,18 @@ impl ScsiDevice {
             phys_block_size: CDROM_SECTOR,
             logical_block_size: 2048,
             identity,
-            write_cache: true,
+            write_cache: false,
+            power_on_write_cache: false,
             background: None,
         }
+    }
+
+    /// Give the disk a write cache (WCE=1) or not, as it powers up. Without
+    /// one (the default) every write is stored before it completes.
+    pub fn with_write_cache(mut self, on: bool) -> Self {
+        self.power_on_write_cache = on;
+        self.write_cache = on;
+        self
     }
 
     /// Whether physical media is loaded. For HDDs always true; for CD-ROMs
@@ -638,16 +650,19 @@ impl ScsiDevice {
         Ok((block_desc, pages))
     }
 
-    /// The caching page (08h) as MODE SENSE reports it: write cache enabled
-    /// (WCE=1) until the guest clears it, read cache on (RCD=0).
+    /// The caching page (08h) as MODE SENSE reports it: the write cache bit
+    /// as the disk's configured and the guest's MODE SELECT left
+    /// it, read cache on (RCD=0).
     ///
-    /// WCE=1 is what the disk is: a plain WRITE reaches the host's file but is
-    /// made durable only by a SYNCHRONIZE CACHE, a WRITE with FUA, or the
-    /// background sync, so the disk must not claim to be write-through. That
-    /// default is a model choice, not a measurement. IRIX 6.5.30 kernels
-    /// (established for the IP27/IP35 ones; only "reported" for IP30 and IP32)
-    /// never read this page, set FUA or send SYNCHRONIZE CACHE, so nothing
-    /// IRIX sees depends on it.
+    /// WCE=1 says a plain WRITE may be acknowledged before it is stored, which
+    /// is true of a disk with a write cache: a write reaches the host's file but is made
+    /// durable only by SYNCHRONIZE CACHE, FUA or the background sync. WCE=0
+    /// says every write is stored before GOOD, which a disk without one does.
+    /// Which a disk starts as is a model choice, not a measurement. IRIX
+    /// 6.5.30 kernels (established for the IP27/IP35 ones; only "reported"
+    /// for IP30 and IP32) never read this page, set FUA or send SYNCHRONIZE
+    /// CACHE, so they rely on the stored-before-GOOD behaviour, and that SGI
+    /// shipped its drives with the write cache off is inferred.
     fn caching_page(&self) -> [u8; 20] {
         let mut page = [0u8; 20];
         page[0] = 0x08; // page code
@@ -1247,6 +1262,8 @@ impl ScsiTarget for ScsiDevice {
         } else {
             self.power_on_block_size();
         }
+        // A reset puts the mode parameters back, the cache bit among them.
+        self.write_cache = self.power_on_write_cache;
     }
 
     fn cow_dirty(&self) -> Option<usize> { self.is_cow().then(|| self.cow_dirty_count()) }
@@ -1384,7 +1401,7 @@ mod tests {
         let node = crate::block_node::RawNode::open(&path).expect("open");
         let identity = ScsiIdentity::new(b"TEST    ", b"DISK            ", b"1.0 ");
         let _ = std::fs::remove_file(&path); // the open handle keeps it
-        ScsiDevice::new(Box::new(node), false, "test".into(), Vec::new(), identity)
+        ScsiDevice::new(Box::new(node), false, "test".into(), Vec::new(), identity).with_write_cache(true)
     }
 
     /// Byte 2 of the caching page MODE SENSE(6) reports (WCE is bit 2).
@@ -1519,7 +1536,7 @@ mod tests {
             let counts = std::sync::Arc::new(Counts::default());
             let node = CountingNode { data: vec![0u8; blocks * 512], counts: counts.clone() };
             let identity = ScsiIdentity::new(b"TEST    ", b"DISK            ", b"1.0 ");
-            (ScsiDevice::new(Box::new(node), false, "mock".into(), Vec::new(), identity), counts)
+            (ScsiDevice::new(Box::new(node), false, "mock".into(), Vec::new(), identity).with_write_cache(true), counts)
         }
     }
 
@@ -1560,6 +1577,38 @@ mod tests {
         assert_eq!(run(&mut dev, &cdb).status, 0x00, "SYNCHRONIZE CACHE(16)");
         assert_eq!(counts.flushes.load(Ordering::SeqCst), 2);
     }
+
+    /// The default disk is a drive as SGI shipped them: cache off, and every
+    /// write stored before GOOD. Clearing or setting WCE changes that, and a
+    /// bus reset puts it back.
+    #[test]
+    fn a_disk_without_a_write_cache_stores_every_write_before_good() {
+        let counts = std::sync::Arc::new(Counts::default());
+        let node = CountingNode { data: vec![0u8; 8 * 512], counts: counts.clone() };
+        let identity = ScsiIdentity::new(b"TEST    ", b"DISK            ", b"1.0 ");
+        let mut dev = ScsiDevice::new(Box::new(node), false, "mock".into(), Vec::new(), identity);
+        assert_eq!(caching_flags(&mut dev), 0x00, "WCE=0 by default");
+        let write = |dev: &mut ScsiDevice| dev.request(&request(&[0x2a, 0, 0, 0, 0, 1, 0, 0, 1, 0], Some(vec![1; 512]))).unwrap();
+        assert_eq!(write(&mut dev).status, 0x00);
+        assert_eq!(write(&mut dev).status, 0x00);
+        assert_eq!(counts.data_syncs.load(Ordering::SeqCst), 2, "each write synced");
+        // The guest turns the cache on.
+        let page = caching_select(&mut dev, 0x04);
+        assert_eq!(mode_select(&mut dev, &page).status, 0x00);
+        assert_eq!(caching_flags(&mut dev), 0x04);
+        assert_eq!(write(&mut dev).status, 0x00);
+        assert_eq!(counts.data_syncs.load(Ordering::SeqCst), 2, "no sync with WCE=1");
+        // A bus reset restores what the disk powers up with.
+        dev.reset_block_size(false);
+        assert_eq!(caching_flags(&mut dev), 0x00);
+        // A disk configured with a cache powers up with it on, and returns to it.
+        let mut dev = disk();
+        let page = caching_select(&mut dev, 0x00);
+        assert_eq!(mode_select(&mut dev, &page).status, 0x00);
+        dev.reset_block_size(false);
+        assert_eq!(caching_flags(&mut dev), 0x04);
+    }
+
 
     /// With WCE cleared by the guest every write is stored before GOOD, as
     /// with FUA; with the default WCE=1 a plain write is not.
@@ -1651,7 +1700,7 @@ mod tests {
         let node = crate::block_node::RawNode::open(&path).unwrap();
         let bg = node.background().expect("a writable image has one");
         let identity = ScsiIdentity::new(b"TEST    ", b"DISK            ", b"1.0 ");
-        let mut dev = ScsiDevice::new(Box::new(node), false, "t".into(), Vec::new(), identity);
+        let mut dev = ScsiDevice::new(Box::new(node), false, "t".into(), Vec::new(), identity).with_write_cache(true);
 
         std::thread::sleep(std::time::Duration::from_millis(500));
         assert_eq!(bg.syncs(), 0, "no writes, no sync");

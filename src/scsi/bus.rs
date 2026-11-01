@@ -178,6 +178,7 @@ impl ScsiBus {
         discs: Vec<String>,
         overlay: bool,
         overlay_path: Option<&str>,
+        write_cache: bool,
     ) -> io::Result<u64> {
         let identity = if cdrom { self.identities.cdrom } else { self.identities.disk };
         let dev = if cdrom && path.is_empty() {
@@ -197,7 +198,7 @@ impl ScsiBus {
     /// A raw image as a disk or CD-ROM, for the controllers' tests.
     #[cfg(test)]
     pub fn attach_image(&self, id: u8, path: &std::path::Path, cdrom: bool) -> io::Result<u64> {
-        self.attach_device(id, path.to_str().unwrap(), cdrom, Vec::new(), false, None)
+        self.attach_device(id, path.to_str().unwrap(), cdrom, Vec::new(), false, None, false)
     }
 
     /// Whether something answers at `id`.
@@ -318,7 +319,7 @@ mod tests {
     }
 
     fn attach(b: &ScsiBus, id: u8, p: &std::path::Path, overlay: bool) -> io::Result<u64> {
-        b.attach_device(id, p.to_str().unwrap(), false, Vec::new(), overlay, None)
+        b.attach_device(id, p.to_str().unwrap(), false, Vec::new(), overlay, None, false)
     }
 
     fn image(tag: &str, blocks: usize) -> std::path::PathBuf {

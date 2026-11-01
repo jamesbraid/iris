@@ -441,7 +441,11 @@ impl BlockNode for RawNode {
     }
 
     fn flush_data(&mut self) -> io::Result<()> {
-        self.file.sync_data()
+        self.file.sync_data()?;
+        if let Some(bg) = &self.bg {
+            bg.synced();
+        }
+        Ok(())
     }
 
     fn discard(&mut self, offset: u64, len: u64) -> io::Result<()> {
@@ -747,6 +751,8 @@ impl BlockNode for CowNode {
         if let Some(record) = &self.record {
             record.sync_data()?;
         }
+        // Nothing is left for the background sync.
+        self.bg.synced();
         Ok(())
     }
 

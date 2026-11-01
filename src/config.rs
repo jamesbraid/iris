@@ -67,6 +67,15 @@ pub struct ScsiDeviceConfig {
     /// Gateway gets host .1, the guest gets host .2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subnet: Option<String>,
+    /// Hard disks only: the disk's write cache, as the caching mode page's WCE
+    /// bit. `false` (the default) reports it off and stores every write on
+    /// the host's disk before the command completes, like the drives SGI
+    /// shipped. `true` reports it on: a plain write is complete once the host
+    /// has it, SYNCHRONIZE CACHE and FUA store what came before them, and a
+    /// background sync follows about 5 s after a write, so a host crash can
+    /// lose that much. A guest can change the bit with MODE SELECT.
+    #[serde(default)]
+    pub write_cache: bool,
     /// Enable copy-on-write overlay. Base image is never modified; writes go to
     /// `{path}.overlay`. Delete the overlay file to reset to clean state.
     #[serde(default)]
@@ -114,6 +123,7 @@ impl Default for ScsiDeviceConfig {
             kind_field: ScsiKind::Disk,
             mac: None,
             subnet: None,
+            write_cache: false,
             overlay: false,
             scratch: false,
             size_mb: None,
@@ -2302,6 +2312,11 @@ pub struct Cli {
     #[arg(long)]
     pub scsi7: Option<String>,
 
+    /// Report every hard disk's write cache on (`write_cache = true` in each
+    /// `[scsi.N]`): faster, and a host crash can lose about 5 s of writes
+    #[arg(long, default_value_t = false)]
+    pub write_cache: bool,
+
     /// Additional ISO images for CD-ROM ID 4 (can be specified multiple times)
     #[arg(long = "cdrom4-extra", value_name = "ISO")]
     pub cdrom4_extra: Vec<String>,
@@ -2535,6 +2550,12 @@ impl Cli {
         if let Some(p) = self.cdrom6.clone() { apply_scsi(&mut cfg.scsi, 6, p, true, self.cdrom6_extra.clone()); }
         if let Some(p) = self.scsi7.clone()  { apply_scsi(&mut cfg.scsi, 7, p, false, vec![]); }
 
+        if self.write_cache {
+            for dev in cfg.scsi.values_mut().filter(|d| !d.cdrom && d.kind() == ScsiKind::Disk) {
+                dev.write_cache = true;
+            }
+        }
+
         if let Some(cpu) = self.cpu { cfg.machine.cpu = cpu; }
         if let Some(cache) = self.cache { cfg.machine.cache = cache; }
         if let Some(b) = self.graphics { cfg.graphics.board = Some(b); }
@@ -2746,6 +2767,37 @@ mod export_tests {
         let back: MachineConfig = toml::from_str(&toml::to_string_pretty(&cfg).expect("serialize")).expect("deserialize");
         assert_eq!(back.audio.host, AudioHost::Pulseaudio);
         assert!(toml::from_str::<MachineConfig>("[audio]\nhost = \"oss\"").is_err());
+    }
+
+    #[test]
+    fn write_cache_defaults_off_and_round_trips() {
+        let cfg: MachineConfig = toml::from_str(r#"
+            [scsi.1]
+            path = "a.raw"
+            [scsi.2]
+            path = "b.raw"
+            write_cache = true
+        "#).expect("parse");
+        assert!(!cfg.scsi[&1].write_cache, "the default");
+        assert!(cfg.scsi[&2].write_cache);
+        let s = toml::to_string_pretty(&cfg).expect("serialize");
+        let back: MachineConfig = toml::from_str(&s).expect("deserialize");
+        assert!(back.scsi[&2].write_cache, "survives export:\n{s}");
+        assert!(toml::from_str::<MachineConfig>("[scsi.1]\nwrite_cache = \"fast\"\n").is_err());
+    }
+
+    /// `--write-cache` turns the cache on for every disk, whatever the file says.
+    #[test]
+    fn write_cache_flag_turns_the_cache_on_for_every_disk() {
+        use clap::Parser;
+        let mut cfg = MachineConfig::default();
+        cfg.scsi.insert(1, ScsiDeviceConfig { path: "a.raw".into(), ..Default::default() });
+        cfg.scsi.insert(4, ScsiDeviceConfig { path: "c.iso".into(), cdrom: true, ..Default::default() });
+        let off = Cli::parse_from(["iris"]).apply(cfg.clone());
+        assert!(!off.scsi[&1].write_cache);
+        let on = Cli::parse_from(["iris", "--write-cache"]).apply(cfg);
+        assert!(on.scsi[&1].write_cache);
+        assert!(!on.scsi[&4].write_cache, "a CD-ROM has no cache to turn on");
     }
 
     #[test]
