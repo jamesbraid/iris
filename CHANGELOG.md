@@ -11,6 +11,28 @@ history; author dates can differ after rebases or cherry-picks. Historical
 feature names describe the build at the time, not flags to use today. Commit
 hashes are given where a change is easiest to understand by reading the commit.
 
+## November 2026
+
+### Disk write cache
+
+- A disk now has a `write_cache` setting in its `[scsi.N]` table (and a
+  `--write-cache` flag for every disk), the caching mode page's WCE bit.
+  `false`, the default, reports the cache off and stores every write on the
+  host's disk before it completes, as the drives SGI shipped do; IRIX never
+  asks for a cache sync and relies on it. `true` reports a write cache: a write
+  completes once the host has it, SYNCHRONIZE CACHE or FUA stores what came
+  before, and a background sync follows about every 5 s; a host crash or power
+  loss can lose up to that much. A disk without a cache is slower, as each
+  write waits for the host's disk.
+- MODE SELECT takes the caching page's WCE bit in either mode (with PF set),
+  and MODE SENSE returns it. A caching page that is malformed is refused with
+  CHECK CONDITION; nothing else about a MODE SELECT is. A guest that clears
+  WCE has what it wrote stored at once. A bus reset (the AIC-7880 and the
+  ISP1040) or a reset of the WD33C93A puts the bit back to the configured
+  value.
+- SYNCHRONIZE CACHE(16) is implemented, WRITE(10) honours FUA, and
+  `log scsi on` logs each command a disk receives.
+
 ## October 2026
 
 ### `IRIS_GUI_GL` works in iris-gui
