@@ -291,12 +291,12 @@ impl HostInterface {
 /// that do not wait (the back end's read window, unmodeled offsets) read
 /// the board's state directly (`BoardCell`).
 pub(super) fn front_register(addr: u64, size: u32, write: bool) -> bool {
-    if fifo_port(addr) || reg(addr, size) < 0 || access_waits(addr, size, write) {
+    if fifo_port(addr) || reg(addr, size).is_none() || access_waits(addr, size, write) {
         return false;
     }
     if !write {
         // Reads of these two fall to the unmodeled-access report.
-        return !matches!(reg(addr, size) as u64, intr::CLEAR | intr::ENABLE_CLEAR);
+        return !matches!(reg(addr, size), Some(intr::CLEAR | intr::ENABLE_CLEAR));
     }
     true
 }
@@ -307,19 +307,19 @@ impl HostInterface {
         let sequence = self.trace_sequence;
         self.trace_sequence = self.trace_sequence.wrapping_add(1);
 
-        match reg(addr, size) as u64 {
-            ODSY_IDENTITY => value = self.identity as u64,
-            ODSY_CONTROL => value = self.widget_control as u64,
-            ODSY_XT_REQ_TIMEOUT => value = self.xt_req_timeout as u64,
-            ODSY_INT_DEST_UPPER => value = self.int_dest_upper as u64,
-            ODSY_INT_DEST_LOWER => value = self.int_dest_lower as u64,
-            ODSY_ERROR_COMMAND => value = self.error_command as u64,
-            ODSY_STATUS | ODSY_ERROR_ADDR_UPPER | ODSY_ERROR_ADDR_LOWER => {
+        match reg(addr, size) {
+            Some(ODSY_IDENTITY) => value = self.identity as u64,
+            Some(ODSY_CONTROL) => value = self.widget_control as u64,
+            Some(ODSY_XT_REQ_TIMEOUT) => value = self.xt_req_timeout as u64,
+            Some(ODSY_INT_DEST_UPPER) => value = self.int_dest_upper as u64,
+            Some(ODSY_INT_DEST_LOWER) => value = self.int_dest_lower as u64,
+            Some(ODSY_ERROR_COMMAND) => value = self.error_command as u64,
+            Some(ODSY_STATUS | ODSY_ERROR_ADDR_UPPER | ODSY_ERROR_ADDR_LOWER) => {
                 // No crosstalk error is ever posted, so the error class is clear.
             }
-            intr::FLAGS => value = self.intr_flags as u64,
-            intr::ENABLE_SET => value = self.intr_enable as u64,
-            ODSY_STATUS0 => {
+            Some(intr::FLAGS) => value = self.intr_flags as u64,
+            Some(intr::ENABLE_SET) => value = self.intr_enable as u64,
+            Some(ODSY_STATUS0) => {
                 // The waiting stores are its level (HostInterface::fifo_level()).
                 // Bit 15 and bit 17 use model-chosen thresholds, see cfifo::LOW_WATER
                 // and reg::FIFO_SETUP_FIRST.
@@ -330,15 +330,15 @@ impl HostInterface {
                     | if level != 0 { 0 } else { status0::FIFO_EMPTY }
                     | if level < cfifo::LOW_WATER { status0::FIFO_LOW_WATER } else { 0 }) as u64;
             }
-            ODSY_SW_TOKEN => value = self.sw_token as u64,
-            flctl::TARGET => value = self.flctl_target as u64,
-            swap::ARM => value = self.swap_arm as u64,
-            swap::PENDING => value = self.swap_pending as u64,
-            swap::CONTROL => value = self.swap_control as u64,
-            swap::CONTROL_COMPANION => value = self.swap_control_companion as u64,
+            Some(ODSY_SW_TOKEN) => value = self.sw_token as u64,
+            Some(flctl::TARGET) => value = self.flctl_target as u64,
+            Some(swap::ARM) => value = self.swap_arm as u64,
+            Some(swap::PENDING) => value = self.swap_pending as u64,
+            Some(swap::CONTROL) => value = self.swap_control as u64,
+            Some(swap::CONTROL_COMPANION) => value = self.swap_control_companion as u64,
             // The buffer the last latched swap put on screen (retrace()).
-            ODSY_DISPLAYED_BUFFER => value = self.displayed_buffer as u64,
-            route::DEST_UPPER | route::DEST_LOWER | route::VECTORS => {
+            Some(ODSY_DISPLAYED_BUFFER) => value = self.displayed_buffer as u64,
+            Some(route::DEST_UPPER | route::DEST_LOWER | route::VECTORS) => {
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: read of the write-only register at {:#x}", addr);
             }
             _ => unreachable!("odyssey_front_register() admits only these"),
@@ -351,26 +351,26 @@ impl HostInterface {
         crate::dlog_dev!(LogModule::Odyssey, "sgi-odyssey: front MMIO write seq {} offset {:#x} size {} value {:#x}", self.trace_sequence, addr, size, value);
         self.trace_sequence = self.trace_sequence.wrapping_add(1);
 
-        match reg(addr, size) as u64 {
-            ODSY_CONTROL => self.widget_control = value as u32,
-            ODSY_XT_REQ_TIMEOUT => self.xt_req_timeout = value as u32,
-            ODSY_INT_DEST_UPPER => self.int_dest_upper = value as u32,
-            ODSY_INT_DEST_LOWER => self.int_dest_lower = value as u32,
+        match reg(addr, size) {
+            Some(ODSY_CONTROL) => self.widget_control = value as u32,
+            Some(ODSY_XT_REQ_TIMEOUT) => self.xt_req_timeout = value as u32,
+            Some(ODSY_INT_DEST_UPPER) => self.int_dest_upper = value as u32,
+            Some(ODSY_INT_DEST_LOWER) => self.int_dest_lower = value as u32,
             // Written to acknowledge; the data itself is discarded.
-            ODSY_ERROR_COMMAND => self.error_command = 0,
-            intr::CLEAR => {
+            Some(ODSY_ERROR_COMMAND) => self.error_command = 0,
+            Some(intr::CLEAR) => {
                 self.intr_flags &= !(value as u32);
                 self.update_irq();
             }
-            intr::ENABLE_SET => {
+            Some(intr::ENABLE_SET) => {
                 self.intr_enable |= value as u32;
                 self.update_irq();
             }
-            intr::ENABLE_CLEAR => {
+            Some(intr::ENABLE_CLEAR) => {
                 self.intr_enable &= !(value as u32);
                 self.update_irq();
             }
-            intr::FLAGS => {
+            Some(intr::FLAGS) => {
                 // The flags take the value written: an inferred model choice.
                 // A driver's flow control writes the low-water bit here before
                 // enabling that source, and its DMA diagnostic clears one flag
@@ -381,8 +381,8 @@ impl HostInterface {
                 self.intr_flags = value as u32;
                 self.update_irq();
             }
-            ODSY_SW_TOKEN => self.sw_token = value as u32,
-            flctl::TARGET => {
+            Some(ODSY_SW_TOKEN) => self.sw_token = value as u32,
+            Some(flctl::TARGET) => {
                 self.flctl_target = value as u32;
                 if !self.flctl_target_reported {
                     self.flctl_target_reported = true;
@@ -394,7 +394,7 @@ impl HostInterface {
                     );
                 }
             }
-            swap::ARM => {
+            Some(swap::ARM) => {
                 // Queue flips for the next retrace. Writes accumulate: the
                 // driver can issue several windows or swap groups between two
                 // retraces, and its retrace handler re-writes one window's bit
@@ -403,8 +403,8 @@ impl HostInterface {
                 self.swap_arm |= value as u32;
                 crate::pf_instant!(crate::perfetto::events::ODSY_SWAP_ARM, value);
             }
-            swap::PENDING => self.swap_pending = value as u32,
-            swap::CONTROL => {
+            Some(swap::PENDING) => self.swap_pending = value as u32,
+            Some(swap::CONTROL) => {
                 // The windows that must show buffer 1 from the next retrace on.
                 // A later write to either register for the same window replaces
                 // this one before the retrace latches it.
@@ -412,30 +412,30 @@ impl HostInterface {
                 self.swap_set |= value as u32;
                 self.swap_clear &= !(value as u32);
             }
-            swap::CONTROL_COMPANION => {
+            Some(swap::CONTROL_COMPANION) => {
                 self.swap_control_companion = value as u32;
                 self.swap_clear |= value as u32;
                 self.swap_set &= !(value as u32);
             }
-            ODSY_DISPLAYED_BUFFER => {
+            Some(ODSY_DISPLAYED_BUFFER) => {
                 // Board-produced status; a guest write is not seen in the
                 // capture, but store it rather than drop it.
                 self.displayed_buffer = value as u32;
                 self.displayed_written = true;
             }
-            route::DEST_UPPER => {
+            Some(route::DEST_UPPER) => {
                 self.route_dest_upper = value as u32;
                 self.deliver_held_flag();
             }
-            route::DEST_LOWER => {
+            Some(route::DEST_LOWER) => {
                 self.route_dest_lower = value as u32;
                 self.deliver_held_flag();
             }
-            route::VECTORS => {
+            Some(route::VECTORS) => {
                 self.route_vectors = value as u32;
                 self.deliver_held_flag();
             }
-            ODSY_IDENTITY | ODSY_STATUS | ODSY_ERROR_ADDR_UPPER | ODSY_ERROR_ADDR_LOWER => {
+            Some(ODSY_IDENTITY | ODSY_STATUS | ODSY_ERROR_ADDR_UPPER | ODSY_ERROR_ADDR_LOWER) => {
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: write of {:#x} to the read-only register at {:#x}", value, addr);
             }
             _ => unreachable!("odyssey_front_register() admits only these"),
