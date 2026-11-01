@@ -433,8 +433,6 @@ impl SoftDraw<'_> {
                     frag.texcoord[k] = (w0 * v[0].texcoord[k] + w1 * v[1].texcoord[k] + w2 * v[2].texcoord[k]) / sum;
                 }
             }
-            if st.fog {
-            }
             if st.clip_planes != 0 {
                 let mut d = [0.0f64; GL_CLIP_PLANES as usize];
 
