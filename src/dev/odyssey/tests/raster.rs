@@ -145,7 +145,7 @@ fn a_fence_behind_a_queued_draw_lands_after_the_draw() {
     {
         let mut s = h.test_board();
         s.guest = Some(ram.clone());
-        s.host_write_addr_lower = 0x1000;
+        s.widget.host_write_addr_lower = 0x1000;
         red_triangle(&mut s, &st);
         s.fence(0x5a5a << dma::FENCE_TOKEN_SHIFT | 3);
     }
@@ -185,7 +185,7 @@ fn a_fence_publishes_the_rows_drawn_before_it() {
     {
         let mut s = h.test_board();
         s.guest = Some(ram.clone());
-        s.host_write_addr_lower = 0x1000;
+        s.widget.host_write_addr_lower = 0x1000;
         small_triangle(&mut s, &st, 100.0, RED);
         s.fence(0x5a5a << dma::FENCE_TOKEN_SHIFT | 3);
         busy(&h, 300);
@@ -204,8 +204,8 @@ fn a_query_publishes_the_rows_drawn_before_it() {
     {
         let mut s = h.test_board();
         s.guest = Some(ram.clone());
-        s.ctx_shadow_addr_lower = 0x2000;
-        s.host_write_addr_lower = 0x1000;
+        s.widget.ctx_shadow_addr_lower = 0x2000;
+        s.widget.host_write_addr_lower = 0x1000;
         small_triangle(&mut s, &st, 100.0, RED);
         for word in [0x4c0, 7, 0x10a5a, 3, 0x5a5a] {
             cmd(&mut s, word);
@@ -368,8 +368,8 @@ fn a_query_behind_a_queued_draw_syncs_after_the_draw_without_holding_the_front_e
     {
         let mut s = h.test_board();
         s.guest = Some(ram.clone());
-        s.ctx_shadow_addr_lower = 0x2000;
-        s.host_write_addr_lower = 0x1000;
+        s.widget.ctx_shadow_addr_lower = 0x2000;
+        s.widget.host_write_addr_lower = 0x1000;
         tiny_triangle(&mut s, &st);
         for word in [0x4c0, 7, 0x10a5a, 3, 0x5a5a] {
             cmd(&mut s, word);
@@ -465,8 +465,8 @@ fn a_draw_asks_the_display_for_the_rows_it_changed_in_a_buffer_a_window_shows() 
 #[test]
 fn a_draw_under_an_id_test_asks_only_for_the_window_it_reaches() {
     let (mut s, mut st) = gl_board();
-    s.did.fill(3 << ODSY_DID_MAIN_SHIFT);
-    s.id_compare = ODSY_ID_COMPARE_ENABLE | 0xf8 << ODSY_ID_COMPARE_MASK_SHIFT | 3 << ODSY_DID_MAIN_SHIFT;
+    s.planes.did.fill(3 << ODSY_DID_MAIN_SHIFT);
+    s.win.id_compare = ODSY_ID_COMPARE_ENABLE | 0xf8 << ODSY_ID_COMPARE_MASK_SHIFT | 3 << ODSY_DID_MAIN_SHIFT;
     st.drawable.front = 1;
     st.drawable.back = 1;
     let h = BoardLocks::new(s);
@@ -677,7 +677,7 @@ fn incremental_updates_keep_the_frame_a_whole_resolve_makes() {
         s.regs().set_lut(i, rng.next_u32() & lut::ENTRY_MASK);
     }
     // Four windows in vertical bands.
-    for (i, d) in s.did.iter_mut().enumerate() {
+    for (i, d) in s.planes.did.iter_mut().enumerate() {
         *d = (((i % ODSY_WIDTH as usize) / 320) as u8) << ODSY_DID_MAIN_SHIFT;
     }
     let h = BoardLocks::new(s);
@@ -851,11 +851,11 @@ fn a_reused_lighting_state_lights_a_vertex_as_a_fresh_one_does() {
     }
     fn set_light(s: &mut Board, i: usize, colour: [f32; 3], directional: bool, spot: bool) {
         for k in 0..3 {
-            s.gl_light_colour[i * 12 + k] = (0.1f32 * (i + 1) as f32).to_bits();
-            s.gl_light_colour[i * 12 + 4 + k] = colour[k].to_bits();
-            s.gl_light_colour[i * 12 + 8 + k] = (colour[k] * 0.5).to_bits();
+            s.geom.light_colour[i * 12 + k] = (0.1f32 * (i + 1) as f32).to_bits();
+            s.geom.light_colour[i * 12 + 4 + k] = colour[k].to_bits();
+            s.geom.light_colour[i * 12 + 8 + k] = (colour[k] * 0.5).to_bits();
         }
-        let blk = &mut s.gl_light_vec[i * gl_cmd::LIGHT_VEC_FLOATS as usize..];
+        let blk = &mut s.geom.light_vec[i * gl_cmd::LIGHT_VEC_FLOATS as usize..];
         for k in 0..3 {
             blk[light::POS + k] = [2.0f32, 3.0, 4.0 + i as f32][k].to_bits();
             blk[light::HALF + k] = (if directional { [0.0f32, 0.6, 0.8][k] } else { 0.0 }).to_bits();
@@ -870,21 +870,21 @@ fn a_reused_lighting_state_lights_a_vertex_as_a_fresh_one_does() {
         }
     }
     fn clear_light(s: &mut Board, i: usize) {
-        s.gl_light_colour[i * 12..i * 12 + 12].fill(0);
+        s.geom.light_colour[i * 12..i * 12 + 12].fill(0);
     }
 
     let (mut s, _) = board("v12");
     let identity: [f32; 16] = [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.];
-    s.gl_modelview = identity.map(f32::to_bits);
-    s.gl_normal_matrix = identity.map(f32::to_bits);
-    s.gl_normal = [0.0f32, 0.6, 0.8].map(f32::to_bits);
-    s.gl_colour = [0.7f32, 0.5, 0.3, 0.9].map(f32::to_bits);
+    s.geom.modelview = identity.map(f32::to_bits);
+    s.geom.normal_matrix = identity.map(f32::to_bits);
+    s.geom.normal = [0.0f32, 0.6, 0.8].map(f32::to_bits);
+    s.geom.colour = [0.7f32, 0.5, 0.3, 0.9].map(f32::to_bits);
     for k in 0..4 {
-        s.gl_material[k] = 0.2f32.to_bits();
-        s.gl_material[4 + k] = [0.8f32, 0.4, 0.6, 0.5][k].to_bits();
-        s.gl_material[8 + k] = 0.5f32.to_bits();
+        s.geom.material[k] = 0.2f32.to_bits();
+        s.geom.material[4 + k] = [0.8f32, 0.4, 0.6, 0.5][k].to_bits();
+        s.geom.material[8 + k] = 0.5f32.to_bits();
     }
-    s.gl_shininess_sqrt = 4.0f32.to_bits();
+    s.geom.shininess_sqrt = 4.0f32.to_bits();
     let obj = [1.0, 2.0, 3.0, 1.0];
     let mut seen = Vec::new();
     let check = |s: &mut Board, what: &str| {
@@ -910,7 +910,7 @@ fn a_reused_lighting_state_lights_a_vertex_as_a_fresh_one_does() {
     set_light(&mut s, 3, [0.3, 0.9, 0.2], false, false);
     seen.push(check(&mut s, "light 3 back without its spot"));
     clear_light(&mut s, 3);
-    s.gl_colour_material = colour::MATERIAL_DIFFUSE;
+    s.geom.colour_material = colour::MATERIAL_DIFFUSE;
     set_light(&mut s, 7, [0.6, 0.6, 0.6], false, false);
     seen.push(check(&mut s, "colour material, light 7"));
 
@@ -1054,7 +1054,7 @@ fn display_rig() -> (BoardLocks, GlDrawState, Arc<Display>) {
     for id in 0..dispmode::COUNT {
         s.regs().set_dispmode(id as usize, ODSY_GAMMA_GROUP << dispmode::GROUP_SHIFT);
     }
-    for (i, d) in s.did.iter_mut().enumerate() {
+    for (i, d) in s.planes.did.iter_mut().enumerate() {
         *d = (((i % ODSY_WIDTH as usize) / 320) as u8) << ODSY_DID_MAIN_SHIFT;
     }
     s.set_scanout_size(ODSY_WIDTH, ODSY_HEIGHT);
@@ -1202,9 +1202,9 @@ fn swap_atomicity() {
     // One window, so the one swap bit is the whole picture.
     {
         let mut s = h.test_board();
-        s.did.fill(0);
-        s.mem.bytes.fill(0);
-        s.buffer1_mem.bytes.fill(0);
+        s.planes.did.fill(0);
+        s.planes.colour.bytes.fill(0);
+        s.planes.buffer1.bytes.fill(0);
         s.scanout.invalidate_all();
     }
     h.raster.test_slice_limit_ms.store(10_000, SeqCst);

@@ -12,7 +12,7 @@ impl Board {
         if base == 0 {
             return None;
         }
-        match self.obj_index.get(&base) {
+        match self.objects.index.get(&base) {
             Some(slot) if *slot != 0 => Some((*slot - 1) as usize),
             _ => None,
         }
@@ -20,17 +20,17 @@ impl Board {
 
     /// Give object i the base base, keeping obj_index in step.
     pub fn object_set_base(&mut self, i: usize, base: u32) {
-        if self.obj_base[i] != 0 {
-            self.obj_index.remove(&self.obj_base[i]);
+        if self.objects.base[i] != 0 {
+            self.objects.index.remove(&self.objects.base[i]);
         }
-        self.obj_base[i] = base;
+        self.objects.base[i] = base;
         if base != 0 {
-            self.obj_index.insert(base, i as u32 + 1);
+            self.objects.index.insert(base, i as u32 + 1);
         }
     }
 
     pub fn object_word_valid(&self, word: u64) -> bool {
-        word < ODSY_OBJ_POOL_WORDS as u64 && (self.obj_valid[(word >> 3) as usize] & (1u8 << (word & 7))) != 0
+        word < ODSY_OBJ_POOL_WORDS as u64 && (self.objects.valid[(word >> 3) as usize] & (1u8 << (word & 7))) != 0
     }
 
     pub fn object_word_set_valid(&mut self, word: u64, valid: bool) {
@@ -38,9 +38,9 @@ impl Board {
 
         assert!(word < ODSY_OBJ_POOL_WORDS as u64);
         if valid {
-            self.obj_valid[(word >> 3) as usize] |= mask;
+            self.objects.valid[(word >> 3) as usize] |= mask;
         } else {
-            self.obj_valid[(word >> 3) as usize] &= !mask;
+            self.objects.valid[(word >> 3) as usize] &= !mask;
         }
     }
 
@@ -68,11 +68,11 @@ impl Board {
 
     pub fn object_region_written(&self, o: usize, x: u32, y: u32, width: u32, height: u32) -> bool {
 
-        if x > self.obj_width[o] || width > self.obj_width[o] - x || y > self.obj_rows[o] || height > self.obj_rows[o] - y {
+        if x > self.objects.width[o] || width > self.objects.width[o] - x || y > self.objects.rows[o] || height > self.objects.rows[o] - y {
             return false;
         }
         for dy in 0..height {
-            let row = self.obj_offset[o] as u64 + (y + dy) as u64 * self.obj_width[o] as u64 + x as u64;
+            let row = self.objects.offset[o] as u64 + (y + dy) as u64 * self.objects.width[o] as u64 + x as u64;
 
             for dx in 0..width {
                 if !self.object_word_valid(row + dx as u64) {
@@ -89,25 +89,25 @@ impl Board {
     /// the table fills. Model policy, not board behaviour (origami datasheet
     /// odyssey.md, "Board-memory object store", origami#3192).
     pub fn object_touch(&mut self, i: usize) {
-        self.obj_clock += 1;
-        self.obj_stamp[i] = self.obj_clock;
+        self.objects.clock += 1;
+        self.objects.stamp[i] = self.objects.clock;
     }
 
     /// Forget object i: its slot stays, with base 0, for a later object.
     pub fn object_forget(&mut self, i: usize) {
         self.object_set_base(i, 0);
-        self.obj_width[i] = 0;
-        self.obj_rows[i] = 0;
-        self.obj_offset[i] = 0;
-        self.obj_stamp[i] = 0;
+        self.objects.width[i] = 0;
+        self.objects.rows[i] = 0;
+        self.objects.offset[i] = 0;
+        self.objects.stamp[i] = 0;
     }
 
     /// The least recently used live object other than keep.
     pub fn object_oldest(&mut self, keep: Option<usize>) -> Option<usize> {
         let mut oldest: Option<usize> = None;
 
-        for i in 0..self.obj_count as usize {
-            if Some(i) != keep && self.obj_base[i] != 0 && oldest.is_none_or(|o| self.obj_stamp[i] < self.obj_stamp[o]) {
+        for i in 0..self.objects.count as usize {
+            if Some(i) != keep && self.objects.base[i] != 0 && oldest.is_none_or(|o| self.objects.stamp[i] < self.objects.stamp[o]) {
                 oldest = Some(i);
             }
         }
@@ -120,16 +120,16 @@ impl Board {
     pub fn object_compact(&mut self, last: Option<usize>) {
         // A queued textured draw may still read the store.
         self.raster_wait();
-        let last_size: u64 = last.map_or(0, |l| self.obj_width[l] as u64 * self.obj_rows[l] as u64);
+        let last_size: u64 = last.map_or(0, |l| self.objects.width[l] as u64 * self.objects.rows[l] as u64);
         let mut held: Vec<u8> = Vec::new();
         let mut held_valid: Vec<bool> = Vec::new();
         let mut next: u64 = 0;
 
         // Packing the others may overwrite last's words: keep them aside.
         if last_size != 0 {
-            let off = last.map_or(0, |l| self.obj_offset[l]) as u64;
+            let off = last.map_or(0, |l| self.objects.offset[l]) as u64;
 
-            held = self.obj_mem.bytes[(off * 4) as usize..((off + last_size) * 4) as usize].to_vec();
+            held = self.objects.mem.bytes[(off * 4) as usize..((off + last_size) * 4) as usize].to_vec();
             for k in 0..last_size {
                 held_valid.push(self.object_word_valid(off + k));
             }
@@ -137,38 +137,38 @@ impl Board {
         // The others in store order, once: each is then the lowest-placed
         // one not yet packed. One whose words a packed object now covers is
         // left where it is, as a search from `next` would leave it.
-        let mut order: Vec<usize> = (0..self.obj_count as usize)
-            .filter(|&i| Some(i) != last && self.obj_base[i] != 0 && self.obj_rows[i] != 0)
+        let mut order: Vec<usize> = (0..self.objects.count as usize)
+            .filter(|&i| Some(i) != last && self.objects.base[i] != 0 && self.objects.rows[i] != 0)
             .collect();
-        order.sort_unstable_by_key(|&i| (self.obj_offset[i], i));
+        order.sort_unstable_by_key(|&i| (self.objects.offset[i], i));
         for p in order {
-            if (self.obj_offset[p] as u64) < next {
+            if (self.objects.offset[p] as u64) < next {
                 continue;
             }
-            let size = self.obj_width[p] as u64 * self.obj_rows[p] as u64;
-            if self.obj_offset[p] as u64 != next {
-                let from = self.obj_offset[p] as usize * 4;
-                self.obj_mem.bytes.copy_within(from..from + size as usize * 4, next as usize * 4);
-                self.object_valid_move(self.obj_offset[p] as u64, next, size);
-                self.obj_offset[p] = next as u32;
+            let size = self.objects.width[p] as u64 * self.objects.rows[p] as u64;
+            if self.objects.offset[p] as u64 != next {
+                let from = self.objects.offset[p] as usize * 4;
+                self.objects.mem.bytes.copy_within(from..from + size as usize * 4, next as usize * 4);
+                self.object_valid_move(self.objects.offset[p] as u64, next, size);
+                self.objects.offset[p] = next as u32;
             }
             next += size;
         }
         if let (Some(last), true) = (last, last_size != 0) {
             let at = next as usize * 4;
-            self.obj_mem.bytes[at..at + held.len()].copy_from_slice(&held);
+            self.objects.mem.bytes[at..at + held.len()].copy_from_slice(&held);
             for k in 0..last_size {
                 self.object_word_set_valid(next + k, held_valid[k as usize]);
             }
-            self.obj_offset[last] = next as u32;
+            self.objects.offset[last] = next as u32;
             next += last_size;
         }
         // Growth in place assumes the words past the store's end are zero.
-        let tail = (self.obj_used as u64).saturating_sub(next);
+        let tail = (self.objects.used as u64).saturating_sub(next);
         let at = next as usize * 4;
-        self.obj_mem.bytes[at..at + tail as usize * 4].fill(0);
+        self.objects.mem.bytes[at..at + tail as usize * 4].fill(0);
         self.object_valid_range(next, tail, false);
-        self.obj_used = next as u32;
+        self.objects.used = next as u32;
     }
 
     /// The object at base, created with the given row length in pixels when it
@@ -177,40 +177,40 @@ impl Board {
     /// used object is forgotten, reported once.
     pub fn object_select(&mut self, base: u32, width: u32) -> usize {
         if let Some(i) = self.object_find(base) {
-            if width != 0 && self.obj_width[i] != width {
-                self.obj_width[i] = width;
-                self.obj_rows[i] = 0;
+            if width != 0 && self.objects.width[i] != width {
+                self.objects.width[i] = width;
+                self.objects.rows[i] = 0;
             }
             self.object_touch(i);
             return i;
         }
-        let free = self.obj_base[..self.obj_count as usize].iter().position(|&b| b == 0);
+        let free = self.objects.base[..self.objects.count as usize].iter().position(|&b| b == 0);
         let i = match free {
             Some(j) => j,
-            None if self.obj_count == ODSY_OBJECTS => {
+            None if self.objects.count == ODSY_OBJECTS => {
                 // A full table has no free slot, so every entry is live.
                 let i = self.object_oldest(None).expect("a full table has a live object");
-                if !self.obj_full_reported {
-                    self.obj_full_reported = true;
+                if !self.diag.obj_full_reported {
+                    self.diag.obj_full_reported = true;
                     crate::dlog!(
                         LogModule::Odyssey,
                         "sgi-odyssey: more than {} board-memory objects; the least recently used, {:#x}, is forgotten",
                         ODSY_OBJECTS,
-                        self.obj_base[i]
+                        self.objects.base[i]
                     );
                 }
                 self.object_forget(i);
                 i
             }
             None => {
-                self.obj_count += 1;
-                self.obj_count as usize - 1
+                self.objects.count += 1;
+                self.objects.count as usize - 1
             }
         };
         self.object_set_base(i, base);
-        self.obj_width[i] = width;
-        self.obj_offset[i] = 0;
-        self.obj_rows[i] = 0;
+        self.objects.width[i] = width;
+        self.objects.offset[i] = 0;
+        self.objects.rows[i] = 0;
         self.object_touch(i);
         i
     }
@@ -223,83 +223,83 @@ impl Board {
     pub fn object_rows(&mut self, i: usize, rows: u32) -> bool {
         let iu = i;
         let pool = ODSY_OBJ_POOL_WORDS as u64;
-        let need = self.obj_width[iu] as u64 * rows as u64;
-        let have = self.obj_width[iu] as u64 * self.obj_rows[iu] as u64;
+        let need = self.objects.width[iu] as u64 * rows as u64;
+        let have = self.objects.width[iu] as u64 * self.objects.rows[iu] as u64;
 
-        if rows <= self.obj_rows[iu] {
+        if rows <= self.objects.rows[iu] {
             return true;
         }
         self.raster_wait();
         self.object_touch(i);
         if need <= pool
-            && !(have != 0 && self.obj_offset[iu] as u64 + have == self.obj_used as u64 && self.obj_offset[iu] as u64 + need <= pool)
-            && self.obj_used as u64 + need > pool
+            && !(have != 0 && self.objects.offset[iu] as u64 + have == self.objects.used as u64 && self.objects.offset[iu] as u64 + need <= pool)
+            && self.objects.used as u64 + need > pool
         {
             let mut live: u64 = 0;
 
-            for j in 0..self.obj_count as usize {
-                if j != iu && self.obj_base[j] != 0 {
-                    live += self.obj_width[j] as u64 * self.obj_rows[j] as u64;
+            for j in 0..self.objects.count as usize {
+                if j != iu && self.objects.base[j] != 0 {
+                    live += self.objects.width[j] as u64 * self.objects.rows[j] as u64;
                 }
             }
             while live + need > pool {
                 let Some(v) = self.object_oldest(Some(i)) else {
                     break;
                 };
-                live -= self.obj_width[v] as u64 * self.obj_rows[v] as u64;
-                if !self.obj_forget_reported {
-                    self.obj_forget_reported = true;
+                live -= self.objects.width[v] as u64 * self.objects.rows[v] as u64;
+                if !self.diag.obj_forget_reported {
+                    self.diag.obj_forget_reported = true;
                     crate::dlog!(
                         LogModule::Odyssey,
                         "sgi-odyssey: the model's {} MiB board-memory store is full; the least recently used object, {:#x}, is forgotten",
                         ODSY_OBJ_POOL_BYTES / (1024 * 1024),
-                        self.obj_base[v]
+                        self.objects.base[v]
                     );
                 }
                 self.object_forget(v);
             }
             self.object_compact((have != 0).then_some(i));
         }
-        if have != 0 && self.obj_offset[iu] as u64 + have == self.obj_used as u64 && self.obj_offset[iu] as u64 + need <= pool {
-            self.obj_used = (self.obj_offset[iu] as u64 + need) as u32;
-            self.object_valid_range(self.obj_offset[iu] as u64 + have, need - have, false);
-        } else if self.obj_used as u64 + need <= pool {
-            let new_offset = self.obj_used;
-            let from = self.obj_offset[iu] as usize * 4;
+        if have != 0 && self.objects.offset[iu] as u64 + have == self.objects.used as u64 && self.objects.offset[iu] as u64 + need <= pool {
+            self.objects.used = (self.objects.offset[iu] as u64 + need) as u32;
+            self.object_valid_range(self.objects.offset[iu] as u64 + have, need - have, false);
+        } else if self.objects.used as u64 + need <= pool {
+            let new_offset = self.objects.used;
+            let from = self.objects.offset[iu] as usize * 4;
 
-            self.obj_mem.bytes.copy_within(from..from + have as usize * 4, new_offset as usize * 4);
+            self.objects.mem.bytes.copy_within(from..from + have as usize * 4, new_offset as usize * 4);
             let z = (new_offset as usize + have as usize) * 4;
-            self.obj_mem.bytes[z..z + (need - have) as usize * 4].fill(0);
-            self.object_valid_move(self.obj_offset[iu] as u64, new_offset as u64, have);
+            self.objects.mem.bytes[z..z + (need - have) as usize * 4].fill(0);
+            self.object_valid_move(self.objects.offset[iu] as u64, new_offset as u64, have);
             self.object_valid_range(new_offset as u64 + have, need - have, false);
-            self.obj_offset[iu] = new_offset;
-            self.obj_used += need as u32;
+            self.objects.offset[iu] = new_offset;
+            self.objects.used += need as u32;
         } else {
-            if !self.obj_full_reported {
-                self.obj_full_reported = true;
+            if !self.diag.obj_full_reported {
+                self.diag.obj_full_reported = true;
                 crate::dlog!(
                     LogModule::Odyssey,
                     "sgi-odyssey: board-memory object {:#x} ({} x {}) exceeds the model's {} MiB store",
-                    self.obj_base[iu],
-                    self.obj_width[iu],
+                    self.objects.base[iu],
+                    self.objects.width[iu],
                     rows,
                     ODSY_OBJ_POOL_BYTES / (1024 * 1024)
                 );
             }
             return false;
         }
-        self.obj_rows[iu] = rows;
+        self.objects.rows[iu] = rows;
         true
     }
 
     /// Object i's texel (x, y) as 0xRRGGBBAA; outside its rows or width, dropped.
     pub fn object_store(&mut self, i: usize, x: u32, y: u32, rgba: u32) {
-        if x >= self.obj_width[i] || !self.object_rows(i, y.wrapping_add(1)) {
+        if x >= self.objects.width[i] || !self.object_rows(i, y.wrapping_add(1)) {
             return;
         }
-        let word = self.obj_offset[i] as u64 + y as u64 * self.obj_width[i] as u64 + x as u64;
+        let word = self.objects.offset[i] as u64 + y as u64 * self.objects.width[i] as u64 + x as u64;
         self.raster_wait();
-        self.obj_mem.bytes[(word * 4) as usize..][..4].copy_from_slice(&rgba.to_be_bytes());
+        self.objects.mem.bytes[(word * 4) as usize..][..4].copy_from_slice(&rgba.to_be_bytes());
         self.object_word_set_valid(word, true);
     }
 
@@ -311,10 +311,10 @@ impl Board {
     pub fn object_stage(&mut self, staged: &mut Vec<(u32, u32)>, i: usize, x: u32, y: u32, rgba: u32) {
         let iu = i;
 
-        if x >= self.obj_width[iu] {
+        if x >= self.objects.width[iu] {
             return;
         }
-        if y.wrapping_add(1) > self.obj_rows[iu] {
+        if y.wrapping_add(1) > self.objects.rows[iu] {
             // Growing the object may move it in the store, and the words
             // staged so far name their places as they are now.
             self.object_flush(staged);
@@ -322,7 +322,7 @@ impl Board {
                 return;
             }
         }
-        let word = self.obj_offset[iu] as u64 + y as u64 * self.obj_width[iu] as u64 + x as u64;
+        let word = self.objects.offset[iu] as u64 + y as u64 * self.objects.width[iu] as u64 + x as u64;
         self.object_word_set_valid(word, true);
         staged.push((word as u32, rgba));
     }
@@ -351,12 +351,12 @@ impl Board {
     pub fn object_load(&mut self, i: usize, x: u32, y: u32) -> u32 {
         let iu = i;
 
-        if x >= self.obj_width[iu] || y >= self.obj_rows[iu] {
+        if x >= self.objects.width[iu] || y >= self.objects.rows[iu] {
             return 0;
         }
         // A staged transfer may still be queued for the raster unit.
         self.raster_wait();
-        be32(&self.obj_mem.bytes[((self.obj_offset[iu] as u64 + y as u64 * self.obj_width[iu] as u64 + x as u64) * 4) as usize..][..4])
+        be32(&self.objects.mem.bytes[((self.objects.offset[iu] as u64 + y as u64 * self.objects.width[iu] as u64 + x as u64) * 4) as usize..][..4])
     }
 
     /// A GL pixel copy (block 0x2031), decoded as the datasheet's "Copy
@@ -406,7 +406,7 @@ impl Board {
             return false;
         }
         if let Some(d) = dest {
-            if c.dest.0 as u64 + w as u64 > self.obj_width[d] as u64 || !self.object_rows(d, c.dest.1.wrapping_add(h)) {
+            if c.dest.0 as u64 + w as u64 > self.objects.width[d] as u64 || !self.object_rows(d, c.dest.1.wrapping_add(h)) {
                 return false;
             }
         }
@@ -422,7 +422,7 @@ impl Board {
                 } else {
                     // Into an object the window's rows go bottom first.
                     let row = if dest.is_some() { h - 1 - y } else { y };
-                    let (px, py) = ((c.src.0 + x) as i64 + self.read_origin[0] as i64, (c.src.1 + row) as i64 + self.read_origin[1] as i64);
+                    let (px, py) = ((c.src.0 + x) as i64 + self.win.read_origin[0] as i64, (c.src.1 + row) as i64 + self.win.read_origin[1] as i64);
 
                     if px < 0 || py < 0 || px >= ODSY_WIDTH as i64 || py >= ODSY_HEIGHT as i64 {
                         0
@@ -447,8 +447,8 @@ impl Board {
                     self.object_store(dest, c.dest.0 + x, c.dest.1 + y, word);
                 } else {
                     self.paint_pixel(
-                        (c.dest.0 + x) as i64 + self.win_origin[0] as i64,
-                        (c.dest.1 + y) as i64 + self.win_origin[1] as i64,
+                        (c.dest.0 + x) as i64 + self.win.origin[0] as i64,
+                        (c.dest.1 + y) as i64 + self.win.origin[1] as i64,
                         word,
                     );
                 }
@@ -489,7 +489,7 @@ impl Board {
     /// 1.0, since the object's stored alpha is the model's 255, not source
     /// bits.
     pub fn copy_post_filter(&self, words: &mut [u32], signed: bool) {
-        let sb = &self.tex_scale_bias;
+        let sb = &self.tex.scale_bias;
         let lane = |c: usize| {
             (sextract32(sb[c * 2], 0, tex::SCALE_BIAS_BITS) as f64 / tex::SCALE_BIAS_ONE as f64,
              sextract32(sb[c * 2 + 1], 0, tex::SCALE_BIAS_BITS) as f64 / tex::SCALE_BIAS_ONE as f64)

@@ -214,7 +214,7 @@ pub(super) fn route_to_heart(s: &mut Board) {
 
 /// The pixel at (x, y) of colour buffer `buffer`, as the plane's 0xRRGGBBAA.
 pub(super) fn pixel(s: &Board, buffer: u32, x: i32, y: i32) -> u32 {
-    let (mem, plane) = if buffer == 0 { (&s.mem, s.colour_plane) } else { (&s.buffer1_mem, s.buffer1_plane) };
+    let (mem, plane) = if buffer == 0 { (&s.planes.colour, s.planes.colour_plane) } else { (&s.planes.buffer1, s.planes.buffer1_plane) };
     let p = mem.plane(plane).expect("the colour plane");
     mem.plane_load(&p, x, y)
 }
@@ -222,7 +222,7 @@ pub(super) fn pixel(s: &Board, buffer: u32, x: i32, y: i32) -> u32 {
 /// Store a pixel into colour buffer 0, as a draw would, and mark its
 /// display line for the scanout to resolve again.
 pub(super) fn pixel_write(s: &mut Board, x: i32, y: i32, value: u32) {
-    let p = s.mem.plane(s.colour_plane).expect("the colour plane");
-    s.mem.plane_store(&p, x, y, value);
+    let p = s.planes.colour.plane(s.planes.colour_plane).expect("the colour plane");
+    s.planes.colour.plane_store(&p, x, y, value);
     s.scanout.invalidate(y, 1);
 }

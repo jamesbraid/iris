@@ -227,8 +227,8 @@ impl Board {
 
     /// A GL draw aimed at the id-plane destination that has no modelled home.
     pub fn gl_aux_refused(&mut self, what: &str) {
-        if !self.gl_aux_reported {
-            self.gl_aux_reported = true;
+        if !self.diag.gl_aux_reported {
+            self.diag.gl_aux_reported = true;
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: {} to the id-plane destination is not modeled; dropped", what);
         }
     }
@@ -251,8 +251,8 @@ impl Board {
             }
             return;
         }
-        if index_mask != write::INDEX_MASK && !self.gl_index_mask_logged {
-            self.gl_index_mask_logged = true;
+        if index_mask != write::INDEX_MASK && !self.diag.gl_index_mask_logged {
+            self.diag.gl_index_mask_logged = true;
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: index write mask {:#05x} is decoded but not applied", index_mask);
         }
         if mask != 0 && (buffers & !(1u32 << ODSY_AUX_OVERLAY_BUFFER)) != 0 && self.gl_to_aux() {
@@ -787,10 +787,10 @@ impl TexelTables {
         // Only a volume reads the slice tables (BoardTexels::read_3d()).
         let volume = chain.volume.slices != 0 || chain.volumes.iter().any(|v| v.slices != 0);
         TexelTables {
-            slice_offset: if volume { s.tex_slice_offset.to_vec() } else { Vec::new() },
-            slice_width: if volume { s.tex_slice_width.to_vec() } else { Vec::new() },
-            colour_table: chain.volume.colour_table.then(|| Box::new(s.tex_colour_table)),
-            scale_bias: s.tex_scale_bias,
+            slice_offset: if volume { s.tex.slice_offset.to_vec() } else { Vec::new() },
+            slice_width: if volume { s.tex.slice_width.to_vec() } else { Vec::new() },
+            colour_table: chain.volume.colour_table.then(|| Box::new(s.tex.colour_table)),
+            scale_bias: s.tex.scale_bias,
         }
     }
 
@@ -945,18 +945,18 @@ impl Board {
     pub fn gl_pixel_state(&mut self) -> GlPixelState<'static> {
         GlPixelState {
             did: &[],
-            id_compare: self.id_compare,
-            clip_rect: self.clip_rect,
-            clip_kept: self.clip_kept,
+            id_compare: self.win.id_compare,
+            clip_rect: self.win.clip_rect,
+            clip_kept: self.win.clip_kept,
             write_mask: self.gl_write_mask,
             to_aux: self.gl_to_aux(),
             fog: self.gl_fog,
             colour: [
-                self.mem.plane(self.colour_plane).expect("the colour plane"),
-                self.buffer1_mem.plane(self.buffer1_plane).expect("colour buffer 1's plane"),
+                self.planes.colour.plane(self.planes.colour_plane).expect("the colour plane"),
+                self.planes.buffer1.plane(self.planes.buffer1_plane).expect("colour buffer 1's plane"),
             ],
-            depth: self.depth_mem.plane(self.depth_plane).expect("the depth plane"),
-            stencil: self.stencil_mem.plane(self.stencil_plane).expect("the stencil plane"),
+            depth: self.planes.depth.plane(self.planes.depth_plane).expect("the depth plane"),
+            stencil: self.planes.stencil.plane(self.planes.stencil_plane).expect("the stencil plane"),
         }
     }
 
@@ -968,19 +968,19 @@ impl Board {
         let state = self.gl_pixel_state();
         let texels = chain.map(|chain| BoardTexels {
             chain,
-            obj: &self.obj_mem.bytes,
-            obj_words: self.obj_mem.size / 4,
-            slice_offset: &self.tex_slice_offset,
-            slice_width: &self.tex_slice_width,
-            colour_table: &self.tex_colour_table,
-            scale_bias: &self.tex_scale_bias,
+            obj: &self.objects.mem.bytes,
+            obj_words: self.objects.mem.size / 4,
+            slice_offset: &self.tex.slice_offset,
+            slice_width: &self.tex.slice_width,
+            colour_table: &self.tex.colour_table,
+            scale_bias: &self.tex.scale_bias,
         });
         let pixels = GlPixels {
-            state: GlPixelState { did: &self.did, ..state },
-            colour: [self.mem.rows(&state.colour[0]), self.buffer1_mem.rows(&state.colour[1])],
-            depth: self.depth_mem.rows(&state.depth),
-            stencil: self.stencil_mem.rows(&state.stencil),
-            overlay: RowsMut::new(&mut self.overlay, ODSY_WIDTH as usize),
+            state: GlPixelState { did: &self.planes.did, ..state },
+            colour: [self.planes.colour.rows(&state.colour[0]), self.planes.buffer1.rows(&state.colour[1])],
+            depth: self.planes.depth.rows(&state.depth),
+            stencil: self.planes.stencil.rows(&state.stencil),
+            overlay: RowsMut::new(&mut self.planes.overlay, ODSY_WIDTH as usize),
             touched: Default::default(),
             row_targets: 3,
             lend_rows: true,
@@ -1036,7 +1036,7 @@ impl Board {
     /// reading under which the X server's FillOpaqueStippled sequence draws an
     /// opaque stipple.
     pub fn gl_stipple_background(&mut self, t: &mut RasterTarget) {
-        if (self.pattern_shape & pattern::SHAPE_OPAQUE) == 0 {
+        if (self.stream.pattern_shape & pattern::SHAPE_OPAQUE) == 0 {
             return;
         }
         t.stipple_opaque = true;
@@ -1297,14 +1297,14 @@ impl TextureDetailWeight {
 /// choice.
 impl Board {
     pub fn texture_scale_bias_known(&self) -> bool {
-        self.tex_scale_bias[..tex::SCALE_BIAS_WORDS as usize]
+        self.tex.scale_bias[..tex::SCALE_BIAS_WORDS as usize]
             .iter()
             .all(|&w| (w >> tex::SCALE_BIAS_BITS) == 0)
     }
 
     pub fn texture_scale_bias_identity(&self) -> bool {
         for c in 0..4usize {
-            if self.tex_scale_bias[c * 2] != tex::SCALE_BIAS_ONE || self.tex_scale_bias[c * 2 + 1] != 0 {
+            if self.tex.scale_bias[c * 2] != tex::SCALE_BIAS_ONE || self.tex.scale_bias[c * 2 + 1] != 0 {
                 return false;
             }
         }
@@ -1352,9 +1352,9 @@ pub(super) fn texture_detail_entry_weight(value: u32) -> Option<u16> {
 
 impl Board {
     pub fn texture_detail_function_weight(&self) -> Option<TextureDetailWeight> {
-        let table = &self.tex_detail_function;
+        let table = &self.tex.detail_function;
 
-        if self.tex_detail_function_valid != 0xffff {
+        if self.tex.detail_function_valid != 0xffff {
             return None;
         }
         let mut weight = TextureDetailWeight::default();
@@ -1425,7 +1425,7 @@ impl Board {
     /// model has no decode for refuses the draw.
     pub fn texture_detail_backing_setup(&mut self, chain: &mut TextureChain, descriptor: u32, width: u32, height: u32) -> bool {
         let e = (descriptor * 3) as usize;
-        let entry = [self.tex_levels[e], self.tex_levels[e + 1], self.tex_levels[e + 2]];
+        let entry = [self.tex.levels[e], self.tex.levels[e + 1], self.tex.levels[e + 2]];
         let Some(base_format) = texture_level_format(entry[1]) else {
             return false;
         };
@@ -1436,7 +1436,7 @@ impl Board {
             || (entry[1] & 0xfff) != stride_units
             || (entry[1] & 0x3c0ff000) != 0
             || entry[2] != 0
-            || self.obj_count > ODSY_OBJECTS
+            || self.objects.count > ODSY_OBJECTS
         {
             return false;
         }
@@ -1444,25 +1444,25 @@ impl Board {
             return false;
         };
         let end = (height.wrapping_sub(1) as u64)
-            .wrapping_mul(self.obj_width[o] as u64)
-            .wrapping_add(self.obj_offset[o] as u64)
+            .wrapping_mul(self.objects.width[o] as u64)
+            .wrapping_add(self.objects.offset[o] as u64)
             .wrapping_add(width as u64);
         let region_written = self.object_region_written(o, 0, 0, width, height);
-        if self.obj_width[o] != stride_units * 16
-            || self.obj_rows[o] < height
-            || end > self.obj_used as u64
-            || end > self.obj_mem.size / 4
+        if self.objects.width[o] != stride_units * 16
+            || self.objects.rows[o] < height
+            || end > self.objects.used as u64
+            || end > self.objects.mem.size / 4
             || !region_written
         {
             return false;
         }
         chain.detail_storage = Texture {
-            offset: self.obj_offset[o],
-            stride: self.obj_width[o],
+            offset: self.objects.offset[o],
+            stride: self.objects.width[o],
             width,
             height,
             base_format,
-            words: self.obj_used,
+            words: self.objects.used,
             border_rows: false,
         };
         chain.detail_image = GlTexLevel {
@@ -1505,8 +1505,8 @@ impl Board {
     /// board's LOD arithmetic is not documented. A zero bias leaves the scale
     /// unset, so an unbiased draw keeps the exact unscaled path.
     pub fn texture_lod_bias(&self, image: &mut GlTexImage) {
-        let bias_s = texture_lod_word(self.tex_lod[0]);
-        let bias_t = texture_lod_word(self.tex_lod[1]);
+        let bias_s = texture_lod_word(self.tex.lod[0]);
+        let bias_t = texture_lod_word(self.tex.lod[1]);
 
         image.lod_scale_s = if bias_s != 0 { (bias_s as f64 / tex::LOD_ONE as f64).exp2() } else { 0.0 };
         image.lod_scale_t = if bias_t != 0 { (bias_t as f64 / tex::LOD_ONE as f64).exp2() } else { 0.0 };
@@ -1554,16 +1554,16 @@ impl GlTexImage<'_> {
 
 impl Board {
     pub fn texture_setup(&mut self, image: &mut GlTexImage<'static>, chain: &mut TextureChain) -> bool {
-        let width_word = self.tex_sampler[1];
-        let height_word = self.tex_sampler[2];
+        let width_word = self.tex.sampler[1];
+        let height_word = self.tex.sampler[2];
         let mut width = width_word;
         let mut height = height_word;
-        let depth = self.tex_sampler[3];
-        let phase = (self.tex_sampler[4] & tex::SAMPLER_BIT17) != 0
-            && (self.tex_sampler[4] & tex::MIN_MASK) != tex::MIN_LINEAR_MIPMAP_LINEAR;
-        let word = self.tex_sampler[4] & !tex::SAMPLER_BIT17;
+        let depth = self.tex.sampler[3];
+        let phase = (self.tex.sampler[4] & tex::SAMPLER_BIT17) != 0
+            && (self.tex.sampler[4] & tex::MIN_MASK) != tex::MIN_LINEAR_MIPMAP_LINEAR;
+        let word = self.tex.sampler[4] & !tex::SAMPLER_BIT17;
         let components = word & tex::COMPONENTS_MASK;
-        let mut sampler_size = self.tex_sampler[0];
+        let mut sampler_size = self.tex.sampler[0];
         // The library's texture move (level descriptor 60), which draws a
         // pixel zoom, sends its sampler without the size word's bit 27 and
         // the sampler word's bit 28, and with bits 22, 21 and 18 set; the
@@ -1579,7 +1579,7 @@ impl Board {
         // offset fields are both 2, and 0 otherwise, so bit 27 may be set and
         // bit 26 never is (ESTABLISHED, same section); the move is read as
         // the plain image either way.
-        let texture_move = self.tex_level0 == 60
+        let texture_move = self.tex.level0 == 60
             && (sampler_size & 0x04000000) == 0
             && (word & 0x10000000) == 0
             && (word & !components & !0x3fff) == 0x00640000;
@@ -1602,8 +1602,8 @@ impl Board {
         let detail_filter = if detail_identity { texture_detail_filter(word) } else { 0 };
         let detail_sampler = detail.unwrap_or_default();
         let detail_weight = if detail_identity { self.texture_detail_function_weight() } else { None };
-        let tex_shape = self.tex_mode & (tex::MODE_1D | tex::MODE_2D | tex::MODE_3D);
-        let three_d = (self.tex_mode & tex::MODE_3D) != 0;
+        let tex_shape = self.tex.mode & (tex::MODE_1D | tex::MODE_2D | tex::MODE_3D);
+        let three_d = (self.tex.mode & tex::MODE_3D) != 0;
         let three_d_shape = tex_shape == tex::MODE_3D
             && width >= 2
             && height >= 2
@@ -1611,21 +1611,21 @@ impl Board {
             && (width as u64).is_power_of_two()
             && (height as u64).is_power_of_two()
             && (depth as u64).is_power_of_two()
-            && self.tex_level0 == 0;
+            && self.tex.level0 == 0;
         let ws = (word >> 12) & 3;
         let wt = (word >> 10) & 3;
         let clamp = ws == 2 || wt == 2;
         let border = ws == 3 || wt == 3;
-        let one_d_shape = tex_shape == tex::MODE_1D && height == 1 && depth == 1 && self.tex_level0 == 0;
+        let one_d_shape = tex_shape == tex::MODE_1D && height == 1 && depth == 1 && self.tex.level0 == 0;
         let two_d_shape =
-            tex_shape == tex::MODE_2D && (width == 2 || width == 4) && height == 2 && depth == 1 && self.tex_level0 == 0;
+            tex_shape == tex::MODE_2D && (width == 2 || width == 4) && height == 2 && depth == 1 && self.tex.level0 == 0;
         let stored_border = ((one_d_shape
             && (width == 2 || width == 4 || width == 8 || width == 64)
             && (word == 0x03002000 || word == 0x03002022))
             || (two_d_shape && (word == 0x03002800 || word == 0x03002822))
             || (three_d_shape && (word == 0x03002a00 || word == 0x03002a22)))
-            && (self.tex_sampler[5] & 0xff000000) == 0
-            && (self.tex_sampler[6] & 0xff000000) == 0x01000000;
+            && (self.tex.sampler[5] & 0xff000000) == 0
+            && (self.tex.sampler[6] & 0xff000000) == 0x01000000;
         let three_d_stored = stored_border && three_d_shape;
         let three_d_clamp = three_d_shape && (three_d_stored || word == 0x13002a00 || word == 0x13002a22);
         let one_d_clamp = one_d_shape && (stored_border || word == 0x13002000 || word == 0x13002022);
@@ -1647,8 +1647,8 @@ impl Board {
             && ws != 3
             && wt != 3
             && word == (components | (ws << 12) | (wt << 10) | filter)
-            && (self.tex_sampler[5] & 0xff000000) == 0
-            && (self.tex_sampler[6] & 0xff000000) == 0x01000000;
+            && (self.tex.sampler[5] & 0xff000000) == 0
+            && (self.tex.sampler[6] & 0xff000000) == 0x01000000;
         let bordered = stored_border || general_border;
         // GL_CLAMP (wrap field 2) on both axes outside the captured shapes,
         // under any filter. The board's sampling is assumed to be the OpenGL
@@ -1662,11 +1662,11 @@ impl Board {
         let colour_table_rgba8_rgba = word == 0x13600001;
         let colour_table = colour_table_l8 || colour_table_rgba8_rgb || colour_table_rgba8_rgba;
         let colour_table_disabled = word == 0x11500000;
-        let first = self.tex_level0 & 0x3f;
+        let first = self.tex.level0 & 0x3f;
         let count: u32;
         let terminal: u32;
-        let lo = texture_lod_limit(self.tex_lod[2]);
-        let hi = texture_lod_limit(self.tex_lod[3]);
+        let lo = texture_lod_limit(self.tex.lod[2]);
+        let hi = texture_lod_limit(self.tex.lod[3]);
         const MIN_FILTERS: [u32; 6] = [
             GL_NEAREST,
             GL_LINEAR,
@@ -1678,7 +1678,7 @@ impl Board {
         'unsupported: {
             if detail_identity {
                 if detail_weight.is_none()
-                    || self.tex_level0 != 0
+                    || self.tex.level0 != 0
                     || depth != 1
                     || tex_shape != tex::MODE_2D
                 {
@@ -1729,7 +1729,7 @@ impl Board {
                     && (depth == 0
                         || depth > ODSY_VOLUME_SLICES
                         || !(depth as u64).is_power_of_two()
-                        || (self.tex_mode & (tex::MODE_1D | tex::MODE_2D)) != 0))
+                        || (self.tex.mode & (tex::MODE_1D | tex::MODE_2D)) != 0))
                 || (!three_d && depth != 1)
                 || sampler_size
                     != (0x08000000 | (width.trailing_zeros() << 10) | (height.trailing_zeros() << 5) | (if three_d { depth.trailing_zeros() } else { 0 }))
@@ -1739,15 +1739,15 @@ impl Board {
                     && !captured_clamp
                     && !general_clamp
                     && !general_border
-                    && (self.tex_sampler[5] != 0 || self.tex_sampler[6] != 0))
-                || (general_clamp && !general_border && ((self.tex_sampler[5] | self.tex_sampler[6]) & 0xff000000) != 0)
-                || (captured_clamp && !stored_border && ((self.tex_sampler[5] | self.tex_sampler[6]) & 0xff000000) != 0)
+                    && (self.tex.sampler[5] != 0 || self.tex.sampler[6] != 0))
+                || (general_clamp && !general_border && ((self.tex.sampler[5] | self.tex.sampler[6]) & 0xff000000) != 0)
+                || (captured_clamp && !stored_border && ((self.tex.sampler[5] | self.tex.sampler[6]) & 0xff000000) != 0)
                 || (border
                     && (ws != 3
                         || wt != 3
                         || width_word != (0x00fc0000 | width)
                         || height_word != (0x00fc0000 | height)
-                        || ((self.tex_sampler[5] | self.tex_sampler[6]) & 0xff000000) != 0))
+                        || ((self.tex.sampler[5] | self.tex.sampler[6]) & 0xff000000) != 0))
                 || (general_clamp && three_d)
                 || (clamp && !general_clamp && !captured_clamp)
                 || (border
@@ -1760,27 +1760,27 @@ impl Board {
                     && !three_d_clamp
                     && word != (0x10000000 | components | (ws << 12) | (wt << 10) | filter)
                     && detail_filter == 0)
-                || ((self.tex_lod[0] | self.tex_lod[1] | self.tex_lod[2] | self.tex_lod[3]) & !tex::LOD_MASK) != 0
+                || ((self.tex.lod[0] | self.tex.lod[1] | self.tex.lod[2] | self.tex.lod[3]) & !tex::LOD_MASK) != 0
                 || !self.texture_scale_bias_known()
                 || phase
-                || self.tex_offset[0] != 0
-                || self.tex_offset[1] != 0
-                || self.tex_offset[2] != 0
+                || self.tex.offset[0] != 0
+                || self.tex.offset[1] != 0
+                || self.tex.offset[2] != 0
                 || (min >= 0x40 && lo > hi)
                 || (colour_table
                     && ((colour_table_l8 && bf != GL_LUMINANCE)
                         || ((colour_table_rgba8_rgb || colour_table_rgba8_rgba) && bf != GL_RGBA)
                         || three_d
                         || tex_shape != tex::MODE_2D
-                        || self.tex_colour_table_valid[0] != 0xffff
-                        || self.tex_colour_table_valid[1] != 0xffff))
+                        || self.tex.colour_table_valid[0] != 0xffff
+                        || self.tex.colour_table_valid[1] != 0xffff))
                 || (colour_table_disabled && (bf != GL_LUMINANCE || three_d || tex_shape != tex::MODE_2D))
-                || self.tex_env[0] < 1
-                || self.tex_env[0] > 4
-                || (self.tex_env[0] == 3
+                || self.tex.env[0] < 1
+                || self.tex.env[0] > 4
+                || (self.tex.env[0] == 3
                     && (bf == GL_ALPHA || bf == GL_LUMINANCE || bf == GL_LUMINANCE_ALPHA || bf == GL_INTENSITY))
-                || (self.tex_env[0] == 4
-                    && (((self.tex_env[1] | self.tex_env[2]) & 0xff000000) != 0 || self.tex_env[3] != 0 || self.tex_env[4] != 0))
+                || (self.tex.env[0] == 4
+                    && (((self.tex.env[1] | self.tex.env[2]) & 0xff000000) != 0 || self.tex.env[3] != 0 || self.tex.env[4] != 0))
             {
                 break 'unsupported;
             }
@@ -1809,10 +1809,10 @@ impl Board {
                 GL_REPEAT
             };
             if border || captured_clamp || general_clamp {
-                image.border_color[0] = ((self.tex_sampler[5] >> 12) & 0xfff) as f32 / 4095.0f32;
-                image.border_color[1] = (self.tex_sampler[5] & 0xfff) as f32 / 4095.0f32;
-                image.border_color[2] = ((self.tex_sampler[6] >> 12) & 0xfff) as f32 / 4095.0f32;
-                image.border_color[3] = (self.tex_sampler[6] & 0xfff) as f32 / 4095.0f32;
+                image.border_color[0] = ((self.tex.sampler[5] >> 12) & 0xfff) as f32 / 4095.0f32;
+                image.border_color[1] = (self.tex.sampler[5] & 0xfff) as f32 / 4095.0f32;
+                image.border_color[2] = ((self.tex.sampler[6] >> 12) & 0xfff) as f32 / 4095.0f32;
+                image.border_color[3] = (self.tex.sampler[6] & 0xfff) as f32 / 4095.0f32;
             }
             image.mag_filter = if detail_filter != 0 {
                 detail_filter
@@ -1826,7 +1826,7 @@ impl Board {
 
             if three_d {
                 let e = (first * 3) as usize;
-                let entry = [self.tex_levels[e], self.tex_levels[e + 1], self.tex_levels[e + 2]];
+                let entry = [self.tex.levels[e], self.tex.levels[e + 1], self.tex.levels[e + 2]];
                 let stride_units = entry[1] & 0xfff;
                 let expected_units = if three_d_stored { 4 } else { (width.div_ceil(16) + 1) & !1u32 };
                 let mut base = entry[0] & 0x1fffffff;
@@ -1838,7 +1838,7 @@ impl Board {
                 // this bounded model policy separate from the level-zero address
                 // rule.
                 if first != 0
-                    || self.tex_level0 != 0
+                    || self.tex.level0 != 0
                     || (!mipmap && word != 0x13000000 && word != 0x13000022 && !three_d_clamp)
                     || (mipmap
                         && ((filter != 0x40 && filter != 0xa0)
@@ -1850,7 +1850,7 @@ impl Board {
                             || depth > 16
                             || stride_units != 2
                             || entry[2] != 1))
-                    || self.tex_env[0] > 2
+                    || self.tex.env[0] > 2
                     || entry[1] != (0x41100000 | stride_units)
                     || (three_d_stored && entry[2] != height + 2)
                     || entry[2] == 0
@@ -1858,7 +1858,7 @@ impl Board {
                     || base == 0
                     || (three_d_stored
                         && (bf != GL_RGBA || width > 48 || height > 30 || depth > 30 || (filter != 0 && filter != 0x22)))
-                    || self.obj_count > ODSY_OBJECTS
+                    || self.objects.count > ODSY_OBJECTS
                     || entry[2] > ODSY_VOLUME_SLICE_SHIFT_MAX
                 {
                     break 'unsupported;
@@ -1892,9 +1892,9 @@ impl Board {
                     let level_height = cmax(1, height >> i);
                     let level_depth = cmax(1, depth >> i);
                     if i != 0
-                        && (self.tex_levels[(i * 3) as usize] != 0
-                            || self.tex_levels[(i * 3 + 1) as usize] != 0
-                            || self.tex_levels[(i * 3 + 2) as usize] != 0)
+                        && (self.tex.levels[(i * 3) as usize] != 0
+                            || self.tex.levels[(i * 3 + 1) as usize] != 0
+                            || self.tex.levels[(i * 3 + 2) as usize] != 0)
                     {
                         break 'unsupported;
                     }
@@ -1915,25 +1915,25 @@ impl Board {
                         let sb: u32 = if three_d_stored { 15 } else { 0 };
                         let sb2: u32 = if three_d_stored { 2 } else { 0 };
                         let storage_end = (sb as u64 + level_height as u64 - 1 + sb2 as u64)
-                            .checked_mul(self.obj_width[o] as u64)
-                            .and_then(|e| e.checked_add(self.obj_offset[o] as u64))
+                            .checked_mul(self.objects.width[o] as u64)
+                            .and_then(|e| e.checked_add(self.objects.offset[o] as u64))
                             .and_then(|e| {
                                 e.checked_add(if three_d_stored { level_width as u64 + 18 } else { level_width as u64 })
                             });
-                        if self.obj_width[o] != stride_units * 16
-                            || self.obj_rows[o] < sb + level_height + sb2
-                            || !storage_end.is_some_and(|e| e <= self.obj_used as u64 && e <= self.obj_mem.size / 4)
+                        if self.objects.width[o] != stride_units * 16
+                            || self.objects.rows[o] < sb + level_height + sb2
+                            || !storage_end.is_some_and(|e| e <= self.objects.used as u64 && e <= self.objects.mem.size / 4)
                         {
                             break 'unsupported;
                         }
                         if three_d_stored && !self.object_region_written(o, 15, 15, level_width + 2, level_height + 2) {
                             break 'unsupported;
                         }
-                        if slice_next as usize >= self.tex_slice_offset.len() {
+                        if slice_next as usize >= self.tex.slice_offset.len() {
                             break 'unsupported;
                         }
-                        self.tex_slice_offset[slice_next as usize] = self.obj_offset[o];
-                        self.tex_slice_width[slice_next as usize] = self.obj_width[o];
+                        self.tex.slice_offset[slice_next as usize] = self.objects.offset[o];
+                        self.tex.slice_width[slice_next as usize] = self.objects.width[o];
                         slice_next += 1;
                         z += 1;
                     }
@@ -1946,7 +1946,7 @@ impl Board {
                         height: level_height,
                         depth: level_depth,
                         base_format: image.base_format,
-                        words: self.obj_used,
+                        words: self.objects.used,
                         border: three_d_stored,
                         first_slice: level_slice,
                         slices: slice_next - level_slice,
@@ -2029,16 +2029,16 @@ impl Board {
             if tex_shape == tex::MODE_2D && !bordered && !texture_move {
                 for i in 0..count {
                     let e = ((first + i) * 3) as usize;
-                    let object = self.object_find(self.tex_levels[e] & 0x1fffffff);
-                    let stride_units = self.tex_levels[e + 1] & 0xfff;
+                    let object = self.object_find(self.tex.levels[e] & 0x1fffffff);
+                    let stride_units = self.tex.levels[e + 1] & 0xfff;
                     let (level_width, level_height) = (cmax(1, width >> i), cmax(1, height >> i));
 
                     if let Some(o) = object {
-                        if self.obj_width[o] >= level_width
-                            && (stride_units == 0 || self.obj_width[o] == stride_units * 16)
-                            && self.obj_rows[o] != 0
-                            && self.obj_rows[o] < level_height
-                            && self.obj_width[o] as u64 * level_height as u64 <= ODSY_OBJ_POOL_WORDS as u64
+                        if self.objects.width[o] >= level_width
+                            && (stride_units == 0 || self.objects.width[o] == stride_units * 16)
+                            && self.objects.rows[o] != 0
+                            && self.objects.rows[o] < level_height
+                            && self.objects.width[o] as u64 * level_height as u64 <= ODSY_OBJ_POOL_WORDS as u64
                         {
                             self.object_rows(o, level_height);
                         }
@@ -2054,7 +2054,7 @@ impl Board {
             }
             for i in 0..count {
                 let e = ((first + i) * 3) as usize;
-                let entry = [self.tex_levels[e], self.tex_levels[e + 1], self.tex_levels[e + 2]];
+                let entry = [self.tex.levels[e], self.tex.levels[e + 1], self.tex.levels[e + 2]];
                 let level_width = cmax(1, width >> i);
                 let level_height = cmax(1, height >> i);
                 let stride_units = entry[1] & 0xfff;
@@ -2076,11 +2076,11 @@ impl Board {
                 if (stored_border && (entry[1] != (if expected_units == 6 { 0x41100006 } else { 0x41100004 }) || base == 0))
                     || (two_d_clamp
                         && !stored_border
-                        && (filter != 0 || self.tex_sampler[5] != 0 || self.tex_sampler[6] != 0)
+                        && (filter != 0 || self.tex.sampler[5] != 0 || self.tex.sampler[6] != 0)
                         && entry[1] != 0x41100002)
                     || (entry[1] & 0x3c0ff000) != 0
                     || entry[2] != 0
-                    || (i != 0 && (entry[1] & 0xc3f00000) != (self.tex_levels[(first * 3 + 1) as usize] & 0xc3f00000))
+                    || (i != 0 && (entry[1] & 0xc3f00000) != (self.tex.levels[(first * 3 + 1) as usize] & 0xc3f00000))
                     || (base != 0 && stride_units != expected_units && !(count == 1 && stride_units == 0))
                 {
                     break 'unsupported;
@@ -2094,7 +2094,7 @@ impl Board {
                     internal_format: image.base_format,
                     ..Default::default()
                 };
-                if base == 0 || self.obj_count > ODSY_OBJECTS {
+                if base == 0 || self.objects.count > ODSY_OBJECTS {
                     if require_backing {
                         break 'unsupported;
                     }
@@ -2105,16 +2105,16 @@ impl Board {
                     // The texture move rounds the image up to a power of two
                     // and the object holds only the rows written, which is
                     // all the rectangle's coordinates reach.
-                    let rows = if texture_move { rows.min(self.obj_rows[o]).max(1) } else { rows };
+                    let rows = if texture_move { rows.min(self.objects.rows[o]).max(1) } else { rows };
                     let end = ((rows - 1) as u64)
-                        .checked_mul(self.obj_width[o] as u64)
-                        .and_then(|e| e.checked_add(self.obj_offset[o] as u64))
+                        .checked_mul(self.objects.width[o] as u64)
+                        .and_then(|e| e.checked_add(self.objects.offset[o] as u64))
                         .and_then(|e| e.checked_add(interior_x as u64))
                         .and_then(|e| e.checked_add(level_width as u64 + bordered as u64));
-                    !(self.obj_width[o] < level_width
-                        || (stride_units != 0 && self.obj_width[o] != stride_units * 16)
-                        || self.obj_rows[o] < rows
-                        || !end.is_some_and(|e| e <= self.obj_used as u64 && e <= self.obj_mem.size / 4))
+                    !(self.objects.width[o] < level_width
+                        || (stride_units != 0 && self.objects.width[o] != stride_units * 16)
+                        || self.objects.rows[o] < rows
+                        || !end.is_some_and(|e| e <= self.objects.used as u64 && e <= self.objects.mem.size / 4))
                 });
                 let Some(o) = backed else {
                     if require_backing {
@@ -2138,12 +2138,12 @@ impl Board {
                 chain.touch(i);
                 chain.storage[i as usize] = Texture {
                     // Captured stored-border policy uses interior coordinate 16.
-                    offset: self.obj_offset[o].wrapping_add(interior_y.wrapping_mul(self.obj_width[o])).wrapping_add(interior_x),
-                    stride: self.obj_width[o],
+                    offset: self.objects.offset[o].wrapping_add(interior_y.wrapping_mul(self.objects.width[o])).wrapping_add(interior_x),
+                    stride: self.objects.width[o],
                     width: level_width,
                     height: level_height,
                     base_format: image.base_format,
-                    words: self.obj_used,
+                    words: self.objects.used,
                     border_rows: two_d_stored || general_border,
                 };
                 chain.levels[i as usize].read_texel = true;
@@ -2182,8 +2182,8 @@ impl Board {
         crate::dlog!(
             LogModule::Odyssey,
             "sgi-odyssey: unsupported texture state sampler {:#x} environment {}{}, draw dropped",
-            self.tex_sampler[4],
-            self.tex_env[0],
+            self.tex.sampler[4],
+            self.tex.env[0],
             if index_mode { " colour-index" } else { "" }
         );
         false
@@ -2192,48 +2192,48 @@ impl Board {
     /// Rebuild shared state from board words; no borrowed image survives a draw.
     pub fn texture_vertex(&mut self) {
         const ENVIRONMENTS: [u32; 5] = [GL_REPLACE, GL_REPLACE, GL_MODULATE, GL_DECAL, GL_BLEND];
-        let mut strq: [u32; 4] = [self.tex_coord[0], self.tex_coord[1], self.tex_coord_r, self.tex_coord_q];
-        let one_d = (self.tex_mode & (tex::MODE_1D | tex::MODE_2D)) == tex::MODE_1D;
-        self.gl().cur.texture_2d = (self.tex_mode & (tex::MODE_1D | tex::MODE_2D)) != 0;
-        self.gl().cur.texture_3d = (self.tex_mode & tex::MODE_3D) != 0;
+        let mut strq: [u32; 4] = [self.tex.coord[0], self.tex.coord[1], self.tex.coord_r, self.tex.coord_q];
+        let one_d = (self.tex.mode & (tex::MODE_1D | tex::MODE_2D)) == tex::MODE_1D;
+        self.gl().cur.texture_2d = (self.tex.mode & (tex::MODE_1D | tex::MODE_2D)) != 0;
+        self.gl().cur.texture_3d = (self.tex.mode & tex::MODE_3D) != 0;
         // Excluded environments are rejected by the board before rasterization.
         self.gl().cur.texture_env_mode = GL_REPLACE;
-        if (self.tex_env[0] as usize) < ENVIRONMENTS.len() {
-            self.gl().cur.texture_env_mode = ENVIRONMENTS[self.tex_env[0] as usize];
+        if (self.tex.env[0] as usize) < ENVIRONMENTS.len() {
+            self.gl().cur.texture_env_mode = ENVIRONMENTS[self.tex.env[0] as usize];
         }
         // Captured linear planes already include the eye-space transform.
-        if (self.cmd_tag == gl_cmd::VERTEX_2I
-            || self.cmd_tag == gl_cmd::VERTEX_2F
-            || self.cmd_tag == gl_cmd::VERTEX_3F
-            || self.cmd_tag == gl_cmd::VERTEX_3I
-            || self.cmd_tag == gl_cmd::VERTEX_4F)
-            && self.gl_linear_texgen != 0
+        if (self.cmd.tag == gl_cmd::VERTEX_2I
+            || self.cmd.tag == gl_cmd::VERTEX_2F
+            || self.cmd.tag == gl_cmd::VERTEX_3F
+            || self.cmd.tag == gl_cmd::VERTEX_3I
+            || self.cmd.tag == gl_cmd::VERTEX_4F)
+            && self.geom.linear_texgen != 0
         {
             let mut vertex = [
-                odyssey_f32(self.cmd_operand[0]),
-                odyssey_f32(self.cmd_operand[1]),
-                if self.cmd_tag != gl_cmd::VERTEX_2I && self.cmd_tag != gl_cmd::VERTEX_2F { odyssey_f32(self.cmd_operand[2]) } else { 0.0 },
-                if self.cmd_tag == gl_cmd::VERTEX_4F { odyssey_f32(self.cmd_operand[3]) } else { 1.0 },
+                odyssey_f32(self.cmd.operand[0]),
+                odyssey_f32(self.cmd.operand[1]),
+                if self.cmd.tag != gl_cmd::VERTEX_2I && self.cmd.tag != gl_cmd::VERTEX_2F { odyssey_f32(self.cmd.operand[2]) } else { 0.0 },
+                if self.cmd.tag == gl_cmd::VERTEX_4F { odyssey_f32(self.cmd.operand[3]) } else { 1.0 },
             ];
 
-            if self.cmd_tag == gl_cmd::VERTEX_2I || self.cmd_tag == gl_cmd::VERTEX_3I {
-                vertex[0] = (self.cmd_operand[0] as i32) as f64;
-                vertex[1] = (self.cmd_operand[1] as i32) as f64;
+            if self.cmd.tag == gl_cmd::VERTEX_2I || self.cmd.tag == gl_cmd::VERTEX_3I {
+                vertex[0] = (self.cmd.operand[0] as i32) as f64;
+                vertex[1] = (self.cmd.operand[1] as i32) as f64;
             }
-            if self.cmd_tag == gl_cmd::VERTEX_3I {
-                vertex[2] = (self.cmd_operand[2] as i32) as f64;
+            if self.cmd.tag == gl_cmd::VERTEX_3I {
+                vertex[2] = (self.cmd.operand[2] as i32) as f64;
             }
             for axis in 0..4usize {
                 let plane = if axis == 3 {
-                    self.tex_linear_plane_q
+                    self.tex.linear_plane_q
                 } else if axis == 2 {
-                    self.tex_linear_plane_r
+                    self.tex.linear_plane_r
                 } else {
-                    self.tex_linear_plane[axis]
+                    self.tex.linear_plane[axis]
                 };
                 let mut value = 0.0f32;
 
-                if (self.gl_linear_texgen & self.tex_linear_valid & (1u32 << axis)) == 0 {
+                if (self.geom.linear_texgen & self.tex.linear_valid & (1u32 << axis)) == 0 {
                     continue;
                 }
                 for k in 0..4usize {
@@ -2302,12 +2302,12 @@ impl Board {
                 return GL_DRAW_OK;
             }
         }
-        if (state.texture_2d || state.texture_3d) && self.tex_env[0] == 4 {
+        if (state.texture_2d || state.texture_3d) && self.tex.env[0] == 4 {
             // The board words pack two normalized 12-bit components each.
-            state.texture_env_color[0] = ((self.tex_env[1] >> 12) & 0xfff) as f32 / 4095.0f32;
-            state.texture_env_color[1] = (self.tex_env[1] & 0xfff) as f32 / 4095.0f32;
-            state.texture_env_color[2] = ((self.tex_env[2] >> 12) & 0xfff) as f32 / 4095.0f32;
-            state.texture_env_color[3] = (self.tex_env[2] & 0xfff) as f32 / 4095.0f32;
+            state.texture_env_color[0] = ((self.tex.env[1] >> 12) & 0xfff) as f32 / 4095.0f32;
+            state.texture_env_color[1] = (self.tex.env[1] & 0xfff) as f32 / 4095.0f32;
+            state.texture_env_color[2] = ((self.tex.env[2] >> 12) & 0xfff) as f32 / 4095.0f32;
+            state.texture_env_color[3] = (self.tex.env[2] & 0xfff) as f32 / 4095.0f32;
         }
         if !self.gl_index_mode() {
             state.colour_mask = (self.gl_write_mask >> write::COLOUR_SHIFT) & write::COLOUR_MASK;
@@ -2477,10 +2477,10 @@ impl Board {
         let buffers = self.draw_buffers();
         let draw: u32 = (if buffers & 1 != 0 { GL_DRAW_FRONT } else { 0 })
             | (if buffers & 2 != 0 { GL_DRAW_BACK } else { 0 });
-        let n = cmax(self.clip_kept, 1);
-        let origin = self.win_origin;
-        let clip_kept = self.clip_kept;
-        let clip_rect = self.clip_rect;
+        let n = cmax(self.win.clip_kept, 1);
+        let origin = self.win.origin;
+        let clip_kept = self.win.clip_kept;
+        let clip_rect = self.win.clip_rect;
 
         // This runs before every command, but the drawable changes only with
         // the window registers, so it is built in place and handed over only
@@ -2563,7 +2563,7 @@ impl Board {
     /// holding at the same time, or the polygon draws twice.
     pub fn gl_feed_raster_state(&mut self, op: u16, args: &[u32]) {
         let in_begin = self.gl_ref().in_begin;
-        let held_polygon = self.gl_begin_open && self.gl_primitive == 9;
+        let held_polygon = self.prim.begin_open && self.stream.primitive == 9;
 
         if held_polygon {
             self.gl().in_begin = false;
@@ -2589,16 +2589,16 @@ impl Board {
     /// plane (mode::STENCIL_TEST).
     pub fn gl_apply_polygon_stipple(&mut self) {
         let cap = GL_POLYGON_STIPPLE;
-        let enable = (self.pattern_mode & gl_cmd::RECT_PATTERN_ENABLE) != 0 && (self.pattern_shape & !pattern::SHAPE_OPAQUE) == 0;
+        let enable = (self.stream.pattern_mode & gl_cmd::RECT_PATTERN_ENABLE) != 0 && (self.stream.pattern_shape & !pattern::SHAPE_OPAQUE) == 0;
 
-        if self.gl_in_prim {
+        if self.prim.in_prim {
             return;
         }
         if enable {
             let mut rows = [0u32; 32];
 
             for i in 0..rows.len() {
-                rows[i] = self.pattern_buffer[31 - i];
+                rows[i] = self.stream.pattern_buffer[31 - i];
             }
             if !self.gl().polygon_stipple(&rows) {
                 return;
@@ -2614,16 +2614,16 @@ impl Board {
     /// (pattern::SHAPE_OPAQUE). Fed again when the colour mode changes.
     pub fn gl_apply_blend(&mut self) {
         let blend = GL_BLEND;
-        let on = (self.pattern_mode & mode::BLEND) != 0 && !self.gl_index_mode();
+        let on = (self.stream.pattern_mode & mode::BLEND) != 0 && !self.gl_index_mode();
 
         self.gl_feed32(if on { op::ENABLE } else { op::DISABLE }, &[blend]);
     }
 
     pub fn gl_apply_mode(&mut self) {
-        let shade = if (self.pattern_mode & mode::FLAT_SHADE) != 0 { GL_FLAT } else { GL_SMOOTH };
-        let cull_mode = cull_face_mode((self.pattern_mode >> mode::CULL_MODE_SHIFT) & mode::CULL_MODE_MASK);
-        let front_face = front_face(self.pattern_mode);
-        let pm = self.pattern_mode;
+        let shade = if (self.stream.pattern_mode & mode::FLAT_SHADE) != 0 { GL_FLAT } else { GL_SMOOTH };
+        let cull_mode = cull_face_mode((self.stream.pattern_mode >> mode::CULL_MODE_SHIFT) & mode::CULL_MODE_MASK);
+        let front_face = front_face(self.stream.pattern_mode);
+        let pm = self.stream.pattern_mode;
         let en = |bit: u32| if (pm & bit) != 0 { op::ENABLE } else { op::DISABLE };
 
         self.gl_feed32(op::SHADE_MODEL, &[shade]);
@@ -2633,8 +2633,8 @@ impl Board {
         // The shared layer has no dither rule yet, so the first mode word that
         // enables it is reported and the board draws undithered. Once the
         // shared rule lands this feeds op::ENABLE/DISABLE of GL_DITHER.
-        if (pm & mode::DITHER) != 0 && !self.gl_dither_reported {
-            self.gl_dither_reported = true;
+        if (pm & mode::DITHER) != 0 && !self.diag.gl_dither_reported {
+            self.diag.gl_dither_reported = true;
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: dither not modelled; drawing undithered");
         }
         self.gl_feed32(en(mode::DEPTH_TEST), &[GL_DEPTH_TEST]);
@@ -2656,7 +2656,7 @@ impl Board {
 
     pub fn gl_apply_line_stipple(&mut self) {
         // Word 1 remains the integer 2D path's 32-bit rotated pattern.
-        let args = [(self.line_stipple[2] & 0xff) + 1, self.line_stipple[0] & 0xffff];
+        let args = [(self.stream.line_stipple[2] & 0xff) + 1, self.stream.line_stipple[0] & 0xffff];
 
         self.gl_feed_raster_state(op::LINE_STIPPLE as u16, &args);
     }
@@ -2691,11 +2691,11 @@ impl Board {
 
         args[0] = i;
         for r in 0..4usize {
-            eye[r] = odyssey_f32(self.gl_clip_eye[i as usize * 4 + r]);
+            eye[r] = odyssey_f32(self.geom.clip_eye[i as usize * 4 + r]);
         }
         for r in 0..4usize {
             for k in 0..4usize {
-                obj[k] += eye[r] * odyssey_f32(self.gl_modelview[r * 4 + k]);
+                obj[k] += eye[r] * odyssey_f32(self.geom.modelview[r * 4 + k]);
             }
         }
         for k in 0..4usize {
@@ -2711,7 +2711,7 @@ impl Board {
     /// touch the loaded coefficients themselves, which a separate load
     /// (gl_cmd::CLIP_PLANE_LOAD) feeds.
     pub fn gl_apply_clip_planes(&mut self) {
-        let bits = self.tex_mode & tex::MODE_CLIP_COUNT_MASK;
+        let bits = self.tex.mode & tex::MODE_CLIP_COUNT_MASK;
         let n = bits.count_ones();
 
         for i in 0..GL_CLIP_PLANES {

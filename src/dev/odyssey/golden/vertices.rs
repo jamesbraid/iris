@@ -90,13 +90,13 @@ fn rows() -> Vec<Row> {
     let mut board = Bench::empty().board;
     for (name, lights, ambient, local, shininess, cm) in setups {
         load_lights(&mut board, &lights, ambient, local, shininess, MATERIAL, cm);
-        board.gl_colour = [0.9f32, 0.7, 0.3, 0.75].map(f32::to_bits);
+        board.geom.colour = [0.9f32, 0.7, 0.3, 0.75].map(f32::to_bits);
         let mut rng = Lcg(99);
         for i in 0..24 {
             let mut nrm = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
             let len = (nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2]).sqrt().max(1e-3);
             nrm = nrm.map(|x| x / len);
-            board.gl_normal = nrm.map(f32::to_bits);
+            board.geom.normal = nrm.map(f32::to_bits);
             let obj = [rng.range(-1.0, 1.0) as f64, rng.range(-1.0, 1.0) as f64, rng.range(-1.0, 1.0) as f64, 1.0];
             let rgba = board.gl_light(&obj);
             out.push(Row { name: format!("light_{name}/{i}"), kind: "rgba", vals: rgba.iter().map(|&c| c as f64).collect() });

@@ -20,8 +20,8 @@ use super::dma::{PAGE_A, TABLE, colour_destination, descriptor, pte, put_table};
 /// every in-plane pixel is the window's.
 fn window() -> (Box<Board>, Arc<Ram>) {
     let (mut s, _, ram) = board_with_ram();
-    s.clip_kept = 1;
-    s.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: ODSY_WIDTH as i32 - 1, y1: ODSY_HEIGHT as i32 - 1 };
+    s.win.clip_kept = 1;
+    s.win.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: ODSY_WIDTH as i32 - 1, y1: ODSY_HEIGHT as i32 - 1 };
     (s, ram)
 }
 
@@ -293,8 +293,8 @@ fn dma_write_sized(s: &mut Board, ram: &Ram, (x, y, w): (u32, u32, u32), word4: 
 }
 
 fn stencil_at(s: &Board, x: i32, y: i32) -> u32 {
-    let p = s.stencil_mem.plane(s.stencil_plane).expect("the stencil plane");
-    s.stencil_mem.plane_load(&p, x, y)
+    let p = s.planes.stencil.plane(s.planes.stencil_plane).expect("the stencil plane");
+    s.planes.stencil.plane_load(&p, x, y)
 }
 
 /// A depth read from a 12/12/12/12 window is class 1 code 0, two bytes a
@@ -568,7 +568,7 @@ fn overlay_copy(s: &mut Board, (sx, sy): (u32, u32), (w, h): (u32, u32), (dx, dy
 }
 
 fn overlay_at(s: &Board, x: u32, y: u32) -> u8 {
-    s.overlay[(y * ODSY_WIDTH + x) as usize]
+    s.planes.overlay[(y * ODSY_WIDTH + x) as usize]
 }
 
 /// A menu's pattern fill replicates a seed by copying the id-plane base onto
@@ -583,7 +583,7 @@ fn a_copy_at_the_id_plane_base_moves_overlay_bytes_not_colour() {
     let (mut s, _) = window();
     select_overlay_destination(&mut s);
     for x in 0..4u32 {
-        s.overlay[(40 * ODSY_WIDTH + 30 + x) as usize] = 0x11 * (x as u8 + 1);
+        s.planes.overlay[(40 * ODSY_WIDTH + 30 + x) as usize] = 0x11 * (x as u8 + 1);
         pixel_write(&mut s, 30 + x as i32, 40, 0xaa00_00ff | x << 8);
     }
     let colour: Vec<u32> = (30..70).map(|x| pixel(&s, 0, x, 40)).collect();
@@ -607,7 +607,7 @@ fn an_overlay_copy_onto_itself_reads_the_source_as_it_was() {
     let (mut s, _) = window();
     select_overlay_destination(&mut s);
     for x in 0..4u32 {
-        s.overlay[(40 * ODSY_WIDTH + 30 + x) as usize] = x as u8 + 1;
+        s.planes.overlay[(40 * ODSY_WIDTH + 30 + x) as usize] = x as u8 + 1;
     }
     overlay_copy(&mut s, (30, 40), (4, 1), (32, 40));
     let row: Vec<u8> = (30..36).map(|x| overlay_at(&s, x, 40)).collect();
@@ -618,7 +618,7 @@ fn an_overlay_copy_onto_itself_reads_the_source_as_it_was() {
     assert_eq!(row, [1, 2, 3, 4, 3, 4], "a copy to the left");
 
     for y in 0..4u32 {
-        s.overlay[((50 + y) * ODSY_WIDTH + 70) as usize] = y as u8 + 1;
+        s.planes.overlay[((50 + y) * ODSY_WIDTH + 70) as usize] = y as u8 + 1;
     }
     overlay_copy(&mut s, (70, 50), (1, 4), (70, 52));
     let column: Vec<u8> = (50..56).map(|y| overlay_at(&s, 70, y)).collect();
@@ -632,8 +632,8 @@ fn an_overlay_copy_changes_only_the_bits_of_the_plane_mask() {
     let (mut s, _) = window();
     select_overlay_destination(&mut s);
     s.plane_write_mask = 0x0f << ODSY_PLANE_MASK_SHIFT;
-    s.overlay[(40 * ODSY_WIDTH + 30) as usize] = 0xa5;
-    s.overlay[(40 * ODSY_WIDTH + 60) as usize] = 0xf0;
+    s.planes.overlay[(40 * ODSY_WIDTH + 30) as usize] = 0xa5;
+    s.planes.overlay[(40 * ODSY_WIDTH + 60) as usize] = 0xf0;
     overlay_copy(&mut s, (30, 40), (1, 1), (60, 40));
     assert_eq!(overlay_at(&s, 60, 40), 0xf5);
 }
@@ -646,13 +646,13 @@ fn copy_bases(s: &mut Board, (src_base, dest_base): (u32, u32), (sx, sy): (u32, 
 /// Seed the overlay, the id byte and colour buffer 0 at (30, 40) with three
 /// distinct values, so a copy to (60, 41) shows which plane it moved.
 fn seed_three_planes(s: &mut Board) {
-    s.overlay[(40 * ODSY_WIDTH + 30) as usize] = 0x77;
-    s.did[(40 * ODSY_WIDTH + 30) as usize] = 0x55;
+    s.planes.overlay[(40 * ODSY_WIDTH + 30) as usize] = 0x77;
+    s.planes.did[(40 * ODSY_WIDTH + 30) as usize] = 0x55;
     pixel_write(s, 30, 40, 0xaa00_00ff);
 }
 
 fn planes_at(s: &Board, x: u32, y: u32) -> (u8, u8, u32) {
-    (overlay_at(s, x, y), s.did[(y * ODSY_WIDTH + x) as usize], pixel(s, 0, x as i32, y as i32))
+    (overlay_at(s, x, y), s.planes.did[(y * ODSY_WIDTH + x) as usize], pixel(s, 0, x as i32, y as i32))
 }
 
 /// What sends a copy to the overlay: both base words at the id-plane base
@@ -675,7 +675,7 @@ fn a_copy_goes_to_the_overlay_only_when_both_bases_and_the_select_say_so() {
         select_overlay_destination(&mut s);
         copy_bases(&mut s, bases, (30, 40), (1, 1), (60, 41));
         assert_eq!(planes_at(&s, 60, 41), (0, 0, 0), "bases {bases:x?}");
-        assert!(s.copy_mixed_base_reported, "bases {bases:x?} are noted");
+        assert!(s.diag.copy_mixed_base_reported, "bases {bases:x?} are noted");
     }
 
     // The id-plane select with no base named (0) and zero base words is not
@@ -706,7 +706,7 @@ fn an_id_plane_copy_moves_the_byte_the_drawing_mask_names() {
         overlay_copy(&mut s, (30, 40), (1, 1), (60, 41));
         let (o, d, c) = planes_at(&s, 60, 41);
         assert_eq!((o, d, c), want, "drawing mask {mask:#x}");
-        assert_eq!(s.aux_mask_reported, mask == 0, "a mask naming neither byte is noted once");
+        assert_eq!(s.diag.aux_mask_reported, mask == 0, "a mask naming neither byte is noted once");
     }
 }
 
@@ -716,7 +716,7 @@ fn an_overlay_copy_up_onto_itself_reads_the_source_as_it_was() {
     let (mut s, _) = window();
     select_overlay_destination(&mut s);
     for y in 0..4u32 {
-        s.overlay[((50 + y) * ODSY_WIDTH + 70) as usize] = y as u8 + 1;
+        s.planes.overlay[((50 + y) * ODSY_WIDTH + 70) as usize] = y as u8 + 1;
     }
     overlay_copy(&mut s, (70, 52), (1, 4), (70, 50));
     let column: Vec<u8> = (50..56).map(|y| overlay_at(&s, 70, y)).collect();
@@ -733,15 +733,15 @@ fn an_overlay_copy_is_clipped_to_the_plane_at_both_ends() {
     let (mut s, _) = window();
     select_overlay_destination(&mut s);
     for x in 0..8u32 {
-        s.overlay[(40 * w + w - 2 + x.min(1)) as usize] = 9;
-        s.overlay[(60 * w + 10 + x) as usize] = x as u8 + 1;
+        s.planes.overlay[(40 * w + w - 2 + x.min(1)) as usize] = 9;
+        s.planes.overlay[(60 * w + 10 + x) as usize] = x as u8 + 1;
     }
     // Source past the right edge: only its last two pixels exist, the rest
     // read as zero and overwrite what was there (made non-zero), and the next
     // row's first bytes (made distinct) are not read as if they followed.
     for x in 0..6u32 {
-        s.overlay[(41 * w + x) as usize] = 5;
-        s.overlay[(41 * w + 12 + x) as usize] = 6;
+        s.planes.overlay[(41 * w + x) as usize] = 5;
+        s.planes.overlay[(41 * w + 12 + x) as usize] = 6;
     }
     overlay_copy(&mut s, (w - 2, 40), (8, 1), (10, 41));
     let row: Vec<u8> = (8..18).map(|x| overlay_at(&s, x, 41)).collect();
@@ -752,9 +752,9 @@ fn an_overlay_copy_is_clipped_to_the_plane_at_both_ends() {
     assert_eq!((overlay_at(&s, w - 2, 62), overlay_at(&s, w - 1, 62), overlay_at(&s, 0, 63)), (1, 2, 0));
     // Rows past the bottom, source or destination: source rows off the plane
     // read as zero.
-    s.overlay[(102 * w + 20) as usize] = 3;
-    s.overlay[((h - 2) * w + 5) as usize] = 7;
-    s.overlay[((h - 1) * w + 5) as usize] = 8;
+    s.planes.overlay[(102 * w + 20) as usize] = 3;
+    s.planes.overlay[((h - 2) * w + 5) as usize] = 7;
+    s.planes.overlay[((h - 1) * w + 5) as usize] = 8;
     overlay_copy(&mut s, (5, h - 2), (1, 6), (20, 100));
     assert_eq!((overlay_at(&s, 20, 100), overlay_at(&s, 20, 101), overlay_at(&s, 20, 102)), (7, 8, 0));
     overlay_copy(&mut s, (5, h - 2), (1, 6), (30, h - 1));
@@ -839,14 +839,14 @@ fn a_signed_type_copy_lists_rows_bottom_first_and_applies_the_signed_pass() {
     assert_eq!(pixel(&s, 0, 50, 21), 0x91ec_47a2);
 
     for c in 0..4 {
-        s.tex_scale_bias[c * 2] = 0x2000;
-        s.tex_scale_bias[c * 2 + 1] = 0x0001;
+        s.tex.scale_bias[c * 2] = 0x2000;
+        s.tex.scale_bias[c * 2 + 1] = 0x0001;
     }
     // A source without alpha programs the alpha bias 0x1000: alpha reads 1.0.
-    s.tex_scale_bias[7] = 0x1000;
+    s.tex.scale_bias[7] = 0x1000;
     copy_block(&mut s, [base, 0, 0x0050_2020, 2 << 16 | 1, 0x8002_500b, 0x3000_0010, 20 << 16 | 50, 0x3863_204b]);
     assert_eq!(pixel(&s, 0, 50, 21) & 0xff, 0xff, "alpha lane");
-    s.tex_scale_bias[7] = 1;
+    s.tex.scale_bias[7] = 1;
     copy_block(&mut s, [base, 0, 0x0050_2020, 2 << 16 | 1, 0x8002_500b, 0x3000_0010, 20 << 16 | 50, 0x3863_204b]);
     assert_eq!(pixel(&s, 0, 50, 20), 0x0a_c0_00_2c, "5, 96, -69, 22");
     assert_eq!(pixel(&s, 0, 50, 21), 0x00_00_8e_00, "-111, -20, 71, -94");
@@ -865,8 +865,8 @@ fn a_copy_from_the_window_applies_the_programmed_scale_and_bias_unsigned() {
     pixel_write(&mut s, 70, 21, 0x00ff_8010);
     s.draw_mask = 4;
     for c in [0, 1, 2] {
-        s.tex_scale_bias[c * 2] = 0x0800;
-        s.tex_scale_bias[c * 2 + 1] = 0x0400;
+        s.tex.scale_bias[c * 2] = 0x0800;
+        s.tex.scale_bias[c * 2 + 1] = 0x0400;
     }
     copy_block(&mut s, [0x3000_0019, 21 << 16 | 70, 0x8020_0050, 1 << 16 | 1, 0x9263_3042, base, 0, 0x3802_204b]);
     // 0x00 -> 64, 0xff -> 191, 0x80 -> 128, alpha lane untouched (0x10).
@@ -895,8 +895,8 @@ fn bind_read_drawable(s: &mut Board, word: u32) {
 fn a_pixel_buffers_front_is_the_buffer_a_front_draw_mask_writes() {
     let (mut s, ram) = read_window();
     colour_destination(&mut s);
-    let p = s.buffer1_mem.plane(s.buffer1_plane).expect("the second colour plane");
-    s.buffer1_mem.plane_store(&p, 30, 40, 0x0102_0304);
+    let p = s.planes.buffer1.plane(s.planes.buffer1_plane).expect("the second colour plane");
+    s.planes.buffer1.plane_store(&p, 30, 40, 0x0102_0304);
     let front = read_word4(2, 8);
     let back = front & !dma::FMT_FRONT;
     let in_buffer_0 = READ_PIXEL.to_be_bytes();
@@ -1037,11 +1037,11 @@ fn zoom_2x2_sized(word4: u32, size_bits: u32) -> Box<Board> {
         }
     }
     // The move's own raster state: 2D texturing, replace, nearest, level 60.
-    s.tex_mode = tex::MODE_2D;
-    s.tex_level0 = 60;
-    s.tex_levels[180..183].copy_from_slice(&[base, 0x8210_0020, 0]);
-    s.tex_sampler = [(9 << 10) | (6 << 5) | size_bits, 512, 64, 0, word4, 0, 0];
-    s.tex_env = [1, 0, 0, 0, 0];
+    s.tex.mode = tex::MODE_2D;
+    s.tex.level0 = 60;
+    s.tex.levels[180..183].copy_from_slice(&[base, 0x8210_0020, 0]);
+    s.tex.sampler = [(9 << 10) | (6 << 5) | size_bits, 512, 64, 0, word4, 0, 0];
+    s.tex.env = [1, 0, 0, 0, 0];
 
     cmd(&mut s, select(reg::GL_BEGIN));
     cmd(&mut s, gl_cmd::QUADS);
@@ -1064,7 +1064,7 @@ fn an_integer_pixel_through_a_logic_op_or_to_the_id_planes_dirties_its_row() {
     let lines = |s: &Board| s.scanout.marks.dirty_rows();
     s.scanout_update();
 
-    s.pattern_mode |= mode::COLOR_LOGIC_OP;
+    s.stream.pattern_mode |= mode::COLOR_LOGIC_OP;
     s.gl_ctx.as_mut().unwrap().cur.logic_op_mode = GL_CLEAR + LOGIC_XOR;
     s.paint_integer(40, 120, false, 0x00ff_ff00);
     assert_eq!(lines(&s), vec![120], "a logic-op pixel");

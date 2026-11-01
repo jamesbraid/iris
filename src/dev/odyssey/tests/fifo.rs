@@ -107,8 +107,8 @@ fn the_board_thread_runs_queued_stores_in_order_and_latches_low_water() {
     }
     {
         let s = h.test_board();
-        assert!(s.cfifo_selftest_ready);
-        assert_eq!(s.selftest_progress, 0);
+        assert!(s.widget.cfifo_selftest_ready);
+        assert_eq!(s.widget.selftest_progress, 0);
     }
     assert!(rec.level(TEST_VECTOR));
     let status = h.read(STATUS0, 4) as u32;

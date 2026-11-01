@@ -53,8 +53,8 @@ fn query(s: &mut Board, kind: u32) {
 
 fn query_board() -> (Box<Board>, Arc<Ram>) {
     let (mut s, _, ram) = board_with_ram();
-    s.ctx_shadow_addr_lower = SHADOW as u32;
-    s.host_write_addr_lower = SYNC as u32;
+    s.widget.ctx_shadow_addr_lower = SHADOW as u32;
+    s.widget.host_write_addr_lower = SYNC as u32;
     (s, ram)
 }
 

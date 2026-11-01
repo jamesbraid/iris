@@ -49,14 +49,14 @@ pub struct Frame {
 impl Frame {
     /// The planes of `b` over the scene window.
     pub fn of(b: &Board) -> Frame {
-        let depth = b.depth_mem.plane(b.depth_plane).expect("the depth plane");
-        let stencil = b.stencil_mem.plane(b.stencil_plane).expect("the stencil plane");
+        let depth = b.planes.depth.plane(b.planes.depth_plane).expect("the depth plane");
+        let stencil = b.planes.stencil.plane(b.planes.stencil_plane).expect("the stencil plane");
         let mut f = Frame { colour: vec![], depth: vec![], stencil: vec![] };
         for y in 0..SIDE {
             for x in 0..SIDE {
                 f.colour.push(b.buffer_load(0, x as i64, y as i64));
-                f.depth.push(b.depth_mem.plane_load(&depth, x, y));
-                f.stencil.push(b.stencil_mem.plane_load(&stencil, x, y));
+                f.depth.push(b.planes.depth.plane_load(&depth, x, y));
+                f.stencil.push(b.planes.stencil.plane_load(&stencil, x, y));
             }
         }
         f

@@ -33,12 +33,12 @@ fn the_object_table_keeps_every_level_a_game_loads() {
 /// axes, nearest, replace, one level at `base` (sampler word 4 0x13001400,
 /// level entry 0x41100020, replayed from a guest trace).
 fn rgba_512x256(s: &mut Board, base: u32) {
-    s.tex_mode = tex::MODE_2D;
-    s.tex_level0 = 0;
-    s.tex_levels[..3].copy_from_slice(&[base, 0x4110_0020, 0]);
-    s.tex_sampler = [0x0800_0000 | (9 << 10) | (8 << 5), 0x0004_0000 | 512, 0x0004_0000 | 256, 1, 0x1300_1400, 0, 0];
-    s.tex_env = [1, 0, 0, 0, 0];
-    s.tex_lod = [0; 4];
+    s.tex.mode = tex::MODE_2D;
+    s.tex.level0 = 0;
+    s.tex.levels[..3].copy_from_slice(&[base, 0x4110_0020, 0]);
+    s.tex.sampler = [0x0800_0000 | (9 << 10) | (8 << 5), 0x0004_0000 | 512, 0x0004_0000 | 256, 1, 0x1300_1400, 0, 0];
+    s.tex.env = [1, 0, 0, 0, 0];
+    s.tex.lod = [0; 4];
 }
 
 /// glTexImage2D with no data and then glTexSubImage2D of a 320x200 frame,
@@ -78,18 +78,18 @@ fn rows_after_setup(width: u32, word: u32, sampler6: u32, entry1: u32) -> u32 {
 
     assert!(s.object_rows(obj, 200));
     rgba_512x256(&mut s, base);
-    s.tex_sampler[4] = word;
-    s.tex_sampler[6] = sampler6;
-    s.tex_levels[1] = entry1;
+    s.tex.sampler[4] = word;
+    s.tex.sampler[6] = sampler6;
+    s.tex.levels[1] = entry1;
     if word & 0x3000 == 0 {
         // No clamp to edge, so no clamp mark in the size words.
-        s.tex_sampler[1] = 512;
-        s.tex_sampler[2] = 256;
+        s.tex.sampler[1] = 512;
+        s.tex.sampler[2] = 256;
     }
     let mut image = GlTexImage::default();
     let mut chain = Box::<TextureChain>::default();
     s.texture_setup(&mut image, &mut chain);
-    s.obj_rows[obj as usize]
+    s.objects.rows[obj as usize]
 }
 
 /// Only a level of the client's own row length grows: an object narrower
@@ -126,15 +126,15 @@ fn a_texture_move_does_not_grow_its_object() {
     let obj = s.object_select(base, 512);
 
     assert!(s.object_rows(obj, 2));
-    s.tex_mode = tex::MODE_2D;
-    s.tex_level0 = 60;
-    s.tex_levels[180..183].copy_from_slice(&[base, 0x8210_0020, 0]);
-    s.tex_sampler = [(9 << 10) | (6 << 5), 512, 64, 0, 0x0364_0000, 0, 0];
-    s.tex_env = [1, 0, 0, 0, 0];
+    s.tex.mode = tex::MODE_2D;
+    s.tex.level0 = 60;
+    s.tex.levels[180..183].copy_from_slice(&[base, 0x8210_0020, 0]);
+    s.tex.sampler = [(9 << 10) | (6 << 5), 512, 64, 0, 0x0364_0000, 0, 0];
+    s.tex.env = [1, 0, 0, 0, 0];
     let mut image = GlTexImage::default();
     let mut chain = Box::<TextureChain>::default();
     assert!(s.texture_setup(&mut image, &mut chain));
-    assert_eq!(s.obj_rows[obj as usize], 2);
+    assert_eq!(s.objects.rows[obj as usize], 2);
 }
 
 /// Packing the store keeps every live object's texels and its place in
@@ -159,18 +159,18 @@ fn packing_a_full_table_keeps_each_object_in_store_order() {
     for i in (1..n).step_by(3) {
         s.object_forget(i);
     }
-    let mut live: Vec<usize> = (0..n).filter(|&i| s.obj_base[i] != 0).collect();
-    live.sort_by_key(|&i| s.obj_offset[i]);
+    let mut live: Vec<usize> = (0..n).filter(|&i| s.objects.base[i] != 0).collect();
+    live.sort_by_key(|&i| s.objects.offset[i]);
 
     s.object_compact(None);
     let mut next = 0u32;
     for &i in &live {
         let o = i;
-        assert_eq!(s.obj_offset[o], next, "object {i} is not packed in store order");
-        next += s.obj_width[o] * s.obj_rows[o];
+        assert_eq!(s.objects.offset[o], next, "object {i} is not packed in store order");
+        next += s.objects.width[o] * s.objects.rows[o];
         assert_eq!(s.object_load(i, 0, 0), i as u32, "object {i}'s texel");
     }
-    assert_eq!(s.obj_used, next);
+    assert_eq!(s.objects.used, next);
 }
 
 /// A stored volume's slices keep their own check: every row and texel the
@@ -199,18 +199,18 @@ fn a_stored_volume_slice_written_in_part_does_not_grow() {
             }
             rows.push((o, n));
         }
-        s.tex_mode = tex::MODE_3D;
-        s.tex_level0 = 0;
-        s.tex_levels[..3].copy_from_slice(&[base, 0x4110_0004, h + 2]);
-        s.tex_sampler = [0x0800_0000 | (2 << 10) | (2 << 5) | 2, w, h, d, 0x0300_2a00, 0, 0x0100_0000];
-        s.tex_env = [1, 0, 0, 0, 0];
+        s.tex.mode = tex::MODE_3D;
+        s.tex.level0 = 0;
+        s.tex.levels[..3].copy_from_slice(&[base, 0x4110_0004, h + 2]);
+        s.tex.sampler = [0x0800_0000 | (2 << 10) | (2 << 5) | 2, w, h, d, 0x0300_2a00, 0, 0x0100_0000];
+        s.tex.env = [1, 0, 0, 0, 0];
         let mut image = GlTexImage::default();
         let mut chain = Box::<TextureChain>::default();
         let taken = s.texture_setup(&mut image, &mut chain) && chain.levels[0].read_texel_3d;
 
         assert_eq!(taken, !partial, "partial {partial}");
         for (o, n) in rows {
-            assert_eq!(s.obj_rows[o as usize], n, "slice object {o}, partial {partial}");
+            assert_eq!(s.objects.rows[o as usize], n, "slice object {o}, partial {partial}");
         }
     }
 }
@@ -261,14 +261,14 @@ fn quake_world_state(s: &mut Board, word4: u32, detail_word1: u32) {
     let base = 0x1d90c0;
     let mut level_base = base;
 
-    s.tex_mode = 0x2410;
-    s.tex_level0 = 0;
+    s.tex.mode = 0x2410;
+    s.tex.level0 = 0;
     for i in 0..10u32 {
         let (w, h) = ((512u32 >> i).max(1), (256u32 >> i).max(1));
         let units = (w.div_ceil(16) + 1) & !1;
         let o = s.object_select(level_base, units * 16);
         assert!(s.object_rows(o, h));
-        s.tex_levels[i as usize * 3..][..3].copy_from_slice(&[level_base, 0x00d0_0000 | units, 0]);
+        s.tex.levels[i as usize * 3..][..3].copy_from_slice(&[level_base, 0x00d0_0000 | units, 0]);
         level_base += units * 16 * h;
     }
     let detail = 0x16b800;
@@ -279,14 +279,14 @@ fn quake_world_state(s: &mut Board, word4: u32, detail_word1: u32) {
             s.object_store(o, x, y, 0x8080_80ff);
         }
     }
-    s.tex_levels[60 * 3..][..3].copy_from_slice(&[detail, detail_word1, 0]);
-    s.tex_sampler = [0x0873_a500, 0x200, 0x100, 1, word4, 0, 0];
-    s.tex_lod = [0, 0, 0x3100, 0xf00];
-    s.tex_env = [2, 0, 0, 0, 0];
-    for (i, e) in s.tex_detail_function.iter_mut().enumerate() {
+    s.tex.levels[60 * 3..][..3].copy_from_slice(&[detail, detail_word1, 0]);
+    s.tex.sampler = [0x0873_a500, 0x200, 0x100, 1, word4, 0, 0];
+    s.tex.lod = [0, 0, 0x3100, 0xf00];
+    s.tex.env = [2, 0, 0, 0, 0];
+    for (i, e) in s.tex.detail_function.iter_mut().enumerate() {
         *e = ((i as u32 * 32).min(4095)) << 12;
     }
-    s.tex_detail_function_valid = 0xffff;
+    s.tex.detail_function_valid = 0xffff;
 }
 
 /// SGI Quake's world textures, replayed from its texture state: a 512x256

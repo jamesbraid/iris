@@ -376,10 +376,10 @@ impl PlaneView {
         let planes = [b.buffer_plane(0)?, b.buffer_plane(1)?];
 
         Some(PlaneView {
-            colour: [RawBytes::of(&b.mem.bytes), RawBytes::of(&b.buffer1_mem.bytes)],
+            colour: [RawBytes::of(&b.planes.colour.bytes), RawBytes::of(&b.planes.buffer1.bytes)],
             planes,
-            did: RawBytes::of(&b.did),
-            overlay: RawBytes::of(&b.overlay),
+            did: RawBytes::of(&b.planes.did),
+            overlay: RawBytes::of(&b.planes.overlay),
         })
     }
 

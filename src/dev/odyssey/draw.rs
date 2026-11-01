@@ -60,19 +60,19 @@ impl Board {
     /// (raster_unit.rs).
     pub fn buffer_mem(&self, b: u32) -> &BoardMemory {
         self.raster_wait();
-        if b != 0 { &self.buffer1_mem } else { &self.mem }
+        if b != 0 { &self.planes.buffer1 } else { &self.planes.colour }
     }
 
     pub fn buffer_mem_mut(&mut self, b: u32) -> &mut BoardMemory {
         self.raster_wait();
-        if b != 0 { &mut self.buffer1_mem } else { &mut self.mem }
+        if b != 0 { &mut self.planes.buffer1 } else { &mut self.planes.colour }
     }
 
     pub fn buffer_plane(&self, b: u32) -> Option<Plane> {
         if b != 0 {
-            self.buffer1_mem.plane(self.buffer1_plane)
+            self.planes.buffer1.plane(self.planes.buffer1_plane)
         } else {
-            self.mem.plane(self.colour_plane)
+            self.planes.colour.plane(self.planes.colour_plane)
         }
     }
 
@@ -114,7 +114,7 @@ impl Board {
         let word = (cookie & ODSY_FENCE_WORD_MASK as u64) as u32;
         let slot = word & dma::FENCE_SLOT_MASK;
         let token = (word >> dma::FENCE_TOKEN_SHIFT) & 0xffff;
-        let base = (((self.host_write_addr_upper & 0xffff) as u64) << 32) | self.host_write_addr_lower as u64;
+        let base = (((self.widget.host_write_addr_upper & 0xffff) as u64) << 32) | self.widget.host_write_addr_lower as u64;
         let (guest, front) = (self.guest.clone(), self.front.clone());
 
         self.raster.submit_completion(move |_| {
@@ -129,10 +129,10 @@ impl Board {
 impl Board {
     /// Rebuild the kept (non-empty) clip rectangles from the raw 0x204b words.
     pub fn clip_update(&mut self) {
-        self.clip_kept = 0;
+        self.win.clip_kept = 0;
         for i in 0..ODSY_CLIP_RECTS as usize {
-            let lo = self.clip_words[2 * i];
-            let hi = self.clip_words[2 * i + 1];
+            let lo = self.win.clip_words[2 * i];
+            let hi = self.win.clip_words[2 * i + 1];
             let r = ClipRect {
                 x0: ((lo >> clip::X_SHIFT) & clip::FIELD_MASK) as i32,
                 y0: (lo & clip::FIELD_MASK) as i32,
@@ -141,15 +141,15 @@ impl Board {
             };
 
             if r.x0 <= r.x1 && r.y0 <= r.y1 {
-                self.clip_rect[self.clip_kept as usize] = r;
-                self.clip_kept += 1;
+                self.win.clip_rect[self.win.clip_kept as usize] = r;
+                self.win.clip_kept += 1;
             }
         }
     }
 
     /// Whether clip_words is the off-screen form (cmd::WINDOW_RESTORE).
     pub fn clip_is_offscreen(&self) -> bool {
-        for (i, &word) in self.clip_words.iter().enumerate().take((2 * ODSY_CLIP_RECTS) as usize) {
+        for (i, &word) in self.win.clip_words.iter().enumerate().take((2 * ODSY_CLIP_RECTS) as usize) {
             let want = if i == 1 { clip::OFFSCREEN_HI } else { 0 };
 
             if (word & clip::WORD_MASK) != want {
@@ -168,13 +168,13 @@ impl Board {
     }
 
     pub fn id_compare_active(&self) -> bool {
-        self.id_compare & ODSY_ID_COMPARE_ENABLE != 0
+        self.win.id_compare & ODSY_ID_COMPARE_ENABLE != 0
     }
 
     /// The 0x840 ownership test at an in-plane pixel.
     pub fn id_compare_passes(&self, x: i64, y: i64) -> bool {
         self.raster_wait();
-        id_compare_passes(&self.did, self.id_compare, x, y)
+        id_compare_passes(&self.planes.did, self.win.id_compare, x, y)
     }
 
     /// The one pixel test every write but a copy destination passes: the plane
@@ -184,7 +184,7 @@ impl Board {
         if !self.pixel_in_bounds(x, y) || !self.id_compare_passes(x, y) {
             return false;
         }
-        for r in &self.clip_rect[..self.clip_kept as usize] {
+        for r in &self.win.clip_rect[..self.win.clip_kept as usize] {
             if x >= r.x0 as i64 && x <= r.x1 as i64 && y >= r.y0 as i64 && y <= r.y1 as i64 {
                 return true;
             }
@@ -204,7 +204,7 @@ impl Board {
         if y < 0 || y >= ODSY_HEIGHT as i64 {
             return runs;
         }
-        for &r in &self.clip_rect[..self.clip_kept as usize] {
+        for &r in &self.win.clip_rect[..self.win.clip_kept as usize] {
             let a = (r.x0 as i64).max(0);
             let b = (r.x1 as i64 + 1).min(ODSY_WIDTH as i64);
             let mut j = n;
@@ -294,13 +294,13 @@ impl Board {
         self.raster_wait();
 
         if buffers & (1u32 << ODSY_AUX_ID_BUFFER) != 0 {
-            self.did[at_i] = (self.did[at_i] & !mask) | (value & mask);
+            self.planes.did[at_i] = (self.planes.did[at_i] & !mask) | (value & mask);
         }
         if buffers & (1u32 << ODSY_AUX_OVERLAY_BUFFER) != 0 {
-            self.overlay[at_i] = (self.overlay[at_i] & !mask) | (value & mask);
+            self.planes.overlay[at_i] = (self.planes.overlay[at_i] & !mask) | (value & mask);
         }
-        if buffers & ((1u32 << ODSY_AUX_ID_BUFFER) | (1u32 << ODSY_AUX_OVERLAY_BUFFER)) == 0 && !self.aux_mask_reported {
-            self.aux_mask_reported = true;
+        if buffers & ((1u32 << ODSY_AUX_ID_BUFFER) | (1u32 << ODSY_AUX_OVERLAY_BUFFER)) == 0 && !self.diag.aux_mask_reported {
+            self.diag.aux_mask_reported = true;
             crate::dlog!(
                 LogModule::Odyssey,
                 "sgi-odyssey: id-plane write with drawing mask {:#x} selects neither the id nor the overlay byte; dropped",
@@ -319,7 +319,7 @@ impl Board {
 
         self.raster_wait();
         if op as u32 != LOGIC_COPY {
-            let dst = if buffers & (1u32 << ODSY_AUX_OVERLAY_BUFFER) != 0 { self.overlay[at as usize] } else { self.did[at as usize] };
+            let dst = if buffers & (1u32 << ODSY_AUX_OVERLAY_BUFFER) != 0 { self.planes.overlay[at as usize] } else { self.planes.did[at as usize] };
 
             byte = logic_op(op, index, dst as u32) as u8;
         }
@@ -350,13 +350,13 @@ impl Board {
         let buffers = self.draw_buffers();
 
         if self.dest_is_id_planes() {
-            let use_op = (self.pattern_mode & enable) != 0 && op as u32 != LOGIC_COPY;
+            let use_op = (self.stream.pattern_mode & enable) != 0 && op as u32 != LOGIC_COPY;
 
             self.paint_aux(x, y, src, if use_op { op } else { LOGIC_COPY as u8 });
             self.scanout.invalidate_for(DirtySite::Integer, y as i32, 1);
             return;
         }
-        if (self.pattern_mode & enable) == 0 || op as u32 == LOGIC_COPY {
+        if (self.stream.pattern_mode & enable) == 0 || op as u32 == LOGIC_COPY {
             self.paint_pixel(x, y, src);
             return;
         }
@@ -382,7 +382,7 @@ impl Board {
         let src = fill_pixel(is_index, value);
         let enable = if is_index { mode::INDEX_LOGIC_OP } else { mode::COLOR_LOGIC_OP };
         let op = self.gl_ref().cur.logic_op_mode.wrapping_sub(GL_CLEAR) as u8;
-        let logic = (self.pattern_mode & enable) != 0 && op as u32 != LOGIC_COPY;
+        let logic = (self.stream.pattern_mode & enable) != 0 && op as u32 != LOGIC_COPY;
         let id_test = self.id_compare_active();
         let buffers = self.draw_buffers();
         let aux = self.dest_is_id_planes();
@@ -428,8 +428,8 @@ impl Board {
                     continue;
                 };
                 let bpp = plane_bpp(plane.format) as usize;
-                let (did, id_compare) = (&self.did, self.id_compare);
-                let mem = if b != 0 { &mut self.buffer1_mem } else { &mut self.mem };
+                let (did, id_compare) = (&self.planes.did, self.win.id_compare);
+                let mem = if b != 0 { &mut self.planes.buffer1 } else { &mut self.planes.colour };
 
                 plane.encode(src, &mut word);
                 for (x, px) in (a..e).zip(mem.bytes[run].chunks_exact_mut(bpp)) {
@@ -533,9 +533,9 @@ impl Board {
                         self.buffer_mem_mut(dest).bytes.copy_within(src, dst.start);
                     } else {
                         let (from, to) = if source != 0 {
-                            (&self.buffer1_mem, &mut self.mem)
+                            (&self.planes.buffer1, &mut self.planes.colour)
                         } else {
-                            (&self.mem, &mut self.buffer1_mem)
+                            (&self.planes.colour, &mut self.planes.buffer1)
                         };
                         to.bytes[dst].copy_from_slice(&from.bytes[src]);
                     }
@@ -584,8 +584,8 @@ impl Board {
         let mask = (self.plane_write_mask >> ODSY_PLANE_MASK_SHIFT) as u8;
         let mut staged = vec![0u8; w_clip];
 
-        if buffers == 0 && !self.aux_mask_reported {
-            self.aux_mask_reported = true;
+        if buffers == 0 && !self.diag.aux_mask_reported {
+            self.diag.aux_mask_reported = true;
             crate::dlog!(
                 LogModule::Odyssey,
                 "sgi-odyssey: id-plane copy with drawing mask {:#x} selects neither the id nor the overlay byte; dropped",
@@ -602,7 +602,7 @@ impl Board {
                 if buffers & (1u32 << b) == 0 {
                     continue;
                 }
-                let plane = if b == ODSY_AUX_ID_BUFFER { &mut self.did } else { &mut self.overlay };
+                let plane = if b == ODSY_AUX_ID_BUFFER { &mut self.planes.did } else { &mut self.planes.overlay };
 
                 staged.fill(0);
                 if sy + r < ODSY_HEIGHT {
@@ -624,12 +624,12 @@ impl Board {
     }
 
     pub fn copy_rect(&mut self) {
-        let source = (self.cmd_operand[2] >> ODSY_COPY_RECT_SOURCE_SHIFT) & 0xf;
-        let dest = (self.cmd_operand[7] >> ODSY_COPY_RECT_DEST_SHIFT) & 0xf;
-        let format_source = (self.cmd_operand[4] >> ODSY_COPY_RECT_FORMAT_SOURCE_SHIFT) & 0xf;
-        let format_dest = (self.cmd_operand[4] >> ODSY_COPY_RECT_DEST_SHIFT) & 0xf;
+        let source = (self.cmd.operand[2] >> ODSY_COPY_RECT_SOURCE_SHIFT) & 0xf;
+        let dest = (self.cmd.operand[7] >> ODSY_COPY_RECT_DEST_SHIFT) & 0xf;
+        let format_source = (self.cmd.operand[4] >> ODSY_COPY_RECT_FORMAT_SOURCE_SHIFT) & 0xf;
+        let format_dest = (self.cmd.operand[4] >> ODSY_COPY_RECT_DEST_SHIFT) & 0xf;
 
-        let operands = CopyOperands::decode(&self.cmd_operand);
+        let operands = CopyOperands::decode(&self.cmd.operand);
 
         if operands.src_base == dma::SENTINEL_READ || operands.dest_base == dma::SENTINEL_DRAW {
             if !self.copy_rect_gl(&operands) {
@@ -657,8 +657,8 @@ impl Board {
         if id_base && src_at_id != dest_at_id {
             // Not traced: a copy between the overlay and a colour buffer. Running
             // it through colour buffer 0 is the smear this path exists to avoid.
-            if !self.copy_mixed_base_reported {
-                self.copy_mixed_base_reported = true;
+            if !self.diag.copy_mixed_base_reported {
+                self.diag.copy_mixed_base_reported = true;
                 crate::dlog!(
                     LogModule::Odyssey,
                     "sgi-odyssey: rectangle copy from base {:#x} to base {:#x} with the id-plane base {:#x} selected is not modeled; dropped",
@@ -695,11 +695,11 @@ impl Board {
     /// selected. A quad drawn in this state paints the current colour through the
     /// pattern instead of as a solid rectangle.
     pub fn pattern_enabled(&mut self) -> bool {
-        if (self.pattern_mode & pattern::MODE_ENABLE) != pattern::MODE_ENABLE {
+        if (self.stream.pattern_mode & pattern::MODE_ENABLE) != pattern::MODE_ENABLE {
             return false;
         }
         matches!(
-            self.pattern_shape & !pattern::SHAPE_OPAQUE,
+            self.stream.pattern_shape & !pattern::SHAPE_OPAQUE,
             pattern::SHAPE_64X16 | pattern::SHAPE_32X32 | pattern::SHAPE_16X64
         )
     }
@@ -710,24 +710,24 @@ impl Board {
     /// treated as clear: the X server never draws a quad larger than its pattern.
     pub fn pattern_bit(&mut self, u: u32, v: u32) -> bool {
 
-        let (word, bit) = match self.pattern_shape & !pattern::SHAPE_OPAQUE {
+        let (word, bit) = match self.stream.pattern_shape & !pattern::SHAPE_OPAQUE {
             pattern::SHAPE_64X16 => {
                 if u >= 64 || v >= 16 {
                     return false;
                 }
-                (self.pattern_buffer[(2 * v + (u >> 5)) as usize], 31 - (u & 31))
+                (self.stream.pattern_buffer[(2 * v + (u >> 5)) as usize], 31 - (u & 31))
             }
             pattern::SHAPE_32X32 => {
                 if u >= 32 || v >= 32 {
                     return false;
                 }
-                (self.pattern_buffer[v as usize], 31 - u)
+                (self.stream.pattern_buffer[v as usize], 31 - u)
             }
             pattern::SHAPE_16X64 => {
                 if u >= 16 || v >= 64 {
                     return false;
                 }
-                (self.pattern_buffer[(v >> 1) as usize], 31 - 16 * (v & 1) - u)
+                (self.stream.pattern_buffer[(v >> 1) as usize], 31 - 16 * (v & 1) - u)
             }
             _ => return false,
         };
@@ -755,7 +755,7 @@ impl Board {
     /// the tile never contributes.
     #[allow(clippy::too_many_arguments, reason = "a fill rectangle, its pattern origin and its colour")]
     pub fn pattern_fill(&mut self, x: u32, y: u32, w: u32, h: u32, pat_u0: u32, pat_v0: u32, is_index: bool, value: u32) {
-        let opaque = self.pattern_shape & pattern::SHAPE_OPAQUE != 0;
+        let opaque = self.stream.pattern_shape & pattern::SHAPE_OPAQUE != 0;
         let background = self.pattern_background(is_index);
         // Each row as spans of equal pattern bits, painted a span at a time.
         for v in 0..h {
@@ -822,39 +822,39 @@ impl Board {
     /// decreasing endpoints visit [first - 1, last]. Payload advances along X,
     /// then along Y.
     pub fn image_put(&mut self, rgba: u32, is_index: bool, preserve_alpha: bool) {
-        let x_decreasing = self.image_x2 < self.image_x1;
-        let y_decreasing = self.image_y2 < self.image_y1;
+        let x_decreasing = self.image.x2 < self.image.x1;
+        let y_decreasing = self.image.y2 < self.image.y1;
         let y_finished = if y_decreasing {
-            self.image_cur_y == u32::MAX || self.image_cur_y < self.image_y2
+            self.image.cur_y == u32::MAX || self.image.cur_y < self.image.y2
         } else {
-            self.image_cur_y >= self.image_y2
+            self.image.cur_y >= self.image.y2
         };
 
-        if self.image_x2 == self.image_x1 || self.image_y2 == self.image_y1 || y_finished {
+        if self.image.x2 == self.image.x1 || self.image.y2 == self.image.y1 || y_finished {
             return;
         }
         if let Some(obj) = self.image_object() {
             // An off-screen object: box coordinates, no window or id tests.
-            self.object_store(obj, self.image_cur_x, self.image_cur_y, rgba);
+            self.object_store(obj, self.image.cur_x, self.image.cur_y, rgba);
         } else if self.dest_is_id_planes() {
             // Menu cascade arrows: index images into the overlay.
             if is_index {
                 self.paint_aux(
-                    self.image_cur_x as i64 + self.win_origin[0] as i64,
-                    self.image_cur_y as i64 + self.win_origin[1] as i64,
+                    self.image.cur_x as i64 + self.win.origin[0] as i64,
+                    self.image.cur_y as i64 + self.win.origin[1] as i64,
                     rgba,
                     LOGIC_COPY as u8,
                 );
-                self.scanout.invalidate_for(DirtySite::Image, self.image_cur_y as i32 + self.win_origin[1], 1);
-            } else if !self.aux_image_reported {
-                self.aux_image_reported = true;
+                self.scanout.invalidate_for(DirtySite::Image, self.image.cur_y as i32 + self.win.origin[1], 1);
+            } else if !self.diag.aux_image_reported {
+                self.diag.aux_image_reported = true;
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: an RGB image to the id-plane destination is not modeled; dropped");
             }
         } else {
             // Screen pixels are window-relative; object pixels are not.
             self.paint_pixel(
-                self.image_cur_x as i64 + self.win_origin[0] as i64,
-                self.image_cur_y as i64 + self.win_origin[1] as i64,
+                self.image.cur_x as i64 + self.win.origin[0] as i64,
+                self.image.cur_y as i64 + self.win.origin[1] as i64,
                 if is_index || preserve_alpha { rgba } else { (rgba & !0xffu32) | 0xff },
             );
         }
@@ -863,17 +863,17 @@ impl Board {
 
     /// Step the raster cursor to the next pixel of the open image.
     fn image_advance(&mut self, x_decreasing: bool, y_decreasing: bool) {
-        if (x_decreasing && self.image_cur_x == self.image_x2) || (!x_decreasing && self.image_cur_x == self.image_x2.wrapping_sub(1)) {
-            self.image_cur_x = if x_decreasing { self.image_x1.wrapping_sub(1) } else { self.image_x1 };
+        if (x_decreasing && self.image.cur_x == self.image.x2) || (!x_decreasing && self.image.cur_x == self.image.x2.wrapping_sub(1)) {
+            self.image.cur_x = if x_decreasing { self.image.x1.wrapping_sub(1) } else { self.image.x1 };
             if y_decreasing {
-                self.image_cur_y = if self.image_cur_y == self.image_y2 { u32::MAX } else { self.image_cur_y.wrapping_sub(1) };
+                self.image.cur_y = if self.image.cur_y == self.image.y2 { u32::MAX } else { self.image.cur_y.wrapping_sub(1) };
             } else {
-                self.image_cur_y = self.image_cur_y.wrapping_add(1);
+                self.image.cur_y = self.image.cur_y.wrapping_add(1);
             }
         } else if x_decreasing {
-            self.image_cur_x = self.image_cur_x.wrapping_sub(1);
+            self.image.cur_x = self.image.cur_x.wrapping_sub(1);
         } else {
-            self.image_cur_x = self.image_cur_x.wrapping_add(1);
+            self.image.cur_x = self.image.cur_x.wrapping_add(1);
         }
     }
 
@@ -881,21 +881,21 @@ impl Board {
     /// the header's group length in pixels. A source format that carries
     /// alpha stores it (code_carries_alpha()); any other stores 255.
     pub fn image_texel(&mut self, rgba: u32, code: u32) {
-        if self.image_group_len != 0 && self.image_group_painted >= self.image_group_len {
+        if self.image.group_len != 0 && self.image.group_painted >= self.image.group_len {
             return;
         }
         self.image_put(rgba, code_is_index(code), code_carries_alpha(code));
-        self.image_group_painted += 1;
+        self.image.group_painted += 1;
     }
 
     /// The same for a pixel of the library's write table: `b` holds its bytes
     /// first byte first. It stores the alpha the source carries.
     pub fn image_texel_form(&mut self, form: &WriteForm, b: &[u8]) {
-        if self.image_group_len != 0 && self.image_group_painted >= self.image_group_len {
+        if self.image.group_len != 0 && self.image.group_painted >= self.image.group_len {
             return;
         }
         self.image_put(form.decode(b), form.is_index(), form.has_alpha());
-        self.image_group_painted += 1;
+        self.image.group_painted += 1;
     }
 }
 
@@ -1028,8 +1028,8 @@ impl Board {
     /// and for any other code, whatever the write table (pixel_write.rs)
     /// takes, under any tag.
     pub fn image_burst_supported(&self, fmt: u32) -> bool {
-        image_pairing_supported(self.image_code, fmt)
-            || (pixel_bytes(self.image_code) == 0 && texel12_components(self.image_code) == 0 && write_form(self.image_write_code).is_some())
+        image_pairing_supported(self.image.code, fmt)
+            || (pixel_bytes(self.image.code) == 0 && texel12_components(self.image.code) == 0 && write_form(self.image.write_code).is_some())
     }
 
     /// One word of a format-0, type-4 burst: a pixel of the depth and
@@ -1056,24 +1056,24 @@ impl Board {
     /// clip-rectangle and window-ID tests as a GL fragment apply (model
     /// choice, as for the DMA write).
     pub fn image_depth_stencil_word(&mut self, word: u32) {
-        let x_decreasing = self.image_x2 < self.image_x1;
-        let y_decreasing = self.image_y2 < self.image_y1;
+        let x_decreasing = self.image.x2 < self.image.x1;
+        let y_decreasing = self.image.y2 < self.image.y1;
         let y_finished = if y_decreasing {
-            self.image_cur_y == u32::MAX || self.image_cur_y < self.image_y2
+            self.image.cur_y == u32::MAX || self.image.cur_y < self.image.y2
         } else {
-            self.image_cur_y >= self.image_y2
+            self.image.cur_y >= self.image.y2
         };
 
-        if (self.image_group_len != 0 && self.image_group_painted >= self.image_group_len)
-            || self.image_x2 == self.image_x1
-            || self.image_y2 == self.image_y1
+        if (self.image.group_len != 0 && self.image.group_painted >= self.image.group_len)
+            || self.image.x2 == self.image.x1
+            || self.image.y2 == self.image.y1
             || y_finished
         {
             return;
         }
-        self.image_group_painted += 1;
-        let x = self.image_cur_x as i64 + self.win_origin[0] as i64;
-        let y = self.image_cur_y as i64 + self.win_origin[1] as i64;
+        self.image.group_painted += 1;
+        let x = self.image.cur_x as i64 + self.win.origin[0] as i64;
+        let y = self.image.cur_y as i64 + self.win.origin[1] as i64;
 
         // An off-screen object and the id planes hold no depth or stencil.
         if self.image_object().is_none() && !self.dest_is_id_planes() && self.pixel_allowed(x, y) {
@@ -1100,31 +1100,31 @@ impl Board {
     /// this model does not know falls back on the burst tag's format, 0x11 one
     /// 0x00RRGGBB pixel a word and 0x10 four indices, and is reported once.
     pub fn image_burst_word(&mut self, word: u32) {
-        let mut code = self.image_code;
+        let mut code = self.image.code;
         let mut n = pixel_bytes(code);
         let mut b = [0u8; 4];
 
-        if !self.image_burst_supported(self.image_fmt) {
+        if !self.image_burst_supported(self.image.fmt) {
             return;
         }
         if code == image::CODE_DEPTH_STENCIL {
             self.image_depth_stencil_word(word);
             return;
         }
-        if self.image_fmt == image::FMT_RGBA16 && texel12_components(code) != 0 {
+        if self.image.fmt == image::FMT_RGBA16 && texel12_components(code) != 0 {
             // A stream of 16-bit components, high half first, a pixel every
             // texel12_components() halves: two words for 0x6b and 0x6c, a
             // word and a half for 0x69. At most two halves wait between words;
             // image_nbytes counts them, image_bytes holds them.
             let comps = texel12_components(code) as usize;
             let mut halves = [0u16; 4];
-            let mut held = self.image_nbytes.min(2) as usize;
+            let mut held = self.image.nbytes.min(2) as usize;
 
-            if self.image_group_len != 0 && self.image_group_painted >= self.image_group_len {
+            if self.image.group_len != 0 && self.image.group_painted >= self.image.group_len {
                 return;
             }
             for (i, half) in halves.iter_mut().enumerate().take(held) {
-                *half = (self.image_bytes >> (16 * (held - 1 - i))) as u16;
+                *half = (self.image.bytes >> (16 * (held - 1 - i))) as u16;
             }
             for h in 0..2 {
                 let mut px = [0u8; 8];
@@ -1137,28 +1137,28 @@ impl Board {
                 for (pair, half) in px.as_chunks_mut::<2>().0.iter_mut().zip(&halves[..comps]) {
                     pair.copy_from_slice(&half.to_be_bytes());
                 }
-                let row = self.image_cur_y;
+                let row = self.image.cur_y;
 
                 self.image_put(decode_texel12(code, &px, true), false, true);
                 held = 0;
-                if h == 0 && self.image_cur_y != row {
+                if h == 0 && self.image.cur_y != row {
                     // The row ended in the word's first half: the second
                     // is pad, and the next row starts on the next word.
                     break;
                 }
             }
-            self.image_bytes = if held > 1 {
+            self.image.bytes = if held > 1 {
                 ((halves[0] as u32) << 16) | halves[1] as u32
             } else if held != 0 {
                 halves[0] as u32
             } else {
                 0
             };
-            self.image_nbytes = held as u32;
-            self.image_group_painted += 1;
-            if self.image_group_len != 0 && self.image_group_painted >= self.image_group_len && self.image_nbytes != 0 {
-                self.image_bytes = 0;
-                self.image_nbytes = 0;
+            self.image.nbytes = held as u32;
+            self.image.group_painted += 1;
+            if self.image.group_len != 0 && self.image.group_painted >= self.image.group_len && self.image.nbytes != 0 {
+                self.image.bytes = 0;
+                self.image.nbytes = 0;
             }
             return;
         }
@@ -1168,19 +1168,19 @@ impl Board {
         if n == 0 {
             // A code the byte-stream tables above do not know: the library's
             // write table (pixel_write.rs), for pixels of up to sixteen bytes.
-            form = write_form(self.image_write_code).filter(|f| f.bytes <= 16);
+            form = write_form(self.image.write_code).filter(|f| f.bytes <= 16);
             if let Some(f) = &form {
                 n = f.bytes;
             } else {
-                if !self.image_code_reported {
-                    self.image_code_reported = true;
+                if !self.diag.image_code_reported {
+                    self.diag.image_code_reported = true;
                     crate::dlog!(
                         LogModule::Odyssey,
                         "sgi-odyssey: image source format {:#x} is not modeled; laid out by the burst tag",
-                        self.image_write_code
+                        self.image.write_code
                     );
                 }
-                code = if self.image_fmt == image::FMT_RGB { image::CODE_FALLBACK_XRGB } else { image::CODE_CI };
+                code = if self.image.fmt == image::FMT_RGB { image::CODE_FALLBACK_XRGB } else { image::CODE_CI };
                 n = pixel_bytes(code);
             }
         }
@@ -1189,17 +1189,17 @@ impl Board {
             // The write table's pixels: any number of bytes up to a pixel of
             // four 32-bit components, in arrival order.
             for (i, &byte) in b[..4].iter().enumerate() {
-                self.image_pixel[self.image_nbytes as usize] = byte;
-                self.image_nbytes += 1;
-                if self.image_nbytes < f.bytes {
+                self.image.pixel[self.image.nbytes as usize] = byte;
+                self.image.nbytes += 1;
+                if self.image.nbytes < f.bytes {
                     continue;
                 }
-                self.image_nbytes = 0;
-                let px = self.image_pixel;
-                let row = self.image_cur_y;
+                self.image.nbytes = 0;
+                let px = self.image.pixel;
+                let row = self.image.cur_y;
 
                 self.image_texel_form(f, &px);
-                if i < 3 && self.image_cur_y != row {
+                if i < 3 && self.image.cur_y != row {
                     // The row ended inside the word: the rest is pad.
                     break;
                 }
@@ -1215,19 +1215,19 @@ impl Board {
         for (i, &byte) in b[..4].iter().enumerate() {
             let mut px = [0u8; 4];
 
-            self.image_bytes = (self.image_bytes << 8) | byte as u32;
-            self.image_nbytes += 1;
-            if self.image_nbytes < n {
+            self.image.bytes = (self.image.bytes << 8) | byte as u32;
+            self.image.nbytes += 1;
+            if self.image.nbytes < n {
                 continue;
             }
-            self.image_nbytes = 0;
+            self.image.nbytes = 0;
             // The pixel's bytes, first byte highest, at the start of px[].
-            px[..4].copy_from_slice(&(self.image_bytes << (8 * (4 - n))).to_be_bytes());
+            px[..4].copy_from_slice(&(self.image.bytes << (8 * (4 - n))).to_be_bytes());
             let rgba = self.decode_pixel(code, &px).unwrap_or(0);
-            let row = self.image_cur_y;
+            let row = self.image.cur_y;
 
             self.image_texel(rgba, code);
-            if padded_rows && i < 3 && self.image_cur_y != row {
+            if padded_rows && i < 3 && self.image.cur_y != row {
                 break;
             }
         }

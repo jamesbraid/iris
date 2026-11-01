@@ -1116,7 +1116,7 @@ mod tests {
     fn draw_bench(mut b: Bench, fill: FillPath, texture: TexturePath) -> Planes3 {
         b.prepare();
         // Stencil values 0 to 3 in a pattern, for the stencil test to tell apart.
-        for (i, v) in b.board.stencil_mem.bytes.iter_mut().enumerate() {
+        for (i, v) in b.board.planes.stencil.bytes.iter_mut().enumerate() {
             *v = ((i * 7 + i / 13) % 4) as u8;
         }
         raster_set_fill_path(fill);
@@ -1484,15 +1484,15 @@ mod tests {
                 let mut rng = Lcg(seed);
 
                 if seed % 3 != 0 {
-                    b.board.id_compare = ODSY_ID_COMPARE_ENABLE | (0x0f << ODSY_ID_COMPARE_MASK_SHIFT) | 0x05;
-                    for d in b.board.did.iter_mut() {
+                    b.board.win.id_compare = ODSY_ID_COMPARE_ENABLE | (0x0f << ODSY_ID_COMPARE_MASK_SHIFT) | 0x05;
+                    for d in b.board.planes.did.iter_mut() {
                         *d = if rng.next_u32() % 4 == 0 { 0x15 } else { 0x06 };
                     }
                 }
                 if seed % 3 != 1 {
-                    b.board.clip_kept = 2;
-                    b.board.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: 70, y1: SIDE - 1 };
-                    b.board.clip_rect[1] = ClipRect { x0: 50, y0: 40, x1: SIDE - 1, y1: 110 };
+                    b.board.win.clip_kept = 2;
+                    b.board.win.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: 70, y1: SIDE - 1 };
+                    b.board.win.clip_rect[1] = ClipRect { x0: 50, y0: 40, x1: SIDE - 1, y1: 110 };
                 }
                 b
             };
@@ -1552,7 +1552,7 @@ mod tests {
 
         b.st.texture_2d = true;
         b.st.texture_env_mode = GL_REPLACE;
-        b.board.tex_lod = lod;
+        b.board.tex.lod = lod;
         b.board.texture_lod_bias(&mut image);
         if let Some(p) = image.pyramid.as_mut() {
             p.min_lod = texture_lod_limit(lod[2]) as f64 / tex::LOD_ONE as f64;

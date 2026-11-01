@@ -49,7 +49,7 @@ impl Board {
     pub fn gl_walk_list(&mut self, k: u32, strict: bool, older: bool, p: &mut Program) -> bool {
         let nc = ODSY_GL_CONSTANTS;
         let at = |s: &Board, i: u32| -> u32 {
-            let a = s.gl_const[(k.wrapping_add(i) % nc) as usize];
+            let a = s.geom.constants[(k.wrapping_add(i) % nc) as usize];
             if older { ucode_current(a) } else { a }
         };
         let mut n: u32 = 0;
@@ -144,19 +144,19 @@ impl Board {
     pub fn gl_program_halfword(&mut self, word: u32) {
         let h: u16 = ((word & prog::LOW_MASK) | (((word >> prog::HIGH_SHIFT) & prog::HALFWORD_HIGH_MASK) << 10)) as u16;
 
-        if self.gl_program_addr >= ODSY_GL_PROGRAM_ENTRIES {
-            if !self.gl_program_mem_reported {
-                self.gl_program_mem_reported = true;
+        if self.geom.program_addr >= ODSY_GL_PROGRAM_ENTRIES {
+            if !self.diag.gl_program_mem_reported {
+                self.diag.gl_program_mem_reported = true;
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: program-memory store past entry {:#x} is not modeled", ODSY_GL_PROGRAM_ENTRIES - 1);
             }
             return;
         }
-        let idx = self.gl_program_addr * prog::ENTRY_HALFWORDS + prog::ENTRY_HALFWORDS - 1 - self.gl_program_half;
-        self.gl_program_mem[idx as usize] = h;
-        self.gl_program_half += 1;
-        if self.gl_program_half == prog::ENTRY_HALFWORDS {
-            self.gl_program_half = 0;
-            self.gl_program_addr += 1;
+        let idx = self.geom.program_addr * prog::ENTRY_HALFWORDS + prog::ENTRY_HALFWORDS - 1 - self.geom.program_half;
+        self.geom.program_mem[idx as usize] = h;
+        self.geom.program_half += 1;
+        if self.geom.program_half == prog::ENTRY_HALFWORDS {
+            self.geom.program_half = 0;
+            self.geom.program_addr += 1;
         }
     }
 }
@@ -249,7 +249,7 @@ impl Board {
     /// CRC-64/ECMA-182 (no reflection, zero initial value) of n window entries.
     pub fn window_crc(&self, n: u32) -> u64 {
         let base = (prog::WINDOW_BASE * prog::ENTRY_HALFWORDS) as usize;
-        let h = &self.gl_program_mem[base..];
+        let h = &self.geom.program_mem[base..];
         let mut crc: u64 = 0;
 
         for &half in &h[..(n * prog::ENTRY_HALFWORDS) as usize] {
@@ -352,9 +352,9 @@ impl Board {
     /// in the current one. Window records are matched by the current bodies'
     /// fingerprints only; the older libraries' window uploads are not.
     pub fn gl_program(&mut self) {
-        let r: [u32; 3] = [self.gl_entry[ODSY_ENTRY_29], self.gl_entry[ODSY_ENTRY_2A], self.gl_entry[ODSY_ENTRY_2C]];
+        let r: [u32; 3] = [self.geom.entry[ODSY_ENTRY_29], self.geom.entry[ODSY_ENTRY_2A], self.geom.entry[ODSY_ENTRY_2C]];
         let (e29, e2a, e2c) = (r[0], r[1], r[2]);
-        let k = self.gl_entry[ODSY_ENTRY_33];
+        let k = self.geom.entry[ODSY_ENTRY_33];
         let mut p = Program::default();
         let resident = gl_resident(&r);
         let window = self.gl_window_record(&r);
@@ -378,23 +378,23 @@ impl Board {
         if !p.known {
             p.lit = false;
             let mut i = 0u32;
-            while i < self.gl_program_logged_count {
+            while i < self.diag.gl_program_logged_count {
                 let b = (i * 3) as usize;
-                if self.gl_program_logged[b] == e29 && self.gl_program_logged[b + 1] == e2a && self.gl_program_logged[b + 2] == e2c {
+                if self.diag.gl_program_logged[b] == e29 && self.diag.gl_program_logged[b + 1] == e2a && self.diag.gl_program_logged[b + 2] == e2c {
                     break;
                 }
                 i += 1;
             }
-            if i == self.gl_program_logged_count && i < ODSY_GL_PROGRAM_REPORTS {
+            if i == self.diag.gl_program_logged_count && i < ODSY_GL_PROGRAM_REPORTS {
                 let m = ODSY_GL_CONSTANTS - 1;
-                let c = |j: u32| -> u32 { self.gl_const[(k.wrapping_add(j) & m) as usize] };
+                let c = |j: u32| -> u32 { self.geom.constants[(k.wrapping_add(j) & m) as usize] };
                 let (c0, c1, c2, c3, c4, c5, c6, c7) = (c(0), c(1), c(2), c(3), c(4), c(5), c(6), c(7));
 
                 let b = (i * 3) as usize;
-                self.gl_program_logged[b] = e29;
-                self.gl_program_logged[b + 1] = e2a;
-                self.gl_program_logged[b + 2] = e2c;
-                self.gl_program_logged_count += 1;
+                self.diag.gl_program_logged[b] = e29;
+                self.diag.gl_program_logged[b + 1] = e2a;
+                self.diag.gl_program_logged[b + 2] = e2c;
+                self.diag.gl_program_logged_count += 1;
                 crate::dlog!(
                     LogModule::Odyssey,
                     "sgi-odyssey: geometry program {:#x} {:#x} {:#x} from list index {} ({:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}) is not recognised{}; drawn unlit",
@@ -403,26 +403,26 @@ impl Board {
                 );
             }
         }
-        if p.two_sided && !self.gl_two_sided_logged {
-            self.gl_two_sided_logged = true;
+        if p.two_sided && !self.diag.gl_two_sided_logged {
+            self.diag.gl_two_sided_logged = true;
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: two-sided lighting is not modeled; back faces are lit with the front material");
         }
-        if p.texgen && !self.gl_texgen_logged {
-            self.gl_texgen_logged = true;
+        if p.texgen && !self.diag.gl_texgen_logged {
+            self.diag.gl_texgen_logged = true;
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: texture-coordinate generation in geometry program {:#x} is not modeled", e29);
         }
-        if p.clip && !self.gl_clip_logged {
-            self.gl_clip_logged = true;
+        if p.clip && !self.diag.gl_clip_logged {
+            self.diag.gl_clip_logged = true;
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: clip planes in geometry program {:#x} are not modeled; geometry is not clipped to them", e29);
         }
-        if p.texture && !self.gl_texture_stage_logged {
-            self.gl_texture_stage_logged = true;
+        if p.texture && !self.diag.gl_texture_stage_logged {
+            self.diag.gl_texture_stage_logged = true;
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: texture-mode lighting finish in geometry program {:#x} is not modeled", e29);
         }
-        self.gl_linear_texgen = if p.known { p.linear_texgen } else { 0 };
-        self.gl_lit = p.lit;
-        self.gl_local_viewer = p.local_viewer;
-        self.gl_normalize = p.normalize;
+        self.geom.linear_texgen = if p.known { p.linear_texgen } else { 0 };
+        self.geom.lit = p.lit;
+        self.geom.local_viewer = p.local_viewer;
+        self.geom.normalize = p.normalize;
     }
 
     /// A colour-mode word (prog::COLOUR_MODE). Only the captured pairs are
@@ -435,12 +435,12 @@ impl Board {
         let index = self.gl_index_mode();
 
         self.colour_mode[(cls - prog::COLOUR_MODE) as usize] = v;
-        if self.gl_index_mode() != index && !self.gl_in_prim {
+        if self.gl_index_mode() != index && !self.prim.in_prim {
             self.gl_apply_blend();
         }
         let disagree = cls == prog::COLOUR_MODE_B && ((self.colour_mode[0] ^ self.colour_mode[1]) & colour::MODE_INDEX) != 0;
-        if ((v & !known) != 0 || disagree) && !self.colour_mode_reported {
-            self.colour_mode_reported = true;
+        if ((v & !known) != 0 || disagree) && !self.diag.colour_mode_reported {
+            self.diag.colour_mode_reported = true;
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: colour mode word class {:#x} value {:#x} (0x22 value {:#x}) is not modeled", cls, v, self.colour_mode[0]);
         }
     }
@@ -451,50 +451,50 @@ impl Board {
         let cls = word >> prog::CLASS_SHIFT;
 
         if (prog::REG_FIRST..=prog::REG_LAST).contains(&cls) {
-            self.gl_regs_20_35[(cls - prog::REG_FIRST) as usize] = v;
+            self.geom.regs_20_35[(cls - prog::REG_FIRST) as usize] = v;
         }
         match cls {
             prog::COLOUR_MODE | prog::COLOUR_MODE_B => {
                 self.colour_mode(word >> prog::CLASS_SHIFT, v);
             }
             prog::CONST_SELECT => {
-                self.gl_const_index = v;
+                self.geom.constant_index = v;
             }
             prog::CONST_STORE => {
-                self.gl_const[(self.gl_const_index % ODSY_GL_CONSTANTS) as usize] = v;
-                self.gl_const_index = (self.gl_const_index + 1) % ODSY_GL_CONSTANTS;
+                self.geom.constants[(self.geom.constant_index % ODSY_GL_CONSTANTS) as usize] = v;
+                self.geom.constant_index = (self.geom.constant_index + 1) % ODSY_GL_CONSTANTS;
             }
             prog::ENTRY_29 => {
                 // Alone, 0x29 selects the stream for light loads (0x19a) or pixel
                 // transfers (0x12f) and runs the one-shot: not a program change. It
                 // is kept for the next 0x2c.
-                self.gl_entry[ODSY_ENTRY_29] = v;
+                self.geom.entry[ODSY_ENTRY_29] = v;
             }
             prog::ENTRY_2A => {
-                self.gl_entry[ODSY_ENTRY_2A] = v;
+                self.geom.entry[ODSY_ENTRY_2A] = v;
             }
             prog::ENTRY_2C => {
-                self.gl_entry[ODSY_ENTRY_2C] = v;
+                self.geom.entry[ODSY_ENTRY_2C] = v;
                 self.gl_program();
             }
             prog::LIST_INDEX => {
-                self.gl_entry[ODSY_ENTRY_33] = v;
+                self.geom.entry[ODSY_ENTRY_33] = v;
             }
             prog::COLOUR_MATERIAL => {
-                self.gl_colour_material = v & colour::MATERIAL_MASK;
+                self.geom.colour_material = v & colour::MATERIAL_MASK;
                 if (v & !colour::MATERIAL_MASK) != 0 {
                     crate::dlog!(LogModule::Odyssey, "sgi-odyssey: colour-material word value {:#x} has bits beyond the eight known ones", v);
                 }
             }
             prog::LIGHT_VEC_SELECT => {
-                self.gl_light_vec_sel = v;
+                self.geom.light_vec_sel = v;
             }
             prog::LIGHT_COLOUR_SELECT => {
-                self.gl_light_colour_sel = v;
+                self.geom.light_colour_sel = v;
             }
             prog::PROGRAM_ADDR => {
-                self.gl_program_addr = v;
-                self.gl_program_half = 0;
+                self.geom.program_addr = v;
+                self.geom.program_half = 0;
             }
             _ => {
                 if (word >> prog::CLASS_SHIFT) >= prog::PROGRAM_HALFWORD {
@@ -599,7 +599,7 @@ impl Board {
         let f = |w: u32| f32::from_bits(w);
         let obj = [obj[0] as f32, obj[1] as f32, obj[2] as f32, obj[3] as f32];
         // The model-view's first three rows; the board ignores w.
-        let mv = &self.gl_modelview;
+        let mv = &self.geom.modelview;
         let mut eye = [0f32; 4];
         for r in 0..3usize {
             eye[r] = (0..4usize).map(|k| f(mv[r * 4 + k]) * obj[k]).sum();
@@ -607,17 +607,17 @@ impl Board {
         eye[3] = 1.0;
 
         lt.on = 1;
-        lt.local_viewer = self.gl_local_viewer as u32;
-        lt.normalize = self.gl_normalize as u32;
+        lt.local_viewer = self.geom.local_viewer as u32;
+        lt.normalize = self.geom.normalize as u32;
         for r in 0..3usize {
             for c in 0..3usize {
-                lt.normal_matrix[c * 3 + r] = f(self.gl_normal_matrix[r * 4 + c]);
+                lt.normal_matrix[c * 3 + r] = f(self.geom.normal_matrix[r * 4 + c]);
             }
         }
-        let colour = self.gl_colour.map(f);
-        let cm = self.gl_colour_material;
+        let colour = self.geom.colour.map(f);
+        let cm = self.geom.colour_material;
         let pick = |bit: u32, base: usize| -> [f32; 4] {
-            if cm & bit != 0 { colour } else { std::array::from_fn(|k| f(self.gl_material[base + k])) }
+            if cm & bit != 0 { colour } else { std::array::from_fn(|k| f(self.geom.material[base + k])) }
         };
         let (ma, md, ms, me) = (
             pick(colour::MATERIAL_AMBIENT, 0),
@@ -630,15 +630,15 @@ impl Board {
         m.diffuse = md;
         m.specular = [ms[0], ms[1], ms[2]];
         m.emission = [me[0], me[1], me[2]];
-        let shininess = f(self.gl_shininess_sqrt);
+        let shininess = f(self.geom.shininess_sqrt);
         m.shininess = shininess * shininess;
         let ambient = gl_cmd::LIGHT_MODEL_AMBIENT as usize * 4;
-        lt.amb_sum = std::array::from_fn(|k| f(self.gl_light_colour[ambient + k]));
+        lt.amb_sum = std::array::from_fn(|k| f(self.geom.light_colour[ambient + k]));
 
         let mut lit = 0u8;
         for i in 0..ODSY_GL_LIGHTS as usize {
-            let blk = &self.gl_light_vec[i * gl_cmd::LIGHT_VEC_FLOATS as usize..];
-            let col = &self.gl_light_colour[i * 3 * 4..];
+            let blk = &self.geom.light_vec[i * gl_cmd::LIGHT_VEC_FLOATS as usize..];
+            let col = &self.geom.light_colour[i * 3 * 4..];
             let rgb = |base: usize| -> [f32; 3] { std::array::from_fn(|k| f(col[base + k])) };
             let (la, ld, ls) = (rgb(0), rgb(4), rgb(8));
             if la.iter().chain(&ld).chain(&ls).all(|&v| v == 0.0) {
@@ -676,7 +676,7 @@ impl Board {
         }
         lt.head = next;
         lt.count = lit.count_ones();
-        let normal = self.gl_normal.map(f);
+        let normal = self.geom.normal.map(f);
         LitVertex { eye, normal, colour, alpha: md[3], lit }
     }
 
@@ -688,21 +688,21 @@ impl Board {
     /// lighting needs it for positional lights and the local viewer.
     pub fn gl_vertex_colour(&mut self, xyz: &[f64; 3]) {
         if self.gl_index_mode() {
-            if self.gl_lit && !self.gl_index_lit_reported {
-                self.gl_index_lit_reported = true;
+            if self.geom.lit && !self.diag.gl_index_lit_reported {
+                self.diag.gl_index_lit_reported = true;
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: colour-index lighting is not modeled; drawn with the current index");
             }
             let words = gl_index_rgba(self.gl_color_index).map(f32::to_bits);
             self.gl_feed(op::COLOR4F as u16, &words);
-            self.gl_colour_overridden = true;
-        } else if self.gl_lit {
+            self.geom.colour_overridden = true;
+        } else if self.geom.lit {
             let words = self.gl_light(&[xyz[0], xyz[1], xyz[2], 1.0]).map(f32::to_bits);
             self.gl_feed(op::COLOR4F as u16, &words);
-            self.gl_colour_overridden = true;
-        } else if self.gl_colour_overridden {
-            let words = self.gl_colour;
+            self.geom.colour_overridden = true;
+        } else if self.geom.colour_overridden {
+            let words = self.geom.colour;
             self.gl_feed(op::COLOR4F as u16, &words);
-            self.gl_colour_overridden = false;
+            self.geom.colour_overridden = false;
         }
     }
 
@@ -844,7 +844,7 @@ impl Board {
             return;
         }
         if self.gl_matrix_slot == gl_cmd::SLOT_NORMAL_MATRIX {
-            self.gl_normal_matrix = self.gl_matrix;
+            self.geom.normal_matrix = self.gl_matrix;
             return;
         }
         if self.gl_matrix_slot == gl_cmd::SLOT_COMBINED {
@@ -856,7 +856,7 @@ impl Board {
             // The combined matrix already carries the model-view
             // (Board::gl_load_combined()), so the shared context keeps its
             // identity model-view; this copy serves lighting's eye position.
-            self.gl_modelview = self.gl_matrix;
+            self.geom.modelview = self.gl_matrix;
             for i in 0..GL_CLIP_PLANES {
                 self.gl_apply_clip_plane(i);
             }
@@ -877,7 +877,7 @@ impl Board {
             return;
         }
         let n = self.gl_block16.len();
-        self.gl_block16.copy_from_slice(&self.cmd_operand[..n]);
+        self.gl_block16.copy_from_slice(&self.cmd.operand[..n]);
         self.gl_reload_combined();
     }
 
@@ -909,7 +909,7 @@ impl Board {
         let mut f = [0f32; gl_cmd::RECT_FLOATS as usize];
         let mut anchor_x: u32 = 0;
         let mut anchor_y: u32 = 0;
-        let patterned = (self.pattern_mode & gl_cmd::RECT_PATTERN_ENABLE) != 0;
+        let patterned = (self.stream.pattern_mode & gl_cmd::RECT_PATTERN_ENABLE) != 0;
         let rules = self.gl_operation_rules();
         let mut op = RasterOp {
             kind: RASTER_CLEAR,
@@ -921,7 +921,7 @@ impl Board {
             f[i] = f32::from_bits(self.gl_rect[i]);
         }
         if patterned {
-            if self.pattern_shape != pattern::SHAPE_32X32
+            if self.stream.pattern_shape != pattern::SHAPE_32X32
                 || !f[4].is_finite()
                 || !f[5].is_finite()
                 || !f[7].is_finite()
@@ -931,15 +931,15 @@ impl Board {
                 || f[7].trunc() != f[7]
                 || f[8].trunc() != f[8]
             {
-                if !self.gl_rect_pattern_logged {
-                    self.gl_rect_pattern_logged = true;
+                if !self.diag.gl_rect_pattern_logged {
+                    self.diag.gl_rect_pattern_logged = true;
                     crate::dlog!(LogModule::Odyssey, "sgi-odyssey: patterned rectangle requires shape 4 and finite integral corners");
                 }
                 return;
             }
             // Reduce before conversion: integral floats can exceed int range.
-            anchor_x = ((self.win_origin[0] % 32).wrapping_add(((f[4] as f64) % 32.0) as i32) & 31) as u32;
-            anchor_y = ((self.win_origin[1] % 32).wrapping_add(((f[5] as f64) % 32.0) as i32) & 31) as u32;
+            anchor_x = ((self.win.origin[0] % 32).wrapping_add(((f[4] as f64) % 32.0) as i32) & 31) as u32;
+            anchor_y = ((self.win.origin[1] % 32).wrapping_add(((f[5] as f64) % 32.0) as i32) & 31) as u32;
         }
         if ((self.gl_write_mask >> write::COLOUR_SHIFT) & write::COLOUR_MASK) != 0 {
             op.clear_buffers |= GL_COLOR_BUFFER_BIT;
@@ -950,7 +950,7 @@ impl Board {
             op.clear_buffers |= GL_DEPTH_BUFFER_BIT;
             op.clear_depth24 = rules.depth_code(d);
         }
-        if (self.pattern_mode & mode::STENCIL_TEST) != 0 && self.gl_ref().cur.stencil_write_mask != 0 {
+        if (self.stream.pattern_mode & mode::STENCIL_TEST) != 0 && self.gl_ref().cur.stencil_write_mask != 0 {
             let st = &self.gl_ref().cur;
 
             if st.stencil_func == GL_ALWAYS && st.stencil_op[2] == GL_REPLACE {
@@ -958,27 +958,27 @@ impl Board {
                 op.clear_buffers |= GL_STENCIL_BUFFER_BIT;
                 op.clear_stencil = st.stencil_ref as u32;
                 op.stencil_mask = st.stencil_write_mask;
-            } else if !self.gl_rect_stencil_logged {
+            } else if !self.diag.gl_rect_stencil_logged {
                 let (func, sop) = (st.stencil_func, st.stencil_op[2]);
-                self.gl_rect_stencil_logged = true;
+                self.diag.gl_rect_stencil_logged = true;
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: stencil-tested rectangle under comparison {} and operation {:#x} is not modeled; stencil left unchanged", func, sop);
             }
         }
-        if (self.pattern_mode & mode::DEPTH_TEST) != 0 && (self.gl_depth_func & ODSY_DEPTH_FUNC_MASK) != GL_ALWAYS && !self.gl_rect_depth_logged {
-            self.gl_rect_depth_logged = true;
+        if (self.stream.pattern_mode & mode::DEPTH_TEST) != 0 && (self.gl_depth_func & ODSY_DEPTH_FUNC_MASK) != GL_ALWAYS && !self.diag.gl_rect_depth_logged {
+            self.diag.gl_rect_depth_logged = true;
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: depth-tested rectangle under comparison {} is not modeled; written unconditionally", self.gl_depth_func & ODSY_DEPTH_FUNC_MASK);
         }
         // No kept rectangle means every 0x204b rectangle is empty: the window is
         // fully covered and nothing may be drawn. The shared clear reads a clip
         // list with n = 0 as "no clip", so the rectangle is skipped here. (Reset
         // is not this case: rectangle 0 then spans the whole range.)
-        if self.clip_kept == 0 || op.clear_buffers == 0 {
+        if self.win.clip_kept == 0 || op.clear_buffers == 0 {
             return;
         }
-        let mut x0 = self.win_origin[0] as f64 + f[4] as f64;
-        let mut y0 = self.win_origin[1] as f64 + f[5] as f64;
-        let mut x1 = self.win_origin[0] as f64 + f[7] as f64;
-        let mut y1 = self.win_origin[1] as f64 + f[8] as f64;
+        let mut x0 = self.win.origin[0] as f64 + f[4] as f64;
+        let mut y0 = self.win.origin[1] as f64 + f[5] as f64;
+        let mut x1 = self.win.origin[0] as f64 + f[7] as f64;
+        let mut y1 = self.win.origin[1] as f64 + f[8] as f64;
         if x0 > x1 {
             std::mem::swap(&mut x0, &mut x1);
         }
@@ -1006,10 +1006,10 @@ impl Board {
         op.y0 = y0 as i32;
         op.x1 = x1 as i32;
         op.y1 = y1 as i32;
-        for i in 0..self.clip_kept as usize {
-            op.clip.r[i] = self.clip_rect[i];
+        for i in 0..self.win.clip_kept as usize {
+            op.clip.r[i] = self.win.clip_rect[i];
         }
-        op.clip.n = self.clip_kept;
+        op.clip.n = self.win.clip_kept;
         if !self.gl_index_mode() {
             op.clear_colour_mask = (self.gl_write_mask >> write::COLOUR_SHIFT) & write::COLOUR_MASK;
         }
@@ -1032,7 +1032,7 @@ impl Board {
         let mut y = y0 as i32;
         let mut runs = Vec::new();
         while y <= y1 as i32 {
-            let row = self.pattern_buffer[((y as u32).wrapping_sub(anchor_y) & 31) as usize];
+            let row = self.stream.pattern_buffer[((y as u32).wrapping_sub(anchor_y) & 31) as usize];
             let mut x = xs;
 
             op.y0 = y;
@@ -1066,14 +1066,14 @@ impl Board {
     /// painted through the id-plane, pattern or solid path.
     pub fn gl_quad(&mut self, first: u32) {
         let f = first as usize;
-        let mut minx = self.gl_vertex_x[f] as i32;
+        let mut minx = self.stream.vertex_x[f] as i32;
         let mut maxx = minx;
-        let mut miny = self.gl_vertex_y[f] as i32;
+        let mut miny = self.stream.vertex_y[f] as i32;
         let mut maxy = miny;
 
         for i in f + 1..f + 4 {
-            let vx = self.gl_vertex_x[i] as i32;
-            let vy = self.gl_vertex_y[i] as i32;
+            let vx = self.stream.vertex_x[i] as i32;
+            let vy = self.stream.vertex_y[i] as i32;
 
             minx = minx.min(vx);
             maxx = maxx.max(vx);
@@ -1103,7 +1103,7 @@ impl Board {
             return;
         }
 
-        let value = if self.gl_color_is_index { self.gl_color_index } else { self.gl_color };
+        let value = if self.gl_color_is_index { self.gl_color_index } else { self.stream.color };
         if self.pattern_enabled() {
             let is_index = self.gl_color_is_index;
             self.pattern_fill(x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32, (x0 - minx as i64) as u32, (y0 - miny as i64) as u32, is_index, value);
@@ -1116,7 +1116,7 @@ impl Board {
     /// One line or polygon pixel in the current colour, clipped to the plane.
     pub fn gl_plot(&mut self, x: i64, y: i64) {
         let is_index = self.gl_color_is_index;
-        let value = if is_index { self.gl_color_index } else { self.gl_color };
+        let value = if is_index { self.gl_color_index } else { self.stream.color };
         self.paint_integer(x, y, is_index, value);
     }
 
@@ -1143,7 +1143,7 @@ impl Board {
     pub fn gl_segment_pixel(&mut self, x: i64, y: i64, clear: bool) {
         if !clear {
             self.gl_plot(x, y);
-        } else if (self.pattern_mode & mode::BLEND) != 0 && self.blend_word == blend::X_OPAQUE {
+        } else if (self.stream.pattern_mode & mode::BLEND) != 0 && self.blend_word == blend::X_OPAQUE {
             let is_index = self.gl_color_is_index;
             let value = self.pattern_background(is_index);
             self.paint_integer(x, y, is_index, value);
@@ -1151,24 +1151,24 @@ impl Board {
     }
 
     pub fn gl_segment(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, stippled: bool) {
-        let pattern = self.line_stipple[line::STIPPLE_PATTERN];
+        let pattern = self.stream.line_stipple[line::STIPPLE_PATTERN];
         let dx = x2 as f64 - x1 as f64;
         let dy = y2 as f64 - y1 as f64;
 
-        if stippled && self.line_stipple[line::STIPPLE_CONTROL] != line::STIPPLE_CONTROL_32 && !self.line_stipple_reported {
-            self.line_stipple_reported = true;
-            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: integer line stipple control {:#x} is not modeled; drawn as a 32-pixel stipple", self.line_stipple[line::STIPPLE_CONTROL]);
+        if stippled && self.stream.line_stipple[line::STIPPLE_CONTROL] != line::STIPPLE_CONTROL_32 && !self.diag.line_stipple_reported {
+            self.diag.line_stipple_reported = true;
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: integer line stipple control {:#x} is not modeled; drawn as a 32-pixel stipple", self.stream.line_stipple[line::STIPPLE_CONTROL]);
         }
 
         // These captured Xlib modes distinguish inclusion of the final vertex.
         // The bit's physical meaning is unknown. Limit this model policy to
         // solid axial independent lines; other integer paths retain their rules.
         if !stippled
-            && self.gl_primitive == GL_LINES
-            && ((self.pattern_mode & !(1u32 << 25)) == 0x00080000 || (self.pattern_mode & !(1u32 << 25)) == 0x00100000)
+            && self.stream.primitive == GL_LINES
+            && ((self.stream.pattern_mode & !(1u32 << 25)) == 0x00080000 || (self.stream.pattern_mode & !(1u32 << 25)) == 0x00100000)
             && (x1 == x2 || y1 == y2)
         {
-            let omit_last = (self.pattern_mode & (1u32 << 25)) != 0;
+            let omit_last = (self.stream.pattern_mode & (1u32 << 25)) != 0;
 
             if y1 == y2 {
                 let lo = (x1.min(x2) as i64).max(0);
@@ -1245,26 +1245,26 @@ impl Board {
                 continue;
             }
             let col: u32 = if px > 0.0 { px as u32 } else { 0 };
-            self.poly_marks[(row as usize) * ODSY_WIDTH as usize + col as usize] ^= 1;
-            self.poly_row_lo = (self.poly_row_lo as i64).min(row) as u32;
-            self.poly_row_hi = (self.poly_row_hi as i64).max(row + 1) as u32;
-            self.poly_col_lo = self.poly_col_lo.min(col);
+            self.stream.poly_marks[(row as usize) * ODSY_WIDTH as usize + col as usize] ^= 1;
+            self.stream.poly_row_lo = (self.stream.poly_row_lo as i64).min(row) as u32;
+            self.stream.poly_row_hi = (self.stream.poly_row_hi as i64).max(row + 1) as u32;
+            self.stream.poly_col_lo = self.stream.poly_col_lo.min(col);
             row += 1;
         }
     }
 
     /// Clear the polygon's marks; with paint, first fill what they enclose.
     pub fn gl_polygon_close(&mut self, paint: bool) {
-        let mut row = self.poly_row_lo;
+        let mut row = self.stream.poly_row_lo;
 
-        while row < self.poly_row_hi {
+        while row < self.stream.poly_row_hi {
             let base = row as usize * ODSY_WIDTH as usize;
             let mut inside: u8 = 0;
 
-            let mut col = self.poly_col_lo;
+            let mut col = self.stream.poly_col_lo;
             while col < ODSY_WIDTH {
-                inside ^= self.poly_marks[base + col as usize];
-                self.poly_marks[base + col as usize] = 0;
+                inside ^= self.stream.poly_marks[base + col as usize];
+                self.stream.poly_marks[base + col as usize] = 0;
                 if paint && inside != 0 {
                     self.gl_plot(col as i64, row as i64);
                 }
@@ -1272,14 +1272,14 @@ impl Board {
             }
             row += 1;
         }
-        self.poly_row_lo = ODSY_HEIGHT;
-        self.poly_row_hi = 0;
-        self.poly_col_lo = ODSY_WIDTH;
+        self.stream.poly_row_lo = ODSY_HEIGHT;
+        self.stream.poly_row_hi = 0;
+        self.stream.poly_col_lo = ODSY_WIDTH;
     }
 
     pub fn gl_hold(&mut self, slot: u32, x: u32, y: u32) {
-        self.gl_vertex_x[slot as usize] = x;
-        self.gl_vertex_y[slot as usize] = y;
+        self.stream.vertex_x[slot as usize] = x;
+        self.stream.vertex_y[slot as usize] = y;
     }
 
     /// One integer vertex, window origin already added. The command FIFO is a
@@ -1297,15 +1297,15 @@ impl Board {
     /// on the pixel GL's rule (floor of each coordinate) picks. The point size is
     /// not modeled.
     pub fn gl_vertex(&mut self, x: u32, y: u32) {
-        let n = self.gl_vertex_count;
-        self.gl_vertex_count = n.wrapping_add(1);
-        let stippled = (self.pattern_mode & pattern::MODE_ENABLE) == pattern::MODE_ENABLE;
+        let n = self.stream.vertex_count;
+        self.stream.vertex_count = n.wrapping_add(1);
+        let stippled = (self.stream.pattern_mode & pattern::MODE_ENABLE) == pattern::MODE_ENABLE;
 
         // The (0, 0) vertex a BEGIN-0xa image carries is not geometry.
-        if self.image_active {
+        if self.image.active {
             return;
         }
-        match self.gl_primitive {
+        match self.stream.primitive {
             gl_cmd::POINTS => {
                 self.gl_plot(x as i32 as i64, y as i32 as i64);
             }
@@ -1318,7 +1318,7 @@ impl Board {
             }
             gl_cmd::LINES => {
                 if n & 1 != 0 {
-                    let (hx, hy) = (self.gl_vertex_x[0], self.gl_vertex_y[0]);
+                    let (hx, hy) = (self.stream.vertex_x[0], self.stream.vertex_y[0]);
                     self.gl_segment(hx as i32, hy as i32, x as i32, y as i32, stippled);
                 } else {
                     self.gl_hold(0, x, y);
@@ -1328,7 +1328,7 @@ impl Board {
                 if n == 0 {
                     self.gl_hold(0, x, y);
                 } else {
-                    let (hx, hy) = (self.gl_vertex_x[1], self.gl_vertex_y[1]);
+                    let (hx, hy) = (self.stream.vertex_x[1], self.stream.vertex_y[1]);
                     self.gl_segment(hx as i32, hy as i32, x as i32, y as i32, stippled);
                 }
                 self.gl_hold(1, x, y);
@@ -1337,7 +1337,7 @@ impl Board {
                 if n == 0 {
                     self.gl_hold(0, x, y);
                 } else {
-                    let (hx, hy) = (self.gl_vertex_x[1], self.gl_vertex_y[1]);
+                    let (hx, hy) = (self.stream.vertex_x[1], self.stream.vertex_y[1]);
                     self.gl_polygon_edge(hx as i32, hy as i32, x as i32, y as i32);
                 }
                 self.gl_hold(1, x, y);
@@ -1347,38 +1347,38 @@ impl Board {
     }
 
     pub fn gl_end(&mut self) {
-        let count = self.gl_vertex_count;
-        let stippled = (self.pattern_mode & pattern::MODE_ENABLE) == pattern::MODE_ENABLE;
+        let count = self.stream.vertex_count;
+        let stippled = (self.stream.pattern_mode & pattern::MODE_ENABLE) == pattern::MODE_ENABLE;
 
         // END always closes the current primitive, the same as a real
         // immediate-mode glEnd(): the next BEGIN starts a fresh vertex count,
         // and a stray END with nothing newly accumulated since -- exactly
         // what the console text path issues to close out its per-row pixel runs,
         // which never call BEGIN again -- paints nothing.
-        self.gl_vertex_count = 0;
+        self.stream.vertex_count = 0;
 
         // END also closes a BEGIN-0xa image. The box and bursts already painted
         // as they streamed, so there is nothing more to do but leave image mode.
-        if self.image_active {
-            self.image_active = false;
-            self.image_bytes = 0;
-            self.image_nbytes = 0;
+        if self.image.active {
+            self.image.active = false;
+            self.image.bytes = 0;
+            self.image.nbytes = 0;
             return;
         }
 
         // Every piece but a loop's closing edge was drawn as it streamed.
-        match self.gl_primitive {
+        match self.stream.primitive {
             gl_cmd::POINTS | gl_cmd::QUADS | gl_cmd::LINES | gl_cmd::LINE_STRIP => {}
             gl_cmd::LINE_LOOP => {
                 if count >= 2 {
-                    let (ax, ay, bx, by) = (self.gl_vertex_x[1], self.gl_vertex_y[1], self.gl_vertex_x[0], self.gl_vertex_y[0]);
+                    let (ax, ay, bx, by) = (self.stream.vertex_x[1], self.stream.vertex_y[1], self.stream.vertex_x[0], self.stream.vertex_y[0]);
                     self.gl_segment(ax as i32, ay as i32, bx as i32, by as i32, stippled);
                 }
             }
             gl_cmd::POLYGON => {
                 // Fewer than three vertices enclose nothing.
                 if count >= 3 {
-                    let (ax, ay, bx, by) = (self.gl_vertex_x[1], self.gl_vertex_y[1], self.gl_vertex_x[0], self.gl_vertex_y[0]);
+                    let (ax, ay, bx, by) = (self.stream.vertex_x[1], self.stream.vertex_y[1], self.stream.vertex_x[0], self.stream.vertex_y[0]);
                     self.gl_polygon_edge(ax as i32, ay as i32, bx as i32, by as i32);
                 }
                 self.gl_polygon_close(count >= 3);
@@ -1390,7 +1390,7 @@ impl Board {
                 if count == 0 {
                     return;
                 }
-                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: command FIFO OpenGL primitive {:#x} is not modeled", self.gl_primitive);
+                crate::dlog!(LogModule::Odyssey, "sgi-odyssey: command FIFO OpenGL primitive {:#x} is not modeled", self.stream.primitive);
                 return;
             }
         }

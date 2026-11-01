@@ -151,7 +151,7 @@ impl Display {
 impl Board {
     /// Pixel (x, y)'s main drawable id, bits 7:3 of its id-plane byte.
     pub fn main_id(&mut self, x: u32, y: u32) -> u32 {
-        ((self.did[(y * ODSY_WIDTH + x) as usize] as u32) >> ODSY_DID_MAIN_SHIFT) & (dispmode::COUNT - 1)
+        ((self.planes.did[(y * ODSY_WIDTH + x) as usize] as u32) >> ODSY_DID_MAIN_SHIFT) & (dispmode::COUNT - 1)
     }
 
     /// The colormap group main drawable main_id shows through: bits 8:4 of its
@@ -269,7 +269,7 @@ impl Board {
         if be0 != be1 {
             return None;
         }
-        Some(ScanoutLine { colour: [l0, l1], be: be0, did: self.did.get(at..at + w)?, overlay: self.overlay.get(at..at + w)? })
+        Some(ScanoutLine { colour: [l0, l1], be: be0, did: self.planes.did.get(at..at + w)?, overlay: self.planes.overlay.get(at..at + w)? })
     }
 
     /// Resolve the colour buffers at scanout; see resolve_row_generic().
