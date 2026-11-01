@@ -56,33 +56,32 @@ impl Board {
             return;
         }
 
-        // -1 (no register) becomes u64::MAX, which no constant matches.
-        match reg(addr, size) as u64 {
-            ODSY_RESET_CONTROL => {
+        match reg(addr, size) {
+            Some(ODSY_RESET_CONTROL) => {
                 crate::dlog!(
                     LogModule::Odyssey,
                     "sgi-odyssey: write of {:#x} to the reset control register accepted; its effect is unknown",
                     value
                 );
             }
-            mem::CONTROL => self.memory_control(value as u32),
-            flctl::CONFIG => self.flctl_config = value as u32,
-            ODSY_BUZZ_1 => self.buzz[0] = value as u32,
-            ODSY_BUZZ_2 => self.buzz[1] = value as u32,
-            ODSY_BUZZ_3 => self.buzz[2] = value as u32,
-            ODSY_BUZZ_4 => self.buzz[3] = value as u32,
-            ODSY_BUZZ_5 => self.buzz[4] = value as u32,
-            ODSY_BUZZ_6 => self.buzz[5] = value as u32,
-            nic::PROM | nic::KERNEL => self.nic_slot(value as u32),
-            host::WRITE_ADDR_UPPER => {
+            Some(mem::CONTROL) => self.memory_control(value as u32),
+            Some(flctl::CONFIG) => self.flctl_config = value as u32,
+            Some(ODSY_BUZZ_1) => self.buzz[0] = value as u32,
+            Some(ODSY_BUZZ_2) => self.buzz[1] = value as u32,
+            Some(ODSY_BUZZ_3) => self.buzz[2] = value as u32,
+            Some(ODSY_BUZZ_4) => self.buzz[3] = value as u32,
+            Some(ODSY_BUZZ_5) => self.buzz[4] = value as u32,
+            Some(ODSY_BUZZ_6) => self.buzz[5] = value as u32,
+            Some(nic::PROM | nic::KERNEL) => self.nic_slot(value as u32),
+            Some(host::WRITE_ADDR_UPPER) => {
                 self.query_cancel();
                 self.host_write_addr_upper = value as u32;
             }
-            host::WRITE_ADDR_LOWER => {
+            Some(host::WRITE_ADDR_LOWER) => {
                 self.query_cancel();
                 self.host_write_addr_lower = value as u32;
             }
-            stats::ADDR_UPPER | stats::ADDR_LOWER | stats::CONTROL => {
+            Some(stats::ADDR_UPPER | stats::ADDR_LOWER | stats::CONTROL) => {
                 if addr == stats::ADDR_UPPER {
                     self.stats_addr_upper = value as u32;
                 } else if addr == stats::ADDR_LOWER {
@@ -100,20 +99,20 @@ impl Board {
                     );
                 }
             }
-            ctx::SHADOW_ADDR_UPPER => {
+            Some(ctx::SHADOW_ADDR_UPPER) => {
                 self.query_cancel();
                 self.ctx_shadow_addr_upper = value as u32;
             }
-            ctx::SHADOW_ADDR_LOWER => {
+            Some(ctx::SHADOW_ADDR_LOWER) => {
                 self.query_cancel();
                 self.ctx_shadow_addr_lower = value as u32;
             }
-            mem::CONFIG
+            Some(mem::CONFIG
             | i2c::MAIN_CMD_READ
             | i2c::MAIN_STATUS_READ
             | i2c::OPT_CMD_READ
             | i2c::OPT_STATUS_READ
-            | backend::VERSION => {
+            | backend::VERSION) => {
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: write of {:#x} to the read-only register at {:#x}", value, addr);
             }
             _ => self.unimplemented(addr, size, true),
@@ -151,8 +150,7 @@ pub(super) fn fifo_port(addr: u64) -> bool {
 pub(super) fn command_store(addr: u64, size: u32) -> bool {
     fifo_port(addr)
         || (addr == ctx::SWITCH_PORT && size == 8)
-        || reg(addr, size) == ctx::SHADOW_ADDR_UPPER as i64
-        || reg(addr, size) == ctx::SHADOW_ADDR_LOWER as i64
+        || matches!(reg(addr, size), Some(ctx::SHADOW_ADDR_UPPER | ctx::SHADOW_ADDR_LOWER))
 }
 
 /// A read of the level word `0x106c`, which never waits: it is a plain load
@@ -161,7 +159,7 @@ pub(super) fn command_store(addr: u64, size: u32) -> bool {
 /// drain waits poll bits 15:7 until they read 0, which the live level
 /// does once the board has run the queue.
 pub(super) fn level_word(addr: u64, size: u32) -> bool {
-    reg(addr, size) == mem::CONFIG as i64
+    reg(addr, size) == Some(mem::CONFIG)
 }
 
 /// Accesses that need not wait for the queued stores, and act on the board
@@ -173,7 +171,7 @@ pub(super) fn access_waits(addr: u64, size: u32, write: bool) -> bool {
     if fifo_port(addr) {
         return !write;
     }
-    if reg(addr, size) < 0 {
+    let Some(r) = reg(addr, size) else {
         // Outside the modeled registers only the back-end and
         // context-switch ports and the cursor do anything; the rest is
         // logged and answers zero, so it need not wait.
@@ -181,12 +179,12 @@ pub(super) fn access_waits(addr: u64, size: u32, write: bool) -> bool {
             return addr == backend::SELECT || addr == ctx::SWITCH_PORT;
         }
         return false;
-    }
+    };
     if !write && addr >= cursor && addr < cursor + ((cursor::ENTRIES as u64) << 3) {
         return false;
     }
     !matches!(
-        reg(addr, size) as u64,
+        r,
         ODSY_IDENTITY
             | ODSY_STATUS
             | ODSY_ERROR_ADDR_UPPER

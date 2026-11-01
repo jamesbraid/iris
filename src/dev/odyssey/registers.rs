@@ -75,24 +75,24 @@ impl Board {
     }
 }
 
-/// The modeled register an access names, or -1. A configuration-block
+/// The modeled register an access names, or None. A configuration-block
 /// register answers its 64-bit address and the 32-bit spelling of either
 /// half identically (a live V12 board reads the same value at a register's
 /// base and at base+4 across the block). Every other register has only been
 /// seen as a 32-bit access. Other widths, alignments and offsets are
 /// unmodeled rather than an error.
-pub(super) fn reg(addr: u64, size: u32) -> i64 {
+pub(super) fn reg(addr: u64, size: u32) -> Option<u64> {
     if addr < ODSY_BLOCK_END {
         if (size == 8 || size == 4) && (addr & 7) == 0 {
-            return addr as i64;
+            return Some(addr);
         }
         if size == 4 && (addr & 7) == 4 {
-            return (addr & !7) as i64;
+            return Some(addr & !7);
         }
-        return -1;
+        return None;
     }
     if size != 4 {
-        return -1;
+        return None;
     }
     match addr {
         intr::FLAGS
@@ -134,8 +134,8 @@ pub(super) fn reg(addr: u64, size: u32) -> i64 {
         | ctx::SHADOW_ADDR_LOWER
         | ODSY_RESET_CONTROL
         | mem::CONTROL
-        | backend::VERSION => addr as i64,
-        _ => -1,
+        | backend::VERSION => Some(addr),
+        _ => None,
     }
 }
 
@@ -376,15 +376,13 @@ impl Board {
         let mut value: u64 = 0;
         let sequence = self.trace_sequence.fetch_add(1, Ordering::Relaxed);
 
-        let reg = reg(addr, size);
-        let key = if reg < 0 { u64::MAX } else { reg as u64 };
-        match key {
-            cfifo::SELFTEST => {
+        match reg(addr, size) {
+            Some(cfifo::SELFTEST) => {
                 // Answers OK only after the kernel driver's command-FIFO
                 // initialisation preamble; zero before.
                 value = if self.cfifo_selftest_ready { cfifo::SELFTEST_OK as u64 } else { 0 };
             }
-            mem::CONFIG => {
+            Some(mem::CONFIG) => {
                 // Bits 15:7: the field and the drain waits are ESTABLISHED,
                 // its unit UNKNOWN, and a count of unreturned credits
                 // INFERRED (datasheet, "Grades for withdrawn claims", level
@@ -395,20 +393,20 @@ impl Board {
                 let doublewords = self.fifo.level().div_ceil(2).min(0x1ff);
                 value = (self.memory_config | (doublewords << 7)) as u64;
             }
-            flctl::CONFIG => value = self.flctl_config as u64,
-            ODSY_BUZZ_1 => value = self.buzz[0] as u64,
-            ODSY_BUZZ_2 => value = self.buzz[1] as u64,
-            ODSY_BUZZ_3 => value = self.buzz[2] as u64,
-            ODSY_BUZZ_4 => value = self.buzz[3] as u64,
-            ODSY_BUZZ_5 => value = self.buzz[4] as u64,
-            ODSY_BUZZ_6 => value = self.buzz[5] as u64,
-            nic::PROM | nic::KERNEL => value = self.nic as u64,
-            i2c::MAIN_CMD_READ => value = self.i2c_main_cmd as u64,
-            i2c::MAIN_STATUS_READ => value = i2c_status(self.i2c_main_cmd) as u64,
-            i2c::OPT_CMD_READ => value = self.i2c_opt_cmd as u64,
-            i2c::OPT_STATUS_READ => value = i2c_status(self.i2c_opt_cmd) as u64,
-            backend::VERSION => value = (self.backend_version & 7) as u64,
-            host::WRITE_ADDR_UPPER
+            Some(flctl::CONFIG) => value = self.flctl_config as u64,
+            Some(ODSY_BUZZ_1) => value = self.buzz[0] as u64,
+            Some(ODSY_BUZZ_2) => value = self.buzz[1] as u64,
+            Some(ODSY_BUZZ_3) => value = self.buzz[2] as u64,
+            Some(ODSY_BUZZ_4) => value = self.buzz[3] as u64,
+            Some(ODSY_BUZZ_5) => value = self.buzz[4] as u64,
+            Some(ODSY_BUZZ_6) => value = self.buzz[5] as u64,
+            Some(nic::PROM | nic::KERNEL) => value = self.nic as u64,
+            Some(i2c::MAIN_CMD_READ) => value = self.i2c_main_cmd as u64,
+            Some(i2c::MAIN_STATUS_READ) => value = i2c_status(self.i2c_main_cmd) as u64,
+            Some(i2c::OPT_CMD_READ) => value = self.i2c_opt_cmd as u64,
+            Some(i2c::OPT_STATUS_READ) => value = i2c_status(self.i2c_opt_cmd) as u64,
+            Some(backend::VERSION) => value = (self.backend_version & 7) as u64,
+            Some(host::WRITE_ADDR_UPPER
             | host::WRITE_ADDR_LOWER
             | stats::ADDR_UPPER
             | stats::ADDR_LOWER
@@ -416,7 +414,7 @@ impl Board {
             | ctx::SHADOW_ADDR_UPPER
             | ctx::SHADOW_ADDR_LOWER
             | ODSY_RESET_CONTROL
-            | mem::CONTROL => {
+            | mem::CONTROL) => {
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: read of the write-only register at {:#x}", addr);
             }
             _ => {
