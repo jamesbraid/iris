@@ -982,7 +982,12 @@ pub(super) mod alpha {
     pub const FUNC_SHIFT: u32 = 12;
     pub const FUNC_MASK: u32 = 0x7;
     pub const REF_MASK: u32 = 0xfff;
-    pub const REF_SCALE: f32 = 4095.0;
+    /// The field is trunc(x * 4096), with 1.0 sent as 4095 (the clamp) and
+    /// 0x800 = 0.5. Only the clamp is chosen here: the alpha test compares at
+    /// 12 bits by floor, where /4096 and /4095 floor to the same field for
+    /// every reference, so the scale cannot be seen.
+    pub const REF_SCALE: f32 = 4096.0;
+    pub const REF_ONE: u32 = 0xfff;
 }
 
 pub(super) mod blend {

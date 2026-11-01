@@ -479,8 +479,12 @@ impl Board {
                 let mut args = [0u32; 2];
 
                 args[0] = GL_NEVER_ENUM + ((word >> alpha::FUNC_SHIFT) & alpha::FUNC_MASK);
-                // The library encodes 1.0 as 4095 (ESTABLISHED).
-                args[1] = f32_bits((word & alpha::REF_MASK) as f32 / alpha::REF_SCALE);
+                // The reference is a 12-bit field, x4096 with 1.0 sent as 4095
+                // (ESTABLISHED). The 12-bit floor comparison cannot tell /4096
+                // from /4095, so the decode is invisible.
+                let field = word & alpha::REF_MASK;
+                let reference = if field == alpha::REF_ONE { 1.0 } else { field as f32 / alpha::REF_SCALE };
+                args[1] = f32_bits(reference);
                 self.gl_feed(op::ALPHA_FUNC as u16, &args);
             }
             reg::STENCIL_FUNC => {
@@ -757,7 +761,7 @@ impl Board {
             0x0740 => {
                 self.prim.restart_select = self.cmd.operand[0];
                 // The kernel selects 0x1ed as well as 0x1e0. What 0x1ed selects is
-                // UNKNOWN: it is accepted and 0x0741 does nothing for it.
+                // UNKNOWN: it is accepted, and 0x0741 is still reported.
                 if self.prim.restart_select != 0x1e0 && self.prim.restart_select != 0x1ed {
                     self.cmd_unimplemented(0x740);
                 }

@@ -603,15 +603,27 @@ fn an_unmodelled_word_passes_over_the_operands_its_arity_names() {
     assert_eq!(s.diag.reported_cmd[1], 0x123);
 }
 
-/// The alpha reference is a 12-bit field over 4095: the library sends 1.0 as
-/// 4095, so the field's largest value is the largest reference, and the
-/// reference the field names is the alpha that sits exactly on it. Over 4096
-/// the top field would be just under 1.0 and every field's reference one
-/// part in 4096 low. A fragment alpha exactly at the reference passes
-/// GL_GEQUAL and fails GL_GREATER; one field step below fails both, one
-/// above passes both.
+/// The kernel's context switch ends with `0x0740 0x1ed` and `0x0741 0`. 0x1ed
+/// is accepted, so 0x0740 is not reported, but 0x0741 is still reported.
 #[test]
-fn the_alpha_reference_field_is_a_fraction_of_4095() {
+fn the_restart_select_1ed_is_accepted_and_0741_is_reported() {
+    let (mut s, _) = board("v12");
+
+    cmd(&mut s, 0x0000_0740);
+    cmd(&mut s, 0x1ed);
+    assert_eq!(s.diag.reported_cmd_count, 0, "0x0740 with 0x1ed is accepted");
+    cmd(&mut s, 0x0000_0741);
+    cmd(&mut s, 0);
+    assert_eq!(s.diag.reported_cmd_count, 1, "0x0741 is reported");
+    assert_eq!(s.diag.reported_cmd[0], 0x741);
+}
+
+/// The alpha reference is a 12-bit field, x4096 with 1.0 sent as 4095 and
+/// 0x800 = 0.5. The board's alpha test (`RasterRules::alpha_test`) compares at
+/// 12 bits: a fragment alpha on the field's step passes GL_GEQUAL and fails
+/// GL_GREATER; one field step below fails both, one above passes both.
+#[test]
+fn the_alpha_reference_field_is_a_fraction_of_4096() {
     use crate::dev::odyssey::gl_context::{GL_GEQUAL, GL_GREATER};
 
     for field in [1u32, 2048, 4094] {
@@ -620,10 +632,11 @@ fn the_alpha_reference_field_is_a_fraction_of_4095() {
             cmd(&mut s, select(reg::ALPHA_FUNC));
             cmd(&mut s, func << 12 | field);
             let r = s.gl_ctx.cur.alpha_ref;
-            let step = |k: i32| (field as i32 + k) as f32 / 4095.0;
+            let step = |k: i32| (field as i32 + k) as f64 / 4096.0;
 
-            assert_eq!(r, field as f32 / 4095.0, "field {field}");
-            let passes = |alpha: f32| if func == GL_GEQUAL { alpha >= r } else { alpha > r };
+            assert_eq!(r, field as f32 / 4096.0, "field {field}");
+            let rules = crate::dev::odyssey::draw::gl_rules();
+            let passes = |alpha: f64| rules.alpha_test(func, alpha, r as f64);
             assert_eq!(passes(step(0)), at_passes, "field {field} at the reference, func {func:#x}");
             assert!(!passes(step(-1)), "field {field} one step below, func {func:#x}");
             assert!(passes(step(1)), "field {field} one step above, func {func:#x}");
@@ -633,4 +646,7 @@ fn the_alpha_reference_field_is_a_fraction_of_4095() {
     cmd(&mut s, select(reg::ALPHA_FUNC));
     cmd(&mut s, (crate::dev::odyssey::gl_context::GL_ALWAYS << 12) | 4095);
     assert_eq!(s.gl_ctx.cur.alpha_ref, 1.0, "the top field is exactly 1.0");
+    cmd(&mut s, select(reg::ALPHA_FUNC));
+    cmd(&mut s, (crate::dev::odyssey::gl_context::GL_ALWAYS << 12) | 0x800);
+    assert_eq!(s.gl_ctx.cur.alpha_ref, 0.5, "0x800 is 0.5");
 }
