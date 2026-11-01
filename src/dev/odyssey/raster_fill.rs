@@ -29,15 +29,32 @@
 //! quads and takes the same level of detail for each, a fragment at a time
 //! (SoftDraw::clipped_triangle()).
 
-use super::*;
 
+use super::gl::{GlPlaneRow, GlPlanes};
+use super::gl_context::{
+    GL_ALWAYS, GL_CLIP_PLANES, GL_COLOUR_MASK_ALL, GL_FLAT, GL_FUNC_ADD, GL_FUNC_REVERSE_SUBTRACT,
+    GL_FUNC_SUBTRACT, GL_INTENSITY, GL_KEEP, GL_LEQUAL, GL_LESS, GL_LINEAR,
+    GL_LINEAR_MIPMAP_LINEAR, GL_LUMINANCE_ALPHA, GL_MAX, GL_MAX_TARGETS, GL_MIN, GL_MODULATE,
+    GL_NEAREST, GL_ONE_MINUS_SRC_ALPHA, GL_REPEAT, GL_REPLACE, GL_RGB, GL_RGBA, GL_SRC_ALPHA,
+    GlDrawState,
+};
+use super::memory::CLIP_MAX;
+use super::raster::{
+    fmax, fmin, soft_blend_factor, soft_compare, soft_unit, Planes, RasterColour, RasterRules,
+    RasterTarget, SoftDraw, SoftFrag, SoftVertex, TexturePath,
+};
+use super::raster_fixed_texture::{
+    fx_max, fx_min, FIXED_ANY, FIXED_LINEAR, FIXED_NEAREST, FIXED_TRILINEAR, SOFT_TEXTURE_PATH,
+    SoftFixedTex, SoftTexSpan,
+};
+use super::raster_texture::{soft_quad_coords, soft_quad_rho_of, SoftQuadCoords, SoftTexPlane};
 /// A FillMode parameter that reads its state at run time.
-pub const FILL_DYN: u32 = u32::MAX;
+pub(super) const FILL_DYN: u32 = u32::MAX;
 
 /// BLEND: off, the alpha-over blend (SRC_ALPHA, ONE_MINUS_SRC_ALPHA, added),
 /// or FILL_DYN for any blend the draw state names.
-pub const FILL_BLEND_OFF: u32 = 0;
-pub const FILL_BLEND_OVER: u32 = 1;
+pub(super) const FILL_BLEND_OFF: u32 = 0;
+pub(super) const FILL_BLEND_OVER: u32 = 1;
 
 /// Which row loops filled triangles take, for tests and the benchmark:
 /// TABLE the specialisations where the state has one, DYNAMIC the
@@ -45,26 +62,26 @@ pub const FILL_BLEND_OVER: u32 = 1;
 /// fills (the general per-fragment path; textured fills keep their own
 /// switch, raster_set_texture_path()).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum FillPath {
+pub(super) enum FillPath {
     Table,
     Dynamic,
     Off,
 }
 
 thread_local! {
-    pub static SOFT_FILL_PATH: std::cell::Cell<FillPath> = const { std::cell::Cell::new(FillPath::Table) };
+    pub(super) static SOFT_FILL_PATH: std::cell::Cell<FillPath> = const { std::cell::Cell::new(FillPath::Table) };
 }
 
 /// Select the row loops for draws made on this thread. Per thread, so that
 /// tests running at once cannot change each other's path.
-pub fn raster_set_fill_path(path: FillPath) {
+pub(super) fn raster_set_fill_path(path: FillPath) {
     SOFT_FILL_PATH.with(|p| p.set(path));
 }
 
 /// The draw state a row loop branches on. Under FillMode each accessor is a
 /// constant where its parameter is, and a read of the state where it is
 /// FILL_DYN.
-pub trait Fill {
+pub(super) trait Fill {
     /// The loop that tests at run time all the state this one names: the
     /// fallback with the same texturing.
     type Dyn: Fill;
@@ -94,7 +111,7 @@ pub trait Fill {
 /// SMOOTH and FOG are 0, 1 or FILL_DYN; FUNC a depth function or FILL_DYN;
 /// BLEND one of the FILL_BLEND_ values or FILL_DYN; STENCIL and CLIP 0 or
 /// FILL_DYN.
-pub struct FillMode<
+pub(super) struct FillMode<
     const TEX: bool,
     const KERNEL: u32,
     const REPEAT: bool,
@@ -186,7 +203,7 @@ impl<
 /// them (SoftDraw::fill_run()): px0 to px1, the edge values at px0, and
 /// whether a pixel must still test the window's rectangles.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct FillRun {
+pub(super) struct FillRun {
     pub px0: i32,
     pub px1: i32,
     pub e1: i64,
@@ -574,7 +591,7 @@ impl SoftDraw<'_> {
 /// and fragment, which draws the fragment at window pixel (px, py) whose edge
 /// values for v[2]-v[0] and v[0]-v[1] are e1 and e2 through the general
 /// path, its quad's footprint included.
-pub struct QuadGeneral<'g> {
+pub(super) struct QuadGeneral<'g> {
     pub scales: Option<(f64, f64)>,
     pub fragment: &'g dyn Fn(i32, i32, i64, i64),
 }
@@ -582,7 +599,7 @@ pub struct QuadGeneral<'g> {
 /// The owned run of one row of a triangle: pixels px0 to px1, whose edge
 /// values for v[2]-v[0] and v[0]-v[1] at px0 are e1 and e2.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct QuadRow {
+pub(super) struct QuadRow {
     pub px0: i32,
     pub px1: i32,
     pub e1: i64,
@@ -755,7 +772,7 @@ fill_rows! {
 
 /// Textured specialisations by depth function (LESS, LEQUAL), kernel less
 /// one, then replace or modulate, then RGBA or RGB.
-pub const SOFT_TEXTURE_SPANS: [[[[FillRow; 2]; 2]; 3]; 2] = {
+pub(super) const SOFT_TEXTURE_SPANS: [[[[FillRow; 2]; 2]; 3]; 2] = {
     use FillRow::*;
     [
         [
@@ -777,7 +794,7 @@ pub const SOFT_TEXTURE_SPANS: [[[[FillRow; 2]; 2]; 3]; 2] = {
 /// The specialisations for a wrap other than REPEAT on both axes, indexed as
 /// SOFT_TEXTURE_SPANS; None where only the loop that tests every state per
 /// pixel (FillRow::TextureAny) takes the draw.
-pub const SOFT_TEXTURE_SPANS_EDGE: [[[[Option<FillRow>; 2]; 2]; 3]; 2] = {
+pub(super) const SOFT_TEXTURE_SPANS_EDGE: [[[[Option<FillRow>; 2]; 2]; 3]; 2] = {
     use FillRow::*;
     let mut t = [[[[None; 2]; 2]; 3]; 2];
 
@@ -787,7 +804,7 @@ pub const SOFT_TEXTURE_SPANS_EDGE: [[[[Option<FillRow>; 2]; 2]; 3]; 2] = {
 
 /// Untextured specialisations by depth (none, LESS, LEQUAL), shading (flat,
 /// smooth), blend (off, over).
-pub const SOFT_FILL_TABLE: [[[FillRow; 2]; 2]; 3] = {
+pub(super) const SOFT_FILL_TABLE: [[[FillRow; 2]; 2]; 3] = {
     use FillRow::*;
     [
         [[NodepthFlat, NodepthFlatOver], [NodepthSmooth, NodepthSmoothOver]],
@@ -930,7 +947,26 @@ impl SoftDraw<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dev::odyssey::raster_bench::*;
+
+    use crate::dev::odyssey::consts::{
+        ODSY_ID_COMPARE_ENABLE, ODSY_ID_COMPARE_MASK_SHIFT, ODSY_TEX_LOD_MASK, ODSY_TEX_LOD_ONE,
+    };
+    use crate::dev::odyssey::gl::{texture_lod_limit, texture_lod_word};
+    use crate::dev::odyssey::gl_context::{
+        GL_BLEND, GL_CLAMP_TO_EDGE, GL_CONSTANT_ALPHA, GL_DECAL, GL_DECR, GL_DST_ALPHA, GL_EQUAL,
+        GL_EXP, GL_EXP2, GL_GREATER, GL_INCR, GL_INVERT, GL_LUMINANCE, GL_NEAREST_MIPMAP_NEAREST,
+        GL_NEVER, GL_NOTEQUAL, GL_OFFSET_FILL, GL_ONE_MINUS_DST_COLOR, GL_SMOOTH,
+        GL_SRC_ALPHA_SATURATE, GL_TRIANGLES, GL_VERTEX_FLOATS, GL_V_COLOR, GL_V_POSITION,
+        GL_V_TEXCOORD, GlDraw,
+    };
+
+    use crate::dev::odyssey::memory::ClipRect;
+    use crate::dev::odyssey::raster::{GlTexLevel, SoftReports, Texels};
+    use crate::dev::odyssey::raster_bench::{BENCH_H, BENCH_W, Bench, BenchTexture, Lcg};
+    use crate::dev::odyssey::raster_fixed_texture::raster_set_texture_path;
+    use crate::dev::odyssey::raster_triangle::raster_set_aa_whole_box;
+
+
 
     /// The square of plane pixels the cases draw in.
     const SIDE: i32 = 160;

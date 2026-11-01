@@ -2,6 +2,20 @@
 //! firmware and the graphics driver walk, the registers they only store,
 //! and the way anything past that ladder stays visibly unmodelled.
 
+use crate::dev::odyssey::board::{Board, ODSY_UNIMP_REPORTS};
+use crate::dev::odyssey::consts::{
+    ODSY_BACKEND_READ_BASE, ODSY_BACKEND_SELECT, ODSY_BUZZ_1, ODSY_BUZZ_2, ODSY_BUZZ_3,
+    ODSY_BUZZ_4, ODSY_BUZZ_5, ODSY_BUZZ_6, ODSY_CFIFO_SELFTEST, ODSY_CFIFO_SELFTEST_OK,
+    ODSY_CMD_FIFO, ODSY_ERROR_COMMAND, ODSY_FLCTL_CONFIG, ODSY_FLCTL_CONFIG_RESET,
+    ODSY_FLCTL_TARGET, ODSY_GL_COLOR_3UB, ODSY_GL_TRIANGLES, ODSY_I2C_OPT_CMD_INDEX,
+    ODSY_I2C_OPT_CMD_READ, ODSY_I2C_OPT_STATUS_READ, ODSY_INTR_ENABLE_SET, ODSY_INTR_FLAGS,
+    ODSY_MEMORY_CONTROL, ODSY_NIC_DONE, ODSY_NIC_LEVEL, ODSY_NIC_PROM, ODSY_NIC_PULSE_SHIFT,
+    ODSY_NIC_SAMPLE_SHIFT, ODSY_REG_GL_BEGIN, ODSY_RESET_CONTROL, ODSY_STATS_ADDR_LOWER,
+    ODSY_STATS_ADDR_UPPER, ODSY_STATS_CONTROL, ODSY_STATUS, ODSY_STATUS0, ODSY_SW_TOKEN,
+    ODSY_XT_REQ_TIMEOUT, ODSY_XT_REQ_TIMEOUT_RESET,
+};
+use crate::dev::odyssey::tests::{board, board_with_ram, cmd, cmd64, reg_read, reg_write, select, VPRO_WIDGET};
+use std::sync::atomic::Ordering;
 use super::*;
 
 /// Where the one-wire access register's low-drive widths mean what: a

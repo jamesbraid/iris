@@ -1,9 +1,56 @@
 //! Pixel DMA, queries, colour conversions and the texture level build.
 
-use super::*;
 
+use crate::devlog::LogModule;
+use std::sync::atomic::Ordering;
+use super::board::{Board, ODSY_CMD_OPERANDS_MAX, ODSY_HEIGHT, ODSY_OBJECTS, ODSY_WIDTH};
+use super::consts::{
+    cmd_arity, ODSY_BUFFERS, ODSY_CLIP_BOX_FIELD_MASK, ODSY_DEPTH24_MAX, ODSY_DEST_WIDTH_UNIT,
+    ODSY_DMA_ABGR_CONTROL_IGNORED, ODSY_DMA_BOTTOM_UP, ODSY_DMA_BPP_MASK, ODSY_DMA_BPP_SHIFT,
+    ODSY_DMA_BYTE_INDEX, ODSY_DMA_BYTE_INDEX_HIGH, ODSY_DMA_BYTE_INDEX_OR_RED, ODSY_DMA_BYTE_ZERO,
+    ODSY_DMA_DESC_ADDR_HIGH_MASK, ODSY_DMA_DESC_ADDR_HIGH_SHIFT, ODSY_DMA_DESC_ADDR_LOW_MASK,
+    ODSY_DMA_FENCE_INTERRUPT, ODSY_DMA_FENCE_SLOT_MASK, ODSY_DMA_FMT_CLASS_MASK,
+    ODSY_DMA_FMT_CODE_MASK, ODSY_DMA_FMT_CODE_SHIFT, ODSY_DMA_FMT_FRONT, ODSY_DMA_FMT_RAW16,
+    ODSY_DMA_FMT_RAW32, ODSY_DMA_FMT_RAW64, ODSY_DMA_FMT_SELECTOR_DRAW, ODSY_DMA_FMT_SELECTOR_MASK,
+    ODSY_DMA_FMT_SELECTOR_READ, ODSY_DMA_FMT_SELECTOR_SHIFT, ODSY_DMA_FMT_SIZE_DEPTH,
+    ODSY_DMA_FMT_SIZE_MASK, ODSY_DMA_FMT_SIZE_SHIFT, ODSY_DMA_FMT_SIZE_STENCIL,
+    ODSY_DMA_HDR_CONTROL, ODSY_DMA_HDR_DEST, ODSY_DMA_HDR_FORMAT, ODSY_DMA_HDR_ORIGIN,
+    ODSY_DMA_HDR_ROWBYTES, ODSY_DMA_HDR_SIZE, ODSY_DMA_HDR_SKIP, ODSY_DMA_HDR_WIDTH,
+    ODSY_DMA_HDR_WORDS, ODSY_DMA_IRQ_REQUEST, ODSY_DMA_MAX_PAGES, ODSY_DMA_MOVIE_CONTROL,
+    ODSY_DMA_MOVIE_FORMAT, ODSY_DMA_PAGE_SIZE, ODSY_DMA_PIECE_PAGES, ODSY_DMA_PTE_ADDR_SHIFT,
+    ODSY_DMA_PTE_LEN_MASK, ODSY_DMA_REPORT_BOUNDS, ODSY_DMA_REPORT_COLOUR_OVER_INDEX,
+    ODSY_DMA_REPORT_DRAW_SENTINEL, ODSY_DMA_REPORT_INDEX, ODSY_DMA_REPORT_INDEX_OBJECT,
+    ODSY_DMA_REPORT_LAYOUT, ODSY_DMA_REPORT_RAW64, ODSY_DMA_REPORT_SENTINEL, ODSY_DMA_REPORT_SHAPE,
+    ODSY_DMA_REPORT_SOURCE, ODSY_DMA_REPORT_STENCIL_OR_INDEX, ODSY_DMA_REPORT_UNLISTED_FIELDS,
+    ODSY_DMA_REPORT_UPLOAD_SENTINEL, ODSY_DMA_REPORT_WRITE, ODSY_DMA_ROWBYTES_MASK,
+    ODSY_DMA_SENTINEL, ODSY_DMA_SENTINEL_DRAW, ODSY_DMA_SENTINEL_READ, ODSY_DMA_TABLE_HEADER,
+    ODSY_DMA_TO_HOST, ODSY_DRAW_WORD_STATE, ODSY_F32_ONE, ODSY_F32_SCALE_16, ODSY_F32_SCALE_32,
+    ODSY_F32_SCALE_8, ODSY_GAMMA_GROUP, ODSY_GL_COLOR_3B, ODSY_GL_COLOR_3F, ODSY_GL_COLOR_3I,
+    ODSY_GL_COLOR_3S, ODSY_GL_COLOR_3UB, ODSY_GL_COLOR_3UI, ODSY_GL_COLOR_3US, ODSY_GL_COLOR_4B,
+    ODSY_GL_COLOR_4F, ODSY_GL_COLOR_4I, ODSY_GL_COLOR_4S, ODSY_GL_COLOR_4UB, ODSY_GL_COLOR_4UI,
+    ODSY_GL_COLOR_4US, ODSY_GL_COLOR_INDEX, ODSY_GL_COLOR_INDEX_F, ODSY_GL_COLOR_TYPE_3,
+    ODSY_GL_COLOR_TYPE_4, ODSY_GL_COLOR_TYPE_MASK, ODSY_GL_INDEX_MODE_COLOR_3F,
+    ODSY_GL_INDEX_MODE_COLOR_3I, ODSY_GL_INDEX_MODE_COLOR_4F, ODSY_GL_NORMAL_3B, ODSY_GL_NORMAL_3F,
+    ODSY_GL_NORMAL_3I, ODSY_GL_NORMAL_3S, ODSY_GL_QUADS, ODSY_GL_REPLAY_INDEX,
+    ODSY_GL_REPLAY_INDEX_F, ODSY_GL_TEXCOORD_1F, ODSY_GL_TEXCOORD_1I, ODSY_GL_TEXCOORD_2F,
+    ODSY_GL_TEXCOORD_2I, ODSY_GL_TEXCOORD_3F, ODSY_GL_TEXCOORD_3I, ODSY_GL_TEXCOORD_4F,
+    ODSY_GL_TEXCOORD_4I, ODSY_GL_TEXCOORD_SHAPE, ODSY_GL_TEXCOORD_TAG, ODSY_GL_VERTEX_3F,
+    ODSY_IMAGE_CODE_ABGR, ODSY_IMAGE_CODE_CI, ODSY_IMAGE_CODE_DEPTH_STENCIL,
+    ODSY_IMAGE_CODE_FALLBACK_XRGB, ODSY_IMAGE_CODE_LUM_ALPHA, ODSY_IMAGE_CODE_MASK,
+    ODSY_IMAGE_CODE_RGB, ODSY_IMAGE_CODE_RGBA, ODSY_MODE_INDEX_ZEROS, ODSY_QUERY_KIND_RASTER,
+    ODSY_QUERY_RASTER_COLOUR, ODSY_QUERY_RASTER_INDEX, ODSY_ROUTE_VECTOR_DMA_SHIFT,
+    ODSY_TEX_MODE_2D, ODSY_WRITE_CODE_MASK,
+};
+use super::context::{
+    ODSY_QUERY_COLOUR, ODSY_QUERY_EDGE, ODSY_QUERY_INDEX, ODSY_QUERY_NORMAL, ODSY_QUERY_TEXCOORD,
+};
+use super::draw::{code_is_index, decode_texel12, pixel_bytes, texel12_components};
+use super::geometry::{f32_bits, odyssey_f32};
+use super::pixel_dma::{write_guest, DmaBus, DmaDirection, DmaError, DmaMap, DmaPageList};
+use super::pixel_write::{write_form, WriteForm};
+use super::scanout::DirtySite;
 #[derive(Clone, Copy, Default)]
-pub struct DmaEntry {
+pub(super) struct DmaEntry {
     pub addr: u64,
     pub len: u32,
 }
@@ -12,14 +59,14 @@ pub struct DmaEntry {
 /// 3 alpha) narrowed to `width` bits and placed at bit `shift`. Width 0 ends
 /// the list.
 #[derive(Clone, Copy, Default)]
-pub struct DmaField {
+pub(super) struct DmaField {
     pub chan: u8,
     pub width: u8,
     pub shift: u8,
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct DmaLayout {
+pub(super) struct DmaLayout {
     pub code: u8,
     pub bytes: u8,
     /// Host bytes, each a channel of the plane word or one of the
@@ -34,7 +81,7 @@ pub struct DmaLayout {
 
 /// The plane a read comes from and the form of its word.
 #[derive(Clone, Copy, Default, PartialEq)]
-pub enum ReadPlane {
+pub(super) enum ReadPlane {
     #[default]
     Colour,
     /// The depth word's 16-bit form: exponent and top ten mantissa bits.
@@ -46,7 +93,7 @@ pub enum ReadPlane {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct DmaSource {
+pub(super) struct DmaSource {
     /// The board-memory object read, or None for the colour buffer.
     pub obj: Option<usize>,
     pub front: bool,
@@ -55,7 +102,7 @@ pub struct DmaSource {
 }
 
 #[derive(Clone, Default)]
-pub struct DmaPiece {
+pub(super) struct DmaPiece {
     pub map: DmaMap,
     pub at: u64,
     pub src: u64,
@@ -63,23 +110,23 @@ pub struct DmaPiece {
 }
 
 // Anonymous enum: command-interpreter states.
-pub const ODSY_CMD_IDLE: u32 = 0;
-pub const ODSY_CMD_OPERANDS: u32 = 1;
-pub const ODSY_CMD_COPY_RECT: u32 = 2;
-pub const ODSY_CMD_PATTERN_LOAD: u32 = 3;
-pub const ODSY_CMD_IMAGE_BOX_LOAD: u32 = 4;
-pub const ODSY_CMD_IMAGE_BURST: u32 = 5;
-pub const ODSY_CMD_MATRIX_LOAD: u32 = 6;
-pub const ODSY_CMD_GL_RECT: u32 = 7;
-pub const ODSY_CMD_SKIP: u32 = 8;
+pub(super) const ODSY_CMD_IDLE: u32 = 0;
+pub(super) const ODSY_CMD_OPERANDS: u32 = 1;
+pub(super) const ODSY_CMD_COPY_RECT: u32 = 2;
+pub(super) const ODSY_CMD_PATTERN_LOAD: u32 = 3;
+pub(super) const ODSY_CMD_IMAGE_BOX_LOAD: u32 = 4;
+pub(super) const ODSY_CMD_IMAGE_BURST: u32 = 5;
+pub(super) const ODSY_CMD_MATRIX_LOAD: u32 = 6;
+pub(super) const ODSY_CMD_GL_RECT: u32 = 7;
+pub(super) const ODSY_CMD_SKIP: u32 = 8;
 
 /// The table's physical address half, unpacked from a descriptor word.
-pub fn dma_desc_half(word: u32) -> u64 {
+pub(super) fn dma_desc_half(word: u32) -> u64 {
     ((word & ODSY_DMA_DESC_ADDR_LOW_MASK) as u64)
         | ((((word >> ODSY_DMA_DESC_ADDR_HIGH_SHIFT) & ODSY_DMA_DESC_ADDR_HIGH_MASK) as u64) << 17)
 }
 
-pub fn dma_table_address(w1: u32, w3: u32) -> u64 {
+pub(super) fn dma_table_address(w1: u32, w3: u32) -> u64 {
     (dma_desc_half(w1) << 24) | dma_desc_half(w3)
 }
 
@@ -99,7 +146,7 @@ impl Board {
 }
 
 /// Bytes per pixel, indexed by word 7's bits 18:16.
-pub static DMA_BPP: [u8; (ODSY_DMA_BPP_MASK + 1) as usize] = [2, 4, 8, 16, 12, 1, 6, 3];
+pub(super) static DMA_BPP: [u8; (ODSY_DMA_BPP_MASK + 1) as usize] = [2, 4, 8, 16, 12, 1, 6, 3];
 
 impl DmaBus {
     /// The entry's page pairs, up to a zero pair or the twelfth, into e[].
@@ -160,7 +207,7 @@ impl Board {
 }
 
 /// True when hdr is a backing-store page the model copies, bpp a texel.
-pub fn dma_raw(hdr: &[u32], bpp: u32) -> bool {
+pub(super) fn dma_raw(hdr: &[u32], bpp: u32) -> bool {
     let fmt = hdr[ODSY_DMA_HDR_FORMAT];
 
     (hdr[ODSY_DMA_HDR_CONTROL] & ODSY_IMAGE_CODE_MASK) == 0
@@ -187,12 +234,12 @@ impl Board {
     }
 }
 
-pub fn raw_nibble(byte: u32) -> u32 {
+pub(super) fn raw_nibble(byte: u32) -> u32 {
     (byte * 15 + 127) / 255
 }
 
 /// A stored texel as a backing-store page's bpp raw bytes.
-pub fn raw_pack(rgba: u32, bpp: u32, dst: &mut [u8]) {
+pub(super) fn raw_pack(rgba: u32, bpp: u32, dst: &mut [u8]) {
     if bpp == 4 {
         dst[..4].copy_from_slice(&rgba.to_be_bytes());
         return;
@@ -205,7 +252,7 @@ pub fn raw_pack(rgba: u32, bpp: u32, dst: &mut [u8]) {
 }
 
 /// A backing-store page's bpp raw bytes back as a stored texel.
-pub fn raw_unpack(src: &[u8], bpp: u32) -> u32 {
+pub(super) fn raw_unpack(src: &[u8], bpp: u32) -> u32 {
     if bpp == 4 {
         return u32::from_be_bytes(src[..4].try_into().unwrap());
     }
@@ -352,7 +399,7 @@ impl Board {
 
 /// What a depth or stencil image write names (see dma_depth_stencil_write()).
 #[derive(Clone, Copy, PartialEq)]
-pub enum DepthStencil {
+pub(super) enum DepthStencil {
     Depth,
     Stencil,
 }
@@ -375,7 +422,7 @@ pub enum DepthStencil {
 ///   software evidence and the mask's effect on it is UNKNOWN; the choice
 ///   stands;
 /// - a depth write is always the 24-bit word, bits 23:0 of each value.
-pub fn dma_depth_stencil_write(hdr: &[u32]) -> Option<DepthStencil> {
+pub(super) fn dma_depth_stencil_write(hdr: &[u32]) -> Option<DepthStencil> {
     if hdr[ODSY_DMA_HDR_CONTROL] & ODSY_WRITE_CODE_MASK != ODSY_IMAGE_CODE_DEPTH_STENCIL {
         return None;
     }
@@ -399,7 +446,7 @@ pub fn dma_depth_stencil_write(hdr: &[u32]) -> Option<DepthStencil> {
 /// row is the top of the picture, and that the header's y counts up from
 /// the bottom of the window. What tells the board the rows run top down,
 /// and the window height its bottom-up y needs, remain unknown.
-pub fn dma_draw_sentinel_form(hdr: &[u32], top_down: &mut bool) -> Option<WriteForm> {
+pub(super) fn dma_draw_sentinel_form(hdr: &[u32], top_down: &mut bool) -> Option<WriteForm> {
     let control = hdr[ODSY_DMA_HDR_CONTROL];
     let bpp = DMA_BPP[((control >> ODSY_DMA_BPP_SHIFT) & ODSY_DMA_BPP_MASK) as usize] as u32;
 
@@ -575,14 +622,14 @@ const BR: u8 = ODSY_DMA_BYTE_INDEX_OR_RED as u8;
 
 /// Which sources a GL read header row applies to.
 #[derive(Clone, Copy, PartialEq)]
-pub enum ReadFrom {
+pub(super) enum ReadFrom {
     Any,
     /// A texture object, named by its board address.
     Object,
 }
 
 #[derive(Clone, Copy)]
-pub struct GlRead {
+pub(super) struct GlRead {
     pub class: u8,
     pub code: u8,
     pub from: ReadFrom,
@@ -618,7 +665,7 @@ const fn object_row(class: u8, code: u8, layout: DmaLayout) -> GlRead {
 /// Class 0 code 0 and class 2 code 2 from a drawable are shared with stencil
 /// and depth reads and are told apart by the field codes
 /// (dma_read_layout()).
-pub static DMA_GL_READS: &[GlRead] = &[
+pub(super) static DMA_GL_READS: &[GlRead] = &[
     // Header class 0: one byte a pixel. A pixel the display shows as an
     // index returns its index, any other its red byte.
     row(0, 1, lay(1, 1, [BR, 0, 0, 0, 0, 0, 0, 0])),
@@ -684,24 +731,24 @@ pub static DMA_GL_READS: &[GlRead] = &[
 /// depth written by the 16-bit form (always stored as 24 bits, see
 /// dma_depth_stencil_write()) reads back near zero, and that visual's depth
 /// does not round-trip; the model does not identify those windows.
-pub static DMA_DEPTH16: DmaLayout =
+pub(super) static DMA_DEPTH16: DmaLayout =
     DmaLayout { code: 0, bytes: 2, from: [0; 8], fields: [NF; 4], plane: ReadPlane::Depth16 };
 
 /// A depth read under class 2 code 2 with field codes (0,0) or (4,0), four
 /// bytes a pixel (DEPTH_COMPONENT, UNSIGNED_INT): the plane's 24-bit word.
-pub static DMA_DEPTH32: DmaLayout =
+pub(super) static DMA_DEPTH32: DmaLayout =
     DmaLayout { code: 2, bytes: 4, from: [0; 8], fields: [NF; 4], plane: ReadPlane::Depth32 };
 
 /// A stencil read under class 0 code 0 with field codes (4,0), one byte a
 /// pixel (STENCIL_INDEX, UNSIGNED_BYTE). MODEL CHOICE: the stencil byte
 /// comes from the model's own stencil plane; where the board keeps it inside
 /// a stored pixel is unknown.
-pub static DMA_STENCIL: DmaLayout =
+pub(super) static DMA_STENCIL: DmaLayout =
     DmaLayout { code: 0, bytes: 1, from: [0; 8], fields: [NF; 4], plane: ReadPlane::Stencil };
 
 /// X reads, by word 7's format byte: the upload decode run backwards. The
 /// luminance code is not invertible and no read of it has been seen.
-pub static DMA_X_LAYOUTS: [DmaLayout; 4] = [
+pub(super) static DMA_X_LAYOUTS: [DmaLayout; 4] = [
     lay(ODSY_IMAGE_CODE_ABGR, 4, [BZ, 2, 1, 0, 0, 0, 0, 0]),
     lay(ODSY_IMAGE_CODE_RGBA, 4, [0, 1, 2, 3, 0, 0, 0, 0]),
     lay(ODSY_IMAGE_CODE_RGB, 3, [0, 1, 2, 0, 0, 0, 0, 0]),
@@ -716,7 +763,7 @@ fn shared_depth_code(cls: u32, code: u32) -> bool {
 
 /// A one-byte colour index read: the plane word's low byte, refused for a
 /// pixel shown as a colour.
-pub static DMA_GL_INDEX_BYTE: DmaLayout = lay(0, 1, [BI, 0, 0, 0, 0, 0, 0, 0]);
+pub(super) static DMA_GL_INDEX_BYTE: DmaLayout = lay(0, 1, [BI, 0, 0, 0, 0, 0, 0, 0]);
 
 impl Board {
     /// The read's layout, or None (reported once) when it is not modeled.
@@ -919,7 +966,7 @@ impl DmaBus {
 /// Channel `chan` of plane word 0xRRGGBBAA as a `width`-bit field: the top
 /// bits for a narrower field, the byte's top bits repeated below for a wider
 /// one (see DMA_GL_READS).
-pub fn field_value(word: u32, chan: u32, width: u32) -> u32 {
+pub(super) fn field_value(word: u32, chan: u32, width: u32) -> u32 {
     let c = (word >> (24 - 8 * chan)) & 0xff;
 
     if width <= 8 { c >> (8 - width) } else { (c << (width - 8)) | (c >> (16 - width)) }
@@ -1262,10 +1309,10 @@ impl Board {
 // takes the current colour unlit, and the texture coordinate untransformed.
 // Kinds 1 and 2 are not modeled.
 
-pub static QUERY_OFFSET: [u32; 5] = [0x900, 0x914, 0x928, 0x950, 0x978];
+pub(super) static QUERY_OFFSET: [u32; 5] = [0x900, 0x914, 0x928, 0x950, 0x978];
 
 /// Public initial values: index 1, colour white, normal +Z, edge true.
-pub static QUERY_DEFAULTS: [[u32; 5]; 5] = [
+pub(super) static QUERY_DEFAULTS: [[u32; 5]; 5] = [
     [ODSY_GL_COLOR_INDEX, 1, 0, 0, 0],
     [ODSY_GL_COLOR_3F, ODSY_F32_ONE, ODSY_F32_ONE, ODSY_F32_ONE, 0],
     [ODSY_GL_NORMAL_3F, 0, 0, ODSY_F32_ONE, 0],
@@ -1523,7 +1570,7 @@ impl Board {
 }
 
 /// Match the shared rasterizer's eight-bit channel conversion.
-pub fn float_channel(bits: u32) -> u32 {
+pub(super) fn float_channel(bits: u32) -> u32 {
     let c = odyssey_f32(bits);
 
     if !(c > 0.0) {
@@ -1543,7 +1590,7 @@ pub fn float_channel(bits: u32) -> u32 {
 /// and 24 convert v first, then form v * 2 + 1 with a fused multiply-add.
 /// This is the software's expectation for what the current value means; the
 /// board's own arithmetic is unknown.
-pub fn signed_to_float(word: u32, format: u32) -> u32 {
+pub(super) fn signed_to_float(word: u32, format: u32) -> u32 {
     let scale_bits: u32;
     let mut f: f32;
 
@@ -1570,7 +1617,7 @@ pub fn signed_to_float(word: u32, format: u32) -> u32 {
 /// for an unsigned type and (2c + 1) / (2^n - 1) for a signed one; the int
 /// type keeps glColor3i's existing conversion. INFERRED: that the board
 /// converts by OpenGL's rule; the library sends the raw components.
-pub fn integer_colour(tag: u32, word: u32) -> u32 {
+pub(super) fn integer_colour(tag: u32, word: u32) -> u32 {
     let mut code = tag & ODSY_GL_COLOR_TYPE_MASK;
 
     code = code.wrapping_sub(if code >= ODSY_GL_COLOR_TYPE_4 { ODSY_GL_COLOR_TYPE_4 } else { ODSY_GL_COLOR_TYPE_3 });
@@ -1586,7 +1633,7 @@ pub fn integer_colour(tag: u32, word: u32) -> u32 {
 }
 
 /// True for the integer colour words other than glColor3ub and glColor3i.
-pub fn is_integer_colour(word: u32) -> bool {
+pub(super) fn is_integer_colour(word: u32) -> bool {
     matches!(
         word,
         ODSY_GL_COLOR_3US

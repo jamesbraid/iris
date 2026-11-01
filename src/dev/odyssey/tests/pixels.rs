@@ -2,8 +2,27 @@
 //! copy block, against the headers the datasheet's "Pixel transfer
 //! headers from the OpenGL library" section records.
 
+use crate::dev::odyssey::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
+use crate::dev::odyssey::consts::{
+    ODSY_CMD_ARITY_MASK, ODSY_CMD_ARITY_SHIFT, ODSY_CMD_COPY_RECT_TRIGGER, ODSY_CMD_IMAGE_BOX,
+    ODSY_CMD_IMAGE_HEADER, ODSY_DEST_ID_PLANES, ODSY_DISPMODE_GROUP_SHIFT, ODSY_DMA_DESC_UPLOAD,
+    ODSY_DMA_FMT_FRONT, ODSY_DMA_PTE_ADDR_SHIFT, ODSY_DMA_SENTINEL_DRAW, ODSY_DMA_SENTINEL_READ,
+    ODSY_DMA_TABLE_HEADER, ODSY_DMA_TO_HOST, ODSY_DRAW_MASK_BUFFER0, ODSY_DRAW_MASK_BUFFER1,
+    ODSY_GAMMA_GROUP, ODSY_GL_PRIMITIVE_IMAGE, ODSY_GL_QUADS, ODSY_GL_TEX_RECT,
+    ODSY_IMAGE_BOX_X1_INDEX, ODSY_IMAGE_BOX_X2_INDEX, ODSY_IMAGE_BOX_Y1_INDEX,
+    ODSY_IMAGE_BOX_Y2_INDEX, ODSY_IMAGE_BURST_BASE, ODSY_IMAGE_FMT_CI, ODSY_IMAGE_FMT_RGB,
+    ODSY_IMAGE_FMT_RGBA16, ODSY_MODE_COLOR_LOGIC_OP, ODSY_PLANE_MASK_SHIFT, ODSY_REG_DEST_SELECT,
+    ODSY_REG_GL_BEGIN, ODSY_REG_GL_END, ODSY_REG_WRITE_MASK, ODSY_SWAP_SYNC_B, ODSY_TEX_MODE_2D,
+    ODSY_USER_CMD_FIFO, ODSY_WRITE_DEPTH,
+};
+use crate::dev::odyssey::dma::DMA_BPP;
+use crate::dev::odyssey::gl_context::GL_CLEAR;
+use crate::dev::odyssey::memory::{ClipRect, LOGIC_XOR};
+use crate::dev::odyssey::objects::CopyOperands;
+use crate::dev::odyssey::pixel_write::write_form;
+use crate::dev::odyssey::tests::{board_with_ram, cmd, cmd64, pixel, pixel_write, select, Ram};
+use std::sync::Arc;
 use super::dma::{PAGE_A, TABLE, colour_destination, descriptor, pte, put_table};
-use super::*;
 
 /// A board with guest RAM whose one clip rectangle covers the screen, so
 /// every in-plane pixel is the window's.

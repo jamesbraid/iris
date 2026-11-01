@@ -16,13 +16,25 @@
 //! raster_set_fill_path()). The tests in raster_fill.rs draw with the same
 //! board and state.
 
-use super::*;
 
-pub const BENCH_W: i32 = ODSY_WIDTH as i32;
-pub const BENCH_H: i32 = ODSY_HEIGHT as i32;
+use super::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
+use super::consts::ODSY_GL_DEPTH_SLACK;
+use super::draw::gl_rules;
+use super::gl_context::{
+    GL_ALWAYS, GL_CLAMP_TO_EDGE, GL_COLOR_BUFFER_BIT, GL_COLOUR_MASK_ALL, GL_DEPTH_BUFFER_BIT,
+    GL_EQUAL, GL_FLAT, GL_INCR, GL_KEEP, GL_LEQUAL, GL_LESS, GL_LINEAR, GL_LINEAR_MIPMAP_LINEAR,
+    GL_LINES, GL_MODULATE, GL_ONE_MINUS_SRC_ALPHA, GL_QUADS, GL_REPEAT, GL_RGB, GL_RGBA, GL_SMOOTH,
+    GL_SRC_ALPHA, GL_TRIANGLES, GL_VERTEX_FLOATS, GL_V_COLOR, GL_V_POSITION, GL_V_TEXCOORD, GlDraw,
+    GlDrawResult, GlDrawState, RASTER_CLEAR, RasterOp,
+};
+use super::memory::ClipRect;
+use super::raster::{GlTexImage, GlTexLevel, GlTexPyramid, RasterRules, RasterTarget, Texels};
+use super::raster_fill::{raster_set_fill_path, FillPath};
+pub(super) const BENCH_W: i32 = ODSY_WIDTH as i32;
+pub(super) const BENCH_H: i32 = ODSY_HEIGHT as i32;
 
 /// A deterministic generator, so every run and every path draws the same.
-pub struct Lcg(pub u64);
+pub(super) struct Lcg(pub u64);
 
 impl Lcg {
     pub fn next_u32(&mut self) -> u32 {
@@ -37,7 +49,7 @@ impl Lcg {
 
 /// Texels that are a hash of their level and position, so a wrong filter or
 /// level shows.
-pub struct HashTexels;
+pub(super) struct HashTexels;
 
 impl Texels for HashTexels {
     fn texel(&self, level: Option<&GlTexLevel>, x: u32, y: u32) -> Option<u32> {
@@ -57,7 +69,7 @@ impl Texels for HashTexels {
 }
 
 /// A square mipmapped texture of side size: its levels and sampler.
-pub struct BenchTexture {
+pub(super) struct BenchTexture {
     pub levels: Vec<GlTexLevel>,
     pub min: u32,
     pub mag: u32,
@@ -115,7 +127,7 @@ impl BenchTexture {
 
 /// What a scene's primitives are and how they are drawn.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Scene {
+pub(super) enum Scene {
     /// Flat-shaded triangles, no depth test: 2D-style GL fills.
     FlatFill,
     /// Smooth-shaded, depth-tested triangles.
@@ -166,7 +178,7 @@ pub enum Scene {
     PolySmooth,
 }
 
-pub const ALL_SCENES: [Scene; 20] = [
+pub(super) const ALL_SCENES: [Scene; 20] = [
     Scene::FlatFill,
     Scene::SmoothDepth,
     Scene::SmoothBlend,
@@ -191,7 +203,7 @@ pub const ALL_SCENES: [Scene; 20] = [
 
 /// One scene, built: the board, the draw state, the vertex lists of its
 /// primitives and the pixels they stand for.
-pub struct Bench {
+pub(super) struct Bench {
     pub board: Box<Board>,
     pub st: GlDrawState,
     pub rules: RasterRules,
@@ -591,7 +603,7 @@ impl Bench {
 }
 
 /// Primitives per scene: enough that a pass takes some milliseconds.
-pub fn bench_count(scene: Scene) -> usize {
+pub(super) fn bench_count(scene: Scene) -> usize {
     match scene {
         Scene::BigQuads | Scene::BigTexTrilinear | Scene::Clear => 8,
         Scene::MidSmooth => 1000,

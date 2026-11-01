@@ -15,12 +15,29 @@
 //! other access is answered busy until the stores before it and the raster
 //! work they handed on are done (`BoardLocks::bus_read`), so the processor
 //! touches the state only while the board's thread is idle.
-use super::*;
 
+use crate::devlog::LogModule;
+use super::consts::{
+    ODSY_CFIFO_LOW_WATER, ODSY_CONTROL, ODSY_DISPLAYED_BUFFER, ODSY_ERROR_ADDR_LOWER,
+    ODSY_ERROR_ADDR_UPPER, ODSY_ERROR_COMMAND, ODSY_FLCTL_INTR_TARGET_SHIFT, ODSY_FLCTL_TARGET,
+    ODSY_FLCTL_TARGET_MASK, ODSY_FLCTL_TARGET_SHIFT, ODSY_IDENTITY, ODSY_INTR_CLEAR,
+    ODSY_INTR_ENABLE_CLEAR, ODSY_INTR_ENABLE_SET, ODSY_INTR_FIFO_LOW_WATER, ODSY_INTR_FLAGS,
+    ODSY_INT_DEST_LOWER, ODSY_INT_DEST_UPPER, ODSY_INT_DEST_WIDGET_BITS, ODSY_ROUTE_DEST_LOWER,
+    ODSY_ROUTE_DEST_UPPER, ODSY_ROUTE_DEST_WIDGET_SHIFT, ODSY_ROUTE_VECTORS,
+    ODSY_ROUTE_VECTOR_FLAG_SHIFT, ODSY_ROUTE_VECTOR_RETRACE_SHIFT,
+    ODSY_ROUTE_VECTOR_SOFTSYNC_SHIFT, ODSY_STATUS, ODSY_STATUS0, ODSY_STATUS0_FIFO_EMPTY,
+    ODSY_STATUS0_FIFO_ENABLED, ODSY_STATUS0_FIFO_HIGH_WATER, ODSY_STATUS0_FIFO_LOW_WATER,
+    ODSY_SWAP_ARM, ODSY_SWAP_CONTROL, ODSY_SWAP_CONTROL_COMPANION, ODSY_SWAP_PENDING,
+    ODSY_SW_TOKEN, ODSY_XT_REQ_TIMEOUT,
+};
+use super::fifo::CommandFifo;
+use super::mmio::{access_waits, command_store, fifo_port};
+use super::pi_gfx::{pi_gfx_return_credits, PiGfxLink};
+use super::registers::reg;
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-pub struct HostInterface {
+pub(super) struct HostInterface {
     /// The crosstalk widget number.
     pub slot: u32,
     /// Where interrupt packets go (the iris glue's HEART).
@@ -166,7 +183,7 @@ impl HostInterface {
 }
 
 /// The fabric address of a widget/address pair: the widget in bits 51:48.
-pub fn odyssey_xio_compose(widget: u32, address: u64, fabric: &mut u64) -> bool {
+pub(super) fn odyssey_xio_compose(widget: u32, address: u64, fabric: &mut u64) -> bool {
     sgi_xio_compose("sgi-odyssey", widget, address, fabric)
 }
 
@@ -280,7 +297,7 @@ impl HostInterface {
 /// registers that do not wait for the board's work. The other accesses
 /// that do not wait (the back end's read window, unmodeled offsets) read
 /// the board's state directly (`BoardCell`).
-pub fn front_register(addr: u64, size: u32, write: bool) -> bool {
+pub(super) fn front_register(addr: u64, size: u32, write: bool) -> bool {
     if fifo_port(addr) || reg(addr, size) < 0 || access_waits(addr, size, write) {
         return false;
     }
@@ -435,7 +452,7 @@ impl HostInterface {
 
 /// A processor's read through the front alone: Some when it is a front
 /// register, None when the access needs the board's state.
-pub fn front_mmio_read(f: &Mutex<HostInterface>, addr: u64, size: u32) -> Option<u64> {
+pub(super) fn front_mmio_read(f: &Mutex<HostInterface>, addr: u64, size: u32) -> Option<u64> {
     if !front_register(addr, size, false) {
         return None;
     }
@@ -446,7 +463,7 @@ pub fn front_mmio_read(f: &Mutex<HostInterface>, addr: u64, size: u32) -> Option
 /// front register or joined the command FIFO for the board's thread, false
 /// when it needs the board's state. `counted`: the processor interface counted
 /// it.
-pub fn front_mmio_write(f: &Mutex<HostInterface>, fifo: &CommandFifo, addr: u64, value: u64, size: u32, counted: bool) -> bool {
+pub(super) fn front_mmio_write(f: &Mutex<HostInterface>, fifo: &CommandFifo, addr: u64, value: u64, size: u32, counted: bool) -> bool {
     if front_register(addr, size, true) {
         let mut f = f.lock();
         f.write(addr, value, size);
@@ -461,12 +478,12 @@ pub fn front_mmio_write(f: &Mutex<HostInterface>, fifo: &CommandFifo, addr: u64,
 }
 
 /// The fabric packet's address bits; the widget sits above them.
-pub const XIO_PACKET_ADDRESS_BITS: u32 = 48;
+pub(super) const XIO_PACKET_ADDRESS_BITS: u32 = 48;
 
-pub const XIO_WIDGETS: u32 = 16;
+pub(super) const XIO_WIDGETS: u32 = 16;
 
 /// The fabric address of a widget/address pair: the widget in bits 51:48.
-pub fn sgi_xio_compose(who: &str, widget: u32, address: u64, packet: &mut u64) -> bool {
+pub(super) fn sgi_xio_compose(who: &str, widget: u32, address: u64, packet: &mut u64) -> bool {
     if widget >= XIO_WIDGETS || address >> XIO_PACKET_ADDRESS_BITS != 0 {
         crate::dlog!(LogModule::Odyssey, "{who}: packet fabric cannot encode widget {widget} address {address:#x}");
         return false;

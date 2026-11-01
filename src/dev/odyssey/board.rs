@@ -1,60 +1,82 @@
 //! The Odyssey (VPro) board's constants and state. The interrupt packet path
 //! is the `irq` field of the host interface (`HostInterface`, interface.rs).
-use super::*;
 
+use super::consts::{
+    ODSY_CLIP_BOX_FIELD_MASK, ODSY_CLIP_RESET_EMPTY, ODSY_CLIP_RESET_FULL, ODSY_CONFIG_COPY_FIELD,
+    ODSY_CONFIG_FOUR_BANKS, ODSY_CONFIG_LATENCY_2, ODSY_CONFIG_SIZE_SHIFT,
+    ODSY_CONTROL_WIDGET_MASK, ODSY_DEPTH24_MAX, ODSY_DEPTH_FUNC_RESET, ODSY_DRAW_MASK_RESET,
+    ODSY_F32_ONE, ODSY_F32_POINT_EIGHT, ODSY_F32_POINT_TWO, ODSY_FLCTL_CONFIG_RESET,
+    ODSY_GL_CONTEXT_HW_ID, ODSY_GL_LIGHT_MODEL_AMBIENT, ODSY_INTR_FIFO_LOW_WATER, ODSY_NIC_FAMILY,
+    ODSY_NIC_PAGE, ODSY_NIC_RECORD_DEFAULT, ODSY_NIC_ROM_SIZE, ODSY_NIC_SERIAL_MASK,
+    ODSY_TEX_SCALE_BIAS_ONE, ODSY_WRITE_MASK_RESET, ODSY_XT_REQ_TIMEOUT_RESET,
+};
+use super::fifo::CommandFifo;
+use super::geometry::LightScratch;
+use super::gl_context::{
+    GL_CLIP_PLANES, GL_MODELVIEW, GL_OP_ENABLE, GL_SCISSOR_TEST, GL_VERTEX_FLOATS, GlContext,
+    GlDrawable,
+};
+use super::interface::HostInterface;
+use super::memory::{BoardMemory, ClipRect, Packing, Plane, PlaneFormat};
+use super::pixel_dma::GuestMemory;
+use super::raster_unit::RasterQueue;
+use super::reader::{DisplayShared, PlaneView};
+use super::scanout::Scanout;
+#[cfg(test)]
+use super::reader::ScanoutReader;
 /// Distinct unimplemented offsets reported before the device falls silent
 /// about them. Diagnostic bookkeeping, not guest state.
-pub const ODSY_UNIMP_REPORTS: u32 = 64;
+pub(super) const ODSY_UNIMP_REPORTS: u32 = 64;
 
 /// The vertices an integer GL primitive holds while it streams: a QUADS
 /// rectangle's four, or a strip's first and previous vertex.
-pub const ODSY_GL_HELD_VERTICES: u32 = 4;
+pub(super) const ODSY_GL_HELD_VERTICES: u32 = 4;
 
 /// The operands a register-select word's gather keeps: the arity field's
 /// largest count, a 16-word burst.
-pub const ODSY_CMD_OPERANDS_MAX: u32 = 16;
+pub(super) const ODSY_CMD_OPERANDS_MAX: u32 = 16;
 
 /// The window-clip register's four rectangles, two words each.
-pub const ODSY_CLIP_RECTS: u32 = 4;
+pub(super) const ODSY_CLIP_RECTS: u32 = 4;
 
 /// Geometry engine program state: constant-memory entries an 11-bit index
 /// reaches.
-pub const ODSY_GL_CONSTANTS: u32 = 2048;
+pub(super) const ODSY_GL_CONSTANTS: u32 = 2048;
 /// Off-screen board-memory objects the model keeps (texture levels). A
 /// model budget, not a board limit: TyrQuake holds some 1,500 levels at once
 /// and samples its oldest every frame, which a table of 1024 forgot.
-pub const ODSY_OBJECTS: u32 = 16384;
+pub(super) const ODSY_OBJECTS: u32 = 16384;
 /// The slices of one volume texture a draw samples (Board::texture_setup()).
-pub const ODSY_VOLUME_SLICES: u32 = 1024;
-pub const ODSY_OBJ_POOL_BYTES: usize = 128 * 1024 * 1024;
-pub const ODSY_OBJ_POOL_WORDS: usize = ODSY_OBJ_POOL_BYTES / 4;
-pub const ODSY_OBJ_VALID_BYTES: usize = ODSY_OBJ_POOL_WORDS / 8;
+pub(super) const ODSY_VOLUME_SLICES: u32 = 1024;
+pub(super) const ODSY_OBJ_POOL_BYTES: usize = 128 * 1024 * 1024;
+pub(super) const ODSY_OBJ_POOL_WORDS: usize = ODSY_OBJ_POOL_BYTES / 4;
+pub(super) const ODSY_OBJ_VALID_BYTES: usize = ODSY_OBJ_POOL_WORDS / 8;
 /// The texture level table's entries (0x0e80 .. 0x0ebf).
-pub const ODSY_TEX_LEVELS: u32 = 64;
-pub const ODSY_TEX_COLOUR_TABLE_ENTRIES: u32 = 256;
-pub const ODSY_TEX_DETAIL_FUNCTION_ENTRIES: u32 = 256;
-pub const ODSY_GL_ENTRIES: u32 = 4;
-pub const ODSY_GL_LIGHTS: u32 = 8;
-pub const ODSY_GL_LIGHT_COLOURS: u32 = 25;
-pub const ODSY_GL_PROGRAM_REPORTS: u32 = 16;
+pub(super) const ODSY_TEX_LEVELS: u32 = 64;
+pub(super) const ODSY_TEX_COLOUR_TABLE_ENTRIES: u32 = 256;
+pub(super) const ODSY_TEX_DETAIL_FUNCTION_ENTRIES: u32 = 256;
+pub(super) const ODSY_GL_ENTRIES: u32 = 4;
+pub(super) const ODSY_GL_LIGHTS: u32 = 8;
+pub(super) const ODSY_GL_LIGHT_COLOURS: u32 = 25;
+pub(super) const ODSY_GL_PROGRAM_REPORTS: u32 = 16;
 /// Program memory: 2048 instructions of six halfwords, of which the window
 /// at 0x738 is the last 0xc7 (ODSY_PROG_WINDOW_BASE).
-pub const ODSY_GL_PROGRAM_ENTRIES: u32 = 2048;
-pub const ODSY_GL_WINDOW_ENTRIES: u32 = 0xc7;
+pub(super) const ODSY_GL_PROGRAM_ENTRIES: u32 = 2048;
+pub(super) const ODSY_GL_WINDOW_ENTRIES: u32 = 0xc7;
 
 /// The one modeled mode: the desktop target size.
-pub const ODSY_WIDTH: u32 = 1280;
-pub const ODSY_HEIGHT: u32 = 1024;
+pub(super) const ODSY_WIDTH: u32 = 1280;
+pub(super) const ODSY_HEIGHT: u32 = 1024;
 
 #[derive(Clone, Copy, Default)]
-pub struct OpenVertex {
+pub(super) struct OpenVertex {
     pub word: u32,
     pub operands: [u32; 4],
     pub attribute: [[u32; 5]; 19],
     pub slot: u32,
 }
 
-pub struct Board {
+pub(super) struct Board {
     /// The crosstalk widget number.
     pub slot: u32,
     /// The host interface, under its own lock (interface.rs): the registers a
@@ -1111,7 +1133,7 @@ impl Board {
 
 /// One marketed board: name, revision, memory size, banks, back-end
 /// version, identity record.
-pub struct Product {
+pub(super) struct Product {
     pub name: &'static str,
     pub revision: u32,
     pub memory_size: u32,
@@ -1134,7 +1156,7 @@ pub struct Product {
 /// (PB&J) version 1. The identity record is the Octane board's name as the
 /// inventory prints it, with its part number beside each entry. Fuel and
 /// Tezro boards are other assemblies; a profile answers the Octane name.
-pub static PRODUCTS: [Product; 4] = [
+pub(super) static PRODUCTS: [Product; 4] = [
     Product { name: "v12", revision: 0xa, memory_size: 128, memory_banks: 4, backend_version: 1, record: "Name:ODY128VERSIONB" }, // 030-1611
     Product { name: "v10", revision: 0xa, memory_size: 32, memory_banks: 2, backend_version: 1, record: "Name:ODY32VERSIONB" }, // 030-1655
     Product { name: "v8", revision: 0x2, memory_size: 128, memory_banks: 4, backend_version: 1, record: "Name:ODY128" }, // 030-1404
@@ -1297,7 +1319,7 @@ impl Board {
 }
 
 /// The synthetic one-wire serial for a component letter and index.
-pub fn synthetic_onewire_serial(letter: char, index: u32) -> u64 {
+pub(super) fn synthetic_onewire_serial(letter: char, index: u32) -> u64 {
     0x51454d55u64 << 16 | (letter as u64) << 8 | index as u64
 }
 

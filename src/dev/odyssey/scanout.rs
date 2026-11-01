@@ -8,17 +8,19 @@
 //! the display consumes. The retrace is counted on the host's
 //! monotonic clock: `retrace_deadline` (-1 when disarmed) is when the next
 //! one is due, and [`Scanout::next_retrace`] reports each as it comes due.
-use super::*;
 
+use crate::devlog::LogModule;
+use super::raster_unit::ROW_WORDS;
+use super::reader::DisplayShared;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-pub const SCANOUT_MAX_DIM: u32 = 16384;
+pub(super) const SCANOUT_MAX_DIM: u32 = 16384;
 /// 1 kHz: well above any SGI display's field rate.
-pub const SCANOUT_MIN_PERIOD_NS: i64 = 1000000;
+pub(super) const SCANOUT_MIN_PERIOD_NS: i64 = 1000000;
 
 #[derive(Clone, Copy, Default, Debug)]
-pub struct ScanoutMode {
+pub(super) struct ScanoutMode {
     pub width: u32, // visible pixels and lines
     pub height: u32,
     pub frame_clocks: u64, // clocks per frame, blanking included
@@ -27,7 +29,7 @@ pub struct ScanoutMode {
 
 /// What marked display lines dirty, for [`DirtyStats`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DirtySite {
+pub(super) enum DirtySite {
     /// A caller that does not say.
     Other,
     /// A new mode or a reset: the whole frame.
@@ -105,7 +107,7 @@ impl DirtySite {
 /// their plane bytes aside. Plain integers the display thread owns; the
 /// per-site marks the writers make are atomics in [`RowMarks`].
 #[derive(Clone, Default, Debug)]
-pub struct DirtyStats {
+pub(super) struct DirtyStats {
     /// Display frames that staged their lines, and those with any line.
     pub frames: u64,
     pub busy_frames: u64,
@@ -161,7 +163,7 @@ impl DirtyStats {
 /// the rest of what the display keeps are the display's own
 /// ([`ScanoutReader`]).
 #[derive(Clone)]
-pub struct Scanout {
+pub(super) struct Scanout {
     pub mode: ScanoutMode,
     /// The lines to resolve again, and the lines a writer touched without
     /// naming a buffer: shared with every thread that writes a plane.
@@ -174,7 +176,7 @@ pub struct Scanout {
 /// clock. `deadline` (-1 when disarmed) is when the next retrace is due,
 /// and [`RetraceClock::next_retrace`] reports each as it comes due.
 #[derive(Clone, Debug)]
-pub struct RetraceClock {
+pub(super) struct RetraceClock {
     pub mode: ScanoutMode,
     pub deadline: i64, // virtual ns of the next retrace; -1 disarmed
     pub epoch: i64,    // virtual time of retrace 0
@@ -250,7 +252,7 @@ impl Scanout {
 }
 
 /// Words of the dirty-line bitset: a bit a display line of the largest mode.
-pub const DIRTY_WORDS: usize = (SCANOUT_MAX_DIM as usize).div_ceil(64);
+pub(super) const DIRTY_WORDS: usize = (SCANOUT_MAX_DIM as usize).div_ceil(64);
 
 /// The display lines that must be resolved again, and the lines a writer
 /// touched without naming a colour buffer, as bitsets any thread may set.
@@ -264,7 +266,7 @@ pub const DIRTY_WORDS: usize = (SCANOUT_MAX_DIM as usize).div_ceil(64);
 ///
 /// The display takes marks and must put back any it does not apply
 /// ([`RowMarks::repaint`]).
-pub struct RowMarks {
+pub(super) struct RowMarks {
     dirty: Box<[AtomicU64; DIRTY_WORDS]>,
     unnamed: [AtomicU64; ROW_WORDS],
     /// Lines of the frame the marks are for; 0 with no frame. A mark past it
@@ -420,17 +422,17 @@ fn set_range(words: &[AtomicU64], first: usize, last: usize) {
 }
 
 /// Nanoseconds in a second.
-pub const NS_PER_SECOND: u64 = 1_000_000_000;
+pub(super) const NS_PER_SECOND: u64 = 1_000_000_000;
 
 /// The host's monotonic clock in nanoseconds since the first call: the
 /// time base of every scanout's retrace.
-pub fn monotonic_ns() -> i64 {
+pub(super) fn monotonic_ns() -> i64 {
     static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     EPOCH.get_or_init(std::time::Instant::now).elapsed().as_nanos() as i64
 }
 
 /// a * b / c without overflowing the product.
-pub fn mul_div(a: u64, b: u64, c: u64) -> u64 {
+pub(super) fn mul_div(a: u64, b: u64, c: u64) -> u64 {
     ((a as u128 * b as u128) / c as u128) as u64
 }
 

@@ -1,14 +1,27 @@
 //! What the board shows: the scanout's colour lookup and gamma, the retrace
 //! with its swap latching, and the window iris presents the frame in.
 
-use super::*;
 
+use super::board::{Board, ODSY_WIDTH};
+use super::consts::{
+    ODSY_CMAP_UNVERIFIED_GROUP, ODSY_DID_MAIN_SHIFT, ODSY_DID_OVERLAY_MASK, ODSY_DISPMODE_COUNT,
+    ODSY_DISPMODE_WIDTH_4, ODSY_DISPMODE_WIDTH_5, ODSY_DISPMODE_WIDTH_MASK,
+    ODSY_DISPMODE_WIDTH_SHIFT, ODSY_GAMMA_GROUP, ODSY_INDEX_MASK, ODSY_LUT_BLUE_SHIFT,
+    ODSY_LUT_GREEN_SHIFT, ODSY_LUT_RED_SHIFT, ODSY_LUT_SIZE, ODSY_OVERLAY_IDS,
+    ODSY_OVERLAY_MODE_ENABLE, ODSY_OVERLAY_MODE_GROUP_MASK, ODSY_OVERLAY_MODE_GROUP_SHIFT,
+};
+use super::fifo::display_fifo_pending;
+use super::reader::{DisplayRegs, PlaneView, RowOf, ScanoutReader};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
 use crate::cpu::mips_core::CyclesPtr;
+#[cfg(test)]
+use super::memory::plane_bpp;
+#[cfg(test)]
+use super::mmio::BoardLocks;
 use crate::dev::ng1::rex3::Renderer;
 use crate::disp::{Rex3Screen, FB_STRIDE};
 
@@ -16,7 +29,7 @@ use crate::disp::{Rex3Screen, FB_STRIDE};
 const IDLE_REFRESH: u32 = 6;
 
 /// The window the board shows the guest: what `GfxDisplay` hands out.
-pub struct Display {
+pub(super) struct Display {
     pub renderer: Mutex<Option<Box<dyn Renderer>>>,
     pub screen: Mutex<Rex3Screen>,
     pub cycles: Mutex<CyclesPtr>,
@@ -305,7 +318,7 @@ impl Board {
 /// shows it: a 4- or 5-bit visual's channel keeps its top bits, repeated down
 /// to fill the byte as a full-scale value. How the board itself stores a
 /// narrow pixel is unknown.
-pub fn display_channel(mode: u32, c: u32) -> u32 {
+pub(super) fn display_channel(mode: u32, c: u32) -> u32 {
     match (mode >> ODSY_DISPMODE_WIDTH_SHIFT) & ODSY_DISPMODE_WIDTH_MASK {
         ODSY_DISPMODE_WIDTH_4 => (c & 0xf0) | (c >> 4),
         ODSY_DISPMODE_WIDTH_5 => (c & 0xf8) | (c >> 5),
@@ -476,7 +489,7 @@ pub(super) fn resolve_line(ctx: &ResolveCtx, line: ScanoutLine<'_>, dst: &mut [u
 
 /// A frame's staged lines on their way to the presented frame
 /// (ScanoutReader::take()).
-pub struct ScanoutJob {
+pub(super) struct ScanoutJob {
     pub(super) stage: ScanoutStage,
     pub(super) ctx: Option<ResolveCtx>,
     /// The frame's width, and the pixels of it the planes cover.
@@ -530,7 +543,7 @@ impl ScanoutJob {
 /// The dirty lines of a frame's update, with the plane bytes of those that
 /// resolve_line() resolves copied aside (ScanoutReader::stage()).
 #[derive(Default)]
-pub struct ScanoutStage {
+pub(super) struct ScanoutStage {
     /// Each dirty line, and whether its bytes are staged; a line that is
     /// not was resolved at once.
     pub(super) lines: Vec<(u32, bool)>,

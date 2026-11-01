@@ -52,8 +52,14 @@
 //! Whether a 32-bit store costs the hardware a whole credit is UNKNOWN; the
 //! model credits one per store.
 
-use super::*;
 
+use super::consts::{
+    ODSY_CFIFO_DEPTH, ODSY_CFIFO_LOW_WATER, ODSY_CFIFO_WORDS, ODSY_INTR_FIFO_HIGH_WATER,
+    ODSY_INTR_FIFO_LOW_WATER, ODSY_WORK_QUEUE_MAX,
+};
+use super::interface::HostInterface;
+use super::pi_gfx::{pi_gfx_owe_credits, pi_gfx_repay_credits};
+use super::worker::GAP;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::{Relaxed, SeqCst}};
 use std::thread::JoinHandle;
@@ -64,11 +70,11 @@ use parking_lot::Mutex;
 use crate::gfifo::GFifo;
 
 /// The host ring under the command FIFO.
-pub type CommandRing = GFifo<{ ODSY_WORK_QUEUE_MAX as usize }>;
+pub(super) type CommandRing = GFifo<{ ODSY_WORK_QUEUE_MAX as usize }>;
 
 /// A command-FIFO store waiting for the board's thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct QueuedStore {
+pub(super) struct QueuedStore {
     pub value: u64,
     pub addr: u32,
     pub size: u8,
@@ -113,15 +119,15 @@ impl QueuedStore {
 }
 
 /// The 32-bit FIFO words a store of `size` bytes fills.
-pub fn store_words(size: u32) -> u32 {
+pub(super) fn store_words(size: u32) -> u32 {
     if size == 8 { 2 } else { 1 }
 }
 
 /// The most stores the board's thread takes out of the FIFO at a time.
-pub const RUN_MAX: usize = 32;
+pub(super) const RUN_MAX: usize = 32;
 
 /// Stores the board's thread has looked at and is running (`take_run`).
-pub struct Run {
+pub(super) struct Run {
     stores: [QueuedStore; RUN_MAX],
     len: usize,
 }
@@ -139,7 +145,7 @@ impl Run {
 
 /// Where a command store is refused with the bus busy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FifoDepth {
+pub(super) enum FifoDepth {
     /// Only when the host ring is full, as IMPACT and GR2 do.
     Deep,
     /// When the model's 32,768-word FIFO would overfill: the old stall.
@@ -158,7 +164,7 @@ impl FifoDepth {
 }
 
 /// The stores the host ring holds: it keeps one slot empty.
-pub const RING_STORES: u32 = ODSY_WORK_QUEUE_MAX - 1;
+pub(super) const RING_STORES: u32 = ODSY_WORK_QUEUE_MAX - 1;
 
 /// The counts the processor's pushes raise and the board's thread's
 /// retirements lower.
@@ -171,7 +177,7 @@ struct Levels {
     counted: AtomicU32,
 }
 
-pub struct CommandFifo {
+pub(super) struct CommandFifo {
     ring: Box<CommandRing>,
     /// Serialises the consumers' accounting against reset's clear. The
     /// producers need no lock of their own: the ring's spinlock orders them.
@@ -590,11 +596,11 @@ thread_local! {
 }
 
 /// The display thread's sample of the words waiting.
-pub fn display_fifo_pending() -> usize {
+pub(super) fn display_fifo_pending() -> usize {
     DISPLAY_FIFO_PENDING.with(Cell::get)
 }
 
 /// Record the words waiting for this display thread's next present.
-pub fn set_display_fifo_pending(words: usize) {
+pub(super) fn set_display_fifo_pending(words: usize) {
     DISPLAY_FIFO_PENDING.with(|p| p.set(words));
 }

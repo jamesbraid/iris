@@ -2,13 +2,53 @@
 //! window records, per-vertex lighting and colour, the depth scale and the
 //! combined matrix loads.
 
-use super::*;
 
+use crate::devlog::LogModule;
+use super::board::{
+    Board, ODSY_GL_CONSTANTS, ODSY_GL_LIGHTS, ODSY_GL_PROGRAM_ENTRIES, ODSY_GL_PROGRAM_REPORTS,
+    ODSY_HEIGHT, ODSY_WIDTH,
+};
+use super::consts::{
+    ODSY_BLEND_X_OPAQUE, ODSY_BUFFERS, ODSY_COLOUR_MATERIAL_AMBIENT, ODSY_COLOUR_MATERIAL_DIFFUSE,
+    ODSY_COLOUR_MATERIAL_EMISSION, ODSY_COLOUR_MATERIAL_MASK, ODSY_COLOUR_MATERIAL_SPECULAR,
+    ODSY_COLOUR_MODE_INDEX, ODSY_CRC64_ECMA_POLY, ODSY_DEPTH_FUNC_MASK, ODSY_ENTRY_29,
+    ODSY_ENTRY_2A, ODSY_ENTRY_2C, ODSY_ENTRY_33, ODSY_GL_BLOCK16_SIGN, ODSY_GL_DEPTH_S,
+    ODSY_GL_LIGHT_MODEL_AMBIENT, ODSY_GL_LIGHT_VEC_FLOATS, ODSY_GL_LINES, ODSY_GL_LINE_LOOP,
+    ODSY_GL_LINE_STRIP, ODSY_GL_LOAD_4F, ODSY_GL_POINTS, ODSY_GL_POLYGON, ODSY_GL_QUADS,
+    ODSY_GL_RECT_FLOATS, ODSY_GL_RECT_PATTERN_ENABLE, ODSY_GL_SLOT_BLOCK16, ODSY_GL_SLOT_COMBINED,
+    ODSY_GL_SLOT_NORMAL_MATRIX, ODSY_GL_SLOT_TEXTURE, ODSY_GL_WINDOW_REACH, ODSY_LIGHT_ATTEN,
+    ODSY_LIGHT_HALF, ODSY_LIGHT_POS, ODSY_LIGHT_SPOT_COS, ODSY_LIGHT_SPOT_DIR, ODSY_LIGHT_SPOT_EXP,
+    ODSY_LINE_STIPPLE_CONTROL, ODSY_LINE_STIPPLE_CONTROL_32, ODSY_LINE_STIPPLE_PATTERN,
+    ODSY_MODE_BLEND, ODSY_MODE_DEPTH_TEST, ODSY_MODE_STENCIL_TEST, ODSY_PATTERN_MODE_ENABLE,
+    ODSY_PATTERN_SHAPE_32X32, ODSY_PLANE_MASK_SHIFT, ODSY_PROG_CLASS_SHIFT,
+    ODSY_PROG_COLOUR_MATERIAL, ODSY_PROG_COLOUR_MODE, ODSY_PROG_COLOUR_MODE_B,
+    ODSY_PROG_CONST_SELECT, ODSY_PROG_CONST_STORE, ODSY_PROG_ENTRY_29, ODSY_PROG_ENTRY_2A,
+    ODSY_PROG_ENTRY_2C, ODSY_PROG_ENTRY_HALFWORDS, ODSY_PROG_HALFWORD_HIGH_MASK,
+    ODSY_PROG_HIGH_SHIFT, ODSY_PROG_LIGHT_COLOUR_SELECT, ODSY_PROG_LIGHT_VEC_SELECT,
+    ODSY_PROG_LIST_INDEX, ODSY_PROG_LIST_MAX, ODSY_PROG_LOW_MASK, ODSY_PROG_PROGRAM_ADDR,
+    ODSY_PROG_PROGRAM_HALFWORD, ODSY_PROG_REG_FIRST, ODSY_PROG_REG_LAST, ODSY_PROG_WINDOW_BASE,
+    ODSY_PROG_WINDOW_ENTRIES, ODSY_UCODE_CLIP, ODSY_UCODE_CLIP_TEXGEN, ODSY_UCODE_CLIP_TEXTURED,
+    ODSY_UCODE_END, ODSY_UCODE_END_ONE_SIDED, ODSY_UCODE_END_TWO_SIDED, ODSY_UCODE_FINISH_A,
+    ODSY_UCODE_FINISH_A_TEXTURE, ODSY_UCODE_FINISH_A_TWO_SIDED, ODSY_UCODE_FINISH_ONE_SIDED,
+    ODSY_UCODE_FINISH_TEXTURE, ODSY_UCODE_FINISH_TWO_SIDED, ODSY_UCODE_HEAD_INF_DIR,
+    ODSY_UCODE_HEAD_INF_POS, ODSY_UCODE_HEAD_LOCAL_DIR, ODSY_UCODE_HEAD_LOCAL_POS,
+    ODSY_UCODE_HEAD_UNLIT, ODSY_UCODE_LIGHT_ATTEN, ODSY_UCODE_LIGHT_DIR, ODSY_UCODE_LIGHT_PLAIN,
+    ODSY_UCODE_LIGHT_POS, ODSY_UCODE_NORMAL, ODSY_UCODE_NORMALIZE, ODSY_UCODE_OLDER_RECORDS,
+    ODSY_UCODE_SPOT_FIRST, ODSY_UCODE_SPOT_RECORDS, ODSY_UCODE_TAIL, ODSY_UCODE_TAIL_ONE_SHOT,
+    ODSY_UCODE_UNLIT, ODSY_UCODE_UNLIT_2A, ODSY_UCODE_UNLIT_2C, ODSY_UCODE_UNLIT_CLIP,
+    ODSY_UCODE_UNLIT_CLIP_2A, ODSY_UCODE_UNLIT_CLIP_2C, ODSY_UCODE_UNLIT_FINISH,
+    ODSY_UCODE_UNLIT_TEXTURE, ODSY_WRITE_COLOUR_MASK, ODSY_WRITE_COLOUR_SHIFT, ODSY_WRITE_DEPTH,
+};
+use super::gl::{float_index, gl_index_rgba, prog_value, ucode_is_texgen};
+use super::gl_context::{
+    GL_ALWAYS, GL_CLIP_PLANES, GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT, GL_LINES, GL_MODELVIEW,
+    GL_OP_COLOR4F, GL_PROJECTION, GL_REPLACE, GL_STENCIL_BUFFER_BIT, RASTER_CLEAR, RasterOp,
+};
 use crate::dev::gl::light::Lighting;
 
 /// What a program asks for, as far as the model recognises it.
 #[derive(Clone, Copy, Default)]
-pub struct Program {
+pub(super) struct Program {
     pub known: bool,
     pub lit: bool,
     pub local_viewer: bool,
@@ -144,7 +184,7 @@ impl Board {
     }
 }
 
-pub fn prog_in_window(a: u32) -> bool {
+pub(super) fn prog_in_window(a: u32) -> bool {
     (ODSY_PROG_WINDOW_BASE..ODSY_PROG_WINDOW_BASE + ODSY_PROG_WINDOW_ENTRIES).contains(&a)
 }
 
@@ -158,7 +198,7 @@ pub fn prog_in_window(a: u32) -> bool {
 /// also carries do not say the context uses them. The model lights every
 /// program here from the light blocks as it does an assembled list
 /// (Board::gl_light()).
-pub static UCODE_LIT_RECORDS: [[u32; 3]; 6] = [
+pub(super) static UCODE_LIT_RECORDS: [[u32; 3]; 6] = [
     [0x5cb, 0x5d8, 0x5e5], // record 3: one light
     [0x62c, 0x63d, 0x64d], // record 6: two lights, texgen
     [0x6d8, 0x6eb, 0x6fd], // record 7: one light, two-sided, texgen
@@ -168,9 +208,9 @@ pub static UCODE_LIT_RECORDS: [[u32; 3]; 6] = [
 ];
 
 /// The lit records above that renormalise normals (GL_NORMALIZE).
-pub static UCODE_NORMALIZE_RECORDS: [[u32; 3]; 2] = [[0x5f0, 0x605, 0x619], [0x657, 0x66e, 0x684]];
+pub(super) static UCODE_NORMALIZE_RECORDS: [[u32; 3]; 2] = [[0x5f0, 0x605, 0x619], [0x657, 0x66e, 0x684]];
 
-pub fn gl_lit_record(e: &[u32; 3]) -> bool {
+pub(super) fn gl_lit_record(e: &[u32; 3]) -> bool {
     for r in UCODE_LIT_RECORDS.iter() {
         if e == r {
             return true;
@@ -207,7 +247,7 @@ pub fn gl_lit_record(e: &[u32; 3]) -> bool {
 /// local-viewer context selects records 18 and 19; key bit 0x1 is two-sided
 /// lighting (INFERRED: it is set in resident record 7, the two-sided one).
 #[derive(Clone, Copy, Default)]
-pub struct WindowRecord {
+pub(super) struct WindowRecord {
     pub record: u8,
     pub local_viewer: bool,
     pub two_sided: bool,
@@ -216,7 +256,7 @@ pub struct WindowRecord {
     pub crc: u64,
 }
 
-pub static WINDOW_RECORDS: [WindowRecord; 8] = [
+pub(super) static WINDOW_RECORDS: [WindowRecord; 8] = [
     WindowRecord { record: 13, local_viewer: false, two_sided: true, entry: [0x706, 0x720, 0x73b], entries: 199, crc: 0xde5dd7f66d4e70cf },
     WindowRecord { record: 14, local_viewer: false, two_sided: false, entry: [0x4c5, 0x4c5, 0x4c5], entries: 199, crc: 0x5aa6880e8d77c0b2 },
     WindowRecord { record: 15, local_viewer: false, two_sided: true, entry: [0x4c5, 0x4c5, 0x4c5], entries: 199, crc: 0x9391fc6eed0accdc },
@@ -256,7 +296,7 @@ impl Board {
 }
 
 /// Uploaded program bodies have no reviewed decoder.
-pub fn gl_resident(e: &[u32; 3]) -> bool {
+pub(super) fn gl_resident(e: &[u32; 3]) -> bool {
     !e.iter().any(|&w| prog_in_window(w))
 }
 
@@ -489,11 +529,11 @@ impl Board {
     }
 }
 
-pub fn odyssey_f32(bits: u32) -> f64 {
+pub(super) fn odyssey_f32(bits: u32) -> f64 {
     f32::from_bits(bits) as f64
 }
 
-pub fn f32_bits(f: f32) -> u32 {
+pub(super) fn f32_bits(f: f32) -> u32 {
     f.to_bits()
 }
 
@@ -507,7 +547,7 @@ fn cmin(a: f64, b: f64) -> f64 {
 }
 
 /// What `Board::gl_light_fill` hands on to the lighting equation.
-pub struct LitVertex {
+pub(super) struct LitVertex {
     pub eye: [f32; 4],
     pub normal: [f32; 3],
     pub colour: [f32; 4],
@@ -519,7 +559,7 @@ pub struct LitVertex {
 
 /// The lighting state `Board::gl_light` fills for each vertex, kept so that
 /// only what the last vertex changed is put back.
-pub struct LightScratch {
+pub(super) struct LightScratch {
     pub state: Lighting,
     fresh: Lighting,
     /// The lights the last fill set up.
@@ -819,7 +859,7 @@ impl Board {
 /// (ODSY_GL_SLOT_NORMAL) is one the context refuses, and its false return is
 /// expected. The texture matrix is kept as sent and applied to the current
 /// ST by the shared context.
-pub fn gl_transpose(rows: &[u32]) -> [f32; 16] {
+pub(super) fn gl_transpose(rows: &[u32]) -> [f32; 16] {
     std::array::from_fn(|i| f32::from_bits(rows[(i % 4) * 4 + i / 4]))
 }
 

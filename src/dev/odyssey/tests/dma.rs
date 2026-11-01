@@ -2,6 +2,19 @@
 //! on, and the page-table transfers that move pixels between guest memory
 //! and the board.
 
+use crate::dev::odyssey::board::Board;
+use crate::dev::odyssey::consts::{
+    ODSY_CTX_SHADOW_ADDR_LOWER, ODSY_CTX_SHADOW_ADDR_UPPER, ODSY_CTX_SWITCH_DONE_OFFSET,
+    ODSY_CTX_SWITCH_PORT, ODSY_DMA_DESC_UPLOAD, ODSY_DMA_FENCE_INTERRUPT, ODSY_DMA_IRQ_REQUEST,
+    ODSY_DMA_PAGE_SIZE, ODSY_DMA_PTE_ADDR_SHIFT, ODSY_DMA_TABLE_HEADER, ODSY_HOST_WRITE_ADDR_LOWER,
+    ODSY_HOST_WRITE_ADDR_UPPER, ODSY_REG_DEST_SELECT, ODSY_REG_HOST_WRITE, ODSY_USER_CMD_FIFO,
+};
+use crate::dev::odyssey::mmio::BoardLocks;
+use crate::dev::odyssey::tests::{
+    board_with_ram, cmd, cmd64, pixel, pixel_write, reg_write, route_to_heart, select, DMA_VECTOR,
+    FLAG_VECTOR, Ram, SOFTSYNC_VECTOR,
+};
+use std::sync::Arc;
 use super::*;
 
 const FENCE_BASE: u64 = 0xb70000;

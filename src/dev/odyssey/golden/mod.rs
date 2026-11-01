@@ -19,6 +19,9 @@
 //! `scripts/vpro-goldens.sh` wraps the commands, and
 //! `src/dev/odyssey/testdata/README.md` says how to re-take the goldens.
 
+use super::raster_bench;
+use super::board::Board;
+use super::draw::gl_rules;
 pub mod cases;
 pub mod replay;
 pub mod scenes;
@@ -27,8 +30,6 @@ pub mod vertices;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::raster_bench::Bench;
-use super::*;
 
 /// A scene's window: the frame is the square from (0, 0) to SIDE - 1.
 pub const SIDE: i32 = 128;

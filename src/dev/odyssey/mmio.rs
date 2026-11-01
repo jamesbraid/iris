@@ -1,8 +1,33 @@
 //! The MMIO aperture: write dispatch, which accesses wait for drawing, and the
 //! locks the board is reached through.
 
-use super::*;
 
+use crate::devlog::LogModule;
+use parking_lot::Mutex;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use super::board::Board;
+use super::consts::{
+    ODSY_BACKEND_READ_BASE, ODSY_BACKEND_SELECT, ODSY_BACKEND_VERSION, ODSY_BUZZ_1, ODSY_BUZZ_2,
+    ODSY_BUZZ_3, ODSY_BUZZ_4, ODSY_BUZZ_5, ODSY_BUZZ_6, ODSY_CMD_FIFO, ODSY_CONTROL,
+    ODSY_CTX_SHADOW_ADDR_LOWER, ODSY_CTX_SHADOW_ADDR_UPPER, ODSY_CTX_SWITCH_PORT, ODSY_CURSOR_BASE,
+    ODSY_CURSOR_ENTRIES, ODSY_DISPLAYED_BUFFER, ODSY_ERROR_ADDR_LOWER, ODSY_ERROR_ADDR_UPPER,
+    ODSY_ERROR_COMMAND, ODSY_FLCTL_CONFIG, ODSY_FLCTL_TARGET, ODSY_HOST_WRITE_ADDR_LOWER,
+    ODSY_HOST_WRITE_ADDR_UPPER, ODSY_I2C_MAIN_CMD_READ, ODSY_I2C_MAIN_STATUS_READ,
+    ODSY_I2C_OPT_CMD_READ, ODSY_I2C_OPT_STATUS_READ, ODSY_IDENTITY, ODSY_INTR_CLEAR,
+    ODSY_INTR_ENABLE_CLEAR, ODSY_INTR_ENABLE_SET, ODSY_INTR_FLAGS, ODSY_INT_DEST_LOWER,
+    ODSY_INT_DEST_UPPER, ODSY_MEMORY_CONFIG, ODSY_MEMORY_CONTROL, ODSY_NIC_KERNEL, ODSY_NIC_PROM,
+    ODSY_RESET_CONTROL, ODSY_ROUTE_DEST_LOWER, ODSY_ROUTE_DEST_UPPER, ODSY_ROUTE_VECTORS,
+    ODSY_STATS_ADDR_LOWER, ODSY_STATS_ADDR_UPPER, ODSY_STATS_CONTROL, ODSY_STATUS, ODSY_STATUS0,
+    ODSY_SWAP_ARM, ODSY_SWAP_CONTROL, ODSY_SWAP_CONTROL_COMPANION, ODSY_SWAP_PENDING,
+    ODSY_SW_TOKEN, ODSY_USER_CMD_FIFO, ODSY_XT_REQ_TIMEOUT,
+};
+use super::fifo::CommandFifo;
+use super::interface::{front_mmio_read, front_mmio_write, front_register, HostInterface};
+use super::pi_gfx::pi_gfx_take_mark;
+use super::raster_unit::RasterQueue;
+use super::reader::DisplayShared;
+use super::registers::reg;
 impl Board {
     pub fn write_dispatch(&mut self, addr: u64, value: u64, size: u32) {
         let sequence = self.trace_sequence.fetch_add(1, Ordering::Relaxed);
@@ -122,14 +147,14 @@ impl Board {
 
 }
 
-pub fn fifo_port(addr: u64) -> bool {
+pub(super) fn fifo_port(addr: u64) -> bool {
     addr == ODSY_USER_CMD_FIFO || addr == ODSY_CMD_FIFO
 }
 
 /// The stores that join the command stream: the two command-FIFO ports, and
 /// the kernel's context switch, the shadow address it names and the switch
 /// store itself.
-pub fn command_store(addr: u64, size: u32) -> bool {
+pub(super) fn command_store(addr: u64, size: u32) -> bool {
     fifo_port(addr)
         || (addr == ODSY_CTX_SWITCH_PORT && size == 8)
         || reg(addr, size) == ODSY_CTX_SHADOW_ADDR_UPPER as i64
@@ -141,14 +166,14 @@ pub fn command_store(addr: u64, size: u32) -> bool {
 /// level word). The make-current and detach readers discard it, and the
 /// drain waits poll bits 15:7 until they read 0, which the live level
 /// does once the board has run the queue.
-pub fn level_word(addr: u64, size: u32) -> bool {
+pub(super) fn level_word(addr: u64, size: u32) -> bool {
     reg(addr, size) == ODSY_MEMORY_CONFIG as i64
 }
 
 /// Accesses that need not wait for the queued stores, and act on the board
 /// as it stands. Inferred from what a driver does while the board works,
 /// not measured on a board; every other access waits.
-pub fn access_waits(addr: u64, size: u32, write: bool) -> bool {
+pub(super) fn access_waits(addr: u64, size: u32, write: bool) -> bool {
     let cursor = ODSY_BACKEND_READ_BASE + ((ODSY_CURSOR_BASE as u64) << 3);
 
     if fifo_port(addr) {
@@ -212,7 +237,7 @@ impl Board {
 }
 
 /// Whether this store is counted: the processor interface's mark.
-pub fn store_counted(front: &parking_lot::Mutex<HostInterface>) -> bool {
+pub(super) fn store_counted(front: &parking_lot::Mutex<HostInterface>) -> bool {
     // The Octane has no PI link, so nothing sets the mark there.
     #[cfg(test)]
     if front.lock().test_counted_stores != 0 {
@@ -279,7 +304,7 @@ impl Board {
 /// whole board while the board's thread may run: it reads words the thread
 /// writes only in whole stores, or atomics, and shows the old or the new
 /// value. That is the other boards' tolerated racy read, not a lock.
-pub struct BoardCell(std::cell::UnsafeCell<Box<Board>>);
+pub(super) struct BoardCell(std::cell::UnsafeCell<Box<Board>>);
 
 // SAFETY: see the type's comment: the board's thread owns the state while it
 // runs stores; a processor touches it holding `submit` after the waiting
@@ -312,7 +337,7 @@ impl BoardCell {
 /// What a processor's access goes through: the host interface's lock, the
 /// board's state, and the queues behind them.
 #[derive(Clone)]
-pub struct BoardLocks {
+pub(super) struct BoardLocks {
     pub(super) board: Arc<BoardCell>,
     /// Serialises the processors' accesses to the board against each other
     /// (see `BoardCell`). Never held by the board's thread or the raster
@@ -328,7 +353,7 @@ pub struct BoardLocks {
 
 /// Why the bus answered busy.
 #[derive(Clone, Copy)]
-pub enum Refusal {
+pub(super) enum Refusal {
     /// A read behind command stores still in the FIFO.
     ReadFifo,
     /// A read behind raster work still queued.
@@ -349,7 +374,7 @@ const REFUSAL_SLOTS: usize = 512;
 /// by the aperture offset and width: lock-free, so the processor's threads
 /// count without waiting. Read by the monitor's `vpro refusals`. The table
 /// is open addressed; a key that finds it full is counted in `lost`.
-pub struct RefusalStats {
+pub(super) struct RefusalStats {
     keys: [AtomicU64; REFUSAL_SLOTS],
     counts: [AtomicU64; REFUSAL_SLOTS],
     lost: AtomicU64,

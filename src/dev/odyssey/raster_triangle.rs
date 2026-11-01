@@ -2,13 +2,28 @@
 //! clip planes, the texture-coordinate planes across a triangle, edge
 //! walking and spans, antialiased polygon coverage, and polygon modes.
 
-use super::*;
 
+use crate::devlog::LogModule;
+use super::gl_context::{
+    GL_BACK, GL_CLIP_PLANES, GL_CW, GL_DRAW_OK, GL_DRAW_OUT_OF_MEMORY, GL_FILL, GL_FLAT, GL_FRONT,
+    GL_FRONT_AND_BACK, GL_LINE, GL_OFFSET_FILL, GL_OFFSET_LINE, GL_OFFSET_POINT, GL_POINT,
+    GL_POLYGON, GL_QUADS, GL_QUAD_STRIP, GL_TRIANGLES, GL_TRIANGLE_FAN, GL_TRIANGLE_STRIP,
+    GL_VERTEX_FLOATS, GL_V_BACK_COLOR, GL_V_COLOR, GL_V_EDGE, GL_V_MATERIAL, GL_V_POSITION, GlDraw,
+    GlDrawResult, GlDrawState,
+};
+use super::raster::{fmin, SoftDraw, SoftFrag, SoftVertex, VOLUME_TRIANGLE_MAX, VolumeVertex};
+use super::raster_fill::{fill_quads_dispatch, FillRow, QuadGeneral, QuadRow};
+use super::raster_fixed_texture::{FIXED_ANY, SoftTexSpan};
+use super::raster_line::{r2_max, r2_min, soft_dimension, SoftLineStipple};
+use super::raster_texture::{
+    soft_quad_flat_rho, soft_quad_rho, soft_texture_derivatives, soft_texture_lod_scale,
+    SoftTexPlane,
+};
 use crate::dev::gl::math::xform;
 
 /// The six planes of the view volume (OpenGL 1.2.1, 2.11), -w <= x, y,
 /// z <= w, as each one's value at a point, which is >= 0 inside it.
-pub const VOLUME_PLANES: i32 = 6;
+pub(super) const VOLUME_PLANES: i32 = 6;
 
 impl VolumeVertex {
     pub fn plane(&self, plane: i32) -> f64 {
@@ -58,7 +73,7 @@ impl VolumeVertex {
 /// keeps its inside end and adds the point where it crosses the plane.
 /// A value that is not a number is outside. The polygon left, and its
 /// vertex count, 0 when nothing is.
-pub fn volume_clip_triangle(in_: &[VolumeVertex; 3]) -> ([VolumeVertex; VOLUME_TRIANGLE_MAX], usize) {
+pub(super) fn volume_clip_triangle(in_: &[VolumeVertex; 3]) -> ([VolumeVertex; VOLUME_TRIANGLE_MAX], usize) {
     let mut out: [VolumeVertex; VOLUME_TRIANGLE_MAX] = Default::default();
 
     out[..3].clone_from_slice(in_);
@@ -174,7 +189,7 @@ impl SoftVertex {
 
 /// The texture-coordinate planes across triangle v, or None where they are
 /// not finite. A triangle of no area has flat planes at its first vertex.
-pub fn soft_texture_plane(v: &[SoftVertex], sub: u32, volume: bool, one_dimensional: bool) -> Option<SoftTexPlane> {
+pub(super) fn soft_texture_plane(v: &[SoftVertex], sub: u32, volume: bool, one_dimensional: bool) -> Option<SoftTexPlane> {
     let scale = (1i32 << sub) as f64;
     let x1 = (v[1].x - v[0].x) as f64 / scale;
     let y1 = (v[1].y - v[0].y) as f64 / scale;
@@ -714,20 +729,20 @@ impl<'a> GlDraw<'a> {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct SoftAaPoint {
+pub(super) struct SoftAaPoint {
     pub x: f64,
     pub y: f64,
 }
 
-pub type SoftAaEdge = u32;
+pub(super) type SoftAaEdge = u32;
 
-pub const AA_LEFT: SoftAaEdge = 0;
+pub(super) const AA_LEFT: SoftAaEdge = 0;
 
-pub const AA_RIGHT: SoftAaEdge = 1;
+pub(super) const AA_RIGHT: SoftAaEdge = 1;
 
-pub const AA_BOTTOM: SoftAaEdge = 2;
+pub(super) const AA_BOTTOM: SoftAaEdge = 2;
 
-pub const AA_TOP: SoftAaEdge = 3;
+pub(super) const AA_TOP: SoftAaEdge = 3;
 
 impl SoftAaPoint {
     pub fn aa_inside(&self, edge: SoftAaEdge, value: f64) -> bool {
@@ -748,7 +763,7 @@ impl SoftAaPoint {
 }
 
 /// Clip a convex window-space polygon to one side of a pixel square.
-pub fn soft_aa_clip(
+pub(super) fn soft_aa_clip(
     src: &[SoftAaPoint],
     n: usize,
     dst: &mut [SoftAaPoint],
@@ -795,7 +810,7 @@ impl SoftVertex {
 }
 
 /// A convex polygon contains the square when it contains all four corners.
-pub fn soft_aa_contains_pixel(v: &[SoftVertex], n: usize, px: i32, py: i32, scale: f64, ccw: bool) -> bool {
+pub(super) fn soft_aa_contains_pixel(v: &[SoftVertex], n: usize, px: i32, py: i32, scale: f64, ccw: bool) -> bool {
     for i in 0..n {
         let a = &v[i];
         let b = &v[(i + 1) % n];
@@ -824,13 +839,13 @@ pub fn soft_aa_contains_pixel(v: &[SoftVertex], n: usize, px: i32, py: i32, scal
 thread_local! {
     /// Visit every pixel of an antialiased polygon's bounding box, not just
     /// the span of each row it can reach (tests and the benchmark).
-    pub static SOFT_AA_WHOLE_BOX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(super) static SOFT_AA_WHOLE_BOX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Select the whole bounding box for antialiased polygons drawn on this
 /// thread. Per thread, so that tests running at once cannot change each
 /// other's path.
-pub fn raster_set_aa_whole_box(whole: bool) {
+pub(super) fn raster_set_aa_whole_box(whole: bool) {
     SOFT_AA_WHOLE_BOX.with(|c| c.set(whole));
 }
 
@@ -839,7 +854,7 @@ pub fn raster_set_aa_whole_box(whole: bool) {
 /// polygon's extent along the row's strip, py to py + 1. None where the
 /// strip holds none of the polygon. The clipping of a pixel's square
 /// against the polygon finds nothing beyond this (soft_aa_clip()).
-pub fn soft_aa_row_span(v: &[SoftVertex], n: usize, scale: f64, py: i32) -> Option<(i32, i32)> {
+pub(super) fn soft_aa_row_span(v: &[SoftVertex], n: usize, scale: f64, py: i32) -> Option<(i32, i32)> {
     let (y0, y1) = (py as f64, py as f64 + 1.0);
     let mut lo = f64::INFINITY;
     let mut hi = f64::NEG_INFINITY;
@@ -1465,7 +1480,12 @@ impl SoftDraw<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dev::odyssey::raster_bench::*;
+
+    use crate::dev::odyssey::gl_context::{
+        GL_LINEAR, GL_LINEAR_MIPMAP_LINEAR, GL_MODULATE, GL_RGBA, GL_V_TEXCOORD,
+    };
+    use crate::dev::odyssey::raster_bench::{BENCH_H, BENCH_W, Bench, BenchTexture, Lcg};
+
 
     const SIDE: i32 = 160;
 

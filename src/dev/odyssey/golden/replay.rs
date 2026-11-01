@@ -12,13 +12,21 @@
 //! `cargo test ... replay_bless -- --ignored` re-takes every recording's
 //! checkpoints.
 
+use crate::dev::odyssey::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
+use crate::dev::odyssey::consts::{
+    ODSY_BUZZ_1, ODSY_CMD_ARITY_SHIFT, ODSY_CMD_FIFO, ODSY_CMD_IMAGE_BOX, ODSY_CMD_IMAGE_HEADER,
+    ODSY_CMD_REGISTER_TAG, ODSY_GL_PRIMITIVE_IMAGE, ODSY_IMAGE_BOX_X1_INDEX,
+    ODSY_IMAGE_BOX_X2_INDEX, ODSY_IMAGE_BOX_Y1_INDEX, ODSY_IMAGE_BOX_Y2_INDEX,
+    ODSY_IMAGE_BURST_BASE, ODSY_IMAGE_FMT_RGB, ODSY_REG_GL_BEGIN, ODSY_REG_GL_END,
+};
+use crate::dev::odyssey::memory::ClipRect;
+use crate::dev::odyssey::pixel_dma::{read_guest, GuestMemory};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
 use super::super::record::{self, Rec};
-use super::*;
 use crate::traits::{BusDevice, BusRead8, BUS_ERR, BUS_OK};
 
 /// Records between checkpoints.

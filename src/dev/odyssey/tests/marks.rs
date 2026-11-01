@@ -8,7 +8,7 @@
 //! has a negative control: the same schedule with the order reversed must
 //! leave a stale row, or the model proves nothing.
 
-use super::*;
+use crate::dev::odyssey::scanout::{DirtySite, RowMarks};
 use std::cell::{Cell, RefCell};
 
 const ROWS: usize = 4;

@@ -4,17 +4,30 @@
 //! raster_fill.rs. Its colours stay within 3/255 of the double-precision
 //! path's; it is faster, not more accurate.
 
-use super::*;
 
+use super::gl_context::{
+    GL_ALPHA, GL_CLAMP, GL_CLAMP_TO_BORDER, GL_CLAMP_TO_EDGE, GL_DEPTH_COMPONENT, GL_INTENSITY,
+    GL_LINEAR, GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR_MIPMAP_NEAREST, GL_LUMINANCE, GL_LUMINANCE_ALPHA,
+    GL_NEAREST, GL_NEAREST_MIPMAP_LINEAR, GL_NEAREST_MIPMAP_NEAREST, GL_REPEAT, GL_RGB,
+};
+use super::raster::{
+    FIXED_FAILED, FIXED_LEVELS, GlTexLevel, SoftDraw, SoftFixedCell, SoftFixedStore, SoftFrag,
+    SoftVertex, TexturePath,
+};
+use super::raster_fill::FillRow;
+use super::raster_texture::{
+    soft_texture_components, soft_texture_lod_scale, soft_texture_mipmap, SoftQuadCoords,
+    SoftTexPlane, SoftTexelCache,
+};
 /// MAX and MIN as conditionals: the first operand when the comparison fails,
 /// so a NaN operand is dropped.
 #[inline(always)]
-pub fn fx_max<T: PartialOrd>(a: T, b: T) -> T {
+pub(super) fn fx_max<T: PartialOrd>(a: T, b: T) -> T {
     if a > b { a } else { b }
 }
 
 #[inline(always)]
-pub fn fx_min<T: PartialOrd>(a: T, b: T) -> T {
+pub(super) fn fx_min<T: PartialOrd>(a: T, b: T) -> T {
     if a < b { a } else { b }
 }
 
@@ -51,28 +64,28 @@ pub fn fx_min<T: PartialOrd>(a: T, b: T) -> T {
 // else, and a fragment the fixed sampler cannot take (a coordinate beyond
 // 2^30, Q/W not positive, a failed read), goes to SoftDraw::texture(), so it
 // is dropped and reported as before.
-pub const FIXED_MAX_SIDE: u32 = 8192;
-pub const FIXED_MAX_TEXELS: u32 = 1 << 22;
+pub(super) const FIXED_MAX_SIDE: u32 = 8192;
+pub(super) const FIXED_MAX_TEXELS: u32 = 1 << 22;
 /// The fewest pixels a draw covers for its texels to be read ahead
 /// (SoftDraw::fixed_prefill()).
-pub const FIXED_PREFILL_MIN_PIXELS: u64 = 2048;
+pub(super) const FIXED_PREFILL_MIN_PIXELS: u64 = 2048;
 /// Lambda's bounds, beyond any level count, in 1/256.
-pub const FIXED_LAMBDA_MAX: i32 = 1 << 24;
+pub(super) const FIXED_LAMBDA_MAX: i32 = 1 << 24;
 
 thread_local! {
-    pub static SOFT_TEXTURE_PATH: std::cell::Cell<TexturePath> =
+    pub(super) static SOFT_TEXTURE_PATH: std::cell::Cell<TexturePath> =
         const { std::cell::Cell::new(TexturePath::Spans) };
 }
 
 /// How filled triangles drawn on this thread sample a texture, for tests.
 /// Per thread, so that tests running at once cannot change each other's
 /// path.
-pub fn raster_set_texture_path(path: TexturePath) {
+pub(super) fn raster_set_texture_path(path: TexturePath) {
     SOFT_TEXTURE_PATH.with(|p| p.set(path));
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct SoftFixedLevel {
+pub(super) struct SoftFixedLevel {
     /// None: the image's level-zero fields
     pub level: Option<GlTexLevel>,
     pub width: u32,
@@ -82,7 +95,7 @@ pub struct SoftFixedLevel {
 }
 
 #[derive(Clone, Default)]
-pub struct SoftFixedTex {
+pub(super) struct SoftFixedTex {
     pub level: [SoftFixedLevel; FIXED_LEVELS],
     /// The row loop for textured triangles, or None for the general one.
     pub span: Option<FillRow>,
@@ -121,7 +134,7 @@ pub struct SoftFixedTex {
 /// lane, red highest: a component times a weight of at most 256 fits its
 /// lane, so one product weights all four.
 #[inline(always)]
-pub fn soft_fixed_lanes(rgba: u32) -> u64 {
+pub(super) fn soft_fixed_lanes(rgba: u32) -> u64 {
     let t: u64 = ((rgba & 0xffff0000) as u64) << 16 | (rgba & 0xffff) as u64;
 
     (t & 0x0000ff000000ff00) << 8 | (t & 0x000000ff000000ff)
@@ -129,7 +142,7 @@ pub fn soft_fixed_lanes(rgba: u32) -> u64 {
 
 /// A packed RRGGBBAA texel with the components the base format lacks
 /// filled in, as soft_texture_components() fills them.
-pub fn soft_fixed_expand(format: u32, rgba: u32) -> u32 {
+pub(super) fn soft_fixed_expand(format: u32, rgba: u32) -> u32 {
     let r = rgba >> 24;
 
     match format {
@@ -142,7 +155,7 @@ pub fn soft_fixed_expand(format: u32, rgba: u32) -> u32 {
     }
 }
 
-pub fn soft_fixed_unit(c: f64) -> u32 {
+pub(super) fn soft_fixed_unit(c: f64) -> u32 {
     (fx_min(fx_max(c, 0.0), 1.0) * 255.0 + 0.5) as u32
 }
 
@@ -263,7 +276,7 @@ impl SoftDraw<'_> {
 }
 
 /// Allocate zeroed cells for size texels, or None where that fails.
-pub fn soft_fixed_alloc<T: Copy + Default>(size: usize) -> Option<Vec<T>> {
+pub(super) fn soft_fixed_alloc<T: Copy + Default>(size: usize) -> Option<Vec<T>> {
     let mut v: Vec<T> = Vec::new();
 
     if v.try_reserve_exact(size).is_err() {
@@ -386,7 +399,7 @@ impl SoftDraw<'_> {
 
 /// Give the arrays SoftDraw::fixed_prefill() filled back to this thread's
 /// texel store, for the next draw to reuse.
-pub fn fixed_return(cache: &std::cell::RefCell<SoftTexelCache>, f: &mut SoftFixedTex) {
+pub(super) fn fixed_return(cache: &std::cell::RefCell<SoftTexelCache>, f: &mut SoftFixedTex) {
     let mut cache = cache.borrow_mut();
 
     for (store, plain) in cache.fixed.iter_mut().zip(f.plain.iter_mut()) {
@@ -446,7 +459,7 @@ impl<'a> SoftDraw<'a> {
 
 /// floor(x) for |x| below 2^62.
 #[inline(always)]
-pub fn soft_fixed_floor(x: f64) -> i64 {
+pub(super) fn soft_fixed_floor(x: f64) -> i64 {
     let i = x as i64;
 
     i - ((x < i as f64) as i64)
@@ -460,7 +473,7 @@ pub fn soft_fixed_floor(x: f64) -> i64 {
 /// for LINEAR, the first tap's index in *x0, the second's in *x1 and the
 /// second's weight; for NEAREST, the tap's index in *x0.
 #[inline(always)]
-pub fn soft_fixed_axis(mut u: i64, n: u32, wrap: u32, upper: f64, linear: bool, x0: &mut i64, x1: &mut i64) -> u32 {
+pub(super) fn soft_fixed_axis(mut u: i64, n: u32, wrap: u32, upper: f64, linear: bool, x0: &mut i64, x1: &mut i64) -> u32 {
     let whole: i64 = (n as i64) << 8;
     let mask: i64 = n.wrapping_sub(1) as i64;
     let mut a: u32 = 0;
@@ -511,7 +524,7 @@ pub fn soft_fixed_axis(mut u: i64, n: u32, wrap: u32, upper: f64, linear: bool, 
 }
 
 /// Two of a texel's lanes, in the low 16 bits of each 32-bit half.
-pub const FIXED_PAIRS: u64 = 0x0000ffff0000ffff;
+pub(super) const FIXED_PAIRS: u64 = 0x0000ffff0000ffff;
 
 impl SoftDraw<'_> {
     /// Relative level i sampled at position (u, v), in 1/256 of its texels,
@@ -558,11 +571,11 @@ impl SoftDraw<'_> {
 }
 
 /// round(128 log2(1 + (i + 0.5) / 1024)): lambda's table, in 1/256.
-pub static SOFT_FIXED_LOG2: std::sync::OnceLock<[i16; 1024]> = std::sync::OnceLock::new();
+pub(super) static SOFT_FIXED_LOG2: std::sync::OnceLock<[i16; 1024]> = std::sync::OnceLock::new();
 
 /// The table, built on first use (not at start-up).
 #[inline(always)]
-pub fn soft_fixed_log2_init() -> &'static [i16; 1024] {
+pub(super) fn soft_fixed_log2_init() -> &'static [i16; 1024] {
     SOFT_FIXED_LOG2.get_or_init(|| {
         let mut t = [0i16; 1024];
 
@@ -578,7 +591,7 @@ pub fn soft_fixed_log2_init() -> &'static [i16; 1024] {
 /// the top ten bits of its significand. Zero and subnormals give the
 /// least lambda, which every level clamp raises.
 #[inline(always)]
-pub fn soft_fixed_lambda(rho2: f64) -> i32 {
+pub(super) fn soft_fixed_lambda(rho2: f64) -> i32 {
     let bits = rho2.to_bits();
     let exponent = ((bits >> 52) & 0x7ff) as i32;
 
@@ -673,11 +686,11 @@ impl SoftFixedTex {
 /// specialised row loops: NEAREST or LINEAR with no footprint, trilinear
 /// (LINEAR_MIPMAP_LINEAR minification with LINEAR magnification), or any
 /// filter the image has, chosen per fragment.
-pub type SoftFixedKernel = u32;
-pub const FIXED_ANY: SoftFixedKernel = 0;
-pub const FIXED_NEAREST: SoftFixedKernel = 1;
-pub const FIXED_LINEAR: SoftFixedKernel = 2;
-pub const FIXED_TRILINEAR: SoftFixedKernel = 3;
+pub(super) type SoftFixedKernel = u32;
+pub(super) const FIXED_ANY: SoftFixedKernel = 0;
+pub(super) const FIXED_NEAREST: SoftFixedKernel = 1;
+pub(super) const FIXED_LINEAR: SoftFixedKernel = 2;
+pub(super) const FIXED_TRILINEAR: SoftFixedKernel = 3;
 
 impl SoftDraw<'_> {
     /// The filtered texel at (s, t) for lambda, each component in [0, 1], as
@@ -771,7 +784,7 @@ impl SoftDraw<'_> {
 
 /// One triangle's fixed inputs to a quad loop (SoftDraw::fill_quads()).
 #[derive(Clone, Copy)]
-pub struct SoftTexSpan<'a> {
+pub(super) struct SoftTexSpan<'a> {
     /// three, wound as the rows step
     pub v: &'a [SoftVertex; 3],
     pub g: &'a SoftTexPlane,
@@ -792,6 +805,16 @@ pub struct SoftTexSpan<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dev::odyssey::raster_bench;
+    use crate::dev::odyssey::gl_context::{
+        GL_COLOUR_MASK_ALL, GL_LEQUAL, GL_REPLACE, GL_RGBA, GL_SMOOTH, GL_TRIANGLES,
+        GL_VERTEX_FLOATS, GL_V_COLOR, GL_V_POSITION, GL_V_TEXCOORD, GlDraw, GlDrawState,
+    };
+    use crate::dev::odyssey::memory::ClipRect;
+    use crate::dev::odyssey::raster::{GlTexImage, LineRule, RasterRules, RasterTarget, Texels};
+
+    use crate::dev::odyssey::raster_texture::soft_quad_coords;
+
 
     // Large enough that the draw covers more pixels than the texture path
     // prefills for.

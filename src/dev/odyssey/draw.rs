@@ -1,11 +1,38 @@
 //! The board's 2D drawing: colour-buffer access, clipping and id-plane tests,
 //! integer pixel paints, rectangle fill and copy, and pixel bursts.
 
-use super::*;
 
+use crate::devlog::LogModule;
+use super::board::{Board, ODSY_CLIP_RECTS, ODSY_HEIGHT, ODSY_WIDTH};
+use super::consts::{
+    ODSY_AUX_ID_BUFFER, ODSY_AUX_OVERLAY_BUFFER, ODSY_BUFFERS, ODSY_BURST_STENCIL_SHIFT,
+    ODSY_CLIP_FIELD_MASK, ODSY_CLIP_OFFSCREEN_HI, ODSY_CLIP_WORD_MASK, ODSY_CLIP_X_SHIFT,
+    ODSY_CMD_COPY_RECT_TRIGGER, ODSY_COPY_RECT_DEST_SHIFT, ODSY_COPY_RECT_FORMAT_SOURCE_SHIFT,
+    ODSY_COPY_RECT_SOURCE_SHIFT, ODSY_DEPTH24_MAX, ODSY_DEST_FLAGS, ODSY_DEST_ID_PLANES,
+    ODSY_DMA_FENCE_INTERRUPT, ODSY_DMA_FENCE_SLOT_MASK, ODSY_DMA_FENCE_TOKEN_SHIFT,
+    ODSY_DMA_SENTINEL_DRAW, ODSY_DMA_SENTINEL_READ, ODSY_DRAW_MASK_BUFFER0, ODSY_DRAW_MASK_BUFFER1,
+    ODSY_FENCE_WORD_MASK, ODSY_ID_COMPARE_ENABLE, ODSY_ID_COMPARE_MASK_SHIFT,
+    ODSY_IMAGE_BURST_BASE, ODSY_IMAGE_BURST_FMT_MASK, ODSY_IMAGE_BURST_RESERVED_MASK,
+    ODSY_IMAGE_CODE_ABGR, ODSY_IMAGE_CODE_ABGR12, ODSY_IMAGE_CODE_CI, ODSY_IMAGE_CODE_CI16,
+    ODSY_IMAGE_CODE_DEPTH_STENCIL, ODSY_IMAGE_CODE_FALLBACK_XRGB, ODSY_IMAGE_CODE_LUM,
+    ODSY_IMAGE_CODE_LUM12, ODSY_IMAGE_CODE_LUM_ALPHA, ODSY_IMAGE_CODE_LUM_ALPHA12,
+    ODSY_IMAGE_CODE_RGB, ODSY_IMAGE_CODE_RGB12, ODSY_IMAGE_CODE_RGBA, ODSY_IMAGE_CODE_RGBA12,
+    ODSY_IMAGE_FMT_CI, ODSY_IMAGE_FMT_RGB, ODSY_IMAGE_FMT_RGBA16, ODSY_INDEX_MASK,
+    ODSY_MODE_COLOR_LOGIC_OP, ODSY_MODE_INDEX_LOGIC_OP, ODSY_PATTERN_MODE_ENABLE,
+    ODSY_PATTERN_SHAPE_16X64, ODSY_PATTERN_SHAPE_32X32, ODSY_PATTERN_SHAPE_64X16,
+    ODSY_PATTERN_SHAPE_OPAQUE, ODSY_PLANE_MASK_SHIFT, ODSY_WRITE_DEPTH, ODSY_WRITE_STENCIL_MASK,
+    ODSY_WRITE_STENCIL_SHIFT,
+};
+use super::gl_context::GL_CLEAR;
+use super::memory::{logic_op, plane_bpp, plane_bytes_per_pixel, BoardMemory, ClipRect, LOGIC_COPY, Plane};
+use super::objects::CopyOperands;
+use super::pixel_dma::write_guest;
+use super::pixel_write::{write_form, WriteForm};
+use super::raster::{LineRule, RasterRules};
+use super::scanout::DirtySite;
 /// The clip-rectangle runs of one row (Board::row_runs).
 #[derive(Clone, Copy)]
-pub struct RowRuns {
+pub(super) struct RowRuns {
     pub n: u32,
     pub start: [i64; ODSY_CLIP_RECTS as usize],
     pub end: [i64; ODSY_CLIP_RECTS as usize],
@@ -20,13 +47,13 @@ impl Default for RowRuns {
 /// 2D fills carry no alpha channel in this grammar; the framebuffer's fourth
 /// byte is modelled fully opaque (the colour plane's red-high R,G,B,A packing,
 /// resolved by resolve_row() below).
-pub fn pack_pixel(r: u32, g: u32, b: u32) -> u32 {
+pub(super) fn pack_pixel(r: u32, g: u32, b: u32) -> u32 {
     (r << 24) | (g << 16) | (b << 8) | 0xff
 }
 
 /// The 0x840 ownership test at an in-plane pixel, against id plane `did`
 /// and the 0x840 word `id_compare`.
-pub fn id_compare_passes(did: &[u8], id_compare: u32, x: i64, y: i64) -> bool {
+pub(super) fn id_compare_passes(did: &[u8], id_compare: u32, x: i64, y: i64) -> bool {
     let mask = (id_compare >> ODSY_ID_COMPARE_MASK_SHIFT) as u8;
 
     id_compare & ODSY_ID_COMPARE_ENABLE == 0
@@ -262,7 +289,7 @@ impl Board {
 /// The plane word a fill stores: the packed RGB pixel of an RGB fill, or the
 /// raw index of a colour-index fill. No colormap is applied here: scanout
 /// resolves each pixel through its own drawable.
-pub fn fill_pixel(is_index: bool, value: u32) -> u32 {
+pub(super) fn fill_pixel(is_index: bool, value: u32) -> u32 {
     if is_index { value & ODSY_INDEX_MASK } else { value }
 }
 
@@ -778,7 +805,7 @@ impl Board {
 /// with an integer-to-float convert, so the 32-bit operand is a float bit
 /// pattern, not an integer. Truncate toward zero; a NaN or negative clamps to
 /// the screen origin.
-pub fn float_to_u32(bits: u32) -> u32 {
+pub(super) fn float_to_u32(bits: u32) -> u32 {
     let f = f32::from_bits(bits);
 
     if !(f > 0.0f32) {
@@ -896,7 +923,7 @@ impl Board {
 /// passes client pixels through, and whether alpha is stored at all for a
 /// window whose visual has none is unknown. The model keeps one plane for
 /// every visual, so it cannot tell such a window apart.
-pub fn code_carries_alpha(code: u32) -> bool {
+pub(super) fn code_carries_alpha(code: u32) -> bool {
     matches!(
         code,
         ODSY_IMAGE_CODE_RGBA
@@ -907,12 +934,12 @@ pub fn code_carries_alpha(code: u32) -> bool {
     )
 }
 
-pub fn unorm16_to_8(v: u32) -> u32 {
+pub(super) fn unorm16_to_8(v: u32) -> u32 {
     (v.wrapping_mul(255).wrapping_add(65535 / 2)) / 65535
 }
 
 /// Components of a 12-bit texture source code, or 0 for any other code.
-pub fn texel12_components(code: u32) -> u32 {
+pub(super) fn texel12_components(code: u32) -> u32 {
     match code {
         ODSY_IMAGE_CODE_LUM12 => 1,
         ODSY_IMAGE_CODE_LUM_ALPHA12 => 2,
@@ -924,7 +951,7 @@ pub fn texel12_components(code: u32) -> u32 {
 
 /// A 12-bit texture source pixel as 0xRRGGBBAA: its components, each a byte or
 /// (wide) a big-endian 16-bit word, in the order its code names.
-pub fn decode_texel12(code: u32, b: &[u8], wide: bool) -> u32 {
+pub(super) fn decode_texel12(code: u32, b: &[u8], wide: bool) -> u32 {
     let mut c = [0u32; 4];
     let n = texel12_components(code) as usize;
 
@@ -967,12 +994,12 @@ impl Board {
 }
 
 /// Whether a source format carries colour indices rather than colours.
-pub fn code_is_index(code: u32) -> bool {
+pub(super) fn code_is_index(code: u32) -> bool {
     code == ODSY_IMAGE_CODE_CI || code == ODSY_IMAGE_CODE_CI16
 }
 
 /// Bytes a pixel of a source format takes, 0 for an unknown code.
-pub fn pixel_bytes(code: u32) -> u32 {
+pub(super) fn pixel_bytes(code: u32) -> u32 {
     match code {
         ODSY_IMAGE_CODE_ABGR | ODSY_IMAGE_CODE_FALLBACK_XRGB | ODSY_IMAGE_CODE_RGBA | ODSY_IMAGE_CODE_RGBA12 => 4,
         ODSY_IMAGE_CODE_RGB => 3,
@@ -983,7 +1010,7 @@ pub fn pixel_bytes(code: u32) -> u32 {
     }
 }
 
-pub fn image_pairing_supported(code: u32, fmt: u32) -> bool {
+pub(super) fn image_pairing_supported(code: u32, fmt: u32) -> bool {
     if code == ODSY_IMAGE_CODE_RGBA12 {
         return fmt == ODSY_IMAGE_FMT_RGB || fmt == ODSY_IMAGE_FMT_RGBA16;
     }
@@ -1217,7 +1244,7 @@ impl Board {
 }
 
 /// The format of a pixel-burst register-select word, None for any other.
-pub fn image_burst_fmt(reg: u32) -> Option<u32> {
+pub(super) fn image_burst_fmt(reg: u32) -> Option<u32> {
     let f = reg & ODSY_IMAGE_BURST_FMT_MASK;
 
     if (reg & ODSY_IMAGE_BURST_BASE) == 0 || (reg & ODSY_IMAGE_BURST_RESERVED_MASK) != 0 {
@@ -1240,7 +1267,7 @@ pub fn image_burst_fmt(reg: u32) -> Option<u32> {
 /// c5417243927d). The branch's record is the authority for where that rule
 /// is established and where it is a model choice: the x-major tie and the
 /// end rule are model choices.
-pub fn gl_rules() -> RasterRules {
+pub(super) fn gl_rules() -> RasterRules {
     RasterRules {
         subpixel_bits: 8,
         color_bits: 8,

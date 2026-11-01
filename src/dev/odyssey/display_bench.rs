@@ -12,7 +12,18 @@
 //!
 //! BENCH_SECS is the time each case takes (default one second).
 
-use super::*;
+use super::{raster_bench, Odyssey};
+use super::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
+use super::consts::{
+    ODSY_CMAP_UNVERIFIED_GROUP, ODSY_CURSOR_COLOURS, ODSY_CURSOR_COLOUR_COUNT, ODSY_CURSOR_CONTROL,
+    ODSY_CURSOR_CTL_CROSSHAIR, ODSY_CURSOR_CTL_ENABLE, ODSY_CURSOR_GLYPH, ODSY_CURSOR_PLANE,
+    ODSY_CURSOR_POSITION, ODSY_DID_MAIN_SHIFT, ODSY_DISPMODE_COUNT, ODSY_DISPMODE_GROUP_SHIFT,
+    ODSY_DISPMODE_WIDTH_4, ODSY_DISPMODE_WIDTH_5, ODSY_DISPMODE_WIDTH_SHIFT, ODSY_GAMMA_BASE,
+    ODSY_LUT_ENTRY_MASK, ODSY_LUT_SIZE, ODSY_OVERLAY_IDS, ODSY_OVERLAY_MODE_ENABLE,
+    ODSY_OVERLAY_MODE_GROUP_SHIFT,
+};
+use super::display::{resolve_line, Display};
+use super::mmio::BoardLocks;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

@@ -5,353 +5,355 @@
 //! primitive being assembled. Colours, matrices and vertex components are IEEE single
 //! floats holding exactly the bits the client sent; arithmetic is double.
 
-use super::*;
 
+use crate::devlog::LogModule;
+use super::bits::deposit32;
+use super::memory::ClipList;
 use crate::dev::gl::math::{invert, xform, IDENT};
 use crate::dev::gl::vertex::{Viewport, Wv};
 
 /// A raster operation: pixel work on a head's planes that is not a GL
 /// primitive, queued beside draws in the order the head received it.
-pub type RasterKind = u32;
+pub(super) type RasterKind = u32;
 
 /// Where colour is stored: a value the board's drawable gives and only
 /// the board's store hook reads. Shared code copies it, never interprets it.
-pub type ColourTarget = u32;
+pub(super) type ColourTarget = u32;
 
-pub type GlDrawResult = u32;
-pub type GlOp = u32;
+pub(super) type GlDrawResult = u32;
+pub(super) type GlOp = u32;
 
 // Constants
-pub const GL_MAX_TARGETS: u32 = 4;
+pub(super) const GL_MAX_TARGETS: u32 = 4;
 
 // The channels glColorMask lets a draw or clear write (4.2.2).
-pub const GL_COLOUR_MASK_RED: u32 = 0x1;
-pub const GL_COLOUR_MASK_ALPHA: u32 = 0x8;
-pub const GL_COLOUR_MASK_ALL: u32 = 0xf;
+pub(super) const GL_COLOUR_MASK_RED: u32 = 0x1;
+pub(super) const GL_COLOUR_MASK_ALPHA: u32 = 0x8;
+pub(super) const GL_COLOUR_MASK_ALL: u32 = 0xf;
 
 // The buffers a clear names, glClear's mask bits.
-pub const GL_DEPTH_BUFFER_BIT: u32 = 0x0100;
-pub const GL_STENCIL_BUFFER_BIT: u32 = 0x0400;
-pub const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
+pub(super) const GL_DEPTH_BUFFER_BIT: u32 = 0x0100;
+pub(super) const GL_STENCIL_BUFFER_BIT: u32 = 0x0400;
+pub(super) const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
 
-pub const GL_VERTEX_FLOATS: usize = 22;
-pub const GL_V_POSITION: usize = 0;
-pub const GL_V_COLOR: usize = 4;
-pub const GL_V_NORMAL: usize = 8;
-pub const GL_V_MATERIAL: usize = 11;
-pub const GL_V_TEXCOORD: usize = 12;
-pub const GL_V_EDGE: usize = 17;
-pub const GL_V_BACK_COLOR: usize = 18;
+pub(super) const GL_VERTEX_FLOATS: usize = 22;
+pub(super) const GL_V_POSITION: usize = 0;
+pub(super) const GL_V_COLOR: usize = 4;
+pub(super) const GL_V_NORMAL: usize = 8;
+pub(super) const GL_V_MATERIAL: usize = 11;
+pub(super) const GL_V_TEXCOORD: usize = 12;
+pub(super) const GL_V_EDGE: usize = 17;
+pub(super) const GL_V_BACK_COLOR: usize = 18;
 
 // OpenGL 1.2 enumerants the state holds.
-pub const GL_POINTS: u32 = 0;
-pub const GL_LINES: u32 = 1;
-pub const GL_LINE_LOOP: u32 = 2;
-pub const GL_LINE_STRIP: u32 = 3;
-pub const GL_TRIANGLES: u32 = 4;
-pub const GL_TRIANGLE_STRIP: u32 = 5;
-pub const GL_TRIANGLE_FAN: u32 = 6;
-pub const GL_QUADS: u32 = 7;
-pub const GL_QUAD_STRIP: u32 = 8;
-pub const GL_POLYGON: u32 = 9;
-pub const GL_MODELVIEW: u32 = 0x1700;
-pub const GL_PROJECTION: u32 = 0x1701;
-pub const GL_TEXTURE: u32 = 0x1702;
-pub const GL_EYE_LINEAR: u32 = 0x2400;
-pub const GL_MODULATE: u32 = 0x2100;
-pub const GL_DECAL: u32 = 0x2101;
-pub const GL_NEAREST: u32 = 0x2600;
-pub const GL_NEAREST_MIPMAP_NEAREST: u32 = 0x2700;
-pub const GL_LINEAR_MIPMAP_NEAREST: u32 = 0x2701;
-pub const GL_NEAREST_MIPMAP_LINEAR: u32 = 0x2702;
-pub const GL_LINEAR_MIPMAP_LINEAR: u32 = 0x2703;
-pub const GL_LINEAR_SHARPEN_SGIS: u32 = 0x80ad;
-pub const GL_LINEAR_SHARPEN_ALPHA_SGIS: u32 = 0x80ae;
-pub const GL_LINEAR_SHARPEN_COLOR_SGIS: u32 = 0x80af;
-pub const GL_LINEAR_DETAIL_SGIS: u32 = 0x8097;
-pub const GL_LINEAR_DETAIL_ALPHA_SGIS: u32 = 0x8098;
-pub const GL_LINEAR_DETAIL_COLOR_SGIS: u32 = 0x8099;
-pub const GL_ADD: u32 = 0x0104;
-pub const GL_REPEAT: u32 = 0x2901;
-pub const GL_CLAMP: u32 = 0x2900;
-pub const GL_CLAMP_TO_EDGE: u32 = 0x812f;
-pub const GL_CLAMP_TO_BORDER: u32 = 0x812d;
-pub const GL_ALPHA4: u32 = 0x803b;
-pub const GL_ALPHA8: u32 = 0x803c;
-pub const GL_ALPHA12: u32 = 0x803d;
-pub const GL_ALPHA16: u32 = 0x803e;
-pub const GL_LUMINANCE4: u32 = 0x803f;
-pub const GL_LUMINANCE8: u32 = 0x8040;
-pub const GL_LUMINANCE12: u32 = 0x8041;
-pub const GL_LUMINANCE16: u32 = 0x8042;
-pub const GL_LUMINANCE4_ALPHA4: u32 = 0x8043;
-pub const GL_LUMINANCE6_ALPHA2: u32 = 0x8044;
-pub const GL_LUMINANCE8_ALPHA8: u32 = 0x8045;
-pub const GL_LUMINANCE12_ALPHA4: u32 = 0x8046;
-pub const GL_LUMINANCE12_ALPHA12: u32 = 0x8047;
-pub const GL_LUMINANCE16_ALPHA16: u32 = 0x8048;
-pub const GL_INTENSITY4: u32 = 0x804a;
-pub const GL_INTENSITY8: u32 = 0x804b;
-pub const GL_INTENSITY12: u32 = 0x804c;
-pub const GL_INTENSITY16: u32 = 0x804d;
-pub const GL_R3_G3_B2: u32 = 0x2a10;
-pub const GL_RGB4: u32 = 0x804f;
-pub const GL_RGB5: u32 = 0x8050;
-pub const GL_RGB8: u32 = 0x8051;
-pub const GL_RGB10: u32 = 0x8052;
-pub const GL_RGB12: u32 = 0x8053;
-pub const GL_RGB16: u32 = 0x8054;
-pub const GL_RGBA2: u32 = 0x8055;
-pub const GL_RGBA4: u32 = 0x8056;
-pub const GL_RGB5_A1: u32 = 0x8057;
-pub const GL_RGBA8: u32 = 0x8058;
-pub const GL_RGB10_A2: u32 = 0x8059;
-pub const GL_RGBA12: u32 = 0x805a;
-pub const GL_RGBA16: u32 = 0x805b;
-pub const GL_ALPHA: u32 = 0x1906;
-pub const GL_RGB: u32 = 0x1907;
-pub const GL_RGBA: u32 = 0x1908;
-pub const GL_DEPTH_COMPONENT: u32 = 0x1902;
-pub const GL_DEPTH_COMPONENT16_SGIX: u32 = 0x81a5;
-pub const GL_DEPTH_COMPONENT24_SGIX: u32 = 0x81a6;
-pub const GL_DEPTH_COMPONENT32_SGIX: u32 = 0x81a7;
-pub const GL_TEXTURE_LEQUAL_R_SGIX: u32 = 0x819c;
-pub const GL_TEXTURE_GEQUAL_R_SGIX: u32 = 0x819d;
-pub const GL_LUMINANCE: u32 = 0x1909;
-pub const GL_LUMINANCE_ALPHA: u32 = 0x190a;
-pub const GL_INTENSITY: u32 = 0x8049;
-pub const GL_FLAT: u32 = 0x1d00;
-pub const GL_SMOOTH: u32 = 0x1d01;
+pub(super) const GL_POINTS: u32 = 0;
+pub(super) const GL_LINES: u32 = 1;
+pub(super) const GL_LINE_LOOP: u32 = 2;
+pub(super) const GL_LINE_STRIP: u32 = 3;
+pub(super) const GL_TRIANGLES: u32 = 4;
+pub(super) const GL_TRIANGLE_STRIP: u32 = 5;
+pub(super) const GL_TRIANGLE_FAN: u32 = 6;
+pub(super) const GL_QUADS: u32 = 7;
+pub(super) const GL_QUAD_STRIP: u32 = 8;
+pub(super) const GL_POLYGON: u32 = 9;
+pub(super) const GL_MODELVIEW: u32 = 0x1700;
+pub(super) const GL_PROJECTION: u32 = 0x1701;
+pub(super) const GL_TEXTURE: u32 = 0x1702;
+pub(super) const GL_EYE_LINEAR: u32 = 0x2400;
+pub(super) const GL_MODULATE: u32 = 0x2100;
+pub(super) const GL_DECAL: u32 = 0x2101;
+pub(super) const GL_NEAREST: u32 = 0x2600;
+pub(super) const GL_NEAREST_MIPMAP_NEAREST: u32 = 0x2700;
+pub(super) const GL_LINEAR_MIPMAP_NEAREST: u32 = 0x2701;
+pub(super) const GL_NEAREST_MIPMAP_LINEAR: u32 = 0x2702;
+pub(super) const GL_LINEAR_MIPMAP_LINEAR: u32 = 0x2703;
+pub(super) const GL_LINEAR_SHARPEN_SGIS: u32 = 0x80ad;
+pub(super) const GL_LINEAR_SHARPEN_ALPHA_SGIS: u32 = 0x80ae;
+pub(super) const GL_LINEAR_SHARPEN_COLOR_SGIS: u32 = 0x80af;
+pub(super) const GL_LINEAR_DETAIL_SGIS: u32 = 0x8097;
+pub(super) const GL_LINEAR_DETAIL_ALPHA_SGIS: u32 = 0x8098;
+pub(super) const GL_LINEAR_DETAIL_COLOR_SGIS: u32 = 0x8099;
+pub(super) const GL_ADD: u32 = 0x0104;
+pub(super) const GL_REPEAT: u32 = 0x2901;
+pub(super) const GL_CLAMP: u32 = 0x2900;
+pub(super) const GL_CLAMP_TO_EDGE: u32 = 0x812f;
+pub(super) const GL_CLAMP_TO_BORDER: u32 = 0x812d;
+pub(super) const GL_ALPHA4: u32 = 0x803b;
+pub(super) const GL_ALPHA8: u32 = 0x803c;
+pub(super) const GL_ALPHA12: u32 = 0x803d;
+pub(super) const GL_ALPHA16: u32 = 0x803e;
+pub(super) const GL_LUMINANCE4: u32 = 0x803f;
+pub(super) const GL_LUMINANCE8: u32 = 0x8040;
+pub(super) const GL_LUMINANCE12: u32 = 0x8041;
+pub(super) const GL_LUMINANCE16: u32 = 0x8042;
+pub(super) const GL_LUMINANCE4_ALPHA4: u32 = 0x8043;
+pub(super) const GL_LUMINANCE6_ALPHA2: u32 = 0x8044;
+pub(super) const GL_LUMINANCE8_ALPHA8: u32 = 0x8045;
+pub(super) const GL_LUMINANCE12_ALPHA4: u32 = 0x8046;
+pub(super) const GL_LUMINANCE12_ALPHA12: u32 = 0x8047;
+pub(super) const GL_LUMINANCE16_ALPHA16: u32 = 0x8048;
+pub(super) const GL_INTENSITY4: u32 = 0x804a;
+pub(super) const GL_INTENSITY8: u32 = 0x804b;
+pub(super) const GL_INTENSITY12: u32 = 0x804c;
+pub(super) const GL_INTENSITY16: u32 = 0x804d;
+pub(super) const GL_R3_G3_B2: u32 = 0x2a10;
+pub(super) const GL_RGB4: u32 = 0x804f;
+pub(super) const GL_RGB5: u32 = 0x8050;
+pub(super) const GL_RGB8: u32 = 0x8051;
+pub(super) const GL_RGB10: u32 = 0x8052;
+pub(super) const GL_RGB12: u32 = 0x8053;
+pub(super) const GL_RGB16: u32 = 0x8054;
+pub(super) const GL_RGBA2: u32 = 0x8055;
+pub(super) const GL_RGBA4: u32 = 0x8056;
+pub(super) const GL_RGB5_A1: u32 = 0x8057;
+pub(super) const GL_RGBA8: u32 = 0x8058;
+pub(super) const GL_RGB10_A2: u32 = 0x8059;
+pub(super) const GL_RGBA12: u32 = 0x805a;
+pub(super) const GL_RGBA16: u32 = 0x805b;
+pub(super) const GL_ALPHA: u32 = 0x1906;
+pub(super) const GL_RGB: u32 = 0x1907;
+pub(super) const GL_RGBA: u32 = 0x1908;
+pub(super) const GL_DEPTH_COMPONENT: u32 = 0x1902;
+pub(super) const GL_DEPTH_COMPONENT16_SGIX: u32 = 0x81a5;
+pub(super) const GL_DEPTH_COMPONENT24_SGIX: u32 = 0x81a6;
+pub(super) const GL_DEPTH_COMPONENT32_SGIX: u32 = 0x81a7;
+pub(super) const GL_TEXTURE_LEQUAL_R_SGIX: u32 = 0x819c;
+pub(super) const GL_TEXTURE_GEQUAL_R_SGIX: u32 = 0x819d;
+pub(super) const GL_LUMINANCE: u32 = 0x1909;
+pub(super) const GL_LUMINANCE_ALPHA: u32 = 0x190a;
+pub(super) const GL_INTENSITY: u32 = 0x8049;
+pub(super) const GL_FLAT: u32 = 0x1d00;
+pub(super) const GL_SMOOTH: u32 = 0x1d01;
 // The comparisons in GL_NEVER's order, as depth_func holds them.
-pub const GL_NEVER: u32 = 0;
-pub const GL_LESS: u32 = 1;
-pub const GL_EQUAL: u32 = 2;
-pub const GL_LEQUAL: u32 = 3;
-pub const GL_GREATER: u32 = 4;
-pub const GL_NOTEQUAL: u32 = 5;
-pub const GL_GEQUAL: u32 = 6;
-pub const GL_ALWAYS: u32 = 7;
-pub const GL_DRAW_FRONT: u32 = 0x1;
-pub const GL_DRAW_BACK: u32 = 0x2;
+pub(super) const GL_NEVER: u32 = 0;
+pub(super) const GL_LESS: u32 = 1;
+pub(super) const GL_EQUAL: u32 = 2;
+pub(super) const GL_LEQUAL: u32 = 3;
+pub(super) const GL_GREATER: u32 = 4;
+pub(super) const GL_NOTEQUAL: u32 = 5;
+pub(super) const GL_GEQUAL: u32 = 6;
+pub(super) const GL_ALWAYS: u32 = 7;
+pub(super) const GL_DRAW_FRONT: u32 = 0x1;
+pub(super) const GL_DRAW_BACK: u32 = 0x2;
 //
 // The board's overlay planes, a layer of their own: set, the draw goes
 // to the drawable's overlay target alone and the other bits name nothing.
 //
-pub const GL_DRAW_OVERLAY: u32 = 0x40;
-pub const GL_NEVER_ENUM: u32 = 0x0200;
-pub const GL_CURRENT_COLOR: u32 = 0x0b00;
-pub const GL_POINT_SMOOTH: u32 = 0x0b10;
-pub const GL_LINE_SMOOTH: u32 = 0x0b20;
-pub const GL_LINE_STIPPLE: u32 = 0x0b24;
-pub const GL_LINE_STIPPLE_PATTERN: u32 = 0x0b25;
-pub const GL_LINE_STIPPLE_REPEAT: u32 = 0x0b26;
-pub const GL_POLYGON_SMOOTH: u32 = 0x0b41;
-pub const GL_POLYGON_STIPPLE: u32 = 0x0b42;
-pub const GL_CULL_FACE: u32 = 0x0b44;
-pub const GL_FOG: u32 = 0x0b60;
-pub const GL_DEPTH_TEST: u32 = 0x0b71;
-pub const GL_STENCIL_TEST: u32 = 0x0b90;
-pub const GL_DONT_CARE: u32 = 0x1100;
-pub const GL_HINTS: u32 = 5;
-pub const GL_SPRITE_AXIAL_SGIX: u32 = 0x814c;
-pub const GL_ALPHA_TEST: u32 = 0x0bc0;
-pub const GL_BLEND: u32 = 0x0be2;
-pub const GL_INDEX_LOGIC_OP: u32 = 0x0bf1;
-pub const GL_COLOR_LOGIC_OP: u32 = 0x0bf2;
-pub const GL_SCISSOR_TEST: u32 = 0x0c11;
-pub const GL_CLIP_PLANE0: u32 = 0x3000;
-pub const GL_POLYGON_OFFSET_POINT: u32 = 0x2a01;
-pub const GL_POLYGON_OFFSET_LINE: u32 = 0x2a02;
-pub const GL_POLYGON_OFFSET_FILL: u32 = 0x8037;
+pub(super) const GL_DRAW_OVERLAY: u32 = 0x40;
+pub(super) const GL_NEVER_ENUM: u32 = 0x0200;
+pub(super) const GL_CURRENT_COLOR: u32 = 0x0b00;
+pub(super) const GL_POINT_SMOOTH: u32 = 0x0b10;
+pub(super) const GL_LINE_SMOOTH: u32 = 0x0b20;
+pub(super) const GL_LINE_STIPPLE: u32 = 0x0b24;
+pub(super) const GL_LINE_STIPPLE_PATTERN: u32 = 0x0b25;
+pub(super) const GL_LINE_STIPPLE_REPEAT: u32 = 0x0b26;
+pub(super) const GL_POLYGON_SMOOTH: u32 = 0x0b41;
+pub(super) const GL_POLYGON_STIPPLE: u32 = 0x0b42;
+pub(super) const GL_CULL_FACE: u32 = 0x0b44;
+pub(super) const GL_FOG: u32 = 0x0b60;
+pub(super) const GL_DEPTH_TEST: u32 = 0x0b71;
+pub(super) const GL_STENCIL_TEST: u32 = 0x0b90;
+pub(super) const GL_DONT_CARE: u32 = 0x1100;
+pub(super) const GL_HINTS: u32 = 5;
+pub(super) const GL_SPRITE_AXIAL_SGIX: u32 = 0x814c;
+pub(super) const GL_ALPHA_TEST: u32 = 0x0bc0;
+pub(super) const GL_BLEND: u32 = 0x0be2;
+pub(super) const GL_INDEX_LOGIC_OP: u32 = 0x0bf1;
+pub(super) const GL_COLOR_LOGIC_OP: u32 = 0x0bf2;
+pub(super) const GL_SCISSOR_TEST: u32 = 0x0c11;
+pub(super) const GL_CLIP_PLANE0: u32 = 0x3000;
+pub(super) const GL_POLYGON_OFFSET_POINT: u32 = 0x2a01;
+pub(super) const GL_POLYGON_OFFSET_LINE: u32 = 0x2a02;
+pub(super) const GL_POLYGON_OFFSET_FILL: u32 = 0x8037;
 // The polygon_offset bits: the enable of each polygon mode's offset.
-pub const GL_OFFSET_FILL: u32 = 0x1;
-pub const GL_OFFSET_LINE: u32 = 0x2;
-pub const GL_OFFSET_POINT: u32 = 0x4;
+pub(super) const GL_OFFSET_FILL: u32 = 0x1;
+pub(super) const GL_OFFSET_LINE: u32 = 0x2;
+pub(super) const GL_OFFSET_POINT: u32 = 0x4;
 
 //
 // glBlendFunc's factors (4.1.6, and the imaging subset's constant
 // factors) and glBlendEquation's equations. GL_ZERO is 0 and GL_ONE 1;
 // GL_LOGIC_OP is EXT_blend_logic_op's equation.
 //
-pub const GL_SRC_COLOR: u32 = 0x0300;
-pub const GL_ONE_MINUS_SRC_COLOR: u32 = 0x0301;
-pub const GL_SRC_ALPHA: u32 = 0x0302;
-pub const GL_ONE_MINUS_SRC_ALPHA: u32 = 0x0303;
-pub const GL_DST_ALPHA: u32 = 0x0304;
-pub const GL_ONE_MINUS_DST_ALPHA: u32 = 0x0305;
-pub const GL_DST_COLOR: u32 = 0x0306;
-pub const GL_ONE_MINUS_DST_COLOR: u32 = 0x0307;
-pub const GL_SRC_ALPHA_SATURATE: u32 = 0x0308;
-pub const GL_CONSTANT_COLOR: u32 = 0x8001;
-pub const GL_ONE_MINUS_CONSTANT_COLOR: u32 = 0x8002;
-pub const GL_CONSTANT_ALPHA: u32 = 0x8003;
-pub const GL_ONE_MINUS_CONSTANT_ALPHA: u32 = 0x8004;
-pub const GL_FUNC_ADD: u32 = 0x8006;
-pub const GL_MIN: u32 = 0x8007;
-pub const GL_MAX: u32 = 0x8008;
-pub const GL_FUNC_SUBTRACT: u32 = 0x800a;
-pub const GL_FUNC_REVERSE_SUBTRACT: u32 = 0x800b;
-pub const GL_LOGIC_OP: u32 = 0x0bf1;
+pub(super) const GL_SRC_COLOR: u32 = 0x0300;
+pub(super) const GL_ONE_MINUS_SRC_COLOR: u32 = 0x0301;
+pub(super) const GL_SRC_ALPHA: u32 = 0x0302;
+pub(super) const GL_ONE_MINUS_SRC_ALPHA: u32 = 0x0303;
+pub(super) const GL_DST_ALPHA: u32 = 0x0304;
+pub(super) const GL_ONE_MINUS_DST_ALPHA: u32 = 0x0305;
+pub(super) const GL_DST_COLOR: u32 = 0x0306;
+pub(super) const GL_ONE_MINUS_DST_COLOR: u32 = 0x0307;
+pub(super) const GL_SRC_ALPHA_SATURATE: u32 = 0x0308;
+pub(super) const GL_CONSTANT_COLOR: u32 = 0x8001;
+pub(super) const GL_ONE_MINUS_CONSTANT_COLOR: u32 = 0x8002;
+pub(super) const GL_CONSTANT_ALPHA: u32 = 0x8003;
+pub(super) const GL_ONE_MINUS_CONSTANT_ALPHA: u32 = 0x8004;
+pub(super) const GL_FUNC_ADD: u32 = 0x8006;
+pub(super) const GL_MIN: u32 = 0x8007;
+pub(super) const GL_MAX: u32 = 0x8008;
+pub(super) const GL_FUNC_SUBTRACT: u32 = 0x800a;
+pub(super) const GL_FUNC_REVERSE_SUBTRACT: u32 = 0x800b;
+pub(super) const GL_LOGIC_OP: u32 = 0x0bf1;
 // glLogicOp's operations run from GL_CLEAR to GL_SET (4.1.8).
-pub const GL_CLEAR: u32 = 0x1500;
-pub const GL_COPY: u32 = 0x1503;
-pub const GL_SET: u32 = 0x150f;
+pub(super) const GL_CLEAR: u32 = 0x1500;
+pub(super) const GL_COPY: u32 = 0x1503;
+pub(super) const GL_SET: u32 = 0x150f;
 
 // Faces, and the light and material parameters (OpenGL 1.2.1, 2.13.2).
-pub const GL_FRONT: u32 = 0x0404;
-pub const GL_BACK: u32 = 0x0405;
-pub const GL_FRONT_AND_BACK: u32 = 0x0408;
+pub(super) const GL_FRONT: u32 = 0x0404;
+pub(super) const GL_BACK: u32 = 0x0405;
+pub(super) const GL_FRONT_AND_BACK: u32 = 0x0408;
 // glPolygonMode's modes (3.5.4).
-pub const GL_POINT: u32 = 0x1b00;
-pub const GL_LINE: u32 = 0x1b01;
-pub const GL_FILL: u32 = 0x1b02;
+pub(super) const GL_POINT: u32 = 0x1b00;
+pub(super) const GL_LINE: u32 = 0x1b01;
+pub(super) const GL_FILL: u32 = 0x1b02;
 //
 // The rasterization enables a context keeps but does not draw with, as
 // bits of raster_enables.
 //
-pub const GL_RASTER_POINT_SMOOTH: u32 = 0x01;
-pub const GL_RASTER_LINE_SMOOTH: u32 = 0x02;
-pub const GL_RASTER_LINE_STIPPLE: u32 = 0x04;
-pub const GL_RASTER_POLYGON_SMOOTH: u32 = 0x08;
-pub const GL_RASTER_POLYGON_STIPPLE: u32 = 0x10;
+pub(super) const GL_RASTER_POINT_SMOOTH: u32 = 0x01;
+pub(super) const GL_RASTER_LINE_SMOOTH: u32 = 0x02;
+pub(super) const GL_RASTER_LINE_STIPPLE: u32 = 0x04;
+pub(super) const GL_RASTER_POLYGON_SMOOTH: u32 = 0x08;
+pub(super) const GL_RASTER_POLYGON_STIPPLE: u32 = 0x10;
 // glFog's modes (3.10).
-pub const GL_EXP: u32 = 0x0800;
-pub const GL_EXP2: u32 = 0x0801;
-pub const GL_LINEAR: u32 = 0x2601;
+pub(super) const GL_EXP: u32 = 0x0800;
+pub(super) const GL_EXP2: u32 = 0x0801;
+pub(super) const GL_LINEAR: u32 = 0x2601;
 // glStencilOp's operations (4.1.5); GL_ZERO is 0.
-pub const GL_INVERT: u32 = 0x150a;
-pub const GL_KEEP: u32 = 0x1e00;
-pub const GL_REPLACE: u32 = 0x1e01;
-pub const GL_INCR: u32 = 0x1e02;
-pub const GL_DECR: u32 = 0x1e03;
+pub(super) const GL_INVERT: u32 = 0x150a;
+pub(super) const GL_KEEP: u32 = 0x1e00;
+pub(super) const GL_REPLACE: u32 = 0x1e01;
+pub(super) const GL_INCR: u32 = 0x1e02;
+pub(super) const GL_DECR: u32 = 0x1e03;
 // glFrontFace's directions (2.13.1).
-pub const GL_CW: u32 = 0x0900;
-pub const GL_CCW: u32 = 0x0901;
+pub(super) const GL_CW: u32 = 0x0900;
+pub(super) const GL_CCW: u32 = 0x0901;
 
 // The client clip planes a context keeps, GL_CLIP_PLANE0 to 5 (2.11).
-pub const GL_CLIP_PLANES: u32 = 6;
+pub(super) const GL_CLIP_PLANES: u32 = 6;
 
 //
 // The most vertices a context holds between pieces of a primitive: a quad
 // is drawn once its fourth arrives, so three wait.
 //
-pub const GL_HELD_VERTICES: u32 = 3;
+pub(super) const GL_HELD_VERTICES: u32 = 3;
 
-pub const GL_WINDOW_GUARD: i32 = 16384;
+pub(super) const GL_WINDOW_GUARD: i32 = 16384;
 
-pub const GL_OUT_OF_MEMORY: u32 = 0x0505;
+pub(super) const GL_OUT_OF_MEMORY: u32 = 0x0505;
 
-pub const RASTER_CLEAR: RasterKind = 1;
+pub(super) const RASTER_CLEAR: RasterKind = 1;
 
-pub const GL_DRAW_OK: GlDrawResult = 0;
-pub const GL_DRAW_OUT_OF_MEMORY: GlDrawResult = 1;
-pub const GL_DRAW_UNSUPPORTED: GlDrawResult = 2;
-pub const GL_DRAW_RESOURCE_ERROR: GlDrawResult = 3;
-pub const GL_DRAW_HOST_ERROR: GlDrawResult = 4;
+pub(super) const GL_DRAW_OK: GlDrawResult = 0;
+pub(super) const GL_DRAW_OUT_OF_MEMORY: GlDrawResult = 1;
+pub(super) const GL_DRAW_UNSUPPORTED: GlDrawResult = 2;
+pub(super) const GL_DRAW_RESOURCE_ERROR: GlDrawResult = 3;
+pub(super) const GL_DRAW_HOST_ERROR: GlDrawResult = 4;
 
-pub const GL_OP_VIEWPORT: GlOp = 0;
-pub const GL_OP_CLEAR_COLOR: GlOp = 1;
-pub const GL_OP_CLEAR_DEPTH: GlOp = 2;
-pub const GL_OP_SHADE_MODEL: GlOp = 3;
-pub const GL_OP_MATRIX_MODE: GlOp = 4;
-pub const GL_OP_LOAD_MATRIX: GlOp = 5;
-pub const GL_OP_LOAD_IDENTITY: GlOp = 6;
-pub const GL_OP_MULT_MATRIX: GlOp = 7;
-pub const GL_OP_FRUSTUM: GlOp = 8;
-pub const GL_OP_ORTHO: GlOp = 9;
-pub const GL_OP_PUSH_MATRIX: GlOp = 10;
-pub const GL_OP_POP_MATRIX: GlOp = 11;
-pub const GL_OP_ROTATE: GlOp = 12;
-pub const GL_OP_SCALE: GlOp = 13;
-pub const GL_OP_TRANSLATE: GlOp = 14;
-pub const GL_OP_ENABLE: GlOp = 15;
-pub const GL_OP_DISABLE: GlOp = 16;
-pub const GL_OP_DEPTH_FUNC: GlOp = 17;
-pub const GL_OP_DEPTH_MASK: GlOp = 18;
-pub const GL_OP_DRAW_BUFFERS: GlOp = 19;
-pub const GL_OP_COLOR3F: GlOp = 20;
-pub const GL_OP_COLOR4F: GlOp = 21;
-pub const GL_OP_COLOR3UB: GlOp = 22;
-pub const GL_OP_COLOR4UB: GlOp = 23;
-pub const GL_OP_NORMAL3F: GlOp = 24;
-pub const GL_OP_EDGE_FLAG: GlOp = 25;
-pub const GL_OP_BEGIN: GlOp = 26;
-pub const GL_OP_END: GlOp = 27;
-pub const GL_OP_VERTEX2F: GlOp = 28;
-pub const GL_OP_VERTEX3F: GlOp = 29;
-pub const GL_OP_VERTEX4F: GlOp = 30;
-pub const GL_OP_VERTEX2I: GlOp = 31;
-pub const GL_OP_FLUSH: GlOp = 32;
-pub const GL_OP_CLEAR: GlOp = 33;
-pub const GL_OP_FINISH: GlOp = 34;
-pub const GL_OP_RASTER_POS2F: GlOp = 35;
-pub const GL_OP_RASTER_POS3F: GlOp = 36;
-pub const GL_OP_RASTER_POS4F: GlOp = 37;
-pub const GL_OP_INDEXF: GlOp = 38;
-pub const GL_OP_INDEX_MASK: GlOp = 39;
-pub const GL_OP_CLEAR_INDEX: GlOp = 40;
-pub const GL_OP_DEPTH_RANGE: GlOp = 41;
+pub(super) const GL_OP_VIEWPORT: GlOp = 0;
+pub(super) const GL_OP_CLEAR_COLOR: GlOp = 1;
+pub(super) const GL_OP_CLEAR_DEPTH: GlOp = 2;
+pub(super) const GL_OP_SHADE_MODEL: GlOp = 3;
+pub(super) const GL_OP_MATRIX_MODE: GlOp = 4;
+pub(super) const GL_OP_LOAD_MATRIX: GlOp = 5;
+pub(super) const GL_OP_LOAD_IDENTITY: GlOp = 6;
+pub(super) const GL_OP_MULT_MATRIX: GlOp = 7;
+pub(super) const GL_OP_FRUSTUM: GlOp = 8;
+pub(super) const GL_OP_ORTHO: GlOp = 9;
+pub(super) const GL_OP_PUSH_MATRIX: GlOp = 10;
+pub(super) const GL_OP_POP_MATRIX: GlOp = 11;
+pub(super) const GL_OP_ROTATE: GlOp = 12;
+pub(super) const GL_OP_SCALE: GlOp = 13;
+pub(super) const GL_OP_TRANSLATE: GlOp = 14;
+pub(super) const GL_OP_ENABLE: GlOp = 15;
+pub(super) const GL_OP_DISABLE: GlOp = 16;
+pub(super) const GL_OP_DEPTH_FUNC: GlOp = 17;
+pub(super) const GL_OP_DEPTH_MASK: GlOp = 18;
+pub(super) const GL_OP_DRAW_BUFFERS: GlOp = 19;
+pub(super) const GL_OP_COLOR3F: GlOp = 20;
+pub(super) const GL_OP_COLOR4F: GlOp = 21;
+pub(super) const GL_OP_COLOR3UB: GlOp = 22;
+pub(super) const GL_OP_COLOR4UB: GlOp = 23;
+pub(super) const GL_OP_NORMAL3F: GlOp = 24;
+pub(super) const GL_OP_EDGE_FLAG: GlOp = 25;
+pub(super) const GL_OP_BEGIN: GlOp = 26;
+pub(super) const GL_OP_END: GlOp = 27;
+pub(super) const GL_OP_VERTEX2F: GlOp = 28;
+pub(super) const GL_OP_VERTEX3F: GlOp = 29;
+pub(super) const GL_OP_VERTEX4F: GlOp = 30;
+pub(super) const GL_OP_VERTEX2I: GlOp = 31;
+pub(super) const GL_OP_FLUSH: GlOp = 32;
+pub(super) const GL_OP_CLEAR: GlOp = 33;
+pub(super) const GL_OP_FINISH: GlOp = 34;
+pub(super) const GL_OP_RASTER_POS2F: GlOp = 35;
+pub(super) const GL_OP_RASTER_POS3F: GlOp = 36;
+pub(super) const GL_OP_RASTER_POS4F: GlOp = 37;
+pub(super) const GL_OP_INDEXF: GlOp = 38;
+pub(super) const GL_OP_INDEX_MASK: GlOp = 39;
+pub(super) const GL_OP_CLEAR_INDEX: GlOp = 40;
+pub(super) const GL_OP_DEPTH_RANGE: GlOp = 41;
 //
 // glLightfv: the light's number, 0 for GL_LIGHT0, the parameter and
 // four floats, of which the parameter uses as many as it takes.
 //
-pub const GL_OP_LIGHT: GlOp = 42;
+pub(super) const GL_OP_LIGHT: GlOp = 42;
 // glMaterialfv: the face, the parameter and four floats, likewise.
-pub const GL_OP_MATERIAL: GlOp = 43;
+pub(super) const GL_OP_MATERIAL: GlOp = 43;
 //
 // glLightModelfv: the parameter and four floats; a boolean parameter
 // is true for a nonzero first float.
 //
-pub const GL_OP_LIGHT_MODEL: GlOp = 44;
-pub const GL_OP_COLOR_MATERIAL: GlOp = 45;
-pub const GL_OP_CULL_FACE: GlOp = 46;
-pub const GL_OP_FRONT_FACE: GlOp = 47;
-pub const GL_OP_SCISSOR: GlOp = 48;
-pub const GL_OP_ALPHA_FUNC: GlOp = 49;
+pub(super) const GL_OP_LIGHT_MODEL: GlOp = 44;
+pub(super) const GL_OP_COLOR_MATERIAL: GlOp = 45;
+pub(super) const GL_OP_CULL_FACE: GlOp = 46;
+pub(super) const GL_OP_FRONT_FACE: GlOp = 47;
+pub(super) const GL_OP_SCISSOR: GlOp = 48;
+pub(super) const GL_OP_ALPHA_FUNC: GlOp = 49;
 // GL_NEVER to GL_ALWAYS, the reference as int32, the value mask
-pub const GL_OP_STENCIL_FUNC: GlOp = 50;
-pub const GL_OP_STENCIL_OP: GlOp = 51;
-pub const GL_OP_STENCIL_MASK: GlOp = 52;
-pub const GL_OP_CLEAR_STENCIL: GlOp = 53;
-pub const GL_OP_BLEND_FUNC: GlOp = 54;
-pub const GL_OP_BLEND_EQUATION: GlOp = 55;
-pub const GL_OP_BLEND_COLOR: GlOp = 56;
-pub const GL_OP_LOGIC_OP: GlOp = 57;
-pub const GL_OP_COLOR_MASK: GlOp = 58;
+pub(super) const GL_OP_STENCIL_FUNC: GlOp = 50;
+pub(super) const GL_OP_STENCIL_OP: GlOp = 51;
+pub(super) const GL_OP_STENCIL_MASK: GlOp = 52;
+pub(super) const GL_OP_CLEAR_STENCIL: GlOp = 53;
+pub(super) const GL_OP_BLEND_FUNC: GlOp = 54;
+pub(super) const GL_OP_BLEND_EQUATION: GlOp = 55;
+pub(super) const GL_OP_BLEND_COLOR: GlOp = 56;
+pub(super) const GL_OP_LOGIC_OP: GlOp = 57;
+pub(super) const GL_OP_COLOR_MASK: GlOp = 58;
 //
 // glFogfv: the parameter and four floats, of which it uses as many as
 // it takes; GL_FOG_MODE's is the mode's enumerant as a float.
 //
-pub const GL_OP_FOG: GlOp = 59;
-pub const GL_OP_POLYGON_OFFSET: GlOp = 60;
-pub const GL_OP_POLYGON_OFFSET_EXT: GlOp = 61;
-pub const GL_OP_CLIP_PLANE: GlOp = 62;
-pub const GL_OP_POINT_SIZE: GlOp = 63;
-pub const GL_OP_LINE_WIDTH: GlOp = 64;
-pub const GL_OP_LINE_STIPPLE: GlOp = 65;
-pub const GL_OP_POLYGON_MODE: GlOp = 66;
-pub const GL_OP_TEXCOORD2F: GlOp = 67;
-pub const GL_OP_TEXCOORD3F: GlOp = 68;
-pub const GL_OP_TEXCOORD4F: GlOp = 69;
+pub(super) const GL_OP_FOG: GlOp = 59;
+pub(super) const GL_OP_POLYGON_OFFSET: GlOp = 60;
+pub(super) const GL_OP_POLYGON_OFFSET_EXT: GlOp = 61;
+pub(super) const GL_OP_CLIP_PLANE: GlOp = 62;
+pub(super) const GL_OP_POINT_SIZE: GlOp = 63;
+pub(super) const GL_OP_LINE_WIDTH: GlOp = 64;
+pub(super) const GL_OP_LINE_STIPPLE: GlOp = 65;
+pub(super) const GL_OP_POLYGON_MODE: GlOp = 66;
+pub(super) const GL_OP_TEXCOORD2F: GlOp = 67;
+pub(super) const GL_OP_TEXCOORD3F: GlOp = 68;
+pub(super) const GL_OP_TEXCOORD4F: GlOp = 69;
 // Parameter and four floats; mode's enumerant as a float.
-pub const GL_OP_TEX_ENV: GlOp = 70;
+pub(super) const GL_OP_TEX_ENV: GlOp = 70;
 //
 // IRIS GL swaptmesh as the OpenGL client passes it through an open
 // triangle strip: the next vertex makes its triangle with the strip's
 // oldest retained vertex instead of its middle one.
 //
-pub const GL_OP_SWAP_TMESH: GlOp = 71;
-pub const GL_OP_HINT: GlOp = 72;
+pub(super) const GL_OP_SWAP_TMESH: GlOp = 71;
+pub(super) const GL_OP_HINT: GlOp = 72;
 //
 // glTexGenfv: the coordinate (GL_S to GL_Q), the parameter and four
 // floats; GL_TEXTURE_GEN_MODE's mode is its enumerant as a float.
 //
-pub const GL_OP_TEX_GEN: GlOp = 73;
+pub(super) const GL_OP_TEX_GEN: GlOp = 73;
 
 /// Only the fields a kind the rasterizer executes needs are here.
 /// Coordinates are plane pixels, the rectangle inclusive.
 #[derive(Clone, Copy, Default)]
-pub struct RasterOp {
+pub(super) struct RasterOp {
     /// RasterKind.
     pub kind: u32,
     /// The colour targets written, as the drawable names them.
@@ -381,7 +383,7 @@ pub struct RasterOp {
 /// Where a context draws, as the board's context switch, window clip and
 /// buffer selection give it. Coordinates are plane pixels.
 #[derive(Clone, Copy, Default)]
-pub struct GlDrawable {
+pub(super) struct GlDrawable {
     /// False while the board has no window for the context: nothing draws,
     /// and each draw, clear or bitmap is logged as dropped.
     pub bound: bool,
@@ -407,7 +409,7 @@ pub struct GlDrawable {
 
 /// The GL state a draw is made under.
 #[derive(Clone, Copy, Default)]
-pub struct GlDrawState {
+pub(super) struct GlDrawState {
     /// Column-major, as glLoadMatrixf lays a matrix out.
     pub modelview: [f32; 16],
     pub projection: [f32; 16],
@@ -511,7 +513,7 @@ pub struct GlDrawState {
 /// `capacity` floats with `count` vertices used; here a Vec sized by
 /// `capacity`. Never shallow-copy a live context.
 #[derive(Clone, Default)]
-pub struct GlPolygonAssembly {
+pub(super) struct GlPolygonAssembly {
     pub vertices: Vec<f32>,
     pub count: u32,
     pub capacity: u32,
@@ -523,7 +525,7 @@ pub struct GlPolygonAssembly {
 }
 
 #[derive(Clone, Default)]
-pub struct GlContext {
+pub(super) struct GlContext {
     /// The hardware identity the board keys this context by.
     pub hw_id: u32,
     pub cur: GlDrawState,
@@ -597,7 +599,7 @@ enum DrawFailure {
 /// words in the specification's order, a float argument as the IEEE single
 /// bits the client sent.
 #[derive(Clone, Copy)]
-pub struct GlCmd<'a> {
+pub(super) struct GlCmd<'a> {
     pub op: u16,
     pub args: &'a [u32],
 }
@@ -613,7 +615,7 @@ impl<'a> GlCmd<'a> {
 /// materials: a vertex's material index is 0, the draw state's. Everything
 /// it points at is the context's, borrowed for the call that carries it.
 #[derive(Clone, Copy)]
-pub struct GlDraw<'a> {
+pub(super) struct GlDraw<'a> {
     /// The context's hw_id.
     pub context: u32,
     /// GL_POINTS to GL_POLYGON.
@@ -678,31 +680,31 @@ impl<'a> GlDraw<'a> {
 
 /// Where a context's draws go. Every draw is executed before the call
 /// returns, so what it points at need only live that long.
-pub trait GlSink {
+pub(super) trait GlSink {
     /// Rasterize one draw; a line stipple's phase comes back in
     /// d.line_phase.
     fn draw(&mut self, d: &mut GlDraw) -> GlDrawResult;
 }
 
 /// The most words one GlContext::get() answer takes: a matrix's.
-pub const GL_GET_WORDS: usize = 16;
+pub(super) const GL_GET_WORDS: usize = 16;
 
 // Functions.
 
 // The last client clip plane and light enumerants.
-pub const GL_CLIP_PLANE_LAST: u32 = GL_CLIP_PLANE0 + GL_CLIP_PLANES - 1;
+pub(super) const GL_CLIP_PLANE_LAST: u32 = GL_CLIP_PLANE0 + GL_CLIP_PLANES - 1;
 
 /// The word `i` of a command's arguments (a short list reads as 0 rather
 /// than past the end).
-pub fn gl_arg(p: &[u32], i: usize) -> u32 {
+pub(super) fn gl_arg(p: &[u32], i: usize) -> u32 {
     p.get(i).copied().unwrap_or(0)
 }
 
-pub fn gl_float(bits: u32) -> f32 {
+pub(super) fn gl_float(bits: u32) -> f32 {
     f32::from_bits(bits)
 }
 
-pub fn gl_bits(value: f32) -> u32 {
+pub(super) fn gl_bits(value: f32) -> u32 {
     value.to_bits()
 }
 
@@ -953,8 +955,8 @@ impl GlContext {
 }
 
 /// The arguments each command takes.
-pub const GL_NARGS_LEN: usize = 74;
-pub static GL_NARGS: [u8; GL_NARGS_LEN] = {
+pub(super) const GL_NARGS_LEN: usize = 74;
+pub(super) static GL_NARGS: [u8; GL_NARGS_LEN] = {
     let mut t = [0u8; GL_NARGS_LEN];
     t[GL_OP_HINT as usize] = 2;
     t[GL_OP_VIEWPORT as usize] = 4;
@@ -1355,14 +1357,14 @@ impl GlDrawState {
 }
 
 /// Whether op is one of glStencilOp's operations (4.1.5).
-pub fn gl_stencil_op_valid(op: u32) -> bool {
+pub(super) fn gl_stencil_op_valid(op: u32) -> bool {
     matches!(op, 0 | GL_KEEP | GL_REPLACE | GL_INCR | GL_DECR | GL_INVERT)
 }
 
 /// Whether glBlendFunc accepts factor as a source factor (OpenGL 1.2.1,
 /// table 4.1, with the imaging subset's constant factors) or, with dst,
 /// as a destination one (table 4.2).
-pub fn gl_blend_factor_valid(factor: u32, dst: bool) -> bool {
+pub(super) fn gl_blend_factor_valid(factor: u32, dst: bool) -> bool {
     match factor {
         0
         | 1
@@ -1381,7 +1383,7 @@ pub fn gl_blend_factor_valid(factor: u32, dst: bool) -> bool {
 }
 
 /// Whether glBlendEquation accepts equation.
-pub fn gl_blend_equation_valid(equation: u32) -> bool {
+pub(super) fn gl_blend_equation_valid(equation: u32) -> bool {
     matches!(
         equation,
         GL_FUNC_ADD
@@ -1411,7 +1413,7 @@ impl GlContext {
 
 /// The rasterization enables kept as raster_enables bits; 0 for any other
 /// capability.
-pub fn gl_raster_enable(cap: u32) -> u32 {
+pub(super) fn gl_raster_enable(cap: u32) -> u32 {
     match cap {
         GL_POINT_SMOOTH => GL_RASTER_POINT_SMOOTH,
         GL_LINE_SMOOTH => GL_RASTER_LINE_SMOOTH,
@@ -1540,7 +1542,7 @@ impl GlContext {
 }
 
 /// Four floats from command words `a[from..from + 4]`.
-pub fn gl_words4(a: &[u32], from: usize) -> [f32; 4] {
+pub(super) fn gl_words4(a: &[u32], from: usize) -> [f32; 4] {
     [
         gl_float(gl_arg(a, from)),
         gl_float(gl_arg(a, from + 1)),
@@ -1832,7 +1834,7 @@ impl GlContext {
 /// 3 and 4 and k itself decide it, never count's absolute size, so a
 /// count that is right only modulo 12 is enough: once a mode has all it
 /// will ever hold, k alone says so.
-pub fn gl_resume_held_ok(mode: u32, k: u32, count: u32) -> bool {
+pub(super) fn gl_resume_held_ok(mode: u32, k: u32, count: u32) -> bool {
     match mode {
         GL_POINTS => k == 0,
         GL_LINES => k == count % 2,
@@ -1904,7 +1906,7 @@ impl GlContext {
 
 /// The faces a glMaterial, glColorMaterial or glCullFace face names, as a
 /// mask of material[] entries, or 0 for a value that names none.
-pub fn gl_faces(face: u32) -> u32 {
+pub(super) fn gl_faces(face: u32) -> u32 {
     match face {
         GL_FRONT => 1,
         GL_BACK => 2,

@@ -1,8 +1,16 @@
 //! Pixel work that is not a GL primitive: a draw's pixel estimate, clears
 //! and the X server's raster ops.
 
-use super::*;
 
+use crate::devlog::LogModule;
+use super::gl::{GlPixels, GlPlaneRow, GlPlanes};
+use super::gl_context::{
+    GL_COLOR_BUFFER_BIT, GL_COLOUR_MASK_ALL, GL_DEPTH_BUFFER_BIT, GL_MAX_TARGETS, GL_QUADS,
+    GL_QUAD_STRIP, GL_STENCIL_BUFFER_BIT, GL_TRIANGLES, GlDraw, RASTER_CLEAR, RasterOp,
+};
+use super::memory::{logic_op, CLIP_MAX, ClipList};
+use super::raster::{Planes, RasterColour, RasterRules, RasterTarget, SoftDraw};
+use super::raster_line::{r2_max, r2_min};
 impl SoftDraw<'_> {
     /// About how many pixels a draw's filled primitives cover: the area of each
     /// one with its vertices moved into the pixels the window owns, summed
@@ -76,7 +84,7 @@ impl ClipList {
 }
 
 /// A clear's decided values, which every row of it stores.
-pub struct SoftClear<'a> {
+pub(super) struct SoftClear<'a> {
     pub rules: &'a RasterRules,
     pub t: &'a RasterTarget<'a>,
     pub op: &'a RasterOp,
@@ -303,7 +311,7 @@ impl RasterRules {
 
 /// The X server's logic ops (GX numbers) are GL's logic-op enums less
 /// GL_CLEAR; an out-of-range one keeps the source.
-pub fn x_logic_op(gx: u32, source: u32, destination: u32) -> u32 {
+pub(super) fn x_logic_op(gx: u32, source: u32, destination: u32) -> u32 {
     if gx <= 15 {
         logic_op(gx as u8, source, destination)
     } else {
@@ -314,7 +322,12 @@ pub fn x_logic_op(gx: u32, source: u32, destination: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dev::odyssey::raster_bench::*;
+
+    use crate::dev::odyssey::consts::{ODSY_ID_COMPARE_ENABLE, ODSY_ID_COMPARE_MASK_SHIFT};
+    use crate::dev::odyssey::memory::ClipRect;
+    use crate::dev::odyssey::raster_bench::{Bench, Lcg};
+
+
 
     /// The square of plane pixels the cases clear in.
     const SIDE: i32 = 96;

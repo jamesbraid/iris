@@ -2,6 +2,21 @@
 //! colour buffers, colour resolved at scanout, the cursor, the channel
 //! size and what a reset clears.
 
+use crate::dev::odyssey::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
+use crate::dev::odyssey::consts::{
+    ODSY_BACKEND_READ_BASE, ODSY_BACKEND_SELECT, ODSY_CHANNEL_HEIGHT, ODSY_CURSOR_BASE,
+    ODSY_CURSOR_COLOURS, ODSY_CURSOR_CONTROL, ODSY_CURSOR_GLYPH, ODSY_CURSOR_PLANE,
+    ODSY_CURSOR_POSITION, ODSY_DID_MAIN_SHIFT, ODSY_DISPLAYED_BUFFER, ODSY_DISPMODE_BASE,
+    ODSY_GL_COLOR_3UB, ODSY_GL_QUADS, ODSY_GL_TRIANGLES, ODSY_GL_VERTEX_2F, ODSY_GL_VERTEX_2I,
+    ODSY_REG_DRAW_MASK, ODSY_REG_GL_BEGIN, ODSY_REG_GL_END, ODSY_SWAP_ARM, ODSY_SWAP_CONTROL,
+    ODSY_SWAP_CONTROL_COMPANION, ODSY_SWAP_SYNC_A, ODSY_SWAP_SYNC_B, ODSY_USER_CMD_FIFO,
+};
+use crate::dev::odyssey::reader::{DisplayRegs, SharedRegs};
+use crate::dev::odyssey::scanout::{DirtySite, DirtyStats};
+use crate::dev::odyssey::tests::{
+    board, cmd, cmd64, pixel, pixel_write, reg_read, reg_write, route_to_heart, select,
+    RETRACE_VECTOR, SOFTSYNC_VECTOR, VPRO_WIDGET,
+};
 use super::*;
 
 const WIDTH: i32 = ODSY_WIDTH as i32;
