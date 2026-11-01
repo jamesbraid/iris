@@ -418,7 +418,7 @@ fn the_format_index_table_lists_the_sixteen_emitted_indices() {
 
 /// Sampler word 4 bits 25:23 are the class: 1 alpha, 2 luminance, 3
 /// luminance-alpha, 4 intensity, 5 RGB, 6 RGBA. Class 0 and 7 name no
-/// components, and bits 27:26 are not part of the class.
+/// components.
 #[test]
 fn the_sampler_class_names_the_components() {
     let want = [None, Some(GL_ALPHA), Some(GL_LUMINANCE), Some(GL_LUMINANCE_ALPHA), Some(GL_INTENSITY), Some(GL_RGB), Some(GL_RGBA), None];
@@ -427,7 +427,24 @@ fn the_sampler_class_names_the_components() {
         let word = (class as u32) << 23;
 
         assert_eq!(texture_class_format(word & tex::COMPONENTS_MASK), *format, "class {class}");
-        assert_eq!(texture_class_format((word | 0x0800_0000) & tex::COMPONENTS_MASK), *format, "class {class} with bit 27");
+    }
+}
+
+/// Sampler word 4 bits 27:26 are not part of the class and the library never
+/// writes them, so a word that sets either is refused, not ignored.
+#[test]
+fn sampler_word_4_bits_27_26_are_refused() {
+    for bit in [26u32, 27] {
+        let (mut s, _, _) = board_with_ram();
+        let base = 0x16b800;
+        let obj = s.object_select(base, 512);
+
+        assert!(s.object_rows(obj, 256));
+        rgba_512x256(&mut s, base);
+        s.tex.levels[1] = 0x4110_0020;
+        assert!(s.texture_setup(&mut GlTexImage::default(), &mut Box::<TextureChain>::default()), "the plain word is taken");
+        s.tex.sampler[4] |= 1 << bit;
+        assert!(!s.texture_setup(&mut GlTexImage::default(), &mut Box::<TextureChain>::default()), "bit {bit} is refused");
     }
 }
 
