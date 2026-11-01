@@ -180,6 +180,15 @@ impl HostInterface {
     /// ODSY_INTR_CLEAR, so it sends a clearing packet as it falls
     /// (HostInterface::update_irq()); the softsync, retrace and DMA-done handlers ack
     /// nothing, and those sources send a single set pulse.
+    ///
+    /// MODEL CHOICE (datasheet, "Bits 18:16 of 0x1044"): bits 18:16 of
+    /// ROUTE_DEST_UPPER are the per-source enables of the DMA-done, retrace
+    /// and softsync sources, in the order of ODSY_ROUTE_ENABLE_*. A source
+    /// raised while its bit is clear sends nothing and is dropped. The
+    /// datasheet grades which bit enables which source unknown, and what
+    /// the board does with a source raised while disabled approximated;
+    /// IRIX sets and clears all three together, so it cannot tell. The flag
+    /// source has no bit here: ODSY_INTR_ENABLE_SET gates it.
     pub fn deliver_routed(&mut self, shift: u32, what: &str, set: bool) {
         let widget = (self.route_dest_upper >> ODSY_ROUTE_DEST_WIDGET_SHIFT) & ((1u32 << ODSY_INT_DEST_WIDGET_BITS) - 1);
         let addr = (((self.route_dest_upper & 0xffff) as u64) << 32) | self.route_dest_lower as u64;
@@ -193,6 +202,16 @@ impl HostInterface {
                 what,
                 if set { "raised" } else { "lowered" }
             );
+            return;
+        }
+        let enable = match shift {
+            ODSY_ROUTE_VECTOR_DMA_SHIFT => ODSY_ROUTE_ENABLE_DMA,
+            ODSY_ROUTE_VECTOR_RETRACE_SHIFT => ODSY_ROUTE_ENABLE_RETRACE,
+            ODSY_ROUTE_VECTOR_SOFTSYNC_SHIFT => ODSY_ROUTE_ENABLE_SOFTSYNC,
+            _ => 0,
+        };
+        if self.route_dest_upper & enable != enable {
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: {} interrupt with its enable bit clear; dropped", what);
             return;
         }
         if !odyssey_xio_compose(widget, addr, &mut where_) {
