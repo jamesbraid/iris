@@ -436,7 +436,7 @@ impl Board {
 
                     if slot < self.prim.restart_vertex.len() {
                         self.prim.restart_vertex[slot] =
-                            self.gl_ctx.as_ref().expect("the GL context").capture_vertex(self.prim.restart_type, &xyz, components);
+                            self.gl_ctx.capture_vertex(self.prim.restart_type, &xyz, components);
                     }
                     self.prim.restart_absorb -= 1;
                     self.restart_finish();

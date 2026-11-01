@@ -479,8 +479,12 @@ pub(super) struct Board {
     pub stream: Stream2d,
 
     // The true-colour OpenGL path.
-    /// None only during Board::gl_command().
-    pub gl_ctx: Option<Box<GlContext>>,
+    /// The GL context. During Board::gl_command() it runs outside the board
+    /// and this holds a stand-in (`gl_spare`), which the draws that command
+    /// emits must not reach.
+    pub gl_ctx: Box<GlContext>,
+    /// The stand-in for `gl_ctx` while a command runs; None during one.
+    pub gl_spare: Option<Box<GlContext>>,
     /// The drawable Board::gl_bind() last built for the shared context.
     pub gl_bind_drawable: GlDrawable,
     /// The lighting state Board::gl_light() keeps between vertices; None
@@ -748,7 +752,8 @@ impl Default for Board {
                 pattern_mode: 0,
                 pattern_load_offset: 0,
             },
-            gl_ctx: Some(Box::default()),
+            gl_ctx: Box::default(),
+            gl_spare: Some(Box::default()),
             gl_bind_drawable: Default::default(),
             gl_light_scratch: None,
             prim: OpenPrimitive {

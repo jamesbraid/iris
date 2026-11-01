@@ -2401,23 +2401,27 @@ impl Board {
     }
 
     /// Run one command in the GL context, with the board as the sink for the
-    /// draws it emits. The context is lifted out of the board for the call,
-    /// so that a draw can borrow the rest of the board.
+    /// draws it emits. The context runs outside the board for the call, so
+    /// that a draw can borrow the rest of the board; a stand-in fills its
+    /// field meanwhile. The draw path does not touch the context.
     pub fn gl_command(&mut self, cmd: &GlCmd) {
-        let mut ctx = self.gl_ctx.take().expect("the GL context is not in a command");
+        let stand_in = self.gl_spare.take().expect("GL commands do not nest");
+        let mut ctx = std::mem::replace(&mut self.gl_ctx, stand_in);
 
         ctx.command(self, cmd);
-        self.gl_ctx = Some(ctx);
+        self.gl_spare = Some(std::mem::replace(&mut self.gl_ctx, ctx));
     }
 
-    /// The board's GL context, which is only out of the board during
-    /// Board::gl_command().
+    /// The board's GL context. Not for the draw path: while a command runs
+    /// the field holds a stand-in.
     pub fn gl(&mut self) -> &mut GlContext {
-        self.gl_ctx.as_mut().expect("the GL context is not in a command")
+        assert!(self.gl_spare.is_some(), "the GL context is running a command");
+        &mut self.gl_ctx
     }
 
     pub fn gl_ref(&self) -> &GlContext {
-        self.gl_ctx.as_ref().expect("the GL context is not in a command")
+        assert!(self.gl_spare.is_some(), "the GL context is running a command");
+        &self.gl_ctx
     }
 }
 

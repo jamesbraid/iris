@@ -1055,7 +1055,7 @@ fn an_integer_pixel_through_a_logic_op_or_to_the_id_planes_dirties_its_row() {
     s.scanout_update();
 
     s.stream.pattern_mode |= mode::COLOR_LOGIC_OP;
-    s.gl_ctx.as_mut().unwrap().cur.logic_op_mode = GL_CLEAR + LOGIC_XOR;
+    s.gl_ctx.cur.logic_op_mode = GL_CLEAR + LOGIC_XOR;
     s.paint_integer(40, 120, false, 0x00ff_ff00);
     assert_eq!(lines(&s), vec![120], "a logic-op pixel");
     s.scanout_update();

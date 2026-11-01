@@ -188,7 +188,7 @@ impl Board {
                 count += 1;
             }
         }
-        self.prim.in_prim = self.gl_ctx.as_mut().expect("the GL context").resume_primitive(self.prim.restart_type, Some(&self.prim.restart_vertex[..]), n, count);
+        self.prim.in_prim = self.gl_ctx.resume_primitive(self.prim.restart_type, Some(&self.prim.restart_vertex[..]), n, count);
         self.prim.restart_armed = false;
     }
 
