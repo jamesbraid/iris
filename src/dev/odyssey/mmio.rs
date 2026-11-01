@@ -404,8 +404,8 @@ impl RefusalStats {
     }
 
     pub fn reset(&self) {
-        for i in 0..REFUSAL_SLOTS {
-            self.counts[i].store(0, Ordering::Relaxed);
+        for c in &self.counts {
+            c.store(0, Ordering::Relaxed);
         }
         self.lost.store(0, Ordering::Relaxed);
     }

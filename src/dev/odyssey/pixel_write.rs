@@ -180,7 +180,7 @@ impl WriteForm {
 
         match &self.kind {
             WriteKind::Comps { comps, n, comp_bytes } => {
-                for i in 0..*n as usize {
+                for (i, &comp) in comps[..*n as usize].iter().enumerate() {
                     let at = i * *comp_bytes as usize;
                     let v = match comp_bytes {
                         1 => b[at] as u32,
@@ -188,7 +188,7 @@ impl WriteForm {
                         _ => scale8(be32(&b[at..at + 4]) as u64, 32),
                     };
 
-                    if comps[i] == Comp::Index {
+                    if comp == Comp::Index {
                         // The raw value: 12 index bits.
                         let raw = match comp_bytes {
                             1 => b[at] as u32,
@@ -197,7 +197,7 @@ impl WriteForm {
                         };
                         return raw & ODSY_INDEX_MASK;
                     }
-                    put(comps[i], v);
+                    put(comp, v);
                 }
             }
             WriteKind::Packed { fields, n } => {
