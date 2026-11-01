@@ -84,7 +84,8 @@ pub(super) struct ClipRect {
 #[derive(Clone, Copy, Default, Debug)]
 pub(super) struct ClipList {
     pub n: u32,
-    pub empty: u32, // 0 or 1; with n 0, 1 keeps nothing
+    /// With n 0: true keeps nothing, false keeps everything.
+    pub empty: bool,
     pub r: [ClipRect; CLIP_MAX],
 }
 
@@ -176,7 +177,7 @@ impl Plane {
 impl ClipList {
     pub fn contains(&self, x: i32, y: i32) -> bool {
         if self.n == 0 {
-            return self.empty == 0;
+            return !self.empty;
         }
         for i in 0..self.n.min(CLIP_MAX as u32) {
             let r = &self.r[i as usize];

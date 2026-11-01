@@ -25,7 +25,7 @@ use super::gl::{
     BLEND_EQUATION, GL_LIGHT_WORDS,
 };
 use super::gl_context::{
-    op, GL_BACK, GL_CLEAR, GL_CLIP_PLANES, GL_CURRENT_COLOR, GL_FRONT, GL_GET_WORDS, GL_MODELVIEW,
+    op, GL_BACK, GL_CLEAR, GL_CLIP_PLANES, GL_FRONT, GL_MODELVIEW,
     GL_NEVER_ENUM,
 };
 impl Board {
@@ -134,15 +134,10 @@ impl Board {
                 self.gl_color = pack_pixel(self.cmd_operand[0], self.cmd_operand[1], self.cmd_operand[2]);
                 self.gl_color_is_index = false;
                 if !self.gl_index_mode() {
-                    let mut colour = [0u32; GL_GET_WORDS];
-                    let mut n = 0u32;
                     let opd = self.cmd_operand;
 
                     self.gl_feed(op::COLOR3UB as u16, &opd[..3]);
-                    let queried = self.gl().get(GL_CURRENT_COLOR, &mut colour, &mut n);
-                    assert!(queried && n as usize == self.gl_colour.len());
-                    let l = self.gl_colour.len();
-                    self.gl_colour.copy_from_slice(&colour[..l]);
+                    self.gl_colour = self.gl().current_color();
                     self.gl_colour_overridden = false;
                 }
             }

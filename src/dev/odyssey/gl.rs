@@ -187,7 +187,7 @@ pub(super) struct TextureDetailSampler {
 
 impl Board {
     /// Whether a GL fragment's colour is an index (prog::COLOUR_MODE).
-    pub fn gl_index_mode(&mut self) -> bool {
+    pub fn gl_index_mode(&self) -> bool {
         self.colour_mode[0] & colour::MODE_INDEX != 0
     }
 }
