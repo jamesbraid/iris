@@ -931,6 +931,46 @@ mip_scenes! {
     tex_mip_linear_linear: 5,
 }
 
+/// SGIS_detail_texture under GL_LINEAR_DETAIL_COLOR_SGIS, as SGI Quake draws
+/// its world: a mipmapped RGB base with a 16x16 detail image at the default
+/// level -4 (level-table entry 60), and the library's ramp from weight 0 at
+/// LOD 0 to 1 at LOD -4. Both quads magnify, so the weight comes from
+/// between the table's entries.
+fn tex_detail_colour(c: &mut Ctx) {
+    tex_detail(c, 0);
+}
+
+/// The same scene under the modulate combine, word 0 bit 31.
+fn tex_detail_colour_modulate(c: &mut Ctx) {
+    tex_detail(c, 0x8000_0000);
+}
+
+fn tex_detail(c: &mut Ctx, combine: u32) {
+    c.texture(&Tex { size: 32, min: 5, ..Tex::new(RGB) });
+    let b = &mut c.board;
+    let (size, base) = (16u32, 0x18_0000u32);
+    let units = (size.div_ceil(16) + 1) & !1;
+    let obj = b.object_select(base, units * 16);
+    assert!(b.object_rows(obj, size));
+    for y in 0..size {
+        for x in 0..size {
+            let g = if (x / 2 + y) & 1 == 0 { 0xc0 } else { 0x40 } + (x * 3) as u32;
+            b.object_store(obj, x, y, (g << 24) | (g << 16) | (g << 8) | 0xff);
+        }
+    }
+    b.tex_levels[60 * 3..][..3].copy_from_slice(&[base, 0x00d0_0000 | units, 0]);
+    // Detail level 4 in bits 29:25, log2 16 in 24:20 and 19:15.
+    b.tex_sampler[0] = combine | 0x0800_0000 | (4 << 20) | (4 << 15) | (5 << 10) | (5 << 5);
+    // Minification code 5 and magnification code 4, detail colour.
+    b.tex_sampler[4] = 0x1000_0000 | RGB | (5 << 5) | (4 << 1);
+    for (i, e) in b.tex_detail_function.iter_mut().enumerate() {
+        *e = ((i as u32 * 32).min(4095)) << 12;
+    }
+    b.tex_detail_function_valid = 0xffff;
+    c.draw(GL_QUADS, &[v(4.0, 4.0, 0.0, WHITE).tex(0.0, 0.0), v(62.0, 4.0, 0.0, WHITE).tex(1.0, 0.0), v(62.0, 124.0, 0.0, WHITE).tex(1.0, 2.0), v(4.0, 124.0, 0.0, WHITE).tex(0.0, 2.0)]);
+    c.draw(GL_QUADS, &[v(66.0, 4.0, 0.0, WHITE).tex(0.0, 0.0), v(124.0, 4.0, 0.0, WHITE).tex(0.125, 0.0), v(124.0, 124.0, 0.0, WHITE).tex(0.125, 0.25), v(66.0, 124.0, 0.0, WHITE).tex(0.0, 0.25)]);
+}
+
 fn tex_with_fog_blend_depth(c: &mut Ctx) {
     c.depth_test(GL_LESS);
     c.fog([200, 210, 230], 1);
@@ -1220,6 +1260,8 @@ scenes! {
     tex_mip_linear_nearest,
     tex_mip_nearest_linear,
     tex_mip_linear_linear,
+    tex_detail_colour,
+    tex_detail_colour_modulate,
     tex_with_fog_blend_depth,
     fog_ramp_triangles,
     fog_lines_and_points,
