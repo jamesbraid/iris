@@ -20,20 +20,10 @@
 
 use crate::devlog::LogModule;
 use super::consts::{
-    ODSY_CFIFO_LOW_WATER, ODSY_CONTROL, ODSY_DISPLAYED_BUFFER, ODSY_ERROR_ADDR_LOWER,
-    ODSY_ERROR_ADDR_UPPER, ODSY_ERROR_COMMAND, ODSY_FLCTL_INTR_TARGET_SHIFT, ODSY_FLCTL_TARGET,
-    ODSY_FLCTL_TARGET_MASK, ODSY_FLCTL_TARGET_SHIFT, ODSY_IDENTITY, ODSY_INTR_CLEAR,
-    ODSY_INTR_ENABLE_CLEAR, ODSY_INTR_ENABLE_SET, ODSY_INTR_FIFO_LOW_WATER, ODSY_INTR_FLAGS,
-    ODSY_INT_DEST_LOWER, ODSY_INT_DEST_UPPER, ODSY_INT_DEST_WIDGET_BITS, ODSY_ROUTE_DEST_LOWER,
-    ODSY_ROUTE_DEST_UPPER, ODSY_ROUTE_DEST_WIDGET_SHIFT, ODSY_ROUTE_VECTORS,
-    ODSY_ROUTE_VECTOR_FLAG_SHIFT, ODSY_ROUTE_VECTOR_RETRACE_SHIFT,
-    ODSY_ROUTE_VECTOR_SOFTSYNC_SHIFT, ODSY_STATUS, ODSY_STATUS0, ODSY_STATUS0_FIFO_EMPTY,
-    ODSY_STATUS0_FIFO_ENABLED, ODSY_STATUS0_FIFO_HIGH_WATER, ODSY_STATUS0_FIFO_LOW_WATER,
-    ODSY_SWAP_ARM, ODSY_SWAP_CONTROL, ODSY_SWAP_CONTROL_COMPANION, ODSY_SWAP_PENDING,
+    cfifo, flctl, intr, route, status0, swap, ODSY_CONTROL, ODSY_DISPLAYED_BUFFER,
+    ODSY_ERROR_ADDR_LOWER, ODSY_ERROR_ADDR_UPPER, ODSY_ERROR_COMMAND, ODSY_IDENTITY,
+    ODSY_INT_DEST_LOWER, ODSY_INT_DEST_UPPER, ODSY_INT_DEST_WIDGET_BITS, ODSY_STATUS, ODSY_STATUS0,
     ODSY_SW_TOKEN, ODSY_XT_REQ_TIMEOUT,
-    ODSY_ROUTE_ENABLE_DMA,
-    ODSY_ROUTE_ENABLE_RETRACE,
-    ODSY_ROUTE_ENABLE_SOFTSYNC,
 };
 use super::fifo::CommandFifo;
 use super::mmio::{access_waits, command_store, fifo_port};
@@ -141,11 +131,11 @@ impl Default for HostInterface {
 impl HostInterface {
     /// A vertical retrace, which the scanout's clock runs at the mode's rate
     /// (ScanoutReader::poll()). The driver issues a swap by writing
-    /// ODSY_SWAP_ARM, a toggle mask with one bit per window whose displayed
+    /// swap::ARM, a toggle mask with one bit per window whose displayed
     /// buffer must flip at the next retrace, then waits for the retrace
     /// interrupt. At each retrace the board first latches the pending flips
     /// into the displayed-buffer bits and then raises the retrace source,
-    /// whose vector is byte 23:16 of ODSY_ROUTE_VECTORS. The interrupt fires
+    /// whose vector is byte 23:16 of route::VECTORS. The interrupt fires
     /// at every retrace once the routing is programmed, not only when a swap
     /// is armed; before the driver programs the routing nothing is
     /// delivered. Whether the board can mask this source is unknown and it is
@@ -174,7 +164,7 @@ impl HostInterface {
         }
         crate::pf_instant!(crate::perfetto::events::ODSY_RETRACE, self.displayed_buffer);
         if self.routed() {
-            self.deliver_routed(ODSY_ROUTE_VECTOR_RETRACE_SHIFT, "retrace", true);
+            self.deliver_routed(route::VECTOR_RETRACE_SHIFT, "retrace", true);
         }
         flips != 0
     }
@@ -194,12 +184,12 @@ pub(super) fn odyssey_xio_compose(widget: u32, address: u64, fabric: &mut u64) -
 
 impl HostInterface {
     /// One routed source's interrupt. Every routed source shares one
-    /// destination (ODSY_ROUTE_DEST_UPPER/_LOWER), distinct from
+    /// destination (route::DEST_UPPER/_LOWER), distinct from
     /// int_dest_upper/int_dest_lower, which the kernel driver gives its
     /// crosstalk error handler; the sources differ only in their byte of
-    /// ODSY_ROUTE_VECTORS. The vectors are read from the register, never
+    /// route::VECTORS. The vectors are read from the register, never
     /// assumed. The flag source is a level the guest clears through
-    /// ODSY_INTR_CLEAR, so it sends a clearing packet as it falls
+    /// intr::CLEAR, so it sends a clearing packet as it falls
     /// (HostInterface::update_irq()); the softsync, retrace and DMA-done handlers ack
     /// nothing, and those sources send a single set pulse.
     ///
@@ -210,9 +200,9 @@ impl HostInterface {
     /// datasheet grades which bit enables which source unknown, and what
     /// the board does with a source raised while disabled approximated;
     /// IRIX sets and clears all three together, so it cannot tell. The flag
-    /// source has no bit here: ODSY_INTR_ENABLE_SET gates it.
+    /// source has no bit here: intr::ENABLE_SET gates it.
     pub fn deliver_routed(&mut self, shift: u32, what: &str, set: bool) {
-        let widget = (self.route_dest_upper >> ODSY_ROUTE_DEST_WIDGET_SHIFT) & ((1u32 << ODSY_INT_DEST_WIDGET_BITS) - 1);
+        let widget = (self.route_dest_upper >> route::DEST_WIDGET_SHIFT) & ((1u32 << ODSY_INT_DEST_WIDGET_BITS) - 1);
         let addr = (((self.route_dest_upper & 0xffff) as u64) << 32) | self.route_dest_lower as u64;
         let vector = self.route_vectors.checked_shr(shift).unwrap_or(0) as u8;
         let mut where_ = 0u64;
@@ -227,9 +217,9 @@ impl HostInterface {
             return;
         }
         let enable = match shift {
-            ODSY_ROUTE_VECTOR_DMA_SHIFT => ODSY_ROUTE_ENABLE_DMA,
-            ODSY_ROUTE_VECTOR_RETRACE_SHIFT => ODSY_ROUTE_ENABLE_RETRACE,
-            ODSY_ROUTE_VECTOR_SOFTSYNC_SHIFT => ODSY_ROUTE_ENABLE_SOFTSYNC,
+            route::VECTOR_DMA_SHIFT => route::ENABLE_DMA,
+            route::VECTOR_RETRACE_SHIFT => route::ENABLE_RETRACE,
+            route::VECTOR_SOFTSYNC_SHIFT => route::ENABLE_SOFTSYNC,
             _ => 0,
         };
         if self.route_dest_upper & enable != enable {
@@ -253,9 +243,9 @@ impl HostInterface {
         self.route_dest_upper != 0 && self.route_dest_lower != 0 && self.route_vectors != 0
     }
 
-    /// The softsync source ODSY_REG_HOST_WRITE (0x0a5a) raises.
+    /// The softsync source reg::HOST_WRITE (0x0a5a) raises.
     pub fn deliver_softsync(&mut self) {
-        self.deliver_routed(ODSY_ROUTE_VECTOR_SOFTSYNC_SHIFT, "softsync", true);
+        self.deliver_routed(route::VECTOR_SOFTSYNC_SHIFT, "softsync", true);
     }
 
     pub fn update_irq(&mut self) {
@@ -269,7 +259,7 @@ impl HostInterface {
             } else {
                 // A level that falls while held was never sent, and with no
                 // routing programmed there is no packet for its clear.
-                self.deliver_routed(ODSY_ROUTE_VECTOR_FLAG_SHIFT, "flag", level);
+                self.deliver_routed(route::VECTOR_FLAG_SHIFT, "flag", level);
             }
         }
     }
@@ -285,7 +275,7 @@ impl HostInterface {
     fn deliver_held_flag(&mut self) {
         if self.flag_held && self.routed() {
             self.flag_held = false;
-            self.deliver_routed(ODSY_ROUTE_VECTOR_FLAG_SHIFT, "held flag", true);
+            self.deliver_routed(route::VECTOR_FLAG_SHIFT, "held flag", true);
         }
     }
 
@@ -295,12 +285,12 @@ impl HostInterface {
     }
 
     /// The FIFO's level went from 'before' to its current value. Falling below
-    /// the model's low-water threshold (ODSY_CFIFO_LOW_WATER, a model choice)
+    /// the model's low-water threshold (cfifo::LOW_WATER, a model choice)
     /// latches the low-water flag whatever the enable mask
     /// says; it reaches the driver only while the source is enabled.
     pub fn fifo_level_changed(&mut self, before: u32) {
-        if before >= ODSY_CFIFO_LOW_WATER && self.fifo_level() < ODSY_CFIFO_LOW_WATER {
-            self.intr_flags |= ODSY_INTR_FIFO_LOW_WATER;
+        if before >= cfifo::LOW_WATER && self.fifo_level() < cfifo::LOW_WATER {
+            self.intr_flags |= intr::FIFO_LOW_WATER;
             self.update_irq();
         }
     }
@@ -327,7 +317,7 @@ pub(super) fn front_register(addr: u64, size: u32, write: bool) -> bool {
     }
     if !write {
         // Reads of these two fall to the unmodeled-access report.
-        return !matches!(reg(addr, size) as u64, ODSY_INTR_CLEAR | ODSY_INTR_ENABLE_CLEAR);
+        return !matches!(reg(addr, size) as u64, intr::CLEAR | intr::ENABLE_CLEAR);
     }
     true
 }
@@ -348,28 +338,28 @@ impl HostInterface {
             ODSY_STATUS | ODSY_ERROR_ADDR_UPPER | ODSY_ERROR_ADDR_LOWER => {
                 // No crosstalk error is ever posted, so the error class is clear.
             }
-            ODSY_INTR_FLAGS => value = self.intr_flags as u64,
-            ODSY_INTR_ENABLE_SET => value = self.intr_enable as u64,
+            intr::FLAGS => value = self.intr_flags as u64,
+            intr::ENABLE_SET => value = self.intr_enable as u64,
             ODSY_STATUS0 => {
                 // The waiting stores are its level (HostInterface::fifo_level()).
-                // Bit 15 and bit 17 use model-chosen thresholds, see ODSY_CFIFO_LOW_WATER
-                // and ODSY_REG_FIFO_SETUP_FIRST.
+                // Bit 15 and bit 17 use model-chosen thresholds, see cfifo::LOW_WATER
+                // and reg::FIFO_SETUP_FIRST.
                 let level = self.fifo_level();
                 crate::pf_value!(self.fifo.pf_level, crate::perfetto::events::ODSY_CFIFO_LEVEL, level);
-                value = (ODSY_STATUS0_FIFO_ENABLED
-                    | if self.fifo.high_water() { ODSY_STATUS0_FIFO_HIGH_WATER } else { 0 }
-                    | if level != 0 { 0 } else { ODSY_STATUS0_FIFO_EMPTY }
-                    | if level < ODSY_CFIFO_LOW_WATER { ODSY_STATUS0_FIFO_LOW_WATER } else { 0 }) as u64;
+                value = (status0::FIFO_ENABLED
+                    | if self.fifo.high_water() { status0::FIFO_HIGH_WATER } else { 0 }
+                    | if level != 0 { 0 } else { status0::FIFO_EMPTY }
+                    | if level < cfifo::LOW_WATER { status0::FIFO_LOW_WATER } else { 0 }) as u64;
             }
             ODSY_SW_TOKEN => value = self.sw_token as u64,
-            ODSY_FLCTL_TARGET => value = self.flctl_target as u64,
-            ODSY_SWAP_ARM => value = self.swap_arm as u64,
-            ODSY_SWAP_PENDING => value = self.swap_pending as u64,
-            ODSY_SWAP_CONTROL => value = self.swap_control as u64,
-            ODSY_SWAP_CONTROL_COMPANION => value = self.swap_control_companion as u64,
+            flctl::TARGET => value = self.flctl_target as u64,
+            swap::ARM => value = self.swap_arm as u64,
+            swap::PENDING => value = self.swap_pending as u64,
+            swap::CONTROL => value = self.swap_control as u64,
+            swap::CONTROL_COMPANION => value = self.swap_control_companion as u64,
             // The buffer the last latched swap put on screen (retrace()).
             ODSY_DISPLAYED_BUFFER => value = self.displayed_buffer as u64,
-            ODSY_ROUTE_DEST_UPPER | ODSY_ROUTE_DEST_LOWER | ODSY_ROUTE_VECTORS => {
+            route::DEST_UPPER | route::DEST_LOWER | route::VECTORS => {
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: read of the write-only register at {:#x}", addr);
             }
             _ => unreachable!("odyssey_front_register() admits only these"),
@@ -389,19 +379,19 @@ impl HostInterface {
             ODSY_INT_DEST_LOWER => self.int_dest_lower = value as u32,
             // Written to acknowledge; the data itself is discarded.
             ODSY_ERROR_COMMAND => self.error_command = 0,
-            ODSY_INTR_CLEAR => {
+            intr::CLEAR => {
                 self.intr_flags &= !(value as u32);
                 self.update_irq();
             }
-            ODSY_INTR_ENABLE_SET => {
+            intr::ENABLE_SET => {
                 self.intr_enable |= value as u32;
                 self.update_irq();
             }
-            ODSY_INTR_ENABLE_CLEAR => {
+            intr::ENABLE_CLEAR => {
                 self.intr_enable &= !(value as u32);
                 self.update_irq();
             }
-            ODSY_INTR_FLAGS => {
+            intr::FLAGS => {
                 // The flags take the value written: an inferred model choice.
                 // A driver's flow control writes the low-water bit here before
                 // enabling that source, and its DMA diagnostic clears one flag
@@ -413,29 +403,29 @@ impl HostInterface {
                 self.update_irq();
             }
             ODSY_SW_TOKEN => self.sw_token = value as u32,
-            ODSY_FLCTL_TARGET => {
+            flctl::TARGET => {
                 self.flctl_target = value as u32;
                 if !self.flctl_target_reported {
                     self.flctl_target_reported = true;
                     crate::dlog!(
                         LogModule::Odyssey,
                         "sgi-odyssey: flow-control interrupt target {} and credit target {} stored; credits still return through the node interface",
-                        (value as u32) >> ODSY_FLCTL_INTR_TARGET_SHIFT,
-                        ((value >> ODSY_FLCTL_TARGET_SHIFT) as u32) & ODSY_FLCTL_TARGET_MASK
+                        (value as u32) >> flctl::INTR_TARGET_SHIFT,
+                        ((value >> flctl::TARGET_SHIFT) as u32) & flctl::TARGET_MASK
                     );
                 }
             }
-            ODSY_SWAP_ARM => {
+            swap::ARM => {
                 // Queue flips for the next retrace. Writes accumulate: the
                 // driver can issue several windows or swap groups between two
                 // retraces, and its retrace handler re-writes one window's bit
                 // when a flip has not shown after two retraces. Whether the
                 // board ORs or replaces is unknown; ORing loses no flip.
                 self.swap_arm |= value as u32;
-                crate::pf_instant!(crate::perfetto::events::ODSY_SWAP_ARM, value);
+                crate::pf_instant!(crate::perfetto::events::swap::ARM, value);
             }
-            ODSY_SWAP_PENDING => self.swap_pending = value as u32,
-            ODSY_SWAP_CONTROL => {
+            swap::PENDING => self.swap_pending = value as u32,
+            swap::CONTROL => {
                 // The windows that must show buffer 1 from the next retrace on.
                 // A later write to either register for the same window replaces
                 // this one before the retrace latches it.
@@ -443,7 +433,7 @@ impl HostInterface {
                 self.swap_set |= value as u32;
                 self.swap_clear &= !(value as u32);
             }
-            ODSY_SWAP_CONTROL_COMPANION => {
+            swap::CONTROL_COMPANION => {
                 self.swap_control_companion = value as u32;
                 self.swap_clear |= value as u32;
                 self.swap_set &= !(value as u32);
@@ -454,15 +444,15 @@ impl HostInterface {
                 self.displayed_buffer = value as u32;
                 self.displayed_written = true;
             }
-            ODSY_ROUTE_DEST_UPPER => {
+            route::DEST_UPPER => {
                 self.route_dest_upper = value as u32;
                 self.deliver_held_flag();
             }
-            ODSY_ROUTE_DEST_LOWER => {
+            route::DEST_LOWER => {
                 self.route_dest_lower = value as u32;
                 self.deliver_held_flag();
             }
-            ODSY_ROUTE_VECTORS => {
+            route::VECTORS => {
                 self.route_vectors = value as u32;
                 self.deliver_held_flag();
             }

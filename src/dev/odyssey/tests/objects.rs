@@ -2,7 +2,7 @@
 //! what a game uploads, and texture setup finds a level's storage there.
 
 use crate::dev::odyssey::board::{Board, ODSY_OBJECTS};
-use crate::dev::odyssey::consts::{ODSY_TEX_MODE_2D, ODSY_TEX_MODE_3D};
+use crate::dev::odyssey::consts::tex;
 use crate::dev::odyssey::gl::{texture_detail_sampler, volume_slice_stride, TextureChain, TextureDetailWeight};
 use crate::dev::odyssey::gl_context::{GL_ADD, GL_LINEAR, GL_LINEAR_DETAIL_COLOR_SGIS, GL_MODULATE, GL_RGB, GL_RGBA};
 use crate::dev::odyssey::raster::GlTexImage;
@@ -33,7 +33,7 @@ fn the_object_table_keeps_every_level_a_game_loads() {
 /// axes, nearest, replace, one level at `base` (sampler word 4 0x13001400,
 /// level entry 0x41100020, replayed from a guest trace).
 fn rgba_512x256(s: &mut Board, base: u32) {
-    s.tex_mode = ODSY_TEX_MODE_2D;
+    s.tex_mode = tex::MODE_2D;
     s.tex_level0 = 0;
     s.tex_levels[..3].copy_from_slice(&[base, 0x4110_0020, 0]);
     s.tex_sampler = [0x0800_0000 | (9 << 10) | (8 << 5), 0x0004_0000 | 512, 0x0004_0000 | 256, 1, 0x1300_1400, 0, 0];
@@ -126,7 +126,7 @@ fn a_texture_move_does_not_grow_its_object() {
     let obj = s.object_select(base, 512);
 
     assert!(s.object_rows(obj, 2));
-    s.tex_mode = ODSY_TEX_MODE_2D;
+    s.tex_mode = tex::MODE_2D;
     s.tex_level0 = 60;
     s.tex_levels[180..183].copy_from_slice(&[base, 0x8210_0020, 0]);
     s.tex_sampler = [(9 << 10) | (6 << 5), 512, 64, 0, 0x0364_0000, 0, 0];
@@ -199,7 +199,7 @@ fn a_stored_volume_slice_written_in_part_does_not_grow() {
             }
             rows.push((o, n));
         }
-        s.tex_mode = ODSY_TEX_MODE_3D;
+        s.tex_mode = tex::MODE_3D;
         s.tex_level0 = 0;
         s.tex_levels[..3].copy_from_slice(&[base, 0x4110_0004, h + 2]);
         s.tex_sampler = [0x0800_0000 | (2 << 10) | (2 << 5) | 2, w, h, d, 0x0300_2a00, 0, 0x0100_0000];

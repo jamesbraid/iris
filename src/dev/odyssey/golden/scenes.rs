@@ -1,15 +1,10 @@
 //! The scenes, and the context that draws them.
 
 use crate::dev::odyssey::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
-use crate::dev::odyssey::consts::{
-    ODSY_COLOUR_MATERIAL_AMBIENT, ODSY_COLOUR_MATERIAL_DIFFUSE, ODSY_COLOUR_MATERIAL_EMISSION,
-    ODSY_GL_DEPTH_S, ODSY_GL_LIGHT_MODEL_AMBIENT, ODSY_GL_LIGHT_VEC_FLOATS, ODSY_LIGHT_ATTEN,
-    ODSY_LIGHT_HALF, ODSY_LIGHT_POS, ODSY_LIGHT_SPOT_COS, ODSY_LIGHT_SPOT_DIR, ODSY_LIGHT_SPOT_EXP,
-    ODSY_TEX_MODE_2D, ODSY_WRITE_COLOUR_MASK, ODSY_WRITE_COLOUR_SHIFT,
-};
+use crate::dev::odyssey::consts::{colour, gl_cmd, light, tex, write};
 use crate::dev::odyssey::draw::gl_rules;
 use crate::dev::odyssey::gl_context::{
-    GL_ALWAYS, GL_BACK, GL_BLEND, GL_CCW, GL_CLEAR, GL_COLOR_BUFFER_BIT, GL_COLOUR_MASK_ALL,
+    vtx, GL_ALWAYS, GL_BACK, GL_BLEND, GL_CCW, GL_CLEAR, GL_COLOR_BUFFER_BIT, GL_COLOUR_MASK_ALL,
     GL_COLOUR_MASK_ALPHA, GL_COLOUR_MASK_RED, GL_CONSTANT_ALPHA, GL_CONSTANT_COLOR, GL_CW,
     GL_DECAL, GL_DECR, GL_DEPTH_BUFFER_BIT, GL_DRAW_OK, GL_DST_ALPHA, GL_DST_COLOR, GL_EQUAL,
     GL_FILL, GL_FLAT, GL_FRONT, GL_FUNC_ADD, GL_FUNC_REVERSE_SUBTRACT, GL_FUNC_SUBTRACT, GL_GEQUAL,
@@ -18,8 +13,7 @@ use crate::dev::odyssey::gl_context::{
     GL_ONE_MINUS_CONSTANT_COLOR, GL_ONE_MINUS_DST_ALPHA, GL_ONE_MINUS_DST_COLOR,
     GL_ONE_MINUS_SRC_ALPHA, GL_ONE_MINUS_SRC_COLOR, GL_POINT, GL_POINTS, GL_POLYGON, GL_QUADS,
     GL_REPLACE, GL_SMOOTH, GL_SRC_ALPHA, GL_SRC_ALPHA_SATURATE, GL_SRC_COLOR,
-    GL_STENCIL_BUFFER_BIT, GL_TRIANGLES, GL_VERTEX_FLOATS, GL_V_BACK_COLOR, GL_V_COLOR, GL_V_EDGE,
-    GL_V_NORMAL, GL_V_POSITION, GL_V_TEXCOORD, GlDraw, GlDrawState, RASTER_CLEAR, RasterOp,
+    GL_STENCIL_BUFFER_BIT, GL_TRIANGLES, GlDraw, GlDrawState, RASTER_CLEAR, RasterOp,
 };
 use crate::dev::odyssey::golden::{Frame, SIDE};
 use crate::dev::odyssey::memory::ClipRect;
@@ -69,14 +63,14 @@ impl V {
         self.t = [self.t[0] * w, self.t[1] * w, 0.0, w];
         self
     }
-    fn floats(&self) -> [f32; GL_VERTEX_FLOATS] {
-        let mut o = [0.0f32; GL_VERTEX_FLOATS];
-        o[GL_V_POSITION..][..4].copy_from_slice(&self.p);
-        o[GL_V_COLOR..][..4].copy_from_slice(&self.c);
-        o[GL_V_NORMAL..][..3].copy_from_slice(&self.n);
-        o[GL_V_TEXCOORD..][..4].copy_from_slice(&self.t);
-        o[GL_V_EDGE] = f32::from_bits(1);
-        o[GL_V_BACK_COLOR..][..4].copy_from_slice(&self.back.unwrap_or(self.c));
+    fn floats(&self) -> [f32; vtx::FLOATS] {
+        let mut o = [0.0f32; vtx::FLOATS];
+        o[vtx::POSITION..][..4].copy_from_slice(&self.p);
+        o[vtx::COLOR..][..4].copy_from_slice(&self.c);
+        o[vtx::NORMAL..][..3].copy_from_slice(&self.n);
+        o[vtx::TEXCOORD..][..4].copy_from_slice(&self.t);
+        o[vtx::EDGE] = f32::from_bits(1);
+        o[vtx::BACK_COLOR..][..4].copy_from_slice(&self.back.unwrap_or(self.c));
         o
     }
 }
@@ -111,7 +105,7 @@ impl Ctx {
         let rect = ClipRect { x0: 0, y0: 0, x1: SIDE - 1, y1: SIDE - 1 };
 
         board.clip_rect[0] = rect;
-        board.gl_write_mask |= ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT;
+        board.gl_write_mask |= write::COLOUR_MASK << write::COLOUR_SHIFT;
         st.drawable.clip.r[0] = rect;
         st.viewport = [0, 0, SIDE, SIDE];
         st.shade_model = GL_SMOOTH;
@@ -145,7 +139,7 @@ impl Ctx {
     /// clip w, scaled the way Board::gl_operation_rules() unscales it. The
     /// default row is the identity projection's, (z + w) / 2.
     pub fn depth_row(&mut self, row: [f64; 4]) {
-        let scale = 2.0 * ODSY_GL_DEPTH_S * self.board.gl_depth_scale();
+        let scale = 2.0 * gl_cmd::DEPTH_S * self.board.gl_depth_scale();
         for k in 0..4 {
             self.board.gl_combined[8 + k] = ((row[k] * scale) as f32).to_bits();
         }
@@ -312,7 +306,7 @@ impl Ctx {
         }
         let axis = |w: u32, wrap: u32| w | if wrap == 1 { 0x4_0000 } else { 0 };
         let filter = (t.min << 5) | if t.mag_linear { 2 } else { 0 };
-        b.tex_mode = ODSY_TEX_MODE_2D;
+        b.tex_mode = tex::MODE_2D;
         b.tex_level0 = 0;
         b.tex_sampler = [
             0x0800_0000 | (t.size.trailing_zeros() << 10) | (t.size.trailing_zeros() << 5),
@@ -569,10 +563,10 @@ fn stencil_mark_then_masked(c: &mut Ctx) {
     c.st.stencil_write_mask = u32::MAX;
     c.st.stencil_op = [GL_KEEP, GL_KEEP, GL_INCR];
     c.st.colour_mask = 0;
-    c.board.gl_write_mask &= !(ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT);
+    c.board.gl_write_mask &= !(write::COLOUR_MASK << write::COLOUR_SHIFT);
     c.tri(v(10.0, 10.0, 0.0, RED), v(110.0, 30.0, 0.0, RED), v(40.0, 110.0, 0.0, RED));
     c.tri(v(30.0, 30.0, 0.0, RED), v(120.0, 90.0, 0.0, RED), v(20.0, 100.0, 0.0, RED));
-    c.board.gl_write_mask |= ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT;
+    c.board.gl_write_mask |= write::COLOUR_MASK << write::COLOUR_SHIFT;
     c.st.stencil_func = GL_EQUAL;
     c.st.stencil_ref = 2;
     c.st.stencil_op = [GL_KEEP; 3];
@@ -632,7 +626,7 @@ fn blend_factor_grid(c: &mut Ctx) {
     ramp_background(c);
     let srcs = [GL_ZERO_F, GL_ONE_F, GL_DST_COLOR, GL_ONE_MINUS_DST_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA, GL_SRC_ALPHA_SATURATE];
     let dsts = [GL_ZERO_F, GL_ONE_F, GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA];
-    c.board.gl_write_mask |= ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT;
+    c.board.gl_write_mask |= write::COLOUR_MASK << write::COLOUR_SHIFT;
     for (i, &s) in srcs.iter().enumerate() {
         for (j, &d) in dsts.iter().enumerate() {
             c.blend(s, d);
@@ -680,7 +674,7 @@ fn logic_op_and_colour_mask(c: &mut Ctx) {
     c.st.logic_op_mode = GL_CLEAR + 1; // AND
     c.rect(40.0, 40.0, 100.0, 100.0, 0.0, [0.9, 0.5, 0.8, 1.0]);
     c.st.color_logic_op = false;
-    c.board.gl_write_mask = (c.board.gl_write_mask & !(ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT)) | ((GL_COLOUR_MASK_RED | GL_COLOUR_MASK_ALPHA) << ODSY_WRITE_COLOUR_SHIFT);
+    c.board.gl_write_mask = (c.board.gl_write_mask & !(write::COLOUR_MASK << write::COLOUR_SHIFT)) | ((GL_COLOUR_MASK_RED | GL_COLOUR_MASK_ALPHA) << write::COLOUR_SHIFT);
     c.rect(70.0, 20.0, 120.0, 110.0, 0.0, [1.0, 1.0, 1.0, 0.5]);
 }
 
@@ -1054,7 +1048,7 @@ pub fn load_lights(b: &mut Board, lights: &[(usize, Light)], ambient: [f32; 3], 
     b.gl_colour_material = colour_material;
     b.gl_light_colour.fill(0);
     b.gl_light_vec.fill(0);
-    let a = ODSY_GL_LIGHT_MODEL_AMBIENT as usize * 4;
+    let a = gl_cmd::LIGHT_MODEL_AMBIENT as usize * 4;
     for k in 0..3 {
         b.gl_light_colour[a + k] = ambient[k].to_bits();
     }
@@ -1076,27 +1070,27 @@ pub fn load_lights(b: &mut Board, lights: &[(usize, Light)], ambient: [f32; 3], 
             b.gl_light_colour[i * 12 + 4 + k] = l.colour[k].to_bits();
             b.gl_light_colour[i * 12 + 8 + k] = l.colour[k].to_bits();
         }
-        let blk = &mut b.gl_light_vec[i * ODSY_GL_LIGHT_VEC_FLOATS as usize..];
+        let blk = &mut b.gl_light_vec[i * gl_cmd::LIGHT_VEC_FLOATS as usize..];
         for k in 0..3 {
-            blk[ODSY_LIGHT_POS + k] = l.pos[k].to_bits();
+            blk[light::POS + k] = l.pos[k].to_bits();
         }
         if l.directional {
             // The board is given the half vector; any non-zero one marks the
             // light directional.
             let n = (l.pos[0] * l.pos[0] + l.pos[1] * l.pos[1] + (l.pos[2] + 1.0).powi(2)).sqrt().max(1e-6);
-            blk[ODSY_LIGHT_HALF] = (l.pos[0] / n).to_bits();
-            blk[ODSY_LIGHT_HALF + 1] = (l.pos[1] / n).to_bits();
-            blk[ODSY_LIGHT_HALF + 2] = ((l.pos[2] + 1.0) / n).to_bits();
+            blk[light::HALF] = (l.pos[0] / n).to_bits();
+            blk[light::HALF + 1] = (l.pos[1] / n).to_bits();
+            blk[light::HALF + 2] = ((l.pos[2] + 1.0) / n).to_bits();
         }
-        blk[ODSY_LIGHT_ATTEN] = l.atten[2].to_bits();
-        blk[ODSY_LIGHT_ATTEN + 1] = l.atten[0].to_bits();
-        blk[ODSY_LIGHT_ATTEN + 2] = l.atten[1].to_bits();
-        blk[ODSY_LIGHT_SPOT_COS] = 1.0f32.to_bits();
+        blk[light::ATTEN] = l.atten[2].to_bits();
+        blk[light::ATTEN + 1] = l.atten[0].to_bits();
+        blk[light::ATTEN + 2] = l.atten[1].to_bits();
+        blk[light::SPOT_COS] = 1.0f32.to_bits();
         if let Some((dir, cos, exp)) = l.spot {
-            blk[ODSY_LIGHT_SPOT_COS] = (-cos).to_bits();
-            blk[ODSY_LIGHT_SPOT_EXP] = (-exp).to_bits();
+            blk[light::SPOT_COS] = (-cos).to_bits();
+            blk[light::SPOT_EXP] = (-exp).to_bits();
             for k in 0..3 {
-                blk[ODSY_LIGHT_SPOT_DIR + k] = (-dir[k]).to_bits();
+                blk[light::SPOT_DIR + k] = (-dir[k]).to_bits();
             }
         }
     }
@@ -1160,12 +1154,12 @@ fn light_three_lights_colour_material(c: &mut Ctx) {
     let a = Light { pos: [1.0, 0.0, -1.0], directional: true, colour: [1.0, 0.1, 0.1], atten: [1.0, 0.0, 0.0], spot: None };
     let b = Light { pos: [-1.0, 0.5, -1.0], directional: true, colour: [0.1, 0.1, 1.0], atten: [1.0, 0.0, 0.0], spot: None };
     let s = Light { pos: [0.0, -2.0, -1.5], directional: false, colour: [0.2, 1.0, 0.2], atten: [1.0, 0.1, 0.0], spot: Some(([0.0, 1.0, 0.5], 0.7, 2.0)) };
-    load_lights(&mut c.board, &[(0, a), (3, b), (7, s)], [0.1, 0.1, 0.1], false, 12.0, MATERIAL, ODSY_COLOUR_MATERIAL_AMBIENT | ODSY_COLOUR_MATERIAL_DIFFUSE);
+    load_lights(&mut c.board, &[(0, a), (3, b), (7, s)], [0.1, 0.1, 0.1], false, 12.0, MATERIAL, colour::MATERIAL_AMBIENT | colour::MATERIAL_DIFFUSE);
     lit_sphere(c, [0.9, 0.7, 0.3, 0.75]);
 }
 
 fn light_unlit_emission_only(c: &mut Ctx) {
-    load_lights(&mut c.board, &[], [0.3, 0.3, 0.3], false, 1.0, MATERIAL, ODSY_COLOUR_MATERIAL_EMISSION);
+    load_lights(&mut c.board, &[], [0.3, 0.3, 0.3], false, 1.0, MATERIAL, colour::MATERIAL_EMISSION);
     lit_sphere(c, [0.2, 0.8, 0.4, 1.0]);
 }
 

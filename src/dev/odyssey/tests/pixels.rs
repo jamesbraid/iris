@@ -4,16 +4,8 @@
 
 use crate::dev::odyssey::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
 use crate::dev::odyssey::consts::{
-    ODSY_CMD_ARITY_MASK, ODSY_CMD_ARITY_SHIFT, ODSY_CMD_COPY_RECT_TRIGGER, ODSY_CMD_IMAGE_BOX,
-    ODSY_CMD_IMAGE_HEADER, ODSY_DEST_ID_PLANES, ODSY_DISPMODE_GROUP_SHIFT, ODSY_DMA_DESC_UPLOAD,
-    ODSY_DMA_FMT_FRONT, ODSY_DMA_PTE_ADDR_SHIFT, ODSY_DMA_SENTINEL_DRAW, ODSY_DMA_SENTINEL_READ,
-    ODSY_DMA_TABLE_HEADER, ODSY_DMA_TO_HOST, ODSY_DRAW_MASK_BUFFER0, ODSY_DRAW_MASK_BUFFER1,
-    ODSY_GAMMA_GROUP, ODSY_GL_PRIMITIVE_IMAGE, ODSY_GL_QUADS, ODSY_GL_TEX_RECT,
-    ODSY_IMAGE_BOX_X1_INDEX, ODSY_IMAGE_BOX_X2_INDEX, ODSY_IMAGE_BOX_Y1_INDEX,
-    ODSY_IMAGE_BOX_Y2_INDEX, ODSY_IMAGE_BURST_BASE, ODSY_IMAGE_FMT_CI, ODSY_IMAGE_FMT_RGB,
-    ODSY_IMAGE_FMT_RGBA16, ODSY_MODE_COLOR_LOGIC_OP, ODSY_PLANE_MASK_SHIFT, ODSY_REG_DEST_SELECT,
-    ODSY_REG_GL_BEGIN, ODSY_REG_GL_END, ODSY_REG_WRITE_MASK, ODSY_SWAP_SYNC_B, ODSY_TEX_MODE_2D,
-    ODSY_USER_CMD_FIFO, ODSY_WRITE_DEPTH,
+    dest, dispmode, dma, gl_cmd, image, mode, reg, self, swap, tex, write, ODSY_DRAW_MASK_BUFFER0,
+    ODSY_DRAW_MASK_BUFFER1, ODSY_GAMMA_GROUP, ODSY_PLANE_MASK_SHIFT, ODSY_USER_CMD_FIFO,
 };
 use crate::dev::odyssey::dma::DMA_BPP;
 use crate::dev::odyssey::gl_context::GL_CLEAR;
@@ -45,33 +37,33 @@ fn burst_image(s: &mut Board, bounds: (u32, u32, u32, u32), header: u32, fmt: u3
 /// each followed by its bursts (a tag and its words): the shape of a draw
 /// wider than one burst, where a header finishes the previous row.
 fn burst_image_groups(s: &mut Board, (x1, y1, x2, y2): (u32, u32, u32, u32), groups: &[(u32, &[(u32, &[u32])])]) {
-    cmd(s, select(ODSY_REG_GL_BEGIN));
-    cmd(s, ODSY_GL_PRIMITIVE_IMAGE);
-    cmd(s, ODSY_CMD_IMAGE_BOX);
+    cmd(s, select(reg::GL_BEGIN));
+    cmd(s, gl_cmd::PRIMITIVE_IMAGE);
+    cmd(s, consts::cmd::IMAGE_BOX);
     for i in 0..10 {
         let v = match i {
-            ODSY_IMAGE_BOX_X1_INDEX => x1,
-            ODSY_IMAGE_BOX_Y1_INDEX => y1,
-            ODSY_IMAGE_BOX_X2_INDEX => x2,
-            ODSY_IMAGE_BOX_Y2_INDEX => y2,
+            image::BOX_X1_INDEX => x1,
+            image::BOX_Y1_INDEX => y1,
+            image::BOX_X2_INDEX => x2,
+            image::BOX_Y2_INDEX => y2,
             _ => 0,
         };
         cmd(s, (v as f32).to_bits());
     }
     for &(header, bursts) in groups {
-        cmd(s, ODSY_CMD_IMAGE_HEADER);
+        cmd(s, consts::cmd::IMAGE_HEADER);
         cmd(s, header);
         for &(fmt, words) in bursts {
             for chunk in words.chunks(16) {
-                let n = if chunk.len() == 16 { ODSY_CMD_ARITY_MASK } else { chunk.len() as u32 };
-                cmd(s, select(ODSY_IMAGE_BURST_BASE | n << ODSY_CMD_ARITY_SHIFT | fmt));
+                let n = if chunk.len() == 16 { consts::cmd::ARITY_MASK } else { chunk.len() as u32 };
+                cmd(s, select(image::BURST_BASE | n << consts::cmd::ARITY_SHIFT | fmt));
                 for &w in chunk {
                     cmd(s, w);
                 }
             }
         }
     }
-    cmd(s, select(ODSY_REG_GL_END));
+    cmd(s, select(reg::GL_END));
 }
 
 /// glDrawPixels of RGBA bytes, the header the library sends for a 2x1
@@ -83,7 +75,7 @@ fn burst_image_groups(s: &mut Board, (x1, y1, x2, y2): (u32, u32, u32, u32), gro
 #[test]
 fn a_gl_rgba_image_keeps_its_alpha() {
     let (mut s, _) = window();
-    burst_image(&mut s, (40, 10, 42, 11), 0x0021_104b, ODSY_IMAGE_FMT_RGB, &[0x116c_c722, 0x2233_4400]);
+    burst_image(&mut s, (40, 10, 42, 11), 0x0021_104b, image::FMT_RGB, &[0x116c_c722, 0x2233_4400]);
     assert_eq!(pixel(&s, 0, 40, 10), 0x116c_c722);
     assert_eq!(pixel(&s, 0, 41, 10), 0x2233_4400);
 }
@@ -93,14 +85,14 @@ fn a_gl_rgba_image_keeps_its_alpha() {
 #[test]
 fn luminance_alpha_and_abgr_images_keep_alpha_and_rgb_stores_255() {
     let (mut s, _) = window();
-    burst_image(&mut s, (40, 10, 42, 11), 0x0021_1048, ODSY_IMAGE_FMT_CI, &[0x116c_2233]);
+    burst_image(&mut s, (40, 10, 42, 11), 0x0021_1048, image::FMT_CI, &[0x116c_2233]);
     assert_eq!(pixel(&s, 0, 40, 10), 0x1111_116c);
     assert_eq!(pixel(&s, 0, 41, 10), 0x2222_2233);
 
-    burst_image(&mut s, (40, 12, 41, 13), 0x0011_104c, ODSY_IMAGE_FMT_RGB, &[0x11c7_6c22]);
+    burst_image(&mut s, (40, 12, 41, 13), 0x0011_104c, image::FMT_RGB, &[0x11c7_6c22]);
     assert_eq!(pixel(&s, 0, 40, 12), 0x226c_c711);
 
-    burst_image(&mut s, (40, 14, 41, 15), 0x0011_1049, ODSY_IMAGE_FMT_RGB, &[0x1122_3300]);
+    burst_image(&mut s, (40, 14, 41, 15), 0x0011_1049, image::FMT_RGB, &[0x1122_3300]);
     assert_eq!(pixel(&s, 0, 40, 14), 0x1122_33ff);
 }
 
@@ -109,21 +101,21 @@ fn luminance_alpha_and_abgr_images_keep_alpha_and_rgb_stores_255() {
 #[test]
 fn an_x_server_abgr_put_still_stores_255() {
     let (mut s, ram) = window();
-    for w in [select(ODSY_REG_DEST_SELECT), 0x2000, 0x50, 0x2000_6950, 0] {
+    for w in [select(reg::DEST_SELECT), 0x2000, 0x50, 0x2000_6950, 0] {
         s.mmio_write(ODSY_USER_CMD_FIFO, w as u64, 4);
     }
     let table = 0xb80000u64;
     let page = 0xb84000u64;
     ram.put(page, &[0x7f, 0x01, 0x9b, 0xfd]);
     let header = [0x2000u32, 300 << 16 | 200, 0x50, 0x10001, 0x8223_305a, 0, 4, 0x3201_004c];
-    let mut t = vec![0u8; ODSY_DMA_TABLE_HEADER as usize + 16];
+    let mut t = vec![0u8; dma::TABLE_HEADER as usize + 16];
     for (i, w) in header.iter().enumerate() {
         t[i * 4..][..4].copy_from_slice(&w.to_be_bytes());
     }
-    t[ODSY_DMA_TABLE_HEADER as usize..][..8].copy_from_slice(&(page << ODSY_DMA_PTE_ADDR_SHIFT | 4).to_be_bytes());
+    t[dma::TABLE_HEADER as usize..][..8].copy_from_slice(&(page << dma::PTE_ADDR_SHIFT | 4).to_be_bytes());
     ram.put(table, &t);
     let half = |h: u64| (h & 0x1ffff) as u32 | ((h & 0xfe_0000) << 6) as u32;
-    cmd64(&mut s, ODSY_DMA_DESC_UPLOAD, half(table >> 24));
+    cmd64(&mut s, dma::DESC_UPLOAD, half(table >> 24));
     cmd64(&mut s, half(table & 0xff_ffff), 0);
     assert_eq!(pixel(&s, 0, 200, 300), 0xfd9b_01ff);
 }
@@ -144,7 +136,7 @@ fn dma_read(s: &mut Board, ram: &Ram, (x, y, w): (u32, u32, u32), word4: u32, by
     put_table(
         ram,
         TABLE,
-        [ODSY_DMA_SENTINEL_READ, y << 16 | x, 0x50, 1 << 16 | w, word4, 0, w * bytes, ODSY_DMA_TO_HOST | bpp_code << 16],
+        [dma::SENTINEL_READ, y << 16 | x, 0x50, 1 << 16 | w, word4, 0, w * bytes, dma::TO_HOST | bpp_code << 16],
         &[pte(PAGE_A, w * bytes)],
     );
     descriptor(s, TABLE);
@@ -158,7 +150,7 @@ fn read_window() -> (Box<Board>, Arc<Ram>) {
     let (mut s, ram) = window();
     pixel_write(&mut s, 30, 40, READ_PIXEL);
     // A colour-map-free RGB mode, so the pixel is a colour and not an index.
-    s.regs().set_dispmode((0) as usize, ODSY_GAMMA_GROUP << ODSY_DISPMODE_GROUP_SHIFT);
+    s.regs().set_dispmode((0) as usize, ODSY_GAMMA_GROUP << dispmode::GROUP_SHIFT);
     (s, ram)
 }
 
@@ -274,7 +266,7 @@ fn a_colour_index_read_returns_the_index() {
     let got = dma_read(&mut s, &ram, (31, 40, 1), read_word4(0, 1), 1);
     assert_eq!(got[..2], [0x2a, 0xa5]);
 
-    s.regs().set_dispmode((0) as usize, ODSY_GAMMA_GROUP << ODSY_DISPMODE_GROUP_SHIFT);
+    s.regs().set_dispmode((0) as usize, ODSY_GAMMA_GROUP << dispmode::GROUP_SHIFT);
     let got = dma_read(&mut s, &ram, (30, 40, 1), read_word4(0, 1), 1);
     assert_eq!(got[..2], [0xa5, 0xa5], "the red byte of 0xa55a3cff");
 }
@@ -294,7 +286,7 @@ fn dma_write_sized(s: &mut Board, ram: &Ram, (x, y, w): (u32, u32, u32), word4: 
     put_table(
         ram,
         TABLE,
-        [ODSY_DMA_SENTINEL_DRAW, y << 16 | x, 0x50, 1 << 16 | w, word4, 0, w * bytes, 1 << 30 | bpp_code << 16 | code],
+        [dma::SENTINEL_DRAW, y << 16 | x, 0x50, 1 << 16 | w, word4, 0, w * bytes, 1 << 30 | bpp_code << 16 | code],
         &[pte(PAGE_A, w * bytes)],
     );
     descriptor(s, TABLE);
@@ -378,12 +370,12 @@ fn a_depth_or_stencil_image_by_dma_writes_its_own_plane() {
 fn a_depth_or_stencil_burst_writes_the_plane_the_write_mask_names() {
     let (mut s, _) = window();
     let write_mask = |s: &mut Board, v: u32| {
-        cmd(s, select(ODSY_REG_WRITE_MASK));
+        cmd(s, select(reg::WRITE_MASK));
         cmd(s, v);
     };
     // Depth download: bit 24 set, stencil mask clear.
-    write_mask(&mut s, ODSY_WRITE_DEPTH);
-    burst_image(&mut s, (40, 10, 42, 11), 0x0021_1080, ODSY_IMAGE_FMT_RGB, &[0xff12_3456, 0x00ab_cdef]);
+    write_mask(&mut s, write::DEPTH);
+    burst_image(&mut s, (40, 10, 42, 11), 0x0021_1080, image::FMT_RGB, &[0xff12_3456, 0x00ab_cdef]);
     assert_eq!(s.depth_load(40, 10), 0x0012_3456, "bits 31:24 are not depth");
     assert_eq!(s.depth_load(41, 10), 0x00ab_cdef);
     assert_eq!(stencil_at(&s, 40, 10), 0, "a depth download leaves stencil");
@@ -392,7 +384,7 @@ fn a_depth_or_stencil_burst_writes_the_plane_the_write_mask_names() {
     s.stencil_store(40, 10, 0x0f);
     s.stencil_store(41, 10, 0x0f);
     write_mask(&mut s, 0xf0 << 12);
-    burst_image(&mut s, (40, 10, 42, 11), 0x0021_1080, ODSY_IMAGE_FMT_RGB, &[0x00a5_0000, 0x005a_0000]);
+    burst_image(&mut s, (40, 10, 42, 11), 0x0021_1080, image::FMT_RGB, &[0x00a5_0000, 0x005a_0000]);
     assert_eq!(stencil_at(&s, 40, 10), 0xaf, "the masked bits change, the rest keep");
     assert_eq!(stencil_at(&s, 41, 10), 0x5f);
     assert_eq!(s.depth_load(40, 10), 0x0012_3456, "a stencil download leaves depth");
@@ -401,13 +393,13 @@ fn a_depth_or_stencil_burst_writes_the_plane_the_write_mask_names() {
     // data in bits 19:12 (where the mask sits) is not the index.
     s.stencil_store(42, 10, 0x3c);
     write_mask(&mut s, 0xff << 12);
-    burst_image(&mut s, (42, 10, 44, 11), 0x0021_1080, ODSY_IMAGE_FMT_RGB, &[0x0000_f000, 0x0081_f0ff]);
+    burst_image(&mut s, (42, 10, 44, 11), 0x0021_1080, image::FMT_RGB, &[0x0000_f000, 0x0081_f0ff]);
     assert_eq!(stencil_at(&s, 42, 10), 0x00, "bits 19:12 alone are index 0");
     assert_eq!(stencil_at(&s, 43, 10), 0x81, "the index is bits 23:16");
 
     // A zero stencil mask and no depth bit: nothing is written.
     write_mask(&mut s, 0);
-    burst_image(&mut s, (40, 10, 41, 11), 0x0011_1080, ODSY_IMAGE_FMT_RGB, &[0x0099_0000]);
+    burst_image(&mut s, (40, 10, 41, 11), 0x0011_1080, image::FMT_RGB, &[0x0099_0000]);
     assert_eq!(s.depth_load(40, 10), 0x0012_3456);
     assert_eq!(stencil_at(&s, 40, 10), 0xaf);
     for buffer in 0..2 {
@@ -429,29 +421,29 @@ fn a_burst_image_of_a_packed_or_single_channel_type_lands_as_that_pixel() {
     let (mut s, _) = window();
 
     // RGBA, 4_4_4_4 (format 0xb, type 6): two pixels in one word.
-    burst_image(&mut s, (40, 10, 42, 11), 0x0021_10cb, ODSY_IMAGE_FMT_RGB, &[0xa53f_1234]);
+    burst_image(&mut s, (40, 10, 42, 11), 0x0021_10cb, image::FMT_RGB, &[0xa53f_1234]);
     assert_eq!(pixel(&s, 0, 40, 10), 0xaa55_33ff);
     assert_eq!(pixel(&s, 0, 41, 10), 0x1122_3344);
 
     // RGBA, 5_5_5_1 (type 7).
-    burst_image(&mut s, (40, 11, 41, 12), 0x0011_10eb, ODSY_IMAGE_FMT_RGB, &[0xa2cf_0000]);
+    burst_image(&mut s, (40, 11, 41, 12), 0x0011_10eb, image::FMT_RGB, &[0xa2cf_0000]);
     assert_eq!(pixel(&s, 0, 40, 11), 0xa55a_3aff);
 
     // RGBA, 10_10_10_2 (type 8): a word a pixel.
-    burst_image(&mut s, (40, 12, 41, 13), 0x0011_110b, ODSY_IMAGE_FMT_RGB, &[0xa596_93c3]);
+    burst_image(&mut s, (40, 12, 41, 13), 0x0011_110b, image::FMT_RGB, &[0xa596_93c3]);
     assert_eq!(pixel(&s, 0, 40, 12), 0xa55a_3cff);
 
     // RED, ALPHA and BGR bytes (formats 4, 7, 0xd; type 2): the channels
     // the source lacks are 0 and full alpha.
-    burst_image(&mut s, (40, 13, 41, 14), 0x0111_1044, ODSY_IMAGE_FMT_RGB, &[0x8000_0000]);
+    burst_image(&mut s, (40, 13, 41, 14), 0x0111_1044, image::FMT_RGB, &[0x8000_0000]);
     assert_eq!(pixel(&s, 0, 40, 13), 0x8000_00ff);
-    burst_image(&mut s, (40, 14, 41, 15), 0x0111_1047, ODSY_IMAGE_FMT_RGB, &[0x4000_0000]);
+    burst_image(&mut s, (40, 14, 41, 15), 0x0111_1047, image::FMT_RGB, &[0x4000_0000]);
     assert_eq!(pixel(&s, 0, 40, 14), 0x0000_0040);
-    burst_image(&mut s, (40, 15, 41, 16), 0x0111_104d, ODSY_IMAGE_FMT_RGB, &[0x3c5a_a500]);
+    burst_image(&mut s, (40, 15, 41, 16), 0x0111_104d, image::FMT_RGB, &[0x3c5a_a500]);
     assert_eq!(pixel(&s, 0, 40, 15), 0xa55a_3cff);
 
     // RGBA, UNSIGNED_INT: four words a pixel, under either burst tag.
-    for (i, fmt) in [ODSY_IMAGE_FMT_RGB, ODSY_IMAGE_FMT_RGBA16].into_iter().enumerate() {
+    for (i, fmt) in [image::FMT_RGB, image::FMT_RGBA16].into_iter().enumerate() {
         let (y, row) = (16 + i as u32, 16 + i as i32);
 
         burst_image(&mut s, (40, y, 42, y + 1), 0x0021_108b, fmt, &[0x8000_0000, 0xffff_ffff, 0, 0x4000_0000, 0xffff_ffff, 0, 0xffff_ffff, 0]);
@@ -504,7 +496,7 @@ fn a_write_code_without_a_pixel_form_is_refused() {
 
 /// One pixel copy, block 0x2031 with its eight operands.
 fn copy_block(s: &mut Board, ops: [u32; 8]) {
-    cmd(s, ODSY_CMD_COPY_RECT_TRIGGER);
+    cmd(s, consts::cmd::COPY_RECT_TRIGGER);
     for w in ops {
         cmd(s, w);
     }
@@ -517,10 +509,10 @@ fn copy_block(s: &mut Board, ops: [u32; 8]) {
 fn the_copy_operands_decode_into_source_size_destination_and_headers() {
     let c = CopyOperands::decode(&[0x3000_0019, 0x00bb_003c, 0x0050_2050, 0x0009_0015, 0x1263_3042, 0x3000_0010, 0x00a2_0064, 0x3863_204b]);
 
-    assert_eq!(c.src_base, ODSY_DMA_SENTINEL_READ);
+    assert_eq!(c.src_base, dma::SENTINEL_READ);
     assert_eq!(c.src, (0x3c, 0xbb));
     assert_eq!(c.size, (0x15, 9));
-    assert_eq!(c.dest_base, ODSY_DMA_SENTINEL_DRAW);
+    assert_eq!(c.dest_base, dma::SENTINEL_DRAW);
     assert_eq!(c.dest, (0x64, 0xa2));
     assert_eq!((c.dest_front, c.dest_drawable, c.dest_field, c.src_drawable), (false, 0x050, 2, 0x050));
     assert!(!c.read_front());
@@ -562,7 +554,7 @@ fn a_gl_copy_between_the_drawables_moves_the_rectangle() {
 /// The id-plane destination as the X server selects it for a menu: the
 /// overlay byte under drawing mask 0xc, every bit writable.
 fn select_overlay_destination(s: &mut Board) {
-    s.dest_buffer_word = ODSY_DEST_ID_PLANES;
+    s.dest_buffer_word = dest::ID_PLANES;
     s.dest_base = 0x14_2000;
     s.draw_mask = ODSY_DRAW_MASK_BUFFER1;
     s.plane_write_mask = 0xff << ODSY_PLANE_MASK_SHIFT;
@@ -883,7 +875,7 @@ fn a_copy_from_the_window_applies_the_programmed_scale_and_bias_unsigned() {
 
 /// The read buffer register (0x609) names the drawable a read comes from.
 fn bind_read_drawable(s: &mut Board, word: u32) {
-    cmd(s, select(ODSY_SWAP_SYNC_B));
+    cmd(s, select(swap::SYNC_B));
     cmd(s, word);
 }
 
@@ -906,7 +898,7 @@ fn a_pixel_buffers_front_is_the_buffer_a_front_draw_mask_writes() {
     let p = s.buffer1_mem.plane(s.buffer1_plane).expect("the second colour plane");
     s.buffer1_mem.plane_store(&p, 30, 40, 0x0102_0304);
     let front = read_word4(2, 8);
-    let back = front & !ODSY_DMA_FMT_FRONT;
+    let back = front & !dma::FMT_FRONT;
     let in_buffer_0 = READ_PIXEL.to_be_bytes();
     let in_buffer_1 = 0x0102_0304u32.to_be_bytes();
 
@@ -952,7 +944,7 @@ fn a_gl_pixel_write_marks_the_display_lines_it_wrote() {
     s.scanout_update();
     assert_eq!(dirty_lines(&s), Vec::<usize>::new(), "a settled display has nothing to resolve");
 
-    burst_image(&mut s, (40, 10, 42, 12), 0x0001_104b, ODSY_IMAGE_FMT_RGB, &[0x1100_00ff, 0x2200_00ff, 0x3300_00ff, 0x4400_00ff]);
+    burst_image(&mut s, (40, 10, 42, 12), 0x0001_104b, image::FMT_RGB, &[0x1100_00ff, 0x2200_00ff, 0x3300_00ff, 0x4400_00ff]);
     assert_eq!(dirty_lines(&s), [10, 11], "a burst image");
     s.scanout_update();
 
@@ -1045,21 +1037,21 @@ fn zoom_2x2_sized(word4: u32, size_bits: u32) -> Box<Board> {
         }
     }
     // The move's own raster state: 2D texturing, replace, nearest, level 60.
-    s.tex_mode = ODSY_TEX_MODE_2D;
+    s.tex_mode = tex::MODE_2D;
     s.tex_level0 = 60;
     s.tex_levels[180..183].copy_from_slice(&[base, 0x8210_0020, 0]);
     s.tex_sampler = [(9 << 10) | (6 << 5) | size_bits, 512, 64, 0, word4, 0, 0];
     s.tex_env = [1, 0, 0, 0, 0];
 
-    cmd(&mut s, select(ODSY_REG_GL_BEGIN));
-    cmd(&mut s, ODSY_GL_QUADS);
+    cmd(&mut s, select(reg::GL_BEGIN));
+    cmd(&mut s, gl_cmd::QUADS);
     for (ya, yb, t0, t1) in [(10.0f32, 12.0f32, 0.0f32, 1.0 / 64.0), (12.0, 14.0, 1.0 / 64.0, 2.0 / 64.0)] {
-        cmd(&mut s, ODSY_GL_TEX_RECT);
+        cmd(&mut s, gl_cmd::TEX_RECT);
         for f in [0.0f32, 0.0, 0.0, 1.0, 20.0, ya, 0.0, 24.0, yb, 0.0, 0.0, t0, 2.0 / 512.0, t1] {
             cmd(&mut s, f.to_bits());
         }
     }
-    cmd(&mut s, select(ODSY_REG_GL_END));
+    cmd(&mut s, select(reg::GL_END));
     s
 }
 
@@ -1072,13 +1064,13 @@ fn an_integer_pixel_through_a_logic_op_or_to_the_id_planes_dirties_its_row() {
     let lines = |s: &Board| s.scanout.marks.dirty_rows();
     s.scanout_update();
 
-    s.pattern_mode |= ODSY_MODE_COLOR_LOGIC_OP;
+    s.pattern_mode |= mode::COLOR_LOGIC_OP;
     s.gl_ctx.as_mut().unwrap().cur.logic_op_mode = GL_CLEAR + LOGIC_XOR;
     s.paint_integer(40, 120, false, 0x00ff_ff00);
     assert_eq!(lines(&s), vec![120], "a logic-op pixel");
     s.scanout_update();
 
-    s.dest_buffer_word = ODSY_DEST_ID_PLANES;
+    s.dest_buffer_word = dest::ID_PLANES;
     s.paint_integer(40, 130, true, 0x10);
     assert_eq!(lines(&s), vec![130], "an id-plane pixel");
 }
@@ -1098,8 +1090,8 @@ fn luminance_images_land_under_the_tags_the_library_sends_them_with() {
         &mut s,
         (40, 206, 53, 205),
         &[
-            (0x0f00_1262, &[(ODSY_IMAGE_FMT_RGBA16, &[0x1111_4646, 0x7b7b_b0b0, 0xe5e5_1a1a, 0x4f4f_8484])]),
-            (0x0fa5_1262, &[(ODSY_IMAGE_FMT_RGBA16, &[0xb9b9_eeee, 0x2323_5858, 0x8d8d_5a5a])]),
+            (0x0f00_1262, &[(image::FMT_RGBA16, &[0x1111_4646, 0x7b7b_b0b0, 0xe5e5_1a1a, 0x4f4f_8484])]),
+            (0x0fa5_1262, &[(image::FMT_RGBA16, &[0xb9b9_eeee, 0x2323_5858, 0x8d8d_5a5a])]),
         ],
     );
     for (x, l) in [0x11, 0x46, 0x7b, 0xb0, 0xe5, 0x1a, 0x4f, 0x84, 0xb9, 0xee, 0x23, 0x58, 0x8d].into_iter().enumerate() {
@@ -1107,7 +1099,7 @@ fn luminance_images_land_under_the_tags_the_library_sends_them_with() {
     }
 
     // LUMINANCE_ALPHA/UNSIGNED_SHORT: a luminance half then an alpha half.
-    burst_image_groups(&mut s, (40, 210, 43, 211), &[(0x0f00_1268, &[(ODSY_IMAGE_FMT_RGBA16, &[0x1111_6c6c, 0x4646_a1a1])])]);
+    burst_image_groups(&mut s, (40, 210, 43, 211), &[(0x0f00_1268, &[(image::FMT_RGBA16, &[0x1111_6c6c, 0x4646_a1a1])])]);
     assert_eq!(pixel(&s, 0, 40, 210), 0x1111_116c);
     assert_eq!(pixel(&s, 0, 41, 210), 0x4646_46a1);
 
@@ -1116,7 +1108,7 @@ fn luminance_images_land_under_the_tags_the_library_sends_them_with() {
     burst_image_groups(
         &mut s,
         (40, 212, 53, 213),
-        &[(0x0fd5_1248, &[(ODSY_IMAGE_FMT_RGB, &[0x116c_46a1, 0x7bd6_b00b, 0xe540_1a75, 0x4faa_84df, 0xb914_ee49, 0x237e_58b3, 0x8de8_5a5a])])],
+        &[(0x0fd5_1248, &[(image::FMT_RGB, &[0x116c_46a1, 0x7bd6_b00b, 0xe540_1a75, 0x4faa_84df, 0xb914_ee49, 0x237e_58b3, 0x8de8_5a5a])])],
     );
     assert_eq!(pixel(&s, 0, 40, 212), 0x1111_116c);
     assert_eq!(pixel(&s, 0, 41, 212), 0x4646_46a1);
@@ -1145,8 +1137,8 @@ fn a_16_bit_luminance_texture_upload_lands_in_its_object() {
         &[(
             0x0f00_1262,
             &[
-                (ODSY_IMAGE_FMT_RGBA16, &[0x1111_4646, 0x7b7b_b0b0, 0xe5e5_1a1a, 0x4f4f_8484]),
-                (ODSY_IMAGE_FMT_RGBA16, &[0xb9b9_eeee, 0x2323_5858, 0x8d8d_c2c2, 0xf7f7_2c2c]),
+                (image::FMT_RGBA16, &[0x1111_4646, 0x7b7b_b0b0, 0xe5e5_1a1a, 0x4f4f_8484]),
+                (image::FMT_RGBA16, &[0xb9b9_eeee, 0x2323_5858, 0x8d8d_c2c2, 0xf7f7_2c2c]),
             ],
         )],
     );
@@ -1164,7 +1156,7 @@ fn a_16_bit_luminance_texture_upload_lands_in_its_object() {
 #[test]
 fn a_row_that_ends_inside_a_word_drops_the_rest_of_the_word() {
     let (mut s, _) = window();
-    let tag = ODSY_IMAGE_FMT_RGBA16;
+    let tag = image::FMT_RGBA16;
 
     // RGB/UNSIGNED_SHORT (0x69): 13 pixels are 39 halves, so the 20th word
     // of the row carries one pad half.
@@ -1222,30 +1214,30 @@ fn a_row_that_ends_inside_a_word_drops_the_rest_of_the_word() {
     // the row sent as five 12-word bursts and a 10-word one.
     let full: &[(u32, &[u32])] = &[
         (
-            ODSY_IMAGE_FMT_RGB,
+            image::FMT_RGB,
             &[0x116c_c746, 0xa1fc_7bd6, 0x31b0_0b66, 0xe540_9b1a, 0x75d0_4faa, 0x0584_df3a, 0xb914_6fee, 0x49a4_237e, 0xd958_b30e, 0x8de8_43c2, 0x1d78_f752, 0xad2c_87e2],
         ),
         (
-            ODSY_IMAGE_FMT_RGB,
+            image::FMT_RGB,
             &[0x61bc_1796, 0xf14c_cb26, 0x8100_5bb6, 0x3590_eb6a, 0xc520_9ffa, 0x55d4_2f8a, 0x0964_bf3e, 0x99f4_73ce, 0x29a8_035e, 0xdd38_9312, 0x6dc8_47a2, 0xfd7c_d732],
         ),
         (
-            ODSY_IMAGE_FMT_RGB,
+            image::FMT_RGB,
             &[0xb10c_67e6, 0x419c_1b76, 0xd150_ab06, 0x85e0_3bba, 0x1570_ef4a, 0xa524_7fda, 0x59b4_0f8e, 0xe944_c31e, 0x79f8_53ae, 0x2d88_e362, 0xbd18_97f2, 0x4dcc_2782],
         ),
         (
-            ODSY_IMAGE_FMT_RGB,
+            image::FMT_RGB,
             &[0x015c_b736, 0x91ec_6bc6, 0x21a0_fb56, 0xd530_8b0a, 0x65c0_3f9a, 0xf574_cf2a, 0xa904_5fde, 0x3994_136e, 0xc948_a3fe, 0x7dd8_33b2, 0x0d68_e742, 0x9d1c_77d2],
         ),
         (
-            ODSY_IMAGE_FMT_RGB,
+            image::FMT_RGB,
             &[0x51ac_0786, 0xe13c_bb16, 0x71f0_4ba6, 0x2580_db5a, 0xb510_8fea, 0x45c4_1f7a, 0xf954_af2e, 0x89e4_63be, 0x1998_f34e, 0xcd28_8302, 0x5db8_3792, 0xed6c_c722],
         ),
     ];
     let tail: &[(u32, &[u32])] = &[
-        (ODSY_IMAGE_FMT_RGB, &[0xa1fc_57d6, 0x318c_0b66, 0xc140_9bf6, 0x75d0_2baa, 0x0560_df3a, 0x9514_6fca, 0x49a4_ff7e, 0xd934_b30e, 0x69e8_439e, 0x1d78_d35a]),
+        (image::FMT_RGB, &[0xa1fc_57d6, 0x318c_0b66, 0xc140_9bf6, 0x75d0_2baa, 0x0560_df3a, 0x9514_6fca, 0x49a4_ff7e, 0xd934_b30e, 0x69e8_439e, 0x1d78_d35a]),
         (
-            ODSY_IMAGE_FMT_RGB,
+            image::FMT_RGB,
             &[0x2e89_e46a, 0xc520_a601, 0x5ce2_3d98, 0x1e79_d45a, 0xb510_96f1, 0x4cd2_2d88, 0x0e69_c44a, 0xa500_86e1, 0x3cc2_1d78, 0xfe59_b43a, 0x95f0_76d1, 0x2cb2_0d68],
         ),
     ];

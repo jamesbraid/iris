@@ -11,11 +11,9 @@
 //! pixels for x and y, in window depth, and in colour units, which is the
 //! check for a move to 32-bit floats.
 
-use crate::dev::odyssey::consts::{
-    ODSY_COLOUR_MATERIAL_AMBIENT, ODSY_COLOUR_MATERIAL_DIFFUSE, ODSY_COLOUR_MATERIAL_EMISSION,
-};
+use crate::dev::odyssey::consts::colour;
 use crate::dev::odyssey::draw::gl_rules;
-use crate::dev::odyssey::gl_context::{GL_VERTEX_FLOATS, GlDrawState};
+use crate::dev::odyssey::gl_context::{vtx, GlDrawState};
 use crate::dev::odyssey::raster_bench::Bench;
 use super::scenes::{load_lights, Light, MATERIAL};
 use super::*;
@@ -66,7 +64,7 @@ fn rows() -> Vec<Row> {
             st.window_rows_down = name == "window_matrix_rot";
         }
         for (i, p) in points.iter().enumerate() {
-            let mut vertex = [0.0f32; GL_VERTEX_FLOATS];
+            let mut vertex = [0.0f32; vtx::FLOATS];
             vertex[..4].copy_from_slice(p);
             let vv = st.volume_from_draw_vertex(&vertex);
             out.push(Row { name: format!("{name}/{i}"), kind: "eye", vals: vv.eye.to_vec() });
@@ -86,8 +84,8 @@ fn rows() -> Vec<Row> {
         ("positional", vec![(1, Light { pos: [1.5, 1.0, -2.0], colour: [1.0; 3], atten: [1.0, 0.3, 0.15], ..Default::default() })], [0.1; 3], false, 8.0, 0),
         ("spot", vec![(0, Light { pos: [0.0, 1.5, -2.5], colour: [1.0, 1.0, 0.8], atten: [1.0, 0.0, 0.0], spot: Some(([0.0, -0.5, 0.85], 0.8, 4.0)), ..Default::default() })], [0.05; 3], false, 30.0, 0),
         ("local_viewer", vec![(2, Light { pos: [-1.0, 1.0, -1.5], colour: [0.9, 0.9, 1.0], atten: [1.0, 0.0, 0.0], ..Default::default() })], [0.15; 3], true, 64.0, 0),
-        ("three", vec![(0, dir([1.0, 0.0, -1.0], [1.0, 0.1, 0.1])), (3, dir([-1.0, 0.5, -1.0], [0.1, 0.1, 1.0])), (7, Light { pos: [0.0, -2.0, -1.5], colour: [0.2, 1.0, 0.2], atten: [1.0, 0.1, 0.0], spot: Some(([0.0, 1.0, 0.5], 0.7, 2.0)), ..Default::default() })], [0.1; 3], false, 12.0, ODSY_COLOUR_MATERIAL_AMBIENT | ODSY_COLOUR_MATERIAL_DIFFUSE),
-        ("none", vec![], [0.3; 3], false, 1.0, ODSY_COLOUR_MATERIAL_EMISSION),
+        ("three", vec![(0, dir([1.0, 0.0, -1.0], [1.0, 0.1, 0.1])), (3, dir([-1.0, 0.5, -1.0], [0.1, 0.1, 1.0])), (7, Light { pos: [0.0, -2.0, -1.5], colour: [0.2, 1.0, 0.2], atten: [1.0, 0.1, 0.0], spot: Some(([0.0, 1.0, 0.5], 0.7, 2.0)), ..Default::default() })], [0.1; 3], false, 12.0, colour::MATERIAL_AMBIENT | colour::MATERIAL_DIFFUSE),
+        ("none", vec![], [0.3; 3], false, 1.0, colour::MATERIAL_EMISSION),
     ];
     let mut board = Bench::empty().board;
     for (name, lights, ambient, local, shininess, cm) in setups {

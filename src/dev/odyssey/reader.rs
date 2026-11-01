@@ -27,13 +27,8 @@
 use crate::devlog::LogModule;
 use super::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
 use super::consts::{
-    ODSY_CMAP_UNVERIFIED_GROUP, ODSY_CURSOR_COLOURS, ODSY_CURSOR_CONTROL, ODSY_CURSOR_CTL_CHANNEL1,
-    ODSY_CURSOR_CTL_CROSSHAIR, ODSY_CURSOR_CTL_ENABLE, ODSY_CURSOR_GLYPH, ODSY_CURSOR_PLANE,
-    ODSY_CURSOR_POSITION, ODSY_CURSOR_SIZE, ODSY_DID_MAIN_SHIFT, ODSY_DID_OVERLAY_MASK,
-    ODSY_DISPMODE_COUNT, ODSY_DISPMODE_GROUP_MASK, ODSY_DISPMODE_GROUP_SHIFT, ODSY_GAMMA_BASE,
-    ODSY_GAMMA_GROUP, ODSY_INDEX_MASK, ODSY_LUT_BLUE_SHIFT, ODSY_LUT_GREEN_SHIFT,
-    ODSY_LUT_RED_SHIFT, ODSY_LUT_SIZE, ODSY_OVERLAY_MODE_ENABLE, ODSY_OVERLAY_MODE_GROUP_MASK,
-    ODSY_OVERLAY_MODE_GROUP_SHIFT,
+    cursor, dispmode, lut, overlay, ODSY_CMAP_UNVERIFIED_GROUP, ODSY_DID_MAIN_SHIFT,
+    ODSY_DID_OVERLAY_MASK, ODSY_GAMMA_BASE, ODSY_GAMMA_GROUP, ODSY_INDEX_MASK,
 };
 use super::display::{display_channel, ResolveCtx, ScanoutJob, ScanoutStage};
 use super::interface::HostInterface;
@@ -48,7 +43,7 @@ use parking_lot::Mutex;
 
 /// The rows of each main drawable id where its two colour buffers may
 /// differ, a bit a row (see [`ScanoutReader::differ`]).
-pub(super) type Differ = [[u64; ROW_WORDS]; ODSY_DISPMODE_COUNT as usize];
+pub(super) type Differ = [[u64; ROW_WORDS]; dispmode::COUNT as usize];
 
 /// The back end's registers the scanout resolves through: the colour
 /// lookup RAM, the per-drawable display modes, the overlay modes and the
@@ -66,7 +61,7 @@ pub(super) struct DisplayRegs {
 
 impl Default for DisplayRegs {
     fn default() -> Self {
-        DisplayRegs { lut: vec![0; ODSY_LUT_SIZE as usize], dispmode: [0; 32], overlay_mode: [0; 8], cursor: [0; 0x100] }
+        DisplayRegs { lut: vec![0; lut::SIZE as usize], dispmode: [0; 32], overlay_mode: [0; 8], cursor: [0; 0x100] }
     }
 }
 
@@ -81,9 +76,9 @@ impl DisplayRegs {
 
     /// The top eight bits of a lookup-RAM entry's ten-bit channels, as RGB.
     pub fn lut_rgb(&self, entry: u32) -> u32 {
-        let word = if entry < ODSY_LUT_SIZE { self.lut[entry as usize] } else { 0 };
+        let word = if entry < lut::SIZE { self.lut[entry as usize] } else { 0 };
 
-        (((word >> ODSY_LUT_RED_SHIFT) & 0xff) << 16) | (((word >> ODSY_LUT_GREEN_SHIFT) & 0xff) << 8) | ((word >> ODSY_LUT_BLUE_SHIFT) & 0xff)
+        (((word >> lut::RED_SHIFT) & 0xff) << 16) | (((word >> lut::GREEN_SHIFT) & 0xff) << 8) | ((word >> lut::BLUE_SHIFT) & 0xff)
     }
 
     /// One 8-bit RGB channel through the 1,536-entry gamma table: widened to 12
@@ -108,30 +103,30 @@ impl DisplayRegs {
     /// The colormap group main drawable main_id shows through: bits 8:4 of its
     /// display mode. Below ODSY_GAMMA_GROUP the plane word is an index.
     pub fn display_group(&self, main_id: u32) -> u32 {
-        (self.dispmode[main_id as usize] >> ODSY_DISPMODE_GROUP_SHIFT) & ODSY_DISPMODE_GROUP_MASK
+        (self.dispmode[main_id as usize] >> dispmode::GROUP_SHIFT) & dispmode::GROUP_MASK
     }
 
     /// The position's components, each a signed 16-bit value (inferred).
     pub fn cursor_x(&self) -> i32 {
-        (self.cursor[ODSY_CURSOR_POSITION as usize] >> 16) as i16 as i32
+        (self.cursor[cursor::POSITION as usize] >> 16) as i16 as i32
     }
 
     pub fn cursor_y(&self) -> i32 {
-        self.cursor[ODSY_CURSOR_POSITION as usize] as i16 as i32
+        self.cursor[cursor::POSITION as usize] as i16 as i32
     }
 
     /// Whether anything is drawn: bit 0 set and bit 5 clear. APPROXIMATION: on
     /// the second channel the cursor is on a display the model does not have.
     pub fn cursor_shown(&self) -> bool {
-        let ctl = self.cursor[ODSY_CURSOR_CONTROL as usize];
+        let ctl = self.cursor[cursor::CONTROL as usize];
 
-        (ctl & ODSY_CURSOR_CTL_ENABLE) != 0 && (ctl & ODSY_CURSOR_CTL_CHANNEL1) == 0
+        (ctl & cursor::CTL_ENABLE) != 0 && (ctl & cursor::CTL_CHANNEL1) == 0
     }
 
     /// The first and last display line the cursor covers as it stands in a
     /// frame whose last line is `bottom`, or None when it covers none.
     pub fn cursor_span(&self, bottom: i32) -> Option<(i32, i32)> {
-        cursor_span_of(self.cursor[ODSY_CURSOR_CONTROL as usize], self.cursor[ODSY_CURSOR_POSITION as usize], bottom)
+        cursor_span_of(self.cursor[cursor::CONTROL as usize], self.cursor[cursor::POSITION as usize], bottom)
     }
 
     /// Draw the cursor over display line y, already resolved into dst. With bit
@@ -146,8 +141,8 @@ impl DisplayRegs {
         if !self.cursor_shown() {
             return;
         }
-        if self.cursor[ODSY_CURSOR_CONTROL as usize] & ODSY_CURSOR_CTL_CROSSHAIR != 0 {
-            let colour = cursor_rgb(self.cursor[ODSY_CURSOR_COLOURS as usize + 1]);
+        if self.cursor[cursor::CONTROL as usize] & cursor::CTL_CROSSHAIR != 0 {
+            let colour = cursor_rgb(self.cursor[cursor::COLOURS as usize + 1]);
 
             if row == 0 {
                 dst[..width as usize].fill(colour);
@@ -156,18 +151,18 @@ impl DisplayRegs {
             }
             return;
         }
-        if row < 0 || row >= ODSY_CURSOR_SIZE as i32 {
+        if row < 0 || row >= cursor::SIZE as i32 {
             return;
         }
-        for col in 0..ODSY_CURSOR_SIZE as i32 {
+        for col in 0..cursor::SIZE as i32 {
             let x = cx.wrapping_add(col);
-            let plane = (self.cursor[(ODSY_CURSOR_PLANE as i32 + row * 2 + col / 16) as usize] >> ((col % 16) * 2)) & 3;
-            let glyph = (self.cursor[(ODSY_CURSOR_GLYPH as i32 + row * 4 + col / 8) as usize] >> ((col % 8) * 4)) & 0xf;
+            let plane = (self.cursor[(cursor::PLANE as i32 + row * 2 + col / 16) as usize] >> ((col % 16) * 2)) & 3;
+            let glyph = (self.cursor[(cursor::GLYPH as i32 + row * 4 + col / 8) as usize] >> ((col % 8) * 4)) & 0xf;
 
             if x < 0 || x >= width as i32 || plane != 3 || glyph == 0xf {
                 continue;
             }
-            dst[x as usize] = cursor_rgb(self.cursor[ODSY_CURSOR_COLOURS as usize + glyph as usize]);
+            dst[x as usize] = cursor_rgb(self.cursor[cursor::COLOURS as usize + glyph as usize]);
         }
     }
 }
@@ -176,15 +171,15 @@ impl DisplayRegs {
 /// words covers in a frame whose last line is `bottom`, or None when it
 /// covers none.
 fn cursor_span_of(control: u32, position: u32, bottom: i32) -> Option<(i32, i32)> {
-    if (control & ODSY_CURSOR_CTL_ENABLE) == 0 || (control & ODSY_CURSOR_CTL_CHANNEL1) != 0 {
+    if (control & cursor::CTL_ENABLE) == 0 || (control & cursor::CTL_CHANNEL1) != 0 {
         return None;
     }
-    if control & ODSY_CURSOR_CTL_CROSSHAIR != 0 {
+    if control & cursor::CTL_CROSSHAIR != 0 {
         // The vertical line crosses every line.
         return Some((0, bottom));
     }
     let y = position as i16 as i32;
-    Some((y.max(0), (y + ODSY_CURSOR_SIZE as i32 - 1).min(bottom)))
+    Some((y.max(0), (y + cursor::SIZE as i32 - 1).min(bottom)))
 }
 
 /// The back end's registers as the front end stores them and the display
@@ -213,7 +208,7 @@ pub(super) struct SharedRegs {
 impl Default for SharedRegs {
     fn default() -> Self {
         SharedRegs {
-            lut: (0..ODSY_LUT_SIZE).map(|_| AtomicU32::new(0)).collect(),
+            lut: (0..lut::SIZE).map(|_| AtomicU32::new(0)).collect(),
             dispmode: std::array::from_fn(|_| AtomicU32::new(0)),
             overlay_mode: std::array::from_fn(|_| AtomicU32::new(0)),
             cursor: std::array::from_fn(|_| AtomicU32::new(0)),
@@ -261,12 +256,12 @@ impl SharedRegs {
     /// The colormap group main drawable `main_id` shows through
     /// (DisplayRegs::display_group()).
     pub fn display_group(&self, main_id: u32) -> u32 {
-        (self.dispmode[main_id as usize].load(Relaxed) >> ODSY_DISPMODE_GROUP_SHIFT) & ODSY_DISPMODE_GROUP_MASK
+        (self.dispmode[main_id as usize].load(Relaxed) >> dispmode::GROUP_SHIFT) & dispmode::GROUP_MASK
     }
 
     /// The lines the cursor covers (DisplayRegs::cursor_span()).
     pub fn cursor_span(&self, bottom: i32) -> Option<(i32, i32)> {
-        cursor_span_of(self.cursor(ODSY_CURSOR_CONTROL as usize), self.cursor(ODSY_CURSOR_POSITION as usize), bottom)
+        cursor_span_of(self.cursor(cursor::CONTROL as usize), self.cursor(cursor::POSITION as usize), bottom)
     }
 
     /// Copy the registers into `out` when a store has landed since `seen`
@@ -474,15 +469,15 @@ impl PlaneView {
         for x in 0..width {
             let at = (y * ODSY_WIDTH + x) as usize;
             let did = self.byte(RowOf::Did, at);
-            let main_id = ((did as u32) >> ODSY_DID_MAIN_SHIFT) & (ODSY_DISPMODE_COUNT - 1);
+            let main_id = ((did as u32) >> ODSY_DID_MAIN_SHIFT) & (dispmode::COUNT - 1);
             let word = self.load(((displayed >> main_id) & 1) as usize, x as i64, y as i64);
             let group = regs.display_group(main_id);
 
             let omode = regs.overlay_mode[((did as u32) & ODSY_DID_OVERLAY_MASK) as usize];
             let opixel = self.byte(RowOf::Overlay, at);
 
-            if (omode & ODSY_OVERLAY_MODE_ENABLE) != 0 && opixel != 0 {
-                dst[x as usize] = regs.lut_rgb(256 * ((omode >> ODSY_OVERLAY_MODE_GROUP_SHIFT) & ODSY_OVERLAY_MODE_GROUP_MASK) + opixel as u32);
+            if (omode & overlay::MODE_ENABLE) != 0 && opixel != 0 {
+                dst[x as usize] = regs.lut_rgb(256 * ((omode >> overlay::MODE_GROUP_SHIFT) & overlay::MODE_GROUP_MASK) + opixel as u32);
                 continue;
             }
             if group >= ODSY_GAMMA_GROUP {
@@ -491,7 +486,7 @@ impl PlaneView {
                 let g = display_channel(mode, (word >> 16) & 0xff);
                 let b = display_channel(mode, (word >> 8) & 0xff);
 
-                dst[x as usize] = regs.gamma(r, ODSY_LUT_RED_SHIFT) << 16 | regs.gamma(g, ODSY_LUT_GREEN_SHIFT) << 8 | regs.gamma(b, ODSY_LUT_BLUE_SHIFT);
+                dst[x as usize] = regs.gamma(r, lut::RED_SHIFT) << 16 | regs.gamma(g, lut::GREEN_SHIFT) << 8 | regs.gamma(b, lut::BLUE_SHIFT);
                 continue;
             }
             saw_unverified |= group == ODSY_CMAP_UNVERIFIED_GROUP;
@@ -627,7 +622,7 @@ impl ScanoutReader {
         self.frame_width = 0;
         self.frame_height = 0;
         self.staged_displayed = 0;
-        *self.differ = [[0; ROW_WORDS]; ODSY_DISPMODE_COUNT as usize];
+        *self.differ = [[0; ROW_WORDS]; dispmode::COUNT as usize];
     }
 
     fn shared(&self) -> Arc<DisplayShared> {
@@ -829,7 +824,7 @@ impl ScanoutReader {
                             let d = did[x];
                             let end = x + 1 + did[x + 1..].iter().take_while(|&&v| v == d).count();
                             if l0[x * 4..end * 4] != l1[x * 4..end * 4] {
-                                ids |= 1 << ((d >> ODSY_DID_MAIN_SHIFT) as usize & (ODSY_DISPMODE_COUNT as usize - 1));
+                                ids |= 1 << ((d >> ODSY_DID_MAIN_SHIFT) as usize & (dispmode::COUNT as usize - 1));
                             }
                             x = end;
                         }

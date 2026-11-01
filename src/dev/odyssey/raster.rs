@@ -11,7 +11,7 @@
 use crate::devlog::LogModule;
 use super::gl::{GlPixels, GlPlanes};
 use super::gl_context::{
-    ColourTarget, GL_CLEAR, GL_CLIP_PLANES, GL_COLOUR_MASK_ALL, GL_COLOUR_MASK_ALPHA,
+    vtx, ColourTarget, GL_CLEAR, GL_CLIP_PLANES, GL_COLOUR_MASK_ALL, GL_COLOUR_MASK_ALPHA,
     GL_COLOUR_MASK_RED, GL_CONSTANT_ALPHA, GL_CONSTANT_COLOR, GL_DECR, GL_DRAW_OK, GL_DST_ALPHA,
     GL_DST_COLOR, GL_EQUAL, GL_FILL, GL_FUNC_REVERSE_SUBTRACT, GL_FUNC_SUBTRACT, GL_GEQUAL,
     GL_GREATER, GL_INCR, GL_INVERT, GL_KEEP, GL_LEQUAL, GL_LESS, GL_LINES, GL_LINE_LOOP,
@@ -19,8 +19,8 @@ use super::gl_context::{
     GL_OFFSET_FILL, GL_ONE_MINUS_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_COLOR,
     GL_ONE_MINUS_DST_ALPHA, GL_ONE_MINUS_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA, GL_ONE_MINUS_SRC_COLOR,
     GL_POINTS, GL_POLYGON, GL_QUADS, GL_QUAD_STRIP, GL_REPLACE, GL_SRC_ALPHA,
-    GL_SRC_ALPHA_SATURATE, GL_SRC_COLOR, GL_TRIANGLES, GL_TRIANGLE_FAN, GL_TRIANGLE_STRIP,
-    GL_VERTEX_FLOATS, GL_V_COLOR, GL_V_TEXCOORD, GlDraw, GlDrawResult, GlDrawState,
+    GL_SRC_ALPHA_SATURATE, GL_SRC_COLOR, GL_TRIANGLES, GL_TRIANGLE_FAN, GL_TRIANGLE_STRIP, GlDraw,
+    GlDrawResult, GlDrawState,
 };
 use super::memory::{CLIP_MAX, ClipList};
 use super::raster_fill::FillRow;
@@ -88,12 +88,12 @@ pub(super) struct RasterRules {
 pub(super) struct VolumeVertex {
     pub clip: [f64; 4],
     pub eye: [f64; 4],
-    pub attr: [f32; GL_VERTEX_FLOATS],
+    pub attr: [f32; vtx::FLOATS],
 }
 
 impl Default for VolumeVertex {
     fn default() -> Self {
-        VolumeVertex { clip: [0.0; 4], eye: [0.0; 4], attr: [0.0; GL_VERTEX_FLOATS] }
+        VolumeVertex { clip: [0.0; 4], eye: [0.0; 4], attr: [0.0; vtx::FLOATS] }
     }
 }
 
@@ -532,7 +532,7 @@ impl RasterRules {
     /// A polygon offset (RasterRules::offset_amount(), in window depth) split
     /// into what adds to the window depth before the code and the steps that
     /// add to the code after it. With depth_float the amount is the 0x058
-    /// field over 2^24 (ODSY_POLYGON_OFFSET_SCALE), a step count the board
+    /// field over 2^24 (polygon::OFFSET_SCALE), a step count the board
     /// adds to the encoded word (depth_word::word_with_offset(); datasheet,
     /// "Polygon offset" and "Depth word"; the placement is INFERRED), so none
     /// of it adds to window depth.
@@ -1426,7 +1426,7 @@ impl SoftDraw<'_> {
             return None;
         }
         for k in 0..4usize {
-            out.texcoord[k] = cv.attr[GL_V_TEXCOORD + k] as f64;
+            out.texcoord[k] = cv.attr[vtx::TEXCOORD + k] as f64;
         }
         out.x = self.rules.round(xw * sub);
         out.y = self.rules.round(yw * sub);
@@ -1452,7 +1452,7 @@ impl SoftDraw<'_> {
             out.clip[i] = p[0] as f64 * eye[0] + p[1] as f64 * eye[1] + p[2] as f64 * eye[2] + p[3] as f64 * eye[3];
         }
         for k in 0..4usize {
-            let a = cv.attr[GL_V_COLOR + k];
+            let a = cv.attr[vtx::COLOR + k];
             let m = if a > 0.0 { a } else { 0.0 };
             let n = if m < 1.0 { m } else { 1.0 };
             out.rgba[k] = n as f64;

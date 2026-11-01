@@ -2,10 +2,7 @@
 use crate::devlog::LogModule;
 use super::bits::sextract32;
 use super::board::{Board, ODSY_HEIGHT, ODSY_OBJECTS, ODSY_OBJ_POOL_BYTES, ODSY_OBJ_POOL_WORDS, ODSY_WIDTH};
-use super::consts::{
-    ODSY_DMA_FMT_FRONT, ODSY_DMA_SENTINEL_DRAW, ODSY_DMA_SENTINEL_READ, ODSY_TEX_SCALE_BIAS_BITS,
-    ODSY_TEX_SCALE_BIAS_ONE,
-};
+use super::consts::{dma, tex};
 use super::raster_unit::RASTER_JOB_OVERHEAD;
 impl Board {
     /// The index of the object at board base base. A base names at most one
@@ -399,8 +396,8 @@ impl Board {
     /// dma_read_pixel()), and a window destination the buffers the drawing
     /// mask selects, through the window's clip rectangles and id test.
     pub fn copy_rect_gl(&mut self, c: &CopyOperands) -> bool {
-        let from_window = c.src_base == ODSY_DMA_SENTINEL_READ;
-        let to_window = c.dest_base == ODSY_DMA_SENTINEL_DRAW;
+        let from_window = c.src_base == dma::SENTINEL_READ;
+        let to_window = c.dest_base == dma::SENTINEL_DRAW;
         let (w, h) = c.size;
         let src = if from_window { None } else { self.object_find(c.src_base) };
         let dest = if to_window { None } else { self.object_find(c.dest_base) };
@@ -494,8 +491,8 @@ impl Board {
     pub fn copy_post_filter(&self, words: &mut [u32], signed: bool) {
         let sb = &self.tex_scale_bias;
         let lane = |c: usize| {
-            (sextract32(sb[c * 2], 0, ODSY_TEX_SCALE_BIAS_BITS) as f64 / ODSY_TEX_SCALE_BIAS_ONE as f64,
-             sextract32(sb[c * 2 + 1], 0, ODSY_TEX_SCALE_BIAS_BITS) as f64 / ODSY_TEX_SCALE_BIAS_ONE as f64)
+            (sextract32(sb[c * 2], 0, tex::SCALE_BIAS_BITS) as f64 / tex::SCALE_BIAS_ONE as f64,
+             sextract32(sb[c * 2 + 1], 0, tex::SCALE_BIAS_BITS) as f64 / tex::SCALE_BIAS_ONE as f64)
         };
 
         if self.texture_scale_bias_identity() {
@@ -568,7 +565,7 @@ impl CopyOperands {
 
     /// The read header's front bit: logical front of the read buffer.
     pub fn read_front(&self) -> bool {
-        self.read_header & ODSY_DMA_FMT_FRONT != 0
+        self.read_header & dma::FMT_FRONT != 0
     }
 
     /// Write header bit 31: the destination x lies inside the source's x

@@ -4,15 +4,9 @@
 
 use crate::dev::odyssey::board::{Board, ODSY_UNIMP_REPORTS};
 use crate::dev::odyssey::consts::{
-    ODSY_BACKEND_READ_BASE, ODSY_BACKEND_SELECT, ODSY_BUZZ_1, ODSY_BUZZ_2, ODSY_BUZZ_3,
-    ODSY_BUZZ_4, ODSY_BUZZ_5, ODSY_BUZZ_6, ODSY_CFIFO_SELFTEST, ODSY_CFIFO_SELFTEST_OK,
-    ODSY_CMD_FIFO, ODSY_ERROR_COMMAND, ODSY_FLCTL_CONFIG, ODSY_FLCTL_CONFIG_RESET,
-    ODSY_FLCTL_TARGET, ODSY_GL_COLOR_3UB, ODSY_GL_TRIANGLES, ODSY_I2C_OPT_CMD_INDEX,
-    ODSY_I2C_OPT_CMD_READ, ODSY_I2C_OPT_STATUS_READ, ODSY_INTR_ENABLE_SET, ODSY_INTR_FLAGS,
-    ODSY_MEMORY_CONTROL, ODSY_NIC_DONE, ODSY_NIC_LEVEL, ODSY_NIC_PROM, ODSY_NIC_PULSE_SHIFT,
-    ODSY_NIC_SAMPLE_SHIFT, ODSY_REG_GL_BEGIN, ODSY_RESET_CONTROL, ODSY_STATS_ADDR_LOWER,
-    ODSY_STATS_ADDR_UPPER, ODSY_STATS_CONTROL, ODSY_STATUS, ODSY_STATUS0, ODSY_SW_TOKEN,
-    ODSY_XT_REQ_TIMEOUT, ODSY_XT_REQ_TIMEOUT_RESET,
+    backend, cfifo, flctl, gl_cmd, i2c, intr, mem, nic, reg, self, stats, ODSY_BUZZ_1, ODSY_BUZZ_2,
+    ODSY_BUZZ_3, ODSY_BUZZ_4, ODSY_BUZZ_5, ODSY_BUZZ_6, ODSY_ERROR_COMMAND, ODSY_RESET_CONTROL,
+    ODSY_STATUS, ODSY_STATUS0, ODSY_SW_TOKEN, ODSY_XT_REQ_TIMEOUT, ODSY_XT_REQ_TIMEOUT_RESET,
 };
 use crate::dev::odyssey::tests::{board, board_with_ram, cmd, cmd64, reg_read, reg_write, select, VPRO_WIDGET};
 use std::sync::atomic::Ordering;
@@ -22,10 +16,10 @@ use super::*;
 /// long drive is a bus reset, a short one a write-one or a read, one in
 /// between a write-zero (the widths the stock PROM was captured using).
 fn nic_slot(s: &mut Board, pulse: u32, sample: u32) -> bool {
-    reg_write(s, ODSY_NIC_PROM, pulse << ODSY_NIC_PULSE_SHIFT | sample << ODSY_NIC_SAMPLE_SHIFT);
-    let nic = reg_read(s, ODSY_NIC_PROM);
-    assert_eq!(nic & ODSY_NIC_DONE, ODSY_NIC_DONE, "a slot finishes inside the write");
-    nic & ODSY_NIC_LEVEL != 0
+    reg_write(s, nic::PROM, pulse << nic::PULSE_SHIFT | sample << nic::SAMPLE_SHIFT);
+    let nic = reg_read(s, nic::PROM);
+    assert_eq!(nic & nic::DONE, nic::DONE, "a slot finishes inside the write");
+    nic & nic::LEVEL != 0
 }
 
 fn nic_write_byte(s: &mut Board, byte: u8) {
@@ -62,12 +56,12 @@ fn backend_header(index: u32, count: u32) -> u32 {
 }
 
 fn backend_push(s: &mut Board, word: u32) {
-    s.mmio_write(ODSY_BACKEND_SELECT, word as u64, 4);
+    s.mmio_write(backend::SELECT, word as u64, 4);
 }
 
 /// A back-end entry's word, at offset 4 of its slot in the read window.
 fn backend_readback(s: &mut Board, index: u32) -> u32 {
-    s.mmio_read(ODSY_BACKEND_READ_BASE + ((index as u64) << 3) + 4, 4) as u32
+    s.mmio_read(backend::READ_BASE + ((index as u64) << 3) + 4, 4) as u32
 }
 
 /// The driver reads the part and the revision nibble it dispatches on.
@@ -168,7 +162,7 @@ fn the_kernels_reset_pulse_and_memory_set_up_are_accepted() {
         reg_write(&mut s, ODSY_RESET_CONTROL, v);
     }
     for v in [master, fields, fields | 1 << 5, fields, fields | 1 << 8] {
-        reg_write(&mut s, ODSY_MEMORY_CONTROL, v);
+        reg_write(&mut s, mem::CONTROL, v);
         assert_eq!(s.memory_control, v);
     }
     assert_eq!(reg_read(&mut s, IDENTITY), IDENTITY_DEFAULT);
@@ -185,7 +179,7 @@ fn the_kernels_reset_pulse_and_memory_set_up_are_accepted() {
 fn the_firmware_diagnostic_registers_reset_and_store() {
     let (mut s, _) = board("v12");
     assert_eq!(reg_read(&mut s, ODSY_XT_REQ_TIMEOUT), ODSY_XT_REQ_TIMEOUT_RESET);
-    assert_eq!(reg_read(&mut s, ODSY_FLCTL_CONFIG), ODSY_FLCTL_CONFIG_RESET);
+    assert_eq!(reg_read(&mut s, flctl::CONFIG), flctl::CONFIG_RESET);
     let buzz = [ODSY_BUZZ_1, ODSY_BUZZ_2, ODSY_BUZZ_3, ODSY_BUZZ_4, ODSY_BUZZ_5, ODSY_BUZZ_6];
     for r in buzz {
         assert_eq!(reg_read(&mut s, r), 0, "{r:#x}");
@@ -193,8 +187,8 @@ fn the_firmware_diagnostic_registers_reset_and_store() {
 
     reg_write(&mut s, ODSY_XT_REQ_TIMEOUT, 0xaaaa_aaaa);
     assert_eq!(reg_read(&mut s, ODSY_XT_REQ_TIMEOUT), 0xaaaa_aaaa);
-    reg_write(&mut s, ODSY_FLCTL_CONFIG, 0x5555_5555);
-    assert_eq!(reg_read(&mut s, ODSY_FLCTL_CONFIG), 0x5555_5555);
+    reg_write(&mut s, flctl::CONFIG, 0x5555_5555);
+    assert_eq!(reg_read(&mut s, flctl::CONFIG), 0x5555_5555);
     for (i, r) in buzz.into_iter().enumerate() {
         let walk = if i % 2 == 0 { 0xaaaa_aaaa } else { 0x5555_5555 };
         reg_write(&mut s, r, walk);
@@ -212,7 +206,7 @@ fn the_firmware_diagnostic_registers_reset_and_store() {
 #[test]
 fn the_flow_control_target_is_stored_and_changes_nothing_else() {
     let (mut s, _) = board("v12");
-    assert_eq!(reg_read(&mut s, ODSY_FLCTL_TARGET), 0);
+    assert_eq!(reg_read(&mut s, flctl::TARGET), 0);
 
     for (write, read) in [
         (1 << 17 | 0x1b << 12 | 0xc8, 0x0003_b0c8),
@@ -220,9 +214,9 @@ fn the_flow_control_target_is_stored_and_changes_nothing_else() {
         (1 << 17 | 0x11 << 12 | 0xc8, 0x0003_10c8),
         (1 << 17 | 0x0b << 12 | 0xc8, 0x0002_b0c8),
     ] {
-        reg_write(&mut s, ODSY_FLCTL_TARGET, write);
-        assert_eq!(reg_read(&mut s, ODSY_FLCTL_TARGET), read);
-        assert_eq!(reg_read(&mut s, ODSY_FLCTL_CONFIG), ODSY_FLCTL_CONFIG_RESET);
+        reg_write(&mut s, flctl::TARGET, write);
+        assert_eq!(reg_read(&mut s, flctl::TARGET), read);
+        assert_eq!(reg_read(&mut s, flctl::CONFIG), flctl::CONFIG_RESET);
         assert_eq!(reg_read(&mut s, ODSY_STATUS0), 0x1003_0000);
     }
 }
@@ -238,11 +232,11 @@ fn the_statistics_region_is_stored_and_the_buffer_left_alone() {
     let (mut s, _, ram) = board_with_ram();
     ram.put(0xb90000, &0x1234_5678u32.to_be_bytes());
 
-    reg_write(&mut s, ODSY_STATS_ADDR_UPPER, 0);
-    reg_write(&mut s, ODSY_STATS_ADDR_LOWER, 0xb90000);
-    reg_write(&mut s, ODSY_STATS_CONTROL, 0x8800_005f);
+    reg_write(&mut s, stats::ADDR_UPPER, 0);
+    reg_write(&mut s, stats::ADDR_LOWER, 0xb90000);
+    reg_write(&mut s, stats::CONTROL, 0x8800_005f);
     assert_eq!((s.stats_addr_upper, s.stats_addr_lower, s.stats_control), (0, 0xb90000, 0x8800_005f));
-    reg_write(&mut s, ODSY_STATS_ADDR_LOWER, 0);
+    reg_write(&mut s, stats::ADDR_LOWER, 0);
     assert_eq!(s.stats_addr_lower, 0);
 
     assert_eq!(ram.get(0xb90000, 4), 0x1234_5678u32.to_be_bytes());
@@ -285,7 +279,7 @@ fn the_0x7f0_doubleword_is_stored_and_runs_no_timer() {
     cmd64(&mut s, 0x6b0, 7);
     assert_eq!(s.fifo_setup[0], 7);
     assert_eq!(s.reported_cmd_count, 0);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS) & 0x2, 0);
+    assert_eq!(reg_read(&mut s, intr::FLAGS) & 0x2, 0);
 }
 
 /// Classes 0x20 to 0x35 are not commands the model fails to recognise, and
@@ -316,7 +310,7 @@ fn the_classes_0x20_to_0x35_are_not_reported_as_unknown_commands() {
 #[test]
 fn the_fifo_self_test_answers_only_after_the_preamble() {
     let (mut s, _) = board("v12");
-    assert_eq!(reg_read(&mut s, ODSY_CFIFO_SELFTEST), 0);
+    assert_eq!(reg_read(&mut s, cfifo::SELFTEST), 0);
 
     cmd(&mut s, 0x00010854);
     cmd(&mut s, 0);
@@ -328,7 +322,7 @@ fn the_fifo_self_test_answers_only_after_the_preamble() {
     cmd64(&mut s, 0x7b5, 1);
     cmd(&mut s, 0x00010046);
 
-    assert_eq!(reg_read(&mut s, ODSY_CFIFO_SELFTEST), ODSY_CFIFO_SELFTEST_OK);
+    assert_eq!(reg_read(&mut s, cfifo::SELFTEST), cfifo::SELFTEST_OK);
 }
 
 /// The command FIFO is write-only, and a store width or a command word it
@@ -339,9 +333,9 @@ fn the_fifo_self_test_answers_only_after_the_preamble() {
 fn an_unrecognised_width_or_command_word_is_reported_not_guessed() {
     let (mut s, _) = board("v12");
 
-    assert_eq!(s.mmio_read(ODSY_CMD_FIFO, 4), 0, "the FIFO has no read side");
-    assert_eq!(s.mmio_read(ODSY_CMD_FIFO, 4), 0);
-    s.mmio_write(ODSY_CMD_FIFO, 0x1234, 2);
+    assert_eq!(s.mmio_read(consts::cmd::FIFO, 4), 0, "the FIFO has no read side");
+    assert_eq!(s.mmio_read(consts::cmd::FIFO, 4), 0);
+    s.mmio_write(consts::cmd::FIFO, 0x1234, 2);
     assert_eq!(s.reported_addr_count.load(Ordering::Relaxed), 2, "a read and a write, once each however often they repeat");
 
     cmd(&mut s, 0x0000_7777);
@@ -357,22 +351,22 @@ fn an_unrecognised_width_or_command_word_is_reported_not_guessed() {
 fn a_reset_restores_the_documented_register_values() {
     let (mut s, _) = board("v12");
     reg_write(&mut s, CONTROL, 0xdead_beef);
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, 0xffff_ffff);
+    reg_write(&mut s, intr::ENABLE_SET, 0xffff_ffff);
     reg_write(&mut s, ODSY_SW_TOKEN, 0x1234_5678);
     reg_write(&mut s, ODSY_XT_REQ_TIMEOUT, 0xdead_beef);
-    reg_write(&mut s, ODSY_FLCTL_CONFIG, 0xdead_beef);
+    reg_write(&mut s, flctl::CONFIG, 0xdead_beef);
     reg_write(&mut s, ODSY_BUZZ_1, 0xdead_beef);
     reg_write(&mut s, ODSY_BUZZ_6, 0xdead_beef);
-    reg_write(&mut s, ODSY_NIC_PROM, 520 << ODSY_NIC_PULSE_SHIFT | 65 << ODSY_NIC_SAMPLE_SHIFT);
+    reg_write(&mut s, nic::PROM, 520 << nic::PULSE_SHIFT | 65 << nic::SAMPLE_SHIFT);
 
     s.reset();
 
     assert_eq!(reg_read(&mut s, CONTROL), VPRO_WIDGET);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_ENABLE_SET), 0);
+    assert_eq!(reg_read(&mut s, intr::ENABLE_SET), 0);
     assert_eq!(reg_read(&mut s, ODSY_SW_TOKEN), 0);
-    assert_eq!(reg_read(&mut s, ODSY_NIC_PROM), 0);
+    assert_eq!(reg_read(&mut s, nic::PROM), 0);
     assert_eq!(reg_read(&mut s, ODSY_XT_REQ_TIMEOUT), ODSY_XT_REQ_TIMEOUT_RESET);
-    assert_eq!(reg_read(&mut s, ODSY_FLCTL_CONFIG), ODSY_FLCTL_CONFIG_RESET);
+    assert_eq!(reg_read(&mut s, flctl::CONFIG), flctl::CONFIG_RESET);
     assert_eq!(reg_read(&mut s, ODSY_BUZZ_1), 0);
     assert_eq!(reg_read(&mut s, ODSY_BUZZ_6), 0);
     // What the product composes is not disturbed.
@@ -429,9 +423,9 @@ fn each_profile_names_its_board_in_the_identity_record() {
 #[test]
 fn the_i2c_reset_poll_ends_on_its_first_read() {
     let (mut s, _) = board("v12");
-    let state = |s: &mut Board| (reg_read(s, ODSY_I2C_OPT_STATUS_READ) >> 10) & 0xf;
+    let state = |s: &mut Board| (reg_read(s, i2c::OPT_STATUS_READ) >> 10) & 0xf;
 
-    s.mmio_write(ODSY_BACKEND_SELECT, (backend_header(ODSY_I2C_OPT_CMD_INDEX, 1) as u64) << 32 | 0x1234, 8);
+    s.mmio_write(backend::SELECT, (backend_header(i2c::OPT_CMD_INDEX, 1) as u64) << 32 | 0x1234, 8);
     assert!(matches!(state(&mut s), 0 | 0xa));
     s.reset();
     assert!(matches!(state(&mut s), 0 | 0xa));
@@ -446,16 +440,16 @@ fn the_i2c_reset_poll_ends_on_its_first_read() {
 fn an_i2c_register_write_reads_ready_and_done_after_each_command() {
     let (mut s, _) = board("v12");
     let push = |s: &mut Board, data: u32| {
-        s.mmio_write(ODSY_BACKEND_SELECT, (backend_header(ODSY_I2C_OPT_CMD_INDEX, 1) as u64) << 32 | data as u64, 8)
+        s.mmio_write(backend::SELECT, (backend_header(i2c::OPT_CMD_INDEX, 1) as u64) << 32 | data as u64, 8)
     };
 
     push(&mut s, 0x4000);
     push(&mut s, 0);
-    assert_eq!(reg_read(&mut s, ODSY_I2C_OPT_CMD_READ), 0);
-    assert_eq!(reg_read(&mut s, ODSY_I2C_OPT_STATUS_READ), 0x0040_0000, "ready, not done, with no command");
+    assert_eq!(reg_read(&mut s, i2c::OPT_CMD_READ), 0);
+    assert_eq!(reg_read(&mut s, i2c::OPT_STATUS_READ), 0x0040_0000, "ready, not done, with no command");
     for data in [0x133e, 0x1202, 0x1234, 0x1834] {
         push(&mut s, data);
-        assert_eq!(reg_read(&mut s, ODSY_I2C_OPT_STATUS_READ), 0x0040_0200, "{data:#x}");
+        assert_eq!(reg_read(&mut s, i2c::OPT_STATUS_READ), 0x0040_0200, "{data:#x}");
     }
 }
 
@@ -468,17 +462,17 @@ fn an_i2c_register_write_reads_ready_and_done_after_each_command() {
 fn an_i2c_register_read_echoes_the_command_and_receives_zero() {
     let (mut s, _) = board("v12");
     let push = |s: &mut Board, data: u32| {
-        s.mmio_write(ODSY_BACKEND_SELECT, (backend_header(ODSY_I2C_OPT_CMD_INDEX, 1) as u64) << 32 | data as u64, 8)
+        s.mmio_write(backend::SELECT, (backend_header(i2c::OPT_CMD_INDEX, 1) as u64) << 32 | data as u64, 8)
     };
 
     push(&mut s, 0x4000);
     push(&mut s, 0);
     push(&mut s, 0x133f);
     push(&mut s, 0x1205);
-    assert_eq!(reg_read(&mut s, ODSY_I2C_OPT_CMD_READ), 0x1205);
+    assert_eq!(reg_read(&mut s, i2c::OPT_CMD_READ), 0x1205);
     push(&mut s, 0x0605);
-    assert_eq!(reg_read(&mut s, ODSY_I2C_OPT_STATUS_READ), 0x0040_0200);
-    assert_eq!(reg_read(&mut s, ODSY_I2C_OPT_STATUS_READ) & 0xff, 0);
+    assert_eq!(reg_read(&mut s, i2c::OPT_STATUS_READ), 0x0040_0200);
+    assert_eq!(reg_read(&mut s, i2c::OPT_STATUS_READ) & 0xff, 0);
 }
 
 /// The kernel's back-end loads: headers opening a record of words, across
@@ -493,7 +487,7 @@ fn an_i2c_register_read_echoes_the_command_and_receives_zero() {
 #[test]
 fn back_end_tables_are_kept_and_read_back_from_the_window() {
     let (mut s, _) = board("v12");
-    let push64 = |s: &mut Board, a: u32, b: u32| s.mmio_write(ODSY_BACKEND_SELECT, (a as u64) << 32 | b as u64, 8);
+    let push64 = |s: &mut Board, a: u32, b: u32| s.mmio_write(backend::SELECT, (a as u64) << 32 | b as u64, 8);
 
     // The frame table: a header, 128 words, two to a store.
     push64(&mut s, 0x3900_0080, 0x0001_0000);
@@ -594,7 +588,7 @@ fn an_unmodelled_word_passes_over_the_operands_its_arity_names() {
     let (mut s, _) = board("v12");
 
     cmd(&mut s, 0x0000_3cf8);
-    for w in [ODSY_GL_COLOR_3UB, 1, 2, 3, select(ODSY_REG_GL_BEGIN), ODSY_GL_TRIANGLES, 0x0000_7777, 0x0000_7778] {
+    for w in [gl_cmd::COLOR_3UB, 1, 2, 3, select(reg::GL_BEGIN), gl_cmd::TRIANGLES, 0x0000_7777, 0x0000_7778] {
         cmd(&mut s, w);
     }
     for w in 0..8 {

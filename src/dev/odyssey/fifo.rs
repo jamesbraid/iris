@@ -8,7 +8,7 @@
 //!
 //! The guest sees the board's FIFO, never the host ring. The FIFO's depth,
 //! in any unit, is UNKNOWN (datasheet, "Grades for withdrawn claims"); the
-//! model gives it a size of 32,768 words (`ODSY_CFIFO_WORDS`), a MODEL
+//! model gives it a size of 32,768 words (`cfifo::WORDS`), a MODEL
 //! CHOICE independent of the `0x6bX` values the kernel stores. The level
 //! STATUS0 reports is the 32-bit words of the stores pushed and not yet
 //! taken out, a doubleword store counting two, clamped to that 32,768
@@ -28,7 +28,7 @@
 //! GR2 do not stall
 //! there. Their host ring is deep, a store is refused with the bus busy
 //! only when the ring is full, and the guest-visible level is the model's,
-//! clamped to the model's FIFO size (a model choice, `ODSY_CFIFO_WORDS`). The VPro follows them by
+//! clamped to the model's FIFO size (a model choice, `cfifo::WORDS`). The VPro follows them by
 //! default (`FifoDepth::Deep`): the ring holds `ODSY_WORK_QUEUE_MAX`
 //! entries, a store is one entry whatever its width, so it takes at least
 //! twice the model's FIFO in words, and the processor runs ahead of the
@@ -45,7 +45,7 @@
 //! board's thread, or an access that drains it with that thread stopped)
 //! is the consumer. Graphics credits, which only machines whose processor
 //! interface counts stores use, are settled as a store enters the FIFO's
-//! first `ODSY_CFIFO_DEPTH` places: at the store when there is room, or
+//! first `cfifo::DEPTH` places: at the store when there is room, or
 //! when the stores ahead of it have run. That depth (64 stores) is a MODEL
 //! CHOICE, independent of the stored `0x6bX` values: credits for a full
 //! FIFO's backlog let the processor run too far ahead of its slower board.
@@ -53,10 +53,7 @@
 //! model credits one per store.
 
 
-use super::consts::{
-    ODSY_CFIFO_DEPTH, ODSY_CFIFO_LOW_WATER, ODSY_CFIFO_WORDS, ODSY_INTR_FIFO_HIGH_WATER,
-    ODSY_INTR_FIFO_LOW_WATER, ODSY_WORK_QUEUE_MAX,
-};
+use super::consts::{cfifo, intr, ODSY_WORK_QUEUE_MAX};
 use super::interface::HostInterface;
 use super::pi_gfx::{pi_gfx_owe_credits, pi_gfx_repay_credits};
 use super::worker::GAP;
@@ -258,10 +255,10 @@ impl Default for CommandFifo {
 
 impl CommandFifo {
     /// The FIFO words waiting, as the guest sees them: the model's FIFO
-    /// holds no more than `ODSY_CFIFO_WORDS` (a model choice), so a deeper
+    /// holds no more than `cfifo::WORDS` (a model choice), so a deeper
     /// backlog in the host ring reads as a full FIFO. Zero only when nothing waits.
     pub fn level(&self) -> u32 {
-        self.queued_words().min(ODSY_CFIFO_WORDS)
+        self.queued_words().min(cfifo::WORDS)
     }
 
     /// The FIFO words waiting in the host ring, unclamped.
@@ -279,7 +276,7 @@ impl CommandFifo {
         if self.deep.load(Relaxed) {
             self.stores() < RING_STORES
         } else {
-            self.queued_words() + words <= ODSY_CFIFO_WORDS
+            self.queued_words() + words <= cfifo::WORDS
         }
     }
 
@@ -299,7 +296,7 @@ impl CommandFifo {
     }
 
     /// The stored `0x6b2`, applied as the high-water threshold in words. MODEL
-    /// CHOICE (see `ODSY_REG_FIFO_SETUP_FIRST`).
+    /// CHOICE (see `reg::FIFO_SETUP_FIRST`).
     pub fn set_threshold_6b2(&self, words: u32) {
         self.threshold_6b2.store(words, SeqCst);
     }
@@ -373,7 +370,7 @@ impl CommandFifo {
 
     /// The stores in the FIFO's first places, credited.
     pub fn in_fifo(&self) -> u32 {
-        self.stores().min(ODSY_CFIFO_DEPTH)
+        self.stores().min(cfifo::DEPTH)
     }
 
     /// Queue a store. A counted store is credited at once when it lands
@@ -397,7 +394,7 @@ impl CommandFifo {
         }
         let stores_before = self.levels.stores.fetch_add(1, SeqCst);
         let before = self.levels.words.fetch_add(words, SeqCst);
-        let credited = counted && stores_before < ODSY_CFIFO_DEPTH;
+        let credited = counted && stores_before < cfifo::DEPTH;
         q.owed = counted && !credited;
         if !self.ring.try_push(q.entry(), q.value) {
             // With one processor this cannot happen: has_room counted the
@@ -441,7 +438,7 @@ impl CommandFifo {
             // Reaching the model's 0x6b2 threshold raises flag 25, whatever
             // the enable mask says.
             let mut f = front.lock();
-            f.intr_flags |= ODSY_INTR_FIFO_HIGH_WATER;
+            f.intr_flags |= intr::FIFO_HIGH_WATER;
             f.update_irq();
         }
         self.wake();
@@ -481,13 +478,13 @@ impl CommandFifo {
         let counted_ran = ran.iter().filter(|q| q.counted).count() as u32;
         let _c = self.pop.lock();
         self.ring.consume_n_at(0, n);
-        if self.levels.words.load(SeqCst) < ODSY_CFIFO_LOW_WATER + words {
+        if self.levels.words.load(SeqCst) < cfifo::LOW_WATER + words {
             let mut f = front.lock();
             let before = self.levels.words.fetch_sub(words, SeqCst);
             debug_assert!(before >= words, "the level counts every store before the ring shows it (push)");
-            if before >= ODSY_CFIFO_LOW_WATER && before - words < ODSY_CFIFO_LOW_WATER {
-                f.intr_flags |= ODSY_INTR_FIFO_LOW_WATER;
-                crate::pf_instant!(crate::perfetto::events::ODSY_CFIFO_LOW_WATER, before - words);
+            if before >= cfifo::LOW_WATER && before - words < cfifo::LOW_WATER {
+                f.intr_flags |= intr::FIFO_LOW_WATER;
+                crate::pf_instant!(crate::perfetto::events::cfifo::LOW_WATER, before - words);
                 f.update_irq();
             }
         } else {
@@ -503,11 +500,11 @@ impl CommandFifo {
         // The next waiting store moves into the FIFO's last credited place
         // and is credited.
         for k in 1..=n as u32 {
-            if stores_before - k < ODSY_CFIFO_DEPTH {
+            if stores_before - k < cfifo::DEPTH {
                 continue;
             }
             // The run is already out of the ring, so count back from its head.
-            let place = ODSY_CFIFO_DEPTH as usize - 1 - (n - k as usize);
+            let place = cfifo::DEPTH as usize - 1 - (n - k as usize);
             if let Some((addr, value)) = self.ring.peek_nth_at(0, place) {
                 let entered = QueuedStore::from_entry(addr, value);
                 let mut f = front.lock();
@@ -535,7 +532,7 @@ impl CommandFifo {
             if q.counted {
                 self.levels.counted.fetch_sub(1, SeqCst);
             }
-            if q.owed && index >= ODSY_CFIFO_DEPTH {
+            if q.owed && index >= cfifo::DEPTH {
                 let f = front.lock();
                 if let Some(pi) = &f.pi {
                     pi_gfx_owe_credits(pi.as_ref(), f.slot, -1);

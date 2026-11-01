@@ -10,19 +10,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use super::board::Board;
 use super::consts::{
-    ODSY_BACKEND_READ_BASE, ODSY_BACKEND_SELECT, ODSY_BACKEND_VERSION, ODSY_BUZZ_1, ODSY_BUZZ_2,
-    ODSY_BUZZ_3, ODSY_BUZZ_4, ODSY_BUZZ_5, ODSY_BUZZ_6, ODSY_CMD_FIFO, ODSY_CONTROL,
-    ODSY_CTX_SHADOW_ADDR_LOWER, ODSY_CTX_SHADOW_ADDR_UPPER, ODSY_CTX_SWITCH_PORT, ODSY_CURSOR_BASE,
-    ODSY_CURSOR_ENTRIES, ODSY_DISPLAYED_BUFFER, ODSY_ERROR_ADDR_LOWER, ODSY_ERROR_ADDR_UPPER,
-    ODSY_ERROR_COMMAND, ODSY_FLCTL_CONFIG, ODSY_FLCTL_TARGET, ODSY_HOST_WRITE_ADDR_LOWER,
-    ODSY_HOST_WRITE_ADDR_UPPER, ODSY_I2C_MAIN_CMD_READ, ODSY_I2C_MAIN_STATUS_READ,
-    ODSY_I2C_OPT_CMD_READ, ODSY_I2C_OPT_STATUS_READ, ODSY_IDENTITY, ODSY_INTR_CLEAR,
-    ODSY_INTR_ENABLE_CLEAR, ODSY_INTR_ENABLE_SET, ODSY_INTR_FLAGS, ODSY_INT_DEST_LOWER,
-    ODSY_INT_DEST_UPPER, ODSY_MEMORY_CONFIG, ODSY_MEMORY_CONTROL, ODSY_NIC_KERNEL, ODSY_NIC_PROM,
-    ODSY_RESET_CONTROL, ODSY_ROUTE_DEST_LOWER, ODSY_ROUTE_DEST_UPPER, ODSY_ROUTE_VECTORS,
-    ODSY_STATS_ADDR_LOWER, ODSY_STATS_ADDR_UPPER, ODSY_STATS_CONTROL, ODSY_STATUS, ODSY_STATUS0,
-    ODSY_SWAP_ARM, ODSY_SWAP_CONTROL, ODSY_SWAP_CONTROL_COMPANION, ODSY_SWAP_PENDING,
-    ODSY_SW_TOKEN, ODSY_USER_CMD_FIFO, ODSY_XT_REQ_TIMEOUT,
+    backend, cmd, ctx, cursor, flctl, host, i2c, intr, mem, nic, route, stats, swap, ODSY_BUZZ_1,
+    ODSY_BUZZ_2, ODSY_BUZZ_3, ODSY_BUZZ_4, ODSY_BUZZ_5, ODSY_BUZZ_6, ODSY_CONTROL,
+    ODSY_DISPLAYED_BUFFER, ODSY_ERROR_ADDR_LOWER, ODSY_ERROR_ADDR_UPPER, ODSY_ERROR_COMMAND,
+    ODSY_IDENTITY, ODSY_INT_DEST_LOWER, ODSY_INT_DEST_UPPER, ODSY_RESET_CONTROL, ODSY_STATUS,
+    ODSY_STATUS0, ODSY_SW_TOKEN, ODSY_USER_CMD_FIFO, ODSY_XT_REQ_TIMEOUT,
 };
 use super::fifo::CommandFifo;
 use super::interface::{front_mmio_read, front_mmio_write, front_register, HostInterface};
@@ -35,16 +27,16 @@ impl Board {
         let sequence = self.trace_sequence.fetch_add(1, Ordering::Relaxed);
         crate::dlog_dev!(LogModule::Odyssey, "sgi-odyssey: MMIO write seq {} offset {:#x} size {} value {:#x}", sequence, addr, size, value);
 
-        if addr == ODSY_BACKEND_SELECT && (size == 8 || size == 4) {
+        if addr == backend::SELECT && (size == 8 || size == 4) {
             self.backend_write(value, size);
             return;
         }
-        if addr == ODSY_CTX_SWITCH_PORT && size == 8 {
+        if addr == ctx::SWITCH_PORT && size == 8 {
             self.ctx_switch(value);
             return;
         }
-        if addr == ODSY_CMD_FIFO {
-            self.selftest_track(ODSY_CMD_FIFO, size, value);
+        if addr == cmd::FIFO {
+            self.selftest_track(cmd::FIFO, size, value);
             self.cmd_from_kernel = true;
             self.cmd_fifo_write(value, size);
             return;
@@ -73,27 +65,27 @@ impl Board {
                     value
                 );
             }
-            ODSY_MEMORY_CONTROL => self.memory_control(value as u32),
-            ODSY_FLCTL_CONFIG => self.flctl_config = value as u32,
+            mem::CONTROL => self.memory_control(value as u32),
+            flctl::CONFIG => self.flctl_config = value as u32,
             ODSY_BUZZ_1 => self.buzz[0] = value as u32,
             ODSY_BUZZ_2 => self.buzz[1] = value as u32,
             ODSY_BUZZ_3 => self.buzz[2] = value as u32,
             ODSY_BUZZ_4 => self.buzz[3] = value as u32,
             ODSY_BUZZ_5 => self.buzz[4] = value as u32,
             ODSY_BUZZ_6 => self.buzz[5] = value as u32,
-            ODSY_NIC_PROM | ODSY_NIC_KERNEL => self.nic_slot(value as u32),
-            ODSY_HOST_WRITE_ADDR_UPPER => {
+            nic::PROM | nic::KERNEL => self.nic_slot(value as u32),
+            host::WRITE_ADDR_UPPER => {
                 self.query_cancel();
                 self.host_write_addr_upper = value as u32;
             }
-            ODSY_HOST_WRITE_ADDR_LOWER => {
+            host::WRITE_ADDR_LOWER => {
                 self.query_cancel();
                 self.host_write_addr_lower = value as u32;
             }
-            ODSY_STATS_ADDR_UPPER | ODSY_STATS_ADDR_LOWER | ODSY_STATS_CONTROL => {
-                if addr == ODSY_STATS_ADDR_UPPER {
+            stats::ADDR_UPPER | stats::ADDR_LOWER | stats::CONTROL => {
+                if addr == stats::ADDR_UPPER {
                     self.stats_addr_upper = value as u32;
-                } else if addr == ODSY_STATS_ADDR_LOWER {
+                } else if addr == stats::ADDR_LOWER {
                     self.stats_addr_lower = value as u32;
                 } else {
                     self.stats_control = value as u32;
@@ -108,20 +100,20 @@ impl Board {
                     );
                 }
             }
-            ODSY_CTX_SHADOW_ADDR_UPPER => {
+            ctx::SHADOW_ADDR_UPPER => {
                 self.query_cancel();
                 self.ctx_shadow_addr_upper = value as u32;
             }
-            ODSY_CTX_SHADOW_ADDR_LOWER => {
+            ctx::SHADOW_ADDR_LOWER => {
                 self.query_cancel();
                 self.ctx_shadow_addr_lower = value as u32;
             }
-            ODSY_MEMORY_CONFIG
-            | ODSY_I2C_MAIN_CMD_READ
-            | ODSY_I2C_MAIN_STATUS_READ
-            | ODSY_I2C_OPT_CMD_READ
-            | ODSY_I2C_OPT_STATUS_READ
-            | ODSY_BACKEND_VERSION => {
+            mem::CONFIG
+            | i2c::MAIN_CMD_READ
+            | i2c::MAIN_STATUS_READ
+            | i2c::OPT_CMD_READ
+            | i2c::OPT_STATUS_READ
+            | backend::VERSION => {
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: write of {:#x} to the read-only register at {:#x}", value, addr);
             }
             _ => self.unimplemented(addr, size, true),
@@ -150,7 +142,7 @@ impl Board {
 }
 
 pub(super) fn fifo_port(addr: u64) -> bool {
-    addr == ODSY_USER_CMD_FIFO || addr == ODSY_CMD_FIFO
+    addr == ODSY_USER_CMD_FIFO || addr == cmd::FIFO
 }
 
 /// The stores that join the command stream: the two command-FIFO ports, and
@@ -158,9 +150,9 @@ pub(super) fn fifo_port(addr: u64) -> bool {
 /// store itself.
 pub(super) fn command_store(addr: u64, size: u32) -> bool {
     fifo_port(addr)
-        || (addr == ODSY_CTX_SWITCH_PORT && size == 8)
-        || reg(addr, size) == ODSY_CTX_SHADOW_ADDR_UPPER as i64
-        || reg(addr, size) == ODSY_CTX_SHADOW_ADDR_LOWER as i64
+        || (addr == ctx::SWITCH_PORT && size == 8)
+        || reg(addr, size) == ctx::SHADOW_ADDR_UPPER as i64
+        || reg(addr, size) == ctx::SHADOW_ADDR_LOWER as i64
 }
 
 /// A read of the level word `0x106c`, which never waits: it is a plain load
@@ -169,14 +161,14 @@ pub(super) fn command_store(addr: u64, size: u32) -> bool {
 /// drain waits poll bits 15:7 until they read 0, which the live level
 /// does once the board has run the queue.
 pub(super) fn level_word(addr: u64, size: u32) -> bool {
-    reg(addr, size) == ODSY_MEMORY_CONFIG as i64
+    reg(addr, size) == mem::CONFIG as i64
 }
 
 /// Accesses that need not wait for the queued stores, and act on the board
 /// as it stands. Inferred from what a driver does while the board works,
 /// not measured on a board; every other access waits.
 pub(super) fn access_waits(addr: u64, size: u32, write: bool) -> bool {
-    let cursor = ODSY_BACKEND_READ_BASE + ((ODSY_CURSOR_BASE as u64) << 3);
+    let cursor = backend::READ_BASE + ((cursor::BASE as u64) << 3);
 
     if fifo_port(addr) {
         return !write;
@@ -186,11 +178,11 @@ pub(super) fn access_waits(addr: u64, size: u32, write: bool) -> bool {
         // context-switch ports and the cursor do anything; the rest is
         // logged and answers zero, so it need not wait.
         if write {
-            return addr == ODSY_BACKEND_SELECT || addr == ODSY_CTX_SWITCH_PORT;
+            return addr == backend::SELECT || addr == ctx::SWITCH_PORT;
         }
         return false;
     }
-    if !write && addr >= cursor && addr < cursor + ((ODSY_CURSOR_ENTRIES as u64) << 3) {
+    if !write && addr >= cursor && addr < cursor + ((cursor::ENTRIES as u64) << 3) {
         return false;
     }
     !matches!(
@@ -205,21 +197,21 @@ pub(super) fn access_waits(addr: u64, size: u32, write: bool) -> bool {
             | ODSY_INT_DEST_LOWER
             | ODSY_ERROR_COMMAND
             | ODSY_STATUS0
-            | ODSY_INTR_FLAGS
-            | ODSY_INTR_CLEAR
-            | ODSY_INTR_ENABLE_SET
-            | ODSY_INTR_ENABLE_CLEAR
-            | ODSY_ROUTE_DEST_UPPER
-            | ODSY_ROUTE_DEST_LOWER
-            | ODSY_ROUTE_VECTORS
+            | intr::FLAGS
+            | intr::CLEAR
+            | intr::ENABLE_SET
+            | intr::ENABLE_CLEAR
+            | route::DEST_UPPER
+            | route::DEST_LOWER
+            | route::VECTORS
             | ODSY_SW_TOKEN
             // The datasheet records the word as stored, not routed, with
             // no wait; making the processor wait on it modelled nothing.
-            | ODSY_FLCTL_TARGET
-            | ODSY_SWAP_ARM
-            | ODSY_SWAP_PENDING
-            | ODSY_SWAP_CONTROL
-            | ODSY_SWAP_CONTROL_COMPANION
+            | flctl::TARGET
+            | swap::ARM
+            | swap::PENDING
+            | swap::CONTROL
+            | swap::CONTROL_COMPANION
             | ODSY_DISPLAYED_BUFFER
     )
 }

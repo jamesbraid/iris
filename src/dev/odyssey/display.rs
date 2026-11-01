@@ -4,11 +4,8 @@
 
 use super::board::{Board, ODSY_WIDTH};
 use super::consts::{
-    ODSY_CMAP_UNVERIFIED_GROUP, ODSY_DID_MAIN_SHIFT, ODSY_DID_OVERLAY_MASK, ODSY_DISPMODE_COUNT,
-    ODSY_DISPMODE_WIDTH_4, ODSY_DISPMODE_WIDTH_5, ODSY_DISPMODE_WIDTH_MASK,
-    ODSY_DISPMODE_WIDTH_SHIFT, ODSY_GAMMA_GROUP, ODSY_INDEX_MASK, ODSY_LUT_BLUE_SHIFT,
-    ODSY_LUT_GREEN_SHIFT, ODSY_LUT_RED_SHIFT, ODSY_LUT_SIZE, ODSY_OVERLAY_IDS,
-    ODSY_OVERLAY_MODE_ENABLE, ODSY_OVERLAY_MODE_GROUP_MASK, ODSY_OVERLAY_MODE_GROUP_SHIFT,
+    dispmode, lut, overlay, ODSY_CMAP_UNVERIFIED_GROUP, ODSY_DID_MAIN_SHIFT, ODSY_DID_OVERLAY_MASK,
+    ODSY_GAMMA_GROUP, ODSY_INDEX_MASK,
 };
 use super::fifo::display_fifo_pending;
 use super::reader::{DisplayRegs, PlaneView, RowOf, ScanoutReader};
@@ -154,7 +151,7 @@ impl Display {
 impl Board {
     /// Pixel (x, y)'s main drawable id, bits 7:3 of its id-plane byte.
     pub fn main_id(&mut self, x: u32, y: u32) -> u32 {
-        ((self.did[(y * ODSY_WIDTH + x) as usize] as u32) >> ODSY_DID_MAIN_SHIFT) & (ODSY_DISPMODE_COUNT - 1)
+        ((self.did[(y * ODSY_WIDTH + x) as usize] as u32) >> ODSY_DID_MAIN_SHIFT) & (dispmode::COUNT - 1)
     }
 
     /// The colormap group main drawable main_id shows through: bits 8:4 of its
@@ -288,9 +285,9 @@ impl Board {
 /// to fill the byte as a full-scale value. How the board itself stores a
 /// narrow pixel is unknown.
 pub(super) fn display_channel(mode: u32, c: u32) -> u32 {
-    match (mode >> ODSY_DISPMODE_WIDTH_SHIFT) & ODSY_DISPMODE_WIDTH_MASK {
-        ODSY_DISPMODE_WIDTH_4 => (c & 0xf0) | (c >> 4),
-        ODSY_DISPMODE_WIDTH_5 => (c & 0xf8) | (c >> 5),
+    match (mode >> dispmode::WIDTH_SHIFT) & dispmode::WIDTH_MASK {
+        dispmode::WIDTH_4 => (c & 0xf0) | (c >> 4),
+        dispmode::WIDTH_5 => (c & 0xf8) | (c >> 5),
         _ => c,
     }
 }
@@ -316,11 +313,11 @@ struct IdShow {
 /// Everything a row's resolve reads outside the planes, gathered once from a
 /// copy of the registers, so none of it can change meanwhile.
 pub(super) struct ResolveCtx {
-    ids: [IdShow; ODSY_DISPMODE_COUNT as usize],
+    ids: [IdShow; dispmode::COUNT as usize],
     /// Per overlay id: whether it is enabled, and its entry base.
-    overlay: [(bool, u32); ODSY_OVERLAY_IDS as usize],
+    overlay: [(bool, u32); overlay::IDS as usize],
     /// Every lookup-RAM entry as 0x00RRGGBB (DisplayRegs::lut_rgb()).
-    rgb: Box<[u32; ODSY_LUT_SIZE as usize]>,
+    rgb: Box<[u32; lut::SIZE as usize]>,
     /// DisplayRegs::gamma() of each 8-bit channel value, placed in its byte of
     /// the pixel: red, green, blue.
     gamma: Box<[[u32; 256]; 3]>,
@@ -331,18 +328,18 @@ impl ResolveCtx {
     /// entry and gamma step, with colour buffer (displayed >> id) & 1
     /// showing for each drawable.
     pub(super) fn new(regs: &DisplayRegs, displayed: u32) -> ResolveCtx {
-        let mut ids = [IdShow::default(); ODSY_DISPMODE_COUNT as usize];
-        let mut overlay = [(false, 0u32); ODSY_OVERLAY_IDS as usize];
-        let mut rgb = Box::new([0u32; ODSY_LUT_SIZE as usize]);
+        let mut ids = [IdShow::default(); dispmode::COUNT as usize];
+        let mut overlay = [(false, 0u32); overlay::IDS as usize];
+        let mut rgb = Box::new([0u32; lut::SIZE as usize]);
         let mut gamma = Box::new([[0u32; 256]; 3]);
 
         for (i, v) in rgb.iter_mut().enumerate() {
             *v = regs.lut_rgb(i as u32);
         }
         for c in 0..256u32 {
-            gamma[0][c as usize] = regs.gamma(c, ODSY_LUT_RED_SHIFT) << 16;
-            gamma[1][c as usize] = regs.gamma(c, ODSY_LUT_GREEN_SHIFT) << 8;
-            gamma[2][c as usize] = regs.gamma(c, ODSY_LUT_BLUE_SHIFT);
+            gamma[0][c as usize] = regs.gamma(c, lut::RED_SHIFT) << 16;
+            gamma[1][c as usize] = regs.gamma(c, lut::GREEN_SHIFT) << 8;
+            gamma[2][c as usize] = regs.gamma(c, lut::BLUE_SHIFT);
         }
         for (id, show) in ids.iter_mut().enumerate() {
             let mode = regs.dispmode[id];
@@ -353,9 +350,9 @@ impl ResolveCtx {
                 show.rgb = true;
                 // display_channel() as a mask and a shift; a shift of 8 or
                 // more leaves a byte's high part empty.
-                (show.keep, show.down) = match (mode >> ODSY_DISPMODE_WIDTH_SHIFT) & ODSY_DISPMODE_WIDTH_MASK {
-                    ODSY_DISPMODE_WIDTH_4 => (0xf0, 4),
-                    ODSY_DISPMODE_WIDTH_5 => (0xf8, 5),
+                (show.keep, show.down) = match (mode >> dispmode::WIDTH_SHIFT) & dispmode::WIDTH_MASK {
+                    dispmode::WIDTH_4 => (0xf0, 4),
+                    dispmode::WIDTH_5 => (0xf8, 5),
                     _ => (0xff, 8),
                 };
             } else if group != 0 {
@@ -370,8 +367,8 @@ impl ResolveCtx {
             let mode = regs.overlay_mode[id];
 
             *o = (
-                mode & ODSY_OVERLAY_MODE_ENABLE != 0,
-                256 * ((mode >> ODSY_OVERLAY_MODE_GROUP_SHIFT) & ODSY_OVERLAY_MODE_GROUP_MASK),
+                mode & overlay::MODE_ENABLE != 0,
+                256 * ((mode >> overlay::MODE_GROUP_SHIFT) & overlay::MODE_GROUP_MASK),
             );
         }
         ResolveCtx { ids, overlay, rgb, gamma }
@@ -423,7 +420,7 @@ pub(super) fn resolve_line(ctx: &ResolveCtx, line: ScanoutLine<'_>, dst: &mut [u
         let d = did[x];
         let end = x + 1 + did[x + 1..].iter().take_while(|&&v| v == d).count();
         let (enabled, obase) = ctx.overlay[(d as u32 & ODSY_DID_OVERLAY_MASK) as usize];
-        let show = &ctx.ids[(d >> ODSY_DID_MAIN_SHIFT) as usize & (ODSY_DISPMODE_COUNT as usize - 1)];
+        let show = &ctx.ids[(d >> ODSY_DID_MAIN_SHIFT) as usize & (dispmode::COUNT as usize - 1)];
         let out = &mut dst[x..end];
         let src = &lines[show.buf][x * 4..end * 4];
         let ov = &ovl[x..end];
@@ -439,7 +436,7 @@ pub(super) fn resolve_line(ctx: &ResolveCtx, line: ScanoutLine<'_>, dst: &mut [u
             for (out, c) in out.iter_mut().zip(src.chunks_exact(4)) {
                 let raw = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
                 let word = if be0 { raw.swap_bytes() } else { raw };
-                *out = ctx.rgb[(show.base + (word & show.mask)) as usize & (ODSY_LUT_SIZE as usize - 1)];
+                *out = ctx.rgb[(show.base + (word & show.mask)) as usize & (lut::SIZE as usize - 1)];
             }
             // Reported only if a pixel of the run is shown through it.
             saw_unverified |= show.unverified && (!enabled || ov.contains(&0));
@@ -447,7 +444,7 @@ pub(super) fn resolve_line(ctx: &ResolveCtx, line: ScanoutLine<'_>, dst: &mut [u
         if enabled {
             for (out, &o) in out.iter_mut().zip(ov) {
                 if o != 0 {
-                    *out = ctx.rgb[(obase + o as u32) as usize & (ODSY_LUT_SIZE as usize - 1)];
+                    *out = ctx.rgb[(obase + o as u32) as usize & (lut::SIZE as usize - 1)];
                 }
             }
         }

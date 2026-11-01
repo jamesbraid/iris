@@ -15,12 +15,8 @@
 use super::{raster_bench, Odyssey};
 use super::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
 use super::consts::{
-    ODSY_CMAP_UNVERIFIED_GROUP, ODSY_CURSOR_COLOURS, ODSY_CURSOR_COLOUR_COUNT, ODSY_CURSOR_CONTROL,
-    ODSY_CURSOR_CTL_CROSSHAIR, ODSY_CURSOR_CTL_ENABLE, ODSY_CURSOR_GLYPH, ODSY_CURSOR_PLANE,
-    ODSY_CURSOR_POSITION, ODSY_DID_MAIN_SHIFT, ODSY_DISPMODE_COUNT, ODSY_DISPMODE_GROUP_SHIFT,
-    ODSY_DISPMODE_WIDTH_4, ODSY_DISPMODE_WIDTH_5, ODSY_DISPMODE_WIDTH_SHIFT, ODSY_GAMMA_BASE,
-    ODSY_LUT_ENTRY_MASK, ODSY_LUT_SIZE, ODSY_OVERLAY_IDS, ODSY_OVERLAY_MODE_ENABLE,
-    ODSY_OVERLAY_MODE_GROUP_SHIFT,
+    cursor, dispmode, lut, overlay, ODSY_CMAP_UNVERIFIED_GROUP, ODSY_DID_MAIN_SHIFT,
+    ODSY_GAMMA_BASE,
 };
 use super::display::{resolve_line, Display};
 use super::mmio::BoardLocks;
@@ -60,8 +56,8 @@ fn scene_board(scene: Scene) -> Box<Board> {
 
     fill_random(&mut s.mem.bytes, &mut rng);
     fill_random(&mut s.buffer1_mem.bytes, &mut rng);
-    for i in 0..ODSY_LUT_SIZE as usize {
-        s.regs().set_lut(i, rng.next_u32() & ODSY_LUT_ENTRY_MASK);
+    for i in 0..lut::SIZE as usize {
+        s.regs().set_lut(i, rng.next_u32() & lut::ENTRY_MASK);
     }
     if let Scene::Rgb = scene {
         // The identity-like ramp a guest loads, so the picture is not noise.
@@ -69,31 +65,31 @@ fn scene_board(scene: Scene) -> Box<Board> {
             let v = (i * 0x3ff / 0x5ff) & 0x3ff;
             s.regs().set_lut((ODSY_GAMMA_BASE + i) as usize, v << 20 | v << 10 | v);
         }
-        for id in 0..ODSY_DISPMODE_COUNT {
-            s.regs().set_dispmode(id as usize, 26 << ODSY_DISPMODE_GROUP_SHIFT);
+        for id in 0..dispmode::COUNT {
+            s.regs().set_dispmode(id as usize, 26 << dispmode::GROUP_SHIFT);
         }
         return s;
     }
     // Drawable modes: 8-bit RGB, 4-bit, 5-bit, index groups 17 and 0 and 25,
     // another RGB group, repeating over the 32 ids.
-    for id in 0..ODSY_DISPMODE_COUNT {
+    for id in 0..dispmode::COUNT {
         let mode = match id % 7 {
-            0 => 26 << ODSY_DISPMODE_GROUP_SHIFT,
-            1 => 27 << ODSY_DISPMODE_GROUP_SHIFT | ODSY_DISPMODE_WIDTH_4 << ODSY_DISPMODE_WIDTH_SHIFT,
-            2 => 28 << ODSY_DISPMODE_GROUP_SHIFT | ODSY_DISPMODE_WIDTH_5 << ODSY_DISPMODE_WIDTH_SHIFT,
-            3 => 17 << ODSY_DISPMODE_GROUP_SHIFT,
+            0 => 26 << dispmode::GROUP_SHIFT,
+            1 => 27 << dispmode::GROUP_SHIFT | dispmode::WIDTH_4 << dispmode::WIDTH_SHIFT,
+            2 => 28 << dispmode::GROUP_SHIFT | dispmode::WIDTH_5 << dispmode::WIDTH_SHIFT,
+            3 => 17 << dispmode::GROUP_SHIFT,
             4 => 0,
-            5 => ODSY_CMAP_UNVERIFIED_GROUP << ODSY_DISPMODE_GROUP_SHIFT,
-            _ => 31 << ODSY_DISPMODE_GROUP_SHIFT | 1 << ODSY_DISPMODE_WIDTH_SHIFT,
+            5 => ODSY_CMAP_UNVERIFIED_GROUP << dispmode::GROUP_SHIFT,
+            _ => 31 << dispmode::GROUP_SHIFT | 1 << dispmode::WIDTH_SHIFT,
         };
         s.regs().set_dispmode(id as usize, mode);
     }
-    for id in 0..ODSY_OVERLAY_IDS {
+    for id in 0..overlay::IDS {
         // Ids 0, 3, 5 and 6 show the overlay, from different groups.
         let mode = if matches!(id, 0 | 3 | 5 | 6) {
-            ODSY_OVERLAY_MODE_ENABLE | (id + 20) << ODSY_OVERLAY_MODE_GROUP_SHIFT
+            overlay::MODE_ENABLE | (id + 20) << overlay::MODE_GROUP_SHIFT
         } else {
-            id << ODSY_OVERLAY_MODE_GROUP_SHIFT
+            id << overlay::MODE_GROUP_SHIFT
         };
         s.regs().set_overlay_mode(id as usize, mode);
     }
@@ -110,18 +106,18 @@ fn scene_board(scene: Scene) -> Box<Board> {
     }
     assert_eq!(s.did.len(), pixels);
     s.front.lock().displayed_buffer = 0x6d5a_b3c9;
-    s.regs().set_cursor(ODSY_CURSOR_POSITION as usize, 100 << 16 | 40);
-    for i in 0..ODSY_CURSOR_COLOUR_COUNT {
-        s.regs().set_cursor((ODSY_CURSOR_COLOURS + 1 + i) as usize, rng.next_u32() & ODSY_LUT_ENTRY_MASK);
+    s.regs().set_cursor(cursor::POSITION as usize, 100 << 16 | 40);
+    for i in 0..cursor::COLOUR_COUNT {
+        s.regs().set_cursor((cursor::COLOURS + 1 + i) as usize, rng.next_u32() & lut::ENTRY_MASK);
     }
     for w in 0..64u32 {
-        s.regs().set_cursor((ODSY_CURSOR_PLANE + w) as usize, rng.next_u32());
+        s.regs().set_cursor((cursor::PLANE + w) as usize, rng.next_u32());
     }
     for w in 0..128u32 {
-        s.regs().set_cursor((ODSY_CURSOR_GLYPH + w) as usize, rng.next_u32());
+        s.regs().set_cursor((cursor::GLYPH + w) as usize, rng.next_u32());
     }
-    let control = if let Scene::Crosshair = scene { ODSY_CURSOR_CTL_ENABLE | ODSY_CURSOR_CTL_CROSSHAIR } else { ODSY_CURSOR_CTL_ENABLE };
-    s.regs().set_cursor(ODSY_CURSOR_CONTROL as usize, control);
+    let control = if let Scene::Crosshair = scene { cursor::CTL_ENABLE | cursor::CTL_CROSSHAIR } else { cursor::CTL_ENABLE };
+    s.regs().set_cursor(cursor::CONTROL as usize, control);
     if let Scene::Small = scene {
         s.set_scanout_size(1000, 700);
     }

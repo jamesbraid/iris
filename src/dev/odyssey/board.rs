@@ -4,20 +4,13 @@
 //! Ported from include/hw/misc/sgi-odyssey.h in jamesbraid/qemu-sgi-origami.
 
 use super::consts::{
-    ODSY_CLIP_BOX_FIELD_MASK, ODSY_CLIP_RESET_EMPTY, ODSY_CLIP_RESET_FULL, ODSY_CONFIG_COPY_FIELD,
-    ODSY_CONFIG_FOUR_BANKS, ODSY_CONFIG_LATENCY_2, ODSY_CONFIG_SIZE_SHIFT,
-    ODSY_CONTROL_WIDGET_MASK, ODSY_DEPTH24_MAX, ODSY_DEPTH_FUNC_RESET, ODSY_DRAW_MASK_RESET,
-    ODSY_F32_ONE, ODSY_F32_POINT_EIGHT, ODSY_F32_POINT_TWO, ODSY_FLCTL_CONFIG_RESET,
-    ODSY_GL_CONTEXT_HW_ID, ODSY_GL_LIGHT_MODEL_AMBIENT, ODSY_INTR_FIFO_LOW_WATER, ODSY_NIC_FAMILY,
-    ODSY_NIC_PAGE, ODSY_NIC_RECORD_DEFAULT, ODSY_NIC_ROM_SIZE, ODSY_NIC_SERIAL_MASK,
-    ODSY_TEX_SCALE_BIAS_ONE, ODSY_WRITE_MASK_RESET, ODSY_XT_REQ_TIMEOUT_RESET,
+    clip, config, flctl, gl_cmd, intr, nic, tex, write, ODSY_CONTROL_WIDGET_MASK, ODSY_DEPTH24_MAX,
+    ODSY_DEPTH_FUNC_RESET, ODSY_DRAW_MASK_RESET, ODSY_F32_ONE, ODSY_F32_POINT_EIGHT,
+    ODSY_F32_POINT_TWO, ODSY_XT_REQ_TIMEOUT_RESET,
 };
 use super::fifo::CommandFifo;
 use super::geometry::LightScratch;
-use super::gl_context::{
-    GL_CLIP_PLANES, GL_MODELVIEW, GL_OP_ENABLE, GL_SCISSOR_TEST, GL_VERTEX_FLOATS, GlContext,
-    GlDrawable,
-};
+use super::gl_context::{op, vtx, GL_CLIP_PLANES, GL_MODELVIEW, GL_SCISSOR_TEST, GlContext, GlDrawable};
 use super::interface::HostInterface;
 use super::memory::{BoardMemory, ClipRect, Packing, Plane, PlaneFormat};
 use super::pixel_dma::GuestMemory;
@@ -62,7 +55,7 @@ pub(super) const ODSY_GL_LIGHTS: u32 = 8;
 pub(super) const ODSY_GL_LIGHT_COLOURS: u32 = 25;
 pub(super) const ODSY_GL_PROGRAM_REPORTS: u32 = 16;
 /// Program memory: 2048 instructions of six halfwords, of which the window
-/// at 0x738 is the last 0xc7 (ODSY_PROG_WINDOW_BASE).
+/// at 0x738 is the last 0xc7 (prog::WINDOW_BASE).
 pub(super) const ODSY_GL_PROGRAM_ENTRIES: u32 = 2048;
 pub(super) const ODSY_GL_WINDOW_ENTRIES: u32 = 0xc7;
 
@@ -318,7 +311,7 @@ pub(super) struct Board {
     pub gl_restart_m3: u32,
     pub gl_restart_m4: u32,
     pub gl_restart_armed: bool,
-    pub gl_restart_vertex: [[f32; GL_VERTEX_FLOATS]; 3],
+    pub gl_restart_vertex: [[f32; vtx::FLOATS]; 3],
     pub gl_matrix_slot: u32,
     pub gl_matrix: [u32; 16],
     pub gl_texture_matrix: [u32; 16],
@@ -436,7 +429,7 @@ pub(super) struct Board {
     pub image_group_len: u32,
     pub image_group_painted: u32,
     pub image_code: u32,
-    /// The header's whole write code, format and type (ODSY_WRITE_CODE_MASK).
+    /// The header's whole write code, format and type (write::CODE_MASK).
     pub image_write_code: u32,
     /// The bytes of the pixel a write-table image is part way through.
     pub image_pixel: [u8; 16],
@@ -461,7 +454,7 @@ pub(super) struct Board {
     pub dma_bpp_reported: bool,
     pub dma_readback_reported: bool,
     pub dma_code_reported: bool,
-    /// One bit per ODSY_DMA_REPORT_* reason.
+    /// One bit per dma::REPORT_* reason.
     pub dma_read_reported: u32,
 }
 
@@ -633,7 +626,7 @@ impl Default for Board {
             gl_restart_m3: 0,
             gl_restart_m4: 0,
             gl_restart_armed: false,
-            gl_restart_vertex: [[0.0; GL_VERTEX_FLOATS]; 3],
+            gl_restart_vertex: [[0.0; vtx::FLOATS]; 3],
             gl_matrix_slot: 0,
             gl_matrix: [0; 16],
             gl_texture_matrix: [0; 16],
@@ -750,34 +743,34 @@ impl Board {
     /// where the master stops clocking. Without a nic-record, a selected
     /// product supplies its board's name, and otherwise the default is the
     /// public owner record of the board the Odyssey contract describes.
-    pub fn build_nic_rom(&mut self, rom: &mut [u8; ODSY_NIC_ROM_SIZE]) {
+    pub fn build_nic_rom(&mut self, rom: &mut [u8; nic::ROM_SIZE]) {
         let fields: &str = if !self.nic_record.is_empty() {
             &self.nic_record
         } else if !self.product_record.is_empty() {
             &self.product_record
         } else {
-            ODSY_NIC_RECORD_DEFAULT
+            nic::RECORD_DEFAULT
         };
         let record = format!("\u{1}    ;{};", fields);
         let record = record.as_bytes();
-        let length = record.len().min(ODSY_NIC_ROM_SIZE);
+        let length = record.len().min(nic::ROM_SIZE);
 
         rom.fill(0xff);
         rom[..length].copy_from_slice(&record[..length]);
-        if length < ODSY_NIC_PAGE as usize {
-            rom[length..ODSY_NIC_PAGE as usize].fill(b' ');
+        if length < nic::PAGE as usize {
+            rom[length..nic::PAGE as usize].fill(b' ');
         }
     }
 
     pub fn attach_nic(&mut self) -> Result<(), String> {
-        let mut rom = [0u8; ODSY_NIC_ROM_SIZE];
+        let mut rom = [0u8; nic::ROM_SIZE];
 
-        if self.nic_serial & !ODSY_NIC_SERIAL_MASK != 0 {
+        if self.nic_serial & !nic::SERIAL_MASK != 0 {
             return Err(format!("the sgi-odyssey one-wire serial {:#x} does not fit in 48 bits", self.nic_serial));
         }
         self.build_nic_rom(&mut rom);
         let mut bus = crate::dev::w1::Bus::new();
-        bus.add(Box::new(crate::dev::w1::Ds2505::new(ODSY_NIC_FAMILY as u8, self.nic_serial, &rom)));
+        bus.add(Box::new(crate::dev::w1::Ds2505::new(nic::FAMILY as u8, self.nic_serial, &rom)));
         self.nic_bus = Some(bus);
         Ok(())
     }
@@ -799,10 +792,10 @@ impl Board {
         }
         // The outstanding-operation count and the data-FIFO level, which the
         // driver waits to reach zero, stay zero: neither is modeled.
-        self.memory_config = code << ODSY_CONFIG_SIZE_SHIFT
-            | (if self.memory_banks == 4 { ODSY_CONFIG_FOUR_BANKS } else { 0 })
-            | (if self.cas_latency == 2 { ODSY_CONFIG_LATENCY_2 } else { 0 })
-            | ODSY_CONFIG_COPY_FIELD;
+        self.memory_config = code << config::SIZE_SHIFT
+            | (if self.memory_banks == 4 { config::FOUR_BANKS } else { 0 })
+            | (if self.cas_latency == 2 { config::LATENCY_2 } else { 0 })
+            | config::COPY_FIELD;
         Ok(())
     }
 
@@ -827,7 +820,7 @@ impl Board {
         // the guest cannot reach the later FIFO-drain edge (a command
         // submission) until that node exists. Masked here until the driver
         // enables the source; enabling it then asserts.
-        f.intr_flags = ODSY_INTR_FIFO_LOW_WATER;
+        f.intr_flags = intr::FIFO_LOW_WATER;
         f.intr_enable = 0;
         // The level falls with the enables. The routed destination is reset
         // below, so no clearing packet has anywhere to go.
@@ -848,7 +841,7 @@ impl Board {
         f.displayed_buffer = 0;
         f.displayed_written = false;
         drop(f);
-        self.flctl_config = ODSY_FLCTL_CONFIG_RESET;
+        self.flctl_config = flctl::CONFIG_RESET;
         self.memory_control = 0;
         self.fifo_setup = [0; 5];
         self.setup_7f0 = 0;
@@ -894,8 +887,8 @@ impl Board {
         self.win_origin = [0; 2];
         self.read_origin = [0; 2];
         for i in 0..ODSY_CLIP_RECTS as usize {
-            self.clip_words[2 * i] = if i != 0 { ODSY_CLIP_RESET_EMPTY } else { 0 };
-            self.clip_words[2 * i + 1] = if i != 0 { 0 } else { ODSY_CLIP_RESET_FULL };
+            self.clip_words[2 * i] = if i != 0 { clip::RESET_EMPTY } else { 0 };
+            self.clip_words[2 * i + 1] = if i != 0 { 0 } else { clip::RESET_FULL };
         }
         self.clip_update();
         self.id_compare = 0;
@@ -956,7 +949,7 @@ impl Board {
         self.tex_lod[2] = 0x3100;
         self.tex_lod[3] = 0x0f00;
         for c in 0..4usize {
-            self.tex_scale_bias[c * 2] = ODSY_TEX_SCALE_BIAS_ONE;
+            self.tex_scale_bias[c * 2] = tex::SCALE_BIAS_ONE;
             self.tex_scale_bias[c * 2 + 1] = 0;
         }
         self.tex_offset = [0; 3];
@@ -981,7 +974,7 @@ impl Board {
         // it before reinitializing. It is safe here even before Board::allocate
         // allocates the colour plane. Its viewport starts empty: nothing is
         // drawn until the client's combined matrix arrives.
-        self.gl().reset(ODSY_GL_CONTEXT_HW_ID);
+        self.gl().reset(gl_cmd::CONTEXT_HW_ID);
         {
             // Opt into the shared context's per-face polygon modes (0x0415) and
             // line stipple: unset, it silently keeps every face at legacy FILL
@@ -1013,14 +1006,14 @@ impl Board {
         // pattern-mode value that already matches a usable scissor default, so
         // the full window is set here explicitly before the test is enabled,
         // once and for good.
-        self.gl_clip_box[0] = ODSY_CLIP_BOX_FIELD_MASK & (ODSY_WIDTH - 1);
-        self.gl_clip_box[1] = ODSY_CLIP_BOX_FIELD_MASK & (ODSY_HEIGHT - 1);
+        self.gl_clip_box[0] = clip::BOX_FIELD_MASK & (ODSY_WIDTH - 1);
+        self.gl_clip_box[1] = clip::BOX_FIELD_MASK & (ODSY_HEIGHT - 1);
         self.gl_fog = [0; 6];
         self.gl_apply_clip_box();
         {
             let scissor_test = GL_SCISSOR_TEST;
 
-            self.gl_feed(GL_OP_ENABLE as u16, &[scissor_test]);
+            self.gl_feed(op::ENABLE as u16, &[scissor_test]);
         }
         self.gl_matrix_slot = GL_MODELVIEW;
         self.gl_modelview = [0; 16];
@@ -1035,7 +1028,7 @@ impl Board {
         }
         self.gl_rect = [0; 10];
         self.gl_depth_func = ODSY_DEPTH_FUNC_RESET;
-        self.gl_write_mask = ODSY_WRITE_MASK_RESET;
+        self.gl_write_mask = write::MASK_RESET;
         self.gl_combined = [0; 16];
         // The identity projection's (-0, -0, -0, 1): the depth row unflipped.
         self.gl_block16[0] = 0x80000000;
@@ -1063,7 +1056,7 @@ impl Board {
         self.gl_colour_material = 0;
         self.gl_light_colour.fill(0);
         for i in 0..3usize {
-            self.gl_light_colour[ODSY_GL_LIGHT_MODEL_AMBIENT as usize * 4 + i] = ODSY_F32_POINT_TWO;
+            self.gl_light_colour[gl_cmd::LIGHT_MODEL_AMBIENT as usize * 4 + i] = ODSY_F32_POINT_TWO;
             self.gl_material[i] = ODSY_F32_POINT_TWO; // ambient
             self.gl_material[4 + i] = ODSY_F32_POINT_EIGHT; // diffuse
             self.gl_material[8 + i] = 0; // specular
@@ -1073,7 +1066,7 @@ impl Board {
             self.gl_material[i * 4 + 3] = ODSY_F32_ONE;
             self.gl_colour[i] = ODSY_F32_ONE;
         }
-        self.gl_light_colour[ODSY_GL_LIGHT_MODEL_AMBIENT as usize * 4 + 3] = ODSY_F32_ONE;
+        self.gl_light_colour[gl_cmd::LIGHT_MODEL_AMBIENT as usize * 4 + 3] = ODSY_F32_ONE;
         self.gl_light_vec.fill(0);
         self.gl_light_colour_sel = 0;
         self.gl_light_vec_sel = 0;

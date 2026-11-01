@@ -7,23 +7,11 @@
 use crate::devlog::LogModule;
 use super::board::{Board, ODSY_CLIP_RECTS, ODSY_HEIGHT, ODSY_WIDTH};
 use super::consts::{
-    ODSY_AUX_ID_BUFFER, ODSY_AUX_OVERLAY_BUFFER, ODSY_BUFFERS, ODSY_BURST_STENCIL_SHIFT,
-    ODSY_CLIP_FIELD_MASK, ODSY_CLIP_OFFSCREEN_HI, ODSY_CLIP_WORD_MASK, ODSY_CLIP_X_SHIFT,
-    ODSY_CMD_COPY_RECT_TRIGGER, ODSY_COPY_RECT_DEST_SHIFT, ODSY_COPY_RECT_FORMAT_SOURCE_SHIFT,
-    ODSY_COPY_RECT_SOURCE_SHIFT, ODSY_DEPTH24_MAX, ODSY_DEST_FLAGS, ODSY_DEST_ID_PLANES,
-    ODSY_DMA_FENCE_INTERRUPT, ODSY_DMA_FENCE_SLOT_MASK, ODSY_DMA_FENCE_TOKEN_SHIFT,
-    ODSY_DMA_SENTINEL_DRAW, ODSY_DMA_SENTINEL_READ, ODSY_DRAW_MASK_BUFFER0, ODSY_DRAW_MASK_BUFFER1,
-    ODSY_FENCE_WORD_MASK, ODSY_ID_COMPARE_ENABLE, ODSY_ID_COMPARE_MASK_SHIFT,
-    ODSY_IMAGE_BURST_BASE, ODSY_IMAGE_BURST_FMT_MASK, ODSY_IMAGE_BURST_RESERVED_MASK,
-    ODSY_IMAGE_CODE_ABGR, ODSY_IMAGE_CODE_ABGR12, ODSY_IMAGE_CODE_CI, ODSY_IMAGE_CODE_CI16,
-    ODSY_IMAGE_CODE_DEPTH_STENCIL, ODSY_IMAGE_CODE_FALLBACK_XRGB, ODSY_IMAGE_CODE_LUM,
-    ODSY_IMAGE_CODE_LUM12, ODSY_IMAGE_CODE_LUM_ALPHA, ODSY_IMAGE_CODE_LUM_ALPHA12,
-    ODSY_IMAGE_CODE_RGB, ODSY_IMAGE_CODE_RGB12, ODSY_IMAGE_CODE_RGBA, ODSY_IMAGE_CODE_RGBA12,
-    ODSY_IMAGE_FMT_CI, ODSY_IMAGE_FMT_RGB, ODSY_IMAGE_FMT_RGBA16, ODSY_INDEX_MASK,
-    ODSY_MODE_COLOR_LOGIC_OP, ODSY_MODE_INDEX_LOGIC_OP, ODSY_PATTERN_MODE_ENABLE,
-    ODSY_PATTERN_SHAPE_16X64, ODSY_PATTERN_SHAPE_32X32, ODSY_PATTERN_SHAPE_64X16,
-    ODSY_PATTERN_SHAPE_OPAQUE, ODSY_PLANE_MASK_SHIFT, ODSY_WRITE_DEPTH, ODSY_WRITE_STENCIL_MASK,
-    ODSY_WRITE_STENCIL_SHIFT,
+    clip, cmd, dest, dma, image, mode, pattern, write, ODSY_AUX_ID_BUFFER, ODSY_AUX_OVERLAY_BUFFER,
+    ODSY_BUFFERS, ODSY_BURST_STENCIL_SHIFT, ODSY_COPY_RECT_DEST_SHIFT,
+    ODSY_COPY_RECT_FORMAT_SOURCE_SHIFT, ODSY_COPY_RECT_SOURCE_SHIFT, ODSY_DEPTH24_MAX,
+    ODSY_DRAW_MASK_BUFFER0, ODSY_DRAW_MASK_BUFFER1, ODSY_FENCE_WORD_MASK, ODSY_ID_COMPARE_ENABLE,
+    ODSY_ID_COMPARE_MASK_SHIFT, ODSY_INDEX_MASK, ODSY_PLANE_MASK_SHIFT,
 };
 use super::gl_context::GL_CLEAR;
 use super::memory::{logic_op, plane_bpp, plane_bytes_per_pixel, BoardMemory, ClipRect, LOGIC_COPY, Plane};
@@ -64,7 +52,7 @@ pub(super) fn id_compare_passes(did: &[u8], id_compare: u32, x: i64, y: i64) -> 
 
 impl Board {
     /// Colour buffer b's board memory and plane (set up by Board::allocate()), b being 0 or
-    /// 1 in the displayed-buffer bits' sense (ODSY_REG_DRAW_MASK).
+    /// 1 in the displayed-buffer bits' sense (reg::DRAW_MASK).
     ///
     /// The planes are the raster unit's: the accessors here and below wait
     /// for its queued jobs before the front end reads or writes them
@@ -101,9 +89,9 @@ impl Board {
     }
 
     /// Whether the last 0x1017 select named the id-plane destination, whatever
-    /// ODSY_DEST_FLAGS it carried.
+    /// dest::FLAGS it carried.
     pub fn dest_is_id_planes(&self) -> bool {
-        (self.dest_buffer_word & !ODSY_DEST_FLAGS) == (ODSY_DEST_ID_PLANES & !ODSY_DEST_FLAGS)
+        (self.dest_buffer_word & !dest::FLAGS) == (dest::ID_PLANES & !dest::FLAGS)
     }
 
     /// The buffers a colour write lands in, bit b for buffer b, from the last
@@ -123,14 +111,14 @@ impl Board {
     /// the token lands only once the drawing before it is in the planes.
     pub fn fence(&mut self, cookie: u64) {
         let word = (cookie & ODSY_FENCE_WORD_MASK as u64) as u32;
-        let slot = word & ODSY_DMA_FENCE_SLOT_MASK;
-        let token = (word >> ODSY_DMA_FENCE_TOKEN_SHIFT) & 0xffff;
+        let slot = word & dma::FENCE_SLOT_MASK;
+        let token = (word >> dma::FENCE_TOKEN_SHIFT) & 0xffff;
         let base = (((self.host_write_addr_upper & 0xffff) as u64) << 32) | self.host_write_addr_lower as u64;
         let (guest, front) = (self.guest.clone(), self.front.clone());
 
         self.raster.submit_completion(move |_| {
             write_guest(&guest, base.wrapping_add(2 * slot as u64), &(token as u16).to_be_bytes());
-            if word & ODSY_DMA_FENCE_INTERRUPT != 0 {
+            if word & dma::FENCE_INTERRUPT != 0 {
                 front.lock().deliver_softsync();
             }
         });
@@ -145,10 +133,10 @@ impl Board {
             let lo = self.clip_words[2 * i];
             let hi = self.clip_words[2 * i + 1];
             let r = ClipRect {
-                x0: ((lo >> ODSY_CLIP_X_SHIFT) & ODSY_CLIP_FIELD_MASK) as i32,
-                y0: (lo & ODSY_CLIP_FIELD_MASK) as i32,
-                x1: ((hi >> ODSY_CLIP_X_SHIFT) & ODSY_CLIP_FIELD_MASK) as i32,
-                y1: (hi & ODSY_CLIP_FIELD_MASK) as i32,
+                x0: ((lo >> clip::X_SHIFT) & clip::FIELD_MASK) as i32,
+                y0: (lo & clip::FIELD_MASK) as i32,
+                x1: ((hi >> clip::X_SHIFT) & clip::FIELD_MASK) as i32,
+                y1: (hi & clip::FIELD_MASK) as i32,
             };
 
             if r.x0 <= r.x1 && r.y0 <= r.y1 {
@@ -158,12 +146,12 @@ impl Board {
         }
     }
 
-    /// Whether clip_words is the off-screen form (ODSY_CMD_WINDOW_RESTORE).
+    /// Whether clip_words is the off-screen form (cmd::WINDOW_RESTORE).
     pub fn clip_is_offscreen(&self) -> bool {
         for (i, &word) in self.clip_words.iter().enumerate().take((2 * ODSY_CLIP_RECTS) as usize) {
-            let want = if i == 1 { ODSY_CLIP_OFFSCREEN_HI } else { 0 };
+            let want = if i == 1 { clip::OFFSCREEN_HI } else { 0 };
 
-            if (word & ODSY_CLIP_WORD_MASK) != want {
+            if (word & clip::WORD_MASK) != want {
                 return false;
             }
         }
@@ -356,7 +344,7 @@ impl Board {
     /// overlay byte when buffer 1 is selected and the id byte otherwise.
     pub fn paint_integer(&mut self, x: i64, y: i64, is_index: bool, value: u32) {
         let src = fill_pixel(is_index, value);
-        let enable = if is_index { ODSY_MODE_INDEX_LOGIC_OP } else { ODSY_MODE_COLOR_LOGIC_OP };
+        let enable = if is_index { mode::INDEX_LOGIC_OP } else { mode::COLOR_LOGIC_OP };
         let op = self.gl_ref().cur.logic_op_mode.wrapping_sub(GL_CLEAR) as u8;
         let buffers = self.draw_buffers();
 
@@ -391,7 +379,7 @@ impl Board {
     /// stores the same bytes.
     pub fn paint_integer_span(&mut self, runs: &RowRuns, y: i64, x0: i64, x1: i64, is_index: bool, value: u32) {
         let src = fill_pixel(is_index, value);
-        let enable = if is_index { ODSY_MODE_INDEX_LOGIC_OP } else { ODSY_MODE_COLOR_LOGIC_OP };
+        let enable = if is_index { mode::INDEX_LOGIC_OP } else { mode::COLOR_LOGIC_OP };
         let op = self.gl_ref().cur.logic_op_mode.wrapping_sub(GL_CLEAR) as u8;
         let logic = (self.pattern_mode & enable) != 0 && op as u32 != LOGIC_COPY;
         let id_test = self.id_compare_active();
@@ -642,15 +630,15 @@ impl Board {
 
         let operands = CopyOperands::decode(&self.cmd_operand);
 
-        if operands.src_base == ODSY_DMA_SENTINEL_READ || operands.dest_base == ODSY_DMA_SENTINEL_DRAW {
+        if operands.src_base == dma::SENTINEL_READ || operands.dest_base == dma::SENTINEL_DRAW {
             if !self.copy_rect_gl(&operands) {
-                self.cmd_unimplemented(ODSY_CMD_COPY_RECT_TRIGGER);
+                self.cmd_unimplemented(cmd::COPY_RECT_TRIGGER);
             }
             return;
         }
 
         if source != format_source || dest != format_dest {
-            self.cmd_unimplemented(ODSY_CMD_COPY_RECT_TRIGGER);
+            self.cmd_unimplemented(cmd::COPY_RECT_TRIGGER);
             return;
         }
 
@@ -678,7 +666,7 @@ impl Board {
                     self.dest_base
                 );
             }
-            self.cmd_unimplemented(ODSY_CMD_COPY_RECT_TRIGGER);
+            self.cmd_unimplemented(cmd::COPY_RECT_TRIGGER);
             return;
         }
         if id_base && src_at_id && dest_at_id {
@@ -695,7 +683,7 @@ impl Board {
                 }
             }
         } else {
-            self.cmd_unimplemented(ODSY_CMD_COPY_RECT_TRIGGER);
+            self.cmd_unimplemented(cmd::COPY_RECT_TRIGGER);
             return;
         }
         let (dy, rows) = self.copy_dest_rows();
@@ -706,12 +694,12 @@ impl Board {
     /// selected. A quad drawn in this state paints the current colour through the
     /// pattern instead of as a solid rectangle.
     pub fn pattern_enabled(&mut self) -> bool {
-        if (self.pattern_mode & ODSY_PATTERN_MODE_ENABLE) != ODSY_PATTERN_MODE_ENABLE {
+        if (self.pattern_mode & pattern::MODE_ENABLE) != pattern::MODE_ENABLE {
             return false;
         }
         matches!(
-            self.pattern_shape & !ODSY_PATTERN_SHAPE_OPAQUE,
-            ODSY_PATTERN_SHAPE_64X16 | ODSY_PATTERN_SHAPE_32X32 | ODSY_PATTERN_SHAPE_16X64
+            self.pattern_shape & !pattern::SHAPE_OPAQUE,
+            pattern::SHAPE_64X16 | pattern::SHAPE_32X32 | pattern::SHAPE_16X64
         )
     }
 
@@ -721,20 +709,20 @@ impl Board {
     /// treated as clear: the X server never draws a quad larger than its pattern.
     pub fn pattern_bit(&mut self, u: u32, v: u32) -> bool {
 
-        let (word, bit) = match self.pattern_shape & !ODSY_PATTERN_SHAPE_OPAQUE {
-            ODSY_PATTERN_SHAPE_64X16 => {
+        let (word, bit) = match self.pattern_shape & !pattern::SHAPE_OPAQUE {
+            pattern::SHAPE_64X16 => {
                 if u >= 64 || v >= 16 {
                     return false;
                 }
                 (self.pattern_buffer[(2 * v + (u >> 5)) as usize], 31 - (u & 31))
             }
-            ODSY_PATTERN_SHAPE_32X32 => {
+            pattern::SHAPE_32X32 => {
                 if u >= 32 || v >= 32 {
                     return false;
                 }
                 (self.pattern_buffer[v as usize], 31 - u)
             }
-            ODSY_PATTERN_SHAPE_16X64 => {
+            pattern::SHAPE_16X64 => {
                 if u >= 16 || v >= 64 {
                     return false;
                 }
@@ -766,7 +754,7 @@ impl Board {
     /// the tile never contributes.
     #[allow(clippy::too_many_arguments, reason = "a fill rectangle, its pattern origin and its colour")]
     pub fn pattern_fill(&mut self, x: u32, y: u32, w: u32, h: u32, pat_u0: u32, pat_v0: u32, is_index: bool, value: u32) {
-        let opaque = self.pattern_shape & ODSY_PATTERN_SHAPE_OPAQUE != 0;
+        let opaque = self.pattern_shape & pattern::SHAPE_OPAQUE != 0;
         let background = self.pattern_background(is_index);
         // Each row as spans of equal pattern bits, painted a span at a time.
         for v in 0..h {
@@ -928,11 +916,11 @@ impl Board {
 pub(super) fn code_carries_alpha(code: u32) -> bool {
     matches!(
         code,
-        ODSY_IMAGE_CODE_RGBA
-            | ODSY_IMAGE_CODE_LUM_ALPHA
-            | ODSY_IMAGE_CODE_ABGR
-            | ODSY_IMAGE_CODE_RGBA12
-            | ODSY_IMAGE_CODE_ABGR12
+        image::CODE_RGBA
+            | image::CODE_LUM_ALPHA
+            | image::CODE_ABGR
+            | image::CODE_RGBA12
+            | image::CODE_ABGR12
     )
 }
 
@@ -943,10 +931,10 @@ pub(super) fn unorm16_to_8(v: u32) -> u32 {
 /// Components of a 12-bit texture source code, or 0 for any other code.
 pub(super) fn texel12_components(code: u32) -> u32 {
     match code {
-        ODSY_IMAGE_CODE_LUM12 => 1,
-        ODSY_IMAGE_CODE_LUM_ALPHA12 => 2,
-        ODSY_IMAGE_CODE_RGB12 => 3,
-        ODSY_IMAGE_CODE_RGBA12 | ODSY_IMAGE_CODE_ABGR12 => 4,
+        image::CODE_LUM12 => 1,
+        image::CODE_LUM_ALPHA12 => 2,
+        image::CODE_RGB12 => 3,
+        image::CODE_RGBA12 | image::CODE_ABGR12 => 4,
         _ => 0,
     }
 }
@@ -961,10 +949,10 @@ pub(super) fn decode_texel12(code: u32, b: &[u8], wide: bool) -> u32 {
         c[i] = if wide { unorm16_to_8(u16::from_be_bytes(b[2 * i..][..2].try_into().unwrap()) as u32) } else { b[i] as u32 };
     }
     match code {
-        ODSY_IMAGE_CODE_LUM12 => pack_pixel(c[0], c[0], c[0]),
-        ODSY_IMAGE_CODE_LUM_ALPHA12 => (pack_pixel(c[0], c[0], c[0]) & !0xffu32) | c[1],
-        ODSY_IMAGE_CODE_RGB12 => pack_pixel(c[0], c[1], c[2]),
-        ODSY_IMAGE_CODE_ABGR12 => (pack_pixel(c[3], c[2], c[1]) & !0xffu32) | c[0],
+        image::CODE_LUM12 => pack_pixel(c[0], c[0], c[0]),
+        image::CODE_LUM_ALPHA12 => (pack_pixel(c[0], c[0], c[0]) & !0xffu32) | c[1],
+        image::CODE_RGB12 => pack_pixel(c[0], c[1], c[2]),
+        image::CODE_ABGR12 => (pack_pixel(c[3], c[2], c[1]) & !0xffu32) | c[0],
         _ => (pack_pixel(c[0], c[1], c[2]) & !0xffu32) | c[3],
     }
 }
@@ -975,21 +963,21 @@ impl Board {
     /// this model does not know.
     pub fn decode_pixel(&mut self, code: u32, b: &[u8]) -> Option<u32> {
         match code {
-            ODSY_IMAGE_CODE_ABGR => Some((pack_pixel(b[3] as u32, b[2] as u32, b[1] as u32) & !0xffu32) | b[0] as u32),
-            ODSY_IMAGE_CODE_FALLBACK_XRGB => Some(pack_pixel(b[1] as u32, b[2] as u32, b[3] as u32)),
-            ODSY_IMAGE_CODE_RGBA | ODSY_IMAGE_CODE_RGBA12 => Some(u32::from_be_bytes(b[..4].try_into().unwrap())),
-            ODSY_IMAGE_CODE_RGB => Some(pack_pixel(b[0] as u32, b[1] as u32, b[2] as u32)),
-            ODSY_IMAGE_CODE_LUM => Some(pack_pixel(b[0] as u32, b[0] as u32, b[0] as u32)),
-            ODSY_IMAGE_CODE_LUM_ALPHA => Some((pack_pixel(b[0] as u32, b[0] as u32, b[0] as u32) & !0xffu32) | b[1] as u32),
-            ODSY_IMAGE_CODE_LUM12 | ODSY_IMAGE_CODE_LUM_ALPHA12 => {
+            image::CODE_ABGR => Some((pack_pixel(b[3] as u32, b[2] as u32, b[1] as u32) & !0xffu32) | b[0] as u32),
+            image::CODE_FALLBACK_XRGB => Some(pack_pixel(b[1] as u32, b[2] as u32, b[3] as u32)),
+            image::CODE_RGBA | image::CODE_RGBA12 => Some(u32::from_be_bytes(b[..4].try_into().unwrap())),
+            image::CODE_RGB => Some(pack_pixel(b[0] as u32, b[1] as u32, b[2] as u32)),
+            image::CODE_LUM => Some(pack_pixel(b[0] as u32, b[0] as u32, b[0] as u32)),
+            image::CODE_LUM_ALPHA => Some((pack_pixel(b[0] as u32, b[0] as u32, b[0] as u32) & !0xffu32) | b[1] as u32),
+            image::CODE_LUM12 | image::CODE_LUM_ALPHA12 => {
                 // A burst's 16-bit components (pixel_bytes()).
                 Some(decode_texel12(code, b, true))
             }
-            ODSY_IMAGE_CODE_CI => {
+            image::CODE_CI => {
                 // The raw index: scanout resolves it through the pixel's drawable.
                 Some(b[0] as u32)
             }
-            ODSY_IMAGE_CODE_CI16 => Some(u16::from_be_bytes(b[..2].try_into().unwrap()) as u32 & ODSY_INDEX_MASK),
+            image::CODE_CI16 => Some(u16::from_be_bytes(b[..2].try_into().unwrap()) as u32 & ODSY_INDEX_MASK),
             _ => None,
         }
     }
@@ -997,40 +985,40 @@ impl Board {
 
 /// Whether a source format carries colour indices rather than colours.
 pub(super) fn code_is_index(code: u32) -> bool {
-    code == ODSY_IMAGE_CODE_CI || code == ODSY_IMAGE_CODE_CI16
+    code == image::CODE_CI || code == image::CODE_CI16
 }
 
 /// Bytes a pixel of a source format takes, 0 for an unknown code.
 pub(super) fn pixel_bytes(code: u32) -> u32 {
     match code {
-        ODSY_IMAGE_CODE_ABGR | ODSY_IMAGE_CODE_FALLBACK_XRGB | ODSY_IMAGE_CODE_RGBA | ODSY_IMAGE_CODE_RGBA12 => 4,
-        ODSY_IMAGE_CODE_RGB => 3,
-        ODSY_IMAGE_CODE_LUM | ODSY_IMAGE_CODE_CI => 1,
-        ODSY_IMAGE_CODE_LUM_ALPHA | ODSY_IMAGE_CODE_LUM12 | ODSY_IMAGE_CODE_CI16 => 2,
-        ODSY_IMAGE_CODE_LUM_ALPHA12 => 4,
+        image::CODE_ABGR | image::CODE_FALLBACK_XRGB | image::CODE_RGBA | image::CODE_RGBA12 => 4,
+        image::CODE_RGB => 3,
+        image::CODE_LUM | image::CODE_CI => 1,
+        image::CODE_LUM_ALPHA | image::CODE_LUM12 | image::CODE_CI16 => 2,
+        image::CODE_LUM_ALPHA12 => 4,
         _ => 0,
     }
 }
 
 pub(super) fn image_pairing_supported(code: u32, fmt: u32) -> bool {
-    if code == ODSY_IMAGE_CODE_RGBA12 {
-        return fmt == ODSY_IMAGE_FMT_RGB || fmt == ODSY_IMAGE_FMT_RGBA16;
+    if code == image::CODE_RGBA12 {
+        return fmt == image::FMT_RGB || fmt == image::FMT_RGBA16;
     }
-    if code == ODSY_IMAGE_CODE_RGB12 || code == ODSY_IMAGE_CODE_ABGR12 {
-        return fmt == ODSY_IMAGE_FMT_RGBA16;
+    if code == image::CODE_RGB12 || code == image::CODE_ABGR12 {
+        return fmt == image::FMT_RGBA16;
     }
     // The library sends 8-bit luminance-alpha under the colour-index or the
     // RGB tag, and its 16-bit luminance and luminance-alpha as 16-bit
     // components under the RGBA16 tag as well as the other two (datasheet,
     // "Texture source codes for 12-bit textures"; observed on 13x5 draws of
     // the GL test suite).
-    if code == ODSY_IMAGE_CODE_LUM_ALPHA {
-        return fmt != ODSY_IMAGE_FMT_RGBA16;
+    if code == image::CODE_LUM_ALPHA {
+        return fmt != image::FMT_RGBA16;
     }
-    if code == ODSY_IMAGE_CODE_LUM12 || code == ODSY_IMAGE_CODE_LUM_ALPHA12 {
+    if code == image::CODE_LUM12 || code == image::CODE_LUM_ALPHA12 {
         return true;
     }
-    fmt != ODSY_IMAGE_FMT_RGBA16
+    fmt != image::FMT_RGBA16
 }
 
 impl Board {
@@ -1088,14 +1076,14 @@ impl Board {
 
         // An off-screen object and the id planes hold no depth or stencil.
         if self.image_object().is_none() && !self.dest_is_id_planes() && self.pixel_allowed(x, y) {
-            let mask = (self.gl_write_mask >> ODSY_WRITE_STENCIL_SHIFT) & ODSY_WRITE_STENCIL_MASK;
+            let mask = (self.gl_write_mask >> write::STENCIL_SHIFT) & write::STENCIL_MASK;
 
-            if self.gl_write_mask & ODSY_WRITE_DEPTH != 0 {
+            if self.gl_write_mask & write::DEPTH != 0 {
                 self.depth_store(x, y, word & ODSY_DEPTH24_MAX);
             }
             if mask != 0 {
                 let old = self.stencil_load(x, y);
-                let data = (word >> ODSY_BURST_STENCIL_SHIFT) & ODSY_WRITE_STENCIL_MASK;
+                let data = (word >> ODSY_BURST_STENCIL_SHIFT) & write::STENCIL_MASK;
 
                 self.stencil_store(x, y, ((data & mask) | (old & !mask)) as u8);
             }
@@ -1118,11 +1106,11 @@ impl Board {
         if !self.image_burst_supported(self.image_fmt) {
             return;
         }
-        if code == ODSY_IMAGE_CODE_DEPTH_STENCIL {
+        if code == image::CODE_DEPTH_STENCIL {
             self.image_depth_stencil_word(word);
             return;
         }
-        if self.image_fmt == ODSY_IMAGE_FMT_RGBA16 && texel12_components(code) != 0 {
+        if self.image_fmt == image::FMT_RGBA16 && texel12_components(code) != 0 {
             // A stream of 16-bit components, high half first, a pixel every
             // texel12_components() halves: two words for 0x6b and 0x6c, a
             // word and a half for 0x69. At most two halves wait between words;
@@ -1191,7 +1179,7 @@ impl Board {
                         self.image_write_code
                     );
                 }
-                code = if self.image_fmt == ODSY_IMAGE_FMT_RGB { ODSY_IMAGE_CODE_FALLBACK_XRGB } else { ODSY_IMAGE_CODE_CI };
+                code = if self.image_fmt == image::FMT_RGB { image::CODE_FALLBACK_XRGB } else { image::CODE_CI };
                 n = pixel_bytes(code);
             }
         }
@@ -1221,7 +1209,7 @@ impl Board {
         // pixels ends on a word, padded with 0x5a, and the next row starts
         // on the next word. Eight-bit pixels (the X server's index images)
         // are left as they were: no trace shows their rows padded.
-        let padded_rows = (n == 2 || n == 3) && code != ODSY_IMAGE_CODE_CI16;
+        let padded_rows = (n == 2 || n == 3) && code != image::CODE_CI16;
 
         for (i, &byte) in b[..4].iter().enumerate() {
             let mut px = [0u8; 4];
@@ -1247,13 +1235,13 @@ impl Board {
 
 /// The format of a pixel-burst register-select word, None for any other.
 pub(super) fn image_burst_fmt(reg: u32) -> Option<u32> {
-    let f = reg & ODSY_IMAGE_BURST_FMT_MASK;
+    let f = reg & image::BURST_FMT_MASK;
 
-    if (reg & ODSY_IMAGE_BURST_BASE) == 0 || (reg & ODSY_IMAGE_BURST_RESERVED_MASK) != 0 {
+    if (reg & image::BURST_BASE) == 0 || (reg & image::BURST_RESERVED_MASK) != 0 {
         return None;
     }
     match f {
-        ODSY_IMAGE_FMT_CI | ODSY_IMAGE_FMT_RGB | ODSY_IMAGE_FMT_RGBA16 => Some(f),
+        image::FMT_CI | image::FMT_RGB | image::FMT_RGBA16 => Some(f),
         // Other documented pixel-burst formats remain unsupported.
         _ => None,
     }

@@ -809,8 +809,8 @@ mod tests {
     use super::*;
     use crate::dev::odyssey::raster_bench;
     use crate::dev::odyssey::gl_context::{
-        GL_COLOUR_MASK_ALL, GL_LEQUAL, GL_REPLACE, GL_RGBA, GL_SMOOTH, GL_TRIANGLES,
-        GL_VERTEX_FLOATS, GL_V_COLOR, GL_V_POSITION, GL_V_TEXCOORD, GlDraw, GlDrawState,
+        vtx, GL_COLOUR_MASK_ALL, GL_LEQUAL, GL_REPLACE, GL_RGBA, GL_SMOOTH, GL_TRIANGLES, GlDraw,
+        GlDrawState,
     };
     use crate::dev::odyssey::memory::ClipRect;
     use crate::dev::odyssey::raster::{GlTexImage, LineRule, RasterRules, RasterTarget, Texels};
@@ -885,13 +885,13 @@ mod tests {
         st.drawable.clip.n = 1;
         st.drawable.clip.r[0] = ClipRect { x0: 0, y0: 0, x1: W as i32 - 1, y1: W as i32 - 1 };
         // x, y, z, w, then colour; strq at the texture slot.
-        let mut verts = vec![0.0f32; 3 * GL_VERTEX_FLOATS];
+        let mut verts = vec![0.0f32; 3 * vtx::FLOATS];
         let corners = [(-0.95f32, -0.95f32, 0.0f32, 0.0f32), (0.95, -0.9, 3.0, 0.0), (-0.9, 0.95, 0.5, 4.0)];
         for (i, (x, y, s, t)) in corners.iter().enumerate() {
-            let v = &mut verts[i * GL_VERTEX_FLOATS..(i + 1) * GL_VERTEX_FLOATS];
-            v[GL_V_POSITION..GL_V_POSITION + 4].copy_from_slice(&[*x, *y, 0.0, 1.0]);
-            v[GL_V_COLOR..GL_V_COLOR + 4].copy_from_slice(&[1.0; 4]);
-            v[GL_V_TEXCOORD..GL_V_TEXCOORD + 4].copy_from_slice(&[*s, *t, 0.0, 1.0]);
+            let v = &mut verts[i * vtx::FLOATS..(i + 1) * vtx::FLOATS];
+            v[vtx::POSITION..vtx::POSITION + 4].copy_from_slice(&[*x, *y, 0.0, 1.0]);
+            v[vtx::COLOR..vtx::COLOR + 4].copy_from_slice(&[1.0; 4]);
+            v[vtx::TEXCOORD..vtx::TEXCOORD + 4].copy_from_slice(&[*s, *t, 0.0, 1.0]);
         }
         let stipple = [0u32; 32];
         let mut d = GlDraw::new(GL_TRIANGLES, 3, &verts, &st, &stipple);

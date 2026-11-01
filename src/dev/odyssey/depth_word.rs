@@ -117,10 +117,10 @@ pub(super) fn word_with_offset(word: u32, steps: i64) -> u32 {
 mod tests {
     use super::*;
     use crate::dev::odyssey::raster_bench;
-    use crate::dev::odyssey::consts::ODSY_POLYGON_OFFSET_SCALE;
+    use crate::dev::odyssey::consts::polygon;
     use crate::dev::odyssey::gl_context::{
-        GL_COLOUR_MASK_ALL, GL_FLAT, GL_LEQUAL, GL_LESS, GL_OFFSET_FILL, GL_TRIANGLES,
-        GL_VERTEX_FLOATS, GL_V_COLOR, GL_V_POSITION, GlDraw, GlDrawState,
+        vtx, GL_COLOUR_MASK_ALL, GL_FLAT, GL_LEQUAL, GL_LESS, GL_OFFSET_FILL, GL_TRIANGLES, GlDraw,
+        GlDrawState,
     };
     use crate::dev::odyssey::memory::ClipRect;
     use crate::dev::odyssey::raster::{LineRule, NoTexels, RasterRules};
@@ -306,7 +306,7 @@ mod tests {
             colour_mask: GL_COLOUR_MASK_ALL,
             polygon_offset: GL_OFFSET_FILL,
             // What the 0x058 write puts in the shared context.
-            offset_bias: steps as f32 * ODSY_POLYGON_OFFSET_SCALE,
+            offset_bias: steps as f32 * polygon::OFFSET_SCALE,
             offset_factor: factor,
             offset_units: units,
             ..Default::default()
@@ -315,14 +315,14 @@ mod tests {
         st.drawable.front = 1;
         st.drawable.clip.n = 1;
         st.drawable.clip.r[0] = ClipRect { x0: 0, y0: 0, x1: WIDTH as i32 - 1, y1: WIDTH as i32 - 1 };
-        let mut verts = vec![0.0f32; 3 * GL_VERTEX_FLOATS];
+        let mut verts = vec![0.0f32; 3 * vtx::FLOATS];
         let ndc_z = (zw * 2.0 - 1.0) as f32;
 
         for (i, (x, y)) in [(-1.0f32, -1.0f32), (3.0, -1.0), (-1.0, 3.0)].iter().enumerate() {
-            let v = &mut verts[i * GL_VERTEX_FLOATS..(i + 1) * GL_VERTEX_FLOATS];
+            let v = &mut verts[i * vtx::FLOATS..(i + 1) * vtx::FLOATS];
             let z = if i == 2 { ndc_z + (tilt * 2.0) as f32 } else { ndc_z };
-            v[GL_V_POSITION..GL_V_POSITION + 4].copy_from_slice(&[*x, *y, z, 1.0]);
-            v[GL_V_COLOR..GL_V_COLOR + 4].copy_from_slice(&[1.0; 4]);
+            v[vtx::POSITION..vtx::POSITION + 4].copy_from_slice(&[*x, *y, z, 1.0]);
+            v[vtx::COLOR..vtx::COLOR + 4].copy_from_slice(&[1.0; 4]);
         }
         let stipple = [0u32; 32];
         let mut d = GlDraw::new(GL_TRIANGLES, 3, &verts, &st, &stipple);

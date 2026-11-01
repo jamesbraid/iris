@@ -2,7 +2,7 @@
 //! answers as, and how the widget windows reach it.
 
 use crate::dev::odyssey::Odyssey;
-use crate::dev::odyssey::consts::{ODSY_BACKEND_VERSION, ODSY_CONTROL_WIDGET_MASK, ODSY_REG_DEST_SELECT};
+use crate::dev::odyssey::consts::{backend, reg, ODSY_CONTROL_WIDGET_MASK};
 use crate::dev::odyssey::tests::{board, cmd, reg_read, select, VPRO_WIDGET};
 use crate::ip30::{widget_large_base, widget_small_base};
 use std::sync::Arc;
@@ -165,9 +165,9 @@ fn the_v12_memory_word_decodes_to_four_banks_and_latency_three() {
 fn every_profile_answers_back_end_version_one_and_ignores_a_write() {
     for product in ["v12", "v10", "v8", "v6"] {
         let (mut s, _) = board(product);
-        assert_eq!(s.mmio_read(ODSY_BACKEND_VERSION, 4), 1, "{product}");
-        s.mmio_write(ODSY_BACKEND_VERSION, 0, 4);
-        assert_eq!(s.mmio_read(ODSY_BACKEND_VERSION, 4), 1, "{product}");
+        assert_eq!(s.mmio_read(backend::VERSION, 4), 1, "{product}");
+        s.mmio_write(backend::VERSION, 0, 4);
+        assert_eq!(s.mmio_read(backend::VERSION, 4), 1, "{product}");
     }
 }
 
@@ -181,7 +181,7 @@ fn every_profile_answers_back_end_version_one_and_ignores_a_write() {
 #[test]
 fn a_destination_beyond_the_reported_memory_is_dropped() {
     let (mut s, _) = board("v10");
-    cmd(&mut s, select(ODSY_REG_DEST_SELECT));
+    cmd(&mut s, select(reg::DEST_SELECT));
     for operand in [0x20_0000, 16, 0, 0] {
         cmd(&mut s, operand);
     }
@@ -191,7 +191,7 @@ fn a_destination_beyond_the_reported_memory_is_dropped() {
 
     // The same base is in range on a 128 MiB board.
     let (mut s, _) = board("v12");
-    cmd(&mut s, select(ODSY_REG_DEST_SELECT));
+    cmd(&mut s, select(reg::DEST_SELECT));
     for operand in [0x20_0000, 16, 0, 0] {
         cmd(&mut s, operand);
     }

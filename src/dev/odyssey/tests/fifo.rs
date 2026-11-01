@@ -3,13 +3,7 @@
 use crate::dev::odyssey::board::Board;
 use crate::dev::odyssey::command::{CFIFO_PREAMBLE, CfifoPreamble};
 use crate::dev::odyssey::consts::{
-    ODSY_BUZZ_1, ODSY_CFIFO_DEPTH, ODSY_CFIFO_LOW_WATER, ODSY_CFIFO_SELFTEST,
-    ODSY_CFIFO_SELFTEST_OK, ODSY_CFIFO_WORDS, ODSY_CMD_FIFO, ODSY_CTX_SHADOW_ADDR_LOWER,
-    ODSY_CTX_SHADOW_ADDR_UPPER, ODSY_CTX_SWITCH_DONE_OFFSET, ODSY_CTX_SWITCH_PORT,
-    ODSY_FLCTL_TARGET, ODSY_HOST_WRITE_ADDR_LOWER, ODSY_HOST_WRITE_ADDR_UPPER, ODSY_INTR_CLEAR,
-    ODSY_INTR_ENABLE_SET, ODSY_INTR_FIFO_HIGH_WATER, ODSY_INTR_FIFO_LOW_WATER, ODSY_INTR_FLAGS,
-    ODSY_REG_HOST_WRITE, ODSY_STATUS0, ODSY_STATUS0_FIFO_EMPTY, ODSY_STATUS0_FIFO_HIGH_WATER,
-    ODSY_STATUS0_FIFO_LOW_WATER, ODSY_SW_TOKEN,
+    cfifo, ctx, flctl, host, intr, reg, self, status0, ODSY_BUZZ_1, ODSY_STATUS0, ODSY_SW_TOKEN,
 };
 use crate::dev::odyssey::fifo::{CommandFifo, FifoDepth, RING_STORES, RUN_MAX, Run};
 use crate::dev::odyssey::interface::HostInterface;
@@ -48,7 +42,7 @@ fn threaded_board() -> (BoardLocks, Arc<Recorder>) {
 /// The self-test preamble twice: it completes only in order.
 fn preamble_twice() -> Vec<&'static CfifoPreamble> {
     let words: Vec<_> = CFIFO_PREAMBLE.iter().chain(CFIFO_PREAMBLE.iter()).collect();
-    assert!(words.len() as u32 > ODSY_CFIFO_LOW_WATER);
+    assert!(words.len() as u32 > cfifo::LOW_WATER);
     words
 }
 
@@ -86,11 +80,11 @@ fn the_board_thread_runs_queued_stores_in_order_and_latches_low_water() {
     }
     {
         let level = h.fifo.level();
-        assert!(level >= ODSY_CFIFO_LOW_WATER, "level {level}: the first slice should still hold the queue");
-        assert_eq!(h.front.lock().intr_flags & ODSY_INTR_FIFO_LOW_WATER, 0);
+        assert!(level >= cfifo::LOW_WATER, "level {level}: the first slice should still hold the queue");
+        assert_eq!(h.front.lock().intr_flags & intr::FIFO_LOW_WATER, 0);
         // The status register does not wait: not empty, above low water.
         let status = h.read(STATUS0, 4) as u32;
-        assert_eq!(status & (ODSY_STATUS0_FIFO_EMPTY | ODSY_STATUS0_FIFO_LOW_WATER), 0);
+        assert_eq!(status & (status0::FIFO_EMPTY | status0::FIFO_LOW_WATER), 0);
         assert_eq!(h.fifo.level(), level);
         // All of that while the slice still held the board.
         assert!(h.fifo.slice.load(SeqCst));
@@ -102,8 +96,8 @@ fn the_board_thread_runs_queued_stores_in_order_and_latches_low_water() {
         {
             let f = h.front.lock();
             let level = h.fifo.level();
-            let flag = f.intr_flags & ODSY_INTR_FIFO_LOW_WATER != 0;
-            assert_eq!(flag, level < ODSY_CFIFO_LOW_WATER, "level {level}");
+            let flag = f.intr_flags & intr::FIFO_LOW_WATER != 0;
+            assert_eq!(flag, level < cfifo::LOW_WATER, "level {level}");
             if level == 0 && !h.fifo.slice.load(SeqCst) {
                 break;
             }
@@ -119,8 +113,8 @@ fn the_board_thread_runs_queued_stores_in_order_and_latches_low_water() {
     assert!(rec.level(TEST_VECTOR));
     let status = h.read(STATUS0, 4) as u32;
     assert_eq!(
-        status & (ODSY_STATUS0_FIFO_EMPTY | ODSY_STATUS0_FIFO_LOW_WATER),
-        ODSY_STATUS0_FIFO_EMPTY | ODSY_STATUS0_FIFO_LOW_WATER
+        status & (status0::FIFO_EMPTY | status0::FIFO_LOW_WATER),
+        status0::FIFO_EMPTY | status0::FIFO_LOW_WATER
     );
     h.work_stop();
     assert!(h.fifo.thread.lock().is_none());
@@ -142,19 +136,19 @@ fn a_read_that_waits_sees_every_earlier_store() {
     assert!(h.fifo.level() > 1);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let selftest = loop {
-        if let Some(v) = h.bus_read(ODSY_CFIFO_SELFTEST, 4) {
+        if let Some(v) = h.bus_read(cfifo::SELFTEST, 4) {
             break v as u32;
         }
         assert!(std::time::Instant::now() < deadline, "the read stayed busy");
         std::thread::yield_now();
     };
-    assert_eq!(selftest, ODSY_CFIFO_SELFTEST_OK);
+    assert_eq!(selftest, cfifo::SELFTEST_OK);
     assert_eq!(h.fifo.level(), 0);
     h.work_stop();
 }
 
 /// A processor store that finds the model's 32,768-word FIFO (its own size,
-/// ODSY_CFIFO_WORDS) full while
+/// cfifo::WORDS) full while
 /// the board's thread runs is refused with the bus busy, and nothing runs
 /// on the processor's thread: the level stays at the brim and the slice
 /// in flight keeps the board. The retried store goes in, once, when the
@@ -166,25 +160,25 @@ fn a_full_fifo_holds_the_store_back_until_the_board_makes_room() {
     let words = preamble_twice();
 
     start_long_slice(&h, &words, 2000);
-    while h.fifo.level() + 2 <= ODSY_CFIFO_WORDS {
-        assert!(h.bus_write(ODSY_CMD_FIFO, 0, 8));
+    while h.fifo.level() + 2 <= cfifo::WORDS {
+        assert!(h.bus_write(consts::cmd::FIFO, 0, 8));
     }
-    while h.fifo.level() < ODSY_CFIFO_WORDS {
-        assert!(h.bus_write(ODSY_CMD_FIFO, 0, 4));
+    while h.fifo.level() < cfifo::WORDS {
+        assert!(h.bus_write(consts::cmd::FIFO, 0, 4));
     }
     let stores = h.fifo.stores();
-    assert!(!h.bus_write(ODSY_CMD_FIFO, 0, 4), "a full FIFO refuses the store");
-    assert!(!h.bus_write(ODSY_CMD_FIFO, 0, 8));
-    assert_eq!((h.fifo.level(), h.fifo.stores()), (ODSY_CFIFO_WORDS, stores), "nothing ran on the processor's thread");
+    assert!(!h.bus_write(consts::cmd::FIFO, 0, 4), "a full FIFO refuses the store");
+    assert!(!h.bus_write(consts::cmd::FIFO, 0, 8));
+    assert_eq!((h.fifo.level(), h.fifo.stores()), (cfifo::WORDS, stores), "nothing ran on the processor's thread");
     assert!(h.fifo.slice.load(SeqCst), "the board's thread still holds the board");
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !h.bus_write(ODSY_CMD_FIFO, 0, 8) {
-        assert!(h.fifo.level() <= ODSY_CFIFO_WORDS);
+    while !h.bus_write(consts::cmd::FIFO, 0, 8) {
+        assert!(h.fifo.level() <= cfifo::WORDS);
         assert!(std::time::Instant::now() < deadline, "the board's thread made no room");
         std::thread::yield_now();
     }
-    assert!(h.fifo.level() <= ODSY_CFIFO_WORDS);
+    assert!(h.fifo.level() <= cfifo::WORDS);
     h.fifo.test_words.store(0, SeqCst);
     h.work_stop();
     assert_eq!(h.fifo.level(), 0);
@@ -206,19 +200,19 @@ fn a_waiting_bus_read_is_busy_until_the_board_thread_has_run_the_stores() {
     }
     let level = h.fifo.level();
     assert!(level > 1);
-    assert_eq!(h.bus_read(ODSY_CFIFO_SELFTEST, 4), None, "busy while the stores wait");
+    assert_eq!(h.bus_read(cfifo::SELFTEST, 4), None, "busy while the stores wait");
     assert!(!h.bus_write(ODSY_BUZZ_1, 0, 4), "a waiting store is busy too");
     assert_eq!(h.fifo.level(), level, "nothing ran on the processor's thread");
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let selftest = loop {
-        if let Some(v) = h.bus_read(ODSY_CFIFO_SELFTEST, 4) {
+        if let Some(v) = h.bus_read(cfifo::SELFTEST, 4) {
             break v as u32;
         }
         assert!(std::time::Instant::now() < deadline, "the board's thread did not run the stores");
         std::thread::yield_now();
     };
-    assert_eq!(selftest, ODSY_CFIFO_SELFTEST_OK);
+    assert_eq!(selftest, cfifo::SELFTEST_OK);
     assert_eq!(h.fifo.level(), 0);
     assert!(h.bus_write(ODSY_BUZZ_1, 0, 4));
     h.fifo.test_words.store(0, SeqCst);
@@ -276,21 +270,21 @@ fn a_counted_store_is_credited_as_it_enters_the_fifo() {
     let stores = 72u32;
 
     for _ in 0..stores {
-        s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+        s.mmio_write(consts::cmd::FIFO, 0, 8);
     }
     // Credits count stores; the level counts words, two a doubleword.
     assert_eq!(s.fifo.stores(), stores);
     assert_eq!(s.fifo.level(), 2 * stores);
-    assert_eq!(s.fifo.in_fifo(), ODSY_CFIFO_DEPTH);
-    assert_eq!(pi.count("return"), ODSY_CFIFO_DEPTH as i64);
-    assert_eq!(pi.count("owe"), (stores - ODSY_CFIFO_DEPTH) as i64);
+    assert_eq!(s.fifo.in_fifo(), cfifo::DEPTH);
+    assert_eq!(pi.count("return"), cfifo::DEPTH as i64);
+    assert_eq!(pi.count("owe"), (stores - cfifo::DEPTH) as i64);
     assert_eq!(pi.count("repay"), 0);
     assert!(pi.0.lock().iter().all(|c| c.1 == VPRO_WIDGET));
 
     // One store runs per slice: the next one moves up and is repaid.
     s.work_step(&mut Budget::stores(1));
     assert_eq!(pi.count("repay"), 1);
-    assert_eq!(pi.settled(), ODSY_CFIFO_DEPTH as i64 + 1);
+    assert_eq!(pi.settled(), cfifo::DEPTH as i64 + 1);
 
     s.work_step(&mut Budget::unlimited());
     assert!(!s.fifo.pending());
@@ -298,10 +292,10 @@ fn a_counted_store_is_credited_as_it_enters_the_fifo() {
 
     // A store that does not wait is credited inside the store.
     s.fifo.test_words.store(0, SeqCst);
-    s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    s.mmio_write(consts::cmd::FIFO, 0, 8);
     assert!(!s.work_pending());
     assert_eq!(pi.settled(), stores as i64 + 1);
-    assert_eq!(pi.count("owe"), (stores - ODSY_CFIFO_DEPTH) as i64);
+    assert_eq!(pi.count("owe"), (stores - cfifo::DEPTH) as i64);
 }
 
 /// A run of stores the board's thread has looked at and then runs leaves
@@ -313,13 +307,13 @@ fn a_run_retires_with_the_levels_and_credits_of_one_by_one() {
     fn queue(s: &mut Board) {
         s.front.lock().test_counted_stores = 0;
         for _ in 0..70 {
-            s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+            s.mmio_write(consts::cmd::FIFO, 0, 8);
         }
     }
     fn counted_join(s: &mut Board) {
         s.front.lock().test_counted_stores = 1;
         for _ in 0..10 {
-            s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+            s.mmio_write(consts::cmd::FIFO, 0, 8);
         }
     }
     // One at a time: the store count and the credits are the reference.
@@ -374,8 +368,8 @@ fn a_slice_cut_short_leaves_the_rest_of_its_run_queued() {
 fn a_reset_cancels_the_credits_owed_for_abandoned_stores() {
     let (mut s, pi) = credit_board();
 
-    for _ in 0..ODSY_CFIFO_DEPTH + 8 {
-        s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    for _ in 0..cfifo::DEPTH + 8 {
+        s.mmio_write(consts::cmd::FIFO, 0, 8);
     }
     assert_eq!(pi.count("owe"), 8);
     s.work_reset();
@@ -397,22 +391,22 @@ fn the_processor_mark_counts_exactly_one_store() {
         f.test_counted_stores = 0;
     }
     s.fifo.test_words.store(0, SeqCst);
-    s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    s.mmio_write(consts::cmd::FIFO, 0, 8);
     assert_eq!(pi.settled(), 0);
 
     let previous = pi_gfx_mark_store(true);
-    s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    s.mmio_write(consts::cmd::FIFO, 0, 8);
     pi_gfx_unmark_store(previous);
     assert_eq!(pi.0.lock().as_slice(), &[("return", VPRO_WIDGET, 1)]);
 
     // One-shot: the mark was taken by the first store.
-    s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    s.mmio_write(consts::cmd::FIFO, 0, 8);
     assert_eq!(pi.settled(), 1);
 
     // The Octane: no link, so the credit is dropped with a log line.
     s.front.lock().pi = None;
     pi_gfx_mark_store(true);
-    s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    s.mmio_write(consts::cmd::FIFO, 0, 8);
     assert_eq!(pi.settled(), 1);
     assert!(!pi_gfx_take_mark());
 }
@@ -439,15 +433,15 @@ fn the_credit_block_starves_a_widget_that_runs_out_of_credits() {
 
 
 /// The model's low-water threshold, in waiting words (a model choice).
-const LOW_WATER_MARK: u32 = ODSY_CFIFO_LOW_WATER;
+const LOW_WATER_MARK: u32 = cfifo::LOW_WATER;
 const HOST_WRITE_BASE: u64 = 0xb70000;
 
 /// A board whose stores wait in the queue until a test steps them one
 /// store a slice, with RAM for the fences they write.
 fn queued_board() -> (Box<Board>, Arc<Recorder>, Arc<Ram>) {
     let (mut s, rec, ram) = board_with_ram();
-    reg_write(&mut s, ODSY_HOST_WRITE_ADDR_UPPER, 0);
-    reg_write(&mut s, ODSY_HOST_WRITE_ADDR_LOWER, HOST_WRITE_BASE as u32);
+    reg_write(&mut s, host::WRITE_ADDR_UPPER, 0);
+    reg_write(&mut s, host::WRITE_ADDR_LOWER, HOST_WRITE_BASE as u32);
     s.fifo.test_words.store(1, SeqCst);
     (s, rec, ram)
 }
@@ -455,7 +449,7 @@ fn queued_board() -> (Box<Board>, Arc<Recorder>, Arc<Ram>) {
 /// Two host-write fences, slot 2 then slot 3, each three words.
 fn push_fences(s: &mut Board) {
     for (slot, token) in [(2, 0x5a00), (3, 0xa5a5)] {
-        cmd(s, select(ODSY_REG_HOST_WRITE));
+        cmd(s, select(reg::HOST_WRITE));
         cmd(s, slot);
         cmd(s, token);
     }
@@ -507,11 +501,11 @@ fn a_context_switch_completes_only_after_the_commands_before_it() {
     let (mut s, _, ram) = queued_board();
     let base = 0xb80000u64;
     push_fences(&mut s);
-    reg_write(&mut s, ODSY_CTX_SHADOW_ADDR_UPPER, 0);
-    reg_write(&mut s, ODSY_CTX_SHADOW_ADDR_LOWER, base as u32);
-    s.mmio_write(ODSY_CTX_SWITCH_PORT, 0x0000_0700_0001_0001, 8);
+    reg_write(&mut s, ctx::SHADOW_ADDR_UPPER, 0);
+    reg_write(&mut s, ctx::SHADOW_ADDR_LOWER, base as u32);
+    s.mmio_write(ctx::SWITCH_PORT, 0x0000_0700_0001_0001, 8);
 
-    let done = |ram: &Ram| u32::from_be_bytes(ram.get(base + ODSY_CTX_SWITCH_DONE_OFFSET, 4).try_into().unwrap());
+    let done = |ram: &Ram| u32::from_be_bytes(ram.get(base + ctx::SWITCH_DONE_OFFSET, 4).try_into().unwrap());
     assert_eq!(done(&ram), 0);
     while s.work_pending() {
         step(&mut s);
@@ -618,36 +612,36 @@ fn the_status_shows_waiting_stores_until_they_have_run() {
 fn the_level_counts_words_against_the_model_fifo_and_the_6b2_threshold() {
     let (mut s, _, _) = queued_board();
     s.fifo.set_depth(FifoDepth::Shallow);
-    let (high, flag) = (ODSY_STATUS0_FIFO_HIGH_WATER, ODSY_INTR_FIFO_HIGH_WATER);
+    let (high, flag) = (status0::FIFO_HIGH_WATER, intr::FIFO_HIGH_WATER);
 
-    s.mmio_write(ODSY_CMD_FIFO, 0, 8);
-    s.mmio_write(ODSY_CMD_FIFO, 0, 4);
+    s.mmio_write(consts::cmd::FIFO, 0, 8);
+    s.mmio_write(consts::cmd::FIFO, 0, 4);
     assert_eq!((s.fifo.stores(), s.fifo.level()), (2, 3));
     finish(&mut s);
 
     // No threshold yet: a FIFO filled to the brim never reads high.
-    for _ in 0..ODSY_CFIFO_WORDS / 2 {
-        s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    for _ in 0..cfifo::WORDS / 2 {
+        s.mmio_write(consts::cmd::FIFO, 0, 8);
     }
-    assert_eq!(s.fifo.level(), ODSY_CFIFO_WORDS);
+    assert_eq!(s.fifo.level(), cfifo::WORDS);
     assert_eq!(reg_read(&mut s, ODSY_STATUS0) & high, 0);
     // Full: the next store runs everything waiting, then itself.
-    s.mmio_write(ODSY_CMD_FIFO, 0, 4);
+    s.mmio_write(consts::cmd::FIFO, 0, 4);
     assert!(!s.work_pending());
 
     // The 0x6b2 value the kernel writes, 576 words below the model's size.
     cmd64(&mut s, 0x6b2, 32192);
     finish(&mut s);
-    reg_write(&mut s, ODSY_INTR_CLEAR, ODSY_INTR_FIFO_HIGH_WATER);
+    reg_write(&mut s, intr::CLEAR, intr::FIFO_HIGH_WATER);
     for _ in 0..32190 / 2 {
-        s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+        s.mmio_write(consts::cmd::FIFO, 0, 8);
     }
     assert_eq!(reg_read(&mut s, ODSY_STATUS0) & high, 0);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS) & flag, 0);
-    s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    assert_eq!(reg_read(&mut s, intr::FLAGS) & flag, 0);
+    s.mmio_write(consts::cmd::FIFO, 0, 8);
     assert_eq!(s.fifo.level(), 32192);
     assert_eq!(reg_read(&mut s, ODSY_STATUS0) & high, high);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS) & flag, flag);
+    assert_eq!(reg_read(&mut s, intr::FLAGS) & flag, flag);
     step(&mut s);
     assert_eq!(reg_read(&mut s, ODSY_STATUS0) & high, 0, "below the threshold again");
     finish(&mut s);
@@ -663,7 +657,7 @@ fn the_level_counts_words_against_the_model_fifo_and_the_6b2_threshold() {
 #[test]
 fn the_threshold_follows_6b2() {
     let (mut s, _, _) = queued_board();
-    let high = ODSY_STATUS0_FIFO_HIGH_WATER;
+    let high = status0::FIFO_HIGH_WATER;
 
     for (mark_6b2, word_6b3, expect) in [(12, 8, 0), (8, 12, high)] {
         cmd64(&mut s, 0x6b1, 256);
@@ -681,7 +675,7 @@ fn the_threshold_follows_6b2() {
 
 /// MODEL CONTRACT ONLY: the FIFO's size is unknown and the model's size is
 /// its own choice. Whatever `0x6b1` the set-up stores, the level clamps at
-/// ODSY_CFIFO_WORDS and a store that would overfill it runs the queue first.
+/// cfifo::WORDS and a store that would overfill it runs the queue first.
 ///
 /// QEMU: command-work-credit-depth-ignores-setup covers the credit depth.
 #[test]
@@ -692,12 +686,12 @@ fn the_fifo_size_ignores_the_set_up_words() {
 
         cmd64(&mut s, 0x6b1, word_6b1);
         finish(&mut s);
-        for _ in 0..ODSY_CFIFO_WORDS / 2 {
+        for _ in 0..cfifo::WORDS / 2 {
             cmd64(&mut s, 0x6b0, 0);
         }
-        assert_eq!(s.fifo.level(), ODSY_CFIFO_WORDS, "0x6b1 = {word_6b1:#x}");
+        assert_eq!(s.fifo.level(), cfifo::WORDS, "0x6b1 = {word_6b1:#x}");
         // Full: the next store runs everything waiting, then itself.
-        s.mmio_write(ODSY_CMD_FIFO, 0, 4);
+        s.mmio_write(consts::cmd::FIFO, 0, 4);
         assert!(!s.work_pending(), "0x6b1 = {word_6b1:#x}");
         finish(&mut s);
     }
@@ -716,19 +710,19 @@ fn low_water_is_raised_as_the_queue_falls_below_the_mark() {
     for _ in 0..3 {
         push_fences(&mut s);
     }
-    reg_write(&mut s, ODSY_INTR_CLEAR, ODSY_INTR_FIFO_LOW_WATER);
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, ODSY_INTR_FIFO_LOW_WATER);
+    reg_write(&mut s, intr::CLEAR, intr::FIFO_LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_SET, intr::FIFO_LOW_WATER);
 
     // 18 wait; two slices leave 16, still at the mark.
     step(&mut s);
     step(&mut s);
     assert!(rec.events(FLAG_VECTOR).is_empty());
-    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS) & ODSY_INTR_FIFO_LOW_WATER, 0);
+    assert_eq!(reg_read(&mut s, intr::FLAGS) & intr::FIFO_LOW_WATER, 0);
 
     // The next leaves 15, below the mark.
     step(&mut s);
     assert_eq!(s.fifo.level(), LOW_WATER_MARK - 1);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS) & ODSY_INTR_FIFO_LOW_WATER, ODSY_INTR_FIFO_LOW_WATER);
+    assert_eq!(reg_read(&mut s, intr::FLAGS) & intr::FIFO_LOW_WATER, intr::FIFO_LOW_WATER);
     assert_eq!(rec.events(FLAG_VECTOR), [true]);
 }
 
@@ -752,10 +746,10 @@ fn the_fifo_set_up_does_not_widen_the_credit_depth() {
 
     s.fifo.test_words.store(1, SeqCst);
     for _ in 0..72 {
-        s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+        s.mmio_write(consts::cmd::FIFO, 0, 8);
     }
     assert_eq!(s.fifo.stores(), 72);
-    assert_eq!(pi.count("return"), ODSY_CFIFO_DEPTH as i64);
+    assert_eq!(pi.count("return"), cfifo::DEPTH as i64);
     finish(&mut s);
     assert_eq!(pi.settled(), 72);
 }
@@ -770,11 +764,11 @@ fn the_fifo_set_up_does_not_widen_the_credit_depth() {
 #[test]
 fn a_counted_store_owed_its_credit_hurries_the_board_thread() {
     let (mut s, pi) = credit_board();
-    for _ in 0..ODSY_CFIFO_DEPTH {
-        s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    for _ in 0..cfifo::DEPTH {
+        s.mmio_write(consts::cmd::FIFO, 0, 8);
     }
     assert!(!s.fifo.take_hurry(), "a credited store leaves the pause alone");
-    s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    s.mmio_write(consts::cmd::FIFO, 0, 8);
     assert_eq!(pi.count("owe"), 1);
     assert!(s.fifo.take_hurry(), "an owed credit hurries the board's thread");
     finish(&mut s);
@@ -791,14 +785,14 @@ fn a_counted_store_owed_its_credit_hurries_the_board_thread() {
     // One credited store starts the thread, and the burst waits until the
     // thread is in its pause: a burst that lands before it would find the
     // request already made and prove nothing about waking a sleeper.
-    h.write(ODSY_CMD_FIFO, 0, 8);
+    h.write(consts::cmd::FIFO, 0, 8);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while h.fifo.test_parked.load(SeqCst) == 0 {
         assert!(std::time::Instant::now() < deadline, "the board's thread never reached its pause");
         std::thread::yield_now();
     }
     for _ in 1..stores {
-        h.write(ODSY_CMD_FIFO, 0, 8);
+        h.write(consts::cmd::FIFO, 0, 8);
     }
     // The last few stores may find the queue run dry and wait out a pause
     // of their own, but inside the depth they are credited at the store.
@@ -829,7 +823,7 @@ fn stopping_finishes_the_waiting_work_and_a_reset_abandons_it() {
     assert_eq!(ram.half(HOST_WRITE_BASE + 6), 0xa5a5);
 
     let mut s = h.test_board();
-    for w in [select(ODSY_REG_HOST_WRITE), 4, 0x1234] {
+    for w in [select(reg::HOST_WRITE), 4, 0x1234] {
         cmd(&mut s, w);
     }
     assert!(s.work_pending());
@@ -857,7 +851,7 @@ fn two_processors_storing_to_the_fifo_lose_nothing_and_keep_each_ones_order() {
                 let pushed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     for seq in 0..PER {
                         let size = if seq % 3 == 0 { 8 } else { 4 };
-                        while !h.fifo.push(&h.front, ODSY_CMD_FIFO, id << 32 | seq, size, false) {
+                        while !h.fifo.push(&h.front, consts::cmd::FIFO, id << 32 | seq, size, false) {
                             std::thread::yield_now();
                         }
                     }
@@ -903,9 +897,9 @@ fn two_processors_storing_to_the_fifo_lose_nothing_and_keep_each_ones_order() {
 fn a_store_run_before_its_push_returns_is_already_in_the_level() {
     let (s, _) = board("v12");
     let h = BoardLocks::new(s);
-    h.front.lock().intr_flags &= !ODSY_INTR_FIFO_LOW_WATER;
+    h.front.lock().intr_flags &= !intr::FIFO_LOW_WATER;
     for seq in 0..20 {
-        assert!(h.fifo.push(&h.front, ODSY_CMD_FIFO, seq, 4, false));
+        assert!(h.fifo.push(&h.front, consts::cmd::FIFO, seq, 4, false));
     }
     fn run_everything(fifo: &CommandFifo, front: &Mutex<HostInterface>) {
         let mut run = Run::new();
@@ -916,10 +910,10 @@ fn a_store_run_before_its_push_returns_is_already_in_the_level() {
         assert_eq!((fifo.stores(), fifo.level()), (0, 0), "the run took out what the level counted");
     }
     *h.fifo.test_after_ring_push.lock() = Some(run_everything);
-    assert!(h.fifo.push(&h.front, ODSY_CMD_FIFO, 20, 8, false));
+    assert!(h.fifo.push(&h.front, consts::cmd::FIFO, 20, 8, false));
     assert!(h.fifo.test_after_ring_push.lock().is_none(), "the consumer ran inside the push");
     assert_eq!((h.fifo.stores(), h.fifo.level()), (0, 0));
-    assert_ne!(h.front.lock().intr_flags & ODSY_INTR_FIFO_LOW_WATER, 0, "the level fell through the mark");
+    assert_ne!(h.front.lock().intr_flags & intr::FIFO_LOW_WATER, 0, "the level fell through the mark");
 }
 
 /// The deep ring takes stores past the model's 32,768 words, and the guest
@@ -933,30 +927,30 @@ fn the_deep_ring_accepts_past_the_brim_and_the_guest_reads_a_full_fifo() {
     s.fifo.set_depth(FifoDepth::Deep);
     cmd64(&mut s, 0x6b2, 32192);
     finish(&mut s);
-    reg_write(&mut s, ODSY_INTR_CLEAR, ODSY_INTR_FIFO_HIGH_WATER);
+    reg_write(&mut s, intr::CLEAR, intr::FIFO_HIGH_WATER);
     assert_eq!(s.fifo.level(), 0);
-    assert_ne!(reg_read(&mut s, ODSY_STATUS0) & ODSY_STATUS0_FIFO_EMPTY, 0, "idle reads empty");
+    assert_ne!(reg_read(&mut s, ODSY_STATUS0) & status0::FIFO_EMPTY, 0, "idle reads empty");
 
-    for _ in 0..ODSY_CFIFO_WORDS / 2 + 5000 {
-        s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    for _ in 0..cfifo::WORDS / 2 + 5000 {
+        s.mmio_write(consts::cmd::FIFO, 0, 8);
     }
-    assert!(s.fifo.queued_words() > ODSY_CFIFO_WORDS, "the ring took more than the model's FIFO");
-    assert_eq!(s.fifo.level(), ODSY_CFIFO_WORDS);
+    assert!(s.fifo.queued_words() > cfifo::WORDS, "the ring took more than the model's FIFO");
+    assert_eq!(s.fifo.level(), cfifo::WORDS);
     let status = reg_read(&mut s, ODSY_STATUS0);
-    assert_ne!(status & ODSY_STATUS0_FIFO_HIGH_WATER, 0);
-    assert_eq!(status & (ODSY_STATUS0_FIFO_EMPTY | ODSY_STATUS0_FIFO_LOW_WATER), 0);
-    assert_ne!(reg_read(&mut s, ODSY_INTR_FLAGS) & ODSY_INTR_FIFO_HIGH_WATER, 0);
+    assert_ne!(status & status0::FIFO_HIGH_WATER, 0);
+    assert_eq!(status & (status0::FIFO_EMPTY | status0::FIFO_LOW_WATER), 0);
+    assert_ne!(reg_read(&mut s, intr::FLAGS) & intr::FIFO_HIGH_WATER, 0);
     assert_eq!((reg_read(&mut s, MEMORY_CONFIG) >> 7) & 0x1ff, 0x1ff, "the doubleword count is at its field's top");
 
     // Draining the backlog keeps the guest's view pinned at the brim until
     // the ring is under it, and level 0 only when everything has run.
     s.work_step(&mut Budget::stores(1000));
-    assert_eq!(s.fifo.level(), ODSY_CFIFO_WORDS);
+    assert_eq!(s.fifo.level(), cfifo::WORDS);
     finish(&mut s);
     assert_eq!(s.fifo.level(), 0);
     let status = reg_read(&mut s, ODSY_STATUS0);
-    assert_eq!(status & ODSY_STATUS0_FIFO_HIGH_WATER, 0);
-    assert_ne!(status & ODSY_STATUS0_FIFO_EMPTY, 0);
+    assert_eq!(status & status0::FIFO_HIGH_WATER, 0);
+    assert_ne!(status & status0::FIFO_EMPTY, 0);
     assert_eq!((reg_read(&mut s, MEMORY_CONFIG) >> 7) & 0x1ff, 0);
 }
 
@@ -970,16 +964,16 @@ fn the_bus_is_busy_only_when_the_ring_is_full_and_the_shallow_mode_stalls_at_the
         h.fifo.set_depth(depth);
         let words = preamble_twice();
         start_long_slice(&h, &words, 3000);
-        let limit = if depth == FifoDepth::Deep { RING_STORES } else { ODSY_CFIFO_WORDS };
+        let limit = if depth == FifoDepth::Deep { RING_STORES } else { cfifo::WORDS };
         // The slice's own first word may have left the ring: count what waits.
         while h.fifo.stores() < limit {
-            assert!(h.bus_write(ODSY_CMD_FIFO, 0, 4), "{depth:?}: refused at {} stores, {} words", h.fifo.stores(), h.fifo.queued_words());
-            assert!(h.fifo.level() <= ODSY_CFIFO_WORDS);
+            assert!(h.bus_write(consts::cmd::FIFO, 0, 4), "{depth:?}: refused at {} stores, {} words", h.fifo.stores(), h.fifo.queued_words());
+            assert!(h.fifo.level() <= cfifo::WORDS);
         }
         assert_eq!(h.fifo.stores(), limit);
-        assert!(!h.bus_write(ODSY_CMD_FIFO, 0, 4), "{depth:?}: full refuses");
+        assert!(!h.bus_write(consts::cmd::FIFO, 0, 4), "{depth:?}: full refuses");
         assert_eq!(h.fifo.stores(), limit);
-        assert_eq!(h.fifo.level(), ODSY_CFIFO_WORDS);
+        assert_eq!(h.fifo.level(), cfifo::WORDS);
         h.fifo.test_words.store(0, SeqCst);
         h.work_stop();
         assert_eq!(h.fifo.level(), 0, "{depth:?}: idle reads zero");
@@ -995,13 +989,13 @@ fn a_flow_control_target_store_does_not_wait_for_the_fifo() {
     let words = preamble_twice();
 
     start_long_slice(&h, &words, 2000);
-    assert!(h.bus_write(ODSY_CMD_FIFO, 0, 4));
+    assert!(h.bus_write(consts::cmd::FIFO, 0, 4));
     assert!(h.fifo.pending(), "work is queued behind the slice in flight");
 
     let word = 1 << 17 | 0x1b << 12 | 0xc8;
-    assert!(h.bus_write(ODSY_FLCTL_TARGET, word, 4), "the store is accepted at once");
+    assert!(h.bus_write(flctl::TARGET, word, 4), "the store is accepted at once");
     assert_eq!(h.front.lock().flctl_target as u64, word);
-    assert_eq!(h.bus_read(ODSY_FLCTL_TARGET, 4), Some(word));
+    assert_eq!(h.bus_read(flctl::TARGET, 4), Some(word));
     assert!(h.fifo.pending(), "it did not drain the FIFO");
 
     let mut report = Vec::new();
@@ -1026,7 +1020,7 @@ fn two_processors_racing_for_the_last_place_in_the_ring_leave_one_store_in() {
     // The ring has room for one more store when it holds RING_STORES - 1.
     let fill = |h: &BoardLocks| {
         for _ in 0..RING_STORES - 1 {
-            assert!(h.fifo.push(&h.front, ODSY_CMD_FIFO, 0, 4, false));
+            assert!(h.fifo.push(&h.front, consts::cmd::FIFO, 0, 4, false));
         }
     };
     fill(&h);
@@ -1041,7 +1035,7 @@ fn two_processors_racing_for_the_last_place_in_the_ring_leave_one_store_in() {
                 for _ in 0..ROUNDS {
                     start.wait();
                     // A panic in a push must fail the round, not leave the others waiting.
-                    let pushed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.fifo.push(&h.front, ODSY_CMD_FIFO, 0, 4, false)));
+                    let pushed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.fifo.push(&h.front, consts::cmd::FIFO, 0, 4, false)));
                     match pushed {
                         Ok(true) => {
                             accepted.fetch_add(1, SeqCst);
@@ -1095,8 +1089,8 @@ fn processors_wait_for_each_other_and_the_board_thread_does_not_wait_for_them() 
         others.push(std::thread::spawn(move || {
             started.fetch_add(1, SeqCst);
             match which {
-                0 => while h.bus_read(ODSY_CFIFO_SELFTEST, 4).is_none() {},
-                1 => assert!(h.bus_write(ODSY_CMD_FIFO, 0, 4)),
+                0 => while h.bus_read(cfifo::SELFTEST, 4).is_none() {},
+                1 => assert!(h.bus_write(consts::cmd::FIFO, 0, 4)),
                 _ => while !h.bus_write(ODSY_BUZZ_1, 1, 4) {},
             }
             done.fetch_add(1, SeqCst);
@@ -1143,7 +1137,7 @@ fn a_drain_with_the_board_thread_running_runs_no_store() {
     assert!(stores > 1);
     // The test stands in for a caller that drains while the thread runs;
     // the guard is what keeps it from running anything.
-    h.test_board().work_drain(ODSY_CFIFO_SELFTEST);
+    h.test_board().work_drain(cfifo::SELFTEST);
     assert_eq!((h.fifo.stores(), h.fifo.level()), (stores, level), "the drain ran stores");
     h.fifo.test_words.store(0, SeqCst);
     h.work_stop();
@@ -1160,15 +1154,15 @@ fn a_refused_command_push_retries_behind_the_board_thread() {
     let words = preamble_twice();
 
     start_long_slice(&h, &words, 1000);
-    while h.fifo.level() < ODSY_CFIFO_WORDS {
-        assert!(h.bus_write(ODSY_CMD_FIFO, 0, 4));
+    while h.fifo.level() < cfifo::WORDS {
+        assert!(h.bus_write(consts::cmd::FIFO, 0, 4));
     }
     let stores = h.fifo.stores();
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let store = {
         let (h, done) = (h.clone(), done.clone());
         std::thread::spawn(move || {
-            h.write(ODSY_CMD_FIFO, 0, 4);
+            h.write(consts::cmd::FIFO, 0, 4);
             done.store(true, SeqCst);
         })
     };
@@ -1176,7 +1170,7 @@ fn a_refused_command_push_retries_behind_the_board_thread() {
     assert!(!done.load(SeqCst), "the store was dropped or ran around the board's thread");
     assert_eq!(h.fifo.stores(), stores);
     store.join().unwrap();
-    assert!(h.fifo.level() <= ODSY_CFIFO_WORDS + 1);
+    assert!(h.fifo.level() <= cfifo::WORDS + 1);
     h.fifo.test_words.store(0, SeqCst);
     h.work_stop();
     assert_eq!(h.fifo.level(), 0);

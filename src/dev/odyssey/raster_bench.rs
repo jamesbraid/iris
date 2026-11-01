@@ -18,14 +18,13 @@
 
 
 use super::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
-use super::consts::ODSY_GL_DEPTH_SLACK;
+use super::consts::gl_cmd;
 use super::draw::gl_rules;
 use super::gl_context::{
-    GL_ALWAYS, GL_CLAMP_TO_EDGE, GL_COLOR_BUFFER_BIT, GL_COLOUR_MASK_ALL, GL_DEPTH_BUFFER_BIT,
+    vtx, GL_ALWAYS, GL_CLAMP_TO_EDGE, GL_COLOR_BUFFER_BIT, GL_COLOUR_MASK_ALL, GL_DEPTH_BUFFER_BIT,
     GL_EQUAL, GL_FLAT, GL_INCR, GL_KEEP, GL_LEQUAL, GL_LESS, GL_LINEAR, GL_LINEAR_MIPMAP_LINEAR,
     GL_LINES, GL_MODULATE, GL_ONE_MINUS_SRC_ALPHA, GL_QUADS, GL_REPEAT, GL_RGB, GL_RGBA, GL_SMOOTH,
-    GL_SRC_ALPHA, GL_TRIANGLES, GL_VERTEX_FLOATS, GL_V_COLOR, GL_V_POSITION, GL_V_TEXCOORD, GlDraw,
-    GlDrawResult, GlDrawState, RASTER_CLEAR, RasterOp,
+    GL_SRC_ALPHA, GL_TRIANGLES, GlDraw, GlDrawResult, GlDrawState, RASTER_CLEAR, RasterOp,
 };
 use super::memory::ClipRect;
 use super::raster::{GlTexImage, GlTexLevel, GlTexPyramid, RasterRules, RasterTarget, Texels};
@@ -208,7 +207,7 @@ pub(super) struct Bench {
     pub st: GlDrawState,
     pub rules: RasterRules,
     pub tex: Option<BenchTexture>,
-    /// Each primitive's vertices, GL_VERTEX_FLOATS apiece.
+    /// Each primitive's vertices, vtx::FLOATS apiece.
     pub prims: Vec<Vec<f32>>,
     pub mode: u32,
     /// The pixels the scene covers, by area, for the rate.
@@ -236,7 +235,7 @@ fn ndc(x: f32, size: i32) -> f32 {
 fn triangle(rng: &mut Lcg, size: f32, texscale: f32) -> (Vec<f32>, f64) {
     let cx = rng.range(0.0, BENCH_W as f32);
     let cy = rng.range(0.0, BENCH_H as f32);
-    let mut v = vec![0.0f32; 3 * GL_VERTEX_FLOATS];
+    let mut v = vec![0.0f32; 3 * vtx::FLOATS];
     let mut xy = [(0.0f32, 0.0f32); 3];
     let s0 = rng.range(0.0, 4.0);
     let t0 = rng.range(0.0, 4.0);
@@ -244,12 +243,12 @@ fn triangle(rng: &mut Lcg, size: f32, texscale: f32) -> (Vec<f32>, f64) {
         let x = cx + rng.range(-size, size);
         let y = cy + rng.range(-size, size);
         let z = rng.range(-0.9, 0.9);
-        let o = &mut v[i * GL_VERTEX_FLOATS..(i + 1) * GL_VERTEX_FLOATS];
+        let o = &mut v[i * vtx::FLOATS..(i + 1) * vtx::FLOATS];
         xy[i] = (x.clamp(0.0, BENCH_W as f32), y.clamp(0.0, BENCH_H as f32));
-        o[GL_V_POSITION..GL_V_POSITION + 4].copy_from_slice(&[ndc(x, BENCH_W), ndc(y, BENCH_H), z, 1.0]);
-        o[GL_V_COLOR..GL_V_COLOR + 4]
+        o[vtx::POSITION..vtx::POSITION + 4].copy_from_slice(&[ndc(x, BENCH_W), ndc(y, BENCH_H), z, 1.0]);
+        o[vtx::COLOR..vtx::COLOR + 4]
             .copy_from_slice(&[rng.range(0.0, 1.0), rng.range(0.0, 1.0), rng.range(0.0, 1.0), rng.range(0.2, 1.0)]);
-        o[GL_V_TEXCOORD..GL_V_TEXCOORD + 4]
+        o[vtx::TEXCOORD..vtx::TEXCOORD + 4]
             .copy_from_slice(&[s0 + (x - cx) * texscale, t0 + (y - cy) * texscale, 0.0, 1.0]);
     }
     let area = ((xy[1].0 - xy[0].0) * (xy[2].1 - xy[0].1) - (xy[2].0 - xy[0].0) * (xy[1].1 - xy[0].1)).abs() / 2.0;
@@ -271,7 +270,7 @@ impl Bench {
         // to [0, 1], as Board::gl_operation_rules() derives it from a
         // combined matrix.
         rules.depth_row = [0.0, 0.0, 0.5, 0.5];
-        rules.depth_slack = ODSY_GL_DEPTH_SLACK;
+        rules.depth_slack = gl_cmd::DEPTH_SLACK;
 
         let mut st = GlDrawState {
             modelview: identity(),
@@ -373,7 +372,7 @@ impl Bench {
                     for i in 0..3 {
                         let w = rng.range(1.0, 4.0);
                         let d = rng.range(0.05, 0.95);
-                        let o = &mut v[i * GL_VERTEX_FLOATS + GL_V_POSITION..];
+                        let o = &mut v[i * vtx::FLOATS + vtx::POSITION..];
 
                         o[0] *= w;
                         o[1] *= w;
@@ -450,7 +449,7 @@ impl Bench {
                     // A triangle's three corners and the fourth that makes
                     // a parallelogram of them.
                     let (mut v, a) = triangle(&mut rng, 20.0, 1.5 / 256.0);
-                    let f = GL_VERTEX_FLOATS;
+                    let f = vtx::FLOATS;
                     let d: Vec<f32> = (0..f).map(|k| v[k] + v[2 * f + k] - v[f + k]).collect();
                     v.extend_from_slice(&d);
                     b.prims.push(v);
@@ -465,18 +464,18 @@ impl Bench {
                     b.tex = Some(BenchTexture::new(256, GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR, GL_RGBA));
                 }
                 for i in 0..count {
-                    let mut v = vec![0.0f32; 4 * GL_VERTEX_FLOATS];
+                    let mut v = vec![0.0f32; 4 * vtx::FLOATS];
                     // Each nearer than the last, so every pixel passes.
                     let z = 0.8 - 1.6 * (i as f32 / count as f32);
                     let corners = [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
                     for (k, (x, y)) in corners.iter().enumerate() {
-                        let o = &mut v[k * GL_VERTEX_FLOATS..(k + 1) * GL_VERTEX_FLOATS];
-                        o[GL_V_POSITION..GL_V_POSITION + 4].copy_from_slice(&[*x, *y, z, 1.0]);
-                        o[GL_V_COLOR..GL_V_COLOR + 4]
+                        let o = &mut v[k * vtx::FLOATS..(k + 1) * vtx::FLOATS];
+                        o[vtx::POSITION..vtx::POSITION + 4].copy_from_slice(&[*x, *y, z, 1.0]);
+                        o[vtx::COLOR..vtx::COLOR + 4]
                             .copy_from_slice(&[rng.range(0.0, 1.0), rng.range(0.0, 1.0), rng.range(0.0, 1.0), 1.0]);
                         // The 256-texel image some 2.5 times across: minified
                         // by about 2, two levels mixed.
-                        o[GL_V_TEXCOORD..GL_V_TEXCOORD + 4].copy_from_slice(&[(x + 1.0) * 2.5, (y + 1.0) * 2.0, 0.0, 1.0]);
+                        o[vtx::TEXCOORD..vtx::TEXCOORD + 4].copy_from_slice(&[(x + 1.0) * 2.5, (y + 1.0) * 2.0, 0.0, 1.0]);
                     }
                     b.prims.push(v);
                     b.pixels += (BENCH_W * BENCH_H) as f64;
@@ -486,16 +485,16 @@ impl Bench {
                 b.mode = GL_LINES;
                 st.shade_model = GL_FLAT;
                 for _ in 0..count {
-                    let mut v = vec![0.0f32; 2 * GL_VERTEX_FLOATS];
+                    let mut v = vec![0.0f32; 2 * vtx::FLOATS];
                     let x0 = rng.range(0.0, BENCH_W as f32);
                     let y0 = rng.range(0.0, BENCH_H as f32);
                     let x1 = (x0 + rng.range(-100.0, 100.0)).clamp(0.0, BENCH_W as f32 - 1.0);
                     let y1 = (y0 + rng.range(-100.0, 100.0)).clamp(0.0, BENCH_H as f32 - 1.0);
                     let c = [rng.range(0.0, 1.0), rng.range(0.0, 1.0), rng.range(0.0, 1.0), 1.0];
                     for (k, (x, y)) in [(x0, y0), (x1, y1)].iter().enumerate() {
-                        let o = &mut v[k * GL_VERTEX_FLOATS..(k + 1) * GL_VERTEX_FLOATS];
-                        o[GL_V_POSITION..GL_V_POSITION + 4].copy_from_slice(&[ndc(*x, BENCH_W), ndc(*y, BENCH_H), 0.0, 1.0]);
-                        o[GL_V_COLOR..GL_V_COLOR + 4].copy_from_slice(&c);
+                        let o = &mut v[k * vtx::FLOATS..(k + 1) * vtx::FLOATS];
+                        o[vtx::POSITION..vtx::POSITION + 4].copy_from_slice(&[ndc(*x, BENCH_W), ndc(*y, BENCH_H), 0.0, 1.0]);
+                        o[vtx::COLOR..vtx::COLOR + 4].copy_from_slice(&c);
                     }
                     b.prims.push(v);
                     b.pixels += ((x1 - x0).abs().max((y1 - y0).abs()) + 1.0) as f64;
@@ -547,7 +546,7 @@ impl Bench {
 
             self.rules.raster(&t, &mut self.board.gl_parts(None).0, &op);
         }
-        let floats = GL_VERTEX_FLOATS as u32;
+        let floats = vtx::FLOATS as u32;
         for v in self.prims.iter() {
             let mut d = GlDraw::new(self.mode, v.len() as u32 / floats, v, &self.st, &stipple);
 

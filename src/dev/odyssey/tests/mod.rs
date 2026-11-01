@@ -15,13 +15,7 @@
 //! test sees its effect at once.
 
 use super::board::Board;
-use super::consts::{
-    ODSY_CMD_FIFO, ODSY_CMD_REGISTER_TAG, ODSY_ROUTE_DEST_LOWER, ODSY_ROUTE_DEST_UPPER,
-    ODSY_ROUTE_VECTORS,
-    ODSY_ROUTE_ENABLE_DMA,
-    ODSY_ROUTE_ENABLE_RETRACE,
-    ODSY_ROUTE_ENABLE_SOFTSYNC,
-};
+use super::consts::{cmd, route};
 use crate::irq::InterruptController;
 use crate::traits::BusDevice;
 use parking_lot::Mutex;
@@ -57,7 +51,7 @@ const CONTROL: u64 = 0x0024;
 const ROUTE_DEST_UPPER: u64 = 0x1044;
 const ROUTE_DEST_LOWER: u64 = 0x104c;
 const ROUTE_VECTORS: u64 = 0x1054;
-pub(super) const ROUTE_ENABLES: u32 = ODSY_ROUTE_ENABLE_DMA | ODSY_ROUTE_ENABLE_RETRACE | ODSY_ROUTE_ENABLE_SOFTSYNC;
+pub(super) const ROUTE_ENABLES: u32 = route::ENABLE_DMA | route::ENABLE_RETRACE | route::ENABLE_SOFTSYNC;
 const INTR_CLEAR: u64 = 0x101c;
 const INTR_ENABLE_SET: u64 = 0x1034;
 const INTR_FIFO_LOW_WATER: u64 = 0x200;
@@ -192,28 +186,28 @@ pub(super) fn reg_write(s: &mut Board, off: u64, value: u32) {
 
 /// One command-FIFO word.
 pub(super) fn cmd(s: &mut Board, word: u32) {
-    s.mmio_write(ODSY_CMD_FIFO, word as u64, 4);
+    s.mmio_write(cmd::FIFO, word as u64, 4);
 }
 
 /// Two command-FIFO words in one 64-bit store, upper half first.
 pub(super) fn cmd64(s: &mut Board, first: u32, second: u32) {
-    s.mmio_write(ODSY_CMD_FIFO, (first as u64) << 32 | second as u64, 8);
+    s.mmio_write(cmd::FIFO, (first as u64) << 32 | second as u64, 8);
 }
 
 /// A register-select word for `reg`, as the driver sends it.
 pub(super) fn select(reg: u32) -> u32 {
-    ODSY_CMD_REGISTER_TAG | reg
+    cmd::REGISTER_TAG | reg
 }
 
 /// Program the routed destination to HEART's packet register, with the
 /// four sources on their own vectors and all three source enables set,
 /// as the shipped kernel programs it.
 pub(super) fn route_to_heart(s: &mut Board) {
-    reg_write(s, ODSY_ROUTE_DEST_UPPER, (HEART_WIDGET << 25) as u32 | ROUTE_ENABLES);
-    reg_write(s, ODSY_ROUTE_DEST_LOWER, HEART_PACKET as u32);
+    reg_write(s, route::DEST_UPPER, (HEART_WIDGET << 25) as u32 | ROUTE_ENABLES);
+    reg_write(s, route::DEST_LOWER, HEART_PACKET as u32);
     reg_write(
         s,
-        ODSY_ROUTE_VECTORS,
+        route::VECTORS,
         SOFTSYNC_VECTOR << 24 | RETRACE_VECTOR << 16 | DMA_VECTOR << 8 | FLAG_VECTOR,
     );
 }

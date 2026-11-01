@@ -9,10 +9,7 @@
 //! behaviour).
 
 use crate::dev::odyssey::board::Board;
-use crate::dev::odyssey::consts::{
-    ODSY_F32_ONE, ODSY_GL_COLOR_3F, ODSY_GL_COLOR_INDEX, ODSY_QUERY_KIND_RASTER,
-    ODSY_QUERY_RASTER_COLOUR, ODSY_QUERY_RASTER_INDEX,
-};
+use crate::dev::odyssey::consts::{gl_cmd, query, ODSY_F32_ONE};
 use crate::dev::odyssey::tests::{board_with_ram, cmd, Ram};
 use std::sync::Arc;
 
@@ -27,13 +24,13 @@ fn word(ram: &Ram, at: u64) -> u32 {
 }
 
 fn colour(s: &mut Board, r: u32, g: u32, b: u32) {
-    for w in [ODSY_GL_COLOR_3F, r, g, b] {
+    for w in [gl_cmd::COLOR_3F, r, g, b] {
         cmd(s, w);
     }
 }
 
 fn index(s: &mut Board, i: u32) {
-    cmd(s, ODSY_GL_COLOR_INDEX);
+    cmd(s, gl_cmd::COLOR_INDEX);
     cmd(s, i);
 }
 
@@ -62,7 +59,7 @@ fn query_board() -> (Box<Board>, Arc<Ram>) {
 }
 
 fn raster_colour(ram: &Ram) -> [u32; 4] {
-    let at = SHADOW + ODSY_QUERY_RASTER_COLOUR as u64;
+    let at = SHADOW + query::RASTER_COLOUR as u64;
     [0, 4, 8, 12].map(|o| word(ram, at + o))
 }
 
@@ -78,11 +75,11 @@ fn the_raster_query_returns_the_colour_latched_at_raster_position_time() {
     raster_pos_stream(&mut s);
     colour(&mut s, 0, 0, 0);
     index(&mut s, 4);
-    query(&mut s, ODSY_QUERY_KIND_RASTER);
+    query(&mut s, query::KIND_RASTER);
 
-    assert_eq!(raster_colour(&ram), [ODSY_GL_COLOR_3F, F_HALF, F_QUARTER, F_ONE]);
-    let at = SHADOW + ODSY_QUERY_RASTER_INDEX as u64;
-    assert_eq!([word(&ram, at), word(&ram, at + 4)], [ODSY_GL_COLOR_INDEX, 9]);
+    assert_eq!(raster_colour(&ram), [gl_cmd::COLOR_3F, F_HALF, F_QUARTER, F_ONE]);
+    let at = SHADOW + query::RASTER_INDEX as u64;
+    assert_eq!([word(&ram, at), word(&ram, at + 4)], [gl_cmd::COLOR_INDEX, 9]);
     assert_eq!(ram.half(SYNC + 6), 0x5a5a, "the query still completes");
 }
 
@@ -97,9 +94,9 @@ fn a_later_raster_position_replaces_the_latch() {
     colour(&mut s, F_ONE, 0, 0);
     raster_pos_stream(&mut s);
     colour(&mut s, 0, 0, F_ONE);
-    query(&mut s, ODSY_QUERY_KIND_RASTER);
+    query(&mut s, query::KIND_RASTER);
 
-    assert_eq!(raster_colour(&ram), [ODSY_GL_COLOR_3F, F_ONE, 0, 0]);
+    assert_eq!(raster_colour(&ram), [gl_cmd::COLOR_3F, F_ONE, 0, 0]);
 }
 
 /// The latch is taken at the last block, not the first: a colour sent
@@ -116,9 +113,9 @@ fn only_the_last_position_block_latches() {
     for _ in 0..16 {
         cmd(&mut s, 0);
     }
-    query(&mut s, ODSY_QUERY_KIND_RASTER);
+    query(&mut s, query::KIND_RASTER);
 
-    assert_eq!(raster_colour(&ram), [ODSY_GL_COLOR_3F, F_HALF, F_HALF, F_HALF]);
+    assert_eq!(raster_colour(&ram), [gl_cmd::COLOR_3F, F_HALF, F_HALF, F_HALF]);
 }
 
 /// Before any glRasterPos the raster records hold the GL initial values:
@@ -129,11 +126,11 @@ fn the_raster_query_before_any_raster_position_returns_the_initial_values() {
 
     colour(&mut s, F_HALF, F_QUARTER, 0);
     index(&mut s, 7);
-    query(&mut s, ODSY_QUERY_KIND_RASTER);
+    query(&mut s, query::KIND_RASTER);
 
-    assert_eq!(raster_colour(&ram), [ODSY_GL_COLOR_3F, F_ONE, F_ONE, F_ONE]);
-    let at = SHADOW + ODSY_QUERY_RASTER_INDEX as u64;
-    assert_eq!([word(&ram, at), word(&ram, at + 4)], [ODSY_GL_COLOR_INDEX, 1]);
+    assert_eq!(raster_colour(&ram), [gl_cmd::COLOR_3F, F_ONE, F_ONE, F_ONE]);
+    let at = SHADOW + query::RASTER_INDEX as u64;
+    assert_eq!([word(&ram, at), word(&ram, at + 4)], [gl_cmd::COLOR_INDEX, 1]);
 }
 
 /// The current-value query (kind 0) stays live: it reports the colour and
@@ -150,8 +147,8 @@ fn the_current_value_query_stays_live() {
     query(&mut s, 0);
 
     let live = SHADOW + 0x914;
-    assert_eq!([0, 4, 8, 12].map(|o| word(&ram, live + o)), [ODSY_GL_COLOR_3F, F_ONE, F_ONE, 0]);
+    assert_eq!([0, 4, 8, 12].map(|o| word(&ram, live + o)), [gl_cmd::COLOR_3F, F_ONE, F_ONE, 0]);
     let idx = SHADOW + 0x900;
-    assert_eq!([word(&ram, idx), word(&ram, idx + 4)], [ODSY_GL_COLOR_INDEX, 4]);
-    assert_eq!(word(&ram, SHADOW + ODSY_QUERY_RASTER_COLOUR as u64), 0, "kind 0 writes no raster record");
+    assert_eq!([word(&ram, idx), word(&ram, idx + 4)], [gl_cmd::COLOR_INDEX, 4]);
+    assert_eq!(word(&ram, SHADOW + query::RASTER_COLOUR as u64), 0, "kind 0 writes no raster record");
 }
