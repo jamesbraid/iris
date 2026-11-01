@@ -168,6 +168,9 @@ pub struct ScsiDevice {
     logical_block_size: u64,
     /// What INQUIRY reports (the attaching controller's choice).
     identity: ScsiIdentity,
+    /// The caching page's WCE bit: the disk may acknowledge a write before it
+    /// is stored. Set at power-up; a MODE SELECT can clear it.
+    write_cache: bool,
 }
 
 /// A CD-ROM's physical sector (Yellow Book).
@@ -194,6 +197,7 @@ impl ScsiDevice {
             // HDD defaults to 512. dksc switches CD-ROM to 512 for EFS, back to 2048 for ISO.
             logical_block_size: if is_cdrom { 2048 } else { 512 },
             identity,
+            write_cache: true,
         }
     }
 
@@ -209,6 +213,7 @@ impl ScsiDevice {
             phys_block_size: CDROM_SECTOR,
             logical_block_size: 2048,
             identity,
+            write_cache: true,
         }
     }
 
@@ -592,24 +597,78 @@ impl ScsiDevice {
             // Page 0x08: Caching Parameters (SBC-2 / SCSI-2). Without this, sd.c logs
             // "No Caching mode page found" / "Assuming drive cache: write through".
             if want_page(0x08) {
-                pages.extend_from_slice(&[
-                    0x08, 0x12, // page code, length (18 bytes follow)
-                    0x04,       // WCE=1 (write-back), RCD=0 (read cache enabled)
-                    0x00,       // demand read/write retention priority
-                    0x00, 0x00, // disable pre-fetch transfer length
-                    0x00, 0x00, // minimum pre-fetch
-                    0xff, 0xff, // maximum pre-fetch
-                    0xff, 0xff, // maximum pre-fetch ceiling
-                    0x00,       // FSW/LBCSS/DRA
-                    0x00,       // number of cache segments
-                    0x00, 0x00, // cache segment size
-                    0x00,       // reserved
-                    0x00, 0x00, 0x00, // non-cache segment size
-                ]);
+                pages.extend_from_slice(&self.caching_page());
             }
         }
 
         Ok((block_desc, pages))
+    }
+
+    /// The caching page (08h) as MODE SENSE reports it: write cache enabled
+    /// (WCE=1) until the guest clears it, read cache on (RCD=0).
+    ///
+    /// WCE=1 is what the disk is: a plain WRITE reaches the host's file but is
+    /// made durable only by a SYNCHRONIZE CACHE, a WRITE with FUA, or the
+    /// background sync, so the disk must not claim to be write-through. That
+    /// default is a model choice, not a measurement. IRIX 6.5.30 kernels
+    /// (established for the IP27/IP35 ones; only "reported" for IP30 and IP32)
+    /// never read this page, set FUA or send SYNCHRONIZE CACHE, so nothing
+    /// IRIX sees depends on it.
+    fn caching_page(&self) -> [u8; 20] {
+        let mut page = [0u8; 20];
+        page[0] = 0x08; // page code
+        page[1] = 0x12; // 18 bytes follow
+        page[2] = if self.write_cache { 0x04 } else { 0x00 }; // WCE; RCD=0, MF=0
+        // Bytes 3..5: retention priorities and disable-prefetch length, all 0.
+        // Minimum 0, then maximum pre-fetch and ceiling.
+        page[8..12].copy_from_slice(&[0xff; 4]);
+        page
+    }
+
+    /// Check the mode pages of a MODE SELECT parameter list and apply them:
+    /// all or none. `list` is the whole parameter list and `at` where its
+    /// pages start, after the header and block descriptors.
+    ///
+    /// The caching page may differ from what MODE SENSE reports only in WCE,
+    /// the one field the disk lets the guest change. A page that runs past the
+    /// list is a parameter list length error, one that is not 18 bytes long,
+    /// is in the long (SPF) format or changes a field that is not changeable
+    /// is an invalid field. Other pages that are well formed are accepted and
+    /// ignored, as they always have been.
+    fn select_mode_pages(&mut self, list: &[u8], mut at: usize) -> Result<(), ScsiResponse> {
+        let length_error = |dev: &mut Self| dev.check_condition(0x05, 0x1a, 0x00);
+        let invalid_field = |dev: &mut Self| dev.check_condition(0x05, 0x26, 0x00);
+        let mut write_cache = self.write_cache;
+        while at < list.len() {
+            if list.len() - at < 2 {
+                return Err(length_error(self));
+            }
+            let (head, len) = (list[at], list[at + 1] as usize);
+            if list.len() - at - 2 < len {
+                return Err(length_error(self));
+            }
+            let page = &list[at..at + 2 + len];
+            at += 2 + len;
+            // PS is reserved in MODE SELECT, but a page copied from MODE SENSE
+            // carries it.
+            if head & 0x40 != 0 {
+                return Err(invalid_field(self)); // SPF: sub-pages are not supported
+            }
+            if head & 0x3f != 0x08 {
+                continue;
+            }
+            let current = self.caching_page();
+            if page.len() != current.len() {
+                return Err(invalid_field(self));
+            }
+            // Everything but WCE (byte 2 bit 2) must be as reported.
+            if page[2] & !0x04 != current[2] & !0x04 || page[3..] != current[3..] {
+                return Err(invalid_field(self));
+            }
+            write_cache = page[2] & 0x04 != 0;
+        }
+        self.write_cache = write_cache;
+        Ok(())
     }
 
     fn exec_mode_sense_6(&mut self, cdb: &[u8]) -> Result<ScsiResponse, std::io::Error> {
@@ -678,6 +737,9 @@ impl ScsiDevice {
         }
 
         // Header: byte 0 = mode data length (ignored on SELECT), byte 3 = block descriptor length
+        if let Err(response) = self.select_pages_after(&data[..param_len], 4, data[3] as usize) {
+            return Ok(response);
+        }
         self.select_block_descriptor(data, 4, data[3] as usize);
         Ok(ScsiResponse { status: 0x00, data: vec![] })
     }
@@ -687,9 +749,26 @@ impl ScsiDevice {
     fn exec_mode_select_10(&mut self, cdb: &[u8], data_in: Option<&Vec<u8>>) -> Result<ScsiResponse, std::io::Error> {
         let param_len = ((cdb[7] as usize) << 8) | cdb[8] as usize;
         if let Some(data) = data_in.filter(|d| d.len() >= param_len && param_len >= 8) {
-            self.select_block_descriptor(data, 8, ((data[6] as usize) << 8) | data[7] as usize);
+            let bd_len = ((data[6] as usize) << 8) | data[7] as usize;
+            if let Err(response) = self.select_pages_after(&data[..param_len], 8, bd_len) {
+                return Ok(response);
+            }
+            self.select_block_descriptor(data, 8, bd_len);
         }
         Ok(ScsiResponse { status: 0x00, data: vec![] })
+    }
+
+    /// The pages of a disk's MODE SELECT parameter list `list`, which has a
+    /// `header`-byte header and `bd_len` bytes of block descriptors. A CD-ROM
+    /// has no pages to change.
+    fn select_pages_after(&mut self, list: &[u8], header: usize, bd_len: usize) -> Result<(), ScsiResponse> {
+        if self.is_cdrom() {
+            return Ok(());
+        }
+        if list.len() < header + bd_len {
+            return Err(self.check_condition(0x05, 0x1a, 0x00)); // PARAMETER LIST LENGTH ERROR
+        }
+        self.select_mode_pages(list, header + bd_len)
     }
 
     /// A MODE SELECT block descriptor at `at`, `len` bytes: its block length
@@ -1259,6 +1338,130 @@ mod tests {
 
     fn run(dev: &mut ScsiDevice, cdb: &[u8]) -> ScsiResponse {
         dev.request(&ScsiRequest { cdb: cdb.to_vec(), data_len: ScsiDataLength::Unlimited, data_in: None }).expect("request")
+    }
+
+    /// A raw 64-sector disk target.
+    fn disk() -> ScsiDevice {
+        let path = tmp("disk");
+        std::fs::write(&path, vec![0u8; 64 * 512]).expect("test image");
+        let node = crate::block_node::RawNode::open(&path).expect("open");
+        let identity = ScsiIdentity::new(b"TEST    ", b"DISK            ", b"1.0 ");
+        let _ = std::fs::remove_file(&path); // the open handle keeps it
+        ScsiDevice::new(Box::new(node), false, "test".into(), Vec::new(), identity)
+    }
+
+    /// Byte 2 of the caching page MODE SENSE(6) reports (WCE is bit 2).
+    fn caching_flags(dev: &mut ScsiDevice) -> u8 {
+        // DBD set, so the page follows the 4-byte header.
+        let r = run(dev, &[0x1a, 0x08, 0x08, 0, 255, 0]);
+        assert_eq!(r.status, 0x00);
+        assert_eq!(r.data[4], 0x08, "page code");
+        assert_eq!(r.data[5], 0x12, "page length");
+        r.data[6]
+    }
+
+    /// MODE SELECT(6), no block descriptor, with `pages` as the list.
+    fn mode_select(dev: &mut ScsiDevice, pages: &[u8]) -> ScsiResponse {
+        let mut list = vec![0u8, 0, 0, 0];
+        list.extend_from_slice(pages);
+        dev.request(&request(&[0x15, 0x10, 0, 0, list.len() as u8, 0], Some(list))).expect("request")
+    }
+
+    /// The caching page as the disk reports it, with byte 2 replaced.
+    fn caching_select(dev: &mut ScsiDevice, flags: u8) -> Vec<u8> {
+        let r = run(dev, &[0x1a, 0x08, 0x08, 0, 255, 0]);
+        let mut page = r.data[4..].to_vec();
+        page[2] = flags;
+        page
+    }
+
+    fn sense_key_asc(dev: &mut ScsiDevice) -> (u8, u8) {
+        let r = run(dev, &[0x03, 0, 0, 0, 18, 0]);
+        (r.data[2] & 0x0f, r.data[12])
+    }
+
+    /// A plain write is not durable at GOOD, so the disk says it has a write
+    /// cache, with the read cache on.
+    #[test]
+    fn a_disk_reports_a_write_cache_with_the_read_cache_on() {
+        let mut dev = disk();
+        assert_eq!(caching_flags(&mut dev), 0x04, "WCE=1, RCD=0");
+        // MODE SENSE(10) says the same.
+        let r = run(&mut dev, &[0x5a, 0x08, 0x08, 0, 0, 0, 0, 0, 255, 0]);
+        assert_eq!(r.data[8 + 2], 0x04);
+    }
+
+    #[test]
+    fn mode_select_round_trips_the_write_cache_bit() {
+        let mut dev = disk();
+        let page = caching_select(&mut dev, 0x00);
+        assert_eq!(mode_select(&mut dev, &page).status, 0x00);
+        assert_eq!(caching_flags(&mut dev), 0x00, "WCE cleared by the guest");
+        let page = caching_select(&mut dev, 0x04);
+        assert_eq!(mode_select(&mut dev, &page).status, 0x00);
+        assert_eq!(caching_flags(&mut dev), 0x04, "and set again");
+    }
+
+    #[test]
+    fn mode_select_10_clears_the_write_cache_bit_after_a_block_descriptor() {
+        let mut dev = disk();
+        let page = caching_select(&mut dev, 0x00);
+        let mut list = vec![0u8; 8];
+        list[7] = 8; // one block descriptor
+        list.extend_from_slice(&[0, 0, 0, 64, 0, 0, 2, 0]);
+        list.extend_from_slice(&page);
+        let cdb = [0x55, 0x10, 0, 0, 0, 0, 0, 0, list.len() as u8, 0];
+        assert_eq!(dev.request(&request(&cdb, Some(list))).unwrap().status, 0x00);
+        assert_eq!(caching_flags(&mut dev), 0x00);
+    }
+
+    #[test]
+    fn mode_select_rejects_a_malformed_caching_page_and_changes_nothing() {
+        let mut dev = disk();
+        let good = caching_select(&mut dev, 0x00);
+
+        // Too short a page.
+        let mut short = good.clone();
+        short[1] = 0x10;
+        short.truncate(18);
+        // A page that claims more than the list holds.
+        let mut cut = good.clone();
+        cut.truncate(10);
+        // The read cache disabled: RCD is not changeable.
+        let rcd = caching_select(&mut dev, 0x05);
+        // Another field changed.
+        let mut other = good.clone();
+        other[8] = 0x00;
+        // The long (sub-page) format.
+        let mut spf = good.clone();
+        spf[0] |= 0x40;
+
+        for (what, page, key_asc) in [
+            ("short page", short, (0x05, 0x26)),
+            ("page past the list", cut, (0x05, 0x1a)),
+            ("RCD", rcd, (0x05, 0x26)),
+            ("other field", other, (0x05, 0x26)),
+            ("SPF", spf, (0x05, 0x26)),
+        ] {
+            let r = mode_select(&mut dev, &page);
+            assert_eq!(r.status, 0x02, "{what}: CHECK CONDITION");
+            assert_eq!(sense_key_asc(&mut dev), key_asc, "{what}");
+            assert_eq!(caching_flags(&mut dev), 0x04, "{what}: WCE untouched");
+        }
+        // A later valid page after a bad one is not half-applied.
+        let mut two = good.clone();
+        two.extend_from_slice(&[0x08, 0x12]);
+        assert_eq!(mode_select(&mut dev, &two).status, 0x02);
+        assert_eq!(caching_flags(&mut dev), 0x04);
+    }
+
+    /// Pages the disk does not model are accepted and ignored.
+    #[test]
+    fn mode_select_ignores_a_well_formed_page_it_does_not_model() {
+        let mut dev = disk();
+        let pages = [0x01, 0x0a, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0];
+        assert_eq!(mode_select(&mut dev, &pages).status, 0x00);
+        assert_eq!(caching_flags(&mut dev), 0x04);
     }
 
     /// NetBSD's cd driver reads the TOC asking for 12 bytes: header and
