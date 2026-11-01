@@ -12,9 +12,10 @@
 //! intensity source spreads over red, green and blue, and a component the
 //! source lacks is 0, or full scale for alpha.
 
+use super::consts::ODSY_INDEX_MASK;
 /// A source component.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Comp {
+pub(super) enum Comp {
     Red,
     Green,
     Blue,
@@ -28,14 +29,14 @@ pub enum Comp {
 
 /// One field of a packed word: component, width in bits, shift.
 #[derive(Clone, Copy, Debug)]
-pub struct Field {
+pub(super) struct Field {
     pub comp: Comp,
     pub width: u8,
     pub shift: u8,
 }
 
 #[derive(Clone, Debug)]
-pub enum WriteKind {
+pub(super) enum WriteKind {
     /// Whole components in order, `comp_bytes` bytes each, big-endian.
     Comps { comps: [Comp; 4], n: u8, comp_bytes: u8 },
     /// One big-endian word of fields.
@@ -44,7 +45,7 @@ pub enum WriteKind {
 
 /// What a write code names: the bytes a pixel takes and how to read them.
 #[derive(Clone, Debug)]
-pub struct WriteForm {
+pub(super) struct WriteForm {
     pub bytes: u32,
     pub kind: WriteKind,
 }
@@ -58,7 +59,7 @@ const NONE: Field = f(Comp::Red, 0, 0);
 /// The form of write code `code` (word 7 & 0x1ff), or None for a code this
 /// model does not take: depth and stencil (format 0, which goes to its own
 /// planes), the 4:2:2 formats 0xa and 0xe, and anything not in the table.
-pub fn write_form(code: u32) -> Option<WriteForm> {
+pub(super) fn write_form(code: u32) -> Option<WriteForm> {
     use Comp::*;
     let format = code & 0x1f;
     let ty = (code >> 5) & 0xf;
@@ -193,7 +194,7 @@ impl WriteForm {
                             2 => u16::from_be_bytes([b[at], b[at + 1]]) as u32,
                             _ => u32::from_be_bytes(b[at..at + 4].try_into().unwrap()),
                         };
-                        return raw & super::ODSY_INDEX_MASK;
+                        return raw & ODSY_INDEX_MASK;
                     }
                     put(comps[i], v);
                 }

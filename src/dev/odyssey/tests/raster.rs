@@ -1,6 +1,37 @@
 //! The raster unit's queue: GL work runs on its own thread, and the
 //! orderings the guest can see hold across both queues.
 
+use crate::dev::odyssey::Odyssey;
+use crate::dev::odyssey::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
+use crate::dev::odyssey::consts::{
+    ODSY_BUZZ_1, ODSY_COLOUR_MATERIAL_DIFFUSE, ODSY_CURSOR_BASE, ODSY_CURSOR_COLOURS,
+    ODSY_CURSOR_COLOUR_COUNT, ODSY_CURSOR_CONTROL, ODSY_CURSOR_CTL_ENABLE, ODSY_CURSOR_GLYPH,
+    ODSY_CURSOR_POSITION, ODSY_DID_MAIN_SHIFT, ODSY_DISPMODE_COUNT, ODSY_DISPMODE_GROUP_SHIFT,
+    ODSY_DMA_FENCE_TOKEN_SHIFT, ODSY_DRAW_MASK_BUFFER0, ODSY_DRAW_MASK_BUFFER1, ODSY_GAMMA_BASE,
+    ODSY_GAMMA_GROUP, ODSY_GL_LIGHT_VEC_FLOATS, ODSY_ID_COMPARE_ENABLE, ODSY_ID_COMPARE_MASK_SHIFT,
+    ODSY_LIGHT_ATTEN, ODSY_LIGHT_HALF, ODSY_LIGHT_POS, ODSY_LIGHT_SPOT_COS, ODSY_LIGHT_SPOT_DIR,
+    ODSY_LIGHT_SPOT_EXP, ODSY_LUT_BLUE_SHIFT, ODSY_LUT_ENTRY_MASK, ODSY_LUT_GREEN_SHIFT,
+    ODSY_LUT_RED_SHIFT, ODSY_SW_TOKEN, ODSY_WRITE_COLOUR_MASK, ODSY_WRITE_COLOUR_SHIFT,
+};
+use crate::dev::odyssey::display::Display;
+use crate::dev::odyssey::gl::{PyramidShape, Texture, TextureChain, TextureVolume};
+use crate::dev::odyssey::gl_context::{
+    GL_COLOR_BUFFER_BIT, GL_COLOUR_MASK_ALL, GL_DRAW_OK, GL_FLAT, GL_LINES, GL_QUADS, GL_TRIANGLES,
+    GL_VERTEX_FLOATS, GL_V_COLOR, GL_V_POSITION, GlDraw, GlDrawState, GlDrawable, RASTER_CLEAR,
+    RasterOp,
+};
+use crate::dev::odyssey::memory::ClipRect;
+use crate::dev::odyssey::mmio::BoardLocks;
+use crate::dev::odyssey::raster::{GlTexLevel, LineRule};
+use crate::dev::odyssey::raster_unit::{
+    primitive_cost, rect_cost, RASTER_CLEAR_DIVISOR, RASTER_JOB_OVERHEAD, RASTER_WORK_BUDGET,
+    ROW_WORDS, RasterCtx,
+};
+use crate::dev::odyssey::reader::Differ;
+use crate::dev::odyssey::scanout::{DirtySite, RowMarks};
+use crate::dev::odyssey::tests::{board, cmd, pixel, Ram};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use super::*;
 use crate::dev::odyssey::raster_bench::Bench;
 use std::sync::atomic::Ordering::SeqCst;

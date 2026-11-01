@@ -7,11 +7,30 @@
 //!
 //! Ported from include/hw/display/sgi/rasterizer.h in jamesbraid/qemu-sgi-origami.
 
-use super::*;
 
+use crate::devlog::LogModule;
+use super::gl::{GlPixels, GlPlanes};
+use super::gl_context::{
+    ColourTarget, GL_CLEAR, GL_CLIP_PLANES, GL_COLOUR_MASK_ALL, GL_COLOUR_MASK_ALPHA,
+    GL_COLOUR_MASK_RED, GL_CONSTANT_ALPHA, GL_CONSTANT_COLOR, GL_DECR, GL_DRAW_OK, GL_DST_ALPHA,
+    GL_DST_COLOR, GL_EQUAL, GL_FILL, GL_FUNC_REVERSE_SUBTRACT, GL_FUNC_SUBTRACT, GL_GEQUAL,
+    GL_GREATER, GL_INCR, GL_INVERT, GL_KEEP, GL_LEQUAL, GL_LESS, GL_LINES, GL_LINE_LOOP,
+    GL_LINE_STRIP, GL_LOGIC_OP, GL_MAX, GL_MAX_TARGETS, GL_MIN, GL_NEVER, GL_NOTEQUAL,
+    GL_OFFSET_FILL, GL_ONE_MINUS_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_COLOR,
+    GL_ONE_MINUS_DST_ALPHA, GL_ONE_MINUS_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA, GL_ONE_MINUS_SRC_COLOR,
+    GL_POINTS, GL_POLYGON, GL_QUADS, GL_QUAD_STRIP, GL_REPLACE, GL_SRC_ALPHA,
+    GL_SRC_ALPHA_SATURATE, GL_SRC_COLOR, GL_TRIANGLES, GL_TRIANGLE_FAN, GL_TRIANGLE_STRIP,
+    GL_VERTEX_FLOATS, GL_V_COLOR, GL_V_TEXCOORD, GlDraw, GlDrawResult, GlDrawState,
+};
+use super::memory::{CLIP_MAX, ClipList};
+use super::raster_fill::FillRow;
+use super::raster_fixed_texture::{fixed_return, FIXED_PREFILL_MIN_PIXELS, SoftFixedTex};
+use super::raster_line::{r2_max, r2_min, soft_dimension, SoftLineStipple};
+use super::raster_pixels::x_logic_op;
+use super::raster_texture::{SoftTexSelection, SoftTexSelectionMemo, SoftTexelCache};
 /// Which pixels a width-1 segment covers.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub enum LineRule {
+pub(super) enum LineRule {
     /// OpenGL's diamond-exit rule (1.2.1, 3.4.1) on the snapped grid.
     #[default]
     Diamond,
@@ -29,7 +48,7 @@ pub enum LineRule {
 // dither (Board::gl_apply_mode() reports GL_DITHER).
 
 #[derive(Clone, Default)]
-pub struct RasterRules {
+pub(super) struct RasterRules {
     /// window coordinates snap to 2^-n pixel
     pub subpixel_bits: u8,
     /// per channel of a stored colour
@@ -66,7 +85,7 @@ pub struct RasterRules {
 
 /// A vertex in clip coordinates, as view-volume clipping takes and makes it.
 #[derive(Clone)]
-pub struct VolumeVertex {
+pub(super) struct VolumeVertex {
     pub clip: [f64; 4],
     pub eye: [f64; 4],
     pub attr: [f32; GL_VERTEX_FLOATS],
@@ -80,15 +99,15 @@ impl Default for VolumeVertex {
 
 /// The most vertices clipping a triangle by the six planes leaves. usize
 /// so it can size arrays.
-pub const VOLUME_TRIANGLE_MAX: usize = 3 + 6;
+pub(super) const VOLUME_TRIANGLE_MAX: usize = 3 + 6;
 
-pub const GL_TEX_LEVELS_MAX: u32 = 31;
+pub(super) const GL_TEX_LEVELS_MAX: u32 = 31;
 
 /// One level of a texture image, as the board describes it. The `read_*`
 /// flags say which reads the draw's Texels answer for it.
 #[derive(Clone, Copy, Default)]
 #[cfg_attr(test, derive(PartialEq, Debug))]
-pub struct GlTexLevel {
+pub(super) struct GlTexLevel {
     pub level: u32,
     pub width: u32,
     pub height: u32,
@@ -107,7 +126,7 @@ pub struct GlTexLevel {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct GlTexPyramid<'a> {
+pub(super) struct GlTexPyramid<'a> {
     pub levels: &'a [GlTexLevel],
     pub base_level: u32,
     pub max_level: u32,
@@ -120,7 +139,7 @@ pub struct GlTexPyramid<'a> {
 /// mutually exclusive. Dimensions count interior texels. Texels return
 /// canonical RRGGBBAA. Immutable through each synchronous draw.
 #[derive(Clone, Copy, Default)]
-pub struct GlTexImage<'a> {
+pub(super) struct GlTexImage<'a> {
     pub width: u32,
     pub height: u32,
     pub depth: u32,
@@ -172,7 +191,7 @@ pub struct GlTexImage<'a> {
 /// (BoardTexels), or a test's. `level` is one of the image's pyramid levels
 /// or its detail image, or None for the level-zero image itself. A read
 /// outside the storage is None.
-pub trait Texels {
+pub(super) trait Texels {
     fn texel(&self, level: Option<&GlTexLevel>, x: u32, y: u32) -> Option<u32>;
     fn border_texel(&self, level: Option<&GlTexLevel>, x: i32, y: i32) -> Option<u32>;
     fn texel_3d(&self, level: Option<&GlTexLevel>, x: u32, y: u32, z: u32) -> Option<u32>;
@@ -189,7 +208,7 @@ pub trait Texels {
 }
 
 /// A draw without a texture reads no texels.
-pub struct NoTexels;
+pub(super) struct NoTexels;
 
 impl Texels for NoTexels {
     fn texel(&self, _: Option<&GlTexLevel>, _: u32, _: u32) -> Option<u32> {
@@ -208,7 +227,7 @@ impl Texels for NoTexels {
 
 /// Quantized scalar channels, each normalized by its own declared maximum.
 #[derive(Clone, Copy, Default)]
-pub struct RasterColour {
+pub(super) struct RasterColour {
     /// R, G, B, A; absent alpha is canonical zero
     pub component: [u32; 4],
 }
@@ -218,7 +237,7 @@ pub struct RasterColour {
 /// borrows (GlPlaneRow), so that the loops that run on both are one source.
 /// target is one of the drawable's colour buffers. The planes are shared, so
 /// a store goes through interior mutability.
-pub trait Planes {
+pub(super) trait Planes {
     fn store_rgba(&self, target: ColourTarget, x: i32, y: i32, colour: &RasterColour);
     /// The colour at (x, y); None where it cannot be read.
     fn load_rgba(&self, target: ColourTarget, x: i32, y: i32) -> Option<RasterColour>;
@@ -230,7 +249,7 @@ pub trait Planes {
 
 /// How a draw stores colour, and the board state it takes at the start.
 #[derive(Clone, Default)]
-pub struct RasterTarget<'a> {
+pub(super) struct RasterTarget<'a> {
     /// Colour-index mode: the board stores the index packed in the colour
     /// word (GlPlanes::store_colour()) and cannot read it back, so blending,
     /// logical operations and partial colour masks are refused. Otherwise
@@ -247,7 +266,7 @@ pub struct RasterTarget<'a> {
 /// How filled triangles sample a texture, for tests (raster_set_texture_path()):
 /// the row loops, the fixed-point sampler alone, or the double-precision path.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum TexturePath {
+pub(super) enum TexturePath {
     Spans,
     Fixed,
     Double,
@@ -257,17 +276,17 @@ pub enum TexturePath {
 // The draw itself. The fixed-point texture path is in raster_fixed_texture.rs.
 // ---------------------------------------------------------------------
 
-pub fn fmax(a: f64, b: f64) -> f64 {
+pub(super) fn fmax(a: f64, b: f64) -> f64 {
     if a > b { a } else { b }
 }
-pub fn fmin(a: f64, b: f64) -> f64 {
+pub(super) fn fmin(a: f64, b: f64) -> f64 {
     if a < b { a } else { b }
 }
 
 /// The drawable's window: its origin and the bounds of the pixels it owns,
 /// in plane pixels, and the rectangles themselves.
 #[derive(Clone, Copy, Default)]
-pub struct SoftWindow {
+pub(super) struct SoftWindow {
     pub ox: i32,
     pub oy: i32,
     pub x0: i32,
@@ -279,7 +298,7 @@ pub struct SoftWindow {
 
 /// Once-a-draw reports.
 #[derive(Default)]
-pub struct SoftReports {
+pub(super) struct SoftReports {
     pub texture: std::sync::atomic::AtomicU32,
     pub rgba: std::sync::atomic::AtomicBool,
 }
@@ -287,7 +306,7 @@ pub struct SoftReports {
 /// One draw as the rasteriser runs it: its rules, state and planes, and
 /// what its setup decided.
 #[derive(Clone, Copy)]
-pub struct SoftDraw<'a> {
+pub(super) struct SoftDraw<'a> {
     pub rules: &'a RasterRules,
     pub t: &'a RasterTarget<'a>,
     pub st: &'a GlDrawState,
@@ -379,7 +398,7 @@ impl<'a> SoftDraw<'a> {
 
 /// A vertex after transformation, ready to rasterize.
 #[derive(Clone, Copy)]
-pub struct SoftVertex {
+pub(super) struct SoftVertex {
     /// window position in subpixels
     pub x: i64,
     pub y: i64,
@@ -414,7 +433,7 @@ impl Default for SoftVertex {
 /// before the per-fragment operations of chapter 4: its colour, each
 /// component in [0, 1], and its texture coordinates.
 #[derive(Clone, Copy, Default)]
-pub struct SoftFrag {
+pub(super) struct SoftFrag {
     pub rgba: [f64; 4],
     pub texcoord: [f64; 4],
     pub texture_rho: f64,
@@ -662,7 +681,7 @@ impl RasterRules {
 }
 
 /// c / 255 for a component c of eight bits, exactly as the division gives it.
-pub static SOFT_UNIT8: [f64; 256] = {
+pub(super) static SOFT_UNIT8: [f64; 256] = {
     let mut t = [0.0f64; 256];
     let mut i = 0;
 
@@ -676,7 +695,7 @@ pub static SOFT_UNIT8: [f64; 256] = {
 /// c as a fraction of max, the largest value of its bits: c / max, from
 /// SOFT_UNIT8 for eight bits, whose table is that division done once.
 #[inline(always)]
-pub fn soft_unit(c: u32, max: u32) -> f64 {
+pub(super) fn soft_unit(c: u32, max: u32) -> f64 {
     match SOFT_UNIT8.get(c as usize) {
         Some(&u) if max == 255 => u,
         _ => c as f64 / max as f64,
@@ -731,7 +750,7 @@ impl SoftVertex {
 /// (4.1.4), the stencil test's masked reference against the masked stored
 /// value (4.1.5).
 #[inline]
-pub fn soft_compare(func: u32, value: u32, ref_: u32) -> bool {
+pub(super) fn soft_compare(func: u32, value: u32, ref_: u32) -> bool {
     match func {
         GL_NEVER => false,
         GL_LESS => value < ref_,
@@ -825,7 +844,7 @@ impl RasterRules {
 /// One blend factor (OpenGL 1.2.1, tables 4.1 and 4.2) for component k,
 /// red to alpha, from the source s, destination d and constant colour c.
 #[inline]
-pub fn soft_blend_factor(factor: u32, k: usize, s: &[f64; 4], d: &[f64; 4], c: &[f32; 4]) -> f64 {
+pub(super) fn soft_blend_factor(factor: u32, k: usize, s: &[f64; 4], d: &[f64; 4], c: &[f32; 4]) -> f64 {
     match factor {
         1 => 1.0,
         GL_SRC_COLOR => s[k],
@@ -893,7 +912,7 @@ impl SoftDraw<'_> {
 
 /// glLogicOp's operation (4.1.8, table 4.3) on the source s and the
 /// destination d, bit by bit.
-pub fn soft_logic_op(op: u32, s: u32, d: u32) -> u32 {
+pub(super) fn soft_logic_op(op: u32, s: u32, d: u32) -> u32 {
     x_logic_op(op.wrapping_sub(GL_CLEAR), s, d)
 }
 
@@ -1023,8 +1042,8 @@ impl SoftDraw<'_> {
     }
 }
 
-pub const FIXED_LEVELS: usize = 14;
-pub const FIXED_FAILED: u32 = 0x80000000;
+pub(super) const FIXED_LEVELS: usize = 14;
+pub(super) const FIXED_FAILED: u32 = 0x80000000;
 
 /// One texel of the fixed-point sampler's store: the packed RGBA8 texel,
 /// components expanded, in lanes (soft_fixed_lanes()), and the tag of the
@@ -1032,7 +1051,7 @@ pub const FIXED_FAILED: u32 = 0x80000000;
 /// reads the tag and then the lanes, and a bilinear tap's two texels in a
 /// row share a cache line.
 #[derive(Clone, Copy, Default)]
-pub struct SoftFixedCell {
+pub(super) struct SoftFixedCell {
     pub lanes: u64,
     pub tag: u32,
 }
@@ -1040,18 +1059,18 @@ pub struct SoftFixedCell {
 /// The fixed-point sampler's texels of one level for one draw, by interior
 /// index.
 #[derive(Clone, Default)]
-pub struct SoftFixedStore {
+pub(super) struct SoftFixedStore {
     pub cells: Vec<SoftFixedCell>,
     pub size: usize,
     pub plain: Vec<u64>,
 }
 
 thread_local! {
-    pub static SOFT_TEXEL_CACHE: std::cell::RefCell<SoftTexelCache> = std::cell::RefCell::new(SoftTexelCache::new());
+    pub(super) static SOFT_TEXEL_CACHE: std::cell::RefCell<SoftTexelCache> = std::cell::RefCell::new(SoftTexelCache::new());
 }
 
 /// Run f with this thread's texel cache, begun for a new draw.
-pub fn with_texel_cache<R>(f: impl FnOnce(&std::cell::RefCell<SoftTexelCache>) -> R) -> R {
+pub(super) fn with_texel_cache<R>(f: impl FnOnce(&std::cell::RefCell<SoftTexelCache>) -> R) -> R {
     SOFT_TEXEL_CACHE.with(|cache| {
         cache.borrow_mut().begin();
         f(cache)
@@ -1059,7 +1078,7 @@ pub fn with_texel_cache<R>(f: impl FnOnce(&std::cell::RefCell<SoftTexelCache>) -
 }
 
 thread_local! {
-    pub static SOFT_TEXTURE_SELECTED: std::cell::Cell<SoftTexSelectionMemo> =
+    pub(super) static SOFT_TEXTURE_SELECTED: std::cell::Cell<SoftTexSelectionMemo> =
         const { std::cell::Cell::new(SoftTexSelectionMemo {
             serial: 0,
             rho: 0,

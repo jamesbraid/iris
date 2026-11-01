@@ -53,102 +53,77 @@
 // a NaN fails them.
 #![allow(clippy::neg_cmp_op_on_partial_ord, reason = "a NaN must fail these tests")]
 
-use crate::devlog::LogModule;
-
-pub mod bits;
-pub mod board;
-pub mod command;
-pub mod consts;
-pub mod context;
-pub mod depth_word;
-pub mod display;
+mod bits;
+mod board;
+mod command;
+mod consts;
+mod context;
+mod depth_word;
+mod display;
 #[cfg(test)]
 mod display_bench;
-pub mod dma;
-pub mod draw;
-pub mod fifo;
+mod dma;
+mod draw;
+mod fifo;
 #[cfg(test)]
 mod golden;
-pub mod geometry;
-pub mod gl;
-pub mod gl_context;
-pub mod interface;
-pub mod memory;
-pub mod mmio;
-pub mod objects;
-pub mod pi_gfx;
-pub mod pixel_dma;
-pub mod pixel_write;
-pub mod raster;
+mod geometry;
+mod gl;
+mod gl_context;
+mod interface;
+mod memory;
+mod mmio;
+mod objects;
+mod pi_gfx;
+mod pixel_dma;
+mod pixel_write;
+mod raster;
 #[cfg(test)]
-pub mod raster_bench;
-pub mod raster_fill;
-pub mod raster_fixed_texture;
-pub mod raster_line;
-pub mod raster_pixels;
-pub mod raster_texture;
-pub mod raster_triangle;
-pub mod raster_unit;
-pub mod record;
-pub mod reader;
-pub mod registers;
-pub mod scanout;
-pub mod worker;
+mod raster_bench;
+mod raster_fill;
+mod raster_fixed_texture;
+mod raster_line;
+mod raster_pixels;
+mod raster_texture;
+mod raster_triangle;
+mod raster_unit;
+mod record;
+mod reader;
+mod registers;
+mod scanout;
+mod worker;
 #[cfg(test)]
 mod tests;
 
-pub use bits::*;
-pub use board::*;
-pub use command::*;
-pub use consts::*;
-pub use context::*;
-pub use display::*;
-pub use dma::*;
-pub use draw::*;
-pub use fifo::*;
-pub use geometry::*;
-pub use gl::*;
-pub use gl_context::*;
-pub use interface::*;
-pub use memory::*;
-pub use mmio::*;
-pub use objects::*;
-pub use pi_gfx::*;
-pub use pixel_dma::*;
-pub use pixel_write::*;
-pub use raster::*;
-pub use raster_fill::*;
-pub use raster_fixed_texture::*;
-pub use raster_line::*;
-pub use raster_pixels::*;
-pub use raster_texture::*;
-pub use raster_triangle::*;
-pub use raster_unit::*;
-pub use reader::*;
-pub use registers::*;
-pub use scanout::*;
-pub use worker::*;
-
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use parking_lot::Mutex;
 
 use crate::cpu::mips_core::CyclesPtr;
-use crate::dev::ng1::rex3::Renderer;
-use crate::disp::{Rex3Screen, FB_STRIDE};
 use crate::ip30::{widget_large_base, widget_small_base};
 use crate::irq::InterruptController;
-use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, Device, Resettable, BUS_BUSY, BUS_ERR, BUS_OK};
+use crate::traits::{
+    BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, Device, Resettable, BUS_BUSY, BUS_ERR,
+    BUS_OK,
+};
+
+use board::Board;
+use consts::ODSY_APERTURE;
+use display::{Display, ScanoutJob};
+use fifo::set_display_fifo_pending;
+use mmio::BoardLocks;
+use reader::ScanoutReader;
+use scanout::{monotonic_ns, DirtyStats};
 
 /// The VPro board on widget `slot`: a `BusDevice` for the widget's
 /// windows.
 pub struct Odyssey {
     small: u64,
     large: u64,
-    pub state: BoardLocks,
-    pub display: Arc<Display>,
+    state: BoardLocks,
+    display: Arc<Display>,
     running: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
     /// `IRIS_ODSY_REC`: the recording of the bus accesses (record.rs).

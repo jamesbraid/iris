@@ -23,8 +23,24 @@
 //! `Board::allocate`, and `PlaneView` holds its base pointers, lengths and
 //! geometry from then on; `PlaneView::copy_row` is the one function that
 //! reads memory a writer may be storing to.
-use super::*;
 
+use crate::devlog::LogModule;
+use super::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
+use super::consts::{
+    ODSY_CMAP_UNVERIFIED_GROUP, ODSY_CURSOR_COLOURS, ODSY_CURSOR_CONTROL, ODSY_CURSOR_CTL_CHANNEL1,
+    ODSY_CURSOR_CTL_CROSSHAIR, ODSY_CURSOR_CTL_ENABLE, ODSY_CURSOR_GLYPH, ODSY_CURSOR_PLANE,
+    ODSY_CURSOR_POSITION, ODSY_CURSOR_SIZE, ODSY_DID_MAIN_SHIFT, ODSY_DID_OVERLAY_MASK,
+    ODSY_DISPMODE_COUNT, ODSY_DISPMODE_GROUP_MASK, ODSY_DISPMODE_GROUP_SHIFT, ODSY_GAMMA_BASE,
+    ODSY_GAMMA_GROUP, ODSY_INDEX_MASK, ODSY_LUT_BLUE_SHIFT, ODSY_LUT_GREEN_SHIFT,
+    ODSY_LUT_RED_SHIFT, ODSY_LUT_SIZE, ODSY_OVERLAY_MODE_ENABLE, ODSY_OVERLAY_MODE_GROUP_MASK,
+    ODSY_OVERLAY_MODE_GROUP_SHIFT,
+};
+use super::display::{display_channel, ResolveCtx, ScanoutJob, ScanoutStage};
+use super::interface::HostInterface;
+use super::memory::{plane_bpp, Plane};
+use super::raster_unit::{ROW_WORDS, RasterQueue};
+use super::registers::cursor_rgb;
+use super::scanout::{DirtySite, DirtyStats, RetraceClock, RowMarks, ScanoutMode};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, Ordering::{Acquire, Relaxed, Release}};
 use std::sync::{Arc, OnceLock};
 
@@ -32,13 +48,13 @@ use parking_lot::Mutex;
 
 /// The rows of each main drawable id where its two colour buffers may
 /// differ, a bit a row (see [`ScanoutReader::differ`]).
-pub type Differ = [[u64; ROW_WORDS]; ODSY_DISPMODE_COUNT as usize];
+pub(super) type Differ = [[u64; ROW_WORDS]; ODSY_DISPMODE_COUNT as usize];
 
 /// The back end's registers the scanout resolves through: the colour
 /// lookup RAM, the per-drawable display modes, the overlay modes and the
 /// hardware cursor.
 #[derive(Clone)]
-pub struct DisplayRegs {
+pub(super) struct DisplayRegs {
     /// The colour lookup RAM (0x2000 entries), one 30-bit colour per entry.
     pub lut: Vec<u32>,
     pub dispmode: [u32; 32],
@@ -182,7 +198,7 @@ fn cursor_span_of(control: u32, position: u32, bottom: i32) -> Option<(i32, i32)
 /// ([`SharedRegs::snapshot`]), so a store that lands during the copy leaves
 /// the generation ahead of the one the copy is filed under, and the next
 /// frame copies again.
-pub struct SharedRegs {
+pub(super) struct SharedRegs {
     lut: Box<[AtomicU32]>,
     dispmode: [AtomicU32; 32],
     overlay_mode: [AtomicU32; 8],
@@ -335,7 +351,7 @@ impl RawBytes {
 
 /// Which plane a row is copied from.
 #[derive(Clone, Copy)]
-pub enum RowOf {
+pub(super) enum RowOf {
     Colour(usize),
     Did,
     Overlay,
@@ -345,7 +361,7 @@ pub enum RowOf {
 /// base pointers, lengths and the colour planes' geometry, captured when
 /// the board allocates them and valid while the board lives. Plane memory
 /// is allocated once and never resized or moved; reset fills it in place.
-pub struct PlaneView {
+pub(super) struct PlaneView {
     colour: [RawBytes; 2],
     planes: [Plane; 2],
     did: RawBytes,
@@ -487,7 +503,7 @@ impl PlaneView {
 }
 
 /// What the board shares with the display thread.
-pub struct DisplayShared {
+pub(super) struct DisplayShared {
     pub marks: Arc<RowMarks>,
     pub regs: SharedRegs,
     mode: ModeCell,
@@ -552,7 +568,7 @@ impl DisplayShared {
 /// rows where a window's buffers differ, and the lines of the update in
 /// progress. Only the display thread (or a test standing in for it) uses it.
 #[derive(Default)]
-pub struct ScanoutReader {
+pub(super) struct ScanoutReader {
     shared: Option<Arc<DisplayShared>>,
     /// The presented frame: `frame_width` by `frame_height` of 0x00RRGGBB;
     /// empty with no mode.

@@ -11,6 +11,12 @@
 //! pixels for x and y, in window depth, and in colour units, which is the
 //! check for a move to 32-bit floats.
 
+use crate::dev::odyssey::consts::{
+    ODSY_COLOUR_MATERIAL_AMBIENT, ODSY_COLOUR_MATERIAL_DIFFUSE, ODSY_COLOUR_MATERIAL_EMISSION,
+};
+use crate::dev::odyssey::draw::gl_rules;
+use crate::dev::odyssey::gl_context::{GL_VERTEX_FLOATS, GlDrawState};
+use crate::dev::odyssey::raster_bench::Bench;
 use super::scenes::{load_lights, Light, MATERIAL};
 use super::*;
 

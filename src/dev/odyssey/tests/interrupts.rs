@@ -1,5 +1,17 @@
 //! Interrupt flags, routing and the packets that reach HEART.
 
+use crate::dev::odyssey::consts::{
+    ODSY_INTR_CLEAR, ODSY_INTR_ENABLE_CLEAR, ODSY_INTR_ENABLE_SET, ODSY_INTR_FIFO_LOW_WATER,
+    ODSY_INTR_FLAGS, ODSY_INT_DEST_LOWER, ODSY_INT_DEST_UPPER, ODSY_ROUTE_DEST_LOWER,
+    ODSY_ROUTE_DEST_UPPER, ODSY_ROUTE_VECTORS, ODSY_STATUS0, ODSY_SW_TOKEN,
+    ODSY_ROUTE_ENABLE_DMA,
+    ODSY_ROUTE_ENABLE_RETRACE,
+    ODSY_ROUTE_ENABLE_SOFTSYNC,
+};
+use crate::dev::odyssey::tests::{
+    board, cmd, reg_read, reg_write, route_to_heart, DMA_VECTOR, FLAG_VECTOR, RETRACE_VECTOR,
+    SOFTSYNC_VECTOR,
+};
 use super::*;
 
 /// A raised and a lowered board interrupt each reach HEART, setting and

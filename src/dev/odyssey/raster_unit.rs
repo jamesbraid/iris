@@ -47,8 +47,17 @@
 //! The ring takes the shared `GFifo`. With no raster thread running (unit
 //! tests, a stopped machine) a job runs inside the submit.
 
-use super::*;
 
+use super::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
+use super::consts::{
+    ODSY_BUFFERS, ODSY_DID_MAIN_SHIFT, ODSY_DISPMODE_COUNT, ODSY_ID_COMPARE_ENABLE,
+    ODSY_ID_COMPARE_MASK_SHIFT,
+};
+use super::gl::GlDrawJob;
+use super::gl_context::{GL_LINES, GL_LINE_LOOP, GL_LINE_STRIP, GL_POINTS, GL_TRIANGLES};
+use super::memory::BoardMemory;
+use super::reader::Differ;
+use super::scanout::{DirtySite, RowMarks};
 use std::cell::{Cell, UnsafeCell};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::{Acquire, Release, SeqCst}};
@@ -60,10 +69,10 @@ use parking_lot::{Condvar, Mutex};
 use crate::gfifo::GFifo;
 
 /// The raster thread's name.
-pub const ODYSSEY_RASTER_THREAD: &str = "odyssey-raster";
+pub(super) const ODYSSEY_RASTER_THREAD: &str = "odyssey-raster";
 
 /// Jobs the queue holds.
-pub const ODSY_RASTER_QUEUE_MAX: usize = 65536;
+pub(super) const ODSY_RASTER_QUEUE_MAX: usize = 65536;
 
 /// Work, in pixels, the front end may have queued for the raster unit
 /// before it waits for the raster unit to catch up, as the board's front
@@ -76,43 +85,43 @@ pub const ODSY_RASTER_QUEUE_MAX: usize = 65536;
 /// textured or blended fill (`raster_bench`, release build), so 2^17 pixels
 /// is a few milliseconds to a few tens of milliseconds of raster time, and
 /// well past any one frame's small primitives.
-pub const RASTER_WORK_BUDGET: u64 = 1 << 17;
+pub(super) const RASTER_WORK_BUDGET: u64 = 1 << 17;
 
 /// What a job costs before its pixels: setup, dispatch and the state it
 /// carries, in pixels of fill. A queue of tiny primitives still adds up.
-pub const RASTER_JOB_OVERHEAD: u32 = 64;
+pub(super) const RASTER_JOB_OVERHEAD: u32 = 64;
 
 /// Clears and block fills run about this many times faster per pixel than
 /// a shaded fill (`raster_bench`: 200 against 5 to 30 Mpixel/s), so their
 /// pixels count for this fraction.
-pub const RASTER_CLEAR_DIVISOR: u32 = 8;
+pub(super) const RASTER_CLEAR_DIVISOR: u32 = 8;
 
 /// The cost a ring entry's word can hold.
 const COST_MAX: u64 = (1 << 30) - 1;
 
 /// The longest the raster thread runs jobs before it publishes the rows it
 /// drew, checked between jobs.
-pub const RASTER_SLICE: Duration = Duration::from_millis(1);
+pub(super) const RASTER_SLICE: Duration = Duration::from_millis(1);
 
 /// What a GL draw hands back to its context in place of the line-stipple
 /// phase while the raster unit keeps the phase: the next draw that carries
 /// it continues from the raster unit's own count. The context resets its
 /// phase to 0 at glBegin and glEnd, which replaces this marker.
-pub const LINE_PHASE_ON_RASTER: u32 = u32::MAX;
+pub(super) const LINE_PHASE_ON_RASTER: u32 = u32::MAX;
 
 /// Words of a row set: one bit a plane row.
-pub const ROW_WORDS: usize = (ODSY_HEIGHT as usize).div_ceil(64);
+pub(super) const ROW_WORDS: usize = (ODSY_HEIGHT as usize).div_ceil(64);
 
 /// The rows a draw wrote, a bit each, by where it wrote: colour buffer 0,
 /// colour buffer 1 and the overlay byte.
-pub type TouchedRows = [[Cell<u64>; ROW_WORDS]; ODSY_BUFFERS as usize + 1];
+pub(super) type TouchedRows = [[Cell<u64>; ROW_WORDS]; ODSY_BUFFERS as usize + 1];
 
 /// Slot of the overlay byte in `TouchedRows`.
-pub const TOUCHED_OVERLAY: usize = ODSY_BUFFERS as usize;
+pub(super) const TOUCHED_OVERLAY: usize = ODSY_BUFFERS as usize;
 
 /// Note that a draw wrote row y of `slot`.
 #[inline(always)]
-pub fn touch_row(rows: &TouchedRows, slot: usize, y: i32) {
+pub(super) fn touch_row(rows: &TouchedRows, slot: usize, y: i32) {
     if (y as u32) < ODSY_HEIGHT {
         let w = &rows[slot][y as usize >> 6];
         w.set(w.get() | 1 << (y & 63));
@@ -125,7 +134,7 @@ pub fn touch_row(rows: &TouchedRows, slot: usize, y: i32) {
 /// window's displayed-buffer bit, so a row written to a buffer is kept by
 /// the windows the draw's id test lets it reach. The overlay shows
 /// whatever the windows do.
-pub struct DrawnRows {
+pub(super) struct DrawnRows {
     by_id: Box<[[[u64; ROW_WORDS]; ODSY_DISPMODE_COUNT as usize]; ODSY_BUFFERS as usize]>,
     overlay: [u64; ROW_WORDS],
     /// Some row is held.
@@ -174,7 +183,7 @@ impl DrawnRows {
 /// ORs its rows in after the stores that drew them and the display swaps
 /// each word out, so neither waits for the other. A word the display takes
 /// just before a publish lands is taken at its next frame.
-pub struct PublishedRows {
+pub(super) struct PublishedRows {
     by_id: Box<[[[AtomicU64; ROW_WORDS]; ODSY_DISPMODE_COUNT as usize]; ODSY_BUFFERS as usize]>,
     overlay: [AtomicU64; ROW_WORDS],
     /// Some row may be held.
@@ -249,7 +258,7 @@ impl PublishedRows {
 
 /// The raster unit's own state.
 #[derive(Default)]
-pub struct RasterCtx {
+pub(super) struct RasterCtx {
     /// The standalone line stipple's phase after the last draw that
     /// carried one.
     pub line_phase: u32,
@@ -278,7 +287,7 @@ impl RasterCtx {
 }
 
 /// One unit of raster work.
-pub type RasterJob = Box<dyn FnOnce(&mut RasterCtx) + Send>;
+pub(super) type RasterJob = Box<dyn FnOnce(&mut RasterCtx) + Send>;
 
 /// The ring entry's address word: the value is a boxed `RasterJob`.
 const ENTRY_JOB: u32 = 1;
@@ -292,7 +301,7 @@ const ENTRY_COST_SHIFT: u32 = 2;
 
 /// The cost of a rectangle of pixels clipped to the screen, a clear's or a
 /// block fill's counted at `RASTER_CLEAR_DIVISOR`, plus the job's overhead.
-pub fn rect_cost(x0: i32, y0: i32, x1: i32, y1: i32, fast: bool) -> u32 {
+pub(super) fn rect_cost(x0: i32, y0: i32, x1: i32, y1: i32, fast: bool) -> u32 {
     let w = (x1.min(ODSY_WIDTH as i32) - x0.max(0)).max(0) as u64;
     let h = (y1.min(ODSY_HEIGHT as i32) - y0.max(0)).max(0) as u64;
     let px = w * h / if fast { RASTER_CLEAR_DIVISOR as u64 } else { 1 };
@@ -306,7 +315,7 @@ pub fn rect_cost(x0: i32, y0: i32, x1: i32, y1: i32, fast: bool) -> u32 {
 /// Points cost their square, lines their length times their width, a
 /// triangle its area and any other polygon its bounding box, each within
 /// the screen. An estimate, from the corners alone.
-pub fn primitive_cost(mode: u32, points: impl Iterator<Item = Option<(f64, f64)>>, point_size: f32, line_width: f32) -> u32 {
+pub(super) fn primitive_cost(mode: u32, points: impl Iterator<Item = Option<(f64, f64)>>, point_size: f32, line_width: f32) -> u32 {
     let (w, h) = (ODSY_WIDTH as f64, ODSY_HEIGHT as f64);
     let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
     let mut first = [(0.0f64, 0.0f64); 3];
@@ -347,7 +356,7 @@ const SPARE_DRAWS: usize = 1024;
 /// GFifo's consumer heads: one, because the board has one raster unit. A
 /// second would need the jobs to split the rows between the heads, as the
 /// IMPACT model's two engines interleave scanlines.
-pub struct RasterQueue<const HEADS: usize = 1> {
+pub(super) struct RasterQueue<const HEADS: usize = 1> {
     ring: Box<GFifo<ODSY_RASTER_QUEUE_MAX, HEADS>>,
     /// Finished draw jobs, from the raster thread (or a draw run inside
     /// its submit) back to the front end, which takes them under the board
@@ -787,7 +796,7 @@ impl RasterQueue {
 
 /// A byte span of one of the board's planes, for a raster job.
 #[derive(Clone, Copy)]
-pub struct Span {
+pub(super) struct Span {
     ptr: *mut u8,
     len: usize,
 }
@@ -813,7 +822,7 @@ impl Span {
 /// depth and stencil plane from its base, the overlay and id bytes, and the
 /// object store the texels come from.
 #[derive(Clone, Copy)]
-pub struct PlaneSpans {
+pub(super) struct PlaneSpans {
     pub colour: [Span; ODSY_BUFFERS as usize],
     pub depth: Span,
     pub stencil: Span,

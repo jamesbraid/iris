@@ -18,11 +18,11 @@
 use super::consts::ODSY_DEPTH24_MAX;
 
 /// The depth range's far value, 2S = 2^33 - 2^15.
-pub const DEPTH_2S: f64 = 8589901824.0;
+pub(super) const DEPTH_2S: f64 = 8589901824.0;
 
 /// What the host encoder returns for an exponent of 160 or more. Wider than
 /// the word: the plane keeps the low 24 bits.
-pub const DEPTH_HOST_SATURATED: u32 = 0x0fffffff;
+pub(super) const DEPTH_HOST_SATURATED: u32 = 0x0fffffff;
 
 /// A value below 2^-31 has no exponent; the host encoder maps it to 0.
 const DEPTH_MIN_VALUE: f64 = 1.0 / 2147483648.0;
@@ -36,13 +36,13 @@ const IEEE_EXP_OFFSET: u32 = 96;
 /// exponent minus 96 and its top 18 mantissa bits, the rest truncated. An
 /// exponent below 96 gives 0, one of 160 or more gives 0x0fffffff, and the
 /// sign is ignored.
-pub fn encode_host(v: f32) -> u32 {
+pub(super) fn encode_host(v: f32) -> u32 {
     encode_f64(v as f64)
 }
 
 /// [`encode_host`] for a double, truncating its mantissa to 18 bits. A
 /// double's range holds a single's, so the result agrees for every single.
-pub fn encode_f64(v: f64) -> u32 {
+pub(super) fn encode_f64(v: f64) -> u32 {
     let v = v.abs();
 
     // NaN fails both tests and is unordered; treat it as below range.
@@ -63,7 +63,7 @@ pub fn encode_f64(v: f64) -> u32 {
 /// the top five. Only the low 24 bits are read. Word 0 decodes to 2^-31
 /// by this rule, though the encoder maps everything below that to 0; whether
 /// the library special-cases it is not shown.
-pub fn decode_host(word: u32) -> f32 {
+pub(super) fn decode_host(word: u32) -> f32 {
     let e = (word >> DEPTH_MANTISSA_BITS) & 0x3f;
     let m = word & DEPTH_MANTISSA_MASK;
 
@@ -73,7 +73,7 @@ pub fn decode_host(word: u32) -> f32 {
 /// The word for an eye-linear depth fraction z in [0, 1] (0 at the near
 /// plane, 1 at the far plane): the encoding of 2S * z. A fraction outside
 /// [0, 1] clamps to it.
-pub fn word_for_fraction(z: f64) -> u32 {
+pub(super) fn word_for_fraction(z: f64) -> u32 {
     let z = if z > 1.0 { 1.0 } else if z > 0.0 { z } else { 0.0 };
 
     encode_f64(z * DEPTH_2S) & ODSY_DEPTH24_MAX
@@ -85,13 +85,13 @@ pub fn word_for_fraction(z: f64) -> u32 {
 /// 24-bit form from every other visual with depth. Why those visuals get the
 /// shorter word is not shown, and the model has no depth plane of that width
 /// or depth DMA read to attach it to, so only the conversion exists.
-pub fn word16_from_word24(word: u32) -> u32 {
+pub(super) fn word16_from_word24(word: u32) -> u32 {
     (word & ODSY_DEPTH24_MAX) >> 8
 }
 
 /// The 16-bit form's decode: the same refill as [`decode_host`], from the
 /// ten mantissa bits (their top five fill the low five of the 23).
-pub fn decode_host16(word: u32) -> f32 {
+pub(super) fn decode_host16(word: u32) -> f32 {
     let e = (word >> 10) & 0x3f;
     let m = word & 0x3ff;
 
@@ -100,8 +100,8 @@ pub fn decode_host16(word: u32) -> f32 {
 
 /// The polygon-offset field (block 0x058) is a signed 25-bit count of steps
 /// of the encoded 24-bit word, the limits the library clamps to.
-pub const OFFSET_STEPS_MIN: i64 = -(1 << 24);
-pub const OFFSET_STEPS_MAX: i64 = (1 << 24) - 1;
+pub(super) const OFFSET_STEPS_MIN: i64 = -(1 << 24);
+pub(super) const OFFSET_STEPS_MAX: i64 = (1 << 24) - 1;
 
 /// The word after a polygon offset. INFERRED placement (datasheet, "Polygon
 /// offset"): the board adds the field to the encoded word, so the offset
@@ -109,14 +109,24 @@ pub const OFFSET_STEPS_MAX: i64 = (1 << 24) - 1;
 /// d - n. The sum clamps to 0 and the largest word, a model choice: what the
 /// board does at either end is not shown. The field alone is the step count;
 /// the library has already folded factor and units into it ("Polygon offset").
-pub fn word_with_offset(word: u32, steps: i64) -> u32 {
+pub(super) fn word_with_offset(word: u32, steps: i64) -> u32 {
     (word as i64 + steps).clamp(0, ODSY_DEPTH24_MAX as i64) as u32
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dev::odyssey::*;
+    use crate::dev::odyssey::raster_bench;
+    use crate::dev::odyssey::consts::ODSY_POLYGON_OFFSET_SCALE;
+    use crate::dev::odyssey::gl_context::{
+        GL_COLOUR_MASK_ALL, GL_FLAT, GL_LEQUAL, GL_LESS, GL_OFFSET_FILL, GL_TRIANGLES,
+        GL_VERTEX_FLOATS, GL_V_COLOR, GL_V_POSITION, GlDraw, GlDrawState,
+    };
+    use crate::dev::odyssey::memory::ClipRect;
+    use crate::dev::odyssey::raster::{LineRule, NoTexels, RasterRules};
+
+
+
 
     const WIDTH: usize = 32;
 

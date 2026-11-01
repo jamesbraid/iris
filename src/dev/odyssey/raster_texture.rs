@@ -5,8 +5,29 @@
 //!
 //! Ported from hw/display/sgi/rasterizer.c in jamesbraid/qemu-sgi-origami.
 
-use super::*;
 
+use crate::devlog::LogModule;
+use super::gl_context::{
+    GL_ADD, GL_ALPHA, GL_ALPHA12, GL_ALPHA16, GL_ALPHA4, GL_ALPHA8, GL_BLEND, GL_CLAMP,
+    GL_CLAMP_TO_BORDER, GL_CLAMP_TO_EDGE, GL_DECAL, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT16_SGIX,
+    GL_DEPTH_COMPONENT24_SGIX, GL_DEPTH_COMPONENT32_SGIX, GL_INTENSITY, GL_INTENSITY12,
+    GL_INTENSITY16, GL_INTENSITY4, GL_INTENSITY8, GL_LINEAR, GL_LINEAR_DETAIL_ALPHA_SGIS,
+    GL_LINEAR_DETAIL_COLOR_SGIS, GL_LINEAR_DETAIL_SGIS, GL_LINEAR_MIPMAP_LINEAR,
+    GL_LINEAR_MIPMAP_NEAREST, GL_LINEAR_SHARPEN_ALPHA_SGIS, GL_LINEAR_SHARPEN_COLOR_SGIS,
+    GL_LINEAR_SHARPEN_SGIS, GL_LUMINANCE, GL_LUMINANCE12, GL_LUMINANCE12_ALPHA12,
+    GL_LUMINANCE12_ALPHA4, GL_LUMINANCE16, GL_LUMINANCE16_ALPHA16, GL_LUMINANCE4,
+    GL_LUMINANCE4_ALPHA4, GL_LUMINANCE6_ALPHA2, GL_LUMINANCE8, GL_LUMINANCE8_ALPHA8,
+    GL_LUMINANCE_ALPHA, GL_MODULATE, GL_NEAREST, GL_NEAREST_MIPMAP_LINEAR,
+    GL_NEAREST_MIPMAP_NEAREST, GL_R3_G3_B2, GL_REPEAT, GL_REPLACE, GL_RGB, GL_RGB10, GL_RGB10_A2,
+    GL_RGB12, GL_RGB16, GL_RGB4, GL_RGB5, GL_RGB5_A1, GL_RGB8, GL_RGBA, GL_RGBA12, GL_RGBA16,
+    GL_RGBA2, GL_RGBA4, GL_RGBA8, GL_TEXTURE_GEQUAL_R_SGIX, GL_TEXTURE_LEQUAL_R_SGIX,
+    GL_V_TEXCOORD, GlDrawState,
+};
+use super::raster::{
+    fmax, fmin, FIXED_FAILED, FIXED_LEVELS, GL_TEX_LEVELS_MAX, GlTexImage, GlTexLevel,
+    GlTexPyramid, SOFT_TEXTURE_SELECTED, SoftDraw, SoftFixedCell, SoftFixedStore, SoftFrag,
+    VolumeVertex,
+};
 impl SoftDraw<'_> {
     /// Runtime errors are observable without logging once for every pixel.
     pub fn texture_report(&self, reason: u32, message: &str) {
@@ -17,20 +38,20 @@ impl SoftDraw<'_> {
     }
 }
 
-pub fn soft_texture_format(format: u32) -> bool {
+pub(super) fn soft_texture_format(format: u32) -> bool {
     format == GL_ALPHA || format == GL_LUMINANCE ||
         format == GL_LUMINANCE_ALPHA || format == GL_INTENSITY ||
         format == GL_RGB || format == GL_RGBA ||
         format == GL_DEPTH_COMPONENT
 }
 
-pub fn soft_texture_wrap(wrap: u32) -> bool {
+pub(super) fn soft_texture_wrap(wrap: u32) -> bool {
     wrap == GL_REPEAT || wrap == GL_CLAMP ||
         wrap == GL_CLAMP_TO_EDGE || wrap == GL_CLAMP_TO_BORDER
 }
 
 /// OpenGL 1.2.1 table 3.16: exact identities remain distinct in a chain.
-pub fn soft_texture_internal_format(format: u32) -> u32 {
+pub(super) fn soft_texture_internal_format(format: u32) -> u32 {
     match format {
         GL_DEPTH_COMPONENT16_SGIX | GL_DEPTH_COMPONENT24_SGIX | GL_DEPTH_COMPONENT32_SGIX => GL_DEPTH_COMPONENT,
         GL_ALPHA4 | GL_ALPHA8 | GL_ALPHA12 | GL_ALPHA16 => GL_ALPHA,
@@ -44,21 +65,21 @@ pub fn soft_texture_internal_format(format: u32) -> u32 {
     }
 }
 
-pub fn soft_texture_mipmap(filter: u32) -> bool {
+pub(super) fn soft_texture_mipmap(filter: u32) -> bool {
     (GL_NEAREST_MIPMAP_NEAREST..=GL_LINEAR_MIPMAP_LINEAR).contains(&filter)
 }
 
-pub fn soft_texture_sharpen(filter: u32) -> bool {
+pub(super) fn soft_texture_sharpen(filter: u32) -> bool {
     filter == GL_LINEAR_SHARPEN_SGIS || filter == GL_LINEAR_SHARPEN_ALPHA_SGIS ||
         filter == GL_LINEAR_SHARPEN_COLOR_SGIS
 }
 
-pub fn soft_texture_detail(filter: u32) -> bool {
+pub(super) fn soft_texture_detail(filter: u32) -> bool {
     filter == GL_LINEAR_DETAIL_SGIS || filter == GL_LINEAR_DETAIL_ALPHA_SGIS ||
         filter == GL_LINEAR_DETAIL_COLOR_SGIS
 }
 
-pub fn soft_texture_dimensions(w: u32, h: u32) -> bool {
+pub(super) fn soft_texture_dimensions(w: u32, h: u32) -> bool {
     w != 0 && h != 0 && w <= i32::MAX as u32 && h <= i32::MAX as u32 &&
         (w as u64).is_power_of_two() && (h as u64).is_power_of_two()
 }
@@ -369,7 +390,7 @@ impl SoftDraw<'_> {
 }
 
 /// Meaningful base components, including the border, before filtering.
-pub fn soft_texture_components(format: u32, v: &mut [f64; 4]) {
+pub(super) fn soft_texture_components(format: u32, v: &mut [f64; 4]) {
     match format {
         GL_ALPHA => {
             v[0] = 1.0;
@@ -412,7 +433,7 @@ impl GlTexImage<'_> {
 /// GL_REPEAT's wrap of a texel index into [0, n). Image and level sizes are
 /// powers of two wherever setup admits them, and there the mask gives the
 /// remainder without two 64-bit divisions a tap.
-pub fn soft_texture_repeat(i: i64, n: u32) -> i64 {
+pub(super) fn soft_texture_repeat(i: i64, n: u32) -> i64 {
     if (n as u64).is_power_of_two() {
         i & (n as i64 - 1)
     } else {
@@ -421,14 +442,14 @@ pub fn soft_texture_repeat(i: i64, n: u32) -> i64 {
 }
 
 /// An 8-bit channel normalized, k / 255.0 for each byte k.
-pub fn soft_unorm8(k: u32) -> f64 {
+pub(super) fn soft_unorm8(k: u32) -> f64 {
     k as f64 / 255.0
 }
 
-pub const TEXEL_CACHE_SIZE: usize = 4096;
+pub(super) const TEXEL_CACHE_SIZE: usize = 4096;
 
 #[derive(Clone, Copy, Default)]
-pub struct SoftTexelEntry {
+pub(super) struct SoftTexelEntry {
     pub serial: u64,
     /// SoftDraw::texel_key() of the level
     pub level: usize,
@@ -444,7 +465,7 @@ pub struct SoftTexelEntry {
 /// draw reads the same both times. A draw starts by taking a new serial,
 /// which empties the table without clearing it. Border texels, depth
 /// texels and failed reads always go to the board.
-pub struct SoftTexelCache {
+pub(super) struct SoftTexelCache {
     pub serial: u64,
     /// Set for a fragment that minifies by more than two texels a pixel
     /// without mipmaps.
@@ -611,7 +632,7 @@ impl SoftDraw<'_> {
 }
 
 /// Reduce finite coordinates before any float-to-integer conversion.
-pub fn soft_texture_axis(x: f64, n: u32, wrap: u32, upper: f64) -> f64 {
+pub(super) fn soft_texture_axis(x: f64, n: u32, wrap: u32, upper: f64) -> f64 {
     let half = 0.5 / n as f64;
 
     match wrap {
@@ -693,7 +714,7 @@ impl SoftDraw<'_> {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct SoftTexSelection {
+pub(super) struct SoftTexSelection {
     pub first: u32,
     pub second: u32,
     pub filter: u32,
@@ -702,7 +723,7 @@ pub struct SoftTexSelection {
 }
 
 /// Relative levels avoid rounding a large absolute base in floating point.
-pub fn soft_texture_select(min: u32, mag: u32, p: &GlTexPyramid, last: u32, rho: f64, out: &mut SoftTexSelection) -> bool {
+pub(super) fn soft_texture_select(min: u32, mag: u32, p: &GlTexPyramid, last: u32, rho: f64, out: &mut SoftTexSelection) -> bool {
     let enhanced = soft_texture_sharpen(mag) || soft_texture_detail(mag);
     let c: f64 = if enhanced {
         if min == GL_NEAREST_MIPMAP_NEAREST || min == GL_LINEAR_MIPMAP_NEAREST { 0.5 } else { 0.0 }
@@ -762,11 +783,11 @@ pub fn soft_texture_select(min: u32, mag: u32, p: &GlTexPyramid, last: u32, rho:
 }
 
 /// Projective gradients precede wrapping; D is Q/W, not geometry W.
-pub fn soft_texture_lod_scale(scale: f64) -> f64 {
+pub(super) fn soft_texture_lod_scale(scale: f64) -> f64 {
     if scale != 0.0 { scale } else { 1.0 }
 }
 
-pub fn soft_texture_derivatives(
+pub(super) fn soft_texture_derivatives(
     value: &[f64; 4],
     dx: &[f64; 4],
     dy: &[f64; 4],
@@ -840,13 +861,13 @@ pub fn soft_texture_derivatives(
 /// footprint (soft_quad_rho_of()) and each fragment's coordinates from one
 /// of these, not from a division each.
 #[derive(Clone, Copy)]
-pub struct SoftQuadCoords {
+pub(super) struct SoftQuadCoords {
     pub s: [f64; 4],
     pub t: [f64; 4],
     pub pos: [bool; 4],
 }
 
-pub fn soft_quad_coords(g: &SoftTexPlane, qx: i32, qy: i32) -> SoftQuadCoords {
+pub(super) fn soft_quad_coords(g: &SoftTexPlane, qx: i32, qy: i32) -> SoftQuadCoords {
     let mut c = SoftQuadCoords { s: [0.0; 4], t: [0.0; 4], pos: [false; 4] };
 
     for i in 0..4 {
@@ -867,7 +888,7 @@ pub fn soft_quad_coords(g: &SoftTexPlane, qx: i32, qy: i32) -> SoftQuadCoords {
 /// of s scaled by ns and of t scaled by nt (the base level's size times the
 /// axis's bias, as soft_texture_derivatives() scales them). None where
 /// neither diagonal has coordinates at both ends.
-pub fn soft_quad_rho_of(c: &SoftQuadCoords, ns: f64, nt: f64) -> Option<f64> {
+pub(super) fn soft_quad_rho_of(c: &SoftQuadCoords, ns: f64, nt: f64) -> Option<f64> {
     let ok = |i: usize| c.pos[i] && c.s[i].is_finite() && c.t[i].is_finite();
     let mut rho = f64::NAN;
 
@@ -883,14 +904,14 @@ pub fn soft_quad_rho_of(c: &SoftQuadCoords, ns: f64, nt: f64) -> Option<f64> {
 
 /// The footprint of the quad whose first pixel is window pixel (qx, qy), from
 /// a triangle's texture planes g (soft_quad_coords(), soft_quad_rho_of()).
-pub fn soft_quad_rho(g: &SoftTexPlane, ns: f64, nt: f64, qx: i32, qy: i32) -> Option<f64> {
+pub(super) fn soft_quad_rho(g: &SoftTexPlane, ns: f64, nt: f64, qx: i32, qy: i32) -> Option<f64> {
     soft_quad_rho_of(&soft_quad_coords(g, qx, qy), ns, nt)
 }
 
 /// soft_quad_rho() for planes g whose Q/W is the same everywhere, where it
 /// is the same for every quad: the planes' slopes along the diagonals over
 /// Q/W. None where Q/W is not positive or the footprint is not finite.
-pub fn soft_quad_flat_rho(g: &SoftTexPlane, ns: f64, nt: f64) -> Option<f64> {
+pub(super) fn soft_quad_flat_rho(g: &SoftTexPlane, ns: f64, nt: f64) -> Option<f64> {
     let q = g.value[2];
 
     if !(q > 0.0) {
@@ -907,7 +928,7 @@ pub fn soft_quad_flat_rho(g: &SoftTexPlane, ns: f64, nt: f64) -> Option<f64> {
 /// The last level selection a thread's draw made, by the footprint it was
 /// made for.
 #[derive(Clone, Copy, Default)]
-pub struct SoftTexSelectionMemo {
+pub(super) struct SoftTexSelectionMemo {
     pub serial: u64,
     pub rho: u64,
     pub selected: SoftTexSelection,
@@ -936,7 +957,7 @@ impl SoftDraw<'_> {
     }
 }
 
-pub fn soft_texture_mix(value: &mut [f64; 4], other: &[f64; 4], alpha: f64) {
+pub(super) fn soft_texture_mix(value: &mut [f64; 4], other: &[f64; 4], alpha: f64) {
     for k in 0..4usize {
         value[k] = (1.0 - alpha) * value[k] + alpha * other[k];
     }
@@ -1003,7 +1024,7 @@ impl SoftDraw<'_> {
 }
 
 /// scalbn: x * 2^n, exact.
-pub fn scalbn(x: f64, n: i32) -> f64 {
+pub(super) fn scalbn(x: f64, n: i32) -> f64 {
     if x == 0.0 || !x.is_finite() {
         return x;
     }
@@ -1193,7 +1214,7 @@ impl SoftDraw<'_> {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct SoftTexPlane {
+pub(super) struct SoftTexPlane {
     /// S/W, T/W, Q/W and, for volumes, R/W.
     pub value: [f64; 4],
     pub dx: [f64; 4],

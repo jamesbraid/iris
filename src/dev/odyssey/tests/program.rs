@@ -1,6 +1,11 @@
 //! Recognising the geometry program the GL library sets.
 
-use super::*;
+use crate::dev::odyssey::board::Board;
+use crate::dev::odyssey::consts::{
+    ODSY_ENTRY_29, ODSY_ENTRY_2A, ODSY_ENTRY_2C, ODSY_ENTRY_33, ODSY_UCODE_END, ODSY_UCODE_UNLIT,
+    ODSY_UCODE_UNLIT_2A, ODSY_UCODE_UNLIT_2C,
+};
+use crate::dev::odyssey::tests::board;
 
 /// Set the three entries and the list at index 0 the way the library's
 /// program words do, and let the board recognise the program.

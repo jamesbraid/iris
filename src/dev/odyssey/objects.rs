@@ -1,5 +1,12 @@
-use super::*;
 
+use crate::devlog::LogModule;
+use super::bits::sextract32;
+use super::board::{Board, ODSY_HEIGHT, ODSY_OBJECTS, ODSY_OBJ_POOL_BYTES, ODSY_OBJ_POOL_WORDS, ODSY_WIDTH};
+use super::consts::{
+    ODSY_DMA_FMT_FRONT, ODSY_DMA_SENTINEL_DRAW, ODSY_DMA_SENTINEL_READ, ODSY_TEX_SCALE_BIAS_BITS,
+    ODSY_TEX_SCALE_BIAS_ONE,
+};
+use super::raster_unit::RASTER_JOB_OVERHEAD;
 impl Board {
     /// The index of the object at board base base. A base names at most one
     /// live object (Board::object_select()), so the index's entry is the one a
@@ -517,7 +524,7 @@ impl Board {
 /// words" (established as what the library sends; what the board does with
 /// the overlap bits is inferred).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CopyOperands {
+pub(super) struct CopyOperands {
     /// Word 0: 0x30000019 for the read drawable, else an object's address.
     pub src_base: u32,
     /// Word 1: source x and y.

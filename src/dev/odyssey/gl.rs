@@ -3,8 +3,76 @@
 //!
 //! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code in jamesbraid/qemu-sgi-origami.
 
-use super::*;
 
+use crate::devlog::LogModule;
+use super::bits::sextract32;
+use super::board::{
+    Board, ODSY_CLIP_RECTS, ODSY_HEIGHT, ODSY_OBJECTS, ODSY_OBJ_POOL_WORDS,
+    ODSY_TEX_COLOUR_TABLE_ENTRIES, ODSY_TEX_DETAIL_FUNCTION_ENTRIES, ODSY_TEX_LEVELS,
+    ODSY_VOLUME_SLICES, ODSY_WIDTH,
+};
+use super::consts::{
+    ODSY_AUX_OVERLAY_BUFFER, ODSY_BUFFERS, ODSY_CLIP_BOX_FIELD_MASK, ODSY_CLIP_BOX_MIN_SHIFT,
+    ODSY_COLOUR_MODE_INDEX, ODSY_DEPTH24_MAX, ODSY_DEPTH_FUNC_MASK, ODSY_DRAW_WORD_STATE,
+    ODSY_GL_BACK_AMBIENT, ODSY_GL_BACK_DIFFUSE, ODSY_GL_BACK_EMISSION, ODSY_GL_BACK_SHININESS_SQRT,
+    ODSY_GL_BACK_SPECULAR, ODSY_GL_CLIP_PLANE_LOAD, ODSY_GL_DEPTH_S, ODSY_GL_DEPTH_SLACK,
+    ODSY_GL_LIGHT_COLOUR_LOAD, ODSY_GL_LIGHT_VEC_LOAD, ODSY_GL_MATERIAL_AMBIENT,
+    ODSY_GL_MATERIAL_DIFFUSE, ODSY_GL_MATERIAL_EMISSION, ODSY_GL_MATERIAL_SPECULAR,
+    ODSY_GL_MATRIX_SELECT_SHAPE, ODSY_GL_MATRIX_SELECT_TAG, ODSY_GL_NORMAL_3F,
+    ODSY_GL_RECT_PATTERN_ENABLE, ODSY_GL_SHININESS_DERIVED, ODSY_GL_SHININESS_SQRT,
+    ODSY_GL_VERTEX_2F, ODSY_GL_VERTEX_2I, ODSY_GL_VERTEX_3F, ODSY_GL_VERTEX_3I, ODSY_GL_VERTEX_4F,
+    ODSY_ID_COMPARE_ENABLE, ODSY_ID_COMPARE_MASK_SHIFT, ODSY_INDEX_MASK, ODSY_MODE_ALPHA_TEST,
+    ODSY_MODE_BLEND, ODSY_MODE_COLOR_LOGIC_OP, ODSY_MODE_CULL_FACE, ODSY_MODE_CULL_MODE_MASK,
+    ODSY_MODE_CULL_MODE_SHIFT, ODSY_MODE_DEPTH_TEST, ODSY_MODE_DITHER, ODSY_MODE_FLAT_SHADE,
+    ODSY_MODE_FOG, ODSY_MODE_FRONT_FACE_CW, ODSY_MODE_GL_LINE_STIPPLE, ODSY_MODE_INDEX_LOGIC_OP,
+    ODSY_MODE_LINE_SMOOTH, ODSY_MODE_OFFSET_FILL, ODSY_MODE_OFFSET_LINE, ODSY_MODE_OFFSET_POINT,
+    ODSY_MODE_POINT_SMOOTH, ODSY_MODE_STENCIL_TEST, ODSY_PATTERN_SHAPE_OPAQUE,
+    ODSY_PROG_CLASS_SHIFT, ODSY_PROG_COLOUR_MATERIAL, ODSY_PROG_COLOUR_MODE,
+    ODSY_PROG_COLOUR_MODE_B, ODSY_PROG_CONST_SELECT, ODSY_PROG_CONST_STORE, ODSY_PROG_ENTRY_29,
+    ODSY_PROG_ENTRY_2A, ODSY_PROG_ENTRY_2C, ODSY_PROG_HIGH_SHIFT, ODSY_PROG_LIGHT_COLOUR_SELECT,
+    ODSY_PROG_LIGHT_VEC_SELECT, ODSY_PROG_LIST_INDEX, ODSY_PROG_LOW_MASK, ODSY_PROG_PROGRAM_ADDR,
+    ODSY_PROG_PROGRAM_HALFWORD, ODSY_PROG_PROGRAM_HALFWORD_LAST, ODSY_PROG_REG_FIRST,
+    ODSY_PROG_REG_LAST, ODSY_PROG_RUN_ONCE, ODSY_PROG_SET_UCODE, ODSY_PROG_SHAPE, ODSY_PROG_TAG,
+    ODSY_STENCIL_MAX, ODSY_TEX_DETAIL_FUNCTION_LAST_LOD, ODSY_TEX_LOD_BITS, ODSY_TEX_LOD_LIMIT,
+    ODSY_TEX_LOD_MASK, ODSY_TEX_LOD_ONE, ODSY_TEX_MIN_LINEAR_MIPMAP_LINEAR, ODSY_TEX_MIN_MASK,
+    ODSY_TEX_MIN_NEAREST_MIPMAP_NEAREST, ODSY_TEX_MODE_1D, ODSY_TEX_MODE_2D, ODSY_TEX_MODE_3D,
+    ODSY_TEX_MODE_CLIP_COUNT_MASK, ODSY_TEX_SAMPLER_BIT17, ODSY_TEX_SCALE_BIAS_BITS,
+    ODSY_TEX_SCALE_BIAS_ONE, ODSY_TEX_SCALE_BIAS_WORDS, ODSY_VOLUME_SLICE_SHIFT_MAX,
+    ODSY_WRITE_COLOUR_MASK, ODSY_WRITE_COLOUR_SHIFT, ODSY_WRITE_DEPTH, ODSY_WRITE_INDEX_MASK,
+    ODSY_TEX_COMPONENTS_MASK,
+};
+use super::draw::{gl_rules, id_compare_passes};
+use super::geometry::{f32_bits, gl_transpose, odyssey_f32};
+use super::gl_context::{
+    ColourTarget, GL_ADD, GL_ALPHA, GL_ALPHA_TEST, GL_BACK, GL_BLEND, GL_CCW, GL_CLAMP,
+    GL_CLAMP_TO_BORDER, GL_CLAMP_TO_EDGE, GL_CLIP_PLANE0, GL_CLIP_PLANES, GL_COLOR_BUFFER_BIT,
+    GL_COLOR_LOGIC_OP, GL_CONSTANT_ALPHA, GL_CONSTANT_COLOR, GL_CULL_FACE, GL_CW, GL_DECAL,
+    GL_DECR, GL_DEPTH_TEST, GL_DRAW_BACK, GL_DRAW_FRONT, GL_DRAW_OK, GL_DST_ALPHA, GL_DST_COLOR,
+    GL_FILL, GL_FLAT, GL_FOG, GL_FRONT, GL_FRONT_AND_BACK, GL_FUNC_ADD, GL_FUNC_REVERSE_SUBTRACT,
+    GL_FUNC_SUBTRACT, GL_INCR, GL_INDEX_LOGIC_OP, GL_INTENSITY, GL_INVERT, GL_KEEP, GL_LINE,
+    GL_LINEAR, GL_LINEAR_DETAIL_ALPHA_SGIS, GL_LINEAR_DETAIL_COLOR_SGIS, GL_LINEAR_DETAIL_SGIS,
+    GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR_MIPMAP_NEAREST, GL_LINE_SMOOTH, GL_LINE_STIPPLE,
+    GL_LOGIC_OP, GL_LUMINANCE, GL_LUMINANCE_ALPHA, GL_MAX, GL_MAX_TARGETS, GL_MIN, GL_MODULATE,
+    GL_NEAREST, GL_NEAREST_MIPMAP_LINEAR, GL_NEAREST_MIPMAP_NEAREST, GL_NEVER_ENUM,
+    GL_ONE_MINUS_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_COLOR, GL_ONE_MINUS_DST_ALPHA,
+    GL_ONE_MINUS_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA, GL_ONE_MINUS_SRC_COLOR, GL_OP_CLIP_PLANE,
+    GL_OP_CULL_FACE, GL_OP_DEPTH_FUNC, GL_OP_DEPTH_MASK, GL_OP_DISABLE, GL_OP_DRAW_BUFFERS,
+    GL_OP_ENABLE, GL_OP_FRONT_FACE, GL_OP_LINE_STIPPLE, GL_OP_SCISSOR, GL_OP_SHADE_MODEL,
+    GL_OP_TEXCOORD4F, GL_POINT, GL_POINT_SMOOTH, GL_POLYGON_OFFSET_FILL, GL_POLYGON_OFFSET_LINE,
+    GL_POLYGON_OFFSET_POINT, GL_POLYGON_STIPPLE, GL_REPEAT, GL_REPLACE, GL_RGB, GL_RGBA, GL_SMOOTH,
+    GL_SRC_ALPHA, GL_SRC_ALPHA_SATURATE, GL_SRC_COLOR, GL_STENCIL_TEST, GL_TEXTURE,
+    GL_VERTEX_FLOATS, GL_V_POSITION, GlCmd, GlContext, GlDraw, GlDrawResult, GlDrawState,
+    GlDrawable, GlOp, GlSink, RASTER_CLEAR, RasterOp,
+};
+use super::memory::{plane_bpp, word_load, word_store, words_fill, ClipRect, Plane, Rows, RowsMut};
+use super::raster::{
+    GL_TEX_LEVELS_MAX, GlTexImage, GlTexLevel, GlTexPyramid, NoTexels, Planes, RasterColour,
+    RasterRules, RasterTarget, Texels,
+};
+use super::raster_unit::{
+    primitive_cost, rect_cost, touch_row, LINE_PHASE_ON_RASTER, PlaneSpans, RasterCtx, Span,
+    TOUCHED_OVERLAY, TouchedRows,
+};
 // MIN/MAX: the second operand wins ties and NaNs.
 fn cmin<T: PartialOrd>(a: T, b: T) -> T {
     if a < b { a } else { b }
@@ -17,7 +85,7 @@ fn cmax<T: PartialOrd>(a: T, b: T) -> T {
 /// word `offset`, rows `stride` words apart.
 #[derive(Clone, Copy, Default)]
 #[cfg_attr(test, derive(PartialEq, Debug))]
-pub struct Texture {
+pub(super) struct Texture {
     pub offset: u32,
     pub stride: u32,
     pub width: u32,
@@ -32,7 +100,7 @@ pub struct Texture {
 /// at LOD -i/32 (TextureDetailWeight::at()).
 #[derive(Clone, Copy)]
 #[cfg_attr(test, derive(PartialEq, Debug))]
-pub struct TextureDetailWeight {
+pub(super) struct TextureDetailWeight {
     pub table: [u16; ODSY_TEX_DETAIL_FUNCTION_ENTRIES as usize],
 }
 
@@ -44,7 +112,7 @@ impl Default for TextureDetailWeight {
 
 #[derive(Clone, Copy, Default)]
 #[cfg_attr(test, derive(PartialEq, Debug))]
-pub struct TextureVolume {
+pub(super) struct TextureVolume {
     pub base: u32,
     pub stride_units: u32,
     pub level_word2: u32,
@@ -65,7 +133,7 @@ pub struct TextureVolume {
 /// A GlTexPyramid's shape: its levels are the first `count` of
 /// TextureChain::levels.
 #[derive(Clone, Copy, Default)]
-pub struct PyramidShape {
+pub(super) struct PyramidShape {
     pub count: u32,
     pub base_level: u32,
     pub max_level: u32,
@@ -75,7 +143,7 @@ pub struct PyramidShape {
 
 /// Where a draw's texture lives (Board::texture_setup()).
 #[derive(Clone, Default)]
-pub struct TextureChain {
+pub(super) struct TextureChain {
     /// The level-zero volume, and the post-filter and detail weight state.
     pub volume: TextureVolume,
     pub volumes: [TextureVolume; GL_TEX_LEVELS_MAX as usize],
@@ -136,7 +204,7 @@ impl TextureChain {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct TextureDetailSampler {
+pub(super) struct TextureDetailSampler {
     pub descriptor: u32,
     pub width: u32,
     pub height: u32,
@@ -156,13 +224,13 @@ impl Board {
 /// the rules' eight colour bits the stored colour's low twelve bits are the
 /// index again (gl_store_colour()). Smooth shading then
 /// interpolates the index as GL does, within one run of 256.
-pub fn gl_index_rgba(index: u32) -> [f32; 4] {
+pub(super) fn gl_index_rgba(index: u32) -> [f32; 4] {
     [0.0, ((index >> 8) & 0xf) as f32 / 255.0f32, (index & 0xff) as f32 / 255.0f32, 1.0]
 }
 
 /// A float index (glIndexf, glClearIndex): its integer part, wrapped to the
 /// twelve index bits the way a write keeps only the buffer's bits.
-pub fn float_index(bits: u32) -> u32 {
+pub(super) fn float_index(bits: u32) -> u32 {
     let mut f = f32::from_bits(bits);
 
     if !f.is_finite() {
@@ -231,7 +299,7 @@ impl Board {
 /// The board state a GL draw tests and stores its pixels under, fixed for
 /// the whole draw.
 #[derive(Clone, Copy)]
-pub struct GlPixelState<'a> {
+pub(super) struct GlPixelState<'a> {
     pub did: &'a [u8],
     pub id_compare: u32,
     pub clip_rect: [ClipRect; ODSY_CLIP_RECTS as usize],
@@ -261,7 +329,7 @@ impl GlPixelState<'_> {
 
 /// The board's planes as a GL draw borrows them: the two colour buffers,
 /// the model depth and stencil planes and the overlay byte.
-pub struct GlPixels<'a> {
+pub(super) struct GlPixels<'a> {
     pub state: GlPixelState<'a>,
     pub colour: [RowsMut<'a, u8>; ODSY_BUFFERS as usize],
     pub depth: RowsMut<'a, u8>,
@@ -313,7 +381,7 @@ impl GlPixels<'_> {
 /// store_colour; RGBA draws store_rgba and load_rgba (Board::gl_target()).
 /// Their once-only reports are made before the draw
 /// (Board::gl_report_refusals()).
-pub struct GlPlanes<'a> {
+pub(super) struct GlPlanes<'a> {
     state: GlPixelState<'a>,
     colour: [Rows<'a, u8>; ODSY_BUFFERS as usize],
     depth: Rows<'a, u8>,
@@ -332,7 +400,7 @@ pub struct GlPlanes<'a> {
 /// which is per pixel; the plane bound and clip rectangles were tested for
 /// the whole row. Its
 /// methods take plane coordinates on that row and answer as GlPlanes would.
-pub struct GlPlaneRow<'a> {
+pub(super) struct GlPlaneRow<'a> {
     x0: i32,
     depth: &'a [std::cell::Cell<u8>],
     depth_le: bool,
@@ -700,7 +768,7 @@ impl Planes for GlPlanes<'_> {
 /// pixel state of the moment it was set up, and spans of the planes the
 /// raster unit owns (raster_unit.rs).
 #[derive(Clone, Copy)]
-pub struct GlPixelJob {
+pub(super) struct GlPixelJob {
     pub state: GlPixelState<'static>,
     pub spans: PlaneSpans,
 }
@@ -736,7 +804,7 @@ impl GlPixelJob {
 /// later command may rewrite them before the raster unit draws. Only what
 /// the chain uses is copied.
 #[derive(Default)]
-pub struct TexelTables {
+pub(super) struct TexelTables {
     slice_offset: Vec<u32>,
     slice_width: Vec<u32>,
     colour_table: Option<Box<[[u32; ODSY_TEX_COLOUR_TABLE_ENTRIES as usize]; 2]>>,
@@ -859,7 +927,7 @@ impl GlDrawFields {
 /// buffer and texture chain: allocating them per draw on the front end and
 /// freeing them on the raster thread had the two threads contending for
 /// the allocator.
-pub struct GlDrawJob {
+pub(super) struct GlDrawJob {
     rules: RasterRules,
     target: RasterTarget<'static>,
     image: GlTexImage<'static>,
@@ -1029,7 +1097,7 @@ impl Board {
 /// The board's texture storage as a textured GL draw reads it: the levels
 /// Board::texture_setup() found in the object store, and the post-filter
 /// state.
-pub struct BoardTexels<'a> {
+pub(super) struct BoardTexels<'a> {
     pub chain: &'a TextureChain,
     pub obj: &'a [u8],
     /// The object store's size in words.
@@ -1215,7 +1283,7 @@ impl Texels for BoardTexels<'_> {
 /// apart), the captured stored 2x2x2 (word 2 4, 0x400 apart) and a
 /// 128x128x64 RGBA volume (word 2 6, 64 slice objects 0x1000 apart). That
 /// word 2 is the log2 of the slice allocation is INFERRED.
-pub fn volume_slice_stride(level_word2: u32) -> u64 {
+pub(super) fn volume_slice_stride(level_word2: u32) -> u64 {
     64u64.wrapping_shl(level_word2)
 }
 
@@ -1290,7 +1358,7 @@ impl Board {
 /// 24:15 only for a detail magnification filter and leaves them stale after,
 /// so the caller reads them only while word 4 carries magnification code 2, 3
 /// or 4. Bit 30 has no known meaning and refuses the word.
-pub fn texture_detail_sampler(sampler: u32) -> Option<TextureDetailSampler> {
+pub(super) fn texture_detail_sampler(sampler: u32) -> Option<TextureDetailSampler> {
     let level = (sampler >> 25) & 0x1f;
 
     if (sampler & 0x40000000) != 0 || level == 0 || level > 15 {
@@ -1308,7 +1376,7 @@ pub fn texture_detail_sampler(sampler: u32) -> Option<TextureDetailSampler> {
 /// A detail function entry's weight, bits 23:12 as an unsigned 12-bit
 /// fraction. The library never sets the other bits, so an entry that does
 /// is unknown state and drops the draw.
-pub fn texture_detail_entry_weight(value: u32) -> Option<u16> {
+pub(super) fn texture_detail_entry_weight(value: u32) -> Option<u16> {
     if (value & !0x00fff000) != 0 {
         return None;
     }
@@ -1345,7 +1413,7 @@ impl Board {
 /// GL_PHASE_SGIX, which the model does not implement, so the draw drops.
 /// Bits 27:23 are the texel components, which the format decode checks,
 /// and the wrap fields must be repeat.
-pub fn texture_detail_filter(word: u32) -> u32 {
+pub(super) fn texture_detail_filter(word: u32) -> u32 {
     let min = word & ODSY_TEX_MIN_MASK;
 
     if min != ODSY_TEX_MIN_NEAREST_MIPMAP_NEAREST && min != ODSY_TEX_MIN_LINEAR_MIPMAP_LINEAR {
@@ -1449,7 +1517,7 @@ impl Board {
 /// the GL library writes trunc(x * 256) & 0x3fff (ESTABLISHED as the
 /// library's conversion). It never sets bits 31:14, so a word that does is
 /// unknown state and drops the draw.
-pub fn texture_lod_word(word: u32) -> i32 {
+pub(super) fn texture_lod_word(word: u32) -> i32 {
     sextract32(word, 0, ODSY_TEX_LOD_BITS)
 }
 
@@ -1457,7 +1525,7 @@ pub fn texture_lod_word(word: u32) -> i32 {
 /// +/-15 before writing them (ESTABLISHED); the field holds +/-32. What the
 /// board does with a limit past 15 is UNKNOWN, as no stock client sends
 /// one: the model clamps it the way the library does, an approximation.
-pub fn texture_lod_limit(word: u32) -> i32 {
+pub(super) fn texture_lod_limit(word: u32) -> i32 {
     cmin(cmax(texture_lod_word(word), -(ODSY_TEX_LOD_LIMIT as i32)), ODSY_TEX_LOD_LIMIT as i32)
 }
 
@@ -2495,7 +2563,7 @@ impl Board {
 /// GL_FRONT 10, GL_FRONT_AND_BACK 11. Returns UINT32_MAX for 00, which no
 /// probe word has sent; the shared layer's own glCullFace validation then
 /// rejects it, leaving the previous mode in place.
-pub fn cull_face_mode(code: u32) -> u32 {
+pub(super) fn cull_face_mode(code: u32) -> u32 {
     match code {
         1 => GL_BACK,
         2 => GL_FRONT,
@@ -2506,7 +2574,7 @@ pub fn cull_face_mode(code: u32) -> u32 {
 
 /// 0x404 bit 23 to the shared layer's glFrontFace sense, inverted -- see
 /// the ODSY_MODE_FRONT_FACE_CW comment for why.
-pub fn front_face(pattern_mode: u32) -> u32 {
+pub(super) fn front_face(pattern_mode: u32) -> u32 {
     if (pattern_mode & ODSY_MODE_FRONT_FACE_CW) != 0 { GL_CCW } else { GL_CW }
 }
 
@@ -2696,7 +2764,7 @@ impl Board {
 /// 0x10 pairing, 0x39 through 0x3c the "one minus" of 0x18/0x20/0x28/0x30
 /// in turn, and 0x40, a source-only code, GL_SRC_ALPHA_SATURATE. Returns
 /// UINT32_MAX for a code with no factor at the requested position.
-pub fn blend_factor(code: u32, dst: bool) -> u32 {
+pub(super) fn blend_factor(code: u32, dst: bool) -> u32 {
     match code {
         0x00 => 0, // GL_ZERO
         0x08 => 1, // GL_ONE
@@ -2724,7 +2792,7 @@ pub fn blend_factor(code: u32, dst: bool) -> u32 {
 /// 0x041f's three 3-bit stencil-op fields (fail, depth-fail, depth-pass)
 /// to the shared layer's enum: KEEP 0, ZERO 1, REPLACE 2, INCR 3, DECR 4,
 /// INVERT 5. Returns UINT32_MAX for the two codes the board leaves unused.
-pub fn stencil_op(code: u32) -> u32 {
+pub(super) fn stencil_op(code: u32) -> u32 {
     match code {
         0 => GL_KEEP,
         1 => 0, // GL_ZERO
@@ -2740,7 +2808,7 @@ pub fn stencil_op(code: u32) -> u32 {
 /// GL_POINT 0 to GL_FILL 2. Returns UINT32_MAX for the one code the board
 /// leaves undefined, which the shared layer's own glPolygonMode validation
 /// then rejects, leaving the previous mode in place.
-pub fn polygon_mode(code: u32) -> u32 {
+pub(super) fn polygon_mode(code: u32) -> u32 {
     match code {
         0 => GL_POINT,
         1 => GL_LINE,
@@ -2754,7 +2822,7 @@ pub fn polygon_mode(code: u32) -> u32 {
 /// (gl_blend_equation_valid() accepts only the other six), so the
 /// dispatch case reports and skips them rather than feeding a code the
 /// shared layer would reject.
-pub static BLEND_EQUATION: [u32; 8] = [
+pub(super) static BLEND_EQUATION: [u32; 8] = [
     GL_FUNC_ADD,
     GL_MIN,
     GL_MAX,
@@ -2777,7 +2845,7 @@ impl Board {
 }
 
 /// The lighting words matched by value (ODSY_GL_NORMAL_3F and the rest).
-pub static GL_LIGHT_WORDS: [u32; 16] = [
+pub(super) static GL_LIGHT_WORDS: [u32; 16] = [
     ODSY_GL_NORMAL_3F,
     ODSY_GL_MATERIAL_AMBIENT,
     ODSY_GL_MATERIAL_DIFFUSE,
@@ -2797,15 +2865,15 @@ pub static GL_LIGHT_WORDS: [u32; 16] = [
 ];
 
 /// The texture-coordinate and generation fragments.
-pub static UCODE_TEXGEN: [u32; 14] = [
+pub(super) static UCODE_TEXGEN: [u32; 14] = [
     0x033, 0x04d, 0x052, 0x057, 0x05c, 0x061, 0x066, 0x06b, 0x06c, 0x077, 0x07b, 0x07f, 0x091, 0x09f,
 ];
 
-pub fn prog_value(word: u32) -> u32 {
+pub(super) fn prog_value(word: u32) -> u32 {
     (word & ODSY_PROG_LOW_MASK) | (((word >> ODSY_PROG_HIGH_SHIFT) & 1) << 10)
 }
 
-pub fn is_program_word(word: u32) -> bool {
+pub(super) fn is_program_word(word: u32) -> bool {
     let cls = word >> ODSY_PROG_CLASS_SHIFT;
 
     if (word & ODSY_PROG_SHAPE) != ODSY_PROG_TAG {
@@ -2837,6 +2905,6 @@ pub fn is_program_word(word: u32) -> bool {
     )
 }
 
-pub fn ucode_is_texgen(a: u32) -> bool {
+pub(super) fn ucode_is_texgen(a: u32) -> bool {
     UCODE_TEXGEN.contains(&a)
 }

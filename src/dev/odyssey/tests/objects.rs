@@ -1,7 +1,12 @@
 //! Board-memory objects as texture levels: the model's object store keeps
 //! what a game uploads, and texture setup finds a level's storage there.
 
-use super::*;
+use crate::dev::odyssey::board::{Board, ODSY_OBJECTS};
+use crate::dev::odyssey::consts::{ODSY_TEX_MODE_2D, ODSY_TEX_MODE_3D};
+use crate::dev::odyssey::gl::{texture_detail_sampler, volume_slice_stride, TextureChain, TextureDetailWeight};
+use crate::dev::odyssey::gl_context::{GL_ADD, GL_LINEAR, GL_LINEAR_DETAIL_COLOR_SGIS, GL_MODULATE, GL_RGB, GL_RGBA};
+use crate::dev::odyssey::raster::GlTexImage;
+use crate::dev::odyssey::tests::board_with_ram;
 
 /// TyrQuake on IRIX 6.5.30 keeps some 1,500 texture levels on the board at
 /// once, each its own board-memory object, and samples the first ones it

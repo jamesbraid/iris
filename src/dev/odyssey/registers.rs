@@ -3,8 +3,43 @@
 //!
 //! Ported from hw/misc/sgi-odyssey.c and the shared SGI graphics code in jamesbraid/qemu-sgi-origami.
 
-use super::*;
 
+use crate::devlog::LogModule;
+use std::sync::atomic::Ordering;
+use super::board::{Board, ODSY_HEIGHT, ODSY_UNIMP_REPORTS, ODSY_WIDTH};
+use super::consts::{
+    ODSY_BACKEND_COUNT_MASK, ODSY_BACKEND_CTL_BASE, ODSY_BACKEND_CTL_ENTRIES,
+    ODSY_BACKEND_READ_BASE, ODSY_BACKEND_SELECT, ODSY_BACKEND_SELECTOR_INDEX_MASK,
+    ODSY_BACKEND_SELECTOR_INDEX_SHIFT, ODSY_BACKEND_TAG_HEADER, ODSY_BACKEND_TAG_MASK,
+    ODSY_BACKEND_TAG_SHIFT, ODSY_BACKEND_VERSION, ODSY_BLOCK_END, ODSY_BUZZ_1, ODSY_BUZZ_2,
+    ODSY_BUZZ_3, ODSY_BUZZ_4, ODSY_BUZZ_5, ODSY_BUZZ_6, ODSY_CFIFO_SELFTEST,
+    ODSY_CFIFO_SELFTEST_OK, ODSY_CHANNEL_HEIGHT, ODSY_CHANNEL_WIDTH, ODSY_CONFIG_FOUR_BANKS,
+    ODSY_CONFIG_LATENCY_2, ODSY_CONFIG_SIZE_SHIFT, ODSY_CTX_SHADOW_ADDR_LOWER,
+    ODSY_CTX_SHADOW_ADDR_UPPER, ODSY_CURSOR_BASE, ODSY_CURSOR_COLOURS, ODSY_CURSOR_COLOUR_COUNT,
+    ODSY_CURSOR_CONTROL, ODSY_CURSOR_CTL_CHANNEL1, ODSY_CURSOR_CTL_CROSSHAIR,
+    ODSY_CURSOR_CTL_ENABLE, ODSY_CURSOR_CTL_KNOWN, ODSY_CURSOR_ENTRIES, ODSY_CURSOR_PLANE,
+    ODSY_CURSOR_POSITION, ODSY_CURSOR_REPORT_CHANNEL1, ODSY_CURSOR_REPORT_CONTROL,
+    ODSY_CURSOR_REPORT_CROSSHAIR, ODSY_CURSOR_REPORT_ENTRY, ODSY_CURSOR_REPORT_GLYPH15,
+    ODSY_CURSOR_REPORT_PLANE, ODSY_DISPLAYED_BUFFER, ODSY_DISPMODE_BASE, ODSY_DISPMODE_COUNT,
+    ODSY_F32_ONE, ODSY_F32_POINT_EIGHT, ODSY_F32_POINT_TWO, ODSY_FLCTL_CONFIG, ODSY_FLCTL_TARGET,
+    ODSY_FRAME_CLOCKS, ODSY_HOST_WRITE_ADDR_LOWER, ODSY_HOST_WRITE_ADDR_UPPER,
+    ODSY_I2C_MAIN_CMD_INDEX, ODSY_I2C_MAIN_CMD_READ, ODSY_I2C_MAIN_STATUS_READ,
+    ODSY_I2C_OPT_CMD_INDEX, ODSY_I2C_OPT_CMD_READ, ODSY_I2C_OPT_STATUS_READ, ODSY_I2C_STATUS_DONE,
+    ODSY_I2C_STATUS_READY, ODSY_INTR_CLEAR, ODSY_INTR_ENABLE_CLEAR, ODSY_INTR_ENABLE_SET,
+    ODSY_INTR_FLAGS, ODSY_LUT_BLUE_SHIFT, ODSY_LUT_ENTRY_MASK, ODSY_LUT_GREEN_SHIFT,
+    ODSY_LUT_RED_SHIFT, ODSY_LUT_SIZE, ODSY_MANUFACTURER, ODSY_MEMORY_CONFIG, ODSY_MEMORY_CONTROL,
+    ODSY_MEMORY_CONTROL_FOUR_BANKS, ODSY_MEMORY_CONTROL_LATENCY_2, ODSY_MEMORY_CONTROL_SIZE_MASK,
+    ODSY_MEMORY_CONTROL_SIZE_SHIFT, ODSY_NIC_DONE, ODSY_NIC_KERNEL, ODSY_NIC_LEVEL, ODSY_NIC_PROM,
+    ODSY_NIC_PULSE_MASK, ODSY_NIC_PULSE_SHIFT, ODSY_NIC_SAMPLE_MASK, ODSY_NIC_SAMPLE_SHIFT,
+    ODSY_OVERLAY_IDS, ODSY_OVERLAY_MODE_BASE, ODSY_OVERLAY_MODE_KNOWN, ODSY_PART,
+    ODSY_PIXEL_CLOCK_HZ, ODSY_RESET_CONTROL, ODSY_ROUTE_DEST_LOWER, ODSY_ROUTE_DEST_UPPER,
+    ODSY_ROUTE_VECTORS, ODSY_STATS_ADDR_LOWER, ODSY_STATS_ADDR_UPPER, ODSY_STATS_CONTROL,
+    ODSY_STATUS0, ODSY_SWAP_ARM, ODSY_SWAP_CONTROL, ODSY_SWAP_CONTROL_COMPANION, ODSY_SWAP_PENDING,
+    ODSY_SW_TOKEN, ODSY_UNIMP_WRITE,
+};
+use super::interface::front_register;
+use super::reader::SharedRegs;
+use super::scanout::{DirtySite, ScanoutMode};
 impl Board {
     pub fn identity(&mut self) -> u32 {
         (self.revision << 28) | (ODSY_PART << 12) | (ODSY_MANUFACTURER << 1) | 1
@@ -68,7 +103,7 @@ impl Board {
 /// base and at base+4 across the block). Every other register has only been
 /// seen as a 32-bit access. Other widths, alignments and offsets are
 /// unmodeled rather than an error.
-pub fn reg(addr: u64, size: u32) -> i64 {
+pub(super) fn reg(addr: u64, size: u32) -> i64 {
     if addr < ODSY_BLOCK_END {
         if (size == 8 || size == 4) && (addr & 7) == 0 {
             return addr as i64;
@@ -185,7 +220,7 @@ impl Board {
 }
 
 /// A colour word, ten bits a channel, as 0x00RRGGBB from the top eight.
-pub fn cursor_rgb(word: u32) -> u32 {
+pub(super) fn cursor_rgb(word: u32) -> u32 {
     (((word >> ODSY_LUT_RED_SHIFT) & 0xff) << 16) | (((word >> ODSY_LUT_GREEN_SHIFT) & 0xff) << 8) | ((word >> ODSY_LUT_BLUE_SHIFT) & 0xff)
 }
 
@@ -297,7 +332,7 @@ impl Board {
 // modeled.
 
 /// The entries the kernel writes (the datasheet's back-end entry table).
-pub fn backend_ctl_known(index: u32) -> bool {
+pub(super) fn backend_ctl_known(index: u32) -> bool {
     (0x2000..=0x247f).contains(&index)
         || (0x2481..=0x2483).contains(&index)
         || index == 0x2600
@@ -349,7 +384,7 @@ impl Board {
     }
 }
 
-pub fn i2c_status(command: u32) -> u32 {
+pub(super) fn i2c_status(command: u32) -> u32 {
     ODSY_I2C_STATUS_READY | if command != 0 { ODSY_I2C_STATUS_DONE } else { 0 }
 }
 
@@ -539,7 +574,7 @@ impl Board {
 /// Deterministic model defaults; physical back-material reset is unknown.
 /// (The ODSY_QUERY_* enum and the hardware shadow-page constants are in
 /// draw.rs and consts.rs.)
-pub const BACK_MATERIAL_DEFAULTS: [u32; 16] = [
+pub(super) const BACK_MATERIAL_DEFAULTS: [u32; 16] = [
     ODSY_F32_POINT_TWO,
     ODSY_F32_POINT_TWO,
     ODSY_F32_POINT_TWO,

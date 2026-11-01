@@ -5,15 +5,15 @@
 //! dropped.
 //!
 //! Ported from include/hw/display/sgi/board-memory.h in jamesbraid/qemu-sgi-origami.
-use super::*;
 
+use crate::devlog::LogModule;
 use std::cell::Cell;
 
-pub const PLANES_MAX: usize = 32;
+pub(super) const PLANES_MAX: usize = 32;
 
 /// How a plane's pixels are stored.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub enum PlaneFormat {
+pub(super) enum PlaneFormat {
     /// 1 byte: colour index
     #[default]
     Ci8,
@@ -39,7 +39,7 @@ pub enum PlaneFormat {
 
 /// The byte order and channel order the model writes a plane's words in.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub enum Packing {
+pub(super) enum Packing {
     #[default]
     LeRedLow,
     LeRedHigh,
@@ -47,7 +47,7 @@ pub enum Packing {
 }
 
 #[derive(Clone, Copy, Default, Debug)]
-pub struct Plane {
+pub(super) struct Plane {
     pub id: u32, // index in the board's plane table
     pub base: u64,
     pub len: u64, // bytes within the board memory
@@ -61,7 +61,7 @@ pub struct Plane {
 
 /// A head's board memory: a model-owned byte array, and the planes over it.
 #[derive(Clone, Default)]
-pub struct BoardMemory {
+pub(super) struct BoardMemory {
     pub size: u64,
     pub bytes: Vec<u8>,
     /// A fixed table, so a plane index stays valid for the memory's life.
@@ -71,10 +71,10 @@ pub struct BoardMemory {
 
 /// Up to 16 inclusive rectangles, in plane coordinates. With n 0 the list
 /// is no clip, unless empty is set: then it keeps no pixel.
-pub const CLIP_MAX: usize = 16;
+pub(super) const CLIP_MAX: usize = 16;
 
 #[derive(Clone, Copy, Default, Debug)]
-pub struct ClipRect {
+pub(super) struct ClipRect {
     pub x0: i32,
     pub y0: i32,
     pub x1: i32,
@@ -82,28 +82,28 @@ pub struct ClipRect {
 }
 
 #[derive(Clone, Copy, Default, Debug)]
-pub struct ClipList {
+pub(super) struct ClipList {
     pub n: u32,
     pub empty: u32, // 0 or 1; with n 0, 1 keeps nothing
     pub r: [ClipRect; CLIP_MAX],
 }
 
 // The sixteen logic ops, in OpenGL's order (GL_CLEAR + op).
-pub const LOGIC_CLEAR: u32 = 0;
-pub const LOGIC_AND: u32 = 1;
-pub const LOGIC_AND_REVERSE: u32 = 2;
-pub const LOGIC_COPY: u32 = 3;
-pub const LOGIC_AND_INVERTED: u32 = 4;
-pub const LOGIC_NOOP: u32 = 5;
-pub const LOGIC_XOR: u32 = 6;
-pub const LOGIC_OR: u32 = 7;
-pub const LOGIC_NOR: u32 = 8;
-pub const LOGIC_EQUIV: u32 = 9;
-pub const LOGIC_INVERT: u32 = 10;
-pub const LOGIC_OR_REVERSE: u32 = 11;
-pub const LOGIC_COPY_INVERTED: u32 = 12;
-pub const LOGIC_OR_INVERTED: u32 = 13;
-pub const LOGIC_NAND: u32 = 14;
+pub(super) const LOGIC_CLEAR: u32 = 0;
+pub(super) const LOGIC_AND: u32 = 1;
+pub(super) const LOGIC_AND_REVERSE: u32 = 2;
+pub(super) const LOGIC_COPY: u32 = 3;
+pub(super) const LOGIC_AND_INVERTED: u32 = 4;
+pub(super) const LOGIC_NOOP: u32 = 5;
+pub(super) const LOGIC_XOR: u32 = 6;
+pub(super) const LOGIC_OR: u32 = 7;
+pub(super) const LOGIC_NOR: u32 = 8;
+pub(super) const LOGIC_EQUIV: u32 = 9;
+pub(super) const LOGIC_INVERT: u32 = 10;
+pub(super) const LOGIC_OR_REVERSE: u32 = 11;
+pub(super) const LOGIC_COPY_INVERTED: u32 = 12;
+pub(super) const LOGIC_OR_INVERTED: u32 = 13;
+pub(super) const LOGIC_NAND: u32 = 14;
 
 impl BoardMemory {
     /// A zeroed memory of size bytes, at most 4 GiB - 1.
@@ -116,7 +116,7 @@ impl BoardMemory {
     }
 }
 
-pub fn plane_bytes_per_pixel(format: PlaneFormat) -> u32 {
+pub(super) fn plane_bytes_per_pixel(format: PlaneFormat) -> u32 {
     plane_bpp(format)
 }
 
@@ -188,7 +188,7 @@ impl ClipList {
         false
     }
 }
-pub fn logic_op(op: u8, src: u32, dst: u32) -> u32 {
+pub(super) fn logic_op(op: u8, src: u32, dst: u32) -> u32 {
     let s = src;
     let d = dst;
     match (op & 0xf) as u32 {
@@ -242,7 +242,7 @@ impl BoardMemory {
 
 /// One plane word of `bpp` bytes, little-endian when `le` is set.
 #[inline]
-pub fn plane_word_load(bytes: &[u8], bpp: u32, le: bool) -> u32 {
+pub(super) fn plane_word_load(bytes: &[u8], bpp: u32, le: bool) -> u32 {
     match bpp {
         1 => bytes[0] as u32,
         2 => {
@@ -263,7 +263,7 @@ pub fn plane_word_load(bytes: &[u8], bpp: u32, le: bool) -> u32 {
 }
 
 #[inline]
-pub fn plane_word_store(bytes: &mut [u8], bpp: u32, le: bool, word: u32) {
+pub(super) fn plane_word_store(bytes: &mut [u8], bpp: u32, le: bool, word: u32) {
     match bpp {
         1 => bytes[0] = word as u8,
         2 => {
@@ -295,7 +295,7 @@ impl Plane {
 
 // The per-pixel paths take a plane's pixel size once and reuse it.
 #[inline]
-pub fn plane_bpp(format: PlaneFormat) -> u32 {
+pub(super) fn plane_bpp(format: PlaneFormat) -> u32 {
     match format {
         PlaneFormat::Ci8 | PlaneFormat::S8 | PlaneFormat::Tag | PlaneFormat::Overlay8 => 1,
         PlaneFormat::Rgb12 => 2,
@@ -328,7 +328,7 @@ impl Plane {
 }
 
 /// A pixel array's rows as a draw borrows them.
-pub struct RowsMut<'a, T> {
+pub(super) struct RowsMut<'a, T> {
     /// Elements from the start of one row to the next.
     stride: usize,
     data: &'a mut [T],
@@ -346,7 +346,7 @@ impl<'a, T> RowsMut<'a, T> {
 }
 
 /// RowsMut as the draw writes it, through shared references.
-pub struct Rows<'a, T> {
+pub(super) struct Rows<'a, T> {
     stride: usize,
     data: &'a [Cell<T>],
 }
@@ -414,7 +414,7 @@ impl Rows<'_, u8> {
 /// Word i of a 4-byte plane's row of bytes (Rows::plane_words()), little-endian
 /// when le is set, as Rows::plane_load() reads it.
 #[inline(always)]
-pub fn word_load(bytes: &[Cell<u8>], i: usize, le: bool) -> u32 {
+pub(super) fn word_load(bytes: &[Cell<u8>], i: usize, le: bool) -> u32 {
     let c = &bytes[4 * i..4 * i + 4];
     let b = [c[0].get(), c[1].get(), c[2].get(), c[3].get()];
 
@@ -423,7 +423,7 @@ pub fn word_load(bytes: &[Cell<u8>], i: usize, le: bool) -> u32 {
 
 /// Store word i of a 4-byte plane's row of bytes, as Rows::plane_store() does.
 #[inline(always)]
-pub fn word_store(bytes: &[Cell<u8>], i: usize, le: bool, word: u32) {
+pub(super) fn word_store(bytes: &[Cell<u8>], i: usize, le: bool, word: u32) {
     let c = &bytes[4 * i..4 * i + 4];
     let b = if le { word.to_le_bytes() } else { word.to_be_bytes() };
 
@@ -435,7 +435,7 @@ pub fn word_store(bytes: &[Cell<u8>], i: usize, le: bool, word: u32) {
 /// Store word into every word of a 4-byte plane's bytes (a whole number of
 /// words), as word_store() does each.
 #[inline]
-pub fn words_fill(bytes: &[Cell<u8>], le: bool, word: u32) {
+pub(super) fn words_fill(bytes: &[Cell<u8>], le: bool, word: u32) {
     let b = if le { word.to_le_bytes() } else { word.to_be_bytes() };
 
     for c in bytes.chunks_exact(4) {

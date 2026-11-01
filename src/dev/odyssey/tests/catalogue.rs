@@ -1,6 +1,11 @@
 //! The board catalogue and the Octane attach: what each marketed VPro
 //! answers as, and how the widget windows reach it.
 
+use crate::dev::odyssey::Odyssey;
+use crate::dev::odyssey::consts::{ODSY_BACKEND_VERSION, ODSY_CONTROL_WIDGET_MASK, ODSY_REG_DEST_SELECT};
+use crate::dev::odyssey::tests::{board, cmd, reg_read, select, VPRO_WIDGET};
+use crate::ip30::{widget_large_base, widget_small_base};
+use std::sync::Arc;
 use super::*;
 
 #[test]

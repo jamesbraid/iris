@@ -4,8 +4,11 @@
 //!
 //! Ported from hw/display/sgi/rasterizer.c in jamesbraid/qemu-sgi-origami.
 
-use super::*;
 
+use crate::devlog::LogModule;
+use super::gl_context::{GL_CLIP_PLANES, GL_FLAT, GL_V_COLOR};
+use super::raster::{LineRule, RasterRules, SoftDraw, SoftFrag, SoftVertex};
+use super::raster_texture::{soft_texture_derivatives, soft_texture_lod_scale};
 impl SoftVertex {
     /// The texture values at this end of the line to b, their change along
     /// it, and its length in pixels; None where one is not finite.
@@ -30,23 +33,23 @@ impl SoftVertex {
 
 // MIN and MAX as conditionals (a NaN operand picks the
 // second), unlike f64::min and f64::max.
-pub fn r2_max<T: PartialOrd>(a: T, b: T) -> T {
+pub(super) fn r2_max<T: PartialOrd>(a: T, b: T) -> T {
     if a > b { a } else { b }
 }
 
-pub fn r2_min<T: PartialOrd>(a: T, b: T) -> T {
+pub(super) fn r2_min<T: PartialOrd>(a: T, b: T) -> T {
     if a < b { a } else { b }
 }
 
 /// Sign of v + e1 * epsilon + e2 * epsilon squared as epsilon -> 0+.
-pub fn soft_limit_sign(v: i64, e1: i64, e2: i64) -> i32 {
+pub(super) fn soft_limit_sign(v: i64, e1: i64, e2: i64) -> i32 {
     let first = if v != 0 { v } else if e1 != 0 { e1 } else { e2 };
 
     (first > 0) as i32 - (first < 0) as i32
 }
 
 /// Whether |v + e1*epsilon + e2*epsilon squared| is strictly below bound.
-pub fn soft_limit_abs(v: i64, e1: i64, e2: i64, bound: i64) -> bool {
+pub(super) fn soft_limit_abs(v: i64, e1: i64, e2: i64, bound: i64) -> bool {
     let sign = soft_limit_sign(v, e1, e2) as i64;
 
     soft_limit_sign(
@@ -57,7 +60,7 @@ pub fn soft_limit_abs(v: i64, e1: i64, e2: i64, bound: i64) -> bool {
 }
 
 /// The endpoint minus (epsilon, epsilon squared) lies in the open diamond.
-pub fn soft_diamond_contains(x: i64, y: i64, half: i64) -> bool {
+pub(super) fn soft_diamond_contains(x: i64, y: i64, half: i64) -> bool {
     let sx = soft_limit_sign(x, -1, 0) as i64;
     let sy = soft_limit_sign(y, 0, -1) as i64;
 
@@ -158,12 +161,12 @@ impl SoftVertex {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct SoftPoint2 {
+pub(super) struct SoftPoint2 {
     pub x: f64,
     pub y: f64,
 }
 
-pub fn soft_clip_edge(
+pub(super) fn soft_clip_edge(
     in_: &[SoftPoint2],
     n: u32,
     out: &mut [SoftPoint2],
@@ -201,7 +204,7 @@ pub fn soft_clip_edge(
     count as u32
 }
 
-pub fn soft_polygon_square_area(polygon: &[SoftPoint2], n: u32, x: i32, y: i32) -> f64 {
+pub(super) fn soft_polygon_square_area(polygon: &[SoftPoint2], n: u32, x: i32, y: i32) -> f64 {
     let mut a = [SoftPoint2::default(); 12];
     let mut b = [SoftPoint2::default(); 12];
     let mut area = 0.0f64;
@@ -221,7 +224,7 @@ pub fn soft_polygon_square_area(polygon: &[SoftPoint2], n: u32, x: i32, y: i32) 
     r2_min(1.0, area.abs() * 0.5)
 }
 
-pub fn soft_line_coverage(ax: f64, ay: f64, bx: f64, by: f64, width: f64, x: i32, y: i32) -> f64 {
+pub(super) fn soft_line_coverage(ax: f64, ay: f64, bx: f64, by: f64, width: f64, x: i32, y: i32) -> f64 {
     let dx = bx - ax;
     let dy = by - ay;
     let length = dx.hypot(dy);
@@ -240,13 +243,13 @@ pub fn soft_line_coverage(ax: f64, ay: f64, bx: f64, by: f64, width: f64, x: i32
     soft_polygon_square_area(&rectangle, 4, x, y)
 }
 
-pub fn soft_circle_integral(x: f64, radius: f64) -> f64 {
+pub(super) fn soft_circle_integral(x: f64, radius: f64) -> f64 {
     let y = r2_max(0.0, radius * radius - x * x).sqrt();
 
     0.5 * (x * y + radius * radius * (x / radius).asin())
 }
 
-pub fn soft_circle_coverage(cx: f64, cy: f64, radius: f64, x: i32, y: i32) -> f64 {
+pub(super) fn soft_circle_coverage(cx: f64, cy: f64, radius: f64, x: i32, y: i32) -> f64 {
     let mut cuts = [0.0f64; 8];
     let mut area = 0.0f64;
     let mut n = 0usize;
@@ -324,7 +327,7 @@ impl RasterRules {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct SoftLineStipple {
+pub(super) struct SoftLineStipple {
     pub counter: u32,
     pub repeat: u32,
     pub pattern: u32,
@@ -723,7 +726,7 @@ impl SoftDraw<'_> {
 }
 
 /// Internal representation bound, not an SGI width range. Half ties round up.
-pub fn soft_dimension(requested: f32) -> Option<u32> {
+pub(super) fn soft_dimension(requested: f32) -> Option<u32> {
     let n = if requested == 0.0 { 1.0 } else { (requested as f64 + 0.5).floor() };
 
     if !requested.is_finite() || requested < 0.0 || n > i32::MAX as f64 {

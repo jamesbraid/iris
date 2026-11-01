@@ -2,7 +2,9 @@
 //! finish, from whichever thread asks, even when that thread is the one
 //! the windowing system needs to answer a teardown request.
 
-use super::*;
+use crate::dev::odyssey::Odyssey;
+use crate::dev::odyssey::command::CFIFO_PREAMBLE;
+use std::sync::Arc;
 use crate::dev::heart::{host_clock, Heart, HeartConfig};
 use crate::dev::heart_mem::HeartRam;
 use crate::dev::ng1::rex3::Renderer;

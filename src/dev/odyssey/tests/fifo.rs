@@ -1,5 +1,31 @@
 //! The command FIFO: queueing, the board's thread, status, credits.
 
+use crate::dev::odyssey::board::Board;
+use crate::dev::odyssey::command::{CFIFO_PREAMBLE, CfifoPreamble};
+use crate::dev::odyssey::consts::{
+    ODSY_BUZZ_1, ODSY_CFIFO_DEPTH, ODSY_CFIFO_LOW_WATER, ODSY_CFIFO_SELFTEST,
+    ODSY_CFIFO_SELFTEST_OK, ODSY_CFIFO_WORDS, ODSY_CMD_FIFO, ODSY_CTX_SHADOW_ADDR_LOWER,
+    ODSY_CTX_SHADOW_ADDR_UPPER, ODSY_CTX_SWITCH_DONE_OFFSET, ODSY_CTX_SWITCH_PORT,
+    ODSY_FLCTL_TARGET, ODSY_HOST_WRITE_ADDR_LOWER, ODSY_HOST_WRITE_ADDR_UPPER, ODSY_INTR_CLEAR,
+    ODSY_INTR_ENABLE_SET, ODSY_INTR_FIFO_HIGH_WATER, ODSY_INTR_FIFO_LOW_WATER, ODSY_INTR_FLAGS,
+    ODSY_REG_HOST_WRITE, ODSY_STATUS0, ODSY_STATUS0_FIFO_EMPTY, ODSY_STATUS0_FIFO_HIGH_WATER,
+    ODSY_STATUS0_FIFO_LOW_WATER, ODSY_SW_TOKEN,
+};
+use crate::dev::odyssey::fifo::{CommandFifo, FifoDepth, RING_STORES, RUN_MAX, Run};
+use crate::dev::odyssey::interface::HostInterface;
+use crate::dev::odyssey::mmio::BoardLocks;
+use crate::dev::odyssey::pi_gfx::{
+    pi_gfx_mark_store, pi_gfx_take_mark, pi_gfx_unmark_store, PI_GFX_BIAS, PI_GFX_CREDIT,
+    PI_GFX_PAGE, PI_GFX_PAGE_ENABLE, PiGfx, PiGfxLink,
+};
+use crate::dev::odyssey::tests::{
+    board, board_with_ram, cmd, cmd64, reg_read, reg_write, route_to_heart, select, FLAG_VECTOR,
+    Ram, VPRO_WIDGET,
+};
+use crate::dev::odyssey::worker::Budget;
+use parking_lot::Mutex;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use super::*;
 use std::sync::atomic::Ordering::SeqCst;
 

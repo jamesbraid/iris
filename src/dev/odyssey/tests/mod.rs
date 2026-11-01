@@ -14,7 +14,14 @@
 //! thread running, a command store runs in the store, which is how a
 //! test sees its effect at once.
 
-use super::*;
+use super::board::Board;
+use super::consts::{
+    ODSY_CMD_FIFO, ODSY_CMD_REGISTER_TAG, ODSY_ROUTE_DEST_LOWER, ODSY_ROUTE_DEST_UPPER,
+    ODSY_ROUTE_VECTORS,
+    ODSY_ROUTE_ENABLE_DMA,
+    ODSY_ROUTE_ENABLE_RETRACE,
+    ODSY_ROUTE_ENABLE_SOFTSYNC,
+};
 use crate::irq::InterruptController;
 use crate::traits::BusDevice;
 use parking_lot::Mutex;

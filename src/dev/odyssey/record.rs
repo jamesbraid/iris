@@ -33,14 +33,14 @@ const MAGIC: &[u8; 8] = b"ODSYREC\0";
 const VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Rec {
+pub(super) enum Rec {
     Write { size: u8, off: u32, val: u64 },
     Read { size: u8, off: u32, val: u64 },
     DmaBlock { addr: u64, words: Vec<u64> },
     DmaByte { addr: u64, val: u8 },
 }
 
-pub struct Recorder {
+pub(super) struct Recorder {
     out: flate2::write::GzEncoder<std::io::BufWriter<std::fs::File>>,
     pub records: u64,
     last_read: Option<(u8, u32, u64)>,
@@ -48,7 +48,7 @@ pub struct Recorder {
 
 /// Shared so the DMA path can record through `RecordingMem` while the bus
 /// path records through the widget.
-pub type RecHandle = Arc<Mutex<Recorder>>;
+pub(super) type RecHandle = Arc<Mutex<Recorder>>;
 
 impl Recorder {
     pub fn create(path: &str) -> std::io::Result<RecHandle> {
@@ -108,7 +108,7 @@ impl Drop for Recorder {
 }
 
 /// System memory as the board's DMA sees it, recording what it reads.
-pub struct RecordingMem {
+pub(super) struct RecordingMem {
     pub inner: Arc<dyn BusDevice>,
     pub rec: RecHandle,
 }
@@ -137,7 +137,7 @@ impl BusDevice for RecordingMem {
 }
 
 /// Parse a whole recording.
-pub fn load(path: &str) -> std::io::Result<Vec<Rec>> {
+pub(super) fn load(path: &str) -> std::io::Result<Vec<Rec>> {
     let bad = |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, what.to_string());
     let mut data = Vec::new();
     // A recording the emulator was killed in the middle of ends without the

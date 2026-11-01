@@ -8,30 +8,30 @@
 //! head did not fully write keeps its other bytes.
 //!
 //! Ported from include/hw/display/sgi/pixel-dma.h in jamesbraid/qemu-sgi-origami.
-use super::*;
 
+use crate::devlog::LogModule;
 use std::sync::Arc;
 
 use crate::traits::{BusDevice, BUS_OK};
 
 /// Guest memory as a graphics head's DMA reaches it: the machine's
 /// bus-master view, or none before the machine attaches one.
-pub type GuestMemory = Option<Arc<dyn BusDevice>>;
+pub(super) type GuestMemory = Option<Arc<dyn BusDevice>>;
 
 /// Read `buf.len()` guest bytes at `addr`; false when no memory is attached
 /// or the bus reports an error.
-pub fn read_guest(mem: &GuestMemory, addr: u64, buf: &mut [u8]) -> bool {
+pub(super) fn read_guest(mem: &GuestMemory, addr: u64, buf: &mut [u8]) -> bool {
     mem.as_deref().is_some_and(|m| crate::physical::read_bytes(m, addr, buf) == BUS_OK)
 }
 
 /// Write `buf` to guest memory at `addr`; false as for [`read_guest`].
-pub fn write_guest(mem: &GuestMemory, addr: u64, buf: &[u8]) -> bool {
+pub(super) fn write_guest(mem: &GuestMemory, addr: u64, buf: &[u8]) -> bool {
     mem.as_deref().is_some_and(|m| crate::physical::write_bytes(m, addr, buf) == BUS_OK)
 }
 
 /// Which way a mapped transfer moves bytes.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub enum DmaDirection {
+pub(super) enum DmaDirection {
     /// Guest memory to the head: chunks are read when mapped.
     #[default]
     ToDevice,
@@ -39,13 +39,13 @@ pub enum DmaDirection {
     FromDevice,
 }
 
-pub const DMA_CHUNK_MAX: u32 = 4096;
+pub(super) const DMA_CHUNK_MAX: u32 = 4096;
 /// The smallest page a page list may name.
-pub const DMA_MIN_PAGE_SIZE: u32 = DMA_CHUNK_MAX;
+pub(super) const DMA_MIN_PAGE_SIZE: u32 = DMA_CHUNK_MAX;
 
 /// Why a DMA transfer to or from guest memory failed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum DmaError {
+pub(super) enum DmaError {
     /// A guest-memory transaction failed.
     Bus,
     /// Outside the page list, plane or pool.
@@ -55,7 +55,7 @@ pub enum DmaError {
 /// A head's view of guest memory. The inbound path is direct-mapped: a
 /// device address is the bus address.
 #[derive(Clone, Default)]
-pub struct DmaBus {
+pub(super) struct DmaBus {
     pub mem: GuestMemory,
     /// The MMIO write that started the transfer, which a traced chunk
     /// names (Board::trace_sequence).
@@ -64,14 +64,14 @@ pub struct DmaBus {
 
 /// A guest buffer as the driver described it: page i at addr[i].
 #[derive(Clone, Default)]
-pub struct DmaPageList {
+pub(super) struct DmaPageList {
     pub addr: Vec<u64>, // device addresses
     pub npages: u32,
     pub page_size: u32,
 }
 
 #[derive(Clone, Default)]
-pub struct DmaChunk {
+pub(super) struct DmaChunk {
     pub host: Vec<u8>, // the chunk's bytes
     pub len: u32,
     pub pos: u64,      // offset within the page-listed buffer
@@ -84,7 +84,7 @@ pub struct DmaChunk {
 }
 
 #[derive(Clone, Default)]
-pub struct DmaMap {
+pub(super) struct DmaMap {
     pub chunks: Vec<DmaChunk>,
     pub cursor: u32, // the chunk the last copy ended in
     pub mem: GuestMemory,

@@ -8,7 +8,13 @@
 //! kind 3 from the latch and kind 0 live (*established* as software
 //! behaviour).
 
-use super::*;
+use crate::dev::odyssey::board::Board;
+use crate::dev::odyssey::consts::{
+    ODSY_F32_ONE, ODSY_GL_COLOR_3F, ODSY_GL_COLOR_INDEX, ODSY_QUERY_KIND_RASTER,
+    ODSY_QUERY_RASTER_COLOUR, ODSY_QUERY_RASTER_INDEX,
+};
+use crate::dev::odyssey::tests::{board_with_ram, cmd, Ram};
+use std::sync::Arc;
 
 const SHADOW: u64 = 0x2000;
 const SYNC: u64 = 0x1000;
