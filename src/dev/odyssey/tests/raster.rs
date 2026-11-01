@@ -1269,21 +1269,44 @@ fn a_swap_after_a_fence_shows_the_whole_new_frame_with_no_lock() {
 }
 
 /// The frame waits for no slice and holds no lock the front end needs: a
-/// slice that holds the raster unit for 400 ms delays neither the board nor
-/// the frame.
+/// slice that holds the raster unit delays neither the board nor the frame.
+/// The slice is held by a job that waits for the test, so the frame ends
+/// while the slice is still running only if it waited for nothing; a frame
+/// that waited for the slice would never end.
 #[test]
 fn a_frame_waits_for_no_slice_and_takes_no_lock() {
-    let (h, st) = slow_raster(400);
+    let (h, st) = slow_raster(0);
     let display = Arc::new(Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))));
+    let hold = Arc::new(AtomicBool::new(true));
+    let held = hold.clone();
+    h.raster.submit(move |_| {
+        while held.load(SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
 
     red_triangle(&mut h.test_board(), &st);
     eventually("the raster unit began its slice", || h.raster.in_slice());
     let board = h.test_board();
-    let t = Instant::now();
-    Odyssey::frame(&h, &display);
-    assert!(t.elapsed() < Duration::from_millis(200), "the frame waited: {:?}", t.elapsed());
+    let framed = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            Odyssey::frame(&h, &display);
+            framed.store(true, SeqCst);
+        });
+        // Let the slice go if the frame never ends, so the failure is
+        // reported rather than hanging the scope.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !framed.load(SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let ended = framed.load(SeqCst);
+        let in_slice = h.raster.in_slice();
+        hold.store(false, SeqCst);
+        assert!(ended, "the frame waited for the slice");
+        assert!(in_slice, "the slice was still running");
+    });
     drop(board);
-    assert!(h.raster.in_slice(), "the slice was still running");
     let reader = display.reader.lock();
     assert_eq!(reader.stats.frames, 1, "and the frame staged its lines");
     drop(reader);
