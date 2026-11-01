@@ -1,0 +1,156 @@
+# Layers of the iris source tree.
+#
+# tests/layering.rs reads this file and fails `cargo test` when a module names
+# one in a layer it may not depend on, with file:line.
+#
+# The direction: core depends on nothing; cpu, dev and gfx depend on core only;
+# top (machines, monitor, UI, binaries) depends on every layer. Siblings never
+# name each other, so an edit in one rebuilds that layer and the top only.
+#
+# What each layer holds:
+#   core  bus traits, config, logging, memory, timers, snapshots, the machines'
+#         address maps, and the few CPU items devices name (ISA constants,
+#         cycle pointer, SMP bookkeeping)
+#   cpu   interpreter, caches, TLB, jitv2, the gdb stub
+#   dev   every non-graphics device, net, SCSI, PCI, host audio, the PROM images
+#   gfx   Newport, GR2, IMPACT, VPro and the display stack
+#   top   machines and buses, monitor, UI, VNC, bench runner, binaries
+
+[layers]
+core = []
+cpu = ["core"]
+dev = ["core"]
+gfx = ["core"]
+top = ["core", "cpu", "dev", "gfx"]
+
+# Module path (`::` separated, relative to src/) to layer. The longest listed
+# prefix wins, so `dev::ng1::rex3` is gfx through `dev::ng1`, and a module
+# nobody lists is in the layer of its nearest listed ancestor, or top. A new
+# file under src/dev/ is therefore a dev device until someone says otherwise.
+#
+# Names that exist only at the crate root (re-exports from lib.rs) are listed
+# the same way.
+[modules]
+# core
+config = "core"
+traits = "core"
+devlog = "core"
+ppmem = "core"
+platform = "core"
+physical = "core"
+locks = "core"
+irq = "core"
+gfifo = "core"
+trace_writer = "core"
+heartbeat = "core"
+screenshot = "core"
+exp = "core"
+snapshot = "core"
+sgi_vh = "core"
+elf = "core"
+chunk_store = "core"
+thread_affinity = "core"
+hptimer = "core"
+hptimer_tests = "core"
+ip22_map = "core"
+memory_map = "core"
+ip30_map = "core"
+perfetto = "core"
+perfetto_macros = "core"
+test_board = "core"
+PfBits = "core"
+PfLevel = "core"
+PfValue = "core"
+# Macros exported at the crate root by core's logging and tracing modules.
+dlog = "core"
+dlog_unconditional = "core"
+dlog_dev = "core"
+pf_instant = "core"
+pf_begin = "core"
+pf_end = "core"
+pf_counter = "core"
+pf_scope = "core"
+pf_level = "core"
+pf_bits = "core"
+pf_value = "core"
+"cpu::mips_isa" = "core"
+"cpu::mips_dis" = "core"
+"cpu::cycles" = "core"
+"cpu::smp" = "core"
+"cpu::jit_feedback" = "core"
+"dev::mem" = "core"
+"dev::w1" = "core"
+
+# cpu
+cpu = "cpu"
+gdb_stub = "cpu"
+
+# dev
+dev = "dev"
+prombin = "dev"
+prombini2 = "dev"
+prombinip28 = "dev"
+net = "dev"
+cow_disk = "dev"
+chd_disk = "dev"
+block_node = "dev"
+scsi = "dev"
+scsi_monitor = "dev"
+host_audio = "dev"
+pci = "dev"
+video_source = "dev"
+ultra_proto = "dev"
+nv_storage = "dev"
+ip32_map = "dev"
+
+# gfx
+"dev::gl" = "gfx"
+"dev::gr2" = "gfx"
+"dev::mgras" = "gfx"
+"dev::odyssey" = "gfx"
+"dev::ng1" = "gfx"
+gfx_display = "gfx"
+compositor = "gfx"
+debug_overlay = "gfx"
+disp = "gfx"
+vga_font = "gfx"
+
+# Everything else (machines, buses, monitor, UI, VNC, CI socket, bench runner,
+# binaries) is top by default.
+
+# Edges that break the direction today and are tolerated until someone removes
+# them. Each names the file (relative to src/) and the layer-lookup key it
+# reaches, which the failure message prints as `to`. An entry that no longer
+# matches an edge fails the check, so the list only shrinks.
+#
+# [[allow]]
+# from = "dev/aic7880.rs"
+# to = "dev::ng1"
+
+[split]
+# Test-only edges between siblings. Code under #[cfg(test)] may name a sibling
+# layer listed here (the MC's VDMA tests drive a real REX3 and give it a status
+# source, the VPro tests build a board on a real HEART and Crossbow);
+# tests/layering.rs fails on any other. The split turns each into a
+# dev-dependency plus a cfg(test) re-export so the test paths do not change.
+# `module` is the parent module that gets the re-export, "" for the crate root.
+# `when` names a path under src/ the entry needs; the entry is skipped on a
+# tree without it.
+[[split.test_edge]]
+crate = "dev"
+needs = "gfx"
+module = "dev"
+items = ["ng1"]
+
+[[split.test_edge]]
+crate = "dev"
+needs = "gfx"
+module = ""
+items = ["disp"]
+
+[[split.test_edge]]
+crate = "gfx"
+needs = "dev"
+module = "dev"
+items = ["heart", "heart_mem", "xbow"]
+when = "dev/odyssey"
