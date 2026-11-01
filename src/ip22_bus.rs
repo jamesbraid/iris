@@ -9,7 +9,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::memory_map::{MemKind, MemRange, MemoryMap};
 use crate::traits::{BusRead8, BusRead16, BusRead32, BusRead64, BusDevice, BUS_OK};
 use crate::devlog::LogModule;
 use crate::ppmem::MappedMemory;
@@ -97,35 +96,7 @@ const HPC3_BASE: u32 = 0x1FB80000;
 const HPC3_END: u32  = 0x1FC00000;
 
 // PROM (1MB at 0x1FC00000)
-const PROM_BASE: u32 = 0x1FC00000;
-const PROM_END: u32  = 0x1FD00000;
-
-// Alias (512KB at 0x00000000) — mirrors the first 512KB of lomem (0x08000000..0x0807ffff)
-// per MC spec: "The bottom 512KB of memory is just an alias for the memory located
-// at address 0x08000000 to 0x0807ffff."
-// An alias on the bus that adds the base of memory to the incoming address, so
-// accesses go through the normal lomem decode-table entries — no direct bank pointer needed.
-const ALIAS_BASE: u32   = 0x00000000;
-const ALIAS_END: u32    = 0x00080000;
-
-/// Where an IP28 can have RAM: from himem, up to four 512 MB banks.
-const IP28_RAM_END: u32 = 0xA000_0000;
-
-/// Where the MC can answer with memory on an Indy, an Indigo2 or an IP28.
-pub fn memory_map(ip28: bool) -> MemoryMap {
-    let range = |name, kind, base: u32, end: u32| MemRange::new(name, kind, base as u64, end as u64);
-    let mut ranges = vec![
-        range("low alias", MemKind::Alias, ALIAS_BASE, ALIAS_END),
-        range("prom", MemKind::Rom, PROM_BASE, PROM_END),
-    ];
-    if ip28 {
-        ranges.push(range("ram", MemKind::Ram, HIMEM_BASE, IP28_RAM_END));
-    } else {
-        ranges.push(range("lomem", MemKind::Ram, LOMEM_BASE, LOMEM_END));
-        ranges.push(range("himem", MemKind::Ram, HIMEM_BASE, HIMEM_END));
-    }
-    MemoryMap::new(ranges)
-}
+pub use crate::ip22_map::{memory_map, ALIAS_BASE, ALIAS_END, IP28_RAM_END, PROM_BASE, PROM_END};
 
 /// Where the 512 KB alias at physical 0 points.
 ///
