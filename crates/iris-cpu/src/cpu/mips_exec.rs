@@ -7623,8 +7623,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         if traps {
             // Trapped: neither the destination register nor the sticky Flag
             // field are touched — only Cause (already set above).
-            let s = exec_exception(EXC_FPE);
-            return self.handle_exception(s);
+            return self.fpu_trap();
         }
         // Not trapping: commit the result and accumulate the sticky Flag
         // field (cleared explicitly by software via SetFPSR/CTC1).
@@ -7639,11 +7638,19 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     /// not modified". Shared terminal helper for every E-raising site
     /// (denormal/qNaN operand, denormal/underflowed result without the FS
     /// escape hatch).
-    #[inline]
+    #[cold]
     fn fpu_unimplemented(&mut self) -> ExecStatus {
         self.core.fpu_fcsr = (self.core.fpu_fcsr & !FCSR_CM) | FCSR_CE;
-        let s = exec_exception(EXC_FPE);
-        self.handle_exception(s)
+        self.fpu_trap()
+    }
+
+    /// Take the Floating-Point exception. Cold, like the other trap paths: the
+    /// operand and result checks that call it run on every FPU instruction and
+    /// must stay small enough to inline, which they are not with the exception
+    /// entry folded into them.
+    #[cold]
+    fn fpu_trap(&mut self) -> ExecStatus {
+        self.handle_exception(exec_exception(EXC_FPE))
     }
 
     /// R4000/VR5000 manuals: "Denormalized operand" and "Quiet Not a Number
@@ -7735,8 +7742,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         self.core.fpu_fcsr = (self.core.fpu_fcsr & !FCSR_CM) | if is_snan { FCSR_CV } else { 0 };
         if is_snan {
             if (self.core.fpu_fcsr & 0x800) != 0 { // EV enable bit
-                let s = exec_exception(EXC_FPE);
-                return self.handle_exception(s);
+                return self.fpu_trap();
             }
             self.core.fpu_fcsr |= FCSR_FV; // untrapped: set sticky Flag V too
         }
@@ -7802,8 +7808,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         if fs_reg == 31 {
             let fcsr = self.core.fpu_fcsr;
             if (fcsr & FCSR_CE) != 0 || (((fcsr & FCSR_CM) >> 5) & (fcsr & FCSR_EM)) != 0 {
-                let s = exec_exception(EXC_FPE);
-                return self.handle_exception(s);
+                return self.fpu_trap();
             }
         }
         self.handle_exec_complete()
@@ -8091,8 +8096,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     fn fpu_cvt_to_int(&mut self, fs_reg: u32, fd_reg: u32, src_f64: bool, dst_i64: bool, rm: u8) -> ExecStatus {
         let fr1 = (self.core.cp0_status & STATUS_FR) != 0;
         if cvt_to_int_and_commit(&mut self.core, fs_reg, fd_reg, fr1, src_f64, dst_i64, rm) {
-            let s = exec_exception(EXC_FPE);
-            self.handle_exception(s)
+            self.fpu_trap()
         } else {
             self.handle_exec_complete()
         }
@@ -8102,8 +8106,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     fn fpu_cvt_int_to_float(&mut self, fs_reg: u32, fd_reg: u32, src_i64: bool, dst_f64: bool) -> ExecStatus {
         let fr1 = (self.core.cp0_status & STATUS_FR) != 0;
         if cvt_int_to_float_and_commit(&mut self.core, fs_reg, fd_reg, fr1, src_i64, dst_f64) {
-            let s = exec_exception(EXC_FPE);
-            self.handle_exception(s)
+            self.fpu_trap()
         } else {
             self.handle_exec_complete()
         }
@@ -8113,8 +8116,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     fn fpu_cvt_d_to_s(&mut self, fs_reg: u32, fd_reg: u32) -> ExecStatus {
         let fr1 = (self.core.cp0_status & STATUS_FR) != 0;
         if cvt_d_to_s_and_commit(&mut self.core, fs_reg, fd_reg, fr1) {
-            let s = exec_exception(EXC_FPE);
-            self.handle_exception(s)
+            self.fpu_trap()
         } else {
             self.handle_exec_complete()
         }
@@ -8159,8 +8161,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 // Trapped: Cause is set above, but the Flag field is not —
                 // R4000 manual: "the flag bits are not set by the hardware"
                 // when a floating-point exception is taken.
-                let s = exec_exception(EXC_FPE);
-                return self.handle_exception(s);
+                return self.fpu_trap();
             }
             self.core.fpu_fcsr |= FCSR_FV; // untrapped: set sticky Flag V too
         }
@@ -8400,8 +8401,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 // Trapped: Cause is set above, but the Flag field is not —
                 // R4000 manual: "the flag bits are not set by the hardware"
                 // when a floating-point exception is taken.
-                let s = exec_exception(EXC_FPE);
-                return self.handle_exception(s);
+                return self.fpu_trap();
             }
             self.core.fpu_fcsr |= FCSR_FV; // untrapped: set sticky Flag V too
         }
