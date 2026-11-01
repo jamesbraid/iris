@@ -80,6 +80,14 @@ pub const ODSY_ROUTE_VECTOR_RETRACE_SHIFT: u32 = 16;
 pub const ODSY_ROUTE_VECTOR_DMA_SHIFT: u32 = 8;
 pub const ODSY_ROUTE_VECTOR_FLAG_SHIFT: u32 = 0;
 
+// Bits 18:16 of ROUTE_DEST_UPPER enable the three non-flag sources. The
+// datasheet infers that the three bits are the enables but not which bit
+// belongs to which source; this assignment is its model choice (an
+// approximation): ascending with the vector bytes.
+pub const ODSY_ROUTE_ENABLE_DMA: u32 = 1 << 16;
+pub const ODSY_ROUTE_ENABLE_RETRACE: u32 = 1 << 17;
+pub const ODSY_ROUTE_ENABLE_SOFTSYNC: u32 = 1 << 18;
+
 // The "Buzz registers" the stock IP35 BaseIO PROM's graphics diagnostic tests, adjoining but distinct from the kernel driver's own register scan.
 pub const ODSY_BUZZ_1: u64 = 0x1078;
 pub const ODSY_BUZZ_2: u64 = 0x1088;

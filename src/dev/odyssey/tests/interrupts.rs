@@ -348,3 +348,85 @@ fn the_flag_interrupt_uses_the_routed_flag_vector() {
     reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
     assert_eq!(rec.events(4), [true, false]);
 }
+
+/// Program the routing with `upper` as the destination's upper half and
+/// raise the retrace, softsync and DMA-done sources once each, in that
+/// order. The returned vectors are the sources that sent a packet.
+fn raise_each_source(upper: u32) -> Vec<u32> {
+    let (mut s, rec) = board("v12");
+    route_to_heart(&mut s);
+    reg_write(&mut s, ODSY_ROUTE_DEST_UPPER, upper);
+    s.retrace();
+    s.front.lock().deliver_softsync();
+    s.dma_done();
+    [RETRACE_VECTOR, SOFTSYNC_VECTOR, DMA_VECTOR].into_iter().filter(|v| rec.events(*v) == [true]).collect()
+}
+
+const HEART_UPPER: u32 = (HEART_WIDGET << 25) as u32;
+
+/// MODEL CHOICE (datasheet, "Bits 18:16 of 0x1044"): each of bits 16, 17
+/// and 18 of the destination's upper half enables one non-flag source (16
+/// DMA-done, 17 retrace, 18 softsync). A source raised while its bit is
+/// clear sends nothing and is dropped; the other two are unaffected. The
+/// bit-to-source assignment is the model's, not a measurement.
+#[test]
+fn a_clear_source_enable_bit_suppresses_only_its_source() {
+    for (bit, silent) in [
+        (ODSY_ROUTE_ENABLE_DMA, DMA_VECTOR),
+        (ODSY_ROUTE_ENABLE_RETRACE, RETRACE_VECTOR),
+        (ODSY_ROUTE_ENABLE_SOFTSYNC, SOFTSYNC_VECTOR),
+    ] {
+        let sent = raise_each_source(HEART_UPPER | (ROUTE_ENABLES & !bit));
+        let want: Vec<u32> = [RETRACE_VECTOR, SOFTSYNC_VECTOR, DMA_VECTOR].into_iter().filter(|v| *v != silent).collect();
+        assert_eq!(sent, want, "bit {:#x} clear suppresses vector {}", bit, silent);
+    }
+}
+
+/// The control for the test above: with all three bits set every source
+/// sends its packet, and with all three clear none does.
+#[test]
+fn a_set_source_enable_bit_sends_its_source() {
+    assert_eq!(raise_each_source(HEART_UPPER | ROUTE_ENABLES), [RETRACE_VECTOR, SOFTSYNC_VECTOR, DMA_VECTOR]);
+    for bit in [ODSY_ROUTE_ENABLE_DMA, ODSY_ROUTE_ENABLE_RETRACE, ODSY_ROUTE_ENABLE_SOFTSYNC] {
+        let sent = raise_each_source(HEART_UPPER | bit);
+        assert_eq!(sent.len(), 1, "bit {:#x} alone sends exactly one source", bit);
+    }
+    assert!(raise_each_source(HEART_UPPER).is_empty(), "no enable bit set sends nothing");
+}
+
+/// The value the shipped kernel stores in the upper half, 0x35cf8000, has
+/// all three enable bits set. Its address (15:0) and target widget (28:25)
+/// are replaced with HEART's so the packets can be recorded; every other bit
+/// is the kernel's. All three sources are delivered.
+#[test]
+fn the_kernels_upper_half_enables_every_source() {
+    let kernel = 0x35cf_8000u32;
+    assert_eq!(kernel & ROUTE_ENABLES, ROUTE_ENABLES);
+    let upper = (kernel & !(0xffff | (0xf << 25))) | HEART_UPPER;
+    assert_eq!(raise_each_source(upper), [RETRACE_VECTOR, SOFTSYNC_VECTOR, DMA_VECTOR]);
+}
+
+/// The flag has no bit in the upper half: it is gated by the enable mask
+/// alone, so a low-water flag is delivered with every source enable clear.
+#[test]
+fn the_flag_ignores_the_source_enable_bits() {
+    let (mut s, rec) = board("v12");
+    route_to_heart(&mut s);
+    reg_write(&mut s, ODSY_ROUTE_DEST_UPPER, HEART_UPPER);
+    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    assert_eq!(rec.events(FLAG_VECTOR), [true]);
+    reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
+    assert_eq!(rec.events(FLAG_VECTOR), [true, false]);
+}
+
+/// A flag held for want of a routing is sent when the routing completes
+/// without the enable bits.
+#[test]
+fn a_held_flag_is_sent_with_the_source_enables_clear() {
+    let (mut s, rec) = board("v12");
+    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, ODSY_ROUTE_VECTORS, SOFTSYNC_VECTOR << 24 | RETRACE_VECTOR << 16 | DMA_VECTOR << 8 | FLAG_VECTOR);
+    reg_write(&mut s, ODSY_ROUTE_DEST_LOWER, HEART_PACKET as u32);
+    reg_write(&mut s, ODSY_ROUTE_DEST_UPPER, HEART_UPPER);
+    assert_eq!(rec.events(FLAG_VECTOR), [true]);
+}
