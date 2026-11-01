@@ -166,13 +166,21 @@ impl Geometry for Frustum {
 ///
 /// - No near or far plane: the board does not clip the frustum
 ///   geometrically (inferred), and the raster drops a fragment by its depth
-///   instead. The library clips only near w = 0 (inferred), here the plane
-///   w >= `NearW::W_MIN` in place of plane 4. Planes 0..3 still clip x and
-///   y: the board's caller sets them as a guard band far outside the window
-///   (VPro's combined matrix puts them 8192 pixels about it), because the
-///   raster's integer edges need a bounded range. That bound is a
-///   modelling choice, not a hardware fact; how far the board's raster
-///   reaches is unknown.
+///   instead.
+/// - The w plane. The library's preclip is off by default and the library
+///   stores positions untested, so what the board does with w <= 0 is
+///   unknown. iris clips on w >= `NearW::W_MIN` in place of plane 4, so
+///   nothing at or behind the eye reaches the integer edge functions, and
+///   the board logs the first time that plane clips anything
+///   (`NearW::W_PLANE`).
+/// - Planes 0..3 still clip x and y, to a guard band that is a limit of
+///   iris's integer edge arithmetic, not of the board. The caller sets
+///   the band: `WINDOW_REACH` (8192 pixels about the window) on the
+///   combined-matrix path, `GL_WINDOW_GUARD` (16384 pixels from the
+///   drawable's origin) on the window-matrix path, each its path's own
+///   choice. 8192 matches the library's own class-3 guard (|x| or |y| >
+///   8192 |w|) and is twice the largest drawable (under 4096). The hard
+///   limit is the +-65536 check in the board's `project()`.
 /// - The divide is a single-precision reciprocal rounded to nearest, then a
 ///   multiply: the order a vendor-simulated frame shows, where a truncated
 ///   reciprocal fails it.
@@ -182,9 +190,18 @@ impl Geometry for Frustum {
 pub struct NearW;
 
 impl NearW {
-    /// The near-w plane. Any positive w divides; the smallest normal float
-    /// is a modelling choice, not a hardware fact.
+    /// The near-w plane's place: w >= W_MIN. The library's own clipper counts
+    /// a vertex inside at distance >= 0 with no epsilon, and plane 4 could
+    /// say w >= 0 the same way. iris keeps the smallest normal float so a
+    /// vertex it keeps has w > 0 and divides. Single-precision
+    /// interpolation can still land a crossing on w = 0, which `divide`
+    /// refuses (the primitive is dropped and logged), and the x and y
+    /// planes already need w >= max(|x|, |y|) >= 0, so the plane only
+    /// matters for primitives edge-on through the eye. A modelling choice,
+    /// not a hardware fact.
     pub const W_MIN: f32 = f32::MIN_POSITIVE;
+    /// Bit of the w plane in an outcode or a clip mask.
+    pub const W_PLANE: u32 = 1 << 4;
 }
 
 impl Geometry for NearW {
@@ -255,7 +272,10 @@ impl Clip {
         self.outcode_by::<Frustum, _>(v)
     }
 
-    /// `outcode` under geometry `G`.
+    /// `outcode` under geometry `G`. A NaN distance counts as inside here
+    /// (`< 0.0` is false), while the clip loops count it as outside
+    /// (`>= 0.0` is false); a NaN vertex then reaches `project()`, which
+    /// drops it.
     #[inline(always)]
     pub fn outcode_by<G: Geometry, V: ClipVertex>(&self, v: &V) -> u32 {
         let mask = self.mask_by::<G>();
@@ -302,6 +322,7 @@ impl Clip {
                     if !(db >= 0.0) {
                         if V::EDGE_FLAGS && da == 0.0 {
                             // Leaving at a: the edge clipping adds starts there.
+                            // m >= 1: da >= 0 just pushed a (m == 0 < cap, cap >= 1) or set over.
                             tmp[m - 1].set_edge(true);
                         } else if m < cap {
                             tmp[m] = V::cross(a, b, da, db);
@@ -429,6 +450,122 @@ mod tests {
         let n = clip.clip_polygon(&mut v, 3);
         assert_eq!(n, 4);
         assert!(v[..n].iter().all(|w| w.h[0] <= 1.0 + 1e-6));
+    }
+
+    type Ov = super::Wv<0, 0>;
+
+    fn nearw(x: f32, y: f32, z: f32, w: f32) -> Ov {
+        let mut v = Ov { h: [x, y, z, w], ..Default::default() };
+        v.oc = Clip::default().outcode_by::<NearW, _>(&v);
+        v
+    }
+
+    #[test]
+    fn nearw_multiplies_by_the_reciprocal_where_frustum_divides() {
+        // 7/49 and 5/49 differ in the last place between x * (1/w) and x / w.
+        for (x, w) in [(7.0f32, 49.0f32), (5.0, 49.0)] {
+            let h = [x, 0.0, 0.0, w];
+            let n = NearW::divide(&h).unwrap()[0];
+            let f = Frustum::divide(&h).unwrap()[0];
+            assert_eq!(n, x * (1.0 / w));
+            assert_eq!(f, x / w);
+            assert_ne!(n, f, "{x}/{w}");
+        }
+    }
+
+    #[test]
+    fn nearw_floors_to_the_grid_where_frustum_rounds() {
+        let v = 3.9999998f32;
+        assert_eq!(NearW::snap(v, 256.0), 3.9960938);
+        assert_eq!(Frustum::snap(v, 256.0), 4.0);
+        // Toward minus infinity, not toward zero.
+        assert_eq!(NearW::snap(-0.001, 256.0), -1.0 / 256.0);
+        assert_eq!(NearW::snap(-3.0, 256.0), -3.0);
+    }
+
+    #[test]
+    fn nearw_has_no_z_plane() {
+        assert_eq!(NearW::VOLUME, 0x1f);
+        let c = Clip::default();
+        for z in [-5.0, 5.0] {
+            assert_eq!(c.outcode_by::<NearW, _>(&nearw(0.0, 0.0, z, 1.0)), 0);
+            assert_ne!(c.outcode::<4, 1>(&at_z(z)), 0);
+        }
+        let mut v = [nearw(0.0, 0.0, 9.0, 1.0), nearw(0.5, 0.0, -9.0, 1.0), nearw(0.0, 0.5, 9.0, 1.0)];
+        let mut tmp = v;
+        let (n, over) = c.clip_polygon_by::<NearW, _>(&mut v, &mut tmp, 3, 0);
+        assert_eq!((n, over), (3, false));
+        assert_eq!(v[1].h[2], -9.0);
+    }
+
+    fn at_z(z: f32) -> Wv {
+        let mut v = Wv { h: [0.0, 0.0, z, 1.0], ..Default::default() };
+        v.oc = Clip::default().outcode(&v);
+        v
+    }
+
+    #[test]
+    fn nearw_clips_at_the_w_plane() {
+        let c = Clip::default();
+        let behind = nearw(0.0, 0.0, 0.0, -1.0);
+        let front = nearw(0.0, 0.0, 0.0, 1.0);
+        assert_eq!(behind.oc & NearW::W_PLANE, NearW::W_PLANE);
+        assert_eq!(front.oc, 0);
+        // The x and y planes already cut the edge at w = 0, and the w plane
+        // leaves it there or one rounding step above: nothing kept is behind
+        // the eye.
+        let (a, b) = c.clip_line_by::<NearW, _>(front, behind, behind.oc | front.oc).unwrap();
+        assert_eq!(a.h[3], 1.0);
+        assert!(b.h[3] >= 0.0 && b.h[3] < 1e-30, "{}", b.h[3]);
+        // Wholly behind the eye: nothing.
+        let behind2 = nearw(0.1, 0.0, 0.0, -2.0);
+        assert!(c.clip_line_by::<NearW, _>(behind, behind2, behind.oc | behind2.oc).is_none());
+        // Nothing divides at or behind the eye.
+        assert!(NearW::divide(&[0.0, 0.0, 0.0, 0.0]).is_none());
+        assert!(NearW::divide(&behind.h).is_none());
+    }
+
+    #[derive(Clone, Copy)]
+    struct Ef {
+        h: [f32; 4],
+        edge: bool,
+    }
+
+    impl ClipVertex for Ef {
+        fn h(&self) -> &[f32; 4] {
+            &self.h
+        }
+        fn e(&self) -> &[f32; 4] {
+            &self.h
+        }
+        fn cross(a: &Self, b: &Self, da: f32, db: f32) -> Self {
+            let t = da / (da - db);
+            Ef { h: std::array::from_fn(|k| a.h[k] + (b.h[k] - a.h[k]) * t), edge: false }
+        }
+        const EDGE_FLAGS: bool = true;
+        fn edge(&self) -> bool {
+            self.edge
+        }
+        fn set_edge(&mut self, edge: bool) {
+            self.edge = edge;
+        }
+    }
+
+    #[test]
+    fn clipping_keeps_edge_flags_and_flags_the_edges_it_adds() {
+        let c = Clip::default();
+        let ef = |x: f32, edge: bool| Ef { h: [x, 0.0, 0.0, 1.0], edge };
+        let mut v = [ef(0.0, true), ef(2.0, false), ef(0.0, false)];
+        v[2].h[1] = 0.5;
+        let any = v.iter().fold(0, |o, w| o | c.outcode_by::<NearW, _>(w));
+        let mut tmp = v;
+        let (n, over) = c.clip_polygon_by::<NearW, _>(&mut v, &mut tmp, 3, any);
+        assert!(!over);
+        assert_eq!(n, 4);
+        // Kept vertex 0 keeps its flag; the leaving edge's new vertex is a
+        // boundary edge; the entering edge's new vertex inherits the entry
+        // edge's flag (false); the last kept vertex keeps its own.
+        assert_eq!(v.map(|w| w.edge)[..n], [true, true, false, false]);
     }
 
     #[test]
