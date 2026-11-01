@@ -733,6 +733,49 @@ fn the_crosshair_draws_a_full_raster_line_each_way() {
     assert_eq!(shown(&mut s, 2, 6), bg);
 }
 
+/// The host steers its pointer by the glyph the guest set: where its
+/// top-left is and which pixels are opaque, the same ones the display draws.
+/// It reports nothing while the cursor is off, on the second channel or a
+/// crosshair.
+#[test]
+fn the_host_reads_the_cursor_glyph_and_position_from_the_registers() {
+    use crate::dev::odyssey::Display;
+    use crate::gfx_display::GfxDisplay;
+
+    let (mut s, _) = board("v12");
+    let display = Display::new(crate::disp::StatusSource::detached());
+    display.attach_registers(s.scanout.shared.clone());
+    assert_eq!(display.hw_cursor(), None, "out of reset the cursor is off");
+
+    cursor_load(&mut s, 2, 3);
+    assert_eq!(display.hw_cursor(), None, "loaded but not enabled");
+
+    cursor_entry(&mut s, cursor::CONTROL, 1);
+    let c = display.hw_cursor().expect("enabled");
+    assert_eq!((c.x, c.y, c.size), (2, 3, 32));
+    // The test glyph is opaque in columns 0 to 2 of row 0 only: the plane
+    // word 0x3f is opaque for those three columns.
+    assert_eq!(c.mask.len(), 32);
+    assert_eq!(c.mask[0], 0b111);
+    assert!(c.mask[1..].iter().all(|&m| m == 0));
+
+    // Position components are signed.
+    cursor_entry(&mut s, cursor::POSITION, 0xffff_fffe);
+    let c = display.hw_cursor().expect("enabled");
+    assert_eq!((c.x, c.y), (-1, -2));
+
+    // A transparent glyph value (15) in an opaque plane draws nothing.
+    cursor_entry(&mut s, cursor::GLYPH, 0x0f21);
+    assert_eq!(display.hw_cursor().expect("enabled").mask[0], 0b011, "glyph 15 in column 2 is transparent");
+
+    cursor_entry(&mut s, cursor::CONTROL, 0x21);
+    assert_eq!(display.hw_cursor(), None, "second channel");
+    cursor_entry(&mut s, cursor::CONTROL, 5);
+    assert_eq!(display.hw_cursor(), None, "crosshair");
+    cursor_entry(&mut s, cursor::CONTROL, 0);
+    assert_eq!(display.hw_cursor(), None, "off");
+}
+
 /// A reset clears every cursor entry, so the cursor is off and its glyph,
 /// plane and colours are gone: turning it on draws nothing.
 ///

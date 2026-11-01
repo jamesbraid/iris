@@ -253,6 +253,37 @@ impl SharedRegs {
         self.cursor[index].load(Relaxed)
     }
 
+    /// The glyph the display draws, for the host's pointer steering
+    /// (`GfxDisplay::hw_cursor`): where it sits and which pixels are
+    /// opaque, by the same plane and glyph rules `cursor_row` draws with.
+    /// None while the cursor is off, on the second channel, or a crosshair,
+    /// which has no glyph.
+    pub fn hw_cursor(&self) -> Option<crate::gfx_display::HwCursor> {
+        let control = self.cursor(cursor::CONTROL as usize);
+
+        if (control & cursor::CTL_ENABLE) == 0 || (control & (cursor::CTL_CHANNEL1 | cursor::CTL_CROSSHAIR)) != 0 {
+            return None;
+        }
+        let position = self.cursor(cursor::POSITION as usize);
+        let mask = (0..cursor::SIZE as usize)
+            .map(|row| {
+                (0..cursor::SIZE as usize).fold(0u64, |m, col| {
+                    let plane = (self.cursor(cursor::PLANE as usize + row * 2 + col / 16) >> ((col % 16) * 2)) & 3;
+                    let glyph = (self.cursor(cursor::GLYPH as usize + row * 4 + col / 8) >> ((col % 8) * 4)) & 0xf;
+
+                    m | u64::from(plane == 3 && glyph != 0xf) << col
+                })
+            })
+            .collect();
+
+        Some(crate::gfx_display::HwCursor {
+            x: (position >> 16) as i16 as i32,
+            y: position as i16 as i32,
+            size: cursor::SIZE as usize,
+            mask,
+        })
+    }
+
     /// The colormap group main drawable `main_id` shows through
     /// (DisplayRegs::display_group()).
     pub fn display_group(&self, main_id: u32) -> u32 {

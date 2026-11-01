@@ -8,9 +8,9 @@ use super::consts::{
     ODSY_GAMMA_GROUP, ODSY_INDEX_MASK,
 };
 use super::fifo::display_fifo_pending;
-use super::reader::{DisplayRegs, PlaneView, RowOf, ScanoutReader};
+use super::reader::{DisplayRegs, DisplayShared, PlaneView, RowOf, ScanoutReader};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 
@@ -43,6 +43,9 @@ pub(super) struct Display {
     shown: Mutex<(usize, usize)>,
     /// The machine's status-bar inputs.
     status: Arc<crate::disp::StatusSource>,
+    /// The registers the display reads, for the host's cursor query; set
+    /// when the board hands the display out.
+    shared: OnceLock<Arc<DisplayShared>>,
 }
 
 struct Local {
@@ -65,7 +68,13 @@ impl Display {
             idle: AtomicU32::new(0),
             shown: Mutex::new((0, 0)),
             status,
+            shared: OnceLock::new(),
         }
+    }
+
+    /// Read the cursor from `shared` from now on.
+    pub(super) fn attach_registers(&self, shared: Arc<DisplayShared>) {
+        let _ = self.shared.set(shared);
     }
 
     pub(super) fn shown(&self) -> (usize, usize) {
@@ -582,5 +591,9 @@ impl crate::gfx_display::GfxDisplay for Display {
     }
     fn frame_pending(&self) -> bool {
         self.frame.load(Ordering::Acquire)
+    }
+    fn hw_cursor(&self) -> Option<crate::gfx_display::HwCursor> {
+        // A racy read of the registers, as the display thread's frame does.
+        self.shared.get()?.regs.hw_cursor()
     }
 }
