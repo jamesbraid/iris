@@ -19,6 +19,7 @@ use super::draw::{code_is_index, decode_texel12, pixel_bytes, texel12_components
 use super::geometry::{f32_bits, odyssey_f32};
 use super::pixel_dma::{write_guest, DmaBus, DmaDirection, DmaError, DmaMap, DmaPageList};
 use super::pixel_write::{write_form, WriteForm};
+use super::sampler::{texture_level_texel_format, texture_mip_build_word, LEVEL_FORMAT_MASK};
 use super::scanout::DirtySite;
 #[derive(Clone, Copy, Default)]
 pub(super) struct DmaEntry {
@@ -1639,8 +1640,10 @@ impl Board {
 
     /// Build the next mipmap level from the level above by taking every second
     /// texel (a model policy), for the one construction template the model has
-    /// seen: RGBA, RGB and luminance-alpha levels, with sampler word 4 and the
-    /// level entry's format field differing per component set. The store keeps
+    /// seen. Sampler word 4 must be the builder's (texture_mip_build_word())
+    /// and the source level's entry must name a listed format index with its
+    /// own size code, with no other bits but the row; the class is not
+    /// checked against the index. The store keeps
     /// whole texel words whatever the level's format, so the copy is the same.
     pub fn texture_build_level(&mut self) -> bool {
         let p = self.cmd.operand;
@@ -1648,12 +1651,9 @@ impl Board {
         let ws = self.tex.sampler[1];
         let hs = self.tex.sampler[2];
 
-        let format: u32 = match self.tex.sampler[4] {
-            0x13640000 => 0x41100000,
-            0x12e40000 => 0x00c00000,
-            0x11e40000 => 0x00b00000,
-            _ => return false,
-        };
+        if !texture_mip_build_word(self.tex.sampler[4]) || texture_level_texel_format(entry[1]).is_none() {
+            return false;
+        }
         if ws == 0 || hs == 0 || ws > i32::MAX as u32 || hs > i32::MAX as u32 || !(ws as u64).is_power_of_two() || !(hs as u64).is_power_of_two() {
             return false;
         }
@@ -1664,7 +1664,7 @@ impl Board {
         if self.stream.primitive != gl_cmd::QUADS
             || (self.tex.mode & tex::MODE_2D) == 0
             || self.tex.level0 != 60
-            || entry[1] != (format | source_units)
+            || (entry[1] & !LEVEL_FORMAT_MASK) != source_units
             || entry[2] != 0
             || self.tex.sampler[0] != ((ws.trailing_zeros() << 10) | (hs.trailing_zeros() << 5))
             || self.tex.sampler[3] != 0

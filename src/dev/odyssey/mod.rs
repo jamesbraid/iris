@@ -88,6 +88,7 @@ mod raster_unit;
 mod record;
 mod reader;
 mod registers;
+mod sampler;
 mod scanout;
 mod worker;
 #[cfg(test)]

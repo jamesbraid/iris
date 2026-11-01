@@ -282,6 +282,20 @@ fn texel(level: u32, x: u32, y: u32, w: u32, h: u32) -> u32 {
     ((r.min(255) ^ tint) << 24) | (g.min(255) << 16) | (b << 8) | a
 }
 
+/// Level descriptor word 1's size code and format index for a sampler
+/// component code: alpha 8 (index 0), luminance 8 (4), luminance-alpha 8/8
+/// (11), intensity 8 (2), and 8/8/8/8 (17) for RGB and RGBA, which the class
+/// alone tells apart.
+fn texel_format_word(components: u32) -> u32 {
+    match components {
+        ALPHA => 0x0000_0000,
+        LUMINANCE => 0x0040_0000,
+        LUMINANCE_ALPHA => 0x00b0_0000,
+        INTENSITY => 0x0020_0000,
+        _ => 0x4110_0000,
+    }
+}
+
 impl Ctx {
     pub fn texture(&mut self, t: &Tex) {
         if self.off == Some("texture") {
@@ -302,7 +316,7 @@ impl Ctx {
                     b.object_store(obj, x, y, texel(level, x, y, w, w));
                 }
             }
-            b.tex.levels[level as usize * 3..][..3].copy_from_slice(&[base, 0x4110_0000 | units, 0]);
+            b.tex.levels[level as usize * 3..][..3].copy_from_slice(&[base, texel_format_word(t.components) | units, 0]);
         }
         let axis = |w: u32, wrap: u32| w | if wrap == 1 { 0x4_0000 } else { 0 };
         let filter = (t.min << 5) | if t.mag_linear { 2 } else { 0 };
