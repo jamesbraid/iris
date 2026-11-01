@@ -562,9 +562,9 @@ impl RasterRules {
         }
     }
 
-    /// A component clamped to [0, 1] and scaled to the rules' colour bits, a
-    /// fraction of a step rounded half up, whatever the rules' rounding: the
-    /// sum is truncated (OpenGL 1.2.1, 2.13.9).
+    /// A component clamped to [0, 1] and scaled to the rules' colour bits as
+    /// floor(c * 2^bits) limited to the largest value: 256c limited to 255
+    /// for eight bits. INFERRED from vendor frames, not established.
     #[inline]
     pub fn channel(&self, c: f64) -> u32 {
         let max = (1u32.wrapping_shl(self.color_bits as u32)).wrapping_sub(1);
@@ -575,7 +575,7 @@ impl RasterRules {
         if c >= 1.0 {
             return max;
         }
-        (c * max as f64 + 0.5) as u32
+        cmin((c * (max as f64 + 1.0)) as u32, max)
     }
 
     /// Incoming alpha precision is independent of absent or narrower stored A.
@@ -593,7 +593,7 @@ impl RasterRules {
         } else if value >= 1.0 {
             max
         } else {
-            (value * max as f64 + 0.5) as u32
+            cmin((value * (max as f64 + 1.0)) as u32, max)
         }
     }
 
@@ -609,7 +609,7 @@ impl RasterRules {
         } else if value >= 1.0 {
             max
         } else {
-            (value * max as f64 + 0.5) as u32
+            cmin((value * (max as f64 + 1.0)) as u32, max)
         }
     }
 
@@ -680,7 +680,7 @@ impl RasterRules {
             } else if c >= 1.0 {
                 max
             } else {
-                (c * maxf + 0.5) as u32
+                cmin((c * (maxf + 1.0)) as u32, max)
             }
         };
 
