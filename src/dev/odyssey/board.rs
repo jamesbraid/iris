@@ -106,6 +106,7 @@ pub(super) struct Reports {
     pub ctx_open_prim_logged: bool,
     pub ctx_shadow_fail_reported: bool,
     pub gl_dither_reported: bool,
+    pub gl_cull_no_face_reported: bool,
     pub colour_mode_reported: bool,
     pub gl_index_lit_reported: bool,
     pub image_code_reported: bool,
@@ -629,6 +630,7 @@ impl Default for Board {
                 ctx_open_prim_logged: false,
                 ctx_shadow_fail_reported: false,
                 gl_dither_reported: false,
+                gl_cull_no_face_reported: false,
                 colour_mode_reported: false,
                 gl_index_lit_reported: false,
                 image_code_reported: false,
@@ -1214,6 +1216,7 @@ impl Board {
         self.diag.ctx_open_prim_logged = false;
         self.diag.ctx_shadow_fail_reported = false;
         self.diag.gl_dither_reported = false;
+        self.diag.gl_cull_no_face_reported = false;
         self.scanout.shared.group25.store(false, std::sync::atomic::Ordering::Relaxed);
         self.copy_src = 0;
         self.copy_size = 0;

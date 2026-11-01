@@ -754,7 +754,7 @@ pub(super) mod mode {
     // Bit 15 of the same register is GL_STENCIL_TEST, which the library sets only for a drawable with stencil planes.
     pub const STENCIL_TEST: u32 = 1 << 15;
 
-    // Bit 8 of the 0x0404 mode register is GL_CULL_FACE, bits 10:9 the face it culls -- 01 GL_BACK, 10 GL_FRONT, 11 GL_FRONT_AND_BACK, with 00 never sent ...
+    // Bit 8 of the 0x0404 mode register is GL_CULL_FACE, bits 10:9 the face it culls: 01 GL_BACK, 10 GL_FRONT, 11 GL_FRONT_AND_BACK. 00 with bit 8 set is never sent and a context starts at 01 (established for the library); the board's answer is unknown, so the model culls nothing for it.
     pub const CULL_FACE: u32 = 1 << 8;
     pub const CULL_MODE_SHIFT: u32 = 9;
     pub const CULL_MODE_MASK: u32 = 0x3;

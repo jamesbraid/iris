@@ -1851,15 +1851,19 @@ impl Board {
 }
 
 /// 0x404 bits 10:9 to the shared layer's cull-face enum: GL_BACK 01,
-/// GL_FRONT 10, GL_FRONT_AND_BACK 11. Returns UINT32_MAX for 00, which no
-/// probe word has sent; the shared layer's own glCullFace validation then
-/// rejects it, leaving the previous mode in place.
-pub(super) fn cull_face_mode(code: u32) -> u32 {
+/// GL_FRONT 10, GL_FRONT_AND_BACK 11. None for 00. The library stores 01, 10
+/// or 11 only and starts a context at 01 (established for the library it
+/// was read from), and no shipped software sends bit 8 with 00. What the
+/// board does with that pair is unknown. Model choice: the culled faces come
+/// from the word alone, so 00 culls nothing; the caller logs the access as
+/// unexpected. No previously selected face is kept, because neither the
+/// register nor any software defines that state.
+pub(super) fn cull_face_mode(code: u32) -> Option<u32> {
     match code {
-        1 => GL_BACK,
-        2 => GL_FRONT,
-        3 => GL_FRONT_AND_BACK,
-        _ => u32::MAX,
+        1 => Some(GL_BACK),
+        2 => Some(GL_FRONT),
+        3 => Some(GL_FRONT_AND_BACK),
+        _ => None,
     }
 }
 
@@ -1946,6 +1950,7 @@ impl Board {
     pub fn gl_apply_mode(&mut self) {
         let shade = if (self.stream.pattern_mode & mode::FLAT_SHADE) != 0 { GL_FLAT } else { GL_SMOOTH };
         let cull_mode = cull_face_mode((self.stream.pattern_mode >> mode::CULL_MODE_SHIFT) & mode::CULL_MODE_MASK);
+        let cull_enable = (self.stream.pattern_mode & mode::CULL_FACE) != 0;
         let front_face = front_face(self.stream.pattern_mode);
         let pm = self.stream.pattern_mode;
         let en = |bit: u32| if (pm & bit) != 0 { op::ENABLE } else { op::DISABLE };
@@ -1971,9 +1976,15 @@ impl Board {
         self.gl_feed32(en(mode::OFFSET_POINT), &[GL_POLYGON_OFFSET_POINT]);
         self.gl_feed32(en(mode::OFFSET_LINE), &[GL_POLYGON_OFFSET_LINE]);
         self.gl_feed32(en(mode::OFFSET_FILL), &[GL_POLYGON_OFFSET_FILL]);
-        self.gl_feed32(en(mode::CULL_FACE), &[GL_CULL_FACE]);
+        if cull_enable && cull_mode.is_none() && !self.diag.gl_cull_no_face_reported {
+            self.diag.gl_cull_no_face_reported = true;
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: cull enabled with no face selected; culling nothing");
+        }
+        self.gl_feed32(if cull_enable && cull_mode.is_some() { op::ENABLE } else { op::DISABLE }, &[GL_CULL_FACE]);
         self.gl_feed_raster_state(en(mode::GL_LINE_STIPPLE) as u16, &[GL_LINE_STIPPLE]);
-        self.gl_feed32(op::CULL_FACE, &[cull_mode]);
+        if let Some(face) = cull_mode {
+            self.gl_feed32(op::CULL_FACE, &[face]);
+        }
         self.gl_feed32(op::FRONT_FACE, &[front_face]);
         self.gl_apply_polygon_stipple();
     }
