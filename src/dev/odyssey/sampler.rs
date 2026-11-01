@@ -198,6 +198,38 @@ fn pitch_ending(tiles: u32) -> u32 {
     if even == 4096 { 1 } else { even }
 }
 
+/// The internal formats 0x8466 and 0x8467, level word 1 format indices 48 and
+/// 49.
+fn icc_index(word1: u32) -> bool {
+    matches!(level_index(word1), 48 | 49)
+}
+
+/// The row of a primary level in 16-texel units, for the level whose word 1
+/// is `word1`, `stored_width` texels wide with `border` texels of border. The
+/// formats 0x8466 and 0x8467 halve the full stored width, rounding up, add
+/// 15 and shift right 4 with no border subtraction, add 2 for a border, and
+/// then take the common ending; every other format takes level_pitch_units().
+/// ESTABLISHED as the library's activation arithmetic. That half the width
+/// is the board's real row length is INFERRED, from the booked size being an
+/// upper bound. A detail level takes the ordinary rule, not this one.
+pub(super) fn primary_pitch_units(word1: u32, stored_width: u32, border: u32) -> u32 {
+    if icc_index(word1) {
+        pitch_ending(((stored_width.div_ceil(2) + 15) >> 4) + if border != 0 { 2 } else { 0 })
+    } else {
+        level_pitch_units(stored_width, border)
+    }
+}
+
+/// The row length in 16-texel units that the object holding a level has. It is
+/// the descriptor's pitch, except for the ICC formats, whose descriptor pitch
+/// is half the width the library books (primary_pitch_units()). MODEL CHOICE:
+/// the model keeps one word per texel and does not unpack, so an ICC level's
+/// object is read at the ordinary rule's full width. A pitch of 0 (no row
+/// given) stays 0.
+fn object_row_units(word1: u32, pitch_units: u32, stored_width: u32, border: u32) -> u32 {
+    if pitch_units != 0 && icc_index(word1) { level_pitch_units(stored_width, border) } else { pitch_units }
+}
+
 /// Why a draw's texture state is refused. Every refusal is logged with the
 /// state's words (Board::texture_setup()).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -825,8 +857,8 @@ impl Board {
             for i in 0..count {
                 let entry = self.level_entry(first + i);
                 let object = self.object_find(entry[0] & LEVEL_ADDRESS_MASK);
-                let stride_units = entry[1] & LEVEL_STRIDE_MASK;
                 let (level_width, level_height) = (cmax(1, width >> i), cmax(1, height >> i));
+                let stride_units = object_row_units(entry[1], entry[1] & LEVEL_STRIDE_MASK, level_width, 0);
 
                 if let Some(o) = object {
                     if self.objects.width[o] >= level_width
@@ -859,10 +891,10 @@ impl Board {
             let entry = self.level_entry(first + i);
             let level_width = cmax(1, width >> i);
             let level_height = cmax(1, height >> i);
-            let stride_units = entry[1] & LEVEL_STRIDE_MASK;
+            let descriptor_units = entry[1] & LEVEL_STRIDE_MASK;
             // A stored border's row is its width plus the border on each side,
             // rounded as level_pitch_units() says.
-            let expected_units = level_pitch_units(level_width + 2 * border, border);
+            let expected_units = primary_pitch_units(entry[1], level_width + 2 * border, border);
             let base = entry[0] & LEVEL_ADDRESS_MASK;
             let rows = level_height + interior_y + (offset && two_d) as u32;
 
@@ -873,7 +905,8 @@ impl Board {
             if (entry[1] & LEVEL_FORMAT_MASK) != format_word {
                 return Err(Refusal("levels of one chain with different formats"));
             }
-            if base != 0 && stride_units != expected_units && !(count == 1 && stride_units == 0) {
+            let stride_units = object_row_units(entry[1], descriptor_units, level_width + 2 * border, border);
+            if base != 0 && descriptor_units != expected_units && !(count == 1 && descriptor_units == 0) {
                 return Err(Refusal("a level row that is not the library's for its width"));
             }
             chain.touch(i);
@@ -972,7 +1005,7 @@ impl Board {
     fn texture_volume_chain(&mut self, s: &Sampler, image: &mut GlTexImage<'static>, chain: &mut TextureChain) -> Result<(), Refusal> {
         let [width, height, depth] = s.size();
         let entry = self.level_entry(0);
-        let stride_units = entry[1] & LEVEL_STRIDE_MASK;
+        let descriptor_units = entry[1] & LEVEL_STRIDE_MASK;
         let offset = s.placement == Placement::TexelOffset;
         let mipmap = s.mipmap();
         // A stored border's slices hold the level 16 texels in, border at 15.
@@ -981,9 +1014,10 @@ impl Board {
         let border_texels = if offset { 2 } else { 0 };
 
         let format = Self::level_format_check(entry[1])?;
-        if stride_units != level_pitch_units(width + 2 * border, border) {
+        if descriptor_units != primary_pitch_units(entry[1], width + 2 * border, border) {
             return Err(Refusal("a volume row that is not the library's for its width"));
         }
+        let stride_units = object_row_units(entry[1], descriptor_units, width + 2 * border, border);
         if (entry[0] & LEVEL_ADDRESS_MASK) == 0 || entry[2] == 0 || entry[2] > ODSY_VOLUME_SLICE_SHIFT_MAX {
             return Err(Refusal("a volume level with no address or slice spacing"));
         }

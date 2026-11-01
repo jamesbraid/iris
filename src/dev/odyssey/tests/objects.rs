@@ -9,7 +9,7 @@ use crate::dev::odyssey::gl_context::{
     GL_LUMINANCE_ALPHA, GL_MODULATE, GL_RGB, GL_RGBA,
 };
 use crate::dev::odyssey::sampler::{
-    border_origin, level_pitch_units, texel_format, texture_class_format, texture_level_texel_format, Placement, TableFormat, Target, Wrap,
+    border_origin, level_pitch_units, primary_pitch_units, texel_format, texture_class_format, texture_level_texel_format, Placement, TableFormat, Target, Wrap,
 };
 use crate::dev::odyssey::raster::GlTexImage;
 use crate::dev::odyssey::tests::board_with_ram;
@@ -470,8 +470,8 @@ fn a_level_needs_an_emitted_index_and_its_size_code() {
         (4, 0x0020_0020, true),
         (1, 0x0080_0020, true),
         (6, 0x8210_0020, true),
-        (5, 0x4310_0020, true),
-        (6, 0x0300_0020, true),
+        (5, 0x4310_0010, true),
+        (6, 0x0300_0010, true),
         (6, 0x0010_0020, false),
         (2, 0x0030_0020, false),
         (6, 0x0050_0020, false),
@@ -506,7 +506,9 @@ fn a_texture_move_takes_any_emitted_index_with_its_size_code() {
         s.tex.level0 = 60;
         let size = texel_format(index).map_or(0, |f| f.size);
         let size = if wrong_size { (size + 1) & 3 } else { size };
-        s.tex.levels[180..183].copy_from_slice(&[base, (size << 30) | (index << 20) | 0x20, 0]);
+        // The ICC formats' descriptor row is half the 512-texel width.
+        let pitch = if matches!(index, 48 | 49) { 0x10 } else { 0x20 };
+        s.tex.levels[180..183].copy_from_slice(&[base, (size << 30) | (index << 20) | pitch, 0]);
         s.tex.sampler = [(9 << 10) | (6 << 5), 512, 64, 0, 0x0364_0000, 0, 0];
         s.tex.env = [1, 0, 0, 0, 0];
         let emitted = texel_format(index).is_some() && !wrong_size;
@@ -769,5 +771,28 @@ fn stored_border_placement_follows_the_library_arithmetic_at_any_size() {
         for word2 in 1..8u32 {
             assert_eq!(volume_slice_stride(word2, texel_format(index).unwrap()), (32 << c) << word2, "index {index}, word 2 {word2}");
         }
+    }
+}
+
+/// The internal formats 0x8466 and 0x8467 (indices 48 and 49) take half the
+/// full width, rounded up, then (half + 15) >> 4 with no border subtraction,
+/// and the common ending. Every other index keeps the ordinary rule.
+#[test]
+fn the_icc_formats_have_their_own_primary_pitch() {
+    let icc = |index: u32| (if index == 49 { 1 << 30 } else { 0 }) | (index << 20);
+    // (index, stored width, border, pitch)
+    let table = [
+        (48, 64, 0, 2),
+        (49, 17, 0, 2),
+        (49, 512, 0, 16),
+        (48, 514, 1, 20),
+        (49, 513, 1, 20),
+        (17, 514, 1, 34),
+        (17, 64, 0, 4),
+    ];
+
+    for (index, width, border, expect) in table {
+        let word1 = if index == 17 { (1 << 30) | (17 << 20) } else { icc(index) };
+        assert_eq!(primary_pitch_units(word1, width, border), expect, "index {index}, width {width}, border {border}");
     }
 }
