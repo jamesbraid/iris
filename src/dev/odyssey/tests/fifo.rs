@@ -240,21 +240,24 @@ fn credit_board() -> (Box<Board>, Arc<PiStub>) {
 }
 
 /// Command work credits at FIFO entry: a counted store's credit
-/// comes back when the board takes it into its FIFO, the oldest 64
-/// waiting stores at once; each store behind them is owed, then
+/// comes back when the board takes it into its FIFO, the oldest
+/// `ODSY_CFIFO_DEPTH` waiting stores at once; each store behind them is owed, then
 /// repaid as the work ahead runs and it moves up. A store that does
 /// not wait is credited inside the store.
+///
+/// QEMU: command-work-credits-at-fifo-entry.
 #[test]
 fn a_counted_store_is_credited_as_it_enters_the_fifo() {
     let (mut s, pi) = credit_board();
-    let stores = 72u32;
+    let stores = ODSY_CFIFO_DEPTH + 8;
 
     for _ in 0..stores {
         s.mmio_write(ODSY_CMD_FIFO, 0, 8);
     }
-    // Credits count stores; the level counts words, two a doubleword.
+    // Credits count stores; the level counts words, two a doubleword, and
+    // reads no more than the model's FIFO size.
     assert_eq!(s.fifo.stores(), stores);
-    assert_eq!(s.fifo.level(), 2 * stores);
+    assert_eq!(s.fifo.level(), (2 * stores).min(ODSY_CFIFO_WORDS));
     assert_eq!(s.fifo.in_fifo(), ODSY_CFIFO_DEPTH);
     assert_eq!(pi.count("return"), ODSY_CFIFO_DEPTH as i64);
     assert_eq!(pi.count("owe"), (stores - ODSY_CFIFO_DEPTH) as i64);
@@ -286,7 +289,7 @@ fn a_counted_store_is_credited_as_it_enters_the_fifo() {
 fn a_run_retires_with_the_levels_and_credits_of_one_by_one() {
     fn queue(s: &mut Board) {
         s.front.lock().test_counted_stores = 0;
-        for _ in 0..70 {
+        for _ in 0..ODSY_CFIFO_DEPTH + 6 {
             s.mmio_write(ODSY_CMD_FIFO, 0, 8);
         }
     }
@@ -310,7 +313,7 @@ fn a_run_retires_with_the_levels_and_credits_of_one_by_one() {
     run.fifo.take_run(&mut taken);
     assert_eq!(taken.stores().len(), RUN_MAX, "no counted store waits yet: a full run");
     counted_join(&mut run);
-    assert_eq!(run.fifo.stores(), 80);
+    assert_eq!(run.fifo.stores(), ODSY_CFIFO_DEPTH + 16);
     run.fifo.retire(&run.front, &taken, RUN_MAX);
 
     assert_eq!(run.fifo.stores(), one.fifo.stores());
@@ -319,9 +322,28 @@ fn a_run_retires_with_the_levels_and_credits_of_one_by_one() {
     assert_eq!(pi_run.count("return"), pi_one.count("return"));
     assert_eq!(pi_run.count("owe"), pi_one.count("owe"));
     assert!(pi_run.count("repay") > 0, "the run moved owed stores up");
-    // With a counted store waiting the next run is one store, as before.
+    // The counted stores left all sit inside the credited depth, so the
+    // next run is full.
+    assert!(run.fifo.stores() <= ODSY_CFIFO_DEPTH);
     run.fifo.take_run(&mut taken);
-    assert_eq!(taken.stores().len(), 1);
+    assert_eq!(taken.stores().len(), RUN_MAX);
+}
+
+/// The board's thread takes stores one at a time only while some wait past
+/// the credited depth, where one may owe its credit; a backlog of counted
+/// stores inside the depth, all credited, goes in full runs.
+#[test]
+fn a_run_is_one_store_only_past_the_credited_depth() {
+    let (mut s, _) = credit_board();
+    for _ in 0..ODSY_CFIFO_DEPTH {
+        s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    }
+    let mut run = Run::new();
+    s.fifo.take_run(&mut run);
+    assert_eq!(run.stores().len(), RUN_MAX, "every waiting store is credited");
+    s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    s.fifo.take_run(&mut run);
+    assert_eq!(run.stores().len(), 1, "one store owes its credit");
 }
 
 /// A slice cut short by its budget retires only the stores it ran: the rest
@@ -708,8 +730,8 @@ fn low_water_is_raised_as_the_queue_falls_below_the_mark() {
 
 /// MODEL CONTRACT ONLY: the FIFO's depth is unknown and the model's depth is
 /// its own choice. The stored `0x6b1` and `0x6b2` values (256 and 32192, as
-/// the kernels write them) do not widen the credits: only the oldest 64
-/// waiting stores, the model's depth, have their credits back, so the
+/// the kernels write them) do not widen the credits: only the oldest
+/// `ODSY_CFIFO_DEPTH` waiting stores, the model's depth, have their credits back, so the
 /// processor interface still holds back a writer that runs ahead of the slow
 /// board.
 ///
@@ -725,13 +747,56 @@ fn the_fifo_set_up_does_not_widen_the_credit_depth() {
     pi.0.lock().clear();
 
     s.fifo.test_words.store(1, SeqCst);
-    for _ in 0..72 {
+    let stores = ODSY_CFIFO_DEPTH + 8;
+    for _ in 0..stores {
         s.mmio_write(ODSY_CMD_FIFO, 0, 8);
     }
-    assert_eq!(s.fifo.stores(), 72);
+    assert_eq!(s.fifo.stores(), stores);
     assert_eq!(pi.count("return"), ODSY_CFIFO_DEPTH as i64);
     finish(&mut s);
-    assert_eq!(pi.settled(), 72);
+    assert_eq!(pi.settled(), stores as i64);
+}
+
+/// MODEL CHOICE: the FIFO holds far more than the host's credit window
+/// (the VPro porting guide's millisecond of commands), so a writer that
+/// fills the whole window, 256 doublewords on the IP30 and at most 256 on
+/// the IP35, gets every credit back as its stores enter, with the board's
+/// thread taking none of them, and owes nothing. A credit that waited on
+/// the board's thread could miss the high-water handler's ten-microsecond
+/// poll.
+#[test]
+fn the_credit_depth_is_deeper_than_the_host_window() {
+    const LARGEST_HOST_WINDOW: u32 = 256;
+    let (mut s, pi) = credit_board();
+    for _ in 0..=LARGEST_HOST_WINDOW {
+        s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    }
+    assert_eq!(s.fifo.stores(), LARGEST_HOST_WINDOW + 1, "the board took none");
+    assert_eq!(pi.count("return"), LARGEST_HOST_WINDOW as i64 + 1);
+    assert_eq!(pi.count("owe"), 0);
+    finish(&mut s);
+}
+
+/// MODEL CHOICE: the credited depth is 16,384 stores, the smallest power of
+/// two that holds the kernel's start-up program of about 12,291 words at
+/// one word per store. With the board taking nothing, every one of the
+/// first 16,384 counted stores is credited as it enters, and
+/// the next is owed until the board takes a store.
+#[test]
+fn every_store_inside_the_credited_depth_is_credited_and_the_next_is_owed() {
+    const DEPTH: u32 = 16_384;
+    let (mut s, pi) = credit_board();
+    for _ in 0..DEPTH {
+        s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    }
+    assert_eq!(s.fifo.stores(), DEPTH, "the board took none");
+    assert_eq!(pi.count("return"), DEPTH as i64);
+    assert_eq!(pi.count("owe"), 0);
+    s.mmio_write(ODSY_CMD_FIFO, 0, 8);
+    assert_eq!(pi.count("return"), DEPTH as i64);
+    assert_eq!(pi.count("owe"), 1, "the store past the depth owes its credit");
+    finish(&mut s);
+    assert_eq!(pi.settled(), DEPTH as i64 + 1);
 }
 
 /// A counted store whose credit is owed has the board's thread run without
@@ -755,7 +820,7 @@ fn a_counted_store_owed_its_credit_hurries_the_board_thread() {
 
     // On the board's thread, with a pause far longer than the wait below:
     // only the hurry runs the burst in time.
-    let stores = 200u32;
+    let stores = ODSY_CFIFO_DEPTH + 136;
     let h = BoardLocks::new(s);
     h.fifo.test_gap_ms.store(60_000, SeqCst);
     // credit_board holds the queue for stepping by hand.

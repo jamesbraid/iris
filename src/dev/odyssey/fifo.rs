@@ -46,11 +46,33 @@
 //! is the consumer. Graphics credits, which only machines whose processor
 //! interface counts stores use, are settled as a store enters the FIFO's
 //! first `ODSY_CFIFO_DEPTH` places: at the store when there is room, or
-//! when the stores ahead of it have run. That depth (64 stores) is a MODEL
-//! CHOICE, independent of the stored `0x6bX` values (the same choice as
-//! in QEMU's model, which found that credits for a full FIFO's backlog let
-//! the processor run too far ahead of its slower board). Whether a 32-bit store costs the hardware a
-//! whole credit is UNKNOWN; the model credits one per store.
+//! when the stores ahead of it have run. That depth (16,384 stores) is a
+//! MODEL CHOICE, independent of the stored `0x6bX` values: the smallest
+//! power of two that holds the kernel's whole start-up program (about
+//! 12,291 words) even at one word per store, and far deeper than the
+//! largest host credit window (256), as a FIFO holding about a millisecond
+//! of commands is. A writer is then credited as its stores enter and does
+//! not wait on the board's thread. That matters because IRIX's high-water
+//! handler looks at the count for only about ten microseconds before it
+//! holds the writer, and while the X server's initialise call is loading
+//! that program, before the low-water interrupt has a destination, only
+//! the kernel's 15-second FIFO timer wakes a writer held there. Limitation: a writer that runs more than the depth plus its
+//! window ahead of the board waits for the board's thread again, and is
+//! held until the level falls below the low-water mark. Whether a 32-bit
+//! store costs the hardware a whole credit is UNKNOWN; the model credits
+//! one per store.
+//!
+//! The deeper credited FIFO widens what the guest can see. A counted writer
+//! can now leave up to the depth plus its window (about 16,640 stores)
+//! waiting, where 64 plus the window was the bound before, so the level,
+//! the unreturned-credit field of `0x106c` (which saturates), status bit 17
+//! (below the low-water mark) and flag 9 follow a backlog that long: bit 17
+//! stays clear, and flag 9 latches, only after it drains. Doubleword stores
+//! that deep reach the `0x6b2` threshold the kernel stores, 32,192 words,
+//! which the old bound never did, so status bit 15 and flag 25 can now
+//! rise for counted stores too; the kernel leaves flag 25 masked and does
+//! not read bit 15. The level the guest reads stops at the model's FIFO
+//! size.
 
 use super::*;
 
@@ -421,10 +443,13 @@ impl CommandFifo {
 
     /// Look at the oldest waiting stores, up to `RUN_MAX`, without taking
     /// them out; the caller runs them, then `retire`s the ones it ran. While
-    /// a counted store waits the run is one store, so each credit is settled
-    /// as that store leaves, as it always was.
+    /// stores wait past the credited depth, one of which may owe its credit,
+    /// the run is one store, so each owed credit is settled as the store
+    /// ahead of it leaves rather than after a whole run. Inside the depth
+    /// every counted store already has its credit, so the run is full.
     pub fn take_run(&self, run: &mut Run) {
-        let max = if self.levels.counted.load(SeqCst) != 0 { 1 } else { RUN_MAX };
+        let owing = self.levels.counted.load(SeqCst) != 0 && self.stores() > ODSY_CFIFO_DEPTH;
+        let max = if owing { 1 } else { RUN_MAX };
         let mut raw = [(0u32, 0u64); RUN_MAX];
         run.len = self.ring.peek_run_at(0, &mut raw[..max]);
         for (store, (addr, value)) in run.stores.iter_mut().zip(&raw[..run.len]) {
