@@ -40,11 +40,11 @@ use super::gl_context::{
 };
 use super::memory::CLIP_MAX;
 use super::raster::{
-    fmax, fmin, soft_blend_factor, soft_compare, soft_unit, Planes, RasterColour, RasterRules,
+    cmax, cmin, soft_blend_factor, soft_compare, soft_unit, Planes, RasterColour, RasterRules,
     RasterTarget, SoftDraw, SoftFrag, SoftVertex, TexturePath,
 };
 use super::raster_fixed_texture::{
-    fx_max, fx_min, FIXED_ANY, FIXED_LINEAR, FIXED_NEAREST, FIXED_TRILINEAR, SOFT_TEXTURE_PATH,
+    FIXED_ANY, FIXED_LINEAR, FIXED_NEAREST, FIXED_TRILINEAR, SOFT_TEXTURE_PATH,
     SoftFixedTex, SoftTexSpan,
 };
 use super::raster_texture::{soft_quad_coords, soft_quad_rho_of, SoftQuadCoords, SoftTexPlane};
@@ -220,8 +220,8 @@ impl SoftDraw<'_> {
         let df = soft_blend_factor(M::blend_dst(st), k, src, dst, &st.blend_color);
 
         match M::blend_equation(st) {
-            GL_MIN => fmin(src[k], dst[k]),
-            GL_MAX => fmax(src[k], dst[k]),
+            GL_MIN => cmin(src[k], dst[k]),
+            GL_MAX => cmax(src[k], dst[k]),
             GL_FUNC_SUBTRACT => src[k] * sf - dst[k] * df,
             GL_FUNC_REVERSE_SUBTRACT => dst[k] * df - src[k] * sf,
             _ => src[k] * sf + dst[k] * df,
@@ -291,7 +291,7 @@ impl SoftDraw<'_> {
         let mut clipped = self.win.clip.n > 1;
 
         let mut i = 0u32;
-        while clipped && i < fx_min(self.win.clip.n, CLIP_MAX as u32) {
+        while clipped && i < cmin(self.win.clip.n, CLIP_MAX as u32) {
             // One of the window's rectangles holds the whole row.
             let c = &self.win.clip.r[i as usize];
 
@@ -317,7 +317,7 @@ impl SoftDraw<'_> {
                 e2 = e2.wrapping_add((sx0 - px0 as i64).wrapping_mul(sp.step2));
                 px0 = sx0 as i32;
             }
-            px1 = fx_min(px1 as i64, sx1) as i32;
+            px1 = cmin(px1 as i64, sx1) as i32;
         }
         (px0 <= px1).then_some(FillRun { px0, px1, e1, e2, clipped })
     }
@@ -356,7 +356,7 @@ impl SoftDraw<'_> {
         // mask, and the operation each outcome names.
         let stencil = M::stencil(self);
         let smax = if stencil { self.rules.stencil_max().unwrap_or(0) } else { 0 };
-        let sref = if st.stencil_ref < 0 { 0 } else { fx_min(st.stencil_ref as u32, smax) };
+        let sref = if st.stencil_ref < 0 { 0 } else { cmin(st.stencil_ref as u32, smax) };
         let svalue = sref & st.stencil_value_mask;
         let rgba = !t.index;
         let rgba_read = rgba && self.rgba_read;
@@ -371,7 +371,7 @@ impl SoftDraw<'_> {
         let mut frag: SoftFrag = *sp.flat;
         let mut dest = [RasterColour::default(); GL_MAX_TARGETS as usize];
         let (x_lo, x_hi) = match runs {
-            [Some(a), Some(b)] => (fx_min(a.px0, b.px0), fx_max(a.px1, b.px1)),
+            [Some(a), Some(b)] => (cmin(a.px0, b.px0), cmax(a.px1, b.px1)),
             [Some(a), None] | [None, Some(a)] => (a.px0, a.px1),
             [None, None] => return,
         };

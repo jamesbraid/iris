@@ -12,10 +12,10 @@ use super::gl_context::{
     GL_POINT, GL_POLYGON, GL_QUADS, GL_QUAD_STRIP, GL_TRIANGLES, GL_TRIANGLE_FAN,
     GL_TRIANGLE_STRIP, GlDraw, GlDrawResult, GlDrawState,
 };
-use super::raster::{fmin, SoftDraw, SoftFrag, SoftVertex, VOLUME_TRIANGLE_MAX, VolumeVertex};
+use super::raster::{cmax, cmin, SoftDraw, SoftFrag, SoftVertex, VOLUME_TRIANGLE_MAX, VolumeVertex};
 use super::raster_fill::{fill_quads_dispatch, FillRow, QuadGeneral, QuadRow};
 use super::raster_fixed_texture::{FIXED_ANY, SoftTexSpan};
-use super::raster_line::{r2_max, r2_min, soft_dimension, SoftLineStipple};
+use super::raster_line::{soft_dimension, SoftLineStipple};
 use super::raster_texture::{
     soft_quad_flat_rho, soft_quad_rho, soft_texture_derivatives, soft_texture_lod_scale,
     SoftTexPlane,
@@ -140,9 +140,9 @@ impl VolumeVertex {
                 return false;
             }
             if da >= 0.0 {
-                tb = fmin(tb, da / (da - db));
+                tb = cmin(tb, da / (da - db));
             } else {
-                sa = fmin(sa, db / (db - da));
+                sa = cmin(sa, db / (db - da));
             }
         }
         if !(sa + tb >= 1.0) {
@@ -1013,7 +1013,7 @@ impl SoftDraw<'_> {
                     if !(twice_area.abs() > 0.0) {
                         continue;
                     }
-                    coverage = r2_min(1.0, twice_area.abs() * 0.5);
+                    coverage = cmin(1.0, twice_area.abs() * 0.5);
                     x = px as f64 + cx / (3.0 * twice_area);
                     y = py as f64 + cy / (3.0 * twice_area);
                 }
@@ -1131,7 +1131,7 @@ impl SoftDraw<'_> {
                 let back = &poly[i].attr[vtx::BACK_COLOR..vtx::BACK_COLOR + 4];
 
                 for k in 0..4 {
-                    v[i].rgba[k] = r2_min(r2_max(back[k], 0.0f32), 1.0f32) as f64;
+                    v[i].rgba[k] = cmin(cmax(back[k], 0.0f32), 1.0f32) as f64;
                 }
             }
         }
@@ -1191,7 +1191,7 @@ impl SoftDraw<'_> {
         let mut current: SoftVertex;
         let mut stipple = SoftLineStipple {
             enabled: d.line_stipple_enabled,
-            repeat: r2_max(1, r2_min(d.line_stipple_repeat, 256)),
+            repeat: cmax(1, cmin(d.line_stipple_repeat, 256)),
             pattern: d.line_stipple_pattern,
             ..Default::default()
         };
@@ -1241,7 +1241,7 @@ impl SoftDraw<'_> {
                 area += first.edge(&previous, current.x, current.y) as f64;
                 fan[1] = previous;
                 fan[2] = current;
-                slope = r2_max(slope, self.slope(&fan));
+                slope = cmax(slope, self.slope(&fan));
             }
             previous = current;
         }

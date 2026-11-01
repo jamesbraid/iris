@@ -25,7 +25,7 @@ use super::gl_context::{
 use super::memory::{CLIP_MAX, ClipList};
 use super::raster_fill::FillRow;
 use super::raster_fixed_texture::{fixed_return, FIXED_PREFILL_MIN_PIXELS, SoftFixedTex};
-use super::raster_line::{r2_max, r2_min, soft_dimension, SoftLineStipple};
+use super::raster_line::{soft_dimension, SoftLineStipple};
 use super::raster_pixels::x_logic_op;
 use super::raster_texture::{SoftTexSelection, SoftTexSelectionMemo, SoftTexelCache};
 /// Which pixels a width-1 segment covers.
@@ -272,16 +272,21 @@ pub(super) enum TexturePath {
     Double,
 }
 
+/// C's max and min: the second operand wins a tie and a NaN on either side,
+/// where f64::max and f64::min give the number. The rasteriser's arithmetic
+/// is written against this order.
+#[inline(always)]
+pub(super) fn cmax<T: PartialOrd>(a: T, b: T) -> T {
+    if a > b { a } else { b }
+}
+#[inline(always)]
+pub(super) fn cmin<T: PartialOrd>(a: T, b: T) -> T {
+    if a < b { a } else { b }
+}
+
 // ---------------------------------------------------------------------
 // The draw itself. The fixed-point texture path is in raster_fixed_texture.rs.
 // ---------------------------------------------------------------------
-
-pub(super) fn fmax(a: f64, b: f64) -> f64 {
-    if a > b { a } else { b }
-}
-pub(super) fn fmin(a: f64, b: f64) -> f64 {
-    if a < b { a } else { b }
-}
 
 /// The drawable's window: its origin and the bounds of the pixels it owns,
 /// in plane pixels, and the rectangles themselves.
@@ -855,7 +860,7 @@ pub(super) fn soft_blend_factor(factor: u32, k: usize, s: &[f64; 4], d: &[f64; 4
         GL_ONE_MINUS_SRC_ALPHA => 1.0 - s[3],
         GL_DST_ALPHA => d[3],
         GL_ONE_MINUS_DST_ALPHA => 1.0 - d[3],
-        GL_SRC_ALPHA_SATURATE => if k == 3 { 1.0 } else { fmin(s[3], 1.0 - d[3]) },
+        GL_SRC_ALPHA_SATURATE => if k == 3 { 1.0 } else { cmin(s[3], 1.0 - d[3]) },
         GL_CONSTANT_COLOR => c[k] as f64,
         GL_ONE_MINUS_CONSTANT_COLOR => 1.0 - c[k] as f64,
         GL_CONSTANT_ALPHA => c[3] as f64,
@@ -870,8 +875,8 @@ impl GlDrawState {
         let df = soft_blend_factor(self.blend_dst, k, src, dst, &self.blend_color);
 
         match self.blend_equation {
-            GL_MIN => fmin(src[k], dst[k]),
-            GL_MAX => fmax(src[k], dst[k]),
+            GL_MIN => cmin(src[k], dst[k]),
+            GL_MAX => cmax(src[k], dst[k]),
             GL_FUNC_SUBTRACT => src[k] * sf - dst[k] * df,
             GL_FUNC_REVERSE_SUBTRACT => dst[k] * df - src[k] * sf,
             _ => src[k] * sf + dst[k] * df,
@@ -1346,7 +1351,7 @@ impl GlDrawState {
         if det == 0.0 {
             return 0.0;
         }
-        fmax((z1 * y2 - z2 * y1).abs(), (x1 * z2 - x2 * z1).abs()) / det.abs() * (f - n).abs()
+        cmax((z1 * y2 - z2 * y1).abs(), (x1 * z2 - x2 * z1).abs()) / det.abs() * (f - n).abs()
     }
 }
 
@@ -1485,7 +1490,7 @@ impl RasterRules {
                 _ => 0,
             },
             enabled: d.line_stipple_enabled,
-            repeat: r2_max(1, r2_min(d.line_stipple_repeat, 256)),
+            repeat: cmax(1, cmin(d.line_stipple_repeat, 256)),
             pattern: d.line_stipple_pattern,
             consumed: false,
         };
@@ -1538,7 +1543,7 @@ impl RasterRules {
             for i in first..=last {
                 texels += fixed.level[i as usize].width as u64 * fixed.level[i as usize].height as u64;
             }
-            texels = r2_max(texels, FIXED_PREFILL_MIN_PIXELS);
+            texels = cmax(texels, FIXED_PREFILL_MIN_PIXELS);
             fixed_on = (r.draw_pixels(d, texels) >= texels
                 && r.fixed_coordinates_valid(d)
                 && r.fixed_prefill(&mut fixed))
@@ -1643,7 +1648,6 @@ impl<'a> SoftDraw<'a> {
 #[cfg(test)]
 mod colour_tests {
     use super::*;
-    use crate::dev::odyssey::raster_fixed_texture::{fx_max, fx_min};
 
     /// The rasteriser's min and max keep C's operand order: a tie or a NaN
     /// on either side gives the second operand, where f64::max and f64::min
@@ -1651,15 +1655,15 @@ mod colour_tests {
     #[test]
     fn min_and_max_give_ties_and_nans_to_the_second_operand() {
         let nan = f64::NAN;
-        assert_eq!(fmax(nan, 1.0), 1.0);
-        assert!(fmax(1.0, nan).is_nan());
-        assert_eq!(fmin(nan, 1.0), 1.0);
-        assert!(fmin(1.0, nan).is_nan());
-        assert!(fmax(0.0, -0.0).is_sign_negative());
-        assert!(fmin(-0.0, 0.0).is_sign_positive());
-        assert_eq!((fmax(2.0, 1.0), fmin(2.0, 1.0)), (2.0, 1.0));
-        assert_eq!((fx_max(3i32, 7), fx_min(3i32, 7)), (7, 3));
-        assert_eq!((r2_max(-1i64, -5), r2_min(-1i64, -5)), (-1, -5));
+        assert_eq!(cmax(nan, 1.0), 1.0);
+        assert!(cmax(1.0, nan).is_nan());
+        assert_eq!(cmin(nan, 1.0), 1.0);
+        assert!(cmin(1.0, nan).is_nan());
+        assert!(cmax(0.0f64, -0.0).is_sign_negative());
+        assert!(cmin(-0.0f64, 0.0).is_sign_positive());
+        assert_eq!((cmax(2.0, 1.0), cmin(2.0, 1.0)), (2.0, 1.0));
+        assert_eq!((cmax(3i32, 7), cmin(3i32, 7)), (7, 3));
+        assert_eq!((cmax(-1i64, -5), cmin(-1i64, -5)), (-1, -5));
     }
 
     fn rules(color_bits: u8, alpha_bits: u8) -> RasterRules {

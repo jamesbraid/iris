@@ -11,8 +11,7 @@ use super::gl_context::{
     GL_QUAD_STRIP, GL_STENCIL_BUFFER_BIT, GL_TRIANGLES, GlDraw, RASTER_CLEAR, RasterOp,
 };
 use super::memory::{logic_op, CLIP_MAX, ClipList};
-use super::raster::{Planes, RasterColour, RasterRules, RasterTarget, SoftDraw};
-use super::raster_line::{r2_max, r2_min};
+use super::raster::{cmax, cmin, Planes, RasterColour, RasterRules, RasterTarget, SoftDraw};
 impl SoftDraw<'_> {
     /// About how many pixels a draw's filled primitives cover: the area of each
     /// one with its vertices moved into the pixels the window owns, summed
@@ -55,8 +54,8 @@ impl SoftDraw<'_> {
             let mut twice = 0.0f64;
 
             for k in 0..size {
-                px[k] = r2_min(r2_max(xy[2 * (i + k)], x0 as f64), (x1 + 1) as f64);
-                py[k] = r2_min(r2_max(xy[2 * (i + k) + 1], y0 as f64), (y1 + 1) as f64);
+                px[k] = cmin(cmax(xy[2 * (i + k)], x0 as f64), (x1 + 1) as f64);
+                py[k] = cmin(cmax(xy[2 * (i + k) + 1], y0 as f64), (y1 + 1) as f64);
             }
             for k in 0..size {
                 let next = (k + 1) % size;
@@ -74,7 +73,7 @@ impl ClipList {
     /// Whether one rectangle of a non-empty clip list holds all of row y from
     /// x0 to x1, so that each pixel's own test would pass.
     pub fn soft_clip_covers_row(&self, x0: i32, x1: i32, y: i32) -> bool {
-        for i in 0..r2_min(self.n, CLIP_MAX as u32) {
+        for i in 0..cmin(self.n, CLIP_MAX as u32) {
             let r = &self.r[i as usize];
 
             if y >= r.y0 && y <= r.y1 && x0 >= r.x0 && x1 <= r.x1 {
@@ -255,7 +254,7 @@ impl RasterRules {
             && op.ntargets != 0
             && rgba_mask != 0
             && rgba_mask != self.rgba_mask(GL_COLOUR_MASK_ALL);
-        let ntargets = r2_min(op.ntargets, GL_MAX_TARGETS);
+        let ntargets = cmin(op.ntargets, GL_MAX_TARGETS);
         let mut clear = RasterColour::default();
 
         if !self.check_rules() {

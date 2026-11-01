@@ -6,6 +6,7 @@
 
 
 use crate::devlog::LogModule;
+use super::raster::{cmax, cmin};
 use super::board::{
     Board, ODSY_GL_CONSTANTS, ODSY_GL_LIGHTS, ODSY_GL_PROGRAM_ENTRIES, ODSY_GL_PROGRAM_REPORTS,
     ODSY_HEIGHT, ODSY_WIDTH,
@@ -511,15 +512,6 @@ pub(super) fn odyssey_f32(bits: u32) -> f64 {
 
 pub(super) fn f32_bits(f: f32) -> u32 {
     f.to_bits()
-}
-
-// MAX/MIN as the draw maths needs them: the first operand wins ties and NaN comparisons.
-fn cmax(a: f64, b: f64) -> f64 {
-    if a > b { a } else { b }
-}
-
-fn cmin(a: f64, b: f64) -> f64 {
-    if a < b { a } else { b }
 }
 
 /// What `Board::gl_light_fill` hands on to the lighting equation.

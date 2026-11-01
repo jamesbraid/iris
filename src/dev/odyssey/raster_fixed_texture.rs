@@ -13,25 +13,14 @@ use super::gl_context::{
     GL_NEAREST, GL_NEAREST_MIPMAP_LINEAR, GL_NEAREST_MIPMAP_NEAREST, GL_REPEAT, GL_RGB,
 };
 use super::raster::{
-    FIXED_FAILED, FIXED_LEVELS, GlTexLevel, SoftDraw, SoftFixedCell, SoftFixedStore, SoftFrag,
-    SoftVertex, TexturePath,
+    cmax, cmin, FIXED_FAILED, FIXED_LEVELS, GlTexLevel, SoftDraw, SoftFixedCell, SoftFixedStore,
+    SoftFrag, SoftVertex, TexturePath,
 };
 use super::raster_fill::FillRow;
 use super::raster_texture::{
     soft_texture_components, soft_texture_lod_scale, soft_texture_mipmap, SoftQuadCoords,
     SoftTexPlane, SoftTexelCache,
 };
-/// MAX and MIN as conditionals: the first operand when the comparison fails,
-/// so a NaN operand is dropped.
-#[inline(always)]
-pub(super) fn fx_max<T: PartialOrd>(a: T, b: T) -> T {
-    if a > b { a } else { b }
-}
-
-#[inline(always)]
-pub(super) fn fx_min<T: PartialOrd>(a: T, b: T) -> T {
-    if a < b { a } else { b }
-}
 
 // Fixed-point texturing for filled triangles.
 //
@@ -158,7 +147,7 @@ pub(super) fn soft_fixed_expand(format: u32, rgba: u32) -> u32 {
 }
 
 pub(super) fn soft_fixed_unit(c: f64) -> u32 {
-    (fx_min(fx_max(c, 0.0), 1.0) * 255.0 + 0.5) as u32
+    (cmin(cmax(c, 0.0), 1.0) * 255.0 + 0.5) as u32
 }
 
 impl SoftDraw<'_> {
@@ -243,7 +232,7 @@ impl SoftDraw<'_> {
             }
         }
         for k in 0..4 {
-            border[k] = fx_min(fx_max(im.border_color[k], 0.0), 1.0) as f64;
+            border[k] = cmin(cmax(im.border_color[k], 0.0), 1.0) as f64;
         }
         soft_texture_components(f.format, &mut border);
         f.border = soft_fixed_lanes(
@@ -260,8 +249,8 @@ impl SoftDraw<'_> {
             let lmax = FIXED_LAMBDA_MAX as f64;
 
             // Rounded up, as an exact lambda is (SoftFixedTex::fixed_decide()).
-            f.min_lod = fx_min(fx_max(p.min_lod * 256.0, -lmax), lmax).ceil() as i32;
-            f.max_lod = fx_min(fx_max(p.max_lod * 256.0, -lmax), lmax).ceil() as i32;
+            f.min_lod = cmin(cmax(p.min_lod * 256.0, -lmax), lmax).ceil() as i32;
+            f.max_lod = cmin(cmax(p.max_lod * 256.0, -lmax), lmax).ceil() as i32;
             f.ns = base.width as f64 * soft_texture_lod_scale(im.lod_scale_s);
             f.nt = base.height as f64 * soft_texture_lod_scale(im.lod_scale_t);
         }
@@ -357,9 +346,9 @@ impl SoftFixedTex {
         if !self.lod {
             return (0, self.range);
         }
-        let first = if self.min_lod > 128 { fx_min((self.min_lod >> 8) as u32, self.range) } else { 0 };
-        let last = if self.max_lod <= 0 { 0 } else { fx_min((self.max_lod.wrapping_add(255)) >> 8, self.range as i32) as u32 };
-        (fx_min(first, last), last)
+        let first = if self.min_lod > 128 { cmin((self.min_lod >> 8) as u32, self.range) } else { 0 };
+        let last = if self.max_lod <= 0 { 0 } else { cmin((self.max_lod.wrapping_add(255)) >> 8, self.range as i32) as u32 };
+        (cmin(first, last), last)
     }
 }
 
@@ -481,7 +470,7 @@ pub(super) fn soft_fixed_axis(mut u: i64, n: u32, wrap: u32, upper: f64, linear:
     let mut a: u32 = 0;
 
     if wrap == GL_CLAMP && upper < 1.0 {
-        u = fx_min(u, soft_fixed_floor(upper * whole as f64));
+        u = cmin(u, soft_fixed_floor(upper * whole as f64));
     }
 
     if linear {
@@ -490,13 +479,13 @@ pub(super) fn soft_fixed_axis(mut u: i64, n: u32, wrap: u32, upper: f64, linear:
                 u -= 128;
             }
             GL_CLAMP_TO_EDGE => {
-                u = fx_min(fx_max(u - 128, 0), whole - 256);
+                u = cmin(cmax(u - 128, 0), whole - 256);
             }
             GL_CLAMP_TO_BORDER => {
-                u = fx_min(fx_max(u, -128), whole + 128) - 128;
+                u = cmin(cmax(u, -128), whole + 128) - 128;
             }
             _ => {
-                u = fx_min(fx_max(u, 0), whole) - 128;
+                u = cmin(cmax(u, 0), whole) - 128;
             }
         }
         a = (u & 255) as u32;
@@ -506,7 +495,7 @@ pub(super) fn soft_fixed_axis(mut u: i64, n: u32, wrap: u32, upper: f64, linear:
             *x0 &= mask;
             *x1 &= mask;
         } else if wrap == GL_CLAMP_TO_EDGE {
-            *x1 = fx_min(*x1, mask);
+            *x1 = cmin(*x1, mask);
         }
         return a;
     }
@@ -516,10 +505,10 @@ pub(super) fn soft_fixed_axis(mut u: i64, n: u32, wrap: u32, upper: f64, linear:
             *x0 &= mask;
         }
         GL_CLAMP_TO_BORDER => {
-            *x0 = fx_min(fx_max(*x0, -1), n as i64);
+            *x0 = cmin(cmax(*x0, -1), n as i64);
         }
         _ => {
-            *x0 = fx_min(fx_max(*x0, 0), n as i64 - 1);
+            *x0 = cmin(cmax(*x0, 0), n as i64 - 1);
         }
     }
     a
@@ -622,7 +611,7 @@ impl SoftFixedTex {
     /// the blend between levels takes the table's precision.
     #[inline(always)]
     pub fn fixed_decide(&self, rho2: f64, lambda: i32) -> i32 {
-        let clamped = fx_min(fx_max(lambda, self.min_lod), self.max_lod);
+        let clamped = cmin(cmax(lambda, self.min_lod), self.max_lod);
         let at_edge = (clamped - self.mag_below).abs() <= 3
             || ((self.min == GL_NEAREST_MIPMAP_NEAREST || self.min == GL_LINEAR_MIPMAP_NEAREST)
                 && (((clamped - 128) & 255) - 128).abs() >= 125);
@@ -632,7 +621,7 @@ impl SoftFixedTex {
             return lambda;
         }
         if rho2 > 0.0 {
-            fx_min(fx_max((128.0 * rho2.log2()).ceil(), -lmax), lmax) as i32
+            cmin(cmax((128.0 * rho2.log2()).ceil(), -lmax), lmax) as i32
         } else {
             -FIXED_LAMBDA_MAX
         }
@@ -676,7 +665,7 @@ impl SoftFixedTex {
         let b = self.nt * (g.dx[1] - t * g.dx[2]) * iq;
         let c = self.ns * (g.dy[0] - s * g.dy[2]) * iq;
         let e = self.nt * (g.dy[1] - t * g.dy[2]) * iq;
-        let rho2 = fx_max(a * a + b * b, c * c + e * e);
+        let rho2 = cmax(a * a + b * b, c * c + e * e);
         if !(rho2 <= f64::MAX) {
             return None;
         }
@@ -717,15 +706,15 @@ impl SoftDraw<'_> {
         let mut other = [0u64; 2];
 
         if KERNEL == FIXED_TRILINEAR || (KERNEL == FIXED_ANY && f.lod) {
-            lambda = fx_min(fx_max(lambda, f.min_lod), f.max_lod);
+            lambda = cmin(cmax(lambda, f.min_lod), f.max_lod);
         }
         if KERNEL == FIXED_TRILINEAR {
             // At or below 0, magnification is the same LINEAR on level 0.
-            let rel = fx_min(fx_max(lambda, 0), (f.range << 8) as i32) as u32;
+            let rel = cmin(cmax(lambda, 0), (f.range << 8) as i32) as u32;
 
             first = rel >> 8;
             alpha = rel & 255;
-            second = fx_min(first + 1, f.range);
+            second = cmin(first + 1, f.range);
         } else if KERNEL == FIXED_ANY && f.lod {
             if lambda <= f.mag_below {
                 filter = f.mag;
@@ -745,11 +734,11 @@ impl SoftDraw<'_> {
                         (lambda.wrapping_add(127) as u32) >> 8
                     };
                 } else {
-                    let rel = fx_min(fx_max(lambda, 0), (f.range << 8) as i32) as u32;
+                    let rel = cmin(cmax(lambda, 0), (f.range << 8) as i32) as u32;
 
                     first = rel >> 8;
                     alpha = rel & 255;
-                    second = fx_min(first + 1, f.range);
+                    second = cmin(first + 1, f.range);
                 }
             }
         }
