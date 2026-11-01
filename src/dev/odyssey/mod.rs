@@ -41,8 +41,7 @@
 //! - `memory`, `scanout`, `reader`, `display`: board memory and planes; the
 //!   marks writers make and the display thread's own reader, with the scanned
 //!   frame and retrace; what reaches the window.
-//! - `pixel_dma`, `pi_gfx`: DMA between guest memory and planes, and graphics
-//!   credits for machines whose processor interface counts them.
+//! - `pixel_dma`: DMA between guest memory and planes.
 //! - `depth_word`: the board's 24-bit float depth word and its offset.
 //! - `consts`: register, command and field constants.
 //!
@@ -74,7 +73,6 @@ mod interface;
 mod memory;
 mod mmio;
 mod objects;
-mod pi_gfx;
 mod pixel_dma;
 mod pixel_write;
 mod raster;
