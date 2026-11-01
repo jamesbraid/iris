@@ -396,7 +396,10 @@ pub(super) struct OpenPrimitive {
     pub open_held: u32,
     pub open_vertex: [OpenVertex; 3],
     pub restart_type: u32,
+    /// The address register of command ids 0x340/0x341 (words 0x740/0x741).
     pub restart_select: u32,
+    /// The 1024 words behind it: write-only, zero at reset.
+    pub local_mem: [u32; 1024],
     pub restart_absorb: u32,
     pub restart_total: u32,
     pub restart_c: u32,
@@ -770,6 +773,7 @@ impl Default for Board {
                 open_vertex: std::array::from_fn(|_| Default::default()),
                 restart_type: 0,
                 restart_select: 0,
+                local_mem: [0; 1024],
                 restart_absorb: 0,
                 restart_total: 0,
                 restart_c: 0,
@@ -1113,6 +1117,7 @@ impl Board {
         self.prim.open_held = 0;
         self.prim.restart_type = 0;
         self.prim.restart_select = 0;
+        self.prim.local_mem = [0; 1024];
         self.prim.restart_absorb = 0;
         self.prim.restart_total = 0;
         self.prim.restart_c = 0;

@@ -742,7 +742,6 @@ impl Board {
                     self.prim.restart_absorb = (self.cmd.operand[0] >> 19) & 3;
                     self.prim.restart_total = self.prim.restart_absorb;
                     self.prim.restart_armed = true;
-                    self.prim.restart_select = 0;
                     self.prim.begin_open = true;
                     self.prim.integer_prim = false;
                     self.prim.open_r = 0;
@@ -755,23 +754,31 @@ impl Board {
                 }
             }
             0x0740 => {
+                // Command ids 0x340 and 0x341 are an address register and a data
+                // port that steps the address on each word, sent only by the
+                // kernel (inferred from the one address word the start-up clear
+                // sends before 576 data words). Which memory they address is
+                // unknown, and nothing reads it back. Model choice: 1024 words
+                // that reset to zero and accept writes.
                 self.prim.restart_select = self.cmd.operand[0];
-                // The kernel selects 0x1ed as well as 0x1e0. What 0x1ed selects is
-                // UNKNOWN: it is accepted and 0x0741 does nothing for it.
-                if self.prim.restart_select != 0x1e0 && self.prim.restart_select != 0x1ed {
-                    self.cmd_unimplemented(0x740);
-                }
             }
             0x0741 => {
-                if self.prim.restart_select == 0x1e0 && self.prim.restart_armed {
-                    let word = self.cmd.operand[0];
+                let addr = self.prim.restart_select;
+                let word = self.cmd.operand[0];
 
+                self.prim.restart_select = addr.wrapping_add(1);
+                match self.prim.local_mem.get_mut(addr as usize) {
+                    Some(slot) => *slot = word,
+                    None => self.cmd_unimplemented(0x741),
+                }
+                // Address 480 is where the primitive restart sends its saved
+                // primitive word (inferred from who writes it and when); the
+                // model takes the open primitive's counters from it.
+                if addr == 0x1e0 && self.prim.restart_armed {
                     self.prim.restart_c = (word >> 21) & 7;
                     self.prim.restart_m3 = (word >> 12) & 3;
                     self.prim.restart_m4 = (word >> 14) & 3;
                     self.restart_finish();
-                } else {
-                    self.cmd_unimplemented(0x741);
                 }
             }
             cmd::IMAGE_HEADER => {
