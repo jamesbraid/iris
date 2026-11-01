@@ -161,13 +161,19 @@ impl VolumeVertex {
 }
 
 impl GlDrawState {
+    /// A draw vertex in eye coordinates, in single precision through the
+    /// shared transform.
+    pub fn draw_vertex_eye(&self, v: &[f32]) -> [f32; 4] {
+        xform(&self.modelview, v[vtx::POSITION..vtx::POSITION + 4].try_into().expect("a position"))
+    }
+
     /// One vertex to clip coordinates (OpenGL 1.2.1, 2.10), in single
     /// precision through the shared transform: object to eye by the
     /// modelview and eye to clip by the projection, or by the window matrix
     /// as GlDrawState::eye_to_clip() takes it. Clipping then works in double
     /// on the result.
     pub fn volume_from_draw_vertex(&self, v: &[f32]) -> VolumeVertex {
-        let eye = xform(&self.modelview, v[vtx::POSITION..vtx::POSITION + 4].try_into().expect("a position"));
+        let eye = self.draw_vertex_eye(v);
 
         VolumeVertex {
             clip: self.eye_to_clip(eye).map(f64::from),

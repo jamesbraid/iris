@@ -71,8 +71,8 @@ fn rows() -> Vec<Row> {
             out.push(Row { name: format!("{name}/{i}"), kind: "clip", vals: vv.clip.to_vec() });
             // A vertex at or behind the eye has no window position.
             if vv.clip[3] > 0.0 {
-                let win = st.clip_to_window(&vv.clip, (1i32 << gl_rules().subpixel_bits) as f32).expect("a window position");
-                out.push(Row { name: format!("{name}/{i}"), kind: "win", vals: win.to_vec() });
+                let win = st.clip_to_window(&vv.clip.map(|c| c as f32), (1i32 << gl_rules().subpixel_bits) as f32).expect("a window position");
+                out.push(Row { name: format!("{name}/{i}"), kind: "win", vals: win.iter().map(|&c| f64::from(c)).collect() });
             }
         }
     }
@@ -97,7 +97,7 @@ fn rows() -> Vec<Row> {
             let len = (nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2]).sqrt().max(1e-3);
             nrm = nrm.map(|x| x / len);
             board.geom.normal = nrm.map(f32::to_bits);
-            let obj = [rng.range(-1.0, 1.0) as f64, rng.range(-1.0, 1.0) as f64, rng.range(-1.0, 1.0) as f64, 1.0];
+            let obj = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), 1.0];
             let rgba = board.gl_light(&obj);
             out.push(Row { name: format!("light_{name}/{i}"), kind: "rgba", vals: rgba.iter().map(|&c| c as f64).collect() });
         }

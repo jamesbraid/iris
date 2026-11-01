@@ -506,8 +506,10 @@ impl Board {
     }
 }
 
-pub(super) fn odyssey_f32(bits: u32) -> f64 {
-    f32::from_bits(bits) as f64
+/// The single a command word holds. Arithmetic that is done in double
+/// widens it at the use (`f64::from`).
+pub(super) fn odyssey_f32(bits: u32) -> f32 {
+    f32::from_bits(bits)
 }
 
 pub(super) fn f32_bits(f: f32) -> u32 {
@@ -577,7 +579,7 @@ impl Board {
     /// is then read as positional). A light with zero ambient, diffuse and
     /// specular colour, every disabled one as the library sends it, adds
     /// nothing and is left out. Shininess arrives as its square root.
-    pub fn gl_light(&mut self, obj: &[f64; 4]) -> [f32; 4] {
+    pub fn gl_light(&mut self, obj: &[f32; 4]) -> [f32; 4] {
         // The lighting state is kept between vertices (LightScratch): building
         // its 3 KB afresh for every vertex was a visible share of the front
         // end's time in Smoke & Mirrors.
@@ -595,9 +597,8 @@ impl Board {
 
     /// Fill `lt`, whose lights hold their initial state, from the kept
     /// words, and link the lights it sets up as the enabled ones.
-    pub fn gl_light_fill(&self, lt: &mut Lighting, obj: &[f64; 4]) -> LitVertex {
+    pub fn gl_light_fill(&self, lt: &mut Lighting, obj: &[f32; 4]) -> LitVertex {
         let f = |w: u32| f32::from_bits(w);
-        let obj = [obj[0] as f32, obj[1] as f32, obj[2] as f32, obj[3] as f32];
         // The model-view's first three rows; the board ignores w.
         let mv = &self.geom.modelview;
         let mut eye = [0f32; 4];
@@ -686,7 +687,7 @@ impl Board {
     /// an index or lit vertex replaced it. xyz is the vertex's object position,
     /// already converted from whatever form its word carried, z 0 for a 2D one;
     /// lighting needs it for positional lights and the local viewer.
-    pub fn gl_vertex_colour(&mut self, xyz: &[f64; 3]) {
+    pub fn gl_vertex_colour(&mut self, xyz: &[f32; 3]) {
         if self.gl_index_mode() {
             if self.geom.lit && !self.diag.gl_index_lit_reported {
                 self.diag.gl_index_lit_reported = true;

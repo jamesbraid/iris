@@ -205,9 +205,9 @@ impl Board {
                         || self.stream.primitive == gl_cmd::QUAD_STRIP)
                 {
                     // Lighting takes the signed integers as object coordinates.
-                    let xyz: [f64; 3] = [
-                        (self.cmd.operand[0] as i32) as f64,
-                        (self.cmd.operand[1] as i32) as f64,
+                    let xyz: [f32; 3] = [
+                        (self.cmd.operand[0] as i32) as f32,
+                        (self.cmd.operand[1] as i32) as f32,
                         0.0,
                     ];
                     let opd = self.cmd.operand;
@@ -404,7 +404,7 @@ impl Board {
                 };
                 let mut xyz = [0u32; 4];
                 xyz.copy_from_slice(&self.cmd.operand[..4]);
-                let mut obj = [0f64; 3];
+                let mut obj = [0f32; 3];
 
                 if tag == gl_cmd::VERTEX_3I {
                     for k in 0..3 {

@@ -1379,7 +1379,8 @@ impl SoftDraw<'_> {
             return None;
         }
         let sub = (1i32 << self.rules.subpixel_bits) as f64;
-        let Some(win) = st.clip_to_window(clip, sub as f32) else {
+        // Clipping works in double; the shared mapping takes single.
+        let Some(win) = st.clip_to_window(&clip.map(|c| c as f32), sub as f32).map(|w| w.map(f64::from)) else {
             crate::dlog!(LogModule::Odyssey, "sgi-gl: clipped vertex at w {} has no window position, primitive dropped", clip[3]);
             return None;
         };

@@ -1539,7 +1539,7 @@ impl Board {
 
 /// Match the shared rasterizer's eight-bit channel conversion.
 pub(super) fn float_channel(bits: u32) -> u32 {
-    let c = odyssey_f32(bits);
+    let c = f64::from(odyssey_f32(bits));
 
     if !(c > 0.0) {
         return 0;

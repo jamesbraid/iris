@@ -855,7 +855,7 @@ fn a_cleared_texture_chain_is_the_default_one_again() {
 fn a_reused_lighting_state_lights_a_vertex_as_a_fresh_one_does() {
     use crate::dev::gl::light::Lighting;
 
-    fn fresh(s: &Board, obj: &[f64; 4]) -> [f32; 4] {
+    fn fresh(s: &Board, obj: &[f32; 4]) -> [f32; 4] {
         let mut lt = Lighting::default();
         lt.init();
         let v = s.gl_light_fill(&mut lt, obj);

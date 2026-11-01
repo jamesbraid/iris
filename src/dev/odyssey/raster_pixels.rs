@@ -26,15 +26,16 @@ impl SoftDraw<'_> {
         };
         let mut xy = vec![0.0f64; 2 * n];
         for i in 0..n {
-            let cv = self.st.volume_from_draw_vertex(d.soft_polygon_vertex(None, i));
-            if !(cv.clip[3] > 0.0) {
+            let st = self.st;
+            let clip = st.eye_to_clip(st.draw_vertex_eye(d.soft_polygon_vertex(None, i)));
+            if !(clip[3] > 0.0) {
                 return limit;
             }
-            let Some(win) = self.st.clip_to_window(&cv.clip, (1i32 << self.rules.subpixel_bits) as f32) else {
+            let Some(win) = st.clip_to_window(&clip, (1i32 << self.rules.subpixel_bits) as f32) else {
                 return limit;
             };
-            xy[2 * i] = win[0];
-            xy[2 * i + 1] = win[1];
+            xy[2 * i] = f64::from(win[0]);
+            xy[2 * i + 1] = f64::from(win[1]);
         }
         // Each primitive's own vertices; a fan's first is left out.
         let step: usize = if d.mode == GL_TRIANGLES {

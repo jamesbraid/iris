@@ -1352,8 +1352,8 @@ impl GlDrawState {
     /// same point. The board's rule for a small w is UNKNOWN, so VPro
     /// takes w > 0, dividing such a vertex through by w before the mapping,
     /// which leaves it at w = 1.
-    pub fn clip_to_window(&self, clip: &[f64; 4], subpixel: f32) -> Option<[f64; 3]> {
-        let mut h = clip.map(|c| c as f32);
+    pub fn clip_to_window(&self, clip: &[f32; 4], subpixel: f32) -> Option<[f32; 3]> {
+        let mut h = *clip;
 
         if !(h[3] > 0.0) {
             return None;
@@ -1363,11 +1363,11 @@ impl GlDrawState {
                 h = h.map(|c| c / h[3]);
             }
             let v = self.gl_viewport().project(Wv::<0, 0> { h, ..Default::default() }, [0.0, 0.0], subpixel);
-            return (v.ok != 0).then_some([v.x as f64, v.y as f64, v.z as f64]);
+            return (v.ok != 0).then_some([v.x, v.y, v.z]);
         }
         let guard = GL_WINDOW_GUARD as f32;
         let snap = |v: f32| (v * subpixel).round() / subpixel;
-        Some([snap(h[0] * guard / h[3]) as f64, snap(h[1] * guard / h[3]) as f64, ((h[2] / h[3] + 1.0) * 0.5) as f64])
+        Some([snap(h[0] * guard / h[3]), snap(h[1] * guard / h[3]), (h[2] / h[3] + 1.0) * 0.5])
     }
 }
 

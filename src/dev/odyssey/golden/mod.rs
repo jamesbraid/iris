@@ -414,7 +414,7 @@ fn scenes_of_one_family_are_told_apart() {
 fn a_small_positive_w_maps_as_the_same_point() {
     let st = scenes::Ctx::new().st;
     let sub = (1i32 << gl_rules().subpixel_bits) as f32;
-    let at = |w: f64| st.clip_to_window(&[0.5 * w, -0.25 * w, 0.125 * w, w], sub);
+    let at = |w: f32| st.clip_to_window(&[0.5 * w, -0.25 * w, 0.125 * w, w], sub);
     let want = at(1.0).expect("a window position");
 
     for w in [1e-6, 5e-7, 1e-7, 1e-12] {

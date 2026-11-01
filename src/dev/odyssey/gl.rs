@@ -648,7 +648,7 @@ impl GlPlanes<'_> {
     pub fn fog_factor(&self, window_z: f32) -> f32 {
         let w = &self.state.fog;
         let scale = if (w[2] & 0xffffff) != 0 {
-            odyssey_f32(((w[2] & 0xffffff) << 5).wrapping_add(96u32 << 23)).abs()
+            f64::from(odyssey_f32(((w[2] & 0xffffff) << 5).wrapping_add(96u32 << 23)).abs())
         } else {
             0.0
         };
@@ -1013,8 +1013,8 @@ impl Board {
         rules.alpha_bits = if self.gl_index_mode() { 0 } else { 8 };
         rules.depth_row_given = true;
         for k in 0..4usize {
-            rules.depth_row[k] = odyssey_f32(self.gl_combined[8 + k]) / scale;
-            block16[k] = odyssey_f32(self.gl_block16[k]);
+            rules.depth_row[k] = f64::from(odyssey_f32(self.gl_combined[8 + k])) / scale;
+            block16[k] = f64::from(odyssey_f32(self.gl_block16[k]));
             divisor &= block16[k].is_finite();
         }
         if divisor && block16[3] != 0.0 {
@@ -2209,10 +2209,10 @@ impl Board {
             && self.geom.linear_texgen != 0
         {
             let mut vertex = [
-                odyssey_f32(self.cmd.operand[0]),
-                odyssey_f32(self.cmd.operand[1]),
-                if self.cmd.tag != gl_cmd::VERTEX_2I && self.cmd.tag != gl_cmd::VERTEX_2F { odyssey_f32(self.cmd.operand[2]) } else { 0.0 },
-                if self.cmd.tag == gl_cmd::VERTEX_4F { odyssey_f32(self.cmd.operand[3]) } else { 1.0 },
+                f64::from(odyssey_f32(self.cmd.operand[0])),
+                f64::from(odyssey_f32(self.cmd.operand[1])),
+                if self.cmd.tag != gl_cmd::VERTEX_2I && self.cmd.tag != gl_cmd::VERTEX_2F { f64::from(odyssey_f32(self.cmd.operand[2])) } else { 0.0 },
+                if self.cmd.tag == gl_cmd::VERTEX_4F { f64::from(odyssey_f32(self.cmd.operand[3])) } else { 1.0 },
             ];
 
             if self.cmd.tag == gl_cmd::VERTEX_2I || self.cmd.tag == gl_cmd::VERTEX_3I {
@@ -2236,7 +2236,7 @@ impl Board {
                     continue;
                 }
                 for k in 0..4usize {
-                    value = (value as f64 + odyssey_f32(plane[k]) * vertex[k]) as f32;
+                    value = (value as f64 + f64::from(odyssey_f32(plane[k])) * vertex[k]) as f32;
                 }
                 strq[axis] = value.to_bits();
             }
@@ -2258,12 +2258,12 @@ impl Board {
 /// positions (`primitive_cost`).
 fn gl_draw_cost(d: &GlDraw) -> u32 {
     let points = d.vertices.chunks_exact(vtx::FLOATS).take(d.count as usize).map(|v| {
-        let clip = [v[vtx::POSITION] as f64, v[vtx::POSITION + 1] as f64, v[vtx::POSITION + 2] as f64, v[vtx::POSITION + 3] as f64];
+        let clip = [v[vtx::POSITION], v[vtx::POSITION + 1], v[vtx::POSITION + 2], v[vtx::POSITION + 3]];
         if !(clip[3] > 0.0) {
             return None;
         }
         let win = d.state.clip_to_window(&clip, (1i32 << gl_rules().subpixel_bits) as f32)?;
-        Some((win[0], win[1]))
+        Some((win[0] as f64, win[1] as f64))
     });
     primitive_cost(d.mode, points, d.point_size, d.line_width)
 }
@@ -2690,11 +2690,11 @@ impl Board {
 
         args[0] = i;
         for r in 0..4usize {
-            eye[r] = odyssey_f32(self.geom.clip_eye[i as usize * 4 + r]);
+            eye[r] = f64::from(odyssey_f32(self.geom.clip_eye[i as usize * 4 + r]));
         }
         for r in 0..4usize {
             for k in 0..4usize {
-                obj[k] += eye[r] * odyssey_f32(self.geom.modelview[r * 4 + k]);
+                obj[k] += eye[r] * f64::from(odyssey_f32(self.geom.modelview[r * 4 + k]));
             }
         }
         for k in 0..4usize {
