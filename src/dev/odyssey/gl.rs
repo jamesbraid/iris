@@ -60,6 +60,9 @@ pub(super) struct Texture {
     pub words: u32,
     /// A 2D level's border rows are stored, so a one-row level is not 1D.
     pub border_rows: bool,
+    /// Level word 1 bits 28:26, the texel-offset code. Carried, with no
+    /// behaviour (sampler::level_offset_code()).
+    pub offset_code: u32,
 }
 
 /// The detail function table's weights, unsigned 12-bit fractions, entry i
@@ -1162,6 +1165,7 @@ impl BoardTexels<'_> {
             base_format: volume.base_format,
             words: volume.words,
             border_rows: false,
+            offset_code: 0,
         };
         self.read(&texture, px, py)
     }
@@ -1431,6 +1435,7 @@ impl Board {
             base_format,
             words: self.objects.used,
             border_rows: false,
+            offset_code: 0,
         };
         chain.detail_image = GlTexLevel {
             level: 0,

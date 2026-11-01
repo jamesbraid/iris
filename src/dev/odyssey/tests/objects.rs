@@ -9,7 +9,7 @@ use crate::dev::odyssey::gl_context::{
     GL_LUMINANCE_ALPHA, GL_MODULATE, GL_RGB, GL_RGBA,
 };
 use crate::dev::odyssey::sampler::{
-    border_origin, level_pitch_units, primary_pitch_units, texel_format, texture_class_format, texture_level_texel_format, Placement, TableFormat, Target, Wrap,
+    border_origin, level_offset_code, level_pitch_units, primary_pitch_units, texel_format, texture_class_format, texture_level_texel_format, Placement, TableFormat, Target, Wrap,
 };
 use crate::dev::odyssey::raster::GlTexImage;
 use crate::dev::odyssey::tests::board_with_ram;
@@ -794,5 +794,34 @@ fn the_icc_formats_have_their_own_primary_pitch() {
     for (index, width, border, expect) in table {
         let word1 = if index == 17 { (1 << 30) | (17 << 20) } else { icc(index) };
         assert_eq!(primary_pitch_units(word1, width, border), expect, "index {index}, width {width}, border {border}");
+    }
+}
+
+/// Offset code 2 is inferred unreachable, not excluded: a level that holds any
+/// of the three bits is taken, and carried with no behaviour. Word 4 bit 28
+/// and word 6 bit 24 are complementary except in the convolution image steps
+/// (word 4 bits 18 and 14), where both can be set and the level reads as
+/// Corner.
+#[test]
+fn offset_codes_are_carried_and_both_offset_flags_are_taken_in_an_image_step() {
+    let (mut s, _, _) = board_with_ram();
+
+    for code in 0..8u32 {
+        let word1 = 0x4110_0020 | (code << 26);
+        assert!(Board::level_format_check(word1).is_ok(), "offset code {code}");
+        assert_eq!(level_offset_code(word1), code);
+    }
+    assert!(Board::level_format_check(0x4110_0020 | 1 << 29).is_err(), "bit 29 is never written");
+    assert!(Board::level_format_check(0x4110_0020 | 1 << 12).is_err(), "word 1 bits 19:12 are never written");
+
+    // (extra word 4 bits, word 6 bit 24, expected)
+    let step = (1 << 18) | (1 << 14);
+    let table = [(0, false, Some(Placement::Corner)), (0, true, None), (step, true, Some(Placement::Corner))];
+
+    for (extra, bit24, expect) in table {
+        rgba_512x256(&mut s, 0x16b800);
+        s.tex.sampler[4] |= extra | 1 << 28;
+        s.tex.sampler[6] = (bit24 as u32) << 24;
+        assert_eq!(s.texture_sampler().ok().map(|d| d.placement), expect, "extra {extra:#x}, bit 24 {bit24}");
     }
 }

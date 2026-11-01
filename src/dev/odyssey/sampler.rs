@@ -155,11 +155,20 @@ fn level_index(word1: u32) -> u32 {
 pub(super) const LEVEL_FORMAT_MASK: u32 = 0xc3f00000;
 /// Level descriptor word 1 bits 11:0, the row in 16-texel units.
 const LEVEL_STRIDE_MASK: u32 = 0xfff;
-/// Word 1 bits 28:26 are the texture-offset code, which only the texture move
-/// writes, and then 0 or 2 (ESTABLISHED). Bit 29 and bits 19:12 are never
-/// written. The model has no reading for offset code 2, so all of these
-/// must be clear.
-const LEVEL_WORD1_UNMODELLED: u32 = 0x3c0ff000;
+/// Word 1 bit 29 and bits 19:12 are never written (ESTABLISHED).
+const LEVEL_WORD1_UNMODELLED: u32 = 0x200ff000;
+
+/// Word 1 bits 28:26, the texel-offset code. The library writes 2 only when
+/// the source's size-code word and pixel-mode word both equal 2 (the texture
+/// move's offset helper, and the mipmap builder's merge), and 0 otherwise. No
+/// traced builder makes that pair, so no traced path emits 2 (INFERRED, not
+/// excluded, since some descriptor builders were not traced). The activation
+/// routine never writes it. What the board does with any code is UNKNOWN, so
+/// MODEL CHOICE: all three bits are carried (Texture::offset_code) and give
+/// no behaviour, instead of refusing a level that holds a code.
+pub(super) fn level_offset_code(word1: u32) -> u32 {
+    (word1 >> 26) & 7
+}
 /// Word 0 bits 28:0 are the level's address. Bits 31:29 are kept from the
 /// object by the texture move and have no known meaning.
 const LEVEL_ADDRESS_MASK: u32 = 0x1fffffff;
@@ -397,7 +406,8 @@ pub(super) fn texture_mip_build_word(word4: u32) -> bool {
 
 /// How a level is placed in its allocation, from word 4 bit 28 and word 6
 /// bit 24, which the library sets as complements from the object's
-/// texel-offset flag (ESTABLISHED).
+/// texel-offset flag (ESTABLISHED), except in the convolution image steps,
+/// where both can be set (see Board::texture_sampler()).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Placement {
     /// Bit 28 set and bit 24 clear: the level starts at its allocation's
@@ -586,6 +596,13 @@ impl Board {
             (true, false) => Placement::Corner,
             (false, true) => Placement::TexelOffset,
             (false, false) if context.image_default() => Placement::Move,
+            // The convolution image steps set bit 28 and leave bit 24 as the
+            // context holds it, so a bound texture with a border leaves both
+            // set while they draw (ESTABLISHED for two such steps, INFERRED
+            // for the rest). Outside an image step the pair is complementary.
+            // The board's answer for both set is UNKNOWN; MODEL CHOICE: read
+            // bit 28 alone, since the steps write it, so the level is Corner.
+            (true, true) if context.image_step => Placement::Corner,
             _ => return Err(Refusal("word 4 bit 28 and word 6 bit 24 are not complements")),
         };
         let min = (mode >> 5) & 7;
@@ -818,9 +835,9 @@ impl Board {
     /// code. The size code is checked the same way for the texture move,
     /// which sends the same quantity. The class is never checked against the
     /// index (TexelFormat).
-    fn level_format_check(word1: u32) -> Result<TexelFormat, Refusal> {
+    pub(super) fn level_format_check(word1: u32) -> Result<TexelFormat, Refusal> {
         if (word1 & LEVEL_WORD1_UNMODELLED) != 0 {
-            return Err(Refusal("a level descriptor's word 1 bits the model has no reading for"));
+            return Err(Refusal("a level descriptor's word 1 bits the library never writes"));
         }
         texture_level_texel_format(word1)
             .ok_or(Refusal("a level's format index or size code is not one the library emits"))
@@ -963,6 +980,7 @@ impl Board {
                 base_format: s.base_format,
                 words: self.objects.used,
                 border_rows: offset && two_d,
+                offset_code: level_offset_code(entry[1]),
             };
             chain.levels[i as usize].read_texel = true;
             if offset {
