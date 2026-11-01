@@ -31,12 +31,28 @@ both to reset to the clean base.
 The record grows as each write lands, so ending iris any way at all (Ctrl-C,
 `kill`, `kill -9`, a crash of iris itself) keeps every write the guest had
 made. To the guest that is a power cut: its filesystem recovers as it would on
-real hardware, from its log. A crash or power loss of the host itself can lose
-the writes made since the last flush, and so can tear the guest's filesystem.
-The disk reports a write-back cache, and only a flush puts what came before it
-on the host's disk: iris stopping, `cow commit`, or the guest's SYNCHRONIZE
-CACHE, which IRIX does not send. Stop iris cleanly before you expect the host
-to go down.
+real hardware, from its log.
+
+A crash or power loss of the host itself is different. The disk reports a
+write cache (WCE=1 in the caching mode page), because a plain write reaches
+the host's file but is not on the host's disk when it returns GOOD. IRIX never
+reads that page, sends SYNCHRONIZE CACHE or sets FUA, so it relies on every
+write being stored; iris cannot sync every write without slowing the guest to
+the host disk's speed, so it syncs in the background instead. A thread syncs
+each writable raw image and overlay (the overlay and its record) about 5 s
+after the first write that follows a sync, and does nothing while the guest
+writes nothing. A host crash can therefore lose up to about 5 s of the guest's
+most recent writes, in any order, and so can tear the guest's filesystem.
+
+A guest can ask for more. SYNCHRONIZE CACHE (10) or (16) and a WRITE(10) with
+FUA sync before they return, and a guest that clears WCE with MODE SELECT gets
+every write synced before GOOD, which is slow. NetBSD and Linux send
+SYNCHRONIZE CACHE to a disk with a write cache, and it is honoured.
+
+A CHD disk has no background sync: its writes are only durable after a flush,
+which closes and reopens the file. They reach the file on SYNCHRONIZE CACHE,
+`cow commit`, a power-off and iris stopping, so a host crash loses everything
+since then. Stop iris cleanly before you expect the host to go down.
 
 An older iris reads only what the last flush recorded, so after a kill it
 sees the disk as it was before the appended writes, torn as before. Open an
