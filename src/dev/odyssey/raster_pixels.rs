@@ -265,7 +265,7 @@ impl RasterRules {
             crate::dlog!(LogModule::Odyssey, "sgi-gl: raster op of kind {} is not executed", op.kind);
             return;
         }
-        if op.clip.n == 0 && op.clip.empty != 0 {
+        if op.clip.n == 0 && op.clip.empty {
             return;
         }
         if stencil {

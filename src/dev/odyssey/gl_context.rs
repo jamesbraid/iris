@@ -702,7 +702,6 @@ pub(super) trait GlSink {
 }
 
 /// The most words one GlContext::get() answer takes: a matrix's.
-pub(super) const GL_GET_WORDS: usize = 16;
 
 // Functions.
 
@@ -1810,37 +1809,9 @@ impl GlContext {
 }
 
 impl GlContext {
-    /// The glGet answer for pname as *n 32-bit words into out, which holds
-    /// GL_GET_WORDS; floats as their bits, enumerants and integers as
-    /// themselves, a matrix column-major. False for a pname the context does
-    /// not keep.
-    ///
-    /// Texture coordinates are not kept, so GL_CURRENT_TEXTURE_COORDS and
-    /// GL_CURRENT_RASTER_TEXTURE_COORDS answer OpenGL's initial (0, 0, 0, 1)
-    /// (2.7, 2.12), wrong once a client has sent glTexCoord.
-    pub fn get(&self, pname: u32, out: &mut [u32], n: &mut u32) -> bool {
-        if self.in_begin
-            && (pname == GL_LINE_STIPPLE
-                || pname == GL_LINE_STIPPLE_REPEAT
-                || pname == GL_LINE_STIPPLE_PATTERN)
-        {
-            crate::dlog!(LogModule::Odyssey, "sgi-gl: line stipple query inside glBegin: invalid operation");
-            return false;
-        }
-        match pname {
-            GL_CURRENT_COLOR => {
-                for i in 0..4 {
-                    out[i] = gl_bits(self.cur_color[i]);
-                }
-                *n = 4;
-                true
-            }
-            // Column-major, the order glLoadMatrixf takes (6.1.2).
-            // The indices as floats, the form the context keeps them in.
-            // glGetBooleanv of a capability is glIsEnabled (6.1.1).
-            // The matrices a stack holds, the current one included (6.1.2).
-            _ => false,
-        }
+    /// glGet of GL_CURRENT_COLOR: the current colour as float bits (6.1.2).
+    pub fn current_color(&self) -> [u32; 4] {
+        self.cur_color.map(gl_bits)
     }
 }
 
