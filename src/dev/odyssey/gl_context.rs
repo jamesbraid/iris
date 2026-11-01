@@ -12,7 +12,7 @@ use crate::devlog::LogModule;
 use super::bits::deposit32;
 use super::memory::ClipList;
 use crate::dev::gl::math::{invert, xform, IDENT};
-use crate::dev::gl::vertex::{Viewport, Wv};
+use crate::dev::gl::vertex::{Geometry, NearW, Viewport, Wv};
 
 /// A raster operation: pixel work on a head's planes that is not a GL
 /// primitive, queued beside draws in the order the head received it.
@@ -1342,32 +1342,22 @@ impl GlDrawState {
     }
 
     /// Clip coordinates as GlDrawState::eye_to_clip() gives them to window x
-    /// and y, snapped to 1 / subpixel of a pixel, and normalized depth,
-    /// (z / w + 1) / 2, in single precision: the shared viewport mapping
-    /// (dev::gl::vertex::Viewport::project()), or under a window matrix the
-    /// window position the matrix gives. None for a w of zero or less.
-    ///
-    /// The shared mapping drops a w of at most 1e-6, which breaks the
-    /// homogeneous scale of a clip vector: a vertex scaled by 1e-7 is the
-    /// same point. The board's rule for a small w is UNKNOWN, so VPro
-    /// takes w > 0, dividing such a vertex through by w before the mapping,
-    /// which leaves it at w = 1.
+    /// and y on the grid of 1 / subpixel of a pixel, and normalized depth,
+    /// (z / w + 1) / 2, in single precision through the shared VPro geometry
+    /// (dev::gl::vertex::NearW): the viewport mapping
+    /// (dev::gl::vertex::Viewport::project_by()), or under a window matrix the
+    /// window position the matrix gives. The divide is a nearest-rounded
+    /// reciprocal and a multiply, and the position truncates onto the grid.
+    /// None for a w of zero or less.
     pub fn clip_to_window(&self, clip: &[f32; 4], subpixel: f32) -> Option<[f32; 3]> {
-        let mut h = *clip;
-
-        if !(h[3] > 0.0) {
-            return None;
-        }
         if !self.window_matrix_given {
-            if h[3] <= 1e-6 {
-                h = h.map(|c| c / h[3]);
-            }
-            let v = self.gl_viewport().project(Wv::<0, 0> { h, ..Default::default() }, [0.0, 0.0], subpixel);
+            let v = self.gl_viewport().project_by::<NearW, 0, 0>(Wv::<0, 0> { h: *clip, ..Default::default() }, [0.0, 0.0], subpixel);
             return (v.ok != 0).then_some([v.x, v.y, v.z]);
         }
+        let [x, y, z] = NearW::divide(clip)?;
+        // The guard is a power of two, so scaling by it is exact.
         let guard = GL_WINDOW_GUARD as f32;
-        let snap = |v: f32| (v * subpixel).round() / subpixel;
-        Some([snap(h[0] * guard / h[3]), snap(h[1] * guard / h[3]), (h[2] / h[3] + 1.0) * 0.5])
+        Some([NearW::snap(x * guard, subpixel), NearW::snap(y * guard, subpixel), (z + 1.0) * 0.5])
     }
 }
 

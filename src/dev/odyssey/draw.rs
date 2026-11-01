@@ -1245,8 +1245,9 @@ pub(super) fn image_burst_fmt(reg: u32) -> Option<u32> {
     }
 }
 
-/// The board's raster rules. The board's own subpixel grid and
-/// interpolated-colour depth are unmeasured. The depth word is the board's
+/// The board's raster rules. Window positions sit on a grid of 8 subpixel
+/// bits, truncated (inferred; the vendor frames accept truncation at 1/16
+/// pixel or finer). The interpolated-colour depth is unmeasured. The depth word is the board's
 /// 24-bit float (depth_word.rs). (A function, not a static: the struct is not const
 /// constructible.)
 ///

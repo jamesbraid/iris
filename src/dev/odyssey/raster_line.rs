@@ -5,6 +5,7 @@
 //! Ported from hw/display/sgi/rasterizer.c in jamesbraid/qemu-sgi-origami.
 
 
+use crate::dev::gl::vertex::NearW;
 use crate::devlog::LogModule;
 use super::gl_context::{vtx, GL_CLIP_PLANES, GL_FLAT};
 use super::raster::{cmax, cmin, LineRule, RasterRules, SoftDraw, SoftFrag, SoftVertex};
@@ -627,11 +628,13 @@ impl SoftDraw<'_> {
         if stipple.is_none() && self.bounds().is_none() {
             return;
         }
-        let mut ca = self.st.volume_from_draw_vertex(va);
-        let mut cb = self.st.volume_from_draw_vertex(vb);
-        if !ca.clip_segment(&mut cb) {
+        let ca = self.st.volume_from_draw_vertex(va);
+        let cb = self.st.volume_from_draw_vertex(vb);
+        let clip = self.st.volume_clip(false);
+        let any = clip.outcode_by::<NearW, _>(&ca) | clip.outcode_by::<NearW, _>(&cb);
+        let Some((ca, cb)) = clip.clip_line_by::<NearW, _>(ca, cb, any) else {
             return;
-        }
+        };
         if let Some((a, b)) = self.project(&ca).and_then(|a| self.project(&cb).map(|b| (a, b))) {
             self.line_projected(&a, &b, provoking, 0.0, stipple, true);
         }
@@ -703,7 +706,7 @@ impl SoftDraw<'_> {
 
     pub fn point(&self, vp: &[f32]) {
         let cv = self.st.volume_from_draw_vertex(vp);
-        if !cv.contains() {
+        if self.st.volume_clip(false).outcode_by::<NearW, _>(&cv) != 0 {
             return;
         }
         if let Some(v) = self.project(&cv).filter(|v| !self.st.clipped(&v.clip)) {

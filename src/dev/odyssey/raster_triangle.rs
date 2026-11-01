@@ -21,144 +21,36 @@ use super::raster_texture::{
     SoftTexPlane,
 };
 use crate::dev::gl::math::xform;
+use crate::dev::gl::vertex::{Clip, ClipVertex, NearW, CLIP_PLANES};
 
-/// The six planes of the view volume (OpenGL 1.2.1, 2.11), -w <= x, y,
-/// z <= w, as each one's value at a point, which is >= 0 inside it.
-pub(super) const VOLUME_PLANES: i32 = 6;
+/// Clip triangle in_ by clip under the shared VPro geometry (`NearW`): the
+/// polygon left, and its vertex count, 0 when less than a triangle is.
+pub(super) fn volume_clip_triangle(clip: &Clip, in_: &[VolumeVertex; 3]) -> ([VolumeVertex; VOLUME_TRIANGLE_MAX], usize) {
+    let mut out = [VolumeVertex::default(); VOLUME_TRIANGLE_MAX];
 
-impl VolumeVertex {
-    pub fn plane(&self, plane: i32) -> f32 {
-        let c = self.clip[(plane / 2) as usize];
-
-        if plane & 1 != 0 { self.clip[3] - c } else { self.clip[3] + c }
-    }
-
-    pub fn contains(&self) -> bool {
-        for i in 0..VOLUME_PLANES {
-            if !(self.plane(i) >= 0.0) {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// The point at t along from in to out, in clip and eye coordinates and
-    /// every float attribute (2.13.8); the material index and edge flag are
-    /// bit patterns and stay in's.
-    pub fn lerp(&self, out: &VolumeVertex, t: f32) -> VolumeVertex {
-        let mut r = VolumeVertex::default();
-        // The shared core's crossing (`dev::gl::vertex::clip_cross`).
-        let l = |x: f32, y: f32| x + (y - x) * t;
-
-        for k in 0..4usize {
-            r.clip[k] = l(self.clip[k], out.clip[k]);
-            r.eye[k] = l(self.eye[k], out.eye[k]);
-        }
-        for k in 0..vtx::FLOATS {
-            r.attr[k] = if k == vtx::MATERIAL || k == vtx::EDGE { self.attr[k] } else { l(self.attr[k], out.attr[k]) };
-        }
-        r
-    }
-
-    /// Where the edge from in, inside a plane with value din, to out, outside
-    /// it with value dout, meets the plane. It is always found from the inside
-    /// end, so that two primitives sharing the edge make the same vertex.
-    pub fn cut(&self, din: f32, out: &VolumeVertex, dout: f32) -> VolumeVertex {
-        self.lerp(out, din / (din - dout))
-    }
-}
-
-/// Sutherland and Hodgman's clipping, one plane at a time: each edge
-/// keeps its inside end and adds the point where it crosses the plane.
-/// A value that is not a number is outside. The polygon left, and its
-/// vertex count, 0 when nothing is.
-pub(super) fn volume_clip_triangle(in_: &[VolumeVertex; 3]) -> ([VolumeVertex; VOLUME_TRIANGLE_MAX], usize) {
-    let mut out: [VolumeVertex; VOLUME_TRIANGLE_MAX] = Default::default();
-
-    out[..3].clone_from_slice(in_);
-    if in_[0].contains() && in_[1].contains() && in_[2].contains() {
+    out[..3].copy_from_slice(in_);
+    let any = in_.iter().fold(0, |o, v| o | clip.outcode_by::<NearW, _>(v));
+    if any == 0 {
         return (out, 3);
     }
-    // Only a triangle that crosses a plane needs the working polygons.
-    let mut src: [VolumeVertex; VOLUME_TRIANGLE_MAX] = std::array::from_fn(|_| VolumeVertex::default());
-    let mut dst: [VolumeVertex; VOLUME_TRIANGLE_MAX] = std::array::from_fn(|_| VolumeVertex::default());
-    let mut n: usize = 3;
-
-    src[..3].clone_from_slice(in_);
-    for p in 0..VOLUME_PLANES {
-        let mut m: usize = 0;
-
-        for i in 0..n {
-            let a = &src[i];
-            let b = &src[(i + 1) % n];
-            let da = a.plane(p);
-            let db = b.plane(p);
-
-            if da >= 0.0 {
-                dst[m] = a.clone();
-                m += 1;
-                if !(db >= 0.0) {
-                    dst[m] = a.cut(da, b, db);
-                    m += 1;
-                }
-            } else if db >= 0.0 {
-                dst[m] = b.cut(db, a, da);
-                m += 1;
-            }
-        }
-        n = m;
-        std::mem::swap(&mut src, &mut dst);
-        if n < 3 {
-            return (out, 0);
-        }
-    }
-    out[..n].clone_from_slice(&src[..n]);
-    (out, n)
-}
-
-impl VolumeVertex {
-    /// Liang and Barsky's clipping: the segment keeps the part every plane
-    /// allows. Each end that a plane bounds moves to where the segment meets
-    /// that plane, found from the other end, inside it, as a triangle's cut
-    /// is: a fraction sa of the way from b to a, and tb from a to b.
-    pub fn clip_segment(&mut self, b: &mut VolumeVertex) -> bool {
-        let mut na = self.clone();
-        let mut nb = b.clone();
-        let mut sa = 1.0f32;
-        let mut tb = 1.0f32;
-
-        for p in 0..VOLUME_PLANES {
-            let da = self.plane(p);
-            let db = b.plane(p);
-
-            if da >= 0.0 && db >= 0.0 {
-                continue;
-            }
-            if !(da >= 0.0) && !(db >= 0.0) {
-                return false;
-            }
-            if da >= 0.0 {
-                tb = cmin(tb, da / (da - db));
-            } else {
-                sa = cmin(sa, db / (db - da));
-            }
-        }
-        if !(sa + tb >= 1.0) {
-            return false;
-        }
-        if sa < 1.0 {
-            na = b.lerp(self, sa);
-        }
-        if tb < 1.0 {
-            nb = self.lerp(b, tb);
-        }
-        *self = na;
-        *b = nb;
-        true
-    }
+    // Only a triangle that crosses a plane needs the workspace.
+    let mut tmp = [VolumeVertex::default(); VOLUME_TRIANGLE_MAX];
+    let (n, _) = clip.clip_polygon_by::<NearW, _>(&mut out, &mut tmp, 3, any);
+    (out, if n < 3 { 0 } else { n })
 }
 
 impl GlDrawState {
+    /// The planes geometry is clipped by, under the shared VPro geometry
+    /// (`NearW`): x and y to the guard band about the window, w to the
+    /// near-w plane, and no near or far plane, since the raster drops a
+    /// fragment by its depth (inferred). With user, the enabled user clip
+    /// planes too, which polygon modes clip their outline by; filled
+    /// triangles, lines and points test them per fragment instead. How the
+    /// board applies a user plane is unknown, so both are model choices.
+    pub fn volume_clip(&self, user: bool) -> Clip {
+        Clip { user: self.clip_plane, user_on: if user { self.clip_planes } else { 0 } }
+    }
+
     /// A draw vertex in eye coordinates, in single precision through the
     /// shared transform.
     pub fn draw_vertex_eye(&self, v: &[f32]) -> [f32; 4] {
@@ -564,14 +456,14 @@ impl SoftDraw<'_> {
         }
     }
 
-    /// Transform, clip and rasterize one triangle. Clipped to the view volume
-    /// in clip coordinates, what is left is drawn as a fan from its first
+    /// Transform, clip and rasterize one triangle. Clipped in clip
+    /// coordinates (GlDrawState::volume_clip()), what is left is drawn as a fan from its first
     /// vertex, each flat shaded from the triangle's provoking vertex.
     /// The polygon left and its vertex count, or None when a textured
     /// piece is invalid.
     pub fn clip_triangle(&self, va: &[f32], vb: &[f32], vc: &[f32]) -> Option<([VolumeVertex; VOLUME_TRIANGLE_MAX], usize)> {
         let in_ = [va, vb, vc].map(|v| self.st.volume_from_draw_vertex(v));
-        let (poly, n) = volume_clip_triangle(&in_);
+        let (poly, n) = volume_clip_triangle(&self.st.volume_clip(false), &in_);
 
         if !poly[..n].iter().all(|v| self.texture_vertex_valid(v)) {
             return None;
@@ -634,91 +526,6 @@ impl SoftDraw<'_> {
         }
         self.clipped_fan(&first, n1, provoking[0]);
         self.clipped_fan(&second, n2, provoking[1]);
-    }
-}
-
-impl VolumeVertex {
-    pub fn soft_boundary_edge(&self) -> bool {
-        self.attr[vtx::EDGE].to_bits() != 0
-    }
-
-    pub fn soft_boundary_set_edge(&mut self, enabled: bool) {
-        self.attr[vtx::EDGE] = f32::from_bits(enabled as u32);
-    }
-}
-
-impl SoftDraw<'_> {
-    pub fn boundary_plane(&self, v: &VolumeVertex, p: u32) -> f32 {
-        if p < VOLUME_PLANES as u32 {
-            v.plane(p as _)
-        } else {
-            let plane = &self.st.clip_plane[(p - VOLUME_PLANES as u32) as usize];
-
-            plane[0] * v.eye[0] + plane[1] * v.eye[1] + plane[2] * v.eye[2] + plane[3] * v.eye[3]
-        }
-    }
-
-    /// Carry outgoing flags through complete polygon clipping (2.11). Original
-    /// retained edges keep their flags; the newly connecting cut edges are
-    /// true. The two workspaces swap each pass; the result is left in `poly` by
-    /// swapping the vectors at the end.
-    pub fn boundary_clip(&self, poly: &mut Vec<VolumeVertex>, other: &mut Vec<VolumeVertex>, count: &mut usize, capacity: usize) -> bool {
-        let mut src_is_poly = true;
-        let mut n = *count;
-
-        for p in 0..(VOLUME_PLANES as u32 + GL_CLIP_PLANES) {
-            let mut m = 0usize;
-
-            if p >= VOLUME_PLANES as u32 && (self.st.clip_planes & (1u32 << (p - VOLUME_PLANES as u32))) == 0 {
-                continue;
-            }
-            let (src, dst): (&Vec<VolumeVertex>, &mut Vec<VolumeVertex>) =
-                if src_is_poly { (&*poly, &mut *other) } else { (&*other, &mut *poly) };
-            for i in 0..n {
-                let a = &src[i];
-                let b = &src[(i + 1) % n];
-                let da = self.boundary_plane(a, p);
-                let db = self.boundary_plane(b, p);
-
-                if da >= 0.0 {
-                    if m == capacity {
-                        return false;
-                    }
-                    dst[m] = a.clone();
-                    m += 1;
-                    if !(db >= 0.0) {
-                        if da == 0.0 {
-                            dst[m - 1].soft_boundary_set_edge(true);
-                        } else {
-                            if m == capacity {
-                                return false;
-                            }
-                            dst[m] = a.cut(da, b, db);
-                            dst[m].soft_boundary_set_edge(true);
-                            m += 1;
-                        }
-                    }
-                } else if db > 0.0 {
-                    if m == capacity {
-                        return false;
-                    }
-                    dst[m] = b.cut(db, a, da);
-                    let edge = a.soft_boundary_edge();
-                    dst[m].soft_boundary_set_edge(edge);
-                    m += 1;
-                }
-            }
-            n = m;
-            src_is_poly = !src_is_poly;
-            if n == 0 {
-                break;
-            }
-        }
-        if !src_is_poly {
-            std::mem::swap(poly, other);
-        }
-        *count = n;
-        true
     }
 }
 
@@ -1208,10 +1015,10 @@ impl SoftDraw<'_> {
         if count < 3 {
             return GL_DRAW_OK;
         }
-        if count > usize::MAX - VOLUME_PLANES as usize - GL_CLIP_PLANES as usize {
+        if count > usize::MAX - CLIP_PLANES {
             return GL_DRAW_OUT_OF_MEMORY;
         }
-        let capacity = count + VOLUME_PLANES as usize + GL_CLIP_PLANES as usize;
+        let capacity = count + CLIP_PLANES;
         let mut poly: Vec<VolumeVertex> = vec![VolumeVertex::default(); capacity];
         let mut other: Vec<VolumeVertex> = vec![VolumeVertex::default(); capacity];
         // Facing must not prevalidate texture Q and erase a valid FILL prefix.
@@ -1223,10 +1030,15 @@ impl SoftDraw<'_> {
                 return GL_DRAW_OK;
             }
             if force_edges {
-                v.soft_boundary_set_edge(true);
+                v.set_edge(true);
             }
         }
-        if !self.boundary_clip(&mut poly, &mut other, &mut n, capacity) {
+        // Edges clipping adds are boundary edges; kept ones keep their flags.
+        let clip = self.st.volume_clip(true);
+        let any = poly[..count].iter().fold(0, |o, v| o | clip.outcode_by::<NearW, _>(v));
+        let over;
+        (n, over) = clip.clip_polygon_by::<NearW, _>(&mut poly, &mut other, n, any);
+        if over {
             crate::dlog!(LogModule::Odyssey, "sgi-gl: polygon exceeds convex clipping bound");
             return GL_DRAW_OK;
         }
@@ -1321,7 +1133,7 @@ impl SoftDraw<'_> {
             offset = self.rules.offset_amount(&self.st, slope);
         }
         for i in 0..n {
-            if !poly[i].soft_boundary_edge() {
+            if !poly[i].edge() {
                 continue;
             }
             // Validated in full above, so every projection here succeeds.

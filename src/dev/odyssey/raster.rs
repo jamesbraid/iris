@@ -8,6 +8,7 @@
 //! Ported from include/hw/display/sgi/rasterizer.h in jamesbraid/qemu-sgi-origami.
 
 
+use crate::dev::gl::vertex::ClipVertex;
 use crate::devlog::LogModule;
 use super::gl::{GlPixels, GlPlanes};
 use super::gl_context::{
@@ -41,11 +42,15 @@ pub(super) enum LineRule {
     CentreSampled,
 }
 
-// Window coordinates and depths round half away from zero. A counter-clockwise
-// triangle edge owns the pixel centres on it when it is a left or a top edge,
-// rows counted up from the bottom of the plane (SoftVertex::owns()). Smoothed
-// points and lines take the exact box filter's coverage. The board does not
-// dither (Board::gl_apply_mode() reports GL_DITHER).
+// Window coordinates truncate toward minus infinity onto the subpixel grid
+// (inferred), through the shared VPro geometry (dev::gl::vertex::NearW);
+// triangle edges are then exact integer functions of the snapped vertices (a
+// model choice the vendor frames pass). Depths round half away from zero. A
+// counter-clockwise triangle edge owns the pixel centres on it when it is a
+// left or a top edge, rows counted up from the bottom of the plane
+// (SoftVertex::owns()). Smoothed points and lines take the exact box filter's
+// coverage. The board does not dither (Board::gl_apply_mode() reports
+// GL_DITHER).
 
 #[derive(Clone, Default)]
 pub(super) struct RasterRules {
@@ -83,11 +88,11 @@ pub(super) struct RasterRules {
     pub depth_float: bool,
 }
 
-/// A vertex in clip coordinates, as view-volume clipping takes and makes it.
-/// Clipping is in single precision, as the shared GL core's (`dev::gl::vertex`)
-/// and MGRAS's are: a model choice, since the board's clip precision is
+/// A vertex in clip coordinates, as the shared GL core's clipper
+/// (`dev::gl::vertex::Clip`, under `NearW`) takes and makes it. Clipping is
+/// in single precision: a model choice, since the board's clip precision is
 /// unknown. The window position and 1/w come from this clip result.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub(super) struct VolumeVertex {
     pub clip: [f32; 4],
     pub eye: [f32; 4],
@@ -100,8 +105,49 @@ impl Default for VolumeVertex {
     }
 }
 
-/// The most vertices clipping a triangle by the six planes leaves. usize
-/// so it can size arrays.
+impl VolumeVertex {
+    /// The point at t along from self to out, in clip and eye coordinates
+    /// and every float attribute (2.13.8); the material index and edge flag
+    /// are bit patterns and stay self's.
+    pub fn lerp(&self, out: &VolumeVertex, t: f32) -> VolumeVertex {
+        let mut r = VolumeVertex::default();
+        // The shared core's crossing (`dev::gl::vertex::clip_cross`).
+        let l = |x: f32, y: f32| x + (y - x) * t;
+
+        for k in 0..4usize {
+            r.clip[k] = l(self.clip[k], out.clip[k]);
+            r.eye[k] = l(self.eye[k], out.eye[k]);
+        }
+        for k in 0..vtx::FLOATS {
+            r.attr[k] = if k == vtx::MATERIAL || k == vtx::EDGE { self.attr[k] } else { l(self.attr[k], out.attr[k]) };
+        }
+        r
+    }
+}
+
+impl ClipVertex for VolumeVertex {
+    fn h(&self) -> &[f32; 4] {
+        &self.clip
+    }
+    fn e(&self) -> &[f32; 4] {
+        &self.eye
+    }
+    /// Found from the inside end of the edge, so that two primitives
+    /// sharing the edge make the same vertex.
+    fn cross(a: &Self, b: &Self, da: f32, db: f32) -> Self {
+        if da >= 0.0 { a.lerp(b, da / (da - db)) } else { b.lerp(a, db / (db - da)) }
+    }
+    const EDGE_FLAGS: bool = true;
+    fn edge(&self) -> bool {
+        self.attr[vtx::EDGE].to_bits() != 0
+    }
+    fn set_edge(&mut self, edge: bool) {
+        self.attr[vtx::EDGE] = f32::from_bits(edge as u32);
+    }
+}
+
+/// The most vertices clipping a triangle leaves: one more per view-volume
+/// plane that clips (`NearW` has five). usize so it can size arrays.
 pub(super) const VOLUME_TRIANGLE_MAX: usize = 3 + 6;
 
 pub(super) const GL_TEX_LEVELS_MAX: u32 = 31;
@@ -1364,11 +1410,11 @@ impl SoftDraw<'_> {
     /// in single precision through the shared mapping
     /// (GlDrawState::clip_to_window()), with depth left normalized to
     /// [0, 1]; the depth range maps it per fragment. Under a window matrix
-    /// the position is the matrix's and the depth its window depth. Clipping
-    /// has put the vertex in the view volume, so its normalized depth is
-    /// clamped to [0, 1] against rounding. Under the rules' depth row the
-    /// depth is the row's over w instead, unclamped, as clipping does not
-    /// bound it. The colour is the front colour; a back-facing
+    /// the position is the matrix's and the depth its window depth. The
+    /// depth is not clamped: no near or far plane clips geometry (inferred),
+    /// so a fragment outside [0, 1] is dropped per pixel
+    /// (GlDrawState::window_depth()). Under the rules' depth row the depth is
+    /// the row's over w instead. The colour is the front colour; a back-facing
     /// triangle takes its back colour later.
     /// A vertex with w <= 0 is in the volume only at the clip-space origin,
     /// where the divide has no answer, and returns None, as does one mapped
@@ -1395,11 +1441,11 @@ impl SoftDraw<'_> {
         for k in 0..4usize {
             out.texcoord[k] = cv.attr[vtx::TEXCOORD + k] as f64;
         }
-        out.x = self.rules.round(xw * sub);
-        out.y = self.rules.round(yw * sub);
+        // Already on the grid: the truncation only makes it an integer.
+        out.x = (xw * sub).floor() as i64;
+        out.y = (yw * sub).floor() as i64;
         if !self.rules.depth_row_given {
-            let z = win[2];
-            out.z = if z >= 1.0 { 1.0 } else if z > 0.0 { z } else { 0.0 };
+            out.z = win[2];
         } else {
             let d = &self.rules.depth_row;
 
