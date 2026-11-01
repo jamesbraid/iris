@@ -208,6 +208,8 @@ impl Odyssey {
     }
 
     pub fn display(&self) -> Arc<dyn crate::gfx_display::GfxDisplay> {
+        // The host's cursor query reads the registers the display reads.
+        self.display.attach_registers(self.state.shared.clone());
         self.display.clone()
     }
 
