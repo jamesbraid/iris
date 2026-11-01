@@ -94,7 +94,7 @@ impl BoardLocks {
         self.fifo.running.store(false, SeqCst);
         // SAFETY: the board's thread is joined; the caller stops the
         // processors' threads before the devices.
-        let s = unsafe { self.board.get() };
+        let s = unsafe { &mut *self.board.get() };
         s.work_step(&mut Budget::unlimited());
         // Then the raster work those stores handed on.
         self.raster.stop();
@@ -116,7 +116,7 @@ impl BoardLocks {
             {
                 // SAFETY: this is the board's thread, which owns the state
                 // while it runs stores (BoardCell).
-                let s = unsafe { self.board.get() };
+                let s = unsafe { &mut *self.board.get() };
                 crate::pf_value!(self.fifo.pf_level, crate::perfetto::events::ODSY_CFIFO_LEVEL, self.fifo.level());
                 crate::pf_begin!(crate::perfetto::events::ODSY_SLICE, self.fifo.level());
                 s.work_step(&mut Budget::slice(words));

@@ -311,19 +311,31 @@ impl BoardCell {
         BoardCell(std::cell::UnsafeCell::new(b))
     }
 
-    /// The board, for the thread that may touch it now.
-    ///
-    /// # Safety
-    /// The caller is the board's thread running stores; or a processor
-    /// holding `BoardLocks::submit` with the FIFO and the raster queue empty
-    /// (the waiting accesses) or making a whole-word read the type's comment
-    /// describes; or the only thread using the board (machine stopped,
-    /// tests). No other `&mut Board` is used while the result is.
-    #[allow(clippy::mut_from_ref)]
-    pub(super) unsafe fn get(&self) -> &mut Board {
-        // SAFETY: the caller's contract.
-        unsafe { &mut *self.0.get() }
+    /// The board, for the thread that may touch it now: the board's thread
+    /// running stores, a processor through `BoardLocks::board()`, or the
+    /// only thread using the board (machine stopped, tests). Dereferencing
+    /// it is the caller's claim to be that thread.
+    pub(super) fn get(&self) -> *mut Board {
+        // The box never moves, so the pointer is the board's for its life.
+        // SAFETY: a place, not a reference: nothing is borrowed here.
+        unsafe { std::ptr::addr_of_mut!(**self.0.get()) }
     }
+}
+
+/// The board for a processor, with the other processors held off
+/// (`BoardLocks::submit`), as MGRAS's `FrontGuard` holds its front lock.
+pub(super) struct BoardGuard<'a> {
+    _cpu: crate::locks::SpinGuard<'a, ()>,
+    board: &'a mut Board,
+}
+
+impl std::ops::Deref for BoardGuard<'_> {
+    type Target = Board;
+    fn deref(&self) -> &Board { self.board }
+}
+
+impl std::ops::DerefMut for BoardGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Board { self.board }
 }
 
 /// What a processor's access goes through: the host interface's lock, the
@@ -431,6 +443,17 @@ impl Default for RefusalStats {
 }
 
 impl BoardLocks {
+    /// The board for a processor holding `submit`, which `cpu` proves.
+    ///
+    /// # Safety
+    /// The FIFO and the raster queue are empty (the waiting accesses), or
+    /// the board's thread is stopped, or the access is a whole-word read
+    /// `BoardCell` describes.
+    unsafe fn board<'a>(&'a self, cpu: crate::locks::SpinGuard<'a, ()>) -> BoardGuard<'a> {
+        // SAFETY: the caller's contract; `cpu` keeps the other processors out.
+        BoardGuard { _cpu: cpu, board: unsafe { &mut *self.board.get() } }
+    }
+
     pub fn new(s: Box<Board>) -> Self {
         let (front, fifo, raster, shared) = (s.front.clone(), s.fifo.clone(), s.raster.clone(), s.scanout.shared.clone());
         BoardLocks {
@@ -451,10 +474,9 @@ impl BoardLocks {
         match front_mmio_read(&self.front, addr, size) {
             Some(v) => v,
             None => {
-                let _cpu = self.submit.lock();
-                // SAFETY: see BoardCell: the caller owns the board with its
-                // thread stopped, or accepts the race of a whole-word read.
-                unsafe { self.board.get() }.mmio_read(addr, size)
+                // SAFETY: the caller owns the board with its thread stopped,
+                // or accepts the race of a whole-word read.
+                unsafe { self.board(self.submit.lock()) }.mmio_read(addr, size)
             }
         }
     }
@@ -473,7 +495,7 @@ impl BoardLocks {
         }
         // From the busy check to the end of the access no other processor
         // pushes a store that would wake the board's thread under it.
-        let _cpu = self.submit.lock();
+        let cpu = self.submit.lock();
         if access_waits(addr, size, false) && !level_word(addr, size) && self.fifo.running.load(std::sync::atomic::Ordering::SeqCst) {
             if self.fifo.pending() {
                 self.fifo.hurry();
@@ -485,9 +507,9 @@ impl BoardLocks {
                 return None;
             }
         }
-        // SAFETY: see BoardCell: the FIFO and the raster queue are empty and
-        // `submit` is held, or the access is a whole-word read.
-        Some(unsafe { self.board.get() }.mmio_read(addr, size))
+        // SAFETY: the FIFO and the raster queue are empty, or the access is
+        // a whole-word read.
+        Some(unsafe { self.board(cpu) }.mmio_read(addr, size))
     }
 
     /// A processor's store as the bus takes it. False, for the bus to
@@ -511,7 +533,7 @@ impl BoardLocks {
             self.write(addr, value, size);
             return true;
         }
-        let _cpu = self.submit.lock();
+        let cpu = self.submit.lock();
         // Classified once: a command store goes straight to the FIFO.
         if command_store(addr, size) {
             if self.fifo.full_for(size) {
@@ -519,7 +541,7 @@ impl BoardLocks {
                 self.refusals.note(Refusal::StoreFull, addr, size);
                 return false;
             }
-            self.write_command(addr, value, size);
+            self.write_command(cpu, addr, value, size);
             return true;
         }
         // A store that waits for the work, as a waiting read does.
@@ -528,13 +550,13 @@ impl BoardLocks {
             self.refusals.note(Refusal::StoreWaits, addr, size);
             return false;
         }
-        self.write_board(addr, value, size);
+        self.write_board(cpu, addr, value, size);
         true
     }
 
     /// A command store the caller has classified, holding `submit`: it joins
     /// the FIFO for the board's thread, else, with no thread, runs here.
-    fn write_command(&self, addr: u64, value: u64, size: u32) {
+    fn write_command(&self, cpu: crate::locks::SpinGuard<'_, ()>, addr: u64, value: u64, size: u32) {
         let counted = store_counted(&self.front);
         while self.fifo.running.load(std::sync::atomic::Ordering::SeqCst) {
             // The ring refuses a push that finds the last place taken between
@@ -545,17 +567,17 @@ impl BoardLocks {
             }
             std::thread::yield_now();
         }
-        // SAFETY: no board thread is running; `submit` is held.
-        unsafe { self.board.get() }.mmio_write_counted(addr, value, size, counted);
+        // SAFETY: no board thread is running.
+        unsafe { self.board(cpu) }.mmio_write_counted(addr, value, size, counted);
     }
 
     /// A store to the board's state that is not a command store, holding
     /// `submit`.
-    fn write_board(&self, addr: u64, value: u64, size: u32) {
+    fn write_board(&self, cpu: crate::locks::SpinGuard<'_, ()>, addr: u64, value: u64, size: u32) {
         let counted = store_counted(&self.front);
-        // SAFETY: see BoardCell: the waiting accesses have drained the FIFO,
-        // `submit` is held, or the board's thread is stopped.
-        unsafe { self.board.get() }.mmio_write_counted(addr, value, size, counted);
+        // SAFETY: the waiting accesses have drained the FIFO, or the board's
+        // thread is stopped.
+        unsafe { self.board(cpu) }.mmio_write_counted(addr, value, size, counted);
     }
 
     /// A store for a caller other than the bus: through the front alone when it
@@ -568,11 +590,11 @@ impl BoardLocks {
             front_mmio_write(&self.front, &self.fifo, addr, value, size, counted);
             return;
         }
-        let _cpu = self.submit.lock();
+        let cpu = self.submit.lock();
         if command_store(addr, size) {
-            return self.write_command(addr, value, size);
+            return self.write_command(cpu, addr, value, size);
         }
-        self.write_board(addr, value, size);
+        self.write_board(cpu, addr, value, size);
     }
 }
 
@@ -583,7 +605,7 @@ impl BoardLocks {
     #[allow(clippy::mut_from_ref)]
     pub(super) fn test_board(&self) -> &mut Board {
         // SAFETY: the test's contract.
-        unsafe { self.board.get() }
+        unsafe { &mut *self.board.get() }
     }
 }
 

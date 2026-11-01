@@ -522,7 +522,9 @@ impl RasterQueue {
     /// caller is the front end.
     pub fn submit_work(&self, cost: u32, job: impl FnOnce(&mut RasterCtx) + Send + 'static) {
         if !self.threaded() {
-            let ctx = self.ctx();
+            // SAFETY: no raster thread runs, so the front end owns the
+            // context (see the Sync impl).
+            let ctx = unsafe { &mut *self.ctx.get() };
             job(ctx);
             ctx.publish();
             return;
@@ -622,7 +624,9 @@ impl RasterQueue {
     /// answer: with no raster thread, a GL draw's result and stipple phase.
     pub fn run_now<R>(&self, job: impl FnOnce(&mut RasterCtx) -> R) -> R {
         self.wait_idle();
-        let ctx = self.ctx();
+        // SAFETY: the queue is idle and this is the front end, which queues
+        // the jobs, so nothing else runs one (see the Sync impl).
+        let ctx = unsafe { &mut *self.ctx.get() };
         let result = job(ctx);
         ctx.publish();
         result
@@ -657,14 +661,6 @@ impl RasterQueue {
     #[cfg(test)]
     pub fn in_slice(&self) -> bool {
         self.test_in_slice.load(SeqCst)
-    }
-
-    /// The raster unit's state, for whoever runs a job: the raster thread, or
-    /// the front end when no job is queued.
-    #[allow(clippy::mut_from_ref)]
-    fn ctx(&self) -> &mut RasterCtx {
-        // SAFETY: see the Sync impl.
-        unsafe { &mut *self.ctx.get() }
     }
 
     /// Start the raster thread.
@@ -724,7 +720,9 @@ impl RasterQueue {
             if self.pushed.load(SeqCst) == self.taken.load(SeqCst) && self.exit.load(SeqCst) {
                 return;
             }
-            let ctx = self.ctx();
+            // SAFETY: this is the raster thread, which owns the context
+            // while it runs (see the Sync impl).
+            let ctx = unsafe { &mut *self.ctx.get() };
             #[cfg(test)]
             self.test_in_slice.store(true, SeqCst);
             #[cfg(test)]

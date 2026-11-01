@@ -923,6 +923,8 @@ impl GlDrawJob {
         let mut targets = [0; GL_MAX_TARGETS as usize];
         let n = self.state.draw_targets(&mut targets) as usize;
         pixels.row_targets = GlPixels::target_bits(&targets[..n]);
+        // SAFETY: the raster unit owns the board memory the spans name while
+        // the job runs (PlaneSpans), and the chain is the one the job holds.
         let texels = chain.map(|chain| unsafe { self.tables.texels(chain, self.pixels.spans.obj) });
         let texels: &dyn Texels = match &texels {
             Some(texels) => texels,
