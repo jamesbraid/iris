@@ -9,7 +9,7 @@ use crate::dev::odyssey::gl_context::{
     GL_LUMINANCE_ALPHA, GL_MODULATE, GL_RGB, GL_RGBA,
 };
 use crate::dev::odyssey::sampler::{
-    texel_format, texture_class_format, texture_level_texel_format, Placement, SamplerContext, Target, Wrap,
+    texel_format, texture_class_format, texture_level_texel_format, Placement, TableFormat, Target, Wrap,
 };
 use crate::dev::odyssey::raster::GlTexImage;
 use crate::dev::odyssey::tests::board_with_ram;
@@ -531,9 +531,48 @@ fn the_sampler_words_decode_into_fields() {
     assert_eq!(d.size(), [512, 256, 1]);
     assert_eq!(d.max_clamp, [512, 256, 1]);
     assert_eq!(d.wrap, [Wrap::ClampToEdge, Wrap::ClampToEdge, Wrap::Repeat]);
-    assert_eq!((d.base_format, d.context, d.placement), (GL_RGBA, SamplerContext::Plain, Placement::Corner));
+    assert_eq!((d.base_format, d.placement), (GL_RGBA, Placement::Corner));
+    assert!(d.context.plain());
     assert_eq!((d.min, d.mag, d.first, d.env), (0, 0, 0, 1));
     assert!(d.detail.is_none());
+}
+
+/// Word 4 bits 22:18 and 0 decode by name. Every value the library writes is
+/// taken, with the enable either way: bits 22:20 are the table format and
+/// bit 18 the image step. The lookup's behaviour is a model choice, so only
+/// an enabled RGB or RGBA table is drawn.
+#[test]
+fn the_colour_table_fields_decode_by_name() {
+    let formats = [None, Some(TableFormat::Alpha), Some(TableFormat::Luminance), Some(TableFormat::LuminanceAlpha), Some(TableFormat::Intensity), Some(TableFormat::Rgb), Some(TableFormat::Rgba)];
+    // Bits 22:18 as the library writes them: 4 times the format code, plus 1
+    // inside an image step.
+    let occurring = [0u32, 1, 4, 5, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25];
+    let (mut s, _, _) = board_with_ram();
+
+    for v in occurring {
+        for enable in [false, true] {
+            rgba_512x256(&mut s, 0x16b800);
+            s.tex.sampler[4] |= (v << 18) | enable as u32 | if v & 1 != 0 { 1 << 14 } else { 0 };
+            let d = s.texture_sampler().unwrap_or_else(|r| panic!("{v} enable {enable}: {}", r.0));
+            let c = d.context;
+
+            assert_eq!((c.enable, c.table, c.image_step), (enable, formats[(v >> 2) as usize], v & 1 != 0), "{v} enable {enable}");
+            assert_eq!(c.plain(), !enable && v & 1 == 0, "{v} enable {enable}");
+            assert_eq!(c.image_default(), !enable && v == 25, "{v} enable {enable}");
+            let drawn = !enable || matches!(c.table, Some(TableFormat::Rgb | TableFormat::Rgba));
+            assert_eq!(s.texture_support(&d).map_or_else(|r| r.0.contains("colour table lookup with no"), |_| false), !drawn, "{v} enable {enable}");
+        }
+    }
+}
+
+/// Bit 14 without bit 18 is not said never to occur, so it decodes.
+#[test]
+fn bit_14_alone_is_accepted() {
+    let (mut s, _, _) = board_with_ram();
+
+    rgba_512x256(&mut s, 0x16b800);
+    s.tex.sampler[4] |= 0x4000;
+    assert!(s.texture_sampler().is_ok());
 }
 
 /// Each state field the library never writes, or writes only in agreement
@@ -541,7 +580,7 @@ fn the_sampler_words_decode_into_fields() {
 #[test]
 fn words_the_library_never_writes_refuse_the_draw() {
     let control = |s: &mut Board| rgba_512x256(s, 0x16b800);
-    let cases: [(&str, fn(&mut Board)); 12] = [
+    let cases: [(&str, fn(&mut Board)); 13] = [
         ("size word bit 30", |s| s.tex.sampler[0] |= 0x4000_0000),
         ("an R size on a 2D image", |s| s.tex.sampler[0] |= 1),
         ("a size word's mark without clamp to edge", |s| s.tex.sampler[1] = 512),
@@ -549,7 +588,8 @@ fn words_the_library_never_writes_refuse_the_draw() {
         ("a maximum clamp past the size", |s| s.tex.sampler[1] = 0x0004_0000 | 513),
         ("class 7", |s| s.tex.sampler[4] |= 0x0380_0000),
         ("word 4 bit 31", |s| s.tex.sampler[4] |= 0x8000_0000),
-        ("bits 22:18 the model has not seen", |s| s.tex.sampler[4] |= 0x0004_0000),
+        ("bit 19", |s| s.tex.sampler[4] |= 0x0008_0000),
+        ("table format 7", |s| s.tex.sampler[4] |= 0x0070_0000),
         ("word 4 bit 28 and word 6 bit 24 both set", |s| s.tex.sampler[6] |= 0x0100_0000),
         ("minification code 6", |s| s.tex.sampler[4] |= 0xc0),
         ("an R wrap on a 2D image", |s| s.tex.sampler[4] |= 0x100),

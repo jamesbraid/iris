@@ -243,37 +243,87 @@ impl Wrap {
     }
 }
 
-/// Sampler word 4 bits 22:18 and bit 0, which the library takes from context
-/// state rather than the texture object. What they select on the board is
-/// UNKNOWN. The model reads the values it has seen and refuses any other:
+/// The format of the texture colour table, sampler word 4 bits 22:20 (1
+/// alpha, 2 luminance, 3 luminance-alpha, 4 intensity, 5 RGB, 6 RGBA). The
+/// context keeps it, not the texture object: it is 0 until a table is stored
+/// and survives a disable. ESTABLISHED as what the library writes; that the
+/// code says which channels the table holds is INFERRED from the numbering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SamplerContext {
-    /// Bits 22:18 0, or 20 or 24 with bit 0 clear: an ordinary draw.
-    Plain,
-    /// Bits 22:18 25 (bits 22, 21 and 18) with bit 0 clear: the image path's
-    /// default block word, which the texture move samples under (ESTABLISHED:
-    /// the move runs with that block's word, 0x03640000 with its class forced
-    /// to 6) and the mip-level builder sends too. MODEL CHOICE: sampled as
-    /// the plain image.
-    Image,
-    /// Bits 22:18 20 or 24 with bit 0 set: a colour table looked up after
-    /// filtering, the 0x3e00 and 0x3e10 tables, and with 24 its alpha table
-    /// too. INFERRED from the draws that send these values while those tables
-    /// are loaded; what the bits do on the board is UNKNOWN.
-    ColourTable { alpha: bool },
+pub(super) enum TableFormat {
+    Alpha = 1,
+    Luminance = 2,
+    LuminanceAlpha = 3,
+    Intensity = 4,
+    Rgb = 5,
+    Rgba = 6,
+}
+
+/// Sampler word 4 bits 22:18, bit 14 and bit 0, which the library takes from
+/// context state rather than the texture object, decoded by name:
+/// - bit 0, the colour-table enable, set and cleared by glEnable and
+///   glDisable of the table (ESTABLISHED as what the library writes);
+/// - bits 22:20, the table's format (TableFormat), 0 for none;
+/// - bit 18, set only inside the image-processing steps while they draw
+///   (ESTABLISHED), with bit 14 (the sheet gives the pair; that bit 14
+///   never occurs alone is not stated, so it is accepted and logged once as
+///   unexpected);
+/// - bit 19, never set (ESTABLISHED).
+/// The values that occur are bits 22:18 of 0, 1, 4, 5, 8, 9, 12, 13, 16, 17,
+/// 20, 21, 24 and 25, each with bit 0 either way. In particular 20 and 24 are
+/// an RGB and an RGBA table and 25 an RGBA table inside an image step. All of
+/// them are accepted. What the enable, the format and bits 18 and 14 do on
+/// the board is UNKNOWN; the lookup's behaviour is a MODEL CHOICE, made in
+/// lookup() and Board::texture_support().
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SamplerContext {
+    pub enable: bool,
+    pub table: Option<TableFormat>,
+    pub image_step: bool,
 }
 
 impl SamplerContext {
     fn decode(word: u32) -> Option<SamplerContext> {
-        let enable = (word & 1) != 0;
+        let table = match (word >> 20) & 7 {
+            0 => None,
+            1 => Some(TableFormat::Alpha),
+            2 => Some(TableFormat::Luminance),
+            3 => Some(TableFormat::LuminanceAlpha),
+            4 => Some(TableFormat::Intensity),
+            5 => Some(TableFormat::Rgb),
+            6 => Some(TableFormat::Rgba),
+            _ => return None,
+        };
+        let image_step = (word & CONTEXT_IMAGE_STEP) != 0;
 
-        match ((word >> 18) & 0x1f, enable) {
-            (0, false) | (20, false) | (24, false) => Some(SamplerContext::Plain),
-            (25, false) => Some(SamplerContext::Image),
-            (20, true) => Some(SamplerContext::ColourTable { alpha: false }),
-            (24, true) => Some(SamplerContext::ColourTable { alpha: true }),
-            _ => None,
+        if (word & CONTEXT_NEVER_SET) != 0 {
+            return None;
         }
+        if (word & CONTEXT_IMAGE_STEP_PAIR) != 0 && !image_step && !LONE_PAIR_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: sampler word 4 bit 14 set without bit 18; accepted");
+        }
+        Some(SamplerContext { enable: (word & 1) != 0, table, image_step })
+    }
+
+    /// An ordinary draw: no lookup and no image step. MODEL CHOICE: the
+    /// stored table's format is ignored while the lookup is off.
+    pub(super) fn plain(&self) -> bool {
+        !self.enable && !self.image_step
+    }
+
+    /// The image path's default block word, which the texture move samples
+    /// under (ESTABLISHED: the move runs with that block's word, 0x03640000
+    /// with its class forced to 6) and the mip-level builder sends too: an
+    /// RGBA table format, bit 18, the enable clear. MODEL CHOICE: sampled as
+    /// the plain image.
+    pub(super) fn image_default(&self) -> bool {
+        !self.enable && self.image_step && self.table == Some(TableFormat::Rgba)
+    }
+
+    /// The table a draw looks up after filtering, if the enable is set.
+    /// MODEL CHOICE: bit 18 does not change the lookup, which runs the same
+    /// inside and outside an image step.
+    pub(super) fn lookup(&self) -> Option<TableFormat> {
+        if self.enable { self.table } else { None }
     }
 }
 
@@ -286,7 +336,7 @@ pub(super) fn texture_mip_build_word(word4: u32) -> bool {
     !( (word4 & MODE_WORD_UNKNOWN) != 0
         || (word4 & CORNER_FLAG) == 0
         || (word4 & 0x3fffe) != 0
-        || SamplerContext::decode(word4) != Some(SamplerContext::Image)
+        || !SamplerContext::decode(word4).is_some_and(|c| c.image_default())
         || texture_class_format(word4 & tex::COMPONENTS_MASK).is_none())
 }
 
@@ -363,7 +413,13 @@ const MIN_CODE_NEAREST_MIPMAP_NEAREST: u32 = 2;
 
 /// Word 0 bit 30 and word 4 bits 31:29 and 16:14 are never written.
 const SIZE_WORD_UNKNOWN: u32 = 0x40000000;
-const MODE_WORD_UNKNOWN: u32 = 0xe001c000;
+const MODE_WORD_UNKNOWN: u32 = 0xe0018000;
+/// Word 4 bit 19 is never set; bit 18 is the image-step flag, bit 14 its pair.
+const CONTEXT_NEVER_SET: u32 = 1 << 19;
+const CONTEXT_IMAGE_STEP: u32 = 1 << 18;
+const CONTEXT_IMAGE_STEP_PAIR: u32 = 1 << 14;
+/// Whether the lone bit 14 has been logged.
+static LONE_PAIR_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Words 1 to 3: bits 31:24 and 17 are never written.
 const AXIS_WORD_UNKNOWN: u32 = 0xff020000;
 /// Words 5 and 6 bits 31:25, and word 5 bit 24, are never written.
@@ -466,7 +522,7 @@ impl Board {
             return Err(Refusal("sampler word 4 class"));
         };
         let Some(context) = SamplerContext::decode(mode) else {
-            return Err(Refusal("sampler word 4 bits 22:18 and 0"));
+            return Err(Refusal("sampler word 4 bit 19 or table format code 7"));
         };
         if ((border0 | border1) & BORDER_WORD_UNKNOWN) != 0 || (border0 & OFFSET_FLAG) != 0 {
             return Err(Refusal("border colour word bits the library never writes"));
@@ -474,7 +530,7 @@ impl Board {
         let placement = match ((mode & CORNER_FLAG) != 0, (border1 & OFFSET_FLAG) != 0) {
             (true, false) => Placement::Corner,
             (false, true) => Placement::TexelOffset,
-            (false, false) if context == SamplerContext::Image => Placement::Move,
+            (false, false) if context.image_default() => Placement::Move,
             _ => return Err(Refusal("word 4 bit 28 and word 6 bit 24 are not complements")),
         };
         let min = (mode >> 5) & 7;
@@ -580,7 +636,10 @@ impl Board {
         if axes.contains(&Wrap::ClampToBorder) && s.placement == Placement::TexelOffset {
             return Err(Refusal("clamp to border on an image with a stored border"));
         }
-        if let SamplerContext::ColourTable { .. } = s.context {
+        if s.context.enable {
+            if !matches!(s.context.table, Some(TableFormat::Rgb | TableFormat::Rgba)) {
+                return Err(Refusal("a colour table lookup with no RGB or RGBA table is not modelled"));
+            }
             if s.target == Target::ThreeD {
                 return Err(Refusal("a colour table on a volume is not modelled"));
             }
@@ -592,7 +651,7 @@ impl Board {
             if s.target != Target::TwoD || s.first != 0 {
                 return Err(Refusal("a detail texture on other than a 2D image from entry 0"));
             }
-            if s.placement != Placement::Corner || s.context != SamplerContext::Plain {
+            if s.placement != Placement::Corner || !s.context.plain() {
                 return Err(Refusal("a detail texture with a stored border or a lookup table is not modelled"));
             }
             if axes.iter().any(|&a| a != Wrap::Repeat) {
@@ -759,9 +818,9 @@ impl Board {
             }
         }
         chain.clear();
-        if let SamplerContext::ColourTable { alpha } = s.context {
+        if let Some(table) = s.context.lookup() {
             chain.volume.colour_table = true;
-            chain.volume.colour_table_alpha = alpha;
+            chain.volume.colour_table_alpha = table == TableFormat::Rgba;
         }
         chain.volume.scale_bias = !self.texture_scale_bias_identity();
         if chain.volume.colour_table || chain.volume.scale_bias {
