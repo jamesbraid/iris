@@ -4557,10 +4557,10 @@ mod tests {
         let words = [addiu(0x22), jr];
         for w in 0..16u64 {
             let word = words.get(w as usize).copied().unwrap_or(0);
-            // The model's raw encoding (p[35:32] = 0xf), with even parity.
-            exec.cache.issue_raw_for_test(0xfu64 << 32 | word as u64);
-            exec.core.cp0_ecc = (0xfu64 << 32 | word as u64).count_ones() & 1;
-            cache_op(&mut exec, 0x1c, 4 * w + 1, word, 0xf);
+            // The form a refill writes (TagHi = 0), with even parity.
+            
+            exec.core.cp0_ecc = (word as u64).count_ones() & 1;
+            cache_op(&mut exec, 0x1c, 4 * w + 1, word, 0);
         }
         for _ in 0..4 {
             assert_eq!(run(&mut exec), 0x22, "the staged words run, not the compiled page");

@@ -145,9 +145,6 @@ const L1D_MODIFIER_WRITTEN: u64 = 2;
 const L1I_TAG_PA_MASK: u64 = 0xf_ffff_ff00;
 const L1I_VALID: u64 = 1 << 6;
 
-/// Most raw words `l1i_issued` holds before it starts again.
-const L1I_ISSUED_MAX: usize = 1 << 16;
-
 /// CacheErr.ED: a data-field error (NEC U10278EJ4V0UM p.265).
 const L1I_CACHEERR_ED: u32 = 1 << 29;
 
@@ -164,32 +161,33 @@ fn l1i_parity_of(p: u64) -> u32 {
     p.count_ones() & 1
 }
 
-/// A primary instruction-cache word is the instruction predecoded: 36 bits
-/// that fetch decodes back. Neither NEC manual gives the layout. This is a
-/// layout inferred from the opcodes a guest's PROM was seen to stage, for
-/// those opcodes only, with `p` the 36-bit word and `f` the instruction:
+/// A primary instruction-cache word is 36 bits: the instruction predecoded,
+/// plus a parity bit kept apart. Neither NEC manual gives the layout, and this
+/// model stores and returns whatever a guest writes (Index Store Data and
+/// Index Load Data move the bits verbatim). Fetching decodes two forms, with
+/// `p` the 36-bit word and `f` the instruction:
+///
+/// - p[35:32] = 0: the word is `f` itself in p[31:0]. A refill writes this
+///   form, a copy of a refilled word keeps it, and the all-zero nop is the
+///   same in both forms. Model choice: hardware stores the predecoded form
+///   here, so Index Load Data of a refilled word differs from hardware.
+/// - p[35:32] != 0: the layout inferred from the table a PROM was seen to load,
+///   for the classes in `L1I_CLASSES` only:
 ///   p[25:20] = f[5:0], p[19:15] = f[10:6], p[14:10] = f[25:21],
 ///   p[28:26] = f[28:26], p[35:29] = a 7-bit class,
 ///   p[4:0] and p[9:5] = f[20:16] and f[15:11] (rt and rd positions), in the
-///   order the opcode gives.
-/// f[31:29] is not in any field, so it comes from the class. The class table
-/// is what was observed, and it is all this model knows: an entry gives
-/// the class, f[31:29], and whether p[4:0] is the rt position. Every other
-/// class is refused (`Err(class)`), never guessed.
+///   order the class gives. f[31:29] is in no field, so the class gives it.
+///   Example: `addiu $4,$0,2` (0x24040002) is 0x3_4420_0004.
 ///
-/// Example: `addiu $4,$0,2` (0x24040002) is 0x3_4420_0004.
+/// Any other word is refused (`Err(class)`), never guessed.
 const L1I_CLASSES: &[L1iClass] = &[
     // Every row is inferred.
-    L1iClass { class: 0x00, hi3: 0b000, rt_low: false, ops: &[0], funct: &[0x00] },
     L1iClass { class: 0x08, hi3: 0b000, rt_low: false, ops: &[0], funct: &[0x38, 0x3c] }, // dsll, dsll32
-    L1iClass { class: 0x18, hi3: 0b000, rt_low: false, ops: &[0], funct: &[0x25] },       // or
     L1iClass { class: 0x1a, hi3: 0b001, rt_low: true, ops: &[0, 1, 5, 7], funct: &[] },   // addi addiu ori lui
     L1iClass { class: 0x1e, hi3: 0b011, rt_low: true, ops: &[1], funct: &[] },            // daddiu
     L1iClass { class: 0x35, hi3: 0b101, rt_low: false, ops: &[7], funct: &[] },           // cache
-    L1iClass { class: 0x36, hi3: 0b110, rt_low: true, ops: &[7], funct: &[] },            // ld
     L1iClass { class: 0x3f, hi3: 0b010, rt_low: false, ops: &[0], funct: &[] },           // mtc0
-    L1iClass { class: 0x40, hi3: 0b000, rt_low: false, ops: &[3], funct: &[] },           // jal
-    L1iClass { class: 0x41, hi3: 0b000, rt_low: false, ops: &[0, 2], funct: &[0x08] },    // jr (op 0, funct 8), j (op 2)
+    L1iClass { class: 0x41, hi3: 0b000, rt_low: false, ops: &[0], funct: &[0x08] },       // jr
     L1iClass { class: 0x71, hi3: 0b000, rt_low: false, ops: &[1], funct: &[] },           // REGIMM
 ];
 
@@ -205,23 +203,9 @@ struct L1iClass {
     funct: &'static [u8],
 }
 
-/// **Model choice, hardware contents unknown.** A word whose p[35:32] is 0xf
-/// and that carries `L1I_RAW_FLAG` is this model's encoding of a raw
-/// instruction: p[31:0] is the instruction. A refill writes it, Index Load
-/// Data returns it and a verbatim Index Store Data of exactly such a word
-/// keeps it, so a word outside the sampled set can round-trip and execute. A
-/// word a guest builds with p[35:32] = 0xf has no flag and is decoded as an
-/// ordinary word, whose classes 0x78-0x7f are unknown and refused. It is not a
-/// claim about what hardware stores.
-const L1I_RAW: u64 = 0xf;
-
-/// Bit 1 of the stored parity slot: the word is the model's raw form. Never
-/// shown to the guest (Index Load Data returns bit 0 only).
-const L1I_RAW_FLAG: u32 = 2;
-
 /// The instruction a staged word encodes, or the class that is refused.
-fn l1i_decode(p: u64, raw_ok: bool) -> Result<u32, u8> {
-    if raw_ok && (p >> 32) & 0xf == L1I_RAW {
+fn l1i_decode(p: u64) -> Result<u32, u8> {
+    if (p >> 32) & 0xf == 0 {
         return Ok(p as u32);
     }
     let class = (p >> 29) as u8 & 0x7f;
@@ -231,7 +215,7 @@ fn l1i_decode(p: u64, raw_ok: bool) -> Result<u32, u8> {
     // The class, p[28:26] and for the SPECIAL members the function field
     // identify the instruction; anything else in a known class is refused.
     let special = !row.funct.is_empty() && op == 0;
-    if !row.ops.contains(&op) || (special && !row.funct.contains(&funct)) || (class == 0 && p != 0) {
+    if !row.ops.contains(&op) || (special && !row.funct.contains(&funct)) {
         return Err(class);
     }
     let (hi3, rt_low) = (row.hi3, row.rt_low);
@@ -387,15 +371,6 @@ pub struct ShadowCache<
     l1i_detect: UnsafeCell<bool>,
     /// Predecode classes already reported as refused, to warn once each.
     l1i_refused: UnsafeCell<Vec<u8>>,
-    /// Raw-form words Index Load Data has returned: a verbatim Index Store
-    /// Data of one of these keeps the raw flag. At most `L1I_ISSUED_MAX`
-    /// words, emptied when full, and not saved in snapshots: the flag only
-    /// matters to a guest that copies a line it read out with Index Load Data
-    /// back with Index Store Data, which does so within the loop that reads
-    /// it. A word read before a snapshot and stored after it, or after 64 Ki
-    /// other distinct words, is stored without the flag and refused like any
-    /// guest-built 0xf word, reported on stderr, never run as raw bits.
-    l1i_issued: UnsafeCell<std::collections::HashSet<u64>>,
     /// Decode-cache page marks to apply at the next fetch or cache operation:
     /// `fetch` holds the decode cache, so a refill cannot touch it.
     bus_pending: UnsafeCell<Vec<(u64, bool)>>,
@@ -464,7 +439,6 @@ impl<
             l1i_err: UnsafeCell::new(0),
             l1i_detect: UnsafeCell::new(true),
             l1i_refused: UnsafeCell::new(Vec::new()),
-            l1i_issued: UnsafeCell::new(Default::default()),
             bus_pending: UnsafeCell::new(Vec::new()),
         }
     }
@@ -756,9 +730,10 @@ impl<
     // - Index Load Data (I) returns the stored word and parity as they were
     //   stored, so a readback stored back verbatim round-trips and executes.
     //   The only refill is from a staged secondary line (`l1i_refill`); other
-    //   lines the guest never staged read back as the shadow's contents. Model
-    //   choice, hardware contents unknown: a word with p[35:32] = 0xf is a raw
-    //   instruction in p[31:0] (`L1I_RAW`);
+    //   lines the guest never staged read back as the shadow's contents. A
+    //   refill writes TagHi = 0 and the instruction in TagLo, which a fetch
+    //   runs as it is (`l1i_decode`). That is an approximation: Index Load
+    //   Data of a refilled word differs from hardware's predecoded word;
     //
     // The primary data cache is not served: its tag and data layouts are
     // known, but a dirty line writes back to the secondary cache and the
@@ -769,21 +744,6 @@ impl<
         (((tag >> 8) & 0xff_ffff) << 12)
             | (((tag >> 32) & 0xf) << 36)
             | ((set as u64 * IC_LINE as u64) & 0xfff)
-    }
-
-    /// Index Load Data handed out the raw word `p`.
-    fn l1i_note_issued(&self, p: u64) {
-        let issued = unsafe { &mut *self.l1i_issued.get() };
-        if issued.len() >= L1I_ISSUED_MAX {
-            issued.clear();
-        }
-        issued.insert(p);
-    }
-
-    /// Test hook: stands for Index Load Data having handed out the raw word `p`.
-    #[cfg(test)]
-    pub(crate) fn issue_raw_for_test(&self, p: u64) {
-        self.l1i_note_issued(p);
     }
 
     /// Store a primary I tag, keeping the staged-line index in step.
@@ -837,7 +797,7 @@ impl<
                 unsafe { *self.l1i_err.get() = L1I_CACHEERR_ED | (pa as u32 & 0x003f_fff8) | (va >> 12) as u32 & 7 };
                 return Err(EXEC_CACHE_ERR);
             }
-            match l1i_decode(p, ic.ecc[slot] & L1I_RAW_FLAG != 0) {
+            match l1i_decode(p) {
                 Ok(w) => return Ok(Some(w)),
                 Err(class) => {
                     // Refused: see `l1i_decode`. An approximation: the fetch is
@@ -862,9 +822,9 @@ impl<
     /// do not track residency.
     /// Model choices: the victim is an Invalid way before a Valid one, and way
     /// 0 when both are valid (the manual states no replacement for a refill);
-    /// the refilled words are stored in the model's raw encoding
-    /// (`L1I_RAW`), the architectural word carried in place of the predecoded
-    /// form hardware stores, with its even parity.
+    /// the refilled words are stored as TagHi = 0, TagLo = the instruction,
+    /// with its even parity, in place of the predecoded form hardware stores.
+    /// The secondary tag takes the fetch's VA[13:12] as its virtual index.
     fn l1i_refill(&self, va: u64, pa: u64) -> Option<usize> {
         let ic = unsafe { &mut *self.ic.get() };
         if ic.data.is_empty() {
@@ -877,12 +837,18 @@ impl<
         let per_way = ic.data.len() / WAYS;
         for i in 0..(IC_LINE / 4) as u64 {
             let w = self.staged_read::<4>(pbase + 4 * i).unwrap_or(0);
-            let p = L1I_RAW << 32 | w;
+            let p = w as u64;
             let slot = (((vbase >> 2) + i) as usize % per_way) * WAYS + way;
             ic.data[slot] = p;
-            ic.ecc[slot] = (p.count_ones() & 1) | L1I_RAW_FLAG;
+            ic.ecc[slot] = p.count_ones() & 1;
         }
         self.set_l1i_tag(idx, l1i_tag_of(pa) | L1I_VALID);
+        // The secondary tag records the virtual index of the access that filled
+        // the primary line, which a later purge of the block goes by.
+        if let Some((l2_idx, _)) = self.staged_line(pa) {
+            let l2 = unsafe { &mut *self.l2.get() };
+            l2.tags[l2_idx] = l2.tags[l2_idx] & !(3 << L2_VINDEX_SHIFT) | ((va >> 12) & 3) << L2_VINDEX_SHIFT;
+        }
         Some(idx)
     }
 
@@ -910,33 +876,17 @@ impl<
         found
     }
 
-    /// Did the model refill the primary I line at tag slot `idx`? Its words
-    /// carry the raw flag (`l1i_refill`), and a guest that stored over the
-    /// first word has made the line its own.
-    fn l1i_refilled(&self, idx: usize) -> bool {
-        let ic = unsafe { &*self.ic.get() };
-        let (set, way) = (idx / WAYS, idx % WAYS);
-        let slot = ((set * IC_LINE / 4) % (ic.data.len() / WAYS).max(1)) * WAYS + way;
-        ic.ecc.get(slot).is_some_and(|e| e & L1I_RAW_FLAG != 0)
-    }
-
     /// Invalidating a secondary block invalidates the primary instruction
     /// lines it holds (NEC U12754EJ1V0UMJ1 p.17, 19), those at the virtual
-    /// index the secondary tag records (`pidx`, TagLo[8:7]). A line the model
-    /// refilled itself goes whatever its index: a refill follows the fetch's
-    /// VA[13:12], where hardware would have recorded that index in the tag,
-    /// and the model keeps the guest's staged tag as it is.
+    /// index the secondary tag records (`pidx`, TagLo[8:7]); a refill records
+    /// its fetch's VA[13:12] there.
     fn l1i_purge_block(&self, pbase: u64, len: u64, pidx: u64) {
         let ic = unsafe { &*self.ic.get() };
         if IC_LINE == 0 || ic.tags.is_empty() {
             return;
         }
-        for index in 0..4 {
-            for (idx, _) in Self::l1_lines_in_block(&ic.tags, IC_LINE, pbase, len, index, |t| t & L1I_VALID != 0) {
-                if index == pidx || self.l1i_refilled(idx) {
-                    self.l1i_invalidate(idx);
-                }
-            }
+        for (idx, _) in Self::l1_lines_in_block(&ic.tags, IC_LINE, pbase, len, pidx, |t| t & L1I_VALID != 0) {
+            self.l1i_invalidate(idx);
         }
     }
 
@@ -1409,16 +1359,7 @@ impl<
                 if s.data.is_empty() {
                     0
                 } else {
-                    let mut ecc = s.ecc[slot];
-                    if sel == CACH_PI {
-                        // The raw flag is the model's, not the guest's. A raw
-                        // word handed out can be stored back verbatim.
-                        if ecc & L1I_RAW_FLAG != 0 {
-                            self.l1i_note_issued(s.data[slot]);
-                        }
-                        ecc &= 1;
-                    }
-                    unsafe { *self.ecc_out.get() = ecc };
+                    unsafe { *self.ecc_out.get() = s.ecc[slot] };
                     if l2_op_log(CACHE_LOG_HIT) {
                         crate::dlog!(LogModule::L2c, "shadow:   -> ILD slot={slot} data={:#018x} ecc={:#x}",
                                      s.data[slot], s.ecc[slot]);
@@ -1439,10 +1380,6 @@ impl<
                     };
                     s.data[slot] = phys_addr & data_mask;
                     s.ecc[slot] = unsafe { *self.ecc_in.get() } & ecc_mask;
-                    if sel == CACH_PI && (s.data[slot] >> 32) & 0xf == L1I_RAW
-                        && unsafe { (*self.l1i_issued.get()).contains(&s.data[slot]) } {
-                        s.ecc[slot] |= L1I_RAW_FLAG;
-                    }
                     if matches!(sel, CACH_SI | CACH_SD) {
                         // Index Store Data (S) writes a quadword: the selected
                         // doubleword plus a zero partner, sharing the check bits
@@ -1509,7 +1446,6 @@ impl<
         st.valid = 0;
         st.pages.clear();
         unsafe { (*self.bus_pending.get()).clear() };
-        unsafe { (*self.l1i_issued.get()).clear() };
         unsafe { (*self.decode.get()).clear_bus_only() };
         unsafe { (*self.decode.get()).flush() };
     }
@@ -1621,8 +1557,7 @@ impl<
             for idx in 0..ic.tags.len() {
                 self.l1i_invalidate(idx);
             }
-            unsafe { (*self.l1i_issued.get()).clear() };
-        }
+            }
         for e in l2s {
             let (set, way) = (e.idx / WAYS, e.idx % WAYS);
             let per_way = l2.data.len() / WAYS;
@@ -2670,17 +2605,13 @@ mod tests {
     /// Index Store Data (I): the word at `va`, in `way`, is the 36-bit `p`,
     /// with the parity bit that makes it even.
     fn stage_p(c: &R10000StagingShadowCache, va: u64, way: u64, p: u64) {
-        // A raw word in a test stands for one Index Load Data handed out.
-        if (p >> 32) & 0xf == L1I_RAW {
-            unsafe { (*c.l1i_issued.get()).insert(p) };
-        }
         c.set_cache_ecc(l1i_parity_of(p));
         c.cache_op(C_R10K_ISD | CACH_PI, (va & !3) | way, p);
     }
 
-    /// The same for a plain instruction, in the model's raw encoding.
+    /// The same for a plain instruction, in the form a refill writes.
     fn stage_i_word(c: &R10000StagingShadowCache, va: u64, way: u64, w: u32) {
-        stage_p(c, va, way, L1I_RAW << 32 | w as u64);
+        stage_p(c, va, way, w as u64);
     }
 
     fn fetch_raw(c: &R10000StagingShadowCache, va: u64, pa: u64) -> u32 {
@@ -2775,19 +2706,19 @@ mod tests {
     /// the layout says, so a change to any one fails.
     #[test]
     fn a_sampled_predecoded_word_decodes_to_its_instruction() {
-        assert_eq!(l1i_decode(0x3_4420_0004, false), Ok(0x2404_0002));
+        assert_eq!(l1i_decode(0x3_4420_0004), Ok(0x2404_0002));
         // addiu $17,$9,-1: rs, rt, immediate and shamt/rd bits all move.
         let f = 0x2531_ffffu32; // op 001001, rs 9, rt 17, imm 0xffff
         let p = (0x1au64 << 29) | ((f as u64 >> 26) & 7) << 26 | (f as u64 & 0x3f) << 20
             | ((f as u64 >> 6) & 0x1f) << 15 | ((f as u64 >> 21) & 0x1f) << 10
             | ((f as u64 >> 11) & 0x1f) << 5 | ((f as u64 >> 16) & 0x1f);
-        assert_eq!(l1i_decode(p, false), Ok(f));
-        assert_eq!(l1i_decode(0x3_4420_0004 | 0x1f << 5, false), Ok(0x2404_0002 | 0x1f << 11), "p[9:5] is the rd position for addiu");
-        assert_eq!(l1i_decode(0x3_4420_0004 | 0x1f << 10, false), Ok(0x2404_0002 | 0x1f << 21), "p[14:10] is rs");
-        assert_eq!(l1i_decode(0x3_4420_0004 | 0x1f << 15, false), Ok(0x2404_0002 | 0x1f << 6), "p[19:15] is f[10:6]");
+        assert_eq!(l1i_decode(p), Ok(f));
+        assert_eq!(l1i_decode(0x3_4420_0004 | 0x1f << 5), Ok(0x2404_0002 | 0x1f << 11), "p[9:5] is the rd position for addiu");
+        assert_eq!(l1i_decode(0x3_4420_0004 | 0x1f << 10), Ok(0x2404_0002 | 0x1f << 21), "p[14:10] is rs");
+        assert_eq!(l1i_decode(0x3_4420_0004 | 0x1f << 15), Ok(0x2404_0002 | 0x1f << 6), "p[19:15] is f[10:6]");
     }
 
-    /// One example per class of the table, built from the instruction by the
+    /// One example per accepted class, built from the instruction by the
     /// layout, decoded back: includes dsll/dsll32, jr/j and the nop.
     #[test]
     fn every_class_in_the_table_decodes() {
@@ -2800,39 +2731,37 @@ mod tests {
         let cases: &[(u64, u32, bool, &str)] = &[
             (0x08, 0x0009_20f8, false, "dsll $4,$9,3"),   // funct 0x38
             (0x08, 0x0009_20fc, false, "dsll32 $4,$9,3"), // funct 0x3c
-            (0x18, 0x0109_5025, false, "or $10,$8,$9"),
             (0x1a, 0x2084_0010, true, "addi"),
             (0x1a, 0x2484_0010, true, "addiu"),
             (0x1a, 0x3484_0010, true, "ori"),
             (0x1a, 0x3c04_8000, true, "lui"),
             (0x1e, 0x6484_0010, true, "daddiu"),
             (0x35, 0xbd04_0040, false, "cache"),
-            (0x36, 0xdd04_0008, true, "ld"),
             (0x3f, 0x4084_6000, false, "mtc0"),
-            (0x40, 0x0c00_1234, false, "jal"),
             (0x41, 0x03e0_0008, false, "jr $31"),
-            (0x41, 0x0800_1234, false, "j"),
             (0x71, 0x0481_0004, false, "bgez"),
         ];
         for &(class, f, rt_low, name) in cases {
-            assert_eq!(l1i_decode(predecode(class, f, rt_low), false), Ok(f), "{name}");
+            assert_eq!(l1i_decode(predecode(class, f, rt_low)), Ok(f), "{name}");
         }
-        assert_eq!(l1i_decode(0, false), Ok(0), "the nop");
-        assert_eq!(l1i_decode(0x3_4420_0004, false), Ok(0x2404_0002));
+        assert_eq!(l1i_decode(0), Ok(0), "the nop");
+        assert_eq!(l1i_decode(0x3_4420_0004), Ok(0x2404_0002));
         // Known class, instruction outside its rows: refused.
-        assert_eq!(l1i_decode(predecode(0x08, 0x0009_20c0, false), false), Err(0x08), "funct 0x00 is not dsll");
-        assert_eq!(l1i_decode(predecode(0x1a, 0x2884_0010, true), false), Err(0x1a), "op 0x0a is not in 0x1a");
-        assert_eq!(l1i_decode(1, false), Err(0), "class 0 is only the nop");
+        assert_eq!(l1i_decode(predecode(0x08, 0x0009_20c0, false)), Err(0x08), "funct 0x00 is not dsll");
+        assert_eq!(l1i_decode(predecode(0x1a, 0x2884_0010, true)), Err(0x1a), "op 0x0a is not in 0x1a");
+        // A nonzero p[35:32] puts a word in the table, so only the listed classes decode.
+        assert!(l1i_decode(predecode(0x18, 0x0109_5025, false)).is_err(), "or is not accepted");
+        assert!(l1i_decode(predecode(0x41, 0x0800_1234, false)).is_err(), "j is not accepted");
         // Classes share an opcode top: the class picks f[31:29].
-        assert_ne!(l1i_decode(predecode(0x1a, 0x2484_0010, true), false), l1i_decode(predecode(0x1e, 0x2484_0010, true), false));
+        assert_ne!(l1i_decode(predecode(0x1a, 0x2484_0010, true)), l1i_decode(predecode(0x1e, 0x2484_0010, true)));
     }
 
     /// A class not in the table is refused, not guessed: the fetch is
     /// treated as a miss and reads memory, and the refusal is reported.
     #[test]
     fn an_unsampled_class_is_refused_and_the_fetch_reads_memory() {
-        assert_eq!(l1i_decode(0x5_0000_0004, false), Err(0x28));
-        assert_eq!(l1i_decode(0x2a << 29, false), Err(0x2a));
+        assert_eq!(l1i_decode(0x5_0000_0004), Err(0x28));
+        assert_eq!(l1i_decode(0x2a << 29), Err(0x2a));
         let (c, bus) = staged_cache();
         let (pa, va) = (0x0030_0000u64, 0xffff_ffff_8030_0000u64);
         stage_i_tag(&c, va, pa, 1, true);
@@ -2842,6 +2771,54 @@ mod tests {
         // The sampled class beside it still executes.
         stage_p(&c, va + 4, 1, 0x3_4420_0004);
         assert_eq!(fetch_raw(&c, va + 4, pa + 4), 0x2404_0002);
+    }
+
+    /// Index Store Data (I) and Index Load Data (I) move TagHi[3:0], TagLo and
+    /// ECC[0] verbatim, odd total parity included, and never refuse at store.
+    #[test]
+    fn the_stored_word_and_parity_come_back_verbatim() {
+        let (c, _) = staged_cache();
+        let va = 0xffff_ffff_8030_0000u64;
+        for (i, (p, ecc)) in [(0xf_ffff_ffffu64, 1u32), (0xa_aaaa_aaaa, 0), (0x5_5555_5555, 1), (0, 0)]
+            .into_iter().enumerate()
+        {
+            let at = va + 4 * i as u64;
+            c.set_cache_ecc(ecc);
+            c.cache_op(C_R10K_ISD | CACH_PI, (at & !3) | 1, p);
+            assert_eq!(c.cache_op(C_R10K_ILD | CACH_PI, at | 1, 0), p, "{p:#x}");
+            assert_eq!(c.cache_op_ecc(), ecc, "{p:#x}: parity bit");
+        }
+    }
+
+    /// A refill writes TagHi = 0, TagLo = the instruction and ECC[0] = its
+    /// even parity (the approximation named at `l1i_refill`), and the words
+    /// run as copied into another line, opcodes outside every class included
+    /// (beq, bne, sltu).
+    #[test]
+    fn a_refilled_word_reads_back_as_the_instruction_and_a_copy_runs() {
+        let (c, _) = staged_cache();
+        let (pa, va) = (0x0030_0040u64, 0xffff_ffff_8030_0040u64);
+        let code = [0x1000_0003u32, 0x1420_0002, 0x0085_182b, 0x2404_0002];
+        stage_tag(&c, pa & !127, 0, 2);
+        for q in 0..8u64 {
+            let (lo, hi) = (code[(2 * q as usize) % 4], code[(2 * q as usize + 1) % 4]);
+            stage_data(&c, (pa & !127) + 16 * q, 0, (hi as u64) << 32 | lo as u64);
+        }
+        fetch_raw(&c, va, pa);
+        let dst = va + 0x4000;
+        stage_i_tag(&c, dst, pa + 0x4000, 0, true);
+        // The block's words: each quadword is two instructions and a zero pad.
+        let words = [code[0], code[1], 0, 0, code[2], code[3], 0, 0];
+        for i in 0..8u64 {
+            let at = (va & !63) + 4 * i;
+            let got = c.cache_op(C_R10K_ILD | CACH_PI, at, 0);
+            let ecc = c.cache_op_ecc();
+            let want = words[i as usize] as u64;
+            assert_eq!((got, ecc), (want, l1i_parity_of(want)), "word {i}: raw readback");
+            c.set_cache_ecc(ecc);
+            c.cache_op(C_R10K_ISD | CACH_PI, (dst & !63) + 4 * i, got);
+            assert_eq!(fetch_raw(&c, (dst & !63) + 4 * i, (pa & !63) + 0x4000 + 4 * i) as u64, want, "copy {i}");
+        }
     }
 
     /// A word staged with the wrong parity bit posts a Cache Error on fetch
@@ -2878,7 +2855,7 @@ mod tests {
         let (pa, va) = (0x0030_0000u64, 0xffff_ffff_8030_0000u64);
         stage_i_tag(&c, va, pa, 1, true);
         stage_i_tag(&c, va + 0x4000, pa + 0x4000, 0, true);
-        for (i, (p, want)) in [(0x3_4420_0004u64, 0x2404_0002u32), (L1I_RAW << 32 | 0x7c00_0001, 0x7c00_0001)].into_iter().enumerate() {
+        for (i, (p, want)) in [(0x3_4420_0004u64, 0x2404_0002u32), (0x7c00_0001u64, 0x7c00_0001)].into_iter().enumerate() {
             let src = va + 4 * i as u64;
             stage_p(&c, src, 1, p);
             let got = c.cache_op(C_R10K_ILD | CACH_PI, src | 1, 0);
@@ -2981,20 +2958,20 @@ mod tests {
         assert_eq!(c.cache_op(C_ILT | CACH_PI, va | 1, 0) & L1I_VALID, 0);
     }
 
-    /// S2: a guest-built word with TagHi = 0xf is not the model's raw form
-    /// and is refused like any unknown class.
+    /// A word with p[35:32] != 0 whose class is not accepted, or whose class
+    /// pairs with another opcode or function, is refused: its bits never run.
+    /// (Both words have even parity, so the refusal is not a parity error.)
     #[test]
-    fn a_guest_staged_0xf_word_is_refused() {
-        let (c, bus) = staged_cache();
-        let (pa, va) = (0x0030_0000u64, 0xffff_ffff_8030_0000u64);
-        stage_i_tag(&c, va, pa, 1, true);
-        let p = L1I_RAW << 32 | 0x2404_0002;
-        c.set_cache_ecc(l1i_parity_of(p));
-        c.cache_op(C_R10K_ISD | CACH_PI, va | 1, p);
-        assert_eq!(fetch_raw(&c, va, pa), 0xeeee_eeee);
-        assert!(bus.reads.load(Ordering::Relaxed) >= 1);
-        // Handed out by Index Load Data from a refilled line, it is raw.
-        assert_eq!(l1i_decode(p, false), Err(0x79));
+    fn unaccepted_words_are_refused() {
+        for p in [0xf_ffff_ffffu64, 0x7_ffff_ffff] {
+            let (c, bus) = staged_cache();
+            let (pa, va) = (0x0030_0000u64, 0xffff_ffff_8030_0000u64);
+            stage_i_tag(&c, va, pa, 1, true);
+            stage_p(&c, va, 1, p);
+            assert_eq!(fetch_raw(&c, va, pa), 0xeeee_eeee, "{p:#x}: memory's word runs");
+            assert!(bus.reads.load(Ordering::Relaxed) >= 1);
+            assert!(l1i_decode(p).is_err(), "{p:#x}");
+        }
     }
 
     /// The refusal fallback (an approximation): a refused
@@ -3153,37 +3130,19 @@ mod tests {
         assert_eq!((d_state(&c, at(1, pa)), d_state(&c, at(2, pa))), (2, 0));
     }
 
-    /// A model-refilled primary I line is purged with its secondary block
-    /// whatever the fetch's VA[13:12] was against the tag's recorded index.
+    /// A refill records its fetch's VA[13:12] in the secondary tag, so ending
+    /// the block purges the refilled line whatever index the guest staged.
     #[test]
-    fn a_refilled_line_is_purged_whatever_its_index() {
+    fn a_refill_records_its_virtual_index_and_ends_with_its_block() {
         for tag_index in 0..4u64 {
             let (c, _) = staged_cache();
             let (pa, va) = (0x0030_0000u64, 0xffff_ffff_8030_1000u64); // fetch index 1
             c.cache_op(C_IST | CACH_SD, operand(pa, 0), l2_tag_of(pa) | 2 << L2_STATE_SHIFT | tag_index << 7);
             stage_data(&c, pa, 0, 0x1111_0000_2222_0000);
             assert_eq!(fetch_raw(&c, va, pa), 0x2222_0000);
-            assert_ne!(c.cache_op(C_ILT | CACH_PI, va, 0) & L1I_VALID, 0, "refilled");
+            assert_eq!(c.cache_op(C_ILT | CACH_SD, operand(pa, 0), 0) >> 7 & 3, 1, "recorded index");
             c.cache_op(C_HINV | CACH_SD, operand(pa, 0), pa);
             assert_eq!(c.cache_op(C_ILT | CACH_PI, va, 0) & L1I_VALID, 0, "tag index {tag_index}");
-        }
-    }
-
-    /// A guest that stores over a refilled line's first word makes the line
-    /// its own: it follows the tag's recorded index like any staged line, so a
-    /// Hit Invalidate (S) whose tag records another index leaves it.
-    #[test]
-    fn a_refilled_line_the_guest_stored_over_follows_the_recorded_index() {
-        for (tag_index, survives) in [(1u64, false), (2, true)] {
-            let (c, _) = staged_cache();
-            let (pa, va) = (0x0030_0000u64, 0xffff_ffff_8030_1000u64); // fetch index 1
-            c.cache_op(C_IST | CACH_SD, operand(pa, 0), l2_tag_of(pa) | 2 << L2_STATE_SHIFT | tag_index << 7);
-            stage_data(&c, pa, 0, 0x1111_0000_2222_0000);
-            assert_eq!(fetch_raw(&c, va, pa), 0x2222_0000);
-            stage_p(&c, va, 0, 0x3_4420_0004); // predecoded, not the raw form: the flag goes
-            c.cache_op(C_HINV | CACH_SD, operand(pa, 0), pa);
-            let valid = c.cache_op(C_ILT | CACH_PI, va, 0) & L1I_VALID != 0;
-            assert_eq!(valid, survives, "tag index {tag_index}");
         }
     }
 
@@ -3333,19 +3292,6 @@ mod tests {
         check::<R16000StagingShadowCache>("R16000 4 MiB/128");
     }
 
-    /// The set of raw words Index Load Data handed out is bounded: after
-    /// `L1I_ISSUED_MAX` it starts again, and the newest word is always in it.
-    #[test]
-    fn the_issued_raw_words_are_bounded() {
-        let (c, _) = staged_cache();
-        for i in 0..(L1I_ISSUED_MAX as u64 * 2 + 5) {
-            c.l1i_note_issued(L1I_RAW << 32 | i);
-            let issued = unsafe { &*c.l1i_issued.get() };
-            assert!(issued.len() <= L1I_ISSUED_MAX, "word {i}");
-            assert!(issued.contains(&(L1I_RAW << 32 | i)));
-        }
-    }
-
     /// Parity suppression follows the real Status register (DE, ERL), not a
     /// direct call, and does not need the cache-ecc feature.
     #[test]
@@ -3464,7 +3410,8 @@ mod tests {
         assert_eq!(bus.reads.load(Ordering::Relaxed), 0);
         // The tag is at the physical set, read back through an unmapped operand.
         assert_eq!(cache_at(&mut exec, 0x07, 0xffff_ffff_8000_0000 | (pa & !127), 0), EXEC_COMPLETE);
-        assert_eq!(exec.core.cp0_taglo | (exec.core.cp0_taghi as u64) << 32, tag);
+        // (The fetch above recorded its virtual index, VA[13:12] = 1, in it.)
+        assert_eq!(exec.core.cp0_taglo | (exec.core.cp0_taghi as u64) << 32, tag | 1 << 7);
         // And nothing is at the set the virtual address would have chosen.
         assert_eq!(cache_at(&mut exec, 0x07, 0xffff_ffff_8000_0000 | VA, 0), EXEC_COMPLETE);
         assert_eq!(exec.core.cp0_taglo, 0);
