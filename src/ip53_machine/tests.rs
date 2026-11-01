@@ -301,17 +301,19 @@ fn widget_11_is_routed_through_widget_0s_crossbar() {
 }
 
 /// Every fitted processor slot reads present, in the board's order (CPU 1
-/// in PI1/A, CPUs 2 and 3 in the B slots), and only CPU 0 is enabled.
+/// in PI1/A, CPUs 2 and 3 in the B slots), and every fitted processor runs
+/// from reset with its enable set, as QEMU's node grants them.
 #[test]
-fn fitted_processors_read_present_and_only_cpu_0_is_enabled() {
+fn fitted_processors_read_present_and_start_enabled() {
     use crate::dev::bedrock_pi::reg::{CPU_A_ENABLE, CPU_B_ENABLE, INTERFACE_SLOT_A, INTERFACE_SLOT_B};
     for (cpus, present) in [(1, [[1, 0], [0, 0]]), (2, [[1, 0], [1, 0]]), (4, [[1, 1], [1, 1]])] {
         let board = TezroBoard::new(cpus).unwrap();
+        assert_eq!(board.processors.count(), cpus);
         for (interface, pi) in board.node.pi.iter().enumerate() {
             let slots = [pi.read64(INTERFACE_SLOT_A).data, pi.read64(INTERFACE_SLOT_B).data];
             assert_eq!(slots, present[interface], "{cpus} CPUs, PI{interface}");
             let enabled = [pi.read64(CPU_A_ENABLE).data & 1, pi.read64(CPU_B_ENABLE).data & 1];
-            assert_eq!(enabled, [u64::from(interface == 0), 0], "{cpus} CPUs, PI{interface}");
+            assert_eq!(enabled, present[interface], "{cpus} CPUs, PI{interface}");
         }
     }
 }
@@ -573,4 +575,15 @@ fn the_cached_view_swaps_ram_above_4_gib() {
     assert_eq!(cached.cas64(at, 1, 2), Some(true));
     assert_eq!(cached.cas64(at, 1, 3), Some(false));
     assert_eq!(cached.read64(at).data, 2);
+}
+
+/// Only the two-processor board's fresh flash marks its empty B and D
+/// positions disabled.
+#[test]
+fn only_the_two_processor_flash_starts_with_b_and_d_disabled() {
+    for (cpus, disabled) in [(1, false), (2, true), (4, false)] {
+        let bytes = TezroBoard::new(cpus).unwrap().node.flash.contents();
+        assert_eq!(&bytes[0x9e0101..0x9e0109] == b"DisableB", disabled, "{cpus} CPUs");
+        assert_eq!(&bytes[0x9e0141..0x9e0149] == b"DisableD", disabled, "{cpus} CPUs");
+    }
 }

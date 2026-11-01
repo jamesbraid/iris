@@ -39,9 +39,10 @@
 //! - The one-processor board has one PIC. The tower guide gives that board
 //!   two PCI-X buses and one XIO connector; that it is one PIC at widget 15
 //!   is inferred from them.
-//! - Only CPU 0 runs. The other fitted processors read present and stay
-//!   disabled; what would start or reach them is refused and logged by the
-//!   Bedrock PI.
+//! - Every fitted processor runs from reset, each on its own thread, as in
+//!   QEMU's IP35 node; CPU enable is stored and starts or stops nothing. The
+//!   PROM's boot rendezvous holds a processor that arrives early
+//!   ([`Rendezvous`]), an approximation with no hardware counterpart.
 //! - The second PIC is a port of the IO9 PIC's PXBOW, beside the host's
 //!   and the IO9 PIC's links: the PROM and IRIX learn which widgets exist
 //!   only from widget 0's link status and auxiliary status, so one
@@ -70,10 +71,10 @@ use crate::cpu::cpu_monitor::CpuMonitor;
 use crate::cpu::mips_tlb::MipsTlb;
 use crate::cpu::smp::World;
 use crate::dev::bcm5701::{Bcm5701, Bcm5701Config};
-use crate::dev::bedrock_flash::FirmwareRecord;
+use crate::dev::bedrock_flash::{two_processor_environment, FirmwareRecord};
 use crate::dev::bedrock_io::BedrockIo;
 use crate::dev::bedrock_mem::MemoryPopulation;
-use crate::dev::bedrock_pi::{GraphicsRegisters, Population};
+use crate::dev::bedrock_pi::{GraphicsRegisters, NodeHooks, Population};
 use crate::dev::ds1744::{Ds1744, YearBase};
 use crate::dev::heart::{host_clock, Clock};
 use crate::dev::ioc4::{Ioc4, Ioc4Config};
@@ -90,7 +91,8 @@ use crate::gdb_stub::CpuDebug;
 use crate::gfx_display::GfxDisplay;
 use crate::hptimer::TimerManager;
 use crate::ip35::CPU_PHYS_MASK;
-use crate::ip35::node::{connect_cpu, connect_serial_ports, Node, NodeConfig, SerialPort, WidgetDma};
+use crate::ip35::node::{connect_cpus, connect_serial_ports, Node, NodeConfig, SerialPort, WidgetDma};
+use crate::ip35::rendezvous::Rendezvous;
 use crate::machine_state::GuestState;
 use crate::monitor::{Monitor, DEFAULT_PORT as DEFAULT_MONITOR_PORT};
 use crate::net::{GatewayConfig, Link, NatControl};
@@ -256,7 +258,7 @@ const SERIAL_PORTS: usize = 5;
 
 pub struct TezroMachine {
     board: Arc<TezroBoard>,
-    /// The running processors, CPU 0 first. Only CPU 0 runs today.
+    /// The processors, CPU 0 first, in the board's slot order.
     cpus: Vec<Arc<dyn CpuDevice>>,
     timers: Arc<TimerManager>,
     monitor: Arc<Monitor>,
@@ -301,14 +303,31 @@ impl TezroMachine {
         let cpu = cpus[0].clone();
         board.status.set_cpu_cycles(cpu.cycles_ptr());
         board.status.set_count_hz(cpu.count_hz_atomic());
+        for c in cpus.iter().skip(1) {
+            board.status.add_cpu_stats(c.cycles_ptr(), c.fasttick_count());
+        }
         let node = &board.node;
         // A rebuild of the whole memory map runs with the other processors
-        // parked; with one running there is nobody to park.
+        // parked.
         let world = Arc::new(World::new());
         world.set_slots(cpus.iter().map(|c| c.park_slot()).collect());
         let remap_world = world.clone();
         node.md.set_remap_guard(Arc::new(move |work: &mut dyn FnMut()| remap_world.stop_others(work)));
-        let rx = connect_cpu("Tezro", &node.md, &node.pi[0], &node.lb, &node.ni, &node.l1, &cpu)?;
+        // One page pool and one body of compiled code, reaching each
+        // processor's state through the core it is called with.
+        #[cfg(feature = "jitv2")]
+        if cpus.len() > 1 {
+            if cfg!(feature = "jitv2_lockstep") {
+                return Err("[machine] cpus above 1 cannot run with jitv2_lockstep".into());
+            }
+            let jit = cpu.jitv2();
+            for c in &cpus {
+                c.share_jitv2(jit.clone(), world.clone());
+            }
+        }
+        board.rendezvous.set_cpus(&cpus);
+        board.rendezvous.set_timer_manager(timers.clone());
+        let rx = connect_cpus("Tezro", node, board.processors, &cpus)?;
         // After connect_cpu set the windows: each compile worker takes the
         // cache's geometry and the CPU model's policies once, as it starts.
         // Workers read plain physical code addresses through the view the CPU
@@ -322,6 +341,9 @@ impl TezroMachine {
             g.compile_queue.set_thread_count(cfg.jitv2.threads.max(1));
             g.compile_queue.set_cpu(Arc::downgrade(&cpu_device));
             g.compile_queue.set_owner(Arc::downgrade(&jit));
+            if cpus.len() > 1 {
+                g.compile_queue.set_world(world.clone());
+            }
             #[cfg(not(feature = "jitv2_lockstep"))]
             {
                 let stats = g.stats.clone();
@@ -344,7 +366,9 @@ impl TezroMachine {
         monitor.register_device(node.l1.clone());
         monitor.register_device(board.scsi.clone());
         monitor.register_device(board.ioc4.ps2());
-        cpu.register_locks();
+        for c in &cpus {
+            c.register_locks();
+        }
         board.scsi.register_locks();
         board.ioc4.register_locks();
         board.eth.register_locks();
@@ -361,8 +385,8 @@ impl TezroMachine {
             board.eth.attach(link);
         }
         eprintln!(
-            "iris: Tezro IP53, {} R16000 {} MHz fitted, CPU 0 running, {} MiB, {}, serial console {:?}",
-            cfg.machine.cpus(),
+            "iris: Tezro IP53, {} R16000 {} MHz, {} MiB, {}, serial console {:?}",
+            cpus.len(),
             chip.chip.mhz,
             memory.total_mib(),
             if board.v12.is_some() { cfg.graphics_board().label() } else { "no graphics" },
@@ -446,7 +470,9 @@ impl Workstation for TezroMachine {
         }
     }
     fn stop(&mut self) {
-        self.cpu().clone().as_device().stop();
+        for c in &self.cpus {
+            c.clone().as_device().stop();
+        }
         self.board.stop();
         self.board.timekeeper.flush();
         if self.lifecycle != GuestState::Idle {
@@ -455,18 +481,23 @@ impl Workstation for TezroMachine {
     }
     fn reset(&mut self) {
         self.stop();
-        self.cpu().power_on();
+        for c in &self.cpus {
+            c.power_on();
+        }
         self.board.power_on();
         self.restart_peripherals();
     }
     fn restart_peripherals(&mut self) {
         self.board.start();
     }
+    /// Every processor starts at once, as from the node's reset.
     fn cpu_start(&self) {
-        self.cpu().clone().as_device().start();
+        for c in &self.cpus {
+            c.clone().as_device().start();
+        }
     }
     fn cpu_is_running(&self) -> bool {
-        self.cpu().clone().as_device().is_running()
+        self.cpus.iter().any(|c| c.clone().as_device().is_running())
     }
     fn machine_slot(&mut self) -> MachineSlot {
         let ptr = self as *mut Self as *mut dyn Workstation;
@@ -503,6 +534,9 @@ impl Workstation for TezroMachine {
     }
     fn fasttick_count(&self) -> Arc<AtomicU64> {
         self.cpu().fasttick_count()
+    }
+    fn cpu_counters(&self) -> Vec<(crate::cpu::mips_core::CyclesPtr, Arc<AtomicU64>)> {
+        self.cpus.iter().map(|c| (c.cycles_ptr(), c.fasttick_count())).collect()
     }
     fn get_ci_serial(&self) -> Option<Arc<CiSerialBackend>> {
         self.ci_serial.clone()
@@ -572,28 +606,35 @@ impl Drop for TezroMachine {
     }
 }
 
-/// The processors the machine runs, CPU 0 first, of the board's chip. The
-/// board fits more, but only CPU 0 is built: starting the others is not
-/// modelled, and the PIs refuse and log what would reach them.
+/// The processors the machine runs, of the board's chip: one for each
+/// fitted slot, CPU 0 first, in the board's slot order.
 fn build_cpus(board: &Arc<TezroBoard>, timers: &Arc<TimerManager>, count_hz: u64) -> Vec<Arc<dyn CpuDevice>> {
-    crate::with_cpu!(board.chip.chip, true, false, C => vec![start_cpu::<C>(board, timers, count_hz)])
+    let count = board.processors.count();
+    crate::with_cpu!(board.chip.chip, true, false, C => {
+        (0..count).map(|id| start_cpu::<C>(board, timers, count_hz, id as u8, count)).collect()
+    })
 }
 
-/// CPU 0 of type `C`, with its timers and the board's poll. A chip with a
-/// secondary cache of another size is another type, instantiated here.
-fn start_cpu<C>(board: &Arc<TezroBoard>, timers: &Arc<TimerManager>, count_hz: u64) -> Arc<dyn CpuDevice>
+/// Processor `id` of `count`, of type `C`, with its timers; CPU 0 also
+/// runs the board's poll. A chip with a secondary cache of another size is
+/// another type, instantiated here.
+fn start_cpu<C>(board: &Arc<TezroBoard>, timers: &Arc<TimerManager>, count_hz: u64, id: u8, count: usize) -> Arc<dyn CpuDevice>
 where
     C: CacheCpuModel + From<Arc<dyn BusDevice>> + 'static,
     MipsCpu<MipsTlb, C>: CpuDevice,
 {
     let mut exec = build_cpu::<C>(board);
-    // The CPU's Compare matches blink the graphics status bar's LED.
-    exec.core.fasttick_count = board.fasttick.clone();
+    // CPU 0's Compare matches blink the graphics status bar's LED.
+    exec.core.fasttick_count = if id == 0 { board.fasttick.clone() } else { Arc::new(AtomicU64::new(0)) };
     exec.core.set_timer_manager(timers.clone());
     exec.core.set_count_hz(count_hz);
     exec.core.count_write_samples = true;
-    let poll_board = board.clone();
-    exec.batch_hook = Some(Box::new(move |_| poll_board.poll()));
+    exec.core.cpu_id = id;
+    exec.core.smp = count > 1;
+    if id == 0 {
+        let poll_board = board.clone();
+        exec.batch_hook = Some(Box::new(move |_| poll_board.poll()));
+    }
     Arc::new(MipsCpu::new(*exec))
 }
 
@@ -642,6 +683,10 @@ pub(crate) struct TezroBoardConfig<'a> {
 /// The Tezro's devices around its Bedrock node.
 pub(crate) struct TezroBoard {
     pub node: Node,
+    /// The slots whose processors run: every fitted one.
+    pub processors: Population,
+    /// The PROM's boot rendezvous across them.
+    pub rendezvous: Arc<Rendezvous>,
     /// The PICs in QEMU's host order, which numbers their PI level sources:
     /// widget 11's first when the board has it, then the IO9's at widget 15.
     pub pics: Vec<Arc<Pic>>,
@@ -697,15 +742,20 @@ impl TezroBoard {
             return Err(format!("{cpus} processors; a Tezro board fits 1, 2 or 4"));
         }
         memory.check_for_cpus(cpus)?;
+        let running = Population::fitted_cpus(cpus)?;
         let node = Node::build(NodeConfig {
             name: "Tezro",
             payload,
             clock: clock.clone(),
             flash_path,
             banks_mib: &memory.banks_mib(),
-            population: Population::fitted_cpus(cpus)?,
-            running: Population::SINGLE,
+            population: running,
+            running,
             firmware: chip.firmware,
+            // The two-processor board's empty B and D positions start
+            // disabled, as the QEMU boot tests seed them; one and four
+            // processors leave no empty position the PROM recovers.
+            flash_records: if cpus == 2 { two_processor_environment() } else { Vec::new() },
             board_id: BOARD_ID,
             l1: L1Config {
                 type_code: 0x39,
@@ -723,9 +773,18 @@ impl TezroBoard {
         let pxbow = io9.enable_pxbow(HOST_WIDGET, clock.clone()).map_err(|e| format!("Tezro PXBOW: {e:?}"))?;
         node.io.connect_widget(0, pxbow.widget_zero());
         node.io.connect_widget(IO9_WIDGET, pxbow.route(IO9_WIDGET));
-        // Each PI keeps its own graphics registers.
+        let rendezvous = Rendezvous::new(running, clock.clone(), &node.lb);
+        node.lb.connect_scratch_hooks(rendezvous.clone());
+        let publication = Arc::downgrade(&rendezvous);
+        node.io.on_scratch0_write(Box::new(move || {
+            if let Some(r) = publication.upgrade() {
+                r.presence_published();
+            }
+        }));
+        // Each PI keeps its own graphics registers, and reports its
+        // real-time registers' part in the boot rendezvous.
         for pi in &node.pi {
-            pi.set_node_hooks(Arc::new(GraphicsRegisters::default()));
+            pi.set_node_hooks(Arc::new(PiHooks { gfx: GraphicsRegisters::default(), rendezvous: Arc::downgrade(&rendezvous) }));
         }
         let heartbeat = Arc::new(AtomicU64::new(0));
         let fasttick = Arc::new(AtomicU64::new(0));
@@ -766,6 +825,8 @@ impl TezroBoard {
         io9.attach(0, ETH_DEVICE, eth.clone(), Function { self_ordered_pio: false, req64: true });
         Ok(Self {
             node,
+            processors: running,
+            rendezvous,
             pics,
             ioc4,
             scsi,
@@ -797,6 +858,7 @@ impl TezroBoard {
     /// Everything back to its power-on state.
     pub fn power_on(&self) {
         let node = &self.node;
+        self.rendezvous.reset();
         for pi in &node.pi {
             pi.power_on();
         }
@@ -882,8 +944,36 @@ impl Drop for TezroBoard {
 /// behind the same PXBOW is inferred, not established.
 const V12_WIDGET: u8 = 12;
 
+/// A PI's node hooks: its graphics flow-control registers, kept as written,
+/// and its real-time registers' part in the boot rendezvous.
+struct PiHooks {
+    gfx: GraphicsRegisters,
+    rendezvous: Weak<Rendezvous>,
+}
+impl NodeHooks for PiHooks {
+    fn rt_compare_written(&self, interface: u8, slot: usize) {
+        if let Some(r) = self.rendezvous.upgrade() {
+            r.rt_compare_written(interface, slot);
+        }
+    }
+    fn rt_counter_read(&self, _interface: u8) {
+        if let Some(r) = self.rendezvous.upgrade() {
+            r.rt_counter_read();
+        }
+    }
+    fn gfx_read(&self, index: usize) -> Option<u64> {
+        self.gfx.gfx_read(index)
+    }
+    fn gfx_write(&self, index: usize, value: u64) -> bool {
+        self.gfx.gfx_write(index, value)
+    }
+    fn gfx_reset(&self) {
+        self.gfx.gfx_reset();
+    }
+}
+
 /// Fit the V12 behind the PXBOW: its interrupt packets and DMA reach
-/// Bedrock IO as the PIC's do. Nothing counts the processor's stores into
+/// Bedrock IO as the PIC's do. Nothing counts the processors' stores into
 /// its graphics page or returns credits for them.
 fn fit_v12(
     node: &Node,
