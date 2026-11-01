@@ -40,7 +40,7 @@ Status: rule (2026-10-30).
   timing measured to better than that is noise.
 
 - **Model choices to remember.** The FIFO's depth is unknown in any unit.
-  The model keeps 64 stores for
+  The model keeps 16,384 stores for
   credits and clamps the level at 32,768 words, whatever the stored `0x6bX`
   values say, and uses a 16-word low-water threshold; `0x6b2` as the
   status-bit-15 threshold is a model choice too. The level is in words, a
