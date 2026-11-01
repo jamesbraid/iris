@@ -44,3 +44,30 @@ pub fn memory_map(ip28: bool) -> MemoryMap {
     }
     MemoryMap::new(ranges)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indy_has_two_windows_a_low_alias_and_a_prom() {
+        let m = memory_map(false);
+        assert!(m.is_ram(0x1000), "the low alias is RAM");
+        assert!(!m.contains(0x0008_0000), "the alias stops at 512 KB");
+        assert!(m.is_ram(0x0800_0000));
+        assert!(m.is_ram(0x17ff_ffff));
+        assert!(!m.contains(0x1800_0000));
+        assert_eq!(m.find(0x1fc0_0000).unwrap().kind, MemKind::Rom);
+        assert!(!m.is_ram(0x1fc0_0000), "the PROM is memory but not RAM");
+        assert!(m.is_ram(0x2fff_ffff));
+        assert_eq!(m.end(), 0x3000_0000);
+    }
+
+    #[test]
+    fn ip28_has_no_lomem() {
+        let m = memory_map(true);
+        assert!(!m.contains(0x0800_0000));
+        assert!(m.is_ram(0x2000_0000));
+        assert!(m.is_ram(0x9fff_ffff), "four 512 MB banks fit");
+    }
+}

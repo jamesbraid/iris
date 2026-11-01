@@ -106,38 +106,6 @@ mod tests {
     const MB: u64 = 1 << 20;
 
     #[test]
-    fn indy_has_two_windows_a_low_alias_and_a_prom() {
-        let m = crate::ip22_bus::memory_map(false);
-        assert!(m.is_ram(0x1000), "the low alias is RAM");
-        assert!(!m.contains(0x0008_0000), "the alias stops at 512 KB");
-        assert!(m.is_ram(0x0800_0000));
-        assert!(m.is_ram(0x17ff_ffff));
-        assert!(!m.contains(0x1800_0000));
-        assert_eq!(m.find(0x1fc0_0000).unwrap().kind, MemKind::Rom);
-        assert!(!m.is_ram(0x1fc0_0000), "the PROM is memory but not RAM");
-        assert!(m.is_ram(0x2fff_ffff));
-        assert_eq!(m.end(), 0x3000_0000);
-    }
-
-    #[test]
-    fn ip28_has_no_lomem() {
-        let m = crate::ip22_bus::memory_map(true);
-        assert!(!m.contains(0x0800_0000));
-        assert!(m.is_ram(0x2000_0000));
-        assert!(m.is_ram(0x9fff_ffff), "four 512 MB banks fit");
-    }
-
-    #[test]
-    fn o2_memory_is_a_gigabyte_at_its_non_zero_base() {
-        let m = crate::ip32::memory_map();
-        assert!(m.is_ram(0x0fff_ffff), "the low alias");
-        assert!(!m.contains(0x1000_0000));
-        assert!(m.is_ram(0x4000_0000));
-        assert!(m.is_ram(0x7fff_ffff));
-        assert!(!m.contains(0x8000_0000), "the CPU folds the no-ECC alias before the bus");
-    }
-
-    #[test]
     #[should_panic(expected = "overlaps")]
     fn overlapping_ranges_are_refused() {
         MemoryMap::new(vec![

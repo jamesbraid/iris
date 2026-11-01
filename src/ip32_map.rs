@@ -135,3 +135,18 @@ pub fn hot_counters() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("IRIS_IP32_HOT").is_some())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn o2_memory_is_a_gigabyte_at_its_non_zero_base() {
+        let m = memory_map();
+        assert!(m.is_ram(0x0fff_ffff), "the low alias");
+        assert!(!m.contains(0x1000_0000));
+        assert!(m.is_ram(0x4000_0000));
+        assert!(m.is_ram(0x7fff_ffff));
+        assert!(!m.contains(0x8000_0000), "the CPU folds the no-ECC alias before the bus");
+    }
+}
