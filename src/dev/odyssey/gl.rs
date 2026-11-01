@@ -26,13 +26,18 @@ pub struct Texture {
     pub border_rows: bool,
 }
 
-/// First and last detail function weights, and whether the table is flat.
-#[derive(Clone, Copy, Default)]
+/// The detail function table's weights, unsigned 12-bit fractions, entry i
+/// at LOD -i/32 (TextureDetailWeight::at()).
+#[derive(Clone, Copy)]
 #[cfg_attr(test, derive(PartialEq, Debug))]
 pub struct TextureDetailWeight {
-    pub constant: bool,
-    pub first: f64,
-    pub last: f64,
+    pub table: [u16; ODSY_TEX_DETAIL_FUNCTION_ENTRIES as usize],
+}
+
+impl Default for TextureDetailWeight {
+    fn default() -> Self {
+        TextureDetailWeight { table: [0; ODSY_TEX_DETAIL_FUNCTION_ENTRIES as usize] }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -53,7 +58,6 @@ pub struct TextureVolume {
     pub border: bool,
     pub colour_table: bool,
     pub scale_bias: bool,
-    pub detail_weight: TextureDetailWeight,
 }
 
 /// A GlTexPyramid's shape: its levels are the first `count` of
@@ -78,6 +82,7 @@ pub struct TextureChain {
     pub pyramid: Option<PyramidShape>,
     pub detail_storage: Texture,
     pub detail_image: GlTexLevel,
+    pub detail_weight: TextureDetailWeight,
     /// The leading entries of `volumes`, `storage` and `levels` written since
     /// the chain was last cleared; the rest are still default.
     filled: usize,
@@ -104,6 +109,7 @@ impl TextureChain {
         self.pyramid = None;
         self.detail_storage = Texture::default();
         self.detail_image = GlTexLevel::default();
+        self.detail_weight = TextureDetailWeight::default();
         self.filled = 0;
     }
 
@@ -1198,7 +1204,7 @@ impl Texels for BoardTexels<'_> {
     }
 
     fn filter_weight(&self, lambda: f64) -> Option<f64> {
-        self.chain.volume.detail_weight.at(lambda)
+        self.chain.detail_weight.at(lambda)
     }
 }
 
@@ -1211,23 +1217,35 @@ pub fn volume_slice_stride(level_word2: u32) -> u64 {
     64u64.wrapping_shl(level_word2)
 }
 
-/// The stock driver's two-point function (-4, 1/4), (0, 1/2) fills entry 0
-/// with 1/2, falls by 1/512 per entry to 1/4 at entry 128 and holds 1/4
-/// through entry 255. That is consistent with entry i serving LOD -i/32, so
-/// the table runs out at LOD -255/32. SGIS_detail_texture fixes the weight
-/// at and beyond each end point, and those are the only weights used here.
-/// How the board indexes and interpolates the table at LODs in between is
-/// not known, so a nonconstant table refuses them.
+/// The detail function table (0x3e40-0x3e4f): the GL library fills its 256
+/// entries with the application's function at LOD -i/32, interpolated
+/// linearly between the points and held beyond the end ones, as unsigned
+/// 12-bit fractions in bits 23:12 (ESTABLISHED as the library's table
+/// builder; origami datasheet, "Texture registers and precision"). Beyond
+/// the table's ends the weight is the end entry's, as SGIS_detail_texture
+/// holds the function past its end points. Between two entries the model
+/// interpolates linearly, which gives back the application's function
+/// wherever its points sit on the 1/32 grid. How the board itself indexes
+/// and rounds the table between entries is UNKNOWN: APPROXIMATION.
 impl TextureDetailWeight {
     /// The detail and sharpen weight at lambda, where the table gives one.
     pub fn at(&self, lambda: f64) -> Option<f64> {
-        if self.constant || lambda <= ODSY_TEX_DETAIL_FUNCTION_LAST_LOD {
-            return Some(self.last);
+        let last = (ODSY_TEX_DETAIL_FUNCTION_ENTRIES - 1) as usize;
+        let weight = |i: usize| self.table[i] as f64 / 4096.0;
+
+        if lambda.is_nan() {
+            return None;
         }
         if lambda >= 0.0 {
-            return Some(self.first);
+            return Some(weight(0));
         }
-        None
+        if lambda <= ODSY_TEX_DETAIL_FUNCTION_LAST_LOD {
+            return Some(weight(last));
+        }
+        let x = -lambda * 32.0;
+        let i = (x as usize).min(last - 1);
+        let f = x - i as f64;
+        Some(weight(i) + (weight(i + 1) - weight(i)) * f)
     }
 }
 
@@ -1258,56 +1276,55 @@ impl Board {
 
 }
 
+/// The detail texture a sampler word 0 names under a detail magnification
+/// filter. Bit 31 is the combine (1 modulate, 0 add) and bits 29:25 the
+/// detail level as a positive count, at most 15 (ESTABLISHED as the library's
+/// setter); bits 14:0 are the base level's sizes. Bits 24:20 and 19:15 are
+/// the detail image's log2 width and height, and the image is level-table
+/// entry 64 minus the level (ESTABLISHED from the library's detail branch,
+/// and consistent with the captured 2x2 and 4x2 controls at levels -1 to -3,
+/// entries 63 to 61, and SGI Quake's 128x128 detail image at the default
+/// level -4, whose entry 60 holds a 128-texel row). The library writes bits
+/// 24:15 only for a detail magnification filter and leaves them stale after,
+/// so the caller reads them only while word 4 carries magnification code 2, 3
+/// or 4. Bit 30 has no known meaning and refuses the word.
 pub fn texture_detail_sampler(sampler: u32) -> Option<TextureDetailSampler> {
-    let mut detail = TextureDetailSampler { descriptor: 62, width: 2, height: 2, level: -2, mode: GL_ADD };
-    match sampler {
-        0x02108000 => {
-            detail.descriptor = 63;
-            detail.level = -1;
-            Some(detail)
-        }
-        0x04108000 => Some(detail),
-        0x06108000 => {
-            detail.descriptor = 61;
-            detail.level = -3;
-            Some(detail)
-        }
-        0x04208000 => {
-            detail.width = 4;
-            Some(detail)
-        }
-        0x04110000 => {
-            detail.height = 4;
-            Some(detail)
-        }
-        0x84108000 => {
-            detail.mode = GL_MODULATE;
-            Some(detail)
-        }
-        _ => None,
+    let level = (sampler >> 25) & 0x1f;
+
+    if (sampler & 0x40000000) != 0 || level == 0 || level > 15 {
+        return None;
     }
+    Some(TextureDetailSampler {
+        descriptor: ODSY_TEX_LEVELS - level,
+        width: 1 << ((sampler >> 20) & 0x1f),
+        height: 1 << ((sampler >> 15) & 0x1f),
+        level: -(level as i32),
+        mode: if (sampler & 0x80000000) != 0 { GL_MODULATE } else { GL_ADD },
+    })
 }
 
-pub fn texture_detail_entry_weight(value: u32) -> Option<f64> {
-    match value {
-        0x00000000 | 0x00400000 | 0x00555000 | 0x00800000 | 0x00fff000 => Some(value as f64 / 16777216.0),
-        _ => None,
+/// A detail function entry's weight, bits 23:12 as an unsigned 12-bit
+/// fraction. The library never sets the other bits, so an entry that does
+/// is unknown state and drops the draw.
+pub fn texture_detail_entry_weight(value: u32) -> Option<u16> {
+    if (value & !0x00fff000) != 0 {
+        return None;
     }
+    Some((value >> 12) as u16)
 }
 
 impl Board {
     pub fn texture_detail_function_weight(&self) -> Option<TextureDetailWeight> {
         let table = &self.tex_detail_function;
-        let last = (ODSY_TEX_DETAIL_FUNCTION_ENTRIES - 1) as usize;
 
         if self.tex_detail_function_valid != 0xffff {
             return None;
         }
-        Some(TextureDetailWeight {
-            constant: table[1..=last].iter().all(|&e| e == table[0]),
-            first: texture_detail_entry_weight(table[0])?,
-            last: texture_detail_entry_weight(table[last])?,
-        })
+        let mut weight = TextureDetailWeight::default();
+        for (w, &e) in weight.table.iter_mut().zip(table.iter()) {
+            *w = texture_detail_entry_weight(e)?;
+        }
+        Some(weight)
     }
 }
 
@@ -1324,27 +1341,66 @@ impl Board {
 /// board is UNKNOWN. With minification code 5 the model samples as that
 /// code says and ignores the bit; with any other code it can only mean
 /// GL_PHASE_SGIX, which the model does not implement, so the draw drops.
+/// Bits 27:23 are the texel components, which the format decode checks,
+/// and the wrap fields must be repeat.
 pub fn texture_detail_filter(word: u32) -> u32 {
     let min = word & ODSY_TEX_MIN_MASK;
 
     if min != ODSY_TEX_MIN_NEAREST_MIPMAP_NEAREST && min != ODSY_TEX_MIN_LINEAR_MIPMAP_LINEAR {
         return 0;
     }
-    match word & !ODSY_TEX_MIN_MASK {
-        0x13000004 => GL_LINEAR_DETAIL_SGIS,
-        0x13000006 => GL_LINEAR_DETAIL_ALPHA_SGIS,
-        0x13000008 => GL_LINEAR_DETAIL_COLOR_SGIS,
+    match word & !ODSY_TEX_MIN_MASK & !ODSY_TEX_COMPONENTS_MASK {
+        0x10000004 => GL_LINEAR_DETAIL_SGIS,
+        0x10000006 => GL_LINEAR_DETAIL_ALPHA_SGIS,
+        0x10000008 => GL_LINEAR_DETAIL_COLOR_SGIS,
         _ => 0,
     }
 }
 
+/// The texel components a level descriptor's word 1 names, from its bits
+/// 31:30 and 25:20 (one board format index; ESTABLISHED as one six-bit field
+/// in the datasheet). Only the indices the model has seen paired with a
+/// component set are decoded: 17 with size 1 is RGBA, 13 is RGB (SGI Quake's
+/// world textures) and 12 and 11 are RGB and luminance-alpha (the mip-level
+/// builder's templates). The model keeps whole texel words, so the index
+/// picks the components alone, not a bit layout. UNKNOWN: the rest of the
+/// index space.
+pub fn texture_level_format(word1: u32) -> Option<u32> {
+    match word1 & 0xc3f00000 {
+        0x41100000 => Some(GL_RGBA),
+        0x00d00000 | 0x00c00000 => Some(GL_RGB),
+        0x00b00000 => Some(GL_LUMINANCE_ALPHA),
+        _ => None,
+    }
+}
+
 impl Board {
-    pub fn texture_detail_backing_setup(&mut self, chain: &mut TextureChain, descriptor: u32, width: u32, height: u32, base_format: u32) -> bool {
+    /// The detail image at level-table entry `descriptor`, held as a plain 2D
+    /// level is: its row is its width in 16-texel units rounded up to even,
+    /// and its entry's word 1 carries no bits outside the format and that
+    /// stride (the plain level rule in Board::texture_setup()).
+    ///
+    /// The entry's word 1 bits 31:30 and 25:20 give the image's own format,
+    /// decoded by texture_level_format() whatever the base level's is. This
+    /// is a MODEL CHOICE: the stock library never sends a detail entry whose
+    /// format differs from the primary's, and what the board does with one is
+    /// UNKNOWN (it may ignore the field or misread the texels). A format the
+    /// model has no decode for refuses the draw.
+    pub fn texture_detail_backing_setup(&mut self, chain: &mut TextureChain, descriptor: u32, width: u32, height: u32) -> bool {
         let e = (descriptor * 3) as usize;
         let entry = [self.tex_levels[e], self.tex_levels[e + 1], self.tex_levels[e + 2]];
+        let Some(base_format) = texture_level_format(entry[1]) else {
+            return false;
+        };
         let base = entry[0] & 0x1fffffff;
+        let stride_units = (width.div_ceil(16) + 1) & !1u32;
 
-        if base == 0 || entry[1] != 0x41100002 || entry[2] != 0 || self.obj_count > ODSY_OBJECTS {
+        if base == 0
+            || (entry[1] & 0xfff) != stride_units
+            || (entry[1] & 0x3c0ff000) != 0
+            || entry[2] != 0
+            || self.obj_count > ODSY_OBJECTS
+        {
             return false;
         }
         let Some(o) = self.object_find(base) else {
@@ -1355,7 +1411,7 @@ impl Board {
             .wrapping_add(self.obj_offset[o] as u64)
             .wrapping_add(width as u64);
         let region_written = self.object_region_written(o, 0, 0, width, height);
-        if self.obj_width[o] != 32
+        if self.obj_width[o] != stride_units * 16
             || self.obj_rows[o] < height
             || end > self.obj_used as u64
             || end > self.obj_mem.size / 4
@@ -1469,7 +1525,7 @@ impl Board {
         let phase = (self.tex_sampler[4] & ODSY_TEX_SAMPLER_BIT17) != 0
             && (self.tex_sampler[4] & ODSY_TEX_MIN_MASK) != ODSY_TEX_MIN_LINEAR_MIPMAP_LINEAR;
         let word = self.tex_sampler[4] & !ODSY_TEX_SAMPLER_BIT17;
-        let components = word & 0x0f800000;
+        let components = word & ODSY_TEX_COMPONENTS_MASK;
         let mut sampler_size = self.tex_sampler[0];
         // The library's texture move (level descriptor 60), which draws a
         // pixel zoom, sends its sampler without the size word's bit 27 and
@@ -1496,11 +1552,19 @@ impl Board {
         if texture_move {
             sampler_size |= 0x08000000;
         }
-        let detail = texture_detail_sampler(sampler_size);
+        // A detail magnification filter names a detail image in word 0.
+        let detail = if texture_detail_filter(word) != 0 { texture_detail_sampler(sampler_size) } else { None };
+        // Word 0's detail combine and image size (bits 31 and 24:15) are
+        // stale unless word 4 carries a detail magnification code
+        // (ESTABLISHED, datasheet), so a plain image ignores them. Bits 29:25
+        // share the texture-offset code's bits and stay checked as before.
+        if detail.is_none() && !matches!((word >> 1) & 0xf, 2..=4) {
+            sampler_size &= 0x7e00_7fff;
+        }
         let detail_identity = detail.is_some();
+        let detail_filter = if detail_identity { texture_detail_filter(word) } else { 0 };
         let detail_sampler = detail.unwrap_or_default();
         let detail_weight = if detail_identity { self.texture_detail_function_weight() } else { None };
-        let detail_filter = if detail_identity { texture_detail_filter(word) } else { 0 };
         let tex_shape = self.tex_mode & (ODSY_TEX_MODE_1D | ODSY_TEX_MODE_2D | ODSY_TEX_MODE_3D);
         let three_d = (self.tex_mode & ODSY_TEX_MODE_3D) != 0;
         let three_d_shape = tex_shape == ODSY_TEX_MODE_3D
@@ -1576,17 +1640,16 @@ impl Board {
         ];
         'unsupported: {
             if detail_identity {
-                if detail_filter == 0
-                    || detail_weight.is_none()
+                if detail_weight.is_none()
                     || self.tex_level0 != 0
-                    || width != 1
-                    || height != 1
                     || depth != 1
                     || tex_shape != ODSY_TEX_MODE_2D
                 {
                     break 'unsupported;
                 }
-                sampler_size = 0x08000000;
+                // Word 0 bits 31:15 are the detail image's; the base level's
+                // sizes are checked below as a plain image's.
+                sampler_size = 0x08000000 | (sampler_size & 0x7fff);
             }
             if border {
                 width &= 0xffff;
@@ -1617,9 +1680,6 @@ impl Board {
                 0x02800000 => image.base_format = GL_RGB,
                 0x03000000 => image.base_format = GL_RGBA,
                 _ => break 'unsupported,
-            }
-            if detail_identity && image.base_format != GL_RGBA {
-                break 'unsupported;
             }
             let bf = image.base_format;
             if width == 0
@@ -2063,16 +2123,17 @@ impl Board {
                 max_lod: if min >= 0x40 { hi as f64 / 256.0 } else { 15.0 },
             });
             if detail_identity {
-                if !self.texture_detail_backing_setup(
+                // The detail image's entry lies past the base chain's.
+                if first + count > detail_sampler.descriptor
+                    || !self.texture_detail_backing_setup(
                     chain,
                     detail_sampler.descriptor,
                     detail_sampler.width,
                     detail_sampler.height,
-                    image.base_format,
                 ) {
                     break 'unsupported;
                 }
-                chain.volume.detail_weight = detail_weight.unwrap_or_default();
+                chain.detail_weight = detail_weight.unwrap_or_default();
                 image.detail_image = Some(chain.detail_image);
                 image.detail_level = detail_sampler.level;
                 image.detail_mode = detail_sampler.mode;

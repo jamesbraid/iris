@@ -995,6 +995,9 @@ pub const ODSY_TEX_MIN_MASK: u32 = 0xe0;
 pub const ODSY_TEX_MIN_NEAREST_MIPMAP_NEAREST: u32 = 0x40;
 pub const ODSY_TEX_MIN_LINEAR_MIPMAP_LINEAR: u32 = 0xa0;
 
+// Sampler word 4 bits 27:23, the texel components
+pub const ODSY_TEX_COMPONENTS_MASK: u32 = 0x0f800000;
+
 // Word 4 bit 17
 pub const ODSY_TEX_SAMPLER_BIT17: u32 = 1 << 17;
 

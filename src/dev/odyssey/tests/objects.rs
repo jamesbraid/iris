@@ -209,3 +209,137 @@ fn a_stored_volume_slice_written_in_part_does_not_grow() {
         }
     }
 }
+
+/// Sampler word 0's detail fields: the six captured detail controls' words
+/// decode to the level, size, entry and combine those controls were built
+/// with, and SGI Quake's world word (0x0873a500, a 512x256 base) to the
+/// 128x128 detail image at the default level -4, which sits in entry 60.
+#[test]
+fn detail_sampler_words_name_the_detail_image() {
+    let cases = [
+        (0x0210_8000, 63, 2, 2, -1, GL_ADD),
+        (0x0410_8000, 62, 2, 2, -2, GL_ADD),
+        (0x0610_8000, 61, 2, 2, -3, GL_ADD),
+        (0x0420_8000, 62, 4, 2, -2, GL_ADD),
+        (0x0411_0000, 62, 2, 4, -2, GL_ADD),
+        (0x8410_8000, 62, 2, 2, -2, GL_MODULATE),
+        (0x0873_a500, 60, 128, 128, -4, GL_ADD),
+    ];
+    for (word, descriptor, width, height, level, mode) in cases {
+        let d = texture_detail_sampler(word).unwrap_or_else(|| panic!("{word:#x} refused"));
+        assert_eq!((d.descriptor, d.width, d.height, d.level, d.mode), (descriptor, width, height, level, mode), "{word:#x}");
+    }
+    assert!(texture_detail_sampler(0x0010_8000).is_none(), "level 0 is no detail level");
+    assert!(texture_detail_sampler(0x4410_8000).is_none(), "bit 30 has no known meaning");
+}
+
+/// The library's default ramp, weight 0 at LOD 0 to 1 at LOD -4: the weight
+/// is the end entry's beyond the table and interpolated between entries.
+#[test]
+fn the_detail_weight_follows_the_function_between_entries() {
+    let mut w = TextureDetailWeight::default();
+    for (i, e) in w.table.iter_mut().enumerate() {
+        *e = (i as u16 * 32).min(4095);
+    }
+    assert_eq!(w.at(0.5), Some(0.0));
+    assert_eq!(w.at(-1.0), Some(1024.0 / 4096.0));
+    assert_eq!(w.at(-1.0 / 64.0), Some(16.0 / 4096.0));
+    assert_eq!(w.at(-2.5), Some(2560.0 / 4096.0));
+    assert_eq!(w.at(-9.0), Some(4095.0 / 4096.0));
+    assert_eq!(w.at(f64::NAN), None);
+}
+
+/// SGI Quake's world textures as the library left them: a 512x256 RGB base
+/// with ten mip levels, sampler word 4 `word4`, modulate, and a 128x128
+/// detail image in entry 60 whose word 1 is `detail_word1`.
+fn quake_world_state(s: &mut Board, word4: u32, detail_word1: u32) {
+    let base = 0x1d90c0;
+    let mut level_base = base;
+
+    s.tex_mode = 0x2410;
+    s.tex_level0 = 0;
+    for i in 0..10u32 {
+        let (w, h) = ((512u32 >> i).max(1), (256u32 >> i).max(1));
+        let units = (w.div_ceil(16) + 1) & !1;
+        let o = s.object_select(level_base, units * 16);
+        assert!(s.object_rows(o, h));
+        s.tex_levels[i as usize * 3..][..3].copy_from_slice(&[level_base, 0x00d0_0000 | units, 0]);
+        level_base += units * 16 * h;
+    }
+    let detail = 0x16b800;
+    let o = s.object_select(detail, 128);
+    assert!(s.object_rows(o, 128));
+    for y in 0..128 {
+        for x in 0..128 {
+            s.object_store(o, x, y, 0x8080_80ff);
+        }
+    }
+    s.tex_levels[60 * 3..][..3].copy_from_slice(&[detail, detail_word1, 0]);
+    s.tex_sampler = [0x0873_a500, 0x200, 0x100, 1, word4, 0, 0];
+    s.tex_lod = [0, 0, 0x3100, 0xf00];
+    s.tex_env = [2, 0, 0, 0, 0];
+    for (i, e) in s.tex_detail_function.iter_mut().enumerate() {
+        *e = ((i as u32 * 32).min(4095)) << 12;
+    }
+    s.tex_detail_function_valid = 0xffff;
+}
+
+/// SGI Quake's world textures, replayed from its texture state: a 512x256
+/// RGB base with ten mip levels under GL_LINEAR_DETAIL_COLOR_SGIS (sampler
+/// word 4 0x128000a8: minification code 5, magnification code 4), modulate,
+/// and a 128x128 detail image in entry 60. Setup used to refuse every such
+/// draw, and the game's whole world went undrawn, black.
+#[test]
+fn sgi_quake_world_texture_takes_its_detail_image() {
+    let (mut s, _, _) = board_with_ram();
+    quake_world_state(&mut s, 0x1280_00a8, 0x00d0_0008);
+    let mut image = GlTexImage::default();
+    let mut chain = Box::<TextureChain>::default();
+
+    assert!(s.texture_setup(&mut image, &mut chain), "the draw was refused");
+    assert_eq!(image.mag_filter, GL_LINEAR_DETAIL_COLOR_SGIS);
+    assert_eq!((image.width, image.height, image.base_format), (512, 256, GL_RGB));
+    assert_eq!(chain.pyramid.map(|p| p.count), Some(10));
+    assert_eq!((chain.detail_storage.width, chain.detail_storage.height), (128, 128));
+    assert_eq!((image.detail_level, image.detail_mode), (-4, GL_ADD));
+    assert_eq!(chain.detail_weight.table[128], 4095);
+}
+
+/// Word 0 bits 24:15 name a detail image only while word 4 carries a detail
+/// magnification code; the library leaves them behind after a change to a
+/// plain filter. Quake's state with magnification code 1 (linear) is a plain
+/// mipmapped image and takes no detail image, where code 4 takes one.
+#[test]
+fn stale_detail_size_bits_are_ignored_without_a_detail_magnification_code() {
+    let (mut s, _, _) = board_with_ram();
+    quake_world_state(&mut s, 0x1280_00a2, 0x00d0_0008);
+    let mut image = GlTexImage::default();
+    let mut chain = Box::<TextureChain>::default();
+
+    assert!(s.texture_setup(&mut image, &mut chain), "the plain draw was refused");
+    assert_eq!(image.mag_filter, GL_LINEAR);
+    assert!(image.detail_image.is_none());
+    assert_eq!((image.width, image.height, image.base_format), (512, 256, GL_RGB));
+    assert_eq!(chain.detail_storage.width, 0);
+}
+
+/// The detail image is decoded by its own entry's format, not the base's:
+/// an RGBA detail entry (board format index 17, texel size 1) over Quake's
+/// RGB base is read as RGBA, and a format the model has no decode for is
+/// refused rather than read as the base's.
+#[test]
+fn the_detail_image_takes_its_own_entry_format() {
+    let (mut s, _, _) = board_with_ram();
+    quake_world_state(&mut s, 0x1280_00a8, 0x4110_0008);
+    let mut image = GlTexImage::default();
+    let mut chain = Box::<TextureChain>::default();
+
+    assert!(s.texture_setup(&mut image, &mut chain), "the draw was refused");
+    assert_eq!(image.base_format, GL_RGB);
+    assert_eq!(chain.detail_storage.base_format, GL_RGBA);
+    assert_eq!(chain.detail_image.base_format, GL_RGBA);
+
+    quake_world_state(&mut s, 0x1280_00a8, 0x0230_0008);
+    let mut chain = Box::<TextureChain>::default();
+    assert!(!s.texture_setup(&mut GlTexImage::default(), &mut chain), "an undecoded format drew");
+}
