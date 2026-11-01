@@ -9,7 +9,7 @@
 //! BUZZ's raster unit (raster_unit.rs), which draws what the front end sets
 //! up; and the display thread, the back end, which counts the retrace and
 //! copies the scanout's frame to the window 60 times a second.
-//! interface.rs describes the two locks the first two share.
+//! interface.rs describes how the first two share the board's state.
 //! Interrupt packets go to HEART, the only interrupt target on the Octane:
 //! a packet to widget 8 sets or clears the HEART pending bit of its vector.
 //!

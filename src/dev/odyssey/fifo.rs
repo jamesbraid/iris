@@ -400,9 +400,9 @@ impl CommandFifo {
             // With one processor this cannot happen: has_room counted the
             // ring's stores and nothing else pushes. With two, the other
             // processor's store can hold the ring's lock, or take the last
-            // place between has_room and here. Refused, the store goes the
-            // board-lock way (`write_command`), which runs what waits and
-            // then the store. Nothing took it out, so its counts come back off.
+            // place between has_room and here. Refused, the store is pushed
+            // again (`write_command`). Nothing took it out, so its counts
+            // come back off.
             self.levels.words.fetch_sub(words, SeqCst);
             self.levels.stores.fetch_sub(1, SeqCst);
             if counted {

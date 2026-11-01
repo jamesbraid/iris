@@ -1,4 +1,4 @@
-//! The board's host interface, under a lock of its own.
+//! The board's host interface: the registers a processor reaches without waiting.
 //!
 //! The board takes command-FIFO stores into a FIFO and draws behind them:
 //! the processor goes on while a primitive is drawn. Meanwhile the driver
