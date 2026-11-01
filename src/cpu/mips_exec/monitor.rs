@@ -1080,8 +1080,11 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> MipsCpu<T, C> {
             }
             "status" => {
                 // Never blocks: while running, the core is not touched.
+                // Read the flag before the note: a stop records its note
+                // first, so a CPU seen stopped has its note.
+                let running = self.is_running();
                 let note = self.stop_note.lock().clone();
-                if self.is_running() {
+                if running {
                     writeln!(writer, "running").unwrap();
                     if note.seq > 0 {
                         writeln!(writer, "  last stop #{}: {} at {:016x}", note.seq, note.reason, note.pc).unwrap();
