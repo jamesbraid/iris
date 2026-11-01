@@ -56,8 +56,7 @@ pub(super) mod intr {
 
     // Flags bit 25, raised as the level rises to the threshold the high mark gives.
     // MODEL CHOICE: the flag's meaning rests on its name alone, and its link to
-    // 0x6b2 and its threshold and edge are UNKNOWN (datasheet, "Grades for
-    // withdrawn claims"); no driver enables it, and the kernel's fatal-flag mask
+    // 0x6b2 and its threshold and edge are UNKNOWN; no driver enables it, and the kernel's fatal-flag mask
     // leaves it out.
     pub const FIFO_HIGH_WATER: u32 = 0x02000000;
 }
@@ -76,9 +75,9 @@ pub(super) mod route {
     pub const VECTOR_FLAG_SHIFT: u32 = 0;
 
     // Bits 18:16 of ROUTE_DEST_UPPER enable the three non-flag sources. The
-    // datasheet infers that the three bits are the enables but not which bit
-    // belongs to which source; this assignment is its model choice (an
-    // approximation): ascending with the vector bytes.
+    // three bits are inferred to be the enables, but not which bit belongs to
+    // which source; this assignment is a model choice (an approximation):
+    // ascending with the vector bytes.
     pub const ENABLE_DMA: u32 = 1 << 16;
     pub const ENABLE_RETRACE: u32 = 1 << 17;
     pub const ENABLE_SOFTSYNC: u32 = 1 << 18;
@@ -172,8 +171,7 @@ pub(super) mod reg {
     // INFERRED) and a value in the low word: 0x6b0 = 0, 0x6b1 = 256,
     // 0x6b3 = 24144, 0x6b2 = 32192 and 0x7b5 = 1, written in the order 0x6b0,
     // 0x6b1, 0x6b3, 0x6b2, 0x7b5. The values and the order are ESTABLISHED; the
-    // roles and units of the four 0x6bX words are UNKNOWN (datasheet, "Grades
-    // for withdrawn claims", row for 0x6b0 to 0x6b3). The model stores all five
+    // roles and units of the four 0x6bX words are UNKNOWN. The model stores all five
     // and gives no meaning to 0x6b0, 0x6b1, 0x6b3 or 0x7b5.
     //
     // MODEL CHOICE, not a hardware fact: 0x6b2 is applied as the threshold for
@@ -197,8 +195,7 @@ pub(super) mod reg {
     // 1,000,000,000 once, after the program load (the doubleword and the single
     // write are ESTABLISHED). That the register is 0x3f0 is INFERRED; its unit
     // and meaning are UNKNOWN: a sync timeout in board clocks, in nanoseconds or
-    // a non-timeout limit all fit (datasheet, "Grades for withdrawn claims", row
-    // for 0x7f0). The model accepts the write and records the value, runs no
+    // a non-timeout limit all fit. The model accepts the write and records the value, runs no
     // timer, and raises no flag because of it.
     pub const SETUP_7F0: u32 = 0x7f0;
     pub const QUICK_FLUSH_ARG: u32 = 0x0443; // 1 operand: 0xfa or 0x96 seen
@@ -301,8 +298,7 @@ pub(super) mod cfifo {
     // The command FIFO's low-water threshold, in 32-bit words: below it STATUS0
     // bit 17 reads set, and the level falling below it latches the low-water
     // flag. That bit 17 and flag 9 report a low-water level is INFERRED, and
-    // their link to any 0x6bX value is UNKNOWN (datasheet, "Grades for withdrawn
-    // claims", rows for 0x6b0-0x6b3 and for status bits 15 and 17).
+    // their link to any 0x6bX value is UNKNOWN.
     // MODEL CHOICE, not a hardware fact: the threshold is 16 words, independent
     // of the 0x6bX values the kernel stores (24,144 in 0x6b3). The edge (bit 17
     // set while the level is below it, the flag latched on falling below it) is a
@@ -317,8 +313,8 @@ pub(super) mod cfifo {
 
     // The command FIFO's size in 32-bit words that the model clamps the level to
     // and, with IRIS_VPRO_FIFO=shallow, refuses stores past. MODEL CHOICE: the
-    // FIFO's depth, in any unit, and the figure 32,768 are UNKNOWN (datasheet,
-    // "Grades for withdrawn claims"; no object names a FIFO size). The model
+    // FIFO's depth, in any unit, and the figure 32,768 are UNKNOWN (no object
+    // names a FIFO size). The model
     // keeps this figure whatever the stored 0x6bX values say, so the level the
     // guest reads never exceeds it, which is a limitation: a real FIFO may be
     // deeper or shallower. Test, a model contract:
@@ -833,8 +829,7 @@ pub(super) mod prog {
     // contiguous. "Sequencer" is not an established name for them. Class 0x27 is
     // the microcode write address (ESTABLISHED; PROGRAM_ADDR). The
     // kernel writes 0x2e = 0x380 and 0x26 = 0x7f at set-up: the values are
-    // ESTABLISHED and their roles UNKNOWN (datasheet, "Grades for withdrawn
-    // claims", row for classes 0x27, 0x2e and 0x26). The model acts on the
+    // ESTABLISHED and their roles UNKNOWN. The model acts on the
     // classes it names, keeps every value in gl_regs_20_35[] and accepts the rest, whose
     // meaning is UNKNOWN, without effect.
     pub const REG_FIRST: u32 = 0x20;
@@ -1184,8 +1179,7 @@ pub(super) mod query {
 }
 /// The last of the four zero-operand blocks (0x3cf8 to 0x3cfb) that end a
 /// glRasterPos stream. INFERRED as the point where the board latches the
-/// raster index, colour and texture coordinate (odyssey datasheet,
-/// "Raster-position query and glyph colour").
+/// raster index, colour and texture coordinate.
 pub(super) const ODSY_RASTER_POS_LATCH_WORD: u32 = 0x3cfb;
 
 // The GL library's conversion of a signed-integer colour or normal operand to a float, in single precision as its query decoder does.

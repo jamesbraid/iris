@@ -25,8 +25,7 @@ tracks.
 
 PB&J version is 1 on all four. Commands, frame buffers and textures share
 one SDRAM pool on every board. Inferred, not captured: the V8's A.1 and
-banks, the V10's revision 10, and the 32 MB boards' two banks (the datasheet
-marks them). The Fuel and Tezro boards are other assemblies; the Octane
+banks, the V10's revision 10, and the 32 MB boards' two banks. The Fuel and Tezro boards are other assemblies; the Octane
 names are answered on those machines too, a known limitation.
 
 Guest-side consequences worth knowing before you debug a "wrong" screen:

@@ -562,8 +562,7 @@ impl Board {
     /// menu covered.
     ///
     /// INFERRED: that these copies belong to the overlay is read from a trace
-    /// of the words and the menus' appearance; the datasheet does not record
-    /// it.
+    /// of the words and the menus' appearance; no other source records it.
     ///
     /// Each row is read whole before it is written, and the rows run in the
     /// direction that keeps a source row ahead of the writes, so an overlapping
@@ -902,15 +901,14 @@ impl Board {
 /// Whether a GL image write under source format `code` stores the source's
 /// alpha rather than 255.
 ///
-/// ESTABLISHED (datasheet "Alpha from image writes"): the library sends
+/// ESTABLISHED: the library sends
 /// the source's alpha bytes unchanged under 0x4b, 0x48, 0x6b, 0x4c and
-/// 0x6c, and no header bit asks the board to replace them. INFERRED there:
+/// 0x6c, and no header bit asks the board to replace them. INFERRED:
 /// the board stores that alpha. The write mask's alpha enable (block
 /// 0x052) is not applied to image writes in this model.
 ///
 /// The X server's on-screen images under 0x4c come by DMA to the colour
-/// buffer (Board::dma_put()), which still stores 255: the datasheet infers
-/// they would write the A byte, 0 in every traced upload, but the X server
+/// buffer (Board::dma_put()), which still stores 255: they would, by inference, write the A byte, 0 in every traced upload, but the X server
 /// passes client pixels through, and whether alpha is stored at all for a
 /// window whose visual has none is unknown. The model keeps one plane for
 /// every visual, so it cannot tell such a window apart.
@@ -1010,9 +1008,8 @@ pub(super) fn image_pairing_supported(code: u32, fmt: u32) -> bool {
     }
     // The library sends 8-bit luminance-alpha under the colour-index or the
     // RGB tag, and its 16-bit luminance and luminance-alpha as 16-bit
-    // components under the RGBA16 tag as well as the other two (datasheet,
-    // "Texture source codes for 12-bit textures"; observed on 13x5 draws of
-    // the GL test suite).
+    // components under the RGBA16 tag as well as the other two (observed on
+    // 13x5 draws of the GL test suite).
     if code == image::CODE_LUM_ALPHA {
         return fmt != image::FMT_RGBA16;
     }
@@ -1035,7 +1032,7 @@ impl Board {
     /// One word of a format-0, type-4 burst: a pixel of the depth and
     /// stencil word, four bytes.
     ///
-    /// Datasheet, "Depth and stencil by pixel burst". ESTABLISHED: the
+    /// ESTABLISHED: the
     /// burst's operand carries no size field and no field codes, so the
     /// header does not say which plane; the library selects the plane by
     /// the write-mask block (0x052) it sends just before the burst. Its depth
@@ -1044,8 +1041,8 @@ impl Board {
     /// and leaves the stencil mask. INFERRED: the enables decide which part of
     /// the stored pixel changes, so the model writes the depth plane's word
     /// (bits 23:0) when bit 24 is set, and the stencil plane's bits 19:12 of
-    /// block 0x052 select as `(data & mask) | (old & !mask)`. ESTABLISHED
-    /// (datasheet, "The stencil word and the write paths"): the library packs
+    /// block 0x052 select as `(data & mask) | (old & !mask)`. ESTABLISHED:
+    /// the library packs
     /// the stencil index at bits 23:16 with no mask (index 0x11 is
     /// 0x0011_0000) and the burst copies the word, so that byte is the data;
     /// the 8-bit mask in bits 19:12 of block 0x052 applies to it, not to the

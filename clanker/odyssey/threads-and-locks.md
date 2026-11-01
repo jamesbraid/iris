@@ -1,7 +1,7 @@
 # VPro threads, the lock-free state and the two queues
 
-Status: design (iris `src/dev/odyssey/{interface,fifo,worker,raster_unit,mod}.rs`,
-2026-10-30). Check against the code before relying on details.
+Status: reference (iris `src/dev/odyssey/{interface,fifo,worker,raster_unit,mod}.rs`,
+2026-10-30).
 
 **Why it is shaped this way.** The board decodes and draws behind the
 processor: the driver stores more commands and polls registers while a
@@ -26,8 +26,8 @@ Each thread stands for a chip, or a part of one, of the board:
 | `odyssey-raster` | BUZZ raster unit: raster, texture, shading, framebuffer writes | one raster unit: inferred (US 6,259,460) |
 | `odyssey-display` | PB&J back end: retrace, colour map, cursor, scanout | PB&J as the display back end with no drawing role: established (`108-0314-003` p. 1) |
 
-The command FIFO lives in board SDRAM. Its depth, in any unit, is unknown
-(datasheet, "Grades for withdrawn claims"); the model gives it 32,768 words,
+The command FIFO lives in board SDRAM. Its depth, in any unit, is unknown;
+the model gives it 32,768 words,
 a model choice independent of the `0x6b1` the kernel stores.
 The split between the two BUZZ threads follows US 6,417,858, which puts an
 output FIFO between the transform engine and the rasteriser (inferred to
@@ -210,8 +210,7 @@ While the worker runs every command store queues, so decoding and drawing
 never run on the processor's thread.
 
 The guest sees the model's FIFO, not the ring: 32,768 words, a model choice
-whatever the kernel's `0x6b1` set-up stores (datasheet, "Command FIFO level
-and credits"). The level is the words waiting, a doubleword store counting
+whatever the kernel's `0x6b1` set-up stores. The level is the words waiting, a doubleword store counting
 two (also a model choice). STATUS0 bit 16 is empty, bit 17 below the model's
 16-word low-water threshold, bit 15 at or above the stored `0x6b2` (flags bit
 25 rises on reaching it). Which register is a high-water mark is unknown:

@@ -213,8 +213,8 @@ pub static MGRAS_HQ4_ACK: EventDef = EventDef::new("hq4 ack", cat::GFX).on_track
 pub static ODSY_CFIFO_LEVEL: EventDef = EventDef::new("VPro cfifo level", cat::GFX).in_group(GFX_GROUP);
 /// The FIFO fell below the low-water mark as a store retired (arg: level).
 pub static ODSY_CFIFO_LOW_WATER: EventDef = EventDef::new("cfifo low water", cat::GFX).on_track("VPro irq").in_group(GFX_GROUP).with_arg("level");
-/// One slice of the board thread holding the board lock (arg: stores
-/// waiting when it began), and an access draining the queue on its own
+/// One slice of the board's front-end thread running queued stores (arg:
+/// stores waiting when it began), and an access draining the queue on its own
 /// thread (arg: stores waiting).
 pub static ODSY_SLICE: EventDef = EventDef::new("slice", cat::GFX).with_arg("waiting");
 pub static ODSY_DRAIN: EventDef = EventDef::new("drain", cat::GFX).with_arg("waiting");
@@ -238,8 +238,8 @@ pub static ODSY_RETRACE: EventDef = EventDef::new("retrace", cat::GFX).on_track(
 /// The refresh thread resolving dirty lines, and handing the frame on.
 pub static ODSY_CAPTURE: EventDef = EventDef::new("frame capture", cat::GFX).on_track("VPro capture").in_group(GFX_GROUP);
 pub static ODSY_PRESENT: EventDef = EventDef::new("present", cat::GFX).on_track("VPro present").in_group(GFX_GROUP);
-/// The display holding the planes against the raster unit while it copies
-/// a frame's dirty lines aside (on the display thread).
+/// The display copying a frame's dirty lines aside, with no lock and no wait
+/// for the raster unit (on the display thread).
 pub static ODSY_FRAME_PLANES: EventDef = EventDef::new("frame planes", cat::GFX);
 
 // ── jitv2 ────────────────────────────────────────────────────────────────────

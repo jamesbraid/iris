@@ -39,14 +39,13 @@ Status: rule (2026-10-30).
   frame pace, up to a frame (about 16 ms) after the guest arms one. Swap
   timing measured to better than that is noise.
 
-- **Model choices to remember.** The FIFO's depth is unknown in any unit
-  (datasheet, "Grades for withdrawn claims"). The model keeps 64 stores for
+- **Model choices to remember.** The FIFO's depth is unknown in any unit.
+  The model keeps 64 stores for
   credits and clamps the level at 32,768 words, whatever the stored `0x6bX`
   values say, and uses a 16-word low-water threshold; `0x6b2` as the
   status-bit-15 threshold is a model choice too. The level is in words, a
-  doubleword store counting two. All are listed with their tests in the
-  datasheet's "Command FIFO level and credits"; the tests pin the model, not
-  the hardware.
+  doubleword store counting two. The tests pin the model, not the
+  hardware.
 
 - **No Mesa renderer.** The host-Mesa path from the QEMU model was left out;
   everything is drawn by the scalar rasteriser.

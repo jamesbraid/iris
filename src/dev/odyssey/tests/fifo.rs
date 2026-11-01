@@ -339,7 +339,7 @@ fn a_run_retires_with_the_levels_and_credits_of_one_by_one() {
     assert_eq!(pi_run.count("return"), pi_one.count("return"));
     assert_eq!(pi_run.count("owe"), pi_one.count("owe"));
     assert!(pi_run.count("repay") > 0, "the run moved owed stores up");
-    // With a counted store waiting the next run is one store, as before.
+    // With a counted store waiting the next run is one store.
     run.fifo.take_run(&mut taken);
     assert_eq!(taken.stores().len(), 1);
 }

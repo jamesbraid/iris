@@ -1349,9 +1349,9 @@ impl GlDrawState {
     ///
     /// The shared mapping drops a w of at most 1e-6, which breaks the
     /// homogeneous scale of a clip vector: a vertex scaled by 1e-7 is the
-    /// same point. The board's rule for a small w is UNKNOWN (the datasheet
-    /// is silent), so VPro keeps its earlier one, w > 0, by dividing such a
-    /// vertex through by w before the mapping, which leaves it at w = 1.
+    /// same point. The board's rule for a small w is UNKNOWN, so VPro
+    /// takes w > 0, dividing such a vertex through by w before the mapping,
+    /// which leaves it at w = 1.
     pub fn clip_to_window(&self, clip: &[f64; 4], subpixel: f32) -> Option<[f64; 3]> {
         let mut h = clip.map(|c| c as f32);
 

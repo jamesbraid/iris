@@ -193,12 +193,12 @@ impl HostInterface {
     /// (HostInterface::update_irq()); the softsync, retrace and DMA-done handlers ack
     /// nothing, and those sources send a single set pulse.
     ///
-    /// MODEL CHOICE (datasheet, "Bits 18:16 of 0x1044"): bits 18:16 of
+    /// MODEL CHOICE: bits 18:16 of
     /// ROUTE_DEST_UPPER are the per-source enables of the DMA-done, retrace
     /// and softsync sources, in the order of ODSY_ROUTE_ENABLE_*. A source
-    /// raised while its bit is clear sends nothing and is dropped. The
-    /// datasheet grades which bit enables which source unknown, and what
-    /// the board does with a source raised while disabled approximated;
+    /// raised while its bit is clear sends nothing and is dropped. Which
+    /// bit enables which source is unknown, and what the board does with a
+    /// source raised while disabled is approximated;
     /// IRIX sets and clears all three together, so it cannot tell. The flag
     /// source has no bit here: intr::ENABLE_SET gates it.
     pub fn deliver_routed(&mut self, shift: u32, what: &str, set: bool) {
@@ -265,8 +265,7 @@ impl HostInterface {
     }
 
     /// A routing write: send the flag level that rose before the destination
-    /// was programmed, if it is still raised. MODEL CHOICE, from the
-    /// datasheet's entry "DMA completion with no tag": the kernel enables
+    /// was programmed, if it is still raised. MODEL CHOICE: the kernel enables
     /// flow control, and so can raise low water, before its interrupt set-up
     /// programs 0x1044, 0x104c and 0x1054, so the model holds the level
     /// pending and sends it once the destination is written. What the board

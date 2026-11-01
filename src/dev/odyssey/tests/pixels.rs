@@ -1,6 +1,5 @@
 //! GL pixel transfers: image writes by burst and by DMA, reads, and the
-//! copy block, against the headers the datasheet's "Pixel transfer
-//! headers from the OpenGL library" section records.
+//! copy block, against the headers the OpenGL library sends.
 
 use crate::dev::odyssey::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
 use crate::dev::odyssey::consts::{
@@ -68,10 +67,8 @@ fn burst_image_groups(s: &mut Board, (x1, y1, x2, y2): (u32, u32, u32, u32), gro
 
 /// glDrawPixels of RGBA bytes, the header the library sends for a 2x1
 /// image (count 2, source code 0x4b): the pixels keep the alpha they
-/// carry. Before the datasheet's alpha section the model stored 255.
-///
-/// Datasheet: "Alpha from image writes" (established that the library
-/// sends the alpha, inferred that the board stores it).
+/// carry. Established that the library sends the alpha, inferred that the
+/// board stores it.
 #[test]
 fn a_gl_rgba_image_keeps_its_alpha() {
     let (mut s, _) = window();
@@ -159,8 +156,7 @@ fn read_window() -> (Box<Board>, Arc<Ram>) {
 /// pixel's top bits. Before the read table, none of these headers was
 /// modelled and the guest buffer was left as it was.
 ///
-/// Datasheet: "Pixel transfer headers from the OpenGL library", "Read
-/// table" (established as the library's request, the packing inferred).
+/// Established as the library's request, the packing inferred.
 /// The narrowing is an approximation, see DMA_GL_READS.
 #[test]
 fn a_read_of_a_packed_type_returns_that_packing_of_the_pixel() {
@@ -220,14 +216,13 @@ fn with_fields(word4: u32, first: u32, second: u32) -> u32 {
 /// pair is colour, (0,0) and (4,0) are depth, and (4,0) is stencil. The
 /// (0,0) stencil or storage-0 index tie is served as an index.
 ///
-/// Datasheet: "Read table" (established that the field codes differ; the
-/// tie is unknown and labelled).
+/// Established that the field codes differ; the tie is unknown and labelled.
 #[test]
 fn field_codes_separate_a_colour_read_from_a_depth_or_stencil_read() {
     let (mut s, ram) = read_window();
     let colour = [0xff, 0xa5, 0x5a, 0x3c];
 
-    // Colour pairs from the datasheet's table: A, R, G, B bytes.
+    // Colour pairs: A, R, G, B bytes.
     for (a, b) in [(6, 2), (2, 2), (3, 2), (7, 3), (2, 0)] {
         let got = dma_read(&mut s, &ram, (30, 40, 1), with_fields(read_word4(2, 2), a, b), 4);
         assert_eq!(got[..5], [0xff, 0xa5, 0x5a, 0x3c, 0xa5], "fields ({a},{b})");
@@ -301,8 +296,8 @@ fn stencil_at(s: &Board, x: i32, y: i32) -> u32 {
 /// pixel: the plane's 24-bit depth word in its 16-bit form (exponent and
 /// the top ten mantissa bits).
 ///
-/// Datasheet: "Depth and stencil headers" (the request is established; that
-/// the board hands back the plane's 16-bit form is inferred).
+/// The request is established; that the board hands back the plane's 16-bit
+/// form is inferred.
 #[test]
 fn a_16_bit_depth_read_returns_the_planes_16_bit_form() {
     let (mut s, ram) = read_window();
@@ -317,9 +312,8 @@ fn a_16_bit_depth_read_returns_the_planes_16_bit_form() {
 /// read of one byte. The same header with a colour pair is colour, as the
 /// test above has it. Nothing here is the colour planes.
 ///
-/// Datasheet: "Read table" (established that the field codes separate them;
-/// that the plane holds the board's word is inferred; the stencil plane is a
-/// model choice).
+/// Established that the field codes separate them; that the plane holds the
+/// board's word is inferred; the stencil plane is a model choice.
 #[test]
 fn a_depth_or_stencil_read_returns_the_planes_word_or_byte() {
     let (mut s, ram) = read_window();
@@ -338,8 +332,7 @@ fn a_depth_or_stencil_read_returns_the_planes_word_or_byte() {
 /// image the same with size 0. Each goes to its own plane, one four-byte
 /// word a pixel, and the colour planes stay as they were.
 ///
-/// Datasheet: "Depth and stencil headers", established as the library's
-/// request.
+/// Established as the library's request.
 #[test]
 fn a_depth_or_stencil_image_by_dma_writes_its_own_plane() {
     let (mut s, ram) = read_window();
@@ -362,7 +355,7 @@ fn a_depth_or_stencil_image_by_dma_writes_its_own_plane() {
 /// the stencil mask and its stencil download clears bit 24, so each leaves
 /// the other plane alone.
 ///
-/// Datasheet: "Depth and stencil by pixel burst" (ESTABLISHED: the burst has
+/// ESTABLISHED: the burst has
 /// no plane selector and the library sets block 0x052 as above; INFERRED:
 /// the enables pick the part that changes; UNKNOWN: depth and stencil tests
 /// on the burst, which the model does not apply).
@@ -414,8 +407,8 @@ fn a_depth_or_stencil_burst_writes_the_plane_the_write_mask_names() {
 /// Small images come as pixel bursts, so the pixels here are the bytes of
 /// the stream: two 16-bit pixels a word, a pixel every byte, and so on.
 ///
-/// Datasheet: "Image-write table" (established as what the library sends;
-/// the widening of narrow fields to a byte is inferred).
+/// Established as what the library sends; the widening of narrow fields to a
+/// byte is inferred.
 #[test]
 fn a_burst_image_of_a_packed_or_single_channel_type_lands_as_that_pixel() {
     let (mut s, _) = window();
@@ -504,7 +497,7 @@ fn copy_block(s: &mut Board, ops: [u32; 8]) {
 
 /// The operands as the library sends a glCopyPixels, taken from a run.
 ///
-/// Datasheet: "Copy words" (established).
+/// Established as what the library sends.
 #[test]
 fn the_copy_operands_decode_into_source_size_destination_and_headers() {
     let c = CopyOperands::decode(&[0x3000_0019, 0x00bb_003c, 0x0050_2050, 0x0009_0015, 0x1263_3042, 0x3000_0010, 0x00a2_0064, 0x3863_204b]);
@@ -529,7 +522,7 @@ fn the_copy_operands_decode_into_source_size_destination_and_headers() {
 /// back by the draw mask, lands the rectangle at the destination, and a copy
 /// onto itself, shifted, reads its source as it was before the copy.
 ///
-/// Datasheet: "Copy words". The model stages the source, so the overlap
+/// The model stages the source, so the overlap
 /// bits (inferred) need no direction of their own.
 #[test]
 fn a_gl_copy_between_the_drawables_moves_the_rectangle() {
@@ -562,7 +555,7 @@ fn select_overlay_destination(s: &mut Board) {
 
 /// A rectangle copy between two points of the id-plane base. The operand
 /// words are the ones a trace of a menu opening showed the X server sending
-/// (the datasheet does not record them): both base words name the id planes.
+/// (no other source records them): both base words name the id planes.
 fn overlay_copy(s: &mut Board, (sx, sy): (u32, u32), (w, h): (u32, u32), (dx, dy): (u32, u32)) {
     copy_block(s, [0x14_2000, sy << 16 | sx, 0x0050_0050, h << 16 | w, 0x8000_1000, 0x14_2000, dy << 16 | dx, 0x3a00_0041]);
 }
@@ -575,9 +568,8 @@ fn overlay_at(s: &Board, x: u32, y: u32) -> u8 {
 /// itself. The copy moves the overlay bytes and leaves the colour planes
 /// alone: copying colour there smeared the window under every popup menu.
 ///
-/// Datasheet: "X server drawing in the overlay and the select's flag bits"
-/// (the menu is drawn at the id-plane base; that its copies stay there is
-/// inferred).
+/// The menu is drawn at the id-plane base; that its copies stay there is
+/// inferred.
 #[test]
 fn a_copy_at_the_id_plane_base_moves_overlay_bytes_not_colour() {
     let (mut s, _) = window();
@@ -856,7 +848,7 @@ fn a_signed_type_copy_lists_rows_bottom_first_and_applies_the_signed_pass() {
 /// bytes as unsigned: scale 0.5 and bias 0.25 (3.12 words 0x0800, 0x0400)
 /// give b / 2 + 63.75 per lane, rounded, and a lane the filter does not change
 /// (scale 1.0, bias 0) keeps its byte. INFERRED arithmetic: the 3.12 words
-/// are the only datasheet-established part.
+/// are the only established part.
 #[test]
 fn a_copy_from_the_window_applies_the_programmed_scale_and_bias_unsigned() {
     let (mut s, _) = window();
@@ -887,10 +879,10 @@ fn bind_read_drawable(s: &mut Board, word: u32) {
 /// drawable is the off-screen object when 0x609 names one and not the
 /// screen's colour buffer. A DMA read and a copy follow the same rule.
 ///
-/// Datasheet: "Front and back of a pixel buffer" (ESTABLISHED: the kernel
+/// ESTABLISHED: the kernel
 /// alone writes bit 31 of 0x609, from the drawable's swap halfword, and a
 /// pixel buffer's pane swaps like a window's; INFERRED: a read's front is
-/// the buffer a front draw mask writes).
+/// the buffer a front draw mask writes.
 #[test]
 fn a_pixel_buffers_front_is_the_buffer_a_front_draw_mask_writes() {
     let (mut s, ram) = read_window();
@@ -964,9 +956,8 @@ fn a_gl_pixel_write_marks_the_display_lines_it_wrote() {
 /// (s0, t0) and (s1, t1) as fractions of the object's power-of-two size,
 /// which the image only partly fills. Here a 2x2 image is drawn at zoom 2 into a 4x4 square: each source texel fills a 2x2 block.
 ///
-/// Datasheet: "Pixel zoom: the texture move and its rectangle"
-/// (ESTABLISHED: the word sequence and layout; INFERRED: the colour floats
-/// and that the corners are window pixels).
+/// ESTABLISHED: the word sequence and layout; INFERRED: the colour floats
+/// and that the corners are window pixels.
 #[test]
 fn a_pixel_zoom_rectangle_draws_the_scratch_texture_over_the_destination() {
     let s = zoom_2x2(0x0364_0000);
@@ -984,9 +975,8 @@ fn a_pixel_zoom_rectangle_draws_the_scratch_texture_over_the_destination() {
 /// filter the context holds: a linear magnification blends the neighbouring
 /// texels where nearest copies one.
 ///
-/// Datasheet: "Pixel zoom: the texture move and its rectangle" (ESTABLISHED:
-/// the move sends no wrap or filter bit; INFERRED: magnification is linear
-/// by default).
+/// ESTABLISHED: the move sends no wrap or filter bit; INFERRED: magnification
+/// is linear by default.
 #[test]
 fn a_pixel_zoom_samples_with_the_contexts_magnification_filter() {
     let nearest = zoom_2x2(0x0364_0000);
@@ -1003,7 +993,7 @@ fn a_pixel_zoom_samples_with_the_contexts_magnification_filter() {
 /// low bit, so a move whose size word has it set is the same zoom, and bit
 /// 26 is never set.
 ///
-/// Datasheet: "Pixel zoom: the texture move and its rectangle" (ESTABLISHED).
+/// ESTABLISHED.
 #[test]
 fn a_pixel_zoom_draws_with_the_offset_code_bit_set_or_clear() {
     let plain = zoom_2x2_sized(0x0364_0000, 0);

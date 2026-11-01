@@ -1291,7 +1291,7 @@ impl TextureDetailWeight {
 /// and A in turn, each signed 3.12 in bits 15:0. The GL library clamps both
 /// to -8 through 7.999755859375 and defaults them to 4096 (1.0) and 0
 /// (ESTABLISHED as the library's conversion). Pairing scale before bias
-/// within a channel is INFERRED from the order the datasheet names them.
+/// within a channel is INFERRED from the order the library names them.
 /// The library never sets bits 31:16, so a word that does is unknown state
 /// and drops the draw. The reset value is the library's default, a model
 /// choice.
@@ -1395,8 +1395,8 @@ pub(super) fn texture_detail_filter(word: u32) -> u32 {
 }
 
 /// The texel components a level descriptor's word 1 names, from its bits
-/// 31:30 and 25:20 (one board format index; ESTABLISHED as one six-bit field
-/// in the datasheet). Only the indices the model has seen paired with a
+/// 31:30 and 25:20 (one board format index; ESTABLISHED as one six-bit field).
+/// Only the indices the model has seen paired with a
 /// component set are decoded: 17 with size 1 is RGBA, 13 is RGB (SGI Quake's
 /// world textures) and 12 and 11 are RGB and luminance-alpha (the mip-level
 /// builder's templates). The model keeps whole texel words, so the index
@@ -2395,7 +2395,7 @@ impl Board {
         });
     }
 
-    /// glClear's raster op: not on the first-triangle path, wired for later.
+    /// glClear's raster op.
     pub fn gl_raster(&mut self, op: &RasterOp) {
         self.gl_raster_ops(vec![*op]);
     }

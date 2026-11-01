@@ -154,8 +154,7 @@ pub(super) fn command_store(addr: u64, size: u32) -> bool {
 }
 
 /// A read of the level word `0x106c`, which never waits: it is a plain load
-/// of live levels (Odyssey datasheet, "Flags, status and flow control", the
-/// level word). The make-current and detach readers discard it, and the
+/// of live levels. The make-current and detach readers discard it, and the
 /// drain waits poll bits 15:7 until they read 0, which the live level
 /// does once the board has run the queue.
 pub(super) fn level_word(addr: u64, size: u32) -> bool {
@@ -203,8 +202,7 @@ pub(super) fn access_waits(addr: u64, size: u32, write: bool) -> bool {
             | route::DEST_LOWER
             | route::VECTORS
             | ODSY_SW_TOKEN
-            // The datasheet records the word as stored, not routed, with
-            // no wait; making the processor wait on it modelled nothing.
+            // The word is stored, not routed, with no wait; making the processor wait on it modelled nothing.
             | flctl::TARGET
             | swap::ARM
             | swap::PENDING
@@ -518,8 +516,7 @@ impl BoardLocks {
     /// room for it while the board's thread runs: the processor retries
     /// the store, taking its interrupts meanwhile, while the board's thread
     /// makes room. What a full FIFO does to a store on the hardware is
-    /// unknown (datasheet, "Grades for withdrawn claims"); the stall is a
-    /// model choice. The processor interface's mark stays untaken until the
+    /// unknown; the stall is a model choice. The processor interface's mark stays untaken until the
     /// store goes in.
     ///
     /// A store that waits is held back for the command FIFO only, not the

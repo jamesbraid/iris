@@ -7,7 +7,7 @@
 //! it is asleep, and otherwise finds the store when it next looks.
 //!
 //! The guest sees the board's FIFO, never the host ring. The FIFO's depth,
-//! in any unit, is UNKNOWN (datasheet, "Grades for withdrawn claims"); the
+//! in any unit, is UNKNOWN; the
 //! model gives it a size of 32,768 words (`cfifo::WORDS`), a MODEL
 //! CHOICE independent of the `0x6bX` values the kernel stores. The level
 //! STATUS0 reports is the 32-bit words of the stores pushed and not yet
@@ -18,11 +18,10 @@
 //! every store run.
 //!
 //! Where a store is refused is a model choice, not a recorded hardware
-//! fact. The datasheet does not say what a full FIFO does to the processor
-//! (it infers only that software avoids overflow by credits and
-//! descheduling, and that a board-side overflow is a flagged error), and it
-//! gives the FIFO no wrap protection of its own, the kernel's flow control
-//! keeping it from filling. On the Octane that flow control (the node's
+//! fact. What a full FIFO does to the processor is not known (software is
+//! inferred to avoid overflow by credits and descheduling, and a board-side
+//! overflow to be a flagged error), and the FIFO has no wrap protection of
+//! its own, the kernel's flow control keeping it from filling. On the Octane that flow control (the node's
 //! counted graphics credits and the kernel's high-water path) is not
 //! modelled, so the old stall at 32,768 words stood in for it. IMPACT and
 //! GR2 do not stall
@@ -448,7 +447,7 @@ impl CommandFifo {
     /// Look at the oldest waiting stores, up to `RUN_MAX`, without taking
     /// them out; the caller runs them, then `retire`s the ones it ran. While
     /// a counted store waits the run is one store, so each credit is settled
-    /// as that store leaves, as it always was.
+    /// as that store leaves.
     pub fn take_run(&self, run: &mut Run) {
         let max = if self.levels.counted.load(SeqCst) != 0 { 1 } else { RUN_MAX };
         let mut raw = [(0u32, 0u64); RUN_MAX];

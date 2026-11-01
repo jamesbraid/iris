@@ -262,7 +262,7 @@ fn a_packet_needs_a_destination_and_an_edge() {
     assert_eq!(rec.events(FLAG_VECTOR), [true, false, true]);
 }
 
-/// MODEL CHOICE (datasheet, "DMA completion with no tag"): the kernel can
+/// MODEL CHOICE: the kernel can
 /// raise low water through flow control before its interrupt set-up
 /// programs the routing, so a flag raised with no destination is held and
 /// sent once the routing is written, in the kernel's order (vectors, lower
@@ -371,7 +371,7 @@ fn raise_each_source(upper: u32) -> Vec<u32> {
 
 const HEART_UPPER: u32 = (HEART_WIDGET << 25) as u32;
 
-/// MODEL CHOICE (datasheet, "Bits 18:16 of 0x1044"): each of bits 16, 17
+/// MODEL CHOICE: each of bits 16, 17
 /// and 18 of the destination's upper half enables one non-flag source (16
 /// DMA-done, 17 retrace, 18 softsync). A source raised while its bit is
 /// clear sends nothing and is dropped; the other two are unaffected. The

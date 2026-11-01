@@ -152,8 +152,7 @@ impl Board {
         self.widget.nic = (value & !(nic::LEVEL | nic::DONE)) | nic::DONE | if level { nic::LEVEL } else { 0 };
     }
 
-    // The display back end's 32 by 32 hardware cursor (the datasheet's
-    // "Hardware cursor"), drawn over the resolved picture: after the lookup RAM
+    // The display back end's 32 by 32 hardware cursor, drawn over the resolved picture: after the lookup RAM
     // and the gamma table, over the main and overlay planes alike. Entries:
     //   0x2500  128 words  glyph: 32 rows of four words, eight 4-bit pixels a
     //                      word, the leftmost pixel in bits 3:0
@@ -309,7 +308,7 @@ impl Board {
 // memory by these entries. The 16 x 16-pixel tiling of board memory is not
 // modeled.
 
-/// The entries the kernel writes (the datasheet's back-end entry table).
+/// The entries the kernel writes.
 pub(super) fn backend_ctl_known(index: u32) -> bool {
     (0x2000..=0x247f).contains(&index)
         || (0x2481..=0x2483).contains(&index)
@@ -385,8 +384,7 @@ impl Board {
             Some(mem::CONFIG) => {
                 // Bits 15:7: the field and the drain waits are ESTABLISHED,
                 // its unit UNKNOWN, and a count of unreturned credits
-                // INFERRED (datasheet, "Grades for withdrawn claims", level
-                // word). MODEL CHOICE: pending doublewords, the model's
+                // INFERRED. MODEL CHOICE: pending doublewords, the model's
                 // pending words rounded up. Only reading 0 once the board has
                 // run the queue is needed, by the start-up and flow-reset
                 // drain waits.

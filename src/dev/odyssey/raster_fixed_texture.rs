@@ -54,7 +54,7 @@ use super::raster_texture::{
 // which turns a difference in the lowest bit into one in any. Anything
 // else, and a fragment the fixed sampler cannot take (a coordinate beyond
 // 2^30, Q/W not positive, a failed read), goes to SoftDraw::texture(), so it
-// is dropped and reported as before.
+// is dropped and reported.
 pub(super) const FIXED_MAX_SIDE: u32 = 8192;
 pub(super) const FIXED_MAX_TEXELS: u32 = 1 << 22;
 /// The fewest pixels a draw covers for its texels to be read ahead

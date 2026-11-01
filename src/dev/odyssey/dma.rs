@@ -379,8 +379,7 @@ pub(super) enum DepthStencil {
 /// type 4 (word 7 low bits 0x080, four bytes a pixel) with word 4's size
 /// field 1 for depth and 0 for stencil.
 ///
-/// ESTABLISHED as the library's request (datasheet, "Depth and stencil
-/// headers"). How the board takes the words is unknown, so the model's
+/// ESTABLISHED as the library's request. How the board takes the words is unknown, so the model's
 /// choices, each pinned by a test, are:
 /// - stencil lives in a plane of its own, so a stencil write leaves the
 ///   colour and the depth word alone;
@@ -388,8 +387,8 @@ pub(super) enum DepthStencil {
 ///   fragment;
 /// - a write ignores the stencil write mask (register 0x0452). The library's
 ///   burst does not: it sends the mask (draw.rs, image_depth_stencil_word()).
-///   The datasheet establishes that the library sends no depth or stencil by
-///   DMA (every depth and stencil step takes the burst), so this path has no
+///   The library sends no depth or stencil by DMA (every depth and stencil
+///   step takes the burst: ESTABLISHED), so this path has no
 ///   software evidence and the mask's effect on it is UNKNOWN; the choice
 ///   stands;
 /// - a depth write is always the 24-bit word, bits 23:0 of each value.
@@ -615,8 +614,7 @@ const fn object_row(class: u8, code: u8, layout: DmaLayout) -> GlRead {
     GlRead { class, code, from: ReadFrom::Object, layout }
 }
 
-/// GL reads by word 4's class and code. Datasheet: "Pixel transfer headers
-/// from the OpenGL library", "Read table" (established as the library's
+/// GL reads by word 4's class and code (established as the library's
 /// request; that the board returns the GL packing of the named format and
 /// type is inferred). A row lists every format and type whose bytes are the
 /// same under one header.
@@ -696,8 +694,7 @@ pub(super) static DMA_GL_READS: &[GlRead] = &[
 /// plane's depth word: exponent in bits 15:10, the top ten mantissa bits
 /// below.
 ///
-/// ESTABLISHED as the library's request (datasheet, "Depth and stencil
-/// headers"); that the board returns the plane's own 16-bit form is INFERRED.
+/// ESTABLISHED as the library's request; that the board returns the plane's own 16-bit form is INFERRED.
 /// MODEL CHOICE: the plane holds a 24-bit word whatever the visual, so a
 /// depth written by the 16-bit form (always stored as 24 bits, see
 /// dma_depth_stencil_write()) reads back near zero, and that visual's depth
@@ -755,8 +752,7 @@ impl Board {
         } else if drawable && shared_depth_code(cls, code) {
             // Class 0 code 0 and class 2 code 2 are each sent for a colour
             // read and for a stencil or 32-bit depth read. Word 4's two field
-            // codes (bits 23:20, 27:24) tell them apart (datasheet, "Read
-            // table"): (4,0) is a stencil byte or a depth word, (0,0) a depth
+            // codes (bits 23:20, 27:24) tell them apart: (4,0) is a stencil byte or a depth word, (0,0) a depth
             // word, and the colour pairs are (6,2), (2,2), (3,2), (7,3) and
             // (2,0).
             let fields = ((fmt >> 20) & 0xf, (fmt >> 24) & 0xf);
@@ -783,7 +779,7 @@ impl Board {
                 if !(cls == 2 && matches!(fields, (6, 2) | (2, 2) | (3, 2) | (7, 3) | (2, 0))) && self.dma_report(dma::REPORT_UNLISTED_FIELDS) {
                     crate::dlog!(
                         LogModule::Odyssey,
-                        "sgi-odyssey: DMA read with word 4 {:#x} (class {}, code {}) has field codes the datasheet does not list; served as colour",
+                        "sgi-odyssey: DMA read with word 4 {:#x} (class {}, code {}) has field codes that are not known; served as colour",
                         fmt, cls, code
                     );
                 }
@@ -890,7 +886,7 @@ impl Board {
     /// back exchanged once the window has swapped, so a front draw lands in
     /// the displayed buffer.
     ///
-    /// Datasheet, "Front and back of a pixel buffer". ESTABLISHED there: the
+    /// ESTABLISHED: the
     /// kernel alone writes bit 31 of the buffer registers 0x608 and 0x609, and
     /// sets it when the drawable's pane has a zero swap halfword; it sends the
     /// draw mask unchanged then, and with front and back exchanged (bit 31
@@ -1271,7 +1267,7 @@ impl Board {
 // the last block (0x3cfb) of glRasterPos's position stream arrives, and
 // kind 3 answers from the latch, not from the colour current when the
 // query is processed: the library defers the query past later glColor
-// calls (datasheet, "Raster-position query and glyph colour"). That the
+// calls. That the
 // board latches, and at 0x3cfb, is INFERRED; the library's reliance on it
 // is ESTABLISHED. Before any latch the records hold the GL initial values
 // (colour white, index 1). Kind 0 answers the live records.
@@ -1725,8 +1721,7 @@ impl Board {
     /// the same word with an alpha of 0, so a word that is not one of those
     /// builds is a zoom rectangle when the colour is exactly (0, 0, 0, 1).
     ///
-    /// Datasheet, "Pixel zoom: the texture move and its rectangle". The
-    /// library sends the move as BEGIN of type 7 (quads), one such word per
+    /// The library sends the move as BEGIN of type 7 (quads), one such word per
     /// source row (per whole destination row under a y zoom), and END, after
     /// it has set the sampler, the level-60 descriptor and a stored raster
     /// state, all of which arrive as ordinary commands. ESTABLISHED: the word

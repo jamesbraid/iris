@@ -358,8 +358,8 @@ impl Board {
         be32(&self.objects.mem.bytes[((self.objects.offset[iu] as u64 + y as u64 * self.objects.width[iu] as u64 + x as u64) * 4) as usize..][..4])
     }
 
-    /// A GL pixel copy (block 0x2031), decoded as the datasheet's "Copy
-    /// words" gives its eight operands: from the read drawable or an object,
+    /// A GL pixel copy (block 0x2031), decoded as its eight
+    /// operands (CopyOperands): from the read drawable or an object,
     /// to the draw drawable or an object. Any other block is the X server's
     /// rectangle copy (Board::copy_rect()). False when an operand names an
     /// object that is not there or does not fit, so the block is reported.
@@ -370,7 +370,7 @@ impl Board {
     /// way a window read asks for it). OBSERVED in guest traces of
     /// glReadPixels of 16-bit types and glCopyTexImage, where the host got
     /// the rectangle's top row. INFERRED to be the board's copy rule: no
-    /// header bit the datasheet records selects it. The other directions
+    /// known header bit selects it. The other directions
     /// keep the rows in the order they are held.
     ///
     /// The opposite copy, from an object to the window, lists the rows
@@ -462,8 +462,7 @@ impl Board {
     /// when it filters them. INFERRED, and nothing board-visible establishes
     /// it: the library sends a signed type's burst and write code as the
     /// unsigned type's, and programs the final pass as ordinary scale and
-    /// bias words (datasheet, "Pixel transfer headers from the OpenGL
-    /// library"). The pass the library builds for a signed type is 2x + 1/4096
+    /// bias words. The pass the library builds for a signed type is 2x + 1/4096
     /// from an object the burst filled, which gives GL's result only if the
     /// bits are read as signed. So the model reads an object's bytes as signed
     /// and a window's as unsigned. This is the one place the choice is made.
@@ -516,9 +515,8 @@ impl Board {
 
 /// The eight operands of the GL pixel copy, block 0x2031.
 ///
-/// Datasheet: "Pixel transfer headers from the OpenGL library", "Copy
-/// words" (established as what the library sends; what the board does with
-/// the overlap bits is inferred).
+/// Established as what the library sends; what the board does with the
+/// overlap bits is inferred.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct CopyOperands {
     /// Word 0: 0x30000019 for the read drawable, else an object's address.

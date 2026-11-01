@@ -1,12 +1,10 @@
 //! The current-value and raster-position queries (words 0x4c0 and 0x4c3).
 //!
-//! The expectations come from the odyssey datasheet's "Raster-position
-//! query and glyph colour": the raster-position stream carries no colour,
-//! the library may send its query after later glColor calls, so the board
-//! is modelled as latching index, colour and texture coordinate when the
-//! last block of that stream (0x3cfb) arrives (*inferred*), answering
-//! kind 3 from the latch and kind 0 live (*established* as software
-//! behaviour).
+//! The raster-position stream carries no colour, the library may send its
+//! query after later glColor calls, so the board is modelled as latching
+//! index, colour and texture coordinate when the last block of that stream
+//! (0x3cfb) arrives (*inferred*), answering kind 3 from the latch and kind 0
+//! live (*established* as software behaviour).
 
 use crate::dev::odyssey::board::Board;
 use crate::dev::odyssey::consts::{gl_cmd, query, ODSY_F32_ONE};

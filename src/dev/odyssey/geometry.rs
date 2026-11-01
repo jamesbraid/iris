@@ -757,7 +757,7 @@ impl Board {
     /// the near and far clip. Under an orthographic matrix the z row stays
     /// row2 / (block16[3] S) - row3, whose window depth is the same. The plane
     /// holds the board's 24-bit float depth word of 2S times that depth
-    /// (depth_word.rs; datasheet, "Depth word"). The word's layout is
+    /// (depth_word.rs). The word's layout is
     /// ESTABLISHED as the library's reading; that the plane stores exactly it is
     /// INFERRED, and the rounding of a rasterised depth into it (truncation here)
     /// is UNKNOWN. Whether the board interpolates depth with perspective

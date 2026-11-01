@@ -929,8 +929,7 @@ impl Board {
                 let op1 = self.cmd.operand[1];
                 // The host-write command's word and the halfword it writes are
                 // ESTABLISHED as the kernel's accesses; that the board treats it
-                // as its DMA completion signal is INFERRED (datasheet, DMA tag
-                // write-back). The model raises the same fence the DMA engine's
+                // as its DMA completion signal is INFERRED. The model raises the same fence the DMA engine's
                 // completion does, through the one fence implementation: op0's slot
                 // and interrupt bit and op1's token become the completion cookie,
                 // raised by Board::fence(). op0's interrupt

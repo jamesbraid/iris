@@ -263,7 +263,7 @@ impl<'a> SoftDraw<'a> {
                 return false;
             }
         }
-        // A volume image under the 2D enable alone stays accepted, as before
+        // A volume image under the 2D enable alone stays accepted
         // targets were ranked. With 1D enabled as well the 2D binding wins,
         // and a volume is not a 2D image.
         if target == 2 && im.is_some_and( |i| i.volume) && st.texture_1d {
@@ -837,7 +837,7 @@ pub(super) fn soft_texture_derivatives(
 // axis's differences, here through ns and nt, and the limits clamp the
 // logarithm (soft_texture_select(), SoftDraw::fixed_sample()).
 //
-// Model choices, where the datasheet leaves the board's behaviour open:
+// Model choices, where the board's behaviour is open:
 //  - The internal LOD precision is unknown. The model takes the
 //    differences in double; the general path takes their logarithm in
 //    double, the fixed-point path in 1/256 of a level, the eight fraction
