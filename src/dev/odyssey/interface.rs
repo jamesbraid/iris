@@ -461,17 +461,17 @@ pub fn front_mmio_write(f: &Mutex<HostInterface>, fifo: &CommandFifo, addr: u64,
 }
 
 /// The fabric packet's address bits; the widget sits above them.
-pub const SGI_XIO_PACKET_ADDRESS_BITS: u32 = 48;
+pub const XIO_PACKET_ADDRESS_BITS: u32 = 48;
 
-pub const SGI_XIO_WIDGETS: u32 = 16;
+pub const XIO_WIDGETS: u32 = 16;
 
 /// The fabric address of a widget/address pair: the widget in bits 51:48.
 pub fn sgi_xio_compose(who: &str, widget: u32, address: u64, packet: &mut u64) -> bool {
-    if widget >= SGI_XIO_WIDGETS || address >> SGI_XIO_PACKET_ADDRESS_BITS != 0 {
+    if widget >= XIO_WIDGETS || address >> XIO_PACKET_ADDRESS_BITS != 0 {
         crate::dlog!(LogModule::Odyssey, "{who}: packet fabric cannot encode widget {widget} address {address:#x}");
         return false;
     }
-    *packet = (widget as u64) << SGI_XIO_PACKET_ADDRESS_BITS | address;
+    *packet = (widget as u64) << XIO_PACKET_ADDRESS_BITS | address;
     true
 }
 
@@ -482,8 +482,8 @@ impl HostInterface {
     /// `HostInterface::send_interrupt(&s->fabric_as, packet, number, set)`: the
     /// interrupt-modify write. HEART takes it at 0x80 of widget 8.
     pub fn send_interrupt(&mut self, packet: u64, number: u8, set: bool) {
-        let widget = (packet >> SGI_XIO_PACKET_ADDRESS_BITS) as u32;
-        let address = packet & ((1u64 << SGI_XIO_PACKET_ADDRESS_BITS) - 1);
+        let widget = (packet >> XIO_PACKET_ADDRESS_BITS) as u32;
+        let address = packet & ((1u64 << XIO_PACKET_ADDRESS_BITS) - 1);
         if widget != self.heart_widget || address != HEART_PACKET {
             crate::dlog!(LogModule::Odyssey, "odyssey: interrupt packet to widget {widget} address {address:#x} has no receiver");
             return;

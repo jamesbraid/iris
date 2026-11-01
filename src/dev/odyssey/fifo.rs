@@ -47,10 +47,10 @@
 //! interface counts stores use, are settled as a store enters the FIFO's
 //! first `ODSY_CFIFO_DEPTH` places: at the store when there is room, or
 //! when the stores ahead of it have run. That depth (64 stores) is a MODEL
-//! CHOICE, independent of the stored `0x6bX` values (the same choice as
-//! in QEMU's model, which found that credits for a full FIFO's backlog let
-//! the processor run too far ahead of its slower board). Whether a 32-bit store costs the hardware a
-//! whole credit is UNKNOWN; the model credits one per store.
+//! CHOICE, independent of the stored `0x6bX` values: credits for a full
+//! FIFO's backlog let the processor run too far ahead of its slower board.
+//! Whether a 32-bit store costs the hardware a whole credit is UNKNOWN; the
+//! model credits one per store.
 
 use super::*;
 
