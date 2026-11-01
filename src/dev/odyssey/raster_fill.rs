@@ -107,6 +107,10 @@ pub(super) trait Fill {
     fn clip(st: &GlDrawState) -> bool;
 }
 
+/// The row loop that reads all of its state at run time.
+pub(super) type FillDyn =
+    FillMode<false, FIXED_ANY, false, 0, 0, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN, FILL_DYN>;
+
 /// The const draw state of one row loop (see the Fill trait). DEPTH, WRITE,
 /// SMOOTH and FOG are 0, 1 or FILL_DYN; FUNC a depth function or FILL_DYN;
 /// BLEND one of the FILL_BLEND_ values or FILL_DYN; STENCIL and CLIP 0 or
@@ -212,7 +216,7 @@ pub(super) struct FillRun {
 }
 
 impl SoftDraw<'_> {
-    /// GlDrawState::blend_component() with the factors and equation M names.
+    /// The blend of one component with the factors and equation M names.
     #[inline(always)]
     pub fn fill_blend_component<M: Fill>(&self, k: usize, src: &[f64; 4], dst: &[f64; 4]) -> f64 {
         let st: &GlDrawState = self.st;
@@ -226,57 +230,6 @@ impl SoftDraw<'_> {
             GL_FUNC_REVERSE_SUBTRACT => dst[k] * df - src[k] * sf,
             _ => src[k] * sf + dst[k] * df,
         }
-    }
-
-    /// SoftDraw::rgba_result() under M, for a draw with no logical
-    /// operation (SoftDraw::fill_admits() admits none).
-    #[inline(always)]
-    pub fn fill_rgba_result<M: Fill>(&self, x: i32, y: i32, frag: &SoftFrag, dest: &RasterColour) -> RasterColour {
-        let mut out = RasterColour::default();
-        let rules = self.rules;
-        let max = (1u32 << rules.color_bits) - 1;
-        let alpha_max = rules.alpha_max();
-        let alpha_q = rules.alpha(frag.rgba[3]);
-        let alpha = soft_unit(alpha_q, alpha_max);
-        let blend = M::blend(self);
-        let rgb = rules.rgb(&frag.rgba);
-
-        if !blend && self.rgba_mask == rules.rgba_mask(GL_COLOUR_MASK_ALL) {
-            let stored = (1u32.wrapping_shl(rules.alpha_bits as u32)).wrapping_sub(1);
-
-            for (k, comp) in out.component.iter_mut().enumerate().take(3) {
-                *comp = (rgb >> ((2 - k as u32) * rules.color_bits as u32)) & max;
-            }
-            out.component[3] = if stored == alpha_max { alpha_q } else { alpha_q.wrapping_mul(stored) / alpha_max };
-            return out;
-        }
-        out = rules.rgba_value(rgb, alpha);
-        if blend {
-            let mut src = [0.0f64; 4];
-            let mut dst = [0.0f64; 4];
-            let mut blended = [0.0f64; 4];
-
-            for k in 0..3usize {
-                src[k] = soft_unit(out.component[k], max);
-                dst[k] = soft_unit(dest.component[k], max);
-            }
-            src[3] = alpha;
-            dst[3] = if rules.alpha_bits != 0 {
-                soft_unit(dest.component[3], (1u32 << rules.alpha_bits) - 1)
-            } else {
-                1.0
-            };
-            for (k, b) in blended.iter_mut().enumerate() {
-                *b = self.fill_blend_component::<M>(k, &src, &dst);
-            }
-            out = rules.rgba_value(rules.rgb(&blended), blended[3]);
-        }
-        for k in 0..4usize {
-            if self.rgba_mask & (1u32 << k) == 0 {
-                out.component[k] = dest.component[k];
-            }
-        }
-        out
     }
 
     /// Pixels px0 to px1 of row py of a filled triangle, whose edge values
@@ -380,7 +333,7 @@ impl SoftDraw<'_> {
         // unless it is fogged or blended.
         let uniform = rgba && store && !M::TEX && !smooth && !fog && !rgba_read;
         let flat_out = if uniform {
-            self.fill_rgba_result::<M>(self.win.ox.wrapping_add(x_lo), self.win.oy.wrapping_add(qy), &frag, &dest[0])
+            self.rgba_result::<M>(&frag, &dest[0])
         } else {
             RasterColour::default()
         };
@@ -575,7 +528,7 @@ impl SoftDraw<'_> {
                     self.fragment_store(x, y, &frag, &dest);
                 } else if store {
                     for k in 0..self.ntargets as usize {
-                        let out = self.fill_rgba_result::<M>(x, y, &frag, &dest[k]);
+                        let out = self.rgba_result::<M>(&frag, &dest[k]);
 
                         planes.store_rgba(self.targets[k], x, y, &out);
                     }

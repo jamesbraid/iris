@@ -23,7 +23,7 @@ use super::gl_context::{
     GlDrawResult, GlDrawState,
 };
 use super::memory::{CLIP_MAX, ClipList};
-use super::raster_fill::FillRow;
+use super::raster_fill::{Fill, FillDyn, FillRow};
 use super::raster_fixed_texture::{fixed_return, FIXED_PREFILL_MIN_PIXELS, SoftFixedTex};
 use super::raster_line::{soft_dimension, SoftLineStipple};
 use super::raster_pixels::x_logic_op;
@@ -869,21 +869,6 @@ pub(super) fn soft_blend_factor(factor: u32, k: usize, s: &[f64; 4], d: &[f64; 4
     }
 }
 
-impl GlDrawState {
-    pub fn blend_component(&self, k: usize, src: &[f64; 4], dst: &[f64; 4]) -> f64 {
-        let sf = soft_blend_factor(self.blend_src, k, src, dst, &self.blend_color);
-        let df = soft_blend_factor(self.blend_dst, k, src, dst, &self.blend_color);
-
-        match self.blend_equation {
-            GL_MIN => cmin(src[k], dst[k]),
-            GL_MAX => cmax(src[k], dst[k]),
-            GL_FUNC_SUBTRACT => src[k] * sf - dst[k] * df,
-            GL_FUNC_REVERSE_SUBTRACT => dst[k] * df - src[k] * sf,
-            _ => src[k] * sf + dst[k] * df,
-        }
-    }
-}
-
 /// glLogicOp's operation (4.1.8, table 4.3) on the source s and the
 /// destination d, bit by bit.
 pub(super) fn soft_logic_op(op: u32, s: u32, d: u32) -> u32 {
@@ -906,16 +891,21 @@ impl RasterRules {
 }
 
 impl SoftDraw<'_> {
-    pub fn rgba_result(&self, x: i32, y: i32, frag: &SoftFrag, dest: &RasterColour) -> RasterColour {
+    /// The colour a fragment stores over `dest`, as the draw's blend, logical
+    /// operation and colour mask make it. M names the state a specialised
+    /// row loop has fixed (raster_fill.rs); `FillDyn` reads all of it.
+    #[inline(always)]
+    pub fn rgba_result<M: Fill>(&self, frag: &SoftFrag, dest: &RasterColour) -> RasterColour {
         let mut out = RasterColour::default();
         let rules = self.rules;
         let max = (1u32 << rules.color_bits) - 1;
         let alpha_max = rules.alpha_max();
         let alpha_q = rules.alpha(frag.rgba[3]);
-        let alpha = alpha_q as f64 / alpha_max as f64;
+        let alpha = soft_unit(alpha_q, alpha_max);
+        let blend = M::blend(self);
         let rgb = rules.rgb(&frag.rgba);
 
-        if !self.blend && !self.logic_op && self.rgba_mask == rules.rgba_mask(GL_COLOUR_MASK_ALL) {
+        if !blend && !self.logic_op && self.rgba_mask == rules.rgba_mask(GL_COLOUR_MASK_ALL) {
             // RasterRules::rgba_value()'s stored alpha, RasterRules::alpha() of
             // alpha_q / alpha_max scaled to the stored bits, without the round
             // trip: alpha_q / alpha_max * alpha_max + 0.5 truncates to alpha_q
@@ -929,23 +919,23 @@ impl SoftDraw<'_> {
             return out;
         }
         out = rules.rgba_value(rgb, alpha);
-        if self.blend {
+        if blend {
             let mut src = [0.0f64; 4];
             let mut dst = [0.0f64; 4];
             let mut blended = [0.0f64; 4];
 
             for k in 0..3usize {
-                src[k] = out.component[k] as f64 / max as f64;
-                dst[k] = dest.component[k] as f64 / max as f64;
+                src[k] = soft_unit(out.component[k], max);
+                dst[k] = soft_unit(dest.component[k], max);
             }
             src[3] = alpha;
             dst[3] = if rules.alpha_bits != 0 {
-                dest.component[3] as f64 / ((1u32 << rules.alpha_bits) - 1) as f64
+                soft_unit(dest.component[3], (1u32 << rules.alpha_bits) - 1)
             } else {
                 1.0
             };
             for (k, b) in blended.iter_mut().enumerate() {
-                *b = self.st.blend_component(k, &src, &dst);
+                *b = self.fill_blend_component::<M>(k, &src, &dst);
             }
             out = rules.rgba_value(rules.rgb(&blended), blended[3]);
         }
@@ -1112,7 +1102,7 @@ impl SoftDraw<'_> {
         if !self.t.index {
             let mut i = 0;
             while self.rgba_mask != 0 && i < self.ntargets as usize {
-                let out = self.rgba_result(x, y, f, &dest[i]);
+                let out = self.rgba_result::<FillDyn>(f, &dest[i]);
 
                 self.px.store_rgba(self.targets[i], x, y, &out);
                 i += 1;
