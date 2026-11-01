@@ -10,38 +10,15 @@ use super::board::{
     ODSY_VOLUME_SLICES, ODSY_WIDTH,
 };
 use super::consts::{
-    ODSY_AUX_OVERLAY_BUFFER, ODSY_BUFFERS, ODSY_CLIP_BOX_FIELD_MASK, ODSY_CLIP_BOX_MIN_SHIFT,
-    ODSY_COLOUR_MODE_INDEX, ODSY_DEPTH24_MAX, ODSY_DEPTH_FUNC_MASK, ODSY_DRAW_WORD_STATE,
-    ODSY_GL_BACK_AMBIENT, ODSY_GL_BACK_DIFFUSE, ODSY_GL_BACK_EMISSION, ODSY_GL_BACK_SHININESS_SQRT,
-    ODSY_GL_BACK_SPECULAR, ODSY_GL_CLIP_PLANE_LOAD, ODSY_GL_DEPTH_S, ODSY_GL_DEPTH_SLACK,
-    ODSY_GL_LIGHT_COLOUR_LOAD, ODSY_GL_LIGHT_VEC_LOAD, ODSY_GL_MATERIAL_AMBIENT,
-    ODSY_GL_MATERIAL_DIFFUSE, ODSY_GL_MATERIAL_EMISSION, ODSY_GL_MATERIAL_SPECULAR,
-    ODSY_GL_MATRIX_SELECT_SHAPE, ODSY_GL_MATRIX_SELECT_TAG, ODSY_GL_NORMAL_3F,
-    ODSY_GL_RECT_PATTERN_ENABLE, ODSY_GL_SHININESS_DERIVED, ODSY_GL_SHININESS_SQRT,
-    ODSY_GL_VERTEX_2F, ODSY_GL_VERTEX_2I, ODSY_GL_VERTEX_3F, ODSY_GL_VERTEX_3I, ODSY_GL_VERTEX_4F,
-    ODSY_ID_COMPARE_ENABLE, ODSY_ID_COMPARE_MASK_SHIFT, ODSY_INDEX_MASK, ODSY_MODE_ALPHA_TEST,
-    ODSY_MODE_BLEND, ODSY_MODE_COLOR_LOGIC_OP, ODSY_MODE_CULL_FACE, ODSY_MODE_CULL_MODE_MASK,
-    ODSY_MODE_CULL_MODE_SHIFT, ODSY_MODE_DEPTH_TEST, ODSY_MODE_DITHER, ODSY_MODE_FLAT_SHADE,
-    ODSY_MODE_FOG, ODSY_MODE_FRONT_FACE_CW, ODSY_MODE_GL_LINE_STIPPLE, ODSY_MODE_INDEX_LOGIC_OP,
-    ODSY_MODE_LINE_SMOOTH, ODSY_MODE_OFFSET_FILL, ODSY_MODE_OFFSET_LINE, ODSY_MODE_OFFSET_POINT,
-    ODSY_MODE_POINT_SMOOTH, ODSY_MODE_STENCIL_TEST, ODSY_PATTERN_SHAPE_OPAQUE,
-    ODSY_PROG_CLASS_SHIFT, ODSY_PROG_COLOUR_MATERIAL, ODSY_PROG_COLOUR_MODE,
-    ODSY_PROG_COLOUR_MODE_B, ODSY_PROG_CONST_SELECT, ODSY_PROG_CONST_STORE, ODSY_PROG_ENTRY_29,
-    ODSY_PROG_ENTRY_2A, ODSY_PROG_ENTRY_2C, ODSY_PROG_HIGH_SHIFT, ODSY_PROG_LIGHT_COLOUR_SELECT,
-    ODSY_PROG_LIGHT_VEC_SELECT, ODSY_PROG_LIST_INDEX, ODSY_PROG_LOW_MASK, ODSY_PROG_PROGRAM_ADDR,
-    ODSY_PROG_PROGRAM_HALFWORD, ODSY_PROG_PROGRAM_HALFWORD_LAST, ODSY_PROG_REG_FIRST,
-    ODSY_PROG_REG_LAST, ODSY_PROG_RUN_ONCE, ODSY_PROG_SET_UCODE, ODSY_PROG_SHAPE, ODSY_PROG_TAG,
-    ODSY_STENCIL_MAX, ODSY_TEX_DETAIL_FUNCTION_LAST_LOD, ODSY_TEX_LOD_BITS, ODSY_TEX_LOD_LIMIT,
-    ODSY_TEX_LOD_MASK, ODSY_TEX_LOD_ONE, ODSY_TEX_MIN_LINEAR_MIPMAP_LINEAR, ODSY_TEX_MIN_MASK,
-    ODSY_TEX_MIN_NEAREST_MIPMAP_NEAREST, ODSY_TEX_MODE_1D, ODSY_TEX_MODE_2D, ODSY_TEX_MODE_3D,
-    ODSY_TEX_MODE_CLIP_COUNT_MASK, ODSY_TEX_SAMPLER_BIT17, ODSY_TEX_SCALE_BIAS_BITS,
-    ODSY_TEX_SCALE_BIAS_ONE, ODSY_TEX_SCALE_BIAS_WORDS, ODSY_VOLUME_SLICE_SHIFT_MAX,
-    ODSY_WRITE_COLOUR_MASK, ODSY_WRITE_COLOUR_SHIFT, ODSY_WRITE_DEPTH, ODSY_WRITE_INDEX_MASK,
+    clip, colour, gl_cmd, mode, pattern, prog, stencil, tex, write, ODSY_AUX_OVERLAY_BUFFER,
+    ODSY_BUFFERS, ODSY_DEPTH24_MAX, ODSY_DEPTH_FUNC_MASK, ODSY_DRAW_WORD_STATE,
+    ODSY_ID_COMPARE_ENABLE, ODSY_ID_COMPARE_MASK_SHIFT, ODSY_INDEX_MASK,
+    ODSY_VOLUME_SLICE_SHIFT_MAX,
 };
 use super::draw::{gl_rules, id_compare_passes};
 use super::geometry::{f32_bits, gl_transpose, odyssey_f32};
 use super::gl_context::{
-    ColourTarget, GL_ADD, GL_ALPHA, GL_ALPHA_TEST, GL_BACK, GL_BLEND, GL_CCW, GL_CLAMP,
+    op, vtx, ColourTarget, GL_ADD, GL_ALPHA, GL_ALPHA_TEST, GL_BACK, GL_BLEND, GL_CCW, GL_CLAMP,
     GL_CLAMP_TO_BORDER, GL_CLAMP_TO_EDGE, GL_CLIP_PLANE0, GL_CLIP_PLANES, GL_COLOR_BUFFER_BIT,
     GL_COLOR_LOGIC_OP, GL_CONSTANT_ALPHA, GL_CONSTANT_COLOR, GL_CULL_FACE, GL_CW, GL_DECAL,
     GL_DECR, GL_DEPTH_TEST, GL_DRAW_BACK, GL_DRAW_FRONT, GL_DRAW_OK, GL_DST_ALPHA, GL_DST_COLOR,
@@ -52,14 +29,11 @@ use super::gl_context::{
     GL_LOGIC_OP, GL_LUMINANCE, GL_LUMINANCE_ALPHA, GL_MAX, GL_MAX_TARGETS, GL_MIN, GL_MODULATE,
     GL_NEAREST, GL_NEAREST_MIPMAP_LINEAR, GL_NEAREST_MIPMAP_NEAREST, GL_NEVER_ENUM,
     GL_ONE_MINUS_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_COLOR, GL_ONE_MINUS_DST_ALPHA,
-    GL_ONE_MINUS_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA, GL_ONE_MINUS_SRC_COLOR, GL_OP_CLIP_PLANE,
-    GL_OP_CULL_FACE, GL_OP_DEPTH_FUNC, GL_OP_DEPTH_MASK, GL_OP_DISABLE, GL_OP_DRAW_BUFFERS,
-    GL_OP_ENABLE, GL_OP_FRONT_FACE, GL_OP_LINE_STIPPLE, GL_OP_SCISSOR, GL_OP_SHADE_MODEL,
-    GL_OP_TEXCOORD4F, GL_POINT, GL_POINT_SMOOTH, GL_POLYGON_OFFSET_FILL, GL_POLYGON_OFFSET_LINE,
-    GL_POLYGON_OFFSET_POINT, GL_POLYGON_STIPPLE, GL_REPEAT, GL_REPLACE, GL_RGB, GL_RGBA, GL_SMOOTH,
-    GL_SRC_ALPHA, GL_SRC_ALPHA_SATURATE, GL_SRC_COLOR, GL_STENCIL_TEST, GL_TEXTURE,
-    GL_VERTEX_FLOATS, GL_V_POSITION, GlCmd, GlContext, GlDraw, GlDrawResult, GlDrawState,
-    GlDrawable, GlOp, GlSink, RASTER_CLEAR, RasterOp,
+    GL_ONE_MINUS_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA, GL_ONE_MINUS_SRC_COLOR, GL_POINT,
+    GL_POINT_SMOOTH, GL_POLYGON_OFFSET_FILL, GL_POLYGON_OFFSET_LINE, GL_POLYGON_OFFSET_POINT,
+    GL_POLYGON_STIPPLE, GL_REPEAT, GL_REPLACE, GL_RGB, GL_RGBA, GL_SMOOTH, GL_SRC_ALPHA,
+    GL_SRC_ALPHA_SATURATE, GL_SRC_COLOR, GL_STENCIL_TEST, GL_TEXTURE, GlCmd, GlContext, GlDraw,
+    GlDrawResult, GlDrawState, GlDrawable, GlOp, GlSink, RASTER_CLEAR, RasterOp,
 };
 use super::memory::{plane_bpp, word_load, word_store, words_fill, ClipRect, Plane, Rows, RowsMut};
 use super::raster::{
@@ -204,9 +178,9 @@ pub(super) struct TextureDetailSampler {
 }
 
 impl Board {
-    /// Whether a GL fragment's colour is an index (ODSY_PROG_COLOUR_MODE).
+    /// Whether a GL fragment's colour is an index (prog::COLOUR_MODE).
     pub fn gl_index_mode(&mut self) -> bool {
-        self.colour_mode[0] & ODSY_COLOUR_MODE_INDEX != 0
+        self.colour_mode[0] & colour::MODE_INDEX != 0
     }
 }
 
@@ -264,8 +238,8 @@ impl Board {
     /// then only stores. colour says whether the draw writes colour at
     /// all.
     pub fn gl_report_refusals(&mut self, colour: bool) {
-        let index_mask = self.gl_write_mask & ODSY_WRITE_INDEX_MASK;
-        let mask = (self.gl_write_mask >> ODSY_WRITE_COLOUR_SHIFT) & ODSY_WRITE_COLOUR_MASK;
+        let index_mask = self.gl_write_mask & write::INDEX_MASK;
+        let mask = (self.gl_write_mask >> write::COLOUR_SHIFT) & write::COLOUR_MASK;
         let buffers = self.draw_buffers();
 
         if !colour {
@@ -277,7 +251,7 @@ impl Board {
             }
             return;
         }
-        if index_mask != ODSY_WRITE_INDEX_MASK && !self.gl_index_mask_logged {
+        if index_mask != write::INDEX_MASK && !self.gl_index_mask_logged {
             self.gl_index_mask_logged = true;
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: index write mask {:#05x} is decoded but not applied", index_mask);
         }
@@ -581,7 +555,7 @@ impl Planes for GlPlaneRow<'_> {
         let i = (x - self.x0) as usize;
 
         if self.allowed(i) {
-            self.stencil[i].set((stencil & ODSY_STENCIL_MAX) as u8);
+            self.stencil[i].set((stencil & stencil::MAX) as u8);
         }
     }
 }
@@ -647,14 +621,14 @@ impl GlPlanes<'_> {
     /// A colour-index fragment's packed index word.
     pub fn store_colour(&self, target: ColourTarget, x: i32, y: i32, colour: u32) {
         let s = &self.state;
-        let mask = (s.write_mask >> ODSY_WRITE_COLOUR_SHIFT) & ODSY_WRITE_COLOUR_MASK;
+        let mask = (s.write_mask >> write::COLOUR_SHIFT) & write::COLOUR_MASK;
 
         if mask == 0 || target >= ODSY_BUFFERS || !s.pixel_allowed(x as i64, y as i64) {
             return;
         }
         if s.to_aux {
             // A colour-index GL draw to the id-plane destination: an overlay
-            // context's drawing (ODSY_OVERLAY_MODE_BASE). Buffer 1 is the
+            // context's drawing (overlay::MODE_BASE). Buffer 1 is the
             // overlay pixel byte and takes the index's low eight bits; the id
             // byte is the X server's alone, so a GL write to buffer 0 is
             // reported and dropped.
@@ -750,7 +724,7 @@ impl Planes for GlPlanes<'_> {
 
     fn store_stencil(&self, x: i32, y: i32, stencil: u32) {
         if self.state.pixel_allowed(x as i64, y as i64) {
-            self.stencil.plane_store(&self.state.stencil, x, y, stencil & ODSY_STENCIL_MAX);
+            self.stencil.plane_store(&self.state.stencil, x, y, stencil & stencil::MAX);
         }
     }
 }
@@ -1015,7 +989,7 @@ impl Board {
 
 impl Board {
     /// How far past [0, 1] a fragment's depth may round and still be drawn,
-    /// clamped: 16 units in the last place of a single near 1 (ODSY_GL_DEPTH_SLACK
+    /// clamped: 16 units in the last place of a single near 1 (gl_cmd::DEPTH_SLACK
     /// in consts.rs). APPROXIMATION: the depth row and block 16 arrive as
     /// singles, and a library that maps the far plane to 0.99999999 of the range
     /// leaves less margin than their rounding takes. A board does its
@@ -1030,7 +1004,7 @@ impl Board {
     /// fallback divides by a constant.
     pub fn gl_operation_rules(&mut self) -> RasterRules {
         let mut rules = gl_rules().clone();
-        let scale = 2.0 * ODSY_GL_DEPTH_S * self.gl_depth_scale();
+        let scale = 2.0 * gl_cmd::DEPTH_S * self.gl_depth_scale();
         let mut block16 = [0.0f64; 4];
         let mut divisor = true;
 
@@ -1047,7 +1021,7 @@ impl Board {
                 rules.depth_divisor[k] = block16[k] / block16[3];
             }
         }
-        rules.depth_slack = ODSY_GL_DEPTH_SLACK;
+        rules.depth_slack = gl_cmd::DEPTH_SLACK;
         rules
     }
 }
@@ -1060,7 +1034,7 @@ impl Board {
     /// reading under which the X server's FillOpaqueStippled sequence draws an
     /// opaque stipple.
     pub fn gl_stipple_background(&mut self, t: &mut RasterTarget) {
-        if (self.pattern_shape & ODSY_PATTERN_SHAPE_OPAQUE) == 0 {
+        if (self.pattern_shape & pattern::SHAPE_OPAQUE) == 0 {
             return;
         }
         t.stipple_opaque = true;
@@ -1213,10 +1187,10 @@ impl BoardTexels<'_> {
     /// INFERRED: no source gives the board's arithmetic.
     pub fn scale_bias(&self, rgba: &mut [f64; 4]) {
         for c in 0..4usize {
-            let scale = sextract32(self.scale_bias[c * 2], 0, ODSY_TEX_SCALE_BIAS_BITS) as f64;
-            let bias = sextract32(self.scale_bias[c * 2 + 1], 0, ODSY_TEX_SCALE_BIAS_BITS) as f64;
+            let scale = sextract32(self.scale_bias[c * 2], 0, tex::SCALE_BIAS_BITS) as f64;
+            let bias = sextract32(self.scale_bias[c * 2 + 1], 0, tex::SCALE_BIAS_BITS) as f64;
 
-            rgba[c] = (rgba[c] * scale + bias) / ODSY_TEX_SCALE_BIAS_ONE as f64;
+            rgba[c] = (rgba[c] * scale + bias) / tex::SCALE_BIAS_ONE as f64;
             rgba[c] = cmin(cmax(rgba[c], 0.0), 1.0);
         }
     }
@@ -1288,7 +1262,7 @@ pub(super) fn volume_slice_stride(level_word2: u32) -> u64 {
 impl TextureDetailWeight {
     /// The detail and sharpen weight at lambda, where the table gives one.
     pub fn at(&self, lambda: f64) -> Option<f64> {
-        if self.constant || lambda <= ODSY_TEX_DETAIL_FUNCTION_LAST_LOD {
+        if self.constant || lambda <= tex::DETAIL_FUNCTION_LAST_LOD {
             return Some(self.last);
         }
         if lambda >= 0.0 {
@@ -1309,14 +1283,14 @@ impl TextureDetailWeight {
 /// choice.
 impl Board {
     pub fn texture_scale_bias_known(&self) -> bool {
-        self.tex_scale_bias[..ODSY_TEX_SCALE_BIAS_WORDS as usize]
+        self.tex_scale_bias[..tex::SCALE_BIAS_WORDS as usize]
             .iter()
-            .all(|&w| (w >> ODSY_TEX_SCALE_BIAS_BITS) == 0)
+            .all(|&w| (w >> tex::SCALE_BIAS_BITS) == 0)
     }
 
     pub fn texture_scale_bias_identity(&self) -> bool {
         for c in 0..4usize {
-            if self.tex_scale_bias[c * 2] != ODSY_TEX_SCALE_BIAS_ONE || self.tex_scale_bias[c * 2 + 1] != 0 {
+            if self.tex_scale_bias[c * 2] != tex::SCALE_BIAS_ONE || self.tex_scale_bias[c * 2 + 1] != 0 {
                 return false;
             }
         }
@@ -1392,12 +1366,12 @@ impl Board {
 /// code says and ignores the bit; with any other code it can only mean
 /// GL_PHASE_SGIX, which the model does not implement, so the draw drops.
 pub(super) fn texture_detail_filter(word: u32) -> u32 {
-    let min = word & ODSY_TEX_MIN_MASK;
+    let min = word & tex::MIN_MASK;
 
-    if min != ODSY_TEX_MIN_NEAREST_MIPMAP_NEAREST && min != ODSY_TEX_MIN_LINEAR_MIPMAP_LINEAR {
+    if min != tex::MIN_NEAREST_MIPMAP_NEAREST && min != tex::MIN_LINEAR_MIPMAP_LINEAR {
         return 0;
     }
-    match word & !ODSY_TEX_MIN_MASK {
+    match word & !tex::MIN_MASK {
         0x13000004 => GL_LINEAR_DETAIL_SGIS,
         0x13000006 => GL_LINEAR_DETAIL_ALPHA_SGIS,
         0x13000008 => GL_LINEAR_DETAIL_COLOR_SGIS,
@@ -1459,7 +1433,7 @@ impl Board {
 /// library's conversion). It never sets bits 31:14, so a word that does is
 /// unknown state and drops the draw.
 pub(super) fn texture_lod_word(word: u32) -> i32 {
-    sextract32(word, 0, ODSY_TEX_LOD_BITS)
+    sextract32(word, 0, tex::LOD_BITS)
 }
 
 /// Minimum and maximum LOD (words 2 and 3). The library clamps both to
@@ -1467,7 +1441,7 @@ pub(super) fn texture_lod_word(word: u32) -> i32 {
 /// board does with a limit past 15 is UNKNOWN, as no stock client sends
 /// one: the model clamps it the way the library does, an approximation.
 pub(super) fn texture_lod_limit(word: u32) -> i32 {
-    cmin(cmax(texture_lod_word(word), -(ODSY_TEX_LOD_LIMIT as i32)), ODSY_TEX_LOD_LIMIT as i32)
+    cmin(cmax(texture_lod_word(word), -(tex::LOD_LIMIT as i32)), tex::LOD_LIMIT as i32)
 }
 
 impl Board {
@@ -1482,8 +1456,8 @@ impl Board {
         let bias_s = texture_lod_word(self.tex_lod[0]);
         let bias_t = texture_lod_word(self.tex_lod[1]);
 
-        image.lod_scale_s = if bias_s != 0 { (bias_s as f64 / ODSY_TEX_LOD_ONE as f64).exp2() } else { 0.0 };
-        image.lod_scale_t = if bias_t != 0 { (bias_t as f64 / ODSY_TEX_LOD_ONE as f64).exp2() } else { 0.0 };
+        image.lod_scale_s = if bias_s != 0 { (bias_s as f64 / tex::LOD_ONE as f64).exp2() } else { 0.0 };
+        image.lod_scale_t = if bias_t != 0 { (bias_t as f64 / tex::LOD_ONE as f64).exp2() } else { 0.0 };
     }
 }
 
@@ -1533,9 +1507,9 @@ impl Board {
         let mut width = width_word;
         let mut height = height_word;
         let depth = self.tex_sampler[3];
-        let phase = (self.tex_sampler[4] & ODSY_TEX_SAMPLER_BIT17) != 0
-            && (self.tex_sampler[4] & ODSY_TEX_MIN_MASK) != ODSY_TEX_MIN_LINEAR_MIPMAP_LINEAR;
-        let word = self.tex_sampler[4] & !ODSY_TEX_SAMPLER_BIT17;
+        let phase = (self.tex_sampler[4] & tex::SAMPLER_BIT17) != 0
+            && (self.tex_sampler[4] & tex::MIN_MASK) != tex::MIN_LINEAR_MIPMAP_LINEAR;
+        let word = self.tex_sampler[4] & !tex::SAMPLER_BIT17;
         let components = word & 0x0f800000;
         let mut sampler_size = self.tex_sampler[0];
         // The library's texture move (level descriptor 60), which draws a
@@ -1568,9 +1542,9 @@ impl Board {
         let detail_sampler = detail.unwrap_or_default();
         let detail_weight = if detail_identity { self.texture_detail_function_weight() } else { None };
         let detail_filter = if detail_identity { texture_detail_filter(word) } else { 0 };
-        let tex_shape = self.tex_mode & (ODSY_TEX_MODE_1D | ODSY_TEX_MODE_2D | ODSY_TEX_MODE_3D);
-        let three_d = (self.tex_mode & ODSY_TEX_MODE_3D) != 0;
-        let three_d_shape = tex_shape == ODSY_TEX_MODE_3D
+        let tex_shape = self.tex_mode & (tex::MODE_1D | tex::MODE_2D | tex::MODE_3D);
+        let three_d = (self.tex_mode & tex::MODE_3D) != 0;
+        let three_d_shape = tex_shape == tex::MODE_3D
             && width >= 2
             && height >= 2
             && depth >= 2
@@ -1582,9 +1556,9 @@ impl Board {
         let wt = (word >> 10) & 3;
         let clamp = ws == 2 || wt == 2;
         let border = ws == 3 || wt == 3;
-        let one_d_shape = tex_shape == ODSY_TEX_MODE_1D && height == 1 && depth == 1 && self.tex_level0 == 0;
+        let one_d_shape = tex_shape == tex::MODE_1D && height == 1 && depth == 1 && self.tex_level0 == 0;
         let two_d_shape =
-            tex_shape == ODSY_TEX_MODE_2D && (width == 2 || width == 4) && height == 2 && depth == 1 && self.tex_level0 == 0;
+            tex_shape == tex::MODE_2D && (width == 2 || width == 4) && height == 2 && depth == 1 && self.tex_level0 == 0;
         let stored_border = ((one_d_shape
             && (width == 2 || width == 4 || width == 8 || width == 64)
             && (word == 0x03002000 || word == 0x03002022))
@@ -1609,7 +1583,7 @@ impl Board {
         let general_border = !stored_border
             && !detail_identity
             && !three_d
-            && tex_shape == ODSY_TEX_MODE_2D
+            && tex_shape == tex::MODE_2D
             && ws != 3
             && wt != 3
             && word == (components | (ws << 12) | (wt << 10) | filter)
@@ -1649,7 +1623,7 @@ impl Board {
                     || width != 1
                     || height != 1
                     || depth != 1
-                    || tex_shape != ODSY_TEX_MODE_2D
+                    || tex_shape != tex::MODE_2D
                 {
                     break 'unsupported;
                 }
@@ -1699,7 +1673,7 @@ impl Board {
                     && (depth == 0
                         || depth > ODSY_VOLUME_SLICES
                         || !(depth as u64).is_power_of_two()
-                        || (self.tex_mode & (ODSY_TEX_MODE_1D | ODSY_TEX_MODE_2D)) != 0))
+                        || (self.tex_mode & (tex::MODE_1D | tex::MODE_2D)) != 0))
                 || (!three_d && depth != 1)
                 || sampler_size
                     != (0x08000000 | (width.trailing_zeros() << 10) | (height.trailing_zeros() << 5) | (if three_d { depth.trailing_zeros() } else { 0 }))
@@ -1722,7 +1696,7 @@ impl Board {
                 || (clamp && !general_clamp && !captured_clamp)
                 || (border
                     && !captured_clamp
-                    && ((clamp && (ws != 2 || wt != 2)) || tex_shape != ODSY_TEX_MODE_2D || bf != GL_RGBA || filter != 0))
+                    && ((clamp && (ws != 2 || wt != 2)) || tex_shape != tex::MODE_2D || bf != GL_RGBA || filter != 0))
                 || (min != 0 && min != 0x20 && min != 0x40 && min != 0x60 && min != 0x80 && min != 0xa0)
                 || (!colour_table
                     && !colour_table_disabled
@@ -1730,7 +1704,7 @@ impl Board {
                     && !three_d_clamp
                     && word != (0x10000000 | components | (ws << 12) | (wt << 10) | filter)
                     && detail_filter == 0)
-                || ((self.tex_lod[0] | self.tex_lod[1] | self.tex_lod[2] | self.tex_lod[3]) & !ODSY_TEX_LOD_MASK) != 0
+                || ((self.tex_lod[0] | self.tex_lod[1] | self.tex_lod[2] | self.tex_lod[3]) & !tex::LOD_MASK) != 0
                 || !self.texture_scale_bias_known()
                 || phase
                 || self.tex_offset[0] != 0
@@ -1741,10 +1715,10 @@ impl Board {
                     && ((colour_table_l8 && bf != GL_LUMINANCE)
                         || ((colour_table_rgba8_rgb || colour_table_rgba8_rgba) && bf != GL_RGBA)
                         || three_d
-                        || tex_shape != ODSY_TEX_MODE_2D
+                        || tex_shape != tex::MODE_2D
                         || self.tex_colour_table_valid[0] != 0xffff
                         || self.tex_colour_table_valid[1] != 0xffff))
-                || (colour_table_disabled && (bf != GL_LUMINANCE || three_d || tex_shape != ODSY_TEX_MODE_2D))
+                || (colour_table_disabled && (bf != GL_LUMINANCE || three_d || tex_shape != tex::MODE_2D))
                 || self.tex_env[0] < 1
                 || self.tex_env[0] > 4
                 || (self.tex_env[0] == 3
@@ -1996,7 +1970,7 @@ impl Board {
             // level is present is not decided; volume slices keep their own
             // checks above. Sampling is not use, so finding a level here does
             // not touch its object (Board::object_touch()).
-            if tex_shape == ODSY_TEX_MODE_2D && !bordered && !texture_move {
+            if tex_shape == tex::MODE_2D && !bordered && !texture_move {
                 for i in 0..count {
                     let e = ((first + i) * 3) as usize;
                     let object = self.object_find(self.tex_levels[e] & 0x1fffffff);
@@ -2162,34 +2136,34 @@ impl Board {
     pub fn texture_vertex(&mut self) {
         const ENVIRONMENTS: [u32; 5] = [GL_REPLACE, GL_REPLACE, GL_MODULATE, GL_DECAL, GL_BLEND];
         let mut strq: [u32; 4] = [self.tex_coord[0], self.tex_coord[1], self.tex_coord_r, self.tex_coord_q];
-        let one_d = (self.tex_mode & (ODSY_TEX_MODE_1D | ODSY_TEX_MODE_2D)) == ODSY_TEX_MODE_1D;
-        self.gl().cur.texture_2d = (self.tex_mode & (ODSY_TEX_MODE_1D | ODSY_TEX_MODE_2D)) != 0;
-        self.gl().cur.texture_3d = (self.tex_mode & ODSY_TEX_MODE_3D) != 0;
+        let one_d = (self.tex_mode & (tex::MODE_1D | tex::MODE_2D)) == tex::MODE_1D;
+        self.gl().cur.texture_2d = (self.tex_mode & (tex::MODE_1D | tex::MODE_2D)) != 0;
+        self.gl().cur.texture_3d = (self.tex_mode & tex::MODE_3D) != 0;
         // Excluded environments are rejected by the board before rasterization.
         self.gl().cur.texture_env_mode = GL_REPLACE;
         if (self.tex_env[0] as usize) < ENVIRONMENTS.len() {
             self.gl().cur.texture_env_mode = ENVIRONMENTS[self.tex_env[0] as usize];
         }
         // Captured linear planes already include the eye-space transform.
-        if (self.cmd_tag == ODSY_GL_VERTEX_2I
-            || self.cmd_tag == ODSY_GL_VERTEX_2F
-            || self.cmd_tag == ODSY_GL_VERTEX_3F
-            || self.cmd_tag == ODSY_GL_VERTEX_3I
-            || self.cmd_tag == ODSY_GL_VERTEX_4F)
+        if (self.cmd_tag == gl_cmd::VERTEX_2I
+            || self.cmd_tag == gl_cmd::VERTEX_2F
+            || self.cmd_tag == gl_cmd::VERTEX_3F
+            || self.cmd_tag == gl_cmd::VERTEX_3I
+            || self.cmd_tag == gl_cmd::VERTEX_4F)
             && self.gl_linear_texgen != 0
         {
             let mut vertex = [
                 odyssey_f32(self.cmd_operand[0]),
                 odyssey_f32(self.cmd_operand[1]),
-                if self.cmd_tag != ODSY_GL_VERTEX_2I && self.cmd_tag != ODSY_GL_VERTEX_2F { odyssey_f32(self.cmd_operand[2]) } else { 0.0 },
-                if self.cmd_tag == ODSY_GL_VERTEX_4F { odyssey_f32(self.cmd_operand[3]) } else { 1.0 },
+                if self.cmd_tag != gl_cmd::VERTEX_2I && self.cmd_tag != gl_cmd::VERTEX_2F { odyssey_f32(self.cmd_operand[2]) } else { 0.0 },
+                if self.cmd_tag == gl_cmd::VERTEX_4F { odyssey_f32(self.cmd_operand[3]) } else { 1.0 },
             ];
 
-            if self.cmd_tag == ODSY_GL_VERTEX_2I || self.cmd_tag == ODSY_GL_VERTEX_3I {
+            if self.cmd_tag == gl_cmd::VERTEX_2I || self.cmd_tag == gl_cmd::VERTEX_3I {
                 vertex[0] = (self.cmd_operand[0] as i32) as f64;
                 vertex[1] = (self.cmd_operand[1] as i32) as f64;
             }
-            if self.cmd_tag == ODSY_GL_VERTEX_3I {
+            if self.cmd_tag == gl_cmd::VERTEX_3I {
                 vertex[2] = (self.cmd_operand[2] as i32) as f64;
             }
             for axis in 0..4usize {
@@ -2220,15 +2194,15 @@ impl Board {
             }
         }
         self.gl().set_matrix(GL_TEXTURE, &matrix);
-        self.gl_feed(GL_OP_TEXCOORD4F as u16, &strq);
+        self.gl_feed(op::TEXCOORD4F as u16, &strq);
     }
 }
 
 /// A draw's estimated raster work in pixels, from its vertices' window
 /// positions (`primitive_cost`).
 fn gl_draw_cost(d: &GlDraw) -> u32 {
-    let points = d.vertices.chunks_exact(GL_VERTEX_FLOATS).take(d.count as usize).map(|v| {
-        let clip = [v[GL_V_POSITION] as f64, v[GL_V_POSITION + 1] as f64, v[GL_V_POSITION + 2] as f64, v[GL_V_POSITION + 3] as f64];
+    let points = d.vertices.chunks_exact(vtx::FLOATS).take(d.count as usize).map(|v| {
+        let clip = [v[vtx::POSITION] as f64, v[vtx::POSITION + 1] as f64, v[vtx::POSITION + 2] as f64, v[vtx::POSITION + 3] as f64];
         if !(clip[3] > 0.0) {
             return None;
         }
@@ -2279,7 +2253,7 @@ impl Board {
             state.texture_env_color[3] = (self.tex_env[2] & 0xfff) as f32 / 4095.0f32;
         }
         if !self.gl_index_mode() {
-            state.colour_mask = (self.gl_write_mask >> ODSY_WRITE_COLOUR_SHIFT) & ODSY_WRITE_COLOUR_MASK;
+            state.colour_mask = (self.gl_write_mask >> write::COLOUR_SHIFT) & write::COLOUR_MASK;
         }
         state.fog_color[0] = ((self.gl_fog[0] >> 12) & 0xfff) as f32 / 4096.0f32;
         state.fog_color[1] = (self.gl_fog[0] & 0xfff) as f32 / 4096.0f32;
@@ -2433,7 +2407,7 @@ impl Board {
     /// targets carry buffers 0 and 1, the raster target callbacks' buffer
     /// numbers, and its draw buffers follow the 0x0424 drawing mask. The kernel
     /// has already turned the client's front and back into buffer numbers
-    /// (ODSY_REG_DRAW_MASK), so the shared names are slots here, not the
+    /// (reg::DRAW_MASK), so the shared names are slots here, not the
     /// client's roles: a client drawing its front after one swap draws the
     /// context's "back", buffer 1.
     ///
@@ -2479,7 +2453,7 @@ impl Board {
             self.gl().set_drawable(&d);
         }
         if self.gl_ref().cur.draw_buffers != draw {
-            self.gl_command(&GlCmd::new(GL_OP_DRAW_BUFFERS as u16, std::slice::from_ref(&draw)));
+            self.gl_command(&GlCmd::new(op::DRAW_BUFFERS as u16, std::slice::from_ref(&draw)));
         }
     }
 
@@ -2509,9 +2483,9 @@ pub(super) fn cull_face_mode(code: u32) -> u32 {
 }
 
 /// 0x404 bit 23 to the shared layer's glFrontFace sense, inverted -- see
-/// the ODSY_MODE_FRONT_FACE_CW comment for why.
+/// the mode::FRONT_FACE_CW comment for why.
 pub(super) fn front_face(pattern_mode: u32) -> u32 {
-    if (pattern_mode & ODSY_MODE_FRONT_FACE_CW) != 0 { GL_CCW } else { GL_CW }
+    if (pattern_mode & mode::FRONT_FACE_CW) != 0 { GL_CCW } else { GL_CW }
 }
 
 impl Board {
@@ -2545,7 +2519,7 @@ impl Board {
     /// the shade model, bit 16, the depth test, bit 14, the alpha test, bit 15,
     /// the stencil test, bit 17, blending, bit 19, index logic op, bit 20,
     /// colour logic op, bit 8, GL_CULL_FACE, bits 10:9, the face it culls, and
-    /// bit 23, front face (fed inverted; see the ODSY_MODE_FRONT_FACE_CW
+    /// bit 23, front face (fed inverted; see the mode::FRONT_FACE_CW
     /// comment), and bit 3, float GL line stipple. The shared rasterizer fills
     /// a flat triangle from its provoking vertex, the last one for triangles
     /// and strips as GL specifies. Nothing in the stream says which vertex the
@@ -2555,10 +2529,10 @@ impl Board {
     /// interpreter.
     ///
     /// Bit 15, the stencil test, gates fragments through the model's stencil
-    /// plane (ODSY_MODE_STENCIL_TEST).
+    /// plane (mode::STENCIL_TEST).
     pub fn gl_apply_polygon_stipple(&mut self) {
         let cap = GL_POLYGON_STIPPLE;
-        let enable = (self.pattern_mode & ODSY_GL_RECT_PATTERN_ENABLE) != 0 && (self.pattern_shape & !ODSY_PATTERN_SHAPE_OPAQUE) == 0;
+        let enable = (self.pattern_mode & gl_cmd::RECT_PATTERN_ENABLE) != 0 && (self.pattern_shape & !pattern::SHAPE_OPAQUE) == 0;
 
         if self.gl_in_prim {
             return;
@@ -2573,53 +2547,53 @@ impl Board {
                 return;
             }
         }
-        self.gl_feed32(if enable { GL_OP_ENABLE } else { GL_OP_DISABLE }, &[cap]);
+        self.gl_feed32(if enable { op::ENABLE } else { op::DISABLE }, &[cap]);
     }
 
-    /// 0x0404 bit 17 (ODSY_MODE_BLEND) blends only into an RGBA drawable:
+    /// 0x0404 bit 17 (mode::BLEND) blends only into an RGBA drawable:
     /// OpenGL blends RGBA fragments alone (OpenGL 1.2.1, 4.1.6), and the X
     /// server sets the bit with factors ONE, ZERO for its opaque stipples,
     /// whose background is the 0x0c21 constant colour and needs no destination
-    /// (ODSY_PATTERN_SHAPE_OPAQUE). Fed again when the colour mode changes.
+    /// (pattern::SHAPE_OPAQUE). Fed again when the colour mode changes.
     pub fn gl_apply_blend(&mut self) {
         let blend = GL_BLEND;
-        let on = (self.pattern_mode & ODSY_MODE_BLEND) != 0 && !self.gl_index_mode();
+        let on = (self.pattern_mode & mode::BLEND) != 0 && !self.gl_index_mode();
 
-        self.gl_feed32(if on { GL_OP_ENABLE } else { GL_OP_DISABLE }, &[blend]);
+        self.gl_feed32(if on { op::ENABLE } else { op::DISABLE }, &[blend]);
     }
 
     pub fn gl_apply_mode(&mut self) {
-        let shade = if (self.pattern_mode & ODSY_MODE_FLAT_SHADE) != 0 { GL_FLAT } else { GL_SMOOTH };
-        let cull_mode = cull_face_mode((self.pattern_mode >> ODSY_MODE_CULL_MODE_SHIFT) & ODSY_MODE_CULL_MODE_MASK);
+        let shade = if (self.pattern_mode & mode::FLAT_SHADE) != 0 { GL_FLAT } else { GL_SMOOTH };
+        let cull_mode = cull_face_mode((self.pattern_mode >> mode::CULL_MODE_SHIFT) & mode::CULL_MODE_MASK);
         let front_face = front_face(self.pattern_mode);
         let pm = self.pattern_mode;
-        let en = |bit: u32| if (pm & bit) != 0 { GL_OP_ENABLE } else { GL_OP_DISABLE };
+        let en = |bit: u32| if (pm & bit) != 0 { op::ENABLE } else { op::DISABLE };
 
-        self.gl_feed32(GL_OP_SHADE_MODEL, &[shade]);
+        self.gl_feed32(op::SHADE_MODEL, &[shade]);
         // Bit assignments follow the library's fragment-state encoding.
-        self.gl_feed32(en(ODSY_MODE_POINT_SMOOTH), &[GL_POINT_SMOOTH]);
-        self.gl_feed32(en(ODSY_MODE_LINE_SMOOTH), &[GL_LINE_SMOOTH]);
+        self.gl_feed32(en(mode::POINT_SMOOTH), &[GL_POINT_SMOOTH]);
+        self.gl_feed32(en(mode::LINE_SMOOTH), &[GL_LINE_SMOOTH]);
         // The shared layer has no dither rule yet, so the first mode word that
         // enables it is reported and the board draws undithered. Once the
-        // shared rule lands this feeds GL_OP_ENABLE/DISABLE of GL_DITHER.
-        if (pm & ODSY_MODE_DITHER) != 0 && !self.gl_dither_reported {
+        // shared rule lands this feeds op::ENABLE/DISABLE of GL_DITHER.
+        if (pm & mode::DITHER) != 0 && !self.gl_dither_reported {
             self.gl_dither_reported = true;
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: dither not modelled; drawing undithered");
         }
-        self.gl_feed32(en(ODSY_MODE_DEPTH_TEST), &[GL_DEPTH_TEST]);
-        self.gl_feed32(en(ODSY_MODE_ALPHA_TEST), &[GL_ALPHA_TEST]);
-        self.gl_feed32(en(ODSY_MODE_STENCIL_TEST), &[GL_STENCIL_TEST]);
+        self.gl_feed32(en(mode::DEPTH_TEST), &[GL_DEPTH_TEST]);
+        self.gl_feed32(en(mode::ALPHA_TEST), &[GL_ALPHA_TEST]);
+        self.gl_feed32(en(mode::STENCIL_TEST), &[GL_STENCIL_TEST]);
         self.gl_apply_blend();
-        self.gl_feed32(en(ODSY_MODE_FOG), &[GL_FOG]);
-        self.gl_feed32(en(ODSY_MODE_INDEX_LOGIC_OP), &[GL_INDEX_LOGIC_OP]);
-        self.gl_feed32(en(ODSY_MODE_COLOR_LOGIC_OP), &[GL_COLOR_LOGIC_OP]);
-        self.gl_feed32(en(ODSY_MODE_OFFSET_POINT), &[GL_POLYGON_OFFSET_POINT]);
-        self.gl_feed32(en(ODSY_MODE_OFFSET_LINE), &[GL_POLYGON_OFFSET_LINE]);
-        self.gl_feed32(en(ODSY_MODE_OFFSET_FILL), &[GL_POLYGON_OFFSET_FILL]);
-        self.gl_feed32(en(ODSY_MODE_CULL_FACE), &[GL_CULL_FACE]);
-        self.gl_feed_raster_state(en(ODSY_MODE_GL_LINE_STIPPLE) as u16, &[GL_LINE_STIPPLE]);
-        self.gl_feed32(GL_OP_CULL_FACE, &[cull_mode]);
-        self.gl_feed32(GL_OP_FRONT_FACE, &[front_face]);
+        self.gl_feed32(en(mode::FOG), &[GL_FOG]);
+        self.gl_feed32(en(mode::INDEX_LOGIC_OP), &[GL_INDEX_LOGIC_OP]);
+        self.gl_feed32(en(mode::COLOR_LOGIC_OP), &[GL_COLOR_LOGIC_OP]);
+        self.gl_feed32(en(mode::OFFSET_POINT), &[GL_POLYGON_OFFSET_POINT]);
+        self.gl_feed32(en(mode::OFFSET_LINE), &[GL_POLYGON_OFFSET_LINE]);
+        self.gl_feed32(en(mode::OFFSET_FILL), &[GL_POLYGON_OFFSET_FILL]);
+        self.gl_feed32(en(mode::CULL_FACE), &[GL_CULL_FACE]);
+        self.gl_feed_raster_state(en(mode::GL_LINE_STIPPLE) as u16, &[GL_LINE_STIPPLE]);
+        self.gl_feed32(op::CULL_FACE, &[cull_mode]);
+        self.gl_feed32(op::FRONT_FACE, &[front_face]);
         self.gl_apply_polygon_stipple();
     }
 
@@ -2627,27 +2601,27 @@ impl Board {
         // Word 1 remains the integer 2D path's 32-bit rotated pattern.
         let args = [(self.line_stipple[2] & 0xff) + 1, self.line_stipple[0] & 0xffff];
 
-        self.gl_feed_raster_state(GL_OP_LINE_STIPPLE as u16, &args);
+        self.gl_feed_raster_state(op::LINE_STIPPLE as u16, &args);
     }
 
-    /// Push the board-shadowed clip box (ODSY_REG_CLIP_BOX) to the shared
+    /// Push the board-shadowed clip box (reg::CLIP_BOX) to the shared
     /// context's scissor rectangle (see the macro's own comment for the
     /// encoding and the always-on rationale). min > max -- including the
     /// library's own 0x1000, 0x1000 empty encoding -- clips every fragment,
     /// matched here with a zero-area box rather than a negative width or
-    /// height, which GL_OP_SCISSOR rejects.
+    /// height, which op::SCISSOR rejects.
     pub fn gl_apply_clip_box(&mut self) {
-        let x_min = (self.gl_clip_box[0] >> ODSY_CLIP_BOX_MIN_SHIFT) & ODSY_CLIP_BOX_FIELD_MASK;
-        let x_max = self.gl_clip_box[0] & ODSY_CLIP_BOX_FIELD_MASK;
-        let y_min = (self.gl_clip_box[1] >> ODSY_CLIP_BOX_MIN_SHIFT) & ODSY_CLIP_BOX_FIELD_MASK;
-        let y_max = self.gl_clip_box[1] & ODSY_CLIP_BOX_FIELD_MASK;
+        let x_min = (self.gl_clip_box[0] >> clip::BOX_MIN_SHIFT) & clip::BOX_FIELD_MASK;
+        let x_max = self.gl_clip_box[0] & clip::BOX_FIELD_MASK;
+        let y_min = (self.gl_clip_box[1] >> clip::BOX_MIN_SHIFT) & clip::BOX_FIELD_MASK;
+        let y_max = self.gl_clip_box[1] & clip::BOX_FIELD_MASK;
         let mut box_ = [x_min, y_min, 0, 0];
 
         if x_min <= x_max && y_min <= y_max {
             box_[2] = x_max - x_min + 1;
             box_[3] = y_max - y_min + 1;
         }
-        self.gl_feed32(GL_OP_SCISSOR, &box_);
+        self.gl_feed32(op::SCISSOR, &box_);
     }
 
     /// Feed eye-space clip plane i to the shared context as the object-space
@@ -2670,23 +2644,23 @@ impl Board {
         for k in 0..4usize {
             args[1 + k] = f32_bits(obj[k] as f32);
         }
-        self.gl_feed32(GL_OP_CLIP_PLANE, &args);
+        self.gl_feed32(op::CLIP_PLANE, &args);
     }
 
     /// Recompute which of the shared context's six clip-plane slots are
     /// tested, from 0x0405 bits 2:0's thermometer count n (see
-    /// ODSY_TEX_MODE_CLIP_COUNT_MASK's comment): slots 0..n-1 enabled, the rest
+    /// tex::MODE_CLIP_COUNT_MASK's comment): slots 0..n-1 enabled, the rest
     /// disabled. Called on every 0x0405 write; does not
     /// touch the loaded coefficients themselves, which a separate load
-    /// (ODSY_GL_CLIP_PLANE_LOAD) feeds.
+    /// (gl_cmd::CLIP_PLANE_LOAD) feeds.
     pub fn gl_apply_clip_planes(&mut self) {
-        let bits = self.tex_mode & ODSY_TEX_MODE_CLIP_COUNT_MASK;
+        let bits = self.tex_mode & tex::MODE_CLIP_COUNT_MASK;
         let n = bits.count_ones();
 
         for i in 0..GL_CLIP_PLANES {
             let plane = GL_CLIP_PLANE0 + i;
 
-            self.gl_feed32(if i < n { GL_OP_ENABLE } else { GL_OP_DISABLE }, &[plane]);
+            self.gl_feed32(if i < n { op::ENABLE } else { op::DISABLE }, &[plane]);
         }
     }
 }
@@ -2773,31 +2747,31 @@ impl Board {
     /// 0x0420 and 0x0452 to the shared context's comparison and depth mask.
     pub fn gl_apply_depth(&mut self) {
         let func = GL_NEVER_ENUM + (self.gl_depth_func & ODSY_DEPTH_FUNC_MASK);
-        let mask = ((self.gl_write_mask & ODSY_WRITE_DEPTH) != 0) as u32;
+        let mask = ((self.gl_write_mask & write::DEPTH) != 0) as u32;
 
-        self.gl_feed32(GL_OP_DEPTH_FUNC, &[func]);
-        self.gl_feed32(GL_OP_DEPTH_MASK, &[mask]);
+        self.gl_feed32(op::DEPTH_FUNC, &[func]);
+        self.gl_feed32(op::DEPTH_MASK, &[mask]);
     }
 }
 
-/// The lighting words matched by value (ODSY_GL_NORMAL_3F and the rest).
+/// The lighting words matched by value (gl_cmd::NORMAL_3F and the rest).
 pub(super) static GL_LIGHT_WORDS: [u32; 16] = [
-    ODSY_GL_NORMAL_3F,
-    ODSY_GL_MATERIAL_AMBIENT,
-    ODSY_GL_MATERIAL_DIFFUSE,
-    ODSY_GL_MATERIAL_SPECULAR,
-    ODSY_GL_MATERIAL_EMISSION,
-    ODSY_GL_BACK_AMBIENT,
-    ODSY_GL_BACK_DIFFUSE,
-    ODSY_GL_BACK_SPECULAR,
-    ODSY_GL_BACK_EMISSION,
-    ODSY_GL_SHININESS_SQRT,
-    ODSY_GL_BACK_SHININESS_SQRT,
-    ODSY_GL_SHININESS_DERIVED,
-    ODSY_GL_LIGHT_COLOUR_LOAD,
-    ODSY_GL_LIGHT_VEC_LOAD,
-    ODSY_GL_CLIP_PLANE_LOAD,
-    ODSY_PROG_RUN_ONCE,
+    gl_cmd::NORMAL_3F,
+    gl_cmd::MATERIAL_AMBIENT,
+    gl_cmd::MATERIAL_DIFFUSE,
+    gl_cmd::MATERIAL_SPECULAR,
+    gl_cmd::MATERIAL_EMISSION,
+    gl_cmd::BACK_AMBIENT,
+    gl_cmd::BACK_DIFFUSE,
+    gl_cmd::BACK_SPECULAR,
+    gl_cmd::BACK_EMISSION,
+    gl_cmd::SHININESS_SQRT,
+    gl_cmd::BACK_SHININESS_SQRT,
+    gl_cmd::SHININESS_DERIVED,
+    gl_cmd::LIGHT_COLOUR_LOAD,
+    gl_cmd::LIGHT_VEC_LOAD,
+    gl_cmd::CLIP_PLANE_LOAD,
+    prog::RUN_ONCE,
 ];
 
 /// The texture-coordinate and generation fragments.
@@ -2806,38 +2780,38 @@ pub(super) static UCODE_TEXGEN: [u32; 14] = [
 ];
 
 pub(super) fn prog_value(word: u32) -> u32 {
-    (word & ODSY_PROG_LOW_MASK) | (((word >> ODSY_PROG_HIGH_SHIFT) & 1) << 10)
+    (word & prog::LOW_MASK) | (((word >> prog::HIGH_SHIFT) & 1) << 10)
 }
 
 pub(super) fn is_program_word(word: u32) -> bool {
-    let cls = word >> ODSY_PROG_CLASS_SHIFT;
+    let cls = word >> prog::CLASS_SHIFT;
 
-    if (word & ODSY_PROG_SHAPE) != ODSY_PROG_TAG {
+    if (word & prog::SHAPE) != prog::TAG {
         return false;
     }
-    if (ODSY_PROG_PROGRAM_HALFWORD..=ODSY_PROG_PROGRAM_HALFWORD_LAST).contains(&cls) {
+    if (prog::PROGRAM_HALFWORD..=prog::PROGRAM_HALFWORD_LAST).contains(&cls) {
         return true;
     }
-    if (ODSY_PROG_REG_FIRST..=ODSY_PROG_REG_LAST).contains(&cls)
-        && (word & ODSY_GL_MATRIX_SELECT_SHAPE) != ODSY_GL_MATRIX_SELECT_TAG
+    if (prog::REG_FIRST..=prog::REG_LAST).contains(&cls)
+        && (word & gl_cmd::MATRIX_SELECT_SHAPE) != gl_cmd::MATRIX_SELECT_TAG
     {
         return true;
     }
     matches!(
         cls,
-        ODSY_PROG_COLOUR_MODE
-            | ODSY_PROG_COLOUR_MODE_B
-            | ODSY_PROG_SET_UCODE
-            | ODSY_PROG_PROGRAM_ADDR
-            | ODSY_PROG_CONST_SELECT
-            | ODSY_PROG_ENTRY_29
-            | ODSY_PROG_ENTRY_2A
-            | ODSY_PROG_ENTRY_2C
-            | ODSY_PROG_LIGHT_VEC_SELECT
-            | ODSY_PROG_LIGHT_COLOUR_SELECT
-            | ODSY_PROG_LIST_INDEX
-            | ODSY_PROG_COLOUR_MATERIAL
-            | ODSY_PROG_CONST_STORE
+        prog::COLOUR_MODE
+            | prog::COLOUR_MODE_B
+            | prog::SET_UCODE
+            | prog::PROGRAM_ADDR
+            | prog::CONST_SELECT
+            | prog::ENTRY_29
+            | prog::ENTRY_2A
+            | prog::ENTRY_2C
+            | prog::LIGHT_VEC_SELECT
+            | prog::LIGHT_COLOUR_SELECT
+            | prog::LIST_INDEX
+            | prog::COLOUR_MATERIAL
+            | prog::CONST_STORE
     )
 }
 

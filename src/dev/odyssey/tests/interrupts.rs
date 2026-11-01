@@ -1,9 +1,7 @@
 //! Interrupt flags, routing and the packets that reach HEART.
 
 use crate::dev::odyssey::consts::{
-    ODSY_INTR_CLEAR, ODSY_INTR_ENABLE_CLEAR, ODSY_INTR_ENABLE_SET, ODSY_INTR_FIFO_LOW_WATER,
-    ODSY_INTR_FLAGS, ODSY_INT_DEST_LOWER, ODSY_INT_DEST_UPPER, ODSY_ROUTE_DEST_LOWER,
-    ODSY_ROUTE_DEST_UPPER, ODSY_ROUTE_VECTORS, ODSY_STATUS0, ODSY_SW_TOKEN,
+    intr, route, ODSY_INT_DEST_LOWER, ODSY_INT_DEST_UPPER, ODSY_STATUS0, ODSY_SW_TOKEN,
 };
 use crate::dev::odyssey::tests::{
     board, cmd, reg_read, reg_write, route_to_heart, DMA_VECTOR, FLAG_VECTOR, RETRACE_VECTOR,
@@ -34,7 +32,7 @@ fn a_raised_and_a_lowered_board_interrupt_each_reach_heart() {
 /// The mask the kernel driver's interrupt set-up writes, from a boot trace.
 /// It leaves the low-water source off.
 const INIT_MASK: u32 = 0x79e4_259e;
-const LOW_WATER: u32 = ODSY_INTR_FIFO_LOW_WATER;
+const LOW_WATER: u32 = intr::FIFO_LOW_WATER;
 const DMA_DONE: u32 = 0x0000_0800;
 
 /// The flag, enable and acknowledge trio, and the rule that an enable on
@@ -46,20 +44,20 @@ const DMA_DONE: u32 = 0x0000_0800;
 fn enabling_a_pending_source_asserts_and_acknowledging_clears_it() {
     let (mut s, rec) = board("v12");
     route_to_heart(&mut s);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS), LOW_WATER);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_ENABLE_SET), 0);
+    assert_eq!(reg_read(&mut s, intr::FLAGS), LOW_WATER);
+    assert_eq!(reg_read(&mut s, intr::ENABLE_SET), 0);
     assert!(rec.events(FLAG_VECTOR).is_empty());
 
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, 0xffff_ffff);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_ENABLE_SET), 0xffff_ffff);
+    reg_write(&mut s, intr::ENABLE_SET, 0xffff_ffff);
+    assert_eq!(reg_read(&mut s, intr::ENABLE_SET), 0xffff_ffff);
     assert!(rec.level(FLAG_VECTOR));
 
     // Write-one-to-clear over the flags, with nothing readable behind it.
-    reg_write(&mut s, ODSY_INTR_CLEAR, 0xffff_ffff);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS), 0);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_CLEAR), 0);
+    reg_write(&mut s, intr::CLEAR, 0xffff_ffff);
+    assert_eq!(reg_read(&mut s, intr::FLAGS), 0);
+    assert_eq!(reg_read(&mut s, intr::CLEAR), 0);
     assert!(!rec.level(FLAG_VECTOR));
-    assert_eq!(reg_read(&mut s, ODSY_INTR_ENABLE_SET), 0xffff_ffff, "clearing flags leaves the enables alone");
+    assert_eq!(reg_read(&mut s, intr::ENABLE_SET), 0xffff_ffff, "clearing flags leaves the enables alone");
 
     // The software-sync pair: a token written, then read back.
     reg_write(&mut s, ODSY_SW_TOKEN, 0x5a5a_5a5a);
@@ -77,25 +75,25 @@ fn the_enable_mask_is_set_and_cleared_by_its_two_halves() {
     route_to_heart(&mut s);
 
     // The initial mask leaves low water off: no level.
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, INIT_MASK);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_ENABLE_SET), INIT_MASK);
+    reg_write(&mut s, intr::ENABLE_SET, INIT_MASK);
+    assert_eq!(reg_read(&mut s, intr::ENABLE_SET), INIT_MASK);
     assert!(!rec.level(FLAG_VECTOR));
 
     // The high-water path adds one bit; the rest of the mask stays.
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_ENABLE_SET), INIT_MASK | LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_SET, LOW_WATER);
+    assert_eq!(reg_read(&mut s, intr::ENABLE_SET), INIT_MASK | LOW_WATER);
     assert!(rec.level(FLAG_VECTOR));
 
     // The low-water handler removes it: the level drops, the flag stays.
-    reg_write(&mut s, ODSY_INTR_ENABLE_CLEAR, LOW_WATER);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_ENABLE_SET), INIT_MASK);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS) & LOW_WATER, LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_CLEAR, LOW_WATER);
+    assert_eq!(reg_read(&mut s, intr::ENABLE_SET), INIT_MASK);
+    assert_eq!(reg_read(&mut s, intr::FLAGS) & LOW_WATER, LOW_WATER);
     assert!(!rec.level(FLAG_VECTOR));
 
     // Disabling with all ones empties the mask.
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
-    reg_write(&mut s, ODSY_INTR_ENABLE_CLEAR, 0xffff_ffff);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_ENABLE_SET), 0);
+    reg_write(&mut s, intr::ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_CLEAR, 0xffff_ffff);
+    assert_eq!(reg_read(&mut s, intr::ENABLE_SET), 0);
     assert!(!rec.level(FLAG_VECTOR));
 }
 
@@ -108,16 +106,16 @@ fn the_enable_mask_is_set_and_cleared_by_its_two_halves() {
 fn an_acknowledge_clears_only_the_flags_it_names() {
     let (mut s, rec) = board("v12");
     route_to_heart(&mut s);
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_SET, LOW_WATER);
     assert!(rec.level(FLAG_VECTOR));
 
-    reg_write(&mut s, ODSY_INTR_CLEAR, DMA_DONE);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS), LOW_WATER);
+    reg_write(&mut s, intr::CLEAR, DMA_DONE);
+    assert_eq!(reg_read(&mut s, intr::FLAGS), LOW_WATER);
     assert!(rec.level(FLAG_VECTOR));
 
-    reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS), 0);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_ENABLE_SET), LOW_WATER);
+    reg_write(&mut s, intr::CLEAR, LOW_WATER);
+    assert_eq!(reg_read(&mut s, intr::FLAGS), 0);
+    assert_eq!(reg_read(&mut s, intr::ENABLE_SET), LOW_WATER);
     assert!(!rec.level(FLAG_VECTOR));
 }
 
@@ -131,21 +129,21 @@ fn an_acknowledge_clears_only_the_flags_it_names() {
 fn a_write_to_the_flags_replaces_them() {
     let (mut s, rec) = board("v12");
     route_to_heart(&mut s);
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
-    reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, intr::CLEAR, LOW_WATER);
     assert!(!rec.level(FLAG_VECTOR));
 
-    reg_write(&mut s, ODSY_INTR_FLAGS, LOW_WATER);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS), LOW_WATER);
+    reg_write(&mut s, intr::FLAGS, LOW_WATER);
+    assert_eq!(reg_read(&mut s, intr::FLAGS), LOW_WATER);
     assert!(rec.level(FLAG_VECTOR));
 
     // Without the low-water bit it is dropped, as a set-only write would not.
-    reg_write(&mut s, ODSY_INTR_FLAGS, DMA_DONE);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS), DMA_DONE);
+    reg_write(&mut s, intr::FLAGS, DMA_DONE);
+    assert_eq!(reg_read(&mut s, intr::FLAGS), DMA_DONE);
     assert!(!rec.level(FLAG_VECTOR));
 
-    reg_write(&mut s, ODSY_INTR_FLAGS, 0);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS), 0);
+    reg_write(&mut s, intr::FLAGS, 0);
+    assert_eq!(reg_read(&mut s, intr::FLAGS), 0);
 }
 
 /// A submission that does not wait never lifts the FIFO to its low-water
@@ -159,18 +157,18 @@ fn a_write_to_the_flags_replaces_them() {
 fn low_water_is_not_raised_while_the_source_is_disabled() {
     let (mut s, rec) = board("v12");
     route_to_heart(&mut s);
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, INIT_MASK | LOW_WATER);
-    reg_write(&mut s, ODSY_INTR_ENABLE_CLEAR, LOW_WATER);
-    reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_SET, INIT_MASK | LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_CLEAR, LOW_WATER);
+    reg_write(&mut s, intr::CLEAR, LOW_WATER);
     assert!(!rec.level(FLAG_VECTOR));
 
     cmd(&mut s, 0x0001_0046);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS) & LOW_WATER, 0);
+    assert_eq!(reg_read(&mut s, intr::FLAGS) & LOW_WATER, 0);
     assert_eq!(reg_read(&mut s, ODSY_STATUS0) & 0x20000, 0x20000);
 
-    reg_write(&mut s, ODSY_INTR_FLAGS, LOW_WATER);
+    reg_write(&mut s, intr::FLAGS, LOW_WATER);
     assert!(!rec.level(FLAG_VECTOR), "latched, but the source is off");
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_SET, LOW_WATER);
     assert!(rec.level(FLAG_VECTOR));
 }
 
@@ -198,15 +196,15 @@ fn the_reset_latched_low_water_interrupt_asserts_once_and_stays_clear() {
     let (mut s, rec) = board("v12");
     route_to_heart(&mut s);
 
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS) & LOW_WATER, LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_SET, LOW_WATER);
+    assert_eq!(reg_read(&mut s, intr::FLAGS) & LOW_WATER, LOW_WATER);
     assert_eq!(rec.events(FLAG_VECTOR), [true]);
 
-    reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
+    reg_write(&mut s, intr::CLEAR, LOW_WATER);
     assert_eq!(rec.events(FLAG_VECTOR), [true, false], "clearing the flag sends the clearing packet");
 
     cmd(&mut s, 0x0001_0046);
-    assert_eq!(reg_read(&mut s, ODSY_INTR_FLAGS) & LOW_WATER, 0);
+    assert_eq!(reg_read(&mut s, intr::FLAGS) & LOW_WATER, 0);
     assert_eq!(rec.events(FLAG_VECTOR), [true, false]);
 }
 
@@ -221,15 +219,15 @@ fn the_reset_latched_low_water_interrupt_asserts_once_and_stays_clear() {
 fn a_reset_lowers_the_flag_level_without_a_packet() {
     let (mut s, rec) = board("v12");
     route_to_heart(&mut s);
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_SET, LOW_WATER);
     assert_eq!(rec.events(FLAG_VECTOR), [true]);
 
     s.reset();
     assert_eq!(rec.events(FLAG_VECTOR), [true], "the reset sends no clearing packet");
 
     route_to_heart(&mut s);
-    reg_write(&mut s, ODSY_ROUTE_VECTORS, FLAG_VECTOR + 1);
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, route::VECTORS, FLAG_VECTOR + 1);
+    reg_write(&mut s, intr::ENABLE_SET, LOW_WATER);
     assert_eq!(rec.events(FLAG_VECTOR + 1), [true]);
     assert_eq!(rec.events(FLAG_VECTOR), [true]);
 }
@@ -244,7 +242,7 @@ fn a_packet_needs_a_destination_and_an_edge() {
     let (mut s, rec) = board("v12");
 
     // No destination: the rising edge sends nothing but is held.
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_SET, LOW_WATER);
     assert!(rec.silent());
 
     reg_write(&mut s, ODSY_INT_DEST_UPPER, 0x1234_5678);
@@ -256,11 +254,11 @@ fn a_packet_needs_a_destination_and_an_edge() {
     assert_eq!(rec.events(FLAG_VECTOR), [true], "the held level goes out with the routing");
 
     // Acknowledging the still-pending flag is the falling edge.
-    reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
+    reg_write(&mut s, intr::CLEAR, LOW_WATER);
     assert_eq!(rec.events(FLAG_VECTOR), [true, false]);
 
     // The flag set again readdresses the same destination, setting it.
-    reg_write(&mut s, ODSY_INTR_FLAGS, LOW_WATER);
+    reg_write(&mut s, intr::FLAGS, LOW_WATER);
     assert_eq!(rec.events(FLAG_VECTOR), [true, false, true]);
 }
 
@@ -273,13 +271,13 @@ fn a_packet_needs_a_destination_and_an_edge() {
 #[test]
 fn a_flag_raised_before_the_routing_is_sent_once_it_is_programmed() {
     let (mut s, rec) = board("v12");
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_SET, LOW_WATER);
     assert!(rec.silent(), "no packet without a destination");
 
-    reg_write(&mut s, ODSY_ROUTE_VECTORS, SOFTSYNC_VECTOR << 24 | RETRACE_VECTOR << 16 | DMA_VECTOR << 8 | FLAG_VECTOR);
-    reg_write(&mut s, ODSY_ROUTE_DEST_LOWER, HEART_PACKET as u32);
+    reg_write(&mut s, route::VECTORS, SOFTSYNC_VECTOR << 24 | RETRACE_VECTOR << 16 | DMA_VECTOR << 8 | FLAG_VECTOR);
+    reg_write(&mut s, route::DEST_LOWER, HEART_PACKET as u32);
     assert!(rec.silent(), "half a destination takes no packet");
-    reg_write(&mut s, ODSY_ROUTE_DEST_UPPER, (HEART_WIDGET << 25) as u32);
+    reg_write(&mut s, route::DEST_UPPER, (HEART_WIDGET << 25) as u32);
     assert_eq!(rec.events(FLAG_VECTOR), [true]);
 
     // Writing the routing again sends nothing more.
@@ -288,8 +286,8 @@ fn a_flag_raised_before_the_routing_is_sent_once_it_is_programmed() {
 
     // A level that rises and falls before any routing sends nothing.
     s.reset();
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
-    reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, intr::CLEAR, LOW_WATER);
     route_to_heart(&mut s);
     assert_eq!(rec.0.lock().len(), 1, "a level gone before the routing sends nothing");
 }
@@ -303,21 +301,21 @@ fn a_flag_raised_before_the_routing_is_sent_once_it_is_programmed() {
 #[test]
 fn a_flag_that_falls_while_held_sends_nothing() {
     let (mut s, rec) = board("v12");
-    reg_write(&mut s, ODSY_ROUTE_VECTORS, SOFTSYNC_VECTOR << 24 | RETRACE_VECTOR << 16 | DMA_VECTOR << 8 | FLAG_VECTOR);
-    reg_write(&mut s, ODSY_ROUTE_DEST_LOWER, HEART_PACKET as u32);
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
-    reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
+    reg_write(&mut s, route::VECTORS, SOFTSYNC_VECTOR << 24 | RETRACE_VECTOR << 16 | DMA_VECTOR << 8 | FLAG_VECTOR);
+    reg_write(&mut s, route::DEST_LOWER, HEART_PACKET as u32);
+    reg_write(&mut s, intr::ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, intr::CLEAR, LOW_WATER);
     assert!(rec.silent(), "vectors and a lower half are no destination");
 
     s.reset();
-    reg_write(&mut s, ODSY_ROUTE_DEST_UPPER, (HEART_WIDGET << 25) as u32);
-    reg_write(&mut s, ODSY_ROUTE_DEST_LOWER, HEART_PACKET as u32);
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, route::DEST_UPPER, (HEART_WIDGET << 25) as u32);
+    reg_write(&mut s, route::DEST_LOWER, HEART_PACKET as u32);
+    reg_write(&mut s, intr::ENABLE_SET, LOW_WATER);
     assert!(rec.silent(), "both halves without the vectors take no packet");
-    reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
+    reg_write(&mut s, intr::CLEAR, LOW_WATER);
     assert!(rec.silent(), "a held level that falls was never sent, so it sends no clear");
 
-    reg_write(&mut s, ODSY_ROUTE_VECTORS, SOFTSYNC_VECTOR << 24 | RETRACE_VECTOR << 16 | DMA_VECTOR << 8 | FLAG_VECTOR);
+    reg_write(&mut s, route::VECTORS, SOFTSYNC_VECTOR << 24 | RETRACE_VECTOR << 16 | DMA_VECTOR << 8 | FLAG_VECTOR);
     assert!(rec.silent(), "the level is gone when the routing is complete");
 }
 
@@ -327,15 +325,15 @@ fn a_flag_that_falls_while_held_sends_nothing() {
 #[test]
 fn a_reset_drops_a_held_flag() {
     let (mut s, rec) = board("v12");
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_SET, LOW_WATER);
     assert!(rec.silent(), "no packet without a destination");
 
     s.reset();
     route_to_heart(&mut s);
     assert!(rec.silent(), "the reset dropped the held flag");
 
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
-    reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, intr::CLEAR, LOW_WATER);
     assert_eq!(rec.events(FLAG_VECTOR), [true, false], "a rise and its fall are both sent");
 }
 
@@ -350,10 +348,10 @@ fn the_flag_interrupt_uses_the_routed_flag_vector() {
     reg_write(&mut s, ODSY_INT_DEST_UPPER, 0x7000_0000);
     reg_write(&mut s, ODSY_INT_DEST_LOWER, 0x40);
     route_to_heart(&mut s);
-    reg_write(&mut s, ODSY_ROUTE_VECTORS, (SOFTSYNC_VECTOR << 24) | 4);
+    reg_write(&mut s, route::VECTORS, (SOFTSYNC_VECTOR << 24) | 4);
 
-    reg_write(&mut s, ODSY_INTR_ENABLE_SET, LOW_WATER);
+    reg_write(&mut s, intr::ENABLE_SET, LOW_WATER);
     assert_eq!(rec.events(4), [true]);
-    reg_write(&mut s, ODSY_INTR_CLEAR, LOW_WATER);
+    reg_write(&mut s, intr::CLEAR, LOW_WATER);
     assert_eq!(rec.events(4), [true, false]);
 }

@@ -5,11 +5,10 @@
 
 use crate::devlog::LogModule;
 use super::gl_context::{
-    GL_BACK, GL_CLIP_PLANES, GL_CW, GL_DRAW_OK, GL_DRAW_OUT_OF_MEMORY, GL_FILL, GL_FLAT, GL_FRONT,
-    GL_FRONT_AND_BACK, GL_LINE, GL_OFFSET_FILL, GL_OFFSET_LINE, GL_OFFSET_POINT, GL_POINT,
-    GL_POLYGON, GL_QUADS, GL_QUAD_STRIP, GL_TRIANGLES, GL_TRIANGLE_FAN, GL_TRIANGLE_STRIP,
-    GL_VERTEX_FLOATS, GL_V_BACK_COLOR, GL_V_COLOR, GL_V_EDGE, GL_V_MATERIAL, GL_V_POSITION, GlDraw,
-    GlDrawResult, GlDrawState,
+    vtx, GL_BACK, GL_CLIP_PLANES, GL_CW, GL_DRAW_OK, GL_DRAW_OUT_OF_MEMORY, GL_FILL, GL_FLAT,
+    GL_FRONT, GL_FRONT_AND_BACK, GL_LINE, GL_OFFSET_FILL, GL_OFFSET_LINE, GL_OFFSET_POINT,
+    GL_POINT, GL_POLYGON, GL_QUADS, GL_QUAD_STRIP, GL_TRIANGLES, GL_TRIANGLE_FAN,
+    GL_TRIANGLE_STRIP, GlDraw, GlDrawResult, GlDrawState,
 };
 use super::raster::{fmin, SoftDraw, SoftFrag, SoftVertex, VOLUME_TRIANGLE_MAX, VolumeVertex};
 use super::raster_fill::{fill_quads_dispatch, FillRow, QuadGeneral, QuadRow};
@@ -51,8 +50,8 @@ impl VolumeVertex {
             r.clip[k] = self.clip[k] + t * (out.clip[k] - self.clip[k]);
             r.eye[k] = self.eye[k] + t * (out.eye[k] - self.eye[k]);
         }
-        for k in 0..GL_VERTEX_FLOATS {
-            r.attr[k] = if k == GL_V_MATERIAL || k == GL_V_EDGE {
+        for k in 0..vtx::FLOATS {
+            r.attr[k] = if k == vtx::MATERIAL || k == vtx::EDGE {
                 self.attr[k]
             } else {
                 (self.attr[k] as f64 + t * (out.attr[k] - self.attr[k]) as f64) as f32
@@ -166,12 +165,12 @@ impl GlDrawState {
     /// as GlDrawState::eye_to_clip() takes it. Clipping then works in double
     /// on the result.
     pub fn volume_from_draw_vertex(&self, v: &[f32]) -> VolumeVertex {
-        let eye = xform(&self.modelview, v[GL_V_POSITION..GL_V_POSITION + 4].try_into().expect("a position"));
+        let eye = xform(&self.modelview, v[vtx::POSITION..vtx::POSITION + 4].try_into().expect("a position"));
 
         VolumeVertex {
             clip: self.eye_to_clip(eye).map(f64::from),
             eye: eye.map(f64::from),
-            attr: v[..GL_VERTEX_FLOATS].try_into().expect("a whole vertex"),
+            attr: v[..vtx::FLOATS].try_into().expect("a whole vertex"),
         }
     }
 }
@@ -236,7 +235,7 @@ impl SoftDraw<'_> {
     pub fn clipped_triangle(&self, va: &VolumeVertex, vb: &VolumeVertex, vc: &VolumeVertex, provoking: &[f32]) {
         let st = self.st;
         let verts: [&VolumeVertex; 3] = [va, vb, vc];
-        let mut flat = &provoking[GL_V_COLOR..GL_V_COLOR + 4];
+        let mut flat = &provoking[vtx::COLOR..vtx::COLOR + 4];
         let mut flat_frag = SoftFrag::default();
         let mut v: [SoftVertex; 3] = Default::default();
         let mut gradient = SoftTexPlane::default();
@@ -320,9 +319,9 @@ impl SoftDraw<'_> {
             return;
         }
         if !front && self.back_colors {
-            flat = &provoking[GL_V_BACK_COLOR..GL_V_BACK_COLOR + 4];
+            flat = &provoking[vtx::BACK_COLOR..vtx::BACK_COLOR + 4];
             for i in 0..3 {
-                let back = &verts[i].attr[GL_V_BACK_COLOR..GL_V_BACK_COLOR + 4];
+                let back = &verts[i].attr[vtx::BACK_COLOR..vtx::BACK_COLOR + 4];
 
                 for k in 0..4 {
                     // max then min, not clamp: a NaN colour becomes 0.
@@ -634,11 +633,11 @@ impl SoftDraw<'_> {
 
 impl VolumeVertex {
     pub fn soft_boundary_edge(&self) -> bool {
-        self.attr[GL_V_EDGE].to_bits() != 0
+        self.attr[vtx::EDGE].to_bits() != 0
     }
 
     pub fn soft_boundary_set_edge(&mut self, enabled: bool) {
-        self.attr[GL_V_EDGE] = f32::from_bits(enabled as u32);
+        self.attr[vtx::EDGE] = f32::from_bits(enabled as u32);
     }
 }
 
@@ -724,7 +723,7 @@ impl<'a> GlDraw<'a> {
             None => i,
         };
 
-        &self.vertices[index * GL_VERTEX_FLOATS..][..GL_VERTEX_FLOATS]
+        &self.vertices[index * vtx::FLOATS..][..vtx::FLOATS]
     }
 }
 
@@ -1116,10 +1115,10 @@ impl SoftDraw<'_> {
     pub fn polygon_smooth(&self, poly: &[VolumeVertex], n: usize, provoking: &[f32], front: bool, slope: f64) {
         let mut v: Vec<SoftVertex> = vec![SoftVertex::default(); n];
         let mut offset = 0.0f64;
-        let mut flat_color = &provoking[GL_V_COLOR..GL_V_COLOR + 4];
+        let mut flat_color = &provoking[vtx::COLOR..vtx::COLOR + 4];
 
         if !front && self.back_colors {
-            flat_color = &provoking[GL_V_BACK_COLOR..GL_V_BACK_COLOR + 4];
+            flat_color = &provoking[vtx::BACK_COLOR..vtx::BACK_COLOR + 4];
         }
         for i in 0..n {
             let Some(p) = self.project(&poly[i]) else {
@@ -1127,7 +1126,7 @@ impl SoftDraw<'_> {
             };
             v[i] = p;
             if !front && self.back_colors {
-                let back = &poly[i].attr[GL_V_BACK_COLOR..GL_V_BACK_COLOR + 4];
+                let back = &poly[i].attr[vtx::BACK_COLOR..vtx::BACK_COLOR + 4];
 
                 for k in 0..4 {
                     v[i].rgba[k] = r2_min(r2_max(back[k], 0.0f32), 1.0f32) as f64;
@@ -1194,7 +1193,7 @@ impl SoftDraw<'_> {
             pattern: d.line_stipple_pattern,
             ..Default::default()
         };
-        let mut flat = [0.0f32; GL_VERTEX_FLOATS];
+        let mut flat = [0.0f32; vtx::FLOATS];
         let mut n = count;
         let mut area = 0.0f64;
         let mut slope = 0.0f64;
@@ -1281,11 +1280,11 @@ impl SoftDraw<'_> {
             };
             coverage.point_size = size;
         }
-        flat.copy_from_slice(&provoking[..GL_VERTEX_FLOATS]);
+        flat.copy_from_slice(&provoking[..vtx::FLOATS]);
         if !front && self.back_colors {
-            flat[GL_V_COLOR..GL_V_COLOR + 4].copy_from_slice(&provoking[GL_V_BACK_COLOR..GL_V_BACK_COLOR + 4]);
+            flat[vtx::COLOR..vtx::COLOR + 4].copy_from_slice(&provoking[vtx::BACK_COLOR..vtx::BACK_COLOR + 4]);
             for v in &mut poly[..n] {
-                v.attr.copy_within(GL_V_BACK_COLOR..GL_V_BACK_COLOR + 4, GL_V_COLOR);
+                v.attr.copy_within(vtx::BACK_COLOR..vtx::BACK_COLOR + 4, vtx::COLOR);
             }
         }
         // Validate the entire boundary before any LINE/POINT fragment or sample.
@@ -1481,9 +1480,7 @@ impl SoftDraw<'_> {
 mod tests {
     use super::*;
 
-    use crate::dev::odyssey::gl_context::{
-        GL_LINEAR, GL_LINEAR_MIPMAP_LINEAR, GL_MODULATE, GL_RGBA, GL_V_TEXCOORD,
-    };
+    use crate::dev::odyssey::gl_context::{vtx, GL_LINEAR, GL_LINEAR_MIPMAP_LINEAR, GL_MODULATE, GL_RGBA};
     use crate::dev::odyssey::raster_bench::{BENCH_H, BENCH_W, Bench, BenchTexture, Lcg};
 
 
@@ -1491,13 +1488,13 @@ mod tests {
 
     /// A vertex at window pixel (x, y) with w, depth d, colour c and
     /// texture coordinates s and t.
-    fn vertex(x: f32, y: f32, w: f32, d: f32, c: [f32; 4], s: f32, t: f32) -> [f32; GL_VERTEX_FLOATS] {
-        let mut o = [0.0f32; GL_VERTEX_FLOATS];
+    fn vertex(x: f32, y: f32, w: f32, d: f32, c: [f32; 4], s: f32, t: f32) -> [f32; vtx::FLOATS] {
+        let mut o = [0.0f32; vtx::FLOATS];
 
-        o[GL_V_POSITION..GL_V_POSITION + 4]
+        o[vtx::POSITION..vtx::POSITION + 4]
             .copy_from_slice(&[(x / BENCH_W as f32 * 2.0 - 1.0) * w, (y / BENCH_H as f32 * 2.0 - 1.0) * w, 2.0 * d - w, w]);
-        o[GL_V_COLOR..GL_V_COLOR + 4].copy_from_slice(&c);
-        o[GL_V_TEXCOORD..GL_V_TEXCOORD + 4].copy_from_slice(&[s * w, t * w, 0.0, w]);
+        o[vtx::COLOR..vtx::COLOR + 4].copy_from_slice(&c);
+        o[vtx::TEXCOORD..vtx::TEXCOORD + 4].copy_from_slice(&[s * w, t * w, 0.0, w]);
         o
     }
 
@@ -1519,7 +1516,7 @@ mod tests {
 
     /// n random vertices in perspective inside the square, some crossing
     /// the near or far plane.
-    fn vertices(rng: &mut Lcg, n: usize) -> Vec<[f32; GL_VERTEX_FLOATS]> {
+    fn vertices(rng: &mut Lcg, n: usize) -> Vec<[f32; vtx::FLOATS]> {
         (0..n)
             .map(|_| {
                 let c = [rng.range(0.0, 1.0), rng.range(0.0, 1.0), rng.range(0.0, 1.0), 1.0];
@@ -1562,7 +1559,7 @@ mod tests {
         ];
         let first: Vec<f32> = v[..3].iter().flatten().copied().collect();
         assert!(draw(GL_TRIANGLES, vec![first]).0.iter().any(|&c| c != 0), "the valid triangle draws alone");
-        v[3][GL_V_TEXCOORD] = f32::NAN;
+        v[3][vtx::TEXCOORD] = f32::NAN;
         let quad: Vec<f32> = v.iter().flatten().copied().collect();
         assert!(draw(GL_QUADS, vec![quad]).0.iter().all(|&c| c == 0), "quads");
         let strip: Vec<f32> = [0, 1, 3, 2].iter().flat_map(|&i| v[i]).collect();

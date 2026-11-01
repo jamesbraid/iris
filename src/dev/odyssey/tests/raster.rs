@@ -4,21 +4,15 @@
 use crate::dev::odyssey::Odyssey;
 use crate::dev::odyssey::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
 use crate::dev::odyssey::consts::{
-    ODSY_BUZZ_1, ODSY_COLOUR_MATERIAL_DIFFUSE, ODSY_CURSOR_BASE, ODSY_CURSOR_COLOURS,
-    ODSY_CURSOR_COLOUR_COUNT, ODSY_CURSOR_CONTROL, ODSY_CURSOR_CTL_ENABLE, ODSY_CURSOR_GLYPH,
-    ODSY_CURSOR_POSITION, ODSY_DID_MAIN_SHIFT, ODSY_DISPMODE_COUNT, ODSY_DISPMODE_GROUP_SHIFT,
-    ODSY_DMA_FENCE_TOKEN_SHIFT, ODSY_DRAW_MASK_BUFFER0, ODSY_DRAW_MASK_BUFFER1, ODSY_GAMMA_BASE,
-    ODSY_GAMMA_GROUP, ODSY_GL_LIGHT_VEC_FLOATS, ODSY_ID_COMPARE_ENABLE, ODSY_ID_COMPARE_MASK_SHIFT,
-    ODSY_LIGHT_ATTEN, ODSY_LIGHT_HALF, ODSY_LIGHT_POS, ODSY_LIGHT_SPOT_COS, ODSY_LIGHT_SPOT_DIR,
-    ODSY_LIGHT_SPOT_EXP, ODSY_LUT_BLUE_SHIFT, ODSY_LUT_ENTRY_MASK, ODSY_LUT_GREEN_SHIFT,
-    ODSY_LUT_RED_SHIFT, ODSY_SW_TOKEN, ODSY_WRITE_COLOUR_MASK, ODSY_WRITE_COLOUR_SHIFT,
+    colour, cursor, dispmode, dma, gl_cmd, light, lut, write, ODSY_BUZZ_1, ODSY_DID_MAIN_SHIFT,
+    ODSY_DRAW_MASK_BUFFER0, ODSY_DRAW_MASK_BUFFER1, ODSY_GAMMA_BASE, ODSY_GAMMA_GROUP,
+    ODSY_ID_COMPARE_ENABLE, ODSY_ID_COMPARE_MASK_SHIFT, ODSY_SW_TOKEN,
 };
 use crate::dev::odyssey::display::Display;
 use crate::dev::odyssey::gl::{PyramidShape, Texture, TextureChain, TextureVolume};
 use crate::dev::odyssey::gl_context::{
-    GL_COLOR_BUFFER_BIT, GL_COLOUR_MASK_ALL, GL_DRAW_OK, GL_FLAT, GL_LINES, GL_QUADS, GL_TRIANGLES,
-    GL_VERTEX_FLOATS, GL_V_COLOR, GL_V_POSITION, GlDraw, GlDrawState, GlDrawable, RASTER_CLEAR,
-    RasterOp,
+    vtx, GL_COLOR_BUFFER_BIT, GL_COLOUR_MASK_ALL, GL_DRAW_OK, GL_FLAT, GL_LINES, GL_QUADS,
+    GL_TRIANGLES, GlDraw, GlDrawState, GlDrawable, RASTER_CLEAR, RasterOp,
 };
 use crate::dev::odyssey::memory::ClipRect;
 use crate::dev::odyssey::mmio::BoardLocks;
@@ -44,19 +38,19 @@ const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 /// draw state the fill-rate benchmark draws with: flat, no depth test.
 fn gl_board() -> (Box<Board>, GlDrawState) {
     let mut b = Bench::empty();
-    b.board.gl_write_mask |= ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT;
+    b.board.gl_write_mask |= write::COLOUR_MASK << write::COLOUR_SHIFT;
     b.st.shade_model = GL_FLAT;
     (b.board, b.st)
 }
 
 /// Vertices at window pixels (x, y), in the colour given.
 fn vertices(points: &[(f32, f32)], colour: [f32; 4]) -> Vec<f32> {
-    let mut v = vec![0.0f32; points.len() * GL_VERTEX_FLOATS];
+    let mut v = vec![0.0f32; points.len() * vtx::FLOATS];
     for (i, &(x, y)) in points.iter().enumerate() {
-        let o = &mut v[i * GL_VERTEX_FLOATS..][..GL_VERTEX_FLOATS];
+        let o = &mut v[i * vtx::FLOATS..][..vtx::FLOATS];
         let ndc = |p: f32, size: u32| p / size as f32 * 2.0 - 1.0;
-        o[GL_V_POSITION..][..4].copy_from_slice(&[ndc(x, ODSY_WIDTH), ndc(y, ODSY_HEIGHT), 0.0, 1.0]);
-        o[GL_V_COLOR..][..4].copy_from_slice(&colour);
+        o[vtx::POSITION..][..4].copy_from_slice(&[ndc(x, ODSY_WIDTH), ndc(y, ODSY_HEIGHT), 0.0, 1.0]);
+        o[vtx::COLOR..][..4].copy_from_slice(&colour);
     }
     v
 }
@@ -139,7 +133,7 @@ fn a_fence_behind_a_queued_draw_lands_after_the_draw() {
         s.guest = Some(ram.clone());
         s.host_write_addr_lower = 0x1000;
         red_triangle(&mut s, &st);
-        s.fence(0x5a5a << ODSY_DMA_FENCE_TOKEN_SHIFT | 3);
+        s.fence(0x5a5a << dma::FENCE_TOKEN_SHIFT | 3);
     }
     assert_eq!(ram.half(0x1006), 0, "the fence waits for the draw before it");
     eventually("the fence did not land", || ram.half(0x1006) == 0x5a5a);
@@ -177,7 +171,7 @@ fn a_fence_publishes_the_rows_drawn_before_it() {
         s.guest = Some(ram.clone());
         s.host_write_addr_lower = 0x1000;
         small_triangle(&mut s, &st, 100.0, RED);
-        s.fence(0x5a5a << ODSY_DMA_FENCE_TOKEN_SHIFT | 3);
+        s.fence(0x5a5a << dma::FENCE_TOKEN_SHIFT | 3);
         busy(&h, 300);
     }
     eventually("the fence did not land", || ram.half(0x1006) == 0x5a5a);
@@ -248,7 +242,7 @@ struct FreshRows {
 fn fresh_scanout() -> FreshRows {
     let marks = RowMarks::default();
     marks.set_height(ODSY_HEIGHT);
-    FreshRows { differ: Box::new([[0; ROW_WORDS]; ODSY_DISPMODE_COUNT as usize]), marks }
+    FreshRows { differ: Box::new([[0; ROW_WORDS]; dispmode::COUNT as usize]), marks }
 }
 
 /// Stopping the machine finishes the raster unit's queued work; a reset
@@ -500,7 +494,7 @@ fn a_clear_asks_the_display_for_its_rows() {
 /// rectangle of the board's first 80 columns and 64 rows, as (x, y) pairs.
 fn line_pixels(rule: LineRule, a: (f32, f32), b: (f32, f32)) -> Vec<(i32, i32)> {
     let mut bench = Bench::empty();
-    bench.board.gl_write_mask |= ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT;
+    bench.board.gl_write_mask |= write::COLOUR_MASK << write::COLOUR_SHIFT;
     bench.st.shade_model = GL_FLAT;
     bench.rules.line_rule = rule;
     bench.mode = GL_LINES;
@@ -664,7 +658,7 @@ fn incremental_updates_keep_the_frame_a_whole_resolve_makes() {
     s.set_scanout_size(ODSY_WIDTH, ODSY_HEIGHT);
     let mut rng = Lcg(0x5a17);
     for i in 0..4096 {
-        s.regs().set_lut(i, rng.next_u32() & ODSY_LUT_ENTRY_MASK);
+        s.regs().set_lut(i, rng.next_u32() & lut::ENTRY_MASK);
     }
     // Four windows in vertical bands.
     for (i, d) in s.did.iter_mut().enumerate() {
@@ -690,7 +684,7 @@ fn incremental_updates_keep_the_frame_a_whole_resolve_makes() {
             }
             3 => {
                 let i = (rng.next_u32() % 4096) as usize;
-                s.regs().set_lut(i, rng.next_u32() & ODSY_LUT_ENTRY_MASK);
+                s.regs().set_lut(i, rng.next_u32() & lut::ENTRY_MASK);
                 s.scanout.repaint_all();
             }
             _ => {
@@ -724,16 +718,16 @@ fn the_screen_follows_the_frame_through_frames_that_present_a_few_lines() {
     s.set_scanout_size(ODSY_WIDTH, ODSY_HEIGHT);
     let mut rng = Lcg(0xfeed);
     for i in 0..4096 {
-        s.regs().set_lut(i, rng.next_u32() & ODSY_LUT_ENTRY_MASK);
+        s.regs().set_lut(i, rng.next_u32() & lut::ENTRY_MASK);
     }
-    s.regs().set_cursor(ODSY_CURSOR_POSITION as usize, 100 << 16 | 40);
-    for i in 0..ODSY_CURSOR_COLOUR_COUNT {
-        s.regs().set_cursor((ODSY_CURSOR_COLOURS + 1 + i) as usize, rng.next_u32() & ODSY_LUT_ENTRY_MASK);
+    s.regs().set_cursor(cursor::POSITION as usize, 100 << 16 | 40);
+    for i in 0..cursor::COLOUR_COUNT {
+        s.regs().set_cursor((cursor::COLOURS + 1 + i) as usize, rng.next_u32() & lut::ENTRY_MASK);
     }
     for w in 0..128u32 {
-        s.regs().set_cursor((ODSY_CURSOR_GLYPH + w) as usize, rng.next_u32());
+        s.regs().set_cursor((cursor::GLYPH + w) as usize, rng.next_u32());
     }
-    s.regs().set_cursor(ODSY_CURSOR_CONTROL as usize, ODSY_CURSOR_CTL_ENABLE);
+    s.regs().set_cursor(cursor::CONTROL as usize, cursor::CTL_ENABLE);
     let h = BoardLocks::new(s);
     let display = Display::new(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     let (w, ht) = (ODSY_WIDTH as usize, ODSY_HEIGHT as usize);
@@ -746,7 +740,7 @@ fn the_screen_follows_the_frame_through_frames_that_present_a_few_lines() {
             st.drawable.back = target;
             small_triangle(&mut s, &st, 20.0 + 120.0 * step as f32, [1.0, (step & 1) as f32, 1.0, 1.0]);
             if step == 5 {
-                s.regs().set_cursor(ODSY_CURSOR_POSITION as usize, 200 << 16 | 500);
+                s.regs().set_cursor(cursor::POSITION as usize, 200 << 16 | 500);
                 let span = s.cursor_span();
                 s.cursor_invalidate(span);
             }
@@ -845,18 +839,18 @@ fn a_reused_lighting_state_lights_a_vertex_as_a_fresh_one_does() {
             s.gl_light_colour[i * 12 + 4 + k] = colour[k].to_bits();
             s.gl_light_colour[i * 12 + 8 + k] = (colour[k] * 0.5).to_bits();
         }
-        let blk = &mut s.gl_light_vec[i * ODSY_GL_LIGHT_VEC_FLOATS as usize..];
+        let blk = &mut s.gl_light_vec[i * gl_cmd::LIGHT_VEC_FLOATS as usize..];
         for k in 0..3 {
-            blk[ODSY_LIGHT_POS + k] = [2.0f32, 3.0, 4.0 + i as f32][k].to_bits();
-            blk[ODSY_LIGHT_HALF + k] = (if directional { [0.0f32, 0.6, 0.8][k] } else { 0.0 }).to_bits();
+            blk[light::POS + k] = [2.0f32, 3.0, 4.0 + i as f32][k].to_bits();
+            blk[light::HALF + k] = (if directional { [0.0f32, 0.6, 0.8][k] } else { 0.0 }).to_bits();
         }
-        blk[ODSY_LIGHT_ATTEN] = 1.0f32.to_bits();
-        blk[ODSY_LIGHT_ATTEN + 1] = 0.1f32.to_bits();
-        blk[ODSY_LIGHT_ATTEN + 2] = 0.01f32.to_bits();
-        blk[ODSY_LIGHT_SPOT_COS] = (if spot { -0.5f32 } else { 1.0 }).to_bits();
-        blk[ODSY_LIGHT_SPOT_EXP] = (-2.0f32).to_bits();
+        blk[light::ATTEN] = 1.0f32.to_bits();
+        blk[light::ATTEN + 1] = 0.1f32.to_bits();
+        blk[light::ATTEN + 2] = 0.01f32.to_bits();
+        blk[light::SPOT_COS] = (if spot { -0.5f32 } else { 1.0 }).to_bits();
+        blk[light::SPOT_EXP] = (-2.0f32).to_bits();
         for k in 0..3 {
-            blk[ODSY_LIGHT_SPOT_DIR + k] = [0.0f32, 0.0, 1.0][k].to_bits();
+            blk[light::SPOT_DIR + k] = [0.0f32, 0.0, 1.0][k].to_bits();
         }
     }
     fn clear_light(s: &mut Board, i: usize) {
@@ -900,7 +894,7 @@ fn a_reused_lighting_state_lights_a_vertex_as_a_fresh_one_does() {
     set_light(&mut s, 3, [0.3, 0.9, 0.2], false, false);
     seen.push(check(&mut s, "light 3 back without its spot"));
     clear_light(&mut s, 3);
-    s.gl_colour_material = ODSY_COLOUR_MATERIAL_DIFFUSE;
+    s.gl_colour_material = colour::MATERIAL_DIFFUSE;
     set_light(&mut s, 7, [0.6, 0.6, 0.6], false, false);
     seen.push(check(&mut s, "colour material, light 7"));
 
@@ -1041,8 +1035,8 @@ fn display_rig() -> (BoardLocks, GlDrawState, Arc<Display>) {
         let v = (i * 0x3ff / 0x5ff) & 0x3ff;
         s.regs().set_lut((ODSY_GAMMA_BASE + i) as usize, v << 20 | v << 10 | v);
     }
-    for id in 0..ODSY_DISPMODE_COUNT {
-        s.regs().set_dispmode(id as usize, ODSY_GAMMA_GROUP << ODSY_DISPMODE_GROUP_SHIFT);
+    for id in 0..dispmode::COUNT {
+        s.regs().set_dispmode(id as usize, ODSY_GAMMA_GROUP << dispmode::GROUP_SHIFT);
     }
     for (i, d) in s.did.iter_mut().enumerate() {
         *d = (((i % ODSY_WIDTH as usize) / 320) as u8) << ODSY_DID_MAIN_SHIFT;
@@ -1122,9 +1116,9 @@ fn stress(seed: u64, last_is_lut: bool) {
                 }
                 5 => {
                     let i = rng.next_u32() % 0x600;
-                    s.backend_data(ODSY_GAMMA_BASE + i, rng.next_u32() & ODSY_LUT_ENTRY_MASK);
+                    s.backend_data(ODSY_GAMMA_BASE + i, rng.next_u32() & lut::ENTRY_MASK);
                 }
-                6 => s.backend_data(ODSY_CURSOR_BASE + ODSY_CURSOR_POSITION, (rng.next_u32() % 1200) << 16 | (rng.next_u32() % 1000)),
+                6 => s.backend_data(cursor::BASE + cursor::POSITION, (rng.next_u32() % 1200) << 16 | (rng.next_u32() % 1000)),
                 7 => {
                     let (x, y) = (rng.next_u32() % 1200, rng.next_u32() % 1000);
                     s.draw_mask = ODSY_DRAW_MASK_BUFFER0;
@@ -1151,7 +1145,7 @@ fn stress(seed: u64, last_is_lut: bool) {
                 s.paint_pixel((rng.next_u32() % 1280) as i64, (rng.next_u32() % 1024) as i64, rng.next_u32());
             } else {
                 // The entry every black pixel is looked up in.
-                s.backend_data(ODSY_GAMMA_BASE, rng.next_u32() & ODSY_LUT_ENTRY_MASK);
+                s.backend_data(ODSY_GAMMA_BASE, rng.next_u32() & lut::ENTRY_MASK);
             }
         }
         std::thread::sleep(Duration::from_micros(1500));
@@ -1262,7 +1256,7 @@ fn swap_atomicity() {
             let s = h.test_board();
             let regs = s.regs().read();
             let r = i * 9;
-            regs.gamma(r, ODSY_LUT_RED_SHIFT) << 16 | regs.gamma(0, ODSY_LUT_GREEN_SHIFT) << 8 | regs.gamma(0, ODSY_LUT_BLUE_SHIFT)
+            regs.gamma(r, lut::RED_SHIFT) << 16 | regs.gamma(0, lut::GREEN_SHIFT) << 8 | regs.gamma(0, lut::BLUE_SHIFT)
         };
         colours[back as usize].store(want as u64, SeqCst);
         h.front.lock().swap_arm |= 1;
@@ -1317,7 +1311,7 @@ fn a_lookup_store_between_taking_the_marks_and_copying_the_registers_is_not_lost
     {
         let shared = h.shared.clone();
         display.reader.lock().test_between = Some(Box::new(move || {
-            shared.regs.set_lut((0) as usize, 0x0123_4567 & ODSY_LUT_ENTRY_MASK);
+            shared.regs.set_lut((0) as usize, 0x0123_4567 & lut::ENTRY_MASK);
             shared.marks.repaint(DirtySite::Lut, 0, ODSY_HEIGHT as i32);
         }));
     }

@@ -5,7 +5,6 @@
 //! primitive being assembled. Colours, matrices and vertex components are IEEE single
 //! floats holding exactly the bits the client sent; arithmetic is double.
 
-
 use crate::devlog::LogModule;
 use super::bits::deposit32;
 use super::memory::ClipList;
@@ -36,14 +35,17 @@ pub(super) const GL_DEPTH_BUFFER_BIT: u32 = 0x0100;
 pub(super) const GL_STENCIL_BUFFER_BIT: u32 = 0x0400;
 pub(super) const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
 
-pub(super) const GL_VERTEX_FLOATS: usize = 22;
-pub(super) const GL_V_POSITION: usize = 0;
-pub(super) const GL_V_COLOR: usize = 4;
-pub(super) const GL_V_NORMAL: usize = 8;
-pub(super) const GL_V_MATERIAL: usize = 11;
-pub(super) const GL_V_TEXCOORD: usize = 12;
-pub(super) const GL_V_EDGE: usize = 17;
-pub(super) const GL_V_BACK_COLOR: usize = 18;
+/// Float slots of a captured vertex, `vtx::FLOATS` of them.
+pub(super) mod vtx {
+    pub const FLOATS: usize = 22;
+    pub const POSITION: usize = 0;
+    pub const COLOR: usize = 4;
+    pub const NORMAL: usize = 8;
+    pub const MATERIAL: usize = 11;
+    pub const TEXCOORD: usize = 12;
+    pub const EDGE: usize = 17;
+    pub const BACK_COLOR: usize = 18;
+}
 
 // OpenGL 1.2 enumerants the state holds.
 pub(super) const GL_POINTS: u32 = 0;
@@ -251,104 +253,117 @@ pub(super) const GL_DRAW_UNSUPPORTED: GlDrawResult = 2;
 pub(super) const GL_DRAW_RESOURCE_ERROR: GlDrawResult = 3;
 pub(super) const GL_DRAW_HOST_ERROR: GlDrawResult = 4;
 
-pub(super) const GL_OP_VIEWPORT: GlOp = 0;
-pub(super) const GL_OP_CLEAR_COLOR: GlOp = 1;
-pub(super) const GL_OP_CLEAR_DEPTH: GlOp = 2;
-pub(super) const GL_OP_SHADE_MODEL: GlOp = 3;
-pub(super) const GL_OP_MATRIX_MODE: GlOp = 4;
-pub(super) const GL_OP_LOAD_MATRIX: GlOp = 5;
-pub(super) const GL_OP_LOAD_IDENTITY: GlOp = 6;
-pub(super) const GL_OP_MULT_MATRIX: GlOp = 7;
-pub(super) const GL_OP_FRUSTUM: GlOp = 8;
-pub(super) const GL_OP_ORTHO: GlOp = 9;
-pub(super) const GL_OP_PUSH_MATRIX: GlOp = 10;
-pub(super) const GL_OP_POP_MATRIX: GlOp = 11;
-pub(super) const GL_OP_ROTATE: GlOp = 12;
-pub(super) const GL_OP_SCALE: GlOp = 13;
-pub(super) const GL_OP_TRANSLATE: GlOp = 14;
-pub(super) const GL_OP_ENABLE: GlOp = 15;
-pub(super) const GL_OP_DISABLE: GlOp = 16;
-pub(super) const GL_OP_DEPTH_FUNC: GlOp = 17;
-pub(super) const GL_OP_DEPTH_MASK: GlOp = 18;
-pub(super) const GL_OP_DRAW_BUFFERS: GlOp = 19;
-pub(super) const GL_OP_COLOR3F: GlOp = 20;
-pub(super) const GL_OP_COLOR4F: GlOp = 21;
-pub(super) const GL_OP_COLOR3UB: GlOp = 22;
-pub(super) const GL_OP_COLOR4UB: GlOp = 23;
-pub(super) const GL_OP_NORMAL3F: GlOp = 24;
-pub(super) const GL_OP_EDGE_FLAG: GlOp = 25;
-pub(super) const GL_OP_BEGIN: GlOp = 26;
-pub(super) const GL_OP_END: GlOp = 27;
-pub(super) const GL_OP_VERTEX2F: GlOp = 28;
-pub(super) const GL_OP_VERTEX3F: GlOp = 29;
-pub(super) const GL_OP_VERTEX4F: GlOp = 30;
-pub(super) const GL_OP_VERTEX2I: GlOp = 31;
-pub(super) const GL_OP_FLUSH: GlOp = 32;
-pub(super) const GL_OP_CLEAR: GlOp = 33;
-pub(super) const GL_OP_FINISH: GlOp = 34;
-pub(super) const GL_OP_RASTER_POS2F: GlOp = 35;
-pub(super) const GL_OP_RASTER_POS3F: GlOp = 36;
-pub(super) const GL_OP_RASTER_POS4F: GlOp = 37;
-pub(super) const GL_OP_INDEXF: GlOp = 38;
-pub(super) const GL_OP_INDEX_MASK: GlOp = 39;
-pub(super) const GL_OP_CLEAR_INDEX: GlOp = 40;
-pub(super) const GL_OP_DEPTH_RANGE: GlOp = 41;
-//
-// glLightfv: the light's number, 0 for GL_LIGHT0, the parameter and
-// four floats, of which the parameter uses as many as it takes.
-//
-pub(super) const GL_OP_LIGHT: GlOp = 42;
-// glMaterialfv: the face, the parameter and four floats, likewise.
-pub(super) const GL_OP_MATERIAL: GlOp = 43;
-//
-// glLightModelfv: the parameter and four floats; a boolean parameter
-// is true for a nonzero first float.
-//
-pub(super) const GL_OP_LIGHT_MODEL: GlOp = 44;
-pub(super) const GL_OP_COLOR_MATERIAL: GlOp = 45;
-pub(super) const GL_OP_CULL_FACE: GlOp = 46;
-pub(super) const GL_OP_FRONT_FACE: GlOp = 47;
-pub(super) const GL_OP_SCISSOR: GlOp = 48;
-pub(super) const GL_OP_ALPHA_FUNC: GlOp = 49;
-// GL_NEVER to GL_ALWAYS, the reference as int32, the value mask
-pub(super) const GL_OP_STENCIL_FUNC: GlOp = 50;
-pub(super) const GL_OP_STENCIL_OP: GlOp = 51;
-pub(super) const GL_OP_STENCIL_MASK: GlOp = 52;
-pub(super) const GL_OP_CLEAR_STENCIL: GlOp = 53;
-pub(super) const GL_OP_BLEND_FUNC: GlOp = 54;
-pub(super) const GL_OP_BLEND_EQUATION: GlOp = 55;
-pub(super) const GL_OP_BLEND_COLOR: GlOp = 56;
-pub(super) const GL_OP_LOGIC_OP: GlOp = 57;
-pub(super) const GL_OP_COLOR_MASK: GlOp = 58;
-//
-// glFogfv: the parameter and four floats, of which it uses as many as
-// it takes; GL_FOG_MODE's is the mode's enumerant as a float.
-//
-pub(super) const GL_OP_FOG: GlOp = 59;
-pub(super) const GL_OP_POLYGON_OFFSET: GlOp = 60;
-pub(super) const GL_OP_POLYGON_OFFSET_EXT: GlOp = 61;
-pub(super) const GL_OP_CLIP_PLANE: GlOp = 62;
-pub(super) const GL_OP_POINT_SIZE: GlOp = 63;
-pub(super) const GL_OP_LINE_WIDTH: GlOp = 64;
-pub(super) const GL_OP_LINE_STIPPLE: GlOp = 65;
-pub(super) const GL_OP_POLYGON_MODE: GlOp = 66;
-pub(super) const GL_OP_TEXCOORD2F: GlOp = 67;
-pub(super) const GL_OP_TEXCOORD3F: GlOp = 68;
-pub(super) const GL_OP_TEXCOORD4F: GlOp = 69;
-// Parameter and four floats; mode's enumerant as a float.
-pub(super) const GL_OP_TEX_ENV: GlOp = 70;
-//
-// IRIS GL swaptmesh as the OpenGL client passes it through an open
-// triangle strip: the next vertex makes its triangle with the strip's
-// oldest retained vertex instead of its middle one.
-//
-pub(super) const GL_OP_SWAP_TMESH: GlOp = 71;
-pub(super) const GL_OP_HINT: GlOp = 72;
-//
-// glTexGenfv: the coordinate (GL_S to GL_Q), the parameter and four
-// floats; GL_TEXTURE_GEN_MODE's mode is its enumerant as a float.
-//
-pub(super) const GL_OP_TEX_GEN: GlOp = 73;
+/// The operations the board feeds the shared GL context (`Board::gl_feed32()`).
+pub(super) mod op {
+    use super::GlOp;
+
+    pub const VIEWPORT: GlOp = 0;
+    pub const CLEAR_COLOR: GlOp = 1;
+    pub const CLEAR_DEPTH: GlOp = 2;
+    pub const SHADE_MODEL: GlOp = 3;
+    pub const MATRIX_MODE: GlOp = 4;
+    pub const LOAD_MATRIX: GlOp = 5;
+    pub const LOAD_IDENTITY: GlOp = 6;
+    pub const MULT_MATRIX: GlOp = 7;
+    pub const FRUSTUM: GlOp = 8;
+    pub const ORTHO: GlOp = 9;
+    pub const PUSH_MATRIX: GlOp = 10;
+    pub const POP_MATRIX: GlOp = 11;
+    pub const ROTATE: GlOp = 12;
+    pub const SCALE: GlOp = 13;
+    pub const TRANSLATE: GlOp = 14;
+    pub const ENABLE: GlOp = 15;
+    pub const DISABLE: GlOp = 16;
+    pub const DEPTH_FUNC: GlOp = 17;
+    pub const DEPTH_MASK: GlOp = 18;
+    pub const DRAW_BUFFERS: GlOp = 19;
+    pub const COLOR3F: GlOp = 20;
+    pub const COLOR4F: GlOp = 21;
+    pub const COLOR3UB: GlOp = 22;
+    pub const COLOR4UB: GlOp = 23;
+    pub const NORMAL3F: GlOp = 24;
+    pub const EDGE_FLAG: GlOp = 25;
+    pub const BEGIN: GlOp = 26;
+    pub const END: GlOp = 27;
+    pub const VERTEX2F: GlOp = 28;
+    pub const VERTEX3F: GlOp = 29;
+    pub const VERTEX4F: GlOp = 30;
+    pub const VERTEX2I: GlOp = 31;
+    pub const FLUSH: GlOp = 32;
+    pub const CLEAR: GlOp = 33;
+    pub const FINISH: GlOp = 34;
+    pub const RASTER_POS2F: GlOp = 35;
+    pub const RASTER_POS3F: GlOp = 36;
+    pub const RASTER_POS4F: GlOp = 37;
+    pub const INDEXF: GlOp = 38;
+    pub const INDEX_MASK: GlOp = 39;
+    pub const CLEAR_INDEX: GlOp = 40;
+    pub const DEPTH_RANGE: GlOp = 41;
+
+    //
+    // glLightfv: the light's number, 0 for super::GL_LIGHT0, the parameter and
+    // four floats, of which the parameter uses as many as it takes.
+    //
+    pub const LIGHT: GlOp = 42;
+
+    // glMaterialfv: the face, the parameter and four floats, likewise.
+    pub const MATERIAL: GlOp = 43;
+
+    //
+    // glLightModelfv: the parameter and four floats; a boolean parameter
+    // is true for a nonzero first float.
+    //
+    pub const LIGHT_MODEL: GlOp = 44;
+    pub const COLOR_MATERIAL: GlOp = 45;
+    pub const CULL_FACE: GlOp = 46;
+    pub const FRONT_FACE: GlOp = 47;
+    pub const SCISSOR: GlOp = 48;
+    pub const ALPHA_FUNC: GlOp = 49;
+
+    // super::GL_NEVER to super::GL_ALWAYS, the reference as int32, the value mask
+    pub const STENCIL_FUNC: GlOp = 50;
+    pub const STENCIL_OP: GlOp = 51;
+    pub const STENCIL_MASK: GlOp = 52;
+    pub const CLEAR_STENCIL: GlOp = 53;
+    pub const BLEND_FUNC: GlOp = 54;
+    pub const BLEND_EQUATION: GlOp = 55;
+    pub const BLEND_COLOR: GlOp = 56;
+    pub const LOGIC_OP: GlOp = 57;
+    pub const COLOR_MASK: GlOp = 58;
+
+    //
+    // glFogfv: the parameter and four floats, of which it uses as many as
+    // it takes; super::GL_FOG_MODE's is the mode's enumerant as a float.
+    //
+    pub const FOG: GlOp = 59;
+    pub const POLYGON_OFFSET: GlOp = 60;
+    pub const POLYGON_OFFSET_EXT: GlOp = 61;
+    pub const CLIP_PLANE: GlOp = 62;
+    pub const POINT_SIZE: GlOp = 63;
+    pub const LINE_WIDTH: GlOp = 64;
+    pub const LINE_STIPPLE: GlOp = 65;
+    pub const POLYGON_MODE: GlOp = 66;
+    pub const TEXCOORD2F: GlOp = 67;
+    pub const TEXCOORD3F: GlOp = 68;
+    pub const TEXCOORD4F: GlOp = 69;
+
+    // Parameter and four floats; mode's enumerant as a float.
+    pub const TEX_ENV: GlOp = 70;
+
+    //
+    // IRIS GL swaptmesh as the OpenGL client passes it through an open
+    // triangle strip: the next vertex makes its triangle with the strip's
+    // oldest retained vertex instead of its middle one.
+    //
+    pub const SWAP_TMESH: GlOp = 71;
+    pub const HINT: GlOp = 72;
+
+    //
+    // glTexGenfv: the coordinate (super::GL_S to super::GL_Q), the parameter and four
+    // floats; super::GL_TEXTURE_GEN_MODE's mode is its enumerant as a float.
+    //
+    pub const TEX_GEN: GlOp = 73;
+}
 
 /// Only the fields a kind the rasterizer executes needs are here.
 /// Coordinates are plane pixels, the rectangle inclusive.
@@ -557,7 +572,7 @@ pub(super) struct GlContext {
     pub begin_mode: u32,
     pub in_begin: bool,
     /// Vertices waiting for the rest of their piece, nheld of them.
-    pub held: [[f32; GL_VERTEX_FLOATS]; GL_HELD_VERTICES as usize],
+    pub held: [[f32; vtx::FLOATS]; GL_HELD_VERTICES as usize],
     pub nheld: u32,
     /// Set while the next triangle of an open strip is an odd one, whose
     /// first two vertices are sent swapped (2.6.1).
@@ -621,7 +636,7 @@ pub(super) struct GlDraw<'a> {
     /// GL_POINTS to GL_POLYGON.
     pub mode: u32,
     pub count: u32,
-    /// count * GL_VERTEX_FLOATS floats, texture-matrix-transformed strq
+    /// count * vtx::FLOATS floats, texture-matrix-transformed strq
     /// included, ready for clipping.
     pub vertices: &'a [f32],
     /// True when the vertices carry back-face colour or index values for a
@@ -817,11 +832,11 @@ impl GlContext {
 
 impl GlPolygonAssembly {
     /// Count and bytes are representation bounds, not hardware size limits.
-    /// `vertices` is kept `capacity * GL_VERTEX_FLOATS` floats long.
+    /// `vertices` is kept `capacity * vtx::FLOATS` floats long.
     pub fn polygon_reserve(&mut self, count: usize) -> bool {
         let mut capacity: usize = std::cmp::max(self.capacity as usize, 8);
 
-        if count > u32::MAX as usize || count > usize::MAX / GL_VERTEX_FLOATS / 4 {
+        if count > u32::MAX as usize || count > usize::MAX / vtx::FLOATS / 4 {
             return false;
         }
         if count <= self.capacity as usize {
@@ -829,14 +844,14 @@ impl GlPolygonAssembly {
         }
         while capacity < count {
             if capacity > (u32::MAX / 2) as usize
-                || capacity > usize::MAX / GL_VERTEX_FLOATS / 4 / 2
+                || capacity > usize::MAX / vtx::FLOATS / 4 / 2
             {
                 capacity = count;
                 break;
             }
             capacity *= 2;
         }
-        let floats = capacity * GL_VERTEX_FLOATS;
+        let floats = capacity * vtx::FLOATS;
         if self.vertices.try_reserve_exact(floats.saturating_sub(self.vertices.len())).is_err() {
             return false;
         }
@@ -958,80 +973,80 @@ impl GlContext {
 pub(super) const GL_NARGS_LEN: usize = 74;
 pub(super) static GL_NARGS: [u8; GL_NARGS_LEN] = {
     let mut t = [0u8; GL_NARGS_LEN];
-    t[GL_OP_HINT as usize] = 2;
-    t[GL_OP_VIEWPORT as usize] = 4;
-    t[GL_OP_CLEAR_COLOR as usize] = 4;
-    t[GL_OP_CLEAR_DEPTH as usize] = 1;
-    t[GL_OP_SHADE_MODEL as usize] = 1;
-    t[GL_OP_MATRIX_MODE as usize] = 1;
-    t[GL_OP_LOAD_MATRIX as usize] = 16;
-    t[GL_OP_LOAD_IDENTITY as usize] = 0;
-    t[GL_OP_MULT_MATRIX as usize] = 16;
-    t[GL_OP_FRUSTUM as usize] = 6;
-    t[GL_OP_ORTHO as usize] = 6;
-    t[GL_OP_PUSH_MATRIX as usize] = 0;
-    t[GL_OP_POP_MATRIX as usize] = 0;
-    t[GL_OP_ROTATE as usize] = 4;
-    t[GL_OP_SCALE as usize] = 3;
-    t[GL_OP_TRANSLATE as usize] = 3;
-    t[GL_OP_ENABLE as usize] = 1;
-    t[GL_OP_DISABLE as usize] = 1;
-    t[GL_OP_DEPTH_FUNC as usize] = 1;
-    t[GL_OP_DEPTH_MASK as usize] = 1;
-    t[GL_OP_DRAW_BUFFERS as usize] = 1;
-    t[GL_OP_COLOR3F as usize] = 3;
-    t[GL_OP_COLOR4F as usize] = 4;
-    t[GL_OP_COLOR3UB as usize] = 3;
-    t[GL_OP_COLOR4UB as usize] = 4;
-    t[GL_OP_NORMAL3F as usize] = 3;
-    t[GL_OP_EDGE_FLAG as usize] = 1;
-    t[GL_OP_BEGIN as usize] = 1;
-    t[GL_OP_END as usize] = 0;
-    t[GL_OP_VERTEX2F as usize] = 2;
-    t[GL_OP_VERTEX3F as usize] = 3;
-    t[GL_OP_VERTEX4F as usize] = 4;
-    t[GL_OP_VERTEX2I as usize] = 2;
-    t[GL_OP_FLUSH as usize] = 0;
-    t[GL_OP_CLEAR as usize] = 1;
-    t[GL_OP_FINISH as usize] = 0;
-    t[GL_OP_RASTER_POS2F as usize] = 2;
-    t[GL_OP_RASTER_POS3F as usize] = 3;
-    t[GL_OP_RASTER_POS4F as usize] = 4;
-    t[GL_OP_INDEXF as usize] = 1;
-    t[GL_OP_INDEX_MASK as usize] = 1;
-    t[GL_OP_CLEAR_INDEX as usize] = 1;
-    t[GL_OP_DEPTH_RANGE as usize] = 2;
-    t[GL_OP_LIGHT as usize] = 6;
-    t[GL_OP_MATERIAL as usize] = 6;
-    t[GL_OP_LIGHT_MODEL as usize] = 5;
-    t[GL_OP_COLOR_MATERIAL as usize] = 2;
-    t[GL_OP_CULL_FACE as usize] = 1;
-    t[GL_OP_FRONT_FACE as usize] = 1;
-    t[GL_OP_SCISSOR as usize] = 4;
-    t[GL_OP_ALPHA_FUNC as usize] = 2;
-    t[GL_OP_STENCIL_FUNC as usize] = 3;
-    t[GL_OP_STENCIL_OP as usize] = 3;
-    t[GL_OP_STENCIL_MASK as usize] = 1;
-    t[GL_OP_CLEAR_STENCIL as usize] = 1;
-    t[GL_OP_BLEND_FUNC as usize] = 2;
-    t[GL_OP_BLEND_EQUATION as usize] = 1;
-    t[GL_OP_BLEND_COLOR as usize] = 4;
-    t[GL_OP_LOGIC_OP as usize] = 1;
-    t[GL_OP_COLOR_MASK as usize] = 4;
-    t[GL_OP_FOG as usize] = 5;
-    t[GL_OP_POLYGON_OFFSET as usize] = 2;
-    t[GL_OP_POLYGON_OFFSET_EXT as usize] = 2;
-    t[GL_OP_CLIP_PLANE as usize] = 5;
-    t[GL_OP_POINT_SIZE as usize] = 1;
-    t[GL_OP_LINE_WIDTH as usize] = 1;
-    t[GL_OP_LINE_STIPPLE as usize] = 2;
-    t[GL_OP_POLYGON_MODE as usize] = 2;
-    t[GL_OP_TEXCOORD2F as usize] = 2;
-    t[GL_OP_TEXCOORD3F as usize] = 3;
-    t[GL_OP_TEXCOORD4F as usize] = 4;
-    t[GL_OP_TEX_ENV as usize] = 5;
-    t[GL_OP_TEX_GEN as usize] = 6;
-    t[GL_OP_SWAP_TMESH as usize] = 0;
+    t[op::HINT as usize] = 2;
+    t[op::VIEWPORT as usize] = 4;
+    t[op::CLEAR_COLOR as usize] = 4;
+    t[op::CLEAR_DEPTH as usize] = 1;
+    t[op::SHADE_MODEL as usize] = 1;
+    t[op::MATRIX_MODE as usize] = 1;
+    t[op::LOAD_MATRIX as usize] = 16;
+    t[op::LOAD_IDENTITY as usize] = 0;
+    t[op::MULT_MATRIX as usize] = 16;
+    t[op::FRUSTUM as usize] = 6;
+    t[op::ORTHO as usize] = 6;
+    t[op::PUSH_MATRIX as usize] = 0;
+    t[op::POP_MATRIX as usize] = 0;
+    t[op::ROTATE as usize] = 4;
+    t[op::SCALE as usize] = 3;
+    t[op::TRANSLATE as usize] = 3;
+    t[op::ENABLE as usize] = 1;
+    t[op::DISABLE as usize] = 1;
+    t[op::DEPTH_FUNC as usize] = 1;
+    t[op::DEPTH_MASK as usize] = 1;
+    t[op::DRAW_BUFFERS as usize] = 1;
+    t[op::COLOR3F as usize] = 3;
+    t[op::COLOR4F as usize] = 4;
+    t[op::COLOR3UB as usize] = 3;
+    t[op::COLOR4UB as usize] = 4;
+    t[op::NORMAL3F as usize] = 3;
+    t[op::EDGE_FLAG as usize] = 1;
+    t[op::BEGIN as usize] = 1;
+    t[op::END as usize] = 0;
+    t[op::VERTEX2F as usize] = 2;
+    t[op::VERTEX3F as usize] = 3;
+    t[op::VERTEX4F as usize] = 4;
+    t[op::VERTEX2I as usize] = 2;
+    t[op::FLUSH as usize] = 0;
+    t[op::CLEAR as usize] = 1;
+    t[op::FINISH as usize] = 0;
+    t[op::RASTER_POS2F as usize] = 2;
+    t[op::RASTER_POS3F as usize] = 3;
+    t[op::RASTER_POS4F as usize] = 4;
+    t[op::INDEXF as usize] = 1;
+    t[op::INDEX_MASK as usize] = 1;
+    t[op::CLEAR_INDEX as usize] = 1;
+    t[op::DEPTH_RANGE as usize] = 2;
+    t[op::LIGHT as usize] = 6;
+    t[op::MATERIAL as usize] = 6;
+    t[op::LIGHT_MODEL as usize] = 5;
+    t[op::COLOR_MATERIAL as usize] = 2;
+    t[op::CULL_FACE as usize] = 1;
+    t[op::FRONT_FACE as usize] = 1;
+    t[op::SCISSOR as usize] = 4;
+    t[op::ALPHA_FUNC as usize] = 2;
+    t[op::STENCIL_FUNC as usize] = 3;
+    t[op::STENCIL_OP as usize] = 3;
+    t[op::STENCIL_MASK as usize] = 1;
+    t[op::CLEAR_STENCIL as usize] = 1;
+    t[op::BLEND_FUNC as usize] = 2;
+    t[op::BLEND_EQUATION as usize] = 1;
+    t[op::BLEND_COLOR as usize] = 4;
+    t[op::LOGIC_OP as usize] = 1;
+    t[op::COLOR_MASK as usize] = 4;
+    t[op::FOG as usize] = 5;
+    t[op::POLYGON_OFFSET as usize] = 2;
+    t[op::POLYGON_OFFSET_EXT as usize] = 2;
+    t[op::CLIP_PLANE as usize] = 5;
+    t[op::POINT_SIZE as usize] = 1;
+    t[op::LINE_WIDTH as usize] = 1;
+    t[op::LINE_STIPPLE as usize] = 2;
+    t[op::POLYGON_MODE as usize] = 2;
+    t[op::TEXCOORD2F as usize] = 2;
+    t[op::TEXCOORD3F as usize] = 3;
+    t[op::TEXCOORD4F as usize] = 4;
+    t[op::TEX_ENV as usize] = 5;
+    t[op::TEX_GEN as usize] = 6;
+    t[op::SWAP_TMESH as usize] = 0;
     t
 };
 
@@ -1083,14 +1098,14 @@ impl GlContext {
 
     /// Send one piece of the open primitive: count of v0 to v3.
     #[allow(clippy::too_many_arguments, reason = "the primitive and up to four vertices of it")]
-    pub fn submit(&mut self, sink: &mut dyn GlSink, mode: u32, count: u32, v0: Option<&[f32; GL_VERTEX_FLOATS]>, v1: Option<&[f32; GL_VERTEX_FLOATS]>, v2: Option<&[f32; GL_VERTEX_FLOATS]>, v3: Option<&[f32; GL_VERTEX_FLOATS]>) {
+    pub fn submit(&mut self, sink: &mut dyn GlSink, mode: u32, count: u32, v0: Option<&[f32; vtx::FLOATS]>, v1: Option<&[f32; vtx::FLOATS]>, v2: Option<&[f32; vtx::FLOATS]>, v3: Option<&[f32; vtx::FLOATS]>) {
         let stipple = if mode == GL_LINES { self.standalone_stipple } else { self.polygon.enabled };
         let v = [v0, v1, v2, v3];
-        let mut verts = [0.0f32; 4 * GL_VERTEX_FLOATS];
+        let mut verts = [0.0f32; 4 * vtx::FLOATS];
 
         for i in 0..count as usize {
             if let Some(src) = v[i] {
-                verts[i * GL_VERTEX_FLOATS..][..GL_VERTEX_FLOATS].copy_from_slice(src);
+                verts[i * vtx::FLOATS..][..vtx::FLOATS].copy_from_slice(src);
             }
         }
         let checked = self.draws_checked();
@@ -1126,7 +1141,7 @@ impl GlContext {
     }
 
     /// Hold a vertex in slot n of the three a context keeps.
-    pub fn hold(&mut self, n: u32, v: &[f32; GL_VERTEX_FLOATS]) {
+    pub fn hold(&mut self, n: u32, v: &[f32; vtx::FLOATS]) {
         self.held[n as usize] = *v;
     }
 }
@@ -1135,23 +1150,23 @@ impl GlContext {
 
     /// Capture one vertex with the current attributes, without
     /// drawing. `bits` holds `components` words.
-    pub fn capture_vertex(&self, mode: u32, bits: &[u32], components: u32) -> [f32; GL_VERTEX_FLOATS] {
-        let mut out = [0.0; GL_VERTEX_FLOATS];
-        out[GL_V_POSITION + 3] = 1.0;
+    pub fn capture_vertex(&self, mode: u32, bits: &[u32], components: u32) -> [f32; vtx::FLOATS] {
+        let mut out = [0.0; vtx::FLOATS];
+        out[vtx::POSITION + 3] = 1.0;
         for i in 0..std::cmp::min(components as usize, bits.len()) {
-            out[GL_V_POSITION + i] = gl_float(bits[i]);
+            out[vtx::POSITION + i] = gl_float(bits[i]);
         }
-        out[GL_V_COLOR..GL_V_COLOR + 4].copy_from_slice(&self.cur_color);
-        out[GL_V_NORMAL..GL_V_NORMAL + 3].copy_from_slice(&self.cur_normal);
-        out[GL_V_TEXCOORD..GL_V_TEXCOORD + 4].copy_from_slice(&self.texture_coord());
-        out[GL_V_EDGE] = f32::from_bits(self.cur_edge);
+        out[vtx::COLOR..vtx::COLOR + 4].copy_from_slice(&self.cur_color);
+        out[vtx::NORMAL..vtx::NORMAL + 3].copy_from_slice(&self.cur_normal);
+        out[vtx::TEXCOORD..vtx::TEXCOORD + 4].copy_from_slice(&self.texture_coord());
+        out[vtx::EDGE] = f32::from_bits(self.cur_edge);
         // Material and lighting belong to the instant this vertex arrived.
-        out[GL_V_BACK_COLOR..GL_V_BACK_COLOR + 4].copy_from_slice(&self.cur_color);
+        out[vtx::BACK_COLOR..vtx::BACK_COLOR + 4].copy_from_slice(&self.cur_color);
 
         if self.polygon.enabled
             && (mode == GL_TRIANGLE_STRIP || mode == GL_TRIANGLE_FAN || mode == GL_QUAD_STRIP)
         {
-            out[GL_V_EDGE] = f32::from_bits(1);
+            out[vtx::EDGE] = f32::from_bits(1);
         }
         out
     }
@@ -1190,8 +1205,8 @@ impl GlContext {
                 }
                 return;
             }
-            let at = p.count as usize * GL_VERTEX_FLOATS;
-            p.vertices[at..at + GL_VERTEX_FLOATS].copy_from_slice(&cur);
+            let at = p.count as usize * vtx::FLOATS;
+            p.vertices[at..at + vtx::FLOATS].copy_from_slice(&cur);
             p.count += 1;
             return;
         }
@@ -1434,7 +1449,7 @@ impl GlContext {
         let f = gl_float(gl_arg(a, 0));
 
         match op as u32 {
-            GL_OP_POINT_SIZE | GL_OP_LINE_WIDTH => {
+            op::POINT_SIZE | op::LINE_WIDTH => {
                 if self.in_begin {
                     crate::dlog!(LogModule::Odyssey, "sgi-gl: size setter inside glBegin: invalid operation");
                     return;
@@ -1443,18 +1458,18 @@ impl GlContext {
                     crate::dlog!(
                         LogModule::Odyssey,
                         "sgi-gl: {}({}) ignored",
-                        if op as u32 == GL_OP_POINT_SIZE { "glPointSize" } else { "glLineWidth" },
+                        if op as u32 == op::POINT_SIZE { "glPointSize" } else { "glLineWidth" },
                         f
                     );
                     return;
                 }
-                if op as u32 == GL_OP_POINT_SIZE {
+                if op as u32 == op::POINT_SIZE {
                     self.point_size = f;
                 } else {
                     self.line_width = f;
                 }
             }
-            GL_OP_LINE_STIPPLE => {
+            op::LINE_STIPPLE => {
                 if self.in_begin {
                     crate::dlog!(LogModule::Odyssey, "sgi-gl: line stipple inside glBegin: invalid operation");
                     return;
@@ -1562,41 +1577,41 @@ impl GlContext {
             return;
         }
         match cmd.op as u32 {
-            GL_OP_TEXCOORD2F | GL_OP_TEXCOORD3F | GL_OP_TEXCOORD4F => {
+            op::TEXCOORD2F | op::TEXCOORD3F | op::TEXCOORD4F => {
                 self.cur_texcoord[2] = 0.0;
                 self.cur_texcoord[3] = 1.0;
                 for i in 0..a.len() {
                     self.cur_texcoord[i] = gl_float(a[i]);
                 }
             }
-            GL_OP_SHADE_MODEL => self.cur.shade_model = a[0],
-            GL_OP_ENABLE | GL_OP_DISABLE => {
-                self.capability(a[0], cmd.op as u32 == GL_OP_ENABLE);
+            op::SHADE_MODEL => self.cur.shade_model = a[0],
+            op::ENABLE | op::DISABLE => {
+                self.capability(a[0], cmd.op as u32 == op::ENABLE);
             }
-            GL_OP_DEPTH_FUNC => {
+            op::DEPTH_FUNC => {
                 if a[0].wrapping_sub(GL_NEVER_ENUM) > GL_ALWAYS {
                     crate::dlog!(LogModule::Odyssey, "sgi-gl: depth function {:#x} ignored", a[0]);
                     return;
                 }
                 self.cur.depth_func = a[0] - GL_NEVER_ENUM;
             }
-            GL_OP_DEPTH_MASK => self.cur.depth_mask = a[0] != 0,
-            GL_OP_CULL_FACE => {
+            op::DEPTH_MASK => self.cur.depth_mask = a[0] != 0,
+            op::CULL_FACE => {
                 if gl_faces(a[0]) == 0 {
                     crate::dlog!(LogModule::Odyssey, "sgi-gl: glCullFace({:#x}) ignored", a[0]);
                     return;
                 }
                 self.cur.cull_face_mode = a[0];
             }
-            GL_OP_FRONT_FACE => {
+            op::FRONT_FACE => {
                 if a[0] != GL_CW && a[0] != GL_CCW {
                     crate::dlog!(LogModule::Odyssey, "sgi-gl: glFrontFace({:#x}) ignored", a[0]);
                     return;
                 }
                 self.cur.front_face = a[0];
             }
-            GL_OP_DRAW_BUFFERS => self.cur.draw_buffers = a[0],
-            GL_OP_SCISSOR => {
+            op::DRAW_BUFFERS => self.cur.draw_buffers = a[0],
+            op::SCISSOR => {
                 // A negative width or height is an error and changes nothing.
                 if (a[2] as i32) < 0 || (a[3] as i32) < 0 {
                     crate::dlog!(LogModule::Odyssey, "sgi-gl: glScissor of {} by {} ignored", a[2] as i32, a[3] as i32);
@@ -1606,7 +1621,7 @@ impl GlContext {
                     self.cur.scissor[i] = a[i] as i32;
                 }
             }
-            GL_OP_ALPHA_FUNC => {
+            op::ALPHA_FUNC => {
                 let r = gl_float(a[1]);
 
                 if a[0].wrapping_sub(GL_NEVER_ENUM) > GL_ALWAYS {
@@ -1623,7 +1638,7 @@ impl GlContext {
                     0.0
                 };
             }
-            GL_OP_STENCIL_FUNC => {
+            op::STENCIL_FUNC => {
                 if a[0].wrapping_sub(GL_NEVER_ENUM) > GL_ALWAYS {
                     crate::dlog!(LogModule::Odyssey, "sgi-gl: stencil function {:#x} ignored", a[0]);
                     return;
@@ -1632,7 +1647,7 @@ impl GlContext {
                 self.cur.stencil_ref = a[1] as i32;
                 self.cur.stencil_value_mask = a[2];
             }
-            GL_OP_STENCIL_OP => {
+            op::STENCIL_OP => {
                 for i in 0..3 {
                     if !gl_stencil_op_valid(a[i]) {
                         crate::dlog!(LogModule::Odyssey, "sgi-gl: glStencilOp({:#x}, {:#x}, {:#x}) ignored", a[0], a[1], a[2]);
@@ -1641,8 +1656,8 @@ impl GlContext {
                 }
                 self.cur.stencil_op.copy_from_slice(&a[..3]);
             }
-            GL_OP_STENCIL_MASK => self.cur.stencil_write_mask = a[0],
-            GL_OP_BLEND_FUNC => {
+            op::STENCIL_MASK => self.cur.stencil_write_mask = a[0],
+            op::BLEND_FUNC => {
                 if !gl_blend_factor_valid(a[0], false) || !gl_blend_factor_valid(a[1], true) {
                     crate::dlog!(LogModule::Odyssey, "sgi-gl: glBlendFunc({:#x}, {:#x}) ignored", a[0], a[1]);
                     return;
@@ -1650,14 +1665,14 @@ impl GlContext {
                 self.cur.blend_src = a[0];
                 self.cur.blend_dst = a[1];
             }
-            GL_OP_BLEND_EQUATION => {
+            op::BLEND_EQUATION => {
                 if !gl_blend_equation_valid(a[0]) {
                     crate::dlog!(LogModule::Odyssey, "sgi-gl: glBlendEquation({:#x}) ignored", a[0]);
                     return;
                 }
                 self.cur.blend_equation = a[0];
             }
-            GL_OP_BLEND_COLOR => {
+            op::BLEND_COLOR => {
                 for i in 0..4 {
                     let v = gl_float(a[i]);
 
@@ -1670,46 +1685,46 @@ impl GlContext {
                     };
                 }
             }
-            GL_OP_LOGIC_OP => {
+            op::LOGIC_OP => {
                 if a[0].wrapping_sub(GL_CLEAR) > GL_SET - GL_CLEAR {
                     crate::dlog!(LogModule::Odyssey, "sgi-gl: glLogicOp({:#x}) ignored", a[0]);
                     return;
                 }
                 self.cur.logic_op_mode = a[0];
             }
-            GL_OP_POLYGON_OFFSET | GL_OP_POLYGON_OFFSET_EXT => {
+            op::POLYGON_OFFSET | op::POLYGON_OFFSET_EXT => {
                 self.cur.offset_factor = gl_float(a[0]);
                 self.cur.offset_units =
-                    if cmd.op as u32 == GL_OP_POLYGON_OFFSET { gl_float(a[1]) } else { 0.0 };
+                    if cmd.op as u32 == op::POLYGON_OFFSET { gl_float(a[1]) } else { 0.0 };
                 self.cur.offset_bias =
-                    if cmd.op as u32 == GL_OP_POLYGON_OFFSET_EXT { gl_float(a[1]) } else { 0.0 };
+                    if cmd.op as u32 == op::POLYGON_OFFSET_EXT { gl_float(a[1]) } else { 0.0 };
             }
-            GL_OP_CLIP_PLANE => {
+            op::CLIP_PLANE => {
                 pos = gl_words4(a, 1);
                 self.clip_plane(a[0], &pos);
             }
-            GL_OP_POINT_SIZE | GL_OP_LINE_WIDTH | GL_OP_LINE_STIPPLE | GL_OP_POLYGON_MODE => {
+            op::POINT_SIZE | op::LINE_WIDTH | op::LINE_STIPPLE | op::POLYGON_MODE => {
                 self.raster_state(cmd.op, a);
             }
-            GL_OP_COLOR3F => {
+            op::COLOR3F => {
                 for i in 0..3 {
                     self.cur_color[i] = gl_float(a[i]);
                 }
                 self.cur_color[3] = 1.0;
             }
-            GL_OP_COLOR4F => {
+            op::COLOR4F => {
                 for i in 0..4 {
                     self.cur_color[i] = gl_float(a[i]);
                 }
             }
-            GL_OP_COLOR3UB | GL_OP_COLOR4UB => {
+            op::COLOR3UB | op::COLOR4UB => {
                 // A byte c is c / 255 (OpenGL 1.2.1, table 2.6); 3ub's alpha is 1.
                 for i in 0..4usize {
                     self.cur_color[i] =
                         if i == a.len() { 1.0 } else { (a[i] & 0xff) as f32 / 255.0 };
                 }
             }
-            GL_OP_BEGIN => {
+            op::BEGIN => {
                 if self.in_begin {
                     crate::dlog!(LogModule::Odyssey, "sgi-gl: nested glBegin ignored");
                     return;
@@ -1726,7 +1741,7 @@ impl GlContext {
                 self.strip_prev = false;
                 self.strip_swap = false;
             }
-            GL_OP_END => {
+            op::END => {
                 if !self.in_begin && self.polygon.enabled {
                     return;
                 }
@@ -1774,13 +1789,13 @@ impl GlContext {
                 self.strip_prev = false;
                 self.strip_swap = false;
             }
-            GL_OP_VERTEX2F | GL_OP_VERTEX3F | GL_OP_VERTEX4F => {
+            op::VERTEX2F | op::VERTEX3F | op::VERTEX4F => {
                 for i in 0..a.len() {
                     pos[i] = gl_float(a[i]);
                 }
                 self.vertex(sink, &pos, a.len() as u32);
             }
-            GL_OP_VERTEX2I => {
+            op::VERTEX2I => {
                 // Integer components convert to float unscaled (2.7).
                 pos[0] = (a[0] as i32) as f32;
                 pos[1] = (a[1] as i32) as f32;
@@ -1860,7 +1875,7 @@ impl GlContext {
     /// Refused, with a log, inside glBegin, for a (k, count, mode) that cannot
     /// occur, and for glPolygon while polygon mode assembly is on. `v` holds k
     /// vertices; None when k is 0.
-    pub fn resume_primitive(&mut self, mode: u32, v: Option<&[[f32; GL_VERTEX_FLOATS]]>, k: u32, count: u32) -> bool {
+    pub fn resume_primitive(&mut self, mode: u32, v: Option<&[[f32; vtx::FLOATS]]>, k: u32, count: u32) -> bool {
         if self.in_begin {
             crate::dlog!(LogModule::Odyssey, "sgi-gl: resume inside glBegin ignored");
             return false;

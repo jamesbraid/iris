@@ -6,7 +6,7 @@
 
 use crate::devlog::LogModule;
 use super::gl_context::{
-    GL_ADD, GL_ALPHA, GL_ALPHA12, GL_ALPHA16, GL_ALPHA4, GL_ALPHA8, GL_BLEND, GL_CLAMP,
+    vtx, GL_ADD, GL_ALPHA, GL_ALPHA12, GL_ALPHA16, GL_ALPHA4, GL_ALPHA8, GL_BLEND, GL_CLAMP,
     GL_CLAMP_TO_BORDER, GL_CLAMP_TO_EDGE, GL_DECAL, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT16_SGIX,
     GL_DEPTH_COMPONENT24_SGIX, GL_DEPTH_COMPONENT32_SGIX, GL_INTENSITY, GL_INTENSITY12,
     GL_INTENSITY16, GL_INTENSITY4, GL_INTENSITY8, GL_LINEAR, GL_LINEAR_DETAIL_ALPHA_SGIS,
@@ -18,8 +18,7 @@ use super::gl_context::{
     GL_LUMINANCE_ALPHA, GL_MODULATE, GL_NEAREST, GL_NEAREST_MIPMAP_LINEAR,
     GL_NEAREST_MIPMAP_NEAREST, GL_R3_G3_B2, GL_REPEAT, GL_REPLACE, GL_RGB, GL_RGB10, GL_RGB10_A2,
     GL_RGB12, GL_RGB16, GL_RGB4, GL_RGB5, GL_RGB5_A1, GL_RGB8, GL_RGBA, GL_RGBA12, GL_RGBA16,
-    GL_RGBA2, GL_RGBA4, GL_RGBA8, GL_TEXTURE_GEQUAL_R_SGIX, GL_TEXTURE_LEQUAL_R_SGIX,
-    GL_V_TEXCOORD, GlDrawState,
+    GL_RGBA2, GL_RGBA4, GL_RGBA8, GL_TEXTURE_GEQUAL_R_SGIX, GL_TEXTURE_LEQUAL_R_SGIX, GlDrawState,
 };
 use super::raster::{
     fmax, fmin, FIXED_FAILED, FIXED_LEVELS, GL_TEX_LEVELS_MAX, GlTexImage, GlTexLevel,
@@ -360,14 +359,14 @@ impl GlTexImage<'_> {
     /// uses: s and q always, t unless the image is one-dimensional, and r for
     /// a shadow comparison against a depth image.
     pub fn soft_texcoord_valid(&self, base: Option<&GlTexLevel>, v: &VolumeVertex) -> bool {
-        let mut valid = v.clip[3].is_finite() && v.clip[3] > 0.0 && v.attr[GL_V_TEXCOORD + 3] > 0.0;
+        let mut valid = v.clip[3].is_finite() && v.clip[3] > 0.0 && v.attr[vtx::TEXCOORD + 3] > 0.0;
 
         for k in 0..4usize {
             if !self.one_dimensional || k == 0 || k == 3 ||
                 (k == 2 && self.shadow_compare != 0 &&
                  base.map_or(self.base_format, |b| b.base_format) == GL_DEPTH_COMPONENT)
             {
-                valid &= v.attr[GL_V_TEXCOORD + k].is_finite();
+                valid &= v.attr[vtx::TEXCOORD + k].is_finite();
             }
         }
         valid

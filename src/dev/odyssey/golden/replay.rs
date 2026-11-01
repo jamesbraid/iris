@@ -13,12 +13,7 @@
 //! checkpoints.
 
 use crate::dev::odyssey::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
-use crate::dev::odyssey::consts::{
-    ODSY_BUZZ_1, ODSY_CMD_ARITY_SHIFT, ODSY_CMD_FIFO, ODSY_CMD_IMAGE_BOX, ODSY_CMD_IMAGE_HEADER,
-    ODSY_CMD_REGISTER_TAG, ODSY_GL_PRIMITIVE_IMAGE, ODSY_IMAGE_BOX_X1_INDEX,
-    ODSY_IMAGE_BOX_X2_INDEX, ODSY_IMAGE_BOX_Y1_INDEX, ODSY_IMAGE_BOX_Y2_INDEX,
-    ODSY_IMAGE_BURST_BASE, ODSY_IMAGE_FMT_RGB, ODSY_REG_GL_BEGIN, ODSY_REG_GL_END,
-};
+use crate::dev::odyssey::consts::{cmd, gl_cmd, image, reg, ODSY_BUZZ_1};
 use crate::dev::odyssey::memory::ClipRect;
 use crate::dev::odyssey::pixel_dma::{read_guest, GuestMemory};
 use std::path::{Path, PathBuf};
@@ -292,28 +287,28 @@ fn window(b: &mut Board) {
 fn image_session(pixels: &[u32]) -> Vec<Rec> {
     let w = |off: u64, val: u32| Rec::Write { size: 4, off: off as u32, val: val as u64 };
     let mut v = vec![];
-    let mut cmd = |word: u32| v.push(w(ODSY_CMD_FIFO, word));
-    cmd(ODSY_CMD_REGISTER_TAG | ODSY_REG_GL_BEGIN);
-    cmd(ODSY_GL_PRIMITIVE_IMAGE);
-    cmd(ODSY_CMD_IMAGE_BOX);
+    let mut cmd = |word: u32| v.push(w(cmd::FIFO, word));
+    cmd(cmd::REGISTER_TAG | reg::GL_BEGIN);
+    cmd(gl_cmd::PRIMITIVE_IMAGE);
+    cmd(cmd::IMAGE_BOX);
     for i in 0..10 {
         let val = match i {
-            ODSY_IMAGE_BOX_X1_INDEX => 40,
-            ODSY_IMAGE_BOX_Y1_INDEX => 10,
-            ODSY_IMAGE_BOX_X2_INDEX => 40 + pixels.len() as u32,
-            ODSY_IMAGE_BOX_Y2_INDEX => 11,
+            image::BOX_X1_INDEX => 40,
+            image::BOX_Y1_INDEX => 10,
+            image::BOX_X2_INDEX => 40 + pixels.len() as u32,
+            image::BOX_Y2_INDEX => 11,
             _ => 0,
         };
         cmd((val as f32).to_bits());
     }
-    cmd(ODSY_CMD_IMAGE_HEADER);
+    cmd(cmd::IMAGE_HEADER);
     cmd(0x0021_104b);
     assert_eq!(pixels.len(), 2, "the header is a 2 x 1 image's");
-    cmd(ODSY_CMD_REGISTER_TAG | (ODSY_IMAGE_BURST_BASE | (pixels.len() as u32) << ODSY_CMD_ARITY_SHIFT | ODSY_IMAGE_FMT_RGB));
+    cmd(cmd::REGISTER_TAG | (image::BURST_BASE | (pixels.len() as u32) << cmd::ARITY_SHIFT | image::FMT_RGB));
     for &p in pixels {
         cmd(p);
     }
-    cmd(ODSY_CMD_REGISTER_TAG | ODSY_REG_GL_END);
+    cmd(cmd::REGISTER_TAG | reg::GL_END);
     // A load between the stores, as a polling driver makes.
     v.push(Rec::Read { size: 4, off: ODSY_BUZZ_1 as u32, val: 0 });
     v

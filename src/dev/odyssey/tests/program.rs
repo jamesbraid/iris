@@ -1,10 +1,7 @@
 //! Recognising the geometry program the GL library sets.
 
 use crate::dev::odyssey::board::Board;
-use crate::dev::odyssey::consts::{
-    ODSY_ENTRY_29, ODSY_ENTRY_2A, ODSY_ENTRY_2C, ODSY_ENTRY_33, ODSY_UCODE_END, ODSY_UCODE_UNLIT,
-    ODSY_UCODE_UNLIT_2A, ODSY_UCODE_UNLIT_2C,
-};
+use crate::dev::odyssey::consts::{ucode, ODSY_ENTRY_29, ODSY_ENTRY_2A, ODSY_ENTRY_2C, ODSY_ENTRY_33};
 use crate::dev::odyssey::tests::board;
 
 /// Set the three entries and the list at index 0 the way the library's
@@ -58,6 +55,6 @@ fn the_older_numbering_is_tried_only_where_the_current_one_fails() {
     assert!(!s.gl_lit);
 
     // The unlit record's entries sit below the spot routine in both numberings.
-    set_program(&mut s, &[ODSY_UCODE_END], 0, [ODSY_UCODE_UNLIT, ODSY_UCODE_UNLIT_2A, ODSY_UCODE_UNLIT_2C]);
+    set_program(&mut s, &[ucode::END], 0, [ucode::UNLIT, ucode::UNLIT_2A, ucode::UNLIT_2C]);
     assert!(!s.gl_lit);
 }

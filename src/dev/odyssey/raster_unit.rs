@@ -50,7 +50,7 @@
 
 use super::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
 use super::consts::{
-    ODSY_BUFFERS, ODSY_DID_MAIN_SHIFT, ODSY_DISPMODE_COUNT, ODSY_ID_COMPARE_ENABLE,
+    dispmode, ODSY_BUFFERS, ODSY_DID_MAIN_SHIFT, ODSY_ID_COMPARE_ENABLE,
     ODSY_ID_COMPARE_MASK_SHIFT,
 };
 use super::gl::GlDrawJob;
@@ -135,7 +135,7 @@ pub(super) fn touch_row(rows: &TouchedRows, slot: usize, y: i32) {
 /// the windows the draw's id test lets it reach. The overlay shows
 /// whatever the windows do.
 pub(super) struct DrawnRows {
-    by_id: Box<[[[u64; ROW_WORDS]; ODSY_DISPMODE_COUNT as usize]; ODSY_BUFFERS as usize]>,
+    by_id: Box<[[[u64; ROW_WORDS]; dispmode::COUNT as usize]; ODSY_BUFFERS as usize]>,
     overlay: [u64; ROW_WORDS],
     /// Some row is held.
     any: bool,
@@ -143,7 +143,7 @@ pub(super) struct DrawnRows {
 
 impl Default for DrawnRows {
     fn default() -> Self {
-        DrawnRows { by_id: Box::new([[[0; ROW_WORDS]; ODSY_DISPMODE_COUNT as usize]; ODSY_BUFFERS as usize]), overlay: [0; ROW_WORDS], any: false }
+        DrawnRows { by_id: Box::new([[[0; ROW_WORDS]; dispmode::COUNT as usize]; ODSY_BUFFERS as usize]), overlay: [0; ROW_WORDS], any: false }
     }
 }
 
@@ -165,7 +165,7 @@ impl DrawnRows {
                 }
                 continue;
             }
-            for id in 0..ODSY_DISPMODE_COUNT {
+            for id in 0..dispmode::COUNT {
                 // The main drawable is the id byte's bits 7:3.
                 if id_compare & ODSY_ID_COMPARE_ENABLE != 0 && (((id << ODSY_DID_MAIN_SHIFT) as u8 ^ value) & mask) >> ODSY_DID_MAIN_SHIFT != 0 {
                     continue;
@@ -184,7 +184,7 @@ impl DrawnRows {
 /// each word out, so neither waits for the other. A word the display takes
 /// just before a publish lands is taken at its next frame.
 pub(super) struct PublishedRows {
-    by_id: Box<[[[AtomicU64; ROW_WORDS]; ODSY_DISPMODE_COUNT as usize]; ODSY_BUFFERS as usize]>,
+    by_id: Box<[[[AtomicU64; ROW_WORDS]; dispmode::COUNT as usize]; ODSY_BUFFERS as usize]>,
     overlay: [AtomicU64; ROW_WORDS],
     /// Some row may be held.
     any: AtomicBool,

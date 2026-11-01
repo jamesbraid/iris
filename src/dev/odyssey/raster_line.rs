@@ -4,7 +4,7 @@
 
 
 use crate::devlog::LogModule;
-use super::gl_context::{GL_CLIP_PLANES, GL_FLAT, GL_V_COLOR};
+use super::gl_context::{vtx, GL_CLIP_PLANES, GL_FLAT};
 use super::raster::{LineRule, RasterRules, SoftDraw, SoftFrag, SoftVertex};
 use super::raster_texture::{soft_texture_derivatives, soft_texture_lod_scale};
 impl SoftVertex {
@@ -423,7 +423,7 @@ impl SoftDraw<'_> {
         };
         let mut flat = [0.0f64; 4];
         for k in 0..4 {
-            flat[k] = provoking[GL_V_COLOR + k] as f64;
+            flat[k] = provoking[vtx::COLOR + k] as f64;
         }
         let len2 = (b.x - a.x) as f64 * (b.x - a.x) as f64 + (b.y - a.y) as f64 * (b.y - a.y) as f64;
         let x_major = (b.x - a.x).wrapping_abs() >= (b.y - a.y).wrapping_abs();
@@ -669,7 +669,7 @@ impl SoftDraw<'_> {
         if let Some(p) = provoking {
             if self.st.shade_model == GL_FLAT {
                 for k in 0..4 {
-                    frag.rgba[k] = p[GL_V_COLOR + k] as f64;
+                    frag.rgba[k] = p[vtx::COLOR + k] as f64;
                 }
             }
         }

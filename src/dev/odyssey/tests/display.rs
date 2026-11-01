@@ -4,12 +4,8 @@
 
 use crate::dev::odyssey::board::{Board, ODSY_HEIGHT, ODSY_WIDTH};
 use crate::dev::odyssey::consts::{
-    ODSY_BACKEND_READ_BASE, ODSY_BACKEND_SELECT, ODSY_CHANNEL_HEIGHT, ODSY_CURSOR_BASE,
-    ODSY_CURSOR_COLOURS, ODSY_CURSOR_CONTROL, ODSY_CURSOR_GLYPH, ODSY_CURSOR_PLANE,
-    ODSY_CURSOR_POSITION, ODSY_DID_MAIN_SHIFT, ODSY_DISPLAYED_BUFFER, ODSY_DISPMODE_BASE,
-    ODSY_GL_COLOR_3UB, ODSY_GL_QUADS, ODSY_GL_TRIANGLES, ODSY_GL_VERTEX_2F, ODSY_GL_VERTEX_2I,
-    ODSY_REG_DRAW_MASK, ODSY_REG_GL_BEGIN, ODSY_REG_GL_END, ODSY_SWAP_ARM, ODSY_SWAP_CONTROL,
-    ODSY_SWAP_CONTROL_COMPANION, ODSY_SWAP_SYNC_A, ODSY_SWAP_SYNC_B, ODSY_USER_CMD_FIFO,
+    backend, cursor, dispmode, gl_cmd, reg, swap, ODSY_CHANNEL_HEIGHT, ODSY_DID_MAIN_SHIFT,
+    ODSY_DISPLAYED_BUFFER, ODSY_USER_CMD_FIFO,
 };
 use crate::dev::odyssey::reader::{DisplayRegs, SharedRegs};
 use crate::dev::odyssey::scanout::{DirtySite, DirtyStats};
@@ -28,7 +24,7 @@ const LUT_RED: u32 = 0x3ff0_0000;
 const LUT_BLUE: u32 = 0x0000_03ff;
 
 fn backend(s: &mut Board, word: u32) {
-    s.mmio_write(ODSY_BACKEND_SELECT, word as u64, 4);
+    s.mmio_write(backend::SELECT, word as u64, 4);
 }
 
 /// A record of one back-end word at `index`.
@@ -38,7 +34,7 @@ fn backend_entry(s: &mut Board, index: u32, word: u32) {
 }
 
 fn dispmode(s: &mut Board, did: u32, mode: u32) {
-    backend_entry(s, ODSY_DISPMODE_BASE + did, mode);
+    backend_entry(s, dispmode::BASE + did, mode);
 }
 
 /// What a guest loads before any RGB pixel is visible: the identity gamma
@@ -88,22 +84,22 @@ fn index_box(s: &mut Board, index: u32, x0: i32, y0: i32, x1: i32, y1: i32) {
 /// One solid RGB QUADS fill of the half-open box [x0, x1) x [y0, y1).
 #[allow(clippy::too_many_arguments, reason = "a colour and a box")]
 fn rgb_fill(s: &mut Board, r: u32, g: u32, b: u32, x0: u32, y0: u32, x1: u32, y1: u32) {
-    cmd(s, select(ODSY_REG_GL_BEGIN));
-    cmd(s, ODSY_GL_QUADS);
-    cmd(s, ODSY_GL_COLOR_3UB);
+    cmd(s, select(reg::GL_BEGIN));
+    cmd(s, gl_cmd::QUADS);
+    cmd(s, gl_cmd::COLOR_3UB);
     for c in [r, g, b] {
         cmd(s, c);
     }
     for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
-        cmd(s, ODSY_GL_VERTEX_2I);
+        cmd(s, gl_cmd::VERTEX_2I);
         cmd(s, x);
         cmd(s, y);
     }
-    cmd(s, select(ODSY_REG_GL_END));
+    cmd(s, select(reg::GL_END));
 }
 
 fn draw_mask(s: &mut Board, mask: u32) {
-    cmd(s, select(ODSY_REG_DRAW_MASK));
+    cmd(s, select(reg::DRAW_MASK));
     cmd(s, mask);
 }
 
@@ -146,28 +142,28 @@ fn an_armed_swap_toggles_the_displayed_buffer_at_the_retrace() {
     route_to_heart(&mut s);
     assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), 0);
 
-    cmd64(&mut s, ODSY_SWAP_SYNC_A, 0x8000_2000);
-    cmd64(&mut s, ODSY_SWAP_SYNC_B, 0x8000_2000);
+    cmd64(&mut s, swap::SYNC_A, 0x8000_2000);
+    cmd64(&mut s, swap::SYNC_B, 0x8000_2000);
     assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), 0);
     assert!(rec.silent());
     assert_eq!(s.reported_cmd_count, 0);
 
-    reg_write(&mut s, ODSY_SWAP_ARM, ARM_BIT);
-    assert_eq!(reg_read(&mut s, ODSY_SWAP_ARM), ARM_BIT);
+    reg_write(&mut s, swap::ARM, ARM_BIT);
+    assert_eq!(reg_read(&mut s, swap::ARM), ARM_BIT);
     assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), 0, "nothing flips before the retrace");
     retrace(&mut s);
-    assert_eq!(reg_read(&mut s, ODSY_SWAP_ARM), 0);
+    assert_eq!(reg_read(&mut s, swap::ARM), 0);
     assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), ARM_BIT);
     assert!(rec.level(RETRACE_VECTOR));
 
     retrace(&mut s);
     assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), ARM_BIT, "an idle retrace flips nothing");
 
-    reg_write(&mut s, ODSY_SWAP_ARM, ARM_BIT);
+    reg_write(&mut s, swap::ARM, ARM_BIT);
     retrace(&mut s);
     assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), 0);
 
-    reg_write(&mut s, ODSY_SWAP_ARM, 0x5);
+    reg_write(&mut s, swap::ARM, 0x5);
     retrace(&mut s);
     assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), 0x5);
 }
@@ -182,14 +178,14 @@ fn arm_writes_between_two_retraces_accumulate() {
     let (mut s, _) = board("v12");
     route_to_heart(&mut s);
 
-    reg_write(&mut s, ODSY_SWAP_ARM, 0x1);
-    reg_write(&mut s, ODSY_SWAP_ARM, 0x0100_0000);
-    assert_eq!(reg_read(&mut s, ODSY_SWAP_ARM), 0x0100_0001);
-    reg_write(&mut s, ODSY_SWAP_ARM, 0x0100_0000);
-    assert_eq!(reg_read(&mut s, ODSY_SWAP_ARM), 0x0100_0001, "a re-arm leaves the mask as it was");
+    reg_write(&mut s, swap::ARM, 0x1);
+    reg_write(&mut s, swap::ARM, 0x0100_0000);
+    assert_eq!(reg_read(&mut s, swap::ARM), 0x0100_0001);
+    reg_write(&mut s, swap::ARM, 0x0100_0000);
+    assert_eq!(reg_read(&mut s, swap::ARM), 0x0100_0001, "a re-arm leaves the mask as it was");
 
     retrace(&mut s);
-    assert_eq!(reg_read(&mut s, ODSY_SWAP_ARM), 0);
+    assert_eq!(reg_read(&mut s, swap::ARM), 0);
     assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), 0x0100_0001);
 }
 
@@ -203,25 +199,25 @@ fn arm_writes_between_two_retraces_accumulate() {
 fn set_and_clear_selects_latch_at_the_next_retrace() {
     let (mut s, _) = board("v12");
 
-    reg_write(&mut s, ODSY_SWAP_ARM, 0x3);
+    reg_write(&mut s, swap::ARM, 0x3);
     retrace(&mut s);
     assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), 0x3);
 
-    reg_write(&mut s, ODSY_SWAP_CONTROL_COMPANION, 0xffff_ffff);
+    reg_write(&mut s, swap::CONTROL_COMPANION, 0xffff_ffff);
     assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), 0x3);
     retrace(&mut s);
     assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), 0);
 
-    reg_write(&mut s, ODSY_SWAP_CONTROL, 0x8000_0010);
+    reg_write(&mut s, swap::CONTROL, 0x8000_0010);
     assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), 0);
     retrace(&mut s);
     assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), 0x8000_0010);
     retrace(&mut s);
     assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), 0x8000_0010, "an idle retrace keeps the selects");
 
-    reg_write(&mut s, ODSY_SWAP_CONTROL_COMPANION, 0x10);
-    reg_write(&mut s, ODSY_SWAP_CONTROL, 0x11);
-    reg_write(&mut s, ODSY_SWAP_CONTROL_COMPANION, 0x8000_0001);
+    reg_write(&mut s, swap::CONTROL_COMPANION, 0x10);
+    reg_write(&mut s, swap::CONTROL, 0x11);
+    reg_write(&mut s, swap::CONTROL_COMPANION, 0x8000_0001);
     retrace(&mut s);
     assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), 0x10);
 }
@@ -263,9 +259,9 @@ fn the_drawable_register_block_takes_its_operands() {
 fn the_draw_and_read_drawable_words_are_kept_apart() {
     let (mut s, _) = board("v12");
 
-    cmd64(&mut s, ODSY_SWAP_SYNC_A, 0x8000_2000);
+    cmd64(&mut s, swap::SYNC_A, 0x8000_2000);
     assert_eq!((s.draw_word, s.read_word), (0x8000_2000, 0));
-    cmd64(&mut s, ODSY_SWAP_SYNC_B, 0x0000_2000);
+    cmd64(&mut s, swap::SYNC_B, 0x0000_2000);
     assert_eq!((s.draw_word, s.read_word), (0x8000_2000, 0x0000_2000));
 
     rgb_fill(&mut s, 0x12, 0x34, 0x56, 0, 0, 1, 1);
@@ -294,7 +290,7 @@ fn the_two_colour_buffers_hold_opposite_colours() {
     assert_eq!(pixel(&s, 1, 105, 105), 0x0000_ffff);
     assert_eq!(shown(&mut s, 105, 105), 0xff0000);
 
-    reg_write(&mut s, ODSY_SWAP_ARM, 0x1);
+    reg_write(&mut s, swap::ARM, 0x1);
     assert_eq!(shown(&mut s, 105, 105), 0xff0000, "an armed swap shows nothing yet");
     retrace(&mut s);
     assert_eq!(shown(&mut s, 105, 105), 0x0000ff);
@@ -354,7 +350,7 @@ fn a_swap_shows_only_complete_frames() {
         rgb_fill(&mut s, r, g, b, 0, 32, 64, 64);
         assert_eq!(shown(&mut s, 10, 40), visible, "frame {i}: second half");
 
-        reg_write(&mut s, ODSY_SWAP_ARM, 0x1);
+        reg_write(&mut s, swap::ARM, 0x1);
         assert_eq!(shown(&mut s, 10, 10), visible, "frame {i}: armed");
         assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), 1 - back);
         retrace(&mut s);
@@ -554,7 +550,7 @@ fn a_reset_clears_the_framebuffer() {
 #[test]
 fn a_reset_with_a_primitive_open_leaves_the_board_responsive() {
     let (mut s, _) = board("v12");
-    for w in [select(ODSY_REG_GL_BEGIN), ODSY_GL_TRIANGLES, ODSY_GL_VERTEX_2F, 0x4220_0000, 0x4220_0000] {
+    for w in [select(reg::GL_BEGIN), gl_cmd::TRIANGLES, gl_cmd::VERTEX_2F, 0x4220_0000, 0x4220_0000] {
         s.mmio_write(ODSY_USER_CMD_FIFO, w as u64, 4);
     }
 
@@ -573,11 +569,11 @@ const WORD1_RGB: u32 = 0x00b100;
 const WORD2_RGB: u32 = 0x0000ff;
 
 fn cursor_entry(s: &mut Board, index: u32, word: u32) {
-    backend_entry(s, ODSY_CURSOR_BASE + index, word);
+    backend_entry(s, cursor::BASE + index, word);
 }
 
 fn cursor_readback(s: &mut Board, index: u32) -> u32 {
-    s.mmio_read(ODSY_BACKEND_READ_BASE + (((ODSY_CURSOR_BASE + index) as u64) << 3), 4) as u32
+    s.mmio_read(backend::READ_BASE + (((cursor::BASE + index) as u64) << 3), 4) as u32
 }
 
 /// An RGB screen with a known colour over the corner the cursor uses, the
@@ -589,22 +585,22 @@ fn cursor_load(s: &mut Board, x: u32, y: u32) {
             pixel_write(s, px, py, CURSOR_BACKGROUND);
         }
     }
-    backend(s, 0x3000_0000 | ODSY_CURSOR_BASE << 14 | 128);
+    backend(s, 0x3000_0000 | cursor::BASE << 14 | 128);
     for i in 0..128 {
         backend(s, if i == 0 { 0x1021 } else { 0 });
     }
-    backend(s, 0x3000_0000 | (ODSY_CURSOR_BASE + ODSY_CURSOR_PLANE) << 14 | 64);
+    backend(s, 0x3000_0000 | (cursor::BASE + cursor::PLANE) << 14 | 64);
     for i in 0..64 {
         backend(s, if i == 0 { 0x3f } else { 0 });
     }
-    backend(s, 0x3000_0000 | (ODSY_CURSOR_BASE + ODSY_CURSOR_COLOURS) << 14 | 15);
+    backend(s, 0x3000_0000 | (cursor::BASE + cursor::COLOURS) << 14 | 15);
     for w in [0x3ff << 20, 0x2c4 << 10, 0x3ff] {
         backend(s, w);
     }
     for _ in 3..15 {
         backend(s, 0);
     }
-    cursor_entry(s, ODSY_CURSOR_POSITION, (x & 0xffff) << 16 | (y & 0xffff));
+    cursor_entry(s, cursor::POSITION, (x & 0xffff) << 16 | (y & 0xffff));
 }
 
 /// Plane 3 shows glyph value k in colour word k and glyph 0 in word 0;
@@ -619,7 +615,7 @@ fn the_cursor_draws_its_glyph_through_the_plane_over_the_picture() {
     let bg = shown(&mut s, 11, 7);
     assert_eq!(shown(&mut s, 2, 3), bg, "the cursor is off");
 
-    cursor_entry(&mut s, ODSY_CURSOR_CONTROL, 1);
+    cursor_entry(&mut s, cursor::CONTROL, 1);
     assert_eq!(shown(&mut s, 2, 3), WORD1_RGB);
     assert_eq!(shown(&mut s, 3, 3), WORD2_RGB);
     assert_eq!(shown(&mut s, 4, 3), WORD0_RGB);
@@ -629,13 +625,13 @@ fn the_cursor_draws_its_glyph_through_the_plane_over_the_picture() {
     assert_eq!(shown(&mut s, 2, 4), bg);
     assert_eq!(shown(&mut s, 2, 2), bg);
     assert_eq!(shown(&mut s, 1, 3), bg);
-    assert_eq!(cursor_readback(&mut s, ODSY_CURSOR_GLYPH), 0x1021);
-    assert_eq!(cursor_readback(&mut s, ODSY_CURSOR_PLANE), 0x3f);
-    assert_eq!(cursor_readback(&mut s, ODSY_CURSOR_COLOURS + 1), 0x2c4 << 10);
-    assert_eq!(cursor_readback(&mut s, ODSY_CURSOR_POSITION), 0x0002_0003);
-    assert_eq!(cursor_readback(&mut s, ODSY_CURSOR_CONTROL), 1);
+    assert_eq!(cursor_readback(&mut s, cursor::GLYPH), 0x1021);
+    assert_eq!(cursor_readback(&mut s, cursor::PLANE), 0x3f);
+    assert_eq!(cursor_readback(&mut s, cursor::COLOURS + 1), 0x2c4 << 10);
+    assert_eq!(cursor_readback(&mut s, cursor::POSITION), 0x0002_0003);
+    assert_eq!(cursor_readback(&mut s, cursor::CONTROL), 1);
 
-    cursor_entry(&mut s, ODSY_CURSOR_CONTROL, 0);
+    cursor_entry(&mut s, cursor::CONTROL, 0);
     for x in 2..7 {
         assert_eq!(shown(&mut s, x, 3), bg, "x {x}");
     }
@@ -650,11 +646,11 @@ fn the_cursor_position_is_signed_and_clipped_to_the_raster() {
     let (mut s, _) = board("v12");
     cursor_load(&mut s, 2, 3);
     let bg = shown(&mut s, 11, 7);
-    cursor_entry(&mut s, ODSY_CURSOR_CONTROL, 1);
+    cursor_entry(&mut s, cursor::CONTROL, 1);
     assert_eq!(shown(&mut s, 2, 3), WORD1_RGB);
 
     // x = -1: column 0 of the glyph is off the left edge.
-    cursor_entry(&mut s, ODSY_CURSOR_POSITION, 0xffff_0005);
+    cursor_entry(&mut s, cursor::POSITION, 0xffff_0005);
     assert_eq!(shown(&mut s, 0, 5), WORD2_RGB);
     assert_eq!(shown(&mut s, 1, 5), WORD0_RGB);
     assert_eq!(shown(&mut s, 2, 5), bg);
@@ -663,9 +659,9 @@ fn the_cursor_position_is_signed_and_clipped_to_the_raster() {
 
     // y = -2: glyph row 2 lands on line 0. Read unsigned, 0xfffe would put
     // the whole cursor below the raster and draw nothing.
-    cursor_entry(&mut s, ODSY_CURSOR_GLYPH + 2 * 4, 0x1);
-    cursor_entry(&mut s, ODSY_CURSOR_PLANE + 2 * 2, 0x3);
-    cursor_entry(&mut s, ODSY_CURSOR_POSITION, 0x0002_fffe);
+    cursor_entry(&mut s, cursor::GLYPH + 2 * 4, 0x1);
+    cursor_entry(&mut s, cursor::PLANE + 2 * 2, 0x3);
+    cursor_entry(&mut s, cursor::POSITION, 0x0002_fffe);
     assert_eq!(shown(&mut s, 2, 0), WORD1_RGB);
     assert_eq!(shown(&mut s, 3, 0), bg);
     assert_eq!(shown(&mut s, 2, 1), bg);
@@ -673,7 +669,7 @@ fn the_cursor_position_is_signed_and_clipped_to_the_raster() {
 
     // The PROM's first position after its enable, x 1280 y 0, is the first
     // column right of the raster and draws nothing.
-    cursor_entry(&mut s, ODSY_CURSOR_POSITION, 0x0500_0000);
+    cursor_entry(&mut s, cursor::POSITION, 0x0500_0000);
     assert_eq!(shown(&mut s, 0, 5), bg);
     assert_eq!(shown(&mut s, 2, 0), bg);
     assert_eq!(shown(&mut s, 1279, 0), 0);
@@ -691,24 +687,24 @@ fn deferred_cursor_records_apply_in_turn() {
     cursor_load(&mut s, 2, 3);
     let bg = shown(&mut s, 11, 7);
     let deferred = |s: &mut Board, index: u32, word: u32| {
-        backend(s, 0x3000_0000 | (ODSY_CURSOR_BASE + index) << 14 | 1 | 0x4000_0000);
+        backend(s, 0x3000_0000 | (cursor::BASE + index) << 14 | 1 | 0x4000_0000);
         backend(s, word);
     };
 
-    cursor_entry(&mut s, ODSY_CURSOR_CONTROL, 3);
-    deferred(&mut s, ODSY_CURSOR_POSITION, 0x0004_0005);
+    cursor_entry(&mut s, cursor::CONTROL, 3);
+    deferred(&mut s, cursor::POSITION, 0x0004_0005);
     assert_eq!(shown(&mut s, 4, 5), WORD1_RGB);
     assert_eq!(shown(&mut s, 2, 3), bg);
-    deferred(&mut s, ODSY_CURSOR_CONTROL, 1);
+    deferred(&mut s, cursor::CONTROL, 1);
     assert_eq!(shown(&mut s, 4, 5), WORD1_RGB);
 
-    deferred(&mut s, ODSY_CURSOR_CONTROL, 0x21);
-    deferred(&mut s, ODSY_CURSOR_POSITION, 0x0002_0003);
-    deferred(&mut s, ODSY_CURSOR_CONTROL, 0x20);
+    deferred(&mut s, cursor::CONTROL, 0x21);
+    deferred(&mut s, cursor::POSITION, 0x0002_0003);
+    deferred(&mut s, cursor::CONTROL, 0x20);
     assert_eq!(shown(&mut s, 2, 3), bg);
     assert_eq!(shown(&mut s, 4, 5), bg);
-    assert_eq!(cursor_readback(&mut s, ODSY_CURSOR_POSITION), 0x0002_0003);
-    assert_eq!(cursor_readback(&mut s, ODSY_CURSOR_CONTROL), 0x20);
+    assert_eq!(cursor_readback(&mut s, cursor::POSITION), 0x0002_0003);
+    assert_eq!(cursor_readback(&mut s, cursor::CONTROL), 0x20);
 }
 
 /// Control bits 0 and 2 are the X server's crosshair: a one-pixel line
@@ -722,17 +718,17 @@ fn the_crosshair_draws_a_full_raster_line_each_way() {
     cursor_load(&mut s, 2, 3);
     let bg = shown(&mut s, 11, 7);
 
-    cursor_entry(&mut s, ODSY_CURSOR_CONTROL, 4);
+    cursor_entry(&mut s, cursor::CONTROL, 4);
     assert_eq!(shown(&mut s, 2, 3), bg);
     assert_eq!(shown(&mut s, 9, 3), bg);
 
-    cursor_entry(&mut s, ODSY_CURSOR_CONTROL, 5);
+    cursor_entry(&mut s, cursor::CONTROL, 5);
     for (x, y) in [(0, 3), (9, 3), (1279, 3), (2, 0), (2, 1023)] {
         assert_eq!(shown(&mut s, x, y), WORD1_RGB, "({x}, {y})");
     }
     assert_eq!(shown(&mut s, 3, 4), bg, "no glyph beside the point");
 
-    cursor_entry(&mut s, ODSY_CURSOR_CONTROL, 0x25);
+    cursor_entry(&mut s, cursor::CONTROL, 0x25);
     assert_eq!(shown(&mut s, 9, 3), bg);
     assert_eq!(shown(&mut s, 2, 6), bg);
 }
@@ -745,16 +741,16 @@ fn the_crosshair_draws_a_full_raster_line_each_way() {
 fn a_reset_leaves_the_cursor_off_and_empty() {
     let (mut s, _) = board("v12");
     cursor_load(&mut s, 2, 3);
-    cursor_entry(&mut s, ODSY_CURSOR_CONTROL, 1);
+    cursor_entry(&mut s, cursor::CONTROL, 1);
     assert_eq!(shown(&mut s, 2, 3), WORD1_RGB);
 
     s.reset();
 
     assert_eq!(shown(&mut s, 2, 3), 0);
-    for e in [ODSY_CURSOR_CONTROL, ODSY_CURSOR_POSITION, ODSY_CURSOR_GLYPH, ODSY_CURSOR_COLOURS + 1] {
+    for e in [cursor::CONTROL, cursor::POSITION, cursor::GLYPH, cursor::COLOURS + 1] {
         assert_eq!(cursor_readback(&mut s, e), 0, "{e:#x}");
     }
-    cursor_entry(&mut s, ODSY_CURSOR_CONTROL, 1);
+    cursor_entry(&mut s, cursor::CONTROL, 1);
     assert_eq!(shown(&mut s, 2, 3), 0);
 }
 

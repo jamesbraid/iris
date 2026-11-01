@@ -1,21 +1,7 @@
 
 use crate::devlog::LogModule;
 use super::board::{Board, OpenVertex};
-use super::consts::{
-    cmd_arity, ODSY_CTX_SWITCH_DONE_OFFSET, ODSY_CTX_SWITCH_OPCODE, ODSY_CTX_SWITCH_OPCODE_SHIFT,
-    ODSY_CTX_SWITCH_PORT, ODSY_CTX_SWITCH_VALID, ODSY_F32_ONE, ODSY_GL_BACK_AMBIENT,
-    ODSY_GL_BACK_DIFFUSE, ODSY_GL_BACK_EMISSION, ODSY_GL_BACK_SHININESS_SQRT,
-    ODSY_GL_BACK_SPECULAR, ODSY_GL_MATERIAL_AMBIENT, ODSY_GL_MATERIAL_DIFFUSE,
-    ODSY_GL_MATERIAL_EMISSION, ODSY_GL_MATERIAL_SPECULAR, ODSY_GL_SHININESS_SQRT,
-    ODSY_GL_TEXCOORD_2F, ODSY_GL_TEXCOORD_3F, ODSY_GL_TEXCOORD_4F, ODSY_GL_TRIANGLE_STRIP,
-    ODSY_HW_ATTR_BACK_MATERIAL, ODSY_HW_ATTR_BACK_SHININESS, ODSY_HW_ATTR_COLOUR,
-    ODSY_HW_ATTR_EDGE, ODSY_HW_ATTR_INDEX, ODSY_HW_ATTR_MATERIAL, ODSY_HW_ATTR_NORMAL,
-    ODSY_HW_ATTR_SHININESS, ODSY_HW_ATTR_TEXTURE, ODSY_HW_COLOUR_OPERANDS, ODSY_HW_COLOUR_WORD,
-    ODSY_HW_CURRENT_ATTRIBUTES, ODSY_HW_DESCRIPTOR_WORDS, ODSY_HW_INDEX_OPERANDS,
-    ODSY_HW_INDEX_WORD, ODSY_HW_PIPE_IDLE, ODSY_HW_PIPE_STATE, ODSY_HW_PIPE_STRIP_ODD,
-    ODSY_HW_RING_OPERANDS, ODSY_HW_RING_OPERAND_STRIDE, ODSY_HW_RING_WORD,
-    ODSY_HW_RING_WORD_STRIDE, ODSY_TEX_MODE_3D,
-};
+use super::consts::{cmd_arity, ctx, gl_cmd, hw, tex, ODSY_F32_ONE};
 use super::pixel_dma::write_guest;
 use super::registers::BACK_MATERIAL_DEFAULTS;
 // Anonymous enum: current-value query kinds.
@@ -45,11 +31,11 @@ impl Board {
 
     /// One selected ring entry: attribute a's word and its raw operands.
     pub fn shadow_ring(&mut self, base: u64, a: u32, slot: u32, word: u32, ops: &[u32]) {
-        self.shadow_put(base, ODSY_HW_RING_WORD + ODSY_HW_RING_WORD_STRIDE * a + 4 * slot, word);
+        self.shadow_put(base, hw::RING_WORD + hw::RING_WORD_STRIDE * a + 4 * slot, word);
         for (i, op) in ops.iter().enumerate() {
             self.shadow_put(
                 base,
-                ODSY_HW_RING_OPERANDS + ODSY_HW_RING_OPERAND_STRIDE * a + 16 * slot + 4 * i as u32,
+                hw::RING_OPERANDS + hw::RING_OPERAND_STRIDE * a + 16 * slot + 4 * i as u32,
                 *op,
             );
         }
@@ -81,29 +67,29 @@ impl Board {
 
     pub fn open_current_records(&mut self, record: &mut [[u32; 5]; 19]) {
         const MATERIAL: [u32; 4] = [
-            ODSY_GL_MATERIAL_AMBIENT,
-            ODSY_GL_MATERIAL_DIFFUSE,
-            ODSY_GL_MATERIAL_SPECULAR,
-            ODSY_GL_MATERIAL_EMISSION,
+            gl_cmd::MATERIAL_AMBIENT,
+            gl_cmd::MATERIAL_DIFFUSE,
+            gl_cmd::MATERIAL_SPECULAR,
+            gl_cmd::MATERIAL_EMISSION,
         ];
-        const BACK_MATERIAL: [u32; 4] = [ODSY_GL_BACK_AMBIENT, ODSY_GL_BACK_DIFFUSE, ODSY_GL_BACK_SPECULAR, ODSY_GL_BACK_EMISSION];
+        const BACK_MATERIAL: [u32; 4] = [gl_cmd::BACK_AMBIENT, gl_cmd::BACK_DIFFUSE, gl_cmd::BACK_SPECULAR, gl_cmd::BACK_EMISSION];
 
         *record = [[0u32; 5]; 19];
-        record[ODSY_HW_ATTR_INDEX] = self.query_current[ODSY_QUERY_INDEX as usize];
-        record[ODSY_HW_ATTR_COLOUR] = self.query_current[ODSY_QUERY_COLOUR as usize];
-        record[ODSY_HW_ATTR_NORMAL] = self.query_current[ODSY_QUERY_NORMAL as usize];
-        record[ODSY_HW_ATTR_TEXTURE] = self.query_current[ODSY_QUERY_TEXCOORD as usize];
-        record[ODSY_HW_ATTR_EDGE] = self.query_current[ODSY_QUERY_EDGE as usize];
+        record[hw::ATTR_INDEX] = self.query_current[ODSY_QUERY_INDEX as usize];
+        record[hw::ATTR_COLOUR] = self.query_current[ODSY_QUERY_COLOUR as usize];
+        record[hw::ATTR_NORMAL] = self.query_current[ODSY_QUERY_NORMAL as usize];
+        record[hw::ATTR_TEXTURE] = self.query_current[ODSY_QUERY_TEXCOORD as usize];
+        record[hw::ATTR_EDGE] = self.query_current[ODSY_QUERY_EDGE as usize];
         for i in 0..4usize {
-            record[ODSY_HW_ATTR_MATERIAL + i][0] = MATERIAL[i];
-            record[ODSY_HW_ATTR_MATERIAL + i][1..5].copy_from_slice(&self.gl_material[4 * i..4 * i + 4]);
-            record[ODSY_HW_ATTR_BACK_MATERIAL + i][0] = BACK_MATERIAL[i];
-            record[ODSY_HW_ATTR_BACK_MATERIAL + i][1..5].copy_from_slice(&self.gl_back_material[4 * i..4 * i + 4]);
+            record[hw::ATTR_MATERIAL + i][0] = MATERIAL[i];
+            record[hw::ATTR_MATERIAL + i][1..5].copy_from_slice(&self.gl_material[4 * i..4 * i + 4]);
+            record[hw::ATTR_BACK_MATERIAL + i][0] = BACK_MATERIAL[i];
+            record[hw::ATTR_BACK_MATERIAL + i][1..5].copy_from_slice(&self.gl_back_material[4 * i..4 * i + 4]);
         }
-        record[ODSY_HW_ATTR_SHININESS][0] = ODSY_GL_SHININESS_SQRT;
-        record[ODSY_HW_ATTR_SHININESS][1] = self.gl_shininess_sqrt;
-        record[ODSY_HW_ATTR_BACK_SHININESS][0] = ODSY_GL_BACK_SHININESS_SQRT;
-        record[ODSY_HW_ATTR_BACK_SHININESS][1] = self.gl_back_shininess_sqrt;
+        record[hw::ATTR_SHININESS][0] = gl_cmd::SHININESS_SQRT;
+        record[hw::ATTR_SHININESS][1] = self.gl_shininess_sqrt;
+        record[hw::ATTR_BACK_SHININESS][0] = gl_cmd::BACK_SHININESS_SQRT;
+        record[hw::ATTR_BACK_SHININESS][1] = self.gl_back_shininess_sqrt;
     }
 
     pub fn open_record_vertex(&mut self, word: u32) {
@@ -222,12 +208,12 @@ impl Board {
     /// decode are model approximations, not established board behaviour.
     pub fn ctx_save(&mut self, base: u64) {
         const MATERIAL: [u32; 4] = [
-            ODSY_GL_MATERIAL_AMBIENT,
-            ODSY_GL_MATERIAL_DIFFUSE,
-            ODSY_GL_MATERIAL_SPECULAR,
-            ODSY_GL_MATERIAL_EMISSION,
+            gl_cmd::MATERIAL_AMBIENT,
+            gl_cmd::MATERIAL_DIFFUSE,
+            gl_cmd::MATERIAL_SPECULAR,
+            gl_cmd::MATERIAL_EMISSION,
         ];
-        const BACK_MATERIAL: [u32; 4] = [ODSY_GL_BACK_AMBIENT, ODSY_GL_BACK_DIFFUSE, ODSY_GL_BACK_SPECULAR, ODSY_GL_BACK_EMISSION];
+        const BACK_MATERIAL: [u32; 4] = [gl_cmd::BACK_AMBIENT, gl_cmd::BACK_DIFFUSE, gl_cmd::BACK_SPECULAR, gl_cmd::BACK_EMISSION];
         let index = self.query_current[ODSY_QUERY_INDEX as usize];
         let colour = self.query_current[ODSY_QUERY_COLOUR as usize];
         let normal = self.query_current[ODSY_QUERY_NORMAL as usize];
@@ -243,53 +229,53 @@ impl Board {
                 self.gl_primitive
             );
         }
-        self.shadow_put(base, ODSY_HW_PIPE_STATE, ODSY_HW_PIPE_IDLE);
-        for i in 0..ODSY_HW_DESCRIPTOR_WORDS {
-            self.shadow_put(base, ODSY_HW_CURRENT_ATTRIBUTES + 4 * i, 0);
+        self.shadow_put(base, hw::PIPE_STATE, hw::PIPE_IDLE);
+        for i in 0..hw::DESCRIPTOR_WORDS {
+            self.shadow_put(base, hw::CURRENT_ATTRIBUTES + 4 * i, 0);
         }
-        self.shadow_put(base, ODSY_HW_INDEX_WORD, index[0]);
+        self.shadow_put(base, hw::INDEX_WORD, index[0]);
         for i in 0..cmd_arity(index[0]) {
-            self.shadow_put(base, ODSY_HW_INDEX_OPERANDS + 4 * i, index[1 + (i as usize).min(3)]);
+            self.shadow_put(base, hw::INDEX_OPERANDS + 4 * i, index[1 + (i as usize).min(3)]);
         }
-        self.shadow_put(base, ODSY_HW_COLOUR_WORD, colour[0]);
+        self.shadow_put(base, hw::COLOUR_WORD, colour[0]);
         for i in 0..cmd_arity(colour[0]) {
-            self.shadow_put(base, ODSY_HW_COLOUR_OPERANDS + 4 * i, colour[1 + (i as usize).min(3)]);
+            self.shadow_put(base, hw::COLOUR_OPERANDS + 4 * i, colour[1 + (i as usize).min(3)]);
         }
-        self.shadow_ring(base, ODSY_HW_ATTR_INDEX as u32, 0, index[0], &index[1..1 + ar(index[0])]);
-        self.shadow_ring(base, ODSY_HW_ATTR_COLOUR as u32, 0, colour[0], &colour[1..1 + ar(colour[0])]);
-        self.shadow_ring(base, ODSY_HW_ATTR_NORMAL as u32, 0, normal[0], &normal[1..1 + ar(normal[0])]);
-        self.shadow_ring(base, ODSY_HW_ATTR_EDGE as u32, 0, edge, &[]);
+        self.shadow_ring(base, hw::ATTR_INDEX as u32, 0, index[0], &index[1..1 + ar(index[0])]);
+        self.shadow_ring(base, hw::ATTR_COLOUR as u32, 0, colour[0], &colour[1..1 + ar(colour[0])]);
+        self.shadow_ring(base, hw::ATTR_NORMAL as u32, 0, normal[0], &normal[1..1 + ar(normal[0])]);
+        self.shadow_ring(base, hw::ATTR_EDGE as u32, 0, edge, &[]);
         if self.tex_coord_q != ODSY_F32_ONE {
             let coordinate = [self.tex_coord[0], self.tex_coord[1], self.tex_coord_r, self.tex_coord_q];
 
-            self.shadow_ring(base, ODSY_HW_ATTR_TEXTURE as u32, 0, ODSY_GL_TEXCOORD_4F, &coordinate);
+            self.shadow_ring(base, hw::ATTR_TEXTURE as u32, 0, gl_cmd::TEXCOORD_4F, &coordinate);
         } else {
-            let three = (self.tex_mode & ODSY_TEX_MODE_3D) != 0 || self.tex_coord_r != 0;
+            let three = (self.tex_mode & tex::MODE_3D) != 0 || self.tex_coord_r != 0;
             let three_ops = [self.tex_coord[0], self.tex_coord[1], self.tex_coord_r];
             let two_ops = self.tex_coord;
 
             self.shadow_ring(
                 base,
-                ODSY_HW_ATTR_TEXTURE as u32,
+                hw::ATTR_TEXTURE as u32,
                 0,
-                if three { ODSY_GL_TEXCOORD_3F } else { ODSY_GL_TEXCOORD_2F },
+                if three { gl_cmd::TEXCOORD_3F } else { gl_cmd::TEXCOORD_2F },
                 if three { &three_ops[..] } else { &two_ops[..] },
             );
         }
         for i in 0..4usize {
             let m: [u32; 4] = self.gl_material[i * 4..i * 4 + 4].try_into().unwrap();
 
-            self.shadow_ring(base, (ODSY_HW_ATTR_MATERIAL + i) as u32, 0, MATERIAL[i], &m);
+            self.shadow_ring(base, (hw::ATTR_MATERIAL + i) as u32, 0, MATERIAL[i], &m);
         }
         let sh = [self.gl_shininess_sqrt];
-        self.shadow_ring(base, ODSY_HW_ATTR_SHININESS as u32, 0, ODSY_GL_SHININESS_SQRT, &sh);
+        self.shadow_ring(base, hw::ATTR_SHININESS as u32, 0, gl_cmd::SHININESS_SQRT, &sh);
         for i in 0..4usize {
             let m: [u32; 4] = self.gl_back_material[i * 4..i * 4 + 4].try_into().unwrap();
 
-            self.shadow_ring(base, (ODSY_HW_ATTR_BACK_MATERIAL + i) as u32, 0, BACK_MATERIAL[i], &m);
+            self.shadow_ring(base, (hw::ATTR_BACK_MATERIAL + i) as u32, 0, BACK_MATERIAL[i], &m);
         }
         let bsh = [self.gl_back_shininess_sqrt];
-        self.shadow_ring(base, ODSY_HW_ATTR_BACK_SHININESS as u32, 0, ODSY_GL_BACK_SHININESS_SQRT, &bsh);
+        self.shadow_ring(base, hw::ATTR_BACK_SHININESS as u32, 0, gl_cmd::BACK_SHININESS_SQRT, &bsh);
         if open {
             let mut current = [[0u32; 5]; 19];
             let mut state = self.gl_primitive
@@ -300,12 +286,12 @@ impl Board {
                 | (self.gl_open_c << 21);
 
             // After c >= 2 vertices the next triangle is number c - 2.
-            if self.gl_primitive == ODSY_GL_TRIANGLE_STRIP && self.gl_open_c >= 2 && (self.gl_open_m4 & 1) != 0 {
-                state |= ODSY_HW_PIPE_STRIP_ODD;
+            if self.gl_primitive == gl_cmd::TRIANGLE_STRIP && self.gl_open_c >= 2 && (self.gl_open_m4 & 1) != 0 {
+                state |= hw::PIPE_STRIP_ODD;
             }
 
             self.open_current_records(&mut current);
-            self.shadow_put(base, ODSY_HW_PIPE_STATE, state);
+            self.shadow_put(base, hw::PIPE_STATE, state);
             for i in 0..self.gl_open_held.min(3) {
                 let v = self.gl_open_vertex[i as usize];
                 let slot = v.slot;
@@ -325,7 +311,7 @@ impl Board {
                     );
                 }
             }
-            self.shadow_descriptor(base, ODSY_HW_CURRENT_ATTRIBUTES, &current, 3);
+            self.shadow_descriptor(base, hw::CURRENT_ATTRIBUTES, &current, 3);
             for i in 0..19usize {
                 if current[i][0] == 0 {
                     continue;
@@ -336,7 +322,7 @@ impl Board {
     }
 
     /// The kernel driver's context switch: a single 8-byte store to
-    /// ODSY_CTX_SWITCH_PORT, not a command-FIFO word. The new context id in bits
+    /// ctx::SWITCH_PORT, not a command-FIFO word. The new context id in bits
     /// 31:16 is not modelled: the board learns the context from the shadow address
     /// pair, which names where the outgoing state is saved (Board::ctx_save()),
     /// and the kernel restores the rest. A store naming context 0x7f is the
@@ -344,10 +330,10 @@ impl Board {
     /// this port has no established meaning and is reported unimplemented instead
     /// of guessed.
     pub fn ctx_switch(&mut self, value: u64) {
-        if ((value >> ODSY_CTX_SWITCH_OPCODE_SHIFT) & 0xff) != ODSY_CTX_SWITCH_OPCODE as u64
-            || (value & ODSY_CTX_SWITCH_VALID) == 0
+        if ((value >> ctx::SWITCH_OPCODE_SHIFT) & 0xff) != ctx::SWITCH_OPCODE as u64
+            || (value & ctx::SWITCH_VALID) == 0
         {
-            self.unimplemented(ODSY_CTX_SWITCH_PORT, 8, true);
+            self.unimplemented(ctx::SWITCH_PORT, 8, true);
             return;
         }
         // The done word says the board has finished the work before the
@@ -365,6 +351,6 @@ impl Board {
         let shadow_base = (((self.ctx_shadow_addr_upper & 0xffff) as u64) << 32) | self.ctx_shadow_addr_lower as u64;
         // A plain guest-physical address: interrupt packets go elsewhere.
         self.ctx_save(shadow_base);
-        self.shadow_put(shadow_base, ODSY_CTX_SWITCH_DONE_OFFSET as u32, 1);
+        self.shadow_put(shadow_base, ctx::SWITCH_DONE_OFFSET as u32, 1);
     }
 }

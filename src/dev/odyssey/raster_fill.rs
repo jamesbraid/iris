@@ -948,16 +948,13 @@ impl SoftDraw<'_> {
 mod tests {
     use super::*;
 
-    use crate::dev::odyssey::consts::{
-        ODSY_ID_COMPARE_ENABLE, ODSY_ID_COMPARE_MASK_SHIFT, ODSY_TEX_LOD_MASK, ODSY_TEX_LOD_ONE,
-    };
+    use crate::dev::odyssey::consts::{tex, ODSY_ID_COMPARE_ENABLE, ODSY_ID_COMPARE_MASK_SHIFT};
     use crate::dev::odyssey::gl::{texture_lod_limit, texture_lod_word};
     use crate::dev::odyssey::gl_context::{
-        GL_BLEND, GL_CLAMP_TO_EDGE, GL_CONSTANT_ALPHA, GL_DECAL, GL_DECR, GL_DST_ALPHA, GL_EQUAL,
-        GL_EXP, GL_EXP2, GL_GREATER, GL_INCR, GL_INVERT, GL_LUMINANCE, GL_NEAREST_MIPMAP_NEAREST,
-        GL_NEVER, GL_NOTEQUAL, GL_OFFSET_FILL, GL_ONE_MINUS_DST_COLOR, GL_SMOOTH,
-        GL_SRC_ALPHA_SATURATE, GL_TRIANGLES, GL_VERTEX_FLOATS, GL_V_COLOR, GL_V_POSITION,
-        GL_V_TEXCOORD, GlDraw,
+        vtx, GL_BLEND, GL_CLAMP_TO_EDGE, GL_CONSTANT_ALPHA, GL_DECAL, GL_DECR, GL_DST_ALPHA,
+        GL_EQUAL, GL_EXP, GL_EXP2, GL_GREATER, GL_INCR, GL_INVERT, GL_LUMINANCE,
+        GL_NEAREST_MIPMAP_NEAREST, GL_NEVER, GL_NOTEQUAL, GL_OFFSET_FILL, GL_ONE_MINUS_DST_COLOR,
+        GL_SMOOTH, GL_SRC_ALPHA_SATURATE, GL_TRIANGLES, GlDraw,
     };
 
     use crate::dev::odyssey::memory::ClipRect;
@@ -1059,7 +1056,7 @@ mod tests {
             b.tex = Some(tex);
         }
         for _ in 0..60 {
-            let mut v = vec![0.0f32; 3 * GL_VERTEX_FLOATS];
+            let mut v = vec![0.0f32; 3 * vtx::FLOATS];
             let size = pick(&mut rng, &[3.0f32, 12.0, 40.0, 90.0]);
             let cx = rng.range(0.0, SIDE as f32);
             let cy = rng.range(0.0, SIDE as f32);
@@ -1069,18 +1066,18 @@ mod tests {
                 let y = cy + rng.range(-size, size);
                 let z = rng.range(-1.2, 1.2);
                 let w = rng.range(0.5, 2.0);
-                let o = &mut v[i * GL_VERTEX_FLOATS..(i + 1) * GL_VERTEX_FLOATS];
+                let o = &mut v[i * vtx::FLOATS..(i + 1) * vtx::FLOATS];
                 let nx = x / BENCH_W as f32 * 2.0 - 1.0;
                 let ny = y / BENCH_H as f32 * 2.0 - 1.0;
-                o[GL_V_POSITION..GL_V_POSITION + 4].copy_from_slice(&[nx * w, ny * w, z * w, w]);
+                o[vtx::POSITION..vtx::POSITION + 4].copy_from_slice(&[nx * w, ny * w, z * w, w]);
                 // Some triangles keep a component 0 or 1 at every vertex.
                 let c = if grey {
                     [1.0, 0.0, rng.range(0.0, 1.0), 1.0]
                 } else {
                     [rng.range(-0.1, 1.1), rng.range(0.0, 1.0), rng.range(0.0, 1.0), rng.range(0.0, 1.0)]
                 };
-                o[GL_V_COLOR..GL_V_COLOR + 4].copy_from_slice(&c);
-                o[GL_V_TEXCOORD..GL_V_TEXCOORD + 4]
+                o[vtx::COLOR..vtx::COLOR + 4].copy_from_slice(&c);
+                o[vtx::TEXCOORD..vtx::TEXCOORD + 4]
                     .copy_from_slice(&[rng.range(-2.0, 3.0) * w, rng.range(-2.0, 3.0) * w, 0.0, w]);
             }
             b.prims.push(v);
@@ -1188,7 +1185,7 @@ mod tests {
                         let mut v = b.prims[0].clone();
 
                         for (i, &(x, y)) in pts.iter().enumerate() {
-                            let o = &mut v[i * GL_VERTEX_FLOATS + GL_V_POSITION..];
+                            let o = &mut v[i * vtx::FLOATS + vtx::POSITION..];
 
                             o[..4].copy_from_slice(&[x / BENCH_W as f32 * 2.0 - 1.0, y / BENCH_H as f32 * 2.0 - 1.0, 0.0, 1.0]);
                         }
@@ -1531,13 +1528,13 @@ mod tests {
 
     /// A vertex at window pixel (x, y) of the bench board, with w and s, at
     /// depth one half: the bench's depth row takes (z + w) / 2.
-    fn lod_vertex(x: f32, y: f32, w: f32, s: f32) -> [f32; GL_VERTEX_FLOATS] {
-        let mut o = [0.0f32; GL_VERTEX_FLOATS];
+    fn lod_vertex(x: f32, y: f32, w: f32, s: f32) -> [f32; vtx::FLOATS] {
+        let mut o = [0.0f32; vtx::FLOATS];
 
-        o[GL_V_POSITION..GL_V_POSITION + 4]
+        o[vtx::POSITION..vtx::POSITION + 4]
             .copy_from_slice(&[(x / BENCH_W as f32 * 2.0 - 1.0) * w, (y / BENCH_H as f32 * 2.0 - 1.0) * w, 1.0 - w, w]);
-        o[GL_V_COLOR..GL_V_COLOR + 4].copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
-        o[GL_V_TEXCOORD..GL_V_TEXCOORD + 4].copy_from_slice(&[s, 0.0, 0.0, 1.0]);
+        o[vtx::COLOR..vtx::COLOR + 4].copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+        o[vtx::TEXCOORD..vtx::TEXCOORD + 4].copy_from_slice(&[s, 0.0, 0.0, 1.0]);
         o
     }
 
@@ -1546,7 +1543,7 @@ mod tests {
     /// the 0x1013 words lod (Board::texture_lod_bias(), texture_lod_limit()),
     /// through texture path path; and return each drawn pixel as (x, y,
     /// level).
-    fn draw_levels(vertices: &[[f32; GL_VERTEX_FLOATS]; 3], lod: [u32; 4], path: TexturePath) -> Vec<(i32, i32, u32)> {
+    fn draw_levels(vertices: &[[f32; vtx::FLOATS]; 3], lod: [u32; 4], path: TexturePath) -> Vec<(i32, i32, u32)> {
         let mut b = Bench::empty();
         let tex = BenchTexture::new(256, GL_NEAREST_MIPMAP_NEAREST, GL_NEAREST, GL_RGBA);
         let mut image = tex.image();
@@ -1558,8 +1555,8 @@ mod tests {
         b.board.tex_lod = lod;
         b.board.texture_lod_bias(&mut image);
         if let Some(p) = image.pyramid.as_mut() {
-            p.min_lod = texture_lod_limit(lod[2]) as f64 / ODSY_TEX_LOD_ONE as f64;
-            p.max_lod = texture_lod_limit(lod[3]) as f64 / ODSY_TEX_LOD_ONE as f64;
+            p.min_lod = texture_lod_limit(lod[2]) as f64 / tex::LOD_ONE as f64;
+            p.max_lod = texture_lod_limit(lod[3]) as f64 / tex::LOD_ONE as f64;
         }
         let mut t = b.board.gl_target();
         t.texture = Some(image);
@@ -1656,7 +1653,7 @@ mod tests {
     // of two texels a pixel along s, t constant: lambda 1 unbiased.
     #[test]
     fn quad_lod_takes_the_bias_and_limits() {
-        let word = |x: f64| (x * 256.0) as i32 as u32 & ODSY_TEX_LOD_MASK;
+        let word = |x: f64| (x * 256.0) as i32 as u32 & tex::LOD_MASK;
         let vertices = [
             lod_vertex(320.0, 256.0, 1.0, 0.0),
             lod_vertex(480.0, 256.0, 1.0, 1.25),

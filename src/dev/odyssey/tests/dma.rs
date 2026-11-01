@@ -3,12 +3,7 @@
 //! and the board.
 
 use crate::dev::odyssey::board::Board;
-use crate::dev::odyssey::consts::{
-    ODSY_CTX_SHADOW_ADDR_LOWER, ODSY_CTX_SHADOW_ADDR_UPPER, ODSY_CTX_SWITCH_DONE_OFFSET,
-    ODSY_CTX_SWITCH_PORT, ODSY_DMA_DESC_UPLOAD, ODSY_DMA_FENCE_INTERRUPT, ODSY_DMA_IRQ_REQUEST,
-    ODSY_DMA_PAGE_SIZE, ODSY_DMA_PTE_ADDR_SHIFT, ODSY_DMA_TABLE_HEADER, ODSY_HOST_WRITE_ADDR_LOWER,
-    ODSY_HOST_WRITE_ADDR_UPPER, ODSY_REG_DEST_SELECT, ODSY_REG_HOST_WRITE, ODSY_USER_CMD_FIFO,
-};
+use crate::dev::odyssey::consts::{ctx, dma, host, reg, ODSY_USER_CMD_FIFO};
 use crate::dev::odyssey::mmio::BoardLocks;
 use crate::dev::odyssey::tests::{
     board_with_ram, cmd, cmd64, pixel, pixel_write, reg_write, route_to_heart, select, DMA_VECTOR,
@@ -34,22 +29,22 @@ fn pack_half(half: u64) -> u32 {
 /// opcode over the packed high half of the table address, then the packed
 /// low half over a zero word.
 pub(super) fn descriptor(s: &mut Board, table: u64) {
-    cmd64(s, ODSY_DMA_DESC_UPLOAD, pack_half(table >> 24));
+    cmd64(s, dma::DESC_UPLOAD, pack_half(table >> 24));
     cmd64(s, pack_half(table & 0xff_ffff), 0);
 }
 
 /// An entry of the translation table: a page address over a byte count.
 pub(super) fn pte(addr: u64, len: u32) -> u64 {
-    addr << ODSY_DMA_PTE_ADDR_SHIFT | len as u64
+    addr << dma::PTE_ADDR_SHIFT | len as u64
 }
 
 pub(super) fn put_table(ram: &Ram, table: u64, header: [u32; 8], entries: &[u64]) {
-    let mut t = vec![0u8; ODSY_DMA_TABLE_HEADER as usize + 16 * 8];
+    let mut t = vec![0u8; dma::TABLE_HEADER as usize + 16 * 8];
     for (i, w) in header.iter().enumerate() {
         t[i * 4..][..4].copy_from_slice(&w.to_be_bytes());
     }
     for (i, e) in entries.iter().enumerate() {
-        t[ODSY_DMA_TABLE_HEADER as usize + i * 8..][..8].copy_from_slice(&e.to_be_bytes());
+        t[dma::TABLE_HEADER as usize + i * 8..][..8].copy_from_slice(&e.to_be_bytes());
     }
     ram.put(table, &t);
 }
@@ -58,7 +53,7 @@ pub(super) fn put_table(ram: &Ram, table: u64, header: [u32; 8], entries: &[u64]
 /// (0, 0), `rows` rows of 64 bytes, 4 bytes a pixel, source format 0x4b,
 /// and the DMA-done request when `irq` is set.
 fn object_header(rows: u32, irq: bool) -> [u32; 8] {
-    [OBJECT, 0, 1, rows << 16 | 16, 0, 0, 64, if irq { ODSY_DMA_IRQ_REQUEST } else { 0 } | 1 << 16 | 0x4b]
+    [OBJECT, 0, 1, rows << 16 | 16, 0, 0, 64, if irq { dma::IRQ_REQUEST } else { 0 } | 1 << 16 | 0x4b]
 }
 
 /// Word `i` of the object, 16 texels a row.
@@ -70,7 +65,7 @@ fn object_word(s: &mut Board, i: u32) -> u32 {
 
 /// The colour destination select the X server sends, naming buffer 0x2000.
 pub(super) fn colour_destination(s: &mut Board) {
-    for w in [select(ODSY_REG_DEST_SELECT), 0x2000, 0x50, 0x2000_6950, 0] {
+    for w in [select(reg::DEST_SELECT), 0x2000, 0x50, 0x2000_6950, 0] {
         s.mmio_write(ODSY_USER_CMD_FIFO, w as u64, 4);
     }
 }
@@ -78,8 +73,8 @@ pub(super) fn colour_destination(s: &mut Board) {
 /// A board with the fence slots at `FENCE_BASE` and the interrupts routed.
 fn fenced_board() -> (Box<Board>, Arc<Recorder>, Arc<Ram>) {
     let (mut s, rec, ram) = board_with_ram();
-    reg_write(&mut s, ODSY_HOST_WRITE_ADDR_UPPER, 0);
-    reg_write(&mut s, ODSY_HOST_WRITE_ADDR_LOWER, FENCE_BASE as u32);
+    reg_write(&mut s, host::WRITE_ADDR_UPPER, 0);
+    reg_write(&mut s, host::WRITE_ADDR_LOWER, FENCE_BASE as u32);
     route_to_heart(&mut s);
     (s, rec, ram)
 }
@@ -98,14 +93,14 @@ fn a_host_write_fence_lands_in_its_slot_and_interrupts_only_when_asked() {
     assert_eq!(ram.half(FENCE_BASE + 4), 0);
 
     // Slot 2, no interrupt bit: the write lands, nothing is sent.
-    for w in [select(ODSY_REG_HOST_WRITE), 2, 0x5a00] {
+    for w in [select(reg::HOST_WRITE), 2, 0x5a00] {
         cmd(&mut s, w);
     }
     assert_eq!(ram.half(FENCE_BASE + 4), 0x5a00);
     assert!(rec.silent());
 
     // Slot 3, interrupt bit set: a second write and the softsync packet.
-    for w in [select(ODSY_REG_HOST_WRITE), ODSY_DMA_FENCE_INTERRUPT | 3, 0xa5a5] {
+    for w in [select(reg::HOST_WRITE), dma::FENCE_INTERRUPT | 3, 0xa5a5] {
         cmd(&mut s, w);
     }
     assert_eq!(ram.half(FENCE_BASE + 6), 0xa5a5);
@@ -126,7 +121,7 @@ fn a_host_write_fence_lands_in_its_slot_and_interrupts_only_when_asked() {
 fn a_page_table_transfer_lands_across_pages_and_raises_dma_done() {
     let table_high = 0x1fe5300u64; // high half 1, low half 0xfe5300
     let first_off = 0x3000u64;
-    let first_len = ODSY_DMA_PAGE_SIZE as u32 - first_off as u32;
+    let first_len = dma::PAGE_SIZE as u32 - first_off as u32;
     let page1_len = 0x40u32;
     let (mut s, rec, ram) = fenced_board();
     assert_eq!(pack_half(TABLE >> 24), 0);
@@ -231,12 +226,12 @@ fn a_full_work_list_entry_takes_exactly_twelve_pages() {
     let mut entries = Vec::new();
     for k in 0..12u64 {
         let row: Vec<u8> = (0..16u32).flat_map(|i| (0xcc00_0000u32 | (k as u32) << 8 | i).to_be_bytes()).collect();
-        ram.put(source + k * ODSY_DMA_PAGE_SIZE, &row);
-        entries.push(pte(source + k * ODSY_DMA_PAGE_SIZE, 64));
+        ram.put(source + k * dma::PAGE_SIZE, &row);
+        entries.push(pte(source + k * dma::PAGE_SIZE, 64));
     }
     put_table(&ram, TABLE, object_header(12, false), &entries);
     // What would be the next entry: nonzero, so a missing terminator is noticed.
-    let after = TABLE + ODSY_DMA_TABLE_HEADER + 12 * 8;
+    let after = TABLE + dma::TABLE_HEADER + 12 * 8;
     ram.put(after, &[0xff; 0x800]);
 
     descriptor(&mut s, TABLE);
@@ -272,7 +267,7 @@ fn a_clipped_transfer_draws_chunk_by_chunk_and_interrupts_on_the_last() {
             0x8223_305a,
             0,
             8,
-            if c == 1 { ODSY_DMA_IRQ_REQUEST } else { 0 } | 0x3201_0000,
+            if c == 1 { dma::IRQ_REQUEST } else { 0 } | 0x3201_0000,
         ];
         let mut px = [0u8; 8];
         px[..4].copy_from_slice(&(0x0010_2030u32 + c as u32).to_be_bytes());
@@ -284,7 +279,7 @@ fn a_clipped_transfer_draws_chunk_by_chunk_and_interrupts_on_the_last() {
         descriptor(&mut s, tables[c]);
         assert_eq!(rec.events(DMA_VECTOR).len(), c, "only the last chunk asks for the interrupt");
     }
-    for w in [select(ODSY_REG_HOST_WRITE), 3, 0x5a01] {
+    for w in [select(reg::HOST_WRITE), 3, 0x5a01] {
         cmd(&mut s, w);
     }
 
@@ -297,7 +292,7 @@ fn a_clipped_transfer_draws_chunk_by_chunk_and_interrupts_on_the_last() {
 
     cmd(&mut s, 0x0001_0444);
     cmd(&mut s, 0);
-    for w in [select(ODSY_REG_HOST_WRITE), 0xd0a, 0x5a02] {
+    for w in [select(reg::HOST_WRITE), 0xd0a, 0x5a02] {
         cmd(&mut s, w);
     }
     assert_eq!(ram.half(FENCE_BASE + 2 * 0xd0a), 0x5a02);
@@ -336,7 +331,7 @@ fn an_image_transfer_skips_the_row_gap_and_crosses_pages() {
     assert!(rec.events(DMA_VECTOR).is_empty(), "the header did not ask for the interrupt");
 
     // The same transfer asking for it: the pixels again, and the packet.
-    header[7] |= ODSY_DMA_IRQ_REQUEST;
+    header[7] |= dma::IRQ_REQUEST;
     put_table(&ram, TABLE, header, &entries);
     descriptor(&mut s, TABLE);
     assert_eq!(pixel(&s, 0, 200, 300), 0xff00_00ff);
@@ -444,12 +439,12 @@ fn an_xputimage_pixel_in_abgr_order_lands_orange_not_blue() {
 fn a_context_switch_writes_its_done_word_into_the_shadow_page() {
     let (mut s, rec, ram) = board_with_ram();
     let base = 0xb70000u64;
-    reg_write(&mut s, ODSY_CTX_SHADOW_ADDR_UPPER, 0);
-    reg_write(&mut s, ODSY_CTX_SHADOW_ADDR_LOWER, base as u32);
-    let done = |ram: &Ram| ram.get(base + ODSY_CTX_SWITCH_DONE_OFFSET, 4);
+    reg_write(&mut s, ctx::SHADOW_ADDR_UPPER, 0);
+    reg_write(&mut s, ctx::SHADOW_ADDR_LOWER, base as u32);
+    let done = |ram: &Ram| ram.get(base + ctx::SWITCH_DONE_OFFSET, 4);
     assert_eq!(done(&ram), [0; 4]);
 
-    s.mmio_write(ODSY_CTX_SWITCH_PORT, 0x0000_0700_0001_0001, 8);
+    s.mmio_write(ctx::SWITCH_PORT, 0x0000_0700_0001_0001, 8);
 
     assert_ne!(done(&ram), [0; 4]);
     assert!(rec.silent());
@@ -465,7 +460,7 @@ fn a_context_switch_with_no_shadow_address_writes_nothing() {
     let (mut s, _, ram) = board_with_ram();
     let before = ram.get(0, 0x2000);
 
-    s.mmio_write(ODSY_CTX_SWITCH_PORT, 0x0000_0700_0001_0001, 8);
+    s.mmio_write(ctx::SWITCH_PORT, 0x0000_0700_0001_0001, 8);
 
     assert_eq!(ram.get(0, 0x2000), before);
 }
