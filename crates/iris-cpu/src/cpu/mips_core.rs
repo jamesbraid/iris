@@ -2505,6 +2505,7 @@ impl MipsCore {
 /// ExecStatus = u32`. `EXEC_IS_TLB_REFILL`/`EXEC_IS_XTLB_REFILL`'s bit
 /// values (`1 << 28`, `1 << 29`) are inlined below; their canonical
 /// definitions and doc comments live in `mips_exec.rs`.
+#[inline]
 pub fn deliver_exception(core: &mut MipsCore, status: u32) {
     // The interpreter maintains `pc`/`in_delay_slot` live on every dispatch,
     // so reading them here is exactly right for its callers. Compiled code
