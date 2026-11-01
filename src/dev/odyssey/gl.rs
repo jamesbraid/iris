@@ -747,6 +747,9 @@ impl GlPixelJob {
     pub unsafe fn pixels<'a>(&self) -> GlPixels<'a> {
         let s = &self.spans;
         let st = &self.state;
+        // SAFETY: the caller's contract (this function's # Safety) is
+        // `Span::bytes`'s: the planes belong to the raster unit or to a
+        // caller it has finished for, so the spans' bytes are not aliased.
         unsafe {
             GlPixels {
                 state: GlPixelState { did: s.did.bytes(), ..*st },
