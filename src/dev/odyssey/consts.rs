@@ -983,9 +983,8 @@ pub(super) mod alpha {
     pub const FUNC_MASK: u32 = 0x7;
     pub const REF_MASK: u32 = 0xfff;
     /// The field is trunc(x * 4096), with 1.0 sent as 4095 (the clamp) and
-    /// 0x800 = 0.5. Only the clamp is chosen here: the alpha test compares at
-    /// 12 bits by floor, where /4096 and /4095 floor to the same field for
-    /// every reference, so the scale cannot be seen.
+    /// 0x800 = 0.5. INFERRED (graded): the board compares min(4095,
+    /// floor(4096 a)), and the vendor frames rule out field / 4095.
     pub const REF_SCALE: f32 = 4096.0;
     pub const REF_ONE: u32 = 0xfff;
 }

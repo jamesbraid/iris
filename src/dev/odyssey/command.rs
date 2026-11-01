@@ -480,8 +480,8 @@ impl Board {
 
                 args[0] = GL_NEVER_ENUM + ((word >> alpha::FUNC_SHIFT) & alpha::FUNC_MASK);
                 // The reference is a 12-bit field, x4096 with 1.0 sent as 4095
-                // (ESTABLISHED). The 12-bit floor comparison cannot tell /4096
-                // from /4095, so the decode is invisible.
+                // (ESTABLISHED). Decoding it as field / 4096 is INFERRED; the
+                // vendor frames rule out field / 4095.
                 let field = word & alpha::REF_MASK;
                 let reference = if field == alpha::REF_ONE { 1.0 } else { field as f32 / alpha::REF_SCALE };
                 args[1] = f32_bits(reference);
