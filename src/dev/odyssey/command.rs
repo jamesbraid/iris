@@ -479,6 +479,7 @@ impl Board {
                 let mut args = [0u32; 2];
 
                 args[0] = GL_NEVER_ENUM + ((word >> alpha::FUNC_SHIFT) & alpha::FUNC_MASK);
+                // The library encodes 1.0 as 4095 (ESTABLISHED).
                 args[1] = f32_bits((word & alpha::REF_MASK) as f32 / alpha::REF_SCALE);
                 self.gl_feed(op::ALPHA_FUNC as u16, &args);
             }
@@ -755,7 +756,9 @@ impl Board {
             }
             0x0740 => {
                 self.prim.restart_select = self.cmd.operand[0];
-                if self.prim.restart_select != 0x1e0 {
+                // The kernel selects 0x1ed as well as 0x1e0. What 0x1ed selects is
+                // UNKNOWN: it is accepted and 0x0741 does nothing for it.
+                if self.prim.restart_select != 0x1e0 && self.prim.restart_select != 0x1ed {
                     self.cmd_unimplemented(0x740);
                 }
             }

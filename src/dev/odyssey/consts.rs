@@ -931,8 +931,8 @@ pub(super) mod tex {
     pub const MIN_NEAREST_MIPMAP_NEAREST: u32 = 0x40;
     pub const MIN_LINEAR_MIPMAP_LINEAR: u32 = 0xa0;
 
-    // Sampler word 4 bits 27:23, the texel components
-    pub const COMPONENTS_MASK: u32 = 0x0f800000;
+    // Sampler word 4 bits 25:23, the texel class
+    pub const COMPONENTS_MASK: u32 = 0x03800000;
 
     // Word 4 bit 17
     pub const SAMPLER_BIT17: u32 = 1 << 17;
@@ -982,7 +982,7 @@ pub(super) mod alpha {
     pub const FUNC_SHIFT: u32 = 12;
     pub const FUNC_MASK: u32 = 0x7;
     pub const REF_MASK: u32 = 0xfff;
-    pub const REF_SCALE: f32 = 4096.0;
+    pub const REF_SCALE: f32 = 4095.0;
 }
 
 pub(super) mod blend {

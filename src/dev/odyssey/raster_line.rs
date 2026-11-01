@@ -642,7 +642,9 @@ impl SoftDraw<'_> {
 
     /// Aliased square-point centring follows OpenGL 1.2.1, 3.3, on the shared
     /// snapped subpixel grid. A smoothed point takes the
-    /// box-filter coverage about its snapped centre (3.3.2).
+    /// box-filter coverage about its snapped centre (3.3.2). MODEL CHOICE:
+    /// the board's coverage rule for a smoothed point is UNKNOWN; a point of
+    /// size 1 covers about pi/4 of a pixel at its centre.
     pub fn point_projected(&self, pv: &SoftVertex, provoking: Option<&[f32]>, offset: f64) {
         let sub = self.rules.subpixel_bits as i32;
         let v = *pv;

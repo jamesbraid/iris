@@ -35,7 +35,7 @@ use super::raster::{cmax, cmin, GlTexImage, GlTexLevel, GL_TEX_LEVELS_MAX};
 /// components the texel words hold, so class 5 samples with alpha 1 through
 /// the base format GL_RGB; that the board forces alpha to 1 for class 5 is
 /// INFERRED, not established. `components` is the word masked by
-/// tex::COMPONENTS_MASK, so bits 27:26 set name no class.
+/// tex::COMPONENTS_MASK.
 pub fn texture_class_format(components: u32) -> Option<u32> {
     match components {
         0x00800000 => Some(GL_ALPHA),
@@ -361,9 +361,9 @@ const MIN_CODE_LINEAR_MIPMAP_LINEAR: u32 = 5;
 /// Word 4's minification code for GL_NEAREST_MIPMAP_NEAREST.
 const MIN_CODE_NEAREST_MIPMAP_NEAREST: u32 = 2;
 
-/// Word 0 bit 30 and word 4 bits 31:29, 27:26 and 16:14 are never written.
+/// Word 0 bit 30 and word 4 bits 31:29 and 16:14 are never written.
 const SIZE_WORD_UNKNOWN: u32 = 0x40000000;
-const MODE_WORD_UNKNOWN: u32 = 0xec01c000;
+const MODE_WORD_UNKNOWN: u32 = 0xe001c000;
 /// Words 1 to 3: bits 31:24 and 17 are never written.
 const AXIS_WORD_UNKNOWN: u32 = 0xff020000;
 /// Words 5 and 6 bits 31:25, and word 5 bit 24, are never written.
