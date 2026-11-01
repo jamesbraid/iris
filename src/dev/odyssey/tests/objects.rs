@@ -417,8 +417,8 @@ fn the_format_index_table_lists_the_sixteen_emitted_indices() {
 }
 
 /// Sampler word 4 bits 25:23 are the class: 1 alpha, 2 luminance, 3
-/// luminance-alpha, 4 intensity, 5 RGB, 6 RGBA. Class 0 and 7, and anything
-/// in bits 27:26, name no components.
+/// luminance-alpha, 4 intensity, 5 RGB, 6 RGBA. Class 0 and 7 name no
+/// components, and bits 27:26 are not part of the class.
 #[test]
 fn the_sampler_class_names_the_components() {
     let want = [None, Some(GL_ALPHA), Some(GL_LUMINANCE), Some(GL_LUMINANCE_ALPHA), Some(GL_INTENSITY), Some(GL_RGB), Some(GL_RGBA), None];
@@ -427,7 +427,7 @@ fn the_sampler_class_names_the_components() {
         let word = (class as u32) << 23;
 
         assert_eq!(texture_class_format(word & tex::COMPONENTS_MASK), *format, "class {class}");
-        assert_eq!(texture_class_format((word | 0x0800_0000) & tex::COMPONENTS_MASK), None, "class {class} with bit 27");
+        assert_eq!(texture_class_format((word | 0x0800_0000) & tex::COMPONENTS_MASK), *format, "class {class} with bit 27");
     }
 }
 
