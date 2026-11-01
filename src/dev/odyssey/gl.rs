@@ -42,6 +42,7 @@ use super::raster::{
     cmax, cmin, GL_TEX_LEVELS_MAX, GlTexImage, GlTexLevel, GlTexPyramid, NoTexels, Planes,
     RasterColour, RasterRules, RasterTarget, Texels,
 };
+use super::sampler::{texture_level_format, Refusal, TexelFormat, Wrap};
 use super::raster_unit::{
     primitive_cost, rect_cost, touch_row, LINE_PHASE_ON_RASTER, PlaneSpans, RasterCtx, Span,
     TOUCHED_OVERLAY, TouchedRows,
@@ -1097,8 +1098,7 @@ impl BoardTexels<'_> {
         let mut texture = *self.chain.storage.get(level as usize)?;
 
         if texture.height == 1 && !texture.border_rows {
-            if (texture.width != 2 && texture.width != 4 && texture.width != 8 && texture.width != 64)
-                || y != 0
+            if y != 0
                 || texture.offset == 0
                 || (x != -1 && x != texture.width as i32)
             {
@@ -1117,8 +1117,7 @@ impl BoardTexels<'_> {
         {
             return None;
         }
-        // Setup validates the complete captured 4-by-4 border region; for a
-        // larger bordered image it checks only that the rows exist.
+        // Setup takes a bordered level only when its whole border was written.
         texture.offset -= texture.stride + 1;
         texture.width += 2;
         texture.height += 2;
@@ -1245,13 +1244,17 @@ impl Texels for BoardTexels<'_> {
     }
 }
 
-/// A volume level's slices sit 64 << word 2 address units apart. OBSERVED
-/// three ways on the model: the captured 8x8x8 levels (word 2 1, 0x80
-/// apart), the captured stored 2x2x2 (word 2 4, 0x400 apart) and a
-/// 128x128x64 RGBA volume (word 2 6, 64 slice objects 0x1000 apart). That
-/// word 2 is the log2 of the slice allocation is INFERRED.
-pub(super) fn volume_slice_stride(level_word2: u32) -> u64 {
-    64u64.wrapping_shl(level_word2)
+/// A volume level's slices sit 2^(word 2) tiles of 256 texels apart, each
+/// texel the bytes the library books for the level's format, in 16-byte
+/// address units. The library places each slice's upload so and sends the
+/// tile count's base-2 ceiling in word 2 (ESTABLISHED). That the board
+/// derives its slice stride the same way is INFERRED: it is the only reading
+/// under which an upload and a later sample agree, as are the 16-byte unit
+/// and the 256-texel tile. For a 4-byte format this gives the spacing seen
+/// three ways on the model: 0x80 apart for word 2 1, 0x400 for 4 and 0x1000
+/// for 6.
+pub(super) fn volume_slice_stride(level_word2: u32, format: TexelFormat) -> u64 {
+    (256u64 * format.booked() as u64 / 16).wrapping_shl(level_word2)
 }
 
 /// The detail function table (0x3e40-0x3e4f): the GL library fills its 256
@@ -1365,69 +1368,29 @@ impl Board {
     }
 }
 
-/// Sampler word 4 bits 7:5 are the minification code (0 nearest, 1 linear,
-/// 2 to 5 the four mipmap modes in GL order) and bits 4:1 the
-/// magnification code (2 linear detail, 3 detail alpha, 4 detail colour).
-/// With a detail magnification filter the GL library sends GL_NEAREST as
-/// code 2 and GL_LINEAR as code 5 (ESTABLISHED as the library's setter), so
-/// a detail word carries code 2 or 5. The model samples each code as the
-/// mipmap mode it names: INFERRED; what the board does with code 2 or 5
-/// under a detail filter is UNKNOWN.
-/// Word 4 bit 17: set for GL_LINEAR_MIPMAP_LINEAR and for GL_PHASE_SGIX,
-/// clear otherwise (ESTABLISHED as the library's setter). Its effect on the
-/// board is UNKNOWN. With minification code 5 the model samples as that
-/// code says and ignores the bit; with any other code it can only mean
-/// GL_PHASE_SGIX, which the model does not implement, so the draw drops.
-/// Bits 27:23 are the texel components, which the format decode checks,
-/// and the wrap fields must be repeat.
-pub(super) fn texture_detail_filter(word: u32) -> u32 {
-    let min = word & tex::MIN_MASK;
-
-    if min != tex::MIN_NEAREST_MIPMAP_NEAREST && min != tex::MIN_LINEAR_MIPMAP_LINEAR {
-        return 0;
-    }
-    match word & !tex::MIN_MASK & !tex::COMPONENTS_MASK {
-        0x10000004 => GL_LINEAR_DETAIL_SGIS,
-        0x10000006 => GL_LINEAR_DETAIL_ALPHA_SGIS,
-        0x10000008 => GL_LINEAR_DETAIL_COLOR_SGIS,
-        _ => 0,
-    }
-}
-
-/// The texel components a level descriptor's word 1 names, from its bits
-/// 31:30 and 25:20 (one board format index; ESTABLISHED as one six-bit field
-/// in the datasheet). Only the indices the model has seen paired with a
-/// component set are decoded: 17 with size 1 is RGBA, 13 is RGB (SGI Quake's
-/// world textures) and 12 and 11 are RGB and luminance-alpha (the mip-level
-/// builder's templates). The model keeps whole texel words, so the index
-/// picks the components alone, not a bit layout. UNKNOWN: the rest of the
-/// index space.
-pub fn texture_level_format(word1: u32) -> Option<u32> {
-    match word1 & 0xc3f00000 {
-        0x41100000 => Some(GL_RGBA),
-        0x00d00000 | 0x00c00000 => Some(GL_RGB),
-        0x00b00000 => Some(GL_LUMINANCE_ALPHA),
-        _ => None,
-    }
-}
-
 impl Board {
     /// The detail image at level-table entry `descriptor`, held as a plain 2D
     /// level is: its row is its width in 16-texel units rounded up to even,
     /// and its entry's word 1 carries no bits outside the format and that
-    /// stride (the plain level rule in Board::texture_setup()).
+    /// stride (Board::texture_setup()).
     ///
-    /// The entry's word 1 bits 31:30 and 25:20 give the image's own format,
-    /// decoded by texture_level_format() whatever the base level's is. This
-    /// is a MODEL CHOICE: the stock library never sends a detail entry whose
-    /// format differs from the primary's, and what the board does with one is
-    /// UNKNOWN (it may ignore the field or misread the texels). A format the
-    /// model has no decode for refuses the draw.
-    pub fn texture_detail_backing_setup(&mut self, chain: &mut TextureChain, descriptor: u32, width: u32, height: u32) -> bool {
+    /// The entry's word 1 bits 31:30 and 25:20 give the image's own index and
+    /// size code, which must be a table row; its components are the
+    /// primary's, `primary`, since the board is sent only the primary's class
+    /// (texture_level_format()). An index the table does not list refuses
+    /// the draw.
+    pub(super) fn texture_detail_backing_setup(
+        &mut self,
+        chain: &mut TextureChain,
+        primary: u32,
+        descriptor: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), Refusal> {
         let e = (descriptor * 3) as usize;
         let entry = [self.tex.levels[e], self.tex.levels[e + 1], self.tex.levels[e + 2]];
-        let Some(base_format) = texture_level_format(entry[1]) else {
-            return false;
+        let Some(base_format) = texture_level_format(entry[1], primary) else {
+            return Err(Refusal("a detail level's format index or size code is not one the library emits"));
         };
         let base = entry[0] & 0x1fffffff;
         let stride_units = (width.div_ceil(16) + 1) & !1u32;
@@ -1438,10 +1401,10 @@ impl Board {
             || entry[2] != 0
             || self.objects.count > ODSY_OBJECTS
         {
-            return false;
+            return Err(Refusal("a detail level that is not a plain level"));
         }
         let Some(o) = self.object_find(base) else {
-            return false;
+            return Err(Refusal("a detail level with no object"));
         };
         let end = (height.wrapping_sub(1) as u64)
             .wrapping_mul(self.objects.width[o] as u64)
@@ -1454,7 +1417,7 @@ impl Board {
             || end > self.objects.mem.size / 4
             || !region_written
         {
-            return false;
+            return Err(Refusal("a detail level whose object does not hold it written"));
         }
         chain.detail_storage = Texture {
             offset: self.objects.offset[o],
@@ -1476,7 +1439,7 @@ impl Board {
             read_texel: true,
             ..Default::default()
         };
-        true
+        Ok(())
     }
 }
 
@@ -1523,672 +1486,26 @@ impl GlTexImage<'_> {
     /// word 0's log2 field. That the board applies it only under GL_CLAMP, and
     /// at every level as the same fraction of the image, is INFERRED from the
     /// extension. Under other wraps a smaller value is ignored. A value above
-    /// the size cannot come from the library and is left to fail the size
-    /// check. Limitation: the R axis's clamp (word 3) is not applied; a volume
-    /// whose word 3 is below its depth stays unsupported.
-    /// Returns the width and height the sampler then takes.
-    pub fn texture_max_clamp(&mut self, sampler_size: u32, ws: u32, wt: u32, mut width: u32, mut height: u32) -> (u32, u32) {
-        let span_s = 1u32 << ((sampler_size >> 10) & 31);
-        let span_t = 1u32 << ((sampler_size >> 5) & 31);
-
+    /// the size cannot come from the library and refuses the draw
+    /// (Board::texture_sampler()). Limitation: the R axis's clamp (word 3) is
+    /// not applied; a volume whose word 3 is below its depth stays
+    /// unsupported (Board::texture_support()).
+    pub(super) fn texture_max_clamp(&mut self, size: [u32; 3], max_clamp: [u32; 3], wrap: [Wrap; 3]) {
         self.max_clamp_s = 1.0;
         self.max_clamp_t = 1.0;
         self.max_clamp_r = 1.0;
-        if width < span_s {
-            if ws == 2 {
-                self.max_clamp = true;
-                self.max_clamp_s = width as f64 / span_s as f64;
-            }
-            width = span_s;
+        if max_clamp[0] < size[0] && wrap[0] == Wrap::Clamp {
+            self.max_clamp = true;
+            self.max_clamp_s = max_clamp[0] as f64 / size[0] as f64;
         }
-        if height < span_t {
-            if wt == 2 {
-                self.max_clamp = true;
-                self.max_clamp_t = height as f64 / span_t as f64;
-            }
-            height = span_t;
+        if max_clamp[1] < size[1] && wrap[1] == Wrap::Clamp {
+            self.max_clamp = true;
+            self.max_clamp_t = max_clamp[1] as f64 / size[1] as f64;
         }
-        (width, height)
     }
 }
 
 impl Board {
-    pub fn texture_setup(&mut self, image: &mut GlTexImage<'static>, chain: &mut TextureChain) -> bool {
-        let width_word = self.tex.sampler[1];
-        let height_word = self.tex.sampler[2];
-        let mut width = width_word;
-        let mut height = height_word;
-        let depth = self.tex.sampler[3];
-        let phase = (self.tex.sampler[4] & tex::SAMPLER_BIT17) != 0
-            && (self.tex.sampler[4] & tex::MIN_MASK) != tex::MIN_LINEAR_MIPMAP_LINEAR;
-        let word = self.tex.sampler[4] & !tex::SAMPLER_BIT17;
-        let components = word & tex::COMPONENTS_MASK;
-        let mut sampler_size = self.tex.sampler[0];
-        // The library's texture move (level descriptor 60), which draws a
-        // pixel zoom, sends its sampler without the size word's bit 27 and
-        // the sampler word's bit 28, and with bits 22, 21 and 18 set; the
-        // mip-level builder (Board::texture_build_level()) sends the same
-        // word with bit 28. INFERRED (datasheet, "Pixel zoom: the texture
-        // move and its rectangle"): these are the move's own marks on an
-        // otherwise plain 2D image. UNKNOWN: what the marked bits mean on the
-        // board. Read it as the plain image. The move writes no wrap or filter
-        // bit (word bits 13:0), so those are the context's and are read as
-        // they stand: the magnification filter is the context's (INFERRED
-        // linear by default), not one the zoom chooses. The size word's
-        // texture-offset code (bits 28:26) is 2 only for an object whose two
-        // offset fields are both 2, and 0 otherwise, so bit 27 may be set and
-        // bit 26 never is (ESTABLISHED, same section); the move is read as
-        // the plain image either way.
-        let texture_move = self.tex.level0 == 60
-            && (sampler_size & 0x04000000) == 0
-            && (word & 0x10000000) == 0
-            && (word & !components & !0x3fff) == 0x00640000;
-        let word = if texture_move { (word & !0x00640000) | 0x10000000 } else { word };
-        // It also leaves the depth word 0 where a 2D image carries 1.
-        let depth = if texture_move { 1 } else { depth };
-        if texture_move {
-            sampler_size |= 0x08000000;
-        }
-        // A detail magnification filter names a detail image in word 0.
-        let detail = if texture_detail_filter(word) != 0 { texture_detail_sampler(sampler_size) } else { None };
-        // Word 0's detail combine and image size (bits 31 and 24:15) are
-        // stale unless word 4 carries a detail magnification code
-        // (ESTABLISHED, datasheet), so a plain image ignores them. Bits 29:25
-        // share the texture-offset code's bits and stay checked as before.
-        if detail.is_none() && !matches!((word >> 1) & 0xf, 2..=4) {
-            sampler_size &= 0x7e00_7fff;
-        }
-        let detail_identity = detail.is_some();
-        let detail_filter = if detail_identity { texture_detail_filter(word) } else { 0 };
-        let detail_sampler = detail.unwrap_or_default();
-        let detail_weight = if detail_identity { self.texture_detail_function_weight() } else { None };
-        let tex_shape = self.tex.mode & (tex::MODE_1D | tex::MODE_2D | tex::MODE_3D);
-        let three_d = (self.tex.mode & tex::MODE_3D) != 0;
-        let three_d_shape = tex_shape == tex::MODE_3D
-            && width >= 2
-            && height >= 2
-            && depth >= 2
-            && (width as u64).is_power_of_two()
-            && (height as u64).is_power_of_two()
-            && (depth as u64).is_power_of_two()
-            && self.tex.level0 == 0;
-        let ws = (word >> 12) & 3;
-        let wt = (word >> 10) & 3;
-        let clamp = ws == 2 || wt == 2;
-        let border = ws == 3 || wt == 3;
-        let one_d_shape = tex_shape == tex::MODE_1D && height == 1 && depth == 1 && self.tex.level0 == 0;
-        let two_d_shape =
-            tex_shape == tex::MODE_2D && (width == 2 || width == 4) && height == 2 && depth == 1 && self.tex.level0 == 0;
-        let stored_border = ((one_d_shape
-            && (width == 2 || width == 4 || width == 8 || width == 64)
-            && (word == 0x03002000 || word == 0x03002022))
-            || (two_d_shape && (word == 0x03002800 || word == 0x03002822))
-            || (three_d_shape && (word == 0x03002a00 || word == 0x03002a22)))
-            && (self.tex.sampler[5] & 0xff000000) == 0
-            && (self.tex.sampler[6] & 0xff000000) == 0x01000000;
-        let three_d_stored = stored_border && three_d_shape;
-        let three_d_clamp = three_d_shape && (three_d_stored || word == 0x13002a00 || word == 0x13002a22);
-        let one_d_clamp = one_d_shape && (stored_border || word == 0x13002000 || word == 0x13002022);
-        let two_d_clamp = two_d_shape && (stored_border || word == 0x13002800 || word == 0x13002822);
-        let captured_clamp = one_d_clamp || two_d_clamp || three_d_clamp;
-        let two_d_stored = stored_border && two_d_shape;
-        let filter = word & 0xe2;
-        let min = filter & 0xe0;
-        // A two-dimensional image of any size with its one-texel border stored
-        // around it, under any filter: word 4's bit 28 clear and word 6's top
-        // byte 1, the marks the captured stored-border uploads carry. Seen from
-        // a 512x512 GL_CLAMP linear-mipmap image whose ten levels each sit 16
-        // texels in from their allocation's corner, with the border at row and
-        // column 15. The captured small shapes keep their own checks.
-        let general_border = !stored_border
-            && !detail_identity
-            && !three_d
-            && tex_shape == tex::MODE_2D
-            && ws != 3
-            && wt != 3
-            && word == (components | (ws << 12) | (wt << 10) | filter)
-            && (self.tex.sampler[5] & 0xff000000) == 0
-            && (self.tex.sampler[6] & 0xff000000) == 0x01000000;
-        let bordered = stored_border || general_border;
-        // GL_CLAMP (wrap field 2) on both axes outside the captured shapes,
-        // under any filter. The board's sampling is assumed to be the OpenGL
-        // 1.2.1 rule (section 3.8.4), which the shared sampler implements:
-        // linear taps past the edge take the border colour, words 5 and 6.
-        // GL_CLAMP on one axis only stays refused; no client has been seen to
-        // send it.
-        let general_clamp = ws == 2 && wt == 2 && !captured_clamp;
-        let colour_table_l8 = word == 0x11500001 || word == 0x11500003 || word == 0x11600001;
-        let colour_table_rgba8_rgb = word == 0x13500001;
-        let colour_table_rgba8_rgba = word == 0x13600001;
-        let colour_table = colour_table_l8 || colour_table_rgba8_rgb || colour_table_rgba8_rgba;
-        let colour_table_disabled = word == 0x11500000;
-        let first = self.tex.level0 & 0x3f;
-        let count: u32;
-        let terminal: u32;
-        let lo = texture_lod_limit(self.tex.lod[2]);
-        let hi = texture_lod_limit(self.tex.lod[3]);
-        const MIN_FILTERS: [u32; 6] = [
-            GL_NEAREST,
-            GL_LINEAR,
-            GL_NEAREST_MIPMAP_NEAREST,
-            GL_LINEAR_MIPMAP_NEAREST,
-            GL_NEAREST_MIPMAP_LINEAR,
-            GL_LINEAR_MIPMAP_LINEAR,
-        ];
-        'unsupported: {
-            if detail_identity {
-                if detail_weight.is_none()
-                    || self.tex.level0 != 0
-                    || depth != 1
-                    || tex_shape != tex::MODE_2D
-                {
-                    break 'unsupported;
-                }
-                // Word 0 bits 31:15 are the detail image's; the base level's
-                // sizes are checked below as a plain image's.
-                sampler_size = 0x08000000 | (sampler_size & 0x7fff);
-            }
-            if border {
-                width &= 0xffff;
-                height &= 0xffff;
-            } else {
-                // An axis with wrap field 1 (clamp to edge) carries 0x4 in bits
-                // 23:16 of its size word, as a Performer-style client sends.
-                // Other axes carry none. INFERRED from that pairing, axis by
-                // axis, the way clamp to border's axes carry 0xfc.
-                if (width_word >> 16) == (if ws == 1 { 0x4u32 } else { 0 }) {
-                    width &= 0xffff;
-                }
-                if (height_word >> 16) == (if wt == 1 { 0x4u32 } else { 0 }) {
-                    height &= 0xffff;
-                }
-            }
-            if !detail_identity {
-                (width, height) = image.texture_max_clamp(sampler_size, ws, wt, width, height);
-            }
-            if self.gl_index_mode() {
-                break 'unsupported;
-            }
-            match components {
-                0x01000000 => image.base_format = GL_LUMINANCE,
-                0x01800000 => image.base_format = GL_LUMINANCE_ALPHA,
-                0x00800000 => image.base_format = GL_ALPHA,
-                0x02000000 => image.base_format = GL_INTENSITY,
-                0x02800000 => image.base_format = GL_RGB,
-                0x03000000 => image.base_format = GL_RGBA,
-                _ => break 'unsupported,
-            }
-            let bf = image.base_format;
-            if width == 0
-                || height == 0
-                || width > i32::MAX as u32
-                || height > i32::MAX as u32
-                || !(width as u64).is_power_of_two()
-                || !(height as u64).is_power_of_two()
-                || (three_d
-                    && (depth == 0
-                        || depth > ODSY_VOLUME_SLICES
-                        || !(depth as u64).is_power_of_two()
-                        || (self.tex.mode & (tex::MODE_1D | tex::MODE_2D)) != 0))
-                || (!three_d && depth != 1)
-                || sampler_size
-                    != (0x08000000 | (width.trailing_zeros() << 10) | (height.trailing_zeros() << 5) | (if three_d { depth.trailing_zeros() } else { 0 }))
-                || ws > 3
-                || wt > 3
-                || (!border
-                    && !captured_clamp
-                    && !general_clamp
-                    && !general_border
-                    && (self.tex.sampler[5] != 0 || self.tex.sampler[6] != 0))
-                || (general_clamp && !general_border && ((self.tex.sampler[5] | self.tex.sampler[6]) & 0xff000000) != 0)
-                || (captured_clamp && !stored_border && ((self.tex.sampler[5] | self.tex.sampler[6]) & 0xff000000) != 0)
-                || (border
-                    && (ws != 3
-                        || wt != 3
-                        || width_word != (0x00fc0000 | width)
-                        || height_word != (0x00fc0000 | height)
-                        || ((self.tex.sampler[5] | self.tex.sampler[6]) & 0xff000000) != 0))
-                || (general_clamp && three_d)
-                || (clamp && !general_clamp && !captured_clamp)
-                || (border
-                    && !captured_clamp
-                    && ((clamp && (ws != 2 || wt != 2)) || tex_shape != tex::MODE_2D || bf != GL_RGBA || filter != 0))
-                || (min != 0 && min != 0x20 && min != 0x40 && min != 0x60 && min != 0x80 && min != 0xa0)
-                || (!colour_table
-                    && !colour_table_disabled
-                    && !bordered
-                    && !three_d_clamp
-                    && word != (0x10000000 | components | (ws << 12) | (wt << 10) | filter)
-                    && detail_filter == 0)
-                || ((self.tex.lod[0] | self.tex.lod[1] | self.tex.lod[2] | self.tex.lod[3]) & !tex::LOD_MASK) != 0
-                || !self.texture_scale_bias_known()
-                || phase
-                || self.tex.offset[0] != 0
-                || self.tex.offset[1] != 0
-                || self.tex.offset[2] != 0
-                || (min >= 0x40 && lo > hi)
-                || (colour_table
-                    && ((colour_table_l8 && bf != GL_LUMINANCE)
-                        || ((colour_table_rgba8_rgb || colour_table_rgba8_rgba) && bf != GL_RGBA)
-                        || three_d
-                        || tex_shape != tex::MODE_2D
-                        || self.tex.colour_table_valid[0] != 0xffff
-                        || self.tex.colour_table_valid[1] != 0xffff))
-                || (colour_table_disabled && (bf != GL_LUMINANCE || three_d || tex_shape != tex::MODE_2D))
-                || self.tex.env[0] < 1
-                || self.tex.env[0] > 4
-                || (self.tex.env[0] == 3
-                    && (bf == GL_ALPHA || bf == GL_LUMINANCE || bf == GL_LUMINANCE_ALPHA || bf == GL_INTENSITY))
-                || (self.tex.env[0] == 4
-                    && (((self.tex.env[1] | self.tex.env[2]) & 0xff000000) != 0 || self.tex.env[3] != 0 || self.tex.env[4] != 0))
-            {
-                break 'unsupported;
-            }
-            image.border = bordered as u32;
-            image.width = width;
-            image.height = height;
-            image.wrap_s = if border {
-                GL_CLAMP_TO_BORDER
-            } else if ws == 2 {
-                GL_CLAMP
-            } else if ws != 0 {
-                GL_CLAMP_TO_EDGE
-            } else {
-                GL_REPEAT
-            };
-            // A 1D image must not acquire a T-axis border tap during filtering.
-            image.wrap_t = if one_d_clamp {
-                GL_CLAMP_TO_EDGE
-            } else if border {
-                GL_CLAMP_TO_BORDER
-            } else if wt == 2 {
-                GL_CLAMP
-            } else if wt != 0 {
-                GL_CLAMP_TO_EDGE
-            } else {
-                GL_REPEAT
-            };
-            if border || captured_clamp || general_clamp {
-                image.border_color[0] = ((self.tex.sampler[5] >> 12) & 0xfff) as f32 / 4095.0f32;
-                image.border_color[1] = (self.tex.sampler[5] & 0xfff) as f32 / 4095.0f32;
-                image.border_color[2] = ((self.tex.sampler[6] >> 12) & 0xfff) as f32 / 4095.0f32;
-                image.border_color[3] = (self.tex.sampler[6] & 0xfff) as f32 / 4095.0f32;
-            }
-            image.mag_filter = if detail_filter != 0 {
-                detail_filter
-            } else if (filter & 2) != 0 {
-                GL_LINEAR
-            } else {
-                GL_NEAREST
-            };
-            image.min_filter = MIN_FILTERS[(min >> 5) as usize];
-            self.texture_lod_bias(image);
-
-            if three_d {
-                let e = (first * 3) as usize;
-                let entry = [self.tex.levels[e], self.tex.levels[e + 1], self.tex.levels[e + 2]];
-                let stride_units = entry[1] & 0xfff;
-                let expected_units = if three_d_stored { 4 } else { (width.div_ceil(16) + 1) & !1u32 };
-                let mut base = entry[0] & 0x1fffffff;
-                let mipmap = min >= 0x40;
-
-                // Observed small-volume mip levels follow the preceding level's
-                // slices, with one 128-byte address unit per slice. Larger-volume
-                // packing and nonzero table selectors are not established. Keep
-                // this bounded model policy separate from the level-zero address
-                // rule.
-                if first != 0
-                    || self.tex.level0 != 0
-                    || (!mipmap && word != 0x13000000 && word != 0x13000022 && !three_d_clamp)
-                    || (mipmap
-                        && ((filter != 0x40 && filter != 0xa0)
-                            || ws != 0
-                            || wt != 0
-                            || (bf != GL_RGB && bf != GL_RGBA)
-                            || width > 16
-                            || height > 16
-                            || depth > 16
-                            || stride_units != 2
-                            || entry[2] != 1))
-                    || self.tex.env[0] > 2
-                    || entry[1] != (0x41100000 | stride_units)
-                    || (three_d_stored && entry[2] != height + 2)
-                    || entry[2] == 0
-                    || stride_units != expected_units
-                    || base == 0
-                    || (three_d_stored
-                        && (bf != GL_RGBA || width > 48 || height > 30 || depth > 30 || (filter != 0 && filter != 0x22)))
-                    || self.objects.count > ODSY_OBJECTS
-                    || entry[2] > ODSY_VOLUME_SLICE_SHIFT_MAX
-                {
-                    break 'unsupported;
-                }
-                let slice_stride = volume_slice_stride(entry[2]);
-                // The captured 2x2x2 stored upload starts 15 slice strides above
-                // the level base. For this one captured profile the rule applies
-                // at any level base: a compatibility approximation of model
-                // traces that showed it at two bases. Physical V12 texture layout
-                // remains unqualified.
-                if three_d_stored && width == 2 && height == 2 && depth == 2 {
-                    let first_slice = slice_stride
-                        .checked_mul(15)
-                        .and_then(|s| s.checked_add(base as u64))
-                        .and_then(|s| u32::try_from(s).ok());
-
-                    let Some(first_slice) = first_slice else {
-                        break 'unsupported;
-                    };
-                    base = first_slice;
-                }
-                terminal = cmax(cmax(width.trailing_zeros(), height.trailing_zeros()), depth.trailing_zeros());
-                count = if mipmap && hi > 0 { cmin(terminal, ((hi + 255) / 256) as u32) + 1 } else { 1 };
-                if count > GL_TEX_LEVELS_MAX {
-                    break 'unsupported;
-                }
-                chain.clear();
-                let mut slice_next: u32 = 0;
-                for i in 0..count {
-                    let level_width = cmax(1, width >> i);
-                    let level_height = cmax(1, height >> i);
-                    let level_depth = cmax(1, depth >> i);
-                    if i != 0
-                        && (self.tex.levels[(i * 3) as usize] != 0
-                            || self.tex.levels[(i * 3 + 1) as usize] != 0
-                            || self.tex.levels[(i * 3 + 2) as usize] != 0)
-                    {
-                        break 'unsupported;
-                    }
-                    let level_slice = slice_next;
-                    let mut z = 0u32;
-                    while z < level_depth + (if three_d_stored { 2 } else { 0 }) {
-                        let slice_base = (z as u64)
-                            .checked_mul(slice_stride)
-                            .and_then(|o| o.checked_add(base as u64))
-                            .and_then(|s| u32::try_from(s).ok());
-
-                        let Some(slice_base) = slice_base else {
-                            break 'unsupported;
-                        };
-                        let Some(o) = self.object_find(slice_base) else {
-                            break 'unsupported;
-                        };
-                        let sb: u32 = if three_d_stored { 15 } else { 0 };
-                        let sb2: u32 = if three_d_stored { 2 } else { 0 };
-                        let storage_end = (sb as u64 + level_height as u64 - 1 + sb2 as u64)
-                            .checked_mul(self.objects.width[o] as u64)
-                            .and_then(|e| e.checked_add(self.objects.offset[o] as u64))
-                            .and_then(|e| {
-                                e.checked_add(if three_d_stored { level_width as u64 + 18 } else { level_width as u64 })
-                            });
-                        if self.objects.width[o] != stride_units * 16
-                            || self.objects.rows[o] < sb + level_height + sb2
-                            || !storage_end.is_some_and(|e| e <= self.objects.used as u64 && e <= self.objects.mem.size / 4)
-                        {
-                            break 'unsupported;
-                        }
-                        if three_d_stored && !self.object_region_written(o, 15, 15, level_width + 2, level_height + 2) {
-                            break 'unsupported;
-                        }
-                        if slice_next as usize >= self.tex.slice_offset.len() {
-                            break 'unsupported;
-                        }
-                        self.tex.slice_offset[slice_next as usize] = self.objects.offset[o];
-                        self.tex.slice_width[slice_next as usize] = self.objects.width[o];
-                        slice_next += 1;
-                        z += 1;
-                    }
-                    chain.touch(i);
-                    chain.volumes[i as usize] = TextureVolume {
-                        base,
-                        stride_units,
-                        level_word2: entry[2],
-                        width: level_width,
-                        height: level_height,
-                        depth: level_depth,
-                        base_format: image.base_format,
-                        words: self.objects.used,
-                        border: three_d_stored,
-                        first_slice: level_slice,
-                        slices: slice_next - level_slice,
-                        ..Default::default()
-                    };
-                    chain.touch(i);
-                    chain.levels[i as usize] = GlTexLevel {
-                        level: i,
-                        width: level_width,
-                        height: level_height,
-                        depth: level_depth,
-                        base_format: image.base_format,
-                        internal_format: image.base_format,
-                        read_texel_3d: true,
-                        ..Default::default()
-                    };
-                    if i + 1 < count {
-                        let next_base = (level_depth as u64)
-                            .checked_mul(slice_stride)
-                            .and_then(|n| n.checked_add(base as u64))
-                            .and_then(|n| u32::try_from(n).ok());
-
-                        let Some(next_base) = next_base else {
-                            break 'unsupported;
-                        };
-                        base = next_base;
-                    }
-                }
-                chain.volume = chain.volumes[0];
-                image.depth = depth;
-                image.volume = true;
-                image.wrap_r = if three_d_stored || (three_d_clamp && (word & 0x200) != 0) {
-                    GL_CLAMP
-                } else {
-                    GL_REPEAT
-                };
-                image.read_texel_3d = true;
-                image.border = three_d_stored as u32;
-                if three_d_stored {
-                    image.wrap_s = GL_CLAMP;
-                    image.wrap_t = GL_CLAMP;
-                    image.read_border_texel_3d = true;
-                }
-                if !self.texture_scale_bias_identity() {
-                    chain.volume.scale_bias = true;
-                    image.post_filter = true;
-                }
-                if mipmap {
-                    chain.pyramid = Some(PyramidShape {
-                        count,
-                        base_level: 0,
-                        max_level: count - 1,
-                        min_lod: lo as f64 / 256.0,
-                        max_lod: hi as f64 / 256.0,
-                    });
-                }
-                return true;
-            }
-
-            terminal = cmax((sampler_size >> 10) & 31, (sampler_size >> 5) & 31);
-            count = if min >= 0x40 && hi > 0 { cmin(terminal, ((hi + 255) / 256) as u32) + 1 } else { 1 };
-            if count > GL_TEX_LEVELS_MAX || first + count > ODSY_TEX_LEVELS {
-                break 'unsupported;
-            }
-            // An object holds only the rows a transfer wrote, and a client may
-            // define a level with no data and then write part of it, as SDL
-            // streams a frame into a larger texture. The rest of the level is
-            // still its storage, with contents GL leaves undefined: grow the
-            // object to the level's rows, the new ones reading 0. Before any
-            // level's place is taken, since growing may move objects. Growth
-            // that fits the store always succeeds (object_rows() forgets
-            // others to make room), and one that cannot is not tried, so a
-            // draw never waits on the raster unit for a growth that fails.
-            // Only an ordinary 2D level that holds some rows grows (origami
-            // datasheet, "Board-memory object store", origami#3192): an object
-            // that holds none stays missing, as before, since whether such a
-            // level is present is not decided; volume slices keep their own
-            // checks above. Sampling is not use, so finding a level here does
-            // not touch its object (Board::object_touch()).
-            if tex_shape == tex::MODE_2D && !bordered && !texture_move {
-                for i in 0..count {
-                    let e = ((first + i) * 3) as usize;
-                    let object = self.object_find(self.tex.levels[e] & 0x1fffffff);
-                    let stride_units = self.tex.levels[e + 1] & 0xfff;
-                    let (level_width, level_height) = (cmax(1, width >> i), cmax(1, height >> i));
-
-                    if let Some(o) = object {
-                        if self.objects.width[o] >= level_width
-                            && (stride_units == 0 || self.objects.width[o] == stride_units * 16)
-                            && self.objects.rows[o] != 0
-                            && self.objects.rows[o] < level_height
-                            && self.objects.width[o] as u64 * level_height as u64 <= ODSY_OBJ_POOL_WORDS as u64
-                        {
-                            self.object_rows(o, level_height);
-                        }
-                    }
-                }
-            }
-            chain.clear();
-            chain.volume.colour_table_alpha = colour_table_rgba8_rgba || word == 0x11600001;
-            chain.volume.colour_table = colour_table;
-            chain.volume.scale_bias = !self.texture_scale_bias_identity();
-            if chain.volume.colour_table || chain.volume.scale_bias {
-                image.post_filter = true;
-            }
-            for i in 0..count {
-                let e = ((first + i) * 3) as usize;
-                let entry = [self.tex.levels[e], self.tex.levels[e + 1], self.tex.levels[e + 2]];
-                let level_width = cmax(1, width >> i);
-                let level_height = cmax(1, height >> i);
-                let stride_units = entry[1] & 0xfff;
-                // A bordered level's row is its width plus 16 texels each side,
-                // in 16-texel units rounded up to even, as the unbordered rule.
-                let expected_units = if stored_border {
-                    if one_d_shape && level_width == 64 { 6 } else { 4 }
-                } else if general_border {
-                    ((level_width + 32).div_ceil(16) + 1) & !1u32
-                } else {
-                    (level_width.div_ceil(16) + 1) & !1u32
-                };
-                let base = entry[0] & 0x1fffffff;
-                let interior_x: u32 = if bordered { 16 } else { 0 };
-                let interior_y: u32 = if two_d_stored || general_border { 16 } else { 0 };
-                let rows = level_height + interior_y + (two_d_stored || general_border) as u32;
-                let require_backing = stored_border;
-
-                if (stored_border && (entry[1] != (if expected_units == 6 { 0x41100006 } else { 0x41100004 }) || base == 0))
-                    || (two_d_clamp
-                        && !stored_border
-                        && (filter != 0 || self.tex.sampler[5] != 0 || self.tex.sampler[6] != 0)
-                        && entry[1] != 0x41100002)
-                    || (entry[1] & 0x3c0ff000) != 0
-                    || entry[2] != 0
-                    || (i != 0 && (entry[1] & 0xc3f00000) != (self.tex.levels[(first * 3 + 1) as usize] & 0xc3f00000))
-                    || (base != 0 && stride_units != expected_units && !(count == 1 && stride_units == 0))
-                {
-                    break 'unsupported;
-                }
-                chain.touch(i);
-                chain.levels[i as usize] = GlTexLevel {
-                    level: i,
-                    width: level_width,
-                    height: level_height,
-                    base_format: image.base_format,
-                    internal_format: image.base_format,
-                    ..Default::default()
-                };
-                if base == 0 || self.objects.count > ODSY_OBJECTS {
-                    if require_backing {
-                        break 'unsupported;
-                    }
-                    continue;
-                }
-                let object = self.object_find(base);
-                let backed = object.filter(|&o| {
-                    // The texture move rounds the image up to a power of two
-                    // and the object holds only the rows written, which is
-                    // all the rectangle's coordinates reach.
-                    let rows = if texture_move { rows.min(self.objects.rows[o]).max(1) } else { rows };
-                    let end = ((rows - 1) as u64)
-                        .checked_mul(self.objects.width[o] as u64)
-                        .and_then(|e| e.checked_add(self.objects.offset[o] as u64))
-                        .and_then(|e| e.checked_add(interior_x as u64))
-                        .and_then(|e| e.checked_add(level_width as u64 + bordered as u64));
-                    !(self.objects.width[o] < level_width
-                        || (stride_units != 0 && self.objects.width[o] != stride_units * 16)
-                        || self.objects.rows[o] < rows
-                        || !end.is_some_and(|e| e <= self.objects.used as u64 && e <= self.objects.mem.size / 4))
-                });
-                let Some(o) = backed else {
-                    if require_backing {
-                        break 'unsupported;
-                    }
-                    continue;
-                };
-                if require_backing {
-                    let written = self.object_region_written(
-                        o,
-                        interior_x - 1,
-                        if two_d_stored { interior_y - 1 } else { 0 },
-                        level_width + 2,
-                        if one_d_shape { 1 } else { level_height + 2 },
-                    );
-
-                    if !written {
-                        break 'unsupported;
-                    }
-                }
-                chain.touch(i);
-                chain.storage[i as usize] = Texture {
-                    // Captured stored-border policy uses interior coordinate 16.
-                    offset: self.objects.offset[o].wrapping_add(interior_y.wrapping_mul(self.objects.width[o])).wrapping_add(interior_x),
-                    stride: self.objects.width[o],
-                    width: level_width,
-                    height: level_height,
-                    base_format: image.base_format,
-                    words: self.objects.used,
-                    border_rows: two_d_stored || general_border,
-                };
-                chain.levels[i as usize].read_texel = true;
-                if bordered {
-                    chain.levels[i as usize].border = 1;
-                    chain.levels[i as usize].read_border_texel = true;
-                }
-            }
-            chain.pyramid = Some(PyramidShape {
-                count,
-                base_level: 0,
-                max_level: count - 1,
-                min_lod: lo as f64 / 256.0,
-                max_lod: if min >= 0x40 { hi as f64 / 256.0 } else { 15.0 },
-            });
-            if detail_identity {
-                // The detail image's entry lies past the base chain's.
-                if first + count > detail_sampler.descriptor
-                    || !self.texture_detail_backing_setup(
-                    chain,
-                    detail_sampler.descriptor,
-                    detail_sampler.width,
-                    detail_sampler.height,
-                ) {
-                    break 'unsupported;
-                }
-                chain.detail_weight = detail_weight.unwrap_or_default();
-                image.detail_image = Some(chain.detail_image);
-                image.detail_level = detail_sampler.level;
-                image.detail_mode = detail_sampler.mode;
-                image.read_filter_weight = true;
-            }
-            return true;
-        }
-        let index_mode = self.gl_index_mode();
-        crate::dlog!(
-            LogModule::Odyssey,
-            "sgi-odyssey: unsupported texture state sampler {:#x} environment {}{}, draw dropped",
-            self.tex.sampler[4],
-            self.tex.env[0],
-            if index_mode { " colour-index" } else { "" }
-        );
-        false
-    }
-
     /// Rebuild shared state from board words; no borrowed image survives a draw.
     pub fn texture_vertex(&mut self) {
         const ENVIRONMENTS: [u32; 5] = [GL_REPLACE, GL_REPLACE, GL_MODULATE, GL_DECAL, GL_BLEND];
