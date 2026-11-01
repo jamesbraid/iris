@@ -169,6 +169,8 @@ pub struct Board {
     pub obj_full_reported: bool,
     pub obj_forget_reported: bool,
     pub board_oob_reported: bool,
+    /// Bit n set once format index n has been reported as refused.
+    pub tex_index_reported: u64,
 
     // The texture state words as last pushed.
     pub tex_mode: u32,
@@ -517,6 +519,7 @@ impl Default for Board {
             obj_full_reported: false,
             obj_forget_reported: false,
             board_oob_reported: false,
+            tex_index_reported: 0,
             tex_mode: 0,
             tex_sampler: [0; 7],
             tex_colour_table: [[0; ODSY_TEX_COLOUR_TABLE_ENTRIES as usize]; 2],
@@ -919,6 +922,7 @@ impl Board {
         self.obj_full_reported = false;
         self.obj_forget_reported = false;
         self.board_oob_reported = false;
+        self.tex_index_reported = 0;
         self.tex_mode = 0;
         self.tex_sampler = [0; 7];
         for t in self.tex_colour_table.iter_mut() {

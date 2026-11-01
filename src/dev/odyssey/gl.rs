@@ -1357,39 +1357,174 @@ pub fn texture_detail_filter(word: u32) -> u32 {
     }
 }
 
-/// The texel components a level descriptor's word 1 names, from its bits
-/// 31:30 and 25:20 (one board format index; ESTABLISHED as one six-bit field
-/// in the datasheet). Only the indices the model has seen paired with a
-/// component set are decoded: 17 with size 1 is RGBA, 13 is RGB (SGI Quake's
-/// world textures) and 12 and 11 are RGB and luminance-alpha (the mip-level
-/// builder's templates). The model keeps whole texel words, so the index
-/// picks the components alone, not a bit layout. UNKNOWN: the rest of the
-/// index space.
-pub fn texture_level_format(word1: u32) -> Option<u32> {
-    match word1 & 0xc3f00000 {
-        0x41100000 => Some(GL_RGBA),
-        0x00d00000 | 0x00c00000 => Some(GL_RGB),
-        0x00b00000 => Some(GL_LUMINANCE_ALPHA),
+/// Sampler word 4 bits 25:23 are the class of the texel format: 1 alpha, 2
+/// luminance, 3 luminance-alpha, 4 intensity, 5 RGB, 6 RGBA (ESTABLISHED as
+/// what the library sends). Bits 27:26 and the other class values have no
+/// known meaning. What the board does with the class is UNKNOWN. MODEL
+/// CHOICE: the class is read as the components the texel words hold, so class
+/// 5 samples with alpha 1 through the base format GL_RGB; that the board
+/// forces alpha to 1 for class 5 is INFERRED, not established. `components`
+/// is the word masked by ODSY_TEX_COMPONENTS_MASK.
+pub fn texture_class_format(components: u32) -> Option<u32> {
+    match components {
+        0x00800000 => Some(GL_ALPHA),
+        0x01000000 => Some(GL_LUMINANCE),
+        0x01800000 => Some(GL_LUMINANCE_ALPHA),
+        0x02000000 => Some(GL_INTENSITY),
+        0x02800000 => Some(GL_RGB),
+        0x03000000 => Some(GL_RGBA),
         _ => None,
     }
 }
 
+/// One row of the board's texel format index table: what a level descriptor's
+/// word 1 bits 25:20 names. The index gives the layout and storage, and index
+/// 12 is the 4/4/4/4 layout in every use; RGB against RGBA comes from the
+/// class in sampler word 4, not from the index. ESTABLISHED as the library's
+/// whole mapping: the sixteen indices it emits, with the size code and the
+/// classes it pairs with each. The board's own packing of a texel, and
+/// whether it reads the index as a layout code, are UNKNOWN; the model keeps
+/// whole texel words, so a row decides what the model accepts and which
+/// components a level holds, not a bit layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TexelFormat {
+    /// Word 1 bits 31:30, the allocator's size code: the library books
+    /// `2 << size` bytes a texel (not a measured packing).
+    pub size: u32,
+    /// The classes the library pairs with the index, one bit at each class
+    /// value.
+    pub classes: u8,
+}
+
+impl TexelFormat {
+    /// Whether the library pairs the index with sampler class `class`.
+    pub const fn pairs_with(&self, class: u32) -> bool {
+        class < 8 && (self.classes & (1 << class)) != 0
+    }
+
+    /// The components of a detail level of this format when the primary's
+    /// sampler class names `primary`. A detail level carries no class of its
+    /// own, so an index with one class names its components alone and an index
+    /// with two (RGB and RGBA) takes the primary's. MODEL CHOICE: the board
+    /// is sent one class per sampler; how it reads a detail level whose index
+    /// pairs differently from the primary's is UNKNOWN.
+    pub fn detail_format(&self, primary: u32) -> Option<u32> {
+        let mut found = None;
+
+        for class in 1..=6u32 {
+            if self.pairs_with(class) {
+                let format = texture_class_format(class << 23)?;
+                if class == texture_format_class(primary) {
+                    return Some(format);
+                }
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(format);
+            }
+        }
+        found
+    }
+}
+
+/// The class value (sampler word 4 bits 25:23) of a base format, 0 for any
+/// other.
+pub fn texture_format_class(format: u32) -> u32 {
+    (1..=6u32).find(|c| texture_class_format(c << 23) == Some(format)).unwrap_or(0)
+}
+
+const fn texel_classes(list: &[u32]) -> u8 {
+    let mut m = 0u8;
+    let mut i = 0;
+
+    while i < list.len() {
+        m |= 1 << list[i];
+        i += 1;
+    }
+    m
+}
+
+/// The format index table. None for every index the library does not emit:
+/// 1, 3, 5, 6 and 7 have width entries that nothing sends, and 14, 15, 19 to
+/// 31, 34 to 47 and 50 to 63 have none (the library leaves the size code
+/// unwritten and returns class 0). UNKNOWN: whether the board accepts them,
+/// so a level that names one is refused and logged.
+///
+/// MODEL CHOICES: 32 and 33 are the same 12-bit RGBA layout and read alike
+/// (the twin pair is unexplained; only the library's pixel-to-texture move
+/// sends 32), and 48 and 49, the ICC pair, are read as their component sets
+/// alone (their stored widths are INFERRED from the enumerant names).
+pub const fn texel_format(index: u32) -> Option<TexelFormat> {
+    const A: u8 = texel_classes(&[1]);
+    const L: u8 = texel_classes(&[2]);
+    const LA: u8 = texel_classes(&[3]);
+    const I: u8 = texel_classes(&[4]);
+    const RGB: u8 = texel_classes(&[5]);
+    const RGBA: u8 = texel_classes(&[6]);
+
+    Some(match index {
+        0 | 8 => TexelFormat { size: 0, classes: A },
+        2 | 9 => TexelFormat { size: 0, classes: I },
+        4 | 10 => TexelFormat { size: 0, classes: L },
+        11 => TexelFormat { size: 0, classes: LA },
+        12 | 13 => TexelFormat { size: 0, classes: RGB | RGBA },
+        16 => TexelFormat { size: 1, classes: LA },
+        17 | 18 => TexelFormat { size: 1, classes: RGB | RGBA },
+        32 | 33 => TexelFormat { size: 2, classes: RGB | RGBA },
+        48 => TexelFormat { size: 0, classes: RGB },
+        49 => TexelFormat { size: 1, classes: RGBA },
+        _ => return None,
+    })
+}
+
+/// The format a level descriptor's word 1 names, from its bits 31:30 (size
+/// code) and 25:20 (format index; ESTABLISHED as one six-bit field). None for
+/// an index the table does not list, or a size code that is not the index's.
+pub fn texture_level_texel_format(word1: u32) -> Option<TexelFormat> {
+    texel_format((word1 >> 20) & 0x3f).filter(|f| f.size == word1 >> 30)
+}
+
+/// The texel components of a detail level whose entry word 1 is `word1`, under
+/// the primary's base format `primary` (TexelFormat::detail_format()).
+pub fn texture_level_format(word1: u32, primary: u32) -> Option<u32> {
+    texture_level_texel_format(word1)?.detail_format(primary)
+}
+
 impl Board {
+    /// Log a level descriptor whose format index or size code is not the
+    /// table's, once per index until reset. The draw is refused; what the
+    /// board does with such a word is UNKNOWN.
+    pub fn texture_index_refused(&mut self, word1: u32) {
+        let index = (word1 >> 20) & 0x3f;
+
+        if self.tex_index_reported & (1u64 << index) == 0 {
+            self.tex_index_reported |= 1u64 << index;
+            crate::dlog!(
+                LogModule::Odyssey,
+                "sgi-odyssey: texture level format index {} with size code {} is not one the library emits, draw dropped",
+                index,
+                word1 >> 30
+            );
+        }
+    }
+
     /// The detail image at level-table entry `descriptor`, held as a plain 2D
     /// level is: its row is its width in 16-texel units rounded up to even,
     /// and its entry's word 1 carries no bits outside the format and that
     /// stride (the plain level rule in Board::texture_setup()).
     ///
     /// The entry's word 1 bits 31:30 and 25:20 give the image's own format,
-    /// decoded by texture_level_format() whatever the base level's is. This
-    /// is a MODEL CHOICE: the stock library never sends a detail entry whose
-    /// format differs from the primary's, and what the board does with one is
-    /// UNKNOWN (it may ignore the field or misread the texels). A format the
-    /// model has no decode for refuses the draw.
-    pub fn texture_detail_backing_setup(&mut self, chain: &mut TextureChain, descriptor: u32, width: u32, height: u32) -> bool {
+    /// decoded by texture_level_format() whatever the base level's is, with
+    /// `primary` (the base level's components) settling an index that can be
+    /// RGB or RGBA. This is a MODEL CHOICE: the stock library never sends a
+    /// detail entry whose format differs from the primary's, and what the
+    /// board does with one is UNKNOWN (it may ignore the field or misread the
+    /// texels). An index the table does not list refuses the draw.
+    pub fn texture_detail_backing_setup(&mut self, chain: &mut TextureChain, primary: u32, descriptor: u32, width: u32, height: u32) -> bool {
         let e = (descriptor * 3) as usize;
         let entry = [self.tex_levels[e], self.tex_levels[e + 1], self.tex_levels[e + 2]];
-        let Some(base_format) = texture_level_format(entry[1]) else {
+        let Some(base_format) = texture_level_format(entry[1], primary) else {
+            self.texture_index_refused(entry[1]);
             return false;
         };
         let base = entry[0] & 0x1fffffff;
@@ -1672,15 +1807,10 @@ impl Board {
             if self.gl_index_mode() {
                 break 'unsupported;
             }
-            match components {
-                0x01000000 => image.base_format = GL_LUMINANCE,
-                0x01800000 => image.base_format = GL_LUMINANCE_ALPHA,
-                0x00800000 => image.base_format = GL_ALPHA,
-                0x02000000 => image.base_format = GL_INTENSITY,
-                0x02800000 => image.base_format = GL_RGB,
-                0x03000000 => image.base_format = GL_RGBA,
-                _ => break 'unsupported,
-            }
+            let Some(class_format) = texture_class_format(components) else {
+                break 'unsupported;
+            };
+            image.base_format = class_format;
             let bf = image.base_format;
             if width == 0
                 || height == 0
@@ -2127,6 +2257,7 @@ impl Board {
                 if first + count > detail_sampler.descriptor
                     || !self.texture_detail_backing_setup(
                     chain,
+                    image.base_format,
                     detail_sampler.descriptor,
                     detail_sampler.width,
                     detail_sampler.height,

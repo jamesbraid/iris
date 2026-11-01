@@ -323,23 +323,103 @@ fn stale_detail_size_bits_are_ignored_without_a_detail_magnification_code() {
     assert_eq!(chain.detail_storage.width, 0);
 }
 
-/// The detail image is decoded by its own entry's format, not the base's:
-/// an RGBA detail entry (board format index 17, texel size 1) over Quake's
-/// RGB base is read as RGBA, and a format the model has no decode for is
-/// refused rather than read as the base's.
+/// The detail image is decoded by its own entry's format index, not the
+/// base's: an index with one class names its components alone, and an index
+/// that holds RGB or RGBA (12, 13, 17, 18, 32, 33) takes the base's class,
+/// the one class a sampler carries. An index the table does not list, or one
+/// whose size code is not its own, is refused rather than read as the base's.
 #[test]
 fn the_detail_image_takes_its_own_entry_format() {
-    let (mut s, _, _) = board_with_ram();
-    quake_world_state(&mut s, 0x1280_00a8, 0x4110_0008);
-    let mut image = GlTexImage::default();
-    let mut chain = Box::<TextureChain>::default();
+    const RGB_WORD4: u32 = 0x1280_00a8;
+    const RGBA_WORD4: u32 = 0x1300_00a8;
+    let cases = [
+        // (sampler word 4, detail entry word 1, the detail image's components)
+        (RGB_WORD4, 0x4110_0008, Some(GL_RGB)),
+        (RGBA_WORD4, 0x4110_0008, Some(GL_RGBA)),
+        (RGB_WORD4, 0x00c0_0008, Some(GL_RGB)),
+        (RGBA_WORD4, 0x00c0_0008, Some(GL_RGBA)),
+        (RGBA_WORD4, 0x00d0_0008, Some(GL_RGBA)),
+        (RGB_WORD4, 0x4120_0008, Some(GL_RGB)),
+        (RGB_WORD4, 0x8210_0008, Some(GL_RGB)),
+        (RGB_WORD4, 0x00b0_0008, Some(GL_LUMINANCE_ALPHA)),
+        (RGB_WORD4, 0x4100_0008, Some(GL_LUMINANCE_ALPHA)),
+        (RGB_WORD4, 0x0040_0008, Some(GL_LUMINANCE)),
+        (RGB_WORD4, 0x00a0_0008, Some(GL_LUMINANCE)),
+        (RGB_WORD4, 0x0000_0008, Some(GL_ALPHA)),
+        (RGB_WORD4, 0x0080_0008, Some(GL_ALPHA)),
+        (RGB_WORD4, 0x0020_0008, Some(GL_INTENSITY)),
+        (RGB_WORD4, 0x0090_0008, Some(GL_INTENSITY)),
+        // The ICC pair has one class each.
+        (RGBA_WORD4, 0x0300_0008, Some(GL_RGB)),
+        (RGB_WORD4, 0x4310_0008, Some(GL_RGBA)),
+        // Indices nothing emits, and a size code that is not the index's.
+        (RGB_WORD4, 0x0230_0008, None),
+        (RGB_WORD4, 0x00e0_0008, None),
+        (RGB_WORD4, 0x0110_0008, None),
+        (RGB_WORD4, 0x4040_0008, None),
+    ];
+    for (word4, word1, want) in cases {
+        let (mut s, _, _) = board_with_ram();
+        quake_world_state(&mut s, word4, word1);
+        let mut image = GlTexImage::default();
+        let mut chain = Box::<TextureChain>::default();
+        let drew = s.texture_setup(&mut image, &mut chain);
 
-    assert!(s.texture_setup(&mut image, &mut chain), "the draw was refused");
-    assert_eq!(image.base_format, GL_RGB);
-    assert_eq!(chain.detail_storage.base_format, GL_RGBA);
-    assert_eq!(chain.detail_image.base_format, GL_RGBA);
+        assert_eq!(drew, want.is_some(), "word 4 {word4:#x} entry {word1:#x}");
+        if let Some(format) = want {
+            assert_eq!(chain.detail_storage.base_format, format, "word 4 {word4:#x} entry {word1:#x}");
+            assert_eq!(chain.detail_image.base_format, format);
+        }
+    }
+}
 
-    quake_world_state(&mut s, 0x1280_00a8, 0x0230_0008);
-    let mut chain = Box::<TextureChain>::default();
-    assert!(!s.texture_setup(&mut GlTexImage::default(), &mut chain), "an undecoded format drew");
+/// The format index table: sixteen indices are emitted, each with its own
+/// size code and classes, and every other index is refused. Index 12 holds
+/// 4/4/4/4 whether its class says RGB or RGBA.
+#[test]
+fn the_format_index_table_lists_the_sixteen_emitted_indices() {
+    // (index, size code, classes as bits 1 to 6)
+    let rows = [
+        (0, 0, 1 << 1),
+        (2, 0, 1 << 4),
+        (4, 0, 1 << 2),
+        (8, 0, 1 << 1),
+        (9, 0, 1 << 4),
+        (10, 0, 1 << 2),
+        (11, 0, 1 << 3),
+        (12, 0, 3 << 5),
+        (13, 0, 3 << 5),
+        (16, 1, 1 << 3),
+        (17, 1, 3 << 5),
+        (18, 1, 3 << 5),
+        (32, 2, 3 << 5),
+        (33, 2, 3 << 5),
+        (48, 0, 1 << 5),
+        (49, 1, 1 << 6),
+    ];
+    for index in 0..64u32 {
+        let want = rows.iter().find(|r| r.0 == index);
+
+        assert_eq!(texel_format(index).map(|f| (f.size, f.classes)), want.map(|r| (r.1, r.2)), "index {index}");
+    }
+    // The size code is part of the word: an index with another size is no format.
+    assert_eq!(texture_level_texel_format(0x4110_0020).map(|f| f.size), Some(1));
+    assert!(texture_level_texel_format(0x0110_0020).is_none());
+    assert!(texture_level_texel_format(0x8110_0020).is_none());
+}
+
+/// Sampler word 4 bits 25:23 are the class: 1 alpha, 2 luminance, 3
+/// luminance-alpha, 4 intensity, 5 RGB, 6 RGBA. Class 0 and 7, and anything
+/// in bits 27:26, name no components.
+#[test]
+fn the_sampler_class_names_the_components() {
+    let want = [None, Some(GL_ALPHA), Some(GL_LUMINANCE), Some(GL_LUMINANCE_ALPHA), Some(GL_INTENSITY), Some(GL_RGB), Some(GL_RGBA), None];
+
+    for (class, format) in want.iter().enumerate() {
+        let word = (class as u32) << 23;
+
+        assert_eq!(texture_class_format(word & ODSY_TEX_COMPONENTS_MASK), *format, "class {class}");
+        assert_eq!(texture_class_format((word | 0x0400_0000) & ODSY_TEX_COMPONENTS_MASK), None, "class {class} with bit 26");
+        assert_eq!(texture_class_format((word | 0x0800_0000) & ODSY_TEX_COMPONENTS_MASK), None, "class {class} with bit 27");
+    }
 }
