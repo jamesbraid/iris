@@ -35,14 +35,14 @@ impl Board {
         }
         if addr == cmd::FIFO {
             self.selftest_track(cmd::FIFO, size, value);
-            self.cmd_from_kernel = true;
+            self.cmd.from_kernel = true;
             self.cmd_fifo_write(value, size);
             return;
         }
         if addr == ODSY_USER_CMD_FIFO {
             // The user-mapped command FIFO has the kernel port's grammar but
             // never carries the self-test preamble, so it skips the tracker.
-            self.cmd_from_kernel = false;
+            self.cmd.from_kernel = false;
             self.cmd_fifo_write(value, size);
             return;
         }
@@ -63,32 +63,32 @@ impl Board {
                 );
             }
             Some(mem::CONTROL) => self.memory_control(value as u32),
-            Some(flctl::CONFIG) => self.flctl_config = value as u32,
-            Some(ODSY_BUZZ_1) => self.buzz[0] = value as u32,
-            Some(ODSY_BUZZ_2) => self.buzz[1] = value as u32,
-            Some(ODSY_BUZZ_3) => self.buzz[2] = value as u32,
-            Some(ODSY_BUZZ_4) => self.buzz[3] = value as u32,
-            Some(ODSY_BUZZ_5) => self.buzz[4] = value as u32,
-            Some(ODSY_BUZZ_6) => self.buzz[5] = value as u32,
+            Some(flctl::CONFIG) => self.widget.flctl_config = value as u32,
+            Some(ODSY_BUZZ_1) => self.widget.buzz[0] = value as u32,
+            Some(ODSY_BUZZ_2) => self.widget.buzz[1] = value as u32,
+            Some(ODSY_BUZZ_3) => self.widget.buzz[2] = value as u32,
+            Some(ODSY_BUZZ_4) => self.widget.buzz[3] = value as u32,
+            Some(ODSY_BUZZ_5) => self.widget.buzz[4] = value as u32,
+            Some(ODSY_BUZZ_6) => self.widget.buzz[5] = value as u32,
             Some(nic::PROM | nic::KERNEL) => self.nic_slot(value as u32),
             Some(host::WRITE_ADDR_UPPER) => {
                 self.query_cancel();
-                self.host_write_addr_upper = value as u32;
+                self.widget.host_write_addr_upper = value as u32;
             }
             Some(host::WRITE_ADDR_LOWER) => {
                 self.query_cancel();
-                self.host_write_addr_lower = value as u32;
+                self.widget.host_write_addr_lower = value as u32;
             }
             Some(stats::ADDR_UPPER | stats::ADDR_LOWER | stats::CONTROL) => {
                 if addr == stats::ADDR_UPPER {
-                    self.stats_addr_upper = value as u32;
+                    self.widget.stats_addr_upper = value as u32;
                 } else if addr == stats::ADDR_LOWER {
-                    self.stats_addr_lower = value as u32;
+                    self.widget.stats_addr_lower = value as u32;
                 } else {
-                    self.stats_control = value as u32;
+                    self.widget.stats_control = value as u32;
                 }
-                if value != 0 && !self.stats_reported {
-                    self.stats_reported = true;
+                if value != 0 && !self.diag.stats_reported {
+                    self.diag.stats_reported = true;
                     crate::dlog!(
                         LogModule::Odyssey,
                         "sgi-odyssey: statistics region word {:#x} at {:#x} stored; the board's writes into the region are not modeled",
@@ -99,11 +99,11 @@ impl Board {
             }
             Some(ctx::SHADOW_ADDR_UPPER) => {
                 self.query_cancel();
-                self.ctx_shadow_addr_upper = value as u32;
+                self.widget.ctx_shadow_addr_upper = value as u32;
             }
             Some(ctx::SHADOW_ADDR_LOWER) => {
                 self.query_cancel();
-                self.ctx_shadow_addr_lower = value as u32;
+                self.widget.ctx_shadow_addr_lower = value as u32;
             }
             Some(mem::CONFIG
             | i2c::MAIN_CMD_READ

@@ -72,7 +72,7 @@ fn the_identity_carries_the_part_and_the_revision() {
     let (mut s, _) = board("v12");
     assert_eq!(reg_read(&mut s, IDENTITY), IDENTITY_DEFAULT);
 
-    s.revision = 3;
+    s.widget.revision = 3;
     s.reset_registers();
     assert_eq!(reg_read(&mut s, IDENTITY), 0x3c013047);
 }
@@ -121,11 +121,11 @@ fn the_memory_word_follows_size_banks_and_latency() {
     assert_eq!(reg_read(&mut s, MEMORY_CONFIG), 0xa100_0000);
 
     for (size, banks, cas, want) in [(32, 2, 3, 0x0100_0000), (64, 4, 2, 0x7100_0000), (64, 2, 2, 0x5100_0000)] {
-        s.memory_size = size;
-        s.memory_banks = banks;
-        s.cas_latency = cas;
+        s.widget.memory_size = size;
+        s.widget.memory_banks = banks;
+        s.widget.cas_latency = cas;
         s.compose_memory_config().unwrap();
-        assert_eq!(s.memory_config, want, "{size} MB, {banks} banks, CAS {cas}");
+        assert_eq!(s.widget.memory_config, want, "{size} MB, {banks} banks, CAS {cas}");
     }
 }
 
@@ -136,13 +136,13 @@ fn the_memory_word_follows_size_banks_and_latency() {
 #[test]
 fn a_memory_configuration_the_board_cannot_have_is_refused() {
     let (mut s, _) = board("v12");
-    s.memory_size = 48;
+    s.widget.memory_size = 48;
     assert!(s.compose_memory_config().unwrap_err().contains("32, 64 or 128"));
-    s.memory_size = 128;
-    s.memory_banks = 3;
+    s.widget.memory_size = 128;
+    s.widget.memory_banks = 3;
     assert!(s.compose_memory_config().unwrap_err().contains("2 or 4"));
-    s.memory_banks = 4;
-    s.cas_latency = 4;
+    s.widget.memory_banks = 4;
+    s.widget.cas_latency = 4;
     assert!(s.compose_memory_config().unwrap_err().contains("2 or 3"));
     assert!(Board::new("v7", VPRO_WIDGET).is_err(), "an unknown product is refused");
 }
@@ -163,11 +163,11 @@ fn the_kernels_reset_pulse_and_memory_set_up_are_accepted() {
     }
     for v in [master, fields, fields | 1 << 5, fields, fields | 1 << 8] {
         reg_write(&mut s, mem::CONTROL, v);
-        assert_eq!(s.memory_control, v);
+        assert_eq!(s.widget.memory_control, v);
     }
     assert_eq!(reg_read(&mut s, IDENTITY), IDENTITY_DEFAULT);
     assert_eq!(reg_read(&mut s, MEMORY_CONFIG) & 0xf000_0000, 0xa000_0000);
-    assert_eq!(s.reported_addr_count.load(Ordering::Relaxed), 0, "neither register is reported as unmodelled");
+    assert_eq!(s.diag.reported_addr_count.load(Ordering::Relaxed), 0, "neither register is reported as unmodelled");
 }
 
 /// The registers the stock firmware's graphics diagnostic reads before it
@@ -235,12 +235,12 @@ fn the_statistics_region_is_stored_and_the_buffer_left_alone() {
     reg_write(&mut s, stats::ADDR_UPPER, 0);
     reg_write(&mut s, stats::ADDR_LOWER, 0xb90000);
     reg_write(&mut s, stats::CONTROL, 0x8800_005f);
-    assert_eq!((s.stats_addr_upper, s.stats_addr_lower, s.stats_control), (0, 0xb90000, 0x8800_005f));
+    assert_eq!((s.widget.stats_addr_upper, s.widget.stats_addr_lower, s.widget.stats_control), (0, 0xb90000, 0x8800_005f));
     reg_write(&mut s, stats::ADDR_LOWER, 0);
-    assert_eq!(s.stats_addr_lower, 0);
+    assert_eq!(s.widget.stats_addr_lower, 0);
 
     assert_eq!(ram.get(0xb90000, 4), 0x1234_5678u32.to_be_bytes());
-    assert_eq!(s.reported_addr_count.load(Ordering::Relaxed), 0, "none of the three is reported as unmodelled");
+    assert_eq!(s.diag.reported_addr_count.load(Ordering::Relaxed), 0, "none of the three is reported as unmodelled");
 }
 
 /// The five FIFO set-up doublewords carry a register in the high word and
@@ -259,9 +259,9 @@ fn the_fifo_set_up_doublewords_are_stored() {
     cmd64(&mut s, 0x6b2, 0x7dc0);
     cmd64(&mut s, 0x7b5, 1);
 
-    assert_eq!(s.fifo_setup, [0, 256, 32192, 24144, 1]);
+    assert_eq!(s.widget.fifo_setup, [0, 256, 32192, 24144, 1]);
     assert_eq!(reg_read(&mut s, ODSY_STATUS0), 0x1003_0000);
-    assert_eq!(s.reported_cmd_count, 0);
+    assert_eq!(s.diag.reported_cmd_count, 0);
 }
 
 /// The kernels write the doubleword 0x7f0 = 10^9 after the set-up; its unit
@@ -275,10 +275,10 @@ fn the_0x7f0_doubleword_is_stored_and_runs_no_timer() {
     let (mut s, _) = board("v12");
 
     cmd64(&mut s, 0x7f0, 1_000_000_000);
-    assert_eq!(s.setup_7f0, 1_000_000_000);
+    assert_eq!(s.widget.setup_7f0, 1_000_000_000);
     cmd64(&mut s, 0x6b0, 7);
-    assert_eq!(s.fifo_setup[0], 7);
-    assert_eq!(s.reported_cmd_count, 0);
+    assert_eq!(s.widget.fifo_setup[0], 7);
+    assert_eq!(s.diag.reported_cmd_count, 0);
     assert_eq!(reg_read(&mut s, intr::FLAGS) & 0x2, 0);
 }
 
@@ -298,7 +298,7 @@ fn the_classes_0x20_to_0x35_are_not_reported_as_unknown_commands() {
         cmd(&mut s, class << 24 | 0x0080_8000 | i as u32);
     }
 
-    assert_eq!(s.reported_cmd_count, 0);
+    assert_eq!(s.diag.reported_cmd_count, 0);
 }
 
 /// The command-FIFO self-test: the kernel's initialisation pushes a
@@ -336,12 +336,12 @@ fn an_unrecognised_width_or_command_word_is_reported_not_guessed() {
     assert_eq!(s.mmio_read(consts::cmd::FIFO, 4), 0, "the FIFO has no read side");
     assert_eq!(s.mmio_read(consts::cmd::FIFO, 4), 0);
     s.mmio_write(consts::cmd::FIFO, 0x1234, 2);
-    assert_eq!(s.reported_addr_count.load(Ordering::Relaxed), 2, "a read and a write, once each however often they repeat");
+    assert_eq!(s.diag.reported_addr_count.load(Ordering::Relaxed), 2, "a read and a write, once each however often they repeat");
 
     cmd(&mut s, 0x0000_7777);
     cmd(&mut s, 0x0000_7777);
-    assert_eq!(s.reported_cmd_count, 1);
-    assert_eq!(s.reported_cmd[0], 0x7777);
+    assert_eq!(s.diag.reported_cmd_count, 1);
+    assert_eq!(s.diag.reported_cmd[0], 0x7777);
 }
 
 /// A reset puts the registers back to their documented values.
@@ -409,7 +409,7 @@ fn each_profile_names_its_board_in_the_identity_record() {
     }
 
     let (mut s, _) = board("v6");
-    s.nic_record = "Name:TEST".into();
+    s.widget.nic_record = "Name:TEST".into();
     s.attach_nic().unwrap();
     let page = nic_read_page(&mut s);
     assert_eq!(&page[6..15], b"Name:TEST");
@@ -520,7 +520,7 @@ fn back_end_tables_are_kept_and_read_back_from_the_window() {
     backend_push(&mut s, gain);
     assert_eq!(backend_readback(&mut s, 0x26c0), 0x00a5_26c2);
     assert_eq!(backend_readback(&mut s, 0x2701) & 7, 1);
-    assert_eq!(s.reported_addr_count.load(Ordering::Relaxed), 0);
+    assert_eq!(s.diag.reported_addr_count.load(Ordering::Relaxed), 0);
 }
 
 /// The display modes start at zero, keep each word as written, and a reset
@@ -568,12 +568,12 @@ fn filling_the_command_report_budget_leaves_the_register_budget_alone() {
     for i in 0..ODSY_UNIMP_REPORTS {
         cmd(&mut s, 0x0000_0100 | i);
     }
-    assert_eq!(s.reported_cmd_count, ODSY_UNIMP_REPORTS);
+    assert_eq!(s.diag.reported_cmd_count, ODSY_UNIMP_REPORTS);
     cmd(&mut s, 0x0000_7800);
-    assert_eq!(s.reported_cmd_count, ODSY_UNIMP_REPORTS, "further words stay silent");
+    assert_eq!(s.diag.reported_cmd_count, ODSY_UNIMP_REPORTS, "further words stay silent");
 
     assert_eq!(s.mmio_read(0x8, 1), 0);
-    assert_eq!(s.reported_addr_count.load(Ordering::Relaxed), 1, "an unmodelled register is still reported");
+    assert_eq!(s.diag.reported_addr_count.load(Ordering::Relaxed), 1, "an unmodelled register is still reported");
 }
 
 /// An unmodelled word still names its operand count in bits 13:10, and the
@@ -594,11 +594,11 @@ fn an_unmodelled_word_passes_over_the_operands_its_arity_names() {
     for w in 0..8 {
         cmd(&mut s, 0x0000_0200 | w);
     }
-    assert_eq!(s.reported_cmd_count, 1, "only the word itself is reported");
-    assert_eq!(s.reported_cmd[0], 0x3cf8);
-    assert!(!s.gl_begin_open, "the operands that spell a primitive did not run");
+    assert_eq!(s.diag.reported_cmd_count, 1, "only the word itself is reported");
+    assert_eq!(s.diag.reported_cmd[0], 0x3cf8);
+    assert!(!s.prim.begin_open, "the operands that spell a primitive did not run");
 
     cmd(&mut s, 0x0000_0123);
-    assert_eq!(s.reported_cmd_count, 2);
-    assert_eq!(s.reported_cmd[1], 0x123);
+    assert_eq!(s.diag.reported_cmd_count, 2);
+    assert_eq!(s.diag.reported_cmd[1], 0x123);
 }

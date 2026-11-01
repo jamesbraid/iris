@@ -185,8 +185,8 @@ fn a_destination_beyond_the_reported_memory_is_dropped() {
     for operand in [0x20_0000, 16, 0, 0] {
         cmd(&mut s, operand);
     }
-    assert!(s.board_oob_reported);
-    assert_eq!(s.obj_count, 0, "no object was made for the dropped base");
+    assert!(s.diag.board_oob_reported);
+    assert_eq!(s.objects.count, 0, "no object was made for the dropped base");
     assert_eq!(reg_read(&mut s, IDENTITY), IDENTITY_DEFAULT);
 
     // The same base is in range on a 128 MiB board.
@@ -195,7 +195,7 @@ fn a_destination_beyond_the_reported_memory_is_dropped() {
     for operand in [0x20_0000, 16, 0, 0] {
         cmd(&mut s, operand);
     }
-    assert!(!s.board_oob_reported);
+    assert!(!s.diag.board_oob_reported);
 }
 
 /// Each name the configuration accepts selects a board, VPro boards are

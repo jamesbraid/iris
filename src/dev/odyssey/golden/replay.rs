@@ -32,21 +32,21 @@ pub const EVERY: usize = 500_000;
 pub fn plane_hash(b: &Board) -> String {
     let mut h = blake3::Hasher::new();
     let (w, ht) = (ODSY_WIDTH as i32, ODSY_HEIGHT as i32);
-    let depth = b.depth_mem.plane(b.depth_plane).expect("the depth plane");
-    let stencil = b.stencil_mem.plane(b.stencil_plane).expect("the stencil plane");
+    let depth = b.planes.depth.plane(b.planes.depth_plane).expect("the depth plane");
+    let stencil = b.planes.stencil.plane(b.planes.stencil_plane).expect("the stencil plane");
     let mut row = Vec::with_capacity(w as usize * 16);
     for y in 0..ht {
         row.clear();
         for x in 0..w {
             row.extend_from_slice(&b.buffer_load(0, x as i64, y as i64).to_be_bytes());
             row.extend_from_slice(&b.buffer_load(1, x as i64, y as i64).to_be_bytes());
-            row.extend_from_slice(&b.depth_mem.plane_load(&depth, x, y).to_be_bytes());
-            row.extend_from_slice(&b.stencil_mem.plane_load(&stencil, x, y).to_be_bytes());
+            row.extend_from_slice(&b.planes.depth.plane_load(&depth, x, y).to_be_bytes());
+            row.extend_from_slice(&b.planes.stencil.plane_load(&stencil, x, y).to_be_bytes());
         }
         h.update(&row);
     }
-    let used = (b.obj_used as usize * 4).min(b.obj_mem.bytes.len());
-    h.update(&b.obj_mem.bytes[..used]);
+    let used = (b.objects.used as usize * 4).min(b.objects.mem.bytes.len());
+    h.update(&b.objects.mem.bytes[..used]);
     h.finalize().to_hex().to_string()
 }
 
@@ -278,8 +278,8 @@ fn replay_bless() {
 // The replay machinery on a short session built in memory.
 
 fn window(b: &mut Board) {
-    b.clip_kept = 1;
-    b.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: ODSY_WIDTH as i32 - 1, y1: ODSY_HEIGHT as i32 - 1 };
+    b.win.clip_kept = 1;
+    b.win.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: ODSY_WIDTH as i32 - 1, y1: ODSY_HEIGHT as i32 - 1 };
 }
 
 /// A glDrawPixels of two pixels by pixel burst, as a store sequence: the same

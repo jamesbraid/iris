@@ -849,12 +849,12 @@ impl Board {
             Span::of(&mut m.bytes[p.base as usize..end])
         }
         PlaneSpans {
-            colour: [rows(&mut self.mem, self.colour_plane), rows(&mut self.buffer1_mem, self.buffer1_plane)],
-            depth: rows(&mut self.depth_mem, self.depth_plane),
-            stencil: rows(&mut self.stencil_mem, self.stencil_plane),
-            overlay: Span::of(&mut self.overlay),
-            did: Span::of(&mut self.did),
-            obj: Span::of(&mut self.obj_mem.bytes),
+            colour: [rows(&mut self.planes.colour, self.planes.colour_plane), rows(&mut self.planes.buffer1, self.planes.buffer1_plane)],
+            depth: rows(&mut self.planes.depth, self.planes.depth_plane),
+            stencil: rows(&mut self.planes.stencil, self.planes.stencil_plane),
+            overlay: Span::of(&mut self.planes.overlay),
+            did: Span::of(&mut self.planes.did),
+            obj: Span::of(&mut self.objects.mem.bytes),
         }
     }
 }

@@ -104,7 +104,7 @@ impl Ctx {
         let (mut board, mut st) = (b.board, b.st);
         let rect = ClipRect { x0: 0, y0: 0, x1: SIDE - 1, y1: SIDE - 1 };
 
-        board.clip_rect[0] = rect;
+        board.win.clip_rect[0] = rect;
         board.gl_write_mask |= write::COLOUR_MASK << write::COLOUR_SHIFT;
         st.drawable.clip.r[0] = rect;
         st.viewport = [0, 0, SIDE, SIDE];
@@ -302,13 +302,13 @@ impl Ctx {
                     b.object_store(obj, x, y, texel(level, x, y, w, w));
                 }
             }
-            b.tex_levels[level as usize * 3..][..3].copy_from_slice(&[base, 0x4110_0000 | units, 0]);
+            b.tex.levels[level as usize * 3..][..3].copy_from_slice(&[base, 0x4110_0000 | units, 0]);
         }
         let axis = |w: u32, wrap: u32| w | if wrap == 1 { 0x4_0000 } else { 0 };
         let filter = (t.min << 5) | if t.mag_linear { 2 } else { 0 };
-        b.tex_mode = tex::MODE_2D;
-        b.tex_level0 = 0;
-        b.tex_sampler = [
+        b.tex.mode = tex::MODE_2D;
+        b.tex.level0 = 0;
+        b.tex.sampler = [
             0x0800_0000 | (t.size.trailing_zeros() << 10) | (t.size.trailing_zeros() << 5),
             axis(t.size, ws),
             axis(t.size, wt),
@@ -317,11 +317,11 @@ impl Ctx {
             0,
             0,
         ];
-        b.tex_env = [t.env, 0, 0, 0, 0];
+        b.tex.env = [t.env, 0, 0, 0, 0];
         if t.env == 4 {
             // The environment colour: two normalized 12-bit components a word.
-            b.tex_env[1] = 0xc00 << 12 | 0x400;
-            b.tex_env[2] = 0x200 << 12 | 0xfff;
+            b.tex.env[1] = 0xc00 << 12 | 0x400;
+            b.tex.env[2] = 0x200 << 12 | 0xfff;
         }
         self.st.texture_2d = true;
         self.st.texture_env_mode = [GL_REPLACE, GL_REPLACE, GL_MODULATE, GL_DECAL, GL_BLEND][t.env as usize];
@@ -1001,36 +1001,36 @@ pub struct Light {
 
 pub fn load_lights(b: &mut Board, lights: &[(usize, Light)], ambient: [f32; 3], local_viewer: bool, shininess: f32, material: ([f32; 3], [f32; 3], [f32; 3], [f32; 3]), colour_material: u32) {
     let identity: [f32; 16] = [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.];
-    b.gl_modelview = identity.map(f32::to_bits);
-    b.gl_normal_matrix = identity.map(f32::to_bits);
-    b.gl_local_viewer = local_viewer;
-    b.gl_normalize = true;
-    b.gl_colour_material = colour_material;
-    b.gl_light_colour.fill(0);
-    b.gl_light_vec.fill(0);
+    b.geom.modelview = identity.map(f32::to_bits);
+    b.geom.normal_matrix = identity.map(f32::to_bits);
+    b.geom.local_viewer = local_viewer;
+    b.geom.normalize = true;
+    b.geom.colour_material = colour_material;
+    b.geom.light_colour.fill(0);
+    b.geom.light_vec.fill(0);
     let a = gl_cmd::LIGHT_MODEL_AMBIENT as usize * 4;
     for k in 0..3 {
-        b.gl_light_colour[a + k] = ambient[k].to_bits();
+        b.geom.light_colour[a + k] = ambient[k].to_bits();
     }
     let (ma, md, ms, me) = material;
     for k in 0..3 {
-        b.gl_material[k] = ma[k].to_bits();
-        b.gl_material[4 + k] = md[k].to_bits();
-        b.gl_material[8 + k] = ms[k].to_bits();
-        b.gl_material[12 + k] = me[k].to_bits();
+        b.geom.material[k] = ma[k].to_bits();
+        b.geom.material[4 + k] = md[k].to_bits();
+        b.geom.material[8 + k] = ms[k].to_bits();
+        b.geom.material[12 + k] = me[k].to_bits();
     }
-    b.gl_material[3] = 1.0f32.to_bits();
-    b.gl_material[7] = 0.9f32.to_bits();
-    b.gl_material[11] = 1.0f32.to_bits();
-    b.gl_material[15] = 1.0f32.to_bits();
-    b.gl_shininess_sqrt = shininess.sqrt().to_bits();
+    b.geom.material[3] = 1.0f32.to_bits();
+    b.geom.material[7] = 0.9f32.to_bits();
+    b.geom.material[11] = 1.0f32.to_bits();
+    b.geom.material[15] = 1.0f32.to_bits();
+    b.geom.shininess_sqrt = shininess.sqrt().to_bits();
     for &(i, l) in lights {
         for k in 0..3 {
-            b.gl_light_colour[i * 12 + k] = (l.colour[k] * 0.2).to_bits();
-            b.gl_light_colour[i * 12 + 4 + k] = l.colour[k].to_bits();
-            b.gl_light_colour[i * 12 + 8 + k] = l.colour[k].to_bits();
+            b.geom.light_colour[i * 12 + k] = (l.colour[k] * 0.2).to_bits();
+            b.geom.light_colour[i * 12 + 4 + k] = l.colour[k].to_bits();
+            b.geom.light_colour[i * 12 + 8 + k] = l.colour[k].to_bits();
         }
-        let blk = &mut b.gl_light_vec[i * gl_cmd::LIGHT_VEC_FLOATS as usize..];
+        let blk = &mut b.geom.light_vec[i * gl_cmd::LIGHT_VEC_FLOATS as usize..];
         for k in 0..3 {
             blk[light::POS + k] = l.pos[k].to_bits();
         }
@@ -1060,7 +1060,7 @@ pub fn load_lights(b: &mut Board, lights: &[(usize, Light)], ambient: [f32; 3], 
 /// it), lit vertex by vertex, drawn smooth and depth tested.
 fn lit_sphere(c: &mut Ctx, current_colour: [f32; 4]) {
     c.depth_test(GL_LESS);
-    c.board.gl_colour = current_colour.map(f32::to_bits);
+    c.board.geom.colour = current_colour.map(f32::to_bits);
     let (nlat, nlon) = (10usize, 16usize);
     let point = |i: usize, j: usize| -> [f32; 3] {
         let th = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / nlat as f32;
@@ -1069,7 +1069,7 @@ fn lit_sphere(c: &mut Ctx, current_colour: [f32; 4]) {
     };
     let lit = |c: &mut Ctx, p: [f32; 3]| -> V {
         let n = p;
-        c.board.gl_normal = n.map(f32::to_bits);
+        c.board.geom.normal = n.map(f32::to_bits);
         let obj = [(p[0] * 0.8) as f64, (p[1] * 0.8) as f64, (p[2] * 0.8) as f64, 1.0];
         let rgba = c.board.gl_light(&obj);
         V { p: [p[0] * 0.8, p[1] * 0.8, p[2] * 0.8, 1.0], c: rgba, t: [0.0, 0.0, 0.0, 1.0], n, back: None }
@@ -1136,8 +1136,8 @@ fn light_lit_blended_textured(c: &mut Ctx) {
         let th = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / nlat as f32;
         let ph = 2.0 * std::f32::consts::PI * j as f32 / nlon as f32;
         let p = [th.cos() * ph.sin(), th.sin(), -th.cos() * ph.cos()];
-        c.board.gl_normal = p.map(f32::to_bits);
-        c.board.gl_colour = WHITE.map(f32::to_bits);
+        c.board.geom.normal = p.map(f32::to_bits);
+        c.board.geom.colour = WHITE.map(f32::to_bits);
         let rgba = c.board.gl_light(&[(p[0] * 0.8) as f64, (p[1] * 0.8) as f64, (p[2] * 0.8) as f64, 1.0]);
         V { p: [p[0] * 0.8, p[1] * 0.8, p[2] * 0.8, 1.0], c: rgba, t: [j as f32 / nlon as f32 * 2.0, i as f32 / nlat as f32 * 2.0, 0.0, 1.0], n: p, back: None }
     };

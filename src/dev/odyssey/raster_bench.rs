@@ -261,8 +261,8 @@ impl Bench {
         let mut board = Board::new("v12", 11).expect("board");
 
         // Every pixel of the screen is the window's.
-        board.clip_kept = 1;
-        board.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: BENCH_W - 1, y1: BENCH_H - 1 };
+        board.win.clip_kept = 1;
+        board.win.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: BENCH_W - 1, y1: BENCH_H - 1 };
         let mut rules = gl_rules();
         rules.alpha_bits = 8;
         rules.depth_row_given = true;
@@ -571,11 +571,11 @@ impl Bench {
     /// from words, row by row.
     pub fn set_depth(&mut self, side: i32, words: &[u32]) {
         let b = &mut self.board;
-        let depth = b.depth_mem.plane(b.depth_plane).expect("the depth plane");
+        let depth = b.planes.depth.plane(b.planes.depth_plane).expect("the depth plane");
 
         for y in 0..side {
             for x in 0..side {
-                b.depth_mem.plane_store(&depth, x, y, words[(y * side + x) as usize]);
+                b.planes.depth.plane_store(&depth, x, y, words[(y * side + x) as usize]);
             }
         }
     }
@@ -584,8 +584,8 @@ impl Bench {
     /// side - 1.
     pub fn snapshot(&self, side: i32) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
         let b = &self.board;
-        let depth = b.depth_mem.plane(b.depth_plane).expect("the depth plane");
-        let stencil = b.stencil_mem.plane(b.stencil_plane).expect("the stencil plane");
+        let depth = b.planes.depth.plane(b.planes.depth_plane).expect("the depth plane");
+        let stencil = b.planes.stencil.plane(b.planes.stencil_plane).expect("the stencil plane");
         let mut c = Vec::new();
         let mut z = Vec::new();
         let mut s = Vec::new();
@@ -593,8 +593,8 @@ impl Bench {
         for y in 0..side {
             for x in 0..side {
                 c.push(b.buffer_load(0, x as i64, y as i64));
-                z.push(b.depth_mem.plane_load(&depth, x, y));
-                s.push(b.stencil_mem.plane_load(&stencil, x, y));
+                z.push(b.planes.depth.plane_load(&depth, x, y));
+                s.push(b.planes.stencil.plane_load(&stencil, x, y));
             }
         }
         (c, z, s)

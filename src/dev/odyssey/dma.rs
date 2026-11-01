@@ -167,8 +167,8 @@ impl Board {
         if pixel_bytes(code) == bpp {
             return code;
         }
-        if !self.dma_code_reported {
-            self.dma_code_reported = true;
+        if !self.diag.dma_code_reported {
+            self.diag.dma_code_reported = true;
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA source format {:#x} at {} bytes a pixel is not modeled", code, bpp);
         }
         if bpp == 4 { image::CODE_FALLBACK_XRGB } else { image::CODE_CI }
@@ -261,8 +261,8 @@ impl Board {
             return;
         }
         if bpp != 4 && bpp != 3 && bpp != 1 && !texel12 && !lum_alpha && !raw {
-            if !self.dma_bpp_reported {
-                self.dma_bpp_reported = true;
+            if !self.diag.dma_bpp_reported {
+                self.diag.dma_bpp_reported = true;
                 crate::dlog!(
                     LogModule::Odyssey,
                     "sgi-odyssey: DMA to buffer {:#x} at {} bytes a pixel is not modeled",
@@ -431,26 +431,26 @@ impl Board {
     /// The depth plane's word at plane pixel (x, y), which is in the plane.
     pub fn depth_load(&mut self, x: i64, y: i64) -> u32 {
         self.raster_wait();
-        let p = self.depth_mem.plane(self.depth_plane).expect("the depth plane");
-        self.depth_mem.plane_load(&p, x as i32, y as i32)
+        let p = self.planes.depth.plane(self.planes.depth_plane).expect("the depth plane");
+        self.planes.depth.plane_load(&p, x as i32, y as i32)
     }
 
     pub fn depth_store(&mut self, x: i64, y: i64, word: u32) {
         self.raster_wait();
-        let p = self.depth_mem.plane(self.depth_plane).expect("the depth plane");
-        self.depth_mem.plane_store(&p, x as i32, y as i32, word);
+        let p = self.planes.depth.plane(self.planes.depth_plane).expect("the depth plane");
+        self.planes.depth.plane_store(&p, x as i32, y as i32, word);
     }
 
     pub fn stencil_load(&mut self, x: i64, y: i64) -> u32 {
         self.raster_wait();
-        let p = self.stencil_mem.plane(self.stencil_plane).expect("the stencil plane");
-        self.stencil_mem.plane_load(&p, x as i32, y as i32)
+        let p = self.planes.stencil.plane(self.planes.stencil_plane).expect("the stencil plane");
+        self.planes.stencil.plane_load(&p, x as i32, y as i32)
     }
 
     pub fn stencil_store(&mut self, x: i64, y: i64, value: u8) {
         self.raster_wait();
-        let p = self.stencil_mem.plane(self.stencil_plane).expect("the stencil plane");
-        self.stencil_mem.plane_store(&p, x as i32, y as i32, value as u32);
+        let p = self.planes.stencil.plane(self.planes.stencil_plane).expect("the stencil plane");
+        self.planes.stencil.plane_store(&p, x as i32, y as i32, value as u32);
     }
 
     /// Stage the pixel bytes first so a failed source read cannot leave a
@@ -536,12 +536,12 @@ impl Board {
             for c in 0..w {
                 let off = ((r as u64) * (rowbytes as u64) + (c as u64) * (psize as u64)) as usize;
                 let src = &payload[off..];
-                let px = (x as i64) + (c as i64) + self.win_origin[0] as i64;
+                let px = (x as i64) + (c as i64) + self.win.origin[0] as i64;
                 let py = (if top_down {
                     rows - (y as i64) - (h as i64) + (r as i64)
                 } else {
                     (y as i64) + (h as i64) - 1 - (r as i64)
-                }) + self.win_origin[1] as i64;
+                }) + self.win.origin[1] as i64;
                 if let Some(plane) = depth_stencil {
                     let value = be32(&src[..4]);
 
@@ -562,10 +562,10 @@ impl Board {
 
     /// True the first time reason (dma::REPORT_*) comes up: report it then.
     pub fn dma_report(&mut self, reason: u32) -> bool {
-        if self.dma_read_reported & reason != 0 {
+        if self.diag.dma_read_reported & reason != 0 {
             return false;
         }
-        self.dma_read_reported |= reason;
+        self.diag.dma_read_reported |= reason;
         true
     }
 }
@@ -842,8 +842,8 @@ impl Board {
             }
             // INFERRED: both sentinels are the current window, whose origin the
             // model tracks; it keeps no separate read and draw drawable.
-            src.x += self.win_origin[0] as i64;
-            src.y += self.win_origin[1] as i64;
+            src.x += self.win.origin[0] as i64;
+            src.y += self.win.origin[1] as i64;
             src.front = fmt & dma::FMT_FRONT != 0;
             return true;
         }
@@ -962,7 +962,7 @@ impl Board {
                 crate::dlog!(
                     LogModule::Odyssey,
                     "sgi-odyssey: DMA index read of board object {:#x}, which records no display mode",
-                    self.obj_base[obj]
+                    self.objects.base[obj]
                 );
             }
             return false;
@@ -1154,7 +1154,7 @@ impl Board {
         let inside = if let Some(obj) = src.obj {
             // Rows past an object's store were never written: the model holds no
             // value for them, so a read reaching them is refused, not zero-filled.
-            src.x + (w as i64) <= self.obj_width[obj] as i64 && src.y + (h as i64) <= self.obj_rows[obj] as i64
+            src.x + (w as i64) <= self.objects.width[obj] as i64 && src.y + (h as i64) <= self.objects.rows[obj] as i64
         } else {
             src.x >= 0
                 && src.y >= 0
@@ -1204,7 +1204,7 @@ impl Board {
     /// sentinel (GL's DMA image write) is accepted only by the draw-sentinel
     /// adapter. The 0xe03 opcode is reported and not performed.
     pub fn dma_descriptor(&mut self, readback: bool) {
-        let table = dma_table_address(self.cmd_operand[0], self.cmd_operand[1]);
+        let table = dma_table_address(self.cmd.operand[0], self.cmd.operand[1]);
         crate::pf_scope!(crate::perfetto::events::ODSY_DMA, table);
         self.dma_seq += 1;
         let seq = self.dma_seq;
@@ -1222,8 +1222,8 @@ impl Board {
             hdr[i] = be32(&raw[i * 4..][..4]);
         }
         if readback {
-            if !self.dma_readback_reported {
-                self.dma_readback_reported = true;
+            if !self.diag.dma_readback_reported {
+                self.diag.dma_readback_reported = true;
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: DMA opcode 0xe03 (buffer {:#x}) is not modeled", hdr[dma::HDR_DEST]);
             }
         } else if hdr[dma::HDR_CONTROL] & dma::TO_HOST != 0 {
@@ -1292,41 +1292,41 @@ pub(super) static QUERY_DEFAULTS: [[u32; 5]; 5] = [
 
 impl Board {
     pub fn query_records_reset(&mut self) {
-        self.query_current = QUERY_DEFAULTS;
-        self.query_current_valid = 0x1f;
-        self.query_latched = QUERY_DEFAULTS;
-        self.query_latched_valid = 0x1f;
+        self.query.current = QUERY_DEFAULTS;
+        self.query.current_valid = 0x1f;
+        self.query.latched = QUERY_DEFAULTS;
+        self.query.latched_valid = 0x1f;
     }
 
     /// The raster position's stream has arrived: keep the current index,
     /// colour and texture coordinate for the kind-3 query.
     pub fn query_raster_latch(&mut self) {
         for rec in [ODSY_QUERY_INDEX, ODSY_QUERY_COLOUR, ODSY_QUERY_TEXCOORD] {
-            self.query_latched[rec as usize] = self.query_current[rec as usize];
+            self.query.latched[rec as usize] = self.query.current[rec as usize];
             let bit = 1u32 << rec;
-            self.query_latched_valid = (self.query_latched_valid & !bit) | (self.query_current_valid & bit);
+            self.query.latched_valid = (self.query.latched_valid & !bit) | (self.query.current_valid & bit);
         }
     }
 
     pub fn query_cancel(&mut self) {
-        if self.query_stage != 0 {
+        if self.query.stage != 0 {
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: interrupted current-query sequence");
         }
-        self.query_epoch += 1;
-        self.query_stage = 0;
-        self.query_count = 0;
-        self.query_sync_index = 0;
-        self.query_kind = 0;
-        self.query_base = 0;
-        self.query_sync_base = 0;
-        self.query_captured_epoch = 0;
-        self.query_captured_valid = 0;
-        self.query_captured = [[0; 5]; 5];
-        self.cmd_state = ODSY_CMD_IDLE;
-        self.cmd_tag = 0;
-        self.cmd_operand_count = 0;
-        self.cmd_operand_index = 0;
-        self.cmd_operand = [0; ODSY_CMD_OPERANDS_MAX as usize];
+        self.query.epoch += 1;
+        self.query.stage = 0;
+        self.query.count = 0;
+        self.query.sync_index = 0;
+        self.query.kind = 0;
+        self.query.base = 0;
+        self.query.sync_base = 0;
+        self.query.captured_epoch = 0;
+        self.query.captured_valid = 0;
+        self.query.captured = [[0; 5]; 5];
+        self.cmd.state = ODSY_CMD_IDLE;
+        self.cmd.tag = 0;
+        self.cmd.operand_count = 0;
+        self.cmd.operand_index = 0;
+        self.cmd.operand = [0; ODSY_CMD_OPERANDS_MAX as usize];
     }
 
     /// Retain a completed setter in its public record: the whole command word
@@ -1347,11 +1347,11 @@ impl Board {
             }
             gl_cmd::COLOR_3UB | mode::INDEX_ZEROS => {
                 record = ODSY_QUERY_COLOUR;
-                supported &= self.cmd_operand[..3].iter().all(|&c| c <= 0xff);
+                supported &= self.cmd.operand[..3].iter().all(|&c| c <= 0xff);
             }
             gl_cmd::COLOR_4UB => {
                 record = ODSY_QUERY_COLOUR;
-                supported &= self.cmd_operand[..4].iter().all(|&c| c <= 0xff);
+                supported &= self.cmd.operand[..4].iter().all(|&c| c <= 0xff);
             }
             gl_cmd::COLOR_3I
             | gl_cmd::INDEX_MODE_COLOR_3I
@@ -1393,19 +1393,19 @@ impl Board {
             }
         }
         let rec = record as usize;
-        self.query_current_valid &= !(1u32 << record);
+        self.query.current_valid &= !(1u32 << record);
         if record != ODSY_QUERY_TEXCOORD || supported {
             // Every word mapped to a record above has at most four operands.
             let arity = cmd_arity(tag) as usize;
-            assert!(arity < self.query_current[rec].len());
-            self.query_current[rec] = [0; 5];
-            self.query_current[rec][0] = tag;
+            assert!(arity < self.query.current[rec].len());
+            self.query.current[rec] = [0; 5];
+            self.query.current[rec][0] = tag;
             for k in 0..arity {
-                self.query_current[rec][1 + k] = self.cmd_operand[k];
+                self.query.current[rec][1 + k] = self.cmd.operand[k];
             }
         }
         if supported {
-            self.query_current_valid |= 1u32 << record;
+            self.query.current_valid |= 1u32 << record;
         } else {
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: unsupported current-query record {} tag {:#010x}", record, tag);
         }
@@ -1446,12 +1446,12 @@ impl DmaBus {
 
 impl Board {
     pub fn query_begin(&mut self) {
-        self.query_stage = 1;
-        self.query_base = (((self.ctx_shadow_addr_upper & 0xffff) as u64) << 32) | self.ctx_shadow_addr_lower as u64;
-        self.query_sync_base = (((self.host_write_addr_upper & 0xffff) as u64) << 32) | self.host_write_addr_lower as u64;
-        self.query_captured_epoch = self.query_epoch;
-        self.query_captured_valid = self.query_current_valid;
-        self.query_captured = self.query_current;
+        self.query.stage = 1;
+        self.query.base = (((self.widget.ctx_shadow_addr_upper & 0xffff) as u64) << 32) | self.widget.ctx_shadow_addr_lower as u64;
+        self.query.sync_base = (((self.widget.host_write_addr_upper & 0xffff) as u64) << 32) | self.widget.host_write_addr_lower as u64;
+        self.query.captured_epoch = self.query.epoch;
+        self.query.captured_valid = self.query.current_valid;
+        self.query.captured = self.query.current;
     }
 
     /// The query's last word: publish the snapshot query_begin() took,
@@ -1461,32 +1461,32 @@ impl Board {
     /// waited for the raster queue to empty instead, which in perfly held
     /// the front end up for most of a frame's drawing once a frame.
     pub fn query_finish(&mut self, sequence: u32) {
-        let sync_offset: u64 = 2 * (self.query_sync_index & dma::FENCE_SLOT_MASK) as u64;
-        let raster = self.query_kind == query::KIND_RASTER;
+        let sync_offset: u64 = 2 * (self.query.sync_index & dma::FENCE_SLOT_MASK) as u64;
+        let raster = self.query.kind == query::KIND_RASTER;
         // Kind 3 reads the raster records and the texture coordinate from the
         // latch; the rest of the page is the live snapshot.
-        let mut page = self.query_captured;
-        let mut page_valid = self.query_captured_valid;
+        let mut page = self.query.captured;
+        let mut page_valid = self.query.captured_valid;
 
-        self.query_stage = 0;
+        self.query.stage = 0;
         if raster {
             let tex = ODSY_QUERY_TEXCOORD as usize;
 
-            page[tex] = self.query_latched[tex];
-            page_valid = (page_valid & !(1u32 << tex)) | (self.query_latched_valid & (1u32 << tex));
+            page[tex] = self.query.latched[tex];
+            page_valid = (page_valid & !(1u32 << tex)) | (self.query.latched_valid & (1u32 << tex));
         }
         for i in 0..QUERY_OFFSET.len() {
             if page_valid & (1u32 << i) == 0 {
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: unsupported current-query record {} in snapshot", i);
             }
         }
-        if raster && self.query_latched_valid & 0b1011 != 0b1011 {
+        if raster && self.query.latched_valid & 0b1011 != 0b1011 {
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: unsupported raster-position latch");
             return;
         }
-        if self.query_base == 0
-            || self.query_base > u64::MAX - 0x980
-            || self.query_captured_epoch != self.query_epoch
+        if self.query.base == 0
+            || self.query.base > u64::MAX - 0x980
+            || self.query.captured_epoch != self.query.epoch
             || page_valid != 0x1f
         {
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: unsupported current-query snapshot");
@@ -1498,23 +1498,23 @@ impl Board {
             let n = 1 + cmd_arity(page[i][0]) as usize;
 
             for j in 0..n {
-                let addr = self.query_base + QUERY_OFFSET[i] as u64 + 4 * j as u64;
+                let addr = self.query.base + QUERY_OFFSET[i] as u64 + 4 * j as u64;
                 words.push((addr, page[i][j], "sgi-odyssey: current-query payload failed"));
             }
         }
         let mut i = 0;
-        while self.query_kind == query::KIND_RASTER && i < 2 {
-            let rec = self.query_latched[if i != 0 { ODSY_QUERY_COLOUR } else { ODSY_QUERY_INDEX } as usize];
-            let at = self.query_base + (if i != 0 { query::RASTER_COLOUR } else { query::RASTER_INDEX }) as u64;
+        while self.query.kind == query::KIND_RASTER && i < 2 {
+            let rec = self.query.latched[if i != 0 { ODSY_QUERY_COLOUR } else { ODSY_QUERY_INDEX } as usize];
+            let at = self.query.base + (if i != 0 { query::RASTER_COLOUR } else { query::RASTER_INDEX }) as u64;
 
             for (j, &word) in rec.iter().enumerate().take(1 + cmd_arity(rec[0]) as usize) {
                 words.push((at + 4 * j as u64, word, "sgi-odyssey: raster query payload failed"));
             }
             i += 1;
         }
-        words.push((self.query_base + 0x97c, self.query_count, "sgi-odyssey: current-query counter failed"));
-        let sync = (self.query_sync_base <= u64::MAX - sync_offset).then(|| self.query_sync_base + sync_offset);
-        let softsync = self.query_sync_index & dma::FENCE_INTERRUPT != 0;
+        words.push((self.query.base + 0x97c, self.query.count, "sgi-odyssey: current-query counter failed"));
+        let sync = (self.query.sync_base <= u64::MAX - sync_offset).then(|| self.query.sync_base + sync_offset);
+        let softsync = self.query.sync_index & dma::FENCE_INTERRUPT != 0;
         let bus = DmaBus {
             mem: self.guest.clone(),
             trace_sequence: self.trace_sequence.load(Ordering::Relaxed).wrapping_sub(1),
@@ -1626,16 +1626,16 @@ impl Board {
     /// capacity is converted into that unit first. A guest that addresses past
     /// the reported size is a guest bug, kept observable.
     pub fn board_address_valid(&mut self, base: u32) -> bool {
-        let limit: u64 = (self.memory_size as u64) * (1u64 << 20) / 16;
+        let limit: u64 = (self.widget.memory_size as u64) * (1u64 << 20) / 16;
 
         if (base as u64) < limit {
             return true;
         }
-        if !self.board_oob_reported {
-            self.board_oob_reported = true;
-            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: destination base {:#x} is beyond the {} MiB this board reports", base, self.memory_size);
+        if !self.diag.board_oob_reported {
+            self.diag.board_oob_reported = true;
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: destination base {:#x} is beyond the {} MiB this board reports", base, self.widget.memory_size);
         }
-        crate::dlog!(LogModule::Odyssey, "sgi-odyssey: board memory out of bounds: destination base {:#x} exceeds the {} MiB this board reports", base, self.memory_size);
+        crate::dlog!(LogModule::Odyssey, "sgi-odyssey: board memory out of bounds: destination base {:#x} exceeds the {} MiB this board reports", base, self.widget.memory_size);
         false
     }
 
@@ -1645,12 +1645,12 @@ impl Board {
     /// level entry's format field differing per component set. The store keeps
     /// whole texel words whatever the level's format, so the copy is the same.
     pub fn texture_build_level(&mut self) -> bool {
-        let p = self.cmd_operand;
-        let entry = [self.tex_levels[60 * 3], self.tex_levels[60 * 3 + 1], self.tex_levels[60 * 3 + 2]];
-        let ws = self.tex_sampler[1];
-        let hs = self.tex_sampler[2];
+        let p = self.cmd.operand;
+        let entry = [self.tex.levels[60 * 3], self.tex.levels[60 * 3 + 1], self.tex.levels[60 * 3 + 2]];
+        let ws = self.tex.sampler[1];
+        let hs = self.tex.sampler[2];
 
-        let format: u32 = match self.tex_sampler[4] {
+        let format: u32 = match self.tex.sampler[4] {
             0x13640000 => 0x41100000,
             0x12e40000 => 0x00c00000,
             0x11e40000 => 0x00b00000,
@@ -1663,15 +1663,15 @@ impl Board {
         let hd = (hs / 2).max(1);
         let source_units = (ws.div_ceil(16) + 1) & !1u32;
         let dest_units = (wd.div_ceil(16) + 1) & !1u32;
-        if self.gl_primitive != gl_cmd::QUADS
-            || (self.tex_mode & tex::MODE_2D) == 0
-            || self.tex_level0 != 60
+        if self.stream.primitive != gl_cmd::QUADS
+            || (self.tex.mode & tex::MODE_2D) == 0
+            || self.tex.level0 != 60
             || entry[1] != (format | source_units)
             || entry[2] != 0
-            || self.tex_sampler[0] != ((ws.trailing_zeros() << 10) | (hs.trailing_zeros() << 5))
-            || self.tex_sampler[3] != 0
-            || self.tex_sampler[5] != 0
-            || self.tex_sampler[6] != 0
+            || self.tex.sampler[0] != ((ws.trailing_zeros() << 10) | (hs.trailing_zeros() << 5))
+            || self.tex.sampler[3] != 0
+            || self.tex.sampler[5] != 0
+            || self.tex.sampler[6] != 0
             || p[0] != 0
             || p[1] != 0
             || p[2] != 0
@@ -1690,21 +1690,21 @@ impl Board {
             return false;
         }
         let source_base = entry[0] & 0x1fffffff;
-        if source_base == 0 || source_base == self.dest_base || self.obj_count > ODSY_OBJECTS {
+        if source_base == 0 || source_base == self.dest_base || self.objects.count > ODSY_OBJECTS {
             return false;
         }
         let (Some(su), Some(du)) = (self.object_find(source_base), self.image_object()) else {
             return false;
         };
-        if self.obj_width[su] != source_units * 16 || self.obj_rows[su] < hs || self.obj_width[du] != dest_units * 16 {
+        if self.objects.width[su] != source_units * 16 || self.objects.rows[su] < hs || self.objects.width[du] != dest_units * 16 {
             return false;
         }
         let source_end = ((hs - 1) as u64)
-            .checked_mul(self.obj_width[su] as u64)
-            .and_then(|v| v.checked_add(self.obj_offset[su] as u64))
+            .checked_mul(self.objects.width[su] as u64)
+            .and_then(|v| v.checked_add(self.objects.offset[su] as u64))
             .and_then(|v| v.checked_add(ws as u64));
         let Some(source_end) = source_end else { return false };
-        if source_end > self.obj_used as u64 || source_end > self.obj_mem.size / 4 || !self.object_rows(du, hd) {
+        if source_end > self.objects.used as u64 || source_end > self.objects.mem.size / 4 || !self.object_rows(du, hd) {
             return false;
         }
         for y in 0..hd {
@@ -1740,12 +1740,12 @@ impl Board {
     /// environment they do not reach the pixel, and the environment is the
     /// stored raster state's to say.
     pub fn texture_zoom_rect(&mut self) -> bool {
-        let p = self.cmd_operand;
+        let p = self.cmd.operand;
 
-        if p[..3] != [0; 3] || p[3] != ODSY_F32_ONE || self.gl_primitive != gl_cmd::QUADS || !self.gl_begin_open {
+        if p[..3] != [0; 3] || p[3] != ODSY_F32_ONE || self.stream.primitive != gl_cmd::QUADS || !self.prim.begin_open {
             return false;
         }
-        let (tag, operands) = (self.cmd_tag, self.cmd_operand);
+        let (tag, operands) = (self.cmd.tag, self.cmd.operand);
         let (x0, ya, z, x1, yb) = (p[4], p[5], p[6], p[7], p[8]);
         let (s0, t0, s1, t1) = (p[10], p[11], p[12], p[13]);
 
@@ -1754,17 +1754,17 @@ impl Board {
         let identity = [1f32, 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.];
 
         self.gl_load_combined(&identity);
-        self.tex_coord_r = 0;
-        self.tex_coord_q = ODSY_F32_ONE;
+        self.tex.coord_r = 0;
+        self.tex.coord_q = ODSY_F32_ONE;
         for (x, y, s, t) in [(x0, ya, s0, t0), (x1, ya, s1, t0), (x1, yb, s1, t1), (x0, yb, s0, t1)] {
-            self.tex_coord = [s, t];
-            self.cmd_operand[..4].copy_from_slice(&[x, y, z, 0]);
-            self.cmd_tag = gl_cmd::VERTEX_3F;
+            self.tex.coord = [s, t];
+            self.cmd.operand[..4].copy_from_slice(&[x, y, z, 0]);
+            self.cmd.tag = gl_cmd::VERTEX_3F;
             self.cmd_dispatch(gl_cmd::VERTEX_3F);
         }
         self.gl_reload_combined();
-        self.cmd_tag = tag;
-        self.cmd_operand = operands;
+        self.cmd.tag = tag;
+        self.cmd.operand = operands;
         true
     }
 }

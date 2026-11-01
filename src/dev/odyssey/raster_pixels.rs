@@ -359,23 +359,23 @@ mod tests {
                 }
             }
         }
-        for v in b.board.depth_mem.bytes.iter_mut().take(4 * 1280 * SIDE as usize) {
+        for v in b.board.planes.depth.bytes.iter_mut().take(4 * 1280 * SIDE as usize) {
             *v = noise.next_u32() as u8;
         }
-        for v in b.board.stencil_mem.bytes.iter_mut().take(1280 * SIDE as usize) {
+        for v in b.board.planes.stencil.bytes.iter_mut().take(1280 * SIDE as usize) {
             *v = noise.next_u32() as u8;
         }
         if rng.next_u32() % 2 == 0 {
-            b.board.id_compare = ODSY_ID_COMPARE_ENABLE | (0x0f << ODSY_ID_COMPARE_MASK_SHIFT) | 0x05;
-            for d in b.board.did.iter_mut() {
+            b.board.win.id_compare = ODSY_ID_COMPARE_ENABLE | (0x0f << ODSY_ID_COMPARE_MASK_SHIFT) | 0x05;
+            for d in b.board.planes.did.iter_mut() {
                 *d = if noise.next_u32() % 4 == 0 { 0x15 } else { 0x06 };
             }
         }
         if rng.next_u32() % 2 == 0 {
             // Board clip rectangles that split rows: those rows are not lent.
-            b.board.clip_kept = 2;
-            b.board.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: 40, y1: SIDE - 1 };
-            b.board.clip_rect[1] = ClipRect { x0: 30, y0: 20, x1: SIDE - 1, y1: 70 };
+            b.board.win.clip_kept = 2;
+            b.board.win.clip_rect[0] = ClipRect { x0: 0, y0: 0, x1: 40, y1: SIDE - 1 };
+            b.board.win.clip_rect[1] = ClipRect { x0: 30, y0: 20, x1: SIDE - 1, y1: 70 };
         }
         let x0 = (rng.next_u32() % 40) as i32;
         let y0 = (rng.next_u32() % 40) as i32;

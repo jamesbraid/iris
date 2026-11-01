@@ -18,7 +18,7 @@ use super::reader::SharedRegs;
 use super::scanout::{DirtySite, ScanoutMode};
 impl Board {
     pub fn identity(&mut self) -> u32 {
-        (self.revision << 28) | (ODSY_PART << 12) | (ODSY_MANUFACTURER << 1) | 1
+        (self.widget.revision << 28) | (ODSY_PART << 12) | (ODSY_MANUFACTURER << 1) | 1
     }
 
     pub fn unimplemented(&self, addr: u64, size: u32, write: bool) {
@@ -28,16 +28,16 @@ impl Board {
         // board's thread may be running a store of its own, so the report
         // table is atomic and the count bounded on every use; a race can only
         // log an offset twice.
-        let len = self.reported_addr.len();
-        let seen = (self.reported_addr_count.load(Ordering::Relaxed) as usize).min(len);
-        if self.reported_addr[..seen].iter().any(|a| a.load(Ordering::Relaxed) == token) || seen == len {
+        let len = self.diag.reported_addr.len();
+        let seen = (self.diag.reported_addr_count.load(Ordering::Relaxed) as usize).min(len);
+        if self.diag.reported_addr[..seen].iter().any(|a| a.load(Ordering::Relaxed) == token) || seen == len {
             return;
         }
-        let slot = self.reported_addr_count.fetch_add(1, Ordering::Relaxed) as usize;
+        let slot = self.diag.reported_addr_count.fetch_add(1, Ordering::Relaxed) as usize;
         if slot >= len {
             return;
         }
-        self.reported_addr[slot].store(token, Ordering::Relaxed);
+        self.diag.reported_addr[slot].store(token, Ordering::Relaxed);
         crate::dlog!(
             LogModule::Odyssey,
             "sgi-odyssey: {}-byte {} at {:#x} is not modeled{}",
@@ -51,20 +51,20 @@ impl Board {
     /// Report an unmodeled command word once. note follows the message: the
     /// parser's framing decision for a word it does not know, or "".
     pub fn cmd_report(&mut self, word: u32, note: &str) {
-        if self.reported_cmd[..self.reported_cmd_count as usize].contains(&word) {
+        if self.diag.reported_cmd[..self.diag.reported_cmd_count as usize].contains(&word) {
             return;
         }
-        if self.reported_cmd_count == ODSY_UNIMP_REPORTS {
+        if self.diag.reported_cmd_count == ODSY_UNIMP_REPORTS {
             return;
         }
-        self.reported_cmd[self.reported_cmd_count as usize] = word;
-        self.reported_cmd_count += 1;
+        self.diag.reported_cmd[self.diag.reported_cmd_count as usize] = word;
+        self.diag.reported_cmd_count += 1;
         crate::dlog!(
             LogModule::Odyssey,
             "sgi-odyssey: command FIFO word {:#010x} is not modeled{}{}",
             word,
             note,
-            if self.reported_cmd_count == ODSY_UNIMP_REPORTS { "; further words stay silent" } else { "" }
+            if self.diag.reported_cmd_count == ODSY_UNIMP_REPORTS { "; further words stay silent" } else { "" }
         );
     }
 
@@ -147,7 +147,7 @@ impl Board {
             None => false,
         };
 
-        self.nic = (value & !(nic::LEVEL | nic::DONE)) | nic::DONE | if level { nic::LEVEL } else { 0 };
+        self.widget.nic = (value & !(nic::LEVEL | nic::DONE)) | nic::DONE | if level { nic::LEVEL } else { 0 };
     }
 
     // The display back end's 32 by 32 hardware cursor (the datasheet's
@@ -168,10 +168,10 @@ impl Board {
     // values are unknown; the model resets every entry to zero, cursor off.
 
     pub fn cursor_report(&mut self, bit: u32, what: &str, index: u32, data: u32) {
-        if self.cursor_reported & bit != 0 {
+        if self.diag.cursor_reported & bit != 0 {
             return;
         }
-        self.cursor_reported |= bit;
+        self.diag.cursor_reported |= bit;
         crate::dlog!(LogModule::Odyssey, "sgi-odyssey: cursor entry {:#x} word {:#010x}: {}", cursor::BASE + index, data, what);
     }
 
@@ -330,20 +330,20 @@ impl Board {
         if size != 4 || addr < first || (addr & 7) != 4 || addr >= first + ((backend::CTL_ENTRIES as u64) << 3) {
             return false;
         }
-        *value = self.backend_ctl[((addr - first) >> 3) as usize] as u64;
+        *value = self.widget.backend_ctl[((addr - first) >> 3) as usize] as u64;
         true
     }
 
     /// +0x1004 (mem::CONTROL): kept, and checked against the strap.
     pub fn memory_control(&mut self, value: u32) {
-        let strap = self.memory_config;
+        let strap = self.widget.memory_config;
         let size = (value >> mem::CONTROL_SIZE_SHIFT) & mem::CONTROL_SIZE_MASK;
         // The kernel programs strap code 3 like 128 MB, code 2.
         let strap_size = (strap >> config::SIZE_SHIFT).min(2);
 
-        self.memory_control = value;
-        if !self.memory_control_reported {
-            self.memory_control_reported = true;
+        self.widget.memory_control = value;
+        if !self.diag.memory_control_reported {
+            self.diag.memory_control_reported = true;
             crate::dlog!(LogModule::Odyssey, "sgi-odyssey: memory controller configuration {:#x} stored; the controller is not modeled", value);
         }
         // The master id goes in first, with the strap fields still zero.
@@ -378,7 +378,7 @@ impl Board {
             Some(cfifo::SELFTEST) => {
                 // Answers OK only after the kernel driver's command-FIFO
                 // initialisation preamble; zero before.
-                value = if self.cfifo_selftest_ready { cfifo::SELFTEST_OK as u64 } else { 0 };
+                value = if self.widget.cfifo_selftest_ready { cfifo::SELFTEST_OK as u64 } else { 0 };
             }
             Some(mem::CONFIG) => {
                 // Bits 15:7: the field and the drain waits are ESTABLISHED,
@@ -389,21 +389,21 @@ impl Board {
                 // run the queue is needed, by the start-up and flow-reset
                 // drain waits.
                 let doublewords = self.fifo.level().div_ceil(2).min(0x1ff);
-                value = (self.memory_config | (doublewords << 7)) as u64;
+                value = (self.widget.memory_config | (doublewords << 7)) as u64;
             }
-            Some(flctl::CONFIG) => value = self.flctl_config as u64,
-            Some(ODSY_BUZZ_1) => value = self.buzz[0] as u64,
-            Some(ODSY_BUZZ_2) => value = self.buzz[1] as u64,
-            Some(ODSY_BUZZ_3) => value = self.buzz[2] as u64,
-            Some(ODSY_BUZZ_4) => value = self.buzz[3] as u64,
-            Some(ODSY_BUZZ_5) => value = self.buzz[4] as u64,
-            Some(ODSY_BUZZ_6) => value = self.buzz[5] as u64,
-            Some(nic::PROM | nic::KERNEL) => value = self.nic as u64,
-            Some(i2c::MAIN_CMD_READ) => value = self.i2c_main_cmd as u64,
-            Some(i2c::MAIN_STATUS_READ) => value = i2c_status(self.i2c_main_cmd) as u64,
-            Some(i2c::OPT_CMD_READ) => value = self.i2c_opt_cmd as u64,
-            Some(i2c::OPT_STATUS_READ) => value = i2c_status(self.i2c_opt_cmd) as u64,
-            Some(backend::VERSION) => value = (self.backend_version & 7) as u64,
+            Some(flctl::CONFIG) => value = self.widget.flctl_config as u64,
+            Some(ODSY_BUZZ_1) => value = self.widget.buzz[0] as u64,
+            Some(ODSY_BUZZ_2) => value = self.widget.buzz[1] as u64,
+            Some(ODSY_BUZZ_3) => value = self.widget.buzz[2] as u64,
+            Some(ODSY_BUZZ_4) => value = self.widget.buzz[3] as u64,
+            Some(ODSY_BUZZ_5) => value = self.widget.buzz[4] as u64,
+            Some(ODSY_BUZZ_6) => value = self.widget.buzz[5] as u64,
+            Some(nic::PROM | nic::KERNEL) => value = self.widget.nic as u64,
+            Some(i2c::MAIN_CMD_READ) => value = self.widget.i2c_main_cmd as u64,
+            Some(i2c::MAIN_STATUS_READ) => value = i2c_status(self.widget.i2c_main_cmd) as u64,
+            Some(i2c::OPT_CMD_READ) => value = self.widget.i2c_opt_cmd as u64,
+            Some(i2c::OPT_STATUS_READ) => value = i2c_status(self.widget.i2c_opt_cmd) as u64,
+            Some(backend::VERSION) => value = (self.widget.backend_version & 7) as u64,
             Some(host::WRITE_ADDR_UPPER
             | host::WRITE_ADDR_LOWER
             | stats::ADDR_UPPER
@@ -474,7 +474,7 @@ impl Board {
     /// is still reported.
     pub fn backend_data(&mut self, index: u32, data: u32) {
         if (backend::CTL_BASE..backend::CTL_BASE + backend::CTL_ENTRIES).contains(&index) {
-            self.backend_ctl[(index - backend::CTL_BASE) as usize] = data;
+            self.widget.backend_ctl[(index - backend::CTL_BASE) as usize] = data;
         }
         // Scanout resolves through both, so either change repaints.
         if index < lut::SIZE {
@@ -493,8 +493,8 @@ impl Board {
         }
         if (overlay::MODE_BASE..overlay::MODE_BASE + overlay::IDS).contains(&index) {
             self.regs().set_overlay_mode((index - overlay::MODE_BASE) as usize, data);
-            if (data & !overlay::MODE_KNOWN) != 0 && !self.overlay_mode_reported {
-                self.overlay_mode_reported = true;
+            if (data & !overlay::MODE_KNOWN) != 0 && !self.diag.overlay_mode_reported {
+                self.diag.overlay_mode_reported = true;
                 crate::dlog!(LogModule::Odyssey, "sgi-odyssey: overlay mode {:#x} has bits this model does not decode", data);
             }
             self.scanout.repaint_all_for(DirtySite::Lut);
@@ -502,8 +502,8 @@ impl Board {
         }
         match index {
             ODSY_CHANNEL_WIDTH | ODSY_CHANNEL_HEIGHT => self.channel_size(index, data),
-            i2c::MAIN_CMD_INDEX => self.i2c_main_cmd = data,
-            i2c::OPT_CMD_INDEX => self.i2c_opt_cmd = data,
+            i2c::MAIN_CMD_INDEX => self.widget.i2c_main_cmd = data,
+            i2c::OPT_CMD_INDEX => self.widget.i2c_opt_cmd = data,
             _ => {
                 if !backend_ctl_known(index) {
                     self.unimplemented(backend::SELECT, 8, true);
@@ -519,18 +519,18 @@ impl Board {
     /// guessed. While a record is open the word is a data word for the running
     /// index, which then advances (see Board::backend_data).
     pub fn backend_word(&mut self, word: u32) {
-        if self.backend_count == 0 {
+        if self.widget.backend_count == 0 {
             if ((word >> backend::TAG_SHIFT) & backend::TAG_MASK) != backend::TAG_HEADER {
                 self.unimplemented(backend::SELECT, 8, true);
                 return;
             }
-            self.backend_index = (word >> backend::SELECTOR_INDEX_SHIFT) & backend::SELECTOR_INDEX_MASK;
-            self.backend_count = word & backend::COUNT_MASK;
+            self.widget.backend_index = (word >> backend::SELECTOR_INDEX_SHIFT) & backend::SELECTOR_INDEX_MASK;
+            self.widget.backend_count = word & backend::COUNT_MASK;
             return;
         }
-        self.backend_data(self.backend_index, word);
-        self.backend_index = (self.backend_index + 1) & backend::SELECTOR_INDEX_MASK;
-        self.backend_count -= 1;
+        self.backend_data(self.widget.backend_index, word);
+        self.widget.backend_index = (self.widget.backend_index + 1) & backend::SELECTOR_INDEX_MASK;
+        self.widget.backend_count -= 1;
     }
 
     /// The indexed register file's write port: an 8-byte store is two words,

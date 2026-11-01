@@ -54,8 +54,8 @@ fn scene_board(scene: Scene) -> Box<Board> {
     let mut rng = Lcg(0x5eed_0001);
     let pixels = (ODSY_WIDTH * ODSY_HEIGHT) as usize;
 
-    fill_random(&mut s.mem.bytes, &mut rng);
-    fill_random(&mut s.buffer1_mem.bytes, &mut rng);
+    fill_random(&mut s.planes.colour.bytes, &mut rng);
+    fill_random(&mut s.planes.buffer1.bytes, &mut rng);
     for i in 0..lut::SIZE as usize {
         s.regs().set_lut(i, rng.next_u32() & lut::ENTRY_MASK);
     }
@@ -100,11 +100,11 @@ fn scene_board(scene: Scene) -> Box<Board> {
             let at = y * ODSY_WIDTH as usize + x;
             let block = (x / 64 + 3 * (y / 48)) as u32;
 
-            s.did[at] = ((block % 32) << ODSY_DID_MAIN_SHIFT | (block / 3) % 8) as u8;
-            s.overlay[at] = if rng.next_u32() % 5 == 0 { rng.next_u32() as u8 } else { 0 };
+            s.planes.did[at] = ((block % 32) << ODSY_DID_MAIN_SHIFT | (block / 3) % 8) as u8;
+            s.planes.overlay[at] = if rng.next_u32() % 5 == 0 { rng.next_u32() as u8 } else { 0 };
         }
     }
-    assert_eq!(s.did.len(), pixels);
+    assert_eq!(s.planes.did.len(), pixels);
     s.front.lock().displayed_buffer = 0x6d5a_b3c9;
     s.regs().set_cursor(cursor::POSITION as usize, 100 << 16 | 40);
     for i in 0..cursor::COLOUR_COUNT {
@@ -132,9 +132,9 @@ fn swap_board(rows: usize) -> Box<Board> {
     let mut rng = Lcg(0x5eed_0002);
     let first = (ODSY_HEIGHT as usize - rows) / 2;
 
-    let same = s.mem.bytes.clone();
-    s.buffer1_mem.bytes.copy_from_slice(&same);
-    fill_random(&mut s.buffer1_mem.bytes[first * stride..(first + rows) * stride], &mut rng);
+    let same = s.planes.colour.bytes.clone();
+    s.planes.buffer1.bytes.copy_from_slice(&same);
+    fill_random(&mut s.planes.buffer1.bytes[first * stride..(first + rows) * stride], &mut rng);
     s
 }
 
@@ -186,7 +186,7 @@ fn a_mode_wider_than_the_planes_still_resolves() {
     let mut fast = vec![0u32; 1280];
     let mut slow = vec![0u32; 1280];
 
-    s.mem.bytes.truncate(1280 * 4 * 10);
+    s.planes.colour.bytes.truncate(1280 * 4 * 10);
     s.resolve_row(9, &mut fast);
     s.resolve_row_generic(9, &mut slow);
     assert_eq!(fast, slow);

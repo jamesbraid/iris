@@ -66,7 +66,7 @@ fn shown(s: &mut Board, x: i32, y: i32) -> u32 {
 fn drawable(s: &mut Board, id: u8, x0: i32, y0: i32, x1: i32, y1: i32) {
     for y in y0..y1 {
         for x in x0..x1 {
-            s.did[(y * WIDTH + x) as usize] = id << ODSY_DID_MAIN_SHIFT;
+            s.planes.did[(y * WIDTH + x) as usize] = id << ODSY_DID_MAIN_SHIFT;
         }
     }
     s.scanout.invalidate(y0, y1 - y0);
@@ -146,7 +146,7 @@ fn an_armed_swap_toggles_the_displayed_buffer_at_the_retrace() {
     cmd64(&mut s, swap::SYNC_B, 0x8000_2000);
     assert_eq!(reg_read(&mut s, ODSY_DISPLAYED_BUFFER), 0);
     assert!(rec.silent());
-    assert_eq!(s.reported_cmd_count, 0);
+    assert_eq!(s.diag.reported_cmd_count, 0);
 
     reg_write(&mut s, swap::ARM, ARM_BIT);
     assert_eq!(reg_read(&mut s, swap::ARM), ARM_BIT);
@@ -246,7 +246,7 @@ fn the_drawable_register_block_takes_its_operands() {
     rgb_fill(&mut s, 0, 0, 0xff, 64, 100, 80, 110);
 
     assert_eq!(pixel(&s, 0, 64, 100), 0x0000_ffff);
-    assert_eq!(s.reported_cmd_count, 0);
+    assert_eq!(s.diag.reported_cmd_count, 0);
 }
 
 /// The bound drawing (0x608) and reading (0x609) drawable words are kept
