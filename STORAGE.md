@@ -31,12 +31,31 @@ both to reset to the clean base.
 The record grows as each write lands, so ending iris any way at all (Ctrl-C,
 `kill`, `kill -9`, a crash of iris itself) keeps every write the guest had
 made. To the guest that is a power cut: its filesystem recovers as it would on
-real hardware, from its log. A crash or power loss of the host itself can lose
-the writes made since the last flush, and so can tear the guest's filesystem.
-The disk reports a write-back cache, and only a flush puts what came before it
-on the host's disk: iris stopping, `cow commit`, or the guest's SYNCHRONIZE
-CACHE, which IRIX does not send. Stop iris cleanly before you expect the host
-to go down.
+real hardware, from its log.
+
+A crash or power loss of the host itself is different, and what it costs
+depends on the disk's `write_cache` setting in `[scsi.N]` (or `--write-cache`
+for every disk), which is the caching mode page's WCE bit:
+
+- `write_cache = false` (the default) is a drive as SGI shipped them. The disk
+  reports its write cache off, and every write is stored on the host's disk
+  before the command completes, so a host crash loses no write the guest was
+  told had finished. That is what IRIX relies on: it never reads that page,
+  sends SYNCHRONIZE CACHE or sets FUA. It is slower, because each write waits
+  for the host disk.
+- `write_cache = true` reports a write cache. A plain write is complete once
+  the host has it, and may be lost in a host crash until SYNCHRONIZE CACHE (10)
+  or (16), a WRITE(10) with FUA, or a background sync stores it. A thread syncs
+  each writable raw image and overlay (the overlay and its record) about 5 s
+  after the first write that follows a sync, doing nothing while the guest
+  writes nothing. A host crash can lose up to about 5 s of the guest's most
+  recent writes, in any order, and so can tear the guest's filesystem. NetBSD
+  and Linux send SYNCHRONIZE CACHE to a disk with a write cache.
+
+A guest can change the setting either way with MODE SELECT (the caching page's
+WCE bit; clearing it stores what was written so far at once). A bus reset puts
+it back to the configured value: on the AIC-7880 and the ISP1040 a bus reset,
+on the WD33C93A a reset of the chip.
 
 An older iris reads only what the last flush recorded, so after a kill it
 sees the disk as it was before the appended writes, torn as before. Open an
