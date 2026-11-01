@@ -2490,15 +2490,17 @@ impl Board {
 }
 
 /// 0x404 bits 10:9 to the shared layer's cull-face enum: GL_BACK 01,
-/// GL_FRONT 10, GL_FRONT_AND_BACK 11. Returns UINT32_MAX for 00, which no
-/// probe word has sent; the shared layer's own glCullFace validation then
-/// rejects it, leaving the previous mode in place.
-pub fn cull_face_mode(code: u32) -> u32 {
+/// GL_FRONT 10, GL_FRONT_AND_BACK 11. 00 names no face and gives None. The
+/// library sends 00 with culling off (bit 8 clear) on most 0x0404 writes,
+/// where the face does not matter. CHOICE: on 00 the model keeps the
+/// face it had; what the board does with 00 and culling on is unknown, and
+/// no stream seen sends that.
+pub fn cull_face_mode(code: u32) -> Option<u32> {
     match code {
-        1 => GL_BACK,
-        2 => GL_FRONT,
-        3 => GL_FRONT_AND_BACK,
-        _ => u32::MAX,
+        1 => Some(GL_BACK),
+        2 => Some(GL_FRONT),
+        3 => Some(GL_FRONT_AND_BACK),
+        _ => None,
     }
 }
 
@@ -2610,7 +2612,9 @@ impl Board {
         self.gl_feed32(en(ODSY_MODE_OFFSET_FILL), &[GL_POLYGON_OFFSET_FILL]);
         self.gl_feed32(en(ODSY_MODE_CULL_FACE), &[GL_CULL_FACE]);
         self.gl_feed_raster_state(en(ODSY_MODE_GL_LINE_STIPPLE) as u16, &[GL_LINE_STIPPLE]);
-        self.gl_feed32(GL_OP_CULL_FACE, &[cull_mode]);
+        if let Some(cull_mode) = cull_mode {
+            self.gl_feed32(GL_OP_CULL_FACE, &[cull_mode]);
+        }
         self.gl_feed32(GL_OP_FRONT_FACE, &[front_face]);
         self.gl_apply_polygon_stipple();
     }

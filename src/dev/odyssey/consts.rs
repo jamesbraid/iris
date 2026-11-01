@@ -806,7 +806,7 @@ pub const ODSY_STENCIL_MAX: u32 = 0xff;
 // 0x452 bits 11:0 are glIndexMask ANDed with the drawable's index-plane mask
 pub const ODSY_WRITE_INDEX_MASK: u32 = 0xfff;
 
-// Bit 8 of the 0x0404 mode register is GL_CULL_FACE, bits 10:9 the face it culls -- 01 GL_BACK, 10 GL_FRONT, 11 GL_FRONT_AND_BACK, with 00 never sent ...
+// Bit 8 of the 0x0404 mode register is GL_CULL_FACE, bits 10:9 the face it culls -- 01 GL_BACK, 10 GL_FRONT, 11 GL_FRONT_AND_BACK; 00, sent with culling off, names none (cull_face_mode())
 pub const ODSY_MODE_CULL_FACE: u32 = 1 << 8;
 pub const ODSY_MODE_CULL_MODE_SHIFT: u32 = 9;
 pub const ODSY_MODE_CULL_MODE_MASK: u32 = 0x3;

@@ -594,3 +594,24 @@ fn an_unmodelled_word_passes_over_the_operands_its_arity_names() {
     assert_eq!(s.reported_cmd_count, 2);
     assert_eq!(s.reported_cmd[1], 0x123);
 }
+
+/// 0x0404 bits 10:9 name the face culled; the library sends 00 with
+/// culling off. That leaves the face the last named one, so turning culling
+/// back on culls it, and 00 is never handed to glCullFace.
+#[test]
+fn a_mode_word_naming_no_cull_face_keeps_the_last_one() {
+    let (mut s, _) = board("v12");
+    let mode = |s: &mut Board, word: u32| {
+        cmd(s, select(ODSY_REG_PATTERN_MODE));
+        cmd(s, word);
+    };
+    let cull = |s: &Board| (s.gl_ref().cur.cull_face, s.gl_ref().cur.cull_face_mode);
+
+    mode(&mut s, ODSY_MODE_CULL_FACE | 2 << ODSY_MODE_CULL_MODE_SHIFT);
+    assert_eq!(cull(&s), (true, GL_FRONT));
+    mode(&mut s, 0);
+    assert_eq!(cull(&s), (false, GL_FRONT), "culling off, face kept");
+    mode(&mut s, ODSY_MODE_CULL_FACE);
+    assert_eq!(cull(&s), (true, GL_FRONT), "00 with culling on keeps the face (model choice)");
+    assert_eq!(cull_face_mode(0), None);
+}
