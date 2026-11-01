@@ -644,9 +644,12 @@ impl SoftDraw<'_> {
     /// snapped subpixel grid. A smoothed point takes the
     /// box-filter coverage about its snapped centre (3.3.2). MODEL CHOICE:
     /// the board's coverage rule for a smoothed point is UNKNOWN; a point of
-    /// size 1 covers about pi/4 of a pixel at its centre. The vendor frames
-    /// show the board's coverage is not a disc's area, and the model's disc area
-    /// disagrees with them at larger offsets (about 0.15 at 0.95 pixel).
+    /// size 1 covers about pi/4 of a pixel at its centre (a sampling artefact, not the board). The graded rule
+    /// (INFERRED) is a = G(c), c the exact pixel-square area covered by a strip
+    /// of the line width or a square of the point size, G a table in the
+    /// datasheet, blended with source alpha = coverage. The model's disc area
+    /// differs from it (about 0.15 at 0.95 pixel against the vendor frames):
+    /// a known approximation, to be replaced.
     pub fn point_projected(&self, pv: &SoftVertex, provoking: Option<&[f32]>, offset: f64) {
         let sub = self.rules.subpixel_bits as i32;
         let v = *pv;
