@@ -72,7 +72,7 @@ pub mod bte_reg {
 use crate::traits::{BusDevice, BusRead64, Resettable, BUS_ERR, BUS_OK};
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread::ThreadId;
 const ID: u64 = (2 << 28) | (0xc110 << 12) | (0x36 << 1);
 const ADDR_MASK: u64 = 0xffffffff80;
@@ -133,6 +133,7 @@ pub struct BedrockIo {
     widgets: Mutex<[Option<Arc<dyn BusDevice>>; 16]>,
     memory: Mutex<Option<Arc<dyn BusDevice>>>,
     hub: Mutex<Option<Arc<dyn BusDevice>>>,
+    scratch0_written: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 impl Default for BedrockIo {
     fn default() -> Self {
@@ -149,7 +150,13 @@ impl BedrockIo {
             widgets: Mutex::new(std::array::from_fn(|_| None)),
             memory: Mutex::new(None),
             hub: Mutex::new(None),
+            scratch0_written: OnceLock::new(),
         }
+    }
+    /// Called after each store to scratch 0 (0x150) has landed, with no IO
+    /// lock held. Once.
+    pub fn on_scratch0_write(&self, hook: Box<dyn Fn() + Send + Sync>) {
+        assert!(self.scratch0_written.set(hook).is_ok(), "scratch 0 hook already set");
     }
     pub fn connect_widget(&self, widget: u8, dev: Arc<dyn BusDevice>) {
         assert!(widget < 16);
@@ -516,6 +523,9 @@ impl BusDevice for BedrockIo {
         if a & 7 != 0 {
             return BUS_ERR;
         }
+        // Declared before the lock, so it runs once the store has landed and
+        // the lock is dropped.
+        let _published = (a == reg::REGISTER_0150).then(|| self.scratch0_written.get()).flatten().map(|hook| ScratchNotice(hook.as_ref()));
         let mut r = self.regs.lock();
         if let Some((n, offset)) = Self::bte_at(a) {
             let b = &mut r.bte[n];
@@ -583,12 +593,36 @@ impl BusDevice for BedrockIo {
     }
 }
 
+/// Calls a scratch 0 hook when dropped.
+struct ScratchNotice<'a>(&'a (dyn Fn() + Send + Sync));
+impl Drop for ScratchNotice<'_> {
+    fn drop(&mut self) {
+        (self.0)()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Cases follow tests/qtest/sn1-bedrock-io-test.c in
     // jamesbraid/qemu-sgi-origami: inbound-protection, bte and
     // bte-error-termination.
     use super::*;
+    /// A node watching scratch 0 sees each store to it once it has landed,
+    /// and no other store.
+    #[test]
+    fn a_scratch_0_store_is_reported_after_it_lands() {
+        let io = Arc::new(BedrockIo::new());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (watch, record) = (Arc::downgrade(&io), seen.clone());
+        io.on_scratch0_write(Box::new(move || {
+            let value = watch.upgrade().unwrap().read64(reg::REGISTER_0150).data;
+            record.lock().push(value);
+        }));
+        io.write64(reg::REGISTER_0150, 0x30);
+        io.write64(reg::REGISTER_0158, 0x40);
+        io.write64(reg::REGISTER_0150, 0xf0);
+        assert_eq!(*seen.lock(), [0x30, 0xf0]);
+    }
     #[derive(Default)]
     struct Memory {
         words: Mutex<BTreeMap<u64, u64>>,
