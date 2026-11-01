@@ -1,0 +1,320 @@
+# Layers of the iris source tree.
+#
+# tests/layering.rs reads this file and fails `cargo test` when a module names
+# one in a layer it may not depend on, with file:line.
+#
+# The direction: core depends on nothing; cpu, dev and gfx depend on core only;
+# top (machines, monitor, UI, binaries) depends on every layer. Siblings never
+# name each other, so an edit in one rebuilds that layer and the top only.
+#
+# What each layer holds:
+#   core  bus traits, config, logging, memory, timers, snapshots, the machines'
+#         address maps, and the few CPU items devices name (ISA constants,
+#         cycle pointer, SMP bookkeeping)
+#   cpu   interpreter, caches, TLB, jitv2, the gdb stub
+#   dev   every non-graphics device, net, SCSI, PCI, host audio, the PROM images
+#   gfx   Newport, GR2, IMPACT, VPro and the display stack
+#   top   machines and buses, monitor, UI, VNC, bench runner, binaries
+
+[layers]
+core = []
+cpu = ["core"]
+dev = ["core"]
+gfx = ["core"]
+top = ["core", "cpu", "dev", "gfx"]
+
+# Module path (`::` separated, relative to src/) to layer. The longest listed
+# prefix wins, so `dev::ng1::rex3` is gfx through `dev::ng1`, and a module
+# nobody lists is in the layer of its nearest listed ancestor, or top. A new
+# file under src/dev/ is therefore a dev device until someone says otherwise.
+#
+# Names that exist only at the crate root (re-exports from lib.rs) are listed
+# the same way.
+[modules]
+# core
+config = "core"
+traits = "core"
+devlog = "core"
+ppmem = "core"
+platform = "core"
+physical = "core"
+locks = "core"
+irq = "core"
+gfifo = "core"
+trace_writer = "core"
+heartbeat = "core"
+screenshot = "core"
+exp = "core"
+snapshot = "core"
+sgi_vh = "core"
+elf = "core"
+chunk_store = "core"
+thread_affinity = "core"
+hptimer = "core"
+hptimer_tests = "core"
+ip22_map = "core"
+memory_map = "core"
+ip30_map = "core"
+perfetto = "core"
+perfetto_macros = "core"
+test_board = "core"
+PfBits = "core"
+PfLevel = "core"
+PfValue = "core"
+# Macros exported at the crate root by core's logging and tracing modules.
+dlog = "core"
+dlog_unconditional = "core"
+dlog_dev = "core"
+pf_instant = "core"
+pf_begin = "core"
+pf_end = "core"
+pf_counter = "core"
+pf_scope = "core"
+pf_level = "core"
+pf_bits = "core"
+pf_value = "core"
+"cpu::mips_isa" = "core"
+"cpu::mips_dis" = "core"
+"cpu::cycles" = "core"
+"cpu::smp" = "core"
+"cpu::jit_feedback" = "core"
+"dev::mem" = "core"
+"dev::w1" = "core"
+
+# cpu
+cpu = "cpu"
+gdb_stub = "cpu"
+
+# dev
+dev = "dev"
+prombin = "dev"
+prombini2 = "dev"
+prombinip28 = "dev"
+net = "dev"
+cow_disk = "dev"
+chd_disk = "dev"
+block_node = "dev"
+scsi = "dev"
+scsi_monitor = "dev"
+host_audio = "dev"
+pci = "dev"
+video_source = "dev"
+ultra_proto = "dev"
+nv_storage = "dev"
+ip32_map = "dev"
+
+# gfx
+"dev::gl" = "gfx"
+"dev::gr2" = "gfx"
+"dev::mgras" = "gfx"
+"dev::odyssey" = "gfx"
+"dev::ng1" = "gfx"
+gfx_display = "gfx"
+compositor = "gfx"
+debug_overlay = "gfx"
+disp = "gfx"
+vga_font = "gfx"
+
+# Everything else (machines, buses, monitor, UI, VNC, CI socket, bench runner,
+# binaries) is top by default.
+
+# Edges that break the direction today and are tolerated until someone removes
+# them. Each names the file (relative to src/) and the layer-lookup key it
+# reaches, which the failure message prints as `to`. An entry that no longer
+# matches an edge fails the check, so the list only shrinks.
+#
+# [[allow]]
+# from = "dev/aic7880.rs"
+# to = "dev::ng1"
+
+# Baseline of the edges that break the direction on this tree, so the check
+# can run in CI before they are gone. Delete an entry when its edge is removed;
+# the check fails on one that no longer matches.
+
+[[allow]]
+from = "config.rs"
+to = "dev"
+
+[[allow]]
+from = "config.rs"
+to = "dev::ng1"
+
+[[allow]]
+from = "config.rs"
+to = "net"
+
+[[allow]]
+from = "cpu/jitv2_html_j2wp.rs"
+to = "ip22_bus"
+
+[[allow]]
+from = "cpu/mips_exec.rs"
+to = "dev"
+
+[[allow]]
+from = "cpu/mips_exec.rs"
+to = "ip22_bus"
+
+[[allow]]
+from = "cpu/smp.rs"
+to = "cpu"
+
+[[allow]]
+from = "dev/aic7880.rs"
+to = "dev::ng1"
+
+[[allow]]
+from = "dev/crime.rs"
+to = "ip32"
+
+[[allow]]
+from = "dev/crime_mem.rs"
+to = "ip32"
+
+[[allow]]
+from = "dev/daynaport.rs"
+to = "dev::ng1"
+
+[[allow]]
+from = "dev/gr2/mod.rs"
+to = "cpu"
+
+[[allow]]
+from = "dev/heart.rs"
+to = "cpu"
+
+[[allow]]
+from = "dev/ioc.rs"
+to = "cpu"
+
+[[allow]]
+from = "dev/ioc.rs"
+to = "dev::ng1"
+
+[[allow]]
+from = "dev/ioc3.rs"
+to = "dev::ng1"
+
+[[allow]]
+from = "dev/ioc3_eth.rs"
+to = "dev::ng1"
+
+[[allow]]
+from = "dev/isp1040.rs"
+to = "dev::ng1"
+
+[[allow]]
+from = "dev/mace.rs"
+to = "ip32"
+
+[[allow]]
+from = "dev/mace_id.rs"
+to = "dev::ng1"
+
+[[allow]]
+from = "dev/mace_isa.rs"
+to = "ip32"
+
+[[allow]]
+from = "dev/mace_pci.rs"
+to = "ip32"
+
+[[allow]]
+from = "dev/mace_ps2.rs"
+to = "ip32"
+
+[[allow]]
+from = "dev/mace_sdma.rs"
+to = "ip32"
+
+[[allow]]
+from = "dev/mace_uart.rs"
+to = "ip32"
+
+[[allow]]
+from = "dev/mc.rs"
+to = "ip22_bus"
+
+[[allow]]
+from = "dev/mc_vdma.rs"
+to = "dev::ng1"
+
+[[allow]]
+from = "dev/mec.rs"
+to = "dev::ng1"
+
+[[allow]]
+from = "dev/mec.rs"
+to = "ip32"
+
+[[allow]]
+from = "dev/mem.rs"
+to = "cpu"
+
+[[allow]]
+from = "dev/mgras/hq4.rs"
+to = "ip30"
+
+[[allow]]
+from = "dev/mgras/mod.rs"
+to = "cpu"
+
+[[allow]]
+from = "dev/ng1/rex3.rs"
+to = "cpu"
+
+[[allow]]
+from = "dev/o2gfx.rs"
+to = "cpu"
+
+[[allow]]
+from = "dev/o2gfx.rs"
+to = "ip32"
+
+[[allow]]
+from = "dev/odyssey/display.rs"
+to = "cpu"
+
+[[allow]]
+from = "dev/odyssey/mod.rs"
+to = "cpu"
+
+[[allow]]
+from = "dev/odyssey/mod.rs"
+to = "ip30"
+
+[[allow]]
+from = "dev/seeq8003.rs"
+to = "dev::ng1"
+
+[[allow]]
+from = "dev/testdev.rs"
+to = "cpu"
+
+[[allow]]
+from = "dev/wd33c93a.rs"
+to = "cpu"
+
+[[allow]]
+from = "dev/wd33c93a.rs"
+to = "dev::ng1"
+
+[[allow]]
+from = "exp.rs"
+to = "cpu"
+
+[[allow]]
+from = "gfx_display.rs"
+to = "cpu"
+
+[[allow]]
+from = "perfetto/mod.rs"
+to = "cpu"
+
+[[allow]]
+from = "ppmem/ppmem.rs"
+to = "cpu"
+
+[[allow]]
+from = "traits.rs"
+to = "cpu"
