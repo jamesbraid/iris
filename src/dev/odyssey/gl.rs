@@ -2595,11 +2595,13 @@ impl Board {
         // Bit assignments follow the library's fragment-state encoding.
         self.gl_feed32(en(ODSY_MODE_POINT_SMOOTH), &[GL_POINT_SMOOTH]);
         self.gl_feed32(en(ODSY_MODE_LINE_SMOOTH), &[GL_LINE_SMOOTH]);
-        // The shared layer has no dither rule yet, so the bit is kept as board
-        // state and reported at the first draw it would affect
-        // (Board::gl_vertex_colour()). Once the shared rule lands this feeds
-        // GL_OP_ENABLE/DISABLE of GL_DITHER instead.
-        self.gl_dither = (self.pattern_mode & ODSY_MODE_DITHER) != 0;
+        // The shared layer has no dither rule yet, so the first mode word that
+        // enables it is reported and the board draws undithered. Once the
+        // shared rule lands this feeds GL_OP_ENABLE/DISABLE of GL_DITHER.
+        if (pm & ODSY_MODE_DITHER) != 0 && !self.gl_dither_reported {
+            self.gl_dither_reported = true;
+            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: dither not modelled; drawing undithered");
+        }
         self.gl_feed32(en(ODSY_MODE_DEPTH_TEST), &[GL_DEPTH_TEST]);
         self.gl_feed32(en(ODSY_MODE_ALPHA_TEST), &[GL_ALPHA_TEST]);
         self.gl_feed32(en(ODSY_MODE_STENCIL_TEST), &[GL_STENCIL_TEST]);

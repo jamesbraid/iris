@@ -15,7 +15,6 @@ fn gl_board() -> (Box<Board>, GlDrawState) {
     let mut b = Bench::empty();
     b.board.gl_write_mask |= ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT;
     b.st.shade_model = GL_FLAT;
-    b.st.dither = false;
     (b.board, b.st)
 }
 
@@ -488,7 +487,6 @@ fn line_pixels(rule: LineRule, a: (f32, f32), b: (f32, f32)) -> Vec<(i32, i32)> 
     let mut bench = Bench::empty();
     bench.board.gl_write_mask |= ODSY_WRITE_COLOUR_MASK << ODSY_WRITE_COLOUR_SHIFT;
     bench.st.shade_model = GL_FLAT;
-    bench.st.dither = false;
     bench.rules.line_rule = rule;
     bench.mode = GL_LINES;
     bench.prims = vec![vertices(&[a, b], RED)];

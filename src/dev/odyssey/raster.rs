@@ -26,7 +26,7 @@ pub enum LineRule {
 // triangle edge owns the pixel centres on it when it is a left or a top edge,
 // rows counted up from the bottom of the plane (SoftVertex::owns()). Smoothed
 // points and lines take the exact box filter's coverage. The board does not
-// dither (Board::gl_vertex_colour() reports GL_DITHER).
+// dither (Board::gl_apply_mode() reports GL_DITHER).
 
 #[derive(Clone, Default)]
 pub struct RasterRules {

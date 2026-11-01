@@ -681,10 +681,6 @@ impl Board {
     /// already converted from whatever form its word carried, z 0 for a 2D one;
     /// lighting needs it for positional lights and the local viewer.
     pub fn gl_vertex_colour(&mut self, xyz: &[f64; 3]) {
-        if self.gl_dither && !self.gl_dither_reported {
-            self.gl_dither_reported = true;
-            crate::dlog!(LogModule::Odyssey, "sgi-odyssey: dither not modelled; drawing undithered");
-        }
         if self.gl_index_mode() {
             if self.gl_lit && !self.gl_index_lit_reported {
                 self.gl_index_lit_reported = true;
