@@ -655,6 +655,10 @@ hashes are given where a change is easiest to understand by reading the commit.
   driver that saw it stopped could restart it on the descriptor it had just
   filled, and the next frame would overwrite that one. Transmit had the same
   order and could send a packet twice.
+- **The Indy's HPC3 reads a receive descriptor again before filling it.** It
+  took a descriptor's end-of-ring flag at fetch time only, so a driver that
+  moved the end of its ring off a descriptor the channel had already fetched
+  still had the channel stop after that descriptor's frame.
 - **The NAT stack was rebuilt, and is faster and no longer stalls.** Through
   a port forward, host → guest TCP went from about 1 to 6 MB/s and guest →
   host from 2.7 to 7 MB/s; FTP to a LAN server from 1 to 7 MB/s; a large

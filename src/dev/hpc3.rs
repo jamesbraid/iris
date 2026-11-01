@@ -375,6 +375,8 @@ struct PdmaChannel {
     tx_new_packet: bool,
     // RX: ROWN bit from current descriptor (host must set 1 before handing to HPC3)
     rown:          bool,
+    // RX: a byte has gone into the current descriptor since it was fetched.
+    rx_started:    bool,
     // RX: last value returned from ENET_RX_CTRL read — suppress repeated debug prints
     last_rx_ctrl:  u32,
 }
@@ -406,7 +408,7 @@ impl PdmaChannel {
             reads_at_poll: 0,
             last_poll: None,
             width_16: false,
-            crbdp: 0, cpfxbdp: 0, ppfxbdp: 0, tx_new_packet: true, rown: false, last_rx_ctrl: 0xFFFFFFFF,
+            crbdp: 0, cpfxbdp: 0, ppfxbdp: 0, tx_new_packet: true, rown: false, rx_started: false, last_rx_ctrl: 0xFFFFFFFF,
         }
     }
 
@@ -467,6 +469,7 @@ fn start_transaction(&mut self) {
                 // RX (ch10): crbdp = address of descriptor currently being filled.
                 // TX (ch11): cpfxbdp/ppfxbdp promoted only at packet boundaries (EOXP).
                 self.crbdp = nbdp;
+                self.rx_started = false;
                 if self.id == 11 && self.tx_new_packet {
                     self.ppfxbdp = self.cpfxbdp;
                     self.cpfxbdp = nbdp;
@@ -510,6 +513,31 @@ fn start_transaction(&mut self) {
                 break; // No memory attached
             }
         }
+    }
+
+    /// RX: read the current descriptor's count and flags again, if no byte
+    /// has gone into it yet. The channel fetches the next descriptor as the
+    /// last one completes, but a driver moves the end of its ring (EOX) as
+    /// it reaps, setting it on the new last descriptor and clearing it on
+    /// the old (sgiseeq_rx, sq_rxintr). Read at fetch time only, a
+    /// descriptor whose EOX was cleared a moment later still stops the
+    /// channel after its frame. Reading it again before the frame starts
+    /// moves the fetch to when the frame arrives, which a driver cannot
+    /// tell apart: no HPC3 document says when the fetch happens.
+    fn reread_rx_descriptor(&mut self) {
+        if self.id != 10 || self.rx_started || self.crbdp == 0 || !self.is_active() { return; }
+        let Some(mem) = &self.sys_mem else { return };
+        let r = mem.read32((self.crbdp + PDMA_DESC_BC_OFFSET) as u64);
+        if !r.is_ok() { return; }
+        let w_cnt = r.data;
+        if w_cnt != self.bc && self.log_active() {
+            dlog_dev!(LogModule::Pdma, "PDMA[10]: desc@{:08x} changed before its frame: BC {:08x} -> {:08x}", self.crbdp, self.bc, w_cnt);
+        }
+        self.bc = w_cnt;
+        self.eox  = (w_cnt & PDMA_DESC_EOX)  != 0;
+        self.eop  = (w_cnt & PDMA_DESC_EOP)  != 0;
+        self.xie  = (w_cnt & PDMA_DESC_XIE)  != 0;
+        self.rown = (w_cnt & PDMA_DESC_ROWN) != 0;
     }
 
     fn get_name(&self) -> String {
@@ -621,6 +649,7 @@ fn start_transaction(&mut self) {
             dlog_dev!(LogModule::Pdma, "PDMA[{}]: dma_write refused — channel not active (CBP={:08x} BC={:08x})", self.id, self.cbp, self.bc);
             return DmaStatus(DmaStatus::NOT_ACTIVE);
         }
+        if self.id == 10 { self.reread_rx_descriptor(); }
         // RX channel (id=10): respect ROWN — only write if HPC3 owns the descriptor
         if self.id == 10 && !self.rown {
             if self.log_active() { dlog_dev!(LogModule::Pdma, "PDMA[{}]: dma_write refused — ROWN=0 (host owns descriptor, cbp={:08x})", self.id, self.cbp); }
@@ -664,6 +693,7 @@ fn start_transaction(&mut self) {
         let addr = self.cbp;
         let step = if self.width_16 { 2 } else { 1 };
         let swap = self.endian;
+        if self.id == 10 { self.rx_started = true; }
 
         if let Some(mem) = &self.sys_mem {
             if self.width_16 {
@@ -2663,6 +2693,36 @@ mod enet_rx_chain_tests {
         let bc = ram.read32(0x104).data;
         assert_eq!(bc & PDMA_DESC_ROWN, 0, "the channel stopped, but the descriptor it filled still reads as the HPC's");
         assert_eq!(bc & 0x3fff, 0x600 - 63);
+    }
+
+    /// A driver that moves the end of its ring off a descriptor the channel
+    /// has already fetched, before any frame has gone into it, has given the
+    /// channel more ring: the next frame fills it and the channel goes on to
+    /// the next descriptor rather than stopping.
+    #[test]
+    fn a_ring_end_moved_before_its_frame_does_not_stop_the_channel() {
+        let (hpc3, ram) = one_descriptor(PDMA_DESC_ROWN);
+        // A second descriptor after the first, now the end of the ring.
+        ram.write32(0x108, 0x110);
+        ram.write32(0x110, 0x1800);
+        ram.write32(0x114, PDMA_DESC_EOX | PDMA_DESC_EOP | PDMA_DESC_XIE | PDMA_DESC_ROWN | 0x600);
+        ram.write32(0x118, 0x100);
+        hpc3.write32(reg(ENET_RX_BASE + ENET_RX_NBDP), 0x100);
+        hpc3.write32(reg(ENET_RX_BASE + ENET_RX_CTRL), ENET_RX_CTRL_ACTIVE);
+        // The channel has fetched the first descriptor with EOX set; the
+        // driver now clears it, the end having moved to the second.
+        ram.write32(0x104, ram.read32(0x104).data & !PDMA_DESC_EOX);
+
+        let rx = PdmaClientImpl { channel: hpc3.pdma_channels[10].clone() };
+        for _ in 0..62 {
+            assert!(!rx.write(0, false).refused());
+        }
+        rx.write(0x20, true);
+
+        assert_ne!(hpc3.read32(reg(ENET_RX_BASE + ENET_RX_CTRL)).data & ENET_RX_CTRL_ACTIVE, 0,
+            "the channel stopped on a descriptor that was no longer the end of the ring");
+        assert_eq!(hpc3.pdma_channels[10].lock().crbdp, 0x110);
+        assert!(!rx.write(0, false).refused(), "the next frame was refused");
     }
 
     /// The same for transmit: a driver restarts a stopped transmit channel at
