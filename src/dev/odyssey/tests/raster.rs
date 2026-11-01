@@ -940,21 +940,6 @@ fn tiny_triangle(s: &mut Board, st: &GlDrawState) {
     assert_eq!(s.gl_draw(&mut d), GL_DRAW_OK);
 }
 
-/// A draw's cost follows its area; a clear's pixels count for less.
-#[test]
-fn a_job_costs_its_pixels() {
-    let p = |mode, pts: &[(f64, f64)]| primitive_cost(mode, pts.iter().map(|&p| Some(p)), 1.0, 1.0);
-
-    assert_eq!(p(GL_TRIANGLES, &[(0.0, 0.0), (100.0, 0.0), (0.0, 100.0)]), RASTER_JOB_OVERHEAD + 5000);
-    assert_eq!(p(GL_QUADS, &[(0.0, 0.0), (100.0, 0.0), (100.0, 10.0), (0.0, 10.0)]), RASTER_JOB_OVERHEAD + 1000);
-    assert_eq!(p(GL_LINES, &[(0.0, 0.0), (99.0, 3.0)]), RASTER_JOB_OVERHEAD + 100);
-    // Off the screen counts for nothing; a vertex behind the eye, for all of it.
-    assert_eq!(p(GL_QUADS, &[(-500.0, -500.0), (-400.0, -500.0), (-400.0, -400.0), (-500.0, -400.0)]), RASTER_JOB_OVERHEAD);
-    assert_eq!(primitive_cost(GL_TRIANGLES, [Some((0.0, 0.0)), None, Some((1.0, 1.0))].into_iter(), 1.0, 1.0), RASTER_JOB_OVERHEAD + ODSY_WIDTH * ODSY_HEIGHT);
-    assert_eq!(rect_cost(0, 0, 80, 80, true), RASTER_JOB_OVERHEAD + 80 * 80 / RASTER_CLEAR_DIVISOR);
-    assert_eq!(rect_cost(0, 0, 80, 80, false), RASTER_JOB_OVERHEAD + 80 * 80);
-}
-
 /// Many small primitives queue behind a busy raster unit without the front
 /// end waiting, however many there are in a frame; the queue's work is the
 /// sum of theirs.

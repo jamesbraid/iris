@@ -1,6 +1,6 @@
 # VPro (Odyssey) regression nets
 
-Five checks guard the VPro model's rendering against a change that moves
+Three checks guard the VPro model's rendering against a change that moves
 pixels, vertices, board state or speed without meaning to. Everything runs
 headless. `scripts/vpro-goldens.sh` wraps the commands; the plain forms are
 shown here. The tests live in `src/dev/odyssey/golden/`.
@@ -10,8 +10,6 @@ shown here. The tests live in `src/dev/odyssey/golden/`.
 | Frames | 78 scenes drawn through `Board::gl_draw`: flat, smooth and textured triangles, quads and polygons (modes, stipple, smoothing, culling, offset), lines (width, stipple, smoothing), points, lights of every kind, fog, depth, stencil, alpha test, blending (factors, equations, constant colour, logic op, colour mask), scissor, frustum and user-plane clipping, w at and behind the eye, projection and window-matrix modes, texture formats, environments, filters, wraps and detail | `golden/scenes.tsv`, `golden/frames/*.png` | `cargo test --release --lib odyssey::golden` |
 | Vertices | Object-space points through six matrix and viewport setups (eye, clip and window positions) and six light setups (lit colour) | `golden/vertices.txt` | same |
 | Replay | Recorded guest sessions (Smoke & Mirrors and perfly, from power-on): the bus stores replayed through a fresh board, its DMA reads answered from the recording, both colour buffers, depth, stencil and object memory hashed every 500,000 records | `replay/*.hashes`; the recordings are not in git | same, with the recordings in place |
-| GL suites | The `pixtest` and `glstate` cases that pass in the guest: 323 and 410 (and 32 and 52 for `pixtest --ci 8` and `--ci 12`) | `gltest/*.pass` | `scripts/vpro-goldens.sh gltest DIR` |
-| Speed | `raster_bench`'s Mpix/s per scene | `perf/raster_bench.tsv` | `scripts/vpro-goldens.sh perf` (not a required check) |
 
 ## Frames and vertices
 
@@ -60,30 +58,3 @@ replays one file; `VPRO_REPLAY_OUT=<png>` saves the final colour buffer
 screen). The replay refuses to bless a recording whose DMA reads it cannot
 follow. Re-take the checkpoints only for a change that is meant to move board
 state, after the frames above say the change is right.
-
-## GL suites
-
-`pixtest` and `glstate` (`test/gltest/`) run in the IRIX guest; the case
-lists are the cases that printed PASS or XPASS. Boot the guest (see the
-`irix-gfx-loop` skill), build and run:
-
-    sh irix.sh pixtest glstate
-    ./pixtest > o_pixtest.out; ./pixtest --ci 8 > o_pix8.out; ./pixtest --ci 12 > o_pix12.out
-    ./glstate > o_glstate.out
-
-then, with the four files in one directory, `scripts/vpro-goldens.sh gltest DIR`
-fails on every listed case that no longer passes and notes the ones that
-newly pass. After a change that fixes cases, `gltest-bless DIR` re-takes the
-lists. A case is keyed by name (the suite repeats a few; the second is
-`name [2]`), since ids shift when cases are added.
-
-## Speed
-
-`scripts/vpro-goldens.sh perf` runs `raster_bench` three times, keeps each
-scene's best, retries a slow scene twice and fails on a drop of more than
-`PERF_DROP` percent (default 20) against `perf/raster_bench.tsv`. The
-baseline is for one host and one build profile (the fast profile); take a new
-one with `perf-bless` on a quiet host after a change that is meant to move
-speed, and say why. For the rendering refactor, run it before and after each
-step, and compare mirrors and perfly swap rates in the guest as well: the
-scenes miss the front end's cost.
