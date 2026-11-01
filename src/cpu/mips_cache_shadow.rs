@@ -107,8 +107,7 @@ const WAYS: usize = 2;
 /// The secondary tag fields a cached access is compared against. The tag
 /// register pair holds PA[35:18] in TagLo[31:14] and PA[39:36] in TagHi[3:0],
 /// which the assembled 64-bit tag keeps at bits 31:14 and 35:32. NEC
-/// U10278EJ4V0UM pp.267-270; origami `r10000-cache-index-ops.md`, "Tag
-/// operations".
+/// U10278EJ4V0UM pp.267-270.
 const L2_TAG_PA_MASK: u64 = 0xf_ffff_c000;
 
 /// Where the secondary state field sits in the assembled tag: TagLo[11:10],
@@ -127,8 +126,7 @@ const L1D_MODIFIER_SHIFT: u32 = 61;
 const L1D_MODIFIER_WRITTEN: u64 = 2;
 
 /// The primary instruction-cache tag, from the register pair (NEC
-/// U10278EJ4V0UM pp.267-270; origami `r10000-cache-index-ops.md`, "Tag
-/// operations"): TagLo[31:8] is PA[35:12], TagLo[6] the state (1 valid), and
+/// U10278EJ4V0UM pp.267-270): TagLo[31:8] is PA[35:12], TagLo[6] the state (1 valid), and
 /// TagHi[3:0] PA[39:36], kept at bits 35:32 of the assembled tag.
 const L1I_TAG_PA_MASK: u64 = 0xf_ffff_ff00;
 const L1I_VALID: u64 = 1 << 6;
@@ -153,22 +151,21 @@ fn l1i_parity_of(p: u64) -> u32 {
 }
 
 /// A primary instruction-cache word is the instruction predecoded: 36 bits
-/// that fetch decodes back. Neither NEC manual gives the layout. This is the
-/// one origami's `r10000-cache-index-ops.md` ("Primary instruction-cache data
-/// word", point 5) infers from a shipped PROM's table, for sampled opcodes
-/// only, with `p` the 36-bit word and `f` the instruction:
+/// that fetch decodes back. Neither NEC manual gives the layout. This is a
+/// layout inferred from the opcodes a guest's PROM was seen to stage, for
+/// those opcodes only, with `p` the 36-bit word and `f` the instruction:
 ///   p[25:20] = f[5:0], p[19:15] = f[10:6], p[14:10] = f[25:21],
 ///   p[28:26] = f[28:26], p[35:29] = a 7-bit class,
 ///   p[4:0] and p[9:5] = f[20:16] and f[15:11] (rt and rd positions), in the
 ///   order the opcode gives.
 /// f[31:29] is not in any field, so it comes from the class. The class table
-/// is what the sheet samples, and it is all this model knows: an entry gives
+/// is what was observed, and it is all this model knows: an entry gives
 /// the class, f[31:29], and whether p[4:0] is the rt position. Every other
 /// class is refused (`Err(class)`), never guessed.
 ///
-/// Example from the sheet: `addiu $4,$0,2` (0x24040002) is 0x3_4420_0004.
+/// Example: `addiu $4,$0,2` (0x24040002) is 0x3_4420_0004.
 const L1I_CLASSES: &[L1iClass] = &[
-    // The table of origami's datasheet (#3113), every row inferred.
+    // Every row is inferred.
     L1iClass { class: 0x00, hi3: 0b000, rt_low: false, ops: &[0], funct: &[0x00] },
     L1iClass { class: 0x08, hi3: 0b000, rt_low: false, ops: &[0], funct: &[0x38, 0x3c] }, // dsll, dsll32
     L1iClass { class: 0x18, hi3: 0b000, rt_low: false, ops: &[0], funct: &[0x25] },       // or
@@ -256,8 +253,7 @@ fn l2_tag_of(pa: u64) -> u64 {
 /// access at the lower address sees. A secondary quadword's doubleword is
 /// staged as TagHi (bits 63:32) and TagLo (bits 31:0), but neither NEC manual
 /// says how those halves become the words of a primary refill. The only
-/// evidence is software that stages a line this way and then fetches it
-/// (origami `r10000-cache-index-ops.md`, "Not established"): it is consistent
+/// evidence is software that stages a line this way and then fetches it: it is consistent
 /// only with the TagLo word landing at the lower address, and that is a
 /// simulation, not a measurement. `false` is the manual-literal order. Index
 /// Load Data is unaffected; it returns the registers as they were stored.
@@ -544,8 +540,7 @@ impl<
     // ---- Staged secondary lines ---------------------------------------
     //
     // Everything below is R10000-family only and runs only once a guest has
-    // made a secondary tag valid. The rules are those of origami's
-    // `r10000-cache-index-ops.md`: a cached access that misses the primary
+    // made a secondary tag valid. The rules: a cached access that misses the primary
     // caches looks up both secondary ways at the access's index, and a way
     // whose tag holds the access's physical address in a valid state supplies
     // the data. Index Store Data (S) wrote a whole quadword, so the other
@@ -572,9 +567,9 @@ impl<
     // - coherence. Another CPU's or a DMA device's write to memory a CPU
     //   holds in a staged line does not reach the line, and the line's data
     //   are not visible to them;
-    // - the part. The datasheet clears the R10000 only. The R12000, R14000
+    // - the part. The R10000's manual is the evidence. The R12000, R14000
     //   and R16000 use the same tag layout and rules here, which is an
-    //   inference ("R12000 behavior needs separate evidence"); the R14000 also
+    //   inference; the R14000 also
     //   keeps only the bits of `R14000_L2_TAG_MASK`;
     // - undefined encodings. Operations with op[1:0] = 10 (`CACH_SI`) are
     //   undefined on the R10000 and do nothing.
@@ -637,7 +632,7 @@ impl<
         // **Inferred.** A store to a CleanExclusive or Shared secondary block
         // asks the secondary cache to make it DirtyExclusive (NEC
         // U10278EJ4V0UM p.246, performance counter events 14 and 15). The
-        // datasheet does not state the transition, so this takes it as
+        // manual does not state the transition, so this takes it as
         // immediate. A later writeback invalidate then sends the stored bytes
         // to memory instead of dropping them.
         l2.tags[idx] |= L2_STATE_DIRTY_EXCLUSIVE << L2_STATE_SHIFT;
@@ -724,11 +719,11 @@ impl<
     // - a fetch hit does not update LRU. Unstated, and no replacement is
     //   modelled;
     // - the stored word is the 36-bit predecoded form, decoded on a fetch hit
-    //   (`l1i_decode`) for the sampled classes only, per the datasheet's
-    //   inferred layout. Any other class is refused: reported once, and the
+    //   (`l1i_decode`) for the sampled classes only, per the inferred
+    //   layout. Any other class is refused: reported once, and the
     //   fetch is treated as a miss and reads the secondary cache or memory.
-    //   APPROXIMATION, not hardware behavior: the sheet has a model refuse an
-    //   unknown class, and hardware would run the word. Chosen over a Cache
+    //   APPROXIMATION, not hardware behavior: a model that refuses an
+    //   unknown class differs from hardware, which would run the word. Chosen over a Cache
     //   Error because memory holds the instruction the word was built from
     //   in all but a few stale entries, so a miss executes the right
     //   instruction for nearly every word a guest stages, where an error
@@ -744,8 +739,8 @@ impl<
     //   choice, hardware contents unknown: a word with p[35:32] = 0xf is a raw
     //   instruction in p[31:0] (`L1I_RAW`);
     //
-    // The primary data cache is not served: its tag and data layouts are in
-    // the sheet, but a dirty line writes back to the secondary cache and the
+    // The primary data cache is not served: its tag and data layouts are
+    // known, but a dirty line writes back to the secondary cache and the
     // modifier field has no model here.
 
     /// Physical address of the line a primary I `tag` at `set` names.
@@ -845,7 +840,7 @@ impl<
     /// secondary cache). Only this path fills a primary line; ordinary fetches
     /// do not track residency.
     /// Model choices: the victim is an Invalid way before a Valid one, and way
-    /// 0 when both are valid (the datasheet states no replacement for a refill);
+    /// 0 when both are valid (the manual states no replacement for a refill);
     /// the refilled words are stored in the model's raw encoding
     /// (`L1I_RAW`), the architectural word carried in place of the predecoded
     /// form hardware stores, with its even parity.
@@ -2106,8 +2101,7 @@ mod tests {
 
     // ---- Index-operation staging ---------------------------------------
     //
-    // Rules are origami's `r10000-cache-index-ops.md`; the section names are
-    // that sheet's.
+    // Tests for the staged-line rules.
 
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
@@ -2176,7 +2170,7 @@ mod tests {
     }
 
     /// Encoding: the 5-bit op field is `op[4:2]` over `cache[1:0]`, and
-    /// the secondary operations are the ones the sheet lists. ISUM pp.70-72.
+    /// the secondary operations are the ones the manual lists. ISUM pp.70-72.
     #[test]
     fn the_secondary_index_and_hit_operations_have_the_listed_encodings() {
         assert_eq!(C_IWBINV | CACH_SD, 0x03);
@@ -2472,7 +2466,7 @@ mod tests {
         assert_eq!(bus.reads.load(Ordering::Relaxed), 1);
     }
 
-    /// Datasheet step 6: the load's VA[13:12] may differ from TagLo[8:7].
+    /// The load's VA[13:12] may differ from TagLo[8:7].
     /// The lookup is physical, so the line hits whatever virtual address is used.
     #[test]
     fn a_different_virtual_index_still_hits() {
@@ -2487,7 +2481,7 @@ mod tests {
     }
 
     /// The same rules at every geometry the family ships: 2 MiB with 128-byte
-    /// lines (Octane, Fuel), 1 MiB with 64-byte lines (O2), 4 MiB (R16000).
+    /// lines (Octane), 1 MiB with 64-byte lines (O2), 4 MiB (R16000).
     /// Two lines of one set differ by a way's worth of address.
     #[test]
     fn staging_works_at_every_cache_geometry() {
@@ -2564,8 +2558,7 @@ mod tests {
         assert_eq!(load::<8>(&d, PA + 8), MEM, "restoring a snapshot with no staged lines ends them");
     }
 
-    /// Datasheet check 7 (origami `r10000-cache-index-ops.md`, "Mapped
-    /// operands and staging granularity"). Index Store Data (S) writes the one
+    /// Staging granularity: Index Store Data (S) writes the one
     /// quadword PA[6:4] names and leaves
     /// the line's other quadwords alone, and a load or fetch finds each
     /// quadword by the same bits. A quadword is stored once, the others are
@@ -2736,7 +2729,7 @@ mod tests {
         assert_eq!(fetch_raw(&c, va, pa), 0x1234);
     }
 
-    /// Decode of the sampled class against the datasheet's example:
+    /// Decode of the sampled class against a known example:
     /// `addiu $4,$0,2` (0x24040002) is 0x3_4420_0004. Each field moves where
     /// the layout says, so a change to any one fails.
     #[test]
@@ -2793,7 +2786,7 @@ mod tests {
         assert_ne!(l1i_decode(predecode(0x1a, 0x2484_0010, true), false), l1i_decode(predecode(0x1e, 0x2484_0010, true), false));
     }
 
-    /// A class the sheet does not sample is refused, not guessed: the fetch is
+    /// A class not in the table is refused, not guessed: the fetch is
     /// treated as a miss and reads memory, and the refusal is reported.
     #[test]
     fn an_unsampled_class_is_refused_and_the_fetch_reads_memory() {
@@ -2963,7 +2956,7 @@ mod tests {
         assert_eq!(l1i_decode(p, false), Err(0x79));
     }
 
-    /// The refusal fallback (an approximation, owner-approved): a refused
+    /// The refusal fallback (an approximation): a refused
     /// staged word is replaced by the staged secondary word if there is one,
     /// else by memory's, and the class is reported once however often it is
     /// fetched. Never the refused word's own bits.
@@ -3409,8 +3402,7 @@ mod tests {
     }
 
     /// The secondary set and way come from the physical address of a mapped
-    /// operand (NEC U12754EJ1V0UMJ1 pp.14-15; datasheet "Mapped operands",
-    /// pending its review). Stage through the mapped page, then a cached
+    /// operand (NEC U12754EJ1V0UMJ1 pp.14-15). Stage through the mapped page, then a cached
     /// access to the frame's kseg0 address hits, and the tag is at the frame's
     /// set, not the virtual address's.
     #[test]
@@ -3443,7 +3435,7 @@ mod tests {
     }
 
     /// Two virtual pages on one frame reach one secondary line; the primary
-    /// index stays virtual (datasheet checks 2 and 3).
+    /// index stays virtual (NEC U12754EJ1V0UMJ1 pp.14-15).
     #[test]
     fn aliases_share_a_secondary_line_and_the_primary_stays_virtual() {
         big_stack(|| {
