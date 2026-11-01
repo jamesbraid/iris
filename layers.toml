@@ -1,7 +1,11 @@
 # Layers of the iris source tree.
 #
-# tests/layering.rs reads this file and fails `cargo test` when a module names
-# one in a layer it may not depend on, with file:line.
+# Two tools read this file:
+#
+#   tests/layering.rs         fails `cargo test` when a module names one in a
+#                             layer it may not depend on, with file:line.
+#   scripts/crate-split.py    splits the crate along these layers into a
+#                             workspace (see the [split] table below).
 #
 # The direction: core depends on nothing; cpu, dev and gfx depend on core only;
 # top (machines, monitor, UI, binaries) depends on every layer. Siblings never
@@ -318,3 +322,159 @@ to = "cpu"
 [[allow]]
 from = "traits.rs"
 to = "cpu"
+
+# What scripts/crate-split.py needs beyond the layers above.
+[split]
+# Crate directory for the lower layers, and the package name of each layer.
+dir = "crates"
+top = "iris"
+crates = { core = "iris-core", cpu = "iris-cpu", dev = "iris-dev", gfx = "iris-gfx" }
+
+# Test-only edges between siblings. Layering ignores code under #[cfg(test)],
+# so a sibling's tests may name another sibling (the MC's VDMA tests drive a
+# real REX3, the VPro tests build a board on a real HEART and Crossbow). The
+# split turns each into a dev-dependency plus a cfg(test) re-export so the test
+# paths do not change. `module` is the parent module that gets the re-export.
+[[split.test_edge]]
+crate = "dev"
+needs = "gfx"
+module = "dev"
+items = ["ng1"]
+
+[[split.test_edge]]
+crate = "gfx"
+needs = "dev"
+module = "dev"
+items = ["heart", "heart_mem", "xbow"]
+
+# Source edits the split needs that no rule derives. Each replaces `old` with
+# `new` exactly once in `file` (a path under src/ in the unsplit tree); the
+# script stops if `old` is missing or ambiguous, so a drifted anchor is fixed
+# here rather than silently skipped.
+#
+# Items another crate's tests use are gated `cfg(test)`, which a dependency
+# never sees, so they move to the `test-support` feature the split adds.
+[[split.patch]]
+file = "test_board.rs"
+why = "the VPro tests in iris-gfx build a TestBoard"
+old = "pub(crate) struct TestBoard<T: Device>(Arc<T>);"
+new = "pub struct TestBoard<T: Device>(Arc<T>);"
+
+[[split.patch]]
+file = "test_board.rs"
+why = "constructor of TestBoard, reached from another crate"
+old = "    pub(crate) fn new(board: Arc<T>) -> Self {"
+new = "    pub fn new(board: Arc<T>) -> Self {"
+
+[[split.patch]]
+file = "dev/crime.rs"
+why = "the O2 machine tests read the interrupt status"
+old = "    pub(crate) fn intstat(&self) -> u64 {"
+new = "    pub fn intstat(&self) -> u64 {"
+
+[[split.patch]]
+file = "scsi/bus.rs"
+why = "ScsiBus::attach_image is used by controller tests in the top crate"
+old = "    #[cfg(test)]\n    pub fn attach_image("
+new = "    #[cfg(any(test, feature = \"test-support\"))]\n    pub fn attach_image("
+
+[[split.patch]]
+file = "dev/ng1/rex3.rs"
+why = "wait_idle is used by the VDMA tests in iris-dev"
+old = "    pub(crate) fn wait_idle(&self) {"
+new = "    pub fn wait_idle(&self) {"
+
+[[split.patch]]
+file = "dev/odyssey/golden/replay.rs"
+why = "CARGO_MANIFEST_DIR is now crates/iris-gfx, two levels below the repository root"
+old = "join(\"ignore/vpro-golden\")"
+new = "join(\"../../ignore/vpro-golden\")"
+
+# Cross-crate inlining: with the executor instantiated in the top crate, LLVM
+# stopped inlining these two into the interpreter loop and the FPU kernels lost
+# about 9% on the bench suite. Not needed to build; needed to keep the speed.
+[[split.patch]]
+file = "cpu/mips_exec.rs"
+why = "keep the FPU operand checks inlined into step_int after the split"
+old = "    #[inline]\n    fn fpu_check_denorm_operand_d("
+new = "    #[inline(always)]\n    fn fpu_check_denorm_operand_d("
+
+[[split.patch]]
+file = "cpu/mips_exec.rs"
+why = "as above, single precision"
+old = "    #[inline]\n    fn fpu_check_denorm_operand_s("
+new = "    #[inline(always)]\n    fn fpu_check_denorm_operand_s("
+
+[[split.patch]]
+file = "gfifo.rs"
+why = "GFIFO tail rewind hooks are used by the REX3 and IMPACT tests"
+old = "    #[cfg(test)]\n    pub fn rewind_tail_for_test"
+new = "    #[cfg(any(test, feature = \"test-support\"))]\n    pub fn rewind_tail_for_test"
+
+[[split.patch]]
+file = "gfifo.rs"
+why = "GFIFO tail rewind hooks are used by the REX3 and IMPACT tests"
+old = "    #[cfg(test)]\n    pub fn restore_tail_for_test"
+new = "    #[cfg(any(test, feature = \"test-support\"))]\n    pub fn restore_tail_for_test"
+
+[[split.patch]]
+file = "irq.rs"
+why = "LevelProbe is used by device tests in every layer"
+old = "#[cfg(test)]\n#[derive(Default)]\npub struct LevelProbe"
+new = "#[cfg(any(test, feature = \"test-support\"))]\n#[derive(Default)]\npub struct LevelProbe"
+
+[[split.patch]]
+file = "irq.rs"
+why = "LevelProbe is used by device tests in every layer"
+old = "#[cfg(test)]\nimpl LevelProbe"
+new = "#[cfg(any(test, feature = \"test-support\"))]\nimpl LevelProbe"
+
+[[split.patch]]
+file = "irq.rs"
+why = "LevelProbe is used by device tests in every layer"
+old = "#[cfg(test)]\nimpl InterruptController for LevelProbe"
+new = "#[cfg(any(test, feature = \"test-support\"))]\nimpl InterruptController for LevelProbe"
+
+[[split.patch]]
+file = "dev/crime_mem.rs"
+why = "O2Memory test accessors are used from the top crate tests"
+old = "#[cfg(test)]\nimpl O2Memory {"
+new = "#[cfg(any(test, feature = \"test-support\"))]\nimpl O2Memory {"
+
+[[split.patch]]
+file = "dev/crime_mem.rs"
+why = "O2Memory test accessors are used from the top crate tests"
+old = "#[cfg(test)]\nimpl std::ops::Index<usize> for O2Memory"
+new = "#[cfg(any(test, feature = \"test-support\"))]\nimpl std::ops::Index<usize> for O2Memory"
+
+[[split.patch]]
+file = "dev/crime_mem.rs"
+why = "O2Memory test accessors are used from the top crate tests"
+old = "#[cfg(test)]\nimpl std::ops::IndexMut<usize> for O2Memory"
+new = "#[cfg(any(test, feature = \"test-support\"))]\nimpl std::ops::IndexMut<usize> for O2Memory"
+
+[[split.patch]]
+file = "net/link.rs"
+why = "Link::loopback is used by device tests"
+old = "    #[cfg(test)]\n    pub fn loopback("
+new = "    #[cfg(any(test, feature = \"test-support\"))]\n    pub fn loopback("
+
+# Non-source files that name moved paths and need more than a path rewrite.
+[[split.patch]]
+file = "../scripts/vpro-goldens.sh"
+why = "device tests now live in iris-gfx, so `cargo test --lib` from the root no longer runs them"
+old = "cargo test --release --lib"
+new = "cargo test --release -p iris-gfx --lib"
+count = 2
+
+[[split.patch]]
+file = "../scripts/vpro-goldens.sh"
+why = "the VPro raster baseline moved with the module"
+old = "baseline=src/dev/odyssey/"
+new = "baseline=crates/iris-gfx/src/dev/odyssey/"
+
+[[split.patch]]
+file = "../tools/mgras-pixdecode.py"
+why = "reads the IMPACT token table from its new path"
+old = '(ROOT / "src/dev/mgras/hq3.rs")'
+new = '(ROOT / "crates/iris-gfx/src/dev/mgras/hq3.rs")'
