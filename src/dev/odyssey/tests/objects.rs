@@ -423,3 +423,89 @@ fn the_sampler_class_names_the_components() {
         assert_eq!(texture_class_format((word | 0x0800_0000) & ODSY_TEX_COMPONENTS_MASK), None, "class {class} with bit 27");
     }
 }
+
+/// Whether texture setup takes a plain 512x256 level whose sampler class is
+/// `class` and whose entry word 1 is `entry1`.
+fn level_draws(class: u32, entry1: u32) -> bool {
+    let (mut s, _, _) = board_with_ram();
+    let base = 0x16b800;
+    let obj = s.object_select(base, 512);
+
+    assert!(s.object_rows(obj, 256));
+    rgba_512x256(&mut s, base);
+    s.tex_sampler[4] = (s.tex_sampler[4] & !ODSY_TEX_COMPONENTS_MASK) | (class << 23);
+    s.tex_levels[1] = entry1;
+    let mut image = GlTexImage::default();
+    let mut chain = Box::<TextureChain>::default();
+    s.texture_setup(&mut image, &mut chain)
+}
+
+/// A level must name an index the library emits, with that index's own size
+/// code. Index 12 is 4/4/4/4 under class 5 or 6, so class does not choose
+/// the layout; the class is not cross-checked against the index, since the
+/// board's use of it is unknown and the texture move pairs class 6 with any
+/// index. A listed index with a wrong size code, or an index nothing emits
+/// (1, 3, 5 to 7, 14, 15, 19 to 31, 34 to 47, 50 to 63), drops the draw.
+#[test]
+fn a_level_needs_an_emitted_index_and_its_size_code() {
+    // (class, entry word 1, takes the draw)
+    let cases = [
+        (6, 0x4110_0020, true),
+        (5, 0x4110_0020, true),
+        (6, 0x00c0_0020, true),
+        (5, 0x00c0_0020, true),
+        (3, 0x00b0_0020, true),
+        (1, 0x0000_0020, true),
+        (2, 0x0040_0020, true),
+        (4, 0x0020_0020, true),
+        (1, 0x0080_0020, true),
+        (6, 0x8210_0020, true),
+        (5, 0x4310_0020, true),
+        (6, 0x0300_0020, true),
+        (6, 0x0010_0020, false),
+        (2, 0x0030_0020, false),
+        (6, 0x0050_0020, false),
+        (6, 0x0070_0020, false),
+        (6, 0x00e0_0020, false),
+        (6, 0x00f0_0020, false),
+        (6, 0x0130_0020, false),
+        (6, 0x0230_0020, false),
+        (6, 0x03f0_0020, false),
+        (6, 0x0110_0020, false),
+        (6, 0x8110_0020, false),
+        (6, 0x4040_0020, false),
+        (6, 0xc110_0020, false),
+    ];
+    for (class, entry1, want) in cases {
+        assert_eq!(level_draws(class, entry1), want, "class {class} entry {entry1:#x}");
+    }
+}
+
+/// A refused index is logged once, kept observable, and a reset starts the
+/// report again.
+#[test]
+fn a_refused_index_is_reported_once_until_reset() {
+    let (mut s, _, _) = board_with_ram();
+
+    assert!(!s.texture_level_valid(0x0030_0000, false));
+    assert_eq!(s.tex_index_reported, 1 << 3);
+    assert!(!s.texture_level_valid(0x0030_0000, false));
+    assert!(!s.texture_level_valid(0x03f0_0000, true));
+    assert!(s.texture_level_valid(0x4110_0000, false));
+    assert_eq!(s.tex_index_reported, (1 << 3) | (1 << 63));
+    s.reset_registers();
+    assert_eq!(s.tex_index_reported, 0);
+}
+
+/// The library's texture move stores class 6 whatever the pixel class's
+/// index, so the move takes any emitted index, and only those.
+#[test]
+fn a_texture_move_takes_any_emitted_index() {
+    let (mut s, _, _) = board_with_ram();
+
+    for index in 0..64u32 {
+        let emitted = texel_format(index).is_some();
+
+        assert_eq!(s.texture_level_valid(index << 20, true), emitted, "index {index}");
+    }
+}

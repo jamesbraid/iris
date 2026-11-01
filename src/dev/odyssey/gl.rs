@@ -1508,6 +1508,20 @@ impl Board {
         }
     }
 
+    /// Whether level descriptor word 1 `word1` names a format the table lists
+    /// with its own size code. The class is not cross-checked: the library's
+    /// texture move (`texture_move`) stores class 6 whatever the pixel class's
+    /// index, and word 1's size code there is its object's storage class, not
+    /// the allocator's, so the move needs the index alone.
+    pub fn texture_level_valid(&mut self, word1: u32, texture_move: bool) -> bool {
+        let ok = if texture_move { texel_format((word1 >> 20) & 0x3f).is_some() } else { texture_level_texel_format(word1).is_some() };
+
+        if !ok {
+            self.texture_index_refused(word1);
+        }
+        ok
+    }
+
     /// The detail image at level-table entry `descriptor`, held as a plain 2D
     /// level is: its row is its width in 16-texel units rounded up to even,
     /// and its entry's word 1 carries no bits outside the format and that
@@ -2172,6 +2186,7 @@ impl Board {
                         && (filter != 0 || self.tex_sampler[5] != 0 || self.tex_sampler[6] != 0)
                         && entry[1] != 0x41100002)
                     || (entry[1] & 0x3c0ff000) != 0
+                    || !self.texture_level_valid(entry[1], texture_move)
                     || entry[2] != 0
                     || (i != 0 && (entry[1] & 0xc3f00000) != (self.tex_levels[(first * 3 + 1) as usize] & 0xc3f00000))
                     || (base != 0 && stride_units != expected_units && !(count == 1 && stride_units == 0))
