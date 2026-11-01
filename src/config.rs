@@ -593,10 +593,14 @@ pub enum GraphicsBoard {
     /// VPro V8: BUZZ A, 128 MB. Octane only.
     #[clap(name = "v8", alias = "vpro:v8", alias = "vpro_v8")]
     V8,
-    /// VPro V10: BUZZ B, 32 MB. Octane only; needs Crossbow 1.4.
+    /// VPro V10: BUZZ B, 32 MB. Octane only. It shipped only in the Octane2
+    /// and needs Crossbow 1.4, so the machine takes the Octane2's Crossbow and
+    /// Bridge revisions.
     #[clap(name = "v10", alias = "vpro:v10", alias = "vpro_v10")]
     V10,
-    /// VPro V12: BUZZ B, 128 MB. Octane only; needs Crossbow 1.4.
+    /// VPro V12: BUZZ B, 128 MB. Octane only. It shipped only in the Octane2
+    /// and needs Crossbow 1.4, so the machine takes the Octane2's Crossbow and
+    /// Bridge revisions.
     #[clap(name = "v12", alias = "vpro:v12", alias = "vpro_v12")]
     V12,
     /// No graphics board: the machine runs on its serial console. Octane

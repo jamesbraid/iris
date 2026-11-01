@@ -189,8 +189,10 @@ impl OctaneMachine {
                 }
             }
         }
-        // The Octane2 is the machine that takes a V10 or V12, as the VPro
-        // upgrade kit requires its Crossbow revision.
+        // The V10 and V12 shipped only in the Octane2, and SGI's upgrade kit
+        // (007-4210-003) requires Crossbow 1.4 for them. Choosing one gives
+        // the machine the Octane2's Crossbow (revision 5) and Bridge
+        // (revision 4); there is no separate option for the machine.
         let octane2 = matches!(kind, crate::config::GraphicsBoard::V10 | crate::config::GraphicsBoard::V12);
         let xbow_revision = if octane2 { XBOW_REVISION_OCTANE2 } else { XBOW_REVISION };
         let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4);

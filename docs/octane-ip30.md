@@ -150,9 +150,10 @@ its startup screen on any of them, but IRIX needs an install with the
 VPro kernel driver and X server module: a disk installed with an IMPACT
 board finds no screen on a VPro. SGI's upgrade kit (007-4210-003) asks
 for PROM 4.0 and IRIX 6.5.10 for the V6 and V8, and PROM 4.5, IRIX 6.5.10
-and Crossbow 1.4 for the V10 and V12; with a V10 or V12 the machine
-presents the Octane2's Crossbow (revision code 5, 1.4 in hinv), and iris
-warns at start-up when the PROM image is older than the board needs.
+and Crossbow 1.4 for the V10 and V12. The V10 and V12 shipped only in the
+Octane2, so choosing one makes the machine an Octane2: it presents the
+Octane2's Crossbow (revision code 5, 1.4 in hinv) and Bridge (revision 4).
+iris warns at start-up when the PROM image is older than the board needs.
 
 ## Networking
 
