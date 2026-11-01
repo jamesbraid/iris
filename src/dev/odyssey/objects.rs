@@ -1,6 +1,6 @@
 
 use crate::devlog::LogModule;
-use super::bits::sextract32;
+use super::bits::{be32, sextract32};
 use super::board::{Board, ODSY_HEIGHT, ODSY_OBJECTS, ODSY_OBJ_POOL_BYTES, ODSY_OBJ_POOL_WORDS, ODSY_WIDTH};
 use super::consts::{dma, tex};
 use super::raster_unit::RASTER_JOB_OVERHEAD;
@@ -356,7 +356,7 @@ impl Board {
         }
         // A staged transfer may still be queued for the raster unit.
         self.raster_wait();
-        u32::from_be_bytes(self.obj_mem.bytes[((self.obj_offset[iu] as u64 + y as u64 * self.obj_width[iu] as u64 + x as u64) * 4) as usize..][..4].try_into().unwrap())
+        be32(&self.obj_mem.bytes[((self.obj_offset[iu] as u64 + y as u64 * self.obj_width[iu] as u64 + x as u64) * 4) as usize..][..4])
     }
 
     /// A GL pixel copy (block 0x2031), decoded as the datasheet's "Copy

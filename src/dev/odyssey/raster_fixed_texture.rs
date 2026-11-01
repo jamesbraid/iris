@@ -190,17 +190,14 @@ impl SoftDraw<'_> {
         }
         let edge_only: bool = (f.wrap_s == GL_REPEAT || f.wrap_s == GL_CLAMP_TO_EDGE)
             && (f.wrap_t == GL_REPEAT || f.wrap_t == GL_CLAMP_TO_EDGE);
-        f.range = if base.is_some() { self.texture_last.wrapping_sub(p.unwrap().base_level) } else { 0 };
+        // A base level comes from the image's pyramid, so both are there or neither.
+        let pyramid = base.and(p);
+        f.range = pyramid.map_or(0, |p| self.texture_last.wrapping_sub(p.base_level));
         if f.range as usize >= FIXED_LEVELS {
             return false;
         }
         for i in 0..=f.range {
-            let l: Option<&GlTexLevel> = if base.is_some() {
-                let p = p.unwrap();
-                p.soft_texture_level(p.base_level.wrapping_add(i))
-            } else {
-                None
-            };
+            let l: Option<&GlTexLevel> = pyramid.and_then(|p| p.soft_texture_level(p.base_level.wrapping_add(i)));
             let fl = &mut f.level[i as usize];
             let format = match l {
                 Some(l) => l.base_format,
@@ -244,8 +241,7 @@ impl SoftDraw<'_> {
         // An image without a pyramid has one filter and no footprint.
         f.lod = base.is_some() && (mipmap || f.min != f.mag);
         f.choice = f.lod && !(f.min == GL_LINEAR_MIPMAP_LINEAR && f.mag == GL_LINEAR);
-        if let Some(base) = base {
-            let p = p.unwrap();
+        if let (Some(base), Some(p)) = (base, pyramid) {
             let lmax = FIXED_LAMBDA_MAX as f64;
 
             // Rounded up, as an exact lambda is (SoftFixedTex::fixed_decide()).
