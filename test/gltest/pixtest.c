@@ -619,7 +619,7 @@ static double fb_comp(const unsigned char *px, int comp)
    only when bpp does not divide the alignment and the width makes w * bpp
    miss a multiple of it: 3 shorts (bpp 6) at width 13 give 78-byte rows
    against GL's 80. The board's data is right; the library lays it out so
-   (origami #3070, VPro RGB short read-back). Returns 0 where GL's layout
+   (seen on the VPro RGB short read-back). Returns 0 where GL's layout
    holds. Only the default pack state is covered. */
 static int vpro_read_stride(const Fmt *f, const Type *t, const Store *s, int w)
 {
@@ -1363,8 +1363,7 @@ static void t_depth_colour(void)
    holds 2S * z with 2S = 2^33 - 2^15 (the depth range's far value), so the
    library multiplies by 2S, keeps the single's exponent and top 18 mantissa
    bits (truncating the rest), then on readback refills the low five mantissa
-   bits from the top five and divides by 2S (origami datasheet odyssey.md,
-   "Depth word, established as the library's reading"). 2S is a hair under a
+   bits from the top five and divides by 2S. 2S is a hair under a
    power of two, so the product's mantissa sits about one 18-bit step below
    z's and the truncation lands one word lower than truncating z itself.
    Other boards expect the value unchanged. */
@@ -1535,8 +1534,7 @@ static void t_depth_stencil(void)
                     /* VPro: the library does shift and offset on the host and
                        runs a stencil download under its default block, whose
                        write mask is all ones, so glStencilMask(0x0f) never
-                       reaches it (origami datasheet odyssey.md, "The stencil
-                       word and the write paths", established). The index is
+                       reaches it. The index is
                        stored whole: 219 for 108. The board gets value << 16
                        and what it does with bits above 8 is unknown there, so
                        such pixels are not checked. */

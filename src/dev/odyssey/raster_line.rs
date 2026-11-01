@@ -116,9 +116,6 @@ impl SoftVertex {
     /// with the minor coordinate at the centre v = n + t / den, the pixel is
     /// ceil(v / 2^sub) - 1. Coordinate differences are at most 2^29, so t
     /// fits, and the minor base shifted by the width stays below 2^43.
-    ///
-    /// Ported from sgi_soft_line_centre_covers() in QEMU sgi-origami
-    /// ab9b3f98f25f.
     pub fn line_centre_covers(&self, b: &SoftVertex, px: i64, py: i64, sub: i32) -> bool {
         let one = 1i64 << sub;
         let half = one >> 1;

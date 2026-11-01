@@ -510,8 +510,8 @@ pub(super) fn sgi_xio_compose(who: &str, widget: u32, address: u64, packet: &mut
 const HEART_PACKET: u64 = 0x80;
 
 impl HostInterface {
-    /// `HostInterface::send_interrupt(&s->fabric_as, packet, number, set)`: the
-    /// interrupt-modify write. HEART takes it at 0x80 of widget 8.
+    /// The interrupt-modify write to the interrupt target. HEART takes it at
+    /// 0x80 of widget 8.
     pub fn send_interrupt(&mut self, packet: u64, number: u8, set: bool) {
         let widget = (packet >> XIO_PACKET_ADDRESS_BITS) as u32;
         let address = packet & ((1u64 << XIO_PACKET_ADDRESS_BITS) - 1);

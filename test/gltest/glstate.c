@@ -477,8 +477,7 @@ static void t_current(void)
         glPopMatrix();
         /* VPro: the library answers from host state and never asks the board;
            the value is the raster vertex's eye-space z, unnegated, so -0.5 in
-           front of the eye (origami datasheet odyssey.md, "Raster distance",
-           established). */
+           front of the eye. */
         want_f(GL_CURRENT_RASTER_DISTANCE, 1, vpro ? -0.5 : 0.5);
         end();
     }

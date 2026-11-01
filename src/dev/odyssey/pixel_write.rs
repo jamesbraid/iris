@@ -1,8 +1,7 @@
 //! The library's image-write codes: word 7's format (bits 4:0) and type
 //! (bits 8:5), and what bytes a pixel of each takes and means.
 //!
-//! Datasheet: "Pixel transfer headers from the OpenGL library", "Image-write
-//! table". ESTABLISHED there as what the library sends. A packed type is
+//! ESTABLISHED as what the library sends. A packed type is
 //! always sent under the format whose component order it has in memory, so
 //! the format lists the components most significant first; the `_REV`
 //! variants are other formats, not a bit.

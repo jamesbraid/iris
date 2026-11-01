@@ -450,7 +450,7 @@ fn a_triangle_at_a_small_w_draws_as_at_one() {
 }
 
 /// amesh's block 16 is the clip w row itself and its depth row the same row
-/// times 0.99999999 (odyssey.md, "Depth"). The depth row and divisor are now
+/// times 0.99999999. The depth row and divisor are now
 /// taken on eye and w rounded to single precision, which moves the ratio by
 /// about 6e-8: it must stay inside the 2^-20 slack, so a wall from the floor
 /// to a peak still draws, and the depth it writes is the far plane's give or

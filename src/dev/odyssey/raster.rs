@@ -538,8 +538,8 @@ impl RasterRules {
     /// into what adds to the window depth before the code and the steps that
     /// add to the code after it. With depth_float the amount is the 0x058
     /// field over 2^24 (polygon::OFFSET_SCALE), a step count the board
-    /// adds to the encoded word (depth_word::word_with_offset(); datasheet,
-    /// "Polygon offset" and "Depth word"; the placement is INFERRED), so none
+    /// adds to the encoded word (depth_word::word_with_offset(); the
+    /// placement is INFERRED), so none
     /// of it adds to window depth.
     pub fn split_offset(&self, offset: f64) -> (f64, i64) {
         if !self.depth_float {
@@ -1380,7 +1380,7 @@ impl RasterRules {
     /// depth_float the guest library has already folded factor (through
     /// tan L) and 2 units into one per-projection step count and sends it as
     /// the 0x058 field, which the context carries as the bias; the board has
-    /// no per-polygon slope term (datasheet, "Polygon offset"). So only the
+    /// no per-polygon slope term. So only the
     /// bias counts there, and the slope and the context's factor and units,
     /// which the library never sets, add nothing.
     pub fn offset_amount(&self, st: &GlDrawState, slope: f64) -> f64 {

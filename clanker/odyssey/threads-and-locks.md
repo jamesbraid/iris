@@ -17,9 +17,7 @@ behaviour is not modelled. Do not add a lock or a borrow to hide one.
 
 ## Chips and threads
 
-Each thread stands for a chip, or a part of one, from the Odyssey datasheet
-(origami `docs/datasheets/odyssey.md`, "Chip roles from the vendor
-documents" and "Board and kernel"):
+Each thread stands for a chip, or a part of one, of the board:
 
 | Thread | Hardware | Grade and source |
 | --- | --- | --- |

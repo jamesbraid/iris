@@ -8,11 +8,10 @@
 //! Words order as unsigned integers do, so a depth compare is an integer
 //! compare. Bits 31:24 of a 32-bit word are not depth.
 //!
-//! What the datasheet's depth section (odyssey.md, "Depth, polygon offset and
-//! lighting follow-up") establishes is the library's reading of the plane
-//! after a DMA read: the host's encoder and decoder below, the 16-bit form
-//! and the polygon-offset field. That the plane holds exactly these bits is
-//! INFERRED there. The rounding of a rasterised depth into the word is
+//! What is established is the library's reading of the plane after a DMA
+//! read: the host's encoder and decoder below, the 16-bit form and the
+//! polygon-offset field. That the plane holds exactly these bits is
+//! INFERRED. The rounding of a rasterised depth into the word is
 //! unknown; this model truncates, as the host encoder does.
 
 use super::consts::ODSY_DEPTH24_MAX;
@@ -32,7 +31,7 @@ const DEPTH_MANTISSA_MASK: u32 = (1 << DEPTH_MANTISSA_BITS) - 1;
 /// The difference between an IEEE single's exponent and the word's.
 const IEEE_EXP_OFFSET: u32 = 96;
 
-/// The host encoder (ESTABLISHED, datasheet depth word): the IEEE single's
+/// The host encoder (ESTABLISHED): the IEEE single's
 /// exponent minus 96 and its top 18 mantissa bits, the rest truncated. An
 /// exponent below 96 gives 0, one of 160 or more gives 0x0fffffff, and the
 /// sign is ignored.
@@ -103,8 +102,7 @@ pub(super) fn decode_host16(word: u32) -> f32 {
 pub(super) const OFFSET_STEPS_MIN: i64 = -(1 << 24);
 pub(super) const OFFSET_STEPS_MAX: i64 = (1 << 24) - 1;
 
-/// The word after a polygon offset. INFERRED placement (datasheet, "Polygon
-/// offset"): the board adds the field to the encoded word, so the offset
+/// The word after a polygon offset. INFERRED placement: the board adds the field to the encoded word, so the offset
 /// counts mantissa steps and shrinks toward the near plane in proportion to
 /// d - n. The sum clamps to 0 and the largest word, a model choice: what the
 /// board does at either end is not shown. The field alone is the step count;
@@ -247,7 +245,7 @@ mod tests {
     }
 
     // The offset the guest library computes for glPolygonOffset(factor, units)
-    // under a frustum (datasheet, "Polygon offset"): factor * tan(L) * (eye
+    // under a frustum: factor * tan(L) * (eye
     // width of a pixel at f) * 2^19 / (f - n) + 2 * units, in steps of the
     // word. It is the guest's arithmetic, not the board's; the register
     // receives the result.

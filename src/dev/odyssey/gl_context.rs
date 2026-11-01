@@ -6,7 +6,7 @@
 //! floats holding exactly the bits the client sent; arithmetic is double.
 
 //!
-//! Ported from hw/display/sgi/gl-context.h in jamesbraid/qemu-sgi-origami.
+//! Ported from include/hw/display/sgi/gl-context.h in jamesbraid/qemu-sgi-origami.
 
 use crate::devlog::LogModule;
 use super::bits::deposit32;

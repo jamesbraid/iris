@@ -826,8 +826,7 @@ pub(super) fn soft_texture_derivatives(
 
 // The diagonal level of detail of a filled triangle's quads.
 //
-// INFERRED, as the datasheet records it (odyssey.md, "Mipmap level of
-// detail", from US 6,232,981 B1): the texture unit picks one level of
+// INFERRED from US 6,232,981 B1: the texture unit picks one level of
 // detail for each 2x2 pixel quad. It takes the s and t differences along
 // the quad's two diagonals, pixel 1 to pixel 4 and pixel 2 to pixel 3,
 // takes the largest absolute difference and returns its base-2 logarithm;

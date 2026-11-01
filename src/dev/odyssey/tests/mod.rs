@@ -1,12 +1,9 @@
 //! Unit tests for the VPro (Odyssey) board model.
 //!
-//! The cases follow the register-contract tests in QEMU's maintained
-//! `sgi-origami` branch (tests/qtest/octane-vpro-test.c and
-//! tests/qtest/sn1-odyssey-test.c), which are grounded in captures from
-//! real boards and the reviewed datasheet. A doc comment names the QEMU
-//! case a test comes from. Cases that are about the Fuel's or Origin's
-//! fabric, QOM properties, migration streams or the rasteriser's pixel
-//! maths are not repeated here.
+//! The cases are register-contract tests of the board, grounded in captures
+//! from real boards. A doc comment names the QEMU case a test comes from.
+//! Cases about other machines' fabrics, QOM properties, migration streams
+//! or the rasteriser's pixel maths are not repeated here.
 //!
 //! The tests reach the board through `Board` and `Odyssey`, the same
 //! surface the machine uses: memory-mapped reads and writes, and the

@@ -1253,11 +1253,8 @@ pub(super) fn image_burst_fmt(reg: u32) -> Option<u32> {
 /// 24-bit float (depth_word.rs). (A function, not a static: the struct is not const
 /// constructible.)
 ///
-/// One-pixel lines take the centre-sampled rule (LineRule::CentreSampled), as
-/// the QEMU sgi-origami branch's board model does (ab9b3f98f25f,
-/// c5417243927d). The branch's record is the authority for where that rule
-/// is established and where it is a model choice: the x-major tie and the
-/// end rule are model choices.
+/// One-pixel lines take the centre-sampled rule (LineRule::CentreSampled).
+/// The x-major tie and the end rule are model choices.
 pub(super) fn gl_rules() -> RasterRules {
     RasterRules {
         subpixel_bits: 8,

@@ -86,8 +86,7 @@ impl Board {
     /// Mark object i as the most recently used. Use is an upload or a grow
     /// that targets the object, never a draw that samples it: a texture drawn
     /// every frame but uploaded once is the first to go when the store or
-    /// the table fills. Model policy, not board behaviour (origami datasheet
-    /// odyssey.md, "Board-memory object store", origami#3192).
+    /// the table fills. Model policy, not board behaviour.
     pub fn object_touch(&mut self, i: usize) {
         self.objects.clock += 1;
         self.objects.stamp[i] = self.objects.clock;

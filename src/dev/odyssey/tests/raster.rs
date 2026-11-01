@@ -526,9 +526,7 @@ fn line_pixels(rule: LineRule, a: (f32, f32), b: (f32, f32)) -> Vec<(i32, i32)> 
 /// pixel edge goes to the lower pixel whichever way the line slopes, where
 /// the diamond rule's perturbation follows the slope. Reversed, the end
 /// inside a diamond is the start, and both rules agree. A vertical line
-/// exactly on a column edge takes the column to its left under both. Cases
-/// and expectations from the QEMU sgi-origami branch's line tests
-/// (ab9b3f98f25f, c5417243927d).
+/// exactly on a column edge takes the column to its left under both.
 #[test]
 fn a_line_takes_the_centre_sampled_rule() {
     let cases: [((f32, f32), (f32, f32), bool, Vec<(i32, i32)>); 4] = [

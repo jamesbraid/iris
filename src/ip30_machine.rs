@@ -54,8 +54,7 @@ pub const OCTANE_PRID: u32 = 0x0927;
 const XBOW_REVISION: u32 = 4;
 /// The Octane2's Crossbow: revision code 5, which IRIX's inventory names
 /// Crossbow 1.4 (a PROM-monitor read of 0x50000001 beside an inventory of
-/// 1.4 on an Octane2, recorded in jamesbraid/qemu-sgi-origami's
-/// docs/system/mips/sgi/ip30.rst). SGI's VPro upgrade kit (007-4210-003)
+/// 1.4 on an Octane2). SGI's VPro upgrade kit (007-4210-003)
 /// requires Crossbow 1.4 for the V10 and V12, so a machine with one of
 /// those presents it.
 const XBOW_REVISION_OCTANE2: u32 = 5;

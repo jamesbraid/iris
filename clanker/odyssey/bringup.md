@@ -1,7 +1,6 @@
 # VPro (Odyssey) on the Octane: boards, versions and bring-up
 
-Status: howto (iris `src/dev/odyssey/`, 2026-10-30). The board's contract is
-origami's reviewed datasheet `docs/datasheets/odyssey.md`; this note is what
+Status: howto (iris `src/dev/odyssey/`, 2026-10-30). This note is what
 you need to start a guest and read a trace.
 
 **What it is.** The Octane's second graphics option after IMPACT: a

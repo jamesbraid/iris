@@ -1258,7 +1258,7 @@ pub(super) fn volume_slice_stride(level_word2: u32) -> u64 {
 /// entries with the application's function at LOD -i/32, interpolated
 /// linearly between the points and held beyond the end ones, as unsigned
 /// 12-bit fractions in bits 23:12 (ESTABLISHED as the library's table
-/// builder; origami datasheet, "Texture registers and precision"). Beyond
+/// builder). Beyond
 /// the table's ends the weight is the end entry's, as SGIS_detail_texture
 /// holds the function past its end points. Between two entries the model
 /// interpolates linearly, which gives back the application's function
@@ -2020,9 +2020,8 @@ impl Board {
             // that fits the store always succeeds (object_rows() forgets
             // others to make room), and one that cannot is not tried, so a
             // draw never waits on the raster unit for a growth that fails.
-            // Only an ordinary 2D level that holds some rows grows (origami
-            // datasheet, "Board-memory object store", origami#3192): an object
-            // that holds none stays missing, as before, since whether such a
+            // Only an ordinary 2D level that holds some rows grows: an object
+            // that holds none stays missing, since whether such a
             // level is present is not decided; volume slices keep their own
             // checks above. Sampling is not use, so finding a level here does
             // not touch its object (Board::object_touch()).
