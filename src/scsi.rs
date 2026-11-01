@@ -39,6 +39,7 @@ pub mod scsi_cmd {
     pub const WRITE_10: u8 = 0x2a;
     pub const VERIFY_10: u8 = 0x2f;
     pub const SYNCHRONIZE_CACHE_10: u8 = 0x35;
+    pub const SYNCHRONIZE_CACHE_16: u8 = 0x91;
     pub const MODE_SELECT_10: u8 = 0x55;
     pub const MODE_SENSE_10: u8 = 0x5a;
     pub const SET_CD_SPEED: u8 = 0xbb;
@@ -1081,7 +1082,9 @@ impl ScsiTarget for ScsiDevice {
             scsi_cmd::PREVENT_ALLOW_MEDIUM_REMOVAL => ScsiResponse { status: 0x00, data: vec![] },
             // Backend writes reach the host synchronously, but a copy-on-write
             // overlay's record of its sectors is only written out on a flush.
-            scsi_cmd::SYNCHRONIZE_CACHE_10 => {
+            // The range and IMMED are not used: the whole disk is flushed
+            // before the command completes.
+            scsi_cmd::SYNCHRONIZE_CACHE_10 | scsi_cmd::SYNCHRONIZE_CACHE_16 => {
                 self.flush()?;
                 ScsiResponse { status: 0x00, data: vec![] }
             }
@@ -1462,6 +1465,55 @@ mod tests {
         let pages = [0x01, 0x0a, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0];
         assert_eq!(mode_select(&mut dev, &pages).status, 0x00);
         assert_eq!(caching_flags(&mut dev), 0x04);
+    }
+
+    /// A disk in memory that counts the flushes it is asked for.
+    struct CountingNode {
+        data: Vec<u8>,
+        flushes: std::sync::Arc<AtomicU64>,
+    }
+
+    impl CountingNode {
+        fn device(blocks: usize) -> (ScsiDevice, std::sync::Arc<AtomicU64>) {
+            let flushes = std::sync::Arc::new(AtomicU64::new(0));
+            let node = CountingNode { data: vec![0u8; blocks * 512], flushes: flushes.clone() };
+            let identity = ScsiIdentity::new(b"TEST    ", b"DISK            ", b"1.0 ");
+            (ScsiDevice::new(Box::new(node), false, "mock".into(), Vec::new(), identity), flushes)
+        }
+    }
+
+    impl crate::block_node::BlockNode for CountingNode {
+        fn size(&self) -> u64 { self.data.len() as u64 }
+        fn read(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+            buf.copy_from_slice(&self.data[offset as usize..offset as usize + buf.len()]);
+            Ok(())
+        }
+        fn write(&mut self, offset: u64, buf: &[u8]) -> io::Result<()> {
+            self.data[offset as usize..offset as usize + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn discard(&mut self, _offset: u64, _len: u64) -> io::Result<()> { Ok(()) }
+        fn block_status(&self, _offset: u64, len: u64) -> io::Result<crate::block_node::BlockStatus> {
+            Ok(crate::block_node::BlockStatus::data(len))
+        }
+        fn backing(&self) -> Option<&dyn crate::block_node::BlockNode> { None }
+    }
+
+    /// SYNCHRONIZE CACHE(10) and (16) both flush the disk before they
+    /// return GOOD. (16) used to be an unknown command.
+    #[test]
+    fn synchronize_cache_flushes_in_both_cdb_sizes() {
+        let (mut dev, flushes) = CountingNode::device(8);
+        assert_eq!(run(&mut dev, &[0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0]).status, 0x00);
+        assert_eq!(flushes.load(Ordering::SeqCst), 1);
+        let mut cdb = [0u8; 16];
+        cdb[0] = 0x91;
+        assert_eq!(run(&mut dev, &cdb).status, 0x00, "SYNCHRONIZE CACHE(16)");
+        assert_eq!(flushes.load(Ordering::SeqCst), 2);
     }
 
     /// NetBSD's cd driver reads the TOC asking for 12 bytes: header and
