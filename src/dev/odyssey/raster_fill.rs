@@ -950,7 +950,8 @@ mod tests {
         st.depth_func = pick(&mut rng, &[GL_LESS, GL_LEQUAL, GL_LESS, GL_LEQUAL, GL_GREATER, GL_ALWAYS, GL_EQUAL, GL_NOTEQUAL, GL_NEVER]);
         st.depth_mask = rng.next_u32() % 5 != 0;
         st.shade_model = pick(&mut rng, &[GL_FLAT, GL_SMOOTH]);
-        st.dither = rng.next_u32() % 2 != 0;
+        // Once the dither enable; still drawn so the seeds keep their cases.
+        rng.next_u32();
         if rng.next_u32() % 2 == 0 {
             st.blend = true;
             if rng.next_u32() % 2 == 0 {
@@ -1516,7 +1517,6 @@ mod tests {
         let stipple = [0u32; 32];
         let v: Vec<f32> = vertices.iter().flatten().copied().collect();
 
-        b.st.dither = false;
         b.st.texture_2d = true;
         b.st.texture_env_mode = GL_REPLACE;
         b.board.tex_lod = lod;

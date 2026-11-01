@@ -272,7 +272,6 @@ impl Bench {
             draw_buffers: 1,
             colour_mask: GL_COLOUR_MASK_ALL,
             texture_env_mode: GL_MODULATE,
-            dither: true,
             ..Default::default()
         };
         st.drawable.bound = true;
@@ -308,7 +307,6 @@ impl Bench {
         match scene {
             Scene::FlatFill => {
                 st.shade_model = GL_FLAT;
-                st.dither = false;
                 tris(&mut b.prims, &mut b.pixels, 40.0, 0.0);
             }
             Scene::SmoothDepth | Scene::SmoothBlend | Scene::MidSmooth => {
@@ -475,7 +473,6 @@ impl Bench {
             Scene::Lines => {
                 b.mode = GL_LINES;
                 st.shade_model = GL_FLAT;
-                st.dither = false;
                 for _ in 0..count {
                     let mut v = vec![0.0f32; 2 * GL_VERTEX_FLOATS];
                     let x0 = rng.range(0.0, BENCH_W as f32);

@@ -92,7 +92,6 @@ impl Ctx {
         st.drawable.clip.r[0] = rect;
         st.viewport = [0, 0, SIDE, SIDE];
         st.shade_model = GL_SMOOTH;
-        st.dither = false;
         let mut c = Ctx {
             board,
             st,

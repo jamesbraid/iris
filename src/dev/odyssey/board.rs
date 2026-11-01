@@ -364,8 +364,6 @@ pub struct Board {
     pub gl_block_logged: bool,
     pub ctx_open_prim_logged: bool,
     pub ctx_shadow_fail_reported: bool,
-    /// GL_DITHER, 0x0404 bit 18, as last pushed.
-    pub gl_dither: bool,
     pub gl_dither_reported: bool,
 
     // The current fill's colour source.
@@ -666,7 +664,6 @@ impl Default for Board {
             gl_block_logged: false,
             ctx_open_prim_logged: false,
             ctx_shadow_fail_reported: false,
-            gl_dither: false,
             gl_dither_reported: false,
             gl_color_index: 0,
             gl_color_is_index: false,
@@ -1082,7 +1079,6 @@ impl Board {
         self.gl_block_logged = false;
         self.ctx_open_prim_logged = false;
         self.ctx_shadow_fail_reported = false;
-        self.gl_dither = false;
         self.gl_dither_reported = false;
         self.scanout.shared.group25.store(false, std::sync::atomic::Ordering::Relaxed);
         self.copy_src = 0;

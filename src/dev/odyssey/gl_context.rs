@@ -422,8 +422,6 @@ pub struct GlDrawState {
     pub depth_range: [f32; 2],
     /// GL_DRAW_* bits; those the drawable has no target for are ignored.
     pub draw_buffers: u32,
-    /// glIndexMask's write mask (4.2.2).
-    pub index_mask: u32,
     /// glColorMask's channels, GL_COLOUR_MASK_RED and so on (4.2.2).
     pub colour_mask: u32,
     /// Polygon culling (3.5.1): GL_CULL_FACE's enable,
@@ -458,9 +456,8 @@ pub struct GlDrawState {
     pub blend_dst: u32,
     pub blend_equation: u32,
     pub blend_color: [f32; 4],
-    /// The logical operation (4.1.8): the GL_INDEX_LOGIC_OP and
-    /// GL_COLOR_LOGIC_OP enables and glLogicOp's operation.
-    pub index_logic_op: bool,
+    /// The logical operation (4.1.8): the GL_COLOR_LOGIC_OP enable and
+    /// glLogicOp's operation.
     pub color_logic_op: bool,
     pub logic_op_mode: u32,
     /// Fog (3.10): its enable, mode, density, start and end, the
@@ -485,8 +482,6 @@ pub struct GlDrawState {
     pub clip_planes: u32,
     pub clip_plane: [[f32; 4]; GL_CLIP_PLANES as usize],
     pub drawable: GlDrawable,
-    /// GL_DITHER's enable, initially on (4.1.7).
-    pub dither: bool,
     /// A window matrix, for a board that takes one eye-to-window
     /// transform in place of a projection and a viewport; none of it is GL
     /// state (GlContext::set_window_matrix()). While window_matrix_given is set,
@@ -722,7 +717,6 @@ impl GlContext {
         self.cur.shade_model = GL_SMOOTH;
         self.sprite_mode = GL_SPRITE_AXIAL_SGIX;
         self.sprite_axis[2] = 1.0;
-        self.cur.dither = true;
         self.cur.modelview = IDENT;
         self.cur.projection = IDENT;
         self.texture = IDENT;
@@ -757,7 +751,6 @@ impl GlContext {
         self.cur.depth_range[1] = 1.0;
         self.clear_depth = u32::MAX;
         self.cur.draw_buffers = GL_DRAW_FRONT;
-        self.cur.index_mask = u32::MAX;
         self.cur.colour_mask = GL_COLOUR_MASK_ALL;
         self.cur.cull_face_mode = GL_BACK;
         self.cur.front_face = GL_CCW;
@@ -1522,7 +1515,9 @@ impl GlContext {
             GL_ALPHA_TEST => self.cur.alpha_test = on,
             GL_STENCIL_TEST => self.cur.stencil_test = on,
             GL_BLEND => self.cur.blend = on,
-            GL_INDEX_LOGIC_OP => self.cur.index_logic_op = on,
+            // Colour-index drawing stores the index unchanged; no logical
+            // operation is modelled for it.
+            GL_INDEX_LOGIC_OP => {}
             GL_COLOR_LOGIC_OP => self.cur.color_logic_op = on,
             GL_FOG => self.cur.fog = on,
             GL_POLYGON_OFFSET_FILL => self.cur.polygon_offset = deposit32(self.cur.polygon_offset, 0, 1, onv),
