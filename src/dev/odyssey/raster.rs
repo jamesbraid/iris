@@ -610,7 +610,8 @@ impl RasterRules {
 
     /// A component clamped to [0, 1] and scaled to the rules' colour bits as
     /// floor(c * 2^bits) limited to the largest value: 256c limited to 255
-    /// for eight bits. INFERRED from vendor frames, not established.
+    /// for eight bits. ESTABLISHED (vendor simulation): the frames allow
+    /// floor(256c + b) for b in 0 to 0.2 and test no value below 0.1.
     #[inline]
     pub fn channel(&self, c: f64) -> u32 {
         let max = (1u32.wrapping_shl(self.color_bits as u32)).wrapping_sub(1);
@@ -643,6 +644,9 @@ impl RasterRules {
         }
     }
 
+    /// The alpha-test comparison value. MODEL CHOICE: floor at the reference's
+    /// 12 bits extends the colour rule to the comparison, whose precision the
+    /// vendor frames do not test.
     pub fn soft_alpha_test(&self, value: f64) -> u32 {
         let max = if self.alpha_test_bits != 0 {
             (1u32.wrapping_shl(self.alpha_test_bits as u32)).wrapping_sub(1)
@@ -659,7 +663,7 @@ impl RasterRules {
         }
     }
 
-    /// Internal nearest conversion precedes storage truncation, even on clears.
+    /// The internal floor conversion precedes storage truncation, even on clears.
     pub fn stored_alpha(&self, value: f64) -> u32 {
         let m = self.alpha_max();
         if m == 0 {
@@ -1307,8 +1311,8 @@ impl SoftDraw<'_> {
 
     /// A primitive's fragment at normalized depth z, (zd + 1) / 2 for the
     /// normalized device z zd: dropped outside [0, 1], the view volume's near
-    /// and far planes, which clipping has already cut the primitive to, and
-    /// otherwise mapped to window depth n + (f - n) z through the depth range
+    /// and far planes, which are now the only near and far kill (the clipper
+    /// keeps them), and otherwise mapped to window depth n + (f - n) z through the depth range
     /// [n, f] (OpenGL 1.2.1, 2.10.1). A polygon's offset is then added to the
     /// window depth, and the sum clamped to [0, 1] (3.5.5).
     #[allow(clippy::too_many_arguments, reason = "the fragment path takes a fragment as its parts")]
@@ -1691,6 +1695,17 @@ mod colour_tests {
             v.push(f64::from_bits(c.to_bits().wrapping_sub(1)));
         }
         v
+    }
+
+    // Colour storage is floor(256c) limited to 255: the vendor-frame points.
+    // 0.1 also rules out round(255c), which gives 0x1a.
+    #[test]
+    fn colour_storage_is_floor_256c() {
+        let r = rules(8, 8);
+
+        assert_eq!(r.channel(0.1), 0x19);
+        assert_eq!(r.channel(0.5), 0x80);
+        assert_eq!(r.channel(1.0), 0xff);
     }
 
     // rgb() takes each channel as channel() does.
