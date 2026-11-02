@@ -3,6 +3,7 @@
 //! Ported from tests/qtest/octane-test.c in jamesbraid/qemu-sgi-origami.
 
 use super::*;
+use crate::dev::host_pcm::HOST_RETRY;
 use crate::hptimer::TimerManager;
 use crate::traits::Device;
 use std::sync::{Arc, Mutex};
