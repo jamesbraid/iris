@@ -311,8 +311,9 @@ impl TezroMachine {
         let rx = connect_cpu("Tezro", &node.md, &node.pi[0], &node.lb, &node.ni, &node.l1, &cpu)?;
         // After connect_cpu set the windows: each compile worker takes the
         // cache's geometry and the CPU model's policies once, as it starts.
-        // Workers read plain physical code addresses, which the cached plane
-        // serves; the uncached views would decode them as Hub registers.
+        // Workers read plain physical code addresses through the view the CPU
+        // fetched each page by: the cached plane for cached pages, the
+        // uncached attribute-0 view for the reset PROM's uncached fetches.
         #[cfg(feature = "jitv2")]
         {
             let cpu_device: Arc<dyn Device> = cpu.clone().as_device();

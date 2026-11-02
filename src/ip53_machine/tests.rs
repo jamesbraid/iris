@@ -324,8 +324,7 @@ fn the_board_refuses_a_population_it_cannot_fit() {
     assert!(TezroBoard::new(5).is_err());
 }
 
-/// A board of one processor and one GiB of memory (below 4 GiB, which a
-/// jitv2 build's uncached code views need) with `chip` fitted.
+/// A board of one processor and one GiB of memory with `chip` fitted.
 fn board_with(chip: &Part) -> TezroBoard {
     TezroBoard::with_config(TezroBoardConfig {
         payload: &[],
