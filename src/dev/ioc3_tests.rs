@@ -11,7 +11,7 @@ use crate::irq::LevelProbe;
 use crate::traits::MachineEvent;
 use crate::pci::PciBusDevice;
 
-const MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
+const MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x45, 0x4d, 0x00];
 
 /// A sink for a serial line: what the guest sent, and what the host types.
 #[derive(Default)]

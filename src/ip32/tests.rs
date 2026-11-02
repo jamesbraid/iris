@@ -820,16 +820,17 @@ impl<'a> IdMaster<'a> {
     }
 }
 
-const TEST_MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
+const TEST_MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x45, 0x4d, 0x00];
 
 /// The bytes the O2's Ethernet-address chip gives the PROM, recorded from
-/// the model before it moved onto the shared bus, for the address 08:00:69:12:34:56.
+/// for the address 08:00:69:45:4d:00; the two CRC bytes were computed by hand
+/// with the 1-Wire CRC-8, not taken from the model.
 #[test]
 fn the_ethernet_address_chip_answers_with_the_recorded_bytes() {
-    let rom = [0x09, 0x08, 0x00, 0x69, 0x12, 0x34, 0x56, 0x7b];
-    let mut memory = vec![0x8d, 0x56, 0x34, 0x12, 0x69, 0x00, 0x08];
+    let rom = [0x09, 0x08, 0x00, 0x69, 0x45, 0x4d, 0x00, 0x78];
+    let mut memory = vec![0x8d, 0x00, 0x4d, 0x45, 0x69, 0x00, 0x08];
     memory.extend([0xff; 122]);
-    memory.push(0x50);
+    memory.push(0xff);
 
     // READ ROM, then straight on to READ MEMORY without a reset.
     let id = MaceId::new(TEST_MAC);
@@ -866,7 +867,7 @@ fn short_pulses_still_read_the_rom() {
     m.widths = (320, 35, 3);
     m.reset();
     m.write_byte(0x33);
-    assert_eq!(m.read_bytes(8), [0x09, 0x08, 0x00, 0x69, 0x12, 0x34, 0x56, 0x7b]);
+    assert_eq!(m.read_bytes(8), [0x09, 0x08, 0x00, 0x69, 0x45, 0x4d, 0x00, 0x78]);
 }
 
 /// A low shorter than a reset is a slot, not a reset: no presence pulse.

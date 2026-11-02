@@ -37,7 +37,7 @@ PROM/kernel from the `eaddr` environment variable, which real hardware stores
 in battery-backed NVRAM (Indy: DS1386) or a serial EEPROM (Indigo2: 93CS56).
 Real hardware always ships with one burned in — there's no way to leave it
 unset — so `Machine::new` (`src/machine.rs`, right after `Hpc3::with_net`)
-backdoor-injects `[network] mac` (default `08:00:69:12:34:56`, see
+backdoor-injects `[network] mac` (default `08:00:69:45:4d:00`, see
 `config::DEFAULT_MAC`) directly into the emulated chip before the CPU ever
 runs, rather than requiring a guest-side `setenv`:
 
@@ -89,7 +89,7 @@ runs, rather than requiring a guest-side `setenv`:
 Manual fallback (still works, e.g. to pick a different MAC without restarting):
 
 1. Boot to PROM monitor (press Escape during countdown)
-2. `>> setenv -f eaddr 08:00:69:de:ad:01` (any SGI OUI `08:00:69` MAC)
+2. `>> setenv -f eaddr 08:00:69:45:4d:01` (keep SGI's OUI 08:00:69; the PROM checks for it)
 3. From iris monitor (telnet 127.0.0.1 8888): `rtc save` (Indy) or
    `nveeprom save` (Indigo2) to persist immediately. Stopping the VM also
    saves both battery-backed devices to their configured paths.

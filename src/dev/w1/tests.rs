@@ -8,7 +8,7 @@ use super::*;
 use crate::dev::w1::sgi::{board_record_part, ethernet_address_part, BoardRecord, ETHERNET_PART_SERIAL};
 use crate::dev::w1::Ds2502;
 
-const MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
+const MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x45, 0x4d, 0x00];
 
 /// A master on one bus: slots at pulse widths, as a MicroLAN register does.
 struct M(Bus);

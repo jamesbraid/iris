@@ -516,12 +516,12 @@ mod tests {
     #[test]
     fn erased_ip28_gets_defaults_and_checksum_without_losing_mac() {
         let mut ee = Eeprom93c56::new();
-        ee.backdoor_set_mac([8, 0, 0x69, 0x12, 0x34, 0x56]);
+        ee.backdoor_set_mac([0x08, 0x00, 0x69, 0x45, 0x4d, 0x00]);
         assert!(ee.initialize_ip28_if_erased());
         assert_eq!(ee.data[0] & 0xff, 9);
         assert_eq!(ee.data[0x74], 0x3830); // volume 80
         assert_eq!(ee.data[0x79] >> 8, b'1' as u16);
-        assert_eq!(ee.data[0x7d..], [0x0800, 0x6912, 0x3456]);
+        assert_eq!(ee.data[0x7d..], [0x0800, 0x6945, 0x4d00]);
         // Independent byte formulation of the PROM checksum.
         let bytes: Vec<u8> = ee.data.iter().flat_map(|w| w.to_be_bytes()).collect();
         let mut sum = 0xa5u8;
@@ -628,17 +628,17 @@ mod tests {
     #[test]
     fn backdoor_mac_words_readable_via_protocol() {
         let mut eeprom = Eeprom93c56::new();
-        eeprom.backdoor_set_mac([0x08, 0x00, 0x69, 0x12, 0x34, 0x56]);
+        eeprom.backdoor_set_mac([0x08, 0x00, 0x69, 0x45, 0x4d, 0x00]);
 
         assert_eq!(eeprom.data[0x7D], 0x0800);
-        assert_eq!(eeprom.data[0x7E], 0x6912);
-        assert_eq!(eeprom.data[0x7F], 0x3456);
+        assert_eq!(eeprom.data[0x7E], 0x6945);
+        assert_eq!(eeprom.data[0x7F], 0x4d00);
 
         eeprom.set_cs(false);
         eeprom.set_sk(false);
         eeprom.set_di(false);
 
-        for (addr, expected) in [(0x7D_u32, 0x0800u16), (0x7E, 0x6912), (0x7F, 0x3456)] {
+        for (addr, expected) in [(0x7D_u32, 0x0800u16), (0x7E, 0x6945), (0x7F, 0x4d00)] {
             eeprom.set_cs(true);
             send_bits(&mut eeprom, 1, 1);
             send_bits(&mut eeprom, 0b10, 2);
@@ -659,7 +659,7 @@ mod tests {
         let mut src = Eeprom93c56::new();
         src.data[0]   = 0x1234;
         src.data[0x11] = 0x0100;
-        src.backdoor_set_mac([0x08, 0x00, 0x69, 0x12, 0x34, 0x56]);
+        src.backdoor_set_mac([0x08, 0x00, 0x69, 0x45, 0x4d, 0x00]);
         src.save(&path).expect("save");
 
         let mut dst = Eeprom93c56::new();
@@ -691,12 +691,12 @@ mod tests {
     #[test]
     fn backdoor_mac_if_blank_does_not_clobber_existing() {
         let mut eeprom = Eeprom93c56::new();
-        let guest_mac = [0x08, 0x00, 0x69, 0xde, 0xad, 0x01];
+        let guest_mac = [0x08, 0x00, 0x69, 0x45, 0x4d, 0x01];
         eeprom.backdoor_set_mac(guest_mac);
 
-        let patched = eeprom.backdoor_set_mac_if_blank([0x08, 0x00, 0x69, 0x12, 0x34, 0x56]);
+        let patched = eeprom.backdoor_set_mac_if_blank([0x08, 0x00, 0x69, 0x45, 0x4d, 0x00]);
         assert!(!patched, "backdoor must not overwrite a non-blank eaddr slot");
-        assert_eq!(eeprom.get_data()[0x7D..=0x7F], [0x0800, 0x69de, 0xad01]);
+        assert_eq!(eeprom.get_data()[0x7D..=0x7F], [0x0800, 0x6945, 0x4d01]);
     }
     /// The trap behind the R5000 boot hang: a fresh EEPROM is *erased*, not zeroed,
     /// so CACHSZ reads as 0xFFFF — 65535 pages, i.e. 256 MB of secondary cache. A

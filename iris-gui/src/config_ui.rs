@@ -1518,7 +1518,7 @@ fn ethernet_address_row(ui: &mut Ui, cfg: &MachineConfig, running: bool) {
         ui.add_enabled_ui(!running, |ui| {
             ui.horizontal(|ui| {
                 let resp = ui.add(TextEdit::singleline(&mut buf)
-                    .hint_text("08:00:69:xx:xx:xx").desired_width(150.0));
+                    .hint_text("08:00:69:45:4d:xx").desired_width(150.0));
                 let entered = resp.lost_focus() && buf != cur_text;
                 if entered {
                     match iris::config::parse_mac(buf.trim()) {

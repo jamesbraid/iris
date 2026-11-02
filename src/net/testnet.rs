@@ -18,7 +18,7 @@ use super::packet::{self, Ether, Ipv4Route, MacAddr, TcpFlags, TcpHeader, TCP_MS
 use super::{GatewayConfig, NatControl, NatEngine};
 use crate::config::{ForwardBind, ForwardProto, PortForwardConfig};
 
-pub const GUEST_MAC: MacAddr = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
+pub const GUEST_MAC: MacAddr = [0x08, 0x00, 0x69, 0x45, 0x4d, 0x00];
 /// How long a test waits for something before failing.
 const PATIENCE: Duration = Duration::from_secs(10);
 

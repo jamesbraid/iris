@@ -28,7 +28,7 @@ toast-invalid-config = The machine settings aren't valid: { $error }
 # $path is the configured PROM file.
 toast-prom-missing = { $path } wasn't found, so the built-in PROM is used.
 toast-nvram-seeded = Created a default NVRAM.
-# $mac is an Ethernet address such as 08:00:69:12:34:56.
+# $mac is an Ethernet address such as 08:00:69:45:4d:00.
 toast-nvram-mac-written = The NVRAM had no Ethernet address, so { $mac } was written to it.
 toast-nvram-mac-no-file = The NVRAM has no Ethernet address, and there's no NVRAM file to write one to yet.
 toast-nvram-mac-failed = Couldn't write the Ethernet address to the NVRAM: { $error }

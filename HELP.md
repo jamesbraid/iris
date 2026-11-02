@@ -98,13 +98,13 @@ address, which prevents networking from working.
 
 **You usually don't have to do anything.** Before boot, IRIS writes a MAC into
 a blank `eaddr` slot: `[network] mac` from `iris.toml` if you set one, otherwise
-`08:00:69:12:34:56`. It never overwrites an address that is already there.
+`08:00:69:45:4d:00`. It never overwrites an address that is already there.
 iris-gui does the same and offers a guided prompt. Set one yourself when you run
 more than one emulated machine on the same network:
 
 ```toml
 [network]
-mac = "08:00:69:de:ad:01"
+mac = "08:00:69:45:4d:01"
 ```
 
 To set it by hand from the PROM instead:
@@ -115,12 +115,13 @@ To set it by hand from the PROM instead:
 2. At the `>>` prompt, set the address:
 
    ```
-   >> setenv -f eaddr 08:00:69:xx:xx:xx
+   >> setenv -f eaddr 08:00:69:45:4d:01
    ```
 
-   Use any valid SGI MAC (OUI `08:00:69`) or any locally-administered address.
-   The value only needs to be unique on your virtual network, e.g.
-   `08:00:69:de:ad:01`.
+   Keep SGI's OUI (`08:00:69`) as the first three octets, since the PROM
+   checks for it. IRIS's default is `08:00:69:45:4d:00`: `45:4d` spells "EM" and the
+   last octet counts instances from 00. The value only needs to be unique on
+   your virtual network.
 
 3. Normal Stop or guest power-off saves battery-backed state automatically.
    To save immediately, or before forced process termination, use the IRIS
@@ -670,7 +671,7 @@ cdrom = true
 mode = "nat"                # or "pcap" (--features pcap)
 # pcap_interface = "1"      # index, name, or '\Device\NPF_{...}' on Windows
 # nfs_pcap_ip = "192.168.1.250"   # PCAP only: LAN IP the NFS server answers on
-# mac = "08:00:69:12:34:56" # ec0 MAC, injected into blank NVRAM before boot
+# mac = "08:00:69:45:4d:00" # ec0 MAC, injected into blank NVRAM before boot
 # tftp_dir = "tftpboot"     # serve read-only over TFTP at the gateway
 # rsh_dir = "shared"        # `rsh <gateway> cat|ls|echo|pwd` on this dir, read-only
 

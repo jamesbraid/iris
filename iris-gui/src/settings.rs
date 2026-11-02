@@ -90,7 +90,7 @@ impl Default for GuiSettings {
 /// Byte offset of the Indy's 6-byte Ethernet MAC inside the NVRAM. The PROM
 /// reads the MAC from these *raw bytes* — it is NOT the colon-separated ASCII
 /// you type at `setenv` (that's just the human entry form). Reverse-engineered
-/// from firmware-written NVRAMs (the SGI OUI 08:00:69 lands exactly here, with
+/// from firmware-written NVRAMs (an address lands exactly here, with
 /// zero bytes around it and no adjacent checksum). Like the `console` byte the
 /// headless path patches, this is a fixed, PROM-specific offset.
 pub const NVRAM_MAC_OFFSET: usize = 0x13a;
@@ -108,18 +108,19 @@ pub fn nvram_has_mac(path: &str) -> bool {
     nvram_mac(path).is_some()
 }
 
-/// Deterministic SGI-OUI MAC bytes (`08:00:69:xx:xx:xx`) from `seed` (machine
-/// name) — stable per machine. Uniqueness across instances doesn't matter; each
-/// runs on its own isolated NAT.
+/// Deterministic synthetic MAC bytes (`08:00:69:45:4d:xx`) from `seed` (machine
+/// name) — stable per machine. The hash picks the instance byte xx; uniqueness
+/// across instances doesn't matter, each runs on its own isolated NAT.
 pub fn generate_mac_bytes(seed: &str) -> [u8; 6] {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     seed.hash(&mut h);
     let v = h.finish();
-    [0x08, 0x00, 0x69, (v >> 16) as u8, (v >> 8) as u8, v as u8]
+    iris::config::synthetic_mac((v % iris::config::SYNTHETIC_MAC_INSTANCES as u64) as usize)
+        .expect("an index below SYNTHETIC_MAC_INSTANCES is a valid instance")
 }
 
-/// Human form `08:00:69:xx:xx:xx` for display/logging.
+/// Human form `08:00:69:45:4d:xx` for display/logging.
 pub fn mac_to_string(m: [u8; 6]) -> String {
     m.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
 }

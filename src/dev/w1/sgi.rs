@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn the_mac_nic_answers_read_rom_and_read_memory() {
-        let mac = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
+        let mac = [0x08, 0x00, 0x69, 0x45, 0x4d, 0x00];
         let mut m = bus_of(vec![Box::new(ethernet_address_part(mac, ETHERNET_PART_SERIAL))]);
         assert!(m.reset(), "presence pulse");
         m.byte(0x33);

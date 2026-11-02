@@ -225,10 +225,30 @@ pub struct DaynaportParams {
     pub subnet: NatSubnet,
 }
 
-/// Default Ethernet station address for `ec0` when `[network] mac` is unset.
-/// SGI's registered OUI (08:00:69) plus an arbitrary host part; matches the
-/// address used throughout `clanker/irix/networking.md` and CI test fixtures.
-pub const DEFAULT_MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
+/// Default Ethernet station address for `ec0` when `[network] mac` is unset:
+/// `08:00:69:45:4d:00`. The PROM checks for SGI's registered OUI (08:00:69),
+/// so the address keeps it; the next two octets (`45:4d`, "EM") mark it as
+/// emulated, and the last is the per-instance byte, 00 for the first.
+pub const DEFAULT_MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x45, 0x4d, 0x00];
+
+/// How many synthetic addresses exist: the instance is the last octet.
+pub const SYNTHETIC_MAC_INSTANCES: usize = 256;
+
+/// The synthetic station address for NIC `instance` (`08:00:69:45:4d:xx`),
+/// counted from 0. Instances 0 through 255 exist; beyond that the address
+/// space is used up and this is an error, never a wrap onto an address
+/// already handed out.
+pub fn synthetic_mac(instance: usize) -> Result<[u8; 6], String> {
+    if instance >= SYNTHETIC_MAC_INSTANCES {
+        return Err(format!(
+            "synthetic Ethernet address instance {instance} is out of range: only {SYNTHETIC_MAC_INSTANCES} \
+             exist (08:00:69:45:4d:00 through 08:00:69:45:4d:ff); set [network] mac for more"
+        ));
+    }
+    let mut mac = DEFAULT_MAC;
+    mac[5] = instance as u8;
+    Ok(mac)
+}
 
 /// Parse `"00:80:19:12:34:56"` (or `-` separated) into six octets.
 pub fn parse_mac(s: &str) -> Result<[u8; 6], String> {
@@ -409,8 +429,8 @@ pub struct NetworkSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nfs_pcap_ip: Option<std::net::Ipv4Addr>,
     /// Ethernet station address for the built-in SEEQ controller (`ec0`), e.g.
-    /// "08:00:69:12:34:56" (SGI's registered OUI). Defaults to
-    /// `08:00:69:12:34:56` when unset. Real hardware has no way to leave this
+    /// "08:00:69:45:4d:00" (SGI's OUI, then the "EM" marker). Defaults to
+    /// `08:00:69:45:4d:00` when unset. Real hardware has no way to leave this
     /// unset — every SGI ships with a MAC burned into NVRAM (Indy) or a serial
     /// EEPROM (Indigo2) — so iris backdoor-injects it into the emulated
     /// NVRAM/EEPROM before boot rather than requiring a guest-side `setenv`.
@@ -2908,6 +2928,45 @@ mod export_tests {
         let cfg: MachineConfig = toml::from_str(
             "[scsi.3]\nkind = \"daynaport\"\noverlay = true\n").expect("parse");
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn the_default_ethernet_address_is_sgi_oui_then_em_instance_0() {
+        let cfg: MachineConfig = toml::from_str("").expect("parse");
+        cfg.validate().expect("validate");
+        let mac = cfg.network().mac;
+        assert_eq!(mac, [0x08, 0x00, 0x69, 0x45, 0x4d, 0x00]);
+        assert_eq!(mac, DEFAULT_MAC);
+        assert_eq!(mac, synthetic_mac(0).unwrap(), "the default is instance 0");
+        assert_eq!(&mac[3..5], b"EM");
+        assert_eq!(mac[..3], [0x08, 0x00, 0x69], "SGI's OUI, which the PROM checks");
+        assert_eq!(crate::dev::mace_id::DEFAULT_MAC, DEFAULT_MAC, "the O2 default agrees");
+    }
+
+    #[test]
+    fn synthetic_mac_counts_instances_in_the_last_octet() {
+        assert_eq!(synthetic_mac(0).unwrap(), [0x08, 0x00, 0x69, 0x45, 0x4d, 0x00]);
+        assert_eq!(synthetic_mac(1).unwrap(), [0x08, 0x00, 0x69, 0x45, 0x4d, 0x01]);
+        assert_eq!(synthetic_mac(255).unwrap(), [0x08, 0x00, 0x69, 0x45, 0x4d, 0xff]);
+        let all: std::collections::HashSet<_> = (0..256).map(|i| synthetic_mac(i).unwrap()).collect();
+        assert_eq!(all.len(), 256, "every instance is distinct");
+    }
+
+    #[test]
+    fn synthetic_mac_past_256_is_an_error_not_a_wrap() {
+        let e = synthetic_mac(256).unwrap_err();
+        assert!(e.contains("256") && e.contains("out of range"), "{e}");
+        assert!(synthetic_mac(257).is_err());
+        assert!(synthetic_mac(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn network_mac_overrides_the_synthetic_default() {
+        let cfg: MachineConfig = toml::from_str("[network]\nmac = \"08:00:69:45:4d:01\"\n").expect("parse");
+        cfg.validate().expect("validate");
+        assert_eq!(cfg.network().mac, [0x08, 0x00, 0x69, 0x45, 0x4d, 0x01]);
+        let cfg: MachineConfig = toml::from_str("[network]\nmac = \"08:00:69:aa:bb:cc\"\n").expect("parse");
+        assert_eq!(cfg.network().mac, [0x08, 0x00, 0x69, 0xaa, 0xbb, 0xcc], "a user's own address is kept");
     }
 
     #[test]

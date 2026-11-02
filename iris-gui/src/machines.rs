@@ -363,7 +363,7 @@ pub(crate) mod tests {
         cfg.ci_socket = "tcp:127.0.0.1:19851".into();
         cfg.debug.debug_log = "scsi=debug,cpu=warn".into();
         cfg.network.pcap_interface = Some("\\Device\\NPF_{example}".into());
-        cfg.network.mac = Some("08:00:69:12:34:56".into());
+        cfg.network.mac = Some("08:00:69:45:4d:00".into());
         save(&root.0, "Indigo2 IP28", &mut cfg).unwrap();
         let path = config_path(&root.0, "Indigo2 IP28").unwrap();
         let back = read(&path).unwrap();

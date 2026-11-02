@@ -816,7 +816,7 @@ mod tests {
             st.tx_ring_base = 0x0123_4000;
             st.tx_read = 3;
             st.tx_write = 9;
-            st.station = 0x0800_6912_3456;
+            st.station = 0x0800_6945_4d00;
             st.multicast = 0xffff;
             st.mcl_fifo = [0x0010_0000u32, 0x0010_1000].into_iter().collect();
             st.rx_seq = 5;
@@ -905,12 +905,12 @@ mod tests {
         m.attach(link);
         let (irq, line) = crate::irq::LevelProbe::line();
         m.connect_irq(line);
-        m.write64(reg::STATION, 0x0800_6912_3456);
+        m.write64(reg::STATION, 0x0800_6945_4d00);
         let (b0, b1) = (0x4000usize, 0x5000usize);
         m.write64(reg::MCL_RX_FIFO, RAM_BASE as u64 + b0 as u64);
         m.write64(reg::MCL_RX_FIFO, RAM_BASE as u64 + b1 as u64);
         m.write64(reg::DMA_CONTROL, bits::DMA_RX_DMA_ENABLE | bits::DMA_RX_INT_ENABLE | (4 << bits::DMA_RX_DMA_OFFSET_SHIFT));
-        let mut frame = vec![0x08, 0x00, 0x69, 0x12, 0x34, 0x56, 2, 0, 0xde, 0xad, 0xbe, 0xef, 0x08, 0x00];
+        let mut frame = vec![0x08, 0x00, 0x69, 0x45, 0x4d, 0x00, 2, 0, 0xde, 0xad, 0xbe, 0xef, 0x08, 0x00];
         frame.extend_from_slice(&[0xaa; 20]);
         rx_prod.push(frame.clone()).unwrap();
         rx_prod.push(vec![0x02, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 2]).unwrap(); // not for us

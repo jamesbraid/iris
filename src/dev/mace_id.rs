@@ -45,7 +45,7 @@ const PRESENCE_DELAY: u64 = 30;
 const PRESENCE_END: u64 = 150;
 
 /// The station address the board carries when none is configured.
-pub const DEFAULT_MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
+pub const DEFAULT_MAC: [u8; 6] = crate::config::DEFAULT_MAC;
 
 /// Where the PROM's start-up handshake stands: its first low, however long,
 /// is a reset when the line is first released.

@@ -438,7 +438,7 @@ const SLOT_ISP0: u32 = 0;
 const SLOT_ISP1: u32 = 1;
 const SLOT_IOC3: u32 = 2;
 
-const MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
+const MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x45, 0x4d, 0x00];
 
 /// Bridge input the SuperIO block of IOC3 is wired to, and the Ethernet's
 /// (the PCI INTA of slot 2).

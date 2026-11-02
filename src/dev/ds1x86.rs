@@ -557,10 +557,10 @@ mod tests {
     #[test]
     fn backdoor_mac_does_not_clobber_existing_eaddr() {
         let rtc = Ds1x86::new(8192, "test_backdoor_mac_no_clobber.bin".to_string(), RtcOffset::default());
-        let guest_mac = [0x08, 0x00, 0x69, 0xde, 0xad, 0x01];
+        let guest_mac = [0x08, 0x00, 0x69, 0x45, 0x4d, 0x01];
         rtc.data.lock().regs[MAC_REGS_OFFSET..MAC_REGS_OFFSET + 6].copy_from_slice(&guest_mac);
 
-        let patched = rtc.backdoor_set_mac_if_blank([0x08, 0x00, 0x69, 0x12, 0x34, 0x56]);
+        let patched = rtc.backdoor_set_mac_if_blank([0x08, 0x00, 0x69, 0x45, 0x4d, 0x00]);
         assert!(!patched, "backdoor must not overwrite a non-blank eaddr slot");
         assert_eq!(&rtc.data.lock().regs[MAC_REGS_OFFSET..MAC_REGS_OFFSET + 6], &guest_mac);
     }

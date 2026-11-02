@@ -163,7 +163,7 @@ gateway, with the usual settings: `nat_subnet`, `[nfs]`, `[[port_forward]]`,
 `nat_subnet`, or, until the first packet routes, on whatever address in its
 /24 the guest asks for: an IRIX disk configured as 192.0.2.2 with a default
 route of 192.0.2.3 works with `nat_subnet = "192.0.2.0/24"` unchanged. When
-`[network] mac` is unset the station address is 08:00:69:12:34:56; set your
+`[network] mac` is unset the station address is 08:00:69:45:4d:00; set your
 own if more than one Octane shares a network. `[network] mode = "off"`
 unplugs the Ethernet; `pcap` bridges it onto a host interface instead, with
 no NAT services. `mode = "stream"` with `stream = "tcp:IP:PORT"` or

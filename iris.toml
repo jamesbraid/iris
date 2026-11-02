@@ -198,10 +198,10 @@ mode           = "nat"
 #pcap_interface = "1"                                          # by index (recommended)
 #pcap_interface = "wlan0"                                     # by name (Linux/macOS)
 #pcap_interface = '\Device\NPF_{385F30D0-9166-45D3-BBC6-F1D9C5300AF9}'  # Windows (literal '...' string!)
-# Ethernet station address for ec0. Defaults to 08:00:69:12:34:56 (SGI's OUI)
-# when unset. Backdoor-injected into NVRAM (Indy) / serial EEPROM (Indigo2)
+# Ethernet station address for ec0. Defaults to 08:00:69:45:4d:00 (SGI's OUI,
+# then "EM" and an instance byte, 00 for the first) when unset. Backdoor-injected into NVRAM (Indy) / serial EEPROM (Indigo2)
 # before boot — no need to `setenv eaddr` by hand at the PROM monitor.
-#mac            = "08:00:69:12:34:56"
+#mac            = "08:00:69:45:4d:00"
 
 # N64 development board (Ultra64 GIO card). Needs the ultra64 branch of
 # github.com/techomancer/gopher64, which maps the shared-memory bridge

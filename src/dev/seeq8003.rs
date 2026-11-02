@@ -1078,7 +1078,7 @@ mod tests {
         let src = Seeq8003::new(None, None, None, Arc::new(AtomicU64::new(0)));
         {
             let mut st = src.state.lock();
-            st.station_addr = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
+            st.station_addr = [0x08, 0x00, 0x69, 0x45, 0x4d, 0x00];
             st.rx_cmd  = 0x18;
             st.rx_stat = 0xa1;
             st.tx_cmd  = 0x40;
