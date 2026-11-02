@@ -90,6 +90,13 @@ file it is kept in (512 bytes). A blank NVRAM makes the PROM pick the graphics
 console; set `console=d` (or start from an image that has it) for the serial
 console.
 
+With no graphics board, set `console=d` before installing IRIX. The PROM
+notices the missing display and talks on the serial port, but the installer
+it loads from the `sa` volume follows `console=g` regardless and stops with
+`Read TLB miss exception, bad address: 0x38` (a null pointer, with nothing in
+the TLB) before "Copying installation program to disk". The same install with
+`console=d` runs through to a login.
+
 ## Disks
 
 The `[scsi.N]` tables list the devices on the two ISP1040s: `N` 1-15 is the
@@ -138,7 +145,8 @@ the board, as on the other machines:
 The two textured boards are new and less tested than the SI. Its screen is the iris window
 and what iris-ci screenshots show; the keyboard and mouse are IOC3's PS/2
 ports. `board = "none"` leaves the port empty, and the machine
-then runs on its serial console with no window.
+then runs on its serial console with no window (set `console=d` to install
+IRIX, see [NVRAM](#nvram)).
 
 `v6`, `v8`, `v10` and `v12` are the four Octane VPro boards on the same
 port: a port of the VPro (Odyssey) model in jamesbraid/qemu-sgi-origami
