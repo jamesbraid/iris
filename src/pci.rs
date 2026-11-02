@@ -254,6 +254,19 @@ pub trait PciBusDevice: Send + Sync {
         self.config().read(index)
     }
 
+    /// A configuration write of dword `index`. `val` is the guest's access
+    /// merged by the bridge into the dword the stored header holds, not the
+    /// one `config_dword` returns: a byte write leaves the other three
+    /// bytes as the header has them. A function that keeps a register
+    /// outside the header, or reads it differently, must also store what it
+    /// decodes in the header, or a write to a neighbouring byte looks like a
+    /// write of zero. The header as stored, unless the chip holds some bits
+    /// read-only, clears others on a write of one, or acts on a write (a
+    /// power-state change).
+    fn config_write(&self, index: usize, val: u32) {
+        self.config().write(index, val);
+    }
+
     /// A read of `width` bytes (1, 2 or 4) at `off` within BAR `bar`.
     fn bar_read(&self, bar: usize, off: u32, width: usize) -> u32;
 
@@ -537,6 +550,31 @@ mod tests {
         fn config(&self) -> &PciConfig { &self.0 }
         fn bar_read(&self, _: usize, off: u32, _: usize) -> u32 { off }
         fn bar_write(&self, _: usize, _: u32, _: u32, _: usize) {}
+    }
+
+    /// A function that holds its command register's upper bits read-only.
+    struct Masked(PciConfig);
+    impl PciBusDevice for Masked {
+        fn config(&self) -> &PciConfig { &self.0 }
+        fn config_write(&self, index: usize, val: u32) {
+            self.0.write(index, if index == 1 { val & PCI_COMMAND_IO } else { val });
+        }
+        fn bar_read(&self, _: usize, off: u32, _: usize) -> u32 { off }
+        fn bar_write(&self, _: usize, _: u32, _: u32, _: usize) {}
+    }
+
+    /// A function that does not override the hook gets the header as stored;
+    /// one that does decides what a write leaves.
+    #[test]
+    fn a_function_may_filter_its_own_configuration_writes() {
+        let plain = Func(scsi_like());
+        plain.config_write(1, 0xffff);
+        assert_eq!(plain.config().command(), 0xffff);
+        let masked = Masked(scsi_like());
+        masked.config_write(1, 0xffff);
+        assert_eq!(masked.config().command(), PCI_COMMAND_IO);
+        masked.config_write(3, 0x0000_2800);
+        assert_eq!(masked.config().read(3), 0x2800, "other registers still store");
     }
 
     /// Whole pages of a window a BAR decodes become runs at their CPU
