@@ -40,6 +40,12 @@ hashes are given where a change is easiest to understand by reading the commit.
   bus's devices; and a `Jitv2` joins its workers before it frees the pages
   they read. The Indy, Indigo2 and O2 still leak their tables.
 
+### jitv2: FCSR.FS flushes denormal results
+
+- Compiled code trapped every denormal ADD/SUB/MUL/DIV/SQRT result as
+  Unimplemented, even with FS set. It now flushes to a signed zero with Cause
+  and Flag U|I, like the interpreter.
+
 ### Disk write cache
 
 - A disk now has a `write_cache` setting in its `[scsi.N]` table (and a

@@ -5496,6 +5496,38 @@ mod tests {
         }
     }
 
+    /// A denormal result with FCSR.FS set and neither Underflow nor Inexact
+    /// enabled is replaced by a signed zero with Cause and Flag U|I, no trap
+    /// (R10000 User's Manual v2.0, 15.4, Flush (FS) bit: "A denormalized
+    /// result is replaced with zero"; VR5000 manual U11761EJ6V0UM, 9.4.5).
+    /// With FS clear, or with Underflow enabled, it is an Unimplemented
+    /// Operation. The smallest normal halved gives an exact denormal.
+    #[test]
+    fn denormal_result_with_fs_set_flushes_like_the_interpreter() {
+        use crate::cpu::mips_isa::{FUNCT_FMUL, OP_COP1, RS_D, RS_S};
+        const FS: u32 = 0x0100_0000;
+        for (fmt, min_normal, half, sign) in [
+            (RS_S, 0x0080_0000u64, 0x3F00_0000u64, 1u64 << 31),
+            (RS_D, 0x0010_0000_0000_0000, 0x3FE0_0000_0000_0000, 1u64 << 63),
+        ] {
+            for fcsr in [FS, 0, FS | 0x0100] {
+                let mut fpr = [0u64; 32];
+                fpr[1] = min_normal | sign;
+                fpr[2] = half;
+                fpr[3] = 0xDEAD_BEEF_DEAD_BEEF;
+                let jit = assert_fpu_matches_interpreter_fcsr(
+                    make_r(OP_COP1, fmt, 2, 1, 3, FUNCT_FMUL), [0u64; 32], fpr, true, Some(fcsr));
+                if fcsr == FS {
+                    assert_eq!(jit.fpu_fcsr, FS | 0x0000_300C, "fmt={fmt}: Cause and Flag U|I, no trap");
+                    let r = if fmt == RS_S { jit.fpr[3] & 0xFFFF_FFFF } else { jit.fpr[3] };
+                    assert_eq!(r, sign, "fmt={fmt}: negative zero delivered");
+                } else {
+                    assert_eq!(jit.fpu_fcsr & 0x0003_F000, 0x0002_0000, "fmt={fmt} fcsr={fcsr:#x}: Cause E alone");
+                }
+            }
+        }
+    }
+
     fn funop_case(funct: u32, fmt: u32, fs_val: f64) {
         let mut fpr = [0u64; 32];
         if fmt == crate::cpu::mips_isa::RS_S {
