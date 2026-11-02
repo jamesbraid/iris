@@ -1,6 +1,8 @@
 //! What a PCI audio card with a host-timed sample clock shares with the
-//! others: the host output sink, a WAV capture of it, and the clock that
-//! stands still while the machine is stopped.
+//! others: the host output (a stereo [`Sink`] with a WAV capture of it, and
+//! the multichannel [`PcmOut`] with its [`Downmix`]), and the clock that
+//! stands still while the machine is stopped. The host streams themselves
+//! are in [`crate::host_audio`].
 //!
 //! RAD1 was the first such card; the DM8 uses the same parts so the two do
 //! not drift apart.
@@ -11,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use crate::host_audio::{HostOut, Resampler};
+use crate::host_audio::{FrameResampler, HostOut, Resampler};
 
 /// Words a host frame carries: the mixer takes two channels.
 pub const PCM_CHANNELS: usize = 2;
@@ -36,10 +38,15 @@ pub struct Sink {
 /// How long to wait before trying to open the host stream again.
 pub const HOST_RETRY: Duration = Duration::from_secs(1);
 
+/// Whether a host stream wanted but not open (`closed`) is due another try.
+fn retry_due(closed: bool, failed_at: Option<Instant>, now: Instant) -> bool {
+    closed && failed_at.is_none_or(|t| now.duration_since(t) >= HOST_RETRY)
+}
+
 impl Sink {
     /// Whether the host stream, wanted but not open, is due another try.
     pub fn host_retry_due(&self, now: Instant) -> bool {
-        self.host.is_none() && self.host_failed_at.is_none_or(|t| now.duration_since(t) >= HOST_RETRY)
+        retry_due(self.host.is_none(), self.host_failed_at, now)
     }
 
     /// Play stereo frames the card produced at `rate` Hz. A muted output
@@ -137,6 +144,235 @@ impl Wav {
             self.data_bytes = self.data_bytes.wrapping_add(bytes.len() as u32);
             let _ = self.header();
         }
+    }
+}
+
+// ---- multichannel output ----
+
+// Speaker positions, numbered in the order of the usual host layouts.
+const FL: u8 = 0;
+const FR: u8 = 1;
+const FC: u8 = 2;
+const LFE: u8 = 3;
+const BL: u8 = 4;
+const BR: u8 = 5;
+const SL: u8 = 6;
+const SR: u8 = 7;
+/// Gain of 1.0 and of -3 dB in Q15.
+const UNITY: i32 = 1 << 15;
+const MINUS_3DB: i32 = 23170;
+
+/// The speakers fed by the channels of a frame of `n` channels, in channel
+/// order: stereo, quad, 5.1 and 7.1, the usual host layouts.
+fn speakers(n: usize) -> &'static [u8] {
+    match n {
+        4 => &[FL, FR, BL, BR],
+        6 => &[FL, FR, FC, LFE, BL, BR],
+        8 => &[FL, FR, FC, LFE, BL, BR, SL, SR],
+        _ => &[FL, FR],
+    }
+}
+
+/// How a frame of `src` channels becomes a frame of `dst` channels: a
+/// speaker the destination has plays there, and one it lacks folds into the
+/// ones it has by the usual stereo matrix (centre and surrounds at -3 dB,
+/// the low-frequency channel dropped). A destination wider than the source
+/// leaves its extra speakers silent. A speaker that receives folds has its
+/// gains scaled down together to sum to one, so it cannot clip.
+pub struct Downmix {
+    src: usize,
+    dst: usize,
+    /// (destination channel, source channel, Q15 gain).
+    terms: Vec<(u8, u8, i32)>,
+}
+
+impl Downmix {
+    pub fn new(src: usize, dst: usize) -> Self {
+        let (sr, dr) = (speakers(src), speakers(dst));
+        let has = |r: u8| dr.contains(&r);
+        let mut terms = Vec::new();
+        for (slot, &r) in sr.iter().enumerate() {
+            let to: Vec<(u8, i32)> = match r {
+                _ if has(r) => vec![(r, UNITY)],
+                FC => vec![(FL, MINUS_3DB), (FR, MINUS_3DB)],
+                BL => vec![(FL, MINUS_3DB)],
+                BR => vec![(FR, MINUS_3DB)],
+                SL if has(BL) => vec![(BL, UNITY)],
+                SR if has(BR) => vec![(BR, UNITY)],
+                SL => vec![(FL, MINUS_3DB)],
+                SR => vec![(FR, MINUS_3DB)],
+                _ => vec![],
+            };
+            for (role, gain) in to {
+                let d = dr.iter().position(|&x| x == role).unwrap_or(0);
+                terms.push((d as u8, slot as u8, gain));
+            }
+        }
+        let mut sum = [0i32; FrameResampler::MAX_CHANNELS];
+        for &(d, _, g) in &terms {
+            sum[d as usize] += g;
+        }
+        for t in terms.iter_mut() {
+            let total = sum[t.0 as usize];
+            if total > UNITY {
+                t.2 = (i64::from(t.2) * i64::from(UNITY) / i64::from(total)) as i32;
+            }
+        }
+        Self { src, dst, terms }
+    }
+
+    /// Mix one source frame into one destination frame.
+    #[inline]
+    pub fn mix(&self, src: &[i16], dst: &mut [i16]) {
+        let mut acc = [1i32 << 14; FrameResampler::MAX_CHANNELS];
+        for &(d, s, g) in &self.terms {
+            acc[d as usize] += i32::from(src[s as usize]) * g;
+        }
+        for (o, a) in dst.iter_mut().zip(acc) {
+            *o = (a >> 15).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        }
+    }
+}
+
+/// Where the DM8's output goes: the multichannel stream and the S/PDIF
+/// stream the card plays, mixed into one host stream.
+///
+/// The engines stage the frames they move here; [`PcmOut::flush`] mixes what
+/// both have made due, so the two streams, whose engines start at different
+/// moments, still sum sample for sample. The analog frames fold into the
+/// host's channel count ([`Downmix`]) and the S/PDIF pair adds to the front
+/// pair. Nothing allocates once the buffers have grown to a tick's worth.
+pub struct PcmOut {
+    pub host: Option<(HostOut, FrameResampler)>,
+    /// When the host stream was last tried and failed to open.
+    pub host_failed_at: Option<Instant>,
+    /// For tests: the mixed frames at the card's rate, as the host stream
+    /// would get them, with `tap_channels` to a frame when there is no
+    /// host stream.
+    pub tap: Option<Arc<Mutex<Vec<i16>>>>,
+    pub tap_channels: usize,
+    analog: Vec<i16>,
+    analog_slots: usize,
+    spdif: Vec<i16>,
+    mix: Downmix,
+    mixed: Vec<i16>,
+    resampled: Vec<i16>,
+}
+
+/// Most a stream may wait in staging for the other, in frames: the engines
+/// start a little apart, never a half second.
+const STAGE_MAX_FRAMES: usize = 1 << 14;
+
+impl PcmOut {
+    pub fn new(host: Option<(HostOut, FrameResampler)>, host_failed_at: Option<Instant>) -> Self {
+        Self {
+            host,
+            host_failed_at,
+            tap: None,
+            tap_channels: PCM_CHANNELS,
+            analog: Vec::new(),
+            analog_slots: 0,
+            spdif: Vec::new(),
+            mix: Downmix::new(2, 2),
+            mixed: Vec::new(),
+            resampled: Vec::new(),
+        }
+    }
+
+    /// Whether the host stream, wanted but not open, is due another try.
+    pub fn host_retry_due(&self, now: Instant) -> bool {
+        retry_due(self.host.is_none(), self.host_failed_at, now)
+    }
+
+    /// Where the interleaved engine puts its samples, `slots` to a frame.
+    /// Frames staged at another width are dropped.
+    pub fn analog_stage(&mut self, slots: usize) -> &mut Vec<i16> {
+        if slots != self.analog_slots {
+            self.analog.clear();
+            self.analog_slots = slots;
+        }
+        &mut self.analog
+    }
+
+    /// Where the S/PDIF engine puts its left and right samples.
+    pub fn spdif_stage(&mut self) -> &mut Vec<i16> {
+        &mut self.spdif
+    }
+
+    /// Mix what is staged and play it at `rate` Hz. A stream whose engine is
+    /// not running contributes nothing and loses what it staged. Returns
+    /// the frames the host ring had no room for, or `None` without a host
+    /// stream.
+    pub fn flush(&mut self, rate: u32, analog_on: bool, spdif_on: bool) -> Option<u64> {
+        if !analog_on {
+            self.analog.clear();
+        }
+        if !spdif_on {
+            self.spdif.clear();
+        }
+        let slots = self.analog_slots.max(1);
+        let (a, s) = (self.analog.len() / slots, self.spdif.len() / 2);
+        let n = match (analog_on, spdif_on) {
+            (true, true) => a.min(s),
+            (true, false) => a,
+            (false, true) => s,
+            _ => 0,
+        };
+        let chans = self.host.as_ref().map_or(self.tap_channels, |(out, _)| out.channels);
+        let mut dropped = 0;
+        if n > 0 {
+            if self.mix.src != slots || self.mix.dst != chans {
+                self.mix = Downmix::new(slots, chans);
+            }
+            self.mixed.clear();
+            self.mixed.resize(n * chans, 0);
+            if analog_on {
+                for (f, o) in self.analog.chunks_exact(slots).zip(self.mixed.chunks_exact_mut(chans)) {
+                    self.mix.mix(f, o);
+                }
+            }
+            if spdif_on {
+                for (f, o) in self.spdif.as_chunks::<2>().0.iter().zip(self.mixed.chunks_exact_mut(chans)) {
+                    for (o, &v) in o.iter_mut().zip(f) {
+                        *o = o.saturating_add(v);
+                    }
+                }
+            }
+            if analog_on {
+                self.analog.drain(..n * slots);
+            }
+            if spdif_on {
+                self.spdif.drain(..n * 2);
+            }
+            if let Some(t) = self.tap.as_ref() {
+                t.lock().extend_from_slice(&self.mixed);
+            }
+            if let Some((out, rs)) = self.host.as_mut() {
+                if rs.in_rate != rate {
+                    *rs = FrameResampler::new(rate, out.stream_rate, chans);
+                }
+                self.resampled.clear();
+                for f in self.mixed.chunks_exact(chans) {
+                    rs.push(f, &mut self.resampled);
+                }
+                // A frame the ring has no room for is dropped whole, or
+                // the channels of every later frame would shift; one that
+                // fits is published whole.
+                for f in self.resampled.chunks_exact(chans) {
+                    if !crate::host_audio::push_frame(&mut out.producer, f) {
+                        dropped += 1;
+                    }
+                }
+            }
+        }
+        // Whatever one stream got ahead by stays for the other, but not
+        // without limit.
+        for (v, w) in [(&mut self.analog, slots), (&mut self.spdif, 2)] {
+            if v.len() > STAGE_MAX_FRAMES * w {
+                v.drain(..v.len() - STAGE_MAX_FRAMES * w);
+            }
+        }
+        self.host.is_some().then_some(dropped)
     }
 }
 
@@ -246,5 +482,85 @@ impl CardClock {
 
     pub fn stopped(&self) -> bool {
         self.stopped_at.lock().is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One frame through the matrix, as unit gains times `v` on `slot`.
+    fn mix_one(src: usize, dst: usize, slot: usize, v: i16) -> Vec<i16> {
+        let mut f = vec![0i16; src];
+        f[slot] = v;
+        let mut o = vec![0i16; dst];
+        Downmix::new(src, dst).mix(&f, &mut o);
+        o
+    }
+
+    #[test]
+    fn equal_layouts_pass_through_unchanged() {
+        for n in [2, 4, 6, 8] {
+            for slot in 0..n {
+                let o = mix_one(n, n, slot, -12345);
+                assert!(o.iter().enumerate().all(|(i, &v)| v == if i == slot { -12345 } else { 0 }), "{n} {slot} {o:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn five_one_folds_to_stereo_with_the_usual_matrix() {
+        let k = std::f64::consts::FRAC_1_SQRT_2;
+        let g = 1.0 / (1.0 + 2.0 * k);
+        let near = |a: i16, b: f64| (f64::from(a) - b).abs() <= 1.0;
+        // Centre feeds both sides at -3 dB.
+        let o = mix_one(6, 2, 2, 10000);
+        assert!(near(o[0], 10000.0 * k * g) && o[0] == o[1], "{o:?}");
+        // The low-frequency channel is dropped.
+        assert_eq!(mix_one(6, 2, 3, 10000), [0, 0]);
+        // Back left folds to the left only.
+        let o = mix_one(6, 2, 4, 10000);
+        assert!(near(o[0], 10000.0 * k * g) && o[1] == 0, "{o:?}");
+        // Front left keeps its side at the common scale.
+        let o = mix_one(6, 2, 0, 10000);
+        assert!(near(o[0], 10000.0 * g) && o[1] == 0, "{o:?}");
+    }
+
+    #[test]
+    fn seven_one_folds_sides_into_the_back_of_a_five_one_host() {
+        // Each back speaker takes its side's and its own channel, halved so
+        // the pair cannot clip; the front is untouched.
+        assert_eq!(mix_one(8, 6, 6, 8000), [0, 0, 0, 0, 4000, 0]);
+        assert_eq!(mix_one(8, 6, 7, 8000), [0, 0, 0, 0, 0, 4000]);
+        assert_eq!(mix_one(8, 6, 0, 8000), [8000, 0, 0, 0, 0, 0]);
+        // A quad host has no centre: it folds into the front pair.
+        let o = mix_one(8, 4, 2, 10000);
+        assert!(o[0] > 0 && o[0] == o[1] && o[2] == 0 && o[3] == 0, "{o:?}");
+    }
+
+    #[test]
+    fn a_full_scale_fold_cannot_clip() {
+        for (src, dst) in [(8, 2), (6, 2), (8, 4), (4, 2)] {
+            let f = vec![i16::MAX; src];
+            let mut o = vec![0i16; dst];
+            Downmix::new(src, dst).mix(&f, &mut o);
+            assert!(o.iter().all(|&v| v > 0), "{src}->{dst} {o:?}");
+        }
+        // The negative rail too.
+        let mut o = [0i16; 2];
+        Downmix::new(8, 2).mix(&[i16::MIN; 8], &mut o);
+        assert!(o.iter().all(|&v| v < 0), "{o:?}");
+    }
+
+    #[test]
+    fn spdif_on_top_of_the_analog_pair_saturates() {
+        let tap = Arc::new(Mutex::new(Vec::new()));
+        let mut out = PcmOut::new(None, None);
+        out.tap = Some(tap.clone());
+        out.analog_stage(2).extend([0x6000, -0x6000]);
+        out.spdif_stage().extend([0x6000, -0x6000]);
+        out.flush(48000, true, true);
+        // 0xc000 does not fit in 16 bits: it clips, it does not wrap.
+        assert_eq!(*tap.lock(), [0x7fff, i16::MIN]);
     }
 }

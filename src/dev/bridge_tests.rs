@@ -1225,3 +1225,24 @@ fn save_load_round_trip_keeps_the_function_reachable() {
     other.bridge.set_revision(4);
     assert!(other.bridge.load_state(&v1).unwrap_err().contains("revision"));
 }
+
+/// A guest's partial configuration write reaches a function merged against
+/// its stored header: a byte beside the DM8's power state must not change
+/// it, and a byte at 0x84 must.
+#[test]
+fn a_partial_config_write_reaches_the_dm8_merged_against_its_header() {
+    use crate::dev::dm8::{Dm8, Variant};
+    let r = Rig::new();
+    let c = Arc::new(Dm8::new(Variant::Dm8));
+    r.bridge.attach(1, c.clone());
+    r.cfg_write(1, 0x04, 2, 0xffff);
+    assert_eq!(r.cfg_read(1, 0x04, 2), 5, "only I/O decode and bus mastering");
+    r.cfg_write(1, 0x84, 2, 3);
+    assert_eq!(r.cfg_read(1, 0x84, 2) & 3, 3);
+    r.cfg_write(1, 0x85, 1, 0);
+    assert_eq!(r.cfg_read(1, 0x84, 2) & 3, 3, "a neighbouring byte leaves D3hot");
+    assert_eq!(r.cfg_read(1, 0x04, 2), 5, "and does not reset the chip");
+    r.cfg_write(1, 0x84, 1, 0);
+    assert_eq!(r.cfg_read(1, 0x84, 2) & 3, 0);
+    assert_eq!(r.cfg_read(1, 0x04, 2), 0, "D3hot to D0 resets the header");
+}

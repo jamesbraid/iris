@@ -27,6 +27,7 @@ pub mod mace_uart;
 pub mod mace_ust;
 pub mod ns16550;
 pub mod host_pcm;
+pub mod dm8;
 pub mod rad1;
 pub mod mgras;
 pub mod odyssey;

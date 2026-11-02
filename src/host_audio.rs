@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::config::{AudioConfig, AudioHost};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use rtrb::{RingBuffer, Producer};
+use rtrb::{RingBuffer, Producer, Consumer};
 
 // Sample rates to try when opening the persistent output stream, in order.
 const PREFERRED_RATES: &[u32] = &[48000, 44100, 22050];
@@ -20,6 +20,9 @@ const PULSE_FRAMES: u32 = 512;
 /// `stream_rate`, and the stream plays silence when the ring is empty.
 pub struct HostOut {
     pub stream_rate: u32,
+    /// Channels per frame in the ring and the stream: 2 unless the device
+    /// asked for more (see [`open_output_channels`]).
+    pub channels: usize,
     pub producer: Producer<i16>,
     pub underruns: Arc<AtomicU64>,
     // Set once prebuffering finishes and real samples are flowing; cleared when
@@ -35,8 +38,15 @@ impl HostOut {
     /// consumer plays it. For tests of the devices that feed one.
     #[cfg(test)]
     pub fn detached(stream_rate: u32, producer: Producer<i16>) -> Self {
+        Self::detached_channels(stream_rate, 2, producer)
+    }
+
+    /// [`HostOut::detached`] with `channels` samples to a frame.
+    #[cfg(test)]
+    pub fn detached_channels(stream_rate: u32, channels: usize, producer: Producer<i16>) -> Self {
         Self {
             stream_rate,
+            channels,
             producer,
             underruns: Arc::new(AtomicU64::new(0)),
             playing: Arc::new(AtomicBool::new(true)),
@@ -102,12 +112,97 @@ impl Resampler {
     }
 }
 
-/// Push a stereo pair only if both samples fit; the consumer pops single
-/// samples, so the free room can be odd.
+/// Push a stereo pair only if both samples fit, and make them visible to
+/// the consumer together: a callback that ran between the two would take
+/// the left alone and swap the channels of every later pair.
 fn push_pair(prod: &mut Producer<i16>, l: i16, r: i16) {
-    if prod.slots() >= 2 {
-        let _ = prod.push(l);
-        let _ = prod.push(r);
+    push_frame(prod, &[l, r]);
+}
+
+/// Push a whole frame, or none of it if the ring lacks room, and publish it
+/// with one commit so the consumer never sees part of a frame. Returns
+/// whether it fit.
+pub fn push_frame(prod: &mut Producer<i16>, frame: &[i16]) -> bool {
+    match prod.write_chunk_uninit(frame.len()) {
+        Ok(chunk) => {
+            chunk.fill_from_iter(frame.iter().copied());
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Fill `out` from the ring a whole frame of `channels` samples at a time,
+/// each sample through `conv`. A frame the ring cannot supply whole is
+/// silence, and what it holds stays for the next call: an underrun in the
+/// middle of a frame would otherwise play the rest of the frame as zeros
+/// and start the next one a channel late for good. Returns the samples
+/// short.
+pub fn pop_frames<T>(c: &mut Consumer<i16>, channels: usize, out: &mut [T], mut conv: impl FnMut(i16) -> T) -> usize {
+    let mut missed = 0;
+    for frame in out.chunks_exact_mut(channels) {
+        match c.read_chunk(channels) {
+            Ok(chunk) => {
+                let (a, b) = chunk.as_slices();
+                for (o, &v) in frame.iter_mut().zip(a.iter().chain(b)) {
+                    *o = conv(v);
+                }
+                chunk.commit_all();
+            }
+            Err(_) => {
+                frame.iter_mut().for_each(|o| *o = conv(0));
+                missed += channels;
+            }
+        }
+    }
+    missed
+}
+
+/// [`Resampler`] for frames of up to [`FrameResampler::MAX_CHANNELS`]
+/// channels, appending to a vector instead of a ring so the caller can mix
+/// before it writes. The same Catmull-Rom interpolation and exact rational
+/// step.
+pub struct FrameResampler {
+    pub in_rate: u32,
+    pub out_rate: u32,
+    channels: usize,
+    acc: u64,
+    h: [[f32; Self::MAX_CHANNELS]; 4],
+}
+
+impl FrameResampler {
+    pub const MAX_CHANNELS: usize = 8;
+
+    pub fn new(in_rate: u32, out_rate: u32, channels: usize) -> Self {
+        debug_assert!((1..=Self::MAX_CHANNELS).contains(&channels));
+        Self { in_rate, out_rate, channels, acc: 0, h: [[0.0; Self::MAX_CHANNELS]; 4] }
+    }
+
+    pub fn passthrough(&self) -> bool { self.in_rate == self.out_rate }
+
+    /// Push one input frame; appends the output frames it completes.
+    pub fn push(&mut self, frame: &[i16], out: &mut Vec<i16>) {
+        let ch = self.channels;
+        debug_assert_eq!(frame.len(), ch);
+        if self.passthrough() {
+            out.extend_from_slice(frame);
+            return;
+        }
+        let mut last = [0.0; Self::MAX_CHANNELS];
+        for (d, &v) in last.iter_mut().zip(frame) {
+            *d = v as f32;
+        }
+        self.h = [self.h[1], self.h[2], self.h[3], last];
+        let outr = self.out_rate as u64;
+        while self.acc < outr {
+            let t = self.acc as f32 / outr as f32;
+            for c in 0..ch {
+                let v = catmull_rom(self.h[0][c], self.h[1][c], self.h[2][c], self.h[3][c], t);
+                out.push(v.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16);
+            }
+            self.acc += self.in_rate as u64;
+        }
+        self.acc -= outr;
     }
 }
 
@@ -171,8 +266,41 @@ pub fn open_output(
     who: &str,
     capture_var: &str,
 ) -> Option<HostOut> {
+    open_output_channels(audio, 2, underruns, playing, ring_samples, who, capture_var)
+}
+
+/// The standard speaker counts a stream is opened with: 7.1, 5.1, quad and
+/// stereo.
+const CHANNEL_LAYOUTS: [u16; 4] = [8, 6, 4, 2];
+
+/// [`open_output`] with as many channels as the device supports, up to
+/// `max_channels` (2 to 8). Of the layouts 7.1, 5.1, quad and stereo the
+/// largest the device reports and `max_channels` allow is tried first, then
+/// the smaller ones. The ring and the stream carry interleaved frames of
+/// [`HostOut::channels`] samples; `ring_samples` is the ring's size as for a
+/// stereo stream, and a wider one gets proportionally more.
+pub fn open_output_channels(
+    audio: &AudioConfig,
+    max_channels: usize,
+    underruns: Arc<AtomicU64>,
+    playing: Arc<AtomicBool>,
+    ring_samples: impl Fn(u32) -> usize,
+    who: &str,
+    capture_var: &str,
+) -> Option<HostOut> {
     let host = output_host(audio.host);
     let device = host.default_output_device()?;
+    let device_max = if max_channels > 2 {
+        device
+            .supported_output_configs()
+            .ok()
+            .and_then(|c| c.map(|c| c.channels()).max())
+            .unwrap_or(2)
+    } else {
+        2
+    };
+    let layouts: Vec<u16> =
+        CHANNEL_LAYOUTS.into_iter().filter(|&n| n as usize <= max_channels.max(2) && n <= device_max.max(2)).collect();
     // A fixed size the device refuses falls back to the host's default.
     let mut sizes = vec![output_buffer(audio, host.id())];
     if sizes[0] != cpal::BufferSize::Default {
@@ -180,13 +308,13 @@ pub fn open_output(
     }
 
     for buffer_size in sizes {
-        for &rate in PREFERRED_RATES {
+        for (&channels, &rate) in layouts.iter().flat_map(|c| PREFERRED_RATES.iter().map(move |r| (c, r))) {
             let config = cpal::StreamConfig {
-                channels: 2,
+                channels,
                 sample_rate: rate,
                 buffer_size,
             };
-            let ring_size = ring_samples(rate);
+            let ring_size = ring_samples(rate) * usize::from(channels) / 2;
             let who_cb = who.to_string();
             let err_fn = move |err: cpal::Error| { eprintln!("{who_cb}: cpal stream error: {:?}", err); };
 
@@ -201,25 +329,15 @@ pub fn open_output(
                     .and_then(|p| std::fs::File::create(p).ok())
                     .map(std::io::BufWriter::new);
                 let data_fn = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    let mut short = false;
-                    for sample in data.iter_mut() {
-                        let v = match c.pop() {
-                            Ok(v) => v,
-                            Err(_) => {
-                                if playing_cb.load(Ordering::Relaxed) {
-                                    underruns_cb.fetch_add(1, Ordering::Relaxed);
-                                    short = true;
-                                }
-                                0
-                            }
-                        };
+                    let missed = pop_frames(&mut c, usize::from(channels), data, |v| {
                         if let Some(w) = capture.as_mut() {
                             use std::io::Write;
                             let _ = w.write_all(&v.to_le_bytes());
                         }
-                        *sample = v as f32 / 32768.0;
-                    }
-                    if short {
+                        v as f32 / 32768.0
+                    });
+                    if missed > 0 && playing_cb.load(Ordering::Relaxed) {
+                        underruns_cb.fetch_add(missed as u64, Ordering::Relaxed);
                         crate::pf_instant!(crate::perfetto::events::HAL2_UNDERRUN, underruns_cb.load(Ordering::Relaxed));
                     }
                 };
@@ -231,20 +349,9 @@ pub fn open_output(
                         let underruns_cb = underruns.clone();
                         let playing_cb = playing.clone();
                         let data_fn = move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                            let mut short = false;
-                            for sample in data.iter_mut() {
-                                *sample = match c.pop() {
-                                    Ok(v) => v,
-                                    Err(_) => {
-                                        if playing_cb.load(Ordering::Relaxed) {
-                                            underruns_cb.fetch_add(1, Ordering::Relaxed);
-                                            short = true;
-                                        }
-                                        0
-                                    }
-                                };
-                            }
-                            if short {
+                            let missed = pop_frames(&mut c, usize::from(channels), data, |v| v);
+                            if missed > 0 && playing_cb.load(Ordering::Relaxed) {
+                                underruns_cb.fetch_add(missed as u64, Ordering::Relaxed);
                                 crate::pf_instant!(crate::perfetto::events::HAL2_UNDERRUN, underruns_cb.load(Ordering::Relaxed));
                             }
                         };
@@ -260,9 +367,10 @@ pub fn open_output(
             };
             if stream.play().is_err() { continue; }
             // cpal 0.18 dropped DeviceTrait::name(); a Device's Display impl is its name.
-            println!("{who}: audio output: {} via {:?} at {}Hz", device, host.id(), rate);
+            println!("{who}: audio output: {} via {:?} at {}Hz, {} channels", device, host.id(), rate, channels);
             return Some(HostOut {
                 stream_rate: rate,
+                channels: channels as usize,
                 producer,
                 underruns,
                 playing,
@@ -302,5 +410,61 @@ mod tests {
                 assert!(got.chunks(2).all(|q| q == [0, 0] || q[0] > 0 && q[1] < 0), "{in_rate}: channels swapped in {got:?}");
             }
         }
+    }
+
+    #[test]
+    fn frames_keep_their_channels_through_the_frame_resampler() {
+        for (inr, outr, per_in) in [(48000u32, 48000u32, 1usize), (24000, 48000, 2), (48000, 24000, 0)] {
+            let mut rs = FrameResampler::new(inr, outr, 6);
+            let mut out = Vec::new();
+            let frame = [100i16, -200, 300, -400, 500, -600];
+            for _ in 0..64 {
+                rs.push(&frame, &mut out);
+            }
+            assert_eq!(out.len() % 6, 0);
+            let frames = out.len() / 6;
+            if per_in > 0 {
+                assert_eq!(frames, 64 * per_in);
+            } else {
+                assert_eq!(frames, 32);
+            }
+            // Past the warm-up each channel is constant at its own level.
+            for f in out.chunks(6).skip(8) {
+                assert_eq!(f, frame, "{inr}->{outr}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_underrun_in_the_middle_of_a_frame_keeps_the_channels_aligned() {
+        let (mut p, mut c) = RingBuffer::<i16>::new(64);
+        // One whole four-channel frame and half of the next, as a producer
+        // that pushes sample by sample leaves the ring between two pushes.
+        for v in [1, 2, 3, 4, 5, 6] {
+            p.push(v).unwrap();
+        }
+        let mut out = [9i16; 12];
+        let missed = pop_frames(&mut c, 4, &mut out, |v| v);
+        assert_eq!(out, [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(missed, 8);
+        // The rest of the frame arrives: it plays whole, first.
+        p.push(7).unwrap();
+        p.push(8).unwrap();
+        let mut out = [9i16; 8];
+        assert_eq!(pop_frames(&mut c, 4, &mut out, |v| v), 4);
+        assert_eq!(out, [5, 6, 7, 8, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_frame_goes_into_the_ring_whole_or_not_at_all() {
+        let (mut p, mut c) = RingBuffer::<i16>::new(6);
+        assert!(push_frame(&mut p, &[1, 2, 3, 4]));
+        // Two slots left, a four-sample frame does not fit: none of it is
+        // written.
+        assert!(!push_frame(&mut p, &[5, 6, 7, 8]));
+        assert_eq!(c.slots(), 4);
+        let mut out = [0i16; 4];
+        assert_eq!(pop_frames(&mut c, 4, &mut out, |v| v), 0);
+        assert_eq!(out, [1, 2, 3, 4]);
     }
 }
