@@ -601,6 +601,18 @@ strips breakpoint checks for speed. `cargo build --profile profiling` builds
 with full debug info for `perf` and flamegraphs. Every feature is listed in
 [FEATURES.md](FEATURES.md).
 
+The source is a workspace of five crates, layered so that an edit rebuilds
+little. `iris-core` (crates/iris-core) holds the bus traits, config, logging,
+memory and the machines' address maps. `iris-cpu`, `iris-dev` (every
+non-graphics device) and `iris-gfx` (the graphics boards and the display)
+depend on core and not on each other. The `iris` crate at the root holds the
+machines, monitor, UI and binaries and re-exports the others, so module paths
+such as `iris::dev::ng1` are unchanged. [layers.toml](layers.toml) says which
+module lives where, and `tests/layering.rs` fails a change that makes a lower
+layer name a higher one. Run one crate's tests with `-p`, for example
+`cargo test -p iris-gfx rex3`; `cargo test --lib` at the root runs only the
+top crate's.
+
 Tests: `cargo test --workspace` (unit tests, including per-device snapshot
 round trips and, with `--features jitv2`, the JIT equivalence tests),
 `make -C cpu-tests run` (bare-metal instruction correctness), `iris-bench`

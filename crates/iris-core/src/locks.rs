@@ -305,7 +305,7 @@ mod tests {
 
     /// Uncontended lock/unlock cost: SpinLock (with holder tracking), the
     /// bare flag it is built on, and parking_lot's Mutex.
-    /// `cargo test --release --lib spinlock_cost -- --ignored --nocapture`
+    /// `cargo test --release -p iris-core --lib spinlock_cost -- --ignored --nocapture`
     #[test]
     #[ignore = "benchmark"]
     fn spinlock_cost() {

@@ -439,7 +439,7 @@ in the `irix-gfx-loop` skill (`clanker/skills/irix-gfx-loop/SKILL.md`).
 | `mgras fbdump [dir]` | Planes and the screen as PNG and raw files |
 | `mgras shot <file.png>` / `mgras dump <file>` | Screenshot / the board state image that replay checkpoints hash (waits for the board to go idle) |
 | `mgras trace <file> [hq,rss,cpu,tex\|all]` / `mgras trace flush\|off` | Annotated trace (also `IRIS_MGRAS_TRACE=<file>`) |
-| `mgras rec <file>` / `mgras rec mark\|off` | Replayable recording; replay with `MGRAS_REPLAY=<file> cargo test --release --lib mgras_replay_file` |
+| `mgras rec <file>` / `mgras rec mark\|off` | Replayable recording; replay with `MGRAS_REPLAY=<file> cargo test --release -p iris-gfx --lib mgras_replay_file` |
 | `rss [regs]` / `rss pix <x> <y> [w] [h]` | Raster registers (decoded IR, each engine's backlog) / raw pixels |
 
 `iris-ci screenshot` captures the composed screen from any board, also

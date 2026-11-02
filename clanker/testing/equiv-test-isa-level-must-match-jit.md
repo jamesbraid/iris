@@ -10,7 +10,7 @@ Addresses `cpucritique2.md` JIT-B.
 ## Symptom
 
 ```
-cargo test --lib --features r5k,jitv2,j2wp,tcache jitv2::equiv_test
+cargo test -p iris-cpu --lib --features r5k,jitv2,j2wp,tcache jitv2::equiv_test
 → 223 passed; 7 failed
 ```
 

@@ -1652,7 +1652,7 @@ fn gl_fog_linear_from_trace() {
 /// Offline replay tool (not a regression test): replays the HQ2 FIFO stream
 /// in $GR2_REPLAY ("index value" hex per line) into a fresh board and dumps
 /// the framebuffer to $GR2_REPLAY_OUT (default gr2replay/). Run with
-/// `GR2_REPLAY=trace cargo test --release --lib gr2_replay_file -- --ignored`.
+/// `GR2_REPLAY=trace cargo test --release -p iris-gfx --lib gr2_replay_file -- --ignored`.
 #[test]
 #[ignore]
 fn gr2_replay_file() {

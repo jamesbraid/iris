@@ -199,7 +199,7 @@ Each step kept `cargo test` and `test/net` green and was measured against §2.
 
 ## 7. Tests
 
-- `cargo test --lib net::` — unit and engine-level tests.
+- `cargo test -p iris-dev --lib net::` — unit and engine-level tests.
 - `test/net/nettest.c` — one portable client/server (guest and host).
 - `test/net/run.sh` (guest) — local TCP/UDP through the gateway, external
   HTTP/ping, FTP to a LAN server, telnet to a LAN host, and the stall probe.

@@ -41,7 +41,7 @@ Until it is re-measured:
 - Compare raster performance offline: record the session in the guest
   (`mgras rec <file>` ... `mgras rec off`) and time its replay:
   `MGRAS_REPLAY_NOCHECK=1 MGRAS_REPLAY_BOARD=high|max MGRAS_REPLAY=<file>
-  cargo test --release --lib --features gr4-jit mgras_replay_file -- --nocapture`
+  cargo test --release -p iris-gfx --lib --features gr4-jit mgras_replay_file -- --nocapture`
   prints the wall time and the final state hash (which must match across
   boards).
 - Treat guest-side fill rates as meaningless; `ioc ticks` shows whether a
