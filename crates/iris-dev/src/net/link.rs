@@ -125,7 +125,7 @@ impl Link {
     }
 
     /// Rings to nowhere, and their far ends, for adapter tests.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn loopback() -> (Link, rtrb::Consumer<Vec<u8>>, rtrb::Producer<Vec<u8>>) {
         let mut link = Self::build(GatewayConfig::default(), Arc::default(), NatControl::new(), Wake::new(), Wake::new());
         let (tx_cons, rx_prod) = link.far.take().expect("a new link has its far ends");

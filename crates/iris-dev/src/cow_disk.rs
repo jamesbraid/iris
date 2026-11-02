@@ -83,7 +83,7 @@ pub(crate) fn sidecar_path_for(overlay_path: &Path) -> PathBuf {
 /// sidecar that cannot be read, or that has no whole header, is an error: the
 /// caller must not treat it as empty, or the next rewrite would replace a
 /// record it could not read with nothing.
-pub(crate) fn load_dirty_sidecar(path: &Path) -> io::Result<HashSet<u64>> {
+pub fn load_dirty_sidecar(path: &Path) -> io::Result<HashSet<u64>> {
     let mut f = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(HashSet::new()),

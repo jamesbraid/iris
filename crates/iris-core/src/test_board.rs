@@ -15,12 +15,12 @@ use std::sync::Arc;
 
 use crate::traits::Device;
 
-pub(crate) struct TestBoard<T: Device>(Arc<T>);
+pub struct TestBoard<T: Device>(Arc<T>);
 
 impl<T: Device> TestBoard<T> {
     /// Take ownership of a board. Wrap it before `start()`: the threads keep
     /// the address it has from then on.
-    pub(crate) fn new(board: Arc<T>) -> Self {
+    pub fn new(board: Arc<T>) -> Self {
         Self(board)
     }
 }

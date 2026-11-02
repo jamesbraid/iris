@@ -729,6 +729,10 @@ fn no_process_exit_bypasses_the_flush() {
         }
     }
     walk(&root, &root, &mut found);
+    for c in std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("crates")).unwrap() {
+        let src = c.unwrap().path().join("src");
+        walk(&src, &src, &mut found);
+    }
     // main: its exits before the machine starts are configuration errors. The
     // two after it (the CI and VNC servers failing to come up) leave a machine
     // that has not run a guest.

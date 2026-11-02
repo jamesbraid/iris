@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def token_names():
     names = {}
-    src = (ROOT / "src/dev/mgras/hq3.rs").read_text()
+    src = (ROOT / "crates/iris-gfx/src/dev/mgras/hq3.rs").read_text()
     for m in re.finditer(r'0x([0-9A-Fa-f]{3}) => "([A-Za-z0-9_]+)"', src):
         names.setdefault(int(m.group(1), 16), m.group(2))
     return names

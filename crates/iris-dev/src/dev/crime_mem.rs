@@ -597,7 +597,7 @@ impl O2Memory {
 /// Device tests set memory up and look at it by hand, by an offset from
 /// the bottom of the window (`o` below `RAM_BASE`) or an address `offset`
 /// gave. Production code reaches memory through the bus.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl O2Memory {
     /// The host byte for test offset or address `o`.
     fn host_of(&self, o: usize) -> *mut u8 {
@@ -642,7 +642,7 @@ impl O2Memory {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl std::ops::Index<usize> for O2Memory {
     type Output = u8;
     fn index(&self, o: usize) -> &u8 {
@@ -650,7 +650,7 @@ impl std::ops::Index<usize> for O2Memory {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl std::ops::IndexMut<usize> for O2Memory {
     fn index_mut(&mut self, o: usize) -> &mut u8 {
         unsafe { &mut *self.host_of(o) }
