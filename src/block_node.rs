@@ -1619,6 +1619,47 @@ mod tests {
         remove_chd(&base);
     }
 
+    /// The background thread alone, with no explicit flush, makes writes
+    /// durable, map entries included: a copy of the files as the host has
+    /// them, taken more than the interval after the writes while the node is
+    /// still open and never closed, stands in for a SIGKILL. Reads and
+    /// writes go on meanwhile, as a busy guest's do.
+    #[test]
+    fn chd_background_sync_covers_a_busy_disk_at_a_kill() {
+        let base = compressed_chd(0xAB);
+        let diff = crate::chd_disk::diff_path_for(&base);
+        let mut node = ChdNode::open(base.to_str().unwrap(), false).unwrap();
+        node.background().unwrap().spawn().unwrap();
+        let hunks = 60u64;
+        for round in 0..3u8 {
+            for h in 0..hunks {
+                let at = (h * 8 + u64::from(round) + 1) * SECTOR_SIZE;
+                node.write(at, &[0x10 + round; SECTOR_BYTES]).unwrap();
+                let mut got = [0u8; SECTOR_BYTES];
+                node.read(at, &mut got).unwrap();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        std::thread::sleep(BACKGROUND_FLUSH_INTERVAL + Duration::from_secs(1));
+        let copy = tmp_path("chd-kill").with_extension("chd");
+        std::fs::copy(&base, &copy).unwrap();
+        std::fs::copy(&diff, crate::chd_disk::diff_path_for(&copy)).unwrap();
+        let mut again = ChdNode::open(copy.to_str().unwrap(), false).unwrap();
+        for round in 0..3u8 {
+            for h in 0..hunks {
+                let at = (h * 8 + u64::from(round) + 1) * SECTOR_SIZE;
+                let mut got = [0u8; SECTOR_BYTES];
+                again.read(at, &mut got).unwrap();
+                assert_eq!(got, [0x10 + round; SECTOR_BYTES], "hunk {h} round {round}");
+            }
+        }
+        drop(again);
+        remove_chd(&copy);
+        node.background().unwrap().finish();
+        drop(node);
+        remove_chd(&base);
+    }
+
     /// Zeroes written over a hunk a diff does not hold yet read back as
     /// zeroes, not as the base: a whole hunk, a sector of a hunk whose other
     /// sectors are zero in the base, and a discard, which reads as zeroes on
