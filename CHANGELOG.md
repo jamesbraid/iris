@@ -40,6 +40,14 @@ hashes are given where a change is easiest to understand by reading the commit.
   its data, so a host crash cannot leave the map pointing at data that is
   not there.
 
+### CHD disks
+
+- Zeroes written to a CHD's `.diff.chd` now read back as zeroes. MAME skips
+  storing a hunk that is all zero and not yet in the diff, so such a hunk
+  went on reading the base CHD's old data: a guest that zeroed fresh blocks
+  (`mkfs`, `dd if=/dev/zero`) got the old contents back. A discard on a CHD,
+  which writes zeroes, had the same fault.
+
 ## October 2026
 
 ### `IRIS_GUI_GL` works in iris-gui
