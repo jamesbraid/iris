@@ -46,8 +46,8 @@ for every disk), which is the caching mode page's WCE bit:
 - `write_cache = true` reports a write cache. A plain write is complete once
   the host has it, and may be lost in a host crash until SYNCHRONIZE CACHE (10)
   or (16), a WRITE(10) with FUA, or a background sync stores it. A thread syncs
-  each writable raw image and overlay (the overlay and its record) about 5 s
-  after the first write that follows a sync, doing nothing while the guest
+  each writable disk (a raw image, an overlay and its record, or a CHD) about
+  5 s after the first write that follows a sync, doing nothing while the guest
   writes nothing. A host crash can lose up to about 5 s of the guest's most
   recent writes, in any order, and so can tear the guest's filesystem. NetBSD
   and Linux send SYNCHRONIZE CACHE to a disk with a write cache.
@@ -56,6 +56,19 @@ A guest can change the setting either way with MODE SELECT (the caching page's
 WCE bit; clearing it stores what was written so far at once). A bus reset puts
 it back to the configured value: on the AIC-7880 and the ISP1040 a bus reset,
 on the WD33C93A a reset of the chip.
+
+A CHD disk works the same way. A write to a hunk the CHD already holds is
+stored in place. A write to a new hunk appends it to the file, and the hunk's
+map entry waits in memory until a sync has stored the data, so after a host
+crash the map only points at data that reached the disk. Such a write costs
+two syncs instead of one; later writes to the hunk cost one, as on a raw
+image. With a write cache, ending iris before the next sync is not like a
+raw image either. A write to a hunk the CHD already held is in the file and
+survives a `kill -9`. A write to a new hunk does not, as its map entry is
+only in memory, so a kill can lose an earlier write to a new hunk and keep a
+later write to an old one. A clean stop writes the
+map entries out. A panic, an abort, a kill, or an exit that skips the disks'
+teardown does not (release builds abort on panic).
 
 An older iris reads only what the last flush recorded, so after a kill it
 sees the disk as it was before the appended writes, torn as before. Open an
