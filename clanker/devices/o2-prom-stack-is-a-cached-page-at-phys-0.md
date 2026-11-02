@@ -2,8 +2,8 @@
 
 Status: landed 2026-10-30. Both O2 CPUs run the shadow cache from reset; the handover
 ([o2-cache-handover-full-to-shadow.md](o2-cache-handover-full-to-shadow.md)) is gone. Code:
-`O2Memory::stack_tag_store` in `src/dev/crime_mem.rs`, the tag-store hook in
-`src/cpu/mips_cache_shadow.rs`. Sections below are the measurements that chose the design; the
+`O2Memory::stack_tag_store` in `crates/iris-dev/src/dev/crime_mem.rs`, the tag-store hook in
+`crates/iris-cpu/src/cpu/mips_cache_shadow.rs`. Sections below are the measurements that chose the design; the
 prototype results used earlier binaries.
 
 ## Where the stack is

@@ -1,6 +1,6 @@
 # Retry rejected REX JIT cold compile requests
 
-The REX JIT compile queue (`src/dev/ng1/rex3_jit_queue.rs`) has two lanes. The
+The REX JIT compile queue (`crates/iris-gfx/src/dev/ng1/rex3_jit_queue.rs`) has two lanes. The
 draw path uses the **hot** lane (`RexJit::request_compile`), which is never
 rejected for a full queue; warm-up and best-effort prefetch use the **cold** lane
 (`request_compile_cold` / `request_compile_blocking`), which holds 256 requests.

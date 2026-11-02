@@ -2,10 +2,10 @@
 
 > **Swappable backends did not land.** The `gfifo-*` features below are
 > historical experiments. The hand-written ring stayed and has since been
-> extracted to `src/gfifo.rs`, shared by Newport, GR2, and IMPACT. The
+> extracted to `crates/iris-core/src/gfifo.rs`, shared by Newport, GR2, and IMPACT. The
 > measurements explain the backend choice, not the current module layout.
 
-The CPU→REX3-painter command queue (`src/gfifo.rs`) can be built on any of four
+The CPU→REX3-painter command queue (`crates/iris-core/src/gfifo.rs`) can be built on any of four
 ring implementations, picked at compile time:
 
 ```

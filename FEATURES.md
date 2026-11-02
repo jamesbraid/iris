@@ -120,7 +120,7 @@ separate from the runtime environment inventory below.
 
 ## Shared machine configuration inventory
 
-Source: [src/config.rs](src/config.rs), `MachineConfig` and nested structs.
+Source: [crates/iris-core/src/config.rs](crates/iris-core/src/config.rs), `MachineConfig` and nested structs.
 The CLI reads `iris.toml` (or `--config FILE`); iris-gui reads and saves the same
 TOML schema in `<config dir>/iris/machines/<name>/<name>.toml`. `gui.json` holds
 GUI preferences. The GUI uses the selected machine folder as the working
@@ -469,72 +469,72 @@ and offline-tool controls are included so they are not mistaken for GUI settings
 
 | Variable | Effect / accepted value | Reader |
 |---|---|---|
-| `GR2_REPLAY` | Replay input path for opt-in GR2 tests. | [src/dev/gr2/hq2_tests.rs](src/dev/gr2/hq2_tests.rs) |
-| `GR2_REPLAY_OUT` | GR2 replay dump prefix (default gr2replay). | [src/dev/gr2/hq2_tests.rs](src/dev/gr2/hq2_tests.rs) |
-| `IRIS_BAKE_HOOKS` | Any presence bakes callout hook addresses into JIT code (experimental). | [src/cpu/jitv2/codegen.rs](src/cpu/jitv2/codegen.rs) |
-| `IRIS_BREAK_CPU` | 1 stops CPU after exception handling for diagnostic inspection. | [src/cpu/mips_exec.rs](src/cpu/mips_exec.rs) |
-| `IRIS_CHD_DIFF_DIR` | Redirect CHD diff sidecars; GUI App Store sets a writable container directory. | [src/chd_disk.rs](src/chd_disk.rs) |
-| `IRIS_CONST_DUMP` | Presence prints selected disassembly lines in constant-dedup tests. | [src/cpu/jitv2/mod.rs](src/cpu/jitv2/mod.rs) |
-| `IRIS_CONST_MODE` | Select the opt-in constant-dedup codegen test shape. | [src/cpu/jitv2/mod.rs](src/cpu/jitv2/mod.rs) |
-| `IRIS_CORPUS_DIR` | Corpus directory consumed by opt-in JIT corpus tests. | [src/cpu/jitv2/mod.rs](src/cpu/jitv2/mod.rs) |
+| `GR2_REPLAY` | Replay input path for opt-in GR2 tests. | [crates/iris-gfx/src/dev/gr2/hq2_tests.rs](crates/iris-gfx/src/dev/gr2/hq2_tests.rs) |
+| `GR2_REPLAY_OUT` | GR2 replay dump prefix (default gr2replay). | [crates/iris-gfx/src/dev/gr2/hq2_tests.rs](crates/iris-gfx/src/dev/gr2/hq2_tests.rs) |
+| `IRIS_BAKE_HOOKS` | Any presence bakes callout hook addresses into JIT code (experimental). | [crates/iris-cpu/src/cpu/jitv2/codegen.rs](crates/iris-cpu/src/cpu/jitv2/codegen.rs) |
+| `IRIS_BREAK_CPU` | 1 stops CPU after exception handling for diagnostic inspection. | [crates/iris-cpu/src/cpu/mips_exec.rs](crates/iris-cpu/src/cpu/mips_exec.rs) |
+| `IRIS_CHD_DIFF_DIR` | Redirect CHD diff sidecars; GUI App Store sets a writable container directory. | [crates/iris-dev/src/chd_disk.rs](crates/iris-dev/src/chd_disk.rs) |
+| `IRIS_CONST_DUMP` | Presence prints selected disassembly lines in constant-dedup tests. | [crates/iris-cpu/src/cpu/jitv2/mod.rs](crates/iris-cpu/src/cpu/jitv2/mod.rs) |
+| `IRIS_CONST_MODE` | Select the opt-in constant-dedup codegen test shape. | [crates/iris-cpu/src/cpu/jitv2/mod.rs](crates/iris-cpu/src/cpu/jitv2/mod.rs) |
+| `IRIS_CORPUS_DIR` | Corpus directory consumed by opt-in JIT corpus tests. | [crates/iris-cpu/src/cpu/jitv2/mod.rs](crates/iris-cpu/src/cpu/jitv2/mod.rs) |
 | `IRIS_CRASH_DIAG` | off disables Windows crash handler installation. | [src/crash_diag.rs](src/crash_diag.rs) |
 | `IRIS_CRASH_SELFTEST` | Standalone crash diagnostic self-test selector; deliberately crashes. | [src/main.rs](src/main.rs) |
 | `IRIS_DEBUG_LOG` | Device log specification; applied to developer devlog after machine creation. | [src/main.rs](src/main.rs) |
-| `IRIS_ENTRY_PREAMBLE` | 1 forces entry-word preamble in the opt-in codegen test. | [src/cpu/jitv2/mod.rs](src/cpu/jitv2/mod.rs) |
+| `IRIS_ENTRY_PREAMBLE` | 1 forces entry-word preamble in the opt-in codegen test. | [crates/iris-cpu/src/cpu/jitv2/mod.rs](crates/iris-cpu/src/cpu/jitv2/mod.rs) |
 | `IRIS_GUI_GL` | 1 selects the GUI GL capture path. | [iris-gui/src/framebuffer.rs](iris-gui/src/framebuffer.rs) |
-| `IRIS_HAL2_CAPTURE` | HAL2 host audio capture output path. | [src/dev/hal2.rs](src/dev/hal2.rs) |
+| `IRIS_HAL2_CAPTURE` | HAL2 host audio capture output path. | [crates/iris-dev/src/dev/hal2.rs](crates/iris-dev/src/dev/hal2.rs) |
 | `IRIS_HOSTGL_CALLS` | Substring filter for HostGL call logging (bounded log). | [iris-hostgl/src/service.rs](iris-hostgl/src/service.rs) |
 | `IRIS_HOSTGL_INLINE` | 1 runs the HostGL service on the CPU thread instead of its own (for comparison; the CPU stalls while a buffer replays). | [iris-hostgl/src/lib.rs](iris-hostgl/src/lib.rs) |
 | `IRIS_HOSTGL_NOSURFACE` | 1 disables CGL IOSurface presentation. | [iris-hostgl/src/backend/cgl.rs](iris-hostgl/src/backend/cgl.rs) |
 | `IRIS_HOSTGL_QOS` | default disables HostGL thread QoS adjustment. | [iris-hostgl/src/qos.rs](iris-hostgl/src/qos.rs) |
 | `IRIS_HOSTGL_STRINGS` | host passes through host GL strings instead of compatibility strings. | [iris-hostgl/src/service.rs](iris-hostgl/src/service.rs) |
 | `IRIS_INTRUN` | Integer interrupt-check coalescing budget; also used by offline tools. | [src/bin/jitv2_pcp_dump.rs](src/bin/jitv2_pcp_dump.rs) |
-| `IRIS_IP28_CACHEOPS` | Presence traces cache ops in the legacy R10K cache model; all broadens logging. | [src/cpu/mips_cache_v2.rs](src/cpu/mips_cache_v2.rs) |
-| `IRIS_IP28_EXC_VADDR` | IP28 exception virtual-address trace filter. | [src/cpu/mips_exec.rs](src/cpu/mips_exec.rs) |
-| `IRIS_IP28_TLBW` | wired enables extra IP28 Wired/TLB-write tracing. | [src/cpu/mips_exec.rs](src/cpu/mips_exec.rs) |
-| `IRIS_IP28_WATCH` | IP28 physical-address/window access trace filter. | [src/cpu/mips_cache_v2.rs](src/cpu/mips_cache_v2.rs) |
-| `IRIS_IP28_WATCHGPR` | Guest GPR index whose writes are traced in IP28 bring-up. | [src/cpu/mips_core.rs](src/cpu/mips_core.rs) |
+| `IRIS_IP28_CACHEOPS` | Presence traces cache ops in the legacy R10K cache model; all broadens logging. | [crates/iris-cpu/src/cpu/mips_cache_v2.rs](crates/iris-cpu/src/cpu/mips_cache_v2.rs) |
+| `IRIS_IP28_EXC_VADDR` | IP28 exception virtual-address trace filter. | [crates/iris-cpu/src/cpu/mips_exec.rs](crates/iris-cpu/src/cpu/mips_exec.rs) |
+| `IRIS_IP28_TLBW` | wired enables extra IP28 Wired/TLB-write tracing. | [crates/iris-cpu/src/cpu/mips_exec.rs](crates/iris-cpu/src/cpu/mips_exec.rs) |
+| `IRIS_IP28_WATCH` | IP28 physical-address/window access trace filter. | [crates/iris-cpu/src/cpu/mips_cache_v2.rs](crates/iris-cpu/src/cpu/mips_cache_v2.rs) |
+| `IRIS_IP28_WATCHGPR` | Guest GPR index whose writes are traced in IP28 bring-up. | [crates/iris-cpu/src/cpu/mips_core.rs](crates/iris-cpu/src/cpu/mips_core.rs) |
 | `IRIS_IP32_HOT` | Any presence counts O2 register accesses (MACE, GBE, rendering engine) for finding a driver polling a bit nothing sets; costs speed. | [src/ip32.rs](src/ip32.rs) |
-| `IRIS_IP32_MEC_TRACE` | Any presence traces O2 Ethernet frames (sent, received, dropped) on stderr. | [src/dev/mec.rs](src/dev/mec.rs) |
-| `IRIS_IP32_RE_TRACE` | Number of O2 rendering-engine primitives to record for `o2 retrace PATH`. | [src/dev/o2gfx.rs](src/dev/o2gfx.rs) |
-| `IRIS_JIT_CACHE` | 1 or on enables persistent JIT page reuse. | [src/cpu/jitv2/pcache.rs](src/cpu/jitv2/pcache.rs) |
-| `IRIS_JIT_CACHE_DIR` | Persistent JIT cache base directory. | [src/cpu/jitv2/pcache.rs](src/cpu/jitv2/pcache.rs) |
-| `IRIS_JIT_CLIF` | Any presence prints Cranelift input IR. | [src/cpu/jitv2/codegen.rs](src/cpu/jitv2/codegen.rs) |
-| `IRIS_JIT_DISASM` | Any presence requests generated machine-code disassembly. | [src/cpu/jitv2/codegen.rs](src/cpu/jitv2/codegen.rs) |
-| `IRIS_JIT_DISPATCH` | off or 0 disables normal JIT v2 dispatch at startup. | [src/cpu/mips_exec.rs](src/cpu/mips_exec.rs) |
-| `IRIS_JIT_HASHSTATS` | 1 enables page/entry reuse diagnostics. | [src/cpu/jitv2/hashstats.rs](src/cpu/jitv2/hashstats.rs) |
-| `IRIS_JIT_HASHSTATS_LOG` | Append per-compile reuse diagnostic records to this file. | [src/cpu/jitv2/hashstats.rs](src/cpu/jitv2/hashstats.rs) |
-| `IRIS_JIT_VERIFY` | 1 or on runs Cranelift's IR verifier on every JIT v2 compile. Already on in unit tests and `--features developer` builds. | [src/cpu/jitv2/codegen.rs](src/cpu/jitv2/codegen.rs) |
-| `IRIS_JIT_ARENA_FLUSH_MB` | Flush compiled code when the arena holds this many MiB, for testing the compile workers' flush. | [src/cpu/jitv2/jitv2.rs](src/cpu/jitv2/jitv2.rs) |
-| `IRIS_JIT_ATOMIC_GEN` | Any presence makes inline stores bump the page generation atomically with one CPU too, as they always do with several. | [src/cpu/mips_exec.rs](src/cpu/mips_exec.rs) |
-| `IRIS_JIT_PIC` | Any presence disables core-address constants for JIT code. | [src/cpu/mips_exec.rs](src/cpu/mips_exec.rs) |
-| `IRIS_MEM_HELPERS` | Any presence enables the experimental JIT memory-helper path. | [src/cpu/jitv2/codegen.rs](src/cpu/jitv2/codegen.rs) |
-| `IRIS_MGRAS_REC` | Record IMPACT bus operations from power-on to this path. | [src/dev/mgras/mod.rs](src/dev/mgras/mod.rs) |
-| `IRIS_MGRAS_TRACE` | Trace IMPACT accesses from power-on to this path (`gputrace` builds). | [src/dev/mgras/mod.rs](src/dev/mgras/mod.rs) |
-| `IRIS_O2_AUDIO_CAPTURE` | O2 host audio capture output path (what the host plays). | [src/dev/mace_audio.rs](src/dev/mace_audio.rs) |
-| `IRIS_O2_AUDIO_DUMP` | File to record the O2's audio output at the guest's rate, before resampling. | [src/dev/mace_audio.rs](src/dev/mace_audio.rs) |
-| `IRIS_O2_AUDIO_TRACE` | Any presence traces every O2 audio register access and codec operation on stderr. | [src/dev/mace_audio.rs](src/dev/mace_audio.rs) |
-| `IRIS_REX3_REC` | Record REX3 bus operations from board start to this path (`gputrace` builds). | [src/dev/ng1/rex3_rec.rs](src/dev/ng1/rex3_rec.rs) |
-| `IRIS_REX3_TRACE` | Trace REX3 GFIFO and CPU accesses from board start to this path (`gputrace` builds). | [src/dev/ng1/rex3_trace.rs](src/dev/ng1/rex3_trace.rs) |
+| `IRIS_IP32_MEC_TRACE` | Any presence traces O2 Ethernet frames (sent, received, dropped) on stderr. | [crates/iris-dev/src/dev/mec.rs](crates/iris-dev/src/dev/mec.rs) |
+| `IRIS_IP32_RE_TRACE` | Number of O2 rendering-engine primitives to record for `o2 retrace PATH`. | [crates/iris-dev/src/dev/o2gfx.rs](crates/iris-dev/src/dev/o2gfx.rs) |
+| `IRIS_JIT_CACHE` | 1 or on enables persistent JIT page reuse. | [crates/iris-cpu/src/cpu/jitv2/pcache.rs](crates/iris-cpu/src/cpu/jitv2/pcache.rs) |
+| `IRIS_JIT_CACHE_DIR` | Persistent JIT cache base directory. | [crates/iris-cpu/src/cpu/jitv2/pcache.rs](crates/iris-cpu/src/cpu/jitv2/pcache.rs) |
+| `IRIS_JIT_CLIF` | Any presence prints Cranelift input IR. | [crates/iris-cpu/src/cpu/jitv2/codegen.rs](crates/iris-cpu/src/cpu/jitv2/codegen.rs) |
+| `IRIS_JIT_DISASM` | Any presence requests generated machine-code disassembly. | [crates/iris-cpu/src/cpu/jitv2/codegen.rs](crates/iris-cpu/src/cpu/jitv2/codegen.rs) |
+| `IRIS_JIT_DISPATCH` | off or 0 disables normal JIT v2 dispatch at startup. | [crates/iris-cpu/src/cpu/mips_exec.rs](crates/iris-cpu/src/cpu/mips_exec.rs) |
+| `IRIS_JIT_HASHSTATS` | 1 enables page/entry reuse diagnostics. | [crates/iris-cpu/src/cpu/jitv2/hashstats.rs](crates/iris-cpu/src/cpu/jitv2/hashstats.rs) |
+| `IRIS_JIT_HASHSTATS_LOG` | Append per-compile reuse diagnostic records to this file. | [crates/iris-cpu/src/cpu/jitv2/hashstats.rs](crates/iris-cpu/src/cpu/jitv2/hashstats.rs) |
+| `IRIS_JIT_VERIFY` | 1 or on runs Cranelift's IR verifier on every JIT v2 compile. Already on in unit tests and `--features developer` builds. | [crates/iris-cpu/src/cpu/jitv2/codegen.rs](crates/iris-cpu/src/cpu/jitv2/codegen.rs) |
+| `IRIS_JIT_ARENA_FLUSH_MB` | Flush compiled code when the arena holds this many MiB, for testing the compile workers' flush. | [crates/iris-cpu/src/cpu/jitv2/jitv2.rs](crates/iris-cpu/src/cpu/jitv2/jitv2.rs) |
+| `IRIS_JIT_ATOMIC_GEN` | Any presence makes inline stores bump the page generation atomically with one CPU too, as they always do with several. | [crates/iris-cpu/src/cpu/mips_exec.rs](crates/iris-cpu/src/cpu/mips_exec.rs) |
+| `IRIS_JIT_PIC` | Any presence disables core-address constants for JIT code. | [crates/iris-cpu/src/cpu/mips_exec.rs](crates/iris-cpu/src/cpu/mips_exec.rs) |
+| `IRIS_MEM_HELPERS` | Any presence enables the experimental JIT memory-helper path. | [crates/iris-cpu/src/cpu/jitv2/codegen.rs](crates/iris-cpu/src/cpu/jitv2/codegen.rs) |
+| `IRIS_MGRAS_REC` | Record IMPACT bus operations from power-on to this path. | [crates/iris-gfx/src/dev/mgras/mod.rs](crates/iris-gfx/src/dev/mgras/mod.rs) |
+| `IRIS_MGRAS_TRACE` | Trace IMPACT accesses from power-on to this path (`gputrace` builds). | [crates/iris-gfx/src/dev/mgras/mod.rs](crates/iris-gfx/src/dev/mgras/mod.rs) |
+| `IRIS_O2_AUDIO_CAPTURE` | O2 host audio capture output path (what the host plays). | [crates/iris-dev/src/dev/mace_audio.rs](crates/iris-dev/src/dev/mace_audio.rs) |
+| `IRIS_O2_AUDIO_DUMP` | File to record the O2's audio output at the guest's rate, before resampling. | [crates/iris-dev/src/dev/mace_audio.rs](crates/iris-dev/src/dev/mace_audio.rs) |
+| `IRIS_O2_AUDIO_TRACE` | Any presence traces every O2 audio register access and codec operation on stderr. | [crates/iris-dev/src/dev/mace_audio.rs](crates/iris-dev/src/dev/mace_audio.rs) |
+| `IRIS_REX3_REC` | Record REX3 bus operations from board start to this path (`gputrace` builds). | [crates/iris-gfx/src/dev/ng1/rex3_rec.rs](crates/iris-gfx/src/dev/ng1/rex3_rec.rs) |
+| `IRIS_REX3_TRACE` | Trace REX3 GFIFO and CPU accesses from board start to this path (`gputrace` builds). | [crates/iris-gfx/src/dev/ng1/rex3_trace.rs](crates/iris-gfx/src/dev/ng1/rex3_trace.rs) |
 | `IRIS_NO_EXIT_ON_POWEROFF` | Any presence prevents process exit on guest power-off/CI quit; set by GUI. | [src/ci.rs](src/ci.rs) |
-| `IRIS_NO_FETCH_VERIFY` | 1 suppresses fetchverify checks in a fetchverify build. | [src/cpu/mips_exec.rs](src/cpu/mips_exec.rs) |
-| `IRIS_NO_IDLE` | Any presence disables idle parking at startup; `idle on` re-enables it. | [src/cpu/idle_park.rs](src/cpu/idle_park.rs) |
-| `IRIS_IDLE_WARMUP_SECS` | Seconds after CPU start before idle parking engages (default 60; 0 disables the warm-up). | [src/cpu/idle_park.rs](src/cpu/idle_park.rs) |
-| `IRIS_NO_INLINE_MEM` | Any presence disables JIT inline memory emission. | [src/cpu/jitv2/codegen.rs](src/cpu/jitv2/codegen.rs) |
-| `IRIS_NO_JIT` | Any presence disables the REX3 shader JIT and the IMPACT raster JIT; does not select the MIPS engine. | [src/dev/ng1/rex3.rs](src/dev/ng1/rex3.rs) |
+| `IRIS_NO_FETCH_VERIFY` | 1 suppresses fetchverify checks in a fetchverify build. | [crates/iris-cpu/src/cpu/mips_exec.rs](crates/iris-cpu/src/cpu/mips_exec.rs) |
+| `IRIS_NO_IDLE` | Any presence disables idle parking at startup; `idle on` re-enables it. | [crates/iris-cpu/src/cpu/idle_park.rs](crates/iris-cpu/src/cpu/idle_park.rs) |
+| `IRIS_IDLE_WARMUP_SECS` | Seconds after CPU start before idle parking engages (default 60; 0 disables the warm-up). | [crates/iris-cpu/src/cpu/idle_park.rs](crates/iris-cpu/src/cpu/idle_park.rs) |
+| `IRIS_NO_INLINE_MEM` | Any presence disables JIT inline memory emission. | [crates/iris-cpu/src/cpu/jitv2/codegen.rs](crates/iris-cpu/src/cpu/jitv2/codegen.rs) |
+| `IRIS_NO_JIT` | Any presence disables the REX3 shader JIT and the IMPACT raster JIT; does not select the MIPS engine. | [crates/iris-gfx/src/dev/ng1/rex3.rs](crates/iris-gfx/src/dev/ng1/rex3.rs) |
 | `IRIS_OPT_SPEED` | Presence selects speed optimization in offline PCP/corpus measurements. | [src/bin/jitv2_pcp_dump.rs](src/bin/jitv2_pcp_dump.rs) |
-| `IRIS_PRINT_OFFSETS` | Presence runs the opt-in layout-offset print test. | [src/cpu/jitv2/mod.rs](src/cpu/jitv2/mod.rs) |
+| `IRIS_PRINT_OFFSETS` | Presence runs the opt-in layout-offset print test. | [crates/iris-cpu/src/cpu/jitv2/mod.rs](crates/iris-cpu/src/cpu/jitv2/mod.rs) |
 | `IRIS_QOS` | HostGL QoS: default/off disables promotion; quiet suppresses logging. | [iris-hostgl/src/qos.rs](iris-hostgl/src/qos.rs) |
-| `IRIS_REX_JIT_PROFILE` | REX3 shader profile path; see rex3_profile.rs for off/empty behavior. | [src/dev/ng1/rex3_profile.rs](src/dev/ng1/rex3_profile.rs) |
-| `IRIS_RSH_TRACE` | Any presence logs each built-in rsh request to stderr (command, bytes moved, duration, unfinished requests), in any build. | [src/net/rsh.rs](src/net/rsh.rs) |
-| `IRIS_RUN_CL_PROBE` | Presence runs the opt-in Cranelift probe test. | [src/cpu/jitv2/mod.rs](src/cpu/jitv2/mod.rs) |
+| `IRIS_REX_JIT_PROFILE` | REX3 shader profile path; see rex3_profile.rs for off/empty behavior. | [crates/iris-gfx/src/dev/ng1/rex3_profile.rs](crates/iris-gfx/src/dev/ng1/rex3_profile.rs) |
+| `IRIS_RSH_TRACE` | Any presence logs each built-in rsh request to stderr (command, bytes moved, duration, unfinished requests), in any build. | [crates/iris-dev/src/net/rsh.rs](crates/iris-dev/src/net/rsh.rs) |
+| `IRIS_RUN_CL_PROBE` | Presence runs the opt-in Cranelift probe test. | [crates/iris-cpu/src/cpu/jitv2/mod.rs](crates/iris-cpu/src/cpu/jitv2/mod.rs) |
 | `IRIS_SNAPSHOT_SKIP_CHECK` | 1 bypasses selected snapshot compatibility checks; diagnostic escape hatch. | [src/machine.rs](src/machine.rs) |
 | `IRIS_SOCKET` | iris-ci default socket override (Unix path or TCP address). | [src/iris_ci_main.rs](src/iris_ci_main.rs) |
-| `IRIS_TFTP_TRACE` | Any presence logs each built-in TFTP request to stderr (file, found or not, bytes, blocks, retransmits, duplicate ACKs, slowest ACK, total time), in any build. | [src/net/tftp.rs](src/net/tftp.rs) |
-| `MGRAS_REPLAY` | Replay input path for opt-in IMPACT golden tests. | [src/dev/mgras/record.rs](src/dev/mgras/record.rs) |
-| `MGRAS_REPLAY_OUT` | Optional IMPACT replay image output path. | [src/dev/mgras/record.rs](src/dev/mgras/record.rs) |
-| `MGRAS_REPLAY_TRACE` | IMPACT replay tracing selector (`gputrace` builds). | [src/dev/mgras/record.rs](src/dev/mgras/record.rs) |
-| `MGRAS_SIZE_PROBE` | Input for the opt-in IMPACT size/probe test. | [src/dev/mgras/mgras_tests.rs](src/dev/mgras/mgras_tests.rs) |
+| `IRIS_TFTP_TRACE` | Any presence logs each built-in TFTP request to stderr (file, found or not, bytes, blocks, retransmits, duplicate ACKs, slowest ACK, total time), in any build. | [crates/iris-dev/src/net/tftp.rs](crates/iris-dev/src/net/tftp.rs) |
+| `MGRAS_REPLAY` | Replay input path for opt-in IMPACT golden tests. | [crates/iris-gfx/src/dev/mgras/record.rs](crates/iris-gfx/src/dev/mgras/record.rs) |
+| `MGRAS_REPLAY_OUT` | Optional IMPACT replay image output path. | [crates/iris-gfx/src/dev/mgras/record.rs](crates/iris-gfx/src/dev/mgras/record.rs) |
+| `MGRAS_REPLAY_TRACE` | IMPACT replay tracing selector (`gputrace` builds). | [crates/iris-gfx/src/dev/mgras/record.rs](crates/iris-gfx/src/dev/mgras/record.rs) |
+| `MGRAS_SIZE_PROBE` | Input for the opt-in IMPACT size/probe test. | [crates/iris-gfx/src/dev/mgras/mgras_tests.rs](crates/iris-gfx/src/dev/mgras/mgras_tests.rs) |
 
 `RUST_LOG` configures the host Rust logger; `IRIS_DEBUG_LOG` configures device
 logging. Standard host variables (`HOME`, `XDG_CACHE_HOME`, `LOCALAPPDATA`,
@@ -717,7 +717,7 @@ prints a warning if you try. See
 ### REX3 drawing and the graphics JIT (`--features rex-jit`)
 
 Every build draws through one generic REX3 draw routine that is specialised
-ahead of time into 400+ native draw functions (`src/dev/ng1/rex3_shaders.rs`, generated
+ahead of time into 400+ native draw functions (`crates/iris-gfx/src/dev/ng1/rex3_shaders.rs`, generated
 by `tools/gen_rex3_shaders.py` from a corpus of the DrawMode0/DrawMode1/clip
 combinations the IRIX desktop actually uses). Most desktop drawing already runs
 through one of those, with no JIT involved.
@@ -736,7 +736,7 @@ cargo run --release --features rex-jit
 
 ### IMPACT raster JIT (`--features gr4-jit`)
 
-`gr4-jit` compiles IMPACT's raster pipelines (`src/dev/mgras/rss_jit`). The
+`gr4-jit` compiles IMPACT's raster pipelines (`crates/iris-gfx/src/dev/mgras/rss_jit`). The
 registers that shape a primitive's pipeline reduce to a 64-bit key, and each
 key gets its own monomorphised shader. The key covers the primitive (fills,
 X lines, character stipple, transfer lines, GL triangles and GL lines),
@@ -747,7 +747,7 @@ coefficients reach a shader as data in a per-board context.
 
 Shaders compile on a background thread. Until a primitive's shader is ready
 the interpreter draws it. Shaders are bit-exact with the interpreter:
-`src/dev/mgras/rss_jit_tests.rs` sweeps the key space and compares whole
+`crates/iris-gfx/src/dev/mgras/rss_jit_tests.rs` sweeps the key space and compares whole
 boards (`GR4_JIT_SWEEP=<factor>` and `GR4_JIT_SEED=<n>` widen it). Measured
 on representative primitives, they are 2.5-6x faster than the interpreter:
 fills and transfers 5-6x, lines and text about 3x, shaded and textured
@@ -760,7 +760,7 @@ triangles 2.5x.
 
 ### GR2 span JIT (`--features gr2-jit`)
 
-`gr2-jit` compiles GR2's RE3 span pipelines (`src/dev/gr2/re3_jit`), on the
+`gr2-jit` compiles GR2's RE3 span pipelines (`crates/iris-gfx/src/dev/gr2/re3_jit`), on the
 pattern of `gr4-jit`. On GR2 the HQ2/GE7 side walks primitives and RE3 draws
 spans, so the unit is an RE3 instruction: SHADED (every iterator steps per
 pixel, with depth, stencil and blending) and FLAT / FLAT4. The state that
@@ -773,7 +773,7 @@ clipped to the scissor once, not per pixel.
 
 Shaders compile on a background thread; until a span's shader is ready the
 interpreter draws it. They are bit-exact with the interpreter:
-`src/dev/gr2/re3_jit_tests.rs` sweeps the keys and compares whole boards
+`crates/iris-gfx/src/dev/gr2/re3_jit_tests.rs` sweeps the keys and compares whole boards
 (`GR2_JIT_SWEEP=<factor>`, `GR2_JIT_SEED=<n>`). Fills run about 3x faster
 (a 24-bit quad fill went from 78 to 245 Mpx/s in IRIX, Z-buffered from 58
 to 115), smooth shading 2-3x. Small triangles gain nothing: the HQ2 side

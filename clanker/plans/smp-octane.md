@@ -203,7 +203,7 @@ kernel boot that bypasses the PROM would have to fake them.
    NMI every CPU enters the NMI path and the one whose PRID equals the GDA's
    master number dumps, the others save registers and spin.
 
-### 1.4 What `src/dev/heart.rs` has and lacks
+### 1.4 What `crates/iris-dev/src/dev/heart.rs` has and lacks
 
 Has: MODE stored (only bit 13 and the ECC bits matter), all four `mask`
 entries stored and readable, SET_ISR/CLR_ISR/ISR, COUNT from the host clock
@@ -236,20 +236,20 @@ single-CPU memory semantics.
 
 | Where | What | Becomes |
 |---|---|---|
-| `src/cpu/idle_park.rs:65,69` `PARKER`/`PARKED`, `wake()` with no argument (called from `mips_core.rs` claim_ip7 and set_interrupt, `mips_exec.rs` signal, `dev/ioc.rs`, `dev/heart.rs:297`) | one parked thread slot | a `ParkSlot` per CPU, handed to interrupt sources together with the word |
-| `src/dev/heart.rs:189` `cpu_irq`, `:134` `levels()` | one word, mask[0] | see 1.4 |
-| `src/ppmem/ppmem.rs:646-689` `SpaceState { sink, sink2 }` behind an `UnsafeCell` whose contract is "only the CPU thread" | one bitmap sink per consumer, no lock | a `Vec` of sinks under a Mutex; remaps run inside the rendezvous (4.2) |
+| `crates/iris-cpu/src/cpu/idle_park.rs:65,69` `PARKER`/`PARKED`, `wake()` with no argument (called from `mips_core.rs` claim_ip7 and set_interrupt, `mips_exec.rs` signal, `dev/ioc.rs`, `dev/heart.rs:297`) | one parked thread slot | a `ParkSlot` per CPU, handed to interrupt sources together with the word |
+| `crates/iris-dev/src/dev/heart.rs:189` `cpu_irq`, `:134` `levels()` | one word, mask[0] | see 1.4 |
+| `crates/iris-core/src/ppmem/ppmem.rs:646-689` `SpaceState { sink, sink2 }` behind an `UnsafeCell` whose contract is "only the CPU thread" | one bitmap sink per consumer, no lock | a `Vec` of sinks under a Mutex; remaps run inside the rendezvous (4.2) |
 | `src/ip30.rs:61` `LAST_PC` (and the O2's) | one AtomicU64 | `[AtomicU64; 4]` indexed by cpu |
-| `src/perfetto/mod.rs:201` `set_guest_cycles` | one cycles pointer | CPU 0, or one counter track per CPU |
+| `crates/iris-core/src/perfetto/mod.rs:201` `set_guest_cycles` | one cycles pointer | CPU 0, or one counter track per CPU |
 | `src/ip30_machine.rs:198,428` `fasttick` | one Arc shared by graphics and the CPU | one per CPU; the status line shows each |
 | `src/ip30_machine.rs:259` `mgras.set_cpu_cycles` | one `CyclesPtr` | a slice; the bar sums or lists them |
-| `src/thread_affinity.rs:16` `PerfRole::MipsCpu`, thread name `MIPS-CPU` (`mips_exec.rs:11538`) | every CPU thread pins to the same core | `MipsCpu(n)`, `MIPS-CPU{n}` |
+| `crates/iris-core/src/thread_affinity.rs:16` `PerfRole::MipsCpu`, thread name `MIPS-CPU` (`mips_exec.rs:11538`) | every CPU thread pins to the same core | `MipsCpu(n)`, `MIPS-CPU{n}` |
 | `src/monitor.rs:163-176` | a command goes to the **first** device that registered it | one `CpuSet` device (4.7) |
-| `src/gdb_stub.rs:29-33` `SingleThreadBase` | one thread | `MultiThreadBase`, tid = cpu+1 |
-| `src/cpu/mips_exec.rs:3089-3116` `install_jit_mem_ptrs` | publishes one core address and one geometry into the shared `Jitv2` | see 4.9 |
-| `src/cpu/jitv2/jitv2.rs:2765` `CompileQueue.cpu` | the one CPU a worker-led flush stops | all CPUs, through the rendezvous |
+| `crates/iris-cpu/src/gdb_stub.rs:29-33` `SingleThreadBase` | one thread | `MultiThreadBase`, tid = cpu+1 |
+| `crates/iris-cpu/src/cpu/mips_exec.rs:3089-3116` `install_jit_mem_ptrs` | publishes one core address and one geometry into the shared `Jitv2` | see 4.9 |
+| `crates/iris-cpu/src/cpu/jitv2/jitv2.rs:2765` `CompileQueue.cpu` | the one CPU a worker-led flush stops | all CPUs, through the rendezvous |
 | `src/ip30.rs:268` `CachedFlashLines` | one store of dirty PROM lines | one per CPU: on hardware those lines are private to each CPU's cache, and the PROM keeps per-CPU scratch in them |
-| `src/snapshot.rs`, `machine.rs:1640,1883` | one `cpu` state | `cpu`, `cpu1`, ...; a missing `cpu1` reads as a 1-CPU snapshot |
+| `crates/iris-core/src/snapshot.rs`, `machine.rs:1640,1883` | one `cpu` state | `cpu`, `cpu1`, ...; a missing `cpu1` reads as a 1-CPU snapshot |
 | `MipsExecutor::symbols` | one `SymbolTable` per executor | one shared Arc |
 
 Statistics, env-var `OnceLock`s, `SMC_HITS`, `JIT_FEEDBACK`, `IDLE_ENABLED`,

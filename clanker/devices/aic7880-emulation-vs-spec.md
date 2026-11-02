@@ -1,4 +1,4 @@
-# AIC-7880: where `src/dev/aic7880.rs` departs from the specification
+# AIC-7880: where `crates/iris-dev/src/dev/aic7880.rs` departs from the specification
 
 Status: open, 2026-10-25. Companion to `docs/o2/aic7880.md` (the spec; section
 numbers below refer to it). Each item says what the chip does, what the
@@ -201,7 +201,7 @@ design; the rest are register-level details that could be fixed inside it.
     drivers check `INTSTAT` first, so this is a safe simplification, but
     note it when implementing stepping (`SEQCTL.STEP` is ignored today).
 
-## C. PCI configuration space (`src/pci.rs` as used by `Aic7880::new_at`)
+## C. PCI configuration space (`crates/iris-dev/src/pci.rs` as used by `Aic7880::new_at`)
 
 23. **Expansion ROM BAR (`0x30`) stores any value** (§5). The chip
     implements a 64 KB ROM BAR (bits 31:15 writable, 14:11 read 0, bit 0

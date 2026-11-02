@@ -9,7 +9,7 @@ For schema_version=2 snapshots, every per-device save_state lives in `<base>.bin
 
 ## Why a tagged enum
 
-Postcard is non-self-describing — it cannot deserialize directly into `toml::Value`, whose Deserialize impl uses `deserialize_any`. To round-trip toml::Value we mirror it as `BinValue` (tagged) in `src/snapshot.rs`:
+Postcard is non-self-describing — it cannot deserialize directly into `toml::Value`, whose Deserialize impl uses `deserialize_any`. To round-trip toml::Value we mirror it as `BinValue` (tagged) in `crates/iris-core/src/snapshot.rs`:
 
 ```rust
 pub enum BinValue {

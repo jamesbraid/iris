@@ -12,7 +12,7 @@
 // The hot path in mips_exec.rs can pass write results through as ExecStatus
 // with zero conversion.
 //
-// BUS_VCE is only ever returned by MipsCache (src/cpu/mips_cache_v2.rs).
+// BUS_VCE is only ever returned by MipsCache (crates/iris-cpu/src/cpu/mips_cache_v2.rs).
 // BusDevice implementations must never return BUS_VCE.
 pub const BUS_OK:   u32 = 0x0000_0000;
 pub const BUS_BUSY: u32 = 0x0000_0100;

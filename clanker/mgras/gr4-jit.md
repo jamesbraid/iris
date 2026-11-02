@@ -1,6 +1,6 @@
 # The raster JIT (`gr4-jit`) and its Cranelift pitfalls
 
-`src/dev/mgras/rss_jit` compiles RSS/TE1 pixel pipelines. The rules below
+`crates/iris-gfx/src/dev/mgras/rss_jit` compiles RSS/TE1 pixel pipelines. The rules below
 are what it took to make shaders exact and fast. Read them before changing
 an emitter.
 
@@ -19,14 +19,14 @@ an emitter.
     `fmin`/`fmax` propagate NaN.
   - `as` conversions saturate (`fcvt_to_*_sat`).
 - No libm and no float in the pixel path: everything a fragment computes
-  is defined in `src/dev/mgras/fixed.rs`, and the JIT emits the same
+  is defined in `crates/iris-gfx/src/dev/mgras/fixed.rs`, and the JIT emits the same
   integer operations. Change one and you must change the other. Component and byte scaling come from tables
   filled by the interpreter's own divisions. Shaders make no calls.
 - Booleans from `icmp`/`fcmp` are 0/1 bytes. `bnot`, `bor_not` and
   `band_not` on them give 0xFE/0xFF, which branch as true. That made every
   texture skip. Negate a comparison by flipping its condition code.
 
-- Colour is 12.16 fixed point end to end (`src/dev/mgras/fixed.rs`):
+- Colour is 12.16 fixed point end to end (`crates/iris-gfx/src/dev/mgras/fixed.rs`):
   iterators, texels widened to 12 bits, 8-bit bilinear weights, the 8-bit
   mip fraction, texture environment, fog and blending, then a shift down
   on write. Depth is a z.12 integer DDA. Texture coordinates are integer

@@ -28,7 +28,7 @@ Hard constraints:
 
 ## Where frames come from today (survey summary)
 
-- `GfxDisplay` (`src/gfx_display.rs`) is common to all boards; `screen()`
+- `GfxDisplay` (`crates/iris-gfx/src/gfx_display.rs`) is common to all boards; `screen()`
   gives `Mutex<Rex3Screen>` with `rgba`, `width`, `height`.
 - GR2, IMPACT, O2 compose on their own refresh threads and keep `rgba`
   current (`prebuilt = true`).

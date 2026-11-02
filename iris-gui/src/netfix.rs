@@ -2,7 +2,7 @@
 //!
 //! The emulator's NAT engine expects the IRIX guest at a fixed address derived
 //! from the configured NAT subnet (gateway = network+1, guest = network+2; see
-//! `src/config.rs` / `src/net/mod.rs`). When the guest's `ec0` is unset or set to a
+//! `crates/iris-core/src/config.rs` / `crates/iris-dev/src/net/mod.rs`). When the guest's `ec0` is unset or set to a
 //! different address — e.g. a static config left over from another subnet — NAT
 //! traffic never flows and the GUI's NET light stays red.
 //!

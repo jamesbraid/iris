@@ -1,5 +1,5 @@
 //! Standalone offline analyzer for a `j2 dump-pcp` capture file
-//! (`src/cpu/jitv2/pcp_dump.rs`'s format): loads the dumped `PhysicalCodePage`
+//! (`crates/iris-cpu/src/cpu/jitv2/pcp_dump.rs`'s format): loads the dumped `PhysicalCodePage`
 //! state + raw 4KB memory, re-runs the real reachability walker over every
 //! offset that was requested/compiled/denylisted at capture time, and
 //! prints disassembly + classification for each — the offline counterpart

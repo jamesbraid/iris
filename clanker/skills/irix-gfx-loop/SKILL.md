@@ -152,7 +152,7 @@ emulator behaviour and gotchas go in `clanker/<board>/`.
 | Board | Capture | Replay as a unit test |
 |---|---|---|
 | REX3 | `rex rec FILE` ... `rex rec off` (`rex rec mark` adds a checkpoint) | `REX3_REPLAY=FILE cargo test --release rex3_replay_file -- --nocapture` (`REX3_REPLAY_ENGINE=interp\|jit`, `REX3_REPLAY_NOCHECK`) |
-| GR2 | `gr2 trace` of the case, cut to the HQ2 FIFO writes from the window setup (`0x1e5`) to the `GL_FINISH` after the draw | `GR2_REPLAY=FILE cargo test --release --lib gr2_replay_file -- --ignored` (`GR2_REPLAY_OUT`); pinned cases use `replay_trace()` in `src/dev/gr2/hq2_tests.rs` |
+| GR2 | `gr2 trace` of the case, cut to the HQ2 FIFO writes from the window setup (`0x1e5`) to the `GL_FINISH` after the draw | `GR2_REPLAY=FILE cargo test --release --lib gr2_replay_file -- --ignored` (`GR2_REPLAY_OUT`); pinned cases use `replay_trace()` in `crates/iris-gfx/src/dev/gr2/hq2_tests.rs` |
 | IMPACT | `mgras rec FILE` ... `mgras rec off` | `MGRAS_REPLAY=FILE cargo test --release --lib --features gr4-jit mgras_replay_file -- --nocapture` (`MGRAS_REPLAY_BOARD=high\|max`, `MGRAS_REPLAY_NOCHECK=1`) |
 
 `tools/rex3-rec.py` and `tools/mgras-rec.py` inspect and slice recordings.

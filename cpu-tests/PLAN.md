@@ -21,15 +21,15 @@ This document was the roadmap.
 
 | Thing | Where | Note |
 |---|---|---|
-| 101 host-side Rust CPU tests | `src/cpu/mips_exec_test.rs` | ALU, FPU, TLB, LL/SC, COP1X, FR-bit aliasing, fusion… Runs under `cargo test`. |
-| TLB unit tests | `src/cpu/mips_tlb_test.rs` | |
-| SGI volume-header writer | `src/sgi_vh.rs` | Writes magic + partition table + checksum. **Does not yet write the volume directory** (the `vd[15]` array at offset `0x48`) — that is what makes a disk bootable by name. |
-| CD-ROM with 512↔2048 block switching | `src/scsi.rs:174` | Exactly what the PROM/`dksc` needs to read an SGI VH + EFS off a CD. |
+| 101 host-side Rust CPU tests | `crates/iris-cpu/src/cpu/mips_exec_test.rs` | ALU, FPU, TLB, LL/SC, COP1X, FR-bit aliasing, fusion… Runs under `cargo test`. |
+| TLB unit tests | `crates/iris-cpu/src/cpu/mips_tlb_test.rs` | |
+| SGI volume-header writer | `crates/iris-core/src/sgi_vh.rs` | Writes magic + partition table + checksum. **Does not yet write the volume directory** (the `vd[15]` array at offset `0x48`) — that is what makes a disk bootable by name. |
+| CD-ROM with 512↔2048 block switching | `crates/iris-dev/src/scsi.rs:174` | Exactly what the PROM/`dksc` needs to read an SGI VH + EFS off a CD. |
 | Runtime disc load | `iris-ci cdrom-load <id> <path>` | Swap a freshly built test image without restarting the emulator. |
 | Serial drive + capture | `iris-ci serial-send / serial-wait / --serial-log` | The CI result channel. |
 | Snapshots | `iris-ci save/restore` (~145 ms restore) | Restore a "sitting at the PROM prompt" snapshot instead of re-POSTing each run. |
-| Monitor console (TCP 8888) | `src/cpu/mips_exec.rs:5880+` | `regs`, `cop0`, `cop1`, `mem`, `dis`, `bp add`, `step`, `loadsym`, `l1i/l1d/l2`, `tlb dump`. This is the debugger for failing tests. |
-| GDB stub | `src/gdb_stub.rs`, `--gdb-port` | `mips-…-gdb` can single-step a failing test binary. |
+| Monitor console (TCP 8888) | `crates/iris-cpu/src/cpu/mips_exec.rs:5880+` | `regs`, `cop0`, `cop1`, `mem`, `dis`, `bp add`, `step`, `loadsym`, `l1i/l1d/l2`, `tlb dump`. This is the debugger for failing tests. |
+| GDB stub | `crates/iris-cpu/src/gdb_stub.rs`, `--gdb-port` | `mips-…-gdb` can single-step a failing test binary. |
 | YAML test driver | `tools/iris-test`, `tools/tests/*.yaml` | Existing pattern for scripted emulator runs. |
 
 The Rust tests exercise the *interpreter's* opcode handlers from the inside.
@@ -41,7 +41,7 @@ IRIX does. The two are complementary; neither replaces the other.
 
 ## 2. Facts established about the boot path (verified against the PROM image)
 
-Strings extracted from the embedded PROM (`src/prombin.rs`, 070-9101-011, 512 KB):
+Strings extracted from the embedded PROM (`crates/iris-dev/src/prombin.rs`, 070-9101-011, 512 KB):
 
 - **The PROM loads both ELF and COFF**: `"binary is ELF"`, `"binary is COFF"`,
   `"Illegal f_magic number 0x%x, expected MIPSELMAGIC or MIPSEBMAGIC"`,
@@ -58,11 +58,11 @@ Strings extracted from the embedded PROM (`src/prombin.rs`, 070-9101-011, 512 KB
   the "EFS CDROM" shape you want.
 - **Network boot exists in the PROM**: full BOOTP + TFTP client
   (`bootp()sashIP24`, `"TFTP: RRQ for file %s to %s"`, `network(%d)tftp()`).
-  IRIS answers BOOTP (`src/net/mod.rs:1679`) but **has no TFTP server** — adding one
+  IRIS answers BOOTP (`crates/iris-dev/src/net/mod.rs:1679`) but **has no TFTP server** — adding one
   (~150 lines in `net.rs`) would let `boot -f bootp()cputest.elf` pull the
   freshly-built ELF straight off the host with no image rebuild at all.
 
-Volume header layout (matches `src/sgi_vh.rs` offsets, confirms the struct):
+Volume header layout (matches `crates/iris-core/src/sgi_vh.rs` offsets, confirms the struct):
 
 ```
 0x000 magic 0x0BE5A941 | 0x004 root/swap part | 0x008 bootfile[16]
@@ -95,7 +95,7 @@ partition table @ 0x138
 Three things this settles, two of which contradict the obvious guess:
 
 1. **Partition 8 spans every voldir file.** It is 48736 blocks (~24 MB) here,
-   not the 8 sectors `src/sgi_vh.rs` writes today. The volume-header partition
+   not the 8 sectors `crates/iris-core/src/sgi_vh.rs` writes today. The volume-header partition
    must cover all the data the voldir points at; partition 7 starts after it.
 2. **Partition 7 is type 5 (`PT_SYSV`), not type 7 (`PT_EFS`)** — even though
    the filesystem on it *is* EFS. Confirmed by the superblock at block 1 of
@@ -126,8 +126,8 @@ and decide expectations at runtime:
 | ISA | MIPS III | MIPS IV (RECIP/RSQRT, MOVF/MOVT, COP1X MADD/LDXC1…, PREF) |
 | L2 | present | absent, external, or Triton on-die per feature |
 
-(source: `src/cpu/mips_core.rs:348-364`, `src/cpu/mips_cache_v2.rs:41-100`,
-`src/cpu/mips_exec.rs:777-790`)
+(source: `crates/iris-cpu/src/cpu/mips_core.rs:348-364`, `crates/iris-cpu/src/cpu/mips_cache_v2.rs:41-100`,
+`crates/iris-cpu/src/cpu/mips_exec.rs:777-790`)
 
 Design rule: **every check declares which CPUs it applies to.** A MIPS IV
 opcode is a *pass* on R4400 only if it raises Reserved Instruction, and a
@@ -161,13 +161,13 @@ Secondary path (debugging + the external `cheritest` corpus): the IRIS **test
 device** — a signature register the guest probes for, plus `PUTC`, a full
 machine-state `DUMP`, and an `EXIT` that sets the process exit code. Absent on
 real hardware, so the suite probes for it and falls back to SCC-only output.
-Landed as `--test-device` (`src/cpu/testdev.rs`).
+Landed as `--test-device` (`crates/iris-cpu/src/cpu/testdev.rs`).
 
 ### 4.2 Console
 
 Write bytes straight to the Z85C30 through KSEG1 (uncached):
 
-- IOC base `0x1FBD9800` (`src/dev/ioc.rs:15`), SCC at `+0x30..0x3C`
+- IOC base `0x1FBD9800` (`crates/iris-dev/src/dev/ioc.rs:15`), SCC at `+0x30..0x3C`
   (`IOC_SERIAL1_CMD/DATA`, `IOC_SERIAL2_CMD/DATA`) → KSEG1 `0xBFBD9830…`.
 - Poll TX-empty in RR0 before each byte. ~40 lines of C.
 - The PROM has already initialised the console before it hands control over, so
@@ -234,7 +234,7 @@ be *stable*), `0x8000000000000000 / -1`, 32-bit results sign-extended.
 
 **mem/** — `lb/lbu/lh/lhu/lw/lwu/ld/sb/sh/sw/sd`; **`lwl/lwr/swl/swr` and
 `ldl/ldr/sdl/sdr` at all 4/8 alignments** (big-endian merge semantics — very
-high bug density, and `src/cpu/mips_exec_test.rs` only covers some cases);
+high bug density, and `crates/iris-cpu/src/cpu/mips_exec_test.rs` only covers some cases);
 unaligned `lw`/`ld` → AdEL/AdES with correct `BadVAddr`; `ll/sc` and `lld/scd`
 including SC-fails-after-intervening-store, SC-fails-after-ERET, and `LLAddr`;
 KUSEG/KSEG0/KSEG1/KSEG2/XKPHYS address decoding.
@@ -254,7 +254,7 @@ COP2/COP3 always), address error on fetch, correct **vector selection**
 **cp0/** — per-register writable-bit masks (R4400 vs R5000 differ; `PRId`
 read-only; `Config` mostly read-only except K0/CU); `Count`/`Compare` →
 IP7 timer interrupt and `Count` running at half clock
-(`src/cpu/mips_core.rs:589`); `Random` decrement + `Wired` floor; `Context`/
+(`crates/iris-cpu/src/cpu/mips_core.rs:589`); `Random` decrement + `Wired` floor; `Context`/
 `XContext` auto-fill on TLB miss; `WatchLo/WatchHi` watchpoints on load/store;
 `LLAddr`; `TagLo/TagHi`; software interrupts via `Cause.IP0/IP1`; `Status.IM`
 masking; interrupt taken in a delay slot.
@@ -280,7 +280,7 @@ this area has already bitten once.
 neg/mov` in S and D; all conversions (`cvt.s/d/w/l`, `round/trunc/ceil/floor`)
 under all four rounding modes; **IEEE edge cases** — signed zeros, infinities,
 quiet vs signalling NaN propagation, denormal input/output handling (R4400
-punts to software on underflow; see `src/cpu/mips_exec.rs:3779`); FCSR
+punts to software on underflow; see `crates/iris-cpu/src/cpu/mips_exec.rs:3779`); FCSR
 cause/enable/flag bit interaction, trapped vs untrapped exceptions;
 all 16 `C.cond.fmt` predicates; `BC1T/F` + `BC1TL/FL` with a delay slot;
 FCSR readback after each op.
@@ -370,13 +370,13 @@ Three ways to get the binary executing, fastest first:
 **Tier 0 — direct load (needs a small IRIS change).**
 Add `--load-elf FILE` / a monitor `loadbin <file> <addr>` command, then
 `jump` + `run`. Sub-second iteration, no PROM, no image. ~100 lines against the
-existing monitor command table in `src/cpu/mips_exec.rs`. Best debug loop by far;
+existing monitor command table in `crates/iris-cpu/src/cpu/mips_exec.rs`. Best debug loop by far;
 also the only mode that can run before POST.
 
 **Tier 1 — PROM boot from a scratch disk.**
 Write the ELF into the volume-header directory of a small raw image attached
 at a spare SCSI ID, `boot -f dksc(0,2,8)cputest`. Needs only the `vd[15]`
-writer added to `src/sgi_vh.rs`. Rebuild = write a few hundred KB.
+writer added to `crates/iris-core/src/sgi_vh.rs`. Rebuild = write a few hundred KB.
 
 **Tier 2 — the real deliverable: bootable EFS CD.**
 ```
@@ -403,7 +403,7 @@ image/
   fallback if `mkefs` slips.
 
 **Optional accelerator — TFTP.** Adding a TFTP server next to the existing
-BOOTP handler in `src/net/mod.rs` unlocks `boot -f bootp()cputest.elf`: no image,
+BOOTP handler in `crates/iris-dev/src/net/mod.rs` unlocks `boot -f bootp()cputest.elf`: no image,
 no disk, straight from the host build directory. ~150 lines, and it exercises
 the PROM's network stack (which nothing currently tests).
 
@@ -477,7 +477,7 @@ What remains for the CD proper:
    guest with `mkfs_efs` on a scratch volume and pull it out with
    `iris-ci scratch-read`, then diff against it.
    Remember partition 7 is type **5 (`PT_SYSV`)** on real SGI media, not type 7.
-2. **The 2048/512 block-size dance.** `src/scsi.rs` already switches the drive
+2. **The 2048/512 block-size dance.** `crates/iris-dev/src/scsi.rs` already switches the drive
    between 2048- and 512-byte logical blocks, which is what lets the PROM read
    an SGI volume header off a CD at all. The image just needs writing at the
    size the PROM asks for.

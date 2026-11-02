@@ -47,7 +47,7 @@ See [HELP.md](../HELP.md) for monitor commands, serial ports, NVRAM, etc.
 |------|------|
 | **RAM presets** | Memory menu + Memory tab: 32–512 MB on IP24/IP22; IP28 also offers 768/1024 MB |
 | **RAM workflow** | Edits disabled while VM is running; **“Applied at next Start”** when stopped; shows config vs last-started total |
-| **Extended RAM fix** | If PROM only POSTs lomem, core **synthesizes MEMCFG** for himem banks 2–3 when configured (`src/dev/mc.rs`) — see [clanker/devices/extended-ram-memcfg.md](../clanker/devices/extended-ram-memcfg.md) |
+| **Extended RAM fix** | If PROM only POSTs lomem, core **synthesizes MEMCFG** for himem banks 2–3 when configured (`crates/iris-dev/src/dev/mc.rs`) — see [clanker/devices/extended-ram-memcfg.md](../clanker/devices/extended-ram-memcfg.md) |
 | **MHz vs MIPS** | Status-bar **MIPS** = real host speed; IRIX System Manager **MHz** = `hinv` inventory (cosmetic). Debug tab explains build features |
 
 **Important:** `banks` in config is applied only when the VM **Starts**. Changing RAM in the GUI while IRIX is running updates the saved config, not the live guest — **Stop → change → Start**.

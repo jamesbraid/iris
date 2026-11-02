@@ -649,7 +649,7 @@ it stop), `locks` (who holds what), the device's own `status` command, then
 ## GDB stub
 
 `--gdb-port <port>` starts a GDB Remote Serial Protocol stub
-(`src/gdb_stub.rs`) on `127.0.0.1:<port>`, one client at a time. Breakpoints
+(`crates/iris-cpu/src/gdb_stub.rs`) on `127.0.0.1:<port>`, one client at a time. Breakpoints
 set by GDB are removed when the client disconnects.
 
 ```sh

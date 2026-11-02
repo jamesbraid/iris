@@ -95,7 +95,7 @@ references as `clanker/...`.
   subcommands), update `debug.md` in the same change. It is the reference
   people and agents use; a command missing from it does not exist for them.
   Update `clanker/iris_mcp.py` too if an MCP tool wraps the command.
-- **Architecture**: when you change a trait in `src/traits.rs`, the threading
+- **Architecture**: when you change a trait in `crates/iris-core/src/traits.rs`, the threading
   of a device, the locking scheme, the GFIFO, or how jitv2 publishes and
   invalidates code, update `HACKING.md`.
 - **Configuration and features**: `FEATURES.md` and `HELP.md`.

@@ -14,7 +14,7 @@ let ci_overlay = format!("/tmp/iris-ci-{}-scsi{}.overlay", ci_pid, id);
 hpc3.add_scsi_device_with_overlay(id as usize, &path, dev.cdrom, discs, dev.overlay, &ci_overlay)
 ```
 
-`src/dev/wd33c93a.rs:255-258` honors the override:
+`crates/iris-dev/src/dev/wd33c93a.rs:255-258` honors the override:
 ```rust
 let overlay_path = overlay_path_override
     .map(|s| s.to_string())

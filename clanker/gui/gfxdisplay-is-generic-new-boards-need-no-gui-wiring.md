@@ -10,7 +10,7 @@ in core to know about `_phys.mgras`, which it already did by the time the GUI
 work started.
 
 So when a new board lands in core and implements `GfxDisplay`
-(`src/gfx_display.rs`), the GUI's framebuffer path picks it up automatically.
+(`crates/iris-gfx/src/gfx_display.rs`), the GUI's framebuffer path picks it up automatically.
 What *does* need GUI-side work for a new board:
 
 - A way to select it in `[graphics] board`.

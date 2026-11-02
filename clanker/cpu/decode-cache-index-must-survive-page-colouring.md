@@ -1,6 +1,6 @@
 # The decode cache index must survive page colouring
 
-Status: fixed 2026-10-27 (hashed index in `src/cpu/decode_cache.rs`).
+Status: fixed 2026-10-27 (hashed index in `crates/iris-cpu/src/cpu/decode_cache.rs`).
 
 ## Symptom
 

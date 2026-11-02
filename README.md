@@ -255,14 +255,14 @@ it vendors — is also BSD 3-Clause, so the whole binary stays BSD 3-Clause. See
 notice.
 
 The status bar and debug overlays use SGI's Screen 16 bitmap font, copyright
-Silicon Graphics, Inc., under the MIT license. `src/vga_font.rs` is generated
+Silicon Graphics, Inc., under the MIT license. `crates/iris-gfx/src/vga_font.rs` is generated
 from it by `tools/gen-screen-font.py`.
 
 The Octane's device models are ported from [Origami](https://github.com/jamesbraid/origami)'s
 [QEMU models](https://github.com/jamesbraid/qemu-sgi-origami), by the same
 author, also BSD 3-Clause.
 
-The Octane's boot flash (`src/dev/sflash.rs`) derives from MAME's
+The Octane's boot flash (`crates/iris-dev/src/dev/sflash.rs`) derives from MAME's
 [`intelfsh.cpp`](https://github.com/mamedev/mame/blob/master/src/devices/machine/intelfsh.cpp),
 BSD 3-Clause, by Aaron Giles.
 

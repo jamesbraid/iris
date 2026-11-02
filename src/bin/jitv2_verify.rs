@@ -1,4 +1,4 @@
-//! JIT v2 trace verifier: replays a `src/cpu/trace.rs`-format execution trace
+//! JIT v2 trace verifier: replays a `crates/iris-cpu/src/cpu/trace.rs`-format execution trace
 //! (captured live via the `trace start <path>` monitor command in a
 //! `developer` build) offline, compiling each recorded instruction through
 //! `Codegen` and diffing the result against what the interpreter actually

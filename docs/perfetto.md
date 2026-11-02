@@ -89,7 +89,7 @@ host thread's name.
 
 ## Adding instrumentation
 
-1. Declare the event in `src/perfetto/events.rs`:
+1. Declare the event in `crates/iris-core/src/perfetto/events.rs`:
 
    ```rust
    pub static VSYNC: EventDef = EventDef::new("vsync", cat::GFX).on_track("Display");
@@ -162,7 +162,7 @@ so call sites need no `#[cfg]`.
 
 ## Format notes
 
-`src/perfetto/proto.rs` writes the protobuf by hand. Perfetto never
+`crates/iris-core/src/perfetto/proto.rs` writes the protobuf by hand. Perfetto never
 renumbers fields, and the ~30 we use are listed there with the upstream
 `.proto` files they come from. The file is a stream of `Trace.packet`
 records on one packet sequence. Event names, categories and argument names

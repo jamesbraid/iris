@@ -1,5 +1,5 @@
 //! Perfetto instrumentation macros and edge-tracker types (see
-//! `src/perfetto/mod.rs`).
+//! `crates/iris-core/src/perfetto/mod.rs`).
 //!
 //! Always compiled, unlike the `perfetto` module itself, so call sites build
 //! with or without `--features perfetto`; without it every macro expands to

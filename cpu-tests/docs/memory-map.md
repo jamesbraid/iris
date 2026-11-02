@@ -3,9 +3,9 @@
 ## Physical RAM does not start at 0
 
 On IP22/IP24, physical RAM begins at **`LOMEM_BASE = 0x08000000`**
-(`src/physical.rs:136`). The only RAM below that is a **512 KB alias** at
+(`crates/iris-core/src/physical.rs:136`). The only RAM below that is a **512 KB alias** at
 `0x00000000..0x0007ffff`, which mirrors `0x08000000..0x0807ffff`
-(`src/physical.rs:165-177`). Everything between `0x00080000` and `0x08000000`
+(`crates/iris-core/src/physical.rs:165-177`). Everything between `0x00080000` and `0x08000000`
 is unmapped.
 
 Unmapped physical addresses are backed by `UnmappedRam`, which **accepts every

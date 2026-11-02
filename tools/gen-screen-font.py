@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Generate src/vga_font.rs from SGI's Screen 16 bitmap font.
+"""Generate crates/iris-gfx/src/vga_font.rs from SGI's Screen 16 bitmap font.
 
 Reads the X11 PCF file (plain or gzipped) and writes one 16-byte bitmap per
 code 0-255, MSB = leftmost pixel. Codes the font has no glyph for are blank.
 
-    tools/gen-screen-font.py [--font Scr16.pcf.gz] [--out src/vga_font.rs]
+    tools/gen-screen-font.py [--font Scr16.pcf.gz] [--out crates/iris-gfx/src/vga_font.rs]
                              [--preview sheet.png]
 
 The font ships as sgi-fonts (SuSE RPM, Gentoo media-fonts/sgi-fonts).

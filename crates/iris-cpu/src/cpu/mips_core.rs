@@ -2495,7 +2495,7 @@ impl MipsCore {
 /// Does NOT perform the two executor-level side effects the real
 /// `handle_exception` also does (`cache.set_llbit(false)`,
 /// `nanotlb_invalidate()`) — neither affects any field `CoreState`
-/// (`src/cpu/trace.rs`) tracks, and `jitv2-verify` has no cache/TLB to touch in
+/// (`crates/iris-cpu/src/cpu/trace.rs`) tracks, and `jitv2-verify` has no cache/TLB to touch in
 /// the first place. `handle_exception` remains responsible for those; this
 /// function only owns the part that's genuinely portable.
 ///

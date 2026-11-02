@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect and convert MGRAS recordings (src/dev/mgras/record.rs).
+"""Inspect and convert MGRAS recordings (crates/iris-gfx/src/dev/mgras/record.rs).
 
   mgras-rec.py text IN.rec OUT.txt [--from N] [--to M] [--no-hash]
       write records [N, M) in the text form; --no-hash drops checkpoints

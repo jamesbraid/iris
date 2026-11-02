@@ -3,7 +3,7 @@
 Reviewed against repository code through `862d0fe` on **2026-10-07**;
 re-audited through `3a3caeb0` on **2026-10-21**. No item was found complete.
 IMPACT buffer formats made real progress and its entry now lists only what is
-left; the Ethernet FIXME moved to `src/net/engine.rs`.
+left; the Ethernet FIXME moved to `crates/iris-dev/src/net/engine.rs`.
 
 The old scratch list (`TODO_archive.md`) has been deleted. Its entries marked
 DONE were done; its open reports are quoted in the items below that cite

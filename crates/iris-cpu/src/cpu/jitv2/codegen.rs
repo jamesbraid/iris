@@ -3555,7 +3555,7 @@ fn core_offset_of_cycles() -> i32 {
 /// Account for one retiring architectural instruction against
 /// `core.hot.cycles` — the JIT-compiled-code counterpart to the
 /// interpreter's `step()` incrementing it once per `step()` call
-/// (`src/cpu/mips_exec.rs`: a real, direct write — see `Hot::cycles`'s own doc
+/// (`crates/iris-cpu/src/cpu/mips_exec.rs`: a real, direct write — see `Hot::cycles`'s own doc
 /// comment for why it must never silently stop advancing). A compiled unit
 /// never calls the interpreter's `step()` for the instructions it covers, so
 /// without this, `cycles` — and everything that depends on it being visibly

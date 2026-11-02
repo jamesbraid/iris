@@ -1,6 +1,6 @@
 # Shadow cache for R4400/R5000: what it is for, what it costs
 
-`ShadowCache` (src/cpu/mips_cache_shadow.rs) keeps no line data: memory is the
+`ShadowCache` (crates/iris-cpu/src/cpu/mips_cache_shadow.rs) keeps no line data: memory is the
 only store, and its tag arrays exist only to answer CACHE instructions. It now
 covers the R4400 and R5000 as well as the R10000, selected by `MODEL`
 (`mips_cache_v2::model`, as for `CpuCache`).
@@ -34,7 +34,7 @@ both recovered once the shadow read RAM through the ppmem window (below).
 
 ## Decode cache and ppmem window (always on)
 
-`src/cpu/decode_cache.rs`: decoded instructions by physical page, plugged into
+`crates/iris-cpu/src/cpu/decode_cache.rs`: decoded instructions by physical page, plugged into
 `ShadowCache::fetch` only, never touching the shadow's tag arrays. The shadow
 also reads and writes RAM through ppmem's window in every build (the window
 hand-over is no longer gated on `tcache`). PROM, MMIO and the low-512KB alias

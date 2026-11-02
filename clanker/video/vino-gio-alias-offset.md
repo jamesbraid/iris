@@ -2,7 +2,7 @@
 
 **Keywords:** vino, gio, alias, physical, ENODEV, /dev/vino, videod, wrapping_add
 **Category:** physical, vino
-**Status:** Fixed in `src/physical.rs` (the `vino_gio_alias` `AliasBus::new(...)` call).
+**Status:** Fixed in `crates/iris-core/src/physical.rs` (the `vino_gio_alias` `AliasBus::new(...)` call).
 
 ## Symptom
 
@@ -42,7 +42,7 @@ the expected `0xB0` (chip_id=0xB, rev=0) and refused to attach.
 
 ## Fix
 
-In `src/physical.rs`, change the `vino_gio_alias` offset:
+In `crates/iris-core/src/physical.rs`, change the `vino_gio_alias` offset:
 
     -let vino_gio_alias = AliasBus::new(std::ptr::null::<ErrorBus>(), 0xFF000000u32);
     +let vino_gio_alias = AliasBus::new(std::ptr::null::<ErrorBus>(), 0xE1000000u32);
@@ -68,8 +68,8 @@ CD.
 
 ## See also
 
-- `src/dev/vino.rs` — `VINO_BASE = 0x00080000`, `REV_ID @ 0x0000` returns `0xB0`.
-- `src/physical.rs` — `build_device_map` mapping of `0x1F080000` to
+- `crates/iris-dev/src/dev/vino.rs` — `VINO_BASE = 0x00080000`, `REV_ID @ 0x0000` returns `0xB0`.
+- `crates/iris-core/src/physical.rs` — `build_device_map` mapping of `0x1F080000` to
   `vino_gio_alias`.
 - `docs/vino/` — VINO ASIC datasheets.
 - `clanker/irix/irix-install.md` — install procedure + missing-CD note.

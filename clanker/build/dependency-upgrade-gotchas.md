@@ -7,7 +7,7 @@ windows-sys 0.52 / libchdman-rs 0.288` and iris-gui off `dirs 5 / if-addrs 0.13
 
 ## windows-sys: `Win32_Foundation` was arriving by accident
 
-`src/thread_affinity.rs` calls `SetThreadAffinityMask`/`GetCurrentThread`, and
+`crates/iris-core/src/thread_affinity.rs` calls `SetThreadAffinityMask`/`GetCurrentThread`, and
 both signatures name `Foundation::HANDLE`. windows-sys gates that module behind
 the **`Win32_Foundation`** feature, which `Win32_System_Threading` does *not*
 imply — in 0.52 the generated binding even carried a
@@ -30,7 +30,7 @@ least made Cargo *validate the feature names* on every host; it is now gated to
 `cfg(target_os = "windows")` (see the riscv64 section below), so off-Windows not
 even the feature names are checked.
 
-## cpal 0.18 API churn (`src/dev/hal2.rs`)
+## cpal 0.18 API churn (`crates/iris-dev/src/dev/hal2.rs`)
 
 Four unrelated breaks in the audio-output path:
 
@@ -61,7 +61,7 @@ old `default-features = false` config never had an equivalent either.
 ## Smaller renames
 
 - **socket2 0.6**: `Socket::set_ttl` → `set_ttl_v4` (disambiguated from the IPv6
-  hop limit). `src/net/mod.rs` sets it on an `IPV4` ICMP socket, so the rename is a
+  hop limit). `crates/iris-dev/src/net/mod.rs` sets it on an `IPV4` ICMP socket, so the rename is a
   straight substitution.
 - **png 0.18**: `Reader::output_buffer_size()` returns `Option<usize>` (`None`
   when the size would overflow `usize`).
@@ -118,9 +118,9 @@ that referenced an arch-gated struct, so the latent breakage only surfaced then.
 
 Fix: the dependency now lives in
 `[target.'cfg(target_os = "windows")'.dependencies]`. Both consumers were
-already gated — `src/thread_affinity.rs` behind `#[cfg(windows)]`, and
-`src/ppmem/map_windows.rs` reached only via `#[cfg_attr(windows, path = ...)]`
-in `src/ppmem/map.rs` — so nothing off-Windows ever referenced the crate.
+already gated — `crates/iris-core/src/thread_affinity.rs` behind `#[cfg(windows)]`, and
+`crates/iris-core/src/ppmem/map_windows.rs` reached only via `#[cfg_attr(windows, path = ...)]`
+in `crates/iris-core/src/ppmem/map.rs` — so nothing off-Windows ever referenced the crate.
 
 **Before adding another `Win32_*` feature**, confirm the crate stays out of the
 non-Windows graphs:

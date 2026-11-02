@@ -6,7 +6,7 @@ Status: rule (2026-10-27). Reference: `docs/Octane/ioc3-ps2.md`.
 the keyboard in set 3 (F0 03), then FA (all keys typematic and
 make/break), FC 14 and FC 76 (Caps Lock and Num Lock make/break only).
 Linux and OpenBSD use set 2. A keyboard model that only speaks set 2 gives
-IRIX the wrong codes on the Octane. `src/dev/ps2.rs` has the set-3 table
+IRIX the wrong codes on the Octane. `crates/iris-dev/src/dev/ps2.rs` has the set-3 table
 and per-key modes.
 
 **Other things the drivers rely on.**
@@ -23,7 +23,7 @@ and per-key modes.
   after a read (a clamped device resumes then).
 
 **How the PROM sequence was found.** A throwaway build with an
-`eprintln!` in `kbc_read`/`kbc_write` (`src/dev/ioc3.rs`), PROM 4.17, a
+`eprintln!` in `kbc_read`/`kbc_write` (`crates/iris-dev/src/dev/ioc3.rs`), PROM 4.17, a
 blank NVRAM (graphics console, so it probes the keyboard), an empty
 `[scsi.4]` CD-ROM slot so no default disk is attached, run for ~100 s
 under `timeout`; then `uniq -c` over the KBC lines (millions of empty

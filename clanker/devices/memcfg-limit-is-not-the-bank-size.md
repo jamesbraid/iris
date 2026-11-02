@@ -45,7 +45,7 @@ So a mapper must take the period as an explicit parameter and fill
 repeat count as `size / bank_size` asserts on a stock `banks = [128, 128, 0, 0]`
 config, since `0x4000000 % 0x8000000 != 0`.
 
-`src/ppmem/ppmem.rs`'s `MappedMemory::map_bank(bank, offset, size, period)`
+`crates/iris-core/src/ppmem/ppmem.rs`'s `MappedMemory::map_bank(bank, offset, size, period)`
 takes `period` for exactly this reason; `physical.rs` passes
 `addr_mask.wrapping_add(1)`.
 

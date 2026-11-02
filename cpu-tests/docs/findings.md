@@ -4,7 +4,7 @@
 > Current code implements the condition-code extraction, Wired/FCSR masks,
 > trapped-result/Flag ordering, per-instruction Cause replacement, denormal/FS
 > handling, and signaling-NaN compare/ABS/NEG fixes described below.
-> MIPS IV selection follows the runtime CPU. See `src/cpu/mips_exec.rs`
+> MIPS IV selection follows the runtime CPU. See `crates/iris-cpu/src/cpu/mips_exec.rs`
 > (`fpu_update_fcsr_full`, `fpu_check_denorm_operand_s/d`, `exec_fcc_s/d`,
 > `exec_fabs_s/d`, `exec_fneg_s/d`) and [status.md](status.md).
 > The tables retain their recorded run results; CI failure ceilings are
@@ -24,7 +24,7 @@ in [gotchas.md](gotchas.md) instead. Telling the two apart is most of the work.
 *Found by `mips4/multi_fp_cc`.*
 
 > This branch carries tests only. The fix lives on **`fix/fp-condition-code`**
-> (two commits, `src/cpu/mips_exec.rs` and `src/cpu/mips_exec_test.rs`), so
+> (two commits, `crates/iris-cpu/src/cpu/mips_exec.rs` and `crates/iris-cpu/src/cpu/mips_exec_test.rs`), so
 > `mips4/multi_fp_cc` fails here — which is what the suite should be reporting
 > until the fix lands.
 
@@ -177,7 +177,7 @@ is a documented requirement.
 
 IP7 fires when `Count` becomes numerically **equal** to `Compare` — not when it
 exceeds it. IRIS models that faithfully and says so
-(`schedule_compare_timer` in `src/cpu/mips_core.rs`): a `Compare` written "in the
+(`schedule_compare_timer` in `crates/iris-cpu/src/cpu/mips_core.rs`): a `Compare` written "in the
 past" correctly does not fire until `Count` wraps through 2^32.
 
 But `Count` is wallclock-anchored by default, so it advances in jumps rather

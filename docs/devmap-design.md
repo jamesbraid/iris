@@ -1,10 +1,10 @@
 # The physical address decode table
 
-`Physical` (`src/physical.rs`) finds the device behind a physical address
+`Physical` (`crates/iris-core/src/physical.rs`) finds the device behind a physical address
 with one indexed load: a table with one `*const dyn BusDevice` per 4 KB
 slot. This document describes how that table is stored since it grew from a
 32-bit to a 40-bit address space, and what happens when the guest touches an
-address nobody mapped. The code is `src/ppmem/devmap.rs`; it builds on the
+address nobody mapped. The code is `crates/iris-core/src/ppmem/devmap.rs`; it builds on the
 host-memory primitives ppmem already had ([ppmem-design.md](ppmem-design.md)
 §7).
 

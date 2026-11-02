@@ -12,7 +12,7 @@ pass, 1 fail (name stack), 15 XFAIL (libGLcore's own departures, listed in
 the test), 20 skipped (extensions IMPACT rejects).
 
 The map itself is in ignore/gr4/GE11.h "STATE READBACK". The model is
-`src/dev/mgras/glquery.rs`: a query shadow of the raw values, kept beside
+`crates/iris-gfx/src/dev/mgras/glquery.rs`: a query shadow of the raw values, kept beside
 the render state.
 
 ## Running

@@ -286,7 +286,7 @@ pub struct Physical {
     ppmem_shift: u32,
 
     /// The decode table: one device per 4 KB slot of a 40-bit physical
-    /// space, sparse and host-MMU-backed (`src/ppmem/devmap.rs`). Slots the
+    /// space, sparse and host-MMU-backed (`crates/iris-core/src/ppmem/devmap.rs`). Slots the
     /// machine fills in are filled at configuration; a slot nobody filled is
     /// faulted in as the default device the first time it is touched.
     devmap: SparseDeviceMap,

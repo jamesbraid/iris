@@ -1,5 +1,5 @@
 //! The OpenGL 1.1 lighting equation and fog, per vertex. A board fills
-//! `Lighting` from its own protocol (GR2: `src/dev/gr2/gl_light.rs`).
+//! `Lighting` from its own protocol (GR2: `crates/iris-gfx/src/dev/gr2/gl_light.rs`).
 //!
 //! Two things vary between boards' libglcore and are parameters here:
 //! - specular and spot exponents arrive either as numbers (`shininess`,

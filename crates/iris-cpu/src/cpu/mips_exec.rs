@@ -801,7 +801,7 @@ pub struct MipsExecutor<T: Tlb, C: CpuModel> {
     pending_memory_writes: Vec<MemoryWrite>,
     traceback: TracebackBuffer,
     /// Per-instruction execution trace recorder (clanker/jitv2's lockstep
-    /// verification tooling, `src/cpu/trace.rs`). `None` when not recording —
+    /// verification tooling, `crates/iris-cpu/src/cpu/trace.rs`). `None` when not recording —
     /// checked on every step() (one branch on a `None` tag), so armed cost
     /// is a file write, disarmed cost is a predictable branch. Developer-only:
     /// this captures full architectural state per instruction, meaningfully
@@ -3760,7 +3760,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     }
 
     /// Begin recording a per-instruction execution trace to `path`
-    /// (`src/cpu/trace.rs`, clanker/jitv2's lockstep verification tooling).
+    /// (`crates/iris-cpu/src/cpu/trace.rs`, clanker/jitv2's lockstep verification tooling).
     /// Overwrites any existing file at `path`. No-op-safe to call while
     /// already recording — starts a fresh file, silently dropping (not
     /// flushing) whatever writer was active before, so callers that want a
@@ -10670,7 +10670,7 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Device for MipsCpu<T
             // interrupts enabled and nothing pending. Short poll/delay loops
             // (2-3 instructions) are rejected by the window's minimum span and
             // distinct-PC count; user-mode code is never parked. See
-            // src/cpu/idle_park.rs.
+            // crates/iris-cpu/src/cpu/idle_park.rs.
             #[cfg(feature = "idle-pause")]
             let mut idle_state = crate::cpu::idle_park::IdleParkState::default();
 

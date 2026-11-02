@@ -26,7 +26,7 @@ description = "post-install"  # free-form note
 - **`iris_git_rev` mismatch with current build** → warn but proceed. Snapshots are not pinned to commits.
 
 ## Where it's defined
-- `src/snapshot.rs` — `Manifest` struct, `to_toml`/`from_toml`, `Snapshot::write_manifest`/`read_manifest`, `SCHEMA_VERSION` const.
+- `crates/iris-core/src/snapshot.rs` — `Manifest` struct, `to_toml`/`from_toml`, `Snapshot::write_manifest`/`read_manifest`, `SCHEMA_VERSION` const.
 - `src/machine.rs:594` writes the manifest first thing in `save_snapshot`. `parent` is auto-set to `self.last_restore`.
 - `src/machine.rs:643-672` validates on load.
 

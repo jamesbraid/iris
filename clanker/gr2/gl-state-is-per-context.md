@@ -10,7 +10,7 @@ with `GE_HQMSAV` (0x1F0: id; DATA state, mode) and saves / restores the GE
 state through its own memory (0x1E1 / 0x1E2 via HQ2_GEDMA), sized by what the
 microcode reports in shram word 0x302. See HQ2.h "KERNEL TOKENS".
 
-Emulator (src/dev/gr2/gl.rs, `gl_switch_context`, `gl_cx_*`): `GlState` is the
+Emulator (crates/iris-gfx/src/dev/gr2/gl.rs, `gl_switch_context`, `gl_cx_*`): `GlState` is the
 saved image, so it must stay plain data: `#[repr(C)]`, numbers and arrays
 only, no pointers, no padding (compile-time asserts; `span: [f64; 6]` stays the
 first field). New fields go anywhere after `span` and must be 4-byte types.

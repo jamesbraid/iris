@@ -8,7 +8,7 @@
 
 ## What it is
 
-`emit_slot_semantics` (src/cpu/jitv2/codegen.rs) wraps every **inlined** delay
+`emit_slot_semantics` (crates/iris-cpu/src/cpu/jitv2/codegen.rs) wraps every **inlined** delay
 slot:
 
 ```

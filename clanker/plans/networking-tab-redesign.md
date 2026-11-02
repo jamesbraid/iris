@@ -2,7 +2,7 @@
 
 > Historical design proposal. The private-network controls and built-in
 > NFSv2/v3 service now live in `iris-gui/src/config_ui.rs` and
-> `src/net/nfsudp.rs`; the external-unfsd description below is superseded.
+> `crates/iris-dev/src/net/nfsudp.rs`; the external-unfsd description below is superseded.
 > Current controls are documented in [iris-gui guide](../../iris-gui-README.md).
 > Other proposed file-transfer protocols below are proposals, not shipped
 > features.

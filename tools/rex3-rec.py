@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect and convert REX3 recordings (src/dev/ng1/rex3_rec.rs).
+"""Inspect and convert REX3 recordings (crates/iris-gfx/src/dev/ng1/rex3_rec.rs).
 
   rex3-rec.py dump IN.rec [--from N] [--to M]
       records [N, M) with register names, numbered from 1 as replay counts

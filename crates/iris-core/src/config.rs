@@ -285,7 +285,7 @@ pub struct PortForwardConfig {
 }
 
 /// NFS share configuration. NFS is served in-process by the NAT
-/// (`src/net/nfsudp.rs`) — no external `unfsd`, no host sockets.
+/// (`crates/iris-dev/src/net/nfsudp.rs`) — no external `unfsd`, no host sockets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NfsConfig {
     /// Directory to export over NFS.
@@ -815,7 +815,7 @@ pub enum CpuModel {
     R5000,
     /// MIPS R10000, 2-way 32K L1s, 1 MB secondary cache, MIPS IV. The CPU in
     /// the Indigo2 IMPACT (IP28). The machine uses shadow cache arrays;
-    /// see `docs/indigo2-ip28.md` and `src/cpu/mips_cache_shadow.rs`.
+    /// see `docs/indigo2-ip28.md` and `crates/iris-cpu/src/cpu/mips_cache_shadow.rs`.
     R10000,
 }
 
@@ -1093,7 +1093,7 @@ fn set_or_remove_env(key: &str, val: &str) {
 /// jitv2 compile-pool tuning (`[jitv2]` section): the compile-pool thread
 /// count, fixed at process startup, never changed at runtime — see
 /// `CompileQueue::set_thread_count`'s own doc comment for why — plus the
-/// persistent on-disk code cache (`src/cpu/jitv2/pcache.rs`), applied to the
+/// persistent on-disk code cache (`crates/iris-cpu/src/cpu/jitv2/pcache.rs`), applied to the
 /// process environment at `Start` the same way `DebugConfig` applies
 /// `[debug]` (see `Jitv2Config::apply_env`). `cache`/`cache_dir` used to be
 /// the undocumented `IRIS_JIT_CACHE`/`IRIS_JIT_CACHE_DIR` env vars; those
@@ -1513,7 +1513,7 @@ pub struct MachineConfig {
     pub perfetto_clock: Option<String>,
 
     /// Map the bare-metal test device (guest console, machine-state dump, exit
-    /// code) into GIO expansion slot 0. Off by default; see src/cpu/testdev.rs.
+    /// code) into GIO expansion slot 0. Off by default; see crates/iris-cpu/src/cpu/testdev.rs.
     #[serde(default)]
     pub test_device: bool,
 
@@ -1591,7 +1591,7 @@ pub struct MachineConfig {
     pub scsi: std::collections::HashMap<u8, ScsiDeviceConfig>,
 
     /// NFS share configuration. If present, the NAT's in-process NFS server
-    /// (`src/net/nfsudp.rs`) exports `shared_dir` to the guest.
+    /// (`crates/iris-dev/src/net/nfsudp.rs`) exports `shared_dir` to the guest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nfs: Option<NfsConfig>,
 

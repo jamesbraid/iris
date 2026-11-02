@@ -5,7 +5,7 @@ for a 16GB window instead, with `PpMemSpace::over_window`. The bitmap stays one
 `u64`, so its regions are 256MB there. The text below describes the 4GB window
 every other machine has; the larger one differs only in those two numbers.
 
-Status: **implemented and always on** (August 2026, `src/ppmem/`, with Unix
+Status: **implemented and always on** (August 2026, `crates/iris-core/src/ppmem/`, with Unix
 and Windows mapping backends; the `ppmem` feature was retired in October 2026).
 RAM banks are `PpMemory`; `Memory` (`Vec<u32>`) survives only as a test/bus
 fixture. `tcache` builds on it (`docs/tcache-design.md`). The rest of this
@@ -20,7 +20,7 @@ with the verified platform findings: `clanker/build/mmap-rs-fixed-address-aliasi
 **Goals**
 
 - An alternative implementation of physical RAM that presents **exactly the
-  interface `src/dev/mem.rs`'s `Memory` presents today**, so `Physical` can hold it
+  interface `crates/iris-core/src/dev/mem.rs`'s `Memory` presents today**, so `Physical` can hold it
   in place of `Memory` with no changes to callers.
 - Back the guest's 4GB physical address space with a **real host virtual
   address reservation**, so guest physical address → host address is one add,
@@ -54,7 +54,7 @@ Today every RAM access does `addr & self.addr_mask` then indexes a `Vec<u32>`,
 after a `device_map[addr >> 16]` lookup and a virtual dispatch through
 `*const dyn BusDevice`. The masking exists to emulate SIMM wrapping — a bank
 smaller than its configured slot mirrors within it (`memcfg_bank_info`'s
-`addr_mask`, `src/dev/mc.rs`).
+`addr_mask`, `crates/iris-dev/src/dev/mc.rs`).
 
 The host MMU does all of that in hardware for free. If a bank is mapped into its
 slot repeatedly, mirroring **is** the mapping — no mask, no branch. The
@@ -74,7 +74,7 @@ ppmem exposes the same surface as `Memory`, so `Physical::banks: [Memory; 4]`
 can become `[PpMemory; 4]` (or a type alias switched by feature) with nothing
 else edited.
 
-**`BusDevice`** (`src/traits.rs`) — `read8/16/32/64`, `write8/16/32/64`,
+**`BusDevice`** (`crates/iris-core/src/traits.rs`) — `read8/16/32/64`, `write8/16/32/64`,
 `mem_ptr`, `read_block`, `write_block`, `write64_masked`, and under `jitv2`,
 `gen_ptr`. Same semantics, same u64 layout, same `BUS_OK`.
 
@@ -345,7 +345,7 @@ mmap(base+off, size, PROT_NONE,
 which another thread can be handed an address inside the range. The initial
 reservation is what makes `MAP_FIXED` *safe*: `MAP_FIXED` over an address we do
 not own would silently unmap someone else's mapping (the JIT arena in
-`src/cpu/jitv2/paged_memory.rs` reserves its own region; thread stacks and `dlopen`
+`crates/iris-cpu/src/cpu/jitv2/paged_memory.rs` reserves its own region; thread stacks and `dlopen`
 also allocate) and produce corruption with no error at the call site.
 
 **The only macOS difference is how the fd is created.** `memfd_create` is
@@ -478,9 +478,9 @@ Three files:
 
 | File | Contents |
 |---|---|
-| `src/ppmem/map_unix.rs` | Linux **and** macOS — `shm_open` + `mmap`. One impl. |
-| `src/ppmem/map_windows.rs` | placeholder API per §7.3 |
-| `src/ppmem/map.rs` | the types above, `#[cfg]` re-export, shared tests |
+| `crates/iris-core/src/ppmem/map_unix.rs` | Linux **and** macOS — `shm_open` + `mmap`. One impl. |
+| `crates/iris-core/src/ppmem/map_windows.rs` | placeholder API per §7.3 |
+| `crates/iris-core/src/ppmem/map.rs` | the types above, `#[cfg]` re-export, shared tests |
 
 The shared test suite (§10) runs against whichever backend is compiled, so the
 Windows implementation is held to exactly the same observable contract that the
@@ -576,7 +576,7 @@ Explicitly **not** part of this work, and not phase 2 either. Recorded here so
 the idea and its blockers aren't relearned.
 
 *Update, October 2026:* a fault handler now exists, but for the **decode
-table**, not for devices. `src/ppmem/devmap.rs` keeps `Physical`'s
+table**, not for devices. `crates/iris-core/src/ppmem/devmap.rs` keeps `Physical`'s
 address-to-device table as a sparse reservation over a 40-bit space and
 faults untouched table pages in as the bus-error device; see
 [devmap-design.md](devmap-design.md). It settles the portability question

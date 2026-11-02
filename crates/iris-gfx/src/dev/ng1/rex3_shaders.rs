@@ -7,7 +7,7 @@
 // position, so this file cannot disagree with the runtime decoder.
 //
 // Regenerate after collecting a fatter corpus:
-//     tools/gen_rex3_shaders.py -o src/dev/ng1/rex3_shaders.rs
+//     tools/gen_rex3_shaders.py -o crates/iris-gfx/src/dev/ng1/rex3_shaders.rs
 
 use crate::dev::ng1::rex3::Rex3Context;
 use crate::dev::ng1::rex3_generic::{draw_with_fb, ConstMode, Framebuffers};

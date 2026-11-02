@@ -10,7 +10,7 @@ toggle. See "Implemented (v1)" below.
 
 ## Implemented (v1) — flatten-on-exit
 
-- **Core** (`src/chd_disk.rs`): `ChdHd` tracks `base_path` / `diff_path` / `dirty`
+- **Core** (`crates/iris-dev/src/chd_disk.rs`): `ChdHd` tracks `base_path` / `diff_path` / `dirty`
   (dirty = wrote this session, or reattached a pre-existing diff). `pending_sync()`
   returns `(base, diff)` when a fold-back is owed. `flatten_diff(base, diff,
   progress, cancel)` rebuilds the base from the merged `reopen_diff` view via
@@ -150,7 +150,7 @@ only the sync *presentation* differs per frontend.
     — in-process `chdman copy`; `progress`/`cancel` callbacks drive the UI.
   - `HdCreateOptions { logical_size, hunk_size=4096, unit_size=512, codecs:[u32;4],
     geometry, ident }` (`hd.rs:42-63`); codecs `codec.rs`.
-- `CowDisk` (`src/cow_disk.rs`) already handles raw-image COW (overlay + dirty
+- `CowDisk` (`crates/iris-dev/src/cow_disk.rs`) already handles raw-image COW (overlay + dirty
   set + `commit()`/`flush()`/snapshot import/export). **Keep it for raw images.**
   Do *not* generalize it over CHDs — CHDs use MAME's diff instead.
 
@@ -169,7 +169,7 @@ only the sync *presentation* differs per frontend.
 
 ### Phase 1 — Core: COW toggle wired through MAME's diff
 
-Files: `src/chd_disk.rs`, `src/dev/wd33c93a.rs`, `src/config.rs`.
+Files: `crates/iris-dev/src/chd_disk.rs`, `crates/iris-dev/src/dev/wd33c93a.rs`, `crates/iris-core/src/config.rs`.
 
 1. **`ChdHd` open modes** (`chd_disk.rs:36-56`): add an explicit COW-on open that
    **always** uses `open_with_diff`/`reopen_diff` (forces a diff even for an

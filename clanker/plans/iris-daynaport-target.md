@@ -52,11 +52,11 @@ on this work:
 
 | File | What it does now | What it needs |
 |---|---|---|
-| `src/scsi.rs` | `ScsiDevice` — one concrete struct, `is_cdrom: bool` selects HDD vs CD-ROM behaviour. `ScsiDevice::request(&mut self, &ScsiRequest) -> Result<ScsiResponse>` dispatches on `req.cdb[0]`. | A third device kind, and a dispatch branch that runs **before** the storage opcodes |
-| `src/dev/wd33c93a.rs` | The controller. Owns `state.devices[id]: Option<ScsiDevice>`; constructs them around lines 385–444 from config | Construct a DaynaPort target when configured |
-| `src/config.rs` | `ScsiConfig { path, cdrom, overlay }` (~line 15) | A way to say "this target is a DaynaPort" |
-| `src/net/mod.rs` | `NatEngine`, `GatewayConfig`, `NatControl`, `NetBackend` trait, frame helpers (`eth_frame`, `mac_str`, `eth_summary`) | Reuse as-is — no changes expected |
-| `src/dev/seeq8003.rs` | The Indy's onboard Ethernet. **This is your template** for how a device owns frame queues and drives a `NatEngine` | Read `start()` around lines 550–600 |
+| `crates/iris-dev/src/scsi.rs` | `ScsiDevice` — one concrete struct, `is_cdrom: bool` selects HDD vs CD-ROM behaviour. `ScsiDevice::request(&mut self, &ScsiRequest) -> Result<ScsiResponse>` dispatches on `req.cdb[0]`. | A third device kind, and a dispatch branch that runs **before** the storage opcodes |
+| `crates/iris-dev/src/dev/wd33c93a.rs` | The controller. Owns `state.devices[id]: Option<ScsiDevice>`; constructs them around lines 385–444 from config | Construct a DaynaPort target when configured |
+| `crates/iris-core/src/config.rs` | `ScsiConfig { path, cdrom, overlay }` (~line 15) | A way to say "this target is a DaynaPort" |
+| `crates/iris-dev/src/net/mod.rs` | `NatEngine`, `GatewayConfig`, `NatControl`, `NetBackend` trait, frame helpers (`eth_frame`, `mac_str`, `eth_summary`) | Reuse as-is — no changes expected |
+| `crates/iris-dev/src/dev/seeq8003.rs` | The Indy's onboard Ethernet. **This is your template** for how a device owns frame queues and drives a `NatEngine` | Read `start()` around lines 550–600 |
 
 ### The reuse that makes this cheap
 
@@ -64,7 +64,7 @@ on this work:
 ring buffers and hands the far ends to a `NatEngine` running on its own thread:
 
 ```rust
-// src/dev/seeq8003.rs, in Device::start()
+// crates/iris-dev/src/dev/seeq8003.rs, in Device::start()
 NatEngine::new(config, tx_cons, rx_prod, rx_wake_nat, tx_wake_nat,
                running_nat, nat_ctl).run();
 ```
@@ -113,7 +113,7 @@ drivers (Mac, Atari) are pickier.
 
 ### 3.2 Opcodes
 
-All five are 6-byte CDBs. `get_cdb_length()` in `src/scsi.rs` already returns 6
+All five are 6-byte CDBs. `get_cdb_length()` in `crates/iris-dev/src/scsi.rs` already returns 6
 for group 0, which covers every one of them — **no change needed there.**
 
 | Opcode | Name | Direction |
@@ -126,7 +126,7 @@ for group 0, which covers every one of them — **no change needed there.**
 
 > ### ⚠ The one thing most likely to go wrong
 >
-> `src/scsi.rs` already defines `READ_6 = 0x08` and `WRITE_6 = 0x0a`. **These
+> `crates/iris-dev/src/scsi.rs` already defines `READ_6 = 0x08` and `WRITE_6 = 0x0a`. **These
 > are the exact opcodes DaynaPort reuses for packet RX/TX.** If you add the
 > DaynaPort handling as extra arms in the existing `match req.cdb[0]`, the
 > storage arms will win and the device will try to read disk blocks.
@@ -228,7 +228,7 @@ and return empty READ responses.
 
 Roughly, and adapt to what the code actually looks like:
 
-1. **`src/dev/daynaport.rs`** (new). A `DaynaPort` struct holding:
+1. **`crates/iris-dev/src/dev/daynaport.rs`** (new). A `DaynaPort` struct holding:
    - `tx_prod: rtrb::Producer<Vec<u8>>`, `rx_cons: rtrb::Consumer<Vec<u8>>`
    - the wake handles the `NatEngine` needs
    - `mac: [u8; 6]`, `enabled: bool`, `broadcast: bool`
@@ -238,7 +238,7 @@ Roughly, and adapt to what the code actually looks like:
    implementing §3, and a `start()` that spawns the `dayna-nat` thread exactly
    as `seeq8003::start()` spawns `seeq-nat`.
 
-2. **`src/scsi.rs`** — introduce a device-kind discriminant. The struct is
+2. **`crates/iris-dev/src/scsi.rs`** — introduce a device-kind discriminant. The struct is
    currently `is_cdrom: bool`; the smallest honest change is
 
    ```rust
@@ -250,7 +250,7 @@ Roughly, and adapt to what the code actually looks like:
    `request()` as described in §3.2. A DaynaPort has no `backend`, no `size`,
    no block size — make sure nothing on the storage path is reachable for it.
 
-3. **`src/config.rs`** — extend `ScsiConfig`. Suggested TOML:
+3. **`crates/iris-core/src/config.rs`** — extend `ScsiConfig`. Suggested TOML:
 
    ```toml
    [scsi.3]
@@ -260,7 +260,7 @@ Roughly, and adapt to what the code actually looks like:
 
    Keep the existing `cdrom = true` spelling working so no config breaks.
 
-4. **`src/dev/wd33c93a.rs`** — around lines 385–444, construct a DaynaPort target
+4. **`crates/iris-dev/src/dev/wd33c93a.rs`** — around lines 385–444, construct a DaynaPort target
    when the config says so, instead of opening a disk image. Note it has no
    file backing at all, so the CHD/overlay path must be skipped entirely.
 
@@ -374,6 +374,6 @@ works you can validate against both IRIX releases.
   implementing that section. `irix5.3/RESUME.md` has the porting background.
 - **BlueSCSI V2 / ZuluSCSI** firmware — open-source implementations of this
   exact device, and the source of the multi-packet extension.
-- **IRIS**: `HACKING.md`, `src/dev/seeq8003.rs` (the template), `src/net/mod.rs`
+- **IRIS**: `HACKING.md`, `crates/iris-dev/src/dev/seeq8003.rs` (the template), `crates/iris-dev/src/net/mod.rs`
   (the backend you are reusing), `clanker/` (check before re-deriving a gotcha,
   and add a note there when you confirm a non-obvious fix).

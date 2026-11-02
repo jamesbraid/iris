@@ -28,5 +28,5 @@ at 48 kHz, with adjust-latency) unless `cpal_buffer_frames` says otherwise.
 
 **Picking the host.** With the `pulseaudio` feature compiled in, cpal's own
 `default_host()` prefers PulseAudio whenever its socket exists, so HAL2 must
-not call it on Linux: `output_host()` in `src/dev/hal2.rs` asks for ALSA by id
+not call it on Linux: `output_host()` in `crates/iris-dev/src/dev/hal2.rs` asks for ALSA by id
 unless PulseAudio was requested.

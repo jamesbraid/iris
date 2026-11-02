@@ -6,7 +6,7 @@ loader and test device. They do not require Cargo features.
 
 ## A — `mkvh`: bootable volume headers
 
-`src/sgi_vh.rs` gained the volume directory (0x048, 15 × 16 bytes), so an image
+`crates/iris-core/src/sgi_vh.rs` gained the volume directory (0x048, 15 × 16 bytes), so an image
 can carry named standalone files the PROM boots by name.
 
 ```sh

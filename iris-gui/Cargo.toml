@@ -78,7 +78,7 @@ hostcall = ["iris/hostcall"]
 # replacement libGL (github.com/atomchild411/iris-guest-tools) reports host
 # GL as unavailable. Build with: cargo build -p iris-gui --features hostgl
 hostgl = ["hostcall", "iris/hostgl"]
-# Perfetto trace recording (src/perfetto/, docs/perfetto.md): the Debug tab
+# Perfetto trace recording (crates/iris-core/src/perfetto/, docs/perfetto.md): the Debug tab
 # gains Start/Stop for a .pftrace to open at ui.perfetto.dev.
 # Build with: cargo build -p iris-gui --features perfetto
 perfetto = ["iris/perfetto"]

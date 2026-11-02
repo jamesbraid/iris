@@ -19,7 +19,7 @@ path plus GR2 token and XMAP events in one file; kept on the
 equalled the CPU-written sequence shifted by one frame, while the kernel's
 unmap / fault / retrace flip / revalidate sequence was correct.
 
-Fix (src/dev/gr2/mod.rs, `fin3_pending`): count 0x0A3 / 0x155 tokens when the
+Fix (crates/iris-gfx/src/dev/gr2/mod.rs, `fin3_pending`): count 0x0A3 / 0x155 tokens when the
 CPU queues them, count down when the HQ executes them; `version` bit 0 and the
 0x6B000 read show FIN3 only when none is pending. Test:
 `fin3_waits_for_queued_finish`.

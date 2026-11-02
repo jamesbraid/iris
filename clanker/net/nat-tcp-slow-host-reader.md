@@ -36,6 +36,6 @@ last ~68 KB. After: both clean, and 40 MB over ssh to a reader at 0.25 MB/s
 matches the guest's `sum -r`. Tests: `net::testnet::slow_host_reader_loses_nothing`
 and `tcp_out_of_order_guest_data_is_not_skipped`.
 
-**Since 2026-10-14** the logic lives in `src/net/tcp.rs` (`TcpConn`): the
+**Since 2026-10-14** the logic lives in `crates/iris-dev/src/net/tcp.rs` (`TcpConn`): the
 buffer is `to_backend`, and the same rules hold for every backend (host
 socket or in-core service).

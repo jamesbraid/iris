@@ -141,7 +141,7 @@ impl Status {
 }
 
 /// The live MIPS and Hz figures, from the machine's CPU counters sampled
-/// once per status tick. Mirrors the CLI status bar's math (`src/disp.rs`),
+/// once per status tick. Mirrors the CLI status bar's math (`crates/iris-gfx/src/disp.rs`),
 /// which the GUI never runs.
 struct RateMeter {
     /// Each CPU's retired-cycle counter and clock-tick counter, CPU 0 first.
@@ -441,7 +441,7 @@ fn worker_loop(
     let mut vnc_server: Option<iris::vnc::VncServer> = None;
     // Live MIPS estimate: read REX3's free-running cycle counter and divide
     // the delta by wall-clock between ticks. Mirrors the status-bar math in
-    // src/disp.rs, but driven here since the GUI never runs REX3's own
+    // crates/iris-gfx/src/disp.rs, but driven here since the GUI never runs REX3's own
     // refresh/status-bar loop. `None` until a machine is up.
     let mut meter: Option<RateMeter> = None;
     // Tick cadence for the status poll while idle on the command channel.

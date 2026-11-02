@@ -19,14 +19,14 @@ How it is put together now:
 
 - **The bus** (`src/ip32.rs`): RAM, the PROM, GBE and VICE, and two chips
   that claim their own space and decode it, as HPC3 does on the Indigo2:
-  `Mace` (`src/dev/mace.rs`: MACE's 8 MB and the PCI windows, with the
+  `Mace` (`crates/iris-dev/src/dev/mace.rs`: MACE's 8 MB and the PCI windows, with the
   bridge, Ethernet, ISA block, PS/2, UST, audio, serial DMA, UARTs, RTC and
-  1-Wire ID) and `CrimeSpace` (`src/dev/crime.rs`: CRIME's registers and
+  1-Wire ID) and `CrimeSpace` (`crates/iris-dev/src/dev/crime.rs`: CRIME's registers and
   the rendering engine).
-- **Memory** (`src/dev/crime_mem.rs`): the banks in one ppmem object, mapped
+- **Memory** (`crates/iris-dev/src/dev/crime_mem.rs`): the banks in one ppmem object, mapped
   into a window as CRIME's bank controls decode them. The CPU's cache and
   the JIT, and the rendering engine (`RamWindow`), use the window directly.
-- **The rendering engine** (`CrimeRe` in `src/dev/o2gfx.rs`) runs on its own
+- **The rendering engine** (`CrimeRe` in `crates/iris-dev/src/dev/o2gfx.rs`) runs on its own
   thread, fed through the shared gfifo standing in for CRIME's interface
   buffer (far deeper than the real 128 entries); a
   full buffer, or a register read while the engine is busy, makes the CPU
@@ -834,7 +834,7 @@ exactly the contract option 2 needs.
 
 ## Emulating above the sequencer
 
-2026-09-20. `src/aic7880.rs` (now `src/dev/aic7880.rs`). The decision was to implement what the driver
+2026-09-20. `src/aic7880.rs` (now `crates/iris-dev/src/dev/aic7880.rs`). The decision was to implement what the driver
 *observes* rather than the sequencer's instruction set, and the first half of
 that works.
 
@@ -1599,7 +1599,7 @@ three that also changed the CPU side say so; those changes (Index_Store_Tag
 without a writeback, a JTLB as big as the CPU model) are upstream in their own
 form -- and one commit moved it onto upstream's layout:
 
-- `src/aic7880.rs` is now `src/dev/aic7880.rs`, with the other devices.
+- `src/aic7880.rs` is now `crates/iris-dev/src/dev/aic7880.rs`, with the other devices.
 - Imports name `crate::cpu::...`, where upstream keeps the CPU now.
 
 Nothing else had to change: the executor, TLB, cache and `BusDevice` the
@@ -1622,7 +1622,7 @@ it, `shutdown -p now`, then stop the test.
 
 ## Ethernet: MACE's MAC-110 (2026-10-17)
 
-`src/dev/mec.rs`, at MACE + 0x280000 on CRIME interrupt 3, implements what
+`crates/iris-dev/src/dev/mec.rs`, at MACE + 0x280000 on CRIME interrupt 3, implements what
 NetBSD's `mec` driver relies on: 64-bit registers; a 64-entry ring of 128-byte
 transmit descriptors (inline data ending at byte 127, then up to three pointers,
 each descriptor's word 0 rewritten as its status, the read pointer in
@@ -1645,7 +1645,7 @@ Related: [`virtio-mmio-design.md`](virtio-mmio-design.md).
 ## Memory as CRIME banks, and the R10000 (2026-10-17)
 
 Memory used to be one flat block from `0x40000000` that ignored CRIME's bank
-controls. It is now `src/dev/crime_mem.rs`: eight banks of 32 or 128 MB,
+controls. It is now `crates/iris-dev/src/dev/crime_mem.rs`: eight banks of 32 or 128 MB,
 placed in the 1 GB window by their control registers (`0x208 + 8*i`, base in
 32 MB units in bits 0-4, 128 MB in bit 8), and decoded the way POST relies on:
 
@@ -1720,7 +1720,7 @@ OpenBSD 6.9 boots to ssh in about 150 s on jitv2 (fork stress 95 s, against
 
 ## Graphics: GBE, the rendering engine and the keyboard (2026-10-18)
 
-`src/dev/o2gfx.rs` is a plain CPU model, meant as the oracle for a later GPU
+`crates/iris-dev/src/dev/o2gfx.rs` is a plain CPU model, meant as the oracle for a later GPU
 version:
 
 - `Gbe`: a 32-bit register file; a beam counter driven by guest time (plus a

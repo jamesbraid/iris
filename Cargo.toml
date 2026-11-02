@@ -16,7 +16,7 @@ default-run = "iris"
 debug_cache = ["iris-core/debug_cache", "iris-cpu/debug_cache", "iris-dev/debug_cache", "iris-gfx/debug_cache"]
 developer = ["gputrace", "iris-core/developer", "iris-cpu/developer", "iris-dev/developer", "iris-gfx/developer"]
 # Graphics bus taps: REX3 annotated trace (`rex trace`) and replayable
-# recording (`rex rec`, src/dev/ng1/rex3_rec.rs), and the GR2 and IMPACT
+# recording (`rex rec`, crates/iris-gfx/src/dev/ng1/rex3_rec.rs), and the GR2 and IMPACT
 # annotated traces (`gr2 trace`, `mgras trace`, IRIS_MGRAS_TRACE). Without it
 # every bus access and FIFO entry goes straight to the device, with not even
 # the relaxed load that checks whether a trace runs. On with `developer`; opt
@@ -32,7 +32,7 @@ developerx = ["iris-core/developerx", "iris-cpu/developerx", "iris-dev/developer
 # a fixed-size direct-mapped table, no allocation, no hashing.
 llstats = ["iris-core/llstats", "iris-cpu/llstats", "iris-dev/llstats", "iris-gfx/llstats"]
 # Perfetto tracing: per-thread event rings drained by a writer thread into a
-# .pftrace file for ui.perfetto.dev (src/perfetto/, docs/perfetto.md).
+# .pftrace file for ui.perfetto.dev (crates/iris-core/src/perfetto/, docs/perfetto.md).
 # Without it the pf_* macros compile to nothing. Controlled at run time with
 # `perfetto start|stop|status|cats` on the monitor or `--perfetto FILE`.
 perfetto = ["iris-core/perfetto", "iris-cpu/perfetto", "iris-dev/perfetto", "iris-gfx/perfetto"]
@@ -164,7 +164,7 @@ tcache_verify = ["tcache", "iris-core/tcache_verify", "iris-cpu/tcache_verify", 
 # observes any of it, and it costs a check on every D-cache miss and a Status
 # sync on every exception, so it is off by default.
 cache-ecc = ["iris-core/cache-ecc", "iris-cpu/cache-ecc", "iris-dev/cache-ecc", "iris-gfx/cache-ecc"]
-# Decoded-instruction cache for the shadow cache (src/cpu/decode_cache.rs).
+# Decoded-instruction cache for the shadow cache (crates/iris-cpu/src/cpu/decode_cache.rs).
 # Always built now; this flag does nothing and is kept so command lines that
 # still pass `--features decode-cache` keep working.
 decode-cache = ["iris-core/decode-cache", "iris-cpu/decode-cache", "iris-dev/decode-cache", "iris-gfx/decode-cache"]
@@ -172,10 +172,10 @@ default = ["tlbvmap", "rexdiag"]
 # Cranelift-based JIT compiler for REX3 graphics draw shaders.
 rex-jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native", "iris-core/rex-jit", "iris-cpu/rex-jit", "iris-dev/rex-jit", "iris-gfx/rex-jit"]
 # Cranelift-based JIT for IMPACT (GR4) raster shaders: RSS/TE1 pixel
-# pipelines monomorphised on a 64-bit key (src/dev/mgras/rss_jit).
+# pipelines monomorphised on a 64-bit key (crates/iris-gfx/src/dev/mgras/rss_jit).
 gr4-jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native", "iris-core/gr4-jit", "iris-cpu/gr4-jit", "iris-dev/gr4-jit", "iris-gfx/gr4-jit"]
 # Cranelift-based JIT for GR2 (XZ / Extreme) RE3 spans: SHADED / FLAT
-# span pipelines monomorphised on a packed key (src/dev/gr2/re3_jit).
+# span pipelines monomorphised on a packed key (crates/iris-gfx/src/dev/gr2/re3_jit).
 gr2-jit = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native", "iris-core/gr2-jit", "iris-cpu/gr2-jit", "iris-dev/gr2-jit", "iris-gfx/gr2-jit"]
 # Every graphics JIT: `--features gpujit` for `rex-jit,gr4-jit,gr2-jit`.
 gpujit = ["rex-jit", "gr4-jit", "gr2-jit", "iris-core/gpujit", "iris-cpu/gpujit", "iris-dev/gpujit", "iris-gfx/gpujit"]
@@ -325,7 +325,7 @@ v4l    = { version = "0.14", features = ["v4l2-sys"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 nokhwa = { version = "0.10", features = ["input-msmf"] }
 
-# ppmem's Windows backend (src/ppmem/map_windows.rs) additionally needs
+# ppmem's Windows backend (crates/iris-core/src/ppmem/map_windows.rs) additionally needs
 # Win32_System_Memory (VirtualAlloc2/MapViewOfFile3/UnmapViewOfFile2 placeholder
 # API), Win32_System_SystemInformation (GetSystemInfo, for the 64KB allocation
 # granularity) and Win32_Security — the last is non-obvious: CreateFileMappingW

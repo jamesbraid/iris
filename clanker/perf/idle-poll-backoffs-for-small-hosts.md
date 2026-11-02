@@ -27,7 +27,7 @@ SCSI thread competes its own core away from the arming it is waiting for.
 Every one of these waits was a *safety net around an already-event-driven wake
 path*, sized as if it were the wake path:
 
-- `Wake` (`src/net/wake.rs`) keeps a notify pending until the next `wait`, so
+- `Wake` (`crates/iris-dev/src/net/wake.rs`) keeps a notify pending until the next `wait`, so
   a signal sent while the consumer was busy is never lost. The enet thread's
   real wakes are `seeq.kick_tx()` (HPC3, when the CPU arms the TX channel)
   and `rx_wake.notify()` (NAT, when a frame arrives); the 1 ms timeout only
@@ -42,7 +42,7 @@ path*, sized as if it were the wake path:
 
 ## Fix
 
-- **seeq-enet** (`src/dev/seeq8003.rs`): the poll backs off 1ms -> 2 -> 4 ->
+- **seeq-enet** (`crates/iris-dev/src/dev/seeq8003.rs`): the poll backs off 1ms -> 2 -> 4 ->
   ... -> 50ms while nothing moves; any notify, frame or interrupt returns it
   to 1ms. Bursts still drain at speed (`busy` already skips the wait), and
   the mid-burst re-arm case always has activity within a few ms, so it never

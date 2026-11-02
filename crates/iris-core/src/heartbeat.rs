@@ -1,7 +1,7 @@
 //! Bits of the status-bar heartbeat word.
 //!
 //! Devices set these on the one `AtomicU64` a board's display hands them, and
-//! the status bar (src/disp.rs) reads and clears them once a frame. They used
+//! the status bar (crates/iris-gfx/src/disp.rs) reads and clears them once a frame. They used
 //! to live on `Rex3`, which made every Ethernet and SCSI device name the
 //! Newport.
 

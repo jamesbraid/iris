@@ -2,7 +2,7 @@
 
 Added 2026-08-12 with the then-optional `daynaport` feature. Since October 1,
 support is unconditional; attach it with `kind = "daynaport"` at a SCSI ID.
-Implementation: `src/dev/daynaport.rs`. Protocol per
+Implementation: `crates/iris-dev/src/dev/daynaport.rs`. Protocol per
 SLINKCMD.TXT rev 1.20, cross-checked against `dp_do_rx()` in
 [irixdayna](https://github.com/techomancer/irixdayna). **Verified end to end
 2026-08-13** against both IRIX drivers, with no IRIS changes needed: 6.5 walks

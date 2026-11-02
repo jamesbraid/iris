@@ -6,7 +6,7 @@
 #ifndef IRIS_H
 #define IRIS_H
 
-/* ── Z85C30 SCC serial, via IOC2 (src/dev/ioc.rs: IOC_BASE 0x1FBD9800) ────────── */
+/* ── Z85C30 SCC serial, via IOC2 (crates/iris-dev/src/dev/ioc.rs: IOC_BASE 0x1FBD9800) ────────── */
 #define IOC_BASE          0xBFBD9800u
 #define SCC_CHB_CMD       (IOC_BASE + 0x30)   /* IOC_SERIAL1_CMD  — tty1 */
 #define SCC_CHB_DATA      (IOC_BASE + 0x34)   /* IOC_SERIAL1_DATA */
@@ -14,7 +14,7 @@
 #define SCC_CHA_DATA      (IOC_BASE + 0x3C)   /* IOC_SERIAL2_DATA */
 #define SCC_RR0_TX_EMPTY  0x04u               /* RR0 bit 2: Tx buffer empty */
 
-/* ── Memory controller (src/dev/mc.rs: MC_BASE 0x1FA00000) ────────────────────── */
+/* ── Memory controller (crates/iris-dev/src/dev/mc.rs: MC_BASE 0x1FA00000) ────────────────────── */
 #define MC_BASE           0xBFA00000u
 #define MC_SYSID          (MC_BASE + 0x0018)  /* board revision / system id */
 #define MC_MEMCFG0        (MC_BASE + 0x00C0)  /* bank 0 in 31:16, bank 1 in 15:0 */
@@ -38,7 +38,7 @@
 #define MEMCFG_BASE(h)    (((h) & 0xFFu) << 22)
 #define MEMCFG_MB(h)      (((((h) >> 8) & 0x1Fu) + 1u) * 4u << (((h) >> 14) & 1u))
 
-/* ── IRIS test device, GIO64 expansion slot 0 (src/cpu/testdev.rs) ────────────── */
+/* ── IRIS test device, GIO64 expansion slot 0 (crates/iris-cpu/src/cpu/testdev.rs) ────────────── */
 #define TESTDEV_BASE      0xBF400000u
 #define TESTDEV_SIGNATURE (TESTDEV_BASE + 0x00)  /* reads "IRIS" */
 #define TESTDEV_PUTC      (TESTDEV_BASE + 0x04)
@@ -60,7 +60,7 @@
  * image loaded with --load-elf has no argv and no environment, so this register
  * is the only way to ask it for a shorter run. Every field is "unrestricted"
  * when zero, which is what an emulator without TESTDEV_CAP_RUN_CONFIG returns,
- * so it can be read unconditionally. See src/cpu/testdev.rs's RunConfig.
+ * so it can be read unconditionally. See crates/iris-cpu/src/cpu/testdev.rs's RunConfig.
  *
  *   31            16 15   12 11             0
  *   +---------------+-------+---------------+
@@ -74,7 +74,7 @@
 #define TESTDEV_RC_TIME_PCT(w) ((w) & 0xFFFu)
 #define TESTDEV_MAGIC     0x49524953u            /* 'I','R','I','S' */
 
-/* ── CPU identity (src/cpu/mips_core.rs:348-364) ──────────────────────────────── */
+/* ── CPU identity (crates/iris-cpu/src/cpu/mips_core.rs:348-364) ──────────────────────────────── */
 #define PRID_R4400        0x00000440u
 #define PRID_R5000        0x00002321u
 #define FIR_R4000         0x00000500u
@@ -170,7 +170,7 @@
 #define EXC_WATCH         23   /* watchpoint                   */
 #define EXC_VCED          31   /* virtual coherency, data      */
 
-/* ── CP0 Config (src/cpu/mips_exec.rs:89-90 and around 777) ───────────────────── */
+/* ── CP0 Config (crates/iris-cpu/src/cpu/mips_exec.rs:89-90 and around 777) ───────────────────── */
 #define CFG_K0_MASK       0x00000007u
 #define CFG_CU            0x00000008u
 #define CFG_DB            0x00000010u   /* dcache line: 0=16B 1=32B */
@@ -229,7 +229,7 @@
 #define K1_PTR(p)         ((volatile void *)(long)(s32)K0_TO_K1((u32)(unsigned long)(p)))
 #define K0_PTR(p)         ((volatile void *)(long)(s32)K1_TO_K0((u32)(unsigned long)(p)))
 
-/* Physical RAM base on IP22/IP24 (src/physical.rs:136). Only the bottom 512 KB
+/* Physical RAM base on IP22/IP24 (crates/iris-core/src/physical.rs:136). Only the bottom 512 KB
  * of the physical map is RAM, as an alias of 0x08000000..0x0807ffff; the span
  * from 0x00080000 to 0x08000000 is unmapped and swallows writes silently. */
 #define LOMEM_PHYS_BASE   0x08000000u

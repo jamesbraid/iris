@@ -2390,7 +2390,7 @@ impl Rex3 {
         *slot = (*slot & !mask) | (val & mask);
     }
 
-    // ── Shims for the generic draw path (src/dev/ng1/rex3_generic.rs) ────────────────
+    // ── Shims for the generic draw path (crates/iris-gfx/src/dev/ng1/rex3_generic.rs) ────────────────
     // The generic path selects among these bodies by decoded shape instead of
     // through the px_* function pointers. They are re-exported rather than
     // reimplemented: the colour packings are irregular (1-2-1 at 4bpp, 3-3-2 at

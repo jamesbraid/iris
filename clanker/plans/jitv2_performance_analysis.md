@@ -134,7 +134,7 @@ self-contained.
 > **Your job**, in this order:
 >
 > **Step 0 — instrument (R0).** There is no way today to tell "compiled but
-> slow" from "never compiled": `j2 stats` (`src/cpu/mips_exec.rs:10459`) reports
+> slow" from "never compiled": `j2 stats` (`crates/iris-cpu/src/cpu/mips_exec.rs:10459`) reports
 > pages, functions compiled, arena bytes and mega-flushes, but no coverage.
 > Add a counter of retired instructions executed inside compiled code — the
 > natural place is alongside `emit_increment_cycles` (`codegen.rs:2387`),
@@ -159,7 +159,7 @@ self-contained.
 > **Step 2 — FP status handling (R2).** Read `emit_fpu_clear_status`
 > (`codegen.rs:2754`), `emit_fpu_update_fcsr_with_inexact_override`
 > (`codegen.rs:2996`), `emit_fbinop_d` (`codegen.rs:4854`), and
-> `platform::x86_64::{get_fpu_status, clear_fpu_status}` (`src/platform.rs:82`,
+> `platform::x86_64::{get_fpu_status, clear_fpu_status}` (`crates/iris-core/src/platform.rs:82`,
 > `99`). Two LDMXCSR per emulated FP instruction is the cost.
 > Do **R2a first**: extend the existing region-wide FPU guard
 > (`emit_fpu_entry_guard`, `codegen.rs:1712` — it already guards CU1 and FR the
@@ -212,7 +212,7 @@ self-contained.
 >   (`fpu/cvt_s_d_rounds`, `fpu/cvt_out_of_range`); anything else is new. This
 >   matters most for step 2 — the FP flag model is exactly what those tests
 >   cover.
-> - `cargo test --release` — 387 lib tests, plus `src/cpu/jitv2/equiv_test.rs`, which
+> - `cargo test --release` — 387 lib tests, plus `crates/iris-cpu/src/cpu/jitv2/equiv_test.rs`, which
 >   is the JIT-vs-interpreter differential net.
 >
 > **Reporting.** Every claim should come with a number from `iris-bench`, not an

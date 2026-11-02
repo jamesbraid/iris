@@ -15,7 +15,7 @@ blocks (src/dev/mgras):
   hq3.rs        HQ3 frontend: CFIFO parser, HLE tokens, host DMA,
                 formatting and context switch/ERAM storage
   ge11.rs       GE11 diagnostic port and microcode storage (no microcode execution)
-  gl.rs         GE11 OpenGL HLE; shared math/vertex/lighting in src/dev/gl
+  gl.rs         GE11 OpenGL HLE; shared math/vertex/lighting in crates/iris-gfx/src/dev/gl
   rss.rs        RSS backend: RE4 registers, 2D primitives, triangles and PP1 ops
   rss_jit/      raster JIT (`gr4-jit`): pipeline key, context, Cranelift
                 emitters; equivalence sweep in rss_jit_tests.rs
@@ -171,7 +171,7 @@ phases:
     built in place (Arc/Box::new_zeroed), never by value: never derive
     Clone/Default on Rss/Frame or build them as struct literals.
   - OpenGL (2026-10-04): GE11 HLE in the HQ thread (gl.rs) on the shared
-    GL core (src/dev/gl: matrices/stacks, clipping, viewport, lighting,
+    GL core (crates/iris-gfx/src/dev/gl: matrices/stacks, clipping, viewport, lighting,
     fog; copied from gr2, gr2 moves onto it next). It sets up triangles
     through the RE4 area registers like SGI's diag _mg0_FillTriangle;
     rss.rs rasterizes them (GL half-open rule, colour planes rebuilt from

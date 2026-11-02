@@ -3002,7 +3002,7 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> MipsCpu<T, C> {
                         }
                     }
                     "html" => {
-                        // See src/cpu/jitv2_html_j2wp.rs for the full collect+render
+                        // See crates/iris-cpu/src/cpu/jitv2_html_j2wp.rs for the full collect+render
                         // implementation.
                         let path = actual_args.get(1).copied().unwrap_or("jitv2.html");
                         let jitv2_arc = exec.jitv2.clone();

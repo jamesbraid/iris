@@ -5,12 +5,12 @@
 Phase 3 moved Codec A output off `TimerManager`/`hptimer` onto a dedicated
 `HAL2-Pump` thread, first with `thread::sleep(period - elapsed)` at
 `period ≈ 1/44100 s` (~23 µs), later "fixed" to spin like `hptimer` does.
-Both versions were reverted; `src/dev/hal2.rs` is back on `TimerManager` via
+Both versions were reverted; `crates/iris-dev/src/dev/hal2.rs` is back on `TimerManager` via
 `arm_codeca`/`disarm_codeca` (see `HAL2_I_...` timer wiring in that file).
 
 ## Why the sleep-based version failed
 
-`hptimer` (`src/hptimer.rs`) **spins** for waits under ~200 µs so 44.1 kHz
+`hptimer` (`crates/iris-core/src/hptimer.rs`) **spins** for waits under ~200 µs so 44.1 kHz
 audio ticks stay on schedule. `thread::sleep` on Windows — even with
 `timeBeginPeriod(1)` from `Hal2::start()` — cannot reliably sleep for 23 µs;
 effective wakeups land near **1 ms**, so DMA was drained ~40× too slowly. The

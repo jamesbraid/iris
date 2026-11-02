@@ -25,7 +25,7 @@ The GE11 program is identical on both 6.5.22 boards (fingerprint
 INIT_PIXEL_STATE_ERAM and for the module state addresses in a program write
 (`Hq3Engine::canonical_pixel_state`). The pixel HLE and `PixMem` only know
 the Indigo2 layout. A new release's layout should be told apart by the
-microcode fingerprint (`src/dev/mgras/microcode.rs`), not by the board.
+microcode fingerprint (`crates/iris-gfx/src/dev/mgras/microcode.rs`), not by the board.
 
 **Also.** IRIX base 6.5 on the IP28 reads viewport, scissor, clear values and
 raster state from addresses the 6.5.22 map does not answer (glstate: 31

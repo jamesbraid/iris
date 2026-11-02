@@ -1,6 +1,6 @@
 # TFTP server tests
 
-Exercise IRIS's built-in TFTP server (`src/net/tftp.rs`) from a guest.
+Exercise IRIS's built-in TFTP server (`crates/iris-dev/src/net/tftp.rs`) from a guest.
 
 - `tftpget.c`: minimal RFC 1350 read client, plain C89 + BSD sockets.
   `cc -o tftpget tftpget.c` on IRIX, `gcc -o tftpget tftpget.c` on Linux.

@@ -15,7 +15,7 @@ Consolidates guidance from `clanker/irix/vino-*.md`.
 
 ## I2C
 
-- Repeated-start reads: START → addr → subaddr → RE-START → read-addr → READ (`src/dev/vino.rs` tests)
+- Repeated-start reads: START → addr → subaddr → RE-START → read-addr → READ (`crates/iris-dev/src/dev/vino.rs` tests)
 - Mid-transaction streaming: `I2C_DATA` writes while `NOT_IDLE` set
 
 ## Frame rate mask
@@ -31,8 +31,8 @@ Consolidates guidance from `clanker/irix/vino-*.md`.
 
 ## Known gaps
 
-- 6.5 interlace capture may show a thin diagonal artifact (`src/dev/vino.rs` comments)
-- HPC1 region black-holed to avoid capture panic (`src/physical.rs`)
+- 6.5 interlace capture may show a thin diagonal artifact (`crates/iris-dev/src/dev/vino.rs` comments)
+- HPC1 region black-holed to avoid capture panic (`crates/iris-core/src/physical.rs`)
 
 ## CDMC → VideoSource (implemented)
 

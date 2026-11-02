@@ -187,10 +187,10 @@ synchronous poll loop has had a chance to exit.
 
 ### Key code locations
 
-- `src/dev/wd33c93a.rs` TRANSFER_COUNT DMA path: lines ~1613–1628
-- `src/dev/wd33c93a.rs` `raise_interrupt`: line ~1380
-- `src/dev/wd33c93a.rs` `update_irq`: line ~1343
-- `src/dev/wd33c93a.rs` AUX_STATUS_DIRECT read: line ~694
+- `crates/iris-dev/src/dev/wd33c93a.rs` TRANSFER_COUNT DMA path: lines ~1613–1628
+- `crates/iris-dev/src/dev/wd33c93a.rs` `raise_interrupt`: line ~1380
+- `crates/iris-dev/src/dev/wd33c93a.rs` `update_irq`: line ~1343
+- `crates/iris-dev/src/dev/wd33c93a.rs` AUX_STATUS_DIRECT read: line ~694
 - `sys/dev/ic/wd33c93.c` `wd33c93_loop`: lines ~1302+
 - `sys/dev/ic/wd33c93.c` `wd33c93_sched` crash site: line 764
 - `sys/arch/sgi/sgi/intr_template.c` IPL masking: line ~129

@@ -8,7 +8,7 @@ supported instruction for diagnosis.
 
 ## Native coverage
 
-`src/cpu/jitv2/codegen.rs` provides the integer ALU, branches/jumps, traps,
+`crates/iris-cpu/src/cpu/jitv2/codegen.rs` provides the integer ALU, branches/jumps, traps,
 aligned/unaligned memory operations, FP arithmetic/moves/compares, FP memory,
 and MIPS IV additions implemented by the interpreter. BC1 is a PC-relative
 conditional branch with native codegen.

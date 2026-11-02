@@ -1,7 +1,7 @@
 # Idle-pause work — findings & handoff
 
 > Historical May 2026 handoff. Idle parking is now implemented behind
-> `idle-pause` (`src/cpu/idle_park.rs`) and used by GUI premiere builds.
+> `idle-pause` (`crates/iris-cpu/src/cpu/idle_park.rs`) and used by GUI premiere builds.
 > September fixes wake parked CPUs on device interrupts and prevent parking
 > with all interrupts masked. The uncommitted state and old JIT commands below
 > describe the original investigation. Current usage is in README.md/HACKING.md.
@@ -53,7 +53,7 @@ idle-loop candidate: 0x88011704..=0x88011748 (72 bytes) — ~57% of samples, int
 
 ## 3. Tools/code added so far
 
-### `idleprof` — PC-sampling histogram (in `src/cpu/mips_exec.rs`)
+### `idleprof` — PC-sampling histogram (in `crates/iris-cpu/src/cpu/mips_exec.rs`)
 Locates hot spin/idle loops. **Lock-free arming** (shared `Arc<AtomicBool>`
 between `MipsCpu` and the executor, read in `step()` via a cached raw ptr) so the
 CPU is never paused to enable it.
@@ -64,7 +64,7 @@ CPU is never paused to enable it.
 - Works against the interpreter run loop so `step()` sees every instruction
   (the old `--features jit` build that bypassed `step()` no longer exists).
 
-### Snapshot provenance (in `src/snapshot.rs` + `src/machine.rs`)
+### Snapshot provenance (in `crates/iris-core/src/snapshot.rs` + `src/machine.rs`)
 The manifest (`saves/<name>/snapshot.toml`) now records and validates **features**,
 **disks** (path+size), and **nvram**:
 - `snapshot.rs`: added `DiskRef`, `enabled_features()`, `Manifest.{features,disks,nvram}`,
@@ -154,7 +154,7 @@ means we can stop executing and let real time pass.
   host CPU drop to ~0 at the idle prompt while the clock and interactivity stay
   correct.
 
-### Implemented so far (`src/cpu/mips_exec.rs`, in the `MIPS-CPU` run loop in `start()`)
+### Implemented so far (`crates/iris-cpu/src/cpu/mips_exec.rs`, in the `MIPS-CPU` run loop in `start()`)
 
 The **park mechanism is done and validated**, run entirely in-place in the run
 loop (no thread/peripheral restart): on detected idle, sleep in ≤1 ms slices,
@@ -170,7 +170,7 @@ break out as soon as an unmasked interrupt is pending. `IRIS_NO_IDLE` disables i
 > **Superseded 2026-10-27.** The hash below never fires on IRIX 6.5, whose idle
 > path is a long scheduler loop with evolving registers, and it *does* match
 > short device-poll loops that must keep running. The PC-cluster detector now
-> in `src/cpu/idle_park.rs` replaces it; see "Detector — PC-cluster sample".
+> in `crates/iris-cpu/src/cpu/idle_park.rs` replaces it; see "Detector — PC-cluster sample".
 
 The crux was distinguishing the kernel idle loop from a busy **delay loop**:
 - IRIX boot calls a calibrated `DELAY()` at `0x88003d70`: `bgezl v1,-1; subu v1,v1,v0`

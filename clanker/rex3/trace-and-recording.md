@@ -23,7 +23,7 @@ Where the cost is:
     MC-DMA threads: that is what makes record order == GFIFO order with two
     producers. The processor thread must never take `rec` (the checkpoint
     path waits for it to drain while holding the lock). Lock order rec -> trace.
-  - TraceWriter (src/trace_writer.rs) does the file I/O on its own thread;
+  - TraceWriter (crates/iris-core/src/trace_writer.rs) does the file I/O on its own thread;
     producers only append to memory.
 
 Recordings open with an S record (save_state + context bits snapshots skip

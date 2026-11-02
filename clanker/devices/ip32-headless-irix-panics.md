@@ -41,7 +41,7 @@ and finished them in host time, after the guest's 4 ms of guest time were
 gone. Console type and memory size only change how much is queued then.
 
 **Fix.** A status read on a busy engine first gives it up to 100 us of host
-time (`RE_STATUS_POLL_WAIT`, `src/dev/o2gfx.rs`); see below for the loop. A guest polling status is
+time (`RE_STATUS_POLL_WAIT`, `crates/iris-dev/src/dev/o2gfx.rs`); see below for the loop. A guest polling status is
 waiting for the engine anyway. Boots to login with 32 MB up to 1 GB and
 headless.
 

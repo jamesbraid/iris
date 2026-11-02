@@ -10,7 +10,7 @@ error, and SDRAM is reachable at its own address from 0x2000_4000. The stock
 IDE diagnostics' expectations are exactly this. 0x4000 up to the 64 KiB decode
 slot is a bus error too.
 
-In `src/dev/heart_mem.rs` (on `Physical` since 2026-10-28), `HeartRam::rebuild`
+In `crates/iris-dev/src/dev/heart_mem.rs` (on `Physical` since 2026-10-28), `HeartRam::rebuild`
 puts the bus's default (bus error) over 0x2000_0000..+16 KiB in the table and
 points 0..0x4000 at a `bank_view` of the bank behind the unit at 0x2000_0000,
 so both reach one bank and one set of jitv2 page generations. The kernel

@@ -46,7 +46,7 @@ IRIS keeps the observable part and drops the timing.
 
 `Machine` (`src/machine.rs`) builds all of this from a `MachineConfig`, wires
 the devices together, starts and stops them, and takes snapshots.
-`src/platform.rs` holds the per-profile differences (Indy "Guinness" vs
+`crates/iris-core/src/platform.rs` holds the per-profile differences (Indy "Guinness" vs
 Indigo2 "Fullhouse": IOC variant, one or two SCSI controllers, NVRAM chip,
 EISA/INT2 cascade, PROM fallback, memory layout).
 
@@ -74,10 +74,10 @@ SCSI storage follows the same pattern one level down. `ScsiTarget` is what
 varies on a bus (a `ScsiDevice` disk or CD-ROM, a `DaynaPort`): `request`,
 the lifecycle, and optional behaviour with do-nothing defaults (a
 copy-on-write layer, CHD sync, a disc changer), so callers ask for behaviour
-and never for a type. `ScsiBus` (`src/scsi/bus.rs`) is the mechanism: the
+and never for a type. `ScsiBus` (`crates/iris-dev/src/scsi/bus.rs`) is the mechanism: the
 id-to-target table with attach, request and overlay export and import, and
 the controller's INQUIRY identities. A disk or CD-ROM sits on a `BlockNode`
-(`src/block_node.rs`), built by `open_image` for everything that mounts an
+(`crates/iris-dev/src/block_node.rs`), built by `open_image` for everything that mounts an
 image. A CD-ROM's node is a `ChangerNode`: the queue of discs and the open
 active one, with the `Removable` trait (present, changed, eject, load)
 separate from `BlockNode` so that removable media which is not a block device,
@@ -85,7 +85,7 @@ a tape, can use it too. The WD33C93A (Indy, Indigo2), the Adaptec
 7880 (O2) and the ISP1040 (Octane) each make an empty bus of their own kind
 (`new_bus`); the machine fills it from config and gives it to the controller's
 constructor, so a controller exists with its targets and keeps only its
-registers and DMA. `src/scsi_monitor.rs` implements the monitor's `scsi` and `cow`
+registers and DMA. `crates/iris-dev/src/scsi_monitor.rs` implements the monitor's `scsi` and `cow`
 subcommands and the run-time disc changes once, over the bus a controller hands
 out through `ScsiTargets::scsi_bus`; chip-specific subcommands (`regs`; the
 WD's `wdt`, `defer`, `debug`) stay with the chip, and `DiscChanger` is
@@ -111,7 +111,7 @@ missing swap.
 
 ## 3. Devices and the bus
 
-Every piece of hardware implements some of these traits (`src/traits.rs`):
+Every piece of hardware implements some of these traits (`crates/iris-core/src/traits.rs`):
 
 ```rust
 pub trait BusDevice: Send + Sync {
@@ -160,9 +160,9 @@ channel), `FifoDevice` (serial byte streams), `InterruptController`/`IrqLine`
 screenshots), `CpuDevice` (what `Machine` holds for the CPU).
 
 Serial lines have two halves. A UART model owns the registers: the Indy's
-`Z85c30`, and `Ns16550` (`src/dev/ns16550.rs`), the 16550A core that the O2's
+`Z85c30`, and `Ns16550` (`crates/iris-dev/src/dev/ns16550.rs`), the 16550A core that the O2's
 `MaceUart` (lane decode, interrupt line, monitor) and the Octane's IOC3 wrap.
-The host end is a `SerialBackend` from `src/dev/serial_host.rs`, which the
+The host end is a `SerialBackend` from `crates/iris-dev/src/dev/serial_host.rs`, which the
 machine constructors pick with `console_backends`: the CI backend, a TCP
 console, or a log tee. A UART's transmit is instant and its receive side
 pulls from the backend with back-pressure (`pump`), so nothing in the model
@@ -170,7 +170,7 @@ needs a thread of its own beyond the service loop's call.
 
 ### The physical address map
 
-`Physical` (`src/physical.rs`) is the physical bus, and it belongs to no
+`Physical` (`crates/iris-core/src/physical.rs`) is the physical bus, and it belongs to no
 machine: a decode table, the RAM banks with ppmem's window over them, and the
 plain devices every machine needs (memory that reads zero, a black hole,
 aliases that re-dispatch a range elsewhere on the bus). A machine builds its
@@ -179,11 +179,11 @@ where its hardware decodes it. For the Indy and Indigo2 that is
 `src/ip22_bus.rs` (`Ip22Bus`): the address map, the MC's error reporting, and
 the MEMCFG remap that places the banks in the table and the window. For the
 O2 it is `src/ip32.rs` (`Ip32Bus`) with CRIME's bank logic in
-`src/dev/crime_mem.rs` (`O2Memory`), whose remap points the table at bank
+`crates/iris-dev/src/dev/crime_mem.rs` (`O2Memory`), whose remap points the table at bank
 views (a bank counted from where CRIME placed it) and maps the window to
 match. The Octane is built the same way: `src/ip30.rs` (`Ip30Bus`) maps
 HEART, the Crossbow and the widget windows (switched as links come and go),
-and HEART's bank descriptors place the banks through `src/dev/heart_mem.rs`
+and HEART's bank descriptors place the banks through `crates/iris-dev/src/dev/heart_mem.rs`
 (`HeartRam`), 32 MB at a time, with the 16 KB low-memory window as a view
 of the same bank. The CPU and every DMA master reach memory through
 `Physical` as a `BusDevice` (on the Octane, masters get `HeartRam`'s DMA
@@ -205,7 +205,7 @@ the bridge's own decode.
 `Physical` decodes physical addresses through a table of
 4 KB slots (one `*const dyn BusDevice` per `addr >> 12`), so finding the
 device for an access is one indexed load. The table itself is sparse and
-host-mapped (`SparseDeviceMap`, `src/ppmem/devmap.rs`): it spans a 40-bit
+host-mapped (`SparseDeviceMap`, `crates/iris-core/src/ppmem/devmap.rs`): it spans a 40-bit
 physical space as a 4 GB reservation, pages full of one pointer are views
 of one shared page mapped on first use, a change swaps a whole page in rather than storing into
 it (so threads dispatching through it never see a torn pointer), and a page
@@ -215,7 +215,7 @@ There is a lot of `unsafe` in there; it is deliberate. The hierarchy it
 models:
 
 - **SysAD**: the CPU's 64-bit bus, with byte enables.
-- **MC** (Memory Controller, `src/dev/mc.rs`): the crossbar. DRAM, the GIO
+- **MC** (Memory Controller, `crates/iris-dev/src/dev/mc.rs`): the crossbar. DRAM, the GIO
   bus, and the MC's own registers (memory configuration, VDMA, timers). CPU
   programmed I/O and every DMA engine go through it.
 - **GIO**: HPC3 (peripheral controller, GIO32) and the graphics board
@@ -231,7 +231,7 @@ kept where the real hardware has them.
 ### The memory map
 
 The decode table says what answers at an address, but not whether that is
-memory. Each machine therefore also builds a `MemoryMap` (`src/memory_map.rs`)
+memory. Each machine therefore also builds a `MemoryMap` (`crates/iris-core/src/memory_map.rs`)
 when it is constructed: a list of named ranges, each one RAM, an alias of RAM,
 or ROM. The Indy and Indigo2 take theirs from `ip22_bus::memory_map`, the O2
 from `ip32::memory_map`, and the Octane from `ip30::memory_map`, which sizes RAM
@@ -247,7 +247,7 @@ devices and should not appear outside them.
 
 ### Interrupts
 
-A device holds an `IrqLine` (`src/irq.rs`): a reference to the controller it
+A device holds an `IrqLine` (`crates/iris-core/src/irq.rs`): a reference to the controller it
 reports to and its input number. It drives the line to a level whenever its
 state may have changed; the controller decides what that means (a status bit
 behind a mask, an OR of several inputs, or a cascade further up). HPC3's
@@ -271,7 +271,7 @@ in [docs/interrupt_map.md](docs/interrupt_map.md).
 CP0 Count is derived from host wall-clock time at a fixed rate (33 MHz on
 IP22/IP24, 97.5 MHz on IP28; `[clock] fixed_mhz` overrides). The Compare
 interrupt and other periodic device events come from host timers
-(`src/hptimer.rs`), not from counting instructions. A guest that runs faster
+(`crates/iris-core/src/hptimer.rs`), not from counting instructions. A guest that runs faster
 or slower than real hardware sees the same time passing. `--features
 ci_clock` instead derives Count from retired instructions, for deterministic
 replays.
@@ -340,7 +340,7 @@ The rules, in order of importance:
    counters that several threads read are `Atomic*` with explicit orderings,
    not fields behind a mutex.
 5. **Pick the lock by the critical section.** `parking_lot::Mutex` for
-   ordinary state. `locks::SpinLock` (`src/locks.rs`) for short sections that
+   ordinary state. `locks::SpinLock` (`crates/iris-core/src/locks.rs`) for short sections that
    device threads share at high rate, where parking costs more than the wait.
    A `SpinLock` records its holder (thread and call site) and reports itself
    on stderr when a waiter has been stuck for five seconds, so a deadlock
@@ -357,11 +357,11 @@ consumer thread never takes `rec`.
 
 ### State and execution
 
-- `MipsCore` (`src/cpu/mips_core.rs`) is register state only: GPRs, HI/LO,
+- `MipsCore` (`crates/iris-cpu/src/cpu/mips_core.rs`) is register state only: GPRs, HI/LO,
   CP0, CP1, the interrupt bitmask, delay-slot state, the cycle counter. Field
   order is deliberate (hot fields together), and jitv2 bakes field offsets
   into generated code, so reordering is not free.
-- `MipsExecutor<T: Tlb, C: CpuModel>` (`src/cpu/mips_exec.rs`) combines the
+- `MipsExecutor<T: Tlb, C: CpuModel>` (`crates/iris-cpu/src/cpu/mips_exec.rs`) combines the
   core with the TLB, the cache model and the bus. `step()` fetches and
   executes one instruction; `exec(instr)` executes one already fetched. Every
   handler sets the PC itself, including delay slots.
@@ -378,7 +378,7 @@ consumer thread never takes `rec`.
 
 An Octane can have two ([docs/Octane/multiprocessor.md](docs/Octane/multiprocessor.md)).
 Each is its own `MipsCpu` with its own core, TLB, cache model and thread, over
-one `Physical`. `src/cpu/smp.rs` holds what they share:
+one `Physical`. `crates/iris-core/src/cpu/smp.rs` holds what they share:
 
 - **Which CPU this is.** `set_current_cpu` marks a CPU thread and `current_cpu()`
   reads it. `BusDevice` carries no initiator; only HEART asks, for `PRID` and
@@ -392,9 +392,9 @@ one `Physical`. `src/cpu/smp.rs` holds what they share:
   on. Two callers take turns, and the one waiting counts as parked. Remapping
   memory and flushing jitv2 go through it.
 
-The monitor reaches CPUs through `CpuMonitor` (`src/cpu/cpu_monitor.rs`), on
+The monitor reaches CPUs through `CpuMonitor` (`crates/iris-cpu/src/cpu/cpu_monitor.rs`), on
 every machine: it routes each command and the commands themselves live in
-`src/cpu/mips_exec/monitor.rs`.
+`crates/iris-cpu/src/cpu/mips_exec/monitor.rs`.
 
 ### ExecStatus
 
@@ -409,13 +409,13 @@ straight through.
 
 ### Memory and caches
 
-- **RAM** is real host memory (`src/ppmem/`, [docs/ppmem-design.md](docs/ppmem-design.md)):
+- **RAM** is real host memory (`crates/iris-core/src/ppmem/`, [docs/ppmem-design.md](docs/ppmem-design.md)):
   the guest's physical address space is a host address reservation, so
   guest physical to host address is one add. SIMM mirroring is expressed as
   repeated mappings of the same bank. RAM banks are still bus devices, so DMA
   and every other bus path work whether or not the host window could be
   reserved.
-- **Caches** (`src/cpu/mips_cache_v2.rs`): the R4400 has VIPT L1I/L1D and a
+- **Caches** (`crates/iris-cpu/src/cpu/mips_cache_v2.rs`): the R4400 has VIPT L1I/L1D and a
   physically indexed L2, with decoded instructions cached in L2 and virtual
   coherency exceptions when VA[14:12] disagrees with the L2's recorded index.
   The R5000 has 2-way L1s and no L2. The R10000 keeps shadow tag/data/ECC
@@ -423,7 +423,7 @@ straight through.
   straight to memory. `tcache` keeps the cache state machine but stops
   copying line data for cacheable RAM
   ([docs/tcache-design.md](docs/tcache-design.md)); jitv2 always uses it.
-- **Address translation** (`src/cpu/mips_tlb.rs`): a one-entry fetch
+- **Address translation** (`crates/iris-cpu/src/cpu/mips_tlb.rs`): a one-entry fetch
   `nanotlb`, the direct-mapped data-side `nutlb`
   ([docs/nutlb-design.md](docs/nutlb-design.md)) and an 8 KB `vmap` from VPN
   to TLB entry sit in front of the JTLB. All of them are invalidated on ASID
@@ -441,7 +441,7 @@ FIFO levels and status bits to stay in step. IRIS keeps that structure and
 uses it for parallelism: the CPU thread only queues work, and one or more
 board threads draw.
 
-**`GFifo`** (`src/gfifo.rs`) is the queue every board uses. Entries are
+**`GFifo`** (`crates/iris-core/src/gfifo.rs`) is the queue every board uses. Entries are
 `(addr: u32, val: u64)` register writes. It is a fixed-size ring with
 multiple producers (the CPU thread and the MC's VDMA thread) serialised by an
 atomic spinlock, and one consumer per head; with `HEADS > 1` it is a
@@ -484,7 +484,7 @@ without locks and composes it through the board's colour maps and DAC.
 Everything that touches the host GL context (including teardown) runs on the
 thread that owns it.
 
-The status bar under the frame is fed by `StatusSource` (`src/disp.rs`),
+The status bar under the frame is fed by `StatusSource` (`crates/iris-gfx/src/disp.rs`),
 which the machine builds once and hands to every graphics board: the
 heartbeat word (front-panel LEDs and SCSI/network activity bits), the CPU
 cycle counter, the Compare-match count and, in developer builds, the fetch
@@ -499,7 +499,7 @@ constructor, answers `GfxDisplay::cycles` from it, and does not build a
 
 ### The composed frame and the hardware cursor
 
-`GfxDisplay` (`src/gfx_display.rs`) is what the window, the CI socket, the
+`GfxDisplay` (`crates/iris-gfx/src/gfx_display.rs`) is what the window, the CI socket, the
 monitor's `screen`/`ptr` commands and the VNC server see of a board, whichever
 board it is. The display thread leaves the composed guest frame in
 `screen().rgba` (stride 2048, `0xAABBGGRR`, no status bar) and bumps
@@ -579,7 +579,7 @@ introspection commands are in [debug.md](debug.md#jit-v2).
   for the boards).
 
 The Indy and Indigo2 profiles each have an embedded PROM fallback;
-`src/platform.rs` and `src/machine.rs` wire their differences, and
+`crates/iris-core/src/platform.rs` and `src/machine.rs` wire their differences, and
 `platform_profile_tests.rs` pins them down. The O2 and the Octane have no
 embedded PROM and are built by `workstation::build`.
 

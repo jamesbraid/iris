@@ -67,7 +67,7 @@ down: the host core takes the host cache line exclusive for the duration of the
 instruction, and every other emulated CPU's plain store to that word is
 serialised against it by the host's own coherence protocol. The guest word is a
 single aligned host `u32`/`u64` thanks to the `^3` byte and `rotate_left(32)`
-qword layout in `src/dev/mem.rs`, so there is nothing to tear.
+qword layout in `crates/iris-core/src/dev/mem.rs`, so there is nothing to tear.
 
 The one deviation from hardware is **ABA**: if the word changed and changed
 back between `LL` and `SC`, the CAS succeeds where hardware would fail.

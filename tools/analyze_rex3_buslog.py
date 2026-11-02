@@ -4,7 +4,7 @@
 Reconstructs REX3 register state and reports, per GO, the effective DRAWMODE0/1,
 span geometry and per-vertex colour/alpha, so you can see what GL asked for.
 
-Internal coordinate format is 21.11 fixed point (see src/dev/ng1/rex3.rs:581-600):
+Internal coordinate format is 21.11 fixed point (see crates/iris-gfx/src/dev/ng1/rex3.rs:581-600):
   XSTARTI/XYSTARTI : integer, << 11
   XSTARTF/XENDF    : IEEE float on the wire; HW masks to mantissa bits 22:7
 Colours are o12.11 (24-bit), integer part = val >> 11.

@@ -1246,7 +1246,7 @@ impl Machine {
     /// 8254 timer 0/1 interrupts when IRIX uses those instead (see
     /// `Ioc::set_clock_ticks`; the two never both run). Read a delta over wall
     /// time to get the guest's Hz, the same math the CLI status bar's
-    /// `BarStats::fasttick` uses (`src/disp.rs`).
+    /// `BarStats::fasttick` uses (`crates/iris-gfx/src/disp.rs`).
     pub fn fasttick_count(&self) -> Arc<AtomicU64> {
         self.cpu.fasttick_count()
     }

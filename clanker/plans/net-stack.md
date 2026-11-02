@@ -2,7 +2,7 @@
 
 Status: analysis and steps 1-5 done 2026-10-14 (results in §2, what is
 left in §8).
-Scope: `src/net/` (NAT backend and its services) and the seeq8003 pump that
+Scope: `crates/iris-dev/src/net/` (NAT backend and its services) and the seeq8003 pump that
 feeds it. PCAP bridging (`net_pcap.rs`) is out of scope except where it shares
 the backend trait.
 
@@ -21,7 +21,7 @@ the backend trait.
                                                                       NTP, FTP ALG, XDMCP ALG
 ```
 
-`src/net/mod.rs` is 3,100 lines. One `NatEngine` owns everything above. Frames
+`crates/iris-dev/src/net/mod.rs` is 3,100 lines. One `NatEngine` owns everything above. Frames
 are `Vec<u8>`; every handler parses with `r16`/`r32` at hand-computed offsets
 and builds replies with `udp_packet`/`tcp_segment_win`/`ip_frame`, each
 computing its own checksum. Services are wired in by matching ports inside
@@ -145,7 +145,7 @@ concerns networking.
 ## 5. Design (as built)
 
 ```
-src/net/
+crates/iris-dev/src/net/
   packet.rs      Ether/Arp/Ipv4/Icmp/Udp/Tcp views (validated once, accessors
                  for every field) and Ipv4Route builders that write a whole
                  frame and compute lengths and checksums; nothing else does

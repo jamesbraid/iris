@@ -36,7 +36,7 @@ def _bits(v, hi, lo):
 
 
 def decode_dm0(v):
-    # Bit layout mirrors DrawMode0 in src/dev/ng1/rex3.rs — keep in sync.
+    # Bit layout mirrors DrawMode0 in crates/iris-gfx/src/dev/ng1/rex3.rs — keep in sync.
     op  = OPCODES.get(_bits(v, 1, 0), '?')
     adr = ADRMODES.get(_bits(v, 4, 2), '?')
     flags = []
@@ -63,7 +63,7 @@ def decode_dm0(v):
 
 
 def decode_dm1(v):
-    # Bit layout mirrors DrawMode1 in src/dev/ng1/rex3.rs — keep in sync.
+    # Bit layout mirrors DrawMode1 in crates/iris-gfx/src/dev/ng1/rex3.rs — keep in sync.
     planes = PLANES.get(_bits(v, 2, 0), '?')
     depth  = DEPTHS.get(_bits(v, 4, 3), '?')
     hdepth = {0: '12bpp', 1: '8bpp', 2: '4bpp', 3: '32bpp'}.get(_bits(v, 9, 8), '?')

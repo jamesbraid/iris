@@ -1,6 +1,6 @@
 # The decode table is host-mapped and never written in place
 
-## Status: landed 2026-10-24 (`src/ppmem/devmap.rs`)
+## Status: landed 2026-10-24 (`crates/iris-core/src/ppmem/devmap.rs`)
 
 `Physical::device_map`, the 64 KB-slot array of `*const dyn BusDevice`, is
 gone. The table is a `SparseDeviceMap`: a 256 MB `AddrSpace` reservation

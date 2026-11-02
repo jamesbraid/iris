@@ -688,7 +688,7 @@ fn cmd_wait_serial(server: &CiServer, args: &Value) -> Response {
 // iris pre-formats the underlying file with a minimal SGI Volume Header at
 // sector 0 so IRIX recognises it (without the VH, /dev/rdsk/dks0dN*
 // returns I/O error on every read). The VH defines three partitions
-// (see src/sgi_vh.rs):
+// (see crates/iris-core/src/sgi_vh.rs):
 //   - slot  0 ("s0",  payload):     PT_RAW,    sectors 8..end
 //   - slot  8 ("vh",  volhdr):      PT_VOLHDR, sectors 0..7
 //   - slot 10 ("vol", whole-disk):  PT_VOLUME, sectors 0..end

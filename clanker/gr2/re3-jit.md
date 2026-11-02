@@ -1,6 +1,6 @@
 # The RE3 span JIT (`gr2-jit`)
 
-`src/dev/gr2/re3_jit` compiles RE3 SHADED / FLAT / FLAT4 spans. Its
+`crates/iris-gfx/src/dev/gr2/re3_jit` compiles RE3 SHADED / FLAT / FLAT4 spans. Its
 pattern follows `gr4-jit` (clanker/mgras/gr4-jit.md: key, store, compiler
 thread, sweep test). These are the GR2-specific gotchas.
 

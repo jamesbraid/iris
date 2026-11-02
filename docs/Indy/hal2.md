@@ -259,7 +259,7 @@ Example from Test_Rx_Clock: `IDR0 = 0x213` → channel 3, BRES clock 2, stereo.
 
 ## Emulator implementation (October 2026)
 
-`src/dev/hal2.rs` uses the shared high-precision timer manager. Codec A is
+`crates/iris-dev/src/dev/hal2.rs` uses the shared high-precision timer manager. Codec A is
 paced from host elapsed time in 250 µs wakeups with bounded catch-up, rather
 than one fixed DMA burst per wakeup. DMA demand tracks the guest's polls to
 avoid advancing into descriptors the guest has not prepared.

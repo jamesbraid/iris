@@ -1,13 +1,13 @@
 # jitv2 persistent code cache — design
 
-Implemented in `src/cpu/jitv2/pcache.rs`; landed on 2026-09-29 (`36ec12b`).
+Implemented in `crates/iris-cpu/src/cpu/jitv2/pcache.rs`; landed on 2026-09-29 (`36ec12b`).
 The September 24 measurements below predate that landing. Where the implementation departs from the plan below, the
 section says so.
 
 Update, 2026-10-01: the toggle is `[jitv2] cache`/`cache_dir` in
 `iris.toml` (iris-gui **General → Persistent JIT code cache** since
 2026-10-02), which
-`Jitv2Config::apply_env` (`src/config.rs`) turns into the `IRIS_JIT_CACHE`/
+`Jitv2Config::apply_env` (`crates/iris-core/src/config.rs`) turns into the `IRIS_JIT_CACHE`/
 `IRIS_JIT_CACHE_DIR` env vars described below. False/blank config values
 preserve existing environment values; enabled/nonempty config replaces them.
 The supported configuration inventory is in [FEATURES.md](../FEATURES.md).

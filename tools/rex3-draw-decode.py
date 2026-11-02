@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Decode a REX3 DRAWMODE0/DRAWMODE1 register pair into human-readable fields.
 
-Bit layout mirrors the `DrawMode0`/`DrawMode1` bitfields in src/dev/ng1/rex3.rs — keep
+Bit layout mirrors the `DrawMode0`/`DrawMode1` bitfields in crates/iris-gfx/src/dev/ng1/rex3.rs — keep
 in sync if those change.
 
 Usage:

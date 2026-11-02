@@ -71,7 +71,7 @@ impl Memory {
     }
 
     /// JIT v2: raw pointer to the generation counter for the page containing `addr`.
-    /// Used to populate `PhysicalCodePage::gen` (see src/cpu/jitv2/jitv2.rs). The pointer
+    /// Used to populate `PhysicalCodePage::gen` (see crates/iris-cpu/src/cpu/jitv2/jitv2.rs). The pointer
     /// is valid for the lifetime of `&self` (the `gen` vec is never resized after `new`).
     #[cfg(feature = "jitv2")]
     #[inline]

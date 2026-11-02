@@ -11,7 +11,7 @@ it and goes on, and audio works.
 **What the driver checks.** It reads the RAD UST counter (BAR0 0x30), spins a
 10 µs kernel delay, reads it again and alerts if it moved by fewer than 3
 ticks. The kernel converts with 960 ns per tick (it divides by 0x3c0), so
-`UST_NS_PER_TICK` in `src/dev/rad1.rs` must stay 960. The counter itself is
+`UST_NS_PER_TICK` in `crates/iris-dev/src/dev/rad1.rs` must stay 960. The counter itself is
 fine. The model enables it on 0x0e then 0x0a, and it counts.
 
 **Cause.** The kernel's microsecond delay is a counted spin loop (11 taken

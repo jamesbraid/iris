@@ -83,7 +83,7 @@ obvious-looking conclusion was a stale-build/caching problem. It was not. The
 give-away was dumping the binary's help text and finding **two** `ll`
 registrations — one from the early return's table entry, one from the new arm.
 
-So: before adding a monitor command, `grep -n '"<name>"' src/cpu/mips_exec.rs` and
+So: before adding a monitor command, `grep -n '"<name>"' crates/iris-cpu/src/cpu/mips_exec.rs` and
 check for `if actual_cmd == "<name>"` as well as a match arm. The early return
 now gates on `actual_args.is_empty()` so `ll stats`/`ll clear` fall through,
 with a comment saying why.
