@@ -417,6 +417,9 @@ struct State {
     /// is [`State::request_out`].
     rqst_cons: u16,
     resp_prod: u16,
+    /// The producer count the driver last read. A completion posted since
+    /// then is one it has not been shown.
+    resp_seen: u16,
     resp_cons: u16,
     pending: VecDeque<Pending>,
     /// Per bus, when the adapter's clock ends the hold-off a bus reset
@@ -452,6 +455,7 @@ impl State {
             resp_len: 0,
             rqst_cons: 0,
             resp_prod: 0,
+            resp_seen: 0,
             resp_cons: 0,
             pending: VecDeque::new(),
             quiet_until: [None; BUSES],
@@ -492,6 +496,7 @@ impl State {
         self.resp_len = 0;
         self.rqst_cons = 0;
         self.resp_prod = 0;
+        self.resp_seen = 0;
         self.resp_cons = 0;
         self.pending.clear();
         self.quiet_until = [None; BUSES];
@@ -1258,6 +1263,20 @@ impl Core {
             0x7 => {
                 st.risc_flags &= !RISC_FLAG_HOST_INT;
                 st.bus_status = 0;
+                // A completion posted since the driver last read the
+                // producer count is not one it has seen, and this clear
+                // would swallow its interrupt: the driver reads the count,
+                // works, then clears, and a model with no bus latency
+                // completes the next command inside that gap. The driver
+                // then waits on a command that already finished until its
+                // timeout resets the chip. Approximation: the interrupt
+                // stays up for such a completion, and the driver may see
+                // one extra interrupt with nothing new in the ring. Real
+                // hardware has the same window, but commands there are
+                // milliseconds apart, so it is not known how it closes.
+                if st.resp_len != 0 && st.resp_prod != st.resp_seen {
+                    st.bus_status = STATUS_INT_REQ | STATUS_RISC_INT_REQ;
+                }
             }
             // Accepted with nothing behind them, so the attach proceeds.
             c @ (0x4 | 0x9 | 0xa | 0xe) => {
@@ -1805,6 +1824,9 @@ impl Core {
         let mut st = self.st.lock();
         // The adapter's own producer count, never the driver's last write.
         if off == reg::RESPONSE_QUEUE {
+            if st.resp_len != 0 {
+                st.resp_seen = st.resp_prod;
+            }
             return if st.resp_len == 0 { st.mailbox[MBOX_RSP] } else { st.resp_prod };
         }
         // The adapter's consumer position: a driver computes its free ring
@@ -2148,6 +2170,7 @@ impl Isp1040 {
                 st.resp_prod %= st.resp_len;
                 st.resp_cons %= st.resp_len;
             }
+            st.resp_seen = st.resp_prod;
             st.rqst_base = u32f("rqst_base") as u64 | ((u32f("rqst_base_hi") as u64) << 32);
             st.resp_base = u32f("resp_base") as u64 | ((u32f("resp_base_hi") as u64) << 32);
             if let Some(m) = get_field(v, "mailbox") { load_u16_slice(m, &mut st.mailbox); }
