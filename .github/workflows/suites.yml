@@ -4,7 +4,7 @@
 # with the MIPS cross toolchain, then run it against IRIS built for each CPU x
 # engine cell. Kept as two workflows, that meant installing the toolchain twice
 # and — far more expensively — building *eight* emulators per push instead of
-# four, since any change to src/cpu/mips_*.rs triggers both. The release profile is
+# four, since any change to the CPU's mips_*.rs triggers both. The release profile is
 # fat-LTO with codegen-units=1, so an emulator build is the dominant cost in
 # this repo's CI and halving the count is the whole point of merging.
 #
@@ -40,8 +40,9 @@ on:
     paths: &suite_paths
       - 'cpu-tests/**'
       - 'bench/**'
-      - 'src/cpu/mips_*.rs'
-      - 'src/cpu/jitv2/**'
+      - 'crates/iris-core/src/cpu/mips_*.rs'
+      - 'crates/iris-cpu/src/cpu/mips_*.rs'
+      - 'crates/iris-cpu/src/cpu/jitv2/**'
       - 'crates/iris-core/src/elf.rs'
       - 'crates/iris-cpu/src/cpu/testdev.rs'
       - 'src/bench_report.rs'
