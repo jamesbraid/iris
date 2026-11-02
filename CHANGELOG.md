@@ -40,7 +40,9 @@ hashes are given where a change is easiest to understand by reading the commit.
   2 GiB compressed CHD it took 27 ms and now takes 1 to 4 ms. A CHD disk gets
   the background sync, and a hunk's map entry reaches the file only after
   its data, so a host crash cannot leave the map pointing at data that is
-  not there.
+  not there. A write that gives a hunk its first data syncs before it
+  completes, also with `write_cache = true`, so killing iris loses nothing
+  on a CHD either.
 
 ### CHD disks
 

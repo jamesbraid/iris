@@ -396,6 +396,11 @@ impl ChdFile {
         Ok(())
     }
 
+    /// Whether map entries wait for a sync.
+    pub fn holds_map_entries(&self) -> bool {
+        !self.held.lock().unwrap().is_empty()
+    }
+
     fn overlaps_map(&self, offset: u64, len: usize) -> bool {
         offset < self.map.end && offset + len as u64 > self.map.start
     }

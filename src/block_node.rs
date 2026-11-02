@@ -53,9 +53,9 @@
 //! contract so:
 //!
 //! - [`BlockNode::write`] has put the data where a killed iris leaves it
-//!   (the host's file) before it returns. Anything a backend holds only in
-//!   memory is lost to `kill -9`; the CHD's new map entries are the one case,
-//!   and STORAGE.md says so.
+//!   (the host's file) before it returns, so that `kill -9` loses nothing.
+//!   A backend that must hold part of a write back, as the CHD holds a new
+//!   hunk's map entry until its data is synced, syncs before returning.
 //! - [`BlockNode::flush_data`] returns only once every write accepted so far
 //!   is on the host's disk and the file would open and read back as the guest
 //!   wrote it after a crash. The SCSI layer calls it before GOOD for a write
@@ -1084,6 +1084,17 @@ impl BlockNode for ChdNode {
         let written = self.hd_mut().write_sectors(offset / ss, buf);
         // Also after a failed write: an earlier hunk may have gone out.
         self.bg.mark();
+        // A write that gave a hunk its first data holds the hunk's map entry
+        // until a sync. A kill would lose the entry and keep any later write,
+        // and a filesystem cannot recover from losing an earlier write but
+        // not a later one. Sync now, so every write is in the file before
+        // the next one starts. Writes to hunks the CHD already holds, the
+        // common case once a disk is in use, cost nothing more.
+        let file = self.hd().file();
+        if file.holds_map_entries() {
+            let synced = self.bg.syncing(|| file.sync(false));
+            return written.and(synced);
+        }
         written
     }
 
@@ -1597,6 +1608,9 @@ mod tests {
                 for lba in [0u64, 9, 511] {
                     let base = compressed_chd(0xAB);
                     let mut node = ChdNode::open(base.to_str().unwrap(), cow).unwrap();
+                    // A write that gives a hunk its first data syncs itself;
+                    // the second lands in place and waits for the sync.
+                    node.write(lba * SECTOR_SIZE, &[0x11; SECTOR_BYTES]).unwrap();
                     node.write(lba * SECTOR_SIZE, &[0x5A; SECTOR_BYTES]).unwrap();
                     match sync {
                         "flush" => node.flush().unwrap(),
@@ -1627,14 +1641,16 @@ mod tests {
     /// A write to a hunk the diff does not hold yet appends the hunk and
     /// points the map at it. The map entry reaches the file only with a
     /// sync, which puts the hunk's data on the disk first, so the map on the
-    /// disk never points at data that is not there.
+    /// disk never points at data that is not there. The node's own write
+    /// syncs at once (see `chd_kill_keeps_writes_in_order`), so the CHD
+    /// under it is written directly to see the entry held.
     #[test]
     fn chd_map_entry_reaches_the_file_only_with_a_sync() {
         let base = compressed_chd(0xAB);
         let diff = crate::chd_disk::diff_path_for(&base);
         let mut node = ChdNode::open(base.to_str().unwrap(), false).unwrap();
         // Hunk 2 of 4 KiB, sector 17 of it.
-        node.write(17 * SECTOR_SIZE, &[0x5A; SECTOR_BYTES]).unwrap();
+        node.hd_mut().write_sectors(17, &[0x5A; SECTOR_BYTES]).unwrap();
         assert_eq!(chd_map_entry(&diff, 2), 0, "held until a sync");
         node.flush_data().unwrap();
         let entry = chd_map_entry(&diff, 2);
@@ -1694,6 +1710,42 @@ mod tests {
         };
         assert!(wait_for(durable), "the background sync alone made the writes durable");
         fast.finish();
+        drop(node);
+        remove_chd(&base);
+    }
+
+    /// A kill leaves the CHD as the host's files have it. Whatever it loses,
+    /// it must not keep a write and lose one the guest made before it: a
+    /// filesystem's log recovery assumes it sees a prefix of its writes. A
+    /// copy of the files taken while the node is open, with no sync in
+    /// between, stands in for the kill. The earlier write goes to a hunk new
+    /// to the diff, the later one in place to a hunk the diff already holds.
+    #[test]
+    fn chd_kill_keeps_writes_in_order() {
+        let base = compressed_chd(0xAB);
+        let diff = crate::chd_disk::diff_path_for(&base);
+        let mut node = ChdNode::open(base.to_str().unwrap(), false).unwrap();
+        node.write(0, &[0x11; SECTOR_BYTES]).unwrap();
+        node.flush().unwrap();
+        // Hunk 0 is now held by the diff and synced; hunk 3 is new to it.
+        node.write(3 * 4096, &[0x22; SECTOR_BYTES]).unwrap();
+        node.write(SECTOR_SIZE, &[0x33; SECTOR_BYTES]).unwrap();
+
+        let copy = tmp_path("chd-order").with_extension("chd");
+        std::fs::copy(&base, &copy).unwrap();
+        std::fs::copy(&diff, crate::chd_disk::diff_path_for(&copy)).unwrap();
+        let mut again = ChdNode::open(copy.to_str().unwrap(), false).unwrap();
+        let mut earlier = [0u8; SECTOR_BYTES];
+        again.read(3 * 4096, &mut earlier).unwrap();
+        let mut later = [0u8; SECTOR_BYTES];
+        again.read(SECTOR_SIZE, &mut later).unwrap();
+        drop(again);
+        remove_chd(&copy);
+        assert!(
+            later != [0x33; SECTOR_BYTES] || earlier == [0x22; SECTOR_BYTES],
+            "the later write survived the kill and the earlier one did not (earlier reads {:#04x})",
+            earlier[0]
+        );
         drop(node);
         remove_chd(&base);
     }

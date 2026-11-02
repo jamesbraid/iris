@@ -44,28 +44,28 @@ write_cache = false   # default true
 
 **The risk of `true`:** a host crash or power loss can lose up to about 5 s of
 the writes the guest was told were done, in any order, and that can damage the
-guest's filesystem. On a CHD, killing iris can lose them too. Nothing synced
-a disk before this setting existed except SYNCHRONIZE CACHE and a clean stop,
-so the default is no less safe than what it replaced. Set `write_cache =
-false` for a disk you cannot rebuild, or an installed system you keep. Stop
-iris cleanly before shutting the host down.
+guest's filesystem. Nothing synced a disk before this setting existed except
+SYNCHRONIZE CACHE and a clean stop, so the default is no less safe than what
+it replaced. Set `write_cache = false` for a disk you cannot rebuild, or an
+installed system you keep. Stop iris cleanly before shutting the host down.
 
 ### What survives
 
 A clean stop (Ctrl-C, SIGTERM, SIGHUP), a WRITE(10) with FUA, and
 SYNCHRONIZE CACHE lose nothing in any mode. These cases differ:
 
-| | `true`, raw image or overlay | `true`, CHD | `false` |
-|---|---|---|---|
-| iris killed (`kill -9`) or crashes | nothing lost | up to about 5 s of writes to new hunks lost | nothing lost |
-| Host crashes or loses power | up to about 5 s lost | up to about 5 s lost | nothing lost |
+| | `true` | `false` |
+|---|---|---|
+| iris killed (`kill -9`) or crashes | nothing lost | nothing lost |
+| Host crashes or loses power | up to about 5 s lost | nothing lost |
 
 A guest's `sync` or `fsync` does not change this: IRIX sends nothing the disk
 acts on. A thread syncs a disk about 5 s after the first write that follows a
-sync, so treat 5 s as typical, not as a bound. Measured: killing iris during
-continuous writes to a CHD data disk lost only files written in the last 0 to
-4 s, and files 7 s or older were intact. A real host crash has not been
-tried; its window follows from how the sync works.
+sync, so treat 5 s as typical, not as a bound. Measured on an Octane with
+IRIX 6.5.30 on CHD disks: four kills, each during a loop that copied a file
+and ran `sync`, lost none of the 58 files the loop had finished, and the root
+filesystem stayed sound. A real host crash has not been tried; its window
+follows from how the sync works.
 
 A guest can switch the bit with MODE SELECT (clearing it stores what was
 written so far at once). A bus reset puts it back to the configured value: on
@@ -88,12 +88,13 @@ reports a cache, so `true` is safer for them.
 A write to a hunk the CHD already holds is stored in place. A write to a new
 hunk appends it to the file, and the hunk's map entry waits in memory until a
 sync has stored the data, so after a host crash the map only points at data
-that reached the disk. With `write_cache = false` that costs two syncs per
-such write (later writes to the hunk cost one, as on a raw image). With
-`true`, a killed iris loses the held map entries, so it can lose an earlier
-write to a new hunk and keep a later write to an old one. A clean stop writes
-the entries out; a panic, an abort, a kill, or an exit that skips the disks'
-teardown does not (release builds abort on panic).
+that reached the disk. In either mode the write then syncs the data, writes
+the entry and syncs again, before the guest is told it is done. Left to
+the background sync, the entry would be lost to a kill while later writes to
+hunks already held were kept, and a filesystem cannot recover from losing an
+earlier write but keeping a later one. Writes to a hunk the CHD already holds
+cost one sync with `write_cache = false` and none with `true`, as on a raw
+image, so the extra cost falls on a fresh `.diff.chd` filling up.
 
 ### For developers
 
@@ -109,8 +110,9 @@ teardown does not (release builds abort on panic).
 What a `BlockNode` promises (the `block_node.rs` module docs say the same):
 
 - `write` has put the data where a killed iris leaves it, the host's file,
-  before it returns. Data held only in memory dies with `kill -9`. The CHD's
-  new map entries are the one case, which is why the CHD column differs.
+  before it returns. Data held only in memory dies with `kill -9`, so a
+  backend that holds part of a write back (the CHD's map entry for a new
+  hunk) syncs before `write` returns.
 - `flush_data` returns only when every write accepted so far is on the host's
   disk and the file would open after a crash and read back as the guest wrote
   it. An on-disk index must never point at data that is not there. It may
