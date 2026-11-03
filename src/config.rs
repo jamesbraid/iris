@@ -1555,13 +1555,18 @@ pub struct AudioConfig {
     /// Fixed cpal buffer size in frames (stereo pairs). Unset = host default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpal_buffer_frames: Option<u32>,
+    /// Record from the host's default input device on cards that can (the
+    /// DM8). Off, they record silence and never open the input. Default on.
+    #[serde(default = "default_audio_capture")]
+    pub capture: bool,
 }
 
 fn default_audio_prebuf_ms() -> u64 { 20 }
+fn default_audio_capture() -> bool { true }
 
 impl Default for AudioConfig {
     fn default() -> Self {
-        Self { host: AudioHost::Default, prebuf_ms: default_audio_prebuf_ms(), cpal_buffer_frames: None }
+        Self { host: AudioHost::Default, prebuf_ms: default_audio_prebuf_ms(), cpal_buffer_frames: None, capture: true }
     }
 }
 

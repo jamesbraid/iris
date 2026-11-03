@@ -54,9 +54,16 @@
 //!   the engine keeps its clock, plays or records silence, the PCI status
 //!   records a master abort, and MT1A flags the engine. A transfer also
 //!   fails when bus mastering is off in the command register.
-//! * The second record engine (RDMA1) records silence, and the first
-//!   records silence too: host audio input is not connected. Their buffers
-//!   are written and their position and interval run.
+//! * The first record engine (RDMA0) records the host's default input as
+//!   16-bit stereo in the top half of each sample, converted to the card's
+//!   rate; the second (RDMA1, the S/PDIF record engine) records silence. The
+//!   input opens on the first start of RDMA0 (`[audio] capture`), not
+//!   before. With no input device, or the ring run dry, the engine records
+//!   silence, and a failure to open is reported once. The input closes when
+//!   the engine stops, and a stream that dies is opened again. Samples the
+//!   host gathered while the engine was stopped are dropped when it starts,
+//!   and no more than the request being read and one behind it are kept.
+//!   Buffers are written and the position and interval run either way.
 //! * MT3C: every field but the validity flag (bit 15) must be written only
 //!   while the S/PDIF transmitter is disabled (CCS07 bit 7 clear). The model
 //!   enforces that rule: bit 15 stays writable, the rest ignore writes and
@@ -119,7 +126,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use crate::config::AudioConfig;
-use crate::dev::host_pcm::{CardClock, PcmOut};
+use crate::dev::host_pcm::{CardClock, PcmIn, PcmOut};
 use crate::devlog::LogModule;
 use crate::host_audio::FrameResampler;
 use crate::hptimer::{TimerId, TimerManager, TimerReturn};
@@ -579,6 +586,10 @@ impl Dm8 {
     }
 }
 
+/// Opens the host input, in place of the real one, in tests.
+#[cfg(test)]
+type InputOpener = Arc<dyn Fn(&AudioConfig) -> Option<crate::host_audio::HostIn> + Send + Sync>;
+
 /// Lock order: `tick_pass`, then `state`, then `sink`; `stopped_at` (in
 /// [`CardClock`]) is a leaf, taken by `now` with or without `state` held. Engines are moved with `state` held:
 /// the DMA goes down through the bridge and memory, which never call back
@@ -597,6 +608,18 @@ pub struct Inner {
     /// `[audio]` settings once host output is enabled.
     audio_cfg: Mutex<Option<AudioConfig>>,
     sink: Mutex<Option<PcmOut>>,
+    /// The host input the first record engine reads, once opened. Lock
+    /// order: `state`, then `sink` or `source`, never both.
+    source: Mutex<Option<PcmIn>>,
+    /// Whether `[audio] capture` is on, and whether the first record engine
+    /// is running: what the timer checks before it does anything about the
+    /// input.
+    capture_on: AtomicBool,
+    capture_active: AtomicBool,
+    capture_failure_logged: AtomicBool,
+    /// For tests: opens the host input in place of the real one.
+    #[cfg(test)]
+    opener: Mutex<Option<InputOpener>>,
     /// Accesses that nothing establishes, counted.
     unexpected: AtomicU64,
     /// The messages behind them, for tests.
@@ -632,6 +655,12 @@ impl Inner {
             irq: OnceLock::new(),
             audio_cfg: Mutex::new(None),
             sink: Mutex::new(None),
+            source: Mutex::new(None),
+            capture_on: AtomicBool::new(false),
+            capture_active: AtomicBool::new(false),
+            capture_failure_logged: AtomicBool::new(false),
+            #[cfg(test)]
+            opener: Mutex::new(None),
             unexpected: AtomicU64::new(0),
             #[cfg(test)]
             seen: Mutex::new(Vec::new()),
@@ -657,6 +686,7 @@ impl Inner {
     /// Play the output engines through the host with `audio`'s settings. The
     /// host stream opens when the machine starts, before the guest runs.
     pub fn enable_output(&self, audio: AudioConfig) {
+        self.capture_on.store(audio.capture, Ordering::Relaxed);
         *self.audio_cfg.lock() = Some(audio);
     }
 
@@ -721,6 +751,7 @@ impl Inner {
             return TimerReturn::Delete;
         }
         self.reopen_sink_if_due();
+        self.open_source_if_wanted();
         let mut s = self.state.lock();
         if s.timer_gen != gen {
             return TimerReturn::Delete;
@@ -809,6 +840,47 @@ impl Inner {
         }
     }
 
+    /// Open the host input when the first record engine runs, capture is on
+    /// and none is open (or the open one has died). Called from the timer
+    /// before it takes the state lock. Nothing is held across the open,
+    /// which can take hundreds of milliseconds (a server connection, a
+    /// permission prompt): register accesses reach `source` only for an
+    /// instant, and the timer's own hold-up the clock absorbs. A failure is
+    /// reported once and retried at the output's pace; the engine records
+    /// silence meanwhile. With capture off or the engine idle this is two
+    /// atomic loads.
+    fn open_source_if_wanted(&self) {
+        if !self.capture_on.load(Ordering::Relaxed) || !self.capture_active.load(Ordering::Relaxed) {
+            return;
+        }
+        let now = Instant::now();
+        if self.source.lock().as_ref().is_some_and(|sk| !sk.host_retry_due(now)) {
+            return;
+        }
+        let Some(cfg) = self.audio_cfg.lock().clone() else { return };
+        let host = self.open_input(&cfg);
+        if host.is_none() && !self.capture_failure_logged.swap(true, Ordering::Relaxed) {
+            eprintln!("DM8 audio: no host input; recording silence");
+            crate::dlog!(LogModule::Dm8, "dm8: host input failed to open");
+        }
+        let failed_at = host.is_none().then_some(now);
+        // The old stream and, if the engine stopped during the open, the
+        // new one are dropped with no lock held.
+        let _old = self.source.lock().replace(PcmIn::new(host, failed_at));
+        if !self.capture_active.load(Ordering::Relaxed) {
+            let _late = self.source.lock().take();
+        }
+    }
+
+    fn open_input(&self, cfg: &AudioConfig) -> Option<crate::host_audio::HostIn> {
+        #[cfg(test)]
+        if let Some(f) = self.opener.lock().clone() {
+            return f(cfg);
+        }
+        let ring = |rate: u32| rate as usize * 2 / 5;
+        crate::host_audio::open_input(cfg, ring, "DM8 audio")
+    }
+
     // ---- interrupts ----
 
     /// Recompute the controller's interrupt bits and drive the line if its
@@ -840,9 +912,15 @@ impl Inner {
         let frame = s.frame_dwords(idx);
         let bytes = dwords as usize * 4;
         let mut buf = std::mem::take(&mut s.scratch);
-        // Recording writes silence: no host input is connected.
+        // Recording: the first engine reads the host input, or silence; the
+        // second records silence.
         buf.clear();
         buf.resize(bytes, 0);
+        if idx == ENG_RDMA0 {
+            if let Some(src) = self.source.lock().as_mut() {
+                src.fill(&mut buf, s.rate);
+            }
+        }
         let dma = self.dma.get().filter(|_| self.pci.command() & PCI_COMMAND_BUS_MASTER != 0);
         let mut done = 0u32;
         let mut failed = false;
@@ -947,14 +1025,31 @@ impl Inner {
     /// every running engine's anchor restarts when `restart` is set.
     /// Callers sync before they change the state.
     fn clock_changed(&self, s: &mut State, now: i64, restart: bool) {
+        let mut capture_started = false;
         for i in 0..ENGINES {
             let clocked = s.engine_clocked(i);
             let e = &mut s.eng[i];
             if clocked && (!e.active || restart) {
                 e.anchor = now;
                 e.frames = 0;
+                capture_started |= i == ENG_RDMA0;
             }
             e.active = clocked;
+        }
+        let recording = s.eng[ENG_RDMA0].active;
+        let was_recording = self.capture_active.swap(recording, Ordering::Relaxed);
+        if capture_started {
+            // Whatever the host input gathered while nothing read it is old.
+            if let Some(src) = self.source.lock().as_mut() {
+                src.restart();
+            }
+        }
+        if was_recording && !recording {
+            // Close the input. Dropping a stream can block, and this runs
+            // under the state lock, so another thread does it.
+            if let Some(old) = self.source.lock().take() {
+                std::thread::spawn(move || drop(old));
+            }
         }
         self.arm_timer(s, now);
     }
@@ -1715,6 +1810,7 @@ impl Saveable for Dm8 {
             return Err("dm8 loaded while its timer runs".into());
         }
         *s = loaded;
+        i.capture_active.store(s.eng[ENG_RDMA0].active, Ordering::Relaxed);
         s.gpio_pins = s.pins();
         i.update_irq(&mut s);
         Ok(())

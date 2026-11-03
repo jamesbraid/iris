@@ -55,6 +55,29 @@ impl HostOut {
     }
 }
 
+/// A host input stream: stereo i16 frames, a mono device's duplicated, pulled
+/// from `consumer`. The callback drops what the ring has no room for.
+pub struct HostIn {
+    pub stream_rate: u32,
+    pub consumer: Consumer<i16>,
+    /// Set by the stream's error callback: the device went away or the
+    /// stream died, and the caller should open another.
+    pub errored: Arc<AtomicBool>,
+    // Keep stream alive; dropped with the HostIn. None for a detached one.
+    _stream: Option<cpal::Stream>,
+}
+
+impl HostIn {
+    /// An input with no host stream behind it: whoever holds the ring's
+    /// producer supplies the samples. For tests of the devices that read one.
+    #[cfg(test)]
+    pub fn detached(stream_rate: u32, consumer: Consumer<i16>) -> Self {
+        Self { stream_rate, consumer, errored: Arc::new(AtomicBool::new(false)), _stream: None }
+    }
+}
+
+unsafe impl Send for HostIn {}
+
 // cpal::Stream is !Send/!Sync on some platforms (ALSA uses raw pointers internally),
 // but it is safe to hold inside a Mutex.
 unsafe impl Send for HostOut {}
@@ -384,6 +407,55 @@ pub fn open_output_channels(
     }
 
     eprintln!("{who}: failed to open audio output at any rate (tried {:?})", PREFERRED_RATES);
+    None
+}
+
+/// Open the default input device as a stereo stream, trying PREFERRED_RATES
+/// in order, with a ring of `ring_samples(rate)` samples. A device with one
+/// channel is read as mono and doubled. Silent on failure: the caller decides
+/// what to say, once.
+pub fn open_input(audio: &AudioConfig, ring_samples: impl Fn(u32) -> usize, who: &str) -> Option<HostIn> {
+    let host = output_host(audio.host);
+    let device = host.default_input_device()?;
+    for channels in [2usize, 1] {
+        for &rate in PREFERRED_RATES {
+            let config = cpal::StreamConfig { channels: channels as u16, sample_rate: rate, buffer_size: cpal::BufferSize::Default };
+            let who_cb = who.to_string();
+            let errored = Arc::new(AtomicBool::new(false));
+            let errored_cb = errored.clone();
+            let err_fn = move |err: cpal::Error| {
+                eprintln!("{who_cb}: cpal input error: {:?}", err);
+                errored_cb.store(true, Ordering::Relaxed);
+            };
+            // Try f32 first, then i16, as the output does.
+            let (mut p, c) = RingBuffer::<i16>::new(ring_samples(rate));
+            let f32_fn = move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                let q = |v: f32| (v * 32768.0).clamp(-32768.0, 32767.0) as i16;
+                for f in data.chunks_exact(channels) {
+                    let l = q(f[0]);
+                    push_pair(&mut p, l, if channels == 2 { q(f[1]) } else { l });
+                }
+            };
+            let (c, stream) = match device.build_input_stream(config, f32_fn, err_fn.clone(), None) {
+                Ok(s) => (c, s),
+                Err(_) => {
+                    let (mut p, c) = RingBuffer::<i16>::new(ring_samples(rate));
+                    let i16_fn = move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                        for f in data.chunks_exact(channels) {
+                            push_pair(&mut p, f[0], if channels == 2 { f[1] } else { f[0] });
+                        }
+                    };
+                    match device.build_input_stream(config, i16_fn, err_fn.clone(), None) {
+                        Ok(s) => (c, s),
+                        Err(_) => continue,
+                    }
+                }
+            };
+            if stream.play().is_err() { continue; }
+            println!("{who}: audio input: {} via {:?} at {}Hz, {} channel(s)", device, host.id(), rate, channels);
+            return Some(HostIn { stream_rate: rate, consumer: c, errored, _stream: Some(stream) });
+        }
+    }
     None
 }
 

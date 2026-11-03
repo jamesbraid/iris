@@ -11,8 +11,8 @@
 //! accesses as byte steps.
 
 use super::*;
-use crate::dev::host_pcm::PcmOut;
-use crate::host_audio::{FrameResampler, HostOut};
+use crate::dev::host_pcm::{PcmIn, PcmOut};
+use crate::host_audio::{FrameResampler, HostIn, HostOut};
 use crate::irq::LevelProbe;
 use crate::pci::{PciDmaStatus, PCI_COMMAND_IO};
 
@@ -1246,4 +1246,282 @@ fn a_save_that_would_break_the_card_is_refused() {
     let mut bad = good;
     bad["ccs"] = crate::snapshot::u8_slice_to_toml(&[0; 3]);
     assert!(rig(Variant::Dm8).load_state(&bad).is_err(), "a short register file");
+}
+
+/// A host input behind a ring the test fills, at `rate`.
+fn detached_input(r: &Rig, rate: u32) -> rtrb::Producer<i16> {
+    let (p, c) = rtrb::RingBuffer::<i16>::new(1 << 16);
+    *r.source.lock() = Some(PcmIn::new(Some(HostIn::detached(rate, c)), None));
+    p
+}
+
+fn push_frames(p: &mut rtrb::Producer<i16>, frames: impl Iterator<Item = (i16, i16)>) {
+    for (l, r) in frames {
+        p.push(l).unwrap();
+        p.push(r).unwrap();
+    }
+}
+
+/// Program the first record engine over `BUFFER + 0x400` and start it.
+fn start_capture(c: &Dm8) {
+    mt_wl(c, 0x20, BUFFER as u32 + 0x400);
+    mt_ww(c, 0x24, 255);
+    mt_wb(c, 0x18, 0x02);
+}
+
+fn recorded(r: &Rig, frames: usize) -> Vec<(i32, i32)> {
+    let m = r.ram.0.lock().unwrap();
+    let at = BUFFER as usize + 0x400;
+    (0..frames)
+        .map(|f| {
+            let d = |o: usize| i32::from_le_bytes(m[at + o..at + o + 4].try_into().unwrap());
+            (d(f * 8), d(f * 8 + 4))
+        })
+        .collect()
+}
+
+#[test]
+fn record_dma_receives_the_host_samples() {
+    let r = rig(Variant::Dm8);
+    let mut p = detached_input(&r, 48000);
+    start_capture(&r);
+    push_frames(&mut p, (0..48).map(|i| (i as i16 + 1, -(i as i16) - 1)));
+    step(&r, 1_000_000);
+    assert_eq!(r.stats().capture_frames, 48);
+    // The 16-bit sample is the top half of each dword.
+    let got = recorded(&r, 48);
+    for (i, &(l, rt)) in got.iter().enumerate() {
+        assert_eq!((l, rt), ((i as i32 + 1) << 16, (-(i as i32) - 1) << 16), "frame {i}");
+    }
+}
+
+#[test]
+fn a_host_at_another_rate_is_converted_to_the_cards() {
+    let r = rig(Variant::Dm8);
+    let mut p = detached_input(&r, 96000);
+    start_capture(&r);
+    push_frames(&mut p, std::iter::repeat_n((1000, -2000), 200));
+    step(&r, 1_000_000);
+    // 48 card frames take 96 host frames; the level settles after warm-up.
+    let got = recorded(&r, 48);
+    assert!(got[8..].iter().all(|&g| g == (1000 << 16, -2000 << 16)), "{:?}", &got[8..12]);
+}
+
+#[test]
+fn no_host_input_records_silence() {
+    for source in [false, true] {
+        let r = rig(Variant::Dm8);
+        if source {
+            // A source whose open failed.
+            *r.source.lock() = Some(PcmIn::new(None, Some(Instant::now())));
+        }
+        r.ram.0.lock().unwrap()[BUFFER as usize + 0x400..][..64].fill(0xaa);
+        start_capture(&r);
+        step(&r, 1_000_000);
+        assert!(recorded(&r, 8).iter().all(|&g| g == (0, 0)), "failed source: {source}");
+    }
+}
+
+#[test]
+fn a_dry_ring_pads_with_silence() {
+    let r = rig(Variant::Dm8);
+    let mut p = detached_input(&r, 48000);
+    start_capture(&r);
+    push_frames(&mut p, (0..10).map(|_| (7, 7)));
+    step(&r, 1_000_000);
+    let got = recorded(&r, 48);
+    assert!(got[..10].iter().all(|&g| g == (7 << 16, 7 << 16)));
+    assert!(got[10..].iter().all(|&g| g == (0, 0)));
+}
+
+#[test]
+fn samples_gathered_while_stopped_are_dropped_at_start() {
+    let r = rig(Variant::Dm8);
+    let mut p = detached_input(&r, 48000);
+    push_frames(&mut p, (0..100).map(|_| (111, 111)));
+    start_capture(&r);
+    push_frames(&mut p, (0..48).map(|_| (222, 222)));
+    step(&r, 1_000_000);
+    assert!(recorded(&r, 48).iter().all(|&g| g == (222 << 16, 222 << 16)));
+}
+
+#[test]
+fn only_a_request_of_backlog_is_kept() {
+    let r = rig(Variant::Dm8);
+    let mut p = detached_input(&r, 48000);
+    start_capture(&r);
+    // Ten milliseconds arrive while the card is asked for one.
+    push_frames(&mut p, (0..480).map(|i| (i as i16, 0)));
+    step(&r, 1_000_000);
+    let first = recorded(&r, 1)[0].0 >> 16;
+    // The newest two requests' worth survive: frames 480 - 2 * 50 and up.
+    assert!(first >= 480 - 2 * 50, "first recorded frame was {first}");
+    assert!(first > 0);
+}
+
+#[test]
+fn the_second_record_engine_records_silence() {
+    let r = rig(Variant::Dm8);
+    let mut p = detached_input(&r, 48000);
+    push_frames(&mut p, (0..100).map(|_| (5, 5)));
+    r.ram.0.lock().unwrap()[BUFFER as usize + 0x400..][..64].fill(0xaa);
+    mt_wl(&r, 0x30, BUFFER as u32 + 0x400);
+    mt_ww(&r, 0x34, 63);
+    mt_wb(&r, 0x18, 0x04);
+    step(&r, 250_000);
+    assert!(recorded(&r, 8).iter().all(|&g| g == (0, 0)));
+    assert_eq!(r.stats().capture_frames, 0);
+}
+
+#[test]
+fn capture_can_be_switched_off() {
+    let r = rig(Variant::Dm8);
+    r.enable_output(AudioConfig { capture: false, ..AudioConfig::default() });
+    *r.opener.lock() = Some(Arc::new(|_| panic!("the input must not be opened")));
+    start_capture(&r);
+    r.open_source_if_wanted();
+    assert!(r.source.lock().is_none());
+}
+
+#[test]
+fn an_idle_record_engine_opens_nothing() {
+    let r = rig(Variant::Dm8);
+    r.enable_output(AudioConfig::default());
+    *r.opener.lock() = Some(Arc::new(|_| panic!("nothing is recording")));
+    r.open_source_if_wanted();
+    assert!(r.source.lock().is_none());
+}
+
+#[test]
+fn the_input_opens_when_recording_starts_and_closes_when_it_stops() {
+    let r = rig(Variant::Dm8);
+    r.enable_output(AudioConfig::default());
+    let opens = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let n = opens.clone();
+    *r.opener.lock() = Some(Arc::new(move |_| {
+        n.fetch_add(1, Ordering::Relaxed);
+        Some(HostIn::detached(48000, rtrb::RingBuffer::<i16>::new(16).1))
+    }));
+    start_capture(&r);
+    r.open_source_if_wanted();
+    assert!(r.source.lock().as_ref().is_some_and(|s| s.host.is_some()));
+    // Open already: another tick does not open again.
+    r.open_source_if_wanted();
+    assert_eq!(opens.load(Ordering::Relaxed), 1);
+    mt_wb(&r, 0x18, 0x00);
+    assert!(r.source.lock().is_none(), "the input stays open after the engine stops");
+    start_capture(&r);
+    r.open_source_if_wanted();
+    assert_eq!(opens.load(Ordering::Relaxed), 2);
+}
+
+/// The guest stops recording while the timer is inside the open: the stream
+/// that arrives is closed, not kept open for an engine that is not running.
+#[test]
+fn an_input_opened_after_recording_stopped_is_closed() {
+    let r = rig(Variant::Dm8);
+    r.enable_output(AudioConfig::default());
+    let inner = r.inner.clone();
+    *r.opener.lock() = Some(Arc::new(move |_| {
+        inner.write(1, 0x18, 0x00, 1);
+        Some(HostIn::detached(48000, rtrb::RingBuffer::<i16>::new(16).1))
+    }));
+    start_capture(&r);
+    r.open_source_if_wanted();
+    assert!(r.source.lock().is_none(), "the late stream was kept");
+    // The opener holds the card; let go of it.
+    *r.opener.lock() = None;
+}
+
+/// A register write while the timer is inside a slow open does not wait for
+/// the open.
+#[test]
+fn a_slow_input_open_does_not_hold_up_register_writes() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let r = rig(Variant::Dm8);
+    r.enable_output(AudioConfig::default());
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    let (entered_tx, go_rx) = (std::sync::Mutex::new(entered_tx), std::sync::Mutex::new(go_rx));
+    *r.opener.lock() = Some(Arc::new(move |_| {
+        entered_tx.lock().unwrap().send(()).unwrap();
+        let _ = go_rx.lock().unwrap().recv();
+        None
+    }));
+    start_capture(&r);
+    let timer = {
+        let inner = r.inner.clone();
+        std::thread::spawn(move || inner.open_source_if_wanted())
+    };
+    entered_rx.recv_timeout(Duration::from_secs(10)).expect("the open should have started");
+    // A rate change restarts the running record engine, which reaches the
+    // input's lock from the register path.
+    let (done_tx, done_rx) = mpsc::channel();
+    let writer = {
+        let inner = r.inner.clone();
+        std::thread::spawn(move || {
+            inner.write(1, 0x01, 0x08, 1);
+            done_tx.send(()).unwrap();
+        })
+    };
+    let waited = done_rx.recv_timeout(Duration::from_secs(5));
+    go_tx.send(()).unwrap();
+    timer.join().unwrap();
+    writer.join().unwrap();
+    assert!(waited.is_ok(), "the register write waited for the open");
+}
+
+/// A slower host (44.1 or 22.05 kHz) into the 48 kHz card yields a frame or
+/// two per input frame, so a request can end in the middle of a conversion;
+/// what is left over starts the next. A ramp comes out with a steady step,
+/// no gap and no repeat, across the requests.
+#[test]
+fn a_slower_host_is_converted_without_gaps_or_repeats() {
+    // Host rate and number of 1 ms requests.
+    for (host, requests) in [(44100u32, 80usize), (22050, 40)] {
+        let r = rig(Variant::Dm8);
+        let mut p = detached_input(&r, host);
+        mt_wl(&r, 0x20, BUFFER as u32 + 0x400);
+        mt_ww(&r, 0x24, 8191);
+        mt_wb(&r, 0x18, 0x02);
+        let mut next = 0i32;
+        for i in 0..requests {
+            // What the host captures in that millisecond, and a few frames
+            // ahead at the start so the card never finds the ring dry.
+            let ahead = |k: usize| host as usize * k / 1000 + if k > 0 { 4 } else { 0 };
+            let n = ahead(i + 1) - ahead(i);
+            push_frames(&mut p, (0..n).map(|_| {
+                next += 1;
+                (next as i16 * 5, -(next as i16) * 5)
+            }));
+            step(&r, 1_000_000);
+        }
+        let frames = requests * 48;
+        let got: Vec<i32> = recorded(&r, frames).iter().map(|g| g.0 >> 16).collect();
+        let per_frame = 5.0 * f64::from(host) / 48000.0;
+        // Skip the first few frames: the interpolator is still filling.
+        for i in 8..frames - 1 {
+            let d = f64::from(got[i + 1] - got[i]);
+            assert!((d - per_frame).abs() <= 1.0, "{host} Hz frame {i}: step {d} in {:?}", &got[i - 2..i + 3]);
+        }
+    }
+}
+
+#[test]
+fn half_a_pair_waits_for_its_other_half() {
+    let r = rig(Variant::Dm8);
+    let mut p = detached_input(&r, 48000);
+    start_capture(&r);
+    // Three samples: a pair and the left of the next.
+    for v in [1, 2, 3] {
+        p.push(v).unwrap();
+    }
+    step(&r, 41_667);
+    p.push(4).unwrap();
+    step(&r, 41_667);
+    let got = recorded(&r, 4);
+    assert_eq!(got[0], (1 << 16, 2 << 16));
+    // The left that was alone is not dropped, and the channels stay put.
+    assert!(got[1..].contains(&(3 << 16, 4 << 16)), "{got:?}");
 }

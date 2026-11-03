@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use crate::host_audio::{FrameResampler, HostOut, Resampler};
+use crate::host_audio::{FrameResampler, HostIn, HostOut, Resampler};
 
 /// Words a host frame carries: the mixer takes two channels.
 pub const PCM_CHANNELS: usize = 2;
@@ -376,6 +376,98 @@ impl PcmOut {
     }
 }
 
+// ---- capture ----
+
+/// Where a record engine's samples come from: the host input stream, read
+/// at the card's pace, or silence.
+///
+/// The engine asks for frames at the card's rate from the card's clock, the
+/// same clock the output runs on; the input stream's own callbacks fill a
+/// ring at the host's rate. The ring is converted to the card's rate on the
+/// way out. It holds what the host has captured and the card has not read,
+/// and that is kept to the request being read plus one more behind it (the
+/// stream's callbacks deliver in bursts): older samples are dropped, so a
+/// card that was not reading (a stopped engine, a held-up timer) does not
+/// play back old audio. A ring that has run dry gives silence for the rest.
+pub struct PcmIn {
+    pub host: Option<(HostIn, FrameResampler)>,
+    /// When the host stream was last tried and failed to open.
+    pub host_failed_at: Option<Instant>,
+    /// When the host stream was opened.
+    opened_at: Instant,
+    /// Frames converted but not yet handed out (stereo, the card's rate).
+    pending: Vec<i16>,
+    scratch: Vec<i16>,
+}
+
+impl PcmIn {
+    pub fn new(host: Option<HostIn>, host_failed_at: Option<Instant>) -> Self {
+        let host = host.map(|h| {
+            let rs = FrameResampler::new(h.stream_rate, h.stream_rate, PCM_CHANNELS);
+            (h, rs)
+        });
+        Self { host, host_failed_at, opened_at: Instant::now(), pending: Vec::new(), scratch: Vec::new() }
+    }
+
+    /// Whether the host stream is due another try: wanted and not open, or
+    /// open but dead (the device went away) and not just opened.
+    pub fn host_retry_due(&self, now: Instant) -> bool {
+        match &self.host {
+            None => retry_due(true, self.host_failed_at, now),
+            Some((h, _)) => h.errored.load(Ordering::Relaxed) && now.duration_since(self.opened_at) >= HOST_RETRY,
+        }
+    }
+
+    /// An engine started: drop what the ring gathered while nothing read it.
+    pub fn restart(&mut self) {
+        self.pending.clear();
+        if let Some((h, rs)) = self.host.as_mut() {
+            while h.consumer.pop().is_ok() {}
+            *rs = FrameResampler::new(rs.in_rate, rs.out_rate, PCM_CHANNELS);
+        }
+    }
+
+    /// Fill `buf` with stereo frames of 32-bit samples (the 16-bit sample
+    /// in the top half), recorded at `rate` Hz.
+    pub fn fill(&mut self, buf: &mut [u8], rate: u32) {
+        let frames = buf.len() / (4 * PCM_CHANNELS);
+        self.scratch.clear();
+        if let Some((h, rs)) = self.host.as_mut() {
+            if rs.out_rate != rate {
+                *rs = FrameResampler::new(h.stream_rate, rate, PCM_CHANNELS);
+                self.pending.clear();
+            }
+            // Two requests' worth of input is the most kept before a read: the
+            // one about to be read and one behind it.
+            let need = frames * h.stream_rate as usize / rate.max(1) as usize + 2;
+            let keep = 2 * need * PCM_CHANNELS;
+            let avail = h.consumer.slots();
+            for _ in 0..avail.saturating_sub(keep) / 2 * 2 {
+                let _ = h.consumer.pop();
+            }
+            self.scratch.append(&mut self.pending);
+            while self.scratch.len() < frames * PCM_CHANNELS {
+                // A pair at a time: the stream callback publishes whole pairs.
+                let Ok(pair) = h.consumer.read_chunk(PCM_CHANNELS) else { break };
+                let (a, b) = pair.as_slices();
+                let mut it = a.iter().chain(b).copied();
+                let (l, r) = (it.next().unwrap_or(0), it.next().unwrap_or(0));
+                pair.commit_all();
+                rs.push(&[l, r], &mut self.scratch);
+            }
+            if self.scratch.len() > frames * PCM_CHANNELS {
+                self.pending.extend_from_slice(&self.scratch[frames * PCM_CHANNELS..]);
+                self.scratch.truncate(frames * PCM_CHANNELS);
+            }
+        }
+        // Whatever the host supplied short of the request is silence.
+        self.scratch.resize(frames * PCM_CHANNELS, 0);
+        for (d, &v) in buf.as_chunks_mut::<4>().0.iter_mut().zip(&self.scratch) {
+            d.copy_from_slice(&(i32::from(v) << 16).to_le_bytes());
+        }
+    }
+}
+
 /// A card's sample clock: host time less the time the machine was stopped
 /// and less the time held back after a late timer, or a fixed value for
 /// tests. Lock order: `tick_pass`, then `stopped_at` (a leaf, taken by
@@ -562,5 +654,18 @@ mod tests {
         out.flush(48000, true, true);
         // 0xc000 does not fit in 16 bits: it clips, it does not wrap.
         assert_eq!(*tap.lock(), [0x7fff, i16::MIN]);
+    }
+
+    #[test]
+    fn a_dead_input_stream_is_due_a_retry_after_a_second() {
+        let (_p, c) = rtrb::RingBuffer::<i16>::new(8);
+        let h = HostIn::detached(48000, c);
+        let errored = h.errored.clone();
+        let src = PcmIn::new(Some(h), None);
+        let later = Instant::now() + HOST_RETRY * 2;
+        assert!(!src.host_retry_due(later), "a live stream is left alone");
+        errored.store(true, Ordering::Relaxed);
+        assert!(!src.host_retry_due(Instant::now()), "not at once, or a broken device would be reopened every tick");
+        assert!(src.host_retry_due(later));
     }
 }
