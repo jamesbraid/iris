@@ -628,6 +628,7 @@ impl O2Machine {
         manifest.nvram = self.flash_path.clone();
         manifest.cpu_model = Some(self.cpu.model_name().to_string());
         manifest.cpu_cache = Some(self.cpu.cache_kind().to_string());
+        manifest.pci = crate::pci::place::card_refs(self.bus.mace.pci.bus());
         snap.write_manifest(&manifest).map_err(|e| e.to_string())?;
         let sv = manifest.schema_version;
         snap.write_state("cpu", &self.cpu.save_state(), sv).map_err(|e| e.to_string())?;
@@ -667,7 +668,7 @@ impl O2Machine {
 
     fn read_snapshot(&self, name: &str) -> Result<O2Snapshot, String> {
         use crate::chunk_store::{get_chunks_as_words, ChunkStore};
-        use crate::snapshot::{Snapshot, SCHEMA_VERSION};
+        use crate::snapshot::Snapshot;
         let snap = Snapshot::new(std::path::PathBuf::from("saves").join(name));
         let m = snap.read_manifest()?.ok_or_else(|| format!("saves/{name}: no snapshot.toml"))?;
         if m.machine.as_deref() != Some(SNAPSHOT_MACHINE) {
@@ -676,15 +677,7 @@ impl O2Machine {
         if m.host_arch != std::env::consts::ARCH {
             return Err(format!("snapshot host_arch '{}' does not match current host '{}'", m.host_arch, std::env::consts::ARCH));
         }
-        if m.schema_version > SCHEMA_VERSION {
-            return Err(format!("snapshot schema_version {} is newer than this iris build supports ({SCHEMA_VERSION})", m.schema_version));
-        }
-        if m.schema_version < SCHEMA_VERSION {
-            return Err(format!(
-                "snapshot {name} is schema {}; the O2's UART state changed shape in schema 5, so it cannot be restored",
-                m.schema_version
-            ));
-        }
+        check_snapshot_fits_bus(&m, name, &self.bus)?;
         // As the Indy: build, CPU and disks must match.
         crate::snapshot::check_provenance(&m, self.cpu.model_name(), self.cpu.cache_kind(), &self.disks)?;
         let sv = m.schema_version;
@@ -769,6 +762,13 @@ struct O2Snapshot {
     /// Each controller's copy-on-write sets, when the snapshot has them.
     overlays: Vec<Option<Vec<(usize, Vec<u64>)>>>,
     dir: std::path::PathBuf,
+}
+
+/// What a snapshot must agree with before anything of it is read: the schema
+/// this build writes, and the cards this machine has fitted.
+fn check_snapshot_fits_bus(m: &crate::snapshot::Manifest, name: &str, bus: &Ip32Bus) -> Result<(), String> {
+    crate::snapshot::require_schema(m, name, "O2")?;
+    crate::snapshot::check_pci(&m.pci, &crate::pci::place::card_refs(bus.mace.pci.bus()))
 }
 
 impl Drop for O2Machine {
@@ -1214,3 +1214,28 @@ fn control_command(bus: &Ip32Bus, cmd: &str, arg: &str, rgba: &mut [u8]) -> Stri
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::snapshot::{Manifest, PciRef, SCHEMA_VERSION};
+
+    /// A snapshot from before the PCI bus saved its own table, and one taken
+    /// with a card this O2 does not have, are both refused before anything of
+    /// the snapshot is read. (A whole `O2Machine` is not built here: a dropped
+    /// one still holds its decode table, and a test binary may have only 64.)
+    #[test]
+    fn a_snapshot_of_another_schema_or_with_cards_is_refused() {
+        let bus = Ip32Bus::new(16 << 20, vec![0u8; crate::ip32::PROM_SIZE as usize]);
+        let mut m = Manifest::for_current_save();
+        check_snapshot_fits_bus(&m, "ok", &bus).expect("this schema, no cards");
+        m.schema_version = 5;
+        assert_eq!(
+            check_snapshot_fits_bus(&m, "old", &bus).unwrap_err(),
+            "snapshot old is schema 5; this build reads O2 snapshots of schema 6"
+        );
+        m.schema_version = SCHEMA_VERSION;
+        m.pci = vec![PciRef { bus: "pci".into(), device: 3, card: "aic7880".into(), options: String::new() }];
+        let e = check_snapshot_fits_bus(&m, "card", &bus).unwrap_err();
+        assert!(e.starts_with("snapshot PCI cards differ:") && e.contains("device 3 = aic7880"), "{e}");
+    }
+}
