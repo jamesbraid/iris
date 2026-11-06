@@ -45,6 +45,8 @@ use crate::chunk_store::{get_chunks_as_words, put_words_as_chunks, ChunkStore};
 use crate::snapshot::{field, ChunksManifest, Manifest, Snapshot, StateTable, SCHEMA_VERSION};
 use crate::traits::{BusDevice, Device, MachineEvent, Resettable, Saveable};
 use crate::control::Control;
+use crate::devices::Devices;
+use crate::disks::Disks;
 use crate::guest_net::GuestNet;
 use crate::workstation::{MachineRef, Workstation};
 use crate::xtalk::{HostPort, Upstream};
@@ -154,8 +156,10 @@ pub struct OctaneMachine {
     /// Lifecycle state, machine events and the pointer slot the front ends
     /// share.
     pub(crate) control: Control,
+    devices: Devices,
+    disks: Disks,
     /// The disks as a snapshot records them, to refuse one taken on others.
-    disks: Vec<crate::snapshot::DiskRef>,
+    disk_refs: Vec<crate::snapshot::DiskRef>,
     /// The snapshot the CI socket last restored, for `rollback`.
     last_restore: Option<String>,
     /// Where snapshots go: `saves` under the current directory, as on the
@@ -264,7 +268,7 @@ impl OctaneMachine {
         let mac = cfg.network().mac;
         // The buses are filled from `[scsi.N]` before the controllers exist.
         let [bus_a, bus_b] = [Isp1040::new_bus(), Isp1040::new_bus()];
-        let (scratch_path, mut disks) = Self::attach_scsi(cfg, [&bus_a, &bus_b])?;
+        let (scratch_path, mut disk_refs) = Self::attach_scsi(cfg, [&bus_a, &bus_b])?;
         let scsi = [Arc::new(Isp1040::new_at(0, bus_a)), Arc::new(Isp1040::new_at(1, bus_b))];
         for s in &scsi {
             s.set_heartbeat(heartbeat.clone());
@@ -285,7 +289,13 @@ impl OctaneMachine {
                 Ok(card.nvme)
             })
             .transpose()?;
-        disks.extend(nvme.as_ref().map(|n| crate::dev::nvme::disk_ref(&cfg.nvme, n)));
+        disk_refs.extend(nvme.as_ref().map(|n| crate::dev::nvme::disk_ref(&cfg.nvme, n)));
+        // The NVMe namespace is one more bus of disks, after both controllers'.
+        let disks = Disks::new(
+            scsi.iter().map(|s| s.clone() as Arc<dyn crate::disks::DiskController>)
+                .chain(nvme.iter().map(|n| n.clone() as Arc<dyn crate::disks::DiskController>))
+                .collect(),
+        );
         let ioc3 = Arc::new(Ioc3::octane(mac, false));
         ioc3.set_heartbeat(heartbeat.clone());
         let eth = Ioc3Eth::new(mac);
@@ -591,7 +601,9 @@ impl OctaneMachine {
             scratch_path,
             nvram_path: cfg.nvram.clone(),
             control,
+            devices: Devices::new(),
             disks,
+            disk_refs,
             last_restore: None,
             saves: std::path::PathBuf::from("saves"),
         })
@@ -857,13 +869,6 @@ struct OctaneSnapshot {
 }
 
 impl OctaneMachine {
-    /// The SCSI buses that hold disks: both controllers', then the NVMe
-    /// card's namespace.
-    fn disk_buses(&self) -> Vec<&crate::scsi::ScsiBus> {
-        use crate::scsi_monitor::ScsiTargets;
-        self.scsi.iter().map(|c| c.bus()).chain(self.nvme.iter().map(|n| n.scsi_bus())).collect()
-    }
-
     /// Why this machine cannot be saved, when it cannot.
     fn snapshot_refusal(&self) -> Option<String> {
         snapshot_refusal_for(self.gfx.is_some(), self.vpro.is_some(), self.cpus.len())
@@ -955,7 +960,7 @@ impl OctaneMachine {
         let mut manifest = Manifest::for_current_save();
         manifest.machine = Some(SNAPSHOT_MACHINE.into());
         manifest.parent = self.last_restore.clone();
-        manifest.disks = self.disks.clone();
+        manifest.disks = self.disk_refs.clone();
         manifest.nvram = Some(self.nvram_path.clone());
         manifest.cpu_model = Some(cpu.model_name().to_string());
         manifest.cpu_cache = Some(cpu.cache_kind().to_string());
@@ -1018,7 +1023,7 @@ impl OctaneMachine {
         }
         crate::snapshot::check_schema(name, m.schema_version)?;
         // As the Indy and the O2: build, CPU and disks must match.
-        crate::snapshot::check_provenance(&m, cpu.model_name(), cpu.cache_kind(), &self.disks)?;
+        crate::snapshot::check_provenance(&m, cpu.model_name(), cpu.cache_kind(), &self.disk_refs)?;
         let sv = m.schema_version;
         let state = |base: &str| snap.read_state(base, sv).map_err(|e| format!("{base}: {e}"));
         let chunks = snap.read_chunks_manifest().map_err(|e| format!("chunks.bin: {e}"))?;
@@ -1109,6 +1114,12 @@ impl Workstation for OctaneMachine {
     fn cpu_is_running(&self) -> bool {
         self.cpus.iter().any(|c| c.clone().as_device().is_running())
     }
+    fn devices(&self) -> &Devices {
+        &self.devices
+    }
+    fn disks(&self) -> &Disks {
+        &self.disks
+    }
     fn control(&self) -> &Control {
         &self.control
     }
@@ -1191,24 +1202,6 @@ impl Workstation for OctaneMachine {
     }
     fn scratch_path(&self) -> Option<&std::path::Path> {
         self.scratch_path.as_deref()
-    }
-    /// Disc changes on the internal bus.
-    fn disc_changer(&self) -> Option<Arc<dyn crate::workstation::DiscChanger>> {
-        Some(self.scsi[0].clone() as Arc<dyn crate::workstation::DiscChanger>)
-    }
-    fn pending_chd_sync_count(&self) -> usize {
-        self.disk_buses().iter().map(|b| b.pending_chd_sync_count()).sum()
-    }
-    fn flush_disks(&self) -> std::io::Result<()> {
-        self.disk_buses().iter().try_for_each(|b| b.flush())
-    }
-    fn sync_chd_disks(
-        &self,
-        only: Option<usize>,
-        progress: &mut dyn FnMut(usize, usize, f32),
-        cancel: &dyn Fn() -> bool,
-    ) -> std::io::Result<usize> {
-        crate::scsi::ScsiBus::sync_chd_disks(&self.disk_buses(), only, progress, cancel)
     }
 }
 
@@ -1569,7 +1562,7 @@ mod snapshot_tests {
             // The onboard Bridge keeps its own devices.
             let onboard: Vec<u8> = (0..8).filter(|&d| m.bridge.bus().occupied(d)).collect();
             assert_eq!(onboard, [0, 1, 2, 3], "SCSI, IOC3 and the RAD, and nothing else");
-            assert!(m.disks.iter().any(|d| d.id == crate::dev::nvme::SNAPSHOT_SLOT && d.size_bytes == 1 << 20));
+            assert!(m.disk_refs.iter().any(|d| d.id == crate::dev::nvme::SNAPSHOT_SLOT && d.size_bytes == 1 << 20));
 
             let nvme = m.nvme.clone().unwrap();
             let io = |cdb: Vec<u8>, data: Option<Vec<u8>>| {

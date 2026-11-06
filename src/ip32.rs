@@ -459,14 +459,6 @@ pub struct Ip32Bus {
 }
 
 impl Ip32Bus {
-    /// Flush the disks on every SCSI controller.
-    pub fn flush_disks(&self) -> std::io::Result<()> {
-        use crate::scsi_monitor::ScsiTargets;
-        let controllers = self.scsi.lock().unwrap().clone();
-        controllers.iter().try_for_each(|c| c.bus().flush())?;
-        self.nvme.get().map_or(Ok(()), |n| n.scsi_bus().flush())
-    }
-
     /// `ram_bytes` of memory in the usual fitting for that size, or, for a
     /// size no O2 can have, one bank of it (power-of-two sizes only). `prom`
     /// must be the raw 512 KiB IP32 PROM image.

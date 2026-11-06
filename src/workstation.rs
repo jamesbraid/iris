@@ -23,6 +23,8 @@ use parking_lot::Mutex;
 
 use crate::config::MachineConfig;
 use crate::control::Control;
+use crate::devices::Devices;
+use crate::disks::Disks;
 use crate::guest_net::GuestNet;
 use crate::gdb_stub::CpuDebug;
 use crate::dev::ps2::Ps2Controller;
@@ -72,6 +74,8 @@ pub trait Workstation: Send {
 
     // ---- the parts every machine carries (see `Control`, `GuestNet`) ----
 
+    fn devices(&self) -> &Devices;
+    fn disks(&self) -> &Disks;
     fn control(&self) -> &Control;
     fn control_mut(&mut self) -> &mut Control;
     /// The guest's NAT handle: None only when `[network] mode = "off"` on the
@@ -252,27 +256,29 @@ pub trait Workstation: Send {
     }
     /// The controller whose CD-ROM drives take disc changes.
     fn disc_changer(&self) -> Option<Arc<dyn DiscChanger>> {
-        None
+        self.disks().disc_changer()
     }
     /// Ask the guest to remount `/CDROM` after a disc change on `scsi_id`.
     fn remount_cdrom_guest(&self, _scsi_id: u8) {}
 
     /// Attached CHD disks with changes waiting to be folded into their bases.
     fn pending_chd_sync_count(&self) -> usize {
-        0
+        self.disks().pending_chd_sync_count()
     }
     /// Make every disk's accepted writes survive the process, including a
     /// copy-on-write overlay's record of the sectors it holds. Run it before
     /// the process exits without dropping the machine.
-    fn flush_disks(&self) -> std::io::Result<()>;
-    /// Fold pending CHD diffs into their bases (see `Machine::sync_chd_disks`).
+    fn flush_disks(&self) -> std::io::Result<()> {
+        self.disks().flush()
+    }
+    /// Fold pending CHD diffs into their bases (see [`Disks::sync_chd`]).
     fn sync_chd_disks(
         &self,
-        _only: Option<usize>,
-        _progress: &mut dyn FnMut(usize, usize, f32),
-        _cancel: &dyn Fn() -> bool,
+        only: Option<usize>,
+        progress: &mut dyn FnMut(usize, usize, f32),
+        cancel: &dyn Fn() -> bool,
     ) -> std::io::Result<usize> {
-        Ok(0)
+        self.disks().sync_chd(only, progress, cancel)
     }
 
     /// The count of guest frames every network backend feeds, for the GUI's

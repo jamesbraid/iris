@@ -193,7 +193,7 @@ pub(crate) fn make_images(dir: &Dir) {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Machine {
     Indy,
     Indigo2,
@@ -272,7 +272,7 @@ pub(crate) fn on_big_stack(body: impl FnOnce() + Send + 'static) {
 }
 
 /// The SCSI buses of whichever machine this is.
-fn with_buses<R>(m: &mut dyn Workstation, f: impl FnOnce(&[&ScsiBus]) -> R) -> R {
+pub(crate) fn with_buses<R>(m: &mut dyn Workstation, f: impl FnOnce(&[&ScsiBus]) -> R) -> R {
     let any = m.as_any_mut();
     if let Some(m) = any.downcast_mut::<crate::machine::Machine>() {
         return f(&m.scsi_buses());
@@ -640,6 +640,8 @@ impl Workstation for Probe {
     fn restart_peripherals(&mut self) { self.0.restart_peripherals() }
     fn cpu_start(&self) { self.0.cpu_start() }
     fn cpu_is_running(&self) -> bool { self.0.cpu_is_running() }
+    fn devices(&self) -> &crate::devices::Devices { self.0.devices() }
+    fn disks(&self) -> &crate::disks::Disks { self.0.disks() }
     fn control(&self) -> &crate::control::Control { self.0.control() }
     fn control_mut(&mut self) -> &mut crate::control::Control { self.0.control_mut() }
     fn net(&self) -> Option<&crate::guest_net::GuestNet> { self.0.net() }
