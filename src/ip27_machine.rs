@@ -67,7 +67,8 @@ use crate::ip27::{self, Ip27Bus, NodeMemory};
 use crate::irq::InterruptController;
 use crate::machine_state::GuestState;
 use crate::monitor::{Monitor, DEFAULT_PORT as DEFAULT_MONITOR_PORT};
-use crate::net::{GatewayConfig, Link, NatControl};
+use crate::guest_net::GuestNet;
+use crate::net::NatControl;
 use crate::scsi::ScsiBus;
 use crate::traits::{BusDevice, Device, MachineEvent, Resettable, Signal, BUS_ERR};
 use crate::xtalk::{Upstream, XtalkHost};
@@ -216,7 +217,8 @@ pub struct BoardIo {
     pub console: Option<Arc<CiSerialBackend>>,
     /// The `scratch = true` volume.
     pub scratch: Option<PathBuf>,
-    pub nat: Option<Nat>,
+    /// The Ethernet's NAT, when `[network]` connects it.
+    pub net: Option<GuestNet>,
     /// The module controller the nodes' I2C controllers reach.
     pub controller: Arc<dyn ModuleController>,
     /// Put the board's devices back to power-on.
@@ -224,13 +226,6 @@ pub struct BoardIo {
     /// The Bridge, for a test to drive.
     #[cfg(test)]
     pub bridge: Arc<Bridge>,
-}
-
-/// The Ethernet's NAT gateway, as the front ends read it.
-pub struct Nat {
-    pub control: Arc<NatControl>,
-    pub expected: (Ipv4Addr, Ipv4Addr, Ipv4Addr),
-    pub frames: Arc<AtomicU64>,
 }
 
 /// A product. Only wiring differs in behaviour between SN0 boards; everything
@@ -716,13 +711,13 @@ impl<B: Ip27Board> Workstation for Ip27Machine<B> {
         ScsiBus::sync_chd_disks(&buses, only, progress, cancel)
     }
     fn net_frames(&self) -> Option<Arc<AtomicU64>> {
-        self.io.nat.as_ref().map(|n| n.frames.clone())
+        self.io.net.as_ref().and_then(|n| n.frames())
     }
     fn nat_control(&self) -> Option<Arc<NatControl>> {
-        self.io.nat.as_ref().map(|n| n.control.clone())
+        self.io.net.as_ref().map(|n| n.nat())
     }
     fn nat_expected(&self) -> Option<(Ipv4Addr, Ipv4Addr, Ipv4Addr)> {
-        self.io.nat.as_ref().map(|n| n.expected)
+        self.io.net.as_ref().map(|n| n.addrs())
     }
 }
 
@@ -901,12 +896,10 @@ pub(crate) fn pci_devices(
         ioc3.set_serial_backend(1, b);
     }
 
-    let mut nat = None;
-    let net = GatewayConfig::from_network(&cfg.network());
-    if let Some(link) = Link::with_gateway(net.clone())? {
-        nat = Some(Nat { control: link.nat(), expected: (net.client_ip, net.gateway_ip, net.netmask), frames: link.frames() });
+    let net = GuestNet::open(cfg, name)?.map(|(net, link)| {
         eth.attach(link);
-    }
+        net
+    });
     bridge.register_locks();
     ioc3.register_locks();
     eth.register_locks();
@@ -938,7 +931,7 @@ pub(crate) fn pci_devices(
         timekeeper,
         console,
         scratch: attached.scratch,
-        nat,
+        net,
         controller,
         reset,
         #[cfg(test)]

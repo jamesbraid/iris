@@ -39,6 +39,7 @@ use crate::snapshot::{Snapshot, Manifest, SCHEMA_VERSION, ChunksManifest, DiskRe
 use crate::chunk_store::{ChunkStore, get_chunks_as_words, put_words_as_chunks};
 use crate::hptimer::TimerManager;
 use crate::control::Control;
+use crate::guest_net::GuestNet;
 use crate::workstation::{MachineSlot, SystemController, Workstation};
 
 /// The profile of the machine this process is running, set by
@@ -153,6 +154,8 @@ pub struct Machine {
     /// Lifecycle state, machine events and the pointer slot the front ends
     /// share.
     pub(crate) control: Control,
+    /// The SEEQ's NAT handle, from the link it attached.
+    net: GuestNet,
 }
 
 /// In-memory snapshot of the just-restored guest state. Populated at the end
@@ -919,6 +922,8 @@ impl Machine {
         }
 
         let control = Control::new();
+        let seeq = hpc3.seeq();
+        let net = GuestNet::from_parts(seeq.nat_control(), seeq.gateway_addrs(), seeq.frames());
 
         // Give MC and IOC async event senders so they can request hard-reset / power-off.
         mc.set_event_sender(control.sender());
@@ -944,6 +949,7 @@ impl Machine {
             newport_active,
             fullhouse: !guinness,
             control,
+            net,
         }
     }
 
@@ -2109,13 +2115,13 @@ impl Workstation for Machine {
         Machine::sync_chd_disks(self, only, progress, cancel)
     }
     fn net_frames(&self) -> Option<Arc<std::sync::atomic::AtomicU64>> {
-        self.hpc3.seeq().frames()
+        self.net.frames()
     }
     fn nat_control(&self) -> Option<Arc<crate::net::NatControl>> {
-        Some(self.hpc3.seeq().nat_control())
+        Some(self.net.nat())
     }
     fn nat_expected(&self) -> Option<(std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr)> {
-        Some(self.hpc3.seeq().gateway_addrs())
+        Some(self.net.addrs())
     }
 }
 
