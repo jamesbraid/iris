@@ -1469,6 +1469,8 @@ impl InterruptController for Bridge {
     }
 }
 
+impl crate::traits::Device for Bridge {}
+
 impl crate::traits::Resettable for Bridge {
     /// Power-on: the chip's own state, as a reset. The functions behind it
     /// are not reset here; see [`Bridge::reset_pci`].
