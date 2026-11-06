@@ -40,10 +40,37 @@ window):
   0x9fc55954 and 0x9fc55914, the sample at 0x9fc55ac0 and its length in bytes at
   0x9fc60ebc.
 
-Both players return early when a value they read from NVRAM is zero (the volume
-setting, inferred from the code, not confirmed). Observed in iris: the first
-boot of a new Indy `nvram.bin` is silent and the next boots chime; an Indigo2
-with no `nveeprom` file chimes on its first boot.
+Both players return early when the volume setting in NVRAM is zero. The Indy
+and Indigo2 (IP22) players read the NVRAM string at offset 232 (three bytes),
+parse it as a decimal number and return before touching HAL2 if it is zero.
+The IP22 and IP24 PROMs were checked this way, in the iris monitor (IP24
+0x9fc030f4 to 0x9fc03124, IP22 0xbfc03380 to 0xbfc033a0). The IP28 player was
+not disassembled; iris already seeded its EEPROM before the chime, which suggests the same gate.
+
+## NVRAM and the first boot
+
+The PROM fills in its default settings (volume "80", console "g", baud 9600,
+time zone PST8PDT and a few flags) only when the NVRAM checksum is bad, and it
+does so after it has played the tune. A zeroed `nvram.bin` (Indy) or an erased
+`nveeprom.bin` (Indigo2 IP22) therefore reads as volume 0 at tune time: the
+first boot is silent, the PROM then writes its defaults, and iris saves them
+for the next boot. Nothing is wrong in the PROM or in the DS1386 or 93CS56
+model. A real machine is programmed at the factory, so it chimes on first
+power-on, and a blank battery-backed block is an artificial starting state.
+
+iris now seeds the factory state for a block that is blank apart from the
+Ethernet address (`src/dev/sgi_nvram.rs`): layout revision 8 for the Indy and
+IP22, 9 for the IP28, the defaults above and a checksum. Existing files and
+anything a guest has set are never touched. The checksum is XOR of every byte
+but the first, seeded with 0xA5, rotated left once per 16-bit word; it
+reproduces the 0xBA the Indy PROM wrote (checked on its whole image). The
+text the PROM also leaves in unused slots is not copied.
+
+Checked with `IRIS_HAL2_AUDIO_DUMP`, blank files, first boot: the Indy gives
+92150 frames with the same PCM sha256 (4891e240...) as the earlier recording
+and as a second boot; the IP22 gives 85000 frames, identical to the earlier
+recording (59e2a08c...); the IP28 is unchanged (b434bab4...). Before the
+change the first boots of the Indy and IP22 played nothing.
 
 ## Recording what HAL2 plays
 
