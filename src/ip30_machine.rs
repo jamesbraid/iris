@@ -805,7 +805,7 @@ impl OctaneMachine {
             std::fs::create_dir_all(&dir).map_err(io)?;
             let overlays = ctl.bus().export_overlays(&dir)
                 .map_err(|e| format!("COW overlay export (controller {i}): {e}"))?;
-            snap.write_toml(&format!("cow{i}.toml"), &crate::machine::build_cow_table(overlays)).map_err(io)?;
+            snap.write_toml(&format!("cow{i}.toml"), &crate::snapshot::build_cow_table(overlays)).map_err(io)?;
         }
         Ok(())
     }
@@ -854,7 +854,7 @@ impl OctaneMachine {
             return Err(format!("snapshot memory is {} MiB, this Octane has {} MiB", memory.len() >> 18, fitted >> 18));
         }
         let overlays = std::array::from_fn(|i| {
-            snap.read_toml(&format!("cow{i}.toml")).ok().map(|t| crate::machine::parse_cow_table(&t))
+            snap.read_toml(&format!("cow{i}.toml")).ok().map(|t| crate::snapshot::parse_cow_table(&t))
         });
         // Checked here, before the machine is touched, rather than when the
         // part is loaded.
