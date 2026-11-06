@@ -3693,12 +3693,7 @@ impl CompileQueue {
                     // `j2 batch off` (the `developer`-build default) used
                     // to route here into handle_request instead, which is
                     // what triggered it.
-                    let ran_out_of_memory = {
-                        #[cfg(feature = "developer")]
-                        { crate::cpu::jitv2::comp::handle_request_deferred(&req, &bus, &mut analyzer, &mut codegen, &mut pending, &stats) }
-                        #[cfg(not(feature = "developer"))]
-                        { crate::cpu::jitv2::comp::handle_request_deferred(&req, &bus, &mut analyzer, &mut codegen, &mut pending) }
-                    };
+                    let ran_out_of_memory = crate::cpu::jitv2::comp::handle_request_deferred(&req, &bus, &mut analyzer, &mut codegen, &mut pending, &stats);
                     // Keep CompileQueue::function_count's mirror in sync —
                     // see that field's doc comment for why it exists
                     // (`j2 stats` can't read the real codegen.function_count()

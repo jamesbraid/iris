@@ -8928,13 +8928,8 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             // Stamp the L1-D geometry the inline load/store path needs. No
             // helper build here — see the note in Jitv2::worker_loop.
             codegen.dc_geometry = self.cache.jit_dc_geometry();
-            #[cfg(feature = "developer")]
-            {
-                let stats = self.jitv2.lock().stats.clone();
-                ran_out_of_memory = crate::cpu::jitv2::comp::handle_request(&req, &self.sysad, &mut self.jitv2_inline_analyzer, codegen, &stats);
-            }
-            #[cfg(not(feature = "developer"))]
-            { ran_out_of_memory = crate::cpu::jitv2::comp::handle_request(&req, &self.sysad, &mut self.jitv2_inline_analyzer, codegen); }
+            let stats = self.jitv2.lock().stats.clone();
+            ran_out_of_memory = crate::cpu::jitv2::comp::handle_request(&req, &self.sysad, &mut self.jitv2_inline_analyzer, codegen, &stats);
         }
         *self.jitv2.lock().codegen.lock() = codegen;
         {
