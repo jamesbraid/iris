@@ -430,7 +430,7 @@ pub fn handle_request(
     bus: &Arc<dyn BusDevice>,
     analyzer: &mut Analyzer,
     codegen: &mut Codegen,
-    #[cfg(feature = "developer")] stats: &crate::cpu::jitv2::JitStats,
+    stats: &crate::cpu::jitv2::JitStats,
 ) -> bool {
     crate::pf_scope!(crate::perfetto::events::JIT_COMPILE);
     let page = unsafe { &*req.page };
@@ -520,8 +520,8 @@ pub fn handle_request(
                     stats.fallback_words.fetch_add(fb, std::sync::atomic::Ordering::Relaxed);
                     stats.fallback_regions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                stats.compiles.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
+            stats.compiles.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         None if codegen.last_compile_ran_out_of_memory() => {
             // Not a real decline — every candidate is perfectly compilable,
@@ -624,7 +624,7 @@ pub fn handle_request_deferred(
     analyzer: &mut Analyzer,
     codegen: &mut Codegen,
     pending: &mut PendingCount,
-    #[cfg(feature = "developer")] stats: &crate::cpu::jitv2::JitStats,
+    stats: &crate::cpu::jitv2::JitStats,
 ) -> bool {
     crate::pf_scope!(crate::perfetto::events::JIT_COMPILE);
     let page = unsafe { &*req.page };
@@ -770,8 +770,8 @@ pub fn handle_request_deferred(
                     stats.fallback_words.fetch_add(fb, std::sync::atomic::Ordering::Relaxed);
                     stats.fallback_regions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                stats.compiles.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
+            stats.compiles.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         None if codegen.last_compile_ran_out_of_memory() => {
             page.mark_codegen_oom_bounced();
@@ -866,22 +866,9 @@ mod tests {
     use crate::traits::{BusRead8, BusRead16, BusRead32, BusRead64, BUS_ERR};
     use std::sync::atomic::AtomicU64;
 
-    /// Test-only wrapper hiding `handle_request`'s `developer`-only `stats`
-    /// parameter — every test below just wants "run a request," not the
-    /// stats side effects, so a fresh throwaway `JitStats` under `developer`
-    /// keeps every call site identical regardless of which build this runs
-    /// under (`--features jitv2` alone must build and pass exactly like
-    /// `--features jitv2,developer` does).
+    /// "Run a request" for tests that do not look at the stats.
     fn handle_request_for_test(req: &CompileRequest, bus: &Arc<dyn BusDevice>, analyzer: &mut Analyzer, codegen: &mut Codegen) -> bool {
-        #[cfg(feature = "developer")]
-        {
-            let stats = crate::cpu::jitv2::JitStats::default();
-            handle_request(req, bus, analyzer, codegen, &stats)
-        }
-        #[cfg(not(feature = "developer"))]
-        {
-            handle_request(req, bus, analyzer, codegen)
-        }
+        handle_request(req, bus, analyzer, codegen, &crate::cpu::jitv2::JitStats::default())
     }
 
     /// Every word decodes as `ADDIU r1, r0, 1` (opcode 0x09, rs=0, rt=1,
@@ -953,6 +940,43 @@ mod tests {
 
         assert!(page.is_runnable(4), "a plain ADDIU must compile and publish");
         assert!(!page.is_denylisted(4));
+    }
+
+    #[test]
+    fn handle_request_counts_a_published_compile() {
+        // `JitStats::compiles` must move in every build, not just
+        // `developer`: the inline (on-CPU-thread) compile path calls this
+        // function directly, and a plain build is what ships.
+        let _stable = crate::cpu::jitv2::opcode_support::table_stable();
+        let bus: Arc<dyn BusDevice> = Arc::new(AddiuDevice);
+        let counter = AtomicU64::new(0);
+        let mut page = PhysicalCodePage::new(0, &counter as *const AtomicU64);
+        page.mark_requested(4);
+        let req = CompileRequest { page: &mut page as *mut PhysicalCodePage, compiled_for_fr1: true };
+        let stats = crate::cpu::jitv2::JitStats::default();
+        let mut analyzer = Analyzer::new();
+        let mut codegen = Codegen::new();
+        handle_request(&req, &bus, &mut analyzer, &mut codegen, &stats);
+
+        assert!(page.is_runnable(4));
+        assert_eq!(stats.compiles.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn handle_request_deferred_counts_a_compile() {
+        let _stable = crate::cpu::jitv2::opcode_support::table_stable();
+        let bus: Arc<dyn BusDevice> = Arc::new(AddiuDevice);
+        let counter = AtomicU64::new(0);
+        let mut page = PhysicalCodePage::new(0, &counter as *const AtomicU64);
+        page.mark_requested(4);
+        let req = CompileRequest { page: &mut page as *mut PhysicalCodePage, compiled_for_fr1: true };
+        let stats = crate::cpu::jitv2::JitStats::default();
+        let mut analyzer = Analyzer::new();
+        let mut codegen = Codegen::new();
+        let mut pending: PendingCount = 0;
+        handle_request_deferred(&req, &bus, &mut analyzer, &mut codegen, &mut pending, &stats);
+
+        assert_eq!(stats.compiles.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1097,18 +1121,9 @@ mod tests {
         }
     }
 
-    /// Same `stats`-hiding wrapper as `handle_request_for_test`, for the
-    /// deferred path.
+    /// Same wrapper for the deferred path.
     fn handle_request_deferred_for_test(req: &CompileRequest, bus: &Arc<dyn BusDevice>, analyzer: &mut Analyzer, codegen: &mut Codegen, pending: &mut PendingCount) -> bool {
-        #[cfg(feature = "developer")]
-        {
-            let stats = crate::cpu::jitv2::JitStats::default();
-            handle_request_deferred(req, bus, analyzer, codegen, pending, &stats)
-        }
-        #[cfg(not(feature = "developer"))]
-        {
-            handle_request_deferred(req, bus, analyzer, codegen, pending)
-        }
+        handle_request_deferred(req, bus, analyzer, codegen, pending, &crate::cpu::jitv2::JitStats::default())
     }
 
     #[test]
