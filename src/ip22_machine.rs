@@ -210,6 +210,8 @@ impl Ip22Machine {
         let perf = cfg.perf.clone();
         #[cfg(feature = "jitv2")]
         let jitv2_threads = cfg.jitv2.threads;
+        #[cfg(feature = "jitv2")]
+        let jitv2_compile = cfg.jitv2.compile;
         let display_resolution = cfg.graphics.resolution;
         let newport_active = !cfg.headless && cfg.graphics_board() == GraphicsBoard::Newport;
         let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
@@ -491,7 +493,7 @@ impl Ip22Machine {
                 .unwrap_or_else(|| crate::dev::testdev::DEFAULT_DUMP_PATH.to_string());
             eprintln!("iris: test device enabled at {:#010x}, dumps to {}",
                       crate::dev::testdev::TEST_DEV_BASE, path);
-            Some(Arc::new(crate::dev::testdev::TestDevice::new(path)))
+            Some(Arc::new(crate::dev::testdev::TestDevice::new(path).with_clock(cfg.test_device_clock)))
         } else {
             None
         };
@@ -760,15 +762,13 @@ impl Ip22Machine {
             // for inline to use.
             #[cfg(not(feature = "jitv2_lockstep"))]
             {
-                let mut guard = jit.lock();
                 // start() now builds its own Codegen internally (no more
                 // shared-arena-across-modes handoff — see CompileQueue::start's
                 // own doc comment) — the idle Jitv2::codegen slot built by
                 // Jitv2::new() stays untouched here, reserved for inline
                 // mode if `j2 inline on` ever switches to it.
-                let stats = guard.stats.clone();
                 let bus: Arc<dyn BusDevice> = phys.clone();
-                guard.compile_queue.start(bus, stats);
+                crate::cpu::jitv2::jitv2::start_compiling(&*cpu, &jit, jitv2_compile, bus);
             }
         }
 
