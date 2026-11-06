@@ -17,11 +17,14 @@ pub struct Monitor {
     /// The address actually bound, once the server thread has bound it —
     /// `shutdown` connects here to wake the blocking `accept`.
     bound: Mutex<Option<std::net::SocketAddr>>,
+    /// The TCP port `serve` binds on 127.0.0.1.
+    port: u16,
 }
 
 impl Monitor {
-    pub fn new() -> Self {
+    pub fn new(port: u16) -> Self {
         Self {
+            port,
             devices: Arc::new(Mutex::new(Vec::new())),
             shutdown: Arc::new(AtomicBool::new(false)),
             bound: Mutex::new(None),
@@ -49,10 +52,12 @@ impl Monitor {
         self.devices.lock().push(device);
     }
 
-    /// Bind `addr` and serve it on a new thread. The bind happens before
-    /// this returns, so `bound_addr` answers at once whether this monitor
-    /// has its port.
-    pub fn start_server(self: Arc<Self>, addr: String) {
+    /// Bind 127.0.0.1 on this monitor's port and serve it on a new thread.
+    /// The bind happens before this returns, so `bound_addr` answers at once
+    /// whether this monitor has its port.
+    pub fn serve(self: &Arc<Self>) {
+        let addr = format!("127.0.0.1:{}", self.port);
+        let me = self.clone();
         // Fail soft (rather than panic-aborting the whole process) if the
         // port can't be bound — because another iris process is using it
         // (give each its own `monitor_port`), or a previous machine
@@ -78,12 +83,12 @@ impl Monitor {
         thread::spawn(move || {
             println!("Monitor listening on {}", addr);
             for stream in listener.incoming() {
-                if self.shutdown.load(Ordering::SeqCst) {
+                if me.shutdown.load(Ordering::SeqCst) {
                     break; // drops the listener: the port is free again
                 }
                 match stream {
                     Ok(stream) => {
-                        let devices = self.devices.clone();
+                        let devices = me.devices.clone();
                         thread::spawn(move || {
                             handle_client(stream, devices);
                         });
@@ -213,22 +218,34 @@ mod tests {
     /// answering for a Machine that no longer exists.
     #[test]
     fn shutdown_releases_the_port() {
-        let monitor = Arc::new(Monitor::new());
-        monitor.clone().start_server("127.0.0.1:0".to_string());
+        let monitor = Arc::new(Monitor::new(0));
+        monitor.serve();
         let addr = wait_for("bind", || monitor.bound_addr());
         monitor.shutdown();
         wait_for("port release", || TcpListener::bind(addr).ok());
     }
 
+    /// The port given to `new` is the port `serve` takes, not an ephemeral one.
+    #[test]
+    fn serve_binds_the_port_it_was_asked_for() {
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let monitor = Arc::new(Monitor::new(port));
+        monitor.serve();
+        assert_eq!(monitor.bound_addr().unwrap().port(), port);
+        monitor.shutdown();
+    }
+
     /// A port already in use (another iris's monitor) leaves this monitor
-    /// unbound, and says so as soon as `start_server` returns — the console
+    /// unbound, and says so as soon as `serve` returns — the console
     /// client must not go looking for a monitor on that port.
     #[test]
     fn taken_port_leaves_the_monitor_unbound() {
         let other = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = other.local_addr().unwrap();
-        let monitor = Arc::new(Monitor::new());
-        monitor.clone().start_server(addr.to_string());
+        let monitor = Arc::new(Monitor::new(addr.port()));
+        monitor.serve();
         assert_eq!(monitor.bound_addr(), None);
     }
 
@@ -238,8 +255,8 @@ mod tests {
     fn quit_hangs_up_despite_the_log_sink() {
         use std::io::{Read, Write};
         crate::devlog::init_devlog();
-        let monitor = Arc::new(Monitor::new());
-        monitor.clone().start_server("127.0.0.1:0".to_string());
+        let monitor = Arc::new(Monitor::new(0));
+        monitor.serve();
         let addr = wait_for("bind", || monitor.bound_addr());
         let mut s = TcpStream::connect(addr).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -251,9 +268,9 @@ mod tests {
 
     #[test]
     fn shutdown_before_bind_does_not_serve() {
-        let monitor = Arc::new(Monitor::new());
+        let monitor = Arc::new(Monitor::new(0));
         monitor.shutdown();
-        monitor.clone().start_server("127.0.0.1:0".to_string());
+        monitor.serve();
         let addr = wait_for("bind", || monitor.bound_addr());
         wait_for("port release", || TcpListener::bind(addr).ok());
     }
