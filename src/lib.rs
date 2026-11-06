@@ -191,6 +191,7 @@ pub mod ip27_origin2000;
 /// Fuel has an IP34 board and uses the IP35 software platform and processor views.
 pub mod ip35;
 pub mod machine_state;
+pub mod control;
 pub mod platform;
 pub mod physical;
 pub mod ip22_bus;

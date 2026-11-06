@@ -416,7 +416,7 @@ fn guest_power_off(m: &mut dyn Workstation) {
     if let Some(m) = any.downcast_mut::<crate::machine::Machine>() {
         // The IOC's front-panel latch sends this; the chip needs a bus cycle
         // the tests have no cheap way to make.
-        m.event_tx.send(crate::traits::MachineEvent::PowerOff).unwrap();
+        m.control.sender().send(crate::traits::MachineEvent::PowerOff).unwrap();
     } else if let Some(m) = any.downcast_mut::<crate::ip32_machine::O2Machine>() {
         // The clock's extended control register, in bank 1, as the PROM sets it.
         let rtc = &m.bus.mace.rtc;
