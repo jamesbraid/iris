@@ -34,7 +34,7 @@ condition; update the linked guide and changelog when it lands.
   checkpoint path. Complete when a restored X/irisGL scene, framebuffer hash,
   and subsequent drawing match uninterrupted execution.
   Sources: [GR2 save/load](../src/dev/gr2/mod.rs),
-  [machine snapshots/checkpoints](../src/machine.rs).
+  [machine snapshots/checkpoints](../src/ip22_machine.rs).
 - [ ] **Implementation — IMPACT snapshots and rollback.** `Mgras::save_state`
   returns an empty table and `load_state` is a no-op. Include HQ3/GE state,
   ERAM contexts, RSS registers, tiled pixel memory, TE1 texture memory, DCB
@@ -49,7 +49,7 @@ condition; update the linked guide and changelog when it lands.
   external camera/audio/network/bridge/GL resources. Host sockets and GPU
   objects cannot simply be serialized. Complete when each supported device
   either resumes correctly or has an explicit, enforced restore limitation.
-  Source: [snapshot and checkpoint manifests](../src/machine.rs).
+  Source: [snapshot and checkpoint manifests](../src/ip22_machine.rs).
 - [ ] **Implementation — remaining architectural FPU differences.** Recheck
   remaining hardware-backed discrepancies and add ordinary arithmetic
   rounding/Overflow/Inexact coverage: the common FP arithmetic helper explicitly
@@ -230,7 +230,7 @@ condition; update the linked guide and changelog when it lands.
   interrupted writes, flush/failure paths, snapshot/load with COW and CHD,
   parent/sidecar mismatches, and restore while DMA is pending. Complete when
   guest filesystem checks pass and base images remain intact in overlay modes.
-  Sources: [storage](../src/scsi.rs), [snapshots](../src/machine.rs),
+  Sources: [storage](../src/scsi.rs), [snapshots](../src/ip22_machine.rs),
   [COW/CHD design](plans/cow-chd-sync-plan.md).
 - [ ] **Triage — Ethernet completion interrupt race.** Investigate the FIXME
   in the SEEQ/NAT control path independently of the already-fixed RX-active

@@ -1,6 +1,6 @@
 # Start the compile pool after the ppmem windows are published
 
-Status: rule, found 2026-10-30 replacing the O2 cache handover. `src/machine.rs` always had
+Status: rule, found 2026-10-30 replacing the O2 cache handover. `src/ip22_machine.rs` always had
 the right order; `src/ip32_machine.rs` and `src/ip30_machine.rs` were fixed then.
 
 ## Symptom

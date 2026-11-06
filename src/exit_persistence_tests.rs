@@ -274,7 +274,7 @@ pub(crate) fn on_big_stack(body: impl FnOnce() + Send + 'static) {
 /// The SCSI buses of whichever machine this is.
 pub(crate) fn with_buses<R>(m: &mut dyn Workstation, f: impl FnOnce(&[&ScsiBus]) -> R) -> R {
     let any = m.as_any_mut();
-    if let Some(m) = any.downcast_mut::<crate::machine::Machine>() {
+    if let Some(m) = any.downcast_mut::<crate::ip22_machine::Ip22Machine>() {
         return f(&m.scsi_buses());
     }
     if let Some(m) = any.downcast_mut::<crate::ip32_machine::O2Machine>() {
@@ -413,7 +413,7 @@ fn guest_power_off(m: &mut dyn Workstation) {
     use crate::pci::PciFunction;
     use crate::traits::BusDevice;
     let any = m.as_any_mut();
-    if let Some(m) = any.downcast_mut::<crate::machine::Machine>() {
+    if let Some(m) = any.downcast_mut::<crate::ip22_machine::Ip22Machine>() {
         // The IOC's front-panel latch sends this; the chip needs a bus cycle
         // the tests have no cheap way to make.
         m.control.sender().send(crate::traits::MachineEvent::PowerOff).unwrap();
@@ -743,8 +743,8 @@ fn no_process_exit_bypasses_the_flush() {
     // File (under src/) -> exits allowed in it, and why.
     let allowed: &[(&str, usize, &str)] = &[
         ("workstation.rs", 1, "exit_process itself"),
-        // Machine::new's three startup failures, before a guest has run.
-        ("machine.rs", 3, "bad SCSI configuration or an IMPACT raster backend that will not start"),
+        // Ip22Machine::new's three startup failures, before a guest has run.
+        ("ip22_machine.rs", 3, "bad SCSI configuration or an IMPACT raster backend that will not start"),
         // The bare-metal test device ends the run with the guest's exit code.
         ("dev/testdev.rs", 1, "bare-metal test device, a harness only"),
         // Command-line and configuration front ends: nothing is running yet.

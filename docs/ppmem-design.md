@@ -84,14 +84,14 @@ else edited.
 
 | Method | Callers | ppmem behaviour |
 |---|---|---|
-| `new(size_mb)` | `machine.rs:292-295` | allocates one bank object |
+| `new(size_mb)` | `ip22_machine.rs:292-295` | allocates one bank object |
 | `set_addr_mask(mask)` | `physical.rs` `remap_banks` | see §5 — becomes a remap |
 | `save_bin` / `load_bin` | `physical.rs` `save_bank`/`load_bank` | unchanged (big-endian bytes) |
-| `snapshot_words` / `restore_words` | snapshot + rollback, `machine.rs` | unchanged (`Vec<u32>` native-endian) |
+| `snapshot_words` / `restore_words` | snapshot + rollback, `ip22_machine.rs` | unchanged (`Vec<u32>` native-endian) |
 | `gen_ptr(addr)` | jitv2 `PhysicalCodePage` | §6 |
 
 `snapshot_words`/`restore_words` keep returning/consuming `Vec<u32>` so the
-snapshot format and `machine.rs` are untouched. They read/write the bank's own
+snapshot format and `ip22_machine.rs` are untouched. They read/write the bank's own
 backing store, not the 4GB window, so aliasing never causes a bank to be
 snapshotted twice.
 
@@ -205,7 +205,7 @@ mirror period, but under ppmem the mapping is what enforces it.
 reasons:
 
 1. **The remap is atomic from the guest's point of view.** `remap_banks` is
-   invoked only from the MEMCFG write callback (`machine.rs:644-650`) and the
+   invoked only from the MEMCFG write callback (`ip22_machine.rs:644-650`) and the
    boot-time initial remap. The callback runs **synchronously inside the CPU's
    store to MEMCFG** — the whole remap completes before that instruction
    retires. It occupies a single guest cycle; guest code can never observe a

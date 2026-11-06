@@ -45,13 +45,13 @@ IRIS keeps the observable part and drops the timing.
                        └─────────────────────────────────────────────────┘
 ```
 
-`Machine` (`src/machine.rs`) builds all of this from a `MachineConfig`, wires
+`Ip22Machine` (`src/ip22_machine.rs`) builds all of this from a `MachineConfig`, wires
 the devices together, starts and stops them, and takes snapshots.
 `src/platform.rs` holds the per-profile differences (Indy "Guinness" vs
 Indigo2 "Fullhouse": IOC variant, one or two SCSI controllers, NVRAM chip,
 EISA/INT2 cascade, PROM fallback, memory layout).
 
-The front ends do not use `Machine` directly. `main.rs`, the window
+The front ends do not use `Ip22Machine` directly. `main.rs`, the window
 (`ui.rs`), the CI socket (`ci.rs`), the monitor's system commands and
 iris-gui hold a `Box<dyn Workstation>` from `workstation::build`
 (`src/workstation.rs`). The trait's required methods are what every machine
@@ -61,7 +61,7 @@ shared logic every machine wants the same way (`status`, and the idempotent
 `start_guest`/`stop_guest` behind `machine-start`/`machine-stop`, see
 `src/machine_state.rs`) or optional facilities (snapshots, CHD folding, the
 scratch volume, disc changes, the NAT controls) that default to "not
-supported on this machine". `Machine` implements all of it. A machine built
+supported on this machine". `Ip22Machine` implements all of it. A machine built
 around a different chipset implements the same trait and gets the window,
 iris-ci, iris-gui and the monitor's `reset`/`save`/`load`/`machine-status`
 with it.
@@ -160,11 +160,11 @@ pub trait Resettable { fn power_on(&self); }
 - **Resettable** is power-on state.
 
 Devices connect to each other through device-specific `connect()` /
-`set_phys()` calls made by `Machine`, not through a generic graph. Smaller
+`set_phys()` calls made by `Ip22Machine`, not through a generic graph. Smaller
 interfaces exist for specific links: `DmaClient` (a peripheral on an HPC3 DMA
 channel), `FifoDevice` (serial byte streams), `InterruptController`/`IrqLine`
 (below), `GfxDisplay` (a graphics board's screen, for the window and
-screenshots), `CpuDevice` (what `Machine` holds for the CPU).
+screenshots), `CpuDevice` (what `Ip22Machine` holds for the CPU).
 
 Serial lines have two halves. A UART model owns the registers: the Indy's
 `Z85c30`, and `Ns16550` (`src/dev/ns16550.rs`), the 16550A core that the O2's
@@ -377,7 +377,7 @@ consumer thread never takes `rec`.
 - The CPU model is the `CpuModel` trait (`MIPS4`, `PRID`, `FIR`,
   `TLB_ENTRIES`, ...), implemented by each cache model. The executor is
   monomorphised over it, so every CPU is in every binary with no
-  per-model branch on the hot path. `Machine::new` picks one from `[machine]
+  per-model branch on the hot path. `Ip22Machine::new` picks one from `[machine]
   cpu`.
 - Every uncached SB/SH goes to the bus through `BusDevice::write_narrow_from`
   with the whole source register: the byte or halfword is the low bits, the
@@ -752,7 +752,7 @@ introspection commands are in [debug.md](debug.md#jit-v2).
   for the boards).
 
 The Indy and Indigo2 profiles each have an embedded PROM fallback;
-`src/platform.rs` and `src/machine.rs` wire their differences, and
+`src/platform.rs` and `src/ip22_machine.rs` wire their differences, and
 `platform_profile_tests.rs` pins them down. The O2 and the Octane have no
 embedded PROM and are built by `workstation::build`.
 

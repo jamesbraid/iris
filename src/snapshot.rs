@@ -413,7 +413,7 @@ impl Snapshot {
 
     /// Write a device save_state value, picking `<base>.bin` for v2+ and
     /// `<base>.toml` for legacy schemas. Centralizes the per-call branching
-    /// in machine.rs.
+    /// in ip22_machine.rs.
     pub fn write_state(&self, base: &str, v: &Value, schema_version: u32) -> std::io::Result<()> {
         if schema_version >= 2 {
             self.write_value_bin(&format!("{}.bin", base), v)

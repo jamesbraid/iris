@@ -3,7 +3,7 @@
 `iris-gui` never special-cases which graphics device is active. `handle.rs`
 installs the capture renderer via `Machine::get_display()` /
 `get_display_head1()`, which return `Option<Arc<dyn GfxDisplay>>`
-(`src/machine.rs`) — a single trait object, picked in this order: GR2, then
+(`src/ip22_machine.rs`) — a single trait object, picked in this order: GR2, then
 IMPACT (mgras), then REX3. Adding IMPACT (commit `0b1ea38`) required zero
 changes to `framebuffer.rs` or `handle.rs`; it only needed `Machine::get_display`
 in core to know about `_phys.mgras`, which it already did by the time the GUI
