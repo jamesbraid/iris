@@ -38,7 +38,7 @@ use crate::ip32::{Ip32Bus, Ip32Options, FIRMWARE_LOAD_VA, FIRMWARE_SPAN, NO_ECC_
 use crate::traits::{BusDevice, Device, MachineEvent, Signal};
 use crate::control::Control;
 use crate::guest_net::GuestNet;
-use crate::workstation::{MachineSlot, Workstation};
+use crate::workstation::Workstation;
 
 const PROM_VA: std::ops::Range<u32> = 0xbfc0_0000..0xbfc8_0000;
 
@@ -713,14 +713,6 @@ impl O2Machine {
         Ok(())
     }
 
-    /// The shared slot (see [`MachineSlot`]) for this machine, created on
-    /// first use. Only once the machine is boxed: the slot records this
-    /// address.
-    pub fn machine_slot(&mut self) -> MachineSlot {
-        let ptr = self as *mut O2Machine as *mut dyn Workstation;
-        self.control.slot(ptr)
-    }
-
     pub fn get_ps2(&self) -> Arc<crate::dev::ps2::Ps2Controller> {
         match self.bus.mace.ps2.devices() {
             Some(d) => d.clone(),
@@ -784,18 +776,14 @@ impl Workstation for O2Machine {
     fn restart_peripherals(&mut self) { O2Machine::restart_peripherals(self) }
     fn cpu_start(&self) { self.cpu.clone().as_device().start() }
     fn cpu_is_running(&self) -> bool { self.cpu.clone().as_device().is_running() }
-    fn machine_slot(&mut self) -> MachineSlot { O2Machine::machine_slot(self) }
-    fn register_system_controller(&mut self) {
-        let ptr = self as *mut O2Machine as *mut dyn Workstation;
-        self.control.register(ptr, &self.monitor);
-    }
-    fn monitor_addr(&self) -> Option<std::net::SocketAddr> { self.monitor.bound_addr() }
-    fn lifecycle(&self) -> crate::machine_state::GuestState { self.control.state() }
-    fn set_lifecycle(&mut self, state: crate::machine_state::GuestState) { self.control.set_state(state) }
+    fn control(&self) -> &Control { &self.control }
+    fn control_mut(&mut self) -> &mut Control { &mut self.control }
+    fn net(&self) -> Option<&GuestNet> { self.net.as_ref() }
+    fn monitor(&self) -> &Arc<crate::monitor::Monitor> { &self.monitor }
+    fn as_ws_ptr(&mut self) -> *mut dyn Workstation { self as *mut Self as *mut dyn Workstation }
 
     fn get_display(&self) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> { Some(O2Machine::get_display(self)) }
     fn get_ps2(&self) -> Arc<crate::dev::ps2::Ps2Controller> { O2Machine::get_ps2(self) }
-    fn register_monitor_device(&self, device: Arc<dyn crate::traits::Device>) { self.monitor.register_device(device); }
     fn get_timer_manager(&self) -> Arc<TimerManager> { O2Machine::get_timer_manager(self) }
     fn get_cpu_debug(&self) -> Arc<dyn crate::gdb_stub::CpuDebug> { self.cpu.clone().debug_adapter() }
     fn fasttick_count(&self) -> Arc<std::sync::atomic::AtomicU64> { self.cpu.fasttick_count() }
@@ -840,15 +828,6 @@ impl Workstation for O2Machine {
         crate::scsi::ScsiBus::sync_chd_disks(&buses, only, progress, cancel)
     }
 
-    fn net_frames(&self) -> Option<Arc<std::sync::atomic::AtomicU64>> {
-        self.net.as_ref().and_then(|n| n.frames())
-    }
-    fn nat_control(&self) -> Option<Arc<crate::net::NatControl>> {
-        self.net.as_ref().map(|n| n.nat())
-    }
-    fn nat_expected(&self) -> Option<(std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr)> {
-        self.net.as_ref().map(|n| n.addrs())
-    }
 }
 
 /// GBE's picture, scanned out of RAM about sixty times a second and handed

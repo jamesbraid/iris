@@ -65,16 +65,13 @@ use crate::gfx_display::GfxDisplay;
 use crate::hptimer::{TimerId, TimerManager, TimerReturn};
 use crate::ip27::{self, Ip27Bus, NodeMemory};
 use crate::irq::InterruptController;
-use crate::machine_state::GuestState;
 use crate::monitor::{Monitor, DEFAULT_PORT as DEFAULT_MONITOR_PORT};
 use crate::guest_net::GuestNet;
-use crate::net::NatControl;
 use crate::scsi::ScsiBus;
 use crate::traits::{BusDevice, Device, MachineEvent, Resettable, Signal, BUS_ERR};
 use crate::xtalk::{Upstream, XtalkHost};
 use crate::control::Control;
-use crate::workstation::{DiscChanger, MachineSlot, Workstation};
-use std::net::{Ipv4Addr, SocketAddr};
+use crate::workstation::{DiscChanger, Workstation};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{atomic::AtomicU64, Arc, Weak};
@@ -636,28 +633,23 @@ impl<B: Ip27Board> Workstation for Ip27Machine<B> {
     fn cpu_is_running(&self) -> bool {
         self.units[0].cpu.clone().as_device().is_running()
     }
-    fn machine_slot(&mut self) -> MachineSlot {
-        let ptr = self as *mut Self as *mut dyn Workstation;
-        self.control.slot(ptr)
+    fn control(&self) -> &Control {
+        &self.control
     }
-    fn register_system_controller(&mut self) {
-        let ptr = self as *mut Self as *mut dyn Workstation;
-        self.control.register(ptr, &self.monitor);
+    fn control_mut(&mut self) -> &mut Control {
+        &mut self.control
     }
-    fn monitor_addr(&self) -> Option<SocketAddr> {
-        self.monitor.bound_addr()
+    fn net(&self) -> Option<&GuestNet> {
+        self.io.net.as_ref()
     }
-    fn lifecycle(&self) -> GuestState {
-        self.control.state()
+    fn monitor(&self) -> &Arc<Monitor> {
+        &self.monitor
     }
-    fn set_lifecycle(&mut self, state: GuestState) {
-        self.control.set_state(state)
+    fn as_ws_ptr(&mut self) -> *mut dyn Workstation {
+        self as *mut Self as *mut dyn Workstation
     }
     fn get_display(&self) -> Option<Arc<dyn GfxDisplay>> {
         None
-    }
-    fn register_monitor_device(&self, device: Arc<dyn Device>) {
-        self.monitor.register_device(device);
     }
     fn get_ps2(&self) -> Arc<Ps2Controller> {
         self.io.ps2.clone()
@@ -709,15 +701,6 @@ impl<B: Ip27Board> Workstation for Ip27Machine<B> {
     ) -> std::io::Result<usize> {
         let buses: Vec<&ScsiBus> = self.io.scsi.iter().map(|c| c.bus()).collect();
         ScsiBus::sync_chd_disks(&buses, only, progress, cancel)
-    }
-    fn net_frames(&self) -> Option<Arc<AtomicU64>> {
-        self.io.net.as_ref().and_then(|n| n.frames())
-    }
-    fn nat_control(&self) -> Option<Arc<NatControl>> {
-        self.io.net.as_ref().map(|n| n.nat())
-    }
-    fn nat_expected(&self) -> Option<(Ipv4Addr, Ipv4Addr, Ipv4Addr)> {
-        self.io.net.as_ref().map(|n| n.addrs())
     }
 }
 
