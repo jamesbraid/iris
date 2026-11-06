@@ -1,6 +1,6 @@
 # Boot chimes of the Indy and Indigo2 PROMs, and how to check them
 
-**Keywords:** boot chime,startup tune,hal2,hpc3,pbus,adpcm,karplus-strong,ip22,ip24,ip28,IRIS_HAL2_AUDIO_DUMP,070-1367-012,070-9101-011,070-1477-002
+**Keywords:** fuel,tezro,ip34,ip53,ip35,no chime,boot chime,startup tune,hal2,hpc3,pbus,adpcm,karplus-strong,ip22,ip24,ip28,IRIS_HAL2_AUDIO_DUMP,070-1367-012,070-9101-011,070-1477-002
 
 The Indy and Indigo2 chimes are not samples iris carries. The PROM builds the
 tune in RAM with its own code and starts HAL2 playing it through an HPC3 PBUS
@@ -69,3 +69,51 @@ synthesized tunes, a plain IMA-style decoder for the Indy), sample for sample:
 0 of 85000 differ on the IP22, 0 of 85000 on the IP28, 0 of 92150 on the Indy.
 The comparison covers the CPU and FPU through HPC3 PBUS DMA and HAL2's
 rate and DMA handling; it does not cover the host audio device or resampler.
+
+## Fuel (IP34) and Tezro (IP53): no power-on tune (2026-11-05)
+
+Both machines run the same IP35 PROM 6.210 payload (`ip35prom.payload.bin`,
+sha256 554924380189a03a512156af2faa38344902f251b49fd5c80c253c23ecaff27b,
+matches the project asset manifest). Conclusion: this PROM plays nothing at
+power-on, so there is nothing for iris to reproduce. What that rests on:
+
+- Hardware. SGI's Tezro hardware user's guides (007-4564-001, 007-4643-003)
+  put the audio jacks on the I/O daughtercard, an extension of the IO9 board,
+  and show the audio option on a PCI bus. The Fuel hardware guide (007-4480-001)
+  lists no audio jacks; the Fuel gets sound from a separate USB converter
+  (007-4530-001). Both guides list the PROM power-on diagnostics, in order:
+  CPU, Bedrock, PROM, DIMMs, secondary cache, PCI bridge (Fuel: Xbridge; Tezro:
+  PIC), PCI slots, serial, SCSI, (Fuel: keyboard and mouse), VPro. Neither
+  names an audio test, a tone or a beep. The only audible item either guide
+  mentions is the "beeping keyboard" peripheral, which the keyboard makes
+  itself. The Fuel claim of "no jacks" rests on a text search of the guide, not
+  a read of the rear-panel figure.
+- Strings. The PROM payload is a processor PROM followed by a gzip member at
+  0x8bbb0 that unpacks to the 1468990-byte base I/O PROM (byte-identical to
+  `io7prom.bin`). Neither holds a string about a chime, tone, beep, volume,
+  sample, mixer or codec. "audio" appears only in the hardware-graph device
+  type list (0x1012e0 in the unpacked image), "sgirad" beside it, "HAL2" and
+  "Iris Audio Processor" in the shared inventory-print table (0x119050), and
+  SGI_RAD / PSITECH_RAD1 in the processor PROM's table of PCI device names for
+  its configuration-space diagnostic (0x84b38, 0x84b80). Those are labels, not
+  playback code. This is string evidence only; I did not read the code.
+- Runs. Headless iris (tezro-mp build), Fuel profile with 256+256 MiB and
+  Tezro profile with one CPU, no real disk. The Fuel PROM prints the keyboard
+  and mouse, graphics and SCSI diagnostics, the summary "ALL DIAGS PASSED" and
+  "Starting up the system"; the Tezro PROM reaches the System Maintenance Menu.
+  No sound-related line appears in either console log.
+
+iris models no audio device for either machine: `no_audio = true` in
+`fuel.toml.example` and `tezro.toml.example` only turns off the host sound
+output; neither machine file instantiates HAL2 or any PCI audio function. So a
+guest or PROM that did talk to audio hardware would hit an empty slot.
+
+What is not established: whether the Tezro audio daughtercard's chips (the
+guide does not name them) are visible to the PROM, and whether a later PROM
+revision beeps. The Tezro run also logged 19 bus errors on uncached 32-bit
+reads at PA 0x020000000f0xxxxx to 0x...f8xxxxx after the menu appeared (PC
+0xbfc47e58 in the PROM window); I did not identify what the PROM was probing,
+and the pattern (4 KiB steps) looks like a memory-size or DIMM walk, not audio.
+A real Fuel or Tezro would settle the question of an audible chime at power-on:
+a user's report that a unit is silent at power-on, or a recording of one that
+is not, is the evidence that would change this.
