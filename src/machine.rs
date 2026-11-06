@@ -38,7 +38,8 @@ use crate::dev::ng1::rex3::Rex3;
 use crate::snapshot::{Snapshot, Manifest, SCHEMA_VERSION, ChunksManifest, DiskRef, enabled_features};
 use crate::chunk_store::{ChunkStore, get_chunks_as_words, put_words_as_chunks};
 use crate::hptimer::TimerManager;
-use crate::workstation::{MachineRef, MachineSlot, SystemController, Workstation};
+use crate::control::Control;
+use crate::workstation::{MachineSlot, SystemController, Workstation};
 
 /// The profile of the machine this process is running, set by
 /// [`crate::workstation::build`] so [`emulator_name`] can pick a model word
@@ -113,9 +114,6 @@ pub struct Machine {
     mc: MemoryController,
     hpc3: Hpc3,
     monitor: Arc<Monitor>,
-    /// Sender for async machine events (HardReset, PowerOff) from devices.
-    pub event_tx: mpsc::SyncSender<MachineEvent>,
-    event_rx: Option<mpsc::Receiver<MachineEvent>>,
     timer_manager: Arc<TimerManager>,
     /// When `cfg.ci` is set, the channel-A backend is replaced by this
     /// in-process one so the CI control socket can drive the console.
@@ -149,18 +147,9 @@ pub struct Machine {
     newport_active: bool,
     /// Indigo2 IP22 fullhouse layout (`!guinness`).
     fullhouse: bool,
-    /// Pointer slot shared by every holder of a raw `*mut Machine` — the
-    /// monitor's `SystemController`, the `machine-events` thread and the CI
-    /// server. Created on first use by `machine_slot` and nulled in `Drop`, so
-    /// a handle that outlives this Machine sees "machine is not running"
-    /// instead of freed memory.
-    controller_slot: Option<MachineSlot>,
-    controller_registered: bool,
-    /// Where the machine is in its start/stop lifecycle. Never `Running`:
-    /// `status` derives that from the CPU's own running flag, so an
-    /// execution-control command cannot leave it stale. See
-    /// [`crate::machine_state`].
-    lifecycle: GuestState,
+    /// Lifecycle state, machine events and the pointer slot the front ends
+    /// share.
+    pub(crate) control: Control,
 }
 
 /// In-memory snapshot of the just-restored guest state. Populated at the end
@@ -934,11 +923,11 @@ impl Machine {
             unsafe { (*monitor_ptr).register_device(Arc::new(LockMonitor)); }
         }
 
-        let (event_tx, event_rx) = mpsc::sync_channel::<MachineEvent>(4);
+        let control = Control::new();
 
         // Give MC and IOC async event senders so they can request hard-reset / power-off.
-        mc.set_event_sender(event_tx.clone());
-        ioc.set_event_sender(event_tx.clone());
+        mc.set_event_sender(control.sender());
+        ioc.set_event_sender(control.sender());
 
         crate::thread_affinity::init(perf);
 
@@ -948,8 +937,6 @@ impl Machine {
             mc,
             hpc3,
             monitor,
-            event_tx,
-            event_rx: Some(event_rx),
             timer_manager,
             ci_serial,
             serial_log,
@@ -961,9 +948,7 @@ impl Machine {
             display_resolution,
             newport_active,
             fullhouse: !guinness,
-            controller_slot: None,
-            controller_registered: false,
-            lifecycle: GuestState::Idle,
+            control,
         }
     }
 
@@ -1003,9 +988,7 @@ impl Machine {
         // readiness can tell "not started" (Idle) from "startup under way".
         // Halted -> Starting covers the GUI's Stop then Start; a stored
         // Running state is impossible (status derives it from the CPU).
-        if let Ok(starting) = self.lifecycle.transition(GuestState::Starting) {
-            self.lifecycle = starting;
-        }
+        self.control.started();
         // Start peripherals
         self.mc.start();
         self.hpc3.start();
@@ -1037,10 +1020,7 @@ impl Machine {
     /// `main`'s stack) — the slot records this address.
     pub(crate) fn machine_slot(&mut self) -> MachineSlot {
         let ptr = self as *mut Machine as *mut dyn Workstation;
-        let slot = self.controller_slot
-            .get_or_insert_with(|| Arc::new(Mutex::new(MachineRef(ptr))));
-        debug_assert!(std::ptr::addr_eq(slot.lock().0, ptr), "Machine moved after its slot was handed out");
-        slot.clone()
+        self.control.slot(ptr)
     }
 
     /// Register a SystemController with the monitor so that `reset`, `save`,
@@ -1051,10 +1031,8 @@ impl Machine {
         // The controller and the event thread reach this Machine through the
         // shared slot, which `Drop` nulls: iris-gui drops a Machine on Stop
         // while the monitor thread (and a connected client) lives on.
-        assert!(!self.controller_registered, "register_system_controller called twice");
-        self.controller_registered = true;
-        let slot = self.machine_slot();
-        crate::workstation::register_system_controller(&self.monitor, slot, self.event_rx.take());
+        let ptr = self as *mut Machine as *mut dyn Workstation;
+        self.control.register(ptr, &self.monitor);
     }
 
     pub fn stop(&mut self) {
@@ -1071,9 +1049,7 @@ impl Machine {
         if let Some(gr2) = &self.board.gr2 { gr2.stop(); }
         // Idle -> Halted is not a lifecycle transition: a machine that was
         // never started has nothing to halt, and the monitor is not up to ask.
-        if self.lifecycle != GuestState::Idle {
-            self.lifecycle = GuestState::Halted;
-        }
+        self.control.stopped();
         // A graceful stop must not lose the final partial line.
         if let Some(log) = &self.serial_log { log.flush(); }
     }
@@ -2061,9 +2037,7 @@ impl Drop for Machine {
         // in-flight monitor/event/CI command to finish, so none of them can see
         // a half-destroyed Machine. No controller command drops the Machine, so
         // this never waits on a lock its own thread holds.
-        if let Some(slot) = self.controller_slot.take() {
-            slot.lock().0 = MachineRef::null();
-        }
+        self.control.release();
         // The guest clock points into this Machine's CPU core.
         #[cfg(feature = "perfetto")]
         crate::perfetto::set_guest_cycles(None);
@@ -2097,8 +2071,8 @@ impl Workstation for Machine {
     fn machine_slot(&mut self) -> MachineSlot { Machine::machine_slot(self) }
     fn register_system_controller(&mut self) { Machine::register_system_controller(self) }
     fn monitor_addr(&self) -> Option<std::net::SocketAddr> { Machine::monitor_addr(self) }
-    fn lifecycle(&self) -> GuestState { self.lifecycle }
-    fn set_lifecycle(&mut self, state: GuestState) { self.lifecycle = state; }
+    fn lifecycle(&self) -> GuestState { self.control.state() }
+    fn set_lifecycle(&mut self, state: GuestState) { self.control.set_state(state) }
 
     fn get_display(&self) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> { Machine::get_display(self) }
     fn get_display_head1(&self) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> { Machine::get_display_head1(self) }
@@ -2306,7 +2280,7 @@ mod controller_lifetime_tests {
         // The handler would otherwise exit this test process.
         std::env::set_var("IRIS_NO_EXIT_ON_POWEROFF", "1");
         machine.register_system_controller();
-        machine.event_tx.send(crate::traits::MachineEvent::PowerOff).unwrap();
+        machine.control.sender().send(crate::traits::MachineEvent::PowerOff).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while counted() != Some(2) && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(20));
