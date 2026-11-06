@@ -7,6 +7,7 @@
 //! the GIO slots, the MC, HPC3 and the PROM, and the MC's error reporting for
 //! everything else.
 
+use crate::config::RamLayout;
 use std::sync::{Arc, Mutex};
 
 use crate::memory_map::{MemKind, MemRange, MemoryMap};
@@ -117,21 +118,19 @@ const PROM_END: u32  = 0x1FD00000;
 const ALIAS_BASE: u32   = 0x00000000;
 const ALIAS_END: u32    = 0x00080000;
 
-/// Where an IP28 can have RAM: from himem, up to four 512 MB banks.
-const IP28_RAM_END: u32 = 0xA000_0000;
-
 /// Where the MC can answer with memory on an Indy, an Indigo2 or an IP28.
-pub fn memory_map(ip28: bool) -> MemoryMap {
+pub fn memory_map(ram: &RamLayout) -> MemoryMap {
     let range = |name, kind, base: u32, end: u32| MemRange::new(name, kind, base as u64, end as u64);
     let mut ranges = vec![
         range("low alias", MemKind::Alias, ALIAS_BASE, ALIAS_END),
         range("prom", MemKind::Rom, PROM_BASE, PROM_END),
     ];
-    if ip28 {
-        ranges.push(range("ram", MemKind::Ram, HIMEM_BASE, IP28_RAM_END));
-    } else {
-        ranges.push(range("lomem", MemKind::Ram, LOMEM_BASE, LOMEM_END));
-        ranges.push(range("himem", MemKind::Ram, HIMEM_BASE, HIMEM_END));
+    match *ram {
+        RamLayout::HimemOnly { end } => ranges.push(range("ram", MemKind::Ram, HIMEM_BASE, end)),
+        RamLayout::Split => {
+            ranges.push(range("lomem", MemKind::Ram, LOMEM_BASE, LOMEM_END));
+            ranges.push(range("himem", MemKind::Ram, HIMEM_BASE, HIMEM_END));
+        }
     }
     MemoryMap::new(ranges)
 }
@@ -149,8 +148,11 @@ pub fn memory_map(ip28: bool) -> MemoryMap {
 /// were being discarded and sash then dereferenced the null it read back.
 ///
 /// Taken from the machine profile, never from the environment.
-fn alias_offset_for(ip28: bool) -> u32 {
-    if ip28 { HIMEM_BASE } else { LOMEM_BASE }
+fn alias_offset_for(ram: &RamLayout) -> u32 {
+    match ram {
+        RamLayout::HimemOnly { .. } => HIMEM_BASE,
+        RamLayout::Split => LOMEM_BASE,
+    }
 }
 
 
@@ -292,8 +294,8 @@ pub struct Ip22Bus {
     pub vino: Vino,
     /// Where the 512 KB alias at physical 0 points — see `alias_offset_for`.
     alias_offset: u32,
-    /// This machine is an IP28. Only used to label the bank-map trace.
-    is_ip28: bool,
+    /// Where RAM sits. The IP28's only labels the bank-map trace.
+    ram: RamLayout,
     /// Remaps run on the CPU thread (a MEMCFG store); the lock only makes
     /// that contract checkable.
     remap: Mutex<RemapState>,
@@ -318,7 +320,7 @@ pub struct Ip22Devices {
 impl Ip22Bus {
     /// Map `d` on `phys` where the MC decodes it. RAM is not placed here:
     /// MEMCFG0/1 control that, through [`Self::remap_banks`].
-    pub fn new(phys: Arc<Physical>, d: Ip22Devices, ip28: bool) -> Self {
+    pub fn new(phys: Arc<Physical>, d: Ip22Devices, ram: RamLayout) -> Self {
         let set = |base: u32, end: u32, dev: Arc<dyn BusDevice>, name: &str| {
             phys.map(base as u64, end as u64, dev, name);
         };
@@ -412,7 +414,7 @@ impl Ip22Bus {
         // Alias: re-dispatches into the bus with `alias_offset` added, so it
         // reaches whichever bank is mapped at the base of memory and tracks
         // whatever MEMCFG maps there.
-        let alias_offset = alias_offset_for(ip28);
+        let alias_offset = alias_offset_for(&ram);
         phys.map_alias(ALIAS_BASE as u64, ALIAS_END as u64, alias_offset, "low-memory alias");
 
         // VINO GIO alias: 0x1F080000 → 0x00080000
@@ -436,7 +438,7 @@ impl Ip22Bus {
             virtio: d.virtio.map(|(v, _)| v),
             vino: d.vino,
             alias_offset,
-            is_ip28: ip28,
+            ram,
             remap: Mutex::new(RemapState::default()),
         }
     }
@@ -493,7 +495,7 @@ impl Ip22Bus {
                 continue;
             };
 
-            if self.is_ip28 {
+            if matches!(self.ram, RamLayout::HimemOnly { .. }) {
                 eprintln!("iris: IP28 experiment: bank {bank_idx} -> base {conf_base:#010x} mask {addr_mask:#010x} limit {limit:#010x}");
             }
             dlog_dev!(LogModule::Mc, "[MEMCFG] bank {} mapped at 0x{:08x}..0x{:08x} addr_mask={:08x} limit={:08x} ({}MB visible, {}MB per rank)",
@@ -639,7 +641,7 @@ mod ppmem_tests {
         use crate::dev::eeprom_93c56::Eeprom93c56;
         use parking_lot::Mutex;
         let mc = MemoryController::new_for_profile(
-            Arc::new(Mutex::new(Eeprom93c56::new())), false, [512, 512, 0, 0], true,
+            Arc::new(Mutex::new(Eeprom93c56::new())), false, [512, 512, 0, 0], 5,
         );
         let addrs = mc.parse_memcfg(0x7f20_7f40, 0);
         let banks = [RamBank::new(512), RamBank::new(512), RamBank::new(1), RamBank::new(1)];
@@ -681,7 +683,7 @@ mod ppmem_tests {
         use parking_lot::Mutex;
         const MB: u32 = 1 << 20;
         let mc = MemoryController::new_for_profile(
-            Arc::new(Mutex::new(Eeprom93c56::new())), false, [128, 128, 0, 0], true,
+            Arc::new(Mutex::new(Eeprom93c56::new())), false, [128, 128, 0, 0], 5,
         );
         let phys = Physical::new(vec![RamBank::new(128), RamBank::new(128), RamBank::new(1), RamBank::new(1)]);
         let mut outside = Vec::new();

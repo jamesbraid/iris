@@ -82,11 +82,12 @@ pub struct MemoryController {
     threads: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
     running: Arc<AtomicBool>,
     guinness: bool,
-    /// How far MEMCFG's base field is shifted to give a physical address:
-    /// 22 on IP22/IP24, 24 on IP28. The size field counts per-subbank units of
-    /// `1 << base_shift` bytes, so the granule follows it too — 4 MB against
-    /// 16 MB. Set from the machine profile, never from the environment.
-    base_shift: u32,
+    /// The chip revision, 3 (rev C) or 5 (rev D): it sets SYSID and how far
+    /// MEMCFG's base field is shifted to give a physical address (22 on IP22
+    /// and IP24, 24 on IP28; the size field counts per-subbank units of the
+    /// same size, 4 MB against 16 MB). Set from the machine profile, never
+    /// from the environment, and kept so a reset puts SYSID back.
+    mc_rev: u32,
     /// Actual SIMM sizes in MB for each bank (index 0..3). Used by parse_memcfg to
     /// derive addr_mask (for aliasing) and limit (for device_map range).
     ram_sizes: Arc<[u32; 4]>,
@@ -110,21 +111,23 @@ pub struct MemoryController {
 }
 
 impl MemoryController {
-    /// An IP22/IP24 memory controller.
+    /// An IP22/IP24 memory controller, chip revision C.
     pub fn new(eeprom: Arc<Mutex<Eeprom93c56>>, guinness: bool, ram_sizes: [u32; 4]) -> Self {
-        Self::new_for_profile(eeprom, guinness, ram_sizes, false)
+        Self::new_for_profile(eeprom, guinness, ram_sizes, 3)
     }
 
-    /// `ip28` selects the IP28 decodes: a 24-bit MEMCFG base shift and an MC
-    /// chip revision the IP28 PROM accepts.
+    /// A memory controller of chip revision `mc_rev`: 3 (rev C, the IP22 and
+    /// IP24) or 5 (rev D, the IP28). The revision sets the MEMCFG base shift,
+    /// 22 or 24 (the IP28 PROM's memory sits above the IP22's windows), and
+    /// the SYSID the PROM checks.
     pub fn new_for_profile(
         eeprom: Arc<Mutex<Eeprom93c56>>,
         guinness: bool,
         ram_sizes: [u32; 4],
-        ip28: bool,
+        mc_rev: u32,
     ) -> Self {
-        let base_shift = if ip28 { 24 } else { 22 };
-        let regs = Self::init_registers_for(guinness, base_shift);
+        debug_assert!(matches!(mc_rev, 3 | 5), "no MC revision {mc_rev}");
+        let regs = Self::init_registers_for(guinness, mc_rev);
         let host_freq = crate::platform::get_host_tick_frequency();
         let last_host_ticks = crate::platform::get_host_ticks();
 
@@ -147,7 +150,7 @@ impl MemoryController {
             threads: Arc::new(Mutex::new(Vec::new())),
             running: Arc::new(AtomicBool::new(false)),
             guinness,
-            base_shift,
+            mc_rev,
             ram_sizes: Arc::new(ram_sizes),
             memcfg_callback: Arc::new(OnceLock::new()),
             event_tx: Arc::new(OnceLock::new()),
@@ -158,11 +161,7 @@ impl MemoryController {
         }
     }
 
-    fn init_registers(guinness: bool) -> Vec<u32> {
-        Self::init_registers_for(guinness, 22)
-    }
-
-    fn init_registers_for(guinness: bool, base_shift: u32) -> Vec<u32> {
+    fn init_registers_for(guinness: bool, mc_rev: u32) -> Vec<u32> {
         let mut regs = vec![0; (MC_SIZE / 4) as usize];
 
         // Initialize CPUCTRL0: REFS=2, RFE=1, MUX_HWM=1
@@ -192,13 +191,9 @@ impl MemoryController {
         // IP28 uses. Report 5 there; every other machine keeps the rev C (3)
         // it has always seen. Bit 4 stays set in both — that is the EISA /
         // vino gate, not part of the revision.
-        regs[(REG_SYSID / 4) as usize] = if base_shift == 22 {
-            0x00000013
-        } else {
-            // IP28's chip revision lives in the low nibble; 5 is the lowest
-            // the PROM accepts.
-            0x00000015
-        };
+        // The chip revision lives in the low nibble; 5 is the lowest the IP28
+        // PROM accepts.
+        regs[(REG_SYSID / 4) as usize] = 0x10 | mc_rev;
 
         // Initialize RPSS_DIVIDER: DIV=9, INC=3 (for 33MHz)
         // 33MHz: Divide by 10 (9+1), Increment by 3 -> 300ns per tick
@@ -302,9 +297,9 @@ impl MemoryController {
     ///
     /// Env-gated while IP28 has no machine profile of its own. It must not
     /// change IP22/IP24, which this default preserves.
-    /// This controller's MEMCFG base shift. See the `base_shift` field.
+    /// This controller's MEMCFG base shift. See the `mc_rev` field.
     fn memcfg_base_shift(&self) -> u32 {
-        self.base_shift
+        if self.mc_rev == 5 { 24 } else { 22 }
     }
 
     /// A bank's installed size in MB → `(size_field, rank)` in register format.
@@ -425,7 +420,7 @@ impl MemoryController {
             return false;
         }
         let half = |i: usize, base: u32| {
-            Self::encode_memcfg_half_at(self.base_shift, base, self.ram_sizes[i]).unwrap_or(0) as u32
+            Self::encode_memcfg_half_at(self.memcfg_base_shift(), base, self.ram_sizes[i]).unwrap_or(0) as u32
         };
         let memcfg0 = (half(0, LOMEM_BASE) << 16) | half(1, LOMEM_BASE + BANK_SIZE);
         if memcfg0 == 0 {
@@ -443,7 +438,7 @@ impl MemoryController {
             (memcfg1 >> 16) as u16,    // bank 2: high half of MEMCFG1
             (memcfg1 & 0xFFFF) as u16, // bank 3: low  half of MEMCFG1
         ];
-        std::array::from_fn(|i| Self::memcfg_bank_info_at(self.base_shift, halves[i], self.ram_sizes[i]))
+        std::array::from_fn(|i| Self::memcfg_bank_info_at(self.memcfg_base_shift(), halves[i], self.ram_sizes[i]))
     }
 
     /// If the embedded PROM POSTed lomem (banks 0–1) but skipped himem, synthesize
@@ -459,7 +454,7 @@ impl MemoryController {
         // 256 MB apiece — bank 2 on top of bank 0 — and the PROM then never
         // converged. HIMEM_BASE and BANK_SIZE are lomem/himem constants that
         // mean nothing on a machine whose RAM starts at 0x20000000 anyway.
-        if self.base_shift != 22 {
+        if self.memcfg_base_shift() != 22 {
             return false;
         }
 
@@ -477,14 +472,14 @@ impl MemoryController {
         let mut changed = false;
 
         if self.ram_sizes[2] > 0 && (h2 >> 13) & 1 == 0 {
-            if let Some(enc) = Self::encode_memcfg_half_at(self.base_shift, HIMEM_BASE, self.ram_sizes[2]) {
+            if let Some(enc) = Self::encode_memcfg_half_at(self.memcfg_base_shift(), HIMEM_BASE, self.ram_sizes[2]) {
                 h2 = enc;
                 changed = true;
             }
         }
         if self.ram_sizes[3] > 0 && (h3 >> 13) & 1 == 0 {
             if let Some(enc) =
-                Self::encode_memcfg_half_at(self.base_shift, HIMEM_BASE + BANK_SIZE, self.ram_sizes[3])
+                Self::encode_memcfg_half_at(self.memcfg_base_shift(), HIMEM_BASE + BANK_SIZE, self.ram_sizes[3])
             {
                 h3 = enc;
                 changed = true;
@@ -827,7 +822,7 @@ impl BusDevice for MemoryController {
                 BUS_OK
             }
             REG_MEMCFG0 => {
-                if self.base_shift != 22 {
+                if self.memcfg_base_shift() != 22 {
                     eprintln!("iris: ip28: guest writes MEMCFG0 = {val:#010x}");
                 }
                 dlog_dev!(LogModule::Mc, "MC: Write MEMCFG0 = {:08x}", val);
@@ -836,7 +831,7 @@ impl BusDevice for MemoryController {
                 BUS_OK
             }
             REG_MEMCFG1 => {
-                if self.base_shift != 22 {
+                if self.memcfg_base_shift() != 22 {
                     eprintln!("iris: ip28: guest writes MEMCFG1 = {val:#010x}");
                 }
                 dlog_dev!(LogModule::Mc, "MC: Write MEMCFG1 = {:08x}", val);
@@ -1291,7 +1286,7 @@ impl Device for MemoryController {
 impl Resettable for MemoryController {
     fn power_on(&self) {
         let mut state = self.state.lock();
-        state.regs = Self::init_registers(self.guinness);
+        state.regs = Self::init_registers_for(self.guinness, self.mc_rev);
         state.sys_semaphore = false;
         state.user_semaphores = [false; 16];
         state.cpu_cycle_acc = 0;
@@ -1392,6 +1387,22 @@ mod tests {
         assert_eq!(sysid, 0x0000_0013, "Indigo2-class (fullhouse) SYSID — Rev C on both profiles, see MAME mc.cpp");
         let gio_arb = fullhouse.read32((MC_BASE + REG_GIO64_ARB) as u64).data;
         assert_eq!(gio_arb & 0x400, 0, "fullhouse dual GIO — ONE_GIO clear");
+    }
+
+    /// The revision sets the SYSID and the MEMCFG base shift together, so the
+    /// two cannot disagree.
+    #[test]
+    fn mc_derives_shift_and_sysid_from_the_revision() {
+        let eeprom = Arc::new(Mutex::new(Eeprom93c56::new()));
+        for (rev, sysid, shift) in [(3u32, 0x13u32, 22u32), (5, 0x15, 24)] {
+            let mc = MemoryController::new_for_profile(eeprom.clone(), false, [0u32; 4], rev);
+            assert_eq!(mc.read32((MC_BASE + REG_SYSID) as u64).data, sysid, "rev {rev} SYSID");
+            assert_eq!(mc.memcfg_base_shift(), shift, "rev {rev} base shift");
+            // A reset puts the same revision back.
+            mc.write32((MC_BASE + REG_SYSID) as u64, 0);
+            mc.power_on();
+            assert_eq!(mc.read32((MC_BASE + REG_SYSID) as u64).data, sysid, "rev {rev} SYSID after a reset");
+        }
     }
 
     #[test]
@@ -1555,7 +1566,7 @@ mod tests {
     fn ip28_512_mb_banks_probe_and_decode() {
         use crate::ppmem::PpMemory;
         let mc = MemoryController::new_for_profile(
-            Arc::new(Mutex::new(Eeprom93c56::new())), false, [512, 512, 0, 0], true,
+            Arc::new(Mutex::new(Eeprom93c56::new())), false, [512, 512, 0, 0], 5,
         );
         // Real POST probes 0x3f20, then 0x7f20. With BNK clear,
         // the second subbank aliases the first; setting BNK exposes both.
@@ -1597,7 +1608,7 @@ mod tests {
         assert_eq!(MemoryController::encode_memcfg_half_at(24, 0x2800_0000, 128), Some(0x6728));
         assert_eq!(MemoryController::encode_memcfg_half_at(24, 0x2000_0000, 32), Some(0x6120));
         let mc = MemoryController::new_for_profile(
-            Arc::new(Mutex::new(Eeprom93c56::new())), false, [128, 128, 0, 0], true,
+            Arc::new(Mutex::new(Eeprom93c56::new())), false, [128, 128, 0, 0], 5,
         );
         // BNK clear: only the first subbank answers, every 64 MB.
         let (base, mask, limit, span) = mc.parse_memcfg(0x3f20_0000, 0)[0].unwrap();
