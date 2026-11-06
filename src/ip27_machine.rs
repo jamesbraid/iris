@@ -37,6 +37,7 @@
 //! jamesbraid/qemu-sgi-origami.
 
 use crate::config::{MachineConfig, MachineProfile};
+use crate::control::Control;
 use crate::cpu::parts::{self, Part};
 use crate::cpu::mips_cache_v2::MipsCache;
 use crate::cpu::mips_exec::{CpuDevice, MipsCpu, MipsCpuConfig, MipsExecutor};
@@ -62,6 +63,7 @@ use crate::dev::w1::sgi::{board_record_part, BoardRecord};
 use crate::devlog::{init_devlog, LogModule};
 use crate::gdb_stub::CpuDebug;
 use crate::gfx_display::GfxDisplay;
+use crate::guest_net::GuestNet;
 use crate::hptimer::{TimerId, TimerManager, TimerReturn};
 use crate::ip27::{self, Ip27Bus, NodeMemory};
 use crate::irq::InterruptController;
@@ -71,11 +73,11 @@ use crate::net::{GatewayConfig, Link, NatControl};
 use crate::scsi::ScsiBus;
 use crate::traits::{BusDevice, Device, MachineEvent, Resettable, Signal, BUS_ERR};
 use crate::xtalk::{Upstream, XtalkHost};
-use crate::workstation::{register_system_controller, DiscChanger, MachineRef, MachineSlot, Workstation};
+use crate::workstation::{DiscChanger, Workstation};
 use parking_lot::Mutex;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::SyncSender;
 use std::sync::{atomic::AtomicU64, Arc, Weak};
 
 /// The PROM image tried when `prom` is left at the shared default.
@@ -216,7 +218,7 @@ pub struct BoardIo {
     pub console: Option<Arc<CiSerialBackend>>,
     /// The `scratch = true` volume.
     pub scratch: Option<PathBuf>,
-    pub nat: Option<Nat>,
+    pub nat: Option<GuestNet>,
     /// The module controller the nodes' I2C controllers reach.
     pub controller: Arc<dyn ModuleController>,
     /// Put the board's devices back to power-on.
@@ -224,13 +226,6 @@ pub struct BoardIo {
     /// The Bridge, for a test to drive.
     #[cfg(test)]
     pub bridge: Arc<Bridge>,
-}
-
-/// The Ethernet's NAT gateway, as the front ends read it.
-pub struct Nat {
-    pub control: Arc<NatControl>,
-    pub expected: (Ipv4Addr, Ipv4Addr, Ipv4Addr),
-    pub frames: Arc<AtomicU64>,
 }
 
 /// A product. Only wiring differs in behaviour between SN0 boards; everything
@@ -255,15 +250,12 @@ pub struct Ip27Machine<B: Ip27Board> {
     io: BoardIo,
     _board: std::marker::PhantomData<fn() -> B>,
     units: Vec<Unit>,
-    controller_events: Sender<MachineEvent>,
     /// The recurring timer that brings the controller up to date.
     controller_timer: Option<TimerId>,
     monitor: Arc<Monitor>,
     ci: bool,
     nvram: String,
-    events: Option<Receiver<MachineEvent>>,
-    slot: Option<MachineSlot>,
-    lifecycle: GuestState,
+    control: Control,
 }
 
 /// The CPU's three Hub lines are hardware interrupts 0 to 2, Cause IP2 to IP4.
@@ -282,7 +274,7 @@ impl InterruptController for CpuIrq {
 struct Hooks {
     name: &'static str,
     cpu: Weak<dyn CpuDevice>,
-    events: Sender<MachineEvent>,
+    events: SyncSender<MachineEvent>,
     /// Where a cached reference naming node zero goes, as the node's number
     /// and cached alias set it.
     zero: Arc<ip27::NodeZero>,
@@ -314,17 +306,17 @@ impl HubHooks for Hooks {
         self.route(number);
     }
     fn machine_restart(&self) {
-        let _ = self.events.send(MachineEvent::HardReset);
+        let _ = self.events.try_send(MachineEvent::HardReset);
     }
 }
 
 /// What the module controller's outputs ask of the machine: its power output
 /// falling is the module losing power, rising or a reset pulse a restart.
 /// The NMI output has no path to the processor yet and is only logged.
-fn controller_output(event: ElscEvent, machine: &Sender<MachineEvent>) {
+fn controller_output(event: ElscEvent, machine: &SyncSender<MachineEvent>) {
     let _ = match event {
-        ElscEvent::Power(false) => machine.send(MachineEvent::PowerOff),
-        ElscEvent::Power(true) | ElscEvent::Reset => machine.send(MachineEvent::HardReset),
+        ElscEvent::Power(false) => machine.try_send(MachineEvent::PowerOff),
+        ElscEvent::Power(true) | ElscEvent::Reset => machine.try_send(MachineEvent::HardReset),
         ElscEvent::Nmi(level) => {
             crate::dlog!(LogModule::Hub, "IP27: module controller NMI {level} (not delivered)");
             Ok(())
@@ -402,7 +394,8 @@ impl<B: Ip27Board> Ip27Machine<B> {
         let nodes: Vec<&Node> = parts.iter().collect();
         let io = B::wire(&nodes, cfg)?;
 
-        let (tx, rx) = channel();
+        let control = Control::new();
+        let tx = control.sender();
         let mut units = Vec::new();
         for (node, spec) in parts.into_iter().zip(&specs) {
             let cpu = Self::build_cpu(cfg, &spec.module, &node, spec.hub.cpu_base, specs.len() > 1)?;
@@ -443,14 +436,11 @@ impl<B: Ip27Board> Ip27Machine<B> {
             io,
             _board: std::marker::PhantomData,
             units,
-            controller_events: tx,
             controller_timer: None,
             monitor: Arc::new(monitor),
             ci: cfg.ci,
             nvram: cfg.nvram.clone(),
-            events: Some(rx),
-            slot: None,
-            lifecycle: GuestState::Idle,
+            control,
         })
     }
 
@@ -537,7 +527,7 @@ impl<B: Ip27Board> Ip27Machine<B> {
     /// recurring timer brings it up to date. Nothing runs per instruction.
     fn start_controller_timer(&mut self) {
         self.stop_controller_timer();
-        let (controller, events) = (self.io.controller.clone(), self.controller_events.clone());
+        let (controller, events) = (self.io.controller.clone(), self.control.sender());
         let id = self.units[0].node.timers.add_recurring(
             std::time::Instant::now() + CONTROLLER_PERIOD,
             CONTROLLER_PERIOD,
@@ -589,7 +579,7 @@ impl<B: Ip27Board> Ip27Machine<B> {
 
 impl<B: Ip27Board> Workstation for Ip27Machine<B> {
     fn start(&mut self) {
-        self.lifecycle = GuestState::Starting;
+        self.control.set_state(GuestState::Starting);
         self.monitor.serve();
         self.restart_peripherals();
         if !self.ci {
@@ -610,9 +600,7 @@ impl<B: Ip27Board> Workstation for Ip27Machine<B> {
         if let Err(e) = self.io.timekeeper.flush_nvram() {
             crate::dlog!(LogModule::Hub, "{} NVRAM: {e}", B::NAME);
         }
-        if self.lifecycle != GuestState::Idle {
-            self.lifecycle = GuestState::Halted;
-        }
+        self.control.stopped();
     }
     fn reset(&mut self) {
         self.stop();
@@ -644,29 +632,23 @@ impl<B: Ip27Board> Workstation for Ip27Machine<B> {
     fn cpu_is_running(&self) -> bool {
         self.units[0].cpu.clone().as_device().is_running()
     }
-    fn machine_slot(&mut self) -> MachineSlot {
-        let ptr = self as *mut Self as *mut dyn Workstation;
-        self.slot.get_or_insert_with(|| Arc::new(Mutex::new(MachineRef(ptr)))).clone()
+    fn control(&self) -> &Control {
+        &self.control
     }
-    fn register_system_controller(&mut self) {
-        let slot = self.machine_slot();
-        let events = self.events.take().expect("system controller registered twice");
-        register_system_controller(&self.monitor, slot, Some(events));
+    fn control_mut(&mut self) -> &mut Control {
+        &mut self.control
     }
-    fn monitor_addr(&self) -> Option<SocketAddr> {
-        self.monitor.bound_addr()
+    fn net(&self) -> Option<&GuestNet> {
+        self.io.nat.as_ref()
     }
-    fn lifecycle(&self) -> GuestState {
-        self.lifecycle
+    fn monitor(&self) -> &Arc<Monitor> {
+        &self.monitor
     }
-    fn set_lifecycle(&mut self, state: GuestState) {
-        self.lifecycle = state;
+    fn as_ws_ptr(&mut self) -> *mut dyn Workstation {
+        self as *mut Self as *mut dyn Workstation
     }
     fn get_display(&self) -> Option<Arc<dyn GfxDisplay>> {
         None
-    }
-    fn register_monitor_device(&self, device: Arc<dyn Device>) {
-        self.monitor.register_device(device);
     }
     fn get_ps2(&self) -> Arc<Ps2Controller> {
         self.io.ps2.clone()
@@ -719,22 +701,11 @@ impl<B: Ip27Board> Workstation for Ip27Machine<B> {
         let buses: Vec<&ScsiBus> = self.io.scsi.iter().map(|c| c.bus()).collect();
         ScsiBus::sync_chd_disks(&buses, only, progress, cancel)
     }
-    fn net_frames(&self) -> Option<Arc<AtomicU64>> {
-        self.io.nat.as_ref().map(|n| n.frames.clone())
-    }
-    fn nat_control(&self) -> Option<Arc<NatControl>> {
-        self.io.nat.as_ref().map(|n| n.control.clone())
-    }
-    fn nat_expected(&self) -> Option<(Ipv4Addr, Ipv4Addr, Ipv4Addr)> {
-        self.io.nat.as_ref().map(|n| n.expected)
-    }
 }
 
 impl<B: Ip27Board> Drop for Ip27Machine<B> {
     fn drop(&mut self) {
-        if let Some(slot) = self.slot.take() {
-            slot.lock().0 = MachineRef::null();
-        }
+        self.control.release();
         self.stop();
         // The compile pool's requests point into the memory freed below.
         #[cfg(feature = "jitv2")]
@@ -910,7 +881,7 @@ pub(crate) fn pci_devices(
     let mut nat = None;
     let net = GatewayConfig::from_network(&cfg.network());
     if let Some(link) = Link::with_gateway(net.clone())? {
-        nat = Some(Nat { control: link.nat(), expected: (net.client_ip, net.gateway_ip, net.netmask), frames: link.frames() });
+        nat = Some(GuestNet::from_parts(link.nat(), (net.client_ip, net.gateway_ip, net.netmask), Some(link.frames())));
         eth.attach(link);
     }
     bridge.register_locks();

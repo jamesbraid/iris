@@ -22,6 +22,8 @@ use std::sync::atomic::AtomicU64;
 use parking_lot::Mutex;
 
 use crate::config::MachineConfig;
+use crate::control::Control;
+use crate::guest_net::GuestNet;
 use crate::gdb_stub::CpuDebug;
 use crate::dev::ps2::Ps2Controller;
 use crate::dev::serial_host::CiSerialBackend;
@@ -68,17 +70,45 @@ pub trait Workstation: Send {
     /// Whether the CPU thread is running. False after a guest power-off.
     fn cpu_is_running(&self) -> bool;
 
+    // ---- the parts every machine carries (see `Control`, `GuestNet`) ----
+
+    fn control(&self) -> &Control;
+    fn control_mut(&mut self) -> &mut Control;
+    /// The guest's NAT handle: None only when `[network] mode = "off"` on the
+    /// machines that take the link from the config.
+    fn net(&self) -> Option<&GuestNet>;
+    fn monitor(&self) -> &Arc<Monitor>;
+    /// This machine as a raw pointer to the trait object, for the slot. The
+    /// body is `self as *mut Self as *mut dyn Workstation` in each machine:
+    /// the one line that needs the concrete type.
+    ///
+    /// Safety contract: the pointer must be the machine's own address, and the
+    /// slot built from it is dereferenced by the monitor, event and CI threads
+    /// until the machine's `Drop` calls `Control::release`. A wrapper that
+    /// forwards the other methods must forward this one to the machine it
+    /// wraps, never return a pointer to itself.
+    fn as_ws_ptr(&mut self) -> *mut dyn Workstation;
+
     /// The shared, nullable pointer slot for this machine (see
     /// [`MachineSlot`]), created on first use. Call it only once the machine
     /// is in its final place (boxed): the slot records this address.
-    fn machine_slot(&mut self) -> MachineSlot;
+    fn machine_slot(&mut self) -> MachineSlot {
+        let me = self.as_ws_ptr();
+        self.control_mut().slot(me)
+    }
     /// Register the monitor's system commands (`reset`, `save`, `load`, ...)
     /// and start the thread that carries out the devices' machine events.
     /// Call once, after the machine is boxed.
-    fn register_system_controller(&mut self);
+    fn register_system_controller(&mut self) {
+        let me = self.as_ws_ptr();
+        let monitor = self.monitor().clone();
+        self.control_mut().register(me, &monitor);
+    }
     /// The address the machine's monitor serves on, or None when it could not
     /// bind its port or has not started.
-    fn monitor_addr(&self) -> Option<std::net::SocketAddr>;
+    fn monitor_addr(&self) -> Option<std::net::SocketAddr> {
+        self.monitor().bound_addr()
+    }
 
     /// Where the machine is in its start/stop lifecycle, as it stores it.
     /// Never `Running`: [`Workstation::status`] derives that from the CPU's
@@ -86,8 +116,12 @@ pub trait Workstation: Send {
     /// stale. `start` moves it to `Starting` before the monitor binds and
     /// `stop` to `Halted` (unless it was never started). See
     /// [`crate::machine_state`].
-    fn lifecycle(&self) -> GuestState;
-    fn set_lifecycle(&mut self, state: GuestState);
+    fn lifecycle(&self) -> GuestState {
+        self.control().state()
+    }
+    fn set_lifecycle(&mut self, state: GuestState) {
+        self.control_mut().set_state(state)
+    }
 
     /// The guest's current state and whether the monitor is accepting
     /// commands. Every surface that reports state — `machine-status`, the
@@ -160,7 +194,9 @@ pub trait Workstation: Send {
     fn get_ps2(&self) -> Arc<Ps2Controller>;
     /// Add a host-side command set (the screen, pointer and key commands)
     /// to this machine's monitor.
-    fn register_monitor_device(&self, device: Arc<dyn crate::traits::Device>);
+    fn register_monitor_device(&self, device: Arc<dyn crate::traits::Device>) {
+        self.monitor().register_device(device);
+    }
     fn get_timer_manager(&self) -> Arc<TimerManager>;
     /// The CPU's debug interface, for the GDB stub.
     fn get_cpu_debug(&self) -> Arc<dyn CpuDebug>;
@@ -242,15 +278,15 @@ pub trait Workstation: Send {
     /// The count of guest frames every network backend feeds, for the GUI's
     /// network indicator.
     fn net_frames(&self) -> Option<Arc<std::sync::atomic::AtomicU64>> {
-        None
+        self.net().and_then(|n| n.frames())
     }
     /// The NAT engine's controls, when the machine's Ethernet runs on it.
     fn nat_control(&self) -> Option<Arc<NatControl>> {
-        None
+        self.net().map(|n| n.nat())
     }
     /// The addresses the NAT hands the guest: (client, gateway, netmask).
     fn nat_expected(&self) -> Option<(Ipv4Addr, Ipv4Addr, Ipv4Addr)> {
-        None
+        self.net().map(|n| n.addrs())
     }
 }
 
