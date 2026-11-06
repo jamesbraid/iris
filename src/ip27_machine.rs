@@ -67,11 +67,12 @@ use crate::ip27::{self, Ip27Bus, NodeMemory};
 use crate::irq::InterruptController;
 use crate::monitor::{Monitor, DEFAULT_PORT as DEFAULT_MONITOR_PORT};
 use crate::guest_net::GuestNet;
-use crate::scsi::ScsiBus;
 use crate::traits::{BusDevice, Device, MachineEvent, Resettable, Signal, BUS_ERR};
 use crate::xtalk::{Upstream, XtalkHost};
 use crate::control::Control;
-use crate::workstation::{DiscChanger, Workstation};
+use crate::devices::Devices;
+use crate::disks::Disks;
+use crate::workstation::Workstation;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{atomic::AtomicU64, Arc, Weak};
@@ -256,6 +257,10 @@ pub struct Ip27Machine<B: Ip27Board> {
     /// Lifecycle state, machine events and the pointer slot the front ends
     /// share.
     control: Control,
+    /// The parts the machine starts, stops, resets and saves.
+    devices: Devices,
+    /// The board's SCSI buses.
+    disks: Disks,
 }
 
 /// The CPU's three Hub lines are hardware interrupts 0 to 2, Cause IP2 to IP4.
@@ -393,6 +398,7 @@ impl<B: Ip27Board> Ip27Machine<B> {
 
         let nodes: Vec<&Node> = parts.iter().collect();
         let io = B::wire(&nodes, cfg)?;
+        let disks = Disks::new(io.scsi.iter().map(|s| s.clone() as Arc<dyn crate::disks::DiskController>).collect());
 
         let control = Control::new();
         let tx = control.sender();
@@ -442,6 +448,8 @@ impl<B: Ip27Board> Ip27Machine<B> {
             ci: cfg.ci,
             nvram: cfg.nvram.clone(),
             control,
+            devices: Devices::new(),
+            disks,
         })
     }
 
@@ -633,6 +641,12 @@ impl<B: Ip27Board> Workstation for Ip27Machine<B> {
     fn cpu_is_running(&self) -> bool {
         self.units[0].cpu.clone().as_device().is_running()
     }
+    fn devices(&self) -> &Devices {
+        &self.devices
+    }
+    fn disks(&self) -> &Disks {
+        &self.disks
+    }
     fn control(&self) -> &Control {
         &self.control
     }
@@ -683,24 +697,6 @@ impl<B: Ip27Board> Workstation for Ip27Machine<B> {
     }
     fn scratch_path(&self) -> Option<&Path> {
         self.io.scratch.as_deref()
-    }
-    fn disc_changer(&self) -> Option<Arc<dyn DiscChanger>> {
-        self.io.scsi.first().map(|c| c.clone() as Arc<dyn DiscChanger>)
-    }
-    fn pending_chd_sync_count(&self) -> usize {
-        self.io.scsi.iter().map(|c| c.bus().pending_chd_sync_count()).sum()
-    }
-    fn flush_disks(&self) -> std::io::Result<()> {
-        self.io.scsi.iter().try_for_each(|c| c.bus().flush())
-    }
-    fn sync_chd_disks(
-        &self,
-        only: Option<usize>,
-        progress: &mut dyn FnMut(usize, usize, f32),
-        cancel: &dyn Fn() -> bool,
-    ) -> std::io::Result<usize> {
-        let buses: Vec<&ScsiBus> = self.io.scsi.iter().map(|c| c.bus()).collect();
-        ScsiBus::sync_chd_disks(&buses, only, progress, cancel)
     }
 }
 
