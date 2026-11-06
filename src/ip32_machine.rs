@@ -37,7 +37,7 @@ use crate::hptimer::TimerManager;
 use crate::ip32::{Ip32Bus, Ip32Options, FIRMWARE_LOAD_VA, FIRMWARE_SPAN, NO_ECC_BASE, RAM_BASE, RAM_WINDOW_SIZE};
 use crate::traits::{BusDevice, Device, MachineEvent, Signal};
 use crate::control::Control;
-use crate::devices::Devices;
+use crate::devices::{Devices, Phase};
 use crate::disks::Disks;
 use crate::guest_net::GuestNet;
 use crate::workstation::Workstation;
@@ -70,7 +70,13 @@ impl BootState {
         Self { post_done: AtomicBool::new(false), inside: AtomicBool::new(true), cu1_saved: Default::default() }
     }
 
-    fn save(&self) -> toml::Value {
+}
+
+impl crate::traits::Device for BootState {}
+impl crate::traits::Resettable for BootState {}
+
+impl crate::traits::Saveable for BootState {
+    fn save_state(&self) -> toml::Value {
         let mut t = toml::map::Map::new();
         t.insert("post_done".into(), toml::Value::Boolean(self.post_done.load(Ordering::Relaxed)));
         t.insert("inside".into(), toml::Value::Boolean(self.inside.load(Ordering::Relaxed)));
@@ -78,11 +84,12 @@ impl BootState {
         toml::Value::Table(t)
     }
 
-    fn load(&self, v: &toml::Value) {
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
         use crate::snapshot::{get_field, toml_bool, toml_u32};
         self.post_done.store(get_field(v, "post_done").and_then(toml_bool).unwrap_or(true), Ordering::Relaxed);
         self.inside.store(get_field(v, "inside").and_then(toml_bool).unwrap_or(false), Ordering::Relaxed);
         self.cu1_saved.store(get_field(v, "cu1_saved").and_then(toml_u32).unwrap_or(0), Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -130,6 +137,8 @@ pub struct O2Machine {
     pub(crate) control: Control,
     devices: Devices,
     disks: Arc<Disks>,
+    /// Where snapshots live: `saves/<name>/` under the working directory.
+    saves: std::path::PathBuf,
     /// The batch hook's place in the boot (see [`BootState`]).
     boot: Arc<BootState>,
     /// Set while the machine is stopped: the service thread leaves the
@@ -307,21 +316,21 @@ impl O2Machine {
         }
         // The shared monitor, as the other machines have it: the CPU's
         // commands (registers, breakpoints, memory) and the O2's devices'.
+        let mut devices = Devices::new();
+        devices.add("o2", Phase::Chipset, bus.clone());
+        devices.add("boot", Phase::Chipset, boot.clone());
+        // After the bus, whose SCSI controllers it follows in start order.
+        if let Some(n) = bus.nvme.get() {
+            devices.add("nvme", Phase::Io, n.clone());
+        }
         let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
         let monitor = crate::monitor::Monitor::new(monitor_port);
         monitor.register_device(crate::devlog::init_devlog());
         monitor.register_device(Arc::new(crate::cpu::cpu_monitor::CpuMonitor::new(vec![cpu.clone()])));
-        monitor.register_device(bus.clone());
+        // The bus brings its devices' and the SCSI controllers' commands.
+        devices.register_monitor(&monitor);
         // `phys`: the physical bus's decode table, memory and traces.
         monitor.register_device(bus.phys.clone());
-        // The SCSI controllers' `scsi`/`scsi1` and `cow`/`cow1`.
-        for ctl in bus.scsi.lock().unwrap().iter() {
-            monitor.register_device(ctl.clone());
-        }
-        // `nvme`: the card's registers, queues and copy-on-write disk.
-        if let Some(n) = bus.nvme.get() {
-            monitor.register_device(n.clone());
-        }
         monitor.register_device(Arc::new(O2Control::new(bus.clone())));
         #[cfg(feature = "perfetto")]
         {
@@ -353,8 +362,9 @@ impl O2Machine {
             ci_serial,
             net,
             control,
-            devices: Devices::new(),
+            devices,
             disks,
+            saves: "saves".into(),
             boot,
             paused: Arc::new(AtomicBool::new(false)),
             disk_refs,
@@ -441,7 +451,7 @@ impl O2Machine {
         let events = (self.control.sender(), self.control.registered());
         let disks = self.disks.clone();
         let paused = self.paused.clone();
-        self.start_scsi();
+        self.devices.start();
         self.threads.push(
             std::thread::Builder::new()
                 .name("O2-Service".into())
@@ -504,7 +514,7 @@ impl O2Machine {
                 eprintln!("iris: the O2 reset itself (CRIME cold reset)");
                 dev.stop();
                 crate::traits::Resettable::power_on(&*cpu);
-                bus.power_on();
+                crate::traits::Resettable::power_on(&*bus);
                 dev.start();
             }
             if bus.mace.rtc.powered_off() {
@@ -537,12 +547,7 @@ impl O2Machine {
         crate::perfetto::set_guest_cycles(None);
         // After the CPU, so nothing queues more; each finishes the command
         // it is running, so a snapshot finds none half done.
-        for ctl in self.bus.scsi.lock().unwrap().iter() {
-            ctl.stop();
-        }
-        if let Some(n) = self.bus.nvme.get() {
-            n.stop();
-        }
+        self.devices.stop();
         if !self.bus.crime.re.drain(Duration::from_secs(2)) {
             eprintln!("iris: O2 stopped with rendering engine writes still queued");
         }
@@ -558,26 +563,20 @@ impl O2Machine {
     /// Let the service thread look after the devices again.
     pub fn restart_peripherals(&mut self) {
         self.paused.store(false, Ordering::SeqCst);
-        self.start_scsi();
+        self.devices.start();
     }
 
-    /// Give each SCSI controller its own thread, so disk transfers do not
-    /// run on the CPU's.
-    fn start_scsi(&self) {
-        for ctl in self.bus.scsi.lock().unwrap().iter() {
-            ctl.start();
-        }
-        if let Some(n) = self.bus.nvme.get() {
-            n.start();
-        }
+    /// The CPU and every part back at power-on.
+    fn power_on_devices(&self) {
+        crate::traits::Resettable::power_on(&*self.cpu);
+        self.devices.power_on();
     }
 
     /// The hardware as at power-on, with the CPU stopped: what a CRIME cold
     /// reset does, less the restart.
     pub fn reset(&mut self) {
         self.stop();
-        crate::traits::Resettable::power_on(&*self.cpu);
-        self.bus.power_on();
+        self.power_on_devices();
         self.restart_peripherals();
     }
 
@@ -601,7 +600,7 @@ impl O2Machine {
         use crate::chunk_store::{put_words_as_chunks, ChunkStore};
         use crate::snapshot::{ChunksManifest, Manifest, Snapshot};
         use crate::traits::Saveable;
-        let snap = Snapshot::new(std::path::PathBuf::from("saves").join(name));
+        let snap = Snapshot::new(self.saves.join(name));
         snap.ensure_dir().map_err(|e| e.to_string())?;
         let mut manifest = Manifest::for_current_save();
         manifest.machine = Some(SNAPSHOT_MACHINE.into());
@@ -612,17 +611,14 @@ impl O2Machine {
         snap.write_manifest(&manifest).map_err(|e| e.to_string())?;
         let sv = manifest.schema_version;
         snap.write_state("cpu", &self.cpu.save_state(), sv).map_err(|e| e.to_string())?;
-        snap.write_state("o2", &self.bus.save_state(), sv).map_err(|e| e.to_string())?;
-        snap.write_state("boot", &self.boot.save(), sv).map_err(|e| e.to_string())?;
-        if let Some(n) = self.bus.nvme.get() {
-            snap.write_state("nvme", &n.save_state(), sv).map_err(|e| e.to_string())?;
-            let dir = snap.dir.join("nvme");
-            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            let overlays = n.export_overlays(&dir).map_err(|e| format!("COW overlay export (NVMe): {e}"))?;
-            snap.write_toml("cow_nvme.toml", &crate::machine::build_cow_table(overlays)).map_err(|e| e.to_string())?;
+        // One file per part (`o2`, `boot`, and `nvme` with an NVMe card).
+        if let Some(table) = self.devices.save().as_table() {
+            for (key, state) in table {
+                snap.write_state(key, state, sv).map_err(|e| e.to_string())?;
+            }
         }
         snap.write_bin("flash.bin", &self.bus.flash_bytes()).map_err(|e| e.to_string())?;
-        let store = ChunkStore::new("saves");
+        let store = ChunkStore::new(&self.saves);
         let mut chunks = ChunksManifest::default();
         chunks.bank_chunks[0] = put_bank_words(&store, &self.bus.ram)
             .map_err(|e| format!("CAS memory put: {e}"))?;
@@ -633,6 +629,12 @@ impl O2Machine {
             let overlays = ctl.export_overlays(&dir).map_err(|e| format!("COW overlay export (controller {i}): {e}"))?;
             snap.write_toml(&format!("cow{i}.toml"), &crate::machine::build_cow_table(overlays))
                 .map_err(|e| e.to_string())?;
+        }
+        if let Some(n) = self.bus.nvme.get() {
+            let dir = snap.dir.join("nvme");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let overlays = n.export_overlays(&dir).map_err(|e| format!("COW overlay export (NVMe): {e}"))?;
+            snap.write_toml("cow_nvme.toml", &crate::machine::build_cow_table(overlays)).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -654,8 +656,8 @@ impl O2Machine {
 
     fn read_snapshot(&self, name: &str) -> Result<O2Snapshot, String> {
         use crate::chunk_store::{get_chunks_as_words, ChunkStore};
-        use crate::snapshot::Snapshot;
-        let snap = Snapshot::new(std::path::PathBuf::from("saves").join(name));
+        use crate::snapshot::{Snapshot, SCHEMA_VERSION};
+        let snap = Snapshot::new(self.saves.join(name));
         let m = snap.read_manifest()?.ok_or_else(|| format!("saves/{name}: no snapshot.toml"))?;
         if m.machine.as_deref() != Some(SNAPSHOT_MACHINE) {
             return Err(format!("snapshot {name} is not of an O2"));
@@ -669,7 +671,7 @@ impl O2Machine {
         let sv = m.schema_version;
         let state = |base: &str| snap.read_state(base, sv).map_err(|e| format!("{base}: {e}"));
         let chunks = snap.read_chunks_manifest().map_err(|e| format!("chunks.bin: {e}"))?;
-        let memory = get_chunks_as_words(&ChunkStore::new("saves"), &chunks.bank_chunks[0])
+        let memory = get_chunks_as_words(&ChunkStore::new(&self.saves), &chunks.bank_chunks[0])
             .map_err(|e| format!("CAS memory get: {e}"))?;
         if memory.len() * 4 != self.bus.ram.len() {
             return Err(format!("snapshot memory is {} MB, this O2 has {} MB",
@@ -679,16 +681,14 @@ impl O2Machine {
         let overlays = (0..ctrls)
             .map(|i| snap.read_toml(&format!("cow{i}.toml")).ok().map(|t| crate::machine::parse_cow_table(&t)))
             .collect();
-        let nvme = match self.bus.nvme.get() {
-            Some(_) => Some(state("nvme")?),
-            None => None,
-        };
+        let mut board = toml::map::Map::new();
+        for key in self.devices.keys() {
+            board.insert(key.clone(), state(&key)?);
+        }
         let nvme_overlays = snap.read_toml("cow_nvme.toml").ok().map(|t| crate::machine::parse_cow_table(&t));
         Ok(O2Snapshot {
             cpu: state("cpu")?,
-            bus: state("o2")?,
-            boot: state("boot")?,
-            nvme,
+            board: toml::Value::Table(board),
             nvme_overlays,
             flash: snap.read_bin("flash.bin").map_err(|e| format!("flash.bin: {e}"))?,
             memory,
@@ -700,12 +700,10 @@ impl O2Machine {
     /// Put a read snapshot into the stopped machine: the hardware as at
     /// power-on first, so nothing the snapshot does not hold is left over.
     fn apply_snapshot(&mut self, s: O2Snapshot) -> Result<(), String> {
-        use crate::traits::{Resettable, Saveable};
-        Resettable::power_on(&*self.cpu);
-        self.bus.power_on();
+        use crate::traits::Saveable;
+        self.power_on_devices();
         self.cpu.load_state(&s.cpu)?;
-        self.bus.load_state(&s.bus)?;
-        self.boot.load(&s.boot);
+        self.devices.load(&s.board)?;
         self.bus.set_flash(&s.flash)?;
         self.bus.ram.restore_words(&s.memory)?;
         for (i, ctl) in self.bus.scsi.lock().unwrap().iter().enumerate() {
@@ -714,11 +712,8 @@ impl O2Machine {
                     .map_err(|e| format!("COW overlay import (controller {i}): {e}"))?;
             }
         }
-        if let (Some(n), Some(v)) = (self.bus.nvme.get(), &s.nvme) {
-            if let Some(sets) = &s.nvme_overlays {
-                n.import_overlays(&s.dir.join("nvme"), sets).map_err(|e| format!("COW overlay import (NVMe): {e}"))?;
-            }
-            n.load_state(v).map_err(|e| format!("nvme: {e}"))?;
+        if let (Some(n), Some(sets)) = (self.bus.nvme.get(), &s.nvme_overlays) {
+            n.import_overlays(&s.dir.join("nvme"), sets).map_err(|e| format!("COW overlay import (NVMe): {e}"))?;
         }
         Ok(())
     }
@@ -743,14 +738,13 @@ impl O2Machine {
 /// A snapshot read and checked, ready to put into the machine.
 struct O2Snapshot {
     cpu: toml::Value,
-    bus: toml::Value,
-    boot: toml::Value,
+    /// The parts' states, as `Devices::save` writes them.
+    board: toml::Value,
     flash: Vec<u8>,
     memory: Vec<u32>,
     /// Each controller's copy-on-write sets, when the snapshot has them.
     overlays: Vec<Option<Vec<(usize, Vec<u64>)>>>,
-    /// The NVMe card's state and copy-on-write sets, with `[nvme]`.
-    nvme: Option<toml::Value>,
+    /// The NVMe card's copy-on-write sets, with `[nvme]`.
     nvme_overlays: Option<Vec<(usize, Vec<u64>)>>,
     dir: std::path::PathBuf,
 }
@@ -1203,5 +1197,99 @@ mod drop_tests {
         machine.disks.flush().unwrap();
         drop(machine);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod device_tests {
+    use super::*;
+    use crate::exit_persistence_tests::Machine as Kind;
+    use crate::traits::{Resettable, Saveable};
+    use crate::workstation_tests::with_shared;
+
+    fn o2<R>(f: impl FnOnce(&mut O2Machine) -> R) -> R {
+        with_shared(Kind::O2, |m| f(m.as_any_mut().downcast_mut::<O2Machine>().expect("an O2")))
+    }
+
+    /// Both SCSI controllers start and stop with the bus, which is the only
+    /// entry the machine registers for them.
+    #[test]
+    fn o2_lifecycle_reaches_both_controllers() {
+        o2(|m| {
+            let running = |m: &O2Machine| m.bus.scsi.lock().unwrap().iter().map(|c| c.is_running()).collect::<Vec<_>>();
+            assert_eq!(running(m), [false, false]);
+            m.restart_peripherals();
+            assert_eq!(running(m), [true, true]);
+            m.stop();
+            assert_eq!(running(m), [false, false]);
+        });
+    }
+
+    /// The files a snapshot has always been: the CPU, the bus (`o2`), the boot
+    /// hook (`boot`), memory in the chunk store, the flash, and each
+    /// controller's overlays.
+    #[test]
+    fn o2_saved_files_keep_their_names() {
+        o2(|m| {
+            let dir = std::env::temp_dir().join(format!("iris-o2-names-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let before = std::mem::replace(&mut m.saves, dir.clone());
+            let written = m.write_snapshot("s");
+            m.saves = before;
+            written.unwrap();
+            let mut names: Vec<String> = std::fs::read_dir(dir.join("s")).unwrap().flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(names, ["boot.bin", "chunks.bin", "cow0.toml", "cow1.toml", "cpu.bin", "ctrl0", "ctrl1", "flash.bin", "o2.bin", "snapshot.toml"]);
+        });
+    }
+
+    /// A cold reset puts back the devices with a power-on state and nothing
+    /// else: CRIME's registers and a MACE UART return to their reset values,
+    /// while memory and the flash keep what they hold.
+    #[test]
+    fn power_on_resets_what_the_bus_resets() {
+        o2(|m| {
+            let table = |m: &O2Machine| m.devices.save()["o2"].clone();
+            let clean = table(m);
+            let (word, flash) = (RAM_BASE as u64 + 0x100, m.bus.flash_bytes());
+            let old = m.bus.phys.read32(word).data;
+            assert_eq!(m.bus.phys.write32(word, 0x600d_f00d), crate::traits::BUS_OK);
+
+            // Dirty the CRIME registers and a MACE UART.
+            let mut dirty = clean.clone();
+            let crime = crate::devices::testing::dirtied(&clean["crime"]["crime"], &[]).expect("a CRIME register");
+            dirty["crime"].as_table_mut().unwrap().insert("crime".into(), crime);
+            let com0 = crate::devices::testing::dirtied(&clean["mace"]["com0"], &[]).expect("a UART register");
+            dirty["mace"].as_table_mut().unwrap().insert("com0".into(), com0);
+            m.bus.load_state(&dirty).unwrap();
+            assert_ne!(table(m)["crime"]["crime"], clean["crime"]["crime"]);
+            assert_ne!(table(m)["mace"]["com0"], clean["mace"]["com0"]);
+
+            Resettable::power_on(&*m.bus);
+            let after = table(m);
+            assert_eq!(after["crime"]["crime"], clean["crime"]["crime"], "CRIME's registers are back");
+            assert_eq!(after["mace"]["com0"], clean["mace"]["com0"], "the UART is back");
+            assert_eq!(m.bus.phys.read32(word).data, 0x600d_f00d, "memory is as the guest left it");
+            assert_eq!(m.bus.flash_bytes(), flash, "the flash is as it was");
+            // Put the shared machine back.
+            m.bus.phys.write32(word, old);
+            m.bus.load_state(&clean).unwrap();
+        });
+    }
+
+    #[test]
+    fn boot_state_round_trips() {
+        let a = BootState::new();
+        a.post_done.store(false, Ordering::Relaxed);
+        a.inside.store(true, Ordering::Relaxed);
+        a.cu1_saved.store(0x1234_5000, Ordering::Relaxed);
+        let b = BootState::new();
+        b.load_state(&a.save_state()).unwrap();
+        assert!(!b.post_done.load(Ordering::Relaxed) && b.inside.load(Ordering::Relaxed));
+        assert_eq!(b.cu1_saved.load(Ordering::Relaxed), 0x1234_5000);
+        assert_eq!(b.save_state(), a.save_state());
     }
 }
