@@ -619,7 +619,7 @@ impl O2Machine {
             let dir = snap.dir.join(format!("ctrl{i}"));
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             let overlays = ctl.export_overlays(&dir).map_err(|e| format!("COW overlay export (controller {i}): {e}"))?;
-            snap.write_toml(&format!("cow{i}.toml"), &crate::machine::build_cow_table(overlays))
+            snap.write_toml(&format!("cow{i}.toml"), &crate::snapshot::build_cow_table(overlays))
                 .map_err(|e| e.to_string())?;
         }
         Ok(())
@@ -673,7 +673,7 @@ impl O2Machine {
         }
         let ctrls = self.bus.scsi.lock().unwrap().len();
         let overlays = (0..ctrls)
-            .map(|i| snap.read_toml(&format!("cow{i}.toml")).ok().map(|t| crate::machine::parse_cow_table(&t)))
+            .map(|i| snap.read_toml(&format!("cow{i}.toml")).ok().map(|t| crate::snapshot::parse_cow_table(&t)))
             .collect();
         let mut board = toml::map::Map::new();
         for key in self.devices.keys() {

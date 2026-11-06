@@ -1,5 +1,4 @@
 use iris::config::load_config;
-use iris::machine::Machine;
 
 fn main() {
     // Without a backend every `log::warn!` here is discarded. Stays at
@@ -162,7 +161,7 @@ fn main() {
         if let Some(addr) = machine.monitor_addr() {
             let slot = machine.machine_slot();
             std::thread::spawn(move || {
-                Machine::run_console_client(addr, iris::workstation::console_quit(slot));
+                iris::monitor::run_console_client(addr, iris::workstation::console_quit(slot));
             });
         }
     }
