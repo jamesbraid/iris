@@ -638,7 +638,7 @@ impl O2Machine {
             let dir = snap.dir.join(format!("ctrl{i}"));
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             let overlays = ctl.export_overlays(&dir).map_err(|e| format!("COW overlay export (controller {i}): {e}"))?;
-            snap.write_toml(&format!("cow{i}.toml"), &crate::machine::build_cow_table(overlays))
+            snap.write_toml(&format!("cow{i}.toml"), &crate::snapshot::build_cow_table(overlays))
                 .map_err(|e| e.to_string())?;
         }
         if let Some(n) = self.bus.nvme.get() {
@@ -646,7 +646,7 @@ impl O2Machine {
             let dir = snap.dir.join("nvme");
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             let overlays = n.export_overlays(&dir).map_err(|e| format!("COW overlay export (NVMe): {e}"))?;
-            snap.write_toml("cow_nvme.toml", &crate::machine::build_cow_table(overlays)).map_err(|e| e.to_string())?;
+            snap.write_toml("cow_nvme.toml", &crate::snapshot::build_cow_table(overlays)).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -691,7 +691,7 @@ impl O2Machine {
         }
         let ctrls = self.bus.scsi.lock().unwrap().len();
         let overlays = (0..ctrls)
-            .map(|i| snap.read_toml(&format!("cow{i}.toml")).ok().map(|t| crate::machine::parse_cow_table(&t)))
+            .map(|i| snap.read_toml(&format!("cow{i}.toml")).ok().map(|t| crate::snapshot::parse_cow_table(&t)))
             .collect();
         let mut board = toml::map::Map::new();
         for key in self.devices.keys() {
@@ -701,7 +701,7 @@ impl O2Machine {
             Some(_) => Some(state("nvme")?),
             None => None,
         };
-        let nvme_overlays = snap.read_toml("cow_nvme.toml").ok().map(|t| crate::machine::parse_cow_table(&t));
+        let nvme_overlays = snap.read_toml("cow_nvme.toml").ok().map(|t| crate::snapshot::parse_cow_table(&t));
         Ok(O2Snapshot {
             cpu: state("cpu")?,
             board: toml::Value::Table(board),

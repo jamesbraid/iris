@@ -35,7 +35,7 @@ use crate::dev::hpc3::Hpc3;
 use crate::dev::ioc::{Ioc, GioSlot, GIO_SLOT_MAP, profile_idx};
 use crate::monitor::Monitor;
 use crate::dev::ng1::rex3::Rex3;
-use crate::snapshot::{Snapshot, Manifest, SCHEMA_VERSION, ChunksManifest, DiskRef, enabled_features};
+use crate::snapshot::{build_cow_table, parse_cow_table, Snapshot, Manifest, SCHEMA_VERSION, ChunksManifest, DiskRef, enabled_features};
 use crate::chunk_store::{ChunkStore, get_chunks_as_words, put_words_as_chunks};
 use crate::hptimer::TimerManager;
 use crate::control::Control;
@@ -43,73 +43,6 @@ use crate::devices::{Devices, Phase};
 use crate::disks::Disks;
 use crate::guest_net::GuestNet;
 use crate::workstation::{SystemController, Workstation};
-
-/// The profile of the machine this process is running, set by
-/// [`crate::workstation::build`] so [`emulator_name`] can pick a model word
-/// that matches it. Stored as the `MachineProfile` discriminant; `u8::MAX`
-/// means no machine has been built yet.
-static EMULATOR_PROFILE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(u8::MAX);
-
-/// Record the profile of the machine being built (see [`emulator_name`]).
-pub fn set_emulator_profile(profile: MachineProfile) {
-    EMULATOR_PROFILE.store(profile as u8, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn emulator_profile() -> Option<MachineProfile> {
-    let raw = EMULATOR_PROFILE.load(std::sync::atomic::Ordering::Relaxed);
-    [MachineProfile::IndyIp24, MachineProfile::Indigo2Ip22, MachineProfile::Indigo2Ip28, MachineProfile::O2Ip32, MachineProfile::OctaneIp30, MachineProfile::Origin200Ip29, MachineProfile::Origin2000Ip27, MachineProfile::Onyx2Ip27]
-        .into_iter().find(|p| *p as u8 == raw)
-}
-
-/// The words an `I` in the expansion may stand for, per machine. Each list
-/// names the machine as the user configured it, so the title never calls an
-/// Indigo2 an Indy or an O2 anything but IP32. Without a profile only the
-/// model-neutral words remain.
-fn emulator_name_thirds(profile: Option<MachineProfile>) -> &'static [&'static str] {
-    match profile {
-        Some(MachineProfile::IndyIp24) => &["IRIX", "Iris", "IPsomething", "Indy", "IP24"],
-        Some(MachineProfile::Indigo2Ip22) => &["IRIX", "Iris", "IPsomething", "Indigo2", "IP22"],
-        Some(MachineProfile::Indigo2Ip28) => &["IRIX", "Iris", "IPsomething", "Indigo2", "IP28"],
-        Some(MachineProfile::O2Ip32) => &["IRIX", "Iris", "IPsomething", "IP32"],
-        Some(MachineProfile::OctaneIp30) => &["IRIX", "Iris", "IPsomething", "IP30"],
-        Some(MachineProfile::Origin200Ip29) => &["IRIX", "Iris", "IPsomething", "IP29"],
-        Some(MachineProfile::Origin2000Ip27) => &["IRIX", "Iris", "IPsomething", "IP27"],
-        Some(MachineProfile::Onyx2Ip27) => &["IRIX", "Iris", "IPsomething", "IP27"],
-        None => &["IRIX", "Iris", "IPsomething"],
-    }
-}
-
-/// The emulator's name for banners and window titles. Three runs in four it
-/// is the canonical one; otherwise an expansion of IRIS rolled once per
-/// process, whose third word is chosen to match the machine profile that
-/// `set_emulator_profile` recorded (so a GUI that starts a different machine
-/// later gets the same roll with the right model word).
-pub fn emulator_name() -> String {
-    /// `None` for the canonical name, else the roll (first, third, fourth).
-    static ROLL: std::sync::OnceLock<Option<(usize, u64, usize)>> = std::sync::OnceLock::new();
-    const FIRSTS: [&str; 9] = ["Irresponsible", "Incredible", "Insufferable", "Infuriating", "Inaccurate", "Incomplete", "Interactive", "Indomitable", "Irresistible"];
-    const FOURTHS: [&str; 4] = ["Simulator", "System", "Substitute", "Sandbox"];
-
-    let roll = ROLL.get_or_init(|| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
-        if now % 4 != 0 {
-            return None;
-        }
-        Some((((now / 4) % FIRSTS.len() as u64) as usize, now / 64, ((now / 256) % FOURTHS.len() as u64) as usize))
-    });
-
-    match *roll {
-        None => "Irresponsible Rust IRIX Simulator".to_string(),
-        Some((first, third_roll, fourth)) => {
-            let thirds = emulator_name_thirds(emulator_profile());
-            let third = thirds[(third_roll % thirds.len() as u64) as usize];
-            format!("{} Rust {} {}", FIRSTS[first], third, FOURTHS[fourth])
-        }
-    }
-}
 
 pub struct Machine {
     cpu: Arc<dyn crate::cpu::mips_exec::CpuDevice>,
@@ -191,36 +124,6 @@ struct RollbackCheckpoint {
     /// Every registered part's state, children included, as `Devices::save`
     /// wrote it.
     state: toml::Value,
-}
-
-/// Parse a `cow.toml`/`cow1.toml`-shaped table (`{"scsi<id>": [dirty
-/// sectors...]}`) into `(id, dirty_sectors)` pairs. Shared by rollback
-/// capture and snapshot load so the two paths can't drift.
-/// Inverse of `parse_cow_table`: build a `{"scsi<id>": [dirty sectors...]}`
-/// table from `export_overlays`'s output.
-pub(crate) fn build_cow_table(overlays: Vec<(usize, Vec<u64>)>) -> toml::Value {
-    let mut tbl = toml::map::Map::new();
-    for (id, dirty) in overlays {
-        let arr: Vec<toml::Value> = dirty.into_iter().map(|v| toml::Value::Integer(v as i64)).collect();
-        tbl.insert(format!("scsi{}", id), toml::Value::Array(arr));
-    }
-    toml::Value::Table(tbl)
-}
-
-pub(crate) fn parse_cow_table(cow_toml: &toml::Value) -> Vec<(usize, Vec<u64>)> {
-    let mut sets = Vec::new();
-    if let Some(tbl) = cow_toml.as_table() {
-        for (k, v) in tbl {
-            let Some(id_str) = k.strip_prefix("scsi") else { continue };
-            let Ok(id) = id_str.parse::<usize>() else { continue };
-            let Some(arr) = v.as_array() else { continue };
-            let dirty: Vec<u64> = arr.iter()
-                .filter_map(|x| x.as_integer().map(|i| i as u64))
-                .collect();
-            sets.push((id, dirty));
-        }
-    }
-    sets
 }
 
 /// Full-machine in-memory checkpoint captured from *live* running state
@@ -1019,68 +922,11 @@ impl Machine {
         if let Some(log) = &self.serial_log { log.flush(); }
     }
 
-    /// The address this Machine's own monitor is serving on, or None when it
-    /// couldn't bind its port (another iris holding it) or has not started.
+    /// Where this machine has memory.
     pub fn memory_map(&self) -> &Arc<crate::memory_map::MemoryMap> {
         &self.memory
     }
 
-
-    /// The terminal console: relays stdin to the monitor at `addr` and the
-    /// monitor's output to stdout. When the monitor closes the connection
-    /// (`quit`) `on_eof` ends the process (through
-    /// `workstation::exit_process`, which flushes the disks first), so `addr`
-    /// must be this process's own monitor (`monitor_addr`): another iris's
-    /// would take this one down with it when it quits.
-    pub fn run_console_client(addr: std::net::SocketAddr, on_eof: impl FnOnce() + Send + 'static) {
-        println!("IRIS: {}", emulator_name());
-        println!("Connecting to monitor socket...");
-
-        let mut stream = loop {
-            match TcpStream::connect(addr) {
-                Ok(s) => break s,
-                Err(_) => {
-                    thread::sleep(std::time::Duration::from_millis(10));
-                    continue;
-                }
-            }
-        };
-
-        Self::relay_monitor_output(stream.try_clone().unwrap(), on_eof);
-
-        let stdin = io::stdin();
-        let mut line = String::new();
-        loop {
-            line.clear();
-            // Ok(0) is end of input (stdin from /dev/null, say): stop
-            // relaying rather than spin; the monitor's output still prints.
-            if !matches!(stdin.read_line(&mut line), Ok(n) if n > 0) {
-                break;
-            }
-            if stream.write_all(line.as_bytes()).is_err() {
-                break;
-            }
-        }
-    }
-
-    /// Print what the monitor sends until it closes the connection (`quit`, or
-    /// iris going away), then run `on_eof`.
-    pub(crate) fn relay_monitor_output(mut monitor: TcpStream, on_eof: impl FnOnce() + Send + 'static) -> thread::JoinHandle<()> {
-        thread::spawn(move || {
-            let mut buf = [0u8; 1024];
-            loop {
-                match monitor.read(&mut buf) {
-                    Ok(0) => break, // EOF
-                    Ok(n) => {
-                        print!("{}", String::from_utf8_lossy(&buf[0..n]));
-                        io::stdout().flush().unwrap();
-                    }
-                    Err(_) => break,
-                }
-            }
-            on_eof();
-        })
-    }
 
     pub fn get_ps2(&self) -> Arc<crate::dev::ps2::Ps2Controller> {
         self.hpc3.ioc().ps2()
@@ -1899,49 +1745,6 @@ impl Workstation for Machine {
     }
     fn scratch_path(&self) -> Option<&std::path::Path> { Machine::scratch_path(self) }
     fn remount_cdrom_guest(&self, scsi_id: u8) { Machine::remount_cdrom_guest(self, scsi_id) }
-}
-
-#[cfg(test)]
-mod emulator_name_tests {
-    use super::*;
-
-    /// No profile's expansion may name another machine: an Indigo2 is never
-    /// an "Indy", an Indy never "IP22", and the O2 is only ever "IP32".
-    #[test]
-    fn thirds_name_only_the_configured_machine() {
-        let foreign = |p: Option<MachineProfile>| -> &'static [&'static str] {
-            match p {
-                Some(MachineProfile::IndyIp24) => &["Indigo2", "IP22", "IP28", "IP32", "O2"],
-                Some(MachineProfile::Indigo2Ip22) => &["Indy", "IP24", "IP28", "IP32", "O2"],
-                Some(MachineProfile::Indigo2Ip28) => &["Indy", "IP24", "IP22", "IP32", "O2"],
-                Some(MachineProfile::O2Ip32) => &["Indy", "Indigo2", "IP24", "IP22", "IP28", "IP30", "O2"],
-                Some(MachineProfile::OctaneIp30) => &["Indy", "Indigo2", "IP24", "IP22", "IP28", "IP32", "O2"],
-                Some(MachineProfile::Origin200Ip29) => &["Indy", "Indigo2", "IP24", "IP22", "IP28", "IP30", "IP32", "O2"],
-                Some(MachineProfile::Origin2000Ip27) => &["Indy", "Indigo2", "IP24", "IP22", "IP28", "IP30", "IP32", "O2"],
-                Some(MachineProfile::Onyx2Ip27) => &["Indy", "Indigo2", "IP24", "IP22", "IP28", "IP30", "IP32", "O2"],
-                None => &["Indy", "Indigo2", "IP24", "IP22", "IP28", "IP30", "IP32", "O2"],
-            }
-        };
-        for p in [None, Some(MachineProfile::IndyIp24), Some(MachineProfile::Indigo2Ip22),
-                  Some(MachineProfile::Indigo2Ip28), Some(MachineProfile::O2Ip32), Some(MachineProfile::OctaneIp30), Some(MachineProfile::Origin200Ip29), Some(MachineProfile::Origin2000Ip27), Some(MachineProfile::Onyx2Ip27)] {
-            let thirds = emulator_name_thirds(p);
-            assert!(!thirds.is_empty());
-            for w in thirds {
-                assert!(w.starts_with('I'), "{p:?}: {w} breaks the acronym");
-                assert!(!foreign(p).contains(w), "{p:?}: {w} names another machine");
-            }
-        }
-    }
-
-    #[test]
-    fn profile_round_trips_through_the_global() {
-        for p in [MachineProfile::IndyIp24, MachineProfile::Indigo2Ip22, MachineProfile::Indigo2Ip28, MachineProfile::O2Ip32, MachineProfile::OctaneIp30, MachineProfile::Origin200Ip29, MachineProfile::Origin2000Ip27, MachineProfile::Onyx2Ip27] {
-            set_emulator_profile(p);
-            assert_eq!(emulator_profile(), Some(p));
-        }
-        let name = emulator_name();
-        assert!(name.starts_with('I') && name.contains(" Rust "), "{name}");
-    }
 }
 
 /// A dropped machine gives back its decode table: a process may have only 64,
