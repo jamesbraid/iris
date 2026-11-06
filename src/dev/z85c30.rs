@@ -545,6 +545,13 @@ impl Z85c30 {
         }
         BUS_OK
     }
+    /// Drive each channel's interrupt line from its registers, for the IOC to
+    /// call once it has loaded its own status (see `Ioc::load_state`).
+    pub fn redrive(&self) {
+        self.channel_a.0.lock().update_ip();
+        self.channel_b.0.lock().update_ip();
+    }
+
     pub fn register_locks(&self) {
         use crate::locks::{register_mutex, register_mutex_fn};
         register_mutex_fn("scc::channel_a", &self.channel_a, |c| c.0.is_locked());

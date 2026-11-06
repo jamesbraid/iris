@@ -1368,6 +1368,11 @@ impl Saveable for Ioc {
         ldu8!(gen_cntl); ldu8!(panel); ldu8!(read_reg);
         ldu8!(dma_sel); ldu8!(reset_reg); ldu8!(write_reg);
         state.update_interrupts();
+        drop(state);
+        // The SCC loaded before this and cleared its transmit queue, standing
+        // in for the character in flight at save with a pending transmit
+        // interrupt. The status just loaded may not have it: put it back.
+        self.scc.redrive();
         Ok(())
     }
 }
