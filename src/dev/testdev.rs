@@ -35,6 +35,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
+use crate::config::TestDeviceClock;
 use crate::cpu::mips_core::MipsCore;
 use crate::traits::{BusDevice, BusRead32, BusRead8, Device, Resettable, Saveable, BUS_OK};
 
@@ -73,6 +74,12 @@ pub const REG_RUN_CONFIG: u32 = 0x24;
 /// Registers decode within this many bytes and the window repeats across the
 /// whole 64 KB the device claims. Was 16 before the clock/icount registers.
 pub const REG_WINDOW: u32 = 0x40;
+
+/// Nanoseconds per retired guest instruction on the `guest` clock
+/// (`TestDeviceClock::Guest`): 4 ns, a steady 250 MIPS. About what the JIT
+/// sustains on the suite, so a guest that sizes its runs by time does about
+/// the work it does on the host clock. The value is arbitrary otherwise.
+pub const GUEST_CLOCK_NS_PER_INSN: u64 = 4;
 
 /// Reads back at `REG_SIGNATURE` — "IRIS" in ASCII.
 pub const SIGNATURE: u32 = 0x4952_4953;
@@ -168,6 +175,8 @@ pub struct TestDevice {
     /// Origin for `REG_HOST_NS_*`. Only deltas are meaningful to the guest, so
     /// where zero lands does not matter — only that it never moves.
     epoch: std::time::Instant,
+    /// Where `REG_HOST_NS_*` gets its time. Chosen when the device is built.
+    clock: TestDeviceClock,
     /// Latched 64-bit values, published by a read of the LO half.
     host_ns_latch: AtomicU64,
     icount_latch: AtomicU64,
@@ -212,9 +221,17 @@ impl TestDevice {
             chars: AtomicU64::new(0),
             running: AtomicBool::new(false),
             epoch: std::time::Instant::now(),
+            clock: TestDeviceClock::Host,
             host_ns_latch: AtomicU64::new(0),
             icount_latch: AtomicU64::new(0),
         }
+    }
+
+    /// Choose the time base of `REG_HOST_NS_*`. Call before the device is
+    /// shared; the default is the host's clock.
+    pub fn with_clock(mut self, clock: TestDeviceClock) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Point the device at the CPU state it dumps. Called once at wiring time.
@@ -358,25 +375,33 @@ pub fn dump_json(core: &MipsCore, tag: u32) -> String {
 }
 
 impl TestDevice {
-    /// Nanoseconds since `epoch`, latched so the HI read that follows sees the
-    /// same sample.
+    /// Nanoseconds since `epoch` (or, on the guest clock, the retired
+    /// instructions times `GUEST_CLOCK_NS_PER_INSN`), latched so the HI read
+    /// that follows sees the same sample.
     fn latch_host_ns(&self) -> u64 {
-        let ns = self.epoch.elapsed().as_nanos() as u64;
+        let ns = match self.clock {
+            TestDeviceClock::Host => self.epoch.elapsed().as_nanos() as u64,
+            TestDeviceClock::Guest => self.icount().wrapping_mul(GUEST_CLOCK_NS_PER_INSN),
+        };
         self.host_ns_latch.store(ns, Ordering::Relaxed);
         ns
     }
 
-    /// Retired guest instructions, latched the same way. Zero when no core is
-    /// attached (a guest reading a flat zero learns the counter is unusable
-    /// rather than getting a plausible-looking wrong number).
-    fn latch_icount(&self) -> u64 {
+    /// Retired guest instructions. Zero when no core is attached (a guest
+    /// reading a flat zero learns the counter is unusable rather than getting
+    /// a plausible-looking wrong number).
+    fn icount(&self) -> u64 {
         let guard = self.core.lock();
-        let n = match guard.as_ref() {
+        match guard.as_ref() {
             // SAFETY: see CorePtr — the CPU thread is the one issuing this load.
             Some(CorePtr(ptr)) => unsafe { (**ptr).hot.cycles },
             None => 0,
-        };
-        drop(guard);
+        }
+    }
+
+    /// `icount`, latched the same way as the host clock.
+    fn latch_icount(&self) -> u64 {
+        let n = self.icount();
         self.icount_latch.store(n, Ordering::Relaxed);
         n
     }
@@ -590,6 +615,25 @@ mod tests {
         let hi2 = d.read32((TEST_DEV_BASE + REG_HOST_NS_HI) as u64).data;
         let second = ((hi2 as u64) << 32) | lo2 as u64;
         assert!(second >= first, "host clock went backwards: {} -> {}", first, second);
+    }
+
+    #[test]
+    fn the_guest_clock_follows_retired_instructions_and_nothing_else() {
+        let d = TestDevice::new("unused").with_clock(TestDeviceClock::Guest);
+        let mut core = MipsCore::new();
+        d.attach_core(&core as *const MipsCore);
+        let read = |d: &TestDevice| {
+            let lo = d.read32((TEST_DEV_BASE + REG_HOST_NS_LO) as u64).data;
+            let hi = d.read32((TEST_DEV_BASE + REG_HOST_NS_HI) as u64).data;
+            ((hi as u64) << 32) | lo as u64
+        };
+        core.hot.cycles = 1_000;
+        let a = read(&d);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(read(&d), a, "wall time must not move the guest clock");
+        core.hot.cycles = 0x1_0000_0000;
+        assert_eq!(read(&d), 0x1_0000_0000 * GUEST_CLOCK_NS_PER_INSN);
+        assert_eq!(a, 1_000 * GUEST_CLOCK_NS_PER_INSN);
     }
 
     #[test]
