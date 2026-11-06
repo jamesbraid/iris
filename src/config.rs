@@ -1359,6 +1359,40 @@ fn set_or_remove_env(key: &str, val: &str) {
     }
 }
 
+/// Where jitv2 compiles a region it has just found hot.
+///
+/// - `async`: on the compile pool's threads, while the CPU keeps interpreting
+///   the page until the compiled code is published. Fastest wall clock, but
+///   when a region switches from interpreted to compiled depends on thread
+///   timing, so no two runs execute the same host code.
+/// - `sync`: on the CPU thread, at the instruction that asked for it, and the
+///   compiled code runs at once. Slower to warm up, and the same every run.
+///   One CPU only: several share the pool's threads.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+#[clap(rename_all = "lower")]
+pub enum JitCompile {
+    #[default]
+    Async,
+    Sync,
+}
+
+/// Where the test device's clock registers get their time.
+///
+/// - `host`: the host's monotonic clock. What a benchmark measures speed with.
+/// - `guest`: a fixed number of nanoseconds per retired guest instruction
+///   (`dev::testdev::GUEST_CLOCK_NS_PER_INSN`), so a guest that sizes its work
+///   by time sizes it the same way every run. It reports no speed: guest MIPS
+///   come out constant.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+#[clap(rename_all = "lower")]
+pub enum TestDeviceClock {
+    #[default]
+    Host,
+    Guest,
+}
+
 /// jitv2 compile-pool tuning (`[jitv2]` section): the compile-pool thread
 /// count, fixed at process startup, never changed at runtime — see
 /// `CompileQueue::set_thread_count`'s own doc comment for why — plus the
@@ -1373,6 +1407,10 @@ fn set_or_remove_env(key: &str, val: &str) {
 pub struct Jitv2Config {
     #[serde(default = "default_jitv2_threads")]
     pub threads: usize,
+    /// Compile on the pool's threads (`async`, the default) or on the CPU
+    /// thread at the dispatch gate (`sync`). See [`JitCompile`].
+    #[serde(default)]
+    pub compile: JitCompile,
     /// Keep compiled pages on disk across runs (`IRIS_JIT_CACHE`). 86-95%
     /// warm hits in the measurements in `docs/jitv2-persistent-cache.md`.
     #[serde(default)]
@@ -1390,7 +1428,7 @@ fn default_jitv2_threads() -> usize { 1 }
 
 impl Default for Jitv2Config {
     fn default() -> Self {
-        Self { threads: default_jitv2_threads(), cache: false, cache_dir: String::new() }
+        Self { threads: default_jitv2_threads(), compile: JitCompile::default(), cache: false, cache_dir: String::new() }
     }
 }
 
@@ -1865,6 +1903,11 @@ pub struct MachineConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_device_dump: Option<String>,
 
+    /// The test device's clock: the host's (`host`, default) or one derived
+    /// from retired instructions (`guest`). See [`TestDeviceClock`].
+    #[serde(default)]
+    pub test_device_clock: TestDeviceClock,
+
     /// cheritest convention: a guest write to CP0 register 26 triggers the same
     /// dump as the test device's DUMP register. Off by default and must stay
     /// that way for a normal boot — CP0 26 is ECC on a real R4400 and the PROM
@@ -2196,6 +2239,7 @@ impl Default for MachineConfig {
             perfetto_clock: None,
             test_device: false,
             test_device_dump: None,
+            test_device_clock: TestDeviceClock::default(),
             cheritest_dump_hook: false,
             nat_subnet: None,
             ci: false,
@@ -2651,6 +2695,14 @@ impl MachineConfig {
                 "jitv2.threads must be at least 1 — 0 would silently degrade to no compile threads, everything sticky-fails to compile forever".into(),
             );
         }
+        if self.jitv2.compile == JitCompile::Sync {
+            if cfg!(feature = "lightning") {
+                return Err("jitv2.compile = \"sync\" is not available in a `lightning` build, which always compiles on the pool".into());
+            }
+            if self.machine.cpus > 1 {
+                return Err("jitv2.compile = \"sync\" needs one CPU: several share the compile pool's threads".into());
+            }
+        }
         Ok(())
     }
 
@@ -2766,6 +2818,12 @@ pub struct Cli {
     /// jitv2 compile-pool thread count (fixed at startup, see jitv2.threads)
     #[arg(long = "jitv2-threads", value_name = "N")]
     pub jitv2_threads: Option<usize>,
+
+    /// Where jitv2 compiles: `async` on the pool's threads (default) or `sync`
+    /// on the CPU thread, so a run executes the same host code every time.
+    /// One CPU only.
+    #[arg(long = "jitv2-compile", value_name = "MODE")]
+    pub jitv2_compile: Option<JitCompile>,
 
     /// SCSI ID 1 image path (HDD)
     #[arg(long)]
@@ -2933,6 +2991,12 @@ pub struct Cli {
     #[arg(long = "test-device-dump", value_name = "FILE")]
     pub test_device_dump: Option<String>,
 
+    /// Time base of the test device's clock registers: `host` (default) or
+    /// `guest`, which counts retired instructions so a guest that sizes its
+    /// work by time does the same work every run. Overrides `test_device_clock`.
+    #[arg(long = "test-device-clock", value_name = "CLOCK")]
+    pub test_device_clock: Option<TestDeviceClock>,
+
     /// cheritest convention: a guest write to CP0 register 26 dumps machine
     /// state. Needs --test-device. Never enable for a normal boot — CP0 26 is
     /// ECC on a real R4400 and the PROM writes it during cache init.
@@ -3029,6 +3093,7 @@ impl Cli {
         if let Some(v) = self.bank2    { cfg.banks[2] = v; }
         if let Some(v) = self.bank3    { cfg.banks[3] = v; }
         if let Some(n) = self.jitv2_threads { cfg.jitv2.threads = n; }
+        if let Some(m) = self.jitv2_compile { cfg.jitv2.compile = m; }
 
         // Helper: insert or update a SCSI device entry.
         let apply_scsi = |map: &mut std::collections::HashMap<u8, ScsiDeviceConfig>,
@@ -3103,6 +3168,7 @@ impl Cli {
         if let Some(ref d) = self.rsh_dir { cfg.network.rsh_dir = Some(d.clone()); }
         if self.test_device { cfg.test_device = true; }
         if let Some(ref p) = self.test_device_dump { cfg.test_device_dump = Some(p.clone()); }
+        if let Some(c) = self.test_device_clock { cfg.test_device_clock = c; }
         if self.cheritest_dump_hook { cfg.cheritest_dump_hook = true; }
         if let Some(ref s) = self.nat_subnet { cfg.nat_subnet = Some(s.clone()); }
 
@@ -3407,6 +3473,44 @@ mod export_tests {
         assert!(parse_mac("00:80:19:12:34").is_err());
         assert!(parse_mac("zz:80:19:12:34:56").is_err());
         assert!(parse_mac("01:80:19:12:34:56").is_err(), "multicast bit must be rejected");
+    }
+
+    #[test]
+    fn jit_compile_and_test_device_clock_default_to_the_normal_build() {
+        let cfg = MachineConfig::default();
+        assert_eq!(cfg.jitv2.compile, JitCompile::Async);
+        assert_eq!(cfg.test_device_clock, TestDeviceClock::Host);
+        let parsed: MachineConfig = toml::from_str("").expect("parse");
+        assert_eq!(parsed.jitv2.compile, JitCompile::Async);
+        assert_eq!(parsed.test_device_clock, TestDeviceClock::Host);
+    }
+
+    #[test]
+    fn jit_compile_and_test_device_clock_read_from_toml_and_the_command_line() {
+        let parsed: MachineConfig =
+            toml::from_str("test_device_clock = \"guest\"\n[jitv2]\ncompile = \"sync\"\n").expect("parse");
+        assert_eq!(parsed.jitv2.compile, JitCompile::Sync);
+        assert_eq!(parsed.test_device_clock, TestDeviceClock::Guest);
+        assert!(toml::from_str::<MachineConfig>("[jitv2]\ncompile = \"inline\"\n").is_err());
+
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["iris", "--jitv2-compile", "sync", "--test-device-clock", "guest"])
+            .expect("parse flags");
+        assert_eq!(cli.jitv2_compile, Some(JitCompile::Sync));
+        assert_eq!(cli.test_device_clock, Some(TestDeviceClock::Guest));
+        assert!(Cli::try_parse_from(["iris", "--jitv2-compile", "never"]).is_err());
+    }
+
+    #[test]
+    #[cfg(not(feature = "lightning"))]
+    fn sync_compile_needs_one_cpu() {
+        let mut cfg = MachineConfig::default();
+        cfg.jitv2.compile = JitCompile::Sync;
+        cfg.validate().expect("sync compile on the default machine");
+        cfg.machine.profile = MachineProfile::OctaneIp30;
+        cfg.machine.cpu = CpuModel::R10000;
+        cfg.machine.cpus = 2;
+        assert!(cfg.validate().unwrap_err().contains("one CPU"));
     }
 
     #[test]
