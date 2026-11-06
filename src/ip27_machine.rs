@@ -259,7 +259,6 @@ pub struct Ip27Machine<B: Ip27Board> {
     /// The recurring timer that brings the controller up to date.
     controller_timer: Option<TimerId>,
     monitor: Arc<Monitor>,
-    monitor_port: u16,
     ci: bool,
     nvram: String,
     events: Option<Receiver<MachineEvent>>,
@@ -421,7 +420,7 @@ impl<B: Ip27Board> Ip27Machine<B> {
             units.push(Unit { node, cpu });
         }
 
-        let monitor = Monitor::new();
+        let monitor = Monitor::new(cfg.monitor_port.unwrap_or(DEFAULT_MONITOR_PORT));
         monitor.register_device(init_devlog());
         monitor.register_device(Arc::new(crate::cpu::cpu_monitor::CpuMonitor::new(units.iter().map(|u| u.cpu.clone()).collect())));
         for u in &units {
@@ -447,7 +446,6 @@ impl<B: Ip27Board> Ip27Machine<B> {
             controller_events: tx,
             controller_timer: None,
             monitor: Arc::new(monitor),
-            monitor_port: cfg.monitor_port.unwrap_or(DEFAULT_MONITOR_PORT),
             ci: cfg.ci,
             nvram: cfg.nvram.clone(),
             events: Some(rx),
@@ -592,7 +590,7 @@ impl<B: Ip27Board> Ip27Machine<B> {
 impl<B: Ip27Board> Workstation for Ip27Machine<B> {
     fn start(&mut self) {
         self.lifecycle = GuestState::Starting;
-        self.monitor.clone().start_server(format!("127.0.0.1:{}", self.monitor_port));
+        self.monitor.serve();
         self.restart_peripherals();
         if !self.ci {
             self.cpu_start();

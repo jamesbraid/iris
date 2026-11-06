@@ -126,7 +126,6 @@ pub struct OctaneMachine {
     flash_lines: Vec<Arc<CachedFlashLines>>,
     timer_manager: Arc<TimerManager>,
     monitor: Arc<crate::monitor::Monitor>,
-    monitor_port: u16,
     /// The console UART's in-process host end in CI mode (`--ci`).
     ci_serial: Option<Arc<crate::dev::serial_host::CiSerialBackend>>,
     pub bridge: Arc<Bridge>,
@@ -499,7 +498,8 @@ impl OctaneMachine {
             heart.set_cpu_park(id, c.park_slot());
         }
 
-        let monitor = crate::monitor::Monitor::new();
+        let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
+        let monitor = crate::monitor::Monitor::new(monitor_port);
         monitor.register_device(crate::devlog::init_devlog());
         monitor.register_device(Arc::new(crate::cpu::cpu_monitor::CpuMonitor::new(cpus.clone())));
         monitor.register_device(heart.clone());
@@ -545,7 +545,6 @@ impl OctaneMachine {
         if let Some(v) = &vpro {
             monitor.register_device(v.clone());
         }
-        let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
         let ci_serial = cfg.ci.then(|| Arc::new(crate::dev::serial_host::CiSerialBackend::new()));
         Self::connect_serial(cfg, &ioc3, ci_serial.as_ref());
 
@@ -572,7 +571,6 @@ impl OctaneMachine {
             flash_lines,
             timer_manager,
             monitor: Arc::new(monitor),
-            monitor_port,
             ci_serial,
             bridge,
             xio_boards,
@@ -718,7 +716,7 @@ impl OctaneMachine {
         if let Ok(starting) = self.lifecycle.transition(crate::machine_state::GuestState::Starting) {
             self.lifecycle = starting;
         }
-        self.monitor.clone().start_server(format!("127.0.0.1:{}", self.monitor_port));
+        self.monitor.serve();
         self.restart_peripherals();
         // CI mode: the harness starts the CPU (`iris-ci start`).
         if self.ci_serial.is_none() {
