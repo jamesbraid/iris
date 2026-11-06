@@ -26,6 +26,9 @@ pub const HOST_PARK_BIT: u64 = 1 << 62;
 pub const HOLD_HEART: u32 = 1 << 0;
 /// Another thread needs the machine still ([`World::stop_others`]).
 pub const HOLD_WORLD: u32 = 1 << 1;
+/// The CPU is being stopped (`MipsCpu::halt`); held only until its thread is
+/// joined, so a guest spinning in compiled code gives the thread up.
+pub const HOLD_STOP: u32 = 1 << 2;
 
 const NOT_A_CPU: u8 = u8::MAX;
 
