@@ -251,6 +251,55 @@ impl Devices {
     }
 }
 
+/// `v` with its first hex scalar changed, or `None` where there is none: a
+/// state a part will load, and that differs from the one it saved.
+#[cfg(test)]
+pub(crate) fn dirtied(v: &toml::Value) -> Option<toml::Value> {
+    match v {
+        toml::Value::String(s) if s.starts_with("0x") => {
+            let n = u64::from_str_radix(&s[2..], 16).ok()?;
+            Some(toml::Value::String(format!("0x{:0w$x}", n ^ 1, w = s.len() - 2)))
+        }
+        toml::Value::Table(t) => {
+            for (k, x) in t {
+                // The WD33C93A's address register survives its reset.
+                if k == "ar" {
+                    continue;
+                }
+                if let Some(d) = dirtied(x) {
+                    let mut t = t.clone();
+                    t.insert(k.clone(), d);
+                    return Some(toml::Value::Table(t));
+                }
+            }
+            None
+        }
+        toml::Value::Array(a) => {
+            for (i, x) in a.iter().enumerate() {
+                if let Some(d) = dirtied(x) {
+                    let mut a = a.clone();
+                    a[i] = d;
+                    return Some(toml::Value::Array(a));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// The table of a `Devices::save` with every part's state `dirtied`.
+#[cfg(test)]
+pub(crate) fn dirtied_everywhere(state: &toml::Value) -> toml::Value {
+    let mut out = state.as_table().unwrap().clone();
+    for (key, v) in state.as_table().unwrap() {
+        if let Some(d) = dirtied(v) {
+            out.insert(key.clone(), d);
+        }
+    }
+    toml::Value::Table(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
