@@ -40,7 +40,7 @@ use crate::chunk_store::{ChunkStore, get_chunks_as_words, put_words_as_chunks};
 use crate::hptimer::TimerManager;
 use crate::control::Control;
 use crate::guest_net::GuestNet;
-use crate::workstation::{MachineSlot, SystemController, Workstation};
+use crate::workstation::{SystemController, Workstation};
 
 /// The profile of the machine this process is running, set by
 /// [`crate::workstation::build`] so [`emulator_name`] can pick a model word
@@ -1021,26 +1021,6 @@ impl Machine {
         }
     }
 
-    /// The shared, nullable pointer slot for this Machine, created on first
-    /// use. Must be called while `self` is in its final location (boxed, or on
-    /// `main`'s stack) — the slot records this address.
-    pub(crate) fn machine_slot(&mut self) -> MachineSlot {
-        let ptr = self as *mut Machine as *mut dyn Workstation;
-        self.control.slot(ptr)
-    }
-
-    /// Register a SystemController with the monitor so that `reset`, `save`,
-    /// and `load` commands work. Must be called after `Machine::new()` while
-    /// `self` is in its final stack location (i.e. before any moves).
-    /// Also starts the machine event dispatch thread (HardReset, PowerOff).
-    pub fn register_system_controller(&mut self) {
-        // The controller and the event thread reach this Machine through the
-        // shared slot, which `Drop` nulls: iris-gui drops a Machine on Stop
-        // while the monitor thread (and a connected client) lives on.
-        let ptr = self as *mut Machine as *mut dyn Workstation;
-        self.control.register(ptr, &self.monitor);
-    }
-
     pub fn stop(&mut self) {
         self.cpu.stop();
         // Graphics last: a board's stop joins its display thread, which can
@@ -1066,9 +1046,6 @@ impl Machine {
         &self.memory
     }
 
-    pub fn monitor_addr(&self) -> Option<std::net::SocketAddr> {
-        self.monitor.bound_addr()
-    }
 
     /// The terminal console: relays stdin to the monitor at `addr` and the
     /// monitor's output to stdout. When the monitor closes the connection
@@ -2074,16 +2051,15 @@ impl Workstation for Machine {
     fn restart_peripherals(&mut self) { Machine::restart_peripherals(self) }
     fn cpu_start(&self) { Machine::cpu_start(self) }
     fn cpu_is_running(&self) -> bool { Machine::cpu_is_running(self) }
-    fn machine_slot(&mut self) -> MachineSlot { Machine::machine_slot(self) }
-    fn register_system_controller(&mut self) { Machine::register_system_controller(self) }
-    fn monitor_addr(&self) -> Option<std::net::SocketAddr> { Machine::monitor_addr(self) }
-    fn lifecycle(&self) -> GuestState { self.control.state() }
-    fn set_lifecycle(&mut self, state: GuestState) { self.control.set_state(state) }
+    fn control(&self) -> &Control { &self.control }
+    fn control_mut(&mut self) -> &mut Control { &mut self.control }
+    fn net(&self) -> Option<&GuestNet> { Some(&self.net) }
+    fn monitor(&self) -> &Arc<Monitor> { &self.monitor }
+    fn as_ws_ptr(&mut self) -> *mut dyn Workstation { self as *mut Self as *mut dyn Workstation }
 
     fn get_display(&self) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> { Machine::get_display(self) }
     fn get_display_head1(&self) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> { Machine::get_display_head1(self) }
     fn get_ps2(&self) -> Arc<crate::dev::ps2::Ps2Controller> { Machine::get_ps2(self) }
-    fn register_monitor_device(&self, device: Arc<dyn crate::traits::Device>) { self.monitor.register_device(device); }
     fn get_timer_manager(&self) -> Arc<TimerManager> { Machine::get_timer_manager(self) }
     fn get_cpu_debug(&self) -> Arc<dyn CpuDebug> { Machine::get_cpu_debug(self) }
     fn fasttick_count(&self) -> Arc<AtomicU64> { Machine::fasttick_count(self) }
@@ -2118,15 +2094,6 @@ impl Workstation for Machine {
         cancel: &dyn Fn() -> bool,
     ) -> std::io::Result<usize> {
         Machine::sync_chd_disks(self, only, progress, cancel)
-    }
-    fn net_frames(&self) -> Option<Arc<std::sync::atomic::AtomicU64>> {
-        self.net.frames()
-    }
-    fn nat_control(&self) -> Option<Arc<crate::net::NatControl>> {
-        Some(self.net.nat())
-    }
-    fn nat_expected(&self) -> Option<(std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr)> {
-        Some(self.net.addrs())
     }
 }
 
