@@ -23,7 +23,7 @@ mod imp {
 
 use crate::devlog::{devlog, devlog_is_active, LogModule};
 use crate::irq::IrqLine;
-use crate::traits::{BusDevice, BusRead32, BusRead64, BusRead16, BusRead8, BUS_OK, Device};
+use crate::traits::{BusDevice, BusRead32, BusRead64, BusRead16, BusRead8, BUS_OK, Device, Resettable, Saveable};
 use crate::ultra_proto::{h2n, n2h, rdb_type, rdb_bytes, IpcRing, ShmHeader,
     SHM_MAGIC, SHM_VERSION, EVENT_AREA_SIZE, SHM_HEADER_OFFSET, SHM_RAMROM_OFFSET,
     RAMROM_TOTAL, SHM_TOTAL_SIZE};
@@ -397,6 +397,9 @@ impl Device for Ultra64 {
         Ok(())
     }
 }
+
+impl Saveable for Ultra64 {}
+impl Resettable for Ultra64 {}
 
 impl Drop for Ultra64 {
     fn drop(&mut self) {

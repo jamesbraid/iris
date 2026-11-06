@@ -75,7 +75,7 @@ use crate::config::GraphicsBoard;
 use crate::dev::ng1::rex3::Renderer;
 use crate::gfifo::GFifo;
 use crate::locks::SpinLock;
-use crate::traits::{BusDevice, BusRead8, BusRead16, BusRead32, BusRead64, BUS_BUSY, BUS_OK, Device, Saveable};
+use crate::traits::{BusDevice, BusRead8, BusRead16, BusRead32, BusRead64, BUS_BUSY, BUS_OK, Device, Resettable, Saveable};
 
 use ge11::Ge11;
 use hq3::{host, Hq3Engine, Hq3Regs, Hq3Sink};
@@ -311,6 +311,8 @@ pub struct Mgras {
     unhandled: SpinLock<HashSet<String>>,
     /// HQ3 flags: the HQ3 thread raises them, the CPU sets and clears them.
     flags: AtomicU32,
+    /// This board's own `Arc`, set by `new`: the display thread needs one.
+    me: std::sync::OnceLock<std::sync::Weak<Mgras>>,
     /// `mgras probe` slots: GE readbacks in a range answer a chosen word
     /// (bits 63:48 first address, 47:32 last + 1, 31:0 the answer; 0 is
     /// unused). For mapping how libGLcore decodes GE state words.
@@ -510,6 +512,7 @@ impl Mgras {
             (*(*p).front.get()).init(board);
             addr_of_mut!((*p).unhandled).write(SpinLock::new(HashSet::new()));
             addr_of_mut!((*p).flags).write(AtomicU32::new(0));
+            addr_of_mut!((*p).me).write(std::sync::OnceLock::new());
             addr_of_mut!((*p).eng).write(UnsafeCell::new(Hq3Engine::new(if board == GraphicsBoard::MaxImpact { 2 } else { 1 })));
             let planes = (*p).planes.get();
             let nrss = Self::engines_for(board);
@@ -540,6 +543,7 @@ impl Mgras {
             addr_of_mut!((*p).trace).write(SpinLock::new(debug::MgrasTrace::new()));
             a.assume_init()
         };
+        let _ = m.me.set(Arc::downgrade(&m));
         if let Some(path) = std::env::var_os("IRIS_MGRAS_REC") {
             let path = path.to_string_lossy();
             match m.set_recording(Some(&path)) {
@@ -1598,8 +1602,16 @@ impl crate::gfx_display::GfxDisplay for Mgras {
 
 impl Device for Mgras {
     fn step(&self, _cycles: u64) {}
-    fn stop(&self) {}
-    fn start(&self) {}
+    /// Stops the engines and the display refresh thread.
+    fn stop(&self) {
+        self.stop_display();
+    }
+    /// Starts the engines and the display refresh thread.
+    fn start(&self) {
+        if let Some(me) = self.me.get().and_then(std::sync::Weak::upgrade) {
+            me.start_display();
+        }
+    }
     fn is_running(&self) -> bool { self.running.load(Ordering::Relaxed) }
     fn get_clock(&self) -> u64 { 0 }
 
@@ -1629,6 +1641,8 @@ impl Saveable for Mgras {
         Ok(())
     }
 }
+
+impl Resettable for Mgras {}
 
 fn read_status(v: Option<u64>) -> (u32, u64) {
     match v {
