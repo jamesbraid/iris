@@ -3734,6 +3734,9 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             self.step_int()
             }
         } else if fetch.status & EXEC_IS_EXCEPTION != 0 {
+            // `step_int` counts this step in its preamble, before the fetch
+            // that faults; this path runs no preamble, so count it here.
+            step_cycles!(self);
             self.handle_exception(fetch.status)
         } else {
             fetch.status

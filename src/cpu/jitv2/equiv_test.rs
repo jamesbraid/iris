@@ -4039,6 +4039,54 @@ mod tests {
             "a store to an unrelated physical page must NOT trip the SMC check");
     }
 
+    /// An instruction fetch that faults counts one in `hot.cycles`: the
+    /// interpreter bumps the counter before it fetches, so the step that
+    /// takes the TLB miss is counted like any other. `step_jit` has no
+    /// preamble and used to hand the fault straight to `handle_exception`,
+    /// leaving the count one short per fetch fault. Both engines run
+    /// `lui; jr; nop` to an unmapped page and take the fault; the reference
+    /// calls `step_int` directly because `step_jit` is the thing under test.
+    #[test]
+    #[cfg(not(feature = "lightning"))]
+    fn fetch_fault_counts_like_the_interpreter() {
+        use crate::cpu::mips_isa::{FUNCT_JR, OP_LUI, OP_SPECIAL};
+        let pc = 0xFFFF_FFFF_8000_1000u64;
+        let code = [
+            (pc, make_i(OP_LUI, 0, 1, 0x3000)),                  // lui r1, 0x3000: past the identity map
+            (pc + 4, make_r(OP_SPECIAL, 1, 0, 0, 0, FUNCT_JR)),   // jr r1
+            (pc + 8, 0),                                          // nop (delay slot)
+        ];
+        let build = |jit: bool| {
+            let mem = if jit { MockMemory::new() } else { MockMemory::new_not_compilable() };
+            let (exec, mem) = seeded_executor_over(mem, [0u64; 32], pc);
+            let mut exec = Box::new(exec);
+            for &(va, raw) in &code {
+                mem.set_word(va, raw);
+                mem.set_word(va & 0x1FFF_FFFF, raw);
+            }
+            // Reset leaves ERL set, which makes kuseg unmapped; clear it so
+            // the jump target takes a TLB miss.
+            exec.core.cp0_status &= !crate::cpu::mips_core::STATUS_ERL;
+            exec.resync_privilege_state();
+            exec.install_jit_hooks();
+            exec.jitv2_inline_compile = jit;
+            exec
+        };
+
+        let mut interp = build(false);
+        for _ in 0..4 { interp.step_int(); } // lui, jr, nop, then the faulting fetch
+        let mut jit = build(true);
+        jit.step_jit(); // one call compiles and runs all three
+        assert_eq!(jit.core.hot.cycles, 3, "the region retires three instructions");
+        jit.step_jit(); // the faulting fetch
+
+        assert_eq!(interp.core.cp0_cause & 0x7C, jit.core.cp0_cause & 0x7C, "both engines take the same exception");
+        assert_ne!(interp.core.pc, 0x3000_0000, "the fault must have been taken");
+        assert_eq!(CoreSnapshot::capture(&interp.core), CoreSnapshot::capture(&jit.core));
+        assert_eq!(interp.core.hot.cycles, 4, "reference: the fetch fault counts");
+        assert_eq!(jit.core.hot.cycles, interp.core.hot.cycles);
+    }
+
     #[test]
     fn self_loop_with_decrement_in_delay_slot_converges_natively() {
         // BGTZ r2,-1 / slot SUBU r2,r2,r3: a tight decrement loop whose
