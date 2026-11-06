@@ -18,7 +18,7 @@ accident.
 
 **Rule.** Fold, don't widen: `MipsExecutor::phys_mask` is the board's decode
 width, applied in `fold_phys` (after `phys_alias`) to mapped, xkphys and
-ERL-identity translations. `machine.rs` and `ip32_machine.rs` set it to
+ERL-identity translations. `ip22_machine.rs` and `ip32_machine.rs` set it to
 `u32::MAX`; the default (all ones) is for tests and a future Octane. Folding
 in the CPU rather than in `Physical` keeps the caches, the ppmem window and
 the JIT's nutlb on the same 32-bit addresses, so a page like the kernel

@@ -40,7 +40,7 @@ use crate::disks::Disks;
 use crate::guest_net::GuestNet;
 use crate::workstation::{SystemController, Workstation};
 
-pub struct Machine {
+pub struct Ip22Machine {
     cpu: Arc<dyn crate::cpu::mips_exec::CpuDevice>,
     /// Where this machine has memory.
     memory: Arc<crate::memory_map::MemoryMap>,
@@ -154,7 +154,7 @@ pub(crate) struct LiveCheckpoint {
 }
 
 /// The test device and the ultra64 dev board both decode GIO expansion slot 0,
-/// so only one of them can exist. Panics rather than exiting: `Machine::new`
+/// so only one of them can exist. Panics rather than exiting: `Ip22Machine::new`
 /// already panics on bad input, and a host that embeds IRIS catches that
 /// (`iris-gui`'s worker wraps construction in `catch_unwind`) — killing the
 /// application over a configuration mistake is not a choice a library gets to
@@ -181,7 +181,7 @@ fn check_virtio_slot_free(slot: crate::dev::ioc::GioSlot, ultra64: bool, testdev
     }
 }
 
-impl Machine {
+impl Ip22Machine {
     pub fn new(cfg: MachineConfig) -> Self {
         // Host calls (iris-hostcall): the self-test service is always there
         // when the feature is built in, so a guest can prove the trap works.
@@ -713,7 +713,7 @@ impl Machine {
         // the boards and Wd33c93a::new run before the CPU exists, so this
         // can't be a constructor parameter (see Hot::cycles's doc comment).
         // Must happen before hpc3.scsi().start() (called later, from
-        // Machine::start) actually spawns the worker thread that reads it.
+        // Ip22Machine::start) actually spawns the worker thread that reads it.
         status.set_cpu_cycles(cpu.cycles_ptr());
         if let Some(td) = &board.testdev { td.attach_core(cpu.core_ptr()); }
         if cheritest_hook {
@@ -1685,19 +1685,19 @@ impl Machine {
     }
 }
 
-impl Drop for Machine {
+impl Drop for Ip22Machine {
     fn drop(&mut self) {
         // Runs before any field is dropped. Taking the lock waits for an
         // in-flight monitor/event/CI command to finish, so none of them can see
-        // a half-destroyed Machine. No controller command drops the Machine, so
+        // a half-destroyed machine. No controller command drops the machine, so
         // this never waits on a lock its own thread holds.
         self.control.release();
-        // The guest clock points into this Machine's CPU core.
+        // The guest clock points into this machine's CPU core.
         #[cfg(feature = "perfetto")]
         crate::perfetto::set_guest_cycles(None);
         crate::workstation::flush_on_drop(self);
-        // Release the monitor port and this Machine's device handles, so the next
-        // Machine in the same process (iris-gui Stop -> Start) gets the monitor.
+        // Release the monitor port and this machine's device handles, so the next
+        // machine in the same process (iris-gui Stop -> Start) gets the monitor.
         self.monitor.shutdown();
         // VINO's DMA thread runs from construction. It holds the bus.
         self.board.vino.stop();
@@ -1710,13 +1710,13 @@ impl Drop for Machine {
 
 /// The Indy and Indigo2 family as the front ends see it: each method is the
 /// inherent one of the same name.
-impl Workstation for Machine {
-    fn start(&mut self) { Machine::start(self) }
-    fn stop(&mut self) { Machine::stop(self) }
-    fn reset(&mut self) { Machine::reset(self) }
-    fn restart_peripherals(&mut self) { Machine::restart_peripherals(self) }
-    fn cpu_start(&self) { Machine::cpu_start(self) }
-    fn cpu_is_running(&self) -> bool { Machine::cpu_is_running(self) }
+impl Workstation for Ip22Machine {
+    fn start(&mut self) { Ip22Machine::start(self) }
+    fn stop(&mut self) { Ip22Machine::stop(self) }
+    fn reset(&mut self) { Ip22Machine::reset(self) }
+    fn restart_peripherals(&mut self) { Ip22Machine::restart_peripherals(self) }
+    fn cpu_start(&self) { Ip22Machine::cpu_start(self) }
+    fn cpu_is_running(&self) -> bool { Ip22Machine::cpu_is_running(self) }
     fn devices(&self) -> &Devices { &self.devices }
     fn disks(&self) -> &Disks { &self.disks }
     fn control(&self) -> &Control { &self.control }
@@ -1725,29 +1725,29 @@ impl Workstation for Machine {
     fn monitor(&self) -> &Arc<Monitor> { &self.monitor }
     fn as_ws_ptr(&mut self) -> *mut dyn Workstation { self as *mut Self as *mut dyn Workstation }
 
-    fn get_display(&self) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> { Machine::get_display(self) }
-    fn get_display_head1(&self) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> { Machine::get_display_head1(self) }
-    fn get_ps2(&self) -> Arc<crate::dev::ps2::Ps2Controller> { Machine::get_ps2(self) }
-    fn get_timer_manager(&self) -> Arc<TimerManager> { Machine::get_timer_manager(self) }
-    fn get_cpu_debug(&self) -> Arc<dyn CpuDebug> { Machine::get_cpu_debug(self) }
-    fn fasttick_count(&self) -> Arc<AtomicU64> { Machine::fasttick_count(self) }
-    fn get_ci_serial(&self) -> Option<Arc<crate::dev::serial_host::CiSerialBackend>> { Machine::get_ci_serial(self) }
-    fn inject_serial_console(&self, bytes: &[u8]) { Machine::inject_serial_console(self, bytes) }
+    fn get_display(&self) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> { Ip22Machine::get_display(self) }
+    fn get_display_head1(&self) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> { Ip22Machine::get_display_head1(self) }
+    fn get_ps2(&self) -> Arc<crate::dev::ps2::Ps2Controller> { Ip22Machine::get_ps2(self) }
+    fn get_timer_manager(&self) -> Arc<TimerManager> { Ip22Machine::get_timer_manager(self) }
+    fn get_cpu_debug(&self) -> Arc<dyn CpuDebug> { Ip22Machine::get_cpu_debug(self) }
+    fn fasttick_count(&self) -> Arc<AtomicU64> { Ip22Machine::fasttick_count(self) }
+    fn get_ci_serial(&self) -> Option<Arc<crate::dev::serial_host::CiSerialBackend>> { Ip22Machine::get_ci_serial(self) }
+    fn inject_serial_console(&self, bytes: &[u8]) { Ip22Machine::inject_serial_console(self, bytes) }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
-    fn load_elf(&self, path: &str) -> Result<String, String> { Machine::load_elf(self, path) }
-    fn save_snapshot(&mut self, name: &str) -> Result<(), String> { Machine::save_snapshot(self, name) }
-    fn load_snapshot(&mut self, name: &str) -> Result<(), String> { Machine::load_snapshot(self, name) }
-    fn ci_restore(&mut self, name: &str) -> Result<(), String> { Machine::ci_restore(self, name) }
-    fn ci_rollback(&mut self) -> Result<(), String> { Machine::ci_rollback(self) }
+    fn load_elf(&self, path: &str) -> Result<String, String> { Ip22Machine::load_elf(self, path) }
+    fn save_snapshot(&mut self, name: &str) -> Result<(), String> { Ip22Machine::save_snapshot(self, name) }
+    fn load_snapshot(&mut self, name: &str) -> Result<(), String> { Ip22Machine::load_snapshot(self, name) }
+    fn ci_restore(&mut self, name: &str) -> Result<(), String> { Ip22Machine::ci_restore(self, name) }
+    fn ci_rollback(&mut self) -> Result<(), String> { Ip22Machine::ci_rollback(self) }
 
     fn save_nvram(&self, path: Option<&str>) -> Result<String, String> {
         let rtc = self.hpc3.rtc();
         let path = path.unwrap_or_else(|| rtc.nvram_path()).to_string();
         rtc.save_nvram(&path).map(|_| path).map_err(|e| e.to_string())
     }
-    fn scratch_path(&self) -> Option<&std::path::Path> { Machine::scratch_path(self) }
-    fn remount_cdrom_guest(&self, scsi_id: u8) { Machine::remount_cdrom_guest(self, scsi_id) }
+    fn scratch_path(&self) -> Option<&std::path::Path> { Ip22Machine::scratch_path(self) }
+    fn remount_cdrom_guest(&self, scsi_id: u8) { Ip22Machine::remount_cdrom_guest(self, scsi_id) }
 }
 
 /// A dropped machine gives back its decode table: a process may have only 64,
@@ -1767,7 +1767,7 @@ mod drop_tests {
             (MachineProfile::Indigo2Ip28, GraphicsBoard::SolidImpact),
         ] {
             let cfg = config(&dir, profile, board);
-            let machine = big_stack(move || Machine::new(cfg));
+            let machine = big_stack(move || Ip22Machine::new(cfg));
             let bus = Arc::downgrade(&machine.board.phys);
             drop(machine);
             assert_eq!(bus.strong_count(), 0, "{profile:?} with {board:?}: the bus outlives its machine");
@@ -1780,11 +1780,11 @@ mod drop_tests {
 mod controller_lifetime_tests {
     use super::*;
 
-    fn build_machine() -> Box<Machine> {
-        // Machine::new needs more stack than a test thread has (see main.rs).
+    fn build_machine() -> Box<Ip22Machine> {
+        // Ip22Machine::new needs more stack than a test thread has (see main.rs).
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
-            .spawn(|| Box::new(Machine::new(crate::bench_runner::bench_config(
+            .spawn(|| Box::new(Ip22Machine::new(crate::bench_runner::bench_config(
                 [16, 0, 0, 0], crate::config::CpuModel::default()))))
             .unwrap()
             .join()
@@ -1800,7 +1800,7 @@ mod controller_lifetime_tests {
     fn start_guest_acknowledges_the_lifecycle_transition() {
         let mut machine = build_machine();
         assert_eq!(machine.status().state, GuestState::Idle);
-        assert!(!machine.status().monitor_ready(), "no monitor before Machine::start");
+        assert!(!machine.status().monitor_ready(), "no monitor before Ip22Machine::start");
 
         let ack = machine.start_guest().expect("start from idle");
         assert_eq!(ack.text(), "idle -> starting -> running");
@@ -1840,7 +1840,7 @@ mod controller_lifetime_tests {
             .spawn(move || {
                 let mut cfg = crate::bench_runner::bench_config([16, 0, 0, 0], crate::config::CpuModel::default());
                 cfg.scsi.insert(1, crate::config::ScsiDeviceConfig { path: path_str, overlay: true, ..Default::default() });
-                Box::new(Machine::new(cfg))
+                Box::new(Ip22Machine::new(cfg))
             })
             .unwrap()
             .join()
@@ -1880,7 +1880,7 @@ mod controller_lifetime_tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// iris-gui drops a Machine on Stop while the monitor keeps its
+    /// iris-gui drops a machine on Stop while the monitor keeps its
     /// SystemController. Every command through that controller afterwards used
     /// to dereference freed memory (SIGSEGV in `save_snapshot`).
     #[test]
@@ -1911,7 +1911,7 @@ mod stop_order_tests {
         let mut machine = big_stack(|| {
             let mut cfg = crate::bench_runner::bench_config([16, 0, 0, 0], crate::config::CpuModel::default());
             cfg.headless = false;
-            Box::new(Machine::new(cfg))
+            Box::new(Ip22Machine::new(cfg))
         });
         let hpc3 = machine.hpc3.clone();
         let (probe, overlap) = Probe::watching(move || hpc3.is_running());
@@ -1981,9 +1981,9 @@ mod snapshot_tests {
 
     /// Run `f` on the shared machine of `kind`, with its snapshots in a
     /// directory of its own.
-    fn on_machine<R: Send>(kind: Kind, tag: &str, f: impl FnOnce(&mut Machine) -> R + Send) -> R {
+    fn on_machine<R: Send>(kind: Kind, tag: &str, f: impl FnOnce(&mut Ip22Machine) -> R + Send) -> R {
         with_shared(kind, |m| {
-            let m = m.as_any_mut().downcast_mut::<Machine>().expect("an Indy-family machine");
+            let m = m.as_any_mut().downcast_mut::<Ip22Machine>().expect("an Indy-family machine");
             let dir = std::env::temp_dir().join(format!("iris-snapshot-{tag}-{kind:?}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             let before = std::mem::replace(&mut m.saves, dir.clone());
@@ -2005,7 +2005,7 @@ mod snapshot_tests {
 
     /// Load `name` into the stopped machine, as `load_snapshot` does before it
     /// restarts anything: the peripherals' threads would change the state.
-    fn load(m: &mut Machine, name: &str) -> Result<(), String> {
+    fn load(m: &mut Ip22Machine, name: &str) -> Result<(), String> {
         m.apply_snapshot(name)
     }
 
@@ -2230,7 +2230,7 @@ mod virtio_tests {
                 cfg.virtio_serial.slot = slot;
                 // One unconnected port: no sockets in a unit test.
                 cfg.virtio_serial.ports = vec![Default::default()];
-                let m = Machine::new(cfg);
+                let m = Ip22Machine::new(cfg);
                 let phys = &m.board.phys;
                 assert_eq!(phys.read32(base + REG_MAGIC).data, MAGIC, "{profile:?} {slot:?}");
                 assert_eq!(phys.read32(base + REG_DEVICE_ID).data, 3);

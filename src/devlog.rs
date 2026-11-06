@@ -45,7 +45,7 @@ pub enum LogModule {
     /// HPC3-side motherboard EEPROM (NVRAM/env vars/MAC @ words 0x7D-0x7F,
     /// `nveeprom` command). Kept distinct from `Eeprom` (MC-side CPU
     /// daughtercard chip, `eeprom` command) — the two are separate physical
-    /// parts on real hardware, see machine.rs's `eeprom_mc`/`eeprom_hpc3`.
+    /// parts on real hardware, see ip22_machine.rs's `eeprom_mc`/`eeprom_hpc3`.
     Nveeprom = 25,
     /// GR2 (XZ / Extreme) graphics: HQ2, GE7, RE3, VC1, XMAP5, Bt457.
     Gr2 = 26,

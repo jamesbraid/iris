@@ -20,6 +20,21 @@ hashes are given where a change is easiest to understand by reading the commit.
   `profile = "indigo2_ip28"` and the default `cpu` now fails `validate` with a
   message naming `cpu = "r10000"` (the shipped `ip28.toml.example` and the GUI
   already set it). The front ends' Processor pickers list the same models.
+- The Indy, Indigo2 and Indigo2 IMPACT are one machine, `Ip22Machine`
+  (`src/ip22_machine.rs`, which replaces `src/machine.rs`), over an
+  `Ip22Board` value that holds what differs between them. The Indy-family, O2
+  and Octane start, stop, reset, save and load their parts through a shared
+  `Devices` list, keep their disks in `Disks`, their lifecycle state, event
+  channel and front-end pointer in `Control`, and their NAT handle in
+  `GuestNet`; `Workstation` provides the methods that were written out five
+  times. Snapshot files and keys are unchanged.
+- Behaviour that changed with it: the Octane no longer stores `Running` when a
+  snapshot loads (so starting it again after the monitor stops its CPU is
+  accepted); the IMPACT board on an Indigo2 writes no empty `mgras` snapshot
+  file; the IOC loads after the SCC, PIT and PS/2 it owns; the developer's
+  live checkpoint (`j2 trace`, `jitcheck`) also rewinds the test device, GR2
+  and IMPACT; on the Indy-family the Ultra64 and virtio-serial boards start
+  before the display and stop before the chipset.
 
 ### Boot test before publishing
 

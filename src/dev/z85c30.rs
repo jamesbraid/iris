@@ -1099,7 +1099,7 @@ mod tests {
 
     /// `read_b_control` returns 0 for RR3, so B's interrupt reaches the guest
     /// only through A's RR3 via the shared `ip_other` atomic that `update_ip`
-    /// publishes. `machine.rs` puts the CI console on B.
+    /// publishes. `ip22_machine.rs` puts the CI console on B.
     #[test]
     fn restore_channel_b_tx_int_reaches_rr3_via_a() {
         let src = Z85c30::new(None);

@@ -13,7 +13,7 @@
 //! threads are stopped during the test so device-side timing variance
 //! doesn't leak into the result.
 
-use crate::machine::Machine;
+use crate::ip22_machine::Ip22Machine;
 use crate::cpu::mips_exec::{CpuStateDigest, EXEC_RETRY};
 
 /// Result of `validate_snapshot_determinism`.
@@ -53,7 +53,7 @@ impl DeterminismReport {
 /// after both passes, with the second-pass state loaded. Caller is
 /// responsible for any subsequent `start`/`restart_peripherals`.
 pub fn validate_snapshot_determinism(
-    machine: &mut Machine,
+    machine: &mut Ip22Machine,
     name: &str,
     n_instructions: u64,
 ) -> Result<DeterminismReport, String> {
@@ -91,7 +91,7 @@ pub fn validate_snapshot_determinism(
 /// real-JIT-dispatch run — either the one `validate_jit_determinism` stopped
 /// at, or one of the `skip` ones it reconverged past on the way there (see
 /// `JitDeterminismReport`). Gated `jitv2 + developer` — every field and
-/// every `Machine` method `validate_jit_determinism` calls (`cpu_set_jitv2_dispatch_enabled`,
+/// every `Ip22Machine` method `validate_jit_determinism` calls (`cpu_set_jitv2_dispatch_enabled`,
 /// `cpu_step_one_inline_counting_instructions`, etc.) only exist under that
 /// same combination; the `jitcheck` monitor command that's this type's only
 /// real caller carries the identical gate.
@@ -185,7 +185,7 @@ pub struct JitDeterminismReport {
 /// should resume.
 #[cfg(all(feature = "jitv2", feature = "developer"))]
 pub fn validate_jit_determinism(
-    machine: &mut Machine,
+    machine: &mut Ip22Machine,
     n_instructions: u64,
     skip: u64,
 ) -> Result<JitDeterminismReport, String> {

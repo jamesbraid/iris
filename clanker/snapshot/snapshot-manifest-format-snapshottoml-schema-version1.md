@@ -19,7 +19,7 @@ parent = "base/desktop"       # name of the snapshot we restored from before thi
 description = "post-install"  # free-form note
 ```
 
-## Load behavior (`src/machine.rs:633` `load_snapshot`)
+## Load behavior (`src/ip22_machine.rs:633` `load_snapshot`)
 - **No manifest** → treated as legacy v0 with a warning. Best-effort load. (Old `saves/working*` snapshots are v0.)
 - **`schema_version > 1`** → refuse: "snapshot schema_version N is newer than this iris build supports (1)".
 - **`host_arch` mismatch** → refuse. FPU bit-layout differs cross-arch and there's no migration plumbing yet.
@@ -27,8 +27,8 @@ description = "post-install"  # free-form note
 
 ## Where it's defined
 - `src/snapshot.rs` — `Manifest` struct, `to_toml`/`from_toml`, `Snapshot::write_manifest`/`read_manifest`, `SCHEMA_VERSION` const.
-- `src/machine.rs:594` writes the manifest first thing in `save_snapshot`. `parent` is auto-set to `self.last_restore`.
-- `src/machine.rs:643-672` validates on load.
+- `src/ip22_machine.rs:594` writes the manifest first thing in `save_snapshot`. `parent` is auto-set to `self.last_restore`.
+- `src/ip22_machine.rs:643-672` validates on load.
 
 ## CI inspection
 - `info <name>` socket command returns the manifest plus `bytes_on_disk` for any snapshot. Legacy snapshots return `{"schema_version":0,"legacy":true}`.
