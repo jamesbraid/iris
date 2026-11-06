@@ -312,24 +312,52 @@ pub enum MachineEvent {
 }
 
 /// Restore hardware to power-on state.
-/// Called with all device threads stopped.
+/// Called with all device threads stopped. A part with no state to put back
+/// inherits the no-op.
 pub trait Resettable {
-    fn power_on(&self);
+    fn power_on(&self) {}
 }
 
 /// Serialize / deserialize device register state to/from TOML.
-/// Memory bulk data (RAM) is handled separately as raw binary.
+/// Memory bulk data (RAM) is handled separately as raw binary. A part with
+/// nothing to save inherits an empty table, which `Devices` leaves out of the
+/// snapshot, and a load that accepts anything.
 pub trait Saveable {
-    fn save_state(&self) -> toml::Value;
-    fn load_state(&self, v: &toml::Value) -> Result<(), String>;
+    fn save_state(&self) -> toml::Value {
+        toml::Value::Table(toml::map::Map::new())
+    }
+    fn load_state(&self, _v: &toml::Value) -> Result<(), String> {
+        Ok(())
+    }
+    /// State this part owns but the snapshot keeps under keys of their own
+    /// (the HPC3's IOC, RTC, EEPROM, SEEQ and SCSI controllers; the IOC's
+    /// SCC, PIT and PS/2). `Devices` saves them before the part and loads
+    /// them before it, so a snapshot keeps the file each child always had.
+    fn children(&self) -> Vec<Child> {
+        Vec::new()
+    }
 }
 
+/// A part's child state, saved under its own key.
+pub struct Child {
+    pub key: &'static str,
+    pub state: std::sync::Arc<dyn Saveable + Send + Sync>,
+    /// A snapshot may lack the key (a legacy file from before the child
+    /// existed); the same meaning as `Devices::add_optional`.
+    pub optional: bool,
+}
+
+/// Every method has a no-op default, so a part implements only what it does.
 pub trait Device: Send + Sync {
-    fn step(&self, cycles: u64);
-    fn stop(&self);
-    fn start(&self);
-    fn is_running(&self) -> bool;
-    fn get_clock(&self) -> u64;
+    fn step(&self, _cycles: u64) {}
+    fn stop(&self) {}
+    fn start(&self) {}
+    fn is_running(&self) -> bool {
+        false
+    }
+    fn get_clock(&self) -> u64 {
+        0
+    }
 
     fn signal(&self, _signal: Signal) {}
 
@@ -342,6 +370,12 @@ pub trait Device: Send + Sync {
     }
 }
 
+/// What `Devices` holds: a part that starts, stops, saves and resets. A part
+/// implements only the methods it has anything to say in; the empty
+/// `impl Saveable for X {}` is the whole cost of the rest.
+pub trait Part: Device + Saveable + Resettable {}
+impl<T: Device + Saveable + Resettable> Part for T {}
+
 // Compile-time asserts: BUS_* constants must equal the corresponding ExecStatus values.
 // If these fail, update BOTH sets of constants to agree.
 // See also: mips_exec.rs EXEC_BUS_ERR / EXEC_BUS_VCE / EXEC_COMPLETE / EXEC_RETRY.
@@ -349,3 +383,32 @@ const _: () = assert!(BUS_OK   == crate::cpu::mips_exec::EXEC_COMPLETE);
 const _: () = assert!(BUS_BUSY == crate::cpu::mips_exec::EXEC_RETRY);
 const _: () = assert!(BUS_ERR  == crate::cpu::mips_exec::EXEC_BUS_ERR);
 const _: () = assert!(BUS_VCE  == crate::cpu::mips_exec::EXEC_BUS_VCE);
+
+#[cfg(test)]
+mod part_tests {
+    use super::*;
+
+    struct Nothing;
+    impl Device for Nothing {}
+    impl Saveable for Nothing {}
+    impl Resettable for Nothing {}
+
+    /// A part that implements nothing is still a `Part`, and every default is
+    /// the do-nothing answer.
+    #[test]
+    fn a_part_that_implements_nothing_inherits_no_ops() {
+        fn is_part<T: Part>(_: &T) {}
+        let n = Nothing;
+        is_part(&n);
+        assert!(n.save_state().as_table().is_some_and(|t| t.is_empty()));
+        assert!(n.load_state(&toml::Value::Boolean(true)).is_ok());
+        assert!(n.children().is_empty());
+        assert!(!n.is_running());
+        assert_eq!(n.get_clock(), 0);
+        n.step(1);
+        n.start();
+        n.stop();
+        n.power_on();
+        assert!(n.register_commands().is_empty());
+    }
+}
