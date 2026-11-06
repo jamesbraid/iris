@@ -36,6 +36,8 @@ use crate::snapshot::{Snapshot, Manifest, SCHEMA_VERSION, ChunksManifest, DiskRe
 use crate::chunk_store::{ChunkStore, get_chunks_as_words, put_words_as_chunks};
 use crate::hptimer::TimerManager;
 use crate::control::Control;
+use crate::devices::Devices;
+use crate::disks::Disks;
 use crate::guest_net::GuestNet;
 use crate::workstation::{SystemController, Workstation};
 
@@ -136,7 +138,7 @@ pub struct Machine {
     /// Disk provenance captured at construction (configured path + host file
     /// size per SCSI id). Written into snapshot manifests and validated on
     /// restore so captured state never lands on a different base disk.
-    disks: Vec<DiskRef>,
+    disk_refs: Vec<DiskRef>,
     /// Configured nvram file path, recorded in snapshot manifests.
     nvram_path: String,
     /// Host-forced Newport resolution from `[graphics] resolution` at construction.
@@ -148,6 +150,8 @@ pub struct Machine {
     /// Lifecycle state, machine events and the pointer slot the front ends
     /// share.
     pub(crate) control: Control,
+    devices: Devices,
+    disks: Disks,
     /// The SEEQ's NAT handle, from the link it attached.
     net: GuestNet,
 }
@@ -945,6 +949,9 @@ impl Machine {
         }
 
         let control = Control::new();
+        let mut controllers: Vec<Arc<dyn crate::disks::DiskController>> = vec![hpc3.scsi().clone()];
+        controllers.extend(hpc3.scsi1().map(|c| c.clone() as Arc<dyn crate::disks::DiskController>));
+        let disks = Disks::new(controllers);
         let seeq = hpc3.seeq();
         let net = GuestNet::from_parts(seeq.nat_control(), seeq.gateway_addrs(), seeq.frames());
 
@@ -966,12 +973,14 @@ impl Machine {
             last_restore: None,
             last_restore_checkpoint: None,
             scratch_path,
-            disks: disk_provenance,
+            disk_refs: disk_provenance,
             nvram_path: nvram_provenance,
             display_resolution,
             newport_active,
             fullhouse: !guinness,
             control,
+            devices: Devices::new(),
+            disks,
             net,
         }
     }
@@ -1261,27 +1270,6 @@ impl Machine {
         let mut v = vec![self.hpc3.scsi().scsi_bus()];
         v.extend(self.hpc3.scsi1().map(|c| c.scsi_bus()));
         v
-    }
-
-    /// Number of attached CHD disks whose `.diff.chd` holds changes pending a
-    /// fold-back into the base on a clean shutdown (the "Synchronizing disks"
-    /// step). 0 means a clean exit needs no disk sync.
-    pub fn pending_chd_sync_count(&self) -> usize {
-        self.scsi_buses().iter().map(|b| b.pending_chd_sync_count()).sum()
-    }
-
-    /// Fold pending CHD diffs back into their bases, preserving compression.
-    /// `only` limits it to one SCSI id; `None` means all.
-    /// Call only after the guest has stopped (so disk I/O is quiesced).
-    /// `progress(done, total, fraction)` drives a UI; `cancel()` aborts cleanly,
-    /// leaving un-synced bases+diffs intact. Returns the count synced.
-    pub fn sync_chd_disks(
-        &self,
-        only: Option<usize>,
-        progress: &mut dyn FnMut(usize, usize, f32),
-        cancel: &dyn Fn() -> bool,
-    ) -> std::io::Result<usize> {
-        crate::scsi::ScsiBus::sync_chd_disks(&self.scsi_buses(), only, progress, cancel)
     }
 
     /// Step the CPU `n` instructions in-line on the calling thread, with all
@@ -1658,7 +1646,7 @@ impl Machine {
         // Provenance: which disks + nvram this state was captured against, so a
         // later restore can refuse a mismatched base disk / build. (features are
         // filled by for_current_save.)
-        manifest.disks = self.disks.clone();
+        manifest.disks = self.disk_refs.clone();
         manifest.nvram = Some(self.nvram_path.clone());
         // The CPU is a runtime choice now, so it is state the restore must match.
         manifest.cpu_model = Some(self.cpu.model_name().to_string());
@@ -1873,7 +1861,7 @@ impl Machine {
                     // dist/ dir), so a path-only difference is a warning, not fatal —
                     // a disk's identity for restore is its id + size, not its path.
                     for d in &m.disks {
-                        match self.disks.iter().find(|c| c.id == d.id) {
+                        match self.disk_refs.iter().find(|c| c.id == d.id) {
                             None => fatal.push(format!(
                                 "snapshot disk SCSI {} ('{}') is not configured in this run", d.id, d.path)),
                             Some(cur) if cur.size_bytes != d.size_bytes => fatal.push(format!(
@@ -2064,6 +2052,8 @@ impl Workstation for Machine {
     fn restart_peripherals(&mut self) { Machine::restart_peripherals(self) }
     fn cpu_start(&self) { Machine::cpu_start(self) }
     fn cpu_is_running(&self) -> bool { Machine::cpu_is_running(self) }
+    fn devices(&self) -> &Devices { &self.devices }
+    fn disks(&self) -> &Disks { &self.disks }
     fn control(&self) -> &Control { &self.control }
     fn control_mut(&mut self) -> &mut Control { &mut self.control }
     fn net(&self) -> Option<&GuestNet> { Some(&self.net) }
@@ -2092,22 +2082,7 @@ impl Workstation for Machine {
         rtc.save_nvram(&path).map(|_| path).map_err(|e| e.to_string())
     }
     fn scratch_path(&self) -> Option<&std::path::Path> { Machine::scratch_path(self) }
-    fn disc_changer(&self) -> Option<Arc<dyn crate::workstation::DiscChanger>> {
-        Some(self.hpc3.scsi().clone())
-    }
     fn remount_cdrom_guest(&self, scsi_id: u8) { Machine::remount_cdrom_guest(self, scsi_id) }
-    fn pending_chd_sync_count(&self) -> usize { Machine::pending_chd_sync_count(self) }
-    fn flush_disks(&self) -> std::io::Result<()> {
-        self.scsi_buses().iter().try_for_each(|b| b.flush())
-    }
-    fn sync_chd_disks(
-        &self,
-        only: Option<usize>,
-        progress: &mut dyn FnMut(usize, usize, f32),
-        cancel: &dyn Fn() -> bool,
-    ) -> std::io::Result<usize> {
-        Machine::sync_chd_disks(self, only, progress, cancel)
-    }
 }
 
 #[cfg(test)]

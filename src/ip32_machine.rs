@@ -37,6 +37,8 @@ use crate::hptimer::TimerManager;
 use crate::ip32::{Ip32Bus, Ip32Options, FIRMWARE_LOAD_VA, FIRMWARE_SPAN, NO_ECC_BASE, RAM_BASE, RAM_WINDOW_SIZE};
 use crate::traits::{BusDevice, Device, MachineEvent, Signal};
 use crate::control::Control;
+use crate::devices::Devices;
+use crate::disks::Disks;
 use crate::guest_net::GuestNet;
 use crate::workstation::Workstation;
 
@@ -126,13 +128,15 @@ pub struct O2Machine {
     /// runs the service loop exits the process itself on a power-off, as it
     /// always has.
     pub(crate) control: Control,
+    devices: Devices,
+    disks: Arc<Disks>,
     /// The batch hook's place in the boot (see [`BootState`]).
     boot: Arc<BootState>,
     /// Set while the machine is stopped: the service thread leaves the
     /// devices alone, so nothing changes memory under a snapshot.
     paused: Arc<AtomicBool>,
     /// The disks as a snapshot records them, to refuse one taken on others.
-    disks: Vec<crate::snapshot::DiskRef>,
+    disk_refs: Vec<crate::snapshot::DiskRef>,
     /// The flash file, recorded in a snapshot's manifest.
     flash_path: Option<String>,
     /// The `scratch = true` volume, for the CI socket's scratch commands.
@@ -321,8 +325,11 @@ impl O2Machine {
         }
 
         let control = Control::new();
+        let disks = Arc::new(Disks::new(
+            bus.scsi.lock().unwrap().iter().map(|c| c.clone() as Arc<dyn crate::disks::DiskController>).collect(),
+        ));
         // A snapshot's disks by slot (controller * 16 + id) and size.
-        let disks: Vec<crate::snapshot::DiskRef> = attached.tables.iter()
+        let disk_refs: Vec<crate::snapshot::DiskRef> = attached.tables.iter()
             .filter(|t| !t.is_cdrom)
             .map(|t| crate::snapshot::DiskRef { id: t.slot, path: t.path.clone(), size_bytes: t.size_bytes })
             .collect();
@@ -338,9 +345,11 @@ impl O2Machine {
             ci_serial,
             net,
             control,
+            devices: Devices::new(),
+            disks,
             boot,
             paused: Arc::new(AtomicBool::new(false)),
-            disks,
+            disk_refs,
             flash_path: Some(cfg.nvram.clone()),
             scratch_path,
         })
@@ -422,12 +431,13 @@ impl O2Machine {
         let cpu = self.cpu.clone();
         let running = self.running.clone();
         let events = (self.control.sender(), self.control.registered());
+        let disks = self.disks.clone();
         let paused = self.paused.clone();
         self.start_scsi();
         self.threads.push(
             std::thread::Builder::new()
                 .name("O2-Service".into())
-                .spawn(move || Self::service_loop(bus, cpu, running, paused, events))
+                .spawn(move || Self::service_loop(bus, cpu, running, paused, events, disks))
                 .unwrap(),
         );
         // CI mode: the harness starts the CPU (`iris-ci start`).
@@ -444,6 +454,7 @@ impl O2Machine {
         running: Arc<AtomicBool>,
         paused: Arc<AtomicBool>,
         (events, controller_up): (std::sync::mpsc::SyncSender<MachineEvent>, Arc<AtomicBool>),
+        disks: Arc<Disks>,
     ) {
         let dev = cpu.clone().as_device();
         // The PROM's environment lives in its flash: save it once the guest
@@ -499,7 +510,7 @@ impl O2Machine {
                 }
                 running.store(false, Ordering::SeqCst);
                 crate::workstation::exit_process("power-off", 0, || {
-                    crate::workstation::flushed(bus.flush_disks(), "power-off")
+                    crate::workstation::flushed(disks.flush(), "power-off")
                 });
             }
             std::thread::sleep(poll);
@@ -527,7 +538,7 @@ impl O2Machine {
         self.bus.save_flash();
         // Not through the display: this stop leaves the guest's writes durable
         // whatever follows it.
-        if let Err(e) = self.bus.flush_disks() {
+        if let Err(e) = self.disks.flush() {
             eprintln!("iris: disk flush at stop failed: {e} (guest writes may be lost)");
         }
         self.control.stopped();
@@ -580,7 +591,7 @@ impl O2Machine {
         snap.ensure_dir().map_err(|e| e.to_string())?;
         let mut manifest = Manifest::for_current_save();
         manifest.machine = Some(SNAPSHOT_MACHINE.into());
-        manifest.disks = self.disks.clone();
+        manifest.disks = self.disk_refs.clone();
         manifest.nvram = self.flash_path.clone();
         manifest.cpu_model = Some(self.cpu.model_name().to_string());
         manifest.cpu_cache = Some(self.cpu.cache_kind().to_string());
@@ -641,7 +652,7 @@ impl O2Machine {
             ));
         }
         // As the Indy: build, CPU and disks must match.
-        crate::snapshot::check_provenance(&m, self.cpu.model_name(), self.cpu.cache_kind(), &self.disks)?;
+        crate::snapshot::check_provenance(&m, self.cpu.model_name(), self.cpu.cache_kind(), &self.disk_refs)?;
         let sv = m.schema_version;
         let state = |base: &str| snap.read_state(base, sv).map_err(|e| format!("{base}: {e}"));
         let chunks = snap.read_chunks_manifest().map_err(|e| format!("chunks.bin: {e}"))?;
@@ -739,6 +750,8 @@ impl Workstation for O2Machine {
     fn restart_peripherals(&mut self) { O2Machine::restart_peripherals(self) }
     fn cpu_start(&self) { self.cpu.clone().as_device().start() }
     fn cpu_is_running(&self) -> bool { self.cpu.clone().as_device().is_running() }
+    fn devices(&self) -> &Devices { &self.devices }
+    fn disks(&self) -> &Disks { &self.disks }
     fn control(&self) -> &Control { &self.control }
     fn control_mut(&mut self) -> &mut Control { &mut self.control }
     fn net(&self) -> Option<&GuestNet> { self.net.as_ref() }
@@ -764,29 +777,6 @@ impl Workstation for O2Machine {
     fn load_snapshot(&mut self, name: &str) -> Result<(), String> { O2Machine::load_snapshot(self, name) }
 
     fn scratch_path(&self) -> Option<&std::path::Path> { self.scratch_path.as_deref() }
-    /// Disc changes on the internal bus (controller 0), as the Indigo2 offers
-    /// its first controller.
-    fn disc_changer(&self) -> Option<Arc<dyn crate::workstation::DiscChanger>> {
-        self.bus.scsi.lock().unwrap().first().map(|c| c.clone() as Arc<dyn crate::workstation::DiscChanger>)
-    }
-
-    fn pending_chd_sync_count(&self) -> usize {
-        self.bus.scsi.lock().unwrap().iter().map(|c| c.bus().pending_chd_sync_count()).sum()
-    }
-    fn flush_disks(&self) -> std::io::Result<()> {
-        self.bus.flush_disks()
-    }
-    fn sync_chd_disks(
-        &self,
-        only: Option<usize>,
-        progress: &mut dyn FnMut(usize, usize, f32),
-        cancel: &dyn Fn() -> bool,
-    ) -> std::io::Result<usize> {
-        let controllers = self.bus.scsi.lock().unwrap().clone();
-        let buses: Vec<_> = controllers.iter().map(|c| c.bus()).collect();
-        crate::scsi::ScsiBus::sync_chd_disks(&buses, only, progress, cancel)
-    }
-
 }
 
 /// GBE's picture, scanned out of RAM about sixty times a second and handed

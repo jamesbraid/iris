@@ -11,7 +11,7 @@
 use std::sync::{Mutex, MutexGuard};
 
 use crate::config::NetMode;
-use crate::exit_persistence_tests::{build, config, make_images, on_big_stack, serial, Dir, Machine};
+use crate::exit_persistence_tests::{build, config, make_images, on_big_stack, serial, with_buses, Dir, Machine};
 use crate::machine_state::GuestState;
 use crate::workstation::Workstation;
 
@@ -48,9 +48,10 @@ pub(crate) fn with_shared<R>(machine: Machine, f: impl FnOnce(&mut dyn Workstati
     f(&mut **m)
 }
 
-/// The NAT accessors and lifecycle on the shared Indy, IP28 and O2: the NAT
-/// hands the gateway's addresses and the machine starts `Idle` with no monitor
-/// up.
+/// The NAT accessors, lifecycle and disk methods on the shared Indy, IP28 and
+/// O2: the NAT hands the gateway's addresses, the machine starts `Idle` with
+/// no monitor up, and the disk methods agree with the buses the machine has,
+/// one tracked controller per SCSI bus (the Indy has one, the others two).
 #[test]
 fn the_provided_methods_answer_on_every_machine_type() {
     for machine in [Machine::Indy, Machine::Indigo2Ip28, Machine::O2] {
@@ -63,6 +64,15 @@ fn the_provided_methods_answer_on_every_machine_type() {
             let want = crate::net::GatewayConfig::from_network(&cfg.network());
             assert_eq!(m.nat_expected(), Some((want.client_ip, want.gateway_ip, want.netmask)), "{machine:?}");
             assert!(m.nat_control().is_some() && m.net_frames().is_some(), "{machine:?}");
+
+            let buses = if machine == Machine::Indy { 1 } else { 2 };
+            assert_eq!(m.disks().len(), buses, "{machine:?}: one tracked controller per bus");
+            assert_eq!(with_buses(m, |b| b.len()), buses, "{machine:?}");
+            let pending = with_buses(m, |b| b.iter().map(|b| b.pending_chd_sync_count()).sum::<usize>());
+            assert_eq!(m.pending_chd_sync_count(), pending, "{machine:?}");
+            assert!(m.flush_disks().is_ok());
+            assert!(m.disc_changer().is_some(), "{machine:?}");
+            assert_eq!(m.sync_chd_disks(None, &mut |_, _, _| {}, &|| false).unwrap(), 0);
         });
     }
 }
