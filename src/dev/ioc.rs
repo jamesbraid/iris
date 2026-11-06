@@ -524,26 +524,16 @@ pub struct Ioc {
 
 impl Ioc {
     pub fn new(guinness: bool) -> Self {
-        Self::new_for_profile(guinness, false)
+        Self::new_for_profile(guinness, if guinness { 0x26 } else { 0x11 })
     }
 
-    /// As `new`, with the machine profile's IP28 flag: an IP28 baseboard
-    /// must report a high enough HPC3 board revision. The SCC's channels are
-    /// wired to nothing; the machine installs their host ends through
-    /// `scc().set_backend_{a,b}` before the first `start()`.
-    pub fn new_for_profile(guinness: bool, ip28: bool) -> Self {
-        // HPC3 SYS_ID: [7:5] chip rev, [4:1] board rev, [0] 1 = fullhouse.
-        // The PROM looks at bit 0 to tell fullhouse from guinness. IRIX reads
-        // the board revision to tell an IP28 baseboard from an IP26 one and
-        // warns "CPU baseboard downrev (IP26 not IP28)" below 13, so an IP28
-        // has to report at least that.
-        let sys_id: u8 = if guinness {
-            0x26
-        } else if ip28 {
-            0x1B // board rev 13, fullhouse
-        } else {
-            0x11 // board rev 8, fullhouse
-        };
+    /// As `new`, with the HPC3 SYS_ID the machine's board gives it:
+    /// [7:5] chip rev, [4:1] board rev, [0] 1 = fullhouse. The PROM looks at
+    /// bit 0 to tell fullhouse from guinness, and IRIX reads the board
+    /// revision to tell an IP28 baseboard from an IP26 one. The SCC's
+    /// channels are wired to nothing; the machine installs their host ends
+    /// through `scc().set_backend_{a,b}` before the first `start()`.
+    pub fn new_for_profile(guinness: bool, sys_id: u8) -> Self {
         let state = Arc::new(Mutex::new(IocState {
             sys_id,
             l0_stat: 0,
