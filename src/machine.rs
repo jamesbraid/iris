@@ -941,9 +941,7 @@ impl Machine {
 
         // Register lock monitor device and all component locks
         {
-            use crate::locks::register_lock_fn;
-            let ep = eeprom_mc.clone();
-            register_lock_fn("mc::eeprom", move || ep.is_locked());
+            crate::locks::register_mutex("mc::eeprom", &eeprom_mc);
             mc.register_locks();
             hpc3.register_locks();
             if let Some(rex3) = &board.rex3 { rex3.register_locks(); }
@@ -2094,6 +2092,12 @@ impl Drop for Machine {
         // Release the monitor port and this Machine's device handles, so the next
         // Machine in the same process (iris-gui Stop -> Start) gets the monitor.
         self.monitor.shutdown();
+        // VINO's DMA thread runs from construction. It holds the bus.
+        self.board.vino.stop();
+        self.hpc3.release();
+        // The bus holds the devices and they hold the bus (DMA): let go, or
+        // none of it is freed.
+        self.board.phys.release_devices();
     }
 }
 
@@ -2199,6 +2203,32 @@ mod emulator_name_tests {
         }
         let name = emulator_name();
         assert!(name.starts_with('I') && name.contains(" Rust "), "{name}");
+    }
+}
+
+/// A dropped machine gives back its decode table: a process may have only 64,
+/// and a test binary builds many machines.
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+    use crate::config::{GraphicsBoard, MachineProfile};
+    use crate::display_stop_tests::{big_stack, config, scratch};
+
+    #[test]
+    fn a_dropped_machine_frees_its_bus_and_decode_table() {
+        let dir = scratch("ip22-drop");
+        for (profile, board) in [
+            (MachineProfile::IndyIp24, GraphicsBoard::Newport),
+            (MachineProfile::Indigo2Ip22, GraphicsBoard::Xz),
+            (MachineProfile::Indigo2Ip28, GraphicsBoard::SolidImpact),
+        ] {
+            let cfg = config(&dir, profile, board);
+            let machine = big_stack(move || Machine::new(cfg));
+            let bus = Arc::downgrade(&machine.board.phys);
+            drop(machine);
+            assert_eq!(bus.strong_count(), 0, "{profile:?} with {board:?}: the bus outlives its machine");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
