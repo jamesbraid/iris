@@ -916,7 +916,7 @@ impl MipsCpuConfig {
     /// Default configuration matching SGI Indy (R4400): 48-entry TLB.
     /// Cache geometry is fixed at compile time via constants in mips_cache_v2.
     pub fn indy() -> Self {
-        Self { tlb_entries: 48, memory: Arc::new(crate::ip22_bus::memory_map(false)), prid: None }
+        Self { tlb_entries: 48, memory: Arc::new(crate::ip22_bus::memory_map(&crate::config::RamLayout::Split)), prid: None }
     }
 
     /// The JTLB size the CPU model declares.

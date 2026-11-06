@@ -599,7 +599,7 @@ mod tests {
         fn check<C: CpuModel + From<Arc<dyn BusDevice>>>() {
             let mem = Arc::new(MockMemory::new());
             let bus: Arc<dyn BusDevice> = mem.clone();
-            let cfg = MipsCpuConfig::for_model::<C>(Arc::new(crate::ip22_bus::memory_map(false)));
+            let cfg = MipsCpuConfig::for_model::<C>(Arc::new(crate::ip22_bus::memory_map(&crate::config::RamLayout::Split)));
             let mut exec = MipsExecutor::<PassthroughTlb, C>::new(
                 bus,
                 PassthroughTlb::default(),
@@ -682,7 +682,7 @@ mod tests {
         fn check<C: CpuModel + From<Arc<dyn BusDevice>>>() {
             let mem = Arc::new(MockMemory::new());
             let bus: Arc<dyn BusDevice> = mem.clone();
-            let cfg = MipsCpuConfig::for_model::<C>(Arc::new(crate::ip22_bus::memory_map(false)));
+            let cfg = MipsCpuConfig::for_model::<C>(Arc::new(crate::ip22_bus::memory_map(&crate::config::RamLayout::Split)));
             let mut exec = MipsExecutor::<PassthroughTlb, C>::new(
                 bus,
                 PassthroughTlb::default(),
@@ -7065,7 +7065,7 @@ mod tests {
 
     /// A 64-bit kernel executor with a TLB, over `bus`.
     fn tlb_exec<C: CpuModel + From<Arc<dyn BusDevice>>>(bus: Arc<dyn BusDevice>) -> TlbExec<C> {
-        let cfg = MipsCpuConfig::for_model::<C>(Arc::new(crate::ip22_bus::memory_map(false)));
+        let cfg = MipsCpuConfig::for_model::<C>(Arc::new(crate::ip22_bus::memory_map(&crate::config::RamLayout::Split)));
         let mut exec = Box::new(MipsExecutor::new(bus, crate::cpu::mips_tlb::MipsTlb::new(C::TLB_ENTRIES), &cfg));
         disable_jitv2(&mut exec);
         exec.install_status_cb();
@@ -7183,7 +7183,7 @@ mod tests {
     fn lwr_upper_below_follows_the_mode_through_status_writes_and_eret() {
         use crate::cpu::mips_core::{STATUS_EXL, STATUS_KX, STATUS_UX};
         fn check<C: CpuModel + From<Arc<dyn BusDevice>>>(keeps_upper: bool) {
-            let cfg = MipsCpuConfig::for_model::<C>(Arc::new(crate::ip22_bus::memory_map(false)));
+            let cfg = MipsCpuConfig::for_model::<C>(Arc::new(crate::ip22_bus::memory_map(&crate::config::RamLayout::Split)));
             let mut exec = Box::new(MipsExecutor::<PassthroughTlb, C>::new(
                 Arc::new(MockMemory::new()), PassthroughTlb::default(), &cfg));
             disable_jitv2(&mut exec);

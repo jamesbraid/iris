@@ -5219,7 +5219,7 @@ mod tests {
         assert_eq!(pfn_of(0x2_1FFF_F000, octane), Some(0x21FFFF));
         assert_eq!(pfn_of(0x2_2000_0000, octane), None);
         assert_eq!(pfn_of(0xFF_FFFF_F000, octane), None);
-        let indy = frames_for(&crate::ip22_bus::memory_map(false));
+        let indy = frames_for(&crate::ip22_bus::memory_map(&crate::config::RamLayout::Split));
         assert_eq!(pfn_of(0x2FFF_F000, indy), Some(0x2FFFF));
         assert_eq!(pfn_of(0x3000_0000, indy), None);
     }

@@ -4412,7 +4412,7 @@ mod tests {
         let build = || {
             let mem = Arc::new(MockMemory::new_not_compilable());
             mem.set_word(0x2000, 0xDEAD_BEEF);
-            let cfg = MipsCpuConfig::for_model::<C>(Arc::new(crate::ip22_bus::memory_map(false)));
+            let cfg = MipsCpuConfig::for_model::<C>(Arc::new(crate::ip22_bus::memory_map(&crate::config::RamLayout::Split)));
             let mut exec = Box::new(MipsExecutor::<PassthroughTlb, C>::new(mem, PassthroughTlb::default(), &cfg));
             (exec.core.gpr[1], exec.core.gpr[2], exec.core.pc) = (0x2000 + offset, 0x1122_3344_5566_7788, 0x1000);
             exec.set_cp0_status(status);
