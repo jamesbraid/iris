@@ -769,11 +769,12 @@ impl crate::traits::Saveable for Ip32Bus {
     }
 }
 
-impl Ip32Bus {
-    /// A cold reset (CRIME's CONTROL register): the devices with a power-on
-    /// state go back to it, and memory and the flash keep their contents, as
-    /// on the hardware. The PROM sets up the rest again as it starts.
-    pub fn power_on(&self) {
+/// A cold reset (CRIME's CONTROL register): the devices with a power-on
+/// state go back to it, and memory and the flash keep their contents, as on
+/// the hardware. The PROM sets up the rest again as it starts. (A reset of
+/// the PCI side is not modelled yet.)
+impl crate::traits::Resettable for Ip32Bus {
+    fn power_on(&self) {
         use crate::traits::Resettable;
         self.crime.regs.power_on();
         let m = &self.mace;
@@ -783,7 +784,9 @@ impl Ip32Bus {
             d.power_on();
         }
     }
+}
 
+impl Ip32Bus {
     /// RAM and the flash, as `ram.bin` and `flash.bin` in `dir`.
     pub fn save_raw(&self, dir: &std::path::Path) -> std::io::Result<()> {
         self.ram.save_raw(&dir.join("ram.bin"))?;
@@ -805,19 +808,40 @@ impl Ip32Bus {
 
 impl crate::traits::Device for Ip32Bus {
     fn step(&self, _cycles: u64) {}
-    fn stop(&self) {}
-    fn start(&self) {}
+    /// The SCSI controllers each run a thread of their own, so disk transfers
+    /// do not run on the CPU's; each finishes the command it is running on
+    /// stop, so a snapshot finds none half done.
+    fn stop(&self) {
+        for ctl in self.scsi.lock().unwrap().iter() {
+            ctl.stop();
+        }
+    }
+    fn start(&self) {
+        for ctl in self.scsi.lock().unwrap().iter() {
+            ctl.start();
+        }
+    }
     fn is_running(&self) -> bool { true }
     fn get_clock(&self) -> u64 { 0 }
 
+    /// The bus's devices' commands, then the SCSI controllers' `scsi` and
+    /// `scsi1` and `cow` and `cow1`.
     fn register_commands(&self) -> Vec<(String, String)> {
-        self.devices().iter().flat_map(|d| d.register_commands()).collect()
+        let mut cmds: Vec<_> = self.devices().iter().flat_map(|d| d.register_commands()).collect();
+        cmds.extend(self.scsi.lock().unwrap().iter().flat_map(|c| c.register_commands()));
+        cmds
     }
 
     fn execute_command(&self, cmd: &str, args: &[&str], writer: Box<dyn std::io::Write + Send>) -> Result<(), String> {
         for d in self.devices() {
             if d.register_commands().iter().any(|(c, _)| c == cmd) {
                 return d.execute_command(cmd, args, writer);
+            }
+        }
+        let controllers = self.scsi.lock().unwrap().clone();
+        for c in controllers {
+            if c.register_commands().iter().any(|(name, _)| name == cmd) {
+                return c.execute_command(cmd, args, writer);
             }
         }
         Err("Command not found".to_string())
