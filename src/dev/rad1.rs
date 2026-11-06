@@ -300,6 +300,7 @@ struct Sink {
     /// When the host stream was last tried and failed to open.
     host_failed_at: Option<Instant>,
     wav: Option<Wav>,
+    dump: Option<Dump>,
     tap: Option<Arc<Mutex<Vec<i16>>>>,
 }
 
@@ -334,10 +335,41 @@ impl Sink {
         if let Some(w) = self.wav.as_mut() {
             w.play(host_pcm, rate);
         }
+        if let Some(d) = self.dump.as_mut() {
+            d.record(host_pcm, rate);
+        }
         if let Some(t) = self.tap.as_ref() {
             t.lock().extend_from_slice(pcm);
         }
         self.host.as_ref().map(|(out, _)| (out.producer.slots(), out.producer.buffer().capacity()))
+    }
+}
+
+/// `IRIS_OCTANE_AUDIO_DUMP=<file>`: every frame the card plays at the card's
+/// own rate, before any resampling, with or without a host sound device.
+/// A record is the rate and the frame count (u32 each), then that many
+/// left, right pairs of little-endian i16; the same layout as HAL2's dump.
+/// A muted card records the silence it plays.
+struct Dump {
+    file: std::io::BufWriter<std::fs::File>,
+}
+
+impl Dump {
+    fn create(path: &std::ffi::OsStr) -> Option<Self> {
+        Some(Self { file: std::io::BufWriter::new(std::fs::File::create(path).ok()?) })
+    }
+
+    fn record(&mut self, pcm: &[i16], rate: u32) {
+        use std::io::Write;
+        if pcm.is_empty() {
+            return;
+        }
+        let mut rec = Vec::with_capacity(8 + pcm.len() * 2);
+        rec.extend_from_slice(&rate.to_le_bytes());
+        rec.extend_from_slice(&((pcm.len() / PCM_CHANNELS) as u32).to_le_bytes());
+        rec.extend(pcm.iter().flat_map(|s| s.to_le_bytes()));
+        let _ = self.file.write_all(&rec);
+        let _ = self.file.flush();
     }
 }
 
@@ -996,7 +1028,8 @@ impl Inner {
             }
             None => {
                 let wav = std::env::var_os("IRIS_OCTANE_AUDIO_WAV").and_then(|p| Wav::create(&p));
-                *sink = Some(Sink { host, host_failed_at: failed_at, wav, tap: None });
+                let dump = std::env::var_os("IRIS_OCTANE_AUDIO_DUMP").and_then(|p| Dump::create(&p));
+                *sink = Some(Sink { host, host_failed_at: failed_at, wav, dump, tap: None });
             }
         }
     }
