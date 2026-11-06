@@ -31,6 +31,14 @@ fn built(machine: Machine, mode: NetMode) -> Box<dyn Workstation> {
             make_images(&dir);
             let mut cfg = config(machine, &dir, false);
             cfg.network.mode = mode;
+            // The Indy-family with its graphics board: Newport, and the
+            // IMPACT the IP28 shipped with. Nothing starts, so no window opens.
+            if matches!(machine, Machine::Indy | Machine::Indigo2 | Machine::Indigo2Ip28) {
+                cfg.headless = false;
+            }
+            if machine == Machine::Indigo2Ip28 {
+                cfg.graphics.board = Some(crate::config::GraphicsBoard::SolidImpact);
+            }
             // The images stay for the life of the process.
             std::mem::forget(dir);
             build(cfg)

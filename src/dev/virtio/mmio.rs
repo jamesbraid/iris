@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use crate::irq::IrqLine;
-use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead8, Device, Resettable, BUS_OK};
+use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead8, Device, Resettable, Saveable, BUS_OK};
 
 use super::{GuestMemory, VirtioCore};
 
@@ -228,6 +228,8 @@ impl Device for VirtioMmio {
         0
     }
 }
+
+impl Saveable for VirtioMmio {}
 
 impl Resettable for VirtioMmio {
     fn power_on(&self) {

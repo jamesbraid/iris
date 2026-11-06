@@ -75,7 +75,7 @@ use crate::config::GraphicsBoard;
 use crate::dev::ng1::rex3::Renderer;
 use crate::gfifo::GFifo;
 use crate::locks::SpinLock;
-use crate::traits::{BusDevice, BusRead8, BusRead16, BusRead32, BusRead64, BUS_BUSY, BUS_OK, Device, Saveable};
+use crate::traits::{BusDevice, BusRead8, BusRead16, BusRead32, BusRead64, BUS_BUSY, BUS_OK, Device, Resettable, Saveable};
 
 use ge11::Ge11;
 use hq3::{host, Hq3Engine, Hq3Regs, Hq3Sink};
@@ -1629,6 +1629,41 @@ impl Saveable for Mgras {
         Ok(())
     }
 }
+
+/// The IMPACT board on the Indigo2's GIO bus as `Devices` sees it: starting
+/// and stopping it is starting and stopping its display (engines and refresh
+/// thread), which needs the `Arc`. The board's commands and (not yet any)
+/// state are the board's own.
+pub struct ImpactGio(pub Arc<Mgras>);
+
+impl Device for ImpactGio {
+    fn start(&self) {
+        self.0.start_display();
+    }
+    fn stop(&self) {
+        self.0.stop_display();
+    }
+    fn is_running(&self) -> bool {
+        Device::is_running(&*self.0)
+    }
+    fn register_commands(&self) -> Vec<(String, String)> {
+        self.0.register_commands()
+    }
+    fn execute_command(&self, cmd: &str, args: &[&str], writer: Box<dyn IoWrite + Send>) -> Result<(), String> {
+        self.0.execute_command(cmd, args, writer)
+    }
+}
+
+impl Saveable for ImpactGio {
+    fn save_state(&self) -> toml::Value {
+        self.0.save_state()
+    }
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        self.0.load_state(v)
+    }
+}
+
+impl Resettable for ImpactGio {}
 
 fn read_status(v: Option<u64>) -> (u32, u64) {
     match v {
