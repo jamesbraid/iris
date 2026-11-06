@@ -64,28 +64,55 @@ byte. IP22 voice rows are 32 bytes: delay length, sample count, start offset,
 peak, then four single-precision coefficients. Tune 1 starts at row 7 of the
 table and tune 2 at row 12.
 
-Both PROMs program the audio clock explicitly, early in start-up (0xbfc00ba0 to
-0xbfc00be8 on the IP22, 0xbfc00c44 to 0xbfc00c8c on the Indy): HAL2 Bresenham generator 1 is pointed at the
-44.1 kHz master with increment 1 and modulus 1, so 44100 Hz is what the PROM
-asks for, not a default iris assumes. A 1995 post by an SGI engineer (comp.sys.sgi.misc,
+All three PROMs program the audio clock explicitly, early in start-up (0xbfc00ba0 to
+0xbfc00be8 on the IP22, 0xbfc00c44 to 0xbfc00c8c on the Indy, 0xbfc00d64 to
+0xbfc00d94 on the IP28): HAL2 Bresenham generator 1 is pointed at the 44.1 kHz
+master with increment 1 and modulus 1, so 44100 Hz is what the PROM asks for,
+not a default iris assumes. The IP28 reads the HAL2 revision register at
+0xbfc00d1c (early return when its top bit is set, 0xbfc00d24) and again at
+0xbfc03438 in its tune player at 0xbfc03404, which also returns early when a
+board-revision test at 0xbfc03418 fails and when the NVRAM variable it fetches
+at 0xbfc03448 is zero. A 1995 post by an SGI engineer (comp.sys.sgi.misc,
 "How to get the Boot Tune...") says the Indy tune is ADPCM, about two seconds
 long, and that the Power Indigo2 (R8000) had dropped its sampled tune for a
 synthesized one when the PROM ran out of space, which fits what the Indy and
 the later Indigo2 PROMs hold.
 
-## A recording that does not match
+## Older and other revisions
+
+A mirror of an SGI PROM collection (Library root irix-mirrors,
+`mirror.rqsall.com/prom/`, on this host under
+`/storage/software/irix/mirrors/`) holds more revisions than iris embeds. They
+are third-party hosted firmware with no redistribution grant: use them in place
+with `prom = "<path>"` and never commit them.
+
+| Part | Version string | Chime |
+|---|---|---|
+| 070-8127-002 | 5.1 Rev B IP22, Sep 16, 1993 | stored ADPCM, 87492 samples (1.98 s) at 44.1 kHz; same decoder tables as the Indy |
+| 070-9101-007 | 5.0 Rev B6 IP24, Sep 28, 1994 | has the ADPCM step table; not run |
+| 070-1361-003, -004 | 6.0.1 Rev A IP26 (Power Indigo2), Dec 9 and Dec 23, 1994 | synthesized strings with a different table (about 234, 295, 330, 443, 467, 592, 663, 706 Hz); not run |
+| 070-1477-001 | 6.2 Rev A IP28, Jun 10, 1996 | same first twelve voice rows as 070-1477-002 |
+
+The older IP22 PROM was run in iris with `prom` set to it: codec A played
+87492 frames at 44100 Hz, identical sample for sample to an IMA-style decode of
+the PROM's own ADPCM data, and equal to the first 87492 samples of the
+`ip22boottune.wav` that sits beside it in the mirror. A spectrogram comparison
+of that wav against the user's recording scores 0.91 at the same pitch (every
+other candidate scored 0.25 or less), so the user's tune is this
+sampled one, from a PROM older than the 5.3 Rev E iris embeds. With a blank
+NVRAM this PROM stayed silent for 280 s; a second boot on the NVRAM the first
+had written chimed within 200 s, consistent with the NVRAM gate the Indy shows
+(two runs, the gate itself not isolated).
+
+## The user's recording
 
 A user supplied a recording of a real Indigo2 (8-bit mono, 11025 Hz, 1.46 s,
-quiet and noisy, no bass). It is not the Indy ADPCM tune (any of the three
-samples, after resampling over 0.6x to 1.8x: no better than chance) and not the
-IP22 or IP28 tune 0 at its own pitch. The strongest partials sit at 261, 329,
-392, 524, 660 and 786 Hz, a C major arpeggio, and the best spectral fit among
-the tunes in the three local PROMs is tune 0 played about 1.19 times faster,
-which is an A major arpeggio moved up a minor third. That fit is suggestive,
-not proof, and the PROM does not program a clock that would produce it. The
-likeliest explanation is a different PROM revision (or an R8000 Power Indigo2)
-with its own table. The version string the machine prints at power-on would
-settle it; none of the three embedded PROMs is that revision.
+quiet and noisy, no bass). It is not the Indy ADPCM tunes and not the IP22 or
+IP28 tune 0 at its own pitch of the PROMs iris embeds; its best spectral fit
+among those was tune 0 played 1.19 times faster, a coincidence of triad
+partials. It is the sampled tune of the older IP22 PROM above. The embedded
+5.3 Rev E PROM synthesizes instead, so iris plays a different tune than a
+machine with an older PROM does, and is right for the PROM it carries.
 
 ## Recording what HAL2 plays
 
