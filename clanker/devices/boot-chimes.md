@@ -69,3 +69,80 @@ synthesized tunes, a plain IMA-style decoder for the Indy), sample for sample:
 0 of 85000 differ on the IP22, 0 of 85000 on the IP28, 0 of 92150 on the Indy.
 The comparison covers the CPU and FPU through HPC3 PBUS DMA and HAL2's
 rate and DMA handling; it does not cover the host audio device or resampler.
+
+## O2 (IP32)
+
+PROM: the installer's `ip32prom.image` from IRIX 6.5.30 (431,872 bytes, sha256
+11230c35...fb23c), firmware revision 4.18. The O2 has no embedded PROM; point
+`prom` at the file.
+
+**Why an earlier run heard nothing.** The file is not a bare flash image: a
+256-byte header ("PROM", the payload length at +12) sits in front of the
+431,616-byte payload. Loaded as is, the CPU (observed) spins in the PROM's fatal-error loop at 0xbfc004a0 (Status shows
+a TLB-load exception, BadVAddr 0xfffffffffffffffc; the section
+walk reading a wrong address is inferred), long before any audio
+register is touched. `Ip32Bus::unwrap_prom_image` now strips the header and
+pads the flash to 512 KiB with erased (0xff) bytes; a raw 512 KiB image is used
+as it is.
+
+**What the chime needs.** Nothing beyond a booting PROM. With `headless = true`
+(no keyboard, no video head), no serial client, and a flash file that did not
+exist, the tune plays within seconds of start; the PROM then reports that it
+cannot reach a keyboard and shows its maintenance menu on the serial port. A
+second boot with the saved flash plays the same samples.
+
+**What it is.** Same plucked-string engine as the Indigo2 (the PROM's
+noise generator, centring, scaling, two-point average and all-pass stage are
+the same code), with a different table and a different player:
+
+- The PROM has eleven sounds, each a table of 4 to 7 voices (32 bytes each:
+  delay length, sample count 88200, start offset, peak, decay, two averaging
+  weights 0.5, tuning coefficient). The power-on tune is the seven-voice table at
+  0x81054ab4 in the firmware once it is copied to RAM (flash offset 0x5dcc4);
+  delay lengths 168, 112, 133, 112, 125, 112, 83; start offsets 0, 6013, 12026,
+  18039, 24052, 30065, 36078 words (about 88 ms apart).
+- The synthesizer fills a buffer of 32-bit words, left and right alternating,
+  each sample added to both words of a pair as `trunc(x) << 8`. Offsets are in
+  words, so voices with an odd offset (1, 3, 5) put their sample in the right
+  word first. The buffer is 124,278 words rounded up to 64 bytes (0x79600), so
+  62,144 stereo frames. The PROM then copies it to the MACE audio output ring
+  in 288-byte steps, waiting for room.
+- Format at the codec: stereo, one sample pair per ring item, 16 bits at bits
+  23:8 of each word. Rate 34000 Hz (AD1843 clock generator 1, register 17 =
+  0x84d0), so 1.83 s. DAC1 analog gain is set to 13 in both fields (register 9 =
+  0x0d0d), 7.5 dB below unity; the dump holds samples after that gain.
+- Voice pitches measured in the model, one voice at a time: about 202, 302,
+  254, 302, 269, 302 and 388 Hz (G3, D4, B3, D4, C4, D4, G4, each roughly a
+  quarter tone sharp of equal temperament at A = 440).
+- The noise generator's start value is a leftover on the PROM's stack, not a
+  constant in its code: 0x810443f0 for the first three voices. The generator's
+  state is written back only by the part of a voice's fill that handles delay
+  lengths not a multiple of four, so the 133 and 125 voices (and the
+  83) advance it by one and three steps and the others by none; later voices
+  start at 0xdb921eb3 and 0x1a01e637. These values were read from the stack in
+  iris; a different earlier boot path would give a different noise pattern.
+- Voices run past the end of the buffer (88200 samples each against 62,139
+  frames played); the overrun lands on the PROM's scratch delay line and is
+  never played.
+
+**Check (2026-11-05).** `modelo2.py` (evidence below) rebuilds the tune from the
+flash bytes of the table and the arithmetic above in float32: 0 of 124,288
+words differ from `IRIS_O2_AUDIO_DUMP`, for the first and the second boot,
+and the dump is silent after the tune. The model depends on the stack value
+and on the codec gain being as the PROM sets them; the gain formula is the one
+iris already uses for the AD1843 (1.5 dB steps), so that part is a shared
+assumption, not independent. Not covered: the host audio device and resampler,
+a machine with a keyboard and video head, and any real O2 recording.
+
+`IRIS_O2_AUDIO_DUMP=<file>` records: output number (u8), rate (u32), pair count
+(u32), then left, right i16 pairs, little-endian. The dump is paced by wall
+clock, with silence for a ring that runs dry; this run had no gaps inside the
+tune.
+
+**Real hardware.** No recording or measurement of a real O2 chime was found in
+public sources. Forum threads confirm a working O2 plays a start-up sound at
+power-on ([comp.sys.sgi.hardware](https://groups.google.com/g/comp.sys.sgi.hardware/c/N79_XRWMHsM)),
+and an IRIX Network thread says SGI boot sounds were reverse engineered from
+the PROMs and that some are generated on the fly instead of stored
+([irixnet](https://forums.irixnet.org/thread-2291-page-3.html)). That fits what
+this PROM does, but neither source states the O2's rate, notes or length.
