@@ -192,6 +192,7 @@ pub mod ip27_origin2000;
 pub mod ip35;
 pub mod machine_state;
 pub mod control;
+pub mod devices;
 pub mod guest_net;
 pub mod platform;
 pub mod physical;
