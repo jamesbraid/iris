@@ -36,7 +36,8 @@ use crate::disp::Rex3Screen;
 use crate::hptimer::TimerManager;
 use crate::ip32::{Ip32Bus, Ip32Options, FIRMWARE_LOAD_VA, FIRMWARE_SPAN, NO_ECC_BASE, RAM_BASE, RAM_WINDOW_SIZE};
 use crate::traits::{BusDevice, Device, MachineEvent, Signal};
-use crate::workstation::{MachineRef, MachineSlot, Workstation};
+use crate::control::Control;
+use crate::workstation::{MachineSlot, Workstation};
 
 const PROM_VA: std::ops::Range<u32> = 0xbfc0_0000..0xbfc8_0000;
 
@@ -122,13 +123,11 @@ pub struct O2Machine {
     nat: Option<(Arc<crate::net::NatControl>, (std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr))>,
     /// Guest frames the network backend has processed.
     frames: Option<Arc<std::sync::atomic::AtomicU64>>,
-    /// The guest switching the machine off, for the machine-events thread.
-    events: std::sync::mpsc::SyncSender<MachineEvent>,
-    event_rx: Option<std::sync::mpsc::Receiver<MachineEvent>>,
-    /// Set once that thread runs; until then the service loop exits the
-    /// process itself on a power-off, as it always has.
-    controller_up: Arc<AtomicBool>,
-    controller_slot: Option<MachineSlot>,
+    /// Lifecycle state, the events channel (the guest switching the machine
+    /// off) and the pointer slot the front ends share. Until the event thread
+    /// runs the service loop exits the process itself on a power-off, as it
+    /// always has.
+    pub(crate) control: Control,
     /// The batch hook's place in the boot (see [`BootState`]).
     boot: Arc<BootState>,
     /// Set while the machine is stopped: the service thread leaves the
@@ -140,10 +139,6 @@ pub struct O2Machine {
     flash_path: Option<String>,
     /// The `scratch = true` volume, for the CI socket's scratch commands.
     scratch_path: Option<std::path::PathBuf>,
-    /// Where the machine is in its start/stop lifecycle (see
-    /// `Workstation::lifecycle`); never `Running`, which `status` reads from
-    /// the CPU.
-    lifecycle: crate::machine_state::GuestState,
 }
 
 /// What an O2 snapshot's manifest names as its machine.
@@ -332,7 +327,7 @@ impl O2Machine {
             monitor.register_device(Arc::new(crate::perfetto::PerfettoMonitor));
         }
 
-        let (events, event_rx) = std::sync::mpsc::sync_channel(4);
+        let control = Control::new();
         // A snapshot's disks by slot (controller * 16 + id) and size.
         let disks: Vec<crate::snapshot::DiskRef> = attached.tables.iter()
             .filter(|t| !t.is_cdrom)
@@ -350,13 +345,9 @@ impl O2Machine {
             ci_serial,
             nat,
             frames,
-            events,
-            event_rx: Some(event_rx),
-            controller_up: Arc::new(AtomicBool::new(false)),
-            controller_slot: None,
+            control,
             boot,
             paused: Arc::new(AtomicBool::new(false)),
-            lifecycle: crate::machine_state::GuestState::Idle,
             disks,
             flash_path: Some(cfg.nvram.clone()),
             scratch_path,
@@ -430,9 +421,7 @@ impl O2Machine {
     pub fn start(&mut self) {
         // Publish "starting" before the monitor binds, so a caller polling
         // readiness can tell "not started" from "startup under way".
-        if let Ok(starting) = self.lifecycle.transition(crate::machine_state::GuestState::Starting) {
-            self.lifecycle = starting;
-        }
+        self.control.started();
         self.running.store(true, Ordering::SeqCst);
         self.monitor.serve();
         let d = self.display.clone();
@@ -440,7 +429,7 @@ impl O2Machine {
         let bus = self.bus.clone();
         let cpu = self.cpu.clone();
         let running = self.running.clone();
-        let events = (self.events.clone(), self.controller_up.clone());
+        let events = (self.control.sender(), self.control.registered());
         let paused = self.paused.clone();
         self.start_scsi();
         self.threads.push(
@@ -549,10 +538,7 @@ impl O2Machine {
         if let Err(e) = self.bus.flush_disks() {
             eprintln!("iris: disk flush at stop failed: {e} (guest writes may be lost)");
         }
-        // A machine that was never started has nothing to halt.
-        if self.lifecycle != crate::machine_state::GuestState::Idle {
-            self.lifecycle = crate::machine_state::GuestState::Halted;
-        }
+        self.control.stopped();
     }
 
     /// Let the service thread look after the devices again.
@@ -713,9 +699,7 @@ impl O2Machine {
     /// address.
     pub fn machine_slot(&mut self) -> MachineSlot {
         let ptr = self as *mut O2Machine as *mut dyn Workstation;
-        let slot = self.controller_slot.get_or_insert_with(|| Arc::new(Mutex::new(MachineRef(ptr))));
-        debug_assert!(std::ptr::addr_eq(slot.lock().0, ptr), "O2Machine moved after its slot was handed out");
-        slot.clone()
+        self.control.slot(ptr)
     }
 
     pub fn get_ps2(&self) -> Arc<crate::dev::ps2::Ps2Controller> {
@@ -751,9 +735,7 @@ impl Drop for O2Machine {
     fn drop(&mut self) {
         // First wait out any monitor, event or CI command in flight, so none
         // sees a half-destroyed machine (see `Drop for Machine`).
-        if let Some(slot) = self.controller_slot.take() {
-            slot.lock().0 = MachineRef::null();
-        }
+        self.control.release();
         self.display.display_stop.request();
         self.running.store(false, Ordering::SeqCst);
         for t in self.threads.drain(..) {
@@ -775,15 +757,12 @@ impl Workstation for O2Machine {
     fn cpu_is_running(&self) -> bool { self.cpu.clone().as_device().is_running() }
     fn machine_slot(&mut self) -> MachineSlot { O2Machine::machine_slot(self) }
     fn register_system_controller(&mut self) {
-        let slot = self.machine_slot();
-        let events = self.event_rx.take();
-        assert!(events.is_some(), "register_system_controller called twice");
-        crate::workstation::register_system_controller(&self.monitor, slot, events);
-        self.controller_up.store(true, Ordering::SeqCst);
+        let ptr = self as *mut O2Machine as *mut dyn Workstation;
+        self.control.register(ptr, &self.monitor);
     }
     fn monitor_addr(&self) -> Option<std::net::SocketAddr> { self.monitor.bound_addr() }
-    fn lifecycle(&self) -> crate::machine_state::GuestState { self.lifecycle }
-    fn set_lifecycle(&mut self, state: crate::machine_state::GuestState) { self.lifecycle = state; }
+    fn lifecycle(&self) -> crate::machine_state::GuestState { self.control.state() }
+    fn set_lifecycle(&mut self, state: crate::machine_state::GuestState) { self.control.set_state(state) }
 
     fn get_display(&self) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> { Some(O2Machine::get_display(self)) }
     fn get_ps2(&self) -> Arc<crate::dev::ps2::Ps2Controller> { O2Machine::get_ps2(self) }
