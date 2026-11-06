@@ -164,6 +164,7 @@ impl O2Machine {
         // and that file is not there: there is no embedded O2 PROM.
         let prom_path = MachineProfile::O2Ip32.prom_path(&cfg.prom);
         let prom = std::fs::read(&prom_path)
+            .map(Ip32Bus::unwrap_prom_image)
             .map_err(|e| format!("O2 PROM {prom_path}: {e} (set `prom` to the O2 PROM image; 4.18 is the last release)"))?;
         // `banks`: the kit in each DIMM pair from A (validate checked them).
         let kits = cfg.o2_kits();
