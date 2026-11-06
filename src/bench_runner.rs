@@ -6,7 +6,7 @@
 //! guest image is linked into it (`crate::benchsuite`), and the test device can
 //! deliver the guest's console and exit code to a caller instead of to stdout
 //! and `process::exit` (`TestDevice::new_embedded`). So the whole run is a
-//! `Machine` on a worker thread, and it behaves identically on macOS, Windows
+//! `Ip22Machine` on a worker thread, and it behaves identically on macOS, Windows
 //! and Linux because there is nothing platform-specific left in it.
 //!
 //! `iris-bench run` uses this too, so "run the suite and parse the answer" has
@@ -23,7 +23,7 @@ use parking_lot::Mutex;
 use crate::bench_report::{host_info, parse_block, Run};
 use crate::benchsuite;
 use crate::config::{CpuModel, MachineConfig};
-use crate::machine::Machine;
+use crate::ip22_machine::Ip22Machine;
 use crate::dev::testdev::{RunConfig, TestDevice};
 
 /// RAM for the bare-metal machine, in MB per bank — the same 256 MB in two
@@ -106,7 +106,7 @@ pub enum Progress {
 ///
 /// Blocks until the guest exits, the timeout expires, or startup fails. Safe to
 /// call from any thread; it does its own work on a worker with a large stack,
-/// because `Machine::new` puts a >1 MB device map on the stack and Windows
+/// because `Ip22Machine::new` puts a >1 MB device map on the stack and Windows
 /// gives a thread 1 MB by default.
 pub fn run(
     opts: &BenchOptions,
@@ -151,16 +151,16 @@ fn run_inner(
     let started = Instant::now();
     let mut cfg = bench_config(opts.banks, opts.cpu);
     cfg.machine.cache = opts.cache;
-    let mut machine = Box::new(Machine::new_with_testdev(cfg, Some(testdev)));
+    let mut machine = Box::new(Ip22Machine::new_with_testdev(cfg, Some(testdev)));
     // Deliberately no `register_system_controller`: it hands a raw pointer to
-    // this Machine to a thread that outlives the call, and this one is dropped
+    // this Ip22Machine to a thread that outlives the call, and this one is dropped
     // when the run finishes. Nothing here needs `reset`/`save`/`load` anyway.
 
     machine.load_elf_bytes(benchsuite::SUITE_ELF, "irisbench.elf")
         .map_err(|e| format!("loading the embedded suite: {}", e))?;
 
     machine.start();
-    // `Machine::start` autostarts the CPU only in a non-developer release
+    // `Ip22Machine::start` autostarts the CPU only in a non-developer release
     // build; ask for it explicitly so a debug build (`cargo test`) runs too.
     // `MipsCpu::start` is a no-op when it is already running.
     machine.cpu_start();

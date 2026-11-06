@@ -124,7 +124,7 @@ fn a_fresh_octane_provides_the_lifecycle_slot_and_nat_methods() {
 #[test]
 fn release_is_the_first_thing_drop_does() {
     for (file, src) in [
-        ("machine.rs", include_str!("machine.rs")),
+        ("ip22_machine.rs", include_str!("ip22_machine.rs")),
         ("ip32_machine.rs", include_str!("ip32_machine.rs")),
         ("ip30_machine.rs", include_str!("ip30_machine.rs")),
     ] {

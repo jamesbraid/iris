@@ -13,7 +13,7 @@ iris`), the disk **cannot be attached**. `ChdHd::open` returns
 The symptom is several steps removed from the cause:
 
 - That attach error now **aborts startup** with a fatal message
-  (`machine.rs`, the `add_scsi_device` result check). It used to print only a
+  (`ip22_machine.rs`, the `add_scsi_device` result check). It used to print only a
   skippable `Note:` and continue, so the device was silently absent and the
   *only* visible failure was much later: the PROM's `OSLoadPartition=disk(N)`
   finding nothing → `Unable to load bootfile: no such device` /

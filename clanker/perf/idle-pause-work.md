@@ -64,12 +64,12 @@ CPU is never paused to enable it.
 - Works against the interpreter run loop so `step()` sees every instruction
   (the old `--features jit` build that bypassed `step()` no longer exists).
 
-### Snapshot provenance (in `src/snapshot.rs` + `src/machine.rs`)
+### Snapshot provenance (in `src/snapshot.rs` + `src/ip22_machine.rs`)
 The manifest (`saves/<name>/snapshot.toml`) now records and validates **features**,
 **disks** (path+size), and **nvram**:
 - `snapshot.rs`: added `DiskRef`, `enabled_features()`, `Manifest.{features,disks,nvram}`,
   to/from-toml (backward-compatible; legacy manifests load with a warning).
-- `machine.rs`: `Machine` captures disk+nvram provenance in `new()`; `save_snapshot`
+- `ip22_machine.rs`: `Machine` captures disk+nvram provenance in `new()`; `save_snapshot`
   writes it; `load_snapshot_inner` validates — **hard error** on disk/feature
   mismatch, **warn** on nvram, `IRIS_SNAPSHOT_SKIP_CHECK=1` overrides.
 - Verified: positive restore loads; tampering a `disks[].size_bytes` is refused
@@ -117,7 +117,7 @@ why we're now booting fresh instead.
   #   nvram="nvram-capture.bin", scsi.1=irix53.raw, scsi.4=irix53 ISO, vino=test_pattern
   ./target/release/iris --config iris-capture53.toml &
   ```
-- In CI mode the CPU does **not** auto-start (`machine.rs:522`): `iris-ci start`.
+- In CI mode the CPU does **not** auto-start (`ip22_machine.rs:522`): `iris-ci start`.
 - The installed 5.3 autoboots past the PROM menu; wait for the prompt with
   `iris-ci serial-wait "login:" --timeout 600` (uses the serial-console nvram
   `nvram-irix53.bin.pre-console-g`, not the `console=g` one).

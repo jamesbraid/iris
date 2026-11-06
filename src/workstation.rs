@@ -3,7 +3,7 @@
 //! `main.rs`, the window (`ui.rs`), the CI socket (`ci.rs`), the monitor's
 //! system commands and iris-gui hold a `Box<dyn Workstation>` (or reach one
 //! through a [`MachineSlot`]) rather than a concrete machine type. Today the
-//! one implementation is [`Machine`], the Indy and Indigo2 family; a machine
+//! one implementation is [`Ip22Machine`], the Indy and Indigo2 family; a machine
 //! built around a different chipset implements the same trait.
 //!
 //! The trait splits in two. The required methods are what every machine has:
@@ -31,7 +31,7 @@ use crate::dev::ps2::Ps2Controller;
 use crate::dev::serial_host::CiSerialBackend;
 use crate::gfx_display::GfxDisplay;
 use crate::hptimer::TimerManager;
-use crate::machine::Machine;
+use crate::ip22_machine::Ip22Machine;
 use crate::machine_state::{GuestState, MachineStatus, TransitionAck};
 use crate::monitor::Monitor;
 use crate::net::NatControl;
@@ -48,7 +48,7 @@ pub fn build(cfg: MachineConfig) -> Result<Box<dyn Workstation>, String> {
         crate::config::MachineProfile::O2Ip32 => Ok(Box::new(crate::ip32_machine::O2Machine::new(&cfg)?)),
         // So is the Octane (HEART, Xbow, Bridge).
         crate::config::MachineProfile::OctaneIp30 => Ok(Box::new(crate::ip30_machine::OctaneMachine::new(&cfg)?)),
-        _ => Ok(Box::new(Machine::new(cfg))),
+        _ => Ok(Box::new(Ip22Machine::new(cfg))),
     }
 }
 
@@ -211,7 +211,7 @@ pub trait Workstation: Send {
     fn inject_serial_console(&self, bytes: &[u8]);
 
     /// For code that only works on one machine type (the JIT validators):
-    /// downcast with `as_any_mut().downcast_mut::<Machine>()`.
+    /// downcast with `as_any_mut().downcast_mut::<Ip22Machine>()`.
     fn as_any_mut(&mut self) -> &mut dyn Any;
 
     // ---- optional facilities ----
@@ -391,7 +391,7 @@ pub struct MachineRef(pub(crate) *mut dyn Workstation);
 impl MachineRef {
     /// The pointer a dropped machine leaves in its slot.
     pub(crate) fn null() -> *mut dyn Workstation {
-        std::ptr::null_mut::<Machine>() as *mut dyn Workstation
+        std::ptr::null_mut::<Ip22Machine>() as *mut dyn Workstation
     }
 }
 
@@ -845,7 +845,7 @@ impl Device for SystemController {
                     .unwrap_or(0);
                 let _ = writeln!(writer, "jitcheck: capturing live state, running {} instructions interpreter-only then with real JIT dispatch (skipping first {} divergence(s))...", n, skip);
                 self.with_machine(|m| {
-                    let m = m.as_any_mut().downcast_mut::<Machine>()
+                    let m = m.as_any_mut().downcast_mut::<Ip22Machine>()
                         .ok_or_else(|| format!("jitcheck: {NOT_HERE}"))?;
                     let report = crate::validate::validate_jit_determinism(m, n, skip)
                         .map_err(|e| format!("jitcheck failed: {}", e))?;

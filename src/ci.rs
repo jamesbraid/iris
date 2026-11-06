@@ -94,8 +94,8 @@ fn cleanup_socket_path(path: &str) {
 }
 
 impl CiServer {
-    /// Run `f` against the Machine, or fail if it has been dropped. The slot's
-    /// mutex serializes all Machine accesses from CI command handlers.
+    /// Run `f` against the Ip22Machine, or fail if it has been dropped. The slot's
+    /// mutex serializes all Ip22Machine accesses from CI command handlers.
     /// CPU/peripheral threads observe state changes only when the methods we
     /// call stop them first (ci_restore/ci_rollback do).
     fn with_machine<R>(&self, f: impl FnOnce(&mut dyn Workstation) -> R) -> Result<R, String> {
@@ -433,7 +433,7 @@ fn cmd_quit(server: &CiServer, args: &Value) -> Response {
 fn cmd_start(server: &CiServer) -> Response {
     // Same path as the monitor's `machine-start`: idempotent, and it brings
     // peripherals back before releasing the CPU after a stop. A machine that
-    // has not finished `Machine::start` reports `idle` and the harness should
+    // has not finished `Ip22Machine::start` reports `idle` and the harness should
     // poll `status` first; the CI socket is created after that startup step,
     // so a connected client normally cannot see `idle`.
     match server.with_machine_result(|m| m.start_guest()) {
@@ -887,7 +887,7 @@ fn cmd_validate(server: &CiServer, args: &Value) -> Response {
         .unwrap_or(1_000_000);
 
     let report_result = server.with_machine_result(|m| {
-        let m = m.as_any_mut().downcast_mut::<crate::machine::Machine>()
+        let m = m.as_any_mut().downcast_mut::<crate::ip22_machine::Ip22Machine>()
             .ok_or("not supported on this machine")?;
         crate::validate::validate_snapshot_determinism(m, &name, n)
     });
