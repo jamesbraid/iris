@@ -3,7 +3,7 @@
 **Symptom:** in *graphical* mode an otherwise-idle IRIX desktop (e.g. sitting at
 the xdm login, or any static screen) pins a host core at ~100%. It does **not**
 happen headless (`headless = true`), because headless constructs no REX3 at all
-(`machine.rs`), so there is no REX3 thread.
+(`ip22_machine.rs`), so there is no REX3 thread.
 
 **Diagnosis trail (worth remembering):**
 

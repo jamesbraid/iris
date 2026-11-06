@@ -172,7 +172,7 @@ pub mod prombini2;
 pub mod prombinip28;
 pub mod ppmem;
 pub mod memory_map;
-pub mod machine;
+pub mod ip22_machine;
 pub mod emulator_name;
 pub mod workstation;
 /// The SGI O2 (IP32): its bus and devices -- see `docs/o2-ip32.md` (and, for how it was built, `clanker/devices/ip32-o2-bringup-log.md`).
