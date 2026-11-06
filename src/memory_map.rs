@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn indy_has_two_windows_a_low_alias_and_a_prom() {
-        let m = crate::ip22_bus::memory_map(false);
+        let m = crate::ip22_bus::memory_map(&crate::config::RamLayout::Split);
         assert!(m.is_ram(0x1000), "the low alias is RAM");
         assert!(!m.contains(0x0008_0000), "the alias stops at 512 KB");
         assert!(m.is_ram(0x0800_0000));
@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn ip28_has_no_lomem() {
-        let m = crate::ip22_bus::memory_map(true);
+        let m = crate::ip22_bus::memory_map(&crate::config::MachineProfile::Indigo2Ip28.board().unwrap().ram);
         assert!(!m.contains(0x0800_0000));
         assert!(m.is_ram(0x2000_0000));
         assert!(m.is_ram(0x9fff_ffff), "four 512 MB banks fit");

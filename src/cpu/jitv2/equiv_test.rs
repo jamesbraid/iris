@@ -4410,7 +4410,7 @@ mod tests {
     {
         let build = || {
             let mem = Arc::new(MockMemory::new_not_compilable());
-            let cfg = MipsCpuConfig::for_model::<C>(Arc::new(crate::ip22_bus::memory_map(false)));
+            let cfg = MipsCpuConfig::for_model::<C>(Arc::new(crate::ip22_bus::memory_map(&crate::config::RamLayout::Split)));
             let mut exec = Box::new(MipsExecutor::<PassthroughTlb, C>::new(mem.clone(), PassthroughTlb::default(), &cfg));
             exec.core.pc = 0x1000;
             setup(&mem, &mut exec);
