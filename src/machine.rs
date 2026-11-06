@@ -110,8 +110,6 @@ pub struct Machine {
     mc: MemoryController,
     hpc3: Hpc3,
     monitor: Arc<Monitor>,
-    /// TCP port the monitor serves on 127.0.0.1 (`cfg.monitor_port`).
-    monitor_port: u16,
     /// Sender for async machine events (HardReset, PowerOff) from devices.
     pub event_tx: mpsc::SyncSender<MachineEvent>,
     event_rx: Option<mpsc::Receiver<MachineEvent>>,
@@ -911,7 +909,7 @@ impl Machine {
         let devlog = crate::devlog::init_devlog();
 
         // Setup Monitor
-        let monitor = Monitor::new();
+        let monitor = Monitor::new(monitor_port);
         monitor.register_device(devlog.clone());
         monitor.register_device(Arc::new(crate::cpu::cpu_monitor::CpuMonitor::new(vec![cpu.clone()])));
         monitor.register_device(Arc::new(mc.clone()));
@@ -968,7 +966,6 @@ impl Machine {
             mc,
             hpc3,
             monitor,
-            monitor_port,
             event_tx,
             event_rx: Some(event_rx),
             timer_manager,
@@ -1043,7 +1040,7 @@ impl Machine {
         // otherwise) — always start, even in CI mode, so debug helpers
         // (status/regs/bt/dis) stay reachable while iris-ci drives the serial
         // console.
-        self.monitor.clone().start_server(format!("127.0.0.1:{}", self.monitor_port));
+        self.monitor.serve();
 
         // CI mode: the harness drives startup via `restore` / `start`. Don't
         // autostart the CPU so the first command finds a quiet machine.
