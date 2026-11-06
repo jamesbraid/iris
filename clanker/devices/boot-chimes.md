@@ -40,10 +40,52 @@ window):
   0x9fc55954 and 0x9fc55914, the sample at 0x9fc55ac0 and its length in bytes at
   0x9fc60ebc.
 
-Both players return early when a value they read from NVRAM is zero (the volume
-setting, inferred from the code, not confirmed). Observed in iris: the first
+Both players return early when the HAL2 revision register's top bit is set or
+when a value they read from NVRAM is zero (the volume setting, inferred from the
+code, not confirmed). Observed in iris: the first
 boot of a new Indy `nvram.bin` is silent and the next boots chime; an Indigo2
 with no `nveeprom` file chimes on its first boot.
+
+## Other tunes in the same PROMs, and the clocks they use
+
+Each PROM holds more than the power-on tune, selected by the number the player
+is called with (0 at power-on). What calls them was not traced; nothing
+in iris reaches them today.
+
+| PROM | Tune 0 | Tune 1 | Tune 2 |
+|---|---|---|---|
+| Indy 070-9101-011 | ADPCM, 92150 samples (2.09 s) | ADPCM, 74460 samples (1.69 s) | ADPCM, 30200 samples (0.68 s) |
+| Indigo2 070-1367-012 | seven strings, A major, rising | five strings (873, 741, 663, 555, 439 Hz), 8000 samples apart, falling | six strings strummed three times 22050 samples apart (156 to 278 Hz, a dissonant cluster; probably the failure sound, not confirmed) |
+| Indigo2 Impact 070-1477-002 | same as the IP22 | same as the IP22 | not in the table (its rows after tune 1 differ and are not voices) |
+
+Indy tune 1 and 2 are stored at 0x9fc60ec0 (length word at 0x9fc6a030) and
+0x9fc6a034 (length at 0x9fc6db30); each length is in bytes, two samples per
+byte. IP22 voice rows are 32 bytes: delay length, sample count, start offset,
+peak, then four single-precision coefficients. Tune 1 starts at row 7 of the
+table and tune 2 at row 12.
+
+Both PROMs program the audio clock explicitly, early in start-up (0xbfc00ba0 to
+0xbfc00be8 on the IP22, 0xbfc00c44 to 0xbfc00c8c on the Indy): HAL2 Bresenham generator 1 is pointed at the
+44.1 kHz master with increment 1 and modulus 1, so 44100 Hz is what the PROM
+asks for, not a default iris assumes. A 1995 post by an SGI engineer (comp.sys.sgi.misc,
+"How to get the Boot Tune...") says the Indy tune is ADPCM, about two seconds
+long, and that the Power Indigo2 (R8000) had dropped its sampled tune for a
+synthesized one when the PROM ran out of space, which fits what the Indy and
+the later Indigo2 PROMs hold.
+
+## A recording that does not match
+
+A user supplied a recording of a real Indigo2 (8-bit mono, 11025 Hz, 1.46 s,
+quiet and noisy, no bass). It is not the Indy ADPCM tune (any of the three
+samples, after resampling over 0.6x to 1.8x: no better than chance) and not the
+IP22 or IP28 tune 0 at its own pitch. The strongest partials sit at 261, 329,
+392, 524, 660 and 786 Hz, a C major arpeggio, and the best spectral fit among
+the tunes in the three local PROMs is tune 0 played about 1.19 times faster,
+which is an A major arpeggio moved up a minor third. That fit is suggestive,
+not proof, and the PROM does not program a clock that would produce it. The
+likeliest explanation is a different PROM revision (or an R8000 Power Indigo2)
+with its own table. The version string the machine prints at power-on would
+settle it; none of the three embedded PROMs is that revision.
 
 ## Recording what HAL2 plays
 
