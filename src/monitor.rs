@@ -52,6 +52,12 @@ impl Monitor {
         self.devices.lock().push(device);
     }
 
+    /// The command names `help` lists, in registration order.
+    #[cfg(test)]
+    pub(crate) fn command_names(&self) -> Vec<String> {
+        self.devices.lock().iter().flat_map(|d| d.register_commands()).map(|(c, _)| c).collect()
+    }
+
     /// Bind 127.0.0.1 on this monitor's port and serve it on a new thread.
     /// The bind happens before this returns, so `bound_addr` answers at once
     /// whether this monitor has its port.
