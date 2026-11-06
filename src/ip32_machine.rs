@@ -114,7 +114,6 @@ pub struct O2Machine {
     /// The shared monitor (telnet, `monitor_port`): the CPU's commands and
     /// every O2 device's, through the bus.
     monitor: Arc<crate::monitor::Monitor>,
-    monitor_port: u16,
     /// The console UART's in-process host end in CI mode (`--ci`), which the
     /// CI socket types into and reads.
     ci_serial: Option<Arc<crate::dev::serial_host::CiSerialBackend>>,
@@ -316,7 +315,8 @@ impl O2Machine {
         }
         // The shared monitor, as the other machines have it: the CPU's
         // commands (registers, breakpoints, memory) and the O2's devices'.
-        let monitor = crate::monitor::Monitor::new();
+        let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
+        let monitor = crate::monitor::Monitor::new(monitor_port);
         monitor.register_device(crate::devlog::init_devlog());
         monitor.register_device(Arc::new(crate::cpu::cpu_monitor::CpuMonitor::new(vec![cpu.clone()])));
         monitor.register_device(bus.clone());
@@ -336,7 +336,6 @@ impl O2Machine {
             crate::perfetto::set_guest_cycles(Some(cpu.cycles_ptr()));
             monitor.register_device(Arc::new(crate::perfetto::PerfettoMonitor));
         }
-        let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
 
         let (events, event_rx) = std::sync::mpsc::sync_channel(4);
         // A snapshot's disks by slot (controller * 16 + id) and size.
@@ -354,7 +353,6 @@ impl O2Machine {
             running,
             threads: Vec::new(),
             monitor: Arc::new(monitor),
-            monitor_port,
             ci_serial,
             nat,
             frames,
@@ -442,7 +440,7 @@ impl O2Machine {
             self.lifecycle = starting;
         }
         self.running.store(true, Ordering::SeqCst);
-        self.monitor.clone().start_server(format!("127.0.0.1:{}", self.monitor_port));
+        self.monitor.serve();
         let d = self.display.clone();
         self.threads.push(std::thread::Builder::new().name("O2-Display".into()).spawn(move || d.display_loop()).unwrap());
         let bus = self.bus.clone();
