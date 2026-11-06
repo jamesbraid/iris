@@ -13,6 +13,14 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### Machine profiles
+
+- An Indy or `indigo2_ip22` no longer accepts an R10000, and `indigo2_ip28`
+  accepts only the R10000: the R10000 Indigo2 is the IP28 board. A config with
+  `profile = "indigo2_ip28"` and the default `cpu` now fails `validate` with a
+  message naming `cpu = "r10000"` (the shipped `ip28.toml.example` and the GUI
+  already set it). The front ends' Processor pickers list the same models.
+
 ### Boot test before publishing
 
 - `build.yml` can boot IRIX 5.3 to a login prompt on Linux, macOS and Windows
