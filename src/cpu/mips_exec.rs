@@ -3492,6 +3492,21 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         EXEC_COMPLETE
     }
 
+    /// Count the second instruction of a fused pair. `step_cycles!` already
+    /// counted the first when the pair was dispatched; the second is never
+    /// dispatched, but it retires, and `hot.cycles` is one per retired
+    /// instruction (the compiled-code path counts both too). Straight-line
+    /// add: the fused handlers call it only on their fused path, so there is
+    /// no extra test. `ci_clock`'s threshold check runs at the next dispatch.
+    #[cfg(feature = "opcodefusion")]
+    #[inline(always)]
+    fn count_fused_second(&mut self) {
+        unsafe {
+            let p = &mut self.core.hot.cycles as *mut u64;
+            std::ptr::write_volatile(p, std::ptr::read_volatile(p).wrapping_add(1));
+        }
+    }
+
     /// Terminal action for a *non-likely* conditional branch's not-taken arm
     /// (BEQ/BNE/BLEZ/BGTZ/BLTZ/BGEZ/BLTZAL/BGEZAL — never the "likely" family,
     /// which annuls the slot entirely via `handle_branch_likely_skip` instead).
@@ -5256,6 +5271,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         if self.core.in_delay_slot {
             return self.branch_delay(target);
         }
+        self.count_fused_second();
         self.core.pc = target;
         self.exec_complete_pc_set()
     }
@@ -5514,6 +5530,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         if self.core.in_delay_slot {
             return self.handle_exec_complete();
         }
+        self.count_fused_second();
         self.core.pc = self.core.pc.wrapping_add(4);
 
         let next_op = (next_raw >> 26) & 0x3F;
@@ -5773,6 +5790,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         if self.core.in_delay_slot {
             return self.branch_delay(target);
         }
+        self.count_fused_second();
         self.core.pc = target;
         self.exec_complete_pc_set()
     }
@@ -5794,6 +5812,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         if self.core.in_delay_slot {
             return self.branch_delay(target);
         }
+        self.count_fused_second();
         self.core.pc = target;
         self.exec_complete_pc_set()
     }
@@ -5825,11 +5844,13 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             if self.core.in_delay_slot {
                 return self.branch_delay(target);
             }
+            self.count_fused_second();
             self.core.pc = target;
             self.exec_complete_pc_set()
         } else if self.core.in_delay_slot {
             self.handle_exec_complete()
         } else {
+            self.count_fused_second();
             self.handle_branch_likely_skip()
         }
     }
@@ -5856,11 +5877,13 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             if self.core.in_delay_slot {
                 return self.branch_delay(target);
             }
+            self.count_fused_second();
             self.core.pc = target;
             self.exec_complete_pc_set()
         } else if self.core.in_delay_slot {
             self.handle_exec_complete()
         } else {
+            self.count_fused_second();
             self.handle_branch_likely_skip()
         }
     }
@@ -6138,6 +6161,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             self.core.write_gpr(d.rt as u32, ((d.raw & 0xFFFF) << 16) as i32 as i64 as u64);
             return self.handle_exec_complete();
         }
+        self.count_fused_second();
         self.core.write_gpr(d.rt as u32, d.immu64());
         self.handle_branch_likely_skip()
     }
@@ -6157,6 +6181,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             self.core.write_gpr(d.rt as u32, ((d.raw & 0xFFFF) << 16) as i32 as i64 as u64);
             return self.handle_exec_complete();
         }
+        self.count_fused_second();
         self.core.write_gpr(d.rt as u32, d.immu64());
         self.handle_branch_likely_skip()
     }
