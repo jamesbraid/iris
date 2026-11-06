@@ -947,7 +947,7 @@ impl Ui {
         let w = 1280 * scale;
         let h = (1024 + STATUS_BAR_HEIGHT as u32) * scale;
         let window_builder = WindowAttributes::default()
-            .with_title(crate::machine::emulator_name())
+            .with_title(crate::emulator_name::emulator_name())
             .with_resizable(true)
             .with_inner_size(winit::dpi::PhysicalSize::new(w, h));
 
