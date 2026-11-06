@@ -37,6 +37,7 @@ use crate::hptimer::TimerManager;
 use crate::ip32::{Ip32Bus, Ip32Options, FIRMWARE_LOAD_VA, FIRMWARE_SPAN, NO_ECC_BASE, RAM_BASE, RAM_WINDOW_SIZE};
 use crate::traits::{BusDevice, Device, MachineEvent, Signal};
 use crate::control::Control;
+use crate::guest_net::GuestNet;
 use crate::workstation::{MachineSlot, Workstation};
 
 const PROM_VA: std::ops::Range<u32> = 0xbfc0_0000..0xbfc8_0000;
@@ -118,11 +119,8 @@ pub struct O2Machine {
     /// The console UART's in-process host end in CI mode (`--ci`), which the
     /// CI socket types into and reads.
     ci_serial: Option<Arc<crate::dev::serial_host::CiSerialBackend>>,
-    /// The NAT's controls and the addresses it hands the guest (client,
-    /// gateway, netmask), when the Ethernet is plugged in.
-    nat: Option<(Arc<crate::net::NatControl>, (std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr))>,
-    /// Guest frames the network backend has processed.
-    frames: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// The NAT handle, when the Ethernet is plugged in.
+    net: Option<GuestNet>,
     /// Lifecycle state, the events channel (the guest switching the machine
     /// off) and the pointer slot the front ends share. Until the event thread
     /// runs the service loop exits the process itself on a power-off, as it
@@ -211,18 +209,13 @@ impl O2Machine {
         }
         // The Ethernet on the NAT gateway `[network]` describes (`mode =
         // "off"` leaves it unplugged; validate refuses pcap here for now).
-        let (mut nat, mut frames) = (None, None);
-        let net = crate::net::GatewayConfig::from_network(&cfg.network());
-        if let Some(link) = crate::net::Link::with_gateway(net.clone())? {
-            if net.mode == crate::config::NetMode::Stream {
-                eprintln!("iris: O2 Ethernet on {}", link.describe());
-            } else {
-                eprintln!("iris: O2 Ethernet on NAT: gateway {}, guest {} (DHCP)", net.gateway_ip, net.client_ip);
+        let net = match GuestNet::open(cfg, "O2")? {
+            Some((net, link)) => {
+                bus.mace.mec.attach(link);
+                Some(net)
             }
-            frames = Some(link.frames());
-            nat = Some((link.nat(), (net.client_ip, net.gateway_ip, net.netmask)));
-            bus.mace.mec.attach(link);
-        }
+            None => None,
+        };
 
         let timer_manager = Arc::new(TimerManager::new());
         let sysad: Arc<dyn BusDevice> = bus.phys.clone();
@@ -343,8 +336,7 @@ impl O2Machine {
             threads: Vec::new(),
             monitor: Arc::new(monitor),
             ci_serial,
-            nat,
-            frames,
+            net,
             control,
             boot,
             paused: Arc::new(AtomicBool::new(false)),
@@ -808,13 +800,13 @@ impl Workstation for O2Machine {
     }
 
     fn net_frames(&self) -> Option<Arc<std::sync::atomic::AtomicU64>> {
-        self.frames.clone()
+        self.net.as_ref().and_then(|n| n.frames())
     }
     fn nat_control(&self) -> Option<Arc<crate::net::NatControl>> {
-        self.nat.as_ref().map(|(n, _)| n.clone())
+        self.net.as_ref().map(|n| n.nat())
     }
     fn nat_expected(&self) -> Option<(std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr)> {
-        self.nat.as_ref().map(|(_, a)| *a)
+        self.net.as_ref().map(|n| n.addrs())
     }
 }
 

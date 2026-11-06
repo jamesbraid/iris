@@ -42,6 +42,7 @@ use crate::chunk_store::{get_chunks_as_words, put_words_as_chunks, ChunkStore};
 use crate::snapshot::{field, ChunksManifest, Manifest, Snapshot, StateTable, SCHEMA_VERSION};
 use crate::traits::{BusDevice, Device, MachineEvent, Resettable, Saveable};
 use crate::control::Control;
+use crate::guest_net::GuestNet;
 use crate::workstation::{MachineSlot, Workstation};
 
 /// The PROM image tried when `prom` is left at the shared default, named
@@ -140,9 +141,8 @@ pub struct OctaneMachine {
     pub gfx: Option<Arc<ImpactXio>>,
     /// The VPro board, with `[graphics] board = "v6"`, `"v8"`, `"v10"` or `"v12"`.
     pub vpro: Option<Arc<Odyssey>>,
-    nat: Option<(Arc<crate::net::NatControl>, (std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr))>,
-    /// Guest frames the network backend has processed.
-    frames: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// The NAT handle, when the Ethernet is plugged in.
+    net: Option<GuestNet>,
     scratch_path: Option<std::path::PathBuf>,
     nvram_path: String,
     /// Lifecycle state, machine events and the pointer slot the front ends
@@ -492,18 +492,13 @@ impl OctaneMachine {
         Self::connect_serial(cfg, &ioc3, ci_serial.as_ref());
 
         // The Ethernet on the NAT gateway `[network]` describes.
-        let (mut nat, mut frames) = (None, None);
-        let net = crate::net::GatewayConfig::from_network(&cfg.network());
-        if let Some(link) = crate::net::Link::with_gateway(net.clone())? {
-            if net.mode == crate::config::NetMode::Stream {
-                eprintln!("iris: Octane Ethernet on {}", link.describe());
-            } else {
-                eprintln!("iris: Octane Ethernet on NAT: gateway {}, guest {} (DHCP)", net.gateway_ip, net.client_ip);
+        let net = match GuestNet::open(cfg, "Octane")? {
+            Some((net, link)) => {
+                eth.attach(link);
+                Some(net)
             }
-            frames = Some(link.frames());
-            nat = Some((link.nat(), (net.client_ip, net.gateway_ip, net.netmask)));
-            eth.attach(link);
-        }
+            None => None,
+        };
         Ok(Self {
             memory,
             phys,
@@ -524,8 +519,7 @@ impl OctaneMachine {
             flash,
             gfx,
             vpro,
-            nat,
-            frames,
+            net,
             scratch_path,
             nvram_path: cfg.nvram.clone(),
             control,
@@ -1104,13 +1098,13 @@ impl Workstation for OctaneMachine {
         crate::scsi::ScsiBus::sync_chd_disks(&buses, only, progress, cancel)
     }
     fn net_frames(&self) -> Option<Arc<std::sync::atomic::AtomicU64>> {
-        self.frames.clone()
+        self.net.as_ref().and_then(|n| n.frames())
     }
     fn nat_control(&self) -> Option<Arc<crate::net::NatControl>> {
-        self.nat.as_ref().map(|(n, _)| n.clone())
+        self.net.as_ref().map(|n| n.nat())
     }
     fn nat_expected(&self) -> Option<(std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr)> {
-        self.nat.as_ref().map(|(_, a)| *a)
+        self.net.as_ref().map(|n| n.addrs())
     }
 }
 
