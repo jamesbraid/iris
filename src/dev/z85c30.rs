@@ -836,8 +836,8 @@ fn channel_from_toml(v: &toml::Value, ch: &mut Channel) {
     let wr5_val = ch.regs[scc_regs::WR5 as usize];
     ch.tx_int_pending = (wr1_val & wr1::TX_INT_EN) != 0 && (wr5_val & wr5::TX_ENABLE) != 0;
     ch.update_tx_delay();
-    // Ioc::load_state restores map_stat wholesale after power_on_devices cleared
-    // SERIAL, so the SCC redrives the line last.
+    // The line follows the restored registers. The IOC loads after its SCC and
+    // restores map_stat as it was saved, so the saved status has the last word.
     ch.update_ip();
 }
 
@@ -1126,7 +1126,6 @@ mod tests {
         dst.load_state(&saved).expect("load_state");
 
         assert!(probe.level(),
-            "`power_on_devices` cleared map_stat SERIAL and `Ioc::load_state` \
-             restored it wholesale, so only the SCC can put the line back up");
+            "the line follows the restored registers");
     }
 }

@@ -153,6 +153,8 @@ pub struct Machine {
     pub(crate) control: Control,
     devices: Devices,
     disks: Disks,
+    /// Where snapshots live: `saves/<name>/` under the working directory.
+    saves: std::path::PathBuf,
     /// The SEEQ's NAT handle, from the link it attached.
     net: GuestNet,
 }
@@ -181,20 +183,9 @@ struct RollbackCheckpoint {
     /// Parsed device save_state TOMLs. Holding `toml::Value` directly skips
     /// the ~80 ms cpu.toml string-parse cost on every rollback.
     cpu: toml::Value,
-    mc: toml::Value,
-    ioc: toml::Value,
-    scc: toml::Value,
-    pit: toml::Value,
-    ps2: toml::Value,
-    rtc: toml::Value,
-    eeprom: toml::Value,
-    scsi: toml::Value,
-    /// Second SCSI controller's state — fullhouse only. `None` on guinness.
-    scsi1: Option<toml::Value>,
-    seeq: toml::Value,
-    hpc3: toml::Value,
-    rex3: Option<toml::Value>,
-    rex3_head1: Option<toml::Value>,
+    /// Every registered part's state, children included, as `Devices::save`
+    /// wrote it.
+    state: toml::Value,
 }
 
 /// Parse a `cow.toml`/`cow1.toml`-shaped table (`{"scsi<id>": [dirty
@@ -237,7 +228,7 @@ pub(crate) fn parse_cow_table(cow_toml: &toml::Value) -> Vec<(usize, Vec<u64>)> 
 /// registers — for comparing an interpreter-only reference run against a
 /// real-JIT-dispatch run of the same instruction window.
 ///
-/// Deliberately does **not** capture SCSI controller or COW-overlay dirty-
+/// Deliberately does **not** capture or restore SCSI controller or COW-overlay dirty-
 /// sector state — there is no "just loaded from snapshot X" name to
 /// reference here (this captures live, mid-session state, not a disk
 /// snapshot restore), and building a live-capture equivalent of
@@ -254,17 +245,8 @@ pub(crate) struct LiveCheckpoint {
     bank_words: [Vec<u32>; 4],
     framebuffers: Option<(Vec<u32>, Vec<u32>)>,
     cpu: toml::Value,
-    mc: toml::Value,
-    ioc: toml::Value,
-    scc: toml::Value,
-    pit: toml::Value,
-    ps2: toml::Value,
-    rtc: toml::Value,
-    eeprom: toml::Value,
-    seeq: toml::Value,
-    hpc3: toml::Value,
-    rex3: Option<toml::Value>,
-    rex3_head1: Option<toml::Value>,
+    /// Every registered part's state but the SCSI controllers'.
+    state: toml::Value,
 }
 
 /// The test device and the ultra64 dev board both decode GIO expansion slot 0,
@@ -991,6 +973,7 @@ impl Machine {
             control,
             devices,
             disks,
+            saves: "saves".into(),
             net,
         }
     }
@@ -1378,21 +1361,16 @@ impl Machine {
     /// Capture in-memory state for fast rollback. Stops the CPU briefly.
     fn capture_rollback_checkpoint(&mut self, name: &str) -> Result<RollbackCheckpoint, String> {
         self.stop();
+        let cp = self.rollback_state(name);
+        self.restart_peripherals();
+        self.cpu.start();
+        Ok(cp)
+    }
 
+    /// What `capture_rollback_checkpoint` records, with everything stopped.
+    fn rollback_state(&self, name: &str) -> RollbackCheckpoint {
         let cpu = self.cpu.save_state();
-        let mc = self.mc.save_state();
-        let ioc = self.hpc3.ioc().save_state();
-        let scc = self.hpc3.ioc().scc().save_state();
-        let pit = self.hpc3.ioc().pit().save_state();
-        let ps2 = self.hpc3.ioc().ps2().save_state();
-        let rtc = self.hpc3.rtc().save_state();
-        let eeprom = self.hpc3.eeprom().lock().save_state_owned();
-        let scsi = self.hpc3.scsi().save_state();
-        let scsi1 = self.hpc3.scsi1().map(|dev| dev.save_state());
-        let seeq = self.hpc3.seeq().save_state();
-        let hpc3 = self.hpc3.save_state();
-        let rex3 = self.board.rex3.as_ref().map(|r| r.save_state());
-        let rex3_head1 = self.board.rex3_head1.as_ref().map(|r| r.save_state());
+        let state = self.devices.save();
 
         let bank_words: [Vec<u32>; 4] = [
             self.board.phys.snapshot_bank_inmem(0),
@@ -1408,50 +1386,38 @@ impl Machine {
         // knows which dirty sectors to import back. The files were just
         // consumed by load_snapshot but they're tiny and re-reading from
         // page cache is cheap (~µs).
-        let overlay_dir = std::path::PathBuf::from("saves").join(name);
+        let overlay_dir = self.saves.join(name);
         let snap = Snapshot::new(&overlay_dir);
         let overlay_sets = snap.read_toml("cow.toml").map(|v| parse_cow_table(&v)).unwrap_or_default();
         let overlay_sets1 = snap.read_toml("cow1.toml").map(|v| parse_cow_table(&v)).unwrap_or_default();
 
-        self.restart_peripherals();
-        self.cpu.start();
-
-        Ok(RollbackCheckpoint {
+        RollbackCheckpoint {
             overlay_dir,
             overlay_sets,
             overlay_sets1,
             bank_words,
             framebuffers,
-            cpu, mc, ioc, scc, pit, ps2, rtc, eeprom, scsi, scsi1, seeq, hpc3, rex3, rex3_head1,
-        })
+            cpu,
+            state,
+        }
     }
 
     /// Apply an in-memory checkpoint, restoring the guest to the state at
     /// the moment of capture. Skips disk IO and TOML string-parsing.
     fn apply_rollback_checkpoint(&mut self, cp: &RollbackCheckpoint) -> Result<(), String> {
         self.stop();
+        self.apply_rollback_state(cp)?;
+        self.restart_peripherals();
+        self.cpu.start();
+        Ok(())
+    }
+
+    /// What `apply_rollback_checkpoint` puts back, with everything stopped.
+    fn apply_rollback_state(&mut self, cp: &RollbackCheckpoint) -> Result<(), String> {
         self.power_on_devices();
 
         self.cpu.load_state(&cp.cpu)?;
-        self.mc.load_state(&cp.mc)?;
-        self.hpc3.ioc().load_state(&cp.ioc)?;
-        self.hpc3.ioc().scc().load_state(&cp.scc)?;
-        self.hpc3.ioc().pit().load_state(&cp.pit)?;
-        self.hpc3.ioc().ps2().load_state(&cp.ps2)?;
-        self.hpc3.rtc().load_state(&cp.rtc)?;
-        self.hpc3.eeprom().lock().load_state_mut(&cp.eeprom)?;
-        self.hpc3.scsi().load_state(&cp.scsi)?;
-        if let (Some(dev), Some(scsi1_toml)) = (self.hpc3.scsi1(), &cp.scsi1) {
-            dev.load_state(scsi1_toml)?;
-        }
-        self.hpc3.seeq().load_state(&cp.seeq)?;
-        self.hpc3.load_state(&cp.hpc3)?;
-        if let (Some(rex3), Some(rex3_toml)) = (&self.board.rex3, &cp.rex3) {
-            rex3.load_state(rex3_toml)?;
-        }
-        if let (Some(rex3), Some(rex3_toml)) = (&self.board.rex3_head1, &cp.rex3_head1) {
-            rex3.load_state(rex3_toml)?;
-        }
+        self.devices.load_present(&cp.state)?;
 
         for (i, words) in cp.bank_words.iter().enumerate() {
             self.board.phys.restore_bank_inmem(i, words);
@@ -1472,9 +1438,6 @@ impl Machine {
             dev.import_overlays(&cp.overlay_dir.join("ctrl1"), &cp.overlay_sets1)
                 .map_err(|e| format!("rollback: COW overlay import (controller 1): {}", e))?;
         }
-
-        self.restart_peripherals();
-        self.cpu.start();
         Ok(())
     }
 
@@ -1491,17 +1454,12 @@ impl Machine {
         self.stop();
 
         let cpu = self.cpu.save_state();
-        let mc = self.mc.save_state();
-        let ioc = self.hpc3.ioc().save_state();
-        let scc = self.hpc3.ioc().scc().save_state();
-        let pit = self.hpc3.ioc().pit().save_state();
-        let ps2 = self.hpc3.ioc().ps2().save_state();
-        let rtc = self.hpc3.rtc().save_state();
-        let eeprom = self.hpc3.eeprom().lock().save_state_owned();
-        let seeq = self.hpc3.seeq().save_state();
-        let hpc3 = self.hpc3.save_state();
-        let rex3 = self.board.rex3.as_ref().map(|r| r.save_state());
-        let rex3_head1 = self.board.rex3_head1.as_ref().map(|r| r.save_state());
+        // The SCSI controllers stay out: see the doc comment above.
+        let mut state = self.devices.save();
+        if let Some(table) = state.as_table_mut() {
+            table.remove("scsi");
+            table.remove("scsi1");
+        }
 
         let bank_words: [Vec<u32>; 4] = [
             self.board.phys.snapshot_bank_inmem(0),
@@ -1519,7 +1477,8 @@ impl Machine {
         LiveCheckpoint {
             bank_words,
             framebuffers,
-            cpu, mc, ioc, scc, pit, ps2, rtc, eeprom, seeq, hpc3, rex3, rex3_head1,
+            cpu,
+            state,
         }
     }
 
@@ -1538,23 +1497,17 @@ impl Machine {
     /// stayed unresponsive after every `jitcheck` for no reason).
     pub(crate) fn restore_live_checkpoint(&mut self, cp: &LiveCheckpoint) -> Result<(), String> {
         self.stop();
+        self.restore_live_state(cp)?;
+        // Peripherals back up; CPU deliberately left stopped — see this
+        // function's own doc comment.
+        self.restart_peripherals();
+        Ok(())
+    }
 
+    /// What `restore_live_checkpoint` puts back, with everything stopped.
+    fn restore_live_state(&mut self, cp: &LiveCheckpoint) -> Result<(), String> {
         self.cpu.load_state(&cp.cpu)?;
-        self.mc.load_state(&cp.mc)?;
-        self.hpc3.ioc().load_state(&cp.ioc)?;
-        self.hpc3.ioc().scc().load_state(&cp.scc)?;
-        self.hpc3.ioc().pit().load_state(&cp.pit)?;
-        self.hpc3.ioc().ps2().load_state(&cp.ps2)?;
-        self.hpc3.rtc().load_state(&cp.rtc)?;
-        self.hpc3.eeprom().lock().load_state_mut(&cp.eeprom)?;
-        self.hpc3.seeq().load_state(&cp.seeq)?;
-        self.hpc3.load_state(&cp.hpc3)?;
-        if let (Some(rex3), Some(rex3_toml)) = (&self.board.rex3, &cp.rex3) {
-            rex3.load_state(rex3_toml)?;
-        }
-        if let (Some(rex3), Some(rex3_toml)) = (&self.board.rex3_head1, &cp.rex3_head1) {
-            rex3.load_state(rex3_toml)?;
-        }
+        self.devices.load_present(&cp.state)?;
 
         for (i, words) in cp.bank_words.iter().enumerate() {
             self.board.phys.restore_bank_inmem(i, words);
@@ -1562,10 +1515,6 @@ impl Machine {
         if let (Some(rex3), Some((rgb, aux))) = (&self.board.rex3, &cp.framebuffers) {
             rex3.restore_framebuffers_inmem(rgb, aux);
         }
-
-        // Peripherals back up; CPU deliberately left stopped — see this
-        // function's own doc comment.
-        self.restart_peripherals();
         Ok(())
     }
 
@@ -1600,8 +1549,19 @@ impl Machine {
     /// Save full machine snapshot to `saves/<name>/`.
     pub fn save_snapshot(&mut self, name: &str) -> Result<(), String> {
         self.stop();
+        self.write_snapshot(name)?;
+        self.restart_peripherals();
+        // Resume execution so the session feels like it never paused.
+        // Without this the user sees JIT shutdown stats and a dead prompt
+        // after `save` — the CPU would otherwise stay stopped.
+        self.cpu.start();
+        println!("Snapshot saved to saves/{}", name);
+        Ok(())
+    }
 
-        let dir = std::path::PathBuf::from("saves").join(name);
+    /// The files of a snapshot, written with everything stopped.
+    fn write_snapshot(&self, name: &str) -> Result<(), String> {
+        let dir = self.saves.join(name);
         let snap = Snapshot::new(&dir);
         snap.ensure_dir().map_err(|e| e.to_string())?;
 
@@ -1623,73 +1583,34 @@ impl Machine {
         // Device state — schema_version=2 writes *.bin (postcard-encoded
         // BinValue tree); legacy writes *.toml. write_state encapsulates the
         // choice so this orchestrator stays format-agnostic.
-        snap.write_state("cpu",    &self.cpu.save_state(),                         sv).map_err(|e| e.to_string())?;
-        snap.write_state("mc",     &self.mc.save_state(),                          sv).map_err(|e| e.to_string())?;
-        snap.write_state("ioc",    &self.hpc3.ioc().save_state(),                  sv).map_err(|e| e.to_string())?;
-        snap.write_state("scc",    &self.hpc3.ioc().scc().save_state(),            sv).map_err(|e| e.to_string())?;
-        snap.write_state("pit",    &self.hpc3.ioc().pit().save_state(),            sv).map_err(|e| e.to_string())?;
-        snap.write_state("ps2",    &self.hpc3.ioc().ps2().save_state(),            sv).map_err(|e| e.to_string())?;
-        snap.write_state("rtc",    &self.hpc3.rtc().save_state(),                  sv).map_err(|e| e.to_string())?;
-        snap.write_state("eeprom", &self.hpc3.eeprom().lock().save_state_owned(),  sv).map_err(|e| e.to_string())?;
-        snap.write_state("scsi",   &self.hpc3.scsi().save_state(),                 sv).map_err(|e| e.to_string())?;
-        if let Some(dev) = self.hpc3.scsi1() {
-            snap.write_state("scsi1", &dev.save_state(), sv).map_err(|e| e.to_string())?;
+        snap.write_state("cpu", &self.cpu.save_state(), sv).map_err(|e| e.to_string())?;
+        // One file per part, children (the chips behind the HPC3 and the IOC)
+        // under their own names. A part with no state writes none.
+        if let Some(table) = self.devices.save().as_table() {
+            for (key, state) in table {
+                snap.write_state(key, state, sv).map_err(|e| e.to_string())?;
+            }
         }
-        snap.write_state("seeq",   &self.hpc3.seeq().save_state(),                 sv).map_err(|e| e.to_string())?;
-        snap.write_state("hpc3",   &self.hpc3.save_state(),                        sv).map_err(|e| e.to_string())?;
 
-        // REX3 (optional — absent in headless config). Framebuffers are
-        // included in the chunks manifest below for v3+; v2 wrote them as
-        // standalone .bin files.
+        // Bulk memory goes to the content-addressable chunk store shared
+        // across all snapshots in `saves/.cas/`; chunk hashes go in chunks.bin
+        // so load can walk the right chunks back out.
+        let store = ChunkStore::new(&self.saves);
+        let mut chunks = ChunksManifest::default();
+        for i in 0..4 {
+            let words = self.board.phys.snapshot_bank_inmem(i);
+            chunks.bank_chunks[i] = put_words_as_chunks(&store, &words)
+                .map_err(|e| format!("CAS bank{} put: {}", i, e))?;
+        }
         if let Some(rex3) = &self.board.rex3 {
-            snap.write_state("rex3", &rex3.save_state(), sv).map_err(|e| e.to_string())?;
-            if sv < 3 {
-                rex3.save_framebuffers(&snap.dir).map_err(|e| e.to_string())?;
-            }
+            let (rgb, aux) = rex3.snapshot_framebuffers_inmem();
+            let rgb_chunks = put_words_as_chunks(&store, &rgb)
+                .map_err(|e| format!("CAS rex3 rgb put: {}", e))?;
+            let aux_chunks = put_words_as_chunks(&store, &aux)
+                .map_err(|e| format!("CAS rex3 aux put: {}", e))?;
+            chunks.framebuffer_chunks = Some((rgb_chunks, aux_chunks));
         }
-        if let Some(td) = &self.board.testdev {
-            snap.write_state("testdev", &td.save_state(), sv).map_err(|e| e.to_string())?;
-        }
-        if let Some(rex3) = &self.board.rex3_head1 {
-            snap.write_state("rex3_head1", &rex3.save_state(), sv).map_err(|e| e.to_string())?;
-            if sv < 3 {
-                let dir = &snap.dir;
-                rex3.save_framebuffers_named(dir, "rex3_head1").map_err(|e| e.to_string())?;
-            }
-        }
-        if let Some(gr2) = &self.board.gr2 {
-            snap.write_state("gr2", &gr2.save_state(), sv).map_err(|e| e.to_string())?;
-        }
-        if let Some(mgras) = &self.board.mgras {
-            snap.write_state("mgras", &mgras.save_state(), sv).map_err(|e| e.to_string())?;
-        }
-
-        // Bulk memory: v3+ goes to the content-addressable chunk store
-        // shared across all snapshots in `saves/.cas/`. v2 (legacy) writes
-        // raw bank{N}.bin files. Chunk hashes go in chunks.bin so load can
-        // walk the right chunks back out.
-        if sv >= 3 {
-            let store = ChunkStore::new("saves");
-            let mut chunks = ChunksManifest::default();
-            for i in 0..4 {
-                let words = self.board.phys.snapshot_bank_inmem(i);
-                chunks.bank_chunks[i] = put_words_as_chunks(&store, &words)
-                    .map_err(|e| format!("CAS bank{} put: {}", i, e))?;
-            }
-            if let Some(rex3) = &self.board.rex3 {
-                let (rgb, aux) = rex3.snapshot_framebuffers_inmem();
-                let rgb_chunks = put_words_as_chunks(&store, &rgb)
-                    .map_err(|e| format!("CAS rex3 rgb put: {}", e))?;
-                let aux_chunks = put_words_as_chunks(&store, &aux)
-                    .map_err(|e| format!("CAS rex3 aux put: {}", e))?;
-                chunks.framebuffer_chunks = Some((rgb_chunks, aux_chunks));
-            }
-            snap.write_chunks_manifest(&chunks).map_err(|e| e.to_string())?;
-        } else {
-            for i in 0..4 {
-                self.board.phys.save_bank(i, dir.join(format!("bank{}.bin", i))).map_err(|e| e.to_string())?;
-            }
-        }
+        snap.write_chunks_manifest(&chunks).map_err(|e| e.to_string())?;
 
         // COW overlays per SCSI device, plus a `cow.toml` with the dirty
         // sector set for each one. Keeps the on-disk filesystem state
@@ -1708,13 +1629,6 @@ impl Machine {
             snap.write_toml("cow1.toml", &build_cow_table(overlays1))
                 .map_err(|e| e.to_string())?;
         }
-
-        self.restart_peripherals();
-        // Resume execution so the session feels like it never paused.
-        // Without this the user sees JIT shutdown stats and a dead prompt
-        // after `save` — the CPU would otherwise stay stopped.
-        self.cpu.start();
-        println!("Snapshot saved to saves/{}", name);
         Ok(())
     }
 
@@ -1755,10 +1669,14 @@ impl Machine {
         // that path; the monitor `load` command leaves it cleared.
         self.last_restore_checkpoint = None;
 
-        // Reset to clean state before loading
-        self.power_on_devices();
+        self.apply_snapshot(name)?;
+        self.restart_peripherals();
+        Ok(())
+    }
 
-        let dir = std::path::PathBuf::from("saves").join(name);
+    /// What `load_snapshot_inner` reads and puts back, with everything stopped.
+    fn apply_snapshot(&mut self, name: &str) -> Result<(), String> {
+        let dir = self.saves.join(name);
         let snap = Snapshot::new(&dir);
 
         // Validate the manifest before reading anything else. Legacy snapshots
@@ -1861,84 +1779,43 @@ impl Machine {
         };
 
         // Device state — read_state picks <base>.bin (v2+) or <base>.toml
-        // (legacy). v2 also falls back to .toml if .bin is absent.
+        // (legacy). v2 also falls back to .toml if .bin is absent. Every file
+        // is read before the machine is touched, so one that is missing or
+        // corrupt is refused with the machine as it was. An absent file is
+        // fine only for a part registered optional: snapshots from before it
+        // existed lack it.
         let cpu = snap.read_state("cpu", schema_version).map_err(|e| e.to_string())?;
-        self.cpu.load_state(&cpu)?;
-
-        let mc = snap.read_state("mc", schema_version).map_err(|e| e.to_string())?;
-        self.mc.load_state(&mc)?;
-
-        let ioc = snap.read_state("ioc", schema_version).map_err(|e| e.to_string())?;
-        self.hpc3.ioc().load_state(&ioc)?;
-
-        let scc = snap.read_state("scc", schema_version).map_err(|e| e.to_string())?;
-        self.hpc3.ioc().scc().load_state(&scc)?;
-
-        let pit = snap.read_state("pit", schema_version).map_err(|e| e.to_string())?;
-        self.hpc3.ioc().pit().load_state(&pit)?;
-
-        let ps2 = snap.read_state("ps2", schema_version).map_err(|e| e.to_string())?;
-        self.hpc3.ioc().ps2().load_state(&ps2)?;
-
-        let rtc = snap.read_state("rtc", schema_version).map_err(|e| e.to_string())?;
-        self.hpc3.rtc().load_state(&rtc)?;
-
-        let eeprom = snap.read_state("eeprom", schema_version).map_err(|e| e.to_string())?;
-        self.hpc3.eeprom().lock().load_state_mut(&eeprom)?;
-
-        let scsi = snap.read_state("scsi", schema_version).map_err(|e| e.to_string())?;
-        self.hpc3.scsi().load_state(&scsi)?;
-
-        // scsi1.* is absent from snapshots saved before the second SCSI
-        // controller existed, and from guinness machines — both are
-        // legitimate "leave controller 1 untouched" cases, not errors.
-        if let Some(dev) = self.hpc3.scsi1() {
-            if let Ok(scsi1) = snap.read_state("scsi1", schema_version) {
-                dev.load_state(&scsi1)?;
+        let mut state = toml::map::Map::new();
+        for key in self.devices.keys() {
+            match snap.read_state(&key, schema_version) {
+                Ok(v) => {
+                    state.insert(key, v);
+                }
+                Err(_) if self.devices.is_optional(&key) => {}
+                Err(e) => return Err(format!("{key}: {e}")),
             }
         }
+        let state = toml::Value::Table(state);
 
-        let seeq = snap.read_state("seeq", schema_version).map_err(|e| e.to_string())?;
-        self.hpc3.seeq().load_state(&seeq)?;
-
-        let hpc3 = snap.read_state("hpc3", schema_version).map_err(|e| e.to_string())?;
-        self.hpc3.load_state(&hpc3)?;
-
-        if let Some(rex3) = &self.board.rex3 {
-            let rex3_v = snap.read_state("rex3", schema_version).map_err(|e| e.to_string())?;
-            rex3.load_state(&rex3_v)?;
-            if schema_version < 3 {
+        // Reset to clean state before loading
+        self.power_on_devices();
+        self.cpu.load_state(&cpu)?;
+        self.devices.load(&state)?;
+        if schema_version < 3 {
+            if let Some(rex3) = &self.board.rex3 {
                 rex3.load_framebuffers(&snap.dir).map_err(|e| e.to_string())?;
             }
-        }
-        if let Some(td) = &self.board.testdev {
-            if let Ok(v) = snap.read_state("testdev", schema_version) {
-                td.load_state(&v)?;
-            }
-        }
-        if let Some(rex3) = &self.board.rex3_head1 {
-            if let Ok(rex3_v) = snap.read_state("rex3_head1", schema_version) {
-                rex3.load_state(&rex3_v)?;
-                if schema_version < 3 {
+            if let Some(rex3) = &self.board.rex3_head1 {
+                if state.get("rex3_head1").is_some() {
                     rex3.load_framebuffers_named(&snap.dir, "rex3_head1").map_err(|e| e.to_string())?;
                 }
-            }
-        }
-        if let Some(gr2) = &self.board.gr2 {
-            if let Ok(gr2_v) = snap.read_state("gr2", schema_version) {
-                gr2.load_state(&gr2_v)?;
-            }
-        }
-        if let Some(mgras) = &self.board.mgras {
-            if let Ok(mgras_v) = snap.read_state("mgras", schema_version) {
-                mgras.load_state(&mgras_v)?;
             }
         }
 
         // Bulk memory: v3+ comes from the content-addressable chunk store
         // shared across snapshots; v2 reads raw bank{N}.bin files.
         if schema_version >= 3 {
-            let store = ChunkStore::new("saves");
+            let store = ChunkStore::new(&self.saves);
             let chunks = snap.read_chunks_manifest()
                 .map_err(|e| format!("read chunks.bin: {}", e))?;
             for (i, hashes) in chunks.bank_chunks.iter().enumerate() {
@@ -1976,8 +1853,6 @@ impl Machine {
         } else {
             eprintln!("load_snapshot: no cow.toml in snapshot — overlays left unchanged");
         }
-
-        self.restart_peripherals();
         Ok(())
     }
 }
@@ -2303,6 +2178,253 @@ mod stop_order_tests {
         for (kind, second_scsi, board) in [(Kind::Indy, false, Some("rex3")), (Kind::Indigo2, true, Some("rex3")), (Kind::Indigo2Ip28, true, None)] {
             with_shared(kind, |m| assert_eq!(m.devices().keys(), expect(second_scsi, board), "{kind:?}"));
         }
+    }
+}
+
+/// Snapshots, rollback and live checkpoints through `Devices`. They run on the
+/// workstation tests' shared machines, so each test leaves its machine as it
+/// found it: stopped, in its starting state.
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use crate::exit_persistence_tests::Machine as Kind;
+    use crate::workstation_tests::with_shared;
+    use std::collections::BTreeSet;
+
+    /// Run `f` on the shared machine of `kind`, with its snapshots in a
+    /// directory of its own.
+    fn on_machine<R: Send>(kind: Kind, tag: &str, f: impl FnOnce(&mut Machine) -> R + Send) -> R {
+        with_shared(kind, |m| {
+            let m = m.as_any_mut().downcast_mut::<Machine>().expect("an Indy-family machine");
+            let dir = std::env::temp_dir().join(format!("iris-snapshot-{tag}-{kind:?}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let before = std::mem::replace(&mut m.saves, dir.clone());
+            // Saving and loading decode the whole machine; a debug build wants
+            // more than a test thread's stack.
+            let result = std::thread::scope(|scope| {
+                std::thread::Builder::new()
+                    .stack_size(64 * 1024 * 1024)
+                    .spawn_scoped(scope, || f(m))
+                    .unwrap()
+                    .join()
+                    .unwrap()
+            });
+            m.saves = before;
+            let _ = std::fs::remove_dir_all(&dir);
+            result
+        })
+    }
+
+    /// Load `name` into the stopped machine, as `load_snapshot` does before it
+    /// restarts anything: the peripherals' threads would change the state.
+    fn load(m: &mut Machine, name: &str) -> Result<(), String> {
+        m.apply_snapshot(name)
+    }
+
+    /// `v` with `field` of the table under `key` set to `to`.
+    fn with_field(v: &toml::Value, key: &str, field: &str, to: toml::Value) -> toml::Value {
+        let mut v = v.clone();
+        v.as_table_mut().unwrap()[key].as_table_mut().unwrap().insert(field.into(), to);
+        v
+    }
+
+    fn files(dir: &std::path::Path) -> BTreeSet<String> {
+        std::fs::read_dir(dir).unwrap().flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            // The disks' overlays are named for the disks the fixture attaches.
+            .filter(|n| !n.ends_with(".overlay"))
+            .collect()
+    }
+
+    fn set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// Per machine the files, and their names, are the ones the snapshots have
+    /// always had, and every key the devices save is a file. An IMPACT board
+    /// has no state yet, so it writes no `mgras` file.
+    #[test]
+    fn the_saved_files_keep_their_names() {
+        let base = ["snapshot.toml", "chunks.bin", "cpu.bin", "mc.bin", "ioc.bin", "scc.bin", "pit.bin", "ps2.bin",
+            "rtc.bin", "eeprom.bin", "scsi.bin", "seeq.bin", "hpc3.bin", "cow.toml"];
+        let second_scsi = ["scsi1.bin", "cow1.toml", "ctrl1"];
+        for (kind, extra) in [
+            (Kind::Indy, vec!["rex3.bin"]),
+            (Kind::Indigo2, [&["rex3.bin"][..], &second_scsi].concat()),
+            (Kind::Indigo2Ip28, second_scsi.to_vec()),
+        ] {
+            on_machine(kind, "names", |m| {
+                m.write_snapshot("s").unwrap();
+                let dir = m.saves.join("s");
+                let want: Vec<&str> = base.iter().chain(&extra).copied().collect();
+                assert_eq!(files(&dir), set(&want), "{kind:?}");
+                // Top-level keys are the file stems.
+                let stems: BTreeSet<String> = files(&dir).iter()
+                    .filter_map(|n| n.strip_suffix(".bin"))
+                    .filter(|s| *s != "cpu" && *s != "chunks")
+                    .map(String::from)
+                    .collect();
+                let keys: BTreeSet<String> = m.devices.save().as_table().unwrap().keys().cloned().collect();
+                assert_eq!(stems, keys, "{kind:?}");
+            });
+        }
+    }
+
+    /// A snapshot from before the second SCSI controller existed has no
+    /// `scsi1` file, and still loads; one that lacks a required file names it.
+    #[test]
+    fn a_snapshot_without_the_optional_files_still_loads() {
+        on_machine(Kind::Indigo2, "optional", |m| {
+            m.write_snapshot("s").unwrap();
+            let dir = m.saves.join("s");
+            std::fs::remove_file(dir.join("scsi1.bin")).unwrap();
+            load(m, "s").expect("an Indigo2 snapshot without scsi1 loads");
+        });
+    }
+
+    #[test]
+    fn a_missing_required_file_is_named() {
+        on_machine(Kind::Indy, "missing", |m| {
+            m.write_snapshot("s").unwrap();
+            std::fs::remove_file(m.saves.join("s").join("ioc.bin")).unwrap();
+            let e = load(m, "s").unwrap_err();
+            assert!(e.contains("ioc"), "{e}");
+        });
+    }
+
+    /// A corrupt file is refused with the machine as it was: all files are read
+    /// before any device is loaded or reset.
+    #[test]
+    fn loading_does_not_touch_the_machine_when_a_file_is_corrupt() {
+        on_machine(Kind::Indy, "corrupt", |m| {
+            m.write_snapshot("s").unwrap();
+            let clean = m.devices.save();
+            // Move the machine off the snapshot: a device register and a RAM word.
+            let dirty = with_field(&clean, "ioc", "l0_mask", toml::Value::String("0x55".into()));
+            m.devices.load_present(&dirty).unwrap();
+            let mut words = m.board.phys.snapshot_bank_inmem(0);
+            words[7] ^= 0xA5A5_0001;
+            m.board.phys.restore_bank_inmem(0, &words);
+            let moved = m.devices.save();
+            assert_ne!(moved, clean);
+
+            std::fs::write(m.saves.join("s").join("hpc3.bin"), b"not a postcard table").unwrap();
+            assert!(load(m, "s").is_err());
+            assert_eq!(m.devices.save(), moved, "no device was reset or loaded");
+            assert_eq!(m.board.phys.snapshot_bank_inmem(0), words, "RAM was left alone");
+
+            // Put the shared machine back.
+            m.board.phys.restore_bank_inmem(0, &{
+                let mut w = words.clone();
+                w[7] ^= 0xA5A5_0001;
+                w
+            });
+            m.devices.load_present(&clean).unwrap();
+        });
+    }
+
+    /// The IOC loads after the SCC, PIT and PS/2 it owns, so what it saved
+    /// about their interrupts is what it holds afterwards. A snapshot whose SCC
+    /// would raise its interrupt but whose IOC saved the line low must leave
+    /// the line low, on a machine whose line was up.
+    #[test]
+    fn ioc_children_load_before_the_ioc() {
+        on_machine(Kind::Indy, "ioc-order", |m| {
+            m.write_snapshot("s").unwrap();
+            let clean = m.devices.save();
+            // The SCC's transmit interrupt enabled: loading it raises the line.
+            let channel = |v: &toml::Value| {
+                let mut ch = v["scc"]["ch_a"].clone();
+                let regs = ch["regs"].as_array_mut().unwrap();
+                regs[1] = toml::Value::String("0x02".into()); // WR1 TX_INT_EN
+                regs[5] = toml::Value::String("0x08".into()); // WR5 TX_ENABLE
+                ch
+            };
+            let raising = with_field(&clean, "scc", "ch_a", channel(&clean));
+            let snap = crate::snapshot::Snapshot::new(m.saves.join("s"));
+            snap.write_state("scc", &raising["scc"], SCHEMA_VERSION).unwrap();
+            let serial = |v: &toml::Value| v["ioc"]["map_stat"].clone();
+            assert_eq!(serial(&clean), serial(&raising));
+
+            // The machine, meanwhile, has the line up.
+            let up = {
+                let mut ioc = clean["ioc"].clone();
+                let stat = crate::snapshot::toml_u8(&ioc["map_stat"]).unwrap() | crate::dev::ioc::map_regs::SERIAL;
+                ioc.as_table_mut().unwrap().insert("map_stat".into(), crate::snapshot::hex_u8(stat));
+                ioc
+            };
+            m.devices.load_present(&toml::Value::Table([("ioc".to_string(), up)].into_iter().collect())).unwrap();
+            assert_ne!(m.devices.save()["ioc"], clean["ioc"]);
+
+            load(m, "s").unwrap();
+            assert_eq!(m.devices.save()["ioc"], clean["ioc"], "the IOC's saved status has the last word");
+
+            // Put the shared machine back.
+            m.power_on_devices();
+            m.devices.load_present(&clean).unwrap();
+        });
+    }
+
+    /// CI's rollback puts every part's state back, children and display boards
+    /// included, with the RAM and the framebuffer.
+    #[test]
+    fn ci_rollback_returns_every_device_to_the_restored_state() {
+        on_machine(Kind::Indy, "rollback", |m| {
+            m.write_snapshot("s").unwrap();
+            let cp = m.rollback_state("s");
+            let restored = m.devices.save();
+            let words = m.board.phys.snapshot_bank_inmem(0);
+            let rex3 = m.board.rex3.clone().expect("a Newport");
+            let fb = rex3.snapshot_framebuffers_inmem();
+
+            // Move on: every part's first hex field, a RAM word, a pixel.
+            let moved = crate::devices::dirtied_everywhere(&restored);
+            m.devices.load_present(&moved).unwrap();
+            assert_ne!(m.devices.save(), restored);
+            let mut w = words.clone();
+            w[3] ^= 0x1234_5678;
+            m.board.phys.restore_bank_inmem(0, &w);
+            let mut pixels = fb.clone();
+            pixels.0[5] ^= 0x00FF_00FF;
+            rex3.restore_framebuffers_inmem(&pixels.0, &pixels.1);
+
+            m.apply_rollback_state(&cp).unwrap();
+            m.devices.stop();
+            assert_eq!(m.devices.save(), restored);
+            assert_eq!(m.board.phys.snapshot_bank_inmem(0), words);
+            assert_eq!(rex3.snapshot_framebuffers_inmem(), fb);
+        });
+    }
+
+    /// The developer checkpoint rewinds every part but the SCSI controllers,
+    /// the test device, GR2 and IMPACT boards now among them (it used to
+    /// ignore those), and leaves the controllers where the guest left them.
+    #[test]
+    fn live_checkpoint_leaves_scsi_alone() {
+        on_machine(Kind::Indigo2, "live", |m| {
+            let cp = m.capture_live_checkpoint();
+            let at_capture = m.devices.save();
+            assert!(cp.state.get("scsi").is_none() && cp.state.get("scsi1").is_none());
+            assert!(cp.state.get("ioc").is_some() && cp.state.get("hpc3").is_some() && cp.state.get("rex3").is_some());
+
+            // Move on: every part's state, the SCSI controllers' included.
+            let moved = crate::devices::dirtied_everywhere(&at_capture);
+            m.devices.load_present(&moved).unwrap();
+            let after = m.devices.save();
+            assert_ne!(after, at_capture);
+
+            m.restore_live_state(&cp).unwrap();
+            let now = m.devices.save();
+            for key in ["scsi", "scsi1"] {
+                assert_eq!(now[key], after[key], "{key} was left where the guest put it");
+            }
+            for key in ["ioc", "scc", "hpc3", "seeq", "rex3"] {
+                assert_eq!(now[key], at_capture[key], "{key} was rewound");
+            }
+            // Put the shared machine back.
+            m.power_on_devices();
+            m.devices.load_present(&at_capture).unwrap();
+        });
     }
 }
 
