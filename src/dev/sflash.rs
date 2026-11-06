@@ -285,6 +285,14 @@ impl CfiFlash {
     }
 }
 
+impl crate::traits::Device for CfiFlash {}
+
+impl crate::traits::Resettable for CfiFlash {
+    fn power_on(&self) {
+        self.reset();
+    }
+}
+
 impl Saveable for CfiFlash {
     fn save_state(&self) -> toml::Value {
         let st = self.st.lock();

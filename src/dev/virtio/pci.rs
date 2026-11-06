@@ -233,6 +233,8 @@ impl crate::traits::Device for VirtioPci {
     }
 }
 
+impl crate::traits::Saveable for VirtioPci {}
+
 impl Resettable for VirtioPci {
     fn power_on(&self) {
         self.pci.reset();
