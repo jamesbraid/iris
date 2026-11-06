@@ -39,7 +39,7 @@ use crate::snapshot::{Snapshot, Manifest, SCHEMA_VERSION, ChunksManifest, DiskRe
 use crate::chunk_store::{ChunkStore, get_chunks_as_words, put_words_as_chunks};
 use crate::hptimer::TimerManager;
 use crate::control::Control;
-use crate::devices::Devices;
+use crate::devices::{Devices, Phase};
 use crate::disks::Disks;
 use crate::guest_net::GuestNet;
 use crate::workstation::{SystemController, Workstation};
@@ -881,20 +881,27 @@ impl Machine {
         // Setup DevLog (must be before Monitor so log command is available)
         let devlog = crate::devlog::init_devlog();
 
+        // The parts the machine starts, stops, resets and gives monitor
+        // commands as one list. The HPC3 starts, stops and resets the chips
+        // behind it; the display boards come last so that a stop reaches the
+        // disks first.
+        let mut devices = Devices::new();
+        devices.add("mc", Phase::Chipset, Arc::new(mc.clone()));
+        devices.add("hpc3", Phase::Chipset, Arc::new(hpc3.clone()));
+        if let Some(rex3) = &board.rex3 { devices.add("rex3", Phase::Display, rex3.clone()); }
+        if let Some(rex3) = &board.rex3_head1 { devices.add_optional("rex3_head1", Phase::Display, rex3.clone()); }
+        if let Some(gr2) = &board.gr2 { devices.add_optional("gr2", Phase::Display, gr2.clone()); }
+        if let Some(mgras) = &board.mgras { devices.add_optional("mgras", Phase::Display, mgras.clone()); }
+        if let Some(td) = &board.testdev { devices.add_optional("testdev", Phase::Io, td.clone()); }
+        if let Some(u64) = &board.ultra64 { devices.add("ultra64", Phase::Io, u64.clone()); }
+        if let Some(v) = &board.virtio { devices.add("virtio", Phase::Io, v.clone()); }
+
         // Setup Monitor
         let monitor = Monitor::new(monitor_port);
         monitor.register_device(devlog.clone());
         monitor.register_device(Arc::new(crate::cpu::cpu_monitor::CpuMonitor::new(vec![cpu.clone()])));
-        monitor.register_device(Arc::new(mc.clone()));
-        monitor.register_device(Arc::new(hpc3.clone()));
+        devices.register_monitor(&monitor);
         monitor.register_device(phys.clone());
-        if let Some(rex3) = &board.rex3 { monitor.register_device(rex3.clone()); }
-        if let Some(rex3) = &board.rex3_head1 { monitor.register_device(rex3.clone()); }
-        if let Some(td) = &board.testdev { monitor.register_device(td.clone()); }
-        if let Some(gr2) = &board.gr2 { monitor.register_device(gr2.clone()); }
-        if let Some(mgras) = &board.mgras { monitor.register_device(mgras.clone()); }
-        if let Some(u64) = &board.ultra64 { monitor.register_device(u64.clone()); }
-        if let Some(v) = &board.virtio { monitor.register_device(v.clone()); }
         monitor.register_device(Arc::new(board.vino.clone()));
         #[cfg(feature = "perfetto")]
         {
@@ -956,7 +963,7 @@ impl Machine {
             newport_active,
             fullhouse: !guinness,
             control,
-            devices: Devices::new(),
+            devices,
             disks,
             net,
         }
@@ -999,17 +1006,9 @@ impl Machine {
         // Halted -> Starting covers the GUI's Stop then Start; a stored
         // Running state is impossible (status derives it from the CPU).
         self.control.started();
-        // Start peripherals
-        self.mc.start();
-        self.hpc3.start();
         // Program VC2 before the refresh thread runs so the first frame has size.
         self.apply_host_display_resolution();
-        if let Some(rex3) = &self.board.rex3 { rex3.start(); }
-        if let Some(mgras) = &self.board.mgras { mgras.start_display(); }
-        if let Some(rex3) = &self.board.rex3_head1 { rex3.start(); }
-        if let Some(gr2) = &self.board.gr2 { gr2.start(); }
-        if let Some(u64) = &self.board.ultra64 { u64.start(); }
-        if let Some(v) = &self.board.virtio { v.start(); }
+        self.devices.start();
 
         // Monitor server on localhost (port 8888 unless `monitor_port` says
         // otherwise) — always start, even in CI mode, so debug helpers
@@ -1029,14 +1028,7 @@ impl Machine {
         self.cpu.stop();
         // Graphics last: a board's stop joins its display thread, which can
         // fail to end, and the disks must be stopped by then.
-        self.hpc3.stop();
-        self.mc.stop();
-        if let Some(u64) = &self.board.ultra64 { u64.stop(); }
-        if let Some(v) = &self.board.virtio { v.stop(); }
-        if let Some(rex3) = &self.board.rex3 { rex3.stop(); }
-        if let Some(mgras) = &self.board.mgras { mgras.stop_display(); }
-        if let Some(rex3) = &self.board.rex3_head1 { rex3.stop(); }
-        if let Some(gr2) = &self.board.gr2 { gr2.stop(); }
+        self.devices.stop();
         // Idle -> Halted is not a lifecycle transition: a machine that was
         // never started has nothing to halt, and the monitor is not up to ask.
         self.control.stopped();
@@ -1554,14 +1546,7 @@ impl Machine {
     /// Restart everything `stop` stopped, less the CPU, without restarting the
     /// monitor server.
     fn restart_peripherals(&mut self) {
-        self.mc.start();
-        self.hpc3.start();
-        if let Some(rex3) = &self.board.rex3 { rex3.start(); }
-        if let Some(mgras) = &self.board.mgras { mgras.start_display(); }
-        if let Some(rex3) = &self.board.rex3_head1 { rex3.start(); }
-        if let Some(gr2) = &self.board.gr2 { gr2.start(); }
-        if let Some(u64) = &self.board.ultra64 { u64.start(); }
-        if let Some(v) = &self.board.virtio { v.start(); }
+        self.devices.start();
     }
 
     /// Helper to power-on reset all devices.
@@ -1569,15 +1554,9 @@ impl Machine {
     fn power_on_devices(&mut self) {
         self.cpu.power_on();
         self.board.phys.reset_memory();
-        self.mc.power_on();
         // The HPC3 resets the chips behind it (IOC and its SCC, PIT and PS/2,
         // RTC, EEPROM, SCSI, SEEQ, HAL2), then itself.
-        self.hpc3.power_on();
-        if let Some(rex3) = &self.board.rex3 { rex3.power_on(); }
-        if let Some(rex3) = &self.board.rex3_head1 { rex3.power_on(); }
-        if let Some(gr2) = &self.board.gr2 { gr2.power_on(); }
-        if let Some(td) = &self.board.testdev { td.power_on(); }
-        if let Some(v) = &self.board.virtio { v.power_on(); }
+        self.devices.power_on();
         self.apply_host_display_resolution();
     }
 
@@ -1730,11 +1709,7 @@ impl Machine {
     pub fn load_snapshot_paused(&mut self, name: &str) -> Result<(), String> {
         self.load_snapshot_inner(name)?;
         // load_snapshot_inner restarted peripherals; stop them again.
-        self.hpc3.stop();
-        self.mc.stop();
-        if let Some(rex3) = &self.board.rex3 { rex3.stop(); }
-        if let Some(rex3) = &self.board.rex3_head1 { rex3.stop(); }
-        if let Some(gr2) = &self.board.gr2 { gr2.stop(); }
+        self.devices.stop();
         Ok(())
     }
 
@@ -2268,6 +2243,50 @@ mod stop_order_tests {
         assert!(probe.stopped.load(SeqCst), "the display thread released its renderer");
         assert!(!overlap.load(SeqCst), "HPC3 was still running when the graphics stopped");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Start runs the chipset, then the I/O parts, then the display boards;
+    /// stop runs the I/O parts and the chipset in reverse and the boards last.
+    /// Compared with the hand-written orders this replaces (start: mc, hpc3,
+    /// boards, ultra64, virtio; stop: hpc3, mc, ultra64, virtio, boards), the
+    /// virtio-serial and Ultra64 boards now start before the display and stop
+    /// before the chipset, and the test device starts and stops with the
+    /// machine (it only flips `running`).
+    #[test]
+    fn lifecycle_order_per_profile() {
+        use crate::exit_persistence_tests::Machine as Kind;
+        use crate::workstation_tests::with_shared;
+        for (kind, board) in [(Kind::Indy, "rex3"), (Kind::Indigo2, "rex3"), (Kind::Indigo2Ip28, "mgras")] {
+            with_shared(kind, |m| {
+                assert_eq!(m.devices().lifecycle_order(false), ["mc", "hpc3", board], "{kind:?} start");
+                assert_eq!(m.devices().lifecycle_order(true), ["hpc3", "mc", board], "{kind:?} stop");
+            });
+        }
+    }
+
+    /// The keys a snapshot is saved under, in the order they are loaded:
+    /// each part's children before it. The HPC3 and the IOC bring the chips
+    /// behind them; the Newport board comes after the chipset. The IMPACT
+    /// board has no state yet, so it has no key (the old code saved an empty
+    /// `mgras` file).
+    #[test]
+    fn ip22_registers_these_keys_in_this_order() {
+        use crate::exit_persistence_tests::Machine as Kind;
+        use crate::workstation_tests::with_shared;
+        let chips = ["scc", "pit", "ps2", "ioc", "rtc", "eeprom", "scsi"];
+        let expect = |second_scsi: bool, board: Option<&str>| {
+            let mut keys: Vec<String> = vec!["mc".into()];
+            keys.extend(chips.map(String::from));
+            if second_scsi {
+                keys.push("scsi1".into());
+            }
+            keys.extend(["seeq", "hpc3"].map(String::from));
+            keys.extend(board.map(String::from));
+            keys
+        };
+        for (kind, second_scsi, board) in [(Kind::Indy, false, Some("rex3")), (Kind::Indigo2, true, Some("rex3")), (Kind::Indigo2Ip28, true, None)] {
+            with_shared(kind, |m| assert_eq!(m.devices().keys(), expect(second_scsi, board), "{kind:?}"));
+        }
     }
 }
 
