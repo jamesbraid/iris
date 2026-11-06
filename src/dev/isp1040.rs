@@ -2023,6 +2023,12 @@ impl PciFunction for Isp1040 {
     }
 }
 
+impl crate::traits::Resettable for Isp1040 {
+    fn power_on(&self) {
+        self.reset();
+    }
+}
+
 impl crate::traits::Saveable for Isp1040 {
     fn save_state(&self) -> toml::Value {
         self.quiesced(|st| {

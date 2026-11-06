@@ -1223,6 +1223,9 @@ impl Device for ImpactXio {
     }
 }
 
+/// The board has no saved state yet; an Octane with one is not snapshotted.
+impl crate::traits::Saveable for ImpactXio {}
+
 impl Resettable for ImpactXio {
     fn power_on(&self) {
         self.reset();

@@ -56,6 +56,7 @@ use crate::dev::bridge::{Bridge, RawFlash};
 use crate::dev::w1;
 use crate::dev::w1::sgi::{board_record_part, BoardRecord};
 use crate::pci::{DevFn, PciBus, PciFunction};
+use crate::traits::{Device, Resettable, Saveable};
 use crate::xtalk::Upstream;
 
 /// Which product, as `[[xio_board]] kind` names it.
@@ -182,6 +183,27 @@ impl XioPciBoard {
         self.check_slot(device)?;
         self.bus().attach(DevFn { device, function: 0 }, f);
         Ok(())
+    }
+}
+
+/// The machine holds a board as a part: its state is its Bridge's, and its
+/// reset the Bridge's core reset. RST# on the PCI side is the machine's, as
+/// for the onboard Bridge.
+impl Device for XioPciBoard {}
+
+impl Saveable for XioPciBoard {
+    fn save_state(&self) -> toml::Value {
+        self.bridge.save_state()
+    }
+
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        self.bridge.load_state(v)
+    }
+}
+
+impl Resettable for XioPciBoard {
+    fn power_on(&self) {
+        self.bridge.reset();
     }
 }
 
