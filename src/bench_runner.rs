@@ -22,7 +22,7 @@ use parking_lot::Mutex;
 
 use crate::bench_report::{host_info, parse_block, Run};
 use crate::benchsuite;
-use crate::config::{CpuModel, MachineConfig};
+use crate::config::{CpuModel, JitCompile, MachineConfig, TestDeviceClock};
 use crate::ip22_machine::Ip22Machine;
 use crate::dev::testdev::{RunConfig, TestDevice};
 
@@ -62,6 +62,12 @@ pub struct BenchOptions {
     pub cpu: CpuModel,
     /// Cache model, as `[machine] cache`.
     pub cache: crate::config::CacheModel,
+    /// Make two runs do the same work: compile on the CPU thread
+    /// (`jitv2.compile = "sync"`) and give the suite the guest clock
+    /// (`test_device_clock = "guest"`), so the iteration counts it picks by
+    /// time are the same every run. The rates it reports are then constant
+    /// by construction; compare instruction counts and host cost instead.
+    pub deterministic: bool,
     /// Set this to abort. The machine is stopped and `run` returns an error —
     /// there is no partial report, because the suite prints its block only at
     /// the end. Exists so an interactive caller's Stop button does something
@@ -77,6 +83,7 @@ impl Default for BenchOptions {
             banks: BENCH_BANKS,
             cpu: CpuModel::default(),
             cache: crate::config::CacheModel::default(),
+            deterministic: false,
             timeout: Duration::from_secs(1800),
             cancel: None,
         }
@@ -145,12 +152,16 @@ fn run_inner(
             code.store(c, Ordering::Relaxed);
             done.store(true, Ordering::Release);
         });
-        Arc::new(TestDevice::new_embedded(sink.clone(), on_exit, cfg))
+        let clock = if opts.deterministic { TestDeviceClock::Guest } else { TestDeviceClock::Host };
+        Arc::new(TestDevice::new_embedded(sink.clone(), on_exit, cfg).with_clock(clock))
     };
 
     let started = Instant::now();
     let mut cfg = bench_config(opts.banks, opts.cpu);
     cfg.machine.cache = opts.cache;
+    if opts.deterministic {
+        cfg.jitv2.compile = JitCompile::Sync;
+    }
     let mut machine = Box::new(Ip22Machine::new_with_testdev(cfg, Some(testdev)));
     // Deliberately no `register_system_controller`: it hands a raw pointer to
     // this Ip22Machine to a thread that outlives the call, and this one is dropped
@@ -323,7 +334,6 @@ fn tail(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{JitCompile, TestDeviceClock};
 
     /// The whole embedded path end to end: build a machine, load the suite out
     /// of the binary, run it, parse what it printed. Quick mode so it is a test
