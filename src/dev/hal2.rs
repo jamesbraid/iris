@@ -345,6 +345,29 @@ pub struct Hal2 {
     underruns: Arc<AtomicU64>,
     // [audio]: which host to play through, and its buffer size.
     audio: AudioConfig,
+    /// IRIS_HAL2_AUDIO_DUMP=<file>: every frame codec A plays, at the codec's
+    /// own rate, before resampling (see `dump_frames`).
+    dump: Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
+}
+
+/// Append one record of frames codec A played to the dump: the rate and the
+/// pair count (u32 each), then the pairs, little-endian. Works with or
+/// without host output, so a muted run can still be checked.
+fn dump_frames(dump: &Mutex<Option<std::io::BufWriter<std::fs::File>>>, rate: u32, pcm: &[(i16, i16)]) {
+    if pcm.is_empty() {
+        return;
+    }
+    let mut dump = dump.lock();
+    let Some(w) = dump.as_mut() else { return };
+    let mut rec = Vec::with_capacity(8 + pcm.len() * 4);
+    rec.extend_from_slice(&rate.to_le_bytes());
+    rec.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+    for &(l, r) in pcm {
+        rec.extend_from_slice(&l.to_le_bytes());
+        rec.extend_from_slice(&r.to_le_bytes());
+    }
+    let _ = w.write_all(&rec);
+    let _ = w.flush();
 }
 
 // ─── cpal helpers ─────────────────────────────────────────────────────────────
@@ -395,6 +418,11 @@ impl Hal2 {
             ar_state: Arc::new(Mutex::new(AesRxState { loopback: std::collections::VecDeque::new(), timer_id: None })),
             underruns: Arc::new(AtomicU64::new(0)),
             audio,
+            dump: Arc::new(Mutex::new(
+                std::env::var_os("IRIS_HAL2_AUDIO_DUMP")
+                    .and_then(|p| std::fs::File::create(p).ok())
+                    .map(std::io::BufWriter::new),
+            )),
         }
     }
 
@@ -455,6 +483,7 @@ impl Hal2 {
 
         let dma_client = self.dma_clients[dma_ch].clone();
         let ca_state = self.ca_state.clone();
+        let dump = self.dump.clone();
         let mut pacer = Pacer::new(pitch_rate);
 
         self.ca_state.lock().armed_ch = Some(dma_ch);
@@ -483,9 +512,9 @@ impl Hal2 {
             let stream_rate = match st.out.as_ref() {
                 Some(o) => o.stream_rate,
                 None => {
-                    for _ in 0..due {
-                        let _ = read_frame_from(&dma_client, mode);
-                    }
+                    let played: Vec<(i16, i16)> =
+                        (0..due).filter_map(|_| read_frame_from(&dma_client, mode)).collect();
+                    dump_frames(&dump, pitch_rate, &played);
                     return TimerReturn::Continue;
                 }
             };
@@ -497,8 +526,10 @@ impl Hal2 {
                 dlog_dev!(LogModule::Hal2, "HAL2: Codec A resampler {}Hz (pitch={}) → {}Hz", rate, pitch_rate, stream_rate);
             }
 
+            let mut played = Vec::new();
             for _ in 0..due {
                 let frame = read_frame_from(&dma_client, mode);
+                if let Some(f) = frame { played.push(f); }
                 if frame.is_some() { st.frames += 1; } else { st.dry_reads += 1; }
                 let was_prebuffering = st.prebuffering;
 
@@ -545,6 +576,7 @@ impl Hal2 {
                     }
                 }
             }
+            dump_frames(&dump, pitch_rate, &played);
 
             TimerReturn::Continue
         });
@@ -1289,6 +1321,28 @@ mod tests {
         // 48000 → 44100: ratio ~0.919, so 48000 in → 44100 out
         let out = resample(48000, 44100, 48000);
         assert_eq!(out, 44100, "48000→44100: expected 44100 frames, got {}", out);
+    }
+
+    #[test]
+    fn the_dump_records_each_burst_at_the_codec_rate() {
+        let path = std::env::temp_dir().join(format!("iris-hal2-dump-{}.bin", std::process::id()));
+        let file = std::fs::File::create(&path).unwrap();
+        let dump = Mutex::new(Some(std::io::BufWriter::new(file)));
+        dump_frames(&dump, 44100, &[(1, -2), (300, -400)]);
+        dump_frames(&dump, 44100, &[]); // a tick with nothing due leaves no record
+        dump_frames(&dump, 32000, &[(i16::MIN, i16::MAX)]);
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let mut want = Vec::new();
+        for (rate, pairs) in [(44100u32, vec![(1i16, -2i16), (300, -400)]), (32000, vec![(i16::MIN, i16::MAX)])] {
+            want.extend_from_slice(&rate.to_le_bytes());
+            want.extend_from_slice(&(pairs.len() as u32).to_le_bytes());
+            for (l, r) in pairs {
+                want.extend_from_slice(&l.to_le_bytes());
+                want.extend_from_slice(&r.to_le_bytes());
+            }
+        }
+        assert_eq!(bytes, want);
     }
 }
 
