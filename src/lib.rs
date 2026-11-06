@@ -183,6 +183,7 @@ pub mod ip32_machine;
 pub mod ip30;
 pub mod ip30_machine;
 pub mod machine_state;
+pub mod control;
 pub mod platform;
 pub mod physical;
 pub mod ip22_bus;
