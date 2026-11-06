@@ -439,6 +439,22 @@ impl Ip32Bus {
         controllers.iter().try_for_each(|c| c.bus().flush())
     }
 
+    /// The flash contents of a PROM file. The installer's `ip32prom.image` is
+    /// the flash behind a 256-byte header: "PROM", then the payload's length
+    /// at +12 (big-endian). The payload is shorter than the 512 KiB part, and
+    /// the rest of an erased part reads 0xff. Anything else is taken as the
+    /// flash as it is.
+    pub fn unwrap_prom_image(file: Vec<u8>) -> Vec<u8> {
+        const HEADER: usize = 0x100;
+        let len = file.get(12..16).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
+        if file.starts_with(b"PROM") && len == Some(file.len().wrapping_sub(HEADER)) && file.len() - HEADER <= PROM_SIZE as usize {
+            let mut flash = file[HEADER..].to_vec();
+            flash.resize(PROM_SIZE as usize, 0xff);
+            return flash;
+        }
+        file
+    }
+
     /// `ram_bytes` of memory in the usual fitting for that size, or, for a
     /// size no O2 can have, one bank of it (power-of-two sizes only). `prom`
     /// must be the raw 512 KiB IP32 PROM image.

@@ -958,3 +958,27 @@ fn every_device_answers_the_monitor_through_the_bus() {
     }
     assert!(bus.execute_command("nonesuch", &[], Box::new(std::io::sink())).is_err());
 }
+
+/// The installer's `ip32prom.image` is the flash contents behind a 256-byte
+/// header ("PROM", then the payload length at +12), 431,616 bytes of 512 KiB.
+/// Run as it comes it jumps through a wrong section table and hangs in the
+/// PROM's fatal-error spin, so the machine never reaches audio. The loader
+/// must take the payload and fill the rest of the flash with erased bytes.
+#[test]
+fn a_wrapped_prom_image_is_unwrapped_into_a_full_flash() {
+    let payload: Vec<u8> = (0..0x6_9600u32).map(|i| (i % 251) as u8).collect();
+    let mut image = vec![0u8; 0x100];
+    image[..4].copy_from_slice(b"PROM");
+    image[8..12].copy_from_slice(&0x4400u32.to_be_bytes());
+    image[12..16].copy_from_slice(&(payload.len() as u32).to_be_bytes());
+    image.extend_from_slice(&payload);
+    let flash = Ip32Bus::unwrap_prom_image(image);
+    assert_eq!(flash.len(), PROM_SIZE as usize);
+    assert_eq!(flash[..payload.len()], payload[..]);
+    assert!(flash[payload.len()..].iter().all(|&b| b == 0xff), "the rest is erased flash");
+
+    // A raw 512 KiB image, whatever its first bytes, is left alone.
+    let mut raw = vec![0x5au8; PROM_SIZE as usize];
+    raw[..4].copy_from_slice(b"PROM");
+    assert_eq!(Ip32Bus::unwrap_prom_image(raw.clone()), raw);
+}
