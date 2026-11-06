@@ -4,7 +4,7 @@
 compiled into every build as separate monomorphisations. The `r5k` and
 `mips4` Cargo features were removed on 2026-10-01.
 
-`src/machine.rs:752` dispatches `build_cpu!(R4400Cache)` / `build_cpu!(R5000Cache)`
+`src/ip22_machine.rs:752` dispatches `build_cpu!(R4400Cache)` / `build_cpu!(R5000Cache)`
 from `cfg.machine.cpu`, and MIPS IV availability rides along with it — `C::MIPS4`
 is an associated const on that type parameter (`R4400Cache::MIPS4 == false`,
 `R5000Cache::MIPS4 == true`, asserted in `src/cpu/mips_exec_test.rs:212`). So

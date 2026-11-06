@@ -382,7 +382,7 @@ guards every reachable exit:
 | Exit site | When | iris-gui guard |
 | --- | --- | --- |
 | SCSI attach failure in `Machine::new` | configured image file missing | **Pre-flight**: `App::missing_disks()` runs before sending `Cmd::Start`. If any image is missing, a modal lists them with **Cancel / Edit Disks tab / Detach missing & start**. |
-| PowerOff handler (`machine.rs`) | IRIX `halt` finishes | iris-gui sets **`IRIS_NO_EXIT_ON_POWEROFF=1`** in `main()`. iris skips the `exit(0)`; the machine is still stopped cleanly. |
+| PowerOff handler (`ip22_machine.rs`) | IRIX `halt` finishes | iris-gui sets **`IRIS_NO_EXIT_ON_POWEROFF=1`** in `main()`. iris skips the `exit(0)`; the machine is still stopped cleanly. |
 | CI socket `quit` (`ci.rs`) | CI tab enabled | Same env-var guard. |
 | Anywhere a `Machine` method panics | such as a bad image or a parse failure | **Worker thread `catch_unwind`** in `handle.rs` around `Machine::new`/`start`/`stop`. The worker stays alive and emits `Evt::Error` instead. |
 

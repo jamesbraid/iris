@@ -18,6 +18,24 @@ hashes are given where a change is easiest to understand by reading the commit.
 - The R10000 family has 44-bit virtual and 40-bit physical addresses, FrameMask and a 28-bit EntryLo PFN, picks the TLB refill vector by address space, invalidates overlapped TLB writes (Status.TS), and completes uncached stores nothing answers. Partial LWR keeps the upper word, and the cache diagnostics (Index Store Data, secondary tag mask, Config size) work.
 - `cpu` takes the parts each machine shipped with, such as `r12000_360` on the Octane, or a family name for the machine's own. The Indy and Indigo2 R4400 is now rev 5.0 at 150 MHz, the O2 R10000 rev 3.4 at 250 MHz, and an Indy no longer takes an R10000 (the R10000 Indigo2 is the IP28). The R12000 and R14000 are new.
 
+### Machine structure
+
+- The Indy, Indigo2 and Indigo2 IMPACT are one machine, `Ip22Machine`
+  (`src/ip22_machine.rs`, which replaces `src/machine.rs`), over an
+  `Ip22Board` value that holds what differs between them. The Indy-family, O2
+  and Octane start, stop, reset, save and load their parts through a shared
+  `Devices` list, keep their disks in `Disks`, their lifecycle state, event
+  channel and front-end pointer in `Control`, and their NAT handle in
+  `GuestNet`; `Workstation` provides the methods that were written out five
+  times. Snapshot files and keys are unchanged.
+- Behaviour that changed with it: the Octane no longer stores `Running` when a
+  snapshot loads (so starting it again after the monitor stops its CPU is
+  accepted); the IMPACT board on an Indigo2 writes no empty `mgras` snapshot
+  file; the IOC loads after the SCC, PIT and PS/2 it owns; the developer's
+  live checkpoint (`j2 trace`, `jitcheck`) also rewinds the test device, GR2
+  and IMPACT; on the Indy-family the Ultra64 and virtio-serial boards start
+  before the display and stop before the chipset.
+
 ### Boot test before publishing
 
 - `build.yml` can boot IRIX 5.3 to a login prompt on Linux, macOS and Windows

@@ -36,7 +36,7 @@ The Seeq Ethernet controller's station address is programmed by the guest's
 PROM/kernel from the `eaddr` environment variable, which real hardware stores
 in battery-backed NVRAM (Indy: DS1386) or a serial EEPROM (Indigo2: 93CS56).
 Real hardware always ships with one burned in — there's no way to leave it
-unset — so `Machine::new` (`src/machine.rs`, right after `Hpc3::with_net`)
+unset — so `Machine::new` (`src/ip22_machine.rs`, right after `Hpc3::with_net`)
 backdoor-injects `[network] mac` (default `08:00:69:12:34:56`, see
 `config::DEFAULT_MAC`) directly into the emulated chip before the CPU ever
 runs, rather than requiring a guest-side `setenv`:
@@ -56,7 +56,7 @@ runs, rather than requiring a guest-side `setenv`:
   by the guest or loaded from a previously-saved `nveeprom.bin`.
 
   IP22 has **two** distinct physical 93-series EEPROM chips, modeled in iris
-  as two independent `Eeprom93c56` instances (`src/machine.rs`, `eeprom_mc`
+  as two independent `Eeprom93c56` instances (`src/ip22_machine.rs`, `eeprom_mc`
   and `eeprom_hpc3` — prior to this they were incorrectly shared as one
   object, which made the `eeprom` monitor command ambiguous about which
   chip it was showing):
