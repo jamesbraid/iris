@@ -248,6 +248,8 @@ mod platform_profile_tests;
 #[cfg(test)]
 mod exit_persistence_tests;
 #[cfg(test)]
+mod workstation_tests;
+#[cfg(test)]
 mod block_node_sync_bench;
 #[cfg(test)]
 pub(crate) mod test_board;

@@ -43,7 +43,7 @@ use crate::snapshot::{field, ChunksManifest, Manifest, Snapshot, StateTable, SCH
 use crate::traits::{BusDevice, Device, MachineEvent, Resettable, Saveable};
 use crate::control::Control;
 use crate::guest_net::GuestNet;
-use crate::workstation::{MachineSlot, Workstation};
+use crate::workstation::Workstation;
 
 /// The PROM image tried when `prom` is left at the shared default, named
 /// as IRIX ships it in /usr/cpu/firmware. The Octane has no embedded PROM.
@@ -721,11 +721,6 @@ impl OctaneMachine {
             c.clone().as_device().stop();
         }
     }
-
-    pub fn machine_slot(&mut self) -> MachineSlot {
-        let ptr = self as *mut OctaneMachine as *mut dyn Workstation;
-        self.control.slot(ptr)
-    }
 }
 
 // Snapshots of the Octane, in the O2's format: a manifest naming the
@@ -993,21 +988,20 @@ impl Workstation for OctaneMachine {
     fn cpu_is_running(&self) -> bool {
         self.cpus.iter().any(|c| c.clone().as_device().is_running())
     }
-    fn machine_slot(&mut self) -> MachineSlot {
-        OctaneMachine::machine_slot(self)
+    fn control(&self) -> &Control {
+        &self.control
     }
-    fn register_system_controller(&mut self) {
-        let ptr = self as *mut OctaneMachine as *mut dyn Workstation;
-        self.control.register(ptr, &self.monitor);
+    fn control_mut(&mut self) -> &mut Control {
+        &mut self.control
     }
-    fn monitor_addr(&self) -> Option<std::net::SocketAddr> {
-        self.monitor.bound_addr()
+    fn net(&self) -> Option<&GuestNet> {
+        self.net.as_ref()
     }
-    fn lifecycle(&self) -> crate::machine_state::GuestState {
-        self.control.state()
+    fn monitor(&self) -> &Arc<crate::monitor::Monitor> {
+        &self.monitor
     }
-    fn set_lifecycle(&mut self, state: crate::machine_state::GuestState) {
-        self.control.set_state(state)
+    fn as_ws_ptr(&mut self) -> *mut dyn Workstation {
+        self as *mut Self as *mut dyn Workstation
     }
     fn get_display(&self) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> {
         match &self.vpro {
@@ -1015,7 +1009,6 @@ impl Workstation for OctaneMachine {
             None => self.gfx.as_ref().map(|g| g.display()),
         }
     }
-    fn register_monitor_device(&self, device: Arc<dyn crate::traits::Device>) { self.monitor.register_device(device); }
     fn get_ps2(&self) -> Arc<crate::dev::ps2::Ps2Controller> {
         self.ioc3.ps2()
     }
@@ -1096,15 +1089,6 @@ impl Workstation for OctaneMachine {
     ) -> std::io::Result<usize> {
         let buses: Vec<_> = self.scsi.iter().map(|c| c.bus()).collect();
         crate::scsi::ScsiBus::sync_chd_disks(&buses, only, progress, cancel)
-    }
-    fn net_frames(&self) -> Option<Arc<std::sync::atomic::AtomicU64>> {
-        self.net.as_ref().and_then(|n| n.frames())
-    }
-    fn nat_control(&self) -> Option<Arc<crate::net::NatControl>> {
-        self.net.as_ref().map(|n| n.nat())
-    }
-    fn nat_expected(&self) -> Option<(std::net::Ipv4Addr, std::net::Ipv4Addr, std::net::Ipv4Addr)> {
-        self.net.as_ref().map(|n| n.addrs())
     }
 }
 
