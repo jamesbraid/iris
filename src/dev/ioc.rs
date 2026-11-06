@@ -3,7 +3,7 @@ use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::devlog::LogModule;
 use std::sync::mpsc;
-use crate::traits::{BusRead8, BusRead16, BusRead32, BusRead64, BUS_OK, BUS_ERR, BusDevice, Device, Resettable, Saveable, MachineEvent};
+use crate::traits::{BusRead8, BusRead16, BusRead32, BusRead64, BUS_OK, BUS_ERR, BusDevice, Child, Device, Resettable, Saveable, MachineEvent};
 use crate::snapshot::{get_field, toml_u8, hex_u8};
 use crate::dev::z85c30::Z85c30;
 use crate::dev::pit8254::{Pit8254, TimerCallback};
@@ -1323,10 +1323,26 @@ impl Resettable for Ioc {
             use std::sync::atomic::Ordering;
             irqs.fetch_and(!IOC_OWNED_LINES, Ordering::SeqCst);
         }
+        drop(state);
+        // SCC: clears channel regs; backend socket kept alive so console survives.
+        self.scc.power_on();
+        // PIT: zeroes all channel registers.
+        self.pit.power_on();
+        // PS2: reset state
+        self.ps2.power_on();
     }
 }
 
 impl Saveable for Ioc {
+    /// The chips behind the IOC keep the snapshot files they always had.
+    fn children(&self) -> Vec<Child> {
+        vec![
+            Child { key: "scc", state: Arc::new(self.scc.clone()), optional: false },
+            Child { key: "pit", state: Arc::new(self.pit.clone()), optional: false },
+            Child { key: "ps2", state: self.ps2.clone(), optional: false },
+        ]
+    }
+
     fn save_state(&self) -> toml::Value {
         let state = self.state.lock();
         let mut tbl = toml::map::Map::new();

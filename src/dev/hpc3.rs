@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::fs::File;
 use std::io::Write as IoWrite;
 use crate::devlog::{LogModule, devlog_mask};
-use crate::traits::{BusRead8, BusRead16, BusRead32, BusRead64, BUS_OK, BUS_ERR, BusDevice, Device, DmaClient, DmaStatus, Resettable, RxRoom, Saveable};
+use crate::traits::{Child, BusRead8, BusRead16, BusRead32, BusRead64, BUS_OK, BUS_ERR, BusDevice, Device, DmaClient, DmaStatus, Resettable, RxRoom, Saveable};
 use crate::snapshot::{get_field, u32_slice_to_toml, load_u32_slice, toml_u32, toml_bool, hex_u32};
 use crate::config::{AudioConfig, NetworkConfig, RtcOffset};
 use crate::dev::eeprom_93c56::Eeprom93c56;
@@ -2259,7 +2259,21 @@ impl BusDevice for Hpc3 {
 // ============================================================================
 
 impl Resettable for Hpc3 {
+    /// The chips behind the HPC3, in the order the machine reset them, then
+    /// its own registers and DMA channels.
     fn power_on(&self) {
+        // The IOC resets its SCC, PIT and PS/2 itself.
+        self.ioc.power_on();
+        // RTC and EEPROM are non-volatile: no-ops.
+        self.rtc.power_on();
+        self.eeprom.lock().power_on();
+        // SCSI: execute hardware reset sequence.
+        self.scsi_dev.power_on();
+        if let Some(dev) = &self.scsi_dev1 { dev.power_on(); }
+        // Seeq/Ethernet: reset regs + signal NAT flush.
+        self.seeq.power_on();
+        // HAL2: reset all audio registers and channel state (timers already stopped).
+        if let Some(hal2) = &self.hal2 { hal2.power_on(); }
         {
             let mut state = self.state.lock();
             state.intstat = 0;
@@ -2351,6 +2365,23 @@ fn load_pdma_channel(chan: &mut PdmaChannel, v: &toml::Value) {
 }
 
 impl Saveable for Hpc3 {
+    /// The chips behind the HPC3 keep the snapshot files they always had.
+    fn children(&self) -> Vec<Child> {
+        let child = |key, state: Arc<dyn Saveable + Send + Sync>, optional| Child { key, state, optional };
+        let mut kids = vec![
+            child("ioc", Arc::new(self.ioc.clone()), false),
+            child("rtc", self.rtc.clone(), false),
+            child("eeprom", self.eeprom.clone(), false),
+            child("scsi", self.scsi_dev.clone(), false),
+        ];
+        // An Indigo2 snapshot from before the second controller was saved lacks it.
+        if let Some(dev) = &self.scsi_dev1 {
+            kids.push(child("scsi1", dev.clone(), true));
+        }
+        kids.push(child("seeq", self.seeq.clone(), false));
+        kids
+    }
+
     fn save_state(&self) -> toml::Value {
         let state = self.state.lock();
         let mut tbl = toml::map::Map::new();
@@ -2621,6 +2652,78 @@ mod tests {
             assert!(c.even_high, "chan {} lost even_high", i);
             assert!(c.endian, "chan {} lost endian", i);
         }
+    }
+
+    fn hpc3_board(guinness: bool) -> Hpc3 {
+        Hpc3::with_net(
+            Arc::new(Mutex::new(Eeprom93c56::new())),
+            Ioc::new(guinness),
+            guinness,
+            Arc::new(AtomicU64::new(0)),
+            NetworkConfig::default(),
+            true,
+            AudioConfig::default(),
+            String::new(),
+            RtcOffset::default(),
+            true,
+            Hpc3::new_scsi_buses(guinness),
+        )
+    }
+
+    /// Every state `Devices` would save for `hpc3`, by key.
+    fn saved(hpc3: &Hpc3) -> std::collections::BTreeMap<String, toml::Value> {
+        let mut devices = crate::devices::Devices::new();
+        devices.add("hpc3", crate::devices::Phase::Chipset, Arc::new(hpc3.clone()));
+        devices.save().as_table().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    /// The HPC3 resets the chips behind it, each reaching its power-on state:
+    /// dirty every child's state, power the HPC3 on, and the saved tables equal
+    /// a fresh board's. The RTC and the EEPROM are non-volatile and keep what
+    /// they were given.
+    #[test]
+    fn power_on_cascades_reach_every_child_once() {
+        let board = hpc3_board(false);
+        let fresh = hpc3_board(false);
+        fresh.power_on();
+        let kept = ["rtc", "eeprom"];
+        let before = saved(&board);
+        let mut devices = crate::devices::Devices::new();
+        devices.add("hpc3", crate::devices::Phase::Chipset, Arc::new(board.clone()));
+        let dirty = crate::devices::testing::dirtied_everywhere(&toml::Value::Table(before.clone().into_iter().collect()), &["ar"]);
+        devices.load_present(&dirty).unwrap();
+        let after_load = saved(&board);
+        // Every child took the dirt, or the test would prove nothing.
+        for key in before.keys() {
+            assert_ne!(after_load[key], before[key], "{key}: the dirtied state did not take");
+        }
+        board.power_on();
+        let after = saved(&board);
+        let want = saved(&fresh);
+        for (key, state) in &want {
+            if kept.contains(&key.as_str()) {
+                assert_eq!(after[key], after_load[key], "{key} is non-volatile");
+            } else {
+                assert_eq!(after[key], *state, "{key} is back at power-on");
+            }
+        }
+    }
+
+    /// The chips behind the HPC3 and the IOC are saved under the keys the
+    /// Indy-family has always had files for; the second SCSI controller only
+    /// on a fullhouse board.
+    #[test]
+    fn children_keys_are_the_files_the_indy_family_writes() {
+        let keys = |guinness| {
+            let mut k: Vec<String> = saved(&hpc3_board(guinness)).into_keys().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(keys(true), ["eeprom", "hpc3", "ioc", "pit", "ps2", "rtc", "scc", "scsi", "seeq"]);
+        assert_eq!(keys(false), ["eeprom", "hpc3", "ioc", "pit", "ps2", "rtc", "scc", "scsi", "scsi1", "seeq"]);
+        let fullhouse = hpc3_board(false);
+        let optional = |key: &str| fullhouse.children().iter().any(|c| c.key == key && c.optional);
+        assert!(optional("scsi1") && !optional("scsi") && !optional("seeq"));
     }
 }
 

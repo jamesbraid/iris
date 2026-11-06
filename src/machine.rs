@@ -1581,24 +1581,8 @@ impl Machine {
         self.cpu.power_on();
         self.board.phys.reset_memory();
         self.mc.power_on();
-        self.hpc3.ioc().power_on();
-        // SCC: clears channel regs; backend socket kept alive so console survives.
-        self.hpc3.ioc().scc().power_on();
-        // PIT: zeroes all channel registers.
-        self.hpc3.ioc().pit().power_on();
-        // PS2: reset state
-        self.hpc3.ioc().ps2().power_on();
-        // RTC: battery-backed, no-op.
-        self.hpc3.rtc().power_on();
-        // EEPROM: non-volatile, no-op.
-        self.hpc3.eeprom().lock().power_on();
-        // SCSI: execute hardware reset sequence.
-        self.hpc3.scsi().power_on();
-        if let Some(dev) = self.hpc3.scsi1() { dev.power_on(); }
-        // Seeq/Ethernet: reset regs + signal NAT flush.
-        self.hpc3.seeq().power_on();
-        // HAL2: reset all audio registers and channel state (timers already stopped).
-        if let Some(hal2) = self.hpc3.hal2() { hal2.power_on(); }
+        // The HPC3 resets the chips behind it (IOC and its SCC, PIT and PS/2,
+        // RTC, EEPROM, SCSI, SEEQ, HAL2), then itself.
         self.hpc3.power_on();
         if let Some(rex3) = &self.board.rex3 { rex3.power_on(); }
         if let Some(rex3) = &self.board.rex3_head1 { rex3.power_on(); }
