@@ -455,6 +455,18 @@ impl Saveable for Eeprom93c56 {
     }
 }
 
+/// The EEPROM sits behind a lock in the HPC3 and the machine; saving and
+/// loading it through the lock is what `load_state_mut` was for.
+impl Saveable for parking_lot::Mutex<Eeprom93c56> {
+    fn save_state(&self) -> toml::Value {
+        self.lock().save_state_owned()
+    }
+
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        self.lock().load_state_mut(v)
+    }
+}
+
 impl Eeprom93c56 {
     pub fn load_state_mut(&mut self, v: &toml::Value) -> Result<(), String> {
         if let Some(d) = get_field(v, "data") {
@@ -487,6 +499,20 @@ impl Eeprom93c56 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Saved and loaded through the lock it sits behind, as the HPC3's child.
+    #[test]
+    fn eeprom_state_round_trips_through_the_mutex() {
+        let source = parking_lot::Mutex::new(Eeprom93c56::new());
+        source.lock().data[5] = 0xBEEF;
+        source.lock().write_enable = true;
+        let saved = Saveable::save_state(&source);
+        let target = parking_lot::Mutex::new(Eeprom93c56::new());
+        Saveable::load_state(&target, &saved).unwrap();
+        assert_eq!(target.lock().data[5], 0xBEEF);
+        assert!(target.lock().write_enable);
+        assert_eq!(Saveable::save_state(&target), saved);
+    }
 
     #[test]
     fn stop_persists_serial_writes_and_reloads() {
