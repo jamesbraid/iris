@@ -185,6 +185,36 @@ impl XioPciBoard {
     }
 }
 
+/// Every option board's Bridge, as one part: a machine without boards
+/// registers none, and a snapshot holds one entry per board in slot order.
+/// The functions behind each Bridge are reset by RST#
+/// ([`Bridge::reset_pci`]), which the machine drives.
+pub struct XioBoards(pub Vec<Arc<Bridge>>);
+
+impl crate::traits::Device for XioBoards {}
+
+impl crate::traits::Resettable for XioBoards {
+    fn power_on(&self) {
+        for b in &self.0 {
+            b.reset();
+        }
+    }
+}
+
+impl crate::traits::Saveable for XioBoards {
+    fn save_state(&self) -> toml::Value {
+        toml::Value::Array(self.0.iter().map(|b| crate::traits::Saveable::save_state(&**b)).collect())
+    }
+
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        let saved = v.as_array().filter(|l| l.len() == self.0.len()).ok_or("not one entry per option board")?;
+        for (b, state) in self.0.iter().zip(saved) {
+            crate::traits::Saveable::load_state(&**b, state)?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[path = "xio_pci_tests.rs"]
 mod tests;

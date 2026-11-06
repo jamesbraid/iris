@@ -587,6 +587,8 @@ impl Xbow {
     }
 }
 
+impl crate::traits::Device for Xbow {}
+
 impl crate::traits::Resettable for Xbow {
     fn power_on(&self) {
         self.locked(|r, _| {

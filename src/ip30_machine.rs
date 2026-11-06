@@ -37,7 +37,7 @@ use crate::dev::xbow::Xbow;
 use crate::dev::xio_pci::XioPciBoard;
 use crate::hptimer::TimerManager;
 use crate::ip30::{
-    widget_small_base, CachedFlashLines, Ip30Bus, LAST_PC, WIDGET_BRIDGE, WIDGET_HEART, WIDGET_SMALL_SIZE,
+    widget_small_base, CachedFlashLines, FlashLineSet, Ip30Bus, LAST_PC, WIDGET_BRIDGE, WIDGET_HEART, WIDGET_SMALL_SIZE,
     WIDGET_XBOW,
 };
 use crate::pci::{BoardIrq, DevFn};
@@ -45,7 +45,7 @@ use crate::chunk_store::{get_chunks_as_words, put_words_as_chunks, ChunkStore};
 use crate::snapshot::{field, ChunksManifest, Manifest, Snapshot, StateTable, SCHEMA_VERSION};
 use crate::traits::{BusDevice, Device, MachineEvent, Resettable, Saveable};
 use crate::control::Control;
-use crate::devices::Devices;
+use crate::devices::{Devices, Phase};
 use crate::disks::Disks;
 use crate::guest_net::GuestNet;
 use crate::workstation::Workstation;
@@ -126,8 +126,6 @@ pub struct OctaneMachine {
     pub xbow: Arc<Xbow>,
     /// CPU 0 first. Whatever means "the CPU" to a front end is CPU 0.
     cpus: Vec<Arc<dyn CpuDevice>>,
-    /// One per CPU: each caches the PROM's data privately.
-    flash_lines: Vec<Arc<CachedFlashLines>>,
     timer_manager: Arc<TimerManager>,
     monitor: Arc<crate::monitor::Monitor>,
     /// The console UART's in-process host end in CI mode (`--ci`).
@@ -511,17 +509,45 @@ impl OctaneMachine {
             heart.set_cpu_park(id, c.park_slot());
         }
 
+        // Start, power-on and load order. HEART starts first so the counter
+        // runs before the devices that read it; the graphics board stops last,
+        // because its stop joins a display thread that can fail to end, and
+        // the disks must be stopped by then.
+        let mut devices = Devices::new();
+        devices.add("xbow", Phase::Chipset, xbow.clone());
+        devices.add("heart", Phase::Chipset, heart.clone());
+        devices.add("flash_lines", Phase::Chipset, Arc::new(FlashLineSet(flash_lines.clone())));
+        devices.add("bridge", Phase::Chipset, bridge.clone());
+        // Only with boards, so a machine without them saves what it always did.
+        if !xio_boards.is_empty() {
+            let bridges = xio_boards.iter().map(|b| b.bridge().clone()).collect();
+            devices.add("xio_boards", Phase::Chipset, Arc::new(crate::dev::xio_pci::XioBoards(bridges)));
+        }
+        devices.add("ioc3", Phase::Io, ioc3.clone());
+        devices.add("eth", Phase::Io, eth.clone());
+        devices.add("scsi0", Phase::Io, scsi[0].clone());
+        devices.add("scsi1", Phase::Io, scsi[1].clone());
+        devices.add("rad", Phase::Io, rad.clone());
+        if let Some(v) = &virtio {
+            devices.add("virtio", Phase::Io, v.clone());
+        }
+        if let Some(n) = &nvme {
+            devices.add("nvme", Phase::Io, n.clone());
+        }
+        devices.add("flash", Phase::Io, flash.clone());
+        if let Some(v) = &vpro {
+            devices.add("vpro", Phase::Io, v.clone());
+        }
+        if let Some(g) = &gfx {
+            devices.add("gfx", Phase::Display, g.clone());
+        }
+
         let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
         let monitor = crate::monitor::Monitor::new(monitor_port);
         monitor.register_device(crate::devlog::init_devlog());
         monitor.register_device(Arc::new(crate::cpu::cpu_monitor::CpuMonitor::new(cpus.clone())));
-        monitor.register_device(heart.clone());
-        // `pci`: the Bridge's bus, as the O2's MACE shows its own.
-        monitor.register_device(bridge.clone());
-        // `nvme`: the card's registers, queues and copy-on-write disk.
-        if let Some(n) = &nvme {
-            monitor.register_device(n.clone());
-        }
+        // `pci` comes from the Bridge, as the O2's MACE shows its own.
+        devices.register_monitor(&monitor);
         monitor.register_device(phys.phys.clone());
         monitor.register_device(Arc::new(Ip30Monitor {
             phys: phys.clone(),
@@ -531,7 +557,6 @@ impl OctaneMachine {
             gfx: gfx.clone(),
         }));
         for c in &scsi {
-            monitor.register_device(c.clone());
             c.register_locks();
         }
         // `ps2 type` and friends: the keyboard and mouse from the monitor.
@@ -555,9 +580,6 @@ impl OctaneMachine {
             monitor.register_device(g.mgras().clone());
             g.register_locks();
         }
-        if let Some(v) = &vpro {
-            monitor.register_device(v.clone());
-        }
         let ci_serial = cfg.ci.then(|| Arc::new(crate::dev::serial_host::CiSerialBackend::new()));
         Self::connect_serial(cfg, &ioc3, ci_serial.as_ref());
 
@@ -576,7 +598,6 @@ impl OctaneMachine {
             ram,
             xbow,
             cpus,
-            flash_lines,
             timer_manager,
             monitor: Arc::new(monitor),
             ci_serial,
@@ -595,7 +616,7 @@ impl OctaneMachine {
             scratch_path,
             nvram_path: cfg.nvram.clone(),
             control,
-            devices: Devices::new(),
+            devices,
             disks,
             disk_refs,
             last_restore: None,
@@ -681,44 +702,6 @@ impl OctaneMachine {
         Arc::new(MipsCpu::new(exec))
     }
 
-    /// The devices with threads or time of their own, in start order; stop
-    /// runs it backwards.
-    fn devices(&self) -> Vec<Arc<dyn Device>> {
-        let mut d: Vec<Arc<dyn Device>> = vec![
-            self.heart.clone(),
-            self.ioc3.clone(),
-            self.eth.clone(),
-            self.scsi[0].clone(),
-            self.scsi[1].clone(),
-            self.rad.clone(),
-        ];
-        if let Some(v) = &self.virtio {
-            d.push(v.clone());
-        }
-        if let Some(n) = &self.nvme {
-            d.push(n.clone());
-        }
-        if let Some(g) = &self.gfx {
-            d.push(g.clone());
-        }
-        if let Some(v) = &self.vpro {
-            d.push(v.clone());
-        }
-        d
-    }
-
-    /// Reverse of start order, but graphics last: its stop joins a display
-    /// thread, which can fail to end, and the disks must be stopped by then.
-    fn stop_devices(&self) {
-        // `devices` ends with the graphics board, if there is one.
-        for d in self.devices().iter().rev().skip(self.gfx.iter().count()) {
-            d.stop();
-        }
-        if let Some(g) = &self.gfx {
-            g.stop();
-        }
-    }
-
     pub fn start(&mut self) {
         self.control.started();
         self.monitor.serve();
@@ -735,7 +718,7 @@ impl OctaneMachine {
     /// and IOC3 writes its NVRAM out.
     pub fn stop(&mut self) {
         self.stop_cpus();
-        self.stop_devices();
+        self.devices.stop();
         // The guest clock points into this machine's CPU core.
         #[cfg(feature = "perfetto")]
         crate::perfetto::set_guest_cycles(None);
@@ -751,39 +734,24 @@ impl OctaneMachine {
         self.restart_peripherals();
     }
 
-    /// Every device as at power-on, with the machine stopped.
-    fn power_on_all(&self) {
+    /// Every device as at power-on, with the machine stopped, short of the
+    /// functions behind the Bridge: the CPUs, every part, and the crossbow's
+    /// links.
+    fn power_on_devices(&self) {
         for c in &self.cpus {
             Resettable::power_on(&**c);
         }
-        self.xbow.power_on();
-        self.heart.power_on();
-        for f in &self.flash_lines {
-            f.clear();
-        }
-        self.bridge.reset();
+        self.devices.power_on();
+        Self::sync_links(&self.phys, &self.xbow);
+    }
+
+    /// [`Self::power_on_devices`], then RST# reaching the PCI side.
+    fn power_on_all(&self) {
+        self.power_on_devices();
         self.bridge.reset_pci();
         for b in &self.xio_boards {
-            b.bridge().reset();
             b.bridge().reset_pci();
         }
-        self.ioc3.power_on();
-        self.eth.power_on();
-        for c in &self.scsi {
-            c.reset();
-        }
-        self.rad.reset();
-        if let Some(v) = &self.virtio {
-            Resettable::power_on(&**v);
-        }
-        self.flash.reset();
-        if let Some(g) = &self.gfx {
-            g.power_on();
-        }
-        if let Some(v) = &self.vpro {
-            v.power_on();
-        }
-        Self::sync_links(&self.phys, &self.xbow);
     }
 
     /// Start what `stop` stopped, short of the CPU: HEART's counter, the
@@ -791,9 +759,7 @@ impl OctaneMachine {
     /// Without the last the PROM's first graphics readback after a reset
     /// waits forever on a pipeline nothing drains.
     pub fn restart_peripherals(&mut self) {
-        for d in self.devices() {
-            d.start();
-        }
+        self.devices.start();
     }
 
     fn start_cpus(&self) {
@@ -868,65 +834,6 @@ impl OctaneMachine {
         snapshot_refusal_for(self.gfx.is_some(), self.vpro.is_some(), self.cpus.len())
     }
 
-    /// Every device's state but the CPU's. Called with the machine stopped.
-    fn save_board(&self) -> toml::Value {
-        let lines = self.flash_lines.iter().map(|f| f.save_state()).collect();
-        let mut t = StateTable::new();
-        // Only with boards, so a machine without them saves what it always did.
-        if !self.xio_boards.is_empty() {
-            t.value("xio_boards", toml::Value::Array(self.xio_boards.iter().map(|b| b.bridge().save_state()).collect()));
-        }
-        if let Some(n) = &self.nvme {
-            t.value("nvme", n.save_state());
-        }
-        t
-            .value("ioc3", self.ioc3.save_state())
-            .value("eth", self.eth.save_state())
-            .value("scsi0", self.scsi[0].save_state())
-            .value("scsi1", self.scsi[1].save_state())
-            .value("rad", self.rad.save_state())
-            .value("flash", self.flash.save_state())
-            .value("flash_lines", toml::Value::Array(lines))
-            .value("bridge", self.bridge.save_state())
-            .value("xbow", self.xbow.save_state())
-            .value("heart", self.heart.save_state())
-            .build()
-    }
-
-    /// Put back what [`Self::save_board`] gave, into a machine stopped and
-    /// reset: leaf devices first and HEART last, so the pins it drives into
-    /// the CPU, already loaded, come from its loaded registers, and memory
-    /// is placed from its loaded descriptors.
-    fn load_board(&self, v: &toml::Value) -> Result<(), String> {
-        let load = |key: &str, dev: &dyn Saveable| dev.load_state(field(v, key)?).map_err(|e| format!("{key}: {e}"));
-        load("ioc3", &*self.ioc3)?;
-        load("eth", &*self.eth)?;
-        load("scsi0", &*self.scsi[0])?;
-        load("scsi1", &*self.scsi[1])?;
-        load("rad", &*self.rad)?;
-        if let Some(n) = &self.nvme {
-            load("nvme", &**n)?;
-        }
-        load("flash", &*self.flash)?;
-        let lines = field(v, "flash_lines")?.as_array().filter(|l| l.len() == self.flash_lines.len())
-            .ok_or("flash_lines: not one entry per processor")?;
-        for (f, saved) in self.flash_lines.iter().zip(lines) {
-            f.load_state(saved)?;
-        }
-        load("bridge", &*self.bridge)?;
-        if !self.xio_boards.is_empty() {
-            let boards = field(v, "xio_boards")?.as_array().filter(|l| l.len() == self.xio_boards.len())
-                .ok_or("xio_boards: not one entry per option board")?;
-            for (b, saved) in self.xio_boards.iter().zip(boards) {
-                b.bridge().load_state(saved).map_err(|e| format!("xio_boards: {e}"))?;
-            }
-        }
-        load("xbow", &*self.xbow)?;
-        Self::sync_links(&self.phys, &self.xbow);
-        load("heart", &*self.heart)?;
-        Ok(())
-    }
-
     pub fn save_snapshot(&mut self, name: &str) -> Result<(), String> {
         if let Some(why) = self.snapshot_refusal() {
             return Err(why);
@@ -962,7 +869,7 @@ impl OctaneMachine {
         let sv = manifest.schema_version;
         let io = |e: std::io::Error| e.to_string();
         snap.write_state("cpu", &cpu.save_state(), sv).map_err(io)?;
-        snap.write_state("octane", &self.save_board(), sv).map_err(io)?;
+        snap.write_state("octane", &self.devices.save(), sv).map_err(io)?;
         snap.write_bin("flash.bin", &self.flash.contents()).map_err(io)?;
         let store = ChunkStore::new(&self.saves);
         let mut chunks = ChunksManifest::default();
@@ -1067,7 +974,9 @@ impl OctaneMachine {
         if let (Some(n), Some(sets)) = (&self.nvme, &s.nvme_overlays) {
             n.import_overlays(&s.dir.join("nvme"), sets).map_err(|e| format!("COW overlay import (NVMe): {e}"))?;
         }
-        self.load_board(&s.board)
+        self.devices.load(&s.board)?;
+        Self::sync_links(&self.phys, &self.xbow);
+        Ok(())
     }
 }
 
@@ -1080,7 +989,7 @@ impl Drop for OctaneMachine {
         for c in &self.cpus {
             crate::cpu::jitv2::Jitv2::stop_for_drop(&c.jitv2(), || self.stop_cpus());
         }
-        self.stop_devices();
+        self.devices.stop();
         crate::workstation::flush_on_drop(self);
         self.monitor.shutdown();
         // The bus holds the devices, and the Bridge and IMPACT hold its
@@ -1660,7 +1569,7 @@ mod snapshot_tests {
             // PHY's negotiation countdown, whose time left can only have
             // shrunk since the load, and the RTC, which keeps the host's time
             // of day as on every machine. Everything else comes back as saved.
-            let (mut board, mut got) = (board, a.save_board());
+            let (mut board, mut got) = (board, a.devices.save());
             let left = |t: &toml::Value| crate::snapshot::field_u64(&t["eth"]["phy"], "deadline").unwrap();
             assert!(left(&got) <= left(&board));
             for t in [&mut board, &mut got] {
@@ -1669,6 +1578,127 @@ mod snapshot_tests {
             }
             assert_eq!(got, board);
         }).unwrap().join().unwrap();
+    }
+
+    /// `v` without the host clocks it holds: the PHY's countdown, HEART's
+    /// counter and its phase, RAD's clock and IOC3's time of day run in host
+    /// time while the machine is stopped, and differ from load to load.
+    fn without_clocks(v: &toml::Value) -> toml::Value {
+        let mut v = v.clone();
+        v["eth"]["phy"].as_table_mut().unwrap().remove("deadline");
+        v["heart"].as_table_mut().unwrap().remove("count");
+        v["heart"].as_table_mut().unwrap().remove("phase");
+        v["rad"].as_table_mut().unwrap().remove("clock_ns");
+        v["ioc3"]["chip"].as_table_mut().unwrap().remove("rtc");
+        v
+    }
+
+    /// The CPU's interrupt pins, as HEART drives them.
+    fn pins(m: &OctaneMachine) -> u64 {
+        // SAFETY: the pointer is into the CPU, which the machine owns.
+        unsafe { (*m.cpus[0].interrupts_ptr()).load(Ordering::SeqCst) }
+    }
+
+    /// Loading the board in registration order or with HEART last ends in the
+    /// same state: a leaf's load publishes its loaded level into HEART, HEART's
+    /// level write is idempotent, and HEART's own load rebuilds its pending
+    /// word, masks and the CPU pins from its saved registers. Checked on a
+    /// machine whose lines are up where the snapshot has them down and the
+    /// reverse (the PCI functions hold their levels through a reset), with the
+    /// levels the Bridge forwards from its functions among them.
+    #[test]
+    fn octane_load_order_does_not_matter() {
+        std::thread::Builder::new().stack_size(64 << 20).spawn(|| {
+            let dir = scratch("load-order");
+            let prom = empty_prom(&dir);
+            let m = machine(&prom, &dir);
+            let low = m.devices.save();
+
+            // A state with lines up, reached as a machine reaches one: IOC3's
+            // Ethernet raises its interrupt through the Bridge, a Bridge pin
+            // is driven, and HEART has the lines enabled and set.
+            let mut asserted = low["eth"].clone();
+            asserted.as_table_mut().unwrap().insert("irq_asserted".into(), toml::Value::Boolean(true));
+            m.devices.load_present(&toml::Value::Table([("eth".to_string(), asserted)].into_iter().collect())).unwrap();
+            m.bridge.bus().board_irq(BoardIrq(1)).set(true);
+            m.heart.piu_write(0x10000, 8, u64::MAX);
+            for line in [3, 16, 42] {
+                crate::irq::InterruptController::set_line(&*m.heart, line, true);
+            }
+            let high = m.devices.save();
+            assert_ne!(pins(&m), 0, "some line is up");
+            assert_ne!(without_clocks(&high), without_clocks(&low));
+            m.devices.load_present(&low).unwrap();
+            m.power_on_all();
+            m.devices.load(&high).unwrap();
+            assert_eq!(without_clocks(&m.devices.save()), without_clocks(&high), "the state is one the machine holds");
+
+            for (live, snapshot, name) in [(&high, &low, "lines up, snapshot down"), (&low, &high, "lines down, snapshot up")] {
+                let mut ends = Vec::new();
+                for last in [None, Some("heart"), Some("bridge"), Some("ioc3"), Some("eth"), Some("xbow")] {
+                    // The functions keep their levels through the reset.
+                    m.devices.load_present(live).unwrap();
+                    m.power_on_all();
+                    match last {
+                        None => m.devices.load(snapshot),
+                        Some(k) => m.devices.reordered(k).load(snapshot),
+                    }
+                    .unwrap();
+                    ends.push((last, without_clocks(&m.devices.save()), pins(&m)));
+                }
+                let (_, first, first_pins) = &ends[0];
+                assert_eq!(first, &without_clocks(snapshot), "{name}: the load puts back the snapshot");
+                for (last, state, p) in &ends[1..] {
+                    assert_eq!(state, first, "{name}: {last:?} last changes the saved state");
+                    assert_eq!(p, first_pins, "{name}: {last:?} last changes the CPU's interrupt pins");
+                }
+            }
+        }).unwrap().join().unwrap();
+    }
+
+    /// The registration order is the start, power-on and load order, and stop
+    /// runs it backwards with the graphics board last. The board keeps the
+    /// keys its single snapshot file always had.
+    #[test]
+    fn octane_registers_these_keys_in_this_order() {
+        std::thread::Builder::new().stack_size(64 << 20).spawn(|| {
+            let dir = scratch("keys");
+            let prom = empty_prom(&dir);
+            let m = machine(&prom, &dir);
+            let keys = ["xbow", "heart", "flash_lines", "bridge", "ioc3", "eth", "scsi0", "scsi1", "rad", "flash"];
+            assert_eq!(m.devices.keys(), keys);
+            assert_eq!(m.devices.lifecycle_order(false), keys);
+            let mut stopping = vec!["flash", "rad", "scsi1", "scsi0", "eth", "ioc3", "bridge", "flash_lines", "heart", "xbow"];
+            assert_eq!(m.devices.lifecycle_order(true), stopping);
+            // The board file's keys, whatever their order.
+            let mut saved: Vec<String> = m.devices.save().as_table().unwrap().keys().cloned().collect();
+            saved.sort();
+            assert_eq!(saved, ["bridge", "eth", "flash", "flash_lines", "heart", "ioc3", "rad", "scsi0", "scsi1", "xbow"]);
+
+            // With an IMPACT board: it has no state to save, and stops after
+            // the I/O parts and HEART.
+            let with = machine_with(&prom, &dir, |cfg| cfg.graphics.board = Some(crate::config::GraphicsBoard::SolidImpact));
+            assert_eq!(with.devices.keys(), keys);
+            assert_eq!(with.devices.lifecycle_order(false).last().map(String::as_str), Some("gfx"));
+            stopping.push("gfx");
+            assert_eq!(with.devices.lifecycle_order(true), stopping);
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn flash_line_set_checks_one_entry_per_processor() {
+        use crate::traits::{Resettable, Saveable};
+        struct Nothing;
+        impl BusDevice for Nothing {}
+        let bus: Arc<dyn BusDevice> = Arc::new(Nothing);
+        let set = FlashLineSet(vec![Arc::new(CachedFlashLines::new(bus.clone())), Arc::new(CachedFlashLines::new(bus.clone()))]);
+        let saved = set.save_state();
+        assert_eq!(saved.as_array().unwrap().len(), 2);
+        set.load_state(&saved).unwrap();
+        set.power_on();
+        let one = FlashLineSet(vec![Arc::new(CachedFlashLines::new(bus))]);
+        let e = one.load_state(&saved).unwrap_err();
+        assert!(e.contains("one entry per processor"), "{e}");
     }
 
     /// Each case a save or load refuses gives its reason. (Decided without

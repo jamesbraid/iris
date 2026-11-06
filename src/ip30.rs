@@ -478,6 +478,34 @@ macro_rules! cached_access {
     };
 }
 
+/// Every processor's cached flash lines, as one part: a reset loses them all,
+/// and a snapshot holds one entry per processor.
+pub struct FlashLineSet(pub Vec<Arc<CachedFlashLines>>);
+
+impl crate::traits::Device for FlashLineSet {}
+
+impl crate::traits::Resettable for FlashLineSet {
+    fn power_on(&self) {
+        for lines in &self.0 {
+            lines.clear();
+        }
+    }
+}
+
+impl crate::traits::Saveable for FlashLineSet {
+    fn save_state(&self) -> toml::Value {
+        toml::Value::Array(self.0.iter().map(|f| f.save_state()).collect())
+    }
+
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        let saved = v.as_array().filter(|l| l.len() == self.0.len()).ok_or("not one entry per processor")?;
+        for (lines, state) in self.0.iter().zip(saved) {
+            lines.load_state(state)?;
+        }
+        Ok(())
+    }
+}
+
 impl BusDevice for CachedFlashLines {
     cached_access!(read8, write8, BusRead8, u8, 1);
     cached_access!(read16, write16, BusRead16, u16, 2);
