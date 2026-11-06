@@ -4834,6 +4834,51 @@ mod tests {
         assert_eq!(std::mem::size_of::<DecodedInstr>(), 24, "DecodedInstr grew past its 24-byte budget");
     }
 
+    /// `hot.cycles` counts one per retired instruction, whether or not the
+    /// decoder fused it with its neighbour. A branch and its NOP delay slot,
+    /// `lui`+`ori` and an address calculation plus its load are two
+    /// instructions each. Runs in plain and `opcodefusion` builds alike; the
+    /// fused build must count the same as the unfused one.
+    #[test]
+    fn test_cycles_count_each_instruction_of_a_fused_pair() {
+        let (mut exec, mem) = create_executor_with_r4000cache();
+        let pc_base: u64 = 0xFFFFFFFF80000000;
+        let nop = 0u32;
+        let pair = |a: u32, b: u32| ((a as u64) << 32) | b as u64;
+        let line = |n: u64| 128 * n;
+        // Every word goes in before the first fetch (see the self-modifying
+        // delay slot test): each case gets its own cache line.
+        let jtarget = |off: u64| (((pc_base + off) & 0x0FFF_FFFF) >> 2) as u32;
+        // (start offset, instruction pair, expected end offset, name)
+        let cases: [(u64, u64, u64, &str); 7] = [
+            (line(0), pair(make_i(OP_BEQ as u32, 0, 0, 3), nop), line(0) + 16, "beq taken"),
+            (line(1), pair(make_i(OP_BNE as u32, 0, 0, 3), nop), line(1) + 8, "bne not taken"),
+            (line(2), pair(make_r(OP_SPECIAL as u32, 31, 0, 0, 0, FUNCT_JR as u32), nop), line(2) + 64, "jr"),
+            (line(3), pair(make_j(OP_J as u32, jtarget(line(3) + 64)), nop), line(3) + 64, "j"),
+            (line(4), pair(make_j(OP_JAL as u32, jtarget(line(4) + 64)), nop), line(4) + 64, "jal"),
+            (line(5), pair(make_i(OP_LUI as u32, 0, 2, 0x1234), make_i(OP_ORI as u32, 2, 2, 0x5678)), line(5) + 8, "lui+ori"),
+            (line(6), pair(make_i(OP_ADDIU as u32, 4, 8, 4), make_i(OP_LW as u32, 8, 2, 8)), line(6) + 8, "addiu+lw"),
+        ];
+        for (start, words, _, _) in cases {
+            mem.set_double(start, words);
+        }
+        mem.set_word(0x2000 + 4 + 8, 0xCAFEF00D);
+        exec.core.write_gpr(4, 0x2000);
+
+        for (start, _, end, what) in cases {
+            exec.core.pc = pc_base + start;
+            exec.core.write_gpr(31, pc_base + end);
+            let before = exec.core.hot.cycles;
+            let mut steps = 0;
+            while exec.core.pc != pc_base + end || exec.core.in_delay_slot {
+                assert_eq!(exec.step_int(), EXEC_COMPLETE, "{what}");
+                steps += 1;
+                assert!(steps < 8, "{what}: never reached {end:#x}");
+            }
+            assert_eq!(exec.core.hot.cycles - before, 2, "{what}: two instructions retired");
+        }
+    }
+
     #[test]
     #[cfg(feature = "opcodefusion")]
     fn test_branch_nop_fusion() {
