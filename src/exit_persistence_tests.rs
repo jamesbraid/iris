@@ -76,7 +76,7 @@ fn base_byte(kind: Kind) -> u8 {
 static SERIAL: Mutex<()> = Mutex::new(());
 
 /// Hold this for the whole test.
-fn serial() -> MutexGuard<'static, ()> {
+pub(crate) fn serial() -> MutexGuard<'static, ()> {
     // The environment variable is the same for every test.
     std::env::set_var("IRIS_NO_EXIT_ON_POWEROFF", "1");
     SERIAL.lock().unwrap_or_else(|e| e.into_inner())
@@ -124,10 +124,10 @@ impl Snapshot {
 }
 
 /// A scratch directory under the container's temp dir, removed when dropped.
-struct Dir(PathBuf);
+pub(crate) struct Dir(PathBuf);
 
 impl Dir {
-    fn new(tag: &str) -> Dir {
+    pub(crate) fn new(tag: &str) -> Dir {
         let p = std::env::temp_dir().join(format!("iris-persist-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
@@ -136,7 +136,7 @@ impl Dir {
         }
         Dir(p)
     }
-    fn file(&self, name: &str) -> PathBuf {
+    pub(crate) fn file(&self, name: &str) -> PathBuf {
         self.0.join(name)
     }
 }
@@ -181,7 +181,7 @@ fn image_name(kind: Kind) -> String {
     }
 }
 
-fn make_images(dir: &Dir) {
+pub(crate) fn make_images(dir: &Dir) {
     for (_, kind) in DISKS {
         let name = image_name(kind);
         match kind {
@@ -194,7 +194,7 @@ fn make_images(dir: &Dir) {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Machine {
+pub(crate) enum Machine {
     Indy,
     Indigo2,
     Indigo2Ip28,
@@ -202,7 +202,7 @@ enum Machine {
     Octane,
 }
 
-fn config(machine: Machine, dir: &Dir, ci: bool) -> MachineConfig {
+pub(crate) fn config(machine: Machine, dir: &Dir, ci: bool) -> MachineConfig {
     let mut cfg = crate::bench_runner::bench_config([32, 0, 0, 0], CpuModel::default());
     cfg.machine.profile = match machine {
         Machine::Indy => MachineProfile::IndyIp24,
@@ -257,12 +257,12 @@ fn config(machine: Machine, dir: &Dir, ci: bool) -> MachineConfig {
 }
 
 /// Build the machine on a thread with the stack `Machine::new` wants.
-fn build(cfg: MachineConfig) -> Box<dyn Workstation> {
+pub(crate) fn build(cfg: MachineConfig) -> Box<dyn Workstation> {
     workstation::build(cfg).expect("machine builds")
 }
 
 /// Run `body` on a big-stack thread, as `main` builds and drops machines.
-fn on_big_stack(body: impl FnOnce() + Send + 'static) {
+pub(crate) fn on_big_stack(body: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(body)
@@ -640,6 +640,13 @@ impl Workstation for Probe {
     fn restart_peripherals(&mut self) { self.0.restart_peripherals() }
     fn cpu_start(&self) { self.0.cpu_start() }
     fn cpu_is_running(&self) -> bool { self.0.cpu_is_running() }
+    fn control(&self) -> &crate::control::Control { self.0.control() }
+    fn control_mut(&mut self) -> &mut crate::control::Control { self.0.control_mut() }
+    fn net(&self) -> Option<&crate::guest_net::GuestNet> { self.0.net() }
+    fn monitor(&self) -> &std::sync::Arc<crate::monitor::Monitor> { self.0.monitor() }
+    // The wrapped machine's address, not the wrapper's: a slot pointing at
+    // the Probe would not outlive the machine it stands in for.
+    fn as_ws_ptr(&mut self) -> *mut dyn Workstation { self.0.as_ws_ptr() }
     fn machine_slot(&mut self) -> workstation::MachineSlot { self.0.machine_slot() }
     fn register_system_controller(&mut self) { self.0.register_system_controller() }
     fn monitor_addr(&self) -> Option<std::net::SocketAddr> { self.0.monitor_addr() }
