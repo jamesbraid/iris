@@ -1,6 +1,6 @@
 # Boot chimes of the Indy and Indigo2 PROMs, and how to check them
 
-**Keywords:** boot chime,startup tune,hal2,hpc3,pbus,adpcm,karplus-strong,ip22,ip24,ip28,IRIS_HAL2_AUDIO_DUMP,070-1367-012,070-9101-011,070-1477-002
+**Keywords:** boot chime,startup tune,hal2,hpc3,pbus,adpcm,karplus-strong,ip22,ip24,ip28,ip30,octane,rad1,IRIS_HAL2_AUDIO_DUMP,IRIS_OCTANE_AUDIO_DUMP,070-1367-012,070-9101-011,070-1477-002
 
 The Indy and Indigo2 chimes are not samples iris carries. The PROM builds the
 tune in RAM with its own code and starts HAL2 playing it through an HPC3 PBUS
@@ -69,3 +69,59 @@ synthesized tunes, a plain IMA-style decoder for the Indy), sample for sample:
 0 of 85000 differ on the IP22, 0 of 85000 on the IP28, 0 of 92150 on the Indy.
 The comparison covers the CPU and FPU through HPC3 PBUS DMA and HAL2's
 rate and DMA handling; it does not cover the host audio device or resampler.
+
+## Octane (IP30)
+
+The Octane plays its tune through the RAD1 PCI audio card, not HAL2. The PROM
+is not embedded; checked here: 6.5.30, sha256
+`ee4722ca6f9b821ffadf156346c4d69bf5be71fc4b911cee75e36a1f51a49972`.
+
+The tune is stored, like the Indy's: 31941 bytes of 4-bit IMA-style ADPCM,
+high nibble first, decoded by the PROM into RAM when it chimes. In the PROM
+image (file offsets): the stream is at 0xa37c0, its byte count at 0xab488, the
+16-entry index-adjust table at 0xa3608 and the 89-entry step table at 0xa3648.
+Predictor and step index start at 0. Each decoded 16-bit sample is stored in
+bits [23:8] of both words of a frame, so the tune is mono at full level (peak
+27717 of 32767) and unattenuated. 63882 samples are decoded; the buffer then
+ends in silence, 72064 frames in all (the decoded frames plus 0x10000 bytes,
+rounded down to 128-byte units). The tune sounds from frame 2955 to 63881.
+
+PROM code, as addresses in the 0xbfc00000 window: the tune chosen by number at
+0x9fc34e90 (three tunes; the boot chime is number 0, the other two are 20194
+and 14158 bytes, read from the code and not run), the decoder at 0x9fc34f78,
+the RAD1 programming and start at 0x9fc3536c to 0x9fc35434. The PROM loads
+clock generator 2 with control word 0x40000405 (divide by 6), remainder word
+0xffff, selects the 192 kHz master with a write of 1 to 0xac, points the
+output ring at the buffer with one end-of-descriptor entry and starts it with
+0x40000001 in register 0x58. Decoded with the public Linux driver's rules
+(`snd_rad1_set_cg`), that is exactly 32000 Hz, so the tune lasts 2.252 s. The
+32 kHz rate is the PROM's programming; the stream itself carries no rate, and
+nothing here compares it with a recording from a real Octane.
+
+Iris plays the PROM's output unchanged. Checked 2026-11-05 with
+`IRIS_OCTANE_AUDIO_DUMP=<file>` (records the card's frames at its own rate, in
+the HAL2 dump layout, with or without a host sound device) and
+`IRIS_OCTANE_AUDIO_WAV=<file>` (44.1 kHz stereo, after the shared resampler):
+
+- The dump is 72064 frames at 32000 Hz, left equals right, and matches an
+  independent decoder written from the PROM's tables and the arithmetic above
+  with 0 of 72064 samples different. Nothing is cut off at the end (the whole
+  ring plays once and the enable bit clears) and there is no extra silence.
+- The WAV is 99314 frames at 44.1 kHz, and matches a separate float32
+  Catmull-Rom model of the shared resampler with 0 of 99314 different.
+  Resampling to a 48 kHz host uses the same code with another output rate.
+- A first boot with a blank NVRAM and flash chimes (unlike the Indy, which is
+  silent on a new NVRAM) and a later boot on the NVRAM the first one wrote gives
+  the identical stream (same SHA-256 of the samples).
+- The run needs the config's SCSI image files to exist. The tune is in the dump
+  within a minute on the interpreter.
+
+One real problem turned up in the host path. The card makes each frame when its
+clock says it is due, so the host ring never held more than the last 10 ms
+pump interval, but a host callback asks for a whole period. With a modelled
+512-frame period at 48 kHz the first ten callbacks of the tune found the ring
+short, and any late pump afterwards would again. RAD1 now holds back the first
+50 ms of a run before the host hears it (HAL2 has its own 20 ms prebuffer), and
+releases what it holds when the run ends. This is checked by a modelled host
+only. No sound device was available here, so the real stream
+(`IRIS_OCTANE_AUDIO_CAPTURE`) was not recorded or listened to.
