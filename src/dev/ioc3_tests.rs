@@ -1641,7 +1641,7 @@ fn dropping_a_running_chip_ends_its_threads() {
 #[test]
 fn the_clocks_power_off_is_sent_to_the_machine_once() {
     let r = Rig::new();
-    let (tx, rx) = std::sync::mpsc::sync_channel(4);
+    let (tx, rx) = std::sync::mpsc::channel();
     r.c.set_event_sender(tx);
     rtc_w(&r, 0x0a, 0x10); // bank 1
     assert!(rx.try_recv().is_err());

@@ -71,11 +71,11 @@ use crate::net::{GatewayConfig, Link, NatControl};
 use crate::scsi::ScsiBus;
 use crate::traits::{BusDevice, Device, MachineEvent, Resettable, Signal, BUS_ERR};
 use crate::xtalk::{Upstream, XtalkHost};
-use crate::workstation::{register_system_controller, DiscChanger, MachineRef, MachineSlot, Workstation};
-use parking_lot::Mutex;
+use crate::control::Control;
+use crate::workstation::{DiscChanger, MachineSlot, Workstation};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::Sender;
 use std::sync::{atomic::AtomicU64, Arc, Weak};
 
 /// The PROM image tried when `prom` is left at the shared default.
@@ -261,9 +261,9 @@ pub struct Ip27Machine<B: Ip27Board> {
     monitor: Arc<Monitor>,
     ci: bool,
     nvram: String,
-    events: Option<Receiver<MachineEvent>>,
-    slot: Option<MachineSlot>,
-    lifecycle: GuestState,
+    /// Lifecycle state, machine events and the pointer slot the front ends
+    /// share.
+    control: Control,
 }
 
 /// The CPU's three Hub lines are hardware interrupts 0 to 2, Cause IP2 to IP4.
@@ -402,7 +402,8 @@ impl<B: Ip27Board> Ip27Machine<B> {
         let nodes: Vec<&Node> = parts.iter().collect();
         let io = B::wire(&nodes, cfg)?;
 
-        let (tx, rx) = channel();
+        let control = Control::new();
+        let tx = control.sender();
         let mut units = Vec::new();
         for (node, spec) in parts.into_iter().zip(&specs) {
             let cpu = Self::build_cpu(cfg, &spec.module, &node, spec.hub.cpu_base, specs.len() > 1)?;
@@ -448,9 +449,7 @@ impl<B: Ip27Board> Ip27Machine<B> {
             monitor: Arc::new(monitor),
             ci: cfg.ci,
             nvram: cfg.nvram.clone(),
-            events: Some(rx),
-            slot: None,
-            lifecycle: GuestState::Idle,
+            control,
         })
     }
 
@@ -589,7 +588,7 @@ impl<B: Ip27Board> Ip27Machine<B> {
 
 impl<B: Ip27Board> Workstation for Ip27Machine<B> {
     fn start(&mut self) {
-        self.lifecycle = GuestState::Starting;
+        self.control.started();
         self.monitor.serve();
         self.restart_peripherals();
         if !self.ci {
@@ -610,9 +609,7 @@ impl<B: Ip27Board> Workstation for Ip27Machine<B> {
         if let Err(e) = self.io.timekeeper.flush_nvram() {
             crate::dlog!(LogModule::Hub, "{} NVRAM: {e}", B::NAME);
         }
-        if self.lifecycle != GuestState::Idle {
-            self.lifecycle = GuestState::Halted;
-        }
+        self.control.stopped();
     }
     fn reset(&mut self) {
         self.stop();
@@ -646,21 +643,20 @@ impl<B: Ip27Board> Workstation for Ip27Machine<B> {
     }
     fn machine_slot(&mut self) -> MachineSlot {
         let ptr = self as *mut Self as *mut dyn Workstation;
-        self.slot.get_or_insert_with(|| Arc::new(Mutex::new(MachineRef(ptr)))).clone()
+        self.control.slot(ptr)
     }
     fn register_system_controller(&mut self) {
-        let slot = self.machine_slot();
-        let events = self.events.take().expect("system controller registered twice");
-        register_system_controller(&self.monitor, slot, Some(events));
+        let ptr = self as *mut Self as *mut dyn Workstation;
+        self.control.register(ptr, &self.monitor);
     }
     fn monitor_addr(&self) -> Option<SocketAddr> {
         self.monitor.bound_addr()
     }
     fn lifecycle(&self) -> GuestState {
-        self.lifecycle
+        self.control.state()
     }
     fn set_lifecycle(&mut self, state: GuestState) {
-        self.lifecycle = state;
+        self.control.set_state(state)
     }
     fn get_display(&self) -> Option<Arc<dyn GfxDisplay>> {
         None
@@ -732,9 +728,7 @@ impl<B: Ip27Board> Workstation for Ip27Machine<B> {
 
 impl<B: Ip27Board> Drop for Ip27Machine<B> {
     fn drop(&mut self) {
-        if let Some(slot) = self.slot.take() {
-            slot.lock().0 = MachineRef::null();
-        }
+        self.control.release();
         self.stop();
         // The compile pool's requests point into the memory freed below.
         #[cfg(feature = "jitv2")]

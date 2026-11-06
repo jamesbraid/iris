@@ -44,7 +44,8 @@ use crate::pci::{BoardIrq, DevFn};
 use crate::chunk_store::{get_chunks_as_words, put_words_as_chunks, ChunkStore};
 use crate::snapshot::{field, ChunksManifest, Manifest, Snapshot, StateTable, SCHEMA_VERSION};
 use crate::traits::{BusDevice, Device, MachineEvent, Resettable, Saveable};
-use crate::workstation::{MachineRef, MachineSlot, Workstation};
+use crate::control::Control;
+use crate::workstation::{MachineSlot, Workstation};
 use crate::xtalk::{HostPort, Upstream};
 
 /// The PROM image tried when `prom` is left at the shared default, named
@@ -150,9 +151,9 @@ pub struct OctaneMachine {
     frames: Option<Arc<std::sync::atomic::AtomicU64>>,
     scratch_path: Option<std::path::PathBuf>,
     nvram_path: String,
-    event_rx: Option<std::sync::mpsc::Receiver<MachineEvent>>,
-    controller_slot: Option<MachineSlot>,
-    lifecycle: crate::machine_state::GuestState,
+    /// Lifecycle state, machine events and the pointer slot the front ends
+    /// share.
+    pub(crate) control: Control,
     /// The disks as a snapshot records them, to refuse one taken on others.
     disks: Vec<crate::snapshot::DiskRef>,
     /// The snapshot the CI socket last restored, for `rollback`.
@@ -206,7 +207,8 @@ impl OctaneMachine {
         // (revision 4); there is no separate option for the machine.
         let octane2 = matches!(kind, crate::config::GraphicsBoard::V10 | crate::config::GraphicsBoard::V12);
         let xbow_revision = if octane2 { XBOW_REVISION_OCTANE2 } else { XBOW_REVISION };
-        let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4);
+        let control = Control::new();
+        let event_tx = control.sender();
         let timer_manager = Arc::new(TimerManager::new());
 
         // Memory, and HEART, whose descriptors place it.
@@ -296,7 +298,7 @@ impl OctaneMachine {
         ioc3.set_event_sender(event_tx.clone());
         // ... and resetting itself through HEART.
         heart.on_soft_reset(Box::new(move || {
-            let _ = event_tx.try_send(MachineEvent::HardReset);
+            let _ = event_tx.send(MachineEvent::HardReset);
         }));
         ioc3.set_rtc_offset(&cfg.rtc_offset);
         if let Err(e) = ioc3.set_nvram_file(&cfg.nvram) {
@@ -587,9 +589,7 @@ impl OctaneMachine {
             frames,
             scratch_path,
             nvram_path: cfg.nvram.clone(),
-            event_rx: Some(event_rx),
-            controller_slot: None,
-            lifecycle: crate::machine_state::GuestState::Idle,
+            control,
             disks,
             last_restore: None,
             saves: std::path::PathBuf::from("saves"),
@@ -713,9 +713,7 @@ impl OctaneMachine {
     }
 
     pub fn start(&mut self) {
-        if let Ok(starting) = self.lifecycle.transition(crate::machine_state::GuestState::Starting) {
-            self.lifecycle = starting;
-        }
+        self.control.started();
         self.monitor.serve();
         self.restart_peripherals();
         // CI mode: the harness starts the CPU (`iris-ci start`).
@@ -734,9 +732,7 @@ impl OctaneMachine {
         // The guest clock points into this machine's CPU core.
         #[cfg(feature = "perfetto")]
         crate::perfetto::set_guest_cycles(None);
-        if self.lifecycle != crate::machine_state::GuestState::Idle {
-            self.lifecycle = crate::machine_state::GuestState::Halted;
-        }
+        self.control.stopped();
     }
 
     /// The hardware as at power-on, with the CPU stopped: memory and the
@@ -807,9 +803,7 @@ impl OctaneMachine {
 
     pub fn machine_slot(&mut self) -> MachineSlot {
         let ptr = self as *mut OctaneMachine as *mut dyn Workstation;
-        let slot = self.controller_slot.get_or_insert_with(|| Arc::new(parking_lot::Mutex::new(MachineRef(ptr))));
-        debug_assert!(std::ptr::addr_eq(slot.lock().0, ptr), "OctaneMachine moved after its slot was handed out");
-        slot.clone()
+        self.control.slot(ptr)
     }
 }
 
@@ -942,7 +936,7 @@ impl OctaneMachine {
         if let Some(why) = self.snapshot_refusal() {
             return Err(why);
         }
-        let lifecycle = self.lifecycle;
+        let lifecycle = self.control.state();
         let was_running = self.cpus[0].clone().as_device().is_running();
         self.stop();
         let saved = self.write_snapshot(name);
@@ -952,7 +946,7 @@ impl OctaneMachine {
         if was_running {
             self.start_cpus();
         }
-        self.lifecycle = lifecycle;
+        self.control.set_state(lifecycle);
         saved?;
         println!("Snapshot saved to {}/{name}", self.saves.display());
         Ok(())
@@ -1084,9 +1078,7 @@ impl OctaneMachine {
 
 impl Drop for OctaneMachine {
     fn drop(&mut self) {
-        if let Some(slot) = self.controller_slot.take() {
-            slot.lock().0 = MachineRef::null();
-        }
+        self.control.release();
         self.stop_cpus();
         // The compile pool's requests point into the memory freed below.
         #[cfg(feature = "jitv2")]
@@ -1125,19 +1117,17 @@ impl Workstation for OctaneMachine {
         OctaneMachine::machine_slot(self)
     }
     fn register_system_controller(&mut self) {
-        let slot = self.machine_slot();
-        let events = self.event_rx.take();
-        assert!(events.is_some(), "register_system_controller called twice");
-        crate::workstation::register_system_controller(&self.monitor, slot, events);
+        let ptr = self as *mut OctaneMachine as *mut dyn Workstation;
+        self.control.register(ptr, &self.monitor);
     }
     fn monitor_addr(&self) -> Option<std::net::SocketAddr> {
         self.monitor.bound_addr()
     }
     fn lifecycle(&self) -> crate::machine_state::GuestState {
-        self.lifecycle
+        self.control.state()
     }
     fn set_lifecycle(&mut self, state: crate::machine_state::GuestState) {
-        self.lifecycle = state;
+        self.control.set_state(state)
     }
     fn get_display(&self) -> Option<Arc<dyn crate::gfx_display::GfxDisplay>> {
         match &self.vpro {
@@ -1543,6 +1533,7 @@ mod snapshot_tests {
             b.apply_snapshot(snap).unwrap();
             assert_eq!(digest(&b), saved, "the restore puts back the CPU and memory");
             assert_eq!(a.cpus[0].save_state(), b.cpus[0].save_state());
+            assert_ne!(b.lifecycle(), crate::machine_state::GuestState::Running, "Running is never stored");
             a.cpus[0].step_n_inline(1_000_000).unwrap();
             b.cpus[0].step_n_inline(1_000_000).unwrap();
             assert_eq!(digest(&a), digest(&b));

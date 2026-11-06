@@ -48,7 +48,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, OnceLock, Weak};
 
 use parking_lot::{Condvar, Mutex};
@@ -2143,7 +2143,7 @@ struct Shared {
     kbc_dirty: AtomicBool,
     me: Weak<Shared>,
     timers: OnceLock<Arc<TimerManager>>,
-    events: OnceLock<SyncSender<MachineEvent>>,
+    events: OnceLock<Sender<MachineEvent>>,
     /// Between `start` and `stop`.
     running: AtomicBool,
     /// Held by a timer callback while it runs, so `stop` can wait one out.
@@ -2212,7 +2212,7 @@ impl Shared {
         self.sync_superio();
         if power_off {
             if let Some(tx) = self.events.get() {
-                let _ = tx.try_send(MachineEvent::PowerOff);
+                let _ = tx.send(MachineEvent::PowerOff);
             }
         }
         r
@@ -2498,7 +2498,7 @@ impl Ioc3 {
 
     /// Where the DS1685's power-off goes: one `PowerOff` event when the guest
     /// writes it. Call before `start`.
-    pub fn set_event_sender(&self, tx: SyncSender<MachineEvent>) {
+    pub fn set_event_sender(&self, tx: Sender<MachineEvent>) {
         let _ = self.sh.events.set(tx);
     }
 

@@ -94,7 +94,7 @@ pub struct MemoryController {
     /// None = bank invalid/empty.
     memcfg_callback: Arc<OnceLock<Box<dyn Fn([Option<BankPlacement>; 4]) + Send + Sync>>>,
     /// Channel to send async machine events (HardReset, PowerOff) to the machine thread.
-    event_tx: Arc<OnceLock<mpsc::SyncSender<MachineEvent>>>,
+    event_tx: Arc<OnceLock<mpsc::Sender<MachineEvent>>>,
     /// Set when `mc vdma on` is active; gates the per-transfer logging in dma_worker.
     vdma_debug: Arc<AtomicBool>,
     /// Log file for VDMA transactions (set when vdma_debug is enabled).
@@ -262,7 +262,7 @@ impl MemoryController {
         let _ = self.memcfg_callback.set(cb);
     }
 
-    pub fn set_event_sender(&self, tx: mpsc::SyncSender<MachineEvent>) {
+    pub fn set_event_sender(&self, tx: mpsc::Sender<MachineEvent>) {
         let _ = self.event_tx.set(tx);
     }
 
@@ -768,7 +768,7 @@ impl BusDevice for MemoryController {
                     // SIN: System INitialization — full power-cycle reset
                     dlog_dev!(LogModule::Mc, "MC: CPUCTRL0 SIN (System Init / hard reset) requested");
                     if let Some(tx) = self.event_tx.get() {
-                        let _ = tx.try_send(MachineEvent::HardReset);
+                        let _ = tx.send(MachineEvent::HardReset);
                     }
                 }
                 if (val & (1 << 16)) != 0 {

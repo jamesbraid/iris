@@ -513,7 +513,7 @@ pub struct Ioc {
     ps2: Arc<Ps2Controller>,
     guinness: bool,
     /// Sender for async machine events (power-off).
-    event_tx: Arc<std::sync::OnceLock<mpsc::SyncSender<MachineEvent>>>,
+    event_tx: Arc<std::sync::OnceLock<mpsc::Sender<MachineEvent>>>,
     /// Shared heartbeat — IOC sets/clears HB_LED_RED/GREEN bits directly.
     heartbeat: Arc<std::sync::OnceLock<Arc<AtomicU64>>>,
     /// Counter bumped on every 8254 timer 0/1 interrupt (see `set_clock_ticks`).
@@ -607,7 +607,7 @@ impl Ioc {
         self.pit.set_timer_manager(tm);
     }
 
-    pub fn set_event_sender(&self, tx: mpsc::SyncSender<MachineEvent>) {
+    pub fn set_event_sender(&self, tx: mpsc::Sender<MachineEvent>) {
         let _ = self.event_tx.set(tx);
     }
 
@@ -969,7 +969,7 @@ impl BusDevice for Ioc {
                 if was_on && now_off {
                     if let Some(tx) = self.event_tx.get() {
                         dlog_dev!(LogModule::Ioc, "IOC: front panel power-off requested");
-                        let _ = tx.try_send(MachineEvent::PowerOff);
+                        let _ = tx.send(MachineEvent::PowerOff);
                     }
                 }
             }
