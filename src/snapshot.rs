@@ -561,6 +561,36 @@ impl BinValue {
 
 // ---- scalar hex helpers ----
 
+/// Inverse of `parse_cow_table`: build a `{"scsi<id>": [dirty sectors...]}`
+/// table from `export_overlays`'s output.
+pub(crate) fn build_cow_table(overlays: Vec<(usize, Vec<u64>)>) -> toml::Value {
+    let mut tbl = toml::map::Map::new();
+    for (id, dirty) in overlays {
+        let arr: Vec<toml::Value> = dirty.into_iter().map(|v| toml::Value::Integer(v as i64)).collect();
+        tbl.insert(format!("scsi{}", id), toml::Value::Array(arr));
+    }
+    toml::Value::Table(tbl)
+}
+
+/// Parse a `cow.toml`/`cow1.toml`-shaped table (`{"scsi<id>": [dirty
+/// sectors...]}`) into `(id, dirty_sectors)` pairs. Shared by rollback
+/// capture and snapshot load so the two paths can't drift.
+pub(crate) fn parse_cow_table(cow_toml: &toml::Value) -> Vec<(usize, Vec<u64>)> {
+    let mut sets = Vec::new();
+    if let Some(tbl) = cow_toml.as_table() {
+        for (k, v) in tbl {
+            let Some(id_str) = k.strip_prefix("scsi") else { continue };
+            let Ok(id) = id_str.parse::<usize>() else { continue };
+            let Some(arr) = v.as_array() else { continue };
+            let dirty: Vec<u64> = arr.iter()
+                .filter_map(|x| x.as_integer().map(|i| i as u64))
+                .collect();
+            sets.push((id, dirty));
+        }
+    }
+    sets
+}
+
 /// Encode a u64 as a hex string Value (e.g. "0x000000001234abcd").
 pub fn hex_u64(v: u64) -> Value { Value::String(format!("0x{:016x}", v)) }
 
@@ -780,6 +810,23 @@ mod tests {
         assert!(e.contains(&format!("schema {older}")) && e.contains(&format!("schema {SCHEMA_VERSION}")), "{e}");
         assert!(check_schema("newer", SCHEMA_VERSION + 1).is_err());
         assert!(check_schema("current", SCHEMA_VERSION).is_ok());
+    }
+
+    /// What `export_overlays` returns survives the table a snapshot writes it
+    /// as, and ids that are not `scsi<n>` keys are ignored.
+    #[test]
+    fn cow_tables_round_trip() {
+        let sets = vec![(1usize, vec![0u64, 7, 4096]), (4, vec![]), (12, vec![u32::MAX as u64 + 1])];
+        let table = build_cow_table(sets.clone());
+        let mut parsed = parse_cow_table(&table);
+        parsed.sort();
+        assert_eq!(parsed, sets);
+        let mut noisy = table.as_table().unwrap().clone();
+        noisy.insert("note".into(), toml::Value::String("x".into()));
+        noisy.insert("scsiX".into(), toml::Value::Array(vec![]));
+        let mut parsed = parse_cow_table(&toml::Value::Table(noisy));
+        parsed.sort();
+        assert_eq!(parsed, sets);
     }
 
     fn unique_tmp_dir(tag: &str) -> PathBuf {

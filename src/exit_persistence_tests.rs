@@ -485,7 +485,7 @@ fn end_session(mut m: Box<dyn Workstation>, exit: Exit, dir: &Dir) {
             let addr = m.monitor_addr().expect("monitor is listening");
             let slot = m.machine_slot();
             let mut s = std::net::TcpStream::connect(addr).unwrap();
-            let relay = crate::machine::Machine::relay_monitor_output(s.try_clone().unwrap(), workstation::console_quit(slot));
+            let relay = crate::monitor::relay_monitor_output(s.try_clone().unwrap(), workstation::console_quit(slot));
             s.write_all(b"quit\n").unwrap();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while !relay.is_finished() {

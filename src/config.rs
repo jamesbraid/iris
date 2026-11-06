@@ -3351,7 +3351,7 @@ impl Cli {
 /// to clap's derive, which wants a constant, so it is set on the command here.
 /// No machine is configured yet, so only the model-neutral words can appear.
 fn parse_cli() -> Cli {
-    let mut matches = Cli::command().about(crate::machine::emulator_name()).get_matches();
+    let mut matches = Cli::command().about(crate::emulator_name::emulator_name()).get_matches();
     Cli::from_arg_matches_mut(&mut matches).unwrap_or_else(|e| e.format(&mut Cli::command()).exit())
 }
 
@@ -3966,7 +3966,7 @@ mod export_tests {
     /// by a fixed description of one machine.
     #[test]
     fn help_is_headed_by_the_emulators_name() {
-        let help = Cli::command().about(crate::machine::emulator_name()).render_help().to_string();
+        let help = Cli::command().about(crate::emulator_name::emulator_name()).render_help().to_string();
         let words: Vec<&str> = help.lines().next().unwrap().split_whitespace().collect();
         assert_eq!(words.len(), 4, "{help}");
         assert!(words[0].starts_with('I') && words[2].starts_with('I') && words[3].starts_with('S'), "{words:?}");

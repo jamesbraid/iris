@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::Mutex;
 use std::thread;
 use std::net::{TcpListener, TcpStream};
-use std::io::{Write, BufReader, BufRead, BufWriter};
+use std::io::{self, Read, Write, BufReader, BufRead, BufWriter};
 use crate::traits::Device;
 
 /// The monitor's TCP port on 127.0.0.1 when the config names none.
@@ -106,6 +106,62 @@ impl Monitor {
     }
 }
 
+/// The terminal console: relays stdin to the monitor at `addr` and the
+/// monitor's output to stdout. When the monitor closes the connection
+/// (`quit`) `on_eof` ends the process (through
+/// `workstation::exit_process`, which flushes the disks first), so `addr`
+/// must be this process's own monitor (`monitor_addr`): another iris's
+/// would take this one down with it when it quits.
+pub fn run_console_client(addr: std::net::SocketAddr, on_eof: impl FnOnce() + Send + 'static) {
+    println!("IRIS: {}", crate::emulator_name::emulator_name());
+    println!("Connecting to monitor socket...");
+
+    let mut stream = loop {
+        match TcpStream::connect(addr) {
+            Ok(s) => break s,
+            Err(_) => {
+                thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+        }
+    };
+
+    relay_monitor_output(stream.try_clone().unwrap(), on_eof);
+
+    let stdin = io::stdin();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        // Ok(0) is end of input (stdin from /dev/null, say): stop
+        // relaying rather than spin; the monitor's output still prints.
+        if !matches!(stdin.read_line(&mut line), Ok(n) if n > 0) {
+            break;
+        }
+        if stream.write_all(line.as_bytes()).is_err() {
+            break;
+        }
+    }
+}
+
+/// Print what the monitor sends until it closes the connection (`quit`, or
+/// iris going away), then run `on_eof`.
+pub(crate) fn relay_monitor_output(mut monitor: TcpStream, on_eof: impl FnOnce() + Send + 'static) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        loop {
+            match monitor.read(&mut buf) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    print!("{}", String::from_utf8_lossy(&buf[0..n]));
+                    io::stdout().flush().unwrap();
+                }
+                Err(_) => break,
+            }
+        }
+        on_eof();
+    })
+}
+
 fn handle_client(stream: TcpStream, devices: Arc<Mutex<Vec<Arc<dyn Device>>>>) {
     // Register this connection with DevLog so log output is broadcast here.
     // Wrap in CrlfWriter so bare \n from log messages renders as CRLF on the
@@ -131,7 +187,7 @@ fn handle_client(stream: TcpStream, devices: Arc<Mutex<Vec<Arc<dyn Device>>>>) {
             let _ = write!(writer, "{}\r\n", line);
         }
     }
-    let _ = write!(writer, "\r\n{} Monitor\r\n> ", crate::machine::emulator_name());
+    let _ = write!(writer, "\r\n{} Monitor\r\n> ", crate::emulator_name::emulator_name());
     let _ = writer.flush();
     
     loop {
