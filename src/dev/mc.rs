@@ -105,21 +105,24 @@ pub struct MemoryController {
 }
 
 impl MemoryController {
-    /// An IP22/IP24 memory controller.
+    /// An IP22/IP24 memory controller, chip revision C.
     pub fn new(eeprom: Arc<Mutex<Eeprom93c56>>, guinness: bool, ram_sizes: [u32; 4]) -> Self {
-        Self::new_for_profile(eeprom, guinness, ram_sizes, false)
+        Self::new_for_profile(eeprom, guinness, ram_sizes, 3)
     }
 
-    /// `ip28` selects the IP28 decodes: a 24-bit MEMCFG base shift and an MC
-    /// chip revision the IP28 PROM accepts.
+    /// A memory controller of chip revision `mc_rev`: 3 (rev C, the IP22 and
+    /// IP24) or 5 (rev D, the IP28). The revision sets the MEMCFG base shift,
+    /// 22 or 24 (the IP28 PROM's memory sits above the IP22's windows), and
+    /// the SYSID the PROM checks.
     pub fn new_for_profile(
         eeprom: Arc<Mutex<Eeprom93c56>>,
         guinness: bool,
         ram_sizes: [u32; 4],
-        ip28: bool,
+        mc_rev: u32,
     ) -> Self {
-        let base_shift = if ip28 { 24 } else { 22 };
-        let regs = Self::init_registers_for(guinness, base_shift);
+        debug_assert!(matches!(mc_rev, 3 | 5), "no MC revision {mc_rev}");
+        let base_shift = if mc_rev == 5 { 24 } else { 22 };
+        let regs = Self::init_registers_for(guinness, mc_rev);
         let host_freq = crate::platform::get_host_tick_frequency();
         let last_host_ticks = crate::platform::get_host_ticks();
 
@@ -157,7 +160,7 @@ impl MemoryController {
         Self::init_registers_for(guinness, 22)
     }
 
-    fn init_registers_for(guinness: bool, base_shift: u32) -> Vec<u32> {
+    fn init_registers_for(guinness: bool, mc_rev: u32) -> Vec<u32> {
         let mut regs = vec![0; (MC_SIZE / 4) as usize];
 
         // Initialize CPUCTRL0: REFS=2, RFE=1, MUX_HWM=1
@@ -187,13 +190,9 @@ impl MemoryController {
         // IP28 uses. Report 5 there; every other machine keeps the rev C (3)
         // it has always seen. Bit 4 stays set in both — that is the EISA /
         // vino gate, not part of the revision.
-        regs[(REG_SYSID / 4) as usize] = if base_shift == 22 {
-            0x00000013
-        } else {
-            // IP28's chip revision lives in the low nibble; 5 is the lowest
-            // the PROM accepts.
-            0x00000015
-        };
+        // The chip revision lives in the low nibble; 5 is the lowest the IP28
+        // PROM accepts.
+        regs[(REG_SYSID / 4) as usize] = 0x10 | mc_rev;
 
         // Initialize RPSS_DIVIDER: DIV=9, INC=3 (for 33MHz)
         // 33MHz: Divide by 10 (9+1), Increment by 3 -> 300ns per tick
@@ -1377,6 +1376,21 @@ mod tests {
         assert_eq!(gio_arb & 0x400, 0, "fullhouse dual GIO — ONE_GIO clear");
     }
 
+    /// The revision sets the SYSID and the MEMCFG base shift together, so the
+    /// two cannot disagree.
+    #[test]
+    fn mc_derives_shift_and_sysid_from_the_revision() {
+        let eeprom = Arc::new(Mutex::new(Eeprom93c56::new()));
+        for (rev, sysid, shift) in [(3u32, 0x13u32, 22u32), (5, 0x15, 24)] {
+            let mc = MemoryController::new_for_profile(eeprom.clone(), false, [0u32; 4], rev);
+            assert_eq!(mc.read32((MC_BASE + REG_SYSID) as u64).data, sysid, "rev {rev} SYSID");
+            assert_eq!(mc.memcfg_base_shift(), shift, "rev {rev} base shift");
+        }
+        // The profiles' boards say which revision they have.
+        use crate::config::MachineProfile as P;
+        assert_eq!([P::IndyIp24, P::Indigo2Ip22, P::Indigo2Ip28].map(|p| p.board().unwrap().mc_rev), [3, 3, 5]);
+    }
+
     #[test]
     fn test_mc_internal_access() {
         let eeprom = Arc::new(Mutex::new(Eeprom93c56::new()));
@@ -1538,7 +1552,7 @@ mod tests {
     fn ip28_512_mb_banks_probe_and_decode() {
         use crate::ppmem::PpMemory;
         let mc = MemoryController::new_for_profile(
-            Arc::new(Mutex::new(Eeprom93c56::new())), false, [512, 512, 0, 0], true,
+            Arc::new(Mutex::new(Eeprom93c56::new())), false, [512, 512, 0, 0], 5,
         );
         // Real POST probes 0x3f20, then 0x7f20. With BNK clear,
         // the second subbank aliases the first; setting BNK exposes both.

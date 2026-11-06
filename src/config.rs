@@ -614,7 +614,124 @@ pub enum MachineProfile {
     OctaneIp30,
 }
 
+/// Where an Indy, an Indigo2 or an IP28 can have RAM, which is what the memory
+/// map and the low-memory alias follow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RamLayout {
+    /// Low memory at 0x08000000 and high memory at 0x20000000, the IP22 and
+    /// IP24 memory controller's two windows.
+    Split,
+    /// High memory only, from 0x20000000 to `end`: the IP28, whose RAM starts
+    /// there and has nothing at low memory at all.
+    HimemOnly { end: u32 },
+}
+
+/// Everything that differs between the Indy, the Indigo2 and the Indigo2
+/// IMPACT, as data read once when the machine is built. The three share one
+/// machine: the memory controller, the IOC and the HPC3 are the same parts,
+/// told apart by a revision, a board ID and where RAM sits.
+pub struct Ip22Board {
+    /// The Indy: one HPC3, one SCSI controller, no EISA, VINO.
+    pub guinness: bool,
+    /// The memory controller's chip revision: 3 (rev C) or 5 (rev D). The
+    /// MEMCFG base shift (22 or 24) and SYSID derive from it.
+    pub mc_rev: u32,
+    pub ram: RamLayout,
+    /// The bank sizes in MB `validate()` accepts.
+    pub bank_sizes: &'static [u32],
+    /// The PROM: the configured file, else the board's own, else its embedded image.
+    pub prom: fn(&str) -> crate::dev::prom::Prom,
+    /// The HPC3's SYS_ID: chip revision [7:5], board revision [4:1], fullhouse [0].
+    pub ioc_sys_id: u8,
+    /// Seeds the motherboard's serial EEPROM with the Ethernet address, and
+    /// the IP28's defaults, before the PROM reads it; `None` where the address
+    /// lives in the RTC's NVRAM (the Indy).
+    pub eeprom_init: Option<fn(&mut crate::dev::eeprom_93c56::Eeprom93c56, [u8; 6])>,
+    /// CP0 Count in Hz; `[clock] fixed_mhz` overrides it.
+    pub default_count_hz: u64,
+    /// The memory controller's clock as a multiple of the effective Count
+    /// rate, where it is not its own default (the IP28: IRIX times the cycle
+    /// counter with it).
+    pub mc_clock_ratio: Option<u32>,
+}
+
+impl Ip22Board {
+    /// CP0 Count and, where the board sets one, the memory controller's clock,
+    /// in Hz, for `[clock] fixed_mhz` (the Count rate).
+    pub fn clocks(&self, fixed_mhz: Option<f64>) -> (u64, Option<u64>) {
+        let count = fixed_mhz.map_or(self.default_count_hz, |mhz| (mhz * 1_000_000.0) as u64);
+        (count, self.mc_clock_ratio.map(|ratio| u64::from(ratio) * count))
+    }
+}
+
+const IP22_BANK_SIZES: &[u32] = &[0, 8, 16, 32, 64, 128];
+
+fn seed_indigo2_eeprom(eeprom: &mut crate::dev::eeprom_93c56::Eeprom93c56, mac: [u8; 6]) {
+    eeprom.backdoor_set_mac_if_blank(mac);
+}
+
+fn seed_ip28_eeprom(eeprom: &mut crate::dev::eeprom_93c56::Eeprom93c56, mac: [u8; 6]) {
+    let erased = eeprom.initialize_ip28_if_erased();
+    eeprom.backdoor_set_mac_if_blank(mac);
+    if erased {
+        eeprom.update_ip28_checksum();
+    }
+}
+
+static INDY_BOARD: Ip22Board = Ip22Board {
+    guinness: true,
+    mc_rev: 3,
+    ram: RamLayout::Split,
+    bank_sizes: IP22_BANK_SIZES,
+    prom: crate::dev::prom::Prom::from_file_or_embedded,
+    ioc_sys_id: 0x26, // guinness
+    eeprom_init: None,
+    default_count_hz: crate::cpu::mips_core::DEFAULT_COUNT_HZ,
+    mc_clock_ratio: None,
+};
+
+static INDIGO2_BOARD: Ip22Board = Ip22Board {
+    guinness: false,
+    mc_rev: 3,
+    ram: RamLayout::Split,
+    bank_sizes: IP22_BANK_SIZES,
+    prom: crate::dev::prom::Prom::from_file_or_embedded_ip22,
+    ioc_sys_id: 0x11, // board rev 8, fullhouse
+    eeprom_init: Some(seed_indigo2_eeprom),
+    default_count_hz: crate::cpu::mips_core::DEFAULT_COUNT_HZ,
+    mc_clock_ratio: None,
+};
+
+/// An IP28 baseboard must report a board revision of at least 13, or IRIX
+/// warns "CPU baseboard downrev (IP26 not IP28)". IRIX takes the CPU speed
+/// from the PROM's `cpufreq` (a 195 MHz R10000) instead of measuring it: UST
+/// assumes Count at half that, and the cycle counter the MC clock at the CPU
+/// clock, so Count runs at 97.5 MHz and the MC at twice that.
+static IP28_BOARD: Ip22Board = Ip22Board {
+    guinness: false,
+    mc_rev: 5,
+    ram: RamLayout::HimemOnly { end: 0xA000_0000 },
+    bank_sizes: MC_BANK_SIZES,
+    prom: crate::dev::prom::Prom::from_file_or_embedded_ip28,
+    ioc_sys_id: 0x1B, // board rev 13, fullhouse
+    eeprom_init: Some(seed_ip28_eeprom),
+    default_count_hz: 97_500_000,
+    mc_clock_ratio: Some(2),
+};
+
 impl MachineProfile {
+    /// What differs between the machines built on the MC, IOC and HPC3: the
+    /// Indy, the Indigo2 and the Indigo2 IMPACT. `None` for the O2 and the
+    /// Octane, which are other machines.
+    pub fn board(self) -> Option<&'static Ip22Board> {
+        match self {
+            Self::IndyIp24 => Some(&INDY_BOARD),
+            Self::Indigo2Ip22 => Some(&INDIGO2_BOARD),
+            Self::Indigo2Ip28 => Some(&IP28_BOARD),
+            Self::O2Ip32 | Self::OctaneIp30 => None,
+        }
+    }
+
     /// All selectable profiles, in display order. Single source of truth for the
     /// GUI dropdowns (Config tab + New Machine dialog) so they never drift.
     ///
@@ -633,8 +750,7 @@ impl MachineProfile {
         match self {
             Self::OctaneIp30 => &[0, 64, 128, 256, 512, 1024, 2048],
             Self::O2Ip32 => &[0, 32, 64, 128, 256],
-            Self::Indigo2Ip28 => MC_BANK_SIZES,
-            _ => &[0, 8, 16, 32, 64, 128],
+            Self::IndyIp24 | Self::Indigo2Ip22 | Self::Indigo2Ip28 => self.board().expect("an Ip22 board").bank_sizes,
         }
     }
 
@@ -3463,6 +3579,50 @@ mod export_tests {
             assert_eq!(cfg.machine.profile, p);
             assert_eq!(MachineProfile::from_name(p.name()), Ok(p));
         }
+    }
+
+    /// The board data is what the constants scattered through the machine
+    /// said: which board is the Indy, the memory controller revision, where RAM
+    /// sits, the HPC3's SYS_ID and the clocks.
+    #[test]
+    fn board_data_matches_the_constants_it_replaced() {
+        use MachineProfile::*;
+        let b = |p: MachineProfile| p.board().expect("an Ip22 board");
+        for p in [IndyIp24, Indigo2Ip22, Indigo2Ip28] {
+            assert_eq!(b(p).guinness, p.guinness(), "{p:?}");
+            assert_eq!(b(p).mc_rev == 5, p.ip28(), "{p:?}: the IP28 has the rev D memory controller");
+            assert_eq!(matches!(b(p).ram, RamLayout::HimemOnly { .. }), p.ip28(), "{p:?}");
+            assert_eq!(p.bank_sizes(), b(p).bank_sizes);
+            assert_eq!(b(p).eeprom_init.is_some(), !p.guinness(), "{p:?}: the Indy keeps its address in the RTC");
+        }
+        assert_eq!([IndyIp24, Indigo2Ip22, Indigo2Ip28].map(|p| b(p).ioc_sys_id), [0x26, 0x11, 0x1B]);
+        assert_eq!(b(Indigo2Ip28).ram, RamLayout::HimemOnly { end: 0xA000_0000 });
+        assert_eq!([IndyIp24, Indigo2Ip22, Indigo2Ip28].map(|p| b(p).default_count_hz), [33_000_000, 33_000_000, 97_500_000]);
+        assert_eq!(b(IndyIp24).default_count_hz, crate::cpu::mips_core::DEFAULT_COUNT_HZ);
+        assert_eq!([IndyIp24, Indigo2Ip22, Indigo2Ip28].map(|p| b(p).mc_clock_ratio), [None, None, Some(2)]);
+        // The IOC built for a board reports its SYS_ID.
+        for p in [IndyIp24, Indigo2Ip22, Indigo2Ip28] {
+            let ioc = crate::dev::ioc::Ioc::new_for_profile(b(p).guinness, b(p).ioc_sys_id);
+            assert_eq!(crate::traits::BusDevice::read8(&ioc, (crate::dev::ioc::IOC_BASE + crate::dev::ioc::IOC_SYS_ID) as u64).data, b(p).ioc_sys_id, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn board_is_none_for_the_o2_and_octane() {
+        assert!(MachineProfile::O2Ip32.board().is_none() && MachineProfile::OctaneIp30.board().is_none());
+        assert!(MachineProfile::EVERY.iter().filter(|p| p.board().is_some()).count() == 3);
+    }
+
+    /// `[clock] fixed_mhz` sets the Count rate, and the IP28's memory controller
+    /// follows it at twice the rate; the Indy and Indigo2 have no such ratio.
+    #[test]
+    fn ip28_clock_override_scales_the_mc_clock() {
+        let ip28 = MachineProfile::Indigo2Ip28.board().unwrap();
+        assert_eq!(ip28.clocks(None), (97_500_000, Some(195_000_000)));
+        assert_eq!(ip28.clocks(Some(50.0)), (50_000_000, Some(100_000_000)));
+        let indy = MachineProfile::IndyIp24.board().unwrap();
+        assert_eq!(indy.clocks(None), (33_000_000, None));
+        assert_eq!(indy.clocks(Some(50.0)), (50_000_000, None));
     }
 
     /// The IP28's default `[machine] cpu` is the R4400 it cannot have; the

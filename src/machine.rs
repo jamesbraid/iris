@@ -22,7 +22,6 @@ use crate::dev::mc::MemoryController;
 
 /// Count on the IP28's 195 MHz R10000: half the pipeline clock, and what
 /// IRIX assumes there (see where the MC is created).
-const IP28_COUNT_HZ: u64 = 97_500_000;
 use crate::cpu::mips_tlb::MipsTlb;
 use crate::cpu::mips_exec::{MipsExecutor, MipsCpu, MipsCpuConfig, MipsCpuDebugAdapter};
 use crate::gdb_stub::CpuDebug;
@@ -217,7 +216,8 @@ impl Machine {
         let clock_fixed_mhz = cfg.clock.fixed_mhz;
         let cfg_cpu_model = cfg.machine.cpu;
 
-        let guinness = cfg.machine.profile.guinness();
+        let board_spec = cfg.machine.profile.board().expect("the Indy and Indigo2 profiles have a board");
+        let guinness = board_spec.guinness;
 
         // 0. EEPROMs. Real IP22 hardware has two distinct 93-series serial
         // EEPROM chips, not one shared part: a CPU-daughtercard chip wired to
@@ -245,23 +245,19 @@ impl Machine {
         // 1. Create all devices first
         // Memory Controller
         let mc_banks: [u32; 4] = cfg.banks[..4].try_into().expect("the MC has four banks");
-        let mc = MemoryController::new_for_profile(
-            eeprom_mc.clone(), guinness, mc_banks, cfg.machine.profile.ip28());
-        // IP28: IRIX takes the CPU speed from the PROM's `cpufreq` (194, i.e.
-        // a 195 MHz R10000) instead of measuring it, and times with it: UST
-        // assumes Count at half that, and the RPSS cycle counter the MC clock
-        // at the CPU clock (Config.EC is 0, a 1:1 system-clock ratio) over the
-        // divider it programs. The generic 33 MHz Count and 50 MHz MC made
-        // UST run at a third of real time (Quake in slow motion) and the
-        // cycle counter at a quarter.
-        let ip28_count_hz: Option<u64> = if cfg.machine.profile.ip28() {
-            Some(clock_fixed_mhz.map_or(IP28_COUNT_HZ, |mhz| (mhz * 1_000_000.0) as u64))
-        } else {
-            None
-        };
-        if let Some(count_hz) = ip28_count_hz {
+        let mc = MemoryController::new_for_profile(eeprom_mc.clone(), guinness, mc_banks, board_spec.mc_rev);
+        // CP0 Count runs at the board's rate unless `[clock] fixed_mhz` says
+        // otherwise. On the IP28 IRIX takes the CPU speed from the PROM's
+        // `cpufreq` (194, i.e. a 195 MHz R10000) instead of measuring it, and
+        // times with it: UST assumes Count at half that, and the RPSS cycle
+        // counter the MC clock at the CPU clock (Config.EC is 0, a 1:1
+        // system-clock ratio) over the divider it programs. The generic 33 MHz
+        // Count and 50 MHz MC made UST run at a third of real time (Quake in
+        // slow motion) and the cycle counter at a quarter.
+        let (count_hz, mc_hz) = board_spec.clocks(clock_fixed_mhz);
+        if let Some(hz) = mc_hz {
             // The R10000's Count ticks at half the pipeline clock.
-            mc.set_clock_hz(2 * count_hz);
+            mc.set_clock_hz(hz);
         }
 
         // RAM banks sized per config. addr_mask is initialized to mem_size-1;
@@ -275,13 +271,7 @@ impl Machine {
 
         // PROM (1MB at 0x1FC00000). Each profile has its own embedded fallback.
         // Indigo2 also tries its profile's default filename after cfg.prom.
-        let prom = if cfg.machine.profile.ip28() {
-            Prom::from_file_or_embedded_ip28(&cfg.prom)
-        } else if guinness {
-            Prom::from_file_or_embedded(&cfg.prom)
-        } else {
-            Prom::from_file_or_embedded_ip22(&cfg.prom)
-        };
+        let prom = (board_spec.prom)(&cfg.prom);
         let prom_port = prom.get_port();
 
         // Shared atomics — created first so all devices and the display thread use the same Arc.
@@ -297,7 +287,7 @@ impl Machine {
 
         // HPC3 (512KB at 0x1FB80000). The SCC's channels start wired to
         // nothing; each gets its host end below.
-        let ioc = Ioc::new_for_profile(guinness, cfg.machine.profile.ip28());
+        let ioc = Ioc::new_for_profile(guinness, board_spec.ioc_sys_id);
         ioc.ps2().set_layout(cfg.keyboard);
 
         // One sink for both serial paths, so the CI and TCP logs are the same
@@ -373,13 +363,9 @@ impl Machine {
         // `eaddr` slot is still blank — never clobbers a MAC the guest
         // already `setenv`'d (Indy) or that a prior run already saved
         // (Indigo2).
-        if guinness {
-            hpc3.rtc().backdoor_set_mac_if_blank(cfg.network().mac);
-        } else {
-            let mut eeprom = eeprom_hpc3.lock();
-            let initialized = cfg.machine.profile.ip28() && eeprom.initialize_ip28_if_erased();
-            eeprom.backdoor_set_mac_if_blank(cfg.network().mac);
-            if initialized { eeprom.update_ip28_checksum(); }
+        match board_spec.eeprom_init {
+            Some(seed) => seed(&mut eeprom_hpc3.lock(), cfg.network().mac),
+            None => { hpc3.rtc().backdoor_set_mac_if_blank(cfg.network().mac); }
         }
 
         // A DaynaPort is built where the gateway is, by Hpc3; a target that
@@ -552,7 +538,7 @@ impl Machine {
             mc: mc.clone(),
             hpc3: hpc3.clone(),
             prom: prom_port,
-        }, cfg.machine.profile.ip28()));
+        }, board_spec.ram));
 
         // Connect Physical to MC (for VDMA)
         mc.set_phys(phys.clone());
@@ -623,7 +609,7 @@ impl Machine {
         // 5. CPU config + TLB + Executor. The model is a runtime choice, but each
         //    arm below monomorphises its own CPU — no per-model branch on the hot path.
         let sysad: Arc<dyn BusDevice> = phys.clone();
-        let memory = Arc::new(crate::ip22_bus::memory_map(cfg.machine.profile.ip28()));
+        let memory = Arc::new(crate::ip22_bus::memory_map(&board_spec.ram));
         macro_rules! build_cpu { ($cache:ty) => {{
         let cfg = MipsCpuConfig::for_model::<$cache>(memory.clone());
         let tlb = MipsTlb::new(cfg.tlb_entries);
@@ -642,14 +628,10 @@ impl Machine {
             }
         }
 
-        // CP0 Count runs at a fixed frequency: DEFAULT_COUNT_HZ unless the
-        // user overrode it via `[clock] fixed_mhz` or the CLI. Must happen
-        // before the core starts executing.
-        if let Some(hz) = ip28_count_hz {
-            executor.core.set_count_hz(hz);
-        } else if let Some(mhz) = clock_fixed_mhz {
-            executor.core.set_count_hz((mhz * 1_000_000.0) as u64);
-        }
+        // CP0 Count runs at a fixed frequency: the board's unless the user
+        // overrode it via `[clock] fixed_mhz` or the CLI. Must happen before
+        // the core starts executing.
+        executor.core.set_count_hz(count_hz);
 
         // Inject the shared fasttick_count Arc into the executor core before wrapping in MipsCpu.
         // (cycles has no equivalent here — it's inline on MipsCore.hot now.)
