@@ -21,5 +21,5 @@ pub use config::{
 };
 pub use decode::{BarMapping, BarMappingSink, CpuWindow};
 pub use function::{DevFn, PciDma, PciDmaStatus, PciFunction, PciFunctionState};
-pub use host::PciHost;
+pub use host::{BarDevice, BarDevices, ByteOrder, PciHost};
 pub use intx::{BoardIrq, IntxRouting};
