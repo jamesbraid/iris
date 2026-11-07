@@ -60,7 +60,7 @@ use crate::dev::w1::sgi::{self, BoardRecord};
 use crate::dev::ns16550::Ns16550;
 use crate::dev::serial_host::SerialBackend;
 use crate::irq::{InterruptController, IrqLine};
-use crate::pci::{Bar, PciFunction, PciConfig, PciDma, PciDmaStatus, PCI_INTA};
+use crate::pci::{Bar, PciConfig, PciDma, PciDmaStatus, PciFunction, PciPort, PCI_INTA};
 use crate::hptimer::{TimerId, TimerManager, TimerReturn};
 use crate::traits::{BusDevice, Device, MachineEvent, Resettable, Saveable};
 use crate::snapshot::{
@@ -2083,7 +2083,7 @@ struct Shared {
     st: Mutex<St>,
     ps2: Arc<Ps2Controller>,
     eth: Mutex<Option<Arc<dyn Ioc3EthPort>>>,
-    raw_dma: Mutex<Option<Arc<dyn PciDma>>>,
+    port: PciPort,
     /// PCI interrupt pin A: the Ethernet block.
     pin_line: Mutex<Option<IrqLine>>,
     /// The SuperIO line the board wires to a Bridge input.
@@ -2324,7 +2324,7 @@ impl Shared {
     /// both it and the bridge's DMA are in hand.
     fn connect_eth(self: &Arc<Self>) {
         let eth = self.eth.lock().clone();
-        let dma = self.raw_dma.lock().clone();
+        let dma = self.port.dma().cloned();
         if let (Some(e), Some(d)) = (eth, dma) {
             let weak = Arc::downgrade(self);
             e.connect(
@@ -2410,7 +2410,7 @@ impl Ioc3 {
                 st: Mutex::new(St::new(cfg)),
                 ps2,
                 eth: Mutex::new(None),
-                raw_dma: Mutex::new(None),
+                port: PciPort::default(),
                 pin_line: Mutex::new(None),
                 superio_line: Mutex::new(None),
                 heartbeat: OnceLock::new(),
@@ -2731,6 +2731,10 @@ impl PciFunction for Ioc3 {
         self.sh.with_st(parity, |st, c| st.write(a, val, width, c));
     }
 
+    fn port(&self) -> &PciPort {
+        &self.sh.port
+    }
+
     /// The PCI interrupt pin: the Ethernet block's level.
     fn connect_interrupt(&self, line: IrqLine) {
         {
@@ -2742,7 +2746,7 @@ impl PciFunction for Ioc3 {
     }
 
     fn connect_dma(&self, dma: Arc<dyn PciDma>) {
-        *self.sh.raw_dma.lock() = Some(dma.clone());
+        self.sh.port.set_dma(dma.clone());
         self.sh.st.lock().dma = Some(Arc::new(Ioc3Dma::new(dma)));
         self.sh.connect_eth();
     }

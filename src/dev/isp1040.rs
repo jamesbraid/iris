@@ -81,7 +81,7 @@ use parking_lot::{Condvar, Mutex, MutexGuard};
 
 use crate::devlog::LogModule;
 use crate::irq::IrqLine;
-use crate::pci::{Bar, PciFunction, PciConfig, PciDma, PCI_INTA};
+use crate::pci::{Bar, PciConfig, PciDma, PciFunction, PciPort, PCI_INTA};
 use crate::scsi::{scsi_cmd, ScsiBus, ScsiDataLength, ScsiIdentities, ScsiRequest, CDROM_IDENTITY, DISK_IDENTITY};
 use crate::snapshot::{get_field, hex_u16, hex_u32, load_u16_slice, toml_u16, toml_u32, toml_u8, u16_slice_to_toml, u8_slice_to_toml};
 
@@ -567,8 +567,7 @@ pub struct Core {
     /// next command to take `bus`, before it runs: no command can see the
     /// targets as they were. See [`Core::scsi`].
     targets_reset: AtomicBool,
-    dma: OnceLock<Arc<dyn PciDma>>,
-    irq: OnceLock<IrqLine>,
+    port: PciPort,
     /// Which of the Octane's two controllers this is (0 internal, 1
     /// external): the monitor's `scsi`/`cow` address the first,
     /// `scsi1`/`cow1` the second.
@@ -673,8 +672,7 @@ impl Core {
             line_order: Mutex::new(()),
             bus,
             targets_reset: AtomicBool::new(false),
-            dma: OnceLock::new(),
-            irq: OnceLock::new(),
+            port: PciPort::default(),
             index,
             // BAR 0 is the I/O window and BAR 1 its memory-space alias, one
             // register file.
@@ -733,7 +731,7 @@ impl Core {
 
     /// Wire the adapter's interrupt pin to `line` (a level).
     pub fn connect_irq(&self, line: IrqLine) {
-        let _ = self.irq.set(line);
+        self.port.set_irq(line);
         self.sync_irq();
     }
 
@@ -749,7 +747,7 @@ impl Core {
     fn sync_irq(&self) {
         let _order = self.line_order.lock();
         let level = self.st.lock().irq_level();
-        if let Some(l) = self.irq.get() {
+        if let Some(l) = self.port.irq() {
             l.set(level);
         }
     }
@@ -985,7 +983,7 @@ impl Core {
     /// `buf.len()` bytes from bus address `addr`; false (and zeros) if the
     /// fabric refuses any of them.
     fn dma_read(&self, addr: u64, buf: &mut [u8]) -> bool {
-        let ok = Self::dma_ok(addr, buf.len()) && self.dma.get().is_some_and(|d| d.dma_read(addr, buf).is_ok());
+        let ok = Self::dma_ok(addr, buf.len()) && self.port.dma().is_some_and(|d| d.dma_read(addr, buf).is_ok());
         if !ok {
             buf.iter_mut().for_each(|b| *b = 0);
             self.dma_miss(addr, false);
@@ -994,7 +992,7 @@ impl Core {
     }
 
     fn dma_write(&self, addr: u64, data: &[u8]) -> bool {
-        let ok = Self::dma_ok(addr, data.len()) && self.dma.get().is_some_and(|d| d.dma_write(addr, data).is_ok());
+        let ok = Self::dma_ok(addr, data.len()) && self.port.dma().is_some_and(|d| d.dma_write(addr, data).is_ok());
         if !ok {
             self.dma_miss(addr, true);
         }
@@ -2023,12 +2021,12 @@ impl PciFunction for Isp1040 {
         self.write(off, val, width)
     }
 
-    fn connect_interrupt(&self, line: IrqLine) {
-        self.connect_irq(line);
+    fn port(&self) -> &PciPort {
+        &self.port
     }
 
-    fn connect_dma(&self, dma: Arc<dyn PciDma>) {
-        let _ = self.dma.set(dma);
+    fn connect_interrupt(&self, line: IrqLine) {
+        self.connect_irq(line);
     }
 
     fn reset(&self) {

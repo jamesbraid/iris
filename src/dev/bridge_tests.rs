@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::irq::IrqLine;
-use crate::pci::{Bar, PciConfig, PCI_COMMAND_IO, PCI_COMMAND_MEMORY, PCI_INTA};
+use crate::pci::{Bar, PciConfig, PciPort, PCI_COMMAND_IO, PCI_COMMAND_MEMORY, PCI_INTA};
 
 /// HEART stand-in: the interrupt packets it received, in order. A line is
 /// the ISR bit, so `set_line(vector, set)` is a packet.
@@ -99,8 +99,7 @@ const FIXED: u32 = 0x20;
 struct Card {
     cfg: PciConfig,
     regs: Mutex<[u8; 0x1000]>,
-    irq: Mutex<Option<IrqLine>>,
-    dma: Mutex<Option<Arc<dyn PciDma>>>,
+    port: PciPort,
 }
 
 impl Card {
@@ -117,8 +116,7 @@ impl Card {
                 pin,
             ),
             regs: Mutex::new(regs),
-            irq: Mutex::new(None),
-            dma: Mutex::new(None),
+            port: PciPort::default(),
         })
     }
 
@@ -127,11 +125,11 @@ impl Card {
     }
 
     fn raise(&self, level: bool) {
-        self.irq.lock().as_ref().unwrap().set(level);
+        self.port.irq().unwrap().set(level);
     }
 
     fn dma(&self) -> Arc<dyn PciDma> {
-        self.dma.lock().clone().unwrap()
+        self.port.dma().unwrap().clone()
     }
 }
 
@@ -151,12 +149,8 @@ impl PciFunction for Card {
         self.regs.lock()[off as usize..off as usize + width].copy_from_slice(&val.to_le_bytes()[..width]);
     }
 
-    fn connect_interrupt(&self, line: IrqLine) {
-        *self.irq.lock() = Some(line);
-    }
-
-    fn connect_dma(&self, dma: Arc<dyn PciDma>) {
-        *self.dma.lock() = Some(dma);
+    fn port(&self) -> &PciPort {
+        &self.port
     }
 }
 
