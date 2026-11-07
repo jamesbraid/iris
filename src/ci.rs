@@ -20,6 +20,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::location::Location;
 use crate::workstation::{MachineSlot, Workstation};
 use crate::gfx_display::GfxDisplay;
 use crate::dev::serial_host::CiSerialBackend;
@@ -325,46 +326,52 @@ fn cmd_rtc_save(server: &CiServer, args: &Value) -> Response {
     }
 }
 
+/// The drive a command names: `at` is a location, `id` a target id on the
+/// first controller, as scripts have always written it.
+fn drive_arg(m: &dyn Workstation, args: &Value) -> Result<Location, String> {
+    if let Some(at) = args.get("at").and_then(|v| v.as_str()) {
+        return m.topology().resolve(at.parse::<Location>()?);
+    }
+    let id = args.get("id").and_then(|v| v.as_u64()).ok_or("missing 'id' (or 'at') arg")?;
+    u8::try_from(id).ok().and_then(|id| m.legacy_target(id)).ok_or_else(|| format!("no target {id} on this machine"))
+}
+
 fn cmd_cdrom_eject(server: &CiServer, args: &Value) -> Response {
-    let id = match args.get("id").and_then(|v| v.as_u64()) {
-        Some(n) => n as usize,
-        None => return Response::err("cdrom-eject: missing 'id' arg"),
-    };
     let result = server.with_machine_result(|m| {
-        m.disc_changer().ok_or("no CD-ROM controller")?.eject_disc(id)
+        let at = drive_arg(m, args)?;
+        m.eject_disc(&at).map(|disc| (at, disc))
     });
     match result {
-        Ok(path) => Response::data(serde_json::json!({ "id": id, "new_disc": path })),
+        Ok((at, path)) => Response::data(serde_json::json!({ "at": at.to_string(), "new_disc": path })),
         Err(e) => Response::err(format!("cdrom-eject: {}", e)),
     }
 }
 
 fn cmd_cdrom_load(server: &CiServer, args: &Value) -> Response {
-    let id = match args.get("id").and_then(|v| v.as_u64()) {
-        Some(n) => n as usize,
-        None => return Response::err("cdrom-load: missing 'id' arg"),
-    };
     let path = match args.get("path").and_then(|v| v.as_str()) {
         Some(p) => p.to_string(),
         None => return Response::err("cdrom-load: missing 'path' arg"),
     };
     let result = server.with_machine_result(|m| {
-        m.disc_changer().ok_or("no CD-ROM controller")?.load_disc(id, path.clone())
+        let at = drive_arg(m, args)?;
+        m.load_disc(&at, path.clone()).map(|disc| (at, disc))
     });
     match result {
-        Ok(loaded) => Response::data(serde_json::json!({ "id": id, "disc": loaded })),
+        Ok((at, loaded)) => Response::data(serde_json::json!({ "at": at.to_string(), "disc": loaded })),
         Err(e) => Response::err(format!("cdrom-load: {}", e)),
     }
 }
 
-/// Parse a SCSI target selector: absent, null or "all" mean every disk.
-fn scsi_selector(v: Option<&Value>) -> Result<Option<usize>, String> {
+/// Which disks to fold: absent, null or "all" mean every disk, a number is a
+/// target on the first controller, anything else a location.
+fn chd_selector(m: &dyn Workstation, v: Option<&Value>) -> Result<Option<Location>, String> {
     match v {
         None | Some(Value::Null) => Ok(None),
         Some(v) if v.as_str() == Some("all") => Ok(None),
-        Some(v) => match v.as_u64() {
-            Some(n) if n < 8 => Ok(Some(n as usize)),
-            _ => Err(format!("bad scsi id {v} (expected 0-7 or \"all\")")),
+        Some(v) => match (v.as_u64(), v.as_str()) {
+            (Some(n), _) if n < 16 => m.legacy_target(n as u8).map(Some).ok_or_else(|| format!("no target {n} on this machine")),
+            (None, Some(at)) => m.topology().resolve(at.parse::<Location>()?).map(Some),
+            _ => Err(format!("bad disk selector {v} (expected a target id, a location or \"all\")")),
         },
     }
 }
@@ -372,17 +379,17 @@ fn scsi_selector(v: Option<&Value>) -> Result<Option<usize>, String> {
 /// Fold pending CHD diffs into their bases. The guest must be stopped: folding
 /// releases the disk backend, so a running IRIX would lose the drive mid-flight.
 fn cmd_chd_sync(server: &CiServer, args: &Value) -> Response {
-    let only = match scsi_selector(args.get("id")) {
-        Ok(v) => v,
-        Err(e) => return Response::err(e),
-    };
     match server.with_machine(|m| m.cpu_is_running()) {
         Ok(false) => {}
         Ok(true) => return Response::err("CPU is running — stop the guest first \
                               (folding releases the disk backend)"),
         Err(e) => return Response::err(e),
     }
-    match server.with_machine_result(|m| m.sync_chd_disks(only, &mut |_, _, _| {}, &|| false)) {
+    let sync = server.with_machine_result(|m| {
+        let only = chd_selector(m, args.get("id")).map_err(|e| std::io::Error::other(e))?;
+        m.sync_chd_disks(only.as_ref(), &mut |_, _, _| {}, &|| false)
+    });
+    match sync {
         Ok(n) => Response::data(serde_json::json!({ "synced": n })),
         Err(e) => Response::err(e.to_string()),
     }
@@ -393,13 +400,10 @@ fn cmd_quit(server: &CiServer, args: &Value) -> Response {
     // fold is quiesced, mirroring the GUI's "Synchronizing disks…" exit step.
     let mut synced = serde_json::Value::Null;
     if args.get("sync_chd").is_some() {
-        let only = match scsi_selector(args.get("sync_chd")) {
-            Ok(v) => v,
-            Err(e) => return Response::err(e),
-        };
         let r = server.with_machine_result(|m| {
+            let only = chd_selector(m, args.get("sync_chd")).map_err(|e| std::io::Error::other(e))?;
             m.stop();
-            m.sync_chd_disks(only, &mut |_, _, _| {}, &|| false)
+            m.sync_chd_disks(only.as_ref(), &mut |_, _, _| {}, &|| false)
         });
         match r {
             Ok(n) => synced = serde_json::json!(n),
@@ -1257,5 +1261,40 @@ fn cmd_push(args: &Value) -> Response {
             "bytes_transferred": report.bytes_transferred,
         })),
         Err(e) => Response::err(format!("push: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod disk_arg_tests {
+    use super::*;
+    use crate::exit_persistence_tests::Machine;
+    use crate::workstation_tests::with_shared;
+    use serde_json::json;
+
+    /// A bare id and a location name the same drive on the first controller.
+    #[test]
+    fn ci_cdrom_load_by_location_and_by_bare_id() {
+        with_shared(Machine::Indy, |m| {
+            let by_id = drive_arg(m, &json!({ "id": 4 })).unwrap();
+            let by_at = drive_arg(m, &json!({ "at": "hpc3.0.t4" })).unwrap();
+            assert_eq!(by_id, by_at);
+            assert!(drive_arg(m, &json!({})).unwrap_err().contains("missing"));
+            assert!(drive_arg(m, &json!({ "at": "nowhere" })).is_err());
+            assert!(drive_arg(m, &json!({ "id": 300 })).unwrap_err().contains("no target 300"));
+        });
+    }
+
+    /// `all`, absent and null fold everything; a number or a location, one disk.
+    #[test]
+    fn sync_chd_selector_accepts_all_a_number_and_a_location() {
+        with_shared(Machine::Indy, |m| {
+            let sel = |v: Option<Value>| chd_selector(m, v.as_ref()).map(|o| o.map(|l| l.to_string()));
+            assert_eq!(sel(None), Ok(None));
+            assert_eq!(sel(Some(json!("all"))), Ok(None));
+            assert_eq!(sel(Some(json!(null))), Ok(None));
+            assert_eq!(sel(Some(json!(3))), Ok(Some("hpc3.0.t3".to_string())));
+            assert_eq!(sel(Some(json!("hpc3.0.t2"))), Ok(Some("hpc3.0.t2".to_string())));
+            assert!(sel(Some(json!(99))).is_err() && sel(Some(json!(true))).is_err());
+        });
     }
 }

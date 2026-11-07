@@ -17,6 +17,7 @@ use crate::compositor::{Compositor, SwCompositor};
 use crate::gl_compositor::GlCompositor;
 use crate::debug_overlay::DebugOverlay;
 use crate::hptimer::{TimerManager, TimerReturn};
+use crate::location::Location;
 use crate::workstation::DiscChanger;
 use glutin::config::ConfigTemplateBuilder;
 use glutin::context::{ContextApi, ContextAttributesBuilder, GlProfile, NotCurrentContext, PossiblyCurrentContext, Version};
@@ -767,7 +768,7 @@ struct MouseDelta {
 pub struct Ui {
     ps2: Arc<Ps2Controller>,
     display: Arc<dyn GfxDisplay>,
-    discs: Option<Arc<dyn DiscChanger>>,
+    discs: Option<(Location, Arc<dyn DiscChanger>)>,
     window: Arc<Window>,
     window_size: Arc<Mutex<Option<(u32, u32)>>>,
     resize_request: Arc<Mutex<Option<ResizeRequest>>>,
@@ -779,7 +780,7 @@ pub struct Ui {
 }
 
 impl Ui {
-    pub fn new(ps2: Arc<Ps2Controller>, display: Arc<dyn GfxDisplay>, discs: Option<Arc<dyn DiscChanger>>, timer_manager: Arc<TimerManager>, event_loop: &EventLoop<()>, scale: u32, scroll_pixels_per_line: f64, lock_aspect_ratio: bool) -> Self {
+    pub fn new(ps2: Arc<Ps2Controller>, display: Arc<dyn GfxDisplay>, discs: Option<(Location, Arc<dyn DiscChanger>)>, timer_manager: Arc<TimerManager>, event_loop: &EventLoop<()>, scale: u32, scroll_pixels_per_line: f64, lock_aspect_ratio: bool) -> Self {
         // The Indy's default video mode is 1280×1024; open the window at that
         // size (plus the status bar). The renderer snaps to the real resolution
         // via resize() once the PROM/IRIX programs its actual mode, keeping `scale`.
@@ -994,7 +995,7 @@ impl Ui {
         }
     }
 
-    fn handle_keyboard(ps2: &Ps2Controller, display: &dyn GfxDisplay, discs: &Option<Arc<dyn DiscChanger>>,
+    fn handle_keyboard(ps2: &Ps2Controller, display: &dyn GfxDisplay, discs: &Option<(Location, Arc<dyn DiscChanger>)>,
         resize_request: &Mutex<Option<ResizeRequest>>,
         input: KeyEvent, grabbed: &mut bool, rctrl_held: &mut bool, held_keys: &mut Vec<KeyCode>,
         window: &Window)
@@ -1041,9 +1042,8 @@ impl Ui {
 
             // RCtrl+F12: hot-swap CD-ROM disc (open file picker and load into first CD-ROM device)
             if keycode == KeyCode::F12 && pressed && !input.repeat && *rctrl_held {
-                // Find the first CD-ROM device (disc_status only lists CD-ROMs)
-                let cdrom = discs.as_ref()
-                    .and_then(|d| d.disc_status().first().map(|(id, ..)| (*id, d.clone())));
+                // The first CD-ROM drive, which the machine names with its controller.
+                let cdrom = discs.as_ref().and_then(|(at, d)| Some((at.target()? as usize, d.clone())));
 
                 if let Some((id, discs)) = cdrom {
                     // Run the picker on its own thread rather than inline.
@@ -1142,7 +1142,7 @@ impl Ui {
 struct UiApp {
     ps2:         Arc<Ps2Controller>,
     display:     Arc<dyn GfxDisplay>,
-    discs:       Option<Arc<dyn DiscChanger>>,
+    discs:       Option<(Location, Arc<dyn DiscChanger>)>,
     window:      Arc<Window>,
     window_size: Arc<Mutex<Option<(u32, u32)>>>,
     resize_request: Arc<Mutex<Option<ResizeRequest>>>,

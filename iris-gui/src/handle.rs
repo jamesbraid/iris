@@ -782,14 +782,16 @@ fn worker_loop(
             Ok(Cmd::LoadDisc { id, path, remount }) => {
                 match machine.as_ref() {
                     Some(m) => {
-                        match m.disc_changer().ok_or_else(no_cdrom).and_then(|d| d.load_disc(id as usize, path.clone())) {
+                        match m.legacy_target(id).ok_or_else(no_cdrom).and_then(|at| m.load_disc(&at, path.clone())) {
                             Ok(loaded_path) => {
                                 let filename = std::path::Path::new(&loaded_path)
                                     .file_name()
                                     .map(|n| n.to_string_lossy().into_owned())
                                     .unwrap_or_else(|| loaded_path.clone());
                                 let msg = if remount {
-                                    m.remount_cdrom_guest(id);
+                                    if let Some(at) = m.legacy_target(id) {
+                                        m.remount_cdrom_guest(&at);
+                                    }
                                     t!("emu-disc-loaded-remount", id = id, file = &filename)
                                 } else {
                                     t!("emu-disc-loaded", id = id, file = &filename)
@@ -807,7 +809,7 @@ fn worker_loop(
             Ok(Cmd::EjectCdrom { id }) => {
                 match machine.as_ref() {
                     Some(m) => {
-                        match m.disc_changer().ok_or_else(no_cdrom).and_then(|d| d.eject_to_empty(id as usize)) {
+                        match m.legacy_target(id).ok_or_else(no_cdrom).and_then(|at| m.eject_to_empty(&at)) {
                             Ok(()) => {
                                 let _ = evt_tx.send(Evt::Error(t!("emu-disc-ejected", id = id)));
                             }
@@ -822,7 +824,9 @@ fn worker_loop(
             Ok(Cmd::RemountCdrom { id }) => {
                 match machine.as_ref() {
                     Some(m) => {
-                        m.remount_cdrom_guest(id);
+                        if let Some(at) = m.legacy_target(id) {
+                            m.remount_cdrom_guest(&at);
+                        }
                         let _ = evt_tx.send(Evt::Error(t!("emu-remount-sent", id = id)));
                     }
                     None => { let _ = evt_tx.send(Evt::Error(t!("emu-not-running"))); }
