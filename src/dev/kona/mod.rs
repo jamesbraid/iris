@@ -80,6 +80,7 @@ mod tests;
 pub use attach::{FifoLow, HostDma, InterruptPacket, KonaAttach, PacketSender};
 pub use back::pack::{pack_bitmap_row, unpack_bitmap_row, BusFormat, HostFormat, Rgba16};
 pub use back::store::layout::{BufferConfig, Layout, Refusal};
+pub use back::raster::{FillRule, Surface};
 pub use back::store::{PixelStore, WordArray, MAX_WORDS};
 pub use back::{BackendConfig, BoardSet, KonaBackend};
 pub use consts::APERTURE;

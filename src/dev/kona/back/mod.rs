@@ -7,6 +7,7 @@
 //! The token layer, raster stage, pixel store and display come in behind it.
 //!
 //! - `store`: the pixel store and the plane layout inside a pixel's words.
+//! - `raster`: drawing into the store, and the fill rule.
 //! - `pack`: the host and bus pixel formats and their packers.
 //! - `bound`: the most words a pixel's record may take, from the host's own
 //!   budget arithmetic.
@@ -15,6 +16,7 @@
 
 mod bound;
 pub mod pack;
+pub mod raster;
 pub mod store;
 #[cfg(test)]
 mod census;
