@@ -242,14 +242,20 @@ mod tests {
         }
     }
 
-    /// MACE's old swizzle: bytes `^3`, halves `^2`, words as given.
+    /// MACE's lane rule as it was written before Lanes: bytes `^3`, halves
+    /// `^2`, words as given.
     #[test]
     fn word_values_4_matches_mace_lane_swizzle() {
+        let swizzle = |off: u32, width: usize| match width {
+            1 => off ^ 3,
+            2 => off ^ 2,
+            _ => off,
+        };
         for size in [1usize, 2, 4] {
             for off in 0..32u32 {
                 let c = card();
                 Lanes::word_values(4).read(&*c, 0, off, size);
-                let want = crate::dev::mace_pci::MacePci::lane_swizzle(off, size);
+                let want = swizzle(off, size);
                 assert_eq!(c.calls(), vec![(want, size)], "size {size} off {off}");
             }
         }
