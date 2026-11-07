@@ -642,6 +642,7 @@ impl Workstation for Probe {
     fn cpu_is_running(&self) -> bool { self.0.cpu_is_running() }
     fn devices(&self) -> &crate::devices::Devices { self.0.devices() }
     fn disks(&self) -> &crate::disks::Disks { self.0.disks() }
+    fn topology(&self) -> &crate::topology::Topology { self.0.topology() }
     fn control(&self) -> &crate::control::Control { self.0.control() }
     fn control_mut(&mut self) -> &mut crate::control::Control { self.0.control_mut() }
     fn net(&self) -> Option<&crate::guest_net::GuestNet> { self.0.net() }
@@ -743,8 +744,8 @@ fn no_process_exit_bypasses_the_flush() {
     // File (under src/) -> exits allowed in it, and why.
     let allowed: &[(&str, usize, &str)] = &[
         ("workstation.rs", 1, "exit_process itself"),
-        // Machine::new's two startup failures, before a guest has run.
-        ("ip22_machine.rs", 2, "bad SCSI configuration at start-up"),
+        // Machine::new's startup failure to place a device, before a guest has run.
+        ("ip22_machine.rs", 1, "a device that cannot be placed at start-up"),
         // The bare-metal test device ends the run with the guest's exit code.
         ("dev/testdev.rs", 1, "bare-metal test device, a harness only"),
         // Command-line and configuration front ends: nothing is running yet.

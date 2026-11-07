@@ -1,6 +1,7 @@
 use clap::{CommandFactory, FromArgMatches, Parser};
 use serde::{Deserialize, Serialize};
-use crate::location::Location;
+use crate::location::{Hop, Location};
+use crate::topology::Topology;
 use crate::scsi::media::DaynaportOptions;
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
@@ -2409,6 +2410,73 @@ impl MachineConfig {
             }
         }
         Ok(out)
+    }
+
+    /// Transitional (removed with the `[scsi.N]` tables): the typed `[scsi.N]`
+    /// map as placements, a key of 16 + id naming controller 1 and a key
+    /// below 16 using `controller`.
+    pub fn scsi_placements(&self, t: &Topology) -> Result<Vec<Placement>, String> {
+        let mut out = Vec::new();
+        // The map is a HashMap: sorted, so the order is the same every run.
+        let mut keys: Vec<u8> = self.scsi.keys().copied().collect();
+        keys.sort_unstable();
+        for key in keys {
+            let dev = &self.scsi[&key];
+            let (controller, id) = dev.placement(key);
+            let base = t
+                .controller(controller)
+                .ok_or_else(|| format!("{}: this machine has no controller {controller}", scsi_label(controller, id)))?;
+            let mut opts = toml::Table::new();
+            let mut put = |k: &str, v: toml::Value| {
+                opts.insert(k.into(), v);
+            };
+            let device = match dev.kind() {
+                ScsiKind::Disk => {
+                    put("path", dev.path.clone().into());
+                    put("write_cache", dev.write_cache.into());
+                    if dev.overlay {
+                        put("overlay", true.into());
+                    }
+                    if dev.scratch {
+                        put("scratch", true.into());
+                    }
+                    if let Some(mb) = dev.size_mb {
+                        put("size_mb", (mb as i64).into());
+                    }
+                    "hdd"
+                }
+                ScsiKind::Cdrom => {
+                    if !dev.path.is_empty() {
+                        put("path", dev.path.clone().into());
+                    }
+                    if !dev.discs.is_empty() {
+                        put("discs", dev.discs.clone().into());
+                    }
+                    "cdrom"
+                }
+                ScsiKind::Daynaport => {
+                    if let Some(mac) = &dev.mac {
+                        put("mac", mac.clone().into());
+                    }
+                    if let Some(subnet) = &dev.subnet {
+                        put("subnet", subnet.clone().into());
+                    }
+                    "daynaport"
+                }
+            };
+            out.push(Placement { device: device.into(), at: base.join(Hop::t(id)), opts });
+        }
+        Ok(out)
+    }
+
+    /// Transitional: the converted `[scsi.N]` tables, then the `[[<device>]]`
+    /// entries, an explicit entry replacing a converted one at its location.
+    pub fn all_placements(&self, t: &Topology) -> Result<Vec<Placement>, String> {
+        let explicit = self.placements()?;
+        let mut all = self.scsi_placements(t)?;
+        all.retain(|p| !explicit.iter().any(|e| e.at == p.at));
+        all.extend(explicit);
+        Ok(all)
     }
 
     /// Put a device at `at`, replacing the entry of that device type already
