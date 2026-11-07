@@ -8,7 +8,8 @@
 /// the shadow caches for the R4400 and R5000, which also have the functional
 /// ones (`CacheModel`). `$o2` selects the O2's R10000 and R12000 types, whose
 /// secondary caches have 64-byte lines where the others have 128. The R16000's
-/// secondary cache size is a type parameter, so `l2_kb` picks the type here, once.
+/// secondary cache size is a type parameter, so `l2_kb` picks the type here, once;
+/// an R12000 with 8 MB (the Origin 3200's C-brick) has its own.
 #[macro_export]
 macro_rules! with_cpu {
     ($part:expr, $shadow:expr, $o2:expr, $C:ident => $body:expr) => {{
@@ -22,6 +23,7 @@ macro_rules! with_cpu {
             (F::R5000, false, _) => { type $C = full::R5000Cache; $body }
             (F::R10000, _, true) => { type $C = sh::R10000O2ShadowCache; $body }
             (F::R10000, _, false) => { type $C = sh::R10000ShadowCache; $body }
+            (F::R12000, _, false) if $part.l2_kb == 8192 => { type $C = sh::R12000Scache8ShadowCache; $body }
             (F::R12000 | F::R14000, _, true) => { type $C = sh::R12000O2ShadowCache; $body }
             (F::R12000 | F::R14000, _, false) => { type $C = sh::R12000ShadowCache; $body }
             (F::R16000, _, _) if $part.l2_kb == 8192 => { type $C = sh::R16000Scache8ShadowCache; $body }
@@ -37,6 +39,17 @@ mod tests {
     use crate::cpu::parts::{R16000_1000, R16000_700_EARLY, R16000_800, R16000_900};
 
     /// `l2_kb` picks the R16000 type: 4, 8 or 16 MiB of secondary cache.
+    /// The C-brick's 8 MB R12000 gets the 8 MB type, the Octane's 2 MB one the
+    /// 2 MB type, and both keep the R12000's name and PRId.
+    #[test]
+    fn an_r12000_with_8_mb_gets_its_own_cache_type() {
+        for (part, mib) in [(&crate::cpu::parts::R12000_400_CBRICK, 8), (&crate::cpu::parts::R12000_360, 2)] {
+            let (name, bytes) = crate::with_cpu!(part, true, false, C => (<C as CpuModel>::NAME, <C as MipsCache>::L2_SIZE));
+            assert_eq!((name, bytes >> 20), ("R12000", mib), "{}", part.name());
+        }
+        assert_eq!(crate::cpu::parts::R12000_400_CBRICK.prid(), crate::cpu::parts::R12000_360.prid());
+    }
+
     #[test]
     fn an_r16000_part_gets_the_cache_type_of_its_secondary_size() {
         for (part, mib) in [(&R16000_700_EARLY, 4), (&R16000_800, 4), (&R16000_900, 8), (&R16000_1000, 16)] {

@@ -1903,6 +1903,13 @@ pub type R10000ShadowCache =
 pub type R12000ShadowCache =
     ShadowCache<32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0e35, 0x0000_0900, 64, { model::R12000 }>;
 
+/// R12000 3.5 as the Origin 3200's C-brick has it: a 400 MHz part with an 8 MiB
+/// secondary cache (a posted inventory prints revision 3.5 and 8 MB). The
+/// FIR 0x935 and the 128-byte secondary lines are inferred from the printed
+/// revisions and the Octane part, not read from a C-brick.
+pub type R12000Scache8ShadowCache =
+    ShadowCache<32768, 64, 32768, 32, 8388608, 128, true, 0x0000_0e35, 0x0000_0935, 64, { model::R12000 }>;
+
 /// The R16000 with a 4 MB secondary cache, the Tezro's 700 and 800 MHz parts:
 /// the R12000's geometry and programming model with the larger secondary (SS
 /// code 3 in Config) and 128-byte secondary lines (SB: a model choice). The
