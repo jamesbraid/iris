@@ -37,10 +37,26 @@ tables the PROM writes to the network interface are stored and not consulted.
 
 PROM 6.210 reaches the System Maintenance Menu on both machines and reports
 `ALL DIAGS PASSED`: one node with 1 CPU and 512 MB, or two nodes with 2 CPUs
-and 1024 MB. Start System does not boot: the I-brick's root disk is on a Fibre
-Channel adapter and Iris has none. The I-brick's IEEE 1394 controller is also
+and 1024 MB. Start System boots IRIX 6.5.30 from the disk at `[scsi.1]` to a
+serial login on both machines; on the two-node one `hinv` lists two
+processors and 1024 MB. The I-brick's IEEE 1394 controller is
 absent, so the PROM's first diagnostic prints `No 1394 Firewire found on
 BASEIO` and carries on.
+
+## Fibre Channel
+
+The I-brick's disks hang off a QLogic ISP2200 at the base I/O's storage slot
+(`src/dev/isp2200.rs`). The `[scsi.N]` tables attach to its loop as they do to
+the other controllers: `N` below 16 is the loop ID of the port. Each loop ID
+is one port with one LUN, named from the ID (`2100000000000000` plus the ID
+for the port, `2000000000000000` plus the ID for the node), and the adapter
+takes the lowest loop ID no disk uses. Frames, logins, fabrics and
+point-to-point are not modelled; the loop comes up 100 ms after
+initialisation on the adapter's clock. Commands run one at a time, so an
+abort or reset matches the command running and nothing still queued in the
+request ring. Disks are read off the bus as the machine built it: one
+attached or removed later is not announced to the loop. The module comments name every other choice the public drivers
+leave open. The `scsi` and `cow` monitor commands work on the loop's disks.
 
 - No cache coherence runs between the nodes; both see the same host memory.
 - A node numbered other than zero reaches its own memory at its number.
