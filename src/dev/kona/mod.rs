@@ -25,6 +25,7 @@
 //! - `flash`: the flash EEPROM and its programming operation.
 //! - `ident`: widget id, one-wire record, configuration block.
 //! - `job`: the back end's interface.
+//! - `back`: the back end that draws and displays.
 //! - `handle`: what a back end's display thread may call on the front end.
 //!
 //! # Threads
@@ -61,6 +62,7 @@
 #![warn(dead_code, unused_imports)]
 
 mod attach;
+mod back;
 mod consts;
 mod dma;
 mod flash;
@@ -76,6 +78,7 @@ mod tables;
 mod tests;
 
 pub use attach::{FifoLow, HostDma, InterruptPacket, KonaAttach, PacketSender};
+pub use back::{BackendConfig, BoardSet, KonaBackend};
 pub use consts::APERTURE;
 pub use flash::FLASH_SIZE;
 pub use handle::DisplayHandle;
@@ -708,6 +711,21 @@ impl Device for Kona {
 
     fn get_clock(&self) -> u64 {
         0
+    }
+
+    fn register_commands(&self) -> Vec<(String, String)> {
+        vec![("kona".into(), "InfiniteReality pipe: status|counters (kona help)".into())]
+    }
+
+    fn execute_command(&self, cmd: &str, args: &[&str], mut w: Box<dyn std::io::Write + Send>) -> Result<(), String> {
+        if cmd != "kona" {
+            return Err(format!("unknown kona command: {cmd}"));
+        }
+        match self.with_backend(|b| b.monitor(args, &mut *w)) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("kona: status|counters".into()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 }
 

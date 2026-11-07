@@ -116,6 +116,11 @@ pub trait Backend: Send {
 
     /// Undo `quiesce`.
     fn resume(&mut self) {}
+
+    /// A monitor command `kona ARGS...`; true if it was one. Written to `w`.
+    fn monitor(&mut self, _args: &[&str], _w: &mut dyn std::io::Write) -> std::io::Result<bool> {
+        Ok(false)
+    }
 }
 
 /// The front end as a back end may use it.

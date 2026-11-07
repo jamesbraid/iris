@@ -27,6 +27,10 @@ hashes are given where a change is easiest to understand by reading the commit.
   activity for the driver's watchdog. A reset ends the epoch tickets were made
   in, so stale calls are dropped. `Backend::stop`, `quiesce` and `resume` let it
   join and park its threads.
+- `KonaBackend` is the first piece of the InfiniteReality drawing back end: it
+  takes every job like `NullBackend`, carries the pipe's configuration (raster
+  managers, texture memory per manager, board set, managed area) and answers
+  `kona status` and `kona counters`. Nothing draws yet.
 
 ### Boot test before publishing
 

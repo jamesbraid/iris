@@ -494,6 +494,13 @@ guest. `y = 0` is the top display line throughout.
 | `vpro trace <file> [fifo,draw,cpu,dma\|all]` / `vpro trace flush\|off` / `vpro trace` | Annotated trace (`gputrace` builds; also `IRIS_ODSY_TRACE=<file>` from power-on): `FIFO` lines are command words as the parser completes them, named, with their operands as words and as floats where the word carries floats, plus copy rects, pattern and matrix loads, image boxes and bursts, queries and unknown words; `DRAW` lines each assembled primitive sent to the raster unit (`draw TRIANGLES n=3 ctx=1 textured depth queued cost 96`) and each clear; `CPU` lines every bus access that is not a command store, repeats collapsed; `DMA` lines the page-table descriptors. `flush` writes the buffer out (it is written at most twice a second otherwise); alone, the trace's state |
 | `vpro rec <file>` / `vpro rec mark\|off` / `vpro rec` | Replayable recording (record.rs; also `IRIS_ODSY_REC=<file>` from power-on): every bus store and load and the DMA reads, gzip. A start, a `mark` and `off` wait for the board to go idle and write the memory hash (`vpro hash`) into the file, so a replay can check board memory at those points; a recording started mid-session cannot reproduce the live memory and says so when replayed, but still replays deterministically. Alone, the recording's state. Replay: `VPRO_REPLAY=<file> cargo test --release --lib odyssey::golden::replay -- --nocapture` (see `src/dev/odyssey/testdata/README.md`) |
 
+**InfiniteReality (KONA)**
+
+| Command | Description |
+|---|---|
+| `kona status` | The pipe the back end draws for: raster managers, texture memory per manager, board set, managed area, the most words a pixel's record may take, whether the display handle is attached |
+| `kona counters` | Jobs the back end has taken, by kind |
+
 `iris-ci screenshot` captures the composed screen from any board, also
 headless.
 

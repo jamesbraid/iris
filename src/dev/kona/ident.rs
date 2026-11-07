@@ -99,6 +99,11 @@ impl KonaConfig {
         (self.host_widget as u32) << 22
     }
 
+    /// Texture memory on each raster manager's texture board, in bytes.
+    pub fn texture_bytes_per_rm(&self) -> u64 {
+        (TEXTURE_MB as u64) << 20
+    }
+
     fn base(&self) -> u32 {
         16 * self.identity_index as u32
     }
