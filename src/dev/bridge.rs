@@ -53,6 +53,7 @@ use std::sync::{Arc, Weak};
 use parking_lot::{Mutex, RwLock};
 
 use crate::dev::w1;
+use crate::devlog::LogModule;
 use crate::irq::InterruptController;
 use crate::pci::decode::BarRun;
 use crate::pci::{CpuWindow, PciAddr, PciBus, PciDma, PciDmaStatus, PciUpstream, PciWiring, Space};
@@ -111,6 +112,46 @@ pub mod reg {
     pub const RRB_ODD: u32 = 0x288;
     pub const RRB_STATUS: u32 = 0x290;
     pub const RRB_CLEAR: u32 = 0x298;
+}
+
+/// A register's name for the `bridge` log, from its slot base.
+fn reg_name(base: u32) -> String {
+    use reg::*;
+    let name = match base {
+        IDENTIFICATION => "identification",
+        STATUS => "status",
+        ERR_UPPER => "error upper",
+        ERR_LOWER => "error lower",
+        CONTROL => "control",
+        REQUEST_TIMEOUT => "request timeout",
+        INT_DEST_UPPER => "interrupt destination upper",
+        INT_DEST_LOWER => "interrupt destination lower",
+        ERR_CMD_WORD => "error command word",
+        LINK_CONFIG => "link config",
+        TARGET_FLUSH => "target flush",
+        DIRECT_MAP => "direct map",
+        ARBITRATION => "arbitration",
+        NIC => "nic",
+        BUS_TIMEOUT => "bus timeout",
+        PCI_TYPE1_CONFIG => "type 1 config",
+        PCI_ERR_UPPER => "pci error upper",
+        PCI_ERR_LOWER => "pci error lower",
+        INT_STATUS => "interrupt status",
+        INT_ENABLE => "interrupt enable",
+        INT_RESET => "interrupt reset",
+        INT_MODE => "interrupt mode",
+        INT_DEVICE => "interrupt device",
+        HOST_ERR_FIELD => "host error field",
+        RRB_EVEN => "rrb even",
+        RRB_ODD => "rrb odd",
+        RRB_STATUS => "rrb status",
+        RRB_CLEAR => "rrb clear",
+        0x130..=0x168 => return format!("interrupt host {}", (base - 0x130) / 8),
+        0x200..=0x238 => return format!("device {}", (base - 0x200) / 8),
+        0x240..=0x278 => return format!("device {} flush", (base - 0x240) / 8),
+        _ => "",
+    };
+    format!("{base:#05x} {name}")
 }
 
 /// Window geometry, as offsets in the small window.
@@ -687,6 +728,10 @@ impl Bridge {
     fn update_pin(&self, st: &mut State, p: &mut Packets, pin: usize, level: bool) {
         let was = st.pin_level >> pin & 1 != 0;
         let enabled = st.r(reg::INT_ENABLE) >> pin & 1 != 0;
+        if level != was {
+            crate::dlog!(LogModule::Bridge, "bridge: pin {pin} {}{}", if level { "rose" } else { "fell" },
+                if enabled { "" } else { " (not enabled)" });
+        }
         st.pin_level = (st.pin_level & !(1 << pin)) | ((level as u8) << pin);
         if level && !was && enabled {
             self.send_interrupt(st, p, pin, true);
@@ -717,6 +762,7 @@ impl Bridge {
             log::debug!("bridge: interrupt packet to widget {} address {address:#x} is not HEART's; dropped", dest.widget);
             return;
         }
+        crate::dlog!(LogModule::Bridge, "bridge: pin {pin} {} HEART vector {}", if set { "sets" } else { "clears" }, host & INT_HOST_FIELD);
         p.push(((host & INT_HOST_FIELD) as u8, set));
     }
 
@@ -1172,6 +1218,9 @@ impl Bridge {
                 },
             };
             if !good {
+                crate::dlog!(LogModule::Bridge, "bridge: slot {slot} {} of {step} bytes at PCI {a:#x} reached no memory ({})",
+                    if matches!(buf, DmaBuf::Read(_)) { "read" } else { "write" },
+                    match target { None => "no translation".to_string(), Some((x, _, w)) => format!("widget {w:#x} address {x:#x}") });
                 ok = false;
                 if let DmaBuf::Read(b) = &mut buf {
                     b[done..done + step].fill(0);
@@ -1269,7 +1318,12 @@ impl Bridge {
     /// is a bus error.
     fn read(&self, off: u32, size: usize) -> Option<u64> {
         match off {
-            0..=0xffff => self.reg_read(off, size),
+            0..=0xffff => {
+                let v = self.reg_read(off, size);
+                crate::dlog!(LogModule::Bridge, "bridge: read {} /{size} -> {}", reg_name(off & !7),
+                    v.map_or("bus error".to_string(), |v| format!("{v:#x}")));
+                v
+            }
             ATE_BASE..=0x10fff => self.ate_read(off - ATE_BASE, size),
             ATE_LOW_BASE..=0x11fff => self.ate_low_read(off - ATE_LOW_BASE, size),
             _ if (CFG0_BASE..CFG0_BASE + CFG0_SIZE).contains(&off) => self.cfg_read(off - CFG0_BASE, size),
@@ -1288,8 +1342,14 @@ impl Bridge {
     /// As [`Bridge::read`]; the result is a bus status.
     fn write(&self, off: u32, size: usize, val: u64) -> u32 {
         let ok = match off {
-            0..=0xffff => self.reg_write(off, size, val),
-            ATE_BASE..=0x10fff => self.ate_write(off - ATE_BASE, size, val),
+            0..=0xffff => {
+                crate::dlog!(LogModule::Bridge, "bridge: write {} /{size} {val:#x}", reg_name(off & !7));
+                self.reg_write(off, size, val)
+            }
+            ATE_BASE..=0x10fff => {
+                crate::dlog!(LogModule::Bridge, "bridge: write translation entry {} /{size} {val:#x}", (off - ATE_BASE) / 8);
+                self.ate_write(off - ATE_BASE, size, val)
+            }
             _ if (CFG0_BASE..CFG0_BASE + CFG0_SIZE).contains(&off) => self.cfg_write(off - CFG0_BASE, size, val),
             _ if (SSRAM_BASE..SSRAM_BASE + SSRAM_SIZE).contains(&off) => true,
             _ if (DEVICE_WINDOW_BASE..FLASH_BASE).contains(&off) => match window_slot(off) {
