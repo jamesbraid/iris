@@ -4,4 +4,7 @@
 
 mod consts;
 mod frame;
+mod ident;
 mod tables;
+
+pub use ident::KonaConfig;
