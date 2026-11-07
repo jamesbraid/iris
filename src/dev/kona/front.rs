@@ -46,6 +46,14 @@ pub(super) struct Front {
     pub loader_328: u32,
     /// A video cause has been delivered and not yet acknowledged.
     video_delivered: bool,
+    /// The missing interrupt destination has been logged for the video
+    /// cause: it rises every frame, so it says so once.
+    video_unrouted_logged: bool,
+    /// Which run of the board a back end's call belongs to. A reset moves it
+    /// on, so a call a back end thread made from before the reset (a retrace
+    /// it completes, a frame it announces) is dropped instead of raising a
+    /// cause the reset cleared. Not itself reset.
+    epoch: u64,
 }
 
 impl Front {
@@ -74,6 +82,8 @@ impl Front {
             loader_3b0: 0,
             loader_328: 0,
             video_delivered: false,
+            video_unrouted_logged: false,
+            epoch: 0,
         }
     }
 
@@ -100,6 +110,17 @@ impl Front {
         self.loader_3b0 = 0;
         self.loader_328 = 0;
         self.video_delivered = false;
+        self.video_unrouted_logged = false;
+    }
+
+    /// The current epoch: a ticket made now is good until the next reset.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Start a new epoch, so calls carrying an older one are dropped.
+    pub fn advance_epoch(&mut self) {
+        self.epoch += 1;
     }
 
     /// The map RAM's entry count: `N << 15` with `N` from the probe
@@ -166,6 +187,15 @@ impl Front {
     /// Deliver the video cause once, if the driver enabled it.
     pub fn video_deliver(&mut self) -> Option<InterruptPacket> {
         if self.int_cause & self.int_enable & CAUSE_VIDEO != 0 && !self.video_delivered {
+            // Checked here, not left to `raise_vector`, which logs every call:
+            // the video cause rises each frame and logs once.
+            if self.int_dest_upper == 0 && self.int_dest_lower == 0 {
+                if !self.video_unrouted_logged {
+                    self.video_unrouted_logged = true;
+                    crate::dlog!(LogModule::Kona, "kona: video interrupt with no destination programmed; no packet sent");
+                }
+                return None;
+            }
             let p = self.raise_vector(true);
             self.video_delivered = p.is_some();
             return p;
@@ -177,6 +207,25 @@ impl Front {
     /// tag, and the video cause rises.
     pub fn retrace(&mut self, tag: u32) -> Option<InterruptPacket> {
         self.retrace_tag = tag;
+        self.int_cause |= CAUSE_VIDEO;
+        self.video_deliver()
+    }
+
+    /// A retrace the back end counted in `epoch`: as `retrace`, unless a
+    /// reset has begun a later epoch.
+    pub fn retrace_in(&mut self, epoch: u64, tag: u32) -> Option<InterruptPacket> {
+        if epoch != self.epoch {
+            return None;
+        }
+        self.retrace(tag)
+    }
+
+    /// A frame the display announced in `epoch`: the video cause rises, with
+    /// no tag, unless a reset has begun a later epoch.
+    pub fn video_frame(&mut self, epoch: u64) -> Option<InterruptPacket> {
+        if epoch != self.epoch {
+            return None;
+        }
         self.int_cause |= CAUSE_VIDEO;
         self.video_deliver()
     }

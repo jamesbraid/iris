@@ -25,6 +25,7 @@
 //! - `flash`: the flash EEPROM and its programming operation.
 //! - `ident`: widget id, one-wire record, configuration block.
 //! - `job`: the back end's interface.
+//! - `handle`: what a back end's display thread may call on the front end.
 //!
 //! # Threads
 //!
@@ -65,6 +66,7 @@ mod dma;
 mod flash;
 mod frame;
 mod front;
+mod handle;
 mod ident;
 mod job;
 mod pipe;
@@ -76,6 +78,7 @@ mod tests;
 pub use attach::{FifoLow, HostDma, InterruptPacket, KonaAttach, PacketSender};
 pub use consts::APERTURE;
 pub use flash::FLASH_SIZE;
+pub use handle::DisplayHandle;
 pub use ident::KonaConfig;
 pub use job::{Backend, BackPort, ContextEvent, Grammar, Job, NullBackend, Reply};
 pub use pipe::LoadSection;
@@ -105,7 +108,9 @@ struct Pipe {
 }
 
 struct Shared {
-    host: Host,
+    /// Its own `Arc` so a back end's display thread can hold it weakly: the
+    /// register file does not own the back end, the pipe slot does.
+    host: Arc<Host>,
     /// The Host Interface Processor's state, or None while someone has it
     /// out (`Shared::pipe`). The mutex is held for an instant to take it or
     /// put it back, never across work.
@@ -335,14 +340,14 @@ impl KonaBuilder {
         };
         let mut front = Front::new(&self.cfg);
         front.probe_value = self.probe;
-        let host = Host {
+        let host = Arc::new(Host {
             front: Mutex::new(front),
             attach: self.attach,
             held_words: Default::default(),
             reasons_waiting: Default::default(),
             list_running: Default::default(),
             activity: Default::default(),
-        };
+        });
         // SAFETY: a zeroed GFifo is an empty one (`GFifo::new`); built in
         // place because the ring is too big for the stack.
         let ring: Box<Ring> = unsafe { Box::new_zeroed().assume_init() };
@@ -620,6 +625,9 @@ impl Kona {
         {
             let mut pipe = s.pipe_wait();
             pipe.core.reset();
+            // A new epoch before the back end cancels its tickets, so a call
+            // a thread of its made in the old one is dropped.
+            s.host.front.lock().advance_epoch();
             pipe.backend.reset();
             s.publish(&pipe.core);
         }
@@ -640,6 +648,7 @@ impl Device for Kona {
             return;
         }
         let s = self.shared.clone();
+        s.pipe_wait().backend.attach(DisplayHandle::new(&s.host));
         s.exit.store(false, SeqCst);
         s.running.store(true, SeqCst);
         *t = Some(

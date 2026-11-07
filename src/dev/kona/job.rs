@@ -13,6 +13,7 @@
 //! pipe's address space for its own DMA.
 
 use super::attach::HostDma;
+use super::handle::DisplayHandle;
 use super::pipe::Core;
 
 /// Which grammar a command belongs to; selectors repeat between them.
@@ -91,7 +92,13 @@ pub enum Reply {
 pub trait Backend: Send {
     fn job(&mut self, port: &mut BackPort<'_>, job: Job<'_>) -> Reply;
 
-    /// The board was reset.
+    /// The board is starting; no thread of the board's runs yet. A back end
+    /// with threads of its own spawns them here and keeps the handle for the
+    /// display thread. Called again after each `stop`.
+    fn attach(&mut self, _handle: DisplayHandle) {}
+
+    /// The board was reset. Cancel pending tickets: the front end has begun a
+    /// new epoch and drops calls made in the old one.
     fn reset(&mut self) {}
 }
 

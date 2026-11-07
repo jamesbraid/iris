@@ -22,6 +22,10 @@ hashes are given where a change is easiest to understand by reading the commit.
   `GFifo` (a full ring answers the bus busy), command framing for the
   textport, kernel and GL grammars, DMA and display-list memory. Drawing is
   behind a typed `Backend` job interface; no machine instantiates the board yet.
+- A back end can run a display thread: `Backend::attach` hands it a
+  `DisplayHandle` to complete retraces, raise the video interrupt and mark
+  activity for the driver's watchdog. A reset ends the epoch tickets were made
+  in, so stale calls are dropped.
 
 ### Boot test before publishing
 

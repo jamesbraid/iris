@@ -92,6 +92,29 @@ infers. Variable runs the front end can size (colour map, gamma, cursor, video,
 EEPROM, list-call pairs, texture table) it takes itself; a run the back end must
 size is asked for by answering `Reply::Data(n)` to the command.
 
+## What a back end's threads may do
+
+`BackPort` works only inside `Backend::job`, on `kona-hip`. A back end with a
+display thread (or a raster thread) gets a `DisplayHandle` instead, from
+`Backend::attach`, which `Device::start` calls before the thread runs and
+again after each stop:
+
+- `retrace_done(epoch, tag)` and `video_frame(epoch)` set the retrace tag and
+  the video cause and send the general-vector packet once, with the register
+  lock dropped, so they cannot deadlock the Host Interface Processor's thread.
+  Both are for the display thread. `video_frame` is the tagless form.
+- `activity()` sets the watchdog latch. The drain loops and the raster thread
+  call it while they work; the display thread must not, or the watchdog could
+  never fire.
+- `epoch()` is what a ticket is made in. A reset begins a new epoch, and a
+  call carrying an older one is dropped, so a thread that was mid-call during
+  a reset cannot raise a cause the reset cleared.
+
+The handle holds the register file (`Host`, its own `Arc`) weakly: the pipe
+slot owns the back end, so a strong reference would be a cycle. With the board
+gone every call is a no-op. With no interrupt destination programmed the video
+cause still sets, and the missing destination is logged once, not per frame.
+
 ## Approximations and open questions
 
 Grades: established (a published manual or measurement), inferred (from

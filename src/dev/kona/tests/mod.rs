@@ -155,6 +155,7 @@ mod host;
 pub(super) use host::{attach, TestHost};
 
 mod bringup;
+mod handle;
 mod config;
 mod eeprom;
 mod dma;
