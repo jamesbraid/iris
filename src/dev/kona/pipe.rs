@@ -287,6 +287,647 @@ impl Core {
         be.job(&mut BackPort { core: self, host: h }, job)
     }
 
+    // ----- the command page ------------------------------------------------
+
+    /// A plain word at the command page's offset 0 or its data slot, as a
+    /// fetched display list's words go through it.
+    pub fn command_word(&mut self, h: &Host, be: &mut dyn Backend, word: u32) {
+        if self.failed.is_none() {
+            self.textport_push(h, be, word);
+        }
+    }
+
+    /// A store to the command page at `offset`.
+    ///
+    /// Offset 0 and the data slot (0xc) both carry a plain word. A store at
+    /// 0xc + 0x20 * t opens token t with the stored value as its first
+    /// argument, the way the alternative X driver module sends its commands.
+    /// Approximated: the decoding is inferred from the stores the senders
+    /// make. What distinguishes offset 0 from 0xc, and what the low address
+    /// bits of a slot store do, are unknown, so slot stores are accepted at
+    /// 0xc only, and any other offset is logged and dropped.
+    pub fn command_page_write(&mut self, h: &Host, be: &mut dyn Backend, offset: u32, value: u32) {
+        if self.failed.is_some() {
+            return;
+        }
+        let token = (offset >> COMMAND_SLOT_SHIFT) & COMMAND_TOKEN_MASK;
+        if offset == 0 || offset == COMMAND_DATA_SLOT {
+            h.activity.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.command_input(h, be, value);
+            return;
+        }
+        if token == 0 || offset & COMMAND_SLOT_MASK != COMMAND_DATA_SLOT {
+            crate::dlog!(LogModule::Kona, "kona: unexpected store of {value:#x} at command page offset {offset:#x}; dropped");
+            return;
+        }
+        if !self.kernel.knows(token) {
+            crate::dlog!(
+                LogModule::Kona,
+                "kona: unknown token {token:#x} stored at command page offset {offset:#x}; value {value:#x} dropped"
+            );
+            return;
+        }
+        if !self.kernel_input {
+            self.user_input();
+        }
+        self.drop_open_commands(token, offset);
+        h.activity.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.kernel_word(h, be, token);
+        self.push_kernel(h, be, value);
+    }
+
+    /// A slot store ends whatever was still collecting words: the partial
+    /// command is dropped, logged, and the new one opens.
+    fn drop_open_commands(&mut self, token: u32, offset: u32) {
+        let at = |what: String| {
+            crate::dlog!(LogModule::Kona, "kona: token {token:#x} stored at command page offset {offset:#x} while {what}; partial command dropped");
+        };
+        if self.kernel.framing() {
+            at(format!("token {:#x} still needs {} words", self.kernel.selector(), self.kernel.missing()));
+            self.kernel.reset();
+        }
+        if self.input.gl.framing() {
+            at(format!("token {:#x} still needs {} words", self.input.gl.selector(), self.input.gl.missing()));
+            self.input.gl.reset();
+        }
+        if self.input.gl_sync_held {
+            at("a held 1 waits (the 1 is dropped)".into());
+            self.input.gl_sync_held = false;
+            self.input.expect_sync = true;
+        }
+        if self.input.level1 != 0 {
+            at("a held 1 1 waits (the words are dropped)".into());
+            self.input.level1 = 0;
+            self.input.expect_sync = true;
+        }
+        match std::mem::replace(&mut self.input.run, Run::None) {
+            Run::None => {}
+            Run::Words { selector, remaining, .. } => {
+                at(format!("token {selector:#x} still needs {remaining} words"));
+            }
+            Run::Video { command, data, .. } => {
+                at(format!("video command {command:#x} awaits its checksum after {} data words", data.len()));
+            }
+            Run::Flash(op) => {
+                let _ = op;
+                at("an EEPROM operation is still taking words".into());
+            }
+            Run::Calls { .. } => at("a list invocation still takes its ranges".into()),
+        }
+    }
+
+    /// A word on the command page. While the kernel's privileged bit is set
+    /// the word belongs to a kernel command and goes to the kernel framer
+    /// alone, leaving any suspended user command untouched. A privileged word
+    /// that opens no kernel command is logged and ignored while a user
+    /// command is suspended; with none suspended it takes the ordinary path.
+    /// Otherwise a suspended command resumes if its context is current again;
+    /// if another context sends first the suspended command is saved with its
+    /// owner, and a context whose saved command waits gets it back before its
+    /// first word.
+    fn command_input(&mut self, h: &Host, be: &mut dyn Backend, word: u32) {
+        if self.swapin.stage != SwapStage::Idle && self.swap_in_word(h, word) {
+            return;
+        }
+        if self.kernel_input {
+            if self.kernel.framing() || self.kernel.knows(word) {
+                self.kernel_word(h, be, word);
+                return;
+            }
+            if self.suspended_owner.is_some() {
+                crate::dlog!(LogModule::Kona, "kona: privileged word {word:#x} opens no kernel command; ignored");
+                return;
+            }
+            self.textport_push(h, be, word);
+            return;
+        }
+        self.user_input();
+        if self.gl_grammar && kernel_only_token(word) && !self.user_command_open() && !self.kernel.framing() {
+            crate::dlog!(LogModule::Kona, "kona: kernel-only token {word:#x} without the privileged bit");
+        }
+        self.textport_push(h, be, word);
+    }
+
+    /// The current context's user input, before its word or slot store is
+    /// taken.
+    fn user_input(&mut self) {
+        if let Some(owner) = self.suspended_owner.take() {
+            if Some(owner) == self.current || !self.user_command_open() {
+                self.kernel_resume();
+            } else {
+                self.input_save(owner);
+            }
+        }
+        if let Some(cur) = self.current {
+            if self.saved[cur].is_some() && !self.user_command_open() {
+                self.input_restore(cur);
+            }
+        }
+    }
+
+    /// A store to the bracket register. Force ends argument collection: a
+    /// kernel command still open is abandoned, logged, and an open user
+    /// command is suspended with the current context. A command the kernel
+    /// framer opened without the privileged bit is a user command (the X
+    /// server's, or a GL client's list call): it is set aside so the kernel's
+    /// packet frames on an idle framer. Privileged, with or without force,
+    /// makes the following words a kernel command's; 0 returns the input to
+    /// user commands.
+    pub fn bracket_write(&mut self, value: u32) {
+        if value & !(BRACKET_FORCE | BRACKET_PRIVILEGED) != 0 {
+            crate::dlog!(LogModule::Kona, "kona: bracket store {value:#x} sets bits the kernel never sets");
+        }
+        if value & BRACKET_FORCE != 0 {
+            if self.kernel.framing() && !self.kernel_privileged && !self.input.kernel_suspended.framing() {
+                self.input.kernel_suspended = self.kernel.clone();
+                self.kernel.reset();
+            } else if self.kernel.framing() {
+                crate::dlog!(LogModule::Kona, "kona: forced store ends kernel command {:#x} short of its words", self.kernel.selector());
+                self.kernel.reset();
+            }
+            if self.suspended_owner.is_none() && self.user_command_open() {
+                self.suspended_owner = self.current;
+            }
+        }
+        self.kernel_input = value & BRACKET_PRIVILEGED != 0;
+    }
+
+    /// Whether a user command is part-way through its words.
+    fn user_command_open(&self) -> bool {
+        let i = &self.input;
+        (self.kernel.framing() && !self.kernel_privileged)
+            || i.kernel_suspended.framing()
+            || i.textport.framing()
+            || i.gl.framing()
+            || i.gl_sync_held
+            || i.level1 != 0
+            || !matches!(i.run, Run::None)
+            || i.bitmap.state != BitmapState::Idle
+    }
+
+    /// Put a user command the kernel framer had open back on it.
+    fn kernel_resume(&mut self) {
+        if !self.input.kernel_suspended.framing() {
+            return;
+        }
+        if self.kernel.framing() {
+            crate::dlog!(
+                LogModule::Kona,
+                "kona: kernel command {:#x} still open when a user command resumes; it ends short of its words",
+                self.kernel.selector()
+            );
+            self.kernel.reset();
+        }
+        self.kernel = std::mem::replace(&mut self.input.kernel_suspended, Port::new(&self.tables.kernel));
+        self.kernel_privileged = false;
+    }
+
+    /// Copy the open user command out to `owner`'s saved slot and leave the
+    /// input idle for the context now sending words: the pipe is inferred to
+    /// keep a context's open command with the context.
+    fn input_save(&mut self, owner: usize) {
+        let fresh = Input::new(self.tables);
+        self.saved[owner] = Some(Box::new(std::mem::replace(&mut self.input, fresh)));
+    }
+
+    fn input_restore(&mut self, owner: usize) {
+        if let Some(v) = self.saved[owner].take() {
+            self.input = *v;
+        }
+    }
+
+    // ----- feeding the framers ---------------------------------------------
+
+    /// A word for the kernel framer. A word that opens a command records
+    /// whether the privileged bit was set, which decides what a forced store
+    /// does to the command if it is still open.
+    fn kernel_word(&mut self, h: &Host, be: &mut dyn Backend, word: u32) {
+        if !self.kernel.framing() {
+            self.kernel_privileged = self.kernel_input;
+        }
+        self.push_kernel(h, be, word);
+    }
+
+    fn push_kernel(&mut self, h: &Host, be: &mut dyn Backend, word: u32) {
+        if self.kernel.push(word) == Step::Packet {
+            let p = self.kernel.packet();
+            self.kernel_packet(h, be, p);
+        }
+    }
+
+    fn push_textport(&mut self, h: &Host, be: &mut dyn Backend, word: u32) {
+        match self.input.textport.push(word) {
+            Step::Packet => {
+                let p = self.input.textport.packet();
+                self.textport_packet(h, be, p);
+            }
+            Step::Unknown => {
+                crate::dlog!(LogModule::Kona, "kona: unsupported textport selector {word:#x}");
+                self.input.expect_sync = true;
+            }
+            Step::Partial => {}
+        }
+    }
+
+    fn push_gl(&mut self, h: &Host, be: &mut dyn Backend, word: u32) {
+        if self.input.gl.push(word) == Step::Packet {
+            let p = self.input.gl.packet();
+            let packed = self.input.gl_token_high;
+            let reply = self.job(h, be, Job::Command { grammar: Grammar::Gl, selector: p.selector, args: p.args(), packed, handled: false });
+            self.open_run(Grammar::Gl, &p, reply);
+            // Known runs of the GL grammar.
+            if p.selector == CMD_GL_TEX_TABLE && reply == Reply::Done {
+                self.start_words(Grammar::Gl, &p, GL_TEX_TABLE_WORDS);
+            }
+        }
+    }
+
+    pub fn push_dma_fifo(&mut self, h: &Host, be: &mut dyn Backend, word: u32) {
+        match self.dma_fifo.push(word) {
+            Step::Packet => {
+                let p = self.dma_fifo.packet();
+                match p.selector {
+                    CMD_DMA_PACKET | CMD_DMA_LIST_WRITE | CMD_DMA_POOL => self.dma_command(h, be, p.selector, p.args()),
+                    _ => {
+                        // The kernel FIFO table's other selectors belong to
+                        // other mechanisms (the display-mode set, select feed):
+                        // framed so the port stays in step, not modelled.
+                        crate::dlog!(LogModule::Kona, "kona: dma fifo selector {:#05x} (argc {}) framed, not modelled", p.selector, p.argc);
+                    }
+                }
+            }
+            Step::Unknown => {
+                crate::dlog!(LogModule::Kona, "kona: dma fifo word {word:#010x} is not a selector the port frames; dropped");
+            }
+            Step::Partial => {}
+        }
+    }
+
+    /// The reply of a job that may want data words behind its command.
+    fn open_run(&mut self, grammar: Grammar, p: &Packet, reply: Reply) {
+        if let Reply::Data(n) = reply {
+            self.start_words(grammar, p, n);
+        }
+    }
+
+    fn start_words(&mut self, grammar: Grammar, p: &Packet, n: u32) {
+        if n == 0 {
+            return;
+        }
+        self.input.run = Run::Words {
+            grammar,
+            selector: p.selector,
+            args: p.args().to_vec(),
+            words: Vec::with_capacity((n as usize).min(1 << 16)),
+            remaining: n,
+        };
+    }
+
+    /// A word while a run takes its words.
+    fn run_word(&mut self, h: &Host, be: &mut dyn Backend, word: u32) {
+        match &mut self.input.run {
+            Run::None => unreachable!("run_word with no run open"),
+            Run::Words { words, remaining, .. } => {
+                words.push(word);
+                *remaining -= 1;
+                if *remaining == 0 {
+                    let Run::Words { grammar, selector, args, words, .. } = std::mem::replace(&mut self.input.run, Run::None) else {
+                        unreachable!()
+                    };
+                    let r = self.job(h, be, Job::Data { grammar, selector, args: &args, words: &words });
+                    debug_assert!(r != Reply::Unclaimed);
+                }
+            }
+            Run::Video { command, data, sum } => {
+                let known = super::tables::VIDEO.get(*command as usize).copied().flatten();
+                let done = match known {
+                    Some(n) => data.len() == n as usize,
+                    None => word == command.wrapping_add(*sum),
+                };
+                if done {
+                    let (command, data, expect) = (*command, std::mem::take(data), command.wrapping_add(*sum));
+                    self.input.run = Run::None;
+                    self.video_complete(h, be, command, &data, word, expect);
+                    return;
+                }
+                if known.is_none() && data.len() + 1 == VIDEO_SEARCH_MAX_WORDS {
+                    crate::dlog!(
+                        LogModule::Kona,
+                        "kona: video command {command:#x} has no checksum within {VIDEO_SEARCH_MAX_WORDS} data words; closed, nothing posted"
+                    );
+                    self.input.run = Run::None;
+                    return;
+                }
+                data.push(word);
+                *sum = sum.wrapping_add(word);
+            }
+            Run::Flash(op) => {
+                let action = op.word(&mut self.flash, word);
+                if !op.open() {
+                    self.input.run = Run::None;
+                }
+                self.flash_action(h, action);
+            }
+            Run::Calls { token, need, words } => {
+                words.push(word);
+                if words.len() == *need {
+                    let (token, words) = (*token, std::mem::take(words));
+                    self.input.run = Run::None;
+                    self.dma_invoke(h, be, token == CMD_LIST_CALLS_POOL, &words);
+                }
+            }
+        }
+    }
+
+    fn video_complete(&mut self, h: &Host, be: &mut dyn Backend, command: u32, data: &[u32], checksum: u32, expect: u32) {
+        if checksum != expect {
+            crate::dlog!(LogModule::Kona, "kona: video command {command:#x} checksum {checksum:#x} is not {expect:#x}; dropped");
+            return;
+        }
+        if command as usize >= super::tables::VIDEO.len() {
+            crate::dlog!(LogModule::Kona, "kona: unmodelled video command {command:#x}; consumed, nothing posted");
+            return;
+        }
+        self.job(h, be, Job::Video { command, data });
+    }
+
+    // ----- the textport and its neighbours ---------------------------------
+
+    /// Whether a word opens a GL command, and its selector.
+    ///
+    /// Once the page speaks the GL grammar, the selector is the word's low 16
+    /// bits: the byte and short attribute forms put data in the top half, and
+    /// no form read uses bits 0 to 15 for data (that no selector is wider
+    /// than 16 bits is inferred). Before the first
+    /// context activation only the whole words of `gl_token_early` open one.
+    fn gl_token_word(&self, word: u32) -> Option<u32> {
+        let low = word & 0xffff;
+        if !self.gl_grammar && (word != low || !gl_token_early(low)) {
+            return None;
+        }
+        self.tables.gl.get(low).map(|_| low)
+    }
+
+    fn gl_open(&mut self, h: &Host, be: &mut dyn Backend, word: u32, selector: u32) {
+        self.input.gl_token_high = word & 0xffff_0000;
+        self.push_gl(h, be, selector);
+    }
+
+    /// The textport's own bulk-transfer framing, layered in front of the
+    /// generic framer: strip the wire protocol's leading sync word, then
+    /// either forward a word to the framers or, mid bitmap blit (command 0xa,
+    /// excluded from the selector table for exactly this reason), accumulate
+    /// it into the header or payload.
+    ///
+    /// The GL client's commands 0x1 to 0xa and 0xc have the numbers of
+    /// textport commands, and a textport command always follows the sync
+    /// word, so a GL command meets a textport number only in the word after
+    /// a sync word. How the pipe tells the grammars apart is unknown.
+    /// Approximated:
+    /// before the first context activation the page speaks only the textport
+    /// grammar, and a bare word opens a GL command only when it is a whole
+    /// selector of `gl_token_early`. After it, every word between packets
+    /// whose low 16 bits are a GL selector opens that command, and a 1 is
+    /// held until the next word: a textport command makes it the sync word,
+    /// anything else makes it the buffer configuration with that word first.
+    ///
+    /// A level-1 (overlay) buffer configuration is told apart from the
+    /// textport's command 1 by looking two words further on: while a context
+    /// is current, `1 1 a b` is the configuration `1 a b ...` only when b is
+    /// 0, 2, 4 or 8, the index sizes the overlay visuals carry. Approximated;
+    /// the rule misreads a buffer configuration whose level is a textport
+    /// command number and takes a stray word whose low half is a GL selector
+    /// as that command.
+    fn textport_push(&mut self, h: &Host, be: &mut dyn Backend, word: u32) {
+        if !matches!(self.input.run, Run::None) {
+            self.run_word(h, be, word);
+            return;
+        }
+        // Kernel commands only start where a textport command could, between
+        // packets, so the framings never interleave.
+        if self.kernel.framing() {
+            self.push_kernel(h, be, word);
+            return;
+        }
+        if self.input.gl.framing() {
+            self.push_gl(h, be, word);
+            return;
+        }
+        if self.input.expect_sync {
+            if self.gl_grammar && word == TEXTPORT_SYNC_WORD {
+                self.input.gl_sync_held = true;
+                self.input.expect_sync = false;
+                return;
+            }
+            if word != TEXTPORT_SYNC_WORD && self.kernel.knows(word) {
+                self.kernel_word(h, be, word);
+                return;
+            }
+            if let Some(selector) = self.gl_token_word(word) {
+                self.gl_open(h, be, word, selector);
+                return;
+            }
+            if word != TEXTPORT_SYNC_WORD {
+                // Among these are the words of a command whose token has no
+                // length here: they arrive one by one as fresh words.
+                crate::dlog!(LogModule::Kona, "kona: textport expected a sync word, got {word:#x}");
+                return;
+            }
+            self.input.expect_sync = false;
+            return;
+        }
+        if self.input.level1 == 1 {
+            self.input.level1_arg = word;
+            self.input.level1 = 2;
+            return;
+        }
+        if self.input.level1 == 2 {
+            self.input.level1 = 0;
+            let arg = self.input.level1_arg;
+            if !matches!(word, 0 | 2 | 4 | 8) {
+                // Textport command 1 and its argument, then the word again.
+                self.push_textport(h, be, CMD_GL_BUFFER_CONFIG);
+                self.push_textport(h, be, arg);
+                self.textport_push(h, be, word);
+                return;
+            }
+            self.input.expect_sync = true;
+            self.input.gl_token_high = 0;
+            for w in [CMD_GL_BUFFER_CONFIG, 1, arg, word] {
+                self.push_gl(h, be, w);
+            }
+            return;
+        }
+        if self.input.gl_sync_held {
+            self.input.gl_sync_held = false;
+            if word == 1 && self.current.is_some() {
+                self.input.level1 = 1;
+                return;
+            }
+            if !self.textport_selector_known(word) {
+                self.input.expect_sync = true;
+                self.input.gl_token_high = 0;
+                self.push_gl(h, be, CMD_GL_BUFFER_CONFIG);
+                self.push_gl(h, be, word);
+                return;
+            }
+        }
+        match self.input.bitmap.state {
+            // The bitmap selector only starts a blit between packets: a word
+            // equal to it is also a valid argument of other selectors.
+            BitmapState::Idle => {
+                if !self.input.textport.framing() && word == BITMAP_SELECTOR {
+                    self.input.bitmap = Bitmap { state: BitmapState::Header, ..Bitmap::idle() };
+                    return;
+                }
+                self.push_textport(h, be, word);
+            }
+            BitmapState::Header => {
+                self.input.bitmap.header.push(word);
+                if self.input.bitmap.header.len() < BITMAP_HEADER_WORDS {
+                    return;
+                }
+                // h0 and h1 are the width and height; h2 to h5 the x and y
+                // origin and advance.
+                let (w, hgt) = (self.input.bitmap.header[0] as u64, self.input.bitmap.header[1] as u64);
+                let expected = (w * hgt).div_ceil(32);
+                if expected == 0 {
+                    self.input.bitmap = Bitmap::idle();
+                    self.input.expect_sync = true;
+                    return;
+                }
+                if expected > BITMAP_MAX_PAYLOAD_WORDS {
+                    crate::dlog!(LogModule::Kona, "kona: bitmap blit {w}x{hgt} exceeds this model's payload bound; dropping");
+                    self.input.bitmap = Bitmap::idle();
+                    self.input.expect_sync = true;
+                    return;
+                }
+                self.input.bitmap.expected = expected as usize;
+                self.input.bitmap.state = BitmapState::Payload;
+            }
+            BitmapState::Payload => {
+                self.input.bitmap.payload.push(word);
+                if self.input.bitmap.payload.len() < self.input.bitmap.expected {
+                    return;
+                }
+                let b = std::mem::replace(&mut self.input.bitmap, Bitmap::idle());
+                self.job(h, be, Job::Bitmap { header: &b.header, payload: &b.payload });
+                self.input.expect_sync = true;
+            }
+        }
+    }
+
+    /// A word that can follow the textport's sync word as its command.
+    fn textport_selector_known(&self, word: u32) -> bool {
+        word == BITMAP_SELECTOR || self.tables.textport.get(word).is_some()
+    }
+
+    fn textport_packet(&mut self, h: &Host, be: &mut dyn Backend, p: Packet) {
+        if self.failed.is_some() {
+            return;
+        }
+        match p.selector {
+            // Sync probe.
+            0x9 => h.mailbox_reply(&[SYNC_PROBE_REPLY]),
+            // Graphics info: width and height are the model's managed area;
+            // the rest of the reply is approximated zero.
+            0xc => h.mailbox_reply(&[0, 0, 0, self.managed.0, self.managed.1]),
+            _ => {
+                self.job(h, be, Job::Command { grammar: Grammar::Textport, selector: p.selector, args: p.args(), packed: 0, handled: false });
+            }
+        }
+        self.input.expect_sync = true;
+    }
+
+    // ----- the kernel's commands -------------------------------------------
+
+    fn kernel_packet(&mut self, h: &Host, be: &mut dyn Backend, p: Packet) {
+        if self.failed.is_some() {
+            return;
+        }
+        let a = p.args();
+        let mut handled = true;
+        match p.selector {
+            CMD_REASON_PAGE => self.register_reason_page(h, a[0], a[1]),
+            CMD_POST_REASON => {
+                // The destroy sends 0x103 only while its context is still
+                // the one the board holds; no context identifier accompanies
+                // it. The back end releases that window.
+                if a[0] == 0x103 {
+                    if let Some(slot) = self.current {
+                        self.job(h, be, Job::Context(ContextEvent::WindowReleased { slot }));
+                    }
+                }
+                self.post_reason(h, p.selector, &[a[0]]);
+            }
+            CMD_CHECK_PIPE => self.post_reason(h, p.selector, &[a[0]]),
+            CMD_CONTEXT_DEACTIVATE => self.context_deactivate(h, be, a[0]),
+            CMD_RETURN_PAGE => self.register_return_page(h, a[0], a[1]),
+            CMD_GET_CONFIG => {
+                let block = ident::config_block(&self.cfg, self.managed.0, self.managed.1);
+                self.post_return(h, p.selector, ident::CONFIG_OFFSET, &block);
+            }
+            CMD_EEPROM => {
+                let mut op = FlashOp::default();
+                let action = op.begin(&mut self.flash, a[0]);
+                if op.open() {
+                    self.input.run = Run::Flash(op);
+                }
+                self.flash_action(h, action);
+            }
+            CMD_X_INIT => {
+                // Echo the request: the model can never report a mode other
+                // than the one asked for, where a real pipe presumably
+                // reports the mode it set up.
+                let mut words = [0u8; 12];
+                for (i, w) in a[..3].iter().enumerate() {
+                    words[4 * i..4 * i + 4].copy_from_slice(&w.to_be_bytes());
+                }
+                self.post_return(h, p.selector, 8, &words);
+            }
+            CMD_CONTEXT_MAP => self.context_activate(h, be, p.selector, a[0], a[1]),
+            CMD_CONTEXT_RESTORE => {
+                self.context_activate(h, be, p.selector, a[1], a[2]);
+                if a[0] != SAVE_AREA_MARKER {
+                    crate::dlog!(
+                        LogModule::Kona,
+                        "kona: context restore carries save-area word {:#x}, not the {SAVE_AREA_MARKER:#x} the model leaves",
+                        a[0]
+                    );
+                }
+            }
+            CMD_DMA_PACKET | CMD_DMA_LIST_WRITE | CMD_DMA_POOL | CMD_LIST_CALL | CMD_LIST_CALL_POOL | CMD_LIST_CALLS
+            | CMD_LIST_CALLS_POOL | CMD_LIST_PULL | CMD_LIST_MOVE => self.dma_command(h, be, p.selector, a),
+            CMD_RETRACE => {
+                self.job(h, be, Job::Retrace { tag: a[0] });
+            }
+            CMD_VIDEO => {
+                self.input.run = Run::Video { command: a[0], data: Vec::new(), sum: 0 };
+            }
+            CMD_X_COLOR_MAP | CMD_X_GAMMA => self.start_words(Grammar::Kernel, &p, a[1]),
+            CMD_X_CURSOR => self.start_words(Grammar::Kernel, &p, X_CURSOR_DATA_WORDS),
+            CMD_X_CURSOR_RECOLOR => self.start_words(Grammar::Kernel, &p, X_CURSOR_RECOLOUR_WORDS),
+            CMD_MEM_SWAP_OUT => self.mem_swap_out(h, a),
+            CMD_MEM_SWAP_IN => {
+                self.swapin.header.copy_from_slice(&a[..6]);
+                self.swapin.stage = SwapStage::Mode;
+            }
+            CMD_MEM_SUSPEND => {
+                if a[0] != REASON_SUSPEND {
+                    crate::dlog!(LogModule::Kona, "kona: suspend with reason {:#x}; answered as 0x104", a[0]);
+                }
+                // A suspend replies n = 0; what a real pipe saves is unknown.
+                self.post_reason(h, p.selector, &[REASON_SUSPEND, 0]);
+            }
+            CMD_MEM_REGION => self.dma_list_region(a),
+            _ => handled = false,
+        }
+        let r = self.job(h, be, Job::Command { grammar: Grammar::Kernel, selector: p.selector, args: a, packed: 0, handled });
+        if !handled {
+            self.open_run(Grammar::Kernel, &p, r);
+        }
+    }
+
     // ----- pages and replies -----------------------------------------------
 
     /// The page a 0x1f1 or 0x1f2 command names in its first two words `page`
@@ -729,6 +1370,32 @@ impl Core {
         }
         true
     }
+}
+
+/// The video command search gives up after this many data words, a model
+/// bound.
+const VIDEO_SEARCH_MAX_WORDS: usize = 1024;
+
+/// The most payload words a textport bitmap blit may carry: the managed
+/// area's bits, a model bound against a guest-controlled size.
+const BITMAP_MAX_PAYLOAD_WORDS: u64 = 1280 * 1024 / 32;
+
+/// The tokens only the kernel sends: the context switch and teardown.
+fn kernel_only_token(word: u32) -> bool {
+    matches!(word, CMD_CONTEXT_DEACTIVATE | CMD_CONTEXT_RESTORE | CMD_CONTEXT_MAP | CMD_POST_REASON)
+}
+
+/// The GL commands a whole word opens before the first context activation:
+/// the make-current and drawing commands the model framed before it framed
+/// the rest of the GL grammar. No client sends them then; the page carries
+/// the PROM's textport and the kernel, and taking any other GL selector
+/// there would change how their stray words frame.
+fn gl_token_early(selector: u32) -> bool {
+    matches!(
+        selector,
+        0x177 | 0x1d7 | 0x17e | 0xee | 0x1ce | 0xe3 | 0xc | 0xe4 | 0x25 | 0x1d | 0x1a | 0xc0 | 0x63
+            | 0x57..=0x60 | 0x8c | 0x71 | 0xc7 | 0xc6 | 0x3e
+    )
 }
 
 #[cfg(test)]
