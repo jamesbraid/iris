@@ -165,6 +165,12 @@ impl PciBus {
         self.0.combiner.redrive();
     }
 
+    /// Each output's (dirty, fell, last), for a test to compare.
+    #[cfg(test)]
+    pub(crate) fn delivery_flags(&self) -> Vec<(bool, bool, bool)> {
+        self.0.combiner.flags()
+    }
+
     /// One line per function: address, identity, command, assigned BARs and
     /// where its interrupt pin goes.
     pub fn describe(&self, w: &mut dyn Write) {
