@@ -69,7 +69,7 @@ use crate::host_audio::{HostOut, Resampler};
 use crate::hptimer::{TimerId, TimerManager, TimerReturn};
 use crate::snapshot::{field, field_bool, field_u32, field_u32s, field_u64, field_u64_vec, field_u64s, field_u8, StateTable};
 use crate::traits::{Device, Saveable};
-use crate::pci::{Bar, PciBusDevice, PciConfig, PciDma};
+use crate::pci::{Bar, PciFunction, PciConfig, PciDma};
 
 pub const PCI_VENDOR_SGI: u16 = 0x10a9;
 pub const PCI_DEVICE_RAD1: u16 = 0x0005;
@@ -1680,7 +1680,7 @@ impl Device for Rad1 {
     fn get_clock(&self) -> u64 { 0 }
 }
 
-impl PciBusDevice for Rad1 {
+impl PciFunction for Rad1 {
     fn config(&self) -> &PciConfig {
         &self.inner.pci
     }
@@ -1697,6 +1697,10 @@ impl PciBusDevice for Rad1 {
     /// raises no interrupt, so there is no `connect_interrupt`.
     fn connect_dma(&self, dma: Arc<dyn PciDma>) {
         let _ = self.inner.dma.set(dma);
+    }
+
+    fn reset(&self) {
+        self.inner.reset();
     }
 }
 

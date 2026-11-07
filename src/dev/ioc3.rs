@@ -13,7 +13,7 @@
 //! # Two interrupt outputs
 //!
 //! The chip has two. The Ethernet block drives the PCI interrupt pin
-//! ([`PciBusDevice::connect_interrupt`]); everything else (serial, PS/2,
+//! ([`PciFunction::connect_interrupt`]); everything else (serial, PS/2,
 //! parallel, the interrupt-output pulse) is gated by the status and enable
 //! pair at 0x1c/0x20 and drives a second line the board wires to a Bridge
 //! input ([`Ioc3::connect_superio_interrupt`]).
@@ -23,7 +23,7 @@
 //! IOC3 owns the conversion between its register and DMA formats and PCI
 //! bytes. Registers: a 32-bit access is the register value; a narrow access
 //! to internal offset `a` arrives from the bridge at `a ^ (4 - width)`, which
-//! [`PciBusDevice::bar_read`] undoes. DMA: an internal byte at address `a`
+//! [`PciFunction::bar_read`] undoes. DMA: an internal byte at address `a`
 //! sits at bus address `a ^ 3`, so a 32-bit value is big-endian on the bus
 //! with the bridge's swap clear ([`Ioc3Dma`]). Neither is a measured property
 //! of the silicon; the chip's real placement is undocumented.
@@ -60,7 +60,7 @@ use crate::dev::w1::sgi::{self, BoardRecord};
 use crate::dev::ns16550::Ns16550;
 use crate::dev::serial_host::SerialBackend;
 use crate::irq::{InterruptController, IrqLine};
-use crate::pci::{Bar, PciBusDevice, PciConfig, PciDma, PciDmaStatus, PCI_INTA};
+use crate::pci::{Bar, PciFunction, PciConfig, PciDma, PciDmaStatus, PCI_INTA};
 use crate::hptimer::{TimerId, TimerManager, TimerReturn};
 use crate::traits::{BusDevice, Device, MachineEvent, Resettable, Saveable};
 use crate::snapshot::{
@@ -2518,7 +2518,7 @@ impl Ioc3 {
     }
 
     /// The line the board wires the SuperIO interrupt (serial, PS/2,
-    /// parallel, interrupt output) to. [`PciBusDevice::connect_interrupt`]
+    /// parallel, interrupt output) to. [`PciFunction::connect_interrupt`]
     /// takes the PCI pin, which only the Ethernet block drives.
     pub fn connect_superio_interrupt(&self, line: IrqLine) {
         {
@@ -2674,7 +2674,7 @@ impl Ioc3 {
     }
 }
 
-impl PciBusDevice for Ioc3 {
+impl PciFunction for Ioc3 {
     fn config(&self) -> &PciConfig {
         &self.sh.pci
     }

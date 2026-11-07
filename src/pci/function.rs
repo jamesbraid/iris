@@ -11,7 +11,7 @@ use super::PciConfig;
 ///
 /// BAR accesses arrive with the offset and value the device sees: whatever
 /// the bridge does to byte lanes it has already done.
-pub trait PciBusDevice: Send + Sync {
+pub trait PciFunction: Send + Sync {
     /// The function's configuration header.
     fn config(&self) -> &PciConfig;
 
@@ -32,6 +32,19 @@ pub trait PciBusDevice: Send + Sync {
 
     /// The bridge gives a function that masters the bus its way to memory.
     fn connect_dma(&self, _dma: std::sync::Arc<dyn PciDma>) {}
+
+    /// RST# reaches the function after the bus has reset its header: drop
+    /// the interrupt line and return to power-on state. A function never
+    /// resets its own header, so the bus's decode table cannot go stale.
+    fn reset(&self) {}
+}
+
+/// Where a function sits on a bus: its device number and its function number.
+/// Orders by device, then function, the order RST# visits them in.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct DevFn {
+    pub device: u8,
+    pub function: u8,
 }
 
 /// How a bus master's access ended.
@@ -66,4 +79,17 @@ pub trait PciDma: Send + Sync {
 
     /// `data` to bus address `addr`.
     fn dma_write(&self, addr: u64, data: &[u8]) -> PciDmaStatus;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn devfn_orders_by_device_then_function() {
+        let a = |device, function| DevFn { device, function };
+        let mut v = [a(3, 0), a(1, 1), a(1, 0)];
+        v.sort();
+        assert_eq!(v, [a(1, 0), a(1, 1), a(3, 0)]);
+    }
 }
