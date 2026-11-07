@@ -26,17 +26,17 @@ use std::sync::{
 pub const PART_SIZE: usize = 8 << 20;
 pub const FLASH_SIZE: usize = 2 * PART_SIZE;
 
-/// The environment records that mark the empty processor positions of a
-/// two-processor IP35 board, slots B and D, disabled, with their offsets
-/// in the store: the records the stock PROM writes itself after its
-/// failed-start recovery has given up on each empty position. Seeding a
+/// The environment records that mark the processor positions `absent` (letters
+/// A to D) disabled, with their offsets in the store: the records the stock
+/// PROM writes itself after its failed-start recovery has given up on each
+/// empty position, at consecutive 64-byte slots from the first. Seeding a
 /// fresh store with them spares the PROM three power cycles per position.
-/// That the board ships in this state is a model policy, not a recovered
+/// That a board ships in this state is a model policy, not a recovered
 /// factory image.
 ///
 /// Ported from tests/functional/mips64/lib_origin300.py in
 /// jamesbraid/qemu-sgi-origami.
-pub fn two_processor_environment() -> Vec<(usize, Vec<u8>)> {
+pub fn disabled_positions_environment(absent: &str) -> Vec<(usize, Vec<u8>)> {
     const VALUE: &[u8] = b"32: CPU failed early init.";
     let record = |slot: u8| {
         let mut bytes = vec![0x10];
@@ -48,7 +48,12 @@ pub fn two_processor_environment() -> Vec<(usize, Vec<u8>)> {
         bytes
     };
     let records = PART_SIZE + 0x1e0100;
-    vec![(records, record(b'B')), (records + 0x40, record(b'D'))]
+    absent.bytes().enumerate().map(|(slot, position)| (records + slot * 0x40, record(position))).collect()
+}
+
+/// The empty positions of a two-processor board, B and D.
+pub fn two_processor_environment() -> Vec<(usize, Vec<u8>)> {
+    disabled_positions_environment("BD")
 }
 pub const SECOND_POSITION: u64 = 32 << 20;
 
@@ -599,6 +604,23 @@ mod tests {
         assert_eq!(&bytes[0x9e0140..0x9e0180], expected.as_slice());
         assert!(bytes[0x9e0180..0x9e0200].iter().all(|&b| b == 0xff));
         assert_eq!(Flash::new(&[], FirmwareRecord::TEZRO).unwrap().contents()[0x9e0100], 0xff);
+    }
+
+    /// A board names the positions it leaves empty: a one-processor C-brick
+    /// disables B, C and D, one record per position at consecutive slots.
+    #[test]
+    fn a_board_names_its_empty_positions() {
+        let records = disabled_positions_environment("BCD");
+        assert_eq!(records.len(), 3);
+        let bytes = Flash::seeded(&[], FirmwareRecord::FUEL, &records).unwrap().contents();
+        for (slot, position) in ['B', 'C', 'D'].into_iter().enumerate() {
+            let at = PART_SIZE + 0x1e0100 + slot * 0x40;
+            assert_eq!(bytes[at], 0x10);
+            assert_eq!(&bytes[at + 1..at + 9], format!("Disable{position}").as_bytes());
+            assert_eq!(&bytes[at + 16..at + 42], b"32: CPU failed early init.");
+        }
+        assert!(bytes[PART_SIZE + 0x1e0100 + 3 * 0x40..PART_SIZE + 0x1e0100 + 4 * 0x40].iter().all(|b| *b == 0xff));
+        assert_eq!(disabled_positions_environment("BD"), two_processor_environment());
     }
 
     /// The PROM reads CPU configuration and the volume label from its boot flash.
