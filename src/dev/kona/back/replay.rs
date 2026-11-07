@@ -16,7 +16,9 @@
 //! on `NullBackend` cannot reproduce; the report lists those apart.
 //!
 //! The recordings are not in the repository. `KONA_RECORDINGS` names the
-//! directory that holds them; without it the tests that need them skip.
+//! directory that holds them; without it, or when it is not readable (as in a
+//! build container without the storage), the tests that need them skip, with a
+//! line on stderr that says so.
 
 use super::super::attach::{FifoLow, HostDma, InterruptPacket, KonaAttach, PacketSender};
 use super::super::consts::{ACTIVITY, CAUSE_VIDEO, CREDIT, INT_CAUSE, PROBE};
@@ -211,14 +213,23 @@ pub(super) fn recordings_dir() -> Option<std::path::PathBuf> {
     match std::env::var_os("KONA_RECORDINGS") {
         Some(d) if std::path::Path::new(&d).is_dir() => Some(d.into()),
         Some(d) => {
-            eprintln!("skipping: KONA_RECORDINGS={d:?} is not a directory");
+            skip_note(&format!("KONA_RECORDINGS={d:?} is not a readable directory here"));
             None
         }
         None => {
-            eprintln!("skipping: set KONA_RECORDINGS to the directory of the KONAREC recordings");
+            skip_note("KONA_RECORDINGS is not set");
             None
         }
     }
+}
+
+/// One line saying a replay test is skipping, written to stderr directly so the
+/// test harness's capture does not hide it. A build container that cannot see
+/// the recordings' storage skips this way: run the built test binary on the
+/// host with `KONA_RECORDINGS` set to run them.
+fn skip_note(why: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "kona replay test skipped: {why}; the recordings are not readable from here (run the test binary on a host that has them)");
 }
 
 /// The machine side of a replay: the interrupt packets, the guest memory the
