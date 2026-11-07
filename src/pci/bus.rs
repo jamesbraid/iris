@@ -20,6 +20,7 @@ use std::sync::{Arc, Weak};
 use super::decode::{BarMappingSink, CpuWindow, Decode};
 use super::intx::{BoardIrq, Combiner, IntxRouting};
 use super::{DevFn, PciFunction, PciHost, Space};
+use crate::devlog::LogModule;
 use crate::irq::IrqLine;
 use crate::snapshot::{get_field, hex_u32, hex_u64, toml_u32, toml_u64};
 use crate::traits::Saveable;
@@ -95,8 +96,11 @@ impl PciBus {
     /// Function 0 of a device with a function above it reports the
     /// multifunction bit of the header type, so a scan visits the rest.
     pub fn config_read(&self, at: DevFn, off: usize, width: usize) -> Option<u32> {
-        let f = self.function(at)?;
-        Some((self.header_dword(at, f, off / 4) >> ((off & 3) * 8)) & (u32::MAX >> (32 - 8 * width)))
+        let mask = u32::MAX >> (32 - 8 * width);
+        let val = self.function(at).map(|f| (self.header_dword(at, f, off / 4) >> ((off & 3) * 8)) & mask);
+        crate::dlog!(LogModule::Pci, "pci: bus {} {}.{} read {off:#04x}/{width} -> {}", self.0.number, at.device, at.function,
+            val.map_or("no answer".to_string(), |v| format!("{v:#x}")));
+        val
     }
 
     /// Dword `index` of `f`'s header as a guest reads it: header type bit 7
@@ -112,7 +116,10 @@ impl PciBus {
     /// if nothing answers. The mappings are updated when the command
     /// register or a BAR changed, the only registers it is built from.
     pub fn config_write(&self, at: DevFn, off: usize, width: usize, val: u32) -> bool {
-        let Some(f) = self.function(at) else { return false };
+        let f = self.function(at);
+        crate::dlog!(LogModule::Pci, "pci: bus {} {}.{} write {off:#04x}/{width} {val:#x}{}", self.0.number, at.device, at.function,
+            if f.is_some() { "" } else { ", no answer" });
+        let Some(f) = f else { return false };
         let (cfg, reg, shift) = (f.state().config(), off / 4, (off & 3) * 8);
         let mask = (u32::MAX >> (32 - 8 * width)) << shift;
         let old = cfg.read(reg);
