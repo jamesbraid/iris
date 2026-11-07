@@ -1751,3 +1751,4 @@ mod irix_tests;
 mod loop_tests;
 mod nvram_tests;
 mod scsi_tests;
+mod state_tests;
