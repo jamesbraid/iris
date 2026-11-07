@@ -69,7 +69,7 @@ use crate::host_audio::{HostOut, Resampler};
 use crate::hptimer::{TimerId, TimerManager, TimerReturn};
 use crate::snapshot::{field, field_bool, field_u32, field_u32s, field_u64, field_u64_vec, field_u64s, field_u8, StateTable};
 use crate::traits::{Device, Saveable};
-use crate::pci::{Bar, PciFunction, PciConfig, PciDma};
+use crate::pci::{Bar, PciConfig, PciFunction, PciPort};
 
 pub const PCI_VENDOR_SGI: u16 = 0x10a9;
 pub const PCI_DEVICE_RAD1: u16 = 0x0005;
@@ -837,7 +837,7 @@ pub struct Inner {
     /// Between `Device::start` and `Device::stop`: timers are armed only
     /// then.
     armed: AtomicBool,
-    dma: OnceLock<Arc<dyn PciDma>>,
+    port: PciPort,
     /// `[audio]` settings once host output is enabled; `None` (tests,
     /// `no_audio`) keeps the output channel running silently.
     audio_cfg: Mutex<Option<AudioConfig>>,
@@ -878,7 +878,7 @@ impl Inner {
             tick_pass: Mutex::new(()),
             timers: OnceLock::new(),
             armed: AtomicBool::new(false),
-            dma: OnceLock::new(),
+            port: PciPort::default(),
             audio_cfg: Mutex::new(None),
             sink: Mutex::new(None),
             open_host: open_host_output,
@@ -1504,7 +1504,7 @@ impl Inner {
     /// * the flags word, then done last, so the driver never sees a done slot
     ///   with a stale body. No digital input or video reference is connected.
     fn fill_slot(&self, s: &mut State, slot: u64, now: i64) -> bool {
-        let Some(dma) = self.dma.get() else { return false };
+        let Some(dma) = self.port.dma() else { return false };
         self.sync_all(s, now);
 
         let mut mirror = Vec::with_capacity(13 * 4);
@@ -1546,7 +1546,7 @@ impl Inner {
     /// that bit.
     #[cfg(feature = "perfetto")]
     fn status_unread(&self, s: &State) -> u32 {
-        let Some(dma) = self.dma.get() else { return 0 };
+        let Some(dma) = self.port.dma() else { return 0 };
         let base = Self::status_base(s);
         (0..s.status_slots)
             .filter(|&i| {
@@ -1578,7 +1578,7 @@ impl Inner {
     /// frames are silence.
     fn chan_move(&self, s: &mut State, idx: usize, mut frames: u64) -> bool {
         let info = &CHAN_INFO[idx];
-        let Some(dma) = self.dma.get() else { return false };
+        let Some(dma) = self.port.dma() else { return false };
         // A position read after a long look-away would replay every
         // revolution of the ring it missed, a DMA per chunk on the CPU
         // thread. Past one revolution the ring is left as it was found (an
@@ -1694,9 +1694,9 @@ impl PciFunction for Rad1 {
     }
 
     /// The card masters the bus for its status slots and audio rings. It
-    /// raises no interrupt, so there is no `connect_interrupt`.
-    fn connect_dma(&self, dma: Arc<dyn PciDma>) {
-        let _ = self.inner.dma.set(dma);
+    /// raises no interrupt, so its port never has a line.
+    fn port(&self) -> &PciPort {
+        &self.inner.port
     }
 
     fn reset(&self) {

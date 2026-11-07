@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::hptimer::TimerManager;
+use crate::pci::PciDma;
 use crate::traits::Device;
 use std::sync::{Arc, Mutex};
 
