@@ -661,6 +661,16 @@ impl MachineProfile {
         }
     }
 
+    /// Add the rows this machine has to `t`: the machine's own `fill`, which
+    /// touches no hardware.
+    pub fn fill(self, cfg: &MachineConfig, t: &Topology) {
+        match self {
+            Self::IndyIp24 | Self::Indigo2Ip22 | Self::Indigo2Ip28 => crate::ip22_machine::Ip22Machine::fill(cfg, t),
+            Self::O2Ip32 => crate::ip32_machine::O2Machine::fill(cfg, t),
+            Self::OctaneIp30 => crate::ip30_machine::OctaneMachine::fill(cfg, t),
+        }
+    }
+
     /// All selectable profiles, in display order. Single source of truth for the
     /// GUI dropdowns (Config tab + New Machine dialog) so they never drift.
     ///
@@ -2939,34 +2949,6 @@ pub struct Cli {
     #[arg(long = "jitv2-compile", value_name = "MODE")]
     pub jitv2_compile: Option<JitCompile>,
 
-    /// SCSI ID 1 image path (HDD)
-    #[arg(long)]
-    pub scsi1: Option<String>,
-
-    /// SCSI ID 2 image path (HDD)
-    #[arg(long)]
-    pub scsi2: Option<String>,
-
-    /// SCSI ID 3 image path (HDD)
-    #[arg(long)]
-    pub scsi3: Option<String>,
-
-    /// SCSI ID 4 image path (CD-ROM, primary disc)
-    #[arg(long)]
-    pub cdrom4: Option<String>,
-
-    /// SCSI ID 5 image path (CD-ROM, primary disc)
-    #[arg(long)]
-    pub cdrom5: Option<String>,
-
-    /// SCSI ID 6 image path (CD-ROM, primary disc)
-    #[arg(long)]
-    pub cdrom6: Option<String>,
-
-    /// SCSI ID 7 image path (HDD)
-    #[arg(long)]
-    pub scsi7: Option<String>,
-
     /// Report every hard disk's write cache off (`write_cache = false` in each
     /// `[scsi.N]`): every write is stored on the host's disk before the guest
     /// is told it is done, as on the drives SGI shipped. Slower. The default
@@ -2974,18 +2956,6 @@ pub struct Cli {
     /// (see STORAGE.md)
     #[arg(long, default_value_t = false)]
     pub no_write_cache: bool,
-
-    /// Additional ISO images for CD-ROM ID 4 (can be specified multiple times)
-    #[arg(long = "cdrom4-extra", value_name = "ISO")]
-    pub cdrom4_extra: Vec<String>,
-
-    /// Additional ISO images for CD-ROM ID 5 (can be specified multiple times)
-    #[arg(long = "cdrom5-extra", value_name = "ISO")]
-    pub cdrom5_extra: Vec<String>,
-
-    /// Additional ISO images for CD-ROM ID 6 (can be specified multiple times)
-    #[arg(long = "cdrom6-extra", value_name = "ISO")]
-    pub cdrom6_extra: Vec<String>,
 
     /// 2× window scaling for HiDPI/4K monitors
     #[arg(long = "2x", default_value_t = false)]
@@ -3189,6 +3159,50 @@ pub struct Cli {
     /// IRIX reports twice this rate as CPU MHz, e.g. --clock-fixed-mhz 50.
     #[arg(long = "clock-fixed-mhz", value_name = "MHZ")]
     pub clock_fixed_mhz: Option<f64>,
+
+    /// SCSI ID 1 image path (HDD)
+    #[arg(long)]
+    pub scsi1: Option<String>,
+
+    /// SCSI ID 2 image path (HDD)
+    #[arg(long)]
+    pub scsi2: Option<String>,
+
+    /// SCSI ID 3 image path (HDD)
+    #[arg(long)]
+    pub scsi3: Option<String>,
+
+    /// SCSI ID 4 image path (CD-ROM, primary disc)
+    #[arg(long)]
+    pub cdrom4: Option<String>,
+
+    /// SCSI ID 5 image path (CD-ROM, primary disc)
+    #[arg(long)]
+    pub cdrom5: Option<String>,
+
+    /// SCSI ID 6 image path (CD-ROM, primary disc)
+    #[arg(long)]
+    pub cdrom6: Option<String>,
+
+    /// SCSI ID 7 image path (HDD)
+    #[arg(long)]
+    pub scsi7: Option<String>,
+
+    /// Additional ISO images for CD-ROM ID 4 (can be specified multiple times)
+    #[arg(long = "cdrom4-extra", value_name = "ISO")]
+    pub cdrom4_extra: Vec<String>,
+
+    /// Additional ISO images for CD-ROM ID 5 (can be specified multiple times)
+    #[arg(long = "cdrom5-extra", value_name = "ISO")]
+    pub cdrom5_extra: Vec<String>,
+
+    /// Additional ISO images for CD-ROM ID 6 (can be specified multiple times)
+    #[arg(long = "cdrom6-extra", value_name = "ISO")]
+    pub cdrom6_extra: Vec<String>,
+
+    /// `--<device> AT[,key=value]...` as given: the device type and the value.
+    #[arg(skip)]
+    device_flags: Vec<(String, String)>,
 }
 
 impl Cli {
@@ -3211,28 +3225,6 @@ impl Cli {
         if let Some(v) = self.bank3    { cfg.banks[3] = v; }
         if let Some(n) = self.jitv2_threads { cfg.jitv2.threads = n; }
         if let Some(m) = self.jitv2_compile { cfg.jitv2.compile = m; }
-
-        // Helper: insert or update a SCSI device entry.
-        let apply_scsi = |map: &mut std::collections::HashMap<u8, ScsiDeviceConfig>,
-                          id: u8, path: String, cdrom: bool, extra: Vec<String>| {
-            let entry = map.entry(id).or_insert_with(|| ScsiDeviceConfig {
-                cdrom,
-                ..Default::default()
-            });
-            entry.path = path;
-            entry.cdrom = cdrom;
-            if !extra.is_empty() {
-                entry.discs = extra;
-            }
-        };
-
-        if let Some(p) = self.scsi1.clone()  { apply_scsi(&mut cfg.scsi, 1, p, false, vec![]); }
-        if let Some(p) = self.scsi2.clone()  { apply_scsi(&mut cfg.scsi, 2, p, false, vec![]); }
-        if let Some(p) = self.scsi3.clone()  { apply_scsi(&mut cfg.scsi, 3, p, false, vec![]); }
-        if let Some(p) = self.cdrom4.clone() { apply_scsi(&mut cfg.scsi, 4, p, true, self.cdrom4_extra.clone()); }
-        if let Some(p) = self.cdrom5.clone() { apply_scsi(&mut cfg.scsi, 5, p, true, self.cdrom5_extra.clone()); }
-        if let Some(p) = self.cdrom6.clone() { apply_scsi(&mut cfg.scsi, 6, p, true, self.cdrom6_extra.clone()); }
-        if let Some(p) = self.scsi7.clone()  { apply_scsi(&mut cfg.scsi, 7, p, false, vec![]); }
 
         if self.no_write_cache {
             for dev in cfg.scsi.values_mut().filter(|d| !d.cdrom && d.kind() == ScsiKind::Disk) {
@@ -3305,13 +3297,152 @@ impl Cli {
     }
 }
 
-/// What `Cli::parse()` does, with `--help` headed by the emulator's name, the
-/// way the banner, the monitor and the window title are. The name is not known
-/// to clap's derive, which wants a constant, so it is set on the command here.
-/// No machine is configured yet, so only the model-neutral words can appear.
+/// `--<device> AT[,key=value]...` for each device type, whose names and help
+/// clap wants for the life of the process.
+fn device_flags() -> &'static [(&'static str, &'static str, &'static str)] {
+    static FLAGS: std::sync::OnceLock<Vec<(&'static str, &'static str, &'static str)>> = std::sync::OnceLock::new();
+    FLAGS.get_or_init(|| {
+        let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+        crate::attach::device_names()
+            .into_iter()
+            .map(|name| {
+                let help = leak(format!("Place a {name}: AT[,key=value]..., e.g. --{name} hpc3.0.t1,path=disk.img"));
+                (name, leak(name.replace('_', "-")), help)
+            })
+            .collect()
+    })
+}
+
+/// The command line: `Cli`'s flags and one `--<device> AT[,key=value]...` for each device type. A device type
+/// whose flag is already taken (`--test-device`) gets none. `--help` is headed
+/// by the emulator's name, the way the banner, the monitor and the window
+/// title are; the name is not known to clap's derive, which wants a constant,
+/// so it is set on the command here. No machine is configured yet, so only the
+/// model-neutral words can appear.
+pub fn cli_command() -> clap::Command {
+    use clap::{Arg, ArgAction};
+    let mut cmd = Cli::command().about(crate::emulator_name::emulator_name());
+    for &(name, long, help) in device_flags() {
+        if cmd.get_arguments().any(|a| a.get_long() == Some(long)) {
+            continue;
+        }
+        cmd = cmd.arg(Arg::new(name).long(long).value_name("AT[,k=v]").action(ArgAction::Append).help(help));
+    }
+    cmd
+}
+
+/// What `Cli::parse_from` does, over [`cli_command`].
+pub fn parse_args<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let mut matches = cli_command().try_get_matches_from(args)?;
+    let mut cli = Cli::from_arg_matches_mut(&mut matches)?;
+    for &(name, _, _) in device_flags() {
+        if let Ok(Some(values)) = matches.try_get_many::<String>(name) {
+            cli.device_flags.extend(values.map(|v| (name.to_string(), v.clone())));
+        }
+    }
+    Ok(cli)
+}
+
 fn parse_cli() -> Cli {
-    let mut matches = Cli::command().about(crate::emulator_name::emulator_name()).get_matches();
-    Cli::from_arg_matches_mut(&mut matches).unwrap_or_else(|e| e.format(&mut Cli::command()).exit())
+    parse_args(std::env::args_os()).unwrap_or_else(|e| e.exit())
+}
+
+/// One `--<device>` value, `AT[,key=value]...`: the location, then options.
+/// A value is read as a TOML value (`true`, `64`) and is a string when it is
+/// not one; a key given twice becomes a list, as does `discs`. The first `=`
+/// of an item splits it, so a value (a path) may hold more. The device type
+/// refuses the keys and types it does not take.
+fn placement_from_flag(topo: &Topology, device: &str, value: &str) -> Result<Placement, String> {
+    let flag = format!("--{}", device.replace('_', "-"));
+    let mut items = value.split(',');
+    let at: Location = items.next().unwrap_or_default().parse().map_err(|e| format!("{flag} {value}: {e}"))?;
+    let at = topo.resolve(at)?;
+    let mut opts = toml::Table::new();
+    for item in items {
+        let (k, v) = item.split_once('=').ok_or_else(|| format!("{flag} {value}: `{item}` is not key=value"))?;
+        let v = v.parse::<toml::Value>().ok().filter(|v| !v.is_array() && !v.is_table()).unwrap_or_else(|| v.into());
+        match opts.get_mut(k) {
+            Some(toml::Value::Array(list)) => list.push(v),
+            Some(old) => *old = toml::Value::Array(vec![old.clone(), v]),
+            None if k == "discs" => {
+                opts.insert(k.into(), toml::Value::Array(vec![v]));
+            }
+            None => {
+                opts.insert(k.into(), v);
+            }
+        }
+    }
+    Ok(Placement { device: device.to_string(), at, opts })
+}
+
+impl Cli {
+    /// `apply`, then `merge`: the command line over the file. Exits on error.
+    fn resolve(&self, file: MachineConfig) -> MachineConfig {
+        let mut cfg = self.apply(file);
+        if let Err(e) = self.merge(&mut cfg) {
+            eprintln!("Configuration error: {e}");
+            std::process::exit(1);
+        }
+        cfg
+    }
+
+    /// Place what the command line asks for, in `cfg`, whose profile is final.
+    /// A disk flag that predates `--<device>` keeps what the file says about
+    /// that target and changes its image; `--<device> AT` replaces the entry.
+    /// Two flags at one location are an error naming both.
+    pub fn merge(&self, cfg: &mut MachineConfig) -> Result<(), String> {
+        let topo = Topology::fill_for(cfg);
+        let mut given: Vec<(String, Location)> = Vec::new();
+        let mut once = |flag: String, at: &Location| -> Result<(), String> {
+            if let Some((other, _)) = given.iter().find(|(_, l)| l == at) {
+                return Err(format!("{other} and {flag} both name {at}"));
+            }
+            given.push((flag, at.clone()));
+            Ok(())
+        };
+        // The disk flags that predate `--<device> AT` name a target on the
+        // first controller, whatever location that is on this machine. They
+        // keep the options the file gave that target and change its image.
+        let none: &[String] = &[];
+        let legacy: [(&str, &str, u8, &Option<String>, &[String]); 7] = [
+            ("scsi1", "hdd", 1, &self.scsi1, none),
+            ("scsi2", "hdd", 2, &self.scsi2, none),
+            ("scsi3", "hdd", 3, &self.scsi3, none),
+            ("cdrom4", "cdrom", 4, &self.cdrom4, &self.cdrom4_extra),
+            ("cdrom5", "cdrom", 5, &self.cdrom5, &self.cdrom5_extra),
+            ("cdrom6", "cdrom", 6, &self.cdrom6, &self.cdrom6_extra),
+            ("scsi7", "hdd", 7, &self.scsi7, none),
+        ];
+        for (flag, device, target, path, discs) in legacy {
+            let Some(path) = path else { continue };
+            let controller = topo.controller(0).ok_or("this machine has no SCSI controller for --scsiN and --cdromN")?;
+            let at = controller.join(Hop::t(target));
+            once(format!("--{flag}"), &at)?;
+            let mut opts = cfg.placements()?.into_iter().find(|p| p.at == at && p.device == device).map(|p| p.opts).unwrap_or_default();
+            opts.insert("path".into(), path.clone().into());
+            if !discs.is_empty() {
+                opts.insert("discs".into(), discs.to_vec().into());
+            }
+            cfg.place(device, at, opts);
+        }
+        for (device, value) in &self.device_flags {
+            let p = placement_from_flag(&topo, device, value)?;
+            once(format!("--{} {}", device.replace('_', "-"), value), &p.at)?;
+            cfg.place(device, p.at, p.opts);
+        }
+        if self.no_write_cache {
+            if let Some(toml::Value::Array(hdds)) = cfg.extra.get_mut("hdd") {
+                for hdd in hdds.iter_mut().filter_map(toml::Value::as_table_mut) {
+                    hdd.insert("write_cache".into(), false.into());
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Parse CLI, load TOML, merge, and validate. Exits on error.
@@ -3355,12 +3486,12 @@ pub fn load_config() -> (MachineConfig, u32) {
             eprintln!("Configuration error: {e}");
             std::process::exit(1);
         });
-        let cfg = cli.apply(toml_cfg);
+        let cfg = cli.resolve(toml_cfg);
         std::process::exit(crate::validate_config::report(&cli.config, &cfg));
     }
 
     let toml_cfg = MachineConfig::load_toml(&cli.config);
-    let cfg = cli.apply(toml_cfg);
+    let cfg = cli.resolve(toml_cfg);
     let scale = cfg.scale;
     if let Err(e) = cfg.validate() {
         eprintln!("Configuration error: {}", e);
@@ -3508,9 +3639,9 @@ mod export_tests {
         let mut cfg = MachineConfig::default();
         cfg.scsi.insert(1, ScsiDeviceConfig { path: "a.raw".into(), ..Default::default() });
         cfg.scsi.insert(2, ScsiDeviceConfig { path: "b.raw".into(), write_cache: true, ..Default::default() });
-        let on = Cli::parse_from(["iris"]).apply(cfg.clone());
+        let on = parse_args(["iris"]).unwrap().apply(cfg.clone());
         assert!(on.scsi[&1].write_cache && on.scsi[&2].write_cache, "no flag, no change");
-        let off = Cli::parse_from(["iris", "--no-write-cache"]).apply(cfg);
+        let off = parse_args(["iris", "--no-write-cache"]).unwrap().apply(cfg);
         assert!(!off.scsi[&1].write_cache && !off.scsi[&2].write_cache);
     }
 
@@ -3789,7 +3920,7 @@ mod export_tests {
         let apply = |args: &[&str]| {
             let mut a = vec!["iris"];
             a.extend_from_slice(args);
-            Cli::parse_from(a).apply(toml::from_str("[machine]\nprofile = \"o2_ip32\"\ncpu = \"r10000\"").unwrap())
+            parse_args(a).unwrap().apply(toml::from_str("[machine]\nprofile = \"o2_ip32\"\ncpu = \"r10000\"").unwrap())
         };
         assert_eq!(apply(&[]).machine.profile, MachineProfile::O2Ip32);
         assert_eq!(apply(&["--machine", "octane_ip30"]).machine.profile, MachineProfile::OctaneIp30);
@@ -3898,7 +4029,7 @@ mod export_tests {
     /// by a fixed description of one machine.
     #[test]
     fn help_is_headed_by_the_emulators_name() {
-        let help = Cli::command().about(crate::emulator_name::emulator_name()).render_help().to_string();
+        let help = cli_command().render_help().to_string();
         let words: Vec<&str> = help.lines().next().unwrap().split_whitespace().collect();
         assert_eq!(words.len(), 4, "{help}");
         assert!(words[0].starts_with('I') && words[2].starts_with('I') && words[3].starts_with('S'), "{words:?}");
@@ -3928,7 +4059,7 @@ mod export_tests {
         octane.serial_log_a = Some("a.log".into());
         assert!(octane.validate().unwrap_err().contains("channel A is the console"));
 
-        let cli = Cli::parse_from(["iris", "--serial-socket-a", "/run/x.sock", "--serial-log-a", "y.log"]);
+        let cli = parse_args(["iris", "--serial-socket-a", "/run/x.sock", "--serial-log-a", "y.log"]).unwrap();
         let cfg = cli.apply(MachineConfig::default());
         assert_eq!(cfg.serial_socket_a.as_deref(), Some("/run/x.sock"));
         assert_eq!(cfg.serial_log_a.as_deref(), Some("y.log"));
@@ -4190,6 +4321,151 @@ mod export_tests {
         let cfg: MachineConfig = toml::from_str("hdd = 3\n").unwrap();
         let e = cfg.check_extra().unwrap_err();
         assert!(e.contains("hdd") && e.contains("not a section"), "{e}");
+    }
+
+    fn flags(args: &[&str]) -> Cli {
+        let mut a = vec!["iris"];
+        a.extend_from_slice(args);
+        parse_args(a).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn merged(profile: &str, file: &str, args: &[&str]) -> MachineConfig {
+        let mut cfg: MachineConfig = toml::from_str(&format!("[machine]\nprofile = \"{profile}\"\ncpu = \"{}\"\n{file}", match profile {
+            "o2_ip32" => "r5000",
+            "octane_ip30" | "indigo2_ip28" => "r10000",
+            _ => "r4400",
+        })).unwrap();
+        cfg.scsi.clear();
+        let cli = flags(args);
+        let mut cfg = cli.apply(cfg);
+        cli.merge(&mut cfg).unwrap();
+        cfg
+    }
+
+    fn placed(cfg: &MachineConfig) -> Vec<(String, String, toml::Table)> {
+        cfg.placements().unwrap().into_iter().map(|p| (p.device, p.at.to_string(), p.opts)).collect()
+    }
+
+    /// The command builds (clap checks its flags for clashes in debug builds)
+    /// and the device flags sit beside the old ones.
+    #[test]
+    fn the_command_builds() {
+        let cmd = cli_command();
+        cmd.clone().debug_assert();
+        let longs: Vec<&str> = cmd.get_arguments().filter_map(|a| a.get_long()).collect();
+        for want in ["hdd", "cdrom", "daynaport", "virtio-serial", "scsi1", "cdrom4-extra", "test-device", "test-device-dump"] {
+            assert!(longs.contains(&want), "--{want} in {longs:?}");
+        }
+        assert_eq!(longs.iter().filter(|l| **l == "test-device").count(), 1, "the old flag keeps the name");
+    }
+
+    /// `=` splits an item once, so a path may hold more.
+    #[test]
+    fn hdd_flag_takes_at_and_explicit_path() {
+        let cfg = merged("o2_ip32", "", &["--hdd", "pci0.1.t1,path=a=b.img", "--hdd", "pci0.2.t3,path=c.img,overlay=true,size_mb=8"]);
+        let got = placed(&cfg);
+        assert_eq!(got[0].1, "pci0.1.t1");
+        assert_eq!(got[0].2["path"].as_str(), Some("a=b.img"));
+        assert_eq!(got[1].2["overlay"].as_bool(), Some(true));
+        assert_eq!(got[1].2["size_mb"].as_integer(), Some(8));
+    }
+
+    #[test]
+    fn a_list_option_repeats() {
+        let cfg = merged("o2_ip32", "", &["--cdrom", "pci0.1.t4,path=a.iso,discs=b.iso,discs=c.iso"]);
+        let got = placed(&cfg);
+        let discs: Vec<&str> = got[0].2["discs"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(discs, ["b.iso", "c.iso"]);
+    }
+
+    #[test]
+    fn a_bad_flag_value_names_the_flag() {
+        let mut cfg = MachineConfig::default();
+        for (args, want) in [
+            (&["--hdd", "nowhere"][..], "--hdd nowhere"),
+            (&["--hdd", "hpc3.0.t1,path"][..], "is not key=value"),
+            (&["--hdd", "hpc3.0.t1,path=a", "--hdd", "hpc3.0.t1,path=b"][..], "both name hpc3.0.t1"),
+        ] {
+            let e = flags(args).merge(&mut cfg).unwrap_err();
+            assert!(e.contains(want), "{args:?}: {e}");
+        }
+        // A value of the wrong type is the device type's to refuse, naming the place.
+        for (arg, want) in [("hpc3.0.t1,path=a,size_mb=big", "size_mb"), ("hpc3.0.t1,path=a,overlay=maybe", "overlay")] {
+            let mut cfg = MachineConfig::default();
+            flags(&["--hdd", arg]).merge(&mut cfg).unwrap();
+            let e = crate::attach::attach_devices(&cfg.placements().unwrap(), &cfg, None, &Topology::fill_for(&cfg)).expect_err("refused");
+            assert!(e.starts_with("error: hpc3.0.t1: invalid type") && e.contains(want), "{arg}: {e}");
+        }
+    }
+
+    /// The ten flags that predate `--<device>` name a target on the
+    /// machine's first controller, wherever that is.
+    #[test]
+    fn legacy_flags_expand_at_the_profiles_controller_zero() {
+        for (profile, ctl) in [("indy_ip24", "hpc3.0"), ("indigo2_ip22", "hpc3.0"), ("o2_ip32", "pci0.1"), ("octane_ip30", "xio15.pci0.0")] {
+            let cfg = merged(profile, "", &[
+                "--scsi1", "a", "--scsi2", "b", "--scsi3", "c", "--cdrom4", "d", "--cdrom5", "e", "--cdrom6", "f", "--scsi7", "g",
+                "--cdrom4-extra", "x.iso", "--cdrom4-extra", "y.iso",
+            ]);
+            let got = placed(&cfg);
+            let at: Vec<String> = got.iter().map(|g| format!("{} {}", g.0, g.1)).collect();
+            let mut want: Vec<String> = [("cdrom", 4), ("cdrom", 5), ("cdrom", 6), ("hdd", 1), ("hdd", 2), ("hdd", 3), ("hdd", 7)]
+                .iter().map(|(d, t)| format!("{d} {ctl}.t{t}")).collect();
+            want.sort();
+            let mut at_sorted = at.clone();
+            at_sorted.sort();
+            assert_eq!(at_sorted, want, "{profile}");
+            let cd4 = got.iter().find(|g| g.1.ends_with(".t4")).unwrap();
+            assert_eq!(cd4.2["discs"].as_array().unwrap().len(), 2, "{profile}");
+        }
+    }
+
+    /// `--scsi1 x` replaces the default disk and keeps the default CD-ROM.
+    #[test]
+    fn scsi1_replaces_the_default_disk_but_keeps_the_default_cdrom() {
+        let cli = flags(&["--scsi1", "mine.img"]);
+        let mut cfg = cli.apply(MachineConfig::default());
+        cli.merge(&mut cfg).unwrap();
+        let topo = Topology::fill_for(&cfg);
+        let all = cfg.all_placements(&topo).unwrap();
+        let hdd: Vec<_> = all.iter().filter(|p| p.device == "hdd").collect();
+        assert_eq!(hdd.len(), 1);
+        assert_eq!(hdd[0].opts["path"].as_str(), Some("mine.img"));
+        assert!(all.iter().any(|p| p.device == "cdrom" && p.opts["path"].as_str() == Some("cdrom4.iso")));
+    }
+
+    /// A legacy flag changes the image of a target the file set up and keeps
+    /// its other options, as it always did.
+    #[test]
+    fn a_legacy_flag_keeps_the_options_of_the_target_it_changes() {
+        let cfg = merged("indy_ip24", "[[hdd]]\nat = \"hpc3.0.t1\"\npath = \"old.img\"\noverlay = true\n", &["--scsi1", "new.img"]);
+        let got = placed(&cfg);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].2["path"].as_str(), Some("new.img"));
+        assert_eq!(got[0].2["overlay"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn no_write_cache_reaches_file_and_cli_hdds() {
+        let cfg = merged("indy_ip24", "[[hdd]]\nat = \"hpc3.0.t1\"\npath = \"a\"\n", &["--no-write-cache", "--scsi2", "b", "--hdd", "hpc3.0.t3,path=c"]);
+        let hdds: Vec<_> = placed(&cfg).into_iter().filter(|p| p.0 == "hdd").collect();
+        assert_eq!(hdds.len(), 3);
+        assert!(hdds.iter().all(|h| h.2["write_cache"].as_bool() == Some(false)));
+    }
+
+    /// The old flags keep their help text.
+    #[test]
+    fn help_text_of_the_legacy_flags_is_unchanged() {
+        let help = cli_command().render_help().to_string();
+        for (flag, value, text) in [
+            ("scsi1", "SCSI1", "SCSI ID 1 image path (HDD)"),
+            ("cdrom4", "CDROM4", "SCSI ID 4 image path (CD-ROM, primary disc)"),
+            ("cdrom6-extra", "ISO", "Additional ISO images for CD-ROM ID 6 (can be specified multiple times)"),
+            ("scsi7", "SCSI7", "SCSI ID 7 image path (HDD)"),
+        ] {
+            let line = help.lines().find(|l| l.contains(&format!("--{flag} <{value}>"))).unwrap_or_else(|| panic!("--{flag} in\n{help}"));
+            assert!(line.contains(text), "{line}");
+        }
     }
 }
 
