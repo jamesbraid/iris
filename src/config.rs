@@ -2469,11 +2469,49 @@ impl MachineConfig {
         Ok(out)
     }
 
-    /// Transitional: the converted `[scsi.N]` tables, then the `[[<device>]]`
-    /// entries, an explicit entry replacing a converted one at its location.
+    /// Transitional (removed with the typed fields): `[ultra64]`,
+    /// `test_device` and `[virtio_serial]` on the Indy and Indigo2 as
+    /// placements. The first two never had a slot and sit in gio0.
+    pub fn legacy_gio_placements(&self) -> Vec<Placement> {
+        if !matches!(
+            self.machine.profile,
+            MachineProfile::IndyIp24 | MachineProfile::Indigo2Ip22 | MachineProfile::Indigo2Ip28
+        ) {
+            return vec![];
+        }
+        let gio = |n| Location::root().join(Hop::gio(n));
+        let mut out = Vec::new();
+        let mut put = |device: &str, at: Location, opts: toml::Table| {
+            out.push(Placement { device: device.into(), at, opts });
+        };
+        if self.ultra64.enabled {
+            put("ultra64", gio(0), toml::Table::new());
+        }
+        if self.test_device {
+            let mut opts = toml::Table::new();
+            if let Some(dump) = &self.test_device_dump {
+                opts.insert("dump".into(), dump.clone().into());
+            }
+            put("test_device", gio(0), opts);
+        }
+        let v = &self.virtio_serial;
+        if v.enabled {
+            let mut opts = toml::Table::new();
+            if !v.ports.is_empty() {
+                opts.insert("port".into(), toml::Value::try_from(&v.ports).expect("ports serialise"));
+            }
+            put("virtio_serial", gio(if v.slot == VirtioGioSlot::Exp0 { 0 } else { 1 }), opts);
+        }
+        out
+    }
+
+    /// Transitional: the converted `[scsi.N]` tables and the old GIO
+    /// settings, then the `[[<device>]]` entries, an explicit entry replacing
+    /// a converted one at its location.
     pub fn all_placements(&self, t: &Topology) -> Result<Vec<Placement>, String> {
         let explicit = self.placements()?;
         let mut all = self.scsi_placements(t)?;
+        all.extend(self.legacy_gio_placements());
         all.retain(|p| !explicit.iter().any(|e| e.at == p.at));
         all.extend(explicit);
         Ok(all)

@@ -145,11 +145,8 @@ pub fn attach_device(p: &Placement, cfg: &MachineConfig, ctx: Option<&Ctx>, topo
     let at = &p.at;
     let family = topo.offers(at)?;
     let Some(m) = maker_for(&p.device, family) else {
-        let takes: Vec<&str> = MAKERS
-            .iter()
-            .filter(|m| m.family == family)
-            .map(|m| m.name)
-            .collect();
+        let mut takes: Vec<&str> = MAKERS.iter().filter(|m| m.family == family).map(|m| m.name).collect();
+        takes.sort_unstable();
         let other = MAKERS.iter().find(|m| m.name == p.device).expect("known above");
         return Err(format!(
             "error: {at}: {} is a {}; {at} is a {} (takes: {})",
@@ -159,9 +156,10 @@ pub fn attach_device(p: &Placement, cfg: &MachineConfig, ctx: Option<&Ctx>, topo
             takes.join(" ")
         ));
     };
+    // Parse before claiming, so a bad entry leaves its row free.
+    (m.parse)(&p.opts, cfg).map_err(|e| format!("error: {at}: {e}"))?;
     let note = p.opts.get("path").and_then(toml::Value::as_str).unwrap_or("");
     topo.claim(at, m.name, m.family, m.needs_network, note)?;
-    (m.parse)(&p.opts, cfg).map_err(|e| format!("error: {at}: {e}"))?;
     let Some(ctx) = ctx else { return Ok(()) };
     let owner = topo.owner(at)?;
     for (hop, handle) in (m.build)(at, &owner, ctx, &p.opts).map_err(|e| format!("error: {at}: {e}"))? {
@@ -288,7 +286,9 @@ mod tests {
         let t = machine();
         let cfg = MachineConfig::default();
         let e = attach_device(&place("test_brings", "gio0", "label = \"x\""), &cfg, None, &t).unwrap_err();
-        assert_eq!(e, "error: gio0: test_brings is a PCI card; gio0 is a GIO slot (takes: test_widget)");
+        assert!(e.starts_with("error: gio0: test_brings is a PCI card; gio0 is a GIO slot (takes: "), "{e}");
+        let takes: Vec<&str> = e.split("(takes: ").nth(1).unwrap().trim_end_matches(')').split(' ').collect();
+        assert!(takes.contains(&"test_widget") && takes.windows(2).all(|w| w[0] <= w[1]), "{e}");
     }
 
     #[test]

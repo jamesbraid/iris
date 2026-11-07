@@ -290,7 +290,7 @@ impl OctaneMachine {
         bridge.attach(3, rad.clone());
         let virtio = cfg.virtio_serial.enabled.then(|| {
             let dev = Arc::new(crate::dev::virtio::pci::VirtioPci::new(
-                crate::dev::virtio::console::from_config(&cfg.virtio_serial),
+                crate::dev::virtio::console::from_ports(&cfg.virtio_serial.ports),
             ));
             bridge.attach(VIRTIO_SLOT, dev.clone());
             eprintln!("iris: virtio-serial on Bridge slot {VIRTIO_SLOT}");
