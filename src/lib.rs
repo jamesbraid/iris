@@ -165,6 +165,7 @@ pub mod build_features {
 pub mod validate_config;
 pub mod config;
 pub mod location;
+pub mod topology;
 pub mod traits;
 #[macro_use]
 pub mod devlog;
