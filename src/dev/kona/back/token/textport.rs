@@ -20,21 +20,29 @@
 use crate::dev::kona::back::display::ColourMap;
 use crate::dev::kona::back::raster::{FillRule, Surface};
 use crate::dev::kona::back::store::PixelStore;
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// The word of a pixel's record the textport draws into.
 pub const COLOUR_WORD: usize = 1;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct Textport {
     colour: u32,
     raster: (i32, i32),
-    colour_map: ColourMap,
+    /// Shared with the display, which copies it once a frame.
+    colour_map: Arc<Mutex<ColourMap>>,
     /// Commands that drew, and those accepted without effect.
     pub drawn: u64,
     pub unmodelled: u64,
 }
 
 impl Textport {
+    /// A textport drawing with `map` as its colour map.
+    pub fn with_map(map: Arc<Mutex<ColourMap>>) -> Textport {
+        Textport { colour_map: map, ..Textport::default() }
+    }
+
     pub fn colour(&self) -> u32 {
         self.colour
     }
@@ -45,13 +53,15 @@ impl Textport {
 
     /// The colour map a textport pixel (an index) is resolved through at
     /// scan-out.
-    pub fn colour_map(&self) -> &ColourMap {
-        &self.colour_map
+    pub fn colour_map(&self) -> ColourMap {
+        self.colour_map.lock().clone()
     }
 
     /// Power-on state.
     pub fn reset(&mut self) {
-        *self = Textport::default();
+        let map = self.colour_map.clone();
+        map.lock().reset();
+        *self = Textport::with_map(map);
     }
 
     /// A textport command. False if `selector` is not one.
@@ -68,7 +78,7 @@ impl Textport {
                 Surface::new(store, COLOUR_WORD).plot(a(0) as i32 as i64, a(1) as i32 as i64, self.colour);
                 self.drawn += 1;
             }
-            3 => self.colour_map.load(args),
+            3 => self.colour_map.lock().load(args),
             1 | 7 | 8 => self.unmodelled += 1,
             _ => return false,
         }
@@ -156,9 +166,9 @@ mod tests {
         assert_eq!(s.read(11, 11, COLOUR_WORD), 0);
         assert_eq!(t.raster(), (13, 10));
         // A header of the wrong length is ignored.
-        let before = t.clone();
+        let before = (t.colour(), t.raster(), t.drawn, t.unmodelled);
         t.bitmap(&s, &[1, 1], &[0]);
-        assert_eq!(t, before);
+        assert_eq!((t.colour(), t.raster(), t.drawn, t.unmodelled), before);
     }
 
     #[test]
@@ -171,7 +181,9 @@ mod tests {
         assert!(!t.command(&s, RULE, 9, &[]));
         assert!(!t.command(&s, RULE, 0xc, &[]));
         assert!(s.allocated().is_empty());
+        t.command(&s, RULE, 3, &[1, 400, 0, 0]);
         t.reset();
-        assert_eq!(t, Textport::default());
+        assert_eq!((t.colour(), t.raster(), t.drawn, t.unmodelled), (0, (0, 0), 0, 0));
+        assert_eq!(t.colour_map(), ColourMap::default(), "a reset clears the shared map too");
     }
 }

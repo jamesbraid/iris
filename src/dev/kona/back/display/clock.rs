@@ -109,6 +109,15 @@ impl Clock {
     }
 }
 
+/// What the display thread does at each frame boundary besides the clock's own
+/// work: compose and present the frame.
+pub trait FrameSink: Send {
+    fn frame(&mut self);
+
+    /// The thread's last act.
+    fn finish(&mut self) {}
+}
+
 /// The display thread and what it joins on.
 pub struct DisplayThread {
     clock: Arc<Clock>,
@@ -117,7 +126,7 @@ pub struct DisplayThread {
 
 impl DisplayThread {
     /// Start `kona-display`, running a frame every `period`.
-    pub fn spawn(clock: Arc<Clock>, handle: DisplayHandle, period: Duration) -> DisplayThread {
+    pub fn spawn(clock: Arc<Clock>, handle: DisplayHandle, period: Duration, mut sink: Box<dyn FrameSink>) -> DisplayThread {
         clock.stop.store(false, Release);
         let c = clock.clone();
         let join = std::thread::Builder::new()
@@ -144,7 +153,9 @@ impl DisplayThread {
                     }
                     next += period;
                     c.frame(&handle);
+                    sink.frame();
                 }
+                sink.finish();
             })
             .expect("kona display thread");
         DisplayThread { clock, join: Some(join) }
@@ -183,6 +194,12 @@ mod tests {
     const INT_CAUSE: u64 = 0x800238;
     const RETRACE_TAG: u64 = 0x800248;
 
+    struct Nothing;
+
+    impl FrameSink for Nothing {
+        fn frame(&mut self) {}
+    }
+
     /// A back end that keeps the handle it is given and does nothing else.
     struct Keep(Arc<Mutex<Option<DisplayHandle>>>);
 
@@ -208,6 +225,18 @@ mod tests {
         kona.start();
         let handle = kept.lock().clone().expect("attach gave a handle");
         (kona, host, handle)
+    }
+
+    /// Wait for `cond`, up to a deadline, not a count of tries.
+    fn wait_for(mut cond: impl FnMut() -> bool) -> bool {
+        let end = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < end {
+            if cond() {
+                return true;
+            }
+            std::thread::yield_now();
+        }
+        cond()
     }
 
     fn read(kona: &crate::dev::kona::Kona, off: u64) -> u32 {
@@ -258,23 +287,12 @@ mod tests {
     fn the_thread_completes_a_request_and_joins() {
         let (kona, _host, h) = board();
         let clock = Arc::new(Clock::default());
-        let mut t = DisplayThread::spawn(clock.clone(), h.clone(), Duration::from_millis(1));
+        let mut t = DisplayThread::spawn(clock.clone(), h.clone(), Duration::from_millis(1), Box::new(Nothing));
         clock.request(h.epoch(), 0x55);
-        for _ in 0..50_000_000u32 {
-            if read(&kona, RETRACE_TAG) == 0x55 {
-                break;
-            }
-            std::thread::yield_now();
-        }
+        assert!(wait_for(|| read(&kona, RETRACE_TAG) == 0x55));
         assert_eq!(read(&kona, RETRACE_TAG), 0x55);
         // The counters follow the completion within the same frame.
-        for _ in 0..50_000_000u32 {
-            if clock.frames() >= 1 {
-                break;
-            }
-            std::thread::yield_now();
-        }
-        assert!(clock.frames() >= 1);
+        assert!(wait_for(|| clock.frames() >= 1));
         t.stop();
         let f = clock.frames();
         std::thread::yield_now();
@@ -287,7 +305,7 @@ mod tests {
     fn a_quiesced_thread_holds_still() {
         let (kona, _host, h) = board();
         let clock = Arc::new(Clock::default());
-        let mut t = DisplayThread::spawn(clock.clone(), h, Duration::from_millis(1));
+        let mut t = DisplayThread::spawn(clock.clone(), h, Duration::from_millis(1), Box::new(Nothing));
         clock.quiesce(true);
         let f = clock.frames();
         for _ in 0..10_000 {
@@ -295,13 +313,7 @@ mod tests {
         }
         assert_eq!(clock.frames(), f);
         clock.resume();
-        for _ in 0..50_000_000u32 {
-            if clock.frames() > f {
-                break;
-            }
-            std::thread::yield_now();
-        }
-        assert!(clock.frames() > f);
+        assert!(wait_for(|| clock.frames() > f));
         t.stop();
         kona.stop();
     }

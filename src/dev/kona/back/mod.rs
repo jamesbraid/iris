@@ -36,12 +36,16 @@ use super::ident::KonaConfig;
 use super::handle::DisplayHandle;
 use super::job::{BackPort, Backend, Grammar, Job, Reply};
 use display::clock::{Clock, DisplayThread, FRAME_PERIOD};
+use crate::gfx_display::GfxDisplay;
+use display::screen::Display;
+use display::{ColourMap, Compositor};
 use raster::FillRule;
 use store::layout::{BufferConfig, Layout, Refusal};
 use token::textport::Textport;
 use token::x::XState;
 use store::PixelStore;
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
 
 /// What the back end is told about the pipe it draws for.
@@ -159,8 +163,15 @@ pub struct KonaBackend {
     handle: Option<DisplayHandle>,
     /// What the display thread completes, and the thread while the board runs.
     clock: Arc<Clock>,
-    display: Option<DisplayThread>,
-    store: PixelStore,
+    thread: Option<DisplayThread>,
+    /// The window the board shows the guest, which the machine keeps a clone
+    /// of (`KonaBackend::display`).
+    display: Arc<Display>,
+    /// The textport's colour map, copied by the display once a frame, and a
+    /// count of the jobs that change the store or the map, which tells the display the store changed.
+    map: Arc<parking_lot::Mutex<ColourMap>>,
+    generation: Arc<AtomicU64>,
+    store: Arc<PixelStore>,
     textport: Textport,
     x: XState,
     /// Buffer-configuration commands that got a layout, and those refused by
@@ -180,16 +191,20 @@ const GL_BUFFER_CONFIG: u32 = 0x1;
 
 impl KonaBackend {
     pub fn new(cfg: BackendConfig) -> Self {
+        let map = Arc::new(parking_lot::Mutex::new(ColourMap::default()));
         KonaBackend {
-            store: PixelStore::new(cfg.managed.0, cfg.managed.1),
-            textport: Textport::default(),
+            store: Arc::new(PixelStore::new(cfg.managed.0, cfg.managed.1)),
+            textport: Textport::with_map(map.clone()),
+            map,
+            generation: Arc::default(),
+            display: Arc::new(Display::detached()),
             x: XState::default(),
             cfg,
             counts: [0; Kind::ALL.len()],
             resets: 0,
             handle: None,
             clock: Arc::default(),
-            display: None,
+            thread: None,
             layouts: 0,
             refused: [0; Refusal::ALL.len()],
             malformed: 0,
@@ -218,6 +233,19 @@ impl KonaBackend {
         }
     }
 
+    /// The window this board shows the guest, to hand to the machine so
+    /// `get_display` can return it.
+    pub fn display(&self) -> Arc<Display> {
+        self.display.clone()
+    }
+
+    /// Wire the machine's status-bar inputs into the display.
+    pub fn with_status(self, status: Arc<crate::disp::StatusSource>) -> Self {
+        // The same window, whether the machine took `display()` before or after.
+        self.display.set_status(status);
+        self
+    }
+
     pub fn config(&self) -> &BackendConfig {
         &self.cfg
     }
@@ -230,7 +258,7 @@ impl KonaBackend {
         writeln!(w, "managed area      {} x {}", c.managed.0, c.managed.1)?;
         writeln!(w, "record bound      {} words per pixel", c.record_words())?;
         writeln!(w, "display handle    {}", if self.handle.is_some() { "attached" } else { "detached" })?;
-        writeln!(w, "display           {} frames, {} retraces completed, thread {}", self.clock.frames(), self.clock.completed(), if self.display.is_some() { "running" } else { "stopped" })?;
+        writeln!(w, "display           {} frames, {} retraces completed, thread {}", self.clock.frames(), self.clock.completed(), if self.thread.is_some() { "running" } else { "stopped" })?;
         writeln!(w, "pixel store       {} word arrays of {} x {}", self.store.allocated().len(), self.store.width(), self.store.height())?;
         writeln!(w, "textport          colour {} raster {:?}, {} drawn, {} unmodelled", self.textport.colour(), self.textport.raster(), self.textport.drawn, self.textport.unmodelled)?;
         let gc = match self.x.gc() {
@@ -284,7 +312,7 @@ impl KonaBackend {
     fn shot(&self, path: &str) -> Result<(usize, usize), String> {
         let (w, h) = (self.store.width() as usize, self.store.height() as usize);
         let mut frame = vec![0u32; w * h];
-        display::compose_default(&self.store, token::textport::COLOUR_WORD, self.textport.colour_map(), &mut frame, w);
+        display::compose_default(&self.store, token::textport::COLOUR_WORD, &self.textport.colour_map(), &mut frame, w);
         crate::hostinput::save_png(path, &frame, w, h, None)
     }
 
@@ -298,40 +326,24 @@ impl KonaBackend {
 
 impl Backend for KonaBackend {
     fn job(&mut self, port: &mut BackPort<'_>, job: Job<'_>) -> Reply {
-        self.counts[Kind::of(&job) as usize] += 1;
-        match job {
-            // With the display thread running, a retrace completes at its next
-            // frame boundary; with none (before the board starts, in a test)
-            // there is no boundary, so it completes at once.
-            Job::Retrace { tag } => match &self.handle {
-                Some(h) if self.display.is_some() => self.clock.request(h.epoch(), tag),
-                _ => port.retrace_done(tag),
-            },
-            Job::DmaIn { .. } => return Reply::Unclaimed,
-            Job::FirmwareStart { .. } => port.set_managed_size(self.cfg.managed.0, self.cfg.managed.1),
-            Job::Command { grammar: Grammar::Gl, selector: GL_BUFFER_CONFIG, args, .. } => self.buffer_config(args),
-            Job::Command { grammar: Grammar::Textport, selector, args, .. } => {
-                self.textport.command(&self.store, self.cfg.fill_rule, selector, args);
-            }
-            Job::Command { grammar: Grammar::Kernel, selector, args, .. } => {
-                if !self.x.command(selector, args) && token::xfill::is_draw(selector) {
-                    let surface = raster::Surface::new(&self.store, token::textport::COLOUR_WORD);
-                    self.x.draw_command(&surface, selector, args);
-                }
-                // A stipple store's rows follow it as a run the back end sizes.
-                if selector == token::stipple::X_STORE_STIPPLE && self.x.stipple.pending_rows() != 0 {
-                    return Reply::Data(self.x.stipple.pending_rows());
-                }
-            }
-            Job::Data { grammar: Grammar::Kernel, selector: token::stipple::X_STORE_STIPPLE, words, .. } => self.x.stipple.rows(words),
-            Job::Bitmap { header, payload } => self.textport.bitmap(&self.store, header, payload),
-            _ => {}
+        // Jobs that change the store (or the textport's colour map) move the
+        // drawing generation after they have run, so a frame the display
+        // composed meanwhile is not marked seen: it is composed again.
+        let draws = match &job {
+            Job::Command { grammar: Grammar::Textport, .. } | Job::Bitmap { .. } => true,
+            Job::Command { grammar: Grammar::Kernel, selector, .. } => token::xfill::is_draw(*selector),
+            _ => false,
+        };
+        let reply = self.handle_job(port, job);
+        if draws {
+            self.generation.fetch_add(1, Relaxed);
         }
-        Reply::Done
+        reply
     }
 
     fn attach(&mut self, handle: DisplayHandle) {
-        self.display = Some(DisplayThread::spawn(self.clock.clone(), handle.clone(), self.cfg.frame_period));
+        let sink = Compositor::new(self.store.clone(), token::textport::COLOUR_WORD, self.map.clone(), self.display.clone(), self.generation.clone());
+        self.thread = Some(DisplayThread::spawn(self.clock.clone(), handle.clone(), self.cfg.frame_period, Box::new(sink)));
         self.handle = Some(handle);
     }
 
@@ -339,20 +351,26 @@ impl Backend for KonaBackend {
         self.resets += 1;
         self.clock.cancel();
         self.store.reset();
+        self.generation.fetch_add(1, Relaxed);
         self.textport.reset();
         self.x.reset();
         self.last_layout = None;
     }
 
     fn stop(&mut self) {
+        // As VPro's stop does: a stop from the main thread must leave the
+        // renderer to the main thread (the macOS hang `DisplayStop` exists for),
+        // so the request is made before the display thread, which releases the
+        // renderer as its last act, is joined.
+        self.display.display_stop().request();
         // The display thread joins first: it may be inside a handle call.
-        self.display = None;
+        self.thread = None;
         self.handle = None;
         self.clock.cancel();
     }
 
     fn quiesce(&mut self) {
-        self.clock.quiesce(self.display.is_some());
+        self.clock.quiesce(self.thread.is_some());
     }
 
     fn resume(&mut self) {
@@ -376,6 +394,41 @@ impl Backend for KonaBackend {
             _ => return Ok(false),
         }
         Ok(true)
+    }
+}
+
+impl KonaBackend {
+    fn handle_job(&mut self, port: &mut BackPort<'_>, job: Job<'_>) -> Reply {
+        self.counts[Kind::of(&job) as usize] += 1;
+        match job {
+            // With the display thread running, a retrace completes at its next
+            // frame boundary; with none (before the board starts, in a test)
+            // there is no boundary, so it completes at once.
+            Job::Retrace { tag } => match &self.handle {
+                Some(h) if self.thread.is_some() => self.clock.request(h.epoch(), tag),
+                _ => port.retrace_done(tag),
+            },
+            Job::DmaIn { .. } => return Reply::Unclaimed,
+            Job::FirmwareStart { .. } => port.set_managed_size(self.cfg.managed.0, self.cfg.managed.1),
+            Job::Command { grammar: Grammar::Gl, selector: GL_BUFFER_CONFIG, args, .. } => self.buffer_config(args),
+            Job::Command { grammar: Grammar::Textport, selector, args, .. } => {
+                self.textport.command(&self.store, self.cfg.fill_rule, selector, args);
+            }
+            Job::Command { grammar: Grammar::Kernel, selector, args, .. } => {
+                if !self.x.command(selector, args) && token::xfill::is_draw(selector) {
+                    let surface = raster::Surface::new(&self.store, token::textport::COLOUR_WORD);
+                    self.x.draw_command(&surface, selector, args);
+                }
+                // A stipple store's rows follow it as a run the back end sizes.
+                if selector == token::stipple::X_STORE_STIPPLE && self.x.stipple.pending_rows() != 0 {
+                    return Reply::Data(self.x.stipple.pending_rows());
+                }
+            }
+            Job::Data { grammar: Grammar::Kernel, selector: token::stipple::X_STORE_STIPPLE, words, .. } => self.x.stipple.rows(words),
+            Job::Bitmap { header, payload } => self.textport.bitmap(&self.store, header, payload),
+            _ => {}
+        }
+        Reply::Done
     }
 }
 
@@ -483,6 +536,18 @@ mod tests {
         }
         let (_, text) = monitor(&kona, &["counters"]);
         assert!(text.contains("dropped words     3"), "{text}");
+    }
+
+    /// Wait for `cond`, up to a deadline, not a count of tries.
+    fn wait_for(mut cond: impl FnMut() -> bool) -> bool {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < end {
+            if cond() {
+                return true;
+            }
+            std::thread::yield_now();
+        }
+        cond()
     }
 
     fn backend() -> KonaBackend {
@@ -648,24 +713,96 @@ mod tests {
         for w in [0x1e7u32, 0x77] {
             assert_eq!(kona.bus_write(0xc10000, 4, w as u64), crate::traits::BUS_OK);
         }
-        for _ in 0..50_000_000u32 {
-            if kona.bus_read(0x800248, 4).1 == 0x77 {
-                break;
-            }
-            std::thread::yield_now();
-        }
+        wait_for(|| kona.bus_read(0x800248, 4).1 == 0x77);
         assert_eq!(kona.bus_read(0x800248, 4).1, 0x77);
         // The counter follows the completion within the same frame.
-        let text = loop {
-            let text = monitor(&kona, &["status"]).1;
-            if text.contains("1 retraces completed") {
-                break text;
-            }
-            std::thread::yield_now();
-        };
+        wait_for(|| monitor(&kona, &["status"]).1.contains("1 retraces completed"));
+        let text = monitor(&kona, &["status"]).1;
         assert!(text.contains("thread running"), "{text}");
         kona.stop();
         assert!(monitor(&kona, &["status"]).1.contains("thread stopped"));
+    }
+
+    /// The display's generation moves for the jobs that change the store and
+    /// the colour map, after they ran, and for no other job: a retrace or a
+    /// state command does not make the display present a new frame.
+    #[test]
+    fn only_jobs_that_draw_move_the_generation() {
+        let mut b = backend();
+        let g = |b: &KonaBackend| b.generation.load(Relaxed);
+        let start = g(&b);
+        send(&mut b, Job::Retrace { tag: 1 });
+        command(&mut b, Grammar::Kernel, 0x12a, &[0, 0, 10, 10]);
+        command(&mut b, Grammar::Gl, 0x1d, &[0, 0, 0, 0]);
+        assert_eq!(g(&b), start);
+        command(&mut b, Grammar::Textport, 2, &[3]);
+        assert_eq!(g(&b), start + 1);
+        command(&mut b, Grammar::Textport, 3, &[3, 100, 100, 100]);
+        send(&mut b, Job::Bitmap { header: &[1, 1, 0, 0, 0, 0], payload: &[0] });
+        command(&mut b, Grammar::Kernel, 0x154, &[0, 1 << 16 | 1]);
+        assert_eq!(g(&b), start + 4);
+        b.reset();
+        assert_eq!(g(&b), start + 5, "a reset clears the store");
+    }
+
+    /// A stop from the main thread leaves the renderer to it; any other stop
+    /// has the display thread release it as its last act.
+    #[test]
+    fn a_stop_from_the_main_thread_leaves_the_renderer_alone() {
+        use crate::dev::ng1::rex3::Renderer;
+        use crate::traits::Device;
+        use std::sync::atomic::AtomicU32;
+        struct Spy(Arc<AtomicU32>);
+        impl Renderer for Spy {
+            fn present(
+                &mut self,
+                _: &mut crate::disp::Rex3Screen,
+                _: &mut crate::debug_overlay::DebugOverlay,
+                _: &mut crate::disp::StatusBar,
+                _: &mut crate::disp::StatusBarTexture,
+                _: &crate::disp::BarStats,
+                _: bool,
+                _: Option<&[u32]>,
+                _: Option<&[u32]>,
+            ) {
+            }
+
+            fn stop(&mut self) {
+                self.0.fetch_add(1, Relaxed);
+            }
+        }
+        let run = |name: &str| {
+            let stops = Arc::new(AtomicU32::new(0));
+            let spy = stops.clone();
+            std::thread::Builder::new()
+                .name(name.into())
+                .spawn(move || {
+                    let cfg = KonaConfig::default();
+                    let backend = KonaBackend::new(BackendConfig::for_pipe(&cfg));
+                    *backend.display().renderer_slot().lock() = Some(Box::new(Spy(spy)));
+                    let host = TestHost::new();
+                    let kona = KonaBuilder::new(cfg, attach(&host)).backend(Box::new(backend)).build().unwrap();
+                    kona.start();
+                    kona.stop();
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+            stops.load(Relaxed)
+        };
+        assert_eq!(run("main"), 0, "the main thread releases it");
+        assert_eq!(run("other"), 1, "the display thread releases it");
+    }
+
+    /// The machine may take the window before or after wiring in its status
+    /// source: it is the same window.
+    #[test]
+    fn the_window_is_the_same_before_and_after_the_status_is_wired() {
+        let cfg = KonaConfig::default();
+        let backend = KonaBackend::new(BackendConfig::for_pipe(&cfg));
+        let before = backend.display();
+        let backend = backend.with_status(crate::disp::StatusSource::new(Arc::default(), Arc::default()));
+        assert!(Arc::ptr_eq(&before, &backend.display()));
     }
 
     #[test]

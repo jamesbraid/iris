@@ -661,6 +661,11 @@ pub(super) fn monitor(kona: &Kona, args: &[&str]) -> Result<String, String> {
 /// A board with a `KonaBackend` after `limit` records (all of them if None) of
 /// `rec`, loads and stores only.
 pub(super) fn replay_board(rec: &Recording, limit: Option<usize>) -> Result<Arc<Kona>, String> {
+    replay_board_with_display(rec, limit).map(|(kona, _)| kona)
+}
+
+/// As `replay_board`, with the window the board shows the guest.
+pub(super) fn replay_board_with_display(rec: &Recording, limit: Option<usize>) -> Result<(Arc<Kona>, Arc<super::display::screen::Display>), String> {
     let cfg = rec.config()?;
     let at = Arc::new(AtomicUsize::new(0));
     let host = ReplayHost::new(rec, at);
@@ -669,6 +674,7 @@ pub(super) fn replay_board(rec: &Recording, limit: Option<usize>) -> Result<Arc<
         _ => None,
     });
     let backend = super::KonaBackend::new(super::BackendConfig::for_pipe(&cfg));
+    let display = backend.display();
     let kona = KonaBuilder::new(cfg, host.attach()).backend(Box::new(backend)).probe_value(probe.unwrap_or(0)).build()?;
     for r in rec.records.iter().take(limit.unwrap_or(usize::MAX)) {
         match *r {
@@ -686,7 +692,7 @@ pub(super) fn replay_board(rec: &Recording, limit: Option<usize>) -> Result<Arc<
             _ => {}
         }
     }
-    Ok(kona)
+    Ok((kona, display))
 }
 
 /// What a stretch of a stream between two user marks sent.
@@ -1049,6 +1055,47 @@ mod tests {
         let bad = ours.2.chunks_exact(3).zip(theirs.2.chunks_exact(3)).filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 8)).count();
         let share = bad as f64 / (ours.0 * ours.1) as f64;
         eprintln!("{bad} of {} pixels differ by more than 8 levels ({:.4})", ours.0 * ours.1, share);
+        assert!(share <= PROM_FRAME_TOLERANCE, "{share}");
+    }
+
+    /// The window the board shows the guest returns the composed PROM frame:
+    /// once the board runs, a frame request is answered at a retrace with the
+    /// frame in the screen's buffer, which matches the capture as the shot does.
+    #[test]
+    fn a_frame_request_on_the_running_board_returns_the_prom_frame() {
+        use crate::gfx_display::GfxDisplay;
+        use crate::traits::Device;
+        let Some(dir) = recordings_dir() else { return };
+        let (rec_path, png_path) = (dir.join("onyx2-deskside-prom.kona.rec"), dir.join("onyx2-deskside-prom-graphics-console.png"));
+        if !rec_path.exists() || !png_path.exists() {
+            eprintln!("skipping: the PROM recording or its capture is not in {}", dir.display());
+            return;
+        }
+        let rec = Recording::parse(&std::fs::read(&rec_path).unwrap()).unwrap();
+        let (kona, display) = replay_board_with_display(&rec, None).unwrap();
+        kona.start();
+        display.request_frame();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while display.frame_pending() && std::time::Instant::now() < end {
+            std::thread::yield_now();
+        }
+        assert!(!display.frame_pending(), "the request was answered at a retrace");
+        let theirs = decode_png(&png_path);
+        let screen = display.screen().lock();
+        assert_eq!((screen.width, screen.height), (theirs.0, theirs.1));
+        let mut bad = 0;
+        for y in 0..theirs.1 {
+            for x in 0..theirs.0 {
+                let p = screen.rgba[y * crate::disp::FB_STRIDE + x];
+                let ours = [p as u8, (p >> 8) as u8, (p >> 16) as u8];
+                let at = (y * theirs.0 + x) * 3;
+                bad += ours.iter().zip(&theirs.2[at..at + 3]).any(|(a, b)| a.abs_diff(*b) > 8) as usize;
+            }
+        }
+        drop(screen);
+        kona.stop();
+        let share = bad as f64 / (theirs.0 * theirs.1) as f64;
+        eprintln!("{bad} pixels differ ({share:.4})");
         assert!(share <= PROM_FRAME_TOLERANCE, "{share}");
     }
 

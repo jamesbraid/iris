@@ -28,8 +28,14 @@
 //! gamma or draw a cursor yet.
 
 pub mod clock;
+pub mod screen;
 
 use super::store::PixelStore;
+use clock::FrameSink;
+use parking_lot::Mutex;
+use screen::Display;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::Arc;
 
 /// Entries in the textport's colour map.
 pub const COLOUR_MAP_ENTRIES: usize = 256;
@@ -88,6 +94,46 @@ pub fn compose_default(store: &PixelStore, word: usize, map: &ColourMap, out: &m
             // SAFETY: `src + x` is inside the array: `x < w <= pitch` and the row is in range.
             *px = map.entries[(unsafe { array.load(src + x) } & 0xff) as usize];
         }
+    }
+}
+
+/// The display thread's frame: compose the store through the tables and
+/// present it, when the store changed, a frame is asked for or the screen is
+/// due a refresh.
+pub struct Compositor {
+    store: Arc<PixelStore>,
+    word: usize,
+    map: Arc<Mutex<ColourMap>>,
+    display: Arc<Display>,
+    /// The drawing generation (bumped once per job that draws) the last
+    /// presented frame was composed at.
+    generation: Arc<AtomicU64>,
+    seen: u64,
+    frame: Vec<u32>,
+}
+
+impl Compositor {
+    pub fn new(store: Arc<PixelStore>, word: usize, map: Arc<Mutex<ColourMap>>, display: Arc<Display>, generation: Arc<AtomicU64>) -> Compositor {
+        let frame = vec![0; store.width() as usize * store.height() as usize];
+        Compositor { store, word, map, display, generation, seen: u64::MAX, frame }
+    }
+}
+
+impl FrameSink for Compositor {
+    fn frame(&mut self) {
+        let now = self.generation.load(Relaxed);
+        let Some(due) = self.display.due(now != self.seen) else { return };
+        self.seen = now;
+        // The tables are copied once per frame, under their lock; the store
+        // is read as it is, without waiting for drawing.
+        let map = self.map.lock().clone();
+        let (w, h) = (self.store.width() as usize, self.store.height() as usize);
+        compose_default(&self.store, self.word, &map, &mut self.frame, w);
+        self.display.present(&self.frame, w, h, due);
+    }
+
+    fn finish(&mut self) {
+        self.display.finish();
     }
 }
 
