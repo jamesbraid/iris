@@ -708,9 +708,7 @@ impl Ip22Machine {
         }
 
         let control = Control::new();
-        let mut controllers: Vec<Arc<dyn crate::disks::DiskController>> = vec![hpc3.scsi().clone()];
-        controllers.extend(hpc3.scsi1().map(|c| c.clone() as Arc<dyn crate::disks::DiskController>));
-        let disks = Disks::new(controllers).with_ci(ci_enabled);
+        let disks = Disks::new().with_ci(ci_enabled);
         Self::bind_scsi(&topology, &hpc3);
         let placed = cfg.all_placements(&topology).and_then(|p| {
             // A test device the caller built occupies gio0 like any other.

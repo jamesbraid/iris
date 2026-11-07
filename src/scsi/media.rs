@@ -221,7 +221,7 @@ mod tests {
 
     fn attach(t: &Topology, device: &str, at: &str, opts: &str, probe: bool) -> Result<(), String> {
         let p = Placement { device: device.into(), at: at.parse().unwrap(), opts: toml::from_str(opts).unwrap() };
-        let (mut d, k) = (Devices::new(), Disks::new(vec![]));
+        let (mut d, k) = (Devices::new(), Disks::new());
         let mut ctx = Ctx { devices: &mut d, disks: &k };
         attach_device(&p, &MachineConfig::default(), (!probe).then_some(&mut ctx), t)
     }
@@ -273,7 +273,7 @@ mod tests {
 
     fn attach_cfg(t: &Topology, cfg: &MachineConfig, opts: &str, probe: bool) -> Result<(), String> {
         let p = Placement { device: "daynaport".into(), at: "hpc3.0.t3".parse().unwrap(), opts: toml::from_str(opts).unwrap() };
-        let (mut d, k) = (Devices::new(), Disks::new(vec![]));
+        let (mut d, k) = (Devices::new(), Disks::new());
         attach_device(&p, cfg, (!probe).then_some(&mut Ctx { devices: &mut d, disks: &k }), t)
     }
 

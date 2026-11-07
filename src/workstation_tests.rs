@@ -74,12 +74,12 @@ fn the_provided_methods_answer_on_every_machine_type() {
             assert!(m.nat_control().is_some() && m.net_frames().is_some(), "{machine:?}");
 
             let buses = if machine == Machine::Indy { 1 } else { 2 };
-            assert_eq!(m.disks().len(), buses, "{machine:?}: one tracked controller per bus");
+            assert_eq!(m.topology().buses::<crate::scsi::ScsiPort>().len(), buses, "{machine:?}: one port per bus");
             assert_eq!(with_buses(m, |b| b.len()), buses, "{machine:?}");
             let pending = with_buses(m, |b| b.iter().map(|b| b.pending_chd_sync_count()).sum::<usize>());
             assert_eq!(m.pending_chd_sync_count(), pending, "{machine:?}");
             assert!(m.flush_disks().is_ok());
-            assert!(m.disc_changer().is_some(), "{machine:?}");
+            assert!(m.disc_changer().is_none(), "{machine:?}: the fixture has no CD-ROM");
             assert_eq!(m.sync_chd_disks(None, &mut |_, _, _| {}, &|| false).unwrap(), 0);
         });
     }

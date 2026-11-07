@@ -1,8 +1,7 @@
 //! The machine's disks as the front ends see them: attach an image to a
 //! target, flush every SCSI bus, count and fold pending CHD diffs, and name the
-//! controller whose CD-ROM drives take disc changes. A machine passes its SCSI
-//! controllers, in bus order, when it builds this; the shared `Workstation`
-//! methods answer from here.
+//! controller whose CD-ROM drives take disc changes. The buses are the ones
+//! bound in the machine's socket map, so there is no list to keep in step.
 
 use std::io;
 use std::path::PathBuf;
@@ -13,6 +12,7 @@ use parking_lot::Mutex;
 use crate::location::Location;
 use crate::scsi::{ScsiBus, ScsiPort};
 use crate::scsi_monitor::ScsiTargets;
+use crate::topology::Topology;
 use crate::workstation::DiscChanger;
 
 /// A SCSI controller, as far as the disks are concerned. (`ScsiTargets` has a
@@ -183,8 +183,8 @@ fn ci_run_tag(pid: u32, started: Result<std::time::Duration, std::time::Duration
     }
 }
 
+#[derive(Default)]
 pub struct Disks {
-    controllers: Vec<Arc<dyn DiskController>>,
     /// A `--ci` run: overlays go to the temporary directory.
     ci: bool,
     /// The `scratch = true` volume the CI socket reads and writes: the lowest
@@ -194,10 +194,8 @@ pub struct Disks {
 }
 
 impl Disks {
-    /// `controllers` in bus order: the first is the machine's internal bus,
-    /// which takes disc changes.
-    pub fn new(controllers: Vec<Arc<dyn DiskController>>) -> Disks {
-        Disks { controllers, ci: false, scratch: Mutex::new(None), records: Mutex::new(Vec::new()) }
+    pub fn new() -> Disks {
+        Disks::default()
     }
 
     pub fn with_ci(mut self, ci: bool) -> Disks {
@@ -252,39 +250,40 @@ impl Disks {
 
     /// Make every disk's accepted writes survive the process, including a
     /// copy-on-write overlay's record of the sectors it holds.
-    pub fn flush(&self) -> io::Result<()> {
-        self.controllers.iter().try_for_each(|c| c.bus().flush())
+    pub fn flush(&self, t: &Topology) -> io::Result<()> {
+        t.buses::<ScsiPort>().iter().try_for_each(|(_, p)| p.bus().flush())
     }
 
     /// Attached CHD disks whose `.diff.chd` holds changes waiting to be folded
     /// into their bases on a clean shutdown.
-    pub fn pending_chd_sync_count(&self) -> usize {
-        self.controllers.iter().map(|c| c.bus().pending_chd_sync_count()).sum()
+    pub fn pending_chd_sync_count(&self, t: &Topology) -> usize {
+        t.buses::<ScsiPort>().iter().map(|(_, p)| p.bus().pending_chd_sync_count()).sum()
     }
 
     /// Fold pending CHD diffs back into their bases, preserving compression.
-    /// `only` limits it to one SCSI id (on every bus). Call only after the
-    /// guest has stopped, so disk I/O is quiesced. `progress(done, total,
+    /// `only` limits it to one target; `None` is every disk. Call only after
+    /// the guest has stopped, so disk I/O is quiesced. `progress(done, total,
     /// fraction)` drives a UI; `cancel()` aborts cleanly, leaving un-synced
     /// bases and diffs intact. Returns the count synced.
     pub fn sync_chd(
         &self,
-        only: Option<usize>,
+        t: &Topology,
+        only: Option<&Location>,
         progress: &mut dyn FnMut(usize, usize, f32),
         cancel: &dyn Fn() -> bool,
     ) -> io::Result<usize> {
-        let buses: Vec<&ScsiBus> = self.controllers.iter().map(|c| c.bus()).collect();
-        ScsiBus::sync_chd_disks(&buses, only, progress, cancel)
+        let ports = t.buses::<ScsiPort>();
+        let parent = only.and_then(Location::parent);
+        let buses: Vec<&ScsiBus> = ports.iter().filter(|(l, _)| parent.as_ref().is_none_or(|p| p == l)).map(|(_, p)| p.bus()).collect();
+        ScsiBus::sync_chd_disks(&buses, only.and_then(Location::target).map(usize::from), progress, cancel)
     }
 
-    /// The first controller's CD-ROM drives take disc changes.
-    pub fn disc_changer(&self) -> Option<Arc<dyn DiscChanger>> {
-        self.controllers.first().cloned().map(|c| c.changer())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.controllers.len()
+    /// The first CD-ROM in location order, with the changer of the controller
+    /// it sits on: its drives take disc changes.
+    pub fn disc_changer(&self, t: &Topology) -> Option<(Location, Arc<dyn DiscChanger>)> {
+        let first = self.records().into_iter().find(|r| r.cdrom)?;
+        let port = t.handle::<ScsiPort>(&first.at.parent()?)?;
+        Some((first.at, port.changer()))
     }
 }
 
@@ -339,46 +338,69 @@ mod tests {
         Arc::new(AtomicUsize::new(0))
     }
 
+    /// A map with one controller row per entry of `ctls`, each bound to a port.
+    fn topo(ctls: Vec<Arc<Ctl>>) -> Topology {
+        let t = Topology::new();
+        for (n, ctl) in ctls.into_iter().enumerate() {
+            let at: Location = format!("hpc3.{n}").parse().unwrap();
+            t.add(at.clone(), crate::topology::Row::fixed("").ctl(n as u8)).unwrap();
+            t.bind(&at, Arc::new(ScsiPort::new(ctl))).unwrap();
+        }
+        t
+    }
+
     #[test]
-    fn flush_reaches_every_tracked_bus() {
+    fn flush_reaches_every_bound_port() {
         let (a, b, c) = (counter(), counter(), counter());
-        let disks = Disks::new(vec![ctl(&[(1, a.clone(), false), (2, b.clone(), false)]), ctl(&[(1, c.clone(), false)])]);
-        assert_eq!(disks.len(), 2);
-        disks.flush().unwrap();
+        let t = topo(vec![ctl(&[(1, a.clone(), false), (2, b.clone(), false)]), ctl(&[(1, c.clone(), false)])]);
+        Disks::new().flush(&t).unwrap();
         assert_eq!([&a, &b, &c].map(|x| x.load(Ordering::SeqCst)), [1, 1, 1]);
     }
 
     #[test]
-    fn pending_chd_sync_count_sums_the_buses() {
-        let disks = Disks::new(vec![
-            ctl(&[(1, counter(), true), (2, counter(), false)]),
-            ctl(&[(1, counter(), true), (3, counter(), true)]),
-        ]);
-        assert_eq!(disks.pending_chd_sync_count(), 3);
+    fn pending_chd_sync_count_sums() {
+        let t = topo(vec![ctl(&[(1, counter(), true), (2, counter(), false)]), ctl(&[(1, counter(), true), (3, counter(), true)])]);
+        assert_eq!(Disks::new().pending_chd_sync_count(&t), 3);
     }
 
     #[test]
     fn sync_chd_with_nothing_pending_returns_zero() {
-        let disks = Disks::new(vec![ctl(&[(1, counter(), false)])]);
-        let n = disks.sync_chd(None, &mut |_, _, _| {}, &|| false).unwrap();
-        assert_eq!(n, 0);
+        let t = topo(vec![ctl(&[(1, counter(), false)])]);
+        assert_eq!(Disks::new().sync_chd(&t, None, &mut |_, _, _| {}, &|| false).unwrap(), 0);
+    }
+
+    /// One location limits the sync to the controller and target it names.
+    #[test]
+    fn sync_chd_only_one_location() {
+        let t = topo(vec![ctl(&[(1, counter(), true)]), ctl(&[(1, counter(), true), (3, counter(), true)])]);
+        let at = |s: &str| s.parse::<Location>().unwrap();
+        let none = Disks::new().sync_chd(&t, Some(&at("hpc3.1.t2")), &mut |_, _, _| {}, &|| false).unwrap();
+        assert_eq!(none, 0, "nothing at that target");
+        assert_eq!(Disks::new().pending_chd_sync_count(&t), 3);
+    }
+
+    /// A CD-ROM on the second controller, with none on the first, is found.
+    #[test]
+    fn disc_changer_is_the_first_cdrom_in_location_order() {
+        let iso = image("changer-iso", 2048);
+        let (first, second) = (ctl(&[]), ctl(&[]));
+        let t = topo(vec![first.clone(), second.clone()]);
+        let disks = Disks::new();
+        assert!(disks.disc_changer(&t).is_none(), "no CD-ROM yet");
+        let port = t.handle::<ScsiPort>(&"hpc3.1".parse().unwrap()).unwrap();
+        disks.attach_media(&port, &"hpc3.1.t4".parse().unwrap(), &MediaSpec { cdrom: true, ..disk(&iso) }).unwrap();
+        let (at, changer) = disks.disc_changer(&t).expect("a changer");
+        assert_eq!(at.to_string(), "hpc3.1.t4");
+        assert_eq!(Arc::as_ptr(&changer) as *const (), Arc::as_ptr(&second) as *const ());
+        std::fs::remove_file(iso).unwrap();
     }
 
     #[test]
-    fn disc_changer_is_the_first_tracked_controller() {
-        let first = ctl(&[]);
-        let disks = Disks::new(vec![first.clone(), ctl(&[])]);
-        // The changer is the same allocation as the first controller.
-        let changer = disks.disc_changer().expect("a changer");
-        assert_eq!(Arc::as_ptr(&changer) as *const (), Arc::as_ptr(&first) as *const ());
-    }
-
-    #[test]
-    fn no_controllers_means_no_changer_and_a_clean_flush() {
-        let disks = Disks::new(vec![]);
-        assert!(disks.disc_changer().is_none());
-        assert!(disks.flush().is_ok());
-        assert_eq!(disks.pending_chd_sync_count(), 0);
+    fn an_empty_topology_has_no_changer_and_a_clean_flush() {
+        let (disks, t) = (Disks::new(), Topology::new());
+        assert!(disks.disc_changer(&t).is_none());
+        assert!(disks.flush(&t).is_ok());
+        assert_eq!(disks.pending_chd_sync_count(&t), 0);
     }
 
     fn port() -> ScsiPort {
@@ -403,7 +425,7 @@ mod tests {
     #[test]
     fn a_target_lands_on_the_id_in_its_location() {
         let (a, b) = (image("land-a", 4096), image("land-b", 4096));
-        let (disks, p) = (Disks::new(vec![]), port());
+        let (disks, p) = (Disks::new(), port());
         disks.attach_media(&p, &at("hpc3.0.t1"), &disk(&a)).unwrap();
         disks.attach_media(&p, &at("hpc3.0.t5"), &disk(&b)).unwrap();
         assert_eq!((0..16).filter(|&i| p.bus().has_target(i)).collect::<Vec<u8>>(), vec![1, 5]);
@@ -419,7 +441,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let (hi, lo) = (dir.join("hi.img"), dir.join("lo.img"));
         let scratch = |p: &std::path::Path| MediaSpec { scratch: true, size_mb: Some(1), ..disk(p.to_str().unwrap()) };
-        let (disks, p) = (Disks::new(vec![]), port());
+        let (disks, p) = (Disks::new(), port());
         disks.attach_media(&p, &at("hpc3.0.t3"), &scratch(&hi)).unwrap();
         disks.attach_media(&p, &at("hpc3.0.t1"), &scratch(&lo)).unwrap();
         assert_eq!(disks.scratch(), Some(lo));
@@ -431,7 +453,7 @@ mod tests {
         let e = attach_failed_in(false, "could not attach x".into(), "hpc3.0.t1").unwrap_err();
         assert_eq!(e, "could not attach x");
         assert!(attach_failed_in(true, "could not attach x".into(), "hpc3.0.t1").is_ok());
-        let (disks, p) = (Disks::new(vec![]), port());
+        let (disks, p) = (Disks::new(), port());
         let e = disks.attach_media(&p, &at("hpc3.0.t1"), &disk("/nonexistent/disk.img"));
         if std::env::var_os("IRIS_NO_EXIT_ON_POWEROFF").is_none() {
             assert!(e.unwrap_err().contains("could not attach /nonexistent/disk.img to hpc3.0.t1"));
@@ -441,7 +463,7 @@ mod tests {
     #[test]
     fn records_list_disks_and_cdroms_with_size() {
         let (a, iso) = (image("rec-a", 4096), image("rec-iso", 2048));
-        let (disks, p) = (Disks::new(vec![]), port());
+        let (disks, p) = (Disks::new(), port());
         disks.attach_media(&p, &at("hpc3.0.t4"), &MediaSpec { cdrom: true, ..disk(&iso) }).unwrap();
         disks.attach_media(&p, &at("hpc3.0.t1"), &disk(&a)).unwrap();
         let got: Vec<(String, bool, u64)> =
