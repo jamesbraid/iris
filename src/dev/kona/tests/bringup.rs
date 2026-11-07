@@ -1075,3 +1075,14 @@ fn data_words_follow_a_command_that_has_them() {
     assert_eq!(jobs.len(), 2);
     assert!(jobs[1].starts_with("data Gl 0x17e [3] [3e8, 3e9,"), "{}", jobs[1]);
 }
+
+/// A word that opens no command reaches the back end as a dropped word, in
+/// stream order with the commands around it, so a token whose length the
+/// tables lack can be seen.
+#[test]
+fn a_word_with_no_command_is_a_dropped_job() {
+    let f = Fixture::new();
+    f.cmd(&[1, 2, 7, 0x500, 0x500]);
+    assert_eq!(f.jobs().last().unwrap(), "dropped 0x500");
+    assert_eq!(f.jobs().iter().filter(|j| j.starts_with("dropped")).count(), 2);
+}

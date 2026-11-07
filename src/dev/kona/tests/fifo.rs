@@ -187,9 +187,11 @@ fn a_doubleword_is_two_words() {
         f.w64(COMMAND_PORT, 6 << 32 | 3);
         f.w64(COMMAND_PORT, 4 << 32);
         f.r(PORT_DATA);
+        // The last doubleword's low word is padding after the command: a word
+        // that opens nothing, which the back end is told of.
         assert_eq!(
             f.take_jobs(),
-            ["Textport 0x2 [7] packed=0x0 handled=false", "Textport 0x6 [3, 4] packed=0x0 handled=false"]
+            ["Textport 0x2 [7] packed=0x0 handled=false", "Textport 0x6 [3, 4] packed=0x0 handled=false", "dropped 0x0"]
         );
     }
 }

@@ -523,6 +523,7 @@ impl Core {
             }
             Step::Unknown => {
                 crate::dlog!(LogModule::Kona, "kona: unsupported textport selector {word:#x}");
+                self.job(h, be, Job::Dropped { word });
                 self.input.expect_sync = true;
             }
             Step::Partial => {}
@@ -558,6 +559,7 @@ impl Core {
             }
             Step::Unknown => {
                 crate::dlog!(LogModule::Kona, "kona: dma fifo word {word:#010x} is not a selector the port frames; dropped");
+                self.job(h, be, Job::Dropped { word });
             }
             Step::Partial => {}
         }
@@ -731,6 +733,7 @@ impl Core {
                 // Among these are the words of a command whose token has no
                 // length here: they arrive one by one as fresh words.
                 crate::dlog!(LogModule::Kona, "kona: textport expected a sync word, got {word:#x}");
+                self.job(h, be, Job::Dropped { word });
                 return;
             }
             self.input.expect_sync = false;

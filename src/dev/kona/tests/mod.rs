@@ -36,6 +36,7 @@ impl Backend for Recorder {
             Job::DmaIn { io, physical, lines, per_line, pitch } => {
                 format!("dma-in {io:#x} {lines} {per_line:#x} {pitch:#x}{}", if *physical { " physical" } else { "" })
             }
+            Job::Dropped { word } => format!("dropped {word:#x}"),
             Job::FirmwareStart { combination } => format!("firmware {combination:x?}"),
         };
         self.jobs.lock().push(line);

@@ -30,7 +30,9 @@ hashes are given where a change is easiest to understand by reading the commit.
 - `KonaBackend` is the first piece of the InfiniteReality drawing back end: it
   takes every job like `NullBackend`, carries the pipe's configuration (raster
   managers, texture memory per manager, board set, managed area) and answers
-  `kona status` and `kona counters`. Nothing draws yet.
+  `kona status` and `kona counters`. Words the command framers drop because
+  no command is open for them reach the back end as `Job::Dropped`. Nothing
+  draws yet.
 
 ### Boot test before publishing
 

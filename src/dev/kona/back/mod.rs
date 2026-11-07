@@ -64,11 +64,12 @@ enum Kind {
     Context,
     Indirect,
     DmaIn,
+    Dropped,
     FirmwareStart,
 }
 
 impl Kind {
-    const ALL: [Kind; 11] = [
+    const ALL: [Kind; 12] = [
         Kind::Textport,
         Kind::Kernel,
         Kind::Gl,
@@ -79,6 +80,7 @@ impl Kind {
         Kind::Context,
         Kind::Indirect,
         Kind::DmaIn,
+        Kind::Dropped,
         Kind::FirmwareStart,
     ];
 
@@ -94,6 +96,7 @@ impl Kind {
             Kind::Context => "context changes",
             Kind::Indirect => "indirect stores",
             Kind::DmaIn => "DMA packets",
+            Kind::Dropped => "dropped words",
             Kind::FirmwareStart => "firmware starts",
         }
     }
@@ -110,6 +113,7 @@ impl Kind {
             Job::Context(_) => Kind::Context,
             Job::Indirect { .. } => Kind::Indirect,
             Job::DmaIn { .. } => Kind::DmaIn,
+            Job::Dropped { .. } => Kind::Dropped,
             Job::FirmwareStart { .. } => Kind::FirmwareStart,
         }
     }
@@ -281,6 +285,17 @@ mod tests {
         assert!(text.contains("kernel commands   2"), "{text}");
         assert!(text.contains("retrace requests  1"), "{text}");
         assert_eq!(kona.bus_read(0x800248, 4), (crate::traits::BUS_OK, 0x42));
+    }
+
+    /// A word that opens no command is counted, not answered.
+    #[test]
+    fn dropped_words_are_counted() {
+        let (_host, kona) = board();
+        for w in [1, 2, 7, 0x500, 0x500, 0x7f7f] {
+            assert_eq!(kona.bus_write(0xc10000, 4, w), crate::traits::BUS_OK);
+        }
+        let (_, text) = monitor(&kona, &["counters"]);
+        assert!(text.contains("dropped words     3"), "{text}");
     }
 
     #[test]

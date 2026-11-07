@@ -62,6 +62,10 @@ machine's DMA, interrupt and FIFO handles are never called with a board lock
 held. The activity latch, held-word count, "reasons wait" and "list runs" flags
 are atomics because the thread touches them per word.
 
+A word that opens no command (no table has it) is not silently lost: it
+reaches the back end as `Job::Dropped`, so a token whose length the tables lack
+is visible as its word and the words behind it.
+
 Re-entry and failure limits:
 
 - A machine's DMA or interrupt handle is called from the kona thread (and from

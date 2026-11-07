@@ -69,6 +69,12 @@ pub enum Job<'a> {
     /// is a device address the map RAM translates. The back end reads the rows
     /// through `BackPort::dma_read`.
     DmaIn { io: u64, physical: bool, lines: u32, per_line: u32, pitch: u64 },
+    /// A word that opened no command and was dropped: no framer's table has
+    /// it. A token whose length the tables lack shows up as its own word and
+    /// the words behind it, one job each. The zero that pads an odd-length
+    /// command out to a doubleword store arrives this way too, and is safe to
+    /// ignore.
+    Dropped { word: u32 },
     /// The loader released the firmware (a store of 1 to the unstall
     /// register): the video format combination stored in the flash, if its
     /// marker and count are good.
