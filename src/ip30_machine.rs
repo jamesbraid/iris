@@ -879,7 +879,9 @@ impl OctaneMachine {
     /// Put a read snapshot into the stopped machine: the hardware as at
     /// power-on first, so nothing the snapshot does not hold is left over.
     fn apply_snapshot(&mut self, s: OctaneSnapshot) -> Result<(), String> {
-        self.power_on_all();
+        // Not `power_on_all`: restore is not RST#. The bus is loaded below
+        // and replaces every header and level it covers.
+        self.power_on_devices();
         self.cpus[0].load_state(&s.cpu).map_err(|e| format!("cpu: {e}"))?;
         self.flash.restore_contents(&s.flash)?;
         self.ram.restore_bank_words(&s.memory)?;
@@ -894,6 +896,8 @@ impl OctaneMachine {
         }
         self.devices.load(&s.board)?;
         Self::sync_links(&self.phys, &self.xbow);
+        // The Bridge and HEART have loaded: tell the Bridge the levels.
+        self.bridge.bus().redrive();
         Ok(())
     }
 }
@@ -1508,6 +1512,76 @@ mod snapshot_tests {
             m.power_on_all();
             assert_eq!(isp.bar_read(0, ireg::MAILBOX_BASE, 2), 0, "the bus reset it");
             assert_eq!(*log.lock().unwrap(), ["early cmd=0x0", "late cmd=0x0"], "header first, by device, once each");
+        }).unwrap().join().unwrap();
+    }
+
+    /// Two recording functions on the Octane's bus, in free slots.
+    fn with_recorders(m: &OctaneMachine) -> Arc<std::sync::Mutex<Vec<String>>> {
+        use crate::pci::testing::TestCard;
+        use crate::pci::Bar;
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bars = [Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused];
+        for (name, device) in [("five", 5u8), ("six", 6)] {
+            m.bridge.bus().attach(PciAddr { device, function: 0 }, TestCard::logged(name, bars, 0, &log));
+        }
+        log
+    }
+
+    /// Restore is not RST#: it starts from the parts' power-on and loads the
+    /// bus over what is there, so no function's reset runs. (A cold reset
+    /// after it does, which shows the recorders work.)
+    #[test]
+    fn octane_restore_does_not_call_reset_pci() {
+        std::thread::Builder::new().stack_size(64 << 20).spawn(|| {
+            let dir = scratch("norst");
+            let prom = empty_prom(&dir);
+            let mut m = machine(&prom, &dir);
+            let log = with_recorders(&m);
+            m.save_snapshot("s").unwrap();
+            m.load_snapshot("s").unwrap();
+            assert!(log.lock().unwrap().is_empty());
+            m.stop();
+            m.power_on_all();
+            assert_eq!(*log.lock().unwrap(), ["five cmd=0x0", "six cmd=0x0"]);
+        }).unwrap().join().unwrap();
+    }
+
+    /// What a restore leaves is a function of the snapshot alone: a machine
+    /// that had been used (another header, a raised wire, a function that
+    /// had been driving its line) ends as a fresh machine does, in its
+    /// headers, its pin levels and the combiner's delivery flags, and in the
+    /// ISP's state.
+    #[test]
+    fn octane_restore_into_a_dirtied_machine_equals_a_fresh_one() {
+        use crate::pci::{Wire, PCI_COMMAND_MEMORY};
+        std::thread::Builder::new().stack_size(64 << 20).spawn(|| {
+            let dir = scratch("dirtied");
+            let prom = empty_prom(&dir);
+            let mut used = machine(&prom, &dir);
+            let at = PciAddr { device: 0, function: 0 };
+            let pci = used.bridge.bus().clone();
+            pci.config_write(at, 0x14, 4, 0x1300_0000);
+            pci.config_write(at, 0x04, 2, PCI_COMMAND_MEMORY);
+            pci.wire(Wire(1)).set(true);
+            used.save_snapshot("s").unwrap();
+            // Busy since: another BAR, the wire fell, another rose and fell.
+            pci.config_write(at, 0x14, 4, 0x1400_0000);
+            pci.wire(Wire(1)).set(false);
+            pci.wire(Wire(2)).set(true);
+            pci.wire(Wire(2)).set(false);
+            pci.wire(Wire(3)).set(true);
+            used.load_snapshot("s").unwrap();
+
+            let dir2 = scratch("dirtied-fresh");
+            let mut fresh = machine(&prom, &dir2);
+            fresh.saves = used.saves.clone();
+            fresh.load_snapshot("s").unwrap();
+            let (a, b) = (used.bridge.bus(), fresh.bridge.bus());
+            assert_eq!(a.save_state(), b.save_state(), "headers, pin and wire levels");
+            assert_eq!(a.delivery_flags(), b.delivery_flags(), "delivery flags");
+            assert_eq!(used.bridge.register(crate::dev::bridge::reg::INT_STATUS), fresh.bridge.register(crate::dev::bridge::reg::INT_STATUS));
+            assert_eq!(a.config_read(at, 0x14, 4), Some(0x1300_0000));
+            assert_eq!(used.scsi[0].save_state(), fresh.scsi[0].save_state(), "the ISP's state");
         }).unwrap().join().unwrap();
     }
 

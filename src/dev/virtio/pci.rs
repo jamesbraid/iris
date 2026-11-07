@@ -70,6 +70,13 @@ struct Selectors {
 }
 
 impl VirtioPci {
+    /// The selectors and the device behind them back at power-on; the header
+    /// is the bus's.
+    fn power_on_device(&self) {
+        *self.sel.lock() = Selectors::default();
+        self.core.power_on();
+    }
+
     pub fn new(core: VirtioCore) -> Self {
         let id = core.device_id() as u16;
         // The capability list starts at 0x40: common, notify, ISR, device.
@@ -216,8 +223,7 @@ impl PciFunction for VirtioPci {
     /// RST#: the header is already reset, so what is left is the selectors
     /// and the device behind them; its interrupt line drops with it.
     fn reset(&self) {
-        *self.sel.lock() = Selectors::default();
-        self.core.power_on();
+        self.power_on_device();
     }
 
     fn connect_interrupt(&self, line: IrqLine) {
@@ -246,7 +252,14 @@ impl crate::traits::Device for VirtioPci {
     }
 }
 
-impl crate::traits::Saveable for VirtioPci {}
+/// The device saves no state, so a load returns what is behind the header
+/// to power-on, as a restore does for every part the snapshot does not name.
+impl crate::traits::Saveable for VirtioPci {
+    fn load_state(&self, _v: &toml::Value) -> Result<(), String> {
+        self.power_on_device();
+        Ok(())
+    }
+}
 
 /// The bus resets it ([`PciFunction::reset`]).
 impl Resettable for VirtioPci {}

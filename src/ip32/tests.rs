@@ -965,3 +965,91 @@ fn every_device_answers_the_monitor_through_the_bus() {
     }
     assert!(bus.execute_command("nonesuch", &[], Box::new(std::io::sink())).is_err());
 }
+
+// ---- restore is not RST# ----
+
+use crate::pci::PciFunction as _;
+
+/// A bus with a recording function at device 4 (the specification's spare
+/// slot, wired to CRIME 11), its memory BAR placed and decoding on.
+fn bus_with_a_recorder() -> (Arc<Ip32Bus>, Arc<crate::pci::testing::TestCard>, Arc<Mutex<Vec<String>>>) {
+    use crate::pci::testing::TestCard;
+    use crate::pci::{Bar, PCI_COMMAND_MEMORY, PCI_INTA};
+    let bus = Ip32Bus::new(1 << 20, vec![0u8; PROM_SIZE as usize]);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let bars = [Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused];
+    let card = TestCard::logged("rec", bars, PCI_INTA, &log);
+    let at = PciAddr { device: 4, function: 0 };
+    bus.mace.pci.bus().attach(at, card.clone());
+    bus.mace.pci.bus().config_write(at, 0x10, 4, 0x8000_1000);
+    bus.mace.pci.bus().config_write(at, 0x04, 2, PCI_COMMAND_MEMORY);
+    (bus, card, log)
+}
+
+fn crime_intstat(bus: &Ip32Bus) -> u64 {
+    bus.phys.read64((CRIME_BASE + crime_reg::INTSTAT) as u64).data
+}
+
+/// Nothing a restore runs delivers RST#: the parts' power-on, the bus load
+/// and the redrive leave the function's reset uncalled. A cold reset does.
+#[test]
+fn restore_calls_neither_bus_reset_nor_function_reset() {
+    use crate::traits::{Resettable, Saveable};
+    let (bus, _card, log) = bus_with_a_recorder();
+    let v = bus.save_state();
+    Resettable::power_on(&*bus);
+    bus.load_state(&v).unwrap();
+    assert!(log.lock().unwrap().is_empty());
+    assert_eq!(bus.mace.pci.bus().config_read(PciAddr { device: 4, function: 0 }, 0x10, 4), Some(0x8000_1000), "and the header is the saved one");
+    bus.reset_pci();
+    assert_eq!(*log.lock().unwrap(), ["rec cmd=0x0"], "the recorder does see a cold reset");
+}
+
+/// What a restore leaves is a function of the snapshot alone: headers, pin
+/// and wire levels, and the combiner's delivery flags are the same whether
+/// the bus had been used or not.
+#[test]
+fn restore_into_a_dirtied_bus_equals_a_fresh_one() {
+    use crate::traits::Saveable;
+    let (src, card, _) = bus_with_a_recorder();
+    card.port().irq().unwrap().set(true);
+    let v = src.save_state();
+
+    let (fresh, _, _) = bus_with_a_recorder();
+    let (used, used_card, _) = bus_with_a_recorder();
+    // A bus that has been busy: another BAR, a pin that fell and rose.
+    used.mace.pci.bus().config_write(PciAddr { device: 4, function: 0 }, 0x10, 4, 0x9000_0000);
+    used_card.port().irq().unwrap().set(true);
+    used_card.port().irq().unwrap().set(false);
+    used_card.port().irq().unwrap().set(true);
+    used_card.port().irq().unwrap().set(false);
+    fresh.load_state(&v).unwrap();
+    used.load_state(&v).unwrap();
+    let (a, b) = (used.mace.pci.bus(), fresh.mace.pci.bus());
+    assert_eq!(a.save_state(), b.save_state(), "headers and pin levels");
+    assert_eq!(a.delivery_flags(), b.delivery_flags(), "delivery flags");
+    assert_eq!(a.save_state(), v.as_table().unwrap()["mace"]["pci"]["bus"], "which is the snapshot's");
+    assert_eq!(crime_intstat(&used), crime_intstat(&fresh));
+}
+
+/// The last thing a load does is tell CRIME the pin levels, after CRIME has
+/// loaded: a snapshot whose CRIME table lacks the level a pin holds still
+/// ends with CRIME seeing it. (Without the redrive MACE's load, which comes
+/// first, would be the only thing that ever drove it, and CRIME's own load
+/// replaces what it drove.)
+#[test]
+fn restore_redrives_the_levels_after_all_loads() {
+    use crate::traits::Saveable;
+    let (src, card, _) = bus_with_a_recorder();
+    card.port().irq().unwrap().set(true);
+    let mut v = src.save_state();
+    // Take CRIME input 11 out of the saved CRIME levels.
+    let regs = v["crime"]["crime"]["regs"].as_array_mut().unwrap();
+    let slot = (crime_reg::INTSTAT / 8) as usize;
+    let levels = crate::snapshot::toml_u64(&regs[slot]).unwrap();
+    assert_ne!(levels & (1 << 11), 0, "saved with the pin up");
+    regs[slot] = crate::snapshot::hex_u64(levels & !(1 << 11));
+    let (dst, _, _) = bus_with_a_recorder();
+    dst.load_state(&v).unwrap();
+    assert_ne!(crime_intstat(&dst) & (1 << 11), 0, "the pin is high at CRIME");
+}
