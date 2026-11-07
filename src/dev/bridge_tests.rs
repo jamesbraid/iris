@@ -974,7 +974,7 @@ fn a_pci_reset_forgets_the_bars_firmware_assigned() {
     let stale = r.card(1, PCI_INTA);
     let c = r.card(2, PCI_INTA);
     r.reset();
-    r.bridge.reset_pci();
+    r.bridge.bus().reset();
     assert_eq!(r.cfg_read(1, 0x14, 4), 0, "BAR forgotten");
     assert_eq!(r.cfg_read(1, 0x04, 2), 0, "decoding off");
     assert_eq!(r.cfg_read(1, 0x10, 4), 1, "an I/O BAR keeps its type bit");

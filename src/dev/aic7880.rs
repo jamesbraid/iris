@@ -1432,6 +1432,13 @@ impl Aic7880 {
         Self::note(st, "chip reset".into());
     }
 
+    /// How many chip resets the chip has had, for the machine tests that
+    /// count the resets a cold reset delivers.
+    #[cfg(test)]
+    pub(crate) fn generation(&self) -> u64 {
+        self.st.lock().generation
+    }
+
     /// A register write with the state locked. Returns whether the
     /// sequencer may now have work, which the caller hands on once the
     /// lock is released.
@@ -1717,6 +1724,13 @@ impl crate::pci::PciFunction for Aic7880 {
 
     fn connect_interrupt(&self, line: crate::irq::IrqLine) {
         self.connect_irq(line);
+    }
+
+    /// RST#: the chip returns to power-on state and its interrupt line
+    /// drops. The SCSI bus is not reset, so the targets keep theirs.
+    fn reset(&self) {
+        Self::chip_reset(&mut self.st.lock());
+        self.update_irq();
     }
 }
 
@@ -2367,6 +2381,24 @@ mod tests {
         assert_eq!(used.save_state(), fresh.save_state());
         assert_eq!(block_sizes(&used), block_sizes(&fresh), "and agrees after");
         assert!(block_sizes(&used).contains(&(3, Some(512))), "a CD-ROM is at 512 under the HIM");
+    }
+
+    /// RST# rebuilds the chip, once, and its pin follows: an interrupt the
+    /// chip was holding is gone.
+    #[test]
+    fn a_pci_reset_rebuilds_the_chip_and_drops_the_interrupt() {
+        use crate::pci::PciFunction;
+        let (c, ram) = him_rig("him-pcireset");
+        let (irq, line) = crate::irq::LevelProbe::line();
+        c.connect_irq(line);
+        put_cmd(&ram, 2, 3, &[0x12, 0, 0, 0, 36, 0], 36);
+        c.write(reg::QINFIFO, 2, 1);
+        assert!(irq.level(), "selection timed out and the chip is interrupting");
+        let generation = c.generation();
+        PciFunction::reset(&*c);
+        assert_eq!(c.generation(), generation + 1, "one chip reset");
+        assert!(!irq.level(), "and the pin dropped");
+        assert_eq!(c.read(reg::INTSTAT, 1), 0);
     }
 
     /// Nobody at an id: the selection times out, the way the HIM expects,

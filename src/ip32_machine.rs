@@ -507,6 +507,7 @@ impl O2Machine {
                 dev.stop();
                 crate::traits::Resettable::power_on(&*cpu);
                 crate::traits::Resettable::power_on(&*bus);
+                bus.reset_pci();
                 dev.start();
             }
             if bus.mace.rtc.powered_off() {
@@ -565,10 +566,12 @@ impl O2Machine {
     }
 
     /// The hardware as at power-on, with the CPU stopped: what a CRIME cold
-    /// reset does, less the restart.
+    /// reset does, less the restart. RST# reaches the PCI bus after the
+    /// parts, which a restore (`power_on_devices` alone) never does.
     pub fn reset(&mut self) {
         self.stop();
         self.power_on_devices();
+        self.bus.reset_pci();
         self.restart_peripherals();
     }
 
@@ -1219,6 +1222,57 @@ mod device_tests {
             // Put the shared machine back.
             m.bus.phys.write32(word, old);
             m.bus.load_state(&clean).unwrap();
+        });
+    }
+
+    /// The PROM's view of the first onboard controller: its memory BAR placed
+    /// and decoding on. (The shared machine's controllers keep these until
+    /// something resets the PCI bus.)
+    fn place_the_scsi_bar(m: &O2Machine) -> crate::pci::PciAddr {
+        use crate::pci::{PCI_COMMAND_MEMORY, PciAddr};
+        let at = PciAddr { device: crate::dev::mace_pci::IP32_SCSI_SLOT, function: 0 };
+        let pci = m.bus.mace.pci.bus();
+        assert!(pci.config_write(at, 0x14, 4, 0x8000_1000));
+        assert!(pci.config_write(at, 0x04, 2, PCI_COMMAND_MEMORY));
+        assert_eq!(pci.config_read(at, 0x14, 4), Some(0x8000_1000));
+        at
+    }
+
+    fn chip_resets(m: &O2Machine) -> Vec<u64> {
+        m.bus.scsi.lock().unwrap().iter().map(|c| c.generation()).collect()
+    }
+
+    /// RST# on a cold reset: every header back to its reset values with no
+    /// run left published, and each onboard controller reset once. Nothing
+    /// before the change reset them at all.
+    #[test]
+    fn o2_cold_reset_returns_pci_headers_to_reset_values_and_resets_each_aic_once() {
+        use crate::pci::Space;
+        o2(|m| {
+            let at = place_the_scsi_bar(m);
+            let before = chip_resets(m);
+            assert!(m.bus.mace.pci.bus().bar_access(Space::Mem, 0x8000_1000).is_some());
+            m.reset();
+            m.stop();
+            let pci = m.bus.mace.pci.bus();
+            assert_eq!(pci.config_read(at, 0x14, 4), Some(0), "BAR forgotten");
+            assert_eq!(pci.config_read(at, 0x04, 2), Some(0), "decoding off");
+            assert!(pci.bar_access(Space::Mem, 0x8000_1000).is_none(), "and no window left for the CPU");
+            assert_eq!(chip_resets(m), before.iter().map(|g| g + 1).collect::<Vec<_>>(), "one chip reset each");
+        });
+    }
+
+    /// A restore starts from `power_on_devices`, which is not a reset of the
+    /// PCI bus: headers and the controllers are as the guest left them.
+    #[test]
+    fn o2_power_on_devices_does_not_reset_pci() {
+        o2(|m| {
+            let at = place_the_scsi_bar(m);
+            let before = chip_resets(m);
+            m.power_on_devices();
+            assert_eq!(m.bus.mace.pci.bus().config_read(at, 0x14, 4), Some(0x8000_1000));
+            assert_eq!(chip_resets(m), before);
+            m.bus.reset_pci();
         });
     }
 

@@ -213,6 +213,13 @@ impl PciFunction for VirtioPci {
         &self.port
     }
 
+    /// RST#: the header is already reset, so what is left is the selectors
+    /// and the device behind them; its interrupt line drops with it.
+    fn reset(&self) {
+        *self.sel.lock() = Selectors::default();
+        self.core.power_on();
+    }
+
     fn connect_interrupt(&self, line: IrqLine) {
         self.port.set_irq(line.clone());
         self.core.connect_interrupt(line);
@@ -241,13 +248,8 @@ impl crate::traits::Device for VirtioPci {
 
 impl crate::traits::Saveable for VirtioPci {}
 
-impl Resettable for VirtioPci {
-    fn power_on(&self) {
-        self.pci.reset();
-        *self.sel.lock() = Selectors::default();
-        self.core.power_on();
-    }
-}
+/// The bus resets it ([`PciFunction::reset`]).
+impl Resettable for VirtioPci {}
 
 #[cfg(test)]
 mod tests {
@@ -315,6 +317,22 @@ mod tests {
         // BAR size probe.
         c.write(4, 0xffff_ffff);
         assert_eq!(c.read(4), !(BAR_SIZE - 1));
+    }
+
+    /// The bus resets the header; the function resets what is behind it, and
+    /// leaves the header to the bus so the decode table cannot go stale.
+    #[test]
+    fn a_function_does_not_reset_its_own_header() {
+        let (dev, ..) = rig();
+        dev.config().write(4, 0x8000_0000);
+        dev.config().write(1, crate::pci::PCI_COMMAND_MEMORY);
+        dev.bar_write(0, 0x16, 2, 2); // queue_select = 2
+        PciFunction::reset(&*dev);
+        assert_eq!(dev.config().bar_base(0), 0x8000_0000);
+        assert_eq!(dev.config().command(), crate::pci::PCI_COMMAND_MEMORY);
+        assert_eq!(dev.bar_read(0, 0x16, 2), 0, "the selectors are back at power-on");
+        dev.config().reset();
+        assert_eq!(dev.config().bar_base(0), 0, "the bus's reset does the header");
     }
 
     #[test]

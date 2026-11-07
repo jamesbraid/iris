@@ -731,8 +731,9 @@ impl crate::traits::Saveable for Ip32Bus {
 
 /// A cold reset (CRIME's CONTROL register): the devices with a power-on
 /// state go back to it, and memory and the flash keep their contents, as on
-/// the hardware. The PROM sets up the rest again as it starts. (A reset of
-/// the PCI side is not modelled yet.)
+/// the hardware. The PROM sets up the rest again as it starts. The PCI side
+/// is [`Ip32Bus::reset_pci`], which the machine runs after this on a cold
+/// reset and which a restore must not.
 impl crate::traits::Resettable for Ip32Bus {
     fn power_on(&self) {
         use crate::traits::Resettable;
@@ -748,6 +749,19 @@ impl crate::traits::Resettable for Ip32Bus {
 }
 
 impl Ip32Bus {
+    /// RST# on the PCI bus: every function's header returns to power-on and
+    /// each function resets itself, so none decodes until the PROM assigns
+    /// its BARs again. Cold reset only. MACE has no software PCI reset
+    /// (its six PCI registers and the ISA ring-base bit, which resets the ISA
+    /// block alone, are all it has: MACE specification pp. 123 and
+    /// 162-165), so the bus sees RST# when the machine is reset and at no
+    /// other time. That the machine's reset reaches the PCI slots at all is
+    /// inferred from the PCI specification's default; no O2 document states
+    /// it.
+    pub fn reset_pci(&self) {
+        self.mace.pci.bus().reset();
+    }
+
     /// RAM and the flash, as `ram.bin` and `flash.bin` in `dir`.
     pub fn save_raw(&self, dir: &std::path::Path) -> std::io::Result<()> {
         self.ram.save_raw(&dir.join("ram.bin"))?;

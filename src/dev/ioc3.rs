@@ -2649,13 +2649,8 @@ impl Device for Ioc3 {
     }
 }
 
-impl Resettable for Ioc3 {
-    /// The chip as at power-on. The clock and the buffer RAM keep their
-    /// contents, as they are memory.
-    fn power_on(&self) {
-        self.reset();
-    }
-}
+/// The bus resets it ([`PciFunction::reset`]).
+impl Resettable for Ioc3 {}
 
 impl Drop for Ioc3 {
     fn drop(&mut self) {
@@ -2733,6 +2728,14 @@ impl PciFunction for Ioc3 {
 
     fn port(&self) -> &PciPort {
         &self.sh.port
+    }
+
+    /// RST#: the chip as at power-on. The clock and the buffer RAM keep
+    /// their contents, as they are memory. Interrupt pin A is the Ethernet
+    /// block's level, and that block is a part of its own that the machine
+    /// resets itself.
+    fn reset(&self) {
+        Ioc3::reset(self);
     }
 
     /// The PCI interrupt pin: the Ethernet block's level.
