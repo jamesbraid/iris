@@ -33,6 +33,12 @@ hashes are given where a change is easiest to understand by reading the commit.
   `kona status` and `kona counters`. Words the command framers drop because
   no command is open for them reach the back end as `Job::Dropped`. Nothing
   draws yet.
+- A recorded command stream (the `KONAREC` file QEMU's KONA model writes) can be
+  replayed into the front end: stores and loads in order, the board's DMA reads
+  served from the recording and its writes compared. The replay is exact only up
+  to the first data run a back end must size; past it the stream misframes. Set `KONA_RECORDINGS` to the
+  directory of recordings and run `cargo test --lib kona::back::replay --
+  --nocapture`; without it the tests skip.
 
 ### Boot test before publishing
 

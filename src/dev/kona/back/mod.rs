@@ -10,10 +10,14 @@
 //!
 //! - `bound`: the most words a pixel's record may take, from the host's own
 //!   budget arithmetic.
+//! - `census`, `replay` (tests only): the jobs a command stream sends the back
+//!   end, and the replay of a recorded stream into a board.
 
 mod bound;
 #[cfg(test)]
 mod census;
+#[cfg(test)]
+mod replay;
 
 pub use bound::BoardSet;
 

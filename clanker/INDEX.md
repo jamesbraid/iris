@@ -284,6 +284,7 @@ The InfiniteReality (KONA) graphics pipe's host interface.
 | Note | Kind | Title |
 |---|---|---|
 | [front-end.md](kona/front-end.md) | design | The Host Interface Processor: attach interface, the command queue on `GFifo`, which accesses wait, the job seam to a back end, approximations |
+| [token-census.md](kona/token-census.md) | measurement | The token families two recorded streams (the PROM to its graphics menu, IRIX to the 4Dwm desktop) send, how far a replay into `NullBackend` stays exact, and the selectors QEMU's decoder leaves unresolved |
 
 ## hostgl/
 
