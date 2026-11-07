@@ -1,5 +1,6 @@
 use clap::{CommandFactory, FromArgMatches, Parser};
 use serde::{Deserialize, Serialize};
+use crate::location::Location;
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
@@ -1782,6 +1783,15 @@ mod scsi_keys {
     }
 }
 
+/// One `[[<device>]]` entry: the device type, where it goes, and the rest of
+/// the entry as that type's options.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Placement {
+    pub device: String,
+    pub at: Location,
+    pub opts: toml::Table,
+}
+
 /// Top-level machine configuration.
 ///
 /// Field order matters for TOML export: the `toml` serializer requires every
@@ -2490,20 +2500,76 @@ impl MachineConfig {
         self.machine.cpu = Some(part.name());
     }
 
-    /// Refuse a top-level key that is not a device array. The typed fields
-    /// are checked by serde; this takes over what `deny_unknown_fields` did
-    /// for the rest.
+    /// Refuse a top-level key that is not an array of device tables. The
+    /// typed fields are checked by serde; this takes over what
+    /// `deny_unknown_fields` did for the rest.
     pub fn check_extra(&self) -> Result<(), String> {
         for (key, v) in &self.extra {
-            return Err(match v {
-                toml::Value::Array(a) if a.iter().all(toml::Value::is_table) => {
-                    format!("unknown device [[{key}]]")
-                }
-                toml::Value::Table(_) => format!("unknown section [{key}]"),
-                _ => format!("unknown key `{key}`: not a section or a device array"),
-            });
+            match v {
+                toml::Value::Array(a) if a.iter().all(toml::Value::is_table) => {}
+                toml::Value::Table(_) => return Err(format!("unknown section [{key}]")),
+                _ => return Err(format!("unknown key `{key}`: not a section or a device array")),
+            }
         }
-        Ok(())
+        self.placements().map(drop)
+    }
+
+    /// Every `[[<device>]]` entry: arrays in key order (toml tables are
+    /// key-sorted, so file order across devices is not available), entries in
+    /// file order within one array.
+    pub fn placements(&self) -> Result<Vec<Placement>, String> {
+        let mut out = Vec::new();
+        for (device, v) in &self.extra {
+            let Some(entries) = v.as_array() else {
+                return Err(format!("`{device}` is not a section: write [[{device}]] with an `at` in each entry"));
+            };
+            for e in entries {
+                let mut opts = e.as_table().cloned().ok_or_else(|| format!("[[{device}]]: every entry is a table"))?;
+                let at = opts
+                    .remove("at")
+                    .ok_or_else(|| format!("[[{device}]]: every entry needs an `at` location"))?;
+                let at = at
+                    .as_str()
+                    .ok_or_else(|| format!("[[{device}]]: `at` is a location string"))?
+                    .parse::<Location>()
+                    .map_err(|e| format!("[[{device}]]: {e}"))?;
+                out.push(Placement { device: device.clone(), at, opts });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Put a device at `at`, replacing the entry of that device type already
+    /// there. An entry of another device type at the same place is kept; the
+    /// claim refuses the pair.
+    pub fn place(&mut self, device: &str, at: Location, mut opts: toml::Table) {
+        let text = at.to_string();
+        opts.insert("at".into(), toml::Value::String(text.clone()));
+        let slot = self.extra.entry(device.to_owned()).or_insert_with(|| toml::Value::Array(vec![]));
+        if !slot.is_array() {
+            *slot = toml::Value::Array(vec![]);
+        }
+        let list = slot.as_array_mut().expect("just made an array");
+        match list.iter_mut().find(|v| v.get("at").and_then(toml::Value::as_str) == Some(&text)) {
+            Some(entry) => *entry = toml::Value::Table(opts),
+            None => list.push(toml::Value::Table(opts)),
+        }
+    }
+
+    /// Remove every entry at `at`; true when there was one. An emptied array
+    /// goes with it.
+    pub fn unplace(&mut self, at: &Location) -> bool {
+        let text = at.to_string();
+        let mut found = false;
+        for v in self.extra.values_mut() {
+            if let toml::Value::Array(list) = v {
+                let before = list.len();
+                list.retain(|e| e.get("at").and_then(toml::Value::as_str) != Some(&text));
+                found |= list.len() != before;
+            }
+        }
+        self.extra.retain(|_, v| v.as_array().is_none_or(|a| !a.is_empty()));
+        found
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -4049,6 +4115,67 @@ mod export_tests {
         assert_eq!(hdd.as_array().map(|a| a.len()), Some(1));
         let out = toml::to_string_pretty(&cfg).unwrap();
         assert!(out.contains("[[hdd]]\nat = \"x\""), "{out}");
+    }
+
+    #[test]
+    fn placements_round_trip_through_toml_text() {
+        let src = "[[cdrom]]\nat = \"pci0.1.t4\"\npath = \"a.iso\"\n\n[[hdd]]\nat = \"pci0.1.t1\"\npath = \"a.img\"\n";
+        let cfg: MachineConfig = toml::from_str(src).unwrap();
+        let ps = cfg.placements().unwrap();
+        assert_eq!(ps.len(), 2);
+        assert_eq!((ps[0].device.as_str(), ps[0].at.to_string()), ("cdrom", "pci0.1.t4".to_string()));
+        assert_eq!(ps[1].opts["path"].as_str(), Some("a.img"));
+        assert!(!ps[1].opts.contains_key("at"));
+        let again: MachineConfig = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(again.placements().unwrap(), ps);
+    }
+
+    #[test]
+    fn place_replaces_by_at_and_keeps_other_entries() {
+        let mut cfg = MachineConfig::default();
+        let at = |s: &str| s.parse::<Location>().unwrap();
+        let path = |p: &str| toml::Table::from_iter([("path".to_string(), toml::Value::String(p.into()))]);
+        cfg.place("hdd", at("pci0.1.t1"), path("a.img"));
+        cfg.place("hdd", at("pci0.1.t2"), path("b.img"));
+        cfg.place("hdd", at("pci0.1.t1"), path("c.img"));
+        let ps = cfg.placements().unwrap();
+        assert_eq!(ps.len(), 2);
+        assert_eq!(ps[0].opts["path"].as_str(), Some("c.img"));
+        assert_eq!(ps[1].opts["path"].as_str(), Some("b.img"));
+    }
+
+    #[test]
+    fn place_in_another_array_with_the_same_at_is_kept_for_the_claim_to_refuse() {
+        let mut cfg = MachineConfig::default();
+        let at: Location = "gio0".parse().unwrap();
+        cfg.place("ultra64", at.clone(), toml::Table::new());
+        cfg.place("test_device", at, toml::Table::new());
+        assert_eq!(cfg.placements().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn unplace_removes_only_that_entry_and_drops_an_empty_array() {
+        let mut cfg: MachineConfig =
+            toml::from_str("[[hdd]]\nat = \"pci0.1.t1\"\n[[hdd]]\nat = \"pci0.1.t2\"\n[[cdrom]]\nat = \"pci0.1.t4\"\n").unwrap();
+        assert!(cfg.unplace(&"pci0.1.t4".parse().unwrap()));
+        assert!(!cfg.extra.contains_key("cdrom"));
+        assert!(cfg.unplace(&"pci0.1.t1".parse().unwrap()));
+        assert_eq!(cfg.placements().unwrap().len(), 1);
+        assert!(!cfg.unplace(&"pci0.1.t9".parse().unwrap()));
+    }
+
+    #[test]
+    fn an_entry_without_at_is_an_error_naming_the_array() {
+        let cfg: MachineConfig = toml::from_str("[[hdd]]\npath = \"a\"\n").unwrap();
+        let e = cfg.check_extra().unwrap_err();
+        assert!(e.contains("[[hdd]]") && e.contains("`at`"), "{e}");
+    }
+
+    #[test]
+    fn a_scalar_under_a_device_name_is_refused_as_not_a_section() {
+        let cfg: MachineConfig = toml::from_str("hdd = 3\n").unwrap();
+        let e = cfg.check_extra().unwrap_err();
+        assert!(e.contains("hdd") && e.contains("not a section"), "{e}");
     }
 }
 
