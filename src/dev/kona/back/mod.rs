@@ -12,6 +12,8 @@
 //!   budget arithmetic.
 
 mod bound;
+#[cfg(test)]
+mod census;
 
 pub use bound::BoardSet;
 
