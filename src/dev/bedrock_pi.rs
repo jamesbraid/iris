@@ -44,6 +44,7 @@ use crate::hptimer::{TimerId, TimerManager, TimerReturn};
 use crate::irq::InterruptController;
 use crate::traits::{BusDevice, BusRead32, BusRead64, Device, Resettable, BUS_ERR, BUS_OK};
 use parking_lot::{Mutex, ReentrantMutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 const RT_MASK: u64 = (1 << 55) - 1;
@@ -368,6 +369,9 @@ pub struct BedrockPi {
     cfg: BedrockPiConfig,
     clock: Clock,
     state: Mutex<State>,
+    /// The cached alias size in bytes, published when the register is written
+    /// so the memory path reads it without taking `state`.
+    alias_bytes: AtomicU64,
     hooks: Mutex<Option<Arc<dyn NodeHooks>>>,
     irq: Mutex<Option<Arc<dyn InterruptController>>>,
     timers: OnceLock<Arc<TimerManager>>,
@@ -391,6 +395,7 @@ impl BedrockPi {
         Arc::new_cyclic(|weak| Self {
             cfg,
             state: Mutex::new(state),
+            alias_bytes: AtomicU64::new(0),
             clock,
             hooks: Mutex::new(None),
             irq: Mutex::new(None),
@@ -402,6 +407,15 @@ impl BedrockPi {
             weak: weak.clone(),
             refused: Mutex::new(Vec::new()),
         })
+    }
+    /// The size in bytes of the cached alias of the node's own memory at
+    /// offset 0: 4 KiB shifted left by the register's code less one, or none.
+    pub fn cached_alias_bytes(&self) -> u64 {
+        self.alias_bytes.load(Ordering::Relaxed)
+    }
+    fn publish_alias(&self, code: u64) {
+        let bytes = if code & 15 == 0 { 0 } else { 0x1000 << ((code & 15) - 1) };
+        self.alias_bytes.store(bytes, Ordering::Relaxed);
     }
     pub fn set_node_hooks(&self, hooks: Arc<dyn NodeHooks>) {
         let _dispatch = self.dispatch.lock();
@@ -655,6 +669,7 @@ impl BedrockPi {
             reg::CACHED_ALIAS => {
                 if s.w[5] != value & 15 {
                     s.w[5] = value & 15;
+                    self.publish_alias(value);
                     alias = Some((value & 15) as u8);
                 }
             }
@@ -918,6 +933,7 @@ impl Resettable for BedrockPi {
         ] {
             s.w[off / 8] = old[off / 8];
         }
+        self.publish_alias(s.w[5]);
         s.running = running;
         s.paused = if running { None } else { Some(now) };
         s.reflected = reflected;

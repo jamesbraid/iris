@@ -133,9 +133,13 @@ pub struct BedrockIo {
     widgets: Mutex<[Option<Arc<dyn BusDevice>>; 16]>,
     memory: Mutex<Option<Arc<dyn BusDevice>>>,
     hub: Mutex<Option<Arc<dyn BusDevice>>>,
+    remote_hub: Mutex<Option<RemoteHub>>,
     gfx_map_written: OnceLock<GfxMapHook>,
     scratch0_written: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
+/// Finds the register-packet target of the node carrying a number other than
+/// this interface's own.
+pub type RemoteHub = Arc<dyn Fn(u8) -> Option<Arc<dyn BusDevice>> + Send + Sync>;
 /// Told of a store to graphics map entry `entry`: its old value, then the
 /// new one. Runs before the new value takes effect, without the register
 /// lock, so it may read the map as it stood.
@@ -155,6 +159,7 @@ impl BedrockIo {
             widgets: Mutex::new(std::array::from_fn(|_| None)),
             memory: Mutex::new(None),
             hub: Mutex::new(None),
+            remote_hub: Mutex::new(None),
             gfx_map_written: OnceLock::new(),
             scratch0_written: OnceLock::new(),
         }
@@ -188,6 +193,10 @@ impl BedrockIo {
     }
     pub fn connect_hub(&self, dev: Arc<dyn BusDevice>) {
         *self.hub.lock() = Some(dev);
+    }
+    /// Send register packets that name another node to that node's hub.
+    pub fn connect_remote_hub(&self, find: RemoteHub) {
+        *self.remote_hub.lock() = Some(find);
     }
     pub fn set_node_number(&self, node: u8) {
         self.regs.lock().node = node;
@@ -369,10 +378,16 @@ impl BedrockIo {
         if address & (1 << 47) != 0 {
             let node = ((address >> 39) & 255) as u8;
             let window = address & ((1 << 39) - 1);
-            if node != self.regs.lock().node || window & !0x7fffff != 0x1800000 {
+            let own = self.regs.lock().node;
+            if window & !0x7fffff != 0x1800000 {
                 return BusRead64::err();
             }
-            let dev = self.hub.lock().clone();
+            let dev = if node == own {
+                self.hub.lock().clone()
+            } else {
+                let find = self.remote_hub.lock().clone();
+                find.and_then(|find| find(node))
+            };
             Self::access(dev, window & 0x7fffff, size, value)
         } else {
             let dev = self.memory.lock().clone();

@@ -15,6 +15,7 @@
 //! jamesbraid/qemu-sgi-origami.
 
 use super::{map_device, Ip35Bus, SparseWindowMap, Window};
+use crate::ip35_fabric::{Fabric, Node as FabricNode};
 use crate::config::MachineConfig;
 use crate::cpu::mips_exec::CpuDevice;
 use crate::dev::bedrock_flash::{FirmwareRecord, Flash, PART_SIZE};
@@ -256,6 +257,17 @@ pub(crate) struct Node {
     pub io: Arc<BedrockIo>,
     pub ni: Arc<BedrockNi>,
     pub xb: Arc<BedrockXb>,
+    /// The cached view of this node's memory, which the other end of a
+    /// NUMAlink cable holds only weakly.
+    pub cached: Arc<dyn BusDevice>,
+    /// The processor's uncached connection: `bus`, or on a node on a cable
+    /// `bus` with node field zero sent where [`crate::ip35::ZeroAway`] says.
+    pub processor: Arc<dyn BusDevice>,
+    /// Present on a node on a cable: where its node-field-zero references go.
+    pub away: Option<Arc<crate::ip35::ZeroAway>>,
+    /// The view the cable offers other nodes; the fabric holds it weakly, so
+    /// the node keeps it alive.
+    _offered: Option<Arc<dyn BusDevice>>,
     /// Set once by a board that counts graphics stores.
     io_store_counter: Arc<OnceLock<Box<dyn StoreCounter>>>,
     #[cfg(test)]
@@ -270,6 +282,14 @@ impl Node {
     }
 
     pub fn build(config: NodeConfig<'_>) -> Result<Self, String> {
+        Self::build_linked(config, None)
+    }
+
+    /// [`Self::build`] for a node at `end` of a NUMAlink cable: its bus sends
+    /// the node numbers above the local forms across `fabric`, the network
+    /// block reads its link from the cable, the local bus launches vector
+    /// requests down it, and the node's number follows the local bus's.
+    pub fn build_linked(config: NodeConfig<'_>, link: Option<(Arc<Fabric>, usize)>) -> Result<Self, String> {
         let NodeConfig { name, payload, clock, flash_path, banks_mib, population, running, firmware, flash_records, board_id, l1 } = config;
         let md = BedrockMd::with_clock(banks_mib, clock.clone())?;
         let phys = md.physical().clone();
@@ -348,8 +368,14 @@ impl Node {
         local.map(reg::MD_BASE, reg::MD_SIZE, md.md_bus());
         let registers = Arc::new(registers);
         let local = Arc::new(local);
-        io.connect_hub(Arc::new(IoHub(pi.clone())));
-        io.connect_memory(md.dma_view());
+        let hub: Arc<dyn BusDevice> = Arc::new(IoHub(pi.clone()));
+        io.connect_hub(hub.clone());
+        // Inbound DMA and the block-transfer engines name memory by node
+        // number; a node on a cable reaches its own through the fabric too.
+        match &link {
+            Some((fabric, end)) => io.connect_memory(fabric.dma_route(*end)),
+            None => io.connect_memory(md.dma_view()),
+        }
         let p = pi.clone();
         lb.connect_error(Arc::new(move |level| {
             for pi in &p {
@@ -369,9 +395,13 @@ impl Node {
             }
         }));
         let io_node = Arc::downgrade(&io);
+        let node_link = link.clone();
         lb.connect_node_changed(Arc::new(move |node| {
             if let Some(io) = io_node.upgrade() {
                 io.set_node_number(node);
+            }
+            if let Some((fabric, end)) = &node_link {
+                fabric.set_number(*end, node);
             }
         }));
         let p = pi.clone();
@@ -391,6 +421,9 @@ impl Node {
         pi[0].set_interrupt_controller(irq.clone());
         l1.set_irq(IrqLine::new(Arc::new(UartIrq(pi.clone())), 0));
         let mut bus = Ip35Bus::new(phys.clone());
+        if let Some((fabric, end)) = &link {
+            bus.set_remote(fabric, *end);
+        }
         #[cfg(feature = "jitv2")]
         bus.set_ram_generations(md.dma_view());
         md.rebuild_memory();
@@ -452,8 +485,33 @@ impl Node {
         bus.map(0, 0x1_4000_0000, 1 << 30, md.ecc_bus());
         bus.map(0, 0x1_0000_0000, 1 << 30, md.ecc_scrub_bus());
         bus.map(2, 0, 1 << 33, md.fetchop_bus());
+        let bus = Arc::new(bus);
+        let away = link.as_ref().map(|(fabric, end)| crate::ip35::ZeroAway::new(fabric, *end, pi[0].clone()));
+        let cached = bus.cached_view_away(md.dma_view(), md.ram_extent(), away.clone());
+        let processor: Arc<dyn BusDevice> = match &away {
+            Some(away) => Arc::new(crate::ip35::ProcessorBus::new(bus.clone(), away.clone())),
+            None => bus.clone(),
+        };
+        let mut offered = None;
+        if let Some((fabric, end)) = &link {
+            ni.connect_cable(fabric.cable(*end));
+            lb.connect_vector(fabric.vector_peer(*end));
+            // What other nodes, and this node by its own number, reach decodes
+            // as a local access: the processor's redirect of node field zero
+            // does not apply to it.
+            let view = bus.cached_view(md.dma_view(), md.ram_extent());
+            fabric.attach(*end, FabricNode { bus: &bus, cached: &view, registers: &(registers.clone() as Arc<dyn BusDevice>), hub: &hub, ni: &ni });
+            let find = Arc::downgrade(fabric);
+            let end = *end;
+            io.connect_remote_hub(Arc::new(move |number| find.upgrade()?.hub_of(end, number)));
+            offered = Some(view);
+        }
         Ok(Self {
-            bus: Arc::new(bus),
+            bus,
+            cached,
+            processor,
+            _offered: offered,
+            away,
             io_store_counter,
             pi,
             md,

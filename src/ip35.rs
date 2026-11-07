@@ -271,6 +271,19 @@ impl Ip35Bus {
         assert!(raw_uc < 4);
         self.views[raw_uc as usize].map(base, size, device);
     }
+    /// Send everything at or above the first node number's window to the
+    /// NUMAlink fabric, in every space: the four uncached views, and cached
+    /// RAM through Physical's default device. The local forms below stay
+    /// as mapped. Call before the rest of the node maps itself, since
+    /// setting Physical's default covers the whole 32-bit space.
+    pub fn set_remote(&mut self, fabric: &Arc<crate::ip35_fabric::Fabric>, end: usize) {
+        use crate::ip35_fabric::{Space, REMOTE_BASE, REMOTE_END};
+        for view in 0..4u8 {
+            let route = fabric.route(end, Space::Uncached(view), REMOTE_BASE);
+            self.map(view, REMOTE_BASE, REMOTE_END - REMOTE_BASE, route);
+        }
+        self.phys.set_default(fabric.route(end, Space::Cached, 0), "NUMAlink");
+    }
     pub fn set_fallback(&mut self, raw_uc: u8, end: u64, device: Arc<dyn BusDevice>) {
         self.map(raw_uc, 0, end, device);
     }
@@ -288,10 +301,16 @@ impl Ip35Bus {
     /// Cached RAM, with `plain_memory` answering wherever `extent` says
     /// fitted RAM can be.
     pub fn cached_view(&self, plain_memory: Arc<dyn BusDevice>, extent: RamExtent) -> Arc<dyn BusDevice> {
+        self.cached_view_away(plain_memory, extent, None)
+    }
+    /// [`Self::cached_view`] for a node on a cable, which sends node field
+    /// zero to its peer while it carries another number.
+    pub fn cached_view_away(&self, plain_memory: Arc<dyn BusDevice>, extent: RamExtent, away: Option<Arc<ZeroAway>>) -> Arc<dyn BusDevice> {
         Arc::new(CachedPhysical {
             phys: self.phys.clone(),
             plain_memory,
             extent,
+            away,
         })
     }
 }
@@ -325,30 +344,181 @@ impl BusDevice for CodeViews {
         if in_fetch_window(a) { self.uncached.gen_ptr(a) } else { self.cached.gen_ptr(a) }
     }
 }
+/// Where a node that carries a number other than zero sends the references of
+/// its processors that name node field zero. Memory, the node's registers and
+/// its I/O are named by node number, so those reach whichever node carries
+/// zero, across the cable, as the claim table sends them. Only the
+/// reader-relative forms stay on the node:
+///
+/// - cached and uncached memory: the cached alias, the first bytes of the
+///   node's own memory, sized by the processor interface's cached-alias
+///   register; and, cached only, the reset PROM's window;
+/// - the Hub-special space's first 512 MiB: its uncached view of the first
+///   256 MiB of memory, the local registers and L1 UART, and the boot windows;
+/// - the I/O space's local register form.
+///
+/// The memory-special space has none. Everything else the node's software
+/// names with its own number.
+///
+/// The cached reset window is approximated: only the firmware's references
+/// there (kseg1, or cache attribute 3) belong on the reader, and a coherent
+/// one belongs to node 0's memory, which the bus here cannot tell apart. They
+/// differ only where RAM overlaps the PROM range.
+pub struct ZeroAway {
+    fabric: Arc<crate::ip35_fabric::Fabric>,
+    end: usize,
+    route: Arc<crate::ip35_fabric::Route>,
+    /// The same for each uncached space, by raw bits 58:57.
+    uncached: [Arc<crate::ip35_fabric::Route>; 4],
+    pi: Arc<crate::dev::bedrock_pi::BedrockPi>,
+}
+/// The Hub-special space's reader-relative forms end here.
+const HUB_LOCAL_FORMS: u64 = 0x2000_0000;
+/// The I/O space's local register form.
+const IO_LOCAL_FORM: u64 = 0x0100_0000;
+const IO_LOCAL_FORM_SIZE: u64 = 0x80_0000;
+impl ZeroAway {
+    pub fn new(fabric: &Arc<crate::ip35_fabric::Fabric>, end: usize, pi: Arc<crate::dev::bedrock_pi::BedrockPi>) -> Arc<Self> {
+        use crate::ip35_fabric::Space;
+        Arc::new(Self {
+            fabric: fabric.clone(),
+            end,
+            route: fabric.zero_route(end, Space::Cached),
+            uncached: std::array::from_fn(|view| fabric.zero_route(end, Space::Uncached(view as u8))),
+            pi,
+        })
+    }
+    /// Whether node field zero is across the cable from this node now.
+    pub fn active(&self) -> bool {
+        self.fabric.zero_is_remote(self.end)
+    }
+    /// Where the cached reference at node-local `pa` goes, when it leaves the node.
+    fn redirect(&self, pa: u64) -> Option<&dyn BusDevice> {
+        if pa >= crate::ip35_fabric::REMOTE_BASE
+            || pa.wrapping_sub(RESET_WINDOW) < RESET_WINDOW_SIZE
+            || !self.active()
+            || pa < self.pi.cached_alias_bytes()
+        {
+            return None;
+        }
+        Some(self.route.as_ref())
+    }
+    /// Where the uncached reference at `pa` in raw space `view` goes, when it
+    /// leaves the node.
+    pub(crate) fn redirect_uncached(&self, view: usize, pa: u64) -> Option<&dyn BusDevice> {
+        if pa >= crate::ip35_fabric::REMOTE_BASE || !self.active() {
+            return None;
+        }
+        let local = match view {
+            0 => pa < HUB_LOCAL_FORMS,
+            1 => pa.wrapping_sub(IO_LOCAL_FORM) < IO_LOCAL_FORM_SIZE,
+            2 => false,
+            _ => pa < self.pi.cached_alias_bytes(),
+        };
+        (!local).then(|| self.uncached[view].as_ref() as &dyn BusDevice)
+    }
+    /// Take the direct RAM window off the processor's path while node field
+    /// zero is remote, so its cached references reach [`Self::redirect`]. Call
+    /// on the node's processor thread, between batches. The window is not put
+    /// back if the node is renumbered to 0 later without a reset: references
+    /// then go the slow way, still correctly.
+    pub fn sync_window(&self, phys: &Physical) {
+        if !self.active() {
+            return;
+        }
+        if let Some(space) = phys.ppmem_space() {
+            use crate::ppmem::ppmem::MappedMemory as _;
+            if space.mapped_bitmap() != 0 {
+                space.withdraw_range(0, space.window_size());
+            }
+        }
+    }
+}
+/// A processor's uncached connection on a node on a cable: the node's own
+/// spaces, except what [`ZeroAway`] sends across. The view the cable offers
+/// other nodes is the node's own cached view (see `Node::_offered`) and the
+/// bus for its uncached spaces, so a reference that arrives from the peer
+/// decodes as a local one and does not bounce back.
+pub struct ProcessorBus {
+    bus: Arc<Ip35Bus>,
+    away: Arc<ZeroAway>,
+}
+impl ProcessorBus {
+    pub fn new(bus: Arc<Ip35Bus>, away: Arc<ZeroAway>) -> Self {
+        Self { bus, away }
+    }
+    fn target(&self, a: u64, n: u64) -> (&dyn BusDevice, u64) {
+        if let Some(pa) = plain_address(a, n) {
+            if let Some(route) = self.away.redirect_uncached((a >> 57) as usize & 3, pa) {
+                return (route, pa);
+            }
+        }
+        (self.bus.as_ref(), a)
+    }
+}
+macro_rules! forward_access {
+    ($r:ident,$w:ident,$t:ty,$out:ident,$n:expr) => {
+        fn $r(&self, a: u64) -> $out {
+            let (device, at) = self.target(a, $n);
+            device.$r(at)
+        }
+        fn $w(&self, a: u64, v: $t) -> u32 {
+            let (device, at) = self.target(a, $n);
+            device.$w(at, v)
+        }
+    };
+}
+impl BusDevice for ProcessorBus {
+    #[cfg(feature = "jitv2")]
+    fn gen_ptr(&self, a: u64) -> *const AtomicU64 {
+        // Code addresses come without a cache attribute, and the cached plane
+        // answers them; see Ip35Bus::gen_ptr.
+        self.bus.gen_ptr(a)
+    }
+    fn write64_masked(&self, a: u64, val: u64, mask: u64) -> u32 {
+        let (device, at) = self.target(a, 8);
+        device.write64_masked(at, val, mask)
+    }
+    fn write_narrow_from(&self, a: u64, size: usize, gpr: u64) -> u32 {
+        let (device, at) = self.target(a, size as u64);
+        device.write_narrow_from(at, size, gpr)
+    }
+    forward_access!(read8, write8, u8, BusRead8, 1);
+    forward_access!(read16, write16, u16, BusRead16, 2);
+    forward_access!(read32, write32, u32, BusRead32, 4);
+    forward_access!(read64, write64, u64, BusRead64, 8);
+}
 struct CachedPhysical {
     phys: Arc<Physical>,
     plain_memory: Arc<dyn BusDevice>,
     extent: RamExtent,
+    away: Option<Arc<ZeroAway>>,
 }
 impl CachedPhysical {
     fn memory_target(&self, a: u64, n: u64) -> Option<(&dyn BusDevice, u64)> {
-        self.target(a, n).map(|(physical, pa)| {
-            // MD owns every guest write to a possible fitted-RAM prefix, so
-            // all paths update its stable logical generation counters. PROM
-            // and other devices retain the cached Physical connection.
-            let memory: &dyn BusDevice = if self.extent.contains(pa) {
-                self.plain_memory.as_ref()
-            } else { physical };
-            (memory, pa)
-        })
+        let (device, pa) = self.target(a, n)?;
+        if !std::ptr::addr_eq(device, self.phys.as_ref()) {
+            return Some((device, pa));
+        }
+        // MD owns every guest write to a possible fitted-RAM prefix, so
+        // all paths update its stable logical generation counters. PROM
+        // and other devices retain the cached Physical connection.
+        let memory: &dyn BusDevice = if self.extent.contains(pa) {
+            self.plain_memory.as_ref()
+        } else { device };
+        Some((memory, pa))
     }
-    fn target(&self, a: u64, n: u64) -> Option<(&Physical, u64)> {
+    fn target(&self, a: u64, n: u64) -> Option<(&dyn BusDevice, u64)> {
         // UC selectors belong to the uncached SysAd connection. Reject them
         // here rather than turning a malformed cached request into an alias.
         if a & !PA_MASK != 0 || a & (n - 1) != 0 {
             return None;
         }
-        Some((self.phys.as_ref(), plain_address(a, n)?))
+        let pa = plain_address(a, n)?;
+        if let Some(away) = self.away.as_ref().and_then(|away| away.redirect(pa)) {
+            return Some((away, pa));
+        }
+        Some((self.phys.as_ref(), pa))
     }
 }
 macro_rules! processor_access {
@@ -418,6 +588,8 @@ impl BusDevice for CachedPhysical {
     #[cfg(feature = "jitv2")]
     fn gen_ptr(&self, a: u64) -> *const AtomicU64 {
         self.target(a, 1).map(|(view, pa)| {
+            // Memory on the peer has its generation counters there.
+            if !std::ptr::addr_eq(view, self.phys.as_ref()) { return std::ptr::null(); }
             let generation = self.plain_memory.gen_ptr(pa);
             if generation.is_null() { view.gen_ptr(pa) } else { generation }
         }).unwrap_or(std::ptr::null())
