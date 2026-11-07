@@ -7,10 +7,15 @@
 //! function only sees configuration registers, accesses to its BARs, and an
 //! [`IrqLine`] for its pin.
 
+pub mod bus;
 pub mod decode;
 pub mod intx;
 #[cfg(test)]
 pub(crate) mod testing;
+
+pub use bus::PciBus;
+pub use decode::CpuWindow;
+pub use intx::{PciUpstream, PciWiring, Wire};
 
 use std::sync::{Arc, Mutex, OnceLock};
 
