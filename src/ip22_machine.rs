@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use crate::attach::{attach_devices, Ctx};
-use crate::config::{GraphicsBoard, MachineConfig, MachineProfile, NetworkConfig, ScsiDeviceConfig};
+use crate::config::{GraphicsBoard, MachineConfig, MachineProfile, NetworkConfig};
 use crate::location::{Hop, Location};
 use crate::scsi::ScsiPort;
 use crate::topology::{Family, Row, Topology};
@@ -205,11 +205,11 @@ impl Ip22Machine {
     /// console and exit code delivered in-process instead of to stdout and
     /// `process::exit` (`crate::bench_runner`, `TestDevice::new_embedded`).
     pub fn new_with_testdev(
-        mut cfg: MachineConfig,
+        cfg: MachineConfig,
         testdev_override: Option<Arc<crate::dev::testdev::TestDevice>>,
     ) -> Self {
-        // The rig takes any part: `MachineConfig::cpu_part` looks at this.
-        cfg.test_device |= testdev_override.is_some();
+        // The rig takes any part.
+        let rig = testdev_override.is_some();
         // Capture config flags that are needed after the local `cfg` binding
         // is shadowed later in this function.
         let ci_enabled = cfg.ci;
@@ -221,7 +221,7 @@ impl Ip22Machine {
         let display_resolution = cfg.graphics.resolution;
         let newport_active = !cfg.headless && cfg.graphics_board() == GraphicsBoard::Newport;
         let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
-        let cfg_cpu_model = cfg.cpu_part().expect("validate() accepted the cpu");
+        let cfg_cpu_model = cfg.cpu_part_on(rig).expect("validate() accepted the cpu");
 
         let board_spec = cfg.machine.profile.board().expect("the Indy and Indigo2 profiles have a board");
         let guinness = cfg.machine.profile.guinness();
@@ -710,7 +710,7 @@ impl Ip22Machine {
         let control = Control::new();
         let disks = Disks::new().with_ci(ci_enabled);
         Self::bind_scsi(&topology, &hpc3);
-        let placed = cfg.all_placements(&topology).and_then(|p| {
+        let placed = cfg.placements().and_then(|p| {
             // A test device the caller built occupies gio0 like any other.
             if let Some(dev) = testdev_override {
                 topology.claim(&Location::root().join(Hop::gio(0)), "test_device", Family::Gio, false, "embedded")?;
@@ -1744,7 +1744,11 @@ mod controller_lifetime_tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(move || {
                 let mut cfg = crate::bench_runner::bench_config([16, 0, 0, 0], &parts::R4400_150);
-                cfg.scsi.insert(1, crate::config::ScsiDeviceConfig { path: path_str, overlay: true, ..Default::default() });
+                cfg.place(
+                    "hdd",
+                    "hpc3.0.t1".parse().unwrap(),
+                    toml::from_str(&format!("path = {path_str:?}\noverlay = true")).unwrap(),
+                );
                 Box::new(Ip22Machine::new(cfg))
             })
             .unwrap()
@@ -2125,7 +2129,6 @@ mod virtio_tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(move || {
                 let mut cfg = MachineConfig::default();
-                cfg.scsi.clear();
                 cfg.headless = true;
                 cfg.machine.profile = profile;
                 if profile == MachineProfile::Indigo2Ip28 {
@@ -2238,7 +2241,6 @@ mod gio_card_tests {
     fn test_device_is_started_and_saved_under_gio0() {
         crate::exit_persistence_tests::on_big_stack(|| {
             let mut cfg = MachineConfig::default();
-            cfg.scsi.clear();
             cfg.headless = true;
             cfg.place("test_device", gio(0), toml::from_str("dump = \"/tmp/never-written.json\"").unwrap());
             let m = Ip22Machine::new(cfg);
@@ -2255,7 +2257,6 @@ mod gio_card_tests {
     fn the_bench_runner_still_gets_its_embedded_device_mapped() {
         crate::exit_persistence_tests::on_big_stack(|| {
             let mut cfg = MachineConfig::default();
-            cfg.scsi.clear();
             cfg.headless = true;
             let dev = Arc::new(TestDevice::new("unused.json"));
             let m = Ip22Machine::new_with_testdev(cfg, Some(dev.clone()));
@@ -2370,15 +2371,11 @@ mod placement_tests {
             let dir = Dir::new("dayna");
             make_images(&dir);
             let mut cfg = config(Machine::Indy, &dir, false);
-            cfg.scsi.clear();
-            cfg.scsi.insert(
-                6,
-                ScsiDeviceConfig { kind_field: crate::config::ScsiKind::Daynaport, ..Default::default() },
-            );
+            cfg.place("daynaport", loc("hpc3.0.t6"), toml::Table::new());
             let m = build(cfg);
             let port = m.topology().handle::<ScsiPort>(&loc("hpc3.0")).unwrap();
             assert!(port.bus().has_target(6));
-            assert!(m.disks().records().is_empty(), "a DaynaPort has no image");
+            assert!(m.disks().records().iter().all(|r| r.at != loc("hpc3.0.t6")), "a DaynaPort has no image");
         });
     }
 }

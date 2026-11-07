@@ -372,11 +372,33 @@ impl VirtioDevice for Console {
 /// The default port when `[virtio_serial]` lists none.
 pub const DEFAULT_TCP_PORT: u16 = 8890;
 
+/// One virtio-serial port and the host end it is connected to.
+///
+/// With neither `tcp_port` nor `socket` the port is wired to nothing: output
+/// is dropped and no input arrives.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct VirtioSerialPort {
+    /// Name the guest sees (`/dev/virtio-ports/<name>` on Linux). Unnamed
+    /// ports are found by number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The guest should treat this port as its console.
+    #[serde(default)]
+    pub console: bool,
+    /// Serve the port as a raw (not telnet) TCP socket on 127.0.0.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_port: Option<u16>,
+    /// Serve the port on a raw Unix socket at this path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket: Option<String>,
+}
+
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VirtioSerialOptions {
     #[serde(default, rename = "port")]
-    pub ports: Vec<crate::config::VirtioSerialPort>,
+    pub ports: Vec<VirtioSerialPort>,
 }
 
 impl VirtioSerialOptions {
@@ -405,14 +427,14 @@ impl VirtioSerialOptions {
 /// Build the console device a `[[virtio_serial]]` entry describes, with its
 /// host ends bound and its input pump running. A port whose socket cannot be
 /// made is left wired to nothing, with the reason on stderr.
-pub fn from_ports(ports: &[crate::config::VirtioSerialPort]) -> super::VirtioCore {
+pub fn from_ports(ports: &[VirtioSerialPort]) -> super::VirtioCore {
     use super::backend::{tcp_port, unix_port, NullPort};
-    let default_port = [crate::config::VirtioSerialPort {
+    let default_port = [VirtioSerialPort {
         console: true,
         tcp_port: Some(DEFAULT_TCP_PORT),
         ..Default::default()
     }];
-    let specs: &[crate::config::VirtioSerialPort] = if ports.is_empty() { &default_port } else { ports };
+    let specs: &[VirtioSerialPort] = if ports.is_empty() { &default_port } else { ports };
     let ports = specs
         .iter()
         .enumerate()

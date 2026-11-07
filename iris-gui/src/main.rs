@@ -415,7 +415,9 @@ struct NetSanityModal {
 
 /// One SCSI device that is missing its backing file at Start time.
 struct MissingDisk {
-    id: u8,
+    /// Where the device is: a target on the second controller must not be
+    /// taken for the same id on the first.
+    at: iris::location::Location,
     path: String,
     cdrom: bool,
 }
@@ -440,6 +442,31 @@ pub(crate) fn disk_readable(path: &str) -> bool {
     };
     let mut probe = [0u8; 1];
     matches!(f.read(&mut probe), Ok(n) if n >= 1)
+}
+
+/// Walk the configured SCSI devices and report any whose image file
+/// is missing. Scratch volumes are skipped (iris auto-creates those).
+/// For CD-ROMs the device is "present" if either the primary path or
+/// any disc in the changer list exists.
+fn missing_disks(cfg: &MachineConfig) -> Vec<MissingDisk> {
+    let mut out = Vec::new();
+    for dev in placement_ui::media(cfg) {
+        if dev.scratch() { continue; }
+        // A DaynaPort is a network adapter — no image to be missing.
+        if dev.is_daynaport() { continue; }
+        // Empty CD-ROM (no path, no changer entries) means "drive present,
+        // tray empty" — a valid configured state, not missing.
+        if dev.is_cdrom() && dev.path().is_empty() && dev.discs().is_empty() {
+            continue;
+        }
+        let primary_ok = disk_readable(dev.path());
+        let any_disc_ok = dev.discs().iter().any(|d| disk_readable(d));
+        let present = primary_ok || (dev.is_cdrom() && any_disc_ok);
+        if !present {
+            out.push(MissingDisk { path: dev.path().to_owned(), cdrom: dev.is_cdrom(), at: dev.at });
+        }
+    }
+    out
 }
 
 /// True if we can create (and remove) a file *in* `dir` — i.e. we hold write
@@ -501,7 +528,7 @@ struct ChdGrantModal {
 
 impl App {
     fn new(mut prefs: GuiSettings) -> Self {
-        let mut cfg = MachineConfig::default();
+        let mut cfg = placement_ui::default_config();
         let mut new_machine = NewMachineDialog::default();
         let mut startup_errors = prefs.errors.clone();
         if let Some(name) = prefs.active_machine.clone() {
@@ -789,7 +816,7 @@ impl App {
         // Preflight: Machine::new will call std::process::exit(1) on the
         // first SCSI device whose backing file is missing — we'd lose the
         // GUI process. Catch that case here and prompt the user instead.
-        let missing = self.missing_disks();
+        let missing = missing_disks(&self.cfg);
         if !missing.is_empty() {
             self.missing_modal = Some(MissingDiskModal { missing });
             return;
@@ -903,36 +930,10 @@ impl App {
     }
 
 
-    /// Walk the configured SCSI devices and report any whose image file
-    /// is missing. Scratch volumes are skipped (iris auto-creates those).
-    /// For CD-ROMs the device is "present" if either the primary path or
-    /// any disc in the changer list exists.
-    fn missing_disks(&self) -> Vec<MissingDisk> {
-        let mut out = Vec::new();
-        for dev in placement_ui::media(&self.cfg) {
-            if dev.scratch { continue; }
-            // A DaynaPort is a network adapter — no image to be missing.
-            if dev.is_daynaport() { continue; }
-            // Empty CD-ROM (no path, no changer entries) means "drive present,
-            // tray empty" — a valid configured state, not missing.
-            if dev.is_cdrom() && dev.path.is_empty() && dev.discs.is_empty() {
-                continue;
-            }
-            let primary_ok = disk_readable(&dev.path);
-            let any_disc_ok = dev.discs.iter().any(|d| disk_readable(d));
-            let present = primary_ok || (dev.is_cdrom() && any_disc_ok);
-            if !present {
-                out.push(MissingDisk { id: dev.id(), path: dev.path.clone(), cdrom: dev.is_cdrom() });
-            }
-        }
-        out
-    }
-
-    /// Detach the given SCSI IDs from the live config and (optionally) try Start again.
-    fn detach_and_start(&mut self, ids: &[u8]) {
-        for &id in ids {
-            let at = placement_ui::controller_zero_target(&self.cfg, id);
-            placement_ui::remove_media(&mut self.cfg, &at);
+    /// Detach the given devices from the live config and (optionally) try Start again.
+    fn detach_and_start(&mut self, at: &[iris::location::Location]) {
+        for at in at {
+            placement_ui::remove_media(&mut self.cfg, at);
         }
         self.mark_dirty();
         self.start_emulator();
@@ -986,14 +987,14 @@ impl App {
             let id = dev.id();
             // CD-ROM CHDs are read-only (no diff); scratch disks live in the
             // writable container. Only writable HDD CHDs ever get folded.
-            if dev.scratch || dev.is_cdrom() || dev.is_daynaport() { continue; }
-            if !dev.path.ends_with(".chd") { continue; }
-            let absolute = abs_path(&dev.path);
+            if dev.scratch() || dev.is_cdrom() || dev.is_daynaport() { continue; }
+            if !dev.path().ends_with(".chd") { continue; }
+            let absolute = abs_path(dev.path());
             let Some(parent) = std::path::Path::new(&absolute).parent() else { continue };
             if !dir_writable(parent) {
                 out.push(ChdNeedsGrant {
                     id,
-                    path: dev.path.clone(),
+                    path: dev.path().to_owned(),
                     dir: parent.to_string_lossy().into_owned(),
                 });
             }
@@ -1021,19 +1022,19 @@ impl App {
         let mut entries: Vec<(u8, String, bool)> = Vec::new(); // (id, base, is_chd)
         for dev in placement_ui::media(&self.cfg) {
             let id = dev.id();
-            if dev.is_cdrom() || dev.is_daynaport() || dev.scratch || dev.path.trim().is_empty() {
+            if dev.is_cdrom() || dev.is_daynaport() || dev.scratch() || dev.path().trim().is_empty() {
                 continue;
             }
-            let is_chd = iris::chd_disk::is_chd(&dev.path);
+            let is_chd = iris::chd_disk::is_chd(dev.path());
             let has_overlay = if is_chd {
-                iris::chd_disk::diff_path_for(std::path::Path::new(&dev.path)).exists()
-            } else if dev.overlay {
-                std::path::Path::new(&format!("{}.overlay", dev.path)).exists()
+                iris::chd_disk::diff_path_for(std::path::Path::new(dev.path())).exists()
+            } else if dev.overlay() {
+                std::path::Path::new(&format!("{}.overlay", dev.path())).exists()
             } else {
                 false
             };
             if has_overlay {
-                entries.push((id, dev.path.clone(), is_chd));
+                entries.push((id, dev.path().to_owned(), is_chd));
             }
         }
         if entries.is_empty() {
@@ -2386,7 +2387,7 @@ impl App {
         if let Some(next) = self.prefs.machines.keys().next().cloned() {
             self.switch_to(&next);
         } else {
-            self.cfg = MachineConfig::default();
+            self.cfg = placement_ui::default_config();
             if let Err(e) = self.prefs.root().and_then(Self::enter_directory) { self.toast(e); }
             self.new_machine.open();
             if let Err(e) = self.prefs.save() { self.toast(e); }
@@ -2913,7 +2914,7 @@ impl App {
         if !self.show_ultra64_help {
             return;
         }
-        let enabled = self.cfg.ultra64.enabled;
+        let enabled = placement_ui::has_ultra64(&self.cfg);
 
         let mut open = true;
         egui::Window::new(t!("help-ultra64-title"))
@@ -3119,7 +3120,7 @@ impl App {
                         ui.label(t!("welcome-drive-daynaport", id = id));
                         continue;
                     }
-                    let path = abs_path(&d.path);
+                    let path = abs_path(d.path());
                     ui.label(if d.is_cdrom() {
                         t!("welcome-drive-cdrom", id = id, path = &path)
                     } else {
@@ -3267,7 +3268,7 @@ impl eframe::App for App {
                 let cdrom = placement_ui::media(&self.cfg).into_iter().find(|m| m.is_cdrom());
 
                 if let Some(dev) = cdrom {
-                    let (id, cur) = (dev.id(), dev.path.clone());
+                    let (id, cur) = (dev.id(), dev.path().to_owned());
                     if let Some(path) = scsi_menu::pick_iso(&t!("main-load-disc-title"), &cur) {
                         self.emu.send(Cmd::LoadDisc { id, path, remount: true });
                     }
@@ -3410,9 +3411,7 @@ impl eframe::App for App {
         if let Some(result) = self.create_disk.take_result() {
             let path_str = result.path.to_string_lossy().into_owned();
             let at = placement_ui::controller_zero_target(&self.cfg, result.scsi_id);
-            let mut disk = placement_ui::Media::new(at, placement_ui::MediaKind::Disk);
-            disk.path = path_str.clone();
-            placement_ui::set_media(&mut self.cfg, disk);
+            placement_ui::set_media(&mut self.cfg, placement_ui::Media { at, dev: placement_ui::Device::new("hdd", path_str.clone()) });
             self.mark_dirty();
             self.toast(t!("toast-disk-created", path = &path_str, id = result.scsi_id));
         }
@@ -3584,9 +3583,9 @@ impl eframe::App for App {
                     ui.label(RichText::new(t!("modal-missing-body")).strong());
                     for m in &modal.missing {
                         ui.label(if m.cdrom {
-                            t!("modal-missing-cdrom", id = m.id, path = &m.path)
+                            t!("modal-missing-cdrom", id = m.at.target().unwrap_or(0), path = &m.path)
                         } else {
-                            t!("modal-missing-disk", id = m.id, path = &m.path)
+                            t!("modal-missing-disk", id = m.at.target().unwrap_or(0), path = &m.path)
                         });
                     }
                     ui.add_space(8.0);
@@ -3622,11 +3621,11 @@ impl eframe::App for App {
                 self.missing_modal = None;
             }
             MissingChoice::Detach => {
-                let ids: Vec<u8> = self.missing_modal.as_ref()
-                    .map(|m| m.missing.iter().map(|d| d.id).collect())
+                let at: Vec<_> = self.missing_modal.as_ref()
+                    .map(|m| m.missing.iter().map(|d| d.at.clone()).collect())
                     .unwrap_or_default();
                 self.missing_modal = None;
-                self.detach_and_start(&ids);
+                self.detach_and_start(&at);
             }
         }
 
@@ -3910,7 +3909,6 @@ mod machine_storage_integration {
         let mut prefs = GuiSettings::load_in(root.clone(), launch_dir());
         let mut cfg = MachineConfig::default();
         cfg.banks = iris::config::banks_from4([8, 8, 0, 0]);
-        cfg.scsi.clear();
         cfg.headless = true;
         cfg.monitor_port = Some(0);
         cfg.serial_port_a = Some(0);
@@ -3991,5 +3989,32 @@ mod makers_tests {
     #[test]
     fn makers_include_the_expected_device_types() {
         assert_eq!(iris::attach::missing_makers(&["hdd", "cdrom"]), Vec::<String>::new());
+    }
+}
+
+#[cfg(test)]
+mod missing_disk_tests {
+    use super::*;
+    use crate::placement_ui::{Device, Media};
+
+    /// A missing disk on the second controller is detached, not the disk with
+    /// the same target id on the first.
+    #[test]
+    fn detaching_a_missing_second_controller_disk_keeps_the_first_controllers() {
+        let present = std::env::temp_dir().join(format!("iris-gui-present-{}", std::process::id()));
+        std::fs::write(&present, [0u8; 512]).unwrap();
+        let mut cfg = MachineConfig::default();
+        cfg.machine.profile = iris::config::MachineProfile::Indigo2Ip22;
+        let hdd = |at: &str, path: &str| Media { at: at.parse().unwrap(), dev: Device::new("hdd", path.into()) };
+        placement_ui::set_media(&mut cfg, hdd("hpc3.0.t1", present.to_str().unwrap()));
+        placement_ui::set_media(&mut cfg, hdd("hpc3.1.t1", "/nonexistent/second.img"));
+        let missing = missing_disks(&cfg);
+        assert_eq!(missing.iter().map(|m| m.at.to_string()).collect::<Vec<_>>(), ["hpc3.1.t1"]);
+        for m in &missing {
+            placement_ui::remove_media(&mut cfg, &m.at);
+        }
+        let left: Vec<String> = placement_ui::media(&cfg).iter().map(|m| m.at.to_string()).collect();
+        assert_eq!(left, ["hpc3.0.t1"]);
+        std::fs::remove_file(present).unwrap();
     }
 }

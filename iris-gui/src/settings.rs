@@ -443,12 +443,13 @@ fn uuid_like() -> String {
 mod storage_tests {
     use super::*;
     use crate::machines::{self, tests::TempRoot};
+    use crate::placement_ui::fixtures::{at_id, edit, with_disks};
 
     #[test]
     fn legacy_json_migration_keeps_preferences_and_removes_only_machine_payloads() {
         let root = TempRoot::new("json");
-        let mut cfg = MachineConfig::default();
-        cfg.scsi.get_mut(&1).unwrap().path = "boot.raw".into();
+        let mut cfg = with_disks();
+        edit(&mut cfg, 1, |m| *m.path_mut().unwrap() = "boot.raw".into());
         let original = serde_json::json!({
             "ui_scale": 1.5, "vm_scale": 1.0, "active_machine": "indy",
             "machines": {"indy": cfg}, "recent_configs": ["old.toml"],
@@ -461,7 +462,7 @@ mod storage_tests {
         assert!(prefs.errors.is_empty(), "{:?}", prefs.errors);
         assert_eq!(prefs.active_machine.as_deref(), Some("indy"));
         // Resolved against the old launch directory; outside the machine folder, so absolute.
-        assert_eq!(prefs.machines["indy"].scsi[&1].path, root.0.join("boot.raw").to_string_lossy());
+        assert_eq!(at_id(&prefs.machines["indy"], 1).path(), root.0.join("boot.raw").to_string_lossy());
         assert_eq!(std::fs::read_to_string(root.0.join("gui.json.pre-toml.bak")).unwrap(), original_text);
         prefs.save().unwrap();
         let persisted: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(root.0.join("gui.json")).unwrap()).unwrap();
@@ -546,11 +547,11 @@ mod storage_tests {
         assert_eq!(prefs.root().unwrap(), actual.join("iris"));
         let disk = temp.0.join("external.raw");
         std::fs::write(&disk, b"external disk").unwrap();
-        let mut cfg = MachineConfig::default();
-        cfg.scsi.get_mut(&1).unwrap().path = disk.to_string_lossy().into_owned();
+        let mut cfg = with_disks();
+        edit(&mut cfg, 1, |m| *m.path_mut().unwrap() = disk.to_string_lossy().into_owned());
         prefs.save_machine("indy", &mut cfg).unwrap();
         let dir = prefs.machine_dir("indy").unwrap();
-        assert_eq!(std::fs::read(dir.join(&cfg.scsi[&1].path)).unwrap(), b"external disk");
+        assert_eq!(std::fs::read(dir.join(at_id(&cfg, 1).path())).unwrap(), b"external disk");
     }
 
     #[test]

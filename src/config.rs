@@ -15,182 +15,6 @@ pub const VALID_BANK_SIZES: &[u32] = &[0, 8, 16, 32, 64, 128, 256, 512, 1024, 20
 /// 256/512 MB banks to those machines.
 const MC_BANK_SIZES: &[u32] = &[0, 8, 16, 32, 64, 128, 256, 512];
 
-/// What sits at a SCSI id. `cdrom = true` remains the historical spelling for
-/// `kind = "cdrom"`; either works and they mean the same thing.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum ScsiKind {
-    /// Hard disk (raw image, CHD, or COW overlay).
-    #[default]
-    Disk,
-    /// CD-ROM drive (may start with an empty tray).
-    Cdrom,
-    /// DaynaPort SCSI/Link — a SCSI-attached Ethernet adapter. Has no disk
-    /// image at all. Built in; attach it with `kind = "daynaport"`.
-    Daynaport,
-}
-
-impl ScsiKind {
-    fn is_default(&self) -> bool { *self == ScsiKind::Disk }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Disk => "Hard disk",
-            Self::Cdrom => "CD-ROM",
-            Self::Daynaport => "DaynaPort SCSI/Link",
-        }
-    }
-}
-
-/// Configuration for a single SCSI device.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScsiDeviceConfig {
-    /// Path to the disk image or ISO file (primary/current disc).
-    /// For CD-ROMs this may be omitted (defaults to empty string) to start the
-    /// drive with an empty tray; media can be loaded at runtime.
-    #[serde(default)]
-    pub path: String,
-    /// Additional ISO images for CD-ROM changers (ignored for HDD).
-    #[serde(default)]
-    pub discs: Vec<String>,
-    /// true = CD-ROM, false = hard disk. Kept for compatibility: it is the
-    /// original spelling of `kind = "cdrom"` and every existing config uses it.
-    /// Use `kind` for anything that is not a disk or a CD-ROM.
-    #[serde(default)]
-    pub cdrom: bool,
-    /// Target type. Defaults to `disk`; `cdrom = true` still selects a CD-ROM
-    /// on its own. Read it through [`ScsiDeviceConfig::kind`] rather than
-    /// directly, so the two spellings stay reconciled.
-    #[serde(default, rename = "kind", skip_serializing_if = "ScsiKind::is_default")]
-    pub kind_field: ScsiKind,
-    /// DaynaPort only: explicit MAC address, e.g. `"00:80:19:12:34:56"`.
-    /// Default is derived from the SCSI id so two targets never collide.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mac: Option<String>,
-    /// DaynaPort only: NAT subnet in CIDR notation for *this* target's gateway,
-    /// e.g. `"192.168.10.0/24"`. Each DaynaPort runs its own NAT engine, so
-    /// this must differ from the machine-wide `nat_subnet` used by `ec0`.
-    /// Gateway gets host .1, the guest gets host .2.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subnet: Option<String>,
-    /// Hard disks only: the disk's write cache, as the caching mode page's WCE
-    /// bit. `true` (the default) reports it on: a plain write is complete once
-    /// the host has it, SYNCHRONIZE CACHE and FUA store what came before them,
-    /// and a background sync follows about 5 s after a write. A host crash or
-    /// power loss can lose that much, and a killed iris can lose it too when
-    /// the disk is a CHD. IRIX never sends SYNCHRONIZE CACHE or FUA, so it
-    /// cannot force a write out. `false` reports it off and stores every write
-    /// on the host's disk before the command completes, like the drives SGI
-    /// shipped; it is slower. A guest can change the bit with MODE SELECT.
-    /// STORAGE.md says what each setting loses.
-    #[serde(default = "default_write_cache")]
-    pub write_cache: bool,
-    /// Enable copy-on-write overlay. Base image is never modified; writes go to
-    /// `{path}.overlay`. Delete the overlay file to reset to clean state.
-    #[serde(default)]
-    pub overlay: bool,
-    /// Scratch volume: a host-controlled raw block device used for file
-    /// injection/extraction without networking. iris auto-creates a zero-filled
-    /// file at `path` if it doesn't exist (size = `size_mb`, default 64). The
-    /// CI socket exposes scratch-write/read/clear/info to mutate it from the
-    /// host side. No filesystem is imposed: callers can write a tar stream and
-    /// the guest reads it with `dd if=/dev/rdsk/dks0dNvh | tar xf -`.
-    /// Implies !cdrom && !overlay (the volume must be host-writable directly).
-    #[serde(default)]
-    pub scratch: bool,
-    /// Size in MB for an auto-created scratch volume. Ignored when the file
-    /// already exists or `scratch=false`.
-    #[serde(default)]
-    pub size_mb: Option<u32>,
-    /// Which SCSI controller this target lives on: 0 (default) or 1. Indigo2
-    /// (IP22 fullhouse) has two independent WD33C93A controllers and the O2
-    /// two Adaptec 7880s (0 the internal bus, 1 the external connector);
-    /// Indy (IP24 guinness) only has controller 0, so `controller = 1` is
-    /// rejected there — see `MachineConfig::validate`.
-    #[serde(default)]
-    pub controller: u8,
-}
-
-/// The `[scsi.N]` key, and the snapshot manifest's disk number, that names
-/// `id` on `controller`: the id itself on controller 0, 16 + id on
-/// controller 1. Sixteen slots per controller, as SCSI ids go.
-pub fn scsi_slot(controller: u8, id: u8) -> u8 {
-    controller * 16 + id
-}
-
-/// `SCSI ID 1` on controller 0, `SCSI 1:1` on another, for messages.
-pub fn scsi_label(controller: u8, id: u8) -> String {
-    if controller == 0 { format!("SCSI ID {id}") } else { format!("SCSI {controller}:{id}") }
-}
-
-/// A disk's write cache is on unless the configuration says otherwise.
-fn default_write_cache() -> bool {
-    true
-}
-
-impl Default for ScsiDeviceConfig {
-    fn default() -> Self {
-        Self {
-            path: String::new(),
-            discs: vec![],
-            cdrom: false,
-            kind_field: ScsiKind::Disk,
-            mac: None,
-            subnet: None,
-            write_cache: true,
-            overlay: false,
-            scratch: false,
-            size_mb: None,
-            controller: 0,
-        }
-    }
-}
-
-impl ScsiDeviceConfig {
-    /// The target type, reconciling the `kind` key with the older `cdrom` bool.
-    /// An explicit `kind` wins; `cdrom = true` alone still means CD-ROM.
-    pub fn kind(&self) -> ScsiKind {
-        match self.kind_field {
-            ScsiKind::Disk if self.cdrom => ScsiKind::Cdrom,
-            k => k,
-        }
-    }
-
-    pub fn is_cdrom(&self) -> bool { self.kind() == ScsiKind::Cdrom }
-    pub fn is_daynaport(&self) -> bool { self.kind() == ScsiKind::Daynaport }
-
-    /// Where the `[scsi.KEY]` table puts this target, as (controller, id).
-    /// Keys 1–15 are ids on `controller` (1–7 off the Octane; 0 unless the key says otherwise);
-    /// a key of 16 + id names controller 1 directly, so the same id can be
-    /// used on both controllers. See [`scsi_slot`].
-    pub fn placement(&self, key: u8) -> (u8, u8) {
-        if key >= 16 { (key / 16, key % 16) } else { (self.controller, key) }
-    }
-
-    /// What the disks module opens for this target.
-    pub fn spec(&self) -> crate::disks::MediaSpec {
-        crate::disks::MediaSpec {
-            path: self.path.clone(),
-            discs: self.discs.clone(),
-            cdrom: self.is_cdrom(),
-            overlay: self.overlay,
-            scratch: self.scratch,
-            size_mb: self.size_mb,
-            write_cache: self.write_cache,
-        }
-    }
-
-    /// A DaynaPort target for this SCSI id, with defaults filled in.
-    /// Errors describe a bad `mac` / `subnet`; `validate()` catches those first.
-    pub fn daynaport_params(&self, id: u8) -> Result<DaynaportParams, String> {
-        self.daynaport_options().params(id)
-    }
-
-    fn daynaport_options(&self) -> DaynaportOptions {
-        DaynaportOptions { mac: self.mac.clone(), subnet: self.subnet.clone() }
-    }
-}
-
 /// Resolved DaynaPort settings for one SCSI target.
 #[derive(Debug, Clone, Copy)]
 pub struct DaynaportParams {
@@ -450,68 +274,6 @@ pub enum VinoStandard {
 
 impl Default for VinoStandard {
     fn default() -> Self { VinoStandard::Ntsc }
-}
-
-/// N64 development board (Ultra64) configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Ultra64Config {
-    /// Enable the N64 development board GIO device and POSIX shm IPC bridge.
-    #[serde(default)]
-    pub enabled: bool,
-}
-
-/// Which GIO expansion slot a virtio device sits in (machines without PCI).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum VirtioGioSlot {
-    /// 0x1F400000; shared with `--test-device` and the Ultra64 board.
-    Exp0,
-    /// 0x1F600000; shared with the second Newport head (`graphics.heads = 2`).
-    #[default]
-    Exp1,
-}
-
-/// One virtio-serial port and the host end it is connected to.
-///
-/// With neither `tcp_port` nor `socket` the port is wired to nothing: output
-/// is dropped and no input arrives.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct VirtioSerialPort {
-    /// Name the guest sees (`/dev/virtio-ports/<name>` on Linux). Unnamed
-    /// ports are found by number.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// The guest should treat this port as its console.
-    #[serde(default)]
-    pub console: bool,
-    /// Serve the port as a raw (not telnet) TCP socket on 127.0.0.1.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tcp_port: Option<u16>,
-    /// Serve the port on a raw Unix socket at this path.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub socket: Option<String>,
-}
-
-/// virtio-serial (virtio-console) device for the guest, `[virtio_serial]`.
-/// See `src/dev/virtio` and `docs/virtio-serial.md`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct VirtioSerialConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    /// GIO expansion slot, on the Indy and Indigo2 (IP24/IP22/IP28). The
-    /// machines with PCI (O2, Octane) put it on the PCI bus and ignore this.
-    #[serde(default)]
-    pub slot: VirtioGioSlot,
-    /// The ports, in order; port 0 is the first. Empty means one console
-    /// port on TCP 127.0.0.1:8890.
-    #[serde(default, rename = "port", skip_serializing_if = "Vec::is_empty")]
-    pub ports: Vec<VirtioSerialPort>,
-}
-
-impl VirtioSerialConfig {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
 }
 
 /// Emulated SGI machine profile (hardware layout scaffold).
@@ -782,29 +544,6 @@ impl MachineProfile {
             Self::Indigo2Ip28 => "SGI Indigo2 IMPACT (IP28)",
             Self::O2Ip32 => "SGI O2 (IP32)",
             Self::OctaneIp30 => "SGI Octane (IP30)",
-        }
-    }
-
-    /// MC/IOC/HPC3 Guinness vs Fullhouse layout. Indy IP24 is Guinness (`true`).
-    /// How many SCSI controllers the machine has: two on the Indigo2 (two
-    /// WD33C93As) and the O2 (two Adaptec 7880s, the second on the external
-    /// connector), one on the Indy.
-    pub fn scsi_controllers(self) -> u8 {
-        match self {
-            Self::Indigo2Ip22 | Self::O2Ip32 | Self::OctaneIp30 => 2,
-            _ => 1,
-        }
-    }
-
-    /// The highest SCSI id a `[scsi.N]` table can name. The Octane's ISP1040
-    /// buses are wide, with ids 0 to 15 and the controller on 0. The Indy's
-    /// and Indigo2's WD33C93A chips are narrow, with ids 0 to 7. The O2's
-    /// Adaptec buses are wide too, but stay at 7 until they are widened on
-    /// purpose.
-    pub fn max_scsi_id(self) -> u8 {
-        match self {
-            Self::OctaneIp30 => 15,
-            _ => 7,
         }
     }
 
@@ -1689,37 +1428,6 @@ pub struct VinoConfig {
     pub camera_index: u32,
 }
 
-/// (De)serialize the `scsi` map through string keys. TOML (and the `toml`
-/// crate's serializer) requires map keys to be strings, but the map is keyed
-/// by `u8`, so `toml::to_string` would fail with "map key was not a string".
-/// JSON is unaffected (it already stringifies map keys); this just makes the
-/// representation explicit and symmetric so iris.toml export round-trips.
-mod scsi_keys {
-    use super::ScsiDeviceConfig;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::collections::{BTreeMap, HashMap};
-
-    pub fn serialize<S: Serializer>(
-        map: &HashMap<u8, ScsiDeviceConfig>,
-        ser: S,
-    ) -> Result<S::Ok, S::Error> {
-        // BTreeMap → stable, ID-sorted output.
-        map.iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect::<BTreeMap<String, &ScsiDeviceConfig>>()
-            .serialize(ser)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        de: D,
-    ) -> Result<HashMap<u8, ScsiDeviceConfig>, D::Error> {
-        HashMap::<String, ScsiDeviceConfig>::deserialize(de)?
-            .into_iter()
-            .map(|(k, v)| k.parse::<u8>().map(|id| (id, v)).map_err(serde::de::Error::custom))
-            .collect()
-    }
-}
-
 /// One `[[<device>]]` entry: the device type, where it goes, and the rest of
 /// the entry as that type's options.
 #[derive(Debug, Clone, PartialEq)]
@@ -1727,6 +1435,27 @@ pub struct Placement {
     pub device: String,
     pub at: Location,
     pub opts: toml::Table,
+}
+
+/// The top-level settings older iris wrote for devices that are now
+/// `[[<device>]]` arrays; [`MachineConfig::migrate`] rewrites them.
+const OLD_KEYS: &[&str] = &["scsi", "ultra64", "virtio_serial", "test_device", "test_device_dump"];
+
+/// Remove `key` from `t` and return it when it is a string.
+fn o_str(t: &mut toml::Table, key: &str) -> Option<String> {
+    t.remove(key).and_then(|v| v.as_str().map(str::to_owned))
+}
+
+/// Whether `v` is what an old `[scsi.N]` table carried for `key` when the
+/// user had not set it.
+fn is_old_default(key: &str, v: &toml::Value) -> bool {
+    match key {
+        "overlay" | "scratch" => v.as_bool() == Some(false),
+        "write_cache" => v.as_bool() == Some(true),
+        "path" => v.as_str() == Some(""),
+        "discs" => v.as_array().is_some_and(|a| a.is_empty()),
+        _ => false,
+    }
 }
 
 /// Top-level machine configuration.
@@ -1838,16 +1567,6 @@ pub struct MachineConfig {
     #[serde(skip)]
     pub perfetto_clock: Option<String>,
 
-    /// Map the bare-metal test device (guest console, machine-state dump, exit
-    /// code) into GIO expansion slot 0. Off by default; see src/dev/testdev.rs.
-    #[serde(default)]
-    pub test_device: bool,
-
-    /// Where the test device's DUMP register writes its JSON. Defaults to
-    /// `iris-testdev-dump.json` in the working directory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub test_device_dump: Option<String>,
-
     /// cheritest convention: a guest write to CP0 register 26 triggers the same
     /// dump as the test device's DUMP register. Off by default and must stay
     /// that way for a normal boot — CP0 26 is ECC on a real R4400 and the PROM
@@ -1920,10 +1639,6 @@ pub struct MachineConfig {
 
     // --- table / array-of-table fields: must be emitted after all scalars ---
 
-    /// SCSI devices keyed by ID 1–7 (1–15 on the Octane). Missing IDs are not attached.
-    #[serde(default = "default_scsi", with = "scsi_keys")]
-    pub scsi: std::collections::HashMap<u8, ScsiDeviceConfig>,
-
     /// NFS share configuration. If present, the NAT's in-process NFS server
     /// (`src/net/nfsudp.rs`) exports `shared_dir` to the guest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1989,14 +1704,6 @@ pub struct MachineConfig {
     /// Guest real-time clock offset from host time (`[rtc_offset]` section).
     #[serde(default, skip_serializing_if = "RtcOffset::is_zero")]
     pub rtc_offset: RtcOffset,
-
-    /// N64 development board (Ultra64) — GIO slot 0 + shm IPC.
-    #[serde(default)]
-    pub ultra64: Ultra64Config,
-
-    /// virtio-serial guest device (`[virtio_serial]`, `[[virtio_serial.port]]`).
-    #[serde(default, skip_serializing_if = "VirtioSerialConfig::is_default")]
-    pub virtio_serial: VirtioSerialConfig,
 
     /// Top-level keys no field above names: the `[[<device>]]` arrays.
     #[serde(flatten)]
@@ -2147,20 +1854,6 @@ mod banks_serde {
 
 fn default_scale() -> u32 { 1 }
 
-fn default_scsi() -> std::collections::HashMap<u8, ScsiDeviceConfig> {
-    let mut map = std::collections::HashMap::new();
-    map.insert(1, ScsiDeviceConfig {
-        path: "scsi1.raw".to_string(),
-        ..Default::default()
-    });
-    map.insert(4, ScsiDeviceConfig {
-        path: "cdrom4.iso".to_string(),
-        cdrom: true,
-        ..Default::default()
-    });
-    map
-}
-
 impl Default for MachineConfig {
     fn default() -> Self {
         Self {
@@ -2168,7 +1861,6 @@ impl Default for MachineConfig {
             nvram: default_nvram(),
             nveeprom: default_nveeprom(),
             banks: default_banks(),
-            scsi: default_scsi(),
             scale: default_scale(),
             nfs: None,
             port_forward: vec![],
@@ -2185,8 +1877,6 @@ impl Default for MachineConfig {
             perfetto: None,
             perfetto_cats: None,
             perfetto_clock: None,
-            test_device: false,
-            test_device_dump: None,
             cheritest_dump_hook: false,
             nat_subnet: None,
             ci: false,
@@ -2213,8 +1903,6 @@ impl Default for MachineConfig {
             perf: PerfConfig::default(),
             clock: ClockConfig::default(),
             rtc_offset: RtcOffset::default(),
-            ultra64: Ultra64Config::default(),
-            virtio_serial: VirtioSerialConfig::default(),
             extra: BTreeMap::new(),
         }
     }
@@ -2224,50 +1912,6 @@ impl Default for MachineConfig {
 fn is_default_keyboard(k: &KeyboardLayout) -> bool { *k == KeyboardLayout::default() }
 
 impl MachineConfig {
-    /// `[virtio_serial]`: the ports it lists, and whether this machine has
-    /// somewhere to put it.
-    fn validate_virtio_serial(&self) -> Result<(), String> {
-        let v = &self.virtio_serial;
-        if !v.enabled {
-            return Ok(());
-        }
-        // Two queues per port and the control pair, in a 64-bit notify mask.
-        if v.ports.len() > 31 {
-            return Err(format!("[virtio_serial] has {} ports (at most 31)", v.ports.len()));
-        }
-        for (i, p) in v.ports.iter().enumerate() {
-            if p.tcp_port.is_some() && p.socket.is_some() {
-                return Err(format!("[virtio_serial] port {i}: tcp_port and socket are exclusive"));
-            }
-            if p.name.as_deref().is_some_and(|n| n.is_empty() || n.len() > 200) {
-                return Err(format!("[virtio_serial] port {i}: name must be 1 to 200 bytes"));
-            }
-            if v.ports[..i].iter().any(|q| q.name.is_some() && q.name == p.name) {
-                return Err(format!("[virtio_serial] port {i}: name {:?} is used twice", p.name.as_deref().unwrap_or("")));
-            }
-        }
-        match self.machine.profile {
-            MachineProfile::IndyIp24 | MachineProfile::Indigo2Ip22 | MachineProfile::Indigo2Ip28 => {
-                match v.slot {
-                    VirtioGioSlot::Exp0 if self.ultra64.enabled || self.test_device => Err(
-                        "[virtio_serial] slot = \"exp0\" is taken by the ultra64 board or test_device; use \"exp1\"".into(),
-                    ),
-                    VirtioGioSlot::Exp1 if self.graphics.heads == 2 && !self.headless => Err(
-                        "[virtio_serial] slot = \"exp1\" is taken by the second graphics head; use \"exp0\"".into(),
-                    ),
-                    _ => Ok(()),
-                }
-            }
-            // The Octane has a PCI bridge with a free slot.
-            MachineProfile::OctaneIp30 => Ok(()),
-            MachineProfile::O2Ip32 => Err(
-                "[virtio_serial] is not wired on the O2 yet: the virtio-pci transport exists, but the \
-                 MACE PCI bridge has no interrupt route for a third slot (see docs/virtio-serial.md)"
-                    .into(),
-            ),
-        }
-    }
-
     /// The serial channels' TCP ports (A, B), defaults filled in.
     pub fn serial_ports(&self) -> [u16; 2] {
         let [a, b] = crate::dev::z85c30::DEFAULT_PORTS;
@@ -2299,7 +1943,7 @@ impl MachineConfig {
         };
         match toml::from_str::<Self>(&text) {
             Ok(mut cfg) => {
-                cfg.check_extra().map_err(|e| format!("failed to parse {path}:\n{e}"))?;
+                cfg.check_keys(true).map_err(|e| format!("failed to parse {path}:\n{e}"))?;
                 cfg.fold_deprecated();
                 Ok(cfg)
             }
@@ -2356,16 +2000,16 @@ impl MachineConfig {
             moved.push("o2.dimms -> banks");
         }
         if !self.o2.disks.is_empty() {
-            self.scsi.clear();
+            let mut table = toml::Table::new();
             for d in std::mem::take(&mut self.o2.disks) {
-                self.scsi.insert(d.id, ScsiDeviceConfig {
-                    path: d.path,
-                    cdrom: d.cdrom,
-                    overlay: d.overlay,
-                    controller: d.bus,
-                    ..Default::default()
-                });
+                let mut dev = toml::Table::new();
+                dev.insert("path".into(), d.path.into());
+                dev.insert("cdrom".into(), d.cdrom.into());
+                dev.insert("overlay".into(), d.overlay.into());
+                dev.insert("controller".into(), (d.bus as i64).into());
+                table.insert(d.id.to_string(), dev.into());
             }
+            self.extra.insert("scsi".into(), table.into());
             moved.push("o2.disks -> [scsi.N] (controller = bus)");
         }
         if let Some(port) = self.o2.serial_port.take() {
@@ -2419,9 +2063,15 @@ impl MachineConfig {
     /// machine profile. The bare-metal test rig (iris-bench) measures every
     /// part on one machine, so with the test device on any part will do.
     pub fn cpu_part(&self) -> Result<&'static Part, String> {
+        self.cpu_part_on(self.extra.contains_key("test_device"))
+    }
+
+    /// `cpu_part`, where `rig` says the machine runs the bare-metal test
+    /// device, placed in the config or handed to `new_with_testdev`.
+    pub fn cpu_part_on(&self, rig: bool) -> Result<&'static Part, String> {
         let named = self.machine.cpu.as_deref();
         match self.machine.profile.part(named) {
-            Err(_) if self.test_device => named.and_then(|n| parts::find(parts::ALL, n))
+            Err(_) if rig => named.and_then(|n| parts::find(parts::ALL, n))
                 .ok_or_else(|| format!("unknown cpu {:?}", named.unwrap_or_default())),
             part => part,
         }
@@ -2438,26 +2088,38 @@ impl MachineConfig {
     }
 
     /// Parse a configuration file's text, refusing the keys serde would have
-    /// refused before unknown top-level keys were collected in `extra`.
+    /// refused before unknown top-level keys were collected in `extra`. The
+    /// old settings that [`MachineConfig::migrate`] rewrites are let through.
     pub fn from_toml(text: &str) -> Result<Self, String> {
         let cfg: Self = toml::from_str(text).map_err(|e| e.to_string())?;
-        cfg.check_extra()?;
+        cfg.check_keys(true)?;
         Ok(cfg)
     }
 
-    /// Refuse a top-level key that is not an array of device tables. The
-    /// typed fields are checked by serde; this takes over what
-    /// `deny_unknown_fields` did for the rest.
+    /// Refuse a top-level key that is not an array of device tables.
     pub fn check_extra(&self) -> Result<(), String> {
+        self.check_keys(false)
+    }
+
+    /// Refuse a top-level key that is not an array of device tables (or, with
+    /// `old`, one of the settings migration rewrites). The typed fields are
+    /// checked by serde; this takes over what `deny_unknown_fields` did for
+    /// the rest.
+    fn check_keys(&self, old: bool) -> Result<(), String> {
         for (key, v) in &self.extra {
+            if old && OLD_KEYS.contains(&key.as_str()) {
+                continue;
+            }
             match v {
                 toml::Value::Array(a) if a.iter().all(toml::Value::is_table) => {}
                 toml::Value::Table(_) => return Err(format!("unknown section [{key}]")),
                 _ => return Err(format!("unknown key `{key}`: not a section or a device array")),
             }
         }
-        self.placements()?;
-        self.extra.keys().try_for_each(|k| crate::attach::known_device(k))
+        for p in self.placements()? {
+            crate::attach::known_device(&p.device)?;
+        }
+        Ok(())
     }
 
     /// Every `[[<device>]]` entry: arrays in key order (toml tables are
@@ -2467,6 +2129,10 @@ impl MachineConfig {
         let mut out = Vec::new();
         for (device, v) in &self.extra {
             let Some(entries) = v.as_array() else {
+                // An old-form setting waiting for migration is not an entry.
+                if OLD_KEYS.contains(&device.as_str()) && !v.is_array() {
+                    continue;
+                }
                 return Err(format!("`{device}` is not a section: write [[{device}]] with an `at` in each entry"));
             };
             for e in entries {
@@ -2485,117 +2151,129 @@ impl MachineConfig {
         Ok(out)
     }
 
-    /// Transitional (removed with the `[scsi.N]` tables): the typed `[scsi.N]`
-    /// map as placements, a key of 16 + id naming controller 1 and a key
-    /// below 16 using `controller`.
-    pub fn scsi_placements(&self, t: &Topology) -> Result<Vec<Placement>, String> {
-        let mut out = Vec::new();
-        // The map is a HashMap: sorted, so the order is the same every run.
-        let mut keys: Vec<u8> = self.scsi.keys().copied().collect();
-        keys.sort_unstable();
-        for key in keys {
-            let dev = &self.scsi[&key];
-            let (controller, id) = dev.placement(key);
-            let base = t
-                .controller(controller)
-                .ok_or_else(|| format!("{}: this machine has no controller {controller}", scsi_label(controller, id)))?;
-            let mut opts = toml::Table::new();
-            let mut put = |k: &str, v: toml::Value| {
-                opts.insert(k.into(), v);
-            };
-            let device = match dev.kind() {
-                ScsiKind::Disk => {
-                    put("path", dev.path.clone().into());
-                    put("write_cache", dev.write_cache.into());
-                    if dev.overlay {
-                        put("overlay", true.into());
-                    }
-                    if dev.scratch {
-                        put("scratch", true.into());
-                    }
-                    if let Some(mb) = dev.size_mb {
-                        put("size_mb", (mb as i64).into());
-                    }
-                    "hdd"
-                }
-                ScsiKind::Cdrom => {
-                    if !dev.path.is_empty() {
-                        put("path", dev.path.clone().into());
-                    }
-                    if !dev.discs.is_empty() {
-                        put("discs", dev.discs.clone().into());
-                    }
-                    "cdrom"
-                }
-                ScsiKind::Daynaport => {
-                    if let Some(mac) = &dev.mac {
-                        put("mac", mac.clone().into());
-                    }
-                    if let Some(subnet) = &dev.subnet {
-                        put("subnet", subnet.clone().into());
-                    }
-                    "daynaport"
-                }
-            };
-            out.push(Placement { device: device.into(), at: base.join(Hop::t(id)), opts });
-        }
-        Ok(out)
-    }
-
-    /// Transitional (removed with the typed fields): `[ultra64]`,
-    /// `test_device` and `[virtio_serial]` as placements. The Indy and
-    /// Indigo2 have the first two, which never had a slot and sit in gio0;
-    /// virtio-serial goes in a GIO slot there and on the Octane's Bridge.
-    pub fn legacy_device_placements(&self) -> Vec<Placement> {
-        let ip22 = matches!(
-            self.machine.profile,
-            MachineProfile::IndyIp24 | MachineProfile::Indigo2Ip22 | MachineProfile::Indigo2Ip28
-        );
-        let octane = self.machine.profile == MachineProfile::OctaneIp30;
-        if !ip22 && !octane {
-            return vec![];
-        }
-        let gio = |n| Location::root().join(Hop::gio(n));
-        let mut out = Vec::new();
-        let mut put = |device: &str, at: Location, opts: toml::Table| {
-            out.push(Placement { device: device.into(), at, opts });
+    /// Rewrite the settings older iris wrote into device arrays, for the
+    /// machine `t` describes (so the profile must be final): the `[scsi.N]`
+    /// tables, `[ultra64]`, the top-level `test_device` and `test_device_dump`,
+    /// and `[virtio_serial]`. The shape tells old from new (a table, a bool or
+    /// a string against an array of tables); a file that mixes the two forms
+    /// for the disks is an error. Returns one notice per rewrite.
+    pub fn migrate(&mut self, t: &Topology) -> Result<Vec<String>, String> {
+        let mut notices = Vec::new();
+        let mut put = |cfg: &mut MachineConfig, old: String, device: &str, at: Location, opts: toml::Table| {
+            notices.push(format!("notice: {old} is now [[{device}]] at = \"{at}\""));
+            cfg.place(device, at, opts);
         };
-        if ip22 && self.ultra64.enabled {
-            put("ultra64", gio(0), toml::Table::new());
-        }
-        if ip22 && self.test_device {
-            let mut opts = toml::Table::new();
-            if let Some(dump) = &self.test_device_dump {
-                opts.insert("dump".into(), dump.clone().into());
+        let gio = |n| Location::root().join(Hop::gio(n));
+        // Only the old shape is taken: `ultra64`, `test_device` and
+        // `virtio_serial` are also device names, whose arrays are the new form.
+        let mut take = |cfg: &mut MachineConfig, key: &str, old: fn(&toml::Value) -> bool| {
+            if cfg.extra.get(key).is_some_and(old) { cfg.extra.remove(key) } else { None }
+        };
+        if let Some(toml::Value::Table(scsi)) = take(self, "scsi", toml::Value::is_table) {
+            // An empty [scsi] only says "no default disks", which a file that
+            // places its own disks does not need said.
+            let dev = ["hdd", "cdrom", "daynaport"].into_iter().find(|d| self.extra.contains_key(*d));
+            if let (Some(dev), false) = (dev, scsi.is_empty()) {
+                return Err(format!("[scsi.N] and [[{dev}]]: use one form"));
             }
-            put("test_device", gio(0), opts);
-        }
-        let v = &self.virtio_serial;
-        if v.enabled {
-            let mut opts = toml::Table::new();
-            if !v.ports.is_empty() {
-                opts.insert("port".into(), toml::Value::try_from(&v.ports).expect("ports serialise"));
+            let mut keys: Vec<(u8, &String, &toml::Value)> = scsi
+                .iter()
+                .map(|(k, v)| Ok((k.parse::<u8>().map_err(|_| format!("[scsi.{k}]: the key is a SCSI id"))?, k, v)))
+                .collect::<Result<_, String>>()?;
+            keys.sort_by_key(|k| k.0);
+            let mut placed: Vec<(String, Location)> = Vec::new();
+            for (key, name, v) in keys {
+                let what = format!("[scsi.{name}]");
+                let mut opts = v.as_table().cloned().ok_or_else(|| format!("{what} is a table"))?;
+                let take_bool = |o: &mut toml::Table, k: &str| o.remove(k).and_then(|v| v.as_bool()).unwrap_or(false);
+                let kind = o_str(&mut opts, "kind");
+                let cdrom = take_bool(&mut opts, "cdrom");
+                let field = opts.remove("controller").and_then(|v| v.as_integer()).unwrap_or(0);
+                // A key of 16 + id names controller 1 directly.
+                let (controller, id) = if key >= 16 { (key / 16, key % 16) } else { (field as u8, key) };
+                if key >= 16 && field != 0 && field != i64::from(controller) {
+                    return Err(format!("{what}: the key already puts the target on controller {controller}; controller = {field} contradicts it"));
+                }
+                let device = match (kind.as_deref(), cdrom) {
+                    (Some("cdrom"), _) | (None | Some("disk"), true) => "cdrom",
+                    (Some("daynaport"), _) => "daynaport",
+                    (None | Some("disk"), false) => "hdd",
+                    (Some(other), _) => return Err(format!("{what}: kind `{other}` is not disk, cdrom or daynaport")),
+                };
+                let at = t
+                    .controller(controller)
+                    .ok_or_else(|| format!("{what}: this machine has no SCSI controller {controller}"))?
+                    .join(Hop::t(id));
+                if let Some((other, _)) = placed.iter().find(|(_, l)| *l == at) {
+                    return Err(format!("{other} and {what} both name {at}"));
+                }
+                placed.push((what.clone(), at.clone()));
+                // The old tables always carried every key; one the device
+                // type has no use for is dropped at its default and is an
+                // unknown option otherwise.
+                opts.retain(|k, v| !is_old_default(k, v));
+                put(self, what, device, at, opts);
             }
-            let at = if octane {
-                crate::ip30_machine::OctaneMachine::pci_slot(Some(crate::ip30_machine::VIRTIO_SLOT))
-            } else {
-                gio(if v.slot == VirtioGioSlot::Exp0 { 0 } else { 1 })
-            };
-            put("virtio_serial", at, opts);
         }
-        out
+        if let Some(toml::Value::Table(u)) = take(self, "ultra64", toml::Value::is_table) {
+            if let Some(k) = u.keys().find(|k| *k != "enabled") {
+                return Err(format!("[ultra64]: unknown key `{k}`"));
+            }
+            if u.get("enabled").and_then(toml::Value::as_bool) == Some(true) {
+                put(self, "[ultra64]".into(), "ultra64", gio(0), toml::Table::new());
+            }
+        }
+        let dump = take(self, "test_device_dump", toml::Value::is_str).and_then(|v| v.as_str().map(str::to_owned));
+        if let Some(toml::Value::Boolean(on)) = take(self, "test_device", toml::Value::is_bool) {
+            if on {
+                let mut opts = toml::Table::new();
+                if let Some(d) = dump {
+                    opts.insert("dump".into(), d.into());
+                }
+                put(self, "test_device = true".into(), "test_device", gio(0), opts);
+            }
+        }
+        if let Some(toml::Value::Table(mut v)) = take(self, "virtio_serial", toml::Value::is_table) {
+            let slot = o_str(&mut v, "slot");
+            let enabled = v.remove("enabled").and_then(|e| e.as_bool()).unwrap_or(false);
+            let ports = v.remove("port");
+            if let Some(k) = v.keys().next() {
+                return Err(format!("[virtio_serial]: unknown key `{k}`"));
+            }
+            if enabled {
+                let at = match self.machine.profile {
+                    MachineProfile::OctaneIp30 => crate::ip30_machine::OctaneMachine::pci_slot(Some(crate::ip30_machine::VIRTIO_SLOT)),
+                    MachineProfile::O2Ip32 => return Err(
+                        "[virtio_serial] is not wired on the O2 yet: the virtio-pci transport exists, but the \
+                         MACE PCI bridge has no interrupt route for a third slot (see docs/virtio-serial.md)".into()),
+                    _ => match slot.as_deref() {
+                        Some("exp0" | "gio0") => gio(0),
+                        None | Some("exp1" | "gio1") => gio(1),
+                        Some(other) => return Err(format!("[virtio_serial] slot = {other:?} is not exp0 or exp1")),
+                    },
+                };
+                let mut opts = toml::Table::new();
+                if let Some(ports) = ports {
+                    opts.insert("port".into(), ports);
+                }
+                put(self, "[virtio_serial]".into(), "virtio_serial", at, opts);
+            }
+        }
+        Ok(notices)
     }
 
-    /// Transitional: the converted `[scsi.N]` tables and the old GIO
-    /// settings, then the `[[<device>]]` entries, an explicit entry replacing
-    /// a converted one at its location.
-    pub fn all_placements(&self, t: &Topology) -> Result<Vec<Placement>, String> {
-        let explicit = self.placements()?;
-        let mut all = self.scsi_placements(t)?;
-        all.extend(self.legacy_device_placements());
-        all.retain(|p| !explicit.iter().any(|e| e.at == p.at));
-        all.extend(explicit);
-        Ok(all)
+    /// A file that placed no disk, CD-ROM or DaynaPort, and had no `[scsi.N]`
+    /// tables, gets the default hard disk and CD-ROM on the first controller.
+    /// Call it after [`MachineConfig::migrate`] and before the command line.
+    pub fn with_default_media(&mut self, t: &Topology, had_scsi_tables: bool) {
+        let placed = self.placements().unwrap_or_default();
+        if had_scsi_tables || placed.iter().any(|p| matches!(p.device.as_str(), "hdd" | "cdrom" | "daynaport")) {
+            return;
+        }
+        let Some(ctl) = t.controller(0) else { return };
+        let path = |p: &str| toml::Table::from_iter([("path".to_string(), toml::Value::String(p.into()))]);
+        self.place("hdd", ctl.join(Hop::t(1)), path("scsi1.raw"));
+        self.place("cdrom", ctl.join(Hop::t(4)), path("cdrom4.iso"));
     }
 
     /// Put a device at `at`, replacing the entry of that device type already
@@ -2633,7 +2311,6 @@ impl MachineConfig {
 
     pub fn validate(&self) -> Result<(), String> {
         self.check_extra()?;
-        self.validate_virtio_serial()?;
         self.cpu_part()?;
         self.machine.profile.accepts_cpus(self.machine.cpus)?;
         if self.graphics.heads != 1 && self.graphics.heads != 2 {
@@ -2664,42 +2341,8 @@ impl MachineConfig {
                 return Err("graphics.resolution presets require Newport (graphics.board = newport)".into());
             }
         }
-        let mut placed: std::collections::HashMap<(u8, u8), u8> = std::collections::HashMap::new();
-        let mut keys: Vec<u8> = self.scsi.keys().copied().collect();
-        keys.sort();
-        for key in keys {
-            let dev = &self.scsi[&key];
-            let (controller, id) = dev.placement(key);
-            let max_id = self.machine.profile.max_scsi_id();
-            if id == 0 || id > max_id {
-                return Err(format!("scsi.{}: SCSI ID {} is out of range (1–{}; the controller itself is 0)", key, id, max_id));
-            }
-            if key >= 16 && dev.controller != 0 && dev.controller != controller {
-                return Err(format!(
-                    "scsi.{}: the key already puts the target on controller {}; controller = {} contradicts it",
-                    key, controller, dev.controller
-                ));
-            }
-            if controller > 1 {
-                return Err(format!("scsi.{}: controller {} is invalid (valid: 0, 1)", key, controller));
-            }
-            if controller != 0 && self.machine.profile.scsi_controllers() < 2 {
-                return Err(format!(
-                    "scsi.{}: controller {} is only valid on Indigo2 (machine.profile = indigo2_ip22) and O2 (o2_ip32), which have two SCSI controllers — this machine has one (0)",
-                    key, controller
-                ));
-            }
-            if let Some(other) = placed.insert((controller, id), key) {
-                return Err(format!(
-                    "scsi.{} and scsi.{} both name {}", other, key, scsi_label(controller, id)
-                ));
-            }
-            if dev.is_daynaport() && self.machine.profile == MachineProfile::O2Ip32 {
-                return Err(format!(
-                    "scsi.{}: kind = \"daynaport\" is not available on the O2 (its Ethernet is built in)", key
-                ));
-            }
-        }
+        // Every placement: its place exists and is free, its options parse.
+        Topology::probe(self)?;
         self.validate_serial_sockets()?;
         if self.scale < 1 || self.scale > 4 {
             return Err(format!("scale {} is invalid (valid: 1, 2, 3, 4)", self.scale));
@@ -2789,19 +2432,6 @@ impl MachineConfig {
         if let Some(ref mac) = self.network.mac {
             parse_mac(mac).map_err(|e| format!("network.mac: {}", e))?;
         }
-        for (id, dev) in &self.scsi {
-            // A CD-ROM may legitimately start with an empty tray (no path, no
-            // discs) and have media loaded at runtime; any discs list is valid
-            // as a changer queue. So there is nothing CD-ROM-specific to check.
-            if dev.is_daynaport() {
-                if dev.cdrom || dev.overlay || dev.scratch {
-                    return Err(format!(
-                        "SCSI ID {}: kind = \"daynaport\" has no disk image, so cdrom / \
-                         overlay / scratch don't apply", id));
-                }
-                dev.daynaport_options().check(self).map_err(|e| format!("SCSI ID {id}: {e}"))?;
-            }
-        }
         if let Some(mhz) = self.clock.fixed_mhz {
             if !(mhz > 0.0) || !mhz.is_finite() {
                 return Err(format!("clock.fixed_mhz {} is invalid (must be a positive number)", mhz));
@@ -2886,12 +2516,6 @@ impl MachineConfig {
             rx_hold:      self.network.rx_hold.unwrap_or(true),
             stream:       self.network.stream.clone(),
         }
-    }
-
-    /// Return the active disc path for a CD-ROM device (first of `discs` list,
-    /// falling back to `path`).
-    pub fn active_disc(dev: &ScsiDeviceConfig) -> &str {
-        dev.discs.first().map(|s| s.as_str()).unwrap_or(&dev.path)
     }
 }
 
@@ -3234,12 +2858,6 @@ impl Cli {
         if let Some(n) = self.jitv2_threads { cfg.jitv2.threads = n; }
         if let Some(m) = self.jitv2_compile { cfg.jitv2.compile = m; }
 
-        if self.no_write_cache {
-            for dev in cfg.scsi.values_mut().filter(|d| !d.cdrom && d.kind() == ScsiKind::Disk) {
-                dev.write_cache = false;
-            }
-        }
-
         // Resolved by `MachineConfig::cpu_part` once the profile is final.
         if let Some(cpu) = &self.cpu { cfg.machine.cpu = Some(cpu.clone()); }
         if let Some(cache) = self.cache { cfg.machine.cache = cache; }
@@ -3286,8 +2904,6 @@ impl Cli {
         if let Some(ref p) = self.perfetto_clock { cfg.perfetto_clock = Some(p.clone()); }
         if let Some(ref d) = self.tftp_dir { cfg.network.tftp_dir = Some(d.clone()); }
         if let Some(ref d) = self.rsh_dir { cfg.network.rsh_dir = Some(d.clone()); }
-        if self.test_device { cfg.test_device = true; }
-        if let Some(ref p) = self.test_device_dump { cfg.test_device_dump = Some(p.clone()); }
         if self.cheritest_dump_hook { cfg.cheritest_dump_hook = true; }
         if let Some(ref s) = self.nat_subnet { cfg.nat_subnet = Some(s.clone()); }
 
@@ -3388,14 +3004,28 @@ fn placement_from_flag(topo: &Topology, device: &str, value: &str) -> Result<Pla
 }
 
 impl Cli {
-    /// `apply`, then `merge`: the command line over the file. Exits on error.
+    /// The file with the command line over it, in the order that makes each
+    /// step see what it needs: the profile is final after `apply`, so the old
+    /// settings can be migrated to places on it, the default disk and CD-ROM
+    /// go in where the file placed none, and the flags replace by location
+    /// last. Exits on error.
     fn resolve(&self, file: MachineConfig) -> MachineConfig {
         let mut cfg = self.apply(file);
-        if let Err(e) = self.merge(&mut cfg) {
+        if let Err(e) = self.migrate_and_merge(&mut cfg) {
             eprintln!("Configuration error: {e}");
             std::process::exit(1);
         }
         cfg
+    }
+
+    fn migrate_and_merge(&self, cfg: &mut MachineConfig) -> Result<(), String> {
+        let topo = Topology::fill_for(cfg);
+        let had_scsi_tables = cfg.extra.contains_key("scsi");
+        for notice in cfg.migrate(&topo)? {
+            eprintln!("iris: {notice}");
+        }
+        cfg.with_default_media(&topo, had_scsi_tables);
+        self.merge(cfg)
     }
 
     /// Place what the command line asks for, in `cfg`, whose profile is final.
@@ -3441,6 +3071,18 @@ impl Cli {
             let p = placement_from_flag(&topo, device, value)?;
             once(format!("--{} {}", device.replace('_', "-"), value), &p.at)?;
             cfg.place(device, p.at, p.opts);
+        }
+        let gio0 = Location::root().join(Hop::gio(0));
+        if self.test_device || self.test_device_dump.is_some() {
+            let existing = cfg.placements()?.into_iter().find(|p| p.device == "test_device");
+            // The flag adds the device; a dump path alone changes only one the file placed.
+            if self.test_device || existing.is_some() {
+                let mut opts = existing.map(|p| p.opts).unwrap_or_default();
+                if let Some(dump) = &self.test_device_dump {
+                    opts.insert("dump".into(), dump.clone().into());
+                }
+                cfg.place("test_device", gio0, opts);
+            }
         }
         if self.no_write_cache {
             if let Some(toml::Value::Array(hdds)) = cfg.extra.get_mut("hdd") {
@@ -3537,40 +3179,42 @@ pub fn parse_nat_subnet(cidr: &str) -> Result<(std::net::Ipv4Addr, std::net::Ipv
 mod export_tests {
     use super::*;
 
+    /// A file in the old form, as a machine would see it: parsed, then its
+    /// old settings migrated onto the profile it names.
+    fn old(text: &str) -> Result<MachineConfig, String> {
+        let mut cfg = MachineConfig::from_toml(text)?;
+        cfg.migrate(&Topology::fill_for(&cfg))?;
+        Ok(cfg)
+    }
+
     #[test]
     fn toml_export_roundtrips() {
         let mut cfg = MachineConfig::default();
-        cfg.scsi.insert(4, ScsiDeviceConfig {
-            path: "/abs/cd.chd".into(), cdrom: true, ..Default::default()
-        });
+        cfg.place("cdrom", "hpc3.0.t4".parse().unwrap(), toml::from_str("path = \"/abs/cd.chd\"").unwrap());
+        cfg.place("hdd", "hpc3.0.t1".parse().unwrap(), toml::from_str("path = \"a.raw\"").unwrap());
         let s = toml::to_string_pretty(&cfg).expect("serialize");
-        let back: MachineConfig = toml::from_str(&s).expect("deserialize");
-        assert_eq!(back.scsi.len(), cfg.scsi.len());
-        assert_eq!(back.scsi[&1].path, cfg.scsi[&1].path);
-        assert_eq!(back.scsi[&4].cdrom, true);
+        let back = MachineConfig::from_toml(&s).expect("deserialize");
+        assert_eq!(back.placements().unwrap(), cfg.placements().unwrap());
         println!("--- exported toml ---\n{s}");
     }
+
 
     /// IDs 1 to 15 are valid on the Octane's wide buses, and 1 to 7 on the
     /// narrow Indy; the controller's own ID 0 is refused everywhere.
     #[test]
     fn scsi_id_limit_is_15_on_the_octane_and_7_elsewhere() {
-        let octane = |key: u8| -> MachineConfig {
-            toml::from_str(&format!(
-                "banks = [128, 0, 0, 0]\n[machine]\nprofile = \"octane_ip30\"\ncpu = \"r10000\"\n[scsi.{key}]\npath = \"wide.raw\"\n"
-            )).expect("parse")
-        };
-        octane(15).validate().expect("id 15 on controller 0");
-        octane(31).validate().expect("id 15 on controller 1");
-        let err = octane(16).validate().unwrap_err();
-        assert!(err.contains("SCSI ID 0"), "key 16 names controller 1's ID 0: {err}");
-        let indy = |key: u8| -> MachineConfig {
-            toml::from_str(&format!("[scsi.{key}]\npath = \"narrow.raw\"\n")).expect("parse")
-        };
-        indy(7).validate().expect("id 7 on the Indy");
-        let err = indy(8).validate().unwrap_err();
-        assert!(err.contains("SCSI ID 8") && err.contains("1–7"), "{err}");
-        assert!(indy(0).validate().is_err(), "the controller is ID 0");
+        let octane = |key: u8| old(&format!(
+            "banks = [128, 0, 0, 0]\n[machine]\nprofile = \"octane_ip30\"\ncpu = \"r10000\"\n[scsi.{key}]\npath = \"wide.raw\"\n"
+        ));
+        octane(15).unwrap().validate().expect("id 15 on controller 0");
+        octane(31).unwrap().validate().expect("id 15 on controller 1");
+        let err = octane(16).unwrap().validate().unwrap_err();
+        assert!(err.contains("xio15.pci0.1.t0") && err.contains("no such location"), "key 16 names controller 1's ID 0: {err}");
+        let indy = |key: u8| old(&format!("[scsi.{key}]\npath = \"narrow.raw\"\n"));
+        indy(7).unwrap().validate().expect("id 7 on the Indy");
+        let err = indy(8).unwrap().validate().unwrap_err();
+        assert!(err.contains("hpc3.0.t8") && err.contains("no such location"), "{err}");
+        assert!(indy(0).unwrap().validate().is_err(), "the controller is ID 0");
     }
 
     #[test]
@@ -3579,7 +3223,6 @@ mod export_tests {
             let mut c: MachineConfig =
                 toml::from_str(&format!("banks = [128, 0, 0, 0]\n[machine]\nprofile = \"octane_ip30\"\ncpu = \"r10000\"\n{t}"))
                     .expect("parse");
-            c.scsi.clear();
             c
         };
         let cfg = octane("");
@@ -3624,80 +3267,66 @@ mod export_tests {
 
     #[test]
     fn write_cache_defaults_on_and_round_trips() {
-        let cfg: MachineConfig = toml::from_str(r#"
+        let cfg = old(r#"
             [scsi.1]
             path = "a.raw"
+            write_cache = true
             [scsi.2]
             path = "b.raw"
             write_cache = false
         "#).expect("parse");
-        assert!(cfg.scsi[&1].write_cache, "the default");
-        assert!(!cfg.scsi[&2].write_cache);
-        assert!(ScsiDeviceConfig::default().write_cache, "the default in code");
+        let wc = |at: &str| cfg.placements().unwrap().into_iter().find(|p| p.at.to_string() == at).unwrap().opts.get("write_cache").and_then(toml::Value::as_bool);
+        assert_eq!((wc("hpc3.0.t1"), wc("hpc3.0.t2")), (None, Some(false)), "the default is dropped, an off cache is kept");
         let s = toml::to_string_pretty(&cfg).expect("serialize");
-        let back: MachineConfig = toml::from_str(&s).expect("deserialize");
-        assert!(back.scsi[&1].write_cache && !back.scsi[&2].write_cache, "survives export:\n{s}");
-        assert!(toml::from_str::<MachineConfig>("[scsi.1]\nwrite_cache = \"fast\"\n").is_err());
+        let back = MachineConfig::from_toml(&s).expect("deserialize");
+        assert_eq!(back.placements().unwrap(), cfg.placements().unwrap(), "survives export:\n{s}");
+        assert!(old("[scsi.1]\npath = \"a\"\nwrite_cache = \"fast\"\n").unwrap().validate().is_err());
     }
 
-    /// `--no-write-cache` turns the cache off for every disk, whatever the file says.
-    #[test]
-    fn no_write_cache_flag_turns_the_cache_off_for_every_disk() {
-        use clap::Parser;
-        let mut cfg = MachineConfig::default();
-        cfg.scsi.insert(1, ScsiDeviceConfig { path: "a.raw".into(), ..Default::default() });
-        cfg.scsi.insert(2, ScsiDeviceConfig { path: "b.raw".into(), write_cache: true, ..Default::default() });
-        let on = parse_args(["iris"]).unwrap().apply(cfg.clone());
-        assert!(on.scsi[&1].write_cache && on.scsi[&2].write_cache, "no flag, no change");
-        let off = parse_args(["iris", "--no-write-cache"]).unwrap().apply(cfg);
-        assert!(!off.scsi[&1].write_cache && !off.scsi[&2].write_cache);
-    }
 
     #[test]
     fn scsi_kind_daynaport_parses_and_round_trips() {
-        let cfg: MachineConfig = toml::from_str(r#"
+        let cfg = old(r#"
             [scsi.3]
             kind = "daynaport"
             mac = "00:80:19:aa:bb:cc"
             subnet = "192.168.7.0/24"
         "#).expect("parse");
-        let dev = &cfg.scsi[&3];
-        assert!(dev.is_daynaport());
-        assert!(!dev.is_cdrom());
+        let p = &cfg.placements().unwrap()[0];
+        assert_eq!((p.device.as_str(), p.at.to_string().as_str()), ("daynaport", "hpc3.0.t3"));
         cfg.validate().expect("validate");
-
-        let params = dev.daynaport_params(3).expect("params");
+        let params = DaynaportOptions { mac: p.opts["mac"].as_str().map(str::to_owned), subnet: p.opts["subnet"].as_str().map(str::to_owned) }
+            .params(3).expect("params");
         assert_eq!(params.mac, [0x00, 0x80, 0x19, 0xaa, 0xbb, 0xcc]);
         assert_eq!(params.subnet.gateway_ip, Ipv4Addr::new(192, 168, 7, 1));
         assert_eq!(params.subnet.client_ip,  Ipv4Addr::new(192, 168, 7, 2));
 
         let s = toml::to_string_pretty(&cfg).expect("serialize");
-        let back: MachineConfig = toml::from_str(&s).expect("deserialize");
-        assert!(back.scsi[&3].is_daynaport(), "kind must survive export:\n{s}");
+        assert!(s.contains("[[daynaport]]"), "the new form is written:\n{s}");
     }
 
-    /// `cdrom = true` predates `kind`; it must keep working, and a plain disk
-    /// must not start serializing a redundant `kind = "disk"`.
+    /// `cdrom = true` predates `kind`; it must keep working, and the new form
+    /// names the device type instead of carrying either key.
     #[test]
     fn cdrom_bool_still_selects_a_cdrom() {
-        let cfg: MachineConfig = toml::from_str(r#"
+        let cfg = old(r#"
             [scsi.4]
             path = "cd.iso"
             cdrom = true
             [scsi.1]
             path = "disk.raw"
         "#).expect("parse");
-        assert!(cfg.scsi[&4].is_cdrom());
-        assert_eq!(cfg.scsi[&1].kind(), ScsiKind::Disk);
+        let got: Vec<(String, String)> = cfg.placements().unwrap().into_iter().map(|p| (p.device, p.at.to_string())).collect();
+        assert_eq!(got, [("cdrom".into(), "hpc3.0.t4".into()), ("hdd".into(), "hpc3.0.t1".into())]);
         let s = toml::to_string_pretty(&cfg).expect("serialize");
-        assert!(!s.contains("kind"), "default kind should not be emitted:\n{s}");
+        assert!(!s.contains("kind") && !s.contains("cdrom ="), "{s}");
     }
 
     #[test]
     fn daynaport_defaults_to_its_own_subnet_and_a_derived_mac() {
-        let cfg: MachineConfig = toml::from_str("[scsi.5]\nkind = \"daynaport\"\n").expect("parse");
+        let cfg = old("[scsi.5]\nkind = \"daynaport\"\n").expect("parse");
         cfg.validate().expect("validate");
-        let p = cfg.scsi[&5].daynaport_params(5).expect("params");
+        let p = DaynaportOptions::default().params(5).expect("params");
         assert_eq!(p.mac, [0x00, 0x80, 0x19, 0x44, 0x50, 5]);
         // Not the driver's own 00:80:19:00:00:NN placeholder, or the acceptance
         // test can't tell a real MAC read from a made-up one.
@@ -3708,7 +3337,7 @@ mod export_tests {
 
     #[test]
     fn daynaport_rejects_a_subnet_that_collides_with_ec0() {
-        let cfg: MachineConfig = toml::from_str(r#"
+        let cfg = old(r#"
             nat_subnet = "192.168.10.0/24"
             [scsi.3]
             kind = "daynaport"
@@ -3719,9 +3348,8 @@ mod export_tests {
 
     #[test]
     fn daynaport_rejects_disk_only_options() {
-        let cfg: MachineConfig = toml::from_str(
-            "[scsi.3]\nkind = \"daynaport\"\noverlay = true\n").expect("parse");
-        assert!(cfg.validate().is_err());
+        let cfg = old("[scsi.3]\nkind = \"daynaport\"\noverlay = true\n").expect("parse");
+        assert!(cfg.validate().unwrap_err().contains("unknown field `overlay`"));
     }
 
     #[test]
@@ -3815,18 +3443,12 @@ mod export_tests {
     /// built in, so a DaynaPort target is refused.
     #[test]
     fn o2_takes_scsi_tables_with_controller_as_bus() {
-        let mut cfg = MachineConfig::default();
-        cfg.machine.profile = MachineProfile::O2Ip32;
-        cfg.machine.cpu = Some("r10000".into());
-        cfg.scsi.insert(2, ScsiDeviceConfig { path: "external.raw".into(), controller: 1, ..Default::default() });
-        cfg.validate().expect("the O2 has two SCSI controllers");
-        cfg.machine.profile = MachineProfile::IndyIp24;
-        cfg.machine.cpu = None;
-        assert!(cfg.validate().unwrap_err().contains("controller 1"), "the Indy has one");
-        cfg.machine.profile = MachineProfile::O2Ip32;
-        cfg.machine.cpu = Some("r10000".into());
-        cfg.scsi.insert(3, ScsiDeviceConfig { kind_field: ScsiKind::Daynaport, ..Default::default() });
-        assert!(cfg.validate().unwrap_err().contains("daynaport"));
+        let o2 = "[machine]\nprofile = \"o2_ip32\"\ncpu = \"r10000\"\n";
+        old(&format!("{o2}[scsi.2]\npath = \"external.raw\"\ncontroller = 1\n")).unwrap().validate().expect("the O2 has two SCSI controllers");
+        let indy = old("[scsi.2]\npath = \"external.raw\"\ncontroller = 1\n").unwrap_err();
+        assert!(indy.contains("no SCSI controller 1"), "the Indy has one: {indy}");
+        let dayna = old(&format!("{o2}[scsi.3]\nkind = \"daynaport\"\n")).unwrap().validate().unwrap_err();
+        assert!(dayna.contains("daynaport") && dayna.contains("pci0.1.t3"), "{dayna}");
     }
 
     /// `mode = "stream"` needs a parseable `stream` peer, on every machine.
@@ -3845,9 +3467,9 @@ mod export_tests {
             cfg.network.stream = Some("tcp:127.0.0.1:7000".into());
             cfg.validate().unwrap_or_else(|e| panic!("{profile:?}: {e}"));
         }
-        let mut cfg: MachineConfig = toml::from_str("[network]\nmode = \"stream\"\nstream = \"unix:/run/x\"\n[scsi.4]\nkind = \"daynaport\"").unwrap();
+        let mut cfg = old("[network]\nmode = \"stream\"\nstream = \"unix:/run/x\"\n[scsi.4]\nkind = \"daynaport\"").unwrap();
         assert!(cfg.validate().unwrap_err().contains("cannot join a stream segment"));
-        cfg.scsi.clear();
+        cfg.unplace(&"hpc3.0.t4".parse().unwrap());
         assert_eq!(cfg.network().stream.as_deref(), Some("unix:/run/x"));
     }
 
@@ -4137,7 +3759,7 @@ mod export_tests {
     /// same target, and id 0 and controller 2 do not exist.
     #[test]
     fn slot_keys_place_targets_on_either_controller() {
-        let mut cfg: MachineConfig = toml::from_str(r#"
+        let file = r#"
             [machine]
             profile = "indigo2_ip22"
             [scsi.1]
@@ -4148,41 +3770,31 @@ mod export_tests {
             path = "cd.iso"
             cdrom = true
             controller = 1
-        "#).expect("parse");
+        "#;
+        let cfg = old(file).expect("parse");
         cfg.validate().expect("two controllers, no collision");
-        assert_eq!(cfg.scsi[&1].placement(1), (0, 1));
-        assert_eq!(cfg.scsi[&17].placement(17), (1, 1));
-        assert_eq!(cfg.scsi[&4].placement(4), (1, 4));
-        assert_eq!(scsi_slot(1, 1), 17);
-        assert_eq!(scsi_label(0, 1), "SCSI ID 1");
-        assert_eq!(scsi_label(1, 1), "SCSI 1:1");
+        let at: Vec<(String, String)> = cfg.placements().unwrap().into_iter().map(|p| (p.device, p.at.to_string())).collect();
+        assert_eq!(at, [("cdrom".into(), "hpc3.1.t4".into()), ("hdd".into(), "hpc3.0.t1".into()), ("hdd".into(), "hpc3.1.t1".into())]);
 
-        cfg.scsi.insert(20, ScsiDeviceConfig { path: "twice.iso".into(), cdrom: true, ..Default::default() });
-        let err = cfg.validate().unwrap_err();
-        assert!(err.contains("scsi.4 and scsi.20 both name SCSI 1:4"), "{err}");
-        cfg.scsi.remove(&20);
+        let err = old(&format!("{file}[scsi.20]\npath = \"twice.iso\"\ncdrom = true\n")).unwrap_err();
+        assert!(err.contains("[scsi.20] and [scsi.4] both name hpc3.1.t4") || err.contains("[scsi.4] and [scsi.20] both name hpc3.1.t4"), "{err}");
 
-        cfg.scsi.insert(18, ScsiDeviceConfig { path: "x.raw".into(), controller: 0, ..Default::default() });
-        cfg.validate().expect("controller 0 on a slot key is just the default");
-        cfg.scsi.get_mut(&18).unwrap().controller = 2;
-        assert!(cfg.validate().unwrap_err().contains("contradicts"));
-        cfg.scsi.remove(&18);
+        old(&format!("{file}[scsi.18]\npath = \"x.raw\"\ncontroller = 0\n")).expect("controller 0 on a slot key is just the default");
+        let err = old(&format!("{file}[scsi.18]\npath = \"x.raw\"\ncontroller = 2\n")).unwrap_err();
+        assert!(err.contains("contradicts"), "{err}");
+        let err = old(&format!("{file}[scsi.16]\npath = \"x.raw\"\n")).unwrap().validate().unwrap_err();
+        assert!(err.contains("hpc3.1.t0") && err.contains("no such location"), "{err}");
+        let err = old(&format!("{file}[scsi.33]\npath = \"x.raw\"\n")).unwrap_err();
+        assert!(err.contains("no SCSI controller 2"), "{err}");
 
-        cfg.scsi.insert(16, ScsiDeviceConfig { path: "x.raw".into(), ..Default::default() });
-        assert!(cfg.validate().unwrap_err().contains("out of range"));
-        cfg.scsi.remove(&16);
-        cfg.scsi.insert(33, ScsiDeviceConfig { path: "x.raw".into(), ..Default::default() });
-        assert!(cfg.validate().unwrap_err().contains("controller 2 is invalid"));
-        cfg.scsi.remove(&33);
-
-        cfg.machine.profile = MachineProfile::IndyIp24;
-        assert!(cfg.validate().unwrap_err().contains("this machine has one"));
+        let indy = file.replace("indigo2_ip22", "indy_ip24");
+        assert!(old(&indy).unwrap_err().contains("no SCSI controller 1"));
     }
 
-    /// An older O2 config's `o2.disks` becomes `[scsi.N]` entries, replacing
-    /// the default disks, and is gone from the section afterwards.
+    /// An older O2 config's `o2.disks` becomes `[scsi.N]` entries and so
+    /// device arrays, replacing the default disks, and is gone afterwards.
     #[test]
-    fn deprecated_o2_disks_fold_into_scsi() {
+    fn deprecated_o2_disks_fold_into_the_new_form() {
         let mut cfg: MachineConfig = toml::from_str(r#"
             [machine]
             profile = "o2_ip32"
@@ -4192,12 +3804,12 @@ mod export_tests {
         "#).expect("parse");
         cfg.fold_deprecated();
         assert!(cfg.o2.disks.is_empty());
-        assert_eq!(cfg.scsi.len(), 2, "the list replaces the default map");
-        assert_eq!(cfg.scsi[&1].path, "sys.raw");
-        assert!(cfg.scsi[&1].overlay);
-        assert_eq!(cfg.scsi[&1].controller, 0);
-        assert!(cfg.scsi[&4].is_cdrom());
-        assert_eq!(cfg.scsi[&4].controller, 1);
+        let notices = cfg.migrate(&Topology::fill_for(&cfg)).unwrap();
+        assert_eq!(notices.len(), 2);
+        let got: Vec<(String, String)> = cfg.placements().unwrap().into_iter().map(|p| (p.device, p.at.to_string())).collect();
+        assert_eq!(got, [("cdrom".into(), "pci0.2.t4".into()), ("hdd".into(), "pci0.1.t1".into())]);
+        let hdd = cfg.placements().unwrap().into_iter().find(|p| p.device == "hdd").unwrap();
+        assert_eq!(hdd.opts["overlay"].as_bool(), Some(true));
         let s = toml::to_string_pretty(&cfg).expect("serialize");
         assert!(!s.contains("disks"), "the deprecated key is never written back:\n{s}");
     }
@@ -4338,15 +3950,14 @@ mod export_tests {
     }
 
     fn merged(profile: &str, file: &str, args: &[&str]) -> MachineConfig {
-        let mut cfg: MachineConfig = toml::from_str(&format!("[machine]\nprofile = \"{profile}\"\ncpu = \"{}\"\n{file}", match profile {
+        let cfg: MachineConfig = toml::from_str(&format!("[machine]\nprofile = \"{profile}\"\ncpu = \"{}\"\n{file}", match profile {
             "o2_ip32" => "r5000",
             "octane_ip30" | "indigo2_ip28" => "r10000",
             _ => "r4400",
         })).unwrap();
-        cfg.scsi.clear();
         let cli = flags(args);
         let mut cfg = cli.apply(cfg);
-        cli.merge(&mut cfg).unwrap();
+        cli.migrate_and_merge(&mut cfg).unwrap();
         cfg
     }
 
@@ -4371,7 +3982,7 @@ mod export_tests {
     #[test]
     fn hdd_flag_takes_at_and_explicit_path() {
         let cfg = merged("o2_ip32", "", &["--hdd", "pci0.1.t1,path=a=b.img", "--hdd", "pci0.2.t3,path=c.img,overlay=true,size_mb=8"]);
-        let got = placed(&cfg);
+        let got: Vec<_> = placed(&cfg).into_iter().filter(|p| p.0 == "hdd").collect();
         assert_eq!(got[0].1, "pci0.1.t1");
         assert_eq!(got[0].2["path"].as_str(), Some("a=b.img"));
         assert_eq!(got[1].2["overlay"].as_bool(), Some(true));
@@ -4433,9 +4044,8 @@ mod export_tests {
     fn scsi1_replaces_the_default_disk_but_keeps_the_default_cdrom() {
         let cli = flags(&["--scsi1", "mine.img"]);
         let mut cfg = cli.apply(MachineConfig::default());
-        cli.merge(&mut cfg).unwrap();
-        let topo = Topology::fill_for(&cfg);
-        let all = cfg.all_placements(&topo).unwrap();
+        cli.migrate_and_merge(&mut cfg).unwrap();
+        let all = cfg.placements().unwrap();
         let hdd: Vec<_> = all.iter().filter(|p| p.device == "hdd").collect();
         assert_eq!(hdd.len(), 1);
         assert_eq!(hdd[0].opts["path"].as_str(), Some("mine.img"));
@@ -4474,6 +4084,171 @@ mod export_tests {
             let line = help.lines().find(|l| l.contains(&format!("--{flag} <{value}>"))).unwrap_or_else(|| panic!("--{flag} in\n{help}"));
             assert!(line.contains(text), "{line}");
         }
+    }
+
+    fn at_of(cfg: &MachineConfig) -> Vec<String> {
+        cfg.placements().unwrap().iter().map(|p| format!("{} {}", p.device, p.at)).collect()
+    }
+
+    /// Every shape of key: ids 1 and 7 on controller 0, 16 + id on controller
+    /// 1, `controller = 1` on a low key, and the Octane's 31 (id 15).
+    #[test]
+    fn migrate_scsi_maps_every_key_shape() {
+        let cfg = old("[scsi.1]\npath = \"a\"\n[scsi.7]\npath = \"b\"\n[scsi.21]\npath = \"c\"\n[scsi.3]\npath = \"d\"\ncontroller = 1\n[machine]\nprofile = \"indigo2_ip22\"\n").unwrap();
+        assert_eq!(at_of(&cfg), ["hdd hpc3.0.t1", "hdd hpc3.1.t3", "hdd hpc3.0.t7", "hdd hpc3.1.t5"], "in key order: 1, 3, 7, 21");
+        let octane = old("[machine]\nprofile = \"octane_ip30\"\ncpu = \"r10000\"\n[scsi.31]\npath = \"x\"\n").unwrap();
+        assert_eq!(at_of(&octane), ["hdd xio15.pci0.1.t15"]);
+        let err = old("[machine]\nprofile = \"indigo2_ip22\"\n[scsi.17]\npath = \"x\"\ncontroller = 0\n").unwrap();
+        assert_eq!(at_of(&err), ["hdd hpc3.1.t1"], "controller 0 on a slot key is the default");
+        let err = old("[machine]\nprofile = \"indigo2_ip22\"\n[scsi.17]\npath = \"x\"\ncontroller = 2\n").unwrap_err();
+        assert!(err.contains("contradicts"), "{err}");
+    }
+
+    #[test]
+    fn kind_daynaport_and_cdrom_with_discs_migrate_with_their_options() {
+        let cfg = old(r#"
+            [scsi.3]
+            kind = "daynaport"
+            mac = "00:80:19:aa:bb:cc"
+            overlay = false
+            write_cache = true
+            [scsi.4]
+            cdrom = true
+            path = "a.iso"
+            discs = ["b.iso"]
+            overlay = false
+            scratch = false
+            write_cache = true
+        "#).unwrap();
+        let ps = cfg.placements().unwrap();
+        let cd = ps.iter().find(|p| p.device == "cdrom").unwrap();
+        assert_eq!(cd.opts.keys().map(String::as_str).collect::<Vec<_>>(), ["discs", "path"]);
+        let dp = ps.iter().find(|p| p.device == "daynaport").unwrap();
+        assert_eq!(dp.opts.keys().map(String::as_str).collect::<Vec<_>>(), ["mac"], "defaults the type has no use for are dropped");
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn an_old_file_with_test_device_true_and_a_dump_ends_with_the_entry_and_a_notice() {
+        let mut cfg = MachineConfig::from_toml("test_device = true\ntest_device_dump = \"d.json\"\n").unwrap();
+        let notices = cfg.migrate(&Topology::fill_for(&cfg)).unwrap();
+        assert_eq!(notices, ["notice: test_device = true is now [[test_device]] at = \"gio0\""]);
+        let p = &cfg.placements().unwrap()[0];
+        assert_eq!((p.device.as_str(), p.opts["dump"].as_str()), ("test_device", Some("d.json")));
+        assert!(!cfg.extra.contains_key("test_device_dump"));
+        // A dump with no test_device = true is dropped, as before.
+        let cfg = old("test_device_dump = \"d.json\"\n").unwrap();
+        assert!(cfg.extra.is_empty());
+    }
+
+    #[test]
+    fn ultra64_enabled_table_migrates_and_false_does_nothing() {
+        assert_eq!(at_of(&old("[ultra64]\nenabled = true\n").unwrap()), ["ultra64 gio0"]);
+        assert!(old("[ultra64]\nenabled = false\n").unwrap().extra.is_empty());
+        assert!(old("[ultra64]\nspeed = 1\n").unwrap_err().contains("unknown key `speed`"));
+    }
+
+    #[test]
+    fn virtio_serial_slot_exp1_becomes_gio1_and_ports_survive() {
+        let cfg = old("[virtio_serial]\nenabled = true\nslot = \"exp1\"\n[[virtio_serial.port]]\nname = \"a\"\n").unwrap();
+        let p = &cfg.placements().unwrap()[0];
+        assert_eq!((p.device.as_str(), p.at.to_string()), ("virtio_serial", "gio1".to_string()));
+        assert_eq!(p.opts["port"].as_array().unwrap().len(), 1);
+        cfg.validate().unwrap();
+        let octane = old("[machine]\nprofile = \"octane_ip30\"\ncpu = \"r10000\"\n[virtio_serial]\nenabled = true\n").unwrap();
+        assert_eq!(at_of(&octane), ["virtio_serial xio15.pci0.4"]);
+        assert!(old("[virtio_serial]\nenabled = false\n").unwrap().extra.is_empty());
+    }
+
+    #[test]
+    fn old_and_new_forms_in_one_file_are_an_error_naming_both() {
+        let e = old("[scsi.1]\npath = \"a\"\n[[hdd]]\nat = \"hpc3.0.t2\"\npath = \"b\"\n").unwrap_err();
+        assert_eq!(e, "[scsi.N] and [[hdd]]: use one form");
+    }
+
+    /// A file that places no disk and has no `[scsi.N]` gets the default disk
+    /// and CD-ROM on the first controller; any disk or `[scsi]` suppresses them.
+    #[test]
+    fn the_empty_file_gets_the_default_disk_and_cdrom_at_controller_zero() {
+        for (profile, ctl) in [("indy_ip24", "hpc3.0"), ("indigo2_ip28", "hpc3.0"), ("o2_ip32", "pci0.1"), ("octane_ip30", "xio15.pci0.0")] {
+            let mut cfg = MachineConfig::from_toml(&format!("[machine]\nprofile = \"{profile}\"\n")).unwrap();
+            let t = Topology::fill_for(&cfg);
+            cfg.with_default_media(&t, false);
+            assert_eq!(at_of(&cfg), [format!("cdrom {ctl}.t4"), format!("hdd {ctl}.t1")], "{profile}");
+            let mut again = cfg.clone();
+            again.with_default_media(&t, false);
+            assert_eq!(again.placements().unwrap(), cfg.placements().unwrap(), "placed disks are not defaulted again");
+        }
+        let mut cfg = MachineConfig::default();
+        cfg.with_default_media(&Topology::fill_for(&cfg), true);
+        assert!(cfg.placements().unwrap().is_empty(), "a [scsi] table, even empty, means no defaults");
+    }
+
+    #[test]
+    fn an_old_style_scsi1_plus_cli_scsi1_ends_with_one_disk() {
+        let cli = parse_args(["iris", "--scsi1", "y.img"]).unwrap();
+        let mut cfg = cli.apply(MachineConfig::from_toml("[scsi.1]\npath = \"x.img\"\n").unwrap());
+        cli.migrate_and_merge(&mut cfg).unwrap();
+        let hdd: Vec<_> = cfg.placements().unwrap().into_iter().filter(|p| p.device == "hdd").collect();
+        assert_eq!(hdd.len(), 1);
+        assert_eq!(hdd[0].opts["path"].as_str(), Some("y.img"));
+        cfg.validate().unwrap();
+    }
+
+    /// The old settings are let through to migration only: validating an
+    /// unmigrated config refuses them, and a misspelt device lists the known.
+    #[test]
+    fn legacy_keys_are_accepted_only_for_migration() {
+        let raw = MachineConfig::from_toml("[scsi.1]\npath = \"a\"\n").unwrap();
+        assert_eq!(raw.validate().unwrap_err(), "unknown section [scsi]");
+        assert!(MachineConfig::from_toml("test_device = 3\n").is_ok(), "the shape is migration's to judge");
+        let e = MachineConfig::from_toml("[[hdd]]\nat = \"hpc3.0.t1\"\n[[hdd2]]\nat = \"hpc3.0.t2\"\n").unwrap_err();
+        assert!(e.starts_with("error: unknown device [[hdd2]]; devices: ") && e.contains("hdd") && e.contains("virtio_serial"), "{e}");
+    }
+
+    /// Every shipped example loads, in the form it is written in and again
+    /// after migration and a round trip through the writer; the second form
+    /// has no old settings and gives the same placements.
+    #[test]
+    fn every_shipped_example_config_loads_and_validates_in_old_and_new_form() {
+        let files: &[(&str, &str)] = &[
+            ("iris.toml", include_str!("../iris.toml")),
+            ("iris-irix53.toml", include_str!("../iris-irix53.toml")),
+            ("iris-irix65.toml", include_str!("../iris-irix65.toml")),
+            ("octane.toml.example", include_str!("../octane.toml.example")),
+            ("ip28.toml.example", include_str!("../ip28.toml.example")),
+        ];
+        for (name, text) in files {
+            let mut cfg = MachineConfig::from_toml(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let t = Topology::fill_for(&cfg);
+            let had = cfg.extra.contains_key("scsi");
+            cfg.migrate(&t).unwrap_or_else(|e| panic!("{name}: {e}"));
+            cfg.with_default_media(&t, had);
+            let written = toml::to_string_pretty(&cfg).unwrap();
+            let mut again = MachineConfig::from_toml(&written).unwrap_or_else(|e| panic!("{name}: {e}\n{written}"));
+            assert!(again.migrate(&t).unwrap().is_empty(), "{name}: the written form has no old settings");
+            assert_eq!(again.placements().unwrap(), cfg.placements().unwrap(), "{name}");
+            cfg.validate().unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
+
+    /// Migration takes the old shape of a name only: the same names as
+    /// arrays are the new form and stay.
+    #[test]
+    fn migration_leaves_the_new_form_of_a_reused_name_alone() {
+        let new = "[[ultra64]]\nat = \"gio0\"\n[[virtio_serial]]\nat = \"gio1\"\n";
+        let cfg = old(new).unwrap();
+        assert_eq!(at_of(&cfg), ["ultra64 gio0", "virtio_serial gio1"]);
+        let mut again = cfg.clone();
+        assert!(again.migrate(&Topology::fill_for(&again)).unwrap().is_empty());
+        assert_eq!(again.placements().unwrap(), cfg.placements().unwrap());
+    }
+
+    #[test]
+    fn unknown_device_error_lists_the_known_ones() {
+        let cfg = MachineConfig::from_toml("[[aic780]]\nat = \"pci0.3\"\n");
+        let e = cfg.unwrap_err();
+        assert!(e.starts_with("error: unknown device [[aic780]]; devices: "), "{e}");
     }
 }
 
