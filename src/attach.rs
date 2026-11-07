@@ -26,14 +26,14 @@ use crate::topology::{Family, Topology};
 
 /// What a device type's constructor may reach.
 pub struct Ctx<'a> {
-    pub devices: &'a Devices,
+    pub devices: &'a mut Devices,
     pub disks: &'a Disks,
 }
 
 /// The runtime objects a device brings for the rows it made, by hop; `None`
 /// is the device's own location.
 pub type Handles = Vec<(Option<Hop>, Arc<dyn Any + Send + Sync>)>;
-pub type BuildFn = fn(&Location, &Arc<dyn Any + Send + Sync>, &Ctx, &toml::Table) -> Result<Handles, String>;
+pub type BuildFn = fn(&Location, &Arc<dyn Any + Send + Sync>, &mut Ctx, &toml::Table) -> Result<Handles, String>;
 
 pub trait DeviceType: Sized + 'static {
     const NAME: &'static str;
@@ -49,7 +49,7 @@ pub trait DeviceType: Sized + 'static {
     }
     /// Create the device. A passive disk returns nothing; a device with
     /// threads or state of its own registers itself in `ctx.devices`.
-    fn new(o: Self::Options, ctx: &Ctx, owner: &Arc<Self::Owner>, at: &Location) -> Result<Handles, String>;
+    fn new(o: Self::Options, ctx: &mut Ctx, owner: &Arc<Self::Owner>, at: &Location) -> Result<Handles, String>;
 
     fn parse_options(t: &toml::Table) -> Result<Self::Options, String> {
         // serde's unknown-field error already lists the accepted keys.
@@ -61,7 +61,7 @@ pub trait DeviceType: Sized + 'static {
     fn parse_dyn(t: &toml::Table, cfg: &MachineConfig) -> Result<(), String> {
         Self::check(&Self::parse_options(t)?, cfg)
     }
-    fn build(at: &Location, owner: &Arc<dyn Any + Send + Sync>, ctx: &Ctx, t: &toml::Table) -> Result<Handles, String> {
+    fn build(at: &Location, owner: &Arc<dyn Any + Send + Sync>, ctx: &mut Ctx, t: &toml::Table) -> Result<Handles, String> {
         let owner = owner
             .clone()
             .downcast::<Self::Owner>()
@@ -131,28 +131,22 @@ pub fn known_device(name: &str) -> Result<(), String> {
 /// Place one device: the row must take it, its options must parse, and with a
 /// `ctx` it is built and its handles are bound. Without a `ctx` this is the
 /// probe and nothing is built.
-pub fn attach_device(p: &Placement, cfg: &MachineConfig, ctx: Option<&Ctx>, topo: &Topology) -> Result<(), String> {
+pub fn attach_device(p: &Placement, cfg: &MachineConfig, ctx: Option<&mut Ctx>, topo: &Topology) -> Result<(), String> {
     known_device(&p.device)?;
     let at = &p.at;
     let family = topo.offers(at)?;
     let Some(m) = maker_for(&p.device, family) else {
-        let takes: Vec<&str> = MAKERS
-            .iter()
-            .filter(|m| m.family == family)
-            .map(|m| m.name)
-            .collect();
+        // The claim words the family mismatch; the row's own list of what it takes follows.
         let other = MAKERS.iter().find(|m| m.name == p.device).expect("known above");
-        return Err(format!(
-            "error: {at}: {} is a {}; {at} is a {} (takes: {})",
-            p.device,
-            other.family.device(),
-            family.place(),
-            takes.join(" ")
-        ));
+        let e = topo.claim(at, &p.device, other.family, false, "").expect_err("the row takes another family");
+        let mut takes: Vec<&str> = MAKERS.iter().filter(|m| m.family == family).map(|m| m.name).collect();
+        takes.sort_unstable();
+        return Err(format!("{e} (takes: {})", takes.join(" ")));
     };
+    // Parse before claiming, so a bad entry leaves its row free.
+    (m.parse)(&p.opts, cfg).map_err(|e| format!("error: {at}: {e}"))?;
     let note = p.opts.get("path").and_then(toml::Value::as_str).unwrap_or("");
     topo.claim(at, m.name, m.family, m.needs_network, note)?;
-    (m.parse)(&p.opts, cfg).map_err(|e| format!("error: {at}: {e}"))?;
     let Some(ctx) = ctx else { return Ok(()) };
     let owner = topo.owner(at)?;
     for (hop, handle) in (m.build)(at, &owner, ctx, &p.opts).map_err(|e| format!("error: {at}: {e}"))? {
@@ -165,11 +159,11 @@ pub fn attach_device(p: &Placement, cfg: &MachineConfig, ctx: Option<&Ctx>, topo
 /// card comes before what sits on it (depth); the list arrives key-sorted,
 /// because toml tables are, so the order across device types is by name, then
 /// by position in the array.
-pub fn attach_devices(placements: &[Placement], cfg: &MachineConfig, ctx: Option<&Ctx>, topo: &Topology) -> Result<(), String> {
+pub fn attach_devices(placements: &[Placement], cfg: &MachineConfig, mut ctx: Option<&mut Ctx>, topo: &Topology) -> Result<(), String> {
     let mut all = placements.to_vec();
     all.sort_by_key(|p| p.at.depth());
     for p in &all {
-        attach_device(p, cfg, ctx, topo)?;
+        attach_device(p, cfg, ctx.as_deref_mut(), topo)?;
     }
     Ok(())
 }
@@ -203,7 +197,7 @@ mod tests {
         const FAMILY: Family = Family::Gio;
         type Owner = u32;
         type Options = WidgetOptions;
-        fn new(o: WidgetOptions, _: &Ctx, owner: &Arc<u32>, _: &Location) -> Result<Handles, String> {
+        fn new(o: WidgetOptions, _: &mut Ctx, owner: &Arc<u32>, _: &Location) -> Result<Handles, String> {
             BUILT.fetch_add(**owner as usize, Ordering::SeqCst);
             ORDER.lock().push(o.label);
             Ok(vec![])
@@ -218,7 +212,7 @@ mod tests {
         const FAMILY: Family = Family::Pci;
         type Owner = u32;
         type Options = WidgetOptions;
-        fn new(_: WidgetOptions, _: &Ctx, _: &Arc<u32>, _: &Location) -> Result<Handles, String> {
+        fn new(_: WidgetOptions, _: &mut Ctx, _: &Arc<u32>, _: &Location) -> Result<Handles, String> {
             panic!("a probe must not build")
         }
     }
@@ -231,7 +225,7 @@ mod tests {
         const FAMILY: Family = Family::Pci;
         type Owner = u32;
         type Options = WidgetOptions;
-        fn new(o: WidgetOptions, _: &Ctx, _: &Arc<u32>, _: &Location) -> Result<Handles, String> {
+        fn new(o: WidgetOptions, _: &mut Ctx, _: &Arc<u32>, _: &Location) -> Result<Handles, String> {
             ORDER.lock().push(o.label.clone());
             let hop = if o.size == 1 { Hop::t(7) } else { Hop::t(0) };
             Ok(vec![(Some(hop), Arc::new(5u8))])
@@ -255,9 +249,9 @@ mod tests {
         Placement { device: device.into(), at: loc(at), opts: toml::from_str(toml_opts).unwrap() }
     }
 
-    fn ctx_run<R>(f: impl FnOnce(&Ctx) -> R) -> R {
-        let (d, k) = (Devices::new(), Disks::new(vec![]));
-        f(&Ctx { devices: &d, disks: &k })
+    fn ctx_run<R>(f: impl FnOnce(&mut Ctx) -> R) -> R {
+        let (mut d, k) = (Devices::new(), Disks::new(vec![]));
+        f(&mut Ctx { devices: &mut d, disks: &k })
     }
 
     #[test]
@@ -279,7 +273,9 @@ mod tests {
         let t = machine();
         let cfg = MachineConfig::default();
         let e = attach_device(&place("test_brings", "gio0", "label = \"x\""), &cfg, None, &t).unwrap_err();
-        assert_eq!(e, "error: gio0: test_brings is a PCI card; gio0 is a GIO slot (takes: test_widget)");
+        assert!(e.starts_with("error: gio0: test_brings is a PCI card; gio0 is a GIO slot (takes: "), "{e}");
+        let takes: Vec<&str> = e.split("(takes: ").nth(1).unwrap().trim_end_matches(')').split(' ').collect();
+        assert!(takes.contains(&"test_widget") && takes.windows(2).all(|w| w[0] <= w[1]), "{e}");
     }
 
     #[test]
@@ -305,8 +301,8 @@ mod tests {
         let t = machine();
         let cfg = MachineConfig::default();
         ctx_run(|ctx| {
-            attach_device(&place("test_brings", "pci0.3", "label = \"x\""), &cfg, Some(ctx), &t).unwrap();
-            attach_device(&place("test_widget", "gio0", "label = \"x\""), &cfg, Some(ctx), &t).unwrap();
+            attach_device(&place("test_brings", "pci0.3", "label = \"x\""), &cfg, Some(&mut *ctx), &t).unwrap();
+            attach_device(&place("test_widget", "gio0", "label = \"x\""), &cfg, Some(&mut *ctx), &t).unwrap();
         });
         assert_eq!(t.handle::<u8>(&loc("pci0.3.t0")).map(|a| *a), Some(5));
         assert_eq!(BUILT.load(Ordering::SeqCst) % 3, 0);

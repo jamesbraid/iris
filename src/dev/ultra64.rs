@@ -642,3 +642,47 @@ impl BusDevice for Ultra64 {
 } // mod imp
 
 pub use imp::*;
+
+use std::sync::Arc;
+
+use crate::attach::{Ctx, DeviceType, Handles};
+use crate::dev::ioc::IocInterrupt;
+use crate::devices::Phase;
+use crate::ip22_bus::Ip22Bus;
+use crate::location::{Hop, Location};
+use crate::register_device;
+use crate::topology::Family;
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ultra64Options {}
+
+/// The N64 development board in GIO expansion slot 0.
+pub struct Ultra64Card;
+
+impl DeviceType for Ultra64Card {
+    const NAME: &'static str = "ultra64";
+    const FAMILY: Family = Family::Gio;
+    type Owner = Ip22Bus;
+    type Options = Ultra64Options;
+
+    fn new(_: Ultra64Options, ctx: &mut Ctx, bus: &Arc<Ip22Bus>, at: &Location) -> Result<Handles, String> {
+        // The card decodes slot 0 only.
+        if at.hops() != [Hop::gio(0)] {
+            return Err("the ultra64 board decodes gio0 only".into());
+        }
+        match Ultra64::new(bus.ioc.irq_line(IocInterrupt::GioExp0)) {
+            Ok(dev) => {
+                let dev = Arc::new(dev);
+                // Control registers: 0x1F400000-0x1F4FFFFF (16 x 64KB slots);
+                // the RAMROM window: 0x1F500000-0x1F5FFFFF (16 x 64KB slots).
+                bus.map_gio(GIO_SLOT0_BASE, RAMROM_BASE - GIO_SLOT0_BASE, dev.clone(), "ultra64");
+                bus.map_gio(RAMROM_BASE, RAMROM_SIZE, dev.clone(), "ultra64");
+                ctx.devices.add(&at.to_string(), Phase::Io, dev);
+            }
+            Err(e) => eprintln!("ultra64: failed to initialize ({e}); running without N64 dev board"),
+        }
+        Ok(vec![])
+    }
+}
+register_device!(Ultra64Card);
