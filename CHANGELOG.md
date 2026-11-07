@@ -18,7 +18,8 @@ hashes are given where a change is easiest to understand by reading the commit.
 - The O2's MACE and the Octane's Bridge share one PCI layer (`src/pci/`,
   `src/pci_host.rs`, [docs/pci.md](docs/pci.md)): the function table, BAR
   decode, interrupt combining, byte lanes, RST# and a PCI-to-PCI bridge
-  function (`PciToPciBridge`, not yet fitted to a machine). A cold reset of
+  function (`PciToPciBridge`, not yet fitted to a machine), reached on the
+  Octane through the Bridge's type 1 configuration aperture. A cold reset of
   the O2 now resets the PCI headers and both onboard AIC-7880s, and a write that
   lowers Octane Bridge reset pin `n` (Control bit `24 + n`) resets PCI device
   `n` and logs a warning. Snapshot schema 6: the PCI bus saves

@@ -316,6 +316,15 @@ impl PciBus {
         self.route_behind(guest_bus)
     }
 
+    /// The bus a type 1 configuration cycle for `guest_bus` on this bus
+    /// reaches. Type 0 functions ignore a type 1 cycle; a PCI-to-PCI bridge
+    /// claims it when the number is in its secondary to subordinate range.
+    /// None when no bridge does. Unlike [`PciBus::route`], bus 0 is not this
+    /// bus: it too reaches only a bridge whose range holds it.
+    pub fn route_type1(&self, guest_bus: u8) -> Option<PciBus> {
+        self.route_behind(guest_bus)
+    }
+
     /// The bus numbered `guest_bus` among the buses behind this one's
     /// bridges (number 0 is never behind a bridge).
     fn route_behind(&self, guest_bus: u8) -> Option<PciBus> {

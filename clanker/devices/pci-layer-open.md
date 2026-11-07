@@ -13,6 +13,9 @@ Status: open, 2026-11.
   other devices on the PCI bus", p. 550) and the four-pin count; the Bridge
   specification does not give it. Whether the stock PROM or IRIX ever writes a
   pin low has not been observed. A write is logged as a warning.
+- **Bridge type 1 master time-out capture.** Which device number the PCI
+  error upper register names for a type 1 cycle nobody claims is not in the
+  Bridge specification; iris records the device the cycle carried.
 - **MACE 64-bit PIO** is not in the driver guide's table; iris splits it into
   two word cycles, high word first. MACE rev 0 sends 4-byte-aligned addresses
   on I/O cycles, so byte and halfword I/O may fail on it (MACE specification
