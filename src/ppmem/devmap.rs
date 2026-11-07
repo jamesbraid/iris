@@ -667,15 +667,27 @@ mod fault {
     static INSTALL: Once = Once::new();
 
     pub(super) fn register(inner: *const Inner) -> io::Result<usize> {
-        for (i, slot) in REGISTRY.iter().enumerate() {
-            if slot
-                .compare_exchange(std::ptr::null_mut(), inner as *mut Inner, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
-                return Ok(i);
+        // The test binary runs as many tests at once as the host has cores,
+        // and more of them build a machine than there are tables: wait for
+        // one to finish, as a process that needs a table can't.
+        #[cfg(test)]
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        loop {
+            for (i, slot) in REGISTRY.iter().enumerate() {
+                if slot
+                    .compare_exchange(std::ptr::null_mut(), inner as *mut Inner, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    return Ok(i);
+                }
             }
+            #[cfg(test)]
+            if std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            }
+            return Err(io::Error::other(format!("devmap: more than {MAX_MAPS} tables alive")));
         }
-        Err(io::Error::other(format!("devmap: more than {MAX_MAPS} tables alive")))
     }
 
     pub(super) fn unregister(i: usize) {
