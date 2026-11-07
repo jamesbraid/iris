@@ -3456,6 +3456,28 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         self.sync_cache_error_control();
     }
 
+    /// The cache began or stopped holding lines the guest staged
+    /// (`MipsCache::holds_staged_lines`). While it holds any it serves every
+    /// cached access itself, so nothing may reach RAM around it: the JIT's
+    /// inline loads and stores go through the micro-TLB and ppmem's window,
+    /// and its code was compiled from memory. So no code page is tracked
+    /// while lines are held, which runs everything in the interpreter, and the
+    /// translations cached before the change go. Only the shipped PROMs stage
+    /// lines, and they end them before the kernel runs.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn staged_lines_changed(&mut self) {
+        self.nanotlb_invalidate();
+        #[cfg(feature = "jitv2")]
+        {
+            self.jitv2_frames = if self.cache.holds_staged_lines() {
+                0
+            } else {
+                crate::cpu::jitv2::jitv2::frames_for(&self.memory)
+            };
+        }
+    }
+
     /// Tell the cache which Status bits govern parity: CE forces the ECC
     /// register into stored check bits, and DE or ERL turn detection off.
     /// Every Status change comes through `resync_privilege_state`.
@@ -6752,23 +6774,27 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         let cache_op = d.rt as u32;  // Encoded operation: cache_sel in bits[1:0], op in bits[4:2]
         let op = cache_op & 0x1C;
 
-        // Hit operations need address translation; index operations use the
-        // address as an index. On an R10000 the encodings for 5/6/7 are index
-        // operations, not the R4000 hit operations: translating them would
-        // fault on an index that is not a valid virtual address (see
-        // C_R10K_ISD in mips_cache_v2). `CpuModel::CACHE_OPS` holds that
-        // decision per encoding, so the choice here is one bit test.
+        // On the R10000 every CACHE operand but Cache Barrier is translated
+        // like a data address before the operation, index operations included
+        // (NEC U12754EJ1V0UMJ1 pp.70, 72, the R10000 cache index operations datasheet,
+        // "Mapped operands"). A mapped operand can take TLB Refill, TLB
+        // Invalid or a privilege Address Error. It is translated as a read, so
+        // it never takes TLB Modified. The primary caches index by the virtual
+        // address and only use the translation for its exceptions. The
+        // secondary cache takes its set and way from the physical address,
+        // passed in place of the virtual one. An operand on an uncached page is undefined on
+        // the R10000; it is translated and the operation goes ahead as if the
+        // page were cached. `CpuModel::CACHE_OPS` holds the decision per
+        // encoding, so the choice here is one bit test.
         let sel = cache_op & 3;
         let bit = 1u32 << cache_op;
         let needs_translation = C::CACHE_OPS.translates & bit != 0;
 
         let phys_addr = if needs_translation {
-            // Hit operations need address translation
             let tr = self.nanotlb_translate::<{AccessType::Read as u8}>(virt_addr);
             if tr.is_exception() { return self.handle_exception(tr.status); }
             tr.phys
         } else {
-            // Index operations use virt_addr as index, no translation needed
             virt_addr
         };
 
@@ -6828,7 +6854,11 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             }
         }
         // Call unified cache interface
-        let result = self.cache.cache_op(cache_op, virt_addr, phys_addr_or_taglo);
+        let index_addr = if C::R10K_CACHE_OPS && sel == CACH_SD { phys_addr } else { virt_addr };
+        let result = self.cache.cache_op(cache_op, index_addr, phys_addr_or_taglo);
+        if C::R10K_CACHE_OPS && self.cache.take_staged_changed() {
+            self.staged_lines_changed();
+        }
         // An I-cache write-back of a line with bad parity raises a Cache
         // Error from the CACHE instruction itself.
         #[cfg(feature = "cache-ecc")]
@@ -11206,6 +11236,9 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Resettable for MipsC
         exec.core.reset(false);
         exec.tlb.power_on();
         exec.cache.power_on();
+        if exec.cache.take_staged_changed() {
+            exec.staged_lines_changed();
+        }
         exec.core.in_delay_slot = false;
         exec.core.delay_slot_target = 0;
         #[cfg(feature = "developer")]
@@ -11349,6 +11382,9 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Saveable for MipsCpu
 
         if let Some(cache_v) = get_field(v, "cache") {
             exec.cache.load_cache_state(cache_v)?;
+            if exec.cache.take_staged_changed() {
+                exec.staged_lines_changed();
+            }
         }
 
         // cp0_status was restored above by direct field write, so translate_fn and the

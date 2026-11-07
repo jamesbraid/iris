@@ -104,10 +104,9 @@ impl CacheOp {
         let op = cache_op & 0x1C;
         let sel = cache_op & 3;
         // The R10000 index operations that name a cache entry rather than an
-        // address: they are not translated. The primary Index Load/Store Data
-        // operations select by virtual address, but a mapped one still takes
-        // TLB Refill and Invalid (VR10000 Instruction Set UM p. 15), so they
-        // are.
+        // address. They still translate their operand (see `translates`), but
+        // the primary Index Load/Store Data operations select by virtual
+        // address.
         let primary_data = r10k
             && (op == C_R10K_ILD || op == C_R10K_ISD)
             && (sel == CACH_PI || sel == CACH_PD);
@@ -117,7 +116,11 @@ impl CacheOp {
                 || (op == C_R10K_ISD && (sel == CACH_SI || sel == CACH_SD)));
         let hit_op = op == C_CDX || op == C_HINV || op == C_HWBINV || op == C_HWB || op == C_HSV;
         CacheOp {
-            translates: primary_data || (!index_op && hit_op),
+            // The R10000 translates every operand but Cache Barrier's, a
+            // mapped one taking TLB Refill and Invalid (VR10000 Instruction
+            // Set UM p. 15; the R10000 cache index operations datasheet, "Mapped
+            // operands"). Older models translate the hit operations only.
+            translates: if r10k { !(op == C_R10K_CBARRIER && sel == CACH_PI) } else { hit_op },
             stores_tag: op == C_IST || ((index_op || primary_data) && op == C_R10K_ISD),
             loads_tag: op == C_ILT || (index_op && op == C_R10K_ILD),
             // Index_Load_Tag also loads CP0 ECC with the selected doubleword's
@@ -692,6 +695,19 @@ pub trait MipsCache: Send + Sync {
     /// instruction (jitv2 entering compiled code) may leave the fetch out.
     /// Default `false`: a model that keeps instruction-cache state does.
     fn fetch_is_pure(&self) -> bool { false }
+
+    /// Does the cache hold a line the guest staged with Index Store Tag and
+    /// Index Store Data, which cached accesses must be served from instead of
+    /// memory? While it does, the cache serves every cached access itself,
+    /// and the executor runs no compiled code: the JIT's inline loads and
+    /// stores reach RAM without calling the cache, and it compiled from
+    /// memory. Default `false`: a model that serves every access itself has
+    /// no such line.
+    fn holds_staged_lines(&self) -> bool { false }
+
+    /// Did `holds_staged_lines` change since the last call? Reading it clears
+    /// it. Asked after each CACHE instruction on the R10000 family.
+    fn take_staged_changed(&self) -> bool { false }
 
     /// Write every dirty line back to memory, so RAM holds everything.
     /// Default no-op: a cache that holds no data has nothing to write.
