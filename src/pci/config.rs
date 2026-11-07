@@ -285,7 +285,7 @@ impl PciConfig {
     /// each BAR that has been assigned an address in a space the command
     /// register enables, in BAR order. The bus caches these and updates its
     /// mappings after a configuration write.
-    pub fn windows(&self) -> Vec<(Space, usize, u32, u32)> {
+    pub fn bar_regions(&self) -> Vec<(Space, usize, u32, u32)> {
         let cmd = self.command();
         (0..6)
             .filter_map(|i| {
@@ -451,7 +451,7 @@ pub fn bar_runs(
     let (wlo, whi) = (pci as u64, pci as u64 + len);
     let mut found: Vec<(u64, u64, usize, usize, u64)> = Vec::new();
     for (k, (_, f)) in funcs.iter().enumerate() {
-        for (sp, bar, base, size) in f.state().config().windows() {
+        for (sp, bar, base, size) in f.state().config().bar_regions() {
             if sp != space {
                 continue;
             }
