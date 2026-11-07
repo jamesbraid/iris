@@ -101,7 +101,7 @@ Non-graphics devices: MC/MEMCFG and RAM banks, HPC3, VDMA, EEPROMs and NVRAM, PS
 | Note | Kind | Title |
 |---|---|---|
 | [pci-layer-design.md](devices/pci-layer-design.md) | design | The PCI layer: headers change only through the bus, byte orders are per-window values, `pci/` imports no card or SCSI; the stale-run and delivery-order hazards, the SeqCst handshake, and what the first attempt got wrong |
-| [pci-layer-open.md](devices/pci-layer-open.md) | open | PCI layer open items: Bridge reset-pin wiring, MACE 64-bit PIO, RST# on cold reset still to come |
+| [pci-layer-open.md](devices/pci-layer-open.md) | open | PCI layer open items: restore vs reset and the AIC-7880 chip reset, the O2's RST#, Bridge reset pins and master time-out approximations, the 2 GB window's reserved range, no external ATE SSRAM, MACE 64-bit PIO |
 | [virtio-serial-design.md](devices/virtio-serial-design.md) | design | virtio-serial: one transport-neutral core, mmio in a GIO slot (IP22/24/28) and pci (IP30); threading, byte order and open items |
 | [empty-gio-slot-reads-bus-error.md](devices/empty-gio-slot-reads-bus-error.md) | rule | Reads of an empty GIO slot end in a bus error (ABORT_EN); all ones made the PROM poll a phantom Newport 200 000 times headless |
 | [audio-test-suite.md](devices/audio-test-suite.md) | howto | The audio test suite (`test/audiotest`): rates x channels x widths through the audio library, playaiff and sfplay, checked against the Octane's capture |
@@ -460,6 +460,7 @@ Plans, task briefs and reviews written for agents. Each states its own status; m
 | [odyssey-quad-pipeline.md](plans/odyssey-quad-pipeline.md) | plan | Plan: a three-stage quad pipeline for the VPro rasteriser (rasteriser, shader, back end on threads; quake1 timedemo as the workload) |
 | [wgpu-raster.md](plans/wgpu-raster.md) | plan | Plan: the boards' raster units on the host GPU through wgpu compute (board memory on the GPU, tile-binned batches; common layer landed, VPro first, IMPACT second, GR2 open) |
 | [odyssey-board-memory.md](plans/odyssey-board-memory.md) | plan | VPro board memory as the hardware has it: one tiled SDRAM pool addressed by base/pitch/format, replacing the fixed planes and the invented object store; measure the tile layout on a real V10 first |
+| [pci.md](plans/pci.md) | plan | PCI: what the shared layer delivers, then the Fuel and Tezro conversions, the XIO PCI carrier, card cage and NVMe in real slots, and the post-rework reset work |
 | [pci-dma-port.md](plans/pci-dma-port.md) | plan | PCI bus masters: one `PciDma` trait, shared on the O2, per device on the Octane's Bridge; Bridge/Xbridge DMA, PIO, interrupt and swap facts; step 1 done |
 | [o2-memory-and-locks.md](plans/o2-memory-and-locks.md) | plan | O2 disk I/O gap vs Indy: interrupt re-drive on every access (~205 locks), PCI BAR decode locks, debug logs on hot paths, RAM onto Physical/SparseDeviceMap/PpMemory like the Indy, remaining locks; hardware facts on memory masters |
 | [networking-tab-redesign.md](plans/networking-tab-redesign.md) | plan | Networking tab redesign — design & plan |
