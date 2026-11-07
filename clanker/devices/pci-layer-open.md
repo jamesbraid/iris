@@ -16,6 +16,13 @@ Status: open, 2026-11.
 - **Bridge type 1 master time-out capture.** Which device number the PCI
   error upper register names for a type 1 cycle nobody claims is not in the
   Bridge specification; iris records the device the cycle carried.
+- **Bridge 32-bit alias master time-out capture.** The same for a PIO through
+  the 2 GB window's PCI memory alias that nothing claims: iris names device 0
+  and records the PCI address the cycle carried.
+- **Bridge 2 GB window, 16 MB to 1 GB.** The specification calls it reserved
+  (p. 52) without saying what an access does; iris answers with a bus error.
+  The 64-bit alias and PCI I/O space, reachable only through the 64 GB
+  window, are not modelled.
 - **MACE 64-bit PIO** is not in the driver guide's table; iris splits it into
   two word cycles, high word first. MACE rev 0 sends 4-byte-aligned addresses
   on I/O cycles, so byte and halfword I/O may fail on it (MACE specification
