@@ -98,6 +98,8 @@ pub const WIDGET_GFX: u8 = 11;
 const SUPERIO_PIN: u8 = 4;
 /// Bridge slot of the virtio device: 0 and 1 are SCSI, 2 IOC3, 3 the RAD.
 const VIRTIO_SLOT: u8 = 4;
+/// Bridge slot of the NVMe card (`[nvme]`).
+const NVME_SLOT: u8 = 5;
 /// The blank part on the Bridge's second flash select: reads all ones and
 /// keeps no writes, an approximation from one word read on a real Octane2.
 /// The PROM looks for a part there too.
@@ -137,6 +139,8 @@ pub struct OctaneMachine {
     rad: Arc<Rad1>,
     /// virtio-serial (`[virtio_serial]`), the next free Bridge slot.
     virtio: Option<Arc<crate::dev::virtio::pci::VirtioPci>>,
+    /// The NVMe card (`[nvme]`), on Bridge slot 5.
+    nvme: Option<Arc<crate::dev::nvme::Nvme>>,
     flash: Arc<CfiFlash>,
     /// The IMPACT board, when `[graphics] board` names one.
     pub gfx: Option<Arc<ImpactXio>>,
@@ -256,7 +260,8 @@ impl OctaneMachine {
         let slot = |device| PciAddr { device, function: 0 };
         pci.attach(slot(0), scsi[0].clone());
         pci.attach(slot(1), scsi[1].clone());
-        let disks = Disks::new(scsi.iter().map(|s| s.clone() as Arc<dyn crate::disks::DiskController>).collect());
+        let mut controllers: Vec<Arc<dyn crate::disks::DiskController>> =
+            scsi.iter().map(|s| s.clone() as Arc<dyn crate::disks::DiskController>).collect();
         let ioc3 = Arc::new(Ioc3::octane(mac, false));
         ioc3.set_heartbeat(heartbeat.clone());
         let eth = Ioc3Eth::new(mac);
@@ -288,6 +293,18 @@ impl OctaneMachine {
             eprintln!("iris: virtio-serial on Bridge slot {VIRTIO_SLOT}");
             dev
         });
+
+        let nvme = (!cfg.nvme.path.is_empty())
+            .then(|| crate::dev::nvme::Card::open(&cfg.nvme))
+            .transpose()?
+            .map(|card| {
+                card.fit(pci, NVME_SLOT);
+                card.nvme
+            });
+        controllers.extend(nvme.iter().map(|n| n.clone() as Arc<dyn crate::disks::DiskController>));
+        let disks = Disks::new(controllers);
+        let mut disk_refs = disk_refs;
+        disk_refs.extend(nvme.as_ref().map(|n| crate::dev::nvme::disk_ref(&cfg.nvme, n)));
 
         // The status bar's activity bits and the CPU's Compare matches,
         // shared with the graphics board before the CPU exists.
@@ -474,6 +491,9 @@ impl OctaneMachine {
         if let Some(v) = &virtio {
             devices.add("virtio", Phase::Io, v.clone());
         }
+        if let Some(n) = &nvme {
+            devices.add("nvme", Phase::Io, n.clone());
+        }
         devices.add("flash", Phase::Io, flash.clone());
         if let Some(v) = &vpro {
             devices.add("vpro", Phase::Io, v.clone());
@@ -543,6 +563,7 @@ impl OctaneMachine {
             eth,
             rad,
             virtio,
+            nvme,
             flash,
             gfx,
             vpro,
@@ -749,6 +770,8 @@ struct OctaneSnapshot {
     flash: Vec<u8>,
     memory: Vec<u32>,
     overlays: [Option<OverlaySets>; 2],
+    /// The NVMe disk's, when the snapshot has them.
+    nvme_overlays: Option<OverlaySets>,
     dir: std::path::PathBuf,
 }
 
@@ -808,6 +831,12 @@ impl OctaneMachine {
                 .map_err(|e| format!("COW overlay export (controller {i}): {e}"))?;
             snap.write_toml(&format!("cow{i}.toml"), &crate::snapshot::build_cow_table(overlays)).map_err(io)?;
         }
+        if let Some(n) = &self.nvme {
+            let dir = snap.dir.join("nvme");
+            std::fs::create_dir_all(&dir).map_err(io)?;
+            let overlays = n.export_overlays(&dir).map_err(|e| format!("COW overlay export (NVMe): {e}"))?;
+            snap.write_toml("cow_nvme.toml", &crate::snapshot::build_cow_table(overlays)).map_err(io)?;
+        }
         Ok(())
     }
 
@@ -860,6 +889,7 @@ impl OctaneMachine {
         let overlays = std::array::from_fn(|i| {
             snap.read_toml(&format!("cow{i}.toml")).ok().map(|t| crate::snapshot::parse_cow_table(&t))
         });
+        let nvme_overlays = snap.read_toml("cow_nvme.toml").ok().map(|t| crate::snapshot::parse_cow_table(&t));
         // Checked here, before the machine is touched, rather than when the
         // part is loaded.
         let flash = snap.read_bin("flash.bin").map_err(|e| format!("flash.bin: {e}"))?;
@@ -872,6 +902,7 @@ impl OctaneMachine {
             flash,
             memory,
             overlays,
+            nvme_overlays,
             dir: snap.dir,
         })
     }
@@ -893,6 +924,9 @@ impl OctaneMachine {
                 ctl.bus().import_overlays(&s.dir.join(format!("ctrl{i}")), sets)
                     .map_err(|e| format!("COW overlay import (controller {i}): {e}"))?;
             }
+        }
+        if let (Some(n), Some(sets)) = (&self.nvme, &s.nvme_overlays) {
+            n.import_overlays(&s.dir.join("nvme"), sets).map_err(|e| format!("COW overlay import (NVMe): {e}"))?;
         }
         self.devices.load(&s.board)?;
         Self::sync_links(&self.phys, &self.xbow);
@@ -1276,6 +1310,46 @@ mod snapshot_tests {
             // The monitor's `stop`: the CPU halts, the lifecycle is not touched.
             m.stop_cpus();
             assert!(m.start_guest().is_ok());
+        }).unwrap().join().unwrap();
+    }
+
+    /// `[nvme]` puts a card in Bridge slot 5, behind a PCI-to-PCI bridge when
+    /// asked, registers it with the other parts, and records its disk. A
+    /// snapshot takes back what the overlay held when it was saved, and the
+    /// controller's state with it.
+    #[test]
+    fn an_nvme_card_is_fitted_and_its_overlay_snapshots() {
+        use crate::scsi::{scsi_cmd, ScsiDataLength, ScsiRequest};
+        use crate::scsi_monitor::ScsiTargets;
+        std::thread::Builder::new().stack_size(64 << 20).spawn(|| {
+            let dir = scratch("nvme");
+            let prom = empty_prom(&dir);
+            let disk = dir.join("nvme.raw");
+            std::fs::write(&disk, vec![0u8; 1 << 20]).unwrap();
+            let path = disk.to_string_lossy().into_owned();
+            let mut m = machine_with(&prom, &dir, |cfg| cfg.nvme = crate::config::NvmeConfig { path, overlay: true, bridge: true });
+            let pci = m.bridge.bus();
+            let slot = PciAddr { device: NVME_SLOT, function: 0 };
+            assert_eq!(pci.config_read(slot, 8, 4).map(|d| d >> 8), Some(0x06_0400), "a PCI-to-PCI bridge in the slot");
+            m.bridge.bus().config_write(slot, 0x18, 4, 0x0001_0100);
+            let sec = pci.route(1).expect("the bus behind it");
+            assert_eq!(sec.config_read(PciAddr { device: 0, function: 0 }, 8, 4).map(|d| d >> 8), Some(0x01_0802), "the card behind it");
+            assert!(m.devices.keys().contains(&"nvme".to_string()));
+            assert!(m.disk_refs.iter().any(|d| d.id == crate::dev::nvme::SNAPSHOT_SLOT && d.size_bytes == 1 << 20));
+
+            let nvme = m.nvme.clone().unwrap();
+            let io = |cdb: Vec<u8>, data: Option<Vec<u8>>| {
+                let req = ScsiRequest { cdb, data_len: ScsiDataLength::Unlimited, data_in: data };
+                nvme.scsi_bus().request(0, &req).unwrap().unwrap().data
+            };
+            let rw = |op: u8| vec![op, 0, 0, 0, 0, 3, 0, 0, 1, 0];
+            io(rw(scsi_cmd::WRITE_10), Some(vec![0x11; 512]));
+            m.save_snapshot("s").unwrap();
+            assert!(m.saves.join("s/nvme/scsi0.overlay").exists(), "the overlay goes with the snapshot");
+            io(rw(scsi_cmd::WRITE_10), Some(vec![0x22; 512]));
+            assert_eq!(io(rw(scsi_cmd::READ_10), None), vec![0x22; 512]);
+            m.load_snapshot("s").unwrap();
+            assert_eq!(io(rw(scsi_cmd::READ_10), None), vec![0x11; 512], "the disk is as saved");
         }).unwrap().join().unwrap();
     }
 

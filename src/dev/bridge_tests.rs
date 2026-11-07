@@ -1430,3 +1430,72 @@ fn save_load_round_trip_keeps_the_function_reachable() {
     other.bridge.set_revision(4);
     assert!(other.bridge.load_state(&v1).unwrap_err().contains("revision"));
 }
+
+/// An NVMe card in Bridge slot 5, directly and behind a PCI-to-PCI bridge,
+/// driven through the slot's device window and the 31-bit direct map with
+/// the swap bit set (a byte stream, as a little-endian master wants).
+struct NvmeHost<'a>(&'a Rig, u32);
+
+impl crate::dev::nvme::tests::HostIo for NvmeHost<'_> {
+    fn w(&self, off: u32, v: u32) {
+        assert_eq!(self.0.bridge.write32(u64::from(Rig::win(self.1) + off), v), BUS_OK);
+    }
+    fn r(&self, off: u32) -> u32 {
+        self.0.bridge.read32(u64::from(Rig::win(self.1) + off)).data
+    }
+    fn put(&self, at: u64, data: &[u8]) {
+        self.0.mem.poke(at, data);
+    }
+    fn get(&self, at: u64, len: usize) -> Vec<u8> {
+        self.0.mem.peek(at, len)
+    }
+    fn bus(&self, at: u64) -> u64 {
+        0x8000_0000 + at
+    }
+}
+
+fn nvme_in_slot_5(behind_bridge: bool) {
+    let r = Rig::new();
+    let img = crate::dev::nvme::tests::temp_image(if behind_bridge { "bridge-ppb" } else { "bridge" });
+    let card = crate::dev::nvme::Card::open(&crate::config::NvmeConfig {
+        path: img.to_string_lossy().into_owned(),
+        overlay: false,
+        bridge: behind_bridge,
+    })
+    .unwrap();
+    card.fit(r.bridge.bus(), 5);
+    r.direct_to_heart(false);
+    r.set(reg::device(5), DEV_MEMORY_SPACE | DEV_SWAP_DIRECT | 0x130);
+    r.route(5, 0x21);
+    if behind_bridge {
+        // Bus 1 behind the bridge at slot 5, memory 0x13000000 forwarded.
+        r.cfg_write(5, 0x18, 4, 0x0001_0100);
+        r.cfg_write(5, 0x20, 4, 0x130f_1300);
+        r.cfg_write(5, 0x04, 2, PCI_COMMAND_MEMORY);
+        let sec = r.bridge.bus().route(1).expect("bus 1");
+        let at = PciAddr { device: 0, function: 0 };
+        sec.config_write(at, 0x10, 4, 0x1300_0000);
+        sec.config_write(at, 0x14, 4, 0);
+        sec.config_write(at, 0x04, 2, PCI_COMMAND_MEMORY);
+    } else {
+        r.cfg_write(5, 0x10, 4, 0x1300_0000);
+        r.cfg_write(5, 0x14, 4, 0);
+        r.cfg_write(5, 0x04, 2, PCI_COMMAND_MEMORY);
+    }
+    r.sink.take();
+    crate::dev::nvme::tests::smoke(&NvmeHost(&r, 5));
+    // The completion raised the slot's pin 5 (INTA of device 5), a packet
+    // for vector 0x21 reached HEART.
+    assert!(r.sink.take().contains(&(0x21, true)));
+    let _ = std::fs::remove_file(img);
+}
+
+#[test]
+fn an_nvme_card_in_bridge_slot_5_masters_ram_and_raises_its_pin() {
+    nvme_in_slot_5(false);
+}
+
+#[test]
+fn an_nvme_card_behind_a_bridge_in_slot_5_does_the_same() {
+    nvme_in_slot_5(true);
+}

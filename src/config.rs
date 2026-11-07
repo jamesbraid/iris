@@ -583,6 +583,28 @@ impl VirtioSerialConfig {
     }
 }
 
+/// `[nvme]`: an NVM Express card in the O2's PCI option slot or on the
+/// Octane's PCI Bridge. See `docs/nvme.md`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct NvmeConfig {
+    /// The namespace's disk image (raw or CHD). Empty: no card.
+    #[serde(default)]
+    pub path: String,
+    /// Copy-on-write: writes go to `{path}.overlay`, as `[scsi.N] overlay`.
+    #[serde(default)]
+    pub overlay: bool,
+    /// Put the card behind a PCI-to-PCI bridge in the slot, as a card on an
+    /// expansion cage sits, instead of in the slot itself.
+    #[serde(default)]
+    pub bridge: bool,
+}
+
+impl NvmeConfig {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Emulated SGI machine profile (hardware layout scaffold).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -2011,6 +2033,10 @@ pub struct MachineConfig {
     /// virtio-serial guest device (`[virtio_serial]`, `[[virtio_serial.port]]`).
     #[serde(default, skip_serializing_if = "VirtioSerialConfig::is_default")]
     pub virtio_serial: VirtioSerialConfig,
+
+    /// NVM Express card (`[nvme]`).
+    #[serde(default, skip_serializing_if = "NvmeConfig::is_default")]
+    pub nvme: NvmeConfig,
 }
 
 fn default_scsi_deferred_int() -> bool { true }
@@ -2224,6 +2250,7 @@ impl Default for MachineConfig {
             rtc_offset: RtcOffset::default(),
             ultra64: Ultra64Config::default(),
             virtio_serial: VirtioSerialConfig::default(),
+            nvme: NvmeConfig::default(),
         }
     }
 }
@@ -2273,6 +2300,20 @@ impl MachineConfig {
                  MACE PCI bridge has no interrupt route for a third slot (see docs/virtio-serial.md)"
                     .into(),
             ),
+        }
+    }
+
+    /// `[nvme]`: only machines with PCI slots have somewhere to put it.
+    fn validate_nvme(&self) -> Result<(), String> {
+        if self.nvme.is_default() {
+            return Ok(());
+        }
+        if self.nvme.path.is_empty() {
+            return Err("[nvme] needs a path".into());
+        }
+        match self.machine.profile {
+            MachineProfile::O2Ip32 | MachineProfile::OctaneIp30 => Ok(()),
+            _ => Err("[nvme] needs a machine with PCI slots: the O2 or the Octane".into()),
         }
     }
 
@@ -2424,6 +2465,7 @@ impl MachineConfig {
 
     pub fn validate(&self) -> Result<(), String> {
         self.validate_virtio_serial()?;
+        self.validate_nvme()?;
         self.machine.profile.accepts_cpu(self.machine.cpu)?;
         self.machine.profile.accepts_cpus(self.machine.cpus)?;
         if self.graphics.heads != 1 && self.graphics.heads != 2 {

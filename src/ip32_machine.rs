@@ -146,6 +146,8 @@ pub struct O2Machine {
     paused: Arc<AtomicBool>,
     /// The disks as a snapshot records them, to refuse one taken on others.
     disk_refs: Vec<crate::snapshot::DiskRef>,
+    /// The NVMe card in the option slot, `[nvme]`.
+    nvme: Option<Arc<crate::dev::nvme::Nvme>>,
     /// The flash file, recorded in a snapshot's manifest.
     flash_path: Option<String>,
     /// The `scratch = true` volume, for the CI socket's scratch commands.
@@ -196,6 +198,14 @@ impl O2Machine {
             mac,
         };
         let bus = Ip32Bus::with_options(mem, prom, opts);
+        // The NVMe card, in the "PCI option" slot.
+        let nvme = (!cfg.nvme.path.is_empty())
+            .then(|| crate::dev::nvme::Card::open(&cfg.nvme))
+            .transpose()?
+            .map(|card| {
+                card.fit(bus.mace.pci.bus(), crate::dev::mace_pci::IP32_OPTION_SLOT);
+                card.nvme
+            });
         // MACE audio plays through the host unless audio is off.
         if !cfg.no_audio {
             bus.mace.audio.enable_output(cfg.audio.clone());
@@ -318,6 +328,9 @@ impl O2Machine {
         let mut devices = Devices::new();
         devices.add("o2", Phase::Chipset, bus.clone());
         devices.add("boot", Phase::Chipset, boot.clone());
+        if let Some(n) = &nvme {
+            devices.add("nvme", Phase::Io, n.clone());
+        }
         let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
         let monitor = crate::monitor::Monitor::new(monitor_port);
         monitor.register_device(crate::devlog::init_devlog());
@@ -334,13 +347,15 @@ impl O2Machine {
         }
 
         let control = Control::new();
-        let disks = Arc::new(Disks::new(
-            bus.scsi.lock().unwrap().iter().map(|c| c.clone() as Arc<dyn crate::disks::DiskController>).collect(),
-        ));
+        let mut controllers: Vec<Arc<dyn crate::disks::DiskController>> =
+            bus.scsi.lock().unwrap().iter().map(|c| c.clone() as Arc<dyn crate::disks::DiskController>).collect();
+        controllers.extend(nvme.iter().map(|n| n.clone() as Arc<dyn crate::disks::DiskController>));
+        let disks = Arc::new(Disks::new(controllers));
         // A snapshot's disks by slot (controller * 16 + id) and size.
         let disk_refs: Vec<crate::snapshot::DiskRef> = attached.tables.iter()
             .filter(|t| !t.is_cdrom)
             .map(|t| crate::snapshot::DiskRef { id: t.slot, path: t.path.clone(), size_bytes: t.size_bytes })
+            .chain(nvme.as_ref().map(|n| crate::dev::nvme::disk_ref(&cfg.nvme, n)))
             .collect();
         Ok(Self {
             memory,
@@ -360,6 +375,7 @@ impl O2Machine {
             boot,
             paused: Arc::new(AtomicBool::new(false)),
             disk_refs,
+            nvme,
             flash_path: Some(cfg.nvram.clone()),
             scratch_path,
         })
@@ -625,6 +641,12 @@ impl O2Machine {
             snap.write_toml(&format!("cow{i}.toml"), &crate::snapshot::build_cow_table(overlays))
                 .map_err(|e| e.to_string())?;
         }
+        if let Some(n) = &self.nvme {
+            let dir = snap.dir.join("nvme");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let overlays = n.export_overlays(&dir).map_err(|e| format!("COW overlay export (NVMe): {e}"))?;
+            snap.write_toml("cow_nvme.toml", &crate::snapshot::build_cow_table(overlays)).map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
@@ -679,6 +701,7 @@ impl O2Machine {
         let overlays = (0..ctrls)
             .map(|i| snap.read_toml(&format!("cow{i}.toml")).ok().map(|t| crate::snapshot::parse_cow_table(&t)))
             .collect();
+        let nvme_overlays = snap.read_toml("cow_nvme.toml").ok().map(|t| crate::snapshot::parse_cow_table(&t));
         let mut board = toml::map::Map::new();
         for key in self.devices.keys() {
             board.insert(key.clone(), state(&key)?);
@@ -689,6 +712,7 @@ impl O2Machine {
             flash: snap.read_bin("flash.bin").map_err(|e| format!("flash.bin: {e}"))?,
             memory,
             overlays,
+            nvme_overlays,
             dir: snap.dir,
         })
     }
@@ -707,6 +731,9 @@ impl O2Machine {
                 ctl.import_overlays(&s.dir.join(format!("ctrl{i}")), sets)
                     .map_err(|e| format!("COW overlay import (controller {i}): {e}"))?;
             }
+        }
+        if let (Some(n), Some(sets)) = (&self.nvme, &s.nvme_overlays) {
+            n.import_overlays(&s.dir.join("nvme"), sets).map_err(|e| format!("COW overlay import (NVMe): {e}"))?;
         }
         Ok(())
     }
@@ -737,6 +764,8 @@ struct O2Snapshot {
     memory: Vec<u32>,
     /// Each controller's copy-on-write sets, when the snapshot has them.
     overlays: Vec<Option<Vec<(usize, Vec<u64>)>>>,
+    /// The NVMe disk's, when the snapshot has them.
+    nvme_overlays: Option<Vec<(usize, Vec<u64>)>>,
     dir: std::path::PathBuf,
 }
 
@@ -1188,6 +1217,52 @@ mod device_tests {
             names.sort();
             let _ = std::fs::remove_dir_all(&dir);
             assert_eq!(names, ["boot.bin", "chunks.bin", "cow0.toml", "cow1.toml", "cpu.bin", "ctrl0", "ctrl1", "flash.bin", "o2.bin", "snapshot.toml"]);
+        });
+    }
+
+    /// `[nvme]` puts a card in the "PCI option" slot, registers it with the
+    /// other parts and records its disk; a snapshot takes back what the
+    /// overlay held when it was saved. (One O2 more than the shared one: each
+    /// keeps a device-map table for the life of the process.)
+    #[test]
+    fn an_nvme_card_is_fitted_in_the_option_slot_and_its_overlay_snapshots() {
+        use crate::exit_persistence_tests::{build, config, make_images, on_big_stack, serial, Dir};
+        use crate::scsi::{scsi_cmd, ScsiDataLength, ScsiRequest};
+        use crate::scsi_monitor::ScsiTargets;
+        on_big_stack(|| {
+            // `Dir::new` clears the CI overlays the exit-persistence tests
+            // are using; take their turn.
+            let _serial = serial();
+            let dir = Dir::new("o2-nvme");
+            make_images(&dir);
+            let disk = dir.file("nvme.raw");
+            std::fs::write(&disk, vec![0u8; 1 << 20]).unwrap();
+            let mut cfg = config(Kind::O2, &dir, false);
+            cfg.nvme = crate::config::NvmeConfig { path: disk.to_string_lossy().into_owned(), overlay: true, bridge: false };
+            let mut ws = build(cfg);
+            let m = ws.as_any_mut().downcast_mut::<O2Machine>().expect("an O2");
+            let at = crate::pci::PciAddr { device: crate::dev::mace_pci::IP32_OPTION_SLOT, function: 0 };
+            assert_eq!(m.bus.mace.pci.bus().config_read(at, 8, 4).map(|d| d >> 8), Some(0x01_0802), "the card in the slot");
+            assert!(m.devices.keys().contains(&"nvme".to_string()));
+            assert!(m.disk_refs.iter().any(|d| d.id == crate::dev::nvme::SNAPSHOT_SLOT && d.size_bytes == 1 << 20));
+
+            let nvme = m.nvme.clone().unwrap();
+            let io = |cdb: Vec<u8>, data: Option<Vec<u8>>| {
+                let req = ScsiRequest { cdb, data_len: ScsiDataLength::Unlimited, data_in: data };
+                nvme.scsi_bus().request(0, &req).unwrap().unwrap().data
+            };
+            let rw = |op: u8| vec![op, 0, 0, 0, 0, 3, 0, 0, 1, 0];
+            io(rw(scsi_cmd::WRITE_10), Some(vec![0x11; 512]));
+            let saves = Dir::new("o2-nvme-saves");
+            let before = std::mem::replace(&mut m.saves, saves.file(""));
+            m.save_snapshot("s").unwrap();
+            assert!(m.saves.join("s/nvme/scsi0.overlay").exists(), "the overlay goes with the snapshot");
+            io(rw(scsi_cmd::WRITE_10), Some(vec![0x22; 512]));
+            m.load_snapshot("s").unwrap();
+            assert_eq!(io(rw(scsi_cmd::READ_10), None), vec![0x11; 512], "the disk is as saved");
+            m.saves = before;
+            m.stop();
+            std::mem::forget(ws);
         });
     }
 
