@@ -4,6 +4,12 @@
 //!
 //! # What is approximated here
 //!
+//! The vector engine reaches only the device at the far end of the node's
+//! cable (route 0), which performs the access on its own registers. A
+//! nonzero route, an unwired port and a refused offset latch no reply, so
+//! the firmware's poll times out. The reply's return route and source stay
+//! zero; their encoding is not established.
+//!
 //! The slot is decoded immediately and completes after one microsecond of
 //! machine time. Permission registers retain guest writes, but this block's
 //! access interface does not carry requester identity, so it cannot enforce
@@ -56,6 +62,15 @@ use parking_lot::{Mutex, ReentrantMutex};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+/// The far end of the vector engine's route 0: the device on the other side
+/// of the node's cable.
+pub trait VectorPeer: Send + Sync {
+    /// Perform one register access at `offset` of the peer's register
+    /// window. A read returns the word; a write returns 0. `None` means the
+    /// route reaches no device or the peer refuses the offset.
+    fn access(&self, route: u64, offset: u64, write: bool, data: u64) -> Option<u64>;
+}
 type Level = Arc<dyn Fn(bool) + Send + Sync>;
 const ID: u64 = (0x36 << 1) | (0x3012 << 12) | (2 << 28);
 /// Scratch 1 and 3 in the plain scratch window.
@@ -69,6 +84,11 @@ impl<F: FnMut()> Drop for OnDrop<F> {
     }
 }
 const VECTOR_MASK: u64 = 3 | (0x1fffff << 3) | (0xff << 32) | (0x7ff << 40);
+/// The fields a vector reply echoes: address, write id and request id.
+const VECTOR_ECHO: u64 = VECTOR_MASK & !3;
+const VECTOR_WRITE: u64 = 1;
+const VECTOR_VALID: u64 = 1 << 63;
+const VECTOR_OVERRUN: u64 = 1 << 62;
 struct Regs {
     words: BTreeMap<u64, u64>,
     scratch: [u64; 5],
@@ -113,6 +133,7 @@ pub struct BedrockLb {
     reset: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     microlan: Mutex<Option<w1::Bus>>,
     node_changed: Mutex<Option<Arc<dyn Fn(u8) + Send + Sync>>>,
+    vector: Mutex<Option<Arc<dyn VectorPeer>>>,
 }
 impl BedrockLb {
     pub fn new(clock: Clock) -> Self {
@@ -128,7 +149,12 @@ impl BedrockLb {
             reset: Mutex::new(None),
             microlan: Mutex::new(None),
             node_changed: Mutex::new(None),
+            vector: Mutex::new(None),
         }
+    }
+    /// Wire route 0 of the vector engine to the device across the cable.
+    pub fn connect_vector(&self, peer: Arc<dyn VectorPeer>) {
+        *self.vector.lock() = Some(peer);
     }
     pub fn connect_error(&self, cb: Level) {
         let _delivery = self.delivery.lock();
@@ -179,6 +205,27 @@ impl BedrockLb {
                 cb(level);
             }
         }
+    }
+    /// Send one vector request down `route`. The peer performs it with no
+    /// lock of ours held, since it may be launching at us at the same time.
+    fn launch_vector(&self, params: u64, route: u64, data: u64) {
+        let write = params & VECTOR_WRITE != 0;
+        let peer = self.vector.lock().clone();
+        let Some(peer) = peer.filter(|_| route == 0) else {
+            crate::dlog!(crate::devlog::LogModule::Bedrock, "Bedrock LB vector launch on route {route:#x} reaches no peer; no reply latched");
+            return;
+        };
+        let Some(word) = peer.access(route, params & (0x1fffff << 3), write, data) else {
+            crate::dlog!(crate::devlog::LogModule::Bedrock, "Bedrock LB vector {} of {:#x} refused", if write { "write" } else { "read" }, params & (0x1fffff << 3));
+            return;
+        };
+        let mut r = self.regs.lock();
+        if !write {
+            r.words.insert(reg::REGISTER_C030, word);
+        }
+        r.words.insert(reg::REGISTER_C028, 0);
+        // Bits 2:0 carry the request type; a write is accepted only as 1.
+        r.words.insert(reg::VECTOR_STATUS, (params & VECTOR_ECHO) | VECTOR_VALID | (params & VECTOR_WRITE));
     }
     fn notify_node(&self) {
         let _delivery = self.delivery.lock();
@@ -273,6 +320,7 @@ impl BusDevice for BedrockLb {
         let now = (self.clock)();
         let mut r = self.regs.lock();
         Self::complete(&mut r, now);
+        let mut launch = None;
         match a {
             reg::NODE_REGION => {
                 let region = ((v >> 46) & 3) as u8;
@@ -320,11 +368,15 @@ impl BusDevice for BedrockLb {
                 *r.words.entry(0x4040).or_default() &= !(v & 0x7ff);
             }
             reg::VECTOR_REQUEST => {
-                r.words.insert(a, v & VECTOR_MASK);
-                if r.words.get(&reg::VECTOR_STATUS).copied().unwrap_or(0) & (1 << 63) != 0 {
-                    *r.words.entry(reg::VECTOR_STATUS).or_default() |= 1 << 62;
+                let params = v & VECTOR_MASK;
+                r.words.insert(a, params);
+                if r.words.get(&reg::VECTOR_STATUS).copied().unwrap_or(0) & VECTOR_VALID != 0 {
+                    // A launch over an unread reply only marks the overrun.
+                    *r.words.entry(reg::VECTOR_STATUS).or_default() |= VECTOR_OVERRUN;
+                } else if params & 3 & !VECTOR_WRITE != 0 {
+                    crate::dlog!(crate::devlog::LogModule::Bedrock, "Bedrock LB vector request type {} refused", params & 3);
                 } else {
-                    crate::dlog!(crate::devlog::LogModule::Bedrock, "Bedrock LB vector launch reaches no peer; no reply latched");
+                    launch = Some(params);
                 }
             }
             reg::VECTOR_STATUS | reg::VECTOR_STATUS_ALIAS => {
@@ -345,7 +397,14 @@ impl BusDevice for BedrockLb {
                 }
             }
         }
+        let (route, data) = (
+            r.words.get(&reg::REGISTER_C008).copied().unwrap_or(0),
+            r.words.get(&reg::REGISTER_C010).copied().unwrap_or(0),
+        );
         drop(r);
+        if let Some(params) = launch {
+            self.launch_vector(params, route, data);
+        }
         self.update_irq();
         if a == reg::NODE_REGION {
             self.notify_node();
@@ -587,5 +646,126 @@ mod tests {
             assert_eq!(d.node_number(), 2);
             assert_eq!(delivered.load(Ordering::SeqCst), 2);
         }
+    }
+
+    // The vector engine cases follow tests/qtest/sn1-bedrock-link-test.c in
+    // jamesbraid/qemu-sgi-origami.
+
+    /// The peer end: the other LB, reached at its hub offset (the LB block
+    /// sits at 0x600000 of the hub window).
+    struct LbPeer(Arc<BedrockLb>, bool);
+    impl VectorPeer for LbPeer {
+        fn access(&self, _route: u64, offset: u64, write: bool, data: u64) -> Option<u64> {
+            let local = offset.checked_sub(0x60_0000).filter(|&l| l < SIZE)?;
+            if !self.1 {
+                return None;
+            }
+            if write {
+                (self.0.write64(local, data) == BUS_OK).then_some(0)
+            } else {
+                let r = self.0.read64(local);
+                (r.status == BUS_OK).then_some(r.data)
+            }
+        }
+    }
+    fn pair() -> (Arc<BedrockLb>, Arc<BedrockLb>) {
+        let a = Arc::new(BedrockLb::new(Arc::new(|| 0)));
+        let b = Arc::new(BedrockLb::new(Arc::new(|| 0)));
+        a.connect_vector(Arc::new(LbPeer(b.clone(), true)));
+        b.connect_vector(Arc::new(LbPeer(a.clone(), true)));
+        (a, b)
+    }
+    const SENTINEL: u64 = 0xdead_beef_dead_beef;
+    const ECHO: u64 = (0x1fffff << 3) | (0xff << 32) | (0x7ff << 40);
+    /// The firmware's own launch: read status clear, seed the read data and
+    /// return route, write route and data, then the parameters last.
+    fn launch(d: &BedrockLb, route: u64, params: u64, data: u64) -> u64 {
+        d.read64(reg::VECTOR_STATUS_ALIAS);
+        d.write64(reg::REGISTER_C030, SENTINEL);
+        d.write64(reg::REGISTER_C028, SENTINEL);
+        d.write64(reg::REGISTER_C008, route);
+        d.write64(reg::REGISTER_C010, data);
+        d.write64(reg::VECTOR_REQUEST, params);
+        d.read64(reg::VECTOR_STATUS).data
+    }
+    fn good_reply(status: u64, params: u64) {
+        assert_eq!(status & VECTOR_VALID, VECTOR_VALID);
+        assert_eq!(status & VECTOR_OVERRUN, 0);
+        assert_eq!(status & 7, params & 1, "bits 2:0 echo the request type");
+        assert_eq!(status & ECHO, params & ECHO);
+    }
+
+    /// Route 0 reads the peer's register, not the launcher's, and a launch
+    /// over an unread reply is an overrun and nothing else.
+    #[test]
+    fn route_zero_reads_the_peer() {
+        let (a, b) = pair();
+        a.write64(reg::PIO_WINDOW, 0xaaaa_0000_aaaa_0000);
+        b.write64(reg::PIO_WINDOW, 0xbbbb_0000_bbbb_0000);
+        let params = 0x60_8000 | (0x1c8 << 40);
+        let status = launch(&a, 0, params, 0);
+        good_reply(status, params);
+        assert_eq!(a.read64(reg::REGISTER_C028).data, 0);
+        assert_eq!(a.read64(reg::REGISTER_C030).data, 0xbbbb_0000_bbbb_0000);
+        let status = launch(&b, 0, params | (0x5a << 32), 0);
+        good_reply(status, params | (0x5a << 32));
+        assert_eq!(b.read64(reg::REGISTER_C030).data, 0xaaaa_0000_aaaa_0000);
+        // Reading status clear returns the reply and clears it.
+        assert_eq!(a.read64(reg::VECTOR_STATUS_ALIAS).data & VECTOR_VALID, VECTOR_VALID);
+        assert_eq!(a.read64(reg::VECTOR_STATUS).data, 0);
+        b.write64(reg::PIO_WINDOW, 0x1234);
+        a.write64(reg::VECTOR_REQUEST, params);
+        a.write64(reg::VECTOR_REQUEST, params);
+        let status = a.read64(reg::VECTOR_STATUS).data;
+        assert_eq!(status & (VECTOR_VALID | VECTOR_OVERRUN), VECTOR_VALID | VECTOR_OVERRUN);
+        // A nonzero write to status leaves the reply, zero clears it.
+        a.write64(reg::VECTOR_STATUS, !0);
+        assert_eq!(a.read64(reg::VECTOR_STATUS).data, status);
+        a.write64(reg::VECTOR_STATUS, 0);
+        assert_eq!(a.read64(reg::VECTOR_STATUS).data, 0);
+    }
+
+    /// The node-number paths the master uses on a peer: a vector write of
+    /// scratch 1 and a read-modify-write of the revision word. Each changes
+    /// the peer and not the launcher.
+    #[test]
+    fn route_zero_writes_the_peer() {
+        let (a, b) = pair();
+        a.write64(reg::PIO_WINDOW + 8, 0x40_0000_0fff);
+        b.write64(reg::PIO_WINDOW + 8, 0x40_0000_0fff);
+        let params = 0x60_8008 | (0x7b << 40) | (0x11 << 32) | 1;
+        good_reply(launch(&a, 0, params, 0x40_0000_0001), params);
+        assert_eq!(b.read64(reg::PIO_WINDOW + 8).data, 0x40_0000_0001);
+        assert_eq!(a.read64(reg::PIO_WINDOW + 8).data, 0x40_0000_0fff);
+        assert_eq!(a.read64(reg::REGISTER_C030).data, SENTINEL, "a write leaves the read data");
+        let read = 0x60_0000 | (0x1c8 << 40);
+        good_reply(launch(&a, 0, read, 0), read);
+        let revision = a.read64(reg::REGISTER_C030).data;
+        assert_eq!(revision, ID);
+        let write = 0x60_0000 | (0x7b << 40) | 1;
+        good_reply(launch(&a, 0, write, revision | (1 << 32)), write);
+        assert_eq!(b.node_number(), 1);
+        assert_eq!(a.node_number(), 0);
+        assert_eq!(b.read64(reg::NODE_REGION).data, ID | (1 << 32));
+    }
+
+    /// A nonzero route, an offset the peer refuses, a request type that is
+    /// neither read nor write and a port with no cable all latch no reply.
+    #[test]
+    fn unroutable_launches_latch_nothing() {
+        let (a, b) = pair();
+        b.write64(reg::PIO_WINDOW + 8, 0x0fff);
+        let write = 0x60_8008 | (0x7b << 40) | 1;
+        assert_eq!(launch(&a, 1, write, 1), 0);
+        assert_eq!(b.read64(reg::PIO_WINDOW + 8).data, 0x0fff);
+        let nothing_there = 0xff_fff8 | (0x1c8 << 40);
+        assert_eq!(launch(&a, 0, nothing_there, 0), 0);
+        assert_eq!(a.read64(reg::REGISTER_C028).data, SENTINEL);
+        assert_eq!(a.read64(reg::REGISTER_C030).data, SENTINEL);
+        assert_eq!(launch(&a, 0, 0x60_8008 | 2, 0), 0, "type 2 is refused");
+        let lone = BedrockLb::new(Arc::new(|| 0));
+        assert_eq!(launch(&lone, 0, 0x60_8008 | (0x1c8 << 40), 0), 0);
+        a.connect_vector(Arc::new(LbPeer(b.clone(), false)));
+        assert_eq!(launch(&a, 0, 0x60_8008 | (0x1c8 << 40), 0), 0, "a downed link answers nothing");
     }
 }
