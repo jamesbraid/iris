@@ -927,12 +927,19 @@ fn nvram_survives_and_decodes_maces_spacing() {
 /// CLRINT, SCBPTR and the SCB array, which is exactly right.
 #[test]
 fn the_bridge_swaps_byte_lanes_for_a_little_endian_device() {
-    assert_eq!(MacePci::lane_swizzle(0x84, 1), 0x87, "HCNTRL");
-    assert_eq!(MacePci::lane_swizzle(0x91, 1), 0x92, "CLRINT");
-    assert_eq!(MacePci::lane_swizzle(0x93, 1), 0x90, "SCBPTR");
-    assert_eq!(MacePci::lane_swizzle(0xbc, 1), 0xbf, "last byte of the SCB");
-    assert_eq!(MacePci::lane_swizzle(0x84, 2), 0x86, "16-bit lanes swap in pairs");
-    assert_eq!(MacePci::lane_swizzle(0x84, 4), 0x84, "a whole word needs no swap");
+    use crate::pci::testing::TestCard;
+    use crate::pci::Bar;
+    let reached = |off: u32, size: usize| {
+        let card = TestCard::new([Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused], 0);
+        crate::pci_host::Lanes::word_values(4).read(&*card, 0, off, size);
+        card.calls()[0].0
+    };
+    assert_eq!(reached(0x84, 1), 0x87, "HCNTRL");
+    assert_eq!(reached(0x91, 1), 0x92, "CLRINT");
+    assert_eq!(reached(0x93, 1), 0x90, "SCBPTR");
+    assert_eq!(reached(0xbc, 1), 0xbf, "last byte of the SCB");
+    assert_eq!(reached(0x84, 2), 0x86, "16-bit lanes swap in pairs");
+    assert_eq!(reached(0x84, 4), 0x84, "a whole word needs no swap");
 }
 
 /// Every O2 device answers the monitor through the bus: its command is

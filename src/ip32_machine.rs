@@ -656,7 +656,8 @@ impl O2Machine {
         }
         if m.schema_version < SCHEMA_VERSION {
             return Err(format!(
-                "snapshot {name} is schema {}; the O2's UART state changed shape in schema 5, so it cannot be restored",
+                "snapshot {name} is schema {}, this build reads schema {SCHEMA_VERSION}: the PCI bus state moved \
+                 into the bus in schema 6 (and the UARTs' in 5), so it cannot be restored",
                 m.schema_version
             ));
         }
@@ -1218,6 +1219,28 @@ mod device_tests {
             // Put the shared machine back.
             m.bus.phys.write32(word, old);
             m.bus.load_state(&clean).unwrap();
+        });
+    }
+
+    /// A snapshot of an older schema is refused with both versions named, by
+    /// the read that runs before anything is loaded. (Without the refusal
+    /// the v5 MACE layout would load as an empty bus.)
+    #[test]
+    fn old_schema_snapshot_is_refused_before_any_load_state() {
+        o2(|m| {
+            let dir = std::env::temp_dir().join(format!("iris-o2-schema-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let before = std::mem::replace(&mut m.saves, dir.clone());
+            m.write_snapshot("old").unwrap();
+            let path = dir.join("old/snapshot.toml");
+            let manifest = std::fs::read_to_string(&path).unwrap();
+            let line = format!("schema_version = {}", crate::snapshot::SCHEMA_VERSION);
+            assert!(manifest.contains(&line), "{manifest}");
+            std::fs::write(&path, manifest.replace(&line, "schema_version = 5")).unwrap();
+            let e = m.read_snapshot("old").err().expect("an old snapshot is refused");
+            m.saves = before;
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(e.contains("schema 5") && e.contains(&format!("schema {}", crate::snapshot::SCHEMA_VERSION)) && e.contains("PCI bus state"), "{e}");
         });
     }
 
