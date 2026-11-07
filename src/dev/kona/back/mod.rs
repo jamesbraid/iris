@@ -12,10 +12,13 @@
 //! - `pack`: the host and bus pixel formats and their packers.
 //! - `bound`: the most words a pixel's record may take, from the host's own
 //!   budget arithmetic.
+//! - `bench` (an ignored test): the fill rate of the integer drawing path.
 //! - `census`, `replay` (tests only): the jobs a command stream sends the back
 //!   end, and the replay of a recorded stream into a board.
 
 mod bound;
+#[cfg(test)]
+mod bench;
 pub mod pack;
 pub mod raster;
 pub mod store;
