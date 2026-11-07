@@ -136,6 +136,11 @@ impl Combiner {
         routed.then(|| IrqLine::new(self.clone(), dev as u32 * 4 + pin as u32 - 1))
     }
 
+    /// The output device `dev`'s pin (1 = INTA) is routed to.
+    pub(super) fn output(&self, dev: u8, pin: u8) -> Option<u8> {
+        *self.route.get(dev as usize)?.get(pin as usize - 1)?
+    }
+
     pub(super) fn board_irq_line(self: &Arc<Self>, w: BoardIrq) -> IrqLine {
         assert!((w.0 as usize) < self.board_irq_out.len(), "pci: no board IRQ {}", w.0);
         IrqLine::new(self.clone(), PIN_LINES + w.0 as u32)
@@ -226,6 +231,24 @@ impl Combiner {
     pub(super) fn redrive(&self) {
         for o in 0..self.out.len() {
             self.kick(o, FORCE);
+        }
+    }
+
+    /// Each output's (dirty, fell, last), for a test to compare.
+    #[cfg(test)]
+    pub(super) fn flags(&self) -> Vec<(bool, bool, bool)> {
+        self.out.iter().map(|m| {
+            let s = m.state.load(SeqCst);
+            (s & DIRTY != 0, s & FELL != 0, m.last.load(SeqCst))
+        }).collect()
+    }
+
+    /// Latch every output's `FELL` and `DIRTY`, as a delivery interrupted
+    /// mid-flight would leave them.
+    #[cfg(test)]
+    pub(super) fn out_force_flags(&self) {
+        for m in self.out.iter() {
+            m.state.fetch_or(FELL | DIRTY, SeqCst);
         }
     }
 
