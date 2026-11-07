@@ -1241,7 +1241,7 @@ impl Core {
     /// How many bytes a command is declared to move, and whether they go to
     /// the device. `block` is the target's logical block size. An opcode
     /// with no rule here moves nothing; the target answers it as SCSI says.
-    fn cdb_transfer(cdb: &[u8], block: usize) -> (usize, bool) {
+    pub(crate) fn cdb_transfer(cdb: &[u8], block: usize) -> (usize, bool) {
         let at = |i: usize| cdb.get(i).copied().unwrap_or(0) as usize;
         let be16 = |i: usize| (at(i) << 8) | at(i + 1);
         let be24 = |i: usize| (at(i) << 16) | (at(i + 1) << 8) | at(i + 2);
@@ -1274,7 +1274,7 @@ impl Core {
     /// so only that much is offered and a longer buffer keeps its tail. The
     /// whole named length is still counted: the residual is measured against
     /// it.
-    fn add_segment(segs: &mut Vec<(u64, u32)>, described: &mut u64, max: u64, base: u64, len: u32) {
+    pub(crate) fn add_segment(segs: &mut Vec<(u64, u32)>, described: &mut u64, max: u64, base: u64, len: u32) {
         let room = max.saturating_sub(*described);
         let placed = (len as u64).min(room);
         *described += len as u64;
