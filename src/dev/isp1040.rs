@@ -196,7 +196,7 @@ pub mod mbox {
     pub const PARAM_ERROR: u16 = 0x4006;
 }
 
-const RAM_WORDS: usize = 0x10000;
+pub(crate) const RAM_WORDS: usize = 0x10000;
 /// The command budget the adapter announces in its firmware status.
 pub const MAX_REQUESTS: u16 = 512;
 pub(crate) const FW_VERSION: [u16; 3] = [1, 0, 0];
@@ -2373,4 +2373,4 @@ impl Isp1040 {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
