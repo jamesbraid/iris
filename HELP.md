@@ -622,8 +622,9 @@ scsi_deferred_int = true        # needed by OpenBSD/NetBSD; see --no-scsi-deferr
 
 # Bare-metal testing (cpu-tests/, bench/)
 # load_elf = "test.elf"
-# test_device = false
-# test_device_dump = "iris-testdev-dump.json"
+# [[test_device]]           # the bare-metal test device in GIO slot 0
+# at = "gio0"
+# dump = "iris-testdev-dump.json"
 # cheritest_dump_hook = false
 
 # ── Machine ──────────────────────────────────────────────────────────────────
@@ -650,36 +651,36 @@ resolution = "guest"        # or "1024x768", "1280x960", "1280x1024"
 # days    = -2              # days/hours/minutes/seconds add as plain time
 # hours   = +3
 
-# ── SCSI ─────────────────────────────────────────────────────────────────────
+# ── Disks and devices ────────────────────────────────────────────────────────
 
-# Valid IDs: 1–7 (1–15 on the Octane). For a hard disk, set cdrom = false. On a machine with two
-# controllers (Indigo2, O2) [scsi.N] is id N on controller 0 and [scsi.16+N]
-# is id N on controller 1, so one id can be used on both; `controller = 1`
-# in a [scsi.N] table does the same for that one device.
-[scsi.1]
+# Each [[hdd]], [[cdrom]] and [[daynaport]] goes at a location (docs/devices.md);
+# `iris --list-slots` lists the places the machine has. Targets are 1–7 (1–15 on the
+# Octane). The first controller is hpc3.0 on the Indy and Indigo2, pci0.1 on the O2 and
+# xio15.pci0.0 on the Octane; the second is hpc3.1, pci0.2 and xio15.pci0.1.
+[[hdd]]
+at = "hpc3.0.t1"
 path    = "scsi1.raw"       # raw or .chd image
-cdrom   = false
 overlay = false             # true = copy-on-write overlay in scsi1.raw.overlay
 # write_cache = true        # the disk's write cache (default true). true: a write completes once the host has it and a sync follows within ~5 s, so a host crash or
                             # power cut can lose the last ~5 s of writes. false: every write is stored on the host's disk before it completes, as on SGI's drives (slower). See STORAGE.md.
-# controller = 0            # Indigo2 and O2 have two: 0 or 1 (the O2's 1 is its external bus); or write [scsi.17]
 
 # A CD-ROM. path may be empty to start with an empty tray.
-[scsi.4]
+[[cdrom]]
+at = "hpc3.0.t4"
 path  = "cdrom4.iso"
-cdrom = true
 # discs = ["irix65.iso", "extras.iso", "patches.iso"]   # changer; "scsi eject 4" cycles
 
 # Scratch volume for file injection without networking (see README).
-# [scsi.2]
+# [[hdd]]
+# at = "hpc3.0.t2"
 # path    = "scratch.raw"
 # scratch = true
 # size_mb = 64
 
 # DaynaPort SCSI/Link — Ethernet over the SCSI bus. Needs a guest driver
 # (IRIX: irixdayna -> dp0). See docs/daynaport.md.
-# [scsi.3]
-# kind   = "daynaport"      # "disk" (default) | "cdrom" | "daynaport"
+# [[daynaport]]
+# at = "hpc3.0.t3"
 # mac    = "00:80:19:12:34:56"
 # subnet = "192.168.10.0/24"
 
@@ -715,8 +716,8 @@ camera_index = 0            # host camera, source = "camera" only
 prebuf_ms = 20
 # cpal_buffer_frames = 512  # unset: the host's default (PulseAudio: 512)
 
-# [ultra64]                 # N64 dev board
-# enabled = true
+# [[ultra64]]               # N64 dev board
+# at = "gio0"
 
 # ── Host tuning and debugging ────────────────────────────────────────────────
 
@@ -755,10 +756,10 @@ kernel step on each other's block size setting.
 | 7  | Additional disk |
 
 The controller itself is ID 0. On the Indigo2 and the O2, which have two
-controllers, `[scsi.N]` keys 1–7 are ids on controller 0 and keys 17–23 are
-ids 1–7 on controller 1 (16 slots per controller); `controller = 1` in a low
-key's table is the older spelling and still works. The monitor's `scsi1`
-addresses the second controller.
+controllers, the second one is `hpc3.1` (Indigo2) or `pci0.2` (O2), so one id
+can be used on both. The older `[scsi.N]` tables still load and are rewritten
+with a notice (docs/devices.md). The monitor's `scsi1` addresses the second
+controller.
 
 ---
 
@@ -806,9 +807,11 @@ Configuration
   --clock-fixed-mhz <MHZ>     CP0 Count frequency (default: half the part's clock, 75 for an Indy R4400)
 
 Storage
-  --scsi1/2/3/7 <FILE>        Hard disk image at that SCSI ID
-  --cdrom4/5/6 <FILE>         CD-ROM primary disc at that SCSI ID
+  --device <TYPE@LOCATION[,k=v]...>  Place a device, as a [[TYPE]] table does, e.g. --device hdd@hpc3.0.t1,path=irix.img
+  --scsi1/2/3/7 <FILE>        Hard disk image at that target of the first controller
+  --cdrom4/5/6 <FILE>         CD-ROM primary disc at that target of the first controller
   --cdrom4/5/6-extra <ISO>    Additional changer disc (repeatable)
+  --list-slots                Print the places the machine has and what is in them, then exit
   --no-write-cache            Turn every hard disk's write cache off (write_cache = false): slower, but a host crash loses no completed write
   --no-scsi-deferred-int      Disable deferred SCSI status interrupts
 
@@ -932,11 +935,11 @@ development board IPC bridge.  The IRIS-compatible fork lives at:
 1. Enable the dev board in `iris.toml` and start IRIS:
 
    ```toml
-   [ultra64]
-   enabled = true
+   [[ultra64]]
+   at = "gio0"
    ```
 
-   The board is built into every IRIS binary; without `enabled = true` no
+   The board is built into every IRIS binary; without the entry no
    board appears in GIO slot 0.
 
 2. Build and run the N64 emulator (it can be started at any time — it will

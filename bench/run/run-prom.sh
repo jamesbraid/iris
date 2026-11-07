@@ -35,11 +35,9 @@ no_audio = true
 [machine]
 profile = "indy_ip24"
 
-[scsi]
-
-[scsi.2]
-path  = "build/irisbench.img"
-cdrom = false
+[[hdd]]
+at = "hpc3.0.t2"
+path = "build/irisbench.img"
 TOML
 
 rm -f "$SOCK" "$LOG"

@@ -672,6 +672,7 @@ impl Ip22Machine {
         monitor.register_device(devlog.clone());
         monitor.register_device(Arc::new(crate::cpu::cpu_monitor::CpuMonitor::new(vec![cpu.clone()])));
         devices.register_monitor(&monitor);
+        monitor.register_device(topology.clone());
         monitor.register_device(phys.clone());
         monitor.register_device(Arc::new(board.vino.clone()));
         #[cfg(feature = "perfetto")]
@@ -2280,5 +2281,49 @@ mod placement_tests {
             assert!(port.bus().has_target(6));
             assert!(m.disks().records().iter().all(|r| r.at != loc("hpc3.0.t6")), "a DaynaPort has no image");
         });
+    }
+}
+
+/// The monitor's `slots` command and the listing a machine gives.
+#[cfg(test)]
+mod slots_tests {
+    use super::*;
+    use crate::traits::Device;
+
+    fn listing(profile: MachineProfile) -> Vec<String> {
+        let mut cfg = MachineConfig::default();
+        cfg.machine.profile = profile;
+        cfg.with_default_media(&Topology::fill_for(&cfg), false);
+        Topology::probe(&cfg).unwrap().lines()
+    }
+
+    #[test]
+    fn indy_listing_has_hpc3_gio_and_gfx_rows() {
+        let lines = listing(MachineProfile::IndyIp24).join("\n");
+        for want in ["hpc3 ", "hpc3.0 ", "hpc3.0.t1 ", "hpc3.0.t4 ", "gio0 ", "gio1 ", "gfx "] {
+            assert!(lines.lines().any(|l| l.starts_with(want)), "{want:?} in\n{lines}");
+        }
+        assert!(!lines.contains("hpc3.1"), "the Indy has one controller");
+        assert!(lines.contains("hdd scsi1.raw") && lines.contains("cdrom cdrom4.iso"), "{lines}");
+        assert!(lines.lines().any(|l| l.starts_with("hpc3.0.t2-t3") && l.contains("cdrom daynaport hdd")), "{lines}");
+    }
+
+    #[test]
+    fn the_monitor_slots_command_prints_the_live_map() {
+        let mut cfg = MachineConfig::default();
+        let t = Topology::fill_for(&cfg);
+        cfg.with_default_media(&t, false);
+        let live = Topology::probe(&cfg).unwrap();
+        assert_eq!(live.register_commands()[0].0, "slots");
+        let buf = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        struct W(std::sync::Arc<parking_lot::Mutex<Vec<u8>>>);
+        impl std::io::Write for W {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { self.0.lock().extend_from_slice(b); Ok(b.len()) }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        live.execute_command("slots", &[], Box::new(W(buf.clone()))).unwrap();
+        let out = String::from_utf8(buf.lock().clone()).unwrap();
+        assert_eq!(out.lines().collect::<Vec<_>>(), live.lines());
+        assert!(live.execute_command("nothing", &[], Box::new(W(buf))).is_err());
     }
 }

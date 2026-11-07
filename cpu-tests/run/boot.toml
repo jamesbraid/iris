@@ -11,8 +11,6 @@ no_audio = true
 [machine]
 profile = "indy_ip24"
 
-[scsi]
-
-[scsi.2]
+[[hdd]]
+at = "hpc3.0.t2"
 path  = "build/cputest.img"
-cdrom = false

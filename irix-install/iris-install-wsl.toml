@@ -4,13 +4,13 @@ no_audio = false
 banks    = [128, 128, 0, 0]
 nvram    = "irix-install/nvram-irix65.bin"
 
-[scsi.1]
+[[hdd]]
+at = "hpc3.0.t1"
 path   = "/mnt/c/Users/chron/CURSOR-PROJECTS/iris-main/irix-install/scsi1.raw"
-cdrom  = false
 
-[scsi.4]
+[[cdrom]]
+at = "hpc3.0.t4"
 path  = "/mnt/c/Users/chron/Downloads/sgi-irix-6.5/sgi-irix-6.5-installation-tools-june-1998_812-0758-002.iso"
-cdrom = true
 discs = [
   "/mnt/c/Users/chron/Downloads/sgi-irix-6.5/sgi-irix-6.5-installation-tools-june-1998_812-0758-002.iso",
   "/mnt/c/Users/chron/Downloads/sgi-irix-6.5/sgi-irix-6.5-foundation-1_812-0759-002.iso",

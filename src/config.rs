@@ -2087,6 +2087,22 @@ impl MachineConfig {
         self.machine.cpu = Some(part.name());
     }
 
+    /// Print the places this machine has and what the config puts in them
+    /// (`--list-slots`); the exit status, 1 with the claim's text when a
+    /// placement does not fit.
+    fn print_slots(&self) -> i32 {
+        match Topology::probe(self) {
+            Ok(t) => {
+                println!("{}", t.lines().join("\n"));
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        }
+    }
+
     /// Parse a configuration file's text, refusing the keys serde would have
     /// refused before unknown top-level keys were collected in `extra`. The
     /// old settings that [`MachineConfig::migrate`] rewrites are let through.
@@ -2709,6 +2725,11 @@ pub struct Cli {
     #[arg(long = "test-device", default_value_t = false)]
     pub test_device: bool,
 
+    /// Print the places this machine has and what is in them, then exit.
+    /// Applies `--machine` and `--config`.
+    #[arg(long = "list-slots", default_value_t = false)]
+    pub list_slots: bool,
+
     /// Where the test device writes its machine-state dump.
     #[arg(long = "test-device-dump", value_name = "FILE")]
     pub test_device_dump: Option<String>,
@@ -3102,13 +3123,14 @@ pub fn load_config() -> (MachineConfig, u32) {
         std::process::exit(0);
     }
 
-    if cli.validate {
+    if cli.validate || cli.list_slots {
         let toml_cfg = MachineConfig::try_load(&cli.config).unwrap_or_else(|e| {
             eprintln!("Configuration error: {e}");
             std::process::exit(1);
         });
         let cfg = cli.resolve(toml_cfg);
-        std::process::exit(crate::validate_config::report(&cli.config, &cfg));
+        let status = if cli.list_slots { cfg.print_slots() } else { crate::validate_config::report(&cli.config, &cfg) };
+        std::process::exit(status);
     }
 
     let toml_cfg = MachineConfig::load_toml(&cli.config);
@@ -4225,6 +4247,48 @@ mod export_tests {
         let mut again = cfg.clone();
         assert!(again.migrate(&Topology::fill_for(&again)).unwrap().is_empty());
         assert_eq!(again.placements().unwrap(), cfg.placements().unwrap());
+    }
+
+    /// `--list-slots` exits 0 on a config that fits and 1 on one that does not.
+    #[test]
+    fn list_slots_exits_0_and_a_bad_placement_exits_1() {
+        let mut cfg = MachineConfig::default();
+        assert_eq!(cfg.print_slots(), 0);
+        cfg.place("hdd", "hpc3.0.t9".parse().unwrap(), toml::from_str("path = \"x\"").unwrap());
+        assert_eq!(cfg.print_slots(), 1);
+        assert!(Cli::parse_from(["iris", "--list-slots"]).list_slots);
+    }
+
+    /// The shipped examples are written in the form the docs describe: no old
+    /// settings left for migration to rewrite, and each one validates.
+    #[test]
+    fn shipped_examples_use_the_new_form_and_validate() {
+        let files: &[(&str, &str)] = &[
+            ("iris.toml", include_str!("../iris.toml")),
+            ("iris-irix53.toml", include_str!("../iris-irix53.toml")),
+            ("iris-irix65.toml", include_str!("../iris-irix65.toml")),
+            ("octane.toml.example", include_str!("../octane.toml.example")),
+            ("ip28.toml.example", include_str!("../ip28.toml.example")),
+            ("irix-install/iris-indigo2-smoke-ci.toml", include_str!("../irix-install/iris-indigo2-smoke-ci.toml")),
+            ("irix-install/iris-install-wsl.toml", include_str!("../irix-install/iris-install-wsl.toml")),
+            ("irix-install/iris-install.toml", include_str!("../irix-install/iris-install.toml")),
+            ("irix-install/iris-smoke-ci.toml", include_str!("../irix-install/iris-smoke-ci.toml")),
+            ("irix-install/iris-windows-384.toml", include_str!("../irix-install/iris-windows-384.toml")),
+            ("irix-install/iris-windows-safe.toml", include_str!("../irix-install/iris-windows-safe.toml")),
+            ("irix-install/iris-windows.toml", include_str!("../irix-install/iris-windows.toml")),
+            ("irix-install/iris-wsl.toml", include_str!("../irix-install/iris-wsl.toml")),
+            ("cpu-tests/run/boot.toml", include_str!("../cpu-tests/run/boot.toml")),
+            ("cpu-tests/run/bare.toml", include_str!("../cpu-tests/run/bare.toml")),
+            ("bench/run/bare.toml", include_str!("../bench/run/bare.toml")),
+        ];
+        for (name, text) in files {
+            let mut cfg = MachineConfig::from_toml(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let notices = cfg.migrate(&Topology::fill_for(&cfg)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(notices.is_empty(), "{name} still has old settings: {notices:?}");
+            // The Windows-path examples name files that are not here; the
+            // placements still have to claim their places.
+            Topology::probe(&cfg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
     }
 
     #[test]
