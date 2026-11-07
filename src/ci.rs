@@ -20,7 +20,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::location::Location;
+use crate::location::{Hop, Location};
 use crate::workstation::{MachineSlot, Workstation};
 use crate::gfx_display::GfxDisplay;
 use crate::dev::serial_host::CiSerialBackend;
@@ -339,10 +339,12 @@ fn drive_arg(m: &dyn Workstation, args: &Value) -> Result<Location, String> {
 fn cmd_cdrom_eject(server: &CiServer, args: &Value) -> Response {
     let result = server.with_machine_result(|m| {
         let at = drive_arg(m, args)?;
-        m.eject_disc(&at).map(|disc| (at, disc))
+        let (changer, id) = m.disks().drive(&at)?;
+        changer.eject_disc(id).map(|disc| (at, disc))
     });
     match result {
-        Ok((at, path)) => Response::data(serde_json::json!({ "at": at.to_string(), "new_disc": path })),
+        // `id` stays in the reply for scripts that read it.
+        Ok((at, path)) => Response::data(serde_json::json!({ "id": at.target(), "at": at.to_string(), "new_disc": path })),
         Err(e) => Response::err(format!("cdrom-eject: {}", e)),
     }
 }
@@ -354,22 +356,23 @@ fn cmd_cdrom_load(server: &CiServer, args: &Value) -> Response {
     };
     let result = server.with_machine_result(|m| {
         let at = drive_arg(m, args)?;
-        m.load_disc(&at, path.clone()).map(|disc| (at, disc))
+        let (changer, id) = m.disks().drive(&at)?;
+        changer.load_disc(id, path.clone()).map(|disc| (at, disc))
     });
     match result {
-        Ok((at, loaded)) => Response::data(serde_json::json!({ "at": at.to_string(), "disc": loaded })),
+        Ok((at, loaded)) => Response::data(serde_json::json!({ "id": at.target(), "at": at.to_string(), "disc": loaded })),
         Err(e) => Response::err(format!("cdrom-load: {}", e)),
     }
 }
 
-/// Which disks to fold: absent, null or "all" mean every disk, a number is a
-/// target on the first controller, anything else a location.
-fn chd_selector(m: &dyn Workstation, v: Option<&Value>) -> Result<Option<Location>, String> {
+/// Which disks to fold: absent, null or "all" mean every disk, a number is
+/// that target id on every controller, anything else a location.
+fn chd_selector(v: Option<&Value>) -> Result<Option<Location>, String> {
     match v {
         None | Some(Value::Null) => Ok(None),
         Some(v) if v.as_str() == Some("all") => Ok(None),
         Some(v) => match (v.as_u64(), v.as_str()) {
-            (Some(n), _) if n < 16 => m.legacy_target(n as u8).map(Some).ok_or_else(|| format!("no target {n} on this machine")),
+            (Some(n), _) if n < 16 => Ok(Some(Location::root().join(Hop::t(n as u8)))),
             (None, Some(at)) => at.parse::<Location>().map(Some),
             _ => Err(format!("bad disk selector {v} (expected a target id, a location or \"all\")")),
         },
@@ -386,7 +389,7 @@ fn cmd_chd_sync(server: &CiServer, args: &Value) -> Response {
         Err(e) => return Response::err(e),
     }
     let sync = server.with_machine_result(|m| {
-        let only = chd_selector(m, args.get("id")).map_err(|e| std::io::Error::other(e))?;
+        let only = chd_selector(args.get("id")).map_err(|e| std::io::Error::other(e))?;
         m.sync_chd_disks(only.as_ref(), &mut |_, _, _| {}, &|| false)
     });
     match sync {
@@ -401,7 +404,7 @@ fn cmd_quit(server: &CiServer, args: &Value) -> Response {
     let mut synced = serde_json::Value::Null;
     if args.get("sync_chd").is_some() {
         let r = server.with_machine_result(|m| {
-            let only = chd_selector(m, args.get("sync_chd")).map_err(|e| std::io::Error::other(e))?;
+            let only = chd_selector(args.get("sync_chd")).map_err(|e| std::io::Error::other(e))?;
             m.stop();
             m.sync_chd_disks(only.as_ref(), &mut |_, _, _| {}, &|| false)
         });
@@ -1287,14 +1290,12 @@ mod disk_arg_tests {
     /// `all`, absent and null fold everything; a number or a location, one disk.
     #[test]
     fn sync_chd_selector_accepts_all_a_number_and_a_location() {
-        with_shared(Machine::Indy, |m| {
-            let sel = |v: Option<Value>| chd_selector(m, v.as_ref()).map(|o| o.map(|l| l.to_string()));
-            assert_eq!(sel(None), Ok(None));
-            assert_eq!(sel(Some(json!("all"))), Ok(None));
-            assert_eq!(sel(Some(json!(null))), Ok(None));
-            assert_eq!(sel(Some(json!(3))), Ok(Some("hpc3.0.t3".to_string())));
-            assert_eq!(sel(Some(json!("hpc3.0.t2"))), Ok(Some("hpc3.0.t2".to_string())));
-            assert!(sel(Some(json!(99))).is_err() && sel(Some(json!(true))).is_err());
-        });
+        let sel = |v: Option<Value>| chd_selector(v.as_ref()).map(|o| o.map(|l| l.to_string()));
+        assert_eq!(sel(None), Ok(None));
+        assert_eq!(sel(Some(json!("all"))), Ok(None));
+        assert_eq!(sel(Some(json!(null))), Ok(None));
+        assert_eq!(sel(Some(json!(3))), Ok(Some("t3".to_string())), "a bare id names the target on every controller");
+        assert_eq!(sel(Some(json!("hpc3.0.t2"))), Ok(Some("hpc3.0.t2".to_string())));
+        assert!(sel(Some(json!(99))).is_err() && sel(Some(json!(true))).is_err());
     }
 }
