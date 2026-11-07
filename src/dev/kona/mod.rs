@@ -78,6 +78,7 @@ mod tables;
 mod tests;
 
 pub use attach::{FifoLow, HostDma, InterruptPacket, KonaAttach, PacketSender};
+pub use back::store::{PixelStore, WordArray, MAX_WORDS};
 pub use back::{BackendConfig, BoardSet, KonaBackend};
 pub use consts::APERTURE;
 pub use flash::FLASH_SIZE;
