@@ -65,7 +65,7 @@ pub fn config_path(root: &Path, name: &str) -> Result<PathBuf, String> {
 
 pub fn read(path: &Path) -> Result<MachineConfig, String> {
     let text = std::fs::read_to_string(path).map_err(|e| file_error(path, e))?;
-    toml::from_str(&text).map_err(|e| file_error(path, e))
+    MachineConfig::from_toml(&text).map_err(|e| file_error(path, e))
 }
 
 /// A file that couldn't be read or written, as shown to the user.
@@ -115,11 +115,12 @@ pub fn visit_paths(cfg: &mut MachineConfig, mut visit: impl FnMut(&mut String)) 
     if !iris::config::ci_socket_is_tcp(&cfg.ci_socket) {
         visit(&mut cfg.ci_socket);
     }
-    for dev in cfg.scsi.values_mut() {
+    for mut dev in crate::placement_ui::media(cfg) {
         visit(&mut dev.path);
         for disc in &mut dev.discs {
             visit(disc);
         }
+        crate::placement_ui::set_media(cfg, dev);
     }
     if let Some(nfs) = &mut cfg.nfs {
         visit(&mut nfs.shared_dir);
@@ -270,14 +271,15 @@ pub fn migrate(root: &Path, name: &str, cfg: &MachineConfig, old_cwd: &Path) -> 
     // Copy any existing sidecar to the machine's redirect, using its new path
     // spelling for the hash. Keep the original for rollback.
     #[cfg(feature = "appstore")]
-    for (id, dev) in &cfg.scsi {
+    for dev in crate::placement_ui::media(cfg) {
         if !iris::chd_disk::is_chd(&dev.path) {
             continue;
         }
         let source = root.join("chd-diffs").join(diff_name(&dev.path));
+        let moved = crate::placement_ui::media_at(&migrated, &dev.at).map(|m| m.path).unwrap_or_default();
         let dest = dir
             .join("chd-diffs")
-            .join(diff_name(&migrated.scsi[id].path));
+            .join(diff_name(&moved));
         if source.exists() && !dest.exists() {
             std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
             std::fs::copy(source, dest).map_err(|e| e.to_string())?;

@@ -17,6 +17,7 @@ mod netfix;
 mod netplan;
 mod ram;
 mod safe_stop;
+mod placement_ui;
 mod scsi_menu;
 mod serial_console;
 mod settings;
@@ -908,29 +909,31 @@ impl App {
     /// any disc in the changer list exists.
     fn missing_disks(&self) -> Vec<MissingDisk> {
         let mut out = Vec::new();
-        for (&id, dev) in &self.cfg.scsi {
+        for dev in placement_ui::media(&self.cfg) {
             if dev.scratch { continue; }
             // A DaynaPort is a network adapter — no image to be missing.
             if dev.is_daynaport() { continue; }
             // Empty CD-ROM (no path, no changer entries) means "drive present,
             // tray empty" — a valid configured state, not missing.
-            if dev.cdrom && dev.path.is_empty() && dev.discs.is_empty() {
+            if dev.is_cdrom() && dev.path.is_empty() && dev.discs.is_empty() {
                 continue;
             }
             let primary_ok = disk_readable(&dev.path);
             let any_disc_ok = dev.discs.iter().any(|d| disk_readable(d));
-            let present = primary_ok || (dev.cdrom && any_disc_ok);
+            let present = primary_ok || (dev.is_cdrom() && any_disc_ok);
             if !present {
-                out.push(MissingDisk { id, path: dev.path.clone(), cdrom: dev.cdrom });
+                out.push(MissingDisk { id: dev.id(), path: dev.path.clone(), cdrom: dev.is_cdrom() });
             }
         }
-        out.sort_by_key(|m| m.id);
         out
     }
 
     /// Detach the given SCSI IDs from the live config and (optionally) try Start again.
     fn detach_and_start(&mut self, ids: &[u8]) {
-        for id in ids { self.cfg.scsi.remove(id); }
+        for &id in ids {
+            let at = placement_ui::controller_zero_target(&self.cfg, id);
+            placement_ui::remove_media(&mut self.cfg, &at);
+        }
         self.mark_dirty();
         self.start_emulator();
     }
@@ -979,10 +982,11 @@ impl App {
             return Vec::new();
         }
         let mut out = Vec::new();
-        for (&id, dev) in &self.cfg.scsi {
+        for dev in placement_ui::media(&self.cfg) {
+            let id = dev.id();
             // CD-ROM CHDs are read-only (no diff); scratch disks live in the
             // writable container. Only writable HDD CHDs ever get folded.
-            if dev.scratch || dev.cdrom { continue; }
+            if dev.scratch || dev.is_cdrom() || dev.is_daynaport() { continue; }
             if !dev.path.ends_with(".chd") { continue; }
             let absolute = abs_path(&dev.path);
             let Some(parent) = std::path::Path::new(&absolute).parent() else { continue };
@@ -994,7 +998,6 @@ impl App {
                 });
             }
         }
-        out.sort_by_key(|c| c.id);
         out
     }
 
@@ -1016,8 +1019,9 @@ impl App {
         // Snapshot disks that currently have an overlay on disk (cloned so we
         // don't hold a `cfg` borrow while sending worker commands below).
         let mut entries: Vec<(u8, String, bool)> = Vec::new(); // (id, base, is_chd)
-        for (&id, dev) in &self.cfg.scsi {
-            if dev.cdrom || dev.scratch || dev.path.trim().is_empty() {
+        for dev in placement_ui::media(&self.cfg) {
+            let id = dev.id();
+            if dev.is_cdrom() || dev.is_daynaport() || dev.scratch || dev.path.trim().is_empty() {
                 continue;
             }
             let is_chd = iris::chd_disk::is_chd(&dev.path);
@@ -3106,19 +3110,18 @@ impl App {
             }
             ui.label(t!("welcome-drives"));
             ui.vertical(|ui| {
-                let mut ids: Vec<u8> = self.cfg.scsi.keys().copied().collect();
-                ids.sort();
-                if ids.is_empty() {
+                let drives = placement_ui::media(&self.cfg);
+                if drives.is_empty() {
                     ui.label(RichText::new(t!("common-none")).weak());
                 }
-                for id in ids {
-                    let d = &self.cfg.scsi[&id];
+                for d in drives {
+                    let id = d.id();
                     if d.is_daynaport() {
                         ui.label(t!("welcome-drive-daynaport", id = id));
                         continue;
                     }
                     let path = abs_path(&d.path);
-                    ui.label(if d.cdrom {
+                    ui.label(if d.is_cdrom() {
                         t!("welcome-drive-cdrom", id = id, path = &path)
                     } else {
                         t!("welcome-drive-disk", id = id, path = &path)
@@ -3262,12 +3265,10 @@ impl eframe::App for App {
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F12)) {
             if self.emu.is_running() {
                 // Find the first CD-ROM device
-                let cdrom_id = self.cfg.scsi.iter()
-                    .find(|(_, dev)| dev.cdrom)
-                    .map(|(id, _)| *id);
+                let cdrom = placement_ui::media(&self.cfg).into_iter().find(|m| m.is_cdrom());
 
-                if let Some(id) = cdrom_id {
-                    let cur = self.cfg.scsi.get(&id).map(|d| d.path.clone()).unwrap_or_default();
+                if let Some(dev) = cdrom {
+                    let (id, cur) = (dev.id(), dev.path.clone());
                     if let Some(path) = scsi_menu::pick_iso(&t!("main-load-disc-title"), &cur) {
                         self.emu.send(Cmd::LoadDisc { id, path, remount: true });
                     }
@@ -3409,9 +3410,10 @@ impl eframe::App for App {
         self.create_disk.show(ctx);
         if let Some(result) = self.create_disk.take_result() {
             let path_str = result.path.to_string_lossy().into_owned();
-            self.cfg.scsi.insert(result.scsi_id, iris::config::ScsiDeviceConfig {
-                path: path_str.clone(), ..Default::default()
-            });
+            let at = placement_ui::controller_zero_target(&self.cfg, result.scsi_id);
+            let mut disk = placement_ui::Media::new(at, placement_ui::MediaKind::Disk);
+            disk.path = path_str.clone();
+            placement_ui::set_media(&mut self.cfg, disk);
             self.mark_dirty();
             self.toast(t!("toast-disk-created", path = &path_str, id = result.scsi_id));
         }

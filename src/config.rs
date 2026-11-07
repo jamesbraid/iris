@@ -2382,6 +2382,14 @@ impl MachineConfig {
         self.graphics.board.unwrap_or_else(|| GraphicsBoard::default_for(self.machine.profile))
     }
 
+    /// Parse a configuration file's text, refusing the keys serde would have
+    /// refused before unknown top-level keys were collected in `extra`.
+    pub fn from_toml(text: &str) -> Result<Self, String> {
+        let cfg: Self = toml::from_str(text).map_err(|e| e.to_string())?;
+        cfg.check_extra()?;
+        Ok(cfg)
+    }
+
     /// Refuse a top-level key that is not an array of device tables. The
     /// typed fields are checked by serde; this takes over what
     /// `deny_unknown_fields` did for the rest.
