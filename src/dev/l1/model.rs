@@ -41,6 +41,24 @@ pub fn parse_revision(text: &str) -> Result<[u32; 3], String> {
     Ok(rev)
 }
 
+/// The brick on a C-brick's XIO cable. The C-brick's L1 reaches the brick's
+/// own controller through requests addressed to `0x4ffff` and names its
+/// letter in the PROM's I/O interface set-up (request 0xa).
+///
+/// Approximation: this is a stub of the I-brick's own L1. It answers only
+/// the module identity (bay and letter) itself; every other request is
+/// served as the C-brick's, so the I-brick shares the C-brick's revision and
+/// board records instead of holding its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttachedBrick {
+    pub bay: u32,
+    /// The brick type character: 0x49 for an I-brick.
+    pub type_code: u32,
+}
+
+/// The attached-brick destination in a request address, above the task bits.
+const ATTACHED_KEY: u32 = 0x4ffff;
+
 #[derive(Clone, Debug)]
 pub struct L1Config {
     pub rack: u32,
@@ -57,6 +75,23 @@ pub struct L1Config {
     /// Answer the router command-interpreter `brick` request. Only the brick
     /// types in `router_type_name` have a reply.
     pub router: bool,
+    /// A brick on the XIO cable whose controller this one relays to.
+    pub attached: Option<AttachedBrick>,
+    /// Set on a C-brick: the records it holds instead of a Fuel's system board.
+    pub compute_node: Option<ComputeNode>,
+}
+
+/// A C-brick's identity records: the node board at component 0 and the
+/// PIMMs at components 1 and 2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ComputeNode {
+    /// The node's position in the machine, which names its synthetic serials.
+    pub index: u8,
+    /// Bit n set when PIMM n is fitted. Approximation: a one-processor node
+    /// reports one PIMM. The PROM reset the module with two reported and
+    /// one processor running; which count a one-processor C-brick would
+    /// report is not established.
+    pub pimm_mask: u8,
 }
 impl Default for L1Config {
     fn default() -> Self {
@@ -71,6 +106,8 @@ impl Default for L1Config {
             auto_power: true,
             port_speed_first: 0,
             router: false,
+            attached: None,
+            compute_node: None,
         }
     }
 }
@@ -179,12 +216,15 @@ fn ia_text(area: &mut Vec<u8>, text: &str) {
     area.extend_from_slice(text.as_bytes());
 }
 fn board(mac: Option<[u8; 6]>) -> Vec<u8> {
+    board_record("IP34", "EMUN00", "030-1707-003", "-G", mac)
+}
+fn board_record(name: &str, serial: &str, part: &str, revision: &str, mac: Option<[u8; 6]>) -> Vec<u8> {
     let mut b = vec![0; 6];
-    for s in ["SYNTHETIC", "IP34", "EMUN00", "030-1707-003"] {
+    for s in ["SYNTHETIC", name, serial, part] {
         ia_text(&mut b, s);
     }
     b.push(0);
-    ia_text(&mut b, "-G");
+    ia_text(&mut b, revision);
     b.extend_from_slice(&[1, 0]);
     ia_text(&mut b, "00");
     for _ in 0..3 {
@@ -209,6 +249,21 @@ impl State {
         for c in 0..2 {
             records[c][0] = chassis.clone();
             records[c][1] = board(if c == 1 { Some(config.mac) } else { None });
+        }
+        // A C-brick answers for its node board at component 0 and its PIMMs at
+        // 1 and 2 with placeholder parts and marked synthetic serials.
+        if let Some(node) = config.compute_node {
+            records[0][1] = board_record("NODE", &format!("EMUN{:02}", node.index), "NOTOBSERVED0", "00", None);
+            records[1] = std::array::from_fn(|_| Vec::new());
+            for pimm in 0..2u8 {
+                if node.pimm_mask & (1 << pimm) != 0 {
+                    let component = 1 + pimm as usize;
+                    records[component][0] = chassis.clone();
+                    records[component][1] = board_record(
+                        "PIMM", &format!("EMUD{:02}", node.index * 2 + pimm), "NOTOBSERVED0", "00", None,
+                    );
+                }
+            }
         }
         let powered = config.auto_power;
         let port = config.node_position << 5;
@@ -395,7 +450,8 @@ impl State {
         let address = word(&p[1..]);
         let cmd = u16::from_be_bytes([p[5], p[6]]);
         let key = address >> 12;
-        if key != 0xffff && key != ((self.config.rack << 6) | self.config.bay) {
+        let attached = (key == ATTACHED_KEY).then_some(self.config.attached).flatten();
+        if attached.is_none() && key != 0xffff && key != ((self.config.rack << 6) | self.config.bay) {
             crate::dlog!(LogModule::L1, "L1 unsupported destination {address:#x}");
             self.emit(&[0x20 | channel, 255, 255, 255, 255, 0, 0, 0, 8]);
             return;
@@ -463,7 +519,9 @@ impl State {
             1 => values.push(self.debug),
             2 => values.push((self.config.rack << 6) | self.config.bay),
             3 => {
-                if self.config.type_code == 0 {
+                if let Some(brick) = attached {
+                    values.extend([(self.config.rack << 6) | brick.bay, brick.type_code]);
+                } else if self.config.type_code == 0 {
                     error = -104;
                 } else {
                     values.extend([
@@ -509,7 +567,9 @@ impl State {
                 field_count = 1;
             }
             9 => values.push(self.partition),
-            0xa => values.extend([self.config.port_speed_first, 0]),
+            // The PROM's I/O interface set-up: the port-speed word, and the
+            // letter of the brick on the XIO cable.
+            0xa => values.extend([self.config.port_speed_first, self.config.attached.map_or(0, |brick| brick.type_code)]),
             0xb => values.push(self.two_bit),
             0xc => values.extend([0; 8]),
             0xd => values.extend([0; 4]),

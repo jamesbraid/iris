@@ -600,3 +600,52 @@ fn the_router_reply_reports_rack_slot_partition_type_and_serial() {
          serial:, source: OTHER\n\n",
     );
 }
+
+fn cbrick() -> L1 {
+    L1::new(L1Config {
+        bay: 4,
+        type_code: 0x43,
+        brick_serial: Some("EMUN00".into()),
+        attached: Some(AttachedBrick { bay: 14, type_code: 0x49 }),
+        compute_node: Some(ComputeNode { index: 0, pimm_mask: 1 }),
+        ..Default::default()
+    })
+    .unwrap()
+}
+
+/// A C-brick names itself, and answers for the I-brick on its XIO cable
+/// when a request is addressed there; the PROM's I/O set-up names the
+/// I-brick's letter and a 400 MHz link.
+#[test]
+fn a_c_brick_reports_itself_and_relays_to_its_i_brick() {
+    let l1 = cbrick();
+    assert_eq!(request(&l1, 3, &[], 0), integer_reply(&[(1 << 6) | 4, 0x43]));
+    assert_eq!(request(&l1, 0xa, &[], 0), integer_reply(&[0, 0x49]));
+    let attached = |command: u16| {
+        send(&l1, &encode(&[0x10, 0x4f, 0xff, 0xf0, 6, (command >> 8) as u8, command as u8, 0]));
+        drain(&l1)
+    };
+    assert_eq!(attached(3), integer_reply(&[(1 << 6) | 14, 0x49]));
+    // A brick with nothing on the cable refuses the attached form.
+    let lone = L1::new(Default::default()).unwrap();
+    send(&lone, &encode(&[0x10, 0x4f, 0xff, 0xf0, 6, 0, 3, 0]));
+    assert_eq!(drain(&lone), encode(&[0x30, 255, 255, 255, 255, 0, 0, 0, 8]));
+}
+
+/// The node board is component 0 and the PIMM mask names the fitted PIMMs,
+/// each with a checksummed record carrying its own synthetic serial.
+#[test]
+fn a_c_brick_holds_a_node_board_and_the_fitted_pimms() {
+    let l1 = cbrick();
+    let node = l1.record(0, 2).unwrap();
+    for text in [b"NODE".as_slice(), b"EMUN00", b"NOTOBSERVED0"] {
+        assert!(node.windows(text.len()).any(|x| x == text));
+    }
+    let pimm = l1.record(1, 2).unwrap();
+    assert!(pimm.windows(4).any(|x| x == b"PIMM"));
+    assert!(pimm.windows(6).any(|x| x == b"EMUD00"));
+    for board in [&node, &pimm] {
+        assert_eq!(board.iter().fold(0u8, |s, x| s.wrapping_add(*x)), 0);
+    }
+    assert!(l1.record(2, 2).is_none());
+}
