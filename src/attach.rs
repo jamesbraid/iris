@@ -170,11 +170,12 @@ pub fn attach_device(p: &Placement, cfg: &MachineConfig, ctx: Option<&Ctx>, topo
     Ok(())
 }
 
-/// Place every `[[<device>]]` entry. A card comes before what sits on it
-/// (depth), and toml tables are key-sorted so the order across device types
-/// is by name, then by position in the array.
-pub fn attach_devices(cfg: &MachineConfig, ctx: Option<&Ctx>, topo: &Topology) -> Result<(), String> {
-    let mut all = cfg.placements()?;
+/// Place every entry of `placements` (the config's `[[<device>]]` arrays). A
+/// card comes before what sits on it (depth); the list arrives key-sorted,
+/// because toml tables are, so the order across device types is by name, then
+/// by position in the array.
+pub fn attach_devices(placements: &[Placement], cfg: &MachineConfig, ctx: Option<&Ctx>, topo: &Topology) -> Result<(), String> {
+    let mut all = placements.to_vec();
     all.sort_by_key(|p| p.at.depth());
     for p in &all {
         attach_device(p, cfg, ctx, topo)?;
@@ -342,7 +343,7 @@ mod tests {
         cfg.place("test_widget", loc("gio1"), opts("ord-b"));
         cfg.place("test_widget", loc("gio0"), opts("ord-c"));
         cfg.place("test_brings", loc("pci0.3"), opts("ord-a"));
-        ctx_run(|ctx| attach_devices(&cfg, Some(ctx), &t)).unwrap();
+        ctx_run(|ctx| attach_devices(&cfg.placements().unwrap(), &cfg, Some(ctx), &t)).unwrap();
         let got: Vec<String> = ORDER.lock().iter().filter(|l| l.starts_with("ord-")).cloned().collect();
         assert_eq!(got, ["ord-b", "ord-c", "ord-a"]);
     }

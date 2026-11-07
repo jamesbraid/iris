@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
+use crate::topology::Topology;
 use crate::config::{MachineConfig, MachineProfile};
 use crate::cpu::parts::{self, Part};
 use crate::cpu::mips_core::CyclesPtr;
@@ -137,6 +138,8 @@ pub struct O2Machine {
     pub(crate) control: Control,
     devices: Devices,
     disks: Arc<Disks>,
+    /// The places the machine has; the rows are filled in a later commit.
+    topology: Topology,
     /// Where snapshots live: `saves/<name>/` under the working directory.
     saves: std::path::PathBuf,
     /// The batch hook's place in the boot (see [`BootState`]).
@@ -351,6 +354,7 @@ impl O2Machine {
             control,
             devices,
             disks,
+            topology: Topology::new(),
             saves: "saves".into(),
             boot,
             paused: Arc::new(AtomicBool::new(false)),
@@ -764,6 +768,7 @@ impl Workstation for O2Machine {
     fn cpu_is_running(&self) -> bool { self.cpu.clone().as_device().is_running() }
     fn devices(&self) -> &Devices { &self.devices }
     fn disks(&self) -> &Disks { &self.disks }
+    fn topology(&self) -> &Topology { &self.topology }
     fn control(&self) -> &Control { &self.control }
     fn control_mut(&mut self) -> &mut Control { &mut self.control }
     fn net(&self) -> Option<&GuestNet> { self.net.as_ref() }
@@ -788,7 +793,7 @@ impl Workstation for O2Machine {
     fn save_snapshot(&mut self, name: &str) -> Result<(), String> { O2Machine::save_snapshot(self, name) }
     fn load_snapshot(&mut self, name: &str) -> Result<(), String> { O2Machine::load_snapshot(self, name) }
 
-    fn scratch_path(&self) -> Option<&std::path::Path> { self.scratch_path.as_deref() }
+    fn scratch_path(&self) -> Option<std::path::PathBuf> { self.scratch_path.clone() }
 }
 
 /// GBE's picture, scanned out of RAM about sixty times a second and handed

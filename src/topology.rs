@@ -159,6 +159,12 @@ impl Topology {
         self.rows.lock().iter().find(|(_, r)| r.ctl == Some(n)).map(|(l, _)| l.clone())
     }
 
+    /// The controller number of the row above `at`, for the snapshot's
+    /// controller * 16 + id disk numbers.
+    pub fn ctl_of(&self, at: &Location) -> Option<u8> {
+        self.rows.lock().get(&at.parent()?)?.ctl
+    }
+
     /// Add target rows `t<id>` below `at`, each offering SCSI.
     pub fn scsi(&self, at: &Location, ids: RangeInclusive<u8>, network: bool) {
         for id in ids {

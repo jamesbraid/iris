@@ -15,6 +15,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::topology::Topology;
 use crate::config::{MachineConfig, MachineProfile};
 use crate::cpu::parts::{self, Part};
 use crate::cpu::mips_cache_v2::MipsCache;
@@ -148,6 +149,8 @@ pub struct OctaneMachine {
     pub(crate) control: Control,
     devices: Devices,
     disks: Disks,
+    /// The places the machine has; the rows are filled in a later commit.
+    topology: Topology,
     /// The disks as a snapshot records them, to refuse one taken on others.
     disk_refs: Vec<crate::snapshot::DiskRef>,
     /// The snapshot the CI socket last restored, for `rollback`.
@@ -549,6 +552,7 @@ impl OctaneMachine {
             control,
             devices,
             disks,
+            topology: Topology::new(),
             disk_refs,
             last_restore: None,
             saves: std::path::PathBuf::from("saves"),
@@ -940,6 +944,9 @@ impl Workstation for OctaneMachine {
     fn disks(&self) -> &Disks {
         &self.disks
     }
+    fn topology(&self) -> &Topology {
+        &self.topology
+    }
     fn control(&self) -> &Control {
         &self.control
     }
@@ -1020,8 +1027,8 @@ impl Workstation for OctaneMachine {
         self.ioc3.flush_nvram();
         Ok(self.nvram_path.clone())
     }
-    fn scratch_path(&self) -> Option<&std::path::Path> {
-        self.scratch_path.as_deref()
+    fn scratch_path(&self) -> Option<std::path::PathBuf> {
+        self.scratch_path.clone()
     }
 }
 
