@@ -1420,6 +1420,18 @@ impl Aic7880 {
         self.bus.for_each(|_, d| d.reset_block_size(sgi));
     }
 
+    /// A chip reset clears everything except the program we were given,
+    /// which the driver reloads anyway. A command still running is dropped
+    /// when it finishes. It is not a SCSI bus reset: the targets keep their
+    /// state ([`Self::reset_targets`] is SCSIRSTO).
+    fn chip_reset(st: &mut State) {
+        let notes = std::mem::take(&mut st.notes);
+        let (c, i, o) = (st.total_cmds, st.total_in, st.total_out);
+        let generation = st.generation + 1;
+        *st = State { notes, total_cmds: c, total_in: i, total_out: o, generation, ..Default::default() };
+        Self::note(st, "chip reset".into());
+    }
+
     /// A register write with the state locked. Returns whether the
     /// sequencer may now have work, which the caller hands on once the
     /// lock is released.
@@ -1427,21 +1439,7 @@ impl Aic7880 {
         match off {
             reg::HCNTRL => {
                 if val & hcntrl::CHIPRST != 0 {
-                    // A chip reset clears everything except the program we
-                    // were given, which the driver reloads anyway.
-                    // A command still running is dropped when it finishes.
-                    let notes = std::mem::take(&mut st.notes);
-                    let (c, i, o) = (st.total_cmds, st.total_in, st.total_out);
-                    let generation = st.generation + 1;
-                    **st = State {
-                        notes,
-                        total_cmds: c,
-                        total_in: i,
-                        total_out: o,
-                        generation,
-                        ..Default::default()
-                    };
-                    Self::note(st, "chip reset".into());
+                    Self::chip_reset(st);
                     // The reset bit reads back as an acknowledgement.
                     st.regs[reg::HCNTRL as usize] = hcntrl::CHIPRST;
                     return false;
@@ -1793,6 +1791,31 @@ mod tests {
         let dst = chip();
         dst.load_state(&v1).expect("load_state");
         assert_eq!(v1, dst.save_state(), "Aic7880 save_state mismatch after load_state round-trip");
+    }
+
+    /// The HCNTRL write is the extracted reset plus its acknowledgement, and
+    /// it counts one generation.
+    #[test]
+    fn chip_reset_through_hcntrl_equals_chip_reset_directly() {
+        let dirty = || {
+            let c = chip();
+            c.write(reg::SCBPTR, 3, 1);
+            c.write(reg::SCBARRAY_FIRST + 4, 0xab, 1);
+            c.write(reg::HCNTRL, hcntrl::PAUSE as u32, 1);
+            c
+        };
+        let (a, b) = (dirty(), dirty());
+        let before = a.st.lock().generation;
+        a.write(reg::HCNTRL, hcntrl::CHIPRST as u32, 1);
+        {
+            let mut st = b.st.lock();
+            Aic7880::chip_reset(&mut st);
+            st.regs[reg::HCNTRL as usize] = hcntrl::CHIPRST;
+        }
+        use crate::traits::Saveable;
+        assert_eq!(a.st.lock().generation, before + 1);
+        assert_eq!(a.save_state(), b.save_state());
+        assert_eq!(a.read(reg::SCBARRAY_FIRST + 4, 1), 0, "the SCB is gone");
     }
 
     #[test]
