@@ -10203,8 +10203,12 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> MipsCpu<T, C> {
 
     pub fn register_locks(&self) {
         use crate::locks::register_lock_fn;
-        let ex = self.executor.clone();
-        register_lock_fn("cpu::executor", move || ex.is_locked());
+        // Weakly, like every other entry: the registry lives as long as the
+        // process, and a strong handle kept each machine's executor, and
+        // through it the bus and everything on it, alive after the machine
+        // was dropped.
+        let ex = Arc::downgrade(&self.executor);
+        register_lock_fn("cpu::executor", move || ex.upgrade().is_some_and(|ex| ex.is_locked()));
     }
 
     fn try_lock_executor(&self) -> Result<parking_lot::MutexGuard<'_, MipsExecutor<T, C>>, String> {

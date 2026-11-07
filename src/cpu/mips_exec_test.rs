@@ -6187,6 +6187,21 @@ mod tests {
         crate::cpu::mips_exec::MipsCpu::new(exec)
     }
 
+    /// Registering a CPU's locks must not keep it alive: the registry is
+    /// process-wide, so a strong handle leaked the executor, its bus and
+    /// everything on it for every machine ever built.
+    #[test]
+    fn a_registered_cpu_is_freed_when_it_is_dropped() {
+        let (exec, mem) = create_executor();
+        let cpu = crate::cpu::mips_exec::MipsCpu::new(exec);
+        cpu.register_locks();
+        let bus = Arc::downgrade(&mem);
+        drop(mem);
+        assert!(bus.upgrade().is_some(), "the executor holds its bus while it lives");
+        drop(cpu);
+        assert!(bus.upgrade().is_none(), "the executor, and so its bus, are freed");
+    }
+
     // `lightning` compiles breakpoint checks out of the run loop, so nothing
     // would ever stop the CPU at the breakpoint.
     #[cfg(not(feature = "lightning"))]
