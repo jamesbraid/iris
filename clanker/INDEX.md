@@ -101,6 +101,8 @@ Non-graphics devices: MC/MEMCFG and RAM banks, HPC3, VDMA, EEPROMs and NVRAM, PS
 | Note | Kind | Title |
 |---|---|---|
 | [machine-layout.md](devices/machine-layout.md) | design | How the Indy-family, O2 and Octane share `Devices`, `Disks`, `Control` and `GuestNet`: the cascade rule, one load order, trait defaults, `optional`, the slot-pointer contract, and why tests share machines |
+| [pci-layer-design.md](devices/pci-layer-design.md) | design | The PCI layer: headers change only through the bus, lanes are per-window values, `pci/` imports no card or SCSI; the stale-run and delivery-order hazards, the SeqCst handshake, and what the first attempt got wrong |
+| [pci-layer-open.md](devices/pci-layer-open.md) | open | PCI layer open items: O2 RST# is inferred, Bridge reset-pin wiring, the unmodelled Type 1 aperture, MACE 64-bit PIO |
 | [virtio-serial-design.md](devices/virtio-serial-design.md) | design | virtio-serial: one transport-neutral core, mmio in a GIO slot (IP22/24/28) and pci (IP30); threading, byte order and open items |
 | [empty-gio-slot-reads-bus-error.md](devices/empty-gio-slot-reads-bus-error.md) | rule | Reads of an empty GIO slot end in a bus error (ABORT_EN); all ones made the PROM poll a phantom Newport 200 000 times headless |
 | [audio-test-suite.md](devices/audio-test-suite.md) | howto | The audio test suite (`test/audiotest`): rates x channels x widths through the audio library, playaiff and sfplay, checked against the Octane's capture |

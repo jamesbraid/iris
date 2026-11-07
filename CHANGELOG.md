@@ -13,6 +13,17 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### PCI
+
+- The O2's MACE and the Octane's Bridge share one PCI layer (`src/pci/`,
+  `src/pci_host.rs`, [docs/pci.md](docs/pci.md)): the function table, BAR
+  decode, interrupt combining, byte lanes and RST#. A cold reset of the O2
+  now resets the PCI headers and both onboard AIC-7880s, and a write that
+  lowers Octane Bridge reset pin `n` (Control bit `24 + n`) resets PCI device
+  `n` and logs a warning. Snapshot schema 6: the PCI bus saves
+  its own state, and older O2 and Octane snapshots are refused. The Octane
+  gains the `pci` monitor command.
+
 ### Machine profiles
 
 - An Indy or `indigo2_ip22` no longer accepts an R10000, and `indigo2_ip28`
