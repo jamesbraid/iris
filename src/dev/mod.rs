@@ -78,6 +78,7 @@ pub mod bcm5701;
 pub mod dp83843;
 pub mod ics1890;
 pub mod isp12160;
+pub mod isp2200;
 pub mod l1;
 pub mod ohci;
 pub mod pic;
