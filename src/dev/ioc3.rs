@@ -13,7 +13,7 @@
 //! # Two interrupt outputs
 //!
 //! The chip has two. The Ethernet block drives the PCI interrupt pin
-//! ([`PciFunction::connect_interrupt`]); everything else (serial, PS/2,
+//! (the line in its [`PciFunctionState`]); everything else (serial, PS/2,
 //! parallel, the interrupt-output pulse) is gated by the status and enable
 //! pair at 0x1c/0x20 and drives a second line the board wires to a Bridge
 //! input ([`Ioc3::connect_superio_interrupt`]).
@@ -60,7 +60,7 @@ use crate::dev::w1::sgi::{self, BoardRecord};
 use crate::dev::ns16550::Ns16550;
 use crate::dev::serial_host::SerialBackend;
 use crate::irq::{InterruptController, IrqLine};
-use crate::pci::{Bar, PciFunction, PciConfig, PciDma, PciDmaStatus, PCI_INTA};
+use crate::pci::{Bar, PciConfig, PciDma, PciDmaStatus, PciFunction, PciFunctionState, PCI_INTA};
 use crate::hptimer::{TimerId, TimerManager, TimerReturn};
 use crate::traits::{BusDevice, Device, MachineEvent, Resettable, Saveable};
 use crate::snapshot::{
@@ -2079,11 +2079,10 @@ type NvramJob = (std::path::PathBuf, Vec<u8>);
 /// the chip, and an access to the Ethernet block goes to it with `st`
 /// released.
 struct Shared {
-    pci: PciConfig,
+    pci: PciFunctionState,
     st: Mutex<St>,
     ps2: Arc<Ps2Controller>,
     eth: Mutex<Option<Arc<dyn Ioc3EthPort>>>,
-    raw_dma: Mutex<Option<Arc<dyn PciDma>>>,
     /// PCI interrupt pin A: the Ethernet block.
     pin_line: Mutex<Option<IrqLine>>,
     /// The SuperIO line the board wires to a Bridge input.
@@ -2324,7 +2323,7 @@ impl Shared {
     /// both it and the bridge's DMA are in hand.
     fn connect_eth(self: &Arc<Self>) {
         let eth = self.eth.lock().clone();
-        let dma = self.raw_dma.lock().clone();
+        let dma = self.pci.dma().cloned();
         if let (Some(e), Some(d)) = (eth, dma) {
             let weak = Arc::downgrade(self);
             e.connect(
@@ -2406,11 +2405,10 @@ impl Ioc3 {
             // The subsystem identity selects what a guest instantiates.
             pci.write(11, ((subsystem as u32) << 16) | VENDOR_ID as u32);
             Shared {
-                pci,
+                pci: PciFunctionState::new(pci),
                 st: Mutex::new(St::new(cfg)),
                 ps2,
                 eth: Mutex::new(None),
-                raw_dma: Mutex::new(None),
                 pin_line: Mutex::new(None),
                 superio_line: Mutex::new(None),
                 heartbeat: OnceLock::new(),
@@ -2517,9 +2515,9 @@ impl Ioc3 {
         self.sh.connect_eth();
     }
 
-    /// The line the board wires the SuperIO interrupt (serial, PS/2,
-    /// parallel, interrupt output) to. [`PciFunction::connect_interrupt`]
-    /// takes the PCI pin, which only the Ethernet block drives.
+    /// The line the board wires the SuperIO interrupt (serial, PS/2, parallel,
+    /// interrupt output) to. The line in its [`PciFunctionState`] is the PCI
+    /// pin, which only the Ethernet block drives.
     pub fn connect_superio_interrupt(&self, line: IrqLine) {
         {
             let _order = self.sh.line_order.lock();
@@ -2669,13 +2667,13 @@ impl Ioc3 {
     /// the first dwords of the register block alike. The status register
     /// reads fast back-to-back capable beside the medium decode timing.
     fn header_dword(&self, index: usize) -> u32 {
-        let v = self.sh.pci.read(index);
+        let v = self.sh.pci.config().read(index);
         if index == 1 { v | PCI_STATUS_FAST_BACK << 16 } else { v }
     }
 }
 
 impl PciFunction for Ioc3 {
-    fn config(&self) -> &PciConfig {
+    fn state(&self) -> &PciFunctionState {
         &self.sh.pci
     }
 
@@ -2731,20 +2729,21 @@ impl PciFunction for Ioc3 {
         self.sh.with_st(parity, |st, c| st.write(a, val, width, c));
     }
 
-    /// The PCI interrupt pin: the Ethernet block's level.
-    fn connect_interrupt(&self, line: IrqLine) {
-        {
-            let _order = self.sh.line_order.lock();
-            line.set(self.sh.pin_level.load(Ordering::SeqCst));
-            *self.sh.pin_line.lock() = Some(line);
+    /// The chip's DMA goes through its own byte order, and the PCI
+    /// interrupt pin is the Ethernet block's level.
+    fn attached(&self) {
+        if let Some(dma) = self.sh.pci.dma() {
+            self.sh.st.lock().dma = Some(Arc::new(Ioc3Dma::new(dma.clone())));
+            self.sh.connect_eth();
         }
-        self.sh.sync_pin();
-    }
-
-    fn connect_dma(&self, dma: Arc<dyn PciDma>) {
-        *self.sh.raw_dma.lock() = Some(dma.clone());
-        self.sh.st.lock().dma = Some(Arc::new(Ioc3Dma::new(dma)));
-        self.sh.connect_eth();
+        if let Some(line) = self.sh.pci.irq() {
+            {
+                let _order = self.sh.line_order.lock();
+                line.set(self.sh.pin_level.load(Ordering::SeqCst));
+                *self.sh.pin_line.lock() = Some(line.clone());
+            }
+            self.sh.sync_pin();
+        }
     }
 }
 
