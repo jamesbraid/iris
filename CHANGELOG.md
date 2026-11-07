@@ -25,6 +25,14 @@ hashes are given where a change is easiest to understand by reading the commit.
   its own state, and older O2 and Octane snapshots are refused. The Octane
   gains the `pci` monitor command.
 
+### NVM Express
+
+- `[nvme]` puts an NVM Express controller in the O2's "PCI option" slot or on
+  the Octane's Bridge (slot 5), directly or behind a PCI-to-PCI bridge
+  (`bridge = true`). One namespace backed by a raw or CHD image, optionally
+  copy-on-write; pin interrupts; saved in snapshots with the other disks
+  ([docs/nvme.md](docs/nvme.md)). The PCI header gained 64-bit memory BARs.
+
 ### Machine profiles
 
 - An Indy or `indigo2_ip22` no longer accepts an R10000, and `indigo2_ip28`
