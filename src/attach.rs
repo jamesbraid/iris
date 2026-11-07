@@ -117,6 +117,13 @@ pub fn device_names() -> Vec<&'static str> {
     names
 }
 
+/// Which of `expected` no device type registered. Every binary that links the
+/// library asserts this is empty: a linker that dropped the entries would
+/// leave a binary that parses no `[[hdd]]`.
+pub fn missing_makers(expected: &[&str]) -> Vec<String> {
+    expected.iter().filter(|n| !MAKERS.iter().any(|m| m.name == **n)).map(|n| n.to_string()).collect()
+}
+
 fn unknown_device(name: &str) -> String {
     format!("error: unknown device [[{name}]]; devices: {}", device_names().join(" "))
 }

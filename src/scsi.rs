@@ -2,8 +2,11 @@ use std::io;
 
 mod attach;
 mod bus;
+pub mod media;
+mod port;
 
-pub use attach::{attach_failed, attach_from_config, Attached, DaynaportRef, TableRef};
+pub use attach::{attach_from_config, Attached, DaynaportRef, TableRef};
+pub use port::ScsiPort;
 pub use bus::{ScsiBus, ScsiIdentities, ScsiTarget, Targets};
 
 use crate::block_node::{Background, ChangerNode, Removable, BlockNode};
