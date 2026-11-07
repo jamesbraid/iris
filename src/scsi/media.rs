@@ -51,7 +51,7 @@ impl DeviceType for Hdd {
     type Owner = ScsiPort;
     type Options = HddOptions;
 
-    fn new(o: HddOptions, ctx: &Ctx, owner: &Arc<ScsiPort>, at: &Location) -> Result<Handles, String> {
+    fn new(o: HddOptions, ctx: &mut Ctx, owner: &Arc<ScsiPort>, at: &Location) -> Result<Handles, String> {
         let spec = MediaSpec {
             path: o.path,
             overlay: o.overlay,
@@ -83,7 +83,7 @@ impl DeviceType for Cdrom {
     type Owner = ScsiPort;
     type Options = CdromOptions;
 
-    fn new(o: CdromOptions, ctx: &Ctx, owner: &Arc<ScsiPort>, at: &Location) -> Result<Handles, String> {
+    fn new(o: CdromOptions, ctx: &mut Ctx, owner: &Arc<ScsiPort>, at: &Location) -> Result<Handles, String> {
         let spec = MediaSpec { path: o.path, discs: o.discs, cdrom: true, ..MediaSpec::default() };
         ctx.disks.attach_media(owner, at, &spec)?;
         Ok(vec![])
@@ -170,7 +170,7 @@ impl DeviceType for Daynaport {
         o.check(cfg)
     }
 
-    fn new(o: DaynaportOptions, _: &Ctx, owner: &Arc<ScsiPort>, at: &Location) -> Result<Handles, String> {
+    fn new(o: DaynaportOptions, _: &mut Ctx, owner: &Arc<ScsiPort>, at: &Location) -> Result<Handles, String> {
         let id = at.target().ok_or_else(|| format!("{at} is not a SCSI target"))?;
         let params = o.params(id)?;
         match owner.add_daynaport(id, params) {
@@ -221,9 +221,9 @@ mod tests {
 
     fn attach(t: &Topology, device: &str, at: &str, opts: &str, probe: bool) -> Result<(), String> {
         let p = Placement { device: device.into(), at: at.parse().unwrap(), opts: toml::from_str(opts).unwrap() };
-        let (d, k) = (Devices::new(), Disks::new(vec![]));
-        let ctx = Ctx { devices: &d, disks: &k };
-        attach_device(&p, &MachineConfig::default(), (!probe).then_some(&ctx), t)
+        let (mut d, k) = (Devices::new(), Disks::new(vec![]));
+        let mut ctx = Ctx { devices: &mut d, disks: &k };
+        attach_device(&p, &MachineConfig::default(), (!probe).then_some(&mut ctx), t)
     }
 
     #[test]
@@ -273,8 +273,8 @@ mod tests {
 
     fn attach_cfg(t: &Topology, cfg: &MachineConfig, opts: &str, probe: bool) -> Result<(), String> {
         let p = Placement { device: "daynaport".into(), at: "hpc3.0.t3".parse().unwrap(), opts: toml::from_str(opts).unwrap() };
-        let (d, k) = (Devices::new(), Disks::new(vec![]));
-        attach_device(&p, cfg, (!probe).then_some(&Ctx { devices: &d, disks: &k }), t)
+        let (mut d, k) = (Devices::new(), Disks::new(vec![]));
+        attach_device(&p, cfg, (!probe).then_some(&mut Ctx { devices: &mut d, disks: &k }), t)
     }
 
     #[test]

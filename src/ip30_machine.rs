@@ -285,7 +285,7 @@ impl OctaneMachine {
         bridge.attach(3, rad.clone());
         let virtio = cfg.virtio_serial.enabled.then(|| {
             let dev = Arc::new(crate::dev::virtio::pci::VirtioPci::new(
-                crate::dev::virtio::console::from_config(&cfg.virtio_serial),
+                crate::dev::virtio::console::from_ports(&cfg.virtio_serial.ports),
             ));
             bridge.attach(VIRTIO_SLOT, dev.clone());
             eprintln!("iris: virtio-serial on Bridge slot {VIRTIO_SLOT}");
@@ -487,7 +487,7 @@ impl OctaneMachine {
             devices.add("gfx", Phase::Display, g.clone());
         }
 
-        attach_devices(&cfg.all_placements(&topology)?, cfg, Some(&Ctx { devices: &devices, disks: &disks }), &topology)?;
+        attach_devices(&cfg.all_placements(&topology)?, cfg, Some(&mut Ctx { devices: &mut devices, disks: &disks }), &topology)?;
 
         let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
         let monitor = crate::monitor::Monitor::new(monitor_port);

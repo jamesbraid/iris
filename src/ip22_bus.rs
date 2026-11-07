@@ -24,7 +24,9 @@ use crate::dev::ng1::rex3::Rex3;
 use crate::dev::gr2::Gr2;
 use crate::dev::mgras::Mgras;
 use crate::dev::vino::Vino;
-use crate::dev::ultra64::Ultra64;
+use crate::dev::ioc::{profile_idx, GioSlot, Ioc, IocInterrupt, GIO_SLOT_MAP};
+use crate::irq::IrqLine;
+use crate::location::{Hop, Location};
 
 /// CPU bus error sink: reports to MC then returns 0/Ready so the CPU doesn't also take
 /// a MIPS bus error exception (which causes terrible cascading failures).
@@ -286,12 +288,11 @@ pub struct Ip22Bus {
     pub gr2: Option<Arc<Gr2>>,
     /// IMPACT/MGRAS graphics (`graphics.board = solidimpact | highimpact | maximpact`).
     pub mgras: Option<Arc<Mgras>>,
-    pub ultra64: Option<Arc<Ultra64>>,
-    /// Bare-metal test device (`--test-device`), in GIO expansion slot 0.
-    pub testdev: Option<Arc<crate::dev::testdev::TestDevice>>,
-    /// virtio-serial (`[virtio_serial]`) in a GIO expansion slot.
-    pub virtio: Option<Arc<crate::dev::virtio::mmio::VirtioMmio>>,
     pub vino: Vino,
+    /// The interrupt controller, for the lines GIO cards drive.
+    pub ioc: Ioc,
+    /// The Indy: its two GIO slots have their own interrupt pins.
+    guinness: bool,
     /// Where the 512 KB alias at physical 0 points — see `alias_offset_for`.
     alias_offset: u32,
     /// Where RAM sits. The IP28's only labels the bank-map trace.
@@ -307,10 +308,6 @@ pub struct Ip22Devices {
     pub rex3_head1: Option<Arc<Rex3>>,
     pub gr2: Option<Arc<Gr2>>,
     pub mgras: Option<Arc<Mgras>>,
-    pub ultra64: Option<Arc<Ultra64>>,
-    pub testdev: Option<Arc<crate::dev::testdev::TestDevice>>,
-    /// A virtio device and the physical base of the GIO expansion slot it sits in.
-    pub virtio: Option<(Arc<crate::dev::virtio::mmio::VirtioMmio>, u32)>,
     pub vino: Vino,
     pub mc: MemoryController,
     pub hpc3: Hpc3,
@@ -320,7 +317,7 @@ pub struct Ip22Devices {
 impl Ip22Bus {
     /// Map `d` on `phys` where the MC decodes it. RAM is not placed here:
     /// MEMCFG0/1 control that, through [`Self::remap_banks`].
-    pub fn new(phys: Arc<Physical>, d: Ip22Devices, ram: RamLayout) -> Self {
+    pub fn new(phys: Arc<Physical>, d: Ip22Devices, ram: RamLayout, guinness: bool) -> Self {
         let set = |base: u32, end: u32, dev: Arc<dyn BusDevice>, name: &str| {
             phys.map(base as u64, end as u64, dev, name);
         };
@@ -379,28 +376,9 @@ impl Ip22Bus {
             set(GIO_SLOT1_BASE, GIO_SLOT1_END, h1.clone(), "newport head 1");
         }
 
-        // GIO expansion slot 0 (0x1F400000–0x1F5FFFFF): N64 dev board if enabled
-        if let Some(u64) = &d.ultra64 {
-            use crate::dev::ultra64::{GIO_SLOT0_BASE, RAMROM_BASE, RAMROM_SIZE};
-            // Control registers: 0x1F400000–0x1F4FFFFF (16 × 64KB slots)
-            set(GIO_SLOT0_BASE, RAMROM_BASE, u64.clone(), "ultra64");
-            // RAMROM window: 0x1F500000–0x1F5FFFFF (16 × 64KB slots)
-            set(RAMROM_BASE, RAMROM_BASE + RAMROM_SIZE, u64.clone(), "ultra64");
-        }
-        // GIO expansion slot 1 — second Newport when rex3_head1 absent: GIO timeout remains
-
-        // Test device (--test-device): GIO expansion slot 0, which is empty on a
-        // stock Indy and otherwise answers with a GIO timeout. See testdev.rs.
-        if let Some(td) = &d.testdev {
-            use crate::dev::testdev::{TEST_DEV_BASE, TEST_DEV_SIZE};
-            set(TEST_DEV_BASE, TEST_DEV_BASE + TEST_DEV_SIZE, td.clone(), "test device");
-        }
-
-        // virtio-serial (`[virtio_serial]`): a GIO expansion slot, 64 KB window.
-        // Machine::new refuses a slot another device already claims.
-        if let Some((v, base)) = &d.virtio {
-            set(*base, *base + crate::dev::virtio::mmio::WINDOW as u32, v.clone(), "virtio-serial");
-        }
+        // GIO expansion slot 1 — second Newport when rex3_head1 absent: GIO timeout remains.
+        // Cards in the expansion slots (ultra64, the test device, virtio-serial)
+        // map themselves when they are placed: see `Ip22Bus::map_gio`.
 
         // Map MC registers (128KB at 0x1FA00000)
         set(MC_BASE, MC_END, Arc::new(d.mc.clone()), "mc");
@@ -433,14 +411,38 @@ impl Ip22Bus {
             rex3_head1: d.rex3_head1,
             gr2: d.gr2,
             mgras: d.mgras,
-            ultra64: d.ultra64,
-            testdev: d.testdev,
-            virtio: d.virtio.map(|(v, _)| v),
             vino: d.vino,
+            ioc: d.hpc3.ioc().clone(),
+            guinness,
             alias_offset,
             ram,
             remap: Mutex::new(RemapState::default()),
         }
+    }
+
+    /// The GIO expansion slot a location names (`gio0`, `gio1`).
+    pub fn gio_slot(&self, at: &Location) -> Result<GioSlot, String> {
+        match at.hops() {
+            [h] if *h == Hop::gio(0) => Ok(GioSlot::Exp0),
+            [h] if *h == Hop::gio(1) => Ok(GioSlot::Exp1),
+            _ => Err(format!("{at} is not a GIO expansion slot")),
+        }
+    }
+
+    /// The line a card in expansion `slot` drives: the Indy has a pin of its
+    /// own per slot, the Indigo2 shares the EXT_IO fan-out.
+    pub fn gio_irq(&self, slot: GioSlot) -> IrqLine {
+        let source = match (self.guinness, slot) {
+            (true, GioSlot::Exp0) => IocInterrupt::GioExp0,
+            (true, _) => IocInterrupt::GioExp1,
+            (false, s) => GIO_SLOT_MAP[profile_idx(false)][s as usize].retrace,
+        };
+        self.ioc.irq_line(source)
+    }
+
+    /// Answer at `base..base + size` with `dev`: a card placed in a GIO slot.
+    pub fn map_gio(&self, base: u32, size: u32, dev: Arc<dyn BusDevice>, name: &str) {
+        self.phys.map(base as u64, (base + size) as u64, dev, name);
     }
 
     /// Remap memory banks in the decode table.

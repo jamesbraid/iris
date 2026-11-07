@@ -352,7 +352,7 @@ impl O2Machine {
         let disks = Arc::new(Disks::new(
             bus.scsi.lock().unwrap().iter().map(|c| c.clone() as Arc<dyn crate::disks::DiskController>).collect(),
         ).with_ci(cfg.ci));
-        attach_devices(&cfg.all_placements(&topology)?, cfg, Some(&Ctx { devices: &devices, disks: &disks }), &topology)?;
+        attach_devices(&cfg.all_placements(&topology)?, cfg, Some(&mut Ctx { devices: &mut devices, disks: &disks }), &topology)?;
         Ok(Self {
             memory,
             bus,

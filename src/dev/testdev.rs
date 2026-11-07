@@ -35,7 +35,15 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
+use std::sync::Arc;
+
+use crate::attach::{Ctx, DeviceType, Handles};
 use crate::cpu::mips_core::MipsCore;
+use crate::devices::{Devices, Phase};
+use crate::ip22_bus::Ip22Bus;
+use crate::location::{Hop, Location};
+use crate::register_device;
+use crate::topology::Family;
 use crate::traits::{BusDevice, BusRead32, BusRead8, Device, Resettable, Saveable, BUS_OK};
 
 /// GIO64 expansion slot 0. 64 KB is decoded; registers repeat every 16 bytes.
@@ -500,6 +508,43 @@ impl Saveable for TestDevice {
         self.chars.store(get("chars") as u64, Ordering::Relaxed);
         Ok(())
     }
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestDeviceOptions {
+    #[serde(default)]
+    pub dump: Option<String>,
+}
+
+/// The bare-metal test device in GIO expansion slot 0.
+pub struct TestDeviceType;
+
+impl DeviceType for TestDeviceType {
+    const NAME: &'static str = "test_device";
+    const FAMILY: Family = Family::Gio;
+    type Owner = Ip22Bus;
+    type Options = TestDeviceOptions;
+
+    /// The machine binds the device at its own row, for `attach_core`.
+    fn new(o: TestDeviceOptions, ctx: &mut Ctx, bus: &Arc<Ip22Bus>, at: &Location) -> Result<Handles, String> {
+        if at.hops() != [Hop::gio(0)] {
+            return Err("the test device decodes gio0 only".into());
+        }
+        let path = o.dump.unwrap_or_else(|| DEFAULT_DUMP_PATH.to_string());
+        eprintln!("iris: test device enabled at {TEST_DEV_BASE:#010x}, dumps to {path}");
+        let dev = Arc::new(TestDevice::new(path));
+        place(bus, &mut *ctx.devices, at, dev.clone());
+        Ok(vec![(None, dev)])
+    }
+}
+register_device!(TestDeviceType);
+
+/// Map a test device in its slot and register it for snapshots; the key is
+/// optional because snapshots from before it existed lack it.
+pub fn place(bus: &Ip22Bus, devices: &mut Devices, at: &Location, dev: Arc<TestDevice>) {
+    bus.map_gio(TEST_DEV_BASE, TEST_DEV_SIZE, dev.clone(), "test device");
+    devices.add_optional(&at.to_string(), Phase::Io, dev);
 }
 
 #[cfg(test)]

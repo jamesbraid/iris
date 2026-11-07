@@ -16,9 +16,18 @@
 
 use std::sync::Arc;
 
+use crate::attach::{Ctx, DeviceType, Handles};
+use crate::config::MachineConfig;
+use crate::dev::ioc::GIO_SLOT_BASES;
+use crate::devices::Phase;
+use crate::ip22_bus::Ip22Bus;
 use crate::irq::IrqLine;
+use crate::location::Location;
+use crate::register_device;
+use crate::topology::Family;
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead8, Device, Resettable, Saveable, BUS_OK};
 
+use super::console::{from_ports, VirtioSerialOptions};
 use super::{GuestMemory, VirtioCore};
 
 /// Bytes of address space the window decodes (one 64 KB decode slot).
@@ -237,6 +246,36 @@ impl Resettable for VirtioMmio {
         self.core.power_on();
     }
 }
+
+/// virtio-serial on a GIO expansion slot of the Indy or Indigo2: the 64 KB
+/// window at the slot's base, on the slot's interrupt line.
+pub struct VirtioSerial;
+
+impl DeviceType for VirtioSerial {
+    const NAME: &'static str = "virtio_serial";
+    const FAMILY: Family = Family::Gio;
+    type Owner = Ip22Bus;
+    type Options = VirtioSerialOptions;
+
+    fn check(o: &VirtioSerialOptions, _: &MachineConfig) -> Result<(), String> {
+        o.check()
+    }
+
+    fn new(o: VirtioSerialOptions, ctx: &mut Ctx, bus: &Arc<Ip22Bus>, at: &Location) -> Result<Handles, String> {
+        let slot = bus.gio_slot(at)?;
+        let base = GIO_SLOT_BASES[slot as usize];
+        eprintln!("iris: virtio-serial at {base:#010x}");
+        let dev = Arc::new(VirtioMmio::new(
+            from_ports(&o.ports),
+            bus.gio_irq(slot),
+            Arc::new(super::BusMemory(bus.phys.clone())),
+        ));
+        bus.map_gio(base, WINDOW as u32, dev.clone(), "virtio-serial");
+        ctx.devices.add(&at.to_string(), Phase::Io, dev);
+        Ok(vec![])
+    }
+}
+register_device!(VirtioSerial);
 
 #[cfg(test)]
 mod tests {
