@@ -458,3 +458,4 @@ Plans, task briefs and reviews written for agents. Each states its own status; m
 | [pcap-release-plan.md](plans/pcap-release-plan.md) | plan | PCAP release + elevation plan |
 | [smp-octane.md](plans/smp-octane.md) | plan | Two CPUs on the Octane: HEART MP registers and PROM/kernel slave flow, CPU core → N instances (park-request bit, CpuShared, debugger extraction), jitv2 shared pool audit and fixes, milestones and foreseen problems |
 | [vnc-server-plan.md](plans/vnc-server-plan.md) | plan | Built-in VNC server: board-agnostic frame tap, damage from frame diffs, pointer steered by the HW cursor, monitor/MCP screenshot + click for agents |
+| [onyx2-infinitereality.md](plans/onyx2-infinitereality.md) | plan | Plan: the Onyx2, Onyx 3000 and InfiniteReality in Iris: IP27 and IP35 platform tracks, serial boots first, KONA board tracks, decisions, finish line and per-PR rules; branch status
