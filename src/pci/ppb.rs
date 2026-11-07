@@ -1,0 +1,268 @@
+//! A PCI-to-PCI bridge: a function with a type 1 header and a bus behind it.
+//!
+//! Firmware numbers the bus (secondary and subordinate bus numbers) and
+//! programs the I/O, memory and prefetchable windows; the bridge forwards the
+//! BARs of the functions behind it that lie inside an enabled window, so the
+//! bus in front decodes them like its own. A pin of the function at device
+//! `d` behind the bridge reaches pin `(pin + d) mod 4` of the bridge's own
+//! device, and its DMA is the bridge's.
+
+use std::sync::Arc;
+
+use super::{PciAddr, PciBus, PciConfig, PciFunction, PciPort};
+
+/// Bridge control bit 6: secondary bus reset.
+const SECONDARY_RESET: u32 = 1 << 22;
+
+pub struct Ppb {
+    cfg: PciConfig,
+    port: PciPort,
+    sec: PciBus,
+}
+
+impl Ppb {
+    /// A bridge to be fitted at `at` on `parent`, and the bus behind it.
+    /// The caller attaches it with `parent.attach(at, bridge)`.
+    pub fn new(parent: &PciBus, at: PciAddr) -> Arc<Self> {
+        Arc::new(Self {
+            cfg: PciConfig::bridge(0x1011, 0x0026, 0),
+            port: PciPort::default(),
+            sec: PciBus::secondary(parent.clone(), at),
+        })
+    }
+}
+
+impl Ppb {
+    /// The bus behind the bridge.
+    pub fn secondary(&self) -> &PciBus {
+        &self.sec
+    }
+}
+
+impl PciFunction for Ppb {
+    fn config(&self) -> &PciConfig {
+        &self.cfg
+    }
+
+    fn bar_read(&self, _bar: usize, _off: u32, _width: usize) -> u32 {
+        0
+    }
+
+    fn bar_write(&self, _bar: usize, _off: u32, _val: u32, _width: usize) {}
+
+    fn port(&self) -> &PciPort {
+        &self.port
+    }
+
+    fn secondary(&self) -> Option<&PciBus> {
+        Some(&self.sec)
+    }
+
+    /// A write that raises secondary bus reset resets the bus behind the
+    /// bridge and nothing else.
+    fn config_written(&self, reg: usize, old: u32, new: u32) {
+        if reg == 15 && old & SECONDARY_RESET == 0 && new & SECONDARY_RESET != 0 {
+            self.sec.reset();
+        }
+    }
+
+    /// RST# on the primary bus reaches everything behind the bridge.
+    fn reset(&self) {
+        self.sec.reset();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pci::testing::{TestCard, TestHost};
+    use crate::pci::{Bar, CpuWindow, PciUpstream, PciWiring, Space, PCI_COMMAND_MEMORY};
+    use std::sync::{Mutex, Weak};
+
+    // The bridge sits at device 3, whose INTA..INTD reach outputs 0 to 3.
+    static W: PciWiring = PciWiring {
+        devices: 8,
+        outputs: 4,
+        pins: &[(3, [Some(0), Some(1), Some(2), Some(3)]), (4, [Some(0), None, None, None])],
+        wires: &[],
+    };
+
+    fn at(device: u8, function: u8) -> PciAddr {
+        PciAddr { device, function }
+    }
+
+    fn bars() -> [Bar; 6] {
+        [Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused]
+    }
+
+    struct Rig {
+        host: Arc<TestHost>,
+        root: PciBus,
+        ppb: Arc<Ppb>,
+    }
+
+    /// A bridge at device 3 numbering a bus 1 behind it, with window
+    /// registers programmed for memory 0x8000_0000..0x800f_ffff.
+    fn rig() -> Rig {
+        let host = Arc::new(TestHost::default());
+        let up: Weak<dyn PciUpstream> = Arc::downgrade(&(host.clone() as Arc<dyn PciUpstream>));
+        let root = PciBus::new(0, &W, up);
+        let ppb = Ppb::new(&root, at(3, 0));
+        root.attach(at(3, 0), ppb.clone());
+        root.config_write(at(3, 0), 0x18, 4, 0x0001_0100); // primary 0, secondary 1, subordinate 1
+        root.config_write(at(3, 0), 0x20, 4, 0x8000_8000);
+        root.config_write(at(3, 0), 0x04, 2, PCI_COMMAND_MEMORY);
+        Rig { host, root, ppb }
+    }
+
+    /// A card on the secondary bus whose BAR 0 is at `base`, decoding on.
+    fn child(r: &Rig, device: u8, pin: u8, base: u32) -> Arc<TestCard> {
+        let c = TestCard::new(bars(), pin);
+        let sec = r.ppb.secondary();
+        sec.attach(at(device, 0), c.clone());
+        sec.config_write(at(device, 0), 0x10, 4, base);
+        sec.config_write(at(device, 0), 0x04, 2, PCI_COMMAND_MEMORY);
+        c
+    }
+
+    fn windows() -> Vec<CpuWindow> {
+        let w = |space, cpu, pci, len| CpuWindow { space, cpu, pci, len, mask: 0xffff_ffff };
+        vec![w(Space::Io, 0x1800_0000, 0, 0x200_0000), w(Space::Mem, 0x1a00_0000, 0x8000_0000, 0x200_0000)]
+    }
+
+    fn cpus(r: &Rig) -> Arc<Mutex<Vec<(u64, u16)>>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        r.root.on_runs(Box::new(move |runs| *sink.lock().unwrap() = runs.iter().map(|b| (b.cpu, b.window)).collect()));
+        r.root.refresh(&windows);
+        seen
+    }
+
+    #[test]
+    fn type_1_header_probe_and_window_registers() {
+        let host = Arc::new(TestHost::default());
+        let up: Weak<dyn PciUpstream> = Arc::downgrade(&(host.clone() as Arc<dyn PciUpstream>));
+        let root = PciBus::new(0, &W, up);
+        root.attach(at(3, 0), Ppb::new(&root, at(3, 0)));
+        let read = |off, w| root.config_read(at(3, 0), off, w).unwrap();
+        assert_eq!(read(0x0e, 1), 1, "header type 1");
+        assert_eq!(read(0x09, 3), 0x06_0400, "a PCI-to-PCI bridge");
+        for (off, probe, stuck) in [(0x18, 0xffff_ffffu32, 0xffff_ffffu32), (0x1c, !0, 0xf0f0), (0x20, !0, 0xfff0_fff0), (0x24, !0, 0xfff0_fff0)] {
+            root.config_write(at(3, 0), off, 4, probe);
+            assert_eq!(read(off, 4), stuck, "register {off:#x}");
+        }
+        root.config_write(at(3, 0), 0x10, 4, !0);
+        assert_eq!(read(0x10, 4), 0, "no BARs");
+        root.config_write(at(3, 0), 0x19, 1, 0x05);
+        assert_eq!(read(0x19, 1), 0x05, "the secondary bus number is a byte");
+    }
+
+    #[test]
+    fn a_child_bar_inside_the_bridge_window_gets_a_run_with_the_parents_window_index() {
+        let r = rig();
+        let seen = cpus(&r);
+        child(&r, 2, 0, 0x8000_2000);
+        assert_eq!(*seen.lock().unwrap(), vec![(0x1a00_2000, 1)]);
+        let (_, bar, off) = r.root.bar_access(Space::Mem, 0x8000_2010).expect("the slow path finds it too");
+        assert_eq!((bar, off), (0, 0x10));
+    }
+
+    #[test]
+    fn a_child_bar_outside_the_window_has_no_run_and_no_bar_access() {
+        let r = rig();
+        let seen = cpus(&r);
+        let c = child(&r, 2, 0, 0x9000_0000);
+        assert!(seen.lock().unwrap().is_empty());
+        assert!(r.root.bar_access(Space::Mem, 0x9000_0010).is_none());
+        assert!(r.ppb.secondary().bar_access(Space::Mem, 0x9000_0010).is_some(), "the bus behind still decodes it");
+        let _ = c;
+    }
+
+    #[test]
+    fn disabling_the_bridge_memory_enable_removes_child_runs() {
+        let r = rig();
+        let seen = cpus(&r);
+        child(&r, 2, 0, 0x8000_2000);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        r.root.config_write(at(3, 0), 0x04, 2, 0);
+        assert!(seen.lock().unwrap().is_empty());
+        assert!(r.root.bar_access(Space::Mem, 0x8000_2010).is_none());
+        r.root.config_write(at(3, 0), 0x04, 2, PCI_COMMAND_MEMORY);
+        assert_eq!(seen.lock().unwrap().len(), 1, "and enabling it brings the run back");
+    }
+
+    /// A pin of the function at device `d` behind the bridge reaches the
+    /// bridge's pin `(pin + d) mod 4`: device 2 INTA is the bridge's INTC.
+    #[test]
+    fn a_child_interrupt_reaches_parent_pin_p_plus_d_mod_4() {
+        for (device, pin, output) in [(2u8, 1u8, 2u32), (2, 2, 3), (2, 3, 0), (1, 1, 1), (0, 4, 3)] {
+            let r = rig();
+            let c = child(&r, device, pin, 0x8000_1000);
+            c.port().irq().unwrap().set(true);
+            assert_eq!(r.host.outputs(), vec![(output as u8, true)], "device {device} pin {pin}");
+        }
+    }
+
+    #[test]
+    fn a_child_dma_uses_the_bridges_root_slot() {
+        let r = rig();
+        let c = child(&r, 2, 0, 0x8000_2000);
+        let mut b = [0u8; 1];
+        assert!(c.port().dma().unwrap().dma_read(0, &mut b).is_ok());
+        assert_eq!(b[0], 3, "the bridge's device number, not the child's");
+    }
+
+    #[test]
+    fn route_finds_the_bus_by_secondary_and_subordinate() {
+        let r = rig();
+        let inner = Ppb::new(r.ppb.secondary(), at(1, 0));
+        r.ppb.secondary().attach(at(1, 0), inner.clone());
+        // Bus 1 holds bridge 1.0, which numbers bus 2; the outer one takes 1 to 2.
+        r.root.config_write(at(3, 0), 0x18, 4, 0x0002_0100);
+        r.ppb.secondary().config_write(at(1, 0), 0x18, 4, 0x0002_0201);
+        assert_eq!(r.root.route(0).unwrap().number(), r.root.number());
+        assert_eq!(r.root.route(1).unwrap().number(), r.ppb.secondary().number());
+        assert_eq!(r.root.route(2).unwrap().number(), inner.secondary().number());
+        assert!(r.root.route(3).is_none());
+    }
+
+    /// Raising secondary bus reset resets what is behind the bridge and
+    /// nothing else.
+    #[test]
+    fn bridge_control_bit_6_resets_the_secondary_only() {
+        let r = rig();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let behind = TestCard::logged("behind", bars(), 0, &log);
+        r.ppb.secondary().attach(at(2, 0), behind);
+        r.root.attach(at(5, 0), TestCard::logged("beside", bars(), 0, &log));
+        r.root.config_write(at(3, 0), 0x3e, 2, 0x40);
+        assert_eq!(*log.lock().unwrap(), ["behind cmd=0x0"]);
+        r.root.config_write(at(3, 0), 0x3e, 2, 0x40);
+        assert_eq!(log.lock().unwrap().len(), 1, "holding it is not another reset");
+    }
+
+    #[test]
+    fn a_bridge_control_write_without_bit_6_leaves_the_secondary_alone() {
+        let r = rig();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        r.ppb.secondary().attach(at(2, 0), TestCard::logged("behind", bars(), 0, &log));
+        r.root.config_write(at(3, 0), 0x3e, 2, 0x01);
+        assert!(log.lock().unwrap().is_empty());
+        // RST# on the primary bus does reach behind the bridge.
+        r.root.reset();
+        assert_eq!(*log.lock().unwrap(), ["behind cmd=0x0"]);
+    }
+
+    #[test]
+    fn a_secondary_bus_saves_and_loads_with_its_parent() {
+        use crate::traits::Saveable;
+        let r = rig();
+        child(&r, 2, 0, 0x8000_2000);
+        let v = r.root.save_state();
+        let r2 = rig();
+        child(&r2, 2, 0, 0x8000_6000);
+        r2.root.load_state(&v).unwrap();
+        assert_eq!(r2.root.save_state(), v);
+        assert!(r2.root.bar_access(Space::Mem, 0x8000_2010).is_some() && r2.root.bar_access(Space::Mem, 0x8000_6010).is_none());
+    }
+}

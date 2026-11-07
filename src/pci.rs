@@ -10,6 +10,7 @@
 pub mod bus;
 pub mod decode;
 pub mod intx;
+pub mod ppb;
 #[cfg(test)]
 pub(crate) mod testing;
 
@@ -70,6 +71,9 @@ pub struct PciConfig {
     /// Dwords `16..caps_end` hold a capability list, which firmware cannot
     /// overwrite. 0 when the function has none.
     caps_end: usize,
+    /// A type 1 header (PCI-to-PCI bridge): no BARs, and dwords 6 to 12 are
+    /// bus numbers and forwarding windows.
+    type1: bool,
 }
 
 impl PciConfig {
@@ -86,7 +90,55 @@ impl PciConfig {
                 r[4 + i] = 1;
             }
         }
-        Self { regs: Mutex::new(r), bars, power_on: r, caps_end: 0 }
+        Self { regs: Mutex::new(r), bars, power_on: r, caps_end: 0, type1: false }
+    }
+
+    /// A PCI-to-PCI bridge's type 1 header: class 0604, header type 1, no
+    /// BARs and no interrupt pin. Dwords 6 (primary, secondary and
+    /// subordinate bus numbers), 7 (I/O base and limit, bits 15:12 of each),
+    /// 8 (memory base and limit, bits 31:20), 9 to 11 (prefetchable memory)
+    /// and 12 (I/O bits 31:16) store what firmware writes, to the
+    /// granularity the register has; the bridge control register is the top
+    /// half of dword 15. Everything resets to zero, and the windows
+    /// forward nothing until the command register enables them.
+    pub fn bridge(vendor: u16, device: u16, revision: u8) -> Self {
+        let mut c = Self::new(vendor, device, 0x06_0400, revision, [Bar::Unused; 6], 0);
+        c.type1 = true;
+        let r = c.regs.get_mut().unwrap();
+        r[3] = 1 << 16;
+        c.power_on = *r;
+        c
+    }
+
+    /// Whether this type 1 header forwards the range `base..base + size` of
+    /// `space` to its secondary bus: the range lies wholly inside one
+    /// enabled window (I/O, memory or prefetchable memory). A range that
+    /// straddles a window's edge is not forwarded; what a bridge does with
+    /// one is not defined.
+    pub fn forwards(&self, space: Space, base: u32, size: u32) -> bool {
+        let r = self.regs.lock().unwrap();
+        let (lo, hi) = (base as u64, base as u64 + size as u64 - 1);
+        let inside = |wlo: u64, whi: u64| wlo <= whi && wlo <= lo && hi <= whi;
+        match space {
+            Space::Io => {
+                r[1] & PCI_COMMAND_IO != 0 && {
+                    let upper = |half: u32| ((r[12] >> half) & 0xffff) as u64;
+                    let wlo = ((r[7] & 0xf0) as u64) << 8 | upper(0) << 16;
+                    let whi = ((r[7] >> 8 & 0xf0) as u64) << 8 | 0xfff | upper(16) << 16;
+                    inside(wlo, whi)
+                }
+            }
+            Space::Mem => {
+                r[1] & PCI_COMMAND_MEMORY != 0 && {
+                    let mem = (((r[8] & 0xfff0) as u64) << 16, ((r[8] >> 16 & 0xfff0) as u64) << 16 | 0xf_ffff);
+                    let pf = (
+                        ((r[9] & 0xfff0) as u64) << 16 | (r[10] as u64) << 32,
+                        ((r[9] >> 16 & 0xfff0) as u64) << 16 | 0xf_ffff | (r[11] as u64) << 32,
+                    );
+                    inside(mem.0, mem.1) || inside(pf.0, pf.1)
+                }
+            }
+        }
     }
 
     /// Give the function a capability list: `caps` are the raw dwords of the
@@ -139,6 +191,12 @@ impl PciConfig {
             3 => r[3] = (r[3] & 0xffff_0000) | (val & 0xffff),
             // Command; status bits are write-one-to-clear and none are set.
             1 => r[1] = val & 0xffff,
+            // A bridge's bus numbers and forwarding windows. The low nibbles
+            // of the base and limit registers are read-only zero (16-bit I/O
+            // and 32-bit memory); the I/O secondary status is not kept.
+            6 | 10 | 11 | 12 if self.type1 => r[reg] = val,
+            7 if self.type1 => r[reg] = val & 0x0000_f0f0,
+            8 | 9 if self.type1 => r[reg] = val & 0xfff0_fff0,
             4..=9 => {
                 let bar = self.bars[reg - 4];
                 r[reg] = match bar {
@@ -308,6 +366,16 @@ pub trait PciFunction: Send + Sync {
     /// The bridge gives a function that masters the bus its way to memory.
     fn connect_dma(&self, dma: Arc<dyn PciDma>) {
         self.port().set_dma(dma);
+    }
+
+    /// The bus wrote configuration dword `reg` of this function's header and
+    /// it changed from `old` to `new`. A PCI-to-PCI bridge acts on bridge
+    /// control here; every other function has nothing to do.
+    fn config_written(&self, _reg: usize, _old: u32, _new: u32) {}
+
+    /// The bus behind this function, if it is a PCI-to-PCI bridge.
+    fn secondary(&self) -> Option<&PciBus> {
+        None
     }
 
     /// RST# reaches the function after the bus has reset its header: drop
