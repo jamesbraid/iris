@@ -38,6 +38,9 @@ hashes are given where a change is easiest to understand by reading the commit.
   pointers), lays a buffer configuration out in a pixel's words within the host's
   budget (`kona status` shows the result and the refusals), and has packers for
   the host and bus pixel formats. `kona pix <x> <y>` shows a pixel's words.
+- The replay reads recordings record by record, so the 71-million-record GL demo
+  recording can be censused per marked span (`KONA_GL_RECORDING`); the results
+  are in `clanker/kona/token-census.md`.
 - A recorded command stream (the `KONAREC` file QEMU's KONA model writes) can be
   replayed into the front end: stores and loads in order, the board's DMA reads
   served from the recording and its writes compared. The replay is exact only up

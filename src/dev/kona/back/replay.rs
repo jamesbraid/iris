@@ -257,14 +257,17 @@ struct Reads {
 
 impl ReplayHost {
     fn new(rec: &Recording, at: Arc<AtomicUsize>) -> Arc<ReplayHost> {
-        let recs = rec
-            .records
-            .iter()
-            .filter_map(|r| match r {
-                Rec::DmaRead { src, addr, bytes } => Some(ReadRec { src: *src, addr: *addr, bytes: bytes.clone(), served: 0 }),
-                _ => None,
-            })
-            .collect();
+        let reads = rec.records.iter().filter_map(|r| match r {
+            Rec::DmaRead { src, addr, bytes } => Some((*src, *addr, bytes.clone())),
+            _ => None,
+        });
+        ReplayHost::with_reads(reads.collect(), at)
+    }
+
+    /// A host that serves the board's reads from `reads` (source, address,
+    /// bytes), in order.
+    fn with_reads(reads: Vec<(u8, u64, Vec<u8>)>, at: Arc<AtomicUsize>) -> Arc<ReplayHost> {
+        let recs = reads.into_iter().map(|(src, addr, bytes)| ReadRec { src, addr, bytes, served: 0 }).collect();
         Arc::new(ReplayHost { packets: Mutex::new(Vec::new()), reads: Mutex::new(Reads { recs, ..Default::default() }), writes: Mutex::new(Vec::new()), at })
     }
 
@@ -639,6 +642,91 @@ impl Report {
     }
 }
 
+/// What a stretch of a stream between two user marks sent.
+pub(super) struct Span {
+    /// The mark the span starts at (0 for the start of the file).
+    pub mark: u32,
+    /// Records in it, swap markers and retrace-completion markers it holds.
+    pub records: u64,
+    pub swaps: u64,
+    pub retraces: u64,
+    pub census: Census,
+}
+
+/// Replay a recording too big to hold in memory into a board with a census
+/// tap, cutting a census at every user mark. Loads are not compared (the
+/// stream is past the point where a replay into `NullBackend` stays exact);
+/// the point is which tokens the stream sends. Reads the file twice: the
+/// board's DMA reads first, since they are recorded after the store that
+/// causes them.
+pub(super) fn census_spans(path: &std::path::Path) -> Result<Vec<Span>, String> {
+    let open = || -> Result<Stream<std::io::BufReader<std::fs::File>>, String> {
+        let f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Stream::new(std::io::BufReader::with_capacity(1 << 20, f))
+    };
+    let mut board = None;
+    let mut reads = Vec::new();
+    let mut probe = None;
+    let mut stream = open()?;
+    while let Some(item) = stream.next()? {
+        match item {
+            Item::Board(b) => board = Some(b),
+            Item::Rec(Rec::DmaRead { src, addr, bytes }) => reads.push((src, addr, bytes)),
+            Item::Rec(Rec::Load { off, val, .. }) if off == PROBE && probe.is_none() => probe = Some(val as u32),
+            _ => {}
+        }
+    }
+    let board = board.ok_or("no board record")?;
+    let cfg = Recording { board, records: Vec::new(), end: None }.config()?;
+    let at = Arc::new(AtomicUsize::new(0));
+    let host = ReplayHost::with_reads(reads, at.clone());
+    let (tap, census) = Tap::new(at.clone());
+    let kona = KonaBuilder::new(cfg, host.attach()).backend(Box::new(tap)).probe_value(probe.unwrap_or(0)).build()?;
+    let mut spans = Vec::new();
+    let (mut mark, mut records, mut swaps, mut retraces) = (0u32, 0u64, 0u64, 0u64);
+    let mut stream = open()?;
+    let mut index = 0usize;
+    while let Some(item) = stream.next()? {
+        let Item::Rec(r) = item else { continue };
+        at.store(index, Relaxed);
+        index += 1;
+        records += 1;
+        match r {
+            Rec::Store { size, off, val } => {
+                let mut n = 0u32;
+                while kona.bus_write(off as u64, size as u32, val) == BUS_BUSY {
+                    n += 1;
+                    if n > 50_000_000 {
+                        return Err(format!("store at {off:#x} stayed busy"));
+                    }
+                    std::thread::yield_now();
+                }
+            }
+            Rec::Load { size, off, .. } => {
+                let mut n = 0u32;
+                while kona.bus_read(off as u64, size as u32).0 == BUS_BUSY {
+                    n += 1;
+                    if n > 50_000_000 {
+                        return Err(format!("load at {off:#x} stayed busy"));
+                    }
+                    std::thread::yield_now();
+                }
+            }
+            Rec::Marker { kind: 1, .. } => kona.power_on(),
+            Rec::Marker { kind: 2, .. } => swaps += 1,
+            Rec::Marker { kind: 3, .. } => retraces += 1,
+            Rec::Marker { kind: 0x100, arg } => {
+                let done = std::mem::take(&mut *census.lock());
+                spans.push(Span { mark, records, swaps, retraces, census: done });
+                (mark, records, swaps, retraces) = (arg, 0, 0, 0);
+            }
+            _ => {}
+        }
+    }
+    spans.push(Span { mark, records, swaps, retraces, census: std::mem::take(&mut *census.lock()) });
+    Ok(spans)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -868,5 +956,27 @@ mod tests {
         // checked: the back end completes no retrace here, so none is sent.
         assert!(rep.general_expected > 0);
         assert!(census.jobs > 0);
+    }
+
+    /// The GL demo recording, when KONA_GL_RECORDING names it (a gigabyte: a
+    /// minute or two in a debug build). Prints each demo's span; asserts that
+    /// the marks are there and that GL commands reached the back end.
+    #[test]
+    fn the_gl_demo_recording_is_censused() {
+        let Some(path) = std::env::var_os("KONA_GL_RECORDING").map(std::path::PathBuf::from) else {
+            eprintln!("skipping: set KONA_GL_RECORDING to the GL demo recording");
+            return;
+        };
+        let spans = census_spans(&path).unwrap();
+        let marks: Vec<u32> = spans.iter().map(|s| s.mark).collect();
+        for m in [210, 220, 230] {
+            assert!(marks.contains(&m), "mark {m} not in {marks:?}");
+        }
+        for sp in spans.iter().filter(|s| [210, 220, 230].contains(&s.mark)) {
+            eprintln!("=== span from mark {}: {} records, {} swap markers, {} retrace markers ===", sp.mark, sp.records, sp.swaps, sp.retraces);
+            eprintln!("{}", sp.census.render());
+            eprintln!("{}", sp.census.render_families());
+            assert!(sp.census.jobs > 0);
+        }
     }
 }

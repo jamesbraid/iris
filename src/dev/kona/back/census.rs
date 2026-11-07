@@ -154,6 +154,30 @@ impl Census {
         }
     }
 
+    /// GL commands by family: command count and distinct selectors, and the
+    /// selectors each family used. The family comes from the front end's table
+    /// names, so a selector it has no entry for cannot be told and shows
+    /// under "dropped words".
+    pub fn render_families(&self) -> String {
+        let names = names();
+        let mut fam: BTreeMap<&str, (u64, Vec<String>)> = BTreeMap::new();
+        for ((gr, sel), (n, ..)) in &self.commands {
+            if *gr != 2 {
+                continue;
+            }
+            let name = names.get(&(2, *sel)).map_or("?", |s| s.as_str());
+            let e = fam.entry(family(name)).or_default();
+            e.0 += n;
+            e.1.push(format!("{name} {n}"));
+        }
+        let mut o = String::from("GL families:\n");
+        for f in ["vertex", "array", "matrix", "texture", "query", "state and other"] {
+            let (n, list) = fam.get(f).cloned().unwrap_or_default();
+            let _ = writeln!(o, "  {f:<16} {n:>9} commands, {} selectors{}", list.len(), if list.is_empty() { String::new() } else { format!(": {}", list.join(", ")) });
+        }
+        o
+    }
+
     /// The GL selectors seen, as framed commands.
     fn gl_selectors(&self) -> BTreeSet<u32> {
         self.commands.keys().filter(|k| k.0 == 2).map(|k| k.1).collect()
@@ -218,6 +242,19 @@ impl Census {
 
         let gl = self.gl_selectors();
         let _ = writeln!(o, "\nGL selectors framed and seen: {}", gl.len());
+        let (mut total, mut outside_cmds, mut unresolved_cmds) = (0u64, 0u64, 0u64);
+        for ((gr, sel), (n, ..)) in &self.commands {
+            if *gr != 2 {
+                continue;
+            }
+            total += n;
+            outside_cmds += n * (!QEMU_DECODER_SELECTORS.contains(sel)) as u64;
+            unresolved_cmds += n * QEMU_UNRESOLVED.iter().any(|(u, _)| u == sel) as u64;
+        }
+        let _ = writeln!(
+            o,
+            "GL commands framed: {total}; with no entry in QEMU's decoder table: {outside_cmds}; in its unresolved set: {unresolved_cmds}"
+        );
         let outside: Vec<_> = gl.iter().filter(|s| !QEMU_DECODER_SELECTORS.contains(s)).map(|s| format!("{s:#x} {}", name(2, *s))).collect();
         let _ = writeln!(o, "  of them with no entry in QEMU's decoder table: {}: {}", outside.len(), outside.join(", "));
         let _ = writeln!(o, "\nlayouts QEMU's decoder marks unresolved, against this stream:");
@@ -227,6 +264,29 @@ impl Census {
             let _ = writeln!(o, "  {sel:#06x} {call:<16} framed {framed:>7}  dropped words with that value {dropped:>7}");
         }
         o
+    }
+}
+
+/// The family a GL command belongs to, by the name of its table entry.
+fn family(name: &str) -> &'static str {
+    const VERTEX: [&str; 11] = ["gl_begin", "gl_end", "gl_color", "gl_index", "gl_normal", "gl_texcoord", "gl_vertex", "gl_edge_flag", "gl_rect", "gl_raster_pos", "gl_eval"];
+    const MATRIX: [&str; 12] =
+        ["gl_matrix_mode", "gl_load_", "gl_mult_", "gl_frustum", "gl_ortho", "gl_push_matrix", "gl_pop_matrix", "gl_rotate", "gl_scale", "gl_translate", "gl_depth_range", "gl_viewport"];
+    const TEXTURE: [&str; 3] = ["gl_tex_", "gl_active_texture", "gl_read_texels"];
+    const QUERY: [&str; 6] = ["gl_get", "gl_set_error", "gl_resolve", "gl_finish", "gl_flush", "gl_read_pixels"];
+    let any = |set: &[&str]| set.iter().any(|p| name.starts_with(p));
+    if name.starts_with("gl_array") {
+        "array"
+    } else if any(&VERTEX) {
+        "vertex"
+    } else if any(&MATRIX) {
+        "matrix"
+    } else if any(&TEXTURE) {
+        "texture"
+    } else if any(&QUERY) {
+        "query"
+    } else {
+        "state and other"
     }
 }
 
@@ -326,6 +386,26 @@ mod tests {
         let text = c.render();
         assert!(text.contains("x_position") && text.contains("after kernel 0x012a x_position"), "{text}");
         assert!(text.contains("glBegin"), "{text}");
+    }
+
+    #[test]
+    fn gl_commands_fall_into_families_by_name() {
+        for (name, fam) in [
+            ("gl_vertex3f", "vertex"),
+            ("gl_begin_first + 3", "vertex"),
+            ("gl_end", "vertex"),
+            ("gl_array_bulk", "array"),
+            ("gl_load_matrixf", "matrix"),
+            ("gl_viewport", "matrix"),
+            ("gl_tex_bind_2d", "texture"),
+            ("gl_get_error", "query"),
+            ("gl_lightf", "state and other"),
+            ("?", "state and other"),
+        ] {
+            assert_eq!(family(name), fam, "{name}");
+        }
+        // Every name in the front end's GL table lands in some family.
+        assert!(names().iter().filter(|((g, _), _)| *g == 2).all(|(_, n)| !family(n).is_empty()));
     }
 
     #[test]
