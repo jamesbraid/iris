@@ -142,7 +142,7 @@ pub struct O2Machine {
     devices: Devices,
     disks: Arc<Disks>,
     /// The places the machine has, with the SCSI controllers bound to theirs.
-    topology: Topology,
+    topology: Arc<Topology>,
     /// Where snapshots live: `saves/<name>/` under the working directory.
     saves: std::path::PathBuf,
     /// The batch hook's place in the boot (see [`BootState`]).
@@ -207,7 +207,7 @@ impl O2Machine {
         };
         // The controllers own their buses; the devices are attached to them
         // below, once the machine is built.
-        let topology = Topology::new();
+        let topology = Arc::new(Topology::new());
         Self::fill(cfg, &topology);
         let scsi = [crate::dev::aic7880::Aic7880::new_bus(), crate::dev::aic7880::Aic7880::new_bus()];
         let opts = Ip32Options {
@@ -349,9 +349,7 @@ impl O2Machine {
         }
 
         let control = Control::new();
-        let disks = Arc::new(Disks::new(
-            bus.scsi.lock().unwrap().iter().map(|c| c.clone() as Arc<dyn crate::disks::DiskController>).collect(),
-        ).with_ci(cfg.ci));
+        let disks = Arc::new(Disks::new().with_ci(cfg.ci));
         attach_devices(&cfg.all_placements(&topology)?, cfg, Some(&mut Ctx { devices: &mut devices, disks: &disks }), &topology)?;
         Ok(Self {
             memory,
@@ -451,7 +449,7 @@ impl O2Machine {
         let cpu = self.cpu.clone();
         let running = self.running.clone();
         let events = (self.control.sender(), self.control.registered());
-        let disks = self.disks.clone();
+        let disks = (self.disks.clone(), self.topology.clone());
         let paused = self.paused.clone();
         self.devices.start();
         self.threads.push(
@@ -474,7 +472,7 @@ impl O2Machine {
         running: Arc<AtomicBool>,
         paused: Arc<AtomicBool>,
         (events, controller_up): (std::sync::mpsc::SyncSender<MachineEvent>, Arc<AtomicBool>),
-        disks: Arc<Disks>,
+        (disks, topology): (Arc<Disks>, Arc<Topology>),
     ) {
         let dev = cpu.clone().as_device();
         // The PROM's environment lives in its flash: save it once the guest
@@ -530,7 +528,7 @@ impl O2Machine {
                 }
                 running.store(false, Ordering::SeqCst);
                 crate::workstation::exit_process("power-off", 0, || {
-                    crate::workstation::flushed(disks.flush(), "power-off")
+                    crate::workstation::flushed(disks.flush(&topology), "power-off")
                 });
             }
             std::thread::sleep(poll);
@@ -556,7 +554,7 @@ impl O2Machine {
         self.bus.save_flash();
         // Not through the display: this stop leaves the guest's writes durable
         // whatever follows it.
-        if let Err(e) = self.disks.flush() {
+        if let Err(e) = self.disks.flush(&self.topology) {
             eprintln!("iris: disk flush at stop failed: {e} (guest writes may be lost)");
         }
         self.control.stopped();

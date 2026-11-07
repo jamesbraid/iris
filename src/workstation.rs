@@ -35,6 +35,7 @@ use crate::ip22_machine::Ip22Machine;
 use crate::machine_state::{GuestState, MachineStatus, TransitionAck};
 use crate::monitor::Monitor;
 use crate::net::NatControl;
+use crate::location::{Hop, Location};
 use crate::topology::Topology;
 use crate::traits::{Device, MachineEvent};
 
@@ -253,31 +254,54 @@ pub trait Workstation: Send {
     fn scratch_path(&self) -> Option<std::path::PathBuf> {
         self.disks().scratch()
     }
-    /// The controller whose CD-ROM drives take disc changes.
-    fn disc_changer(&self) -> Option<Arc<dyn DiscChanger>> {
-        self.disks().disc_changer()
+    /// The first CD-ROM drive and the controller it is on, for the window's
+    /// RCtrl+F12.
+    fn disc_changer(&self) -> Option<(Location, Arc<dyn DiscChanger>)> {
+        self.disks().disc_changer(self.topology())
     }
-    /// Ask the guest to remount `/CDROM` after a disc change on `scsi_id`.
-    fn remount_cdrom_guest(&self, _scsi_id: u8) {}
+    /// A target id as the front ends have always named it: on the machine's
+    /// first controller.
+    fn legacy_target(&self, id: u8) -> Option<Location> {
+        self.topology().controller(0).map(|c| c.join(Hop::t(id)))
+    }
+    /// Every CD-ROM drive: (location, current disc, the configured disc list,
+    /// list position, list length).
+    fn disc_status(&self) -> Vec<(Location, String, Vec<String>, u64, u64)> {
+        self.disks().disc_status(self.topology())
+    }
+    /// Put the disc at `path` in the drive at `at`; returns the path loaded.
+    fn load_disc(&self, at: &Location, path: String) -> Result<String, String> {
+        self.disks().load_disc(self.topology(), at, path)
+    }
+    /// Eject the drive's disc and load the next in its list; returns its path.
+    fn eject_disc(&self, at: &Location) -> Result<String, String> {
+        self.disks().eject_disc(self.topology(), at)
+    }
+    /// Eject the drive's disc and leave it empty.
+    fn eject_to_empty(&self, at: &Location) -> Result<(), String> {
+        self.disks().eject_to_empty(self.topology(), at)
+    }
+    /// Ask the guest to remount `/CDROM` after a disc change at `at`.
+    fn remount_cdrom_guest(&self, _at: &Location) {}
 
     /// Attached CHD disks with changes waiting to be folded into their bases.
     fn pending_chd_sync_count(&self) -> usize {
-        self.disks().pending_chd_sync_count()
+        self.disks().pending_chd_sync_count(self.topology())
     }
     /// Make every disk's accepted writes survive the process, including a
     /// copy-on-write overlay's record of the sectors it holds. Run it before
     /// the process exits without dropping the machine.
     fn flush_disks(&self) -> std::io::Result<()> {
-        self.disks().flush()
+        self.disks().flush(self.topology())
     }
     /// Fold pending CHD diffs into their bases (see [`Disks::sync_chd`]).
     fn sync_chd_disks(
         &self,
-        only: Option<usize>,
+        only: Option<&Location>,
         progress: &mut dyn FnMut(usize, usize, f32),
         cancel: &dyn Fn() -> bool,
     ) -> std::io::Result<usize> {
-        self.disks().sync_chd(only, progress, cancel)
+        self.disks().sync_chd(self.topology(), only, progress, cancel)
     }
 
     /// The count of guest frames every network backend feeds, for the GUI's
