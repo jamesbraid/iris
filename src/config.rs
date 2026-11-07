@@ -620,6 +620,12 @@ pub enum MachineProfile {
     /// configured by the shared keys and the `[tezro]` section; see
     /// `src/ip53_machine.rs`.
     TezroIp53,
+    /// SGI Origin 3200 (IP35) with one C-brick and an I-brick. The I-brick's
+    /// Fibre Channel card is stood in for by the Fuel's SCSI controller.
+    Origin3200OneCIp35,
+    /// SGI Origin 3200 (IP35) with two C-bricks joined by a direct NUMAlink
+    /// cable, and an I-brick on the first.
+    Origin3200TwoCIp35,
 }
 
 impl MachineProfile {
@@ -642,7 +648,7 @@ impl MachineProfile {
             Self::OctaneIp30 => &[0, 64, 128, 256, 512, 1024, 2048],
             Self::O2Ip32 => &[0, 32, 64, 128, 256],
             Self::Indigo2Ip28 => MC_BANK_SIZES,
-            Self::FuelIp34 => &[0, 256],
+            Self::FuelIp34 | Self::Origin3200OneCIp35 | Self::Origin3200TwoCIp35 => &[0, 256],
             Self::TezroIp53 => &[0, 512, 1024],
             _ => &[0, 8, 16, 32, 64, 128],
         }
@@ -667,7 +673,7 @@ impl MachineProfile {
 
     /// Every profile, in the order `workstation::build` lists them. `ALL` is
     /// only the ones the GUI offers.
-    pub const EVERY: [Self; 7] = [
+    pub const EVERY: [Self; 9] = [
         Self::IndyIp24,
         Self::Indigo2Ip22,
         Self::Indigo2Ip28,
@@ -675,6 +681,8 @@ impl MachineProfile {
         Self::OctaneIp30,
         Self::FuelIp34,
         Self::TezroIp53,
+        Self::Origin3200OneCIp35,
+        Self::Origin3200TwoCIp35,
     ];
 
     /// The name `[machine] profile` and `--machine` give this profile.
@@ -687,6 +695,8 @@ impl MachineProfile {
             Self::OctaneIp30 => "octane_ip30",
             Self::FuelIp34 => "fuel_ip34",
             Self::TezroIp53 => "tezro_ip53",
+            Self::Origin3200OneCIp35 => "origin3200_one_c_ip35",
+            Self::Origin3200TwoCIp35 => "origin3200_two_c_ip35",
         }
     }
 
@@ -739,6 +749,11 @@ impl MachineProfile {
         }
     }
 
+    /// Whether this is one of the Origin 3200 profiles.
+    pub fn origin3200(self) -> bool {
+        matches!(self, Self::Origin3200OneCIp35 | Self::Origin3200TwoCIp35)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::IndyIp24 => "SGI Indy (IP24)",
@@ -748,6 +763,8 @@ impl MachineProfile {
             Self::OctaneIp30 => "SGI Octane (IP30)",
             Self::FuelIp34 => "SGI Fuel (IP34)",
             Self::TezroIp53 => "SGI Tezro (IP53)",
+            Self::Origin3200OneCIp35 => "SGI Origin 3200, one C-brick (IP35)",
+            Self::Origin3200TwoCIp35 => "SGI Origin 3200, two C-bricks (IP35)",
         }
     }
 
@@ -757,7 +774,8 @@ impl MachineProfile {
     /// connector), one on the Indy.
     pub fn scsi_controllers(self) -> u8 {
         match self {
-            Self::Indigo2Ip22 | Self::O2Ip32 | Self::OctaneIp30 | Self::FuelIp34 | Self::TezroIp53 => 2,
+            Self::Indigo2Ip22 | Self::O2Ip32 | Self::OctaneIp30 | Self::FuelIp34 | Self::TezroIp53
+            | Self::Origin3200OneCIp35 | Self::Origin3200TwoCIp35 => 2,
             _ => 1,
         }
     }
@@ -769,7 +787,7 @@ impl MachineProfile {
     /// purpose. The Fuel's and the Tezro's ISP12160 buses are wide.
     pub fn max_scsi_id(self) -> u8 {
         match self {
-            Self::OctaneIp30 | Self::FuelIp34 | Self::TezroIp53 => 15,
+            Self::OctaneIp30 | Self::FuelIp34 | Self::TezroIp53 | Self::Origin3200OneCIp35 | Self::Origin3200TwoCIp35 => 15,
             _ => 7,
         }
     }
@@ -779,7 +797,7 @@ impl MachineProfile {
     /// room for more; unused entries must be zero.
     pub fn memory_banks(self) -> usize {
         match self {
-            Self::FuelIp34 => 2,
+            Self::FuelIp34 | Self::Origin3200OneCIp35 | Self::Origin3200TwoCIp35 => 2,
             Self::TezroIp53 => MAX_BANKS,
             _ => 4,
         }
@@ -798,6 +816,7 @@ impl MachineProfile {
             Self::Indigo2Ip28 => crate::machine::IP28_CPUS,
             Self::FuelIp34 => crate::ip34_machine::CPUS,
             Self::TezroIp53 => crate::ip53_machine::CPUS,
+            Self::Origin3200OneCIp35 | Self::Origin3200TwoCIp35 => crate::ip35_machine::CPUS,
             Self::IndyIp24 | Self::Indigo2Ip22 => crate::machine::CPUS,
         }
     }
@@ -912,6 +931,7 @@ impl GraphicsBoard {
             MachineProfile::OctaneIp30 => self.is_impact() || self.is_vpro() || self == Self::None,
             MachineProfile::FuelIp34 => matches!(self, Self::V10 | Self::V12 | Self::None),
             MachineProfile::TezroIp53 => matches!(self, Self::None | Self::V12),
+            MachineProfile::Origin3200OneCIp35 | MachineProfile::Origin3200TwoCIp35 => self == Self::None,
             MachineProfile::Indigo2Ip22 => !self.is_vpro() && self != Self::None,
             _ => !self.is_vpro() && !matches!(self, Self::Extreme | Self::None),
         }
@@ -921,7 +941,8 @@ impl GraphicsBoard {
     pub fn default_for(profile: MachineProfile) -> Self {
         match profile {
             MachineProfile::OctaneIp30 => Self::SolidImpact,
-            MachineProfile::FuelIp34 | MachineProfile::TezroIp53 => Self::None,
+            MachineProfile::FuelIp34 | MachineProfile::TezroIp53
+            | MachineProfile::Origin3200OneCIp35 | MachineProfile::Origin3200TwoCIp35 => Self::None,
             _ => Self::Newport,
         }
     }
@@ -2396,6 +2417,9 @@ impl MachineConfig {
             MachineProfile::FuelIp34 => Err(
                 "[virtio_serial] is not wired on the Fuel: its XBridge has no virtio-pci attachment".into(),
             ),
+            MachineProfile::Origin3200OneCIp35 | MachineProfile::Origin3200TwoCIp35 => Err(
+                "[virtio_serial] is not wired on the Origin 3200: its XBridge has no virtio-pci attachment".into(),
+            ),
             MachineProfile::TezroIp53 => Err(
                 "[virtio_serial] is not wired on the Tezro: its PIC has no virtio-pci attachment".into(),
             ),
@@ -2621,6 +2645,8 @@ impl MachineConfig {
                     format!("graphics.board \"{name}\" is not modelled on the Octane (valid: solidimpact, highimpact, maximpact, v6, v8, v10, v12, none)")
                 } else if self.machine.profile == MachineProfile::FuelIp34 {
                     format!("graphics.board \"{name}\" is not a Fuel board (valid: v12, v10, none)")
+                } else if self.machine.profile.origin3200() {
+                    format!("graphics.board \"{name}\" is not modelled on the Origin 3200 (valid: none)")
                 } else {
                     format!("graphics.board \"{name}\" is only valid on the Octane")
                 });
@@ -2662,7 +2688,7 @@ impl MachineConfig {
                     "scsi.{} and scsi.{} both name {}", other, key, scsi_label(controller, id)
                 ));
             }
-            if dev.is_daynaport() && matches!(self.machine.profile, MachineProfile::O2Ip32 | MachineProfile::FuelIp34 | MachineProfile::TezroIp53) {
+            if dev.is_daynaport() && (matches!(self.machine.profile, MachineProfile::O2Ip32 | MachineProfile::FuelIp34 | MachineProfile::TezroIp53) || self.machine.profile.origin3200()) {
                 return Err(format!(
                     "scsi.{}: kind = \"daynaport\" is not available on {} (its Ethernet is built in)", key, self.machine.profile.label()
                 ));
@@ -2705,6 +2731,19 @@ impl MachineConfig {
             }
             if !board.supports(MachineProfile::FuelIp34) {
                 return Err(format!("graphics.board \"{}\" is not a Fuel board (valid: v12, v10, none)", board.as_str()));
+            }
+            if let Some(text) = &self.fuel.l1_revision {
+                crate::dev::l1::parse_revision(text).map_err(|e| format!("fuel.l1_revision: {e}"))?;
+            }
+            if self.fuel.brick_serial.as_ref().is_some_and(|s| s.len() > 37 || s.contains('\0')) {
+                return Err("fuel.brick_serial must be at most 37 bytes with no NUL".into());
+            }
+        } else if self.machine.profile.origin3200() {
+            if self.banks[..2] != [256, 256] {
+                return Err("The Origin 3200 currently requires banks = [256, 256] (512 MiB a C-brick)".into());
+            }
+            if !board.supports(self.machine.profile) {
+                return Err(format!("graphics.board \"{}\" is not a board of the Origin 3200 (valid: none)", board.as_str()));
             }
             if let Some(text) = &self.fuel.l1_revision {
                 crate::dev::l1::parse_revision(text).map_err(|e| format!("fuel.l1_revision: {e}"))?;
@@ -2766,8 +2805,8 @@ impl MachineConfig {
             }
         }
         match (self.network.mode, self.machine.profile) {
-            (NetMode::Off, p) if !matches!(p, MachineProfile::O2Ip32 | MachineProfile::OctaneIp30 | MachineProfile::FuelIp34 | MachineProfile::TezroIp53) => {
-                return Err("network.mode = \"off\" is only available on the O2, Octane, Fuel and Tezro; the Indy and Indigo2 always have their Ethernet".into());
+            (NetMode::Off, p) if !(matches!(p, MachineProfile::O2Ip32 | MachineProfile::OctaneIp30 | MachineProfile::FuelIp34 | MachineProfile::TezroIp53) || p.origin3200()) => {
+                return Err("network.mode = \"off\" is only available on the O2, Octane, Fuel, Tezro and Origin 3200; the Indy and Indigo2 always have their Ethernet".into());
             }
             (NetMode::Stream, _) => {
                 let ep = self.network.stream.as_deref()
@@ -3831,7 +3870,7 @@ mod export_tests {
         assert_eq!(apply(&["--ip22"]).machine.profile, MachineProfile::Indigo2Ip22);
         assert!(Cli::try_parse_from(["iris", "--ip22", "--machine", "o2_ip32"]).is_err());
         let e = MachineProfile::from_name("vax").unwrap_err();
-        assert_eq!(e, "unknown machine \"vax\" (valid: indy_ip24, indigo2_ip22, indigo2_ip28, o2_ip32, octane_ip30, fuel_ip34, tezro_ip53)");
+        assert_eq!(e, "unknown machine \"vax\" (valid: indy_ip24, indigo2_ip22, indigo2_ip28, o2_ip32, octane_ip30, fuel_ip34, tezro_ip53, origin3200_one_c_ip35, origin3200_two_c_ip35)");
         let list = MachineProfile::list();
         assert_eq!(list.lines().count(), MachineProfile::EVERY.len());
         assert!(list.starts_with("indy_ip24     SGI Indy (IP24)\n"), "{list}");
@@ -3841,7 +3880,8 @@ mod export_tests {
             match p {
                 MachineProfile::IndyIp24 | MachineProfile::Indigo2Ip22 | MachineProfile::Indigo2Ip28
                 | MachineProfile::O2Ip32 | MachineProfile::OctaneIp30 | MachineProfile::FuelIp34
-                | MachineProfile::TezroIp53 => {}
+                | MachineProfile::TezroIp53
+                | MachineProfile::Origin3200OneCIp35 | MachineProfile::Origin3200TwoCIp35 => {}
             }
             let cfg: MachineConfig = toml::from_str(&format!("[machine]\nprofile = \"{}\"", p.name())).unwrap();
             assert_eq!(cfg.machine.profile, p);
@@ -3858,6 +3898,9 @@ mod export_tests {
         assert!(accepts(MachineProfile::IndyIp24, "r5000") && !accepts(MachineProfile::IndyIp24, "r10000"));
         assert!(accepts(MachineProfile::FuelIp34, "r14000") && !accepts(MachineProfile::FuelIp34, "r10000"));
         assert!(accepts(MachineProfile::TezroIp53, "r16000") && !accepts(MachineProfile::TezroIp53, "r14000"));
+        for profile in [MachineProfile::Origin3200OneCIp35, MachineProfile::Origin3200TwoCIp35] {
+            assert!(accepts(profile, "r12000") && accepts(profile, "r12000_400") && !accepts(profile, "r14000"), "{profile:?}");
+        }
 
         // The counts are what the checks in validate() and the Octane
         // constructor allowed before they moved here: one on every machine
