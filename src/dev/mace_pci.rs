@@ -200,12 +200,10 @@ impl PciDma for HostMemory {
     }
 }
 
-/// A function in a slot, and the configuration registers the guest has
-/// touched (first touch, with direction), for the bring-up report.
+/// A function in a slot.
 struct Slot {
     name: &'static str,
     dev: Arc<dyn PciFunction>,
-    touched: Mutex<Vec<(u8, bool)>>,
 }
 
 /// The most BAR windows open at once (two AIC-7880s open two each).
@@ -246,8 +244,6 @@ impl Window {
 pub struct MacePci {
     config_addr: Mutex<u32>,
     regs: Mutex<[u32; (MACEPCI_SIZE / 4) as usize]>,
-    /// Distinct config addresses the guest selected, in order.
-    probed: Mutex<Vec<u32>>,
     /// Functions by device number on bus 0.
     slots: Mutex<std::collections::BTreeMap<u8, Arc<Slot>>>,
     /// The function in each slot, for the CPU's window accesses, which
@@ -281,7 +277,6 @@ impl MacePci {
         Self {
             config_addr: Mutex::new(0),
             regs: Mutex::new([0u32; (MACEPCI_SIZE / 4) as usize]),
-            probed: Mutex::new(Vec::new()),
             slots: Mutex::new(std::collections::BTreeMap::new()),
             funcs: std::array::from_fn(|_| OnceLock::new()),
             windows: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -304,7 +299,7 @@ impl MacePci {
         dev.attached();
         assert!(self.funcs[slot as usize].set(dev.clone()).is_ok(), "pci: slot {slot} is taken");
         let mut slots = self.slots.lock().unwrap();
-        slots.insert(slot, Arc::new(Slot { name, dev, touched: Mutex::new(Vec::new()) }));
+        slots.insert(slot, Arc::new(Slot { name, dev }));
         self.rebuild_windows(&slots);
     }
 
@@ -357,11 +352,10 @@ impl MacePci {
         sink(runs);
     }
 
-    /// The function in a slot: its name and the registers the guest touched.
-    pub fn slot(&self, slot: u8) -> Option<(&'static str, Arc<dyn PciFunction>, Vec<(u8, bool)>)> {
+    /// The function in a slot, and the name it was attached under.
+    pub fn slot(&self, slot: u8) -> Option<(&'static str, Arc<dyn PciFunction>)> {
         let s = self.slots.lock().unwrap().get(&slot).cloned()?;
-        let touched = s.touched.lock().unwrap().clone();
-        Some((s.name, s.dev.clone(), touched))
+        Some((s.name, s.dev.clone()))
     }
 
     /// Whether `addr` is in one of the CPU's windows onto PCI memory.
@@ -475,21 +469,6 @@ impl MacePci {
         let s = self.slots.lock().unwrap().get(&dev).cloned()?;
         Some((s, ((a >> 2) & 0x3f) as usize))
     }
-
-    /// Config addresses selected so far, in first-touch order.
-    pub fn probed(&self) -> Vec<u32> {
-        self.probed.lock().unwrap().clone()
-    }
-}
-
-impl Slot {
-    fn note(&self, reg: usize, write: bool) {
-        let mut t = self.touched.lock().unwrap();
-        let r = (reg * 4) as u8;
-        if !t.contains(&(r, write)) {
-            t.push((r, write));
-        }
-    }
 }
 
 /// MACE's lanes, for [`PciBar`] entries: the same swizzle and the same
@@ -522,10 +501,7 @@ impl BusDevice for MacePci {
         let off = (addr as u32) & (MACEPCI_SIZE - 1) & !3;
         match off {
             macepci_reg::CONFIG_DATA => BusRead32::ok(match self.selected() {
-                Some((s, reg)) => {
-                    s.note(reg, false);
-                    s.dev.state().config().read(reg)
-                }
+                Some((s, reg)) => s.dev.state().config().read(reg),
                 // An absent device: the bus floats high. Zero would read back
                 // as vendor ID 0x0000, which firmware takes for a device that
                 // is present but broken.
@@ -542,14 +518,9 @@ impl BusDevice for MacePci {
         match off {
             macepci_reg::CONFIG_ADDR => {
                 *self.config_addr.lock().unwrap() = val;
-                let mut p = self.probed.lock().unwrap();
-                if val != 0 && !p.contains(&val) {
-                    p.push(val);
-                }
             }
             macepci_reg::CONFIG_DATA => {
                 if let Some((s, reg)) = self.selected() {
-                    s.note(reg, true);
                     s.dev.state().config().write(reg, val);
                     self.rebuild_windows(&self.slots.lock().unwrap());
                 }
@@ -653,7 +624,7 @@ impl crate::traits::Device for MacePci {
             }
             "config" => {
                 let slot: u8 = args.get(1).and_then(|v| v.parse().ok()).ok_or("Usage: pci config <slot>")?;
-                let (_, f, _) = self.slot(slot).ok_or(format!("pci: nothing in slot {slot}"))?;
+                let (_, f) = self.slot(slot).ok_or(format!("pci: nothing in slot {slot}"))?;
                 for row in 0..16 {
                     let v: Vec<String> = (0..4).map(|k| format!("{:08x}", f.state().config().read(row * 4 + k))).collect();
                     writeln!(w, "  {:02x}: {}", row * 16, v.join(" ")).ok();
@@ -753,8 +724,6 @@ mod tests {
         assert_eq!(*f.last.lock().unwrap(), Some((1, 0x87, 1)), "HCNTRL, by its little-endian lane");
         assert_eq!(pci.window_read(0x8000_1084, 2) as u16, 0x5678, "and the one-to-one high window");
         assert_eq!(*f.last.lock().unwrap(), Some((1, 0x86, 2)));
-        assert_eq!(pci.slot(IP32_SCSI_SLOT).unwrap().2, vec![(0x00, false), (0x14, true), (0x04, true)],
-                   "config registers touched, for the bring-up report");
 
         // Pin A of slot 1 is CRIME input 8.
         f.pci.irq().expect("wired at attach").set(true);
