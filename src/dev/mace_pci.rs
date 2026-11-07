@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use crate::irq::{InterruptController, IrqLine};
 use crate::dev::crime_mem::O2Memory;
-use crate::pci::{bar_runs, BarAt, BarRun, BarRunSink, PciBar, PciBusDevice, PciDma, PciDmaStatus, PciLanes, Space};
+use crate::pci::{bar_runs, BarAt, BarRun, BarRunSink, PciBar, PciFunction, PciDma, PciDmaStatus, PciLanes, Space};
 use crate::snapshot::{get_field, hex_u32, load_u32_slice, toml_u32, u32_slice_to_toml};
 use crate::traits::{BusDevice, BusRead32, BusRead64, Saveable, BUS_OK};
 use crate::ip32::*;
@@ -204,7 +204,7 @@ impl PciDma for HostMemory {
 /// touched (first touch, with direction), for the bring-up report.
 struct Slot {
     name: &'static str,
-    dev: Arc<dyn PciBusDevice>,
+    dev: Arc<dyn PciFunction>,
     touched: Mutex<Vec<(u8, bool)>>,
 }
 
@@ -252,7 +252,7 @@ pub struct MacePci {
     slots: Mutex<std::collections::BTreeMap<u8, Arc<Slot>>>,
     /// The function in each slot, for the CPU's window accesses, which
     /// look it up without a lock.
-    funcs: [OnceLock<Arc<dyn PciBusDevice>>; 32],
+    funcs: [OnceLock<Arc<dyn PciFunction>>; 32],
     /// The BAR windows the functions decode, rebuilt from their headers
     /// after every configuration write. A function's BAR comparators are
     /// its own registers on the bus, not anything the bridge locks, so
@@ -295,7 +295,7 @@ impl MacePci {
 
     /// Put a function in a slot on bus 0, wire its interrupt pin to the
     /// bridge, which routes it on, and give it host memory to master.
-    pub fn attach(&self, slot: u8, name: &'static str, dev: Arc<dyn PciBusDevice>) {
+    pub fn attach(&self, slot: u8, name: &'static str, dev: Arc<dyn PciFunction>) {
         dev.connect_dma(self.dma.clone());
         let pin = dev.config().interrupt_pin();
         if (1..=4).contains(&pin) {
@@ -339,7 +339,7 @@ impl MacePci {
     fn publish_bars(&self, slots: &std::collections::BTreeMap<u8, Arc<Slot>>) {
         let sink = self.bar_sink.read().unwrap();
         let Some(sink) = sink.as_ref() else { return };
-        let funcs: Vec<(usize, Arc<dyn PciBusDevice>)> = slots.iter().map(|(&i, s)| (i as usize, s.dev.clone())).collect();
+        let funcs: Vec<(usize, Arc<dyn PciFunction>)> = slots.iter().map(|(&i, s)| (i as usize, s.dev.clone())).collect();
         let mut entry = |b: BarAt| {
             self.bar_entries
                 .lock()
@@ -357,7 +357,7 @@ impl MacePci {
     }
 
     /// The function in a slot: its name and the registers the guest touched.
-    pub fn slot(&self, slot: u8) -> Option<(&'static str, Arc<dyn PciBusDevice>, Vec<(u8, bool)>)> {
+    pub fn slot(&self, slot: u8) -> Option<(&'static str, Arc<dyn PciFunction>, Vec<(u8, bool)>)> {
         let s = self.slots.lock().unwrap().get(&slot).cloned()?;
         let touched = s.touched.lock().unwrap().clone();
         Some((s.name, s.dev.clone(), touched))
@@ -400,7 +400,7 @@ impl MacePci {
 
     /// The function decoding a PCI memory address: it, the BAR and the
     /// offset within it.
-    fn mem_target(&self, space: Space, pci_addr: u32) -> Option<(&Arc<dyn PciBusDevice>, usize, u32)> {
+    fn mem_target(&self, space: Space, pci_addr: u32) -> Option<(&Arc<dyn PciFunction>, usize, u32)> {
         let n = self.nwindows.load(Ordering::Acquire);
         self.windows[..n].iter().find_map(|w| {
             let w = Window::unpack(w.load(Ordering::Relaxed));
@@ -414,7 +414,7 @@ impl MacePci {
 
     /// The function and BAR a CPU address in a window reaches, in whichever
     /// space that window opens onto.
-    fn window_target(&self, addr: u32) -> Option<(&Arc<dyn PciBusDevice>, usize, u32)> {
+    fn window_target(&self, addr: u32) -> Option<(&Arc<dyn PciFunction>, usize, u32)> {
         if Self::in_io_window(addr) {
             return self.mem_target(Space::Io, addr - PCI_IO_BASE);
         }
@@ -497,7 +497,7 @@ impl Slot {
 struct Lanes;
 
 impl PciLanes for Lanes {
-    fn read(&self, f: &dyn PciBusDevice, bar: usize, off: u32, size: usize) -> u64 {
+    fn read(&self, f: &dyn PciFunction, bar: usize, off: u32, size: usize) -> u64 {
         if size == 8 {
             let hi = f.bar_read(bar, off, 4) as u64;
             return hi << 32 | f.bar_read(bar, off.wrapping_add(4), 4) as u64;
@@ -505,7 +505,7 @@ impl PciLanes for Lanes {
         f.bar_read(bar, MacePci::lane_swizzle(off, size), size) as u64
     }
 
-    fn write(&self, f: &dyn PciBusDevice, bar: usize, off: u32, size: usize, val: u64) {
+    fn write(&self, f: &dyn PciFunction, bar: usize, off: u32, size: usize, val: u64) {
         if size == 8 {
             f.bar_write(bar, off, (val >> 32) as u32, 4);
             f.bar_write(bar, off.wrapping_add(4), val as u32, 4);
@@ -676,7 +676,7 @@ mod tests {
         irq: std::sync::OnceLock<IrqLine>,
     }
 
-    impl PciBusDevice for Fake {
+    impl PciFunction for Fake {
         fn config(&self) -> &PciConfig { &self.cfg }
         fn bar_read(&self, bar: usize, off: u32, width: usize) -> u32 {
             *self.last.lock().unwrap() = Some((bar, off, width));

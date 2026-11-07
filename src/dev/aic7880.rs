@@ -1697,7 +1697,7 @@ impl crate::traits::Saveable for Aic7880 {
 }
 
 /// Both BARs reach the same registers.
-impl crate::pci::PciBusDevice for Aic7880 {
+impl crate::pci::PciFunction for Aic7880 {
     fn config(&self) -> &crate::pci::PciConfig {
         &self.pci
     }
@@ -1760,7 +1760,7 @@ mod tests {
     /// A chip that masters host memory `ram` through the bridge.
     fn on(ram: Ram) -> Arc<Aic7880> {
         let c = Aic7880::new();
-        crate::pci::PciBusDevice::connect_dma(&*c, std::sync::Arc::new(crate::dev::mace_pci::HostMemory::new(ram)));
+        crate::pci::PciFunction::connect_dma(&*c, std::sync::Arc::new(crate::dev::mace_pci::HostMemory::new(ram)));
         c
     }
 

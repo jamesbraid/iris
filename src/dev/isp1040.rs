@@ -81,7 +81,7 @@ use parking_lot::{Condvar, Mutex, MutexGuard};
 
 use crate::devlog::LogModule;
 use crate::irq::IrqLine;
-use crate::pci::{Bar, PciBusDevice, PciConfig, PciDma, PCI_INTA};
+use crate::pci::{Bar, PciFunction, PciConfig, PciDma, PCI_INTA};
 use crate::scsi::{scsi_cmd, ScsiBus, ScsiDataLength, ScsiIdentities, ScsiRequest, CDROM_IDENTITY, DISK_IDENTITY};
 use crate::snapshot::{get_field, hex_u16, hex_u32, load_u16_slice, toml_u16, toml_u32, toml_u8, u16_slice_to_toml, u8_slice_to_toml};
 
@@ -2010,7 +2010,7 @@ impl crate::scsi_monitor::ScsiTargets for Isp1040 {
 }
 
 /// Both BARs reach the same registers.
-impl PciBusDevice for Isp1040 {
+impl PciFunction for Isp1040 {
     fn config(&self) -> &PciConfig {
         &self.pci
     }
@@ -2029,6 +2029,10 @@ impl PciBusDevice for Isp1040 {
 
     fn connect_dma(&self, dma: Arc<dyn PciDma>) {
         let _ = self.dma.set(dma);
+    }
+
+    fn reset(&self) {
+        self.core.reset();
     }
 }
 

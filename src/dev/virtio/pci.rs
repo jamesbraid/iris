@@ -12,7 +12,7 @@
 //! | `0x3000` | notifications, one dword per queue | 2 |
 //!
 //! Everything in the BAR is little-endian as the device sees it; the host
-//! bridge has already applied its byte-lane rules (see `PciBusDevice`), so a
+//! bridge has already applied its byte-lane rules (see `PciFunction`), so a
 //! guest driver swaps exactly as it does for any other PCI device on that
 //! machine.
 //!
@@ -22,7 +22,7 @@
 use std::sync::Arc;
 
 use crate::irq::IrqLine;
-use crate::pci::{Bar, PciBusDevice, PciConfig, PciDma, PCI_INTA};
+use crate::pci::{Bar, PciFunction, PciConfig, PciDma, PCI_INTA};
 use crate::traits::Resettable;
 
 use super::{PciMemory, VirtioCore};
@@ -171,7 +171,7 @@ fn lanes(off: u32, width: usize, word: impl Fn(u32) -> u32) -> u32 {
     }
 }
 
-impl PciBusDevice for VirtioPci {
+impl PciFunction for VirtioPci {
     fn config(&self) -> &PciConfig {
         &self.pci
     }
