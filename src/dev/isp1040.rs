@@ -189,6 +189,7 @@ pub mod mbox {
     pub const INVALID: u16 = 0x4001;
     pub const HOST_INTERFACE_ERROR: u16 = 0x4002;
     pub const TEST_FAILED: u16 = 0x4003;
+    pub const COMMAND_ERROR: u16 = 0x4005;
     pub const PARAM_ERROR: u16 = 0x4006;
 }
 
