@@ -14,7 +14,8 @@
 //! its point, absolute (no position added). Points (0x14c, 0x14d, 0x14e with
 //! one, six or twenty-four) are single pixels `x << 16 | y`, and like boxes
 //! they take the words of a waiting data run first. A span token whose count
-//! is not what its length implies is dropped, counted.
+//! is not what its length implies is dropped, counted. Every fill is masked by the
+//! loaded stipple (see `stipple`).
 //!
 //! Not built: background points (0x15f to 0x161), relative points (0x14f to
 //! 0x151), and segments and lines (0x159 to 0x15c). No recorded stream uses
@@ -325,9 +326,11 @@ struct Outcome {
 }
 
 impl XState {
-    /// The stipple pattern a fill uses: none until stipples are held.
+    /// The stipple pattern a fill uses, if one with a pattern is loaded.
     fn stipple_pattern(&self) -> Option<StipplePattern> {
-        None
+        let (rows, width, height, origin) = self.stipple.loaded_pattern()?;
+        let (ox, oy) = self.origin();
+        Some(StipplePattern { rows, width, height, origin: (ox + origin.0, oy + origin.1) })
     }
 
     /// Draw `boxes` under the context: planned once, every box checked before
@@ -702,6 +705,191 @@ mod tests {
         assert_eq!((x.fills.malformed, x.runs_dropped), (2, 0));
         x.draw_command(&d, X_BOX, &[pack(0, 0), pack(1, 1)]);
         assert_eq!(x.fills.drawn, 1, "the box alone");
+    }
+
+    /// The optimised fills against a per-pixel reference that works from what
+    /// this test wrote, not from the code under test: its own table of the 16
+    /// logic operations, the raw words it chose for the colours and the mask, the
+    /// clip rectangles, scissor, stipple rows, origin and position it sent, and
+    /// the clip rule stated once below. Nothing on the expected-value path calls
+    /// `XState`, `Gc` or `Stipple`; only the loads and the draw go through them.
+    ///
+    /// The generator keeps most requests on the screen (clip rectangles
+    /// overlapping it, few empty masks), and the test counts, from the
+    /// reference, the requests that change a pixel and asserts at least half of
+    /// them do, and that every operation that writes changed something.
+    ///
+    /// The clip rule, as the model this was taken from has it (inferred there,
+    /// not a hardware measurement): drawing is limited to the screen; to the box
+    /// from the smallest x1 and y1 to the largest x2 and y2 of the clip
+    /// rectangles as sent (a reversed rectangle contributes its corners as given,
+    /// so it can make that box empty); when more than one rectangle was sent, to
+    /// pixels inside at least one (x1 <= x < x2 and y1 <= y < y2, so a reversed
+    /// rectangle holds none); and to the scissor box (x1, y1, width, height) when
+    /// one was loaded after the clip. A stipple bit is the row at `(y - oy) mod
+    /// height`, bit `(x - ox) mod width` from the most significant, where the
+    /// origin is the position plus the entry's origin.
+    #[test]
+    fn fills_match_a_per_pixel_reference() {
+        const W: i64 = 64;
+        const H: i64 = 48;
+        // The 16 operations in the GL numbering, written out here.
+        let ops: [fn(u32, u32) -> u32; 16] = [
+            |_, _| 0,
+            |s, d| s & d,
+            |s, d| s & !d,
+            |s, _| s,
+            |s, d| !s & d,
+            |_, d| d,
+            |s, d| s ^ d,
+            |s, d| s | d,
+            |s, d| !(s | d),
+            |s, d| !(s ^ d),
+            |_, d| !d,
+            |s, d| s | !d,
+            |s, _| !s,
+            |s, d| !s | d,
+            |s, d| !(s & d),
+            |_, _| u32::MAX,
+        ];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = move |n: u32| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) as u32) % n
+        };
+        let store = PixelStore::new(W as u32, H as u32);
+        let surface = Surface::new(&store, 1);
+        // The reference's own copy of the screen, by X row (y down), and the store
+        // is bottom-origin: store row = H - 1 - y.
+        let mut model = vec![0u32; (W * H) as usize];
+        for y in 0..H {
+            for x in 0..W {
+                let v = rnd(0x1_0000);
+                model[(y * W + x) as usize] = v;
+                store.write(x as u32, (H - 1 - y) as u32, 1, v);
+            }
+        }
+        // A rectangle mostly over the screen; now and then reversed.
+        let rect = |rnd: &mut dyn FnMut(u32) -> u32| -> [i64; 4] {
+            let (x1, y1) = (rnd(70) as i64 - 8, rnd(54) as i64 - 6);
+            let (w, h) = (6 + rnd(60) as i64, 6 + rnd(44) as i64);
+            if rnd(12) == 0 { [x1 + w, y1 + h, x1, y1] } else { [x1, y1, x1 + w, y1 + h] }
+        };
+        let (mut changing, mut by_op) = (0u32, [0u32; 16]);
+        const REQUESTS: u32 = 600;
+        for request in 0..REQUESTS {
+            let mut x = XState::default();
+            // Stipple: none, or one of several sizes at a random origin.
+            let stippled = rnd(3) != 0;
+            let (mut rows, mut sw, mut sh, mut so) = (Vec::new(), 1i64, 1i64, (0i64, 0i64));
+            if stippled {
+                let sizes = [1u32, 2, 3, 5, 8, 17, 32];
+                let (w, h) = (sizes[rnd(7) as usize], sizes[rnd(7) as usize]);
+                x.command(0x13d, &[1, w, h]);
+                rows = (0..h).map(|_| rnd(u32::MAX)).collect();
+                x.stipple.rows(&rows);
+                so = (rnd(80) as i64 - 40, rnd(80) as i64 - 40);
+                x.command(0x13e, &[1, so.0 as i32 as u32, so.1 as i32 as u32]);
+                x.command(0x13c, &[1]);
+                (sw, sh) = (w as i64, h as i64);
+            }
+            let pos = (rnd(40) as i64 - 20, rnd(40) as i64 - 20);
+            x.command(0x12a, &[pos.0 as i32 as u32, pos.1 as i32 as u32, 64, 48]);
+            // The context: the words are built from the values chosen here.
+            let gx = rnd(16);
+            let mask = match rnd(5) {
+                0 | 1 => 0xffff,
+                _ => 1 + rnd(0xffff),
+            };
+            let (fg, bg) = (rnd(0x1_0000), rnd(0x1_0000));
+            let opaque = stippled && rnd(2) == 0;
+            let word = |v: u32| (v & 0xfff0) << 4 | (v & 0xf) << 3;
+            let mut gc = [0, 0x1ffe, 0, 0x1ffe, 0, 0, 0x180c, 0x40001, 1, 2 * gx, 5, 1, 1];
+            gc[0] = word(fg);
+            gc[2] = word(bg);
+            gc[4] = (mask >> 4) & 0xfff | (mask & 0xf) << 20 | if opaque { 0x8000_0000 } else { 0 };
+            x.command(0x129, &gc);
+            // The clip: none, one rectangle, or several that overlap.
+            let mut clips: Vec<[i64; 4]> = Vec::new();
+            match rnd(3) {
+                0 => {}
+                1 => {
+                    clips.push(rect(&mut rnd));
+                    let r = clips[0];
+                    x.command(0x12b, &[1, r[0] as i32 as u32, r[1] as i32 as u32, r[2] as i32 as u32, r[3] as i32 as u32]);
+                }
+                _ => {
+                    let n = 2 + rnd(3) as usize;
+                    let mut flat = vec![n as u32];
+                    for _ in 0..n {
+                        let r = rect(&mut rnd);
+                        clips.push(r);
+                        flat.extend(r.iter().map(|&v| v as i32 as u32));
+                    }
+                    let (lead, last) = flat.split_at(flat.len() - 5);
+                    for c in lead.chunks(4) {
+                        x.command(0x145, c);
+                    }
+                    x.command(0x12b, last);
+                }
+            }
+            let scissor = (rnd(4) == 0).then(|| [rnd(50) as i64 - 10, rnd(36) as i64 - 8, 10 + rnd(60) as i64, 8 + rnd(40) as i64]);
+            if let Some(s) = scissor {
+                x.command(0x12d, &[s[0] as i32 as u32, s[1] as i32 as u32, s[2] as u32, s[3] as u32]);
+            }
+            let b = rect(&mut rnd);
+            x.draw_command(&surface, X_BOX, &[pack(b[0] as i32, b[1] as i32), pack(b[2] as i32, b[3] as i32)]);
+
+            // The reference.
+            let mut limit = [0i64, 0, W, H];
+            if !clips.is_empty() {
+                limit = [
+                    limit[0].max(clips.iter().map(|c| c[0]).min().unwrap()),
+                    limit[1].max(clips.iter().map(|c| c[1]).min().unwrap()),
+                    limit[2].min(clips.iter().map(|c| c[2]).max().unwrap()),
+                    limit[3].min(clips.iter().map(|c| c[3]).max().unwrap()),
+                ];
+            }
+            if let Some(s) = scissor {
+                limit = [limit[0].max(s[0]), limit[1].max(s[1]), limit[2].min(s[0] + s[2]), limit[3].min(s[1] + s[3])];
+            }
+            let writes = mask != 0 && gx != 5;
+            let mut changed = false;
+            if writes {
+                for py in 0..H {
+                    for px in 0..W {
+                        let inside = |r: &[i64; 4]| px >= r[0] && px < r[2] && py >= r[1] && py < r[3];
+                        if !inside(&b) || !inside(&limit) || (clips.len() > 1 && !clips.iter().any(inside)) {
+                            continue;
+                        }
+                        let set = !stippled || rows[(py - (pos.1 + so.1)).rem_euclid(sh) as usize] & (0x8000_0000u32 >> (px - (pos.0 + so.0)).rem_euclid(sw)) != 0;
+                        if !set && !opaque {
+                            continue;
+                        }
+                        let at = (py * W + px) as usize;
+                        let old = model[at];
+                        let new = ((ops[gx as usize](if set { fg } else { bg }, old) & mask) | (old & !mask)) & 0xffff;
+                        changed |= new != old;
+                        model[at] = new;
+                    }
+                }
+            }
+            for py in 0..H {
+                for px in 0..W {
+                    let (a, r) = (store.read(px as u32, (H - 1 - py) as u32, 1), model[(py * W + px) as usize]);
+                    assert_eq!(a, r, "request {request}: pixel ({px}, {py}) after gx {gx}, mask {mask:#x}, box {b:?}, clips {clips:?}, scissor {scissor:?}, stipple {stippled} (opaque {opaque})");
+                }
+            }
+            if changed {
+                changing += 1;
+                by_op[gx as usize] += 1;
+            }
+        }
+        assert!(changing >= REQUESTS / 2, "only {changing} of {REQUESTS} requests changed a pixel");
+        for (gx, n) in by_op.iter().enumerate() {
+            // The no-op writes nothing; the others must have changed pixels.
+            assert!(gx == 5 || *n >= 5, "operation {gx} changed pixels in only {n} requests");
+        }
     }
 
     #[test]

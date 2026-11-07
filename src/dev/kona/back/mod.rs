@@ -231,6 +231,7 @@ impl KonaBackend {
             self.x.scissor(),
             self.x.runs_dropped
         )?;
+        writeln!(w, "X stipple         {}", if self.x.stipple.is_loaded() { "loaded" } else { "none loaded" })?;
         let f = &self.x.fills;
         writeln!(w, "X fills           {} drawn, refused: {} context, {} target, {} destination", f.drawn, f.bad_context, f.other_target, f.bad_destination)?;
         writeln!(w, "fill rule         {:?}", self.cfg.fill_rule)?;
@@ -286,7 +287,12 @@ impl Backend for KonaBackend {
                     let surface = raster::Surface::new(&self.store, token::textport::COLOUR_WORD);
                     self.x.draw_command(&surface, selector, args);
                 }
+                // A stipple store's rows follow it as a run the back end sizes.
+                if selector == token::stipple::X_STORE_STIPPLE && self.x.stipple.pending_rows() != 0 {
+                    return Reply::Data(self.x.stipple.pending_rows());
+                }
             }
+            Job::Data { grammar: Grammar::Kernel, selector: token::stipple::X_STORE_STIPPLE, words, .. } => self.x.stipple.rows(words),
             Job::Bitmap { header, payload } => self.textport.bitmap(&self.store, header, payload),
             _ => {}
         }
@@ -460,7 +466,7 @@ mod tests {
     }
 
     /// Run one job through `Backend::job` with a front end behind it.
-    fn send(b: &mut KonaBackend, job: Job<'_>) {
+    fn send(b: &mut KonaBackend, job: Job<'_>) -> Reply {
         use super::super::front::{Front, Host};
         use super::super::pipe::Core;
         let t = TestHost::new();
@@ -474,11 +480,11 @@ mod tests {
             activity: Default::default(),
         };
         let mut core = Core::new(cfg, super::super::flash::Flash::fresh());
-        b.job(&mut BackPort { core: &mut core, host: &host }, job);
+        b.job(&mut BackPort { core: &mut core, host: &host }, job)
     }
 
-    fn command(b: &mut KonaBackend, grammar: Grammar, selector: u32, args: &[u32]) {
-        send(b, Job::Command { grammar, selector, args, packed: 0, handled: false });
+    fn command(b: &mut KonaBackend, grammar: Grammar, selector: u32, args: &[u32]) -> Reply {
+        send(b, Job::Command { grammar, selector, args, packed: 0, handled: false })
     }
 
     /// A framed GL command reaches the layout through `Backend::job`; the
@@ -558,6 +564,29 @@ mod tests {
         assert_eq!(b.store.read(20, 1023 - 20, 1), 0x5a00);
         let text = run(&mut b, &["status"]).1;
         assert!(text.contains("X fills           2 drawn, refused: 0 context, 0 target, 0 destination"), "{text}");
+    }
+
+    /// A stipple store asks for its rows as a data run; with the pattern
+    /// stored and loaded, a box fill is masked by it.
+    #[test]
+    fn a_stipple_is_stored_loaded_and_masks_a_fill() {
+        let mut b = backend();
+        let gc = [0x5a000, 0x1ffe, 0xa5000, 0x1ffe, 0xf00fff, 0, 0x180c, 0x40001, 1, 6, 5, 1, 1];
+        command(&mut b, Grammar::Kernel, 0x129, &gc);
+        // A 2 x 2 checkerboard in entry 4: the reply asks for its two rows.
+        assert_eq!(command(&mut b, Grammar::Kernel, 0x13d, &[4, 2, 2]), Reply::Data(2));
+        send(&mut b, Job::Data { grammar: Grammar::Kernel, selector: 0x13d, args: &[4, 2, 2], words: &[0x8000_0000, 0x4000_0000] });
+        assert_eq!(command(&mut b, Grammar::Kernel, 0x13c, &[4]), Reply::Done);
+        command(&mut b, Grammar::Kernel, 0x154, &[0, 4 << 16 | 4]);
+        assert_eq!(b.store.read(0, 1023 - 0, 1), 0x5a00);
+        assert_eq!(b.store.read(1, 1023 - 0, 1), 0);
+        assert_eq!(b.store.read(1, 1023 - 1, 1), 0x5a00);
+        assert!(run(&mut b, &["status"]).1.contains("X stipple         loaded"));
+        command(&mut b, Grammar::Kernel, 0x13c, &[u32::MAX]);
+        command(&mut b, Grammar::Kernel, 0x154, &[10 << 16 | 10, 12 << 16 | 12]);
+        assert_eq!(b.store.read(11, 1023 - 10, 1), 0x5a00, "no stipple: solid");
+        // A store of no rows asks for none.
+        assert_eq!(command(&mut b, Grammar::Kernel, 0x13d, &[4, 2, 0]), Reply::Done);
     }
 
     #[test]

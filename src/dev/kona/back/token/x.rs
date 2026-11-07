@@ -12,7 +12,8 @@
 //! - 0x145 (`x_bdata4`) the leading words of a clip list longer than one
 //!   rectangle, kept until the 0x12b (`x_clip`) that ends it: a count `n` and
 //!   `n` rectangles `x1, y1, x2, y2`;
-//! - 0x12d (`x_scissor`) a clip box (x1, y1, width, height).
+//! - 0x12d (`x_scissor`) a clip box (x1, y1, width, height);
+//! - 0x13c, 0x13d, 0x13e the stipple cache (see `stipple`).
 //!
 //! Grades. The word layouts are software expectations from the senders. That
 //! each clip rectangle is absolute with an exclusive far corner, and that
@@ -62,6 +63,7 @@ pub struct XState {
     pub(super) boxes: Vec<super::xfill::Box4>,
     pub(super) spans: Vec<(i64, i64)>,
     pub fills: super::xfill::FillCounts,
+    pub stipple: super::stipple::Stipple,
     /// Clip lists refused (a count that does not match, or too long) and runs
     /// dropped by another command.
     pub clips_refused: u64,
@@ -70,7 +72,7 @@ pub struct XState {
 
 impl Default for XState {
     fn default() -> Self {
-        XState { gc: [0; GC_WORDS], position: [0; 4], clip: Vec::new(), scissor: None, clip_run: Vec::new(), run: Vec::new(), boxes: Vec::new(), spans: Vec::new(), fills: Default::default(), clips_refused: 0, runs_dropped: 0 }
+        XState { gc: [0; GC_WORDS], position: [0; 4], clip: Vec::new(), scissor: None, clip_run: Vec::new(), run: Vec::new(), boxes: Vec::new(), spans: Vec::new(), fills: Default::default(), stipple: Default::default(), clips_refused: 0, runs_dropped: 0 }
     }
 }
 
@@ -171,6 +173,11 @@ impl XState {
                 }
             }
             X_CLIP => self.load_clip(args),
+            super::stipple::X_LOAD_STIPPLE => self.stipple.load(args),
+            super::stipple::X_STORE_STIPPLE => {
+                self.stipple.begin_store(args);
+            }
+            super::stipple::X_ROTATE_STIPPLE => self.stipple.rotate(args),
             X_SCISSOR => {
                 if let Ok(w) = <[u32; 4]>::try_from(args) {
                     self.scissor = Some(w);
