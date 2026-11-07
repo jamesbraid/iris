@@ -1758,11 +1758,8 @@ fn mute_from_word(w: u8) -> Result<Option<bool>, String> {
 // resumes at the saved instant, as the machine's other clocks do. The
 // timers are armed again when the card starts. The host audio stream is
 // this process's own and is not saved.
-impl crate::traits::Resettable for Rad1 {
-    fn power_on(&self) {
-        self.reset();
-    }
-}
+/// The bus resets it ([`PciFunction::reset`]).
+impl crate::traits::Resettable for Rad1 {}
 
 impl Saveable for Rad1 {
     fn save_state(&self) -> toml::Value {

@@ -677,7 +677,7 @@ impl OctaneMachine {
     /// [`Self::power_on_devices`], then RST# reaching the PCI side.
     fn power_on_all(&self) {
         self.power_on_devices();
-        self.bridge.reset_pci();
+        self.bridge.bus().reset();
     }
 
     /// Start what `stop` stopped, short of the CPU: HEART's counter, the
@@ -1474,6 +1474,40 @@ mod snapshot_tests {
             assert!(e.contains("IMPACT"), "{e}");
             let e = m.load_snapshot("x").unwrap_err();
             assert!(e.contains("IMPACT"), "{e}");
+        }).unwrap().join().unwrap();
+    }
+
+    /// RST# on the Octane's cold reset: the parts' power-on leaves the PCI
+    /// functions alone, and the bus then resets each one's header and then
+    /// the function, once, by device. (A recording card at two free slots
+    /// shows the order; the SCSI controller shows the parts' power-on skips
+    /// the registered functions.)
+    #[test]
+    fn octane_reset_runs_bus_reset_once_and_each_function_once() {
+        use crate::pci::testing::TestCard;
+        use crate::pci::{Bar, PciFunction, PCI_COMMAND_MEMORY};
+        use crate::dev::isp1040::reg as ireg;
+        std::thread::Builder::new().stack_size(64 << 20).spawn(|| {
+            let dir = scratch("rst");
+            let prom = empty_prom(&dir);
+            let m = machine(&prom, &dir);
+            let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let pci = m.bridge.bus();
+            let bars = [Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused];
+            for (name, device) in [("late", 6u8), ("early", 5)] {
+                let at = PciAddr { device, function: 0 };
+                pci.attach(at, TestCard::logged(name, bars, 0, &log));
+                pci.config_write(at, 4, 2, PCI_COMMAND_MEMORY);
+            }
+            let isp = &m.scsi[0];
+            isp.bar_write(0, ireg::MAILBOX_BASE, 0x1234, 2);
+            assert_eq!(isp.bar_read(0, ireg::MAILBOX_BASE, 2), 0x1234);
+            m.power_on_devices();
+            assert_eq!(isp.bar_read(0, ireg::MAILBOX_BASE, 2), 0x1234, "the parts' power-on skips PCI functions");
+            assert!(log.lock().unwrap().is_empty());
+            m.power_on_all();
+            assert_eq!(isp.bar_read(0, ireg::MAILBOX_BASE, 2), 0, "the bus reset it");
+            assert_eq!(*log.lock().unwrap(), ["early cmd=0x0", "late cmd=0x0"], "header first, by device, once each");
         }).unwrap().join().unwrap();
     }
 

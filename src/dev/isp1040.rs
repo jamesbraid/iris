@@ -2034,11 +2034,8 @@ impl PciFunction for Isp1040 {
     }
 }
 
-impl crate::traits::Resettable for Isp1040 {
-    fn power_on(&self) {
-        self.reset();
-    }
-}
+/// The bus resets it ([`PciFunction::reset`]).
+impl crate::traits::Resettable for Isp1040 {}
 
 impl crate::traits::Saveable for Isp1040 {
     fn save_state(&self) -> toml::Value {

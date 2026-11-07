@@ -630,13 +630,6 @@ impl Bridge {
         self.bus.refresh(&|| self.windows());
     }
 
-    /// The machine's reset reaching the PCI side: RST# on the bus. Every
-    /// function's configuration header returns to power-up, so none decodes
-    /// until firmware assigns its BARs again.
-    pub fn reset_pci(&self) {
-        self.bus.reset();
-    }
-
     /// The Crossbow's link reset arriving. IRIX saves the control and link
     /// configuration registers around it and rebuilds the rest, so the whole
     /// core is taken as lost: registers, translation entries and latched
@@ -1319,7 +1312,7 @@ impl crate::traits::Device for Bridge {
 
 impl crate::traits::Resettable for Bridge {
     /// Power-on: the chip's own state, as a reset. The functions behind it
-    /// are not reset here; see [`Bridge::reset_pci`].
+    /// are not reset here; the machine resets the bus.
     fn power_on(&self) {
         self.reset();
     }
