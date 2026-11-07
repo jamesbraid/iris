@@ -13,6 +13,16 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### InfiniteReality front end
+
+- `src/dev/kona/` is the InfiniteReality (KONA) pipe's host interface: widget
+  id and identity registers, the one-wire board record of an Onyx2 deskside's
+  InfiniteReality2 (GE14-4, one or two RM7), the flash EEPROM and the
+  operation the graphics install tool programs it with, the command FIFO on
+  `GFifo` (a full ring answers the bus busy), command framing for the
+  textport, kernel and GL grammars, DMA and display-list memory. Drawing is
+  behind a typed `Backend` job interface; no machine instantiates the board yet.
+
 ### Boot test before publishing
 
 - `build.yml` can boot IRIX 5.3 to a login prompt on Linux, macOS and Windows

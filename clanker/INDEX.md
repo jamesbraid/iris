@@ -276,6 +276,15 @@ Odyssey (VPro V6/V8/V10/V12): the Octane2/Fuel/Tezro graphics board. Modelled on
 | [a-refused-command-store-answers-busy-never-spins.md](odyssey/a-refused-command-store-answers-busy-never-spins.md) | rule | RAD "thread held off" under Quake: the room check counted retired stores while the GFifo head is published lazily, so `write_command` spun on the host with no interrupts; check the ring's own view and answer busy |
 | [sharegroup-warning-at-gl-exit-is-normal.md](odyssey/sharegroup-warning-at-gl-exit-is-normal.md) | rule | `odsy: attempted sharegroup operation from unbound gfxp` at GL program exit is normal: a real V10 logs it 57 times when tyrquake quits; only a sign of trouble mid-run or after a teardown |
 
+
+## kona/
+
+The InfiniteReality (KONA) graphics pipe's host interface.
+
+| Note | Kind | Title |
+|---|---|---|
+| [front-end.md](kona/front-end.md) | design | The Host Interface Processor: attach interface, the command queue on `GFifo`, which accesses wait, the job seam to a back end, approximations |
+
 ## hostgl/
 
 Host GL pass-through for guest GL programs (`iris-hostgl`).
