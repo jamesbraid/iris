@@ -24,8 +24,9 @@ is `docs/pci.md`.
 
 ## Hazards
 
-- A stale run table: anything that changes a BAR, a command register or a host
-  window must update the mappings. A configuration write to any other register
+- A stale run table: anything that changes a BAR, a command register, a bridge
+  window or a host window must update the mappings. A change behind a bridge
+  updates the buses in front of it. A configuration write to any other register
   does not, because each update walks the whole table.
 - The physical bus keeps every device it is given, for the life of the
   machine. Hosts make their `BarDevice`s through `BarDevices`, which returns the
@@ -34,7 +35,8 @@ is `docs/pci.md`.
   calls into the combiner with that lock held. The Bridge decides a packet
   under `st` and sends it after dropping `st`.
 - Lock order: publish mutex, then the host's lock (`refresh`'s `make`). The
-  Bridge drops `st` before `refresh`.
+  Bridge drops `st` before `refresh`. A bridge's secondary holds its parent
+  weakly; the parent holds the bridge function, which holds the bus.
 - The slow BAR table is scanned without a lock while an update rewrites it. A
   reader can briefly see a mix of old and new regions; every word is valid and
   no slot is freed, so it is not unsafe.
