@@ -3981,3 +3981,13 @@ mod machine_storage_integration {
         assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     }
 }
+
+#[cfg(test)]
+mod makers_tests {
+    /// The linker kept the device types: a binary that lost them would parse
+    /// no `[[hdd]]` entry.
+    #[test]
+    fn makers_include_the_expected_device_types() {
+        assert_eq!(iris::attach::missing_makers(&["hdd", "cdrom"]), Vec::<String>::new());
+    }
+}

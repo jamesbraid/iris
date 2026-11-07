@@ -165,81 +165,17 @@ impl ScsiDeviceConfig {
         if key >= 16 { (key / 16, key % 16) } else { (self.controller, key) }
     }
 
-    /// The media this target starts with: the active image and, for a
-    /// CD-ROM, the changer list built from `path` and `discs` with empty
-    /// entries skipped (an empty `path` is a drive with its tray empty, to be
-    /// loaded at run time). A disk is just its path.
-    pub fn media(&self) -> (String, Vec<String>) {
-        if !self.is_cdrom() {
-            return (self.path.clone(), vec![]);
+    /// What the disks module opens for this target.
+    pub fn spec(&self) -> crate::disks::MediaSpec {
+        crate::disks::MediaSpec {
+            path: self.path.clone(),
+            discs: self.discs.clone(),
+            cdrom: self.is_cdrom(),
+            overlay: self.overlay,
+            scratch: self.scratch,
+            size_mb: self.size_mb,
+            write_cache: self.write_cache,
         }
-        let mut list: Vec<String> = Vec::new();
-        if !self.path.is_empty() {
-            list.push(self.path.clone());
-        }
-        for d in &self.discs {
-            if !d.is_empty() && !list.contains(d) {
-                list.push(d.clone());
-            }
-        }
-        let active = list.first().cloned().unwrap_or_default();
-        (active, list)
-    }
-
-    /// Where a `--ci` run keeps the copy-on-write overlay of the disk at
-    /// `id`: in the host's temporary directory (`$TMPDIR`, or `/tmp` when it
-    /// is unset), as an absolute path, so a later change of directory still
-    /// finds it.
-    ///
-    /// The name carries [`ci_run_tag`](Self::ci_run_tag), so an interactive
-    /// iris holding `PATH.overlay`, any number of CI runs, and a later run
-    /// that gets the same process ID never open each other's overlay. A
-    /// machine rebuilt in the same process reopens its own. The files are
-    /// kept after the run for inspection.
-    pub fn ci_overlay_path(id: u8) -> String {
-        static RUN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        let run = RUN.get_or_init(|| {
-            let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                .map_err(|before| before.duration());
-            Self::ci_run_tag(std::process::id(), started)
-        });
-        let path = std::env::temp_dir().join(format!("iris-ci-{run}-scsi{id}.overlay"));
-        std::path::absolute(&path).unwrap_or(path).to_string_lossy().into_owned()
-    }
-
-    /// One run's part of its overlay names: the process ID and the time the
-    /// run first named an overlay, in nanoseconds since the epoch, or with a
-    /// `b` before it when the host clock is set before the epoch, so such a
-    /// clock still gives each run its own name.
-    fn ci_run_tag(pid: u32, started: Result<std::time::Duration, std::time::Duration>) -> String {
-        match started {
-            Ok(after) => format!("{pid}-{:x}", after.as_nanos()),
-            Err(before) => format!("{pid}-b{:x}", before.as_nanos()),
-        }
-    }
-
-    /// For `scratch = true`: make sure the volume exists, creating it with a
-    /// minimal SGI volume header and `size_mb` MB when it does not, and
-    /// return its path for the CI socket's scratch commands. None when the
-    /// target is not a scratch volume, or cannot be one (a CD-ROM or an
-    /// overlay is not host-writable in place), which is reported.
-    pub fn prepare_scratch(&self, id: u8) -> Option<std::path::PathBuf> {
-        if !self.scratch {
-            return None;
-        }
-        if self.is_cdrom() || self.overlay {
-            println!("Note: SCSI ID {}: scratch=true is incompatible with cdrom/overlay; ignoring scratch flag", id);
-            return None;
-        }
-        let path = std::path::Path::new(&self.path);
-        if !path.exists() {
-            let size_mb = self.size_mb.unwrap_or(64) as u64;
-            match crate::sgi_vh::create_scratch_image(path, size_mb * 1024 * 1024) {
-                Ok(()) => println!("iris: created scratch volume {} ({} MB, with SGI VH)", self.path, size_mb),
-                Err(e) => println!("Note: could not create scratch volume {}: {}", self.path, e),
-            }
-        }
-        Some(path.to_path_buf())
     }
 
     /// A DaynaPort target for this SCSI id, with defaults filled in.
@@ -4366,43 +4302,4 @@ mod apply_env_tests {
         set_or_remove_env(OURS, "");
         assert!(std::env::var_os(OURS).is_none());
     }
-}
-
-#[cfg(test)]
-mod ci_overlay_tests {
-    use super::ScsiDeviceConfig;
-    use std::time::Duration;
-
-    /// Process IDs come round again, and a container gives iris the same one
-    /// every time, so a later run must not take an earlier run's name and
-    /// adopt its overlay.
-    #[test]
-    fn a_later_run_with_the_same_process_id_gets_its_own_overlay() {
-        let first = ScsiDeviceConfig::ci_run_tag(2, Ok(Duration::from_nanos(1_000)));
-        let later = ScsiDeviceConfig::ci_run_tag(2, Ok(Duration::from_nanos(2_000)));
-        assert_ne!(first, later);
-    }
-
-    /// A host clock set before the epoch still names each run apart, and
-    /// never as a run the same distance after it.
-    #[test]
-    fn a_clock_before_the_epoch_still_names_runs_apart() {
-        let tag = |t| ScsiDeviceConfig::ci_run_tag(2, t);
-        let (a, b) = (tag(Err(Duration::from_nanos(5_000))), tag(Err(Duration::from_nanos(4_000))));
-        assert_ne!(a, b);
-        assert_ne!(a, tag(Ok(Duration::from_nanos(5_000))));
-        assert_ne!(tag(Err(Duration::ZERO)), tag(Ok(Duration::ZERO)));
-    }
-
-    #[test]
-    fn one_run_keeps_one_name_per_disk_in_the_temporary_directory() {
-        let a = ScsiDeviceConfig::ci_overlay_path(1);
-        let path = std::path::Path::new(&a);
-        assert!(path.is_absolute(), "{a}");
-        assert_eq!(path.parent(), std::path::absolute(std::env::temp_dir()).ok().as_deref());
-        assert_eq!(a, ScsiDeviceConfig::ci_overlay_path(1));
-        assert_ne!(a, ScsiDeviceConfig::ci_overlay_path(2));
-        assert!(a.contains(&format!("iris-ci-{}-", std::process::id())), "{a}");
-    }
-
 }

@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use super::ScsiBus;
 use crate::config::{DaynaportParams, MachineConfig, ScsiDeviceConfig};
+use crate::disks::{attach_target, ci_overlay_path};
 
 /// One `[scsi.N]` image table, for a snapshot manifest to record.
 pub struct TableRef {
@@ -42,20 +43,6 @@ pub struct Attached {
     pub daynaports: Vec<DaynaportRef>,
 }
 
-/// A target that will not attach ends a command-line run, since booting on
-/// without it only yields a confusing PROM "no such device" later. An
-/// embedder (the GUI sets `IRIS_NO_EXIT_ON_POWEROFF`) must never be torn
-/// down by the library, so it skips the one target and boots without it; the
-/// GUI's Start preflight already warns about an unreadable disk.
-pub fn attach_failed(msg: String, at: &str) -> Result<(), String> {
-    if std::env::var_os("IRIS_NO_EXIT_ON_POWEROFF").is_some() {
-        eprintln!("iris: warning: {msg}; continuing without {at}");
-        Ok(())
-    } else {
-        Err(msg)
-    }
-}
-
 /// Attach every disk and CD-ROM table of `cfg`, logging each as
 /// `{log_prefix}: SCSI ID n: ...` unless the prefix is `None`. `route` names
 /// the bus a controller number is on, or says why there is none ("an O2 has
@@ -84,9 +71,8 @@ pub fn attach_from_config<'a>(
             path: dev.path.clone(),
             size_bytes: std::fs::metadata(&dev.path).map(|m| m.len()).unwrap_or(0),
         });
-        // The file gets an SGI volume header, without which IRIX returns I/O
-        // errors on every read of the volume.
-        if let Some(path) = dev.prepare_scratch(key) {
+        let spec = dev.spec();
+        if let Some(path) = spec.prepare_scratch(&at) {
             if out.scratch.is_some() {
                 println!("Note: multiple scratch SCSI devices configured; CI socket will use the lowest-id one");
             } else {
@@ -94,30 +80,8 @@ pub fn attach_from_config<'a>(
             }
         }
         let bus = route(controller).map_err(|e| format!("{at}: {e}"))?;
-        let (path, discs) = dev.media();
-        let cdrom = dev.is_cdrom();
-        // CI mode isolates each copy-on-write overlay in the temporary
-        // directory, so an interactive iris holding one and any number of CI
-        // runs can share the image.
-        let ci_overlay = (cfg.ci && dev.overlay && !cdrom).then(|| ScsiDeviceConfig::ci_overlay_path(key));
-        match bus.attach_device(id, &path, cdrom, discs, dev.overlay, ci_overlay.as_deref(), dev.write_cache) {
-            Ok(blocks) => {
-                if let Some(prefix) = log_prefix {
-                    if path.is_empty() {
-                        eprintln!("{prefix}: {at}: CD-ROM, tray empty");
-                    } else {
-                        eprintln!("{prefix}: {at}: {path} ({blocks} blocks)");
-                    }
-                }
-            }
-            Err(e) => {
-                let msg = match &ci_overlay {
-                    Some(ov) => format!("could not attach {path} to {at} with its --ci overlay {ov}: {e}"),
-                    None => format!("could not attach {path} to {at}: {e}"),
-                };
-                attach_failed(msg, &at)?
-            }
-        }
+        let ci_overlay = (cfg.ci && dev.overlay && !spec.cdrom).then(|| ci_overlay_path(&format!("scsi{key}")));
+        attach_target(bus, id, &at, ci_overlay.as_deref(), &spec, log_prefix)?;
     }
     out.tables.sort_by_key(|t| t.slot);
     Ok(out)
