@@ -653,12 +653,7 @@ impl O2Machine {
         if m.schema_version > SCHEMA_VERSION {
             return Err(format!("snapshot schema_version {} is newer than this iris build supports ({SCHEMA_VERSION})", m.schema_version));
         }
-        if m.schema_version < SCHEMA_VERSION {
-            return Err(format!(
-                "snapshot {name} is schema {}; the O2's UART state changed shape in schema 5, so it cannot be restored",
-                m.schema_version
-            ));
-        }
+        refuse_older_schema(name, m.schema_version)?;
         // As the Indy: build, CPU and disks must match.
         crate::snapshot::check_provenance(&m, self.cpu.model_name(), self.cpu.cache_kind(), &self.disks)?;
         let sv = m.schema_version;
@@ -1195,6 +1190,19 @@ fn control_command(bus: &Ip32Bus, cmd: &str, arg: &str, rgba: &mut [u8]) -> Stri
 }
 
 
+/// An O2 snapshot older than this build's schema cannot be restored: the PCI
+/// bus state moved into the bus in schema 6, and the UARTs' in 5.
+fn refuse_older_schema(name: &str, version: u32) -> Result<(), String> {
+    use crate::snapshot::SCHEMA_VERSION;
+    if version < SCHEMA_VERSION {
+        return Err(format!(
+            "snapshot {name} is schema {version}, this build reads schema {SCHEMA_VERSION}: the PCI bus state moved \
+             into the bus in schema 6 (and the UARTs' in 5), so it cannot be restored"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod drop_tests {
     use super::*;
@@ -1212,5 +1220,15 @@ mod drop_tests {
         drop(machine);
         assert_eq!(phys.strong_count(), 0, "the bus outlives its machine");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A snapshot of an older schema is refused with both versions named.
+    /// `read_snapshot` asks this before it loads anything; without the
+    /// refusal the schema 5 MACE layout would load as an empty bus.
+    #[test]
+    fn old_schema_snapshot_is_refused() {
+        let e = refuse_older_schema("old", 5).err().expect("an old snapshot is refused");
+        assert!(e.contains("schema 5") && e.contains(&format!("schema {}", crate::snapshot::SCHEMA_VERSION)) && e.contains("PCI bus state"), "{e}");
+        assert!(refuse_older_schema("new", crate::snapshot::SCHEMA_VERSION).is_ok());
     }
 }

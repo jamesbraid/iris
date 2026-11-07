@@ -49,7 +49,13 @@ use toml::Value;
 /// changed shape: the serial DMA, the Indy's SCC and the rest are as before.
 /// Octane snapshots start at v5, and an Octane reads only snapshots of the
 /// schema it was built with, so the next bump refuses every older one.
-pub const SCHEMA_VERSION: u32 = 5;
+///
+/// v5 → v6: the PCI bus saves its own state (each function's header, the pin
+/// and wire levels) where MACE and the Bridge each saved headers and pin
+/// levels in their own layout. A v5 reader would load none of it and leave
+/// every BAR unassigned under a running kernel, and a v6 reader does the
+/// same with a v5 snapshot, so both machines refuse the other schema.
+pub const SCHEMA_VERSION: u32 = 6;
 
 const MANIFEST_FILE: &str = "snapshot.toml";
 
