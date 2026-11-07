@@ -1248,6 +1248,30 @@ fn save_load_round_trip() {
     assert_eq!(dst.r(reg::REQUEST_QUEUE), 4, "the held completion and the ring carry over");
 }
 
+/// A restore into a chip that has been in use equals one into a fresh chip:
+/// the snapshot names everything the chip holds, and nothing of the old
+/// rings, held completions or mailboxes survives the load.
+#[test]
+fn isp1040_load_into_a_dirtied_instance_equals_load_into_a_fresh_one() {
+    let src = Rig::with_disk("ld-src", 0, 64);
+    src.init_rings(8, 3);
+    src.cmd(&[mbox::WRITE_RAM_WORD, 0x40, 0x1234]);
+    for i in 0..4 { src.put_entry(i, &tur_entry(0x5000 + i)); }
+    src.doorbell(4);
+    let v = src.isp.save_state();
+
+    let used = Rig::with_disk("ld-used", 0, 64);
+    used.init_rings(8, 5);
+    used.cmd(&[mbox::WRITE_RAM_WORD, 0x41, 0x9999]);
+    for i in 0..6 { used.put_entry(i, &tur_entry(0x6000 + i)); }
+    used.doorbell(6);
+    let fresh = Rig::with_disk("ld-fresh", 0, 64);
+    used.isp.load_state(&v).unwrap();
+    fresh.isp.load_state(&v).unwrap();
+    assert_eq!(used.isp.save_state(), fresh.isp.save_state());
+    assert_eq!(used.isp.save_state(), v);
+}
+
 #[test]
 fn a_disk_attaches_where_asked_and_the_monitor_can_see_it() {
     use crate::scsi_monitor::ScsiTargets;
