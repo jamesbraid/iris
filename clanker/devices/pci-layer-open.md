@@ -28,3 +28,5 @@ Status: open, 2026-11.
   post-bus-reset state on a load rather than saved.
 - **Resettable on PCI functions.** Ioc3, Isp1040, Rad1 and VirtioPci have
   empty `Resettable` impls only because the device registry requires one.
+- **A BAR that straddles a bridge window's edge** is not forwarded; what
+  hardware does is undefined.

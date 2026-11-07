@@ -77,6 +77,20 @@ established. `Wire(i)` is pin `i`, shared with the GPIO inputs; the IOC3's
 SuperIO interrupt is `Wire(4)`. Devices 0 and 1 are the ISP1040s, 2 is the
 IOC3, 3 is the RAD1, and 4 is virtio-serial when enabled.
 
+## PCI-to-PCI bridges
+
+`PciToPciBridge` is a function with a type 1 header and a bus behind it. The
+bus in front merges the BARs behind the bridge that lie wholly inside an enabled
+window into its own decode table and runs; a BAR that straddles a window's edge
+is not forwarded, because what a bridge does with one is not defined. A pin of
+the function at device `d` behind the bridge reaches pin `(pin + d) mod 4` of
+the bridge's device, and its DMA is the bridge's. Raising bridge control bit 6
+resets the bus behind it, and RST# on the bus in front reaches behind it too.
+MACE's configuration cycles for a bus number other than 0 go to the bus
+firmware has numbered that far. The header is
+the type 1 header only (the caller names the PCI identity); the upper halves of
+the prefetchable and I/O windows read zero. No machine builds one yet.
+
 ## Monitor
 
 `pci status` lists each function: address, identity, command, assigned BARs
