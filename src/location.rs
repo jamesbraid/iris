@@ -50,6 +50,10 @@ impl Hop {
     pub fn t(n: u8) -> Hop { Hop::of("t", n) }
     pub fn hpc3() -> Hop { Hop::of("hpc3", 0) }
     pub fn gfx() -> Hop { Hop::of("gfx", 0) }
+    pub fn number(self) -> u8 { self.n }
+    /// A position on the enclosing bus (a bare number).
+    pub fn is_bare(self) -> bool { self.tag == BARE }
+    pub fn same_tag(self, other: Hop) -> bool { self.tag == other.tag }
 }
 
 impl fmt::Display for Hop {
