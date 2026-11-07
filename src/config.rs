@@ -1,5 +1,6 @@
 use clap::{CommandFactory, FromArgMatches, Parser};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
 /// Every memory bank size in MB, for the front-ends' menus; `bank_sizes` says
@@ -1764,13 +1765,14 @@ mod scsi_keys {
 /// field, so all scalars are declared first and the table-valued fields
 /// (`scsi`, `nfs`, `port_forward`, `vino`) come last.
 ///
-/// `deny_unknown_fields` makes typos and misplaced keys a hard parse error
-/// instead of silently ignoring them. This catches a common footgun: writing
+/// Keys no typed field names are collected in `extra` (the `[[<device>]]`
+/// arrays live there) and `check_extra` refuses the ones that are not a
+/// device. Typos and misplaced keys therefore stay a hard error instead of
+/// being silently ignored. This catches a common footgun: writing
 /// `mode = "pcap"` at the top level (because `[network]` was left commented
 /// out) used to be silently dropped, so PCAP never engaged and networking
 /// quietly stayed on NAT.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct MachineConfig {
     /// Path to the PROM ROM image.
     #[serde(default = "default_prom")]
@@ -2016,6 +2018,10 @@ pub struct MachineConfig {
     /// virtio-serial guest device (`[virtio_serial]`, `[[virtio_serial.port]]`).
     #[serde(default, skip_serializing_if = "VirtioSerialConfig::is_default")]
     pub virtio_serial: VirtioSerialConfig,
+
+    /// Top-level keys no field above names: the `[[<device>]]` arrays.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, toml::Value>,
 }
 
 fn default_scsi_deferred_int() -> bool { true }
@@ -2229,6 +2235,7 @@ impl Default for MachineConfig {
             rtc_offset: RtcOffset::default(),
             ultra64: Ultra64Config::default(),
             virtio_serial: VirtioSerialConfig::default(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -2312,6 +2319,7 @@ impl MachineConfig {
         };
         match toml::from_str::<Self>(&text) {
             Ok(mut cfg) => {
+                cfg.check_extra().map_err(|e| format!("failed to parse {path}:\n{e}"))?;
                 cfg.fold_deprecated();
                 Ok(cfg)
             }
@@ -2427,7 +2435,24 @@ impl MachineConfig {
         self.graphics.board.unwrap_or_else(|| GraphicsBoard::default_for(self.machine.profile))
     }
 
+    /// Refuse a top-level key that is not a device array. The typed fields
+    /// are checked by serde; this takes over what `deny_unknown_fields` did
+    /// for the rest.
+    pub fn check_extra(&self) -> Result<(), String> {
+        for (key, v) in &self.extra {
+            return Err(match v {
+                toml::Value::Array(a) if a.iter().all(toml::Value::is_table) => {
+                    format!("unknown device [[{key}]]")
+                }
+                toml::Value::Table(_) => format!("unknown section [{key}]"),
+                _ => format!("unknown key `{key}`: not a section or a device array"),
+            });
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<(), String> {
+        self.check_extra()?;
         self.validate_virtio_serial()?;
         self.machine.profile.accepts_cpu(self.machine.cpu)?;
         self.machine.profile.accepts_cpus(self.machine.cpus)?;
@@ -3875,6 +3900,74 @@ mod export_tests {
         let s = toml::to_string_pretty(&cfg).expect("serialize");
         assert!(!s.contains("disks"), "the deprecated key is never written back:\n{s}");
     }
+
+    /// Unrecognised top-level keys land in `extra`, not in a parse error, so
+    /// `[[<device>]]` arrays can sit beside the typed fields. The check that
+    /// replaces `deny_unknown_fields` must still catch the typos it caught.
+    #[test]
+    fn mode_pcap_at_the_top_level_is_refused_naming_the_key() {
+        let cfg: MachineConfig = toml::from_str("mode = \"pcap\"\n").unwrap();
+        let e = cfg.validate().unwrap_err();
+        assert!(e.contains("mode"), "{e}");
+    }
+
+    #[test]
+    fn a_misspelt_scalar_is_refused() {
+        let cfg: MachineConfig = toml::from_str("monitor_prot = 1\n").unwrap();
+        let e = cfg.validate().unwrap_err();
+        assert!(e.contains("monitor_prot") && e.contains("not a section"), "{e}");
+    }
+
+    #[test]
+    fn a_misspelt_section_is_refused() {
+        let cfg: MachineConfig = toml::from_str("[machin]\nprofile = \"o2_ip32\"\n").unwrap();
+        let e = cfg.validate().unwrap_err();
+        assert!(e.contains("unknown section [machin]"), "{e}");
+    }
+
+    #[test]
+    fn a_wrong_typed_typed_field_keeps_its_line_and_column() {
+        let e = toml::from_str::<MachineConfig>("scale = \"x\"\n").unwrap_err().to_string();
+        assert!(e.contains("line 1, column"), "{e}");
+    }
+
+    /// Every shipped example survives parse, serialise, parse: the typed
+    /// fields and `extra` together write what they read.
+    #[test]
+    fn typed_fields_round_trip_through_flatten() {
+        let files: &[(&str, &str)] = &[
+            ("iris.toml", include_str!("../iris.toml")),
+            ("iris-irix53.toml", include_str!("../iris-irix53.toml")),
+            ("iris-irix65.toml", include_str!("../iris-irix65.toml")),
+            ("octane.toml.example", include_str!("../octane.toml.example")),
+            ("ip28.toml.example", include_str!("../ip28.toml.example")),
+            ("irix-install/iris-install.toml", include_str!("../irix-install/iris-install.toml")),
+            ("irix-install/iris-smoke-ci.toml", include_str!("../irix-install/iris-smoke-ci.toml")),
+            ("irix-install/iris-windows.toml", include_str!("../irix-install/iris-windows.toml")),
+            ("cpu-tests/run/boot.toml", include_str!("../cpu-tests/run/boot.toml")),
+        ];
+        for (name, text) in files {
+            let a: MachineConfig = toml::from_str(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let out = toml::to_string_pretty(&a).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let b: MachineConfig = toml::from_str(&out).unwrap_or_else(|e| panic!("{name}: {e}\n{out}"));
+            let again = toml::to_string_pretty(&b).unwrap();
+            assert_eq!(
+                toml::from_str::<toml::Value>(&out).unwrap(),
+                toml::from_str::<toml::Value>(&again).unwrap(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_collects_an_array_of_tables() {
+        let src = "[[hdd]]\nat = \"x\"\n";
+        let cfg: MachineConfig = toml::from_str(src).unwrap();
+        let hdd = cfg.extra.get("hdd").expect("hdd in extra");
+        assert_eq!(hdd.as_array().map(|a| a.len()), Some(1));
+        let out = toml::to_string_pretty(&cfg).unwrap();
+        assert!(out.contains("[[hdd]]\nat = \"x\""), "{out}");
+    }
 }
 
 #[cfg(test)]
@@ -4101,4 +4194,5 @@ mod ci_overlay_tests {
         assert_ne!(a, ScsiDeviceConfig::ci_overlay_path(2));
         assert!(a.contains(&format!("iris-ci-{}-", std::process::id())), "{a}");
     }
+
 }
