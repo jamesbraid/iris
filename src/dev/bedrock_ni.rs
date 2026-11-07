@@ -1,11 +1,14 @@
-//! Bedrock NI exposes node routing, sideband and error registers. Fuel runs as
-//! one node without a NUMAlink peer, but the guest still reads and programs
-//! these local control words during machine setup.
+//! Bedrock NI exposes node routing, sideband and error registers. A node may
+//! have no NUMAlink peer, as the Fuel has none, but the guest still reads and
+//! programs these local control words during machine setup. A node whose port
+//! is cabled to another Bedrock reads its link state from that cable and can
+//! send it a warm reset.
 //!
 //! # What is approximated here
 //!
 //! Routing and sideband writes are retained; the network fabric and packet
-//! delivery are not simulated. Unspecified power-on fields start at zero, and
+//! delivery are not simulated. The link comes up with the cable, with no
+//! training sequence. Unspecified power-on fields start at zero, and
 //! the sideband word survives reset as the current compatibility behavior.
 //!
 //! Ported from hw/misc/sgi-bedrock-ni.c and hw/misc/sgi-bedrock-ni-regs.c
@@ -14,14 +17,18 @@
 /// Length of the block-relative register aperture.
 pub const SIZE: u64 = 0x2008;
 
-/// Port status bits 1:0 of a node with no cable: bit 1 (link up) clear, bit 0
-/// set. INFERRED, not measured. Bit 1 follows a real Tezro PROM reporting its
-/// NUMAlink as down; bit 0 follows a real one-node Fuel taking a PIO bus
-/// error with no link message (a 2003 installation kernel). The IRIX 6.5.30
-/// bus-error handler prints a link-reset NOTICE when bits 1:0 read 0 with
-/// reset enable 0. A PROM-monitor read of this register on an uncabled node
-/// would settle it.
-const PORT_STATUS_UNCABLED: u64 = 1;
+/// Port status bits 1:0 (register 0). Bit 0 reads set when nothing is cabled to
+/// the port, bit 1 when the cable carries a live link.
+///
+/// INFERRED, not measured. Bit 1 follows a real Tezro PROM reporting its
+/// NUMAlink as down and the PROM's test of it for link-up (it prints "link is
+/// down" when it stays clear); bit 0 follows a real one-node Fuel taking a PIO
+/// bus error with no link message (a 2003 installation kernel). The IRIX 6.5.30
+/// bus-error handler prints a link-reset NOTICE when bits 1:0 read 0 with reset
+/// enable 0, which is why a never-cabled port reads bit 0. A PROM-monitor read
+/// of this register on an uncabled node would settle it.
+pub const UNCABLED: u64 = 1;
+pub const LINK_UP: u64 = 2;
 
 pub mod reg {
     /// Port status, hub-relative `0x680000` (the first word of the block).
@@ -44,7 +51,17 @@ pub mod reg {
 
 use crate::traits::{BusDevice, BusRead64, Resettable, BUS_ERR, BUS_OK};
 use parking_lot::{Mutex, ReentrantMutex};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+/// Index of the reset-enable word (`CONTROL_0`) in `Regs::control`.
+const RESET_ENABLE: usize = reg::CONTROL_0 as usize / 8;
+
+/// What the NUMAlink cable on the port tells the Bedrock and carries from it.
+pub trait Cable: Send + Sync {
+    fn link_up(&self) -> bool;
+    /// Send a warm reset to the node at the far end.
+    fn send_reset(&self);
+}
 type Level = Arc<dyn Fn(bool) + Send + Sync>;
 #[derive(Clone)]
 struct Regs {
@@ -71,6 +88,7 @@ pub struct BedrockNi {
     delivery: ReentrantMutex<()>,
     driven: Mutex<Option<bool>>,
     reset: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    cable: OnceLock<Arc<dyn Cable>>,
 }
 impl Default for BedrockNi {
     fn default() -> Self {
@@ -87,6 +105,24 @@ impl BedrockNi {
             delivery: ReentrantMutex::new(()),
             driven: Mutex::new(None),
             reset: Mutex::new(None),
+            cable: OnceLock::new(),
+        }
+    }
+    /// Cable the port. A port is cabled once, when the machine is built.
+    pub fn connect_cable(&self, cable: Arc<dyn Cable>) {
+        assert!(self.cable.set(cable).is_ok(), "NI port already cabled");
+    }
+    /// A warm reset arrived over the cable. The reset-enable bit, bit 0 of
+    /// control 0, lets it reset the node; the local request is not gated.
+    pub fn link_reset(&self) {
+        if self.regs.lock().control[RESET_ENABLE] & 1 != 0 {
+            self.request_reset();
+        }
+    }
+    fn request_reset(&self) {
+        let cb = self.reset.lock().clone();
+        if let Some(cb) = cb {
+            cb();
         }
     }
     pub fn connect_error(&self, cb: Level) {
@@ -153,7 +189,11 @@ impl BusDevice for BedrockNi {
             r.routes[(a as usize - 0x1000) / 8]
         } else {
             match a {
-                reg::PORT_STATUS => PORT_STATUS_UNCABLED,
+                reg::PORT_STATUS => match self.cable.get() {
+                    None => UNCABLED,
+                    Some(cable) if cable.link_up() => LINK_UP,
+                    Some(_) => 0,
+                },
                 reg::ERROR_STATUS => r.errors,
                 reg::ERROR_STATUS_UPPER | reg::ERROR_STATUS_LOWER => 0,
                 reg::SIDE_BAND => r.sideband,
@@ -193,10 +233,15 @@ impl BusDevice for BedrockNi {
         }
         drop(r);
         self.update_irq();
-        if a == reg::LOCAL_RESET && v & 4 != 0 {
-            let cb = self.reset.lock().clone();
-            if let Some(cb) = cb {
-                cb();
+        if a == reg::LOCAL_RESET {
+            if v & 2 != 0 {
+                match self.cable.get() {
+                    Some(cable) if cable.link_up() => cable.send_reset(),
+                    _ => crate::dlog!(crate::devlog::LogModule::Bedrock, "Bedrock NI port reset with no link reaches nothing"),
+                }
+            }
+            if v & 4 != 0 {
+                self.request_reset();
             }
         }
         BUS_OK
@@ -343,17 +388,69 @@ mod tests {
         }
     }
 
-    /// An uncabled one-node port reads status bits 1:0 = 1: link down, bit 0
-    /// set. Reading 0 there makes the guest's bus-error handler print a
-    /// link-reset notice. Bit 18 stays clear (a one-node machine) and a
-    /// write does not change the value.
+    struct TestCable {
+        up: std::sync::atomic::AtomicBool,
+        resets: AtomicU64,
+    }
+    impl TestCable {
+        fn new(up: bool) -> Arc<Self> {
+            Arc::new(Self { up: up.into(), resets: AtomicU64::new(0) })
+        }
+    }
+    impl Cable for TestCable {
+        fn link_up(&self) -> bool {
+            self.up.load(Ordering::SeqCst)
+        }
+        fn send_reset(&self) {
+            self.resets.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// The firmware only polls bit 1 of the port status: it follows the
+    /// cable from reset with nothing written, a port that was never cabled
+    /// reads bit 0 alone, and a write leaves the status alone.
     #[test]
-    fn uncabled_port_status_reads_one_and_ignores_writes() {
+    fn port_status_follows_the_cable() {
+        let lone = BedrockNi::new();
+        assert_eq!(lone.read64(reg::PORT_STATUS).data, UNCABLED);
+        lone.write64(reg::PORT_STATUS, !0);
+        assert_eq!(lone.read64(reg::PORT_STATUS).data, UNCABLED);
         let d = BedrockNi::new();
-        assert_eq!(d.read64(reg::PORT_STATUS).data, 1);
-        d.write64(reg::PORT_STATUS, !0);
-        assert_eq!(d.read64(reg::PORT_STATUS).data, 1);
+        let cable = TestCable::new(true);
+        d.connect_cable(cable.clone());
+        assert_eq!(d.read64(reg::PORT_STATUS).data, LINK_UP);
+        cable.up.store(false, Ordering::SeqCst);
+        assert_eq!(d.read64(reg::PORT_STATUS).data, 0);
+        cable.up.store(true, Ordering::SeqCst);
         d.power_on();
-        assert_eq!(d.read64(reg::PORT_STATUS).data, 1);
+        assert_eq!(d.read64(reg::PORT_STATUS).data, LINK_UP);
+    }
+
+    /// Bit 1 of the reset word sends a warm reset over a live link and bit 2
+    /// resets this node; a warm reset arriving over the link resets the node
+    /// only when its reset-enable bit is set.
+    #[test]
+    fn port_reset_goes_over_the_link_and_arrives_gated_by_the_enable() {
+        let d = BedrockNi::new();
+        let cable = TestCable::new(true);
+        d.connect_cable(cable.clone());
+        let resets = Arc::new(AtomicU64::new(0));
+        let count = resets.clone();
+        d.connect_local_reset(Arc::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        }));
+        d.write64(reg::LOCAL_RESET, 2);
+        assert_eq!(cable.resets.load(Ordering::SeqCst), 1);
+        assert_eq!(resets.load(Ordering::SeqCst), 0, "a port reset leaves this node alone");
+        cable.up.store(false, Ordering::SeqCst);
+        d.write64(reg::LOCAL_RESET, 2);
+        assert_eq!(cable.resets.load(Ordering::SeqCst), 1, "a downed link carries nothing");
+        d.link_reset();
+        assert_eq!(resets.load(Ordering::SeqCst), 0, "the enable bit gates incoming resets");
+        d.write64(reg::CONTROL_0, 1);
+        d.link_reset();
+        assert_eq!(resets.load(Ordering::SeqCst), 1);
+        d.write64(reg::LOCAL_RESET, 6);
+        assert_eq!(resets.load(Ordering::SeqCst), 2, "bit 2 resets this node whatever the enable");
     }
 }
