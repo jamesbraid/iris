@@ -617,7 +617,14 @@ impl MipsTlb {
         if !self.irregular_mask {
             let (start, count) = Self::vmap_range(new);
             let tag = index as u8;
-            if self.vmap[start..start + count].iter().all(|&v| v == VMAP_MISS || v == tag) {
+            // A 4 KiB page, the refill case, covers one slot.
+            let clear = if count == 1 {
+                let v = self.vmap[start];
+                v == VMAP_MISS || v == tag
+            } else {
+                self.vmap[start..start + count].iter().all(|&v| v == VMAP_MISS || v == tag)
+            };
+            if clear {
                 return;
             }
         }
@@ -780,6 +787,16 @@ impl MipsTlb {
     #[inline]
     fn vmap_vacate(&mut self, index: usize, old_range: (usize, usize)) {
         let (old_start, old_count) = old_range;
+        // One slot that only `index` covers (named by it, no VMAP_MULTI):
+        // no other entry covers it, so none has anything to reclaim and the
+        // walk below would find nothing. A refill replaces an entry this way.
+        // Slot 0 is left to the walk: the zeroed entries of a TLB that was
+        // never written, and the entries an overlapping write cleared, all
+        // read as covering it.
+        if old_count == 1 && old_start != 0 && self.vmap[old_start] == index as u8 {
+            self.vmap_clear(old_start, 1);
+            return;
+        }
         self.vmap_clear(old_start, old_count);
         let old_end = old_start + old_count;
         for i in 0..self.num_entries {
