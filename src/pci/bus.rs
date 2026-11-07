@@ -20,6 +20,7 @@ use std::sync::{Arc, Weak};
 use super::decode::{BarRunSink, CpuWindow, Decode};
 use super::intx::{Combiner, PciUpstream, PciWiring, Wire};
 use super::{PciAddr, PciFunction, Space};
+use crate::devlog::LogModule;
 use crate::irq::IrqLine;
 use crate::snapshot::{get_field, hex_u32, hex_u64, toml_u32, toml_u64};
 use crate::traits::Saveable;
@@ -88,8 +89,10 @@ impl PciBus {
     /// A configuration read of `width` bytes (1, 2 or 4) at byte `off`.
     /// None: nothing answers, and the host decides what that looks like.
     pub fn config_read(&self, at: PciAddr, off: usize, width: usize) -> Option<u32> {
-        let dword = self.function(at)?.config_dword(off / 4);
-        Some((dword >> ((off & 3) * 8)) & (u32::MAX >> (32 - 8 * width)))
+        let val = self.function(at).map(|f| (f.config_dword(off / 4) >> ((off & 3) * 8)) & (u32::MAX >> (32 - 8 * width)));
+        crate::dlog!(LogModule::Pci, "pci: bus {} {}.{} read {off:#04x}/{width} -> {}", self.0.number, at.device, at.function,
+            val.map_or("no answer".to_string(), |v| format!("{v:#x}")));
+        val
     }
 
     /// A configuration write of `width` bytes at byte `off`: only those
@@ -97,7 +100,10 @@ impl PciBus {
     /// if nothing answers. The decode table is republished when the command
     /// register or a BAR changed, the only registers it is built from.
     pub fn config_write(&self, at: PciAddr, off: usize, width: usize, val: u32) -> bool {
-        let Some(f) = self.function(at) else { return false };
+        let f = self.function(at);
+        crate::dlog!(LogModule::Pci, "pci: bus {} {}.{} write {off:#04x}/{width} {val:#x}{}", self.0.number, at.device, at.function,
+            if f.is_some() { "" } else { ", no answer" });
+        let Some(f) = f else { return false };
         let (cfg, reg, shift) = (f.config(), off / 4, (off & 3) * 8);
         let mask = (u32::MAX >> (32 - 8 * width)) << shift;
         let old = cfg.read(reg);
