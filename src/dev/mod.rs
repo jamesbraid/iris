@@ -83,5 +83,6 @@ pub mod ohci;
 pub mod pic;
 pub mod pxbow;
 pub mod prom_image;
+pub mod qlogic_ring;
 pub mod timekeeper;
 pub mod xbridge;

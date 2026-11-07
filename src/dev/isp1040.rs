@@ -78,7 +78,9 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use parking_lot::{Condvar, Mutex, MutexGuard};
+use parking_lot::{Mutex, MutexGuard};
+
+use crate::dev::qlogic_ring::{RingCtl, RingState, RingThread};
 
 use crate::devlog::LogModule;
 use crate::irq::IrqLine;
@@ -283,37 +285,37 @@ struct Pending {
     sense: Vec<u8>,
 }
 
-/// What the request-ring thread and the register side tell each other.
+/// What the request-ring thread and the register side tell each other: the
+/// plumbing every QLogic adapter has ([`RingCtl`], reached through `Deref`)
+/// and what only the ISP1040's ring walk needs.
 #[derive(Default)]
 struct Ctl {
-    /// Bumped by every reset: a command that finishes under another
-    /// generation was cancelled with the chip, and posts nothing.
-    gen: u64,
+    ring: RingCtl,
     /// Bumped when the request ring is replaced (and by a reset): a command
     /// read from the old ring does not advance the new one's consumer.
     rqst_epoch: u64,
     /// Bumped when the response ring is replaced (and by a reset): an entry
     /// written into the old ring is written again into the new one.
     resp_epoch: u64,
-    /// The ring may have entries the thread has not looked at.
-    work: bool,
-    /// The thread is walking the ring.
-    walking: bool,
     /// A command is running with the state unlocked.
     busy: bool,
-    /// Holders that need the thread not to start another command
-    /// (saving and loading state).
-    hold: u32,
-    /// The machine is stopped: the thread takes no further entries.
-    paused: bool,
-    shutdown: bool,
     /// The selection of an absent target the thread is waiting out. It
     /// survives the thread being parked meanwhile.
     selecting: Option<Selection>,
-    /// When the adapter's clock last stopped with the machine, and how long
-    /// it has stood still in all.
-    stopped_at: Option<Instant>,
-    stopped_ns: i64,
+}
+
+impl std::ops::Deref for Ctl {
+    type Target = RingCtl;
+    fn deref(&self) -> &RingCtl { &self.ring }
+}
+
+impl std::ops::DerefMut for Ctl {
+    fn deref_mut(&mut self) -> &mut RingCtl { &mut self.ring }
+}
+
+impl RingState for State {
+    fn ring_ctl(&self) -> &RingCtl { &self.ctl.ring }
+    fn ring_ctl_mut(&mut self) -> &mut RingCtl { &mut self.ctl.ring }
 }
 
 /// A selection of an absent target in progress.
@@ -441,7 +443,7 @@ struct Parked {
     started: bool,
 }
 
-pub(crate) struct State {
+pub struct State {
     pub(crate) reset_targets: bool,
     pub(crate) pending_target_resets: VecDeque<(u8, Option<u8>)>,
     pub(crate) active: Option<(u8, u8, u32)>,
@@ -612,7 +614,6 @@ impl State {
 /// runs the request ring.
 pub struct Isp1040 {
     core: Arc<Core>,
-    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl std::ops::Deref for Isp1040 {
@@ -620,23 +621,16 @@ impl std::ops::Deref for Isp1040 {
     fn deref(&self) -> &Core { &self.core }
 }
 
+/// The state lock, the fence and the thread are the shared [`RingThread`], reached
+/// through `Deref`.
+///
 /// Lock order: `line_order`, then `st`. Nothing else is taken with `st`
 /// held except the leaf locks (`notes`, `dma_misses`, `odd_accesses`): DMA,
 /// either bus and `fence` are reached with it released. `fence` is held
 /// across one guest-memory store at a time, and either bus across one
 /// target command; neither is held with the other.
 pub struct Core {
-    st: Mutex<State>,
-    /// `st.ctl.gen`, readable without `st`: what a store into guest memory
-    /// checks under `fence`.
-    gen: AtomicU64,
-    /// Held across each store the ring thread makes into guest memory. A
-    /// reset moves the generation on and then passes through it, so once
-    /// the reset returns no store of a cancelled command is under way or
-    /// can start; the reset waits for one store, never for a disk.
-    fence: Mutex<()>,
-    /// Signals [`Ctl`] changes both ways.
-    wake: Condvar,
+    ring: RingThread<State>,
     /// Serialises driving the interrupt line; see [`Core::sync_irq`].
     line_order: Mutex<()>,
     /// Generation for commands cancelled by aborts without resetting the chip.
@@ -662,10 +656,11 @@ pub struct Core {
     odd_accesses: Mutex<u32>,
     /// The status bar's activity bits, shared with the display thread.
     heartbeat: OnceLock<Arc<AtomicU64>>,
-    /// Where the adapter's clock starts.
-    start: Instant,
-    /// When not `i64::MIN`, the clock in nanoseconds, for tests.
-    fake_ns: AtomicI64,
+}
+
+impl std::ops::Deref for Core {
+    type Target = RingThread<State>;
+    fn deref(&self) -> &RingThread<State> { &self.ring }
 }
 
 fn le16(b: &[u8], off: usize) -> u16 { u16::from_le_bytes([b[off], b[off + 1]]) }
@@ -686,41 +681,24 @@ impl Isp1040 {
 
     /// The controller at `index` (0 internal, 1 external) on `bus`.
     pub fn new_at(index: u8, bus: ScsiBus) -> Self {
-        Self { core: Arc::new(Core::new_at(index, &Isp1040Part, [bus, Self::new_bus()])), worker: Mutex::new(None) }
+        Self { core: Arc::new(Core::new_at(index, &Isp1040Part, [bus, Self::new_bus()])) }
     }
 
     pub(crate) fn new_12160(bus0: ScsiBus, bus1: ScsiBus) -> Self {
-        Self { core: Arc::new(Core::new_at(0, &crate::dev::isp12160::Isp12160Part, [bus0, bus1])), worker: Mutex::new(None) }
+        Self { core: Arc::new(Core::new_at(0, &crate::dev::isp12160::Isp12160Part, [bus0, bus1])) }
     }
 
     /// Start the ring thread (idempotent) and let it take whatever was
     /// published while the adapter was stopped.
     fn start_ring(&self) {
-        let mut worker = self.worker.lock();
-        if worker.is_some() {
-            return;
-        }
-        self.st.lock().ctl.shutdown = false;
-        let c = self.core.clone();
-        *worker = Some(
-            std::thread::Builder::new()
-                .name(format!("{}-{}", self.core.model_name(), self.index))
-                .spawn(move || c.run_ring())
-                .expect("spawn isp1040 thread"),
-        );
-        drop(worker);
-        self.resume();
+        self.start_thread(&self.core, format!("{}-{}", self.core.model_name(), self.index), Core::run_ring);
     }
 
     /// Park the ring between entries, then end and join the thread. A
     /// command in flight finishes and posts first; afterwards nothing
     /// touches guest memory or the interrupt line.
     fn stop_ring(&self) {
-        self.pause();
-        let Some(h) = self.worker.lock().take() else { return };
-        self.st.lock().ctl.shutdown = true;
-        self.wake.notify_all();
-        let _ = h.join();
+        self.stop_thread();
     }
 }
 
@@ -755,16 +733,12 @@ impl Drop for Isp1040 {
 impl Core {
     fn new_at(index: u8, part: &'static dyn IspPart, buses: [ScsiBus; 2]) -> Self {
         let st = State::new();
-        let gen = st.ctl.gen;
         let bars = [Bar::Io(reg::WINDOW_SIZE), Bar::Mem(reg::WINDOW_SIZE), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused];
         let pci = part.pci_config(bars);
         Self {
             part,
             cancel: AtomicU64::new(0),
-            st: Mutex::new(st),
-            gen: AtomicU64::new(gen),
-            fence: Mutex::new(()),
-            wake: Condvar::new(),
+            ring: RingThread::new(st),
             line_order: Mutex::new(()),
             buses,
             targets_reset: [AtomicBool::new(false), AtomicBool::new(false)],
@@ -778,8 +752,6 @@ impl Core {
             dma_misses: Mutex::new(std::collections::BTreeSet::new()),
             odd_accesses: Mutex::new(0),
             heartbeat: OnceLock::new(),
-            start: Instant::now(),
-            fake_ns: AtomicI64::new(i64::MIN),
         }
     }
 
@@ -801,23 +773,6 @@ impl Core {
         }
         self.retire_stores();
         self.sync_irq();
-    }
-
-    fn publish_gen(&self, st: &State) {
-        self.gen.store(st.ctl.gen, Ordering::Release);
-    }
-
-    /// Wait out a store into guest memory that a cancelled command began
-    /// before the generation moved on; see `fence`.
-    fn retire_stores(&self) {
-        drop(self.fence.lock());
-    }
-
-    /// Run `store` for work of generation `gen`, unless a reset has
-    /// cancelled that work.
-    fn fenced<R>(&self, gen: u64, store: impl FnOnce() -> R) -> Option<R> {
-        let _fence = self.fence.lock();
-        (self.gen.load(Ordering::Acquire) == gen).then(store)
     }
 
     /// Light the status bar's SCSI activity bits in `heartbeat`.
@@ -858,18 +813,6 @@ impl Core {
             || (st.ctl.walking && !st.ctl.selecting.as_ref().is_some_and(|sel| self.now_ns(&st) < sel.due))
         {
             self.wake.wait(&mut st);
-        }
-    }
-
-    /// The adapter's clock in nanoseconds: host wall time less the time the
-    /// machine was stopped.
-    fn now_ns(&self, st: &State) -> i64 {
-        match self.fake_ns.load(Ordering::Relaxed) {
-            i64::MIN => {
-                let at = st.ctl.stopped_at.unwrap_or_else(Instant::now);
-                at.duration_since(self.start).as_nanos() as i64 - st.ctl.stopped_ns
-            }
-            t => t,
         }
     }
 
@@ -967,32 +910,6 @@ impl Core {
         }
     }
 
-    /// Stop the ring thread between entries while the machine is stopped:
-    /// once this returns the adapter touches neither guest memory nor its
-    /// interrupt until [`Core::resume`]. A command in flight finishes and
-    /// posts first.
-    pub fn pause(&self) {
-        let mut st = self.st.lock();
-        st.ctl.paused = true;
-        st.ctl.stopped_at.get_or_insert_with(Instant::now);
-        // Parked mid-selection, the thread lets go of its entry.
-        self.wake.notify_all();
-        while st.ctl.walking {
-            self.wake.wait(&mut st);
-        }
-    }
-
-    /// Let the ring thread run again, taking up whatever was published
-    /// while it was paused.
-    pub fn resume(&self) {
-        let mut st = self.st.lock();
-        st.ctl.paused = false;
-        if let Some(t) = st.ctl.stopped_at.take() {
-            st.ctl.stopped_ns += t.elapsed().as_nanos() as i64;
-        }
-        self.kick(&mut st);
-    }
-
     /// A save or a load is waiting for the ring thread (tests).
     #[cfg(test)]
     fn waiting_on_command(&self) -> bool {
@@ -1003,29 +920,6 @@ impl Core {
     #[cfg(test)]
     fn command_running(&self) -> bool {
         self.st.lock().ctl.busy
-    }
-
-    /// Run `f` on the state with the ring thread stopped between entries
-    /// and none allowed to start: the quiesce point for saving and loading.
-    /// A command in flight posts its completion first.
-    fn quiesced<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
-        let mut st = self.st.lock();
-        st.ctl.hold += 1;
-        self.wake.notify_all();
-        while st.ctl.walking {
-            self.wake.wait(&mut st);
-        }
-        let r = f(&mut st);
-        st.ctl.hold -= 1;
-        drop(st);
-        self.wake.notify_all();
-        r
-    }
-
-    /// Tell the ring thread the ring may have moved.
-    pub(crate) fn kick(&self, st: &mut State) {
-        st.ctl.work = true;
-        self.wake.notify_all();
     }
 
     /// Commands run, for the whole session.
