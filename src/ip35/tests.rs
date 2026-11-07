@@ -732,7 +732,7 @@ fn uncached_fetch_compiles_the_prom_body() {
 
 #[cfg(feature = "jitv2")]
 fn alias_the_reset_window(cpu: &mut crate::ip35_machine::FuelCpu) {
-    cpu.uncached_fetch_alias = Some((RESET_WINDOW, RESET_WINDOW_SIZE, RESET_WINDOW_FETCH));
+    cpu.set_uncached_fetch_alias(RESET_WINDOW, RESET_WINDOW_SIZE, RESET_WINDOW_FETCH);
 }
 
 #[cfg(feature = "jitv2")]

@@ -597,9 +597,9 @@ code into host code with Cranelift. The concepts:
   `FuelBoard::build_cpu`) and the JIT sees two different frames. Compiles read
   that frame through the executor's compile bus (`set_jitv2_code_bus`,
   `Ip35Bus::code_view`), and its generation counter is the PROM device's, so a
-  flash command invalidates it and a store to RAM never does. The alias is applied
-  where an uncached instruction fetch fills the nanotlb, which a cached fetch and
-  every data access skip.
+  flash command invalidates it and a store to RAM never does. The alias wraps the
+  translation (`update_translate_fn` installs the wrapper when one is set), so
+  the other machines' fetch paths are the ones they always had.
 - Compiled pages can optionally be cached on disk across runs
   (`[jitv2] cache`, [docs/jitv2-persistent-cache.md](docs/jitv2-persistent-cache.md)).
 

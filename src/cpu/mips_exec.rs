@@ -1056,7 +1056,7 @@ pub struct MipsExecutor<T: Tlb, C: CpuModel> {
     /// so the code page for it is keyed, read and invalidated by address like
     /// any other. None on the other machines, whose uncached and cached
     /// instruction fetches reach the same bytes.
-    pub uncached_fetch_alias: Option<(u64, u64, u64)>,
+    uncached_fetch_alias: Option<(u64, u64, u64)>,
     /// Where the machine has memory, from [`MipsCpuConfig::memory`].
     pub memory: Arc<crate::memory_map::MemoryMap>,
     /// Frames the JIT's page table has, the end of `memory` in pages. Kept
@@ -1178,6 +1178,30 @@ fn translate_64_supervisor<T: Tlb, C: CpuModel>(e: &mut MipsExecutor<T,C>, va: u
 }
 fn translate_64_user<T: Tlb, C: CpuModel>(e: &mut MipsExecutor<T,C>, va: u64, at: AccessType) -> TranslateResult {
     e.translate_64bit_impl::<false, {crate::cpu::mips_core::PRIV_USER}>(va, at)
+}
+
+/// The translation wrappers above for a board that decodes an uncached
+/// instruction fetch apart (`MipsExecutor::set_uncached_fetch_alias`):
+/// `MODE` is the wrapper's index in `update_translate_fn`'s order. Only a
+/// fetch that comes out uncached is changed.
+fn translate_fetch_aliased<T: Tlb, C: CpuModel, const MODE: u8>(e: &mut MipsExecutor<T,C>, va: u64, at: AccessType) -> TranslateResult {
+    let mut result = match MODE {
+        0 => translate_32_kernel::<T, C>(e, va, at),
+        1 => translate_32_supervisor::<T, C>(e, va, at),
+        2 => translate_32_user::<T, C>(e, va, at),
+        3 => translate_64_kernel::<T, C>(e, va, at),
+        4 => translate_64_supervisor::<T, C>(e, va, at),
+        _ => translate_64_user::<T, C>(e, va, at),
+    };
+    if at == AccessType::Fetch && !result.is_exception() && !result.is_cached() {
+        if let Some((base, size, target)) = e.uncached_fetch_alias {
+            let offset = result.phys.wrapping_sub(base);
+            if offset < size {
+                result.phys = target + offset;
+            }
+        }
+    }
+    result
 }
 
 /// Free-standing trampoline for the CP0 Status callback installed by `install_status_cb`.
@@ -2799,14 +2823,8 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
         let at = unsafe { std::mem::transmute::<u8, AccessType>(AT) };
         #[cfg(feature = "tlbstats")]
         self.tlb.stats_nanotlb_miss(at);
-        let mut result = (self.translate_fn)(self, va, at);
+        let result = (self.translate_fn)(self, va, at);
         if !result.is_exception() {
-            // Only an uncached instruction fetch can be decoded apart
-            // (`uncached_fetch_alias`); a cached fetch, and every fill for
-            // data, skips it.
-            if AT == AccessType::Fetch as u8 && !result.is_cached() {
-                result.phys = self.alias_uncached_fetch(result.phys);
-            }
             self.core.nanotlb[AT as usize].fill_raw(va_page, result.phys, result.status & 0x7);
             #[cfg(feature = "jitv2")]
             if AT == AccessType::Fetch as u8 {
@@ -2814,18 +2832,6 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             }
         }
         result
-    }
-
-    /// The address an uncached instruction fetch of `phys` is presented at
-    /// (`uncached_fetch_alias`). Out of line: nothing but the Fuel sets the
-    /// alias, and its fills are rare.
-    #[cold]
-    #[inline(never)]
-    fn alias_uncached_fetch(&self, phys: u64) -> u64 {
-        match self.uncached_fetch_alias {
-            Some((base, size, target)) if phys.wrapping_sub(base) < size => target + (phys - base),
-            _ => phys,
-        }
     }
 
     /// Probe the nutlb for `va` on the Read (`W=false`) or Write (`W=true`)
@@ -3334,6 +3340,26 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             (true,  PrivilegeMode::Supervisor) => translate_64_supervisor::<T, C>,
             (true,  PrivilegeMode::User)       => translate_64_user::<T, C>,
         };
+        // A board that decodes an uncached instruction fetch apart wraps the
+        // translation itself, so the fetch paths of the other machines stay
+        // as they are.
+        if self.uncached_fetch_alias.is_some() {
+            self.translate_fn = match (is_64bit, privilege) {
+                (false, PrivilegeMode::Kernel)     => translate_fetch_aliased::<T, C, 0>,
+                (false, PrivilegeMode::Supervisor) => translate_fetch_aliased::<T, C, 1>,
+                (false, PrivilegeMode::User)       => translate_fetch_aliased::<T, C, 2>,
+                (true,  PrivilegeMode::Kernel)     => translate_fetch_aliased::<T, C, 3>,
+                (true,  PrivilegeMode::Supervisor) => translate_fetch_aliased::<T, C, 4>,
+                (true,  PrivilegeMode::User)       => translate_fetch_aliased::<T, C, 5>,
+            };
+        }
+    }
+
+    /// Present an uncached instruction fetch of the window `base..base+size`
+    /// to the bus at `target` plus the offset (see [`Self::uncached_fetch_alias`]).
+    pub fn set_uncached_fetch_alias(&mut self, base: u64, size: u64, target: u64) {
+        self.uncached_fetch_alias = Some((base, size, target));
+        self.update_translate_fn();
     }
 
     /// Re-derive `fpr_read_d/write_d/read_l/write_l` from STATUS_FR.

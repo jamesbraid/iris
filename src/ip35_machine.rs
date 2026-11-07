@@ -979,11 +979,11 @@ impl FuelBoard {
         // The PROM fetches its own code uncached; with memory over its window
         // the cached plane answers RAM there, so the fetch is presented at the
         // PROM's own address and compiled from the view that holds it.
-        cpu.uncached_fetch_alias = Some((
+        cpu.set_uncached_fetch_alias(
             crate::ip35::RESET_WINDOW,
             crate::ip35::RESET_WINDOW_SIZE,
             crate::ip35::RESET_WINDOW_FETCH,
-        ));
+        );
         #[cfg(feature = "jitv2")]
         cpu.set_jitv2_code_bus(self.code_bus());
         // The PROM keeps its stack in cache lines it tags for a window with no
