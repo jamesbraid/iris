@@ -2801,16 +2801,11 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
         self.tlb.stats_nanotlb_miss(at);
         let mut result = (self.translate_fn)(self, va, at);
         if !result.is_exception() {
-            // Only an uncached instruction fetch on a board that decodes it
-            // apart (`uncached_fetch_alias`); a cached fetch, and every
-            // fill for data, skips this.
+            // Only an uncached instruction fetch can be decoded apart
+            // (`uncached_fetch_alias`); a cached fetch, and every fill for
+            // data, skips it.
             if AT == AccessType::Fetch as u8 && !result.is_cached() {
-                if let Some((base, size, target)) = self.uncached_fetch_alias {
-                    let offset = result.phys.wrapping_sub(base);
-                    if offset < size {
-                        result.phys = target + offset;
-                    }
-                }
+                result.phys = self.alias_uncached_fetch(result.phys);
             }
             self.core.nanotlb[AT as usize].fill_raw(va_page, result.phys, result.status & 0x7);
             #[cfg(feature = "jitv2")]
@@ -2819,6 +2814,18 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             }
         }
         result
+    }
+
+    /// The address an uncached instruction fetch of `phys` is presented at
+    /// (`uncached_fetch_alias`). Out of line: nothing but the Fuel sets the
+    /// alias, and its fills are rare.
+    #[cold]
+    #[inline(never)]
+    fn alias_uncached_fetch(&self, phys: u64) -> u64 {
+        match self.uncached_fetch_alias {
+            Some((base, size, target)) if phys.wrapping_sub(base) < size => target + (phys - base),
+            _ => phys,
+        }
     }
 
     /// Probe the nutlb for `va` on the Read (`W=false`) or Write (`W=true`)
