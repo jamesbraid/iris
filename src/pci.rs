@@ -243,7 +243,7 @@ impl crate::traits::Saveable for PciConfig {
 ///
 /// BAR accesses arrive with the offset and value the device sees: whatever
 /// the bridge does to byte lanes it has already done.
-pub trait PciBusDevice: Send + Sync {
+pub trait PciFunction: Send + Sync {
     /// The function's configuration header.
     fn config(&self) -> &PciConfig;
 
@@ -264,6 +264,19 @@ pub trait PciBusDevice: Send + Sync {
 
     /// The bridge gives a function that masters the bus its way to memory.
     fn connect_dma(&self, _dma: std::sync::Arc<dyn PciDma>) {}
+
+    /// RST# reaches the function after the bus has reset its header: drop
+    /// the interrupt line and return to power-on state. A function never
+    /// resets its own header, so the bus's decode table cannot go stale.
+    fn reset(&self) {}
+}
+
+/// Where a function sits on a bus: its device number and its function number.
+/// Orders by device, then function, the order RST# visits them in.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct PciAddr {
+    pub device: u8,
+    pub function: u8,
 }
 
 /// How a bus master's access ended.
@@ -309,9 +322,9 @@ pub trait PciLanes: Send + Sync {
     /// A CPU read of `size` bytes (1, 2, 4 or 8) whose first byte is at
     /// offset `off` of BAR `bar` of `f`, before the bridge moves lanes.
     /// The value is in CPU order, most significant byte first in memory.
-    fn read(&self, f: &dyn PciBusDevice, bar: usize, off: u32, size: usize) -> u64;
+    fn read(&self, f: &dyn PciFunction, bar: usize, off: u32, size: usize) -> u64;
 
-    fn write(&self, f: &dyn PciBusDevice, bar: usize, off: u32, size: usize, val: u64);
+    fn write(&self, f: &dyn PciFunction, bar: usize, off: u32, size: usize, val: u64);
 }
 
 /// A run of a host bridge's CPU window that one BAR decodes whole, as a
@@ -322,7 +335,7 @@ pub trait PciLanes: Send + Sync {
 /// window; every other page of the window stays with the bridge.
 pub struct PciBar {
     lanes: Arc<dyn PciLanes>,
-    dev: Arc<dyn PciBusDevice>,
+    dev: Arc<dyn PciFunction>,
     bar: usize,
     /// The CPU address bits the bridge decodes, and where in them the BAR's
     /// byte 0 sits (it may lie below the window: a BAR larger than it).
@@ -331,7 +344,7 @@ pub struct PciBar {
 }
 
 impl PciBar {
-    pub fn new(lanes: Arc<dyn PciLanes>, dev: Arc<dyn PciBusDevice>, bar: usize, mask: u64, base: u64) -> Self {
+    pub fn new(lanes: Arc<dyn PciLanes>, dev: Arc<dyn PciFunction>, bar: usize, mask: u64, base: u64) -> Self {
         Self { lanes, dev, bar, mask, base }
     }
 
@@ -374,7 +387,7 @@ pub struct BarRun {
 /// window's terms) of its byte 0.
 pub struct BarAt<'a> {
     pub slot: usize,
-    pub dev: &'a Arc<dyn PciBusDevice>,
+    pub dev: &'a Arc<dyn PciFunction>,
     pub bar: usize,
     pub cpu_base: u64,
 }
@@ -386,7 +399,7 @@ pub struct BarAt<'a> {
 /// the bridge resolves its own way), are left out: the bridge decodes those
 /// itself.
 pub fn bar_runs(
-    funcs: &[(usize, Arc<dyn PciBusDevice>)],
+    funcs: &[(usize, Arc<dyn PciFunction>)],
     space: Space,
     cpu: u64,
     pci: u32,
@@ -529,11 +542,19 @@ mod tests {
         assert_eq!(c.interrupt_pin(), PCI_INTA);
     }
 
+    #[test]
+    fn pci_addr_orders_by_device_then_function() {
+        let a = |device, function| PciAddr { device, function };
+        let mut v = [a(3, 0), a(1, 1), a(1, 0)];
+        v.sort();
+        assert_eq!(v, [a(1, 0), a(1, 1), a(3, 0)]);
+    }
+
     struct Nothing;
     impl BusDevice for Nothing {}
 
     struct Func(PciConfig);
-    impl PciBusDevice for Func {
+    impl PciFunction for Func {
         fn config(&self) -> &PciConfig { &self.0 }
         fn bar_read(&self, _: usize, off: u32, _: usize) -> u32 { off }
         fn bar_write(&self, _: usize, _: u32, _: u32, _: usize) {}
@@ -544,8 +565,8 @@ mod tests {
     /// BARs, and a BAR outside the window do not.
     #[test]
     fn bar_runs_are_the_pages_one_bar_decodes_whole() {
-        let a: Arc<dyn PciBusDevice> = Arc::new(Func(scsi_like()));
-        let b: Arc<dyn PciBusDevice> = Arc::new(Func(scsi_like()));
+        let a: Arc<dyn PciFunction> = Arc::new(Func(scsi_like()));
+        let b: Arc<dyn PciFunction> = Arc::new(Func(scsi_like()));
         for (f, io, mem) in [(&a, 0x100, 0x8000_1000u32), (&b, 0x200, 0x8000_3000)] {
             f.config().write(4, io);
             f.config().write(5, mem);

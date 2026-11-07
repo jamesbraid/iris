@@ -135,7 +135,7 @@ impl Card {
     }
 }
 
-impl PciBusDevice for Card {
+impl PciFunction for Card {
     fn config(&self) -> &PciConfig {
         &self.cfg
     }
