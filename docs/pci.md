@@ -79,6 +79,21 @@ established. `BoardIrq(i)` is pin `i`, shared with the GPIO inputs; the IOC3's
 SuperIO interrupt is `BoardIrq(4)`. Devices 0 and 1 are the ISP1040s, 2 is the
 IOC3, 3 is the RAD1, and 4 is virtio-serial when enabled.
 
+## Octane windows
+
+The CPU reaches PCI memory on the Bridge two ways (Bridge ASIC specification
+rev 4.0; offsets in [ip30-address-map.md](Octane/ip30-address-map.md), section
+8). A device window in the Bridge's own widget space, set by `Device(x)`; and
+the 2 GB window HEART gives widget 15 at `0xF_8000_0000`, whose first 16 MB is
+the widget's small window and whose range from offset `0x4000_0000` is the
+32-bit alias of the low 1 GB of PCI memory. A BAR in either is mapped straight
+to its function. The rest of the 2 GB window (16 MB to 1 GB) is reserved in the
+specification (p. 52), which does not say what an access does; iris ends it in
+a bus error, an approximation. The 64-bit alias and PCI I/O space, reached only
+through the 64 GB window, are not modelled. The external ATE SSRAM (`0x080000`)
+is not fitted on the Octane and reads as all ones, which is what the PROM
+expects when it sizes it.
+
 ## PCI-to-PCI bridges
 
 `PciToPciBridge` is a function with a type 1 header and a bus behind it. The
