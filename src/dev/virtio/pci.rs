@@ -22,7 +22,7 @@
 use std::sync::Arc;
 
 use crate::irq::IrqLine;
-use crate::pci::{Bar, PciFunction, PciConfig, PciDma, PCI_INTA};
+use crate::pci::{Bar, PciConfig, PciDma, PciFunction, PciPort, PCI_INTA};
 use crate::traits::Resettable;
 
 use super::{PciMemory, VirtioCore};
@@ -58,6 +58,7 @@ fn cap(cfg_type: u8, next: u8, len: u8, offset: u32, length: u32, extra: Option<
 pub struct VirtioPci {
     core: VirtioCore,
     pci: PciConfig,
+    port: PciPort,
     sel: parking_lot::Mutex<Selectors>,
 }
 
@@ -88,7 +89,7 @@ impl VirtioPci {
         .with_capabilities(16, &caps);
         // Subsystem: vendor and the virtio device ID, dword 11.
         pci.write(11, ((id as u32) << 16) | VENDOR_ID as u32);
-        Self { core, pci, sel: Default::default() }
+        Self { core, pci, port: PciPort::default(), sel: Default::default() }
     }
 
     pub fn core(&self) -> &VirtioCore {
@@ -208,7 +209,12 @@ impl PciFunction for VirtioPci {
         }
     }
 
+    fn port(&self) -> &PciPort {
+        &self.port
+    }
+
     fn connect_interrupt(&self, line: IrqLine) {
+        self.port.set_irq(line.clone());
         self.core.connect_interrupt(line);
     }
 

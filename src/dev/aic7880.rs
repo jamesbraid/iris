@@ -424,7 +424,7 @@ pub struct Aic7880 {
     /// fetches its work from there rather than being handed it a register at
     /// a time, so without this it can see the tag of a command and nothing
     /// else about it.
-    dma: std::sync::OnceLock<std::sync::Arc<dyn crate::pci::PciDma>>,
+    port: crate::pci::PciPort,
     /// The SCSI id a disk attached without one answers at.
     target: u8,
     /// The status bar's activity bits, shared with the display thread.
@@ -440,7 +440,6 @@ pub struct Aic7880 {
     /// Pages of DMA addresses already reported as not memory.
     dma_misses: Mutex<std::collections::BTreeSet<u32>>,
     /// The chip's interrupt pin, as the board routes it.
-    irq: std::sync::OnceLock<crate::irq::IrqLine>,
     pci: crate::pci::PciConfig,
 }
 
@@ -476,10 +475,9 @@ impl Aic7880 {
             running: AtomicBool::new(false),
             me: me.clone(),
             bus,
-            dma: std::sync::OnceLock::new(),
+            port: Default::default(),
             sense: Mutex::new(None),
             dma_misses: Mutex::new(std::collections::BTreeSet::new()),
-            irq: std::sync::OnceLock::new(),
             // 256 bytes of I/O and 4 KiB of memory, both onto the same
             // registers: what the part has.
             pci: {
@@ -503,7 +501,7 @@ impl Aic7880 {
     /// CDB pointer inside it is `0x0107532c`.
     fn dma_read_bytes(&self, addr: u32, n: usize) -> Vec<u8> {
         let mut b = vec![0u8; n];
-        if !self.dma.get().is_some_and(|d| d.dma_read(addr as u64, &mut b).is_ok()) {
+        if !self.port.dma().is_some_and(|d| d.dma_read(addr as u64, &mut b).is_ok()) {
             self.dma_miss(addr, false);
         }
         b
@@ -514,7 +512,7 @@ impl Aic7880 {
     }
 
     fn dma_write_bytes(&self, addr: u32, data: &[u8]) {
-        if !self.dma.get().is_some_and(|d| d.dma_write(addr as u64, data).is_ok()) {
+        if !self.port.dma().is_some_and(|d| d.dma_write(addr as u64, data).is_ok()) {
             self.dma_miss(addr, true);
         }
     }
@@ -587,7 +585,7 @@ impl Aic7880 {
 
     /// Wire the chip's interrupt pin to `line`.
     pub fn connect_irq(&self, line: crate::irq::IrqLine) {
-        let _ = self.irq.set(line);
+        self.port.set_irq(line);
         self.update_irq();
     }
 
@@ -601,7 +599,7 @@ impl Aic7880 {
     /// same lock as the change; set after releasing it, a completion's
     /// "high" could land after the host's clear and stick.
     fn drive_irq(&self, st: &State) {
-        if let Some(l) = self.irq.get() {
+        if let Some(l) = self.port.irq() {
             l.set(st.intstat & 0x0f != 0);
         }
     }
@@ -665,7 +663,7 @@ impl Aic7880 {
     /// bytes the HIM also uses, so a doorbell whose rings are not memory is
     /// somebody else's bytes and not a doorbell.
     fn is_memory(&self, addr: u32) -> bool {
-        self.dma.get().is_some_and(|d| d.dma_read(addr as u64, &mut [0u8]).is_ok())
+        self.port.dma().is_some_and(|d| d.dma_read(addr as u64, &mut [0u8]).is_ok())
     }
 
     /// A CDB's length follows from its opcode group. Taking it from the
@@ -1715,12 +1713,12 @@ impl crate::pci::PciFunction for Aic7880 {
         self.write(off, val, width)
     }
 
-    fn connect_interrupt(&self, line: crate::irq::IrqLine) {
-        self.connect_irq(line);
+    fn port(&self) -> &crate::pci::PciPort {
+        &self.port
     }
 
-    fn connect_dma(&self, dma: std::sync::Arc<dyn crate::pci::PciDma>) {
-        let _ = self.dma.set(dma);
+    fn connect_interrupt(&self, line: crate::irq::IrqLine) {
+        self.connect_irq(line);
     }
 }
 

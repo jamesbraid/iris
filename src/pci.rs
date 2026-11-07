@@ -7,7 +7,7 @@
 //! function only sees configuration registers, accesses to its BARs, and an
 //! [`IrqLine`] for its pin.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::irq::IrqLine;
 use crate::snapshot::{get_field, load_u32_slice, u32_slice_to_toml};
@@ -239,6 +239,34 @@ impl crate::traits::Saveable for PciConfig {
     }
 }
 
+/// What the bus hands a function when it is attached: its interrupt line
+/// and its way to memory, each set once. A function that raises no
+/// interrupt (RAD1) never has a line.
+#[derive(Default)]
+pub struct PciPort {
+    irq: OnceLock<IrqLine>,
+    dma: OnceLock<Arc<dyn PciDma>>,
+}
+
+impl PciPort {
+    pub fn irq(&self) -> Option<&IrqLine> {
+        self.irq.get()
+    }
+
+    pub fn dma(&self) -> Option<&Arc<dyn PciDma>> {
+        self.dma.get()
+    }
+
+    /// For a function whose own `connect_*` does more than keep the value.
+    pub fn set_irq(&self, line: IrqLine) {
+        let _ = self.irq.set(line);
+    }
+
+    pub fn set_dma(&self, dma: Arc<dyn PciDma>) {
+        let _ = self.dma.set(dma);
+    }
+}
+
 /// A PCI function, as a host bridge sees it.
 ///
 /// BAR accesses arrive with the offset and value the device sees: whatever
@@ -259,11 +287,19 @@ pub trait PciFunction: Send + Sync {
 
     fn bar_write(&self, bar: usize, off: u32, val: u32, width: usize);
 
+    /// Where the bus leaves the function's interrupt line and its way to
+    /// memory.
+    fn port(&self) -> &PciPort;
+
     /// The bridge wires the function's interrupt pin to `line`.
-    fn connect_interrupt(&self, _line: IrqLine) {}
+    fn connect_interrupt(&self, line: IrqLine) {
+        self.port().set_irq(line);
+    }
 
     /// The bridge gives a function that masters the bus its way to memory.
-    fn connect_dma(&self, _dma: std::sync::Arc<dyn PciDma>) {}
+    fn connect_dma(&self, dma: Arc<dyn PciDma>) {
+        self.port().set_dma(dma);
+    }
 
     /// RST# reaches the function after the bus has reset its header: drop
     /// the interrupt line and return to power-on state. A function never
@@ -543,6 +579,26 @@ mod tests {
     }
 
     #[test]
+    fn a_port_takes_its_line_and_dma_once() {
+        struct Dma;
+        impl PciDma for Dma {
+            fn dma_read(&self, _: u64, _: &mut [u8]) -> PciDmaStatus { PciDmaStatus::Ok }
+            fn dma_write(&self, _: u64, _: &[u8]) -> PciDmaStatus { PciDmaStatus::Ok }
+        }
+        let (a, b) = (crate::irq::LevelProbe::line(), crate::irq::LevelProbe::line());
+        let f = Func(scsi_like(), PciPort::default());
+        assert!(f.port().irq().is_none() && f.port().dma().is_none());
+        f.connect_interrupt(a.1);
+        f.connect_interrupt(b.1);
+        f.connect_dma(Arc::new(Dma));
+        f.port().irq().unwrap().set(true);
+        assert!(a.0.level() && !b.0.level(), "the second line is ignored");
+        assert!(f.port().dma().is_some());
+        let rad = Func(scsi_like(), PciPort::default());
+        assert!(rad.port().irq().is_none(), "a function with no interrupt never has a line");
+    }
+
+    #[test]
     fn pci_addr_orders_by_device_then_function() {
         let a = |device, function| PciAddr { device, function };
         let mut v = [a(3, 0), a(1, 1), a(1, 0)];
@@ -553,9 +609,10 @@ mod tests {
     struct Nothing;
     impl BusDevice for Nothing {}
 
-    struct Func(PciConfig);
+    struct Func(PciConfig, PciPort);
     impl PciFunction for Func {
         fn config(&self) -> &PciConfig { &self.0 }
+        fn port(&self) -> &PciPort { &self.1 }
         fn bar_read(&self, _: usize, off: u32, _: usize) -> u32 { off }
         fn bar_write(&self, _: usize, _: u32, _: u32, _: usize) {}
     }
@@ -565,8 +622,8 @@ mod tests {
     /// BARs, and a BAR outside the window do not.
     #[test]
     fn bar_runs_are_the_pages_one_bar_decodes_whole() {
-        let a: Arc<dyn PciFunction> = Arc::new(Func(scsi_like()));
-        let b: Arc<dyn PciFunction> = Arc::new(Func(scsi_like()));
+        let a: Arc<dyn PciFunction> = Arc::new(Func(scsi_like(), PciPort::default()));
+        let b: Arc<dyn PciFunction> = Arc::new(Func(scsi_like(), PciPort::default()));
         for (f, io, mem) in [(&a, 0x100, 0x8000_1000u32), (&b, 0x200, 0x8000_3000)] {
             f.config().write(4, io);
             f.config().write(5, mem);
