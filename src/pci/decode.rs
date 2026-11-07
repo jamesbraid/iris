@@ -10,6 +10,13 @@
 //! rebuilds the table under the publish mutex, which also holds the host's
 //! windows as of the last rebuild; `make` runs inside it, so two CPUs
 //! writing registers cannot publish out of order.
+//!
+//! A bus with PCI-to-PCI bridges decodes for the buses behind them too: the
+//! windows of a secondary bus's functions that the bridge's header forwards
+//! are merged into this bus's table, so one scan, and the runs the host maps,
+//! reach a function however many bridges deep it sits. A function behind a
+//! bridge has a slot in `fwd`, which only grows, so a lookup still returns a
+//! borrow.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -52,16 +59,24 @@ pub type BarRunSink = Box<dyn Fn(Vec<BarRun>) + Send + Sync>;
 /// warning.
 const MAX_WINDOWS: usize = 64;
 
+/// Functions behind bridges that one bus can decode for.
+const MAX_FORWARDED: usize = 256;
+
+/// One BAR window of one function: space, BAR, base, size, function.
+pub(super) type Win = (Space, usize, u32, u32, Arc<dyn PciFunction>);
+
+
 /// Functions per device, and so the function table's stride.
 const FUNCTIONS: usize = 8;
 
 /// A BAR window as the slow table holds it, packed into one word: base
-/// (bits 0-31), log2 of the size (32-37), I/O space (38), function index
-/// `device * 8 + function` (40-47), BAR (48-50).
+/// (bits 0-31), log2 of the size (32-37), I/O space (38), function slot
+/// (40-51: `device * 8 + function`, or 256 and up for a function behind a
+/// bridge) and BAR (52-54).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Window {
     space: Space,
-    func: u8,
+    func: u16,
     bar: usize,
     base: u32,
     size: u32,
@@ -73,14 +88,14 @@ impl Window {
             | (self.size.trailing_zeros() as u64) << 32
             | ((self.space == Space::Io) as u64) << 38
             | (self.func as u64) << 40
-            | (self.bar as u64) << 48
+            | (self.bar as u64) << 52
     }
 
     fn unpack(w: u64) -> Self {
         Self {
             space: if w & (1 << 38) != 0 { Space::Io } else { Space::Mem },
-            func: (w >> 40) as u8,
-            bar: ((w >> 48) & 7) as usize,
+            func: ((w >> 40) & 0xfff) as u16,
+            bar: ((w >> 52) & 7) as usize,
             base: w as u32,
             size: 1u32 << ((w >> 32) & 0x3f),
         }
@@ -97,6 +112,10 @@ struct Publish {
 pub(super) struct Decode {
     /// By `device * 8 + function`; set once.
     funcs: Box<[OnceLock<Arc<dyn PciFunction>>]>,
+    /// Functions behind bridges that have had a window, in the order they
+    /// first did; append-only, so an index never changes meaning.
+    fwd: Box<[OnceLock<Arc<dyn PciFunction>>]>,
+    nfwd: AtomicUsize,
     /// The slow table: first match wins, in (device, function, BAR) order.
     windows: [AtomicU64; MAX_WINDOWS],
     count: AtomicUsize,
@@ -107,10 +126,17 @@ impl Decode {
     pub(super) fn new(devices: u8) -> Self {
         Self {
             funcs: (0..devices as usize * FUNCTIONS).map(|_| OnceLock::new()).collect(),
+            fwd: (0..MAX_FORWARDED).map(|_| OnceLock::new()).collect(),
+            nfwd: AtomicUsize::new(0),
             windows: std::array::from_fn(|_| AtomicU64::new(0)),
             count: AtomicUsize::new(0),
             publish: Mutex::new(Publish::default()),
         }
+    }
+
+    /// Device numbers on the bus.
+    pub(super) fn devices(&self) -> u8 {
+        (self.funcs.len() / FUNCTIONS) as u8
     }
 
     fn index(&self, at: PciAddr) -> Option<usize> {
@@ -132,6 +158,42 @@ impl Decode {
         self.funcs.iter().enumerate().filter_map(|(i, f)| {
             Some((PciAddr { device: (i / FUNCTIONS) as u8, function: (i % FUNCTIONS) as u8 }, f.get()?))
         })
+    }
+
+    /// The windows of this bus's functions and of the buses behind its
+    /// bridges, as forwarded. No lock: the function table is write-once.
+    pub(super) fn all_windows(&self) -> Vec<Win> {
+        self.windows().into_iter().map(|(w, _)| w).collect()
+    }
+
+    /// Own windows first, each with its slot in `funcs`; then, for each
+    /// bridge, the windows behind it that its header forwards (with no slot
+    /// yet).
+    fn windows(&self) -> Vec<(Win, Option<u16>)> {
+        let mut out = Vec::new();
+        for (at, f) in self.functions() {
+            let slot = (at.device as usize * FUNCTIONS + at.function as usize) as u16;
+            for (space, bar, base, size) in f.config().windows() {
+                out.push(((space, bar, base, size, f.clone()), Some(slot)));
+            }
+            if let Some(bus) = f.secondary() {
+                out.extend(bus.all_windows().into_iter().filter(|w| f.config().forwards(w.0, w.2, w.3)).map(|w| (w, None)));
+            }
+        }
+        out
+    }
+
+    /// The slot in `fwd` of a function behind a bridge, given one if it has
+    /// none. None once the table is full.
+    fn forwarded_slot(&self, f: &Arc<dyn PciFunction>) -> Option<u16> {
+        let n = self.nfwd.load(Ordering::Acquire);
+        if let Some(i) = self.fwd[..n].iter().position(|s| s.get().is_some_and(|g| Arc::ptr_eq(g, f))) {
+            return Some((FUNCTIONS * 32 + i) as u16);
+        }
+        let slot = self.fwd.get(n)?;
+        let _ = slot.set(f.clone());
+        self.nfwd.store(n + 1, Ordering::Release);
+        Some((FUNCTIONS * 32 + n) as u16)
     }
 
     /// Where the runs go. The first publish happens now.
@@ -162,49 +224,53 @@ impl Decode {
             if w.space != space || off >= w.size {
                 return None;
             }
-            Some((&**self.funcs[w.func as usize].get()?, w.bar, off))
+            let f = match (w.func as usize).checked_sub(FUNCTIONS * 32) {
+                None => self.funcs[w.func as usize].get()?,
+                Some(i) => self.fwd[i].get()?,
+            };
+            Some((&**f, w.bar, off))
         })
     }
 
     fn build(&self, p: &Publish) {
+        let wins = self.windows();
         let mut n = 0;
-        for (at, f) in self.functions() {
-            for (space, bar, base, size) in f.config().windows() {
-                if n == MAX_WINDOWS {
-                    log::warn!("pci: more than {MAX_WINDOWS} BAR windows open; {at:?} BAR {bar} ignored");
-                    continue;
-                }
-                let func = at.device * FUNCTIONS as u8 + at.function;
-                self.windows[n].store(Window { space, func, bar, base, size }.pack(), Ordering::Relaxed);
-                n += 1;
+        for ((space, bar, base, size, f), slot) in &wins {
+            if n == MAX_WINDOWS {
+                log::warn!("pci: more than {MAX_WINDOWS} BAR windows open; one of BAR {bar} ignored");
+                continue;
             }
+            let Some(func) = slot.or_else(|| self.forwarded_slot(f)) else {
+                log::warn!("pci: more than {MAX_FORWARDED} functions behind bridges; BAR {bar} ignored");
+                continue;
+            };
+            self.windows[n].store(Window { space: *space, func, bar: *bar, base: *base, size: *size }.pack(), Ordering::Relaxed);
+            n += 1;
         }
         self.count.store(n, Ordering::Release);
         if let Some(sink) = &p.sink {
-            sink(self.runs(&p.windows));
+            sink(Self::runs(&wins, &p.windows));
         }
     }
 
     /// The pages of each host window that one BAR decodes whole. Pages a
     /// BAR covers only in part, and pages two BARs claim (a misconfiguration
     /// the host resolves its own way), are left to the host.
-    fn runs(&self, windows: &[CpuWindow]) -> Vec<BarRun> {
+    fn runs(wins: &[(Win, Option<u16>)], windows: &[CpuWindow]) -> Vec<BarRun> {
         const PAGE: u64 = 1 << crate::ppmem::devmap::SLOT_SHIFT;
         let mut runs = Vec::new();
         for (wi, w) in windows.iter().enumerate() {
             let (wlo, whi) = (w.pci as u64, w.pci as u64 + w.len);
             // (first page, end page, function, BAR, BAR base) in PCI addresses.
             let mut found: Vec<(u64, u64, &Arc<dyn PciFunction>, usize, u64)> = Vec::new();
-            for (_, f) in self.functions() {
-                for (space, bar, base, size) in f.config().windows() {
-                    if space != w.space {
-                        continue;
-                    }
-                    let (lo, hi) = ((base as u64).max(wlo), (base as u64 + size as u64).min(whi));
-                    let (lo, hi) = (lo.next_multiple_of(PAGE), hi & !(PAGE - 1));
-                    if lo < hi {
-                        found.push((lo, hi, f, bar, base as u64));
-                    }
+            for ((space, bar, base, size, f), _) in wins {
+                if *space != w.space {
+                    continue;
+                }
+                let (lo, hi) = ((*base as u64).max(wlo), (*base as u64 + *size as u64).min(whi));
+                let (lo, hi) = (lo.next_multiple_of(PAGE), hi & !(PAGE - 1));
+                if lo < hi {
+                    found.push((lo, hi, f, *bar, *base as u64));
                 }
             }
             for (i, &(lo, hi, f, bar, base)) in found.iter().enumerate() {
