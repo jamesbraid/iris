@@ -56,6 +56,9 @@
 //! Ported from hw/misc/sgi-kona.c, sgi-kona-ports.c, sgi-kona-dma.c and
 //! sgi-command-port.c in jamesbraid/qemu-sgi-origami.
 
+// The crate allows dead code; this board's code does not hide any.
+#![warn(dead_code, unused_imports)]
+
 mod attach;
 mod consts;
 mod dma;

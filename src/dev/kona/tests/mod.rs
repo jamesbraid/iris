@@ -150,11 +150,12 @@ pub(super) fn threaded() -> (Fixture, TestBoard<Kona>) {
     (f, board)
 }
 
+mod regs;
 mod host;
 pub(super) use host::{attach, TestHost};
 
-mod regs;
 mod bringup;
 mod config;
 mod eeprom;
+mod dma;
 mod fifo;
