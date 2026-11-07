@@ -78,7 +78,8 @@ impl Rig {
 
     fn with(c: Ioc3) -> Rig {
         let mem = TestMem::new();
-        c.connect_dma(mem.clone());
+        c.state().connect_dma(mem.clone());
+        c.attached();
         let wire = [Arc::new(Wire::default()), Arc::new(Wire::default())];
         c.set_serial_backend(0, wire[0].clone());
         c.set_serial_backend(1, wire[1].clone());
@@ -119,7 +120,7 @@ impl Rig {
 #[test]
 fn identity_and_bar() {
     let r = Rig::new();
-    let cfg = r.c.config();
+    let cfg = r.c.state().config();
     assert_eq!(cfg.read(0), 0x0003_10a9);
     assert_eq!(cfg.read(2) >> 8, 0xff_0000, "no defined class");
     assert_eq!(cfg.read(2) & 0xff, 1, "revision 1");
@@ -141,7 +142,7 @@ fn identity_and_bar() {
 #[test]
 fn configuration_space_repeats_its_first_32_bytes() {
     let r = Rig::new();
-    let cfg = r.c.config();
+    let cfg = r.c.state().config();
     cfg.write(4, 0x0050_0000);
     cfg.write(3, 0x2800);
     cfg.write(1, 0x146);
@@ -170,7 +171,7 @@ fn configuration_space_repeats_its_first_32_bytes() {
 #[test]
 fn the_register_block_starts_with_the_configuration_header() {
     let r = Rig::new();
-    let cfg = r.c.config();
+    let cfg = r.c.state().config();
     cfg.write(4, 0x0050_0000);
     cfg.write(3, 0x2800);
     cfg.write(1, 0x146);
@@ -1108,9 +1109,10 @@ fn the_ethernet_level_drives_the_pci_pin_not_the_superio_line() {
     let c = Ioc3::octane(MAC, false);
     let eth = Arc::new(MockEth::default());
     c.attach_eth(eth.clone());
-    c.connect_dma(TestMem::new());
+    c.state().connect_dma(TestMem::new());
     let (pin, line) = LevelProbe::line();
-    c.connect_interrupt(line);
+    c.state().connect_irq(line);
+    c.attached();
     let (sup, sline) = LevelProbe::line();
     c.connect_superio_interrupt(sline);
     let wired = eth.wired.lock().unwrap();
@@ -1201,9 +1203,10 @@ fn the_ethernet_pin_follows_the_last_level_given() {
     let c = Ioc3::octane(MAC, false);
     let eth = Arc::new(MockEth::default());
     c.attach_eth(eth.clone());
-    c.connect_dma(TestMem::new());
+    c.state().connect_dma(TestMem::new());
     let (pin, line) = LevelProbe::line();
-    c.connect_interrupt(line);
+    c.state().connect_irq(line);
+    c.attached();
     let wired = eth.wired.lock().unwrap();
     let irq = &wired.as_ref().unwrap().1;
     for i in 0..1000 {

@@ -64,7 +64,7 @@ impl Rig {
         let mem = FakeMem::new();
         let isp = Isp1040::new();
         Device::start(&isp);
-        isp.connect_dma(mem.clone());
+        isp.state().connect_dma(mem.clone());
         Rig { isp, mem }
     }
 
@@ -165,7 +165,7 @@ fn cdb10(op: u8, lba: u32, blocks: u16) -> [u8; 10] {
 #[test]
 fn identity_and_window() {
     let r = Rig::bare();
-    let c = r.isp.config();
+    let c = r.isp.state().config();
     assert_eq!(c.read(0), 0x1020_1077, "device and vendor id");
     assert_eq!(c.read(2) & 0xff, 0x05, "revision");
     assert_eq!(c.read(2) >> 16, 0x0100, "mass storage, SCSI");
@@ -239,7 +239,8 @@ fn dma_block_config_is_storage_and_control_is_inert() {
 fn bus_ctrl_status_and_the_interrupt_line() {
     let r = Rig::bare();
     let (probe, line) = LevelProbe::line();
-    r.isp.connect_interrupt(line);
+    r.isp.state().connect_irq(line);
+    r.isp.attached();
     r.w(reg::BUS_CTRL, CTRL_INT_ENABLE | CTRL_RISC_INT_ENABLE);
     assert_eq!(r.r(reg::BUS_CTRL), CTRL_INT_ENABLE | CTRL_RISC_INT_ENABLE);
     r.w(reg::BUS_CTRL, 0xffff);
@@ -1048,7 +1049,8 @@ fn an_acknowledgement_does_not_erase_a_later_completion() {
 fn clearing_the_interrupt_keeps_a_completion_the_driver_was_not_shown() {
     let r = Rig::with_disk("unseen", 0, 64);
     let (probe, line) = LevelProbe::line();
-    r.isp.connect_interrupt(line);
+    r.isp.state().connect_irq(line);
+    r.isp.attached();
     r.init_rings(8, 8);
     r.w(reg::BUS_CTRL, CTRL_INT_ENABLE | CTRL_RISC_INT_ENABLE);
     r.put_entry(0, &tur_entry(0x5001));
@@ -1293,7 +1295,7 @@ fn dma_above_4_gib_reaches_the_bus_in_full() {
     let isp = Isp1040::new();
     Device::start(&isp);
     let probe = Arc::new(AddrProbe(Mutex::new(Vec::new())));
-    isp.connect_dma(probe.clone());
+    isp.state().connect_dma(probe.clone());
     let mut b = [0u8; 4];
     assert!(isp.dma_read(0x1_2345_6000, &mut b));
     assert!(isp.dma_write(0xffff_ffff_ffff_f000, &b));
@@ -1355,10 +1357,11 @@ fn gated_rig(name: &str) -> (Rig, Arc<GatedMem>, Arc<LevelProbe>) {
     let gate = GatedMem::new(mem.clone(), BUF);
     let isp = Isp1040::new();
     Device::start(&isp);
-    isp.connect_dma(gate.clone());
+    isp.state().connect_dma(gate.clone());
     isp.bus().attach_image(1, &image(name, 64), false).expect("attach");
     let (probe, line) = LevelProbe::line();
-    isp.connect_interrupt(line);
+    isp.state().connect_irq(line);
+    isp.attached();
     let r = Rig { isp, mem };
     r.init_rings(4, 4);
     r.w(reg::BUS_CTRL, CTRL_INT_ENABLE | CTRL_RISC_INT_ENABLE);
@@ -1395,11 +1398,12 @@ fn a_soft_reset_does_not_wait_for_the_target() {
     let gate = GatedMem::new(mem.clone(), BUF);
     let isp = Isp1040::new();
     Device::start(&isp);
-    isp.connect_dma(gate.clone());
+    isp.state().connect_dma(gate.clone());
     isp.bus().attach_image(1, &image("async-reset", 64), false).expect("attach");
     let r = Rig { isp, mem };
     let (probe, line) = LevelProbe::line();
-    r.isp.connect_interrupt(line);
+    r.isp.state().connect_irq(line);
+    r.isp.attached();
     r.init_rings(4, 4);
     r.w(reg::BUS_CTRL, CTRL_INT_ENABLE | CTRL_RISC_INT_ENABLE);
     r.mem.put(BUF, &[0x5a; BLOCK_SIZE]);
@@ -1574,7 +1578,7 @@ fn the_ring_thread_lives_between_start_and_stop() {
     let isp = Isp1040::new();
     assert!(!isp.is_running(), "the constructor starts no thread");
     let mem = FakeMem::new();
-    isp.connect_dma(mem.clone());
+    isp.state().connect_dma(mem.clone());
     isp.bus().attach_image(0, &image("lifecycle", 64), false).expect("attach");
     let r = Rig { isp, mem };
     r.init_rings(8, 8);

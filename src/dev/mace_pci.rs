@@ -296,11 +296,12 @@ impl MacePci {
     /// Put a function in a slot on bus 0, wire its interrupt pin to the
     /// bridge, which routes it on, and give it host memory to master.
     pub fn attach(&self, slot: u8, name: &'static str, dev: Arc<dyn PciFunction>) {
-        dev.connect_dma(self.dma.clone());
-        let pin = dev.config().interrupt_pin();
+        dev.state().connect_dma(self.dma.clone());
+        let pin = dev.state().config().interrupt_pin();
         if (1..=4).contains(&pin) {
-            dev.connect_interrupt(IrqLine::new(self.irq.clone(), PciIrqRouter::line(slot, pin)));
+            dev.state().connect_irq(IrqLine::new(self.irq.clone(), PciIrqRouter::line(slot, pin)));
         }
+        dev.attached();
         assert!(self.funcs[slot as usize].set(dev.clone()).is_ok(), "pci: slot {slot} is taken");
         let mut slots = self.slots.lock().unwrap();
         slots.insert(slot, Arc::new(Slot { name, dev, touched: Mutex::new(Vec::new()) }));
@@ -312,7 +313,7 @@ impl MacePci {
     fn rebuild_windows(&self, slots: &std::collections::BTreeMap<u8, Arc<Slot>>) {
         let mut n = 0;
         for (&slot, s) in slots {
-            for (space, bar, base, size) in s.dev.config().windows() {
+            for (space, bar, base, size) in s.dev.state().config().windows() {
                 if n == MAX_WINDOWS {
                     log::warn!("pci: more than {MAX_WINDOWS} BAR windows open; slot {slot} BAR {bar} ignored");
                     continue;
@@ -523,7 +524,7 @@ impl BusDevice for MacePci {
             macepci_reg::CONFIG_DATA => BusRead32::ok(match self.selected() {
                 Some((s, reg)) => {
                     s.note(reg, false);
-                    s.dev.config().read(reg)
+                    s.dev.state().config().read(reg)
                 }
                 // An absent device: the bus floats high. Zero would read back
                 // as vendor ID 0x0000, which firmware takes for a device that
@@ -549,7 +550,7 @@ impl BusDevice for MacePci {
             macepci_reg::CONFIG_DATA => {
                 if let Some((s, reg)) = self.selected() {
                     s.note(reg, true);
-                    s.dev.config().write(reg, val);
+                    s.dev.state().config().write(reg, val);
                     self.rebuild_windows(&self.slots.lock().unwrap());
                 }
             }
@@ -583,7 +584,7 @@ impl Saveable for MacePci {
         t.insert("pins".into(), toml::Value::Array(levels.iter().map(|&b| toml::Value::Boolean(b)).collect()));
         let mut slots = toml::map::Map::new();
         for (n, s) in self.slots.lock().unwrap().iter() {
-            slots.insert(n.to_string(), s.dev.config().save_state());
+            slots.insert(n.to_string(), s.dev.state().config().save_state());
         }
         t.insert("slots".into(), toml::Value::Table(slots));
         toml::Value::Table(t)
@@ -599,7 +600,7 @@ impl Saveable for MacePci {
             for (n, cfg) in slots {
                 let s = n.parse::<u8>().ok().and_then(|n| ours.get(&n))
                     .ok_or_else(|| format!("pci: saved state has slot {n}, which is empty here"))?;
-                s.dev.config().load_state(cfg)?;
+                s.dev.state().config().load_state(cfg)?;
             }
             self.rebuild_windows(&ours);
         }
@@ -636,7 +637,7 @@ impl crate::traits::Device for MacePci {
                     reg(macepci_reg::CONTROL), reg(macepci_reg::REVISION), reg(macepci_reg::ERROR_FLAGS),
                     reg(macepci_reg::ERROR_ADDR), *self.config_addr.lock().unwrap()).ok();
                 for (slot, s) in self.slots.lock().unwrap().iter() {
-                    let c = s.dev.config();
+                    let c = s.dev.state().config();
                     let id = c.read(0);
                     let bars: Vec<String> = (0..6).map(|i| c.bar_base(i)).filter(|&b| b != 0).map(|b| format!("{b:#x}")).collect();
                     let irq = match c.interrupt_pin() {
@@ -654,7 +655,7 @@ impl crate::traits::Device for MacePci {
                 let slot: u8 = args.get(1).and_then(|v| v.parse().ok()).ok_or("Usage: pci config <slot>")?;
                 let (_, f, _) = self.slot(slot).ok_or(format!("pci: nothing in slot {slot}"))?;
                 for row in 0..16 {
-                    let v: Vec<String> = (0..4).map(|k| format!("{:08x}", f.config().read(row * 4 + k))).collect();
+                    let v: Vec<String> = (0..4).map(|k| format!("{:08x}", f.state().config().read(row * 4 + k))).collect();
                     writeln!(w, "  {:02x}: {}", row * 16, v.join(" ")).ok();
                 }
             }
@@ -667,17 +668,16 @@ impl crate::traits::Device for MacePci {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pci::{Bar, PciConfig, PCI_COMMAND_IO, PCI_COMMAND_MEMORY, PCI_INTA};
+    use crate::pci::{Bar, PciConfig, PciFunctionState, PCI_COMMAND_IO, PCI_COMMAND_MEMORY, PCI_INTA};
 
     /// A function that remembers its last BAR access and drives its pin.
     struct Fake {
-        cfg: PciConfig,
+        pci: PciFunctionState,
         last: Mutex<Option<(usize, u32, usize)>>,
-        irq: std::sync::OnceLock<IrqLine>,
     }
 
     impl PciFunction for Fake {
-        fn config(&self) -> &PciConfig { &self.cfg }
+        fn state(&self) -> &PciFunctionState { &self.pci }
         fn bar_read(&self, bar: usize, off: u32, width: usize) -> u32 {
             *self.last.lock().unwrap() = Some((bar, off, width));
             0x1234_5678
@@ -685,7 +685,6 @@ mod tests {
         fn bar_write(&self, bar: usize, off: u32, _val: u32, width: usize) {
             *self.last.lock().unwrap() = Some((bar, off, width));
         }
-        fn connect_interrupt(&self, line: IrqLine) { let _ = self.irq.set(line); }
     }
 
     struct Crime(Mutex<Vec<(u32, bool)>>);
@@ -728,10 +727,9 @@ mod tests {
         let crime = Arc::new(Crime(Mutex::new(Vec::new())));
         let pci = MacePci::new(crime.clone(), test_ram());
         let f = Arc::new(Fake {
-            cfg: PciConfig::new(0x9004, 0x8078, 0x0100_00, 1,
-                [Bar::Io(0x100), Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused], PCI_INTA),
+            pci: PciFunctionState::new(PciConfig::new(0x9004, 0x8078, 0x0100_00, 1,
+                [Bar::Io(0x100), Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused], PCI_INTA)),
             last: Mutex::new(None),
-            irq: std::sync::OnceLock::new(),
         });
         pci.attach(IP32_SCSI_SLOT, "fake", f.clone());
 
@@ -759,7 +757,7 @@ mod tests {
                    "config registers touched, for the bring-up report");
 
         // Pin A of slot 1 is CRIME input 8.
-        f.irq.get().expect("wired at attach").set(true);
+        f.pci.irq().expect("wired at attach").set(true);
         assert_eq!(*crime.0.lock().unwrap(), vec![(IP32_SCSI_CRIME_INT, true)]);
     }
     /// Once a memory BAR is placed and enabled, the pages it decodes in both
@@ -770,10 +768,9 @@ mod tests {
         let crime = Arc::new(Crime(Mutex::new(Vec::new())));
         let pci = MacePci::new(crime, test_ram());
         let f = Arc::new(Fake {
-            cfg: PciConfig::new(0x9004, 0x8078, 0x0100_00, 1,
-                [Bar::Io(0x100), Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused], PCI_INTA),
+            pci: PciFunctionState::new(PciConfig::new(0x9004, 0x8078, 0x0100_00, 1,
+                [Bar::Io(0x100), Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused], PCI_INTA)),
             last: Mutex::new(None),
-            irq: std::sync::OnceLock::new(),
         });
         pci.attach(IP32_SCSI_SLOT, "fake", f.clone());
         let runs = Arc::new(Mutex::new(Vec::<BarRun>::new()));
@@ -803,10 +800,9 @@ mod tests {
         let make = |crime: Arc<Crime>| {
             let pci = MacePci::new(crime, test_ram());
             let f = Arc::new(Fake {
-                cfg: PciConfig::new(0x9004, 0x8078, 0x0100_00, 1,
-                    [Bar::Io(0x100), Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused], PCI_INTA),
+                pci: PciFunctionState::new(PciConfig::new(0x9004, 0x8078, 0x0100_00, 1,
+                    [Bar::Io(0x100), Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused], PCI_INTA)),
                 last: Mutex::new(None),
-                irq: std::sync::OnceLock::new(),
             });
             pci.attach(IP32_SCSI_SLOT, "fake", f.clone());
             (pci, f)
@@ -817,7 +813,7 @@ mod tests {
         src.write32(bridge(macepci_reg::CONFIG_DATA), 0x8000_1000);
         src.write32(bridge(macepci_reg::CONFIG_ADDR), cfg(slot1, 1));
         src.write32(bridge(macepci_reg::CONFIG_DATA), PCI_COMMAND_MEMORY);
-        f.irq.get().unwrap().set(true);
+        f.pci.irq().unwrap().set(true);
         let v1 = src.save_state();
 
         let crime = Arc::new(Crime(Mutex::new(Vec::new())));
@@ -842,14 +838,13 @@ mod tests {
         let crime = Arc::new(Crime(Mutex::new(Vec::new())));
         let pci = MacePci::with_routing(crime.clone(), route, test_ram());
         let fake = |pin| Arc::new(Fake {
-            cfg: PciConfig::new(0x1234, 0x5678, 0, 0, [Bar::Unused; 6], pin),
+            pci: PciFunctionState::new(PciConfig::new(0x1234, 0x5678, 0, 0, [Bar::Unused; 6], pin)),
             last: Mutex::new(None),
-            irq: std::sync::OnceLock::new(),
         });
         let (a, b) = (fake(PCI_INTA), fake(PCI_INTA + 1));
         pci.attach(3, "a", a.clone());
         pci.attach(4, "b", b.clone());
-        let (la, lb) = (a.irq.get().unwrap(), b.irq.get().unwrap());
+        let (la, lb) = (a.pci.irq().unwrap(), b.pci.irq().unwrap());
         let last = || *crime.0.lock().unwrap().last().unwrap();
 
         la.set(true);

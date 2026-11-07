@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::hptimer::TimerManager;
+use crate::pci::PciDma;
 use crate::traits::Device;
 use std::sync::{Arc, Mutex};
 
@@ -12,8 +13,8 @@ const BAR: u64 = 0x1300_0000;
 /// A card with BAR0 assigned and memory decoding on, as firmware leaves it.
 fn card() -> Rad1 {
     let r = Rad1::new();
-    r.config().write(4, BAR as u32);
-    r.config().write(1, PCI_COMMAND_MEMORY_ON);
+    r.state().config().write(4, BAR as u32);
+    r.state().config().write(1, PCI_COMMAND_MEMORY_ON);
     r.fake_ns.store(0, Ordering::Relaxed);
     r
 }
@@ -39,7 +40,7 @@ const STARTUP: [(u32, u32); 28] = [
 #[test]
 fn pci_identity() {
     let r = Rad1::new();
-    let c = r.config();
+    let c = r.state().config();
     assert_eq!(c.read(0), 0x0005_10a9);
     assert_eq!(c.read(2) & 0xff, 0xc0);
     assert_eq!(c.read(2), 0xc0);
@@ -55,7 +56,7 @@ fn pci_identity() {
 #[test]
 fn bar_sizing_and_assignment() {
     let r = Rad1::new();
-    let c = r.config();
+    let c = r.state().config();
     c.write(4, 0xffff_ffff);
     assert_eq!(c.read(4), 0xffff_e000);
     c.write(4, BAR as u32);
@@ -340,7 +341,7 @@ impl PciDma for Ram {
 fn dma_card() -> (Rad1, Arc<Ram>) {
     let r = card();
     let ram = Arc::new(Ram(Mutex::new(vec![0xaa; 0x40_0000])));
-    r.connect_dma(ram.clone());
+    r.state().connect_dma(ram.clone());
     (r, ram)
 }
 
@@ -806,7 +807,7 @@ fn a_long_catch_up_skips_whole_revolutions() {
     let r = card();
     let ram = Arc::new(Ram(Mutex::new(vec![0xaa; 0x40_0000])));
     let dma = Arc::new(Counting(ram.clone(), std::sync::atomic::AtomicUsize::new(0)));
-    r.connect_dma(dma.clone());
+    r.state().connect_dma(dma.clone());
     program(&r, &RING_INPUT, 0x11_0000, 0xffff_f000);
     wr(&r, 0x4c, 1);
     // 1000 s of 44.1 kHz: 44.1 million frames of 8 bytes into a 4 KiB ring.
@@ -1195,15 +1196,15 @@ fn slow_host(card: &Inner, _: &crate::config::AudioConfig) -> Option<HostOut> {
 #[test]
 fn a_host_slow_to_open_does_not_cost_the_boot_tune_its_start() {
     let r = Rad1 { inner: Arc::new_cyclic(|me| Inner { open_host: slow_host, ..Inner::new(me.clone()) }) };
-    r.config().write(4, BAR as u32);
-    r.config().write(1, PCI_COMMAND_MEMORY_ON);
+    r.state().config().write(4, BAR as u32);
+    r.state().config().write(1, PCI_COMMAND_MEMORY_ON);
     r.fake_ns.store(0, Ordering::Relaxed);
     let ram = Arc::new(Ram(Mutex::new(vec![0; 0x40_0000])));
     // A recognisable tune: every frame's samples count up from 1.
     for (f, w) in ram.0.lock().unwrap()[TUNE_BUF as usize..][..TUNE_FRAMES * 8].chunks_exact_mut(4).enumerate() {
         w.copy_from_slice(&sample_to_word((f / 2 % 30_000 + 1) as i16).to_le_bytes());
     }
-    r.connect_dma(ram);
+    r.state().connect_dma(ram);
     r.enable_output(crate::config::AudioConfig::default());
     Device::start(&r);
     prom_tune(&r, TUNE_CTRL);
