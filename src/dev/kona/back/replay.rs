@@ -643,9 +643,10 @@ impl Report {
 }
 
 /// Replay a recording into a board whose back end is a `KonaBackend`, loads
-/// and stores only, and return the monitor's `status` and `hash` at the end.
-/// The recording's resets and retraces are performed as in `replay`.
-pub(super) fn replay_drawing(rec: &Recording) -> Result<(String, String), String> {
+/// and stores only, and return the monitor's `status` and `hash` at the end,
+/// after `limit` records or all of them. The recording's resets are performed
+/// as in `replay`.
+pub(super) fn replay_drawing(rec: &Recording, limit: Option<usize>) -> Result<(String, String), String> {
     let cfg = rec.config()?;
     let at = Arc::new(AtomicUsize::new(0));
     let host = ReplayHost::new(rec, at);
@@ -655,7 +656,7 @@ pub(super) fn replay_drawing(rec: &Recording) -> Result<(String, String), String
     });
     let backend = super::KonaBackend::new(super::BackendConfig::for_pipe(&cfg));
     let kona = KonaBuilder::new(cfg, host.attach()).backend(Box::new(backend)).probe_value(probe.unwrap_or(0)).build()?;
-    for r in &rec.records {
+    for r in rec.records.iter().take(limit.unwrap_or(usize::MAX)) {
         match *r {
             Rec::Store { size, off, val } => {
                 while kona.bus_write(off as u64, size as u32, val) == BUS_BUSY {
@@ -819,6 +820,11 @@ mod tests {
     /// The store after the PROM recording (see `the_prom_recording_draws_into_the_store`).
     const PROM_STORE_HASH: &str = "48d707b87081b952";
 
+    /// The records of the IRIX recording the front end frames exactly (see
+    /// `the_irix_recording_replays`).
+    const IRIX_EXACT_RECORDS: usize = 1_415_538;
+    const IRIX_STORE_HASH: &str = "53eab9b4cb25862c";
+
     const PORT: u32 = 0xc10000;
 
     #[test]
@@ -977,10 +983,30 @@ mod tests {
             return;
         }
         let rec = Recording::parse(&std::fs::read(&path).unwrap()).unwrap();
-        let (status, hash) = replay_drawing(&rec).unwrap();
+        let (status, hash) = replay_drawing(&rec, None).unwrap();
         eprintln!("{status}\nstore hash {hash}");
         assert!(status.contains("1 word arrays"), "{status}");
         assert_eq!(hash, PROM_STORE_HASH, "{status}");
+    }
+
+    /// The IRIX stream drawn into the store as far as the front end frames it
+    /// exactly (to the first data run only a back end can size): the X
+    /// server's state, boxes, rectangles, spans, points and stipples of the
+    /// greeter's start. The hash is a regression net, not evidence of the pixels. The pixel and
+    /// image paths that follow are the next step's, so the store is not yet
+    /// the desktop.
+    #[test]
+    fn the_irix_recording_draws_into_the_store_over_its_exact_window() {
+        let Some(dir) = recordings_dir() else { return };
+        let path = dir.join("onyx2-deskside-irix-4dwm.kona.rec");
+        if !path.exists() {
+            eprintln!("skipping: {} is not there", path.display());
+            return;
+        }
+        let rec = Recording::parse(&std::fs::read(&path).unwrap()).unwrap();
+        let (status, hash) = replay_drawing(&rec, Some(IRIX_EXACT_RECORDS)).unwrap();
+        eprintln!("{status}\nstore hash {hash}");
+        assert_eq!(hash, IRIX_STORE_HASH, "{status}");
     }
 
     #[test]

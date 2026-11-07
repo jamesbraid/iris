@@ -45,7 +45,7 @@ hashes are given where a change is easiest to understand by reading the commit.
   points, bitmap blits) into the pixel store, boxes by a fill rule that is a
   parameter (`FillRule`). Replaying the PROM recording to its end draws the
   graphics menu; `kona hash` shows the store's hash.
-- The X server's graphics context, position, clip list and scissor are decoded and held by the KONA back end (`kona status` shows what was understood). X boxes, rectangles, spans and points (and the data tokens that feed them) draw under that state into the pixel store, clipped to the screen, the clip list and the scissor, and masked by the stipple the X server stores and loads.
+- The X server's graphics context, position, clip list and scissor are decoded and held by the KONA back end (`kona status` shows what was understood). X boxes, rectangles, spans and points (and the data tokens that feed them) draw under that state into the pixel store, clipped to the screen, the clip list and the scissor, and masked by the stipple the X server stores and loads. Replaying the IRIX recording over its exactly framed window (about 20,700 records of graphics traffic) draws the greeter's start, 154 fills; `kona hash` pins it.
 - A recorded command stream (the `KONAREC` file QEMU's KONA model writes) can be
   replayed into the front end: stores and loads in order, the board's DMA reads
   served from the recording and its writes compared. The replay is exact only up
