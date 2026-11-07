@@ -231,6 +231,8 @@ impl KonaBackend {
             self.x.scissor(),
             self.x.runs_dropped
         )?;
+        let f = &self.x.fills;
+        writeln!(w, "X fills           {} drawn, refused: {} context, {} target, {} destination", f.drawn, f.bad_context, f.other_target, f.bad_destination)?;
         writeln!(w, "fill rule         {:?}", self.cfg.fill_rule)?;
         writeln!(w, "layouts           {} made", self.layouts)?;
         if self.malformed != 0 {
@@ -280,7 +282,10 @@ impl Backend for KonaBackend {
                 self.textport.command(&self.store, self.cfg.fill_rule, selector, args);
             }
             Job::Command { grammar: Grammar::Kernel, selector, args, .. } => {
-                self.x.command(selector, args);
+                if !self.x.command(selector, args) && token::xfill::is_draw(selector) {
+                    let surface = raster::Surface::new(&self.store, token::textport::COLOUR_WORD);
+                    self.x.draw_command(&surface, selector, args);
+                }
             }
             Job::Bitmap { header, payload } => self.textport.bitmap(&self.store, header, payload),
             _ => {}
@@ -532,6 +537,27 @@ mod tests {
         assert!(run(&mut b, &["status"]).1.contains("MainIndex16"));
         b.reset();
         assert!(run(&mut b, &["status"]).1.contains("not decoded"));
+    }
+
+    /// An X box through `Backend::job` draws into the colour word of the store
+    /// under the loaded context, and a command that is no X token leaves a
+    /// waiting run alone only if it belongs to the run.
+    #[test]
+    fn an_x_box_draws_into_the_store() {
+        let mut b = backend();
+        let gc = [0x5a000, 0x1ffe, 0xa5000, 0x1ffe, 0xf00fff, 0, 0x180c, 0x40001, 1, 6, 5, 1, 1];
+        command(&mut b, Grammar::Kernel, 0x129, &gc);
+        command(&mut b, Grammar::Kernel, 0x154, &[2 << 16 | 3, 5 << 16 | 7]);
+        assert_eq!(b.store.read(2, 1023 - 3, 1), 0x5a00);
+        assert_eq!(b.store.read(5, 1023 - 3, 1), 0);
+        // A data token, another command, then a box: the run did not survive.
+        command(&mut b, Grammar::Kernel, 0x142, &[10 << 16 | 10, 12 << 16 | 12]);
+        command(&mut b, Grammar::Kernel, 0x1f1, &[0, 0, 0]);
+        command(&mut b, Grammar::Kernel, 0x154, &[20 << 16 | 20, 21 << 16 | 21]);
+        assert_eq!(b.store.read(10, 1023 - 10, 1), 0);
+        assert_eq!(b.store.read(20, 1023 - 20, 1), 0x5a00);
+        let text = run(&mut b, &["status"]).1;
+        assert!(text.contains("X fills           2 drawn, refused: 0 context, 0 target, 0 destination"), "{text}");
     }
 
     #[test]

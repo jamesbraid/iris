@@ -85,6 +85,7 @@ pub use back::store::{PixelStore, WordArray, MAX_WORDS};
 pub use back::token::gc::{logic_op, Gc, Status as GcStatus, Target as GcTarget, GC_WORDS};
 pub use back::token::textport::{Textport, COLOUR_WORD};
 pub use back::token::x::{Bounds, XState};
+pub use back::token::xfill::{FillCounts, StipplePattern};
 pub use back::{BackendConfig, BoardSet, KonaBackend};
 pub use consts::APERTURE;
 pub use flash::FLASH_SIZE;

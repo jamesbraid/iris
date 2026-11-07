@@ -48,12 +48,20 @@ pub struct Bounds {
 
 #[derive(Clone, Debug)]
 pub struct XState {
-    gc: [u32; GC_WORDS],
+    pub(super) gc: [u32; GC_WORDS],
     position: [u32; 4],
     clip: Vec<[i32; 4]>,
     scissor: Option<[u32; 4]>,
     /// Words of a clip list's leading data tokens, waiting for the clip.
     clip_run: Vec<u32>,
+    /// Words of data tokens waiting for the box, rectangle or point that uses
+    /// them.
+    pub(super) run: Vec<u32>,
+    /// Buffers kept between requests, so a fill allocates nothing: the boxes
+    /// of a request and the spans of a row.
+    pub(super) boxes: Vec<super::xfill::Box4>,
+    pub(super) spans: Vec<(i64, i64)>,
+    pub fills: super::xfill::FillCounts,
     /// Clip lists refused (a count that does not match, or too long) and runs
     /// dropped by another command.
     pub clips_refused: u64,
@@ -62,7 +70,7 @@ pub struct XState {
 
 impl Default for XState {
     fn default() -> Self {
-        XState { gc: [0; GC_WORDS], position: [0; 4], clip: Vec::new(), scissor: None, clip_run: Vec::new(), clips_refused: 0, runs_dropped: 0 }
+        XState { gc: [0; GC_WORDS], position: [0; 4], clip: Vec::new(), scissor: None, clip_run: Vec::new(), run: Vec::new(), boxes: Vec::new(), spans: Vec::new(), fills: Default::default(), clips_refused: 0, runs_dropped: 0 }
     }
 }
 
@@ -121,11 +129,21 @@ impl XState {
         self.clip.len() <= 1 || self.clip.iter().any(|c| x >= c[0] as i64 && y >= c[1] as i64 && x < c[2] as i64 && y < c[3] as i64)
     }
 
-    /// Every X command ends a waiting clip list's words except the two that
-    /// belong to it. Called for every kernel-grammar command before it runs.
+    /// Every kernel command ends a waiting clip list's words except the two
+    /// that belong to it, and a waiting data run's except the tokens that use
+    /// or extend it. Called for every kernel-grammar command before it runs.
+    ///
+    /// The model this was taken from keeps a held run across words another
+    /// context sends (the run belongs to the context that began it; inferred
+    /// there). This model drops it: the context-ownership rule is not modelled,
+    /// to be revisited with the context-switch step.
     pub fn end_runs(&mut self, selector: u32) {
         if selector != X_BDATA4 && selector != X_CLIP && !self.clip_run.is_empty() {
             self.clip_run.clear();
+            self.runs_dropped += 1;
+        }
+        if !super::xfill::keeps_run(selector) && !self.run.is_empty() {
+            self.run.clear();
             self.runs_dropped += 1;
         }
     }
