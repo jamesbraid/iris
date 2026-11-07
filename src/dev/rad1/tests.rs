@@ -1297,6 +1297,31 @@ fn a_hold_up_is_more_than_one_interval_late_and_at_most_200ms_is_held_back() {
     }
 }
 
+/// A restore into a card that has been in use equals one into a fresh card.
+#[test]
+fn rad1_load_into_a_dirtied_instance_equals_load_into_a_fresh_one() {
+    use crate::traits::Saveable;
+    let src = card();
+    wr(&src, 0xa8, 0x1357_9bdf);
+    wr(&src, 0x80, 0xffe3_cffe);
+    let v = src.save_state();
+    let used = card();
+    wr(&used, 0xa8, 0x2468_ace0);
+    wr(&used, 0x44, 0xa000_0008);
+    wr(&used, 0x4c0, 0xa000_c000);
+    {
+        let mut s = used.state.lock();
+        s.chan[CH_OUT].eod = true;
+        s.out_cg = 2;
+        s.relay_muted = Some(true);
+    }
+    let fresh = card();
+    used.load_state(&v).unwrap();
+    fresh.load_state(&v).unwrap();
+    assert_eq!(used.save_state(), fresh.save_state());
+    assert_eq!(used.save_state(), v);
+}
+
 /// A saved card loads into a fresh one: its registers come back, and its
 /// clock reads what it read at the save rather than the restoring card's.
 #[test]
