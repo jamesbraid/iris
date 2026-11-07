@@ -1,5 +1,6 @@
 use eframe::egui::{self, Color32, ComboBox, Grid, RichText, TextEdit};
-use iris::config::{MachineConfig, MachineProfile, ScsiDeviceConfig, VALID_BANK_SIZES};
+use crate::placement_ui::{self, Device, Media};
+use iris::config::{MachineConfig, MachineProfile, VALID_BANK_SIZES};
 use iris::cpu::parts::{self, Part};
 use iris::dev::ng1::vc2_timings::NewportResolution;
 
@@ -406,19 +407,15 @@ impl NewMachineDialog {
                         }
                         // SCSI defaults: drop the built-in entries unless the
                         // user explicitly opted in.
-                        cfg.scsi.clear();
+                        let place = |cfg: &mut MachineConfig, id: u8, name: &str, path: &str| {
+                            let at = placement_ui::controller_zero_target(cfg, id);
+                            placement_ui::set_media(cfg, Media { at, dev: Device::new(name, path.to_string()) });
+                        };
                         if !self.scsi1_path.is_empty() {
-                            cfg.scsi.insert(1, ScsiDeviceConfig {
-                                path: self.scsi1_path.clone(),
-                                ..Default::default()
-                            });
+                            place(&mut cfg, 1, "hdd", &self.scsi1_path);
                         }
                         if self.attach_cdrom && !self.cdrom4_path.is_empty() {
-                            cfg.scsi.insert(4, ScsiDeviceConfig {
-                                path: self.cdrom4_path.clone(),
-                                cdrom: true,
-                                ..Default::default()
-                            });
+                            place(&mut cfg, 4, "cdrom", &self.cdrom4_path);
                         }
                         let name = if self.name.trim().is_empty() { "indy".to_string() } else { self.name.trim().to_string() };
                         self.result = Some(NewMachineResult { name, cfg });

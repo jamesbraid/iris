@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::config::{MachineConfig, MachineProfile, ScsiKind, DEFAULT_PROM};
+use crate::config::{MachineConfig, MachineProfile, DEFAULT_PROM};
 
 fn missing_file(what: &str, path: &str, problems: &mut Vec<String>) {
     match std::fs::metadata(path) {
@@ -67,24 +67,23 @@ pub fn problems(cfg: &MachineConfig) -> Vec<String> {
         missing_file("prom", &profile.prom_path(&cfg.prom), &mut problems);
     }
 
-    let mut keys: Vec<_> = cfg.scsi.keys().copied().collect();
-    keys.sort();
-    for key in keys {
-        let dev = &cfg.scsi[&key];
-        let what = format!("scsi.{key}");
-        match dev.kind() {
-            ScsiKind::Daynaport => {}
-            ScsiKind::Cdrom => {
-                if !dev.path.is_empty() {
-                    missing_file(&what, &dev.path, &mut problems);
+    for p in cfg.placements().unwrap_or_default() {
+        let what = p.at.to_string();
+        let flag = |k: &str| p.opts.get(k).and_then(toml::Value::as_bool).unwrap_or(false);
+        let path = p.opts.get("path").and_then(toml::Value::as_str).unwrap_or("");
+        match p.device.as_str() {
+            "hdd" if flag("scratch") => missing_parent(&format!("{what} scratch volume"), path, &mut problems),
+            "hdd" if path.is_empty() => problems.push(format!("{what}: a disk needs a path")),
+            "hdd" => missing_file(&what, path, &mut problems),
+            "cdrom" => {
+                if !path.is_empty() {
+                    missing_file(&what, path, &mut problems);
                 }
-                for disc in &dev.discs {
+                for disc in p.opts.get("discs").and_then(toml::Value::as_array).into_iter().flatten().filter_map(toml::Value::as_str) {
                     missing_file(&format!("{what} disc"), disc, &mut problems);
                 }
             }
-            ScsiKind::Disk if dev.scratch => missing_parent(&format!("{what} scratch volume"), &dev.path, &mut problems),
-            ScsiKind::Disk if dev.path.is_empty() => problems.push(format!("{what}: a disk needs a path")),
-            ScsiKind::Disk => missing_file(&what, &dev.path, &mut problems),
+            _ => {}
         }
     }
 
@@ -149,6 +148,8 @@ pub fn report(path: &str, cfg: &MachineConfig) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ip30_machine::OctaneMachine;
+    use crate::location::Hop;
     use crate::config::banks_from4;
 
     fn dir(name: &str) -> std::path::PathBuf {
@@ -174,7 +175,8 @@ mod tests {
             file(&d, "prom"), d.join("console.log"), file(&d, "disk"));
         let cfg_path = d.join("octane.toml");
         std::fs::write(&cfg_path, text).unwrap();
-        let cfg = MachineConfig::try_load(cfg_path.to_str().unwrap()).unwrap();
+        let mut cfg = MachineConfig::try_load(cfg_path.to_str().unwrap()).unwrap();
+        cfg.migrate(&crate::topology::Topology::fill_for(&cfg)).unwrap();
         assert_eq!(problems(&cfg), Vec::<String>::new());
         assert_eq!(report("octane.toml", &cfg), 0);
         let _ = std::fs::remove_dir_all(&d);
@@ -186,13 +188,13 @@ mod tests {
     #[test]
     fn the_defaults_need_only_their_disk_images() {
         let d = dir("defaults");
-        let cfg = MachineConfig::try_load(d.join("absent.toml").to_str().unwrap()).unwrap();
+        let mut cfg = MachineConfig::try_load(d.join("absent.toml").to_str().unwrap()).unwrap();
+        assert!(problems(&cfg).is_empty(), "a bare config places nothing");
+        cfg.with_default_media(&crate::topology::Topology::fill_for(&cfg), false);
         let wanted = problems(&cfg);
         // (Both are there if the test is run beside such files.)
-        assert!(wanted.iter().all(|p| p.starts_with("scsi.1 scsi1.raw") || p.starts_with("scsi.4 cdrom4.iso")), "{wanted:?}");
-        let mut cfg = cfg;
-        cfg.scsi.clear();
-        assert!(problems(&cfg).is_empty());
+        assert!(wanted.iter().all(|p| p.starts_with("hpc3.0.t1 scsi1.raw") || p.starts_with("hpc3.0.t4 cdrom4.iso")), "{wanted:?}");
+        assert_eq!(wanted.len(), 2, "{wanted:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -219,17 +221,17 @@ mod tests {
         cfg.machine.cpu = Some("r4400".into());
         cfg.banks = banks_from4([128, 0, 0, 0]);
         cfg.prom = d.join("no-prom").to_string_lossy().into_owned();
-        cfg.scsi.clear();
-        cfg.scsi.insert(1, toml::from_str(&format!("path = {:?}", d.join("no-disk").to_str().unwrap())).unwrap());
-        cfg.scsi.insert(2, toml::from_str("path = \"\"").unwrap());
+        let ctl = OctaneMachine::pci_slot(Some(0));
+        cfg.place("hdd", ctl.join(Hop::t(1)), toml::from_str(&format!("path = {:?}", d.join("no-disk").to_str().unwrap())).unwrap());
+        cfg.place("hdd", ctl.join(Hop::t(2)), toml::from_str("path = \"\"").unwrap());
         cfg.serial_log = Some(d.join("nowhere").join("log").to_string_lossy().into_owned());
         cfg.monitor_port = Some(8880);
         let all = problems(&cfg).join("\n");
         for want in [
             "SGI Octane (IP30) takes [machine] cpu = ",
             "prom ",
-            "scsi.1 ",
-            "scsi.2: a disk needs a path",
+            "xio15.pci0.0.t1 ",
+            "xio15.pci0.0.t2: a disk needs a path",
             "serial_log ",
             "directory ",
             "monitor_port and serial_port_a both use port 8880",
@@ -246,7 +248,6 @@ mod tests {
     #[test]
     fn a_missing_prom_is_a_warning_where_the_machine_has_its_own() {
         let mut cfg = MachineConfig::default();
-        cfg.scsi.clear();
         cfg.prom = "no-such-prom.bin".into();
         assert!(problems(&cfg).is_empty());
         assert_eq!(warnings(&cfg).len(), 1, "{:?}", warnings(&cfg));
@@ -270,9 +271,9 @@ mod tests {
         cfg.banks = banks_from4([128, 0, 0, 0]);
         cfg.prom = d.join("absent-prom").to_string_lossy().into_owned();
         assert!(problems(&cfg).iter().any(|p| p.starts_with("prom ")), "{:?}", problems(&cfg));
-        cfg.scsi.clear();
-        cfg.scsi.insert(1, toml::from_str(&format!("scratch = true\npath = {:?}", d.join("scratch.img").to_str().unwrap())).unwrap());
-        cfg.scsi.insert(4, toml::from_str("cdrom = true").unwrap());
+        let ctl = OctaneMachine::pci_slot(Some(0));
+        cfg.place("hdd", ctl.join(Hop::t(1)), toml::from_str(&format!("scratch = true\npath = {:?}", d.join("scratch.img").to_str().unwrap())).unwrap());
+        cfg.place("cdrom", ctl.join(Hop::t(4)), toml::Table::new());
         cfg.prom = file(&d, "prom");
         assert_eq!(problems(&cfg), Vec::<String>::new());
         let _ = std::fs::remove_dir_all(&d);

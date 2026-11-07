@@ -118,40 +118,6 @@ fn attach_failed_in(embedded: bool, msg: String, at: &str) -> Result<(), String>
     }
 }
 
-/// Open the image and put it on target `id` of `bus`, logging it as
-/// `{log}: {at}: ...` when there is a prefix. `ci_overlay` sends a `--ci`
-/// run's copy-on-write overlay to the temporary directory, so an interactive
-/// iris holding one and any number of CI runs can share the image.
-pub(crate) fn attach_target(
-    bus: &ScsiBus,
-    id: u8,
-    at: &str,
-    ci_overlay: Option<&str>,
-    spec: &MediaSpec,
-    log: Option<&str>,
-) -> Result<(), String> {
-    let (path, discs) = spec.media();
-    match bus.attach_device(id, &path, spec.cdrom, discs, spec.overlay, ci_overlay, spec.write_cache) {
-        Ok(blocks) => {
-            if let Some(prefix) = log {
-                if path.is_empty() {
-                    eprintln!("{prefix}: {at}: CD-ROM, tray empty");
-                } else {
-                    eprintln!("{prefix}: {at}: {path} ({blocks} blocks)");
-                }
-            }
-            Ok(())
-        }
-        Err(e) => {
-            let msg = match ci_overlay {
-                Some(ov) => format!("could not attach {path} to {at} with its --ci overlay {ov}: {e}"),
-                None => format!("could not attach {path} to {at}: {e}"),
-            };
-            attach_failed(msg, at)
-        }
-    }
-}
-
 /// Where a `--ci` run keeps the copy-on-write overlay of the disk named
 /// `name`: in the host's temporary directory (`$TMPDIR`, or `/tmp` when it is
 /// unset), as an absolute path, so a later change of directory still finds it.
@@ -227,8 +193,28 @@ impl Disks {
                 *scratch = Some((at.clone(), path));
             }
         }
+        // CI mode isolates each copy-on-write overlay in the temporary
+        // directory, so an interactive iris holding one and any number of CI
+        // runs can share the image.
         let ci_overlay = (self.ci && spec.overlay && !spec.cdrom).then(|| ci_overlay_path(&name));
-        attach_target(port.bus(), id, &name, ci_overlay.as_deref(), spec, Some("iris"))
+        let (path, discs) = spec.media();
+        match port.bus().attach_device(id, &path, spec.cdrom, discs, spec.overlay, ci_overlay.as_deref(), spec.write_cache) {
+            Ok(_) if path.is_empty() => {
+                eprintln!("iris: {name}: CD-ROM, tray empty");
+                Ok(())
+            }
+            Ok(blocks) => {
+                eprintln!("iris: {name}: {path} ({blocks} blocks)");
+                Ok(())
+            }
+            Err(e) => {
+                let msg = match &ci_overlay {
+                    Some(ov) => format!("could not attach {path} to {name} with its --ci overlay {ov}: {e}"),
+                    None => format!("could not attach {path} to {name}: {e}"),
+                };
+                attach_failed(msg, &name)
+            }
+        }
     }
 
     /// Every disk and CD-ROM placed, by location.

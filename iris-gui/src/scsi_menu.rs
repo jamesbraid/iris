@@ -1,6 +1,7 @@
 use crate::i18n::{subtitle, ResponseExt};
 use eframe::egui::Ui;
-use iris::config::{MachineConfig, ScsiDeviceConfig};
+use crate::placement_ui::{self, Device, Media};
+use iris::config::MachineConfig;
 use std::path::Path;
 
 /// What the user picked from a SCSI submenu, deferred for the App to act on
@@ -23,7 +24,9 @@ pub fn draw(ui: &mut Ui, cfg: &MachineConfig) -> ScsiAction {
     let mut action = ScsiAction::None;
     ui.set_min_width(280.0);
     for id in 1u8..=7 {
-        let dev = cfg.scsi.get(&id);
+        let at = placement_ui::controller_zero_target(cfg, id);
+        let found = placement_ui::media_at(cfg, &at);
+        let dev = found.as_ref();
         let label = render_label(id, dev);
         ui.menu_button(label, |ui| {
             ui.set_min_width(220.0);
@@ -62,7 +65,7 @@ pub fn draw(ui: &mut Ui, cfg: &MachineConfig) -> ScsiAction {
                     }
                 }
                 Some(d) if d.is_cdrom() => {
-                    let has_media = !d.path.is_empty() && Path::new(&d.path).exists();
+                    let has_media = !d.path().is_empty() && Path::new(d.path()).exists();
                     if has_media {
                         if ui.button(t!("scsi-eject")).clicked() {
                             action = ScsiAction::Eject { id };
@@ -71,7 +74,7 @@ pub fn draw(ui: &mut Ui, cfg: &MachineConfig) -> ScsiAction {
                     }
                     let insert_label = if has_media { t!("scsi-change-disc") } else { t!("scsi-insert-disc") };
                     if ui.button(insert_label).clicked() {
-                        if let Some(p) = pick_iso(&t!("scsi-insert-disc-picker"), &d.path) {
+                        if let Some(p) = pick_iso(&t!("scsi-insert-disc-picker"), d.path()) {
                             action = ScsiAction::InsertDisc { id, path: p };
                         }
                         ui.close();
@@ -90,7 +93,7 @@ pub fn draw(ui: &mut Ui, cfg: &MachineConfig) -> ScsiAction {
                 }
                 Some(d) => {
                     // HDD
-                    let overlay_label = if d.overlay {
+                    let overlay_label = if d.overlay() {
                         t!("scsi-overlay-disable")
                     } else {
                         t!("scsi-overlay-enable")
@@ -100,7 +103,7 @@ pub fn draw(ui: &mut Ui, cfg: &MachineConfig) -> ScsiAction {
                         ui.close();
                     }
                     if ui.button(t!("scsi-replace-image")).clicked() {
-                        if let Some(p) = pick_disk(&t!("scsi-replace-image-picker"), &d.path) {
+                        if let Some(p) = pick_disk(&t!("scsi-replace-image-picker"), d.path()) {
                             action = ScsiAction::AttachHdd { id, path: p };
                         }
                         ui.close();
@@ -119,30 +122,30 @@ pub fn draw(ui: &mut Ui, cfg: &MachineConfig) -> ScsiAction {
     action
 }
 
-fn render_label(id: u8, dev: Option<&ScsiDeviceConfig>) -> String {
+fn render_label(id: u8, dev: Option<&Media>) -> String {
     match dev {
         None => t!("scsi-slot-empty", id = id),
         Some(d) if d.is_daynaport() => t!("scsi-slot-daynaport", id = id),
         Some(d) if d.is_cdrom() => {
-            if d.path.is_empty() {
+            if d.path().is_empty() {
                 t!("scsi-slot-cdrom-empty", id = id)
-            } else if !Path::new(&d.path).exists() {
-                t!("scsi-slot-cdrom-missing", id = id, path = &d.path)
+            } else if !Path::new(d.path()).exists() {
+                t!("scsi-slot-cdrom-missing", id = id, path = d.path())
             } else {
-                let name = Path::new(&d.path).file_name()
+                let name = Path::new(d.path()).file_name()
                     .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| d.path.clone());
+                    .unwrap_or_else(|| d.path().to_owned());
                 t!("scsi-slot-cdrom", id = id, name = name)
             }
         }
         Some(d) => {
-            let name = Path::new(&d.path).file_name()
+            let name = Path::new(d.path()).file_name()
                 .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| d.path.clone());
-            let size = std::fs::metadata(&d.path).map(|m| m.len()).unwrap_or(0);
+                .unwrap_or_else(|| d.path().to_owned());
+            let size = std::fs::metadata(d.path()).map(|m| m.len()).unwrap_or(0);
             let mb = size as f64 / (1024.0 * 1024.0);
             let size_mb = format!("{mb:.0}");
-            match (size > 0, d.overlay) {
+            match (size > 0, d.overlay()) {
                 (true, false) => t!("scsi-slot-hdd-size", id = id, name = name, size = size_mb),
                 (true, true) => t!("scsi-slot-hdd-size-overlay", id = id, name = name, size = size_mb),
                 (false, false) => t!("scsi-slot-hdd", id = id, name = name),
@@ -178,32 +181,50 @@ pub fn pick_iso(title: &str, cur: &str) -> Option<String> {
 
 /// Apply an action to the config.
 pub fn apply(cfg: &mut MachineConfig, action: ScsiAction) -> Option<String> {
+    let target = |cfg: &MachineConfig, id: u8| placement_ui::controller_zero_target(cfg, id);
+    let attach = |cfg: &mut MachineConfig, id: u8, name: &str, path: String| {
+        placement_ui::set_media(cfg, Media { at: target(cfg, id), dev: Device::new(name, path) });
+    };
+    let change = |cfg: &mut MachineConfig, id: u8, edit: &dyn Fn(&mut Media)| {
+        let at = target(cfg, id);
+        if let Some(mut m) = placement_ui::media_at(cfg, &at) {
+            edit(&mut m);
+            placement_ui::set_media(cfg, m);
+        }
+    };
     match action {
         ScsiAction::None => None,
         ScsiAction::AttachHdd { id, path } => {
-            cfg.scsi.insert(id, ScsiDeviceConfig { path, ..Default::default() });
+            attach(cfg, id, "hdd", path);
             Some(t!("scsi-attached-hdd", id = id))
         }
         ScsiAction::AttachEmptyCdrom { id } => {
-            cfg.scsi.insert(id, ScsiDeviceConfig { cdrom: true, ..Default::default() });
+            attach(cfg, id, "cdrom", String::new());
             Some(t!("scsi-attached-cdrom-empty", id = id))
         }
         ScsiAction::AttachCdromWithDisc { id, path } => {
-            cfg.scsi.insert(id, ScsiDeviceConfig {
-                path: path.clone(), cdrom: true, ..Default::default()
-            });
+            attach(cfg, id, "cdrom", path);
             Some(t!("scsi-attached-cdrom-disc", id = id))
         }
         ScsiAction::InsertDisc { id, path } => {
-            if let Some(d) = cfg.scsi.get_mut(&id) { d.path = path; }
+            change(cfg, id, &|m| {
+                if let Some(p) = m.path_mut() {
+                    *p = path.clone();
+                }
+            });
             Some(t!("scsi-disc-inserted", id = id))
         }
         ScsiAction::Eject { id } => {
-            if let Some(d) = cfg.scsi.get_mut(&id) { d.path = String::new(); }
+            change(cfg, id, &|m| {
+                if let Some(p) = m.path_mut() {
+                    p.clear();
+                }
+            });
             Some(t!("scsi-disc-ejected", id = id))
         }
         ScsiAction::Detach { id } => {
-            cfg.scsi.remove(&id);
+            let at = target(cfg, id);
+            placement_ui::remove_media(cfg, &at);
             Some(t!("scsi-detached", id = id))
         }
         ScsiAction::CreateBlank { .. } => {
@@ -211,9 +232,13 @@ pub fn apply(cfg: &mut MachineConfig, action: ScsiAction) -> Option<String> {
             None
         }
         ScsiAction::ToggleOverlay { id } => {
-            let mut on = false;
-            if let Some(d) = cfg.scsi.get_mut(&id) { d.overlay = !d.overlay; on = d.overlay; }
-            Some(if on { t!("scsi-overlay-on", id = id) } else { t!("scsi-overlay-off", id = id) })
+            let now = placement_ui::media_at(cfg, &target(cfg, id)).is_some_and(|m| !m.overlay());
+            change(cfg, id, &|m| {
+                if let Device::Hdd(h) = &mut m.dev {
+                    h.overlay = !h.overlay;
+                }
+            });
+            Some(if now { t!("scsi-overlay-on", id = id) } else { t!("scsi-overlay-off", id = id) })
         }
         ScsiAction::RemountInIrix { .. } => None,
     }

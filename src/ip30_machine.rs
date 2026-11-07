@@ -477,7 +477,7 @@ impl OctaneMachine {
             devices.add("gfx", Phase::Display, g.clone());
         }
 
-        attach_devices(&cfg.all_placements(&topology)?, cfg, Some(&mut Ctx { devices: &mut devices, disks: &disks }), &topology)?;
+        attach_devices(&cfg.placements()?, cfg, Some(&mut Ctx { devices: &mut devices, disks: &disks }), &topology)?;
 
         let monitor_port = cfg.monitor_port.unwrap_or(crate::monitor::DEFAULT_PORT);
         let monitor = crate::monitor::Monitor::new(monitor_port);
@@ -1229,8 +1229,11 @@ mod snapshot_tests {
         if !disk.exists() {
             std::fs::write(&disk, vec![0u8; 4 << 20]).unwrap();
         }
-        cfg.scsi.clear();
-        cfg.scsi.insert(1, toml::from_str(&format!("path = {:?}\noverlay = true", disk.to_string_lossy())).unwrap());
+        cfg.place(
+            "hdd",
+            OctaneMachine::pci_slot(Some(0)).join(Hop::t(1)),
+            toml::from_str(&format!("path = {:?}\noverlay = true", disk.to_string_lossy())).unwrap(),
+        );
         edit(&mut cfg);
         let mut m = OctaneMachine::new(&cfg).expect("an Octane");
         m.saves = dir.join("saves");
@@ -1520,7 +1523,6 @@ mod snapshot_tests {
 #[cfg(test)]
 mod placement_tests {
     use super::*;
-    use crate::config::ScsiDeviceConfig;
     use crate::exit_persistence_tests::Machine;
     use crate::topology::Family;
     use crate::workstation_tests::with_shared;
@@ -1564,10 +1566,10 @@ mod placement_tests {
     #[test]
     fn legacy_key_31_lands_on_xio15_pci0_1_t15() {
         let t = filled();
-        let mut cfg = MachineConfig::default();
-        cfg.scsi.clear();
-        cfg.scsi.insert(31, ScsiDeviceConfig { path: "x.img".into(), ..Default::default() });
-        assert_eq!(cfg.scsi_placements(&t).unwrap()[0].at, loc("xio15.pci0.1.t15"));
+        let mut cfg: MachineConfig = toml::from_str("[scsi.31]\npath = \"x.img\"\n").unwrap();
+        let notices = cfg.migrate(&t).unwrap();
+        assert_eq!(cfg.placements().unwrap()[0].at, loc("xio15.pci0.1.t15"));
+        assert_eq!(notices, ["notice: [scsi.31] is now [[hdd]] at = \"xio15.pci0.1.t15\""]);
     }
 
     /// virtio-serial is a function on the Bridge at the spare device, and

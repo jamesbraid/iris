@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+use crate::config::MachineConfig;
 use crate::location::{Hop, Location};
 
 /// The class of rows a device type goes into.
@@ -108,6 +109,15 @@ impl Topology {
         Topology::default()
     }
 
+    /// The rows the configured machine has, with nothing placed and no
+    /// hardware built: what migration and the command line use to find
+    /// "controller 0".
+    pub fn fill_for(cfg: &MachineConfig) -> Topology {
+        let t = Topology::new();
+        cfg.machine.profile.fill(cfg, &t);
+        t
+    }
+
     pub fn add(&self, at: Location, row: Row) -> Result<(), String> {
         match self.rows.lock().entry(at) {
             std::collections::btree_map::Entry::Occupied(e) => Err(format!("error: {}: row added twice", e.key())),
@@ -157,6 +167,15 @@ impl Topology {
     /// The row that is controller `n` of this profile.
     pub fn controller(&self, n: u8) -> Option<Location> {
         self.rows.lock().iter().find(|(_, r)| r.ctl == Some(n)).map(|(l, _)| l.clone())
+    }
+
+    /// `fill_for`, then every placement of `cfg` claimed and its options
+    /// parsed. Nothing is built: this is what `validate`, `--list-slots` and
+    /// the GUI run, so config errors appear without a machine.
+    pub fn probe(cfg: &MachineConfig) -> Result<Topology, String> {
+        let t = Topology::fill_for(cfg);
+        crate::attach::attach_devices(&cfg.placements()?, cfg, None, &t)?;
+        Ok(t)
     }
 
     /// The controller number of the row above `at`, for the snapshot's
