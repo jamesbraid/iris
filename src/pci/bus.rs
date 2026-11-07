@@ -194,6 +194,26 @@ impl PciBus {
     }
 }
 
+impl PciBus {
+    /// The `pci` monitor command both hosts share: `status` describes the
+    /// functions, `config <device>` dumps one's header.
+    pub fn command(&self, args: &[&str], w: &mut dyn Write) -> Result<(), String> {
+        match args.first().copied().unwrap_or("status") {
+            "status" => self.describe(w),
+            "config" => {
+                let device: u8 = args.get(1).and_then(|v| v.parse().ok()).ok_or("Usage: pci config <slot>")?;
+                let f = self.function(DevFn { device, function: 0 }).ok_or(format!("pci: nothing in slot {device}"))?;
+                for row in 0..16 {
+                    let v: Vec<String> = (0..4).map(|k| format!("{:08x}", f.state().config().read(row * 4 + k))).collect();
+                    let _ = writeln!(w, "  {:02x}: {}", row * 16, v.join(" "));
+                }
+            }
+            _ => return Err("Usage: pci status | config <slot>".to_string()),
+        }
+        Ok(())
+    }
+}
+
 /// Every function's header, and the pin and board IRQ levels. A restore
 /// replaces all of it and forgets what the host was last told; the machine then
 /// calls [`PciBus::redrive`]. The functions behind the headers save their own
