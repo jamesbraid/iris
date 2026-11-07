@@ -88,13 +88,17 @@ is not forwarded, because what a bridge does with one is not defined. A pin of
 the function at device `d` behind the bridge reaches pin `(pin + d) mod 4` of
 the bridge's device, and its DMA is the bridge's. Raising bridge control bit 6
 resets the bus behind it, and RST# on the bus in front reaches behind it too.
-MACE's configuration cycles for a bus number other than 0 go to the bus
-firmware has numbered that far. A configuration cycle that reaches the
-bus behind a bridge and finds no function ends in master abort at the
-bridge: a read returns all ones, a write is dropped, and the bridge's
-secondary status records received master abort. The header is
-the type 1 header only (the caller names the PCI identity); the upper halves of
-the prefetchable and I/O windows read zero. No machine builds one yet.
+MACE's configuration cycles for a bus number other than 0 go to the bus firmware
+has numbered that far. A configuration cycle that reaches the bus behind a
+bridge and finds no function ends in master abort at the bridge: a read returns
+all ones, a write is dropped, and the bridge's secondary status records received
+master abort. On the Octane, the Bridge's type 1 aperture (0x028000 in its
+widget space, Bridge specification table 43) sends a cycle to the bus and device
+its PCI Type 1 Configuration register names (table 26); a bus number no bridge's
+secondary to subordinate range holds, including 0, ends in a master time-out.
+IRIX 6.5.30 scans a bus behind a bridge this way. The header is the type 1
+header only (the caller names the PCI identity); the upper halves of the
+prefetchable and I/O windows read zero. No machine builds one yet.
 
 ## Monitor
 
