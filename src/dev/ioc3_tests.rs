@@ -1612,6 +1612,28 @@ fn save_load_round_trip() {
     }
 }
 
+/// A restore into a chip that has been in use equals one into a fresh chip.
+#[test]
+fn ioc3_load_into_a_dirtied_instance_equals_load_into_a_fresh_one() {
+    let dirty = |r: &Rig, salt: u32| {
+        r.w8(reg::SERIAL_A + 3, 0x80);
+        r.w8(reg::SERIAL_A + 7, 4 + salt as u8);
+        r.w8(reg::SERIAL_A + 3, 0x03);
+        r.w32(reg::SSRAM + 0x100 * salt, 0x1000 + salt);
+        r.w32(reg::INT_ENABLE_SET, 0x40 << salt);
+    };
+    let src = Rig::new();
+    dirty(&src, 1);
+    let v = src.c.save_state();
+    let used = Rig::new();
+    dirty(&used, 2);
+    let fresh = Rig::new();
+    used.c.load_state(&v).unwrap();
+    fresh.c.load_state(&v).unwrap();
+    assert_eq!(used.c.save_state(), fresh.c.save_state());
+    assert_eq!(used.c.save_state(), v);
+}
+
 /// A periodic interrupt output keeps the time its next pulse had left,
 /// counted from the load rather than from the save.
 #[test]
