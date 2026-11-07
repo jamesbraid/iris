@@ -7,7 +7,10 @@
 //! function only sees configuration registers, accesses to its BARs, and an
 //! [`IrqLine`] for its pin.
 
+pub mod decode;
 pub mod intx;
+#[cfg(test)]
+pub(crate) mod testing;
 
 use std::sync::{Arc, Mutex, OnceLock};
 
