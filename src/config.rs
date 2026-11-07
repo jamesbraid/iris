@@ -2511,7 +2511,8 @@ impl MachineConfig {
                 _ => return Err(format!("unknown key `{key}`: not a section or a device array")),
             }
         }
-        self.placements().map(drop)
+        self.placements()?;
+        self.extra.keys().try_for_each(|k| crate::attach::known_device(k))
     }
 
     /// Every `[[<device>]]` entry: arrays in key order (toml tables are
