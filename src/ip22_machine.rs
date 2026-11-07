@@ -6,7 +6,11 @@ use std::net::TcpStream;
 use std::sync::mpsc;
 use std::thread;
 
+use crate::attach::{attach_devices, Ctx};
 use crate::config::{GraphicsBoard, MachineConfig, MachineProfile, NetworkConfig, ScsiDeviceConfig};
+use crate::location::{Hop, Location};
+use crate::scsi::ScsiPort;
+use crate::topology::{Family, Row, Topology};
 use crate::machine_state::GuestState;
 use crate::traits::{BusDevice, Device, Resettable, Saveable, MachineEvent};
 use crate::locks::LockMonitor;
@@ -62,15 +66,6 @@ pub struct Ip22Machine {
     /// bank/framebuffer buffers. Cleared on any explicit `load_snapshot`
     /// outside the CI path.
     last_restore_checkpoint: Option<RollbackCheckpoint>,
-    /// Path of the configured scratch SCSI volume, if any. The CI socket reads
-    /// and writes this file directly (with the machine briefly stopped) to
-    /// inject/exfiltrate files without going through the network. None when no
-    /// SCSI device has `scratch = true` set in the config.
-    scratch_path: Option<std::path::PathBuf>,
-    /// Disk provenance captured at construction (configured path + host file
-    /// size per SCSI id). Written into snapshot manifests and validated on
-    /// restore so captured state never lands on a different base disk.
-    disk_refs: Vec<DiskRef>,
     /// Configured nvram file path, recorded in snapshot manifests.
     nvram_path: String,
     /// Host-forced Newport resolution from `[graphics] resolution` at construction.
@@ -84,6 +79,7 @@ pub struct Ip22Machine {
     pub(crate) control: Control,
     devices: Devices,
     disks: Disks,
+    topology: Topology,
     /// Where snapshots live: `saves/<name>/` under the working directory.
     saves: std::path::PathBuf,
     /// The SEEQ's NAT handle, from the link it attached.
@@ -179,6 +175,46 @@ fn check_virtio_slot_free(slot: crate::dev::ioc::GioSlot, ultra64: bool, testdev
 }
 
 impl Ip22Machine {
+    /// The places this profile has: the I/O chip with its one or two SCSI
+    /// controllers and their targets, the graphics slot, and the two GIO
+    /// expansion slots (the second is the second Newport head's when asked
+    /// for). Touches no hardware.
+    pub(crate) fn fill(cfg: &MachineConfig, t: &Topology) {
+        let at = |hops: &[Hop]| hops.iter().fold(Location::root(), |l, h| l.join(*h));
+        let add = |l: Location, row: Row| t.add(l, row).expect("rows are added once");
+        add(Location::root(), Row::fixed("GIO bus"));
+        add(at(&[Hop::hpc3()]), Row::fixed("I/O chip"));
+        for n in 0..if cfg.machine.profile.guinness() { 1 } else { 2 } {
+            let ctl = at(&[Hop::hpc3(), Hop::pos(n)]);
+            add(ctl.clone(), Row::fixed(["SCSI 0", "SCSI 1"][n as usize]).ctl(n).onboard("wd33c93a"));
+            t.scsi(&ctl, 1..=7, true);
+        }
+        add(at(&[Hop::gfx()]), Row::fixed("graphics").onboard(cfg.graphics_board().as_str()));
+        add(at(&[Hop::gio(0)]), Row::offering("GIO slot 0", Family::Gio));
+        let head1 = !cfg.headless && cfg.graphics.heads >= 2;
+        add(at(&[Hop::gio(1)]), if head1 {
+            Row::fixed("GIO slot 1").onboard("graphics (head 2)")
+        } else {
+            Row::offering("GIO slot 1", Family::Gio)
+        });
+    }
+
+    /// Bind the controllers the HPC3 built to their rows. A DaynaPort is built
+    /// by the HPC3, where the gateway is, so each port carries the call.
+    fn bind_scsi(t: &Topology, hpc3: &Hpc3) {
+        let ctls = std::iter::once(hpc3.scsi()).chain(hpc3.scsi1());
+        for (n, ctl) in ctls.enumerate() {
+            let hpc3 = hpc3.clone();
+            let port = ScsiPort::new(ctl.clone()).with_daynaport(move |id, params| hpc3.add_scsi_daynaport(n as u8, id as usize, params));
+            let at = t.controller(n as u8).expect("fill added a row for every controller");
+            t.bind(&at, Arc::new(port)).expect("the controller row takes its handle once");
+        }
+    }
+
+    fn disk_refs(&self) -> Vec<DiskRef> {
+        DiskRef::from_records(&self.disks, &self.topology, true)
+    }
+
     pub fn new(cfg: MachineConfig) -> Self {
         // Host calls (iris-hostcall): the self-test service is always there
         // when the feature is built in, so a guest can prove the trap works.
@@ -217,6 +253,8 @@ impl Ip22Machine {
 
         let board_spec = cfg.machine.profile.board().expect("the Indy and Indigo2 profiles have a board");
         let guinness = cfg.machine.profile.guinness();
+        let topology = Topology::new();
+        Self::fill(&cfg, &topology);
 
         // 0. EEPROMs. Real IP22 hardware has two distinct 93-series serial
         // EEPROM chips, not one shared part: a CPU-daughtercard chip wired to
@@ -330,23 +368,9 @@ impl Ip22Machine {
         ioc.set_timer_manager(timer_manager.clone());
         ioc.set_heartbeat(heartbeat.clone());
         ioc.set_clock_ticks(fasttick_count.clone());
-        // Attach SCSI devices from config: each `[scsi.KEY]` table puts a
-        // target on a controller (`ScsiDeviceConfig::placement`). The disks
-        // recorded here, and the scratch volume's path for the CI socket,
-        // come back with it. Disk provenance for snapshot manifests is
-        // captured while the MachineConfig `cfg` is still in scope (it is
-        // shadowed by the CPU config below): the slot (controller * 16 + id,
-        // see `config::scsi_slot`), the configured path and the host file
-        // size.
-        // The buses are filled before the controllers exist and handed to them.
+        // The controllers own their SCSI buses; the devices are attached to
+        // them below, once the machine is built.
         let scsi_buses = Hpc3::new_scsi_buses(guinness);
-        let attached = match crate::scsi::attach_from_config(&cfg, None, &|c| Hpc3::route_scsi(&scsi_buses, c)) {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("iris: fatal: {e}");
-                std::process::exit(1);
-            }
-        };
         let hpc3 = Hpc3::with_net(eeprom_hpc3.clone(), ioc.clone(), guinness, heartbeat.clone(), cfg.network(), cfg.no_audio, cfg.audio.clone(), cfg.nvram.clone(), cfg.rtc_offset, cfg.scsi_deferred_int, scsi_buses);
         hpc3.set_timer_manager(timer_manager.clone());
 
@@ -363,30 +387,6 @@ impl Ip22Machine {
             None => { hpc3.rtc().backdoor_set_mac_if_blank(cfg.network().mac); }
         }
 
-        // A DaynaPort is built where the gateway is, by Hpc3; a target that
-        // will not attach ends the run (see `attach_from_config`).
-        let daynaports = || -> Result<(), String> {
-            for d in &attached.daynaports {
-                let at = crate::config::scsi_label(d.controller, d.id);
-                match hpc3.add_scsi_daynaport(d.controller, d.id as usize, d.params) {
-                    Ok(()) => println!(
-                        "iris: DaynaPort SCSI/Link at {at} — MAC {}, gateway {} (guest {}/{})",
-                        crate::net::mac_str(&d.params.mac),
-                        d.params.subnet.gateway_ip, d.params.subnet.client_ip, d.params.subnet.netmask),
-                    Err(e) => crate::disks::attach_failed(format!("could not attach DaynaPort to {at}: {e}"), &at)?,
-                }
-            }
-            Ok(())
-        };
-        if let Err(e) = daynaports() {
-            eprintln!("iris: fatal: {e}");
-            std::process::exit(1);
-        }
-        let scratch_path = attached.scratch;
-        // The Indy and Indigo2 have always listed CD-ROMs beside the disks.
-        let disk_provenance: Vec<DiskRef> = attached.tables.iter()
-            .map(|t| DiskRef { id: t.slot, path: t.path.clone(), size_bytes: t.size_bytes })
-            .collect();
         let nvram_provenance = cfg.nvram.clone();
 
         // REX3 Graphics — Newport only; skipped in headless mode or when non-Newport board selected.
@@ -812,7 +812,14 @@ impl Ip22Machine {
         let control = Control::new();
         let mut controllers: Vec<Arc<dyn crate::disks::DiskController>> = vec![hpc3.scsi().clone()];
         controllers.extend(hpc3.scsi1().map(|c| c.clone() as Arc<dyn crate::disks::DiskController>));
-        let disks = Disks::new(controllers);
+        let disks = Disks::new(controllers).with_ci(ci_enabled);
+        Self::bind_scsi(&topology, &hpc3);
+        let ctx = Ctx { devices: &devices, disks: &disks };
+        let placed = cfg.all_placements(&topology).and_then(|p| attach_devices(&p, &cfg, Some(&ctx), &topology));
+        if let Err(e) = placed {
+            eprintln!("iris: fatal: {e}");
+            std::process::exit(1);
+        }
         let seeq = hpc3.seeq();
         let net = GuestNet::from_parts(seeq.nat_control(), seeq.gateway_addrs(), seeq.frames());
 
@@ -833,8 +840,6 @@ impl Ip22Machine {
             serial_log,
             last_restore: None,
             last_restore_checkpoint: None,
-            scratch_path,
-            disk_refs: disk_provenance,
             nvram_path: nvram_provenance,
             display_resolution,
             newport_active,
@@ -842,6 +847,7 @@ impl Ip22Machine {
             control,
             devices,
             disks,
+            topology,
             saves: "saves".into(),
             net,
         }
@@ -869,13 +875,6 @@ impl Ip22Machine {
         if let Some(rex3) = &self.board.rex3_head1 {
             rex3.apply_display_resolution(mode);
         }
-    }
-
-    /// Path of the configured scratch SCSI volume, if any. Used by the CI
-    /// socket scratch-{write,read,clear,info} commands to act on the file
-    /// directly while the machine is briefly stopped.
-    pub fn scratch_path(&self) -> Option<&std::path::Path> {
-        self.scratch_path.as_deref()
     }
 
     pub fn start(&mut self) {
@@ -1384,7 +1383,7 @@ impl Ip22Machine {
         // Provenance: which disks + nvram this state was captured against, so a
         // later restore can refuse a mismatched base disk / build. (features are
         // filled by for_current_save.)
-        manifest.disks = self.disk_refs.clone();
+        manifest.disks = self.disk_refs();
         manifest.nvram = Some(self.nvram_path.clone());
         // The CPU is a runtime choice now, so it is state the restore must match.
         manifest.cpu_model = Some(self.cpu.model_name().to_string());
@@ -1552,8 +1551,9 @@ impl Ip22Machine {
                     // happens to live (it moves when disks are relocated, e.g. into a
                     // dist/ dir), so a path-only difference is a warning, not fatal —
                     // a disk's identity for restore is its id + size, not its path.
+                    let disk_refs = self.disk_refs();
                     for d in &m.disks {
-                        match self.disk_refs.iter().find(|c| c.id == d.id) {
+                        match disk_refs.iter().find(|c| c.id == d.id) {
                             None => fatal.push(format!(
                                 "snapshot disk SCSI {} ('{}') is not configured in this run", d.id, d.path)),
                             Some(cur) if cur.size_bytes != d.size_bytes => fatal.push(format!(
@@ -1708,6 +1708,7 @@ impl Workstation for Ip22Machine {
     fn cpu_is_running(&self) -> bool { Ip22Machine::cpu_is_running(self) }
     fn devices(&self) -> &Devices { &self.devices }
     fn disks(&self) -> &Disks { &self.disks }
+    fn topology(&self) -> &Topology { &self.topology }
     fn control(&self) -> &Control { &self.control }
     fn control_mut(&mut self) -> &mut Control { &mut self.control }
     fn net(&self) -> Option<&GuestNet> { Some(&self.net) }
@@ -1735,7 +1736,6 @@ impl Workstation for Ip22Machine {
         let path = path.unwrap_or_else(|| rtc.nvram_path()).to_string();
         rtc.save_nvram(&path).map(|_| path).map_err(|e| e.to_string())
     }
-    fn scratch_path(&self) -> Option<&std::path::Path> { Ip22Machine::scratch_path(self) }
     fn remount_cdrom_guest(&self, scsi_id: u8) { Ip22Machine::remount_cdrom_guest(self, scsi_id) }
 }
 
@@ -2248,5 +2248,123 @@ mod virtio_tests {
     #[test]
     fn ip28_slot_exp1() {
         probe(MachineProfile::Indigo2Ip28, VirtioGioSlot::Exp1, 0x1F60_0000);
+    }
+}
+
+/// Disks and devices are placed through the socket map.
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+    use crate::exit_persistence_tests::{build, config, make_images, on_big_stack, serial, Dir, Machine};
+
+    fn loc(s: &str) -> Location {
+        s.parse().unwrap()
+    }
+
+    fn filled(profile: MachineProfile) -> Topology {
+        let mut cfg = MachineConfig::default();
+        cfg.machine.profile = profile;
+        let t = Topology::new();
+        Ip22Machine::fill(&cfg, &t);
+        t
+    }
+
+    /// The rows follow the profile: one controller on the Indy, two on the
+    /// Indigo2 boards, seven targets each.
+    #[test]
+    fn ip22_fill_rows_match_the_profiles() {
+        let take = |t: &Topology, at: &str| t.claim(&loc(at), "hdd", Family::Scsi, false, "");
+        let indy = filled(MachineProfile::IndyIp24);
+        assert!(take(&indy, "hpc3.0.t7").is_ok());
+        assert!(take(&indy, "hpc3.0.t8").is_err(), "ids stop at 7");
+        assert!(take(&indy, "hpc3.1.t1").unwrap_err().contains("no such location"), "{:?}", take(&indy, "hpc3.1.t1"));
+        assert_eq!(indy.controller(1), None);
+        for profile in [MachineProfile::Indigo2Ip22, MachineProfile::Indigo2Ip28] {
+            let t = filled(profile);
+            assert_eq!(t.controller(1), Some(loc("hpc3.1")));
+            assert!(take(&t, "hpc3.1.t7").is_ok());
+        }
+        // A controller is not a place to put a disk, and neither is a fixed slot.
+        assert!(take(&indy, "hpc3.0").unwrap_err().contains("onboard wd33c93a"));
+        assert!(indy.claim(&loc("gio0"), "ultra64", Family::Gio, false, "").is_ok());
+    }
+
+    /// The second head takes the second GIO slot only when it is built.
+    #[test]
+    fn two_heads_fix_gio1_unless_headless() {
+        let mut cfg = MachineConfig::default();
+        cfg.graphics.heads = 2;
+        let t = Topology::new();
+        Ip22Machine::fill(&cfg, &t);
+        let e = t.claim(&loc("gio1"), "virtio_serial", Family::Gio, false, "").unwrap_err();
+        assert!(e.contains("graphics (head 2)"), "{e}");
+        cfg.headless = true;
+        let t = Topology::new();
+        Ip22Machine::fill(&cfg, &t);
+        assert!(t.claim(&loc("gio1"), "virtio_serial", Family::Gio, false, "").is_ok());
+    }
+
+    /// Every runtime object the constructor made is on its row.
+    #[test]
+    fn ip22_rows_bind_every_handle() {
+        let _serial = serial();
+        for (machine, ports) in [(Machine::Indy, 1), (Machine::Indigo2, 2), (Machine::Indigo2Ip28, 2)] {
+            on_big_stack(move || {
+                let dir = Dir::new(&format!("rows-{machine:?}"));
+                make_images(&dir);
+                let m = build(config(machine, &dir, false));
+                let bound = m.topology().buses::<ScsiPort>();
+                assert_eq!(bound.len(), ports, "{machine:?}");
+                assert_eq!(bound[0].0, loc("hpc3.0"));
+                if ports == 2 {
+                    assert_eq!(bound[1].0, loc("hpc3.1"));
+                }
+                // The five test disks sit on controller 0's first targets.
+                let at: Vec<String> = m.disks().records().iter().map(|r| r.at.to_string()).collect();
+                assert_eq!(at, ["hpc3.0.t1", "hpc3.0.t2", "hpc3.0.t3", "hpc3.0.t4", "hpc3.0.t5"], "{machine:?}");
+                for (id, port) in (1..=5).map(|i| (i, &bound[0].1)) {
+                    assert!(port.bus().has_target(id), "{machine:?} t{id}");
+                }
+            });
+        }
+    }
+
+    /// `[scsi.N]` tables and `[[hdd]]` entries both place disks; at one
+    /// location the entry wins.
+    #[test]
+    fn a_scsi_table_and_a_placement_at_one_location_keep_the_placement() {
+        let _serial = serial();
+        on_big_stack(|| {
+            let dir = Dir::new("both-forms");
+            make_images(&dir);
+            let mut cfg = config(Machine::Indy, &dir, false);
+            let other = dir.file("other.img");
+            std::fs::write(&other, vec![0u8; 512 * 64]).unwrap();
+            cfg.place("hdd", loc("hpc3.0.t1"), toml::from_str(&format!("path = {:?}", other.display().to_string())).unwrap());
+            let m = build(cfg);
+            let rec = m.disks().records();
+            assert_eq!(rec.len(), 5);
+            assert_eq!(rec[0].path, other.display().to_string());
+        });
+    }
+
+    /// A DaynaPort is built by the HPC3, through the closure its port carries.
+    #[test]
+    fn daynaport_attaches_through_the_hpc3_closure() {
+        let _serial = serial();
+        on_big_stack(|| {
+            let dir = Dir::new("dayna");
+            make_images(&dir);
+            let mut cfg = config(Machine::Indy, &dir, false);
+            cfg.scsi.clear();
+            cfg.scsi.insert(
+                6,
+                ScsiDeviceConfig { kind_field: crate::config::ScsiKind::Daynaport, ..Default::default() },
+            );
+            let m = build(cfg);
+            let port = m.topology().handle::<ScsiPort>(&loc("hpc3.0")).unwrap();
+            assert!(port.bus().has_target(6));
+            assert!(m.disks().records().is_empty(), "a DaynaPort has no image");
+        });
     }
 }

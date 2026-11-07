@@ -35,6 +35,7 @@ use crate::ip22_machine::Ip22Machine;
 use crate::machine_state::{GuestState, MachineStatus, TransitionAck};
 use crate::monitor::Monitor;
 use crate::net::NatControl;
+use crate::topology::Topology;
 use crate::traits::{Device, MachineEvent};
 
 /// Build the machine `cfg` describes, or say why it cannot be built.
@@ -73,6 +74,7 @@ pub trait Workstation: Send {
 
     fn devices(&self) -> &Devices;
     fn disks(&self) -> &Disks;
+    fn topology(&self) -> &Topology;
     fn control(&self) -> &Control;
     fn control_mut(&mut self) -> &mut Control;
     /// The guest's NAT handle: None only when `[network] mode = "off"` on the
@@ -248,8 +250,8 @@ pub trait Workstation: Send {
         Err(NOT_HERE.into())
     }
     /// The configured scratch SCSI volume, if any (see `STORAGE.md`).
-    fn scratch_path(&self) -> Option<&std::path::Path> {
-        None
+    fn scratch_path(&self) -> Option<std::path::PathBuf> {
+        self.disks().scratch()
     }
     /// The controller whose CD-ROM drives take disc changes.
     fn disc_changer(&self) -> Option<Arc<dyn DiscChanger>> {

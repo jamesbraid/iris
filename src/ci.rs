@@ -744,7 +744,7 @@ fn cmd_scratch_write(server: &CiServer, args: &Value) -> Response {
 
     let result = server.with_machine_result(|m| {
         let scratch = match m.scratch_path() {
-            Some(p) => p.to_path_buf(),
+            Some(p) => p,
             None => return Err("scratch volume not configured (set `scratch = true` on a SCSI device in iris.toml)".to_string()),
         };
         m.with_paused(|| -> Result<u64, String> {
@@ -786,7 +786,7 @@ fn cmd_scratch_read(server: &CiServer, args: &Value) -> Response {
 
     let result = server.with_machine_result(|m| {
         let scratch = match m.scratch_path() {
-            Some(p) => p.to_path_buf(),
+            Some(p) => p,
             None => return Err("scratch volume not configured (set `scratch = true` on a SCSI device in iris.toml)".to_string()),
         };
         m.with_paused(|| -> Result<u64, String> {
@@ -823,7 +823,7 @@ fn cmd_scratch_read(server: &CiServer, args: &Value) -> Response {
 fn cmd_scratch_clear(server: &CiServer) -> Response {
     let result = server.with_machine_result(|m| {
         let scratch = match m.scratch_path() {
-            Some(p) => p.to_path_buf(),
+            Some(p) => p,
             None => return Err("scratch volume not configured".to_string()),
         };
         m.with_paused(|| -> Result<u64, String> {
@@ -856,7 +856,7 @@ fn cmd_scratch_clear(server: &CiServer) -> Response {
 }
 
 fn cmd_scratch_info(server: &CiServer) -> Response {
-    let path = match server.with_machine(|m| m.scratch_path().map(|p| p.to_path_buf())) {
+    let path = match server.with_machine(|m| m.scratch_path()) {
         Ok(path) => path,
         Err(e) => return Response::err(format!("scratch-info: {e}")),
     };
