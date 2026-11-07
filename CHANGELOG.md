@@ -18,7 +18,8 @@ hashes are given where a change is easiest to understand by reading the commit.
 - The O2's MACE and the Octane's Bridge share one PCI layer (`src/pci/`,
   `src/pci/host.rs`, [docs/pci.md](docs/pci.md)): the function table, BAR
   decode, interrupt combining, byte order, RST# and a PCI-to-PCI bridge
-  function (`PciToPciBridge`, not yet fitted to a machine). A write that
+  function (`PciToPciBridge`, not yet fitted to a machine), reached on the
+  Octane through the Bridge's type 1 configuration aperture. A write that
   lowers Octane Bridge reset pin `n` (Control bit `24 + n`) resets PCI device
   `n` and logs a warning. Snapshot schema 6: the PCI bus saves its own state,
   and older O2 and Octane snapshots are refused. The Octane gains the `pci`
