@@ -642,6 +642,43 @@ impl Report {
     }
 }
 
+/// Replay a recording into a board whose back end is a `KonaBackend`, loads
+/// and stores only, and return the monitor's `status` and `hash` at the end.
+/// The recording's resets and retraces are performed as in `replay`.
+pub(super) fn replay_drawing(rec: &Recording) -> Result<(String, String), String> {
+    let cfg = rec.config()?;
+    let at = Arc::new(AtomicUsize::new(0));
+    let host = ReplayHost::new(rec, at);
+    let probe = rec.records.iter().find_map(|r| match r {
+        Rec::Load { off, val, .. } if *off == PROBE => Some(*val as u32),
+        _ => None,
+    });
+    let backend = super::KonaBackend::new(super::BackendConfig::for_pipe(&cfg));
+    let kona = KonaBuilder::new(cfg, host.attach()).backend(Box::new(backend)).probe_value(probe.unwrap_or(0)).build()?;
+    for r in &rec.records {
+        match *r {
+            Rec::Store { size, off, val } => {
+                while kona.bus_write(off as u64, size as u32, val) == BUS_BUSY {
+                    std::thread::yield_now();
+                }
+            }
+            Rec::Load { size, off, .. } => {
+                while kona.bus_read(off as u64, size as u32).0 == BUS_BUSY {
+                    std::thread::yield_now();
+                }
+            }
+            Rec::Marker { kind: 1, .. } => kona.power_on(),
+            _ => {}
+        }
+    }
+    let out = |cmd: &str| {
+        let mut v = Vec::new();
+        kona.with_backend(|b| b.monitor(&[cmd], &mut v)).map_err(|e| e.to_string())?;
+        String::from_utf8(v).map_err(|e| e.to_string())
+    };
+    Ok((out("status")?, out("hash")?.trim().to_string()))
+}
+
 /// What a stretch of a stream between two user marks sent.
 pub(super) struct Span {
     /// The mark the span starts at (0 for the start of the file).
@@ -778,6 +815,9 @@ mod tests {
             self.0
         }
     }
+
+    /// The store after the PROM recording (see `the_prom_recording_draws_into_the_store`).
+    const PROM_STORE_HASH: &str = "48d707b87081b952";
 
     const PORT: u32 = 0xc10000;
 
@@ -921,6 +961,26 @@ mod tests {
             eprintln!("\n=== the same census up to record {}, where the front end could no longer size the stream ===\n{}", rep.exact_until, before.render());
         }
         Some((rec, rep, census))
+    }
+
+    /// The PROM stream drawn into the store, to its end. The hash is the
+    /// store after the last record: a regression net for the drawing, not
+    /// evidence of the pixels, which the display step compares with
+    /// the capture. Reset markers clear the store, so this is the last
+    /// screen the console drew.
+    #[test]
+    fn the_prom_recording_draws_into_the_store() {
+        let Some(dir) = recordings_dir() else { return };
+        let path = dir.join("onyx2-deskside-prom.kona.rec");
+        if !path.exists() {
+            eprintln!("skipping: {} is not there", path.display());
+            return;
+        }
+        let rec = Recording::parse(&std::fs::read(&path).unwrap()).unwrap();
+        let (status, hash) = replay_drawing(&rec).unwrap();
+        eprintln!("{status}\nstore hash {hash}");
+        assert!(status.contains("1 word arrays"), "{status}");
+        assert_eq!(hash, PROM_STORE_HASH, "{status}");
     }
 
     #[test]

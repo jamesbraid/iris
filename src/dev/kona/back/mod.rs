@@ -30,7 +30,9 @@ pub use bound::BoardSet;
 use super::ident::KonaConfig;
 use super::handle::DisplayHandle;
 use super::job::{BackPort, Backend, Grammar, Job, Reply};
+use raster::FillRule;
 use store::layout::{BufferConfig, Layout, Refusal};
+use token::textport::Textport;
 use store::PixelStore;
 use std::io::{self, Write};
 
@@ -46,6 +48,8 @@ pub struct BackendConfig {
     /// The managed area, in pixels, until a video format combination sets up
     /// another.
     pub managed: (u32, u32),
+    /// Which edges of a whole-pixel box light.
+    pub fill_rule: FillRule,
 }
 
 impl BackendConfig {
@@ -56,6 +60,7 @@ impl BackendConfig {
             texture_bytes_per_rm: cfg.texture_bytes_per_rm(),
             board_set: BoardSet::InfiniteReality,
             managed: (1280, 1024),
+            fill_rule: FillRule::OmitLeftBottom,
         }
     }
 
@@ -142,6 +147,7 @@ pub struct KonaBackend {
     /// one.
     handle: Option<DisplayHandle>,
     store: PixelStore,
+    textport: Textport,
     /// Buffer-configuration commands that got a layout, and those refused by
     /// reason (indexed by `Refusal`).
     layouts: u64,
@@ -161,6 +167,7 @@ impl KonaBackend {
     pub fn new(cfg: BackendConfig) -> Self {
         KonaBackend {
             store: PixelStore::new(cfg.managed.0, cfg.managed.1),
+            textport: Textport::default(),
             cfg,
             counts: [0; Kind::ALL.len()],
             resets: 0,
@@ -206,6 +213,8 @@ impl KonaBackend {
         writeln!(w, "record bound      {} words per pixel", c.record_words())?;
         writeln!(w, "display handle    {}", if self.handle.is_some() { "attached" } else { "detached" })?;
         writeln!(w, "pixel store       {} word arrays of {} x {}", self.store.allocated().len(), self.store.width(), self.store.height())?;
+        writeln!(w, "textport          colour {} raster {:?}, {} drawn, {} unmodelled", self.textport.colour(), self.textport.raster(), self.textport.drawn, self.textport.unmodelled)?;
+        writeln!(w, "fill rule         {:?}", self.cfg.fill_rule)?;
         writeln!(w, "layouts           {} made", self.layouts)?;
         if self.malformed != 0 {
             writeln!(w, "  refused         {} x not {} words", self.malformed, BufferConfig::WORDS)?;
@@ -250,6 +259,10 @@ impl Backend for KonaBackend {
             Job::DmaIn { .. } => return Reply::Unclaimed,
             Job::FirmwareStart { .. } => port.set_managed_size(self.cfg.managed.0, self.cfg.managed.1),
             Job::Command { grammar: Grammar::Gl, selector: GL_BUFFER_CONFIG, args, .. } => self.buffer_config(args),
+            Job::Command { grammar: Grammar::Textport, selector, args, .. } => {
+                self.textport.command(&self.store, self.cfg.fill_rule, selector, args);
+            }
+            Job::Bitmap { header, payload } => self.textport.bitmap(&self.store, header, payload),
             _ => {}
         }
         Reply::Done
@@ -262,6 +275,7 @@ impl Backend for KonaBackend {
     fn reset(&mut self) {
         self.resets += 1;
         self.store.reset();
+        self.textport.reset();
         self.last_layout = None;
     }
 
@@ -273,11 +287,12 @@ impl Backend for KonaBackend {
         match args {
             ["status"] => self.status(w)?,
             ["counters"] => self.counters(w)?,
+            ["hash"] => writeln!(w, "{:016x}", self.store.checksum())?,
             ["pix", x, y] => {
                 let (Ok(x), Ok(y)) = (x.parse::<u32>(), y.parse::<u32>()) else { return Ok(false) };
                 self.pix(x, y, w)?
             }
-            ["help"] | [] => writeln!(w, "kona: status|counters|pix X Y")?,
+            ["help"] | [] => writeln!(w, "kona: status|counters|hash|pix X Y")?,
             _ => return Ok(false),
         }
         Ok(true)
@@ -328,7 +343,7 @@ mod tests {
     #[test]
     fn the_config_follows_the_pipe() {
         let c = BackendConfig::for_pipe(&KonaConfig::ir2(1).unwrap());
-        assert_eq!(c, BackendConfig { rm_count: 1, texture_bytes_per_rm: 64 << 20, board_set: BoardSet::InfiniteReality, managed: (1280, 1024) });
+        assert_eq!(c, BackendConfig { rm_count: 1, texture_bytes_per_rm: 64 << 20, board_set: BoardSet::InfiniteReality, managed: (1280, 1024), fill_rule: FillRule::OmitLeftBottom });
         assert_eq!(c.record_words(), 16);
         assert_eq!(BackendConfig::for_pipe(&KonaConfig::ir2(2).unwrap()).record_words(), 32);
     }
@@ -418,10 +433,8 @@ mod tests {
         assert!(text.contains("(13 words)"), "{text}");
     }
 
-    /// A framed GL command reaches the layout through `Backend::job`; the
-    /// same selector in the textport grammar does not.
-    #[test]
-    fn a_framed_gl_buffer_configuration_is_laid_out() {
+    /// Run one job through `Backend::job` with a front end behind it.
+    fn send(b: &mut KonaBackend, job: Job<'_>) {
         use super::super::front::{Front, Host};
         use super::super::pipe::Core;
         let t = TestHost::new();
@@ -435,17 +448,48 @@ mod tests {
             activity: Default::default(),
         };
         let mut core = Core::new(cfg, super::super::flash::Flash::fresh());
+        b.job(&mut BackPort { core: &mut core, host: &host }, job);
+    }
+
+    fn command(b: &mut KonaBackend, grammar: Grammar, selector: u32, args: &[u32]) {
+        send(b, Job::Command { grammar, selector, args, packed: 0, handled: false });
+    }
+
+    /// A framed GL command reaches the layout through `Backend::job`; the
+    /// same selector in the textport grammar does not.
+    #[test]
+    fn a_framed_gl_buffer_configuration_is_laid_out() {
         let mut b = backend();
         let args = [0, 10, 0, 1, 0, 4, 24, 8, 25, 0];
-        let mut send = |grammar, selector, args: &[u32]| {
-            b.job(&mut BackPort { core: &mut core, host: &host }, Job::Command { grammar, selector, args, packed: 0, handled: false });
-        };
-        send(Grammar::Textport, 1, &args);
-        send(Grammar::Gl, 1, &args);
-        send(Grammar::Gl, 1, &args[..3]);
+        command(&mut b, Grammar::Textport, 1, &args);
+        command(&mut b, Grammar::Gl, 1, &args);
+        command(&mut b, Grammar::Gl, 1, &args[..3]);
         let text = run(&mut b, &["status"]).1;
         assert!(text.contains("layouts           1 made") && text.contains("1 x not 10 words"), "{text}");
         assert!(text.contains("(13 words)"), "{text}");
+    }
+
+    /// Textport commands draw into the colour word of the store, a bitmap
+    /// draws at the raster position, and the hash follows the contents.
+    #[test]
+    fn textport_commands_draw_into_the_store() {
+        let mut b = backend();
+        let empty = run(&mut b, &["hash"]).1;
+        command(&mut b, Grammar::Textport, 2, &[7]);
+        command(&mut b, Grammar::Textport, 5, &[0, 0, 3, 3]);
+        command(&mut b, Grammar::Textport, 4, &[10, 10]);
+        send(&mut b, Job::Bitmap { header: &[1, 1, 0, 0, 2, 0], payload: &[1 << 31] });
+        assert_eq!(b.store.read(10, 10, 1), 7);
+        assert_eq!(b.store.read(3, 3, 1), 7);
+        assert_eq!(b.store.read(1, 1, 1), 7);
+        assert_eq!(b.store.read(0, 0, 1), 0, "the near corner is out");
+        let text = run(&mut b, &["status"]).1;
+        assert!(text.contains("colour 7 raster (12, 10), 2 drawn"), "{text}");
+        let drawn = run(&mut b, &["hash"]).1;
+        assert_ne!(empty, drawn);
+        b.reset();
+        assert_ne!(run(&mut b, &["hash"]).1, drawn);
+        assert_eq!(b.store.read(3, 3, 1), 0);
     }
 
     #[test]

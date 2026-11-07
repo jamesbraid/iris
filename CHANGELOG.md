@@ -41,6 +41,10 @@ hashes are given where a change is easiest to understand by reading the commit.
 - The replay reads recordings record by record, so the 71-million-record GL demo
   recording can be censused per marked span (`KONA_GL_RECORDING`); the results
   are in `clanker/kona/token-census.md`.
+- The KONA back end draws the PROM's textport (colour, raster position, boxes,
+  points, bitmap blits) into the pixel store, boxes by a fill rule that is a
+  parameter (`FillRule`). Replaying the PROM recording to its end draws the
+  graphics menu; `kona hash` shows the store's hash.
 - A recorded command stream (the `KONAREC` file QEMU's KONA model writes) can be
   replayed into the front end: stores and loads in order, the board's DMA reads
   served from the recording and its writes compared. The replay is exact only up

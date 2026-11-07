@@ -185,6 +185,23 @@ impl PixelStore {
         (0..MAX_WORDS).filter(|&w| !self.slots[w].load(Acquire).is_null()).collect()
     }
 
+    /// A hash of the store's contents, to compare a store with a recorded or
+    /// remembered one: FNV-1a over each allocated word position's index and
+    /// entries. An unallocated position and an all-zero one differ, so replays
+    /// that allocate the same arrays compare equal.
+    pub fn checksum(&self) -> u64 {
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut mix = |v: u64| h = (h ^ v).wrapping_mul(PRIME);
+        for w in self.allocated() {
+            mix(w as u64 | 1 << 32);
+            let a = self.array(w).expect("allocated");
+            // SAFETY: `i` is below `len()`.
+            (0..a.len()).for_each(|i| mix(unsafe { a.load(i) } as u64));
+        }
+        h
+    }
+
     /// Zero every allocated array in place. Frees nothing and moves nothing,
     /// so a worker's or the display's pointer stays good. Each entry is a
     /// relaxed atomic store rather than a `memset`, which may write a word in
@@ -348,6 +365,23 @@ mod tests {
         }
         stop.store(true, Relaxed);
         assert!(reader.join().unwrap() > 0);
+    }
+
+    #[test]
+    fn the_checksum_follows_contents_and_allocation() {
+        let a = PixelStore::new(8, 8);
+        let b = PixelStore::new(8, 8);
+        assert_eq!(a.checksum(), b.checksum());
+        a.write(1, 1, 3, 5);
+        assert_ne!(a.checksum(), b.checksum());
+        b.write(1, 1, 3, 5);
+        assert_eq!(a.checksum(), b.checksum());
+        b.write(2, 2, 3, 0);
+        assert_eq!(a.checksum(), b.checksum(), "writing a zero changes nothing");
+        b.ensure(9);
+        assert_ne!(a.checksum(), b.checksum(), "an allocated array of zeros counts");
+        a.reset();
+        assert_ne!(a.checksum(), PixelStore::new(8, 8).checksum());
     }
 
     /// Two threads allocating the same word position end with one array.
