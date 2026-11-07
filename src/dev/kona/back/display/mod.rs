@@ -27,6 +27,8 @@
 //! orders colour map, gamma and cursor is unknown; the model does not apply
 //! gamma or draw a cursor yet.
 
+pub mod clock;
+
 use super::store::PixelStore;
 
 /// Entries in the textport's colour map.

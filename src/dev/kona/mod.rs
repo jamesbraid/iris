@@ -703,8 +703,10 @@ impl Device for Kona {
         if !s.dead.load(SeqCst) {
             s.drain_inline();
         }
-        // The back end's own threads join with the slot taken and no lock
-        // held: one of them may be inside a handle call that sends a packet.
+        // The back end's own threads join with the slot taken and no
+        // register-file lock held: one of them may be inside a handle call,
+        // which takes only that lock and sends its packet after dropping it,
+        // and never asks for the slot.
         // Always, even for a dead board: `start` attaches again, and the
         // first run's threads must be gone by then. A back end that panics
         // here is logged, not rethrown, since this runs from `Drop`.

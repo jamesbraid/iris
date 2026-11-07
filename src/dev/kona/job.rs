@@ -109,9 +109,10 @@ pub trait Backend: Send {
 
     /// The board stopped, after the Host Interface Processor's thread joined
     /// and the jobs it had not taken ran (a dead board skips those, not this).
-    /// Join the back end's threads. Called
-    /// with no board lock held, since a thread of the back end may be inside
-    /// a handle call that sends an interrupt packet.
+    /// Join the back end's threads. Called with the pipe slot taken and no
+    /// register-file lock held: a thread of the back end may be inside a handle
+    /// call, which takes only that lock and sends its interrupt packet after
+    /// dropping it, and never asks for the slot.
     fn stop(&mut self) {}
 
     /// The machine's processors are stopped and the command ring is empty:
