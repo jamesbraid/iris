@@ -9,12 +9,14 @@
 //! The token layer, raster stage, pixel store and display come in behind it.
 //!
 //! - `store`: the pixel store and the plane layout inside a pixel's words.
+//! - `pack`: the host and bus pixel formats and their packers.
 //! - `bound`: the most words a pixel's record may take, from the host's own
 //!   budget arithmetic.
 //! - `census`, `replay` (tests only): the jobs a command stream sends the back
 //!   end, and the replay of a recorded stream into a board.
 
 mod bound;
+pub mod pack;
 pub mod store;
 #[cfg(test)]
 mod census;
