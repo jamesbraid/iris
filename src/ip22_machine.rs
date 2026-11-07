@@ -373,7 +373,7 @@ impl Ip22Machine {
                         "iris: DaynaPort SCSI/Link at {at} — MAC {}, gateway {} (guest {}/{})",
                         crate::net::mac_str(&d.params.mac),
                         d.params.subnet.gateway_ip, d.params.subnet.client_ip, d.params.subnet.netmask),
-                    Err(e) => crate::scsi::attach_failed(format!("could not attach DaynaPort to {at}: {e}"), &at)?,
+                    Err(e) => crate::disks::attach_failed(format!("could not attach DaynaPort to {at}: {e}"), &at)?,
                 }
             }
             Ok(())

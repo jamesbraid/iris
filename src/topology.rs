@@ -168,6 +168,13 @@ impl Topology {
         }
     }
 
+    /// The family `at` takes: the row exists and is not fixed.
+    pub fn offers(&self, at: &Location) -> Result<Family, String> {
+        let rows = self.rows.lock();
+        let row = rows.get(at).ok_or_else(|| Self::missing(&rows, at))?;
+        row.offers.ok_or_else(|| Self::fixed_error(&rows, at, row))
+    }
+
     /// Place a device: the row must exist, offer `family`, suit a network
     /// device when `needs_network` and be free. `note` says what is placed.
     pub fn claim(&self, at: &Location, name: &str, family: Family, needs_network: bool, note: &str) -> Result<(), String> {
