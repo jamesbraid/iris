@@ -263,7 +263,7 @@ mod tests {
     }
 
     fn ctx_run<R>(f: impl FnOnce(&Ctx) -> R) -> R {
-        let (d, k) = (Devices::new(), Disks::new());
+        let (d, k) = (Devices::new(), Disks::new(Arc::new(Topology::new())));
         f(&Ctx { devices: &d, disks: &k })
     }
 

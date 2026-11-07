@@ -323,14 +323,14 @@ impl ScsiBus {
         Ok(done)
     }
 
-    /// Copy each target's copy-on-write overlay into `dir` as
-    /// `scsi<id>.overlay`, and return the dirty sectors of each.
-    pub fn export_overlays(&self, dir: &std::path::Path) -> io::Result<Vec<(usize, Vec<u64>)>> {
+    /// Copy each target's copy-on-write overlay to the file `path_of` names
+    /// for its id, and return the dirty sectors of each.
+    pub fn export_overlays(&self, path_of: &dyn Fn(usize) -> std::path::PathBuf) -> io::Result<Vec<(usize, Vec<u64>)>> {
         let mut out = Vec::new();
         let mut err = None;
         self.for_each(|id, t| {
             if err.is_none() {
-                match t.cow_export(&dir.join(format!("scsi{id}.overlay"))) {
+                match t.cow_export(&path_of(id)) {
                     Ok(Some(dirty)) => out.push((id, dirty)),
                     Ok(None) => {}
                     Err(e) => err = Some(e),
@@ -342,11 +342,11 @@ impl ScsiBus {
 
     /// Put back the overlays [`Self::export_overlays`] wrote. A target with
     /// no entry in `dirty_sets` keeps its overlay.
-    pub fn import_overlays(&self, dir: &std::path::Path, dirty_sets: &[(usize, Vec<u64>)]) -> io::Result<()> {
+    pub fn import_overlays(&self, path_of: &dyn Fn(usize) -> std::path::PathBuf, dirty_sets: &[(usize, Vec<u64>)]) -> io::Result<()> {
         let mut targets = self.targets.lock();
         for (id, dirty) in dirty_sets {
             if let Some(t) = targets.get_mut(*id).and_then(|t| t.as_mut()) {
-                t.cow_import(&dir.join(format!("scsi{id}.overlay")), dirty.clone())?;
+                t.cow_import(&path_of(*id), dirty.clone())?;
             }
         }
         Ok(())
@@ -494,10 +494,12 @@ mod tests {
         attach(&b, 2, &p, true).unwrap();
         let dir = std::env::temp_dir().join(format!("iris-scsibus-ov-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let sets = b.export_overlays(&dir).unwrap();
+        let path_of = |id: usize| dir.join(format!("t{id}.overlay"));
+        let sets = b.export_overlays(&path_of).unwrap();
         assert_eq!(sets.len(), 1);
         assert_eq!(sets[0].0, 2);
-        b.import_overlays(&dir, &sets).unwrap();
+        assert!(dir.join("t2.overlay").exists());
+        b.import_overlays(&path_of, &sets).unwrap();
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_file(format!("{}.overlay", p.display()));
         std::fs::remove_file(p).unwrap();

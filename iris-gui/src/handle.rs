@@ -782,7 +782,10 @@ fn worker_loop(
             Ok(Cmd::LoadDisc { id, path, remount }) => {
                 match machine.as_ref() {
                     Some(m) => {
-                        match m.legacy_target(id).ok_or_else(no_cdrom).and_then(|at| m.load_disc(&at, path.clone())) {
+                        match m.legacy_target(id).ok_or_else(no_cdrom).and_then(|at| {
+                            let (changer, id) = m.disks().drive(&at)?;
+                            changer.load_disc(id, path.clone())
+                        }) {
                             Ok(loaded_path) => {
                                 let filename = std::path::Path::new(&loaded_path)
                                     .file_name()
@@ -809,7 +812,10 @@ fn worker_loop(
             Ok(Cmd::EjectCdrom { id }) => {
                 match machine.as_ref() {
                     Some(m) => {
-                        match m.legacy_target(id).ok_or_else(no_cdrom).and_then(|at| m.eject_to_empty(&at)) {
+                        match m.legacy_target(id).ok_or_else(no_cdrom).and_then(|at| {
+                            let (changer, id) = m.disks().drive(&at)?;
+                            changer.eject_to_empty(id)
+                        }) {
                             Ok(()) => {
                                 let _ = evt_tx.send(Evt::Error(t!("emu-disc-ejected", id = id)));
                             }

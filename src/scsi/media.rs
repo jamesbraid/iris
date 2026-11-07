@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::port::ScsiPort;
 use crate::attach::{Ctx, DeviceType, Handles};
 use crate::config::{parse_mac, parse_nat_subnet, DaynaportParams, MachineConfig, NatSubnet, NetMode};
-use crate::disks::{attach_failed, MediaSpec};
+use crate::disks::attach_failed;
 use crate::location::Location;
 use crate::register_device;
 use crate::topology::Family;
@@ -52,15 +52,7 @@ impl DeviceType for Hdd {
     type Options = HddOptions;
 
     fn new(o: HddOptions, ctx: &Ctx, owner: &Arc<ScsiPort>, at: &Location) -> Result<Handles, String> {
-        let spec = MediaSpec {
-            path: o.path,
-            overlay: o.overlay,
-            scratch: o.scratch,
-            size_mb: o.size_mb,
-            write_cache: o.write_cache,
-            ..MediaSpec::default()
-        };
-        ctx.disks.attach_media(owner, at, &spec)?;
+        ctx.disks.attach_hdd(owner, at, &o)?;
         Ok(vec![])
     }
 }
@@ -75,6 +67,24 @@ pub struct CdromOptions {
     pub discs: Vec<String>,
 }
 
+impl CdromOptions {
+    /// The media the drive starts with: the active image and the changer list
+    /// built from `path` and `discs` with empty entries skipped (an empty
+    /// `path` is a drive with its tray empty, to be loaded at run time).
+    pub fn media(&self) -> (String, Vec<String>) {
+        let mut list: Vec<String> = Vec::new();
+        if !self.path.is_empty() {
+            list.push(self.path.clone());
+        }
+        for d in &self.discs {
+            if !d.is_empty() && !list.contains(d) {
+                list.push(d.clone());
+            }
+        }
+        (list.first().cloned().unwrap_or_default(), list)
+    }
+}
+
 pub struct Cdrom;
 
 impl DeviceType for Cdrom {
@@ -84,8 +94,7 @@ impl DeviceType for Cdrom {
     type Options = CdromOptions;
 
     fn new(o: CdromOptions, ctx: &Ctx, owner: &Arc<ScsiPort>, at: &Location) -> Result<Handles, String> {
-        let spec = MediaSpec { path: o.path, discs: o.discs, cdrom: true, ..MediaSpec::default() };
-        ctx.disks.attach_media(owner, at, &spec)?;
+        ctx.disks.attach_cdrom(owner, at, &o)?;
         Ok(vec![])
     }
 }
@@ -221,7 +230,7 @@ mod tests {
 
     fn attach(t: &Topology, device: &str, at: &str, opts: &str, probe: bool) -> Result<(), String> {
         let p = Placement { device: device.into(), at: at.parse().unwrap(), opts: toml::from_str(opts).unwrap() };
-        let (d, k) = (Devices::new(), Disks::new());
+        let (d, k) = (Devices::new(), Disks::new(Arc::new(Topology::new())));
         let ctx = Ctx { devices: &d, disks: &k };
         attach_device(&p, &MachineConfig::default(), (!probe).then_some(&ctx), t)
     }
@@ -250,6 +259,13 @@ mod tests {
     }
 
     #[test]
+    fn a_cd_rom_is_its_list_with_empty_entries_skipped() {
+        let o = CdromOptions { path: "a.iso".into(), discs: vec!["".into(), "b.iso".into(), "a.iso".into()] };
+        assert_eq!(o.media(), ("a.iso".to_string(), vec!["a.iso".to_string(), "b.iso".to_string()]));
+        assert_eq!(CdromOptions::default().media(), (String::new(), vec![]));
+    }
+
+    #[test]
     fn register_makers_lists_hdd_and_cdrom() {
         for name in ["hdd", "cdrom"] {
             assert!(crate::attach::maker_for(name, Family::Scsi).is_some(), "{name}");
@@ -273,7 +289,7 @@ mod tests {
 
     fn attach_cfg(t: &Topology, cfg: &MachineConfig, opts: &str, probe: bool) -> Result<(), String> {
         let p = Placement { device: "daynaport".into(), at: "hpc3.0.t3".parse().unwrap(), opts: toml::from_str(opts).unwrap() };
-        let (d, k) = (Devices::new(), Disks::new());
+        let (d, k) = (Devices::new(), Disks::new(Arc::new(Topology::new())));
         attach_device(&p, cfg, (!probe).then_some(&Ctx { devices: &d, disks: &k }), t)
     }
 

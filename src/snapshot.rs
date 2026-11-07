@@ -20,7 +20,9 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use crate::location::Location;
 use toml::Value;
 
 /// On-disk schema version for the snapshot directory layout. Bumped when a
@@ -49,7 +51,13 @@ use toml::Value;
 /// changed shape: the serial DMA, the Indy's SCC and the rest are as before.
 /// Octane snapshots start at v5, and an Octane reads only snapshots of the
 /// schema it was built with, so the next bump refuses every older one.
-pub const SCHEMA_VERSION: u32 = 5;
+///
+/// v5 → v6: disks, overlays and the state of attached devices are named by
+/// location (`hpc3.0.t1`, `gio0`) where they were numbered by controller and
+/// target id (`scsi17`, `ctrl1/`) or by a fixed device name. The state of a
+/// v5 snapshot has no key a v6 machine would look for, so every machine
+/// refuses it with a message that names both versions; there is no converter.
+pub const SCHEMA_VERSION: u32 = 6;
 
 const MANIFEST_FILE: &str = "snapshot.toml";
 
@@ -65,28 +73,59 @@ pub struct Snapshot {
 /// hashing multi-GB images.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiskRef {
-    pub id: u8,
+    pub at: Location,
     pub path: String,
     pub size_bytes: u64,
+    /// A CD-ROM drive, which the manifest does not record.
+    pub cdrom: bool,
 }
 
 impl DiskRef {
-    /// The placed disks as a manifest numbers them: controller * 16 + target
-    /// id. CD-ROMs only when `cdroms`: the Indy and Indigo2 have always listed
-    /// them beside the disks, the O2 and Octane do not.
-    pub fn from_records(disks: &crate::disks::Disks, topo: &crate::topology::Topology, cdroms: bool) -> Vec<DiskRef> {
-        let mut refs: Vec<DiskRef> = disks
+    /// The placed disks, by location. CD-ROMs only when `cdroms`: the Indy
+    /// and Indigo2 have always listed them beside the disks, the O2 and
+    /// Octane do not.
+    pub fn from_records(disks: &crate::disks::Disks, cdroms: bool) -> Vec<DiskRef> {
+        disks
             .records()
-            .iter()
+            .into_iter()
             .filter(|r| cdroms || !r.cdrom)
-            .filter_map(|r| {
-                let id = topo.ctl_of(&r.at)? * 16 + r.at.target()?;
-                Some(DiskRef { id, path: r.path.clone(), size_bytes: r.size_bytes })
-            })
-            .collect();
-        refs.sort_by_key(|r| r.id);
-        refs
+            .collect()
     }
+}
+
+/// What every machine checks of a manifest before it reads anything else: the
+/// host it was taken on and the schema it was written in. A schema other than
+/// this build's is refused naming both, since the names the state is keyed by
+/// changed shape between them.
+pub fn check_header(m: &Manifest, dir: &Path) -> Result<(), String> {
+    if m.host_arch != std::env::consts::ARCH {
+        return Err(format!(
+            "snapshot host_arch '{}' does not match current host '{}'; cross-arch load is not supported",
+            m.host_arch,
+            std::env::consts::ARCH
+        ));
+    }
+    if m.schema_version > SCHEMA_VERSION {
+        return Err(format!(
+            "error: snapshot {} has schema {}, newer than the schema {SCHEMA_VERSION} this iris reads",
+            dir.display(),
+            m.schema_version
+        ));
+    }
+    if m.schema_version < SCHEMA_VERSION {
+        return Err(format!(
+            "error: snapshot {} has schema {} (disks and device state by controller number); this iris reads schema {SCHEMA_VERSION}, \
+             which names them by location. Boot it with the iris that made it; there is no converter.",
+            dir.display(),
+            m.schema_version
+        ));
+    }
+    Ok(())
+}
+
+/// The file a snapshot keeps the copy-on-write overlay of the disk at `at` in.
+pub fn overlay_file(at: &Location) -> String {
+    format!("{at}.overlay")
 }
 
 /// Reject a restore whose CPU model differs from the running machine's.
@@ -163,11 +202,16 @@ pub fn check_provenance(m: &Manifest, cpu_model: &str, cache_kind: &str, disks: 
     if let Some(e) = cache_model_mismatch(m.cpu_cache.as_deref(), m.cpu_model.as_deref(), cache_kind) {
         fatal.push(e);
     }
+    // The host path is only where the file happens to live (it moves when
+    // disks are relocated), so a path-only difference is a warning: a disk's
+    // identity for restore is its place and size.
     for d in &m.disks {
-        match disks.iter().find(|c| c.id == d.id) {
-            None => fatal.push(format!("snapshot disk {}:{} ('{}') is not configured in this run", d.id / 16, d.id % 16, d.path)),
+        match disks.iter().find(|c| c.at == d.at) {
+            None => fatal.push(format!("snapshot disk {} ('{}') is not configured in this run", d.at, d.path)),
             Some(c) if c.size_bytes != d.size_bytes => fatal.push(format!(
-                "disk {}:{} ('{}') size differs: snapshot {} bytes vs current {}", d.id / 16, d.id % 16, d.path, d.size_bytes, c.size_bytes)),
+                "disk {} ('{}') size differs: snapshot {} bytes vs current {}", d.at, d.path, d.size_bytes, c.size_bytes)),
+            Some(c) if c.path != d.path => eprintln!(
+                "load_snapshot: {} path differs: snapshot '{}' vs current '{}' (same size; continuing)", d.at, d.path, c.path),
             Some(_) => {}
         }
     }
@@ -266,7 +310,7 @@ impl Manifest {
         if !self.disks.is_empty() {
             let disks: Vec<Value> = self.disks.iter().map(|d| {
                 let mut dt = toml::map::Map::new();
-                dt.insert("id".into(), Value::Integer(d.id as i64));
+                dt.insert("at".into(), Value::String(d.at.to_string()));
                 dt.insert("path".into(), Value::String(d.path.clone()));
                 dt.insert("size_bytes".into(), Value::Integer(d.size_bytes as i64));
                 Value::Table(dt)
@@ -319,9 +363,10 @@ impl Manifest {
             .map(|arr| arr.iter().filter_map(|x| {
                 let t = x.as_table()?;
                 Some(DiskRef {
-                    id: t.get("id").and_then(|v| v.as_integer())? as u8,
+                    at: t.get("at").and_then(|v| v.as_str())?.parse().ok()?,
                     path: t.get("path").and_then(|v| v.as_str())?.to_string(),
                     size_bytes: t.get("size_bytes").and_then(|v| v.as_integer())? as u64,
+                    cdrom: false,
                 })
             }).collect())
             .unwrap_or_default();
@@ -564,26 +609,25 @@ impl BinValue {
 
 // ---- scalar hex helpers ----
 
-/// Inverse of `parse_cow_table`: build a `{"scsi<id>": [dirty sectors...]}`
-/// table from `export_overlays`'s output.
-pub(crate) fn build_cow_table(overlays: Vec<(usize, Vec<u64>)>) -> toml::Value {
+/// Inverse of `parse_cow_table`: build a `{"<location>": [dirty sectors...]}`
+/// table from `Disks::export_overlays`'s output.
+pub(crate) fn build_cow_table(overlays: Vec<(Location, Vec<u64>)>) -> toml::Value {
     let mut tbl = toml::map::Map::new();
-    for (id, dirty) in overlays {
+    for (at, dirty) in overlays {
         let arr: Vec<toml::Value> = dirty.into_iter().map(|v| toml::Value::Integer(v as i64)).collect();
-        tbl.insert(format!("scsi{}", id), toml::Value::Array(arr));
+        tbl.insert(at.to_string(), toml::Value::Array(arr));
     }
     toml::Value::Table(tbl)
 }
 
-/// Parse a `cow.toml`/`cow1.toml`-shaped table (`{"scsi<id>": [dirty
-/// sectors...]}`) into `(id, dirty_sectors)` pairs. Shared by rollback
-/// capture and snapshot load so the two paths can't drift.
-pub(crate) fn parse_cow_table(cow_toml: &toml::Value) -> Vec<(usize, Vec<u64>)> {
+/// Parse a `cow.toml`-shaped table (`{"<location>": [dirty sectors...]}`) into
+/// `(location, dirty_sectors)` pairs. Shared by rollback capture and snapshot
+/// load so the two paths can't drift.
+pub(crate) fn parse_cow_table(cow_toml: &toml::Value) -> Vec<(Location, Vec<u64>)> {
     let mut sets = Vec::new();
     if let Some(tbl) = cow_toml.as_table() {
         for (k, v) in tbl {
-            let Some(id_str) = k.strip_prefix("scsi") else { continue };
-            let Ok(id) = id_str.parse::<usize>() else { continue };
+            let Ok(id) = k.parse::<Location>() else { continue };
             let Some(arr) = v.as_array() else { continue };
             let dirty: Vec<u64> = arr.iter()
                 .filter_map(|x| x.as_integer().map(|i| i as u64))
@@ -801,15 +845,28 @@ impl StateTable {
     pub fn build(&mut self) -> Value { Value::Table(std::mem::take(&mut self.0)) }
 }
 
+/// A schema 5 snapshot directory holding only its manifest, for a machine's
+/// test to show that it refuses it before reading anything else.
+#[cfg(test)]
+pub(crate) fn write_schema_5_manifest(saves: &Path, name: &str, machine: Option<&str>) {
+    let snap = Snapshot::new(saves.join(name));
+    snap.ensure_dir().unwrap();
+    let mut m = Manifest::for_current_save();
+    m.schema_version = 5;
+    m.machine = machine.map(str::to_owned);
+    snap.write_manifest(&m).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// What `export_overlays` returns survives the table a snapshot writes it
-    /// as, and ids that are not `scsi<n>` keys are ignored.
+    /// as, and keys that are not locations are ignored.
     #[test]
     fn cow_tables_round_trip() {
-        let sets = vec![(1usize, vec![0u64, 7, 4096]), (4, vec![]), (12, vec![u32::MAX as u64 + 1])];
+        let at = |s: &str| s.parse::<Location>().unwrap();
+        let sets = vec![(at("hpc3.0.t1"), vec![0u64, 7, 4096]), (at("hpc3.0.t4"), vec![]), (at("hpc3.1.t7"), vec![u32::MAX as u64 + 1])];
         let table = build_cow_table(sets.clone());
         let mut parsed = parse_cow_table(&table);
         parsed.sort();
@@ -843,7 +900,7 @@ mod tests {
             description: Some("post install".into()),
             installed_bundles: vec!["grep-2.5.4".into(), "sed-4.2.2".into()],
             features: vec!["jit".into(), "tlbvmap".into()],
-            disks: vec![DiskRef { id: 1, path: "irix53.raw".into(), size_bytes: 4294967296 }],
+            disks: vec![DiskRef { at: "hpc3.0.t1".parse().unwrap(), path: "irix53.raw".into(), size_bytes: 4294967296, cdrom: false }],
             nvram: Some("nvram-irix53.bin".into()),
             cpu_model: Some("R5000".into()),
             cpu_cache: Some("shadow".into()),
@@ -1141,5 +1198,47 @@ mod tests {
         assert_eq!(field_u64(&v, "z"), Err("missing z".into()));
         assert_eq!(field_u32s::<3>(&v, "b"), Err("b: 2 entries, expected 3".into()));
         assert!(field_bool(&v, "a").is_err());
+    }
+
+    fn manifest_at(schema: u32) -> Manifest {
+        let mut m = Manifest::for_current_save();
+        m.schema_version = schema;
+        m
+    }
+
+    /// An older schema is refused naming both versions, and so is a newer one.
+    #[test]
+    fn a_schema_5_snapshot_is_refused_naming_both_versions() {
+        let dir = Path::new("saves/old");
+        assert!(check_header(&manifest_at(SCHEMA_VERSION), dir).is_ok());
+        assert_eq!(
+            check_header(&manifest_at(5), dir).unwrap_err(),
+            "error: snapshot saves/old has schema 5 (disks and device state by controller number); this iris reads schema 6, \
+             which names them by location. Boot it with the iris that made it; there is no converter."
+        );
+        let newer = check_header(&manifest_at(SCHEMA_VERSION + 1), dir).unwrap_err();
+        assert!(newer.contains("schema 7") && newer.contains("newer than the schema 6"), "{newer}");
+    }
+
+    /// A missing or resized disk is named by its location.
+    #[test]
+    fn provenance_refuses_a_missing_or_resized_disk_naming_its_location() {
+        let at = |s: &str| s.parse::<Location>().unwrap();
+        let mut m = manifest_at(SCHEMA_VERSION);
+        m.disks = vec![
+            DiskRef { at: at("pci0.1.t1"), path: "a.img".into(), size_bytes: 100, cdrom: false },
+            DiskRef { at: at("pci0.2.t4"), path: "b.img".into(), size_bytes: 200, cdrom: false },
+        ];
+        m.features = enabled_features();
+        m.cpu_model = Some("R4400".into());
+        m.cpu_cache = Some("full".into());
+        let here = vec![DiskRef { at: at("pci0.1.t1"), path: "a.img".into(), size_bytes: 101, cdrom: false }];
+        let e = check_provenance(&m, "R4400", "full", &here).unwrap_err();
+        assert!(e.contains("disk pci0.1.t1 ('a.img') size differs") && e.contains("disk pci0.2.t4 ('b.img') is not configured"), "{e}");
+        let fine = vec![
+            DiskRef { at: at("pci0.1.t1"), path: "moved/a.img".into(), size_bytes: 100, cdrom: false },
+            DiskRef { at: at("pci0.2.t4"), path: "b.img".into(), size_bytes: 200, cdrom: false },
+        ];
+        check_provenance(&m, "R4400", "full", &fine).expect("a moved path with the same size is only a warning");
     }
 }

@@ -152,7 +152,7 @@ pub struct OctaneMachine {
     devices: Devices,
     disks: Disks,
     /// The places the machine has, with the SCSI controllers bound to theirs.
-    topology: Topology,
+    topology: Arc<Topology>,
     /// The snapshot the CI socket last restored, for `rollback`.
     last_restore: Option<String>,
     /// Where snapshots go: `saves` under the current directory, as on the
@@ -247,7 +247,7 @@ impl OctaneMachine {
         let mac = cfg.network().mac;
         // The controllers own their buses; the devices are attached to them
         // below, once the machine is built.
-        let topology = Topology::new();
+        let topology = Arc::new(Topology::new());
         Self::fill(cfg, &topology);
         let scsi = [Arc::new(Isp1040::new_at(0, Isp1040::new_bus())), Arc::new(Isp1040::new_at(1, Isp1040::new_bus()))];
         for (n, s) in scsi.iter().enumerate() {
@@ -259,7 +259,7 @@ impl OctaneMachine {
         }
         bridge.attach(0, scsi[0].clone());
         bridge.attach(1, scsi[1].clone());
-        let disks = Disks::new().with_ci(cfg.ci);
+        let disks = Disks::new(topology.clone()).with_ci(cfg.ci);
         let ioc3 = Arc::new(Ioc3::octane(mac, false));
         ioc3.set_heartbeat(heartbeat.clone());
         let eth = Ioc3Eth::new(mac);
@@ -587,7 +587,7 @@ impl OctaneMachine {
 
     /// The hard disks as a snapshot records them, to refuse one taken on others.
     fn disk_refs(&self) -> Vec<crate::snapshot::DiskRef> {
-        crate::snapshot::DiskRef::from_records(&self.disks, &self.topology, false)
+        crate::snapshot::DiskRef::from_records(&self.disks, false)
     }
 
     /// IOC3's first port is the console: the CI socket's backend in CI
@@ -744,8 +744,8 @@ fn snapshot_refusal_for(impact: bool, vpro: bool, cpus: usize) -> Option<String>
 /// The `machine` an Octane snapshot's manifest names.
 pub(crate) const SNAPSHOT_MACHINE: &str = "octane_ip30";
 
-/// One SCSI controller's copy-on-write sets: each target's dirty sectors.
-type OverlaySets = Vec<(usize, Vec<u64>)>;
+/// The disks' copy-on-write sets: each one's dirty sectors, by location.
+type OverlaySets = Vec<(Location, Vec<u64>)>;
 
 /// A snapshot read and checked, ready to put into the machine.
 struct OctaneSnapshot {
@@ -753,7 +753,7 @@ struct OctaneSnapshot {
     board: toml::Value,
     flash: Vec<u8>,
     memory: Vec<u32>,
-    overlays: [Option<OverlaySets>; 2],
+    overlays: Option<OverlaySets>,
     dir: std::path::PathBuf,
 }
 
@@ -806,13 +806,8 @@ impl OctaneMachine {
             chunks.bank_chunks[0].extend(put_words_as_chunks(&store, words).map_err(|e| format!("CAS memory put: {e}"))?);
         }
         snap.write_chunks_manifest(&chunks).map_err(io)?;
-        for (i, ctl) in self.scsi.iter().enumerate() {
-            let dir = snap.dir.join(format!("ctrl{i}"));
-            std::fs::create_dir_all(&dir).map_err(io)?;
-            let overlays = ctl.bus().export_overlays(&dir)
-                .map_err(|e| format!("COW overlay export (controller {i}): {e}"))?;
-            snap.write_toml(&format!("cow{i}.toml"), &crate::snapshot::build_cow_table(overlays)).map_err(io)?;
-        }
+        let overlays = self.disks.export_overlays(&snap.dir).map_err(|e| format!("COW overlay export: {e}"))?;
+        snap.write_toml("cow.toml", &crate::snapshot::build_cow_table(overlays)).map_err(io)?;
         Ok(())
     }
 
@@ -842,12 +837,7 @@ impl OctaneMachine {
         if m.machine.as_deref() != Some(SNAPSHOT_MACHINE) {
             return Err(format!("snapshot {name} is not of an Octane"));
         }
-        if m.host_arch != std::env::consts::ARCH {
-            return Err(format!("snapshot host_arch '{}' does not match current host '{}'", m.host_arch, std::env::consts::ARCH));
-        }
-        if m.schema_version != SCHEMA_VERSION {
-            return Err(format!("snapshot {name} is schema {}; this build reads Octane snapshots of schema {SCHEMA_VERSION}", m.schema_version));
-        }
+        crate::snapshot::check_header(&m, &snap.dir)?;
         // As the Indy and the O2: build, CPU and disks must match.
         crate::snapshot::check_provenance(&m, cpu.model_name(), cpu.cache_kind(), &self.disk_refs())?;
         let sv = m.schema_version;
@@ -859,9 +849,7 @@ impl OctaneMachine {
         if memory.len() != fitted {
             return Err(format!("snapshot memory is {} MiB, this Octane has {} MiB", memory.len() >> 18, fitted >> 18));
         }
-        let overlays = std::array::from_fn(|i| {
-            snap.read_toml(&format!("cow{i}.toml")).ok().map(|t| crate::snapshot::parse_cow_table(&t))
-        });
+        let overlays = snap.read_toml("cow.toml").ok().map(|t| crate::snapshot::parse_cow_table(&t));
         // Checked here, before the machine is touched, rather than when the
         // part is loaded.
         let flash = snap.read_bin("flash.bin").map_err(|e| format!("flash.bin: {e}"))?;
@@ -888,11 +876,8 @@ impl OctaneMachine {
         // The overlays first: an import can take minutes, and the devices
         // count their deadlines from their load, so they load last, just
         // before the machine starts.
-        for (i, ctl) in self.scsi.iter().enumerate() {
-            if let Some(sets) = &s.overlays[i] {
-                ctl.bus().import_overlays(&s.dir.join(format!("ctrl{i}")), sets)
-                    .map_err(|e| format!("COW overlay import (controller {i}): {e}"))?;
-            }
+        if let Some(sets) = &s.overlays {
+            self.disks.import_overlays(&s.dir, sets).map_err(|e| format!("COW overlay import: {e}"))?;
         }
         self.devices.load(&s.board)?;
         Self::sync_links(&self.phys, &self.xbow);
@@ -1584,6 +1569,22 @@ mod placement_tests {
         use crate::attach::maker_for;
         assert!(maker_for("virtio_serial", Family::Gio).is_some());
         assert!(maker_for("virtio_serial", Family::Pci).is_some());
+    }
+
+    #[test]
+    fn the_octane_refuses_a_schema_5_snapshot_naming_both_versions() {
+        with_shared(Machine::Octane, |m| {
+            let m = m.as_any_mut().downcast_mut::<OctaneMachine>().expect("an Octane");
+            let dir = std::env::temp_dir().join(format!("iris-octane-v5-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            crate::snapshot::write_schema_5_manifest(&dir, "old", Some(SNAPSHOT_MACHINE));
+            let before = std::mem::replace(&mut m.saves, dir.clone());
+            let read = m.read_snapshot("old");
+            m.saves = before;
+            let _ = std::fs::remove_dir_all(&dir);
+            let e = read.err().expect("refused");
+            assert!(e.contains("has schema 5") && e.contains("reads schema 6"), "{e}");
+        });
     }
 
     /// A built Octane takes the placement: the row is taken afterwards.
