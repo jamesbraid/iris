@@ -727,10 +727,10 @@ impl<
     // - coherence. Another CPU's or a DMA device's write to memory a CPU
     //   holds in a staged line does not reach the line, and the line's data
     //   are not visible to them;
-    // - the part. The datasheet clears the R10000 only. The R12000 and R14000
-    //   use the same tag layout and rules here, which is an inference
-    //   ("R12000 behavior needs separate evidence"); both keep only the bits
-    //   of `CpuModel::SECONDARY_TAG_MASK`;
+    // - the part. The datasheet clears the R10000 only. The R12000, R14000
+    //   and R16000 use the same tag layout and rules here, which is an
+    //   inference ("R12000 behavior needs separate evidence"); all keep only
+    //   the bits of `CpuModel::SECONDARY_TAG_MASK`;
     // - undefined encodings. Operations with op[1:0] = 10 (`CACH_SI`) are
     //   undefined on the R10000 and do nothing.
 
@@ -2659,8 +2659,8 @@ mod tests {
     }
 
     /// The same rules at every geometry the family ships: 2 MiB with 128-byte
-    /// lines (Octane), 1 MiB with 64-byte lines (O2).
-    /// Two lines of one set differ by a way's worth of address.
+    /// lines (Octane), 1 MiB with 64-byte lines (O2), 4, 8 and 16 MiB with
+    /// 128-byte lines (R16000). Two lines of one set differ by a way's worth of address.
     #[test]
     fn staging_works_at_every_cache_geometry() {
         use crate::cpu::mips_cache_v2::MipsCache as _;
@@ -2701,6 +2701,9 @@ mod tests {
         check::<R10000ShadowCache>("R10000 1 MiB/128");
         check::<R10000O2ShadowCache>("R10000 O2 1 MiB/64");
         check::<R12000ShadowCache>("R12000 2 MiB/128");
+        check::<R16000ShadowCache>("R16000 4 MiB/128");
+        check::<R16000Scache8ShadowCache>("R16000 8 MiB/128");
+        check::<R16000Scache16ShadowCache>("R16000 16 MiB/128");
     }
 
     /// A snapshot carries the staged lines, and a restore ends any that were
@@ -2792,6 +2795,26 @@ mod tests {
         }
         check::<R10000ShadowCache>("128-byte lines");
         check::<R10000O2ShadowCache>("64-byte lines");
+        check::<R16000ShadowCache>("4 MiB, 128-byte lines");
+        check::<R16000Scache8ShadowCache>("8 MiB, 128-byte lines");
+        check::<R16000Scache16ShadowCache>("16 MiB, 128-byte lines");
+    }
+
+    /// Every R10000-family chip translates every CACHE operand but Cache
+    /// Barrier's, through the model's operation table; the R16000 types
+    /// choose it with the rest of the family.
+    #[test]
+    fn r16000_cache_operands_translate_like_the_r10000() {
+        use crate::cpu::mips_cache_v2::{C_R10K_CBARRIER, CACH_PI};
+        fn mask<C: CpuModel>() -> u32 {
+            C::CACHE_OPS.translates
+        }
+        let barrier = 1u32 << (C_R10K_CBARRIER | CACH_PI);
+        let expected = u32::MAX & !barrier;
+        assert_eq!(mask::<R10000ShadowCache>(), expected, "the R10000");
+        assert_eq!(mask::<R16000ShadowCache>(), expected, "R16000 4 MiB");
+        assert_eq!(mask::<R16000Scache8ShadowCache>(), expected, "R16000 8 MiB");
+        assert_eq!(mask::<R16000Scache16ShadowCache>(), expected, "R16000 16 MiB");
     }
 
     // ---- Staged primary instruction-cache lines -------------------------
@@ -3472,6 +3495,9 @@ mod tests {
         check::<R10000ShadowCache>("R10000 1 MiB/128");
         check::<R10000O2ShadowCache>("R10000 O2 1 MiB/64");
         check::<R12000ShadowCache>("R12000 2 MiB/128");
+        check::<R16000ShadowCache>("R16000 4 MiB/128");
+        check::<R16000Scache8ShadowCache>("R16000 8 MiB/128");
+        check::<R16000Scache16ShadowCache>("R16000 16 MiB/128");
     }
 
     /// The set of raw words Index Load Data handed out is bounded: after

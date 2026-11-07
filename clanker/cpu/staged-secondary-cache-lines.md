@@ -114,8 +114,8 @@ Dropping the executor's part fails `a_compiled_load_hits_a_staged_line_not_the_w
 - A store to a staged line makes it DirtyExclusive. NEC U10278EJ4V0UM p.246
   counts such requests; the datasheet does not state the transition.
 - Every CACHE operand is translated first (exceptions: TLB Refill/Invalid, privilege Address Error, never TLB Modified). The secondary set, way and quadword come from the operand's physical address, which the executor passes in place of the virtual one, the primaries' from its virtual address. An operand on an uncached page is undefined on the R10000 and goes ahead as if cached.
-- The datasheet clears the R10000. The R12000 and R14000 use the same
-  tag layout here, which is an inference.
+- The datasheet clears the R10000. The R12000, R14000 and R16000 use the
+  same tag layout here, which is an inference.
 - Not modelled: the predecode of unsampled classes, primary data cache staged
   hits, ECC and check bits, the purge a cached access makes when its VA[13:12]
   differs from the tag's recorded index, the BadVAddr/Context/EntryHi values after a CACHE-raised TLB exception, Status.CH, the
