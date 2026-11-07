@@ -88,6 +88,26 @@ pub fn problems(cfg: &MachineConfig) -> Vec<String> {
         }
     }
 
+    for p in cfg.placements().unwrap_or_default() {
+        let what = p.at.to_string();
+        let flag = |k: &str| p.opts.get(k).and_then(toml::Value::as_bool).unwrap_or(false);
+        let path = p.opts.get("path").and_then(toml::Value::as_str).unwrap_or("");
+        match p.device.as_str() {
+            "hdd" if flag("scratch") => missing_parent(&format!("{what} scratch volume"), path, &mut problems),
+            "hdd" if path.is_empty() => problems.push(format!("{what}: a disk needs a path")),
+            "hdd" => missing_file(&what, path, &mut problems),
+            "cdrom" => {
+                if !path.is_empty() {
+                    missing_file(&what, path, &mut problems);
+                }
+                for disc in p.opts.get("discs").and_then(toml::Value::as_array).into_iter().flatten().filter_map(toml::Value::as_str) {
+                    missing_file(&format!("{what} disc"), disc, &mut problems);
+                }
+            }
+            _ => {}
+        }
+    }
+
     if let Some(path) = &cfg.load_elf {
         missing_file("load_elf", path, &mut problems);
     }

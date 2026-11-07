@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+use crate::config::MachineConfig;
 use crate::location::{Hop, Location};
 
 /// The class of rows a device type goes into.
@@ -106,6 +107,15 @@ pub struct Topology {
 impl Topology {
     pub fn new() -> Topology {
         Topology::default()
+    }
+
+    /// The rows the configured machine has, with nothing placed and no
+    /// hardware built: what migration and the command line use to find
+    /// "controller 0".
+    pub fn fill_for(cfg: &MachineConfig) -> Topology {
+        let t = Topology::new();
+        cfg.machine.profile.fill(cfg, &t);
+        t
     }
 
     pub fn add(&self, at: Location, row: Row) -> Result<(), String> {
