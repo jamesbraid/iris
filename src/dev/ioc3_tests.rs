@@ -1,6 +1,6 @@
 //! IOC3 register-contract tests.
 //!
-//! Accesses go through `PciBusDevice` the way a host bridge makes them: a
+//! Accesses go through `PciFunction` the way a host bridge makes them: a
 //! 32-bit access at its offset, a byte access at `offset ^ 3`.
 //!
 //! Ported from tests/qtest/octane-test.c in jamesbraid/qemu-sgi-origami.
@@ -9,7 +9,7 @@ use super::*;
 use std::sync::Mutex;
 use crate::irq::LevelProbe;
 use crate::traits::MachineEvent;
-use crate::pci::PciBusDevice;
+use crate::pci::PciFunction;
 
 const MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
 
