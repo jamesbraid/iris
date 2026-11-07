@@ -859,6 +859,14 @@ pub trait MipsCache: Send + Sync {
     /// are detected at all (neither DE nor ERL set). Pushed by the executor on
     /// every Status change. Models that keep no check bits ignore it.
     fn set_error_control(&self, _ce: bool, _detect: bool) {}
+    /// Where to read the CPU's PC and Status registers, for a model that
+    /// needs them only rarely instead of being told of every change
+    /// (`set_error_control`): the R10000 shadow cache's staged lines. Handed
+    /// over by the executor on the CPU thread, with the executor in place.
+    ///
+    /// # Safety
+    /// Both must outlive the cache, which reads them on the CPU thread.
+    unsafe fn set_cpu_registers(&self, _pc: *const u64, _status: *const u32) {}
     /// CacheErr for the Cache Error exception the last access reported
     /// (`EXEC_CACHE_ERR`).
     fn take_cache_err(&self) -> u32 { 0 }

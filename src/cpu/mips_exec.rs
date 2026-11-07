@@ -3467,6 +3467,9 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     #[cold]
     #[inline(never)]
     pub(crate) fn staged_lines_changed(&mut self) {
+        // A fetch from a staged line reads the PC, and its parity check DE and
+        // ERL. Handed over here, on the CPU thread with the executor in place.
+        unsafe { self.cache.set_cpu_registers(&self.core.pc, &self.core.cp0_status) };
         self.nanotlb_invalidate();
         #[cfg(feature = "jitv2")]
         {
