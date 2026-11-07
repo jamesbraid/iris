@@ -647,6 +647,20 @@ impl Report {
 /// after `limit` records or all of them. The recording's resets are performed
 /// as in `replay`.
 pub(super) fn replay_drawing(rec: &Recording, limit: Option<usize>) -> Result<(String, String), String> {
+    let kona = replay_board(rec, limit)?;
+    Ok((monitor(&kona, &["status"])?, monitor(&kona, &["hash"])?.trim().to_string()))
+}
+
+/// A monitor command of a board's back end, as text.
+pub(super) fn monitor(kona: &Kona, args: &[&str]) -> Result<String, String> {
+    let mut v = Vec::new();
+    kona.with_backend(|b| b.monitor(args, &mut v)).map_err(|e| e.to_string())?;
+    String::from_utf8(v).map_err(|e| e.to_string())
+}
+
+/// A board with a `KonaBackend` after `limit` records (all of them if None) of
+/// `rec`, loads and stores only.
+pub(super) fn replay_board(rec: &Recording, limit: Option<usize>) -> Result<Arc<Kona>, String> {
     let cfg = rec.config()?;
     let at = Arc::new(AtomicUsize::new(0));
     let host = ReplayHost::new(rec, at);
@@ -672,12 +686,7 @@ pub(super) fn replay_drawing(rec: &Recording, limit: Option<usize>) -> Result<(S
             _ => {}
         }
     }
-    let out = |cmd: &str| {
-        let mut v = Vec::new();
-        kona.with_backend(|b| b.monitor(&[cmd], &mut v)).map_err(|e| e.to_string())?;
-        String::from_utf8(v).map_err(|e| e.to_string())
-    };
-    Ok((out("status")?, out("hash")?.trim().to_string()))
+    Ok(kona)
 }
 
 /// What a stretch of a stream between two user marks sent.
@@ -824,6 +833,10 @@ mod tests {
     /// `the_irix_recording_replays`).
     const IRIX_EXACT_RECORDS: usize = 1_415_538;
     const IRIX_STORE_HASH: &str = "53eab9b4cb25862c";
+
+    /// The most pixels (as a share) the PROM frame may differ from its capture
+    /// by (see `the_prom_frame_matches_its_capture_within_a_tolerance`).
+    const PROM_FRAME_TOLERANCE: f64 = 0.0001;
 
     const PORT: u32 = 0xc10000;
 
@@ -1007,6 +1020,52 @@ mod tests {
         let (status, hash) = replay_drawing(&rec, Some(IRIX_EXACT_RECORDS)).unwrap();
         eprintln!("{status}\nstore hash {hash}");
         assert_eq!(hash, IRIX_STORE_HASH, "{status}");
+    }
+
+    /// The frame the PROM stream composes, against the recorded screen
+    /// capture. Both renderers are approximations of one board, so the check is
+    /// a tolerance, set from the first measurement: the share of pixels whose
+    /// colour differs by more than a few levels in any channel stays under
+    /// `PROM_FRAME_TOLERANCE` (the first measurement found no pixel differing;
+    /// the recorder is the same model, so that agreement is not hardware
+    /// evidence). It catches a layout, placement or colour-map
+    /// disagreement to look into; it is not a claim about the hardware's pixels.
+    #[test]
+    fn the_prom_frame_matches_its_capture_within_a_tolerance() {
+        let Some(dir) = recordings_dir() else { return };
+        let (rec_path, png_path) = (dir.join("onyx2-deskside-prom.kona.rec"), dir.join("onyx2-deskside-prom-graphics-console.png"));
+        if !rec_path.exists() || !png_path.exists() {
+            eprintln!("skipping: the PROM recording or its capture is not in {}", dir.display());
+            return;
+        }
+        let rec = Recording::parse(&std::fs::read(&rec_path).unwrap()).unwrap();
+        let kona = replay_board(&rec, None).unwrap();
+        let shot = std::env::temp_dir().join(format!("kona-prom-shot-{}.png", std::process::id()));
+        let said = monitor(&kona, &["shot", shot.to_str().unwrap()]).unwrap();
+        assert!(said.contains("1280 x 1024"), "{said}");
+        let (ours, theirs) = (decode_png(&shot), decode_png(&png_path));
+        let _ = std::fs::remove_file(&shot);
+        assert_eq!((ours.0, ours.1), (theirs.0, theirs.1));
+        let bad = ours.2.chunks_exact(3).zip(theirs.2.chunks_exact(3)).filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 8)).count();
+        let share = bad as f64 / (ours.0 * ours.1) as f64;
+        eprintln!("{bad} of {} pixels differ by more than 8 levels ({:.4})", ours.0 * ours.1, share);
+        assert!(share <= PROM_FRAME_TOLERANCE, "{share}");
+    }
+
+    /// A PNG's width, height and RGB bytes.
+    fn decode_png(path: &std::path::Path) -> (usize, usize, Vec<u8>) {
+        let dec = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap()));
+        let mut r = dec.read_info().unwrap();
+        let mut buf = vec![0; r.output_buffer_size().expect("a PNG that fits memory")];
+        let info = r.next_frame(&mut buf).unwrap();
+        let bytes = &buf[..info.buffer_size()];
+        let (w, h) = (info.width as usize, info.height as usize);
+        let rgb = match info.color_type {
+            png::ColorType::Rgb => bytes.to_vec(),
+            png::ColorType::Rgba => bytes.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect(),
+            other => panic!("unexpected PNG colour type {other:?}"),
+        };
+        (w, h, rgb)
     }
 
     #[test]
