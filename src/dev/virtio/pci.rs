@@ -21,10 +21,18 @@
 
 use std::sync::Arc;
 
+use crate::attach::{Ctx, DeviceType, Handles};
+use crate::config::MachineConfig;
+use crate::dev::bridge::Bridge;
+use crate::devices::Phase;
 use crate::irq::IrqLine;
+use crate::location::Location;
+use crate::register_device;
+use crate::topology::Family;
 use crate::pci::{Bar, PciBusDevice, PciConfig, PciDma, PCI_INTA};
 use crate::traits::Resettable;
 
+use super::console::{from_ports, VirtioSerialOptions};
 use super::{PciMemory, VirtioCore};
 
 pub const VENDOR_ID: u16 = 0x1af4;
@@ -242,6 +250,31 @@ impl Resettable for VirtioPci {
         self.core.power_on();
     }
 }
+
+/// virtio-serial on the Octane: a function on the Bridge's PCI bus at the
+/// device number its location names.
+pub struct OctaneVirtioSerial;
+
+impl DeviceType for OctaneVirtioSerial {
+    const NAME: &'static str = "virtio_serial";
+    const FAMILY: Family = Family::Pci;
+    type Owner = Bridge;
+    type Options = VirtioSerialOptions;
+
+    fn check(o: &VirtioSerialOptions, _: &MachineConfig) -> Result<(), String> {
+        o.check()
+    }
+
+    fn new(o: VirtioSerialOptions, ctx: &mut Ctx, bridge: &Arc<Bridge>, at: &Location) -> Result<Handles, String> {
+        let device = at.last().filter(|h| h.is_bare()).ok_or_else(|| format!("{at} is not a PCI device"))?.number();
+        let dev = Arc::new(VirtioPci::new(from_ports(&o.ports)));
+        bridge.attach(device, dev.clone());
+        eprintln!("iris: virtio-serial on Bridge slot {device}");
+        ctx.devices.add(&at.to_string(), Phase::Io, dev);
+        Ok(vec![])
+    }
+}
+register_device!(OctaneVirtioSerial);
 
 #[cfg(test)]
 mod tests {

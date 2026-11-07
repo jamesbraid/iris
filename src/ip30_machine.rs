@@ -18,7 +18,7 @@ use std::sync::Arc;
 use crate::attach::{attach_devices, Ctx};
 use crate::location::{Hop, Location};
 use crate::scsi::ScsiPort;
-use crate::topology::{Row, Topology};
+use crate::topology::{Family, Row, Topology};
 use crate::config::{MachineConfig, MachineProfile};
 use crate::cpu::parts::{self, Part};
 use crate::cpu::mips_cache_v2::MipsCache;
@@ -97,8 +97,8 @@ pub const WIDGET_GFX: u8 = 11;
 /// The Bridge input IOC3's SuperIO block (serial, keyboard, clock) is
 /// wired to; the Ethernet uses IOC3's PCI pin.
 const SUPERIO_PIN: u8 = 4;
-/// Bridge slot of the virtio device: 0 and 1 are SCSI, 2 IOC3, 3 the RAD.
-const VIRTIO_SLOT: u8 = 4;
+/// Bridge device number of the virtio device: 0 and 1 are SCSI, 2 IOC3, 3 the RAD.
+pub(crate) const VIRTIO_SLOT: u8 = 4;
 /// The blank part on the Bridge's second flash select: reads all ones and
 /// keeps no writes, an approximation from one word read on a real Octane2.
 /// The PROM looks for a part there too.
@@ -136,8 +136,6 @@ pub struct OctaneMachine {
     pub scsi: [Arc<Isp1040>; 2],
     eth: Arc<Ioc3Eth>,
     rad: Arc<Rad1>,
-    /// virtio-serial (`[virtio_serial]`), the next free Bridge slot.
-    virtio: Option<Arc<crate::dev::virtio::pci::VirtioPci>>,
     flash: Arc<CfiFlash>,
     /// The IMPACT board, when `[graphics] board` names one.
     pub gfx: Option<Arc<ImpactXio>>,
@@ -283,14 +281,9 @@ impl OctaneMachine {
             rad.enable_output(cfg.audio.clone());
         }
         bridge.attach(3, rad.clone());
-        let virtio = cfg.virtio_serial.enabled.then(|| {
-            let dev = Arc::new(crate::dev::virtio::pci::VirtioPci::new(
-                crate::dev::virtio::console::from_ports(&cfg.virtio_serial.ports),
-            ));
-            bridge.attach(VIRTIO_SLOT, dev.clone());
-            eprintln!("iris: virtio-serial on Bridge slot {VIRTIO_SLOT}");
-            dev
-        });
+        topology
+            .bind(&Self::pci_slot(None), bridge.clone())
+            .expect("fill added the Bridge's PCI bus row");
 
         // The status bar's activity bits and the CPU's Compare matches,
         // shared with the graphics board before the CPU exists.
@@ -476,9 +469,6 @@ impl OctaneMachine {
         devices.add("scsi0", Phase::Io, scsi[0].clone());
         devices.add("scsi1", Phase::Io, scsi[1].clone());
         devices.add("rad", Phase::Io, rad.clone());
-        if let Some(v) = &virtio {
-            devices.add("virtio", Phase::Io, v.clone());
-        }
         devices.add("flash", Phase::Io, flash.clone());
         if let Some(v) = &vpro {
             devices.add("vpro", Phase::Io, v.clone());
@@ -549,7 +539,6 @@ impl OctaneMachine {
             scsi,
             eth,
             rad,
-            virtio,
             flash,
             gfx,
             vpro,
@@ -576,19 +565,25 @@ impl OctaneMachine {
     /// first two devices are the ISP1040 SCSI controllers (internal, external)
     /// with targets 1 to 15, then the IOC3 and the RAD1. Touches no hardware.
     pub(crate) fn fill(_: &MachineConfig, t: &Topology) {
-        let at = |hops: &[Hop]| hops.iter().fold(Location::root(), |l, h| l.join(*h));
         let add = |l: Location, row: Row| t.add(l, row).expect("rows are added once");
-        let bus = [Hop::xio(WIDGET_BRIDGE), Hop::pci(0)];
         add(Location::root(), Row::fixed("XIO"));
-        add(at(&[bus[0]]), Row::fixed("Bridge"));
-        add(at(&bus), Row::fixed("PCI bus"));
+        add(Self::pci_slot(None).parent().expect("the bus has a widget"), Row::fixed("Bridge"));
+        add(Self::pci_slot(None), Row::fixed("PCI bus"));
         for (n, label) in ["SCSI internal", "SCSI external"].into_iter().enumerate() {
-            let ctl = at(&bus).join(Hop::pos(n as u8));
+            let ctl = Self::pci_slot(Some(n as u8));
             add(ctl.clone(), Row::fixed(label).ctl(n as u8).onboard("isp1040"));
             t.scsi(&ctl, 1..=15, false);
         }
-        add(at(&bus).join(Hop::pos(2)), Row::fixed("").onboard("ioc3"));
-        add(at(&bus).join(Hop::pos(3)), Row::fixed("").onboard("rad1"));
+        add(Self::pci_slot(Some(2)), Row::fixed("").onboard("ioc3"));
+        add(Self::pci_slot(Some(3)), Row::fixed("").onboard("rad1"));
+        // The next free device, which iris fills with its own virtio device.
+        add(Self::pci_slot(Some(VIRTIO_SLOT)), Row::offering("iris spare", Family::Pci).approx());
+    }
+
+    /// The Bridge's PCI bus, or device `device` on it.
+    pub(crate) fn pci_slot(device: Option<u8>) -> Location {
+        let bus = Location::root().join(Hop::xio(WIDGET_BRIDGE)).join(Hop::pci(0));
+        device.map_or(bus.clone(), |d| bus.join(Hop::pos(d)))
     }
 
     /// The hard disks as a snapshot records them, to refuse one taken on others.
@@ -1573,5 +1568,46 @@ mod placement_tests {
         cfg.scsi.clear();
         cfg.scsi.insert(31, ScsiDeviceConfig { path: "x.img".into(), ..Default::default() });
         assert_eq!(cfg.scsi_placements(&t).unwrap()[0].at, loc("xio15.pci0.1.t15"));
+    }
+
+    /// virtio-serial is a function on the Bridge at the spare device, and
+    /// the O2, which has no row for it, refuses with the claim.
+    #[test]
+    fn octane_virtio_serial_is_placed_at_xio15_pci0_4() {
+        use crate::attach::attach_device;
+        use crate::config::Placement;
+        let t = filled();
+        let at = loc("xio15.pci0.4");
+        let p = Placement { device: "virtio_serial".into(), at: at.clone(), opts: Default::default() };
+        attach_device(&p, &MachineConfig::default(), None, &t).unwrap();
+        let row_taken = attach_device(&p, &MachineConfig::default(), None, &t).unwrap_err();
+        assert_eq!(row_taken, "error: xio15.pci0.4: taken by virtio_serial");
+        // The same name on a GIO slot is the other family: the Octane has none.
+        let gio = Placement { at: loc("gio0"), ..p };
+        assert!(attach_device(&gio, &MachineConfig::default(), None, &t).unwrap_err().contains("no such location"));
+    }
+
+    /// Both families list the one name.
+    #[test]
+    fn makers_list_two_virtio_serial_families() {
+        use crate::attach::maker_for;
+        assert!(maker_for("virtio_serial", Family::Gio).is_some());
+        assert!(maker_for("virtio_serial", Family::Pci).is_some());
+    }
+
+    /// A built Octane takes the placement: the row is taken afterwards.
+    #[test]
+    fn a_built_octane_places_virtio_serial_on_the_bridge() {
+        use crate::exit_persistence_tests::{build, config, make_images, on_big_stack, serial, Dir};
+        let _serial = serial();
+        on_big_stack(|| {
+            let dir = Dir::new("octane-virtio");
+            make_images(&dir);
+            let mut cfg = config(Machine::Octane, &dir, false);
+            cfg.place("virtio_serial", OctaneMachine::pci_slot(Some(VIRTIO_SLOT)), toml::from_str("[[port]]").unwrap());
+            let m = build(cfg);
+            let e = m.topology().claim(&loc("xio15.pci0.4"), "virtio_serial", Family::Pci, false, "").unwrap_err();
+            assert_eq!(e, "error: xio15.pci0.4: taken by virtio_serial");
+        });
     }
 }
