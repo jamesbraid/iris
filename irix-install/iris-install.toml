@@ -10,14 +10,14 @@ nvram    = "irix-install/nvram-irix65.bin"
 
 # Empty 20 GB disk (created with fsutil). Use overlay during install if you like:
 #   overlay = true   → writes go to scsi1.raw.overlay; delete overlay to reset.
-[scsi.1]
+[[hdd]]
+at = "hpc3.0.t1"
 path   = "irix-install/scsi1.raw"
-cdrom  = false
 
 # CD changer at SCSI 4. Installation Tools must be first (boot / miniroot disc).
-[scsi.4]
+[[cdrom]]
+at = "hpc3.0.t4"
 path  = 'C:/Users/chron/Downloads/sgi-irix-6.5/sgi-irix-6.5-installation-tools-june-1998_812-0758-002.iso'
-cdrom = true
 discs = [
   'C:/Users/chron/Downloads/sgi-irix-6.5/sgi-irix-6.5-installation-tools-june-1998_812-0758-002.iso',
   'C:/Users/chron/Downloads/sgi-irix-6.5/sgi-irix-6.5-foundation-1_812-0759-002.iso',

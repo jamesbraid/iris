@@ -38,26 +38,28 @@ banks = [128, 128, 0, 0]
 # Change this if 192.168.0.x conflicts with your local network.
 #nat_subnet = "192.168.5.0/24"
 
-# SCSI devices.
-# Valid IDs: 1–7.  The SCSI controller itself occupies ID 0.
+# Disks, CD-ROMs and other devices go where `at` says. `iris --list-slots`
+# shows every place the machine has and what it takes. On the Indy and
+# Indigo2 the first controller is `hpc3.0` and targets are `t1` to `t7` (the
+# controller itself is 0); an Indigo2's second controller is `hpc3.1`.
+# A file that places no disk gets the defaults below, scsi1.raw at t1 and
+# cdrom4.iso at t4.
 # Typical Indy layout:
-#   ID 1 — internal hard disk
-#   ID 4 — internal CD-ROM (removable, 512-byte block mode)
-#   ID 6 — optional second hard disk or tape
+#   t1 -- internal hard disk
+#   t4 -- internal CD-ROM (removable, 512-byte block mode)
+#   t6 -- optional second hard disk or tape
 
 # Internal hard disk
-[scsi.1]
-path   = "scsi1.raw"
-cdrom  = false
+[[hdd]]
+at = "hpc3.0.t1"
+path = "scsi1.raw"
 #overlay = true
 #write_cache = false  # default true. false stores every write before it completes, like SGI's drives (slower); true can lose ~5 s of writes in a host crash. See STORAGE.md.
-#controller = 0   # Indigo2 and O2 have a second controller (1); on the O2 it is the external bus.
-                  # [scsi.17] is id 1 on controller 1 without this key, so an id can be on both.
 
-# Internal hard disk
-#[scsi.2]
-#path   = "scsi2.raw"
-#cdrom  = false
+# A second hard disk
+#[[hdd]]
+#at = "hpc3.0.t2"
+#path = "scsi2.raw"
 
 # Scratch volume for host<->guest file injection without networking.
 # iris auto-creates the file at `path` if missing — first 4 KB hold a minimal
@@ -73,12 +75,12 @@ cdrom  = false
 #   host:  iris CI: scratch-read {to_path: "log.tar"}
 # IRIX raw block-device reads must be sector-aligned (bs must be a multiple
 # of 512); bs=64 etc returns "Read error: I/O error".
-# Implies cdrom=false, overlay=false (the volume must be host-writable, and
+# Implies overlay=false (the volume must be host-writable, and
 # scratch contents intentionally survive snapshot rollback so a freshly
 # injected bundle isn't reverted).
-#[scsi.2]
-#path    = "scratch.raw"
-#cdrom   = false
+#[[hdd]]
+#at = "hpc3.0.t2"
+#path = "scratch.raw"
 #overlay = false
 #scratch = true
 #size_mb = 64
@@ -91,9 +93,9 @@ cdrom  = false
 #   subnet — optional; this target's own NAT subnet (gateway .1, guest .2).
 #            Must differ from nat_subnet (ec0's). Default 192.168.10.0/24.
 # See docs/daynaport.md.
-#[scsi.3]
-#kind   = "daynaport"
-#mac    = "00:80:19:12:34:56"
+#[[daynaport]]
+#at = "hpc3.0.t3"
+#mac = "00:80:19:12:34:56"
 #subnet = "192.168.10.0/24"
 
 # NAT subnet for the internal network (CIDR notation).
@@ -139,9 +141,9 @@ bind       = "localhost"
 # For a single disc, set path only.
 # For a changer (cycled with "scsi eject 4" in the monitor), list all
 # ISO images in `discs`; the first entry is mounted at startup.
-#[scsi.4]
-#path   = "cdrom4.iso"
-#cdrom  = true
+#[[cdrom]]
+#at = "hpc3.0.t4"
+#path = "cdrom4.iso"
 #discs = ["second.iso", "cdrom4.iso", "patches.iso"]
 
 # Runtime disc switching (no extra config needed).
@@ -153,9 +155,9 @@ bind       = "localhost"
 #   - two+ discs: ejecting cycles through them; a single disc ejects to empty
 # `path` is optional: omit it (or comment it out) to boot with an empty tray and
 # insert media later.
-#[scsi.4]
-#cdrom = true
-#path  = "cdrom4.iso"   # optional — omit to start with an empty tray
+#[[cdrom]]
+#at = "hpc3.0.t4"
+#path = "cdrom4.iso"   # optional — omit to start with an empty tray
 
 # VINO video-in (IndyCam). Off by default.
 # source:   "off" | "test_pattern" | "black" | "camera"

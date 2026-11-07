@@ -23,9 +23,9 @@ thread_affinity = false
 [audio]
 prebuf_ms = 20
 
-[scsi.1]
+[[hdd]]
+at = "hpc3.0.t1"
 path = "irix-install/scsi1.raw"
-cdrom = false
 
 [nfs]
 shared_dir = "shared"

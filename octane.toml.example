@@ -19,7 +19,8 @@ cpu     = "r10000"
 flash    = "octane-flash.bin"  # keep the PROM's flash records between runs (optional)
 # graphics = "none"            # no graphics board: serial console, no window
 
-[scsi.1]                       # id 1 on the internal bus, where IRIX expects its disk
+[[hdd]] # id 1 on the internal bus, where IRIX expects its disk
+at = "xio15.pci0.0.t1"
 path    = "irix6530.raw"
 overlay = true
 # write_cache = false             # default true. false stores every write before it completes, like SGI's drives (slower); true can lose ~5 s of writes in a host crash. See STORAGE.md

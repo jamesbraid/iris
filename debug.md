@@ -355,8 +355,8 @@ On the O2 the controllers are Adaptec 7880s: `scsi regs` shows that chip's
 interrupt status, queues and command totals, whether its worker thread is
 running (commands run on it, off the CPU's thread), any completions held
 for a paused sequencer and NetBSD's doorbell, and `wdt`, `defer`, `debug` and
-`dayna` are not there. Ids are per controller, as in the `[scsi.N]` tables
-(`[scsi.17]` is id 1 on controller 1, so `scsi1 eject 1`).
+`dayna` are not there. Ids are per controller, as in the `at` locations
+(`hpc3.1.t1` is id 1 on controller 1, so `scsi1 eject 1`).
 
 On the Octane the controllers are ISP1040s: `scsi notes` (`scsi1 notes`)
 shows the command total and anything odd the driver did; `regs`, `wdt`,
@@ -611,7 +611,7 @@ See [docs/perfetto.md](docs/perfetto.md) for categories and analysis.
 
 ### N64 development board
 
-With `[ultra64] enabled = true`: `ultra status | send <hex> | reset | r
+With a `[[ultra64]]` entry at `gio0`: `ultra status | send <hex> | reset | r
 <offset> | w <offset> <val> | dump <offset> <size> | disasm <offset> <count>
 | load <path> [offset]`. See [HELP.md](HELP.md#n64-development-board-ultra64).
 

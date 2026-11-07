@@ -23,13 +23,14 @@ NVRAM/MAC address setup, disk image prep, and more.
 
 ## Disk write cache
 
-Each hard disk has a `write_cache` setting in its `[scsi.N]` table. It is the
+Each hard disk has a `write_cache` setting in its `[[hdd]]` entry. It is the
 WCE bit of the SCSI caching page: whether the disk may tell the guest a write
 is done before the write is on the host's disk. `--no-write-cache` sets it to
 `false` for every disk.
 
 ```toml
-[scsi.1]
+[[hdd]]
+at = "hpc3.0.t1"
 path = "irix.img"
 write_cache = false   # default true
 ```
@@ -157,9 +158,9 @@ overlay that a newer iris left that way with a newer iris first.
 
 Enable in `iris.toml`:
 ```toml
-[scsi.1]
+[[hdd]]
+at = "hpc3.0.t1"
 path = "scsi1.raw"
-cdrom = false
 overlay = true
 ```
 
@@ -308,9 +309,9 @@ SGI Volume Header on first run, and exposes it inside IRIX as
 
 Enable in `iris.toml`:
 ```toml
-[scsi.2]
+[[hdd]]
+at = "hpc3.0.t2"
 path    = "scratch.raw"
-cdrom   = false
 overlay = false
 scratch = true
 size_mb = 64

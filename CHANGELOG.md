@@ -13,6 +13,35 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### Devices and locations
+
+- Disks, CD-ROMs, DaynaPorts, the Ultra64 board, the test device and
+  virtio-serial are `[[hdd]]`, `[[cdrom]]`, `[[daynaport]]`, `[[ultra64]]`,
+  `[[test_device]]` and `[[virtio_serial]]` entries, each at an `at` location
+  (`hpc3.0.t1`, `pci0.2.t4`, `xio15.pci0.0.t1`, `gio1`): see
+  [docs/devices.md](docs/devices.md). `iris --list-slots` and the monitor's
+  `slots` list the places a machine has and what each takes. Every device type
+  also has a `--<device> AT[,key=value]...` flag; `--scsi1`, `--cdrom4` and
+  the other disk flags keep their meaning and name a target on the first
+  controller.
+- Old configs load: `[scsi.N]`, `[ultra64]`, `test_device`, `test_device_dump`
+  and `[virtio_serial]` are rewritten into the new entries once the machine is
+  known, with one notice for each, and a file that mixes the two forms for its
+  disks is refused. A clash is an error naming the place (`gio0: taken by
+  ultra64`), not a panic. An unknown top-level key is still refused, now by
+  iris's own check rather than serde's.
+- Snapshots name disks, overlays and attached devices by location and are
+  schema 6. A snapshot from an older iris is refused, naming both versions;
+  boot it with the iris that made it. Overlay files are now
+  `<location>.overlay` in one flat directory with one `cow.toml`, and a `--ci`
+  run's overlay is `iris-ci-<run>-<location>.overlay`.
+- A DaynaPort, or a target past the machine's last id, is refused by the place
+  it names. `--no-write-cache` also reaches the new `[[hdd]]` entries. The
+  `iris-ci` commands `cdrom-load`, `cdrom-eject` and `chd-sync` take `at` (a
+  location) as well as `id`; `id` still means the target on the first
+  controller for the CD-ROM commands and on every controller for `chd-sync`,
+  and the CD-ROM replies carry `id` beside the new `at`.
+
 ### Machine profiles
 
 - An Indy or `indigo2_ip22` no longer accepts an R10000, and `indigo2_ip28`
