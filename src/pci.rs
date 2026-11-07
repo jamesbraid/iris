@@ -9,9 +9,13 @@
 
 mod config;
 mod function;
+mod host;
+mod intx;
 
 pub use config::{
     PCI_COMMAND_IO, PCI_COMMAND_MEMORY, PCI_INTA, Bar, BarAt, BarRun, BarRunSink, PciBar, PciConfig,
     PciLanes, Space, bar_runs,
 };
 pub use function::{DevFn, PciDma, PciDmaStatus, PciFunction, PciFunctionState};
+pub use host::PciHost;
+pub use intx::{BoardIrq, IntxRouting};
