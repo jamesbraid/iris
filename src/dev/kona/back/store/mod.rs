@@ -31,6 +31,8 @@
 //! The elements are `AtomicU32` and accessed relaxed: a racing read and write
 //! is then defined, and costs a plain load or store.
 
+pub mod layout;
+
 use std::alloc::{alloc_zeroed, dealloc, Layout as MemLayout};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering::{Acquire, Relaxed, Release}};
