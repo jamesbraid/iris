@@ -55,6 +55,9 @@ pub enum LogModule {
     /// The Octane's VPro (Odyssey) graphics board: guest accesses the
     /// model does not support.
     Odyssey = 28,
+    /// PCI configuration cycles on every bus: who was addressed, what was
+    /// read or written, and whether anything answered.
+    Pci = 29,
 }
 
 // Mask bits shared by L1i / L1d / L2c
@@ -63,7 +66,7 @@ pub const CACHE_LOG_MISS: u32 = 0x2;  // log misses and fills
 pub const CACHE_LOG_OP:   u32 = 0x4;  // log CACHE instruction ops
 
 impl LogModule {
-    pub const COUNT: usize = 29;
+    pub const COUNT: usize = 30;
 
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
@@ -96,6 +99,7 @@ impl LogModule {
             "gr2"    => Some(Self::Gr2),
             "rad1"   => Some(Self::Rad1),
             "odyssey" => Some(Self::Odyssey),
+            "pci"    => Some(Self::Pci),
             _        => None,
         }
     }
@@ -131,6 +135,7 @@ impl LogModule {
             Self::Gr2    => "gr2",
             Self::Rad1   => "rad1",
             Self::Odyssey => "odyssey",
+            Self::Pci    => "pci",
         }
     }
 
@@ -141,7 +146,7 @@ impl LogModule {
             Self::Vino, Self::Dcb, Self::Vc2, Self::Cmap, Self::Xmap,
             Self::Bt445, Self::Scc, Self::Ps2, Self::Rtc, Self::Eeprom,
             Self::L1i, Self::L1d, Self::L2c, Self::Ultra, Self::Scsi1,
-            Self::Nveeprom, Self::Gr2, Self::Rad1, Self::Odyssey,
+            Self::Nveeprom, Self::Gr2, Self::Rad1, Self::Odyssey, Self::Pci,
         ]
     }
 
@@ -283,6 +288,7 @@ impl DevLog {
                 ModuleLog::new(), // Gr2
                 ModuleLog::new(), // Rad1
                 ModuleLog::new(), // Odyssey
+                ModuleLog::new(), // Pci
             ],
         }
     }
@@ -470,7 +476,7 @@ impl Device for DevLog {
         vec![(
             "log".to_string(),
             "[DEV] log <module|all> <on|off>  |  log <module> mask <cat|hex>  |  log <module> file <path|off>  |  log status\n\
-             \x20             modules: net hpc3 seeq hal2 mc rex3 mips ioc scsi pdma vino dcb vc2 cmap xmap bt445 scc ps2 rtc eeprom l1i l1d l2c\n\
+             \x20             modules: net hpc3 seeq hal2 mc rex3 mips ioc scsi pdma vino dcb vc2 cmap xmap bt445 scc ps2 rtc eeprom l1i l1d l2c pci\n\
              \x20             pdma mask categories: hal enet scsi on/all off/none <hex>\n\
              \x20             mips mask categories: insn tlb mem fpu cp0 on/all off/none <hex>\n\
              \x20             l1i/l1d/l2c mask categories: hit miss op on/all off/none <hex>\n\
