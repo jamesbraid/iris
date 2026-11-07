@@ -1,4 +1,6 @@
-//! The Octane's onboard Bridge: the XIO-to-PCI host bridge at widget 0xf.
+//! The Octane's onboard Bridge: the XIO-to-PCI host bridge at widget 0xf. The
+//! same chip sits on the PCI option boards ([`super::xio_pci`]), each on a
+//! port of its own.
 //!
 //! One side is an ordinary XIO widget whose 16 MB small window holds the
 //! common widget registers, the translation table, PCI configuration space,
@@ -52,7 +54,7 @@
 //!
 //! Ported from hw/pci-host/sgi-bridge.c in jamesbraid/qemu-sgi-origami.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 
 use parking_lot::{Mutex, RwLock};
@@ -479,6 +481,8 @@ pub struct Bridge {
     microlan: Mutex<Option<w1::Bus>>,
     /// Whether the Crossbow has a live link to a widget; default only HEART.
     link_alive: RwLock<Box<dyn Fn(u8) -> bool + Send + Sync>>,
+    /// The Crossbow port this Bridge is on: 0xf for the onboard one.
+    widget: AtomicU8,
 }
 
 /// A function's way to memory, tagged with its slot: the swap bits that
@@ -558,6 +562,7 @@ impl Bridge {
             microlan: Mutex::new(None),
             bar_devices: Default::default(),
             link_alive: RwLock::new(Box::new(|w| w == WIDGET_HEART)),
+            widget: AtomicU8::new(WIDGET_BRIDGE),
         });
         this.bus.set_host_windows(&|| this.windows());
         this
@@ -696,6 +701,14 @@ impl Bridge {
     /// Bridge's request timer reports. The default is HEART alone.
     pub fn set_link_alive(&self, alive: Box<dyn Fn(u8) -> bool + Send + Sync>) {
         *self.link_alive.write() = alive;
+    }
+
+    /// The Crossbow port this Bridge is on, when it is not the onboard one
+    /// at 0xf: a Bridge on an option board's own port. A DMA request that
+    /// names this port is dropped by the Crossbow, as one naming the
+    /// onboard Bridge's port is.
+    pub fn set_widget(&self, widget: u8) {
+        self.widget.store(widget, Ordering::Release);
     }
 
     /// Install the one-wire net behind the NIC register: the board's
@@ -1323,7 +1336,7 @@ impl Bridge {
                 Some((_, _, w)) if w != WIDGET_HEART => {
                     // Approximation: QEMU routes peer DMA to a fitted widget;
                     // no supported Octane guest is known to need it.
-                    dropped = w == WIDGET_BRIDGE || !(self.link_alive.read())(w);
+                    dropped = w == self.widget.load(Ordering::Acquire) || !(self.link_alive.read())(w);
                     false
                 }
                 Some((xio, p, _)) => match &mut buf {
