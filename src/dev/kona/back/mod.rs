@@ -33,6 +33,7 @@ use super::job::{BackPort, Backend, Grammar, Job, Reply};
 use raster::FillRule;
 use store::layout::{BufferConfig, Layout, Refusal};
 use token::textport::Textport;
+use token::x::XState;
 use store::PixelStore;
 use std::io::{self, Write};
 
@@ -148,6 +149,7 @@ pub struct KonaBackend {
     handle: Option<DisplayHandle>,
     store: PixelStore,
     textport: Textport,
+    x: XState,
     /// Buffer-configuration commands that got a layout, and those refused by
     /// reason (indexed by `Refusal`).
     layouts: u64,
@@ -168,6 +170,7 @@ impl KonaBackend {
         KonaBackend {
             store: PixelStore::new(cfg.managed.0, cfg.managed.1),
             textport: Textport::default(),
+            x: XState::default(),
             cfg,
             counts: [0; Kind::ALL.len()],
             resets: 0,
@@ -214,6 +217,20 @@ impl KonaBackend {
         writeln!(w, "display handle    {}", if self.handle.is_some() { "attached" } else { "detached" })?;
         writeln!(w, "pixel store       {} word arrays of {} x {}", self.store.allocated().len(), self.store.width(), self.store.height())?;
         writeln!(w, "textport          colour {} raster {:?}, {} drawn, {} unmodelled", self.textport.colour(), self.textport.raster(), self.textport.drawn, self.textport.unmodelled)?;
+        let gc = match self.x.gc() {
+            Ok(g) => format!("{:?} fg {:#x} bg {:#x} mask {:#x} gx {}", g.target, g.foreground, g.background, g.mask, g.gx),
+            Err(why) => format!("not decoded ({why:?})"),
+        };
+        writeln!(w, "X gc              {gc}")?;
+        writeln!(
+            w,
+            "X state           origin {:?}, {} clip rects ({} refused), scissor {:?}, {} runs dropped",
+            self.x.origin(),
+            self.x.clip_rects().len(),
+            self.x.clips_refused,
+            self.x.scissor(),
+            self.x.runs_dropped
+        )?;
         writeln!(w, "fill rule         {:?}", self.cfg.fill_rule)?;
         writeln!(w, "layouts           {} made", self.layouts)?;
         if self.malformed != 0 {
@@ -262,6 +279,9 @@ impl Backend for KonaBackend {
             Job::Command { grammar: Grammar::Textport, selector, args, .. } => {
                 self.textport.command(&self.store, self.cfg.fill_rule, selector, args);
             }
+            Job::Command { grammar: Grammar::Kernel, selector, args, .. } => {
+                self.x.command(selector, args);
+            }
             Job::Bitmap { header, payload } => self.textport.bitmap(&self.store, header, payload),
             _ => {}
         }
@@ -276,6 +296,7 @@ impl Backend for KonaBackend {
         self.resets += 1;
         self.store.reset();
         self.textport.reset();
+        self.x.reset();
         self.last_layout = None;
     }
 
@@ -490,6 +511,27 @@ mod tests {
         b.reset();
         assert_ne!(run(&mut b, &["hash"]).1, drawn);
         assert_eq!(b.store.read(3, 3, 1), 0);
+    }
+
+    /// X state commands load the context, position, clip and scissor; the
+    /// monitor shows what was understood.
+    #[test]
+    fn x_state_commands_are_taken_and_shown() {
+        let mut b = backend();
+        let gc = [0x5a000, 0x1ffe, 0xa5000, 0x1ffe, 0xf00fff, 0, 0x180c, 0x40001, 1, 6, 5, 1, 1];
+        command(&mut b, Grammar::Kernel, 0x129, &gc);
+        command(&mut b, Grammar::Kernel, 0x12a, &[240, 295, 100, 50]);
+        command(&mut b, Grammar::Kernel, 0x12b, &[1, 10, 20, 110, 220]);
+        command(&mut b, Grammar::Kernel, 0x12d, &[10, 20, 100, 200]);
+        let text = run(&mut b, &["status"]).1;
+        assert!(text.contains("MainIndex16 fg 0x5a00 bg 0xa500 mask 0xffff gx 3"), "{text}");
+        assert!(text.contains("origin (240, 295), 1 clip rects (0 refused), scissor Some([10, 20, 100, 200])"), "{text}");
+        // The same selector numbers in another grammar are not X state.
+        command(&mut b, Grammar::Gl, 0x129, &[0; 13]);
+        command(&mut b, Grammar::Kernel, 0x1f1, &[0, 0, 0]);
+        assert!(run(&mut b, &["status"]).1.contains("MainIndex16"));
+        b.reset();
+        assert!(run(&mut b, &["status"]).1.contains("not decoded"));
     }
 
     #[test]

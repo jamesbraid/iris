@@ -45,6 +45,7 @@ hashes are given where a change is easiest to understand by reading the commit.
   points, bitmap blits) into the pixel store, boxes by a fill rule that is a
   parameter (`FillRule`). Replaying the PROM recording to its end draws the
   graphics menu; `kona hash` shows the store's hash.
+- The X server's graphics context, position, clip list and scissor are decoded and held by the KONA back end (`kona status` shows what was understood); fills that use them follow.
 - A recorded command stream (the `KONAREC` file QEMU's KONA model writes) can be
   replayed into the front end: stores and loads in order, the board's DMA reads
   served from the recording and its writes compared. The replay is exact only up
