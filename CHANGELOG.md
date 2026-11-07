@@ -13,6 +13,16 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### PCI
+
+- The O2's MACE and the Octane's Bridge share one PCI layer (`src/pci/`,
+  `src/pci_host.rs`, [docs/pci.md](docs/pci.md)): the function table, BAR
+  decode, interrupt combining, byte lanes and RST#. A write that lowers
+  Octane Bridge reset pin `n` (Control bit `24 + n`) resets PCI device `n`
+  and logs a warning. Snapshot schema 6: the PCI bus saves its own state,
+  and older O2 and Octane snapshots are refused. The Octane gains the `pci`
+  monitor command.
+
 ### R10000 family fixes, R12000 and R14000
 
 - The R10000 family has 44-bit virtual and 40-bit physical addresses, FrameMask and a 28-bit EntryLo PFN, picks the TLB refill vector by address space, invalidates overlapped TLB writes (Status.TS), and completes uncached stores nothing answers. Partial LWR keeps the upper word, and the cache diagnostics (Index Store Data, secondary tag mask, Config size) work.

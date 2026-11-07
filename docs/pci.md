@@ -1,0 +1,84 @@
+# PCI
+
+The O2 (through MACE) and the Octane (through the onboard Bridge) have PCI
+buses. Both hosts own a `PciBus` (`src/pci/`), which holds the functions on
+the bus, decodes their BARs, combines their interrupt pins and resets and
+saves them. A host decides only what is its own: how a CPU access becomes
+configuration cycles and byte lanes, where an interrupt output goes, and what
+a function's DMA reaches. The bus has no byte order and knows no card by name.
+
+## Functions
+
+A function implements `PciFunction` (`src/pci.rs`): a configuration header, BAR
+reads and writes, a `PciPort` that holds its interrupt line and DMA once the
+bus attaches it, and `reset` (RST#). The bus resets a function's header; a
+function never resets its own, so the decode table cannot go stale behind a
+BAR that moved. Headers change only through the bus: a configuration write, a
+reset or a snapshot load, and each republishes the decode table.
+
+`PciBus::attach` gives the function its DMA and, if its header names an
+interrupt pin, the line that pin drives. A device number the wiring lacks, an
+address already taken, or a pin the wiring does not route is a bug in the
+machine and panics at attach.
+
+## Byte order
+
+A little-endian function behind a big-endian CPU needs a rule for how bytes
+move, and the two hosts differ. A host chooses a `Lanes` value per window
+(`src/pci_host.rs`): `ByteStream`, or `WordValues { width }` for a bus 4 or 8
+bytes wide. MACE is `WordValues { width: 4 }`: a byte access at CPU offset `a`
+reaches the function at `a ^ 3`, a halfword at `a ^ 2`, a word as given (O2
+Device Driver Programming Guide 007-3443-002, pp. 397-398, Table 15-3). That
+guide does not cover 64-bit accesses; iris sends one as two word cycles, the
+high word first, and the rule is unknown. The Bridge takes its lanes from the
+window's Device(x) register: the programmed swap bit gives `ByteStream`, and
+its 64-bit device bit gives the width. A `PciBar` the physical bus maps over a
+host window holds its `Lanes` by value, so a BAR access is one match and the
+function's own call.
+
+## Interrupts
+
+Every device pin and every board wire is a line routed to a host output, and
+the bus tells the host the OR of what is routed to each output. A pin that
+falls and rises before the host has seen the fall still reaches an edge host
+as a 0 and then a 1: the Bridge sends its interrupt packet to HEART only on a
+rising edge, and the guest may have cleared the bit in between. A rise that
+falls again unseen is coalesced. No lock of ours is held while the host is
+driven, and deliveries to one output are serialised and in order.
+
+## Reset
+
+`PciBus::reset` is RST#: each function's header, then `PciFunction::reset`, in
+(device, function) order. Pin levels are left alone, so a function that is not
+reset keeps its line. A restore is not a reset: it loads over what is there and
+ends by telling the host the levels again.
+
+| Machine | RST# | Grade |
+|---|---|---|
+| O2 | Not yet: the O2's cold reset does not reach its PCI functions; that comes with a later change. MACE has no software PCI reset: the ISA ring-base bit resets the ISA block alone (MACE specification p. 123; PCI registers pp. 162-165). | When it comes, inferred. MACE has a `PCIRst_N` output (MACE specification p. 188) and a `SysReset` input (p. 194), and CRIME drives system and cold reset (CRIME specification, Table 8-2); that CRIME's reset reaches `SysReset` and that `PCIRst_N` follows it on the board is not documented. |
+| Octane | On a cold reset, to every function. And when a write takes Bridge Control bit `24 + n` (`RST_PIN_N(3:0)`) from 1 to 0: RST# to the functions at PCI device `n` alone, with a logged warning. | The bits, their reset value (all high) and that a 1 drives the pin high are established (Bridge ASIC specification rev 4.0, Control register and pin list: four `BUS_RSTN` outputs, "PCI Bus reset signals"), so a 0 asserts RST#. Which device a pin serves is not documented and is inferred from the driver guide's `pciio_reset()` (007-3443-002, p. 550), which resets one card "without affecting other devices on the PCI bus". |
+| Octane | Not on a Bridge core reset or a Crossbow link reset. | Not established. The Bridge specification says the core reset comes from the link reset (rev 4.0, section 7.5) and does not say whether the pins pulse. |
+
+## Wiring
+
+**O2**, MACE bus 0. Outputs are CRIME inputs (MACE specification Tables 85, 87
+and 90; established as software, and the board's INTB-D wiring is not known).
+
+| Device | INTA | INTB | INTC | INTD | Use |
+|---|---|---|---|---|---|
+| 1 | CRIME 8 | | | | Internal SCSI controller 0 |
+| 2 | CRIME 9 | | | | Internal SCSI controller 1 |
+| 3 | CRIME 10 | CRIME 13 | CRIME 14 | CRIME 15 | The PCI option slot |
+| 4 | CRIME 11 | | | | Not populated on an O2; iris keeps it spare for virtio-serial |
+
+**Octane**, Bridge bus 0. Outputs are the Bridge's eight pins. Pins A and C of
+device `d` reach pin `d`, B and D reach `d ^ 4`: inferred from software, not
+established. `Wire(i)` is pin `i`, shared with the GPIO inputs; the IOC3's
+SuperIO interrupt is `Wire(4)`. Devices 0 and 1 are the ISP1040s, 2 is the
+IOC3, 3 is the RAD1, and 4 is virtio-serial when enabled.
+
+## Monitor
+
+`pci status` lists each function: address, identity, command, assigned BARs
+and where its pin goes (on the Octane too, since both machines share the bus);
+`pci config <slot>` dumps a function's header.
