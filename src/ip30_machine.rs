@@ -484,6 +484,7 @@ impl OctaneMachine {
         monitor.register_device(crate::devlog::init_devlog());
         monitor.register_device(Arc::new(crate::cpu::cpu_monitor::CpuMonitor::new(cpus.clone())));
         devices.register_monitor(&monitor);
+        monitor.register_device(topology.clone());
         monitor.register_device(phys.phys.clone());
         monitor.register_device(Arc::new(Ip30Monitor {
             phys: phys.clone(),
@@ -1535,6 +1536,14 @@ mod placement_tests {
             assert_eq!(disks, want);
             assert!(bound[0].1.bus().has_target(5));
         });
+    }
+
+    #[test]
+    fn octane_listing_marks_the_spare_row_approx() {
+        let lines = filled().lines().join("\n");
+        let spare = lines.lines().find(|l| l.starts_with("xio15.pci0.4")).expect("the spare row");
+        assert!(spare.contains("approx") && spare.contains("virtio_serial"), "{spare}");
+        assert!(lines.contains("xio15.pci0.0 ") && lines.contains("isp1040 (onboard)") && lines.contains("t1-t15"), "{lines}");
     }
 
     /// The Octane's SCSI ids run to 15; the rows stop there.

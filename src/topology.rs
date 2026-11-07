@@ -178,10 +178,81 @@ impl Topology {
         Ok(t)
     }
 
-    /// The controller number of the row above `at`, for the snapshot's
-    /// controller * 16 + id disk numbers.
-    pub fn ctl_of(&self, at: &Location) -> Option<u8> {
-        self.rows.lock().get(&at.parent()?)?.ctl
+    /// The listing: one line per place, `LOCATION LABEL HAS TAKES`, with
+    /// a run of empty targets on one bus as a range (`t2-t7`). `takes` is
+    /// computed from the registered device types, so the listing and the claim
+    /// cannot disagree.
+    pub fn lines(&self) -> Vec<String> {
+        let rows = self.rows.lock();
+        let takes = |r: &Row| -> String {
+            let Some(family) = r.offers else { return "-".into() };
+            if r.taken.is_some() {
+                return "-".into();
+            }
+            let mut names: Vec<&str> = crate::attach::MAKERS
+                .iter()
+                .filter(|m| m.family == family && (!m.needs_network || r.network))
+                .map(|m| m.name)
+                .collect();
+            names.sort_unstable();
+            names.dedup();
+            if names.is_empty() { "-".into() } else { names.join(" ") }
+        };
+        let has = |r: &Row| match (&r.taken, r.onboard) {
+            (Some(t), _) => t.clone(),
+            (None, Some(o)) => format!("{o} (onboard)"),
+            (None, None) => "-".into(),
+        };
+        let label = |r: &Row| match (r.label, r.approx) {
+            ("", false) => "-".to_string(),
+            ("", true) => "approx".to_string(),
+            (l, false) => l.to_string(),
+            (l, true) => format!("{l} approx"),
+        };
+        let mut out: Vec<[String; 4]> = Vec::new();
+        let mut run: Option<(Location, Location, &Row)> = None;
+        let flush = |out: &mut Vec<[String; 4]>, run: &mut Option<(Location, Location, &Row)>| {
+            if let Some((first, last, r)) = run.take() {
+                let at = if first == last {
+                    first.to_string()
+                } else {
+                    format!("{first}-{}", last.last().map_or_else(String::new, |h| h.to_string()))
+                };
+                out.push([at, label(r), has(r), takes(r)]);
+            }
+        };
+        let empty = |r: &Row| r.offers.is_some() && r.taken.is_none() && r.onboard.is_none();
+        for (at, r) in rows.iter().filter(|(l, _)| l.depth() > 0) {
+            if empty(r) {
+                if let Some((first, last, prev)) = &mut run {
+                    // The same kind of empty target, next in number on one bus.
+                    let next = last.parent() == at.parent()
+                        && matches!((last.last(), at.last()), (Some(a), Some(b)) if a.same_tag(b) && b.number() == a.number() + 1)
+                        && prev.offers == r.offers
+                        && prev.network == r.network
+                        && prev.label == r.label;
+                    if next && at.target().is_some() {
+                        *last = at.clone();
+                        let _ = first;
+                        continue;
+                    }
+                }
+                flush(&mut out, &mut run);
+                run = Some((at.clone(), at.clone(), r));
+            } else {
+                flush(&mut out, &mut run);
+                out.push([at.to_string(), label(r), has(r), takes(r)]);
+            }
+        }
+        flush(&mut out, &mut run);
+        let head = ["LOCATION", "LABEL", "HAS", "TAKES"].map(String::from);
+        let mut all = vec![head];
+        all.extend(out);
+        let width = |c: usize| all.iter().map(|r| r[c].len()).max().unwrap_or(0);
+        let w = [width(0), width(1), width(2)];
+        all.iter()
+            .map(|r| format!("{:<w0$}  {:<w1$}  {:<w2$}  {}", r[0], r[1], r[2], r[3], w0 = w[0], w1 = w[1], w2 = w[2]).trim_end().to_string())
+            .collect()
     }
 
     /// Add target rows `t<id>` below `at`, each offering SCSI.
@@ -296,6 +367,23 @@ impl Topology {
             }
         }
         Ok(out)
+    }
+}
+
+/// The monitor's `slots` command: the live map.
+impl crate::traits::Device for Topology {
+    fn register_commands(&self) -> Vec<(String, String)> {
+        vec![("slots".into(), "List every place a device can go and what is in it".into())]
+    }
+
+    fn execute_command(&self, cmd: &str, _args: &[&str], mut writer: Box<dyn std::io::Write + Send>) -> Result<(), String> {
+        if cmd != "slots" {
+            return Err(format!("Unknown command: {cmd}"));
+        }
+        for line in self.lines() {
+            writeln!(writer, "{line}").map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 }
 
@@ -427,5 +515,41 @@ mod tests {
         assert!(t.claim(&loc("hpc3.0.t0"), "hdd", Family::Scsi, false, "").is_err());
         assert_eq!(t.controller(0), Some(loc("hpc3.0")));
         assert_eq!(t.controller(1), None);
+    }
+
+    /// The listing is columns, with a range for a run of empty targets, the
+    /// taken target showing its device and taking nothing, and the approximate
+    /// label marked.
+    #[test]
+    fn the_listing_has_ranges_columns_and_markers() {
+        let t = Topology::new();
+        t.add(Location::root(), Row::fixed("")).unwrap();
+        t.add(loc("pci0.1"), Row::fixed("SCSI internal").onboard("aic7880")).unwrap();
+        t.scsi(&loc("pci0.1"), 1..=7, false);
+        t.add(loc("pci0.4"), Row::offering("iris spare", Family::Pci).approx()).unwrap();
+        t.claim(&loc("pci0.1.t1"), "hdd", Family::Scsi, false, "o2.img").unwrap();
+        t.claim(&loc("pci0.1.t4"), "cdrom", Family::Scsi, false, "a.iso").unwrap();
+        let lines = t.lines();
+        let row = |at: &str| lines.iter().find(|l| l.starts_with(at)).unwrap_or_else(|| panic!("{at} in\n{}", lines.join("\n"))).split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(lines[0].starts_with("LOCATION") && lines[0].ends_with("TAKES"), "{}", lines[0]);
+        assert_eq!(row("pci0.1 "), "pci0.1 SCSI internal aic7880 (onboard) -");
+        assert_eq!(row("pci0.1.t1 "), "pci0.1.t1 - hdd o2.img -");
+        assert!(row("pci0.1.t2-t3").starts_with("pci0.1.t2-t3 - - "), "{}", row("pci0.1.t2-t3"));
+        assert_eq!(row("pci0.1.t4 "), "pci0.1.t4 - cdrom a.iso -");
+        assert!(row("pci0.1.t5-t7").starts_with("pci0.1.t5-t7"));
+        assert!(row("pci0.4").starts_with("pci0.4 iris spare approx - "), "{}", row("pci0.4"));
+    }
+
+    /// `takes` follows the registered device types and the row's network flag.
+    #[test]
+    fn takes_lists_the_device_types_the_row_accepts() {
+        let t = Topology::new();
+        t.add(loc("hpc3.0"), Row::fixed("")).unwrap();
+        t.scsi(&loc("hpc3.0"), 1..=1, true);
+        t.add(loc("pci0"), Row::fixed("")).unwrap();
+        t.scsi(&loc("pci0"), 1..=1, false);
+        let takes = |at: &str| t.lines().into_iter().find(|l| l.starts_with(at)).unwrap();
+        assert!(takes("hpc3.0.t1").contains("cdrom daynaport hdd"), "{}", takes("hpc3.0.t1"));
+        assert!(takes("pci0.t1").contains("cdrom hdd") && !takes("pci0.t1").contains("daynaport"), "{}", takes("pci0.t1"));
     }
 }
