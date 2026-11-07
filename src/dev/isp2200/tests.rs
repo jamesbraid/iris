@@ -3,6 +3,21 @@
 //!
 //! Ported from tests/qtest/qlogic-isp2200-test.c in
 //! jamesbraid/qemu-sgi-origami.
+//!
+//! The qtests not ported, and why:
+//!
+//! * `dbrick_loop`, `dbrick_full_loop`: iris has no D-brick enclosure to fit
+//!   disks into bays.
+//! * `loop_plug`, `unplug_disconnect`: a target attached or removed after
+//!   start is not announced to the loop (see the module comment).
+//! * `cdrom_block_length`: it pins the SGI CD-ROM block-length quirk of the
+//!   reference model's `scsi-cd` device, which iris's target does not carry.
+//! * The migration test: iris saves and loads through `Saveable`, covered by
+//!   `save_and_load_round_trip`, and does not migrate between builds.
+//! * `load_ram_high`, `init_firmware_high`: they need host memory above
+//!   4 GiB behind the bridge. `high_address_words_count` pins the refusal
+//!   when mailbox 6 or 7 names a high address; the transfer that succeeds
+//!   there is not tested.
 
 use super::*;
 use crate::dev::isp1040::tests::FakeMem;
@@ -34,6 +49,11 @@ pub(super) struct Rig {
     rslen: Cell<u16>,
     rq_next: Cell<u16>,
     rs_next: Cell<u16>,
+    /// The adapter's clock, which only the test moves.
+    now: Cell<i64>,
+    /// The ring thread is blocked on a device the test holds: writes do not
+    /// wait for it to settle.
+    busy: Cell<bool>,
 }
 
 fn mb(n: usize) -> u32 {
@@ -52,7 +72,17 @@ impl Rig {
         isp.state().connect_dma(mem.clone());
         // I/O and memory decode, and bus mastering.
         isp.state().config().write(1, 0x7);
-        Rig { isp, mem, rqlen: Cell::new(0), rslen: Cell::new(0), rq_next: Cell::new(0), rs_next: Cell::new(0) }
+        isp.set_test_clock(0);
+        Rig {
+            isp,
+            mem,
+            rqlen: Cell::new(0),
+            rslen: Cell::new(0),
+            rq_next: Cell::new(0),
+            rs_next: Cell::new(0),
+            now: Cell::new(0),
+            busy: Cell::new(false),
+        }
     }
 
     pub fn rd(&self, off: u32) -> u16 {
@@ -63,7 +93,13 @@ impl Rig {
     /// write waits for the ring to settle.
     pub fn wr(&self, off: u32, val: u16) {
         self.isp.write(off, u32::from(val), 2);
-        self.isp.wait_idle();
+        self.settle();
+    }
+
+    pub fn settle(&self) {
+        if !self.busy.get() {
+            self.isp.wait_idle();
+        }
     }
 
     /// Mailboxes in ascending order, then the doorbell.
@@ -1711,4 +1747,7 @@ fn window_openbsd_interleave_response() {
     assert_eq!(g32(&r.response(1), 4), 0xa2);
 }
 
+mod irix_tests;
+mod loop_tests;
 mod nvram_tests;
+mod scsi_tests;

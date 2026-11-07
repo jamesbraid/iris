@@ -232,6 +232,7 @@ pub const SCSI_STATUS_SENSE_VALID: u16 = 0x0200;
 pub const IOCB_COMPLETE: u16 = 0x0000;
 pub const IOCB_INCOMPLETE: u16 = 0x0001;
 pub const IOCB_RESET: u16 = 0x0004;
+pub const IOCB_ABORTED: u16 = 0x0005;
 pub const IOCB_DATA_UNDERRUN: u16 = 0x0015;
 
 pub const STATE_GOT_BUS: u16 = 0x0100;
