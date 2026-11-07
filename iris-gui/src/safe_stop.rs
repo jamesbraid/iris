@@ -52,14 +52,14 @@ pub fn evaluate(status: &Status, cfg: &MachineConfig) -> UnsafeReasons {
     }
 
     let mut r = UnsafeReasons::default();
-    for (id, dev) in &cfg.scsi {
-        let persists_to_base = !dev.cdrom
+    for dev in crate::placement_ui::media(cfg) {
+        let persists_to_base = !dev.is_cdrom()
             && !dev.overlay
             && !dev.scratch
             && !dev.is_daynaport() // no image behind a network adapter
             && !dev.path.ends_with(".chd");
         if persists_to_base {
-            r.writable_disks.push(*id);
+            r.writable_disks.push(dev.id());
         }
     }
     r.writable_disks.sort();
