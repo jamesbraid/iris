@@ -1013,6 +1013,11 @@ impl MipsTlb {
     /// model's C table.
     #[inline]
     fn pfn_bases(&self, lo: &[u64; 2], pfn_mask: u64) -> [u64; 2] {
+        // No attribute bits set, the usual case: nothing to carry, and the C
+        // table need not be read.
+        if (lo[0] | lo[1]) >> 62 == 0 {
+            return [(lo[0] << 6) & pfn_mask, (lo[1] << 6) & pfn_mask];
+        }
         let uncached = |lo: u64| self.c_attr[((lo >> 3) & 7) as usize] == CacheAttr::Uncached;
         [pfn_base(lo[0], pfn_mask, uncached(lo[0])), pfn_base(lo[1], pfn_mask, uncached(lo[1]))]
     }
