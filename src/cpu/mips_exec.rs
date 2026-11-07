@@ -3344,15 +3344,24 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         // translation itself, so the fetch paths of the other machines stay
         // as they are.
         if self.uncached_fetch_alias.is_some() {
-            self.translate_fn = match (is_64bit, privilege) {
-                (false, PrivilegeMode::Kernel)     => translate_fetch_aliased::<T, C, 0>,
-                (false, PrivilegeMode::Supervisor) => translate_fetch_aliased::<T, C, 1>,
-                (false, PrivilegeMode::User)       => translate_fetch_aliased::<T, C, 2>,
-                (true,  PrivilegeMode::Kernel)     => translate_fetch_aliased::<T, C, 3>,
-                (true,  PrivilegeMode::Supervisor) => translate_fetch_aliased::<T, C, 4>,
-                (true,  PrivilegeMode::User)       => translate_fetch_aliased::<T, C, 5>,
-            };
+            self.wrap_translate_fn(is_64bit, privilege);
         }
+    }
+
+    /// `update_translate_fn`'s choice, wrapped for `uncached_fetch_alias`.
+    /// Out of line so the update itself stays as small as it was.
+    #[cold]
+    #[inline(never)]
+    fn wrap_translate_fn(&mut self, is_64bit: bool, privilege: crate::cpu::mips_core::PrivilegeMode) {
+        use crate::cpu::mips_core::PrivilegeMode;
+        self.translate_fn = match (is_64bit, privilege) {
+            (false, PrivilegeMode::Kernel)     => translate_fetch_aliased::<T, C, 0>,
+            (false, PrivilegeMode::Supervisor) => translate_fetch_aliased::<T, C, 1>,
+            (false, PrivilegeMode::User)       => translate_fetch_aliased::<T, C, 2>,
+            (true,  PrivilegeMode::Kernel)     => translate_fetch_aliased::<T, C, 3>,
+            (true,  PrivilegeMode::Supervisor) => translate_fetch_aliased::<T, C, 4>,
+            (true,  PrivilegeMode::User)       => translate_fetch_aliased::<T, C, 5>,
+        };
     }
 
     /// Present an uncached instruction fetch of the window `base..base+size`
