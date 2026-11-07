@@ -865,6 +865,8 @@ pub struct MipsExecutor<T: Tlb, C: CpuModel> {
     /// Hot-path translation function pointer, updated whenever CP0 Status changes.
     /// Always the non-debug variant; selects the correct 32/64-bit × privilege specialisation.
     pub translate_fn: fn(&mut Self, u64, AccessType) -> TranslateResult,
+    /// The translations `update_translate_fn` chooses from.
+    translate_table: [TranslateFn<T, C>; 6],
 
     /// FR-mode-aware FPR accessors. Switched in update_fpr_mode() whenever STATUS_FR changes.
     /// FR=0: doubles/longs use full even slot; odd single/word regs are upper 32 bits of even slot.
@@ -1180,26 +1182,30 @@ fn translate_64_user<T: Tlb, C: CpuModel>(e: &mut MipsExecutor<T,C>, va: u64, at
     e.translate_64bit_impl::<false, {crate::cpu::mips_core::PRIV_USER}>(va, at)
 }
 
+type TranslateFn<T, C> = fn(&mut MipsExecutor<T, C>, u64, AccessType) -> TranslateResult;
+
 /// A window whose uncached instruction fetch the board decodes apart, and the
-/// translation it wraps (`MipsExecutor::set_uncached_fetch_alias`).
+/// translations it wraps (`MipsExecutor::set_uncached_fetch_alias`).
 struct FetchAlias<T: Tlb, C: CpuModel> {
     base: u64,
     size: u64,
     target: u64,
-    inner: fn(&mut MipsExecutor<T, C>, u64, AccessType) -> TranslateResult,
+    inner: [TranslateFn<T, C>; 6],
 }
 
-/// The translation wrappers above for a board that decodes an uncached
-/// instruction fetch apart. Only a fetch that comes out uncached is changed.
-fn translate_fetch_aliased<T: Tlb, C: CpuModel>(e: &mut MipsExecutor<T,C>, va: u64, at: AccessType) -> TranslateResult {
-    let inner = e.uncached_fetch_alias.as_ref().map_or(translate_32_kernel::<T, C> as fn(&mut MipsExecutor<T, C>, u64, AccessType) -> TranslateResult, |a| a.inner);
+/// The translation `MODE` (an index into `translate_table`) for a board that
+/// decodes an uncached instruction fetch apart. Only a fetch that comes out
+/// uncached is changed.
+fn translate_fetch_aliased<T: Tlb, C: CpuModel, const MODE: usize>(e: &mut MipsExecutor<T,C>, va: u64, at: AccessType) -> TranslateResult {
+    let (inner, base, size, target) = {
+        let a = e.uncached_fetch_alias.as_ref().expect("the wrappers are installed with the alias");
+        (a.inner[MODE], a.base, a.size, a.target)
+    };
     let mut result = inner(e, va, at);
     if at == AccessType::Fetch && !result.is_exception() && !result.is_cached() {
-        if let Some(alias) = e.uncached_fetch_alias.as_ref() {
-            let offset = result.phys.wrapping_sub(alias.base);
-            if offset < alias.size {
-                result.phys = alias.target + offset;
-            }
+        let offset = result.phys.wrapping_sub(base);
+        if offset < size {
+            result.phys = target + offset;
         }
     }
     result
@@ -2462,6 +2468,10 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             uncached_fetch_count: Arc::new(AtomicU64::new(0)),
             // Placeholder — overwritten immediately by update_translate_fn below.
             translate_fn: translate_32_kernel::<T, C>,
+            translate_table: [
+                translate_32_kernel::<T, C>, translate_32_supervisor::<T, C>, translate_32_user::<T, C>,
+                translate_64_kernel::<T, C>, translate_64_supervisor::<T, C>, translate_64_user::<T, C>,
+            ],
             // Placeholder — overwritten immediately by update_fpr_mode below.
             fpr_read_d:  crate::cpu::mips_core::read_fpr_d_fr0,
             fpr_write_d: crate::cpu::mips_core::write_fpr_d_fr0,
@@ -3333,44 +3343,24 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         let is_64bit = self.core.is_64bit_mode();
         self.core.lwr_upper_below = if C::PARTIAL_LWR_KEEPS_UPPER && is_64bit { 3 } else { 0 };
         let privilege = self.core.get_privilege_mode();
-        let translate_fn = match (is_64bit, privilege) {
-            (false, PrivilegeMode::Kernel)     => translate_32_kernel::<T, C>,
-            (false, PrivilegeMode::Supervisor) => translate_32_supervisor::<T, C>,
-            (false, PrivilegeMode::User)       => translate_32_user::<T, C>,
-            (true,  PrivilegeMode::Kernel)     => translate_64_kernel::<T, C>,
-            (true,  PrivilegeMode::Supervisor) => translate_64_supervisor::<T, C>,
-            (true,  PrivilegeMode::User)       => translate_64_user::<T, C>,
-        };
-        self.translate_fn = translate_fn;
-        // A board that decodes an uncached instruction fetch apart wraps the
-        // translation itself, so the fetch paths of the other machines stay
-        // as they are.
-        if self.uncached_fetch_alias.is_some() {
-            self.wrap_translate_fn(translate_fn);
-        }
-    }
-
-    /// `update_translate_fn`'s choice, wrapped for `uncached_fetch_alias`.
-    /// Out of line so the update itself stays as small as it was; the wrapper
-    /// reaches the choice through a pointer so that the translation bodies keep
-    /// the one caller they inline into.
-    #[cold]
-    #[inline(never)]
-    fn wrap_translate_fn(&mut self, inner: fn(&mut Self, u64, AccessType) -> TranslateResult) {
-        if let Some(alias) = self.uncached_fetch_alias.as_mut() {
-            alias.inner = inner;
-        }
-        self.translate_fn = translate_fetch_aliased::<T, C>;
+        // Indexed by addressing mode, then privilege (`PrivilegeMode`'s values).
+        self.translate_fn = self.translate_table[is_64bit as usize * 3 + privilege as usize];
     }
 
     /// Present an uncached instruction fetch of the window `base..base+size`
     /// to the bus at `target` plus the offset (see [`Self::uncached_fetch_alias`]).
     pub fn set_uncached_fetch_alias(&mut self, base: u64, size: u64, target: u64) {
-        // Never called: `update_translate_fn` replaces it below.
-        fn placeholder<T: Tlb, C: CpuModel>(_: &mut MipsExecutor<T, C>, _: u64, _: AccessType) -> TranslateResult {
-            unreachable!("the translation wrapper is installed before it is used")
-        }
-        self.uncached_fetch_alias = Some(Box::new(FetchAlias { base, size, target, inner: placeholder::<T, C> }));
+        // A board that decodes an uncached instruction fetch apart wraps each
+        // translation, so the fetch paths of the other machines stay as they
+        // are. The wrappers reach the translations through pointers, so the
+        // translation bodies keep the one caller they inline into.
+        let inner = self.translate_table;
+        self.uncached_fetch_alias = Some(Box::new(FetchAlias { base, size, target, inner }));
+        self.translate_table = [
+            translate_fetch_aliased::<T, C, 0>, translate_fetch_aliased::<T, C, 1>,
+            translate_fetch_aliased::<T, C, 2>, translate_fetch_aliased::<T, C, 3>,
+            translate_fetch_aliased::<T, C, 4>, translate_fetch_aliased::<T, C, 5>,
+        ];
         self.update_translate_fn();
     }
 
