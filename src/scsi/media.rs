@@ -2,13 +2,15 @@
 //! at a target row. Both are passive: they attach to the controller's bus and
 //! return no handles, and the controller saves their state.
 
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use super::port::ScsiPort;
 use crate::attach::{Ctx, DeviceType, Handles};
-use crate::disks::MediaSpec;
+use crate::config::{parse_mac, parse_nat_subnet, DaynaportParams, MachineConfig, NatSubnet, NetMode};
+use crate::disks::{attach_failed, MediaSpec};
 use crate::location::Location;
 use crate::register_device;
 use crate::topology::Family;
@@ -89,6 +91,103 @@ impl DeviceType for Cdrom {
 }
 register_device!(Cdrom);
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaynaportOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subnet: Option<String>,
+}
+
+impl DaynaportOptions {
+    /// The settings with defaults filled in: a MAC ending in the target id,
+    /// so two targets never collide, and the 192.168.10.0/24 gateway subnet.
+    pub fn params(&self, id: u8) -> Result<DaynaportParams, String> {
+        let mac = match &self.mac {
+            Some(s) => parse_mac(s)?,
+            None => [0x00, 0x80, 0x19, 0x44, 0x50, id],
+        };
+        let subnet = match &self.subnet {
+            Some(cidr) => {
+                let (gateway_ip, client_ip, netmask) = parse_nat_subnet(cidr)?;
+                NatSubnet { gateway_ip, client_ip, netmask }
+            }
+            None => NatSubnet {
+                gateway_ip: Ipv4Addr::new(192, 168, 10, 1),
+                client_ip: Ipv4Addr::new(192, 168, 10, 2),
+                netmask: Ipv4Addr::new(255, 255, 255, 0),
+            },
+        };
+        Ok(DaynaportParams { mac, subnet })
+    }
+
+    /// Values that need the rest of the config: a good MAC and subnet, a
+    /// gateway that is not the machine's own NAT subnet, and no stream mode.
+    pub fn check(&self, cfg: &MachineConfig) -> Result<(), String> {
+        if cfg.network.mode == NetMode::Stream {
+            return Err("a daynaport cannot join a stream segment: [network] stream names the onboard Ethernet's peer".into());
+        }
+        if let Some(mac) = &self.mac {
+            parse_mac(mac).map_err(|e| format!("mac: {e}"))?;
+        }
+        if let Some(cidr) = &self.subnet {
+            parse_nat_subnet(cidr).map_err(|e| format!("subnet \"{cidr}\": {e}"))?;
+        }
+        // Each DaynaPort runs its own NAT gateway. Sharing a subnet with ec0
+        // gives the guest two interfaces on one network and nothing routes
+        // predictably.
+        let dp = self.params(0)?;
+        let main = cfg
+            .nat_subnet
+            .as_deref()
+            .map(|c| parse_nat_subnet(c).map(|(g, c2, n)| NatSubnet { gateway_ip: g, client_ip: c2, netmask: n }))
+            .transpose()?
+            .unwrap_or_default();
+        if dp.subnet.gateway_ip == main.gateway_ip {
+            return Err(format!(
+                "DaynaPort subnet {} collides with the machine's NAT subnet (ec0). Give the DaynaPort its own, \
+                 e.g. subnet = \"192.168.10.0/24\".",
+                dp.subnet.gateway_ip
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A DaynaPort SCSI/Link: an Ethernet adapter on a SCSI target. The
+/// controller builds it, since it needs the machine's network.
+pub struct Daynaport;
+
+impl DeviceType for Daynaport {
+    const NAME: &'static str = "daynaport";
+    const FAMILY: Family = Family::Scsi;
+    const NEEDS_NETWORK: bool = true;
+    type Owner = ScsiPort;
+    type Options = DaynaportOptions;
+
+    fn check(o: &DaynaportOptions, cfg: &MachineConfig) -> Result<(), String> {
+        o.check(cfg)
+    }
+
+    fn new(o: DaynaportOptions, _: &Ctx, owner: &Arc<ScsiPort>, at: &Location) -> Result<Handles, String> {
+        let id = at.target().ok_or_else(|| format!("{at} is not a SCSI target"))?;
+        let params = o.params(id)?;
+        match owner.add_daynaport(id, params) {
+            Ok(()) => println!(
+                "iris: DaynaPort SCSI/Link at {at} \u{2014} MAC {}, gateway {} (guest {}/{})",
+                crate::net::mac_str(&params.mac),
+                params.subnet.gateway_ip,
+                params.subnet.client_ip,
+                params.subnet.netmask
+            ),
+            Err(e) => attach_failed(format!("could not attach DaynaPort to {at}: {e}"), &at.to_string())?,
+        }
+        Ok(vec![])
+    }
+}
+register_device!(Daynaport);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,7 +195,7 @@ mod tests {
     use crate::config::{MachineConfig, Placement};
     use crate::devices::Devices;
     use crate::disks::Disks;
-    use crate::scsi::{ScsiBus, ScsiIdentity};
+    use crate::scsi::{ScsiBus, ScsiIdentities, ScsiIdentity};
     use crate::scsi_monitor::ScsiTargets;
     use crate::topology::{Row, Topology};
 
@@ -115,7 +214,7 @@ mod tests {
         t.add(at("hpc3"), Row::fixed("")).unwrap();
         t.add(at("hpc3.0"), Row::fixed("").ctl(0)).unwrap();
         t.scsi(&at("hpc3.0"), 1..=7, true);
-        let bus = ScsiBus::new(8, crate::scsi::ScsiIdentities { disk: ID, cdrom: ID });
+        let bus = ScsiBus::new(8, ScsiIdentities { disk: ID, cdrom: ID });
         t.bind(&at("hpc3.0"), Arc::new(ScsiPort::new(Arc::new(Ctl(bus))))).unwrap();
         t
     }
@@ -155,5 +254,70 @@ mod tests {
         for name in ["hdd", "cdrom"] {
             assert!(crate::attach::maker_for(name, Family::Scsi).is_some(), "{name}");
         }
+    }
+
+    fn dayna_machine(log: Arc<parking_lot::Mutex<Vec<(u8, DaynaportParams)>>>) -> Topology {
+        let t = Topology::new();
+        let at = |s: &str| s.parse::<Location>().unwrap();
+        t.add(at("hpc3"), Row::fixed("")).unwrap();
+        t.add(at("hpc3.0"), Row::fixed("").ctl(0)).unwrap();
+        t.scsi(&at("hpc3.0"), 1..=7, true);
+        let bus = ScsiBus::new(8, ScsiIdentities { disk: ID, cdrom: ID });
+        let port = ScsiPort::new(Arc::new(Ctl(bus))).with_daynaport(move |id, p| {
+            log.lock().push((id, p));
+            Ok(())
+        });
+        t.bind(&at("hpc3.0"), Arc::new(port)).unwrap();
+        t
+    }
+
+    fn attach_cfg(t: &Topology, cfg: &MachineConfig, opts: &str, probe: bool) -> Result<(), String> {
+        let p = Placement { device: "daynaport".into(), at: "hpc3.0.t3".parse().unwrap(), opts: toml::from_str(opts).unwrap() };
+        let (d, k) = (Devices::new(), Disks::new());
+        attach_device(&p, cfg, (!probe).then_some(&Ctx { devices: &d, disks: &k }), t)
+    }
+
+    #[test]
+    fn daynaport_check_rejects_a_subnet_that_collides_with_the_nat_subnet() {
+        let mut cfg = MachineConfig::default();
+        cfg.nat_subnet = Some("192.168.10.0/24".into());
+        let e = attach_cfg(&machine(), &cfg, "", true).unwrap_err();
+        assert!(e.starts_with("error: hpc3.0.t3: DaynaPort subnet") && e.contains("collides"), "{e}");
+        cfg.nat_subnet = Some("192.168.20.0/24".into());
+        attach_cfg(&machine(), &cfg, "", true).unwrap();
+    }
+
+    #[test]
+    fn daynaport_check_rejects_stream_mode() {
+        let mut cfg = MachineConfig::default();
+        cfg.network.mode = NetMode::Stream;
+        let e = attach_cfg(&machine(), &cfg, "", true).unwrap_err();
+        assert!(e.contains("cannot join a stream segment"), "{e}");
+    }
+
+    #[test]
+    fn bad_mac_and_subnet_are_named() {
+        let cfg = MachineConfig::default();
+        let e = attach_cfg(&machine(), &cfg, "mac = \"zz\"", true).unwrap_err();
+        assert!(e.contains("mac:") && e.contains("zz"), "{e}");
+        let e = attach_cfg(&machine(), &cfg, "subnet = \"nope\"", true).unwrap_err();
+        assert!(e.contains("subnet \"nope\""), "{e}");
+    }
+
+    #[test]
+    fn default_mac_ends_in_the_target_id() {
+        let p = DaynaportOptions::default().params(5).unwrap();
+        assert_eq!(p.mac, [0x00, 0x80, 0x19, 0x44, 0x50, 5]);
+        assert_eq!(p.subnet.gateway_ip, std::net::Ipv4Addr::new(192, 168, 10, 1));
+    }
+
+    #[test]
+    fn new_reaches_the_port_closure_with_the_params() {
+        let log = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let t = dayna_machine(log.clone());
+        attach_cfg(&t, &MachineConfig::default(), "mac = \"00:80:19:12:34:56\"", false).unwrap();
+        let got = log.lock().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].0, got[0].1.mac), (3, [0, 0x80, 0x19, 0x12, 0x34, 0x56]));
     }
 }
