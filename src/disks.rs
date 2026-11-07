@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::location::Location;
+use crate::location::{Hop, Location};
 use crate::scsi::{ScsiBus, ScsiPort};
 use crate::scsi_monitor::ScsiTargets;
 use crate::topology::Topology;
@@ -278,6 +278,46 @@ impl Disks {
         ScsiBus::sync_chd_disks(&buses, only.and_then(Location::target).map(usize::from), progress, cancel)
     }
 
+    /// Every CD-ROM drive: (location, current disc, the configured disc list,
+    /// list position, list length), controllers in location order.
+    pub fn disc_status(&self, t: &Topology) -> Vec<(Location, String, Vec<String>, u64, u64)> {
+        let mut out = Vec::new();
+        for (at, port) in t.buses::<ScsiPort>() {
+            for (id, disc, list, pos, len) in port.changer().disc_status() {
+                out.push((at.join(Hop::t(id as u8)), disc, list, pos, len));
+            }
+        }
+        out
+    }
+
+    /// The changer of the controller the drive at `at` is on, and its id.
+    fn drive(t: &Topology, at: &Location) -> Result<(Arc<dyn DiscChanger>, usize), String> {
+        let id = at.target().ok_or_else(|| format!("{at} is not a SCSI target"))?;
+        let port = at
+            .parent()
+            .and_then(|p| t.handle::<ScsiPort>(&p))
+            .ok_or_else(|| format!("{at}: no SCSI controller there"))?;
+        Ok((port.changer(), id as usize))
+    }
+
+    /// Put the disc at `path` in the drive at `at`; returns the path loaded.
+    pub fn load_disc(&self, t: &Topology, at: &Location, path: String) -> Result<String, String> {
+        let (changer, id) = Self::drive(t, at)?;
+        changer.load_disc(id, path)
+    }
+
+    /// Eject the drive's disc and load the next in its list; returns its path.
+    pub fn eject_disc(&self, t: &Topology, at: &Location) -> Result<String, String> {
+        let (changer, id) = Self::drive(t, at)?;
+        changer.eject_disc(id)
+    }
+
+    /// Eject the drive's disc and leave it empty.
+    pub fn eject_to_empty(&self, t: &Topology, at: &Location) -> Result<(), String> {
+        let (changer, id) = Self::drive(t, at)?;
+        changer.eject_to_empty(id)
+    }
+
     /// The first CD-ROM in location order, with the changer of the controller
     /// it sits on: its drives take disc changes.
     pub fn disc_changer(&self, t: &Topology) -> Option<(Location, Arc<dyn DiscChanger>)> {
@@ -514,5 +554,30 @@ mod tests {
         let empty = MediaSpec { cdrom: true, ..MediaSpec::default() };
         assert_eq!(empty.media(), (String::new(), vec![]));
         assert_eq!(disk("x.img").media(), ("x.img".to_string(), vec![]));
+    }
+
+    /// The status lists each CD-ROM by location, and a disc loads, ejects and
+    /// empties by the same name.
+    #[test]
+    fn disc_status_lists_cdroms_with_their_locations() {
+        let (a, b) = (image("status-a", 2048), image("status-b", 2048));
+        let t = topo(vec![ctl(&[]), ctl(&[])]);
+        let disks = Disks::new();
+        let at = |s: &str| s.parse::<Location>().unwrap();
+        let second = t.handle::<ScsiPort>(&at("hpc3.1")).unwrap();
+        let spec = MediaSpec { cdrom: true, discs: vec![b.clone()], ..disk(&a) };
+        disks.attach_media(&second, &at("hpc3.1.t4"), &spec).unwrap();
+        let status = disks.disc_status(&t);
+        assert_eq!(status.len(), 1);
+        assert_eq!((status[0].0.to_string(), status[0].1.as_str()), ("hpc3.1.t4".to_string(), a.as_str()));
+        assert_eq!(disks.eject_disc(&t, &at("hpc3.1.t4")).unwrap(), b);
+        disks.eject_to_empty(&t, &at("hpc3.1.t4")).unwrap();
+        assert_eq!(disks.disc_status(&t)[0].1, "");
+        assert_eq!(disks.load_disc(&t, &at("hpc3.1.t4"), a.clone()).unwrap(), a);
+        assert!(disks.load_disc(&t, &at("hpc3.0.t4"), a.clone()).is_err(), "no drive there");
+        assert!(disks.load_disc(&t, &at("hpc3.1"), a.clone()).is_err(), "not a target");
+        for f in [a, b] {
+            std::fs::remove_file(f).unwrap();
+        }
     }
 }

@@ -921,23 +921,23 @@ impl Ip22Machine {
         self.hpc3.ioc().scc().drain_console()
     }
 
-    /// csh one-liner to (re)mount `/CDROM` for SCSI unit `id` (EFS s7, else iso9660 vol).
-    pub fn irix_cdrom_remount_command(scsi_id: u8) -> String {
-        format!(
+    /// csh one-liner to (re)mount `/CDROM` for the drive at `at` (EFS s7, else
+    /// iso9660 vol). IRIX numbers the drive by the `hpc3.N` controller it is on
+    /// and its target id.
+    pub fn irix_cdrom_remount_command(at: &Location) -> Option<String> {
+        let (ctl, id) = (at.parent()?.last()?.number(), at.target()?);
+        Some(format!(
             "umount /CDROM >& /dev/null; \
-             mount -t efs -o ro /dev/dsk/dks0d{id}s7 /CDROM || \
-             mount -t iso9660 /dev/rdsk/dks0d{id}vol /CDROM\n",
-            id = scsi_id
-        )
+             mount -t efs -o ro /dev/dsk/dks{ctl}d{id}s7 /CDROM || \
+             mount -t iso9660 /dev/rdsk/dks{ctl}d{id}vol /CDROM\n"
+        ))
     }
 
     /// Best-effort `/CDROM` remount via the IRIX serial console (tty1).
     /// Works when a login shell or xterm on the console is active.
-    pub fn remount_cdrom_guest(&self, scsi_id: u8) {
-        let script = Self::irix_cdrom_remount_command(scsi_id);
-        eprintln!(
-            "IRIX: remount /CDROM for SCSI #{scsi_id} (console shell must be active)"
-        );
+    pub fn remount_cdrom_guest(&self, at: &Location) {
+        let Some(script) = Self::irix_cdrom_remount_command(at) else { return };
+        eprintln!("IRIX: remount /CDROM for {at} (console shell must be active)");
         self.inject_serial_console(script.as_bytes());
     }
 
@@ -1649,7 +1649,7 @@ impl Workstation for Ip22Machine {
         let path = path.unwrap_or_else(|| rtc.nvram_path()).to_string();
         rtc.save_nvram(&path).map(|_| path).map_err(|e| e.to_string())
     }
-    fn remount_cdrom_guest(&self, scsi_id: u8) { Ip22Machine::remount_cdrom_guest(self, scsi_id) }
+    fn remount_cdrom_guest(&self, at: &Location) { Ip22Machine::remount_cdrom_guest(self, at) }
 }
 
 /// A dropped machine gives back its decode table: a process may have only 64,
@@ -2154,6 +2154,21 @@ mod virtio_tests {
         probe(MachineProfile::IndyIp24, "gio0", 0x1F40_0000);
         probe(MachineProfile::Indigo2Ip28, "gio1", 0x1F60_0000);
         probe(MachineProfile::IndyIp24, "exp1", 0x1F60_0000);
+    }
+}
+
+/// The `/CDROM` remount names the drive by its controller and target id.
+#[cfg(test)]
+mod remount_tests {
+    use super::*;
+
+    #[test]
+    fn remount_script_names_the_controller_and_the_target_id() {
+        let command = |at: &str| Ip22Machine::irix_cdrom_remount_command(&at.parse().unwrap());
+        let script = command("hpc3.1.t5").unwrap();
+        assert!(script.contains("dks1d5s7") && script.contains("dks1d5vol"), "{script}");
+        assert!(command("hpc3.0.t4").unwrap().contains("dks0d4s7"));
+        assert!(command("hpc3.0").is_none(), "not a target");
     }
 }
 
