@@ -19,6 +19,7 @@ pub mod ioc3;
 pub mod ioc3_eth;
 pub mod ioc3_port;
 pub mod isp1040;
+pub mod qlogic_ring;
 pub mod mace_id;
 pub mod mace_pci;
 pub mod mace_ps2;
