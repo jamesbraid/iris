@@ -161,7 +161,7 @@ impl Card {
     }
 }
 
-impl crate::pci::PciBusDevice for Card {
+impl crate::pci::PciFunction for Card {
     fn config(&self) -> &crate::pci::PciConfig {
         &self.cfg
     }
