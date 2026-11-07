@@ -54,10 +54,10 @@ pub fn evaluate(status: &Status, cfg: &MachineConfig) -> UnsafeReasons {
     let mut r = UnsafeReasons::default();
     for dev in crate::placement_ui::media(cfg) {
         let persists_to_base = !dev.is_cdrom()
-            && !dev.overlay
-            && !dev.scratch
+            && !dev.overlay()
+            && !dev.scratch()
             && !dev.is_daynaport() // no image behind a network adapter
-            && !dev.path.ends_with(".chd");
+            && !dev.path().ends_with(".chd");
         if persists_to_base {
             r.writable_disks.push(dev.id());
         }
@@ -78,15 +78,15 @@ pub fn reason_lines(r: &UnsafeReasons) -> Vec<String> {
 mod tests {
     use super::*;
 
-    // MachineConfig::default() attaches scsi1 as a plain read-write disk image,
-    // so it is the "unsafe while running" case.
+    // The default disk is a plain read-write disk image, so it is the
+    // "unsafe while running" case.
     fn running(halted: bool) -> Status {
         Status { running: true, cpu_halted: halted, ..Status::default() }
     }
 
     #[test]
     fn writable_disk_is_unsafe_while_cpu_runs() {
-        let r = evaluate(&running(false), &MachineConfig::default());
+        let r = evaluate(&running(false), &crate::placement_ui::fixtures::with_disks());
         assert!(!r.is_empty(), "a live rw disk should warn before force-stop");
         assert!(r.writable_disks.contains(&1));
     }
@@ -95,7 +95,7 @@ mod tests {
     fn halted_cpu_is_always_safe() {
         // After IRIX shuts down (0 MIPS / power-off) stopping can't corrupt a
         // disk, so the same config must now evaluate as safe.
-        let r = evaluate(&running(true), &MachineConfig::default());
+        let r = evaluate(&running(true), &crate::placement_ui::fixtures::with_disks());
         assert!(r.is_empty(), "a halted CPU must be safe to stop");
     }
 }

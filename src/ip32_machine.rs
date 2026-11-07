@@ -355,7 +355,7 @@ impl O2Machine {
 
         let control = Control::new();
         let disks = Disks::new().with_ci(cfg.ci);
-        attach_devices(&cfg.all_placements(&topology)?, cfg, Some(&Ctx { devices: &devices, disks: &disks }), &topology)?;
+        attach_devices(&cfg.placements()?, cfg, Some(&Ctx { devices: &devices, disks: &disks }), &topology)?;
         Ok(Self {
             memory,
             bus,
@@ -1252,7 +1252,7 @@ mod device_tests {
 mod placement_tests {
     use super::*;
     use crate::attach::attach_device;
-    use crate::config::{Placement, ScsiDeviceConfig};
+    use crate::config::Placement;
     use crate::exit_persistence_tests::Machine;
     use crate::topology::Family;
     use crate::workstation_tests::with_shared;
@@ -1301,17 +1301,13 @@ mod placement_tests {
         assert_eq!(e, "error: pci0.1.t3: daynaport is not supported on this SCSI bus");
     }
 
-    /// `[scsi.20]` names controller 1, target 4.
+    /// `[scsi.20]` names controller 1, target 4; `controller = 1` moves a low key.
     #[test]
     fn legacy_controller_one_lands_on_pci0_2() {
         let t = filled();
-        let mut cfg = MachineConfig::default();
-        cfg.scsi.clear();
-        cfg.scsi.insert(20, ScsiDeviceConfig { path: "x.img".into(), ..Default::default() });
-        let p = cfg.scsi_placements(&t).unwrap();
-        assert_eq!(p[0].at, loc("pci0.2.t4"));
-        cfg.scsi.insert(1, ScsiDeviceConfig { controller: 1, path: "y.img".into(), ..Default::default() });
-        let ats: Vec<String> = cfg.scsi_placements(&t).unwrap().iter().map(|p| p.at.to_string()).collect();
+        let mut cfg: MachineConfig = toml::from_str("[scsi.20]\npath = \"x.img\"\n[scsi.1]\ncontroller = 1\npath = \"y.img\"\n").unwrap();
+        cfg.migrate(&t).unwrap();
+        let ats: Vec<String> = cfg.placements().unwrap().iter().map(|p| p.at.to_string()).collect();
         assert_eq!(ats, ["pci0.2.t1", "pci0.2.t4"]);
     }
 }

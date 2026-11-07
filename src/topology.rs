@@ -169,6 +169,15 @@ impl Topology {
         self.rows.lock().iter().find(|(_, r)| r.ctl == Some(n)).map(|(l, _)| l.clone())
     }
 
+    /// `fill_for`, then every placement of `cfg` claimed and its options
+    /// parsed. Nothing is built: this is what `validate`, `--list-slots` and
+    /// the GUI run, so config errors appear without a machine.
+    pub fn probe(cfg: &MachineConfig) -> Result<Topology, String> {
+        let t = Topology::fill_for(cfg);
+        crate::attach::attach_devices(&cfg.placements()?, cfg, None, &t)?;
+        Ok(t)
+    }
+
     /// The controller number of the row above `at`, for the snapshot's
     /// controller * 16 + id disk numbers.
     pub fn ctl_of(&self, at: &Location) -> Option<u8> {
