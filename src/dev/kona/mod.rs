@@ -82,6 +82,7 @@ pub use back::pack::{pack_bitmap_row, unpack_bitmap_row, BusFormat, HostFormat, 
 pub use back::store::layout::{BufferConfig, Layout, Refusal};
 pub use back::raster::{FillRule, Surface};
 pub use back::store::{PixelStore, WordArray, MAX_WORDS};
+pub use back::token::textport::{Textport, COLOUR_WORD};
 pub use back::{BackendConfig, BoardSet, KonaBackend};
 pub use consts::APERTURE;
 pub use flash::FLASH_SIZE;
