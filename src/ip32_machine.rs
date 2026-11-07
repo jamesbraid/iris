@@ -355,9 +355,6 @@ impl O2Machine {
 
         let control = Control::new();
         let disks = Disks::new().with_ci(cfg.ci);
-        for ctl in bus.scsi.lock().unwrap().iter() {
-            disks.track(ctl.clone());
-        }
         attach_devices(&cfg.all_placements(&topology)?, cfg, Some(&Ctx { devices: &devices, disks: &disks }), &topology)?;
         Ok(Self {
             memory,

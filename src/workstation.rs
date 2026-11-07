@@ -35,6 +35,7 @@ use crate::ip22_machine::Ip22Machine;
 use crate::machine_state::{GuestState, MachineStatus, TransitionAck};
 use crate::monitor::Monitor;
 use crate::net::NatControl;
+use crate::location::{Hop, Location};
 use crate::topology::Topology;
 use crate::traits::{Device, MachineEvent};
 
@@ -247,22 +248,28 @@ pub trait Workstation: Send {
     fn scratch_path(&self) -> Option<std::path::PathBuf> {
         self.disks().scratch()
     }
-    /// The controller whose CD-ROM drives take disc changes.
+    /// The controller whose CD-ROM drives take disc changes: the one with the
+    /// first CD-ROM.
     fn disc_changer(&self) -> Option<Arc<dyn DiscChanger>> {
-        self.disks().disc_changer()
+        self.disks().disc_changer(self.topology()).map(|(_, c)| c)
+    }
+    /// A target id as the front ends have always named it: on the machine's
+    /// first controller.
+    fn legacy_target(&self, id: u8) -> Option<Location> {
+        self.topology().controller(0).map(|c| c.join(Hop::t(id)))
     }
     /// Ask the guest to remount `/CDROM` after a disc change on `scsi_id`.
     fn remount_cdrom_guest(&self, _scsi_id: u8) {}
 
     /// Attached CHD disks with changes waiting to be folded into their bases.
     fn pending_chd_sync_count(&self) -> usize {
-        self.disks().pending_chd_sync_count()
+        self.disks().pending_chd_sync_count(self.topology())
     }
     /// Make every disk's accepted writes survive the process, including a
     /// copy-on-write overlay's record of the sectors it holds. Run it before
     /// the process exits without dropping the machine.
     fn flush_disks(&self) -> std::io::Result<()> {
-        self.disks().flush()
+        self.disks().flush(self.topology())
     }
     /// Fold pending CHD diffs into their bases (see [`Disks::sync_chd`]).
     fn sync_chd_disks(
@@ -271,7 +278,14 @@ pub trait Workstation: Send {
         progress: &mut dyn FnMut(usize, usize, f32),
         cancel: &dyn Fn() -> bool,
     ) -> std::io::Result<usize> {
-        self.disks().sync_chd(only, progress, cancel)
+        let only = match only {
+            None => None,
+            Some(id) => match u8::try_from(id).ok().and_then(|id| self.legacy_target(id)) {
+                Some(at) => Some(at),
+                None => return Ok(0),
+            },
+        };
+        self.disks().sync_chd(self.topology(), only.as_ref(), progress, cancel)
     }
 
     /// The count of guest frames every network backend feeds, for the GUI's

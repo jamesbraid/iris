@@ -727,10 +727,6 @@ impl Ip22Machine {
 
         let control = Control::new();
         let disks = Disks::new().with_ci(ci_enabled);
-        disks.track(hpc3.scsi().clone());
-        if let Some(second) = hpc3.scsi1() {
-            disks.track(second.clone());
-        }
         Self::bind_scsi(&topology, &hpc3);
         let ctx = Ctx { devices: &devices, disks: &disks };
         let placed = cfg.all_placements(&topology).and_then(|p| {
