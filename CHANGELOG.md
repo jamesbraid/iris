@@ -25,7 +25,8 @@ hashes are given where a change is easiest to understand by reading the commit.
 - A back end can run a display thread: `Backend::attach` hands it a
   `DisplayHandle` to complete retraces, raise the video interrupt and mark
   activity for the driver's watchdog. A reset ends the epoch tickets were made
-  in, so stale calls are dropped.
+  in, so stale calls are dropped. `Backend::stop`, `quiesce` and `resume` let it
+  join and park its threads.
 
 ### Boot test before publishing
 

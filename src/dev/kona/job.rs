@@ -100,6 +100,22 @@ pub trait Backend: Send {
     /// The board was reset. Cancel pending tickets: the front end has begun a
     /// new epoch and drops calls made in the old one.
     fn reset(&mut self) {}
+
+    /// The board stopped, after the Host Interface Processor's thread joined
+    /// and the jobs it had not taken ran (a dead board skips those, not this).
+    /// Join the back end's threads. Called
+    /// with no board lock held, since a thread of the back end may be inside
+    /// a handle call that sends an interrupt packet.
+    fn stop(&mut self) {}
+
+    /// The machine's processors are stopped and the command ring is empty:
+    /// finish the queued work and park every thread, for a snapshot. A command
+    /// the framers hold part-delivered stays part-framed; saving that is the
+    /// front end's.
+    fn quiesce(&mut self) {}
+
+    /// Undo `quiesce`.
+    fn resume(&mut self) {}
 }
 
 /// The front end as a back end may use it.

@@ -1,5 +1,5 @@
-//! The display handle a back end's threads call, and the attach hook the board
-//! gives a back end.
+//! The display handle a back end's threads call, and the lifecycle hooks the
+//! board gives a back end: attach, stop, quiesce and resume.
 
 use super::*;
 use crate::traits::Device;
@@ -19,10 +19,15 @@ const GENERAL_VECTOR: u8 = 0x10;
 struct Probe {
     events: Arc<Mutex<Vec<&'static str>>>,
     handle: Arc<Mutex<Option<DisplayHandle>>>,
+    jobs: Arc<Mutex<u32>>,
+    /// Panic on the first job, to kill the board.
+    panics: bool,
 }
 
 impl Backend for Probe {
     fn job(&mut self, _port: &mut BackPort<'_>, _job: Job<'_>) -> Reply {
+        assert!(!self.panics, "the back end panics on a job");
+        *self.jobs.lock() += 1;
         Reply::Done
     }
 
@@ -35,22 +40,37 @@ impl Backend for Probe {
         self.events.lock().push("reset");
     }
 
+    fn stop(&mut self) {
+        self.events.lock().push("stop");
+    }
+
+    fn quiesce(&mut self) {
+        self.events.lock().push("quiesce");
+    }
+
+    fn resume(&mut self) {
+        self.events.lock().push("resume");
+    }
 }
 
 struct Rig {
     f: Fixture,
     events: Arc<Mutex<Vec<&'static str>>>,
     handle: Arc<Mutex<Option<DisplayHandle>>>,
+    jobs: Arc<Mutex<u32>>,
 }
 
 impl Rig {
     fn new() -> Rig {
-        let probe = Probe::default();
-        let (events, handle) = (probe.events.clone(), probe.handle.clone());
+        Rig::with(Probe::default())
+    }
+
+    fn with(probe: Probe) -> Rig {
+        let (events, handle, jobs) = (probe.events.clone(), probe.handle.clone(), probe.jobs.clone());
         let host = TestHost::new();
         let kona = KonaBuilder::new(KonaConfig::default(), attach(&host)).backend(Box::new(probe)).build().unwrap();
         let f = Fixture { host, kona, jobs: Default::default() };
-        Rig { f, events, handle }
+        Rig { f, events, handle, jobs }
     }
 
     fn handle(&self) -> DisplayHandle {
@@ -70,23 +90,42 @@ impl Rig {
     }
 }
 
-/// Starting the board attaches the back end before the thread runs, and again
-/// after a reset restarts it.
+/// Starting the board attaches the back end before the thread runs; stopping
+/// it stops the back end once, after the stores the thread had not taken ran.
 #[test]
-fn start_attaches_and_a_reset_attaches_again() {
+fn start_attaches_and_stop_stops_after_the_stream_ran() {
     let r = Rig::new();
     assert!(r.events().is_empty(), "nothing before the board starts");
     let board = TestBoard::new(r.f.kona.clone());
     board.start();
     assert_eq!(r.events(), ["attach"]);
+    for w in [1, 2, 7] {
+        r.f.w(0xc10000, w);
+    }
+    board.stop();
+    assert_eq!(r.events(), ["attach", "stop"]);
+    assert_eq!(*r.jobs.lock(), 1, "the command ran before the back end stopped");
+    // A stop with no thread running is not a stop of the back end.
+    r.f.kona.stop();
+    assert_eq!(r.events(), ["attach", "stop"]);
+}
+
+/// A reset while running stops the back end, begins a new epoch and attaches
+/// again: the display thread of the old run is gone before the new one starts.
+#[test]
+fn a_reset_cycles_the_back_end() {
+    let r = Rig::new();
+    let board = TestBoard::new(r.f.kona.clone());
+    board.start();
     r.f.kona.power_on();
-    assert_eq!(r.events(), ["attach", "reset", "attach"]);
+    assert_eq!(r.events(), ["attach", "stop", "reset", "attach"]);
     board.stop();
 }
 
 /// A ticket made before a reset cannot complete after it: the tag register
 /// and the video cause stay as the reset left them. A ticket of the new epoch
-/// completes.
+/// completes. The reset joins the back end first, so this is the epoch check
+/// alone, not a race with a display thread mid-call.
 #[test]
 fn a_ticket_from_before_a_reset_is_dropped() {
     let r = Rig::new();
@@ -174,4 +213,41 @@ fn a_handle_outlives_the_board_harmlessly() {
     h.retrace_done(0, 1);
     h.video_frame(0);
     h.activity();
+}
+
+/// Quiesce lets the stores in the ring run, then quiesces the back end;
+/// resume undoes it.
+#[test]
+fn quiesce_runs_the_ring_then_the_back_end() {
+    let r = Rig::new();
+    let board = TestBoard::new(r.f.kona.clone());
+    board.start();
+    for _ in 0..100 {
+        for w in [1, 2, 7] {
+            r.f.w(0xc10000, w);
+        }
+    }
+    r.f.kona.quiesce();
+    assert_eq!(*r.jobs.lock(), 100);
+    assert_eq!(r.events(), ["attach", "quiesce"]);
+    r.f.kona.resume();
+    assert_eq!(r.events(), ["attach", "quiesce", "resume"]);
+    board.stop();
+}
+
+/// A board whose back end panicked is dead, but stopping it still reaches the
+/// back end: the next start attaches again and the first run's threads must
+/// be gone by then.
+#[test]
+fn a_dead_board_still_stops_the_back_end() {
+    let r = Rig::with(Probe { panics: true, ..Default::default() });
+    let board = TestBoard::new(r.f.kona.clone());
+    board.start();
+    for w in [1, 2, 7] {
+        r.f.kona.bus_write(0xc10000, 4, w as u64);
+    }
+    retry(|| r.f.kona.bus_read(INT_CAUSE, 4).0 == crate::traits::BUS_ERR);
+    assert!(r.f.kona.failure().unwrap().contains("panicked"));
+    board.stop();
+    assert_eq!(r.events(), ["attach", "stop"]);
 }

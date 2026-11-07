@@ -617,6 +617,23 @@ impl Kona {
         f(&mut *guard.backend)
     }
 
+    /// Bring the back end to rest for a snapshot. The machine's processors are
+    /// stopped: the stores in the ring run to completion, then the back end
+    /// finishes its queued work and parks its threads. `resume` undoes it.
+    pub fn quiesce(&self) {
+        let s = &*self.shared;
+        while s.running.load(SeqCst) && !s.dead.load(SeqCst) && !s.ring.is_empty() {
+            s.wake();
+            std::thread::yield_now();
+        }
+        s.pipe_wait().backend.quiesce();
+    }
+
+    /// Undo `quiesce`.
+    pub fn resume(&self) {
+        self.shared.pipe_wait().backend.resume();
+    }
+
     fn reset(&self) {
         let was_running = self.is_running();
         Device::stop(self);
@@ -673,6 +690,15 @@ impl Device for Kona {
         // end would only panic again.
         if !s.dead.load(SeqCst) {
             s.drain_inline();
+        }
+        // The back end's own threads join with the slot taken and no lock
+        // held: one of them may be inside a handle call that sends a packet.
+        // Always, even for a dead board: `start` attaches again, and the
+        // first run's threads must be gone by then. A back end that panics
+        // here is logged, not rethrown, since this runs from `Drop`.
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.pipe_wait().backend.stop()));
+        if stopped.is_err() {
+            crate::dlog!(crate::devlog::LogModule::Kona, "kona: the back end panicked while stopping");
         }
     }
 

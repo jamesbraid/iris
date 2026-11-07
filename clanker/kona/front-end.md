@@ -115,6 +115,10 @@ slot owns the back end, so a strong reference would be a cycle. With the board
 gone every call is a no-op. With no interrupt destination programmed the video
 cause still sets, and the missing destination is logged once, not per frame.
 
+`Device::stop` calls `Backend::stop` after the thread joined and the jobs it
+had not taken ran, with the slot taken and no lock held. `Kona::quiesce` lets
+the ring run out and calls `Backend::quiesce`; `Kona::resume` undoes it.
+
 ## Approximations and open questions
 
 Grades: established (a published manual or measurement), inferred (from
