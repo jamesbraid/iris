@@ -2026,6 +2026,22 @@ impl MachineConfig {
         self.graphics.board.unwrap_or_else(|| GraphicsBoard::default_for(self.machine.profile))
     }
 
+    /// Print the places this machine has and what the config puts in them
+    /// (`--list-slots`); the exit status, 1 with the claim's text when a
+    /// placement does not fit.
+    fn print_slots(&self) -> i32 {
+        match Topology::probe(self) {
+            Ok(t) => {
+                println!("{}", t.lines().join("\n"));
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        }
+    }
+
     /// Parse a configuration file's text, refusing the keys serde would have
     /// refused before unknown top-level keys were collected in `extra`. The
     /// old settings that [`MachineConfig::migrate`] rewrites are let through.
@@ -2617,6 +2633,11 @@ pub struct Cli {
     #[arg(long = "test-device", default_value_t = false)]
     pub test_device: bool,
 
+    /// Print the places this machine has and what is in them, then exit.
+    /// Applies `--machine` and `--config`.
+    #[arg(long = "list-slots", default_value_t = false)]
+    pub list_slots: bool,
+
     /// Where the test device writes its machine-state dump.
     #[arg(long = "test-device-dump", value_name = "FILE")]
     pub test_device_dump: Option<String>,
@@ -3032,13 +3053,14 @@ pub fn load_config() -> (MachineConfig, u32) {
         std::process::exit(0);
     }
 
-    if cli.validate {
+    if cli.validate || cli.list_slots {
         let toml_cfg = MachineConfig::try_load(&cli.config).unwrap_or_else(|e| {
             eprintln!("Configuration error: {e}");
             std::process::exit(1);
         });
         let cfg = cli.resolve(toml_cfg);
-        std::process::exit(crate::validate_config::report(&cli.config, &cfg));
+        let status = if cli.list_slots { cfg.print_slots() } else { crate::validate_config::report(&cli.config, &cfg) };
+        std::process::exit(status);
     }
 
     let toml_cfg = MachineConfig::load_toml(&cli.config);
@@ -4154,6 +4176,16 @@ mod export_tests {
         let mut again = cfg.clone();
         assert!(again.migrate(&Topology::fill_for(&again)).unwrap().is_empty());
         assert_eq!(again.placements().unwrap(), cfg.placements().unwrap());
+    }
+
+    /// `--list-slots` exits 0 on a config that fits and 1 on one that does not.
+    #[test]
+    fn list_slots_exits_0_and_a_bad_placement_exits_1() {
+        let mut cfg = MachineConfig::default();
+        assert_eq!(cfg.print_slots(), 0);
+        cfg.place("hdd", "hpc3.0.t9".parse().unwrap(), toml::from_str("path = \"x\"").unwrap());
+        assert_eq!(cfg.print_slots(), 1);
+        assert!(parse_args(["iris", "--list-slots"]).unwrap().list_slots);
     }
 
     #[test]
