@@ -821,6 +821,80 @@ fn a_directly_wired_input_shares_the_pins() {
     assert_eq!(r.get(reg::INT_STATUS) & 0xff, 0);
 }
 
+// ---- the PCI reset pins, Control 27:24 ----
+
+/// A recording function at slot 6, command register enabled, and the
+/// number of RST# deliveries it has seen.
+fn watcher(r: &Rig) -> (Arc<std::sync::Mutex<Vec<String>>>, PciAddr) {
+    use crate::pci::testing::TestCard;
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let at = PciAddr { device: 6, function: 0 };
+    let bars = [Bar::Mem(0x1000), Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused, Bar::Unused];
+    r.fit(6, TestCard::logged("w", bars, 0, &log));
+    r.bridge.bus().config_write(at, 4, 2, PCI_COMMAND_MEMORY);
+    (log, at)
+}
+
+const RST_PINS: u32 = 0xf << 24;
+
+/// Control resets with every pin deasserted (1); writing it back with them
+/// still deasserted resets nothing, so the PROM's first Control write
+/// does not reset the functions.
+#[test]
+fn releasing_untouched_reset_pins_resets_nothing() {
+    let r = Rig::new();
+    let (log, at) = watcher(&r);
+    assert_eq!(r.get(reg::CONTROL) & RST_PINS, RST_PINS, "deasserted at reset");
+    r.set(reg::CONTROL, r.get(reg::CONTROL));
+    r.set(reg::CONTROL, r.get(reg::CONTROL) | DEV_ERROR_LOCK);
+    assert!(log.lock().unwrap().is_empty());
+    assert_eq!(r.bridge.bus().config_read(at, 4, 2), Some(PCI_COMMAND_MEMORY), "and the header is as it was");
+}
+
+/// Which slot each pin serves is not known, so any one of them going from 1
+/// to 0 resets the whole bus, once, and raising it again does not.
+#[test]
+fn a_one_to_zero_on_any_reset_pin_resets_the_bus_once() {
+    for bit in 24..28 {
+        let r = Rig::new();
+        let (log, at) = watcher(&r);
+        let ctl = r.get(reg::CONTROL);
+        r.set(reg::CONTROL, ctl & !(1 << bit));
+        assert_eq!(*log.lock().unwrap(), ["w cmd=0x0"], "pin {bit}: header reset first, then the function");
+        assert_eq!(r.bridge.bus().config_read(at, 4, 2), Some(0));
+        r.set(reg::CONTROL, ctl);
+        assert_eq!(log.lock().unwrap().len(), 1, "pin {bit}: releasing it resets nothing");
+    }
+}
+
+#[test]
+fn holding_a_pin_low_does_not_reset_again() {
+    let r = Rig::new();
+    let (log, _) = watcher(&r);
+    let ctl = r.get(reg::CONTROL);
+    r.set(reg::CONTROL, ctl & !(1 << 25));
+    r.set(reg::CONTROL, ctl & !(1 << 25) | DEV_ERROR_LOCK);
+    r.set(reg::CONTROL, ctl & !(0x3 << 25));
+    assert_eq!(log.lock().unwrap().len(), 2, "the second pin is a new 1 to 0; holding the first is not");
+}
+
+/// The datasheet does not establish that a Bridge core reset or a Crossbow
+/// link reset pulses the pins, so neither resets the bus; the functions
+/// keep their lines.
+#[test]
+fn a_core_reset_and_a_link_reset_run_no_bus_reset_and_keep_pin_levels() {
+    let r = Rig::new();
+    let (log, at) = watcher(&r);
+    let c = r.card(2, PCI_INTA);
+    r.route(2, 1);
+    c.raise(true);
+    r.reset();
+    r.bridge.link_reset();
+    assert!(log.lock().unwrap().is_empty());
+    assert_eq!(r.bridge.bus().config_read(at, 4, 2), Some(PCI_COMMAND_MEMORY));
+    assert_eq!(r.get(reg::INT_STATUS) & 0xff, 1 << 2, "the card still holds its line");
+}
+
 /// The wiring table is the rule the Bridge always had: pins A and C reach
 /// the pin numbered as the slot, B and D that number with bit two flipped.
 #[test]

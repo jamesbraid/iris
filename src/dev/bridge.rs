@@ -172,7 +172,16 @@ const STATUS_PCI_MODE: u32 = 1 << 5;
 pub const CONTROL_FLASH_WRITE_EN: u32 = 1 << 31;
 pub const CONTROL_MEM_SWAP: u32 = 1 << 22;
 pub const CONTROL_PAGE_16K: u32 = 1 << 21;
-const CONTROL_RESET: u32 = (1 << 30) | (1 << 29) | (1 << 28) | (0xf << 24) | (3 << 12) | (1 << 9) | (0x1f << 4) | 0xf;
+/// Control 27:24, RST_PIN_N(3:0): the four PCI reset pins, active low, all
+/// high (deasserted) at reset. Established: the bits and their reset value
+/// (Bridge ASIC specification rev 4.0, Control register). That 1 is
+/// deasserted follows the `_N` in the name. Which pin serves which slot is
+/// not known, so a write that takes any of the four from 1 to 0 resets the
+/// whole bus: an approximation, the PCI default of one reset line shared by
+/// every slot. A core reset and a link reset do not pulse the pins, because
+/// the datasheet does not establish that either does.
+const CONTROL_RST_PINS: u32 = 0xf << 24;
+const CONTROL_RESET: u32 = (1 << 30) | (1 << 29) | (1 << 28) | CONTROL_RST_PINS | (3 << 12) | (1 << 9) | (0x1f << 4) | 0xf;
 /// Two strobes that clear the link retry counters and always read zero.
 const CONTROL_RETRY_CLEAR: u32 = 0x3 << 10;
 
@@ -789,7 +798,8 @@ impl Bridge {
             return false;
         }
         let val = val as u32;
-        self.irq_locked(|st, p| {
+        let mut assert_reset = false;
+        let ok = self.irq_locked(|st, p| {
             let Some(info) = (if off % 8 == SLOT_DATA { reg_info(off - SLOT_DATA) } else { None }) else {
                 self.invalid_address(st, p, off, true);
                 return true;
@@ -820,6 +830,9 @@ impl Bridge {
                     let old = st.r(base);
                     let new = (old & !info.writable) | (val & info.writable);
                     st.set_r(base, new);
+                    // Control 27:24 going from 1 to 0 asserts RST# (see
+                    // CONTROL_RST_PINS).
+                    assert_reset = base == reg::CONTROL && old & !new & CONTROL_RST_PINS != 0;
                     if base == reg::NIC {
                         self.onewire_slot(st, val);
                     } else if base == reg::INT_ENABLE {
@@ -834,7 +847,12 @@ impl Bridge {
                 }
             }
             true
-        })
+        });
+        // With the state lock dropped: the functions reset themselves.
+        if assert_reset {
+            self.bus.reset();
+        }
+        ok
     }
 
     /// One bit slot, reported finished inside the write the guest polls after.
