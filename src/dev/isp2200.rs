@@ -48,6 +48,7 @@ use crate::dev::isp1040::{
 };
 use crate::dev::qlogic_ring::{RingCtl, RingState, RingThread};
 use crate::pci::{Bar, PciConfig, PciFunction, PciFunctionState, PCI_INTA};
+use crate::snapshot::{get_field, hex_u16, hex_u32, load_u16_slice, toml_u16, toml_u32, u16_slice_to_toml, u8_slice_to_toml};
 use crate::scsi::{get_cdb_length, scsi_cmd, ScsiBus, ScsiDataLength, ScsiIdentities, ScsiRequest, CDROM_IDENTITY, DISK_IDENTITY};
 
 pub const PCI_DEVICE_ISP2200: u16 = 0x2200;
@@ -2320,6 +2321,193 @@ impl Core {
         }
     }
 
+    // ---- state ---------------------------------------------------------
+
+    /// Commands run, for the whole session.
+    pub fn total_commands(&self) -> u64 {
+        self.st.lock().commands
+    }
+
+    fn save_locked(&self, st: &State, now: i64) -> toml::Value {
+        let mut t = toml::map::Map::new();
+        for (k, v) in [
+            ("csr", st.csr),
+            ("icr", st.icr),
+            ("semaphore", st.semaphore),
+            ("nvram", st.nvram),
+            ("nvram_shift", st.nvram_shift),
+            ("gpio_data", st.gpio_data),
+            ("gpio_enable", st.gpio_enable),
+            ("rqst_len", st.rqst_len),
+            ("resp_len", st.resp_len),
+            ("rqst_in", st.rqst_in),
+            ("rqst_out", st.rqst_out),
+            ("resp_in", st.resp_in),
+            ("resp_out", st.resp_out),
+            ("loop_state", st.loop_state),
+        ] {
+            t.insert(k.into(), hex_u16(v));
+        }
+        for (k, v) in [
+            ("csr_reset_visible", st.csr_reset_visible),
+            ("nvram_dout", st.nvram_dout),
+            ("risc_int", st.risc_int),
+            ("host_int", st.host_int),
+            ("risc_reset", st.risc_reset),
+            ("risc_paused", st.risc_paused),
+            ("cmd_window", st.cmd_window),
+            ("cmd_pending", st.cmd_pending),
+            ("fw_running", st.fw_running),
+            ("queues_init", st.queues_init),
+            ("completion_held", st.completion_held),
+            ("rqst_blocked", st.rqst_blocked),
+            ("loop_active", st.loop_active),
+            ("has_loop_id", st.has_loop_id),
+            ("bringup_lip_reset", st.bringup_lip_reset),
+        ] {
+            t.insert(k.into(), toml::Value::Boolean(v));
+        }
+        t.insert(
+            "nvram_mode".into(),
+            toml::Value::Integer(match st.nvram_mode {
+                NvramMode::Command => 0,
+                NvramMode::Data => 1,
+                NvramMode::Ignore => 2,
+            }),
+        );
+        t.insert("nvram_bits".into(), toml::Value::Integer(i64::from(st.nvram_bits)));
+        t.insert("loop_id".into(), toml::Value::Integer(i64::from(st.loop_id)));
+        t.insert("commands".into(), toml::Value::Integer(st.commands as i64));
+        t.insert("rqst_base".into(), hex_u32(st.rqst_base as u32));
+        t.insert("rqst_base_hi".into(), hex_u32((st.rqst_base >> 32) as u32));
+        t.insert("resp_base".into(), hex_u32(st.resp_base as u32));
+        t.insert("resp_base_hi".into(), hex_u32((st.resp_base >> 32) as u32));
+        t.insert("mbox_in".into(), u16_slice_to_toml(&st.mbox_in));
+        t.insert("mbox_out".into(), u16_slice_to_toml(&st.mbox_out));
+        t.insert("completion".into(), u16_slice_to_toml(&st.completion));
+        t.insert("fw_options".into(), u16_slice_to_toml(&st.fw_options));
+        t.insert("icb".into(), u8_slice_to_toml(&st.icb));
+        // The downloaded microcode is large and usually all zero between a
+        // reset and the driver's download.
+        if st.risc_ram.iter().any(|&w| w != 0) {
+            t.insert("risc_ram".into(), u16_slice_to_toml(&st.risc_ram));
+        }
+        t.insert("events".into(), toml::Value::Array(st.events.iter().map(|mb| u16_slice_to_toml(mb)).collect()));
+        t.insert("held".into(), toml::Value::Array(st.held.iter().map(|entry| u8_slice_to_toml(entry)).collect()));
+        // Absolute deadlines mean nothing on another run's clock.
+        if let Some(due) = st.bringup_due {
+            t.insert("bringup_left_ns".into(), toml::Value::Integer((due - now).max(0)));
+        }
+        toml::Value::Table(t)
+    }
+
+    /// Whatever the file says, indices fold into their rings and counts stay
+    /// within what this build could have queued.
+    fn load_locked(&self, st: &mut State, v: &toml::Value, now: i64) {
+        let ctl = std::mem::take(&mut st.ctl);
+        *st = State::new();
+        st.ctl = ctl;
+        st.ctl.gen += 1;
+        let u16f = |k: &str| get_field(v, k).and_then(toml_u16).unwrap_or(0);
+        let flag = |k: &str| matches!(get_field(v, k), Some(toml::Value::Boolean(true)));
+        let int = |k: &str| match get_field(v, k) {
+            Some(toml::Value::Integer(n)) => Some(*n),
+            _ => None,
+        };
+        st.csr = u16f("csr") & CSR_BANK_MASK;
+        st.icr = u16f("icr") & ICR_MASK;
+        st.semaphore = u16f("semaphore") & SEMAPHORE_LOCK;
+        st.nvram = u16f("nvram") & NVRAM_WRITE_MASK;
+        st.nvram_shift = u16f("nvram_shift");
+        st.nvram_bits = int("nvram_bits").unwrap_or(0).clamp(0, i64::from(NVRAM_CMD_BITS.max(NVRAM_DATA_BITS))) as u8;
+        st.nvram_mode = match int("nvram_mode") {
+            Some(1) => NvramMode::Data,
+            Some(2) => NvramMode::Ignore,
+            _ => NvramMode::Command,
+        };
+        st.nvram_dout = flag("nvram_dout");
+        st.gpio_data = u16f("gpio_data");
+        st.gpio_enable = u16f("gpio_enable");
+        st.csr_reset_visible = flag("csr_reset_visible");
+        st.risc_int = flag("risc_int");
+        st.host_int = flag("host_int");
+        st.risc_reset = flag("risc_reset");
+        st.risc_paused = flag("risc_paused");
+        st.cmd_window = flag("cmd_window");
+        st.cmd_pending = flag("cmd_pending");
+        st.fw_running = flag("fw_running");
+        st.queues_init = flag("queues_init");
+        st.completion_held = flag("completion_held");
+        st.rqst_blocked = flag("rqst_blocked");
+        st.loop_active = flag("loop_active");
+        st.has_loop_id = flag("has_loop_id");
+        st.bringup_lip_reset = flag("bringup_lip_reset");
+        st.loop_state = match u16f("loop_state") {
+            state @ (FW_STATE_CONFIG_WAIT | FW_STATE_WAIT_AL_PA | FW_STATE_READY) => state,
+            _ => FW_STATE_CONFIG_WAIT,
+        };
+        st.loop_id = int("loop_id").unwrap_or(0).clamp(0, i64::from(LOOP_ID_MAX)) as u8;
+        st.commands = int("commands").unwrap_or(0).max(0) as u64;
+        let u32f = |k: &str| get_field(v, k).and_then(toml_u32).unwrap_or(0);
+        st.rqst_base = u64::from(u32f("rqst_base")) | (u64::from(u32f("rqst_base_hi")) << 32);
+        st.resp_base = u64::from(u32f("resp_base")) | (u64::from(u32f("resp_base_hi")) << 32);
+        st.rqst_len = u16f("rqst_len");
+        st.resp_len = u16f("resp_len");
+        if st.queues_init && (st.rqst_len == 0 || st.resp_len == 0) {
+            st.queues_init = false;
+        }
+        if st.queues_init {
+            st.rqst_in = u16f("rqst_in") % st.rqst_len;
+            st.rqst_out = u16f("rqst_out") % st.rqst_len;
+            st.resp_in = u16f("resp_in") % st.resp_len;
+            st.resp_out = u16f("resp_out") % st.resp_len;
+        } else {
+            st.clear_queues();
+        }
+        for (k, dst) in [("mbox_in", &mut st.mbox_in), ("mbox_out", &mut st.mbox_out), ("completion", &mut st.completion)] {
+            if let Some(m) = get_field(v, k) {
+                load_u16_slice(m, dst);
+            }
+        }
+        if let Some(m) = get_field(v, "fw_options") {
+            load_u16_slice(m, &mut st.fw_options);
+        }
+        if let Some(toml::Value::Array(icb)) = get_field(v, "icb") {
+            for (dst, src) in st.icb.iter_mut().zip(icb) {
+                *dst = toml_u16(src).unwrap_or(0) as u8;
+            }
+        }
+        if let Some(m) = get_field(v, "risc_ram") {
+            load_u16_slice(m, &mut st.risc_ram);
+        }
+        if let Some(toml::Value::Array(events)) = get_field(v, "events") {
+            for e in events.iter().take(EVENTS_MAX) {
+                let mut mb = [0; MAILBOX_COUNT];
+                load_u16_slice(e, &mut mb);
+                st.events.push_back(mb);
+            }
+        }
+        if let Some(toml::Value::Array(held)) = get_field(v, "held") {
+            for e in held.iter().take(usize::from(MAX_REQUESTS)) {
+                let mut entry = [0u8; ENTRY_SIZE];
+                if let toml::Value::Array(bytes) = e {
+                    for (dst, src) in entry.iter_mut().zip(bytes) {
+                        *dst = toml_u16(src).unwrap_or(0) as u8;
+                    }
+                }
+                st.held.push_back(entry);
+            }
+        }
+        // The wait goes on for what was left of it, from this clock.
+        st.bringup_due = int("bringup_left_ns").filter(|_| st.loop_active).map(|left| now.saturating_add(left.max(0)));
+        self.ports_unknown(st);
+    }
+
+    /// Ports are read off the bus again by the next command that needs them.
+    fn ports_unknown(&self, st: &mut State) {
+        self.refresh_ports(st);
+    }
+
     // ---- registers ---------------------------------------------------
 
     /// Bits 15:12 are the command; the rest of a command not modelled is
@@ -2595,6 +2783,23 @@ impl PciFunction for Isp2200 {
     }
 }
 
+impl Isp2200 {
+    /// Name the adapter's long-lived locks in the lock registry, which holds
+    /// only a weak reference to them.
+    pub fn register_locks(&self) {
+        let locks: [(&str, fn(&Core) -> bool); 3] =
+            [("st", |c| c.st.is_locked()), ("fence", |c| c.fence.is_locked()), ("targets", |c| c.bus.is_locked())];
+        for (what, probe) in locks {
+            let core = Arc::downgrade(&self.core);
+            crate::locks::register_lock(format!("isp2200-{}::{what}", self.core.index), move || {
+                core.upgrade().is_some_and(|c| probe(&c))
+            });
+        }
+    }
+}
+
+/// The monitor's `scsi` and `cow` commands over the loop's disks, as the
+/// other SCSI controllers have them, plus `scsi notes`.
 impl crate::traits::Device for Isp2200 {
     fn step(&self, _cycles: u64) {}
     fn stop(&self) {
@@ -2608,6 +2813,69 @@ impl crate::traits::Device for Isp2200 {
     }
     fn get_clock(&self) -> u64 {
         0
+    }
+
+    fn register_commands(&self) -> Vec<(String, String)> {
+        let usage = crate::scsi_monitor::SCSI_USAGE;
+        if self.index == 0 {
+            vec![
+                ("scsi".to_string(), format!("SCSI (QLogic ISP2200 loop): {usage} | scsi notes")),
+                ("scsi0".to_string(), "Alias for `scsi` (the loop of adapter 0)".to_string()),
+                ("cow".to_string(), "COW overlays on the loop: cow status | cow commit [id] | cow reset [id]".to_string()),
+            ]
+        } else {
+            vec![
+                (format!("scsi{}", self.index), format!("SCSI loop of adapter {}: same subcommands as `scsi`", self.index)),
+                (format!("cow{}", self.index), format!("COW overlays on the loop of adapter {}: same subcommands as `cow`", self.index)),
+            ]
+        }
+    }
+
+    fn execute_command(&self, cmd: &str, args: &[&str], mut w: Box<dyn std::io::Write + Send>) -> Result<(), String> {
+        use std::io::Write as _;
+        if cmd.starts_with("scsi") {
+            if let Some(done) = crate::scsi_monitor::scsi_subcommand(self, args, &mut *w) {
+                return done;
+            }
+            if args.first().copied() == Some("notes") {
+                let _ = writeln!(w, "QLogic ISP2200, adapter {}: {} commands", self.index, self.total_commands());
+                for note in self.notes() {
+                    let _ = writeln!(w, "  note: {note}");
+                }
+                return Ok(());
+            }
+            return Err(format!("Usage: {} | scsi notes", crate::scsi_monitor::SCSI_USAGE));
+        }
+        if cmd.starts_with("cow") {
+            return crate::scsi_monitor::cow_command(self, args, &mut *w);
+        }
+        Err("Command not found".to_string())
+    }
+}
+
+impl crate::scsi_monitor::ScsiTargets for Isp2200 {
+    fn scsi_bus(&self) -> &ScsiBus {
+        &self.bus
+    }
+}
+
+impl crate::traits::Saveable for Isp2200 {
+    fn save_state(&self) -> toml::Value {
+        self.quiesced(|st| {
+            let now = self.now_ns(st);
+            self.save_locked(st, now)
+        })
+    }
+
+    fn load_state(&self, v: &toml::Value) -> Result<(), String> {
+        self.quiesced(|st| {
+            let now = self.now_ns(st);
+            self.load_locked(st, v, now);
+            self.publish_gen(st);
+            st.ctl.work = true;
+        });
+        self.sync_irq();
+        Ok(())
     }
 }
 
