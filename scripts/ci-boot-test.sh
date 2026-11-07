@@ -42,9 +42,9 @@ serial_log = "serial.log"
 ci         = true
 ci_socket  = "$IRIS_SOCKET"
 
-[scsi.1]
-path    = "$IMAGE_TOML"
-cdrom   = false
+[[hdd]]
+at = "hpc3.0.t1"
+path = "$IMAGE_TOML"
 overlay = true
 EOF
 

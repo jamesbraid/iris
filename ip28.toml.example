@@ -13,15 +13,15 @@ cpu     = "r10000"
 board = "solidimpact"
 heads = 1
 resolution = "guest"
-[scsi.1]
+[[hdd]]
+at = "hpc3.0.t1"
 path    = "ip28/blank.raw"
-cdrom   = false
 overlay = true
 
 # Optional: a virtio-serial port for a guest that has a driver for it
-# (see docs/virtio-serial.md). GIO expansion slot 1 by default.
-# [virtio_serial]
-# enabled = true
+# (see docs/virtio-serial.md). It goes in GIO expansion slot 1 (gio1).
+# [[virtio_serial]]
+# at = "gio1"
 # [[virtio_serial.port]]
 # console  = true
 # tcp_port = 8890

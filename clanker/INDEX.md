@@ -100,6 +100,7 @@ Non-graphics devices: MC/MEMCFG and RAM banks, HPC3, VDMA, EEPROMs and NVRAM, PS
 
 | Note | Kind | Title |
 |---|---|---|
+| [machine-device-design.md](devices/machine-device-design.md) | design | Places, device types and how a device is attached: the rows decide, a device registers itself, state is keyed by location |
 | [machine-layout.md](devices/machine-layout.md) | design | How the Indy-family, O2 and Octane share `Devices`, `Disks`, `Control` and `GuestNet`: the cascade rule, one load order, trait defaults, `optional`, the slot-pointer contract, and why tests share machines |
 | [virtio-serial-design.md](devices/virtio-serial-design.md) | design | virtio-serial: one transport-neutral core, mmio in a GIO slot (IP22/24/28) and pci (IP30); threading, byte order and open items |
 | [empty-gio-slot-reads-bus-error.md](devices/empty-gio-slot-reads-bus-error.md) | rule | Reads of an empty GIO slot end in a bus error (ABORT_EN); all ones made the PROM poll a phantom Newport 200 000 times headless |

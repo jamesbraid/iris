@@ -4276,6 +4276,38 @@ mod export_tests {
         assert!(parse_args(["iris", "--list-slots"]).unwrap().list_slots);
     }
 
+    /// The shipped examples are written in the form the docs describe: no old
+    /// settings left for migration to rewrite, and each one validates.
+    #[test]
+    fn shipped_examples_use_the_new_form_and_validate() {
+        let files: &[(&str, &str)] = &[
+            ("iris.toml", include_str!("../iris.toml")),
+            ("iris-irix53.toml", include_str!("../iris-irix53.toml")),
+            ("iris-irix65.toml", include_str!("../iris-irix65.toml")),
+            ("octane.toml.example", include_str!("../octane.toml.example")),
+            ("ip28.toml.example", include_str!("../ip28.toml.example")),
+            ("irix-install/iris-indigo2-smoke-ci.toml", include_str!("../irix-install/iris-indigo2-smoke-ci.toml")),
+            ("irix-install/iris-install-wsl.toml", include_str!("../irix-install/iris-install-wsl.toml")),
+            ("irix-install/iris-install.toml", include_str!("../irix-install/iris-install.toml")),
+            ("irix-install/iris-smoke-ci.toml", include_str!("../irix-install/iris-smoke-ci.toml")),
+            ("irix-install/iris-windows-384.toml", include_str!("../irix-install/iris-windows-384.toml")),
+            ("irix-install/iris-windows-safe.toml", include_str!("../irix-install/iris-windows-safe.toml")),
+            ("irix-install/iris-windows.toml", include_str!("../irix-install/iris-windows.toml")),
+            ("irix-install/iris-wsl.toml", include_str!("../irix-install/iris-wsl.toml")),
+            ("cpu-tests/run/boot.toml", include_str!("../cpu-tests/run/boot.toml")),
+            ("cpu-tests/run/bare.toml", include_str!("../cpu-tests/run/bare.toml")),
+            ("bench/run/bare.toml", include_str!("../bench/run/bare.toml")),
+        ];
+        for (name, text) in files {
+            let mut cfg = MachineConfig::from_toml(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let notices = cfg.migrate(&Topology::fill_for(&cfg)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(notices.is_empty(), "{name} still has old settings: {notices:?}");
+            // The Windows-path examples name files that are not here; the
+            // placements still have to claim their places.
+            Topology::probe(&cfg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
+
     #[test]
     fn unknown_device_error_lists_the_known_ones() {
         let cfg = MachineConfig::from_toml("[[aic780]]\nat = \"pci0.3\"\n");
