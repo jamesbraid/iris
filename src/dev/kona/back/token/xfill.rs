@@ -9,6 +9,13 @@
 //! (0x141 to 0x14b) and are kept until the box or rectangle token that ends
 //! them, which draws them all.
 //!
+//! Spans (0x156, 0x157, 0x158 with one, two or six) are a count `n`, `n` points
+//! `x << 16 | y` and `n` widths: each a one-pixel-high run of `width` pixels from
+//! its point, absolute (no position added). Points (0x14c, 0x14d, 0x14e with
+//! one, six or twenty-four) are single pixels `x << 16 | y`, and like boxes
+//! they take the words of a waiting data run first. A span token whose count
+//! is not what its length implies is dropped, counted.
+//!
 //! Not built: background points (0x15f to 0x161), relative points (0x14f to
 //! 0x151), and segments and lines (0x159 to 0x15c). No recorded stream uses
 //! them, and the model's source for them is read only for the token families
@@ -58,6 +65,12 @@ pub const X_RECT: u32 = 0x152;
 pub const X_RECT6: u32 = 0x153;
 pub const X_BOX: u32 = 0x154;
 pub const X_BOX6: u32 = 0x155;
+pub const X_POINT: u32 = 0x14c;
+pub const X_POINT6: u32 = 0x14d;
+pub const X_POINT24: u32 = 0x14e;
+pub const X_SPANS: u32 = 0x156;
+pub const X_SPANS2: u32 = 0x157;
+pub const X_SPANS6: u32 = 0x158;
 /// The data tokens, 0x141 to 0x14b: how many words each carries.
 const DATA: [(u32, usize); 8] = [(0x141, 1), (0x142, 2), (0x143, 3), (0x144, 4), (0x146, 5), (0x147, 6), (0x149, 8), (0x14b, 10)];
 /// The most words a data run may hold.
@@ -86,13 +99,13 @@ pub fn data_words(selector: u32) -> Option<usize> {
 
 /// Whether `selector` is a token `draw_command` takes.
 pub fn is_draw(selector: u32) -> bool {
-    keeps_run(selector)
+    keeps_run(selector) || matches!(selector, X_SPANS | X_SPANS2 | X_SPANS6)
 }
 
-/// A token that keeps a waiting data run: the data tokens, boxes and
-/// rectangles.
+/// A token that keeps a waiting data run: the data tokens, boxes, rectangles
+/// and points.
 pub fn keeps_run(selector: u32) -> bool {
-    data_words(selector).is_some() || matches!(selector, X_RECT | X_RECT6 | X_BOX | X_BOX6)
+    data_words(selector).is_some() || matches!(selector, X_RECT | X_RECT6 | X_BOX | X_BOX6 | X_POINT | X_POINT6 | X_POINT24)
 }
 
 /// Why a request was refused.
@@ -370,6 +383,8 @@ impl XState {
         match selector {
             X_BOX | X_BOX6 => self.boxes(surface, false, args),
             X_RECT | X_RECT6 => self.boxes(surface, true, args),
+            X_POINT | X_POINT6 | X_POINT24 => self.points(surface, args),
+            X_SPANS | X_SPANS2 | X_SPANS6 => self.spans(surface, args),
             _ => return false,
         }
         true
@@ -402,6 +417,36 @@ impl XState {
         self.boxes = buf;
     }
 
+    /// Points: the waiting run's words, then the token's, one pixel each.
+    fn points(&mut self, surface: &Surface<'_>, args: &[u32]) {
+        let mut buf = std::mem::take(&mut self.boxes);
+        buf.clear();
+        buf.extend(self.run.iter().chain(args).map(|&w| {
+            let (x, y) = ((w >> 16) as u16 as i16 as i64, w as u16 as i16 as i64);
+            (x, y, x + 1, y + 1)
+        }));
+        self.run.clear();
+        self.run_request(surface, buf.iter().copied());
+        self.boxes = buf;
+    }
+
+    /// Spans: a count, that many points, that many widths.
+    fn spans(&mut self, surface: &Surface<'_>, args: &[u32]) {
+        let n = args.len().saturating_sub(1) / 2;
+        if args.is_empty() || args[0] as usize != n {
+            self.fills.malformed += 1;
+            return;
+        }
+        let mut buf = std::mem::take(&mut self.boxes);
+        buf.clear();
+        buf.extend((0..n).map(|i| {
+            let w = args[1 + i];
+            let (x, y) = ((w >> 16) as u16 as i16 as i64, w as u16 as i16 as i64);
+            (x, y, x + args[1 + n + i] as i64, y + 1)
+        }));
+        self.run_request(surface, buf.iter().copied());
+        self.boxes = buf;
+    }
 }
 
 #[cfg(test)]
@@ -571,6 +616,42 @@ mod tests {
         x.draw_command(&d, X_BOX, &[pack(9, 9), pack(11, 11)]);
         assert_eq!(x.fills.bad_destination, 2);
         assert_eq!(at(&s, 0, 0), 0, "the first box of the refused request did not draw");
+    }
+
+    /// Spans are absolute one-pixel-high runs; a count that disagrees with the
+    /// length drops the token.
+    #[test]
+    fn spans_draw_runs_and_a_bad_count_is_dropped() {
+        let (mut x, s) = rig();
+        x.command(0x12a, &[100, 100, 5, 5]);
+        let d = Surface::new(&s, 1);
+        x.draw_command(&d, X_SPANS2, &[2, pack(1, 1), pack(4, 3), 5, 2]);
+        assert_eq!(lit(&s), 7);
+        assert_eq!(at(&s, 1, 1), 0x5a00);
+        assert_eq!(at(&s, 5, 1), 0x5a00);
+        assert_eq!(at(&s, 6, 1), 0);
+        assert_eq!(at(&s, 5, 3), 0x5a00);
+        x.draw_command(&d, X_SPANS, &[2, pack(0, 9), 3]);
+        assert_eq!((x.fills.malformed, lit(&s)), (1, 7));
+        // A zero width draws nothing; spans end a waiting data run.
+        x.draw_command(&d, 0x141, &[pack(20, 20)]);
+        // (the back end offers every kernel command to `command` first, which
+        // ends the run)
+        assert!(!x.command(X_SPANS, &[]));
+        x.draw_command(&d, X_SPANS, &[1, pack(0, 9), 0]);
+        assert_eq!((x.runs_dropped, lit(&s)), (1, 7));
+    }
+
+    /// Points take a waiting run's words first, and are single pixels.
+    #[test]
+    fn points_draw_single_pixels_including_a_waiting_run() {
+        let (mut x, s) = rig();
+        let d = Surface::new(&s, 1);
+        x.draw_command(&d, 0x142, &[pack(1, 1), pack(2, 2)]);
+        x.draw_command(&d, X_POINT, &[pack(3, 3)]);
+        assert_eq!(lit(&s), 3);
+        x.draw_command(&d, X_POINT6, &[pack(10, 1), pack(11, 1), pack(12, 1), pack(13, 1), pack(14, 1), pack(-1, 1)]);
+        assert_eq!(lit(&s), 3 + 5);
     }
 
     /// The two-buffer RGB form (configuration 4, buffer selector 3) is
