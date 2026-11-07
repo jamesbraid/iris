@@ -27,6 +27,7 @@ use crate::traits::{Resettable, BUS_BUSY, BUS_OK};
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::fmt::Write;
+use std::io::Read;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::Arc;
 
@@ -61,30 +62,110 @@ pub(super) struct Recording {
     pub end: Option<u64>,
 }
 
-struct Reader<'a> {
-    b: &'a [u8],
-    at: usize,
+/// One thing in a recording: the board, a record, or the end with its count.
+pub(super) enum Item {
+    Board(Board),
+    Rec(Rec),
+    End(u64),
 }
 
-impl Reader<'_> {
-    fn take(&mut self, n: usize) -> Result<&[u8], String> {
-        let end = self.at.checked_add(n).filter(|&e| e <= self.b.len());
-        let end = end.ok_or_else(|| format!("record cut off at byte {}", self.at))?;
-        let s = &self.b[self.at..end];
-        self.at = end;
-        Ok(s)
+/// A recording read record by record, so a file too big for memory can be
+/// replayed.
+pub(super) struct Stream<R: Read> {
+    r: R,
+    /// Bytes read so far, for messages.
+    at: u64,
+    seen_board: bool,
+    ended: bool,
+}
+
+impl<R: Read> Stream<R> {
+    pub fn new(mut r: R) -> Result<Stream<R>, String> {
+        let mut head = [0u8; 12];
+        r.read_exact(&mut head).map_err(|_| "not a KONAREC file".to_string())?;
+        if &head[..8] != b"KONAREC\0" {
+            return Err("not a KONAREC file".into());
+        }
+        let version = u32::from_le_bytes(head[8..12].try_into().unwrap());
+        if version != 1 {
+            return Err(format!("format version {version}, not 1"));
+        }
+        Ok(Stream { r, at: 12, seen_board: false, ended: false })
+    }
+
+    fn fill(&mut self, buf: &mut [u8]) -> Result<(), String> {
+        self.r.read_exact(buf).map_err(|_| format!("record cut off at byte {}", self.at))?;
+        self.at += buf.len() as u64;
+        Ok(())
     }
 
     fn u8(&mut self) -> Result<u8, String> {
-        Ok(self.take(1)?[0])
+        let mut b = [0u8; 1];
+        self.fill(&mut b)?;
+        Ok(b[0])
     }
 
     fn u32(&mut self) -> Result<u32, String> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+        let mut b = [0u8; 4];
+        self.fill(&mut b)?;
+        Ok(u32::from_le_bytes(b))
     }
 
     fn u64(&mut self) -> Result<u64, String> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+        let mut b = [0u8; 8];
+        self.fill(&mut b)?;
+        Ok(u64::from_le_bytes(b))
+    }
+
+    fn bytes(&mut self, n: usize) -> Result<Vec<u8>, String> {
+        let mut v = vec![0u8; n];
+        self.fill(&mut v)?;
+        Ok(v)
+    }
+
+    /// The next item; None at the end of the file between records.
+    pub fn next(&mut self) -> Result<Option<Item>, String> {
+        let tag_at = self.at;
+        let mut t = [0u8; 1];
+        let n = self.r.read(&mut t).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Ok(None);
+        }
+        self.at += 1;
+        if self.ended {
+            return Err(format!("data after the end record, at byte {tag_at}"));
+        }
+        let tag = t[0];
+        if tag != b'C' && !self.seen_board {
+            return Err("the board record is not first".into());
+        }
+        Ok(Some(match tag {
+            b'C' => {
+                let (part, revision, rm_count, texture_mb) = (self.u32()?, self.u32()?, self.u32()?, self.u32()?);
+                let n = self.u8()? as usize;
+                let product = String::from_utf8_lossy(&self.bytes(n)?).into_owned();
+                if std::mem::replace(&mut self.seen_board, true) {
+                    return Err(format!("second board record at byte {tag_at}"));
+                }
+                Item::Board(Board { part, revision, rm_count, texture_mb, product })
+            }
+            b'W' | b'R' => {
+                let (size, off, val) = (self.u8()?, self.u32()?, self.u64()?);
+                Item::Rec(if tag == b'W' { Rec::Store { size, off, val } } else { Rec::Load { size, off, val } })
+            }
+            b'D' | b'O' => {
+                let (src, addr, n) = (self.u8()?, self.u64()?, self.u32()? as usize);
+                let bytes = self.bytes(n)?;
+                Item::Rec(if tag == b'D' { Rec::DmaRead { src, addr, bytes } } else { Rec::DmaWrite { src, addr, bytes } })
+            }
+            b'I' => Item::Rec(Rec::Interrupt { kind: self.u8()?, vector: self.u8()?, delivered: self.u8()? }),
+            b'M' => Item::Rec(Rec::Marker { kind: self.u32()?, arg: self.u32()? }),
+            b'E' => {
+                self.ended = true;
+                Item::End(self.u64()?)
+            }
+            _ => return Err(format!("unknown record tag {tag:#04x} at byte {tag_at}")),
+        }))
     }
 }
 
@@ -93,50 +174,15 @@ impl Recording {
     /// whole records only: the recorder flushes at record boundaries, but the
     /// last record of a killed run may be partial and is an error.
     pub fn parse(bytes: &[u8]) -> Result<Recording, String> {
-        if bytes.len() < 12 || &bytes[..8] != b"KONAREC\0" {
-            return Err("not a KONAREC file".into());
-        }
-        let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        if version != 1 {
-            return Err(format!("format version {version}, not 1"));
-        }
-        let mut r = Reader { b: bytes, at: 12 };
+        let mut stream = Stream::new(bytes)?;
         let mut board = None;
         let mut records = Vec::new();
         let mut end = None;
-        while r.at < bytes.len() {
-            let tag_at = r.at;
-            let tag = r.u8()?;
-            match tag {
-                b'C' => {
-                    let (part, revision, rm_count, texture_mb) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
-                    let n = r.u8()? as usize;
-                    let product = String::from_utf8_lossy(r.take(n)?).into_owned();
-                    if board.replace(Board { part, revision, rm_count, texture_mb, product }).is_some() {
-                        return Err(format!("second board record at byte {tag_at}"));
-                    }
-                }
-                b'W' | b'R' => {
-                    let (size, off, val) = (r.u8()?, r.u32()?, r.u64()?);
-                    records.push(if tag == b'W' { Rec::Store { size, off, val } } else { Rec::Load { size, off, val } });
-                }
-                b'D' | b'O' => {
-                    let (src, addr, n) = (r.u8()?, r.u64()?, r.u32()? as usize);
-                    let bytes = r.take(n)?.to_vec();
-                    records.push(if tag == b'D' { Rec::DmaRead { src, addr, bytes } } else { Rec::DmaWrite { src, addr, bytes } });
-                }
-                b'I' => records.push(Rec::Interrupt { kind: r.u8()?, vector: r.u8()?, delivered: r.u8()? }),
-                b'M' => records.push(Rec::Marker { kind: r.u32()?, arg: r.u32()? }),
-                b'E' => {
-                    end = Some(r.u64()?);
-                    if r.at != bytes.len() {
-                        return Err(format!("{} bytes after the end record", bytes.len() - r.at));
-                    }
-                }
-                _ => return Err(format!("unknown record tag {tag:#04x} at byte {tag_at}")),
-            }
-            if board.is_none() {
-                return Err("the board record is not first".into());
+        while let Some(item) = stream.next()? {
+            match item {
+                Item::Board(b) => board = Some(b),
+                Item::Rec(r) => records.push(r),
+                Item::End(n) => end = Some(n),
             }
         }
         let board = board.ok_or("no board record")?;
@@ -692,6 +738,18 @@ mod tests {
         assert!(Recording::parse(&v2).unwrap_err().contains("version 2"));
         // A file with no end record parses, and says so.
         assert_eq!(Recording::parse(&cut).unwrap().end, None);
+        // Data after the end record, a record before the board, a second board.
+        let mut after = ok.clone();
+        after.push(b'W');
+        assert!(Recording::parse(&after).unwrap_err().contains("after the end record"));
+        let mut early = b"KONAREC\0\x01\0\0\0".to_vec();
+        early.extend([b'W', 4]);
+        assert!(Recording::parse(&early).unwrap_err().contains("not first"));
+        let board = Builder::new(2, "ir2").0;
+        let mut twice = board.clone();
+        twice.extend(&board[12..]);
+        assert!(Recording::parse(&twice).unwrap_err().contains("second board"));
+        assert!(Recording::parse(&board[..12]).unwrap_err().contains("no board record"));
         // Only the InfiniteReality2 is modelled.
         assert!(Recording::parse(&Builder::new(2, "ir4").0).unwrap().config().is_err());
     }
