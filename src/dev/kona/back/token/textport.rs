@@ -2,9 +2,9 @@
 //!
 //! Commands, after the textport's sync word: 2 sets the draw colour, 4 the
 //! raster position, 5 fills a box, 6 plots a point and a bitmap blit draws a
-//! glyph or icon at the raster position. The rest are accepted and counted:
-//! 3 (a colour-map load, held by the display tables), 1, 7 and 8 (framed, no
-//! drawing role known). 9 and 0xc are answered by the front end.
+//! glyph or icon at the raster position, and 3 loads the textport's colour map
+//! (an index and three 10-bit components). 1, 7 and 8 are framed and counted,
+//! with no drawing role known. 9 and 0xc are answered by the front end.
 //!
 //! Grades. The command meanings are software expectations; a textport pixel is
 //! a colour index (inferred from command 2 taking an index, 0 to 255). The
@@ -17,6 +17,7 @@
 //! then advances by the advances. That placement is approximated: the model's
 //! reading, matched to the glyph routines that send it, not confirmed.
 
+use crate::dev::kona::back::display::ColourMap;
 use crate::dev::kona::back::raster::{FillRule, Surface};
 use crate::dev::kona::back::store::PixelStore;
 
@@ -27,6 +28,7 @@ pub const COLOUR_WORD: usize = 1;
 pub struct Textport {
     colour: u32,
     raster: (i32, i32),
+    colour_map: ColourMap,
     /// Commands that drew, and those accepted without effect.
     pub drawn: u64,
     pub unmodelled: u64,
@@ -39,6 +41,12 @@ impl Textport {
 
     pub fn raster(&self) -> (i32, i32) {
         self.raster
+    }
+
+    /// The colour map a textport pixel (an index) is resolved through at
+    /// scan-out.
+    pub fn colour_map(&self) -> &ColourMap {
+        &self.colour_map
     }
 
     /// Power-on state.
@@ -60,7 +68,8 @@ impl Textport {
                 Surface::new(store, COLOUR_WORD).plot(a(0) as i32 as i64, a(1) as i32 as i64, self.colour);
                 self.drawn += 1;
             }
-            1 | 3 | 7 | 8 => self.unmodelled += 1,
+            3 => self.colour_map.load(args),
+            1 | 7 | 8 => self.unmodelled += 1,
             _ => return false,
         }
         true
@@ -99,6 +108,15 @@ mod tests {
         assert_eq!(s.read(1, 2, COLOUR_WORD), 0);
         assert_eq!(s.read(4, 3, COLOUR_WORD), 0xff);
         assert_eq!(s.allocated(), [COLOUR_WORD]);
+    }
+
+    /// A colour-map load reaches the map the display resolves through.
+    #[test]
+    fn a_colour_map_load_sets_an_entry() {
+        let (mut t, s) = tp();
+        assert!(t.command(&s, RULE, 3, &[7, 1020, 512, 0]));
+        assert_eq!(t.colour_map().get(7), 0xff00_80ff);
+        assert_eq!(t.unmodelled, 0);
     }
 
     #[test]
@@ -146,10 +164,10 @@ mod tests {
     #[test]
     fn commands_with_no_drawing_role_are_counted_and_others_refused() {
         let (mut t, s) = tp();
-        for sel in [1, 3, 7, 8] {
+        for sel in [1, 7, 8] {
             assert!(t.command(&s, RULE, sel, &[0, 0, 0, 0]));
         }
-        assert_eq!(t.unmodelled, 4);
+        assert_eq!(t.unmodelled, 3);
         assert!(!t.command(&s, RULE, 9, &[]));
         assert!(!t.command(&s, RULE, 0xc, &[]));
         assert!(s.allocated().is_empty());

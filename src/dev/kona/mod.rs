@@ -78,6 +78,7 @@ mod tables;
 mod tests;
 
 pub use attach::{FifoLow, HostDma, InterruptPacket, KonaAttach, PacketSender};
+pub use back::display::{compose_default, ColourMap, COLOUR_MAP_ENTRIES};
 pub use back::pack::{pack_bitmap_row, unpack_bitmap_row, BusFormat, HostFormat, Rgba16};
 pub use back::store::layout::{BufferConfig, Layout, Refusal};
 pub use back::raster::{FillRule, Surface};

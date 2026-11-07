@@ -9,6 +9,7 @@
 //! - `store`: the pixel store and the plane layout inside a pixel's words.
 //! - `raster`: drawing into the store, and the fill rule.
 //! - `token`: the commands that say what to draw (the textport).
+//! - `display`: the tables the scan-out reads and the frame's composition.
 //! - `pack`: the host and bus pixel formats and their packers.
 //! - `bound`: the most words a pixel's record may take, from the host's own
 //!   budget arithmetic.
@@ -19,6 +20,7 @@
 mod bound;
 #[cfg(test)]
 mod bench;
+pub mod display;
 pub mod pack;
 pub mod raster;
 pub mod store;
@@ -266,6 +268,15 @@ impl KonaBackend {
         writeln!(w, "{} word arrays allocated", words.len())
     }
 
+    /// The frame the display would show now, written as a PNG. Composed here,
+    /// from the store as it stands, without waiting for a display thread.
+    fn shot(&self, path: &str) -> Result<(usize, usize), String> {
+        let (w, h) = (self.store.width() as usize, self.store.height() as usize);
+        let mut frame = vec![0u32; w * h];
+        display::compose_default(&self.store, token::textport::COLOUR_WORD, self.textport.colour_map(), &mut frame, w);
+        crate::hostinput::save_png(path, &frame, w, h, None)
+    }
+
     fn counters(&self, w: &mut dyn Write) -> io::Result<()> {
         for k in Kind::ALL {
             writeln!(w, "{:18}{}", k.name(), self.counts[k as usize])?;
@@ -323,11 +334,15 @@ impl Backend for KonaBackend {
             ["status"] => self.status(w)?,
             ["counters"] => self.counters(w)?,
             ["hash"] => writeln!(w, "{:016x}", self.store.checksum())?,
+            ["shot", path] => match self.shot(path) {
+                Ok((w_, h_)) => writeln!(w, "{path}: {w_} x {h_}")?,
+                Err(e) => writeln!(w, "kona: {e}")?,
+            },
             ["pix", x, y] => {
                 let (Ok(x), Ok(y)) = (x.parse::<u32>(), y.parse::<u32>()) else { return Ok(false) };
                 self.pix(x, y, w)?
             }
-            ["help"] | [] => writeln!(w, "kona: status|counters|hash|pix X Y")?,
+            ["help"] | [] => writeln!(w, "kona: status|counters|hash|pix X Y|shot FILE.png")?,
             _ => return Ok(false),
         }
         Ok(true)
@@ -392,7 +407,7 @@ mod tests {
         assert!(text.contains("record bound      32 words per pixel"), "{text}");
         let (known, text) = monitor(&kona, &["counters"]);
         assert!(known && text.contains("GL commands       0"), "{text}");
-        assert!(!monitor(&kona, &["shot", "x.png"]).0);
+        assert!(!monitor(&kona, &["frob", "x.png"]).0);
     }
 
     /// The monitor reaches the back end through the board's own command.
