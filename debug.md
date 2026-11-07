@@ -630,7 +630,7 @@ its SCSI controllers answer to `scsi`/`cow` and `scsi1`/`cow1` as described unde
 | `re dither [on\|off]` | Show or set whether the engine dithers, to compare renderings; on by default |
 | `gbe status` | GBE display engine: timing, frame buffer, tiles |
 | `isa status` | MACE ISA interrupts |
-| `pci status` / `pci config <slot>` | MACE PCI bridge / a function's configuration space |
+| `pci status` / `pci config <slot>` | The PCI bus (on the O2 with MACE's registers; the Octane has it too) / a function's configuration space |
 | `mec status` | MACE Ethernet: rings, receive buffers, frame counts |
 | `sdma status` | MACE serial DMA |
 | `maceps2 status` / `maceps2 traffic` | PS/2 ports / recent bytes each way |
