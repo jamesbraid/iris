@@ -1,6 +1,7 @@
 use clap::{CommandFactory, FromArgMatches, Parser};
 use serde::{Deserialize, Serialize};
 use crate::location::Location;
+use crate::scsi::media::DaynaportOptions;
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
@@ -181,22 +182,11 @@ impl ScsiDeviceConfig {
     /// A DaynaPort target for this SCSI id, with defaults filled in.
     /// Errors describe a bad `mac` / `subnet`; `validate()` catches those first.
     pub fn daynaport_params(&self, id: u8) -> Result<DaynaportParams, String> {
-        let mac = match &self.mac {
-            Some(s) => parse_mac(s)?,
-            None => [0x00, 0x80, 0x19, 0x44, 0x50, id],
-        };
-        let subnet = match &self.subnet {
-            Some(cidr) => {
-                let (gateway_ip, client_ip, netmask) = parse_nat_subnet(cidr)?;
-                NatSubnet { gateway_ip, client_ip, netmask }
-            }
-            None => NatSubnet {
-                gateway_ip: Ipv4Addr::new(192, 168, 10, 1),
-                client_ip:  Ipv4Addr::new(192, 168, 10, 2),
-                netmask:    Ipv4Addr::new(255, 255, 255, 0),
-            },
-        };
-        Ok(DaynaportParams { mac, subnet })
+        self.daynaport_options().params(id)
+    }
+
+    fn daynaport_options(&self) -> DaynaportOptions {
+        DaynaportOptions { mac: self.mac.clone(), subnet: self.subnet.clone() }
     }
 }
 
@@ -2577,11 +2567,6 @@ impl MachineConfig {
                     "scsi.{}: kind = \"daynaport\" is not available on the O2 (its Ethernet is built in)", key
                 ));
             }
-            if dev.is_daynaport() && self.network.mode == NetMode::Stream {
-                return Err(format!(
-                    "scsi.{}: kind = \"daynaport\" cannot join a stream segment: [network] stream names the onboard Ethernet's peer", key
-                ));
-            }
         }
         self.validate_serial_sockets()?;
         if self.scale < 1 || self.scale > 4 {
@@ -2682,29 +2667,7 @@ impl MachineConfig {
                         "SCSI ID {}: kind = \"daynaport\" has no disk image, so cdrom / \
                          overlay / scratch don't apply", id));
                 }
-                if let Some(mac) = &dev.mac {
-                    parse_mac(mac).map_err(|e| format!("SCSI ID {}: mac: {}", id, e))?;
-                }
-                if let Some(cidr) = &dev.subnet {
-                    parse_nat_subnet(cidr)
-                        .map_err(|e| format!("SCSI ID {}: subnet \"{}\": {}", id, cidr, e))?;
-                }
-                // Each DaynaPort runs its own NAT gateway. Sharing a subnet with
-                // ec0 gives the guest two interfaces on one network and nothing
-                // routes predictably.
-                let dp = dev.daynaport_params(*id)
-                    .map_err(|e| format!("SCSI ID {}: {}", id, e))?;
-                let main = self.nat_subnet.as_deref()
-                    .map(|c| parse_nat_subnet(c).map(|(g, c2, n)| NatSubnet {
-                        gateway_ip: g, client_ip: c2, netmask: n }))
-                    .transpose()?
-                    .unwrap_or_default();
-                if dp.subnet.gateway_ip == main.gateway_ip {
-                    return Err(format!(
-                        "SCSI ID {}: DaynaPort subnet {} collides with the machine's NAT subnet \
-                         (ec0). Give the DaynaPort its own, e.g. subnet = \"192.168.10.0/24\".",
-                        id, dp.subnet.gateway_ip));
-                }
+                dev.daynaport_options().check(self).map_err(|e| format!("SCSI ID {id}: {e}"))?;
             }
         }
         if let Some(mhz) = self.clock.fixed_mhz {
