@@ -30,12 +30,34 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::dev::heart_mem::HeartRam;
-use crate::pci::BarRun;
+use crate::pci::PciWiring;
 use crate::physical::Physical;
 use crate::ppmem::devmap::{entry_eq, SLOT_SHIFT};
 use crate::traits::{BusDevice, BusRead16, BusRead32, BusRead64, BusRead8, BUS_ERR, BUS_OK};
 
 /// Widget numbers on the Octane's Crossbow.
+/// The Bridge's PCI bus; the outputs are the Bridge's eight interrupt pins.
+/// Pins A and C of a device reach the pin numbered as the device, B and D
+/// that number with bit two flipped. That rule is inferred from the system's
+/// software and is not established by a board document. `Wire(i)` is the
+/// Bridge's pin `i`, which the GPIO inputs share with PCI; the IOC3's
+/// SuperIO interrupt is `Wire(4)`. The wire numbering is iris's own.
+pub static PCI0: PciWiring = PciWiring {
+    devices: 8,
+    outputs: 8,
+    pins: &[
+        (0, [Some(0), Some(4), Some(0), Some(4)]),
+        (1, [Some(1), Some(5), Some(1), Some(5)]),
+        (2, [Some(2), Some(6), Some(2), Some(6)]),
+        (3, [Some(3), Some(7), Some(3), Some(7)]),
+        (4, [Some(4), Some(0), Some(4), Some(0)]),
+        (5, [Some(5), Some(1), Some(5), Some(1)]),
+        (6, [Some(6), Some(2), Some(6), Some(2)]),
+        (7, [Some(7), Some(3), Some(7), Some(3)]),
+    ],
+    wires: &[0, 1, 2, 3, 4, 5, 6, 7],
+};
+
 pub const WIDGET_XBOW: u8 = 0x0;
 pub const WIDGET_HEART: u8 = 0x8;
 pub const WIDGET_BRIDGE: u8 = 0xf;
@@ -137,9 +159,9 @@ pub struct Ip30Bus {
     /// takes its large window.
     widgets: Mutex<[Option<(Arc<dyn BusDevice>, bool)>; 16]>,
     /// Per port, the runs of its small window that a PCI BAR decodes whole
-    /// (the Bridge's [`crate::pci::BarRun`]s, offsets in the window), mapped
-    /// over the widget while its link is up.
-    runs: Mutex<[Vec<BarRun>; 16]>,
+    /// (the Bridge's runs, offsets in the window), mapped over the widget
+    /// while its link is up.
+    runs: Mutex<[Vec<WidgetRun>; 16]>,
 }
 
 impl Ip30Bus {
@@ -215,9 +237,9 @@ impl Ip30Bus {
     }
 
     /// Widget `w` says which runs of its small window a PCI BAR decodes
-    /// whole (the Bridge's `on_bar_runs`): map them over the widget while
+    /// whole (the Bridge's BAR runs): map them over the widget while
     /// its link is up, giving the runs it named before back to the widget.
-    pub fn set_widget_runs(&self, w: u8, new: Vec<BarRun>) {
+    pub fn set_widget_runs(&self, w: u8, new: Vec<WidgetRun>) {
         if !(9..16).contains(&w) {
             return;
         }
@@ -237,7 +259,7 @@ impl Ip30Bus {
         self.map_runs(w, &runs[w as usize]);
     }
 
-    fn map_runs(&self, w: u8, runs: &[BarRun]) {
+    fn map_runs(&self, w: u8, runs: &[WidgetRun]) {
         let base = widget_small_base(w);
         for r in runs {
             self.phys.map(base + r.start, base + r.end, r.dev.clone(), &format!("widget {w:#x} pci bar"));
@@ -258,6 +280,15 @@ impl Ip30Bus {
     pub fn unmapped(&self) -> Vec<(u64, bool, u64)> {
         self.unmapped.misses.lock().clone()
     }
+}
+
+/// A run of a widget's small window, `start..end` in offsets of it, that one
+/// device answers: what the Bridge's BARs decode whole.
+#[derive(Clone)]
+pub struct WidgetRun {
+    pub start: u64,
+    pub end: u64,
+    pub dev: Arc<dyn BusDevice>,
 }
 
 /// An R10000 secondary cache line.
