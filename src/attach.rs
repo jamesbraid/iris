@@ -263,7 +263,7 @@ mod tests {
     }
 
     fn ctx_run<R>(f: impl FnOnce(&mut Ctx) -> R) -> R {
-        let (mut d, k) = (Devices::new(), Disks::new());
+        let (mut d, k) = (Devices::new(), Disks::new(Arc::new(Topology::new())));
         f(&mut Ctx { devices: &mut d, disks: &k })
     }
 

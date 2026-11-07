@@ -1593,20 +1593,6 @@ impl Aic7880 {
     }
 }
 
-impl Aic7880 {
-    /// Copy each target's copy-on-write overlay into `dir` as
-    /// `scsi<id>.overlay`, and return the dirty sectors of each, as the
-    /// Indigo2's and Indy's controller does for their snapshots.
-    pub fn export_overlays(&self, dir: &std::path::Path) -> std::io::Result<Vec<(usize, Vec<u64>)>> {
-        self.bus.export_overlays(dir)
-    }
-
-    /// Put back the overlays [`Self::export_overlays`] wrote.
-    pub fn import_overlays(&self, dir: &std::path::Path, dirty_sets: &[(usize, Vec<u64>)]) -> std::io::Result<()> {
-        self.bus.import_overlays(dir, dirty_sets)
-    }
-}
-
 /// What the guest can see of the chip: registers, SCBs, the sequencer's
 /// program and address, both queues, the latched status, the host-ring
 /// positions, the controller's own sense, and finished commands held for a

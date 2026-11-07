@@ -14,8 +14,8 @@
 //!   GET  <base>/snapshots/<name>/snapshot.toml      ← manifest, schema_version
 //!   GET  <base>/snapshots/<name>/cpu.bin            ← v2+ device state
 //!   GET  <base>/snapshots/<name>/chunks.bin         ← v3+ CAS hash list
-//!   GET  <base>/snapshots/<name>/cow.toml           ← per-SCSI dirty sectors
-//!   GET  <base>/snapshots/<name>/scsi1.overlay      ← per-SCSI overlay bytes
+//!   GET  <base>/snapshots/<name>/cow.toml           ← per-disk dirty sectors
+//!   GET  <base>/snapshots/<name>/hpc3.0.t1.overlay  ← per-disk overlay bytes, named by location
 //!   GET  <base>/cas/<hex2>/<hex62>.chunk            ← content-addressed RAM chunk
 //! ```
 //!
@@ -107,7 +107,7 @@ pub fn pull(base_url: &str, name: &str, saves_dir: &Path) -> Result<TransferRepo
         }
     }
 
-    // 3. cow.toml (overlay dirty sector lists) and the scsi*.overlay files.
+    // 3. cow.toml (overlay dirty sector lists) and the <location>.overlay files.
     if let Ok(bytes) = http_get(&format!("{}/snapshots/{}/cow.toml", base, name)) {
         std::fs::write(snap_dir.join("cow.toml"), &bytes)
             .map_err(|e| format!("write cow.toml: {}", e))?;
@@ -117,16 +117,14 @@ pub fn pull(base_url: &str, name: &str, saves_dir: &Path) -> Result<TransferRepo
         if let Ok(text) = std::str::from_utf8(&bytes) {
             if let Ok(toml::Value::Table(t)) = text.parse::<toml::Value>() {
                 for (key, _) in t {
-                    if let Some(id_str) = key.strip_prefix("scsi") {
-                        if id_str.parse::<usize>().is_ok() {
-                            let fname = format!("{}.overlay", key);
-                            let url = format!("{}/snapshots/{}/{}", base, name, fname);
-                            if let Ok(b) = http_get(&url) {
-                                std::fs::write(snap_dir.join(&fname), &b)
-                                    .map_err(|e| format!("write {}: {}", fname, e))?;
-                                report.files_transferred += 1;
-                                report.bytes_transferred += b.len() as u64;
-                            }
+                    if let Ok(at) = key.parse::<crate::location::Location>() {
+                        let fname = crate::snapshot::overlay_file(&at);
+                        let url = format!("{}/snapshots/{}/{}", base, name, fname);
+                        if let Ok(b) = http_get(&url) {
+                            std::fs::write(snap_dir.join(&fname), &b)
+                                .map_err(|e| format!("write {}: {}", fname, e))?;
+                            report.files_transferred += 1;
+                            report.bytes_transferred += b.len() as u64;
                         }
                     }
                 }
@@ -244,7 +242,7 @@ pub fn push(base_url: &str, name: &str, saves_dir: &Path) -> Result<TransferRepo
         report.bytes_transferred += bytes.len() as u64;
     }
 
-    // 3. cow.toml + scsi*.overlay (each overlay file is a sector-image, can be MB).
+    // 3. cow.toml + <location>.overlay (each overlay file is a sector-image, can be MB).
     let cow_path = snap_dir.join("cow.toml");
     if cow_path.exists() {
         let cow_bytes = std::fs::read(&cow_path).map_err(|e| format!("read cow.toml: {}", e))?;
@@ -252,19 +250,17 @@ pub fn push(base_url: &str, name: &str, saves_dir: &Path) -> Result<TransferRepo
         if let Ok(text) = std::str::from_utf8(&cow_bytes) {
             if let Ok(toml::Value::Table(t)) = text.parse::<toml::Value>() {
                 for (key, _) in t {
-                    if let Some(id_str) = key.strip_prefix("scsi") {
-                        if id_str.parse::<usize>().is_ok() {
-                            let fname = format!("{}.overlay", key);
-                            let p = snap_dir.join(&fname);
-                            if p.exists() {
-                                let bytes = std::fs::read(&p)
-                                    .map_err(|e| format!("read {}: {}", fname, e))?;
-                                let url = format!("{}/snapshots/{}/{}", base, name, fname);
-                                http_put(&url, &bytes)
-                                    .map_err(|e| format!("PUT {}: {}", fname, e))?;
-                                report.files_transferred += 1;
-                                report.bytes_transferred += bytes.len() as u64;
-                            }
+                    if let Ok(at) = key.parse::<crate::location::Location>() {
+                        let fname = crate::snapshot::overlay_file(&at);
+                        let p = snap_dir.join(&fname);
+                        if p.exists() {
+                            let bytes = std::fs::read(&p)
+                                .map_err(|e| format!("read {}: {}", fname, e))?;
+                            let url = format!("{}/snapshots/{}/{}", base, name, fname);
+                            http_put(&url, &bytes)
+                                .map_err(|e| format!("PUT {}: {}", fname, e))?;
+                            report.files_transferred += 1;
+                            report.bytes_transferred += bytes.len() as u64;
                         }
                     }
                 }

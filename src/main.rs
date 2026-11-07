@@ -188,7 +188,7 @@ fn main() {
         use winit::event_loop::EventLoop;
         let event_loop = EventLoop::new().unwrap();
         let display = machine.get_display().expect("a graphics board must be present in non-headless mode");
-        let ui = Ui::new(machine.get_ps2(), display, machine.disc_changer(), machine.get_timer_manager(), &event_loop, scale, scroll_pixels_per_line, lock_aspect_ratio, ui_renderer);
+        let ui = Ui::new(machine.get_ps2(), display, machine.disks().disc_changer(), machine.get_timer_manager(), &event_loop, scale, scroll_pixels_per_line, lock_aspect_ratio, ui_renderer);
         ui.run(event_loop);
     }
 

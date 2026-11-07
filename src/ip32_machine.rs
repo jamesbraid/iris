@@ -183,7 +183,7 @@ impl O2Machine {
 
     /// The hard disks as a snapshot records them, to refuse one taken on others.
     fn disk_refs(&self) -> Vec<crate::snapshot::DiskRef> {
-        crate::snapshot::DiskRef::from_records(&self.disks, &self.topology, false)
+        crate::snapshot::DiskRef::from_records(&self.disks, false)
     }
 
     pub fn new(cfg: &MachineConfig) -> Result<Self, String> {
@@ -349,7 +349,7 @@ impl O2Machine {
         }
 
         let control = Control::new();
-        let disks = Arc::new(Disks::new().with_ci(cfg.ci));
+        let disks = Arc::new(Disks::new(topology.clone()).with_ci(cfg.ci));
         attach_devices(&cfg.placements()?, cfg, Some(&mut Ctx { devices: &mut devices, disks: &disks }), &topology)?;
         Ok(Self {
             memory,
@@ -449,7 +449,7 @@ impl O2Machine {
         let cpu = self.cpu.clone();
         let running = self.running.clone();
         let events = (self.control.sender(), self.control.registered());
-        let disks = (self.disks.clone(), self.topology.clone());
+        let disks = self.disks.clone();
         let paused = self.paused.clone();
         self.devices.start();
         self.threads.push(
@@ -472,7 +472,7 @@ impl O2Machine {
         running: Arc<AtomicBool>,
         paused: Arc<AtomicBool>,
         (events, controller_up): (std::sync::mpsc::SyncSender<MachineEvent>, Arc<AtomicBool>),
-        (disks, topology): (Arc<Disks>, Arc<Topology>),
+        disks: Arc<Disks>,
     ) {
         let dev = cpu.clone().as_device();
         // The PROM's environment lives in its flash: save it once the guest
@@ -528,7 +528,7 @@ impl O2Machine {
                 }
                 running.store(false, Ordering::SeqCst);
                 crate::workstation::exit_process("power-off", 0, || {
-                    crate::workstation::flushed(disks.flush(&topology), "power-off")
+                    crate::workstation::flushed(disks.flush(), "power-off")
                 });
             }
             std::thread::sleep(poll);
@@ -554,7 +554,7 @@ impl O2Machine {
         self.bus.save_flash();
         // Not through the display: this stop leaves the guest's writes durable
         // whatever follows it.
-        if let Err(e) = self.disks.flush(&self.topology) {
+        if let Err(e) = self.disks.flush() {
             eprintln!("iris: disk flush at stop failed: {e} (guest writes may be lost)");
         }
         self.control.stopped();
@@ -623,13 +623,8 @@ impl O2Machine {
         chunks.bank_chunks[0] = put_bank_words(&store, &self.bus.ram)
             .map_err(|e| format!("CAS memory put: {e}"))?;
         snap.write_chunks_manifest(&chunks).map_err(|e| e.to_string())?;
-        for (i, ctl) in self.bus.scsi.lock().unwrap().iter().enumerate() {
-            let dir = snap.dir.join(format!("ctrl{i}"));
-            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            let overlays = ctl.export_overlays(&dir).map_err(|e| format!("COW overlay export (controller {i}): {e}"))?;
-            snap.write_toml(&format!("cow{i}.toml"), &crate::snapshot::build_cow_table(overlays))
-                .map_err(|e| e.to_string())?;
-        }
+        let overlays = self.disks.export_overlays(&snap.dir).map_err(|e| format!("COW overlay export: {e}"))?;
+        snap.write_toml("cow.toml", &crate::snapshot::build_cow_table(overlays)).map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -650,24 +645,13 @@ impl O2Machine {
 
     fn read_snapshot(&self, name: &str) -> Result<O2Snapshot, String> {
         use crate::chunk_store::{get_chunks_as_words, ChunkStore};
-        use crate::snapshot::{Snapshot, SCHEMA_VERSION};
+        use crate::snapshot::Snapshot;
         let snap = Snapshot::new(self.saves.join(name));
         let m = snap.read_manifest()?.ok_or_else(|| format!("saves/{name}: no snapshot.toml"))?;
         if m.machine.as_deref() != Some(SNAPSHOT_MACHINE) {
             return Err(format!("snapshot {name} is not of an O2"));
         }
-        if m.host_arch != std::env::consts::ARCH {
-            return Err(format!("snapshot host_arch '{}' does not match current host '{}'", m.host_arch, std::env::consts::ARCH));
-        }
-        if m.schema_version > SCHEMA_VERSION {
-            return Err(format!("snapshot schema_version {} is newer than this iris build supports ({SCHEMA_VERSION})", m.schema_version));
-        }
-        if m.schema_version < SCHEMA_VERSION {
-            return Err(format!(
-                "snapshot {name} is schema {}; the O2's UART state changed shape in schema 5, so it cannot be restored",
-                m.schema_version
-            ));
-        }
+        crate::snapshot::check_header(&m, &snap.dir)?;
         // As the Indy: build, CPU and disks must match.
         crate::snapshot::check_provenance(&m, self.cpu.model_name(), self.cpu.cache_kind(), &self.disk_refs())?;
         let sv = m.schema_version;
@@ -679,10 +663,7 @@ impl O2Machine {
             return Err(format!("snapshot memory is {} MB, this O2 has {} MB",
                 memory.len() >> 18, self.bus.ram.len() >> 20));
         }
-        let ctrls = self.bus.scsi.lock().unwrap().len();
-        let overlays = (0..ctrls)
-            .map(|i| snap.read_toml(&format!("cow{i}.toml")).ok().map(|t| crate::snapshot::parse_cow_table(&t)))
-            .collect();
+        let overlays = snap.read_toml("cow.toml").ok().map(|t| crate::snapshot::parse_cow_table(&t));
         let mut board = toml::map::Map::new();
         for key in self.devices.keys() {
             board.insert(key.clone(), state(&key)?);
@@ -706,11 +687,8 @@ impl O2Machine {
         self.devices.load(&s.board)?;
         self.bus.set_flash(&s.flash)?;
         self.bus.ram.restore_words(&s.memory)?;
-        for (i, ctl) in self.bus.scsi.lock().unwrap().iter().enumerate() {
-            if let Some(Some(sets)) = s.overlays.get(i) {
-                ctl.import_overlays(&s.dir.join(format!("ctrl{i}")), sets)
-                    .map_err(|e| format!("COW overlay import (controller {i}): {e}"))?;
-            }
+        if let Some(sets) = &s.overlays {
+            self.disks.import_overlays(&s.dir, sets).map_err(|e| format!("COW overlay import: {e}"))?;
         }
         Ok(())
     }
@@ -739,8 +717,8 @@ struct O2Snapshot {
     board: toml::Value,
     flash: Vec<u8>,
     memory: Vec<u32>,
-    /// Each controller's copy-on-write sets, when the snapshot has them.
-    overlays: Vec<Option<Vec<(usize, Vec<u64>)>>>,
+    /// The disks' copy-on-write sets, when the snapshot has them.
+    overlays: Option<Vec<(crate::location::Location, Vec<u64>)>>,
     dir: std::path::PathBuf,
 }
 
@@ -1204,9 +1182,9 @@ mod device_tests {
 
     /// The files a snapshot has always been: the CPU, the bus (`o2`), the boot
     /// hook (`boot`), memory in the chunk store, the flash, and each
-    /// controller's overlays.
+    /// disk's overlays, by location.
     #[test]
-    fn o2_saved_files_keep_their_names() {
+    fn the_o2_snapshot_file_set_is_by_location() {
         o2(|m| {
             let dir = std::env::temp_dir().join(format!("iris-o2-names-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
@@ -1219,7 +1197,22 @@ mod device_tests {
                 .collect();
             names.sort();
             let _ = std::fs::remove_dir_all(&dir);
-            assert_eq!(names, ["boot.bin", "chunks.bin", "cow0.toml", "cow1.toml", "cpu.bin", "ctrl0", "ctrl1", "flash.bin", "o2.bin", "snapshot.toml"]);
+            assert_eq!(names, ["boot.bin", "chunks.bin", "cow.toml", "cpu.bin", "flash.bin", "o2.bin", "pci0.1.t1.overlay", "snapshot.toml"]);
+        });
+    }
+
+    #[test]
+    fn the_o2_refuses_a_schema_5_snapshot_naming_both_versions() {
+        o2(|m| {
+            let dir = std::env::temp_dir().join(format!("iris-o2-v5-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            crate::snapshot::write_schema_5_manifest(&dir, "old", Some(SNAPSHOT_MACHINE));
+            let before = std::mem::replace(&mut m.saves, dir.clone());
+            let read = m.read_snapshot("old");
+            m.saves = before;
+            let _ = std::fs::remove_dir_all(&dir);
+            let e = read.err().expect("refused");
+            assert!(e.contains("has schema 5") && e.contains("reads schema 6"), "{e}");
         });
     }
 

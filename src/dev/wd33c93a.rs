@@ -434,24 +434,6 @@ impl Wd33c93a {
         results
     }
 
-    /// Copy every COW overlay into `dir` as `scsi<id>.overlay`. Returns a
-    /// list of `(id, dirty_sector_list)` entries so snapshot save can
-    /// persist the dirty set alongside the raw overlay bytes.
-    pub fn export_overlays(&self, dir: &std::path::Path) -> std::io::Result<Vec<(usize, Vec<u64>)>> {
-        self.bus.export_overlays(dir)
-    }
-
-    /// Replace each COW overlay with its saved counterpart in `dir` and
-    /// adopt the matching dirty sector set. Devices with no corresponding
-    /// entry in `dirty_sets` keep their current overlay untouched.
-    pub fn import_overlays(
-        &self,
-        dir: &std::path::Path,
-        dirty_sets: &[(usize, Vec<u64>)],
-    ) -> std::io::Result<()> {
-        self.bus.import_overlays(dir, dirty_sets)
-    }
-
     pub fn read_fifo(&self) -> u8 {
         let mut state = self.state.lock();
         state.fifo.pop_front().unwrap_or(0)

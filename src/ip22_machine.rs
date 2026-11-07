@@ -79,7 +79,7 @@ pub struct Ip22Machine {
     pub(crate) control: Control,
     devices: Devices,
     disks: Disks,
-    topology: Topology,
+    topology: Arc<Topology>,
     /// Where snapshots live: `saves/<name>/` under the working directory.
     saves: std::path::PathBuf,
     /// The SEEQ's NAT handle, from the link it attached.
@@ -93,12 +93,8 @@ struct RollbackCheckpoint {
     /// Snapshot directory (saves/<name>/) — re-used by rollback to reflink
     /// the COW overlays back into place.
     overlay_dir: std::path::PathBuf,
-    /// Per-SCSI-id dirty sector lists from cow.toml at the time of restore.
-    overlay_sets: Vec<(usize, Vec<u64>)>,
-    /// Same, for the second (fullhouse) SCSI controller — kept in a
-    /// separate list/subdirectory (see `capture_rollback_checkpoint`) since
-    /// controller 0 and controller 1 can each have a device at the same id.
-    overlay_sets1: Vec<(usize, Vec<u64>)>,
+    /// Per-disk dirty sector lists from cow.toml at the time of restore.
+    overlay_sets: Vec<(crate::location::Location, Vec<u64>)>,
 
     /// Native-endian RAM bank words. `bank_words[i].len() ==
     /// banks[i].size_bytes / 4` for present banks; populated for all four.
@@ -184,7 +180,7 @@ impl Ip22Machine {
     }
 
     fn disk_refs(&self) -> Vec<DiskRef> {
-        DiskRef::from_records(&self.disks, &self.topology, true)
+        DiskRef::from_records(&self.disks, true)
     }
 
     pub fn new(cfg: MachineConfig) -> Self {
@@ -225,7 +221,7 @@ impl Ip22Machine {
 
         let board_spec = cfg.machine.profile.board().expect("the Indy and Indigo2 profiles have a board");
         let guinness = cfg.machine.profile.guinness();
-        let topology = Topology::new();
+        let topology = Arc::new(Topology::new());
         Self::fill(&cfg, &topology);
 
         // 0. EEPROMs. Real IP22 hardware has two distinct 93-series serial
@@ -708,7 +704,7 @@ impl Ip22Machine {
         }
 
         let control = Control::new();
-        let disks = Disks::new().with_ci(ci_enabled);
+        let disks = Disks::new(topology.clone()).with_ci(ci_enabled);
         Self::bind_scsi(&topology, &hpc3);
         let placed = cfg.placements().and_then(|p| {
             // A test device the caller built occupies gio0 like any other.
@@ -1106,19 +1102,16 @@ impl Ip22Machine {
         let framebuffers = self.board.rex3.as_ref()
             .map(|r| r.snapshot_framebuffers_inmem());
 
-        // Re-read cow.toml (and cow1.toml, for controller 1) so rollback
-        // knows which dirty sectors to import back. The files were just
+        // Re-read cow.toml so rollback knows which dirty sectors to import back. The files were just
         // consumed by load_snapshot but they're tiny and re-reading from
         // page cache is cheap (~µs).
         let overlay_dir = self.saves.join(name);
         let snap = Snapshot::new(&overlay_dir);
         let overlay_sets = snap.read_toml("cow.toml").map(|v| parse_cow_table(&v)).unwrap_or_default();
-        let overlay_sets1 = snap.read_toml("cow1.toml").map(|v| parse_cow_table(&v)).unwrap_or_default();
 
         RollbackCheckpoint {
             overlay_dir,
             overlay_sets,
-            overlay_sets1,
             bank_words,
             framebuffers,
             cpu,
@@ -1150,18 +1143,11 @@ impl Ip22Machine {
             rex3.restore_framebuffers_inmem(rgb, aux);
         }
 
-        // Reflink the overlay back into place. saves/<name>/scsi*.overlay is
-        // unchanged by guest writes (writes go to the live overlay), so this
-        // can re-import directly.
-        self.hpc3.scsi().import_overlays(&cp.overlay_dir, &cp.overlay_sets)
+        // Reflink the overlays back into place. saves/<name>/<location>.overlay
+        // is unchanged by guest writes (writes go to the live overlay), so
+        // this can re-import directly.
+        self.disks.import_overlays(&cp.overlay_dir, &cp.overlay_sets)
             .map_err(|e| format!("rollback: COW overlay import: {}", e))?;
-        if let Some(dev) = self.hpc3.scsi1() {
-            // Controller 1's overlays live in a "ctrl1" subdirectory so a
-            // device at the same id on both controllers never collides on
-            // the same scsi<id>.overlay filename.
-            dev.import_overlays(&cp.overlay_dir.join("ctrl1"), &cp.overlay_sets1)
-                .map_err(|e| format!("rollback: COW overlay import (controller 1): {}", e))?;
-        }
         Ok(())
     }
 
@@ -1336,23 +1322,13 @@ impl Ip22Machine {
         }
         snap.write_chunks_manifest(&chunks).map_err(|e| e.to_string())?;
 
-        // COW overlays per SCSI device, plus a `cow.toml` with the dirty
-        // sector set for each one. Keeps the on-disk filesystem state
-        // consistent with the captured RAM.
-        let overlays = self.hpc3.scsi().export_overlays(&snap.dir)
+        // COW overlays per disk, named by location, plus a `cow.toml` with
+        // the dirty sector set for each one. Keeps the on-disk filesystem
+        // state consistent with the captured RAM.
+        let overlays = self.disks.export_overlays(&snap.dir)
             .map_err(|e| format!("COW overlay export: {}", e))?;
         snap.write_toml("cow.toml", &build_cow_table(overlays))
             .map_err(|e| e.to_string())?;
-        if let Some(dev) = self.hpc3.scsi1() {
-            // Own subdirectory + cow1.toml so controller 1 never collides
-            // with controller 0's scsi<id>.overlay filenames.
-            let ctrl1_dir = snap.dir.join("ctrl1");
-            std::fs::create_dir_all(&ctrl1_dir).map_err(|e| e.to_string())?;
-            let overlays1 = dev.export_overlays(&ctrl1_dir)
-                .map_err(|e| format!("COW overlay export (controller 1): {}", e))?;
-            snap.write_toml("cow1.toml", &build_cow_table(overlays1))
-                .map_err(|e| e.to_string())?;
-        }
         Ok(())
     }
 
@@ -1403,105 +1379,28 @@ impl Ip22Machine {
         let dir = self.saves.join(name);
         let snap = Snapshot::new(&dir);
 
-        // Validate the manifest before reading anything else. Legacy snapshots
-        // (no snapshot.toml) are accepted with a warning. Cross-arch loads are
-        // refused — FPU bit-layout differs between aarch64 and x86_64 and we
-        // don't have migration plumbing yet.
-        let schema_version = match snap.read_manifest()? {
-            Some(m) => {
-                if let Some(other) = &m.machine {
-                    return Err(format!("snapshot {name} is of another machine ({other})"));
+        // Validate the manifest before reading anything else: the host, the
+        // schema, and that build, CPU and disks fit.
+        let m = snap.read_manifest()?.ok_or_else(|| format!("{}: no snapshot.toml", dir.display()))?;
+        if let Some(other) = &m.machine {
+            return Err(format!("snapshot {name} is of another machine ({other})"));
+        }
+        crate::snapshot::check_header(&m, &dir)?;
+        if let Some(rev) = &m.iris_git_rev {
+            if let Some(my_rev) = option_env!("IRIS_GIT_REV") {
+                if rev != my_rev {
+                    eprintln!("load_snapshot: snapshot was captured at iris {} but current build is {}", rev, my_rev);
                 }
-                if m.host_arch != std::env::consts::ARCH {
-                    return Err(format!(
-                        "snapshot host_arch '{}' does not match current host '{}'; cross-arch load is not supported",
-                        m.host_arch, std::env::consts::ARCH
-                    ));
-                }
-                if m.schema_version > SCHEMA_VERSION {
-                    return Err(format!(
-                        "snapshot schema_version {} is newer than this iris build supports ({})",
-                        m.schema_version, SCHEMA_VERSION
-                    ));
-                }
-                if let Some(rev) = &m.iris_git_rev {
-                    if let Some(my_rev) = option_env!("IRIS_GIT_REV") {
-                        if rev != my_rev {
-                            eprintln!("load_snapshot: snapshot was captured at iris {} but current build is {}", rev, my_rev);
-                        }
-                    }
-                }
-
-                // Provenance validation: build features + disk presence/size = hard
-                // error; disk path and nvram = warn. IRIS_SNAPSHOT_SKIP_CHECK=1
-                // downgrades the hard errors to warnings.
-                let skip_check = std::env::var("IRIS_SNAPSHOT_SKIP_CHECK")
-                    .map(|v| v != "0" && !v.is_empty()).unwrap_or(false);
-                let mut fatal: Vec<String> = Vec::new();
-
-                if m.features.is_empty() && m.disks.is_empty() {
-                    eprintln!("load_snapshot: snapshot {} predates provenance recording — skipping disk/feature checks", name);
-                } else {
-                    // Build features must match exactly.
-                    let cur_features = enabled_features();
-                    let snap_features: Vec<String> = m.features.iter()
-                        .filter(|f| !crate::snapshot::RETIRED_FEATURES.contains(&f.as_str()))
-                        .cloned().collect();
-                    if !m.features.is_empty() && snap_features != cur_features {
-                        fatal.push(format!(
-                            "build features differ: snapshot [{}] vs current [{}]",
-                            m.features.join(","), cur_features.join(",")
-                        ));
-                    }
-                    // The CPU model is guest-visible (PRId/FIR, cache geometry) and
-                    // no longer a build flag, so a mismatch is as fatal as a feature one.
-                    if let Some(e) = crate::snapshot::cpu_model_mismatch(
-                        m.cpu_model.as_deref(), self.cpu.model_name()) { fatal.push(e); }
-                    if let Some(e) = crate::snapshot::cache_model_mismatch(
-                        m.cpu_cache.as_deref(), m.cpu_model.as_deref(), self.cpu.cache_kind()) { fatal.push(e); }
-                    // Every recorded disk must still be configured at the same SCSI
-                    // id with the same size. The host *path* is only where the file
-                    // happens to live (it moves when disks are relocated, e.g. into a
-                    // dist/ dir), so a path-only difference is a warning, not fatal —
-                    // a disk's identity for restore is its id + size, not its path.
-                    let disk_refs = self.disk_refs();
-                    for d in &m.disks {
-                        match disk_refs.iter().find(|c| c.id == d.id) {
-                            None => fatal.push(format!(
-                                "snapshot disk SCSI {} ('{}') is not configured in this run", d.id, d.path)),
-                            Some(cur) if cur.size_bytes != d.size_bytes => fatal.push(format!(
-                                "SCSI {} ('{}') size differs: snapshot {} bytes vs current {} bytes",
-                                d.id, d.path, d.size_bytes, cur.size_bytes)),
-                            Some(cur) if cur.path != d.path => eprintln!(
-                                "load_snapshot: SCSI {} path differs: snapshot '{}' vs current '{}' (same size — continuing)",
-                                d.id, d.path, cur.path),
-                            Some(_) => {}
-                        }
-                    }
-                    // nvram mismatch is non-fatal (eeprom state is in the snapshot).
-                    if let Some(nv) = &m.nvram {
-                        if nv != &self.nvram_path {
-                            eprintln!("load_snapshot: nvram differs: snapshot '{}' vs current '{}' (continuing)", nv, self.nvram_path);
-                        }
-                    }
-                }
-
-                if !fatal.is_empty() {
-                    let msg = format!("snapshot provenance mismatch:\n  - {}", fatal.join("\n  - "));
-                    if skip_check {
-                        eprintln!("load_snapshot: {} [IRIS_SNAPSHOT_SKIP_CHECK set — continuing anyway]", msg);
-                    } else {
-                        return Err(format!("{}\n(set IRIS_SNAPSHOT_SKIP_CHECK=1 to override)", msg));
-                    }
-                }
-
-                m.schema_version
             }
-            None => {
-                eprintln!("load_snapshot: no snapshot.toml in {} — treating as legacy v0 (no manifest)", dir.display());
-                0
+        }
+        crate::snapshot::check_provenance(&m, self.cpu.model_name(), self.cpu.cache_kind(), &self.disk_refs())?;
+        // nvram mismatch is non-fatal (eeprom state is in the snapshot).
+        if let Some(nv) = &m.nvram {
+            if nv != &self.nvram_path {
+                eprintln!("load_snapshot: nvram differs: snapshot '{}' vs current '{}' (continuing)", nv, self.nvram_path);
             }
-        };
+        }
+        let schema_version = m.schema_version;
 
         // Device state — read_state picks <base>.bin (v2+) or <base>.toml
         // (legacy). v2 also falls back to .toml if .bin is absent. Every file
@@ -1562,19 +1461,12 @@ impl Ip22Machine {
             }
         }
 
-        // COW overlays — best-effort for backward compatibility with
-        // snapshots saved before overlay capture was added.
+        // COW overlays — best-effort: a snapshot taken with no overlay disks
+        // has none.
         if let Ok(cow_toml) = snap.read_toml("cow.toml") {
             let sets = parse_cow_table(&cow_toml);
-            self.hpc3.scsi().import_overlays(&snap.dir, &sets)
+            self.disks.import_overlays(&snap.dir, &sets)
                 .map_err(|e| format!("COW overlay import: {}", e))?;
-            if let Some(dev) = self.hpc3.scsi1() {
-                if let Ok(cow1_toml) = snap.read_toml("cow1.toml") {
-                    let sets1 = parse_cow_table(&cow1_toml);
-                    dev.import_overlays(&snap.dir.join("ctrl1"), &sets1)
-                        .map_err(|e| format!("COW overlay import (controller 1): {}", e))?;
-                }
-            }
         } else {
             eprintln!("load_snapshot: no cow.toml in snapshot — overlays left unchanged");
         }
@@ -1929,8 +1821,6 @@ mod snapshot_tests {
     fn files(dir: &std::path::Path) -> BTreeSet<String> {
         std::fs::read_dir(dir).unwrap().flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            // The disks' overlays are named for the disks the fixture attaches.
-            .filter(|n| !n.ends_with(".overlay"))
             .collect()
     }
 
@@ -1945,11 +1835,13 @@ mod snapshot_tests {
     fn the_saved_files_keep_their_names() {
         let base = ["snapshot.toml", "chunks.bin", "cpu.bin", "mc.bin", "ioc.bin", "scc.bin", "pit.bin", "ps2.bin",
             "rtc.bin", "eeprom.bin", "scsi.bin", "seeq.bin", "hpc3.bin", "cow.toml"];
-        let second_scsi = ["scsi1.bin", "cow1.toml", "ctrl1"];
+        let second_scsi = ["scsi1.bin"];
+        // The fixture's overlay disk is on the first controller's target 1.
+        let overlay = "hpc3.0.t1.overlay";
         for (kind, extra) in [
-            (Kind::Indy, vec!["rex3.bin"]),
-            (Kind::Indigo2, [&["rex3.bin"][..], &second_scsi].concat()),
-            (Kind::Indigo2Ip28, second_scsi.to_vec()),
+            (Kind::Indy, vec!["rex3.bin", overlay]),
+            (Kind::Indigo2, [&["rex3.bin", overlay][..], &second_scsi].concat()),
+            (Kind::Indigo2Ip28, [&[overlay][..], &second_scsi].concat()),
         ] {
             on_machine(kind, "names", |m| {
                 m.write_snapshot("s").unwrap();
@@ -1966,6 +1858,17 @@ mod snapshot_tests {
                 assert_eq!(stems, keys, "{kind:?}");
             });
         }
+    }
+
+    /// A schema 5 snapshot is refused naming both schemas, before the machine
+    /// is touched.
+    #[test]
+    fn a_schema_5_snapshot_is_refused_naming_both_versions() {
+        on_machine(Kind::Indigo2, "v5", |m| {
+            crate::snapshot::write_schema_5_manifest(&m.saves, "old", None);
+            let e = load(m, "old").unwrap_err();
+            assert!(e.starts_with("error: snapshot ") && e.contains("has schema 5") && e.contains("reads schema 6"), "{e}");
+        });
     }
 
     /// A snapshot from before the second SCSI controller existed has no
