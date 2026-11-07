@@ -8,6 +8,8 @@
 //! its effect at once; the threaded cases use `TestBoard` and retry on busy.
 
 use super::*;
+use crate::test_board::TestBoard;
+use std::sync::atomic::Ordering;
 
 /// A back end that records every job and answers as the test says.
 #[derive(Default)]
@@ -140,6 +142,14 @@ pub(super) fn retry(mut f: impl FnMut() -> bool) {
     panic!("the bus kept answering busy");
 }
 
+/// A fixture with the thread running, freed with the test.
+pub(super) fn threaded() -> (Fixture, TestBoard<Kona>) {
+    let f = Fixture::new();
+    let board = TestBoard::new(f.kona.clone());
+    board.start();
+    (f, board)
+}
+
 mod host;
 pub(super) use host::{attach, TestHost};
 
@@ -147,3 +157,4 @@ mod regs;
 mod bringup;
 mod config;
 mod eeprom;
+mod fifo;

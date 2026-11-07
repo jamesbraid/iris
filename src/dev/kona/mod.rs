@@ -1,5 +1,58 @@
 //! The InfiniteReality (KONA) graphics pipe's front end: the host interface.
 //!
+//! The pipe is a crosstalk-style widget. The processor stores commands to a
+//! command page; a Host Interface Processor on the board takes them, answers
+//! the ones that are about the board itself and passes the ones that draw to
+//! the Geometry Distributor, Geometry Engines, Raster Managers and Display
+//! Generator behind it. This module is the first part: the widget header and
+//! identity registers, the one-wire identity record, the board's flash
+//! EEPROM and the operation the graphics install tool programs it with,
+//! reset, the command FIFO, command framing, DMA and display-list storage.
+//! Drawing is behind the typed job interface in `job`: a later back end
+//! implements `Backend`.
+//!
+//! - `attach`: what a machine gives the board: an interrupt packet sender, an
+//!   inbound DMA handle and the FIFO-drained signal. The machine calls
+//!   `Kona::bus_read` / `bus_write` with offsets inside the 16 MiB aperture.
+//! - `front`: the registers a processor reaches without waiting for the
+//!   command stream, behind one short lock.
+//! - `regs`: which accesses join the stream, which are served at once and
+//!   which wait; the registers the Host Interface Processor owns.
+//! - `pipe`: the Host Interface Processor's state and the command stream it
+//!   runs (framers, pages, contexts, reasons, swaps).
+//! - `frame`, `tables`: command-word framing and the selector tables.
+//! - `dma`: DMA packets, display-list memory and list invocation.
+//! - `flash`: the flash EEPROM and its programming operation.
+//! - `ident`: widget id, one-wire record, configuration block.
+//! - `job`: the back end's interface.
+//!
+//! # Threads
+//!
+//! One thread, `kona-hip`, stands for the Host Interface Processor. The
+//! processor stores into a command FIFO and goes on, as it does on the
+//! board, and a display list the processor invokes can run for as long as
+//! its words take to decode. A store to the command page (and the few other
+//! stream registers) goes into the shared graphics ring (`GFifo`) with no
+//! lock beyond the ring's; a full ring answers the bus busy, never a spin on
+//! the processor's thread. The thread takes a run of stores at a time and
+//! runs them in order. A register the stream changes or the stream reads
+//! (`regs::classify`) is answered busy until the ring is empty and the thread
+//! idle; a register the driver polls while the pipe works is served from the
+//! register file at once.
+//!
+//! Without the thread running (before `start`, in unit tests) a stream store
+//! runs on the caller's thread, in order.
+//!
+//! # Locks
+//!
+//! `Host::front` guards the register file and is held for a few instructions,
+//! never across a call out of the board. `Shared::pipe` holds the Host
+//! Interface Processor's state and the back end in a slot. Whoever works on it
+//! takes it out (the mutex is held for an instant) and puts it back after: the
+//! thread for a batch, a processor only when the ring is empty (a taken slot
+//! is busy). So no board lock is held while the machine's DMA, interrupt and
+//! FIFO handles are called, and none is held across the back end.
+//!
 //! Ported from hw/misc/sgi-kona.c, sgi-kona-ports.c, sgi-kona-dma.c and
 //! sgi-command-port.c in jamesbraid/qemu-sgi-origami.
 
@@ -24,14 +77,23 @@ pub use ident::KonaConfig;
 pub use job::{Backend, BackPort, ContextEvent, Grammar, Job, NullBackend, Reply};
 pub use pipe::LoadSection;
 
-use crate::traits::{Resettable, BUS_BUSY, BUS_ERR, BUS_OK};
+use crate::gfifo::GFifo;
+use crate::traits::{Device, Resettable, BUS_BUSY, BUS_ERR, BUS_OK};
 use front::{Front, Host};
 use parking_lot::{Condvar, Mutex};
 use pipe::Core;
 use regs::{classify, Access};
 use std::fs::File;
-use std::sync::atomic::Ordering::{Relaxed, SeqCst};
+use std::sync::atomic::{AtomicBool, Ordering::{Relaxed, SeqCst}};
 use std::sync::Arc;
+use std::thread::JoinHandle;
+
+/// The host ring under the command stream: 64K stores, as the other
+/// graphics boards' rings are.
+type Ring = GFifo<{ 1 << 16 }>;
+
+/// The most stores the thread looks at before running them.
+const RUN_MAX: usize = 32;
 
 /// The Host Interface Processor's state with the back end it hands jobs to.
 struct Pipe {
@@ -48,6 +110,16 @@ struct Shared {
     /// Signalled when the state is put back: what a monitor or reset waits
     /// on.
     freed: Condvar,
+    ring: Box<Ring>,
+    /// The thread died (its back end panicked): bus accesses fail.
+    dead: AtomicBool,
+    /// The thread runs, so stream stores queue.
+    running: AtomicBool,
+    exit: AtomicBool,
+    /// The thread is parked in `wait_for_work`: a producer wakes it only
+    /// then, so a store reads a line nobody writes instead of locking.
+    asleep: AtomicBool,
+    sleeper: Mutex<Option<std::thread::Thread>>,
 }
 
 /// The Host Interface Processor's state taken out of its slot, put back when
@@ -111,6 +183,62 @@ impl Shared {
         }
     }
 
+    fn wake(&self) {
+        // Store the entry, then look at `asleep`; the thread stores `asleep`,
+        // then looks at the ring. Both sides need the fence for either to
+        // see the other (a store-then-load handshake).
+        std::sync::atomic::fence(SeqCst);
+        if self.asleep.load(SeqCst) {
+            if let Some(t) = self.sleeper.lock().as_ref() {
+                t.unpark();
+            }
+        }
+    }
+
+    /// The thread: sleep until a store waits or `stop` asks. False when the
+    /// thread is to finish. The timeout is only a backstop for a wake the
+    /// fences should never lose.
+    fn wait_for_work(&self) -> bool {
+        *self.sleeper.lock() = Some(std::thread::current());
+        while self.ring.is_empty() && !self.exit.load(SeqCst) {
+            self.asleep.store(true, Relaxed);
+            std::sync::atomic::fence(SeqCst);
+            if self.ring.is_empty() && !self.exit.load(SeqCst) {
+                std::thread::park_timeout(std::time::Duration::from_millis(50));
+            }
+            self.asleep.store(false, Relaxed);
+        }
+        !self.exit.load(SeqCst)
+    }
+
+    /// Run the stores waiting, a run at a time, in order, until the ring is
+    /// empty.
+    fn run_stores(&self) -> bool {
+        let mut run = [(0u32, 0u64); RUN_MAX];
+        let mut worked = false;
+        loop {
+            let n = self.ring.peek_run_at(0, &mut run);
+            if n == 0 {
+                return worked;
+            }
+            worked = true;
+            {
+                let mut guard = self.pipe_spin();
+                let pipe = &mut *guard;
+                for &(off, val) in &run[..n] {
+                    pipe.core.stream_store(&self.host, &mut *pipe.backend, off, val as u32);
+                }
+                pipe.core.reason_drain(&self.host);
+                self.publish(&pipe.core);
+                // Taken out of the ring only now that they have run: a
+                // register that waits for the ring to be empty then finds the
+                // state the stores left.
+                self.ring.consume_n_at(0, n);
+                self.ring.flush_head();
+            }
+        }
+    }
+
     /// What the polled registers read of the stream.
     fn publish(&self, core: &Core) {
         self.host.held_words.store(core.held_words(), SeqCst);
@@ -124,11 +252,42 @@ impl Shared {
         self.host.attach.fifo_low.drained();
     }
 
+    fn thread_main(self: &Arc<Self>) {
+        let _dead = DeadOnPanic(self);
+        while self.wait_for_work() {
+            if self.run_stores() {
+                self.drained();
+            }
+        }
+    }
+
+    /// Run whatever is left in the ring on the calling thread.
+    fn drain_inline(&self) {
+        if self.run_stores() {
+            self.drained();
+        }
+    }
+}
+
+/// Marks the board dead if the thread unwinds: its back end panicked. The
+/// bus then fails visibly instead of answering busy forever to a thread that
+/// is gone.
+struct DeadOnPanic<'a>(&'a Shared);
+
+impl Drop for DeadOnPanic<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.dead.store(true, SeqCst);
+            self.0.running.store(false, SeqCst);
+            crate::dlog!(crate::devlog::LogModule::Kona, "kona: the Host Interface Processor thread panicked; the board is dead");
+        }
+    }
 }
 
 /// The InfiniteReality pipe's host interface.
 pub struct Kona {
     shared: Arc<Shared>,
+    thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 /// How a pipe is built.
@@ -181,12 +340,22 @@ impl KonaBuilder {
             list_running: Default::default(),
             activity: Default::default(),
         };
+        // SAFETY: a zeroed GFifo is an empty one (`GFifo::new`); built in
+        // place because the ring is too big for the stack.
+        let ring: Box<Ring> = unsafe { Box::new_zeroed().assume_init() };
         Ok(Arc::new(Kona {
             shared: Arc::new(Shared {
                 host,
                 pipe: Mutex::new(Some(Box::new(Pipe { core: Core::new(self.cfg, flash), backend: self.backend }))),
                 freed: Condvar::new(),
+                ring,
+                dead: AtomicBool::new(false),
+                running: AtomicBool::new(false),
+                exit: AtomicBool::new(false),
+                asleep: AtomicBool::new(false),
+                sleeper: Mutex::new(None),
             }),
+            thread: Mutex::new(None),
         }))
     }
 }
@@ -201,6 +370,9 @@ impl Kona {
     /// the data. The registers are word-sized: an 8-byte read is two word
     /// reads, high word at the lower address.
     pub fn bus_read(&self, off: u64, size: u32) -> (u32, u64) {
+        if self.shared.dead.load(Relaxed) {
+            return (BUS_ERR, 0);
+        }
         if off >= APERTURE {
             return (BUS_ERR, 0);
         }
@@ -232,6 +404,9 @@ impl Kona {
     /// into two word stores at `off` and `off + 4`, logged: no evidence says
     /// what a real pipe does with one.
     pub fn bus_write(&self, off: u64, size: u32, val: u64) -> u32 {
+        if self.shared.dead.load(Relaxed) {
+            return BUS_ERR;
+        }
         if off >= APERTURE {
             return BUS_ERR;
         }
@@ -262,7 +437,7 @@ impl Kona {
     fn read_now(&self, off: u32) -> u32 {
         use consts::*;
         let s = &*self.shared;
-        let pending = false;
+        let pending = !s.ring.is_empty();
         match off {
             INT_CAUSE => {
                 // Reasons waiting behind an unread one are looked for when
@@ -293,7 +468,7 @@ impl Kona {
         let credit = if s.host.list_running.load(SeqCst) {
             CREDIT_MASK
         } else {
-            let words = s.host.held_words.load(SeqCst);
+            let words = s.host.held_words.load(SeqCst) + s.ring.len() as u32;
             ((words + 1) & !1).min(CREDIT_MASK)
         };
         s.host.front.lock().read(off, credit).unwrap_or_else(|| {
@@ -305,12 +480,28 @@ impl Kona {
     /// Run `f` on the pipe once the stream has run: None, for the bus to
     /// answer busy, while stores wait in the ring or the thread is mid-run.
     fn with_idle_pipe<R>(&self, f: impl FnOnce(&mut Pipe) -> R) -> Option<R> {
-        self.shared.try_pipe().map(|mut p| f(&mut p))
+        let s = &*self.shared;
+        if !s.running.load(SeqCst) {
+            return s.try_pipe().map(|mut p| f(&mut p));
+        }
+        if !s.ring.is_empty() {
+            s.wake();
+            return None;
+        }
+        let mut pipe = s.try_pipe()?;
+        Some(f(&mut pipe))
     }
 
     /// One word of a store. A stream store goes into the ring and nothing
     /// more; the rest is the slow path.
+    #[inline]
     fn write_word(&self, off: u32, val: u32) -> u32 {
+        let s = &*self.shared;
+        if classify(off, true) == Access::Queues && s.running.load(Relaxed) {
+            let ok = s.ring.try_push(off, val as u64);
+            s.wake();
+            return if ok { BUS_OK } else { BUS_BUSY };
+        }
         self.write_words(&[(off, val)])
     }
 
@@ -323,6 +514,15 @@ impl Kona {
             *k = classify(o, true);
         }
         let kinds = &kinds[..words.len()];
+        if kinds.iter().all(|k| *k == Access::Queues) && s.running.load(Relaxed) {
+            let ok = match words {
+                [(o, v)] => s.ring.try_push(*o, *v as u64),
+                [(o0, v0), (o1, v1)] => s.ring.try_push2(*o0, *v0 as u64, *o1, *v1 as u64),
+                _ => unreachable!(),
+            };
+            s.wake();
+            return if ok { BUS_OK } else { BUS_BUSY };
+        }
         if kinds.iter().all(|k| *k == Access::Now) {
             for &(o, v) in words {
                 self.write_now(o, v);
@@ -340,9 +540,9 @@ impl Kona {
             }
             s.publish(core);
         });
-        // Stream stores ran on this thread: the FIFO-low signal is the end of
-        // the run.
-        if done.is_some() && kinds.contains(&Access::Queues) {
+        // Without the thread, stream stores ran on this one: the FIFO-low
+        // signal is the end of the run.
+        if done.is_some() && !s.running.load(SeqCst) && kinds.contains(&Access::Queues) {
             s.drained();
         }
         if done.is_some() { BUS_OK } else { BUS_BUSY }
@@ -385,6 +585,9 @@ impl Kona {
 
     /// Why the pipe stopped taking commands, if it did.
     pub fn failure(&self) -> Option<String> {
+        if self.shared.dead.load(Relaxed) {
+            return Some("kona: the back end panicked on the Host Interface Processor thread; the board is dead".into());
+        }
         self.shared.pipe_wait().core.failed.clone()
     }
 
@@ -407,7 +610,10 @@ impl Kona {
     }
 
     fn reset(&self) {
+        let was_running = self.is_running();
+        Device::stop(self);
         let s = &*self.shared;
+        s.ring.reset();
         {
             let mut pipe = s.pipe_wait();
             pipe.core.reset();
@@ -416,6 +622,60 @@ impl Kona {
         }
         s.host.front.lock().reset();
         s.host.activity.store(false, Relaxed);
+        if was_running {
+            Device::start(self);
+        }
+    }
+}
+
+impl Device for Kona {
+    fn step(&self, _cycles: u64) {}
+
+    fn start(&self) {
+        let mut t = self.thread.lock();
+        if t.is_some() {
+            return;
+        }
+        let s = self.shared.clone();
+        s.exit.store(false, SeqCst);
+        s.running.store(true, SeqCst);
+        *t = Some(
+            std::thread::Builder::new()
+                .name("kona-hip".into())
+                .spawn(move || s.thread_main())
+                .expect("kona thread"),
+        );
+    }
+
+    fn stop(&self) {
+        let Some(t) = self.thread.lock().take() else { return };
+        let s = &*self.shared;
+        s.exit.store(true, SeqCst);
+        s.wake();
+        if let Some(th) = s.sleeper.lock().as_ref() {
+            th.unpark();
+        }
+        let _ = t.join();
+        s.running.store(false, SeqCst);
+        // What the thread had not taken runs here, unless it died: its back
+        // end would only panic again.
+        if !s.dead.load(SeqCst) {
+            s.drain_inline();
+        }
+    }
+
+    fn is_running(&self) -> bool {
+        self.shared.running.load(SeqCst)
+    }
+
+    fn get_clock(&self) -> u64 {
+        0
+    }
+}
+
+impl Drop for Kona {
+    fn drop(&mut self) {
+        Device::stop(self);
     }
 }
 
