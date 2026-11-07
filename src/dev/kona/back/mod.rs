@@ -1,7 +1,5 @@
 //! The InfiniteReality pipe's drawing and display back end.
 //!
-//! Designed for Iris; the QEMU port follows from this design.
-//!
 //! This is the skeleton: a `Backend` that consumes every job, counts it by
 //! kind and completes retrace requests at once, as `NullBackend` does, but
 //! carries the pipe's configuration (raster managers, texture memory per
@@ -28,6 +26,8 @@ pub use bound::BoardSet;
 use super::ident::KonaConfig;
 use super::handle::DisplayHandle;
 use super::job::{BackPort, Backend, Grammar, Job, Reply};
+use store::layout::{BufferConfig, Layout, Refusal};
+use store::PixelStore;
 use std::io::{self, Write};
 
 /// What the back end is told about the pipe it draws for.
@@ -137,11 +137,56 @@ pub struct KonaBackend {
     /// Held between `attach` and `stop`, for the display thread once there is
     /// one.
     handle: Option<DisplayHandle>,
+    store: PixelStore,
+    /// Buffer-configuration commands that got a layout, and those refused by
+    /// reason (indexed by `Refusal`).
+    layouts: u64,
+    refused: [u64; Refusal::ALL.len()],
+    /// Buffer-configuration commands that were not ten words, and whether that
+    /// has been logged.
+    malformed: u64,
+    malformed_logged: bool,
+    /// The layout of the last buffer configuration that got one.
+    last_layout: Option<Layout>,
 }
+
+/// The GL grammar's buffer-configuration selector.
+const GL_BUFFER_CONFIG: u32 = 0x1;
 
 impl KonaBackend {
     pub fn new(cfg: BackendConfig) -> Self {
-        KonaBackend { cfg, counts: [0; Kind::ALL.len()], resets: 0, handle: None }
+        KonaBackend {
+            store: PixelStore::new(cfg.managed.0, cfg.managed.1),
+            cfg,
+            counts: [0; Kind::ALL.len()],
+            resets: 0,
+            handle: None,
+            layouts: 0,
+            refused: [0; Refusal::ALL.len()],
+            malformed: 0,
+            malformed_logged: false,
+            last_layout: None,
+        }
+    }
+
+    /// A buffer configuration: lay its planes out in a pixel's words, within
+    /// the host's budget, or count why not. The token layer will keep the
+    /// layout per context; until then the last one is shown by `kona status`.
+    fn buffer_config(&mut self, args: &[u32]) {
+        let Ok(words) = <&[u32; BufferConfig::WORDS]>::try_from(args) else {
+            self.malformed += 1;
+            if !std::mem::replace(&mut self.malformed_logged, true) {
+                crate::dlog!(crate::devlog::LogModule::Kona, "kona: buffer configuration of {} words, not {}; refused", args.len(), BufferConfig::WORDS);
+            }
+            return;
+        };
+        match Layout::new(&BufferConfig::from_words(words), 0, self.cfg.record_words()) {
+            Ok(l) => {
+                self.layouts += 1;
+                self.last_layout = Some(l);
+            }
+            Err(why) => self.refused[why as usize] += 1,
+        }
     }
 
     pub fn config(&self) -> &BackendConfig {
@@ -156,7 +201,33 @@ impl KonaBackend {
         writeln!(w, "managed area      {} x {}", c.managed.0, c.managed.1)?;
         writeln!(w, "record bound      {} words per pixel", c.record_words())?;
         writeln!(w, "display handle    {}", if self.handle.is_some() { "attached" } else { "detached" })?;
+        writeln!(w, "pixel store       {} word arrays of {} x {}", self.store.allocated().len(), self.store.width(), self.store.height())?;
+        writeln!(w, "layouts           {} made", self.layouts)?;
+        if self.malformed != 0 {
+            writeln!(w, "  refused         {} x not {} words", self.malformed, BufferConfig::WORDS)?;
+        }
+        for r in Refusal::ALL {
+            let n = self.refused[r as usize];
+            if n != 0 {
+                writeln!(w, "  refused         {n} x {r:?}")?;
+            }
+        }
+        if let Some(l) = &self.last_layout {
+            writeln!(w, "  last            colour {:?} depth {:?} stencil {:?} multisample {:?} accumulation {:?} ({} words)", l.colour, l.depth, l.stencil, l.multisample, l.accumulation, l.words())?;
+        }
         writeln!(w, "resets            {}", self.resets)
+    }
+
+    /// The words of one pixel that have an array, as the planes hold them.
+    fn pix(&self, x: u32, y: u32, w: &mut dyn Write) -> io::Result<()> {
+        if self.store.word_slot(x, y, 0).is_none() {
+            return writeln!(w, "({x}, {y}) is outside the {} x {} managed area", self.store.width(), self.store.height());
+        }
+        let words = self.store.allocated();
+        for i in &words {
+            writeln!(w, "word {i:2}  {:#010x}", self.store.read(x, y, *i))?;
+        }
+        writeln!(w, "{} word arrays allocated", words.len())
     }
 
     fn counters(&self, w: &mut dyn Write) -> io::Result<()> {
@@ -174,6 +245,7 @@ impl Backend for KonaBackend {
             Job::Retrace { tag } => port.retrace_done(tag),
             Job::DmaIn { .. } => return Reply::Unclaimed,
             Job::FirmwareStart { .. } => port.set_managed_size(self.cfg.managed.0, self.cfg.managed.1),
+            Job::Command { grammar: Grammar::Gl, selector: GL_BUFFER_CONFIG, args, .. } => self.buffer_config(args),
             _ => {}
         }
         Reply::Done
@@ -185,6 +257,8 @@ impl Backend for KonaBackend {
 
     fn reset(&mut self) {
         self.resets += 1;
+        self.store.reset();
+        self.last_layout = None;
     }
 
     fn stop(&mut self) {
@@ -195,7 +269,11 @@ impl Backend for KonaBackend {
         match args {
             ["status"] => self.status(w)?,
             ["counters"] => self.counters(w)?,
-            ["help"] | [] => writeln!(w, "kona: status|counters")?,
+            ["pix", x, y] => {
+                let (Ok(x), Ok(y)) = (x.parse::<u32>(), y.parse::<u32>()) else { return Ok(false) };
+                self.pix(x, y, w)?
+            }
+            ["help"] | [] => writeln!(w, "kona: status|counters|pix X Y")?,
             _ => return Ok(false),
         }
         Ok(true)
@@ -260,7 +338,7 @@ mod tests {
         assert!(text.contains("record bound      32 words per pixel"), "{text}");
         let (known, text) = monitor(&kona, &["counters"]);
         assert!(known && text.contains("GL commands       0"), "{text}");
-        assert!(!monitor(&kona, &["pix", "1", "2"]).0);
+        assert!(!monitor(&kona, &["shot", "x.png"]).0);
     }
 
     /// The monitor reaches the back end through the board's own command.
@@ -306,6 +384,79 @@ mod tests {
         }
         let (_, text) = monitor(&kona, &["counters"]);
         assert!(text.contains("dropped words     3"), "{text}");
+    }
+
+    fn backend() -> KonaBackend {
+        KonaBackend::new(BackendConfig::for_pipe(&KonaConfig::default()))
+    }
+
+    fn run(b: &mut KonaBackend, args: &[&str]) -> (bool, String) {
+        let mut out = Vec::new();
+        let known = b.monitor(args, &mut out).unwrap();
+        (known, String::from_utf8(out).unwrap())
+    }
+
+    /// A GL buffer configuration is laid out within the budget; one the hardware
+    /// documents do not cover is refused and counted; so is one of the wrong
+    /// length; the monitor shows them.
+    #[test]
+    fn a_buffer_configuration_gets_a_layout_or_a_counted_refusal() {
+        let mut b = backend();
+        assert!(run(&mut b, &["status"]).1.contains("layouts           0 made"));
+        b.buffer_config(&[0, 10, 0, 1, 0, 4, 24, 8, 25, 0]);
+        b.buffer_config(&[0, 8, 0, 0, 0, 2, 0, 0, 0, 0]);
+        b.buffer_config(&[0, 8, 0]);
+        b.buffer_config(&[0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let text = run(&mut b, &["status"]).1;
+        assert!(text.contains("layouts           1 made"), "{text}");
+        assert!(text.contains("refused         2 x not 10 words"), "{text}");
+        assert!(text.contains("refused         1 x Samples"), "{text}");
+        assert!(text.contains("(13 words)"), "{text}");
+    }
+
+    /// A framed GL command reaches the layout through `Backend::job`; the
+    /// same selector in the textport grammar does not.
+    #[test]
+    fn a_framed_gl_buffer_configuration_is_laid_out() {
+        use super::super::front::{Front, Host};
+        use super::super::pipe::Core;
+        let t = TestHost::new();
+        let cfg = KonaConfig::default();
+        let host = Host {
+            front: parking_lot::Mutex::new(Front::new(&cfg)),
+            attach: attach(&t),
+            held_words: Default::default(),
+            reasons_waiting: Default::default(),
+            list_running: Default::default(),
+            activity: Default::default(),
+        };
+        let mut core = Core::new(cfg, super::super::flash::Flash::fresh());
+        let mut b = backend();
+        let args = [0, 10, 0, 1, 0, 4, 24, 8, 25, 0];
+        let mut send = |grammar, selector, args: &[u32]| {
+            b.job(&mut BackPort { core: &mut core, host: &host }, Job::Command { grammar, selector, args, packed: 0, handled: false });
+        };
+        send(Grammar::Textport, 1, &args);
+        send(Grammar::Gl, 1, &args);
+        send(Grammar::Gl, 1, &args[..3]);
+        let text = run(&mut b, &["status"]).1;
+        assert!(text.contains("layouts           1 made") && text.contains("1 x not 10 words"), "{text}");
+        assert!(text.contains("(13 words)"), "{text}");
+    }
+
+    #[test]
+    fn pix_shows_the_allocated_words_of_a_pixel() {
+        let mut b = backend();
+        let (known, text) = run(&mut b, &["pix", "3", "4"]);
+        assert!(known && text.contains("0 word arrays allocated"), "{text}");
+        b.store.write(3, 4, 2, 0xabcd);
+        let text = run(&mut b, &["pix", "3", "4"]).1;
+        assert!(text.contains("word  2  0x0000abcd") && text.contains("1 word arrays"), "{text}");
+        assert!(run(&mut b, &["pix", "5000", "0"]).1.contains("outside"));
+        assert!(!run(&mut b, &["pix", "x", "0"]).0);
+        // A reset zeroes the store in place.
+        b.reset();
+        assert!(run(&mut b, &["pix", "3", "4"]).1.contains("word  2  0x00000000"));
     }
 
     #[test]

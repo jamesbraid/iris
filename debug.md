@@ -498,7 +498,8 @@ guest. `y = 0` is the top display line throughout.
 
 | Command | Description |
 |---|---|
-| `kona status` | The pipe the back end draws for: raster managers, texture memory per manager, board set, managed area, the most words a pixel's record may take, whether the display handle is attached |
+| `kona status` | The pipe the back end draws for: raster managers, texture memory per manager, board set, managed area, the most words a pixel's record may take, whether the display handle is attached, the pixel store's allocated word arrays, buffer configurations laid out and refused by reason, and the last layout |
+| `kona pix <x> <y>` | The words of one pixel's record that have an array in the pixel store, as the planes hold them |
 | `kona counters` | Jobs the back end has taken, by kind, with the words the command framers dropped |
 
 `iris-ci screenshot` captures the composed screen from any board, also

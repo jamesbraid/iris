@@ -52,7 +52,7 @@ pub fn managed_pixels(width: u32, height: u32) -> u64 {
 }
 
 /// The words a pixel's record may take, or 0 when the budget gives less than
-/// the smallest class (which the sheets do not cover).
+/// the smallest class (which the hardware documents do not cover).
 pub fn record_words(board_set: BoardSet, rm_count: u32, width: u32, height: u32) -> u32 {
     let pixels = managed_pixels(width, height);
     if pixels == 0 {

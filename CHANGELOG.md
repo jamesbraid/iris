@@ -33,6 +33,11 @@ hashes are given where a change is easiest to understand by reading the commit.
   `kona status` and `kona counters`. Words the command framers drop because
   no command is open for them reach the back end as `Job::Dropped`. Nothing
   draws yet.
+- The KONA back end holds the pixel store (one array per word position of a
+  pixel's record, allocated when first written and published through fixed
+  pointers), lays a buffer configuration out in a pixel's words within the host's
+  budget (`kona status` shows the result and the refusals), and has packers for
+  the host and bus pixel formats. `kona pix <x> <y>` shows a pixel's words.
 - A recorded command stream (the `KONAREC` file QEMU's KONA model writes) can be
   replayed into the front end: stores and loads in order, the board's DMA reads
   served from the recording and its writes compared. The replay is exact only up
