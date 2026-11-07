@@ -382,13 +382,14 @@ impl<
     const NAME: &'static str = match MODEL {
         model::R4400 => "R4400",
         model::R5000 => "R5000",
-        model::R12000 => "R12000",
+        model::R12000 | model::R14000_FUEL => "R12000",
         _ => "shadow",
     };
     const CACHE_KIND: &'static str = "shadow";
     const R10K_FAMILY: bool = Self::R10K_CACHE_OPS;
     const R10K_CACHE_OPS: bool = Self::R10K;
     const SECONDARY_TAG_MASK: u64 = if Self::R10K_CACHE_OPS { R10K_L2_TAG_MASK } else { u64::MAX };
+    const UNCACHED_CODE_VIEWS: bool = MODEL == model::R14000_FUEL;
 }
 
 impl<
@@ -804,7 +805,7 @@ pub type R12000O2ShadowCache =
 /// part (`R12000ShadowCache` with `R14000_PRID`), not read from a Fuel. Like
 /// the Octane's R14000 it reports "R12000" as `NAME`.
 pub type R14000FuelShadowCache =
-    ShadowCache<32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0f23, 0x0000_0900, 64, { model::R12000 }>;
+    ShadowCache<32768, 64, 32768, 32, 2097152, 128, true, 0x0000_0f23, 0x0000_0900, 64, { model::R14000_FUEL }>;
 
 /// SGI O2 R10000 (IP32): the IP28 model with 64-byte secondary-cache lines.
 ///

@@ -3116,7 +3116,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     /// (`jitv2::code_key`). `None` above the page table.
     #[cfg(feature = "jitv2")]
     pub(crate) fn jitv2_code_key(&self, phys_addr: u64, uncached: bool) -> Option<crate::cpu::jitv2::jitv2::Pfn> {
-        crate::cpu::jitv2::jitv2::code_key(phys_addr, self.jitv2_frames, uncached & self.jitv2_uncached_views)
+        crate::cpu::jitv2::jitv2::code_key(phys_addr, self.jitv2_frames, C::UNCACHED_CODE_VIEWS & uncached & self.jitv2_uncached_views)
     }
 
     /// Tell the JIT this machine's uncached bus view decodes code differently
@@ -3124,9 +3124,12 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
     /// are compiled from `code_bus`, which must serve a page's bytes through
     /// the view its key names (see `jitv2::key_bus_addr`). Call while the
     /// executor is being built, before it is shared or run. Machines without
-    /// such views never call this and keep one page per frame.
+    /// such views never call this and keep one page per frame. Only a model
+    /// with `CpuModel::UNCACHED_CODE_VIEWS` can opt in: the other models
+    /// compile the view out of page tracking.
     #[cfg(feature = "jitv2")]
     pub fn enable_jitv2_uncached_views(&mut self, code_bus: Arc<dyn BusDevice>) {
+        assert!(C::UNCACHED_CODE_VIEWS, "{} has no uncached code view", C::NAME);
         self.jitv2.lock().enable_uncached_views();
         self.jitv2_uncached_views = true;
         self.jitv2_code_bus = Some(code_bus);
@@ -3196,7 +3199,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         // so the frame range check rejects them. Where the uncached bus view
         // differs from the cached one, an uncached fetch keys a page of its
         // own (`code_key`).
-        let Some(pfn) = crate::cpu::jitv2::jitv2::code_key(phys_addr, self.jitv2_frames, uncached & self.jitv2_uncached_views) else {
+        let Some(pfn) = crate::cpu::jitv2::jitv2::code_key(phys_addr, self.jitv2_frames, C::UNCACHED_CODE_VIEWS & uncached & self.jitv2_uncached_views) else {
             self.clear_pcp();
             return;
         };

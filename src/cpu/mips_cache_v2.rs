@@ -649,6 +649,12 @@ pub trait CpuModel: MipsCache {
     /// Bits `Index_Store_Tag` keeps for the secondary cache: all of them, except
     /// on the R10000 family, whose reserved tag bits read as zero (R10000 UM p. 270).
     const SECONDARY_TAG_MASK: u64 = u64::MAX;
+    /// The machine's uncached bus view can decode code differently from its
+    /// cached view (the Fuel's boot PROM window), so an uncached fetch may key
+    /// a code page of its own (`jitv2::code_key`). A constant of the model, so
+    /// the executor of every other model compiles the view out of its page
+    /// tracking.
+    const UNCACHED_CODE_VIEWS: bool = false;
 }
 
 pub trait MipsCache: Send + Sync {
@@ -1470,11 +1476,14 @@ pub mod model {
     pub const R5000: u8 = 1;
     pub const R10000: u8 = 2;
     pub const R12000: u8 = 3;
+    /// The Fuel's R14000: the R12000 programming model, plus the uncached
+    /// code view (`CpuModel::UNCACHED_CODE_VIEWS`).
+    pub const R14000_FUEL: u8 = 4;
 
     /// The R10000 family: the R10000 and the parts that follow it, which share
     /// one programming model.
     pub const fn r10k_family(model: u8) -> bool {
-        matches!(model, R10000 | R12000)
+        matches!(model, R10000 | R12000 | R14000_FUEL)
     }
 }
 
