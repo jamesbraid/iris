@@ -24,7 +24,10 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use crate::topology::Topology;
+use crate::attach::{attach_devices, Ctx};
+use crate::location::{Hop, Location};
+use crate::scsi::ScsiPort;
+use crate::topology::{Row, Topology};
 use crate::config::{MachineConfig, MachineProfile};
 use crate::cpu::parts::{self, Part};
 use crate::cpu::mips_core::CyclesPtr;
@@ -138,7 +141,7 @@ pub struct O2Machine {
     pub(crate) control: Control,
     devices: Devices,
     disks: Arc<Disks>,
-    /// The places the machine has; the rows are filled in a later commit.
+    /// The places the machine has, with the SCSI controllers bound to theirs.
     topology: Topology,
     /// Where snapshots live: `saves/<name>/` under the working directory.
     saves: std::path::PathBuf,
@@ -147,12 +150,8 @@ pub struct O2Machine {
     /// Set while the machine is stopped: the service thread leaves the
     /// devices alone, so nothing changes memory under a snapshot.
     paused: Arc<AtomicBool>,
-    /// The disks as a snapshot records them, to refuse one taken on others.
-    disk_refs: Vec<crate::snapshot::DiskRef>,
     /// The flash file, recorded in a snapshot's manifest.
     flash_path: Option<String>,
-    /// The `scratch = true` volume, for the CI socket's scratch commands.
-    scratch_path: Option<std::path::PathBuf>,
 }
 
 /// What an O2 snapshot's manifest names as its machine.
@@ -166,6 +165,27 @@ pub const O2_PROM_FILE: &str = "ip32prom.rev4.18.bin";
 pub const CPUS: &[&Part] = &[&parts::R5000_180, &parts::R10000_250, &parts::R12000_400];
 
 impl O2Machine {
+    /// The places an O2 has: the PCI bus, its two onboard SCSI controllers
+    /// (the internal one at device 1, the external connector at 2) with
+    /// targets 1 to 7. The Ethernet is built in, so no target takes a
+    /// DaynaPort. Touches no hardware.
+    pub(crate) fn fill(_: &MachineConfig, t: &Topology) {
+        let at = |hops: &[Hop]| hops.iter().fold(Location::root(), |l, h| l.join(*h));
+        let add = |l: Location, row: Row| t.add(l, row).expect("rows are added once");
+        add(Location::root(), Row::fixed("MACE"));
+        add(at(&[Hop::pci(0)]), Row::fixed("PCI bus"));
+        for (n, label) in ["SCSI internal", "SCSI external"].into_iter().enumerate() {
+            let ctl = at(&[Hop::pci(0), Hop::pos(n as u8 + 1)]);
+            add(ctl.clone(), Row::fixed(label).ctl(n as u8).onboard("aic7880"));
+            t.scsi(&ctl, 1..=7, false);
+        }
+    }
+
+    /// The hard disks as a snapshot records them, to refuse one taken on others.
+    fn disk_refs(&self) -> Vec<crate::snapshot::DiskRef> {
+        crate::snapshot::DiskRef::from_records(&self.disks, &self.topology, false)
+    }
+
     pub fn new(cfg: &MachineConfig) -> Result<Self, String> {
         let part = MachineProfile::O2Ip32.part(cfg.machine.cpu.as_deref())?;
         let o2 = &cfg.o2;
@@ -185,14 +205,11 @@ impl O2Machine {
             Some(mac) => Some(crate::config::parse_mac(mac).map_err(|e| format!("network.mac: {e}"))?),
             None => None,
         };
-        // The SCSI devices, from the same `[scsi.N]` tables as the other
-        // machines; `controller` is the bus (0 internal, 1 external). The
-        // buses are filled before the controllers exist.
+        // The controllers own their buses; the devices are attached to them
+        // below, once the machine is built.
+        let topology = Topology::new();
+        Self::fill(cfg, &topology);
         let scsi = [crate::dev::aic7880::Aic7880::new_bus(), crate::dev::aic7880::Aic7880::new_bus()];
-        let attached = crate::scsi::attach_from_config(cfg, Some("ip32"), &|c| {
-            scsi.get(c as usize)
-                .ok_or_else(|| format!("controller {c} (an O2 has controllers 0 and 1)"))
-        })?;
         let opts = Ip32Options {
             scsi: Some(scsi),
             flash_file: Some(cfg.nvram.clone().into()),
@@ -204,10 +221,10 @@ impl O2Machine {
         if !cfg.no_audio {
             bus.mace.audio.enable_output(cfg.audio.clone());
         }
-        if let Some(d) = attached.daynaports.first() {
-            return Err(format!("{}: kind = \"daynaport\" is not available on the O2", crate::config::scsi_label(d.controller, d.id)));
+        for (n, ctl) in bus.scsi.lock().unwrap().iter().enumerate() {
+            let at = topology.controller(n as u8).expect("fill added a row for every controller");
+            topology.bind(&at, Arc::new(ScsiPort::new(ctl.clone()))).expect("the controller row takes its handle once");
         }
-        let scratch_path = attached.scratch;
         eprintln!(
             "iris: O2 with {} MB ({}), {}",
             kits.iter().sum::<u32>(),
@@ -334,12 +351,8 @@ impl O2Machine {
         let control = Control::new();
         let disks = Arc::new(Disks::new(
             bus.scsi.lock().unwrap().iter().map(|c| c.clone() as Arc<dyn crate::disks::DiskController>).collect(),
-        ));
-        // A snapshot's disks by slot (controller * 16 + id) and size.
-        let disk_refs: Vec<crate::snapshot::DiskRef> = attached.tables.iter()
-            .filter(|t| !t.is_cdrom)
-            .map(|t| crate::snapshot::DiskRef { id: t.slot, path: t.path.clone(), size_bytes: t.size_bytes })
-            .collect();
+        ).with_ci(cfg.ci));
+        attach_devices(&cfg.all_placements(&topology)?, cfg, Some(&Ctx { devices: &devices, disks: &disks }), &topology)?;
         Ok(Self {
             memory,
             bus,
@@ -354,13 +367,11 @@ impl O2Machine {
             control,
             devices,
             disks,
-            topology: Topology::new(),
+            topology,
             saves: "saves".into(),
             boot,
             paused: Arc::new(AtomicBool::new(false)),
-            disk_refs,
             flash_path: Some(cfg.nvram.clone()),
-            scratch_path,
         })
     }
 
@@ -595,7 +606,7 @@ impl O2Machine {
         snap.ensure_dir().map_err(|e| e.to_string())?;
         let mut manifest = Manifest::for_current_save();
         manifest.machine = Some(SNAPSHOT_MACHINE.into());
-        manifest.disks = self.disk_refs.clone();
+        manifest.disks = self.disk_refs();
         manifest.nvram = self.flash_path.clone();
         manifest.cpu_model = Some(self.cpu.model_name().to_string());
         manifest.cpu_cache = Some(self.cpu.cache_kind().to_string());
@@ -660,7 +671,7 @@ impl O2Machine {
             ));
         }
         // As the Indy: build, CPU and disks must match.
-        crate::snapshot::check_provenance(&m, self.cpu.model_name(), self.cpu.cache_kind(), &self.disk_refs)?;
+        crate::snapshot::check_provenance(&m, self.cpu.model_name(), self.cpu.cache_kind(), &self.disk_refs())?;
         let sv = m.schema_version;
         let state = |base: &str| snap.read_state(base, sv).map_err(|e| format!("{base}: {e}"));
         let chunks = snap.read_chunks_manifest().map_err(|e| format!("chunks.bin: {e}"))?;
@@ -793,7 +804,6 @@ impl Workstation for O2Machine {
     fn save_snapshot(&mut self, name: &str) -> Result<(), String> { O2Machine::save_snapshot(self, name) }
     fn load_snapshot(&mut self, name: &str) -> Result<(), String> { O2Machine::load_snapshot(self, name) }
 
-    fn scratch_path(&self) -> Option<std::path::PathBuf> { self.scratch_path.clone() }
 }
 
 /// GBE's picture, scanned out of RAM about sixty times a second and handed
@@ -1173,6 +1183,7 @@ mod device_tests {
     use super::*;
     use crate::exit_persistence_tests::Machine as Kind;
     use crate::traits::{Resettable, Saveable};
+    use crate::topology::Family;
     use crate::workstation_tests::with_shared;
 
     fn o2<R>(f: impl FnOnce(&mut O2Machine) -> R) -> R {
@@ -1259,5 +1270,74 @@ mod device_tests {
         assert!(!b.post_done.load(Ordering::Relaxed) && b.inside.load(Ordering::Relaxed));
         assert_eq!(b.cu1_saved.load(Ordering::Relaxed), 0x1234_5000);
         assert_eq!(b.save_state(), a.save_state());
+    }
+}
+
+/// Disks are placed through the socket map.
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+    use crate::attach::attach_device;
+    use crate::config::{Placement, ScsiDeviceConfig};
+    use crate::exit_persistence_tests::Machine;
+    use crate::topology::Family;
+    use crate::workstation_tests::with_shared;
+
+    fn loc(s: &str) -> Location {
+        s.parse().unwrap()
+    }
+
+    fn filled() -> Topology {
+        let t = Topology::new();
+        O2Machine::fill(&MachineConfig::default(), &t);
+        t
+    }
+
+    /// Every controller the bus made is on its row, and the shared O2's
+    /// disks sit on the internal controller.
+    #[test]
+    fn o2_rows_bind_every_handle() {
+        with_shared(Machine::O2, |m| {
+            let bound = m.topology().buses::<ScsiPort>();
+            let at: Vec<String> = bound.iter().map(|b| b.0.to_string()).collect();
+            assert_eq!(at, ["pci0.1", "pci0.2"]);
+            let disks: Vec<String> = m.disks().records().iter().map(|r| r.at.to_string()).collect();
+            assert_eq!(disks, ["pci0.1.t1", "pci0.1.t2", "pci0.1.t3", "pci0.1.t4", "pci0.1.t5"]);
+            assert!(bound[0].1.bus().has_target(5));
+        });
+    }
+
+    /// Option slots belong to the PCI core; until then the map has the bus
+    /// and the two onboard controllers only.
+    #[test]
+    fn o2_fill_has_no_option_slot_yet() {
+        let t = filled();
+        let e = t.claim(&loc("pci0.3"), "aic7880", Family::Pci, false, "").unwrap_err();
+        assert!(e.contains("no such location"), "{e}");
+        assert!(t.claim(&loc("pci0.2.t7"), "hdd", Family::Scsi, false, "").is_ok());
+        assert!(t.claim(&loc("pci0.2.t8"), "hdd", Family::Scsi, false, "").is_err(), "the limit stays 7");
+    }
+
+    /// The Ethernet is built in: the claim says which row refused.
+    #[test]
+    fn a_daynaport_on_the_o2_is_refused_by_the_claim_with_the_row_named() {
+        let t = filled();
+        let p = Placement { device: "daynaport".into(), at: loc("pci0.1.t3"), opts: Default::default() };
+        let e = attach_device(&p, &MachineConfig::default(), None, &t).unwrap_err();
+        assert_eq!(e, "error: pci0.1.t3: daynaport is not supported on this SCSI bus");
+    }
+
+    /// `[scsi.20]` names controller 1, target 4.
+    #[test]
+    fn legacy_controller_one_lands_on_pci0_2() {
+        let t = filled();
+        let mut cfg = MachineConfig::default();
+        cfg.scsi.clear();
+        cfg.scsi.insert(20, ScsiDeviceConfig { path: "x.img".into(), ..Default::default() });
+        let p = cfg.scsi_placements(&t).unwrap();
+        assert_eq!(p[0].at, loc("pci0.2.t4"));
+        cfg.scsi.insert(1, ScsiDeviceConfig { controller: 1, path: "y.img".into(), ..Default::default() });
+        let ats: Vec<String> = cfg.scsi_placements(&t).unwrap().iter().map(|p| p.at.to_string()).collect();
+        assert_eq!(ats, ["pci0.2.t1", "pci0.2.t4"]);
     }
 }
