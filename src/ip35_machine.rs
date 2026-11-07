@@ -5,9 +5,10 @@
 //!
 //! Selected with `[machine] profile = "origin3200_one_c_ip35"` or
 //! `"origin3200_two_c_ip35"`. The shared keys select the PROM, NVRAM, memory
-//! and SCSI devices, and `[fuel]` selects the serial console and writable
-//! flash of the first C-brick: the I-brick's base I/O is the Fuel's, an
-//! XBridge with an IOC3, a storage controller and USB. Each C-brick has its own
+//! and disks, and `[fuel]` selects the serial console and writable flash of
+//! the first C-brick. The I-brick's base I/O is an XBridge with an IOC3, USB
+//! and a QLogic Fibre Channel adapter at the bus slot where the Fuel has its
+//! SCSI controller; the I-brick has no SCSI controller. Each C-brick has its own
 //! L1; the first carries the console. The nodes are the shared Bedrock node
 //! (`ip35::node`); what a brick adds is its processor row, its L1 identity
 //! and, for the first, the I-brick.
@@ -20,8 +21,10 @@
 //!   report is not established.
 //! - Which low nibble of the board identification word a C-brick presents
 //!   is a choice: 2 is the row for the 400 MHz, 8 MiB part.
-//! - The I-brick's Fibre Channel card is stood in for by the Fuel's SCSI
-//!   controller, and its IEEE 1394 controller is not modelled.
+//! - The I-brick's IEEE 1394 controller is not modelled; the PROM prints
+//!   `No 1394 Firewire found on BASEIO` and carries on.
+//! - The Fibre Channel slot runs 64-bit data phases. That is a property of
+//!   the I-brick's board wiring, inferred from the PROM's behaviour alone.
 //!
 //! Board composition ported from hw/mips/sgi/sn1-node.c
 //! in jamesbraid/qemu-sgi-origami.
@@ -36,7 +39,7 @@ use crate::dev::bedrock_pi::{BedrockPi, Population};
 use crate::dev::heart::{host_clock, Clock};
 use crate::dev::ioc3::{Ioc3, Ioc3Config};
 use crate::dev::ioc3_eth::Ioc3Eth;
-use crate::dev::isp12160::Isp12160;
+use crate::dev::isp2200::Isp2200;
 use crate::dev::l1::{AttachedBrick, ComputeNode, L1Config};
 use crate::dev::odyssey::{PiGfx, PI_GFX_REGS};
 use crate::dev::ohci::Ohci;
@@ -112,7 +115,9 @@ pub(crate) struct BaseIo {
     pub xbridge: Arc<XBridge>,
     pub ioc3: Arc<Ioc3>,
     pub eth: Arc<Ioc3Eth>,
-    pub scsi: Arc<Isp12160>,
+    /// The I-brick's Fibre Channel adapter, where the Fuel has its SCSI
+    /// controller; the I-brick has none.
+    pub storage: Arc<Isp2200>,
     pub usb: Arc<Ohci>,
     pub serial: [Arc<CiSerialBackend>; 3],
 }
@@ -278,7 +283,7 @@ impl Ip35Machine {
         ));
         monitor.register_device(first.node.md.physical().clone());
         monitor.register_device(first.node.l1.clone());
-        monitor.register_device(base.scsi.clone());
+        monitor.register_device(base.storage.clone());
         // `ps2 type` and friends: the keyboard and mouse from the monitor.
         monitor.register_device(base.ioc3.ps2());
         for brick in &bricks_built {
@@ -286,7 +291,7 @@ impl Ip35Machine {
             brick.node.flash.register_locks();
             brick.node.md.register_locks();
         }
-        base.scsi.register_locks();
+        base.storage.register_locks();
         base.ioc3.register_locks();
         base.xbridge.register_locks();
         let (mut nat, mut frames) = (None, None);
@@ -325,8 +330,8 @@ impl Ip35Machine {
 
     fn attach_scsi(cfg: &MachineConfig, base: &BaseIo) -> Result<Option<PathBuf>, String> {
         let attached = attach_from_config(cfg, Some("fuel"), &|channel| {
-            base.scsi.bus_for_channel(channel)
-                .ok_or_else(|| format!("controller {channel} (an Origin 3200 has channels 0 and 1)"))
+            base.storage.bus_for_channel(channel)
+                .ok_or_else(|| format!("controller {channel} (an Origin 3200 has the I-brick's one Fibre Channel loop, channel 0)"))
         })?;
         if let Some(device) = attached.daynaports.first() {
             return Err(format!("{}: kind = \"daynaport\" is not available on the Origin 3200",
@@ -536,12 +541,18 @@ impl BaseIo {
         ioc3.attach_timekeeper(timekeeper);
         ioc3.set_serial_backend(0, serial[1].clone());
         ioc3.set_serial_backend(1, serial[2].clone());
-        let scsi = Arc::new(Isp12160::new(Isp12160::new_bus(), Isp12160::new_bus()));
+        let storage = Arc::new(Isp2200::new_at(0, Isp2200::new_bus()));
         let heartbeat = Arc::new(AtomicU64::new(0));
-        scsi.set_heartbeat(heartbeat.clone());
         ioc3.set_heartbeat(heartbeat.clone());
         eth.set_heartbeat(heartbeat);
-        xbridge.attach(15, 1, scsi.clone());
+        xbridge.attach(15, 1, storage.clone());
+        // Whether this slot runs 64-bit data phases is a property of the
+        // I-brick's board wiring, which no held document gives. It is inferred
+        // from the PROM's behaviour: the control block and rings it builds
+        // are right only if the bridge reverses each doubleword of the
+        // adapter's DMA, as it does on a slot running 64-bit data phases;
+        // on a 32-bit slot the halves come out exchanged.
+        xbridge.set_dma_64bit(15, 1, true);
         xbridge.attach(15, 4, ioc3.clone());
         let usb = Ohci::new();
         usb.set_clock(host_clock());
@@ -561,36 +572,36 @@ impl BaseIo {
             xbridge.set_pci_irq(15, slot, 0, xbridge.pin_line(15, slot));
         }
         ioc3.connect_superio_interrupt(xbridge.pin_line(15, 0));
-        let (reset_ioc3, reset_eth, reset_scsi, reset_usb) = (ioc3.clone(), eth.clone(), scsi.clone(), usb.clone());
+        let (reset_ioc3, reset_eth, reset_storage, reset_usb) = (ioc3.clone(), eth.clone(), storage.clone(), usb.clone());
         xbridge.set_reset_output(Arc::new(move |port| {
             if port == 15 {
                 reset_ioc3.power_on();
                 reset_eth.power_on();
-                reset_scsi.power_on();
+                reset_storage.power_on();
                 reset_usb.power_on();
             }
         }));
-        Ok(Self { xbridge, ioc3, eth, scsi, usb, serial })
+        Ok(Self { xbridge, ioc3, eth, storage, usb, serial })
     }
 
     fn power_on(&self) {
         self.xbridge.power_on();
         self.ioc3.power_on();
         self.eth.power_on();
-        self.scsi.power_on();
+        self.storage.power_on();
         self.usb.power_on();
     }
 
     fn start(&self) {
         self.ioc3.start();
         self.eth.start();
-        self.scsi.start();
+        self.storage.start();
         self.usb.start();
     }
 
     fn stop(&self) {
         self.usb.stop();
-        self.scsi.stop();
+        self.storage.stop();
         self.eth.stop();
         self.ioc3.stop();
     }
@@ -782,13 +793,13 @@ impl Workstation for Ip35Machine {
         self.scratch.as_deref()
     }
     fn disc_changer(&self) -> Option<Arc<dyn DiscChanger>> {
-        Some(self.base.scsi.clone() as Arc<dyn DiscChanger>)
+        Some(self.base.storage.clone() as Arc<dyn DiscChanger>)
     }
     fn pending_chd_sync_count(&self) -> usize {
-        (0..2).map(|channel| self.base.scsi.bus_for_channel(channel).unwrap().pending_chd_sync_count()).sum()
+        self.base.storage.bus_for_channel(0).unwrap().pending_chd_sync_count()
     }
     fn flush_disks(&self) -> std::io::Result<()> {
-        (0..2).try_for_each(|channel| self.base.scsi.bus_for_channel(channel).unwrap().flush())
+        self.base.storage.bus_for_channel(0).unwrap().flush()
     }
     fn sync_chd_disks(
         &self,
@@ -796,7 +807,7 @@ impl Workstation for Ip35Machine {
         progress: &mut dyn FnMut(usize, usize, f32),
         cancel: &dyn Fn() -> bool,
     ) -> std::io::Result<usize> {
-        let buses: Vec<_> = (0..2).map(|channel| self.base.scsi.bus_for_channel(channel).unwrap()).collect();
+        let buses = vec![self.base.storage.bus_for_channel(0).unwrap()];
         ScsiBus::sync_chd_disks(&buses, only, progress, cancel)
     }
     fn net_frames(&self) -> Option<Arc<AtomicU64>> { self.frames.clone() }

@@ -140,3 +140,25 @@ fn a_cabled_processor_takes_its_nodes_processor_connection() {
         }
     });
 }
+
+/// The I-brick fits the Fibre Channel adapter at the bus slot where the Fuel
+/// has its SCSI controller, and a link reset of the port resets it as well.
+#[test]
+fn the_i_brick_fits_a_fibre_channel_adapter_in_the_storage_slot() {
+    use crate::dev::isp2200::{mbox, reg};
+    use crate::pci::PciBusDevice;
+    big_stack(|| {
+        let dir = Scratch::new("fc");
+        let m = Ip35Machine::new(&config(&dir.0, MachineProfile::Origin3200OneCIp35)).unwrap();
+        let fc = &m.base.storage;
+        assert_eq!(fc.config().read(0), 0x2200_1077);
+        fc.config().write(1, 3);
+        fc.config().write(5, 0x02000000);
+        fc.bar_write(1, reg::mbox(0), u32::from(mbox::NOP), 2);
+        fc.bar_write(1, reg::HCCR, 0x5000, 2);
+        assert_eq!(fc.bar_read(1, reg::mbox(0), 2), u32::from(mbox::COMPLETE));
+        assert_eq!(m.base.xbridge.widget(0).unwrap().write32(0x2f4, 1), BUS_OK);
+        assert_eq!(fc.config().command(), 0);
+        assert_eq!(fc.bar_read(1, reg::mbox(1), 2), 0x4953);
+    });
+}

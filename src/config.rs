@@ -620,8 +620,8 @@ pub enum MachineProfile {
     /// configured by the shared keys and the `[tezro]` section; see
     /// `src/ip53_machine.rs`.
     TezroIp53,
-    /// SGI Origin 3200 (IP35) with one C-brick and an I-brick. The I-brick's
-    /// Fibre Channel card is stood in for by the Fuel's SCSI controller.
+    /// SGI Origin 3200 (IP35) with one C-brick and an I-brick, whose root
+    /// disk is behind a Fibre Channel adapter.
     Origin3200OneCIp35,
     /// SGI Origin 3200 (IP35) with two C-bricks joined by a direct NUMAlink
     /// cable, and an I-brick on the first.
