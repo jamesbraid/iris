@@ -150,6 +150,12 @@ impl ScsiBus {
         self.targets.lock()
     }
 
+    /// Take the table if no command holds it, for a controller that must not
+    /// wait for a disk.
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, Targets>> {
+        self.targets.try_lock()
+    }
+
     /// Whether the table is held; for the lock registry.
     pub fn is_locked(&self) -> bool {
         self.targets.is_locked()
