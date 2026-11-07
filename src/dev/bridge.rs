@@ -551,12 +551,13 @@ impl Bridge {
     pub fn attach(self: &Arc<Self>, slot: u8, dev: Arc<dyn PciFunction>) {
         let slot = slot as usize;
         assert!(slot < DEVICES, "Bridge has {DEVICES} slots");
-        dev.connect_dma(Arc::new(SlotDma { bridge: Arc::downgrade(self), slot }));
-        let pin = dev.config().interrupt_pin();
+        dev.state().connect_dma(Arc::new(SlotDma { bridge: Arc::downgrade(self), slot }));
+        let pin = dev.state().config().interrupt_pin();
         if (1..=4).contains(&pin) {
             let router = Arc::new(PciPin { bridge: Arc::downgrade(self) });
-            dev.connect_interrupt(IrqLine::new(router, (slot * 4 + pin as usize - 1) as u32));
+            dev.state().connect_irq(IrqLine::new(router, (slot * 4 + pin as usize - 1) as u32));
         }
+        dev.attached();
         self.slots.write()[slot] = Some(dev);
         self.publish_bars();
     }
@@ -704,7 +705,7 @@ impl Bridge {
     /// to reset.
     pub fn reset_pci(&self) {
         for d in self.slots.read().iter().flatten() {
-            d.config().reset();
+            d.state().config().reset();
         }
         self.publish_bars();
     }
@@ -1045,7 +1046,7 @@ impl Bridge {
             self.config_master_timeout(slot, reg);
             return true;
         };
-        let cfg = dev.config();
+        let cfg = dev.state().config();
         let i = (reg >> 2) as usize;
         let shift = 8 * (reg & 3);
         let mask = (u64::MAX >> (64 - 8 * size)) << shift;
@@ -1067,7 +1068,7 @@ impl Bridge {
         let n = host.len();
         let target = base.wrapping_add(if swap { woff } else { woff ^ (width - n) as u32 });
         let claimed = self.slots.read().iter().flatten().find_map(|d| {
-            let (bar, boff) = d.config().decode(space, target)?;
+            let (bar, boff) = d.state().config().decode(space, target)?;
             Some((d.clone(), bar, boff))
         });
         let Some((dev, bar, boff)) = claimed else {
@@ -1607,7 +1608,7 @@ impl Saveable for Bridge {
     fn save_state(&self) -> toml::Value {
         let microlan = self.microlan.lock().as_ref().map_or(toml::Value::Boolean(false), |bus| bus.save_state());
         let configs: Vec<toml::Value> = self.slots.read().iter()
-            .map(|f| f.as_ref().map_or(toml::Value::Boolean(false), |f| f.config().save_state()))
+            .map(|f| f.as_ref().map_or(toml::Value::Boolean(false), |f| f.state().config().save_state()))
             .collect();
         let st = self.st.lock();
         let lines: Vec<u8> = st.pci_lines.iter().map(|&l| u8::from(l)).collect();
@@ -1642,7 +1643,7 @@ impl Saveable for Bridge {
         }
         for (slot, (f, saved)) in slots.iter().zip(configs).enumerate() {
             match (f, saved.as_bool()) {
-                (Some(f), None) => f.config().load_state(saved).map_err(|e| format!("slot {slot}: {e}"))?,
+                (Some(f), None) => f.state().config().load_state(saved).map_err(|e| format!("slot {slot}: {e}"))?,
                 (None, Some(false)) => {}
                 _ => return Err(format!("slot {slot}: the saved bus has a different function there")),
             }

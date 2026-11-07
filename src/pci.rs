@@ -14,4 +14,4 @@ pub use config::{
     PCI_COMMAND_IO, PCI_COMMAND_MEMORY, PCI_INTA, Bar, BarAt, BarRun, BarRunSink, PciBar, PciConfig, PciConfigPolicy,
     PciLanes, PciRegisterPolicy, Space, bar_runs,
 };
-pub use function::{DevFn, PciDma, PciDmaStatus, PciFunction};
+pub use function::{DevFn, PciDma, PciDmaStatus, PciFunction, PciFunctionState};
