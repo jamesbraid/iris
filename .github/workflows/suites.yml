@@ -318,11 +318,12 @@ jobs:
       # per cell:
       #
       #            interp  jitv2
-      #   r4400     124     126
-      #   r5000     108     110
+      #   r4400      48      50
+      #   r5000      35      37
       #
-      # Interpreter numbers measured 2026-09-12. Hardware passes 240/240 on both
-      # parts, so every one of these is an emulator bug with a confirmed
+      # Measured 2026-11-08 on all four cells, test by test the same with the
+      # suite built by GCC 12.4 and by GCC 16.2.1. Hardware passes 240/240 on
+      # both parts, so every one of these is an emulator bug with a confirmed
       # counter-example — see cpu-tests/docs/findings.md. jitv2 implies tcache
       # (since 2026-10-01), which makes L1-D write-through, so
       # cache/hit_inv_discards fails its 2 checks there by design — see
@@ -334,7 +335,7 @@ jobs:
       - name: Result
         if: always()
         env:
-          CPUTEST_BASELINE: ${{ matrix.cpu == 'r4400' && (matrix.engine == 'jitv2' && 126 || 124) || (matrix.engine == 'jitv2' && 110 || 108) }}
+          CPUTEST_BASELINE: ${{ matrix.cpu == 'r4400' && (matrix.engine == 'jitv2' && 50 || 48) || (matrix.engine == 'jitv2' && 37 || 35) }}
         run: |
           {
             echo "### ${{ matrix.cpu }} / ${{ matrix.engine }}"
