@@ -61,6 +61,7 @@ use super::bits::sextract32;
 use super::board::Board;
 use super::consts::{tex, ODSY_DID_MAIN_SHIFT, ODSY_PLANE_MASK_SHIFT};
 use super::field::{Codec, Field, Layout, FIELD_FOUR, FIELD_INDEX, FIELD_ONE, FIELD_PACKED, FIELD_TWO};
+use super::regs::buzz::{ReadHeader, WriteHeader};
 use super::view::{Rows, View, MAX_DIM};
 use super::vram::{Format, Surface, ADDR_MASK, DRAWABLE, PITCH_MASK};
 
@@ -85,6 +86,10 @@ pub(super) struct Side {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct CopyOperands {
     pub w: [u32; 8],
+    /// Word 4, decoded once.
+    pub read: ReadHeader,
+    /// Word 7, decoded once.
+    pub write: WriteHeader,
 }
 
 /// Word 7 bits 4:0, the format the copy writes (the Odyssey RE notes).
@@ -97,7 +102,7 @@ impl CopyOperands {
     pub fn decode(op: &[u32]) -> CopyOperands {
         let mut w = [0; 8];
         w.copy_from_slice(&op[..8]);
-        CopyOperands { w }
+        CopyOperands { w, read: ReadHeader::new(w[4]), write: WriteHeader::new(w[7]) }
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -105,18 +110,17 @@ impl CopyOperands {
     }
 
     pub fn src(&self) -> Side {
-        let w = &self.w;
-        let front = w[4] >> 31 != 0;
+        let (w, r) = (&self.w, self.read);
         Side {
             base: w[0] & ADDR_MASK,
             drawable: w[0] & DRAWABLE != 0,
             x: w[1] & 0xffff,
             y: w[1] >> 16,
             stride: w[2] & PITCH_MASK,
-            pixel_log2: ((w[4] >> 16) & 0xf) as u8 + 1,
-            at: 2 * (if front { (w[4] >> 20) & 0xf } else { (w[4] >> 24) & 0xf }) as u8,
-            bytes: 2 << ((w[4] >> 13) & 7),
-            format: w[4] & 0xff,
+            pixel_log2: (r.pixel_size().bits() | (r.pixel_size_b19() as u32) << 3) as u8 + 1,
+            at: 2 * (if r.front() { r.field_a() } else { r.field_b() }) as u8,
+            bytes: 2 << r.size_field(),
+            format: r.code() << 3 | r.class(),
         }
     }
 
@@ -139,16 +143,16 @@ impl CopyOperands {
     }
 
     pub fn dst(&self) -> Side {
-        let w = &self.w;
+        let (w, o) = (&self.w, self.write);
         Side {
             base: w[5] & ADDR_MASK,
             drawable: w[5] & DRAWABLE != 0,
             x: w[6] & 0xffff,
             y: w[6] >> 16,
             stride: (w[2] >> 16) & PITCH_MASK,
-            pixel_log2: ((w[7] >> 16) & 0xf) as u8 + 1,
+            pixel_log2: (o.psize().bits() | (o.raw() >> 19 & 1) << 3) as u8 + 1,
             at: 2 * ((w[2] >> 12) & 0xf) as u8,
-            bytes: 2 << ((w[7] >> 13) & 7),
+            bytes: 2 << o.size_field(),
             format: 0,
         }
     }
@@ -241,11 +245,10 @@ impl Board {
         let from = side_rows(&src, src_codec(src.at), src_base);
         // A drawable source's front is the buffer its window shows, as a
         // DMA read's is (Board::read_buffer()): buffer 0 the A field, 1 the B.
-        let w4 = c.w[4];
         let ab = src.drawable.then(|| {
-            [(w4 >> 20) & 0xf, (w4 >> 24) & 0xf].map(|u| side_rows(&Side { at: 2 * u as u8, ..src }, src_codec(2 * u as u8), src_base))
+            [c.read.field_a(), c.read.field_b()].map(|u| side_rows(&Side { at: 2 * u as u8, ..src }, src_codec(2 * u as u8), src_base))
         });
-        let front = w4 >> 31 != 0;
+        let front = c.read.front();
         let to = side_rows(&dst, dst_codec, dst_base);
         let (ox, oy) = if src.drawable { (self.win.read_origin[0], self.win.read_origin[1]) } else { (0, 0) };
         let (dx0, dy0) = if dst.drawable { (self.win.origin[0], self.win.origin[1]) } else { (0, 0) };
@@ -409,7 +412,7 @@ impl Board {
         let (views, select) = match ab {
             None => ([from.v, from.v], CopySelect::Fixed(0)),
             Some(f) => {
-                let front = c.w[4] >> 31 != 0;
+                let front = c.read.front();
                 let select = if self.read_drawable_offscreen() {
                     CopySelect::Fixed(self.read_buffer(front, 0, 0) as usize & 1)
                 } else {
