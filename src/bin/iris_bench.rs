@@ -28,8 +28,8 @@ use serde::Deserialize;
 // library: this binary, the in-process runner and the GUI all need them, and
 // "what accuracy means" should have exactly one definition.
 use iris::bench_report::{
-    fmt_rate, host_info, parse_block, reference_entry, MachineInfo, ReferenceTable, Row, Run,
-    RunSettings, EXPECT_EXC,
+    fmt_rate, host_info, parse_block, reference_entry, GuestStep, MachineInfo, ReferenceTable,
+    Row, Run, RunSettings, EXPECT_EXC, GUEST_OUTPUT_MAX,
 };
 use iris::bench_runner::{self, BenchOptions};
 use iris::cpu::parts::{self, Part};
@@ -356,6 +356,40 @@ struct Step {
     /// Run it, but do not record a row (cleanup).
     #[serde(default)]
     skip_timing: bool,
+    /// Regex that pulls a number out of the step's output, for a benchmark
+    /// that reports its own figure. The first capture group is the number, or
+    /// the whole match when the pattern has none. It lands in the result next
+    /// to the host timing.
+    #[serde(default)]
+    metric: Option<String>,
+}
+
+/// The number `pattern` finds in `output`, if it finds one.
+fn extract_metric(pattern: &str, output: &str) -> Result<Option<f64>, String> {
+    let re = regex::Regex::new(pattern).map_err(|e| format!("metric {pattern:?}: {e}"))?;
+    Ok(re.captures(output).and_then(|c| {
+        let m = c.get(1).or_else(|| c.get(0))?;
+        m.as_str().trim().replace(',', "").parse().ok()
+    }))
+}
+
+/// The last `max` bytes of `s`, noting how much was cut from the front.
+fn keep_tail(s: &str, max: usize) -> String {
+    if s.len() <= max { return s.to_string(); }
+    let mut at = s.len() - max;
+    while !s.is_char_boundary(at) { at += 1; }
+    format!("[{} bytes cut]\n{}", at, &s[at..])
+}
+
+/// Fail a steps file up front for a mistake that would otherwise surface
+/// halfway through a long run.
+fn check_steps(steps: &[Step]) -> Result<(), String> {
+    for s in steps {
+        if let Some(m) = &s.metric {
+            regex::Regex::new(m).map_err(|e| format!("step {}: metric {m:?}: {e}", s.name))?;
+        }
+    }
+    Ok(())
 }
 
 /// Wrap a guest command so it runs under a Bourne shell with a sane PATH,
@@ -473,7 +507,8 @@ fn baseline(guest: &impl Guest) -> Result<f64, String> {
     Ok(best)
 }
 
-/// A row for a step that has no timing to report.
+/// A row for a step that has no timing to report. The caller adds what the
+/// guest printed.
 fn untimed_row(step: &Step, status: &str) -> Row {
     Row {
         name: step.name.clone(),
@@ -487,6 +522,7 @@ fn untimed_row(step: &Step, status: &str) -> Row {
         checksum: "0x0000000000000000".into(),
         golden: "0x0000000000000000".into(),
         status: status.into(),
+        guest: None,
     }
 }
 
@@ -519,9 +555,24 @@ fn run_steps(guest: &impl Guest, steps: &[Step], baseline: f64) -> Result<(Vec<R
 
         let r = guest.run(&wrap(&step.cmd))?;
         if step.skip_timing { continue; }
+        let metric = match &step.metric {
+            Some(p) => extract_metric(p, &r.stdout)?,
+            None => None,
+        };
+        let seen = GuestStep {
+            exit: r.exit,
+            output: keep_tail(&r.stdout, GUEST_OUTPUT_MAX),
+            metric,
+        };
         if r.exit != 0 {
             println!("  {:<22} FAILED (exited {})", step.name, r.exit);
-            rows.push(untimed_row(step, "FAILED"));
+            let last = tail(r.stdout.trim_end(), 3);
+            if !last.is_empty() {
+                for l in last.lines() { println!("      {}", l); }
+            }
+            let mut row = untimed_row(step, "FAILED");
+            row.guest = Some(seen);
+            rows.push(row);
             continue;
         }
 
@@ -537,8 +588,15 @@ fn run_steps(guest: &impl Guest, steps: &[Step], baseline: f64) -> Result<(Vec<R
                 String::new()
             }
         );
+        if let Some(p) = &step.metric {
+            match seen.metric {
+                Some(v) => println!("      metric {}", v),
+                None => println!("      metric {:?} found nothing in the output", p),
+            }
+        }
         let mut row = untimed_row(step, "UNCHECKED");
         row.ns = ns;
+        row.guest = Some(seen);
         // Nothing here is checksummed: these are IRIX's own tools against
         // IRIX's own filesystem, and their output is not ours to predict.
         rows.push(row);
@@ -551,6 +609,7 @@ fn run_irix(ci: &Ci, steps_path: &Path, label: &str) -> Result<Run, String> {
         .map_err(|e| format!("{}: {}", steps_path.display(), e))?;
     let file: StepFile = toml::from_str(&text)
         .map_err(|e| format!("{}: {}", steps_path.display(), e))?;
+    check_steps(&file.step).map_err(|e| format!("{}: {}", steps_path.display(), e))?;
 
     // Identify the guest before anything else: a result recorded against the
     // wrong disk image is worse than no result.
@@ -1246,12 +1305,13 @@ mod tests {
         have: Vec<&'static str>,
         failing: Vec<&'static str>,
         broken: Option<&'static str>,
+        output: &'static str,
         log: std::cell::RefCell<Vec<String>>,
     }
 
     impl FakeGuest {
         fn new() -> Self {
-            FakeGuest { have: vec![], failing: vec![], broken: None, log: Default::default() }
+            FakeGuest { have: vec![], failing: vec![], broken: None, output: "", log: Default::default() }
         }
     }
 
@@ -1261,7 +1321,7 @@ mod tests {
             if let Some(b) = self.broken {
                 if cmd.contains(b) { return Err("iris-ci run failed: timed out".into()); }
             }
-            let mut out = String::new();
+            let mut out = self.output.to_string();
             if self.have.iter().any(|p| cmd.contains(&probe_command(p))) {
                 out.push_str("IRISBENCH-HAVE\n");
             }
@@ -1274,6 +1334,7 @@ mod tests {
         Step {
             name: name.into(), unit: "op".into(), work: 10, setup: None,
             cmd: cmd.into(), requires: requires.map(String::from), skip_timing: false,
+            metric: None,
         }
     }
 
@@ -1344,5 +1405,74 @@ mod tests {
         g.broken = Some("hang-cmd");
         let steps = [step("a", "ok-cmd", None), step("b", "hang-cmd", None), step("c", "ok-cmd", None)];
         assert!(run_steps(&g, &steps, 0.0).is_err());
+    }
+
+    #[test]
+    fn metric_takes_the_first_capture_group() {
+        let out = "Dhrystones per Second:                      555555.6\nother 12\n";
+        let m = extract_metric(r"Dhrystones per Second:\s+([0-9.]+)", out).unwrap();
+        assert_eq!(m, Some(555555.6));
+        // No group: the whole match is the number.
+        assert_eq!(extract_metric(r"[0-9]+", "abc 42 def 7").unwrap(), Some(42.0));
+        assert_eq!(extract_metric(r"MIPS: ([0-9,]+)", "MIPS: 1,234").unwrap(), Some(1234.0));
+    }
+
+    #[test]
+    fn metric_that_does_not_match_or_is_not_a_number_is_none() {
+        assert_eq!(extract_metric(r"throughput: ([0-9.]+)", "no figure here").unwrap(), None);
+        assert_eq!(extract_metric(r"name: (\w+)", "name: abc").unwrap(), None);
+    }
+
+    #[test]
+    fn a_bad_metric_pattern_is_an_error_not_a_panic() {
+        assert!(extract_metric("([", "x").is_err());
+        let mut s = step("a", "c", None);
+        s.metric = Some("([".into());
+        assert!(check_steps(&[s]).is_err());
+    }
+
+    #[test]
+    fn long_output_keeps_its_tail_on_a_character_boundary() {
+        assert_eq!(keep_tail("short", 16), "short");
+        let s = format!("{}END", "é".repeat(10));
+        let k = keep_tail(&s, 5);
+        assert!(k.ends_with("END"), "{k}");
+        assert!(k.starts_with("[18 bytes cut]\n"), "{k}");
+    }
+
+    #[test]
+    fn step_output_and_metric_are_kept_in_the_result() {
+        let mut g = FakeGuest::new();
+        g.output = "Dhrystones per Second: 1000.5\n";
+        let mut s = step("dhry", "run-it", None);
+        s.metric = Some(r"Second:\s+([0-9.]+)".into());
+        let (rows, _) = run_steps(&g, &[s], 0.0).unwrap();
+        let guest = rows[0].guest.as_ref().unwrap();
+        assert_eq!(guest.output, "Dhrystones per Second: 1000.5\n");
+        assert_eq!(guest.metric, Some(1000.5));
+        assert_eq!(guest.exit, 0);
+        // And it survives the trip through the JSON result file.
+        let json = serde_json::to_string(&rows[0]).unwrap();
+        let back: Row = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.guest.unwrap().metric, Some(1000.5));
+    }
+
+    #[test]
+    fn a_failed_step_keeps_what_it_printed() {
+        let mut g = FakeGuest::new();
+        g.failing = vec!["bad-cmd"];
+        g.output = "boom\n";
+        let (rows, _) = run_steps(&g, &[step("bad", "bad-cmd", None)], 0.0).unwrap();
+        assert_eq!(rows[0].status, "FAILED");
+        let guest = rows[0].guest.as_ref().unwrap();
+        assert_eq!((guest.exit, guest.output.as_str()), (1, "boom\n"));
+    }
+
+    #[test]
+    fn rows_without_guest_output_serialise_as_before() {
+        let g = FakeGuest::new();
+        let (mut rows, _) = run_steps(&g, &[step("a", "c", Some("nothere"))], 0.0).unwrap();
+        let json = serde_json::to_string(&rows.remove(0)).unwrap();
+        assert!(!json.contains("guest"), "{json}");
     }
 }

@@ -44,7 +44,32 @@ pub struct Row {
     pub checksum: String,
     pub golden: String,
     pub status: String,
+    /// What a guest-OS step printed. Only `iris-bench irix` fills it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest: Option<GuestStep>,
 }
+
+/// How a step of the guest-OS suite (`bench/irix/`) ended and what it printed.
+///
+/// Those steps are IRIX's own tools and benchmark binaries copied into the
+/// guest, and the figure a benchmark prints about itself, such as Dhrystones
+/// per second, is often the number a reader wants. The host timing around the
+/// step cannot replace it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GuestStep {
+    /// The command's exit status.
+    pub exit: i32,
+    /// stdout and stderr as the guest's tty delivered them, cut to the last
+    /// `GUEST_OUTPUT_MAX` bytes.
+    pub output: String,
+    /// The number the step's `metric` pattern pulled out of `output`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<f64>,
+}
+
+/// Most output kept per step. A step is a benchmark, not a log, and a result
+/// file should stay readable.
+pub const GUEST_OUTPUT_MAX: usize = 16 * 1024;
 
 impl Row {
     /// Work units per second. The unit is the kernel's own, so this is only
@@ -366,6 +391,7 @@ pub fn parse_block(text: &str) -> Result<Parsed, String> {
             checksum: f[8].to_string(),
             golden: f[9].to_string(),
             status: f[10].to_string(),
+            guest: None,
         });
     }
 
