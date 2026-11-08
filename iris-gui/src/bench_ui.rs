@@ -824,6 +824,7 @@ mod tests {
             name: name.into(), unit: unit.into(), iters: 1, work, ns,
             icount: work, count: 0, exc: 0,
             checksum: "0x0".into(), golden: "0x0".into(), status: "OK".into(),
+            guest: None,
         }
     }
 
