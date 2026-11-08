@@ -54,6 +54,13 @@ Indy can be put next to published figures for a real one, plus a Whetstone mix
 [clanker/testing/benchmark-suite-gotchas.md](clanker/testing/benchmark-suite-gotchas.md)
 before adding a kernel.
 
+To ask whether a change made the emulator slower, compare two `iris` builds
+with `iris-bench ab --a BASE --b BRANCH` (or `make -C bench ab A=BASE B=BRANCH`):
+paired, shuffled rounds on the same guest image, flagged only when the median
+and best runs agree, with a bootstrap interval and a noise figure beside each
+kernel so a quiet "no change" can be told from a noisy one. See
+"Comparing two builds" in [bench/README.md](bench/README.md).
+
 `bench/irix/` is the other half: real workloads under a booted IRIX (filesystem,
 buffer cache, IRIX's own tools, X on REX3), driven over `iris-ci`.
 

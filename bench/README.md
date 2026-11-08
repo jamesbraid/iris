@@ -361,6 +361,162 @@ efficiency rankings.
 
 ---
 
+## Comparing two builds
+
+"Is my branch slower?" is hard to answer on a shared machine: load drifts,
+about one run in ten comes out 25-35% slow for reasons that have nothing to do
+with the build, and the guest image is rebuilt now and then, which changes the
+instructions per iteration and so the rates. `iris-bench ab` is the paired
+answer. Build the `iris` binary at the base and at the candidate, copy both
+out of their target directories, and:
+
+```sh
+iris-bench ab --a ./iris-base --b ./iris-branch --label-a base --label-b branch
+iris-bench ab --a ./iris-base --b ./iris-branch --pin 8-14 --rounds 7
+make ab A=./iris-base B=./iris-branch ROUNDS=7 PIN=8-14   # the same, from bench/
+```
+
+(`make ab` takes `ROUNDS`, `PIN`, `ELF` and `CPU` as well.)
+
+Both builds run the same guest image, one process at a time, A and B in a fresh
+random order each round (5 rounds by default; 7 or more is better). The image
+defaults to the one linked into the `iris-bench` you run, and the output names
+it by suite id; pass `--elf FILE` to hold it fixed across a bisect that spans a
+rebuild of `bench/prebuilt/`. `--pin CPULIST` (Linux) runs every process on the
+same host cores, which should be physical cores with no SMT sibling busy.
+`--cpu` selects the emulated CPU, `--quick` is not available because the
+shorter run is chosen when an in-process machine is built.
+
+### How a kernel gets flagged
+
+Each round gives one cost figure per side per kernel (nanoseconds per guest
+instruction). A kernel is flagged `SLOWER` when both the **median** B/A ratio
+and the **best-round** B/A ratio are above 1 + `--threshold` (3% by default),
+and `faster` when both are below 1/(1 + threshold). A median that moved alone
+is load; a best round that moved alone is one lucky sample. With fewer than
+three rounds nothing is flagged. The rule is a heuristic, chosen because it is
+robust to the one-run-in-ten outlier and cheap to read; it is not a hypothesis
+test, and it does not come from the literature.
+
+Two columns show how far to trust it:
+
+* **paired B/A [95% CI]**: each round's A and B ran back to back, so their
+  ratio cancels slow drift in host load. The column is the median of those
+  per-round ratios with a percentile bootstrap confidence interval (Efron): the
+  rounds resampled with replacement 10,000 times, the median of each resample,
+  the central 95%. The seed is a constant, so the same rounds print the same
+  interval. It is information, not the verdict: with five to seven rounds the
+  interval is close to the range of the ratios, so it excludes 1.0 only when
+  every round agrees, and one spoiled round in ten is normal here. Read it as
+  "how far apart could these be".
+* **noise**: the robust scatter of the per-round ratios (1.4826 times their
+  median absolute deviation, over their median). It is the run's own estimate of
+  what an A/A comparison would show, and a result has to stand clear of it. A
+  row with no flag and noise above the threshold is marked `inconclusive`: "no
+  flag" only means "no change" when the scatter is smaller than the change being
+  looked for. A flag whose effect (the weaker of its two ratios) is smaller than
+  the noise is also `inconclusive`, because the same build could have produced
+  it. If the suite row's noise is above the threshold the table says the host was
+  noisy. Fix it with more rounds (9 or more on a loaded host) or quieter cores.
+  To check a suspicious result directly, run `ab` with the same binary as A and B.
+
+The table also keeps the per-side median and best round in guest MIPS. The suite
+row is treated like a kernel, on whole-run totals. Where `perf stat` works
+(Linux, `perf_event_paranoid` permitting) it reports host instructions and
+cycles per guest instruction for the whole run; elsewhere that block is left
+out and the rest is unchanged. It warns if a kernel's guest instructions per
+iteration differ between the two runs, which means the guest code was not held
+fixed. Host instructions per guest instruction that stay put while cycles rise
+point at code layout and branch behaviour rather than extra work, and are easy
+to miss by counting instructions alone.
+
+The raw rounds, run order, seed, bootstrap settings and host description are
+saved as `ab-<labelA>-vs-<labelB>.json` beside the table (`.md`) in `--out`
+(default `bench/build/results`); attach the table to a performance PR.
+
+Limits. The result describes this host, these two binaries and this image. `ab`
+randomises the order of the two runs in each round; it does **not** randomise
+code layout, link order or environment size, and those move speed by several
+percent with no change in work (Mytkowicz et al. measured it). A flag therefore
+means "this pair of binaries differs": confirm with the host instruction count,
+a rerun of the suspect kernel, and the build matrix (default features,
+`lightning`, `jitv2`, and `jitv2` with `IRIS_JIT_DISPATCH=off`).
+
+### Method and prior art
+
+* Measurement bias: T. Mytkowicz, A. Diwan, M. Hauswirth, P. F. Sweeney,
+  "Producing Wrong Data Without Doing Anything Obviously Wrong!", ASPLOS 2009
+  (DOI 10.1145/1508244.1508275). Innocuous setup details such as link order and
+  environment size change measured speed enough to reverse conclusions, and
+  their remedy is to randomise the experimental setup, so that bias averages
+  out instead of sitting in one arrangement. This is why the limit above is
+  stated: `ab` randomises only the run order.
+* Bootstrap confidence intervals: B. Efron, "Bootstrap Methods: Another Look at
+  the Jackknife", Annals of Statistics 7(1), 1979.
+* pyperf `compare_to` compares two sets of results with a two-sample,
+  two-tailed Student's t-test and a `--min-speed` percentage below which a
+  difference is not called significant; across a suite it reports the geometric
+  mean of the ratios. It is unpaired, and a t-test assumes roughly normal
+  samples, which one-in-ten slow runs are not.
+* criterion.rs bootstraps a t-statistic between old and new samples to get a
+  p-value, then also requires the change to exceed a configurable noise
+  threshold (its documentation gives +-1% as an example) before reporting it:
+  a test plus a minimum effect size, as here, but with many more samples per
+  side than a bare-metal suite run can afford.
+
+What was checked: pyperf's `compare_to` page and the criterion.rs analysis
+chapter were read for the points above; the Mytkowicz paper was confirmed by
+its ACM, dblp and IBM records (title, authors, venue, DOI, the setup
+randomisation proposal) and its abstract, but its full text was not retrieved.
+Efron's citation (volume, pages, DOI 10.1214/aos/1176344552) was confirmed
+against the Project Euclid record, not read in full. The median-and-best flag
+rule, the 3% default, the noise figure and the resample count are this tool's
+choices; none comes from those sources. An earlier version used the bootstrap
+interval as the flag; on a simulated host with a one-in-ten outlier rate it
+caught a true 7% slowdown much less often than the median-and-best rule
+because of the collapse at small n, so it was demoted to an information column.
+
+### Whole-command timing: hyperfine
+
+For the question "how long does this whole command take", for example an
+`iris` bare-metal run or a single IRIX step wrapped in a script, use
+[hyperfine](https://github.com/sharkdp/hyperfine) rather than extending this
+tool. It is not a dependency of iris. Checked against hyperfine 2.0.0 (docs and
+source, plus real runs):
+
+* **It does not interleave.** Commands run in the order given, each command's
+  whole batch in turn: `A A A A A B B B B B`, warm-up runs included. Giving the
+  variants with `--parameter-list` runs them as separate batches in the same
+  order. `--setup` runs once per command batch, `--prepare` before each timed
+  run, `--conclude` after each, `--cleanup` once after the batch. None of them
+  reorders runs. Drift between the batches lands in the comparison. To
+  interleave, call hyperfine once per round with `-r 1` and shuffle yourself,
+  which discards its statistics.
+* **Statistics.** Mean and standard deviation, median, min and max, per
+  command, plus a "relative speed" against the first command (a ratio of
+  means). No confidence interval, no significance test, no pairing. Version
+  2.0 also collects user and system time, peak memory and, where the host
+  allows, hardware counters (`--metrics`).
+* **Outliers.** Only the first run is checked: a warning when it is much
+  slower than the rest. The modified-Z-score outlier detector (Iglewicz and
+  Hoaglin) is compiled for tests only in 2.0.0. Mean and standard deviation
+  are not robust, so a 1-in-10 slow run moves them; read the median.
+* **Export.** `--export-json` writes every measurement per command (all
+  collected metrics per run, exit codes, parameters) and a summary block with
+  mean, stddev, median, min, max; CSV, Markdown, AsciiDoc and org-mode too.
+  Easy to feed to a script that does its own pairing or bootstrap.
+* Also: it randomises the size of the environment per run
+  (`HYPERFINE_RANDOMIZED_ENVIRONMENT_OFFSET`), the stack-layout bias that
+  Mytkowicz et al. describe; it runs commands without a shell by default
+  (`-N`/`--shell=none`), so pass `-S` or wrap in a script for pipes.
+
+Use hyperfine for wall time of one command, and read its median and min, not
+the mean. Use `iris-bench ab` when the answer needs per-kernel guest rates, the
+fixed guest ELF, host perf counters per guest instruction, or paired and
+shuffled rounds with an interval.
+
+---
+
 ## The other half: `bench/irix/`
 
 Everything above runs with no operating system, which is the right way to
