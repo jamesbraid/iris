@@ -1,0 +1,59 @@
+# What scripts/hot-path-check/check.py looks for. One rule per line:
+#
+#   hot     OWNER-REGEX  METHOD   a function that runs once per guest instruction
+#                                 or memory access. It must not call a formatting
+#                                 function directly, and each of these lines must
+#                                 match at least one symbol, so a rename cannot
+#                                 make the check pass by finding nothing.
+#   inline  OWNER-REGEX  METHOD   a hit path that must be inlined into its caller.
+#                                 An out-of-line symbol for it is the regression
+#                                 (clanker/perf/hot-path-inlining-must-be-explicit.md).
+#   anchor  OWNER-REGEX  METHOD   a function that must exist. An `inline` rule passes
+#                                 by finding nothing, so each one has an anchor in
+#                                 the same type: renaming the type fails here
+#                                 instead of passing quietly.
+#   format  CALLEE-REGEX          a formatting or printing function. A direct call
+#                                 or tail jump to one from a hot function fails.
+#
+# OWNER-REGEX is searched in the type that owns the method, as the demangler
+# prints it: `<iris::cpu::mips_exec::MipsExecutor<...>>` for v0 symbols,
+# `MipsExecutor<T,C>` for legacy ones, `<X as Trait>` for trait methods.
+# METHOD is the last path segment, without generic arguments. CALLEE-REGEX is
+# searched in the demangled callee name. All regexes are Python `re`.
+#
+# Every CPU and cache model is its own monomorph of these functions, so each
+# rule applies to every copy the binary contains. A miss path that is
+# `#[cold] #[inline(never)]` is a separate function and is not listed here:
+# formatting there is what the rule asks for.
+
+hot     MipsExecutor<   step_int
+hot     MipsExecutor<   fetch_instr_impl
+hot     MipsExecutor<   read_data_impl
+hot     MipsExecutor<   write_data_impl
+hot     MipsExecutor<   write_data64_masked_impl
+
+# Each line is also a hot function if it ever appears out of line, so its
+# formatting calls are reported along with the symbol itself.
+inline  CpuCache<.*\bas\b.*MipsCache>     fetch
+inline  ShadowCache<.*\bas\b.*MipsCache>  fetch
+inline  DecodeCache\b                     fetch
+anchor  CpuCache\b                        fill_l1i_line
+anchor  ShadowCache\b.*\bas\b.*MipsCache>  cache_op
+anchor  DecodeCache\b                     fetch_slow
+
+# Printing and string formatting. A `{}` in a hot function compiles to a call
+# to one of these, plus the code that builds its arguments; that code is what
+# slowed the lightning interpreter at aded5989.
+#
+# Not listed: core::panicking::panic_fmt and friends. A panic ends the run, its
+# call sits on a branch the compiler already treats as cold, and every bounds
+# check reaches one.
+format  ^std::io::stdio::_eprint$
+format  ^std::io::stdio::_print$
+format  ^std::io::Write::write_fmt$
+format  ^alloc::fmt::format(::format_inner)?$
+format  ^core::fmt::write$
+format  ^<?core::fmt::Formatter>?::write_fmt$
+format  ^<alloc::string::String\sas\score::fmt::Write>::write_fmt$
+format  \sas\salloc::string::ToString>::to_string$
+format  ^log::__private_api::log
