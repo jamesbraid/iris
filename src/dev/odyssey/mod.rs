@@ -91,6 +91,7 @@ mod raster_bench;
 mod raster_unit;
 mod record;
 mod reader;
+mod regs;
 mod registers;
 mod scanout;
 mod trace;
