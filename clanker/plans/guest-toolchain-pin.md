@@ -1,6 +1,19 @@
 # One pinned compiler for every MIPS guest binary
 
-Status: design for review, not started (2026-11-08).
+Status: built and checked on this branch (2026-11-08). Done: both
+`cpu-tests` fixes, the test-count gate, per-cell failure limits lowered to
+the measured counts (48/50/35/37), the pinned toolchain and its container,
+reproducible flags, the CI rebuild check, the fast check, the removals, the
+documentation and the rebuilt image. The report warning is the one already
+in `iris-bench report` (`suite_mismatch`, with a suite column in the cells
+table), so the separate one planned as commit 1 was dropped. Checked on
+x86-64 Linux with rootless Podman: the image hashes the same as the arm64
+Mac build, the rebuild leaves `bench/prebuilt/` unchanged, both checks fail
+on the GCC 14 image, and all four `cpu-tests` cells run 262 tests with the
+same failing tests as the GCC 12.4 build. The workflow passed on GitHub's
+runners, which reported the same counts and 100% bench accuracy in every
+cell, and failed at `check-prebuilt` with the GCC 14 image put back. Left:
+review.
 
 ## Why
 
