@@ -506,6 +506,16 @@ fn fmt_ratio(a: f64, b: f64) -> String {
     if r >= 100.0 { format!("{:.0}x", r) } else { format!("{:.2}x", r) }
 }
 
+/// A cell's rate as a fraction of the host's own on the same kernel: `1/12`
+/// when the emulator is twelve times slower, `1.50x` if it were faster.
+fn fmt_native(rate: f64, host: f64) -> String {
+    if rate <= 0.0 || host <= 0.0 { return "-".into(); }
+    let slower = host / rate;
+    if slower < 1.0 { format!("{:.2}x", rate / host) }
+    else if slower < 10.0 { format!("1/{:.1}", slower) }
+    else { format!("1/{:.0}", slower) }
+}
+
 /// The first 12 characters of a suite ID, enough to tell two images apart.
 fn short_suite(id: &str) -> &str {
     if id.is_empty() { "-" } else { &id[..id.len().min(12)] }
@@ -625,24 +635,32 @@ fn markdown(runs: &[Run], baseline: Option<&str>) -> String {
 
     // ── per-kernel rates ────────────────────────────────────────────────────
     o.push_str("## Per-kernel throughput\n\n");
-    o.push_str("Work units per second, in each kernel's own unit. `vs base` is \
-                relative to **");
+    o.push_str("Work units per second, in each kernel's own unit. Each `vs base` \
+                column is that cell's rate over the rate of **");
     o.push_str(base.map(|b| b.cell.as_str()).unwrap_or("-"));
     o.push_str("**");
     if host.is_some() {
-        o.push_str("; `native` is the fraction of the host's own rate on the identical kernel");
+        o.push_str("; each `native` column is that cell's rate as a fraction of the host's \
+                    own on the identical kernel");
     }
     o.push_str(".\n\n");
 
+    let versus: Vec<&Run> = emulated.iter().copied()
+        .filter(|r| base.map_or(false, |b| r.cell != b.cell)).collect();
+
     o.push_str("| benchmark | unit |");
     for r in &emulated { o.push_str(&format!(" {} |", r.cell)); }
-    if base.is_some() && emulated.len() > 1 { o.push_str(" vs base |"); }
-    if host.is_some() { o.push_str(" host | native |"); }
+    for r in &versus { o.push_str(&format!(" {} vs base |", r.cell)); }
+    if host.is_some() {
+        o.push_str(" host |");
+        for r in &emulated { o.push_str(&format!(" {} native |", r.cell)); }
+    }
     o.push('\n');
     o.push_str("|---|---|");
-    for _ in &emulated { o.push_str("---:|"); }
-    if base.is_some() && emulated.len() > 1 { o.push_str("---:|"); }
-    if host.is_some() { o.push_str("---:|---:|"); }
+    for _ in 0..emulated.len() + versus.len() { o.push_str("---:|"); }
+    if host.is_some() {
+        for _ in 0..1 + emulated.len() { o.push_str("---:|"); }
+    }
     o.push('\n');
 
     let names = ordered_names(runs);
@@ -650,24 +668,17 @@ fn markdown(runs: &[Run], baseline: Option<&str>) -> String {
         let unit = runs.iter().find_map(|r| r.row(name).map(|x| x.unit.clone()))
             .unwrap_or_default();
         o.push_str(&format!("| {} | {} |", name, unit));
-        for r in &emulated {
-            o.push_str(&format!(" {} |", r.row(name).map(|x| fmt_rate(x.rate()))
-                                             .unwrap_or_else(|| "-".into())));
-        }
-        if base.is_some() && emulated.len() > 1 {
-            let b = base.unwrap().row(name).map(|x| x.rate()).unwrap_or(0.0);
-            let best = emulated.iter().filter_map(|r| r.row(name)).map(|x| x.rate())
-                .fold(0.0f64, f64::max);
-            o.push_str(&format!(" {} |", fmt_ratio(best, b)));
+        let rate_of = |r: &Run| r.row(name).map(|x| x.rate()).unwrap_or(0.0);
+        for r in &emulated { o.push_str(&format!(" {} |", fmt_rate(rate_of(r)))); }
+        if let Some(b) = base {
+            for r in &versus {
+                o.push_str(&format!(" {} |", fmt_ratio(rate_of(r), rate_of(b))));
+            }
         }
         if let Some(h) = host {
-            let hv = h.row(name).map(|x| x.rate()).unwrap_or(0.0);
-            let best = emulated.iter().filter_map(|r| r.row(name)).map(|x| x.rate())
-                .fold(0.0f64, f64::max);
+            let hv = rate_of(h);
             o.push_str(&format!(" {} |", fmt_rate(hv)));
-            o.push_str(&format!(" {} |", if hv > 0.0 && best > 0.0 {
-                format!("1/{:.0}", hv / best)
-            } else { "-".into() }));
+            for r in &emulated { o.push_str(&format!(" {} |", fmt_native(rate_of(r), hv))); }
         }
         o.push('\n');
     }
@@ -1198,5 +1209,76 @@ mod tests {
         let runs = [run_on("a", "blake3:3bc1c0000000"), run_on("b", "blake3:3bc1c0000000"), run_on("host", "")];
         assert_eq!(suite_mismatch(&runs), None);
         assert!(!markdown(&runs, None).contains("Warning"));
+    }
+
+    fn row(name: &str, work: u64, ns: u64) -> Row {
+        Row {
+            name: name.into(), unit: "ops".into(), iters: 1, work, ns,
+            icount: 0, count: 0, exc: 0,
+            checksum: "0x0".into(), golden: "0x0".into(), status: "OK".into(),
+        }
+    }
+
+    /// A run whose kernels all do `work` units, taking `ns` each.
+    fn run_rates(cell: &str, kernels: &[(&str, u64, u64)]) -> Run {
+        let mut r = run_on(cell, "blake3:3bc1c0000000");
+        r.rows = kernels.iter().map(|(n, w, ns)| row(n, *w, *ns)).collect();
+        r
+    }
+
+    /// The line of the per-kernel table for `kernel`, split into its cells.
+    fn kernel_cells(md: &str, kernel: &str) -> Vec<String> {
+        let line = md.lines().find(|l| l.starts_with(&format!("| {} |", kernel)))
+            .unwrap_or_else(|| panic!("no row for {kernel} in:\n{md}"));
+        line.trim_matches('|').split('|').map(|c| c.trim().to_string()).collect()
+    }
+
+    /// The audit's first bug: "vs base" divided the best of all cells by the
+    /// base, so a cell that lost 14% against the base still read 1.00x.
+    #[test]
+    fn vs_base_compares_each_cell_with_the_base_and_can_go_below_one() {
+        // rates per second: base 100, slower 86, faster 125
+        let runs = [
+            run_rates("base", &[("int/alu", 100, 1_000_000_000)]),
+            run_rates("faster", &[("int/alu", 125, 1_000_000_000)]),
+            run_rates("slower", &[("int/alu", 86, 1_000_000_000)]),
+        ];
+        let md = markdown(&runs, Some("base"));
+        assert!(md.contains("| faster vs base |"), "{md}");
+        assert!(md.contains("| slower vs base |"), "{md}");
+        // columns: kernel, unit, base, faster, slower, faster vs base, slower vs base
+        let c = kernel_cells(&md, "int/alu");
+        assert_eq!(c[5], "1.25x", "{md}");
+        assert_eq!(c[6], "0.86x", "{md}");
+    }
+
+    #[test]
+    fn vs_base_defaults_to_the_first_emulated_cell() {
+        let runs = [
+            run_rates("a", &[("int/alu", 100, 1_000_000_000)]),
+            run_rates("b", &[("int/alu", 50, 1_000_000_000)]),
+        ];
+        let c = kernel_cells(&markdown(&runs, None), "int/alu");
+        assert_eq!(c[4], "0.50x");
+    }
+
+    #[test]
+    fn native_is_a_fraction_of_the_host_per_cell() {
+        let runs = [
+            run_rates("fast", &[("int/alu", 500, 1_000_000_000)]),
+            run_rates("slow", &[("int/alu", 50, 1_000_000_000)]),
+            run_rates("host", &[("int/alu", 1000, 1_000_000_000)]),
+        ];
+        let md = markdown(&runs, Some("fast"));
+        // kernel, unit, fast, slow, slow vs base, host, fast native, slow native
+        let c = kernel_cells(&md, "int/alu");
+        assert_eq!(c[6], "1/2.0", "{md}");
+        assert_eq!(c[7], "1/20", "{md}");
+    }
+
+    #[test]
+    fn native_above_the_host_reads_as_a_multiple() {
+        assert_eq!(fmt_native(1500.0, 1000.0), "1.50x");
+        assert_eq!(fmt_native(0.0, 1000.0), "-");
     }
 }
