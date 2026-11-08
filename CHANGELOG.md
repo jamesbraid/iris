@@ -13,6 +13,12 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### Benchmark and test suites: one pinned compiler
+
+- The embedded benchmark image is built with GCC 16.2.1 again. Since 6adc7927 it had been built with GCC 14.2, which runs Dhrystone in 428 guest instructions per iteration instead of 313 and rotate90 in 7 per pixel instead of 5, so those rates read about 22% lower on an unchanged emulator. Benchmark results recorded on images built in between are not comparable with results from before or after; `iris-bench report` now warns when the runs it compares used different images.
+- One pinned compiler, Fedora 45's GCC 16.2.1 for MIPS, builds every guest binary: `cpu-tests`, `bench` and the embedded image. It comes in a container (`make -C cpu-tests toolchain-image`, then `make container-<target>`), on Linux or macOS, x86-64 or arm64. Builds are reproducible, and CI rebuilds the embedded image and fails on any byte difference. `make -C cpu-tests toolchain-local` is gone.
+- `cpu-tests` no longer depends on where its stack lands: `cache/index_tag_rt` cleans the lines it invalidates, and `umode/load_miss_third` no longer takes a hidden Virtual Coherency exception. CI fails a `cpu-tests` run that does not execute every test.
+
 ### R10000 family fixes, R12000 and R14000
 
 - The R10000 family has 44-bit virtual and 40-bit physical addresses, FrameMask and a 28-bit EntryLo PFN, picks the TLB refill vector by address space, invalidates overlapped TLB writes (Status.TS), and completes uncached stores nothing answers. Partial LWR keeps the upper word, and the cache diagnostics (Index Store Data, secondary tag mask, Config size) work.
