@@ -377,24 +377,63 @@ iris-bench irix
 Steps live in `bench/irix/steps.toml` and are ordinary shell one-liners: `dd`
 through the filesystem cold and warm, 500 small files created/stat'd/removed,
 `sum`/`compress`/`gzip`/`tar`, 256 MB through the read/write syscall pair with
-no disk in the path, loopback ping, and `xwd` reading the root window back out
-of the framebuffer. A step naming a `requires` program is **skipped** when that
-program is not installed rather than failed — IRIX installs vary enormously and
-a missing `x11perf` is not a benchmark result.
+no disk in the path, a loopback ping flood, and `xwd` reading the root window
+back out of the framebuffer. A step naming a `requires` program is **skipped**
+when that program is not installed rather than failed — IRIX installs vary
+enormously and a missing `x11perf` is not a benchmark result. `requires` with a
+slash in it tests that exact path.
 
 Timing is done on the host around one `iris-ci run`, with the measured no-op
 round trip subtracted, so nothing depends on the guest having a usable clock.
 Commands run as `sh -c '<cmd>'` with an IRIX-shaped PATH whatever the login
-shell is — so a step command may not contain a single quote.
+shell is — so a step command may not contain a single quote (a steps file that
+does is refused when it loads). Use what IRIX's tools take: `dd` has no `m`
+suffix, so a megabyte block is `bs=1048576`.
+
+Each step ends one of three ways, and every one gets a row in the saved result:
+
+- **timed**, when the command exits 0;
+- **FAILED**, when it exits nonzero or does not finish within its `timeout`
+  (seconds, default `--timeout`). It has no time, the suite carries on, and a
+  hung step gets Ctrl-C on the serial line first. The run stops only if the
+  guest shell does not answer afterwards;
+- **SKIP**, when its `requires` program is not there.
+
+What a step prints (stdout and stderr, the last 16 KiB) and its exit status are
+kept in the result JSON under `guest`. A step may carry a `metric` regex: its
+first capture group is parsed as a number and stored as `guest.metric`, so the
+figure a benchmark prints about itself sits next to the host timing. The report
+subcommand does not render `guest` yet; read it from the JSON.
+
+### Your own steps
+
+`--steps FILE` runs a different file in place of the default. `--extra-steps
+FILE` (repeatable) adds to it instead. A step named like an existing one
+replaces it, and new steps run after the defaults and before the final cleanup.
+`bench/irix/benchies.toml` is an example: Dhrystone 10M, Whetstone 100k and
+`iris_bench` ×20, run from `/usr/bench` in the guest, each with a `metric`
+for the figure it prints.
+
+```sh
+# copy the binaries in first, e.g. with `iris-ci put`, and chmod +x them
+iris-bench irix --extra-steps bench/irix/benchies.toml
+```
 
 Nothing here is checksummed. These are IRIX's own tools against IRIX's own
 filesystem and their output is not ours to predict; the accuracy score belongs
 to the bare-metal half.
 
-> **Status: written, not yet run.** There is no IRIX disk image in this working
-> tree, so the step list has been reasoned about rather than executed. The
-> per-step `requires` gate is what makes that safe to ship — an install that
-> lacks a tool skips it — but expect to adjust paths on first contact.
+> **Status: run once, on an Indy.** The default steps and `benchies.toml` were
+> run end to end against IRIX 6.5.22 on `indy_ip24` (R4400, 256 MB, Newport),
+> through a jitv2 build of 404a86c7, driven by `iris-ci`. Every step either
+> ran or was skipped: 17 default steps plus the three benchmark steps. `x11perf`
+> is not installed, so its two steps skip. `xwd` hangs on that guest, which was
+> sitting at the xdm login with no window attached, so `gfx/xwd_root` fails at
+> its 60 s timeout and the run continues. Dhrystone 10M reported 500000
+> Dhrystones per second, Whetstone 100k 833.3 MIPS and `iris_bench` ×20 5.85 MB/s
+> (the benchmarks print at 1 s resolution; the host step times are the finer
+> figure). Not run: any other IRIX release, a guest with a working X server, or
+> another machine.
 
 ## Running it elsewhere
 

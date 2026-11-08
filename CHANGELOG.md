@@ -13,6 +13,11 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### iris-bench guest suite
+
+- `iris-bench irix` now finds the programs a step `requires` on IRIX 6.5.22 (it skipped every step before), uses a `dd` block size IRIX accepts, and records a step whose command fails or hangs as FAILED instead of aborting the run.
+- Each step's output and exit status are saved in the result JSON, and a step's optional `metric` regex stores a number the guest program printed. `--extra-steps FILE` adds steps to the defaults; `bench/irix/benchies.toml` runs Dhrystone, Whetstone and `iris_bench` from `/usr/bench` in the guest.
+
 ### R10000 family fixes, R12000 and R14000
 
 - The R10000 family has 44-bit virtual and 40-bit physical addresses, FrameMask and a 28-bit EntryLo PFN, picks the TLB refill vector by address space, invalidates overlapped TLB writes (Status.TS), and completes uncached stores nothing answers. Partial LWR keeps the upper word, and the cache diagnostics (Index Store Data, secondary tag mask, Config size) work.
