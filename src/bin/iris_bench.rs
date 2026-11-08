@@ -643,7 +643,161 @@ fn suite_mismatch(runs: &[Run]) -> Option<String> {
     Some(o)
 }
 
+/// What a run's clock was: the host's, or one that counts retired
+/// instructions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Clock {
+    Timed,
+    /// A `ci_clock` build: the test device reads retired instructions, so every
+    /// rate the suite prints is a constant of the build, not a speed.
+    Counted,
+    /// Labelled `+deterministic` but the build has no `ci_clock`: not
+    /// deterministic, and not a plain timed run either.
+    Mislabelled,
+}
+
+fn clock_of(r: &Run) -> Clock {
+    if r.features.iter().any(|f| f == "ci_clock") { Clock::Counted }
+    else if r.cell.ends_with("+deterministic") { Clock::Mislabelled }
+    else { Clock::Timed }
+}
+
+/// What can differ between two runs and make their rates incomparable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    /// The guest binary; see `suite_mismatch`.
+    Suite,
+    /// Quick or full: groups, timed-run length, passes per kernel.
+    Mode,
+    /// Timed on the host clock, or counted on `ci_clock`'s.
+    Clock,
+    /// The CPU the emulator ran on.
+    Host,
+    /// The emulator's cargo features: its engine, and what it traces.
+    Features,
+}
+
+impl Axis {
+    fn what(self) -> &'static str {
+        match self {
+            Axis::Suite => "guest image",
+            Axis::Mode => "run length (quick or full)",
+            Axis::Clock => "clock (timed, or deterministic with ci_clock)",
+            Axis::Host => "host CPU",
+            Axis::Features => "emulator build features",
+        }
+    }
+    /// This run's value on the axis, or None when the axis does not apply to it
+    /// (a host run or an IRIX run has no guest image).
+    fn value(self, r: &Run) -> Option<String> {
+        // The host run is the suite compiled natively: no emulator, so no
+        // clock or build features to compare.
+        if r.cell == "host" && matches!(self, Axis::Clock | Axis::Features) { return None; }
+        match self {
+            Axis::Suite => Some(r.suite_id.clone()).filter(|s| !s.is_empty()),
+            Axis::Mode => Some(r.settings.shortened_because().map_or("full".into(), |w| format!("quick: {w}"))),
+            Axis::Clock => Some(match clock_of(r) {
+                Clock::Timed => "timed",
+                Clock::Counted => "deterministic (ci_clock)",
+                Clock::Mislabelled => "labelled +deterministic, but no ci_clock",
+            }.into()),
+            Axis::Host => Some(format!("{} ({} {})", r.host.cpu_model, r.host.os, r.host.arch)),
+            Axis::Features => Some(if r.features.is_empty() { "(none)".into() } else { r.features.join(" ") }),
+        }
+    }
+}
+
+/// How strictly a report treats differences.
+#[derive(Debug, Clone, Copy, Default)]
+struct Compare {
+    /// Cells built with different cargo features are meant to be compared:
+    /// that is what `matrix` is for. Without this, differing features are
+    /// reported and their ratios withheld like any other difference.
+    across_features: bool,
+}
+
+impl Compare {
+    fn axes(self) -> Vec<Axis> {
+        let mut v = vec![Axis::Suite, Axis::Mode, Axis::Clock, Axis::Host];
+        if !self.across_features { v.push(Axis::Features); }
+        v
+    }
+}
+
+/// The axes, of those in `axes`, on which `runs` do not all agree.
+fn differing(runs: &[&Run], axes: &[Axis]) -> Vec<Axis> {
+    axes.iter().copied().filter(|a| {
+        let mut seen: Vec<String> = Vec::new();
+        for v in runs.iter().filter_map(|r| a.value(r)) {
+            if !seen.contains(&v) { seen.push(v); }
+        }
+        seen.len() > 1
+    }).collect()
+}
+
+/// The axes on which two cells' runs disagree, so their ratio means nothing.
+fn not_comparable(a: &Group, b: &Group, cmp: Compare) -> Vec<Axis> {
+    let all: Vec<&Run> = a.runs.iter().chain(b.runs.iter()).copied().collect();
+    differing(&all, &cmp.axes())
+}
+
+/// A cell against the host's own run of the same kernels: only the host and
+/// the run length matter there, the host run has no engine or guest image.
+fn not_comparable_to_native(a: &Group, host: &Group) -> Vec<Axis> {
+    let all: Vec<&Run> = a.runs.iter().chain(host.runs.iter()).copied().collect();
+    differing(&all, &[Axis::Mode, Axis::Host])
+}
+
+/// Warnings for every axis other than the guest image (`suite_mismatch` owns
+/// that one) on which the runs disagree. Each names the values and which
+/// cells had them. None when they all agree.
+fn mixed_runs(runs: &[Run], cmp: Compare) -> Option<String> {
+    let all: Vec<&Run> = runs.iter().collect();
+    let axes: Vec<Axis> = cmp.axes().into_iter().filter(|a| *a != Axis::Suite).collect();
+    let mut o = String::new();
+    for axis in differing(&all, &axes) {
+        let mut by_value: Vec<(String, Vec<&str>)> = Vec::new();
+        for r in runs {
+            let Some(v) = axis.value(r) else { continue };
+            match by_value.iter_mut().find(|(x, _)| *x == v) {
+                Some((_, cells)) => if !cells.contains(&r.cell.as_str()) { cells.push(&r.cell) },
+                None => by_value.push((v, vec![&r.cell])),
+            }
+        }
+        o.push_str(&format!(
+            "These runs differ in {}, so their rates are not comparable; \
+             ratios between cells that differ are shown as n/c.\n", axis.what()));
+        for (v, cells) in &by_value {
+            o.push_str(&format!("  {}: {}\n", v, cells.join(", ")));
+        }
+    }
+    if o.is_empty() { None } else { Some(o) }
+}
+
+/// Each distinct host and the cells that ran on it, one line per host.
+fn host_lines(runs: &[Run]) -> Vec<String> {
+    let mut hosts: Vec<(String, Vec<&str>)> = Vec::new();
+    for r in runs {
+        let h = format!("{} ({} {}, {} cores)", r.host.cpu_model, r.host.os, r.host.arch, r.host.cores);
+        match hosts.iter_mut().find(|(x, _)| *x == h) {
+            Some((_, cells)) => if !cells.contains(&r.cell.as_str()) { cells.push(&r.cell) },
+            None => hosts.push((h, vec![&r.cell])),
+        }
+    }
+    hosts.into_iter().map(|(h, cells)| format!("{}: {}", h, cells.join(", "))).collect()
+}
+
+fn axis_names(axes: &[Axis]) -> String {
+    axes.iter().map(|a| a.what()).collect::<Vec<_>>().join(", ")
+}
+
+/// `markdown_with` under the default comparison rules, for the tests.
+#[cfg(test)]
 fn markdown(runs: &[Run], baseline: Option<&str>) -> String {
+    markdown_with(runs, baseline, Compare::default())
+}
+
+fn markdown_with(runs: &[Run], baseline: Option<&str>, cmp: Compare) -> String {
     let mut o = String::new();
     let groups = group_runs(runs);
     let emulated: Vec<&Group> = groups.iter().filter(|g| g.cell != "host").collect();
@@ -653,13 +807,30 @@ fn markdown(runs: &[Run], baseline: Option<&str>) -> String {
         .or_else(|| emulated.first().copied());
 
     o.push_str("# IRIS benchmark report\n\n");
-    if let Some(h) = runs.first() {
-        o.push_str(&format!(
-            "Host: {} {} / {} / {} cores\n\n",
-            h.host.os, h.host.arch, h.host.cpu_model, h.host.cores
-        ));
+    // Every run's own host, not the first run's: results from several
+    // machines end up in one directory.
+    let hosts = host_lines(runs);
+    if hosts.len() == 1 {
+        if let Some(h) = runs.first() {
+            o.push_str(&format!(
+                "Host: {} {} / {} / {} cores\n\n",
+                h.host.os, h.host.arch, h.host.cpu_model, h.host.cores
+            ));
+        }
+    } else {
+        o.push_str("Hosts:\n\n");
+        for h in &hosts { o.push_str(&format!("- {}\n", h)); }
+        o.push('\n');
     }
     if let Some(w) = suite_mismatch(runs) {
+        for (i, line) in w.lines().enumerate() {
+            o.push_str(if i == 0 { "> **Warning:** " } else { ">\n> " });
+            o.push_str(line.trim_start());
+            o.push('\n');
+        }
+        o.push('\n');
+    }
+    if let Some(w) = mixed_runs(runs, cmp) {
         for (i, line) in w.lines().enumerate() {
             o.push_str(if i == 0 { "> **Warning:** " } else { ">\n> " });
             o.push_str(line.trim_start());
@@ -671,15 +842,17 @@ fn markdown(runs: &[Run], baseline: Option<&str>) -> String {
     // ── per-cell summary ────────────────────────────────────────────────────
     o.push_str("## Cells\n\n");
     o.push_str("A cell run more than once shows the median, with `[min-max]` after it.\n\n");
-    o.push_str("| cell | n | features | CPU | suite | accuracy | guest MIPS | DMIPS | whet/s | LINPACK MFLOPS | timed | wall |\n");
-    o.push_str("|---|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
+    o.push_str("| cell | n | features | CPU | suite | run | clock | accuracy | guest MIPS | DMIPS | whet/s | LINPACK MFLOPS | timed | wall |\n");
+    o.push_str("|---|---:|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
     for g in &groups {
         let r = g.runs[0];
         let feats = if r.features.is_empty() { "-".to_string() } else { r.features.join(" ") };
         let worst = g.least_accurate();
         o.push_str(&format!(
-            "| {} | {} | {} | {} | `{}` | {:.1}% ({}/{}) | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | `{}` | {} | {} | {:.1}% ({}/{}) | {} | {} | {} | {} | {} | {} |\n",
             g.cell, g.runs.len(), feats, r.machine.cpu, short_suite(&r.suite_id),
+            if r.settings.is_full() { "full" } else { "quick" },
+            match clock_of(r) { Clock::Timed => "timed", Clock::Counted => "ci_clock", Clock::Mislabelled => "timed?" },
             worst.accuracy(), worst.matched, worst.checked,
             fmt_stat(g.stat(|r| Some(r.mips()).filter(|v| *v > 0.0)), |v| format!("{:.1}", v)),
             fmt_stat(g.stat(|r| r.dmips()), |v| format!("{:.1}", v)),
@@ -746,6 +919,26 @@ fn markdown(runs: &[Run], baseline: Option<&str>) -> String {
     let versus: Vec<&Group> = emulated.iter().copied()
         .filter(|g| base.map_or(false, |b| g.cell != b.cell)).collect();
 
+    let blocked_vs_base = |g: &Group| -> Vec<Axis> {
+        base.map_or(Vec::new(), |b| not_comparable(g, b, cmp))
+    };
+    let mut notes: Vec<String> = Vec::new();
+    for g in &versus {
+        let ax = blocked_vs_base(g);
+        if !ax.is_empty() {
+            notes.push(format!("{} vs base: differs from {} in {}", g.cell,
+                               base.map_or("-", |b| b.cell), axis_names(&ax)));
+        }
+    }
+    if let Some(h) = host {
+        for g in &emulated {
+            let ax = not_comparable_to_native(g, h);
+            if !ax.is_empty() {
+                notes.push(format!("{} native: differs from {} in {}", g.cell, h.cell, axis_names(&ax)));
+            }
+        }
+    }
+
     o.push_str("| benchmark | unit |");
     for g in &emulated { o.push_str(&format!(" {} |", g.label())); }
     for g in &versus { o.push_str(&format!(" {} vs base |", g.cell)); }
@@ -770,17 +963,28 @@ fn markdown(runs: &[Run], baseline: Option<&str>) -> String {
         for g in &emulated { o.push_str(&format!(" {} |", fmt_stat(g.rate(name), fmt_rate))); }
         if let Some(b) = base {
             for g in &versus {
-                o.push_str(&format!(" {} |", fmt_ratio(median(g), median(b))));
+                let cell = if blocked_vs_base(g).is_empty() { fmt_ratio(median(g), median(b)) }
+                           else { "n/c".into() };
+                o.push_str(&format!(" {} |", cell));
             }
         }
         if let Some(h) = host {
             let hv = median(h);
             o.push_str(&format!(" {} |", fmt_stat(h.rate(name), fmt_rate)));
-            for g in &emulated { o.push_str(&format!(" {} |", fmt_native(median(g), hv))); }
+            for g in &emulated {
+                let cell = if not_comparable_to_native(g, h).is_empty() { fmt_native(median(g), hv) }
+                           else { "n/c".into() };
+                o.push_str(&format!(" {} |", cell));
+            }
         }
         o.push('\n');
     }
     o.push('\n');
+    if !notes.is_empty() {
+        o.push_str("`n/c` means not comparable, and no ratio is shown:\n\n");
+        for n in &notes { o.push_str(&format!("- {}\n", n)); }
+        o.push('\n');
+    }
 
     // ── efficiency ──────────────────────────────────────────────────────────
     for g in &emulated {
@@ -829,6 +1033,10 @@ fn ordered_names(runs: &[Run]) -> Vec<String> {
 }
 
 fn text_summary(runs: &[Run]) -> String {
+    text_summary_with(runs, Compare::default())
+}
+
+fn text_summary_with(runs: &[Run], cmp: Compare) -> String {
     let mut o = String::new();
     for g in group_runs(runs) {
         let worst = g.least_accurate();
@@ -846,6 +1054,13 @@ fn text_summary(runs: &[Run]) -> String {
     if let Some(w) = suite_mismatch(runs) {
         o.push_str("warning: ");
         o.push_str(&w);
+    }
+    if let Some(w) = mixed_runs(runs, cmp) {
+        o.push_str("warning: ");
+        o.push_str(&w);
+    }
+    for h in host_lines(runs) {
+        o.push_str(&format!("host: {}\n", h));
     }
     o
 }
@@ -957,6 +1172,11 @@ enum Cmd {
         baseline: Option<String>,
         #[arg(long, value_parser = ["md", "json", "text"], default_value = "md")]
         format: String,
+        /// Show ratios between cells built with different cargo features. By
+        /// default they are withheld, since a feature change is a different
+        /// emulator; `matrix` is the case where that is the point.
+        #[arg(long)]
+        across_features: bool,
         /// Write here instead of stdout.
         #[arg(long)]
         out: Option<PathBuf>,
@@ -1157,7 +1377,8 @@ fn dispatch(cmd: Cmd) -> Result<(), String> {
             else { println!("matrix: {} cell(s) failed: {}", failures.len(), failures.join(" ")); }
 
             let runs = load_all(&out)?;
-            let md = markdown(&runs, None);
+            // Its cells differ in features by design.
+            let md = markdown_with(&runs, None, Compare { across_features: true });
             let report = out.join("report.md");
             std::fs::write(&report, &md).map_err(|e| format!("{}: {}", report.display(), e))?;
             println!("report: {}", report.display());
@@ -1236,12 +1457,13 @@ fn dispatch(cmd: Cmd) -> Result<(), String> {
             Ok(())
         }
 
-        Cmd::Report { dir, baseline, format, out } => {
+        Cmd::Report { dir, baseline, format, across_features, out } => {
             let dir = dir.unwrap_or_else(default_out);
             let runs = load_all(&dir)?;
+            let cmp = Compare { across_features };
             let text = match format.as_str() {
-                "md" => markdown(&runs, baseline.as_deref()),
-                "text" => text_summary(&runs),
+                "md" => markdown_with(&runs, baseline.as_deref(), cmp),
+                "text" => text_summary_with(&runs, cmp),
                 "json" => serde_json::to_string_pretty(&runs).map_err(|e| e.to_string())?,
                 _ => unreachable!(),
             };
@@ -1477,5 +1699,126 @@ mod tests {
         let c = kernel_cells(&markdown(&runs, Some("base")), "int/alu");
         // medians 100 and 90
         assert_eq!(c[4], "0.90x");
+    }
+
+    /// A run of one kernel at `rate` units/s, with the properties a report
+    /// compares: host CPU, features, whether it was a quick run.
+    fn run_with(cell: &str, rate: u64, host: &str, features: &[&str], quick: bool) -> Run {
+        let mut r = run_rates(cell, &[("int/alu", rate, 1_000_000_000)]);
+        r.host.cpu_model = host.into();
+        r.features = features.iter().map(|s| s.to_string()).collect();
+        if quick { r.settings.time_pct = 30; r.settings.repeats = 1; }
+        r
+    }
+
+    /// Everything in a report that says "do not compare these".
+    fn is_blanked(md: &str) -> bool { kernel_cells(md, "int/alu").iter().any(|c| c == "n/c") }
+
+    #[test]
+    fn a_quick_run_beside_a_full_run_warns_and_blanks_the_ratio() {
+        let runs = [
+            run_with("full", 100, "cpu", &[], false),
+            run_with("quick", 80, "cpu", &[], true),
+        ];
+        let md = markdown(&runs, Some("full"));
+        assert!(md.contains("**Warning:** These runs differ in run length"), "{md}");
+        assert!(is_blanked(&md), "{md}");
+        assert!(!md.contains("0.80x"), "{md}");
+        assert!(text_summary(&runs).contains("run length"));
+    }
+
+    #[test]
+    fn a_counted_run_beside_a_timed_run_warns_and_blanks_the_ratio() {
+        let runs = [
+            run_with("timed", 100, "cpu", &["lightning"], false),
+            run_with("counted+deterministic", 100, "cpu", &["lightning", "ci_clock"], false),
+        ];
+        // across features, so only the clock can be what is withheld
+        let md = markdown_with(&runs, Some("timed"), Compare { across_features: true });
+        assert!(md.contains("differ in clock"), "{md}");
+        assert!(is_blanked(&md), "{md}");
+    }
+
+    #[test]
+    fn a_run_labelled_deterministic_without_ci_clock_is_called_out() {
+        let runs = [
+            run_with("a", 100, "cpu", &["tlbvmap"], false),
+            run_with("b+deterministic", 100, "cpu", &["tlbvmap"], false),
+        ];
+        let md = markdown(&runs, Some("a"));
+        assert!(md.contains("labelled +deterministic, but no ci_clock"), "{md}");
+        assert!(is_blanked(&md), "{md}");
+    }
+
+    #[test]
+    fn runs_from_two_hosts_warn_print_both_and_blank_the_ratio() {
+        let runs = [
+            run_with("a", 100, "AMD EPYC 7443", &[], false),
+            run_with("b", 100, "AMD EPYC 7663", &[], false),
+        ];
+        let md = markdown(&runs, Some("a"));
+        assert!(md.contains("differ in host CPU"), "{md}");
+        assert!(md.contains("- AMD EPYC 7443 (") && md.contains("- AMD EPYC 7663 ("), "{md}");
+        assert!(md.contains("): a\n") && md.contains("): b\n"), "{md}");
+        assert!(is_blanked(&md), "{md}");
+        assert!(text_summary(&runs).contains("host: AMD EPYC 7663"));
+    }
+
+    #[test]
+    fn one_host_is_printed_once_and_is_quiet() {
+        let runs = [run_with("a", 100, "cpu", &[], false), run_with("b", 90, "cpu", &[], false)];
+        let md = markdown(&runs, Some("a"));
+        assert!(!md.contains("Warning"), "{md}");
+        assert_eq!(md.matches("Host: ").count(), 1, "{md}");
+        assert!(!is_blanked(&md), "{md}");
+    }
+
+    #[test]
+    fn different_features_warn_and_blank_unless_asked_to_compare_them() {
+        let runs = [
+            run_with("interp", 100, "cpu", &[], false),
+            run_with("jit", 400, "cpu", &["jitv2"], false),
+        ];
+        let md = markdown(&runs, Some("interp"));
+        assert!(md.contains("differ in emulator build features"), "{md}");
+        assert!(is_blanked(&md), "{md}");
+        let md = markdown_with(&runs, Some("interp"), Compare { across_features: true });
+        assert!(!md.contains("Warning"), "{md}");
+        assert_eq!(kernel_cells(&md, "int/alu")[4], "4.00x", "{md}");
+    }
+
+    /// The suite compiled for the host has no emulator, so it must not trip
+    /// the clock and features checks that every emulated report would fail.
+    #[test]
+    fn the_native_host_run_does_not_count_as_a_different_build() {
+        let runs = [
+            run_with("a", 100, "cpu", &["tlbvmap"], false),
+            run_with("host", 1000, "cpu", &[], false),
+        ];
+        let md = markdown(&runs, None);
+        assert!(!md.contains("Warning"), "{md}");
+        let c = kernel_cells(&md, "int/alu");
+        assert_eq!(c.last().unwrap(), "1/10", "{md}");
+    }
+
+    #[test]
+    fn native_is_withheld_when_the_host_run_was_on_another_cpu() {
+        let runs = [
+            run_with("a", 100, "AMD EPYC 7443", &[], false),
+            run_with("host", 1000, "AMD EPYC 7663", &[], false),
+        ];
+        let md = markdown(&runs, None);
+        assert_eq!(kernel_cells(&md, "int/alu").last().unwrap(), "n/c", "{md}");
+        assert!(md.contains("a native: differs from host in host CPU"), "{md}");
+    }
+
+    #[test]
+    fn rates_across_guest_images_are_withheld() {
+        let mut after = run_with("after", 80, "cpu", &[], false);
+        after.suite_id = "blake3:be5200000000".into();
+        let runs = [run_with("before", 100, "cpu", &[], false), after];
+        let md = markdown(&runs, Some("before"));
+        assert!(is_blanked(&md), "{md}");
+        assert!(md.contains("after vs base: differs from before in guest image"), "{md}");
     }
 }
