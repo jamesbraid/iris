@@ -79,6 +79,26 @@ against 38-42 s with it.
 Where a ROM's pages share one counter, holding any of them keeps all of them from
 being compiled while it stands.
 
+## Primary instruction lines
+
+A primary instruction word is 36 bits of predecoded instruction (p. 288). A valid
+primary instruction line writes each word into its page as the instruction it
+predecodes, through an eleven-class table inferred from the words a shipped PROM
+stores (`l1i_decode`). A word of any other class leaves what memory showed there
+and is reported once per class; hardware would run it. A page held only for code
+also answers cached loads with the code's bytes, where hardware would read memory.
+
+The model never refills a primary line on a fetch. The Tezro's PROM executes a
+staged secondary line and then reads the primary words back with Index Load Data
+(I), to copy them into lines it stages itself. So Index Load Data (I) in a set a
+held secondary line maps to, with no held primary line there, returns that line's
+words predecoded (`refilled_word`): the line is assumed to have been refilled,
+whichever way the operand names. A small per-CPU table from primary set to held
+secondary line, kept at hold and release, finds it. An instruction outside the
+eleven classes comes back in a form only this model reads (bits 35:32 all ones over
+the instruction), which hardware would not produce. Index Load Tag (I) reads the
+stored tag: the PROM does not ask for a refilled tag.
+
 ## Seeing it
 
 `l2 probe 0` in the monitor prints how many lines hold pages and which. Every
