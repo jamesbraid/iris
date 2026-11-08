@@ -5,6 +5,7 @@
 #   make golden     regenerate golden/golden.h from a native host build
 #   make image      bootable SGI disk image (volume header + ELF)
 #   make matrix     run every CPU x engine cell and write a comparison
+#   make workload   regenerate prebuilt/workload.txt (needs cargo, no cross compiler)
 #   make clean
 #
 # The toolchain lookup, the console and the startup/exception code are shared
@@ -62,7 +63,7 @@ LIBGCC :=
 
 PREBUILT := prebuilt/irisbench.elf
 
-.PHONY: all clean run dis syms image golden hostbench matrix bench report check-size prebuilt check-prebuilt
+.PHONY: all clean run dis syms image golden hostbench matrix bench report check-size prebuilt check-prebuilt workload
 all: $(TARGET)
 
 # Refresh the copy of the guest binary that `iris` links in with include_bytes!
@@ -76,7 +77,31 @@ prebuilt: $(TARGET)
 	@mkdir -p prebuilt
 	cp $(TARGET) $(PREBUILT)
 	@python3 prebuilt-stamp.py --write
-	@echo "prebuilt: $(PREBUILT) refreshed — commit it with the change that caused it"
+	@$(MAKE) --no-print-directory workload
+	@echo "prebuilt: $(PREBUILT) and $(WORKLOAD) refreshed — commit them with the change that caused it"
+
+# Guest instructions per iteration of every kernel in the prebuilt image, so a
+# change to the work the benchmark measures is a readable diff and not only a
+# changed binary. It needs a run, and only a deterministic run of the plain
+# interpreter gives the same numbers on every host: an iris-bench built with
+# `ci_clock` and nothing else, which runs the image it embeds. Hence its own
+# target directory, and LTO off because the counts do not depend on it. Set
+# WORKLOAD_IRIS_BENCH to use one you have already built. See workload.py.
+WORKLOAD := prebuilt/workload.txt
+WORKLOAD_TARGET_DIR ?= ../target/workload
+WORKLOAD_IRIS_BENCH ?=
+
+workload:
+ifeq ($(WORKLOAD_IRIS_BENCH),)
+	cd .. && CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+	    cargo build --release --features ci_clock --bin iris-bench \
+	    --target-dir $(patsubst ../%,%,$(WORKLOAD_TARGET_DIR))
+	@$(MAKE) --no-print-directory workload WORKLOAD_IRIS_BENCH=$(WORKLOAD_TARGET_DIR)/release/iris-bench
+else
+	@rm -rf $(BUILD)/workload
+	$(WORKLOAD_IRIS_BENCH) run --deterministic --cache full --label workload --out $(BUILD)/workload
+	python3 workload.py write $(BUILD)/workload/workload+deterministic.json $(WORKLOAD)
+endif
 
 # Is the checked-in image still the one these sources build? Needs no cross
 # toolchain and no compile — it hashes the inputs. See prebuilt-stamp.py for why

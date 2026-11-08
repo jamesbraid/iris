@@ -22,6 +22,7 @@ make -C bench bench           # run once against ../target/release/iris
 make -C bench matrix          # build and run every CPU x engine cell
 make -C bench report          # turn the saved results into markdown
 make -C bench prebuilt        # refresh the guest binary that `iris` links in
+make -C bench workload        # regenerate its per-kernel instruction counts
 ```
 
 **You do not need any of this to run the suite.** A known-good guest binary is
@@ -269,6 +270,15 @@ the image, so a stale image against fresh goldens reports failures to users that
 are not real. It compares a digest of the *sources*, not the image bytes:
 `bench/prebuilt-stamp.py` explains why byte comparison cannot work.
 
+`prebuilt/workload.txt` lists each kernel's guest instructions per iteration
+in that image, from a deterministic run of the plain interpreter. `prebuilt`
+regenerates it, and CI regenerates it again and fails on a diff. It is how a
+reviewer sees that an image change altered the work: a new compiler, new flags
+or a kernel edit shows up as named kernels with new counts, while a comment
+edit, which changes only the image's debug information, leaves it unchanged.
+Results from either side of a change to this file are not comparable.
+`bench/workload.py` explains which run defines it and why.
+
 ---
 
 ## Asking for a shorter run
@@ -452,7 +462,8 @@ harness/     benchlib (time base, work area, checksums), main (the runner),
 kernels/     integer fpu memory imaging codec sys
 gen/         golden.c (the oracle) + hostplat.c (the host platform layer)
 golden/      golden.h — generated, checked in
-prebuilt/    irisbench.elf — generated, checked in, linked into `iris`
+prebuilt/    irisbench.elf — generated, checked in, linked into `iris`;
+             workload.txt — its instructions per iteration, generated
 run/         bare.toml, run-local.sh, run-prom.sh
 ```
 
