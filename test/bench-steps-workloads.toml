@@ -1,0 +1,57 @@
+# Guest steps for the checked-in IRIX workloads: Dhrystone 2.1 (test/dhry),
+# the C Whetstone (test/whet) and iris_bench (test/ib), for `iris-bench irix`.
+#
+#   iris-bench irix --steps test/bench-steps-workloads.toml
+#
+# --steps replaces the default file, so only these three run. Once
+# `--extra-steps` is available, pass the file there instead to add them to the
+# default suite.
+#
+# Getting the binaries into the guest: one way, `iris-ci put`, which needs a
+# scratch volume in iris.toml (a `[scsi.2]` entry with `scratch = true`, see
+# STORAGE.md). Boot to a shell, then from the repo root:
+#
+#   iris-ci run "mkdir -p /usr/bench"
+#   iris-ci put test/dhry/dhrystone --to /usr/bench/dhrystone
+#   iris-ci put test/whet/whetstone --to /usr/bench/whetstone
+#   iris-ci put test/ib/iris_bench  --to /usr/bench/iris_bench
+#   iris-ci run "chmod +x /usr/bench/dhrystone /usr/bench/whetstone /usr/bench/iris_bench"
+#
+# `put` does not set the execute bit. If iris runs in a container, the host
+# path given to `put` must be visible at the same path inside it, because iris
+# opens the file as well as iris-ci.
+#
+# The binaries are expected in /usr/bench, named as in the repo. `requires`
+# with a path tests that exact file, so a step whose binary is missing is
+# skipped, not failed. A build of iris-bench that only searches PATH for
+# `requires` skips these steps whatever is installed. Delete the `requires`
+# lines to run them anyway.
+#
+# The `metric` regex reads the figure each program prints about itself. Both
+# Dhrystone and Whetstone use time(2), so their own figure has 1 s resolution
+# and moves by 4 to 8 percent from run to run. The host timing around the step
+# is the finer number. A parser that predates `metric` ignores the key.
+
+[[step]]
+name = "workload/dhrystone_10M"
+unit = "run"
+work = 10000000
+cmd = "cd /usr/bench; echo 10000000 | ./dhrystone"
+requires = "/usr/bench/dhrystone"
+metric = "Dhrystones per Second:\\s+([0-9.]+)"
+
+[[step]]
+name = "workload/whetstone_100k"
+unit = "loop"
+work = 100000
+cmd = "cd /usr/bench; ./whetstone 100000"
+requires = "/usr/bench/whetstone"
+metric = "Whetstones:\\s+([0-9.]+)\\s+MIPS"
+
+[[step]]
+name = "workload/iris_bench_x20"
+unit = "rep"
+work = 20
+cmd = "cd /usr/bench; ./iris_bench 20"
+requires = "/usr/bench/iris_bench"
+metric = "throughput:\\s+([0-9.]+)\\s+MB/s wall"

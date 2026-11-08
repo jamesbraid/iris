@@ -111,3 +111,9 @@ The medians are within 1.3% in both runs, far inside the spread within each
 binary, and the instruction counts agree, so the two are the same workload.
 The printed Dhrystones/s only takes values 1 s apart (about 5%) and tracked the
 host load. Use the host step time and compare runs on the same boot.
+
+## Running it from iris-bench
+
+`../bench-steps-workloads.toml` holds the `iris-bench irix` step for this
+program (and for Whetstone and `iris_bench`), and explains how to get the
+binaries into a guest with `iris-ci put`.
