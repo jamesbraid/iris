@@ -2320,4 +2320,12 @@ mod tests {
         assert!(e.starts_with("timed out after 1s"), "{e}");
         assert!(e.contains("stuck at boot"), "{e}");
     }
+
+    #[test]
+    fn a_reference_row_from_a_lightning_build_says_lightning() {
+        let run = run_with("light", 100, "cpu", &["lightning", "tlbvmap"], false);
+        assert_eq!(iris::bench_report::engine_of(&run), "lightning");
+        let e = reference_entry(&run, "id", None, Some("2026-11-08"));
+        assert_eq!((e.engine.as_str(), e.features.as_str()), ("lightning", "lightning tlbvmap"));
+    }
 }

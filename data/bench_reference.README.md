@@ -37,11 +37,20 @@ An empty table adopts the suite of the first row merged into it.
 
 ## `cpu` and `engine`
 
-Both are recorded because the two engines differ by roughly 4x, so a row without
-them cannot be compared with anything. Note the Mac App Store build forces
-`IRIS_NO_JIT=1` (`iris-gui/src/main.rs`) — the sandbox only permits `MAP_JIT`
-pages and Cranelift does not use them — so rows meant for comparison against a
-store build must be `"engine": "interp"`.
+Both are recorded because the engines differ by roughly 4x, so a row without
+them cannot be compared with anything. The engine comes from the emulator's own
+`build features:` banner: `interp`, `lightning`, `jitv2`, or `jitv2-lightning`.
+Lightning is its own engine, about 1.3x the plain interpreter on this suite, so
+a lightning result does not match an `interp` row. The row's `features` field
+keeps the whole feature list for anyone who needs more than the engine name.
+
+The Mac App Store build forces `IRIS_NO_JIT=1` (`iris-gui/src/main.rs`) — the
+sandbox only permits `MAP_JIT` pages and Cranelift does not use them. The
+benchmark plan describes that build as lightning (`iris/lightning,appstore`), so
+rows meant for comparison against a store build should carry `"engine":
+"lightning"`; check the store build's feature list before recording one. The
+engine is read from features alone, so a jitv2 build run with `IRIS_NO_JIT=1` is
+still labelled `jitv2`.
 
 ## Full runs only
 

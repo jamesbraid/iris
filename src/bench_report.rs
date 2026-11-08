@@ -562,11 +562,16 @@ pub fn cpu_model() -> String {
 pub struct ReferenceEntry {
     pub id: String,
     pub label: String,
-    /// Emulated CPU (`R4400`/`R5000`) and execution engine (`interp`/`jitv2`).
-    /// Both matter: the two engines differ by about 4x, so a row without them
+    /// Emulated CPU (`R4400`/`R5000`) and execution engine (see `engine_of`).
+    /// Both matter: the engines differ by about 4x, so a row without them
     /// cannot be compared with anything.
     pub cpu: String,
     pub engine: String,
+    /// The emulator's full cargo feature list as its banner printed it, so a
+    /// row says what produced it beyond the engine name. Informational: rows
+    /// match on `engine`. Empty for rows written before this field existed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub features: String,
     pub host: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub measured: Option<String>,
@@ -635,10 +640,23 @@ impl ReferenceTable {
     }
 }
 
-/// `interp` unless the emulator's own feature banner says otherwise. Read from
-/// the banner rather than inferred, so a mislabelled row is impossible.
+/// The execution engine the emulator's feature banner names: `interp`,
+/// `lightning`, `jitv2`, or `jitv2-lightning`. Read from the banner rather
+/// than inferred, so a mislabelled row is impossible.
+///
+/// Lightning is its own engine, not a flavour of the interpreter: it is the
+/// build the Mac App Store ships, and it measured about 1.3x the plain
+/// interpreter on this suite (92.1 against 69.6 guest MIPS, one host), so a
+/// row from one must not stand in for the other. A build with
+/// both `lightning` and `jitv2` is a third thing again.
 pub fn engine_of(run: &Run) -> &'static str {
-    if run.features.iter().any(|f| f == "jitv2") { "jitv2" } else { "interp" }
+    let has = |f: &str| run.features.iter().any(|x| x == f);
+    match (has("jitv2"), has("lightning")) {
+        (true, true) => "jitv2-lightning",
+        (true, false) => "jitv2",
+        (false, true) => "lightning",
+        (false, false) => "interp",
+    }
 }
 
 /// Today as `YYYY-MM-DD`, from the system clock. Hinnant's civil-from-days.
@@ -667,6 +685,7 @@ pub fn reference_entry(run: &Run, id: &str, label: Option<&str>, measured: Optio
         }),
         cpu: run.machine.cpu.clone(),
         engine: engine_of(run).to_string(),
+        features: run.features.join(" "),
         host: run.host.cpu_model.clone(),
         measured: Some(measured.map(str::to_string).unwrap_or_else(today)),
         guest_mips: (run.mips() * 10.0).round() / 10.0,
@@ -917,7 +936,7 @@ IRIS-BENCH-END
         let run = a_run();
         let row = ReferenceEntry {
             id: "ref".into(), label: "Reference".into(),
-            cpu: "R4400".into(), engine: "interp".into(), host: "Test CPU".into(),
+            cpu: "R4400".into(), engine: "interp".into(), features: String::new(), host: "Test CPU".into(),
             measured: None, guest_mips: 50.0, dmips: 70.0, accuracy: 100.0,
             kernels: BTreeMap::new(),
         };
@@ -941,11 +960,61 @@ IRIS-BENCH-END
     }
 
     #[test]
+    fn each_build_family_is_its_own_engine() {
+        let engine = |features: &[&str]| {
+            let mut r = a_run();
+            r.features = features.iter().map(|s| s.to_string()).collect();
+            engine_of(&r)
+        };
+        assert_eq!(engine(&[]), "interp");
+        assert_eq!(engine(&["tlbvmap", "opcodefusion"]), "interp");
+        assert_eq!(engine(&["tlbvmap", "jitv2"]), "jitv2");
+        assert_eq!(engine(&["lightning", "tlbvmap"]), "lightning");
+        assert_eq!(engine(&["jitv2", "lightning"]), "jitv2-lightning");
+    }
+
+    /// The audit's tenth bug: a lightning result was labelled "interp" and
+    /// matched the plain interpreter's row, 1.3x apart.
+    #[test]
+    fn a_lightning_run_does_not_match_an_interpreter_row() {
+        let mut run = a_run();
+        run.features = vec!["lightning".into(), "tlbvmap".into()];
+        let interp_row = ReferenceEntry {
+            id: "i".into(), label: "i".into(), cpu: "R4400".into(), engine: "interp".into(),
+            features: String::new(), host: "Test CPU".into(), measured: None,
+            guest_mips: 70.0, dmips: 90.0, accuracy: 100.0, kernels: BTreeMap::new(),
+        };
+        let lightning_row = ReferenceEntry { id: "l".into(), engine: "lightning".into(), ..interp_row.clone() };
+        let table = |e: ReferenceEntry| ReferenceTable {
+            schema: 1, suite_id: run.suite_id.clone(), entries: vec![e],
+        };
+        assert!(table(interp_row).matching(&run).is_none());
+        assert_eq!(table(lightning_row).matching(&run).unwrap().id, "l");
+    }
+
+    #[test]
+    fn a_reference_row_records_the_engine_and_the_full_feature_string() {
+        let mut run = a_run();
+        run.features = vec!["opcodefusion".into(), "idle-pause".into(), "lightning".into(), "tlbvmap".into()];
+        let e = reference_entry(&run, "id", None, Some("2026-11-08"));
+        assert_eq!(e.engine, "lightning");
+        assert_eq!(e.features, "opcodefusion idle-pause lightning tlbvmap");
+        assert!(e.label.ends_with("lightning"), "{}", e.label);
+        let json = serde_json::to_string(&e).unwrap();
+        let back: ReferenceEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.features, e.features);
+        // a row written before the field existed still loads
+        let old = json.replace(r#""features":"opcodefusion idle-pause lightning tlbvmap","#, "");
+        assert_ne!(old, json);
+        assert_eq!(serde_json::from_str::<ReferenceEntry>(&old).unwrap().features, "");
+    }
+
+    #[test]
     fn the_same_host_cpu_wins_over_a_merely_compatible_row() {
         let run = a_run();
         let base = ReferenceEntry {
             id: "other".into(), label: "Other".into(),
-            cpu: "R4400".into(), engine: "interp".into(), host: "Some Other CPU".into(),
+            cpu: "R4400".into(), engine: "interp".into(), features: String::new(), host: "Some Other CPU".into(),
             measured: None, guest_mips: 1.0, dmips: 1.0, accuracy: 100.0,
             kernels: BTreeMap::new(),
         };
