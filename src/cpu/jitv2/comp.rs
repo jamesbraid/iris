@@ -116,6 +116,8 @@ pub(crate) enum Snapshot {
     Taken(u64),
     /// A word could not be read (not RAM right now).
     Unreadable,
+    /// A CPU's cache holds lines in the page, under this generation.
+    Held(u64),
     /// The generation moved under every attempt.
     Busy,
 }
@@ -129,6 +131,11 @@ pub(crate) fn snapshot_page(page: &PhysicalCodePage, bus: &dyn BusDevice, phys_b
     const MAX_SEQLOCK_RETRIES: u32 = 8;
     for _ in 0..MAX_SEQLOCK_RETRIES {
         let gen0 = page.current_gen();
+        // A CPU's cache holds lines in the page: what that CPU runs there is
+        // not what memory holds. Not readable until the lines go.
+        if gen0 >= crate::cpu::jitv2::jitv2::GEN_HELD {
+            return Snapshot::Held(gen0);
+        }
         // A seqlock reader: the words are read after `gen0` and before
         // `gen1` (acquire), and every writer bumps the generation after its
         // bytes, with release. Then a generation that held means these are
@@ -199,10 +206,30 @@ fn prepare_multi_entry_compile(
     // §13.3 step 2: seqlock-snapshot the page bytes.
     let mut words = [0u32; ENTRIES_PER_PAGE];
     let gen_snap = match snapshot_page(page, &**bus, phys_base, &mut words) {
-        Snapshot::Taken(gen) => gen,
+        Snapshot::Taken(gen) => {
+            // The last publish was the empty one for a held generation
+            // (below), whose denials meant only "held". The lines are gone.
+            if page.entry_gen() >= crate::cpu::jitv2::jitv2::GEN_HELD {
+                page.allow_all();
+            }
+            gen
+        }
         Snapshot::Unreadable => {
             page.mark_prepare_bounced();
             return PrepareOutcome::Done(false); // page not readable right now; retry later
+        }
+        Snapshot::Held(gen) => {
+            // Nothing compiles until the lines go, and the release moves the
+            // generation. Publish no code for this one and deny every
+            // offset, so arrivals go straight to the interpreter instead of
+            // asking again (`step_jit`'s denylist gate). With four Tezro
+            // processors running the same held PROM page, the asking was
+            // most of the time to the BASEIO monitor.
+            if page.publish(&[0; crate::cpu::jitv2::BITMAP_WORDS], std::ptr::null(), gen, 0, 0, req.compiled_for_fr1) {
+                page.denylist_all();
+            }
+            page.mark_prepare_bounced();
+            return PrepareOutcome::Done(false);
         }
         Snapshot::Busy => {
             // A sufficiently hot self-modifying/shared-DMA page can bounce here
