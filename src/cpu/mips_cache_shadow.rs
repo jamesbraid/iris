@@ -437,6 +437,9 @@ impl<
     /// line did before.
     fn line_enters(&self, sp: &PpMemSpace, sel: u32, idx: usize, va: u64, (pa, len): (u64, usize)) {
         let Some(new) = sp.hold_line_page(self.view_no(), pa) else { return };
+        if new {
+            self.mark_held(pa, true);
+        }
         let base = unsafe { *self.tc_base.get() };
         if l2_op_log(CACHE_LOG_OP) {
             crate::dlog!(LogModule::L2c, "shadow:   -> line {pa:#x} holds its page (new: {new})");
@@ -469,6 +472,9 @@ impl<
         let s = self.shadow(sel);
         s.held[idx] = false;
         let gone = sp.release_line_page(self.view_no(), pa);
+        if gone {
+            self.mark_held(pa, false);
+        }
         if l2_op_log(CACHE_LOG_OP) {
             crate::dlog!(LogModule::L2c, "shadow:   -> line {pa:#x} leaves (page released: {gone})");
         }
@@ -488,6 +494,28 @@ impl<
                 *(base.add(at as usize) as *mut u64) = value;
                 *(base.add((at ^ 8) as usize) as *mut u64) = 0;
             },
+        }
+    }
+
+    /// The page holding `pa` became held in this CPU's view, or stopped
+    /// being. The generation counter that compiled code for the page checks
+    /// (the cache's bus's, which is what the JIT reads code through) carries
+    /// `GEN_HELD` while any CPU holds it. A compile request for the page is
+    /// refused at that point; dispatch is unchanged, since the change alone
+    /// retires what was compiled from memory before.
+    fn mark_held(&self, _pa: u64, _held: bool) {
+        #[cfg(feature = "jitv2")]
+        {
+            use crate::cpu::jitv2::jitv2::GEN_HELD;
+            let gran = crate::ppmem::granularity() as u64;
+            let page = _pa & !(gran - 1);
+            for a in (page..page + gran).step_by(4096) {
+                let g = self.downstream.gen_ptr(a);
+                if !g.is_null() {
+                    let d = if _held { GEN_HELD } else { 1u64.wrapping_sub(GEN_HELD) };
+                    unsafe { (*g).fetch_add(d, std::sync::atomic::Ordering::Release) };
+                }
+            }
         }
     }
 

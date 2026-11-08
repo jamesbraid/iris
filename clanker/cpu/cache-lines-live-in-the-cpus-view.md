@@ -62,6 +62,23 @@ Each is an approximation, stated where it is made.
 - No replacement, parity or ECC, and no coherence with other CPUs or DMA.
 - A snapshot taken while lines hold pages is refused at restore.
 
+## Compiled code
+
+Compiles read memory and compiled code is shared by every CPU, so a page some CPU
+holds is not compiled. Holding a page adds `GEN_HELD` to the generation counter its
+compiled code checks (the one behind the cache's bus), which retires what was
+compiled before. The compile that finds the mark (`comp::snapshot_page`) publishes
+no code for that generation and denies every offset, so arrivals interpret the page
+without asking again. The last CPU's release takes the mark off with one ordinary
+bump, which lowers the counter below that publish's generation, and the next
+compile allows every offset again. All of it is at compile time: dispatch is
+unchanged, and every other page stays compiled. Without the denial four Tezro
+processors asking for the same held PROM page took 65-77 s to the BASEIO monitor,
+against 38-42 s with it.
+
+Where a ROM's pages share one counter, holding any of them keeps all of them from
+being compiled while it stands.
+
 ## Seeing it
 
 `l2 probe 0` in the monitor prints how many lines hold pages and which. Every

@@ -8182,4 +8182,130 @@ mod tests {
             assert_eq!(jit, expected, "{name}: JIT retired-instruction count");
         }
     }
+
+    /// A CPU's cached view of a real ppmem window over one 64 MB bank at 0,
+    /// with an executor reading memory through it: compiled code for the
+    /// page at PA 0x1000 loads a word from PA 0x2000 and returns.
+    fn viewed_executor() -> (Box<MipsExecutor<PassthroughTlb, crate::cpu::mips_cache_shadow::R10000ShadowCache>>,
+                             Box<crate::ppmem::PpMemSpace>, Arc<crate::ppmem::PpMemory>) {
+        use crate::cpu::mips_cache_shadow::R10000ShadowCache;
+        use crate::cpu::mips_isa::OP_LW;
+        use crate::ppmem::MappedMemory;
+        let (space, mut banks) = crate::ppmem::PpMemSpace::with_bank_sizes(&[64]).unwrap();
+        let space = Box::new(space);
+        let bank = Arc::new(banks.remove(0));
+        let jr = make_r(crate::cpu::mips_isa::OP_SPECIAL, 31, 0, 0, 0, crate::cpu::mips_isa::FUNCT_JR);
+        for (i, w) in [make_i(OP_LW, 4, 2, 0), jr, 0].into_iter().enumerate() {
+            bank.write32(0x1000 + 4 * i as u64, w);
+        }
+        bank.write32(0x2000, 0x0a0a_0a0a);
+        bank.write32(0x3000, jr); // a page to leave for
+        let bus: Arc<dyn BusDevice> = bank.clone();
+        let mut exec = Box::new(MipsExecutor::<PassthroughTlb, R10000ShadowCache>::new(
+            bus, PassthroughTlb::default(), &MipsCpuConfig::for_model::<R10000ShadowCache>(Arc::new(crate::ip22_bus::memory_map(false)))));
+        exec.core.cp0_config = (exec.core.cp0_config & !7) | 3; // KSEG0 cacheable
+        exec.core.cp0_status &= !crate::cpu::mips_core::STATUS_ERL;
+        exec.resync_privilege_state();
+        let v = space.add_cached_view(&[exec.ppmem_bitmap_ptr(), exec.tcache_bitmap_ptr()]).unwrap();
+        unsafe {
+            exec.set_tcache_window(space.view_base(v));
+            exec.set_cached_view(&*space, v);
+            exec.set_tcache_gen_window(space.gen_window_base());
+        }
+        space.map_bank(0, 0, 64 << 20, 64 << 20).unwrap();
+        exec.install_jit_hooks();
+        assert!(crate::cpu::mips_cache_v2::MipsCache::jit_dc_geometry(&exec.cache).supported, "the inline path is on");
+        exec.jitv2_inline_compile = true;
+        exec.core.hot.interrupts.store(0, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "fetchverify")]
+        { exec.core.fetch_verify_on = false; }
+        (exec, space, bank)
+    }
+
+    fn run_viewed(exec: &mut MipsExecutor<PassthroughTlb, crate::cpu::mips_cache_shadow::R10000ShadowCache>) -> u64 {
+        run_viewed_at(exec, 0xFFFF_FFFF_8000_1000)
+    }
+
+    fn run_viewed_at(exec: &mut MipsExecutor<PassthroughTlb, crate::cpu::mips_cache_shadow::R10000ShadowCache>, pc: u64) -> u64 {
+        let ra = 0xFFFF_FFFF_8000_8000u64;
+        exec.core.pc = pc;
+        exec.core.gpr[31] = ra;
+        exec.core.gpr[4] = 0xFFFF_FFFF_8000_2000;
+        exec.core.gpr[2] = 0;
+        for _ in 0..16 {
+            if exec.core.pc == ra { break; }
+            exec.step_jit();
+        }
+        assert_eq!(exec.core.pc, ra, "the code returns");
+        exec.core.gpr[2]
+    }
+
+    /// Index Store Tag (D) through the executor, at `va`. `exec` takes the
+    /// PC as a physical address for the JIT's page, so leave it on the code.
+    fn store_pd_tag(exec: &mut MipsExecutor<PassthroughTlb, crate::cpu::mips_cache_shadow::R10000ShadowCache>, va: u64, lo: u32) {
+        exec.core.pc = 0x1000;
+        exec.core.gpr[5] = va;
+        exec.core.cp0_taglo = lo as u64;
+        exec.core.cp0_taghi = 0;
+        assert_eq!(exec.exec(make_i(crate::cpu::mips_isa::OP_CACHE, 5, 0x09, 0)), crate::cpu::mips_exec::EXEC_COMPLETE);
+    }
+
+    /// A line held for a data page: the compiled load sees the line, and the
+    /// code page stays compiled the whole time.
+    #[test]
+    fn compiled_code_reads_a_held_line_and_stays_compiled() {
+        let (mut exec, space, bank) = viewed_executor();
+        for _ in 0..4 {
+            assert_eq!(run_viewed(&mut exec), 0x0a0a_0a0a, "memory");
+        }
+        let code = unsafe { &*exec.pcp };
+        assert!(code.is_runnable(0), "compiled");
+        // PA 0x2000, DirtyExclusive; the data array's first word is zero.
+        store_pd_tag(&mut exec, 0xFFFF_FFFF_8000_2000, 2 << 8 | 3 << 6);
+        assert_eq!(space.held_line_pages(0), vec![0x2000]);
+        for _ in 0..4 {
+            assert_eq!(run_viewed(&mut exec), 0, "the line's word");
+        }
+        assert!(code.is_runnable(0), "still compiled while a data page is held");
+        assert_eq!(bank.read32(0x2000).data, 0x0a0a_0a0a);
+        store_pd_tag(&mut exec, 0xFFFF_FFFF_8000_2000, 0);
+        assert_eq!(run_viewed(&mut exec), 0x0a0a_0a0a, "memory again");
+    }
+
+    /// A held code page is not compiled while any CPU holds it: it runs
+    /// from the view in the interpreter, and compiles again once released.
+    #[test]
+    fn a_held_code_page_is_not_compiled() {
+        let (mut exec, space, bank) = viewed_executor();
+        for _ in 0..4 {
+            assert_eq!(run_viewed(&mut exec), 0x0a0a_0a0a);
+        }
+        let code = unsafe { &*exec.pcp };
+        assert!(code.is_runnable(0));
+        // A line for PA 0x1000, which keeps the code it was given: the view
+        // copies memory and the line's 32 bytes come from the data array,
+        // which here holds the same words.
+        exec.core.pc = 0x1000;
+        for i in 0..3u64 {
+            exec.core.cp0_taglo = bank.read32(0x1000 + 4 * i).data as u64;
+            exec.core.gpr[5] = 0xFFFF_FFFF_8000_1000 + 4 * i;
+            assert_eq!(exec.exec(make_i(crate::cpu::mips_isa::OP_CACHE, 5, 0x1d, 0)), crate::cpu::mips_exec::EXEC_COMPLETE);
+        }
+        store_pd_tag(&mut exec, 0xFFFF_FFFF_8000_1000, 1 << 8 | 2 << 6);
+        assert_eq!(space.held_line_pages(0), vec![0x1000]);
+        assert!(code.current_gen() >= crate::cpu::jitv2::jitv2::GEN_HELD, "the page's counter says held");
+        for _ in 0..4 {
+            assert_eq!(run_viewed(&mut exec), 0x0a0a_0a0a, "interpreted from the view");
+        }
+        assert!(!code.is_runnable(0), "not compiled while held");
+        assert!(code.is_denylisted(0) && code.entry_gen() == code.current_gen(), "and not asked for again until the lines go");
+        store_pd_tag(&mut exec, 0xFFFF_FFFF_8000_1000, 0);
+        assert!(code.current_gen() < crate::cpu::jitv2::jitv2::GEN_HELD);
+        // The page is asked for again on its next arrival.
+        run_viewed_at(&mut exec, 0xFFFF_FFFF_8000_3000);
+        for _ in 0..4 {
+            assert_eq!(run_viewed(&mut exec), 0x0a0a_0a0a);
+        }
+        assert!(code.is_runnable(0), "compiled again");
+    }
 }

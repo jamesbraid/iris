@@ -228,6 +228,17 @@ pub fn push_hot_request(hot: &crossbeam_queue::ArrayQueue<CompileRequest>, req: 
 /// for this constant.
 pub const PAGE_SIZE: u32 = 4096;
 
+/// Added to a page's generation counter for each CPU whose cache holds lines
+/// in the page, and taken off, with one ordinary bump, when the last goes
+/// (`ShadowCache::mark_held`). That CPU reads the page from its own cached
+/// view, while compiles read memory and compiled code is shared by every
+/// CPU, so a page whose counter carries this is not compiled
+/// (`comp::snapshot_page`), and the change itself retires what was compiled
+/// before. Far above anything ordinary bumps reach. The release lowers the
+/// counter below what the held page's empty publish left in `entry_gen`, so
+/// `publish` treats any change of generation as new bytes.
+pub const GEN_HELD: u64 = 1 << 48;
+
 /// Number of possible entry offsets per page: one per 4-byte-aligned word
 /// (MIPS instructions are always word-aligned), i.e. `PAGE_SIZE / 4` (§2.4:
 /// `entry_bits` 16×u64 = 1024 bits, `entry_table` 1024 entries).
@@ -1620,6 +1631,12 @@ impl PhysicalCodePage {
         for word in self.denied.iter() { word.store(0, Ordering::Relaxed); }
     }
 
+    /// Undo [`Self::denylist_all`]: every offset may be compiled again. Not
+    /// on any hot path.
+    pub fn allow_all(&self) {
+        for word in self.denied.iter() { word.store(u64::MAX, Ordering::Relaxed); }
+    }
+
     /// Clear `offset_word`'s `compiled` bit only — NOT `denied`. Two
     /// distinct callers:
     ///
@@ -1854,8 +1871,9 @@ impl PhysicalCodePage {
     /// a reader that observes a `compiled` bit set (Acquire-paired via
     /// `is_runnable`'s `entry_gen` load) never observes a stale/null
     /// `func` for it. `entry_gen` is written unconditionally on every actual
-    /// publish, but only **numerically advances** when `snap_gen >
-    /// entry_gen` (a real page-bump-triggered recompile, §13.6/§13.3's
+    /// publish, but only **changes** when `snap_gen != entry_gen` (a real
+    /// page-bump-triggered recompile, or the first after `GEN_HELD` comes
+    /// off, §13.6/§13.3's
     /// discussion) — a pure entry-coverage publish against unchanged bytes
     /// (`snap_gen == entry_gen` already) rewrites the same value. Readers
     /// never need to distinguish the two: `entry_gen == current_gen()` is
@@ -1909,7 +1927,9 @@ impl PhysicalCodePage {
         }
 
         let prev_entry_gen = self.entry_gen.load(Ordering::Relaxed);
-        let is_real_invalidation = snap_gen > prev_entry_gen;
+        // Not `>`: a page's generation drops by `GEN_HELD` when a CPU's
+        // cache lets go of it, below the generation its held publish left.
+        let is_real_invalidation = snap_gen != prev_entry_gen;
         // Code for the other FR mode replaces the old function outright, so
         // the old function's entries must go with it: its dispatch switch is
         // gone, and the new one only has cases for `new_entries`.
