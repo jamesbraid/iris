@@ -181,7 +181,7 @@ fn run_guest(
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let p = parse_block(&stdout).map_err(|e| {
-        format!("{}\n--- last 20 lines of emulator output ---\n{}", e, tail(&stdout, 20))
+        format!("{}\n{}", e, failure_context(&out.status, &stdout, &stderr))
     })?;
 
     Ok(Run {
@@ -268,6 +268,16 @@ fn run_embedded(label: &str, timeout_s: u64, quick: bool, cpu: &'static Part,
     Ok(run)
 }
 
+/// What to show when an emulator run produced no report: how it ended, and
+/// the tail of both streams. The reason is usually on stderr (a configuration
+/// error, a refused option, a panic); stdout alone showed an empty context.
+fn failure_context(status: &std::process::ExitStatus, stdout: &str, stderr: &str) -> String {
+    format!(
+        "emulator {}\n--- last 20 lines of emulator stderr ---\n{}\n\
+         --- last 20 lines of emulator stdout ---\n{}",
+        status, tail(stderr, 20), tail(stdout, 20))
+}
+
 /// Wait for a child, killing it after `timeout_s`. A benchmark that hangs is a
 /// finding, not a reason to block a matrix run forever.
 fn run_with_timeout(mut cmd: Command, timeout_s: u64) -> Result<std::process::Output, String> {
@@ -289,8 +299,16 @@ fn run_with_timeout(mut cmd: Command, timeout_s: u64) -> Result<std::process::Ou
             None => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("timed out after {}s", timeout_s));
+                    let status = child.wait();
+                    // Killing closes the pipes, so the readers finish: what the
+                    // child said before it hung is the best clue why.
+                    let stdout = String::from_utf8_lossy(&t_out.join().unwrap_or_default()).into_owned();
+                    let stderr = String::from_utf8_lossy(&t_err.join().unwrap_or_default()).into_owned();
+                    let how = match status {
+                        Ok(st) => failure_context(&st, &stdout, &stderr),
+                        Err(_) => format!("--- last 20 lines of emulator stderr ---\n{}", tail(&stderr, 20)),
+                    };
+                    return Err(format!("timed out after {}s\n{}", timeout_s, how));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
@@ -2259,5 +2277,47 @@ mod tests {
         assert!(e.contains("ci_clock"), "{e}");
         assert!(!marker.exists(), "the emulator must not be started for the run");
         assert!(!out.exists(), "nothing is saved");
+    }
+
+    /// A fake emulator, an ELF that need only exist, and a config in a directory
+    /// whose parent is where `run_guest` runs the emulator.
+    #[cfg(unix)]
+    fn guest_fixture(dir: &Path, body: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let iris = fake_iris(dir, "iris", body);
+        let elf = dir.join("suite.elf");
+        std::fs::write(&elf, b"not really an elf").unwrap();
+        std::fs::create_dir_all(dir.join("run")).unwrap();
+        let config = dir.join("run/bare.toml");
+        std::fs::write(&config, b"").unwrap();
+        (iris, elf, config)
+    }
+
+    /// The audit's seventh bug: iris-bench printed only "no IRIS-BENCH-BEGIN in
+    /// the output" with an empty context, and the reason was on stderr.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_iris_run_shows_what_the_emulator_said_on_stderr() {
+        let _g = FAKE_IRIS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = TempDir::new("stderr");
+        let (iris, elf, config) = guest_fixture(&dir.0,
+            "echo 'iris: build features: lightning' >&2\n\
+             echo 'Configuration error: jitv2.compile = sync is not available' >&2\n\
+             echo 'some stdout' ; exit 3");
+        let e = run_guest(&iris, &elf, &config, "x", 30, &[]).unwrap_err();
+        assert!(e.contains("no IRIS-BENCH-BEGIN"), "{e}");
+        assert!(e.contains("Configuration error: jitv2.compile = sync is not available"), "{e}");
+        assert!(e.contains("exit status: 3"), "{e}");
+        assert!(e.contains("some stdout"), "{e}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_timed_out_iris_run_shows_stderr_too() {
+        let _g = FAKE_IRIS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = TempDir::new("timeout");
+        let (iris, elf, config) = guest_fixture(&dir.0, "echo 'stuck at boot' >&2\nexec sleep 30");
+        let e = run_guest(&iris, &elf, &config, "x", 1, &[]).unwrap_err();
+        assert!(e.starts_with("timed out after 1s"), "{e}");
+        assert!(e.contains("stuck at boot"), "{e}");
     }
 }
