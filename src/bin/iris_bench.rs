@@ -28,7 +28,7 @@ use serde::Deserialize;
 // library: this binary, the in-process runner and the GUI all need them, and
 // "what accuracy means" should have exactly one definition.
 use iris::bench_report::{
-    fmt_rate, host_info, parse_block, reference_entry, MachineInfo, ReferenceTable, Row, Run,
+    find_features, fmt_rate, host_info, parse_block, reference_entry, MachineInfo, ReferenceTable, Row, Run,
     RunSettings, EXPECT_EXC,
 };
 use iris::bench_runner::{self, BenchOptions};
@@ -101,6 +101,42 @@ fn with_host_instructions<T>(f: impl FnOnce() -> T) -> (T, Option<u64>) {
     let counter = InsnCounter::start();
     let out = f();
     (out, counter.and_then(InsnCounter::finish))
+}
+
+/// The cargo features an emulator binary was built with, from the banner it
+/// prints on stderr before it reads any configuration. `--help` gets that
+/// far and exits, so this costs one process start rather than a run.
+fn probe_features(iris: &Path) -> Result<Vec<String>, String> {
+    let mut cmd = Command::new(iris);
+    cmd.arg("--help");
+    let out = run_with_timeout(cmd, 60)?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    find_features(&stderr).ok_or_else(|| format!(
+        "{} printed no `build features:` line for --help, so its build cannot be checked. \
+         Is it an iris binary?", iris.display()))
+}
+
+/// The emulator arguments that make a run deterministic for a binary built
+/// with `features`, or why it cannot be.
+fn deterministic_args(features: &[String]) -> Result<Vec<String>, String> {
+    let has = |f: &str| features.iter().any(|x| x == f);
+    if !has("ci_clock") {
+        return Err(format!(
+            "--deterministic needs a `ci_clock` build: its test device clock counts retired \
+             instructions, which is what makes the suite pick the same work every run. This \
+             binary was built with [{}], so the run would be timed and its counts would vary. \
+             Rebuild with --features ci_clock.", features.join(" ")));
+    }
+    if has("lightning") && has("jitv2") {
+        return Err(
+            "--deterministic cannot work on a build with both `lightning` and `jitv2`: lightning \
+             always compiles on the pool, which refuses `--jitv2-compile sync`, so the JIT's \
+             timing would vary the counts. Use lightning without jitv2, or jitv2 without lightning."
+                .into());
+    }
+    // Lightning without the JIT has nothing to compile, and refuses the option.
+    if has("lightning") { Ok(Vec::new()) }
+    else { Ok(["--jitv2-compile", "sync"].map(String::from).to_vec()) }
 }
 
 fn run_guest(
@@ -1346,9 +1382,10 @@ enum Cmd {
         /// driven by retired instructions, so it picks the same iteration
         /// counts every time. The rates it prints are then
         /// constant by construction; compare instruction counts and host cost.
-        /// The result is labelled `<label>+deterministic`. With --iris this
-        /// passes `--jitv2-compile sync`; the emulator must itself be a
-        /// `ci_clock` build.
+        /// The result is labelled `<label>+deterministic`. With --iris the
+        /// emulator is asked for its `build features:` line first and the run
+        /// is refused unless it has `ci_clock`; `--jitv2-compile sync` is
+        /// passed where the build allows it (not on a lightning build).
         #[arg(long)]
         deterministic: bool,
         /// Extra arguments passed through to --iris.
@@ -1488,7 +1525,12 @@ fn dispatch(cmd: Cmd) -> Result<(), String> {
                     let elf = elf.unwrap_or_else(|| repo_relative("bench/build/irisbench.elf"));
                     let config = config.unwrap_or_else(|| repo_relative("bench/run/bare.toml"));
                     if deterministic {
-                        extra.extend(["--jitv2-compile", "sync"].map(String::from));
+                        // Refuse before the run: a binary without ci_clock
+                        // gives a timed run, whatever the label says.
+                        let features = probe_features(&iris)?;
+                        let args = deterministic_args(&features)
+                            .map_err(|e| format!("{}: {}", iris.display(), e))?;
+                        extra.extend(args);
                     }
                     run_guest(&iris, &elf, &config, &label, timeout, &extra)?
                 }
@@ -2148,5 +2190,74 @@ mod tests {
         other.settings.repeats = 1;
         let runs = [counted("det+deterministic", 1_000, None), other];
         assert!(markdown(&runs, None).contains("differ in run length"));
+    }
+
+    /// Fake emulators are scripts written and run by the tests. A script that
+    /// is still open for writing when another thread forks fails to execute
+    /// (ETXTBSY), so every test that makes or runs one holds this.
+    #[cfg(unix)]
+    static FAKE_IRIS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A shell script standing in for an emulator binary.
+    #[cfg(unix)]
+    fn fake_iris(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    fn features(list: &str) -> Vec<String> { list.split_whitespace().map(String::from).collect() }
+
+    #[test]
+    fn deterministic_needs_ci_clock_and_picks_arguments_by_build() {
+        let e = deterministic_args(&features("tlbvmap")).unwrap_err();
+        assert!(e.contains("ci_clock") && e.contains("[tlbvmap]"), "{e}");
+        assert!(deterministic_args(&[]).is_err());
+        assert_eq!(deterministic_args(&features("tlbvmap ci_clock")).unwrap(),
+                   ["--jitv2-compile", "sync"]);
+        assert_eq!(deterministic_args(&features("jitv2 ci_clock")).unwrap(),
+                   ["--jitv2-compile", "sync"]);
+        // lightning refuses --jitv2-compile sync, and has no JIT to need it
+        assert!(deterministic_args(&features("lightning ci_clock")).unwrap().is_empty());
+        // lightning with the JIT compiles on the pool, which cannot be made deterministic
+        assert!(deterministic_args(&features("lightning jitv2 ci_clock")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_build_features_come_from_the_binarys_own_banner() {
+        let _g = FAKE_IRIS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = TempDir::new("probe");
+        let with = fake_iris(&dir.0, "with", "echo 'iris: build features: lightning tlbvmap ci_clock' >&2");
+        assert_eq!(probe_features(&with).unwrap(), features("lightning tlbvmap ci_clock"));
+        let none = fake_iris(&dir.0, "none", "echo 'iris: build features: (none)' >&2");
+        assert!(probe_features(&none).unwrap().is_empty());
+        let other = fake_iris(&dir.0, "other", "echo hello");
+        assert!(probe_features(&other).unwrap_err().contains("no `build features:` line"));
+    }
+
+    /// The audit's sixth bug: `run --deterministic --iris` on a plain binary
+    /// ran, and labelled a non-deterministic result "+deterministic".
+    #[cfg(unix)]
+    #[test]
+    fn deterministic_on_a_binary_without_ci_clock_is_refused_before_it_runs() {
+        let _g = FAKE_IRIS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = TempDir::new("detrefuse");
+        let marker = dir.0.join("ran");
+        // --help is the probe; any other invocation is the real run
+        let body = format!(
+            "echo 'iris: build features: tlbvmap' >&2\n\
+             case \"$1\" in --help) exit 0;; esac\n\
+             touch {}", marker.display());
+        let iris = fake_iris(&dir.0, "iris", &body);
+        let out = dir.0.join("out");
+        let cli = Cli::try_parse_from(["iris-bench", "run", "--deterministic", "--iris",
+            iris.to_str().unwrap(), "--out", out.to_str().unwrap()]).unwrap();
+        let e = dispatch(cli.cmd).unwrap_err();
+        assert!(e.contains("ci_clock"), "{e}");
+        assert!(!marker.exists(), "the emulator must not be started for the run");
+        assert!(!out.exists(), "nothing is saved");
     }
 }

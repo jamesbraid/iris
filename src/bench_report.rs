@@ -394,14 +394,20 @@ pub fn parse_u64(s: &str) -> Option<u64> {
 /// Pull the feature list out of the emulator's own startup banner, so a saved
 /// result records what produced it rather than what the caller believed.
 pub fn parse_features(stderr: &str) -> Vec<String> {
+    find_features(stderr).unwrap_or_default()
+}
+
+/// Like `parse_features`, but None when there is no banner line at all, so a
+/// caller can tell "built with no features" from "this is not an iris".
+pub fn find_features(stderr: &str) -> Option<Vec<String>> {
     for line in stderr.lines() {
         if let Some(rest) = line.strip_prefix("iris: build features: ") {
             let rest = rest.trim();
-            if rest == "(none)" { return Vec::new(); }
-            return rest.split_whitespace().map(str::to_string).collect();
+            if rest == "(none)" { return Some(Vec::new()); }
+            return Some(rest.split_whitespace().map(str::to_string).collect());
         }
     }
-    Vec::new()
+    None
 }
 
 // ─── headline categories ─────────────────────────────────────────────────────
@@ -876,6 +882,8 @@ IRIS-BENCH-END
         assert_eq!(parse_features("iris: build features: r5k jitv2 tlbvmap\n"),
                    vec!["r5k", "jitv2", "tlbvmap"]);
         assert!(parse_features("iris: build features: (none)\n").is_empty());
+        assert_eq!(find_features("iris: build features: (none)\n"), Some(Vec::new()));
+        assert_eq!(find_features("no banner here\n"), None);
         assert!(parse_features("no banner at all").is_empty());
     }
 
