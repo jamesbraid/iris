@@ -227,6 +227,14 @@ jobs:
           got=$(grep -o 'cpu=[A-Za-z0-9]*' build/run.log | head -1)
           [ "$got" = "cpu=$want" ] \
             || { echo "::error::cpu-tests ran $got, expected cpu=$want"; exit 1; }
+          # A run that derails stops early or skips tests, and then reports as
+          # many failures as before or fewer, which the baseline gate below
+          # reads as no change or progress. Every declared test must have run.
+          declared=$(grep -ho 'TEST("' tests/*/*.c | wc -l | tr -d ' ')
+          ran=$(grep -oE '\(([0-9]+) tests\)' build/run.log | grep -oE '[0-9]+' || true)
+          skipped=$(grep -oE '[0-9]+ tests skipped' build/run.log | grep -oE '^[0-9]+' || true)
+          [ "$ran" = "$declared" ] && [ -z "$skipped" ] \
+            || { echo "::error::cpu-tests ran ${ran:-?} of $declared tests (${skipped:-0} skipped)"; exit 1; }
           grep -E '^ RESULT:' build/run.log
 
       # ── bench ────────────────────────────────────────────────────────────
