@@ -32,6 +32,13 @@ GUEST_CROSS       := mips64-linux-gnu-
 # where the checkout lives.
 REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))..)
 
+# Both suites compile with this, so their debug information records source
+# paths relative to the repository root rather than wherever the checkout
+# lives, and two builds of the same sources are byte-identical. The root
+# rather than each suite's directory, because bench compiles cpu-tests/harness
+# too.
+PREFIXMAP := -ffile-prefix-map=$(REPO_ROOT)=.
+
 # Search order when CROSS is not given: the pinned triple first, then the
 # names other distributions use (any version; see the warning below).
 # A candidate is accepted only if `$(name)gcc --version` actually runs — a
