@@ -17,8 +17,8 @@ and R5000, both passing every check); see
 [cpu-tests/README.md](cpu-tests/README.md).
 
 ```sh
-sudo apt-get install gcc-mips-linux-gnu binutils-mips-linux-gnu   # or: make -C cpu-tests toolchain-local
-make -C cpu-tests && make -C cpu-tests run
+make -C cpu-tests toolchain-image       # the pinned MIPS compiler, in a container
+make -C cpu-tests container-all && make -C cpu-tests run
 cpu-tests/run/matrix.sh                 # R4400/R5000 x interp/jitv2
 ```
 
