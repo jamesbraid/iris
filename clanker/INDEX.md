@@ -449,6 +449,7 @@ Plans, task briefs and reviews written for agents. Each states its own status; m
 |---|---|---|
 | [wgpu-ui.md](plans/wgpu-ui.md) | plan | The iris window on wgpu: a presenter in `src/wgpu`, the board's device shared, VPro frames presented with no readback, then Newport's compositor in WGSL |
 | [cow-chd-sync-plan.md](plans/cow-chd-sync-plan.md) | plan | Plan: copy-on-write protection + "Syncing CHD file…" apply-on-shutdown |
+| [benchmark-regression-prevention.md](plans/benchmark-regression-prevention.md) | plan | Lessons from aded5989 (second hot-path formatting slowdown of the lightning interpreter) and the GCC 14 bench image, the checks that prevent each, and the steps to land them |
 | [gui-benchmark-plan.md](plans/gui-benchmark-plan.md) | plan | Benchmark in iris-gui |
 | [iris-daynaport-target.md](plans/iris-daynaport-target.md) | plan | Task: add a DaynaPort SCSI/Link target to the IRIS emulator |
 | [irix7-fork-review.md](plans/irix7-fork-review.md) | plan | The `irix7/iris` fork — change inventory and triage |
