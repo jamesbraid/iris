@@ -361,6 +361,11 @@ struct Step {
     /// the step's output lands in the result next to the host timing.
     #[serde(default)]
     metric: Option<String>,
+    /// Seconds to wait for the command, in place of `--timeout`. A step that
+    /// can hang, such as an X client talking to a server that is not
+    /// answering, gets a short one so it fails instead of holding up the run.
+    #[serde(default)]
+    timeout: Option<u64>,
 }
 
 /// The number printed after `label` in `output`: the first number following
@@ -465,17 +470,27 @@ struct CiRun {
     stdout: String,
     /// Host wall time around the `iris-ci run`.
     secs: f64,
-    /// The guest command's exit status.
+    /// The guest command's exit status. -1 when it timed out.
     exit: i32,
+    /// The guest did not finish the command in time. It may still be running it.
+    timed_out: bool,
 }
 
 /// Something that runs shell commands in a guest. `Ci` is the real one; the
 /// step logic is written against this so it can be tested without a guest.
 trait Guest {
-    /// An `Err` means the guest could not be asked (iris-ci failed, timed out,
-    /// lost the emulator). A command that ran and failed is an `Ok` with a
-    /// nonzero `exit`.
-    fn run(&self, guest_cmd: &str) -> Result<CiRun, String>;
+    /// Run `guest_cmd`, waiting `secs` seconds for it (the default when
+    /// `None`). An `Err` means the guest could not be asked (iris-ci failed or
+    /// the emulator is gone). A command that ran and failed is an `Ok` with a
+    /// nonzero `exit`, and one that did not finish is an `Ok` with `timed_out`.
+    fn run_within(&self, guest_cmd: &str, secs: Option<u64>) -> Result<CiRun, String>;
+
+    fn run(&self, guest_cmd: &str) -> Result<CiRun, String> {
+        self.run_within(guest_cmd, None)
+    }
+
+    /// Send Ctrl-C to whatever the guest's shell is running.
+    fn interrupt(&self) -> Result<(), String>;
 }
 
 /// The exit status in `iris-ci run`'s complaint about a failing guest command,
@@ -494,24 +509,29 @@ fn guest_exit(stderr: &str) -> Option<i32> {
 /// `iris-ci` failure with no guest status (no emulator, a timeout) is an error.
 fn classify_run(success: bool, stdout: String, stderr: &str, secs: f64) -> Result<CiRun, String> {
     if success {
-        return Ok(CiRun { stdout, secs, exit: 0 });
+        return Ok(CiRun { stdout, secs, exit: 0, timed_out: false });
     }
-    match guest_exit(stderr) {
-        Some(exit) => Ok(CiRun { stdout, secs, exit }),
-        None => Err(format!("iris-ci run failed: {}", stderr.trim())),
+    if let Some(exit) = guest_exit(stderr) {
+        return Ok(CiRun { stdout, secs, exit, timed_out: false });
     }
+    // The serial wait for the end-of-command marker ran out.
+    if stderr.contains("timeout after") {
+        return Ok(CiRun { stdout, secs, exit: -1, timed_out: true });
+    }
+    Err(format!("iris-ci run failed: {}", stderr.trim()))
 }
 
 impl Guest for Ci {
-    fn run(&self, guest_cmd: &str) -> Result<CiRun, String> {
+    fn run_within(&self, guest_cmd: &str, secs: Option<u64>) -> Result<CiRun, String> {
+        let secs = secs.unwrap_or(self.timeout);
         let mut cmd = Command::new(&self.bin);
         if let Some(s) = &self.socket { cmd.arg("--socket").arg(s); }
         cmd.arg("run")
             .arg(guest_cmd)
             .arg("--shell").arg(&self.shell)
-            .arg("--timeout").arg(self.timeout.to_string());
+            .arg("--timeout").arg(secs.to_string());
         let started = Instant::now();
-        let out = run_with_timeout(cmd, self.timeout + 30)?;
+        let out = run_with_timeout(cmd, secs + 30)?;
         let secs = started.elapsed().as_secs_f64();
         classify_run(
             out.status.success(),
@@ -519,6 +539,27 @@ impl Guest for Ci {
             &String::from_utf8_lossy(&out.stderr),
             secs,
         )
+    }
+
+    fn interrupt(&self) -> Result<(), String> {
+        self.send_interrupt()
+    }
+}
+
+impl Ci {
+    /// Ctrl-C is a raw byte on the serial line, with no carriage return after it.
+    fn send_interrupt(&self) -> Result<(), String> {
+        let mut cmd = Command::new(&self.bin);
+        if let Some(s) = &self.socket { cmd.arg("--socket").arg(s); }
+        cmd.arg("serial-send").arg("--no-cr").arg("\u{3}");
+        let out = run_with_timeout(cmd, 30)?;
+        if !out.status.success() {
+            return Err(format!("iris-ci serial-send failed: {}",
+                               String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        // Let the tty flush and the shell redraw its prompt.
+        std::thread::sleep(Duration::from_secs(2));
+        Ok(())
     }
 }
 
@@ -537,6 +578,17 @@ fn baseline(guest: &impl Guest) -> Result<f64, String> {
         if s < best { best = s; }
     }
     Ok(best)
+}
+
+/// Get the guest's shell back after a step hung. Interrupts it and checks that a
+/// trivial command answers; if it does not, nothing after this can be trusted.
+fn recover(guest: &impl Guest) -> Result<(), String> {
+    guest.interrupt()?;
+    let r = guest.run_within(&wrap(":"), Some(30))?;
+    if r.timed_out {
+        return Err("the guest shell did not answer after Ctrl-C".into());
+    }
+    Ok(())
 }
 
 /// A row for a step that has no timing to report. The caller adds what the
@@ -577,7 +629,14 @@ fn run_steps(guest: &impl Guest, steps: &[Step], baseline: f64) -> Result<(Vec<R
             }
         }
         if let Some(setup) = &step.setup {
-            let r = guest.run(&wrap(setup))?;
+            let r = guest.run_within(&wrap(setup), step.timeout)?;
+            if r.timed_out {
+                println!("  {:<22} FAILED (setup did not finish in {} s)", step.name,
+                         step.timeout.unwrap_or(0));
+                if !step.skip_timing { rows.push(untimed_row(step, "FAILED")); }
+                recover(guest)?;
+                continue;
+            }
             if r.exit != 0 {
                 println!("  {:<22} FAILED (setup exited {})", step.name, r.exit);
                 if !step.skip_timing { rows.push(untimed_row(step, "FAILED")); }
@@ -585,7 +644,14 @@ fn run_steps(guest: &impl Guest, steps: &[Step], baseline: f64) -> Result<(Vec<R
             }
         }
 
-        let r = guest.run(&wrap(&step.cmd))?;
+        let r = guest.run_within(&wrap(&step.cmd), step.timeout)?;
+        if r.timed_out {
+            println!("  {:<22} FAILED (did not finish in {} s)", step.name,
+                     step.timeout.unwrap_or(0));
+            if !step.skip_timing { rows.push(untimed_row(step, "FAILED")); }
+            recover(guest)?;
+            continue;
+        }
         if step.skip_timing { continue; }
         let metric = match &step.metric {
             Some(p) => extract_metric(p, &r.stdout),
@@ -614,8 +680,8 @@ fn run_steps(guest: &impl Guest, steps: &[Step], baseline: f64) -> Result<(Vec<R
             "  {:<22} {:>8.2} s{}",
             step.name,
             ns as f64 / 1e9,
-            if step.work > 0 {
-                format!("   {}/s", fmt_rate(step.work as f64 * 1e9 / ns.max(1) as f64))
+            if step.work > 0 && ns > 0 {
+                format!("   {}/s", fmt_rate(step.work as f64 * 1e9 / ns as f64))
             } else {
                 String::new()
             }
@@ -1341,19 +1407,28 @@ mod tests {
         have: Vec<&'static str>,
         failing: Vec<&'static str>,
         broken: Option<&'static str>,
+        hanging: Vec<&'static str>,
         output: &'static str,
         log: std::cell::RefCell<Vec<String>>,
     }
 
     impl FakeGuest {
         fn new() -> Self {
-            FakeGuest { have: vec![], failing: vec![], broken: None, output: "", log: Default::default() }
+            FakeGuest { have: vec![], failing: vec![], broken: None, hanging: vec![], output: "", log: Default::default() }
         }
     }
 
     impl Guest for FakeGuest {
-        fn run(&self, cmd: &str) -> Result<CiRun, String> {
+        fn interrupt(&self) -> Result<(), String> {
+            self.log.borrow_mut().push("^C".into());
+            Ok(())
+        }
+
+        fn run_within(&self, cmd: &str, _secs: Option<u64>) -> Result<CiRun, String> {
             self.log.borrow_mut().push(cmd.to_string());
+            if self.hanging.iter().any(|h| cmd.contains(h)) {
+                return Ok(CiRun { stdout: String::new(), secs: 9.0, exit: -1, timed_out: true });
+            }
             if let Some(b) = self.broken {
                 if cmd.contains(b) { return Err("iris-ci run failed: timed out".into()); }
             }
@@ -1362,7 +1437,7 @@ mod tests {
                 out.push_str("IRISBENCH-HAVE\n");
             }
             let exit = if self.failing.iter().any(|f| cmd.contains(f)) { 1 } else { 0 };
-            Ok(CiRun { stdout: out, secs: 2.0, exit })
+            Ok(CiRun { stdout: out, secs: 2.0, exit, timed_out: false })
         }
     }
 
@@ -1370,7 +1445,7 @@ mod tests {
         Step {
             name: name.into(), unit: "op".into(), work: 10, setup: None,
             cmd: cmd.into(), requires: requires.map(String::from), skip_timing: false,
-            metric: None,
+            metric: None, timeout: None,
         }
     }
 
@@ -1392,6 +1467,10 @@ mod tests {
         // iris-ci itself failing is still an error, output or not.
         assert!(classify_run(false, String::new(), "iris-ci: connect /x: refused", 1.5).is_err());
         assert!(classify_run(false, "partial".into(), "iris-ci: timed out", 1.5).is_err());
+        // A command that never finished is a step result too.
+        let r = classify_run(false, String::new(),
+            "iris-ci: iris error: wait-serial: wait-serial: timeout after 30000ms waiting for \"M\"", 31.0).unwrap();
+        assert!(r.timed_out);
     }
 
     #[test]
@@ -1544,5 +1623,28 @@ mod tests {
         let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/irix/steps.toml");
         let steps = load_steps(&p).unwrap_or_else(|e| panic!("{e}"));
         assert!(!steps.is_empty());
+    }
+
+    #[test]
+    fn a_hung_step_fails_and_the_guest_is_interrupted_before_the_next_one() {
+        let mut g = FakeGuest::new();
+        g.hanging = vec!["hang-cmd"];
+        let steps = [step("a", "hang-cmd", None), step("b", "ok-cmd", None)];
+        let (rows, _) = run_steps(&g, &steps, 0.0).unwrap();
+        let st: Vec<_> = rows.iter().map(|r| r.status.as_str()).collect();
+        assert_eq!(st, ["FAILED", "UNCHECKED"]);
+        let log = g.log.borrow();
+        let ctrl_c = log.iter().position(|c| c == "^C").unwrap();
+        assert!(log[..ctrl_c].iter().any(|c| c.contains("hang-cmd")));
+        assert!(log[ctrl_c..].iter().any(|c| c.contains("ok-cmd")));
+    }
+
+    #[test]
+    fn a_guest_that_ignores_ctrl_c_ends_the_run() {
+        let mut g = FakeGuest::new();
+        // The recovery check is the no-op `:`; it hangs too.
+        g.hanging = vec!["hang-cmd", "export PATH; :"];
+        let steps = [step("a", "hang-cmd", None), step("b", "ok-cmd", None)];
+        assert!(run_steps(&g, &steps, 0.0).is_err());
     }
 }

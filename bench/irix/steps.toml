@@ -20,6 +20,10 @@
 # failed) when it is absent, because IRIX installs vary enormously and a
 # missing x11perf is not a benchmark result.
 #
+# `timeout` (seconds) bounds one step in place of --timeout. A step that does not
+# finish in time fails, the guest shell is interrupted with Ctrl-C, and the run
+# goes on.
+#
 # A command that exits nonzero fails its step: the row is recorded as FAILED
 # with no time, and the suite carries on with the next step. End a command with
 # `; true` only if a nonzero status is expected.
