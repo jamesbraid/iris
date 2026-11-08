@@ -64,15 +64,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install the MIPS cross toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-mips-linux-gnu binutils-mips-linux-gnu
+      # The one pinned MIPS compiler every guest binary is built with, from
+      # cpu-tests/toolchain.mk, the same container developers use. The
+      # benchmark measures compiled guest code, so the compiler is part of the
+      # workload; CI testing another compiler's output would test another
+      # benchmark.
+      - name: Build the pinned MIPS toolchain
+        run: make -C cpu-tests toolchain-image
 
       # Three checked-in generated files, all verified the same way: regenerate
       # and fail on a diff. That is what stops a generator and its output from
-      # drifting apart, and it is why building either suite needs nothing but
-      # the cross toolchain.
+      # drifting apart. The FP vectors and golden checksums come from host
+      # programs; the bench image comes from the pinned toolchain.
 
       # `make vectors` also runs the generator's --check pass, which cross-checks
       # its exact rational arithmetic against the runner's own FPU before
@@ -94,8 +97,8 @@ jobs:
 
       - name: Build the guest binaries
         run: |
-          make -C cpu-tests
-          make -C bench
+          make -C cpu-tests container-all
+          make -C bench container-all
 
       # bench/prebuilt/irisbench.elf is linked into `iris` with include_bytes!
       # so the benchmark runs on a machine with no cross toolchain — a released
@@ -103,15 +106,22 @@ jobs:
       # build product that can drift is worse than no build product, and this
       # one drifts dangerously: accuracy is scored against golden checksums
       # compiled *into* the image, so a stale image against fresh goldens
-      # reports failures to users that are not real.
+      # reports failures to users that are not real, and an image from another
+      # compiler silently changes every benchmark figure.
       #
-      # Compares a digest of the *sources* rather than the image bytes. Byte
-      # comparison against a fresh build does not work and this job proved it:
-      # the guest is compiled with -g, so DWARF records the build directory, and
-      # a runner's path is never a developer's. Two correct builds of identical
-      # source differ. See bench/prebuilt-stamp.py.
-      - name: bench — checked-in guest binary matches its sources
+      # The quick check reads the compiler out of the image's debug information
+      # and names both versions if it is not the pin. The full check rebuilds
+      # the image with the pinned toolchain and fails on any byte difference:
+      # the builds are reproducible (-ffile-prefix-map), so a difference means
+      # the committed image is stale, hand-copied, or from another compiler.
+      - name: bench — checked-in guest binary built by the pinned compiler
         run: make -C bench check-prebuilt
+
+      - name: bench — checked-in guest binary is what its sources build
+        run: |
+          make -C bench prebuilt
+          git diff --exit-code --stat bench/prebuilt/ \
+            || { echo "::error::bench/prebuilt/irisbench.elf is not what the pinned toolchain builds from these sources. Run make -C bench prebuilt and commit the result."; exit 1; }
 
       # One binary of each for every cell below — that is what makes the matrix
       # a differential test rather than N independent runs.

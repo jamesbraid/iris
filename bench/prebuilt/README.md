@@ -9,20 +9,20 @@ copy of a known-good one.
 A checked-in build product that can drift is worse than no build product, and
 this one drifts dangerously: accuracy is scored against golden checksums
 compiled *into* the image, so a stale image against fresh goldens reports
-failures that are not real. `.github/workflows/suites.yml` rebuilds it and fails
-on any difference.
+failures that are not real. And the compiler decides how much guest code each
+kernel runs, so an image from another compiler is a different benchmark.
 
 Refresh it with `make -C bench prebuilt` after changing anything the guest is
 built from — the kernels, the harness, `cpu-tests/harness/`, the link script,
-the compiler flags — and commit the result alongside the source change.
+the compiler flags — and commit the result alongside the source change. It
+builds with the pinned compiler in its container, from clean.
 
-`PROVENANCE` records a digest of every source the image is built from, written
-by the `prebuilt` target and verified by `make -C bench check-prebuilt` (which
-CI runs). It is a *source* digest, not an image one, because two correct builds
-of identical source do not produce identical bytes — the image is compiled with
-`-g`, so DWARF records the build directory, and toolchain versions differ. The
-image's own hash is recorded alongside for humans, and nothing compares it.
+`.github/workflows/suites.yml` checks it twice. `make -C bench check-prebuilt`
+reads the compiler GCC recorded in the image's debug information and fails if
+it is not the pinned one, with no toolchain needed. Then CI rebuilds the image
+and fails on any byte difference; builds are reproducible, so a difference
+means the image is stale, hand-copied, or from another compiler.
 
-The digest cannot tell you the image *works*. The embedded-runner test does, by
+Neither check can tell you the image *works*. The embedded-runner test does, by
 running the suite out of the binary the image is linked into and requiring 100%
 accuracy against the golden checksums compiled into it.

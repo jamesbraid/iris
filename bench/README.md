@@ -261,13 +261,27 @@ writable path to unpack an image to either.
 
 **Refresh it with `make -C bench prebuilt` whenever you change anything the
 guest is built from** — the kernels, `harness/`, `cpu-tests/harness/`, the link
-script, the compiler flags — and commit it alongside the source change.
-`make -C bench check-prebuilt` — which CI runs — fails if the guest sources have
-moved since the image was last refreshed, because this is a build product that
-drifts dangerously: accuracy is scored against golden checksums compiled *into*
-the image, so a stale image against fresh goldens reports failures to users that
-are not real. It compares a digest of the *sources*, not the image bytes:
-`bench/prebuilt-stamp.py` explains why byte comparison cannot work.
+script, the compiler flags — and commit it alongside the source change. It
+always builds with the one pinned compiler, GCC 16.2.1 from
+`cpu-tests/toolchain.mk`, inside its container (Docker or Podman; see
+`cpu-tests/docs/toolchain.md`), so nothing needs installing and nobody's own
+compiler can leak in.
+
+The compiler is part of the benchmark. Built from the same sources at `-O2`,
+GCC 14.2 runs Dhrystone in 428 guest instructions per iteration and GCC 16.2.1
+in 313, and every rate moves with it, on an unchanged emulator. Results from
+images built by different compilers are not comparable, and `iris-bench report`
+warns when the runs it compares used different images.
+
+CI holds the image to that. `make -C bench check-prebuilt` reads the compiler
+out of the image's debug information and fails, naming both versions, if it is
+not the pin; it needs no toolchain. CI then rebuilds the image with the pinned
+toolchain and fails on any byte difference. The builds are reproducible
+(`-ffile-prefix-map` keeps the checkout's path out of the debug information),
+so a difference means the committed image is stale, copied in by hand, or from
+another compiler. A stale image is dangerous on its own: accuracy is scored
+against golden checksums compiled *into* it, so a stale image against fresh
+goldens reports failures to users that are not real.
 
 ---
 
