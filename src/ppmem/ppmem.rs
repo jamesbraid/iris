@@ -656,11 +656,17 @@ impl BusDevice for Arc<PpMemory> {
 // ---------------------------------------------------------------------------
 
 /// One live mapping inside the window, tracked so `clear_mappings` can undo it
-/// and `mapped_bitmap` can be recomputed.
+/// and `mapped_bitmap` can be recomputed. It also says where its bytes come
+/// from, so a cached view can lay part of it again when a held page leaves:
+/// `bank`'s object from `src`, or repeating every `period` bytes from `src`
+/// into the period (0: no repeat).
 #[derive(Clone, Copy, Debug)]
 struct Mapping {
     at: u64,
     len: u64,
+    bank: usize,
+    src: u64,
+    period: u64,
 }
 
 /// The 4GB window that banks are mapped into, plus the banks themselves.
@@ -713,6 +719,23 @@ struct SpaceState {
     sink2: *mut u64,
     /// Further CPUs' inline copies (`PpMemSpace::add_bitmap_sink`).
     more_sinks: Vec<*mut u64>,
+    /// The bitmap last published to the sinks above.
+    bits: u64,
+    /// Each CPU's cached view of memory: see [`PpMemSpace::add_cached_view`].
+    views: Vec<View>,
+}
+
+/// One CPU's cached view of memory: a window of its own, with every mapping
+/// the shared window has, plus the pages its cache holds lines for, which
+/// nobody else sees.
+struct View {
+    space: AddrSpace,
+    /// Where this view's region bitmap is published: the CPU's inline copies.
+    sinks: Vec<*mut u64>,
+    /// The pages this view holds, with how many of the CPU's valid lines each
+    /// holds. Only its CPU changes them, at CACHE instructions; the lock is
+    /// for a remap, which runs on another CPU's thread with this one parked.
+    held: std::sync::Mutex<std::collections::BTreeMap<u64, u32>>,
 }
 
 /// The bitmap `PpMemSpace` publishes into before a CPU claims it.
@@ -733,6 +756,9 @@ struct OwnBitmap(Box<u64>);
 //     (`smp::World::stop_others`, wired where HEART's descriptors reach memory).
 //   * Device threads (MC-DMA, seeq, VINO) reach RAM through `BusDevice` on the
 //     individual `PpMemory` banks. They never touch `PpMemSpace`.
+//   * `hold_line_page`/`release_line_page` run on a CPU thread at a CACHE
+//     instruction and change only that CPU's own view. They read the mapping
+//     list and the bitmap, which only a remap changes, with the others parked.
 //   * `mapped_bitmap()` reads the sink and is likewise CPU-thread-only; the
 //     hot-path reader is the CPU's own inline `MipsCore::ppmem_bitmap` field,
 //     which is a plain `u64` and never goes through here.
@@ -770,6 +796,8 @@ impl PpMemSpace {
                 sink,
                 sink2,
                 more_sinks: Vec::new(),
+                bits: 0,
+                views: Vec::new(),
             }),
         })
     }
@@ -814,6 +842,7 @@ impl PpMemSpace {
         unsafe {
             self.space.map(offset as usize, size as usize, b, src, Prot::ReadWrite)?;
         }
+        self.map_views(offset, size, b, src)?;
         #[cfg(feature = "jitv2")]
         {
             let (gen_off, gen_len, gen_src) = (offset / GEN_RATIO, size / GEN_RATIO, src / GEN_RATIO);
@@ -827,7 +856,7 @@ impl PpMemSpace {
             }
         }
         let st = unsafe { &mut *self.state.get() };
-        Self::record(st, offset, size);
+        Self::record(st, Mapping { at: offset, len: size, bank, src, period: 0 });
         Ok(())
     }
 
@@ -871,14 +900,30 @@ impl PpMemSpace {
                 *s = bits;
             }
         }
+        state.bits = bits;
+        for v in 0..state.views.len() {
+            Self::publish_view(state, v);
+        }
     }
 
-    fn record(state: &mut SpaceState, at: u64, len: u64) {
+    /// Publish view `v`'s bitmap: the shared one, plus every region the view
+    /// holds a page in, which `hold_line_page` made safe to touch whole.
+    fn publish_view(state: &SpaceState, v: usize) {
+        let shift = window_shift(state.window);
+        let view = &state.views[v];
+        let bits = view.held.lock().unwrap().keys().fold(state.bits, |b, &page| b | 1u64 << (page >> shift));
+        for &s in &view.sinks {
+            unsafe { *s = bits };
+        }
+    }
+
+    fn record(state: &mut SpaceState, m: Mapping) {
         // Drop anything this mapping fully replaces, then record it.
+        let (at, len) = (m.at, m.len);
         state
             .mappings
             .retain(|m| !(m.at >= at && m.at + m.len <= at + len));
-        state.mappings.push(Mapping { at, len });
+        state.mappings.push(m);
         Self::recompute_bitmap(state);
     }
 }
@@ -895,9 +940,209 @@ impl PpMemSpace {
     }
 }
 
+/// Cached views.
+///
+/// A CPU's cache and its compiled code read memory through ppmem's window, so
+/// the window is that CPU's cached view of memory. Giving each CPU a window of
+/// its own makes room for what the cache holds: a valid cache line's page can
+/// become private memory in that CPU's view while the shared window, the
+/// decode table and every other CPU go on seeing memory. That is the
+/// hardware's rule. Uncached accesses and other bus masters never see a line
+/// (NEC VR10000 user's manual p. 75), and each CPU's cache is its own.
+///
+/// Nothing on a load, store or fetch changes: the CPU reads its view through
+/// the same base pointer and inline bitmap it read the shared window through.
+/// The page is the host's mapping granule (4 KB on Linux and x86 macOS,
+/// 16 KB on Apple silicon, 64 KB on Windows).
+impl PpMemSpace {
+    /// Give a CPU a cached view of its own: a window with the same mappings
+    /// as this one, from now on, whose region bitmap is published to `sinks`
+    /// (the CPU's inline copies; null entries are skipped) instead of this
+    /// window's. Returns the view's number. Set up before the CPU runs.
+    pub fn add_cached_view(&self, sinks: &[*mut u64]) -> io::Result<usize> {
+        let st = unsafe { &mut *self.state.get() };
+        let space = AddrSpace::reserve(st.window as usize)?;
+        let sinks = sinks.iter().copied().filter(|p| !p.is_null()).collect();
+        st.views.push(View { space, sinks, held: Default::default() });
+        let v = st.views.len() - 1;
+        for m in st.mappings.clone() {
+            self.lay(st, v, &m, m.at, m.at + m.len)?;
+        }
+        Self::publish_view(st, v);
+        Ok(v)
+    }
+
+    /// The base of view `v`'s window.
+    pub fn view_base(&self, v: usize) -> *mut u8 {
+        unsafe { (&(*self.state.get()).views)[v].space.base() }
+    }
+
+    /// The pages view `v` holds, in address order.
+    pub fn held_line_pages(&self, v: usize) -> Vec<u64> {
+        unsafe { (&(*self.state.get()).views)[v].held.lock().unwrap().keys().copied().collect() }
+    }
+
+    /// A line of view `v`'s CPU at `pa` became valid: from now on the view
+    /// shows the page holding it as private memory, starting as a copy of
+    /// memory. Each call is one line, and [`Self::release_line_page`] gives
+    /// it back. Returns whether the page is newly held, or `None` when no
+    /// memory is mapped behind it.
+    ///
+    /// The region bitmap is all a CPU tests, so the page's whole region is
+    /// the view's while it stands, reading zeros where nothing is mapped. The
+    /// O2's POST holds lines for page 0 before CRIME maps the rest of its
+    /// region.
+    pub fn hold_line_page(&self, v: usize, pa: u64) -> Option<bool> {
+        let st = unsafe { &*self.state.get() };
+        let gran = granularity() as u64;
+        let page = pa & !(gran - 1);
+        if !st.mappings.iter().any(|m| m.at <= page && m.at + m.len >= page + gran) {
+            return None;
+        }
+        let shift = window_shift(st.window);
+        let view = &st.views[v];
+        let mut held = view.held.lock().unwrap();
+        if let Some(n) = held.get_mut(&page) {
+            *n += 1;
+            return Some(false);
+        }
+        if !bitmap_maps_at(st.bits, shift, page) && !held.keys().any(|&p| p >> shift == page >> shift) {
+            self.scrub_region_gaps(st, v, page >> shift << shift, 1u64 << shift);
+        }
+        let at = unsafe { view.space.base().add(page as usize) };
+        let mut bytes = vec![0u8; gran as usize];
+        unsafe {
+            std::ptr::copy_nonoverlapping(at, bytes.as_mut_ptr(), bytes.len());
+            let _ = view.space.scrub(page as usize, gran as usize);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), at, bytes.len());
+        }
+        held.insert(page, 1);
+        drop(held);
+        Self::publish_view(st, v);
+        Some(true)
+    }
+
+    /// One line of [`Self::hold_line_page`]'s page is no longer valid.
+    /// Returns true when it was the page's last: the view shows memory there
+    /// again, and what the page held is dropped, as a line invalidated
+    /// without writeback is.
+    pub fn release_line_page(&self, v: usize, pa: u64) -> bool {
+        let st = unsafe { &*self.state.get() };
+        let gran = granularity() as u64;
+        let page = pa & !(gran - 1);
+        let view = &st.views[v];
+        let mut held = view.held.lock().unwrap();
+        let Some(n) = held.get_mut(&page) else { return false };
+        *n -= 1;
+        if *n > 0 {
+            return false;
+        }
+        held.remove(&page);
+        drop(held);
+        let _ = unsafe { view.space.scrub(page as usize, gran as usize) };
+        for m in st.mappings.iter().filter(|m| m.at < page + gran && m.at + m.len > page) {
+            let _ = self.lay(st, v, m, page.max(m.at), (page + gran).min(m.at + m.len));
+        }
+        Self::publish_view(st, v);
+        true
+    }
+
+    /// Make the parts of `[r, r + len)` that nothing maps private zeros in
+    /// view `v`, and give them generation counters where none are mapped, so
+    /// the region can be marked whole in the view's bitmap: compiled stores
+    /// there bump a counter.
+    fn scrub_region_gaps(&self, st: &SpaceState, v: usize, r: u64, len: u64) {
+        let end = r + len;
+        let mut at = r;
+        while at < end {
+            if let Some(m) = st.mappings.iter().find(|m| m.at <= at && m.at + m.len > at) {
+                at = m.at + m.len;
+                continue;
+            }
+            let next = st.mappings.iter().filter(|m| m.at > at && m.at < end).map(|m| m.at).min().unwrap_or(end);
+            let _ = unsafe { st.views[v].space.scrub(at as usize, (next - at) as usize) };
+            #[cfg(feature = "jitv2")]
+            {
+                let g = granularity() as u64;
+                let (gs, ge) = ((at / GEN_RATIO) & !(g - 1), (next / GEN_RATIO).div_ceil(g) * g);
+                let touches = |m: &Mapping| m.at < ge * GEN_RATIO && m.at + m.len > gs * GEN_RATIO;
+                if !st.mappings.iter().any(touches) {
+                    let _ = unsafe { self.gen_space.scrub(gs as usize, (ge - gs) as usize) };
+                }
+            }
+            at = next;
+        }
+    }
+
+    /// A mapping just laid in the shared window goes into every view too,
+    /// under the pages each holds.
+    fn map_views(&self, at: u64, len: u64, b: &SharedMem, src: u64) -> io::Result<()> {
+        let st = unsafe { &*self.state.get() };
+        for view in &st.views {
+            let saved = Self::save_held(view, at, len);
+            unsafe { view.space.map(at as usize, len as usize, b, src, Prot::ReadWrite)? };
+            Self::put_held(view, saved);
+        }
+        Ok(())
+    }
+
+    /// Lay `[from, to)` of mapping `m` in view `v`. Data only: the views
+    /// share the window's generation counters.
+    fn lay(&self, st: &SpaceState, v: usize, m: &Mapping, from: u64, to: u64) -> io::Result<()> {
+        let b = &self.banks[m.bank];
+        let mut at = from;
+        while at < to {
+            let rel = at - m.at;
+            let (src, run) = if m.period == 0 {
+                (m.src + rel, to - at)
+            } else {
+                let o = (m.src + rel) % m.period;
+                (o, (m.period - o).min(to - at))
+            };
+            unsafe { st.views[v].space.map(at as usize, run as usize, b, src, Prot::ReadWrite)? };
+            at += run;
+        }
+        Ok(())
+    }
+
+    /// The bytes of each page `view` holds inside `[at, at + len)`, before
+    /// a mapping change replaces them.
+    fn save_held(view: &View, at: u64, len: u64) -> Vec<(u64, Vec<u8>)> {
+        let gran = granularity();
+        let base = view.space.base();
+        let held = view.held.lock().unwrap();
+        held.keys()
+            .filter(|&&p| p < at + len && p + gran as u64 > at)
+            .map(|&p| {
+                let mut b = vec![0u8; gran];
+                unsafe { std::ptr::copy_nonoverlapping(base.add(p as usize), b.as_mut_ptr(), gran) };
+                (p, b)
+            })
+            .collect()
+    }
+
+    /// Put [`Self::save_held`]'s pages back, private again.
+    fn put_held(view: &View, saved: Vec<(u64, Vec<u8>)>) {
+        let base = view.space.base();
+        for (page, bytes) in saved {
+            let _ = unsafe { view.space.scrub(page as usize, bytes.len()) };
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(page as usize), bytes.len()) };
+        }
+    }
+}
+
 impl MappedMemory for PpMemSpace {
     fn clear_mappings(&self) {
         let st = unsafe { &mut *self.state.get() };
+        // Views keep the pages they hold. Scrubbed, not left mapped, so a
+        // view never shows memory the shared window no longer maps.
+        for view in &st.views {
+            let saved = Self::save_held(view, 0, st.window);
+            for m in &st.mappings {
+                let _ = unsafe { view.space.scrub(m.at as usize, m.len as usize) };
+            }
+            Self::put_held(view, saved);
+        }
         for m in std::mem::take(&mut st.mappings) {
             // Best-effort: a failure here leaves the range mapped, which is
             // still safe — it just isn't reverted.
@@ -915,13 +1160,7 @@ impl MappedMemory for PpMemSpace {
                 }
             }
         }
-        unsafe {
-            *st.sink = 0;
-            *st.sink2 = 0;
-            for &s in &st.more_sinks {
-                *s = 0;
-            }
-        }
+        Self::recompute_bitmap(st);
     }
 
     fn map_bank(&self, bank: usize, offset: u64, size: u64, period: u64) -> io::Result<()> {
@@ -950,6 +1189,7 @@ impl MappedMemory for PpMemSpace {
                 self.space
                     .map(at as usize, chunk as usize, b, 0, Prot::ReadWrite)?;
             }
+            self.map_views(at, chunk, b, 0)?;
             // Lockstep: the counters for this mirror land at the same offset
             // scaled by GEN_RATIO, from the same bank's gen object. Every
             // mirror therefore shares one physical counter page with the
@@ -975,7 +1215,7 @@ impl MappedMemory for PpMemSpace {
         }
 
         let st = unsafe { &mut *self.state.get() };
-        Self::record(st, offset, size);
+        Self::record(st, Mapping { at: offset, len: size, bank, src: 0, period });
         Ok(())
     }
 
@@ -994,6 +1234,7 @@ impl MappedMemory for PpMemSpace {
             self.space
                 .map(offset as usize, size as usize, b, 0, Prot::ReadWrite)?;
         }
+        self.map_views(offset, size, b, 0)?;
         // Alias the counters too — this is NOT optional.
         //
         // An earlier version skipped the gen mapping whenever the alias's gen
@@ -1045,7 +1286,7 @@ impl MappedMemory for PpMemSpace {
             }
         }
         let st = unsafe { &mut *self.state.get() };
-        Self::record(st, offset, size);
+        Self::record(st, Mapping { at: offset, len: size, bank, src: 0, period: 0 });
         Ok(())
     }
 
@@ -1695,5 +1936,125 @@ mod tests {
         let min_bank = 8 * MB;
         let gen_bytes = min_bank / GEN_RATIO as usize;
         assert_eq!(gen_bytes, 16 * 1024, "8MB bank => 16KB of counters");
+    }
+
+    // ---- cached views ----
+
+    /// A CPU's view of `space`, publishing into a boxed stand-in for its
+    /// inline bitmap field.
+    fn view_of(space: &PpMemSpace) -> (usize, Box<u64>) {
+        let field = Box::new(0u64);
+        let v = space.add_cached_view(&[&*field as *const u64 as *mut u64]).unwrap();
+        (v, field)
+    }
+
+    fn word(base: *mut u8, at: u64) -> u32 {
+        unsafe { *(base.add(at as usize) as *const u32) }
+    }
+
+    fn set_word(base: *mut u8, at: u64, w: u32) {
+        unsafe { *(base.add(at as usize) as *mut u32) = w };
+    }
+
+    /// A view shows every mapping the window has, laid before or after it
+    /// was made, and publishes the same bitmap to its own sink.
+    #[test]
+    fn a_view_follows_the_windows_mappings() {
+        let (space, banks) = PpMemSpace::with_bank_sizes(&[64, 64]).unwrap();
+        space.map_bank(0, 0, 64 * MB as u64, 64 * MB as u64).unwrap();
+        let (v, field) = view_of(&space);
+        space.map_alias(1, 0x0800_0000, 64 * MB as u64).unwrap();
+        banks[0].write32(0x40, 0x1111_1111);
+        banks[1].write32(0x80, 0x2222_2222);
+        assert_eq!(word(space.view_base(v), 0x40), 0x1111_1111);
+        assert_eq!(word(space.view_base(v), 0x0800_0080), 0x2222_2222);
+        assert_eq!(*field, space.mapped_bitmap());
+        set_word(space.view_base(v), 0x44, 0x3333_3333);
+        assert_eq!(banks[0].read32(0x44).data, 0x3333_3333, "an unheld page is memory itself");
+        space.clear_mappings();
+        assert_eq!(*field, 0);
+    }
+
+    /// A held page is the view's own: what is written there stays there, the
+    /// window and memory keep their bytes, and releasing it drops the page.
+    #[test]
+    fn a_held_page_is_private_to_its_view_until_released() {
+        let (space, banks) = PpMemSpace::with_bank_sizes(&[64]).unwrap();
+        space.map_bank(0, 0, 64 * MB as u64, 64 * MB as u64).unwrap();
+        let (v, _field) = view_of(&space);
+        banks[0].write32(0x2040, 0x1234_5678);
+        assert_eq!(space.hold_line_page(v, 0x2040), Some(true));
+        assert_eq!(space.hold_line_page(v, 0x2080), Some(false), "a second line of the page");
+        let base = space.view_base(v);
+        assert_eq!(word(base, 0x2040), 0x1234_5678, "it starts as memory");
+        set_word(base, 0x2040, 0xaaaa_aaaa);
+        banks[0].write32(0x2044, 0x5555_5555);
+        assert_eq!(banks[0].read32(0x2040).data, 0x1234_5678);
+        assert_eq!(word(space.window_base(), 0x2040), 0x1234_5678);
+        assert_eq!(word(base, 0x2044), 0, "the page does not see later memory writes");
+        assert!(!space.release_line_page(v, 0x2040), "one line left");
+        assert_eq!(space.held_line_pages(v), vec![0x2000]);
+        assert!(space.release_line_page(v, 0x2080));
+        assert!(space.held_line_pages(v).is_empty());
+        assert_eq!(word(base, 0x2040), 0x1234_5678, "memory again");
+        assert_eq!(word(base, 0x2044), 0x5555_5555);
+    }
+
+    /// Two CPUs holding one page each see their own bytes.
+    #[test]
+    fn two_views_hold_one_page_apart() {
+        let (space, _banks) = PpMemSpace::with_bank_sizes(&[64]).unwrap();
+        space.map_bank(0, 0, 64 * MB as u64, 64 * MB as u64).unwrap();
+        let (a, _fa) = view_of(&space);
+        let (b, _fb) = view_of(&space);
+        space.hold_line_page(a, 0x10_0000);
+        space.hold_line_page(b, 0x10_0000);
+        set_word(space.view_base(a), 0x10_0040, 0xaaaa_aaaa);
+        set_word(space.view_base(b), 0x10_0040, 0xbbbb_bbbb);
+        assert_eq!(word(space.view_base(a), 0x10_0040), 0xaaaa_aaaa);
+        assert_eq!(word(space.view_base(b), 0x10_0040), 0xbbbb_bbbb);
+        assert_eq!(word(space.window_base(), 0x10_0040), 0);
+    }
+
+    /// A remap lays memory out again under every view and must not take a
+    /// held page with it.
+    #[test]
+    fn a_remap_keeps_held_pages() {
+        let (space, banks) = PpMemSpace::with_bank_sizes(&[64]).unwrap();
+        space.map_bank(0, 0, 64 * MB as u64, 64 * MB as u64).unwrap();
+        let (v, field) = view_of(&space);
+        space.hold_line_page(v, 0x3000);
+        set_word(space.view_base(v), 0x3010, 0x7777_7777);
+        space.clear_mappings();
+        assert_eq!(*field, 1, "the region the page stands in stays the view's");
+        space.map_bank(0, 0, 64 * MB as u64, 32 * MB as u64).unwrap();
+        assert_eq!(word(space.view_base(v), 0x3010), 0x7777_7777);
+        assert_eq!(banks[0].read32(0x3010).data, 0);
+        space.release_line_page(v, 0x3000);
+        banks[0].write32(0x3010, 0x9999_9999);
+        assert_eq!(word(space.view_base(v), 0x3010), 0x9999_9999);
+        assert_eq!(word(space.view_base(v), 0x200_3010), 0x9999_9999, "laid again with the bank's period");
+    }
+
+    /// A page with no memory behind it cannot be held. One in a region the
+    /// window maps only in part makes the region the view's, reading zeros
+    /// where nothing is mapped, until the page goes.
+    #[test]
+    fn a_page_needs_memory_and_takes_its_region() {
+        let (space, banks) = PpMemSpace::with_bank_sizes(&[32]).unwrap();
+        let (v, field) = view_of(&space);
+        assert_eq!(space.hold_line_page(v, 0x10_0000), None);
+        assert_eq!(space.hold_line_page(v, space.window_size()), None, "outside the window");
+        space.map_bank(0, 0, 32 * MB as u64, 32 * MB as u64).unwrap();
+        assert_eq!((space.mapped_bitmap(), *field), (0, 0), "a 32 MB bank leaves its 64 MB region to the bus");
+        assert_eq!(space.hold_line_page(v, 0x40 * MB as u64), None, "nothing behind it");
+        banks[0].write32(0x10_0040, 0x600d);
+        assert_eq!(space.hold_line_page(v, 0x10_0040), Some(true));
+        assert_eq!(*field, 1);
+        assert_eq!(space.mapped_bitmap(), 0, "the shared window is unchanged");
+        assert_eq!(word(space.view_base(v), 0x10_0040), 0x600d, "the page starts as memory");
+        assert_eq!(word(space.view_base(v), 0x3ff_fffc), 0, "the rest of the region is safe to touch");
+        space.release_line_page(v, 0x10_0040);
+        assert_eq!(*field, 0);
     }
 }
