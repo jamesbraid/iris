@@ -382,14 +382,45 @@ fn keep_tail(s: &str, max: usize) -> String {
 }
 
 /// Fail a steps file up front for a mistake that would otherwise surface
-/// halfway through a long run.
+/// halfway through a long run, or as a confusing quoting error in the guest.
 fn check_steps(steps: &[Step]) -> Result<(), String> {
-    for s in steps {
+    for (i, s) in steps.iter().enumerate() {
+        if steps[..i].iter().any(|o| o.name == s.name) {
+            return Err(format!("step {}: name used twice", s.name));
+        }
+        let texts = [Some(&s.cmd), s.setup.as_ref(), s.requires.as_ref()];
+        if texts.iter().flatten().any(|t| t.contains('\'')) {
+            return Err(format!(
+                "step {}: a single quote would end the sh -c '...' wrapper early", s.name));
+        }
         if let Some(m) = &s.metric {
             regex::Regex::new(m).map_err(|e| format!("step {}: metric {m:?}: {e}", s.name))?;
         }
     }
     Ok(())
+}
+
+fn load_steps(path: &Path) -> Result<Vec<Step>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+    let file: StepFile = toml::from_str(&text).map_err(|e| format!("{}: {}", path.display(), e))?;
+    check_steps(&file.step).map_err(|e| format!("{}: {}", path.display(), e))?;
+    Ok(file.step)
+}
+
+/// Add `extra` to `base`. A step with the name of one already there replaces
+/// it in place. The rest go before the steps at the end of `base` that record
+/// no row (the default file ends with a cleanup), so they still run with the
+/// files the earlier steps left behind.
+fn merge_steps(mut base: Vec<Step>, extra: Vec<Step>) -> Vec<Step> {
+    let mut at = base.len();
+    while at > 0 && base[at - 1].skip_timing { at -= 1; }
+    for e in extra {
+        match base.iter().position(|b| b.name == e.name) {
+            Some(i) => base[i] = e,
+            None => { base.insert(at, e); at += 1; }
+        }
+    }
+    base
 }
 
 /// Wrap a guest command so it runs under a Bourne shell with a sane PATH,
@@ -604,12 +635,11 @@ fn run_steps(guest: &impl Guest, steps: &[Step], baseline: f64) -> Result<(Vec<R
     Ok((rows, total_ns))
 }
 
-fn run_irix(ci: &Ci, steps_path: &Path, label: &str) -> Result<Run, String> {
-    let text = std::fs::read_to_string(steps_path)
-        .map_err(|e| format!("{}: {}", steps_path.display(), e))?;
-    let file: StepFile = toml::from_str(&text)
-        .map_err(|e| format!("{}: {}", steps_path.display(), e))?;
-    check_steps(&file.step).map_err(|e| format!("{}: {}", steps_path.display(), e))?;
+fn run_irix(ci: &Ci, steps_path: &Path, extra: &[PathBuf], label: &str) -> Result<Run, String> {
+    let mut steps = load_steps(steps_path)?;
+    for path in extra {
+        steps = merge_steps(steps, load_steps(path)?);
+    }
 
     // Identify the guest before anything else: a result recorded against the
     // wrong disk image is worse than no result.
@@ -620,7 +650,7 @@ fn run_irix(ci: &Ci, steps_path: &Path, label: &str) -> Result<Run, String> {
     let floor = baseline(ci)?;
     println!("  round-trip floor: {:.0} ms", floor * 1e3);
 
-    let (rows, total_ns) = run_steps(ci, &file.step, floor)?;
+    let (rows, total_ns) = run_steps(ci, &steps, floor)?;
 
     Ok(Run {
         cell: label.to_string(),
@@ -953,9 +983,14 @@ enum Cmd {
         /// CI socket. Defaults to iris-ci's own default.
         #[arg(long)]
         socket: Option<PathBuf>,
-        /// Step definitions. Defaults to bench/irix/steps.toml.
+        /// Step definitions, replacing bench/irix/steps.toml.
         #[arg(long)]
         steps: Option<PathBuf>,
+        /// More steps, added to the ones above. May be given more than once.
+        /// A step named like an existing one replaces it; the others run
+        /// after the defaults and before the final cleanup.
+        #[arg(long = "extra-steps")]
+        extra_steps: Vec<PathBuf>,
         /// iris-ci binary. Defaults to target/release/iris-ci.
         #[arg(long)]
         ci: Option<PathBuf>,
@@ -1146,7 +1181,7 @@ fn dispatch(cmd: Cmd) -> Result<(), String> {
             Ok(())
         }
 
-        Cmd::Irix { socket, steps, ci, shell, label, out, timeout } => {
+        Cmd::Irix { socket, steps, extra_steps, ci, shell, label, out, timeout } => {
             let ci_bin = ci.unwrap_or_else(|| repo_relative(
                 if cfg!(windows) { "target/release/iris-ci.exe" } else { "target/release/iris-ci" }));
             if !ci_bin.exists() {
@@ -1156,7 +1191,7 @@ fn dispatch(cmd: Cmd) -> Result<(), String> {
             let steps = steps.unwrap_or_else(|| repo_relative("bench/irix/steps.toml"));
             let out = out.unwrap_or_else(default_out);
             let ci = Ci { bin: ci_bin, socket, shell, timeout };
-            let run = run_irix(&ci, &steps, &label)?;
+            let run = run_irix(&ci, &steps, &extra_steps, &label)?;
             let path = save(&run, &out)?;
             println!("wrote {}", path.display());
             Ok(())
@@ -1474,5 +1509,45 @@ mod tests {
         let (mut rows, _) = run_steps(&g, &[step("a", "c", Some("nothere"))], 0.0).unwrap();
         let json = serde_json::to_string(&rows.remove(0)).unwrap();
         assert!(!json.contains("guest"), "{json}");
+    }
+
+    #[test]
+    fn extra_steps_run_before_the_trailing_cleanup() {
+        let mut clean = step("cleanup", "rm", None);
+        clean.skip_timing = true;
+        let base = vec![step("a", "x", None), step("b", "y", None), clean];
+        let m = merge_steps(base, vec![step("c", "z", None), step("d", "w", None)]);
+        let names: Vec<_> = m.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["a", "b", "c", "d", "cleanup"]);
+    }
+
+    #[test]
+    fn an_extra_step_with_an_existing_name_replaces_it_in_place() {
+        let base = vec![step("a", "x", None), step("b", "old", None), step("c", "z", None)];
+        let m = merge_steps(base, vec![step("b", "new", None)]);
+        let cmds: Vec<_> = m.iter().map(|s| s.cmd.as_str()).collect();
+        assert_eq!(cmds, ["x", "new", "z"]);
+    }
+
+    #[test]
+    fn a_steps_file_with_a_quote_or_a_repeated_name_is_refused() {
+        assert!(check_steps(&[step("a", "echo 'hi'", None)]).is_err());
+        assert!(check_steps(&[step("a", "x", Some("it's"))]).is_err());
+        assert!(check_steps(&[step("a", "x", None), step("a", "y", None)]).is_err());
+        assert!(check_steps(&[step("a", "x", None), step("b", "y", None)]).is_ok());
+    }
+
+    #[test]
+    fn the_shipped_steps_and_the_example_parse_and_pass_the_checks() {
+        for f in ["bench/irix/steps.toml", "bench/irix/benchies.toml"] {
+            let p = Path::new(env!("CARGO_MANIFEST_DIR")).join(f);
+            let steps = load_steps(&p).unwrap_or_else(|e| panic!("{e}"));
+            assert!(!steps.is_empty(), "{f}");
+        }
+        // The example adds to the defaults without clashing with any of them.
+        let base = load_steps(&Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/irix/steps.toml")).unwrap();
+        let extra = load_steps(&Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/irix/benchies.toml")).unwrap();
+        let n = base.len() + extra.len();
+        assert_eq!(merge_steps(base, extra).len(), n);
     }
 }

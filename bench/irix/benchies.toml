@@ -1,0 +1,37 @@
+# Example extra steps: benchmark binaries copied into the guest.
+#
+#   iris-bench irix --extra-steps bench/irix/benchies.toml
+#
+# These run after the default steps. To run only these, pass the file with
+# --steps instead.
+#
+# Each binary is expected in /usr/bench inside the guest. Put them there with
+# `iris-ci put`, or with scp or tar, and mark them executable. `requires` with
+# a path tests that exact file, so a step whose binary is missing is skipped.
+#
+# The `metric` patterns read the figure each program prints about itself. The
+# host timing around the step is recorded either way.
+
+[[step]]
+name = "bench/dhrystone_10M"
+unit = "run"
+work = 10000000
+cmd = "cd /usr/bench; echo 10000000 | ./dhrystone.n32"
+requires = "/usr/bench/dhrystone.n32"
+metric = "Dhrystones per Second:\\s+([0-9.]+)"
+
+[[step]]
+name = "bench/whetstone_100k"
+unit = "loop"
+work = 100000
+cmd = "cd /usr/bench; ./whetstone.n32 100000"
+requires = "/usr/bench/whetstone.n32"
+metric = "Whetstones:\\s+([0-9.]+)\\s+MIPS"
+
+[[step]]
+name = "bench/iris_bench_20"
+unit = "rep"
+work = 20
+cmd = "cd /usr/bench; ./iris_bench 20"
+requires = "/usr/bench/iris_bench"
+metric = "throughput:\\s+([0-9.]+)\\s+MB/s wall"
