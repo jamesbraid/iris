@@ -771,7 +771,6 @@ impl FuelBoard {
         // The PROM keeps its stack in cache lines it tags for a window with no
         // memory behind it yet; the controller answers that window while they stand.
         let memory = self.md.clone();
-        cpu.cache.set_pd_tag_store_hook(Box::new(move |tag| memory.startup_tag_store(tag)));
         cpu
     }
 

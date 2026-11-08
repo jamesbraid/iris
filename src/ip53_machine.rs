@@ -674,7 +674,6 @@ fn build_cpu<C: CacheCpuModel + From<Arc<dyn BusDevice>>>(board: &TezroBoard) ->
     // processor's own, while they stand. The hook runs on the processor's
     // thread, which names the processor.
     let memory = board.node.md.clone();
-    cpu.cache.set_pd_tag_store_hook(Box::new(move |tag| memory.startup_tag_store(tag)));
     cpu
 }
 

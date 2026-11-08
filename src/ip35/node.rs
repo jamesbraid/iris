@@ -77,24 +77,24 @@ fn connect(
     cpus: &[Arc<dyn CpuDevice>],
 ) -> Receiver<MachineEvent> {
     if let Some(space) = md.physical().ppmem_space() {
-        use crate::ppmem::MappedMemory;
-        unsafe {
-            for (id, cpu) in cpus.iter().enumerate() {
-                if id == 0 {
-                    space.set_bitmap_sink(cpu.ppmem_bitmap_ptr());
-                } else {
-                    space.add_bitmap_sink(cpu.ppmem_bitmap_ptr());
-                }
-                cpu.set_tcache_window(space.window_base());
-                let bitmap = cpu.tcache_bitmap_ptr();
-                if !bitmap.is_null() {
-                    if id == 0 { space.set_bitmap_sink2(bitmap) } else { space.add_bitmap_sink(bitmap) }
-                }
+        // Each processor reads memory through a cached view of its own. The
+        // PROM keeps its stack and code in cache lines before memory is set
+        // up, so lines may stand in every bank slot the window holds.
+        let span = crate::dev::bedrock_mem::BANK_SPAN;
+        for slot in 0..space.window_size() / span {
+            space.allow_unbacked_lines(slot * span, (slot + 1) * span);
+        }
+        for cpu in cpus {
+            let v = space
+                .add_cached_view(&[cpu.ppmem_bitmap_ptr(), cpu.tcache_bitmap_ptr()])
+                .expect("ppmem: a processor's cached view");
+            unsafe {
+                cpu.set_tcache_window(space.view_base(v));
+                cpu.set_cached_view(space, v);
                 #[cfg(feature = "jitv2")]
                 cpu.set_tcache_gen_window(md.generation_base());
             }
         }
-        md.physical().resync_ppmem_bitmap();
         md.rebuild_memory();
     }
     for (interface, pi) in pis.iter().enumerate() {
