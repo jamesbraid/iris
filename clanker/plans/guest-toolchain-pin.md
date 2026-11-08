@@ -1,6 +1,12 @@
 # One pinned compiler for every MIPS guest binary
 
-Status: design for review, not started (2026-11-08).
+Status: built on this branch, not yet run in CI (2026-11-08). Done: the
+report warning, both `cpu-tests` fixes, the test-count gate, the pinned
+toolchain and its container, reproducible flags, the CI rebuild check, the
+fast check, the removals, the documentation and the rebuilt image. Left: a
+green CI run; lowering the per-cell failure limits to counts measured on CI's
+runners; the R5000 jitv2 `cpu-tests` cell on the fixed suite; a failing CI run
+with the GCC 14 image put back, to show the check bites.
 
 ## Why
 
