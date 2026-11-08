@@ -19,6 +19,10 @@
 # `requires` names a program that must be on PATH; the step is skipped (not
 # failed) when it is absent, because IRIX installs vary enormously and a
 # missing x11perf is not a benchmark result.
+#
+# A command that exits nonzero fails its step: the row is recorded as FAILED
+# with no time, and the suite carries on with the next step. End a command with
+# `; true` only if a nonzero status is expected.
 
 # ── storage ─────────────────────────────────────────────────────────────────
 # 16 MB is comfortably larger than the buffer cache will hold onto across a

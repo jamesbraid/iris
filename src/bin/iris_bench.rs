@@ -394,11 +394,50 @@ struct Ci {
     timeout: u64,
 }
 
-impl Ci {
-    /// Returns the guest's stdout. An iris-ci failure is an error; a nonzero
-    /// exit status inside the guest is not — several steps end on a command
-    /// that legitimately returns nonzero.
-    fn run(&self, guest_cmd: &str) -> Result<(String, f64), String> {
+/// One command run in the guest.
+struct CiRun {
+    stdout: String,
+    /// Host wall time around the `iris-ci run`.
+    secs: f64,
+    /// The guest command's exit status.
+    exit: i32,
+}
+
+/// Something that runs shell commands in a guest. `Ci` is the real one; the
+/// step logic is written against this so it can be tested without a guest.
+trait Guest {
+    /// An `Err` means the guest could not be asked (iris-ci failed, timed out,
+    /// lost the emulator). A command that ran and failed is an `Ok` with a
+    /// nonzero `exit`.
+    fn run(&self, guest_cmd: &str) -> Result<CiRun, String>;
+}
+
+/// The exit status in `iris-ci run`'s complaint about a failing guest command,
+/// `iris-ci: iris error: guest exit N`.
+fn guest_exit(stderr: &str) -> Option<i32> {
+    let rest = &stderr[stderr.rfind("guest exit ")? + "guest exit ".len()..];
+    let end = rest.find(|c: char| !(c.is_ascii_digit() || c == '-')).unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// Turn the outcome of one `iris-ci run` process into a `CiRun`.
+///
+/// `iris-ci run` exits nonzero when the guest command does, and says so on
+/// stderr. That is a result about the step, not a failure of the harness, and
+/// it must not depend on whether the command printed anything. Only an
+/// `iris-ci` failure with no guest status (no emulator, a timeout) is an error.
+fn classify_run(success: bool, stdout: String, stderr: &str, secs: f64) -> Result<CiRun, String> {
+    if success {
+        return Ok(CiRun { stdout, secs, exit: 0 });
+    }
+    match guest_exit(stderr) {
+        Some(exit) => Ok(CiRun { stdout, secs, exit }),
+        None => Err(format!("iris-ci run failed: {}", stderr.trim())),
+    }
+}
+
+impl Guest for Ci {
+    fn run(&self, guest_cmd: &str) -> Result<CiRun, String> {
         let mut cmd = Command::new(&self.bin);
         if let Some(s) = &self.socket { cmd.arg("--socket").arg(s); }
         cmd.arg("run")
@@ -408,66 +447,85 @@ impl Ci {
         let started = Instant::now();
         let out = run_with_timeout(cmd, self.timeout + 30)?;
         let secs = started.elapsed().as_secs_f64();
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        if !out.status.success() && stdout.trim().is_empty() {
-            return Err(format!(
-                "iris-ci run failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-        Ok((stdout, secs))
-    }
-
-    fn has(&self, prog: &str) -> Result<bool, String> {
-        let (out, _) = self.run(&wrap(&probe_command(prog)))?;
-        Ok(probe_found(&out))
-    }
-
-    /// Smallest round trip we can measure: everything a step's timing has in
-    /// common with doing nothing at all — serial latency, prompt matching,
-    /// process spawn. Subtracted from every step, so a one-second step is a
-    /// second of work rather than a second of work plus the harness.
-    fn baseline(&self) -> Result<f64, String> {
-        let mut best = f64::MAX;
-        for _ in 0..3 {
-            let (_, s) = self.run(&wrap(":"))?;
-            if s < best { best = s; }
-        }
-        Ok(best)
+        classify_run(
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            &String::from_utf8_lossy(&out.stderr),
+            secs,
+        )
     }
 }
 
-fn run_irix(ci: &Ci, steps_path: &Path, label: &str) -> Result<Run, String> {
-    let text = std::fs::read_to_string(steps_path)
-        .map_err(|e| format!("{}: {}", steps_path.display(), e))?;
-    let file: StepFile = toml::from_str(&text)
-        .map_err(|e| format!("{}: {}", steps_path.display(), e))?;
+fn has(guest: &impl Guest, prog: &str) -> Result<bool, String> {
+    Ok(probe_found(&guest.run(&wrap(&probe_command(prog)))?.stdout))
+}
 
-    // Identify the guest before anything else: a result recorded against the
-    // wrong disk image is worse than no result.
-    let (uname, _) = ci.run(&wrap("uname -a"))?;
-    let cpu = uname.lines().find(|l| l.contains("IRIX")).unwrap_or("IRIX").trim().to_string();
-    println!("  guest: {}", cpu);
+/// Smallest round trip we can measure: everything a step's timing has in
+/// common with doing nothing at all — serial latency, prompt matching,
+/// process spawn. Subtracted from every step, so a one-second step is a
+/// second of work rather than a second of work plus the harness.
+fn baseline(guest: &impl Guest) -> Result<f64, String> {
+    let mut best = f64::MAX;
+    for _ in 0..3 {
+        let s = guest.run(&wrap(":"))?.secs;
+        if s < best { best = s; }
+    }
+    Ok(best)
+}
 
-    let baseline = ci.baseline()?;
-    println!("  round-trip floor: {:.0} ms", baseline * 1e3);
+/// A row for a step that has no timing to report.
+fn untimed_row(step: &Step, status: &str) -> Row {
+    Row {
+        name: step.name.clone(),
+        unit: step.unit.clone(),
+        iters: 1,
+        work: step.work,
+        ns: 0,
+        icount: 0,
+        count: 0,
+        exc: 0,
+        checksum: "0x0000000000000000".into(),
+        golden: "0x0000000000000000".into(),
+        status: status.into(),
+    }
+}
 
+/// Run `steps` in order. Returns a row per step that is timed, skipped or
+/// failed, and the total timed nanoseconds.
+///
+/// A step whose command exits nonzero is recorded as FAILED and the suite goes
+/// on: one missing tool or broken workload says nothing about the next step. Only
+/// a failure to talk to the guest at all stops the run.
+fn run_steps(guest: &impl Guest, steps: &[Step], baseline: f64) -> Result<(Vec<Row>, u64), String> {
     let mut rows = Vec::new();
     let mut total_ns = 0u64;
 
-    for step in &file.step {
+    for step in steps {
         if let Some(prog) = &step.requires {
-            if !ci.has(prog)? {
+            if !has(guest, prog)? {
                 println!("  {:<22} skipped ({} not installed)", step.name, prog);
+                rows.push(untimed_row(step, "SKIP"));
                 continue;
             }
         }
-        if let Some(setup) = &step.setup { ci.run(&wrap(setup))?; }
+        if let Some(setup) = &step.setup {
+            let r = guest.run(&wrap(setup))?;
+            if r.exit != 0 {
+                println!("  {:<22} FAILED (setup exited {})", step.name, r.exit);
+                if !step.skip_timing { rows.push(untimed_row(step, "FAILED")); }
+                continue;
+            }
+        }
 
-        let (_, secs) = ci.run(&wrap(&step.cmd))?;
+        let r = guest.run(&wrap(&step.cmd))?;
         if step.skip_timing { continue; }
+        if r.exit != 0 {
+            println!("  {:<22} FAILED (exited {})", step.name, r.exit);
+            rows.push(untimed_row(step, "FAILED"));
+            continue;
+        }
 
-        let ns = ((secs - baseline).max(0.0) * 1e9) as u64;
+        let ns = ((r.secs - baseline).max(0.0) * 1e9) as u64;
         total_ns += ns;
         println!(
             "  {:<22} {:>8.2} s{}",
@@ -479,22 +537,31 @@ fn run_irix(ci: &Ci, steps_path: &Path, label: &str) -> Result<Run, String> {
                 String::new()
             }
         );
-        rows.push(Row {
-            name: step.name.clone(),
-            unit: step.unit.clone(),
-            iters: 1,
-            work: step.work,
-            ns,
-            icount: 0,
-            count: 0,
-            exc: 0,
-            checksum: "0x0000000000000000".into(),
-            golden: "0x0000000000000000".into(),
-            // Nothing here is checksummed: these are IRIX's own tools against
-            // IRIX's own filesystem, and their output is not ours to predict.
-            status: "UNCHECKED".into(),
-        });
+        let mut row = untimed_row(step, "UNCHECKED");
+        row.ns = ns;
+        // Nothing here is checksummed: these are IRIX's own tools against
+        // IRIX's own filesystem, and their output is not ours to predict.
+        rows.push(row);
     }
+    Ok((rows, total_ns))
+}
+
+fn run_irix(ci: &Ci, steps_path: &Path, label: &str) -> Result<Run, String> {
+    let text = std::fs::read_to_string(steps_path)
+        .map_err(|e| format!("{}: {}", steps_path.display(), e))?;
+    let file: StepFile = toml::from_str(&text)
+        .map_err(|e| format!("{}: {}", steps_path.display(), e))?;
+
+    // Identify the guest before anything else: a result recorded against the
+    // wrong disk image is worse than no result.
+    let uname = ci.run(&wrap("uname -a"))?.stdout;
+    let cpu = uname.lines().find(|l| l.contains("IRIX")).unwrap_or("IRIX").trim().to_string();
+    println!("  guest: {}", cpu);
+
+    let floor = baseline(ci)?;
+    println!("  round-trip floor: {:.0} ms", floor * 1e3);
+
+    let (rows, total_ns) = run_steps(ci, &file.step, floor)?;
 
     Ok(Run {
         cell: label.to_string(),
@@ -1171,5 +1238,111 @@ mod tests {
         // or the login shell parses the rest of the line itself.
         let w = wrap(&probe_command("dd"));
         assert_eq!(w.matches('\'').count(), 2, "{w}");
+    }
+
+    /// A scripted guest: programs it "has", commands that exit nonzero, and a
+    /// log of every command line it was asked to run.
+    struct FakeGuest {
+        have: Vec<&'static str>,
+        failing: Vec<&'static str>,
+        broken: Option<&'static str>,
+        log: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl FakeGuest {
+        fn new() -> Self {
+            FakeGuest { have: vec![], failing: vec![], broken: None, log: Default::default() }
+        }
+    }
+
+    impl Guest for FakeGuest {
+        fn run(&self, cmd: &str) -> Result<CiRun, String> {
+            self.log.borrow_mut().push(cmd.to_string());
+            if let Some(b) = self.broken {
+                if cmd.contains(b) { return Err("iris-ci run failed: timed out".into()); }
+            }
+            let mut out = String::new();
+            if self.have.iter().any(|p| cmd.contains(&probe_command(p))) {
+                out.push_str("IRISBENCH-HAVE\n");
+            }
+            let exit = if self.failing.iter().any(|f| cmd.contains(f)) { 1 } else { 0 };
+            Ok(CiRun { stdout: out, secs: 2.0, exit })
+        }
+    }
+
+    fn step(name: &str, cmd: &str, requires: Option<&str>) -> Step {
+        Step {
+            name: name.into(), unit: "op".into(), work: 10, setup: None,
+            cmd: cmd.into(), requires: requires.map(String::from), skip_timing: false,
+        }
+    }
+
+    #[test]
+    fn guest_exit_is_read_from_iris_ci_stderr() {
+        assert_eq!(guest_exit("iris-ci: iris error: guest exit 1\n"), Some(1));
+        assert_eq!(guest_exit("iris-ci: iris error: guest exit 127"), Some(127));
+        assert_eq!(guest_exit("iris-ci: iris error: guest exit -1"), Some(-1));
+        assert_eq!(guest_exit("iris-ci: connect /x: No such file"), None);
+        assert_eq!(guest_exit("iris-ci: timed out waiting for the prompt"), None);
+    }
+
+    #[test]
+    fn a_failing_guest_command_with_no_output_is_a_result_not_an_error() {
+        let r = classify_run(false, String::new(), "iris-ci: iris error: guest exit 2\n", 1.5).unwrap();
+        assert_eq!(r.exit, 2);
+        let r = classify_run(true, "x".into(), "", 1.5).unwrap();
+        assert_eq!(r.exit, 0);
+        // iris-ci itself failing is still an error, output or not.
+        assert!(classify_run(false, String::new(), "iris-ci: connect /x: refused", 1.5).is_err());
+        assert!(classify_run(false, "partial".into(), "iris-ci: timed out", 1.5).is_err());
+    }
+
+    #[test]
+    fn present_programs_run_and_absent_ones_are_skipped() {
+        let mut g = FakeGuest::new();
+        g.have = vec!["dd"];
+        let steps = [step("a", "dd-work", Some("dd")), step("b", "x11-work", Some("x11perf"))];
+        let (rows, total) = run_steps(&g, &steps, 0.5).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].name.as_str(), rows[0].status.as_str()), ("a", "UNCHECKED"));
+        assert_eq!(rows[0].ns, 1_500_000_000);
+        assert_eq!((rows[1].name.as_str(), rows[1].status.as_str()), ("b", "SKIP"));
+        assert_eq!(rows[1].ns, 0);
+        assert_eq!(total, 1_500_000_000);
+        // The skipped step's command never reached the guest.
+        assert!(!g.log.borrow().iter().any(|c| c.contains("x11-work")));
+    }
+
+    #[test]
+    fn a_failed_step_is_recorded_and_the_suite_goes_on() {
+        let mut g = FakeGuest::new();
+        g.failing = vec!["bad-cmd"];
+        let steps = [step("first", "ok-cmd", None), step("bad", "bad-cmd", None),
+                     step("last", "ok-cmd2", None)];
+        let (rows, total) = run_steps(&g, &steps, 0.0).unwrap();
+        let st: Vec<_> = rows.iter().map(|r| r.status.as_str()).collect();
+        assert_eq!(st, ["UNCHECKED", "FAILED", "UNCHECKED"]);
+        // A failed step contributes no time to the total.
+        assert_eq!(rows[1].ns, 0);
+        assert_eq!(total, 4_000_000_000);
+    }
+
+    #[test]
+    fn a_failing_setup_fails_the_step_without_running_it() {
+        let mut g = FakeGuest::new();
+        g.failing = vec!["bad-setup"];
+        let mut s = step("s", "the-cmd", None);
+        s.setup = Some("bad-setup".into());
+        let (rows, _) = run_steps(&g, &[s], 0.0).unwrap();
+        assert_eq!(rows[0].status, "FAILED");
+        assert!(!g.log.borrow().iter().any(|c| c.contains("the-cmd")));
+    }
+
+    #[test]
+    fn losing_the_guest_aborts_the_run() {
+        let mut g = FakeGuest::new();
+        g.broken = Some("hang-cmd");
+        let steps = [step("a", "ok-cmd", None), step("b", "hang-cmd", None), step("c", "ok-cmd", None)];
+        assert!(run_steps(&g, &steps, 0.0).is_err());
     }
 }
