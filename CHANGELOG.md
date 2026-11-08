@@ -13,6 +13,10 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### R10000-family cache lines as memory
+
+- A valid primary data or secondary cache line now holds its page in that CPU's own copy of ppmem's window, so a PROM that keeps its stack in cache lines reads and writes the lines with cached accesses while the uncached path, DMA and the other CPUs see memory. Index Store Data writes through to such a line. `l2 probe 0` lists the pages held. Nothing changes on a load, store or fetch.
+
 ### R10000 family fixes, R12000 and R14000
 
 - The R10000 family has 44-bit virtual and 40-bit physical addresses, FrameMask and a 28-bit EntryLo PFN, picks the TLB refill vector by address space, invalidates overlapped TLB writes (Status.TS), and completes uncached stores nothing answers. Partial LWR keeps the upper word, and the cache diagnostics (Index Store Data, secondary tag mask, Config size) work.
