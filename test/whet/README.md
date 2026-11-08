@@ -98,3 +98,8 @@ instructions.
 The medians are within 2% in both runs, inside the spread, and the instruction
 counts agree. The printed figure changes in steps of one second (about 8%), so
 read the host step time.
+
+## Running it from iris-bench
+
+`../../bench/irix/benchies.toml` holds the `iris-bench irix` step for this
+program, and explains how to get the binary into a guest with `iris-ci put`.

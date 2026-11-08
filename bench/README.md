@@ -442,6 +442,10 @@ metric = "Figure:"
 iris-bench irix --extra-steps mine.toml
 ```
 
+`bench/irix/benchies.toml` has the steps for the programs built from source in
+this repository: Dhrystone (`test/dhry`), Whetstone (`test/whet`) and
+`iris_bench` (`test/ib`). Its header says how to copy them into the guest.
+
 Nothing here is checksummed. These are IRIX's own tools against IRIX's own
 filesystem and their output is not ours to predict; the accuracy score belongs
 to the bare-metal half.

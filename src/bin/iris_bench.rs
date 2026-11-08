@@ -1817,10 +1817,17 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_steps_parse_and_pass_the_checks() {
-        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/irix/steps.toml");
-        let steps = load_steps(&p).unwrap_or_else(|e| panic!("{e}"));
-        assert!(!steps.is_empty());
+    fn the_shipped_steps_and_the_benchies_parse_and_pass_the_checks() {
+        for f in ["bench/irix/steps.toml", "bench/irix/benchies.toml"] {
+            let p = Path::new(env!("CARGO_MANIFEST_DIR")).join(f);
+            let steps = load_steps(&p).unwrap_or_else(|e| panic!("{e}"));
+            assert!(!steps.is_empty(), "{f}");
+        }
+        // The benchies add to the defaults without clashing with any of them.
+        let base = load_steps(&Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/irix/steps.toml")).unwrap();
+        let extra = load_steps(&Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/irix/benchies.toml")).unwrap();
+        let n = base.len() + extra.len();
+        assert_eq!(merge_steps(base, extra).len(), n);
     }
 
     #[test]
