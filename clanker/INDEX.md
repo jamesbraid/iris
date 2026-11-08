@@ -447,6 +447,7 @@ Plans, task briefs and reviews written for agents. Each states its own status; m
 
 | Note | Kind | Title |
 |---|---|---|
+| [guest-toolchain-pin.md](plans/guest-toolchain-pin.md) | plan | One pinned compiler (Fedora 45 GCC 16.2.1, in a container) for every MIPS guest binary: reproducible builds, CI rebuilds the embedded bench image and diffs it, `cpu-tests` made independent of code size |
 | [wgpu-ui.md](plans/wgpu-ui.md) | plan | The iris window on wgpu: a presenter in `src/wgpu`, the board's device shared, VPro frames presented with no readback, then Newport's compositor in WGSL |
 | [cow-chd-sync-plan.md](plans/cow-chd-sync-plan.md) | plan | Plan: copy-on-write protection + "Syncing CHD file…" apply-on-shutdown |
 | [gui-benchmark-plan.md](plans/gui-benchmark-plan.md) | plan | Benchmark in iris-gui |
