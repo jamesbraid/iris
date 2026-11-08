@@ -203,6 +203,7 @@ fn run_inner(
         wall_s,
         suite_id: benchsuite::suite_id(),
         settings: p.settings,
+        host_instructions: None,
     })
 }
 

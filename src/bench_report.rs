@@ -223,6 +223,13 @@ pub struct Run {
     /// which is what they were.
     #[serde(default)]
     pub settings: RunSettings,
+    /// Host instructions retired in user mode over the whole run, emulator
+    /// start-up included, when the host could count them (Linux, with
+    /// `perf_event_paranoid` allowing it). The cost figure a deterministic run
+    /// is for: its guest instruction count is exact, so this is what changes
+    /// when the emulator does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_instructions: Option<u64>,
 }
 
 impl Run {
@@ -823,6 +830,7 @@ IRIS-BENCH-END
             wall_s: 30.0,
             suite_id: "blake3:0123456789abcdef".into(),
             settings: p.settings,
+            host_instructions: None,
         }
     }
 
