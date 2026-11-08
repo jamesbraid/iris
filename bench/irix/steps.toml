@@ -144,8 +144,10 @@ requires = "dd"
 [[step]]
 name = "net/loopback_ping"
 unit = "pkt"
-work = 100
-cmd = "ping -c 100 -i 0 127.0.0.1 > /dev/null 2>&1"
+work = 10000
+# IRIX's ping refuses `-i 0` ("Bad/invalid interval"); flood mode sends back to
+# back, which is what a zero interval was meant to do.
+cmd = "ping -f -c 10000 127.0.0.1 > /dev/null 2>&1"
 requires = "ping"
 
 # ── graphics ────────────────────────────────────────────────────────────────
@@ -159,6 +161,9 @@ unit = "grab"
 work = 20
 cmd = "i=0; while [ $i -lt 20 ]; do xwd -root -silent > /dev/null; i=`expr $i + 1`; done"
 requires = "xwd"
+# An X client waits forever on a server that is not answering. Give up, fail the
+# step and move on.
+timeout = 60
 
 [[step]]
 name = "gfx/x11perf_rects"
@@ -166,6 +171,7 @@ unit = "op"
 work = 0
 cmd = "x11perf -reps 3 -rect500 2>&1 | tail -2"
 requires = "x11perf"
+timeout = 300
 
 [[step]]
 name = "gfx/x11perf_scroll"
@@ -173,6 +179,7 @@ unit = "op"
 work = 0
 cmd = "x11perf -reps 3 -scroll500 2>&1 | tail -2"
 requires = "x11perf"
+timeout = 300
 
 # ── cleanup ─────────────────────────────────────────────────────────────────
 
