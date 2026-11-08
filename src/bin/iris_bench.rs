@@ -506,6 +506,40 @@ fn fmt_ratio(a: f64, b: f64) -> String {
     if r >= 100.0 { format!("{:.0}x", r) } else { format!("{:.2}x", r) }
 }
 
+/// The first 12 characters of a suite ID, enough to tell two images apart.
+fn short_suite(id: &str) -> &str {
+    if id.is_empty() { "-" } else { &id[..id.len().min(12)] }
+}
+
+/// A warning naming which runs used which guest image, when they did not all
+/// use the same one; None when they agree.
+///
+/// Kernel rates and DMIPS count iterations of compiled guest code, so they
+/// compare emulators only on the same image. A rebuild of the image with
+/// another compiler changed the instructions per Dhrystone iteration by 37%
+/// and read exactly like an emulator regression. Host runs carry no suite ID
+/// and are left out.
+fn suite_mismatch(runs: &[Run]) -> Option<String> {
+    let mut by_suite: Vec<(&str, Vec<&str>)> = Vec::new();
+    for r in runs.iter().filter(|r| !r.suite_id.is_empty()) {
+        match by_suite.iter_mut().find(|(s, _)| *s == r.suite_id) {
+            Some((_, cells)) => cells.push(&r.cell),
+            None => by_suite.push((&r.suite_id, vec![&r.cell])),
+        }
+    }
+    if by_suite.len() < 2 {
+        return None;
+    }
+    let mut o = String::from(
+        "These runs used different guest images, so kernel rates and DMIPS \
+         are not comparable across them, and guest MIPS is only roughly so: \
+         the instruction mix differs too.\n");
+    for (suite, cells) in &by_suite {
+        o.push_str(&format!("  {}: {}\n", short_suite(suite), cells.join(", ")));
+    }
+    Some(o)
+}
+
 fn markdown(runs: &[Run], baseline: Option<&str>) -> String {
     let mut o = String::new();
     let emulated: Vec<&Run> = runs.iter().filter(|r| r.cell != "host").collect();
@@ -521,16 +555,24 @@ fn markdown(runs: &[Run], baseline: Option<&str>) -> String {
             h.host.os, h.host.arch, h.host.cpu_model, h.host.cores
         ));
     }
+    if let Some(w) = suite_mismatch(runs) {
+        for (i, line) in w.lines().enumerate() {
+            o.push_str(if i == 0 { "> **Warning:** " } else { ">\n> " });
+            o.push_str(line.trim_start());
+            o.push('\n');
+        }
+        o.push('\n');
+    }
 
     // ── per-cell summary ────────────────────────────────────────────────────
     o.push_str("## Cells\n\n");
-    o.push_str("| cell | features | CPU | accuracy | guest MIPS | DMIPS | whet/s | LINPACK MFLOPS | timed | wall |\n");
-    o.push_str("|---|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
+    o.push_str("| cell | features | CPU | suite | accuracy | guest MIPS | DMIPS | whet/s | LINPACK MFLOPS | timed | wall |\n");
+    o.push_str("|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
     for r in runs {
         let feats = if r.features.is_empty() { "-".to_string() } else { r.features.join(" ") };
         o.push_str(&format!(
-            "| {} | {} | {} | {:.1}% ({}/{}) | {} | {} | {} | {} | {:.1} s | {:.1} s |\n",
-            r.cell, feats, r.machine.cpu,
+            "| {} | {} | {} | `{}` | {:.1}% ({}/{}) | {} | {} | {} | {} | {:.1} s | {:.1} s |\n",
+            r.cell, feats, r.machine.cpu, short_suite(&r.suite_id),
             r.accuracy(), r.matched, r.checked,
             if r.mips() > 0.0 { format!("{:.1}", r.mips()) } else { "n/a".into() },
             r.dmips().map(|v| format!("{:.1}", v)).unwrap_or_else(|| "-".into()),
@@ -683,6 +725,10 @@ fn text_summary(runs: &[Run]) -> String {
             r.dmips().map(|v| format!("{:.1}", v)).unwrap_or_else(|| "-".into()),
             r.total_ns as f64 / 1e9,
         ));
+    }
+    if let Some(w) = suite_mismatch(runs) {
+        o.push_str("warning: ");
+        o.push_str(&w);
     }
     o
 }
@@ -1113,5 +1159,44 @@ mod tests {
             assert!(bench_cpu(a.cpu).is_ok());
             for b in CELLS.iter().skip(i + 1) { assert_ne!(a.name, b.name); }
         }
+    }
+
+    fn run_on(cell: &str, suite: &str) -> Run {
+        Run {
+            cell: cell.into(),
+            features: Vec::new(),
+            machine: Default::default(),
+            host: Default::default(),
+            rows: Vec::new(),
+            checked: 0,
+            matched: 0,
+            total_ns: 0,
+            total_icount: 0,
+            wall_s: 0.0,
+            suite_id: suite.into(),
+            settings: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_report_across_guest_images_says_so() {
+        let runs = [
+            run_on("before", "blake3:3bc1c0000000"),
+            run_on("after", "blake3:be5200000000"),
+            run_on("host", ""),
+        ];
+        let w = suite_mismatch(&runs).expect("two images must be reported");
+        assert!(w.contains("blake3:3bc1c: before"), "{w}");
+        assert!(w.contains("blake3:be520: after"), "{w}");
+        assert!(!w.contains("host"), "a host run has no image: {w}");
+        assert!(markdown(&runs, Some("before")).contains("**Warning:**"));
+        assert!(text_summary(&runs).contains("warning: "));
+    }
+
+    #[test]
+    fn a_report_on_one_guest_image_is_quiet() {
+        let runs = [run_on("a", "blake3:3bc1c0000000"), run_on("b", "blake3:3bc1c0000000"), run_on("host", "")];
+        assert_eq!(suite_mismatch(&runs), None);
+        assert!(!markdown(&runs, None).contains("Warning"));
     }
 }
