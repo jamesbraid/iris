@@ -100,6 +100,18 @@ jobs:
         restore-keys: ${{ runner.os }}-features-cargo-
     - name: Build
       run: cargo build --release -p iris --bins --features lightning,jitv2,gpujit,idle-pause,hostgl
+    # Reads the binary just built: no formatting calls in the interpreter's
+    # per-instruction functions, and no out-of-line copy of a fetch that must
+    # inline (scripts/hot-path-check). No run and no timing, so it cannot
+    # flake. Linux gates. macOS is informational until a Mach-O run has been
+    # checked against Linux. Windows keeps its symbols in the PDB, which the
+    # script cannot read.
+    - name: Check the interpreter's hot paths
+      if: runner.os != 'Windows'
+      continue-on-error: ${{ runner.os == 'macOS' }}
+      run: |
+        python3 scripts/hot-path-check/test_check.py
+        python3 scripts/hot-path-check/check.py target/release/iris
     - name: Build opt-in REX3 dirty uploads
       run: |
         cargo build -p iris --features rex-dirty-upload
