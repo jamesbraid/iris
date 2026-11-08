@@ -77,9 +77,11 @@ A page some CPU holds is not compiled: compiles read memory, and compiled code i
 shared. ppmem puts `GEN_HELD` on the page's generation counter at the first hold
 and takes it off at the last release, moving it with the page on a remap
 (`PpMemSpace::mark`). The compile that finds it publishes nothing and denies every
-offset until the release. ppmem's counters are the bus's for memory; a machine whose bus
-maps a device over memory, as the IP35 boards map their reset PROM, must mark that
-device's counter as well.
+offset until the release. ppmem's counters are the bus's for memory. Where the bus
+maps a device over memory, as the IP35 boards map their reset PROM, the compile checks
+that device's counter instead, so the cache puts the same mark there when a page
+becomes held and takes it off with the page's last line (`mark_foreign`). That work
+is at CACHE instructions only; a load, store or fetch is unchanged.
 
 ## Primary instruction lines
 

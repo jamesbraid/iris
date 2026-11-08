@@ -244,6 +244,10 @@ pub struct ShadowCache<
     /// secondary line that a refill there would load (`refilled_word`), or
     /// `u64::MAX`.
     refill: UnsafeCell<Box<[u64]>>,
+    /// The held pages whose generation counters are not ppmem's, with the
+    /// counters carrying their `GEN_HELD`: see [`Self::mark_foreign`].
+    #[cfg(feature = "jitv2")]
+    foreign: UnsafeCell<Vec<(u64, *const std::sync::atomic::AtomicU64)>>,
 }
 
 // Safety: the CPU thread is the only accessor, as for every other cache model
@@ -303,6 +307,8 @@ impl<
             view_space: UnsafeCell::new(std::ptr::null()),
             view: UnsafeCell::new(0),
             refill: UnsafeCell::new(vec![u64::MAX; Self::PI_SETS].into_boxed_slice()),
+            #[cfg(feature = "jitv2")]
+            foreign: UnsafeCell::new(Vec::new()),
         }
     }
 
@@ -512,10 +518,23 @@ impl<
     /// into it from the data array, since Index Store Tag writes the tag
     /// alone (NEC VR5000/VR10000 instruction manual pp. 24-25). A line with
     /// no memory behind it holds no page and stays in the arrays, as every
-    /// line did before.
+    /// line did before, unless the machine allows lines there.
     fn line_enters(&self, sp: &PpMemSpace, sel: u32, idx: usize, va: u64, (pa, len): (u64, usize)) {
+        let unbacked = !sp.backs(pa);
         let Some(new) = sp.hold_line_page(self.view_no(), pa) else { return };
         let base = unsafe { *self.tc_base.get() };
+        if new {
+            self.mark_foreign(sp, pa, true);
+        }
+        if new && unbacked {
+            // No memory behind the page yet: it starts as what the cache's
+            // bus shows there.
+            let gran = crate::ppmem::granularity() as u64;
+            for a in (pa & !(gran - 1)..(pa & !(gran - 1)) + gran).step_by(8) {
+                let r = self.downstream.read64(a);
+                unsafe { *(base.add(a as usize) as *mut u64) = if r.is_ok() { r.data.rotate_left(32) } else { 0 } };
+            }
+        }
         if l2_op_log(CACHE_LOG_OP) {
             crate::dlog!(LogModule::L2c, "shadow:   -> line {pa:#x} holds its page (new: {new})");
         }
@@ -559,8 +578,45 @@ impl<
             self.set_refill(s.tags[idx], pa, len, false);
         }
         let gone = sp.release_line_page(self.view_no(), pa);
+        if gone {
+            self.mark_foreign(sp, pa, false);
+        }
         if l2_op_log(CACHE_LOG_OP) {
             crate::dlog!(LogModule::L2c, "shadow:   -> line {pa:#x} leaves (page released: {gone})");
+        }
+    }
+
+    /// ppmem puts `GEN_HELD` on its own generation counters. Where the cache's
+    /// bus counts a held page's writes on a counter of its own, which compiles
+    /// check instead (the Fuel's reset PROM, mapped over memory), the mark
+    /// goes there too, and comes off with the page's last line. A page
+    /// outside any counter, or on ppmem's, is skipped.
+    #[cfg_attr(not(feature = "jitv2"), allow(unused_variables))]
+    fn mark_foreign(&self, sp: &PpMemSpace, pa: u64, held: bool) {
+        #[cfg(feature = "jitv2")]
+        {
+            use crate::cpu::jitv2::jitv2::GEN_HELD;
+            use crate::ppmem::MappedMemory;
+            use std::sync::atomic::{AtomicU64, Ordering};
+            let page = pa & !(crate::ppmem::granularity() as u64 - 1);
+            let foreign = unsafe { &mut *self.foreign.get() };
+            if held {
+                for a in (page..page + crate::ppmem::granularity() as u64).step_by(4096) {
+                    let g = self.downstream.gen_ptr(a);
+                    let own = unsafe { sp.gen_window_base().add((a >> 12) as usize) as *const AtomicU64 };
+                    if !g.is_null() && g != own {
+                        unsafe { (*g).fetch_add(GEN_HELD, Ordering::Release) };
+                        foreign.push((page, g));
+                    }
+                }
+            } else {
+                foreign.retain(|&(p, g)| {
+                    if p == page {
+                        unsafe { (*g).fetch_add(1u64.wrapping_sub(GEN_HELD), Ordering::Release) };
+                    }
+                    p != page
+                });
+            }
         }
     }
 
@@ -1802,5 +1858,34 @@ mod tests {
         c.cache_op(C_IST | CACH_PI, set(0x10), 0);
         c.cache_op(C_IST | CACH_SD, 0x8000_4f00, 0);
         assert_eq!(c.cache_op(C_R10K_ILD | CACH_PI, set(0x10), 0), 0x3_4420_0004, "gone with the line: the array");
+    }
+
+    /// A page the cache's bus counts on a counter of its own (a ROM mapped
+    /// over memory) carries one `GEN_HELD` there however many lines hold it,
+    /// and none once they go. A counter that is ppmem's is left to ppmem.
+    #[cfg(feature = "jitv2")]
+    #[test]
+    fn a_held_page_marks_the_buss_own_counter() {
+        use crate::cpu::jitv2::jitv2::GEN_HELD;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        struct Rom(AtomicU64);
+        impl BusDevice for Rom {
+            fn gen_ptr(&self, _addr: u64) -> *const AtomicU64 { &self.0 }
+        }
+        let (space, _banks) = PpMemSpace::with_bank_sizes(&[64]).unwrap();
+        let space = Box::new(space);
+        space.map_bank(0, 0, 64 << 20, 64 << 20).unwrap();
+        let rom = Arc::new(Rom(AtomicU64::new(0)));
+        let c = Box::new(R10000ShadowCache::from(rom.clone() as Arc<dyn BusDevice>));
+        attach(&c, &space);
+        let marks = || rom.0.load(Ordering::Relaxed) / GEN_HELD;
+        c.cache_op(C_IST | CACH_PD, 0x8000_0000, pd_dirty(0x2000));
+        c.cache_op(C_IST | CACH_PD, 0x8000_0040, pd_dirty(0x2040));
+        assert_eq!(marks(), 1, "one mark for two lines");
+        c.cache_op(C_IST | CACH_PD, 0x8000_0000, 0);
+        assert_eq!(marks(), 1, "the page is still held");
+        c.cache_op(C_IST | CACH_PD, 0x8000_0040, 0);
+        assert_eq!(marks(), 0, "off with the last line");
+        assert_eq!(rom.0.load(Ordering::Relaxed), 1, "by one ordinary bump");
     }
 }
