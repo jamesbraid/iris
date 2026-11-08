@@ -16,12 +16,12 @@
 //! | 2 | 15:12 | the destination field's offset |
 //! | 3 | | width (15:0), height (31:16) |
 //! | 4 | 31, 27:24, 23:20 | source front, B and A field offsets |
-//! | 4 | 19:16, 15:13 | source pixel size and field size, 2 << code bytes |
+//! | 4 | 18:16, 15:13 | source pixel size and field size, 2 << code bytes |
 //! | 4 | 7:0 | the source field's code (7:3) and class (2:0) |
 //! | 5 | 28:0 | destination address; bit 28 with 0x10: the draw drawable |
 //! | 6 | | destination x, y |
 //! | 7 | 23:20 | another field offset, not used (see below) |
-//! | 7 | 19:16, 15:13 | destination pixel size and field size |
+//! | 7 | 18:16, 15:13 | destination pixel size and field size |
 //!
 //! Field offsets count 2-byte units from the start of the pixel. For the
 //! source, word 4 bit 31 picks A (front) or B. The destination's field is
@@ -117,7 +117,7 @@ impl CopyOperands {
             x: w[1] & 0xffff,
             y: w[1] >> 16,
             stride: w[2] & PITCH_MASK,
-            pixel_log2: (r.pixel_size().bits() | (r.pixel_size_b19() as u32) << 3) as u8 + 1,
+            pixel_log2: r.pixel_size().bits() as u8 + 1,
             at: 2 * (if r.front() { r.field_a() } else { r.field_b() }) as u8,
             bytes: 2 << r.size_field(),
             format: r.code() << 3 | r.class(),
@@ -150,7 +150,7 @@ impl CopyOperands {
             x: w[6] & 0xffff,
             y: w[6] >> 16,
             stride: (w[2] >> 16) & PITCH_MASK,
-            pixel_log2: (o.psize().bits() | (o.raw() >> 19 & 1) << 3) as u8 + 1,
+            pixel_log2: o.psize().bits() as u8 + 1,
             at: 2 * ((w[2] >> 12) & 0xf) as u8,
             bytes: 2 << o.size_field(),
             format: 0,
@@ -518,6 +518,17 @@ mod tests {
         let (s, d) = (c.src(), c.dst());
         assert_eq!((s.at, s.bytes, 1u32 << s.pixel_log2), (8, 8, 16));
         assert_eq!((d.at, d.bytes, 1u32 << d.pixel_log2), (8, 8, 16));
+    }
+
+    #[test]
+    fn the_pixel_size_is_three_bits_and_bit_19_is_not_part_of_it() {
+        let mut op = [0x2000, 0x019e0110, 0x80504050, 0x00680272, 0x84435004, 0x2000, 0x01cc01ca, 0xf2034000];
+        let plain = CopyOperands::decode(&op);
+        assert_eq!((plain.src().pixel_log2, plain.dst().pixel_log2), (4, 4));
+        op[4] |= 1 << 19;
+        op[7] |= 1 << 19;
+        let set = CopyOperands::decode(&op);
+        assert_eq!((set.src().pixel_log2, set.dst().pixel_log2), (4, 4), "bit 19 read as a size bit");
     }
 
     #[test]
