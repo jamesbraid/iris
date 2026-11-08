@@ -138,16 +138,22 @@ impl FuelMachine {
         board.status.set_cpu_cycles(cpu.cycles_ptr());
         board.status.set_count_hz(cpu.count_hz_atomic());
         if let Some(space) = board.md.physical().ppmem_space() {
-            use crate::ppmem::MappedMemory;
+            // The CPU reads memory through a cached view of its own. The
+            // PROM keeps its stack in primary data lines before it has set
+            // up memory, so lines may stand in every bank slot without it.
+            let v = space
+                .add_cached_view(&[cpu.ppmem_bitmap_ptr(), cpu.tcache_bitmap_ptr()])
+                .map_err(|e| format!("ppmem: the CPU's cached view: {e}"))?;
+            for slot in 0..4u64 {
+                let at = slot * crate::dev::bedrock_mem::BANK_SPAN;
+                space.allow_unbacked_lines(at, at + crate::dev::bedrock_mem::FITTED_BANK);
+            }
             unsafe {
-                space.set_bitmap_sink(cpu.ppmem_bitmap_ptr());
-                cpu.set_tcache_window(space.window_base());
-                let bitmap = cpu.tcache_bitmap_ptr();
-                if !bitmap.is_null() { space.set_bitmap_sink2(bitmap); }
+                cpu.set_tcache_window(space.view_base(v));
+                cpu.set_cached_view(space, v);
                 #[cfg(feature = "jitv2")]
                 cpu.set_tcache_gen_window(board.md.generation_base());
             }
-            board.md.physical().resync_ppmem_bitmap();
             board.md.rebuild_memory();
         }
         // After the windows above: each compile worker takes the cache's
