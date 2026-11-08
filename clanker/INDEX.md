@@ -354,6 +354,7 @@ Host performance: idle parking, thread parking, GFIFO, benchmarks.
 | Note | Kind | Title |
 |---|---|---|
 | [bench-first-numbers.md](perf/bench-first-numbers.md) | history | First benchmark matrix — 2026-08-21 |
+| [cpu-regression-2026-11.md](perf/cpu-regression-2026-11.md) | measure | Interpreter slowdown and benchmark-tool audit, November 2026: causes, fix, noise, tool bugs, every measurement |
 | [gfifo-backend-experiment.md](perf/gfifo-backend-experiment.md) | history | GFIFO backend: swappable ring for benchmarking — 2026-09-14 |
 | [gui-idle-refresh.md](perf/gui-idle-refresh.md) | rule | Status-bar-only heartbeat refresh skips the compose and (in iris-gui) publishes nothing; iris-gui uploads only the damaged scanlines |
 | [hal2-pump-thread.md](perf/hal2-pump-thread.md) | rule | HAL2 dedicated pump thread — reverted, do not reintroduce as-is |
