@@ -530,13 +530,23 @@ impl<
     /// into it from the data array, since Index Store Tag writes the tag
     /// alone (NEC VR5000/VR10000 instruction manual pp. 24-25). A line with
     /// no memory behind it holds no page and stays in the arrays, as every
-    /// line did before.
+    /// line did before, unless the machine allows lines there.
     fn line_enters(&self, sp: &PpMemSpace, sel: u32, idx: usize, va: u64, (pa, len): (u64, usize)) {
+        let unbacked = !sp.backs(pa);
         let Some(new) = sp.hold_line_page(self.view_no(), pa) else { return };
+        let base = unsafe { *self.tc_base.get() };
         if new {
             self.mark_held(pa, true);
+            if unbacked {
+                // No memory behind the page yet: it starts as what the
+                // cache's bus shows there.
+                let gran = crate::ppmem::granularity() as u64;
+                for a in (pa & !(gran - 1)..(pa & !(gran - 1)) + gran).step_by(8) {
+                    let r = self.downstream.read64(a);
+                    unsafe { *(base.add(a as usize) as *mut u64) = if r.is_ok() { r.data.rotate_left(32) } else { 0 } };
+                }
+            }
         }
-        let base = unsafe { *self.tc_base.get() };
         if l2_op_log(CACHE_LOG_OP) {
             crate::dlog!(LogModule::L2c, "shadow:   -> line {pa:#x} holds its page (new: {new})");
         }
