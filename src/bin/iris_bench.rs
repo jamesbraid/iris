@@ -365,6 +365,28 @@ fn wrap(cmd: &str) -> String {
     format!("sh -c 'PATH={}; export PATH; {}'", IRIX_PATH, cmd)
 }
 
+/// Shell that prints `IRISBENCH-HAVE` when `prog` is an executable the guest can
+/// run. A name is searched for in `$PATH` by splitting on `:` with `IFS`; a path
+/// is tested as given.
+///
+/// This used to split PATH with `tr : \" \"`. Inside backquotes the backslashes
+/// survive, so IRIX's `tr` was handed literal `\"` arguments, printed its usage
+/// and the loop saw no directories, so no program was ever found.
+///
+/// The marker is typed as `HAV\E` so the tty's echo of the command line cannot
+/// itself contain the word the output is searched for.
+fn probe_command(prog: &str) -> String {
+    if prog.contains('/') {
+        format!("test -x {prog} && echo IRISBENCH-HAV\\E; true")
+    } else {
+        format!("IFS=:; for d in $PATH; do test -x $d/{prog} && echo IRISBENCH-HAV\\E; done; true")
+    }
+}
+
+fn probe_found(out: &str) -> bool {
+    out.contains("IRISBENCH-HAVE")
+}
+
 struct Ci {
     bin: PathBuf,
     socket: Option<PathBuf>,
@@ -397,12 +419,8 @@ impl Ci {
     }
 
     fn has(&self, prog: &str) -> Result<bool, String> {
-        let probe = format!(
-            "for d in `echo {} | tr : \\\" \\\"`; do test -x $d/{} && echo IRISBENCH-HAVE; done",
-            IRIX_PATH, prog
-        );
-        let (out, _) = self.run(&wrap(&probe))?;
-        Ok(out.contains("IRISBENCH-HAVE"))
+        let (out, _) = self.run(&wrap(&probe_command(prog)))?;
+        Ok(probe_found(&out))
     }
 
     /// Smallest round trip we can measure: everything a step's timing has in
@@ -1113,5 +1131,45 @@ mod tests {
             assert!(bench_cpu(a.cpu).is_ok());
             for b in CELLS.iter().skip(i + 1) { assert_ne!(a.name, b.name); }
         }
+    }
+
+    /// Run a guest command line through the local Bourne shell, the way the
+    /// guest's `sh -c` does after `iris-ci` types it.
+    #[cfg(unix)]
+    fn local_sh(cmd: &str) -> String {
+        let out = Command::new("sh").arg("-c").arg(cmd).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_finds_a_program_on_the_path_and_not_a_missing_one() {
+        // `sh` is on every Unix PATH, and on IRIX_PATH's /bin or /usr/bin.
+        assert!(probe_found(&local_sh(&probe_command("sh"))));
+        assert!(!probe_found(&local_sh(&probe_command("irisbench-no-such-program"))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_tests_an_absolute_path_as_given() {
+        let sh = ["/bin/sh", "/usr/bin/sh"].into_iter()
+            .find(|p| Path::new(p).exists()).unwrap();
+        assert!(probe_found(&local_sh(&probe_command(sh))));
+        assert!(!probe_found(&local_sh(&probe_command("/nonexistent/irisbench"))));
+    }
+
+    #[test]
+    fn the_probe_command_line_does_not_contain_its_own_answer() {
+        // The tty echoes the typed line back into the captured output.
+        assert!(!probe_found(&probe_command("dd")));
+        assert!(!probe_found(&probe_command("/usr/bin/dd")));
+    }
+
+    #[test]
+    fn the_probe_survives_the_wrapper_quoting() {
+        // Nothing in the wrapped command may close the single quote around it,
+        // or the login shell parses the rest of the line itself.
+        let w = wrap(&probe_command("dd"));
+        assert_eq!(w.matches('\'').count(), 2, "{w}");
     }
 }
