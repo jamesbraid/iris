@@ -14,15 +14,15 @@ reported, not fixed here, so the suite keeps showing them until `src/` changes.
 
 ## Build
 
-Needs a MIPS cross toolchain:
+Built with one pinned MIPS cross compiler, GCC 16.2.1 from Fedora 45, which
+comes in a container ([docs/toolchain.md](docs/toolchain.md)):
 
 ```sh
-sudo apt-get install gcc-mips-linux-gnu binutils-mips-linux-gnu
-make                        # -> build/cputest.elf
+make toolchain-image        # once, with Docker or Podman
+make container-all          # -> build/cputest.elf
 ```
 
-No root? `make toolchain-local` unpacks the same packages into
-`~/.local/opt`; the Makefile finds them automatically.
+Any other MIPS cross compiler works for a quick local `make`, with a warning.
 
 `make ONLY=group_umode` (any `group_*` from `harness/tests.c`) builds a suite of
 `identity` plus that one group - for iterating on a slow target such as an HDL

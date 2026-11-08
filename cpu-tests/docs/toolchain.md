@@ -2,7 +2,13 @@
 
 ## What the suite is built with
 
-`mips-linux-gnu-gcc` (Debian/Ubuntu cross GCC), targeting:
+One pinned compiler builds every MIPS guest binary in the repository: this
+suite, `bench/`, and the benchmark image iris embeds. It is GCC 16.2.1 for
+`mips64-linux-gnu` from Fedora 45, and `toolchain.mk` is the only place its
+version is written. The compiler is part of what the benchmark measures (GCC
+14.2 runs Dhrystone in 37% more guest instructions than 16.2.1), and a change
+in code size moves this suite's stack, so an unpinned compiler changes results
+in both suites. It targets:
 
 ```
 -march=mips3 -mabi=n32 -EB -mno-abicalls -fno-pic -G0 -msoft-float
@@ -24,7 +30,7 @@ both take it; only `e_flags` differs (`abi2`).
 
 ### No libgcc
 
-The Debian cross package ships a **single, o32** `libgcc.a`. Linking it into an
+Cross packages may ship only an **o32** `libgcc.a` (Debian's does). Linking it into an
 n32 image would be silently wrong. It is also unnecessary: under n32 every
 64-bit operation the C code performs — including the `% 10` / `/= 10` in
 `con_udec` — is a native instruction rather than a `__udivdi3` call. `LIBGCC`
@@ -38,28 +44,26 @@ and under n32 `$t4`–`$t7` **do not exist** (`$8`–`$11` are `$a4`–`$a7` the
 The bootstrap uses numeric names (`$8`–`$14`) so it assembles identically under
 any ABI.
 
-## Installing it
+## Getting it
 
-With root:
-
-```sh
-sudo apt-get install gcc-mips-linux-gnu binutils-mips-linux-gnu
-```
-
-Without root — what an unattended session has to do — unpack the same `.deb`s
-into a prefix. `toolchain.mk` looks there automatically:
+With Docker or Podman, on Linux or macOS, x86-64 or arm64, nothing needs
+installing. Build the toolchain container once, then put `container-` in front
+of any target:
 
 ```sh
-make -C cpu-tests toolchain-local
+make -C cpu-tests toolchain-image
+make -C cpu-tests container-all     # same as `make all`, with the pinned GCC
+make -C bench container-all
 ```
 
-That fetches `binutils-mips-linux-gnu`, `binutils-common`, `libbinutils`,
-`gcc-12-mips-linux-gnu`, `cpp-12-mips-linux-gnu` and `libgcc-12-dev-mips-cross`
-and `dpkg -x`s them into `~/.local/opt/mips-linux-gnu`.
+The container runs natively on either architecture; both build the same bytes.
+On macOS with Colima the checkout must be under your home directory, because
+Colima shares only that with its VM.
 
-One wrinkle: the binutils from the `.deb` link against their own
-`libbfd-2.42-mips.so` / `libopcodes-2.42-mips.so`, which are not on the default
-loader path in a rootless install. `toolchain.mk` exports `LD_LIBRARY_PATH` for
-them; `env.sh` in the prefix does the same for an interactive shell.
+On Fedora 45 itself, install the packages `toolchain.mk` names
+(`GUEST_TC_PACKAGES`) and plain `make` finds `mips64-linux-gnu-gcc`.
 
-Override the prefix with `make CROSS=mips64-elf-` for a different toolchain.
+Any other MIPS cross compiler still works for quick local runs (`make
+CROSS=...`, or one of the names `toolchain.mk` probes for), with a warning:
+its binaries are not the ones CI tests, and benchmark figures from it are not
+comparable.
