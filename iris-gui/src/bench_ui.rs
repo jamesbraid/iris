@@ -861,6 +861,7 @@ mod tests {
             wall_s: 30.0,
             suite_id: "blake3:0123456789abcdef".into(),
             settings: RunSettings::default(),
+            host_instructions: None,
         }
     }
 

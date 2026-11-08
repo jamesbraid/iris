@@ -50,6 +50,59 @@ fn repo_relative(p: &str) -> PathBuf {
     direct
 }
 
+/// Counts the user-mode instructions this process and everything it starts
+/// afterwards retire, so a deterministic run can say what it cost the host.
+/// Linux only, through `perf_event_open`; where that is unavailable or not
+/// permitted `finish` returns None and the report says the figure is missing.
+struct InsnCounter {
+    #[cfg(target_os = "linux")]
+    fd: libc::c_int,
+}
+
+#[cfg(target_os = "linux")]
+impl InsnCounter {
+    fn start() -> Option<Self> {
+        // The first 64 bytes of `struct perf_event_attr` (PERF_ATTR_SIZE_VER0),
+        // which every kernel since 2.6.31 accepts.
+        let mut attr = [0u64; 8];
+        attr[0] = 0 /* PERF_TYPE_HARDWARE */ | (64u64 << 32) /* size */;
+        attr[1] = 1; // PERF_COUNT_HW_INSTRUCTIONS
+        // bit 1 inherit (threads and children started later), bit 5
+        // exclude_kernel, bit 6 exclude_hv: what `perf stat -e instructions:u` counts.
+        attr[5] = (1 << 1) | (1 << 5) | (1 << 6);
+        // SAFETY: `attr` is a live, correctly sized perf_event_attr and the
+        // remaining arguments are plain integers; the call only reads it.
+        let fd = unsafe {
+            libc::syscall(libc::SYS_perf_event_open, attr.as_ptr(), 0 as libc::pid_t,
+                          -1 as libc::c_int, -1 as libc::c_int,
+                          8 /* PERF_FLAG_FD_CLOEXEC */ as libc::c_ulong)
+        };
+        if fd < 0 { None } else { Some(InsnCounter { fd: fd as libc::c_int }) }
+    }
+
+    fn finish(self) -> Option<u64> {
+        let mut v = 0u64;
+        // SAFETY: reads at most 8 bytes into `v`, which is 8 bytes.
+        let n = unsafe { libc::read(self.fd, (&mut v as *mut u64).cast(), 8) };
+        // SAFETY: `fd` is ours and closed exactly once, here.
+        unsafe { libc::close(self.fd) };
+        (n == 8).then_some(v)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl InsnCounter {
+    fn start() -> Option<Self> { None }
+    fn finish(self) -> Option<u64> { None }
+}
+
+/// Start counting, run `f`, stop counting.
+fn with_host_instructions<T>(f: impl FnOnce() -> T) -> (T, Option<u64>) {
+    let counter = InsnCounter::start();
+    let out = f();
+    (out, counter.and_then(InsnCounter::finish))
+}
+
 fn run_guest(
     iris: &Path,
     elf: &Path,
@@ -85,7 +138,8 @@ fn run_guest(
     for e in extra { cmd.arg(e); }
 
     let started = Instant::now();
-    let out = run_with_timeout(cmd, timeout_s)?;
+    let (out, host_instructions) = with_host_instructions(|| run_with_timeout(cmd, timeout_s));
+    let out = out?;
     let wall_s = started.elapsed().as_secs_f64();
 
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -107,6 +161,7 @@ fn run_guest(
         wall_s,
         suite_id,
         settings: p.settings,
+        host_instructions,
     })
 }
 
@@ -138,6 +193,7 @@ fn run_host(exe: &Path, timeout_s: u64) -> Result<Run, String> {
         wall_s,
         suite_id: String::new(),
         settings: p.settings,
+        host_instructions: None,
     })
 }
 
@@ -164,11 +220,16 @@ fn run_embedded(label: &str, timeout_s: u64, quick: bool, cpu: &'static Part,
         deterministic,
         ..Default::default()
     };
-    bench_runner::run(&opts, |p| {
-        if let bench_runner::Progress::Line(l) = p {
-            println!("{}", l);
-        }
-    })
+    let (run, host_instructions) = with_host_instructions(|| {
+        bench_runner::run(&opts, |p| {
+            if let bench_runner::Progress::Line(l) = p {
+                println!("{}", l);
+            }
+        })
+    });
+    let mut run = run?;
+    run.host_instructions = host_instructions;
+    Ok(run)
 }
 
 /// Wait for a child, killing it after `timeout_s`. A benchmark that hangs is a
@@ -514,10 +575,24 @@ fn run_irix(ci: &Ci, steps_path: &Path, label: &str) -> Result<Run, String> {
         suite_id: String::new(),
         // Not the bare-metal harness, so its run configuration does not apply.
         settings: RunSettings::default(),
+        host_instructions: None,
     })
 }
 
 // ─── reports ─────────────────────────────────────────────────────────────────
+
+/// Why a result cannot be a reference row, if it cannot. A deterministic run
+/// reports constant rates (100.0 MIPS, a DMIPS set by the compiler), so a row
+/// made from one would compare every machine against a number that is not a speed.
+fn reference_refusal(run: &Run) -> Result<(), String> {
+    match clock_of(run) {
+        Clock::Timed => Ok(()),
+        Clock::Counted => Err("this is a deterministic (ci_clock) run: its rates are constants of \
+            the build, not speeds. Reference rows must come from a timed run.".into()),
+        Clock::Mislabelled => Err("this run is labelled +deterministic, which marks rates that are \
+            not speeds. Reference rows must come from a timed run; re-run under a label without it.".into()),
+    }
+}
 
 fn fmt_ratio(a: f64, b: f64) -> String {
     if b <= 0.0 || a <= 0.0 { return "-".into(); }
@@ -597,6 +672,103 @@ fn fmt_stat(s: Option<Stat>, f: impl Fn(f64) -> String) -> String {
         Some(s) if s.n == 1 => f(s.median),
         Some(s) => format!("{} [{}-{}]", f(s.median), f(s.min), f(s.max)),
     }
+}
+
+/// A whole count with thousands separators: `613,905,711`.
+fn fmt_count(v: f64) -> String {
+    let digits = format!("{:.0}", v);
+    let mut o = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 { o.push(','); }
+        o.push(c);
+    }
+    o
+}
+
+fn is_counted(g: &Group) -> bool { clock_of(g.runs[0]) == Clock::Counted }
+
+/// Guest and host instruction counts for the counted (`ci_clock`) groups.
+///
+/// The suite's rates in these runs are constants of the build: the test
+/// device's clock counts retired instructions, so every kernel "runs" at the
+/// same speed however slow the emulator is. What a run does tell is how many
+/// guest instructions the work took, which is exact, and how many host
+/// instructions the emulator spent on it.
+fn counted_markdown(counted: &[&Group], baseline: Option<&str>, cmp: Compare) -> String {
+    let mut o = String::new();
+    let base = baseline
+        .and_then(|b| counted.iter().copied().find(|g| g.cell == b))
+        .or_else(|| counted.first().copied());
+
+    o.push_str("## Deterministic runs\n\n");
+    o.push_str("These runs used the `ci_clock` clock, which counts retired instructions, so \
+                they report instructions instead of speed. They are not compared with the \
+                timed cells. Guest instructions are exact; host instructions are what the \
+                emulator spent, counted in user mode over the whole run (`-` where the host \
+                could not count them).\n\n");
+    o.push_str("| cell | n | features | CPU | suite | run | accuracy | guest instructions | host instructions | wall |\n");
+    o.push_str("|---|---:|---|---|---|---|---:|---:|---:|---:|\n");
+    for g in counted {
+        let r = g.runs[0];
+        let feats = if r.features.is_empty() { "-".to_string() } else { r.features.join(" ") };
+        let worst = g.least_accurate();
+        o.push_str(&format!(
+            "| {} | {} | {} | {} | `{}` | {} | {:.1}% ({}/{}) | {} | {} | {} |\n",
+            g.cell, g.runs.len(), feats, r.machine.cpu, short_suite(&r.suite_id),
+            if r.settings.is_full() { "full" } else { "quick" },
+            worst.accuracy(), worst.matched, worst.checked,
+            fmt_stat(g.stat(|r| Some(r.total_icount as f64).filter(|v| *v > 0.0)), fmt_count),
+            fmt_stat(g.stat(|r| r.host_instructions.map(|v| v as f64)), fmt_count),
+            fmt_stat(g.stat(|r| Some(r.wall_s)), |v| format!("{:.1} s", v)),
+        ));
+    }
+    o.push('\n');
+
+    let versus: Vec<&&Group> = counted.iter().filter(|g| base.map_or(false, |b| g.cell != b.cell)).collect();
+    if let Some(b) = base {
+        for g in &versus {
+            let hi = |g: &Group| g.stat(|r| r.host_instructions.map(|v| v as f64)).map_or(0.0, |s| s.median);
+            let gi = |g: &Group| g.stat(|r| Some(r.total_icount as f64)).map_or(0.0, |s| s.median);
+            let ax = not_comparable(g, b, cmp);
+            if !ax.is_empty() {
+                o.push_str(&format!("{} against {}: n/c, they differ in {}.\n\n", g.cell, b.cell, axis_names(&ax)));
+            } else {
+                o.push_str(&format!("{} against {}: guest instructions {}, host instructions {}.\n\n",
+                                    g.cell, b.cell, fmt_ratio(gi(g), gi(b)), fmt_ratio(hi(g), hi(b))));
+            }
+        }
+    }
+
+    o.push_str("### Guest instructions per kernel\n\n");
+    o.push_str("A kernel whose count differs between two builds of the same image did \
+                different work.\n\n");
+    o.push_str("| benchmark |");
+    for g in counted { o.push_str(&format!(" {} |", g.label())); }
+    for g in &versus { o.push_str(&format!(" {} vs base |", g.cell)); }
+    o.push('\n');
+    o.push_str("|---|");
+    for _ in 0..counted.len() + versus.len() { o.push_str("---:|"); }
+    o.push('\n');
+    let mut names: Vec<&str> = Vec::new();
+    for g in counted { for r in &g.runs { for row in &r.rows {
+        if row.icount > 0 && !names.contains(&row.name.as_str()) { names.push(&row.name); }
+    } } }
+    for name in names {
+        o.push_str(&format!("| {} |", name));
+        let stat = |g: &Group| g.stat(|r| r.row(name).map(|x| x.icount as f64).filter(|v| *v > 0.0));
+        for g in counted { o.push_str(&format!(" {} |", fmt_stat(stat(g), fmt_count))); }
+        if let Some(b) = base {
+            for g in &versus {
+                let cell = if not_comparable(g, b, cmp).is_empty() {
+                    fmt_ratio(stat(g).map_or(0.0, |s| s.median), stat(b).map_or(0.0, |s| s.median))
+                } else { "n/c".into() };
+                o.push_str(&format!(" {} |", cell));
+            }
+        }
+        o.push('\n');
+    }
+    o.push('\n');
+    o
 }
 
 /// A cell's rate as a fraction of the host's own on the same kernel: `1/12`
@@ -702,7 +874,11 @@ impl Axis {
                 Clock::Mislabelled => "labelled +deterministic, but no ci_clock",
             }.into()),
             Axis::Host => Some(format!("{} ({} {})", r.host.cpu_model, r.host.os, r.host.arch)),
-            Axis::Features => Some(if r.features.is_empty() { "(none)".into() } else { r.features.join(" ") }),
+            // ci_clock is the clock axis, not a second difference.
+            Axis::Features => {
+                let f: Vec<&str> = r.features.iter().map(String::as_str).filter(|f| *f != "ci_clock").collect();
+                Some(if f.is_empty() { "(none)".into() } else { f.join(" ") })
+            }
         }
     }
 }
@@ -751,13 +927,36 @@ fn not_comparable_to_native(a: &Group, host: &Group) -> Vec<Axis> {
 /// Warnings for every axis other than the guest image (`suite_mismatch` owns
 /// that one) on which the runs disagree. Each names the values and which
 /// cells had them. None when they all agree.
+///
+/// Counted (`ci_clock`) runs are reported apart from timed ones and never set
+/// beside them, so run length and features are judged within each kind. The
+/// host CPU is judged across both: a counted run's host instruction figure
+/// is still a property of the machine. The clock is only an issue for a run
+/// labelled deterministic whose build has no ci_clock.
 fn mixed_runs(runs: &[Run], cmp: Compare) -> Option<String> {
     let all: Vec<&Run> = runs.iter().collect();
-    let axes: Vec<Axis> = cmp.axes().into_iter().filter(|a| *a != Axis::Suite).collect();
+    let timed: Vec<&Run> = runs.iter().filter(|r| clock_of(r) != Clock::Counted).collect();
+    let counted: Vec<&Run> = runs.iter().filter(|r| clock_of(r) == Clock::Counted).collect();
+    let mislabelled = timed.iter().any(|r| clock_of(r) == Clock::Mislabelled);
+
+    let mut checks: Vec<(Axis, &[&Run])> = Vec::new();
+    for axis in cmp.axes() {
+        match axis {
+            Axis::Suite => {}
+            Axis::Mode | Axis::Features => {
+                checks.push((axis, &timed));
+                checks.push((axis, &counted));
+            }
+            Axis::Clock => if mislabelled { checks.push((axis, &all)) },
+            Axis::Host => checks.push((axis, &all)),
+        }
+    }
+
     let mut o = String::new();
-    for axis in differing(&all, &axes) {
+    for (axis, set) in checks {
+        if differing(set, &[axis]).is_empty() { continue; }
         let mut by_value: Vec<(String, Vec<&str>)> = Vec::new();
-        for r in runs {
+        for r in set.iter().copied() {
             let Some(v) = axis.value(r) else { continue };
             match by_value.iter_mut().find(|(x, _)| *x == v) {
                 Some((_, cells)) => if !cells.contains(&r.cell.as_str()) { cells.push(&r.cell) },
@@ -799,11 +998,14 @@ fn markdown(runs: &[Run], baseline: Option<&str>) -> String {
 
 fn markdown_with(runs: &[Run], baseline: Option<&str>, cmp: Compare) -> String {
     let mut o = String::new();
-    let groups = group_runs(runs);
-    let emulated: Vec<&Group> = groups.iter().filter(|g| g.cell != "host").collect();
-    let host = groups.iter().find(|g| g.cell == "host");
+    let all_groups = group_runs(runs);
+    // Counted (`ci_clock`) runs have no speed to report; they get their own section.
+    let counted: Vec<&Group> = all_groups.iter().filter(|g| is_counted(g)).collect();
+    let groups: Vec<&Group> = all_groups.iter().filter(|g| !is_counted(g)).collect();
+    let emulated: Vec<&Group> = groups.iter().copied().filter(|g| g.cell != "host").collect();
+    let host = groups.iter().copied().find(|g| g.cell == "host");
     let base = baseline
-        .and_then(|b| groups.iter().find(|g| g.cell == b))
+        .and_then(|b| groups.iter().copied().find(|g| g.cell == b))
         .or_else(|| emulated.first().copied());
 
     o.push_str("# IRIS benchmark report\n\n");
@@ -840,6 +1042,10 @@ fn markdown_with(runs: &[Run], baseline: Option<&str>, cmp: Compare) -> String {
     }
 
     // ── per-cell summary ────────────────────────────────────────────────────
+    if groups.is_empty() {
+        o.push_str(&counted_markdown(&counted, baseline, cmp));
+        return o;
+    }
     o.push_str("## Cells\n\n");
     o.push_str("A cell run more than once shows the median, with `[min-max]` after it.\n\n");
     o.push_str("| cell | n | features | CPU | suite | run | clock | accuracy | guest MIPS | DMIPS | whet/s | LINPACK MFLOPS | timed | wall |\n");
@@ -954,9 +1160,10 @@ fn markdown_with(runs: &[Run], baseline: Option<&str>, cmp: Compare) -> String {
     }
     o.push('\n');
 
-    let names = ordered_names(runs);
+    let timed_runs: Vec<&Run> = groups.iter().flat_map(|g| g.runs.iter().copied()).collect();
+    let names = ordered_names(&timed_runs);
     for name in &names {
-        let unit = runs.iter().find_map(|r| r.row(name).map(|x| x.unit.clone()))
+        let unit = timed_runs.iter().find_map(|r| r.row(name).map(|x| x.unit.clone()))
             .unwrap_or_default();
         o.push_str(&format!("| {} | {} |", name, unit));
         let median = |g: &Group| g.rate(name).map_or(0.0, |s| s.median);
@@ -1017,14 +1224,18 @@ fn markdown_with(runs: &[Run], baseline: Option<&str>, cmp: Compare) -> String {
         o.push('\n');
     }
 
+    if !counted.is_empty() {
+        o.push_str(&counted_markdown(&counted, baseline, cmp));
+    }
+
     o
 }
 
 /// Every kernel name that appears anywhere, in the order the first run lists
 /// them — the suite's own order, which groups related kernels together.
-fn ordered_names(runs: &[Run]) -> Vec<String> {
+fn ordered_names(runs: &[&Run]) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    for r in runs {
+    for r in runs.iter().copied() {
         for row in &r.rows {
             if !names.iter().any(|n| n == &row.name) { names.push(row.name.clone()); }
         }
@@ -1040,6 +1251,16 @@ fn text_summary_with(runs: &[Run], cmp: Compare) -> String {
     let mut o = String::new();
     for g in group_runs(runs) {
         let worst = g.least_accurate();
+        if is_counted(&g) {
+            // Counts, not speeds: a ci_clock run's MIPS and DMIPS are constants.
+            o.push_str(&format!(
+                "{:<24} {:>6.1}% accuracy   {} guest instructions   {} host instructions\n",
+                g.label(), worst.accuracy(),
+                fmt_stat(g.stat(|r| Some(r.total_icount as f64).filter(|v| *v > 0.0)), fmt_count),
+                fmt_stat(g.stat(|r| r.host_instructions.map(|v| v as f64)), fmt_count),
+            ));
+            continue;
+        }
         o.push_str(&format!(
             "{:<24} {:>6.1}% accuracy   {:>8}   {:>7} DMIPS   {:>7} timed\n",
             g.label(), worst.accuracy(),
@@ -1411,6 +1632,9 @@ fn dispatch(cmd: Cmd) -> Result<(), String> {
                 .map_err(|e| format!("{}: {}", path.display(), e))?;
             let run: Run = serde_json::from_str(&text)
                 .map_err(|e| format!("{}: {}", path.display(), e))?;
+            if let Err(why) = reference_refusal(&run) {
+                return Err(format!("{}: {}", path.display(), why));
+            }
             if run.suite_id.is_empty() {
                 return Err(format!(
                     "{} has no suite_id — it predates the field, or it is a host run. \
@@ -1514,6 +1738,7 @@ mod tests {
             wall_s: 0.0,
             suite_id: suite.into(),
             settings: Default::default(),
+            host_instructions: None,
         }
     }
 
@@ -1728,18 +1953,6 @@ mod tests {
     }
 
     #[test]
-    fn a_counted_run_beside_a_timed_run_warns_and_blanks_the_ratio() {
-        let runs = [
-            run_with("timed", 100, "cpu", &["lightning"], false),
-            run_with("counted+deterministic", 100, "cpu", &["lightning", "ci_clock"], false),
-        ];
-        // across features, so only the clock can be what is withheld
-        let md = markdown_with(&runs, Some("timed"), Compare { across_features: true });
-        assert!(md.contains("differ in clock"), "{md}");
-        assert!(is_blanked(&md), "{md}");
-    }
-
-    #[test]
     fn a_run_labelled_deterministic_without_ci_clock_is_called_out() {
         let runs = [
             run_with("a", 100, "cpu", &["tlbvmap"], false),
@@ -1820,5 +2033,120 @@ mod tests {
         let md = markdown(&runs, Some("before"));
         assert!(is_blanked(&md), "{md}");
         assert!(md.contains("after vs base: differs from before in guest image"), "{md}");
+    }
+
+    /// A `ci_clock` run: every rate is a constant (the audit's 100.0 MIPS), the
+    /// counts are the information.
+    fn counted(cell: &str, guest: u64, host: Option<u64>) -> Run {
+        let mut r = run_with(cell, 100, "cpu", &["lightning", "ci_clock"], false);
+        r.rows[0].icount = guest;
+        r.total_icount = guest;
+        r.total_ns = guest * 10; // 10 ns per instruction: the instruction clock
+        r.host_instructions = host;
+        r
+    }
+
+    #[test]
+    fn a_counted_run_prints_instruction_counts_not_speeds() {
+        let runs = [counted("det+deterministic", 613_905_711, Some(266_397_000_000))];
+        let t = text_summary(&runs);
+        assert!(t.contains("613,905,711 guest instructions"), "{t}");
+        assert!(t.contains("266,397,000,000 host instructions"), "{t}");
+        assert!(!t.contains("MIPS") && !t.contains("DMIPS"), "{t}");
+        let md = markdown(&runs, None);
+        assert!(md.contains("## Deterministic runs"), "{md}");
+        assert!(md.contains("| 613,905,711 | 266,397,000,000 |"), "{md}");
+        assert!(!md.contains("MIPS") && !md.contains("## Cells"), "{md}");
+    }
+
+    #[test]
+    fn counted_runs_are_listed_apart_from_timed_ones() {
+        let runs = [
+            run_with("timed", 100, "cpu", &["lightning"], false),
+            counted("det+deterministic", 1_000, Some(5_000_000)),
+        ];
+        let md = markdown(&runs, None);
+        let cells = md.split("## Deterministic runs").next().unwrap();
+        assert!(cells.contains("| timed |") && !cells.contains("det+deterministic"), "{md}");
+        // different clocks, but never set side by side, so there is nothing to warn about
+        assert!(!md.contains("Warning") && !md.contains("n/c"), "{md}");
+        let t = text_summary(&runs);
+        assert!(t.lines().any(|l| l.starts_with("timed ") && l.contains("MIPS")), "{t}");
+        assert!(t.lines().any(|l| l.starts_with("det+deterministic") && l.contains("guest instructions")), "{t}");
+    }
+
+    #[test]
+    fn counted_runs_compare_their_instruction_counts_against_the_base() {
+        let runs = [
+            counted("a+deterministic", 1_000, Some(10_000)),
+            counted("b+deterministic", 1_000, Some(10_750)),
+        ];
+        let md = markdown(&runs, None);
+        assert!(md.contains("b+deterministic against a+deterministic: guest instructions 1.00x, host instructions 1.07x"), "{md}");
+        assert_eq!(kernel_cells(&md, "int/alu").last().unwrap(), "1.00x", "{md}");
+    }
+
+    #[test]
+    fn a_counted_run_without_host_counts_says_so_with_a_dash() {
+        let md = markdown(&[counted("a+deterministic", 1_000, None)], None);
+        assert!(md.contains("| 1,000 | - |"), "{md}");
+    }
+
+    #[test]
+    fn reference_refuses_deterministic_runs() {
+        assert!(reference_refusal(&run_with("x", 1, "cpu", &["lightning"], false)).is_ok());
+        let e = reference_refusal(&counted("x+deterministic", 1, None)).unwrap_err();
+        assert!(e.contains("ci_clock"), "{e}");
+        // the audit's case: labelled deterministic, built without ci_clock
+        let e = reference_refusal(&run_with("x+deterministic", 1, "cpu", &["tlbvmap"], false)).unwrap_err();
+        assert!(e.contains("+deterministic"), "{e}");
+    }
+
+    #[test]
+    fn counts_print_with_thousands_separators() {
+        assert_eq!(fmt_count(0.0), "0");
+        assert_eq!(fmt_count(999.0), "999");
+        assert_eq!(fmt_count(1000.0), "1,000");
+        assert_eq!(fmt_count(613_905_711.0), "613,905,711");
+    }
+
+    /// Skipped where the host will not count (a container, a strict
+    /// `perf_event_paranoid`): the report prints "-" for the figure then.
+    #[test]
+    fn the_host_instruction_counter_counts_work_done_after_it_starts() {
+        let (sum, n) = with_host_instructions(|| (0..5_000_000u64).fold(0u64, |a, b| a ^ b.wrapping_mul(31)));
+        std::hint::black_box(sum);
+        match n {
+            Some(n) => assert!(n > 5_000_000, "{n}"),
+            None => eprintln!("no host instruction counter here; skipped"),
+        }
+    }
+
+    #[test]
+    fn a_missing_host_count_stays_out_of_the_saved_result() {
+        let r = run_on("c", "");
+        assert!(!serde_json::to_string(&r).unwrap().contains("host_instructions"));
+        let mut r = r;
+        r.host_instructions = Some(7);
+        let back: Run = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(back.host_instructions, Some(7));
+        // results saved before the field existed still load
+        let mut j: serde_json::Value = serde_json::to_value(&r).unwrap();
+        j.as_object_mut().unwrap().remove("host_instructions");
+        assert_eq!(serde_json::from_value::<Run>(j).unwrap().host_instructions, None);
+    }
+
+    #[test]
+    fn counted_runs_are_judged_among_themselves_not_against_the_timed_ones() {
+        let mut quick_counted = counted("det+deterministic", 1_000, Some(5_000));
+        quick_counted.settings.time_pct = 30;
+        let runs = [run_with("timed", 100, "cpu", &["lightning"], false), quick_counted];
+        let md = markdown(&runs, None);
+        assert!(!md.contains("Warning"), "a quick counted run beside a full timed one is not a mix: {md}");
+        // but two counted runs of different lengths are
+        let mut other = counted("det2+deterministic", 1_000, Some(5_000));
+        other.settings.repeats = 1;
+        let runs = [counted("det+deterministic", 1_000, None), other];
+        assert!(markdown(&runs, None).contains("differ in run length"));
     }
 }
