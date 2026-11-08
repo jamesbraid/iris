@@ -123,6 +123,28 @@ jobs:
             bench/build/irisbench.elf
           if-no-files-found: error
 
+  # bench/prebuilt/workload.txt is generated from the checked-in image the way
+  # golden.h is generated from the kernels: regenerate it and fail on a diff.
+  # It needs no cross toolchain, only a ci_clock build of iris-bench, which
+  # runs the image it embeds. That run is deterministic, so the table is exact
+  # on any runner. A diff means the work the benchmark measures changed, or the
+  # plain interpreter retires a different number of instructions for the same
+  # image. Either way the commit should say so. See bench/workload.py.
+  workload:
+    name: bench — workload table up to date
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Regenerate and compare
+        run: |
+          make -C bench workload
+          git diff --exit-code bench/prebuilt/workload.txt
+
   host-baseline:
     name: Host baseline
     runs-on: ubuntu-24.04
