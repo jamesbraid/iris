@@ -28,8 +28,8 @@ use serde::Deserialize;
 // library: this binary, the in-process runner and the GUI all need them, and
 // "what accuracy means" should have exactly one definition.
 use iris::bench_report::{
-    fmt_rate, host_info, parse_block, reference_entry, MachineInfo, ReferenceTable, Row, Run,
-    RunSettings, EXPECT_EXC,
+    fmt_rate, host_info, parse_block, reference_entry, suite_groups, MachineInfo, ReferenceTable,
+    Row, Run, RunSettings, EXPECT_EXC,
 };
 use iris::bench_runner::{self, BenchOptions};
 use iris::cpu::parts::{self, Part};
@@ -522,6 +522,20 @@ fn markdown(runs: &[Run], baseline: Option<&str>) -> String {
         ));
     }
 
+    // ── comparability ───────────────────────────────────────────────────────
+    if let Some(groups) = suite_groups(runs) {
+        o.push_str("## Different suite images\n\n");
+        o.push_str("These cells ran different builds of the suite, so their kernels executed \
+                    different guest code. Compare rates only within one image: a gap between \
+                    images can come from the compiler that built the suite rather than the \
+                    emulator.\n\n");
+        o.push_str("| suite image | cells |\n|---|---|\n");
+        for (id, cells) in &groups {
+            o.push_str(&format!("| `{}` | {} |\n", id, cells.join(", ")));
+        }
+        o.push('\n');
+    }
+
     // ── per-cell summary ────────────────────────────────────────────────────
     o.push_str("## Cells\n\n");
     o.push_str("| cell | features | CPU | accuracy | guest MIPS | DMIPS | whet/s | LINPACK MFLOPS | timed | wall |\n");
@@ -675,6 +689,12 @@ fn ordered_names(runs: &[Run]) -> Vec<String> {
 
 fn text_summary(runs: &[Run]) -> String {
     let mut o = String::new();
+    if let Some(groups) = suite_groups(runs) {
+        o.push_str("warning: these results ran different suite images; compare rates only within one\n");
+        for (id, cells) in &groups {
+            o.push_str(&format!("  {}  {}\n", id, cells.join(", ")));
+        }
+    }
     for r in runs {
         o.push_str(&format!(
             "{:<24} {:>6.1}% accuracy   {:>8}   {:>7} DMIPS   {:>7.1} s timed\n",

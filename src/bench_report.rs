@@ -254,6 +254,23 @@ impl Run {
     }
 }
 
+/// The emulated runs, grouped by the suite image they ran, when there is more
+/// than one image among them; `None` when they are comparable. A rebuilt image
+/// changes the guest code each kernel executes (a different compiler can add a
+/// third to Dhrystone's instructions per pass), so its rates are not the same
+/// measurement, however alike the emulators were. Host runs and results that
+/// predate `suite_id` are left out: there is nothing to compare them by.
+pub fn suite_groups(runs: &[Run]) -> Option<Vec<(String, Vec<String>)>> {
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for r in runs.iter().filter(|r| !r.suite_id.is_empty()) {
+        match groups.iter_mut().find(|(id, _)| *id == r.suite_id) {
+            Some((_, cells)) => cells.push(r.cell.clone()),
+            None => groups.push((r.suite_id.clone(), vec![r.cell.clone()])),
+        }
+    }
+    (groups.len() > 1).then_some(groups)
+}
+
 // ─── parsing the suite's machine block ───────────────────────────────────────
 
 /// What one parse of the suite's machine block yielded.
@@ -824,6 +841,26 @@ IRIS-BENCH-END
             suite_id: "blake3:0123456789abcdef".into(),
             settings: p.settings,
         }
+    }
+
+    #[test]
+    fn runs_of_different_suite_images_are_grouped_apart() {
+        let mut a = a_run();
+        a.cell = "a".into();
+        let mut b = a_run();
+        b.cell = "b".into();
+        let mut host = a_run();
+        host.cell = "host".into();
+        host.suite_id.clear();
+        assert!(suite_groups(&[a.clone(), b.clone(), host.clone()]).is_none(),
+                "one image, plus a host run with none, is comparable");
+
+        b.suite_id = "blake3:fedcba9876543210".into();
+        let groups = suite_groups(&[a, b, host]).expect("two images must be reported");
+        assert_eq!(groups, vec![
+            ("blake3:0123456789abcdef".to_string(), vec!["a".to_string()]),
+            ("blake3:fedcba9876543210".to_string(), vec!["b".to_string()]),
+        ]);
     }
 
     #[test]
