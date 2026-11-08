@@ -32,15 +32,20 @@ TARGET := $(BUILD)/irisbench.elf
 #                  could not fuse anyway — but the golden generator runs on a
 #                  host that can, and a contracted result differs in the last
 #                  ulp from an uncontracted one.
+# -ffile-prefix-map  record source paths relative to the repository root, so
+#                  the debug information, and so the image's bytes, do not
+#                  depend on where the checkout lives. CI rebuilds the
+#                  embedded bench image and compares it byte for byte.
+PREFIXMAP := -ffile-prefix-map=$(REPO_ROOT)=.
 ARCHFLAGS := -march=mips3 -mabi=n32 -EB -mno-abicalls -fno-pic -G0 -mhard-float
 CFLAGS    := $(ARCHFLAGS) -ffreestanding -nostdlib -nostdinc \
              -fno-builtin -fno-stack-protector -fno-strict-aliasing \
              -fno-delete-null-pointer-checks -fomit-frame-pointer \
              -ffp-contract=off -fexcess-precision=standard \
-             -O2 -g -std=gnu11 \
+             -O2 -g $(PREFIXMAP) -std=gnu11 \
              -Wall -Wextra -Werror -Wno-unused-parameter \
              -Iharness -Igolden -I$(CPUTESTS)/harness
-ASFLAGS   := $(ARCHFLAGS) -ffreestanding -nostdlib -I$(CPUTESTS)/harness -Iharness \
+ASFLAGS   := $(ARCHFLAGS) -ffreestanding -nostdlib $(PREFIXMAP) -I$(CPUTESTS)/harness -Iharness \
              -g -Wa,--fatal-warnings
 LDFLAGS   := -EB -T harness/link.ld -nostdlib --no-warn-mismatch
 

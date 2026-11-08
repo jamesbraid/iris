@@ -32,14 +32,18 @@ TARGET  := $(BUILD)/cputest.elf
 #              tests drive the FPU by hand with explicit asm (inside `.set
 #              hardfloat`). Without this GCC would emit its own FP code that
 #              assumes an FR/FCSR state the tests are actively changing.
+# -ffile-prefix-map  record source paths relative to the repository root, so
+#                  the debug information, and so the ELF's bytes, do not
+#                  depend on where the checkout lives.
+PREFIXMAP := -ffile-prefix-map=$(REPO_ROOT)=.
 ARCHFLAGS := -march=mips3 -mabi=n32 -EB -mno-abicalls -fno-pic -G0 -msoft-float
 CFLAGS    := $(ARCHFLAGS) -ffreestanding -nostdlib -nostdinc \
              -fno-builtin -fno-stack-protector -fno-strict-aliasing \
              -fno-delete-null-pointer-checks -fomit-frame-pointer \
-             -O1 -g -std=gnu11 \
+             -O1 -g $(PREFIXMAP) -std=gnu11 \
              -Wall -Wextra -Werror -Wno-unused-parameter \
              -Iharness $(if $(ONLY),-DCPUTEST_ONLY=$(ONLY))
-ASFLAGS   := $(ARCHFLAGS) -ffreestanding -nostdlib -Iharness -g -Wa,--fatal-warnings
+ASFLAGS   := $(ARCHFLAGS) -ffreestanding -nostdlib $(PREFIXMAP) -Iharness -g -Wa,--fatal-warnings
 LDFLAGS   := -EB -T harness/link.ld -nostdlib --no-warn-mismatch
 
 HARNESS_C := harness/console.c harness/testlib.c harness/scsilog.c harness/arcs.c
