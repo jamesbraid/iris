@@ -868,7 +868,8 @@ mod tests {
     fn reference(alu: f64, bitops: f64) -> ReferenceEntry {
         ReferenceEntry {
             id: "ref".into(), label: "Reference machine".into(),
-            cpu: "R4400".into(), engine: "interp".into(), host: "Other CPU".into(),
+            cpu: "R4400".into(), engine: "interp".into(), features: String::new(),
+            host: "Other CPU".into(),
             measured: None, guest_mips: 1.0, dmips: 1.0, accuracy: 100.0,
             kernels: BTreeMap::from([
                 ("int/alu".to_string(), alu),
