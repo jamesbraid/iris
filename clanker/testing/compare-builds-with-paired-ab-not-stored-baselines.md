@@ -24,9 +24,13 @@ do not wait for a nightly to notice.
 - **Busy-host outliers.** About 1 run in 10 is 25-35% slow, in wall time and
   in user instructions, probably threads spinning while they wait. A mean, or a
   best-of-N from different days, is moved by it. The paired median is not.
-- **SMT siblings.** With sibling threads in the CPU set, wall rates were
-  bimodal by about 30%. Pin to physical cores of one CCD (`--pin`); the shared
-  bench slot locks live in `/scratch/iris/runs/bench-slots/`.
+- **SMT siblings and shared cache.** With sibling threads in the CPU set, wall
+  rates were bimodal by about 30%. Another process landing on the sibling of
+  the emulator's core moves one run by 10-30%, and nothing short of root can
+  keep the siblings free. So `ab` runs A and B at the same moment on their own
+  physical cores of one last-level-cache group, re-picking the least busy cores
+  each round, and reads the per-round ratio. That cut the A/A scatter of one
+  round from 6-17% (sequential) to about 4% per kernel.
 
 ## Host instruction counts miss layout and branch regressions
 
@@ -60,21 +64,23 @@ loop profile has different inlining and tells you nothing about the layout.
 
 ## How the verdict is made
 
-Flag when the median B/A ratio and the best-round B/A ratio are both past 3%.
-That is a heuristic. It was kept over a bootstrap-interval rule on purpose: at
-5 to 7 rounds the 95% percentile interval of the median is nearly [min, max] of
-the per-round ratios, so it excludes 1.0 only if every round agrees, and this
-host spoils about one run in ten. (A 7-round and a Bonferroni-corrected trial on
-the real binaries needed unanimity and missed the known regression; a
-simulation put the detection of a true 7% slowdown at 63% against 98%. The
-simulation is a model, not a measurement.) The interval is printed for
-reading. A "noise" column (scaled MAD of the per-round ratios, the run's own estimate of
-an A/A result) backs the rule: no flag with noise above the threshold is
-`inconclusive`, and so is a flag whose effect is smaller than the noise. A
-quiet-looking pass in a noisy run proves nothing. Whole-run speed of the same
-binary swung 68-88 MIPS between rounds on 2026-11-08, and a 7-round A/A of one
-binary against itself flagged 17 kernels by the median-and-best rule alone, so
-9-11 rounds on a loaded host.
+A row is SLOWER when the 99% bootstrap interval of the median per-round B/A
+ratio lies above 1 and the median passes 3%; the same when the interval lies
+within 3% either way; inconclusive otherwise; nothing with fewer than eight
+rounds. The first version flagged when the median and the best-round ratios
+both passed 3%, and called a row inconclusive when one round's scatter (the
+noise column) exceeded 3%. That scatter does not shrink with rounds, so on this
+host the rule could not conclude at any length (31 of 46 rows inconclusive on
+51 concurrent A/A rounds). The interval does shrink: in draws of 25 concurrent
+rounds it found the aded5989 loss in alu, resize and motion_est every time and
+flagged nothing in 19 of 20 A/A draws (at 20 rounds, resize in 93%). Default 20
+rounds, about 13 minutes on the shared 224-core host.
+
+Do not normalise rounds by the suite or by a reference kernel. Tried on the
+same data: it raised the A/A scatter and removed most of the real effect,
+because the regression is global and host speed is not common to kernels that
+run seconds apart.
+
 A flag means "this pair of binaries differs", which includes code layout;
 `ab` randomises run order only, not layout, link order or environment size
 (the remedy in Mytkowicz et al., "Producing Wrong Data Without Doing Anything

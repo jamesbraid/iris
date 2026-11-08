@@ -372,53 +372,85 @@ out of their target directories, and:
 
 ```sh
 iris-bench ab --a ./iris-base --b ./iris-branch --label-a base --label-b branch
-iris-bench ab --a ./iris-base --b ./iris-branch --pin 8-14 --rounds 7
-make ab A=./iris-base B=./iris-branch ROUNDS=7 PIN=8-14   # the same, from bench/
+make ab A=./iris-base B=./iris-branch   # the same, from bench/
 ```
 
-(`make ab` takes `ROUNDS`, `PIN`, `ELF` and `CPU` as well.)
+(`make ab` takes `ROUNDS`, `PIN`, `ELF` and `CPU` as well.) It needs no
+configuration. 20 rounds took about 13 minutes on a busy 224-core host.
 
-Both builds run the same guest image, one process at a time, A and B in a fresh
-random order each round (5 rounds by default; 7 or more is better). The image
-defaults to the one linked into the `iris-bench` you run, and the output names
-it by suite id; pass `--elf FILE` to hold it fixed across a bisect that spans a
-rebuild of `bench/prebuilt/`. `--pin CPULIST` (Linux) runs every process on the
-same host cores, which should be physical cores with no SMT sibling busy.
-`--cpu` selects the emulated CPU, `--quick` is not available because the
-shorter run is chosen when an in-process machine is built.
+**Concurrent pairs.** Each round starts A and B at the same moment, each on its
+own two physical cores (one thread per core, SMT siblings left out) inside one
+group of cores that share a last-level cache, such as one CCD of a chiplet CPU.
+Whatever else the host is doing to that cache, its memory and its clock lands
+on both sides, and the per-round B/A ratio cancels it. Before each round the
+least busy cores of the group are picked from `/proc/stat` and given to the
+sides at random, so a core whose sibling is busy for one round hurts A as often
+as B. The group is the one with the quietest cores when the run starts. All of
+this is read at run time from `/sys/devices/system/cpu` (thread siblings, cache
+`level` and `shared_cpu_list`) and the process's own CPU affinity, so it follows
+a `taskset` or cgroup limit and knows nothing about any particular machine.
+With groups of two or three cores each side gets one core.
+
+**Sequential fallback.** Where the topology cannot be read (macOS, Windows, a
+Linux without `/sys`), where no two cores share a cache, or with `--sequential`
+or `--pin CPULIST`, A and B run one at a time in a fresh random order each
+round, and the output's `mode:` line says which and why. Expect to need several
+times the rounds for the same resolution there.
+
+**Short, repeated timed runs.** An `iris` binary started from the command line
+tells the guest nothing about run length, so the guest runs its compiled-in
+defaults. `ab` writes a copy of the image with those defaults changed (the
+`bench_time_pct` and `bench_repeats` globals, found by name in the symbol
+table) to `--time-pct 10 --repeats 3`: each kernel's timed run is about 25 ms,
+done three times, and the guest keeps the fastest. A burst of other work then
+spoils one repeat, not the sample. Each run checks that the guest reports the
+settings it was given. An image without those symbols runs as it is, with a
+note. Most of a suite run's time is the guest's checksum pass and calibration,
+which these settings do not shorten.
+
+The image defaults to the one linked into the `iris-bench` you run, and the
+output names it by suite id; pass `--elf FILE` to hold it fixed across a bisect
+that spans a rebuild of `bench/prebuilt/`. `--cpu` selects the emulated CPU.
 
 ### How a kernel gets flagged
 
 Each round gives one cost figure per side per kernel (nanoseconds per guest
-instruction). A kernel is flagged `SLOWER` when both the **median** B/A ratio
-and the **best-round** B/A ratio are above 1 + `--threshold` (3% by default),
-and `faster` when both are below 1/(1 + threshold). A median that moved alone
-is load; a best round that moved alone is one lucky sample. With fewer than
-three rounds nothing is flagged. The rule is a heuristic, chosen because it is
-robust to the one-run-in-ten outlier and cheap to read; it is not a hypothesis
-test, and it does not come from the literature.
+instruction), and so one B/A ratio. A row is judged from the median of those
+ratios and its 99% percentile bootstrap interval (Efron): the rounds resampled
+with replacement 10,000 times, the median of each resample, the central 99%,
+with a constant seed so the same rounds print the same interval.
 
-Two columns show how far to trust it:
+* `SLOWER` when the interval lies above 1 and the median is above
+  1 + `--threshold` (3% by default); `faster` is the mirror image, below
+  1/(1 + threshold).
+* blank (the same) when the whole interval lies within the threshold either
+  way, so a change of that size would have shown.
+* `inconclusive` otherwise. "No flag" never means "no change" unless the run
+  could have seen one.
 
-* **paired B/A [95% CI]**: each round's A and B ran back to back, so their
-  ratio cancels slow drift in host load. The column is the median of those
-  per-round ratios with a percentile bootstrap confidence interval (Efron): the
-  rounds resampled with replacement 10,000 times, the median of each resample,
-  the central 95%. The seed is a constant, so the same rounds print the same
-  interval. It is information, not the verdict: with five to seven rounds the
-  interval is close to the range of the ratios, so it excludes 1.0 only when
-  every round agrees, and one spoiled round in ten is normal here. Read it as
-  "how far apart could these be".
-* **noise**: the robust scatter of the per-round ratios (1.4826 times their
-  median absolute deviation, over their median). It is the run's own estimate of
-  what an A/A comparison would show, and a result has to stand clear of it. A
-  row with no flag and noise above the threshold is marked `inconclusive`: "no
-  flag" only means "no change" when the scatter is smaller than the change being
-  looked for. A flag whose effect (the weaker of its two ratios) is smaller than
-  the noise is also `inconclusive`, because the same build could have produced
-  it. If the suite row's noise is above the threshold the table says the host was
-  noisy. Fix it with more rounds (9 or more on a loaded host) or quieter cores.
-  To check a suspicious result directly, run `ab` with the same binary as A and B.
+Fewer than eight rounds give no verdict at all: below that the 99% interval is
+the range of the ratios, and every round of an A/A run agreeing by chance is
+common across 46 rows. 99% rather than 95% because at 95% an A/A run would flag
+about two of its 46 rows by chance. Unlike the scatter of the rounds, the
+interval narrows as rounds are added, so a noisy host still reaches a verdict
+given enough of them. The **noise** column is that scatter (1.4826 times the
+median absolute deviation of the ratios, over their median), the run's own
+estimate of one A/A round; it is shown for reading. To check a suspicious
+result directly, run `ab` with the same binary as A and B.
+
+What it resolves, measured on a shared host with two 56-core EPYC 7663 (16
+groups of 7 cores sharing an L3) and the lightning-interpreter builds
+of 6fc2c7e5 and aded5989 (a known 8-17% loss in alu, resize and motion_est), at
+load 75-100 and with three extra busy threads on the chosen cache group: one
+A/A round scatters by 4% per kernel (6% with the extra threads). Drawing 25
+rounds at a time from 51 A/A and 57 A/B rounds, the known loss was found in all
+three kernels every time, 19 of 20 A/A draws flagged nothing, and a synthetic
+4% slowdown added to the A/A rounds was caught in two thirds of the kernels.
+The draws overlap, so read those as optimistic. A 14-round run of each, from
+the tool itself at load 100-145, flagged all three and the suite row on A/B
+and nothing on A/A. The sequential protocol scattered by 6-17% per kernel at
+the same loads, and in 11 rounds left 44 of 47 rows of the same comparison
+inconclusive.
 
 The table also keeps the per-side median and best round in guest MIPS. The suite
 row is treated like a kernel, on whole-run totals. Where `perf stat` works
@@ -458,6 +490,24 @@ a rerun of the suspect kernel, and the build matrix (default features,
   difference is not called significant; across a suite it reports the geometric
   mean of the ratios. It is unpaired, and a t-test assumes roughly normal
   samples, which one-in-ten slow runs are not.
+* Duet benchmarking: L. Bulej, V. Horký, P. Tůma, F. Farquet, A. Prokopec,
+  "Duet Benchmarking: Improving Measurement Accuracy in the Cloud", ICPE 2020
+  (DOI 10.1145/3358960.3379132, arXiv 2001.05811). Run the two versions in
+  parallel on the same machine and compare them together rather than one at a
+  time, so interference from other tenants hits both. That is the concurrent
+  mode here, with the cores chosen from the topology.
+* pyperf `system tune` makes a host quieter: the `performance` governor,
+  minimum frequency raised to the maximum, Turbo Boost off, IRQs moved off the
+  benchmark CPUs (stopping `irqbalance`), and it checks for `isolcpus=` and
+  `rcu_nocbs=` on the kernel command line. All of that needs root, and the
+  isolation needs a reboot. Its `--affinity` pins worker processes with
+  `sched_setaffinity`, which does not. On a shared host where the benchmark
+  cannot have the machine, pairing is what is left.
+* Google Benchmark's `--benchmark_enable_random_interleaving` runs the
+  repetitions of different benchmarks in a random order instead of back to
+  back, with short repetitions; its documentation reports about 40% less
+  run-to-run variance. The sequential mode here does the same for the two
+  builds.
 * criterion.rs bootstraps a t-statistic between old and new samples to get a
   p-value, then also requires the change to exceed a configurable noise
   threshold (its documentation gives +-1% as an example) before reporting it:
@@ -469,12 +519,18 @@ chapter were read for the points above; the Mytkowicz paper was confirmed by
 its ACM, dblp and IBM records (title, authors, venue, DOI, the setup
 randomisation proposal) and its abstract, but its full text was not retrieved.
 Efron's citation (volume, pages, DOI 10.1214/aos/1176344552) was confirmed
-against the Project Euclid record, not read in full. The median-and-best flag
-rule, the 3% default, the noise figure and the resample count are this tool's
-choices; none comes from those sources. An earlier version used the bootstrap
-interval as the flag; on a simulated host with a one-in-ten outlier rate it
-caught a true 7% slowdown much less often than the median-and-best rule
-because of the collapse at small n, so it was demoted to an information column.
+against the Project Euclid record, not read in full. The Duet paper is known from
+its ACM and arXiv listings; its full text was not read. The pyperf
+points come from its "Tune the system for benchmarks" page, and the Google
+Benchmark point from its `random_interleaving.md`. Which pyperf steps need
+root is inferred from what they write (`/sys`, `/proc/irq`, `/dev/cpu/*/msr`,
+the kernel command line); the page does not say. The interval rule, the 3%
+default, the eight-round minimum and the run settings are this tool's choices;
+none comes from those sources. An earlier version flagged a row when the median
+and the best-round ratios both passed the threshold, and called a row
+inconclusive when one round's scatter exceeded it. That scatter does not shrink
+with more rounds, so on a busy host the rule could not conclude at any length:
+on 51 concurrent A/A rounds it left 31 of 46 rows inconclusive.
 
 ### Whole-command timing: hyperfine
 

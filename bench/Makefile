@@ -188,7 +188,8 @@ report:
 	cd .. && ./target/release/iris-bench report
 
 # Is build B slower than build A? A and B are `iris` binaries (copy them out of
-# their target directories first). Optional: ROUNDS=7, PIN=8-14 (taskset list),
+# their target directories first). Optional: ROUNDS=20, PIN=8-14 (CPU list; runs
+# A and B one at a time instead of together),
 # ELF=file (hold the guest image fixed), CPU=r5000. Needs no cross toolchain.
 # See "Comparing two builds" in README.md.
 ab:
