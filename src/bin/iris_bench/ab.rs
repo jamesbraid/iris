@@ -14,11 +14,12 @@
 //!     Where the topology cannot be read (not Linux, or no two cores share a
 //!     cache) A and B run one at a time in a random order each round instead,
 //!     and the output says so.
-//!   - **Outliers.** The table reports medians, which one spoiled round in
-//!     ten barely moves, beside the best round. Each kernel's timed run is
-//!     short (25 ms by default) and repeated three times, the guest keeping
-//!     the fastest, so a burst of other work spoils one repeat rather than the
-//!     sample.
+//!   - **Outliers.** A row is judged by a bootstrap interval of the median
+//!     per-round ratio, which one spoiled round in ten barely moves, and is
+//!     INCONCLUSIVE when that interval is too wide to say. Each kernel's timed
+//!     run is short (25 ms by default) and repeated three times, the guest
+//!     keeping the fastest, so a burst of other work spoils one repeat rather
+//!     than the sample.
 //!   - **A moving guest.** The suite's guest binary is rebuilt now and then,
 //!     and a new compiler changes the instructions per iteration, which moves
 //!     the rates with no emulator change at all. Both builds run the same ELF.
@@ -59,6 +60,109 @@ pub fn median(v: &[f64]) -> f64 {
 
 pub fn minimum(v: &[f64]) -> f64 {
     v.iter().copied().fold(f64::NAN, f64::min)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Verdict {
+    Slower,
+    Faster,
+    Same,
+    /// The interval is too wide to say either: a change of the threshold's size
+    /// could be hiding in it.
+    Inconclusive,
+}
+
+/// Bootstrap settings. The seed is fixed, not taken from the run's order seed,
+/// so the same rounds always print the same interval. 99.9% rather than 95%
+/// because a table has 46 kernels: at 95% an A/A run would flag about two of
+/// them by chance.
+pub const BOOT_RESAMPLES: usize = 10_000;
+pub const BOOT_CONFIDENCE: f64 = 0.999;
+pub const BOOT_SEED: u64 = 0x1215_B007_57A9_0001;
+
+/// With fewer rounds an interval over the median says nothing: three rounds
+/// is the least that can disagree with itself.
+pub const MIN_ROUNDS: usize = 3;
+
+/// Fewest rounds that can give a verdict. Below about eight the 99.9% interval
+/// of the median is the range of the ratios, so it excludes 1 whenever every
+/// round agrees, which an A/A run of three to seven rounds does by chance in
+/// several of its 46 rows. Eight agreeing rounds has a chance under 1%.
+pub const MIN_VERDICT_ROUNDS: usize = 8;
+
+/// Percentile bootstrap confidence interval of the median of `ratios`
+/// (Efron 1979): resample the rounds with replacement `resamples` times, take
+/// the median of each resample, and return the central `confidence` span of
+/// those medians. `None` below [`MIN_ROUNDS`] samples or on a non-finite ratio.
+///
+/// Resampling whole rounds keeps the pairing: each ratio is already B over A
+/// from the same moment. With few rounds the interval is coarse (the median of
+/// five values can only be one of those values) and percentile intervals
+/// under-cover somewhat at small n; the effect-size threshold absorbs that.
+pub fn bootstrap_ci(ratios: &[f64], resamples: usize, confidence: f64, seed: u64) -> Option<(f64, f64)> {
+    let n = ratios.len();
+    if n < MIN_ROUNDS || resamples == 0 || ratios.iter().any(|r| !r.is_finite()) {
+        return None;
+    }
+    let mut rng = Rng::new(seed);
+    let mut buf = vec![0.0; n];
+    let mut meds: Vec<f64> = (0..resamples).map(|_| {
+        for slot in buf.iter_mut() { *slot = ratios[(rng.next() >> 11) as usize % n]; }
+        median(&buf)
+    }).collect();
+    meds.sort_by(|a, b| a.total_cmp(b));
+    let tail = (1.0 - confidence) / 2.0;
+    let lo = ((tail * resamples as f64).floor() as usize).min(resamples - 1);
+    let hi = (((1.0 - tail) * resamples as f64).ceil() as usize).clamp(1, resamples) - 1;
+    Some((meds[lo], meds[hi]))
+}
+
+/// The verdict for one row, from the per-round B/A cost ratios (above 1 is
+/// slower) and the effect size `threshold` (0.03 for 3%).
+///
+/// - SLOWER: the [`BOOT_CONFIDENCE`] bootstrap interval of the median ratio
+///   lies above 1 and the median itself is past 1 + threshold. FASTER is the
+///   mirror image, 1/(1 + threshold), so a 3% gain and a 3% loss are equally
+///   visible.
+/// - SAME: the whole interval lies within the threshold either way, so a
+///   change of that size would have shown.
+/// - INCONCLUSIVE: anything else, including fewer than [`MIN_VERDICT_ROUNDS`]
+///   ratios.
+///   "No flag" is never reported as "no change" when the run cannot tell.
+///
+/// Unlike the per-round scatter, the interval narrows with more rounds, so a
+/// noisy host still reaches a verdict given enough of them.
+pub fn decide(ratios: &[f64], threshold: f64) -> Verdict {
+    if ratios.len() < MIN_VERDICT_ROUNDS { return Verdict::Inconclusive; }
+    let Some((lo, hi)) = bootstrap_ci(ratios, BOOT_RESAMPLES, BOOT_CONFIDENCE, BOOT_SEED) else {
+        return Verdict::Inconclusive;
+    };
+    let m = median(ratios);
+    let up = 1.0 + threshold;
+    let down = 1.0 / up;
+    if lo > 1.0 && m > up {
+        Verdict::Slower
+    } else if hi < 1.0 && m < down {
+        Verdict::Faster
+    } else if lo >= down && hi <= up {
+        Verdict::Same
+    } else {
+        Verdict::Inconclusive
+    }
+}
+
+/// Robust scatter of the per-round ratios, as a fraction: 1.4826 times the
+/// median absolute deviation (the normal-consistent scale), over the median.
+/// It is the run's own measure of what an A/A comparison would show. `None`
+/// below [`MIN_ROUNDS`] ratios or on a non-finite one.
+pub fn noise(ratios: &[f64]) -> Option<f64> {
+    if ratios.len() < MIN_ROUNDS || ratios.iter().any(|r| !r.is_finite()) {
+        return None;
+    }
+    let m = median(ratios);
+    let dev: Vec<f64> = ratios.iter().map(|r| (r - m).abs()).collect();
+    Some(1.4826 * median(&dev) / m.abs())
 }
 
 // ─── the pairing loop ────────────────────────────────────────────────────────
@@ -643,8 +747,12 @@ pub struct KernelSummary {
     pub b: Cost,
     pub median_ratio: f64,
     pub min_ratio: f64,
-    /// Median of the per-round B/A ratios.
+    /// Median of the per-round B/A ratios, its bootstrap interval, which
+    /// decides the verdict, and the scatter of the ratios.
     pub paired_ratio: f64,
+    pub noise: Option<f64>,
+    pub ci: Option<[f64; 2]>,
+    pub verdict: Verdict,
 }
 
 #[derive(Debug, Serialize)]
@@ -661,7 +769,8 @@ pub struct Summary {
     pub total: KernelSummary,
     /// Host instructions and cycles per guest instruction, median over rounds.
     pub host: Option<HostCost>,
-    /// Rounds the summary is built from.
+    /// Rounds the summary is built from. Below [`MIN_ROUNDS`] there is no interval
+    /// and nothing is flagged.
     pub rounds: usize,
     /// Kernels whose checksum did not verify on some run.
     pub bad_status: Vec<String>,
@@ -673,21 +782,27 @@ fn per_insn(k: &KernelSample) -> Option<f64> {
 
 /// `a` and `b` hold one entry per round, `None` where that run had no usable
 /// figure for the kernel. Only rounds where both sides have one are paired.
-fn summarise_series(name: &str, a: &[Option<f64>], b: &[Option<f64>]) -> KernelSummary {
+fn summarise_series(name: &str, a: &[Option<f64>], b: &[Option<f64>], thr: f64) -> KernelSummary {
     let side = |v: &[Option<f64>]| -> Vec<f64> { v.iter().flatten().copied().collect() };
     let (a_cost, b_cost) = (Cost::of(&side(a)), Cost::of(&side(b)));
     let ratios: Vec<f64> = a.iter().zip(b).filter_map(|(x, y)| Some((*y)? / (*x)?)).collect();
+    let ci = bootstrap_ci(&ratios, BOOT_RESAMPLES, BOOT_CONFIDENCE, BOOT_SEED);
+    let (median_ratio, min_ratio) = (b_cost.median / a_cost.median, b_cost.min / a_cost.min);
+    let noise = noise(&ratios);
     KernelSummary {
         name: name.to_string(),
-        median_ratio: b_cost.median / a_cost.median,
-        min_ratio: b_cost.min / a_cost.min,
+        verdict: decide(&ratios, thr),
+        median_ratio,
+        min_ratio,
+        noise,
         paired_ratio: median(&ratios),
+        ci: ci.map(|(lo, hi)| [lo, hi]),
         a: a_cost,
         b: b_cost,
     }
 }
 
-pub fn summarise(rounds: &[Round<Sample>]) -> Summary {
+pub fn summarise(rounds: &[Round<Sample>], thr: f64) -> Summary {
     let mut names: Vec<String> = Vec::new();
     for k in &rounds[0].a.kernels {
         if per_insn(k).is_some() { names.push(k.name.clone()); }
@@ -699,7 +814,7 @@ pub fn summarise(rounds: &[Round<Sample>]) -> Summary {
         }).collect()
     };
     let kernels = names.iter()
-        .map(|n| summarise_series(n, &series(Side::A, n), &series(Side::B, n)))
+        .map(|n| summarise_series(n, &series(Side::A, n), &series(Side::B, n), thr))
         .collect();
     let tot = |side: Side| -> Vec<Option<f64>> {
         rounds.iter().map(|r| {
@@ -707,7 +822,7 @@ pub fn summarise(rounds: &[Round<Sample>]) -> Summary {
             Some(s.total_ns as f64 / s.total_icount.max(1) as f64)
         }).collect()
     };
-    let total = summarise_series("(suite)", &tot(Side::A), &tot(Side::B));
+    let total = summarise_series("(suite)", &tot(Side::A), &tot(Side::B), thr);
 
     let host = || -> Option<HostCost> {
         let per = |side: Side, f: fn(&Sample) -> Option<u64>| -> Option<f64> {
@@ -745,21 +860,38 @@ fn pct(ratio: f64) -> String { format!("{:+.1}%", (ratio - 1.0) * 100.0) }
 
 /// The table. Rates are shown as MIPS (higher is better); the ratios are of
 /// cost, B over A, so +5% means B takes 5% longer per guest instruction.
-pub fn table(s: &Summary, la: &str, lb: &str) -> String {
+pub fn table(s: &Summary, la: &str, lb: &str, thr: f64) -> String {
     let mut o = String::new();
     o.push_str(&format!(
-        "| kernel | {la} med | {lb} med | {la} best | {lb} best | med B/A | best B/A | paired B/A |\n\
-         |---|---:|---:|---:|---:|---:|---:|---:|\n"));
+        "| kernel | {la} med | {lb} med | {la} best | {lb} best | med B/A | best B/A | paired B/A [{ci:.1}% CI] | noise | flag |\n\
+         |---|---:|---:|---:|---:|---:|---:|---|---:|---|\n", ci = BOOT_CONFIDENCE * 100.0));
     let row = |k: &KernelSummary| -> String {
-        format!("| {} | {:.1} | {:.1} | {:.1} | {:.1} | {} | {} | {} |\n",
+        let flag = match k.verdict {
+            Verdict::Slower => "SLOWER",
+            Verdict::Faster => "faster",
+            Verdict::Same => "",
+            Verdict::Inconclusive => "inconclusive",
+        };
+        let ci = match k.ci {
+            Some([lo, hi]) => format!("{} [{}, {}]", pct(k.paired_ratio), pct(lo), pct(hi)),
+            None => "n/a".to_string(),
+        };
+        let noise = k.noise.map_or("n/a".to_string(), |n| format!("{:.1}%", n * 100.0));
+        format!("| {} | {:.1} | {:.1} | {:.1} | {:.1} | {} | {} | {} | {} | {} |\n",
                 k.name, mips(k.a.median), mips(k.b.median), mips(k.a.min), mips(k.b.min),
-                pct(k.median_ratio), pct(k.min_ratio), pct(k.paired_ratio))
+                pct(k.median_ratio), pct(k.min_ratio), ci, noise, flag)
     };
     for k in &s.kernels { o.push_str(&row(k)); }
     o.push_str(&row(&s.total));
     o.push_str(&format!("\nRates are guest MIPS (guest instructions per host microsecond). \
         \"best\" is the fastest round. Ratios are cost per guest instruction, B over A: \
-        positive means B is slower. \"paired\" is the median of the per-round B/A ratios.\n"));
+        positive means B is slower. \"paired\" is the median of the per-round B/A ratios with \
+        its {:.1}% bootstrap interval ({} resamples of the rounds, fixed seed). A row is SLOWER \
+        or faster when that interval excludes no change and the median passes {:.1}%, the same \
+        when the whole interval is within {:.1}% either way, and inconclusive otherwise; more \
+        rounds narrow the interval. \"noise\" is the robust scatter of the per-round ratios \
+        (1.4826 x MAD / median), the run's own estimate of one A/A round.\n",
+        BOOT_CONFIDENCE * 100.0, BOOT_RESAMPLES, thr * 100.0, thr * 100.0));
     if let Some(h) = &s.host {
         o.push_str(&format!(
             "\nHost per guest instruction (perf, user mode, median of rounds; includes start-up):\n\n\
@@ -770,8 +902,32 @@ pub fn table(s: &Summary, la: &str, lb: &str) -> String {
     } else {
         o.push_str("\nHost cycles and instructions: not measured (perf unavailable).\n");
     }
+    if s.rounds < MIN_VERDICT_ROUNDS {
+        o.push_str(&format!("\nOnly {} round(s): too few to judge anything. Use at least {MIN_VERDICT_ROUNDS}; 30 or more on a busy host.\n", s.rounds));
+    }
     if !s.bad_status.is_empty() {
         o.push_str(&format!("\nWARNING: checksum not OK: {}\n", s.bad_status.join(", ")));
+    }
+    if let Some(n) = s.total.noise.filter(|n| *n > thr) {
+        o.push_str(&format!(
+            "\nWARNING: the whole-run B/A ratio scattered by {:.1}% between rounds, so this host was \
+             noisy. Rows are judged by their interval, which accounts for that, but more rounds \
+             or quieter cores are needed to resolve small changes.\n", n * 100.0));
+    }
+    let flagged: Vec<String> = s.kernels.iter()
+        .filter(|k| matches!(k.verdict, Verdict::Slower | Verdict::Faster))
+        .map(|k| format!("{} {}", k.name, if k.verdict == Verdict::Slower { "slower" } else { "faster" }))
+        .collect();
+    o.push_str(&if flagged.is_empty() {
+        "\nNo kernel flagged.\n".to_string()
+    } else {
+        format!("\nFlagged: {}.\n", flagged.join(", "))
+    });
+    let unsure: Vec<&str> = s.kernels.iter().chain([&s.total])
+        .filter(|k| k.verdict == Verdict::Inconclusive).map(|k| k.name.as_str()).collect();
+    if !unsure.is_empty() {
+        o.push_str(&format!("Inconclusive (the interval is too wide to say): {}.\n",
+                            unsure.join(", ")));
     }
     o
 }
@@ -797,7 +953,7 @@ pub struct AbArgs {
     #[arg(long)]
     config: Option<PathBuf>,
     /// Rounds; each runs A and B once.
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = 30)]
     rounds: usize,
     /// Each kernel's timed run, as a percentage of the suite's default (about
     /// 250 ms). Shorter runs are less often hit by another process.
@@ -818,6 +974,11 @@ pub struct AbArgs {
     /// Emulated CPU, forwarded to the emulator as `--cpu`.
     #[arg(long)]
     cpu: Option<String>,
+    /// Effect size, percent: a row is flagged when its interval excludes no
+    /// change and its median ratio passes this; "same" when the whole interval
+    /// is within it.
+    #[arg(long, default_value_t = 3.0)]
+    threshold: f64,
     /// Names for the table columns and files.
     #[arg(long, default_value = "A")]
     label_a: String,
@@ -863,10 +1024,20 @@ struct Report<'a> {
     pin: &'a Option<String>,
     cpu: &'a Option<String>,
     perf: bool,
+    threshold_pct: f64,
+    bootstrap: Bootstrap,
     seed: u64,
     host: serde_json::Value,
     rounds: &'a [Round<Sample>],
     summary: &'a Summary,
+}
+
+#[derive(Serialize)]
+struct Bootstrap {
+    resamples: usize,
+    confidence: f64,
+    seed: u64,
+    statistic: &'static str,
 }
 
 #[derive(Serialize)]
@@ -960,7 +1131,7 @@ pub fn run(args: AbArgs) -> Result<(), String> {
     println!("A/B: {} = {}\n     {} = {}", args.label_a, bin_a.display(), args.label_b, bin_b.display());
     println!("guest image: {suite_id} from {elf_source}, run with {run_cfg} ({})", elf.display());
     println!("mode: {mode}");
-    println!("rounds {}, perf {}", args.rounds, if perf { "on" } else { "off" });
+    println!("rounds {}, perf {}, threshold {:.1}%", args.rounds, if perf { "on" } else { "off" }, args.threshold);
 
     let mut rng = Rng::new(seed);
     let mips = |s: &Sample| s.total_icount as f64 * 1e3 / s.total_ns.max(1) as f64;
@@ -986,8 +1157,8 @@ pub fn run(args: AbArgs) -> Result<(), String> {
         })?,
     };
 
-    let summary = summarise(&rounds);
-    let text = table(&summary, &args.label_a, &args.label_b);
+    let summary = summarise(&rounds, args.threshold / 100.0);
+    let text = table(&summary, &args.label_a, &args.label_b, args.threshold / 100.0);
     let report = Report {
         tool: "iris-bench ab",
         a: Side_ { label: &args.label_a, bin: bin_a.display().to_string() },
@@ -1001,6 +1172,11 @@ pub fn run(args: AbArgs) -> Result<(), String> {
         pin: &args.pin,
         cpu: &args.cpu,
         perf,
+        threshold_pct: args.threshold,
+        bootstrap: Bootstrap {
+            resamples: BOOT_RESAMPLES, confidence: BOOT_CONFIDENCE, seed: BOOT_SEED,
+            statistic: "median of per-round B/A cost ratios, percentile interval; decides the verdict",
+        },
         seed,
         host: serde_json::to_value(host_info()).map_err(|e| e.to_string())?,
         rounds: &rounds,
@@ -1035,6 +1211,100 @@ mod tests {
         let v = [10.0, 10.1, 9.9, 13.5, 10.0];
         assert_eq!(median(&v), 10.0);
         assert_eq!(minimum(&v), 9.9);
+    }
+
+    #[test]
+    fn a_verdict_needs_the_interval_clear_of_one_and_the_median_past_the_threshold() {
+        let t = 0.03;
+        assert_eq!(decide(&[1.10; 9], t), Verdict::Slower);
+        assert_eq!(decide(&[0.90; 9], t), Verdict::Faster);
+        // A steady 2% change: real, but under the threshold, and the interval
+        // shows a 3% one would have been seen.
+        assert_eq!(decide(&[1.02; 9], t), Verdict::Same);
+        assert_eq!(decide(&[1.0; 9], t), Verdict::Same);
+        // Scattered around 1 by more than the threshold: cannot tell.
+        assert_eq!(decide(&[0.9, 1.1, 1.0, 0.92, 1.08, 1.0, 0.95, 1.05, 1.0], t), Verdict::Inconclusive);
+        // Too few rounds to have an interval.
+        assert_eq!(decide(&[1.2, 1.2], t), Verdict::Inconclusive);
+    }
+
+    #[test]
+    fn the_threshold_is_exclusive_and_symmetric() {
+        let t = 0.05;
+        assert_eq!(decide(&[1.05; 8], t), Verdict::Same);
+        assert_eq!(decide(&[1.0501; 8], t), Verdict::Slower);
+        // A 5% slowdown and the matching speedup are equally visible.
+        assert_eq!(decide(&[1.0 / 1.0501; 8], t), Verdict::Faster);
+        // Seven agreeing rounds are not enough.
+        assert_eq!(decide(&[1.10; 7], t), Verdict::Inconclusive);
+    }
+
+    #[test]
+    fn one_spoiled_round_in_many_does_not_move_the_verdict() {
+        let mut r = vec![1.0; 11];
+        r[4] = 1.3;
+        assert_eq!(decide(&r, 0.03), Verdict::Same);
+        let mut r = vec![1.08; 11];
+        r[7] = 1.4;
+        assert_eq!(decide(&r, 0.03), Verdict::Slower);
+    }
+
+    #[test]
+    fn noise_is_the_scaled_mad_over_the_median() {
+        // Median 1.0, absolute deviations 0.1 0 0.1 0.1 0.2 -> MAD 0.1.
+        let n = noise(&[0.9, 1.0, 1.1, 1.1, 0.8]).unwrap();
+        assert!((n - 0.14826).abs() < 1e-9, "{n}");
+        // One 30% round among steady ones barely registers.
+        assert!(noise(&[1.0, 1.01, 0.99, 1.0, 1.3]).unwrap() < 0.02);
+        assert_eq!(noise(&[1.0; 5]), Some(0.0));
+        assert_eq!(noise(&[1.0, 1.1]), None);
+        assert_eq!(noise(&[1.0, f64::NAN, 1.0]), None);
+    }
+
+    const SEED: u64 = 42;
+    fn ci(r: &[f64]) -> Option<(f64, f64)> { bootstrap_ci(r, 10_000, 0.95, SEED) }
+
+    #[test]
+    fn bootstrap_is_reproducible_for_a_seed() {
+        let r = [1.01, 0.98, 1.03, 0.99, 1.00, 1.02, 0.97];
+        assert_eq!(ci(&r), ci(&r));
+        assert_eq!(bootstrap_ci(&r, 10_000, 0.95, 7), bootstrap_ci(&r, 10_000, 0.95, 7));
+    }
+
+    #[test]
+    fn a_vs_a_interval_straddles_one() {
+        // Same build both sides: ratios scatter around 1, one of them a 30%
+        // slow run, as on a busy host.
+        let r = [1.01, 0.99, 1.30, 0.98, 1.02, 1.00, 0.99];
+        let (lo, hi) = ci(&r).unwrap();
+        assert!(lo <= 1.0 && hi >= 1.0, "[{lo}, {hi}]");
+    }
+
+    #[test]
+    fn a_clear_shift_has_an_interval_that_excludes_one() {
+        let r = [1.10, 1.12, 1.09, 1.11, 1.10];
+        let (lo, hi) = ci(&r).unwrap();
+        assert!(lo > 1.03 && hi < 1.15, "[{lo}, {hi}]");
+        assert!(lo <= median(&r) && median(&r) <= hi);
+    }
+
+    #[test]
+    fn five_rounds_collapse_the_interval_to_the_range() {
+        // Why the default is 30 rounds: with n = 5 the percentile interval of
+        // the median is [min, max] of the ratios, so one spoiled round keeps
+        // it from excluding 1.0.
+        let r = [1.07, 1.07, 1.00, 1.07, 1.07];
+        let (lo, hi) = ci(&r).unwrap();
+        assert_eq!((lo, hi), (1.00, 1.07));
+    }
+
+    #[test]
+    fn fewer_than_three_rounds_give_no_interval() {
+        assert_eq!(ci(&[]), None);
+        assert_eq!(ci(&[1.2]), None);
+        assert_eq!(ci(&[1.2, 1.2]), None);
+        assert!(ci(&[1.2, 1.2, 1.2]).is_some());
+        assert_eq!(ci(&[1.0, f64::NAN, 1.0]), None);
     }
 
     #[test]
@@ -1096,40 +1366,65 @@ mod tests {
     }
 
     #[test]
-    fn summary_measures_a_steady_regression_and_ignores_one_slow_round() {
+    fn summary_flags_a_steady_regression_and_ignores_one_slow_round() {
         // B is 10% slower every round.
-        let s = summarise(&rounds_of(&[10.0; 8], &[11.0; 8]));
-        for k in s.kernels.iter().chain([&s.total]) {
-            assert!((k.median_ratio - 1.1).abs() < 1e-9 && (k.min_ratio - 1.1).abs() < 1e-9, "{k:?}");
-            assert!((k.paired_ratio - 1.1).abs() < 1e-9, "{k:?}");
-        }
+        let s = summarise(&rounds_of(&[10.0; 8], &[11.0; 8]), 0.03);
+        assert!(s.kernels.iter().all(|k| k.verdict == Verdict::Slower));
+        assert!((s.total.median_ratio - 1.1).abs() < 1e-9);
+        assert!((s.total.paired_ratio - 1.1).abs() < 1e-9);
+        let [lo, hi] = s.total.ci.unwrap();
+        assert!(lo > 1.03 && hi < 1.2);
+        assert_eq!(s.total.noise, Some(0.0));
         let h = s.host.as_ref().unwrap();
         assert!((h.b_insn / h.a_insn - 1.1).abs() < 1e-9);
-        assert!(table(&s, "A", "B").contains("| int/alu | 100.0 | 90.9 |"));
 
         // Same build, one B round in eleven 30% slow: the median stays put.
         let mut b = [10.0; 11];
         b[2] = 13.0;
-        let s = summarise(&rounds_of(&[10.0; 11], &b));
-        assert!(s.kernels.iter().all(|k| (k.paired_ratio - 1.0).abs() < 1e-9));
+        let s = summarise(&rounds_of(&[10.0; 11], &b), 0.03);
+        assert!(s.kernels.iter().all(|k| k.verdict == Verdict::Same));
+    }
+
+    #[test]
+    fn a_noisy_a_vs_a_run_is_inconclusive_and_a_quiet_one_is_not() {
+        let noisy = [10.0, 13.0, 8.0, 10.0, 12.0, 9.0, 10.0, 11.0];
+        let s = summarise(&rounds_of(&[10.0; 8], &noisy), 0.03);
+        assert!(s.kernels.iter().all(|k| k.verdict == Verdict::Inconclusive), "{:?}", s.kernels[0]);
+        let t = table(&s, "A", "B", 0.03);
+        assert!(t.contains("Inconclusive") && t.contains("WARNING: the whole-run B/A ratio scattered"), "{t}");
+        let s = summarise(&rounds_of(&[10.0; 8], &[10.0; 8]), 0.03);
+        assert!(s.kernels.iter().all(|k| k.verdict == Verdict::Same));
+        assert!(!table(&s, "A", "B", 0.03).contains("Inconclusive"));
+        assert!(!table(&s, "A", "B", 0.03).contains("WARNING"));
+    }
+
+    #[test]
+    fn too_few_rounds_judge_nothing() {
+        let s = summarise(&rounds_of(&[10.0; 2], &[12.0; 2]), 0.03);
+        assert!(s.kernels.iter().all(|k| k.verdict == Verdict::Inconclusive));
+        assert!(table(&s, "A", "B", 0.03).contains("too few to judge"));
+        let s = summarise(&rounds_of(&[10.0; 7], &[12.0; 7]), 0.03);
+        assert!(s.kernels.iter().all(|k| k.verdict == Verdict::Inconclusive));
+        let s = summarise(&rounds_of(&[10.0; 8], &[12.0; 8]), 0.03);
+        assert!(s.kernels.iter().all(|k| k.verdict == Verdict::Slower));
     }
 
     #[test]
     fn only_a_mismatch_is_a_bad_checksum() {
         let mut r = rounds_of(&[10.0; 3], &[10.0; 3]);
         for x in &mut r { x.a.kernels[0].status = "UNCHECKED".into(); }
-        assert!(summarise(&r).bad_status.is_empty());
+        assert!(summarise(&r, 0.03).bad_status.is_empty());
         r[1].b.kernels[1].status = "MISMATCH".into();
-        assert_eq!(summarise(&r).bad_status, vec!["img/resize (B: MISMATCH)".to_string()]);
+        assert_eq!(summarise(&r, 0.03).bad_status, vec!["img/resize (B: MISMATCH)".to_string()]);
     }
 
     #[test]
     fn missing_perf_leaves_the_host_block_out() {
         let mut r = rounds_of(&[10.0; 3], &[10.0; 3]);
         r[1].b.host_cycles = None;
-        let s = summarise(&r);
+        let s = summarise(&r, 0.03);
         assert!(s.host.is_none());
-        assert!(table(&s, "A", "B").contains("perf unavailable"));
+        assert!(table(&s, "A", "B", 0.03).contains("perf unavailable"));
     }
 
     #[test]

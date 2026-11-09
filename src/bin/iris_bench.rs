@@ -861,8 +861,8 @@ enum Cmd {
     ///
     /// Runs the same guest image under A and B for N rounds, at the same
     /// time on cores that share a cache where the host's topology allows,
-    /// else one at a time in shuffled order, and reports each kernel's
-    /// median and best rate on each side and the B/A cost ratios.
+    /// else one at a time in shuffled order, and flags the kernels whose
+    /// paired B/A ratio is clearly past the threshold.
     Ab(ab::AbArgs),
 }
 
