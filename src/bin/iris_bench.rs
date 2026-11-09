@@ -1592,4 +1592,26 @@ mod tests {
         assert!(!probe_command("dd").contains("IRISBENCH-HAVE"));
         assert!(!probe_command("/usr/bin/dd").contains("IRISBENCH-HAVE"));
     }
+
+    fn shipped_steps() -> Vec<Step> {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/irix/steps.toml");
+        toml::from_str::<StepFile>(&std::fs::read_to_string(&p).unwrap()).unwrap().step
+    }
+
+    /// IRIX's dd has no `m` suffix and its ping refuses `-i 0`; either made a
+    /// step fail. The buffer cache still holds what disk/write just wrote, so
+    /// the cold read must read a file its own setup wrote.
+    #[test]
+    fn the_shipped_steps_stay_valid_on_irix() {
+        let steps = shipped_steps();
+        for s in &steps {
+            for c in std::iter::once(&s.cmd).chain(s.setup.iter()) {
+                assert!(!c.contains('\''), "{}: the sh -c wrapper has no room for a quote", s.name);
+                assert!(!c.contains("bs=1m") && !c.contains(" -i 0"), "{}: {c}", s.name);
+            }
+        }
+        let cold = steps.iter().find(|s| s.name == "disk/read_cold").unwrap();
+        assert!(!cold.cmd.contains("irisbench.dat"));
+        assert!(cold.setup.as_deref().unwrap().contains("hinv -c memory"));
+    }
 }
