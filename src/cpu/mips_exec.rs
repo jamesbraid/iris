@@ -11152,25 +11152,30 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Device for MipsCpu<T
                 }
                 #[cfg(not(feature = "lightning"))]
                 {
+                    // 100 groups of ten steps, sampled once per group as the
+                    // lightning loop does, so the idle detector costs nothing per
+                    // instruction.
                     macro_rules! run_batch {
                         ($step:ident) => {
-                            for _ in 0..1000 {
-                                let status = guard.$step();
+                            'batch: for _ in 0..100 {
+                                for _ in 0..10 {
+                                    let status = guard.$step();
+                                    match status {
+                                        EXEC_BREAKPOINT => {
+                                            // Reported through the stop note (`status`, `wait`),
+                                            // not printed: the terminal is a monitor console.
+                                            // Note first, then clear `running`: whoever sees the
+                                            // CPU stopped (`wait` polls it) must find the note.
+                                            let why = guard.breakpoint_hit_reason();
+                                            stop_note.lock().record(guard.core.pc, why);
+                                            running.store(false, Ordering::SeqCst);
+                                            break 'batch;
+                                        }
+                                        _ => {}
+                                    }
+                                }
                                 #[cfg(feature = "idle-pause")]
                                 idle_state.sample(&guard.core);
-                                match status {
-                                    EXEC_BREAKPOINT => {
-                                        // Reported through the stop note (`status`, `wait`),
-                                        // not printed: the terminal is a monitor console.
-                                        // Note first, then clear `running`: whoever sees the
-                                        // CPU stopped (`wait` polls it) must find the note.
-                                        let why = guard.breakpoint_hit_reason();
-                                        stop_note.lock().record(guard.core.pc, why);
-                                        running.store(false, Ordering::SeqCst);
-                                        break;
-                                    }
-                                    _ => {}
-                                }
                             }
                         };
                     }
