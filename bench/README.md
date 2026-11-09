@@ -453,6 +453,11 @@ A skipped step leaves a `SKIP` row in the saved result. A step whose command
 exits nonzero leaves a `FAILED` row with no time, the last three lines it
 printed go to the console, and the suite carries on.
 
+A step may set `timeout` (seconds, default the run's `--timeout`). When it
+overruns, the step is `FAILED`, iris-bench sends the guest Ctrl-C and runs a
+no-op to check the shell is back, and the run stops only if it is not. The X
+steps have one, since an X client waits forever on a server that does not answer.
+
 Timing is done on the host around one `iris-ci run`, with the measured no-op
 round trip subtracted, so nothing depends on the guest having a usable clock.
 Commands run as `sh -c '<cmd>'` with an IRIX-shaped PATH whatever the login

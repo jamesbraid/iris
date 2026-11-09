@@ -425,6 +425,10 @@ struct Step {
     /// Run it, but do not record a row (cleanup).
     #[serde(default)]
     skip_timing: bool,
+    /// Seconds the setup and the command may each take. A step that overruns
+    /// is FAILED. Defaults to the `--timeout` of the run.
+    #[serde(default)]
+    timeout: Option<u64>,
 }
 
 /// Wrap a guest command so it runs under a Bourne shell with a sane PATH,
@@ -463,6 +467,8 @@ enum Outcome {
     Done { out: String, secs: f64 },
     /// The command ran and exited nonzero.
     Failed { out: String, exit: i32 },
+    /// The guest did not finish in time. It may still be running the command.
+    TimedOut,
 }
 
 impl Outcome {
@@ -471,19 +477,22 @@ impl Outcome {
         match self {
             Outcome::Done { out, secs } => Ok((out, secs)),
             Outcome::Failed { exit, .. } => Err(format!("guest command exited {exit}")),
+            Outcome::TimedOut => Err("guest command timed out".into()),
         }
     }
 }
 
 /// `iris-ci run` exits nonzero for every failure and says which in a message,
-/// `iris-ci: iris error: guest exit N` when the guest command failed. Anything
-/// else (no emulator, no socket) is an error.
+/// `iris-ci: iris error: guest exit N` when the guest command failed, and
+/// `wait-serial: timeout after` when it did not finish. Anything else (no
+/// emulator, no socket) is an error.
 fn classify(success: bool, out: String, stderr: &str, secs: f64) -> Result<Outcome, String> {
     if success { return Ok(Outcome::Done { out, secs }); }
     let exit = stderr.rfind("guest exit ")
         .and_then(|i| stderr[i + 11..].split_whitespace().next()?.parse().ok());
     match exit {
         Some(exit) => Ok(Outcome::Failed { out, exit }),
+        None if stderr.contains("timeout after") => Ok(Outcome::TimedOut),
         None => Err(format!("iris-ci run failed: {}", stderr.trim())),
     }
 }
@@ -508,6 +517,21 @@ impl Ci {
             &String::from_utf8_lossy(&out.stderr),
             started.elapsed().as_secs_f64(),
         )
+    }
+
+    /// Get the shell back after a step timed out: Ctrl-C is a raw byte on the
+    /// serial line, with no carriage return. Then check that a no-op answers;
+    /// if not, every later timing would be measured against a wedged tty.
+    fn recover(&self) -> Result<(), String> {
+        let mut cmd = Command::new(&self.bin);
+        if let Some(s) = &self.socket { cmd.arg("--socket").arg(s); }
+        cmd.arg("serial-send").arg("--no-cr").arg("\u{3}");
+        if !run_with_timeout(cmd, 30)?.status.success() { return Err("iris-ci serial-send failed".into()); }
+        std::thread::sleep(Duration::from_secs(2)); // let the tty flush and the prompt redraw
+        match self.run(&wrap(":"), Some(30))? {
+            Outcome::Done { .. } => Ok(()),
+            _ => Err("the guest shell did not answer after Ctrl-C".into()),
+        }
     }
 
     fn has(&self, prog: &str) -> Result<bool, String> {
@@ -574,19 +598,24 @@ fn run_irix(ci: &Ci, steps_path: &Path, label: &str) -> Result<Run, String> {
             }
         }
         let mut o = match &step.setup {
-            Some(setup) => ci.run(&wrap(setup), None)?,
+            Some(setup) => ci.run(&wrap(setup), step.timeout)?,
             None => Outcome::Done { out: String::new(), secs: 0.0 },
         };
         let in_setup = !matches!(o, Outcome::Done { .. });
-        if !in_setup { o = ci.run(&wrap(&step.cmd), None)?; }
+        if !in_setup { o = ci.run(&wrap(&step.cmd), step.timeout)?; }
 
         let secs = match o {
             Outcome::Done { secs, .. } => secs,
-            Outcome::Failed { out, exit } => {
-                println!("  {:<22} FAILED ({}exited {})", step.name,
-                         if in_setup { "setup " } else { "" }, exit);
+            bad => {
+                let hung = matches!(bad, Outcome::TimedOut);
+                let (why, out) = match bad {
+                    Outcome::Failed { out, exit } => (format!("exited {exit}"), out),
+                    _ => (format!("did not finish in {} s", step.timeout.unwrap_or(ci.timeout)), String::new()),
+                };
+                println!("  {:<22} FAILED ({}{})", step.name, if in_setup { "setup " } else { "" }, why);
                 for l in tail(out.trim_end(), 3).lines() { println!("      {l}"); }
                 rows.push(row(step, 0, "FAILED"));
+                if hung { ci.recover()?; }
                 continue;
             }
         };
@@ -1673,6 +1702,9 @@ mod tests {
             Ok(Outcome::Failed { exit: 3, out }) => assert_eq!(out, "x\n"),
             _ => panic!("a nonzero guest status is a failed step"),
         }
+        assert!(matches!(
+            classify(false, String::new(), "iris-ci: iris error: wait-serial: timeout after 5000ms waiting for \"x\"\n", 5.0),
+            Ok(Outcome::TimedOut)));
         // No emulator to talk to: the run stops, it is not a step result.
         assert!(classify(false, String::new(), "iris-ci: connect /x: refused\n", 1.0).is_err());
     }
