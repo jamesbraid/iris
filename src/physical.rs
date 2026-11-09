@@ -121,7 +121,6 @@ impl BusDevice for AliasBus {
     fn write32(&self, addr: u64, val: u32) -> u32 { unsafe { (*self.target).write32(self.target_addr(addr), val) } }
     fn read64(&self, addr: u64) -> BusRead64  { unsafe { (*self.target).read64(self.target_addr(addr)) } }
     fn write64(&self, addr: u64, val: u64) -> u32 { unsafe { (*self.target).write64(self.target_addr(addr), val) } }
-    fn describe_fault(&self, addr: u64, size: usize) -> Option<String> { unsafe { (*self.target).describe_fault(self.target_addr(addr), size) } }
 
     /// Forward the generation counter lookup too — an alias is the same
     /// physical memory, so it must resolve to the same counter.
@@ -309,6 +308,8 @@ pub struct Physical {
     bank_views: Mutex<Vec<Box<BankView>>>,
     /// What [`Self::set_default`] installed, for a remap to put back.
     default: Mutex<Option<Entry>>,
+    /// Ranges named by [`Self::mark_probe_space`].
+    probes: Mutex<Vec<std::ops::Range<u64>>>,
 
     unmapped_ram: UnmappedRam,
     black_hole: BlackHoleRegion,
@@ -381,6 +382,7 @@ impl Physical {
             aliases: Mutex::new(Vec::new()),
             bank_views: Mutex::new(Vec::new()),
             default: Mutex::new(None),
+            probes: Mutex::new(Vec::new()),
             unmapped_ram: UnmappedRam,
             black_hole: BlackHoleRegion::new(),
             error_bus: ErrorBus::new(),
@@ -461,6 +463,13 @@ impl Physical {
         let p: Entry = &*alias;
         self.aliases.lock().unwrap().push((alias, name.to_string()));
         self.fill_range(base, end, p);
+    }
+
+    /// Software finds what is fitted in `start..end` by reading until a bus
+    /// error says nothing is there, so a bus error there is routine and its
+    /// line says so.
+    pub fn mark_probe_space(&self, start: u64, end: u64) {
+        self.probes.lock().unwrap().push(start..end);
     }
 
     /// `base..end` reads as zero and ignores writes.
@@ -845,13 +854,13 @@ impl Device for Physical {
 }
 
 impl BusDevice for Physical {
-    /// Ask the device the decode table names for `addr`, as an access to it
-    /// would have been routed, and name that device in the answer.
-    fn describe_fault(&self, addr: u64, size: usize) -> Option<String> {
+    /// The decode table's name for the device at `addr`, marked when
+    /// `addr` is probe space.
+    fn name_at(&self, addr: u64) -> Option<String> {
         let addr = addr & PHYS_MASK;
-        let dev = self.dev_at(addr);
-        let why = unsafe { (*dev).describe_fault(addr, size) }?;
-        Some(format!("{}: {why}", self.device_name(dev)))
+        let name = self.device_name(self.dev_at(addr));
+        let probe = self.probes.lock().unwrap().iter().any(|r| r.contains(&addr));
+        Some(if probe { format!("{name}, probe") } else { name })
     }
 
     #[inline(always)]
@@ -1089,6 +1098,20 @@ mod tests {
         assert!(phys.read32(0x20_0000).is_ok(), "the black hole answers");
         assert!(!phys.read32(0x30_0000).is_ok(), "the default is a bus error");
         assert!(!phys.read32(0x1_0000_0000).is_ok(), "above 4 GB too");
+    }
+
+    /// A bus-error line names what the table holds at the address, and says
+    /// when the address is probe space.
+    #[test]
+    fn name_at_names_the_device_and_probe_space() {
+        let phys = Physical::new(vec![RamBank::new(1)]);
+        phys.set_default(Arc::new(ErrorBus::new()), "error");
+        phys.map(0x20_0000, 0x21_0000, Arc::new(ErrorBus::new()), "card");
+        phys.mark_probe_space(0x20_8000, 0x20_9000);
+        assert_eq!(phys.name_at(0x30_0000).as_deref(), Some("error"));
+        assert_eq!(phys.name_at(0x20_0000).as_deref(), Some("card"));
+        assert_eq!(phys.name_at(0x20_8ffc).as_deref(), Some("card, probe"));
+        assert_eq!(phys.name_at(0x20_9000).as_deref(), Some("card"));
     }
 
     /// A bank view reaches the bank counting from its base, and the byte

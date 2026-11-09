@@ -133,9 +133,9 @@ pub struct Ip30Bus {
     pub phys: Arc<Physical>,
     ram: Arc<HeartRam>,
     unmapped: Arc<Unmapped>,
-    /// The widgets on the Crossbow's ports 9 to 15, and whether each also
-    /// takes its large window.
-    widgets: Mutex<[Option<(Arc<dyn BusDevice>, bool)>; 16]>,
+    /// The widgets on the Crossbow's ports 9 to 15, whether each also takes
+    /// its large window, and the name its windows go by in the table.
+    widgets: Mutex<[Option<(Arc<dyn BusDevice>, bool, String)>; 16]>,
     /// Per port, the runs of its small window that a PCI BAR decodes whole
     /// (the Bridge's [`crate::pci::BarRun`]s, offsets in the window), mapped
     /// over the widget while its link is up.
@@ -162,12 +162,13 @@ impl Ip30Bus {
         self.phys.map(start, end, dev, name);
     }
 
-    /// Put `dev` on the Crossbow's port `w` (9 to 15): its small window and,
-    /// with `large`, its large window. Routed only while the link is alive;
-    /// until `set_widget_link(w, true)` both windows bus-error.
-    pub fn attach_widget(&self, w: u8, dev: Arc<dyn BusDevice>, large: bool) {
+    /// Put `dev`, called `name`, on the Crossbow's port `w` (9 to 15): its
+    /// small window and, with `large`, its large window. Routed only while
+    /// the link is alive; until `set_widget_link(w, true)` both windows
+    /// bus-error.
+    pub fn attach_widget(&self, w: u8, dev: Arc<dyn BusDevice>, large: bool, name: &str) {
         assert!((9..16).contains(&w), "ip30: widget {w} is not a port the Crossbow switches");
-        self.widgets.lock()[w as usize] = Some((dev, large));
+        self.widgets.lock()[w as usize] = Some((dev, large, format!("{name} (widget {w:#x})")));
     }
 
     /// Fill the widget windows as each link stands (dead). Call once, after
@@ -194,7 +195,7 @@ impl Ip30Bus {
             return;
         }
         let widgets = self.widgets.lock();
-        let Some((dev, large)) = &widgets[w as usize] else {
+        let Some((dev, large, name)) = &widgets[w as usize] else {
             self.unmap(widget_small_base(w), WIDGET_SMALL_SIZE);
             return;
         };
@@ -204,7 +205,7 @@ impl Ip30Bus {
         }
         for (base, size) in windows {
             if alive {
-                self.phys.map(base, base + size, dev.clone(), &format!("widget {w:#x}"));
+                self.phys.map(base, base + size, dev.clone(), name);
             } else {
                 self.unmap(base, size);
             }
@@ -224,7 +225,7 @@ impl Ip30Bus {
         let widgets = self.widgets.lock();
         let mut runs = self.runs.lock();
         let old = std::mem::replace(&mut runs[w as usize], new);
-        let Some((dev, _)) = &widgets[w as usize] else { return };
+        let Some((dev, _, name)) = &widgets[w as usize] else { return };
         let base = widget_small_base(w);
         // The window's first page is the widget's own registers, never a
         // run: it answers as the widget exactly while the link is up.
@@ -232,7 +233,7 @@ impl Ip30Bus {
             return; // link down: `set_widget_link` maps them when it comes up
         }
         for r in &old {
-            self.phys.map(base + r.start, base + r.end, dev.clone(), &format!("widget {w:#x}"));
+            self.phys.map(base + r.start, base + r.end, dev.clone(), name);
         }
         self.map_runs(w, &runs[w as usize]);
     }
@@ -410,10 +411,6 @@ impl BusDevice for CachedFlashLines {
     cached_access!(read16, write16, BusRead16, u16, 2);
     cached_access!(read32, write32, BusRead32, u32, 4);
     cached_access!(read64, write64, BusRead64, u64, 8);
-
-    fn describe_fault(&self, addr: u64, size: usize) -> Option<String> {
-        self.bus.describe_fault(addr, size)
-    }
 
     fn mem_ptr(&self, addr: u64) -> Option<*const u64> {
         if BOOT_FLASH.contains(&addr) {

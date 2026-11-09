@@ -2524,13 +2524,12 @@ macro_rules! step_preamble {
 }
 
 impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
-    /// The suffix a bus-error line carries when the device behind `phys_addr`
-    /// can say why the access failed. Asked only after a failure, so a good
-    /// access never pays; it changes nothing the guest sees.
+    /// The suffix a bus-error line carries: what the bus has at `phys_addr`.
+    /// Asked only after a failure; it changes nothing the guest sees.
     #[cold]
     #[inline(never)]
-    fn fault_note(&self, phys_addr: u64, size: usize) -> String {
-        self.sysad.describe_fault(phys_addr, size).map_or_else(String::new, |why| format!(" [{why}]"))
+    fn fault_note(&self, phys_addr: u64) -> String {
+        self.sysad.name_at(phys_addr).map_or_else(String::new, |name| format!(" [{name}]"))
     }
 
     /// One bus-error report for the fetch, load and store paths, kept out of
@@ -2543,7 +2542,7 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
     #[allow(clippy::too_many_arguments)]
     fn report_bus_error(&self, op: BusErrorOp, size: usize, virt_addr: u64, phys_addr: u64, val: u64, mask: u64, status: u32) {
         match op {
-            BusErrorOp::Fetch => eprintln!("Bus error on instruction fetch: PC={:016x} PA={:08x} status={:08x}{}", virt_addr, phys_addr, status, self.fault_note(phys_addr, size)),
+            BusErrorOp::Fetch => eprintln!("Bus error on instruction fetch: PC={:016x} PA={:08x} status={:08x}{}", virt_addr, phys_addr, status, self.fault_note(phys_addr)),
             BusErrorOp::Read => {
                 // jitcheck tag: which pass this read happened in, so a
                 // divergence investigation can tell at a glance whether
@@ -2561,10 +2560,10 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
                 };
                 #[cfg(not(feature = "developer"))]
                 let jitcheck_pass = "";
-                eprintln!("Bus error on uncached read{}: PC={:016x} VA={:016x} PA={:016x} status={:08x}{}{}", size*8, self.core.pc, virt_addr, phys_addr, status, jitcheck_pass, self.fault_note(phys_addr, size));
+                eprintln!("Bus error on uncached read{}: PC={:016x} VA={:016x} PA={:016x} status={:08x}{}{}", size*8, self.core.pc, virt_addr, phys_addr, status, jitcheck_pass, self.fault_note(phys_addr));
             }
-            BusErrorOp::Write => eprintln!("Bus error on uncached write{}: PC={:016x} VA={:016x} PA={:016x} val={:016x} status={:08x}{}", size*8, self.core.pc, virt_addr, phys_addr, val, status, self.fault_note(phys_addr, size)),
-            BusErrorOp::MaskedWrite => eprintln!("Bus error on uncached write64_masked: PC={:016x} VA={:016x} PA={:016x} val={:016x} mask={:016x} status={:08x}{}", self.core.pc, virt_addr, phys_addr, val, mask, status, self.fault_note(phys_addr, size)),
+            BusErrorOp::Write => eprintln!("Bus error on uncached write{}: PC={:016x} VA={:016x} PA={:016x} val={:016x} status={:08x}{}", size*8, self.core.pc, virt_addr, phys_addr, val, status, self.fault_note(phys_addr)),
+            BusErrorOp::MaskedWrite => eprintln!("Bus error on uncached write64_masked: PC={:016x} VA={:016x} PA={:016x} val={:016x} mask={:016x} status={:08x}{}", self.core.pc, virt_addr, phys_addr, val, mask, status, self.fault_note(phys_addr)),
         }
     }
 
@@ -2583,7 +2582,7 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
     #[inline(never)]
     fn post_refused_store(&mut self, virt_addr: u64, phys_addr: u64, size: usize, val: u64, status: u32) {
         eprintln!("Unsupported uncached write{} (posted, completes): PC={:016x} VA={:016x} PA={:016x} val={:016x} status={:08x}{}",
-            size * 8, self.core.pc, virt_addr, phys_addr, val, status, self.fault_note(phys_addr, size));
+            size * 8, self.core.pc, virt_addr, phys_addr, val, status, self.fault_note(phys_addr));
     }
 
     /// Create a new executor from a config and a bus (sysad) and a TLB.

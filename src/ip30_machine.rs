@@ -21,7 +21,7 @@ use crate::cpu::mips_cache_v2::MipsCache;
 use crate::cpu::smp::World;
 use crate::cpu::mips_exec::{CpuDevice, MipsCpu, MipsCpuConfig, MipsExecutor};
 use crate::cpu::mips_tlb::MipsTlb;
-use crate::dev::bridge::{Bridge, RawFlash};
+use crate::dev::bridge::{Bridge, RawFlash, CFG0_BASE, CFG0_SIZE};
 use crate::dev::heart::{host_clock, Heart, HeartConfig, PIU_BASE, PIU_SIZE};
 use crate::dev::heart_mem::HeartRam;
 use crate::dev::ioc3::Ioc3;
@@ -298,12 +298,16 @@ impl OctaneMachine {
         // The processor reaches its own HEART without a trip through the
         // switch.
         phys.map(widget_small_base(WIDGET_HEART), widget_small_base(WIDGET_HEART) + WIDGET_SMALL_SIZE, heart.clone(), "heart widget");
-        phys.attach_widget(WIDGET_BRIDGE, bridge.clone(), false);
+        phys.attach_widget(WIDGET_BRIDGE, bridge.clone(), false, "bridge");
+        // The PROM and the kernel find the PCI slots by reading each one's
+        // configuration space; an empty slot answers with a bus error.
+        let probes = widget_small_base(WIDGET_BRIDGE) + u64::from(CFG0_BASE);
+        phys.phys.mark_probe_space(probes, probes + u64::from(CFG0_SIZE));
         if let Some(g) = &gfx {
-            phys.attach_widget(WIDGET_GFX, g.clone(), false);
+            phys.attach_widget(WIDGET_GFX, g.clone(), false, "impact");
         }
         if let Some(v) = &vpro {
-            phys.attach_widget(WIDGET_GFX, v.clone(), true);
+            phys.attach_widget(WIDGET_GFX, v.clone(), true, "vpro");
         }
         let phys = Arc::new(phys);
         phys.init();

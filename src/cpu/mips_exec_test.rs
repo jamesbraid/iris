@@ -6874,30 +6874,30 @@ mod tests {
         }
     }
 
-    /// A bus whose reads fail, recording each time it is asked to explain
-    /// a failure.
+    /// A bus whose reads fail, recording each time it is asked to name what
+    /// answers at an address.
     struct FailingProbe {
-        explains: bool,
-        asked: Mutex<Vec<(u64, usize)>>,
+        names: bool,
+        asked: Mutex<Vec<u64>>,
     }
 
     impl BusDevice for FailingProbe {
         fn read32(&self, addr: u64) -> BusRead32 {
             if addr == 0x2000 { BusRead32::ok(0x1234_5678) } else { BusRead32::err() }
         }
-        fn describe_fault(&self, addr: u64, size: usize) -> Option<String> {
-            self.asked.lock().unwrap().push((addr, size));
-            self.explains.then(|| "probe failed".to_string())
+        fn name_at(&self, addr: u64) -> Option<String> {
+            self.asked.lock().unwrap().push(addr);
+            self.names.then(|| "probe".to_string())
         }
     }
 
-    /// A described fault is labelled but not different: the same exception
-    /// and BadVAddr, and the bus is asked only after a read has failed.
+    /// A named fault is labelled but not different: the same exception and
+    /// BadVAddr, and the bus is asked only after a read has failed.
     #[test]
-    fn test_described_uncached_read_fault_still_raises_the_bus_error() {
+    fn test_named_uncached_read_fault_still_raises_the_bus_error() {
         let mut outcome = Vec::new();
-        for explains in [false, true] {
-            let bus = Arc::new(FailingProbe { explains, asked: Mutex::new(Vec::new()) });
+        for names in [false, true] {
+            let bus = Arc::new(FailingProbe { names, asked: Mutex::new(Vec::new()) });
             let dev: Arc<dyn BusDevice> = bus.clone();
             let mut exec: MipsExecutor<PassthroughTlb, PassthroughCache> = MipsExecutor::new(dev, PassthroughTlb::default(), &MipsCpuConfig::indy());
             disable_jitv2(&mut exec);
@@ -6911,21 +6911,21 @@ mod tests {
 
             let st = exec.exec(make_i(OP_LW, 4, 9, 0x100));
             assert_ne!(st, EXEC_COMPLETE, "the read must still fault");
-            assert_eq!(*bus.asked.lock().unwrap(), vec![(0x100, 4)]);
+            assert_eq!(*bus.asked.lock().unwrap(), vec![0x100]);
             outcome.push((st, exec.core.cp0_badvaddr, exec.core.cp0_cause));
         }
-        assert_eq!(outcome[0], outcome[1], "an explanation must not change what the guest sees");
+        assert_eq!(outcome[0], outcome[1], "a name must not change what the guest sees");
     }
 
     /// An uncached instruction fetch from a failing bus takes the bus error
-    /// as before, with or without a description: the same status, Cause, EPC
-    /// and BadVAddr, and the bus is asked once, after the fetch failed.
+    /// as before, with or without a name: the same status, Cause, EPC and
+    /// BadVAddr, and the bus is asked once, after the fetch failed.
     #[test]
-    fn test_described_uncached_fetch_fault_still_raises_the_bus_error() {
+    fn test_named_uncached_fetch_fault_still_raises_the_bus_error() {
         use crate::traits::BUS_ERR;
         let mut outcome = Vec::new();
-        for explains in [false, true] {
-            let bus = Arc::new(FailingProbe { explains, asked: Mutex::new(Vec::new()) });
+        for names in [false, true] {
+            let bus = Arc::new(FailingProbe { names, asked: Mutex::new(Vec::new()) });
             let dev: Arc<dyn BusDevice> = bus.clone();
             let mut exec: MipsExecutor<PassthroughTlb, PassthroughCache> = MipsExecutor::new(dev, PassthroughTlb::default(), &MipsCpuConfig::indy());
             disable_jitv2(&mut exec);
@@ -6937,10 +6937,10 @@ mod tests {
             assert_eq!(exec.step_int(), BUS_ERR);
             assert_eq!(exec.core.cp0_epc, 0xFFFFFFFF_A0000100);
             assert_eq!(exec.core.cp0_badvaddr, 0x5555);
-            assert_eq!(*bus.asked.lock().unwrap(), vec![(0x100, 4)]);
+            assert_eq!(*bus.asked.lock().unwrap(), vec![0x100]);
             outcome.push(exec.core.cp0_cause);
         }
-        assert_eq!(outcome[0], outcome[1], "an explanation must not change what the guest sees");
+        assert_eq!(outcome[0], outcome[1], "a name must not change what the guest sees");
     }
 
     type TlbExec<C> = Box<MipsExecutor<crate::cpu::mips_tlb::MipsTlb, C>>;

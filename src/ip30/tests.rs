@@ -69,7 +69,7 @@ fn board_with(prom: &[u8], banks_mb: [u32; 4]) -> Board {
     phys.map(PIU_BASE, PIU_BASE + PIU_SIZE, heart.clone(), "heart piu");
     phys.map(widget_small_base(WIDGET_XBOW), widget_small_base(WIDGET_XBOW) + WIDGET_SMALL_SIZE, xbow.clone(), "xbow");
     phys.map(widget_small_base(WIDGET_HEART), widget_small_base(WIDGET_HEART) + WIDGET_SMALL_SIZE, heart.clone(), "heart widget");
-    phys.attach_widget(WIDGET_BRIDGE, bridge, false);
+    phys.attach_widget(WIDGET_BRIDGE, bridge, false, "bridge");
     let phys = Arc::new(phys);
     phys.init();
     for w in 9..16 {
@@ -404,7 +404,7 @@ fn the_graphics_port_reaches_impact_with_its_link_up() {
         let xbow = Arc::new(Xbow::new(XBOW_REVISION, links));
         xbow.connect_heart(heart.clone());
         let p = Arc::new(Ip30Bus::new(ram.clone()));
-        p.attach_widget(WIDGET_GFX, gfx.clone(), false);
+        p.attach_widget(WIDGET_GFX, gfx.clone(), false, "impact");
         p.init();
         let weak = Arc::downgrade(&p);
         xbow.on_link_change(Box::new(move |w, up| {
