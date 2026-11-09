@@ -2518,6 +2518,32 @@ macro_rules! step_preamble {
     }};
 }
 
+// A change in a CPU model's size moves everything behind it in `MipsExecutor`,
+// and the interpreter's speed has shifted by percents from placement alone,
+// in either direction depending on the build. If one of these fires, re-measure
+// with `iris-bench ab` (lightning, idle-pause, release with the JIT on and off)
+// and then update the number. The three functional models share one layout;
+// `jitv2` adds fields to both kinds.
+#[cfg(not(feature = "jitv2"))]
+const CPU_CACHE_SIZE: usize = 392;
+#[cfg(feature = "jitv2")]
+const CPU_CACHE_SIZE: usize = 416;
+#[cfg(not(feature = "jitv2"))]
+const SHADOW_CACHE_SIZE: usize = 296;
+#[cfg(feature = "jitv2")]
+const SHADOW_CACHE_SIZE: usize = 304;
+const _: () = assert!(
+    std::mem::size_of::<R4400Cache>() == CPU_CACHE_SIZE
+        && std::mem::size_of::<R5000Cache>() == CPU_CACHE_SIZE
+        && std::mem::size_of::<R10000Cache>() == CPU_CACHE_SIZE,
+    "size of CpuCache changed: re-measure the interpreter with iris-bench ab, then update CPU_CACHE_SIZE"
+);
+const _: () = assert!(
+    std::mem::size_of::<crate::cpu::mips_cache_shadow::R4400ShadowCache>() == SHADOW_CACHE_SIZE
+        && std::mem::size_of::<crate::cpu::mips_cache_shadow::R10000ShadowCache>() == SHADOW_CACHE_SIZE,
+    "size of ShadowCache changed: re-measure the interpreter with iris-bench ab, then update SHADOW_CACHE_SIZE"
+);
+
 impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
     /// The suffix a bus-error line carries when the device behind `phys_addr`
     /// can say why the access failed. Asked only after a failure, so a good
@@ -2544,12 +2570,27 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             size * 8, self.core.pc, virt_addr, phys_addr, val, status, self.fault_note(phys_addr, size));
     }
 
+    /// `core` at offset 0 and `cache` straight after it: the per-instruction
+    /// state stays together however the models' sizes change. Evaluated for
+    /// every instantiation by [`Self::new`].
+    const LAYOUT: () = {
+        assert!(
+            std::mem::offset_of!(MipsExecutor<T, C>, core) == 0,
+            "MipsExecutor: `core` must stay the first field; re-measure with iris-bench ab before reordering"
+        );
+        assert!(
+            std::mem::offset_of!(MipsExecutor<T, C>, cache) == std::mem::size_of::<MipsCore>(),
+            "MipsExecutor: `cache` must follow `core` with no padding; re-measure with iris-bench ab before reordering"
+        );
+    };
+
     /// Create a new executor from a config and a bus (sysad) and a TLB.
     /// The cache hierarchy is constructed internally as a unified R4000Cache.
     pub fn new(sysad: Arc<dyn BusDevice>, mut tlb: T, cfg: &MipsCpuConfig) -> Self
     where
         C: From<Arc<dyn BusDevice>>
     {
+        let () = Self::LAYOUT;
         let mut core = MipsCore::new();
         // Mapped pages decode their C field with this model's table, as KSEG0
         // and xkphys do.
