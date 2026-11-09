@@ -65,6 +65,18 @@ pub struct GuestStep {
     /// The number the step's `metric` pattern pulled out of `output`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metric: Option<f64>,
+    /// Where the step's screenshot was saved, when it took one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<String>,
+    /// The screenshot reduced to a grid of mean colours, the form a golden
+    /// is written in. Paste it into the step's `golden` to record a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// How far the screenshot was from what the step compared it with: its
+    /// golden, or the earlier screenshot it had to differ from. Mean absolute
+    /// difference per colour channel, 0 to 255.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance: Option<f64>,
 }
 
 /// Most output kept per step. A step is a benchmark, not a log, and a result

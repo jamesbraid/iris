@@ -343,7 +343,7 @@ struct StepFile {
     step: Vec<Step>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct Step {
     name: String,
     unit: String,
@@ -372,6 +372,147 @@ struct Step {
     /// answering, gets a short one so it fails instead of holding up the run.
     #[serde(default)]
     timeout: Option<u64>,
+    /// Save the guest's screen under this name once the command has run (see
+    /// `shot_at`). A step that checks what a program drew rather than what it
+    /// printed needs one.
+    #[serde(default)]
+    screenshot: Option<String>,
+    /// Take the screenshot this many seconds into the command instead of after
+    /// it, so a step that runs a demo in the foreground can show it mid-run.
+    #[serde(default)]
+    shot_at: Option<u64>,
+    /// Signature (`iris-bench screen-sig`) the screenshot must match within
+    /// `tolerance`. A full-size reference image would change with every
+    /// pixel of a clock or a cursor; a coarse grid of mean colours does not,
+    /// and still sees a window that is missing, black or the wrong colour.
+    #[serde(default)]
+    golden: Option<String>,
+    /// Largest distance from `golden` that still passes, as a mean absolute
+    /// difference per colour channel (0 to 255). Default `DEFAULT_TOLERANCE`.
+    #[serde(default)]
+    tolerance: Option<f64>,
+    /// Name of an earlier step's screenshot that this one must differ from
+    /// by at least `min_change`: a program that was meant to open a window and
+    /// draw in it left the screen as it found it.
+    #[serde(default)]
+    differs_from: Option<String>,
+    /// Smallest distance from `differs_from` that passes. Default
+    /// `DEFAULT_MIN_CHANGE`.
+    #[serde(default)]
+    min_change: Option<f64>,
+}
+
+/// Cells across and down in a screen signature. Coarse on purpose: a cell
+/// is about 80 pixels on a side at 1280x1024, so a moving cursor or a clock
+/// changes its mean by a fraction of a level, while a missing window or a
+/// black screen moves many cells by tens of levels.
+const SIG_COLS: usize = 16;
+const SIG_ROWS: usize = 12;
+
+/// Default largest distance from a golden. Two desktops of the same guest
+/// differ by the cursor, the clock and the order windows came up in.
+const DEFAULT_TOLERANCE: f64 = 6.0;
+
+/// Default smallest change from an earlier screenshot. A program window of
+/// a few hundred pixels on a side moves the mean over the whole screen by
+/// several levels; nothing drawn at all leaves it under one.
+const DEFAULT_MIN_CHANGE: f64 = 2.0;
+
+/// A screenshot reduced to the mean colour of each cell of a
+/// `SIG_COLS` x `SIG_ROWS` grid, with the frame size it came from.
+#[derive(Debug, Clone, PartialEq)]
+struct ScreenSig {
+    width: u32,
+    height: u32,
+    /// RGB per cell, row by row.
+    cells: Vec<u8>,
+}
+
+impl ScreenSig {
+    /// Reduce an 8-bit RGB or RGBA frame.
+    fn from_pixels(width: u32, height: u32, channels: usize, px: &[u8]) -> Result<Self, String> {
+        let (w, h) = (width as usize, height as usize);
+        if w < SIG_COLS || h < SIG_ROWS || px.len() < w * h * channels || channels < 3 {
+            return Err(format!("a {width}x{height} frame is too small to reduce"));
+        }
+        let mut cells = Vec::with_capacity(SIG_COLS * SIG_ROWS * 3);
+        for cy in 0..SIG_ROWS {
+            let (y0, y1) = (cy * h / SIG_ROWS, (cy + 1) * h / SIG_ROWS);
+            for cx in 0..SIG_COLS {
+                let (x0, x1) = (cx * w / SIG_COLS, (cx + 1) * w / SIG_COLS);
+                let mut sum = [0u64; 3];
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let p = &px[(y * w + x) * channels..];
+                        for c in 0..3 { sum[c] += p[c] as u64; }
+                    }
+                }
+                let n = ((y1 - y0) * (x1 - x0)) as u64;
+                for s in sum { cells.push(((s + n / 2) / n) as u8); }
+            }
+        }
+        Ok(ScreenSig { width, height, cells })
+    }
+
+    fn from_png(path: &Path) -> Result<Self, String> {
+        let file = std::fs::File::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+        let mut reader = png::Decoder::new(std::io::BufReader::new(file))
+            .read_info()
+            .map_err(|e| format!("{}: {}", path.display(), e))?;
+        let size = reader.output_buffer_size()
+            .ok_or_else(|| format!("{}: frame too large", path.display()))?;
+        let mut buf = vec![0; size];
+        let info = reader.next_frame(&mut buf).map_err(|e| format!("{}: {}", path.display(), e))?;
+        let channels = match (info.color_type, info.bit_depth) {
+            (png::ColorType::Rgb, png::BitDepth::Eight) => 3,
+            (png::ColorType::Rgba, png::BitDepth::Eight) => 4,
+            (c, d) => return Err(format!("{}: {:?} {:?} is not 8-bit RGB", path.display(), c, d)),
+        };
+        Self::from_pixels(info.width, info.height, channels, &buf)
+    }
+
+    /// Mean absolute difference per channel, 0 to 255. Frames of different
+    /// sizes are not comparable: the guest changed video mode.
+    fn distance(&self, other: &ScreenSig) -> Result<f64, String> {
+        if (self.width, self.height) != (other.width, other.height) {
+            return Err(format!("the screen is {}x{}, the reference {}x{}",
+                               self.width, self.height, other.width, other.height));
+        }
+        let total: u64 = self.cells.iter().zip(&other.cells)
+            .map(|(a, b)| a.abs_diff(*b) as u64).sum();
+        Ok(total as f64 / self.cells.len() as f64)
+    }
+}
+
+/// `sig1 16x12 1280x1024 <hex>`: the grid, the frame size and the cells.
+impl std::fmt::Display for ScreenSig {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "sig1 {}x{} {}x{} ", SIG_COLS, SIG_ROWS, self.width, self.height)?;
+        for b in &self.cells { write!(f, "{:02x}", b)?; }
+        Ok(())
+    }
+}
+
+impl std::str::FromStr for ScreenSig {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        let bad = || format!("not a screen signature (want \"sig1 {SIG_COLS}x{SIG_ROWS} WxH HEX\"): {s:.40}");
+        let f: Vec<&str> = s.split_whitespace().collect();
+        if f.len() != 4 || f[0] != "sig1" || f[1] != format!("{SIG_COLS}x{SIG_ROWS}") {
+            return Err(bad());
+        }
+        let (w, h) = f[2].split_once('x').ok_or_else(bad)?;
+        let (width, height) = (w.parse().map_err(|_| bad())?, h.parse().map_err(|_| bad())?);
+        let hex = f[3].as_bytes();
+        if hex.len() != SIG_COLS * SIG_ROWS * 3 * 2 {
+            return Err(bad());
+        }
+        let cells = hex.chunks(2)
+            .map(|p| std::str::from_utf8(p).ok().and_then(|t| u8::from_str_radix(t, 16).ok()))
+            .collect::<Option<Vec<u8>>>()
+            .ok_or_else(bad)?;
+        Ok(ScreenSig { width, height, cells })
+    }
 }
 
 /// The number printed after `label` in `output`: the first number following
@@ -424,6 +565,33 @@ fn check_steps(steps: &[Step]) -> Result<(), String> {
                 return Err(format!(
                     "step {}: the {} is {} characters once wrapped, over the {} the guest's \
                      tty accepts on one line", s.name, what, n, MAX_COMMAND_LINE));
+            }
+        }
+        let compares = s.golden.is_some() || s.differs_from.is_some() || s.shot_at.is_some();
+        if compares && s.screenshot.is_none() {
+            return Err(format!(
+                "step {}: golden, differs_from and shot_at need a screenshot to work on", s.name));
+        }
+        if let Some(g) = &s.golden {
+            g.parse::<ScreenSig>().map_err(|e| format!("step {}: golden: {}", s.name, e))?;
+        }
+    }
+    Ok(())
+}
+
+/// Check what one step says about another, once every file is merged: an
+/// extra steps file may compare with a screenshot the main file takes.
+fn check_screenshot_names(steps: &[Step]) -> Result<(), String> {
+    for (i, s) in steps.iter().enumerate() {
+        if let Some(name) = &s.screenshot {
+            if steps[..i].iter().any(|o| o.screenshot.as_ref() == Some(name)) {
+                return Err(format!("step {}: screenshot {} is taken twice", s.name, name));
+            }
+        }
+        if let Some(earlier) = &s.differs_from {
+            if !steps[..i].iter().any(|o| o.screenshot.as_ref() == Some(earlier)) {
+                return Err(format!(
+                    "step {}: differs_from names {}, which no earlier step takes", s.name, earlier));
             }
         }
     }
@@ -515,6 +683,16 @@ trait Guest {
 
     /// Send Ctrl-C to whatever the guest's shell is running.
     fn interrupt(&self) -> Result<(), String>;
+
+    /// Save the guest's screen as a PNG at `path`. The emulator writes the
+    /// file, so the path is on its host.
+    fn screenshot(&self, path: &Path) -> Result<(), String>;
+
+    /// Run `guest_cmd` as `run_within` does and save the screen `at` seconds
+    /// into it. The two outcomes are separate: a demo can run to the end
+    /// with the capture failing, and the other way round.
+    fn run_with_shot(&self, guest_cmd: &str, secs: Option<u64>, at: u64, path: &Path)
+        -> Result<(CiRun, Result<(), String>), String>;
 }
 
 /// The exit status in `iris-ci run`'s complaint about a failing guest command,
@@ -567,6 +745,32 @@ impl Guest for Ci {
 
     fn interrupt(&self) -> Result<(), String> {
         self.send_interrupt()
+    }
+
+    fn screenshot(&self, path: &Path) -> Result<(), String> {
+        let mut cmd = Command::new(&self.bin);
+        if let Some(s) = &self.socket { cmd.arg("--socket").arg(s); }
+        cmd.arg("screenshot").arg(path);
+        let out = run_with_timeout(cmd, 60)?;
+        if !out.status.success() {
+            return Err(format!("iris-ci screenshot failed: {}",
+                               String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        Ok(())
+    }
+
+    fn run_with_shot(&self, guest_cmd: &str, secs: Option<u64>, at: u64, path: &Path)
+        -> Result<(CiRun, Result<(), String>), String>
+    {
+        // The CI socket serves each connection on its own thread, so the
+        // capture does not wait for the command's serial round trip.
+        std::thread::scope(|s| {
+            let run = s.spawn(|| self.run_within(guest_cmd, secs));
+            std::thread::sleep(Duration::from_secs(at));
+            let shot = self.screenshot(path);
+            let run = run.join().map_err(|_| "the guest command's thread panicked".to_string())?;
+            Ok((run?, shot))
+        })
     }
 }
 
@@ -634,15 +838,70 @@ fn untimed_row(step: &Step, status: &str) -> Row {
     }
 }
 
+/// Where a run's screenshots go, and the prefix that keeps two runs' files
+/// apart in one directory.
+struct Shots {
+    dir: PathBuf,
+    label: String,
+}
+
+impl Shots {
+    fn path(&self, name: &str) -> PathBuf {
+        let safe = |s: &str| s.replace(|c: char| !(c.is_ascii_alphanumeric() || c == '-'), "_");
+        self.dir.join(format!("{}-{}.png", safe(&self.label), safe(name)))
+    }
+}
+
+/// Hold a screenshot up against what its step expects. Returns the distance
+/// to report, and the reason the step fails if it does.
+fn judge_screen(step: &Step, sig: &ScreenSig, taken: &[(String, ScreenSig)])
+    -> (Option<f64>, Option<String>)
+{
+    let mut distance = None;
+    if let Some(golden) = &step.golden {
+        let golden: ScreenSig = match golden.parse() {
+            Ok(g) => g,
+            Err(e) => return (None, Some(e)),
+        };
+        let tol = step.tolerance.unwrap_or(DEFAULT_TOLERANCE);
+        match sig.distance(&golden) {
+            Err(e) => return (None, Some(e)),
+            Ok(d) if d > tol => {
+                return (Some(d), Some(format!("screen is {:.1} from its golden, over {:.1}", d, tol)));
+            }
+            Ok(d) => distance = Some(d),
+        }
+    }
+    if let Some(earlier) = &step.differs_from {
+        let Some((_, before)) = taken.iter().find(|(n, _)| n == earlier) else {
+            return (distance, Some(format!("no {} screenshot to compare with", earlier)));
+        };
+        let min = step.min_change.unwrap_or(DEFAULT_MIN_CHANGE);
+        match sig.distance(before) {
+            Err(e) => return (distance, Some(e)),
+            Ok(d) if d < min => {
+                return (Some(d), Some(format!(
+                    "screen is only {:.1} from {}, under {:.1}: nothing was drawn", d, earlier, min)));
+            }
+            Ok(d) => { distance.get_or_insert(d); }
+        }
+    }
+    (distance, None)
+}
+
 /// Run `steps` in order. Returns a row per step that is timed, skipped or
 /// failed, and the total timed nanoseconds.
 ///
-/// A step whose command exits nonzero is recorded as FAILED and the suite goes
-/// on: one missing tool or broken workload says nothing about the next step. Only
-/// a failure to talk to the guest at all stops the run.
-fn run_steps(guest: &impl Guest, steps: &[Step], baseline: f64) -> Result<(Vec<Row>, u64), String> {
+/// A step whose command exits nonzero, or whose screenshot does not match, is
+/// recorded as FAILED and the suite goes on: one missing tool or broken
+/// workload says nothing about the next step. Only a failure to talk to the
+/// guest at all stops the run.
+fn run_steps(guest: &impl Guest, steps: &[Step], baseline: f64, shots: &Shots)
+    -> Result<(Vec<Row>, u64), String>
+{
     let mut rows = Vec::new();
     let mut total_ns = 0u64;
+    let mut taken: Vec<(String, ScreenSig)> = Vec::new();
 
     for step in steps {
         if let Some(prog) = &step.requires {
@@ -668,7 +927,14 @@ fn run_steps(guest: &impl Guest, steps: &[Step], baseline: f64) -> Result<(Vec<R
             }
         }
 
-        let r = guest.run_within(&wrap(&step.cmd), step.timeout)?;
+        let shot_path = step.screenshot.as_ref().map(|n| shots.path(n));
+        let (r, mut shot) = match (&shot_path, step.shot_at) {
+            (Some(p), Some(at)) => {
+                let (r, s) = guest.run_with_shot(&wrap(&step.cmd), step.timeout, at, p)?;
+                (r, Some(s))
+            }
+            _ => (guest.run_within(&wrap(&step.cmd), step.timeout)?, None),
+        };
         if r.timed_out {
             println!("  {:<22} FAILED (did not finish in {} s)", step.name,
                      step.timeout.unwrap_or(0));
@@ -677,17 +943,38 @@ fn run_steps(guest: &impl Guest, steps: &[Step], baseline: f64) -> Result<(Vec<R
             continue;
         }
         if step.skip_timing { continue; }
+        if let (Some(p), None) = (&shot_path, &shot) {
+            shot = Some(guest.screenshot(p));
+        }
         let metric = match &step.metric {
             Some(p) => extract_metric(p, &r.stdout),
             None => None,
         };
-        let seen = GuestStep {
+        let mut seen = GuestStep {
             exit: r.exit,
             output: keep_tail(&r.stdout, GUEST_OUTPUT_MAX),
             metric,
+            ..Default::default()
         };
-        if r.exit != 0 {
-            println!("  {:<22} FAILED (exited {})", step.name, r.exit);
+        let mut screen_fault = None;
+        if let (Some(p), Some(shot), Some(name)) = (&shot_path, shot, &step.screenshot) {
+            match shot.and_then(|()| ScreenSig::from_png(p)) {
+                Err(e) => screen_fault = Some(e),
+                Ok(sig) => {
+                    let (distance, fault) = judge_screen(step, &sig, &taken);
+                    seen.screenshot = Some(p.display().to_string());
+                    seen.signature = Some(sig.to_string());
+                    seen.distance = distance;
+                    screen_fault = fault;
+                    taken.push((name.clone(), sig));
+                }
+            }
+        }
+        if r.exit != 0 || screen_fault.is_some() {
+            match &screen_fault {
+                Some(why) if r.exit == 0 => println!("  {:<22} FAILED ({})", step.name, why),
+                _ => println!("  {:<22} FAILED (exited {})", step.name, r.exit),
+            }
             let last = tail(r.stdout.trim_end(), 3);
             if !last.is_empty() {
                 for l in last.lines() { println!("      {}", l); }
@@ -716,6 +1003,13 @@ fn run_steps(guest: &impl Guest, steps: &[Step], baseline: f64) -> Result<(Vec<R
                 None => println!("      metric {:?} found nothing in the output", p),
             }
         }
+        if let Some(path) = &seen.screenshot {
+            match seen.distance {
+                Some(d) => println!("      screen {} at {:.1}", path, d),
+                // Nothing to compare with yet: print what a golden would be.
+                None => println!("      screen {} {}", path, seen.signature.as_deref().unwrap_or("")),
+            }
+        }
         let mut row = untimed_row(step, "UNCHECKED");
         row.ns = ns;
         row.guest = Some(seen);
@@ -741,10 +1035,17 @@ fn guest_name(out: &str) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn run_irix(ci: &Ci, steps_path: &Path, extra: &[PathBuf], label: &str) -> Result<Run, String> {
+fn run_irix(ci: &Ci, steps_path: &Path, extra: &[PathBuf], label: &str, shots: &Shots)
+    -> Result<Run, String>
+{
     let mut steps = load_steps(steps_path)?;
     for path in extra {
         steps = merge_steps(steps, load_steps(path)?);
+    }
+    check_screenshot_names(&steps)?;
+    if steps.iter().any(|s| s.screenshot.is_some()) {
+        std::fs::create_dir_all(&shots.dir)
+            .map_err(|e| format!("{}: {}", shots.dir.display(), e))?;
     }
 
     // Identify the guest before anything else: a result recorded against the
@@ -755,7 +1056,7 @@ fn run_irix(ci: &Ci, steps_path: &Path, extra: &[PathBuf], label: &str) -> Resul
     let floor = baseline(ci)?;
     println!("  round-trip floor: {:.0} ms", floor * 1e3);
 
-    let (rows, total_ns) = run_steps(ci, &steps, floor)?;
+    let (rows, total_ns) = run_steps(ci, &steps, floor, shots)?;
 
     Ok(Run {
         cell: label.to_string(),
@@ -1156,6 +1457,19 @@ enum Cmd {
         /// Per-command timeout inside the guest.
         #[arg(long, default_value_t = 300)]
         timeout: u64,
+        /// Directory for the steps' screenshots, as the emulator sees it:
+        /// the emulator writes them. Defaults to the results directory.
+        #[arg(long)]
+        shots: Option<PathBuf>,
+    },
+
+    /// Print a screenshot's signature, the form a step's `golden` takes.
+    ///
+    /// With a second file, print how far apart the two are as well: the
+    /// figure a step's `tolerance` and `min_change` are measured in.
+    ScreenSig {
+        png: PathBuf,
+        other: Option<PathBuf>,
     },
 
     /// Print a `data/bench_reference.json` row for a saved result.
@@ -1333,7 +1647,16 @@ fn dispatch(cmd: Cmd) -> Result<(), String> {
             Ok(())
         }
 
-        Cmd::Irix { socket, steps, extra_steps, ci, shell, label, out, timeout } => {
+        Cmd::ScreenSig { png, other } => {
+            let sig = ScreenSig::from_png(&png)?;
+            println!("{}", sig);
+            if let Some(other) = other {
+                println!("distance {:.2}", sig.distance(&ScreenSig::from_png(&other)?)?);
+            }
+            Ok(())
+        }
+
+        Cmd::Irix { socket, steps, extra_steps, ci, shell, label, out, timeout, shots } => {
             let ci_bin = ci.unwrap_or_else(|| repo_relative(
                 if cfg!(windows) { "target/release/iris-ci.exe" } else { "target/release/iris-ci" }));
             if !ci_bin.exists() {
@@ -1343,7 +1666,8 @@ fn dispatch(cmd: Cmd) -> Result<(), String> {
             let steps = steps.unwrap_or_else(|| repo_relative("bench/irix/steps.toml"));
             let out = out.unwrap_or_else(default_out);
             let ci = Ci { bin: ci_bin, socket, shell, timeout };
-            let run = run_irix(&ci, &steps, &extra_steps, &label)?;
+            let shots = Shots { dir: shots.unwrap_or_else(|| out.clone()), label: label.clone() };
+            let run = run_irix(&ci, &steps, &extra_steps, &label, &shots)?;
             let path = save(&run, &out)?;
             println!("wrote {}", path.display());
             Ok(())
@@ -1495,12 +1819,42 @@ mod tests {
         hanging: Vec<&'static str>,
         output: &'static str,
         log: std::cell::RefCell<Vec<String>>,
+        /// The colour the whole screen shows, for screenshots. A command
+        /// containing "draw" turns it to `drawn`.
+        screen: std::cell::Cell<[u8; 3]>,
+        drawn: [u8; 3],
     }
 
     impl FakeGuest {
         fn new() -> Self {
-            FakeGuest { have: vec![], failing: vec![], broken: None, hanging: vec![], output: "", log: Default::default() }
+            FakeGuest {
+                have: vec![], failing: vec![], broken: None, hanging: vec![], output: "",
+                log: Default::default(), screen: std::cell::Cell::new([40, 80, 120]),
+                drawn: [200, 40, 40],
+            }
         }
+    }
+
+    /// A frame of one colour, written as the emulator's screenshot would be.
+    fn write_png(path: &Path, w: u32, h: u32, rgb: [u8; 3]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        let px: Vec<u8> = (0..w * h).flat_map(|_| rgb).collect();
+        enc.write_header().unwrap().write_image_data(&px).unwrap();
+    }
+
+    /// A screenshot directory of the test's own.
+    fn shots_in(test: &str) -> Shots {
+        let dir = std::env::temp_dir().join(format!("iris-bench-{}-{}", std::process::id(), test));
+        std::fs::create_dir_all(&dir).unwrap();
+        Shots { dir, label: "t".into() }
+    }
+
+    /// For runs that take no screenshot.
+    fn no_shots() -> Shots {
+        Shots { dir: PathBuf::from("/nonexistent"), label: "t".into() }
     }
 
     impl Guest for FakeGuest {
@@ -1522,16 +1876,137 @@ mod tests {
                 out.push_str("IRISBENCH-HAVE\n");
             }
             let exit = if self.failing.iter().any(|f| cmd.contains(f)) { 1 } else { 0 };
+            if cmd.contains("draw") { self.screen.set(self.drawn); }
             Ok(CiRun { stdout: out, secs: 2.0, exit, timed_out: false })
+        }
+
+        fn screenshot(&self, path: &Path) -> Result<(), String> {
+            self.log.borrow_mut().push(format!("shot {}", path.display()));
+            write_png(path, 64, 48, self.screen.get());
+            Ok(())
+        }
+
+        fn run_with_shot(&self, cmd: &str, secs: Option<u64>, at: u64, path: &Path)
+            -> Result<(CiRun, Result<(), String>), String>
+        {
+            self.log.borrow_mut().push(format!("shot at {at}"));
+            let r = self.run_within(cmd, secs)?;
+            Ok((r, self.screenshot(path)))
         }
     }
 
     fn step(name: &str, cmd: &str, requires: Option<&str>) -> Step {
         Step {
-            name: name.into(), unit: "op".into(), work: 10, setup: None,
-            cmd: cmd.into(), requires: requires.map(String::from), skip_timing: false,
-            metric: None, timeout: None,
+            name: name.into(), unit: "op".into(), work: 10,
+            cmd: cmd.into(), requires: requires.map(String::from),
+            ..Default::default()
         }
+    }
+
+    fn shot(name: &str, cmd: &str, screenshot: &str) -> Step {
+        Step { screenshot: Some(screenshot.into()), ..step(name, cmd, None) }
+    }
+
+    fn sig_of(w: u32, h: u32, rgb: [u8; 3]) -> ScreenSig {
+        let px: Vec<u8> = (0..w * h).flat_map(|_| rgb).collect();
+        ScreenSig::from_pixels(w, h, 3, &px).unwrap()
+    }
+
+    #[test]
+    fn a_signature_survives_its_text_form() {
+        let mut px: Vec<u8> = (0..640u32 * 480).flat_map(|i| [(i % 251) as u8, (i / 640) as u8, 7]).collect();
+        px[0] = 255;
+        let sig = ScreenSig::from_pixels(640, 480, 3, &px).unwrap();
+        let text = sig.to_string();
+        assert!(text.starts_with("sig1 16x12 640x480 "), "{text}");
+        assert_eq!(text.parse::<ScreenSig>().unwrap(), sig);
+        assert!("sig1 16x12 640x480 00".parse::<ScreenSig>().is_err());
+        assert!("not a signature".parse::<ScreenSig>().is_err());
+    }
+
+    #[test]
+    fn distance_is_the_mean_channel_difference_and_needs_one_frame_size() {
+        let a = sig_of(64, 48, [10, 20, 30]);
+        assert_eq!(a.distance(&a).unwrap(), 0.0);
+        assert_eq!(a.distance(&sig_of(64, 48, [16, 20, 30])).unwrap(), 2.0);
+        assert!(a.distance(&sig_of(32, 24, [10, 20, 30])).is_err());
+        // RGBA reduces the same as RGB.
+        let rgba: Vec<u8> = (0..64 * 48).flat_map(|_| [10, 20, 30, 255]).collect();
+        assert_eq!(ScreenSig::from_pixels(64, 48, 4, &rgba).unwrap(), a);
+    }
+
+    #[test]
+    fn a_screen_that_matches_its_golden_passes_and_one_that_does_not_fails() {
+        let g = FakeGuest::new();
+        let shots = shots_in("golden");
+        let mut good = shot("desk", "sleep 1", "desktop");
+        good.golden = Some(sig_of(64, 48, [41, 79, 121]).to_string());
+        let mut bad = shot("desk2", "sleep 1", "desktop2");
+        bad.golden = Some(sig_of(64, 48, [0, 0, 0]).to_string());
+        let (rows, _) = run_steps(&g, &[good, bad], 0.0, &shots).unwrap();
+        assert_eq!(rows[0].status, "UNCHECKED");
+        assert_eq!(rows[0].guest.as_ref().unwrap().distance, Some(1.0));
+        assert_eq!(rows[1].status, "FAILED");
+        let seen = rows[1].guest.as_ref().unwrap();
+        assert_eq!(seen.distance, Some(80.0));
+        assert_eq!(seen.exit, 0);
+        // The failing frame is kept, with the signature that would replace the golden.
+        assert!(Path::new(seen.screenshot.as_ref().unwrap()).exists());
+        assert!(seen.signature.as_ref().unwrap().starts_with("sig1 "));
+    }
+
+    #[test]
+    fn a_program_that_draws_nothing_fails_its_differs_from_check() {
+        let g = FakeGuest::new();
+        let shots = shots_in("differs");
+        let desk = shot("desk", "sleep 1", "desktop");
+        let mut idle = shot("idle", "sleep 1", "idle");
+        idle.differs_from = Some("desktop".into());
+        let mut game = shot("game", "draw it", "game");
+        game.differs_from = Some("desktop".into());
+        let (rows, _) = run_steps(&g, &[desk, idle, game], 0.0, &shots).unwrap();
+        let st: Vec<_> = rows.iter().map(|r| r.status.as_str()).collect();
+        assert_eq!(st, ["UNCHECKED", "FAILED", "UNCHECKED"]);
+        assert_eq!(rows[1].guest.as_ref().unwrap().distance, Some(0.0));
+        assert!(rows[2].guest.as_ref().unwrap().distance.unwrap() > DEFAULT_MIN_CHANGE);
+    }
+
+    #[test]
+    fn shot_at_takes_the_screenshot_while_the_command_runs() {
+        let g = FakeGuest::new();
+        let shots = shots_in("shot-at");
+        let mut s = shot("demo", "draw demo", "demo");
+        s.shot_at = Some(20);
+        let (rows, _) = run_steps(&g, &[s], 0.0, &shots).unwrap();
+        assert_eq!(rows[0].status, "UNCHECKED");
+        let log = g.log.borrow();
+        assert!(log.iter().any(|c| c == "shot at 20"));
+        assert_eq!(log.iter().filter(|c| c.starts_with("shot /")).count(), 1);
+    }
+
+    #[test]
+    fn a_skipped_step_takes_no_screenshot() {
+        let g = FakeGuest::new();
+        let mut s = shot("game", "draw", "game");
+        s.requires = Some("/usr/games/none".into());
+        let (rows, _) = run_steps(&g, &[s], 0.0, &no_shots()).unwrap();
+        assert_eq!(rows[0].status, "SKIP");
+        assert!(!g.log.borrow().iter().any(|c| c.starts_with("shot")));
+    }
+
+    #[test]
+    fn screenshot_fields_are_checked_when_the_steps_load() {
+        let mut lone = step("a", "x", None);
+        lone.golden = Some(sig_of(64, 48, [0, 0, 0]).to_string());
+        assert!(check_steps(&[lone]).unwrap_err().contains("need a screenshot"));
+        let mut bad = shot("a", "x", "a");
+        bad.golden = Some("sig1 nonsense".into());
+        assert!(check_steps(&[bad]).unwrap_err().contains("golden"));
+        let mut later = shot("b", "x", "b");
+        later.differs_from = Some("a".into());
+        assert!(check_screenshot_names(&[later]).unwrap_err().contains("no earlier step"));
+        let twice = [shot("a", "x", "s"), shot("b", "y", "s")];
+        assert!(check_screenshot_names(&twice).unwrap_err().contains("taken twice"));
     }
 
     #[cfg(unix)]
@@ -1602,7 +2077,7 @@ mod tests {
         let mut dhry = untimed_row(&step("bench/dhry", "x", None), "UNCHECKED");
         dhry.work = 1000;
         dhry.ns = 2_000_000_000;
-        dhry.guest = Some(GuestStep { exit: 0, output: String::new(), metric: Some(555555.6) });
+        dhry.guest = Some(GuestStep { metric: Some(555555.6), ..Default::default() });
         let rows = vec![
             timed, find, dhry,
             untimed_row(&step("gfx/x11perf", "x", None), "SKIP"),
@@ -1676,7 +2151,7 @@ mod tests {
         let mut g = FakeGuest::new();
         g.have = vec!["dd"];
         let steps = [step("a", "dd-work", Some("dd")), step("b", "x11-work", Some("x11perf"))];
-        let (rows, total) = run_steps(&g, &steps, 0.5).unwrap();
+        let (rows, total) = run_steps(&g, &steps, 0.5, &no_shots()).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!((rows[0].name.as_str(), rows[0].status.as_str()), ("a", "UNCHECKED"));
         assert_eq!(rows[0].ns, 1_500_000_000);
@@ -1693,7 +2168,7 @@ mod tests {
         g.failing = vec!["bad-cmd"];
         let steps = [step("first", "ok-cmd", None), step("bad", "bad-cmd", None),
                      step("last", "ok-cmd2", None)];
-        let (rows, total) = run_steps(&g, &steps, 0.0).unwrap();
+        let (rows, total) = run_steps(&g, &steps, 0.0, &no_shots()).unwrap();
         let st: Vec<_> = rows.iter().map(|r| r.status.as_str()).collect();
         assert_eq!(st, ["UNCHECKED", "FAILED", "UNCHECKED"]);
         // A failed step contributes no time to the total.
@@ -1707,7 +2182,7 @@ mod tests {
         g.failing = vec!["bad-setup"];
         let mut s = step("s", "the-cmd", None);
         s.setup = Some("bad-setup".into());
-        let (rows, _) = run_steps(&g, &[s], 0.0).unwrap();
+        let (rows, _) = run_steps(&g, &[s], 0.0, &no_shots()).unwrap();
         assert_eq!(rows[0].status, "FAILED");
         assert!(!g.log.borrow().iter().any(|c| c.contains("the-cmd")));
     }
@@ -1717,7 +2192,7 @@ mod tests {
         let mut g = FakeGuest::new();
         g.broken = Some("hang-cmd");
         let steps = [step("a", "ok-cmd", None), step("b", "hang-cmd", None), step("c", "ok-cmd", None)];
-        assert!(run_steps(&g, &steps, 0.0).is_err());
+        assert!(run_steps(&g, &steps, 0.0, &no_shots()).is_err());
     }
 
     #[test]
@@ -1760,7 +2235,7 @@ mod tests {
         g.output = "Dhrystones per Second: 1000.5\n";
         let mut s = step("dhry", "run-it", None);
         s.metric = Some("Second:".into());
-        let (rows, _) = run_steps(&g, &[s], 0.0).unwrap();
+        let (rows, _) = run_steps(&g, &[s], 0.0, &no_shots()).unwrap();
         let guest = rows[0].guest.as_ref().unwrap();
         assert_eq!(guest.output, "Dhrystones per Second: 1000.5\n");
         assert_eq!(guest.metric, Some(1000.5));
@@ -1776,7 +2251,7 @@ mod tests {
         let mut g = FakeGuest::new();
         g.failing = vec!["bad-cmd"];
         g.output = "boom\n";
-        let (rows, _) = run_steps(&g, &[step("bad", "bad-cmd", None)], 0.0).unwrap();
+        let (rows, _) = run_steps(&g, &[step("bad", "bad-cmd", None)], 0.0, &no_shots()).unwrap();
         assert_eq!(rows[0].status, "FAILED");
         let guest = rows[0].guest.as_ref().unwrap();
         assert_eq!((guest.exit, guest.output.as_str()), (1, "boom\n"));
@@ -1785,7 +2260,7 @@ mod tests {
     #[test]
     fn rows_without_guest_output_serialise_as_before() {
         let g = FakeGuest::new();
-        let (mut rows, _) = run_steps(&g, &[step("a", "c", Some("nothere"))], 0.0).unwrap();
+        let (mut rows, _) = run_steps(&g, &[step("a", "c", Some("nothere"))], 0.0, &no_shots()).unwrap();
         let json = serde_json::to_string(&rows.remove(0)).unwrap();
         assert!(!json.contains("guest"), "{json}");
     }
@@ -1853,7 +2328,7 @@ mod tests {
         let mut g = FakeGuest::new();
         g.hanging = vec!["hang-cmd"];
         let steps = [step("a", "hang-cmd", None), step("b", "ok-cmd", None)];
-        let (rows, _) = run_steps(&g, &steps, 0.0).unwrap();
+        let (rows, _) = run_steps(&g, &steps, 0.0, &no_shots()).unwrap();
         let st: Vec<_> = rows.iter().map(|r| r.status.as_str()).collect();
         assert_eq!(st, ["FAILED", "UNCHECKED"]);
         let log = g.log.borrow();
@@ -1868,6 +2343,6 @@ mod tests {
         // The recovery check is the no-op `:`; it hangs too.
         g.hanging = vec!["hang-cmd", "export PATH; :"];
         let steps = [step("a", "hang-cmd", None), step("b", "ok-cmd", None)];
-        assert!(run_steps(&g, &steps, 0.0).is_err());
+        assert!(run_steps(&g, &steps, 0.0, &no_shots()).is_err());
     }
 }
