@@ -2509,6 +2509,48 @@ pub fn write_fpr_l_fr1(core: &mut MipsCore, reg: u32, v: u64)  { core.write_fpr_
 pub fn read_fpr_w_fr1(core: &MipsCore, reg: u32) -> u32        { core.read_fpr_w(reg) }
 pub fn write_fpr_w_fr1(core: &mut MipsCore, reg: u32, v: u32)  { core.write_fpr_w(reg, v) }
 
+// Status-driven accessors for the interpreter's FP handlers: Status.FR is read on
+// each access and becomes an index mask (FR=0: clear bit 0 of the register number
+// and pick the word half by that bit; FR=1: identity), so there is no branch and
+// no indirect call. The fixed-mode functions above stay for callers that already
+// know the mode.
+impl MipsCore {
+    /// 1 when Status.FR=0 (register pairs), else 0.
+    #[inline(always)]
+    fn fr_pairs(&self) -> u32 {
+        ((self.cp0_status & STATUS_FR) == 0) as u32
+    }
+    #[inline(always)]
+    pub fn fr_read_l(&self, reg: u32) -> u64 {
+        self.fpr[(reg & !self.fr_pairs()) as usize]
+    }
+    #[inline(always)]
+    pub fn fr_write_l(&mut self, reg: u32, value: u64) {
+        let p = self.fr_pairs();
+        self.fpr[(reg & !p) as usize] = value;
+    }
+    #[inline(always)]
+    pub fn fr_read_d(&self, reg: u32) -> f64 {
+        f64::from_bits(self.fr_read_l(reg))
+    }
+    #[inline(always)]
+    pub fn fr_write_d(&mut self, reg: u32, value: f64) {
+        self.fr_write_l(reg, value.to_bits())
+    }
+    #[inline(always)]
+    pub fn fr_read_w(&self, reg: u32) -> u32 {
+        let p = self.fr_pairs();
+        (self.fpr[(reg & !p) as usize] >> ((reg & p) << 5)) as u32
+    }
+    #[inline(always)]
+    pub fn fr_write_w(&mut self, reg: u32, value: u32) {
+        let p = self.fr_pairs();
+        let shift = (reg & p) << 5;
+        let slot = &mut self.fpr[(reg & !p) as usize];
+        *slot = (*slot & !(0xFFFF_FFFFu64 << shift)) | ((value as u64) << shift);
+    }
+}
+
 impl MipsCore {
 
     /// Pack condition codes cc0..cc7 out of FCSR into an 8-bit FCCR-style value
