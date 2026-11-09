@@ -1,0 +1,81 @@
+# What tools/hot-path-check/check.py looks for. One rule per line:
+#
+#   hot     OWNER-REGEX           every function that belongs to a method of a
+#                                 type matching OWNER-REGEX, closures included,
+#                                 must not call a formatting function directly.
+#   cold    OWNER-REGEX METHOD    an exception to `hot`: a cold or debug method
+#                                 that may format. METHOD is a regex matched
+#                                 against the whole method name.
+#   inline  OWNER-REGEX METHOD    a hit path that must be inlined into its caller.
+#                                 An out-of-line symbol for it is the regression
+#                                 (clanker/perf/hot-path-inlining-must-be-explicit.md),
+#                                 and its formatting calls are reported too.
+#   anchor  OWNER-REGEX METHOD    a function that must exist. An `inline` rule
+#                                 passes by finding nothing, so each one has an
+#                                 anchor in the same type: renaming the type fails
+#                                 here instead of passing quietly. Anchors must be
+#                                 `#[inline(never)]` in the source, so that whether
+#                                 they exist does not depend on the inliner.
+#   control OWNER-REGEX METHOD    a positive control: a function that prints by
+#                                 design. If no copy of any control shows a
+#                                 formatting call, the disassembly cannot show
+#                                 them, and the run fails as unreadable.
+#   format  CALLEE-REGEX          a formatting or printing function. A direct call
+#                                 or tail jump to one from `hot` code fails.
+#
+# OWNER-REGEX is searched in the type that owns the method, as the demangler
+# prints it: `<iris::cpu::mips_exec::MipsExecutor<...>>` for v0 symbols,
+# `MipsExecutor<T,C>` for legacy ones, `<X as Trait>` for trait methods.
+# METHOD is the method's name without generic arguments. CALLEE-REGEX is
+# searched in the demangled callee name. All regexes are Python `re`.
+
+# Each CPU and cache model is its own monomorph, and every copy is checked.
+hot     ^<?(?:\w+::)*MipsExecutor<
+
+# Cold and debug methods, which may format. Each one is `#[cold]` or runs only
+# for a fault report, the debugger or the monitor. handle_exception is here
+# because its bus-error, address-error and coprocessor-unusable branches print,
+# and it runs on every guest exception; whether that costs anything on
+# exception-heavy guests has not been measured.
+cold    MipsExecutor<   report_bus_error
+cold    MipsExecutor<   fault_note
+cold    MipsExecutor<   post_refused_store
+cold    MipsExecutor<   idle_profile_report
+cold    MipsExecutor<   backtrace_from
+cold    MipsExecutor<   jitv2_monitor_pfn
+cold    MipsExecutor<   handle_exception
+cold    MipsExecutor<   debug_\w+
+cold    MipsExecutor<   monitor_\w+
+
+# Positive controls: methods that print by design. One showing a formatting
+# call proves the disassembly can show them. report_bus_error is
+# `#[cold] #[inline(never)]`; handle_exception reads binaries built before it.
+control MipsExecutor<   report_bus_error
+control MipsExecutor<   handle_exception
+
+inline  CpuCache<.*\bas\b.*MipsCache>     fetch
+inline  ShadowCache<.*\bas\b.*MipsCache>  fetch
+inline  DecodeCache\b                     fetch
+anchor  CpuCache\b                        fill_l1i_line
+anchor  ShadowCache\b                     index_store_data
+anchor  DecodeCache\b                     fetch_slow
+
+# Printing and string formatting. A `{}` in a hot function compiles to a call
+# to one of these, plus the code that builds its arguments; that code is what
+# slowed the lightning interpreter at aded5989. `x.to_string()` on an integer
+# skips fmt::write and calls the integer formatter (`<u64>::_fmt`) directly.
+#
+# Not listed: core::panicking::panic_fmt and friends. A panic ends the run, its
+# call sits on a branch the compiler already treats as cold, and every bounds
+# check reaches one.
+format  ^std::io::stdio::_eprint$
+format  ^std::io::stdio::_print$
+format  ::write_fmt$
+format  ^alloc::fmt::format(::format_inner)?$
+format  ^core::fmt::write$
+format  ^<?core::fmt::Formatter>?::
+format  \sas\salloc::string::ToString>::to_string$
+format  ^<(?:u|i)(?:8|16|32|64|128|size)>::_fmt$
+format  ^core::fmt::num::
+format  \sas\score::fmt::\w+>::fmt$
+format  ^log::__private_api::log

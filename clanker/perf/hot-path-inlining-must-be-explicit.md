@@ -24,3 +24,26 @@ Rules:
   function is the regression.
 
 Fixed in 28d8c01a (back to ×1.02 of `main`).
+
+Broken again by aded5989, this time without losing inlining: it put
+`eprintln!` bus-error reports with a formatted `String` into the hot fetch,
+load and store functions. They never ran on a good access, but the formatting
+code compiled into those functions, and the lightning interpreter ran about
+7-17% slower per kernel on x86. Fixed by moving the reports into one
+`#[cold] #[inline(never)]` method.
+
+`tools/hot-path-check/check.py` runs in CI on the release build (lightning,
+fat LTO, one codegen unit). It fails when any `MipsExecutor` method outside a
+short cold list in `hot-paths.txt` calls a formatting function directly, or
+when a `fetch` that must inline has its own symbol. Code the inliner moves
+between methods is checked wherever it lands. It does not see a layout or
+inlining regression with no formatting in it, allocation without formatting,
+or anything outside `MipsExecutor`. A build without fat LTO calls std through
+the GOT, so the check fails it as unreadable rather than passing it. It has
+not been run on Windows (the symbols are in the PDB) or on a Mach-O binary.
+
+Open: `handle_exception` prints on its bus-error, address-error and
+coprocessor-unusable branches (`eprintln!` in `mips_exec.rs`), and it runs on
+every guest exception. It is on the cold list for now. Whether that formatting
+code costs anything on exception-heavy guests (IRIX user space: TLB refills,
+syscalls, interrupts) has not been measured.
