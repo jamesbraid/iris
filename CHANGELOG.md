@@ -32,6 +32,10 @@ hashes are given where a change is easiest to understand by reading the commit.
 - CI judges `cpu-tests` by test name, not by failure count: the harness prints TAP, `cpu-tests/expected-failures.txt` lists the failing tests per CPU and engine, and `make -C cpu-tests check-run CPU=... ENGINE=...` runs the suite and the check, locally as in CI.
 - `cpu-tests` and the benchmark's accuracy check are cargo integration tests, one case per CPU: `cargo test --release [--features jitv2] --test cpu_tests --test bench_accuracy -- --ignored` builds the emulator for the engine it names, so it cannot judge a stale or wrong-engine binary. It replaces `make -C cpu-tests check-run` and `cpu-tests/run/matrix.sh`. CI runs the same tests and marks a failing case, with the tests that broke, on the pull request.
 
+### Benchmark report
+
+- The per-kernel table has a "vs base" column for every cell and a "native" column for every cell. Both used to divide the best cell by the base or the host, so a build that lost 14% still read 1.00x.
+
 ### PCI
 
 - The O2's MACE and the Octane's Bridge share one PCI layer (`src/pci/`,
