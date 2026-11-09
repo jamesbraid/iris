@@ -71,6 +71,17 @@ hashes are given where a change is easiest to understand by reading the commit.
   with the CLI it just built, and a failed boot stops the nightly or release
   from publishing. It runs when the `IRIX53_BOOT_IMAGE_URL` secret is set.
 
+### Acceptance scenarios
+
+- `iris-accept` boots a machine from a prepared disk and checks it against a
+  TOML scenario (`test/accept/`): console phases with timestamps, guest
+  commands, monitor commands, forbidden console text, and a `halt -p` that
+  must end the process. Each run writes a JSON result; `--runs N` repeats and
+  prints min/median/max per phase. It refuses to start without 150 GB free or
+  with two guests already running, and keeps the disk image read-only behind
+  an overlay. `cargo test` validates the scenarios without any disk. See
+  [TESTING.md](TESTING.md). The first scenario is the O2.
+
 ### Networking
 
 - IRIX 6.5.30 guests mount the NFS share with a plain `mount`: the

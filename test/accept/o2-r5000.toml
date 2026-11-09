@@ -1,0 +1,75 @@
+# O2 (IP32) with its default R5000: PROM menu, IRIX to a console login, one
+# CPU, no cache lines held after boot, the NAT gateway answers, and the guest
+# powers itself off. Needs the files named under [assets] in --assets.
+name = "o2-r5000"
+description = "O2 boots to login, reports one R5000, reaches the NAT gateway and halts"
+speed = "quick"
+shell = "csh"
+
+[assets]
+prom = "ip32prom.o2-seed.bin"
+disk = "o2.raw"
+
+[iris.machine]
+profile = "o2_ip32"
+
+[iris.network]
+mode = "nat"
+
+# Timeouts are seconds since the previous phase on a quiet host; the harness
+# stretches them when the host is loaded. A quiet host takes about 180 s.
+[[phase]]
+name = "prom-diagnostics"
+expect = "Running power-on diagnostics"
+timeout = 120
+
+[[phase]]
+name = "prom-menu"
+expect = "Option?"
+timeout = 300
+send = "1"
+delay = 2
+
+[[phase]]
+name = "kernel"
+expect = "IRIX Release"
+timeout = 120
+
+[[phase]]
+name = "login"
+expect = "console login:"
+timeout = 400
+
+[[step]]
+name = "hinv-processor"
+run = "hinv -c processor"
+expect = ['^1 180 MHZ IP32 Processor$', 'R5000']
+
+[[step]]
+name = "uname"
+run = "uname -m"
+expect = ['^IP32$']
+
+# Nothing may be left in the emulated caches once the PROM has handed over.
+[[step]]
+name = "held-lines-cpu0"
+monitor = "l2 probe 0"
+expect = ['shadow: 0 valid lines hold 0 pages in the cached view \[\]']
+
+# The prepared disk addresses the guest as 10.98.0.2 behind a gateway at
+# 10.98.0.3; iris's NAT answers for whatever router the guest was set up with.
+[[step]]
+name = "ping-gateway"
+run = "ping -c 3 10.98.0.3"
+timeout = 60
+expect = ['3 packets transmitted, 3 packets received']
+
+[[forbid]]
+pattern = "PANIC"
+
+[[forbid]]
+pattern = "Media error"
+
+[finish]
+command = "halt -p"
+exit_timeout = 400

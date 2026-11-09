@@ -112,3 +112,40 @@ the same files and reads every sector back. Another test fails on any
 ```sh
 cargo nextest run --release --lib exit_persistence_tests
 ```
+
+**Acceptance scenarios** — `iris-accept` boots a machine from a prepared disk
+and checks the things that need a whole guest: the console reaches a login,
+`hinv` reports the CPUs, `l2 probe` shows no held cache lines, the network
+answers, and `halt -p` ends the iris process by itself. One TOML file per
+machine lives in `test/accept/`; the program knows nothing about any machine.
+`cargo test` parses and validates every scenario but boots none, so it passes
+with no disk image. A run needs the images the scenario's `[assets]` names, in
+a directory you point it at; a scenario whose images are missing is skipped
+(exit status 77).
+
+```sh
+cargo build --release --bin iris --bin iris-ci --bin iris-accept
+target/release/iris-accept check test/accept/*.toml        # validate only
+target/release/iris-accept run test/accept/o2-r5000.toml \
+    --run-root /big/disk/runs --assets /big/disk/assets --runs 3
+target/release/iris-accept summary /big/disk/runs/results/*.json
+```
+
+A scenario has an `[iris]` table that is merged into the generated
+`iris.toml`, `[[phase]]` entries (a console string, a timeout, optionally text
+to type), `[[step]]` entries (a guest command with `run`, or an emulator
+monitor command with `monitor`, plus `expect`/`reject` regexes matched per
+line and the required exit status), `[[forbid]]` strings with an allowed
+count, and `[finish]` (the command that powers the guest off and how long iris
+has to exit). Each run writes one JSON file under `--out` with the time each
+phase was reached, every step's verdict and output, the host load, and the
+BLAKE3 of the iris binary.
+
+The harness boots the disk with `overlay = true` and puts the overlay in the
+run directory, so the image is never written; give it a copy made for the
+purpose anyway. It refuses to start with less than `--min-free-gb` (150) free on
+the run root, with `--max-guests` (2) guests already running under it, or with
+a run root inside the system temporary directory. A run whose logs show
+`Media error: Write error` is reported as invalid, not failed. Timeouts
+stretch when the host's load exceeds its CPU count (`--timeout-scale` sets it).
+
