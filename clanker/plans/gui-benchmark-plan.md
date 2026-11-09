@@ -308,3 +308,7 @@ which parts of the analysis were actually tested, in
 passes but does not report how far apart they were, so a thermally throttled
 laptop looks the same as a quiet desktop. Reporting the spread and warning above
 ~5% needs one more field per row in the machine block.
+
+**Quick mode on JIT builds.** Open. The figures above are for the interpreter.
+On a JIT build quick mode is far off a full run: Dhrystone read 310-728 DMIPS
+against 689-722 for full runs, and 28 of 46 kernels were more than 2% off.
