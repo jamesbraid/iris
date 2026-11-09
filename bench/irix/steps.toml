@@ -15,6 +15,11 @@
 # Commands run as `sh -c '<cmd>'` regardless of the login shell, so behaviour
 # does not depend on whether the account uses csh. Consequence: **no single
 # quotes in a command**, and no unescaped newlines.
+#
+# The wrapped line, about 110 characters longer than the command, must fit in
+# the 255 characters IRIX's tty takes on one line. iris-bench refuses a longer
+# one when it loads the file.
+#
 # `requires` names a program that must be on PATH; the step is skipped (not
 # failed) when it is absent, because IRIX installs vary enormously and a
 # missing x11perf is not a benchmark result.

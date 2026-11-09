@@ -374,21 +374,32 @@ and the X server driving REX3:
 iris-bench irix
 ```
 
+Two things about starting that guest. With `ci = true` the CPU stays parked
+until `iris-ci start`, so a guest that never reaches a login prompt has usually
+not been started. And with `overlay = true` on a disk the writes go to a file
+in the host's temporary directory (`TMPDIR`, else `/tmp`), not beside the
+image. The suite writes hundreds of megabytes, so point `TMPDIR` at a
+filesystem with room, or mount one over `/tmp` if iris runs in a container.
+
 Steps live in `bench/irix/steps.toml` and are ordinary shell one-liners: `dd`
-through the filesystem cold and warm, 500 small files created/stat'd/removed,
-`sum`/`compress`/`gzip`/`tar`, 256 MB through the read/write syscall pair with
+through the filesystem cold and warm (the cold read follows a write of one and
+a half times the guest's memory, so it comes from the disk), 500 small files
+created/stat'd/removed, `sum`/`compress`/`gzip`/`tar`, 256 MB through the read/write syscall pair with
 no disk in the path, a loopback ping flood, and `xwd` reading the root window
 back out of the framebuffer. A step naming a `requires` program is **skipped**
 when that program is not installed rather than failed — IRIX installs vary
 enormously and a missing `x11perf` is not a benchmark result. `requires` with a
 slash in it tests that exact path.
 
-Timing is done on the host around one `iris-ci run`, with the measured no-op
-round trip subtracted, so nothing depends on the guest having a usable clock.
+Timing is done on the host around one `iris-ci run`, to the millisecond, with
+the measured no-op round trip subtracted, so nothing depends on the guest
+having a usable clock.
 Commands run as `sh -c '<cmd>'` with an IRIX-shaped PATH whatever the login
 shell is — so a step command may not contain a single quote (a steps file that
-does is refused when it loads). Use what IRIX's tools take: `dd` has no `m`
-suffix, so a megabyte block is `bs=1048576`.
+does is refused when it loads), and the wrapped line may not pass the 255
+characters IRIX's tty takes at once, which leaves a command about 140. Use what
+IRIX's tools take: `dd` has no `m` suffix, so a megabyte block is
+`bs=1048576`.
 
 Each step ends one of three ways, and every one gets a row in the saved result:
 
@@ -403,8 +414,9 @@ What a step prints (stdout and stderr, the last 16 KiB) and its exit status are
 kept in the result JSON under `guest`. A step may carry a `metric` caption, such as
 `"Dhrystones per Second:"`: the first number after its last appearance in the
 output is stored as `guest.metric`, so the
-figure a benchmark prints about itself sits next to the host timing. The report
-subcommand does not render `guest` yet; read it from the JSON.
+figure a benchmark prints about itself sits next to the host timing. `report`
+lists every step of a guest run, in order, with its status, time, rate and that
+figure, and leaves accuracy blank.
 
 ### Your own steps
 

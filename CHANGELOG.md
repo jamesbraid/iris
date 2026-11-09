@@ -17,6 +17,7 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 - `iris-bench irix` now finds the programs a step `requires` on IRIX 6.5.22 (it skipped every step before), uses a `dd` block size IRIX accepts, and records a step whose command fails or hangs as FAILED instead of aborting the run.
 - Each step's output and exit status are saved in the result JSON, and a step's optional `metric` caption (the text a program prints just before its figure) stores the number the guest program printed. `--extra-steps FILE` adds steps to the defaults.
+- Step times are measured to the millisecond (they were rounded to 100 ms), `disk/read_cold` now reads from the disk instead of the guest's buffer cache, and `report` lists every guest step with its time and leaves accuracy blank. A steps file whose wrapped command is longer than the 255 characters IRIX's tty takes on a line is refused.
 
 ### R10000 family fixes, R12000 and R14000
 
