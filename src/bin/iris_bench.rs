@@ -767,16 +767,38 @@ fn fmt_ratio(a: f64, b: f64) -> String {
     if r >= 100.0 { format!("{:.0}x", r) } else { format!("{:.2}x", r) }
 }
 
-fn markdown(runs: &[Run], baseline: Option<&str>) -> String {
-    let mut o = String::new();
-    let emulated: Vec<&Run> = runs.iter().filter(|r| r.cell != "host").collect();
-    let host = runs.iter().find(|r| r.cell == "host");
-    let base = baseline
-        .and_then(|b| runs.iter().find(|r| r.cell == b))
-        .or_else(|| emulated.first().copied());
+/// Accuracy as the report prints it: blank for a guest-OS run, which has
+/// nothing checked, rather than "0.0% (0/0)".
+fn accuracy_text(r: &Run) -> String {
+    if r.is_guest_os() { "-".into() } else { format!("{:.1}% ({}/{})", r.accuracy(), r.matched, r.checked) }
+}
 
+/// Every step of a guest-OS run, in the order it ran. Steps with no fixed
+/// quantity of work (`find`, `tar`) have no rate, so the time is what they show.
+fn guest_steps_section(r: &Run) -> String {
+    let mut o = format!("### {}\n\nGuest: {}\n\n", r.cell, r.machine.cpu);
+    o.push_str("Times are host wall clock around each step, less the round trip of an \
+                empty command.\n\n");
+    o.push_str("| step | status | time | rate | program's own figure |\n|---|---|---:|---:|---:|\n");
+    for row in &r.rows {
+        let (status, time) = match row.status.as_str() {
+            "UNCHECKED" => ("ok", format!("{:.3} s", row.ns as f64 / 1e9)),
+            "SKIP" => ("skipped", "-".into()),
+            other => (other, "-".into()),
+        };
+        let rate = if row.rate() > 0.0 { format!("{} {}/s", fmt_rate(row.rate()), row.unit) } else { "-".into() };
+        let own = row.guest.as_ref().and_then(|g| g.metric)
+            .map(|m| m.to_string()).unwrap_or_else(|| "-".into());
+        o.push_str(&format!("| {} | {} | {} | {} | {} |\n", row.name, status, time, rate, own));
+    }
+    o.push('\n');
+    o
+}
+
+fn markdown(all: &[Run], baseline: Option<&str>) -> String {
+    let mut o = String::new();
     o.push_str("# IRIS benchmark report\n\n");
-    if let Some(h) = runs.first() {
+    if let Some(h) = all.first() {
         o.push_str(&format!(
             "Host: {} {} / {} / {} cores\n\n",
             h.host.os, h.host.arch, h.host.cpu_model, h.host.cores
@@ -787,12 +809,12 @@ fn markdown(runs: &[Run], baseline: Option<&str>) -> String {
     o.push_str("## Cells\n\n");
     o.push_str("| cell | features | CPU | accuracy | guest MIPS | DMIPS | whet/s | LINPACK MFLOPS | timed | wall |\n");
     o.push_str("|---|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
-    for r in runs {
+    for r in all {
         let feats = if r.features.is_empty() { "-".to_string() } else { r.features.join(" ") };
         o.push_str(&format!(
-            "| {} | {} | {} | {:.1}% ({}/{}) | {} | {} | {} | {} | {:.1} s | {:.1} s |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {:.1} s | {:.1} s |\n",
             r.cell, feats, r.machine.cpu,
-            r.accuracy(), r.matched, r.checked,
+            accuracy_text(r),
             if r.mips() > 0.0 { format!("{:.1}", r.mips()) } else { "n/a".into() },
             r.dmips().map(|v| format!("{:.1}", v)).unwrap_or_else(|| "-".into()),
             r.whet_loops().map(|v| format!("{:.0}", v)).unwrap_or_else(|| "-".into()),
@@ -801,6 +823,22 @@ fn markdown(runs: &[Run], baseline: Option<&str>) -> String {
         ));
     }
     o.push('\n');
+
+    // The guest-OS steps have their own section. Everything below compares the
+    // bare-metal kernels, which these runs do not have.
+    let guest: Vec<&Run> = all.iter().filter(|r| r.is_guest_os()).collect();
+    if !guest.is_empty() {
+        o.push_str("## Guest steps\n\n");
+        for r in &guest { o.push_str(&guest_steps_section(r)); }
+    }
+    let bare: Vec<Run> = all.iter().filter(|r| !r.is_guest_os()).cloned().collect();
+    if bare.is_empty() { return o; }
+    let runs = &bare[..];
+    let emulated: Vec<&Run> = runs.iter().filter(|r| r.cell != "host").collect();
+    let host = runs.iter().find(|r| r.cell == "host");
+    let base = baseline
+        .and_then(|b| runs.iter().find(|r| r.cell == b))
+        .or_else(|| emulated.first().copied());
 
     // ── accuracy detail ─────────────────────────────────────────────────────
     let mut any_bad = false;
@@ -937,6 +975,15 @@ fn ordered_names(runs: &[Run]) -> Vec<String> {
 fn text_summary(runs: &[Run]) -> String {
     let mut o = String::new();
     for r in runs {
+        if r.is_guest_os() {
+            let count = |s: &str| r.rows.iter().filter(|x| x.status == s).count();
+            o.push_str(&format!(
+                "{:<24} guest steps: {} timed, {} skipped, {} failed   {:>7.1} s timed\n",
+                r.cell, count("UNCHECKED"), count("SKIP"), count("FAILED"),
+                r.total_ns as f64 / 1e9,
+            ));
+            continue;
+        }
         o.push_str(&format!(
             "{:<24} {:>6.1}% accuracy   {:>8}   {:>7} DMIPS   {:>7.1} s timed\n",
             r.cell, r.accuracy(),
@@ -1524,6 +1571,62 @@ mod tests {
     fn the_uname_command_line_does_not_contain_its_own_marker() {
         assert!(!UNAME_COMMAND.contains("IRISBENCH-UNAME"));
         assert!(!UNAME_COMMAND.contains('\''));
+    }
+
+    fn guest_run(label: &str) -> Run {
+        let mut timed = untimed_row(&step("disk/write", "x", None), "UNCHECKED");
+        timed.unit = "B".into();
+        timed.work = 16 << 20;
+        timed.ns = 600_000_000;
+        let mut find = untimed_row(&step("fs/walk_usr", "x", None), "UNCHECKED");
+        find.work = 0;
+        find.ns = 1_234_000_000;
+        let mut dhry = untimed_row(&step("bench/dhry", "x", None), "UNCHECKED");
+        dhry.work = 1000;
+        dhry.ns = 2_000_000_000;
+        dhry.guest = Some(GuestStep { exit: 0, output: String::new(), metric: Some(555555.6) });
+        let rows = vec![
+            timed, find, dhry,
+            untimed_row(&step("gfx/x11perf", "x", None), "SKIP"),
+            untimed_row(&step("gfx/xwd", "x", None), "FAILED"),
+        ];
+        Run {
+            cell: label.into(),
+            features: Vec::new(),
+            machine: MachineInfo { cpu: "IRIX IRIS 6.5 10070055 IP22".into(), ..Default::default() },
+            host: iris::bench_report::HostInfo::default(),
+            rows,
+            checked: 0,
+            matched: 0,
+            total_ns: 3_834_000_000,
+            total_icount: 0,
+            wall_s: 3.8,
+            suite_id: String::new(),
+            settings: RunSettings::default(),
+        }
+    }
+
+    #[test]
+    fn a_guest_run_is_reported_by_step_with_no_accuracy() {
+        let md = markdown(&[guest_run("indy")], None);
+        assert!(!md.contains("0.0% (0/0)"), "{md}");
+        assert!(md.contains("| indy |") && md.contains("| IRIX IRIS 6.5 10070055 IP22 | - |"), "{md}");
+        // Every step is listed, including the ones with no fixed amount of work,
+        // the skipped one and the failed one.
+        assert!(md.contains("| disk/write | ok | 0.600 s | 27.96 M B/s | - |"), "{md}");
+        assert!(md.contains("| fs/walk_usr | ok | 1.234 s | - | - |"), "{md}");
+        assert!(md.contains("| bench/dhry | ok | 2.000 s | 500.0 op/s | 555555.6 |"), "{md}");
+        assert!(md.contains("| gfx/x11perf | skipped | - | - | - |"), "{md}");
+        assert!(md.contains("| gfx/xwd | FAILED | - | - | - |"), "{md}");
+        // Nothing that compares bare-metal kernels.
+        assert!(!md.contains("Per-kernel"), "{md}");
+    }
+
+    #[test]
+    fn a_guest_run_in_the_text_summary_counts_its_steps() {
+        let t = text_summary(&[guest_run("indy")]);
+        assert!(t.contains("3 timed, 1 skipped, 1 failed"), "{t}");
+        assert!(!t.contains("accuracy"), "{t}");
     }
 
     #[test]

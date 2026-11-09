@@ -251,6 +251,13 @@ pub struct Run {
 }
 
 impl Run {
+    /// A result of the guest-OS suite (`iris-bench irix`) rather than the
+    /// bare-metal kernels. Its steps are IRIX's own tools, so nothing is
+    /// checksummed and there is no accuracy to report.
+    pub fn is_guest_os(&self) -> bool {
+        self.checked == 0
+            && self.rows.iter().any(|r| matches!(r.status.as_str(), "UNCHECKED" | "SKIP" | "FAILED"))
+    }
     pub fn accuracy(&self) -> f64 {
         if self.checked == 0 { 0.0 } else { self.matched as f64 * 100.0 / self.checked as f64 }
     }
