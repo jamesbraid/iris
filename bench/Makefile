@@ -5,6 +5,7 @@
 #   make golden     regenerate golden/golden.h from a native host build
 #   make image      bootable SGI disk image (volume header + ELF)
 #   make matrix     run every CPU x engine cell and write a comparison
+#   make ab A=.. B=.. paired comparison of two iris builds (see README)
 #   make clean
 #
 # The toolchain lookup, the console and the startup/exception code are shared
@@ -62,7 +63,7 @@ LIBGCC :=
 
 PREBUILT := prebuilt/irisbench.elf
 
-.PHONY: all clean run dis syms image golden hostbench matrix bench report check-size prebuilt check-prebuilt
+.PHONY: all clean run dis syms image golden hostbench matrix bench report check-size prebuilt check-prebuilt ab
 all: $(TARGET)
 
 # Refresh the copy of the guest binary that `iris` links in with include_bytes!
@@ -185,6 +186,20 @@ bench: $(TARGET)
 
 report:
 	cd .. && ./target/release/iris-bench report
+
+# Is build B slower than build A? A and B are `iris` binaries (copy them out of
+# their target directories first). Optional: ROUNDS=20, PIN=8-14 (CPU list; runs
+# A and B one at a time instead of together),
+# ELF=file (hold the guest image fixed), CPU=r5000. Needs no cross toolchain.
+# See "Comparing two builds" in README.md.
+ab:
+	@test -n "$(A)" && test -n "$(B)" || { \
+	   echo "usage: make ab A=path/to/iris-base B=path/to/iris-branch [ROUNDS=N] [PIN=CPULIST] [ELF=FILE] [CPU=NAME]"; \
+	   exit 2; }
+	cd .. && cargo build --release --bin iris-bench
+	cd .. && ./target/release/iris-bench ab --a $(abspath $(A)) --b $(abspath $(B)) \
+	   $(if $(ROUNDS),--rounds $(ROUNDS)) $(if $(PIN),--pin $(PIN)) \
+	   $(if $(ELF),--elf $(abspath $(ELF))) $(if $(CPU),--cpu $(CPU))
 
 # ── bootable image ───────────────────────────────────────────────────────────
 MKVH ?= ../target/release/mkvh

@@ -379,6 +379,7 @@ Test harnesses: cpu-tests and bench, JIT equivalence tests, CI flakiness, disk h
 | [ci-unattended-irix-boot.md](testing/ci-unattended-irix-boot.md) | howto | Unattended IRIX boot under `--ci`: seed NVRAM first, and what the boot test needs from the disk |
 | [arcs-console-from-bare-metal.md](testing/arcs-console-from-bare-metal.md) | howto | Calling ARCS firmware from the bare-metal harness |
 | [bare-metal-harness-platform-assumptions.md](testing/bare-metal-harness-platform-assumptions.md) | howto | What the bare-metal suites assume about the machine |
+| [compare-builds-with-paired-ab-not-stored-baselines.md](testing/compare-builds-with-paired-ab-not-stored-baselines.md) | rule | Compare builds with paired, shuffled A/B, not stored baselines: fixed guest ELF, cycles as well as instructions, the build matrix, hyperfine for wall time |
 | [benchmark-suite-gotchas.md](testing/benchmark-suite-gotchas.md) | howto | Writing benchmark kernels for `bench/` — things that bit |
 | [cpu-tests-known-failure-baseline.md](testing/cpu-tests-known-failure-baseline.md) | howto | cpu-tests: the known-failure baseline, and how to use it |
 | [cpu-tests-scorecard-drift.md](testing/cpu-tests-scorecard-drift.md) | history | The cpu-tests scorecard in README.md is stale |

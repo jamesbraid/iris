@@ -361,6 +361,285 @@ efficiency rankings.
 
 ---
 
+## Measuring a change
+
+Whether a change made iris slower is a question about two builds on one host
+at one time, so answer it that way.
+
+* **Compare against the base, paired.** Build the change and its base and run
+  both now, with `iris-bench ab` below. Never compare against a number written
+  down earlier: the host, its load and the guest image have all moved since.
+* **Hold the guest image fixed.** Both sides run one ELF. A rebuilt
+  `bench/prebuilt/irisbench.elf` changes the instructions per iteration, which
+  moves every rate with no emulator change at all. Pass `--elf` when the two
+  builds span a rebuild of the image.
+* **Check every build users run.** A change can cost one build and not another,
+  because each feature set compiles its own hot loop. The builds that ship:
+
+  | build | features |
+  |---|---|
+  | release CLI and GUI, JIT on | `lightning,jitv2,gpujit,idle-pause,hostgl` |
+  | the same, JIT dispatch off | the same binary, run with `IRIS_JIT_DISPATCH=off` |
+  | lightning interpreter | `lightning,gpujit`, with and without `idle-pause` |
+  | Mac App Store | `iris/lightning,appstore` (the interpreter) |
+  | default | none |
+
+  Measure with and without `idle-pause`: that feature alone moved bare-metal
+  results by 9% on the suite and 23% on `int/alu` on one commit. Build both
+  sides with the release profile (`cargo build --release`), since other
+  profiles inline differently.
+* **Wall time is the result.** Host instructions, cycles and branch misses per
+  guest instruction explain a result; they are not one. A change that keeps
+  instructions flat can still cost cycles through code layout and branch
+  prediction.
+* **INCONCLUSIVE means run more rounds,** or find quieter cores. It never means
+  "no change". `ab` runs 30 rounds by default and judges each row by a 99.9%
+  interval.
+
+---
+
+## Comparing two builds
+
+"Is my branch slower?" is hard to answer on a shared machine: load drifts,
+about one run in ten comes out 25-35% slow for reasons that have nothing to do
+with the build, and the guest image is rebuilt now and then, which changes the
+instructions per iteration and so the rates. `iris-bench ab` is the paired
+answer. Build the `iris` binary at the base and at the candidate, copy both
+out of their target directories, and:
+
+```sh
+iris-bench ab --a ./iris-base --b ./iris-branch --label-a base --label-b branch
+make ab A=./iris-base B=./iris-branch   # the same, from bench/
+```
+
+(`make ab` takes `ROUNDS`, `PIN`, `ELF` and `CPU` as well.) It needs no
+configuration. It runs 30 rounds by default; 20 rounds took 13-15 minutes on a
+busy 224-core host, so expect about half as long again for 30.
+
+**Concurrent pairs.** Each round starts A and B at the same moment, each on its
+own two physical cores (one thread per core, SMT siblings left out) inside one
+group of cores that share a last-level cache, such as one CCD of a chiplet CPU.
+Whatever else the host is doing to that cache, its memory and its clock lands
+on both sides, and the per-round B/A ratio cancels it. Before each round the
+least busy cores of the group are picked from `/proc/stat` and given to the
+sides at random, so a core whose sibling is busy for one round hurts A as often
+as B. The group is the quietest one whose lock is free when the run starts. All of
+this is read at run time from `/sys/devices/system/cpu` (thread siblings, cache
+`level` and `shared_cpu_list`) and the process's own CPU affinity, so it follows
+a `taskset` or cgroup limit and knows nothing about any particular machine.
+With groups of two or three cores each side gets one core.
+
+**One run per group.** A concurrent run locks its group for the whole run, with
+a lock file `slot-<id>.lock` named by the cache's sysfs `id`, in `--lock-dir`
+(default `iris-bench-ab` in the system temporary directory). Another run using
+the same directory takes the next best free group, or waits for one, up to
+`--timeout`. The lock is released when the process exits, however it exits.
+Other tools on a host can take the same files to keep their own benchmarks off
+those cores.
+
+**Sequential fallback.** Where the topology cannot be read (macOS, Windows, a
+Linux without `/sys`), where no two cores share a cache, or with `--sequential`
+or `--pin CPULIST`, A and B run one at a time in a fresh random order each
+round, and the output's `mode:` line says which and why. Expect to need several
+times the rounds for the same resolution there.
+
+**Short, repeated timed runs.** An `iris` binary started from the command line
+tells the guest nothing about run length, so the guest runs its compiled-in
+defaults. `ab` writes a copy of the image with those defaults changed (the
+`bench_time_pct` and `bench_repeats` globals, found by name in the symbol
+table) to `--time-pct 10 --repeats 3`: each kernel's timed run is about 25 ms,
+done three times, and the guest keeps the fastest. A burst of other work then
+spoils one repeat, not the sample. Each run checks that the guest reports the
+settings it was given. An image without those symbols runs as it is, with a
+note. Most of a suite run's time is the guest's checksum pass and calibration,
+which these settings do not shorten.
+
+The image defaults to the one linked into the `iris-bench` you run, and the
+output names it by suite id; pass `--elf FILE` to hold it fixed across a bisect
+that spans a rebuild of `bench/prebuilt/`. `--cpu` selects the emulated CPU.
+
+**Like builds only.** Before the first round `ab` runs each binary with
+`--help` and reads its `build features:` line. Two builds with different
+features differ in more than the change under test, so `ab` stops unless given
+`--allow-feature-mismatch`. A `ci_clock` build is refused outright: its test
+device clock counts guest instructions rather than host time, so its timings say
+nothing about speed.
+
+### How a kernel gets flagged
+
+Each round gives one cost figure per side per kernel (nanoseconds per guest
+instruction), and so one B/A ratio. A row is judged from the median of those
+ratios and its 99.9% percentile bootstrap interval (Efron): the rounds resampled
+with replacement 10,000 times, the median of each resample, the central 99.9%,
+with a constant seed so the same rounds print the same interval.
+
+* `SLOWER` when the interval lies above 1 and the median is above
+  1 + `--threshold` (3% by default); `faster` is the mirror image, below
+  1/(1 + threshold).
+* blank (the same) when the whole interval lies within the threshold either
+  way, so a change of that size would have shown.
+* `inconclusive` otherwise. "No flag" never means "no change" unless the run
+  could have seen one.
+
+Fewer than eight rounds give no verdict at all: below that the interval is
+the range of the ratios, and every round of an A/A run agreeing by chance is
+common across 46 rows. 99.9% rather than 95% because at 95% an A/A run would flag
+about two of its 46 rows by chance. Unlike the scatter of the rounds, the
+interval narrows as rounds are added, so a noisy host still reaches a verdict
+given enough of them. The **noise** column is that scatter (1.4826 times the
+median absolute deviation of the ratios, over their median), the run's own
+estimate of one A/A round; it is shown for reading. To check a suspicious
+result directly, run `ab` with the same binary as A and B.
+
+What it resolves, measured on a shared host with two 56-core EPYC 7663 (16
+groups of 7 cores sharing an L3) and the lightning-interpreter builds of
+6fc2c7e5 and aded5989 (a known 8-17% loss in alu, resize and motion_est). At
+load 75-100, one A/A round scattered by 4% per kernel, and drawing 25 rounds
+at a time from 51 A/A and 57 A/B rounds found the loss in all three kernels
+every time, with 19 of 20 A/A draws flagging nothing. At load 190-400 one round
+scattered by 8-25%. There a 20-round A/B flagged alu and resize but left
+motion_est inconclusive, a 40-round A/B flagged all three and the suite row,
+an A/A run of 20 rounds on a group loaded with four extra suite copies left
+all 46 rows inconclusive, and of two plain 20-round A/A runs one flagged
+nothing and one flagged `mem/latency_l1` faster. That last is the cost of the
+99% level over 46 rows at 20 rounds. Drawing subsets of those 60 A/A and 60 A/B
+rounds, three settings compare as:
+
+| interval, rounds | false flags per A/A run | known losses found |
+|---|---:|---|
+| 99%, 20 | 0.45 (32% of runs have one) | alu 82%, resize 92%, motion_est 88% |
+| 99.9%, 20 | 0.03 (2% of runs) | 65-75% |
+| 99.9%, 30 (the default) | none | 90-100% |
+
+The last column is the share of A/B draws that flagged the aded5989 loss.
+The 99.9% interval at 30 rounds is the default for that reason. On a host this
+busy, still rerun a run with a single flagged row before acting on it. The
+sequential protocol scattered by 6-17% per kernel at load 70-240, and in 11
+rounds left 44 of 47 rows of the same comparison inconclusive.
+
+The table also keeps the per-side median and best round in guest MIPS. The suite
+row is treated like a kernel, on whole-run totals. Where `perf stat` works
+(Linux, `perf_event_paranoid` permitting) it reports host instructions and
+cycles per guest instruction for the whole run; elsewhere that block is left
+out and the rest is unchanged. It warns when a kernel's guest instructions per
+iteration differ by more than 0.5% between A and B in every round, which means
+the guest code differs or one emulator counts differently. (Every round, because
+each run sizes its iteration count by time, which moves the per-iteration
+figure of a few kernels by a percent or more on its own.) Host instructions per guest instruction that stay put while cycles rise
+point at code layout and branch behaviour rather than extra work, and are easy
+to miss by counting instructions alone.
+
+The raw rounds, run order, seed, bootstrap settings and host description are
+saved as `ab-<labelA>-vs-<labelB>.json` beside the table (`.md`) in `--out`
+(default `bench/build/results`); attach the table to a performance PR.
+
+Limits. The result describes this host, these two binaries and this image. `ab`
+randomises the order of the two runs in each round; it does **not** randomise
+code layout, link order or environment size, and those move speed by several
+percent with no change in work (Mytkowicz et al. measured it). A flag therefore
+means "this pair of binaries differs": confirm with the host instruction count,
+a rerun of the suspect kernel, and the build matrix (default features,
+`lightning`, `jitv2`, and `jitv2` with `IRIS_JIT_DISPATCH=off`).
+
+### Method and prior art
+
+* Measurement bias: T. Mytkowicz, A. Diwan, M. Hauswirth, P. F. Sweeney,
+  "Producing Wrong Data Without Doing Anything Obviously Wrong!", ASPLOS 2009
+  (DOI 10.1145/1508244.1508275). Innocuous setup details such as link order and
+  environment size change measured speed enough to reverse conclusions, and
+  their remedy is to randomise the experimental setup, so that bias averages
+  out instead of sitting in one arrangement. This is why the limit above is
+  stated: `ab` randomises only the run order.
+* Bootstrap confidence intervals: B. Efron, "Bootstrap Methods: Another Look at
+  the Jackknife", Annals of Statistics 7(1), 1979.
+* pyperf `compare_to` compares two sets of results with a two-sample,
+  two-tailed Student's t-test and a `--min-speed` percentage below which a
+  difference is not called significant; across a suite it reports the geometric
+  mean of the ratios. It is unpaired, and a t-test assumes roughly normal
+  samples, which one-in-ten slow runs are not.
+* Duet benchmarking: L. Bulej, V. Horký, P. Tůma, F. Farquet, A. Prokopec,
+  "Duet Benchmarking: Improving Measurement Accuracy in the Cloud", ICPE 2020
+  (DOI 10.1145/3358960.3379132, arXiv 2001.05811). Run the two versions in
+  parallel on the same machine and compare them together rather than one at a
+  time, so interference from other tenants hits both. That is the concurrent
+  mode here, with the cores chosen from the topology.
+* pyperf `system tune` makes a host quieter: the `performance` governor,
+  minimum frequency raised to the maximum, Turbo Boost off, IRQs moved off the
+  benchmark CPUs (stopping `irqbalance`), and it checks for `isolcpus=` and
+  `rcu_nocbs=` on the kernel command line. All of that needs root, and the
+  isolation needs a reboot. Its `--affinity` pins worker processes with
+  `sched_setaffinity`, which does not. On a shared host where the benchmark
+  cannot have the machine, pairing is what is left.
+* Google Benchmark's `--benchmark_enable_random_interleaving` runs the
+  repetitions of different benchmarks in a random order instead of back to
+  back, with short repetitions; its documentation reports about 40% less
+  run-to-run variance. The sequential mode here does the same for the two
+  builds.
+* criterion.rs bootstraps a t-statistic between old and new samples to get a
+  p-value, then also requires the change to exceed a configurable noise
+  threshold (its documentation gives +-1% as an example) before reporting it:
+  a test plus a minimum effect size, as here, but with many more samples per
+  side than a bare-metal suite run can afford.
+
+What was checked: pyperf's `compare_to` page and the criterion.rs analysis
+chapter were read for the points above; the Mytkowicz paper was confirmed by
+its ACM, dblp and IBM records (title, authors, venue, DOI, the setup
+randomisation proposal) and its abstract, but its full text was not retrieved.
+Efron's citation (volume, pages, DOI 10.1214/aos/1176344552) was confirmed
+against the Project Euclid record, not read in full. The Duet paper is known from
+its ACM and arXiv listings; its full text was not read. The pyperf
+points come from its "Tune the system for benchmarks" page, and the Google
+Benchmark point from its `random_interleaving.md`. Which pyperf steps need
+root is inferred from what they write (`/sys`, `/proc/irq`, `/dev/cpu/*/msr`,
+the kernel command line); the page does not say. The interval rule, the 3%
+default, the eight-round minimum and the run settings are this tool's choices;
+none comes from those sources. An earlier version flagged a row when the median
+and the best-round ratios both passed the threshold, and called a row
+inconclusive when one round's scatter exceeded it. That scatter does not shrink
+with more rounds, so on a busy host the rule could not conclude at any length:
+on 51 concurrent A/A rounds it left 31 of 46 rows inconclusive.
+
+### Whole-command timing: hyperfine
+
+For the question "how long does this whole command take", for example an
+`iris` bare-metal run or a single IRIX step wrapped in a script, use
+[hyperfine](https://github.com/sharkdp/hyperfine) rather than extending this
+tool. It is not a dependency of iris. Checked against hyperfine 2.0.0 (docs and
+source, plus real runs):
+
+* **It does not interleave.** Commands run in the order given, each command's
+  whole batch in turn: `A A A A A B B B B B`, warm-up runs included. Giving the
+  variants with `--parameter-list` runs them as separate batches in the same
+  order. `--setup` runs once per command batch, `--prepare` before each timed
+  run, `--conclude` after each, `--cleanup` once after the batch. None of them
+  reorders runs. Drift between the batches lands in the comparison. To
+  interleave, call hyperfine once per round with `-r 1` and shuffle yourself,
+  which discards its statistics.
+* **Statistics.** Mean and standard deviation, median, min and max, per
+  command, plus a "relative speed" against the first command (a ratio of
+  means). No confidence interval, no significance test, no pairing. Version
+  2.0 also collects user and system time, peak memory and, where the host
+  allows, hardware counters (`--metrics`).
+* **Outliers.** Only the first run is checked: a warning when it is much
+  slower than the rest. The modified-Z-score outlier detector (Iglewicz and
+  Hoaglin) is compiled for tests only in 2.0.0. Mean and standard deviation
+  are not robust, so a 1-in-10 slow run moves them; read the median.
+* **Export.** `--export-json` writes every measurement per command (all
+  collected metrics per run, exit codes, parameters) and a summary block with
+  mean, stddev, median, min, max; CSV, Markdown, AsciiDoc and org-mode too.
+  Easy to feed to a script that does its own pairing or bootstrap.
+* Also: it randomises the size of the environment per run
+  (`HYPERFINE_RANDOMIZED_ENVIRONMENT_OFFSET`), the stack-layout bias that
+  Mytkowicz et al. describe; it runs commands without a shell by default
+  (`-N`/`--shell=none`), so pass `-S` or wrap in a script for pipes.
+
+Use hyperfine for wall time of one command, and read its median and min, not
+the mean. Use `iris-bench ab` when the answer needs per-kernel guest rates, the
+fixed guest ELF, host perf counters per guest instruction, or paired and
+shuffled rounds with an interval.
+
+---
+
 ## The other half: `bench/irix/`
 
 Everything above runs with no operating system, which is the right way to
