@@ -393,25 +393,25 @@ struct XBridgeHead {
 
 /// A run of the head's address space that one BAR covers whole, and the bus
 /// device that answers it.
-struct PioRun {
-    start: u64,
-    end: u64,
-    dev: Arc<dyn BusDevice>,
+pub(crate) struct PioRun {
+    pub(crate) start: u64,
+    pub(crate) end: u64,
+    pub(crate) dev: Arc<dyn BusDevice>,
 }
 
 /// Whole BAR-page runs are few and carry no RAM or native fault-handler state.
 /// Readers clone one endpoint and release the table lock before calling a device.
 #[derive(Default)]
-struct PioDecode {
+pub(crate) struct PioDecode {
     runs: RwLock<Vec<PioRun>>,
 }
 impl PioDecode {
-    fn publish(&self, mut runs: Vec<PioRun>) -> Vec<PioRun> {
+    pub(crate) fn publish(&self, mut runs: Vec<PioRun>) -> Vec<PioRun> {
         runs.sort_unstable_by_key(|run| run.start);
         debug_assert!(runs.windows(2).all(|pair| pair[0].end <= pair[1].start));
         std::mem::replace(&mut *self.runs.write(), runs)
     }
-    fn target(&self, address: u64, size: usize) -> Option<Arc<dyn BusDevice>> {
+    pub(crate) fn target(&self, address: u64, size: usize) -> Option<Arc<dyn BusDevice>> {
         let runs = self.runs.read();
         let i = runs.partition_point(|run| run.start <= address).checked_sub(1)?;
         let run = &runs[i];
