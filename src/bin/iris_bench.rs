@@ -171,6 +171,12 @@ fn run_embedded(label: &str, timeout_s: u64, quick: bool, cpu: &'static Part,
     })
 }
 
+/// How often `run_with_timeout` checks whether the child has exited. The
+/// guest-OS suite times each step around one of these waits, so this is the
+/// resolution of every step time. It used to be 100 ms, which put most
+/// sub-second steps on a multiple of 100 ms.
+const WAIT_POLL: Duration = Duration::from_millis(2);
+
 /// Wait for a child, killing it after `timeout_s`. A benchmark that hangs is a
 /// finding, not a reason to block a matrix run forever.
 fn run_with_timeout(mut cmd: Command, timeout_s: u64) -> Result<std::process::Output, String> {
@@ -195,7 +201,7 @@ fn run_with_timeout(mut cmd: Command, timeout_s: u64) -> Result<std::process::Ou
                     let _ = child.wait();
                     return Err(format!("timed out after {}s", timeout_s));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                std::thread::sleep(WAIT_POLL);
             }
         }
     };
@@ -573,7 +579,7 @@ fn has(guest: &impl Guest, prog: &str) -> Result<bool, String> {
 /// second of work rather than a second of work plus the harness.
 fn baseline(guest: &impl Guest) -> Result<f64, String> {
     let mut best = f64::MAX;
-    for _ in 0..3 {
+    for _ in 0..5 {
         let s = guest.run(&wrap(":"))?.secs;
         if s < best { best = s; }
     }
@@ -1447,6 +1453,45 @@ mod tests {
             cmd: cmd.into(), requires: requires.map(String::from), skip_timing: false,
             metric: None, timeout: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_quick_child_is_timed_to_the_millisecond_not_to_the_poll() {
+        // The wait used to poll every 100 ms, so a child that exited at once
+        // took 100 ms. Taking the best of several keeps a loaded host from
+        // failing this: only a coarse poll can make every attempt slow.
+        let best = (0..10)
+            .map(|_| {
+                let t = Instant::now();
+                run_with_timeout(Command::new("true"), 30).unwrap();
+                t.elapsed()
+            })
+            .min()
+            .unwrap();
+        assert!(best < Duration::from_millis(60), "best of 10 was {best:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_outlives_the_timeout_is_killed() {
+        let mut c = Command::new("sleep");
+        c.arg("30");
+        let t = Instant::now();
+        let e = run_with_timeout(c, 1).unwrap_err();
+        assert!(e.contains("timed out"), "{e}");
+        assert!(t.elapsed() < Duration::from_secs(10));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_finished_child_keeps_its_output_and_status() {
+        let mut c = Command::new("sh");
+        c.args(["-c", "echo out; echo err >&2; exit 3"]);
+        let o = run_with_timeout(c, 30).unwrap();
+        assert_eq!(o.status.code(), Some(3));
+        assert_eq!(String::from_utf8_lossy(&o.stdout), "out\n");
+        assert_eq!(String::from_utf8_lossy(&o.stderr), "err\n");
     }
 
     #[test]
