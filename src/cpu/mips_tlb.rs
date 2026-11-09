@@ -558,7 +558,9 @@ pub struct MipsTlb {
     c_attr: [CacheAttr; 8],
     /// O(1) lookup for 32-bit (and sign-extended 64-bit) VAs.
     /// Indexed by VA[31:13] (19 bits).  Value = entry index or VMAP_MISS.
-    vmap: [u8; VMAP_SIZE],
+    /// Boxed so the TLB's other state, which the executor shares cache lines
+    /// with, is not spread over half a megabyte.
+    vmap: Box<[u8; VMAP_SIZE]>,
     /// Every VPN2 slot `vmap_fill_range`/`vmap_clear` has ever touched (across the
     /// whole session, union — never shrinks except on power_on/load_state).
     /// `vmap` starts as `[VMAP_MISS; VMAP_SIZE]` and nothing but those two
@@ -584,6 +586,14 @@ pub struct MipsTlb {
     /// scans instead of asking the map.
     irregular_mask: bool,
 }
+
+// The lookup map lives on the heap (see `vmap`) so the executor's TLB field is
+// small. Inline it was 535 KB and put everything behind it half a megabyte
+// from `MipsCore`.
+const _: () = assert!(
+    std::mem::size_of::<MipsTlb>() < 32 * 1024,
+    "MipsTlb grew: keep large tables boxed so MipsExecutor's hot fields stay compact"
+);
 
 impl MipsTlb {
     /// The R10000 family never lets a write create a multiple match: every
@@ -652,7 +662,8 @@ impl MipsTlb {
             num_entries,
             vpn_mask64: 0xC000_00FF_FFFF_E000,
             c_attr: DEFAULT_C_ATTR,
-            vmap: [VMAP_MISS; VMAP_SIZE],
+            // Built on the heap: an array literal would pass through the stack.
+            vmap: vec![VMAP_MISS; VMAP_SIZE].into_boxed_slice().try_into().unwrap(),
             #[cfg(feature = "tlbcheck")]
             vmap_touched: std::collections::HashSet::new(),
             #[cfg(feature = "tlbstats")]
