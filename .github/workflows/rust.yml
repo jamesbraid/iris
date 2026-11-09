@@ -100,6 +100,22 @@ jobs:
         restore-keys: ${{ runner.os }}-features-cargo-
     - name: Build
       run: cargo build --release -p iris --bins --features lightning,jitv2,gpujit,idle-pause,hostgl
+    # Reads the binary just built (tools/hot-path-check): no formatting calls
+    # in MipsExecutor code outside a short list of cold methods, and no
+    # out-of-line copy of a fetch that must inline. It needs this job's build:
+    # lightning, because without it step_int keeps the breakpoint and monitor
+    # paths, which format by design, and the release profile's fat LTO,
+    # without which it fails as unreadable. No run and no timing, so the result
+    # is deterministic for a given compiler, but a new nightly can move an
+    # inlining decision. Linux fails the job. macOS is informational until a
+    # Mach-O run has been checked against Linux. Windows keeps its symbols in
+    # the PDB, which the script cannot read.
+    - name: Check the interpreter's hot paths
+      if: runner.os != 'Windows'
+      continue-on-error: ${{ runner.os == 'macOS' }}
+      run: |
+        (cd tools/hot-path-check && python3 -m unittest)
+        python3 tools/hot-path-check/check.py target/release/iris
     - name: Build opt-in REX3 dirty uploads
       run: |
         cargo build -p iris --features rex-dirty-upload
