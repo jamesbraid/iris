@@ -40,6 +40,7 @@ hashes are given where a change is easiest to understand by reading the commit.
 - A failed `run --iris` shows the emulator's exit status and the tail of its stderr as well as its stdout. A run killed for timing out keeps what the emulator printed before it hung.
 - `run --deterministic --iris` reads the emulator's build features first and refuses a binary without `ci_clock`, which would have produced a timed run saved as deterministic. Lightning builds are no longer passed `--jitv2-compile sync`, which they reject.
 - A lightning build is its own engine in the GUI's reference comparison. It was compared with the plain interpreter's row, though the two run about 1.3x apart.
+- `iris-bench ab --a BASE --b CHANGE` compares two emulator builds with paired rounds on one guest image and judges each kernel by an interval, so a slowdown shows without a stored baseline. `--concurrent` starts both builds together each round; pin the command with `taskset` or `start /affinity` if the host needs it.
 
 ### PCI
 
