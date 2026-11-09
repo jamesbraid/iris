@@ -400,6 +400,12 @@ struct Step {
     /// `DEFAULT_MIN_CHANGE`.
     #[serde(default)]
     min_change: Option<f64>,
+    /// Monitor commands sent before the command, a second apart, such as
+    /// `key type root` and `key enter` to log in at the X greeter. Only the
+    /// emulator's keyboard reaches a program that reads the keyboard, and the
+    /// greeter is one. Needs `--monitor`.
+    #[serde(default)]
+    keys: Vec<String>,
 }
 
 /// Cells across and down in a screen signature. Coarse on purpose: a cell
@@ -655,6 +661,8 @@ struct Ci {
     socket: Option<PathBuf>,
     shell: String,
     timeout: u64,
+    /// The emulator's monitor, `host:port`, for steps that type keys.
+    monitor: Option<String>,
 }
 
 /// One command run in the guest.
@@ -693,6 +701,9 @@ trait Guest {
     /// with the capture failing, and the other way round.
     fn run_with_shot(&self, guest_cmd: &str, secs: Option<u64>, at: u64, path: &Path)
         -> Result<(CiRun, Result<(), String>), String>;
+
+    /// Send one command to the emulator's monitor and return its reply.
+    fn monitor(&self, command: &str) -> Result<String, String>;
 }
 
 /// The exit status in `iris-ci run`'s complaint about a failing guest command,
@@ -771,6 +782,30 @@ impl Guest for Ci {
             let run = run.join().map_err(|_| "the guest command's thread panicked".to_string())?;
             Ok((run?, shot))
         })
+    }
+
+    fn monitor(&self, command: &str) -> Result<String, String> {
+        use std::io::Read;
+        let addr = self.monitor.as_deref()
+            .ok_or("typing keys needs the emulator's monitor: pass --monitor HOST:PORT")?;
+        let mut conn = std::net::TcpStream::connect(addr)
+            .map_err(|e| format!("monitor {}: {}", addr, e))?;
+        conn.write_all(format!("{}\n", command).as_bytes())
+            .map_err(|e| format!("monitor {}: {}", addr, e))?;
+        // The monitor answers and waits for the next line, with no end
+        // marker, so read until it has been quiet for a moment.
+        conn.set_read_timeout(Some(Duration::from_secs(2))).ok();
+        let mut reply = Vec::new();
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = conn.read(&mut buf) {
+            if n == 0 { break; }
+            reply.extend_from_slice(&buf[..n]);
+        }
+        let reply = String::from_utf8_lossy(&reply).into_owned();
+        if reply.contains("Unknown command") {
+            return Err(format!("monitor refused {:?}", command));
+        }
+        Ok(reply)
     }
 }
 
@@ -889,6 +924,16 @@ fn judge_screen(step: &Step, sig: &ScreenSig, taken: &[(String, ScreenSig)])
     (distance, None)
 }
 
+/// Send a step's monitor commands, with a pause after each so the guest has
+/// taken one key sequence before the next arrives.
+fn type_keys(guest: &impl Guest, keys: &[String]) -> Result<(), String> {
+    for k in keys {
+        guest.monitor(k)?;
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    Ok(())
+}
+
 /// Run `steps` in order. Returns a row per step that is timed, skipped or
 /// failed, and the total timed nanoseconds.
 ///
@@ -925,6 +970,12 @@ fn run_steps(guest: &impl Guest, steps: &[Step], baseline: f64, shots: &Shots)
                 if !step.skip_timing { rows.push(untimed_row(step, "FAILED")); }
                 continue;
             }
+        }
+
+        if let Err(e) = type_keys(guest, &step.keys) {
+            println!("  {:<22} FAILED ({})", step.name, e);
+            if !step.skip_timing { rows.push(untimed_row(step, "FAILED")); }
+            continue;
         }
 
         let shot_path = step.screenshot.as_ref().map(|n| shots.path(n));
@@ -1461,6 +1512,10 @@ enum Cmd {
         /// the emulator writes them. Defaults to the results directory.
         #[arg(long)]
         shots: Option<PathBuf>,
+        /// The emulator's monitor, HOST:PORT (its `monitor_port`), for
+        /// steps that type keys.
+        #[arg(long)]
+        monitor: Option<String>,
     },
 
     /// Print a screenshot's signature, the form a step's `golden` takes.
@@ -1656,7 +1711,7 @@ fn dispatch(cmd: Cmd) -> Result<(), String> {
             Ok(())
         }
 
-        Cmd::Irix { socket, steps, extra_steps, ci, shell, label, out, timeout, shots } => {
+        Cmd::Irix { socket, steps, extra_steps, ci, shell, label, out, timeout, shots, monitor } => {
             let ci_bin = ci.unwrap_or_else(|| repo_relative(
                 if cfg!(windows) { "target/release/iris-ci.exe" } else { "target/release/iris-ci" }));
             if !ci_bin.exists() {
@@ -1665,7 +1720,7 @@ fn dispatch(cmd: Cmd) -> Result<(), String> {
             }
             let steps = steps.unwrap_or_else(|| repo_relative("bench/irix/steps.toml"));
             let out = out.unwrap_or_else(default_out);
-            let ci = Ci { bin: ci_bin, socket, shell, timeout };
+            let ci = Ci { bin: ci_bin, socket, shell, timeout, monitor };
             let shots = Shots { dir: shots.unwrap_or_else(|| out.clone()), label: label.clone() };
             let run = run_irix(&ci, &steps, &extra_steps, &label, &shots)?;
             let path = save(&run, &out)?;
@@ -1893,6 +1948,12 @@ mod tests {
             let r = self.run_within(cmd, secs)?;
             Ok((r, self.screenshot(path)))
         }
+
+        fn monitor(&self, command: &str) -> Result<String, String> {
+            self.log.borrow_mut().push(format!("monitor {command}"));
+            if command.contains("refused") { return Err("monitor refused it".into()); }
+            Ok(String::new())
+        }
     }
 
     fn step(name: &str, cmd: &str, requires: Option<&str>) -> Step {
@@ -1992,6 +2053,23 @@ mod tests {
         let (rows, _) = run_steps(&g, &[s], 0.0, &no_shots()).unwrap();
         assert_eq!(rows[0].status, "SKIP");
         assert!(!g.log.borrow().iter().any(|c| c.starts_with("shot")));
+    }
+
+    #[test]
+    fn keys_are_typed_before_the_command_and_a_refused_key_fails_the_step() {
+        let g = FakeGuest::new();
+        let mut login = step("login", "wait-for-desktop", None);
+        login.keys = vec!["key type root".into(), "key enter".into()];
+        let mut bad = step("bad", "never-run", None);
+        bad.keys = vec!["refused".into()];
+        let (rows, _) = run_steps(&g, &[login, bad], 0.0, &no_shots()).unwrap();
+        let st: Vec<_> = rows.iter().map(|r| r.status.as_str()).collect();
+        assert_eq!(st, ["UNCHECKED", "FAILED"]);
+        let log = g.log.borrow();
+        let at = |c: &str| log.iter().position(|l| l.contains(c)).unwrap();
+        assert!(at("monitor key type root") < at("monitor key enter"));
+        assert!(at("monitor key enter") < at("wait-for-desktop"));
+        assert!(!log.iter().any(|l| l.contains("never-run")));
     }
 
     #[test]
