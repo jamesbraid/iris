@@ -41,6 +41,9 @@ hashes are given where a change is easiest to understand by reading the commit.
 - `run --deterministic --iris` reads the emulator's build features first and refuses a binary without `ci_clock`, which would have produced a timed run saved as deterministic. Lightning builds are no longer passed `--jitv2-compile sync`, which they reject.
 - A lightning build is its own engine in the GUI's reference comparison. It was compared with the plain interpreter's row, though the two run about 1.3x apart.
 - `iris-bench ab --a BASE --b CHANGE` compares two emulator builds with paired rounds on one guest image and judges each kernel by an interval, so a slowdown shows without a stored baseline. `--concurrent` starts both builds together each round; pin the command with `taskset` or `start /affinity` if the host needs it.
+### iris-bench guest suite
+
+- `iris-bench irix` finds the programs a step `requires` on IRIX 6.5.22; it skipped every step before. A `requires` with a slash in it is tested as a path.
 
 ### PCI
 
