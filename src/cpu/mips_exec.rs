@@ -995,15 +995,19 @@ pub struct LlSiteStats {
     pub max_run: u64,
 }
 
+/// `#[repr(C)]`, hot fields first: rustc orders fields by size, so an unrelated
+/// size change (`CpuCache` growing eight bytes) reshuffled this struct and moved
+/// the interpreter's speed by percents. Cold and debug fields go last.
+#[repr(C)]
 pub struct MipsExecutor<T: Tlb, C: CpuModel> {
     pub core: MipsCore,
+    pub cache: C,
+    pub tlb: T,
     pub sysad: Arc<dyn BusDevice>,
     /// cheritest convention (`--cheritest-dump-hook`): a guest write to CP0 26
     /// dumps machine state via the test device. Off unless asked for — CP0 26
     /// is ECC on a real R4400 and the PROM writes it during cache init.
     cheritest_dump_hook: bool,
-    pub tlb: T,
-    pub cache: C,
     #[cfg(feature = "developer")]
     undo_buffer: UndoBuffer,
     #[cfg(feature = "developer")]
