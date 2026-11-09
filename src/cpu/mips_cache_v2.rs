@@ -1355,6 +1355,9 @@ fn lane_mask(addr: u64, size: usize) -> u8 {
     (off..off + size).fold(0, |m, k| m | 1 << (7 - k))
 }
 
+/// `CpuCache::ll`'s LLbit, above any LLAddr.
+const LL_BIT: u64 = 1 << 63;
+
 /// R4000 cache with proper 2-level hierarchy
 ///
 /// This implementation keeps L1-I, L1-D, and L2 in a single object
@@ -1383,8 +1386,9 @@ pub struct CpuCache<
     l2: L2CacheT<L2_CACHE_SIZE, L2_LINE, L2_TAGS, L2_DATA, L2_NINSTRS>,
 
     // Load-Linked / Store-Conditional support
-    llbit: UnsafeCell<bool>,
-    lladdr: UnsafeCell<u64>,
+    // LLbit in bit 63 over LLAddr (PA[PA_BITS-1:4], at most 36 bits), so
+    // the LL state costs one word rather than a bool and a u64.
+    ll: UnsafeCell<u64>,
 
     /// L1-I hit counter — incremented on every fetch that finds a valid line (no fill needed).
     pub l1i_hit_count: Arc<AtomicU64>,
@@ -1646,8 +1650,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
             ic,
             dc,
             l2,
-            llbit: UnsafeCell::new(false),
-            lladdr: UnsafeCell::new(0),
+            ll: UnsafeCell::new(0),
             l1i_hit_count: Arc::new(AtomicU64::new(0)),
             l1i_fetch_count: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "tcache")]
@@ -2063,10 +2066,11 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
     #[inline]
     fn check_and_clear_llbit(&self, phys_addr: u64, line_mask: usize) {
         unsafe {
-            if !*self.llbit.get() {
+            let ll = *self.ll.get();
+            if ll & LL_BIT == 0 {
                 return;
             }
-            let ll_addr = *self.lladdr.get() << 4;
+            let ll_addr = (ll & !LL_BIT) << 4;
             let line_mask = line_mask as u64;
             let addr_line = phys_addr & !line_mask;
             let ll_line = ll_addr & !line_mask;
@@ -4618,19 +4622,26 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
     }
 
     fn get_llbit(&self) -> bool {
-        unsafe { *self.llbit.get() }
+        unsafe { *self.ll.get() & LL_BIT != 0 }
     }
 
     fn set_llbit(&self, val: bool) {
-        unsafe { *self.llbit.get() = val; }
+        unsafe {
+            let ll = &mut *self.ll.get();
+            *ll = if val { *ll | LL_BIT } else { *ll & !LL_BIT };
+        }
     }
 
     fn get_lladdr(&self) -> u64 {
-        unsafe { *self.lladdr.get() }
+        unsafe { *self.ll.get() & !LL_BIT }
     }
 
     fn set_lladdr(&self, addr: u64) {
-        unsafe { *self.lladdr.get() = addr; }
+        debug_assert_eq!(addr & LL_BIT, 0, "LLAddr is at most 36 bits");
+        unsafe {
+            let ll = &mut *self.ll.get();
+            *ll = (*ll & LL_BIT) | addr;
+        }
     }
 
     fn debug_probe(&self, cache_name: &str, virt_addr: u64, phys_addr: u64) -> String {
@@ -4956,8 +4967,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
         }
         }
         unsafe {
-            *self.llbit.get() = false;
-            *self.lladdr.get() = 0;
+            *self.ll.get() = 0;
         }
     }
 
@@ -5008,8 +5018,7 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
         }
         }
         unsafe {
-            *self.llbit.get() = false;
-            *self.lladdr.get() = 0;
+            *self.ll.get() = 0;
         }
     }
 }
@@ -5036,8 +5045,8 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
         let l2_tags = Self::save_tags_as_u32(self.l2.tags());
         let dc_data = self.dc.data().to_vec();
         let l2_data = self.l2.data().to_vec();
-        let llbit = unsafe { *self.llbit.get() };
-        let lladdr = unsafe { *self.lladdr.get() };
+        let llbit = self.get_llbit();
+        let lladdr = self.get_lladdr();
 
         let mut t = toml::value::Table::new();
         t.insert("ic_tags".into(),  u32_slice_to_toml(&ic_tags));
@@ -5138,10 +5147,10 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
         }
 
         if let Some(f) = get_field(v, "llbit") {
-            if let Some(b) = toml_bool(f) { unsafe { *self.llbit.get() = b; } }
+            if let Some(b) = toml_bool(f) { self.set_llbit(b); }
         }
         if let Some(f) = get_field(v, "lladdr") {
-            if let Some(a) = toml_u64(f) { unsafe { *self.lladdr.get() = a; } }
+            if let Some(a) = toml_u64(f) { self.set_lladdr(a & !LL_BIT); }
         }
         self.rebuild_l1i_words();
         Ok(())
@@ -5486,6 +5495,28 @@ mod tests {
 
     // Flush a single L2 set to memory.  `phys` is any address within the L2 line.
     // Only valid when L2 is present (r4k or r5k+r5ksc).
+    /// LLbit and LLAddr share one word; neither write disturbs the other, at
+    /// the widest LLAddr (PA[39:4] on the R10000).
+    #[test]
+    fn llbit_and_lladdr_share_a_word_without_overlap() {
+        let cache: R10000Cache = make_cache_of(Arc::new(Memory::new(MEM_MB)));
+        let top = R10000Cache::LLADDR_MASK;
+        cache.set_lladdr(top);
+        cache.set_llbit(true);
+        assert_eq!((cache.get_lladdr(), cache.get_llbit()), (top, true));
+        cache.set_llbit(false);
+        assert_eq!((cache.get_lladdr(), cache.get_llbit()), (top, false));
+        cache.set_llbit(true);
+        cache.set_lladdr(0x123);
+        assert_eq!((cache.get_lladdr(), cache.get_llbit()), (0x123, true));
+
+        // Only a store to the linked line breaks the link.
+        MipsCache::check_and_clear_llbit(&cache, 0x1230 + 0x1000);
+        assert!(cache.get_llbit());
+        MipsCache::check_and_clear_llbit(&cache, 0x1238);
+        assert_eq!((cache.get_lladdr(), cache.get_llbit()), (0x123, false));
+    }
+
     /// A whole-cache flush the way an R10000 kernel does it -- every index of
     /// one way, then of the other, bit 0 picking the way -- reaches every line,
     /// including those this direct-mapped model keeps in its upper half.
