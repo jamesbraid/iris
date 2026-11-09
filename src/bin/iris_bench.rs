@@ -1824,6 +1824,19 @@ mod tests {
     }
 
     #[test]
+    fn the_cold_read_does_not_read_the_file_the_write_step_just_wrote() {
+        let steps = load_steps(&Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/irix/steps.toml")).unwrap();
+        let get = |n: &str| steps.iter().find(|s| s.name == n).unwrap();
+        let (write, cold, warm) = (get("disk/write"), get("disk/read_cold"), get("disk/read_warm"));
+        // That file is still in the buffer cache when the next step starts.
+        assert!(write.cmd.contains("irisbench.dat") && !cold.cmd.contains("irisbench.dat"));
+        // The cold file is written by the step's setup, larger than memory,
+        // and the warm step reads its own file once beforehand.
+        assert!(cold.setup.as_deref().unwrap().contains("hinv -c memory"));
+        assert!(warm.setup.as_deref().unwrap().contains("irisbench.dat"));
+    }
+
+    #[test]
     fn a_command_the_guests_tty_would_cut_is_refused() {
         // A wrapped line is 12 + IRIX_PATH + 15 + command + 1 characters.
         let room = MAX_COMMAND_LINE - wrap("").len();
