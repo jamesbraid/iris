@@ -4,10 +4,16 @@
 //! other work and has no quiet cores to give. Three things make the usual
 //! answer, two sequential runs and a glance at the totals, untrustworthy:
 //!
-//!   - **The host changes under the runs.** Load drifts between two runs made
-//!     minutes apart. So A and B alternate, one at a time, in a fresh random
-//!     order each round, and the comparison is read from the per-round B/A
-//!     ratio, whose two runs were seconds apart.
+//!   - **The host changes under the runs.** Load moves within seconds, and
+//!     another process on a core's SMT sibling or on the shared cache slows
+//!     ours by tens of percent. So A and B run at the same moment, each on its
+//!     own physical cores, one thread per core, inside one last-level-cache
+//!     group, and the verdict is read from the per-round B/A ratio, which
+//!     cancels what both sides see. The cores are re-picked each round and the
+//!     sides assigned at random, so what one core suffers alone averages out.
+//!     Where the topology cannot be read (not Linux, or no two cores share a
+//!     cache) A and B run one at a time in a random order each round instead,
+//!     and the output says so.
 //!   - **Outliers.** The table reports medians, which one spoiled round in
 //!     ten barely moves, beside the best round. Each kernel's timed run is
 //!     short (25 ms by default) and repeated three times, the guest keeping
@@ -27,7 +33,8 @@
 //! The kernels autoscale their iteration counts, so only a per-instruction
 //! figure is comparable between runs.
 //!
-//! The pairing loop, [`paired_rounds`], does not know what a run is. A later `iris-bench irix` comparison can reuse them with its
+//! The pairing loops, [`concurrent_rounds`] and [`paired_rounds`], do not know
+//! what a run is. A later `iris-bench irix` comparison can reuse them with its
 //! own closure.
 
 use std::path::{Path, PathBuf};
@@ -79,8 +86,13 @@ impl Rng {
 #[derive(Debug, Serialize)]
 pub struct Round<T> {
     pub round: usize,
-    /// The order the sides ran in this round.
+    /// The order the sides ran in this round. Meaningless when `together`.
     pub order: [Side; 2],
+    /// A and B ran at the same time, on the cores in `cpus`.
+    pub together: bool,
+    /// Logical CPUs each side was pinned to, A then B; empty when unpinned or
+    /// pinned by `--pin`.
+    pub cpus: [Vec<usize>; 2],
     pub a: T,
     pub b: T,
 }
@@ -101,10 +113,342 @@ pub fn paired_rounds<T>(
             let t = f(side, round)?;
             match side { Side::A => a = Some(t), Side::B => b = Some(t) }
         }
-        out.push(Round { round, order, a: a.unwrap(), b: b.unwrap() });
+        out.push(Round { round, order, together: false, cpus: [vec![], vec![]], a: a.unwrap(), b: b.unwrap() });
     }
     Ok(out)
 }
+
+/// Run A and B at the same moment each round, A on the CPUs `place` gives
+/// first and B on the second, so both see the same host: whatever else is
+/// running slows both, and the per-round ratio cancels it. `place` is called
+/// once per round, so the cores, and which side gets which, can change. Stops
+/// at the first error, after both runs of that round have ended.
+pub fn concurrent_rounds<T: Send>(
+    rounds: usize,
+    rng: &mut Rng,
+    mut place: impl FnMut(&mut Rng) -> [Vec<usize>; 2],
+    f: impl Fn(Side, usize, &[usize]) -> Result<T, String> + Sync,
+    mut done: impl FnMut(&Round<T>),
+) -> Result<Vec<Round<T>>, String> {
+    let mut out = Vec::with_capacity(rounds);
+    for round in 1..=rounds {
+        let [ca, cb] = place(rng);
+        let (a, b) = std::thread::scope(|s| {
+            let ha = s.spawn(|| f(Side::A, round, &ca));
+            let hb = s.spawn(|| f(Side::B, round, &cb));
+            (ha.join().unwrap_or_else(|_| Err("run thread panicked".into())),
+             hb.join().unwrap_or_else(|_| Err("run thread panicked".into())))
+        });
+        let r = Round { round, order: [Side::A, Side::B], together: true, cpus: [ca, cb], a: a?, b: b? };
+        done(&r);
+        out.push(r);
+    }
+    Ok(out)
+}
+
+// ─── host topology ───────────────────────────────────────────────────────────
+//
+// Concurrent pairs need two sets of physical cores that share a last-level
+// cache, so that load from other processes on that cache, and on the memory
+// behind it, lands on both sides. Everything here is read at run time; nothing
+// knows about a particular machine. Off Linux nothing but the tests calls the
+// readers and the locks, so those carry an allow(dead_code) for other hosts.
+
+/// A physical core: the logical CPUs (SMT threads) that share it, those this
+/// process may run on first, each part ascending. A side is pinned to the first.
+pub type Core = Vec<usize>;
+
+/// A Linux CPU list ("0-6,112-118") as CPU numbers. `None` if malformed.
+pub fn parse_cpu_list(s: &str) -> Option<Vec<usize>> {
+    let mut out = Vec::new();
+    for part in s.trim().split(',').filter(|p| !p.is_empty()) {
+        match part.split_once('-') {
+            Some((a, b)) => {
+                let (a, b): (usize, usize) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
+                if b < a { return None; }
+                out.extend(a..=b);
+            }
+            None => out.push(part.trim().parse().ok()?),
+        }
+    }
+    Some(out)
+}
+
+pub fn format_cpu_list(cpus: &[usize]) -> String {
+    let mut v = cpus.to_vec();
+    v.sort_unstable();
+    v.dedup();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < v.len() {
+        let mut j = i;
+        while j + 1 < v.len() && v[j + 1] == v[j] + 1 { j += 1; }
+        out.push(if j > i { format!("{}-{}", v[i], v[j]) } else { v[i].to_string() });
+        i = j + 1;
+    }
+    out.join(",")
+}
+
+/// The cores that share one last-level cache.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Group {
+    /// The cache's `id` from sysfs, or its lowest CPU when there is none. It
+    /// names the group's lock file, so it must not depend on this process's
+    /// affinity.
+    pub id: usize,
+    pub cores: Vec<Core>,
+}
+
+/// The allowed logical CPUs grouped into physical cores, and the cores grouped
+/// by the last-level cache they share. `read` returns the contents of a file
+/// under `/sys/devices/system/cpu/`. The last level is the highest cache
+/// `level` a CPU lists; on a chiplet part that is the L3 of one CCD. Empty
+/// when the files are missing, which callers treat as "no topology".
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn llc_groups(allowed: &[usize], read: impl Fn(&str) -> Option<String>) -> Vec<Group> {
+    let mut groups: Vec<(Vec<usize>, Group)> = Vec::new();
+    for &c in allowed {
+        let Some(mut core) = read(&format!("cpu{c}/topology/thread_siblings_list")).and_then(|t| parse_cpu_list(&t))
+        else { return Vec::new() };
+        core.sort_by_key(|x| (!allowed.contains(x), *x));
+        let mut llc: Option<(u32, usize, Vec<usize>)> = None;
+        for i in 0..16 {
+            let Some(level) = read(&format!("cpu{c}/cache/index{i}/level")) else { break };
+            let Ok(level) = level.trim().parse::<u32>() else { continue };
+            let Some(shared) = read(&format!("cpu{c}/cache/index{i}/shared_cpu_list"))
+                .and_then(|t| parse_cpu_list(&t)) else { continue };
+            if llc.as_ref().is_none_or(|(l, _, _)| level > *l) { llc = Some((level, i, shared)); }
+        }
+        let Some((_, index, llc)) = llc else { return Vec::new() };
+        let g = match groups.iter_mut().position(|(k, _)| *k == llc) {
+            Some(i) => &mut groups[i].1,
+            None => {
+                let id = read(&format!("cpu{c}/cache/index{index}/id"))
+                    .and_then(|t| t.trim().parse().ok())
+                    .unwrap_or_else(|| llc.iter().copied().min().unwrap_or(c));
+                groups.push((llc, Group { id, cores: Vec::new() }));
+                &mut groups.last_mut().unwrap().1
+            }
+        };
+        if !g.cores.contains(&core) { g.cores.push(core); }
+    }
+    let mut out: Vec<Group> = groups.into_iter().map(|(_, mut g)| { g.cores.sort(); g }).collect();
+    out.sort_by(|a, b| a.cores.cmp(&b.cores));
+    out
+}
+
+/// Per-CPU (total, idle) jiffies from `/proc/stat` text.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn cpu_times(stat: &str) -> std::collections::HashMap<usize, (u64, u64)> {
+    stat.lines().filter_map(|l| {
+        let mut f = l.split_whitespace();
+        let cpu: usize = f.next()?.strip_prefix("cpu")?.parse().ok()?;
+        let v: Vec<u64> = f.filter_map(|x| x.parse().ok()).collect();
+        // user nice system idle iowait ...: idle and iowait are not busy.
+        (v.len() >= 5).then(|| (cpu, (v.iter().sum(), v[3] + v[4])))
+    }).collect()
+}
+
+/// How busy each CPU was between two `/proc/stat` readings, 0 to 1.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn busy_between(
+    a: &std::collections::HashMap<usize, (u64, u64)>,
+    b: &std::collections::HashMap<usize, (u64, u64)>,
+) -> std::collections::HashMap<usize, f64> {
+    b.iter().filter_map(|(c, (tb, ib))| {
+        let (ta, ia) = a.get(c)?;
+        let dt = tb.saturating_sub(*ta);
+        (dt > 0).then(|| (*c, 1.0 - ib.saturating_sub(*ia) as f64 / dt as f64))
+    }).collect()
+}
+
+/// A core is as busy as its busiest thread: another process on the sibling
+/// thread slows ours as much as one on our own.
+pub fn core_load(core: &Core, busy: &std::collections::HashMap<usize, f64>) -> f64 {
+    core.iter().map(|c| busy.get(c).copied().unwrap_or(0.0)).fold(0.0, f64::max)
+}
+
+/// How a concurrent run lays out its sides.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Layout {
+    /// The last-level-cache group the run uses.
+    pub group: Group,
+    /// Physical cores per side.
+    pub per_side: usize,
+}
+
+/// The groups a concurrent run could use, best first, with the cores per side.
+/// Two cores per side when some group has four, so the emulator's helper
+/// threads do not take turns with its CPU thread; else one; empty when no group
+/// has two cores. Groups are ranked by how busy their least busy cores are.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn rank_layouts(groups: &[Group], busy: &std::collections::HashMap<usize, f64>) -> Vec<Layout> {
+    let per_side = if groups.iter().any(|g| g.cores.len() >= 4) {
+        2
+    } else if groups.iter().any(|g| g.cores.len() >= 2) {
+        1
+    } else {
+        return Vec::new();
+    };
+    let cost = |g: &Group| -> f64 {
+        let mut l: Vec<f64> = g.cores.iter().map(|c| core_load(c, busy)).collect();
+        l.sort_by(|a, b| a.total_cmp(b));
+        l.iter().take(2 * per_side).sum()
+    };
+    let mut fit: Vec<&Group> = groups.iter().filter(|g| g.cores.len() >= 2 * per_side).collect();
+    fit.sort_by(|a, b| cost(a).total_cmp(&cost(b)));
+    fit.into_iter().map(|g| Layout { group: g.clone(), per_side }).collect()
+}
+
+/// This round's CPUs: the 2 x `per_side` least busy cores of the group, shuffled
+/// and split between A and B. Each side gets one logical CPU per core, the
+/// first, and never its SMT sibling.
+pub fn pick_sides(layout: &Layout, busy: &std::collections::HashMap<usize, f64>, rng: &mut Rng) -> [Vec<usize>; 2] {
+    let mut cores: Vec<&Core> = layout.group.cores.iter().collect();
+    cores.sort_by(|a, b| core_load(a, busy).total_cmp(&core_load(b, busy)));
+    let mut pick: Vec<usize> = cores.iter().take(2 * layout.per_side).map(|c| c[0]).collect();
+    for i in (1..pick.len()).rev() {
+        let j = (rng.next() >> 33) as usize % (i + 1);
+        pick.swap(i, j);
+    }
+    let b = pick.split_off(layout.per_side);
+    [pick, b]
+}
+
+#[cfg(target_os = "linux")]
+fn allowed_cpus() -> Vec<usize> {
+    // SAFETY: a zeroed cpu_set_t is a valid empty set, and the call only
+    // writes into it.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        if libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) != 0 {
+            return Vec::new();
+        }
+        (0..libc::CPU_SETSIZE as usize).filter(|&c| libc::CPU_ISSET(c, &set)).collect()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn sample_busy() -> std::collections::HashMap<usize, f64> {
+    let read = || std::fs::read_to_string("/proc/stat").map(|t| cpu_times(&t)).unwrap_or_default();
+    let a = read();
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    busy_between(&a, &read())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sample_busy() -> std::collections::HashMap<usize, f64> { Default::default() }
+
+/// Take the lock file `dir/slot-<id>.lock` without waiting. `None` when
+/// another process holds it. The lock is `flock`-style and is released when
+/// the file is closed, including when the process dies, so a crashed run
+/// leaves nothing to clean up.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn try_lock(dir: &Path, id: usize) -> Result<Option<std::fs::File>, String> {
+    let path = dir.join(format!("slot-{id}.lock"));
+    // Read-only when it exists: a lock file another user created is still
+    // lockable, and opening it never truncates it.
+    let f = std::fs::File::open(&path)
+        .or_else(|_| std::fs::OpenOptions::new().append(true).create(true).open(&path))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    match f.try_lock() {
+        Ok(()) => Ok(Some(f)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// A cache group held for the whole run. Another `ab` using the same lock
+/// directory skips it, so two runs started together never share a group.
+pub struct Held {
+    pub layout: Layout,
+    _lock: std::fs::File,
+}
+
+/// Lock the best group whose lock is free, as [`rank_layouts`] orders them.
+/// `Ok(None)` when every group that fits is held.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn hold_best(layouts: Vec<Layout>, dir: &Path) -> Result<Option<Held>, String> {
+    for layout in layouts {
+        if let Some(lock) = try_lock(dir, layout.group.id)? {
+            return Ok(Some(Held { layout, _lock: lock }));
+        }
+    }
+    Ok(None)
+}
+
+/// Why there is no concurrent layout.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub enum NoLayout {
+    /// Run sequentially instead, and say why.
+    Fallback(String),
+    /// Stop: the host has groups, but none came free in time.
+    Fatal(String),
+}
+
+/// The concurrent layout for this host, with its group locked under `lock_dir`.
+/// Waits up to `wait_s` seconds for a group when all are held.
+#[cfg(target_os = "linux")]
+fn host_layout(lock_dir: &Path, wait_s: u64) -> Result<Held, NoLayout> {
+    let groups = llc_groups(&allowed_cpus(), |p| std::fs::read_to_string(format!("/sys/devices/system/cpu/{p}")).ok());
+    if groups.is_empty() {
+        return Err(NoLayout::Fallback("no CPU or cache topology under /sys/devices/system/cpu".into()));
+    }
+    std::fs::create_dir_all(lock_dir).map_err(|e| NoLayout::Fatal(format!("{}: {e}", lock_dir.display())))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_s);
+    let mut said = false;
+    loop {
+        let layouts = rank_layouts(&groups, &sample_busy());
+        if layouts.is_empty() {
+            return Err(NoLayout::Fallback("no two physical cores share a last-level cache".into()));
+        }
+        if let Some(h) = hold_best(layouts, lock_dir).map_err(NoLayout::Fatal)? {
+            return Ok(h);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(NoLayout::Fatal(format!(
+                "every cache group that fits is held by another run (locks in {}); waited {wait_s}s",
+                lock_dir.display())));
+        }
+        if !said {
+            println!("waiting for a free cache group: all are held (locks in {})", lock_dir.display());
+            said = true;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn host_layout(_lock_dir: &Path, _wait_s: u64) -> Result<Held, NoLayout> {
+    Err(NoLayout::Fallback("CPU pinning and topology are read on Linux only".into()))
+}
+
+/// Pin the command's process to `cpus` before it runs. Linux only; a no-op
+/// for an empty list.
+#[cfg(target_os = "linux")]
+fn pin(cmd: &mut Command, cpus: &[usize]) {
+    use std::os::unix::process::CommandExt;
+    if cpus.is_empty() { return; }
+    // SAFETY: as in allowed_cpus; the set is built before the fork.
+    let set = unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        for &c in cpus { libc::CPU_SET(c, &mut set); }
+        set
+    };
+    // SAFETY: sched_setaffinity is a plain system call, safe between fork and
+    // exec. The pinning is inherited by perf and the emulator it starts.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pin(_cmd: &mut Command, _cpus: &[usize]) {}
 
 // ─── the guest's run settings ────────────────────────────────────────────────
 
@@ -220,7 +564,7 @@ struct Ctx {
     scratch: PathBuf,
 }
 
-fn run_once(bin: &Path, ctx: &Ctx, tag: &str) -> Result<Sample, String> {
+fn run_once(bin: &Path, ctx: &Ctx, tag: &str, cpus: &[usize]) -> Result<Sample, String> {
     let mut argv: Vec<std::ffi::OsString> = Vec::new();
     let perf_out = ctx.scratch.join(format!("{tag}.perf"));
     if ctx.perf {
@@ -239,6 +583,7 @@ fn run_once(bin: &Path, ctx: &Ctx, tag: &str) -> Result<Sample, String> {
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(&ctx.cwd);
+    pin(&mut cmd, cpus);
     let started = std::time::Instant::now();
     let out = super::run_with_timeout(cmd, ctx.timeout)?;
     let wall_s = started.elapsed().as_secs_f64();
@@ -461,6 +806,15 @@ pub struct AbArgs {
     /// Timed runs per kernel; the guest keeps the fastest.
     #[arg(long, default_value_t = 3)]
     repeats: u32,
+    /// Run A and B one at a time, in a random order each round, instead of
+    /// together. Implied by --pin, and the fallback when the host's CPU
+    /// topology cannot be read.
+    #[arg(long)]
+    sequential: bool,
+    /// Run every process on these host CPUs, as a list ("8-14"), one at a
+    /// time. Linux only. Keep them free of SMT siblings.
+    #[arg(long)]
+    pin: Option<String>,
     /// Emulated CPU, forwarded to the emulator as `--cpu`.
     #[arg(long)]
     cpu: Option<String>,
@@ -469,7 +823,7 @@ pub struct AbArgs {
     label_a: String,
     #[arg(long, default_value = "B")]
     label_b: String,
-    /// Seed for the A/B order. Default: from the clock.
+    /// Seed for the A/B order and core choice. Default: from the clock.
     /// Recorded in the JSON.
     #[arg(long)]
     seed: Option<u64>,
@@ -482,6 +836,13 @@ pub struct AbArgs {
     /// Do not use perf even if it works.
     #[arg(long)]
     no_perf: bool,
+    /// Directory of the per-cache-group lock files (`slot-<cache id>.lock`).
+    /// A concurrent run holds its group's lock throughout, and skips or waits
+    /// for groups another run holds, so runs that share this directory never
+    /// share a group. Default: `iris-bench-ab` in the system temporary
+    /// directory.
+    #[arg(long)]
+    lock_dir: Option<PathBuf>,
     /// Extra arguments passed to both emulators.
     #[arg(last = true)]
     extra: Vec<String>,
@@ -498,6 +859,8 @@ struct Report<'a> {
     /// Run settings written into the image, `None` when it could not be.
     time_pct: Option<u32>,
     repeats: Option<u32>,
+    mode: &'a str,
+    pin: &'a Option<String>,
     cpu: &'a Option<String>,
     perf: bool,
     seed: u64,
@@ -514,6 +877,12 @@ struct Side_<'a> {
 
 pub fn run(args: AbArgs) -> Result<(), String> {
     if args.rounds == 0 { return Err("--rounds must be at least 1".into()); }
+    let pin_list = match &args.pin {
+        Some(_) if !cfg!(target_os = "linux") => return Err("--pin is Linux only".into()),
+        Some(p) => Some(parse_cpu_list(p).filter(|v| !v.is_empty())
+            .ok_or_else(|| format!("--pin {p}: not a CPU list"))?),
+        None => None,
+    };
     for (what, p) in [("A", &args.a), ("B", &args.b)] {
         if !p.exists() { return Err(format!("no emulator for {what} at {}", p.display())); }
     }
@@ -552,6 +921,34 @@ pub fn run(args: AbArgs) -> Result<(), String> {
         timeout: args.timeout, extra, scratch: out.clone(),
     };
 
+    let lock_dir = args.lock_dir.clone().unwrap_or_else(|| std::env::temp_dir().join("iris-bench-ab"));
+    let held = if args.sequential {
+        Err("--sequential".to_string())
+    } else if args.pin.is_some() {
+        Err("--pin".to_string())
+    } else {
+        match host_layout(&lock_dir, args.timeout) {
+            Ok(h) => Ok(h),
+            Err(NoLayout::Fallback(why)) => Err(why),
+            Err(NoLayout::Fatal(why)) => return Err(why),
+        }
+    };
+    let layout = held.as_ref().map(|h| &h.layout);
+    let mode = match &layout {
+        Ok(l) => {
+            let cpus: Vec<usize> = l.group.cores.iter().flatten().copied().collect();
+            format!("concurrent pairs: A and B start together, each on {} physical core(s), one \
+                     thread per core, from the {} cores sharing a last-level cache (CPUs {}, cache id {}, locked in {}). \
+                     The least busy cores are picked again each round and given to the sides at random.",
+                    l.per_side, l.group.cores.len(), format_cpu_list(&cpus), l.group.id, lock_dir.display())
+        }
+        Err(why) => format!("sequential interleaving, one run at a time in a random order each \
+                             round ({why}){}", match &args.pin {
+            Some(p) => format!(", pinned to CPUs {p}"),
+            None => String::new(),
+        }),
+    };
+
     let seed = args.seed.unwrap_or_else(|| {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64).unwrap_or(1)
@@ -562,17 +959,32 @@ pub fn run(args: AbArgs) -> Result<(), String> {
     };
     println!("A/B: {} = {}\n     {} = {}", args.label_a, bin_a.display(), args.label_b, bin_b.display());
     println!("guest image: {suite_id} from {elf_source}, run with {run_cfg} ({})", elf.display());
+    println!("mode: {mode}");
     println!("rounds {}, perf {}", args.rounds, if perf { "on" } else { "off" });
 
     let mut rng = Rng::new(seed);
     let mips = |s: &Sample| s.total_icount as f64 * 1e3 / s.total_ns.max(1) as f64;
     let label = |side: Side| match side { Side::A => (&bin_a, &args.label_a), Side::B => (&bin_b, &args.label_b) };
-    let rounds = paired_rounds(args.rounds, &mut rng, |side, round| {
-        let (bin, lab) = label(side);
-        let s = run_once(bin, &ctx, &format!("{stem}-r{round}-{lab}"))?;
-        println!("round {round}/{} {lab}: {:.1} MIPS, {:.0}s", args.rounds, mips(&s), s.wall_s);
-        Ok(s)
-    })?;
+    let rounds = match &layout {
+        Ok(l) => {
+            let cost = |s: &Sample| s.total_ns as f64 / s.total_icount.max(1) as f64;
+            concurrent_rounds(args.rounds, &mut rng, |rng| pick_sides(l, &sample_busy(), rng),
+                |side, round, cpus| {
+                    let (bin, lab) = label(side);
+                    run_once(bin, &ctx, &format!("{stem}-r{round}-{lab}"), cpus)
+                },
+                |r| println!("round {}/{}: {} {:.1} MIPS on CPUs {}, {} {:.1} MIPS on CPUs {}, suite B/A {}, {:.0}s",
+                             r.round, args.rounds, args.label_a, mips(&r.a), format_cpu_list(&r.cpus[0]),
+                             args.label_b, mips(&r.b), format_cpu_list(&r.cpus[1]),
+                             pct(cost(&r.b) / cost(&r.a)), r.a.wall_s.max(r.b.wall_s)))?
+        }
+        Err(_) => paired_rounds(args.rounds, &mut rng, |side, round| {
+            let (bin, lab) = label(side);
+            let s = run_once(bin, &ctx, &format!("{stem}-r{round}-{lab}"), pin_list.as_deref().unwrap_or(&[]))?;
+            println!("round {round}/{} {lab}: {:.1} MIPS, {:.0}s", args.rounds, mips(&s), s.wall_s);
+            Ok(s)
+        })?,
+    };
 
     let summary = summarise(&rounds);
     let text = table(&summary, &args.label_a, &args.label_b);
@@ -585,6 +997,8 @@ pub fn run(args: AbArgs) -> Result<(), String> {
         elf_source,
         time_pct: settings.map(|s| s.0),
         repeats: settings.map(|s| s.1),
+        mode: &mode,
+        pin: &args.pin,
         cpu: &args.cpu,
         perf,
         seed,
@@ -596,7 +1010,7 @@ pub fn run(args: AbArgs) -> Result<(), String> {
     let md_path = out.join(format!("{stem}.md"));
     std::fs::write(&json_path, serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?)
         .map_err(|e| format!("{}: {e}", json_path.display()))?;
-    let header = format!("guest image {suite_id} (from {elf_source}, {run_cfg}), {} rounds\n\n",
+    let header = format!("guest image {suite_id} (from {elf_source}, {run_cfg}), {} rounds\n\nMode: {mode}\n\n",
                          args.rounds);
     std::fs::write(&md_path, format!("{header}{text}"))
         .map_err(|e| format!("{}: {e}", md_path.display()))?;
@@ -676,7 +1090,7 @@ mod tests {
 
     fn rounds_of(a: &[f64], b: &[f64]) -> Vec<Round<Sample>> {
         a.iter().zip(b).enumerate().map(|(i, (a, b))| Round {
-            round: i + 1, order: [Side::A, Side::B],
+            round: i + 1, order: [Side::A, Side::B], together: false, cpus: [vec![], vec![]],
             a: sample(*a, Some(1_000_000)), b: sample(*b, Some(1_100_000)),
         }).collect()
     }
@@ -716,6 +1130,206 @@ mod tests {
         let s = summarise(&r);
         assert!(s.host.is_none());
         assert!(table(&s, "A", "B").contains("perf unavailable"));
+    }
+
+    #[test]
+    fn concurrent_rounds_run_both_sides_together_on_their_cpus() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (active, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let mut rng = Rng::new(3);
+        let mut seen = 0;
+        let rounds = concurrent_rounds(4, &mut rng, |_| [vec![1, 2], vec![3, 4]], |side, _, cpus| {
+            let n = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(n, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            active.fetch_sub(1, Ordering::SeqCst);
+            Ok((side, cpus.to_vec()))
+        }, |_| seen += 1).unwrap();
+        assert_eq!(seen, 4);
+        assert_eq!(peak.load(Ordering::SeqCst), 2, "the two sides did not overlap");
+        for r in &rounds {
+            assert!(r.together);
+            assert_eq!(r.a, (Side::A, vec![1, 2]));
+            assert_eq!(r.b, (Side::B, vec![3, 4]));
+        }
+        let e = concurrent_rounds(3, &mut rng, |_| [vec![], vec![]], |side, round, _| {
+            if round == 2 && side == Side::B { Err("crashed".to_string()) } else { Ok(()) }
+        }, |_| {}).unwrap_err();
+        assert_eq!(e, "crashed");
+    }
+
+    #[test]
+    fn cpu_lists_parse_and_print() {
+        assert_eq!(parse_cpu_list("0-2,112-113\n"), Some(vec![0, 1, 2, 112, 113]));
+        assert_eq!(parse_cpu_list("5"), Some(vec![5]));
+        assert_eq!(parse_cpu_list("3-1"), None);
+        assert_eq!(parse_cpu_list("x"), None);
+        assert_eq!(format_cpu_list(&[3, 0, 1, 2, 7, 9, 8]), "0-3,7-9");
+        assert_eq!(format_cpu_list(&[4]), "4");
+    }
+
+    /// sysfs for `ccds` chiplets of `cores` cores each, two SMT threads per core
+    /// numbered like Linux on x86 (sibling = cpu + total cores), an L3 per
+    /// chiplet with cache id 10 + chiplet, private L1 and L2.
+    fn fake_sysfs(ccds: usize, cores: usize) -> impl Fn(&str) -> Option<String> {
+        let n = ccds * cores;
+        move |p: &str| {
+            let cpu: usize = p.strip_prefix("cpu")?.split('/').next()?.parse().ok()?;
+            let core = cpu % n;
+            let ccd = core / cores;
+            if p.ends_with("thread_siblings_list") { return Some(format!("{},{}\n", core, core + n)); }
+            let idx: usize = p.split("/index").nth(1)?.split('/').next()?.parse().ok()?;
+            let level = [1, 1, 2, 3].get(idx)?;
+            if p.ends_with("/level") { return Some(format!("{level}\n")); }
+            if p.ends_with("/id") { return Some(format!("{}\n", if *level == 3 { 10 + ccd } else { core })); }
+            Some(if *level == 3 {
+                format!("{}-{},{}-{}\n", ccd * cores, ccd * cores + cores - 1, n + ccd * cores, n + ccd * cores + cores - 1)
+            } else {
+                format!("{},{}\n", core, core + n)
+            })
+        }
+    }
+
+    /// A part with no L3: an L2 shared by each pair of cores, one thread per
+    /// core, and no cache `id` files (older kernels).
+    fn fake_sysfs_l2_pairs(cpus: usize) -> impl Fn(&str) -> Option<String> {
+        move |p: &str| {
+            let cpu: usize = p.strip_prefix("cpu")?.split('/').next()?.parse().ok()?;
+            if cpu >= cpus { return None; }
+            if p.ends_with("thread_siblings_list") { return Some(format!("{cpu}\n")); }
+            let idx: usize = p.split("/index").nth(1)?.split('/').next()?.parse().ok()?;
+            let level = [1, 1, 2].get(idx)?;
+            if p.ends_with("/level") { return Some(format!("{level}\n")); }
+            if p.ends_with("/id") { return None; }
+            let pair = cpu & !1;
+            Some(if *level == 2 { format!("{}-{}\n", pair, pair + 1) } else { format!("{cpu}\n") })
+        }
+    }
+
+    fn cores(g: &[Group]) -> Vec<Vec<Core>> { g.iter().map(|g| g.cores.clone()).collect() }
+
+    #[test]
+    fn cores_are_grouped_by_the_cache_they_share() {
+        let all: Vec<usize> = (0..16).collect();
+        let g = llc_groups(&all, fake_sysfs(2, 4));
+        assert_eq!(cores(&g), vec![
+            vec![vec![0, 8], vec![1, 9], vec![2, 10], vec![3, 11]],
+            vec![vec![4, 12], vec![5, 13], vec![6, 14], vec![7, 15]],
+        ]);
+        assert_eq!(g.iter().map(|g| g.id).collect::<Vec<_>>(), vec![10, 11]);
+        // Only some CPUs allowed (a cgroup or taskset): only their cores count,
+        // and the groups keep their cache ids.
+        let g = llc_groups(&[1, 2, 9, 5], fake_sysfs(2, 4));
+        assert_eq!(cores(&g), vec![vec![vec![1, 9], vec![2, 10]], vec![vec![5, 13]]]);
+        assert_eq!(g.iter().map(|g| g.id).collect::<Vec<_>>(), vec![10, 11]);
+        let g = llc_groups(&[5, 6], fake_sysfs(2, 4));
+        assert_eq!(g.iter().map(|g| g.id).collect::<Vec<_>>(), vec![11]);
+        // Only the second thread of a core allowed: that is the one to pin to.
+        assert_eq!(cores(&llc_groups(&[9], fake_sysfs(2, 4))), vec![vec![vec![9, 1]]]);
+        // No topology files at all.
+        assert!(llc_groups(&all, |_| None).is_empty());
+        // A sibling list but no caches.
+        assert!(llc_groups(&[0], |p| p.ends_with("thread_siblings_list").then(|| "0\n".to_string())).is_empty());
+    }
+
+    #[test]
+    fn without_an_l3_the_highest_shared_level_groups_the_cores() {
+        let g = llc_groups(&(0..6).collect::<Vec<_>>(), fake_sysfs_l2_pairs(6));
+        assert_eq!(cores(&g), vec![vec![vec![0], vec![1]], vec![vec![2], vec![3]], vec![vec![4], vec![5]]]);
+        // No `id` file: the group is named by its lowest CPU.
+        assert_eq!(g.iter().map(|g| g.id).collect::<Vec<_>>(), vec![0, 2, 4]);
+        // Pairs: one core a side.
+        assert_eq!(rank_layouts(&g, &busy(&[]))[0].per_side, 1);
+    }
+
+    fn busy(v: &[(usize, f64)]) -> std::collections::HashMap<usize, f64> { v.iter().copied().collect() }
+
+    #[test]
+    fn the_layout_takes_two_cores_a_side_from_the_quietest_group() {
+        let g = llc_groups(&(0..16).collect::<Vec<_>>(), fake_sysfs(2, 4));
+        // The first group's sibling threads are busy: the second is quieter.
+        let b = busy(&[(8, 1.0), (9, 1.0), (10, 0.5)]);
+        let l = rank_layouts(&g, &b);
+        assert_eq!(l.iter().map(|l| (l.per_side, l.group.id)).collect::<Vec<_>>(), vec![(2, 11), (2, 10)]);
+        // Groups of two or three cores: one core a side.
+        let g = llc_groups(&(0..12).collect::<Vec<_>>(), fake_sysfs(2, 3));
+        assert_eq!(rank_layouts(&g, &busy(&[]))[0].per_side, 1);
+        // A group too small for two a side is not offered when another fits.
+        let mut g = llc_groups(&(0..16).collect::<Vec<_>>(), fake_sysfs(2, 4));
+        g[1].cores.truncate(3);
+        assert_eq!(rank_layouts(&g, &busy(&[])).iter().map(|l| l.group.id).collect::<Vec<_>>(), vec![10]);
+        // No group with two cores: no concurrent layout.
+        let g = llc_groups(&(0..4).collect::<Vec<_>>(), fake_sysfs(2, 1));
+        assert!(rank_layouts(&g, &busy(&[])).is_empty());
+    }
+
+    #[test]
+    fn sides_get_the_least_busy_cores_and_no_siblings() {
+        let g = llc_groups(&(0..16).collect::<Vec<_>>(), fake_sysfs(1, 8));
+        let l = rank_layouts(&g, &busy(&[])).remove(0);
+        // Cores 0 and 5 are busy, 3 is busy through its sibling 11.
+        let b = busy(&[(0, 0.9), (5, 0.8), (11, 0.7)]);
+        let mut rng = Rng::new(9);
+        let mut a_got_1 = 0;
+        for _ in 0..40 {
+            let [a, bb] = pick_sides(&l, &b, &mut rng);
+            assert_eq!((a.len(), bb.len()), (2, 2));
+            let mut all: Vec<usize> = a.iter().chain(&bb).copied().collect();
+            all.sort();
+            assert_eq!(all, vec![1, 2, 4, 6]);
+            if a.contains(&1) { a_got_1 += 1; }
+        }
+        assert!((10..=30).contains(&a_got_1), "sides are not shuffled: {a_got_1}/40");
+    }
+
+    /// A lock directory of its own per test: tests run in parallel threads of
+    /// one process.
+    fn lock_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("iris-bench-ab-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn two_runs_never_hold_the_same_group() {
+        let dir = lock_dir("two-runs");
+        let g = llc_groups(&(0..16).collect::<Vec<_>>(), fake_sysfs(2, 4));
+        let first = hold_best(rank_layouts(&g, &busy(&[])), &dir).unwrap().unwrap();
+        // The second run ranks the groups the same way, finds the best one
+        // held, and takes the other.
+        let second = hold_best(rank_layouts(&g, &busy(&[])), &dir).unwrap().unwrap();
+        assert_ne!(first.layout.group.id, second.layout.group.id);
+        // A third finds nothing free.
+        assert!(hold_best(rank_layouts(&g, &busy(&[])), &dir).unwrap().is_none());
+        // Ending the first run frees its group.
+        let freed = first.layout.group.id;
+        drop(first);
+        let third = hold_best(rank_layouts(&g, &busy(&[])), &dir).unwrap().unwrap();
+        assert_eq!(third.layout.group.id, freed);
+        drop((second, third));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_lock_file_left_behind_is_free_and_kept() {
+        let dir = lock_dir("left-behind");
+        std::fs::write(dir.join("slot-3.lock"), b"note from another tool\n").unwrap();
+        let l = try_lock(&dir, 3).unwrap();
+        assert!(l.is_some());
+        assert!(try_lock(&dir, 3).unwrap().is_none());
+        drop(l);
+        assert_eq!(std::fs::read(dir.join("slot-3.lock")).unwrap(), b"note from another tool\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn proc_stat_gives_per_cpu_busy() {
+        let a = cpu_times("cpu  1 2 3 4 5\ncpu0 100 0 0 100 0 0 0\ncpu1 0 0 0 200 0\nintr 5\n");
+        let b = cpu_times("cpu0 150 0 0 150 0 0 0\ncpu1 0 0 10 290 0\n");
+        let v = busy_between(&a, &b);
+        assert!((v[&0] - 0.5).abs() < 1e-9 && (v[&1] - 0.1).abs() < 1e-9, "{v:?}");
+        assert!(!v.contains_key(&2));
     }
 
     #[test]

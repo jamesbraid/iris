@@ -859,9 +859,10 @@ enum Cmd {
 
     /// Compare two emulator builds with paired runs.
     ///
-    /// Runs the same guest image under A and B, one at a time in shuffled
-    /// order, for N rounds, and reports each kernel's median and best rate
-    /// on each side and the B/A cost ratios.
+    /// Runs the same guest image under A and B for N rounds, at the same
+    /// time on cores that share a cache where the host's topology allows,
+    /// else one at a time in shuffled order, and reports each kernel's
+    /// median and best rate on each side and the B/A cost ratios.
     Ab(ab::AbArgs),
 }
 
