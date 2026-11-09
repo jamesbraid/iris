@@ -605,6 +605,58 @@ pub fn set_image_defaults(elf: &mut [u8], vals: &[(&str, u32)]) -> Result<(), St
     Ok(())
 }
 
+// ─── which builds may be compared ────────────────────────────────────────────
+
+/// The features in an `iris` binary's `build features:` startup line, or
+/// `None` when the output has no such line. Unlike
+/// [`iris::bench_report::parse_features`] this tells "built with none" from
+/// "did not say".
+pub fn banner_features(stderr: &str) -> Option<Vec<String>> {
+    stderr.lines().find_map(|l| l.strip_prefix("iris: build features: ")).map(|rest| match rest.trim() {
+        "(none)" => Vec::new(),
+        r => r.split_whitespace().map(str::to_string).collect(),
+    })
+}
+
+/// Read a binary's build features by running it with `--help`, which prints
+/// the startup line and exits before a machine is built.
+fn probe_features(bin: &Path) -> Result<Option<Vec<String>>, String> {
+    let mut cmd = Command::new(bin);
+    cmd.arg("--help");
+    let out = super::run_with_timeout(cmd, 60).map_err(|e| format!("{}: {e}", bin.display()))?;
+    Ok(banner_features(&String::from_utf8_lossy(&out.stderr)))
+}
+
+/// Whether A and B, with these build features, may be timed against each
+/// other.
+///
+/// A `ci_clock` build is refused outright: there the test device's clock
+/// counts retired guest instructions instead of host time, so the suite's
+/// timings describe the guest, not the host, and every ratio would read as no
+/// change. Builds with different features differ in more than the change under
+/// test (`idle-pause` alone moves the suite's speed), so they are refused
+/// unless `allow` is set, and then the difference is printed. A binary that
+/// prints no feature line cannot be checked, and is treated as a mismatch.
+pub fn check_builds(a: Option<&[String]>, b: Option<&[String]>, allow: bool) -> Result<Option<String>, String> {
+    for (side, f) in [("A", a), ("B", b)] {
+        if f.is_some_and(|f| f.iter().any(|x| x == "ci_clock")) {
+            return Err(format!("{side} is a ci_clock build. Its guest clock counts instructions, \
+                                not host time, so it cannot be timed; build it without ci_clock"));
+        }
+    }
+    let show = |f: Option<&[String]>| f.map_or("(no build features line)".to_string(), |f| {
+        if f.is_empty() { "(none)".to_string() } else { f.join(" ") }
+    });
+    if a.is_some() && a == b {
+        return Ok(None);
+    }
+    let diff = format!("A has features {}, B has {}", show(a), show(b));
+    if allow { Ok(Some(diff)) } else {
+        Err(format!("{diff}. Builds with different features differ in more than the change \
+                     under test; build both alike, or pass --allow-feature-mismatch"))
+    }
+}
+
 // ─── one run ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -1041,6 +1093,11 @@ pub struct AbArgs {
     /// Do not use perf even if it works.
     #[arg(long)]
     no_perf: bool,
+    /// Compare builds whose `build features:` lines differ, or that print
+    /// none. Refused by default, since the result then measures the features
+    /// as well as the change.
+    #[arg(long)]
+    allow_feature_mismatch: bool,
     /// Directory of the per-cache-group lock files (`slot-<cache id>.lock`).
     /// A concurrent run holds its group's lock throughout, and skips or waits
     /// for groups another run holds, so runs that share this directory never
@@ -1135,6 +1192,11 @@ pub fn run(args: AbArgs) -> Result<(), String> {
         elf: elf.clone(), config, cwd, expect: settings, perf,
         timeout: args.timeout, extra, scratch: out.clone(),
     };
+
+    let (fa, fb) = (probe_features(&bin_a)?, probe_features(&bin_b)?);
+    if let Some(diff) = check_builds(fa.as_deref(), fb.as_deref(), args.allow_feature_mismatch)? {
+        println!("note: {diff}; comparing anyway (--allow-feature-mismatch)");
+    }
 
     let lock_dir = args.lock_dir.clone().unwrap_or_else(|| std::env::temp_dir().join("iris-bench-ab"));
     let held = if args.sequential {
@@ -1715,5 +1777,32 @@ mod tests {
         assert!(set_image_defaults(&mut img, &[("no_such_symbol", 1)]).is_err());
         assert!(set_image_defaults(&mut b"not an elf at all, not an elf at all, not an elf at all".to_vec(),
                                    &[("bench_repeats", 3)]).is_err());
+    }
+
+    #[test]
+    fn the_features_line_is_read_and_its_absence_noticed() {
+        assert_eq!(banner_features("x\niris: build features: lightning idle-pause\nSGI Indy\n"),
+                   Some(vec!["lightning".to_string(), "idle-pause".to_string()]));
+        assert_eq!(banner_features("iris: build features: (none)\n"), Some(vec![]));
+        assert_eq!(banner_features("usage: iris [OPTIONS]\n"), None);
+    }
+
+    #[test]
+    fn mismatched_and_ci_clock_builds_are_refused() {
+        let f = |s: &str| -> Vec<String> { s.split_whitespace().map(str::to_string).collect() };
+        let (light, pause) = (f("lightning"), f("lightning idle-pause"));
+        assert_eq!(check_builds(Some(&light[..]), Some(&light[..]), false), Ok(None));
+        assert_eq!(check_builds(Some(&[][..]), Some(&[][..]), false), Ok(None));
+        let e = check_builds(Some(&light[..]), Some(&pause[..]), false).unwrap_err();
+        assert!(e.contains("--allow-feature-mismatch"), "{e}");
+        let note = check_builds(Some(&light[..]), Some(&pause[..]), true).unwrap().unwrap();
+        assert!(note.contains("idle-pause"), "{note}");
+        // No features line: cannot tell, so not the same.
+        assert!(check_builds(None, None, false).is_err());
+        assert!(check_builds(Some(&light[..]), None, true).unwrap().is_some());
+        // ci_clock is refused even when both sides have it and mismatches are allowed.
+        let ci = f("lightning ci_clock");
+        let e = check_builds(Some(&ci[..]), Some(&ci[..]), true).unwrap_err();
+        assert!(e.contains("ci_clock"), "{e}");
     }
 }
