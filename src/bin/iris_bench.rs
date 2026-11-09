@@ -1071,6 +1071,12 @@ fn run_steps(guest: &impl Guest, steps: &[Step], baseline: f64, shots: &Shots)
     Ok((rows, total_ns))
 }
 
+/// Steps that ran cleanly, failed and were skipped.
+fn step_outcomes(run: &Run) -> (usize, usize, usize) {
+    let count = |s: &str| run.rows.iter().filter(|r| r.status == s).count();
+    (count("UNCHECKED"), count("FAILED"), count("SKIP"))
+}
+
 /// Prints the guest's `uname -a` after a marker. The tty echoes the typed
 /// command line ahead of the output, and a line of that echo can run into the
 /// start of the real output. Searching for "IRIX" then picked up shell input.
@@ -1516,6 +1522,10 @@ enum Cmd {
         /// steps that type keys.
         #[arg(long)]
         monitor: Option<String>,
+        /// Exit nonzero when any step failed, after saving the result. A
+        /// skipped step is not a failure.
+        #[arg(long)]
+        strict: bool,
     },
 
     /// Print a screenshot's signature, the form a step's `golden` takes.
@@ -1711,7 +1721,7 @@ fn dispatch(cmd: Cmd) -> Result<(), String> {
             Ok(())
         }
 
-        Cmd::Irix { socket, steps, extra_steps, ci, shell, label, out, timeout, shots, monitor } => {
+        Cmd::Irix { socket, steps, extra_steps, ci, shell, label, out, timeout, shots, monitor, strict } => {
             let ci_bin = ci.unwrap_or_else(|| repo_relative(
                 if cfg!(windows) { "target/release/iris-ci.exe" } else { "target/release/iris-ci" }));
             if !ci_bin.exists() {
@@ -1725,6 +1735,11 @@ fn dispatch(cmd: Cmd) -> Result<(), String> {
             let run = run_irix(&ci, &steps, &extra_steps, &label, &shots)?;
             let path = save(&run, &out)?;
             println!("wrote {}", path.display());
+            let (ok, failed, skipped) = step_outcomes(&run);
+            println!("{}: {} ok, {} failed, {} skipped", label, ok, failed, skipped);
+            if strict && failed > 0 {
+                return Err(format!("{} of {} steps failed", failed, run.rows.len()));
+            }
             Ok(())
         }
 
@@ -2053,6 +2068,16 @@ mod tests {
         let (rows, _) = run_steps(&g, &[s], 0.0, &no_shots()).unwrap();
         assert_eq!(rows[0].status, "SKIP");
         assert!(!g.log.borrow().iter().any(|c| c.starts_with("shot")));
+    }
+
+    #[test]
+    fn outcomes_count_ok_failed_and_skipped_steps() {
+        let mut g = FakeGuest::new();
+        g.failing = vec!["bad"];
+        let steps = [step("a", "ok", None), step("b", "bad", None), step("c", "x", Some("absent"))];
+        let (rows, _) = run_steps(&g, &steps, 0.0, &no_shots()).unwrap();
+        let run = Run { rows, ..guest_run("t") };
+        assert_eq!(step_outcomes(&run), (1, 1, 1));
     }
 
     #[test]
