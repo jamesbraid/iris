@@ -199,6 +199,7 @@ pub mod ip22_bus;
 pub mod monitor;
 pub mod locks;
 pub mod net;
+pub mod accept;
 pub mod bench_report;
 pub mod benchsuite;
 pub mod bench_runner;
