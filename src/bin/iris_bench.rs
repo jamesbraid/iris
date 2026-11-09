@@ -396,6 +396,12 @@ fn keep_tail(s: &str, max: usize) -> String {
     format!("[{} bytes cut]\n{}", at, &s[at..])
 }
 
+/// Longest command line the guest's tty takes. IRIX cuts a line at 256
+/// characters, and what is left reaches the shell as a command that fails
+/// with "Unmatched '" (or runs a truncated one). Measured on IRIX 6.5.22: a
+/// 255-character line runs and a 256-character one does not.
+const MAX_COMMAND_LINE: usize = 255;
+
 /// Fail a steps file up front for a mistake that would otherwise surface
 /// halfway through a long run, or as a confusing quoting error in the guest.
 fn check_steps(steps: &[Step]) -> Result<(), String> {
@@ -407,6 +413,18 @@ fn check_steps(steps: &[Step]) -> Result<(), String> {
         if texts.iter().flatten().any(|t| t.contains('\'')) {
             return Err(format!(
                 "step {}: a single quote would end the sh -c '...' wrapper early", s.name));
+        }
+        let lines = [
+            ("command", Some(wrap(&s.cmd))),
+            ("setup", s.setup.as_ref().map(|t| wrap(t))),
+            ("requires probe", s.requires.as_ref().map(|r| wrap(&probe_command(r)))),
+        ];
+        for (what, line) in lines {
+            if let Some(n) = line.map(|l| l.len()).filter(|&n| n > MAX_COMMAND_LINE) {
+                return Err(format!(
+                    "step {}: the {} is {} characters once wrapped, over the {} the guest's \
+                     tty accepts on one line", s.name, what, n, MAX_COMMAND_LINE));
+            }
         }
     }
     Ok(())
@@ -1803,6 +1821,18 @@ mod tests {
         let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/irix/steps.toml");
         let steps = load_steps(&p).unwrap_or_else(|e| panic!("{e}"));
         assert!(!steps.is_empty());
+    }
+
+    #[test]
+    fn a_command_the_guests_tty_would_cut_is_refused() {
+        // A wrapped line is 12 + IRIX_PATH + 15 + command + 1 characters.
+        let room = MAX_COMMAND_LINE - wrap("").len();
+        assert!(check_steps(&[step("a", &"x".repeat(room), None)]).is_ok());
+        let e = check_steps(&[step("a", &"x".repeat(room + 1), None)]).unwrap_err();
+        assert!(e.contains("256 characters once wrapped"), "{e}");
+        let mut s = step("b", "ok", None);
+        s.setup = Some("y".repeat(room + 1));
+        assert!(check_steps(&[s]).unwrap_err().contains("the setup"));
     }
 
     #[test]
