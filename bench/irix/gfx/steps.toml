@@ -1,0 +1,135 @@
+# Graphics acceptance steps, shared by every machine. run.sh adds MACHINE.toml,
+# which replaces gfx/desktop with that machine's golden. README.md says what
+# the disks need.
+#
+# The guest is at a root shell on the serial console with the xdm greeter on
+# screen. The steps log in at the greeter with the emulated keyboard, check
+# the desktop, then run SGI Quake's and SGI Doom's timedemos and a Performer
+# demo, each with a screenshot that must differ from the desktop. The games
+# come from a second disk mounted at /g, and their steps are skipped when it
+# is not there.
+#
+# Keep each wrapped command line under 200 characters, about 85 of command.
+# iris-ci types its end marker, about 45 characters, straight after the
+# command. The Fuel's L1 console hands both lines to IRIX at once, and
+# typeahead past the 255 characters IRIX's tty holds is dropped, so a longer
+# command loses the end of its marker and runs into its timeout. Long game
+# command lines go into small scripts in /tmp instead. Games and demos start
+# a few seconds after the command that launches them, and a program started
+# in the background reads /dev/null rather than the console.
+
+[[step]]
+name = "gfx/x_server"
+unit = "op"
+# Xsgi comes up after the login prompt. 30 s more lets the greeter draw.
+cmd = "until ps -ef | grep \"[X]sgi\" > /dev/null; do sleep 5; done; sleep 30"
+timeout = 900
+
+[[step]]
+name = "gfx/login"
+unit = "op"
+keys = ["key type root", "key enter"]
+cmd = "until ps -ef | grep \"[t]oolchest\" > /dev/null; do sleep 5; done; sleep 30"
+timeout = 600
+
+[[step]]
+name = "gfx/xset"
+unit = "op"
+skip_timing = true
+# A blanked screen would fail every screenshot after it.
+cmd = "DISPLAY=:0; export DISPLAY; xset s off; xset -dpms; true"
+
+[[step]]
+name = "gfx/desktop"
+unit = "op"
+cmd = "sleep 10"
+screenshot = "desktop"
+
+[[step]]
+name = "gfx/games_disk"
+unit = "op"
+skip_timing = true
+# The games disk is SCSI ID 2. Its games are linked into /tmp, which keeps
+# the commands below short.
+setup = "mkdir -p /g /tmp/gb; mount /dev/dsk/dks0d2s0 /g; true"
+cmd = "ln -s /g/usr/games/* /tmp; rm -f /tmp/tyrquake/id1/qconsole.log; true"
+timeout = 120
+
+[[step]]
+name = "gfx/quake_script"
+unit = "op"
+skip_timing = true
+# SGI Quake plays from TyrQuake's id1 data, found from the working directory.
+# /tmp/ql is where -condebug will write Quake's console.
+setup = "echo cd /tmp/tyrquake > /tmp/q.sh; ln -s /tmp/tyrquake/id1/qconsole.log /tmp/ql"
+cmd = "echo ../sgiquake/quake.gl -nosound -nofullscreen -condebug +timedemo demo1 >> /tmp/q.sh"
+
+[[step]]
+name = "gfx/doom_script"
+unit = "op"
+skip_timing = true
+# Doom needs a sound server to start, and not every machine has audio, so
+# one that only waits stands in for it.
+setup = "echo exec sleep 100000 > /tmp/gb/sndserver; chmod +x /tmp/gb/sndserver"
+cmd = "echo \"PATH=/tmp/gb:\\$PATH ./sgixdoom -timedemo demo1\" > /tmp/d.sh"
+
+[[step]]
+name = "gfx/perfly_script"
+unit = "op"
+skip_timing = true
+setup = "echo cd /usr/share/Performer/data > /tmp/p.sh"
+cmd = "echo perfly -W 640,480 -g 0 truck.pfb >> /tmp/p.sh"
+
+[[step]]
+name = "gfx/quake"
+unit = "op"
+requires = "/g/usr/games/sgiquake/quake.gl"
+# Quake prints the timedemo result on its console, "969 frames 125.1
+# seconds 7.7 fps", in guest seconds; -condebug copies it to qconsole.log.
+setup = "(sleep 2; DISPLAY=:0 sh /tmp/q.sh) </dev/null >/tmp/q 2>&1 &"
+cmd = "until sleep 4; grep -s fps /tmp/ql; do ps -e | grep quake > /dev/null || exit 1; done"
+metric = "seconds"
+screenshot = "quake"
+shot_at = 45
+differs_from = "desktop"
+timeout = 1800
+
+[[step]]
+name = "gfx/quake_stop"
+unit = "op"
+skip_timing = true
+cmd = "killall quake.gl; sleep 2; true"
+
+[[step]]
+name = "gfx/doom"
+# Doom renders one frame per game tic in a timedemo, so the rate is frames
+# per host second over the whole demo, start-up included. Doom's own count
+# restarts at each level load, and demo1 reloads the level on every death,
+# so its realtics cover only the last life. The metric is the tic count,
+# 5026 when the demo plays as recorded.
+unit = "tic"
+work = 5026
+requires = "/g/usr/games/sgidoom/sgixdoom"
+cmd = "cd /tmp/sgidoom; DISPLAY=:0 sh /tmp/d.sh </dev/null >/tmp/d 2>&1; grep gametics /tmp/d"
+metric = "timed"
+screenshot = "doom"
+shot_at = 25
+differs_from = "desktop"
+timeout = 1800
+
+[[step]]
+name = "gfx/perfly"
+unit = "op"
+requires = "perfly"
+setup = "(sleep 2; DISPLAY=:0 sh /tmp/p.sh) </dev/null >/tmp/p 2>&1 &"
+# Still running after a minute, and its window drawn.
+cmd = "sleep 62; ps -e | grep perfly > /dev/null"
+screenshot = "perfly"
+differs_from = "desktop"
+timeout = 300
+
+[[step]]
+name = "gfx/perfly_stop"
+unit = "op"
+skip_timing = true
+cmd = "killall perfly; true"

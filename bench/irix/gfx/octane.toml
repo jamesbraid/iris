@@ -1,0 +1,26 @@
+# Octane (IP30, R10000) with iris's default board, IMPACT (SolidImpact):
+# its desktop golden and a longer Quake timeout, added to steps.toml by run.sh.
+#
+# The golden was recorded from bench-irix-pr 931c1c826 with the games disk
+# fitted (its Disk(0,2) icon shows).
+
+[[step]]
+name = "gfx/desktop"
+unit = "op"
+cmd = "sleep 10"
+screenshot = "desktop"
+golden = "sig1 16x12 1280x1024 9ca4a48ca3a383929e898b9f779d9d779e9e779d9d779d9d779d9d779e9e779d9d779d9d779d9d779d9d7a9d9d7b9999b9bdbd97acac7c9e9e7e9c9c779d9d779e9e779d9d779d9d779e9e779d9d779d9d779d9d779d9d779d9d799d9d7e999987a4a47ea0a0779d9d779e9e779d9d779d9d779d9d779d9d779d9d779d9d779e9e779d9d779d9d779e9e7c9e9e8aa5a6779d9d779d9d779d9d779d9d779d9d779e9e779d9d779d9d779d9d779e9e779d9d779d9d779d9d779d9d799d9d7e9e9d779d9d779d9d779e9e779d9d779d9d779e9e779d9d779d9d779e9e779d9d779d9d779d9d779d9d779d9d7e9fa0819fa0779e9e779d9d779d9d779e9e779d9d779d9d779d9d779d9d779d9d779d9d779e9e779d9d779d9d779e9e779d9d779d9d779d9d779d9d779d9d779d9d779d9d779e9e779d9d7d9c9c899b9b859a9a859999899d9d8da2a28da1a18da1a17e9b9b779d9d779d9d779e9e779d9d779d9d779e9e779d9d829ea194acbb91afc095adbc9ab6c698b6c89ab2be95b4c78ba1a3779e9e779d9d779d9d779e9e779d9d779d9d779d9d8ba5a58cafc382a8c285aec785aec685aec784adc586b0c98ba3a5779d9d779d9d779d9d779d9d779d9d779e9e779d9d8da6a68bafc484adc686b0c986b0c986b0c986b0c986b0c98ba3a5779d9d779d9d779e9e779d9d779d9d779e9e779d9d8fa8a88fb3c786b0c986b0c986b0c986b0c986b0c986b0c98aa2a5779e9e779d9d779d9d779e9e779d9d779d9d779d9d8da6a6afb1b2acafb1adafb0afb1b3b0b3b4b2b4b5bdc0c193a7a7"
+
+# Quake's timedemo took 65 minutes at 0.3 fps here, against two minutes on the
+# Fuel, so it gets 90 minutes.
+[[step]]
+name = "gfx/quake"
+unit = "op"
+requires = "/g/usr/games/sgiquake/quake.gl"
+setup = "(sleep 2; DISPLAY=:0 sh /tmp/q.sh) </dev/null >/tmp/q 2>&1 &"
+cmd = "until sleep 4; grep -s fps /tmp/ql; do ps -e | grep quake > /dev/null || exit 1; done"
+metric = "seconds"
+screenshot = "quake"
+shot_at = 45
+differs_from = "desktop"
+timeout = 5400

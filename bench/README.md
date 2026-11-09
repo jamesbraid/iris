@@ -471,6 +471,8 @@ A step can check what a program drew as well as what it printed:
 A failed comparison fails the step and keeps the screenshot, its signature
 and the distance in the result. `--strict` makes `iris-bench irix` exit
 nonzero when any step failed, for a run whose outcome a script acts on.
+[`gfx/`](irix/gfx/README.md) uses all of this for a graphics acceptance
+check of the Fuel, the Octane and the Indy.
 
 > **Status: run once, on an Indy.** The default steps and three extra steps (Dhrystone,
 > Whetstone and `iris_bench` binaries copied into the guest) were

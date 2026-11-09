@@ -2402,6 +2402,28 @@ mod tests {
     }
 
     #[test]
+    fn the_graphics_acceptance_steps_parse_and_pass_the_checks() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/irix/gfx");
+        for m in ["fuel", "octane", "indy"] {
+            let base = load_steps(&dir.join("steps.toml")).unwrap_or_else(|e| panic!("{e}"));
+            let mine = load_steps(&dir.join(format!("{m}.toml"))).unwrap_or_else(|e| panic!("{e}"));
+            let n = base.len();
+            let steps = merge_steps(base, mine);
+            assert_eq!(steps.len(), n, "{m}: a machine file only replaces shared steps");
+            check_screenshot_names(&steps).unwrap_or_else(|e| panic!("{m}: {e}"));
+            // The Fuel's L1 console hands a command and iris-ci's end
+            // marker to IRIX together, and the pair must fit its tty.
+            for s in &steps {
+                for line in [Some(&s.cmd), s.setup.as_ref()].into_iter().flatten() {
+                    assert!(wrap(line).len() <= 200, "{m}: {}: {} characters", s.name, wrap(line).len());
+                }
+            }
+            let desktop = steps.iter().find(|s| s.name == "gfx/desktop").unwrap();
+            assert!(desktop.golden.is_some(), "{m}: the desktop has no golden");
+        }
+    }
+
+    #[test]
     fn the_cold_read_does_not_read_the_file_the_write_step_just_wrote() {
         let steps = load_steps(&Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/irix/steps.toml")).unwrap();
         let get = |n: &str| steps.iter().find(|s| s.name == n).unwrap();

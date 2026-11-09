@@ -56,6 +56,10 @@ before adding a kernel.
 
 `bench/irix/` is the other half: real workloads under a booted IRIX (filesystem,
 buffer cache, IRIX's own tools, X on REX3), driven over `iris-ci`.
+`bench/irix/gfx/` is a graphics acceptance check built on it: boot to the
+desktop, compare it with a golden, and play SGI Quake's and SGI Doom's
+timedemos and a Performer demo, on the Fuel, the Octane and the Indy. It needs
+disks the user provides; see [bench/irix/gfx/README.md](bench/irix/gfx/README.md).
 
 **GPU parity tests** — with the `wgpu` feature, the host-GPU raster path
 (`src/wgpu`, `src/dev/odyssey/wgpu`) is checked against the CPU pipeline: the
