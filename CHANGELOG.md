@@ -48,6 +48,7 @@ hashes are given where a change is easiest to understand by reading the commit.
 - A guest step that fails is recorded as a `FAILED` row and the suite carries on; it used to stop at the first quiet failure and lose the results so far. A step skipped for a missing program is a `SKIP` row.
 - A step in `bench/irix/steps.toml` can set `timeout`. A hung step is a `FAILED` row, the guest gets Ctrl-C, and the suite goes on once the shell answers. The X steps have timeouts; `gfx/xwd_root` blocked the suite for good on an Indy sitting at the login screen.
 - `iris-bench report` shows a guest run as a "Guest steps" table with each step's status, time and rate, instead of blank rows in the kernel tables. `iris-bench reference` refuses a guest run.
+- `iris-bench irix` also runs `bench/irix/benchies.toml`: Dhrystone 2.1 and the C Whetstone (new in `test/dhrystone` and `test/whetstone`, with IRIX N32 binaries) and `iris_bench`. `--steps` can be repeated. A step prints its last line of output, so the program's own figure shows. Steps whose binary is not in the guest are skipped.
 
 ### PCI
 

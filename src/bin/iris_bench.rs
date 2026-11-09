@@ -573,11 +573,17 @@ fn row(step: &Step, ns: u64, status: &str) -> Row {
     }
 }
 
-fn run_irix(ci: &Ci, steps_path: &Path, label: &str) -> Result<Run, String> {
-    let text = std::fs::read_to_string(steps_path)
-        .map_err(|e| format!("{}: {}", steps_path.display(), e))?;
-    let file: StepFile = toml::from_str(&text)
-        .map_err(|e| format!("{}: {}", steps_path.display(), e))?;
+fn load_steps(paths: &[PathBuf]) -> Result<Vec<Step>, String> {
+    let mut steps = Vec::new();
+    for p in paths {
+        let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {}", p.display(), e))?;
+        let file: StepFile = toml::from_str(&text).map_err(|e| format!("{}: {}", p.display(), e))?;
+        steps.extend(file.step);
+    }
+    Ok(steps)
+}
+
+fn run_irix(ci: &Ci, steps: &[Step], label: &str) -> Result<Run, String> {
 
     // Identify the guest before anything else: a result recorded against the
     // wrong disk image is worse than no result.
@@ -593,7 +599,7 @@ fn run_irix(ci: &Ci, steps_path: &Path, label: &str) -> Result<Run, String> {
 
     // A step that fails or is skipped gets a row of its own and the suite goes
     // on: one missing tool or broken workload says nothing about the next step.
-    for step in &file.step {
+    for step in steps {
         if let Some(prog) = &step.requires {
             if !ci.has(prog)? {
                 println!("  {:<22} skipped ({} not installed)", step.name, prog);
@@ -608,8 +614,8 @@ fn run_irix(ci: &Ci, steps_path: &Path, label: &str) -> Result<Run, String> {
         let in_setup = !matches!(o, Outcome::Done { .. });
         if !in_setup { o = ci.run(&wrap(&step.cmd), step.timeout)?; }
 
-        let secs = match o {
-            Outcome::Done { secs, .. } => secs,
+        let (secs, last) = match o {
+            Outcome::Done { out, secs } => (secs, out.trim_end().lines().last().unwrap_or("").to_string()),
             bad => {
                 let hung = matches!(bad, Outcome::TimedOut);
                 let (why, out) = match bad {
@@ -637,6 +643,8 @@ fn run_irix(ci: &Ci, steps_path: &Path, label: &str) -> Result<Run, String> {
                 String::new()
             }
         );
+        // Programs like Dhrystone print their own figure last.
+        if !last.is_empty() { println!("      {last}"); }
         // Nothing here is checksummed: these are IRIX's own tools against
         // IRIX's own filesystem, and their output is not ours to predict.
         rows.push(row(step, ns, "UNCHECKED"));
@@ -1180,9 +1188,10 @@ enum Cmd {
         /// CI socket. Defaults to iris-ci's own default.
         #[arg(long)]
         socket: Option<PathBuf>,
-        /// Step definitions. Defaults to bench/irix/steps.toml.
+        /// Step definitions; repeat to run several files in order. Defaults to
+        /// bench/irix/steps.toml, then bench/irix/benchies.toml.
         #[arg(long)]
-        steps: Option<PathBuf>,
+        steps: Vec<PathBuf>,
         /// iris-ci binary. Defaults to target/release/iris-ci.
         #[arg(long)]
         ci: Option<PathBuf>,
@@ -1393,7 +1402,10 @@ fn dispatch(cmd: Cmd) -> Result<(), String> {
                 return Err(format!("no iris-ci at {} — cargo build --release --bin iris-ci",
                                    ci_bin.display()));
             }
-            let steps = steps.unwrap_or_else(|| repo_relative("bench/irix/steps.toml"));
+            let paths = if steps.is_empty() {
+                vec![repo_relative("bench/irix/steps.toml"), repo_relative("bench/irix/benchies.toml")]
+            } else { steps };
+            let steps = load_steps(&paths)?;
             let out = out.unwrap_or_else(default_out);
             let ci = Ci { bin: ci_bin, socket, shell, timeout };
             let run = run_irix(&ci, &steps, &label)?;
@@ -1717,8 +1729,8 @@ mod tests {
     }
 
     fn shipped_steps() -> Vec<Step> {
-        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/irix/steps.toml");
-        toml::from_str::<StepFile>(&std::fs::read_to_string(&p).unwrap()).unwrap().step
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/irix");
+        load_steps(&[dir.join("steps.toml"), dir.join("benchies.toml")]).unwrap()
     }
 
     /// IRIX's dd has no `m` suffix and its ping refuses `-i 0`; either made a
@@ -1732,6 +1744,9 @@ mod tests {
                 assert!(!c.contains('\''), "{}: the sh -c wrapper has no room for a quote", s.name);
                 assert!(!c.contains("bs=1m") && !c.contains(" -i 0"), "{}: {c}", s.name);
             }
+        }
+        for (i, s) in steps.iter().enumerate() {
+            assert!(steps[..i].iter().all(|t| t.name != s.name), "{} repeats", s.name);
         }
         let cold = steps.iter().find(|s| s.name == "disk/read_cold").unwrap();
         assert!(!cold.cmd.contains("irisbench.dat"));
