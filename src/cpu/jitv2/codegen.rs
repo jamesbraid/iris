@@ -9127,26 +9127,55 @@ fn emit_fcc(ctx: &mut EmitCtx, fr_mode: FrMode, is_d: bool) {
             b.ins().band(exp_mantissa_nonzero, snan_bit_set)
         }
     };
-    let a_snan = is_snan(ctx.builder, a_bits, is_d);
-    let b_snan = is_snan(ctx.builder, b_bits, is_d);
-    let has_snan = ctx.builder.ins().bor(a_snan, b_snan);
+    const FCSR_CM: i64 = 0x0001_f000;
+    const FCSR_CV: i64 = 0x0001_0000;
+    let fcsr_off = ir::immediates::Offset32::new(core_offset_of_fpu_fcsr());
+    // set_fpu_cc: cc = (raw >> 8) & 0x7; bit = if cc==0 {23} else {24+cc}.
+    let cc = (raw >> 8) & 0x7;
+    let bit = if cc == 0 { 23 } else { 24 + cc };
 
-    let invalid = if funct & 0x8 != 0 {
+    // Neither kind of Invalid can arise unless an operand is a NaN, so the
+    // common case is one unordered test. Classifying signalling NaNs and the
+    // Invalid/EV handling sit in a cold block.
+    let any_nan = {
         use cranelift_codegen::ir::condcodes::FloatCC;
-        let a_nan = ctx.builder.ins().fcmp(FloatCC::Unordered, a, a);
-        let b_nan = ctx.builder.ins().fcmp(FloatCC::Unordered, b, b);
-        let either_nan = ctx.builder.ins().bor(a_nan, b_nan);
-        ctx.builder.ins().bor(has_snan, either_nan)
+        ctx.builder.ins().fcmp(FloatCC::Unordered, a, b)
+    };
+    let nan_block = ctx.builder.create_block();
+    let fast_block = ctx.builder.create_block();
+    let after_block = ctx.builder.create_block();
+    ctx.builder.ins().brif(any_nan, nan_block, &[], fast_block, &[]);
+
+    // Fast path: Cause reflects only the last instruction (cleared here, with
+    // the cc bit, in the one FCSR read-modify-write).
+    ctx.builder.switch_to_block(fast_block);
+    ctx.builder.seal_block(fast_block);
+    let cond_result = emit_fpu_compare(ctx.builder, a, b, funct);
+    let cond_i32 = ctx.builder.ins().uextend(ir::types::I32, cond_result);
+    let fcsr = ctx.builder.ins().load(ir::types::I32, mem, ctx.core_ptr, fcsr_off);
+    emit_fcc_write_cc(ctx, fcsr, FCSR_CM | (1i64 << bit), cond_i32, bit);
+    ctx.builder.ins().jump(after_block, &[]);
+
+    // Cold: at least one operand is a NaN.
+    ctx.builder.switch_to_block(nan_block);
+    ctx.builder.set_cold_block(nan_block);
+    ctx.builder.seal_block(nan_block);
+    // Invalid is raised whenever either operand is a signalling NaN
+    // (unconditional on the predicate), and additionally for the eight
+    // signalling predicates (funct bit 3) whenever either operand is any
+    // NaN (known true here) - mirrors `exec_fcc_s`/`exec_fcc_d`'s `invalid`
+    // computation exactly.
+    let invalid = if funct & 0x8 != 0 {
+        ctx.builder.ins().iconst(ir::types::I8, 1)
     } else {
-        has_snan
+        let a_snan = is_snan(ctx.builder, a_bits, is_d);
+        let b_snan = is_snan(ctx.builder, b_bits, is_d);
+        ctx.builder.ins().bor(a_snan, b_snan)
     };
     let invalid = ctx.builder.ins().uextend(ir::types::I32, invalid);
 
     // Cause reflects only the last instruction (rewritten every compare,
     // not just when this one raises Invalid), matching the interpreter.
-    const FCSR_CM: i64 = 0x0001_f000;
-    const FCSR_CV: i64 = 0x0001_0000;
-    let fcsr_off = ir::immediates::Offset32::new(core_offset_of_fpu_fcsr());
     let fcsr = ctx.builder.ins().load(ir::types::I32, mem, ctx.core_ptr, fcsr_off);
     let fcsr_cause_cleared = ctx.builder.ins().band_imm_s(fcsr, !FCSR_CM);
     let cv_bit = ctx.builder.ins().ishl_imm_s(invalid, 16); // FCSR_CV = 1<<16
@@ -9158,7 +9187,6 @@ fn emit_fcc(ctx: &mut EmitCtx, fr_mode: FrMode, is_d: bool) {
     let after_v_block = ctx.builder.create_block();
     ctx.builder.ins().brif(invalid_nonzero, raise_v_block, &[], after_v_block, &[]);
 
-    // Cold: a signaling-NaN operand on a compare is a rare edge case.
     ctx.builder.switch_to_block(raise_v_block);
     ctx.builder.set_cold_block(raise_v_block);
     ctx.builder.seal_block(raise_v_block);
@@ -9168,17 +9196,17 @@ fn emit_fcc(ctx: &mut EmitCtx, fr_mode: FrMode, is_d: bool) {
     let no_raise_block = ctx.builder.create_block();
     ctx.builder.ins().brif(ev_nonzero, raise_fpe_block, &[], no_raise_block, &[]);
 
-    // Cold: reached only after the already-rare signaling-NaN case above.
     ctx.builder.switch_to_block(raise_fpe_block);
     ctx.builder.set_cold_block(raise_fpe_block);
     ctx.builder.seal_block(raise_fpe_block);
     // Trapped: Cause is already set above, but the sticky Flag field is
-    // not — R4000 manual: flag bits are not set when an exception is taken.
+    // not - R4000 manual: flag bits are not set when an exception is taken.
     let status = crate::cpu::mips_exec::exec_exception_const(crate::cpu::mips_exec::EXC_FPE);
     let status_val = ctx.builder.ins().iconst(ir::types::I32, status as i64);
     emit_exception_exit(ctx, status_val);
 
     ctx.builder.switch_to_block(no_raise_block);
+    ctx.builder.set_cold_block(no_raise_block);
     ctx.builder.seal_block(no_raise_block);
     // Untrapped: also set the sticky Flag.V bit.
     let fcsr_with_flag = ctx.builder.ins().bor_imm_s(fcsr_with_cause, FCSR_CV >> 10);
@@ -9186,21 +9214,29 @@ fn emit_fcc(ctx: &mut EmitCtx, fr_mode: FrMode, is_d: bool) {
     ctx.builder.ins().jump(after_v_block, &[]);
 
     ctx.builder.switch_to_block(after_v_block);
+    ctx.builder.set_cold_block(after_v_block);
     ctx.builder.seal_block(after_v_block);
-
     let cond_result = emit_fpu_compare(ctx.builder, a, b, funct);
     let cond_i32 = ctx.builder.ins().uextend(ir::types::I32, cond_result);
-
-    // set_fpu_cc: cc = (raw >> 8) & 0x7; bit = if cc==0 {23} else {24+cc}.
-    let cc = (raw >> 8) & 0x7;
-    let bit = if cc == 0 { 23 } else { 24 + cc };
     let fcsr = ctx.builder.ins().load(ir::types::I32, mem, ctx.core_ptr, fcsr_off);
-    let cleared = ctx.builder.ins().band_imm_s(fcsr, !(1i64 << bit));
+    emit_fcc_write_cc(ctx, fcsr, 1i64 << bit, cond_i32, bit);
+    ctx.builder.ins().jump(after_block, &[]);
+
+    ctx.builder.switch_to_block(after_block);
+    ctx.builder.seal_block(after_block);
+}
+
+/// `set_fpu_cc`: replace condition-code bit `bit` of `fcsr` (also clearing the
+/// other bits in `clear_mask`) with `cond_i32`, store FCSR, and refresh
+/// `fpu_fccr` from the new value (`fccr_from_fcsr`).
+fn emit_fcc_write_cc(ctx: &mut EmitCtx, fcsr: Value, clear_mask: i64, cond_i32: Value, bit: u32) {
+    let mem = MemFlagsData::trusted();
+    let fcsr_off = ir::immediates::Offset32::new(core_offset_of_fpu_fcsr());
+    let cleared = ctx.builder.ins().band_imm_s(fcsr, !clear_mask);
     let bit_val = ctx.builder.ins().ishl_imm_s(cond_i32, bit as i64);
     let new_fcsr = ctx.builder.ins().bor(cleared, bit_val);
     ctx.builder.ins().store(mem, new_fcsr, ctx.core_ptr, fcsr_off);
 
-    // set_fpu_cc also refreshes fpu_fccr from the new FCSR (fccr_from_fcsr).
     let cc0 = ctx.builder.ins().ushr_imm_s(new_fcsr, 23);
     let cc0 = ctx.builder.ins().band_imm_s(cc0, 1);
     let cc1_7 = ctx.builder.ins().ushr_imm_s(new_fcsr, 25);
