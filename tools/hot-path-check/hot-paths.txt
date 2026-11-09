@@ -28,6 +28,12 @@
 #                                 copy of OWNER's METHOD, direct call or tail
 #                                 jump). For a helper the compiler must inline.
 #                                 The caller must exist or the rule fails.
+#   budget  OWNER METHOD FORMAT PUSHES FRAME-BYTES
+#                                 the most callee-saved registers the function
+#                                 may push, and the most other stack bytes its
+#                                 prologue may reserve, when objdump reports
+#                                 object format FORMAT (a regex). Applies to
+#                                 every copy. Raise it only on purpose.
 #   format  CALLEE-REGEX          a formatting or printing function. A direct call
 #                                 or tail jump to one from `hot` code fails.
 #
@@ -108,3 +114,18 @@ forbid@release    MipsExecutor<                      write_data_impl  CpuCache< 
 forbid@release    MipsExecutor<.*CpuCache<(?!16384,) read_data_impl   CpuCache<   fill_l1d_line_raw
 forbid@lightning  MipsExecutor<.*CpuCache<16384,     read_data_impl   CpuCache<   fill_l1d_line_raw
 forbid@lightning  MipsExecutor<.*CpuCache<16384,     write_data_impl  CpuCache<   fill_l1d_line_raw
+
+# step_int's prologue: the callee-saved registers it pushes, and the bytes of
+# other stack it reserves, at most over every copy. PUSHES FRAME-BYTES, with `-`
+# for a frame that is not budgeted. To change one on purpose: build the new
+# revision, run check.py -v, and say why in the commit.
+#
+# release: all six callee-saved registers x86-64 has, plus `push %rax` for
+#   alignment. With six taken a new spill can only show up as more reserved
+#   stack, so the frame is budgeted.
+# lightning: four registers at 73a1df35^ and five at 73a1df35, the extra `push
+#   r12` on every interpreted instruction. The frame is not budgeted there: it
+#   was 136, 128, 112 and 16 bytes across 73a1df35^, 73a1df35, main and main
+#   with the bus-error fix, without a register changing, so it is noise.
+budget@release    MipsExecutor<   step_int   elf64-x86-64   6 8
+budget@lightning  MipsExecutor<   step_int   elf64-x86-64   4 -

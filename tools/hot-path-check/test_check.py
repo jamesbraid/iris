@@ -203,6 +203,17 @@ class Inlining(unittest.TestCase):
 
 
 FILL = CACHE.replace(" as iris::cpu::mips_cache_v2::MipsCache", "") + "::fill_l1d_line_raw"
+X86 = ["a.out:     file format elf64-x86-64\n"]
+PROLOGUE = ("push   %rbp", "push   %r15", "push   %r14", "push   %r12", "push   %rbx",
+            "sub    $0x28,%rsp")
+
+
+def with_step_int(*insns, fmt=X86):
+    """CLEAN with its step_int replaced by one that starts with `insns`."""
+    keep = [l for l in CLEAN if EXEC + "::step_int" not in l]
+    return fmt + keep + func(0x4000, EXEC + "::step_int", *insns)
+
+
 class Forbidden(unittest.TestCase):
     def test_clean_build_passes(self):
         found = scan(CLEAN)
@@ -245,6 +256,88 @@ class Forbidden(unittest.TestCase):
         self.assertIn("inlined away", out)
 
 
+def budget_rules(regs, frame):
+    return {**RULES, "budget": [(l, rx, m, f, regs, frame) for l, rx, m, f, _, _ in RULES["budget"]]}
+
+
+def budgets(lines, rules):
+    """(passed, output) of the budget report alone."""
+    found = check.scan(lines, rules)
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        ok = check.report_budgets(rules, found)
+    return ok, out.getvalue()
+
+
+class Budget(unittest.TestCase):
+    def test_within_budget_passes(self):
+        ok, out = budgets(with_step_int(*PROLOGUE), budget_rules(5, 40))
+        self.assertTrue(ok, out)
+        self.assertNotIn("FAIL", out)
+
+    def test_registers_are_counted_in_the_prologue_only(self):
+        found = scan(with_step_int(*PROLOGUE[:5], "mov    %rdi,%rbx", "push   %r13"))
+        self.assertEqual(found["saves"][0]["regs"], ["rbp", "r15", "r14", "r12", "rbx"])
+
+    def test_a_new_spill_fails_with_the_register_and_the_fix(self):
+        lines = with_step_int(*PROLOGUE[:3], "push   %r13", *PROLOGUE[3:])
+        ok, out = budgets(lines, budget_rules(5, 40))
+        self.assertFalse(ok)
+        self.assertIn("saves 6 callee-saved registers (rbp r15 r14 r13 r12 rbx)", out)
+        self.assertIn("budget 5 and 40", out)
+        self.assertIn("change the budget in hot-paths.txt", out)
+        self.assertIn("`6 40`", out)
+
+    def test_a_bigger_frame_fails_when_every_register_is_already_saved(self):
+        # All six callee-saved registers are taken on x86-64, so the next
+        # spill can only show up as stack the prologue reserves.
+        six = ("push   %rbp", "push   %r15", "push   %r14", "push   %r13", "push   %r12",
+               "push   %rbx")
+        rules = budget_rules(6, 8)
+        self.assertTrue(budgets(with_step_int(*six, "push   %rax", "mov    %rdi,%rbx"), rules)[0])
+        ok, out = budgets(with_step_int(*six, "sub    $0x28,%rsp", "mov    %rdi,%rbx"), rules)
+        self.assertFalse(ok)
+        self.assertIn("reserves 40 bytes", out)
+
+    def test_every_copy_is_checked(self):
+        other = EXEC.replace("16384", "32768")
+        lines = (with_step_int(*PROLOGUE)
+                 + func(0x5000, other + "::step_int", *PROLOGUE[:3], "push   %r13", *PROLOGUE[3:]))
+        ok, out = budgets(lines, budget_rules(5, 40))
+        self.assertFalse(ok)
+        self.assertIn(other, out)
+
+    def test_leading_endbr64_and_scratch_pushes_are_skipped(self):
+        found = scan(with_step_int("endbr64", "push   %rax", "push   %rbx", "push   %r15",
+                                   "mov    %rdi,%rbx"))
+        self.assertEqual(found["saves"][0]["regs"], ["rbx", "r15"])
+        self.assertEqual(found["saves"][0]["scratch"], 8)
+
+    def test_slack_prints_the_numbers_to_tighten_to(self):
+        ok, out = budgets(with_step_int(*PROLOGUE), budget_rules(7, 64))
+        self.assertTrue(ok)
+        self.assertIn("Tighten it to `5 40`", out)
+
+    def test_missing_function_fails(self):
+        ok, out = budgets(X86 + CLEAN[:len(CONTROLS)], budget_rules(5, 40))
+        self.assertFalse(ok)
+        self.assertIn("step_int", out)
+
+    def test_other_object_formats_are_not_judged(self):
+        lines = with_step_int(*PROLOGUE, fmt=["a.out:     file format mach-o-arm64\n"])
+        ok, out = budgets(lines, budget_rules(1, 0))
+        self.assertTrue(ok)
+        self.assertIn("no register budget is recorded for object format mach-o-arm64", out)
+
+    def test_the_recorded_budget_covers_x86_64_linux(self):
+        self.assertTrue(any(r[3].search("elf64-x86-64") and r[4] > 0 for r in RULES["budget"]))
+
+    def test_the_full_report_runs_the_budget(self):
+        lines = with_step_int(*PROLOGUE[:3], "push   %r13", *PROLOGUE[3:])
+        rules = budget_rules(5, 40)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(check.report(rules, check.scan(lines, rules)))
+
+
 class Builds(unittest.TestCase):
     def rules(self, text, build):
         with tempfile.NamedTemporaryFile("w", suffix=".txt") as f:
@@ -254,12 +347,13 @@ class Builds(unittest.TestCase):
 
     def test_a_rule_applies_to_its_own_build_and_plain_rules_to_all(self):
         text = ("hot MipsExecutor<\nforbid@release A a B b\nforbid@lightning C c D d\n"
-                )
-        for build, forbid in (("release", 1), ("lightning", 1), ("other", 0)):
+                "budget@release X x elf 1 2\n")
+        for build, forbid, budget in (("release", 1, 1), ("lightning", 1, 0), ("other", 0, 0)):
             with self.subTest(build=build):
                 rules = self.rules(text, build)
                 self.assertEqual(len(rules["hot"]), 1)
                 self.assertEqual(len(rules["forbid"]), forbid)
+                self.assertEqual(len(rules["budget"]), budget)
 
     def test_shipped_release_rules_leave_the_r4400_loads_alone(self):
         # Every build so far calls the fill from the R4400 loads under the
@@ -278,6 +372,16 @@ class Builds(unittest.TestCase):
         r4400 = EXEC + "::read_data_impl::<false, 4>"
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertFalse(passes(CLEAN + func(0x3000, r4400, call(FILL)))[0])
+
+    def test_unbudgeted_frame_is_not_judged(self):
+        rules = {**RULES, "budget": [(l, rx, m, f, 5, None) for l, rx, m, f, _, _ in RULES["budget"]]}
+        ok, out = budgets(with_step_int(*PROLOGUE[:5], "sub    $0x400,%rsp"), rules)
+        self.assertTrue(ok, out)
+        ok, out = budgets(with_step_int(*PROLOGUE[:3], "push   %r13", *PROLOGUE[3:]), rules)
+        self.assertFalse(ok)
+        self.assertIn("budget 5.", out)
+        self.assertIn("`6 -`", out)
+
 
 class Readable(unittest.TestCase):
     def test_thin_lto_build_is_unreadable(self):

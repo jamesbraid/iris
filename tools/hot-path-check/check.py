@@ -23,6 +23,12 @@ profile and applies the rules in hot-paths.txt beside this script:
     and checked with `--build BUILD`; hot-paths.txt has the measurements.
     The caller must exist, so a rename fails instead of passing by finding
     nothing;
+  * `budget` rules: the prologue of a named function (`step_int`) may push
+    at most N callee-saved registers and reserve at most M other bytes of
+    stack, per object format. 73a1df35 also made `step_int` save one more
+    register (`push r12` on every interpreted instruction). A new spill fails
+    and prints the line to change if it is deliberate. See the note on
+    budgets below;
   * each anchor exists. Anchors are `#[inline(never)]` functions in the types
     the inline rules name, so renaming a type fails instead of letting an
     inline rule pass by finding nothing;
@@ -39,6 +45,19 @@ functions and the lightning interpreter lost 8% (suite 92.1 -> 84.9 MIPS).
 Host instruction counts did not move; cycles and branch misses did. Moving
 each report into its own `#[cold] #[inline(never)]` method takes the calls out
 of the hot functions, which is what this check sees.
+
+Budgets: x86-64 has six callee-saved registers and the release build's
+`step_int` already pushes all six, so the register count can no longer rise
+there; the next spill shows up as stack the prologue reserves (`push %rax`
+today, a `sub $n,%rsp` after a spill). The release budget is therefore a
+pair. In a `lightning,gpujit` build the register count moves (four at
+73a1df35^, five after) and the frame size is noise (136, 128, 112, 16 bytes
+over four revisions, no register change), so only the registers are
+budgeted there. A budget is an upper bound over every copy of the function.
+It is recorded per build (`budget@release`, `budget@lightning`), is not
+portable to other feature sets, and a new nightly can move it without a
+source change. Only the x86-64 `push` forms are read. For any other object
+format the budget rules are skipped with a note.
 
 What it does not check:
   * speed. A layout or inlining regression with no formatting call in it
@@ -90,7 +109,13 @@ INDIRECT_RE = re.compile(r"\tcall[lq]?\s+\*")
 
 # rule kind -> number of fields after it
 ARITY = {"hot": 1, "cold": 2, "inline": 2, "anchor": 2, "control": 2, "format": 1,
-         "forbid": 4}
+         "forbid": 4, "budget": 5}
+# `file format elf64-x86-64`, in the header of GNU and LLVM objdump alike.
+FORMAT_RE = re.compile(r"file format (\S+)")
+# An instruction line: `  2000:\tpush   %rbp`.
+INSN_RE = re.compile(r"^\s*[0-9a-f]+:\t(\S+)\s*(.*?)\s*(?:#.*)?$")
+# Registers the x86-64 System V ABI makes the callee save.
+CALLEE_SAVED = ("rbx", "rbp", "r12", "r13", "r14", "r15")
 
 
 def load_rules(path, build="release"):
@@ -110,7 +135,8 @@ def load_rules(path, build="release"):
                 if ARITY.get(kind) != len(rest):
                     raise ValueError("expected `hot OWNER`, `format CALLEE`, "
                                      "`cold|inline|anchor|control OWNER METHOD`, "
-                                     "or `forbid OWNER METHOD CALLEE-OWNER CALLEE-METHOD`")
+                                     "`forbid OWNER METHOD CALLEE-OWNER CALLEE-METHOD` or "
+                                     "`budget OWNER METHOD FORMAT PUSHES FRAME-BYTES`")
                 if kind in ("hot", "format"):
                     rules[kind].append(re.compile(rest[0]))
                 elif kind == "cold":
@@ -118,6 +144,10 @@ def load_rules(path, build="release"):
                 elif kind == "forbid":
                     rules[kind].append((line, re.compile(rest[0]), rest[1],
                                         re.compile(rest[2]), rest[3]))
+                elif kind == "budget":
+                    rules[kind].append((line, re.compile(rest[0]), rest[1],
+                                        re.compile(rest[2]), int(rest[3]),
+                                        None if rest[4] == "-" else int(rest[4])))
                 else:
                     rules[kind].append((line, re.compile(rest[0]), rest[1]))
             except (ValueError, re.error) as e:
@@ -197,21 +227,28 @@ def scan(lines, rules):
     indirect  symbol -> count of indirect calls;
     callers   rule line -> [symbol] for `forbid` rules: the functions it watches;
     forbidden rule line -> symbol -> callee -> count of forbidden calls;
+    saves     [{rule, sym, regs, scratch}] for `budget` rules: the callee-saved
+              registers pushed at the top of the function, and the bytes of
+              other stack the prologue reserves (`push %rax`, `sub $n,%rsp`);
+    format    the object file format objdump reports, or None.
     """
     named = defaultdict(list)
-    outlined, hot, cold = [], [], []
+    outlined, hot, cold, saves = [], [], [], []
     calls = defaultdict(lambda: defaultdict(int))
     indirect = defaultdict(int)
     callers = defaultdict(list)
     forbidden = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    fmt = None
     cur = None                        # the function being read, if a rule wants it
     watch = []                        # `forbid` rules whose caller this function is
+    pro = None                        # (rule line, symbol, regs) while in a prologue
     for line in lines:
         m = FUNC_RE.match(line)
         if m:
             name = m.group(2)
             cur = None
             watch = []
+            pro = None
             owner, method = owner_and_method(name)
             for kind in ("inline", "anchor", "control"):
                 for rule, rx, meth in rules[kind]:
@@ -227,6 +264,11 @@ def scan(lines, rules):
                 if method == meth and rx.search(owner):
                     callers[rule].append(name)
                     watch.append((rule, crx, cmeth))
+            for rule, rx, meth, _, _, _ in rules["budget"]:
+                if method == meth and rx.search(owner):
+                    pro = {"rule": rule, "sym": name, "regs": [], "scratch": 0}
+                    saves.append(pro)
+                    break
             hm = hot_method(name, rules["hot"])
             if hm:
                 if any(o.search(hm[0]) and mx.fullmatch(hm[1]) for o, mx in rules["cold"]):
@@ -235,6 +277,26 @@ def scan(lines, rules):
                     hot.append(name)
                 cur = name
             continue
+        if fmt is None:
+            m = FORMAT_RE.search(line)
+            if m:
+                fmt = m.group(1)
+        if pro is not None:
+            m = INSN_RE.match(line)
+            if m:
+                op, arg = m.group(1), m.group(2)
+                if op.startswith("push"):
+                    reg = arg.lstrip("%")
+                    if reg in CALLEE_SAVED:
+                        pro["regs"].append(reg)
+                    else:
+                        pro["scratch"] += 8       # `push %rax` reserves a slot
+                elif op.startswith("sub") and arg.endswith(",%rsp"):
+                    imm = re.match(r"\$(0x[0-9a-f]+|\d+),", arg)
+                    pro["scratch"] += int(imm.group(1), 0) if imm else 0
+                    pro = None                    # the frame is allocated
+                elif op != "endbr64":
+                    pro = None    # the first other instruction ends the prologue
         if cur is not None or watch:
             m = CALL_RE.search(line)
             if m:
@@ -249,7 +311,7 @@ def scan(lines, rules):
                 indirect[cur] += 1
     return {"named": named, "outlined": outlined, "hot": hot, "cold": cold,
             "calls": calls, "indirect": indirect, "callers": callers,
-            "forbidden": forbidden}
+            "forbidden": forbidden, "saves": saves, "format": fmt}
 
 
 def readable(rules, found):
@@ -301,6 +363,56 @@ def report_forbidden(rules, found, verbose=False):
     return ok
 
 
+def report_budgets(rules, found, verbose=False):
+    """Print the `budget` rules' result; return True when none is exceeded.
+
+    Two numbers per function, each an upper bound: the callee-saved registers
+    it pushes, and the other stack its prologue reserves. x86-64 has six
+    callee-saved registers, so a function that already pushes all six can
+    only grow in the second number. A function under budget passes and
+    prints the number to tighten the budget to, so that a later spill cannot
+    hide in the slack.
+    """
+    ok = True
+    fmt = found["format"] or "unknown"
+    for rule, _, meth, frx, max_regs, max_frame in rules["budget"]:
+        if not frx.search(fmt):
+            continue
+        syms = [p for p in found["saves"] if p["rule"] == rule]
+        if not syms:
+            print(f"FAIL: no symbol matches `{rule}`. It was renamed or inlined away: "
+                  f"update hot-paths.txt to match.")
+            ok = False
+            continue
+        regs = max(len(p["regs"]) for p in syms)
+        frame = max(p["scratch"] for p in syms)
+        limit = f"{max_regs} and {max_frame}" if max_frame is not None else f"{max_regs}"
+        print(f"{len(syms):4d} x {meth} (saves at most {regs} callee-saved registers and "
+              f"reserves at most {frame} bytes, budget {limit})")
+        over = False
+        for p in syms:
+            if verbose:
+                print(f"         {len(p['regs'])}, {p['scratch']} bytes: "
+                      f"{' '.join(p['regs'])}  {p['sym']}")
+            if len(p["regs"]) > max_regs or (max_frame is not None and p["scratch"] > max_frame):
+                print(f"FAIL: {p['sym']} saves {len(p['regs'])} callee-saved registers "
+                      f"({' '.join(p['regs'])}) and reserves {p['scratch']} bytes of "
+                      f"stack, budget {limit}.\n"
+                      f"      Something kept one more value live across the function, and "
+                      f"that costs a push and a pop (or a stack slot) on every call.\n"
+                      f"      If it is deliberate, change the budget in hot-paths.txt "
+                      f"(`{rule}`) to `{len(p['regs'])} {p['scratch'] if max_frame is not None else '-'}` "
+                      f"and say why in the commit.")
+                ok, over = False, True
+        if not over and (regs < max_regs or (max_frame is not None and frame < max_frame)):
+            print(f"note: under budget. Tighten it to `{regs} {frame if max_frame is not None else '-'}` in hot-paths.txt "
+                  f"so the next spill fails.")
+    if rules["budget"] and not any(r[3].search(fmt) for r in rules["budget"]):
+        print(f"note: no register budget is recorded for object format {fmt}; "
+              f"the budget rules were not applied.")
+    return ok
+
+
 def report(rules, found, verbose=False):
     """Print the result; return True when the binary passes."""
     if not readable(rules, found):
@@ -334,6 +446,7 @@ def report(rules, found, verbose=False):
         what = ", ".join(f"{n} x {c}" for c, n in sorted(callees.items()))
         print(f"      {sym}: {what}")
     ok = report_forbidden(rules, found, verbose) and ok
+    ok = report_budgets(rules, found, verbose) and ok
     if verbose:
         print("cold symbols, allowed to format:")
         for s in sorted(found["cold"]):

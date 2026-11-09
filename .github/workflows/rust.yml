@@ -101,8 +101,11 @@ jobs:
     - name: Build
       run: cargo build --release -p iris --bins --features lightning,jitv2,gpujit,idle-pause,hostgl
     # Reads the binary just built (tools/hot-path-check): no formatting calls
-    # in MipsExecutor code outside a short list of cold methods, and no
-    # out-of-line copy of a fetch that must inline. It needs this job's build:
+    # in MipsExecutor code outside a short list of cold methods, no
+    # out-of-line copy of a fetch that must inline, no call to the cache fill
+    # from the loads and stores that must inline it, and step_int's prologue
+    # within its recorded register and stack budget (raise it in hot-paths.txt
+    # on purpose). It needs this job's build:
     # lightning, because without it step_int keeps the breakpoint and monitor
     # paths, which format by design, and the release profile's fat LTO,
     # without which it fails as unreadable. No run and no timing, so the result
