@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail when interpreter code formats text or a must-inline fetch goes out of line.
 
-    tools/hot-path-check/check.py target/release/iris [--rules FILE] [-v]
+    tools/hot-path-check/check.py target/release/iris [--build BUILD] [--rules FILE] [-v]
 
 Disassembles a `lightning` release binary built with upstream's release
 profile and applies the rules in hot-paths.txt beside this script:
@@ -14,6 +14,15 @@ profile and applies the rules in hot-paths.txt beside this script:
     instruction handler is covered without a rule edit;
   * no out-of-line symbol for a fetch that must be inlined (`CpuCache`,
     `ShadowCache` and `DecodeCache` `fetch`);
+  * `forbid` rules: a named hot function must not call a named helper. The
+    helper is correct; the call is the regression. `read_data_impl` and
+    `write_data_impl` must not call `CpuCache::fill_l1d_line_raw`, which
+    73a1df35 stopped inlining into the R4400 cache's copies (a call, a
+    prologue and argument set-up on every cached load and store). Which
+    copies hold depends on the build, so a rule can be written `forbid@BUILD`
+    and checked with `--build BUILD`; hot-paths.txt has the measurements.
+    The caller must exist, so a rename fails instead of passing by finding
+    nothing;
   * each anchor exists. Anchors are `#[inline(never)]` functions in the types
     the inline rules name, so renaming a type fails instead of letting an
     inline rule pass by finding nothing;
@@ -80,10 +89,13 @@ CALL_RE = re.compile(
 INDIRECT_RE = re.compile(r"\tcall[lq]?\s+\*")
 
 # rule kind -> number of fields after it
-ARITY = {"hot": 1, "cold": 2, "inline": 2, "anchor": 2, "control": 2, "format": 1}
+ARITY = {"hot": 1, "cold": 2, "inline": 2, "anchor": 2, "control": 2, "format": 1,
+         "forbid": 4}
 
 
-def load_rules(path):
+def load_rules(path, build="release"):
+    """Read the rules that apply to `build`. A rule kind written `kind@NAME`
+    applies to that build only; a plain `kind` applies to every build."""
     rules = {k: [] for k in ARITY}
     with open(path) as f:
         for n, line in enumerate(f, 1):
@@ -91,14 +103,21 @@ def load_rules(path):
             if not line:
                 continue
             kind, *rest = line.split()
+            kind, _, only = kind.partition("@")
+            if only and only != build:
+                continue
             try:
                 if ARITY.get(kind) != len(rest):
-                    raise ValueError("expected `hot OWNER`, `format CALLEE` or "
-                                     "`cold|inline|anchor|control OWNER METHOD`")
+                    raise ValueError("expected `hot OWNER`, `format CALLEE`, "
+                                     "`cold|inline|anchor|control OWNER METHOD`, "
+                                     "or `forbid OWNER METHOD CALLEE-OWNER CALLEE-METHOD`")
                 if kind in ("hot", "format"):
                     rules[kind].append(re.compile(rest[0]))
                 elif kind == "cold":
                     rules[kind].append((re.compile(rest[0]), re.compile(rest[1])))
+                elif kind == "forbid":
+                    rules[kind].append((line, re.compile(rest[0]), rest[1],
+                                        re.compile(rest[2]), rest[3]))
                 else:
                     rules[kind].append((line, re.compile(rest[0]), rest[1]))
             except (ValueError, re.error) as e:
@@ -175,18 +194,24 @@ def scan(lines, rules):
     hot       [symbol] of hot types, checked against the format rules;
     cold      [symbol] of hot types that a `cold` rule lets format;
     calls     symbol -> callee -> count of formatting calls;
-    indirect  symbol -> count of indirect calls.
+    indirect  symbol -> count of indirect calls;
+    callers   rule line -> [symbol] for `forbid` rules: the functions it watches;
+    forbidden rule line -> symbol -> callee -> count of forbidden calls;
     """
     named = defaultdict(list)
     outlined, hot, cold = [], [], []
     calls = defaultdict(lambda: defaultdict(int))
     indirect = defaultdict(int)
+    callers = defaultdict(list)
+    forbidden = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     cur = None                        # the function being read, if a rule wants it
+    watch = []                        # `forbid` rules whose caller this function is
     for line in lines:
         m = FUNC_RE.match(line)
         if m:
             name = m.group(2)
             cur = None
+            watch = []
             owner, method = owner_and_method(name)
             for kind in ("inline", "anchor", "control"):
                 for rule, rx, meth in rules[kind]:
@@ -198,6 +223,10 @@ def scan(lines, rules):
                         named[rule].append(name)
                     if kind != "anchor":
                         cur = name
+            for rule, rx, meth, crx, cmeth in rules["forbid"]:
+                if method == meth and rx.search(owner):
+                    callers[rule].append(name)
+                    watch.append((rule, crx, cmeth))
             hm = hot_method(name, rules["hot"])
             if hm:
                 if any(o.search(hm[0]) and mx.fullmatch(hm[1]) for o, mx in rules["cold"]):
@@ -206,15 +235,21 @@ def scan(lines, rules):
                     hot.append(name)
                 cur = name
             continue
-        if cur is not None:
+        if cur is not None or watch:
             m = CALL_RE.search(line)
             if m:
-                if any(rx.search(m.group(1)) for rx in rules["format"]):
+                if cur is not None and any(rx.search(m.group(1)) for rx in rules["format"]):
                     calls[cur][m.group(1)] += 1
-            elif INDIRECT_RE.search(line):
+                if watch:
+                    cowner, cmethod = owner_and_method(m.group(1))
+                    for rule, crx, cmeth in watch:
+                        if cmethod == cmeth and crx.search(cowner):
+                            forbidden[rule][name][m.group(1)] += 1
+            elif cur is not None and INDIRECT_RE.search(line):
                 indirect[cur] += 1
     return {"named": named, "outlined": outlined, "hot": hot, "cold": cold,
-            "calls": calls, "indirect": indirect}
+            "calls": calls, "indirect": indirect, "callers": callers,
+            "forbidden": forbidden}
 
 
 def readable(rules, found):
@@ -244,6 +279,26 @@ def readable(rules, found):
     print(msg + ".\n      Check a build with upstream's release profile "
           "(lto = \"fat\", codegen-units = 1), which plain `cargo build --release` uses.")
     return False
+
+
+def report_forbidden(rules, found, verbose=False):
+    """Print the `forbid` rules' result; return True when none is broken."""
+    ok = True
+    for rule, _, meth, _, cmeth in rules["forbid"]:
+        syms = found["callers"][rule]
+        calls = found["forbidden"][rule]
+        print(f"{len(syms):4d} x {meth} (must not call {cmeth})")
+        if not syms:
+            print(f"FAIL: no symbol matches the caller in `{rule}`. It was renamed or "
+                  f"inlined away, so the rule would pass by finding nothing: update "
+                  f"hot-paths.txt to match.")
+            ok = False
+        for sym in sorted(calls):
+            what = ", ".join(f"{n} x {c}" for c, n in sorted(calls[sym].items()))
+            print(f"FAIL: {sym} calls {cmeth}, which must stay inlined ({rule}):\n"
+                  f"      {what}")
+            ok = False
+    return ok
 
 
 def report(rules, found, verbose=False):
@@ -278,6 +333,7 @@ def report(rules, found, verbose=False):
     for sym, callees in sorted(bad.items()):
         what = ", ".join(f"{n} x {c}" for c, n in sorted(callees.items()))
         print(f"      {sym}: {what}")
+    ok = report_forbidden(rules, found, verbose) and ok
     if verbose:
         print("cold symbols, allowed to format:")
         for s in sorted(found["cold"]):
@@ -315,10 +371,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("binary")
     ap.add_argument("--rules", default=os.path.join(HERE, "hot-paths.txt"))
+    ap.add_argument("--build", default="release",
+                    help="which build the binary is, for rules written `kind@NAME`: "
+                         "`release` (CI's feature set, the default) or `lightning` "
+                         "(--features lightning,gpujit)")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="list the anchors, and the cold symbols with their call counts")
     a = ap.parse_args()
-    rules = load_rules(a.rules)
+    rules = load_rules(a.rules, a.build)
     found = scan(disassemble(find_objdump(), a.binary), rules)
     return 0 if report(rules, found, a.verbose) else 1
 

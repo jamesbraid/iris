@@ -14,13 +14,16 @@ import contextlib
 import io
 import os
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import check  # noqa: E402
 
-RULES = check.load_rules(os.path.join(check.HERE, "hot-paths.txt"))
+HOT_PATHS = os.path.join(check.HERE, "hot-paths.txt")
+# The fixtures use the R4400 cache, which the lightning rules name.
+RULES = check.load_rules(HOT_PATHS, "lightning")
 
 EXEC = ("<iris::cpu::mips_exec::MipsExecutor<iris::cpu::mips_tlb::MipsTlb, "
         "iris::cpu::mips_cache_v2::CpuCache<16384, 16, true, 0>>>")
@@ -64,6 +67,7 @@ CLEAN = (
     + func(0x2300, EXEC + "::fault_note", call("alloc::fmt::format::format_inner"))
     + func(0x2400, EXEC + "::debug_read", call("alloc::fmt::format::format_inner"))
     + func(0x2500, EXEC + "::backtrace_from::{closure#0}", call("core::fmt::write"))
+    + func(0x2600, EXEC + "::write_data_impl::<false, 8>", call(EXEC + "::report_bus_error"))
 )
 
 
@@ -161,10 +165,11 @@ class Coverage(unittest.TestCase):
         self.assertTrue(passes(lines)[0])
 
     def test_hot_methods_may_be_inlined_away(self):
-        # A build where the inliner folded read_data_impl and step_int into
-        # their callers: nothing requires them to exist, and their code is
-        # checked in the handler it landed in.
-        keep = [l for l in CLEAN if "read_data_impl" not in l and "step_int" not in l]
+        # A build where the inliner folded step_int into its caller: nothing
+        # requires it to exist, and its code is checked in the handler it
+        # landed in. (read_data_impl is different: the forbid rules name it, so
+        # a build without it fails instead of passing by finding nothing.)
+        keep = [l for l in CLEAN if "step_int" not in l]
         self.assertTrue(passes(keep)[0])
         lines = keep + func(0x3000, EXEC + "::exec_lw", call("std::io::stdio::_eprint"))
         self.assertEqual(bad_symbols(lines), {EXEC + "::exec_lw"})
@@ -196,6 +201,83 @@ class Inlining(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("fill_l1i_line", out)
 
+
+FILL = CACHE.replace(" as iris::cpu::mips_cache_v2::MipsCache", "") + "::fill_l1d_line_raw"
+class Forbidden(unittest.TestCase):
+    def test_clean_build_passes(self):
+        found = scan(CLEAN)
+        self.assertEqual(len(found["callers"]), 2)
+        self.assertEqual(len(found["forbidden"]), 0)
+
+    def test_outlined_cache_fill_in_a_load_or_store_fails(self):
+        # 73a1df35 stopped inlining fill_l1d_line_raw into these two.
+        for meth in ("read_data_impl::<false, 4>", "write_data_impl::<false, 8>"):
+            with self.subTest(meth=meth):
+                lines = CLEAN + func(0x3000, EXEC + "::" + meth, call(FILL))
+                ok, out = passes(lines)
+                self.assertFalse(ok)
+                self.assertIn("fill_l1d_line_raw", out)
+                self.assertIn("must stay inlined", out)
+                self.assertIn(EXEC + "::" + meth, out)
+
+    def test_tail_jump_to_the_fill_counts(self):
+        lines = CLEAN + func(0x3000, EXEC + "::read_data_impl::<false, 2>",
+                             f"jmp    b000 <{FILL}>")
+        self.assertFalse(passes(lines)[0])
+
+    def test_only_the_named_callers_are_watched(self):
+        # exec_lw may call the fill (it does not today); the rule is about the
+        # two functions whose inlining was lost.
+        lines = CLEAN + func(0x3000, EXEC + "::exec_lw", call(FILL))
+        self.assertTrue(passes(lines)[0])
+
+    def test_other_callees_of_a_watched_caller_pass(self):
+        lines = CLEAN + func(0x3000, EXEC + "::read_data_impl::<false, 1>",
+                             call(CACHE.replace(" as iris::cpu::mips_cache_v2::MipsCache", "")
+                                  + "::fill_l2_line_for"))
+        self.assertTrue(passes(lines)[0])
+
+    def test_missing_caller_fails_instead_of_passing_blind(self):
+        lines = [l.replace("read_data_impl", "load_data_impl") for l in CLEAN]
+        ok, out = passes(lines)
+        self.assertFalse(ok)
+        self.assertIn("read_data_impl", out)
+        self.assertIn("inlined away", out)
+
+
+class Builds(unittest.TestCase):
+    def rules(self, text, build):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt") as f:
+            f.write(text)
+            f.flush()
+            return check.load_rules(f.name, build)
+
+    def test_a_rule_applies_to_its_own_build_and_plain_rules_to_all(self):
+        text = ("hot MipsExecutor<\nforbid@release A a B b\nforbid@lightning C c D d\n"
+                )
+        for build, forbid in (("release", 1), ("lightning", 1), ("other", 0)):
+            with self.subTest(build=build):
+                rules = self.rules(text, build)
+                self.assertEqual(len(rules["hot"]), 1)
+                self.assertEqual(len(rules["forbid"]), forbid)
+
+    def test_shipped_release_rules_leave_the_r4400_loads_alone(self):
+        # Every build so far calls the fill from the R4400 loads under the
+        # release feature set, so only the other caches are watched.
+        rules = check.load_rules(HOT_PATHS, "release")
+        r4400 = EXEC + "::read_data_impl::<false, 4>"
+        other = EXEC.replace("16384", "32768") + "::read_data_impl::<false, 4>"
+        lines = (CLEAN + func(0x3000, r4400, call(FILL)) + func(0x3100, other, "ret"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(check.report_forbidden(rules, check.scan(lines, rules)))
+        lines = CLEAN + func(0x3100, other, call(FILL))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(check.report_forbidden(rules, check.scan(lines, rules)))
+
+    def test_shipped_lightning_rules_watch_the_r4400_loads(self):
+        r4400 = EXEC + "::read_data_impl::<false, 4>"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(passes(CLEAN + func(0x3000, r4400, call(FILL)))[0])
 
 class Readable(unittest.TestCase):
     def test_thin_lto_build_is_unreadable(self):

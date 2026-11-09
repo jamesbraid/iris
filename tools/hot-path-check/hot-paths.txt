@@ -20,6 +20,14 @@
 #                                 design. If no copy of any control shows a
 #                                 formatting call, the disassembly cannot show
 #                                 them, and the run fails as unreadable.
+#   Any kind may be written `kind@BUILD` (`release` or `lightning`): it then
+#   applies when check.py runs with --build BUILD, and the plain kinds apply always.
+#
+#   forbid  OWNER METHOD CALLEE-OWNER CALLEE-METHOD
+#                                 a function that must not call a helper (every
+#                                 copy of OWNER's METHOD, direct call or tail
+#                                 jump). For a helper the compiler must inline.
+#                                 The caller must exist or the rule fails.
 #   format  CALLEE-REGEX          a formatting or printing function. A direct call
 #                                 or tail jump to one from `hot` code fails.
 #
@@ -79,3 +87,24 @@ format  ^<(?:u|i)(?:8|16|32|64|128|size)>::_fmt$
 format  ^core::fmt::num::
 format  \sas\score::fmt::\w+>::fmt$
 format  ^log::__private_api::log
+
+# 73a1df35 ("bus: now it is 64 bits") stopped inlining the L1D line fill into
+# the load and store paths of the R4400 cache (CpuCache<16384, ...>): a call,
+# a prologue and argument set-up per cached access. The helper stays out of line
+# for other callers; these functions must not call it. Which copies hold depends
+# on the build, measured with the rules below on 73a1df35^, 73a1df35 and main:
+#
+#   release (lightning,jitv2,gpujit,idle-pause,hostgl, what CI builds)
+#       every write_data_impl is clean, and so is every read_data_impl except
+#       the R4400 one, which calls the fill in all three revisions. 73a1df35
+#       does not change this build (the same symbols call the fill before and
+#       after), so no rule here can catch it; they guard the rest.
+#   lightning (lightning,gpujit)
+#       73a1df35^ is clean for the R4400 cache and 73a1df35 is not. The R10000
+#       cache (CpuCache<32768, ...>) was already out of line before it, so it
+#       is not listed. Main fails these rules until the inlining is recovered,
+#       so CI does not build this configuration yet.
+forbid@release    MipsExecutor<                      write_data_impl  CpuCache<   fill_l1d_line_raw
+forbid@release    MipsExecutor<.*CpuCache<(?!16384,) read_data_impl   CpuCache<   fill_l1d_line_raw
+forbid@lightning  MipsExecutor<.*CpuCache<16384,     read_data_impl   CpuCache<   fill_l1d_line_raw
+forbid@lightning  MipsExecutor<.*CpuCache<16384,     write_data_impl  CpuCache<   fill_l1d_line_raw
