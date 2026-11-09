@@ -8,7 +8,7 @@
 
 use crate::traits::{BusRead64, BusDevice, Resettable, BUS_OK, BUS_BUSY, BUS_ERR, BUS_VCE};
 use crate::snapshot::{u32_slice_to_toml, u64_slice_to_toml, load_u32_slice, load_u64_slice, get_field, toml_bool, toml_u32, toml_u64, hex_u32, hex_u64};
-use crate::cpu::mips_exec::{DecodedInstr, ExecStatus, EXEC_COMPLETE, EXEC_RETRY, exec_exception_const, EXC_VCEI, EXC_VCED, EXC_IBE, FLAG_NOT_DECODED, FLAG_IMM_IS_NEXT, EXEC_CACHE_ERR};
+use crate::cpu::mips_exec::{DecodedInstr, ExecStatus, EXEC_COMPLETE, EXEC_RETRY, exec_exception_const, fetch_fault_status, EXC_VCEI, EXC_VCED, EXC_IBE, FLAG_NOT_DECODED, FLAG_IMM_IS_NEXT, EXEC_CACHE_ERR};
 use crate::devlog::{LogModule, CACHE_LOG_HIT, CACHE_LOG_MISS, CACHE_LOG_OP, devlog_is_active, devlog_mask};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -999,7 +999,7 @@ impl<const MIPS4: bool> MipsCache for PassthroughCacheOf<MIPS4> {
             FetchInstrResult::hit(slot as *const DecodedInstr)
         } else {
             // BUS_BUSY == EXEC_RETRY (compile-time asserted in traits.rs); pass status through.
-            FetchInstrResult::exception(r.status)
+            FetchInstrResult::exception(fetch_fault_status(r.status))
         }
     }
 
@@ -2842,7 +2842,11 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
                     for i in 0..Self::IC_INSTRS_PER_LINE {
                         let word_addr = line_base + (i as u64) * 4;
                         let r = self.downstream.read32(word_addr);
-                        let w = if r.is_ok() { r.data } else { 0 };
+                        // A failed refill is a bus error on the fetch (the L2 path above
+                        // does the same); the half-written slots are unreachable, as the
+                        // tag is not set.
+                        if !r.is_ok() { return fetch_fault_status(r.status); }
+                        let w = r.data;
                         let d = &mut ic_instrs[ic_slot_base + i];
                         d.flags = FLAG_NOT_DECODED;
                         d.raw = w;

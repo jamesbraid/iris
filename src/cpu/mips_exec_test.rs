@@ -7021,6 +7021,70 @@ mod tests {
         assert_eq!(run::<R10K>(OP_LW).0, BUS_ERR, "a refused load still faults");
     }
 
+    /// A bus error on an instruction fetch is IBE (ExcCode 6), never DBE,
+    /// whether the fetch is uncached (kseg1) or a cache fill (kseg0), on every
+    /// cache model: EPC is the fetch address (the branch's, in a delay slot,
+    /// with BD set) and BadVAddr is left alone, since bus errors are not
+    /// addressing errors (R4000 UM pp. 103, 134, 145; VR5000 UM pp. 141, 168;
+    /// R10000 UM p. 346). A load from the same bus is still DBE.
+    /// Fix: fetch bus error code.
+    #[test]
+    fn instruction_fetch_bus_error_is_ibe_on_every_model() {
+        use crate::cpu::mips_cache_shadow::*;
+        use crate::cpu::mips_core::{CAUSE_BD, CAUSE_EXCCODE_MASK};
+        use crate::cpu::mips_exec::{EXC_DBE, EXC_IBE};
+        use crate::cpu::mips_cache_v2::R5000Cache;
+        fn code(exec: &MipsExecutor<PassthroughTlb, impl CpuModel>) -> u32 {
+            (exec.core.cp0_cause & CAUSE_EXCCODE_MASK) >> 2
+        }
+        fn check<C: CpuModel + From<Arc<dyn BusDevice>>>() {
+            for pc in [0xFFFF_FFFF_A000_0100u64, 0xFFFF_FFFF_8000_0100] {
+                for in_delay_slot in [false, true] {
+                    let bus: Arc<dyn BusDevice> = Arc::new(RefusingBus);
+                    let mut exec = MipsExecutor::<PassthroughTlb, C>::new(bus, PassthroughTlb::default(), &MipsCpuConfig::indy());
+                    disable_jitv2(&mut exec);
+                    exec.core.cp0_badvaddr = 0x5555;
+                    exec.core.pc = pc;
+                    exec.core.in_delay_slot = in_delay_slot;
+                    let st = exec.step_int();
+                    let what = format!("{} pc {pc:#x} delay slot {in_delay_slot}", C::NAME);
+                    assert_eq!(st, exec_exception(EXC_IBE), "{what}");
+                    assert_eq!(code(&exec), EXC_IBE, "{what}");
+                    assert_eq!(exec.core.cp0_epc, if in_delay_slot { pc - 4 } else { pc }, "{what}");
+                    assert_eq!(exec.core.cp0_cause & CAUSE_BD != 0, in_delay_slot, "{what}");
+                    assert_eq!(exec.core.cp0_badvaddr, 0x5555, "{what}");
+                }
+            }
+            let bus: Arc<dyn BusDevice> = Arc::new(RefusingBus);
+            let mut exec = MipsExecutor::<PassthroughTlb, C>::new(bus, PassthroughTlb::default(), &MipsCpuConfig::indy());
+            disable_jitv2(&mut exec);
+            exec.core.write_gpr(4, 0xFFFF_FFFF_A100_0000);
+            assert_eq!(exec.exec(make_i(OP_LW, 4, 8, 0)), exec_exception(EXC_DBE), "{}: a load", C::NAME);
+        }
+        check::<PassthroughCache>();
+        check::<R4400Cache>();
+        check::<R5000Cache>();
+        check::<crate::cpu::mips_cache_v2::R10000Cache>();
+        check::<R4400ShadowCache>();
+        check::<R5000ShadowCache>();
+        check::<R10000ShadowCache>();
+    }
+
+    /// The jitv2 dispatch step fetches through the same path, so a fetch bus
+    /// error there is IBE too. Fix: fetch bus error code.
+    #[cfg(feature = "jitv2")]
+    #[test]
+    fn jit_step_fetch_bus_error_is_ibe() {
+        use crate::cpu::mips_exec::EXC_IBE;
+        for pc in [0xFFFF_FFFF_A000_0100u64, 0xFFFF_FFFF_8000_0100] {
+            let bus: Arc<dyn BusDevice> = Arc::new(RefusingBus);
+            let mut exec = MipsExecutor::<PassthroughTlb, crate::cpu::mips_cache_shadow::R10000ShadowCache>::new(bus, PassthroughTlb::default(), &MipsCpuConfig::indy());
+            exec.core.pc = pc;
+            assert_eq!(exec.step_jit(), exec_exception(EXC_IBE), "pc {pc:#x}");
+            assert_eq!(exec.core.cp0_epc, pc);
+        }
+    }
+
     /// The O2's RAM alias at 0x8000_0000 is matched on the 32 bits the board
     /// decodes, so a PTE software bit above the PFN (PA 0x1_8000_0000) cannot
     /// send a mapped page to the PCI window. Fix: O2 memory alias.

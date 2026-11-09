@@ -686,6 +686,16 @@ pub const EXEC_CACHE_ERR: ExecStatus = EXEC_IS_EXCEPTION | EXEC_IS_CACHE_ERR;
 // The values MUST stay identical; enforced by compile-time asserts in traits.rs.
 pub const EXEC_BUS_ERR: ExecStatus = exec_exception_const(EXC_DBE);  // 0x0800_001C
 pub const EXEC_BUS_VCE: ExecStatus = exec_exception_const(EXC_VCED); // 0x0800_007C
+/// A bus error on an instruction fetch is IBE, not DBE (R4000 UM p.134,
+/// R10000 UM p.346). The bus only says `BUS_ERR`; the fetch paths convert it.
+pub const EXEC_FETCH_BUS_ERR: ExecStatus = exec_exception_const(EXC_IBE);
+
+/// The status a failed instruction fetch raises for the bus's `status`.
+/// Only the failure paths call this, so a good fetch never pays for it.
+#[inline(always)]
+pub const fn fetch_fault_status(status: ExecStatus) -> ExecStatus {
+    if status == EXEC_BUS_ERR { EXEC_FETCH_BUS_ERR } else { status }
+}
 
 /// `const`-evaluable version of exec_exception (for use in const initializers).
 #[inline(always)]
@@ -5187,7 +5197,7 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
                 if r.status != BUS_BUSY {
                     eprintln!("Bus error on instruction fetch: PC={:016x} PA={:08x} status={:08x}{}", virt_addr, phys_addr, r.status, self.fault_note(phys_addr, 4));
                 }
-                FetchInstrResult::exception(r.status)
+                FetchInstrResult::exception(fetch_fault_status(r.status))
             }
         }
     }
