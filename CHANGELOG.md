@@ -45,6 +45,7 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 - `iris-bench irix` finds the programs a step `requires` on IRIX 6.5.22; it skipped every step before. A `requires` with a slash in it is tested as a path.
 - The guest suite uses `dd` and `ping` options IRIX accepts. `net/loopback_ping` now floods 10000 packets instead of sending 100, so earlier results for that step do not compare. `disk/read_cold` reads from the disk instead of the guest's buffer cache: it read at 87 GB/s before.
+- A guest step that fails is recorded as a `FAILED` row and the suite carries on; it used to stop at the first quiet failure and lose the results so far. A step skipped for a missing program is a `SKIP` row.
 
 ### PCI
 

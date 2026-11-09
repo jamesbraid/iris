@@ -456,32 +456,62 @@ struct Ci {
     timeout: u64,
 }
 
+/// How one command run in the guest ended, from `iris-ci run`'s exit status
+/// and its message on stderr.
+enum Outcome {
+    /// `secs` is host wall time around the `iris-ci run`.
+    Done { out: String, secs: f64 },
+    /// The command ran and exited nonzero.
+    Failed { out: String, exit: i32 },
+}
+
+impl Outcome {
+    /// For commands whose failure means the harness is broken, not the step.
+    fn done(self) -> Result<(String, f64), String> {
+        match self {
+            Outcome::Done { out, secs } => Ok((out, secs)),
+            Outcome::Failed { exit, .. } => Err(format!("guest command exited {exit}")),
+        }
+    }
+}
+
+/// `iris-ci run` exits nonzero for every failure and says which in a message,
+/// `iris-ci: iris error: guest exit N` when the guest command failed. Anything
+/// else (no emulator, no socket) is an error.
+fn classify(success: bool, out: String, stderr: &str, secs: f64) -> Result<Outcome, String> {
+    if success { return Ok(Outcome::Done { out, secs }); }
+    let exit = stderr.rfind("guest exit ")
+        .and_then(|i| stderr[i + 11..].split_whitespace().next()?.parse().ok());
+    match exit {
+        Some(exit) => Ok(Outcome::Failed { out, exit }),
+        None => Err(format!("iris-ci run failed: {}", stderr.trim())),
+    }
+}
+
 impl Ci {
-    /// Returns the guest's stdout. An iris-ci failure is an error; a nonzero
-    /// exit status inside the guest is not — several steps end on a command
-    /// that legitimately returns nonzero.
-    fn run(&self, guest_cmd: &str) -> Result<(String, f64), String> {
+    /// Run `guest_cmd`, waiting `secs` for it (`self.timeout` when `None`). An
+    /// `Err` means the guest could not be asked; a command that ran and failed
+    /// is an `Ok`.
+    fn run(&self, guest_cmd: &str, secs: Option<u64>) -> Result<Outcome, String> {
+        let secs = secs.unwrap_or(self.timeout);
         let mut cmd = Command::new(&self.bin);
         if let Some(s) = &self.socket { cmd.arg("--socket").arg(s); }
         cmd.arg("run")
             .arg(guest_cmd)
             .arg("--shell").arg(&self.shell)
-            .arg("--timeout").arg(self.timeout.to_string());
+            .arg("--timeout").arg(secs.to_string());
         let started = Instant::now();
-        let out = run_with_timeout(cmd, self.timeout + 30)?;
-        let secs = started.elapsed().as_secs_f64();
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        if !out.status.success() && stdout.trim().is_empty() {
-            return Err(format!(
-                "iris-ci run failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-        Ok((stdout, secs))
+        let out = run_with_timeout(cmd, secs + 30)?;
+        classify(
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            &String::from_utf8_lossy(&out.stderr),
+            started.elapsed().as_secs_f64(),
+        )
     }
 
     fn has(&self, prog: &str) -> Result<bool, String> {
-        let (out, _) = self.run(&wrap(&probe_command(prog)))?;
+        let (out, _) = self.run(&wrap(&probe_command(prog)), None)?.done()?;
         Ok(out.contains("IRISBENCH-HAVE"))
     }
 
@@ -492,10 +522,26 @@ impl Ci {
     fn baseline(&self) -> Result<f64, String> {
         let mut best = f64::MAX;
         for _ in 0..3 {
-            let (_, s) = self.run(&wrap(":"))?;
+            let (_, s) = self.run(&wrap(":"), None)?.done()?;
             if s < best { best = s; }
         }
         Ok(best)
+    }
+}
+
+fn row(step: &Step, ns: u64, status: &str) -> Row {
+    Row {
+        name: step.name.clone(),
+        unit: step.unit.clone(),
+        iters: 1,
+        work: step.work,
+        ns,
+        icount: 0,
+        count: 0,
+        exc: 0,
+        checksum: "0x0000000000000000".into(),
+        golden: "0x0000000000000000".into(),
+        status: status.into(),
     }
 }
 
@@ -507,7 +553,7 @@ fn run_irix(ci: &Ci, steps_path: &Path, label: &str) -> Result<Run, String> {
 
     // Identify the guest before anything else: a result recorded against the
     // wrong disk image is worse than no result.
-    let (uname, _) = ci.run(&wrap("uname -a"))?;
+    let (uname, _) = ci.run(&wrap("uname -a"), None)?.done()?;
     let cpu = uname.lines().find(|l| l.contains("IRIX")).unwrap_or("IRIX").trim().to_string();
     println!("  guest: {}", cpu);
 
@@ -517,16 +563,33 @@ fn run_irix(ci: &Ci, steps_path: &Path, label: &str) -> Result<Run, String> {
     let mut rows = Vec::new();
     let mut total_ns = 0u64;
 
+    // A step that fails or is skipped gets a row of its own and the suite goes
+    // on: one missing tool or broken workload says nothing about the next step.
     for step in &file.step {
         if let Some(prog) = &step.requires {
             if !ci.has(prog)? {
                 println!("  {:<22} skipped ({} not installed)", step.name, prog);
+                rows.push(row(step, 0, "SKIP"));
                 continue;
             }
         }
-        if let Some(setup) = &step.setup { ci.run(&wrap(setup))?; }
+        let mut o = match &step.setup {
+            Some(setup) => ci.run(&wrap(setup), None)?,
+            None => Outcome::Done { out: String::new(), secs: 0.0 },
+        };
+        let in_setup = !matches!(o, Outcome::Done { .. });
+        if !in_setup { o = ci.run(&wrap(&step.cmd), None)?; }
 
-        let (_, secs) = ci.run(&wrap(&step.cmd))?;
+        let secs = match o {
+            Outcome::Done { secs, .. } => secs,
+            Outcome::Failed { out, exit } => {
+                println!("  {:<22} FAILED ({}exited {})", step.name,
+                         if in_setup { "setup " } else { "" }, exit);
+                for l in tail(out.trim_end(), 3).lines() { println!("      {l}"); }
+                rows.push(row(step, 0, "FAILED"));
+                continue;
+            }
+        };
         if step.skip_timing { continue; }
 
         let ns = ((secs - baseline).max(0.0) * 1e9) as u64;
@@ -541,21 +604,9 @@ fn run_irix(ci: &Ci, steps_path: &Path, label: &str) -> Result<Run, String> {
                 String::new()
             }
         );
-        rows.push(Row {
-            name: step.name.clone(),
-            unit: step.unit.clone(),
-            iters: 1,
-            work: step.work,
-            ns,
-            icount: 0,
-            count: 0,
-            exc: 0,
-            checksum: "0x0000000000000000".into(),
-            golden: "0x0000000000000000".into(),
-            // Nothing here is checksummed: these are IRIX's own tools against
-            // IRIX's own filesystem, and their output is not ours to predict.
-            status: "UNCHECKED".into(),
-        });
+        // Nothing here is checksummed: these are IRIX's own tools against
+        // IRIX's own filesystem, and their output is not ours to predict.
+        rows.push(row(step, ns, "UNCHECKED"));
     }
 
     Ok(Run {
@@ -1613,5 +1664,16 @@ mod tests {
         let cold = steps.iter().find(|s| s.name == "disk/read_cold").unwrap();
         assert!(!cold.cmd.contains("irisbench.dat"));
         assert!(cold.setup.as_deref().unwrap().contains("hinv -c memory"));
+    }
+
+    #[test]
+    fn iris_ci_messages_say_how_a_run_ended() {
+        assert!(matches!(classify(true, String::new(), "", 1.0), Ok(Outcome::Done { .. })));
+        match classify(false, "x\n".into(), "iris-ci: iris error: guest exit 3\n", 1.0) {
+            Ok(Outcome::Failed { exit: 3, out }) => assert_eq!(out, "x\n"),
+            _ => panic!("a nonzero guest status is a failed step"),
+        }
+        // No emulator to talk to: the run stops, it is not a step result.
+        assert!(classify(false, String::new(), "iris-ci: connect /x: refused\n", 1.0).is_err());
     }
 }
