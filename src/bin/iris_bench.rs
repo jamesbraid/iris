@@ -708,6 +708,21 @@ fn run_steps(guest: &impl Guest, steps: &[Step], baseline: f64) -> Result<(Vec<R
     Ok((rows, total_ns))
 }
 
+/// Prints the guest's `uname -a` after a marker. The tty echoes the typed
+/// command line ahead of the output, and a line of that echo can run into the
+/// start of the real output. Searching for "IRIX" then picked up shell input.
+/// The marker is typed as `UNAM\E` so the echo cannot contain it.
+const UNAME_COMMAND: &str = "echo IRISBENCH-UNAM\\E `uname -a`";
+
+/// The guest's `uname -a` line, from the one line that starts with the marker.
+fn guest_name(out: &str) -> String {
+    out.lines()
+        .find_map(|l| l.trim().strip_prefix("IRISBENCH-UNAME "))
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 fn run_irix(ci: &Ci, steps_path: &Path, extra: &[PathBuf], label: &str) -> Result<Run, String> {
     let mut steps = load_steps(steps_path)?;
     for path in extra {
@@ -716,8 +731,7 @@ fn run_irix(ci: &Ci, steps_path: &Path, extra: &[PathBuf], label: &str) -> Resul
 
     // Identify the guest before anything else: a result recorded against the
     // wrong disk image is worse than no result.
-    let uname = ci.run(&wrap("uname -a"))?.stdout;
-    let cpu = uname.lines().find(|l| l.contains("IRIX")).unwrap_or("IRIX").trim().to_string();
+    let cpu = guest_name(&ci.run(&wrap(UNAME_COMMAND))?.stdout);
     println!("  guest: {}", cpu);
 
     let floor = baseline(ci)?;
@@ -1492,6 +1506,24 @@ mod tests {
         assert_eq!(o.status.code(), Some(3));
         assert_eq!(String::from_utf8_lossy(&o.stdout), "out\n");
         assert_eq!(String::from_utf8_lossy(&o.stderr), "err\n");
+    }
+
+    #[test]
+    fn the_guest_name_comes_from_the_marked_line_only() {
+        // The echo of the typed line first, then the output.
+        let out = "echo IRISBENCH-UNAM\\E `uname -a`\r\nIRISBENCH-UNAME IRIX IRIS 6.5 10070055 IP22\r\n";
+        assert_eq!(guest_name(out), "IRIX IRIS 6.5 10070055 IP22");
+        // Echoed input that runs into the output does not leak into the name.
+        let out = "echo IRIRISBENCH-UNAME IRIX64 IP27\n";
+        assert_eq!(guest_name(out), "unknown");
+        assert_eq!(guest_name(""), "unknown");
+        assert_eq!(guest_name("IRISBENCH-UNAME \n"), "unknown");
+    }
+
+    #[test]
+    fn the_uname_command_line_does_not_contain_its_own_marker() {
+        assert!(!UNAME_COMMAND.contains("IRISBENCH-UNAME"));
+        assert!(!UNAME_COMMAND.contains('\''));
     }
 
     #[test]
