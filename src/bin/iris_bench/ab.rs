@@ -753,6 +753,13 @@ pub struct KernelSummary {
     pub noise: Option<f64>,
     pub ci: Option<[f64; 2]>,
     pub verdict: Verdict,
+    /// Guest instructions per iteration, median per side. Differs only when
+    /// the guest code differs or the emulator miscounts.
+    pub ipi_a: f64,
+    pub ipi_b: f64,
+    /// The medians differ by more than [`IPI_TOLERANCE`] and no round of A
+    /// overlaps any round of B.
+    pub ipi_differs: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -782,10 +789,13 @@ fn per_insn(k: &KernelSample) -> Option<f64> {
 
 /// `a` and `b` hold one entry per round, `None` where that run had no usable
 /// figure for the kernel. Only rounds where both sides have one are paired.
-fn summarise_series(name: &str, a: &[Option<f64>], b: &[Option<f64>], thr: f64) -> KernelSummary {
-    let side = |v: &[Option<f64>]| -> Vec<f64> { v.iter().flatten().copied().collect() };
-    let (a_cost, b_cost) = (Cost::of(&side(a)), Cost::of(&side(b)));
-    let ratios: Vec<f64> = a.iter().zip(b).filter_map(|(x, y)| Some((*y)? / (*x)?)).collect();
+fn summarise_series(name: &str, a: &[Option<(f64, f64)>], b: &[Option<(f64, f64)>], thr: f64) -> KernelSummary {
+    let side = |v: &[Option<(f64, f64)>]| -> Vec<(f64, f64)> { v.iter().flatten().copied().collect() };
+    let (sa, sb) = (side(a), side(b));
+    let (ca, cb) = (sa.iter().map(|x| x.0).collect::<Vec<_>>(), sb.iter().map(|x| x.0).collect::<Vec<_>>());
+    let (ia, ib) = (sa.iter().map(|x| x.1).collect::<Vec<_>>(), sb.iter().map(|x| x.1).collect::<Vec<_>>());
+    let (a_cost, b_cost) = (Cost::of(&ca), Cost::of(&cb));
+    let ratios: Vec<f64> = a.iter().zip(b).filter_map(|(x, y)| Some(y.as_ref()?.0 / x.as_ref()?.0)).collect();
     let ci = bootstrap_ci(&ratios, BOOT_RESAMPLES, BOOT_CONFIDENCE, BOOT_SEED);
     let (median_ratio, min_ratio) = (b_cost.median / a_cost.median, b_cost.min / a_cost.min);
     let noise = noise(&ratios);
@@ -797,6 +807,9 @@ fn summarise_series(name: &str, a: &[Option<f64>], b: &[Option<f64>], thr: f64) 
         noise,
         paired_ratio: median(&ratios),
         ci: ci.map(|(lo, hi)| [lo, hi]),
+        ipi_a: median(&ia),
+        ipi_b: median(&ib),
+        ipi_differs: ipi_differs(&ia, &ib),
         a: a_cost,
         b: b_cost,
     }
@@ -807,19 +820,20 @@ pub fn summarise(rounds: &[Round<Sample>], thr: f64) -> Summary {
     for k in &rounds[0].a.kernels {
         if per_insn(k).is_some() { names.push(k.name.clone()); }
     }
-    let series = |side: Side, name: &str| -> Vec<Option<f64>> {
+    let series = |side: Side, name: &str| -> Vec<Option<(f64, f64)>> {
         rounds.iter().map(|r| {
             let s = if side == Side::A { &r.a } else { &r.b };
-            per_insn(s.kernels.iter().find(|k| k.name == name)?)
+            let k = s.kernels.iter().find(|k| k.name == name)?;
+            Some((per_insn(k)?, k.icount as f64 / k.iters.max(1) as f64))
         }).collect()
     };
     let kernels = names.iter()
         .map(|n| summarise_series(n, &series(Side::A, n), &series(Side::B, n), thr))
         .collect();
-    let tot = |side: Side| -> Vec<Option<f64>> {
+    let tot = |side: Side| -> Vec<Option<(f64, f64)>> {
         rounds.iter().map(|r| {
             let s = if side == Side::A { &r.a } else { &r.b };
-            Some(s.total_ns as f64 / s.total_icount.max(1) as f64)
+            Some((s.total_ns as f64 / s.total_icount.max(1) as f64, s.total_icount as f64))
         }).collect()
     };
     let total = summarise_series("(suite)", &tot(Side::A), &tot(Side::B), thr);
@@ -852,6 +866,26 @@ pub fn summarise(rounds: &[Round<Sample>], thr: f64) -> Summary {
         }
     }
     Summary { kernels, total, host, rounds: rounds.len(), bad_status: bad }
+}
+
+/// How far the median guest instructions per iteration may differ between A
+/// and B before the table warns.
+pub const IPI_TOLERANCE: f64 = 0.005;
+
+/// Whether A and B did different guest work per iteration of a kernel, from
+/// each round's instructions per iteration. Both run one image, so the work
+/// should match, but each run sizes its iteration count by time, and a
+/// kernel's fixed setup, or work that depends on the iteration, then moves
+/// the per-iteration figure from run to run: by up to 4% for fpu/transcend
+/// when one binary ran against itself. So the medians must differ by more
+/// than [`IPI_TOLERANCE`] and the two sides' ranges must not overlap. A
+/// different image or an emulator that counts differently shifts every round.
+pub fn ipi_differs(a: &[f64], b: &[f64]) -> bool {
+    if a.is_empty() || b.is_empty() { return false; }
+    let (ma, mb) = (median(a), median(b));
+    let range = |v: &[f64]| (minimum(v), v.iter().copied().fold(f64::NAN, f64::max));
+    let ((lo_a, hi_a), (lo_b, hi_b)) = (range(a), range(b));
+    (ma - mb).abs() > IPI_TOLERANCE * ma.abs().max(1.0) && (lo_b > hi_a || lo_a > hi_b)
 }
 
 fn mips(ns_per_insn: f64) -> f64 { 1e3 / ns_per_insn }
@@ -904,6 +938,16 @@ pub fn table(s: &Summary, la: &str, lb: &str, thr: f64) -> String {
     }
     if s.rounds < MIN_VERDICT_ROUNDS {
         o.push_str(&format!("\nOnly {} round(s): too few to judge anything. Use at least {MIN_VERDICT_ROUNDS}; 30 or more on a busy host.\n", s.rounds));
+    }
+    let drift: Vec<String> = s.kernels.iter()
+        .filter(|k| k.ipi_differs)
+        .map(|k| format!("{} ({:.1} vs {:.1})", k.name, k.ipi_a, k.ipi_b)).collect();
+    if !drift.is_empty() {
+        o.push_str(&format!(
+            "\nWARNING: guest instructions per iteration differ by more than {:.1}%, in every \
+             round, between builds for {}. The guest code is not the same, or one emulator \
+             miscounts; the ratios above do not compare like with like.\n",
+            IPI_TOLERANCE * 100.0, drift.join(", ")));
     }
     if !s.bad_status.is_empty() {
         o.push_str(&format!("\nWARNING: checksum not OK: {}\n", s.bad_status.join(", ")));
@@ -1425,6 +1469,37 @@ mod tests {
         let s = summarise(&r, 0.03);
         assert!(s.host.is_none());
         assert!(table(&s, "A", "B", 0.03).contains("perf unavailable"));
+    }
+
+    #[test]
+    fn differing_instructions_per_iteration_are_called_out() {
+        let mut r = rounds_of(&[10.0; 3], &[10.0; 3]);
+        for x in &mut r { x.b.kernels[0].icount = 13_000; x.b.kernels[0].ns = 130_000; }
+        let t = table(&summarise(&r, 0.03), "A", "B", 0.03);
+        assert!(t.contains("WARNING: guest instructions per iteration differ"), "{t}");
+        assert!(t.contains("int/alu (1000.0 vs 1300.0)"), "{t}");
+        let warning = t.lines().find(|l| l.starts_with("WARNING: guest")).unwrap();
+        assert!(!warning.contains("img/resize"), "{warning}");
+        // Within half a percent: no warning.
+        let mut r = rounds_of(&[10.0; 3], &[10.0; 3]);
+        for x in &mut r { x.b.kernels[0].icount = 10_040; }
+        assert!(!table(&summarise(&r, 0.03), "A", "B", 0.03).contains("WARNING: guest"));
+    }
+
+    #[test]
+    fn instructions_per_iteration_that_scatter_by_run_are_not_a_difference() {
+        // One binary against itself on fpu/transcend: the figure moves with
+        // the iteration count, by more than the tolerance, on both sides.
+        let a = [291.7, 297.5, 304.1, 295.0];
+        let b = [291.8, 294.7, 304.1, 293.0];
+        assert!(!ipi_differs(&a, &b));
+        // A different image: every round of B above every round of A.
+        assert!(ipi_differs(&[313.0, 313.1, 313.2], &[428.1, 428.2, 428.0]));
+        // A small but consistent shift, outside the tolerance.
+        assert!(ipi_differs(&[1000.0, 1000.5, 999.5], &[1008.0, 1008.5, 1007.5]));
+        // Consistent but within the tolerance.
+        assert!(!ipi_differs(&[1000.0; 3], &[1004.0; 3]));
+        assert!(!ipi_differs(&[], &[1.0]));
     }
 
     #[test]
