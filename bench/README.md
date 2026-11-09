@@ -446,6 +446,32 @@ Nothing here is checksummed. These are IRIX's own tools against IRIX's own
 filesystem and their output is not ours to predict; the accuracy score belongs
 to the bare-metal half.
 
+### Screens, keys and pass or fail
+
+A step can check what a program drew as well as what it printed:
+
+- `screenshot = "NAME"` saves the guest screen through `iris-ci screenshot`
+  after the command, or `shot_at` seconds into it, as `LABEL-NAME.png` in
+  `--shots` (default `--out`). The emulator writes the file, so the path is
+  the emulator's.
+- `golden` is a signature the screen must stay within `tolerance` of: the
+  mean colour of each cell of a 16x12 grid and the frame size, compared as
+  the mean difference per colour channel, 0 to 255 (default tolerance 6).
+  `iris-bench screen-sig PNG [OTHER]` prints a signature and the distance
+  to another screenshot; a step with a screenshot and no golden prints the
+  signature it saw.
+- `differs_from = "NAME"` fails the step when the screen is within
+  `min_change` (default 2) of an earlier screenshot, the check that a
+  program which should have opened a window drew anything.
+- `keys` are monitor commands sent a second apart before the command, such
+  as `key type root` and `key enter` at the xdm greeter, which reads the
+  emulated keyboard rather than the serial console. They need `--monitor
+  HOST:PORT`.
+
+A failed comparison fails the step and keeps the screenshot, its signature
+and the distance in the result. `--strict` makes `iris-bench irix` exit
+nonzero when any step failed, for a run whose outcome a script acts on.
+
 > **Status: run once, on an Indy.** The default steps and three extra steps (Dhrystone,
 > Whetstone and `iris_bench` binaries copied into the guest) were
 > run end to end against IRIX 6.5.22 on `indy_ip24` (R4400, 256 MB, Newport),
