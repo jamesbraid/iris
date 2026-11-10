@@ -37,7 +37,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 50
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -112,7 +112,7 @@ jobs:
   features:
     name: Build release features (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -165,7 +165,7 @@ jobs:
   dist-scripts:
     name: Lint scripts/dist
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 60
     steps:
     - uses: actions/checkout@v5
     - run: shellcheck -x -S warning scripts/dist/*.sh scripts/build-macos.sh

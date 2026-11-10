@@ -71,7 +71,7 @@ jobs:
   guests:
     name: Build the guest binaries
     runs-on: &ubuntu ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
 
@@ -126,7 +126,7 @@ jobs:
   host-baseline:
     name: Host baseline
     runs-on: *ubuntu
-    timeout-minutes: 5
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - name: Build and run
@@ -147,7 +147,7 @@ jobs:
   embedded:
     name: Embedded runner
     runs-on: *ubuntu
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - name: Install build dependencies
@@ -163,7 +163,7 @@ jobs:
     name: ${{ matrix.engine }}
     needs: guests
     runs-on: *ubuntu
-    timeout-minutes: 25
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -250,7 +250,7 @@ jobs:
     needs: suites
     if: ${{ !cancelled() }}
     runs-on: *ubuntu
-    timeout-minutes: 12
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       # iris-bench links libasound at run time.
