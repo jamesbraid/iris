@@ -6,7 +6,7 @@ use std::net::TcpStream;
 use std::sync::mpsc;
 use std::thread;
 
-use crate::config::{GraphicsBoard, MachineConfig, MachineProfile, NetworkConfig, ScsiDeviceConfig};
+use crate::config::{GraphicsBoard, MachineConfig, MachineProfile, NetworkConfig};
 use crate::machine_state::GuestState;
 use crate::traits::{BusDevice, Device, Resettable, Saveable, MachineEvent};
 use crate::locks::LockMonitor;
@@ -200,8 +200,8 @@ impl Ip22Machine {
     }
 
     /// `new`, with the bare-metal test device supplied by the caller rather
-    /// than built from `cfg.test_device_dump`. Passing one enables it — the
-    /// device *is* the request, so `cfg.test_device` need not also be set.
+    /// than built from a `[[test_device]]` entry. Passing one enables it — the
+    /// device *is* the request, so the config need not also place one.
     ///
     /// Exists for hosts that link IRIS as a library and need the guest's
     /// console and exit code delivered in-process instead of to stdout and
@@ -214,7 +214,7 @@ impl Ip22Machine {
         // A test device the caller built takes gio0 in place of one built
         // from the config.
         if testdev_override.is_some() {
-            cfg.test_device = false;
+            cfg.test_device.entries.clear();
         }
         // Capture config flags that are needed after the local `cfg` binding
         // is shadowed later in this function.
@@ -466,7 +466,7 @@ impl Ip22Machine {
                 crate::dev::testdev::place(&board, &mut placed, dev.clone());
                 topology.bind(&gio0, dev)?;
             }
-            attach_devices(&cfg.placements(&topology)?, &cfg, Some(&mut Ctx { devices: &mut placed, disks: &disks }), &topology)
+            attach_devices(&cfg.placements()?, &cfg, Some(&mut Ctx { devices: &mut placed, disks: &disks }), &topology)
         })();
         if let Err(e) = placing {
             eprintln!("iris: fatal: {e}");
@@ -1746,7 +1746,8 @@ mod controller_lifetime_tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(move || {
                 let mut cfg = crate::bench_runner::bench_config([16, 0, 0, 0], &parts::R4400_150);
-                cfg.scsi.insert(1, crate::config::ScsiDeviceConfig { path: path_str, overlay: true, ..Default::default() });
+                let disk = toml::from_str(&format!("path = {path_str:?}\noverlay = true")).unwrap();
+                cfg.place("hdd", "hpc3.0.t1".parse().unwrap(), disk).unwrap();
                 Box::new(Ip22Machine::new(cfg))
             })
             .unwrap()
@@ -2118,15 +2119,14 @@ mod snapshot_tests {
 #[cfg(test)]
 mod virtio_tests {
     use super::*;
-    use crate::config::{MachineProfile, VirtioGioSlot};
+    use crate::config::MachineProfile;
     use crate::dev::virtio::mmio::{MAGIC, REG_DEVICE_ID, REG_MAGIC};
 
-    fn probe(profile: MachineProfile, slot: VirtioGioSlot, base: u64) {
+    fn probe(profile: MachineProfile, slot: &'static str, base: u64) {
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(move || {
                 let mut cfg = MachineConfig::default();
-                cfg.scsi.clear();
                 cfg.headless = true;
                 cfg.machine.profile = profile;
                 if profile == MachineProfile::Indigo2Ip28 {
@@ -2134,13 +2134,11 @@ mod virtio_tests {
                     cfg.banks = [512, 512, 0, 0, 0, 0, 0, 0];
                     cfg.graphics.board = Some(crate::config::GraphicsBoard::SolidImpact);
                 }
-                cfg.virtio_serial.enabled = true;
-                cfg.virtio_serial.slot = slot;
                 // One unconnected port: no sockets in a unit test.
-                cfg.virtio_serial.ports = vec![Default::default()];
+                cfg.place("virtio_serial", slot.parse().unwrap(), toml::from_str("[[port]]\nconsole = false").unwrap()).unwrap();
                 let m = Ip22Machine::new(cfg);
                 let phys = &m.board.phys;
-                assert_eq!(phys.read32(base + REG_MAGIC).data, MAGIC, "{profile:?} {slot:?}");
+                assert_eq!(phys.read32(base + REG_MAGIC).data, MAGIC, "{profile:?} {slot}");
                 assert_eq!(phys.read32(base + REG_DEVICE_ID).data, 3);
                 // The window is 64 KB: past it the slot is empty again.
                 assert_ne!(phys.read32(base + 0x1_0000 + REG_MAGIC).data, MAGIC);
@@ -2151,18 +2149,18 @@ mod virtio_tests {
     }
 
     #[test]
-    fn indy_slot_exp1() {
-        probe(MachineProfile::IndyIp24, VirtioGioSlot::Exp1, 0x1F60_0000);
+    fn indy_slot_gio1() {
+        probe(MachineProfile::IndyIp24, "gio1", 0x1F60_0000);
     }
 
     #[test]
-    fn indy_slot_exp0() {
-        probe(MachineProfile::IndyIp24, VirtioGioSlot::Exp0, 0x1F40_0000);
+    fn indy_slot_gio0() {
+        probe(MachineProfile::IndyIp24, "gio0", 0x1F40_0000);
     }
 
     #[test]
-    fn ip28_slot_exp1() {
-        probe(MachineProfile::Indigo2Ip28, VirtioGioSlot::Exp1, 0x1F60_0000);
+    fn ip28_slot_gio1() {
+        probe(MachineProfile::Indigo2Ip28, "gio1", 0x1F60_0000);
     }
 }
 
@@ -2292,21 +2290,5 @@ mod placement_tests {
         assert!(try_ports("[[port]]\ntcp_port = 1\nsocket = \"/x\"\n").unwrap_err().contains("exclusive"));
         assert!(try_ports("[[port]]\nname = \"\"\n").unwrap_err().contains("1 to 200 bytes"));
         assert!(try_ports("[[port]]\nname = \"a\"\n[[port]]\nname = \"a\"\n").unwrap_err().contains("used twice"));
-    }
-
-    /// The older tables land in the GIO slots.
-    #[test]
-    fn ultra64_test_device_and_virtio_tables_become_placements() {
-        let mut cfg = MachineConfig::default();
-        cfg.scsi.clear();
-        cfg.ultra64.enabled = true;
-        cfg.virtio_serial.enabled = true;
-        let got: Vec<String> = cfg.placements(&Topology::fill_for(&cfg)).unwrap().iter().map(|p| format!("{} {}", p.device, p.at)).collect();
-        assert_eq!(got, ["ultra64 gio0", "virtio_serial gio1"]);
-        cfg.ultra64.enabled = false;
-        cfg.test_device = true;
-        cfg.virtio_serial.enabled = false;
-        let got: Vec<String> = cfg.placements(&Topology::fill_for(&cfg)).unwrap().iter().map(|p| format!("{} {}", p.device, p.at)).collect();
-        assert_eq!(got, ["test_device gio0"]);
     }
 }

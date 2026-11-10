@@ -20,9 +20,7 @@ mod tests {
     use crate::dev::gr2::{Gr2, Gr2Variant, GR2_BASE};
 
     fn minimal_cfg() -> MachineConfig {
-        let mut cfg = MachineConfig::default();
-        cfg.scsi.clear();
-        cfg
+        MachineConfig::default()
     }
 
     #[test]
@@ -32,49 +30,52 @@ mod tests {
             "/irix-install/iris-indigo2-smoke-ci.toml"
         );
         let text = std::fs::read_to_string(path).expect("smoke ci toml");
-        let cfg: MachineConfig = toml::from_str(&text).expect("parse smoke toml");
+        let mut cfg: MachineConfig = toml::from_str(&text).expect("parse smoke toml");
+        cfg.migrate(&crate::topology::Topology::fill_for(&cfg)).expect("migrates");
         cfg.validate().expect("smoke config validates");
         assert_eq!(cfg.machine.profile, MachineProfile::Indigo2Ip22);
         assert!(cfg.headless);
         assert!(cfg.ci);
     }
 
-    fn virtio_cfg(profile: MachineProfile) -> MachineConfig {
-        let mut cfg = minimal_cfg();
+    /// An older file's `[virtio_serial]`, migrated onto `profile`.
+    fn virtio_cfg(profile: MachineProfile) -> Result<MachineConfig, String> {
+        let mut cfg: MachineConfig = toml::from_str("[virtio_serial]\nenabled = true\n").unwrap();
         cfg.machine.profile = profile;
-        cfg.virtio_serial.enabled = true;
-        cfg
+        cfg.migrate(&crate::topology::Topology::fill_for(&cfg))?;
+        Ok(cfg)
     }
 
     #[test]
     fn virtio_serial_validates_where_it_has_a_home() {
         for p in [MachineProfile::IndyIp24, MachineProfile::Indigo2Ip22, MachineProfile::Indigo2Ip28, MachineProfile::OctaneIp30] {
-            virtio_cfg(p).validate().unwrap_or_else(|e| panic!("{p:?}: {e}"));
+            virtio_cfg(p).and_then(|c| c.validate()).unwrap_or_else(|e| panic!("{p:?}: {e}"));
         }
-        assert!(virtio_cfg(MachineProfile::O2Ip32).validate().is_err(), "not wired on the O2");
+        assert!(virtio_cfg(MachineProfile::O2Ip32).is_err(), "not wired on the O2");
     }
 
     #[test]
     fn virtio_serial_refuses_a_taken_slot_and_bad_ports() {
-        use crate::config::{VirtioGioSlot, VirtioSerialPort};
-        let mut c = virtio_cfg(MachineProfile::Indigo2Ip28);
-        c.virtio_serial.slot = VirtioGioSlot::Exp0;
-        c.test_device = true;
-        assert!(c.validate().is_err());
+        let mut c = minimal_cfg();
+        c.machine.profile = MachineProfile::Indigo2Ip28;
+        c.place("test_device", "gio0".parse().unwrap(), toml::Table::new()).unwrap();
+        c.place("virtio_serial", "gio0".parse().unwrap(), toml::Table::new()).unwrap();
+        assert!(c.validate().unwrap_err().contains("gio0: taken by"));
 
-        let mut c = virtio_cfg(MachineProfile::IndyIp24);
-        let port = |n: &str| VirtioSerialPort { name: Some(n.into()), ..Default::default() };
-        c.virtio_serial.ports = vec![port("a"), port("a")];
-        assert!(c.validate().unwrap_err().contains("used twice"));
-        c.virtio_serial.ports = (0..32).map(|i| port(&format!("p{i}"))).collect();
-        assert!(c.validate().unwrap_err().contains("at most 31"));
-        c.virtio_serial.ports = vec![VirtioSerialPort { tcp_port: Some(1), socket: Some("/x".into()), ..Default::default() }];
-        assert!(c.validate().unwrap_err().contains("exclusive"));
+        let mut c = minimal_cfg();
+        let mut ports = |text: &str| {
+            c.place("virtio_serial", "gio1".parse().unwrap(), toml::from_str(text).unwrap()).unwrap();
+            c.validate().unwrap_err()
+        };
+        assert!(ports("[[port]]\nname = \"a\"\n[[port]]\nname = \"a\"\n").contains("used twice"));
+        let many: String = (0..32).map(|i| format!("[[port]]\nname = \"p{i}\"\n")).collect();
+        assert!(ports(&many).contains("at most 31"));
+        assert!(ports("[[port]]\ntcp_port = 1\nsocket = \"/x\"\n").contains("exclusive"));
     }
 
     #[test]
     fn virtio_serial_section_parses() {
-        let cfg: MachineConfig = toml::from_str(
+        let mut cfg: MachineConfig = toml::from_str(
             r#"
             [virtio_serial]
             enabled = true
@@ -88,8 +89,11 @@ mod tests {
             "#,
         )
         .expect("parses");
-        assert_eq!(cfg.virtio_serial.ports.len(), 2);
-        assert_eq!(cfg.virtio_serial.ports[1].name.as_deref(), Some("org.iris.agent.0"));
+        cfg.migrate(&crate::topology::Topology::fill_for(&cfg)).expect("migrates");
+        let ports = cfg.virtio_serial.entries[0]["port"].as_array().unwrap();
+        assert_eq!(ports.len(), 2);
+        assert_eq!(ports[1].get("name").and_then(toml::Value::as_str), Some("org.iris.agent.0"));
+        assert_eq!(cfg.virtio_serial.entries[0]["at"].as_str(), Some("gio0"));
         // Unset, it stays out of a saved config.
         assert!(!toml::to_string(&MachineConfig::default()).unwrap().contains("virtio_serial"));
     }

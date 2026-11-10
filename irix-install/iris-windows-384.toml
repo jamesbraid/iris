@@ -17,14 +17,14 @@ thread_affinity = false
 [audio]
 prebuf_ms = 40
 
-[scsi.1]
+[[hdd]]
+at = "hpc3.0.t1"
 path    = "irix-install/scsi1.raw"
-cdrom   = false
 overlay = true
 
-[scsi.4]
+[[cdrom]]
+at = "hpc3.0.t4"
 path  = 'C:/Users/chron/Downloads/sgi-irix-6.5/sgi-irix-6.5-installation-tools-june-1998_812-0758-002.iso'
-cdrom = true
 discs = [
   'C:/Users/chron/Downloads/sgi-irix-6.5/sgi-irix-6.5-installation-tools-june-1998_812-0758-002.iso',
   'C:/Users/chron/Downloads/sgi-irix-6.5/sgi-irix-6.5-foundation-1_812-0759-002.iso',

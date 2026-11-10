@@ -178,7 +178,7 @@ impl Topology {
     /// machine.
     pub fn probe(cfg: &MachineConfig) -> Result<Topology, String> {
         let t = Topology::fill_for(cfg);
-        crate::attach::attach_devices(&cfg.placements(&t)?, cfg, None, &t)?;
+        crate::attach::attach_devices(&cfg.placements()?, cfg, None, &t)?;
         Ok(t)
     }
 

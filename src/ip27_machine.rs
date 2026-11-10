@@ -408,7 +408,7 @@ impl<B: Ip27Board> Ip27Machine<B> {
         }
         let disks = Disks::new(topology.clone()).with_ci(cfg.ci);
         let mut devices = Devices::new();
-        attach_devices(&cfg.placements(&topology)?, cfg, Some(&mut Ctx { devices: &mut devices, disks: &disks }), &topology)?;
+        attach_devices(&cfg.placements()?, cfg, Some(&mut Ctx { devices: &mut devices, disks: &disks }), &topology)?;
 
         let control = Control::new();
         let tx = control.sender();

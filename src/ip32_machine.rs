@@ -230,7 +230,7 @@ impl O2Machine {
             .expect("the PCI bus row takes its handle once");
         let disks = Arc::new(Disks::new(topology.clone()).with_ci(cfg.ci));
         let mut placed = Devices::new();
-        attach_devices(&cfg.placements(&topology)?, cfg, Some(&mut Ctx { devices: &mut placed, disks: &disks }), &topology)?;
+        attach_devices(&cfg.placements()?, cfg, Some(&mut Ctx { devices: &mut placed, disks: &disks }), &topology)?;
         eprintln!(
             "iris: O2 with {} MB ({}), {}",
             kits.iter().sum::<u32>(),
@@ -1185,7 +1185,7 @@ mod drop_tests {
         let disk = dir.join("nvme.raw");
         std::fs::write(&disk, vec![0u8; 1 << 20]).unwrap();
         let mut cfg = config(&dir, MachineProfile::O2Ip32, GraphicsBoard::Newport);
-        cfg.nvme = crate::config::NvmeConfig { path: disk.to_string_lossy().into_owned(), overlay: true, bridge: false, board: None, slot: None };
+        cfg.place("nvme", "pci0.3".parse().unwrap(), toml::from_str(&format!("path = {:?}\noverlay = true", disk.to_string_lossy())).unwrap()).unwrap();
         let machine = big_stack(move || O2Machine::new(&cfg).expect("O2"));
         let at = crate::pci::DevFn { device: crate::dev::mace_pci::IP32_OPTION_SLOT, function: 0 };
         assert_eq!(machine.bus.mace.pci.bus().config_read(at, 8, 4).map(|d| d >> 8), Some(0x01_0802), "the card in the slot");
@@ -1299,7 +1299,6 @@ mod device_tests {
 mod placement_tests {
     use super::*;
     use crate::attach::{attach_device, Placement};
-    use crate::config::ScsiDeviceConfig;
     use crate::exit_persistence_tests::Machine;
     use crate::topology::Family;
     use crate::workstation_tests::with_shared;
@@ -1333,26 +1332,24 @@ mod placement_tests {
         assert!(t.claim(&loc("pci0.2.t8"), "hdd", Family::Scsi, false, "").is_err(), "the limit stays 7");
     }
 
-    /// `[scsi.20]` names controller 1, target 4; `controller = 1` does too.
+    /// An older file's `[scsi.20]` names controller 1, target 4;
+    /// `controller = 1` does too.
     #[test]
     fn legacy_controller_one_lands_on_pci0_2() {
         let mut cfg = MachineConfig::default();
         cfg.machine.profile = MachineProfile::O2Ip32;
-        let t = Topology::fill_for(&cfg);
-        cfg.scsi.clear();
-        cfg.scsi.insert(20, ScsiDeviceConfig { path: "x.img".into(), ..Default::default() });
-        cfg.scsi.insert(1, ScsiDeviceConfig { controller: 1, path: "y.img".into(), ..Default::default() });
-        let ats: Vec<String> = cfg.placements(&t).unwrap().iter().map(|p| p.at.to_string()).collect();
+        cfg.scsi = Some(toml::from_str("20 = { path = \"x.img\" }\n1 = { path = \"y.img\", controller = 1 }").unwrap());
+        cfg.migrate(&Topology::fill_for(&cfg)).unwrap();
+        let ats: Vec<String> = cfg.placements().unwrap().iter().map(|p| p.at.to_string()).collect();
         assert_eq!(ats, ["pci0.2.t1", "pci0.2.t4"]);
     }
 
-    /// The option slot takes a PCI card, and the `[nvme]` table lands there.
+    /// The option slot takes a PCI card, and an older file's `[nvme]` table
+    /// lands there.
     #[test]
     fn the_option_slot_takes_an_nvme_card() {
-        let mut cfg = MachineConfig::default();
-        cfg.machine.profile = MachineProfile::O2Ip32;
-        cfg.scsi.clear();
-        cfg.nvme = crate::config::NvmeConfig { path: "n.img".into(), ..Default::default() };
+        let mut cfg: MachineConfig = toml::from_str("[machine]\nprofile = \"o2_ip32\"\n[nvme]\npath = \"n.img\"\n").unwrap();
+        cfg.migrate(&Topology::fill_for(&cfg)).unwrap();
         let t = Topology::probe(&cfg).unwrap();
         let row = t.lines().into_iter().find(|l| l.starts_with("pci0.3 ")).unwrap();
         assert!(row.contains("PCI option") && row.contains("nvme n.img"), "{row}");

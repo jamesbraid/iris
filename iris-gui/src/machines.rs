@@ -65,7 +65,10 @@ pub fn config_path(root: &Path, name: &str) -> Result<PathBuf, String> {
 
 pub fn read(path: &Path) -> Result<MachineConfig, String> {
     let text = std::fs::read_to_string(path).map_err(|e| file_error(path, e))?;
-    toml::from_str(&text).map_err(|e| file_error(path, e))
+    let mut cfg: MachineConfig = toml::from_str(&text).map_err(|e| file_error(path, e))?;
+    // Machines saved by older versions keep their disks in `[scsi.N]`.
+    cfg.migrate(&iris::topology::Topology::fill_for(&cfg)).map_err(|e| file_error(path, e))?;
+    Ok(cfg)
 }
 
 /// A file that couldn't be read or written, as shown to the user.
@@ -103,7 +106,6 @@ pub fn visit_paths(cfg: &mut MachineConfig, mut visit: impl FnMut(&mut String)) 
     for path in [
         &mut cfg.serial_log,
         &mut cfg.load_elf,
-        &mut cfg.test_device_dump,
         &mut cfg.network.tftp_dir,
         &mut cfg.network.rsh_dir,
     ] {
@@ -111,15 +113,25 @@ pub fn visit_paths(cfg: &mut MachineConfig, mut visit: impl FnMut(&mut String)) 
             visit(path);
         }
     }
+    // The test device's dump file.
+    for dump in cfg.test_device.entries.iter_mut().filter_map(|d| match d.get_mut("dump") {
+        Some(toml::Value::String(s)) => Some(s),
+        _ => None,
+    }) {
+        visit(dump);
+    }
     visit(&mut cfg.jitv2.cache_dir);
     if !iris::config::ci_socket_is_tcp(&cfg.ci_socket) {
         visit(&mut cfg.ci_socket);
     }
-    for dev in cfg.scsi.values_mut() {
-        visit(&mut dev.path);
-        for disc in &mut dev.discs {
-            visit(disc);
+    for mut dev in crate::placement_ui::media(cfg) {
+        if let Some(path) = dev.path_mut() {
+            visit(path);
         }
+        if let crate::placement_ui::Device::Cdrom(cd) = &mut dev.dev {
+            cd.discs.iter_mut().for_each(&mut visit);
+        }
+        crate::placement_ui::set_media(cfg, dev);
     }
     if let Some(nfs) = &mut cfg.nfs {
         visit(&mut nfs.shared_dir);
@@ -270,14 +282,15 @@ pub fn migrate(root: &Path, name: &str, cfg: &MachineConfig, old_cwd: &Path) -> 
     // Copy any existing sidecar to the machine's redirect, using its new path
     // spelling for the hash. Keep the original for rollback.
     #[cfg(feature = "appstore")]
-    for (id, dev) in &cfg.scsi {
-        if !iris::chd_disk::is_chd(&dev.path) {
+    for dev in crate::placement_ui::media(cfg) {
+        if !iris::chd_disk::is_chd(dev.path()) {
             continue;
         }
-        let source = root.join("chd-diffs").join(diff_name(&dev.path));
+        let source = root.join("chd-diffs").join(diff_name(dev.path()));
+        let moved = crate::placement_ui::media_at(&migrated, &dev.at).map(|m| m.path().to_owned()).unwrap_or_default();
         let dest = dir
             .join("chd-diffs")
-            .join(diff_name(&migrated.scsi[id].path));
+            .join(diff_name(&moved));
         if source.exists() && !dest.exists() {
             std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
             std::fs::copy(source, dest).map_err(|e| e.to_string())?;
@@ -316,6 +329,9 @@ pub fn rename(root: &Path, old: &str, new: &str) -> Result<(), String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::placement_ui::fixtures::{at_id, edit, with_disks};
+    use crate::placement_ui::Device;
+    use iris::scsi::media::CdromOptions;
 
     pub struct TempRoot(pub PathBuf);
     impl TempRoot {
@@ -342,15 +358,17 @@ pub(crate) mod tests {
     fn saved_toml_roundtrips_every_path_and_preserves_non_path_strings() {
         let root = TempRoot::new("paths");
         let dir = directory(&root.0, "Indigo2 IP28").unwrap();
-        let mut cfg = MachineConfig::default();
+        let mut cfg = with_disks();
         cfg.prom = dir.join("prom.bin").to_string_lossy().into_owned();
         cfg.nvram = dir.join("nvram.bin").to_string_lossy().into_owned();
         cfg.nveeprom = dir.join("nveeprom.bin").to_string_lossy().into_owned();
-        cfg.scsi.get_mut(&1).unwrap().path =
-            dir.join("disks/root.chd").to_string_lossy().into_owned();
-        cfg.scsi.get_mut(&4).unwrap().path.clear();
-        cfg.scsi.get_mut(&4).unwrap().discs =
-            vec![root.0.join("install.iso").to_string_lossy().into_owned()];
+        edit(&mut cfg, 1, |m| *m.path_mut().unwrap() = dir.join("disks/root.chd").to_string_lossy().into_owned());
+        edit(&mut cfg, 4, |m| {
+            m.dev = Device::Cdrom(CdromOptions {
+                path: String::new(),
+                discs: vec![root.0.join("install.iso").to_string_lossy().into_owned()],
+            });
+        });
         cfg.nfs = Some(iris::config::NfsConfig {
             shared_dir: root.0.join("shared").to_string_lossy().into_owned(),
             version: Default::default(),
@@ -358,7 +376,12 @@ pub(crate) mod tests {
         cfg.network.tftp_dir = Some(root.0.join("tftp").to_string_lossy().into_owned());
         cfg.serial_log = Some(dir.join("console.log").to_string_lossy().into_owned());
         cfg.load_elf = Some(root.0.join("test.elf").to_string_lossy().into_owned());
-        cfg.test_device_dump = Some(dir.join("dump.json").to_string_lossy().into_owned());
+        cfg.place(
+            "test_device",
+            "gio0".parse().unwrap(),
+            toml::from_str(&format!("dump = {:?}", dir.join("dump.json").to_string_lossy())).unwrap(),
+        )
+        .unwrap();
         cfg.jitv2.cache_dir = dir.join("jit-cache").to_string_lossy().into_owned();
         cfg.ci_socket = "tcp:127.0.0.1:19851".into();
         cfg.debug.debug_log = "scsi=debug,cpu=warn".into();
@@ -367,10 +390,12 @@ pub(crate) mod tests {
         save(&root.0, "Indigo2 IP28", &mut cfg).unwrap();
         let path = config_path(&root.0, "Indigo2 IP28").unwrap();
         let back = read(&path).unwrap();
-        assert_eq!(back.scsi[&1].path, "disks/root.chd");
-        assert_eq!(back.scsi[&4].path, "");
+        assert_eq!(at_id(&back, 1).path(), "disks/root.chd");
+        assert_eq!(at_id(&back, 4).path(), "");
         // External paths keep their absolute spelling.
-        assert_eq!(back.scsi[&4].discs[0], root.0.join("install.iso").to_string_lossy());
+        assert_eq!(at_id(&back, 4).discs()[0], root.0.join("install.iso").to_string_lossy());
+        let dump = back.placements().unwrap().into_iter().find(|p| p.device == "test_device").unwrap();
+        assert_eq!(dump.opts["dump"].as_str(), Some("dump.json"));
         assert_eq!(back.nvram, "nvram.bin");
         assert_eq!(back.nveeprom, "nveeprom.bin");
         assert_eq!(back.ci_socket, "tcp:127.0.0.1:19851");
@@ -412,7 +437,7 @@ pub(crate) mod tests {
         std::fs::write(root.0.join("nvram.bin"), b"original NVRAM").unwrap();
         std::fs::write(root.0.join("nveeprom.bin"), b"original EEPROM").unwrap();
         std::fs::write(old_cwd.join("scsi1.raw"), b"disk stays here").unwrap();
-        let cfg = MachineConfig::default();
+        let cfg = with_disks();
         for name in ["indy", "ip28"] {
             migrate(&root.0, name, &cfg, &old_cwd).unwrap();
         }
@@ -420,7 +445,7 @@ pub(crate) mod tests {
         let ip28 = directory(&root.0, "ip28").unwrap();
         let migrated = read(&config_path(&root.0, "indy").unwrap()).unwrap();
         assert_eq!(
-            std::fs::read(indy.join(&migrated.scsi[&1].path)).unwrap(),
+            std::fs::read(indy.join(&at_id(&migrated, 1).path())).unwrap(),
             b"disk stays here"
         );
         assert_eq!(
@@ -452,8 +477,8 @@ pub(crate) mod tests {
     #[test]
     fn rename_moves_config_disks_and_battery_state_as_one_machine() {
         let root = TempRoot::new("rename");
-        let mut cfg = MachineConfig::default();
-        cfg.scsi.get_mut(&1).unwrap().path = "disks/root.raw".into();
+        let mut cfg = with_disks();
+        edit(&mut cfg, 1, |m| *m.path_mut().unwrap() = "disks/root.raw".into());
         save(&root.0, "before", &mut cfg).unwrap();
         let old_dir = directory(&root.0, "before").unwrap();
         for (leaf, data) in [
@@ -469,7 +494,7 @@ pub(crate) mod tests {
         assert!(!new_dir.join("before.toml").exists());
         let cfg = read(&new_dir.join("after.toml")).unwrap();
         assert_eq!(
-            std::fs::read(new_dir.join(&cfg.scsi[&1].path)).unwrap(),
+            std::fs::read(new_dir.join(&at_id(&cfg, 1).path())).unwrap(),
             b"disk"
         );
         assert_eq!(std::fs::read(new_dir.join(&cfg.nvram)).unwrap(), b"nvram");
@@ -515,10 +540,10 @@ pub(crate) mod tests {
             Some(PathBuf::from("disks/a.raw"))
         );
         assert_eq!(relative(dir, Path::new("/Volumes/X/a.chd")), None);
-        let mut cfg = MachineConfig::default();
-        cfg.scsi.get_mut(&1).unwrap().path = "/Volumes/X/a.chd".into();
+        let mut cfg = with_disks();
+        edit(&mut cfg, 1, |m| *m.path_mut().unwrap() = "/Volumes/X/a.chd".into());
         make_relative(&mut cfg, dir).unwrap();
-        assert_eq!(cfg.scsi[&1].path, "/Volumes/X/a.chd");
+        assert_eq!(at_id(&cfg, 1).path(), "/Volumes/X/a.chd");
     }
 
     #[test]
@@ -528,8 +553,8 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let resource = root.0.join("external.iso");
         std::fs::write(&resource, b"media").unwrap();
-        let mut cfg = MachineConfig::default();
-        cfg.scsi.get_mut(&4).unwrap().path = "../../external.iso".into();
+        let mut cfg = with_disks();
+        edit(&mut cfg, 4, |m| *m.path_mut().unwrap() = "../../external.iso".into());
         let paths = crate::macos_sandbox::config_paths(&cfg, &dir);
         assert!(paths.contains(&resource.to_string_lossy().into_owned()));
     }
@@ -540,15 +565,15 @@ pub(crate) mod tests {
         let root = TempRoot::new("diffs");
         std::fs::create_dir_all(root.0.join("chd-diffs")).unwrap();
         let mut cfg = MachineConfig::default();
-        cfg.scsi.get_mut(&1).unwrap().path = root.0.join("root.chd").to_string_lossy().into_owned();
-        let old_diff = root.0.join("chd-diffs").join(diff_name(&cfg.scsi[&1].path));
+        edit(&mut cfg, 1, |m| m.path = root.0.join("root.chd").to_string_lossy().into_owned());
+        let old_diff = root.0.join("chd-diffs").join(diff_name(&at_id(&cfg, 1).path()));
         std::fs::write(&old_diff, b"guest writes").unwrap();
         migrate(&root.0, "indy", &cfg, &root.0).unwrap();
         let migrated = read(&config_path(&root.0, "indy").unwrap()).unwrap();
         let new_diff = directory(&root.0, "indy")
             .unwrap()
             .join("chd-diffs")
-            .join(diff_name(&migrated.scsi[&1].path));
+            .join(diff_name(&at_id(&migrated, 1).path()));
         assert_eq!(std::fs::read(new_diff).unwrap(), b"guest writes");
         assert!(old_diff.exists());
     }

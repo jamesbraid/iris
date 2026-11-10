@@ -26,13 +26,33 @@ fn is_yes(b: &bool) -> bool {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HddOptions {
+    /// The disk image: raw or CHD.
     pub path: String,
+    /// Copy-on-write: the image is never modified and writes go to
+    /// `{path}.overlay`. Delete the overlay file to start clean.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub overlay: bool,
+    /// A host-controlled raw volume for moving files in and out without
+    /// networking: created zero-filled at `path` if it is not there, and
+    /// written and read through the CI socket's scratch commands. No
+    /// filesystem is imposed; a tar stream is typical. It is written directly,
+    /// so it takes no overlay.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub scratch: bool,
+    /// Size in MB of a scratch volume iris creates (64 when unset); ignored
+    /// when the file exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_mb: Option<u32>,
+    /// The disk's write cache, as the caching mode page's WCE bit. `true` (the
+    /// default) reports it on: a plain write is complete once the host has
+    /// it, SYNCHRONIZE CACHE and FUA store what came before them, and a
+    /// background sync follows about 5 s after a write. A host crash or power
+    /// loss can lose that much, and a killed iris can lose it too when the
+    /// disk is a CHD. IRIX never sends SYNCHRONIZE CACHE or FUA, so it cannot
+    /// force a write out. `false` reports it off and stores every write on the
+    /// host's disk before the command completes, like the drives SGI shipped;
+    /// it is slower. A guest can change the bit with MODE SELECT. STORAGE.md
+    /// says what each setting loses.
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub write_cache: bool,
 }

@@ -131,6 +131,11 @@ pub fn device_names() -> Vec<&'static str> {
     names(MAKERS)
 }
 
+/// The error for a device type name nothing registers, listing those that are.
+pub fn unknown_device(name: &str) -> String {
+    format!("error: unknown device [[{name}]]; devices: {}", device_names().join(" "))
+}
+
 fn names(makers: &[Maker]) -> Vec<&'static str> {
     let mut names: Vec<&str> = makers.iter().map(|m| m.name).collect();
     names.sort_unstable();

@@ -40,7 +40,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard};
 
-use crate::config::{MachineConfig, MachineProfile, ScsiDeviceConfig};
+use crate::config::{MachineConfig, MachineProfile};
+use crate::location::Hop;
 use crate::scsi::{scsi_cmd, ScsiBus, ScsiDataLength, ScsiRequest};
 use crate::workstation::{self, Workstation};
 
@@ -240,18 +241,17 @@ pub(crate) fn config(machine: Machine, dir: &Dir, ci: bool) -> MachineConfig {
     // monitor takes any free port.
     cfg.ci = ci;
     cfg.monitor_port = Some(0);
-    cfg.scsi.clear();
+    let ctl = crate::topology::Topology::fill_for(&cfg).controller(0).expect("a first SCSI controller");
     for (id, kind) in DISKS {
-        let path = dir.file(&image_name(kind)).display().to_string();
-        cfg.scsi.insert(
-            id,
-            ScsiDeviceConfig {
-                path,
-                overlay: matches!(kind, Kind::RawOverlay | Kind::ChdCow),
-                scratch: kind == Kind::Scratch,
-                ..Default::default()
-            },
-        );
+        let mut disk = toml::Table::new();
+        disk.insert("path".into(), dir.file(&image_name(kind)).display().to_string().into());
+        if matches!(kind, Kind::RawOverlay | Kind::ChdCow) {
+            disk.insert("overlay".into(), true.into());
+        }
+        if kind == Kind::Scratch {
+            disk.insert("scratch".into(), true.into());
+        }
+        cfg.place("hdd", ctl.join(Hop::t(id)), disk).expect("hdd is a device type");
     }
     cfg
 }

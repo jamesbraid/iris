@@ -44,8 +44,8 @@ fn config(dir: &Path) -> MachineConfig {
     cfg.serial_port_b = Some(held[2].local_addr().unwrap().port());
     let disk = dir.join("disk.raw");
     std::fs::write(&disk, vec![0u8; 4 << 20]).unwrap();
-    cfg.scsi.clear();
-    cfg.scsi.insert(1, toml::from_str(&format!("path = {:?}\noverlay = true", disk.to_string_lossy())).unwrap());
+    let ctl = crate::topology::Topology::fill_for(&cfg).controller(0).unwrap();
+    cfg.place("hdd", ctl.join(crate::location::Hop::t(1)), toml::from_str(&format!("path = {:?}\noverlay = true", disk.to_string_lossy())).unwrap()).unwrap();
     cfg
 }
 
@@ -193,8 +193,9 @@ fn a_scratch_volume_is_the_machines_scratch_path() {
         let dir = Scratch::new("scratch");
         let mut cfg = config(&dir.0);
         let disk = dir.0.join("scratch.raw");
-        cfg.scsi.clear();
-        cfg.scsi.insert(2, toml::from_str(&format!("path = {:?}\nscratch = true\nsize_mb = 4", disk.to_string_lossy())).unwrap());
+        let ctl = crate::topology::Topology::fill_for(&cfg).controller(0).unwrap();
+        cfg.unplace(&ctl.join(crate::location::Hop::t(1)));
+        cfg.place("hdd", ctl.join(crate::location::Hop::t(2)), toml::from_str(&format!("path = {:?}\nscratch = true\nsize_mb = 4", disk.to_string_lossy())).unwrap()).unwrap();
         let m = Origin200Machine::new(&cfg).unwrap();
         assert_eq!(m.scratch_path(), Some(disk.clone()));
     });

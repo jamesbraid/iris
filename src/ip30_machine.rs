@@ -227,7 +227,7 @@ impl OctaneMachine {
         // The places, and what is placed in them: a board placed at an XIO
         // port brings that port's link up from power-on.
         let topology = Arc::new(Topology::fill_for(cfg));
-        let placements = cfg.placements(&topology)?;
+        let placements = cfg.placements()?;
         let xio_links = placements.iter().filter_map(|p| match p.at.hops() {
             [h] => h.xio_port(),
             _ => None,
@@ -1299,8 +1299,8 @@ mod snapshot_tests {
         if !disk.exists() {
             std::fs::write(&disk, vec![0u8; 4 << 20]).unwrap();
         }
-        cfg.scsi.clear();
-        cfg.scsi.insert(1, toml::from_str(&format!("path = {:?}\noverlay = true", disk.to_string_lossy())).unwrap());
+        let disk = toml::from_str(&format!("path = {:?}\noverlay = true", disk.to_string_lossy())).unwrap();
+        cfg.place("hdd", "xio15.pci0.0.t1".parse().unwrap(), disk).unwrap();
         edit(&mut cfg);
         let mut m = OctaneMachine::new(&cfg).expect("an Octane");
         m.saves = dir.join("saves");
@@ -1315,9 +1315,8 @@ mod snapshot_tests {
     /// has no slot at.
     #[test]
     fn option_boards_are_fitted_on_their_ports() {
-        use crate::config::{MachineProfile, XioBoardConfig};
+        use crate::config::MachineProfile;
         use crate::dev::bridge::{reg, CFG0_BASE, DIRECT_ADD_512MB};
-        use crate::dev::xio_pci::Kind;
         use crate::pci::testing::TestCard;
         use crate::pci::{Bar, PciFunction, PCI_INTA};
         std::thread::Builder::new().stack_size(64 << 20).spawn(|| {
@@ -1325,14 +1324,12 @@ mod snapshot_tests {
             let prom = empty_prom(&dir);
             let m = machine_with(&prom, &dir, |cfg| {
                 assert_eq!(cfg.machine.profile, MachineProfile::OctaneIp30);
-                cfg.xio_board = vec![
-                    XioBoardConfig { kind: Kind::Shoehorn, widget: None },
-                    XioBoardConfig { kind: Kind::Cage, widget: None },
-                    XioBoardConfig { kind: Kind::Shoehorn, widget: Some(9) },
-                ];
+                for (device, at) in [("pci_shoehorn", "xio10"), ("pci_cage", "xio13"), ("pci_shoehorn", "xio9")] {
+                    cfg.place(device, at.parse().unwrap(), toml::Table::new()).unwrap();
+                }
             });
             let ports: Vec<u8> = m.xio_boards.iter().map(|b| b.widget()).collect();
-            assert_eq!(ports, [10, 13, 9], "a shoehorn takes 10, the module is in 13, one shoehorn asked for 9");
+            assert_eq!(ports, [9, 10, 13], "the boards in port order");
             for w in 9..=13u8 {
                 assert_eq!(m.xbow.carries(w), ports.contains(&w), "link to port {w}");
             }
@@ -1340,7 +1337,7 @@ mod snapshot_tests {
                 let r = m.phys.phys.read32(widget_small_base(w) + u64::from(off));
                 r.is_ok().then_some(r.data)
             };
-            for (&w, revision) in ports.iter().zip([4, BRIDGE_REVISION, 4]) {
+            for (&w, revision) in ports.iter().zip([4, 4, BRIDGE_REVISION]) {
                 let id = word(w, 4).expect("the Bridge answers on its port");
                 assert_eq!((id >> 12 & 0xffff, id >> 28), (0xc002, revision), "port {w}: a Bridge of the board's revision");
             }
@@ -1424,7 +1421,6 @@ mod snapshot_tests {
     /// controller's state with it; a reset of the machine resets the
     /// controller to its power-on state.
     fn nvme_in_a_slot(kind: crate::dev::xio_pci::Kind, slot: Option<u8>, bridge: bool) {
-        use crate::config::{NvmeConfig, XioBoardConfig};
         use crate::scsi::{scsi_cmd, ScsiDataLength, ScsiRequest};
         use crate::scsi_monitor::ScsiTargets;
         std::thread::Builder::new().stack_size(64 << 20).spawn(move || {
@@ -1434,8 +1430,19 @@ mod snapshot_tests {
             std::fs::write(&disk, vec![0u8; 1 << 20]).unwrap();
             let path = disk.to_string_lossy().into_owned();
             let mut m = machine_with(&prom, &dir, |cfg| {
-                cfg.xio_board = vec![XioBoardConfig { kind, widget: None }];
-                cfg.nvme = NvmeConfig { path, overlay: true, bridge, board: None, slot };
+                let (board, w) = match kind {
+                    crate::dev::xio_pci::Kind::Cage => ("pci_cage", crate::dev::xio_pci::CAGE_WIDGET),
+                    crate::dev::xio_pci::Kind::Shoehorn => ("pci_shoehorn", 10),
+                };
+                let at = Location::root().join(Hop::xio(w)).join(Hop::pci(0)).join(Hop::pos(slot.unwrap_or(1)));
+                cfg.place(board, Location::root().join(Hop::xio(w)), toml::Table::new()).unwrap();
+                let card = if bridge {
+                    cfg.place("pci_bridge", at.clone(), toml::Table::new()).unwrap();
+                    at.join(Hop::pci(0)).join(Hop::pos(0))
+                } else {
+                    at
+                };
+                cfg.place("nvme", card, toml::from_str(&format!("path = {path:?}\noverlay = true")).unwrap()).unwrap();
             });
             let board = &m.xio_boards[0];
             let slot = slot.unwrap_or(1);
@@ -1756,7 +1763,6 @@ mod snapshot_tests {
 #[cfg(test)]
 mod placement_tests {
     use super::*;
-    use crate::config::ScsiDeviceConfig;
     use crate::topology::Family;
 
     fn loc(s: &str) -> Location {
@@ -1780,14 +1786,13 @@ mod placement_tests {
         assert!(e.contains("onboard ioc3"), "{e}");
     }
 
-    /// `[scsi.31]` is controller 1, target 15.
+    /// An older file's `[scsi.31]` is controller 1, target 15.
     #[test]
     fn legacy_key_31_lands_on_xio15_pci0_1_t15() {
         let mut cfg = octane();
-        let t = Topology::fill_for(&cfg);
-        cfg.scsi.clear();
-        cfg.scsi.insert(31, ScsiDeviceConfig { path: "x.img".into(), ..Default::default() });
-        assert_eq!(cfg.placements(&t).unwrap()[0].at, loc("xio15.pci0.1.t15"));
+        cfg.scsi = Some(toml::from_str("31 = { path = \"x.img\" }").unwrap());
+        cfg.migrate(&Topology::fill_for(&cfg)).unwrap();
+        assert_eq!(cfg.placements().unwrap()[0].at, loc("xio15.pci0.1.t15"));
     }
 
     /// The listing shows the controllers with their range of empty targets.
@@ -1858,13 +1863,14 @@ mod placement_tests {
     /// The older tables land where the location types put them.
     #[test]
     fn xio_board_and_nvme_tables_become_placements() {
-        use crate::config::{NvmeConfig, XioBoardConfig};
-        use crate::dev::xio_pci::Kind;
-        let mut cfg = octane();
-        cfg.scsi.clear();
-        cfg.xio_board = vec![XioBoardConfig { kind: Kind::Shoehorn, widget: None }, XioBoardConfig { kind: Kind::Cage, widget: None }];
-        cfg.nvme = NvmeConfig { path: "n.img".into(), overlay: true, bridge: true, board: Some(1), slot: Some(3) };
-        let got: Vec<String> = cfg.placements(&Topology::fill_for(&cfg)).unwrap().iter().map(|p| format!("{} {}", p.device, p.at)).collect();
-        assert_eq!(got, ["pci_shoehorn xio10", "pci_cage xio13", "pci_bridge xio13.pci0.3", "nvme xio13.pci0.3.pci0.0"]);
+        let mut cfg: MachineConfig = toml::from_str(
+            "[machine]\nprofile = \"octane_ip30\"\n[[xio_board]]\nkind = \"pci-shoehorn\"\n[[xio_board]]\nkind = \"pci-cage\"\n\
+             [nvme]\npath = \"n.img\"\noverlay = true\nbridge = true\nboard = 1\nslot = 3\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.migrate(&Topology::fill_for(&cfg)).unwrap().len(), 4, "one notice per rewrite");
+        let got: Vec<String> = cfg.placements().unwrap().iter().map(|p| format!("{} {}", p.device, p.at)).collect();
+        assert_eq!(got, ["nvme xio13.pci0.3.pci0.0", "pci_bridge xio13.pci0.3", "pci_cage xio13", "pci_shoehorn xio10"]);
+        Topology::probe(&cfg).expect("each sits on what the one before it brought");
     }
 }

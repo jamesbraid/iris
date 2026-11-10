@@ -5,11 +5,12 @@ use std::path::Path;
 use iris::config::{AudioHost, CacheModel,
     format_unix_utc, ForwardBind, ForwardProto, GraphicsBoard, KeyboardLayout,
     MachineConfig, MachineProfile, NetMode, NfsConfig, PortForwardConfig, RtcOffset,
-    ScsiDeviceConfig, ScsiKind, VinoSource, VinoStandard, VALID_BANK_SIZES,
+    VinoSource, VinoStandard, VALID_BANK_SIZES,
 };
 use iris::net::nfsudp::NfsVersion;
 use iris::dev::ng1::vc2_timings::NewportResolution;
 
+use crate::placement_ui::{self, Device};
 use crate::i18n::{subtitle, ResponseExt};
 use crate::ram::{ram_summary, ram_presets};
 
@@ -466,8 +467,10 @@ fn show_general(ui: &mut Ui, cfg: &mut MachineConfig, mem_ctx: MemoryUiContext) 
     #[cfg(not(feature = "appstore"))]
     {
         ui.separator();
-        ui.checkbox(&mut cfg.ultra64.enabled, t!("config-ultra64"))
-            .tip(t!("config-ultra64-tip"));
+        let mut ultra64 = placement_ui::has_ultra64(cfg);
+        if ui.checkbox(&mut ultra64, t!("config-ultra64")).tip(t!("config-ultra64-tip")).changed() {
+            placement_ui::set_ultra64(cfg, ultra64);
+        }
         subtitle(ui, t!("config-autosave-subtitle"));
     }
 
@@ -891,24 +894,26 @@ fn show_disks(ui: &mut Ui, cfg: &mut MachineConfig) -> (PathEdit, ConfigAction) 
     ui.horizontal(|ui| {
         subtitle(ui, t!("config-scsi-subtitle"));
     });
-    let mut to_delete: Option<u8> = None;
     for id in 1u8..=7 {
         ui.separator();
-        let exists = cfg.scsi.contains_key(&id);
+        let at = placement_ui::controller_zero_target(cfg, id);
+        let mut current = placement_ui::media_at(cfg, &at);
+        let before = current.clone();
+        let exists = current.is_some();
         ui.horizontal(|ui| {
             ui.strong(t!("config-scsi-id", id = id));
             if exists {
                 if ui.button(t!("config-remove")).clicked() {
-                    to_delete = Some(id);
+                    placement_ui::remove_media(cfg, &at);
+                    current = None;
                 }
             } else if ui.button(t!("config-scsi-attach")).clicked() {
-                cfg.scsi.insert(id, ScsiDeviceConfig {
-                    path: crate::settings::GuiSettings::default_disk_path(id),
-                    ..Default::default()
-                });
+                let disk = placement_ui::Media { at: at.clone(), dev: Device::new("hdd", crate::settings::GuiSettings::default_disk_path(id)) };
+                placement_ui::set_media(cfg, disk.clone());
+                current = Some(disk);
             }
         });
-        if let Some(dev) = cfg.scsi.get_mut(&id) {
+        if let Some(dev) = current.as_mut() {
             // A DaynaPort has no image, no media and no overlay — it is an
             // Ethernet adapter on the SCSI bus. Show its own short form
             // instead of the storage rows below.
@@ -920,18 +925,19 @@ fn show_disks(ui: &mut Ui, cfg: &mut MachineConfig) -> (PathEdit, ConfigAction) 
 
                     ui.label(t!("config-scsi-mac"))
                         .tip(t!("config-scsi-mac-tip"));
-                    let mut mac = dev.mac.clone().unwrap_or_default();
+                    let Device::Daynaport(dp) = &mut dev.dev else { unreachable!("checked above") };
+                    let mut mac = dp.mac.clone().unwrap_or_default();
                     if ui.add(TextEdit::singleline(&mut mac).hint_text("00:80:19:44:50:03")).changed() {
-                        dev.mac = if mac.trim().is_empty() { None } else { Some(mac) };
+                        dp.mac = if mac.trim().is_empty() { None } else { Some(mac) };
                         edit.changed = true;
                     }
                     ui.end_row();
 
                     ui.label(t!("config-scsi-subnet"))
                         .tip(t!("config-scsi-subnet-tip"));
-                    let mut subnet = dev.subnet.clone().unwrap_or_default();
+                    let mut subnet = dp.subnet.clone().unwrap_or_default();
                     if ui.add(TextEdit::singleline(&mut subnet).hint_text("192.168.10.0/24")).changed() {
-                        dev.subnet = if subnet.trim().is_empty() { None } else { Some(subnet) };
+                        dp.subnet = if subnet.trim().is_empty() { None } else { Some(subnet) };
                         edit.changed = true;
                     }
                     ui.end_row();
@@ -941,18 +947,17 @@ fn show_disks(ui: &mut Ui, cfg: &mut MachineConfig) -> (PathEdit, ConfigAction) 
             }
             Grid::new(("scsi_grid", id)).num_columns(2).striped(true).show(ui, |ui| {
                 ui.label(t!("config-scsi-image"));
-                let e = path_row_disk(ui, ("scsi_path", id), &mut dev.path,
-                    if dev.scratch { Pick::SaveFile } else { Pick::OpenFile },
-                    &disk_filters());
+                let pick = if dev.scratch() { Pick::SaveFile } else { Pick::OpenFile };
+                let e = path_row_disk(ui, ("scsi_path", id), dev.path_mut().expect("a DaynaPort was handled above"), pick, &disk_filters());
                 edit.changed |= e.changed;
                 edit.picked |= e.picked;
                 // For CD-ROMs, picking a path immediately loads the disc into
                 // the running machine (equivalent to Ctrl+F12). The core's
                 // count-driven queue decides whether this replaces the current
                 // disc or joins the changer cycle.
-                if dev.cdrom && e.picked && !dev.path.is_empty() {
+                if dev.is_cdrom() && e.picked && !dev.path().is_empty() {
                     action = ConfigAction::LoadDisc {
-                        id, path: dev.path.clone(), remount: true,
+                        id, path: dev.path().to_owned(), remount: true,
                     };
                 }
                 ui.end_row();
@@ -961,8 +966,8 @@ fn show_disks(ui: &mut Ui, cfg: &mut MachineConfig) -> (PathEdit, ConfigAction) 
                 // so on the sandbox build this is the container sidecar) and its
                 // size, so it's unambiguous that changes are landing here and that
                 // this is the file folded back into the disk on a clean exit.
-                if dev.path.ends_with(".chd") {
-                    let diff = iris::chd_disk::diff_path_for(Path::new(&dev.path));
+                if dev.path().ends_with(".chd") {
+                    let diff = iris::chd_disk::diff_path_for(Path::new(dev.path()));
                     if let Ok(meta) = std::fs::metadata(&diff) {
                         let mb = meta.len() as f64 / (1024.0 * 1024.0);
                         ui.label(t!("config-scsi-overlay"));
@@ -980,47 +985,50 @@ fn show_disks(ui: &mut Ui, cfg: &mut MachineConfig) -> (PathEdit, ConfigAction) 
                 }
 
                 ui.label(t!("config-scsi-type"));
-                let was_cd = dev.cdrom;
+                let was_cd = dev.is_cdrom();
                 scsi_type_combo(ui, id, dev, &mut edit);
                 // Switching to CD-ROM defaults to an empty drive (no media):
                 // clear the auto-generated HDD placeholder path so it doesn't
                 // look like a (missing) disc. Load media via "Insert disc…" in
                 // the SCSI menu, or just type a path here.
-                if dev.cdrom && !was_cd && (dev.path == crate::settings::GuiSettings::default_disk_path(id) || dev.path == format!("scsi{id}.raw")) {
-                    dev.path.clear();
+                if dev.is_cdrom() && !was_cd && (dev.path() == crate::settings::GuiSettings::default_disk_path(id) || dev.path() == format!("scsi{id}.raw")) {
+                    dev.path_mut().expect("a CD-ROM has an image").clear();
                 }
                 ui.end_row();
-                if dev.cdrom && dev.path.is_empty() {
+                if dev.is_cdrom() && dev.path().is_empty() {
                     ui.label("");
                     ui.label(RichText::new(t!("config-scsi-cdrom-empty"))
                         .weak().small());
                     ui.end_row();
                 }
 
-                ui.label(t!("config-scsi-cow"))
-                    .tip(t!("config-scsi-cow-tip"));
-                ui.checkbox(&mut dev.overlay, "")
-                    .tip(t!("config-scsi-cow-check-tip"));
-                ui.end_row();
-
-                ui.label(t!("config-scsi-scratch"));
-                ui.checkbox(&mut dev.scratch, "");
-                ui.end_row();
-
-                if dev.scratch {
-                    ui.label(t!("config-scsi-scratch-size"));
-                    let mut sz = dev.size_mb.unwrap_or(64);
-                    if ui.add(DragValue::new(&mut sz).range(1..=8192)).changed() {
-                        dev.size_mb = Some(sz);
-                    }
+                // Only a hard disk has an overlay or a scratch volume.
+                if let Device::Hdd(hdd) = &mut dev.dev {
+                    ui.label(t!("config-scsi-cow"))
+                        .tip(t!("config-scsi-cow-tip"));
+                    ui.checkbox(&mut hdd.overlay, "")
+                        .tip(t!("config-scsi-cow-check-tip"));
                     ui.end_row();
+
+                    ui.label(t!("config-scsi-scratch"));
+                    ui.checkbox(&mut hdd.scratch, "");
+                    ui.end_row();
+
+                    if hdd.scratch {
+                        ui.label(t!("config-scsi-scratch-size"));
+                        let mut sz = hdd.size_mb.unwrap_or(64);
+                        if ui.add(DragValue::new(&mut sz).range(1..=8192)).changed() {
+                            hdd.size_mb = Some(sz);
+                        }
+                        ui.end_row();
+                    }
                 }
             });
 
-            if dev.cdrom {
+            if let Device::Cdrom(cd) = &mut dev.dev {
                 ui.label(t!("config-scsi-changer"));
                 let mut drop_idx: Option<usize> = None;
-                for (i, disc) in dev.discs.iter_mut().enumerate() {
+                for (i, disc) in cd.discs.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
                         let e = path_row_disk(ui, ("disc", id, i), disc, Pick::OpenFile, &disk_filters());
                         edit.changed |= e.changed;
@@ -1028,14 +1036,18 @@ fn show_disks(ui: &mut Ui, cfg: &mut MachineConfig) -> (PathEdit, ConfigAction) 
                         if ui.button("×").tip(t!("config-scsi-disc-remove-tip")).clicked() { drop_idx = Some(i); }
                     });
                 }
-                if let Some(i) = drop_idx { dev.discs.remove(i); }
+                if let Some(i) = drop_idx { cd.discs.remove(i); }
                 if ui.button(t!("config-scsi-add-disc")).clicked() {
-                    dev.discs.push(String::new());
+                    cd.discs.push(String::new());
                 }
             }
         }
+        if current != before {
+            if let Some(dev) = current {
+                placement_ui::set_media(cfg, dev);
+            }
+        }
     }
-    if let Some(id) = to_delete { cfg.scsi.remove(&id); }
     (edit, action)
 }
 
@@ -2263,37 +2275,27 @@ struct PathEdit {
     picked: bool,
 }
 
-/// SCSI target-type picker. `kind`/`cdrom` are two spellings of the same
-/// setting in the config, so write both from one place: a DaynaPort must not
-/// keep a stale `cdrom = true`, and a disk/CD-ROM must not keep
-/// `kind = "daynaport"`.
-fn scsi_type_combo(ui: &mut Ui, id: u8, dev: &mut ScsiDeviceConfig, edit: &mut PathEdit) {
-    let mut kind = dev.kind();
-    let before = kind;
+/// SCSI target-type picker. Changing the type keeps the image path of a disk
+/// or CD-ROM; a DaynaPort has no image, and leaving one set would make the
+/// config fail validation at Start.
+fn scsi_type_combo(ui: &mut Ui, id: u8, dev: &mut placement_ui::Media, edit: &mut PathEdit) {
+    let mut name = dev.dev.name();
+    let before = name;
     ComboBox::from_id_salt(("type", id))
-        .selected_text(match kind {
-            ScsiKind::Disk => t!("config-scsi-type-disk"),
-            ScsiKind::Cdrom => t!("config-scsi-type-cdrom"),
-            ScsiKind::Daynaport => t!("config-scsi-type-daynaport"),
+        .selected_text(match name {
+            "hdd" => t!("config-scsi-type-disk"),
+            "cdrom" => t!("config-scsi-type-cdrom"),
+            _ => t!("config-scsi-type-daynaport"),
         })
         .show_ui(ui, |ui| {
-            ui.selectable_value(&mut kind, ScsiKind::Disk, t!("config-scsi-type-disk"));
-            ui.selectable_value(&mut kind, ScsiKind::Cdrom, t!("config-scsi-type-cdrom"));
-            ui.selectable_value(&mut kind, ScsiKind::Daynaport, t!("config-scsi-type-daynaport"));
+            ui.selectable_value(&mut name, "hdd", t!("config-scsi-type-disk"));
+            ui.selectable_value(&mut name, "cdrom", t!("config-scsi-type-cdrom"));
+            ui.selectable_value(&mut name, "daynaport", t!("config-scsi-type-daynaport"));
         });
-    if kind != before {
+    if name != before {
         edit.changed = true;
-        if kind == ScsiKind::Daynaport {
-            // No image, no media, no overlay behind a network adapter — and
-            // leaving them set makes the config fail validation at Start.
-            dev.path.clear();
-            dev.discs.clear();
-            dev.overlay = false;
-            dev.scratch = false;
-        }
+        dev.dev = Device::new(name, dev.path().to_owned());
     }
-    dev.kind_field = kind;
-    dev.cdrom = kind == ScsiKind::Cdrom;
 }
 
 /// A TextEdit + 📁 Browse button that updates `value` in place. See [`PathEdit`].

@@ -48,8 +48,8 @@ fn config(dir: &Path, nodes: u8) -> MachineConfig {
     cfg.serial_port_b = Some(held[2].local_addr().unwrap().port());
     let disk = dir.join("disk.raw");
     std::fs::write(&disk, vec![0u8; 4 << 20]).unwrap();
-    cfg.scsi.clear();
-    cfg.scsi.insert(1, toml::from_str(&format!("path = {:?}\noverlay = true", disk.to_string_lossy())).unwrap());
+    let ctl = crate::topology::Topology::fill_for(&cfg).controller(0).unwrap();
+    cfg.place("hdd", ctl.join(crate::location::Hop::t(1)), toml::from_str(&format!("path = {:?}\noverlay = true", disk.to_string_lossy())).unwrap()).unwrap();
     cfg
 }
 

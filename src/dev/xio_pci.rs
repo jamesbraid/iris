@@ -221,9 +221,12 @@ impl XioPorts {
         bus
     }
 
-    /// The boards placed so far, in placement order.
+    /// The boards placed so far, in port order: a snapshot lists them so,
+    /// whichever order the config's arrays placed them in.
     pub fn take(&self) -> Vec<XioPciBoard> {
-        std::mem::take(&mut *self.boards.lock())
+        let mut boards = std::mem::take(&mut *self.boards.lock());
+        boards.sort_by_key(|b| b.widget());
+        boards
     }
 }
 
