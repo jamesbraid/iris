@@ -200,7 +200,7 @@ mode           = "nat"
 #pcap_interface = "wlan0"                                     # by name (Linux/macOS)
 #pcap_interface = '\Device\NPF_{385F30D0-9166-45D3-BBC6-F1D9C5300AF9}'  # Windows (literal '...' string!)
 # Ethernet station address for ec0. Unset: 08:00:69:e2:00:00, or the address
-# [machine] emu_id / serial / hostid give.
+# [machine] emu_id / serial / hostid give (docs/machine-identity.md).
 # Backdoor-injected into NVRAM (Indy) / serial EEPROM (Indigo2) before boot —
 # no need to `setenv eaddr` by hand at the PROM monitor. On the Indy, Indigo2,
 # O2, Octane and Origin 200 IRIX's host id (`sysinfo -s`) is its last four

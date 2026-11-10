@@ -79,9 +79,10 @@ Caveats:
 - Wired bridges work best. Many Wi-Fi access points reject the guest's extra
   MAC address, so bridging onto a wireless interface may not pass traffic.
 - The guest needs a MAC address in NVRAM. IRIS writes `[network] mac` (default
-  `08:00:69:e2:00:00`, or what `[machine] emu_id` gives) into a blank slot
-  before boot; give each emulated machine
-  on the same LAN its own (see `clanker/irix/networking.md`).
+  `08:00:69:e2:00:00`, or what `[machine] emu_id` gives; see
+  [machine identity](docs/machine-identity.md)) into a blank slot before boot;
+  give each emulated machine on the same LAN its own (see
+  `clanker/irix/networking.md`).
 
 Without `--features pcap`, selecting `mode = "pcap"` logs a warning and falls
 back to the NAT gateway, and `--list-net-interfaces` reports that the feature

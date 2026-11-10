@@ -18,7 +18,8 @@ hashes are given where a change is easiest to understand by reading the commit.
 - Every machine takes `machine.emu_id`, `machine.serial` and `machine.hostid`, and
   derives the system id IRIX reports (`sysinfo -s`, `lmhostid`) from them: the
   station address on the Indy, Indigo2, O2, Octane and Origin 200, the module
-  serial on the Origin 2000 and Onyx2.
+  serial on the Origin 2000 and Onyx2. See
+  [machine identity](docs/machine-identity.md).
 - **The default Ethernet address changes** from `08:00:69:12:34:56` to
   `08:00:69:e2:00:00` (the id for `emu_id` 0), so a new Indy, Indigo2, O2,
   Octane or Origin 200 no longer shares a host id with every other iris
