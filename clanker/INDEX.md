@@ -463,6 +463,7 @@ Plans, task briefs and reviews written for agents. Each states its own status; m
 
 | Note | Kind | Title |
 |---|---|---|
+| [locations.md](plans/locations.md) | plan | Devices placed by location: the places each machine has, rows from the PCI hosts' slot tables and a card's `rows()`, owners per family, an explicit registry, migration, and what an IP35 machine adds |
 | [wgpu-ui.md](plans/wgpu-ui.md) | plan | The iris window on wgpu: a presenter in `src/wgpu`, the board's device shared, VPro frames presented with no readback, then Newport's compositor in WGSL |
 | [cow-chd-sync-plan.md](plans/cow-chd-sync-plan.md) | plan | Plan: copy-on-write protection + "Syncing CHD file…" apply-on-shutdown |
 | [gui-benchmark-plan.md](plans/gui-benchmark-plan.md) | plan | Benchmark in iris-gui |
