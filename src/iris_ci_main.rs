@@ -110,6 +110,27 @@ enum Cmd {
     },
     /// Save the guest screen (any graphics board) to a PNG.
     Screenshot { path: PathBuf },
+    /// Take screenshots until the screen matches a golden PNG. On a timeout,
+    /// leave the last screenshot and a diff image (differing pixels in red)
+    /// behind and exit 3.
+    ScreenWait {
+        golden: PathBuf,
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+        /// Where each screenshot is written; iris must run on this host.
+        #[arg(long, default_value = "screen.png")]
+        actual: PathBuf,
+        /// Where the diff image goes on a mismatch.
+        #[arg(long, default_value = "screen-diff.png")]
+        diff: PathBuf,
+        /// A pixel differs when a channel is off by more than this.
+        #[arg(long, default_value_t = 32)]
+        threshold: u8,
+        /// The most differing pixels a match allows. The mouse and text
+        /// cursors account for up to 100 on the IRIX login screen.
+        #[arg(long, default_value_t = 1000)]
+        max_pixels: usize,
+    },
 
     /// Send keystrokes to the IRIX serial console.
     SerialSend {
@@ -305,6 +326,8 @@ fn dispatch(opts: &Opts, cmd: Cmd) -> Result<()> {
         Cmd::Gc                    => cmd_gc(opts),
         Cmd::Validate { name, n }  => cmd_validate(opts, &name, n),
         Cmd::Screenshot { path }   => simple(opts, "screenshot", json!({"path": path.display().to_string()}), "screenshot"),
+        Cmd::ScreenWait { golden, timeout, actual, diff, threshold, max_pixels } =>
+            cmd_screen_wait(opts, &golden, timeout, &actual, &diff, threshold, max_pixels),
 
         Cmd::SerialSend { text, no_cr } => {
             let data = if no_cr { text } else { format!("{}\r", text) };
@@ -674,6 +697,139 @@ fn cmd_serial_wait(opts: &Opts, pattern: &str, timeout_ms: u64) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ---- screen-wait --------------------------------------------------------------
+
+/// How often screen-wait takes a screenshot.
+const SCREEN_POLL: Duration = Duration::from_secs(1);
+
+/// An 8-bit RGB image, three bytes a pixel.
+struct Rgb {
+    width: u32,
+    height: u32,
+    px: Vec<u8>,
+}
+
+fn read_rgb(path: &std::path::Path) -> std::result::Result<Rgb, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+    let mut dec = png::Decoder::new(BufReader::new(file));
+    // A golden re-saved by an image tool may come back palette or 16-bit.
+    dec.set_transformations(png::Transformations::normalize_to_color8());
+    let bad = |e: png::DecodingError| format!("{}: {}", path.display(), e);
+    let mut r = dec.read_info().map_err(bad)?;
+    let mut buf = vec![0; r.output_buffer_size().ok_or_else(|| format!("{}: too large", path.display()))?];
+    let info = r.next_frame(&mut buf).map_err(bad)?;
+    buf.truncate(info.buffer_size());
+    let px = match info.color_type {
+        png::ColorType::Rgb => buf,
+        png::ColorType::Rgba => buf.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect(),
+        png::ColorType::Grayscale => buf.iter().flat_map(|&g| [g, g, g]).collect(),
+        png::ColorType::GrayscaleAlpha => buf.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0]]).collect(),
+        png::ColorType::Indexed => return Err(format!("{}: palette left unexpanded", path.display())),
+    };
+    Ok(Rgb { width: info.width, height: info.height, px })
+}
+
+fn write_rgb(path: &std::path::Path, img: &Rgb) -> std::result::Result<(), String> {
+    let bad = |e: &dyn std::fmt::Display| format!("{}: {}", path.display(), e);
+    let file = std::fs::File::create(path).map_err(|e| bad(&e))?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), img.width, img.height);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut w = enc.write_header().map_err(|e| bad(&e))?;
+    w.write_image_data(&img.px).map_err(|e| bad(&e))
+}
+
+fn pixel_differs(a: &[u8], b: &[u8], threshold: u8) -> bool {
+    a.iter().zip(b).any(|(x, y)| x.abs_diff(*y) > threshold)
+}
+
+/// How many pixels of `actual` are more than `threshold` away from `golden`
+/// in some channel, or None when the two are different sizes.
+fn count_differing(golden: &Rgb, actual: &Rgb, threshold: u8) -> Option<usize> {
+    if (golden.width, golden.height) != (actual.width, actual.height) {
+        return None;
+    }
+    Some(golden.px.chunks_exact(3).zip(actual.px.chunks_exact(3))
+        .filter(|(g, a)| pixel_differs(g, a, threshold))
+        .count())
+}
+
+/// `actual` darkened to a third, with every differing pixel in pure red.
+fn diff_image(golden: &Rgb, actual: &Rgb, threshold: u8) -> Rgb {
+    let px = golden.px.chunks_exact(3).zip(actual.px.chunks_exact(3))
+        .flat_map(|(g, a)| if pixel_differs(g, a, threshold) {
+            [255, 0, 0]
+        } else {
+            [a[0] / 3, a[1] / 3, a[2] / 3]
+        })
+        .collect();
+    Rgb { width: actual.width, height: actual.height, px }
+}
+
+/// `iris-ci screen-wait`: wait for the screen to show what the golden does.
+/// A boot draws its screen in stages and no one signal says it has finished,
+/// so poll screenshots until one matches or the deadline passes. Screenshots
+/// fail until the board has a video mode; those count as not matching yet.
+fn cmd_screen_wait(
+    opts: &Opts,
+    golden_path: &std::path::Path,
+    timeout_s: u64,
+    actual_path: &std::path::Path,
+    diff_path: &std::path::Path,
+    threshold: u8,
+    max_pixels: usize,
+) -> Result<()> {
+    let golden = read_rgb(golden_path).map_err(|e| Error::Local(format!("golden: {e}")))?;
+    // iris writes the screenshot, from its own working directory.
+    let actual_path = std::path::absolute(actual_path)
+        .map_err(|e| Error::Local(format!("{}: {}", actual_path.display(), e)))?;
+    let deadline = Instant::now() + Duration::from_secs(timeout_s);
+    let mut last: Option<(Rgb, Option<usize>)> = None;
+    let mut why = String::from("no screenshot taken");
+    loop {
+        match send(opts, "screenshot", json!({"path": actual_path.display().to_string()})) {
+            Ok(_) => match read_rgb(&actual_path) {
+                Ok(img) => {
+                    let n = count_differing(&golden, &img, threshold);
+                    if n.is_some_and(|n| n <= max_pixels) {
+                        print_response(opts, &format!(
+                            "screen matches {} ({} pixels differ)", golden_path.display(), n.unwrap()), &Value::Null);
+                        return Ok(());
+                    }
+                    if !opts.quiet && last.as_ref().map(|l| l.1) != Some(n) {
+                        match n {
+                            Some(n) => eprintln!("screen-wait: {n} pixels differ"),
+                            None => eprintln!("screen-wait: screen is {}x{}", img.width, img.height),
+                        }
+                    }
+                    last = Some((img, n));
+                }
+                Err(e) => why = e,
+            },
+            // No video mode yet, or a screenshot iris could not write.
+            Err(Error::Iris(e)) => why = e,
+            Err(e) => return Err(e),
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(SCREEN_POLL);
+    }
+    let Some((img, n)) = last else {
+        return Err(Error::Local(format!("no screenshot within {timeout_s}s: {why}")));
+    };
+    let Some(n) = n else {
+        return Err(Error::Local(format!(
+            "screen still {}x{} after {timeout_s}s, golden is {}x{}; see {}",
+            img.width, img.height, golden.width, golden.height, actual_path.display())));
+    };
+    write_rgb(diff_path, &diff_image(&golden, &img, threshold)).map_err(Error::Local)?;
+    Err(Error::Local(format!(
+        "screen did not match {} within {timeout_s}s: {n} pixels differ by more than {threshold} \
+         (limit {max_pixels}); see {} and {}",
+        golden_path.display(), actual_path.display(), diff_path.display())))
 }
 
 // ---- boot/login/run macros --------------------------------------------------
@@ -1288,5 +1444,39 @@ mod tests {
         assert!(!typed.contains(&marker));
         let buf = format!("echo IRIS-CI-RC=7\r\nIRIS-CI-RC=7\r\nIRIS 3# {}", marker);
         assert_eq!(extract_run_stdout(&buf, &marker), "IRIS-CI-RC=7");
+    }
+
+    fn rgb(width: u32, height: u32, px: &[u8]) -> Rgb {
+        Rgb { width, height, px: px.to_vec() }
+    }
+
+    #[test]
+    fn a_pixel_differs_only_past_the_threshold() {
+        let golden = rgb(3, 1, &[100, 100, 100, 100, 100, 100, 100, 100, 100]);
+        let actual = rgb(3, 1, &[132, 100, 100, 100, 68, 100, 100, 100, 133]);
+        assert_eq!(count_differing(&golden, &actual, 32), Some(1));
+        assert_eq!(count_differing(&golden, &actual, 31), Some(3));
+        assert_eq!(count_differing(&golden, &rgb(1, 3, &actual.px), 32), None);
+    }
+
+    #[test]
+    fn the_diff_marks_differing_pixels_red() {
+        let golden = rgb(2, 1, &[90, 60, 30, 90, 60, 30]);
+        let actual = rgb(2, 1, &[90, 60, 30, 0, 0, 0]);
+        assert_eq!(diff_image(&golden, &actual, 32).px, [30, 20, 10, 255, 0, 0]);
+    }
+
+    #[test]
+    fn an_rgba_golden_reads_as_rgb() {
+        let path = std::env::temp_dir().join(format!("iris-ci-rgba-golden-{}.png", std::process::id()));
+        let file = std::fs::File::create(&path).unwrap();
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 2, 1);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(&[1, 2, 3, 255, 4, 5, 6, 0]).unwrap();
+        let img = read_rgb(&path);
+        std::fs::remove_file(&path).unwrap();
+        let img = img.unwrap();
+        assert_eq!((img.width, img.height, img.px), (2, 1, vec![1, 2, 3, 4, 5, 6]));
     }
 }
