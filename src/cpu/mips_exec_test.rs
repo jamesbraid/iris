@@ -6839,6 +6839,25 @@ mod tests {
         crate::cpu::mips_exec::MipsCpu::new(exec)
     }
 
+    /// `idle` reads and sets atomics only. Pausing the CPU for it stopped and
+    /// restarted the CPU thread, and with it the guest's clock between two
+    /// ticks; a tool polling `idle status` must leave the thread alone.
+    #[cfg(feature = "idle-pause")]
+    #[test]
+    fn idle_status_leaves_a_running_cpu_alone() {
+        let (mut exec, mem) = create_executor();
+        mem.set_word(0x1000, (OP_BEQ << 26) | 0xFFFF); // beq $0, $0, self
+        mem.set_word(0x1004, 0);
+        exec.core.pc = 0xffff_ffff_8000_1000;
+        let cpu = crate::cpu::mips_exec::MipsCpu::new(exec);
+        crate::traits::Device::start(&cpu);
+        let before = cpu.thread_id();
+        let (r, out) = mon(&cpu, "idle status");
+        assert!(r.is_ok() && out.starts_with("idle:"), "{r:?} {out}");
+        assert_eq!(cpu.thread_id(), before, "`idle status` stopped and restarted the CPU thread");
+        crate::traits::Device::stop(&cpu);
+    }
+
     // `lightning` compiles breakpoint checks out of the run loop, so nothing
     // would ever stop the CPU at the breakpoint.
     #[cfg(not(feature = "lightning"))]

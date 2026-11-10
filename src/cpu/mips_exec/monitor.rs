@@ -620,7 +620,9 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> MipsCpu<T, C> {
         //  - everything else holds the core still while it works (`pause`):
         //    a running CPU is stopped for the command and restarted after.
         const RUN_CONTROL: &[&str] = &["run", "c", "cont", "finish", "fin", "step", "s", "si", "next", "n"];
-        const LOCK_FREE: &[&str] = &["start", "stop", "status", "wait", "help"];
+        // `idle` reads and sets atomics only; pausing the CPU for it would
+        // stop the guest's clock between two of its ticks.
+        const LOCK_FREE: &[&str] = &["start", "stop", "status", "wait", "help", "idle"];
         if RUN_CONTROL.contains(&actual_cmd) && self.is_running() {
             return Err(format!("CPU is running: `stop` it before `{}` (or `wait` for a breakpoint)", actual_cmd));
         }

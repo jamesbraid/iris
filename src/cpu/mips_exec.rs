@@ -10650,6 +10650,13 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> MipsCpu<T, C> {
         let _ = &mut exec;
     }
 
+    /// The running CPU thread's id, for tests that must tell whether a
+    /// command stopped and restarted it.
+    #[cfg(test)]
+    pub(crate) fn thread_id(&self) -> Option<thread::ThreadId> {
+        self.thread.lock().as_ref().map(|h| h.thread().id())
+    }
+
     /// Hold the core still for a monitor command: a running CPU is stopped
     /// now and restarted when the guard drops; a stopped one is left alone.
     /// Every command that reads or changes core state goes through this, so
