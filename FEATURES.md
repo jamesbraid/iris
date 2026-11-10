@@ -260,6 +260,10 @@ config only when one of these keys is set. See the
 | `scsi.<ID>.scratch` | `false` | Host-managed raw scratch volume; cannot be CD-ROM/overlay. |
 | `scsi.<ID>.size_mb` | `64 when unset` | Size of a newly created scratch image; existing files are unchanged. |
 | `scsi.<ID>.controller` | `0` | 0 or 1; controller 1 is accepted on indigo2_ip22 and o2_ip32 (on the O2 it is the external bus). A key of 16 + ID names controller 1 directly and does not need it. |
+| `scsi.<ID>.vendor` | `the machine's own` | Up to 8 printable ASCII characters INQUIRY reports as the vendor, padded with spaces. Disks and CD-ROMs. |
+| `scsi.<ID>.product` | `the machine's own` | Up to 16 characters INQUIRY reports as the product. |
+| `scsi.<ID>.revision` | `the machine's own` | Up to 4 characters INQUIRY reports as the product revision. |
+| `scsi.<ID>.serial` | `none` | Up to 16 printable ASCII characters: the unit serial number. Set, INQUIRY reports its first 8 characters after the revision (bytes 36 to 43) and the unit serial number page (VPD 0x80) carries all of it. Unset, INQUIRY is unchanged. |
 
 IDs are 1–7, or 1–15 on the Octane's wide ISP1040 buses. The key is a slot: `[scsi.N]` with N 1–7 is id N on controller 0
 (or on `controller`, when set), and N = 16 + id is that id on controller 1,

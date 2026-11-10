@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 
 use crate::devlog::{LogModule, NVME_LOG_ADMIN, NVME_LOG_IO, NVME_LOG_REGS, NVME_LOG_STATE};
 use crate::pci::{Bar, DevFn, PciBus, PciConfig, PciDma, PciFunction, PciFunctionState, PciToPciBridge, PCI_INTA};
-use crate::scsi::{ScsiBus, ScsiIdentities, ScsiIdentity};
+use crate::scsi::{AttachOptions, ScsiBus, ScsiIdentities, ScsiIdentity};
 use crate::scsi_monitor::ScsiTargets;
 use crate::snapshot::{get_field, hex_u32, hex_u64, toml_u32, toml_u64};
 use crate::traits::{Device, Resettable, Saveable};
@@ -343,7 +343,11 @@ impl Nvme {
     pub fn attach_image(&self, path: &str, overlay: bool, overlay_path: Option<&str>) -> Result<u64, String> {
         let blocks = self
             .bus
-            .attach_device(0, path, false, Vec::new(), overlay, overlay_path, false)
+            .attach_device(
+                0,
+                path,
+                AttachOptions { overlay, overlay_path: overlay_path.map(str::to_string), ..Default::default() },
+            )
             .map_err(|e| format!("could not open {path}: {e}"))?;
         // The SCSI layer addresses blocks in 32 bits.
         if blocks > u64::from(u32::MAX) {
