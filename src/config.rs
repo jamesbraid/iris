@@ -2786,8 +2786,7 @@ impl MachineConfig {
     pub fn identity(&self) -> Result<crate::identity::Identity, String> {
         use crate::identity::{Family, Identity, KIND};
         let family = match self.machine.profile {
-            MachineProfile::IndyIp24 | MachineProfile::Indigo2Ip22 | MachineProfile::Indigo2Ip28 => Family::AnyAddress,
-            MachineProfile::O2Ip32 | MachineProfile::OctaneIp30 | MachineProfile::Origin200Ip29 => Family::Address,
+            MachineProfile::IndyIp24 | MachineProfile::Indigo2Ip22 | MachineProfile::Indigo2Ip28 | MachineProfile::O2Ip32 | MachineProfile::OctaneIp30 | MachineProfile::Origin200Ip29 => Family::Address,
             MachineProfile::Origin2000Ip27 | MachineProfile::Onyx2Ip27 => Family::Module,
         };
         let mac = self.network.mac.as_deref().map(|s| parse_mac(s).map_err(|e| format!("network.mac: {e}"))).transpose()?;
@@ -3575,10 +3574,15 @@ mod export_tests {
         assert!(e.contains("must start 08:00:69; use mac=08:00:69:aa:bb:cc or hostid=aabbcc"), "{e}");
     }
 
+    /// IRIX brings ec0 down ("machine has bad ethernet address") for an Indy
+    /// or Indigo2 at 02:12:34:56:78:9a, so start-up refuses it.
     #[test]
-    fn the_indy_and_indigo2_default_to_the_identity_layout() {
+    fn the_indy_and_indigo2_refuse_a_station_address_outside_08_00_69() {
         for profile in ["indy_ip24", "indigo2_ip22", "indigo2_ip28"] {
             let mut cfg = identity_cfg(profile, "");
+            cfg.network.mac = Some("02:12:34:56:78:9a".into());
+            let e = cfg.validate().unwrap_err();
+            assert!(e.contains("must start 08:00:69; use mac=08:00:69:56:78:9a or hostid=56789a"), "{profile}: {e}");
             cfg.network.mac = Some("08:00:69:56:78:9a".into());
             cfg.validate().unwrap();
             let cfg = identity_cfg(profile, "");

@@ -153,11 +153,11 @@ pub enum Family {
     /// starts with K: the Origin 2000 and Onyx2.
     Module,
     /// The id comes from the station address, which must start `08:00:69`:
-    /// the Octane, Origin 200 and O2, whose firmware insists on it.
+    /// the Octane, Origin 200 and O2, whose firmware insists on it. IRIX on
+    /// the Indy and Indigo2 rejects any other first three bytes ("ec0: machine
+    /// has bad ethernet address") and brings ec0 down, so they are held to the
+    /// same prefix.
     Address,
-    /// The id comes from the last four bytes of any station address: the Indy
-    /// and Indigo2.
-    AnyAddress,
 }
 
 /// What the inputs of one machine come to.
@@ -354,7 +354,7 @@ impl Identity {
     pub fn hostids(&self, count: u32) -> Result<Vec<u32>, String> {
         (0..count)
             .map(|n| match self.family {
-                Family::Address | Family::AnyAddress => self.station(n).map(|m| hostid_from_mac(&m)),
+                Family::Address => self.station(n).map(|m| hostid_from_mac(&m)),
                 Family::Module => self.module_text(n).map(|t| hostid_from_text(&t)).ok_or_else(|| format!("module serials number at most {MODULE_COUNT} modules, and module {n} does not fit")),
             })
             .collect()

@@ -22,5 +22,11 @@ O2 stores no copy and takes the new address on its next boot.
 - `hostid`, `serial` and `mac` name one id on the machines that take it from
   the address, so they must agree. See [machine identity](../../docs/machine-identity.md)
   for the keys and layout.
+- The Indy, Indigo2 and IP28 refuse a `mac` outside `08:00:69` at start-up. The
+  evidence is Indy and Indigo2 boots: IRIX logs
+  `ec0: machine has bad ethernet address` right after the banner and brings
+  ec0 down for any change in the first three bytes. See the table in
+  [machine identity](../../docs/machine-identity.md). IP28 was not booted;
+  its refusal is by family and unverified.
 - The Origin 2000 and Onyx2 module serial rule (IRIX reads it only when it
   starts with `K`) is an expectation, not yet confirmed on an iris boot.

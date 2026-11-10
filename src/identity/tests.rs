@@ -228,18 +228,22 @@ fn an_address_family_takes_its_id_from_the_station_address() {
     a(4096, None, None, None).unwrap_err();
 }
 
-/// The Indy and Indigo2 take their id from the last four bytes of whatever
-/// address they hold: an Indy at 02:12:34:56:78:9a printed `3456789a` from
-/// `sysinfo -s`.
+/// The Indy and Indigo2 are an address family too: IRIX brings ec0 down with
+/// "bad ethernet address" for any other first three bytes, so they refuse the
+/// same prefixes the Octane does. Their default
+/// is the iris layout (kind 2).
 #[test]
-fn the_indy_takes_its_id_from_any_station_address() {
-    let id = Identity::resolve(Family::AnyAddress, KIND, 0, None, None, None).unwrap();
+fn the_indy_refuses_a_station_address_outside_08_00_69() {
+    let id = Identity::resolve(Family::Address, KIND, 0, None, None, None).unwrap();
     assert_eq!((id.id, id.station(0).unwrap()), (0x69e2_0000, [0x08, 0x00, 0x69, 0xe2, 0x00, 0x00]));
     let measured = [0x02, 0x12, 0x34, 0x56, 0x78, 0x9a];
-    let id = Identity::resolve(Family::AnyAddress, KIND, 0, None, None, Some(measured)).unwrap();
-    assert_eq!((id.id, id.station(0).unwrap()), (0x3456_789a, measured));
-    let id = Identity::resolve(Family::AnyAddress, KIND, 0, None, Some("3456789a"), None).unwrap();
-    assert_eq!(id.station(0).unwrap(), [0x08, 0x00, 0x34, 0x56, 0x78, 0x9a]);
+    let e = Identity::resolve(Family::Address, KIND, 0, None, None, Some(measured)).unwrap_err();
+    assert_eq!(e, "mac=02:12:34:56:78:9a: this machine's station address must start 08:00:69; use mac=08:00:69:56:78:9a or hostid=56789a");
+    let ok = [0x08, 0x00, 0x69, 0x56, 0x78, 0x9a];
+    let id = Identity::resolve(Family::Address, KIND, 0, None, None, Some(ok)).unwrap();
+    assert_eq!((id.id, id.station(0).unwrap()), (0x6956_789a, ok));
+    // An id that does not start 69 would need such an address.
+    Identity::resolve(Family::Address, KIND, 0, None, Some("3456789a"), None).unwrap_err();
 }
 
 #[test]

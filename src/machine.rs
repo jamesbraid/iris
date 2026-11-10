@@ -2280,6 +2280,21 @@ mod identity_tests {
         }
     }
 
+    /// The Indy and Indigo2 refuse an address outside 08:00:69 at start-up:
+    /// IRIX rejects the Ethernet address and leaves ec0 down, so a machine
+    /// is never built with one.
+    #[test]
+    fn a_foreign_address_is_refused_on_the_indy() {
+        let dir = scratch("ip22-foreign");
+        for profile in [MachineProfile::IndyIp24, MachineProfile::Indigo2Ip22, MachineProfile::Indigo2Ip28] {
+            let mut cfg = config(&dir, profile, GraphicsBoard::Newport);
+            cfg.network.mac = Some("02:12:34:56:78:9a".into());
+            let e = cfg.validate().unwrap_err();
+            assert!(e.contains("must start 08:00:69"), "{profile:?}: {e}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A saved NVRAM keeps its address whatever the inputs now say.
     #[test]
     fn a_saved_address_is_not_rewritten() {
