@@ -1,0 +1,29 @@
+name: Probe anchors
+on:
+  push:
+    branches: [ "ci-probe-platform-tables" ]
+jobs:
+  one:
+    name: One (${{ matrix.arch }})
+    runs-on: &ubuntu ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - &x64   { arch: x64,   runner: *ubuntu }
+          - &arm64 { arch: arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - run: echo "${{ matrix.runner }}"
+  two:
+    name: Two (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - *x64
+          - *arm64
+    steps:
+      - run: echo "${{ matrix.runner }}"
+  three:
+    runs-on: *ubuntu
+    steps:
+      - run: echo ok
