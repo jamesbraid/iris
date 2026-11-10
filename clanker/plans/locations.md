@@ -1,10 +1,11 @@
 # Plan: devices placed by location
 
 Status: **in progress.** The machine-sharing refactor it builds on (Control,
-GuestNet, Devices, Disks, Ip22Board) is the stack below it. Steps 1 and 2
+GuestNet, Devices, Disks, Ip22Board) is the stack below it. Steps 1 to 3
 of the order of work below are built: locations, the socket map, the `rows`
 hook, the device list, the SCSI, GIO, PCI and XIO device types, with every
-machine placing its disks and cards through the map, and `--list-slots`.
+machine placing its disks and cards through the map, `--list-slots`, and the
+config by location (`[[TYPE]]` entries, `--device`, migration, the GUI).
 The IP27 machines place their disks; their XIO and PCI rows wait for the
 IP27 work. The earlier attempt placed SCSI
 disks and GIO cards by location but could not place anything below a PCI
@@ -137,12 +138,17 @@ depends on link order. Adding a device type costs the type and its impl
 beside the device, one line in `registry.rs` and one field in
 `MachineConfig`.
 
+The config side is `DeviceArray` (the entries, plus an older file's table or
+bool under the same name, kept for `migrate` and never written) and one seam,
+`MachineConfig::arrays()` and `array_mut()`, the only code that knows which
+field holds which type.
+
 ## Config migration
 
 `MachineConfig::migrate` rewrites the older tables once the machine is known,
 printing one notice each: `[scsi.N]`, `[ultra64]`, `test_device`,
 `test_device_dump`, `[virtio_serial]`, `[[xio_board]]` (to `pci_cage` at
-`xio13`, `pci_shoehorn` at the port `xio_widgets` would have picked) and
+`xio13`, `pci_shoehorn` at the port the older code picked) and
 `[nvme]` (to `nvme` at `pci0.3` on the O2, or at that board's `xioW.pci0.S`,
 first free slot when unset; `bridge = true` becomes a `pci_bridge` at the slot
 and the card at `.pci0.0`). A file mixing old and new forms for the same
