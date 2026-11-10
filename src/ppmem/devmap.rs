@@ -662,20 +662,34 @@ mod fault {
     static REGISTRY: [AtomicPtr<Inner>; MAX_MAPS] = [const { AtomicPtr::new(std::ptr::null_mut()) }; MAX_MAPS];
     static INSTALL: Once = Once::new();
 
+    static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     pub(super) fn register(inner: *const Inner) -> io::Result<usize> {
         for (i, slot) in REGISTRY.iter().enumerate() {
             if slot
                 .compare_exchange(std::ptr::null_mut(), inner as *mut Inner, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
+                let live = LIVE.fetch_add(1, Ordering::SeqCst) + 1;
+                if live > PEAK.fetch_max(live, Ordering::SeqCst) {
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/scratch/origami/tmp/devmap-peak.log") {
+                        let _ = writeln!(f, "live={} test={}", live, std::thread::current().name().unwrap_or("?"));
+                    }
+                }
                 return Ok(i);
             }
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/scratch/origami/tmp/devmap-peak.log") {
+            use std::io::Write;
+            let _ = writeln!(f, "FULL test={}", std::thread::current().name().unwrap_or("?"));
         }
         Err(io::Error::other(format!("devmap: more than {MAX_MAPS} tables alive")))
     }
 
     pub(super) fn unregister(i: usize) {
         if i < MAX_MAPS {
+            LIVE.fetch_sub(1, Ordering::SeqCst);
             REGISTRY[i].store(std::ptr::null_mut(), Ordering::Release);
         }
     }
