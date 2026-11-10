@@ -73,9 +73,9 @@ Each is an approximation, stated where it is made.
 ## Compiled code
 
 A page some CPU holds is not compiled: compiles read memory, and compiled code is
-shared. ppmem puts `GEN_HELD` on the page's generation counter at the first hold
-and takes it off at the last release, moving it with the page on a remap
-(`PpMemSpace::mark`). The compile that finds it publishes nothing and denies every
+shared. Each CPU's view puts its own `GEN_HELD` on the page's generation counter
+at its first hold and takes it off at its last release, so no CPU reads another's
+view, and a remap moves the marks with the page (`PpMemSpace::mark`). The compile that finds it publishes nothing and denies every
 offset until the release. ppmem's counters are the bus's for memory; a machine whose bus
 maps a device over memory must mark that device's counter as well.
 
