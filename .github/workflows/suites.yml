@@ -28,7 +28,8 @@
 # Both suites run on every CPU even when the first fails, so a cpu-tests
 # failure never hides the benchmark's accuracy result. cpu-tests has known
 # findings (cpu-tests/docs/findings.md); a cell passes when exactly the tests
-# in cpu-tests/expected-failures.txt fail.
+# in cpu-tests/expected-failures.txt fail. Both are cargo integration tests
+# (tests/cpu_tests.rs, tests/bench_accuracy.rs), one case per CPU.
 
 name: Bare-metal suites
 
@@ -46,6 +47,9 @@ on:
       - 'src/bench_runner.rs'
       - 'src/benchsuite.rs'
       - 'src/bin/iris_bench.rs'
+      - 'tests/common/**'
+      - 'tests/cpu_tests.rs'
+      - 'tests/bench_accuracy.rs'
       - '.github/workflows/suites.yml'
   pull_request:
     branches: [ "main" ]
@@ -180,41 +184,35 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # iris-bench embeds the guest image and can run the suite in-process, so
-      # it is built with the same features: a default-feature build would
-      # quietly be a different machine from the one this job is named after.
-      # jitv2 is the only MIPS JIT and is active as soon as it is compiled in.
-      - name: Build IRIS
-        run: cargo build --release --bin iris --bin iris-bench --features "${{ matrix.features }}"
-
+      # cargo builds `iris` and `iris-bench` for the tests with the tests' own
+      # profile and features, so each case runs the release emulator for this
+      # job's engine; a default-feature build would quietly be a different
+      # machine from the one this job is named after. jitv2 is the only MIPS
+      # JIT and is active as soon as it is compiled in.
+      #
+      # One test thread: the bench cases time the guest, and three emulators
+      # sharing this runner's cores would record figures nobody can compare
+      # with another run. CI judges only accuracy either way.
+      #
       # The R5000 is the R5000 without a secondary cache: r5ksc is refused at
       # compile time (src/lib.rs). It matters here only because CPU/FPU
-      # correctness does not depend on it.
-      - name: cpu-tests
-        run: |
-          rc=0
-          for cpu in r4400 r5000; do
-            make -C cpu-tests check-run PREBUILT=1 CPU=$cpu ENGINE=${{ matrix.engine }} || rc=1
-          done
-          exit $rc
-
-      # --iris is required, not decorative: without it `run` measures the
-      # in-process emulator, which is not the binary built above. The R10000
-      # always runs the shadow caches, so the default build covers it.
-      - name: bench
-        if: ${{ !cancelled() }}
-        run: |
-          rc=0
-          for cpu in r4400 r5000 r10000_195; do
-            make -C bench check-run PREBUILT=1 CPU=$cpu ENGINE=${{ matrix.engine }} || rc=1
-          done
-          exit $rc
+      # correctness does not depend on it. The R10000 always runs the shadow
+      # caches, so the default build covers it; cpu-tests has no expectations
+      # for it.
+      - name: cpu-tests and bench
+        env:
+          IRIS_CPUTEST_ELF: cpu-tests/build/cputest.elf
+          IRIS_BENCH_RESULTS: ${{ github.workspace }}/bench/build/results
+        run: >
+          cargo test --release --features "${{ matrix.features }}"
+          --test cpu_tests --test bench_accuracy --no-fail-fast
+          -- --include-ignored --test-threads=1
 
       - name: Summary
         if: ${{ !cancelled() }}
         run: |
           { echo "### ${{ matrix.engine }}"; echo '```'
-            grep -HE '^ RESULT:|accuracy|emulator speed' cpu-tests/build/*.log bench/build/*.log
+            grep -rHE '^ RESULT:|accuracy|emulator speed' target/tmp/bare-metal
             echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
 
       - uses: actions/upload-artifact@v7
@@ -222,9 +220,7 @@ jobs:
         with:
           name: suites-${{ matrix.engine }}
           path: |
-            cpu-tests/build/*.log
-            cpu-tests/build/dump.json
-            bench/build/*.log
+            target/tmp/bare-metal
             bench/build/results/*.json
           if-no-files-found: ignore
 
