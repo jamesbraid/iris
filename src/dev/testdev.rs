@@ -384,6 +384,7 @@ impl TestDevice {
             TestDeviceClock::Guest => self.icount().wrapping_mul(GUEST_CLOCK_NS_PER_INSN),
         };
         self.host_ns_latch.store(ns, Ordering::Relaxed);
+        hi_log(ns);
         ns
     }
 
@@ -725,4 +726,32 @@ mod tests {
         b.power_on();
         assert_eq!(b.dumps_written(), 0, "power_on clears counters");
     }
+}
+
+// Measurement only (local, never committed): log host instructions retired by
+// the calling thread at each guest clock read.
+fn hi_log(ns: u64) {
+    use std::cell::Cell;
+    thread_local! { static FD: Cell<i32> = const { Cell::new(-2) }; }
+    FD.with(|f| {
+        if f.get() == -2 {
+            let mut attr = [0u64; 8];
+            attr[0] = 0 | (64u64 << 32);
+            attr[1] = 1;
+            attr[5] = (1 << 5) | (1 << 6);
+            let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, attr.as_ptr(), 0, -1, -1, 0) } as i32;
+            f.set(fd);
+        }
+        let fd = f.get();
+        if fd >= 0 {
+            let mut v: u64 = 0;
+            unsafe { libc::read(fd, &mut v as *mut u64 as *mut _, 8) };
+            use std::io::Write;
+            if let Ok(path) = std::env::var("IRIS_HI_OUT") {
+                if let Ok(mut fh) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
+                    let _ = writeln!(fh, "HI {} {} {}", ns, v, unsafe { libc::syscall(libc::SYS_gettid) });
+                }
+            }
+        }
+    });
 }
