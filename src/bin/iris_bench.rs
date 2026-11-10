@@ -266,7 +266,7 @@ struct Cell {
     /// What the guest must print in `#machine cpu=`. Checked, because an
     /// overwritten target/release/iris silently turning an "R4400" cell into
     /// an R5000 run is a mistake this repo has made before — see
-    /// cpu-tests/run/matrix.sh.
+    /// clanker/testing/benchmark-suite-gotchas.md.
     expect_cpu: &'static str,
 }
 

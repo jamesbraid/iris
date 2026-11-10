@@ -109,19 +109,9 @@ IRIS ?= ../target/release/iris
 run: $(TARGET)
 	@run/run-local.sh $(TARGET)
 
-# Run the suite on one cell and judge the log with run/check.py; CI runs this
-# too. IRIS must be built for the cell's engine. PREBUILT=1 skips building the
-# guest, for CI, which holds the binary but no cross compiler.
-CPU     ?= r4400
-ENGINE  ?= interp
-CELL    := $(CPU)-$(ENGINE)
-LOG     ?= $(BUILD)/$(CELL).log
-TIMEOUT ?= 900
-
-.PHONY: check-run
-check-run: $(if $(PREBUILT),,$(TARGET))
-	@IRIS=$(IRIS) LOG=$(LOG) TIMEOUT=$(TIMEOUT) run/run-local.sh $(TARGET) --cpu $(CPU); \
-	 [ $$? -ne 2 ] && python3 run/check.py $(CELL) $(LOG)
+# Judging a run against expected-failures.txt is a cargo test, which builds
+# the emulator for the engine it names:
+#   cargo test --release [--features jitv2] --test cpu_tests -- --ignored
 
 # ── bootable image ───────────────────────────────────────────────────────────
 MKVH ?= ../target/release/mkvh
