@@ -1173,10 +1173,14 @@ fn pin_fall_then_rise_gives_the_bridge_one_heart_packet_each() {
         std::thread::spawn(move || c.raise(true))
     };
     begun_rx.recv().unwrap();
-    c.raise(false);
-    c.raise(true);
+    // The fall and rise wait for the packet in flight.
+    let toggler = std::thread::spawn(move || {
+        c.raise(false);
+        c.raise(true);
+    });
     go_tx.send(()).unwrap();
     raiser.join().unwrap();
+    toggler.join().unwrap();
     assert_eq!(*heart.log.lock(), [(1, true), (1, true)]);
 }
 

@@ -41,12 +41,12 @@ call.
 ## Interrupts
 
 Every device pin and every board IRQ is a line routed to a host output, and
-the bus tells the host the OR of what is routed to each output. A pin that
-falls and rises before the host has seen the fall still reaches an edge host
-as a 0 and then a 1: the Bridge sends its interrupt packet to HEART only on a
-rising edge, and the guest may have cleared the bit in between. A rise that
-falls again unseen is coalesced. No lock of ours is held while the host is
-driven, and deliveries to one output are serialised and in order.
+the bus tells the host the OR of what is routed to each output. The bus
+drives the host under its own lock, as every interrupt controller in iris
+drives the one above it, so deliveries are one at a time and in the order the
+levels changed. A pin that falls and rises reaches an edge host as a 0 and
+then a 1: the Bridge sends its interrupt packet to HEART only on a rising
+edge, and the guest may have cleared the bit in between.
 
 ## Reset
 

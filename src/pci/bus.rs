@@ -295,21 +295,20 @@ impl PciBus {
         }
     }
 
-    /// Each output's (dirty, fell, last), for a test to compare.
+    /// Which outputs the host has high, one bit each, for a test to compare.
     #[cfg(test)]
-    pub(crate) fn delivery_flags(&self) -> Vec<(bool, bool, bool)> {
+    pub(crate) fn driven_outputs(&self) -> u64 {
         match &self.0.uplink {
-            Uplink::Root { combiner, .. } => combiner.flags(),
-            Uplink::Behind { .. } => Vec::new(),
+            Uplink::Root { combiner, .. } => combiner.driven(),
+            Uplink::Behind { .. } => 0,
         }
     }
 
-    /// Latch every output's `fell` and `dirty`, as an interrupted delivery
-    /// would leave them.
+    /// Take every output as high at the host, as a used bus might.
     #[cfg(test)]
-    pub(crate) fn latch_delivery_flags(&self) {
+    pub(crate) fn drive_all_outputs_high(&self) {
         if let Uplink::Root { combiner, .. } = &self.0.uplink {
-            combiner.out_force_flags();
+            combiner.drive_all_high();
         }
     }
 
@@ -726,17 +725,17 @@ mod tests {
         let v = src.save_state();
         let (_hf, fresh, _) = make();
         fresh.load_state(&v).unwrap();
-        // A bus that has been used: other header, other pins, a latched fall.
+        // A bus that has been used: other header, other pins, outputs high at the host.
         let (_hd, dirty, cd) = make();
         dirty.config_write(at(3, 0), 0x14, 4, 0x9000_0000);
         dirty.config_write(at(3, 0), 0x04, 2, PCI_COMMAND_MEMORY);
         cd.state().irq().unwrap().set(true);
         cd.state().irq().unwrap().set(false);
         dirty.board_irq(BoardIrq(0)).set(true);
-        dirty.latch_delivery_flags();
+        dirty.drive_all_outputs_high();
         dirty.load_state(&v).unwrap();
         assert_eq!(dirty.save_state(), fresh.save_state());
-        assert_eq!(dirty.delivery_flags(), fresh.delivery_flags());
+        assert_eq!(dirty.driven_outputs(), fresh.driven_outputs());
         assert_eq!(dirty.config_read(at(3, 0), 4, 2), fresh.config_read(at(3, 0), 4, 2));
     }
 

@@ -16,11 +16,11 @@ is `docs/pci.md`.
   with `PciBus::redrive`. A function's load must overwrite what the
   snapshot does not name (the AIC-7880 puts its SCSI targets back with
   `reset_targets`).
-- **The combiner's handshake is one atomic word per output** (`DIRTY`,
-  `HELD`, `FELL`, `FORCE`). Every step is a read-modify-write on that word, so
-  acquire-release is enough; a store-then-load handshake would need SeqCst and
-  cannot be model-checked. `loom_tests` in `src/pci/intx.rs` checks it
-  (`RUSTFLAGS="--cfg loom"`).
+- **The combiner drives its host under its own lock**, so deliveries are in
+  the order the levels changed and a fall and rise reach an edge host as both.
+  That holds only while interrupts travel up: a host's `set_irq` must not call
+  into the bus, and nothing may change a line while holding a lock the host's
+  `set_irq` takes.
 
 ## Hazards
 
@@ -45,8 +45,8 @@ is `docs/pci.md`.
 
 - Cards, SCSI and the snapshot format leaked into the core (`CardRef`,
   `Origin`, `attach_card`, `ScsiController`).
-- Three copies of the level state in the Bridge and a lock held across the
-  host call in MACE's router.
+- Three copies of the level state in the Bridge, and MACE's router scanning
+  all 128 lines for every change.
 - A byte-order trait object per host and a duplicate swizzle in each.
 - Reset was whatever each function's power-on did, and the O2 had none.
 
