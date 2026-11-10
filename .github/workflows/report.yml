@@ -17,9 +17,13 @@ jobs:
           name: dorny-workflow_run-$1
           path: '**/junit.xml'
           reporter: java-junit
+          fail-on-error: false
+          use-actions-summary: false
       - uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2
         with:
           artifact: /junit-(.*)/
           name: dorny-workflow_run-libtest-$1
           path: 'libtest/*.xml'
           reporter: java-junit
+          fail-on-error: false
+          use-actions-summary: false

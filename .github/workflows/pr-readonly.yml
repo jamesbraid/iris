@@ -46,21 +46,33 @@ jobs:
           annotate_only: true
           check_name: mikepenz-libtest
           job_summary: true
-      - name: dorny nextest
-        id: dorny-nextest
+      - name: dorny-nextest-summaryonly
         if: always()
         uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2
         with:
-          name: dorny-nextest-inline
+          name: dorny-nextest-summaryonly
           path: target/nextest/ci/junit.xml
           reporter: java-junit
-      - name: dorny libtest
+          fail-on-error: false
+          use-actions-summary: true
+      - name: dorny-nextest-check
         if: always()
         uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2
         with:
-          name: dorny-libtest-inline
+          name: dorny-nextest-check
+          path: target/nextest/ci/junit.xml
+          reporter: java-junit
+          fail-on-error: false
+          use-actions-summary: false
+      - name: dorny-libtest-check
+        if: always()
+        uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2
+        with:
+          name: dorny-libtest-check
           path: target/libtest/*.xml
           reporter: java-junit
+          fail-on-error: false
+          use-actions-summary: false
       - name: summary only
         if: always()
         run: |
