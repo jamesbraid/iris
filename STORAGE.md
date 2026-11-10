@@ -267,6 +267,7 @@ debugging the wrapper itself.
 ./target/release/iris-ci tree
 ./target/release/iris-ci script tests/scenario.iris   # batch-run a sequence of cmds
 ./target/release/iris-ci cdrom-load 4 disc2.iso       # swap a CD at runtime
+./target/release/iris-ci cdrom-load pci0.2.t4 d.iso   # ... on another controller
 ./target/release/iris-ci rtc-save                     # persist NVRAM
 ./target/release/iris-ci quit --sync-chd              # fold CHD diffs, then exit
 ```

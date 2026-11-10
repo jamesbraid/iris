@@ -194,15 +194,24 @@ enum Cmd {
     },
 
     /// Cycle the CD changer on a SCSI ID to the next disc.
-    CdromEject { id: u64 },
+    CdromEject {
+        /// A target id on the first SCSI controller, or a location such as `pci0.2.t4`.
+        #[arg(value_name = "ID|LOCATION")]
+        drive: String,
+    },
 
     /// Load an arbitrary CD image into a SCSI ID and make it the active disc.
-    CdromLoad { id: u64, path: String },
+    CdromLoad {
+        /// A target id on the first SCSI controller, or a location such as `pci0.2.t4`.
+        #[arg(value_name = "ID|LOCATION")]
+        drive: String,
+        path: String,
+    },
 
     /// Fold pending CHD diffs back into their bases (guest must be stopped).
     ChdSync {
-        /// SCSI id to consolidate, or "all" (default).
-        #[arg(default_value = "all", value_name = "ID|all")]
+        /// SCSI id (on every controller) or location to consolidate, or "all" (default).
+        #[arg(default_value = "all", value_name = "ID|LOCATION|all")]
         id: String,
     },
 }
@@ -335,8 +344,8 @@ fn dispatch(opts: &Opts, cmd: Cmd) -> Result<()> {
             };
             simple(opts, "rtc-save", args, "nvram saved")
         }
-        Cmd::CdromEject { id } => simple(opts, "cdrom-eject", json!({"id": id}), "ejected"),
-        Cmd::CdromLoad { id, path } => simple(opts, "cdrom-load", json!({"id": id, "path": path}), "loaded"),
+        Cmd::CdromEject { drive } => simple(opts, "cdrom-eject", drive_args(&drive, json!({})), "ejected"),
+        Cmd::CdromLoad { drive, path } => simple(opts, "cdrom-load", drive_args(&drive, json!({"path": path})), "loaded"),
         Cmd::ChdSync { id } => {
             let data = send_until(opts, "chd-sync", json!({"id": scsi_sel(&id)?}), FOLD_TIMEOUT)?;
             print_response(opts, "synced", &data);
@@ -375,9 +384,20 @@ const FOLD_TIMEOUT: Duration = Duration::from_secs(3 * 3600);
 fn scsi_sel(s: &str) -> Result<Value> {
     if s.eq_ignore_ascii_case("all") { return Ok(json!("all")); }
     match s.parse::<u64>() {
-        Ok(n) if n < 8 => Ok(json!(n)),
-        _ => Err(Error::Iris(format!("bad scsi id '{s}' (expected 0-7 or \"all\")"))),
+        Ok(n) if n < 16 => Ok(json!(n)),
+        Ok(_) => Err(Error::Iris(format!("bad scsi id '{s}' (expected 0-15, a location or \"all\")"))),
+        Err(_) => Ok(json!(s)),
     }
+}
+
+/// `args` with the drive a command names: `id` for a bare number, `at` for a
+/// location. iris checks the location.
+fn drive_args(drive: &str, mut args: Value) -> Value {
+    match drive.parse::<u64>() {
+        Ok(id) => args["id"] = json!(id),
+        Err(_) => args["at"] = json!(drive),
+    }
+    args
 }
 
 /// Grace on top of a guest deadline, so the server's own timeout fires first

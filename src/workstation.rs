@@ -35,6 +35,7 @@ use crate::ip22_machine::Ip22Machine;
 use crate::machine_state::{GuestState, MachineStatus, TransitionAck};
 use crate::monitor::Monitor;
 use crate::net::NatControl;
+use crate::location::{Hop, Location};
 use crate::topology::Topology;
 use crate::traits::{Device, MachineEvent};
 
@@ -259,13 +260,33 @@ pub trait Workstation: Send {
     fn scratch_path(&self) -> Option<std::path::PathBuf> {
         self.disks().scratch()
     }
-    /// The controller whose CD-ROM drives take disc changes: the one the
-    /// first CD-ROM in location order is on.
-    fn disc_changer(&self) -> Option<Arc<dyn DiscChanger>> {
-        self.disks().disc_changer().map(|(_, c)| c)
+    /// The first CD-ROM drive in location order and the controller it is on,
+    /// for the window's RCtrl+F12.
+    fn disc_changer(&self) -> Option<(Location, Arc<dyn DiscChanger>)> {
+        self.disks().disc_changer()
     }
-    /// Ask the guest to remount `/CDROM` after a disc change on `scsi_id`.
-    fn remount_cdrom_guest(&self, _scsi_id: u8) {}
+    /// A target id as the front ends have always named it: on the machine's
+    /// first controller.
+    fn legacy_target(&self, id: u8) -> Option<Location> {
+        self.topology().controller(0).map(|c| c.join(Hop::t(id)))
+    }
+    /// Put the disc at `path` in the drive at `at`; returns the path loaded.
+    fn load_disc(&self, at: &Location, path: String) -> Result<String, String> {
+        let (changer, id) = self.disks().drive(at)?;
+        changer.load_disc(id, path)
+    }
+    /// Eject the drive's disc and load the next in its list; returns its path.
+    fn eject_disc(&self, at: &Location) -> Result<String, String> {
+        let (changer, id) = self.disks().drive(at)?;
+        changer.eject_disc(id)
+    }
+    /// Eject the drive's disc and leave it empty.
+    fn eject_to_empty(&self, at: &Location) -> Result<(), String> {
+        let (changer, id) = self.disks().drive(at)?;
+        changer.eject_to_empty(id)
+    }
+    /// Ask the guest to remount `/CDROM` after a disc change at `at`.
+    fn remount_cdrom_guest(&self, _at: &Location) {}
 
     /// Attached CHD disks with changes waiting to be folded into their bases.
     fn pending_chd_sync_count(&self) -> usize {
@@ -280,12 +301,11 @@ pub trait Workstation: Send {
     /// Fold pending CHD diffs into their bases (see [`Disks::sync_chd`]).
     fn sync_chd_disks(
         &self,
-        only: Option<usize>,
+        only: Option<&Location>,
         progress: &mut dyn FnMut(usize, usize, f32),
         cancel: &dyn Fn() -> bool,
     ) -> std::io::Result<usize> {
-        let only = only.map(|id| crate::location::Location::root().join(crate::location::Hop::t(id as u8)));
-        self.disks().sync_chd(only.as_ref(), progress, cancel)
+        self.disks().sync_chd(only, progress, cancel)
     }
 
     /// The count of guest frames every network backend feeds, for the GUI's

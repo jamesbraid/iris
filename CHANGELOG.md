@@ -13,6 +13,16 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### Drives named by location
+
+- `iris-ci cdrom-load`, `cdrom-eject` and `chd-sync` take a location such as
+  `pci0.2.t4` as well as a target id, so a drive on a second controller can be
+  named. A bare id is still a target on the first controller (on every
+  controller for `chd-sync`), and the replies carry the location beside the
+  id.
+- A machine with no CD-ROM drive has no disc changer, so RCtrl+F12 does
+  nothing there.
+
 ### A date set on an Octane sticks
 
 - Setting the date on an Octane under IRIX 6.5 lasted only until the next
