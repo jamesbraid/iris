@@ -1,10 +1,12 @@
 # Plan: devices placed by location
 
 Status: **in progress.** The machine-sharing refactor it builds on (Control,
-GuestNet, Devices, Disks, Ip22Board) is the stack below it. Step 1 of the
-order of work below is built: locations, the socket map, the `rows` hook,
-the device list and the SCSI device types, with every machine placing its
-disks through the map and `--list-slots`. The earlier attempt placed SCSI
+GuestNet, Devices, Disks, Ip22Board) is the stack below it. Steps 1 and 2
+of the order of work below are built: locations, the socket map, the `rows`
+hook, the device list, the SCSI, GIO, PCI and XIO device types, with every
+machine placing its disks and cards through the map, and `--list-slots`.
+The IP27 machines place their disks; their XIO and PCI rows wait for the
+IP27 work. The earlier attempt placed SCSI
 disks and GIO cards by location but could not place anything below a PCI
 card; the `rows` hook fixes that.
 

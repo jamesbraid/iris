@@ -640,14 +640,7 @@ mod tests {
         let ram = test_ram();
         let pci = MacePci::new(&PCI0, crime.clone(), ram.clone());
         let img = crate::dev::nvme::tests::temp_image(if bridge { "mace-ppb" } else { "mace" });
-        let card = crate::dev::nvme::Card::open(&crate::config::NvmeConfig {
-            path: img.to_string_lossy().into_owned(),
-            overlay: false,
-            bridge,
-            ..Default::default()
-        })
-        .unwrap();
-        card.fit(pci.bus(), IP32_OPTION_SLOT);
+        let card = crate::dev::nvme::tests::fitted(&img, pci.bus(), IP32_OPTION_SLOT, bridge);
         let cycle = |bus: u32, dev: u32, reg: u32, val: u32| {
             pci.write32(bridge_reg(macepci_reg::CONFIG_ADDR), cfg(bus << 16 | dev << 11, reg));
             pci.write32(bridge_reg(macepci_reg::CONFIG_DATA), val);

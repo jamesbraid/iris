@@ -404,12 +404,6 @@ impl VirtioSerialOptions {
     }
 }
 
-/// Build the console device a `[virtio_serial]` section describes: the
-/// Octane builds its own until it places the card.
-pub fn from_config(cfg: &crate::config::VirtioSerialConfig) -> super::VirtioCore {
-    from_ports(&cfg.ports)
-}
-
 /// Build the console device a `virtio_serial` entry describes, with its
 /// host ends bound and its input pump running. A port whose socket cannot be
 /// made is left wired to nothing, with the reason on stderr.

@@ -23,4 +23,10 @@ pub use decode::{BarMapping, BarMappingSink, CpuWindow};
 pub use function::{DevFn, PciDma, PciDmaStatus, PciFunction, PciFunctionState};
 pub use host::{BarDevice, BarDevices, ByteOrder, PciHost};
 pub use intx::{BoardIrq, IntxRouting};
-pub use pci_to_pci_bridge::PciToPciBridge;
+pub use pci_to_pci_bridge::{PciBridgeCard, PciToPciBridge};
+
+/// The device number a PCI card's location names: its last hop, a bare
+/// number on the bus above it.
+pub fn device_at(at: &crate::location::Location) -> Result<u8, String> {
+    at.last().filter(|h| h.is_bare()).map(|h| h.number()).ok_or_else(|| format!("{at} is not a device on a PCI bus"))
+}

@@ -461,9 +461,6 @@ pub struct Ip32Bus {
     /// The SCSI controller, when one is attached, so the trace can report
     /// what the driver asked it for.
     pub scsi: Mutex<Vec<Arc<crate::dev::aic7880::Aic7880>>>,
-    /// The NVMe card in the "PCI option" slot (`[nvme]`), set once when
-    /// the machine fits it.
-    pub nvme: std::sync::OnceLock<Arc<crate::dev::nvme::Nvme>>,
 }
 
 impl Ip32Bus {
@@ -504,7 +501,6 @@ impl Ip32Bus {
             mace: Mace::new(ram.clone(), crime, ust, &PCI0),
             misses: Arc::new(Misses::default()),
             scsi: Mutex::new(Vec::new()),
-            nvme: std::sync::OnceLock::new(),
         };
         bus.gbe.tr.start_from_env();
         if let Some(mac) = opts.mac {

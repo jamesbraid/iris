@@ -110,6 +110,8 @@ file.
 
 The namespace is a disk of the shared SCSI target layer, so images, CHD,
 copy-on-write overlays, the background sync and the `cow` commands are those
-of [STORAGE.md](../STORAGE.md). A snapshot saves the controller's state and
-the overlay with the other disks, and records the disk's size under slot 240
-in its manifest.
+of [STORAGE.md](../STORAGE.md). The card's location (`pci0.3` on the O2,
+`xio13.pci0.2` in an Octane's PCI module) names the disk: a snapshot saves
+the controller's state under it, the overlay in a directory of that name,
+and the disk's path and size under it in the manifest. `iris --list-slots`
+shows the card and the places it can go.

@@ -1127,6 +1127,23 @@ pub(crate) fn temp_image(tag: &str) -> std::path::PathBuf {
     image(tag, 64)
 }
 
+/// A card with `img` as its namespace in device `device` of `bus`, or
+/// behind a PCI-to-PCI bridge there as device 0 of the bridge's bus, as the
+/// `nvme` and `pci_bridge` types fit them.
+#[allow(dead_code)]
+pub(crate) fn fitted(img: &std::path::Path, bus: &PciBus, device: u8, behind_bridge: bool) -> Arc<Nvme> {
+    let nvme = Nvme::new();
+    nvme.attach_image(&img.to_string_lossy(), false, None).unwrap();
+    let at = |device| DevFn { device, function: 0 };
+    if behind_bridge {
+        let ppb = PciToPciBridge::new(bus, at(device), 0x1011, 0x0026);
+        bus.attach(at(device), ppb.clone());
+        ppb.secondary().attach(at(0), nvme.clone());
+    } else {
+        bus.attach(at(device), nvme.clone());
+    }
+    nvme
+}
 
 /// Put `n` in a used state through its registers and state: admin queues
 /// programmed, enabled, an I/O queue pair present and the interrupt masked.

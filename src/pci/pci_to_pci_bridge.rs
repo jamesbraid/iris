@@ -32,6 +32,46 @@ impl PciToPciBridge {
     }
 }
 
+/// The identity a placed `pci_bridge` reports: a DEC 21150, the generic
+/// PCI-to-PCI bridge drivers know. Only its type 1 header is modelled.
+const DEC_VENDOR: u16 = 0x1011;
+const DEC_21150: u16 = 0x0026;
+
+/// A PCI-to-PCI bridge card in a slot, as a card on an expansion cage sits:
+/// it brings a bus of its own, numbered `pci0` below its location, with
+/// device positions 0 to 31.
+pub struct PciBridgeCard;
+
+impl crate::attach::DeviceType for PciBridgeCard {
+    const NAME: &'static str = "pci_bridge";
+    const FAMILY: crate::topology::Family = crate::topology::Family::Pci;
+    type Owner = PciBus;
+    type Options = crate::attach::NoOptions;
+
+    fn rows(_: &Self::Options, at: &crate::location::Location, t: &crate::topology::Topology) -> Result<(), String> {
+        use crate::location::Hop;
+        use crate::topology::{Family, Row};
+        let bus = at.join(Hop::pci(0));
+        t.add(bus.clone(), Row::fixed("PCI bus"))?;
+        for d in 0..32 {
+            t.add(bus.join(Hop::pos(d)), Row::offering("", Family::Pci))?;
+        }
+        Ok(())
+    }
+
+    fn new(
+        _: Self::Options,
+        _: &mut crate::attach::Ctx,
+        bus: &Arc<PciBus>,
+        at: &crate::location::Location,
+    ) -> Result<crate::attach::Handles, String> {
+        let at_dev = DevFn { device: super::device_at(at)?, function: 0 };
+        let ppb = PciToPciBridge::new(bus, at_dev, DEC_VENDOR, DEC_21150);
+        bus.attach(at_dev, ppb.clone());
+        Ok(vec![(Some(crate::location::Hop::pci(0)), Arc::new(ppb.secondary().clone()))])
+    }
+}
+
 impl PciToPciBridge {
     /// The bus behind the bridge.
     pub fn secondary(&self) -> &PciBus {

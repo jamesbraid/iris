@@ -34,7 +34,7 @@ use crate::dev::sflash::{CfiFlash, FLASH_SIZE};
 use crate::dev::w1;
 use crate::dev::w1::sgi::{board_record_part, BoardRecord};
 use crate::dev::xbow::Xbow;
-use crate::dev::xio_pci::XioPciBoard;
+use crate::dev::xio_pci::{XioPciBoard, XioPorts};
 use crate::hptimer::TimerManager;
 use crate::ip30::{
     widget_small_base, CachedFlashLines, FlashLineSet, Ip30Bus, LAST_PC, WIDGET_BRIDGE, WIDGET_HEART, WIDGET_SMALL_SIZE,
@@ -50,7 +50,7 @@ use crate::disks::Disks;
 use crate::attach::{attach_devices, Ctx};
 use crate::location::{Hop, Location};
 use crate::scsi::ScsiPort;
-use crate::topology::{Row, Topology};
+use crate::topology::{Family, Row, Topology};
 use crate::guest_net::GuestNet;
 use crate::workstation::Workstation;
 use crate::xtalk::{HostPort, Upstream};
@@ -100,8 +100,11 @@ pub const WIDGET_GFX: u8 = 11;
 /// The Bridge input IOC3's SuperIO block (serial, keyboard, clock) is
 /// wired to; the Ethernet uses IOC3's PCI pin.
 const SUPERIO_PIN: u8 = 4;
-/// Bridge slot of the virtio device: 0 and 1 are SCSI, 2 IOC3, 3 the RAD.
-const VIRTIO_SLOT: u8 = 4;
+/// The Bridge device iris offers a card (virtio-serial) on: 0 and 1 are
+/// SCSI, 2 IOC3, 3 the RAD. Iris's own choice of a spare number.
+const SPARE_SLOT: u8 = 4;
+/// What `--list-slots` calls XIO ports 9 to 12.
+const XIO_SLOT_LABELS: [&str; 4] = ["XIO slot 9", "XIO slot 10", "XIO slot 11", "XIO slot 12"];
 /// The blank part on the Bridge's second flash select: reads all ones and
 /// keeps no writes, an approximation from one word read on a real Octane2.
 /// The PROM looks for a part there too.
@@ -142,10 +145,6 @@ pub struct OctaneMachine {
     pub scsi: [Arc<Isp1040>; 2],
     eth: Arc<Ioc3Eth>,
     rad: Arc<Rad1>,
-    /// virtio-serial (`[virtio_serial]`), the next free Bridge slot.
-    virtio: Option<Arc<crate::dev::virtio::pci::VirtioPci>>,
-    /// The NVMe card (`[nvme]`), in a slot of an option board.
-    nvme: Option<Arc<crate::dev::nvme::Nvme>>,
     flash: Arc<CfiFlash>,
     /// The IMPACT board, when `[graphics] board` names one.
     pub gfx: Option<Arc<ImpactXio>>,
@@ -159,8 +158,6 @@ pub struct OctaneMachine {
     pub(crate) control: Control,
     devices: Devices,
     disks: Disks,
-    /// The NVMe card's disk as a snapshot records it, with `[nvme]`.
-    nvme_ref: Option<crate::snapshot::DiskRef>,
     /// The snapshot the CI socket last restored, for `rollback`.
     last_restore: Option<String>,
     /// Where snapshots go: `saves` under the current directory, as on the
@@ -227,8 +224,14 @@ impl OctaneMachine {
         heart.set_microlan(record_bus("EMUU00", "030-0888-004", "B", module, 0x5145_4d55_5500));
 
         let gfx_link = if board.is_some() || has_vpro { 1 << WIDGET_GFX } else { 0 };
-        let xio_widgets = cfg.xio_widgets()?;
-        let xio_links = xio_widgets.iter().fold(0u16, |m, w| m | 1 << w);
+        // The places, and what is placed in them: a board placed at an XIO
+        // port brings that port's link up from power-on.
+        let topology = Arc::new(Topology::fill_for(cfg));
+        let placements = cfg.placements(&topology)?;
+        let xio_links = placements.iter().filter_map(|p| match p.at.hops() {
+            [h] => h.xio_port(),
+            _ => None,
+        }).fold(0u16, |m, w| m | 1 << w);
         let xbow = Arc::new(Xbow::new(xbow_revision, (1 << WIDGET_HEART) | (1 << WIDGET_BRIDGE) | gfx_link | xio_links));
         xbow.connect_host(crate::ip30::HEART_HOST, heart.clone());
 
@@ -254,22 +257,24 @@ impl OctaneMachine {
 
         // Option boards: each a Bridge on its own port, reaching memory and
         // HEART as the onboard one does, over the links the Crossbow has up.
+        // They are built when they are placed, below.
         let bridge_revision = if octane2 { BRIDGE_REVISION_OCTANE2 } else { BRIDGE_REVISION };
-        let xio_boards: Vec<XioPciBoard> = cfg.xio_board.iter().zip(&xio_widgets).map(|(b, &w)| {
-            let up = xbow.upstream(vec![HostPort::new(crate::ip30::HEART_HOST, mem.clone(), heart.clone())]);
-            let board = XioPciBoard::new(b.kind, w, up, bridge_revision);
-            let links = xbow.clone();
-            board.bridge().set_link_alive(Box::new(move |w| links.carries(w)));
-            eprintln!("iris: {} in XIO slot {w}", b.kind.label());
-            board
-        }).collect();
+        let (up_xbow, up_mem, up_heart, link_xbow) = (xbow.clone(), mem.clone(), heart.clone(), xbow.clone());
+        let xio_ports = Arc::new(XioPorts::new(
+            move || up_xbow.upstream(vec![HostPort::new(crate::ip30::HEART_HOST, up_mem.clone(), up_heart.clone())]),
+            move |b: &Bridge| {
+                let links = link_xbow.clone();
+                b.set_link_alive(Box::new(move |w| links.carries(w)));
+            },
+            bridge_revision,
+        ));
+        topology.bind(&Location::root(), xio_ports.clone()).expect("the root takes its handle once");
 
         // The status bar's activity bits, shared with the graphics board.
         let heartbeat = Arc::new(AtomicU64::new(0));
         let mac = cfg.network().mac;
         // The controllers own their buses; the devices are placed on them
         // below.
-        let topology = Arc::new(Topology::fill_for(cfg));
         let scsi = [Arc::new(Isp1040::new_at(0, Isp1040::new_bus())), Arc::new(Isp1040::new_at(1, Isp1040::new_bus()))];
         for (n, s) in scsi.iter().enumerate() {
             let at = topology.controller(n as u8).expect("fill added a row for every controller");
@@ -282,26 +287,7 @@ impl OctaneMachine {
         let slot = |device| DevFn { device, function: 0 };
         pci.attach(slot(0), scsi[0].clone());
         pci.attach(slot(1), scsi[1].clone());
-        let nvme = (!cfg.nvme.path.is_empty())
-            .then(|| -> Result<_, String> {
-                // `validate` found the board; the slot may still be taken.
-                let board = &xio_boards[cfg.nvme.board.unwrap_or(0)];
-                let slot = cfg.nvme.slot.or_else(|| board.free_slot()).ok_or("[nvme]: the board has no free slot")?;
-                board.check_slot(slot).map_err(|e| format!("[nvme]: {e}"))?;
-                let card = crate::dev::nvme::Card::open(&cfg.nvme)?;
-                card.fit(board.bus(), slot);
-                eprintln!("iris: NVMe in the {} on XIO slot {}, slot {slot}", board.kind().label(), board.widget());
-                Ok(card.nvme)
-            })
-            .transpose()?;
-        let nvme_ref = nvme.as_ref().map(|n| crate::dev::nvme::disk_ref(&cfg.nvme, n));
         let disks = Disks::new(topology.clone()).with_ci(cfg.ci);
-        // The NVMe card's namespace is a disk outside the map.
-        if let Some(n) = &nvme {
-            disks.add_unplaced(n.clone());
-        }
-        let mut placed = Devices::new();
-        attach_devices(&cfg.placements(&topology)?, cfg, Some(&mut Ctx { devices: &mut placed, disks: &disks }), &topology)?;
         let ioc3 = Arc::new(Ioc3::octane(mac, false));
         ioc3.set_heartbeat(heartbeat.clone());
         let eth = Ioc3Eth::new(mac);
@@ -326,14 +312,12 @@ impl OctaneMachine {
             rad.enable_output(cfg.audio.clone());
         }
         pci.attach(slot(3), rad.clone());
-        let virtio = cfg.virtio_serial.enabled.then(|| {
-            let dev = Arc::new(crate::dev::virtio::pci::VirtioPci::new(
-                crate::dev::virtio::console::from_config(&cfg.virtio_serial),
-            ));
-            pci.attach(slot(VIRTIO_SLOT), dev.clone());
-            eprintln!("iris: virtio-serial on Bridge slot {VIRTIO_SLOT}");
-            dev
-        });
+        // Every disk, and every card on the Bridge or an option board.
+        topology.bind(&Location::root().join(Hop::xio(WIDGET_BRIDGE)).join(Hop::pci(0)), Arc::new(pci.clone()))
+            .expect("the Bridge's bus row takes its handle once");
+        let mut placed = Devices::new();
+        attach_devices(&placements, cfg, Some(&mut Ctx { devices: &mut placed, disks: &disks }), &topology)?;
+        let xio_boards = xio_ports.take();
 
         // The status bar's activity bits and the CPU's Compare matches,
         // shared with the graphics board before the CPU exists.
@@ -536,12 +520,6 @@ impl OctaneMachine {
         devices.add("scsi0", Phase::Io, scsi[0].clone());
         devices.add("scsi1", Phase::Io, scsi[1].clone());
         devices.add("rad", Phase::Io, rad.clone());
-        if let Some(v) = &virtio {
-            devices.add("virtio", Phase::Io, v.clone());
-        }
-        if let Some(n) = &nvme {
-            devices.add("nvme", Phase::Io, n.clone());
-        }
         devices.add("flash", Phase::Io, flash.clone());
         if let Some(v) = &vpro {
             devices.add("vpro", Phase::Io, v.clone());
@@ -616,8 +594,6 @@ impl OctaneMachine {
             scsi,
             eth,
             rad,
-            virtio,
-            nvme,
             flash,
             gfx,
             vpro,
@@ -626,7 +602,6 @@ impl OctaneMachine {
             control,
             devices,
             disks,
-            nvme_ref,
             last_restore: None,
             saves: std::path::PathBuf::from("saves"),
         })
@@ -642,8 +617,11 @@ impl OctaneMachine {
 
     /// The places an Octane has: the Bridge widget with its PCI bus, whose
     /// first two devices are the ISP1040 SCSI controllers (internal, external)
-    /// with targets 1 to 15, then the IOC3 and the RAD1. Touches no hardware.
-    pub(crate) fn fill(_: &MachineConfig, t: &Topology) {
+    /// with targets 1 to 15, then the IOC3, the RAD1 and iris's spare device
+    /// for a card; the four XIO slots, the graphics port among them fixed
+    /// when a board is fitted; and the PCI module's port. Touches no
+    /// hardware.
+    pub(crate) fn fill(cfg: &MachineConfig, t: &Topology) {
         let at = |hops: &[Hop]| hops.iter().fold(Location::root(), |l, h| l.join(*h));
         let add = |l: Location, row: Row| t.add(l, row).expect("rows are added once");
         let bus = [Hop::xio(WIDGET_BRIDGE), Hop::pci(0)];
@@ -657,13 +635,26 @@ impl OctaneMachine {
         }
         add(at(&bus).join(Hop::pos(2)), Row::fixed("").onboard("ioc3"));
         add(at(&bus).join(Hop::pos(3)), Row::fixed("").onboard("rad1"));
+        add(Self::spare_slot(), Row::offering("spare", Family::Pci).approx());
+        let graphics = cfg.graphics_board();
+        for w in 9..=12 {
+            add(at(&[Hop::xio(w)]), if w == WIDGET_GFX && graphics != crate::config::GraphicsBoard::None {
+                Row::fixed("graphics").onboard(graphics.as_str())
+            } else {
+                Row::offering(XIO_SLOT_LABELS[w as usize - 9], Family::Xio)
+            });
+        }
+        add(at(&[Hop::xio(crate::dev::xio_pci::CAGE_WIDGET)]), Row::offering("PCI module", Family::Xio));
+    }
+
+    /// The Bridge device a card goes in when nothing else names one.
+    pub(crate) fn spare_slot() -> Location {
+        Location::root().join(Hop::xio(WIDGET_BRIDGE)).join(Hop::pci(0)).join(Hop::pos(SPARE_SLOT))
     }
 
     /// The hard disks as a snapshot records them, to refuse one taken on others.
     fn disk_refs(&self) -> Vec<crate::snapshot::DiskRef> {
-        let mut refs = crate::snapshot::DiskRef::from_records(&self.disks, false);
-        refs.extend(self.nvme_ref.clone());
-        refs
+        crate::snapshot::DiskRef::from_records(&self.disks, false)
     }
 
     /// IOC3's first port is the console: the CI socket's backend in CI
@@ -838,8 +829,8 @@ struct OctaneSnapshot {
     flash: Vec<u8>,
     memory: Vec<u32>,
     overlays: [Option<OverlaySets>; 2],
-    /// The NVMe disk's, when the snapshot has them.
-    nvme_overlays: Option<OverlaySets>,
+    /// Each card's disk's (an NVMe's), by the card's location.
+    card_overlays: crate::snapshot::CardOverlays,
     dir: std::path::PathBuf,
 }
 
@@ -899,12 +890,7 @@ impl OctaneMachine {
                 .map_err(|e| format!("COW overlay export (controller {i}): {e}"))?;
             snap.write_toml(&format!("cow{i}.toml"), &crate::snapshot::build_cow_table(overlays)).map_err(io)?;
         }
-        if let Some(n) = &self.nvme {
-            let dir = snap.dir.join("nvme");
-            std::fs::create_dir_all(&dir).map_err(io)?;
-            let overlays = n.export_overlays(&dir).map_err(|e| format!("COW overlay export (NVMe): {e}"))?;
-            snap.write_toml("cow_nvme.toml", &crate::snapshot::build_cow_table(overlays)).map_err(io)?;
-        }
+        crate::snapshot::export_card_overlays(&snap, &self.disks)?;
         Ok(())
     }
 
@@ -958,14 +944,14 @@ impl OctaneMachine {
         if flash.len() != self.flash.size() {
             return Err(format!("saved flash is {} bytes, this Octane's holds {}", flash.len(), self.flash.size()));
         }
-        let nvme_overlays = snap.read_toml("cow_nvme.toml").ok().map(|t| crate::snapshot::parse_cow_table(&t));
+        let card_overlays = crate::snapshot::read_card_overlays(&snap, &self.disks);
         Ok(OctaneSnapshot {
             cpu: state("cpu")?,
             board: state("octane")?,
             flash,
             memory,
             overlays,
-            nvme_overlays,
+            card_overlays,
             dir: snap.dir,
         })
     }
@@ -986,9 +972,7 @@ impl OctaneMachine {
                     .map_err(|e| format!("COW overlay import (controller {i}): {e}"))?;
             }
         }
-        if let (Some(n), Some(sets)) = (&self.nvme, &s.nvme_overlays) {
-            n.import_overlays(&s.dir.join("nvme"), sets).map_err(|e| format!("COW overlay import (NVMe): {e}"))?;
-        }
+        crate::snapshot::import_card_overlays(&s.dir, &self.disks, &s.card_overlays)?;
         self.devices.load(&s.board)?;
         Self::sync_links(&self.phys, &self.xbow);
         Ok(())
@@ -1477,9 +1461,13 @@ mod snapshot_tests {
             // The onboard Bridge keeps its own devices.
             let onboard: Vec<u8> = (0..8).filter(|&d| m.bridge.bus().occupied(d)).collect();
             assert_eq!(onboard, [0, 1, 2, 3], "SCSI, IOC3 and the RAD, and nothing else");
-            assert!(m.disk_refs().iter().any(|d| d.id == crate::dev::nvme::SNAPSHOT_SLOT && d.size_bytes == 1 << 20));
-
-            let nvme = m.nvme.clone().unwrap();
+            // The card is at its board's slot, behind the bridge when there is one.
+            let mut card = Location::root().join(Hop::xio(w)).join(Hop::pci(0)).join(Hop::pos(slot));
+            if bridge {
+                card = card.join(Hop::pci(0)).join(Hop::pos(0));
+            }
+            assert!(m.disk_refs().iter().any(|d| d.at.as_ref() == Some(&card) && d.size_bytes == 1 << 20), "{:?}", m.disk_refs());
+            let nvme = m.topology().handle::<ScsiPort>(&card).and_then(|p| p.device::<crate::dev::nvme::Nvme>()).expect("the card");
             let io = |cdb: Vec<u8>, data: Option<Vec<u8>>| {
                 let req = ScsiRequest { cdb, data_len: ScsiDataLength::Unlimited, data_in: data };
                 nvme.scsi_bus().request(0, &req).unwrap().unwrap().data
@@ -1487,7 +1475,7 @@ mod snapshot_tests {
             let rw = |op: u8| vec![op, 0, 0, 0, 0, 3, 0, 0, 1, 0];
             io(rw(scsi_cmd::WRITE_10), Some(vec![0x11; 512]));
             m.save_snapshot("s").unwrap();
-            assert!(m.saves.join("s/nvme/scsi0.overlay").exists(), "the overlay goes with the snapshot");
+            assert!(m.saves.join(format!("s/{card}/scsi0.overlay")).exists(), "the overlay goes with the snapshot");
             io(rw(scsi_cmd::WRITE_10), Some(vec![0x22; 512]));
             assert_eq!(io(rw(scsi_cmd::READ_10), None), vec![0x22; 512]);
             m.load_snapshot("s").unwrap();
@@ -1810,5 +1798,73 @@ mod placement_tests {
             assert!(lines.lines().any(|l| l.starts_with(want)), "{want:?} in\n{lines}");
         }
         assert!(lines.contains("isp1040 (onboard)") && lines.contains("rad1 (onboard)"), "{lines}");
+    }
+
+    fn place(device: &str, at: &str, opts: &str) -> crate::attach::Placement {
+        crate::attach::Placement { device: device.into(), at: loc(at), opts: toml::from_str(opts).unwrap() }
+    }
+
+    fn probe(cfg: &MachineConfig, all: &[crate::attach::Placement]) -> Result<Topology, String> {
+        let t = Topology::fill_for(cfg);
+        crate::attach::attach_devices(all, cfg, None, &t).map(|_| t)
+    }
+
+    /// The XIO ports are places for boards; a board brings its slots, a
+    /// bridge in a slot brings 32 positions, and a card behind it fits.
+    #[test]
+    fn boards_bring_their_slots_and_cards_nest_below_them() {
+        let cfg = octane();
+        let t = probe(&cfg, &[
+            place("nvme", "xio13.pci0.2.pci0.0", "path = \"n.img\""),
+            place("pci_bridge", "xio13.pci0.2", ""),
+            place("pci_cage", "xio13", ""),
+            place("pci_shoehorn", "xio10", ""),
+        ]).unwrap();
+        let lines = t.lines().join("\n");
+        for want in ["xio13 ", "xio13.pci0 ", "xio13.pci0.1 ", "xio13.pci0.2.pci0.0 ", "xio13.pci0.2.pci0.1-31 ", "xio10.pci0.1 ", "xio9 ", "xio12 "] {
+            assert!(lines.lines().any(|l| l.starts_with(want)), "{want:?} in\n{lines}");
+        }
+        assert!(lines.lines().any(|l| l.starts_with("xio13 ") && l.contains("pci_cage")), "{lines}");
+        assert!(lines.lines().any(|l| l.starts_with("xio13.pci0.2.pci0.0 ") && l.contains("nvme n.img")), "{lines}");
+    }
+
+    /// Each board goes only where it fits, and a card needs its board.
+    #[test]
+    fn boards_go_only_in_their_ports() {
+        let cfg = octane();
+        let e = probe(&cfg, &[place("pci_cage", "xio10", "")]).err().unwrap();
+        assert!(e.contains("the PCI module goes in port 13"), "{e}");
+        let e = probe(&cfg, &[place("pci_shoehorn", "xio13", "")]).err().unwrap();
+        assert!(e.contains("PCI module's port"), "{e}");
+        let e = probe(&cfg, &[place("nvme", "xio13.pci0.1", "path = \"n.img\"")]).err().unwrap();
+        assert_eq!(e, "error: xio13.pci0.1: no such location (nothing is placed at xio13; place a card there first)");
+        let e = probe(&cfg, &[place("pci_cage", "xio13", ""), place("nvme", "xio13.pci0.4", "path = \"n.img\"")]).err().unwrap();
+        assert!(e.contains("xio13.pci0 has no 4"), "{e}");
+        let e = probe(&cfg, &[place("nvme", "xio13", "path = \"n.img\"")]).err().unwrap();
+        assert!(e.starts_with("error: xio13: nvme is a PCI card; xio13 is a XIO slot (takes: pci_cage pci_shoehorn)"), "{e}");
+    }
+
+    /// A graphics board holds its port, which then takes no board.
+    #[test]
+    fn the_graphics_port_is_fixed_when_a_board_is_fitted() {
+        let mut cfg = octane();
+        cfg.graphics.board = Some(crate::config::GraphicsBoard::SolidImpact);
+        let e = probe(&cfg, &[place("pci_shoehorn", "xio11", "")]).err().unwrap();
+        assert!(e.contains("not a place for add-in devices (onboard solidimpact)"), "{e}");
+        cfg.graphics.board = Some(crate::config::GraphicsBoard::None);
+        probe(&cfg, &[place("pci_shoehorn", "xio11", "")]).unwrap();
+    }
+
+    /// The older tables land where the location types put them.
+    #[test]
+    fn xio_board_and_nvme_tables_become_placements() {
+        use crate::config::{NvmeConfig, XioBoardConfig};
+        use crate::dev::xio_pci::Kind;
+        let mut cfg = octane();
+        cfg.scsi.clear();
+        cfg.xio_board = vec![XioBoardConfig { kind: Kind::Shoehorn, widget: None }, XioBoardConfig { kind: Kind::Cage, widget: None }];
+        cfg.nvme = NvmeConfig { path: "n.img".into(), overlay: true, bridge: true, board: Some(1), slot: Some(3) };
+        let got: Vec<String> = cfg.placements(&Topology::fill_for(&cfg)).unwrap().iter().map(|p| format!("{} {}", p.device, p.at)).collect();
+        assert_eq!(got, ["pci_shoehorn xio10", "pci_cage xio13", "pci_bridge xio13.pci0.3", "nvme xio13.pci0.3.pci0.0"]);
     }
 }

@@ -13,6 +13,23 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### PCI cards and option boards have locations
+
+- The O2's "PCI option" slot (`pci0.3`), the Octane's XIO slots (`xio9` to
+  `xio12`), its PCI module port (`xio13`) and iris's spare Bridge device
+  (`xio15.pci0.4`) are places for cards. An option board brings its own slots
+  (`xio13.pci0.1` to `.3`), and a PCI-to-PCI bridge in a slot brings a bus of
+  32 positions, so `--list-slots` shows them and a card on them is checked
+  before anything is built.
+- The `[[xio_board]]`, `[nvme]`, `[virtio_serial]`, `[ultra64]` and
+  `test_device` settings are read as before and placed through those rows.
+  A clash such as the ultra64 board and the test device both in GIO slot 0
+  is now the same error as any other taken place, instead of a panic.
+- A card placed this way saves its state under its location, and an NVMe
+  card's disk is named by the card's location in snapshots, so O2 and Octane
+  snapshots from earlier builds with an NVMe card, or an Octane's with
+  virtio-serial, do not load.
+
 ### Devices have locations
 
 - Every place a device can go has a location, a dotted path from the machine's

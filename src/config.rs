@@ -2705,7 +2705,10 @@ impl MachineConfig {
     }
 
     /// The cards the older tables describe, as placements: `[ultra64]`,
-    /// `test_device` and `[virtio_serial]` in a GIO slot.
+    /// `test_device` and `[virtio_serial]` in a GIO slot or on the Octane's
+    /// Bridge, `[[xio_board]]` at the XIO port `xio_widgets` picks, and
+    /// `[nvme]` in the O2's option slot or a slot of an Octane board, behind
+    /// a `pci_bridge` with `bridge = true`.
     fn card_placements(&self) -> Result<Vec<crate::attach::Placement>, String> {
         use crate::location::{Hop, Location};
         let mut out = Vec::new();
@@ -2735,10 +2738,51 @@ impl MachineConfig {
                     VirtioGioSlot::Exp0 => 0,
                     VirtioGioSlot::Exp1 => 1,
                 })),
+                MachineProfile::OctaneIp30 => Some(crate::ip30_machine::OctaneMachine::spare_slot()),
                 _ => None,
             };
             if let Some(at) = at {
                 put("virtio_serial", at, opts);
+            }
+        }
+        let widgets = self.xio_widgets()?;
+        for (b, w) in self.xio_board.iter().zip(&widgets) {
+            let device = match b.kind {
+                crate::dev::xio_pci::Kind::Cage => "pci_cage",
+                crate::dev::xio_pci::Kind::Shoehorn => "pci_shoehorn",
+            };
+            put(device, Location::root().join(Hop::xio(*w)), toml::Table::new());
+        }
+        if !self.nvme.is_default() {
+            let slot = match self.machine.profile {
+                MachineProfile::O2Ip32 => {
+                    Some(Location::root().join(Hop::pci(0)).join(Hop::pos(crate::dev::mace_pci::IP32_OPTION_SLOT)))
+                }
+                MachineProfile::OctaneIp30 => {
+                    let i = self.nvme.board.unwrap_or(0);
+                    match (self.xio_board.get(i), widgets.get(i)) {
+                        (Some(b), Some(w)) => {
+                            let s = self.nvme.slot.unwrap_or(b.kind.slots()[0]);
+                            Some(Location::root().join(Hop::xio(*w)).join(Hop::pci(0)).join(Hop::pos(s)))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            if let Some(slot) = slot {
+                let card = if self.nvme.bridge {
+                    put("pci_bridge", slot.clone(), toml::Table::new());
+                    slot.join(Hop::pci(0)).join(Hop::pos(0))
+                } else {
+                    slot
+                };
+                let mut opts = toml::Table::new();
+                opts.insert("path".into(), self.nvme.path.clone().into());
+                if self.nvme.overlay {
+                    opts.insert("overlay".into(), true.into());
+                }
+                put("nvme", card, opts);
             }
         }
         Ok(out)

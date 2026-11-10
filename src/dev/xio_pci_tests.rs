@@ -346,14 +346,8 @@ impl crate::dev::nvme::tests::HostIo for NvmeHost<'_> {
 fn nvme_in_slot(kind: Kind, widget: u8, slot: u8, behind_bridge: bool) {
     let rig = Rig::new(kind, widget);
     let img = crate::dev::nvme::tests::temp_image(&format!("xio-{}-{slot}-{behind_bridge}", kind.name()));
-    let card = crate::dev::nvme::Card::open(&crate::config::NvmeConfig {
-        path: img.to_string_lossy().into_owned(),
-        bridge: behind_bridge,
-        ..Default::default()
-    })
-    .unwrap();
     rig.board.check_slot(slot).unwrap();
-    card.fit(rig.board.bus(), slot);
+    let card = crate::dev::nvme::tests::fitted(&img, rig.board.bus(), slot, behind_bridge);
     let cfg_write = |off: u32, size: u32, v: u32| {
         let (a, w) = (u64::from(CFG0_BASE + u32::from(slot) * 0x1000 + ((off & !3) | ((off & 3) ^ (4 - size)))), size);
         let s = match w {

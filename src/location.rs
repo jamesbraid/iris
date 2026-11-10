@@ -53,6 +53,8 @@ impl Hop {
     /// A position on the enclosing bus (a bare number).
     pub fn is_bare(self) -> bool { self.tag == BARE }
     pub fn same_tag(self, other: Hop) -> bool { self.tag == other.tag }
+    /// The port number when this is an `xioN` hop.
+    pub fn xio_port(self) -> Option<u8> { (TAGS[self.tag as usize].0 == "xio").then_some(self.n) }
 }
 
 impl fmt::Display for Hop {

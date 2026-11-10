@@ -1774,14 +1774,7 @@ fn nvme_ready_follows_enable_through_every_lane_mode_and_width() {
     for mode in [Mode::ByteStream, Mode::Words4, Mode::Words8] {
         let r = Rig::new();
         let img = crate::dev::nvme::tests::temp_image("bridge-lanes");
-        let card = crate::dev::nvme::Card::open(&crate::config::NvmeConfig {
-            path: img.to_string_lossy().into_owned(),
-            overlay: false,
-            bridge: false,
-            ..Default::default()
-        })
-        .unwrap();
-        card.fit(r.bridge.bus(), 1);
+        let card = crate::dev::nvme::tests::fitted(&img, r.bridge.bus(), 1, false);
         let bits = match mode {
             Mode::ByteStream => DEV_SWAP_PROGRAMMED,
             Mode::Words4 => 0,

@@ -6,6 +6,7 @@
 //! load on the command path. A controller that can host a DaynaPort also
 //! carries the closure that builds one, since that needs the machine's network.
 
+use std::any::Any;
 use std::io;
 use std::sync::Arc;
 
@@ -18,12 +19,19 @@ type DaynaportFn = Box<dyn Fn(u8, DaynaportParams) -> io::Result<()> + Send + Sy
 
 pub struct ScsiPort {
     ctl: Arc<dyn DiskController>,
+    /// The same controller, for [`Self::device`].
+    any: Arc<dyn Any + Send + Sync>,
     dayna: Option<DaynaportFn>,
 }
 
 impl ScsiPort {
-    pub fn new(ctl: Arc<dyn DiskController>) -> ScsiPort {
-        ScsiPort { ctl, dayna: None }
+    pub fn new<T: DiskController + Any>(ctl: Arc<T>) -> ScsiPort {
+        ScsiPort { ctl: ctl.clone(), any: ctl, dayna: None }
+    }
+
+    /// The controller, when it is a `T`: the card an NVMe row holds.
+    pub fn device<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        self.any.clone().downcast().ok()
     }
 
     /// Say how this controller builds a DaynaPort at a target id.

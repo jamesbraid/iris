@@ -50,7 +50,12 @@
 
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+
+use crate::attach::{Ctx, DeviceType, Handles, NoOptions};
+use crate::location::{Hop, Location};
+use crate::topology::{Family, Row, Topology};
 
 use crate::dev::bridge::{Bridge, RawFlash};
 use crate::dev::w1;
@@ -58,7 +63,8 @@ use crate::dev::w1::sgi::{board_record_part, BoardRecord};
 use crate::pci::{DevFn, PciBus, PciFunction};
 use crate::xtalk::Upstream;
 
-/// Which product, as `[[xio_board]] kind` names it.
+/// Which product: the device types `pci_shoehorn` and `pci_cage`, and the
+/// older `[[xio_board]] kind` names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
     /// The single-slot XIO-to-PCI adapter.
@@ -182,6 +188,112 @@ impl XioPciBoard {
         self.check_slot(device)?;
         self.bus().attach(DevFn { device, function: 0 }, f);
         Ok(())
+    }
+}
+
+/// What a board placed in an XIO slot is built with, bound at the machine's
+/// root: the way its Bridge reaches memory and interrupts over the switch,
+/// what tells it which links are alive, and the machine's Bridge revision.
+/// The boards built here are collected for the machine, which maps each at
+/// its port once the rest of the hardware exists.
+pub struct XioPorts {
+    upstream: Box<dyn Fn() -> Upstream + Send + Sync>,
+    link_alive: Box<dyn Fn(&Bridge) + Send + Sync>,
+    revision: u32,
+    boards: Mutex<Vec<XioPciBoard>>,
+}
+
+impl XioPorts {
+    pub fn new(
+        upstream: impl Fn() -> Upstream + Send + Sync + 'static,
+        link_alive: impl Fn(&Bridge) + Send + Sync + 'static,
+        revision: u32,
+    ) -> Self {
+        Self { upstream: Box::new(upstream), link_alive: Box::new(link_alive), revision, boards: Mutex::new(Vec::new()) }
+    }
+
+    fn build(&self, kind: Kind, widget: u8) -> PciBus {
+        let board = XioPciBoard::new(kind, widget, (self.upstream)(), self.revision);
+        (self.link_alive)(board.bridge());
+        eprintln!("iris: {} in XIO slot {widget}", kind.label());
+        let bus = board.bus().clone();
+        self.boards.lock().push(board);
+        bus
+    }
+
+    /// The boards placed so far, in placement order.
+    pub fn take(&self) -> Vec<XioPciBoard> {
+        std::mem::take(&mut *self.boards.lock())
+    }
+}
+
+/// The ports an XIO board's location may name: the PCI module's own port,
+/// or one of the four XIO slots for a shoehorn.
+fn port_of(kind: Kind, at: &Location) -> Result<u8, String> {
+    let w = match at.hops() {
+        [h] => h.xio_port().ok_or_else(|| format!("{at} is not an XIO port"))?,
+        _ => return Err(format!("{at} is not an XIO port")),
+    };
+    match kind {
+        Kind::Cage if w != CAGE_WIDGET => Err(format!("the PCI module goes in port {CAGE_WIDGET} (xio{CAGE_WIDGET}), not {w}")),
+        Kind::Shoehorn if w == CAGE_WIDGET => Err(format!("xio{CAGE_WIDGET} is the PCI module's port; a shoehorn goes in an XIO slot")),
+        _ => Ok(w),
+    }
+}
+
+/// The rows a board brings: its PCI bus and a card position per slot.
+fn board_rows(kind: Kind, at: &Location, t: &Topology) -> Result<(), String> {
+    port_of(kind, at)?;
+    let bus = at.join(Hop::pci(0));
+    t.add(bus.clone(), Row::fixed("PCI bus"))?;
+    for &d in kind.slots() {
+        t.add(bus.join(Hop::pos(d)), Row::offering(SLOT_LABELS[d as usize], Family::Pci))?;
+    }
+    Ok(())
+}
+
+/// The slots' names: the PCI module's guide numbers them 1 to 3, as their
+/// device numbers; a shoehorn's one slot is its device 1.
+const SLOT_LABELS: [&str; 4] = ["", "PCI slot 1", "PCI slot 2", "PCI slot 3"];
+
+fn board_new(kind: Kind, ports: &XioPorts, at: &Location) -> Result<Handles, String> {
+    let bus = ports.build(kind, port_of(kind, at)?);
+    Ok(vec![(Some(Hop::pci(0)), Arc::new(bus))])
+}
+
+/// The single-slot XIO-to-PCI adapter, in an Octane XIO slot.
+pub struct PciShoehorn;
+
+impl DeviceType for PciShoehorn {
+    const NAME: &'static str = "pci_shoehorn";
+    const FAMILY: Family = Family::Xio;
+    type Owner = XioPorts;
+    type Options = NoOptions;
+
+    fn rows(_: &NoOptions, at: &Location, t: &Topology) -> Result<(), String> {
+        board_rows(Kind::Shoehorn, at, t)
+    }
+
+    fn new(_: NoOptions, _: &mut Ctx, ports: &Arc<XioPorts>, at: &Location) -> Result<Handles, String> {
+        board_new(Kind::Shoehorn, ports, at)
+    }
+}
+
+/// The Octane's three-slot PCI module, on XIO port 13.
+pub struct PciCage;
+
+impl DeviceType for PciCage {
+    const NAME: &'static str = "pci_cage";
+    const FAMILY: Family = Family::Xio;
+    type Owner = XioPorts;
+    type Options = NoOptions;
+
+    fn rows(_: &NoOptions, at: &Location, t: &Topology) -> Result<(), String> {
+        board_rows(Kind::Cage, at, t)
+    }
+
+    fn new(_: NoOptions, _: &mut Ctx, ports: &Arc<XioPorts>, at: &Location) -> Result<Handles, String> {
+        board_new(Kind::Cage, ports, at)
     }
 }
 

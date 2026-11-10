@@ -71,7 +71,10 @@ pub struct Snapshot {
 /// hashing multi-GB images.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiskRef {
+    /// Controller * 16 + target id, for a disk on a numbered controller.
     pub id: u8,
+    /// The location, for a disk with no controller number (an NVMe card's).
+    pub at: Option<crate::location::Location>,
     pub path: String,
     pub size_bytes: u64,
 }
@@ -85,13 +88,29 @@ impl DiskRef {
             .records()
             .iter()
             .filter(|r| cdroms || !r.cdrom)
-            .filter_map(|r| {
-                let id = crate::config::scsi_slot(disks.topology().ctl_of(&r.at)?, r.at.target()?);
-                Some(DiskRef { id, path: r.path.clone(), size_bytes: r.size_bytes })
+            .map(|r| {
+                let slot = disks.topology().ctl_of(&r.at).zip(r.at.target());
+                let (id, at) = match slot {
+                    Some((ctl, id)) => (crate::config::scsi_slot(ctl, id), None),
+                    None => (0, Some(r.at.clone())),
+                };
+                DiskRef { id, at, path: r.path.clone(), size_bytes: r.size_bytes }
             })
             .collect();
-        refs.sort_by_key(|r| r.id);
+        refs.sort_by(|a, b| (&a.at, a.id).cmp(&(&b.at, b.id)));
         refs
+    }
+
+    /// How a message names the disk: `0:1`, or its location.
+    pub fn name(&self) -> String {
+        match &self.at {
+            Some(at) => at.to_string(),
+            None => format!("{}:{}", self.id / 16, self.id % 16),
+        }
+    }
+
+    fn same_place(&self, other: &DiskRef) -> bool {
+        self.at == other.at && (self.at.is_some() || self.id == other.id)
     }
 }
 
@@ -180,10 +199,10 @@ pub fn check_provenance(m: &Manifest, cpu_model: &str, cache_kind: &str, disks: 
         fatal.push(e);
     }
     for d in &m.disks {
-        match disks.iter().find(|c| c.id == d.id) {
-            None => fatal.push(format!("snapshot disk {}:{} ('{}') is not configured in this run", d.id / 16, d.id % 16, d.path)),
+        match disks.iter().find(|c| c.same_place(d)) {
+            None => fatal.push(format!("snapshot disk {} ('{}') is not configured in this run", d.name(), d.path)),
             Some(c) if c.size_bytes != d.size_bytes => fatal.push(format!(
-                "disk {}:{} ('{}') size differs: snapshot {} bytes vs current {}", d.id / 16, d.id % 16, d.path, d.size_bytes, c.size_bytes)),
+                "disk {} ('{}') size differs: snapshot {} bytes vs current {}", d.name(), d.path, d.size_bytes, c.size_bytes)),
             Some(_) => {}
         }
     }
@@ -282,7 +301,10 @@ impl Manifest {
         if !self.disks.is_empty() {
             let disks: Vec<Value> = self.disks.iter().map(|d| {
                 let mut dt = toml::map::Map::new();
-                dt.insert("id".into(), Value::Integer(d.id as i64));
+                match &d.at {
+                    Some(at) => dt.insert("at".into(), Value::String(at.to_string())),
+                    None => dt.insert("id".into(), Value::Integer(d.id as i64)),
+                };
                 dt.insert("path".into(), Value::String(d.path.clone()));
                 dt.insert("size_bytes".into(), Value::Integer(d.size_bytes as i64));
                 Value::Table(dt)
@@ -334,8 +356,13 @@ impl Manifest {
             .and_then(|x| x.as_array())
             .map(|arr| arr.iter().filter_map(|x| {
                 let t = x.as_table()?;
+                let at = match t.get("at") {
+                    Some(v) => Some(v.as_str()?.parse().ok()?),
+                    None => None,
+                };
                 Some(DiskRef {
-                    id: t.get("id").and_then(|v| v.as_integer())? as u8,
+                    id: if at.is_some() { 0 } else { t.get("id").and_then(|v| v.as_integer())? as u8 },
+                    at,
                     path: t.get("path").and_then(|v| v.as_str())?.to_string(),
                     size_bytes: t.get("size_bytes").and_then(|v| v.as_integer())? as u64,
                 })
@@ -579,6 +606,42 @@ impl BinValue {
 }
 
 // ---- scalar hex helpers ----
+
+/// Each card's disk's copy-on-write sets, by the card's location, as a
+/// snapshot read them.
+pub type CardOverlays = Vec<(crate::location::Location, Vec<(usize, Vec<u64>)>)>;
+
+/// Write each card's disk's overlay (an NVMe namespace's) into a directory
+/// named by the card's location, and its dirty sectors into
+/// `cow-<location>.toml`.
+pub fn export_card_overlays(snap: &Snapshot, disks: &crate::disks::Disks) -> Result<(), String> {
+    for (at, port) in disks.cards() {
+        let dir = snap.dir.join(at.to_string());
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let overlays = port.bus().export_overlays(&dir).map_err(|e| format!("COW overlay export ({at}): {e}"))?;
+        snap.write_toml(&format!("cow-{at}.toml"), &build_cow_table(overlays)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// The card overlays a snapshot holds for the cards this machine has.
+pub fn read_card_overlays(snap: &Snapshot, disks: &crate::disks::Disks) -> CardOverlays {
+    disks
+        .cards()
+        .into_iter()
+        .filter_map(|(at, _)| Some((at.clone(), parse_cow_table(&snap.read_toml(&format!("cow-{at}.toml")).ok()?))))
+        .collect()
+}
+
+/// Put back what [`export_card_overlays`] wrote, from the snapshot in `dir`.
+pub fn import_card_overlays(dir: &std::path::Path, disks: &crate::disks::Disks, sets: &CardOverlays) -> Result<(), String> {
+    let cards = disks.cards();
+    for (at, sets) in sets {
+        let Some((_, port)) = cards.iter().find(|(c, _)| c == at) else { continue };
+        port.bus().import_overlays(&dir.join(at.to_string()), sets).map_err(|e| format!("COW overlay import ({at}): {e}"))?;
+    }
+    Ok(())
+}
 
 /// Inverse of `parse_cow_table`: build a `{"scsi<id>": [dirty sectors...]}`
 /// table from `export_overlays`'s output.
@@ -869,7 +932,10 @@ mod tests {
             description: Some("post install".into()),
             installed_bundles: vec!["grep-2.5.4".into(), "sed-4.2.2".into()],
             features: vec!["jit".into(), "tlbvmap".into()],
-            disks: vec![DiskRef { id: 1, path: "irix53.raw".into(), size_bytes: 4294967296 }],
+            disks: vec![
+                DiskRef { id: 1, at: None, path: "irix53.raw".into(), size_bytes: 4294967296 },
+                DiskRef { id: 0, at: Some("pci0.3".parse().unwrap()), path: "nvme.raw".into(), size_bytes: 1 << 20 },
+            ],
             nvram: Some("nvram-irix53.bin".into()),
             cpu_model: Some("R5000".into()),
             cpu_cache: Some("shadow".into()),

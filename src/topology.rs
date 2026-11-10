@@ -25,6 +25,7 @@ pub enum Family {
     Scsi,
     Pci,
     Gio,
+    Xio,
 }
 
 impl Family {
@@ -34,6 +35,7 @@ impl Family {
             Family::Scsi => "SCSI device",
             Family::Pci => "PCI card",
             Family::Gio => "GIO card",
+            Family::Xio => "XIO board",
         }
     }
 
@@ -43,6 +45,7 @@ impl Family {
             Family::Scsi => "SCSI target",
             Family::Pci => "PCI card position",
             Family::Gio => "GIO slot",
+            Family::Xio => "XIO slot",
         }
     }
 }
@@ -179,6 +182,11 @@ impl Topology {
         Ok(t)
     }
 
+    /// The controller number of the row `at`, if it is a numbered controller.
+    pub fn ctl(&self, at: &Location) -> Option<u8> {
+        self.rows.lock().get(at)?.ctl
+    }
+
     /// The controller number of the row above `at`, for the snapshot's
     /// controller * 16 + id disk numbers.
     pub fn ctl_of(&self, at: &Location) -> Option<u8> {
@@ -238,7 +246,9 @@ impl Topology {
                         && prev.offers == r.offers
                         && prev.network == r.network
                         && prev.label == r.label;
-                    if next && at.target().is_some() {
+                    // Targets and positions on a bus; a run of XIO slots
+                    // is listed one by one, since each has its own label.
+                    if next && at.last().is_some_and(|h| h.is_bare() || at.target().is_some()) {
                         *last = at.clone();
                         continue;
                     }

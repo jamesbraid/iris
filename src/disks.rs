@@ -124,14 +124,11 @@ pub struct Disks {
     /// location, if several are configured.
     scratch: Mutex<Option<(Location, PathBuf)>>,
     records: Mutex<Vec<MediaRecord>>,
-    /// Controllers with disks that have no row in the map yet: the NVMe
-    /// card's namespace.
-    unplaced: Mutex<Vec<Arc<dyn DiskController>>>,
 }
 
 impl Disks {
     pub fn new(topology: Arc<Topology>) -> Disks {
-        Disks { topology, ci: false, scratch: Mutex::new(None), records: Mutex::new(Vec::new()), unplaced: Mutex::new(Vec::new()) }
+        Disks { topology, ci: false, scratch: Mutex::new(None), records: Mutex::new(Vec::new()) }
     }
 
     pub fn with_ci(mut self, ci: bool) -> Disks {
@@ -139,19 +136,9 @@ impl Disks {
         self
     }
 
-    /// Count `ctl`'s disks in the flush and the CHD sync, though no row of the
-    /// map holds it.
-    pub fn add_unplaced(&self, ctl: Arc<dyn DiskController>) {
-        self.unplaced.lock().push(ctl);
-    }
-
-    /// Every bus with disks on it: the bound controllers in location order,
-    /// then the unplaced ones.
+    /// Every bus with disks on it, in location order.
     fn buses(&self) -> Vec<Arc<dyn DiskController>> {
-        let mut all: Vec<Arc<dyn DiskController>> =
-            self.topology.buses::<ScsiPort>().into_iter().map(|(_, p)| p.controller().clone()).collect();
-        all.extend(self.unplaced.lock().iter().cloned());
-        all
+        self.topology.buses::<ScsiPort>().into_iter().map(|(_, p)| p.controller().clone()).collect()
     }
 
     /// How many buses with disks the machine has.
@@ -198,6 +185,21 @@ impl Disks {
         let (path, discs) = o.media();
         let r = port.bus().attach_device(id, &path, true, discs, false, None, false);
         Self::report(r, at, &path, None)
+    }
+
+    /// Give an NVMe card at `at` its namespace: the disk is recorded, and a
+    /// CI run's overlay goes to the temporary directory, as a SCSI disk's do.
+    pub fn attach_nvme(&self, nvme: &crate::dev::nvme::Nvme, at: &Location, o: &crate::dev::nvme::NvmeOptions) -> Result<(), String> {
+        self.record(at, false, &o.path);
+        let ci_overlay = (self.ci && o.overlay).then(|| ci_overlay_path(&at.to_string()));
+        let r = nvme.attach_image(&o.path, o.overlay, ci_overlay.as_deref()).map_err(io::Error::other);
+        Self::report(r, at, &o.path, ci_overlay.as_deref())
+    }
+
+    /// The bound ports with no controller number: cards such as the NVMe,
+    /// whose disk is keyed by the card's own location.
+    pub fn cards(&self) -> Vec<(Location, Arc<ScsiPort>)> {
+        self.topology.buses::<ScsiPort>().into_iter().filter(|(at, _)| self.topology.ctl(at).is_none()).collect()
     }
 
     fn record(&self, at: &Location, cdrom: bool, path: &str) {

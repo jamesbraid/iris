@@ -245,6 +245,35 @@ impl Resettable for VirtioPci {
     }
 }
 
+/// virtio-serial as a PCI function, at the device number its location names:
+/// on the Octane, the Bridge device iris keeps spare for it.
+pub struct VirtioSerialPci;
+
+impl crate::attach::DeviceType for VirtioSerialPci {
+    const NAME: &'static str = "virtio_serial";
+    const FAMILY: crate::topology::Family = crate::topology::Family::Pci;
+    type Owner = crate::pci::PciBus;
+    type Options = super::console::VirtioSerialOptions;
+
+    fn check(o: &Self::Options, _: &crate::config::MachineConfig) -> Result<(), String> {
+        o.check()
+    }
+
+    fn new(
+        o: Self::Options,
+        ctx: &mut crate::attach::Ctx,
+        bus: &Arc<crate::pci::PciBus>,
+        at: &crate::location::Location,
+    ) -> Result<crate::attach::Handles, String> {
+        let device = crate::pci::device_at(at)?;
+        let dev = Arc::new(VirtioPci::new(super::console::from_ports(&o.ports)));
+        bus.attach(crate::pci::DevFn { device, function: 0 }, dev.clone());
+        eprintln!("iris: virtio-serial at {at}");
+        ctx.devices.add(&at.to_string(), crate::devices::Phase::Io, dev);
+        Ok(vec![])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
