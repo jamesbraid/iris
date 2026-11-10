@@ -35,7 +35,8 @@ Select with `cargo build --release --features <comma-separated-list>`; add
 | `instr_stats` | Per-opcode decode/execute counters; interpreter only, refused with JIT v2. | — |
 | `r5ksc` | Disabled external secondary-cache model; deliberately refuses to compile. | — |
 | `r5ksc_triton` | Disabled O2/Triton integrated L2 model; deliberately refuses to compile. | `r5ksc` |
-| `idle-pause` | Park the CPU in recognized guest idle loops; opt-in. | — |
+| `idle-pause` | Park the CPU in guest idle loops proven to be spins; opt-in. | — |
+| `idleprof` | The `idleprof` PC histogram; costs a check per instruction. | `idle-pause` |
 | `tcache` | Keep cache tags/state but use authoritative ppmem RAM for cacheable data. | — |
 | `tcache_verify` | Assert transparent-cache/RAM coherence on accesses; very slow. | `tcache` |
 | `default` | Default bundle: `tlbvmap` and `rexdiag`. | `tlbvmap`, `rexdiag` |
@@ -593,6 +594,7 @@ and offline-tool controls are included so they are not mistaken for GUI settings
 | `IRIS_NO_FETCH_VERIFY` | 1 suppresses fetchverify checks in a fetchverify build. | [src/cpu/mips_exec.rs](src/cpu/mips_exec.rs) |
 | `IRIS_NO_IDLE` | Any presence disables idle parking at startup; `idle on` re-enables it. | [src/cpu/idle_park.rs](src/cpu/idle_park.rs) |
 | `IRIS_IDLE_WARMUP_SECS` | Seconds after CPU start before idle parking engages (default 60; 0 disables the warm-up). | [src/cpu/idle_park.rs](src/cpu/idle_park.rs) |
+| `IRIS_IDLE_POLL_US` | How often a parked CPU compares the memory its loop watches (default 200 µs). | [src/cpu/idle_park.rs](src/cpu/idle_park.rs) |
 | `IRIS_NO_INLINE_MEM` | Any presence disables JIT inline memory emission. | [src/cpu/jitv2/codegen.rs](src/cpu/jitv2/codegen.rs) |
 | `IRIS_NO_JIT` | Any presence disables the REX3 shader JIT and the IMPACT raster JIT; does not select the MIPS engine. | [src/dev/ng1/rex3.rs](src/dev/ng1/rex3.rs) |
 | `IRIS_OPT_SPEED` | Presence selects speed optimization in offline PCP/corpus measurements. | [src/bin/jitv2_pcp_dump.rs](src/bin/jitv2_pcp_dump.rs) |

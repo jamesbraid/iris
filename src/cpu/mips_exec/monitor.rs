@@ -3360,25 +3360,15 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> MipsCpu<T, C> {
                         writeln!(writer, "idle: parking disabled").unwrap();
                     }
                     "status" => {
+                        use crate::cpu::idle_park::{self as ip, Refusal};
                         use std::sync::atomic::Ordering::Relaxed as R;
-                        let n = crate::cpu::idle_park::PARK_COUNT.load(R);
-                        let ns = crate::cpu::idle_park::PARK_SLEEP_NS.load(R);
-                        let irq = crate::cpu::idle_park::PARK_WAKE_IRQ.load(R);
-                        let other = crate::cpu::idle_park::PARK_WAKE_OTHER.load(R);
-                        writeln!(writer, "idle: {}  parks={} slept={:.3}s wake_irq={} wake_other={}",
-                            if crate::cpu::idle_park::idle_park_enabled() { "on" } else { "off" },
-                            n, ns as f64 / 1e9, irq, other).unwrap();
-                        writeln!(writer, "  updates={} full={} largest={} distinct={}",
-                            crate::cpu::idle_park::UPDATES.load(R),
-                            crate::cpu::idle_park::WINDOW_FULL.load(R),
-                            crate::cpu::idle_park::WINDOW_SAMPLES.load(R),
-                            crate::cpu::idle_park::WINDOW_DISTINCT.load(R)).unwrap();
-                        writeln!(writer, "  resets: irq={} ip={} im0={} ie0={} user={}",
-                            crate::cpu::idle_park::RESET_IRQ.load(R),
-                            crate::cpu::idle_park::RESET_IP.load(R),
-                            crate::cpu::idle_park::RESET_IM0.load(R),
-                            crate::cpu::idle_park::RESET_IE0.load(R),
-                            crate::cpu::idle_park::RESET_USER.load(R)).unwrap();
+                        writeln!(writer, "idle: {}  parks={} slept={:.3}s woke: irq={} mem={} other={}",
+                            if ip::idle_park_enabled() { "on" } else { "off" },
+                            ip::PARK_COUNT.load(R), ip::PARK_SLEEP_NS.load(R) as f64 / 1e9,
+                            ip::PARK_WAKE_IRQ.load(R), ip::PARK_WAKE_MEM.load(R), ip::PARK_WAKE_OTHER.load(R)).unwrap();
+                        let refused: Vec<String> = Refusal::NAMES.iter().zip(&ip::REFUSED)
+                            .map(|(n, c)| format!("{}={}", n, c.load(R))).collect();
+                        writeln!(writer, "  probes={} in {:.3}s refused: {}", ip::PROBES.load(R), ip::PROBE_NS.load(R) as f64 / 1e9, refused.join(" ")).unwrap();
                     }
                     _ => return Err("Usage: idle <on|off|status>".to_string()),
                 }

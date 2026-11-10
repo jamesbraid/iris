@@ -6988,18 +6988,311 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Idle probe fixtures: a kernel-mode executor with interrupts enabled
+    /// (IM7), PC at a loop built from `words` at physical 0x1000, t0 pointing
+    /// at the flag word at physical 0x2000 (cached, or uncached with
+    /// `uncached`), t1 at a scratch word at 0x3000.
+    #[cfg(feature = "idle-pause")]
+    fn idle_probe_fixture(words: &[u32], uncached: bool) -> (MipsExecutor<PassthroughTlb, PassthroughCache>, Arc<MockMemory>) {
+        use crate::cpu::mips_core::{STATUS_ERL, STATUS_EXL, STATUS_IE, STATUS_IM_SHIFT};
+        let (mut exec, mem) = create_executor();
+        for (k, &w) in words.iter().enumerate() {
+            mem.set_word(0x1000 + 4 * k as u64, w);
+        }
+        mem.set_word(0x2000, 0);
+        let seg = if uncached { 0xFFFF_FFFF_A000_0000u64 } else { 0xFFFF_FFFF_8000_0000u64 };
+        exec.core.gpr[8] = seg | 0x2000;
+        exec.core.gpr[9] = 0xFFFF_FFFF_8000_3000;
+        exec.core.gpr[12] = 1;
+        exec.core.cp0_status = (exec.core.cp0_status & !(STATUS_ERL | STATUS_EXL)) | STATUS_IE | (1 << (STATUS_IM_SHIFT + 7));
+        exec.core.pc = 0xFFFF_FFFF_8000_1000;
+        (exec, mem)
+    }
+
+    #[cfg(feature = "idle-pause")]
+    const IDLE_LW_T3_T0: u32 = (OP_LW << 26) | (8 << 21) | (11 << 16);
+    #[cfg(feature = "idle-pause")]
+    fn idle_beq_t3_zero(off: i32) -> u32 {
+        (OP_BEQ << 26) | (11 << 21) | (off as u32 & 0xFFFF)
+    }
+
+    /// `1: lw t3,0(t0); beq t3,zero,1b`: a loop waiting for a word to become
+    /// non-zero, with nothing else to do. The probe proves it a pure spin and
+    /// watches the flag's line.
+    #[cfg(feature = "idle-pause")]
+    #[test]
+    fn idle_probe_proves_a_pure_spin_and_watches_its_flag() {
+        let (mut exec, _mem) = idle_probe_fixture(&[IDLE_LW_T3_T0, idle_beq_t3_zero(-2), 0], false);
+        let running = std::sync::atomic::AtomicBool::new(true);
+        let w = exec.idle_probe_run(&running).map_err(|r| format!("{:?}", r)).expect("a pure spin");
+        assert!(w.lines.contains(&0x2000), "the flag is watched: {:x?}", w.lines);
+        assert!(w.lines.contains(&0x1000), "the loop's code is watched: {:x?}", w.lines);
+        assert_eq!(exec.pc_bp_count, 0, "the probe gives the breakpoint counts back");
+        assert_eq!(exec.mem_bp_count, 0);
+    }
+
+    /// A loop that counts in memory each pass (`lw; addiu; sw`): neither
+    /// its registers nor memory ever return to an earlier state.
+    #[cfg(feature = "idle-pause")]
+    fn idle_counting_loop(extra_nops: usize) -> Vec<u32> {
+        let lw_t6_t1 = (OP_LW << 26) | (9 << 21) | (14 << 16);
+        let addiu_t6 = (OP_ADDIU << 26) | (14 << 21) | (14 << 16) | 1;
+        let sw_t6_t1 = (OP_SW << 26) | (9 << 21) | (14 << 16);
+        let mut w = vec![lw_t6_t1, addiu_t6, sw_t6_t1];
+        w.extend(std::iter::repeat(0).take(extra_nops));
+        w.push(IDLE_LW_T3_T0);
+        w.push(idle_beq_t3_zero(-(w.len() as i32 + 1)));
+        w.push(0);
+        w
+    }
+
+    /// A store that writes what memory already holds changes nothing anyone
+    /// can see: `sw t4,0(t1)` of the same value each pass is still a spin,
+    /// and its line is watched too.
+    #[cfg(feature = "idle-pause")]
+    #[test]
+    fn idle_probe_accepts_a_silent_store() {
+        let sw_t4_t1 = (OP_SW << 26) | (9 << 21) | (12 << 16);
+        let (mut exec, mem) = idle_probe_fixture(&[sw_t4_t1, IDLE_LW_T3_T0, idle_beq_t3_zero(-3), 0], false);
+        mem.set_word(0x3000, 1);
+        let running = std::sync::atomic::AtomicBool::new(true);
+        let w = exec.idle_probe_run(&running).map_err(|r| format!("{:?}", r)).expect("a silent store keeps it a spin");
+        assert!(w.lines.contains(&0x2000) && w.lines.contains(&0x3000), "watched {:x?}", w.lines);
+    }
+
+    /// A loop that takes and drops a lock word each pass (`sw 1; ...; sw 0`)
+    /// changes memory only for a moment: memory returns with the registers,
+    /// so it is a spin. The park stops where the word is left longest, after
+    /// the drop, so another processor never finds the lock held by a parked
+    /// one.
+    #[cfg(feature = "idle-pause")]
+    #[test]
+    fn idle_probe_parks_a_lock_taking_spin_with_the_lock_dropped() {
+        let sw_t4_t1 = (OP_SW << 26) | (9 << 21) | (12 << 16);
+        let sw_zero_t1 = (OP_SW << 26) | (9 << 21);
+        let mut words = vec![sw_t4_t1, 0, 0, 0, sw_zero_t1];
+        words.extend(std::iter::repeat(0).take(20));
+        words.push(IDLE_LW_T3_T0);
+        words.push(idle_beq_t3_zero(-(words.len() as i32 + 1)));
+        words.push(0);
+        let (mut exec, _mem) = idle_probe_fixture(&words, false);
+        let running = std::sync::atomic::AtomicBool::new(true);
+        let w = exec.idle_probe_run(&running).map_err(|r| format!("{:?}", r)).expect("memory returns each pass");
+        let i = w.lines.iter().position(|&l| l == 0x3000).expect("the lock word is watched");
+        assert_eq!(w.contents[i][0] & 0xffff_ffff, 0, "parked with the lock held");
+        assert_eq!(w.contents[i][0] >> 32, 0, "parked with the lock held");
+    }
+
+    /// A probe gives up once the loop goes `MAX_PASS` instructions without
+    /// coming back to where the probe started: it is doing other work, which
+    /// the probe would otherwise run slowly to the end of its budget. A pure
+    /// spin with a pass shorter than that is still proven.
+    #[cfg(feature = "idle-pause")]
+    #[test]
+    fn idle_probe_gives_up_on_a_pass_longer_than_max_pass() {
+        use crate::cpu::idle_park::{Refusal, MAX_PASS};
+        let running = std::sync::atomic::AtomicBool::new(true);
+        for (nops, proven) in [(MAX_PASS - 16, true), (MAX_PASS + 16, false)] {
+            let mut words = vec![IDLE_LW_T3_T0];
+            words.extend(std::iter::repeat(0).take(nops));
+            words.push(idle_beq_t3_zero(-(words.len() as i32 + 1)));
+            words.push(0);
+            let (mut exec, _mem) = idle_probe_fixture(&words, false);
+            match exec.idle_probe_run(&running) {
+                Ok(_) => assert!(proven, "a {}-instruction pass was proven", nops + 3),
+                Err(r) => assert!(!proven && r == Refusal::NoCycle, "a {}-instruction pass: {r:?}", nops + 3),
+            }
+        }
+    }
+
+    /// The false-park cases: a loop that changes memory, counts, polls an
+    /// uncached word or reads Count is never a pure spin, however stationary
+    /// its PCs.
+    #[cfg(feature = "idle-pause")]
+    #[test]
+    fn idle_probe_refuses_loops_that_make_progress() {
+        use crate::cpu::idle_park::Refusal;
+        let addiu_t5 = (OP_ADDIU << 26) | (13 << 21) | (13 << 16) | 1;
+        let mfc0_t5_count = (OP_COP0 << 26) | (13 << 16) | (9 << 11);
+        let running = std::sync::atomic::AtomicBool::new(true);
+        // Registers that return each pass while memory counts: the count is
+        // kept only in memory (`lw; addiu; sw; then t6 = 0`).
+        let lw_t6_t1 = (OP_LW << 26) | (9 << 21) | (14 << 16);
+        let addiu_t6 = (OP_ADDIU << 26) | (14 << 21) | (14 << 16) | 1;
+        let sw_t6_t1 = (OP_SW << 26) | (9 << 21) | (14 << 16);
+        let clear_t6 = (OP_ADDIU << 26) | (14 << 16); // addiu t6, zero, 0
+        let memory_counter = vec![lw_t6_t1, addiu_t6, sw_t6_t1, clear_t6, IDLE_LW_T3_T0, idle_beq_t3_zero(-6), 0];
+        // Count read and thrown away: the registers repeat, but a loop that
+        // reads Count can leave by time alone.
+        let clear_t5 = (OP_ADDIU << 26) | (13 << 16); // addiu t5, zero, 0
+        let count_discarded = vec![mfc0_t5_count, clear_t5, IDLE_LW_T3_T0, idle_beq_t3_zero(-4), 0];
+        let cases: [(&str, Vec<u32>, bool, &[Refusal]); 6] = [
+            ("memory counter", memory_counter, false, &[Refusal::NoCycle]),
+            ("Count read and discarded", count_discarded, false, &[Refusal::Outside]),
+            ("store", idle_counting_loop(0), false, &[Refusal::NoCycle]),
+            ("count", vec![addiu_t5, IDLE_LW_T3_T0, idle_beq_t3_zero(-3), 0], false, &[Refusal::NoCycle]),
+            ("uncached", vec![IDLE_LW_T3_T0, idle_beq_t3_zero(-2), 0], true, &[Refusal::Uncached]),
+            ("Count read", vec![mfc0_t5_count, IDLE_LW_T3_T0, idle_beq_t3_zero(-3), 0], false, &[Refusal::NoCycle, Refusal::Outside]),
+        ];
+        for (name, words, uncached, want) in cases {
+            let (mut exec, _mem) = idle_probe_fixture(&words, uncached);
+            match exec.idle_probe_run(&running) {
+                Ok(_) => panic!("{name}: a loop that makes progress was proven a spin"),
+                Err(r) => assert!(want.contains(&r), "{name}: refused for {r:?}, want one of {want:?}"),
+            }
+        }
+    }
+
+    /// Drive a store loop through the run loop's decision path for many
+    /// batches: it must never park, and the probe's back-off must bound how
+    /// often it is probed.
+    #[cfg(feature = "idle-pause")]
+    #[test]
+    fn idle_store_loop_never_parks_through_the_run_loop_path() {
+        use crate::cpu::idle_park::{IdleParkState, PARK_COUNT, PARK_TEST_LOCK};
+        use crate::cpu::idle_park::PROBES;
+        use std::sync::atomic::Ordering;
+        let _one = PARK_TEST_LOCK.lock();
+        // A long loop (a count kept in memory, NOPs, the poll) so its PCs
+        // form one cluster with many distinct samples, as an idle loop does.
+        let (mut exec, _mem) = idle_probe_fixture(&idle_counting_loop(35), false);
+        let running = std::sync::atomic::AtomicBool::new(true);
+        let mut st = IdleParkState::ready();
+        let parks = PARK_COUNT.load(Ordering::Relaxed);
+        let probes = PROBES.load(Ordering::Relaxed);
+        let mut candidates = 0;
+        for _ in 0..2000 {
+            for _ in 0..997 {
+                exec.step_int();
+            }
+            st.record(&exec.core);
+            if st.should_probe(&exec.core, false) {
+                candidates += 1;
+                match exec.idle_probe_run(&running) {
+                    Ok(_) => panic!("a loop that changes memory was proven a spin"),
+                    Err(_) => st.refused(&exec.core),
+                }
+            }
+        }
+        assert!(candidates > 0, "the detector never offered the loop, so this tests nothing");
+        assert_eq!(PARK_COUNT.load(Ordering::Relaxed), parks, "a store loop parked");
+        assert!(PROBES.load(Ordering::Relaxed) - probes <= 8, "the back-off let the loop be probed {} times", PROBES.load(Ordering::Relaxed) - probes);
+    }
+
+    /// An interrupt line ends a park on a proven spin at once.
+    #[cfg(feature = "idle-pause")]
+    #[test]
+    fn idle_park_watch_wakes_on_an_interrupt() {
+        use crate::cpu::idle_park::{parked, wake, PARK_TEST_LOCK, PARK_WAKE_IRQ};
+        use crate::cpu::mips_core::CAUSE_IP7;
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::time::{Duration, Instant};
+        struct Ptr(*const AtomicU64);
+        unsafe impl Send for Ptr {}
+        let _one = PARK_TEST_LOCK.lock();
+        let (mut exec, _mem) = idle_probe_fixture(&[IDLE_LW_T3_T0, idle_beq_t3_zero(-2), 0], false);
+        let running = std::sync::Arc::new(AtomicBool::new(true));
+        let w = exec.idle_probe_run(&running).map_err(|r| format!("{:?}", r)).expect("a pure spin");
+        let p = Ptr(&exec.core.hot.interrupts as *const AtomicU64);
+        let stop = running.clone();
+        let raiser = std::thread::spawn(move || {
+            let p = p;
+            let t0 = Instant::now();
+            while !parked() && t0.elapsed() < Duration::from_secs(2) {
+                std::thread::yield_now();
+            }
+            unsafe { &*p.0 }.fetch_or(CAUSE_IP7 as u64, Ordering::SeqCst);
+            wake();
+            std::thread::sleep(Duration::from_secs(2));
+            stop.store(false, Ordering::SeqCst); // the deadline
+            wake();
+        });
+        let woke = PARK_WAKE_IRQ.load(Ordering::Relaxed);
+        let t0 = Instant::now();
+        exec.idle_park_watch(&running, &w, Duration::from_millis(500));
+        let took = t0.elapsed();
+        assert!(PARK_WAKE_IRQ.load(Ordering::Relaxed) > woke, "the park did not end on the interrupt");
+        assert!(took < Duration::from_millis(400), "the park waited {took:?} for its poll, not the interrupt");
+        raiser.join().unwrap();
+    }
+
+    /// Lost wakeups. A write that lands between the probe and the park ends
+    /// the park at once, and one that lands during the park ends it within a
+    /// few polls; neither waits for an interrupt that never comes.
+    #[cfg(feature = "idle-pause")]
+    #[test]
+    fn idle_park_watch_wakes_on_a_write_to_a_watched_line() {
+        use crate::cpu::idle_park::{parked, PARK_TEST_LOCK};
+        use crate::cpu::idle_park::PARK_WAKE_MEM as WAKE_MEM;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        let _one = PARK_TEST_LOCK.lock();
+        let (mut exec, mem) = idle_probe_fixture(&[IDLE_LW_T3_T0, idle_beq_t3_zero(-2), 0], false);
+        let running = Arc::new(AtomicBool::new(true));
+        let poll = Duration::from_micros(200);
+        // A deadline so a lost wakeup fails instead of hanging.
+        let stop = running.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let watchdog = std::thread::spawn(move || {
+            if rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                stop.store(false, Ordering::SeqCst);
+                crate::cpu::idle_park::wake();
+            }
+        });
+
+        // 1. The write lands after the probe, before the park.
+        let w = exec.idle_probe_run(&running).map_err(|r| format!("{:?}", r)).expect("a pure spin");
+        mem.set_word(0x2000, 7);
+        let woke = WAKE_MEM.load(Ordering::Relaxed);
+        let t0 = Instant::now();
+        exec.idle_park_watch(&running, &w, poll);
+        assert!(WAKE_MEM.load(Ordering::Relaxed) > woke, "the park missed a write made before it");
+        assert!(t0.elapsed() < Duration::from_millis(50));
+
+        // 2. The write lands during the park, from another thread.
+        mem.set_word(0x2000, 0);
+        let w = exec.idle_probe_run(&running).map_err(|r| format!("{:?}", r)).expect("a pure spin");
+        let writer_mem = mem.clone();
+        let writer = std::thread::spawn(move || {
+            let t0 = Instant::now();
+            while !parked() && t0.elapsed() < Duration::from_secs(2) {
+                std::thread::yield_now();
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            writer_mem.set_word(0x2000, 9);
+        });
+        let woke = WAKE_MEM.load(Ordering::Relaxed);
+        exec.idle_park_watch(&running, &w, poll);
+        writer.join().unwrap();
+        assert!(WAKE_MEM.load(Ordering::Relaxed) > woke, "the park ended without seeing the write");
+
+        // 3. The loop's own code changes during the park: the loop the proof
+        // was about no longer exists, so the park ends too.
+        mem.set_word(0x2000, 0);
+        let w = exec.idle_probe_run(&running).map_err(|r| format!("{:?}", r)).expect("a pure spin");
+        mem.set_word(0x1008, 1 << 6); // the delay slot becomes `sll zero,zero,1`
+        let woke = WAKE_MEM.load(Ordering::Relaxed);
+        exec.idle_park_watch(&running, &w, poll);
+        let _ = tx.send(());
+        watchdog.join().unwrap();
+        assert!(running.load(Ordering::SeqCst), "only the watchdog ended the park: a lost wakeup");
+        assert!(WAKE_MEM.load(Ordering::Relaxed) > woke, "the park ended without seeing the write");
+    }
+
+
     /// The kernel pattern that hung a real IRIX 6.5.22 boot after hours:
     /// a loop that raises the spl (`splhi`: only IP6, the bus error, left
     /// unmasked on IP22), spins a while, drops it again (`splx`) and tests a
     /// flag that an interrupt handler sets. Most of each pass is masked, so
-    /// the idle detector sees the repeated state there and parks; the
-    /// timer's interrupt then arrives *masked*. `park` used to wait for
-    /// `ip & im`, which a masked line never satisfies, so the CPU slept
-    /// through the interrupt that would have been taken a few instructions
-    /// later at `splx` - for good. This runs the guest, the 1000-step
-    /// batches and the park exactly as `MipsCpu::start`'s loop does, raises
-    /// IP4 from another thread the way a device does, and requires the loop
-    /// to finish. See clanker/perf/idle-pause-masked-interrupt-must-wake.md.
+    /// the loop is a proven spin and parks there; the timer's interrupt then
+    /// arrives *masked*. A park that waited for `ip & im`, which a masked
+    /// line never satisfies, slept through the interrupt that would have
+    /// been taken a few instructions later at `splx` - for good. This runs
+    /// the guest, the 1000-step batches, the probe and the park as
+    /// `MipsCpu::start`'s loop does, raises IP4 from another thread the way
+    /// a device does, and requires the loop to finish. See
+    /// clanker/perf/idle-pause-masked-interrupt-must-wake.md.
     #[cfg(feature = "idle-pause")]
     #[test]
     fn idle_park_wakes_for_an_interrupt_masked_by_a_raised_spl() {
@@ -7081,16 +7374,14 @@ mod tests {
                     done_tx.send(Ok(parks)).unwrap();
                     return;
                 }
-                match idle.update(&exec.core) {
-                    crate::cpu::idle_park::IdleDecision::Park => {
-                        parks += 1;
-                        idle.park(&mut exec.core, &run);
+                if idle.should_probe(&exec.core, false) {
+                    match exec.idle_probe_run(&run) {
+                        Ok(w) => {
+                            parks += 1;
+                            exec.idle_park_watch(&run, &w, Duration::from_millis(1));
+                        }
+                        Err(_) => idle.refused(&exec.core),
                     }
-                    crate::cpu::idle_park::IdleDecision::Pace => {
-                        parks += 1;
-                        idle.pace(&mut exec.core, &run);
-                    }
-                    crate::cpu::idle_park::IdleDecision::None => {}
                 }
             }
             done_tx.send(Err(exec.core.pc)).unwrap();

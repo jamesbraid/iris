@@ -318,14 +318,14 @@ that raises an interrupt, unparks the thread it is waiting on. See
 `hptimer` sleeps to 50 µs short of its next deadline and spins only the rest,
 so a 1 kHz tick costs a few percent of a core, not all of it.
 
-The idle detector samples the guest PC every 32 sample calls (about 320
-instructions in the batch loop) and parks only when one long kernel cluster of
-code dominates the sample ring (at least 12 of 32 samples and 12 distinct PCs,
-no user-mode majority), with interrupts enabled, a mask bit set, nothing
-pending and Compare armed. That accepts IRIX 5.3's 14-instruction loop and
-6.5's ~89-instruction scheduler path while rejecting short DELAY and
-device-poll loops. Parking starts 60 s after the CPU thread starts
-(`IRIS_IDLE_WARMUP_SECS` overrides), so boot runs at full speed. The monitor's
+The idle detector records the guest PC once per batch and offers a loop when
+one long kernel cluster dominates the ring (at least 12 of 32 samples and 12
+distinct PCs, no user-mode majority) with interrupts enabled and nothing
+pending. It only offers: the CPU thread parks after a probe proves the loop a
+spin, its registers and every line it touches returning to the same values
+each pass (`src/cpu/idle_park.rs`). A park ends on any interrupt line or a
+change to a watched line, compared every 200 µs (`IRIS_IDLE_POLL_US`). Offers
+start 60 s after the CPU thread starts (`IRIS_IDLE_WARMUP_SECS`). The monitor's
 `idle on|off|status` controls and reports it.
 
 ## 5. Locks

@@ -417,6 +417,10 @@ impl<
 
     fn tcache_base_ptr(&self) -> *mut u8 { unsafe { *self.tc_base.get() } }
 
+    fn tcache_ram_base(&self, phys: u64) -> Option<*mut u8> {
+        self.ram(phys).filter(|base| !base.is_null())
+    }
+
     fn set_pd_tag_store_hook(&self, hook: Box<dyn Fn(u32) + Send + Sync>) {
         unsafe { *self.pd_tag_hook.get() = Some(hook) };
     }

@@ -705,6 +705,11 @@ pub trait MipsCache: Send + Sync {
     /// (`tc_base + phys`). Null until `set_transparent_base` runs.
     fn tcache_base_ptr(&self) -> *mut u8 { std::ptr::null_mut() }
 
+    /// The base of the ppmem window this cache reads `phys` through, when the
+    /// window maps it: `base + phys` is then the memory a load of `phys`
+    /// sees. `None` sends the caller to the bus.
+    fn tcache_ram_base(&self, _phys: u64) -> Option<*mut u8> { None }
+
     /// tcache: base of the jitv2 per-page generation array (`[AtomicU64]`,
     /// indexed by `phys >> 12`). An inline store through the ppmem window
     /// must bump this or self-modifying code stops invalidating compiled
@@ -3737,6 +3742,12 @@ impl<const IC_SIZE: usize, const IC_LINE: usize, const IC_WAYS: usize, const IC_
 
     #[cfg(feature = "tcache")]
     fn tcache_base_ptr(&self) -> *mut u8 { unsafe { *self.tc_base.get() } }
+
+    #[cfg(feature = "tcache")]
+    fn tcache_ram_base(&self, phys: u64) -> Option<*mut u8> {
+        let base = unsafe { *self.tc_base.get() };
+        (!base.is_null() && crate::ppmem::bitmap_maps(unsafe { *self.tc_bitmap.get() }, phys)).then_some(base)
+    }
 
     #[cfg(feature = "jitv2")]
     fn tcache_gen_ptr(&self) -> *mut u8 { unsafe { *self.tc_gen.get() as *mut u8 } }

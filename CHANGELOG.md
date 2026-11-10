@@ -13,6 +13,32 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### Idle parking
+
+- **Parking only on a loop proven to be a spin.** With `--features
+  idle-pause`, a candidate idle loop is run once more under observation and
+  parked only if its registers and every line it touches, code included,
+  return to the same values each pass, with no uncached access, exception or
+  pending interrupt and no instruction reaching outside that state. The old
+  park (until an interrupt, or one slice) and pace paths are gone: they
+  parked busy loops too, and a parked IRIX 6.5.30 boot on the Tezro or 6.5
+  on the Octane did not reach login. A park ends on any interrupt line or
+  when a watched line changes (compared every 200 µs, `IRIS_IDLE_POLL_US`).
+  `idle status` counts wakes and probe refusals. `src/cpu/idle_park.rs`;
+  `clanker/perf/idle-park-proves-the-spin.md`.
+- **The idle sampler is out of the instruction loop.** It records one PC per
+  batch, and the `idleprof` histogram has its own feature, so an idle-pause
+  build runs the deterministic r14000_600 cell in the same host instructions
+  as one without.
+
+### Count and Compare
+
+- **A stopped CPU no longer loses a Compare deadline for a Count wrap.**
+  Stopping the CPU latched Count without delivering a Compare it stepped
+  over, and the restart armed the next match a whole wrap away: 12.3 s at
+  the R16000's 350 MHz Count, which IRIX on the Tezro reports as "hasn't seen
+  a scheduler clock interrupt in 12 seconds". Any monitor command that
+  pauses a running CPU could trigger it when the timer thread ran late.
 ### Benchmark and test suites: one pinned compiler
 
 - One pinned compiler, Fedora 45's GCC 16.2.1 for MIPS, builds the `cpu-tests` and `bench` guest binaries, in a container (`cpu-tests/docs/toolchain.md`). Builds are reproducible: debug information no longer records the checkout's path. `make -C cpu-tests toolchain-local` is gone.

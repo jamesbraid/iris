@@ -1058,6 +1058,10 @@ pub struct MipsExecutor<T: Tlb, C: CpuModel> {
     pub ll_stats: Box<[LlSiteStats; LL_STATS_SLOTS]>,
     #[cfg(feature = "idleprof")]
     idle_profiler: IdleProfiler,
+    /// An idle probe in progress (`crate::cpu::idle_park`): `Some` only
+    /// while `idle_probe_run` executes.
+    #[cfg(feature = "idle-pause")]
+    idle_probe: Option<Box<crate::cpu::idle_park::Probe>>,
     #[cfg(feature = "idleprof")]
     pub idle_profile_on: Arc<AtomicBool>,
     #[cfg(feature = "idleprof")]
@@ -2770,6 +2774,8 @@ impl<T: Tlb, C: CpuModel> MipsExecutor<T, C> {
             ll_stats: Box::new([LlSiteStats { key: u64::MAX, ..Default::default() }; LL_STATS_SLOTS]),
             #[cfg(feature = "idleprof")]
             idle_profiler: IdleProfiler::default(),
+            #[cfg(feature = "idle-pause")]
+            idle_probe: None,
             #[cfg(feature = "idleprof")]
             idle_profile_on: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "idleprof")]
@@ -4264,6 +4270,276 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
             }
         }
         hit
+    }
+
+    /// The instruction word at `pc`, read without side effects: through
+    /// the ppmem window where it maps the word (every probe step reads one),
+    /// else through the bus.
+    #[cfg(feature = "idle-pause")]
+    fn idle_fetch(&mut self, pc: u64) -> Option<u32> {
+        let tr = self.debug_translate(pc);
+        if tr.is_exception() {
+            return None;
+        }
+        if let Some(base) = self.cache.tcache_ram_base(tr.phys) {
+            // SAFETY: as in `idle_lines`; the window keeps 32-bit words in
+            // host order, so an aligned word reads as the instruction.
+            return Some(unsafe { (base.add((tr.phys & !3) as usize) as *const u32).read_volatile() });
+        }
+        let word = self.sysad.read32(tr.phys);
+        word.is_ok().then_some(word.data)
+    }
+
+    /// Is an interrupt line pending, masked or not, or a reset or hold?
+    #[cfg(feature = "idle-pause")]
+    fn idle_line_pending(&self) -> bool {
+        let word = self.core.hot.interrupts.load(Ordering::SeqCst);
+        word & (crate::cpu::smp::HOST_PARK_BIT | SOFT_RESET_BIT) != 0
+            || (self.core.cp0_cause | word as u32) & crate::cpu::mips_core::CAUSE_IP_MASK != 0
+    }
+
+    /// What `lines` hold, as this CPU's loads see them: through the ppmem
+    /// window where it maps the line (a parked CPU compares its lines every
+    /// poll, so this is the cost of a park), else through the bus. `None` if
+    /// one is not readable memory. The words are compared, never decoded,
+    /// so their order in the window does not matter.
+    #[cfg(feature = "idle-pause")]
+    fn idle_lines(&mut self, lines: &[u64]) -> Option<Vec<[u64; 8]>> {
+        lines.iter().map(|&line| {
+            let mut words = [0u64; 8];
+            if let Some(base) = self.cache.tcache_ram_base(line) {
+                // SAFETY: the window maps every byte of a region its bitmap
+                // marks, and a line never crosses a region; other threads
+                // may store there, so read each word once, volatile.
+                let at = unsafe { base.add(line as usize) } as *const u64;
+                for (i, w) in words.iter_mut().enumerate() {
+                    *w = unsafe { at.add(i).read_volatile() };
+                }
+                return Some(words);
+            }
+            for (i, w) in words.iter_mut().enumerate() {
+                let r = self.sysad.read64(line + 8 * i as u64);
+                *w = r.is_ok().then_some(r.data)?;
+            }
+            Some(words)
+        }).collect()
+    }
+
+    /// Prove that the loop at the PC is a spin (see `crate::cpu::idle_park`)
+    /// and return what to watch, or why not. Runs guest instructions through
+    /// the interpreter exactly as the run loop would; a refused probe has
+    /// just run the guest for a while.
+    #[cfg(feature = "idle-pause")]
+    pub fn idle_probe_run(&mut self, running: &AtomicBool) -> Result<crate::cpu::idle_park::Watch, crate::cpu::idle_park::Refusal> {
+        use crate::cpu::idle_park::{reaches_outside, Probe, Refusal, PROBES, REFUSED};
+        PROBES.fetch_add(1, Ordering::Relaxed);
+        let t0 = std::time::Instant::now();
+        self.idle_probe = Some(Box::<Probe>::default());
+        let cycle = self.idle_probe_cycle(running);
+        let pcs = self.idle_probe.take().unwrap().pcs;
+        // Every instruction the loop ran must stay inside the state.
+        let result = cycle.and_then(|w| {
+            for &pc in &pcs {
+                match self.idle_fetch(pc) {
+                    Some(word) if !reaches_outside(word) => {}
+                    _ => return Err(Refusal::Outside),
+                }
+            }
+            Ok(w)
+        });
+        if let Err(r) = result {
+            REFUSED[r as usize].fetch_add(1, Ordering::Relaxed);
+        }
+        crate::cpu::idle_park::PROBE_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        result
+    }
+
+    /// Run one instruction under the probe. True if it changed memory.
+    #[cfg(feature = "idle-pause")]
+    fn idle_probe_step(&mut self, running: &AtomicBool, steps: &mut usize) -> Result<bool, crate::cpu::idle_park::Refusal> {
+        use crate::cpu::idle_park::{Refusal, LINE, MAX_STEPS};
+        use crate::cpu::mips_core::{STATUS_ERL, STATUS_EXL};
+        if *steps >= MAX_STEPS {
+            return Err(Refusal::NoCycle);
+        }
+        if !running.load(Ordering::Relaxed) {
+            return Err(Refusal::Stopped);
+        }
+        *steps += 1;
+        // Note what the instruction will touch before it runs: the line it
+        // reads, or the line it stores to with what that holds now.
+        let pc = self.core.pc;
+        let word = self.idle_fetch(pc).ok_or(Refusal::Uncached)?;
+        let line = match crate::cpu::idle_park::access(word, &self.core.gpr) {
+            Ok(None) => None,
+            Ok(Some((store, at))) => {
+                let tr = self.debug_translate(at);
+                if tr.is_exception() || !tr.is_cached() {
+                    return Err(Refusal::Uncached);
+                }
+                Some((store, tr.phys & !(LINE - 1)))
+            }
+            Err(()) => return Err(Refusal::Unfollowed),
+        };
+        let before_store = match line {
+            Some((true, l)) => Some((l, self.idle_lines(&[l]).ok_or(Refusal::Uncached)?[0])),
+            _ => None,
+        };
+        let p = self.idle_probe.as_mut().unwrap();
+        p.note_pc(pc);
+        match (line, before_store) {
+            (_, Some((l, held))) => p.note_store(l, held),
+            (Some((false, l)), None) => p.add_line(l),
+            _ => {}
+        }
+        let before = p.stores;
+        let status = self.step_int();
+        let mut p = self.idle_probe.take().unwrap();
+        p.settle_stores(|line| self.idle_lines(&[line]).map(|c| c[0]));
+        let changed = p.stores != before;
+        let refusal = p.refusal();
+        self.idle_probe = Some(p);
+        if status == EXEC_BREAKPOINT {
+            Err(Refusal::Stopped)
+        } else if self.core.cp0_status & (STATUS_EXL | STATUS_ERL) != 0 {
+            Err(Refusal::Exception)
+        } else if self.idle_line_pending() {
+            Err(Refusal::Interrupt)
+        } else if let Some(r) = refusal {
+            Err(r)
+        } else {
+            Ok(changed)
+        }
+    }
+
+    /// The registers and what every line touched so far holds.
+    #[cfg(feature = "idle-pause")]
+    fn idle_snapshot(&mut self) -> Result<(crate::cpu::idle_park::State, Vec<u64>, Vec<[u64; 8]>), crate::cpu::idle_park::Refusal> {
+        let state = crate::cpu::idle_park::State::of(&self.core, self.cache.get_llbit());
+        let lines = self.idle_probe.as_ref().unwrap().lines.clone();
+        let held = self.idle_lines(&lines).ok_or(crate::cpu::idle_park::Refusal::Uncached)?;
+        Ok((state, lines, held))
+    }
+
+    /// The proof: find a repeat of the whole state (registers and touched
+    /// memory) at the PC the probe started from; add the loop's code to the
+    /// watched lines and run one more full period back to that exact state,
+    /// noting the state after each store that changed memory; then stop just
+    /// after the store that starts the longest store-free stretch, where the
+    /// state must equal the verified period's, and watch from there.
+    #[cfg(feature = "idle-pause")]
+    fn idle_probe_cycle(&mut self, running: &AtomicBool) -> Result<crate::cpu::idle_park::Watch, crate::cpu::idle_park::Refusal> {
+        use crate::cpu::idle_park::{Refusal, Watch, LINE, MAX_PASS, MAX_STATES};
+        let anchor = self.core.pc;
+        let at_anchor = |e: &Self| e.core.pc == anchor && !e.core.in_delay_slot;
+        let mut steps = 0;
+        let mut seen = Vec::new();
+        let mut last_visit = 0;
+        loop {
+            if steps - last_visit > MAX_PASS {
+                return Err(Refusal::NoCycle);
+            }
+            if at_anchor(self) {
+                last_visit = steps;
+                let snap = self.idle_snapshot()?;
+                if seen.contains(&snap) {
+                    break;
+                }
+                if seen.len() == MAX_STATES {
+                    return Err(Refusal::NoCycle);
+                }
+                seen.push(snap);
+            }
+            self.idle_probe_step(running, &mut steps)?;
+        }
+        // The loop's code is memory too: a changed instruction is changed
+        // memory.
+        for pc in self.idle_probe.as_ref().unwrap().pcs.clone() {
+            let tr = self.debug_translate(pc);
+            if tr.is_exception() || !tr.is_cached() {
+                return Err(Refusal::Uncached);
+            }
+            self.idle_probe.as_mut().unwrap().add_line(tr.phys & !(LINE - 1));
+        }
+        let start = self.idle_snapshot()?;
+        let mut after_store = Vec::new();
+        let mut period = 0;
+        let mut last_visit = 0;
+        loop {
+            let changed = self.idle_probe_step(running, &mut steps)?;
+            period += 1;
+            if at_anchor(self) {
+                last_visit = period;
+            } else if period - last_visit > MAX_PASS {
+                return Err(Refusal::NoCycle);
+            }
+            if changed {
+                after_store.push((period, self.idle_snapshot()?));
+            }
+            if at_anchor(self) && self.idle_snapshot()? == start {
+                break;
+            }
+        }
+        let pcs = self.idle_probe.as_ref().unwrap().pcs.iter().fold((u64::MAX, 0), |(lo, hi), &pc| (lo.min(pc), hi.max(pc)));
+        let park = if after_store.is_empty() {
+            start
+        } else {
+            let gap = |i: usize| after_store.get(i + 1).map_or(after_store[0].0 + period, |s| s.0) - after_store[i].0;
+            let i = (0..after_store.len()).max_by_key(|&i| gap(i)).unwrap();
+            let (offset, expect) = after_store.swap_remove(i);
+            for _ in 0..offset {
+                self.idle_probe_step(running, &mut steps)?;
+            }
+            // The same registers and memory as at this point of the verified
+            // period: the loop is still in its cycle, and what it reads next
+            // is what the snapshot holds.
+            let here = self.idle_snapshot()?;
+            if here != expect {
+                return Err(Refusal::Changed);
+            }
+            here
+        };
+        Ok(Watch { lines: park.1, contents: park.2, pcs })
+    }
+
+    /// Park this processor's thread on a proven spin until an interrupt line
+    /// is pending, a watched line changes, the CPU is stopped, or (ci_clock)
+    /// the Compare deadline passes. The board's per-batch work keeps running:
+    /// a parked processor must not stop the devices it drives.
+    #[cfg(feature = "idle-pause")]
+    pub fn idle_park_watch(&mut self, running: &AtomicBool, w: &crate::cpu::idle_park::Watch, poll: std::time::Duration) {
+        use crate::cpu::idle_park as ip;
+        ip::PARK_COUNT.fetch_add(1, Ordering::Relaxed);
+        ip::register_parker(&self.core);
+        loop {
+            if !running.load(Ordering::Relaxed) {
+                ip::PARK_WAKE_OTHER.fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+            if let Some(mut hook) = self.batch_hook.take() {
+                hook(self);
+                self.batch_hook = Some(hook);
+            }
+            ip::announce_parked(&self.core);
+            if self.idle_line_pending() {
+                ip::PARK_WAKE_IRQ.fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+            if self.idle_lines(&w.lines).as_ref() != Some(&w.contents) {
+                ip::PARK_WAKE_MEM.fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+            #[cfg(feature = "ci_clock")]
+            if self.core.hot.cycles >= self.core.count_fire_cycle {
+                break;
+            }
+            let t0 = std::time::Instant::now();
+            std::thread::park_timeout(poll);
+            let ns = t0.elapsed().as_nanos() as u64;
+            ip::PARK_SLEEP_NS.fetch_add(ns, Ordering::Relaxed);
+            ip::advance_parked(&mut self.core, ns);
+        }
+        ip::clear_parked(&self.core);
     }
 
     /// What `last_bp_hit` was, as a sentence for the stop note.
@@ -11102,20 +11378,17 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Device for MipsCpu<T
             //let mut last_time = std::time::Instant::now();
             // --- end perf sampling ---
 
-            // Idle detection + park state (see clanker/perf/idle-pause-work.md). Compiled
-            // in only with the `idle-pause` feature (off by default; opt in with
-            // --features idle-pause). When compiled in, set IRIS_NO_IDLE to keep
-            // spinning the host CPU at runtime (for benchmarking/debug).
-            //
-            // The detector records the PC once per batch, after the batch, so
-            // the instruction loops above carry no idle work at all. It parks
-            // only when execution stayed inside one long, narrow, kernel code
-            // window with interrupts enabled and nothing pending. Short
-            // poll/delay loops (2-3 instructions) are rejected by the window's
-            // minimum span and distinct-PC count; user-mode code is never
-            // parked. See src/cpu/idle_park.rs.
+            // Idle parking (src/cpu/idle_park.rs), with the `idle-pause`
+            // feature; IRIS_NO_IDLE turns it off at run time. Decided after
+            // each batch, so the instruction loops above carry none of it.
             #[cfg(feature = "idle-pause")]
             let mut idle_state = crate::cpu::idle_park::IdleParkState::default();
+            #[cfg(feature = "idle-pause")]
+            let idle_poll = crate::cpu::idle_park::poll_interval();
+            // The PC range of the last proven spin: back in it, the loop is
+            // offered at once rather than after the PC ring refills.
+            #[cfg(feature = "idle-pause")]
+            let mut idle_last: Option<(u64, u64)> = None;
 
             while running.load(Ordering::Relaxed) {
                 // Another thread is holding this CPU: stop here, between
@@ -11205,27 +11478,18 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Device for MipsCpu<T
                 #[cfg(feature = "idle-pause")]
                 if crate::cpu::idle_park::idle_park_enabled() {
                     idle_state.record(&guard.core);
-                    match idle_state.update(&guard.core) {
-                        crate::cpu::idle_park::IdleDecision::Park => {
-                            drop(guard);
-                            {
-                                let mut guard = executor.lock();
-                                idle_state.park(&mut guard.core, &running);
+                    let again = idle_last.is_some_and(|(lo, hi)| (lo..=hi).contains(&guard.core.pc));
+                    if idle_state.should_probe(&guard.core, again) {
+                        match guard.idle_probe_run(&running) {
+                            Ok(w) => {
+                                idle_state.proven();
+                                idle_last = Some(w.pcs);
+                                guard.idle_park_watch(&running, &w, idle_poll);
                             }
-                            guard = executor.lock();
+                            Err(_) => idle_state.refused(&guard.core),
                         }
-                        crate::cpu::idle_park::IdleDecision::Pace => {
-                            drop(guard);
-                            {
-                                let mut guard = executor.lock();
-                                idle_state.pace(&mut guard.core, &running);
-                            }
-                            guard = executor.lock();
-                        }
-                        crate::cpu::idle_park::IdleDecision::None => {}
                     }
                 }
-                // --- end idle park ---
                 // --- perf sampling (comment out to disable) ---
                 //let cycles = guard.core.hot.cycles;
                 //if cycles.wrapping_sub(last_cycles) >= 100_000_000 {

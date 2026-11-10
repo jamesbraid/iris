@@ -265,8 +265,8 @@ exception of that class is taken. `ex tlb on` stops on every TLB exception.
 | `undo clear` / `undo resize <n>` | Clear / resize the undo history **[DEV]** |
 | `debug <on\|off\|file <path>>` | Print every executed instruction, or write them to a file **[DEV]** |
 | `trace start <path>` / `trace stop` / `trace status` | Record full per-instruction architectural state to a file **[DEV]** |
-| `idleprof <on\|off\|report [n]\|stats>` | Sample the PC to find idle and spin loops (`idle-pause` builds); `stats` prints park counters |
-| `idle <on\|off\|status>` | Turn idle parking on or off at runtime, or show park counters and the detector's last window (`idle-pause` builds) |
+| `idleprof <on\|off\|report [n]\|stats>` | Sample the PC to find idle and spin loops (`idleprof` builds; `stats` in `idle-pause` builds prints park counters) |
+| `idle <on\|off\|status>` | Turn idle parking on or off at runtime, or show park, wake and probe-refusal counters (`idle-pause` builds); runs without pausing the CPU |
 | `instrstats [report\|clear\|dump]` | Per-instruction decode/execute counters (`--features instr_stats`) **[DEV]** |
 
 The undo buffer tracks register changes and memory writes. It does not
