@@ -352,6 +352,7 @@ impl O2Machine {
         monitor.register_device(Arc::new(crate::cpu::cpu_monitor::CpuMonitor::new(vec![cpu.clone()])));
         // The bus brings its devices' and the SCSI controllers' commands.
         devices.register_monitor(&monitor);
+        monitor.register_device(topology.clone());
         // `phys`: the physical bus's decode table, memory and traces.
         monitor.register_device(bus.phys.clone());
         // `nvme`: the card's registers, queues and copy-on-write disk.

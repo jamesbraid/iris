@@ -431,6 +431,7 @@ impl<B: Ip27Board> Ip27Machine<B> {
 
         let monitor = Monitor::new(cfg.monitor_port.unwrap_or(DEFAULT_MONITOR_PORT));
         monitor.register_device(init_devlog());
+        monitor.register_device(topology.clone());
         monitor.register_device(Arc::new(crate::cpu::cpu_monitor::CpuMonitor::new(units.iter().map(|u| u.cpu.clone()).collect())));
         for u in &units {
             monitor.register_device(u.node.memory.physical().clone());

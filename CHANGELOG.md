@@ -13,6 +13,16 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### Devices have locations
+
+- Every place a device can go has a location, a dotted path from the machine's
+  root: `hpc3.0.t4` on an Indy, `pci0.2.t1` on an O2, `xio15.pci0.0.t1` on an
+  Octane. Messages about a disk name it by location, and a disk that does not
+  fit says why and what the place takes.
+- `iris --list-slots` prints the places the configured machine has, what is in
+  each and what an empty one takes; the monitor's `slots` command prints the
+  running machine's. See HELP.md, "Where devices go".
+
 ### Drives named by location
 
 - `iris-ci cdrom-load`, `cdrom-eject` and `chd-sync` take a location such as

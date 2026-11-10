@@ -785,6 +785,36 @@ machine starts.
 
 ---
 
+## Where devices go
+
+Every place a device can go has a location: a dotted path from the machine's
+root, such as `hpc3.0.t4` (the Indy's first SCSI controller, target 4),
+`pci0.2.t1` (the O2's external SCSI connector, target 1) or `xio15.pci0.0.t1`
+(the Octane's internal SCSI bus, target 1). A hop is `xioN` (a port of the
+XIO switch), `pciN` (a PCI bus), a bare number (a device on that bus, or a
+controller of the `hpc3`), `tN` (a SCSI target), `hpc3` or `gfx`.
+
+`iris --list-slots` prints them for the configured machine, one per line, with
+what the configuration puts there and the device types an empty place takes,
+then exits; `--machine` and `--config` apply. A run of empty targets on one
+bus is a range (`hpc3.0.t2-t3`). It exits 1 with the reason when a configured
+device does not fit. The monitor's `slots` command prints the same for the
+running machine.
+
+```
+LOCATION      LABEL          HAS                  TAKES
+hpc3          I/O chip       -                    -
+hpc3.0        SCSI 0         wd33c93a (onboard)   -
+hpc3.0.t1     -              hdd scsi1.raw        -
+hpc3.0.t2-t3  -              -                    cdrom daynaport hdd
+hpc3.0.t4     -              cdrom cdrom4.iso     -
+```
+
+The `[scsi.N]` tables still say where each disk goes; the location is how
+messages, the monitor and the CI socket name it.
+
+---
+
 ## Command-line options
 
 All options are optional and override the corresponding `iris.toml` value.
@@ -837,6 +867,7 @@ Automation and debugging
   --monitor-port <PORT>       Monitor TCP port (default 8888)
   --vnc [ADDR]                VNC server on ADDR (host:port or port; default 127.0.0.1:5900)
   --validate                  Check the --config file and exit; 0 if iris would start
+  --list-slots                Print every place for a device and what is in it, then exit
   --serial-port-a <PORT>      Serial channel A TCP port (default 8880)
   --serial-port-b <PORT>      Serial channel B TCP port (default 8881)
   --serial-socket-a <PATH>    Also serve channel A on a Unix socket

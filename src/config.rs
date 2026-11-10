@@ -2703,6 +2703,22 @@ impl MachineConfig {
         Ok(out)
     }
 
+    /// Print the places this machine has and what the config puts in them
+    /// (`--list-slots`); the exit status, 1 with the claim's text when a
+    /// placement does not fit.
+    pub fn print_slots(&self) -> i32 {
+        match crate::topology::Topology::probe(self) {
+            Ok(t) => {
+                println!("{}", t.lines().join("\n"));
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         self.validate_virtio_serial()?;
         self.xio_widgets()?;
@@ -3180,6 +3196,11 @@ pub struct Cli {
     #[arg(long = "validate", default_value_t = false)]
     pub validate: bool,
 
+    /// Print every place this machine has for a device and what the config
+    /// puts there, then exit. Applies `--machine` and `--config`.
+    #[arg(long = "list-slots", default_value_t = false)]
+    pub list_slots: bool,
+
     /// Print the host network interfaces libpcap can bridge onto, then exit.
     /// Requires a build with --features pcap.
     #[arg(long = "list-net-interfaces", default_value_t = false)]
@@ -3501,13 +3522,14 @@ pub fn load_config() -> (MachineConfig, u32) {
         std::process::exit(0);
     }
 
-    if cli.validate {
+    if cli.validate || cli.list_slots {
         let toml_cfg = MachineConfig::try_load(&cli.config).unwrap_or_else(|e| {
             eprintln!("Configuration error: {e}");
             std::process::exit(1);
         });
         let cfg = cli.apply(toml_cfg);
-        std::process::exit(crate::validate_config::report(&cli.config, &cfg));
+        let status = if cli.list_slots { cfg.print_slots() } else { crate::validate_config::report(&cli.config, &cfg) };
+        std::process::exit(status);
     }
 
     let toml_cfg = MachineConfig::load_toml(&cli.config);
@@ -4464,5 +4486,20 @@ mod apply_env_tests {
         std::env::remove_var(OURS);
         set_or_remove_env(OURS, "");
         assert!(std::env::var_os(OURS).is_none());
+    }
+}
+
+#[cfg(test)]
+mod list_slots_tests {
+    use super::*;
+
+    /// `--list-slots` exits 0 on a config that fits and 1 on one that does not.
+    #[test]
+    fn list_slots_exits_0_and_a_bad_placement_exits_1() {
+        let mut cfg = MachineConfig::default();
+        assert_eq!(cfg.print_slots(), 0);
+        cfg.scsi.insert(9, ScsiDeviceConfig { path: "x.img".into(), ..Default::default() });
+        assert_eq!(cfg.print_slots(), 1, "the Indy's ids stop at 7");
+        assert!(Cli::parse_from(["iris", "--list-slots"]).list_slots);
     }
 }

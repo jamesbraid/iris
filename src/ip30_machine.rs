@@ -556,6 +556,7 @@ impl OctaneMachine {
         monitor.register_device(Arc::new(crate::cpu::cpu_monitor::CpuMonitor::new(cpus.clone())));
         // `pci` comes from the Bridge, as the O2's MACE shows its own.
         devices.register_monitor(&monitor);
+        monitor.register_device(topology.clone());
         monitor.register_device(phys.phys.clone());
         monitor.register_device(Arc::new(Ip30Monitor {
             phys: phys.clone(),
@@ -1799,5 +1800,15 @@ mod placement_tests {
         cfg.scsi.clear();
         cfg.scsi.insert(31, ScsiDeviceConfig { path: "x.img".into(), ..Default::default() });
         assert_eq!(cfg.placements(&t).unwrap()[0].at, loc("xio15.pci0.1.t15"));
+    }
+
+    /// The listing shows the controllers with their range of empty targets.
+    #[test]
+    fn octane_listing_shows_both_controllers() {
+        let lines = Topology::fill_for(&octane()).lines().join("\n");
+        for want in ["xio15 ", "xio15.pci0 ", "xio15.pci0.0 ", "xio15.pci0.1.t1-t15 ", "xio15.pci0.3 "] {
+            assert!(lines.lines().any(|l| l.starts_with(want)), "{want:?} in\n{lines}");
+        }
+        assert!(lines.contains("isp1040 (onboard)") && lines.contains("rad1 (onboard)"), "{lines}");
     }
 }

@@ -775,6 +775,7 @@ impl Ip22Machine {
         monitor.register_device(devlog.clone());
         monitor.register_device(Arc::new(crate::cpu::cpu_monitor::CpuMonitor::new(vec![cpu.clone()])));
         devices.register_monitor(&monitor);
+        monitor.register_device(topology.clone());
         monitor.register_device(phys.clone());
         monitor.register_device(Arc::new(board.vino.clone()));
         #[cfg(feature = "perfetto")]
@@ -2281,6 +2282,44 @@ mod placement_tests {
             assert_eq!(bound, ["hpc3.0"]);
             let disks: Vec<String> = m.disks().records().iter().map(|r| r.at.to_string()).collect();
             assert_eq!(disks, ["hpc3.0.t1", "hpc3.0.t2", "hpc3.0.t3", "hpc3.0.t4", "hpc3.0.t5"]);
+        });
+    }
+
+    /// The listing names every row the Indy has, its disks and the device
+    /// types each empty target takes.
+    #[test]
+    fn indy_listing_has_hpc3_and_gfx_rows() {
+        with_shared(Machine::Indy, |m| {
+            let lines = m.topology().lines().join("\n");
+            for want in ["hpc3 ", "hpc3.0 ", "hpc3.0.t1 ", "hpc3.0.t5 ", "gfx "] {
+                assert!(lines.lines().any(|l| l.starts_with(want)), "{want:?} in\n{lines}");
+            }
+            assert!(!lines.contains("hpc3.1"), "the Indy has one controller");
+            assert!(lines.lines().any(|l| l.starts_with("hpc3.0.t6-t7") && l.ends_with("cdrom daynaport hdd")), "{lines}");
+        });
+    }
+
+    /// The monitor's `slots` command prints the live map.
+    #[test]
+    fn the_monitor_slots_command_prints_the_live_map() {
+        use crate::traits::Device;
+        struct W(Arc<Mutex<Vec<u8>>>);
+        impl Write for W {
+            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+                self.0.lock().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        with_shared(Machine::Indy, |m| {
+            let t = m.topology();
+            assert_eq!(t.register_commands()[0].0, "slots");
+            let buf = Arc::new(Mutex::new(Vec::new()));
+            t.execute_command("slots", &[], Box::new(W(buf.clone()))).unwrap();
+            let out = String::from_utf8(buf.lock().clone()).unwrap();
+            assert_eq!(out.lines().collect::<Vec<_>>(), t.lines());
         });
     }
 }
