@@ -46,9 +46,10 @@ impl NatEngine {
         if dst_ip == self.config.gateway_ip {
             dlog_dev!(LogModule::Net, "NAT ICMP {} → {} ident={} seq={} (local reply)", src_ip, dst_ip, ident, seq);
             let id = self.next_ip_id();
-            let frame = self.route(src_mac, dst_ip, src_ip)
-                .icmp(id, packet::ICMP_ECHO_REPLY, 0, icmp.rest(), icmp.body());
-            self.send(frame);
+            for f in self.route(src_mac, dst_ip, src_ip)
+                .icmp_fragments(id, packet::ICMP_ECHO_REPLY, 0, icmp.rest(), icmp.body()) {
+                self.send(f);
+            }
             return;
         }
 
@@ -88,7 +89,10 @@ impl NatEngine {
         let mut replies: Vec<(Vec<u8>, Ipv4Addr, (u32, u16))> = Vec::new();
         for (&key, entry) in &mut self.icmp_nat {
             let Some(sock) = &mut entry.sock else { continue };
-            let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 1500];
+            // Room for the largest datagram: the host reassembles a big echo
+            // reply before the socket sees it. Left uninitialised, so the
+            // size costs nothing per poll.
+            let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 65535];
             while let Ok(n) = sock.recv(&mut buf) {
                 // SAFETY: recv initialised the first n bytes.
                 let raw: Vec<u8> = buf[..n].iter().map(|b| unsafe { b.assume_init() }).collect();
@@ -104,34 +108,86 @@ impl NatEngine {
             }
         }
         for (icmp, outer_src, key) in replies {
-            let Some(msg) = Icmp::parse(&icmp) else { continue };
-            // Time Exceeded (non-Linux only): find the flow from the probe
-            // embedded in it, rewrite its source back to the guest.
-            #[cfg(not(target_os = "linux"))]
-            if msg.ty() == packet::ICMP_TIME_EXCEEDED {
-                let Some(emb) = packet::Ipv4::parse(msg.body()) else { continue };
-                let Some(probe) = Icmp::parse(&msg.body()[emb.header_len()..]) else { continue };
-                let Some(entry) = self.icmp_nat.get(&(u32::from(emb.dst()), probe.ident())) else { continue };
-                let (client_mac, client_ip) = (entry.client_mac, entry.client_ip);
-                let mut body = msg.body().to_vec();
-                body[12..16].copy_from_slice(&client_ip.octets());
-                dlog_dev!(LogModule::Net, "NAT ICMP TimeExceeded {} → {} ident={}", outer_src, client_ip, probe.ident());
-                let id = self.next_ip_id();
-                let frame = self.route(client_mac, outer_src, client_ip)
-                    .icmp(id, msg.ty(), msg.code(), msg.rest(), &body);
-                self.send(frame);
-                continue;
-            }
-            // Echo reply: restore the guest's identifier (the host kernel may
-            // have rewritten it).
-            let Some(entry) = self.icmp_nat.get(&key) else { continue };
-            let (client_mac, client_ip) = (entry.client_mac, entry.client_ip);
-            let mut rest = msg.rest();
-            rest[..2].copy_from_slice(&key.1.to_be_bytes());
-            dlog_dev!(LogModule::Net, "NAT ICMP reply {} → {} ident={} seq={}", outer_src, client_ip, key.1, msg.seq());
-            let id = self.next_ip_id();
-            let frame = self.route(client_mac, outer_src, client_ip).icmp(id, msg.ty(), msg.code(), rest, msg.body());
-            self.send(frame);
+            self.reply_from_host(&icmp, outer_src, key);
         }
+    }
+
+    /// Hand the guest an ICMP message a host socket received for the flow
+    /// `key`, from `outer_src`.
+    fn reply_from_host(&mut self, icmp: &[u8], outer_src: Ipv4Addr, key: (u32, u16)) {
+        let Some(msg) = Icmp::parse(icmp) else { return };
+        // Time Exceeded (non-Linux only): find the flow from the probe
+        // embedded in it, rewrite its source back to the guest.
+        #[cfg(not(target_os = "linux"))]
+        if msg.ty() == packet::ICMP_TIME_EXCEEDED {
+            let Some(emb) = packet::Ipv4::parse(msg.body()) else { return };
+            let Some(probe) = Icmp::parse(&msg.body()[emb.header_len()..]) else { return };
+            let Some(entry) = self.icmp_nat.get(&(u32::from(emb.dst()), probe.ident())) else { return };
+            let (client_mac, client_ip) = (entry.client_mac, entry.client_ip);
+            let mut body = msg.body().to_vec();
+            body[12..16].copy_from_slice(&client_ip.octets());
+            dlog_dev!(LogModule::Net, "NAT ICMP TimeExceeded {} → {} ident={}", outer_src, client_ip, probe.ident());
+            let id = self.next_ip_id();
+            let frame = self.route(client_mac, outer_src, client_ip)
+                .icmp(id, msg.ty(), msg.code(), msg.rest(), &body);
+            self.send(frame);
+            return;
+        }
+        // Echo reply: restore the guest's identifier (the host kernel may
+        // have rewritten it).
+        let Some(entry) = self.icmp_nat.get(&key) else { return };
+        let (client_mac, client_ip) = (entry.client_mac, entry.client_ip);
+        let mut rest = msg.rest();
+        rest[..2].copy_from_slice(&key.1.to_be_bytes());
+        dlog_dev!(LogModule::Net, "NAT ICMP reply {} → {} ident={} seq={}", outer_src, client_ip, key.1, msg.seq());
+        let id = self.next_ip_id();
+        for f in self.route(client_mac, outer_src, client_ip).icmp_fragments(id, msg.ty(), msg.code(), rest, msg.body()) {
+            self.send(f);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::packet::{Ether, Ipv4Route};
+    use crate::net::testnet::{echo_message, fragment_by_hand, pattern, TestNet, GUEST_MAC};
+
+    /// An echo reply from an outside host, as the host socket hands it over
+    /// (reassembled, identifier rewritten by the host kernel), reaches the
+    /// guest with the guest's identifier, fragmented to the MTU.
+    fn host_reply_with(size: usize) {
+        let mut net = TestNet::default();
+        let (guest, gw_mac) = (net.guest_ip, net.gw_mac);
+        let outside = Ipv4Addr::new(198, 51, 100, 7);
+        let key = (u32::from(outside), 0xbeef);
+        net.e.icmp_nat.insert(key, NatIcmpEntry { sock: None, client_mac: GUEST_MAC, client_ip: guest,
+                                                  last_use: Instant::now() });
+        let body = pattern(size);
+        let from_host = echo_message(packet::ICMP_ECHO_REPLY, 0x1234, 7, &body);
+        net.e.reply_from_host(&from_host, outside, key);
+        net.pump();
+        let got: Vec<Vec<u8>> = net.inbox.drain(..).collect();
+        assert!(!got.is_empty(), "{size}-byte reply: nothing sent");
+        let id = Ether::parse(&got[0]).unwrap().ipv4().unwrap().id();
+        let reply = echo_message(packet::ICMP_ECHO_REPLY, 0xbeef, 7, &body);
+        let want = fragment_by_hand(Ipv4Route::new(GUEST_MAC, gw_mac, outside, guest), packet::PROTO_ICMP, id, &reply);
+        assert_eq!(got.len(), want.len(), "{size}-byte reply: frames");
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!(g == w, "{size}-byte reply: frame {i} differs:\n got {}\nwant {}",
+                    packet::summary(g), packet::summary(w));
+        }
+    }
+
+    #[test]
+    fn big_echo_reply_from_outside_is_fragmented() {
+        host_reply_with(1473);
+        host_reply_with(8000);
+    }
+
+    #[test]
+    fn echo_reply_from_outside_that_fits_is_one_frame() {
+        host_reply_with(56);
+        host_reply_with(1472);
     }
 }

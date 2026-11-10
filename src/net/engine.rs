@@ -412,14 +412,19 @@ impl NatEngine {
     }
 
     fn handle_ip(&mut self, ip: &packet::Ipv4, src_mac: MacAddr) {
-        // A guest NFS WRITE with a large wsize arrives fragmented: reassemble
-        // and dispatch the whole datagram once it is complete.
+        // A guest NFS WRITE with a large wsize, or a ping larger than the MTU,
+        // arrives fragmented: reassemble and dispatch the whole datagram once
+        // it is complete.
         if ip.is_fragment() {
             if let Some(whole) = self.reasm.add(ip) {
-                if ip.proto() == packet::PROTO_UDP {
-                    if let Some(udp) = packet::Udp::parse(&whole) {
+                match ip.proto() {
+                    packet::PROTO_ICMP => if let Some(icmp) = packet::Icmp::parse(&whole) {
+                        self.handle_icmp(src_mac, ip.src(), ip.dst(), ip.ttl(), &icmp);
+                    },
+                    packet::PROTO_UDP => if let Some(udp) = packet::Udp::parse(&whole) {
                         self.handle_udp(src_mac, ip.src(), ip.dst(), &udp);
-                    }
+                    },
+                    _ => {}
                 }
             }
             return;

@@ -275,14 +275,20 @@ impl Ipv4Route {
 
     /// An ICMP message; its checksum is computed here.
     pub fn icmp(&self, id: u16, ty: u8, code: u8, rest: [u8; 4], body: &[u8]) -> Vec<u8> {
-        let (mut f, l4) = self.start(PROTO_ICMP, id, 0, 8 + body.len());
-        f.extend_from_slice(&[ty, code, 0, 0]);
-        f.extend_from_slice(&rest);
-        f.extend_from_slice(body);
-        let c = checksum(&f[l4..]);
-        put16(&mut f, l4 + 2, c);
+        let (mut f, _) = self.start(PROTO_ICMP, id, 0, 8 + body.len());
+        write_icmp(&mut f, ty, code, rest, body);
         pad(&mut f);
         f
+    }
+
+    /// One ICMP message, IP-fragmented into frames no larger than the MTU.
+    pub fn icmp_fragments(&self, id: u16, ty: u8, code: u8, rest: [u8; 4], body: &[u8]) -> Vec<Vec<u8>> {
+        if 8 + body.len() <= MTU - IPV4_HDR {
+            return vec![self.icmp(id, ty, code, rest, body)];
+        }
+        let mut msg = Vec::with_capacity(8 + body.len());
+        write_icmp(&mut msg, ty, code, rest, body);
+        self.fragments(PROTO_ICMP, id, &msg)
     }
 
     /// One UDP datagram in one frame, however large.
@@ -295,13 +301,18 @@ impl Ipv4Route {
 
     /// One UDP datagram, IP-fragmented into frames no larger than the MTU.
     pub fn udp_fragments(&self, id: u16, sport: u16, dport: u16, payload: &[u8]) -> Vec<Vec<u8>> {
-        // Fragment payloads must be multiples of 8 bytes except the last.
-        const CHUNK: usize = (MTU - IPV4_HDR) / 8 * 8;
         if UDP_HDR + payload.len() <= MTU - IPV4_HDR {
             return vec![self.udp(id, sport, dport, payload)];
         }
         let mut dgram = Vec::with_capacity(UDP_HDR + payload.len());
         write_udp(&mut dgram, self.src, self.dst, sport, dport, payload);
+        self.fragments(PROTO_UDP, id, &dgram)
+    }
+
+    /// A whole transport message split into IP fragments that fit the MTU.
+    fn fragments(&self, proto: u8, id: u16, dgram: &[u8]) -> Vec<Vec<u8>> {
+        // Fragment payloads must be multiples of 8 bytes except the last.
+        const CHUNK: usize = (MTU - IPV4_HDR) / 8 * 8;
         dgram
             .chunks(CHUNK)
             .enumerate()
@@ -309,7 +320,7 @@ impl Ipv4Route {
                 let offset = i * CHUNK;
                 let more = offset + chunk.len() < dgram.len();
                 let frag = (offset / 8) as u16 | if more { IP_MF } else { 0 };
-                let (mut f, _) = self.start(PROTO_UDP, id, frag, chunk.len());
+                let (mut f, _) = self.start(proto, id, frag, chunk.len());
                 f.extend_from_slice(chunk);
                 pad(&mut f);
                 f
@@ -358,6 +369,15 @@ fn write_udp(f: &mut Vec<u8>, src: Ipv4Addr, dst: Ipv4Addr, sport: u16, dport: u
         c => c,
     };
     put16(f, at + 6, c);
+}
+
+fn write_icmp(f: &mut Vec<u8>, ty: u8, code: u8, rest: [u8; 4], body: &[u8]) {
+    let at = f.len();
+    f.extend_from_slice(&[ty, code, 0, 0]);
+    f.extend_from_slice(&rest);
+    f.extend_from_slice(body);
+    let c = checksum(&f[at..]);
+    put16(f, at + 2, c);
 }
 
 // ── ICMP ─────────────────────────────────────────────────────────────────────

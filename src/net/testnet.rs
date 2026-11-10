@@ -686,6 +686,95 @@ fn ping_the_gateway() {
                (gw, packet::ICMP_ECHO_REPLY, 0xbeef, 7, &b"payload"[..]));
 }
 
+/// An ICMP echo message with its checksum.
+pub(super) fn echo_message(ty: u8, ident: u16, seq: u16, body: &[u8]) -> Vec<u8> {
+    let mut m = vec![ty, 0, 0, 0];
+    m.extend_from_slice(&ident.to_be_bytes());
+    m.extend_from_slice(&seq.to_be_bytes());
+    m.extend_from_slice(body);
+    let c = packet::checksum(&m);
+    m[2..4].copy_from_slice(&c.to_be_bytes());
+    m
+}
+
+/// `dgram` (a whole transport message) as IP fragments of at most 1480
+/// bytes, the way IRIX sends a datagram too large for one frame. Built from
+/// `Ipv4Route::raw` and patched by hand, not by the engine's fragmenter, so
+/// it can check that fragmenter. A message that fits is one plain frame.
+pub(super) fn fragment_by_hand(route: Ipv4Route, proto: u8, id: u16, dgram: &[u8]) -> Vec<Vec<u8>> {
+    const CHUNK: usize = 1480;
+    let ip = packet::ETH_HDR;
+    dgram.chunks(CHUNK).enumerate().map(|(i, chunk)| {
+        let offset = i * CHUNK;
+        let more = offset + chunk.len() < dgram.len();
+        let mut f = route.raw(proto, id, chunk);
+        let field = (offset / 8) as u16 | if more { 0x2000 } else { 0 };
+        f[ip + 6..ip + 8].copy_from_slice(&field.to_be_bytes());
+        f[ip + 10..ip + 12].fill(0);
+        let c = packet::checksum(&f[ip..ip + packet::IPV4_HDR]);
+        f[ip + 10..ip + 12].copy_from_slice(&c.to_be_bytes());
+        f
+    }).collect()
+}
+
+/// Ping the gateway with `size` bytes of payload. The reply must be the
+/// request's message turned around, fragmented the way the request was.
+fn ping_the_gateway_with(size: usize) {
+    let mut net = TestNet::default();
+    let (gw, guest) = (net.gw_ip, net.guest_ip);
+    let body = pattern(size);
+    let id = net.next_id();
+    let request = echo_message(packet::ICMP_ECHO_REQUEST, 0xbeef, 7, &body);
+    for f in fragment_by_hand(net.route_to(gw), packet::PROTO_ICMP, id, &request) {
+        net.send(f);
+    }
+    net.pump();
+    let got: Vec<Vec<u8>> = net.inbox.drain(..).collect();
+    assert!(!got.is_empty(), "{size}-byte ping: no reply");
+    for f in &got {
+        let len = Ether::parse(f).unwrap().ipv4().unwrap().total_len() as usize;
+        assert!(len <= packet::MTU, "{size}-byte ping: a {len}-byte datagram exceeds the MTU");
+    }
+    let reply_id = Ether::parse(&got[0]).unwrap().ipv4().unwrap().id();
+    let reply = echo_message(packet::ICMP_ECHO_REPLY, 0xbeef, 7, &body);
+    let back = Ipv4Route::new(GUEST_MAC, net.gw_mac, gw, guest);
+    let want = fragment_by_hand(back, packet::PROTO_ICMP, reply_id, &reply);
+    assert_eq!(got.len(), want.len(), "{size}-byte ping: reply frames");
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!(g == w, "{size}-byte ping: reply frame {i} differs:\n got {}\nwant {}",
+                packet::summary(g), packet::summary(w));
+    }
+}
+
+/// A ping too large for one frame arrives as IP fragments. The gateway
+/// answers it with a reply fragmented to the MTU.
+#[test]
+fn ping_the_gateway_with_fragmented_requests() {
+    ping_the_gateway_with(1473);
+    ping_the_gateway_with(8000);
+}
+
+/// A ping that fits one frame gets one unfragmented reply.
+#[test]
+fn ping_reply_that_fits_a_frame_is_one_frame() {
+    ping_the_gateway_with(56);
+    ping_the_gateway_with(1472);
+}
+
+/// UDP datagrams too large for a frame are split into these exact frames.
+#[test]
+fn udp_fragments_match_hand_built_fragments() {
+    let net = TestNet::default();
+    let back = Ipv4Route::new(GUEST_MAC, net.gw_mac, net.gw_ip, net.guest_ip);
+    for size in [1, 1472, 1473, 8000, 20_000] {
+        let data = pattern(size);
+        let whole = back.udp(9, 2049, 1023, &data);
+        let dgram = Ether::parse(&whole).unwrap().ipv4().unwrap().payload().to_vec();
+        let want = fragment_by_hand(back, packet::PROTO_UDP, 9, &dgram);
+        assert!(back.udp_fragments(9, 2049, 1023, &data) == want, "{size}-byte UDP payload");
+    }
+}
+
 // ── Inbound port forwards ────────────────────────────────────────────────────
 
 fn forward_config(proto: ForwardProto, host_port: u16, guest_port: u16) -> GatewayConfig {
