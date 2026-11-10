@@ -60,7 +60,6 @@ judges it against that list:
 ```sh
 cargo test --release --test cpu_tests -- --ignored                    # interp
 cargo test --release --features jitv2 --test cpu_tests -- --ignored   # jitv2
-make check-run CPU=r5000 ENGINE=jitv2                                  # one cell
 ```
 
 It fails when a test fails that the list does not name, when a listed test
