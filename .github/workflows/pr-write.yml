@@ -1,0 +1,72 @@
+name: pr-write
+on: pull_request
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
+        with: { tool: nextest }
+      - name: nextest
+        id: nextest
+        continue-on-error: true
+        run: cargo nextest run --profile ci
+      - name: libtest junit (nightly)
+        continue-on-error: true
+        run: |
+          rustup toolchain install nightly --profile minimal
+          mkdir -p target/libtest
+          for t in pass fail; do
+            cargo +nightly test --test $t -- -Z unstable-options --format junit > target/libtest/$t.xml || true
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: junit-pr-write
+          path: |
+            target/nextest/ci/junit.xml
+            target/libtest/*.xml
+      - name: mikepenz nextest
+        id: mp-nextest
+        if: always()
+        uses: mikepenz/action-junit-report@a16be3a69023e9bd7e748ede768b3282ea7b30ce
+        with:
+          report_paths: target/nextest/ci/junit.xml
+          annotate_only: true
+          check_name: mikepenz-nextest
+          job_summary: true
+      - name: mikepenz libtest
+        id: mp-libtest
+        if: always()
+        uses: mikepenz/action-junit-report@a16be3a69023e9bd7e748ede768b3282ea7b30ce
+        with:
+          report_paths: target/libtest/*.xml
+          annotate_only: true
+          check_name: mikepenz-libtest
+          job_summary: true
+      - name: dorny nextest
+        id: dorny-nextest
+        if: always()
+        uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2
+        with:
+          name: dorny-nextest-inline
+          path: target/nextest/ci/junit.xml
+          reporter: java-junit
+      - name: dorny libtest
+        if: always()
+        uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2
+        with:
+          name: dorny-libtest-inline
+          path: target/libtest/*.xml
+          reporter: java-junit
+      - name: summary only
+        if: always()
+        run: |
+          {
+            echo "## junit raw (summary only: pr-write)"
+            echo '```xml'; cat target/nextest/ci/junit.xml; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,25 @@
+name: report
+on:
+  workflow_run:
+    workflows: [pr-write, pr-readonly]
+    types: [completed]
+permissions:
+  contents: read
+  checks: write
+  actions: read
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2
+        with:
+          artifact: /junit-(.*)/
+          name: dorny-workflow_run-$1
+          path: '**/junit.xml'
+          reporter: java-junit
+      - uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2
+        with:
+          artifact: /junit-(.*)/
+          name: dorny-workflow_run-libtest-$1
+          path: 'libtest/*.xml'
+          reporter: java-junit
