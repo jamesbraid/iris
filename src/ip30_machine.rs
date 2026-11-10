@@ -1014,7 +1014,6 @@ impl OctaneMachine {
         self.restart_peripherals();
         applied?;
         self.start_cpus();
-        self.lifecycle = crate::machine_state::GuestState::Running;
         println!("Snapshot loaded from {}/{name}", self.saves.display());
         Ok(())
     }
@@ -1634,6 +1633,25 @@ mod snapshot_tests {
     #[test]
     fn an_nvme_card_is_fitted_in_a_shoehorn() {
         nvme_in_a_slot(crate::dev::xio_pci::Kind::Shoehorn, None, false);
+    }
+
+    /// A restore leaves the CPU running without storing `Running`, so a CPU
+    /// the monitor then stops can be started again. A stored `Running` would
+    /// refuse that start as `Running -> Starting`.
+    #[test]
+    fn a_start_after_a_snapshot_load_is_accepted() {
+        std::thread::Builder::new().stack_size(64 << 20).spawn(|| {
+            use crate::workstation::Workstation as _;
+            let dir = scratch("start-after-load");
+            let prom = empty_prom(&dir);
+            let mut m = machine(&prom, &dir);
+            m.save_snapshot("s").unwrap();
+            m.load_snapshot("s").unwrap();
+            assert_ne!(m.lifecycle(), crate::machine_state::GuestState::Running, "Running is never stored");
+            // The monitor's `stop`: the CPU halts, the lifecycle is not touched.
+            m.stop_cpus();
+            assert!(m.start_guest().is_ok());
+        }).unwrap().join().unwrap();
     }
 
     /// An empty PROM in place of the stock one, so these run anywhere.
