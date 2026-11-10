@@ -1042,7 +1042,56 @@ fn show_disks(ui: &mut Ui, cfg: &mut MachineConfig) -> (PathEdit, ConfigAction) 
         }
     }
     if let Some(id) = to_delete { cfg.scsi.remove(&id); }
+    if cfg.machine.profile == MachineProfile::OctaneIp30 {
+        show_fibre_channel(ui, cfg, &mut edit);
+    }
     (edit, action)
+}
+
+/// The Octane's Fibre Channel adapter and the disks on its loop. Fitting it
+/// puts a PCI module in the machine when it has no option board yet; unfitting
+/// it leaves the board be. Names, slot and bridge are in the TOML file.
+fn show_fibre_channel(ui: &mut Ui, cfg: &mut MachineConfig, edit: &mut PathEdit) {
+    ui.separator();
+    ui.heading(t!("config-fc"));
+    let mut fitted = cfg.fibre_channel.is_some();
+    if ui.checkbox(&mut fitted, t!("config-fc-fit")).on_hover_text(t!("config-fc-tip")).changed() {
+        // Unticking keeps the table for this session, so ticking again
+        // brings the disk rows back instead of an empty section.
+        let stash = egui::Id::new("fc_stash");
+        if fitted {
+            cfg.fibre_channel = Some(ui.data_mut(|d| d.remove_temp::<iris::config::FibreChannelConfig>(stash)).unwrap_or_default());
+        } else if let Some(old) = cfg.fibre_channel.take() {
+            ui.data_mut(|d| d.insert_temp(stash, old));
+        }
+        if fitted && cfg.xio_board.is_empty() {
+            cfg.xio_board.push(iris::config::XioBoardConfig { kind: iris::dev::xio_pci::Kind::Cage, widget: None });
+        }
+        edit.changed = true;
+    }
+    let Some(fc) = cfg.fibre_channel.as_mut() else { return };
+    let mut to_delete: Option<u8> = None;
+    for (&loop_id, disk) in fc.disks.iter_mut() {
+        ui.horizontal(|ui| {
+            ui.strong(t!("config-fc-loop-id", id = loop_id));
+            if ui.button(t!("config-remove")).clicked() {
+                to_delete = Some(loop_id);
+            }
+        });
+        let e = path_row_disk(ui, ("fc_path", loop_id), &mut disk.disk.path, Pick::OpenFile, &disk_filters());
+        edit.changed |= e.changed;
+        edit.picked |= e.picked;
+    }
+    if let Some(id) = to_delete {
+        fc.disks.remove(&id);
+        edit.changed = true;
+    }
+    if ui.button(t!("config-fc-add-disk")).clicked() {
+        if let Some(id) = (0..=iris::dev::isp2200::LOOP_ID_MAX).find(|i| !fc.disks.contains_key(i)) {
+            fc.disks.insert(id, Default::default());
+            edit.changed = true;
+        }
+    }
 }
 
 /// One row of a SCSI table's INQUIRY strings: a text box where empty means

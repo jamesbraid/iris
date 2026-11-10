@@ -199,6 +199,12 @@ config-scsi-revision-tip = The product revision INQUIRY reports, up to 4 charact
 config-scsi-serial = Serial number
 config-scsi-serial-tip = The unit serial number, up to 16 characters, in INQUIRY data and the serial number page. Empty: none.
 config-scsi-inquiry-hint = { $n } chars
+config-fc = Fibre Channel
+config-fc-fit = Fit a Fibre Channel adapter
+config-fc-tip = A QLogic ISP2200 in the PCI module, with a private loop of disks. Adds a PCI module if the machine has no option board.
+# $id is the disk's loop ID, 0 to 125.
+config-fc-loop-id = Loop ID { $id }
+config-fc-add-disk = Add loop disk
 config-scsi-changer = Extra discs in the changer
 config-scsi-disc-remove-tip = Remove this disc
 config-scsi-add-disc = Add disc
