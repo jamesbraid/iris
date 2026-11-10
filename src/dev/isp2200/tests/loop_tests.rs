@@ -423,3 +423,45 @@ fn port_name_list_retains_m7() {
     assert_eq!(r.rd(mb(1)), 20);
     r.ack();
 }
+
+/// A port given its own names reports them through every command that
+/// names a port; one that was not given any keeps the names its loop ID makes.
+/// Fitted names are a model facility (a drive's names are set by whoever
+/// fits it), so the layout is the port database's and name list's, unchanged.
+#[test]
+fn fitted_port_names() {
+    let r = Rig::with_disks("names", &[1, 5]);
+    let (node, port) = (0x2000_00e0_8b12_3456_u64, 0x2100_00e0_8b12_3456_u64);
+    r.isp.set_names(5, node, port);
+    r.loop_up(ICB_OPT_PORT_DB, 0);
+
+    r.mem.put(0x9100, &[0xa5; 129]);
+    assert_eq!(r.call_dma(mbox::GET_PORT_DB, 5 << 8, 0x9100), mbox::COMPLETE);
+    r.ack();
+    let pd = r.mem.get(0x9100, 128);
+    assert_eq!(pd[12..20], node.to_be_bytes());
+    assert_eq!(pd[20..28], port.to_be_bytes());
+
+    // Port 1 was not named.
+    assert_eq!(r.call_dma(mbox::GET_PORT_DB, 1 << 8, 0x9100), mbox::COMPLETE);
+    r.ack();
+    let pd = r.mem.get(0x9100, 128);
+    assert_eq!(pd[12..20], node_wwn(1).to_be_bytes());
+    assert_eq!(pd[20..28], port_wwn(1).to_be_bytes());
+
+    // Get Port Name, option 0 the port name and 1 the node name, two
+    // wire-order bytes to a mailbox with the earlier in the low half.
+    for (option, want) in [(0u16, port), (1, node)] {
+        assert_eq!(r.mbox(&[mbox::GET_PORT_NAME, 5 << 8 | option]), mbox::COMPLETE);
+        let got: Vec<u8> = [2, 3, 6, 7].iter().flat_map(|&m| r.rd(mb(m)).to_le_bytes()).collect();
+        r.ack();
+        assert_eq!(got, want.to_be_bytes());
+    }
+
+    // The port name list carries the fitted port name, little-endian.
+    assert_eq!(r.call_dma(mbox::PORT_NAME_LIST, 0x08, 0x9000), mbox::COMPLETE);
+    r.ack();
+    let names = r.mem.get(0x9000, 20);
+    assert_eq!(u64::from_le_bytes(names[0..8].try_into().unwrap()), port_wwn(1));
+    assert_eq!(u64::from_le_bytes(names[10..18].try_into().unwrap()), port);
+}

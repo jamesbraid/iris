@@ -338,14 +338,15 @@ const ALPA: [u8; LOOP_ID_MAX as usize + 2] = [
     0x00,
 ];
 
-/// The node name of the port at `loop_id`. Whoever fits a disk to the loop
-/// names it in the real fabric; the model names a port from its loop ID, so a
-/// guest sees stable names that look synthetic.
+/// The node name of the port at `loop_id` unless [`Isp2200::set_names`] gave
+/// the port its own. Whoever fits a disk to the loop names it in the real
+/// fabric; the model names a port from its loop ID, so a guest sees stable
+/// names that look synthetic.
 pub const fn node_wwn(loop_id: u8) -> u64 {
     0x2000_0000_0000_0000 | loop_id as u64
 }
 
-/// The port name of the port at `loop_id`; see [`node_wwn`].
+/// The port name of the port at `loop_id` unless given its own; see [`node_wwn`].
 pub const fn port_wwn(loop_id: u8) -> u64 {
     0x2100_0000_0000_0000 | loop_id as u64
 }
@@ -1032,6 +1033,8 @@ pub struct Core {
     bus: ScsiBus,
     index: u8,
     pci: PciFunctionState,
+    /// Names fitted to a port in place of the ones its loop ID gives.
+    names: Mutex<std::collections::BTreeMap<u8, (u64, u64)>>,
     /// The board's EEPROM image, fixed when the adapter is built.
     nvram_image: [u8; NVRAM_SIZE],
     notes: Mutex<Vec<String>>,
@@ -1114,6 +1117,7 @@ impl Core {
             bus,
             index,
             pci: PciFunctionState::new(pci),
+            names: Mutex::new(std::collections::BTreeMap::new()),
             nvram_image: Self::nvram_build(serial),
             notes: Mutex::new(Vec::new()),
             odd_accesses: AtomicU64::new(0),
@@ -1122,6 +1126,25 @@ impl Core {
 
     pub fn index(&self) -> u8 {
         self.index
+    }
+
+    /// Give the port at `loop_id` its own node and port names, in place of
+    /// the ones [`node_wwn`] and [`port_wwn`] make from the loop ID. A fitted
+    /// disk is named by whoever fits it, as a drive's names are on a real
+    /// loop; the machine sets them before the guest runs.
+    pub fn set_names(&self, loop_id: u8, node: u64, port: u64) {
+        assert!(loop_id <= LOOP_ID_MAX, "loop ID {loop_id:#x} is not a loop port");
+        self.names.lock().insert(loop_id, (node, port));
+    }
+
+    /// The node name of the port at `loop_id`.
+    fn node_name(&self, loop_id: u8) -> u64 {
+        self.names.lock().get(&loop_id).map_or_else(|| node_wwn(loop_id), |n| n.0)
+    }
+
+    /// The port name of the port at `loop_id`.
+    fn port_name(&self, loop_id: u8) -> u64 {
+        self.names.lock().get(&loop_id).map_or_else(|| port_wwn(loop_id), |n| n.1)
     }
 
     /// The loop: attach targets to it and ask what is on it.
@@ -1895,7 +1918,7 @@ impl Core {
             .filter(|&id| st.target(usize::from(id)))
             .flat_map(|id| {
                 let mut entry = [0u8; NAME_LIST_ENTRY];
-                entry[..8].copy_from_slice(&port_wwn(id).to_le_bytes());
+                entry[..8].copy_from_slice(&self.port_name(id).to_le_bytes());
                 entry[8..].copy_from_slice(&u16::from(id).to_le_bytes());
                 entry
             })
@@ -1920,8 +1943,8 @@ impl Core {
         pd[PDB_OFF_HARD_ADDR] = ALPA[usize::from(id)];
         // Domain, a reserved byte, AL_PA, area.
         pd[PDB_OFF_PORT_ID + 2] = ALPA[usize::from(id)];
-        pd[PDB_OFF_NODE_NAME..][..8].copy_from_slice(&node_wwn(id).to_be_bytes());
-        pd[PDB_OFF_PORT_NAME..][..8].copy_from_slice(&port_wwn(id).to_be_bytes());
+        pd[PDB_OFF_NODE_NAME..][..8].copy_from_slice(&self.node_name(id).to_be_bytes());
+        pd[PDB_OFF_PORT_NAME..][..8].copy_from_slice(&self.port_name(id).to_be_bytes());
         // Both drivers find the target role in the low byte.
         pd[PDB_OFF_PRLI_SVC3] = PDB_TARGET_ROLE;
         pd[PDB_OFF_LOOP_ID..][..2].copy_from_slice(&u16::from(id).to_le_bytes());
@@ -1939,7 +1962,7 @@ impl Core {
     /// only for the fabric port, which is refused. The real firmware's order
     /// is unknown. Refusals follow the port database's, so the fabric check
     /// at 0x7e finds no fabric and a scan of every loop ID skips the adapter.
-    fn get_port_name(st: &State, input: &Mailboxes, out: &mut Mailboxes) -> u16 {
+    fn get_port_name(&self, st: &State, input: &Mailboxes, out: &mut Mailboxes) -> u16 {
         let option = input[1] & 0xff;
         if !st.loop_ready() {
             return mbox::COMMAND_ERROR;
@@ -1951,7 +1974,7 @@ impl Core {
         if !st.target(usize::from(id)) {
             return mbox::COMMAND_ERROR;
         }
-        let name = (if option == 1 { node_wwn(id) } else { port_wwn(id) }).to_be_bytes();
+        let name = (if option == 1 { self.node_name(id) } else { self.port_name(id) }).to_be_bytes();
         for (slot, pair) in [2, 3, 6, 7].into_iter().zip(name.chunks_exact(2)) {
             out[slot] = u16::from_le_bytes([pair[0], pair[1]]);
         }
@@ -2046,7 +2069,7 @@ impl Core {
             mbox::GET_ID_LIST => self.get_id_list(st, input, out),
             mbox::PORT_NAME_LIST => self.port_name_list(st, input, out),
             mbox::GET_PORT_DB => self.get_port_db(st, input),
-            mbox::GET_PORT_NAME => Self::get_port_name(st, input, out),
+            mbox::GET_PORT_NAME => self.get_port_name(st, input, out),
             mbox::POSITION_MAP => self.position_map(st, input),
             mbox::ABORT_COMMAND | mbox::ABORT_TARGET | mbox::LUN_RESET | mbox::LIP_RESET => self.recovery(st, cmd, input),
             mbox::INITIATE_LIP | mbox::FULL_LOGIN_LIP => {
