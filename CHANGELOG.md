@@ -52,6 +52,7 @@ hashes are given where a change is easiest to understand by reading the commit.
 ### Boot test
 
 - `iris-ci screen-wait GOLDEN` takes screenshots until the guest screen matches a PNG: a pixel differs when a channel is more than `--threshold` (32) away, and a match allows `--max-pixels` (1000) of them. On a timeout it writes the last screenshot and a diff image with the differing pixels in red, and exits 3.
+- The nightly boot test also boots IRIX 5.3 on the graphics console and fails unless the login screen matches `scripts/boot-goldens/indy-irix53.png`.
 
 ### PCI
 

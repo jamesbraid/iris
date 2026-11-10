@@ -9,7 +9,8 @@
 # to check that a branch builds everywhere without publishing anything.
 #
 # The boot-test job then boots IRIX 5.3 with the Linux, macOS and Windows CLI
-# builds, when the IRIX53_BOOT_IMAGE_URL secret is set.
+# builds, once on the serial console and once on the graphics console, when the
+# IRIX53_BOOT_IMAGE_URL secret is set.
 #
 # Runner images are pinned: a glibc-linked Linux binary needs at least the
 # build host's glibc, so ubuntu-24.04 decides which distros our packages run on,
@@ -366,7 +367,9 @@ jobs:
           if-no-files-found: error
 
   # Boots IRIX 5.3 to a login prompt with the CLI just built, through
-  # scripts/ci-boot-test.sh. The disk image comes from the
+  # scripts/ci-boot-test.sh: once on serial, where "login:" is read, and once
+  # on the graphics board, where the screen must match
+  # scripts/boot-goldens/indy-irix53.png. The disk image comes from the
   # IRIX53_BOOT_IMAGE_URL secret; without it every step is skipped and the job
   # passes with a warning. nightly.yml and release.yml publish only if this
   # whole workflow succeeds, so a failed boot stops the publish.
@@ -377,7 +380,9 @@ jobs:
     timeout-minutes: 30
     env:
       VER: ${{ needs.version.outputs.version }}
-      BOOT_TIMEOUT: 900
+      # Per boot. Both boots must fit in the job's 30 minutes; the graphics
+      # login appears within 80 s on all three runners.
+      BOOT_TIMEOUT: 600
     strategy:
       fail-fast: false
       matrix:
@@ -460,7 +465,7 @@ jobs:
           path: boot-image
           key: irix53-boot-image-${{ steps.image.outputs.hash }}
 
-      - name: Boot IRIX 5.3 to the login prompt
+      - name: Boot IRIX 5.3 on the serial and graphics consoles
         if: ${{ steps.image.outputs.present == 'true' }}
         run: bash scripts/ci-boot-test.sh core boot-image/irix53.chd boot-test "$BOOT_TIMEOUT"
 
@@ -471,6 +476,7 @@ jobs:
         with:
           name: boot-test-${{ matrix.os }}-${{ matrix.arch }}
           path: |
+            boot-test/*.png
             boot-test/*.log
             boot-test/boot-test.toml
           if-no-files-found: warn
