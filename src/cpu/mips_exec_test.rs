@@ -7056,8 +7056,8 @@ mod tests {
             while run.load(Ordering::Relaxed) {
                 for _ in 0..1000 {
                     exec.step_int();
-                    idle.sample(&exec.core);
                 }
+                idle.record(&exec.core);
                 if exec.core.pc == kseg0(done_pa) || exec.core.pc == kseg0(done_pa + 4) {
                     done_tx.send(Ok(parks)).unwrap();
                     return;

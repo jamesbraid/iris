@@ -10,15 +10,13 @@ use crate::cpu::mips_core::{CAUSE_IP_MASK, STATUS_IM_MASK};
 use crate::cpu::mips_core::MipsCore;
 use crate::cpu::smp::{HOST_PARK_BIT, MAX_CPUS};
 
-/// PCs kept for the idle-window test. The batch run loop calls [`sample`]
-/// after each ten-instruction group, so with [`SAMPLE_EVERY`] = 32 the ring
-/// spans about 10,000 guest instructions — several iterations of even a long
-/// idle loop. The single-step path spans 32.
+/// PCs kept for the idle-window test, one per run-loop batch (1,000
+/// instructions, 10,000 in a `lightning` build). The run loop records the PC
+/// after each batch, never inside it, so the instruction loops carry no idle
+/// work. A ring spans 32 batches: many iterations of even a long idle loop.
+/// A loop whose period divides the batch length lands on few distinct PCs and
+/// is refused, which errs towards running.
 const PC_RING: usize = 32;
-/// Number of [`sample`] calls between recorded PCs. The batch loop calls it
-/// after every ten instructions (~320 guest instructions per record); the
-/// single-step path calls it after each instruction.
-const SAMPLE_EVERY: u32 = 32;
 /// A "cluster" is a run of sorted sample PCs no more than this far apart.
 /// IRIX's idle path is one hot loop plus a few helper functions (spl, the
 /// ll/sc lock) reached by calls, so it is a cluster, not one contiguous
@@ -34,10 +32,9 @@ const CLUSTER_MIN_SAMPLES: usize = 12;
 /// The IRIX 5.3 idle loop has 14 and 6.5's scheduler path has ~89.
 const CLUSTER_MIN_DISTINCT: usize = 12;
 /// The dominant-cluster test must hold for this many consecutive batches
-/// (1 000 instructions per batch) before parking. One batch is enough to
-/// reject a short-lived hot function without delaying idle parking, which
-/// would otherwise re-run thousands of idle-loop iterations after every
-/// timer interrupt before sleeping again.
+/// before parking. One batch is enough to reject a short-lived hot function
+/// without delaying idle parking, which would otherwise re-run thousands of
+/// idle-loop iterations after every timer interrupt before sleeping again.
 const IDLE_STREAK: u32 = 1;
 const SLICE_NS: u64 = 1_000_000;
 /// Host-pacing rate for `hot.cycles` while the CPU is parked: one guest cycle
@@ -121,7 +118,7 @@ fn clear_parked(core: &MipsCore) {
     PARKED.fetch_and(!(1 << core.cpu_id), Ordering::SeqCst);
 }
 
-/// Detects kernel idle loops from a per-instruction PC sample ring.
+/// Detects kernel idle loops from a ring of PCs recorded once per batch.
 ///
 /// The previous detector hashed PC + GPRs at each 1000-instruction batch and
 /// required an exact repeat. It fails IRIX 6.5's idle path (a ~470-byte
@@ -129,8 +126,7 @@ fn clear_parked(core: &MipsCore) {
 /// iteration) and, worse, it *does* match short device-poll loops (e.g.
 /// `lbu/andi/bne -3` waiting on a SCSI bit), which must keep executing.
 ///
-/// This detector samples the PC every [`SAMPLE_EVERY`] calls (about 320
-/// instructions in the batch loop), groups
+/// This detector records the PC after every run-loop batch, groups
 /// the samples into PC-space clusters, and parks only when one long kernel
 /// cluster dominates the ring. User-mode samples are tolerated in a minority
 /// (a syscall wake runs a few user instructions between kernel stretches) but
@@ -140,8 +136,6 @@ pub struct IdleParkState {
     pcs: [u64; PC_RING],
     pc_len: usize,
     pc_pos: usize,
-    /// Instructions until the next PC sample.
-    sample_countdown: u32,
     /// Per-slot user-mode flag, parallel to `pcs`.
     user: [bool; PC_RING],
     /// Consecutive batches whose dominant cluster was the same loop.
@@ -190,7 +184,6 @@ impl IdleParkState {
             pcs: [0; PC_RING],
             pc_len: 0,
             pc_pos: 0,
-            sample_countdown: SAMPLE_EVERY,
             user: [false; PC_RING],
             streak: 0,
             park_skip_until_cycle: 0,
@@ -211,21 +204,13 @@ impl IdleParkState {
     fn clear_window(&mut self) {
         self.pc_len = 0;
         self.pc_pos = 0;
-        self.sample_countdown = SAMPLE_EVERY;
         self.streak = 0;
     }
 
-    /// Sample the PC every [`SAMPLE_EVERY`] calls. The batch run loop calls
-    /// this after each ten-instruction group, the single-step path after each
-    /// instruction; one predictable decrement and a rarely-taken branch on the
-    /// hot path.
+    /// Record the PC. The run loop calls this once per batch, after the
+    /// batch's instructions, only while parking is enabled.
     #[inline]
-    pub fn sample(&mut self, core: &MipsCore) {
-        self.sample_countdown -= 1;
-        if self.sample_countdown != 0 {
-            return;
-        }
-        self.sample_countdown = SAMPLE_EVERY;
+    pub fn record(&mut self, core: &MipsCore) {
         let user = !matches!(core.get_privilege_mode(), crate::cpu::mips_core::PrivilegeMode::Kernel);
         self.pcs[self.pc_pos] = core.pc;
         self.user[self.pc_pos] = user;
@@ -624,9 +609,7 @@ mod tests {
         for _ in 0..IDLE_STREAK {
             for &pc in pcs {
                 core.pc = pc;
-                for _ in 0..SAMPLE_EVERY {
-                    st.sample(core);
-                }
+                st.record(core);
             }
             decision = st.update(core);
         }

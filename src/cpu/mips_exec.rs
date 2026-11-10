@@ -11100,13 +11100,13 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Device for MipsCpu<T
             // --features idle-pause). When compiled in, set IRIS_NO_IDLE to keep
             // spinning the host CPU at runtime (for benchmarking/debug).
             //
-            // The detector samples the PC once per 32 sample calls (about 320
-            // instructions in the batch loop) and parks only when the execution
-            // stayed inside one long, narrow, kernel code window with
-            // interrupts enabled and nothing pending. Short poll/delay loops
-            // (2-3 instructions) are rejected by the window's minimum span and
-            // distinct-PC count; user-mode code is never parked. See
-            // src/cpu/idle_park.rs.
+            // The detector records the PC once per batch, after the batch, so
+            // the instruction loops above carry no idle work at all. It parks
+            // only when execution stayed inside one long, narrow, kernel code
+            // window with interrupts enabled and nothing pending. Short
+            // poll/delay loops (2-3 instructions) are rejected by the window's
+            // minimum span and distinct-PC count; user-mode code is never
+            // parked. See src/cpu/idle_park.rs.
             #[cfg(feature = "idle-pause")]
             let mut idle_state = crate::cpu::idle_park::IdleParkState::default();
 
@@ -11150,16 +11150,12 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Device for MipsCpu<T
                         for _ in 0..1000 {
                             guard.step_jit(); guard.step_jit(); guard.step_jit(); guard.step_jit(); guard.step_jit();
                             guard.step_jit(); guard.step_jit(); guard.step_jit(); guard.step_jit(); guard.step_jit();
-                            #[cfg(feature = "idle-pause")]
-                            idle_state.sample(&guard.core);
                         }
                     } else {
                         // is this going to be a problem for netbsd?
                         for _ in 0..1000 {
                             guard.step_int(); guard.step_int(); guard.step_int(); guard.step_int(); guard.step_int();
                             guard.step_int(); guard.step_int(); guard.step_int(); guard.step_int(); guard.step_int();
-                            #[cfg(feature = "idle-pause")]
-                            idle_state.sample(&guard.core);
                         }
                                                  
                     }
@@ -11170,8 +11166,6 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Device for MipsCpu<T
                         ($step:ident) => {
                             for _ in 0..1000 {
                                 let status = guard.$step();
-                                #[cfg(feature = "idle-pause")]
-                                idle_state.sample(&guard.core);
                                 match status {
                                     EXEC_BREAKPOINT => {
                                         // Reported through the stop note (`status`, `wait`),
@@ -11203,6 +11197,7 @@ impl<T: Tlb + Send + 'static, C: CpuModel + Send + 'static> Device for MipsCpu<T
                 }
                 #[cfg(feature = "idle-pause")]
                 if crate::cpu::idle_park::idle_park_enabled() {
+                    idle_state.record(&guard.core);
                     match idle_state.update(&guard.core) {
                         crate::cpu::idle_park::IdleDecision::Park => {
                             drop(guard);
