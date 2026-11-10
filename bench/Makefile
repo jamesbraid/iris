@@ -62,7 +62,7 @@ LIBGCC :=
 
 PREBUILT := prebuilt/irisbench.elf
 
-.PHONY: all clean run dis syms image golden hostbench matrix bench check-run report check-size prebuilt check-prebuilt
+.PHONY: all clean run dis syms image golden hostbench matrix bench report check-size prebuilt check-prebuilt
 all: $(TARGET)
 
 # Refresh the copy of the guest binary that `iris` links in with include_bytes!
@@ -196,21 +196,9 @@ bench: $(TARGET)
 	cd .. && cargo build --release --bin iris-bench
 	cd .. && ./target/release/iris-bench run --label local
 
-# One cell, judged by run/check.py; CI runs this too. IRIS must be built for
-# the cell's engine, and iris-bench for the same features (it embeds the guest
-# image). CPU is the emulator's --cpu value, so r10000_195 is the cell
-# r10000-interp. PREBUILT=1 skips building the guest, for CI, which holds the
-# binary but no cross compiler.
-CPU     ?= r4400
-ENGINE  ?= interp
-CELL    := $(word 1,$(subst _, ,$(CPU)))-$(ENGINE)
-TIMEOUT ?= 2400
-
-check-run: $(if $(PREBUILT),,$(TARGET))
-	@mkdir -p $(BUILD) && rm -f $(BUILD)/results/$(CELL).json
-	cd .. && ./target/release/iris-bench run --iris $(abspath $(IRIS)) \
-	    --label $(CELL) --timeout $(TIMEOUT) -- --cpu $(CPU) 2>&1 | tee bench/$(BUILD)/$(CELL).log
-	@python3 run/check.py $(CELL) $(CPU)
+# Accuracy on every CPU, judged as CI judges it, is a cargo test, which
+# builds iris and iris-bench for the engine it names:
+#   cargo test --release [--features jitv2] --test bench_accuracy -- --ignored
 
 report:
 	cd .. && ./target/release/iris-bench report
