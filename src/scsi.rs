@@ -3,8 +3,9 @@ use std::io;
 mod attach;
 mod bus;
 
-pub use attach::{attach_failed, attach_from_config, Attached, DaynaportRef, TableRef};
+pub use attach::{attach_failed, attach_from_config, attach_table, Attached, DaynaportRef, TableRef};
 pub use bus::{AttachOptions, ScsiBus, ScsiIdentities, ScsiTarget, Targets};
+
 use crate::block_node::{Background, ChangerNode, Removable, BlockNode};
 
 /// Get the standard CDB length based on the opcode's group code
