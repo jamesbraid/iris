@@ -1,0 +1,9 @@
+# CI's profile for the bare-metal suites (.github/workflows/suites.yml).
+[profile.ci]
+# The bench cases time the guest. Emulators sharing a runner's cores would
+# time each other, and the uploaded figures could not be compared.
+test-threads = 1
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"
