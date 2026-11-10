@@ -835,11 +835,12 @@ impl<'a> IdMaster<'a> {
 
 const TEST_MAC: [u8; 6] = [0x08, 0x00, 0x69, 0x12, 0x34, 0x56];
 
-/// The bytes the O2's Ethernet-address chip gives the PROM, recorded from
-/// the model before it moved onto the shared bus, for the address 08:00:69:12:34:56.
+/// The bytes the O2's Ethernet-address chip gives the PROM for the address
+/// 08:00:69:12:34:56: the marker ROM serial (`45 4d 55`, kind 2, `00 00`) with
+/// its CRC, and the address reversed, then erased filler.
 #[test]
 fn the_ethernet_address_chip_answers_with_the_recorded_bytes() {
-    let rom = [0x09, 0x08, 0x00, 0x69, 0x12, 0x34, 0x56, 0x7b];
+    let rom = [0x09, 0x45, 0x4d, 0x55, 0x02, 0x00, 0x00, 0x41];
     let mut memory = vec![0x8d, 0x56, 0x34, 0x12, 0x69, 0x00, 0x08];
     memory.extend([0xff; 122]);
     memory.push(0x50);
@@ -870,6 +871,64 @@ fn the_ethernet_address_chip_answers_with_the_recorded_bytes() {
     assert_eq!(eaddr, TEST_MAC);
 }
 
+/// What the PROM reads from the identity chip of an O2 configured with
+/// `extra` under `[machine]`: the ROM serial and the 128 bytes of memory.
+fn chip_of(extra: &str) -> (Vec<u8>, Vec<u8>) {
+    let cfg: crate::config::MachineConfig = toml::from_str(&format!("[machine]\nprofile = \"o2_ip32\"\n{extra}")).expect("parse");
+    cfg.validate().expect("valid");
+    // The machine builds MaceId from this address, as O2Machine::new does.
+    let id = MaceId::new(cfg.identity().unwrap().station(0).unwrap());
+    let mut m = IdMaster::new(&id);
+    m.reset();
+    m.write_byte(0x33);
+    let rom = m.read_bytes(8);
+    m.write_byte(0xf0);
+    m.write_byte(0);
+    m.write_byte(0);
+    let memory = m.read_bytes(130);
+    (rom, memory[1..129].to_vec())
+}
+
+/// IRIX reads the station address from the chip's bytes 0 to 5, reversed, and
+/// takes the last four as its host id.
+#[test]
+fn the_identity_chip_holds_the_configured_address_reversed() {
+    // 08:00:69:e1:02:a0 is a0 02 e1 69 00 08, whose first four bytes read
+    // little-endian are the host id 69e102a0.
+    let (rom, data) = chip_of("hostid = \"69e102a0\"\n");
+    assert_eq!(data[..6], [0xa0, 0x02, 0xe1, 0x69, 0x00, 0x08]);
+    assert_eq!(u32::from_le_bytes(data[..4].try_into().unwrap()), 0x69e1_02a0);
+    // Bytes 6 to 127 are erased, the approximation documented with the part.
+    assert!(data[6..].iter().all(|&b| b == 0xff));
+    // The ROM serial is the marker and the kind, the same whatever the address.
+    assert_eq!(rom, [0x09, 0x45, 0x4d, 0x55, 0x02, 0x00, 0x00, 0x41]);
+    assert_eq!(chip_of("hostid = \"69aabbcc\"\n").0, rom);
+
+    // serial folds to the same id; the six-digit hostid implies the 69.
+    assert_eq!(chip_of("serial = \"F9N102J0\"\n").1, data);
+    assert_eq!(chip_of("hostid = \"e102a0\"\n").1, data);
+
+    // emu_id 42 in iris's layout: 08:00:69:e2:02:a0, host id 69e202a0.
+    let (_, data) = chip_of("emu_id = 42\n");
+    assert_eq!(data[..6], [0xa0, 0x02, 0xe2, 0x69, 0x00, 0x08]);
+    // Nothing set: emu_id 0.
+    assert_eq!(chip_of("").1[..6], [0x00, 0x00, 0xe2, 0x69, 0x00, 0x08]);
+}
+
+/// `[network] mac` is still the address in the chip.
+#[test]
+fn the_identity_chip_follows_network_mac() {
+    let cfg: crate::config::MachineConfig = toml::from_str("[machine]\nprofile = \"o2_ip32\"\n[network]\nmac = \"08:00:69:12:34:56\"\n").unwrap();
+    let id = MaceId::new(cfg.identity().unwrap().station(0).unwrap());
+    let mut m = IdMaster::new(&id);
+    m.reset();
+    m.write_byte(0xcc);
+    m.write_byte(0xf0);
+    m.write_byte(0);
+    m.write_byte(0);
+    assert_eq!(m.read_bytes(130)[1..7], [0x56, 0x34, 0x12, 0x69, 0x00, 0x08]);
+}
+
 /// The PROM's delay loops run short when the emulator runs fast, so pulses
 /// well under the datasheet's widths must still read as the same classes.
 #[test]
@@ -879,7 +938,7 @@ fn short_pulses_still_read_the_rom() {
     m.widths = (320, 35, 3);
     m.reset();
     m.write_byte(0x33);
-    assert_eq!(m.read_bytes(8), [0x09, 0x08, 0x00, 0x69, 0x12, 0x34, 0x56, 0x7b]);
+    assert_eq!(m.read_bytes(8), [0x09, 0x45, 0x4d, 0x55, 0x02, 0x00, 0x00, 0x41]);
 }
 
 /// A low shorter than a reset is a slot, not a reset: no presence pulse.

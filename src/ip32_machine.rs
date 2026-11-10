@@ -170,13 +170,12 @@ impl O2Machine {
         let kits = cfg.o2_kits();
         let mem = O2Memory::from_kits(&kits)?;
         // The PROM's flash, and so its environment, lives in `nvram`.
-        // `[network] mac` is the address in the 1-Wire ID chip. `headless`:
-        // no keyboard, so the PROM and the OS take the serial console, as on
-        // an O2 booted without one. The GBE stays: it is part of every O2.
-        let mac = match cfg.network.mac.as_deref() {
-            Some(mac) => Some(crate::config::parse_mac(mac).map_err(|e| format!("network.mac: {e}"))?),
-            None => None,
-        };
+        // The station address, from `[network] mac` or `[machine] emu_id`,
+        // `serial` and `hostid`, is the address in the 1-Wire ID chip, and IRIX
+        // takes its host id from it. `headless`: no keyboard, so the PROM and
+        // the OS take the serial console, as on an O2 booted without one. The
+        // GBE stays: it is part of every O2.
+        let mac = Some(cfg.identity()?.station(0)?);
         // The SCSI devices, from the same `[scsi.N]` tables as the other
         // machines; `controller` is the bus (0 internal, 1 external). The
         // buses are filled before the controllers exist.

@@ -103,13 +103,18 @@ pub fn ethernet_address_part(mac: [u8; 6], serial: u64) -> w1::Ds2502 {
 }
 
 /// The O2's Ethernet-address part: a DS2502 (family 0x09, the one its PROM
-/// insists on) whose serial is the station address itself, in order, and
-/// whose memory starts with the address reversed, the rest erased.
+/// insists on) whose memory starts with the address reversed, as the PROM
+/// reads it, and is erased (0xff) after that. The filler is an approximation:
+/// a fitted part's contents are unknown and no guest output depended on them.
+///
+/// The ROM serial belongs to the die, not to the system, so it carries no
+/// machine id: the marker `45 4d 55` and the identity kind (2) and two zero
+/// bytes, the same for every address.
 pub fn o2_ethernet_address_part(mac: [u8; 6]) -> w1::Ds2502 {
     let mut rev = mac;
     rev.reverse();
     let mut serial = [0u8; 8];
-    serial[..6].copy_from_slice(&mac);
+    serial[..6].copy_from_slice(&crate::identity::chip_serial(crate::identity::KIND).to_be_bytes()[2..]);
     w1::Ds2502::new(0x09, u64::from_le_bytes(serial), &rev)
 }
 
