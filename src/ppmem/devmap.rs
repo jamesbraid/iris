@@ -667,15 +667,33 @@ mod fault {
     static INSTALL: Once = Once::new();
 
     pub(super) fn register(inner: *const Inner) -> io::Result<usize> {
-        for (i, slot) in REGISTRY.iter().enumerate() {
-            if slot
-                .compare_exchange(std::ptr::null_mut(), inner as *mut Inner, Ordering::AcqRel, Ordering::Relaxed)
+        let got = claim(inner);
+        #[cfg(test)]
+        let got = got.or_else(|| wait_for_slot(inner));
+        got.ok_or_else(|| io::Error::other(format!("devmap: more than {MAX_MAPS} tables alive")))
+    }
+
+    fn claim(inner: *const Inner) -> Option<usize> {
+        REGISTRY.iter().position(|slot| {
+            slot.compare_exchange(std::ptr::null_mut(), inner as *mut Inner, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
-            {
-                return Ok(i);
+        })
+    }
+
+    /// The lib tests run as threads of one process, and with a thread per
+    /// core more of them can hold a bus at once than there are slots. A test
+    /// build waits for one to come free instead of failing; a leak that
+    /// fills the table still fails, after the wait.
+    #[cfg(test)]
+    fn wait_for_slot(inner: *const Inner) -> Option<usize> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            if let Some(i) = claim(inner) {
+                return Some(i);
             }
         }
-        Err(io::Error::other(format!("devmap: more than {MAX_MAPS} tables alive")))
+        None
     }
 
     pub(super) fn unregister(i: usize) {
