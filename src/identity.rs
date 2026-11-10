@@ -15,6 +15,8 @@
 //! small sub-index (a node, module or port), with no hashing. The kind is a
 //! digit that marks an id as minted by an emulator, and iris's is 2:
 //!
+//! - The system serial every L1 of a Tezro answers with is `LEMU`, the kind
+//!   digit, the `emu_id` as four digits and `0`.
 //! - A module serial of the Origin 2000 and Onyx2 is `KEMU`, the kind digit,
 //!   the `emu_id` as four digits and the module number 0 to 9.
 //! - The default station address is `08:00:69:E<kind>:<emu_id >> 4>:
@@ -56,7 +58,8 @@ pub const MODULE_COUNT: u32 = 10;
 pub const SERIAL_MAX_LENGTH: usize = 10;
 
 /// Whether `text` can be a serial: 1 to 10 printable ASCII characters, none
-/// of `:` or `;`, which the module record uses as separators.
+/// of `:` or `;`, which the module record and the L1's replies use as
+/// separators.
 pub fn serial_valid(text: &str) -> bool {
     let b = text.as_bytes();
     !b.is_empty() && b.len() <= SERIAL_MAX_LENGTH && b.iter().all(|&c| (0x20..=0x7e).contains(&c) && c != b':' && c != b';')
@@ -67,6 +70,14 @@ pub fn serial_valid(text: &str) -> bool {
 pub fn module_serial(kind: u32, emu_id: u32, module: u32) -> Option<String> {
     assert!((1..=9).contains(&kind) && emu_id <= EMU_ID_MAX);
     (module < MODULE_COUNT).then(|| format!("KEMU{kind}{emu_id:04}{module}"))
+}
+
+/// `LEMU`, the kind digit, four `emu_id` digits and `0`: the system serial an
+/// L1 answers with. It names the system, not a brick, so every L1 of a
+/// machine gives the same text.
+pub fn system_serial(kind: u32, emu_id: u32) -> String {
+    assert!((1..=9).contains(&kind) && emu_id <= EMU_ID_MAX);
+    format!("LEMU{kind}{emu_id:04}0")
 }
 
 /// The default station address of node or port `sub`: `08:00:69:E<kind>`, the
@@ -158,6 +169,10 @@ pub enum Family {
     /// has bad ethernet address") and brings ec0 down, so they are held to the
     /// same prefix.
     Address,
+    /// The id comes from the system serial text the L1 answers with: the
+    /// Tezro. IRIX accepts any text the serial rule allows, so a serial is
+    /// kept as given.
+    Text,
 }
 
 /// What the inputs of one machine come to.
@@ -171,7 +186,8 @@ pub struct Identity {
     /// The id came from `serial`, `hostid` or `mac`, so it has no emulator
     /// marker.
     pub user: bool,
-    /// Module 0's serial text of a module family.
+    /// Module 0's serial text of a module family, or the system serial of a
+    /// text family.
     pub text: String,
     /// The station address derives from an id the user gave, not `emu_id`.
     pub address_from_id: bool,
@@ -196,7 +212,8 @@ impl Identity {
     pub fn resolve(family: Family, kind: u32, emu_id: u32, serial: Option<&str>, hostid: Option<&str>, mac: Option<[u8; 6]>) -> Result<Identity, String> {
         let serial = serial.filter(|s| !s.is_empty());
         let hostid = hostid.filter(|s| !s.is_empty());
-        let address = family != Family::Module;
+        let address = family == Family::Address;
+        let module = family == Family::Module;
         let mut out = Identity { family, kind, emu_id, id: 0, user: false, text: String::new(), address_from_id: false, mac };
         if emu_id > EMU_ID_MAX {
             return Err(format!("emu_id must be 0 to {EMU_ID_MAX}, not {emu_id}"));
@@ -206,14 +223,14 @@ impl Identity {
             if !serial_valid(s) {
                 return Err(format!("serial '{s}' must be 1 to {SERIAL_MAX_LENGTH} printable characters, none of ':' or ';'"));
             }
-            if !address && !s.starts_with('K') {
+            if module && !s.starts_with('K') {
                 return Err(format!("serial '{s}' must start with K on this machine: the guest ignores a module serial that does not"));
             }
             // The record holds ten characters. A shorter serial is padded on
             // the left with K, so it still starts with K; the padding is a
             // model choice (an approximation). The id is the fold of the
-            // padded text. An address family keeps the serial as given.
-            out.text = if address { s.to_string() } else { format!("{}{s}", "K".repeat(SERIAL_MAX_LENGTH - s.len())) };
+            // padded text. The other families keep the serial as given.
+            out.text = if module { format!("{}{s}", "K".repeat(SERIAL_MAX_LENGTH - s.len())) } else { s.to_string() };
             serial_id = hostid_from_text(&out.text);
         }
         let mut hostid_id = 0;
@@ -287,10 +304,10 @@ impl Identity {
             } else {
                 out.id = hostid_id;
                 // "KK" and the spelling: any id is reachable and K comes first.
-                out.text = format!("KK{}", text_from_hostid(hostid_id));
+                out.text = if module { format!("KK{}", text_from_hostid(hostid_id)) } else { text_from_hostid(hostid_id) };
             }
         } else {
-            out.text = module_serial(kind, emu_id, 0).unwrap();
+            out.text = if module { module_serial(kind, emu_id, 0).unwrap() } else { system_serial(kind, emu_id) };
             out.id = hostid_from_text(&out.text);
         }
         Ok(out)
@@ -356,6 +373,8 @@ impl Identity {
             .map(|n| match self.family {
                 Family::Address => self.station(n).map(|m| hostid_from_mac(&m)),
                 Family::Module => self.module_text(n).map(|t| hostid_from_text(&t)).ok_or_else(|| format!("module serials number at most {MODULE_COUNT} modules, and module {n} does not fit")),
+                // Every L1 answers with the one system serial.
+                Family::Text => Ok(hostid_from_text(&self.text)),
             })
             .collect()
     }
@@ -367,6 +386,7 @@ impl std::fmt::Display for Identity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (self.family, self.hostids(1)) {
             (Family::Module, Ok(ids)) => write!(f, "host id {:08x} (module serial {})", ids[0], self.module_text(0).unwrap_or_default()),
+            (Family::Text, Ok(ids)) => write!(f, "host id {:08x} (system serial {})", ids[0], self.text),
             (_, Ok(ids)) => write!(f, "host id {:08x} (station address {})", ids[0], self.station(0).map(|m| mac_text(&m)).unwrap_or_default()),
             (_, Err(e)) => write!(f, "{e}"),
         }

@@ -169,6 +169,72 @@ fn a_module_family_needs_a_serial_that_starts_with_k() {
 }
 
 #[test]
+fn the_system_serial_ends_in_a_zero_and_spans_the_emu_id_range() {
+    assert_eq!(system_serial(1, 42), "LEMU100420");
+    assert_eq!(hostid_from_text("LEMU100420"), 0xd510_0420);
+    assert_eq!(system_serial(1, 0), "LEMU100000");
+    assert_eq!(system_serial(KIND, 42), "LEMU200420");
+    assert_eq!(hostid_from_text(&system_serial(KIND, 42)), 0xd520_0420);
+    assert_eq!(system_serial(KIND, EMU_ID_MAX), "LEMU240950");
+    assert_eq!(hostid_from_text(&system_serial(KIND, EMU_ID_MAX)), 0xd524_0950);
+    // Ten characters, so all of the kind and the emu_id reach the id.
+    assert_eq!(system_serial(KIND, 1).len(), SERIAL_MAX_LENGTH);
+}
+
+#[test]
+#[should_panic]
+fn the_system_serial_refuses_an_emu_id_past_the_range() {
+    system_serial(KIND, EMU_ID_MAX + 1);
+}
+
+/// A text family keeps any serial the rule allows: the module family's K
+/// test and padding do not apply, and `LEMU100420`, which the module family
+/// refuses, is accepted.
+#[test]
+fn a_text_family_takes_its_id_from_the_system_serial() {
+    let t = |emu, serial, hostid, mac| resolve(Family::Text, emu, serial, hostid, mac);
+
+    let id = t(42, None, None, None).unwrap();
+    assert_eq!((id.text.as_str(), id.id, id.user), ("LEMU100420", 0xd510_0420, false));
+    assert_eq!(t(0, None, None, None).unwrap().id, 0xd510_0000);
+    let id = Identity::resolve(Family::Text, KIND, 42, None, None, None).unwrap();
+    assert_eq!((id.text.as_str(), id.id), ("LEMU200420", 0xd520_0420));
+
+    resolve(Family::Module, 0, Some("LEMU100420"), None, None).unwrap_err();
+    let id = t(0, Some("LEMU100420"), None, None).unwrap();
+    assert_eq!((id.text.as_str(), id.id, id.user), ("LEMU100420", 0xd510_0420, true));
+    // A real unit's letter and seven digits, kept as given, not padded.
+    let id = t(0, Some("L1000302"), None, None).unwrap();
+    assert_eq!((id.text.as_str(), id.id), ("L1000302", 0xc100_0302));
+    assert_eq!(t(0, Some("M2001347"), None, None).unwrap().id, 0xd200_1347);
+    // Any printable text up to ten characters.
+    assert_eq!(t(0, Some("EMU1-0042"), None, None).unwrap().id, 0xd51d_0042);
+    assert_eq!(t(0, Some("LEMU1042"), None, None).unwrap().id, 0xc5d5_1042);
+    t(0, Some("EMU1L0000042"), None, None).unwrap_err();
+    t(0, Some("L100:0302"), None, None).unwrap_err();
+
+    // hostid is spelled as eight characters that fold back to it.
+    let id = t(0, None, Some("d2100887"), None).unwrap();
+    assert_eq!((id.text.as_str(), id.id, id.user), ("M2100887", 0xd210_0887, true));
+    t(0, Some("M2100887"), Some("d2100887"), None).unwrap();
+    let e = t(0, Some("M2100887"), Some("d2100888"), None).unwrap_err();
+    assert!(e.contains("serial M2100887 folds to d2100887 but hostid=d2100888"), "{e}");
+    // Any id is reachable, not just 69xxxxxx.
+    assert_eq!(t(0, None, Some("3456789a"), None).unwrap().id, 0x3456_789a);
+
+    // mac is only the port's address and never the id.
+    let other = [0x08, 0x00, 0x69, 0xaa, 0xbb, 0xcc];
+    let id = t(42, None, None, Some(other)).unwrap();
+    assert_eq!((id.id, id.station(0).unwrap()), (0xd510_0420, other));
+    let foreign = [0x52, 0x54, 0x00, 0x11, 0x22, 0x33];
+    assert_eq!(t(0, None, None, Some(foreign)).unwrap().station(0).unwrap(), foreign);
+    assert_eq!(t(42, None, None, None).unwrap().station(0).unwrap(), MAC);
+
+    assert_eq!(t(4096, None, None, None).unwrap_err(), "emu_id must be 0 to 4095, not 4096");
+    t(4095, None, None, None).unwrap();
+}
+
+#[test]
 fn an_address_family_takes_its_id_from_the_station_address() {
     let other = [0x08, 0x00, 0x69, 0xaa, 0xbb, 0xcc];
     let foreign = [0x52, 0x54, 0x00, 0x11, 0x22, 0x33];
@@ -272,6 +338,9 @@ fn a_machines_ids_are_what_its_guest_prints() {
     assert_eq!(id.hostids(2).unwrap(), [0xd520_0420, 0xd520_0421]);
     assert_eq!(id.station(0).unwrap(), [0x08, 0x00, 0x69, 0xe2, 0x02, 0xa0]);
     assert!(id.hostids(11).is_err());
+    // Every L1 answers with the one system serial, so every node the same.
+    let id = Identity::resolve(Family::Text, KIND, 42, None, None, None).unwrap();
+    assert_eq!(id.hostids(2).unwrap(), [0xd520_0420, 0xd520_0420]);
 }
 
 #[test]
@@ -280,4 +349,6 @@ fn a_machine_says_which_id_its_guest_will_print() {
     assert_eq!(id.to_string(), "host id 69e202a0 (station address 08:00:69:e2:02:a0)");
     let id = Identity::resolve(Family::Module, KIND, 42, None, None, None).unwrap();
     assert_eq!(id.to_string(), "host id d5200420 (module serial KEMU200420)");
+    let id = Identity::resolve(Family::Text, KIND, 42, None, None, None).unwrap();
+    assert_eq!(id.to_string(), "host id d5200420 (system serial LEMU200420)");
 }
