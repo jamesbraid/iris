@@ -1015,6 +1015,12 @@ fn show_disks(ui: &mut Ui, cfg: &mut MachineConfig) -> (PathEdit, ConfigAction) 
                     }
                     ui.end_row();
                 }
+
+                // INQUIRY strings. Empty means the machine's own.
+                edit.changed |= inquiry_row(ui, t!("config-scsi-vendor"), t!("config-scsi-vendor-tip"), t!("config-scsi-inquiry-hint", n = 8), &mut dev.vendor);
+                edit.changed |= inquiry_row(ui, t!("config-scsi-product"), t!("config-scsi-product-tip"), t!("config-scsi-inquiry-hint", n = 16), &mut dev.product);
+                edit.changed |= inquiry_row(ui, t!("config-scsi-revision"), t!("config-scsi-revision-tip"), t!("config-scsi-inquiry-hint", n = 4), &mut dev.revision);
+                edit.changed |= inquiry_row(ui, t!("config-scsi-serial"), t!("config-scsi-serial-tip"), t!("config-scsi-inquiry-hint", n = 16), &mut dev.serial);
             });
 
             if dev.cdrom {
@@ -1037,6 +1043,19 @@ fn show_disks(ui: &mut Ui, cfg: &mut MachineConfig) -> (PathEdit, ConfigAction) 
     }
     if let Some(id) = to_delete { cfg.scsi.remove(&id); }
     (edit, action)
+}
+
+/// One row of a SCSI table's INQUIRY strings: a text box where empty means
+/// unset. True when the text changed.
+fn inquiry_row(ui: &mut Ui, label: String, tip: String, hint: String, field: &mut Option<String>) -> bool {
+    ui.label(label).tip(tip);
+    let mut text = field.clone().unwrap_or_default();
+    let changed = ui.add(TextEdit::singleline(&mut text).hint_text(hint)).changed();
+    if changed {
+        *field = if text.is_empty() { None } else { Some(text) };
+    }
+    ui.end_row();
+    changed
 }
 
 /// A soft-invalid subnet the user just entered, surfaced to the app so it can
