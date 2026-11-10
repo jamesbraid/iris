@@ -5950,6 +5950,42 @@ mod tests {
         }
     }
 
+    /// RECIP of a number above 2^126 (single) or 2^1022 (double) has a
+    /// denormal result, which follows the same rule as the multiply above. Pinned
+    /// absolutely too: both engines handed the denormal to fd before. The
+    /// last single operand is the one olperi's seed 4844 takes the
+    /// reciprocal of; 2^126 gives the smallest normal and nothing to flag.
+    #[test]
+    fn recip_denormal_result_flushes_like_the_interpreter() {
+        use crate::cpu::mips_isa::{FUNCT_FRECIP, OP_COP1, RS_D, RS_S};
+        const FS: u32 = 0x0100_0000;
+        for (fmt, op, sign) in [
+            (RS_S, 0xFF00_0000u64, 1u64 << 31),
+            (RS_S, 0x7EDD_A9BE, 0),
+            (RS_D, 0xFFE0_0000_0000_0000, 1u64 << 63),
+        ] {
+            for fcsr in [FS, FS | 0x0400, 0, FS | 0x0100, FS | 0x2000] {
+                let mut fpr = [0u64; 32];
+                fpr[1] = op;
+                fpr[3] = 0xDEAD_BEEF_DEAD_BEEF;
+                let jit = assert_fpu_matches_interpreter_fcsr(
+                    make_r(OP_COP1, fmt, 0, 1, 3, FUNCT_FRECIP), [0u64; 32], fpr, true, Some(fcsr));
+                let r = if fmt == RS_S { jit.fpr[3] & 0xFFFF_FFFF } else { jit.fpr[3] };
+                if fcsr & 0x0100 == 0 && fcsr & FS != 0 {
+                    assert_eq!(jit.fpu_fcsr, (fcsr & !0x0003_F000) | 0x0000_300C, "op={op:#x} fcsr={fcsr:#x}: Cause and Flag U|I");
+                    assert_eq!(r, sign, "op={op:#x} fcsr={fcsr:#x}: signed zero delivered");
+                } else {
+                    assert_eq!(jit.fpu_fcsr & 0x0003_F000, 0x0002_0000, "op={op:#x} fcsr={fcsr:#x}: Cause E alone");
+                }
+            }
+        }
+        let mut fpr = [0u64; 32];
+        fpr[1] = 0x7E80_0000;
+        let jit = assert_fpu_matches_interpreter_fcsr(
+            make_r(OP_COP1, RS_S, 0, 1, 3, FUNCT_FRECIP), [0u64; 32], fpr, true, Some(FS | 0x2000));
+        assert_eq!((jit.fpr[3] & 0xFFFF_FFFF, jit.fpu_fcsr), (0x0080_0000, FS), "2^126: normal, stale Cause cleared");
+    }
+
     /// SQRT, RSQRT, the multiply-add family and CVT.S.D leave an Invalid
     /// Operation's result as the MIPS default NaN, not the host's
     /// (0xFFC00000 on x86, which is a signalling NaN under the MIPS

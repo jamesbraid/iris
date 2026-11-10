@@ -4779,6 +4779,51 @@ mod tests {
         assert_eq!(exec.core.read_fpr_d(4), 0.5); // 1 / sqrt(4) = 1/2 = 0.5
     }
 
+    /// RECIP of a number above 2^126 (single) or 2^1022 (double) has a
+    /// denormal result, and gets the same rule as any other: flushed to a
+    /// signed zero with FS set, Unimplemented Operation with FS clear (R10000
+    /// User's Manual v2.0, Figure 15-7, Flush (FS) bit). Seed 4844 of the
+    /// olperi diagnostic takes RECIP.S of 0x7EDDA9BE with FS and the Divide
+    /// by Zero enable set; the denormal it got back then reached a DIV.S
+    /// divisor.
+    #[test]
+    fn test_fpu_recip_denorm_result_follows_fs() {
+        let (mut exec, _) = create_executor_m4();
+        exec.core.cp0_status |= STATUS_CU1 | STATUS_FR;
+        exec.update_fpr_mode();
+        let recip_s = make_cop1_compute(RS_S, 0, 1, 2, FUNCT_FRECIP);
+        let recip_d = make_cop1_compute(RS_D, 0, 1, 2, FUNCT_FRECIP);
+
+        for (op, neg) in [(0x7EDD_A9BEu32, false), (0x7F00_0000, false), (0xFF00_0000, true)] {
+            exec.core.write_fpr_w(1, op);
+            exec.core.write_fpr_w(2, 0x5a5a_5a5a);
+            exec.core.fpu_fcsr = 0x0100_0400; // FS, Enable Z: what olperi runs with
+            assert_eq!(exec.exec(recip_s), EXEC_COMPLETE, "recip.s {op:#x}: flushed, no trap");
+            assert_eq!(exec.core.read_fpr_w(2), if neg { 0x8000_0000 } else { 0 }, "recip.s {op:#x}");
+            assert_eq!(exec.core.read_fpu_control(31), 0x0100_340c, "recip.s {op:#x}: Cause and Flag U|I");
+
+            exec.core.fpu_fcsr = 0; // FS clear
+            let s = exec.exec(recip_s);
+            assert!(s & EXEC_IS_EXCEPTION != 0, "recip.s {op:#x}: denormal result without FS must trap");
+            assert_eq!((s >> 2) & 0x1F, crate::cpu::mips_exec::EXC_FPE);
+            assert_eq!(exec.core.read_fpu_control(31) & 0x0003_f000, 0x0002_0000, "recip.s {op:#x}: Cause E alone");
+            assert_eq!(exec.core.read_fpr_w(2), if neg { 0x8000_0000 } else { 0 }, "recip.s {op:#x}: fd untouched");
+        }
+
+        exec.core.write_fpr_l(1, 0xFFE0_0000_0000_0000); // -2^1023
+        exec.core.fpu_fcsr = 0x0100_0000;
+        assert_eq!(exec.exec(recip_d), EXEC_COMPLETE, "recip.d: flushed, no trap");
+        assert_eq!(exec.core.read_fpr_l(2), 0x8000_0000_0000_0000);
+        assert_eq!(exec.core.read_fpu_control(31), 0x0100_300c);
+
+        // The top of the normal range still comes back normal.
+        exec.core.write_fpr_w(1, 0x7E80_0000); // 2^126
+        exec.core.fpu_fcsr = 0x0100_0000;
+        assert_eq!(exec.exec(recip_s), EXEC_COMPLETE);
+        assert_eq!(exec.core.read_fpr_w(2), 0x0080_0000);
+        assert_eq!(exec.core.read_fpu_control(31), 0x0100_0000);
+    }
+
     #[test]
     fn test_cop1x_load_store() {
         let (mut exec, mem) = create_executor_m4();

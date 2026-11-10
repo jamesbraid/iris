@@ -258,6 +258,40 @@ fn fpu_invalid_nan_d(flags: u32, bits: u64, ops: &[u64]) -> (u32, u64) {
     }
 }
 
+/// `fpu_fix_invalid_s/d` for RECIP, whose result can be denormal, which the
+/// R10000 never delivers. The reciprocal of anything above 2^126 (single) or
+/// 2^1022 (double) is one, so `fpu_update_fcsr_full` has to see it and flush
+/// it under FCSR.FS or take Unimplemented Operation. A plain host divide
+/// hands it straight to fd. Folding the denormal test into the range test
+/// keeps the ordinary path at one compare. Returns the flags, the bits to
+/// deliver and the `result_is_denorm` `fpu_update_fcsr_full` takes.
+#[inline(always)]
+fn fpu_fix_invalid_denorm_s<const N: usize>(flags: impl FnOnce() -> u32, bits: u32, ops: [u32; N]) -> (u32, u32, Option<bool>) {
+    let abs = bits & 0x7FFF_FFFF;
+    if abs.wrapping_sub(0x0080_0000) < 0x7F80_0000 - 0x0080_0000 {
+        return (0, bits, None);
+    }
+    if abs >= 0x7F80_0000 {
+        let (flags, bits) = fpu_invalid_nan_s(flags(), bits, &ops);
+        return (flags, bits, None);
+    }
+    (0, bits, (abs != 0).then_some(bits & 0x8000_0000 != 0))
+}
+#[inline(always)]
+fn fpu_fix_invalid_denorm_d<const N: usize>(flags: impl FnOnce() -> u32, bits: u64, ops: [u64; N]) -> (u32, u64, Option<bool>) {
+    // On the high word, as in `fpu_binop_finish_d`.
+    let hi = (bits >> 32) as u32 & 0x7FFF_FFFF;
+    if hi.wrapping_sub(0x0010_0000) < 0x7FF0_0000 - 0x0010_0000 {
+        return (0, bits, None);
+    }
+    if hi >= 0x7FF0_0000 {
+        let (flags, bits) = fpu_invalid_nan_d(flags(), bits, &ops);
+        return (flags, bits, None);
+    }
+    let abs = bits & 0x7FFF_FFFF_FFFF_FFFF;
+    (0, bits, (abs != 0).then_some(bits & 0x8000_0000_0000_0000 != 0))
+}
+
 /// The result of ADD/SUB/MUL/DIV is ±MAX, ±infinity or a NaN: the only
 /// results that can carry an Invalid Operation or an Overflow. The
 /// classification lives in `fpu_binop_top_flags_s`/`_d`.
@@ -8483,9 +8517,9 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         if mips_log(MIPS_LOG_FPU) {
             dlog_dev!(LogModule::Mips, "FPU recip.s PC={:016x} 1 / {} = {}", self.core.pc, fs_val, result);
         }
-        let (flags, rbits) = fpu_fix_invalid_s(|| Self::fpu_arith_flags_div_s(1.0f32.to_bits(), fs_bits), result.to_bits(), [fs_bits]);
+        let (flags, rbits, denorm) = fpu_fix_invalid_denorm_s(|| Self::fpu_arith_flags_div_s(1.0f32.to_bits(), fs_bits), result.to_bits(), [fs_bits]);
         let write_w = self.fpr_write_w;
-        self.fpu_update_fcsr(flags, |exec| write_w(&mut exec.core, fd_reg, rbits))
+        self.fpu_update_fcsr_full(flags, denorm, |exec, flush| write_w(&mut exec.core, fd_reg, if flush { rbits & 0x8000_0000 } else { rbits }))
     }
     fn exec_frsqrt_s(&mut self, d: &DecodedInstr) -> ExecStatus {
         if (self.core.cp0_status & STATUS_CU1) == 0 { return self.cpu_unusable(1); }
@@ -8767,8 +8801,8 @@ va={:#018x} phys={:#010x} (code pfn {:#x}, page {:#010x}, word {}/{})",
         if mips_log(MIPS_LOG_FPU) {
             dlog_dev!(LogModule::Mips, "FPU recip.d PC={:016x} 1 / {} = {}", self.core.pc, fs_val, result);
         }
-        let (flags, rbits) = fpu_fix_invalid_d(|| Self::fpu_arith_flags_div_d(1.0f64.to_bits(), fs_val.to_bits()), result.to_bits(), [fs_val.to_bits()]);
-        self.fpu_update_fcsr(flags, |exec| write_d(&mut exec.core, fd_reg, f64::from_bits(rbits)))
+        let (flags, rbits, denorm) = fpu_fix_invalid_denorm_d(|| Self::fpu_arith_flags_div_d(1.0f64.to_bits(), fs_val.to_bits()), result.to_bits(), [fs_val.to_bits()]);
+        self.fpu_update_fcsr_full(flags, denorm, |exec, flush| write_d(&mut exec.core, fd_reg, f64::from_bits(if flush { rbits & 0x8000_0000_0000_0000 } else { rbits })))
     }
     fn exec_frsqrt_d(&mut self, d: &DecodedInstr) -> ExecStatus {
         if (self.core.cp0_status & STATUS_CU1) == 0 { return self.cpu_unusable(1); }
