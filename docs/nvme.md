@@ -8,25 +8,39 @@ guest needs a driver for it: IRIX has none of its own, and Linux and the BSDs
 carry theirs.
 
 ```toml
-[nvme]
-path = "nvme.img"     # raw or CHD; the card is present when this is set
-overlay = true        # writes go to nvme.img.overlay, as for [scsi.N]
-bridge = false        # true: behind a PCI-to-PCI bridge in the slot
-board = 0             # Octane: which [[xio_board]] (the first by default)
-slot = 1              # Octane: its PCI device (the first free by default)
+[[nvme]]
+at = "pci0.3"         # the O2's PCI option slot
+path = "nvme.img"     # raw or CHD
+overlay = true        # writes go to nvme.img.overlay, as for an [[hdd]]
 ```
 
 On the Octane the card needs a board to sit in, since its onboard Bridge keeps
-only its built-in devices:
+only its built-in devices. The board goes at its XIO port and the card in one
+of the board's slots, below it:
 
 ```toml
-[[xio_board]]
-kind = "pci-cage"     # or "pci-shoehorn"; see docs/pci.md
+[[pci_cage]]
+at = "xio13"          # the PCI module; or [[pci_shoehorn]] at xio9 to xio12, see docs/pci.md
 
-[nvme]
+[[nvme]]
+at = "xio13.pci0.2"   # the module's slots are PCI devices 1 to 3; a shoehorn has 1
 path = "nvme.img"
-slot = 2              # the module's slots are PCI devices 1 to 3; a shoehorn has 1
 ```
+
+Behind a PCI-to-PCI bridge in the slot, as a card in an expansion cage sits:
+
+```toml
+[[pci_bridge]]
+at = "xio13.pci0.2"
+
+[[nvme]]
+at = "xio13.pci0.2.pci0.0"
+path = "nvme.img"
+```
+
+`--device nvme@pci0.3,path=nvme.img` does the same from the command line. An
+older `[nvme]` table (`path`, `overlay`, `bridge`, `board`, `slot`) still
+loads, and iris rewrites it as these entries with a notice.
 
 ## Where it sits
 
@@ -39,8 +53,8 @@ The Octane's boards are a Bridge of their own on a Crossbow port
 ([docs/pci.md](pci.md#option-boards-in-xio-slots)): its pins go to HEART, and
 IRIX finds the card in the hardware graph under that port's `pci` node.
 
-With `bridge = true` the slot holds a PCI-to-PCI bridge (type 1 header) and
-the controller is device 0 on the bus behind it. Firmware numbers the bus and
+With a `pci_bridge` in the slot, the slot holds a PCI-to-PCI bridge (type 1
+header) and the controller is device 0 on the bus behind it. Firmware numbers the bus and
 opens the bridge's memory window; a pin of the card reaches the bridge's pins
 by the usual swizzle ([docs/pci.md](pci.md)). The card's DMA is the slot's.
 

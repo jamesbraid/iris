@@ -156,9 +156,8 @@ the first `[section]`, because TOML tables continue until the next header.
 | `serial_socket_a` | `unset` | Also serve serial channel A on this Unix socket (raw bytes, one client at a time). |
 | `serial_socket_b` | `unset` | Likewise for channel B. With `ci` the console stays readable through `serial-read` and `wait-serial` as well. |
 | `load_elf` | `unset` | Load a static big-endian MIPS ELF32 binary before starting the CPU. |
-| `test_device` | `false` | Map the bare-metal test device in GIO slot 0. |
-| `test_device_dump` | `iris-testdev-dump.json when unset` | Test-device machine-state JSON output. |
-| `cheritest_dump_hook` | `false` | CP0 register 26 dump convention; needs test_device, unsafe for normal PROM boot. |
+| `[[test_device]]` | none | Map the bare-metal test device in GIO slot 0 (`at = "gio0"`); `dump` sets the machine-state JSON output, `iris-testdev-dump.json` when unset. |
+| `cheritest_dump_hook` | `false` | CP0 register 26 dump convention; needs the test device, unsafe for normal PROM boot. |
 | `nat_subnet` | `192.168.0.0/24 when unset` | CIDR; NAT gateway network+1 and guest network+2. |
 | `ci` | `false` | CI server/serial backend; hides host window unless ci_display, keeps offscreen graphics. |
 | `ci_socket` | `iris.sock` in `$TMPDIR` (else `/tmp`) on Unix; `127.0.0.1:19851` on Windows | Unix path, host:port, or tcp:host:port. |
@@ -204,28 +203,30 @@ keys is set. See the [Origin 2000 guide](docs/origin2000-ip27.md).
 | `graphics.raster` | `cpu` | VPro and IMPACT: where the raster unit runs. `cpu` draws on the threads above (IMPACT: its raster engine threads); `wgpu` draws on the host GPU through wgpu compute (needs a build with the `wgpu` feature; work in progress, see `clanker/plans/wgpu-raster.md`). An IMPACT board then has one raster engine, whatever `IRIS_MGRAS_ENGINES` says. |
 | `graphics.gpu_backend` | `auto` | The wgpu backend for `raster = "wgpu"`: auto, vulkan, metal, dx12 or gl. |
 
-### [scsi.<ID>]
+### Devices: `[[hdd]]`, `[[cdrom]]`, `[[daynaport]]`
+
+Each entry has an `at` location (see [HELP.md](HELP.md#where-devices-go)); the
+table name is the device type. `iris --list-slots` shows the places and what
+they take.
 
 | Key | Default | Values and behavior |
 |---|---|---|
-| `scsi.<ID>.path` | `""` | Disk/CHD/ISO path; empty CD-ROM means an empty tray. |
-| `scsi.<ID>.discs` | `[]` | Additional CD changer images. |
-| `scsi.<ID>.cdrom` | `false` | Legacy spelling for kind=cdrom. |
-| `scsi.<ID>.kind` | `disk` | disk, cdrom, daynaport; serialized key is kind. |
-| `scsi.<ID>.mac` | `00:80:19:44:50:<SCSI ID> when unset` | DaynaPort-only station MAC. |
-| `scsi.<ID>.subnet` | `192.168.10.0/24 when unset` | DaynaPort NAT network; separate from ec0. |
-| `scsi.<ID>.overlay` | `false` | Raw-image COW sidecar; CHD uses its own diff sidecar. |
-| `scsi.<ID>.scratch` | `false` | Host-managed raw scratch volume; cannot be CD-ROM/overlay. |
-| `scsi.<ID>.size_mb` | `64 when unset` | Size of a newly created scratch image; existing files are unchanged. |
-| `scsi.<ID>.controller` | `0` | 0 or 1; controller 1 is accepted on indigo2_ip22 and o2_ip32 (on the O2 it is the external bus). A key of 16 + ID names controller 1 directly and does not need it. |
+| `at` | required | Where the device goes, e.g. `hpc3.0.t1`, `pci0.2.t4`, `xio15.pci0.0.t1`. |
+| `hdd.path` | required | Disk image: raw or CHD. |
+| `hdd.overlay` | `false` | Raw-image COW sidecar; CHD uses its own diff sidecar. |
+| `hdd.scratch` | `false` | Host-managed raw scratch volume; cannot have an overlay. |
+| `hdd.size_mb` | `64 when unset` | Size of a newly created scratch image; existing files are unchanged. |
+| `hdd.write_cache` | `true` | Report the disk's write cache on (see [STORAGE.md](STORAGE.md)). |
+| `cdrom.path` | `""` | ISO or CHD; empty means an empty tray. |
+| `cdrom.discs` | `[]` | Additional CD changer images. |
+| `daynaport.mac` | `00:80:19:44:50:<target id> when unset` | Station MAC. |
+| `daynaport.subnet` | `192.168.10.0/24 when unset` | Its own NAT network; separate from ec0. |
 
-IDs are 1–7, or 1–15 on the Octane's wide ISP1040 buses. The key is a slot: `[scsi.N]` with N 1–7 is id N on controller 0
-(or on `controller`, when set), and N = 16 + id is that id on controller 1,
-so both controllers can carry the same id; two tables naming one target are
-rejected. If `scsi` is entirely omitted, core defaults attach SCSI #1 as
-`scsi1.raw` and SCSI #4 as `cdrom4.iso`. An explicit map replaces that
-default map; missing slots are unattached. `kind = "daynaport"` needs no image.
-An explicit non-disk kind takes precedence over the legacy cdrom flag.
+Ids are 1 to 7, or 1 to 15 on the Octane's wide ISP1040 buses. If the file
+places no disk, CD-ROM or DaynaPort and has no `[scsi]` table, `scsi1.raw` goes
+at target 1 and `cdrom4.iso` at target 4 of the first controller. The old
+`[scsi.<ID>]` tables still load and are rewritten into these entries with a
+notice.
 
 ### [network]
 
@@ -336,40 +337,49 @@ clock has drifted. An Octane's NVRAM file with no `.clock` beside it opens
 in QEMU at the time of its last save, since QEMU then takes the image's
 calendar without adding the time since.
 
-### [ultra64]
+### [[ultra64]]
 
-| Key | Default | Values and behavior |
-|---|---|---|
-| `ultra64.enabled` | `false` | Enable the GIO N64 development board; requires an external gopher64 peer. |
+The GIO N64 development board; requires an external gopher64 peer. `at = "gio0"`.
+No options. The old `[ultra64] enabled = true` still loads.
 
-### [virtio_serial]
+### [[virtio_serial]]
 
 virtio-console / virtio-serial for guests that carry a driver; see
-[docs/dev/virtio-serial.md](docs/dev/virtio-serial.md). Each `[[virtio_serial.port]]`
-table adds a port, in order.
+[docs/dev/virtio-serial.md](docs/dev/virtio-serial.md). `at` is `gio0`
+(`0x1F400000`, shared with the test device and Ultra64) or `gio1`
+(`0x1F600000`, shared with the second Newport head) on the Indy and Indigo2,
+and a PCI place on the Octane, `xio15.pci0.4` the one iris keeps spare for it.
+Refused on the O2. Each `[[virtio_serial.port]]` table adds a port, in order.
 
 | Key | Default | Values and behavior |
 |---|---|---|
-| `virtio_serial.enabled` | `false` | Present the device. On the Indy and Indigo2 it sits in a GIO expansion slot; on the Octane, on the PCI Bridge. Refused on the O2. |
-| `virtio_serial.slot` | `"exp1"` | `"exp0"` (`0x1F400000`, shared with `test_device` and Ultra64) or `"exp1"` (`0x1F600000`, shared with the second Newport head). Indy and Indigo2 only. |
+| `at` | required | The place, as above. |
 | `virtio_serial.port` | one console on TCP 8890 | Array of ports (at most 31). |
 | `port.name` | none | Name the guest sees (`/dev/virtio-ports/<name>` on Linux); unique. |
 | `port.console` | `false` | Tell the guest this port is its console. |
 | `port.tcp_port` | none | Serve the port as raw TCP on 127.0.0.1 (no telnet). Exclusive with `socket`. |
 | `port.socket` | none | Serve the port on a raw Unix socket at this path. |
 
-### [nvme]
+### [[nvme]], [[pci_bridge]], [[pci_cage]], [[pci_shoehorn]]
 
-An NVM Express controller with one namespace; see [docs/nvme.md](docs/nvme.md).
-O2 and Octane only; on the Octane it sits in a slot of an `[[xio_board]]`.
+PCI cards and the Octane's XIO option boards; see [docs/nvme.md](docs/nvme.md)
+and [docs/pci.md](docs/pci.md). A card goes at a PCI place: the O2's option
+slot `pci0.3`, a slot of an Octane option board, or a position behind a
+`pci_bridge`. An option board goes at an Octane XIO port and brings its own
+PCI bus and slots, so cards on it are placed below it.
 
 | Key | Default | Values and behavior |
 |---|---|---|
-| `nvme.path` | none | Disk image for the namespace (raw or CHD, at most 2 TiB). The card is present when this is set. |
-| `nvme.overlay` | `false` | Copy-on-write: writes go to `PATH.overlay`, as for `[scsi.N]`. |
-| `nvme.bridge` | `false` | Put the card behind a PCI-to-PCI bridge in the slot, instead of in the slot. |
-| `nvme.board` | `0` | Octane: which `[[xio_board]]` table holds the card, counting from 0. Refused on the O2. |
-| `nvme.slot` | first free | Octane: the board's slot, its PCI device number (the PCI module 1 to 3, a shoehorn 1). Refused on the O2. |
+| `nvme.at` | required | A PCI place, e.g. `pci0.3`, `xio13.pci0.1`, or `xio13.pci0.2.pci0.0` behind a bridge. |
+| `nvme.path` | required | Disk image for the namespace (raw or CHD, at most 2 TiB). |
+| `nvme.overlay` | `false` | Copy-on-write: writes go to `PATH.overlay`, as for an `[[hdd]]`. |
+| `pci_bridge.at` | required | A PCI place. Brings `pci0` with positions 0 to 31 below it. No options. |
+| `pci_cage.at` | required | `xio13`: the Octane PCI module, on its own port; slots `pci0.1` to `pci0.3`. No options. |
+| `pci_shoehorn.at` | required | The single-slot XIO-to-PCI adapter in an XIO slot, `xio9` to `xio12`, not the graphics board's (`xio11` with a board fitted); slot `pci0.1`. No options. |
+
+The older `[nvme]` table (`board`, `slot`, `bridge`) and `[[xio_board]]`
+tables (`kind`, `widget`) still load and are rewritten into these entries with
+a notice; see [HELP.md](HELP.md#older-files).
 
 ### [o2]
 
@@ -383,8 +393,8 @@ Octane's 512-byte image, and its clock in `<nvram>.rtc.clock`), `banks`
 `headless` (serial console instead of the graphics console and keyboard),
 `[clock] fixed_mhz` (CP0 Count; the CPU runs at twice it, so 90 MHz is a
 180 MHz O2), `[network]` including `mac` and `mode = "off"` for an unplugged
-Ethernet, `[[port_forward]]`, `nat_subnet`, `[nfs]` and `[scsi.N]`
-(`controller` is the bus). See [the O2 guide](docs/o2-ip32.md). The old
+Ethernet, `[[port_forward]]`, `nat_subnet`, `[nfs]` and `[[hdd]]` at
+`pci0.1` (internal) or `pci0.2` (external). See [the O2 guide](docs/o2-ip32.md). The old
 O2-only spellings (`o2.prom`, `o2.flash`, `o2.ram_mb`, `o2.dimms`,
 `o2.disks`, `o2.serial_port`, `o2.serial_log`, `o2.graphics`, `o2.cpu_mhz`,
 `o2.net`, `o2.forwards`) are deprecated: they are folded into those keys when
@@ -405,23 +415,12 @@ DS1685's NVRAM, behind IOC3, its clock in `<nvram>.clock`), `banks` (the MB in e
 512, 1024 or 2048, filled from bank 0 with no gap, 8192 in all), `serial_port_a` and
 `serial_port_b`/`serial_log` (IOC3's two ports, the first the console),
 `headless`, `[clock] fixed_mhz` (CP0 Count; 97.5 for the 195 MHz R10000),
-`[network]`, `[[port_forward]]`, `nat_subnet`, `[scsi.N]` (`controller` 0
-is the internal bus, 1 the external) and `[graphics] board`. See [the Octane guide](docs/octane-ip30.md).
+`[network]`, `[[port_forward]]`, `nat_subnet`, `[[hdd]]` at `xio15.pci0.0`
+(internal) or `xio15.pci0.1` (external) and `[graphics] board`. See [the Octane guide](docs/octane-ip30.md).
 
 | Key | Default | Values and behavior |
 |---|---|---|
 | `octane.flash` | unset | Boot flash file, keeping the PROM's records between runs. Created from `prom` when missing and then used as it is, so delete it after changing `prom`; a file of another size is refused. Unset, the flash is in memory and every start is from `prom`. |
-
-### [[xio_board]]
-
-An option board in one of the Octane's XIO slots, each with a Bridge and a PCI
-bus of its own; see [docs/pci.md](docs/pci.md#option-boards-in-xio-slots).
-Octane only. The array takes one table per board.
-
-| Key | Default | Values and behavior |
-|---|---|---|
-| `xio_board.kind` | required | `"pci-shoehorn"`: the single-slot XIO-to-PCI adapter, its slot PCI device 1. `"pci-cage"`: the Octane PCI module, slots at PCI devices 1 to 3. |
-| `xio_board.widget` | cage 13; shoehorn the first free of 10, 12, 9, 11 | The XIO slot, Crossbow port: 9 to 12 for a shoehorn, 13 for the module. Not the one the graphics board is in (11 with `[graphics] board` set), and no two boards share one. |
 
 ### Hardware constraints and precedence
 
@@ -434,8 +433,9 @@ IP22/IP24 four-bank IRIX 6.5 behavior remains separate from IP28's verified
 two-bank 1 GB layout. Extreme requires IP22. All non-Newport boards require
 `heads=1` and `resolution="guest"`. IP28 IRIX needs IMPACT; its PROM has an
 embedded fallback.
-The config validator permits SCSI controller 1 only on IP22, the O2 and the
-Octane, the machines with two controllers.
+A disk can go on a second SCSI controller only where the machine has one:
+the Indigo2 (`hpc3.1`), the O2 (`pci0.2`), the Octane (`xio15.pci0.1`) and the
+Origin family.
 
 Standalone CLI options update the loaded config where supplied; boolean enable
 switches do not provide a general way to clear every saved true setting.
@@ -466,16 +466,10 @@ iris-gui does not parse this standalone option set; use its named-machine UI.
 | `--bank2` | RAM bank 2 size in MB (0/8/16/32/64/128; IP28 also supports 256/512) |
 | `--bank3` | RAM bank 3 size in MB (0/8/16/32/64/128; IP28 also supports 256/512) |
 | `--jitv2-threads` | jitv2 compile-pool thread count (fixed at startup, see jitv2.threads) |
-| `--scsi1` | SCSI ID 1 image path (HDD) |
-| `--scsi2` | SCSI ID 2 image path (HDD) |
-| `--scsi3` | SCSI ID 3 image path (HDD) |
-| `--cdrom4` | SCSI ID 4 image path (CD-ROM, primary disc) |
-| `--cdrom5` | SCSI ID 5 image path (CD-ROM, primary disc) |
-| `--cdrom6` | SCSI ID 6 image path (CD-ROM, primary disc) |
-| `--scsi7` | SCSI ID 7 image path (HDD) |
-| `--cdrom4-extra` | Additional ISO images for CD-ROM ID 4 (can be specified multiple times) |
-| `--cdrom5-extra` | Additional ISO images for CD-ROM ID 5 (can be specified multiple times) |
-| `--cdrom6-extra` | Additional ISO images for CD-ROM ID 6 (can be specified multiple times) |
+| `--device TYPE@LOCATION[,key=value]...` | Place any device type, the same entry as a `[[TYPE]]` table with `at`, e.g. `--device hdd@hpc3.0.t1,path=irix.img` or `--device cdrom@hpc3.0.t4,path=a.iso,discs=b.iso`; repeatable |
+| `--scsi1`, `--scsi2`, `--scsi3`, `--scsi7` | Image path (HDD) at that target of the first controller |
+| `--cdrom4`, `--cdrom5`, `--cdrom6` | Image path (CD-ROM, primary disc) at that target of the first controller |
+| `--cdrom4-extra`, `--cdrom5-extra`, `--cdrom6-extra` | Additional ISO images for that CD-ROM (can be specified multiple times) |
 | `--2x` | 2× window scaling for HiDPI/4K monitors |
 | `--headless` | Run headless: no window, no REX3 graphics (audio unaffected; use --noaudio to disable) |
 | `--noaudio` | Disable audio emulation (no HAL2); graphics still works |

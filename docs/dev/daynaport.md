@@ -17,20 +17,21 @@ nothing else happens. The IRIX driver lives at
 
 ## Build
 
-Always built in; a target only exists when a `[scsi.N]` section asks for one
-(it is only useful with that driver).
+Always built in; a target only exists when a `[[daynaport]]` entry asks for
+one (it is only useful with that driver).
 
 ## Configure
 
 ```toml
-[scsi.3]
-kind = "daynaport"            # default "disk"; "cdrom" (or cdrom = true) unchanged
+[[daynaport]]
+at   = "hpc3.0.t3"            # a target of the Indy's or Indigo2's SCSI bus
 mac  = "00:80:19:12:34:56"    # optional
 subnet = "192.168.10.0/24"    # optional; this target's own NAT subnet
 ```
 
-- `kind` is the new spelling of the target type. `cdrom = true` still means
-  `kind = "cdrom"`, so no existing config changes.
+- `at` is a target of a WD33C93A bus, the only buses that take one. An older
+  `[scsi.N]` table with `kind = "daynaport"` still loads and is rewritten as
+  this entry.
 - `mac` defaults to `00:80:19:44:50:<scsi-id>` — the real DaynaPort `00:80:19`
   OUI, then `44 50` ("DP") and the target id, so two targets never collide. It
   is deliberately *not* the IRIX driver's `00:80:19:00:00:NN` placeholder, so a

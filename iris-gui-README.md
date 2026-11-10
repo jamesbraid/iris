@@ -293,7 +293,8 @@ prom = "(embedded)"
 nvram = "nvram.bin"
 nveeprom = "nveeprom.bin"
 
-[scsi.1]
+[[hdd]]
+at = "hpc3.0.t1"
 path = "disks/scsi1.raw"
 ```
 

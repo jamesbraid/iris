@@ -13,6 +13,30 @@ hashes are given where a change is easiest to understand by reading the commit.
 
 ## November 2026
 
+### Devices are configured by location
+
+- Every device is an entry of the array named for its type, with `at` saying
+  where it goes: `[[hdd]]`, `[[cdrom]]`, `[[daynaport]]`, `[[ultra64]]`,
+  `[[test_device]]`, `[[virtio_serial]]`, `[[nvme]]`, `[[pci_bridge]]`,
+  `[[pci_cage]]` and `[[pci_shoehorn]]`. A card on a board goes below the
+  board (`xio13.pci0.2.pci0.0` for an NVMe card behind a bridge in the PCI
+  module), so any arrangement `--list-slots` shows can be configured. See
+  HELP.md, "Where devices go".
+- `--device TYPE@LOCATION[,key=value]...` places any device type from the
+  command line, read by the same code as the file. `--scsi1/2/3/7`,
+  `--cdrom4/5/6`, `--test-device` and `--no-write-cache` keep their meaning;
+  two flags for one place are an error naming both.
+- Older files load: `[scsi.N]`, `o2.disks`, `[ultra64]`, `test_device` and
+  `test_device_dump`, `[virtio_serial]`, `[[xio_board]]` and `[nvme]` are
+  rewritten as these entries once the machine is known, with one notice each.
+  A file that writes both forms for the same devices is refused, and a
+  misspelt top-level key is still a parse error. The GUI saves machines in
+  the new form. A file with no disk and no `[scsi]` table still gets
+  `scsi1.raw` and `cdrom4.iso` on the first controller.
+- `--validate` checks every placement, so a device that does not fit is
+  reported before a machine is built. The example configs are in the new
+  form.
+
 ### PCI cards and option boards have locations
 
 - The O2's "PCI option" slot (`pci0.3`), the Octane's XIO slots (`xio9` to

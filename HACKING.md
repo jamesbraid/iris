@@ -94,9 +94,10 @@ subcommands and the run-time disc changes once, over the bus a controller hands
 out through `ScsiTargets::scsi_bus`; chip-specific subcommands (`regs`; the
 WD's `wdt`, `defer`, `debug`) stay with the chip, and `DiscChanger` is
 implemented once for every `ScsiTargets`. Configuration is shared the same
-way: `scsi::attach_from_config` walks the `[scsi.N]` tables for every machine,
-where the key is a slot (controller × 16 + id, see `config::scsi_slot`), and
-the machine supplies only a route from controller number to bus.
+way: `attach_devices` places every `[[hdd]]` and `[[cdrom]]` entry of the
+config on the controller its `at` location names, for every machine, and each
+machine supplies only its places (`fill`) and the controllers it built
+(HELP.md, "Where devices go").
 
 Flash command engines share `FlashBacking` file storage while retaining
 their own command state.

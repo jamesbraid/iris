@@ -8,7 +8,7 @@ guest agent, a file-transfer pipe.
 None of the machines IRIS emulates had virtio. **The device needs a guest
 driver.** IRIX has none in the box; this is for a purpose-written driver, or a
 kernel that has one (Linux and the BSDs speak virtio-mmio and virtio-pci on
-MIPS). The device is off unless `[virtio_serial] enabled = true`.
+MIPS). The device is there only when a `[[virtio_serial]]` entry places it.
 
 ## Where it attaches
 
@@ -19,27 +19,27 @@ chooses a transport:
 |---|---|---|---|
 | Indy (IP24) | virtio-mmio v2 | GIO expansion slot 1 (`0x1F600000`), or slot 0 (`0x1F400000`) | `GioExp1` / `GioExp0` (IOC local/mappable) |
 | Indigo2 (IP22), Indigo2 IMPACT (IP28) | virtio-mmio v2 | same two slots | the slot's EXT_IO fan-out line (`GioS1Graphics` / `GioS0Graphics`) |
-| Octane (IP30) | virtio-pci (modern) | Bridge slot 4 | INTA through the Bridge |
+| Octane (IP30) | virtio-pci (modern) | Bridge slot 4 (`xio15.pci0.4`), or a slot of an option board | INTA through the Bridge |
 | O2 (IP32) | virtio-pci (modern) | **not wired** | the MACE PCI router has no route for a spare slot |
 
 The Indy and Indigo2 have no PCI bus, so they get the memory-mapped transport
 in a 64 KB window of an empty GIO expansion slot (an empty slot otherwise
-answers with a GIO timeout, so nothing real is displaced). Slot 1 is the
-default. Slot 0 is shared with `test_device` and the Ultra64 board; slot 1 is
+answers with a GIO timeout, so nothing real is displaced): `gio1` or `gio0`.
+Slot 0 is shared with the test device and the Ultra64 board; slot 1 is
 shared with the second Newport head (`graphics.heads = 2`). A clash is refused
-when the configuration is validated.
+when the configuration is validated, naming the slot.
 
 The O2's transport is complete and tested but the machine does not use it: its
 bridge routes only the two SCSI slots' pins to CRIME inputs, and which CRIME
-input a third slot would drive is a hardware fact we do not have. `validate()`
-says so rather than silently ignoring the section.
+input a third slot would drive is a hardware fact we do not have. An older
+`[virtio_serial]` section on the O2 is refused with that reason rather than
+silently ignored.
 
 ## Configuration
 
 ```toml
-[virtio_serial]
-enabled = true
-slot    = "exp1"            # "exp0" | "exp1"; Indy and Indigo2 only
+[[virtio_serial]]
+at = "gio1"                 # Indy and Indigo2: gio0 or gio1; Octane: xio15.pci0.4
 
 [[virtio_serial.port]]      # port 0
 console  = true
@@ -51,7 +51,9 @@ socket = "/tmp/iris-agent.sock"   # raw Unix socket
 ```
 
 With no `[[virtio_serial.port]]` there is one console port on TCP
-`127.0.0.1:8890`. A port with neither `tcp_port` nor `socket` is wired to
+`127.0.0.1:8890`. The older form, `[virtio_serial]` with `enabled = true` and
+`slot = "exp0"` or `"exp1"`, still loads: iris rewrites it as an entry at
+`gio0` or `gio1` (on the Octane, `xio15.pci0.4`) and says so. A port with neither `tcp_port` nor `socket` is wired to
 nothing: its output is dropped and no input arrives. At most 31 ports.
 
 A host end is a listening socket that serves one client at a time. Bytes are

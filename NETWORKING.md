@@ -120,8 +120,8 @@ useful with a guest driver; IRIX has none in the box (see
 `dp0`).
 
 ```toml
-[scsi.3]
-kind = "daynaport"            # default "disk"; "cdrom" / cdrom = true unchanged
+[[daynaport]]
+at   = "hpc3.0.t3"
 mac  = "00:80:19:12:34:56"    # optional; default derived from the SCSI id
 subnet = "192.168.10.0/24"    # optional; this target's own NAT subnet
 ```

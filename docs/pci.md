@@ -99,16 +99,20 @@ expects when it sizes it.
 An Octane takes boards that put a PCI bus on a spare XIO slot. Each is a
 Bridge (the onboard one's model) on its own Crossbow port, with its own bus,
 interrupt pins to HEART and DMA through the Crossbow's live links.
-`[[xio_board]]` fits them:
+Each is placed at its port, and a card on it at one of its slots:
 
 ```toml
-[[xio_board]]
-kind = "pci-shoehorn"    # one slot, PCI device 1
-# widget = 10            # a shoehorn's XIO slot, 9 to 12; unset: 10, then 12, 9, 11
+[[pci_shoehorn]]
+at = "xio10"             # an XIO slot, 9 to 12; one PCI slot, xio10.pci0.1
 
-[[xio_board]]
-kind = "pci-cage"        # the Octane PCI module: three slots, PCI devices 1 to 3, port 13
+[[pci_cage]]
+at = "xio13"             # the Octane PCI module: slots xio13.pci0.1 to .3
 ```
+
+An older file's `[[xio_board]]` tables (`kind = "pci-shoehorn"` or
+`"pci-cage"`, `widget`) still load: iris puts the module at `xio13` and a
+shoehorn at its `widget`, or at the first of 10, 12, 9 and 11 that is free,
+and says so.
 
 The shoehorn is the single-slot XIO-to-PCI adapter: Bridge revision 4, one
 slot at device 1 whose INTA and INTB reach the board's Bridge pins 1 and 5, and
