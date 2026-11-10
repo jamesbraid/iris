@@ -90,8 +90,12 @@ fn run_guest(
 
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    // A missing report is all the output can say; the exit status says
+    // whether the emulator died first (a signal, a panic's abort).
     let p = parse_block(&stdout).map_err(|e| {
-        format!("{}\n--- last 20 lines of emulator output ---\n{}", e, tail(&stdout, 20))
+        let died = if out.status.success() { String::new() }
+                   else { format!(" (the emulator exited with {})", out.status) };
+        format!("{}{}\n--- last 20 lines of emulator output ---\n{}", e, died, tail(&stdout, 20))
     })?;
 
     Ok(Run {
